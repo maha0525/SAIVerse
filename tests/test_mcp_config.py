@@ -3,6 +3,7 @@ import os
 import shutil
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 import uuid
 
@@ -10,8 +11,12 @@ from tools import SPELL_TOOL_NAMES, SPELL_TOOL_SCHEMAS, register_external_tool, 
 from tools.core import ToolSchema
 from tools.mcp_client import (
     MCPClientManager,
+    MCPServerConnection,
     _make_instance_key,
+    _mcp_http_client_no_redirect,
     _normalize_spell_config,
+    _normalize_spell_default,
+    _tool_schema_from_mcp,
 )
 from tools.mcp_config import (
     _resolve_placeholder,
@@ -317,6 +322,580 @@ class MCPConfigTestCase(unittest.TestCase):
                 "write_file": {"display_name": "保存"},
             },
         )
+
+    # -- spell_tools_default (サーバー側のツール追加への追随) -------------
+
+    @staticmethod
+    def _fake_tool(name: str) -> SimpleNamespace:
+        return SimpleNamespace(
+            name=name,
+            description="desc",
+            inputSchema={"type": "object", "properties": {}},
+        )
+
+    def test_normalize_spell_default_shapes(self) -> None:
+        self.assertIsNone(_normalize_spell_default(None, "srv"))
+        self.assertEqual(
+            _normalize_spell_default(True, "srv"),
+            {"spell": True, "visible": False},
+        )
+        # キーを書く目的が「自動で使えるようにする」ことなので spell 既定は True。
+        # visible 既定は False — サービスがツールを増やすたびに head が太らないように。
+        self.assertEqual(
+            _normalize_spell_default({}, "srv"),
+            {"spell": True, "visible": False},
+        )
+        self.assertEqual(
+            _normalize_spell_default({"spell": False}, "srv"),
+            {"spell": False, "visible": False},
+        )
+        self.assertEqual(
+            _normalize_spell_default({"spell": True, "visible": True}, "srv"),
+            {"spell": True, "visible": True},
+        )
+
+    def test_normalize_spell_default_rejects_bad_type(self) -> None:
+        self.assertIsNone(_normalize_spell_default("yes", "srv"))
+        self.assertIsNone(_normalize_spell_default(["read_file"], "srv"))
+
+    def test_spell_default_rejects_non_boolean_values(self) -> None:
+        """誤記が権限を広げないこと。
+
+        素の ``bool()`` は文字列 "false" を True と読むので、閉じたつもりの
+        ``{"spell": "false"}`` がツールを開いてしまう。boolean 以外は閉じる側
+        (False) に倒す。
+        """
+        self.assertEqual(
+            _normalize_spell_default({"spell": "false"}, "srv"),
+            {"spell": False, "visible": False},
+        )
+        self.assertEqual(
+            _normalize_spell_default({"spell": 1, "visible": "yes"}, "srv"),
+            {"spell": False, "visible": False},
+        )
+        # 省略は「宣言の目的どおり」の既定に落ちる (誤記とは区別する)
+        self.assertEqual(
+            _normalize_spell_default({"visible": True}, "srv"),
+            {"spell": True, "visible": True},
+        )
+
+    def test_undeclared_tool_is_not_a_spell_without_default(self) -> None:
+        """回帰防止: spell_tools_default が無ければ従来どおり spell=False。
+
+        saiverse-stackchan-addon は spell_tools を「生 MCP ツールを隠す」ために
+        使っており、既定が反転すると gateway_config_set / i2c_write のような
+        管理者向けツールがペルソナへ開く。
+        """
+        schema = _tool_schema_from_mcp(
+            "srv__new_tool",
+            "srv",
+            "new_tool",
+            self._fake_tool("new_tool"),
+            {"other_tool": {}},
+            None,
+        )
+        self.assertFalse(schema.spell)
+
+    def test_undeclared_tool_becomes_hidden_spell_with_default(self) -> None:
+        schema = _tool_schema_from_mcp(
+            "srv__new_tool",
+            "srv",
+            "new_tool",
+            self._fake_tool("new_tool"),
+            {"other_tool": {}},
+            {"spell": True, "visible": False},
+        )
+        self.assertTrue(schema.spell)
+        self.assertFalse(schema.spell_visible)
+
+    def test_declared_tool_keeps_its_own_settings_under_default(self) -> None:
+        """spell_tools に書いたエントリは従来の意味を保つ (visible 既定 True)。"""
+        schema = _tool_schema_from_mcp(
+            "srv__listed",
+            "srv",
+            "listed",
+            self._fake_tool("listed"),
+            {"listed": {"display_name": "一覧のツール"}},
+            {"spell": True, "visible": False},
+        )
+        self.assertTrue(schema.spell)
+        self.assertTrue(schema.spell_visible)
+        self.assertEqual(schema.spell_display_name, "一覧のツール")
+
+    def test_declared_entry_visible_rejects_non_boolean(self) -> None:
+        """spell_tools 側の visible も同じ族 — "false" を True と読ませない。"""
+        schema = _tool_schema_from_mcp(
+            "srv__t",
+            "srv",
+            "t",
+            self._fake_tool("t"),
+            {"t": {"visible": "false"}},
+            None,
+        )
+        self.assertTrue(schema.spell)
+        self.assertFalse(schema.spell_visible)
+
+    def test_default_can_disable_spell_for_undeclared_tools(self) -> None:
+        schema = _tool_schema_from_mcp(
+            "srv__new_tool",
+            "srv",
+            "new_tool",
+            self._fake_tool("new_tool"),
+            {},
+            {"spell": False, "visible": False},
+        )
+        self.assertFalse(schema.spell)
+
+    # -- remote transport の認証ヘッダー ---------------------------------
+
+    def test_http_headers_absent_returns_none(self) -> None:
+        conn = MCPServerConnection("srv", {"url": "https://example.test/mcp"})
+        self.assertIsNone(conn._http_headers())
+
+    def test_http_headers_returns_declared_headers(self) -> None:
+        conn = MCPServerConnection(
+            "srv",
+            {
+                "url": "https://example.test/mcp",
+                "headers": {"Authorization": "Bearer key-123"},
+            },
+        )
+        self.assertEqual(conn._http_headers(), {"Authorization": "Bearer key-123"})
+
+    def test_http_headers_empty_dict_returns_none(self) -> None:
+        conn = MCPServerConnection("srv", {"headers": {}})
+        self.assertIsNone(conn._http_headers())
+
+    def test_http_headers_rejects_non_mapping(self) -> None:
+        conn = MCPServerConnection("srv", {"headers": "Bearer nope"})
+        self.assertIsNone(conn._http_headers())
+
+    def test_remote_kwargs_pin_no_redirect_only_when_headers_are_sent(self) -> None:
+        """認証情報を載せるときだけ redirect を止める。
+
+        httpx が cross-origin redirect で落とすのは Authorization だけなので、
+        X-API-Key 等は転送先ホストへそのまま送られる。ヘッダーが無ければ漏れる
+        秘密がないため、SDK 既定の factory を保つ (既存挙動を変えない)。
+        """
+        with_headers = MCPServerConnection(
+            "srv", {"url": "https://x.test", "headers": {"X-API-Key": "k"}}
+        )._remote_connect_kwargs()
+        self.assertIs(
+            with_headers["httpx_client_factory"], _mcp_http_client_no_redirect
+        )
+
+        without = MCPServerConnection(
+            "srv", {"url": "https://x.test"}
+        )._remote_connect_kwargs()
+        self.assertNotIn("httpx_client_factory", without)
+        self.assertIsNone(without["headers"])
+
+    def test_no_redirect_client_refuses_redirects(self) -> None:
+        client = _mcp_http_client_no_redirect(headers={"X-API-Key": "k"})
+        self.assertFalse(client.follow_redirects)
+
+    # -- per_persona ツール一覧のペルソナ単位取得 (§I) --------------------
+    #
+    # 起動時 discovery (代表者 1 人の鍵で一括登録) は 2026-08-10 に廃止された。
+    # 一覧は各ペルソナ自身の接続から Pulse 頭 (connect=True) / Beat 頭
+    # (connect=False) で取得する。docs/intent/mcp_addon_integration.md §I。
+
+    @staticmethod
+    def _per_persona_meta(**overrides):
+        meta = {
+            "scope": "per_persona",
+            "addon_name": "my-addon",
+            "raw_config": {
+                "url": "https://x.test",
+                "headers": {
+                    "Authorization": "Bearer ${persona.addon.my-addon.api_key}"
+                },
+            },
+        }
+        meta.update(overrides)
+        return meta
+
+    class _FakeLiveConnection:
+        """生きている per_persona 接続の代役。tools は差し替え可能。"""
+
+        def __init__(self, tools=None, refresh_error=None):
+            from types import SimpleNamespace
+
+            self.config = {"url": "https://x.test"}
+            self.session = object()
+            self._connected = True
+            self.tools = [
+                SimpleNamespace(name=n, description="d", inputSchema={})
+                for n in (tools or [])
+            ]
+            self.refresh_count = 0
+            self._refresh_error = refresh_error
+            self._next_tools = None
+
+        @property
+        def connected(self):
+            return self._connected and self.session is not None
+
+        def set_next_tools(self, names):
+            from types import SimpleNamespace
+
+            self._next_tools = [
+                SimpleNamespace(name=n, description="d", inputSchema={})
+                for n in names
+            ]
+
+        async def _discover_tools(self):
+            self.refresh_count += 1
+            if self._refresh_error is not None:
+                raise self._refresh_error
+            if self._next_tools is not None:
+                self.tools = self._next_tools
+
+    def test_refresh_skips_connect_when_key_unset(self) -> None:
+        """鍵未設定のペルソナでは接続を張らず、失敗としても記録しない。
+
+        未設定は普通の状態であって故障ではない (§I 要請 3)。placeholder の
+        literal が外部へ出る経路は「本人の config が解決できたときしか繋がない」
+        ことで構造的に存在しない。
+        """
+        import asyncio
+
+        mgr = MCPClientManager()
+        mgr._server_meta["srv"] = self._per_persona_meta()
+        with mock.patch(
+            "saiverse.addon_config.get_params", return_value={}
+        ), mock.patch.object(
+            MCPClientManager, "_start_instance", new_callable=mock.AsyncMock
+        ) as mock_start:
+            asyncio.run(mgr.refresh_persona_tools("air_city_a"))
+
+        mock_start.assert_not_called()
+        self.assertEqual(mgr._failed_instances, {})
+        # 「評価した結果、使えない」は空集合として記録される (未取得 None とは
+        # 区別する — None は config 近似へフォールバックしてしまう)。
+        self.assertEqual(
+            mgr._persona_tool_names[("srv", "air_city_a")], frozenset()
+        )
+
+    def test_refresh_connects_and_grants_membership(self) -> None:
+        """鍵が解決できるペルソナは Pulse 頭で接続し、本人の一覧が所属になる。"""
+        import asyncio
+
+        mgr = MCPClientManager()
+        mgr._server_meta["srv"] = self._per_persona_meta()
+        fake = self._FakeLiveConnection(tools=["post", "read"])
+
+        async def _fake_start(self_, instance_key, qualified_name, persona_id=None, **kw):
+            mgr._connections[instance_key] = fake
+
+        registered: list[str] = []
+        with mock.patch(
+            "saiverse.addon_config.get_params",
+            return_value={"api_key": "k"},
+        ), mock.patch.object(
+            MCPClientManager, "_start_instance", new=_fake_start
+        ), mock.patch(
+            "tools.register_external_tool",
+            side_effect=lambda name, schema, fn: registered.append(name) or True,
+        ):
+            changed = asyncio.run(mgr.refresh_persona_tools("air_city_a"))
+
+        self.assertTrue(changed)
+        self.assertEqual(
+            mgr._persona_tool_names[("srv", "air_city_a")],
+            frozenset({"post", "read"}),
+        )
+        self.assertIn("srv__post", registered)
+        # lazy-start (wrapper 経路) と同じ自己参照が付く
+        self.assertIn("persona:air_city_a", mgr._refs.get("srv:persona:air_city_a", set()))
+
+    def test_beat_refresh_does_not_create_connections(self) -> None:
+        """Beat 頭 (connect=False) は生きた接続の上でしか聞き直さない。
+
+        接続を張るのは Pulse 頭の仕事。ここで張り直すと未設定ペルソナの
+        resolve (DB 引き) が Beat 頻度で走る。
+        """
+        import asyncio
+
+        mgr = MCPClientManager()
+        mgr._server_meta["srv"] = self._per_persona_meta()
+        with mock.patch(
+            "saiverse.addon_config.get_params"
+        ) as mock_params, mock.patch.object(
+            MCPClientManager, "_start_instance", new_callable=mock.AsyncMock
+        ) as mock_start:
+            changed = asyncio.run(
+                mgr.refresh_persona_tools("air_city_a", connect=False)
+            )
+
+        self.assertFalse(changed)
+        mock_start.assert_not_called()
+        mock_params.assert_not_called()
+
+    def test_beat_refresh_detects_tool_list_change(self) -> None:
+        """ツール呼び出しで一覧が変わるサーバー (モードチェンジ型) の変動を
+        同じ Pulse 内の次の Beat で拾える。"""
+        import asyncio
+
+        mgr = MCPClientManager()
+        mgr._server_meta["srv"] = self._per_persona_meta()
+        fake = self._FakeLiveConnection(tools=["post"])
+        mgr._connections["srv:persona:air_city_a"] = fake
+
+        with mock.patch("tools.register_external_tool", return_value=True):
+            first = asyncio.run(
+                mgr.refresh_persona_tools("air_city_a", connect=False)
+            )
+            fake.set_next_tools(["post", "enter_field"])
+            second = asyncio.run(
+                mgr.refresh_persona_tools("air_city_a", connect=False)
+            )
+
+        self.assertTrue(first)   # 初取得 (近似からの置き換わり) も変化
+        self.assertTrue(second)  # モードチェンジの検出
+        self.assertEqual(
+            mgr._persona_tool_names[("srv", "air_city_a")],
+            frozenset({"post", "enter_field"}),
+        )
+
+    def test_refresh_failure_keeps_previous_list(self) -> None:
+        """生きた接続への聞き直し失敗は「一覧が変わった」証拠ではない (§I)。
+
+        所属を保ち、変化なしとして返す — 取得失敗を『使えなくなりました』へ
+        変換してはいけない。
+        """
+        import asyncio
+
+        mgr = MCPClientManager()
+        mgr._server_meta["srv"] = self._per_persona_meta()
+        fake = self._FakeLiveConnection(
+            tools=["post"], refresh_error=RuntimeError("transient network error")
+        )
+        mgr._connections["srv:persona:air_city_a"] = fake
+        mgr._persona_tool_names[("srv", "air_city_a")] = frozenset({"post"})
+
+        changed = asyncio.run(
+            mgr.refresh_persona_tools("air_city_a", connect=False)
+        )
+
+        self.assertFalse(changed)
+        self.assertEqual(
+            mgr._persona_tool_names[("srv", "air_city_a")], frozenset({"post"})
+        )
+
+    def test_refresh_drops_membership_when_key_removed(self) -> None:
+        """鍵が消えた (解決できなくなった) ペルソナの所属は空になり、変化として返る。"""
+        import asyncio
+
+        mgr = MCPClientManager()
+        mgr._server_meta["srv"] = self._per_persona_meta()
+        mgr._persona_tool_names[("srv", "air_city_a")] = frozenset({"post"})
+
+        with mock.patch(
+            "saiverse.addon_config.get_params", return_value={}
+        ):
+            changed = asyncio.run(mgr.refresh_persona_tools("air_city_a"))
+
+        self.assertTrue(changed)
+        self.assertEqual(
+            mgr._persona_tool_names[("srv", "air_city_a")], frozenset()
+        )
+
+    def test_connect_failure_is_fail_closed(self) -> None:
+        """接続失敗したペルソナのツールは「無い」— config 近似で復活しない (§I)。
+
+        所属を pop で消すと近似 (鍵が解決できる = True) へフォールバックして
+        fail-open に反転する (Qwen レビュー 2026-08-10)。空集合マークで
+        「評価済み・利用不可」を保持する。
+        """
+        import asyncio
+
+        mgr = MCPClientManager()
+        mgr._server_meta["srv"] = self._per_persona_meta()
+        mgr._registered_tools["srv__post"] = {
+            "qualified_server_name": "srv",
+            "tool_name": "post",
+            "scope": "per_persona",
+            "building_ids": None,
+        }
+
+        async def _fail_start(self_, instance_key, qualified_name, persona_id=None, **kw):
+            raise RuntimeError("connection refused")
+
+        with mock.patch(
+            "saiverse.addon_config.get_params",
+            return_value={"api_key": "k"},
+        ), mock.patch.object(
+            MCPClientManager, "_start_instance", new=_fail_start
+        ):
+            changed = asyncio.run(mgr.refresh_persona_tools("air_city_a"))
+            self.assertTrue(changed)
+            # 鍵は解決できるが、接続に失敗した Pulse ではツール無し
+            self.assertFalse(
+                mgr.is_tool_available_for_persona("srv__post", "air_city_a")
+            )
+
+    def test_refresh_skips_while_previous_refresh_in_flight(self) -> None:
+        """走行中の取得があるうちは、同じ (サーバー, ペルソナ) の取得を重ねない。
+
+        sync 側が timeout で見放した取得は MCP ループ上で走り続ける。次の
+        Pulse の取得が接続開始を重ねると、同じ instance_key に接続が二重生成
+        されて片方が孤児になる。
+        """
+        import asyncio
+
+        mgr = MCPClientManager()
+        mgr._server_meta["srv"] = self._per_persona_meta()
+        mgr._persona_refresh_inflight.add(("srv", "air_city_a"))
+
+        with mock.patch(
+            "saiverse.addon_config.get_params"
+        ) as mock_params, mock.patch.object(
+            MCPClientManager, "_start_instance", new_callable=mock.AsyncMock
+        ) as mock_start:
+            changed = asyncio.run(mgr.refresh_persona_tools("air_city_a"))
+
+        self.assertFalse(changed)
+        mock_start.assert_not_called()
+        mock_params.assert_not_called()
+        # ガードは残っている (走行中の取得が finally で自分の分を外す)
+        self.assertIn(("srv", "air_city_a"), mgr._persona_refresh_inflight)
+
+    def test_shutdown_instance_drops_membership(self) -> None:
+        """接続を殺す関所 (_shutdown_instance) が派生状態の所属を道連れにする。
+
+        残すと「切れた接続の一覧」が真実の顔で is_tool_available_for_persona
+        から出続ける (ローカルレビュー 2026-08-10 指摘)。
+        """
+        import asyncio
+
+        mgr = MCPClientManager()
+        mgr._server_meta["srv"] = self._per_persona_meta()
+        fake = self._FakeLiveConnection(tools=["post"])
+
+        async def _noop_disconnect():
+            pass
+
+        fake.disconnect = _noop_disconnect
+        mgr._connections["srv:persona:air_city_a"] = fake
+        mgr._persona_tool_names[("srv", "air_city_a")] = frozenset({"post"})
+
+        asyncio.run(mgr._shutdown_instance("srv:persona:air_city_a", force=True))
+
+        self.assertEqual(
+            mgr._persona_tool_names[("srv", "air_city_a")], frozenset()
+        )
+
+    def test_membership_overrides_config_approximation(self) -> None:
+        """所属記録がある間は、config 近似ではなく本人の一覧が真実 (§I)。
+
+        鍵が解決できても、サーバー側で消えたツールは使えない — 近似はそれを
+        表せない。
+        """
+        mgr = MCPClientManager()
+        mgr._server_meta["srv"] = self._per_persona_meta()
+        mgr._registered_tools["srv__gone"] = {
+            "qualified_server_name": "srv",
+            "tool_name": "gone",
+            "scope": "per_persona",
+            "building_ids": None,
+        }
+        mgr._registered_tools["srv__alive"] = {
+            "qualified_server_name": "srv",
+            "tool_name": "alive",
+            "scope": "per_persona",
+            "building_ids": None,
+        }
+        mgr._persona_tool_names[("srv", "air_city_a")] = frozenset({"alive"})
+
+        with mock.patch(
+            "saiverse.addon_config.get_params",
+            return_value={"api_key": "k"},
+        ):
+            self.assertTrue(
+                mgr.is_tool_available_for_persona("srv__alive", "air_city_a")
+            )
+            self.assertFalse(
+                mgr.is_tool_available_for_persona("srv__gone", "air_city_a")
+            )
+            # 所属記録が無いペルソナは従来の config 近似にフォールバック
+            self.assertTrue(
+                mgr.is_tool_available_for_persona("srv__gone", "sofia_city_a")
+            )
+
+    def test_is_server_enabled_is_strict_boolean(self) -> None:
+        """誤記は「切ったつもり」を尊重して無効側へ倒す。"""
+        from tools.mcp_config import is_server_enabled
+
+        self.assertTrue(is_server_enabled("s", {}))
+        self.assertTrue(is_server_enabled("s", {"enabled": True}))
+        self.assertFalse(is_server_enabled("s", {"enabled": False}))
+        self.assertFalse(is_server_enabled("s", {"enabled": "false"}))
+        self.assertFalse(is_server_enabled("s", {"enabled": "true"}))
+        self.assertFalse(is_server_enabled("s", {"enabled": 1}))
+
+    def test_enabled_judgement_has_a_single_owner(self) -> None:
+        """起動時と addon hot-load が同じ判定を通ること。
+
+        片方だけ厳密化したせいで、同じ定義が boot では無効・再有効化では有効
+        という食い違いを作った前科がある。生の truthiness 判定が復活したら
+        ここで落とす。
+        """
+        from pathlib import Path
+
+        repo = Path(__file__).resolve().parents[1]
+        cfg_text = (repo / "tools" / "mcp_config.py").read_text(encoding="utf-8")
+        # ちょうど 1 箇所 = is_server_enabled の本体だけが読む
+        self.assertEqual(
+            cfg_text.count('cfg.get("enabled"'),
+            1,
+            "'enabled' must be read in exactly one place (is_server_enabled)",
+        )
+        client_text = (repo / "tools" / "mcp_client.py").read_text(encoding="utf-8")
+        self.assertNotIn(
+            '.get("enabled"',
+            client_text,
+            "mcp_client must delegate the 'enabled' judgement to is_server_enabled()",
+        )
+
+    def test_transport_type_selection(self) -> None:
+        self.assertEqual(
+            MCPServerConnection("srv", {"command": "npx"}).transport_type, "stdio"
+        )
+        self.assertEqual(
+            MCPServerConnection("srv", {"url": "https://x.test"}).transport_type,
+            "streamable_http",
+        )
+        self.assertEqual(
+            MCPServerConnection(
+                "srv", {"url": "https://x.test", "transport": "sse"}
+            ).transport_type,
+            "sse",
+        )
+
+    def test_resolve_config_placeholders_reaches_headers(self) -> None:
+        """remote MCP の認証情報はヘッダーに載るので、解決がそこまで届く必要がある。"""
+        raw = {
+            "url": "https://example.test/mcp",
+            "headers": {"Authorization": "Bearer ${persona.addon.my-addon.api_key}"},
+        }
+        with mock.patch(
+            "saiverse.addon_config.get_params",
+            return_value={"api_key": "secret-key"},
+        ):
+            resolved = resolve_config_placeholders(raw, persona_id="air_city_a")
+        self.assertEqual(resolved["headers"]["Authorization"], "Bearer secret-key")
+
+    def test_unresolved_header_placeholder_is_detected(self) -> None:
+        """API キー未入力を missing_config として検出できる (= スペルを隠せる)。"""
+        from tools.mcp_client import _find_unresolved_placeholders
+
+        raw = {
+            "headers": {"Authorization": "Bearer ${persona.addon.my-addon.api_key}"}
+        }
+        with mock.patch("saiverse.addon_config.get_params", return_value={}):
+            resolved = resolve_config_placeholders(raw, persona_id="air_city_a")
+        self.assertTrue(_find_unresolved_placeholders(resolved))
 
     def test_register_external_tool_updates_spell_registry(self) -> None:
         tool_name = "test_mcp_external_spell_tool"

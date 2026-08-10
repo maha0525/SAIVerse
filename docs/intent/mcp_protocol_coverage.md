@@ -20,9 +20,9 @@ MCP (Model Context Protocol) は Tools だけでなく Resources / Prompts / Sam
 | 機能 | 実装場所 | 備考 |
 |------|---------|------|
 | **Tools** | `tools/mcp_client.py::MCPServerConnection._discover_tools` / `call_tool` | `tools/list` + `tools/call` |
-| Transports | `_connect_stdio` / `_connect_sse` / `_connect_streamable_http` | 3 方式全て対応 |
+| Transports | `_connect_stdio` / `_connect_sse` / `_connect_streamable_http` | 3 方式。remote 2 方式は `headers` による認証つき接続に対応 (2026-08-09) |
 | Initialize handshake | `connect()` 内 `session.initialize()` | |
-| Tool discovery | 起動時 (global) + 初回有効化時 (per_persona) | |
+| Tool discovery | 起動時 (global) / **Pulse 頭 + Beat 頭にペルソナ別取得** (per_persona) | per_persona の起動時一括 discovery は 2026-08-10 廃止。`mcp_addon_integration.md` §I |
 | エラー分類 + backoff | `_classify_error` / `_record_failure` | 6 カテゴリ、exponential backoff (2–60 秒) |
 | ペルソナ別インスタンス管理 | instance_key + refcount | `docs/intent/mcp_addon_integration.md` 参照 |
 

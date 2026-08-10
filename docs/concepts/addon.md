@@ -46,7 +46,7 @@
 ## 増やし方（アドオン作成の要点）
 
 - Pydantic を使うアドオンでは `from __future__ import annotations` を**使わない**（forward ref 解決が破綻する）
-- MCP を含む場合は `mcp_servers.json` の `spell_tools[]` に登録しないと [Spell](spell.md) 化されない（`visible: true` も必要）
+- MCP を含む場合は `mcp_servers.json` の `spell_tools[]` に登録しないと [Spell](spell.md) 化されない（サーバー側のツール追加に自動追随させたいなら `spell_tools_default` を宣言する）。`visible: true` は system prompt の一覧に出すかどうかで、`false` でも呼び出し自体は可能
 - native binary の同梱可否は「枯れた・小・寛容ライセンスなら同梱、発展中・大は CI DL + SHA256」
 
 ## 実装

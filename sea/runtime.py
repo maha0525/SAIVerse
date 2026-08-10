@@ -169,6 +169,21 @@ class SEARuntime:
         from sea.pulse_context import aspect_from_pulse_type
         _root_aspect = aspect_from_pulse_type(pulse_type)
 
+        # --- per_persona MCP ツール一覧の取得 (Pulse 頭) ---
+        # ツール一覧の真実はサーバー側にしか無く、証言できるのは本人の鍵で
+        # 張った生きた接続だけ (docs/intent/mcp_addon_integration.md §I)。
+        # ここで本人の接続を張って一覧を取得してから、下の検知が走る順序が肝 —
+        # 逆だと一覧の変動が知覚バッファに積まれず、次の Pulse まで届かない。
+        # per_persona サーバーが無い環境では has_per_persona_servers の
+        # 前置き判定だけで即戻る。
+        try:
+            from tools.mcp_client import refresh_persona_tools_sync
+            refresh_persona_tools_sync(
+                getattr(persona, "persona_id", "") or "", connect=True,
+            )
+        except Exception:
+            LOGGER.exception("[mcp] per-persona tool refresh failed in run_meta_user")
+
         # --- 知覚の「検知」フェーズ (バッファへ push、まだ消費しない) ---
         # 世界状態の差分 (入退室・アイテム・スペル 等) と入室時想起を検知し、知覚
         # バッファへ push する (SAIMemory へは直接入れない)。Phase 2 で

@@ -40,7 +40,13 @@ beautifulsoup4>=4.12
 xai-sdk>=1.6.0
 
 # MCP (Model Context Protocol) client
-mcp>=1.10.0
+# 上限固定は必須: mcp 2.x は client transport の綴りを変え、SAIVerse が使う
+# streamablehttp_client を削除している (公式 whats-new: 「The deprecated
+# streamablehttp_client spelling」を removed に列挙、pip install mcp は 2.x を
+# 入れる)。上限が無いと fresh install で 2.x が入り、remote MCP が import
+# 時点で壊れる。公式もライブラリ側には mcp>=1.28,<2 を推奨。v2 API への移行は
+# 別案件 (docs/intent/mcp_protocol_coverage.md)。
+mcp>=1.10.0,<2
 
 # Codex 系クライアント (llm_clients/openai_codex.py が利用)
 curl-cffi>=0.10.0

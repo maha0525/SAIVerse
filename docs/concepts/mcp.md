@@ -14,10 +14,11 @@ SAIVerse 本体にコードを書かずに、MCP サーバー（外部プロセ�
 
 - `tools/list` + `tools/call` で外部サーバーのツールを取得
 - `mcp_servers.json` の **`spell_tools[]`** で [Spell](spell.md) として登録（`visible` フラグで表示制御）
+- **`spell_tools_default`** を宣言すると、サーバーが後から増やしたツールも自動で Spell 化される（ツールの入れ替えが速い外部サービス向け）
 - これにより MCP ツールがペルソナの平文応答から呼べる
 - `scope: "per_persona"` でペルソナ単位の独立プロセス管理に対応
 
-> **登録の落とし穴**: `mcp_servers.json` の `spell_tools` に書かないと `spell=False` になり平文から呼べない。`visible: true` も併せて必要。
+> **登録の落とし穴**: `mcp_servers.json` の `spell_tools` に書かないと `spell=False` になり平文から呼べない（`spell_tools_default` を宣言したサーバーを除く）。なお `visible: false` でも呼び出し自体は可能で、system prompt のスペル一覧に出ないだけ（ペルソナは `addon_spell_help` で発見できる）。
 >
 > **設計方針**: SAIVerse 固有の挙動を upstream の MCP サーバーに焼き込まない。生 MCP は addon 側の native tool でラップし、生ツールは `visible:false` にする。
 

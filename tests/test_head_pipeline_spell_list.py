@@ -264,6 +264,68 @@ def test_stale_spell_set_raises_snapshot_stale_error():
     assert issubclass(SnapshotStaleError, ValueError)
 
 
+def test_missing_per_persona_mcp_tools_are_not_stale():
+    """per_persona MCP ツールが live 登録簿に無いだけでは失効にしない (§I)。
+
+    per_persona のツール登録は Pulse 頭の本人取得で行われるため、再起動直後は
+    「まだ誰も取得していない」だけで消えたわけではない。ここで失効にすると
+    Pulse 前の head 構築 (プレビュー等) が capture_all → 通知既読 (B) リセットを
+    起こし、初回取得時に全ツールぶんの spell_added が知覚へ流れ込む。
+    """
+    from tools import SPELL_TOOL_SCHEMAS
+    from tools.mcp_client import MCPClientManager
+
+    mgr = MCPClientManager()
+    mgr._server_meta["saiverse-elyth-addon__elyth"] = {
+        "scope": "per_persona", "raw_config": {},
+    }
+
+    section = SpellListSection()
+    # 実運用の形: 前セッションの保存 = 現ライブの全スペル + per_persona ツール。
+    # 再起動直後は per_persona 分だけがライブ登録簿から欠けている。
+    stored = frozenset(SPELL_TOOL_SCHEMAS.keys()) | {
+        "saiverse-elyth-addon__elyth__create_post"
+    }
+    snap = SpellListSnapshot(
+        enabled=True,
+        entries=(),
+        addon_manifests=(),
+        registered_names=stored,
+    )
+    data = section.serialize_snapshot(snap)
+    with patch("tools.mcp_client.get_mcp_manager", return_value=mgr):
+        restored = section.deserialize_snapshot(data)  # raise しない
+    assert restored.registered_names == snap.registered_names
+
+
+def test_missing_non_per_persona_tools_still_stale():
+    """per_persona 以外の名前が消えている場合は従来どおり失効 (再 capture)。"""
+    from sea.head_pipeline.types import SnapshotStaleError
+    from tools import SPELL_TOOL_SCHEMAS
+    from tools.mcp_client import MCPClientManager
+
+    mgr = MCPClientManager()
+    mgr._server_meta["saiverse-elyth-addon__elyth"] = {
+        "scope": "per_persona", "raw_config": {},
+    }
+
+    section = SpellListSection()
+    stored = frozenset(SPELL_TOOL_SCHEMAS.keys()) | {
+        "saiverse-elyth-addon__elyth__create_post",
+        "__gone_native_spell__",
+    }
+    snap = SpellListSnapshot(
+        enabled=True,
+        entries=(),
+        addon_manifests=(),
+        registered_names=stored,
+    )
+    data = section.serialize_snapshot(snap)
+    with patch("tools.mcp_client.get_mcp_manager", return_value=mgr):
+        with pytest.raises(SnapshotStaleError):
+            section.deserialize_snapshot(data)
+
+
 def test_serialize_deserialize_roundtrip():
     section = SpellListSection()
     snap = SpellListSnapshot(

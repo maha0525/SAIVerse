@@ -240,6 +240,33 @@ def resolve_config_placeholders(
     )
 
 
+def is_server_enabled(server_name: str, cfg: Dict[str, Any]) -> bool:
+    """Whether a server definition is switched on.
+
+    **Strict boolean.** A bare truthiness test reads the string ``"false"`` as
+    enabled, so a typo would silently keep running a server the author meant to
+    switch off. Non-boolean values are treated as disabled — "I tried to turn
+    this off" is the intent worth honouring.
+
+    Shared by the startup load (:func:`load_mcp_configs`) and the addon
+    hot-load path (``tools.mcp_client._reload_addon_mcp_config``) so the two
+    cannot disagree about whether a server runs. They did disagree once: the
+    strict check landed in the startup path only, which made
+    ``"enabled": "false"`` mean *off* at boot but *on* after re-enabling the
+    addon — the same definition, two answers.
+    """
+    flag = cfg.get("enabled", True)
+    if not isinstance(flag, bool):
+        LOGGER.warning(
+            "MCP config: server '%s' has a non-boolean 'enabled' (%r); "
+            "treating it as disabled",
+            server_name,
+            flag,
+        )
+        return False
+    return flag
+
+
 def _load_config_file(path: Path) -> Dict[str, Dict[str, Any]]:
     if not path.exists():
         return {}
@@ -359,7 +386,7 @@ def load_mcp_configs() -> Dict[str, Dict[str, Any]]:
 
     enabled: Dict[str, Dict[str, Any]] = {}
     for server_name, cfg in merged.items():
-        if not cfg.get("enabled", True):
+        if not is_server_enabled(server_name, cfg):
             LOGGER.info("MCP config: server '%s' is disabled", server_name)
             continue
         enabled[server_name] = cfg

@@ -2194,6 +2194,29 @@ async def _run_spell_loop(
             if _beat_gate is not None and _beat_persona_id:
                 _beat_gate.boundary(_beat_persona_id, _beat_cancel_token)
 
+            # ---- Beat 頭の per_persona ツール一覧取り直し (mcp_addon_integration.md §I) ----
+            # 生きている接続の上でだけ tools/list を聞き直す (新しい接続は
+            # 張らない — 接続を張るのは Pulse 頭の仕事)。一覧が変わっていたら
+            # spell_list の検知器 (inject_diff_notifications) で知覚バッファへ
+            # 積み、直後の flush が同じ周の生成に届ける。ツール呼び出し自体が
+            # 一覧を変えるサーバー (モードチェンジ型) の変動をここで拾う。
+            # 並びは「取得 → 検知 → flush → 生成」— 検知が flush より後だと
+            # 変動の知覚が次の Beat まで読まれない。
+            try:
+                from tools.mcp_client import refresh_persona_tools_sync
+                if _beat_persona_id and refresh_persona_tools_sync(
+                    _beat_persona_id, connect=False, timeout=8.0,
+                ):
+                    from sea.head_pipeline import inject_diff_notifications
+                    inject_diff_notifications(
+                        persona, getattr(runtime, "manager", None), building_id,
+                    )
+            except Exception:
+                LOGGER.warning(
+                    "[sea][spell] Beat-head MCP tool refresh failed; continuing",
+                    exc_info=True,
+                )
+
             # ---- Beat 頭の知覚消費 (perception_buffer.md §4.2 2026-08-08 改訂) ----
             # boundary の関所に知覚バッファの消費が同席する。この周のスペルが
             # 世界を変えた帰結 (移動先の様子・入室配送など) を、次の生成が始まる

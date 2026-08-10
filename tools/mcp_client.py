@@ -20,6 +20,7 @@ Design overview (see ``docs/intent/mcp_addon_integration.md``):
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import inspect
 import logging
 import re
@@ -28,7 +29,7 @@ import time
 from contextlib import AsyncExitStack
 from datetime import timedelta
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Set
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from tools.core import ToolSchema
 # Bind get_active_persona_id at module-load time. Lazy-importing this inside
@@ -226,6 +227,80 @@ def _normalize_spell_config(raw_value: Any) -> Dict[str, Dict[str, Any]]:
     return result
 
 
+def _coerce_json_bool(
+    raw: Dict[str, Any],
+    key: str,
+    absent_default: bool,
+    server_name: str,
+    where: str,
+) -> bool:
+    """Read one boolean out of an ``mcp_servers.json`` object.
+
+    Absent → ``absent_default`` (what the declaration exists to express).
+    Present but not a JSON boolean → ``False``, the closed side. Plain
+    ``bool()`` would read the string ``"false"`` as ``True`` and open a tool
+    the author meant to keep shut; **a typo must never widen access**.
+
+    Every visibility / reachability flag read out of a server definition goes
+    through here, so the ``bool("false")`` hole cannot reappear in one branch
+    while being closed in another.
+    """
+    if key not in raw:
+        return absent_default
+    value = raw[key]
+    if isinstance(value, bool):
+        return value
+    LOGGER.warning(
+        "MCP server '%s': %s.%s must be true or false; got %r — "
+        "treating it as false",
+        server_name,
+        where,
+        key,
+        value,
+    )
+    return False
+
+
+def _normalize_spell_default(raw_value: Any, server_name: str) -> Optional[Dict[str, bool]]:
+    """Normalize a server's ``spell_tools_default`` declaration.
+
+    **Absent (``None``) keeps the historical allowlist behaviour**: a tool the
+    server exposes but ``spell_tools`` does not name gets ``spell=False`` and
+    stays unreachable from a persona. Addons that use ``spell_tools`` to *hide*
+    raw tools behind native wrappers (saiverse-stackchan-addon) depend on this,
+    so the default must never flip globally.
+
+    **Present opts one server into following its own tool list**: tools that
+    appear later become callable without anyone editing JSON. That is the whole
+    point of writing the key, so ``spell`` defaults to ``True``; ``visible``
+    defaults to ``False`` so a service shipping tools cannot grow every
+    persona's head. Writing the key is the single opt-in gate — for a server
+    that might add dangerous tools, simply omit it.
+
+    Detail: docs/intent/mcp_addon_integration.md §H.
+    """
+    if raw_value is None:
+        return None
+    if raw_value is True:
+        return {"spell": True, "visible": False}
+    if not isinstance(raw_value, dict):
+        LOGGER.warning(
+            "MCP server '%s': 'spell_tools_default' must be an object or true; "
+            "ignoring %s",
+            server_name,
+            type(raw_value).__name__,
+        )
+        return None
+    return {
+        "spell": _coerce_json_bool(
+            raw_value, "spell", True, server_name, "spell_tools_default"
+        ),
+        "visible": _coerce_json_bool(
+            raw_value, "visible", False, server_name, "spell_tools_default"
+        ),
+    }
+
+
 def _strip_jsonschema_meta_keys(schema: Dict[str, Any]) -> Dict[str, Any]:
     """Remove top-level JSON Schema metadata keys that our ToolSchema
     pydantic model rejects as ``extra_forbidden``.
@@ -245,6 +320,7 @@ def _tool_schema_from_mcp(
     tool_name: str,
     tool_def: Any,
     spell_config: Dict[str, Dict[str, Any]],
+    spell_default: Optional[Dict[str, bool]] = None,
 ) -> ToolSchema:
     description = getattr(tool_def, "description", "") or ""
     parameters = getattr(tool_def, "inputSchema", None)
@@ -253,9 +329,29 @@ def _tool_schema_from_mcp(
     else:
         parameters = _strip_jsonschema_meta_keys(parameters)
 
+    declared = tool_name in spell_config
     spell_options = spell_config.get(tool_name, {})
+    if declared:
+        # An explicitly listed tool keeps its historical meaning: it is a
+        # spell, and it is visible unless the entry says otherwise.
+        spell_enabled = True
+        default_visible = True
+    else:
+        # ``is True`` rather than ``bool()``: spell_default arrives normalized
+        # from _normalize_spell_default, but a caller passing a raw dict must
+        # not be able to re-open the ``bool("false") == True`` hole.
+        defaults = spell_default or {}
+        spell_enabled = defaults.get("spell") is True
+        default_visible = defaults.get("visible") is True
+
     display_name = spell_options.get("display_name") or spell_options.get("spell_display_name") or ""
-    spell_visible = spell_options.get("visible", True)
+    spell_visible = _coerce_json_bool(
+        spell_options,
+        "visible",
+        default_visible,
+        qualified_server_name,
+        f"spell_tools[{tool_name}]",
+    )
     raw_building_ids = spell_options.get("building_ids")
     building_ids: Optional[List[str]] = None
     if isinstance(raw_building_ids, list):
@@ -268,9 +364,9 @@ def _tool_schema_from_mcp(
         description=f"[MCP:{qualified_server_name}] {description}".strip(),
         parameters=parameters,
         result_type="string",
-        spell=tool_name in spell_config,
+        spell=spell_enabled,
         spell_display_name=str(display_name) if display_name else "",
-        spell_visible=bool(spell_visible),
+        spell_visible=spell_visible,
         building_ids=building_ids,
     )
 
@@ -296,6 +392,50 @@ def _format_tool_result(result: Any) -> str:
             continue
         rendered.append(str(item))
     return "\n".join(rendered)
+
+
+# Mirrors the MCP SDK's own remote defaults. Kept as literals instead of
+# importing ``mcp.shared._httpx_utils``: that module is private, and the v2
+# line reorganizes it. Coupling to a private path would turn an SDK upgrade
+# into an ImportError at connect time; drifting a timeout by a few seconds is
+# a far softer failure.
+_REMOTE_CONNECT_TIMEOUT_SECONDS = 30.0
+_REMOTE_SSE_READ_TIMEOUT_SECONDS = 300.0
+
+
+def _mcp_http_client_no_redirect(
+    headers: Optional[Dict[str, str]] = None,
+    timeout: Any = None,
+    auth: Any = None,
+) -> Any:
+    """httpx client for remote MCP that refuses to follow redirects.
+
+    The SDK's own factory hard-codes ``follow_redirects=True``, and httpx only
+    strips ``Authorization`` when a redirect crosses to a different origin —
+    **any other credential header (``X-API-Key`` and friends) is replayed to
+    whatever host the redirect names**. A remote MCP endpoint is a fixed URL,
+    so following redirects buys nothing while risking handing a persona's API
+    key to a third party.
+
+    Used only when we actually send headers (see
+    ``MCPServerConnection._connect_*``); header-less remote servers keep the
+    SDK's default factory so their behaviour is unchanged. Mirrors
+    ``mcp.shared._httpx_utils.create_mcp_http_client`` in every other respect.
+    """
+    import httpx
+
+    kwargs: Dict[str, Any] = {"follow_redirects": False}
+    if timeout is None:
+        kwargs["timeout"] = httpx.Timeout(
+            _REMOTE_CONNECT_TIMEOUT_SECONDS, read=_REMOTE_SSE_READ_TIMEOUT_SECONDS
+        )
+    else:
+        kwargs["timeout"] = timeout
+    if headers is not None:
+        kwargs["headers"] = headers
+    if auth is not None:
+        kwargs["auth"] = auth
+    return httpx.AsyncClient(**kwargs)
 
 
 class MCPServerConnection:
@@ -540,12 +680,51 @@ class MCPServerConnection:
             ClientSession(read_stream, write_stream)
         )
 
+    def _http_headers(self) -> Optional[Dict[str, str]]:
+        """Headers to send with remote (SSE / streamable HTTP) connections.
+
+        stdio servers authenticate through ``env`` because they are our own
+        subprocess. Remote servers have no such channel — the credential has
+        to ride on the HTTP request itself (e.g. Elyth Remote MCP wants
+        ``Authorization: Bearer <api key>``). ``self.config`` is already
+        placeholder-resolved at this point, so ``${persona.addon.X.api_key}``
+        inside a header value arrives here as the real key.
+
+        Returns ``None`` when no headers are declared so we pass the SDK its
+        own default rather than an empty dict.
+        """
+        raw = self.config.get("headers")
+        if not isinstance(raw, dict):
+            if raw is not None:
+                LOGGER.warning(
+                    "MCP server '%s': 'headers' must be an object; ignoring %s",
+                    self.server_name,
+                    type(raw).__name__,
+                )
+            return None
+        headers = {str(key): str(value) for key, value in raw.items()}
+        return headers or None
+
+    def _remote_connect_kwargs(self) -> Dict[str, Any]:
+        """Shared keyword arguments for the two remote transports.
+
+        Pins a no-redirect httpx client **only when we send headers**: with a
+        credential on the wire, following a redirect can hand it to another
+        host (see ``_mcp_http_client_no_redirect``). Header-less remote servers
+        keep the SDK's default factory, so their behaviour is unchanged.
+        """
+        headers = self._http_headers()
+        kwargs: Dict[str, Any] = {"headers": headers}
+        if headers is not None:
+            kwargs["httpx_client_factory"] = _mcp_http_client_no_redirect
+        return kwargs
+
     async def _connect_sse(self, stack: AsyncExitStack) -> None:
         from mcp import ClientSession
         from mcp.client.sse import sse_client
 
         read_stream, write_stream = await stack.enter_async_context(
-            sse_client(self.config["url"])
+            sse_client(self.config["url"], **self._remote_connect_kwargs())
         )
         self.session = await stack.enter_async_context(
             ClientSession(read_stream, write_stream)
@@ -556,7 +735,9 @@ class MCPServerConnection:
         from mcp.client.streamable_http import streamablehttp_client
 
         transport = await stack.enter_async_context(
-            streamablehttp_client(self.config["url"])
+            streamablehttp_client(
+                self.config["url"], **self._remote_connect_kwargs()
+            )
         )
         read_stream, write_stream = transport[0], transport[1]
         self.session = await stack.enter_async_context(
@@ -695,6 +876,16 @@ class MCPClientManager:
         self._instance_contexts: Dict[str, Dict[str, str]] = {}
         # instance_key -> failure record with backoff deadline
         self._failed_instances: Dict[str, Dict[str, Any]] = {}
+        # (qualified_name, persona_id) -> このペルソナ自身の接続から最後に
+        # 取得したツール名集合 (per_persona スコープの「所属」)。一覧の真実は
+        # サーバー側にあり、証言できるのは本人の鍵で張った生きた接続だけ
+        # (docs/intent/mcp_addon_integration.md §I)。ここに無いペルソナは
+        # 「このセッションでまだ一度も取得していない」= 近似判定へフォールバック。
+        self._persona_tool_names: Dict[Tuple[str, str], frozenset] = {}
+        # 取得が走行中の (qualified_name, persona_id)。sync 側の timeout で
+        # 放置された取得と次の Pulse の取得が同じ接続開始を重ねないための
+        # ガード (MCP ループ単一スレッド上でのみ触る)。
+        self._persona_refresh_inflight: Set[Tuple[str, str]] = set()
         # qualified_name -> subscribers waiting for this server to become ready
         self._on_server_ready: Dict[str, List[Callable[[], None]]] = {}
         # qualified_names currently ready (reset on disconnect, set on connect)
@@ -733,9 +924,16 @@ class MCPClientManager:
             if scope == "global":
                 await self._start_global_instance(qualified_name, referrer)
             elif scope == "per_persona":
-                # Run one-shot tool discovery so the LLM can see the tools;
-                # actual per-persona instances start lazily on first call.
-                await self._discover_per_persona_tools(qualified_name)
+                # 起動時のツール登録は行わない (§I, 2026-08-10)。一覧は各ペルソナ
+                # 自身の接続から Pulse 頭 / Beat 頭で取得する
+                # (refresh_persona_tools)。「どれか 1 人の鍵を借りる」discovery は
+                # 候補選びの複雑さと「代表者の鍵失効で全員のツールが消える」
+                # 故障モードごと廃止した。
+                LOGGER.info(
+                    "MCP: per_persona server '%s' registered; tools are "
+                    "fetched per-persona at pulse head (no boot discovery)",
+                    qualified_name,
+                )
             elif scope == "instance_template":
                 # A template for named instances (設計 G): do NOT auto-start.
                 # The meta is registered above; an addon spawns concrete
@@ -849,116 +1047,202 @@ class MCPClientManager:
         self._instance_contexts.pop(instance_key, None)
         return await self.manual_stop_instance(instance_key)
 
-    async def _discover_per_persona_tools(self, qualified_name: str) -> None:
-        """One-shot tool discovery for a per_persona server.
+    def has_per_persona_servers(self) -> bool:
+        """per_persona スコープのサーバーが 1 つでも登録されているか (安価な前置き判定)。"""
+        return any(
+            str(meta.get("scope")) == "per_persona"
+            for meta in self._server_meta.values()
+        )
 
-        Opens a throw-away connection using the env resolved for a single
-        concrete persona (tool schemas are shared across all persona
-        instances by design), registers the tools in TOOL_REGISTRY, then
-        closes the probe connection. Actual tool calls spin up dedicated
-        per-persona instances on demand (see the per_persona branch in
-        ``_make_mcp_tool_wrapper``).
+    async def refresh_persona_tools(
+        self, persona_id: str, *, connect: bool = True,
+    ) -> bool:
+        """このペルソナの per_persona ツール一覧を、本人の生きた接続から取り直す。
+
+        設計は docs/intent/mcp_addon_integration.md §I。一覧の真実はサーバー側に
+        あり、証言できるのは本人の鍵で張った生きた接続だけ — 起動時に代表者の
+        鍵を借りて一括登録する discovery は廃止された。
+
+        - ``connect=True`` (Pulse 頭): 鍵が解決できるサーバーへ接続を張り
+          (無ければ起動し)、一覧を取得して登録・所属を更新する。
+        - ``connect=False`` (Beat 頭): 既に生きている接続の上でだけ一覧を
+          聞き直す。新しい接続は張らない — 接続は Pulse 単位、一覧の
+          取り直しは Beat 単位。
+
+        Returns:
+            いずれかのサーバーでこのペルソナのツール所属が変わったら True。
+            呼び出し元はこれを合図に spell_list の検知 (差分 → 知覚バッファ)
+            を走らせる。
         """
-        meta = self._server_meta.get(qualified_name)
-        if meta is None:
-            return
-        if meta.get("tools_discovered"):
-            return
-
-        addon_name = meta.get("addon_name")
-        persona_id = self._pick_discovery_persona(addon_name)
-        if persona_id is None:
-            LOGGER.info(
-                "MCP: per_persona server '%s' has no candidate persona for discovery; "
-                "tools will appear once a persona is configured",
-                qualified_name,
-            )
-            return
-
-        from tools.mcp_config import resolve_config_placeholders
-
-        raw_config = meta["raw_config"]
-        try:
-            resolved = resolve_config_placeholders(raw_config, persona_id=persona_id)
-        except Exception as exc:
-            LOGGER.warning(
-                "MCP: placeholder resolution failed during discovery for '%s' (persona=%s): %s",
-                qualified_name,
-                persona_id,
-                exc,
-            )
-            return
-
-        probe = MCPServerConnection(qualified_name, resolved)
-        discovery_key = f"{qualified_name}:discovery:{persona_id}"
-        try:
-            await probe.connect()
-            self._register_tools(probe, qualified_name, discovery_key, persona_id)
-            meta["tools_discovered"] = True
-            meta["discovery_persona_id"] = persona_id
-            LOGGER.info(
-                "MCP: per_persona server '%s' discovered %d tool(s) via persona '%s'",
-                qualified_name,
-                len(probe.tools),
-                persona_id,
-            )
-        except Exception as exc:
-            LOGGER.warning(
-                "MCP: tool discovery failed for per_persona server '%s' (persona=%s): %s",
-                qualified_name,
-                persona_id,
-                exc,
-            )
-        finally:
+        if not persona_id:
+            return False
+        changed = False
+        for qualified_name, meta in list(self._server_meta.items()):
+            if str(meta.get("scope")) != "per_persona":
+                continue
             try:
-                await probe.disconnect()
-            except Exception as disconnect_exc:
-                LOGGER.debug(
-                    "MCP: probe disconnect error for '%s': %s",
+                if await self._refresh_persona_server_tools(
+                    qualified_name, persona_id, meta, connect=connect,
+                ):
+                    changed = True
+            except Exception:
+                LOGGER.exception(
+                    "MCP: per-persona tool refresh failed for '%s' (persona=%s)",
                     qualified_name,
-                    disconnect_exc,
+                    persona_id,
                 )
+        return changed
 
-    @staticmethod
-    def _pick_discovery_persona(addon_name: Optional[str]) -> Optional[str]:
-        """Pick one persona id suitable for per_persona discovery.
-
-        Preference order:
-          1. A persona with an AddonPersonaConfig row for ``addon_name`` — they
-             are known to have per-persona parameters filled in.
-          2. Any persona in the ``ai`` table — usable when the addon relies on
-             global params only (no ``${persona.addon.*}`` references in env).
-          3. ``None`` if neither is available (discovery will be skipped).
-        """
-        try:
-            from database.models import AI, AddonPersonaConfig
-            from database.session import SessionLocal
-        except ImportError as exc:
-            LOGGER.warning(
-                "MCP: DB layer unavailable for discovery persona selection: %s", exc
+    async def _refresh_persona_server_tools(
+        self,
+        qualified_name: str,
+        persona_id: str,
+        meta: Dict[str, Any],
+        *,
+        connect: bool,
+    ) -> bool:
+        instance_key = _make_instance_key(qualified_name, persona_id)
+        membership_key = (qualified_name, persona_id)
+        if membership_key in self._persona_refresh_inflight:
+            # 前回の取得 (sync 側が timeout で見放したもの等) がまだ MCP ループ
+            # 上で走っている。接続開始を重ねると同じ instance_key に接続が
+            # 二重生成されるので、この回は見送る。
+            LOGGER.debug(
+                "MCP: per-persona refresh already in flight for '%s' (persona=%s)",
+                qualified_name,
+                persona_id,
             )
-            return None
-
-        db = SessionLocal()
+            return False
+        self._persona_refresh_inflight.add(membership_key)
         try:
-            if addon_name:
-                row = (
-                    db.query(AddonPersonaConfig)
-                    .filter(AddonPersonaConfig.addon_name == addon_name)
-                    .order_by(AddonPersonaConfig.id.asc())
-                    .first()
-                )
-                if row is not None:
-                    return row.persona_id
-            ai_row = db.query(AI).order_by(AI.AIID.asc()).first()
-            if ai_row is not None:
-                return ai_row.AIID
-            return None
-        except Exception as exc:
-            LOGGER.warning("MCP: discovery persona query failed: %s", exc)
-            return None
+            return await self._refresh_persona_server_tools_locked(
+                qualified_name, persona_id, meta,
+                instance_key=instance_key,
+                membership_key=membership_key,
+                connect=connect,
+            )
         finally:
-            db.close()
+            self._persona_refresh_inflight.discard(membership_key)
+
+    async def _refresh_persona_server_tools_locked(
+        self,
+        qualified_name: str,
+        persona_id: str,
+        meta: Dict[str, Any],
+        *,
+        instance_key: str,
+        membership_key: Tuple[str, str],
+        connect: bool,
+    ) -> bool:
+        connection = self._connections.get(instance_key)
+        alive = connection is not None and connection.connected
+
+        if not alive:
+            if not connect:
+                # Beat 頭は「生きた接続に聞き直す」だけ。接続を作るのは
+                # Pulse 頭の仕事 (§I) — ここで張り直すと、未設定ペルソナの
+                # resolve (DB 引き) が Beat 頻度で走ってしまう。
+                return False
+
+            from tools.mcp_config import resolve_config_placeholders
+
+            raw_config = meta["raw_config"]
+            try:
+                resolved = resolve_config_placeholders(
+                    raw_config, persona_id=persona_id
+                )
+            except Exception:
+                LOGGER.warning(
+                    "MCP: placeholder resolution failed for '%s' (persona=%s); "
+                    "no tools this pulse",
+                    qualified_name,
+                    persona_id,
+                    exc_info=True,
+                )
+                return self._mark_persona_tools_unavailable(membership_key)
+
+            if _find_unresolved_placeholders(resolved):
+                # 鍵未設定は普通の状態であって故障ではない — 失敗一覧には
+                # 載せない (充足状況はアドオン設定画面が示す)。このペルソナに
+                # ツールが無いのは正直な状態 (§I 要請 3)。
+                return self._mark_persona_tools_unavailable(membership_key)
+
+            if self._is_in_backoff(instance_key):
+                return self._mark_persona_tools_unavailable(membership_key)
+
+            try:
+                await self._start_instance(
+                    instance_key, qualified_name, persona_id=persona_id
+                )
+            except Exception:
+                # _start_instance が失敗記録 + backoff を済ませている
+                # (= get_failed_instances / UI に出る)。
+                return self._mark_persona_tools_unavailable(membership_key)
+            # Lazy-start (wrapper 経路) と同じ自己参照。refcount=0 での停止は
+            # addon disable / manual stop 側の remove_reference が担う。
+            self._add_reference(instance_key, f"persona:{persona_id}")
+            self._clear_failure(instance_key)
+            connection = self._connections.get(instance_key)
+            if connection is None or not connection.connected:
+                return self._mark_persona_tools_unavailable(membership_key)
+            # connect() 内の一覧取得 (tools) をそのまま使う。
+        else:
+            # 生きた接続の上で一覧だけ聞き直す。失敗は「一覧が変わった」証拠
+            # ではないので、所属は保って静かに続行する (§I: 失敗 ≠ 消滅)。
+            try:
+                await connection._discover_tools()
+            except Exception:
+                LOGGER.warning(
+                    "MCP: tools/list refresh failed on live connection '%s' "
+                    "(persona=%s); keeping the previous list",
+                    qualified_name,
+                    persona_id,
+                    exc_info=True,
+                )
+                return False
+
+        # 新規ツールの wrapper 登録 (登録済みの名前は skip される)。
+        self._register_tools(connection, qualified_name, instance_key, persona_id)
+
+        new_names = frozenset(
+            str(getattr(tool, "name", ""))
+            for tool in connection.tools
+            if getattr(tool, "name", None)
+        )
+        old_names = self._persona_tool_names.get(membership_key)
+        self._persona_tool_names[membership_key] = new_names
+        if old_names is None:
+            # このセッション初取得。ツールが 1 つでもあれば「見える集合が
+            # 変わった」ので検知に値する (head 側の近似からの置き換わり検出)。
+            return bool(new_names)
+        return old_names != new_names
+
+    def _mark_persona_tools_unavailable(
+        self, membership_key: Tuple[str, str]
+    ) -> bool:
+        """所属を「確認済み・利用不可 (空集合)」にする。
+
+        pop で消してはいけない — 消すと is_tool_available_for_persona が
+        「まだ一度も取得していない」と同じ config 近似へフォールバックし、
+        鍵が解決できる限りツールが使える顔で現れる (fail-open 反転、
+        Qwen レビュー 2026-08-10)。§I の「その Pulse はツール無し」を守るには
+        『評価した結果、使えない』を空集合として区別する必要がある。
+        完全に忘れて近似へ戻すのはアドオン入れ直し (_purge_persona_tools) だけ。
+
+        Returns 変化あり (可視状態が変わりうる) かどうか。
+        """
+        old = self._persona_tool_names.get(membership_key)
+        self._persona_tool_names[membership_key] = frozenset()
+        # None (未取得 = 近似が True を返していたかもしれない) → 空集合も
+        # 可視状態の変化になりうるので変化ありとして返す。空→空だけが不変。
+        return old is None or bool(old)
+
+    def _purge_persona_tools(self, qualified_name: str) -> None:
+        """qualified server の全ペルソナ所属を白紙に戻す (addon toggle 用)。"""
+        for key in [
+            k for k in self._persona_tool_names if k[0] == qualified_name
+        ]:
+            self._persona_tool_names.pop(key, None)
 
     async def _start_instance(
         self,
@@ -1135,6 +1419,17 @@ class MCPClientManager:
         if scope == "per_persona":
             if persona_id is None:
                 return False
+            # 本人の生きた接続から取得済みの所属があればそれが真実 (§I)。
+            # 鍵が解決できても接続できなかった / サーバー側でツールが消えた、
+            # を config 近似は表せない。
+            membership = self._persona_tool_names.get(
+                (qualified, str(persona_id))
+            )
+            if membership is not None:
+                bare_name = meta_info.get("tool_name") or ""
+                return bare_name in membership
+            # このセッションでまだ一度も取得していない (Pulse 前の UI 列挙等)
+            # 場合だけ、従来の「config が解決できるか」で近似する。
             try:
                 resolved = resolve_config_placeholders(
                     raw_config, persona_id=persona_id
@@ -1178,7 +1473,16 @@ class MCPClientManager:
         from tools import register_external_tool
 
         spell_config = _normalize_spell_config(connection.config.get("spell_tools"))
+        spell_default = _normalize_spell_default(
+            connection.config.get("spell_tools_default"), qualified_name
+        )
         scope = self._server_meta.get(qualified_name, {}).get("scope", "global")
+        # Tools this server exposes that no one named in spell_tools, yet which
+        # became callable through spell_tools_default. Recorded so the set can
+        # be reconstructed after the fact — this is a record, NOT a safeguard:
+        # nobody reads logs in time to stop anything. The only gate is whether
+        # spell_tools_default is declared for this server at all.
+        auto_enabled: List[str] = []
 
         for tool_def in connection.tools:
             tool_name = getattr(tool_def, "name", None)
@@ -1198,7 +1502,10 @@ class MCPClientManager:
                 tool_name,
                 tool_def,
                 spell_config,
+                spell_default,
             )
+            if schema.spell and tool_name not in spell_config:
+                auto_enabled.append(tool_name)
             schema.addon_name = connection.config.get("_addon_name")
             wrapper = _make_mcp_tool_wrapper(self, qualified_name, tool_name, scope)
             if register_external_tool(namespaced_name, schema, wrapper):
@@ -1215,6 +1522,15 @@ class MCPClientManager:
                     "first_registered_from_instance": instance_key,
                     "first_registered_with_persona": persona_id,
                 }
+
+        if auto_enabled:
+            LOGGER.info(
+                "MCP server '%s': %d tool(s) not listed in spell_tools became "
+                "callable via spell_tools_default: %s",
+                qualified_name,
+                len(auto_enabled),
+                ", ".join(sorted(auto_enabled)),
+            )
 
     # -- Shutdown --------------------------------------------------------
 
@@ -1250,6 +1566,16 @@ class MCPClientManager:
             )
         self._refs.pop(instance_key, None)
         self._instance_contexts.pop(instance_key, None)
+        # 所属 (per_persona ツール一覧) は接続から導かれる派生状態なので、
+        # 接続を殺すこの関所が道連れで無効化する。残すと「切れた接続の一覧」が
+        # 真実の顔で is_tool_available_for_persona から出続ける。次の Pulse 頭の
+        # 取得が復元するため、生きた運用では通知のばたつきは起きない
+        # (取得 → 検知の順序が Pulse 頭で保証されている)。
+        persona_id = self._persona_id_from_instance_key(instance_key)
+        if persona_id:
+            qualified_name = self._qualified_from_instance_key(instance_key)
+            if qualified_name:
+                self._mark_persona_tools_unavailable((qualified_name, persona_id))
 
     async def _unregister_instance_tools(self, instance_key: str) -> None:
         """Unregister tools tied to a specific instance.
@@ -1840,6 +2166,57 @@ async def run_on_mcp_loop(coro: Any) -> Any:
     return await asyncio.wrap_future(future)
 
 
+def refresh_persona_tools_sync(
+    persona_id: str, *, connect: bool = True, timeout: float = 15.0,
+) -> bool:
+    """SEA (同期スレッド) から Pulse/Beat 頭のツール一覧取得を呼ぶための橋。
+
+    MCP 専用ループに coroutine を投げて完了を待つ。設計:
+    docs/intent/mcp_addon_integration.md §I (Pulse 頭 connect=True /
+    Beat 頭 connect=False)。
+
+    未初期化・per_persona サーバー不在・timeout 超過・例外はすべて
+    False (= 変化なし扱い) — 取得の失敗で Pulse を止めない。timeout で
+    抜けた場合も coroutine 自体は MCP ループ上で走り続け、完了すれば
+    所属は更新される (次の Beat / Pulse の取得が拾う)。
+    """
+    manager = get_mcp_manager()
+    if manager is None or _loop is None or not persona_id:
+        return False
+    if not manager.has_per_persona_servers():
+        return False
+    try:
+        current_loop = None
+        try:
+            current_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            pass
+        if current_loop is _loop:
+            LOGGER.warning(
+                "refresh_persona_tools_sync called on the MCP loop itself; "
+                "skipping to avoid deadlock",
+            )
+            return False
+        future = asyncio.run_coroutine_threadsafe(
+            manager.refresh_persona_tools(persona_id, connect=connect), _loop,
+        )
+        return bool(future.result(timeout=timeout))
+    except concurrent.futures.TimeoutError:
+        LOGGER.warning(
+            "MCP: per-persona tool refresh timed out after %.1fs "
+            "(persona=%s, connect=%s); continuing without the result",
+            timeout,
+            persona_id,
+            connect,
+        )
+        return False
+    except Exception:
+        LOGGER.exception(
+            "MCP: refresh_persona_tools_sync failed (persona=%s)", persona_id,
+        )
+        return False
+
+
 async def initialize_mcp() -> Optional[MCPClientManager]:
     global _manager
     if _manager is not None:
@@ -1916,7 +2293,11 @@ def _reload_addon_mcp_config(
     Returns the list of qualified server names newly added.
     """
     from saiverse.data_paths import EXPANSION_DATA_DIR
-    from tools.mcp_config import _load_config_file, _interpolate_value
+    from tools.mcp_config import (
+        _interpolate_value,
+        _load_config_file,
+        is_server_enabled,
+    )
 
     config_path = EXPANSION_DATA_DIR / addon_name / "mcp_servers.json"
     if not config_path.exists():
@@ -1928,7 +2309,10 @@ def _reload_addon_mcp_config(
         qualified_name = f"{addon_name}__{server_name}"
         if qualified_name in manager._server_meta:
             continue
-        if not cfg.get("enabled", True):
+        # Same strict-boolean judgement as the startup load — see
+        # ``is_server_enabled``. Duplicating the test here once made
+        # ``"enabled": "false"`` mean off at boot and on after re-enabling.
+        if not is_server_enabled(qualified_name, cfg):
             LOGGER.info(
                 "MCP: server '%s' in addon '%s' is marked disabled, skipping",
                 qualified_name,
@@ -2001,21 +2385,18 @@ async def _apply_addon_toggle(
                 if scope == "global":
                     await manager.add_referrer_for_server(qualified_name, referrer)
                 elif scope == "per_persona":
-                    # Re-run discovery to (re)register tools in TOOL_REGISTRY.
-                    # _discover_per_persona_tools is idempotent once tools
-                    # are discovered, so we clear the flag first to force it.
-                    meta.pop("tools_discovered", None)
-                    meta.pop("discovery_persona_id", None)
-                    await manager._discover_per_persona_tools(qualified_name)
+                    # §I: 再有効化でも一括 discovery は行わない。ツールは各
+                    # ペルソナの次の Pulse 頭で本人の鍵により取得される。
+                    # 旧セッションの所属記録だけ白紙に戻す。
+                    manager._purge_persona_tools(qualified_name)
             else:
                 if scope == "global":
                     await manager.remove_referrer_for_server(qualified_name, referrer)
                 elif scope == "per_persona":
-                    # Stop any running per-persona instances, unregister tools,
-                    # clear discovery flag.
+                    # Stop any running per-persona instances and unregister
+                    # tools; forget per-persona tool membership.
                     await _shutdown_all_instances_of_server(manager, qualified_name)
-                    meta.pop("tools_discovered", None)
-                    meta.pop("discovery_persona_id", None)
+                    manager._purge_persona_tools(qualified_name)
         except Exception as exc:
             LOGGER.warning(
                 "MCP: addon toggle failed for '%s' (enabled=%s): %s",

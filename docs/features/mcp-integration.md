@@ -6,7 +6,8 @@ SAIVerse は MCP (Model Context Protocol) クライアントとして外部ツ�
 
 - `mcp_servers.json` に定義したサーバーへ起動時に接続します。
 - 見つかったツールは `server__tool` 形式で既存の `TOOL_REGISTRY` に登録されます。
-- 必要なものだけ `spell_tools` で選ぶと、`/spell` からも使えます。
+- 必要なものだけ `spell_tools` で選ぶと、`/spell` からも使えます。サーバー側のツール追加に自動追随したい場合は `spell_tools_default` を宣言します。
+- 接続方式は stdio（子プロセス）と remote（`streamable_http` / `sse`）から選べます。remote では認証情報を `headers` に載せます。
 - `expansion_data/<addon>/mcp_servers.json` に置けば、アドオン配布物からも MCP サーバーを宣言できます。
 - ペルソナごとに別アカウントを持たせたいサービス（Elyth 等）向けに `scope: "per_persona"` が選べます。
 - アドオン由来サーバー名は自動で `<addon_name>__` にプレフィックスされ、他アドオンやユーザー設定と衝突しないよう隔離されます。
@@ -42,6 +43,35 @@ SAIVerse は MCP (Model Context Protocol) クライアントとして外部ツ�
 }
 ```
 
+## 接続方式 (`transport`)
+
+`command` を書くと **stdio**（SAIVerse が子プロセスとして起動し、標準入出力で会話する）になります。`command` がない場合は `transport` フィールドで選び、省略時は `"streamable_http"` です。
+
+| 指定 | 意味 |
+|------|------|
+| `command` あり | stdio。SAIVerse が子プロセスを起動する |
+| `"transport": "streamable_http"` | リモートの HTTP エンドポイントへ接続（`command` 省略時の既定） |
+| `"transport": "sse"` | リモートの SSE エンドポイントへ接続 |
+
+リモート接続では接続先を `url` で指定します。子プロセスではないので `env` で認証情報を渡す経路がなく、代わりに `headers` に載せます。
+
+```json
+{
+  "mcpServers": {
+    "elyth": {
+      "url": "https://elythworld.com/api/mcp/remote",
+      "transport": "streamable_http",
+      "headers": {
+        "Authorization": "Bearer ${persona.addon.saiverse-elyth-addon.api_key}"
+      },
+      "scope": "per_persona"
+    }
+  }
+}
+```
+
+`headers` の値にも下記の参照構文が使えます。未解決のまま残った場合は `env` と同じく `missing_config` 扱いになり、そのツールはペルソナのスペル一覧から隠れます。
+
 ## スコープ (`scope`)
 
 サーバー定義に `scope` フィールドを指定できます。省略時は `"global"` です。
@@ -54,19 +84,19 @@ SAIVerse は MCP (Model Context Protocol) クライアントとして外部ツ�
 
 ペルソナごとに独立プロセスを起動します。AIエージェント単位でアカウント発行する外部サービス（Elyth, Twitter, Mastodon 等）向き。
 
-- 起動時に一度だけ tool discovery を行います（任意の 1 ペルソナの env で接続 → 切断）。
-- 実際のツール呼び出し時、`tools.context.get_active_persona_id()` で取得したペルソナ用のインスタンスを遅延起動します。
-- ペルソナごとに異なる API キーが必要な場合は env 値を `${persona.addon.<addon>.<key>}` で参照します。
+- **ツール一覧は各ペルソナ自身の接続から取得します**（`docs/intent/mcp_addon_integration.md` §I）。ペルソナの Pulse（思考サイクル）の頭で、そのペルソナのキーが解決できれば接続を張って一覧を取得し、Pulse 中は Beat（生成 1 回）ごとに一覧を聞き直します。サーバー側でツールが増減すると、ペルソナは「スペル◯◯が使えるようになりました / 使えなくなりました」という知覚として受け取ります（Building 移動でスペルが変わるときと同じ通知経路）。
+- キー未設定のペルソナにはそのサーバーのツールが現れません。**キーを保存すれば、次の Pulse から自動的に使えます**（再起動やアドオンの再有効化は不要）。
+- 起動時の一括 tool discovery（任意の 1 ペルソナの env で接続 → 切断）は 2026-08-10 に廃止されました。
+- ペルソナごとに異なる API キーが必要な場合は、その値を `${persona.addon.<addon>.<key>}` で参照します（stdio なら `env`、remote なら `headers`）。
 
 ```json
 {
   "mcpServers": {
     "elyth": {
-      "command": "npx",
-      "args": ["-y", "elyth-mcp-server@latest"],
-      "env": {
-        "ELYTH_API_KEY": "${persona.addon.saiverse-elyth-addon.api_key}",
-        "ELYTH_API_BASE": "https://elythworld.com"
+      "url": "${addon.saiverse-elyth-addon.mcp_url}",
+      "transport": "streamable_http",
+      "headers": {
+        "Authorization": "Bearer ${persona.addon.saiverse-elyth-addon.api_key}"
       },
       "scope": "per_persona"
     }
@@ -74,9 +104,11 @@ SAIVerse は MCP (Model Context Protocol) クライアントとして外部ツ�
 }
 ```
 
+remote 接続では子プロセスが立たないため、「ペルソナごとに独立プロセス」ではなく「ペルソナごとに独立した接続」になります。instance_key による管理と遅延起動の扱いは stdio と同じです。
+
 ## env 参照構文
 
-サーバー定義の文字列値（`env` の値、`args` の要素、`url` など）に `${...}` プレースホルダーを書けます。
+サーバー定義の文字列値（`env` の値、`args` の要素、`headers` の値、`url` など）に `${...}` プレースホルダーを書けます。
 
 | 構文 | 解決元 |
 |------|--------|
@@ -89,7 +121,16 @@ SAIVerse は MCP (Model Context Protocol) クライアントとして外部ツ�
 
 未解決のプレースホルダーが残った状態では **サーバーは起動せず、「missing_config」カテゴリの失敗**として記録されます。silent に空文字列に置換されることはありません。
 
+ただし区別が一つあります。`scope: "per_persona"` サーバーで**キーが未設定**のペルソナは、失敗一覧に記録されません — 未設定は故障ではなく「そのペルソナはまだこのサービスを使わない」という普通の状態だからです（キーの充足状況はアドオン設定画面に出ます）。接続の失敗（キーが不正・期限切れ・サーバー到達不能など）は従来どおり失敗として記録され、UI に表示されます。
+
 ## spell_tools
+
+MCP サーバーが公開するツールは、すべて `TOOL_REGISTRY` に登録されます。そこから先に独立した 2 つのスイッチがあります。
+
+- **スペルになるか (`spell`)** — ペルソナが平文応答から呼べるかどうか。偽なら呼ぶ手段がありません。
+- **一覧に載るか (`visible`)** — ペルソナの system prompt のスペル一覧に載せるかどうか。**偽でも呼ぶことはでき**、`addon_spell_help` を通じてペルソナ自身が発見できます。head を膨らませたくないツールに使います。
+
+`spell_tools` に名前を書いたツールは `spell=true` になり、`visible` は既定 `true`（エントリで指定可）です。
 
 `spell_tools` は以下のどちらでも書けます。
 
@@ -108,6 +149,27 @@ SAIVerse は MCP (Model Context Protocol) クライアントとして外部ツ�
 
 スペル名は `filesystem__read_file` のように名前空間付きになります。アドオン由来の場合は `<addon_name>__<server_name>__<tool_name>` の形になります。
 
+### spell_tools_default（サーバーのツール追加に追随する）
+
+`spell_tools` は許可リストなので、サーバー側が新しいツールを増やすたびに JSON へ書き足さないとペルソナから使えません。ツールの入れ替えが速いサービス（Elyth は v1 の 23 個から v2 の 25 個へ移る際に 7 個が消え 9 個が増えました）では、これが運用の負担になります。
+
+サーバー定義に `spell_tools_default` を宣言すると、`spell_tools` に名前がないツールの既定値を決められます。
+
+```json
+{
+  "spell_tools_default": {"spell": true, "visible": false},
+  "spell_tools": [
+    {"name": "create_post", "display_name": "投稿する", "visible": true}
+  ]
+}
+```
+
+こう書くと、サーバーが後から増やしたツールは自動でスペルになり、system prompt には載りません。ペルソナは `addon_spell_help` で発見できます。`{"spell_tools_default": true}` は `{"spell": true, "visible": false}` の省略形です。
+
+**省略時は従来どおり**、`spell_tools` に無いツールは `spell=false`（ペルソナから呼べない）のままです。生の MCP ツールを native wrapper の裏に隠す設計（`saiverse-stackchan-addon`）はこの挙動に依存しているため、既定は変わりません。
+
+**このキーを書くかどうかが唯一の関所です。** 自動で有効になったツールは起動時にログへ記録されますが、それは事後に何が起きたか追うための記録であって、歯止めではありません（ログは実際には読まれません）。危険なツールを増やしうるサービスでは、このキーを書かないでください。
+
 ## ライフサイクル (参照カウント)
 
 各サーバーインスタンスは、参照元 (`referenced_by`) の集合で管理されます。
@@ -115,7 +177,7 @@ SAIVerse は MCP (Model Context Protocol) クライアントとして外部ツ�
 - アドオンから宣言されたサーバーは、そのアドオンが有効な間だけ参照されます。
 - ユーザー設定 (`user_data/`) と builtin からのサーバーは起動中ずっと参照されます。
 - アドオンを **無効化** すると、そのアドオン由来サーバーの参照が外れ、refcount がゼロになったプロセスは停止します。
-- アドオンを **有効化** し直すと、global スコープは再起動し、per_persona スコープは tool discovery を再実行します。
+- アドオンを **有効化** し直すと、global スコープは再起動します。per_persona スコープは各ペルソナの次の Pulse 頭で自分のキーによりツール一覧を取り直します。
 - UI から**手動停止**することもできます（次回呼び出しで再起動可能）。
 
 ## エラー分類
@@ -131,6 +193,10 @@ SAIVerse は MCP (Model Context Protocol) クライアントとして外部ツ�
 | `network` | ネットワーク到達性の問題（タイムアウト、DNS 等） |
 | `process_crash` | 子プロセスが異常終了 |
 | `unknown` | 分類不能 |
+
+`runtime_missing` と `process_crash` は stdio（子プロセスを起動する方式）でのみ発生します。
+
+`command_error` は本来 stdio 向けのカテゴリですが、**remote 接続でも出ることがあります**。失敗の分類が例外メッセージの文字列を見ており、`not found` を含むものを `command_error` に振り分けるためです。接続先 URL が間違っていて HTTP 404 が返る場合がこれに当たり、**「コマンドエラー」という表示で URL の誤りが報告されます**。remote で `command_error` が出たら、まず `url` の値を疑ってください。
 
 連続失敗時は exponential backoff（初期 2 秒、最大 60 秒）で再試行を抑制します。UI の手動リトライや `POST /api/mcp/instances/retry` でバックオフを強制解除できます。
 
@@ -188,16 +254,16 @@ expansion_data/<your-addon>/
     }
     ```
 
-2. `mcp_servers.json` の env で参照構文を使います：
+2. `mcp_servers.json` で参照構文を使います。stdio なら `env`、remote なら `headers` に置きます：
 
     ```json
     {
       "mcpServers": {
-        "elyth": {
-          "command": "npx",
-          "args": ["-y", "elyth-mcp-server@latest"],
-          "env": {
-            "ELYTH_API_KEY": "${persona.addon.your-addon-name.api_key}"
+        "example": {
+          "url": "https://example.com/api/mcp",
+          "transport": "streamable_http",
+          "headers": {
+            "Authorization": "Bearer ${persona.addon.your-addon-name.api_key}"
           },
           "scope": "per_persona"
         }

@@ -50,6 +50,29 @@ class SpellListSnapshot:
     registered_names: Optional[frozenset[str]] = None  # all SPELL_TOOL_SCHEMAS keys at capture time (pre-filter)
 
 
+def _belongs_to_per_persona_mcp_server(tool_name: str) -> bool:
+    """このツール名が per_persona スコープ MCP サーバーの名前空間に属するか。
+
+    per_persona のツール登録は Pulse 頭のペルソナ別取得で行われるため、
+    「レジストリに無い」ことが「消えた」ことを意味しない (§I)。判定は
+    qualified server 名のプレフィックス一致 — 登録簿は空でも server meta は
+    起動時に揃っている。
+    """
+    try:
+        from tools.mcp_client import get_mcp_manager
+        manager = get_mcp_manager()
+    except Exception:
+        return False
+    if manager is None:
+        return False
+    for qualified, meta in manager._server_meta.items():
+        if str(meta.get("scope")) == "per_persona" and tool_name.startswith(
+            f"{qualified}__"
+        ):
+            return True
+    return False
+
+
 class SpellListSection:
     """Spell 一覧の section 実装。
 
@@ -311,6 +334,22 @@ class SpellListSection:
         if stored_registered != live_names:
             added = live_names - stored_registered
             removed = stored_registered - live_names
+            if not added and removed and all(
+                _belongs_to_per_persona_mcp_server(name) for name in removed
+            ):
+                # per_persona MCP ツールは Pulse 頭に各ペルソナ自身の接続から
+                # 登録される (mcp_addon_integration.md §I)。再起動直後は「まだ
+                # 今セッションで誰も取得していない」だけで、消えたわけではない。
+                # ここで stale 扱いにすると Pulse 前の head 構築 (プレビュー等)
+                # が capture_all → B リセットを起こし、初回取得時に全ツール
+                # ぶんの spell_added が知覚へ流れ込む。取得後の真の差分は
+                # Pulse 頭の検知が拾う。
+                LOGGER.debug(
+                    "spell_list: stored snapshot references per_persona MCP "
+                    "tools not yet fetched this session (%s); not stale",
+                    sorted(removed),
+                )
+                return
             LOGGER.info(
                 "spell_list: stored snapshot stale (added=%s removed=%s), "
                 "triggering recapture",
