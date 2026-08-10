@@ -1011,6 +1011,165 @@ class MCPConfigTestCase(unittest.TestCase):
         # 生きた instance が 1 つも無いので ready は立てない
         self.assertEqual(ready_fired, [])
 
+    # -- 遷移中 (起動中 / 停止中) の競合 (Codex レビュー 3 巡目) ------------
+    #
+    # MCP ループは単一スレッドだが、接続の確立と切断には await がある。その隙に
+    # 別経路 (Pulse 頭の取得・再接続・遅延起動・アドオン無効化・全停止) が同じ
+    # instance_key を触ると、二重起動と孤児 subprocess が生まれる。
+
+    def test_start_refuses_while_another_start_is_in_flight(self) -> None:
+        """起動中の instance_key には二重に接続を張らない。"""
+        import asyncio
+
+        from tools.mcp_client import MCPInstanceBusyError
+
+        mgr = MCPClientManager()
+        mgr._server_meta["srv"] = self._per_persona_meta()
+        key = "srv:persona:air_city_a"
+        mgr._starting.add(key)
+
+        with mock.patch(
+            "saiverse.addon_config.get_params", return_value={"api_key": "k"},
+        ):
+            with self.assertRaises(MCPInstanceBusyError):
+                asyncio.run(mgr._start_instance(key, "srv", persona_id="air_city_a"))
+
+    def test_start_refuses_while_a_stop_is_in_flight(self) -> None:
+        """停止処理の途中に立て直さない。
+
+        旧接続の後片付け (参照・所属の無効化) が新しい接続に適用される事故を防ぐ。
+        断られた回の実害は「その Pulse はツール無し」だけで、次の Pulse 頭が張り直す。
+        """
+        import asyncio
+
+        from tools.mcp_client import MCPInstanceBusyError
+
+        mgr = MCPClientManager()
+        mgr._server_meta["srv"] = self._per_persona_meta()
+        key = "srv:persona:air_city_a"
+        mgr._stopping.add(key)
+
+        with mock.patch(
+            "saiverse.addon_config.get_params", return_value={"api_key": "k"},
+        ):
+            with self.assertRaises(MCPInstanceBusyError):
+                asyncio.run(mgr._start_instance(key, "srv", persona_id="air_city_a"))
+
+    def test_start_is_a_noop_when_already_connected(self) -> None:
+        """別経路が先に張り終えていたら二重に張らない (Pulse 頭 × 遅延起動)。"""
+        import asyncio
+
+        mgr = MCPClientManager()
+        mgr._server_meta["srv"] = self._per_persona_meta()
+        key = "srv:persona:air_city_a"
+        fake = self._FakeLiveConnection(tools=["post"])
+        mgr._connections[key] = fake
+
+        with mock.patch("saiverse.addon_config.get_params") as mock_params:
+            asyncio.run(mgr._start_instance(key, "srv", persona_id="air_city_a"))
+
+        self.assertIs(mgr._connections[key], fake)
+        mock_params.assert_not_called()
+
+    def test_stop_during_start_shuts_the_instance_down_on_landing(self) -> None:
+        """起動の await 中に来た停止要求は、起動が着地した瞬間に効く。
+
+        接続が _connections に入るのは接続完了後なので、停止側は「対象に無い」と
+        判断してしまう。放置すると無効化・全停止のあとに subprocess とツール
+        wrapper が残る (Codex レビュー 3 巡目 high)。
+        """
+        import asyncio
+
+        from tools.mcp_client import MCPInstanceBusyError
+
+        mgr = MCPClientManager()
+        mgr._server_meta["srv"] = self._per_persona_meta()
+        key = "srv:persona:air_city_a"
+        disconnected: list[str] = []
+
+        class _SlowConnection(self._FakeLiveConnection):
+            async def connect(self_inner):
+                # 接続の途中にアドオン無効化が走る状況の再現
+                await mgr._shutdown_instance(key)
+                self_inner._connected = True
+
+            async def disconnect(self_inner):
+                disconnected.append(key)
+                self_inner._connected = False
+
+        async def _run():
+            with mock.patch(
+                "saiverse.addon_config.get_params", return_value={"api_key": "k"},
+            ), mock.patch(
+                "tools.mcp_client.MCPServerConnection",
+                side_effect=lambda *a, **kw: _SlowConnection(tools=["post"]),
+            ):
+                with self.assertRaises(MCPInstanceBusyError):
+                    await mgr._start_instance(key, "srv", persona_id="air_city_a")
+
+        asyncio.run(_run())
+
+        # 着地した接続は自分で畳まれ、登録もされない
+        self.assertEqual(disconnected, [key])
+        self.assertNotIn(key, mgr._connections)
+        self.assertEqual(mgr._registered_tools, {})
+        self.assertNotIn(key, mgr._stop_requested)
+
+    def test_stop_request_does_not_leak_to_the_next_start(self) -> None:
+        """停止要求は「あの起動」に向いたもの。失敗した回に残して次を自壊させない。"""
+        import asyncio
+
+        mgr = MCPClientManager()
+        mgr._server_meta["srv"] = self._per_persona_meta()
+        key = "srv:persona:air_city_a"
+
+        class _FailingConnection(self._FakeLiveConnection):
+            async def connect(self_inner):
+                # 起動中に停止要求が置かれ、その起動は失敗する
+                mgr._stop_requested.add(key)
+                raise RuntimeError("connection refused")
+
+        with mock.patch(
+            "saiverse.addon_config.get_params", return_value={"api_key": "k"},
+        ), mock.patch(
+            "tools.mcp_client.MCPServerConnection",
+            side_effect=lambda *a, **kw: _FailingConnection(),
+        ):
+            with self.assertRaises(RuntimeError):
+                asyncio.run(mgr._start_instance(key, "srv", persona_id="air_city_a"))
+
+        self.assertNotIn(key, mgr._stop_requested)
+        self.assertNotIn(key, mgr._starting)
+
+    def test_reconnect_ignores_unowned_failed_instances(self) -> None:
+        """誰も要求していない instance を、失敗記録だけを根拠に復活させない。
+
+        失敗記録を根拠に加えると refcount 0 の live instance ができ、明示的に
+        止めた / 一度も所有されたことのない instance まで蘇る (Codex レビュー
+        3 巡目 high)。復活の条件は「まだ望まれているか」= 参照があるか。
+        """
+        import asyncio
+
+        mgr = MCPClientManager()
+        mgr._server_meta["srv"] = self._per_persona_meta()
+        mgr._failed_instances["srv:persona:air_city_a"] = {
+            "attempts": 1, "next_retry_at": 0,
+            "last_category": "network", "last_message": "boom",
+            "last_exception": None,
+        }
+        started: list[str] = []
+
+        async def _fake_start(self_, instance_key, qualified_name, persona_id=None, **kw):
+            started.append(instance_key)
+
+        with mock.patch.object(
+            MCPClientManager, "_start_instance", new=_fake_start
+        ):
+            ok = asyncio.run(mgr.reconnect_server("srv"))
+
+        self.assertFalse(ok)   # 対象が無いので何もしていない
+        self.assertEqual(started, [])
+
     def test_reconnect_can_restart_a_down_instance(self) -> None:
         """一度落ちた instance も再接続ボタンから立て直せる。
 
@@ -1022,7 +1181,9 @@ class MCPConfigTestCase(unittest.TestCase):
 
         mgr = MCPClientManager()
         mgr._server_meta["srv"] = self._per_persona_meta()
-        # 直近で落ちた記録だけがある状態 (接続オブジェクトは無い)
+        # 一時的な失敗で畳まれた状態: 接続は無いが参照は残っている
+        # (= まだ望まれている instance)。加えて失敗記録も付いている。
+        mgr._refs["srv:persona:air_city_a"] = {"persona:air_city_a"}
         mgr._failed_instances["srv:persona:air_city_a"] = {
             "attempts": 1, "next_retry_at": 0,
             "last_category": "network", "last_message": "boom",

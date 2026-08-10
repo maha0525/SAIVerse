@@ -61,6 +61,7 @@ const CATEGORY_LABELS: Record<string, string> = {
     command_error: '起動コマンドエラー',
     network: 'ネットワークエラー',
     process_crash: 'プロセス異常終了',
+    busy: '起動・停止処理が進行中',
     unknown: '不明なエラー',
 };
 

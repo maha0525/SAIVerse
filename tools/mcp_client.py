@@ -103,6 +103,10 @@ ERROR_CATEGORY_AUTH_FAILED = "auth_failed"
 ERROR_CATEGORY_COMMAND_ERROR = "command_error"
 ERROR_CATEGORY_NETWORK = "network"
 ERROR_CATEGORY_PROCESS_CRASH = "process_crash"
+# 同じ instance の起動 / 停止が進行中で今は使えない、という**一時的な状態**。
+# 故障ではないので失敗記録 (_failed_instances) には載せない — backoff を焚くと
+# 「混み合っただけ」で次の Pulse まで使えなくなる。
+ERROR_CATEGORY_BUSY = "busy"
 ERROR_CATEGORY_UNKNOWN = "unknown"
 
 _CATEGORY_JP = {
@@ -112,6 +116,7 @@ _CATEGORY_JP = {
     ERROR_CATEGORY_COMMAND_ERROR: "サーバーの起動コマンドエラー",
     ERROR_CATEGORY_NETWORK: "ネットワークエラー",
     ERROR_CATEGORY_PROCESS_CRASH: "サーバープロセスが異常終了しました",
+    ERROR_CATEGORY_BUSY: "サーバーの起動・停止処理が進行中です",
     ERROR_CATEGORY_UNKNOWN: "不明なエラー",
 }
 
@@ -142,10 +147,30 @@ class MCPUnresolvedConfigError(RuntimeError):
         )
 
 
+class MCPInstanceBusyError(RuntimeError):
+    """同じ instance_key が起動中 / 停止中で、今この操作はできない。
+
+    MCP ループは単一スレッドだが接続の確立と切断には await があるため、その隙に
+    別経路 (Pulse 頭の取得・再接続・遅延起動・アドオン無効化) が同じ instance を
+    触りうる。待たずに正直に断ることで、二重起動と「旧接続の後片付けが新接続に
+    適用される」事故を防ぐ (Codex レビュー 3 巡目)。per_persona は次の Pulse 頭が
+    張り直すため、断られた回の実害は「その Pulse はツール無し」だけ。
+    """
+
+    def __init__(self, instance_key: str, reason: str) -> None:
+        self.instance_key = instance_key
+        self.reason = reason
+        super().__init__(
+            f"MCP instance '{instance_key}' is busy: {reason}"
+        )
+
+
 def _classify_error(exc: Exception) -> str:
     """Heuristically categorize an MCP startup exception."""
     if isinstance(exc, MCPUnresolvedConfigError):
         return ERROR_CATEGORY_MISSING_CONFIG
+    if isinstance(exc, MCPInstanceBusyError):
+        return ERROR_CATEGORY_BUSY
     exc_str = str(exc).lower()
 
     if isinstance(exc, FileNotFoundError):
@@ -926,6 +951,19 @@ class MCPClientManager:
         # 放置された取得と次の Pulse の取得が同じ接続開始を重ねないための
         # ガード (MCP ループ単一スレッド上でのみ触る)。
         self._persona_refresh_inflight: Set[Tuple[str, str]] = set()
+        # 起動中 / 停止中の instance_key。MCP ループは単一スレッドだが、接続の
+        # 確立と切断には await があるため、その隙に別経路 (Pulse 頭の取得・
+        # 再接続・アドオン無効化・全停止) が同じ instance_key を触りうる。
+        # ``_connections`` は「今繋がっているもの」しか表せないので、遷移中の
+        # instance がどの経路からも見えず、二重起動と孤児 subprocess を生む
+        # (Codex レビュー 3 巡目)。遷移中も見えるようにするための状態:
+        #   _starting  … 起動処理が走っている (まだ _connections に入っていない)
+        #   _stopping  … 停止処理が走っている (もう _connections から出ている)
+        #   _stop_requested … 起動中に停止を頼まれた。起動が着地した瞬間に
+        #                     自分で畳む (起動を途中でキャンセルはしない)
+        self._starting: Set[str] = set()
+        self._stopping: Set[str] = set()
+        self._stop_requested: Set[str] = set()
         # (qualified_name, persona_id) -> 所属の版番号。意図的な無効化 (接続を
         # 殺した / 鍵が解決できなくなった / アドオン入れ直し) が版を上げ、走行中の
         # 取得は開始時に見た版と違っていたら結果を捨てる。これが無いと、sync 側が
@@ -1370,12 +1408,29 @@ class MCPClientManager:
         instances (設計 G). When omitted, it is recovered from
         ``self._instance_contexts`` so backoff-retry / reconnect paths that
         only know the instance_key still resolve correctly.
+
+        遷移中の重なりは :py:class:`MCPInstanceBusyError` で拒む (既に繋がって
+        いる場合は何もしない)。接続の確立には await があるため、拒まないと同じ
+        instance_key に接続が二重生成され、片方が孤児 subprocess として残る。
         """
         from tools.mcp_config import resolve_config_placeholders
 
         meta = self._server_meta.get(qualified_name)
         if meta is None:
             raise ValueError(f"Unknown MCP server '{qualified_name}'")
+
+        existing = self._connections.get(instance_key)
+        if existing is not None and existing.connected:
+            # 別経路が先に張り終えていた (Pulse 頭 と wrapper の遅延起動が
+            # 重なる等)。二重に張らない。
+            return
+        if instance_key in self._starting:
+            raise MCPInstanceBusyError(instance_key, "起動処理が進行中です")
+        if instance_key in self._stopping:
+            # 停止の途中に立て直すと、旧接続の後片付け (参照・所属の無効化) が
+            # 新しい接続に適用されてしまう。停止が終わるまで待たず正直に断る —
+            # per_persona なら次の Pulse 頭が張り直す。
+            raise MCPInstanceBusyError(instance_key, "停止処理が進行中です")
 
         if instance_context is None:
             instance_context = self._instance_contexts.get(instance_key)
@@ -1391,6 +1446,7 @@ class MCPClientManager:
         connection = MCPServerConnection(
             qualified_name, resolved, instance_key=instance_key
         )
+        self._starting.add(instance_key)
         try:
             await connection.connect()
         except Exception as exc:
@@ -1406,6 +1462,32 @@ class MCPClientManager:
                 user_msg,
             )
             raise
+        finally:
+            self._starting.discard(instance_key)
+            # 旗はここで必ず降ろす。接続が失敗した回に残すと、次に成功した
+            # 起動が着地した瞬間に自壊する (要求は「あの起動」に向いたもの)。
+            stop_requested = instance_key in self._stop_requested
+            self._stop_requested.discard(instance_key)
+
+        if stop_requested:
+            # 起動中に停止を頼まれていた (アドオン無効化・手動停止・全停止)。
+            # 起動は途中でキャンセルしないので、着地した瞬間に自分で畳む。
+            # これをしないと、停止側は _connections を見て「無いから対象外」と
+            # 判断しているため、subprocess と wrapper が残り続ける。
+            LOGGER.info(
+                "MCP: instance '%s' was asked to stop while starting; "
+                "shutting it down right after connect", instance_key,
+            )
+            try:
+                await connection.disconnect()
+            except Exception as exc:
+                LOGGER.debug(
+                    "MCP: failed to disconnect just-started instance '%s': %s",
+                    instance_key, exc,
+                )
+            raise MCPInstanceBusyError(
+                instance_key, "起動中に停止が要求されました"
+            )
 
         self._clear_failure(instance_key)
         self._connections[instance_key] = connection
@@ -1636,7 +1718,11 @@ class MCPClientManager:
             unregister_external_tool(name)
             self._registered_tools.pop(name, None)
 
-        for instance_key in list(self._connections.keys()):
+        # 起動中の instance も対象に含める — 接続が _connections に入るのは接続
+        # 完了後なので、ここで漏らすとプロセス終了後に subprocess が残る
+        # (Codex レビュー 3 巡目)。_shutdown_instance が起動中には停止要求を置き、
+        # 起動側が着地時に自分で畳む。
+        for instance_key in list(self._connections.keys()) + list(self._starting):
             await self._shutdown_instance(instance_key, force=True)
 
         self._connections.clear()
@@ -1668,7 +1754,30 @@ class MCPClientManager:
         「この instance はもう使わない」と決めた :py:meth:`stop_instance` の責務で、
         そこが明示的に pop している。ここで一緒に捨てると、設定が戻っても名前付き
         instance が再登録なしには復旧できなくなる。
+
+        **起動中の instance にも届く。** 接続が ``_connections`` に入るのは接続完了後
+        なので、起動の await 中に停止が来ると「対象に無い」と判断されて subprocess が
+        残る。起動中なら停止要求を置いて (``_stop_requested``)、起動が着地した瞬間に
+        起動側が自分で畳む (Codex レビュー 3 巡目)。
         """
+        if instance_key in self._starting:
+            self._stop_requested.add(instance_key)
+            LOGGER.info(
+                "MCP: stop requested for '%s' while it is still starting; "
+                "it will be shut down as soon as the connect lands", instance_key,
+            )
+        self._stopping.add(instance_key)
+        try:
+            await self._shutdown_instance_locked(
+                instance_key, force=force, recoverable=recoverable,
+            )
+        finally:
+            self._stopping.discard(instance_key)
+
+    async def _shutdown_instance_locked(
+        self, instance_key: str, *, force: bool, recoverable: bool,
+    ) -> None:
+        """:py:meth:`_shutdown_instance` の本体 (``_stopping`` 保持下で実行される)。"""
         connection = self._connections.pop(instance_key, None)
         if connection is not None:
             # in-flight のツールコールが disconnect のキャンセルで失敗しても、
@@ -1801,13 +1910,17 @@ class MCPClientManager:
         # 対象は「今繋がっている instance」+「在るべきなのに落ちている instance」。
         # 後者を入れないと、一度落ちた instance は再接続ボタンから見えなくなる
         # (matching が作れず即 False) — 落とした側が復旧の道を塞ぐ形になる。
-        # 在るべきかどうかの根拠は参照 (_refs = まだ誰かが要求している) と
-        # 失敗記録 (_failed_instances = 直近で落ちた) の 2 つ。
+        #
+        # 在るべきかの根拠は **参照 (_refs) だけ** にする。参照は「まだ誰かが
+        # この instance を要求している」= 望まれている状態の記録であり、一時的な
+        # 失敗で畳むとき (recoverable) に残すのはまさにこのため。失敗記録
+        # (_failed_instances) を根拠に加えると「誰も要求していない instance を
+        # 復活させる」道が開き、しかも参照が無いので refcount 0 の live instance
+        # ができる (Codex レビュー 3 巡目)。歯止めの条件は「望まれているか」という
+        # 目的から導く — 「直近で落ちた」という種類から導くと的を外す。
         matching: List[str] = []
         seen: Set[str] = set()
-        for key in list(self._connections) + list(self._refs) + list(
-            self._failed_instances
-        ):
+        for key in list(self._connections) + list(self._refs):
             if key in seen:
                 continue
             if self._qualified_from_instance_key(key) != qualified_name:
@@ -2052,8 +2165,11 @@ class MCPClientManager:
         process restarts); named instances (``:instance:``) can be restarted
         by a tool call or retry because their ``${instance.*}`` context is
         kept — only :py:meth:`stop_instance` forgets it.
+
+        起動中 (まだ接続が登録されていない) instance も止められる: 停止要求を
+        置いて、起動が着地した瞬間に畳ませる。
         """
-        if instance_key not in self._connections:
+        if instance_key not in self._connections and instance_key not in self._starting:
             return False
         await self._shutdown_instance(instance_key)
         return True
@@ -2673,12 +2789,19 @@ async def _shutdown_all_instances_of_server(
     manager: MCPClientManager,
     qualified_name: str,
 ) -> None:
-    """Shutdown every instance of a qualified_name server, global or per-persona."""
+    """Shutdown every instance of a qualified_name server, global or per-persona.
+
+    起動中 (``_starting``) の instance も対象に含める。接続が ``_connections`` に
+    入るのは接続完了後なので、アドオン無効化がその await 中に走ると「対象に無い」
+    と判断され、無効化したはずのサーバーの subprocess とツール wrapper が残る
+    (Codex レビュー 3 巡目)。_shutdown_instance が起動中には停止要求を置き、
+    起動側が着地時に自分で畳む。
+    """
     targets = [
-        key for key in list(manager._connections.keys())
+        key for key in list(manager._connections.keys()) + list(manager._starting)
         if manager._qualified_from_instance_key(key) == qualified_name
     ]
-    for instance_key in targets:
+    for instance_key in dict.fromkeys(targets):
         await manager._shutdown_instance(instance_key)
 
 
