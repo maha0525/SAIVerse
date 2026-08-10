@@ -1,6 +1,7 @@
 # Issue: 別 Track に押し出された会話の出来事が孤児になり、永久に閉じない
 
-**ステータス**: 🔲 未着手（まはー裁定: issue 化。2026-07-29）
+**ステータス**: 🟡 裁定済み・実装待ち（2026-08-10、Wave 1 第一夜）— **下記 A/B は問いごと無効化された**。エピソードに「中断」状態が新設され（押し出し＝中断）、閉じは「量と畳みの需要」で行われる（時計・Track 非依存）。閉じ忘れという概念が構造から消えるため、本 issue 単独の修正はせず Wave 3 の器の実装に吸収する。詳細: [episode.md](../intent/episode.md) ⚡ 2026-08-10 到達点・[track_retirement.md](../intent/track_retirement.md)。
+**旧ステータス**: 🔲 未着手（まはー裁定: issue 化。2026-07-29）
 **優先度**: high（予定された行動が失われる実害あり・発生条件は限定的）
 **作成日**: 2026-07-29
 **関連**: `saiverse/track_manager.py`（`activate` / `create` の displaced 処理）/ `saiverse/saiverse_manager.py`（`_rearm_wait_response_timeout_on_load`）/ `saiverse/day_plan.py`（`is_in_user_conversation`）/ [life.md](../intent/life.md) §7.3

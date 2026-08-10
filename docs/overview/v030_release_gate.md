@@ -40,7 +40,7 @@ doc: [`recall_tags_and_track_reduction.md`](../intent/persona_cognition/recall_t
 ### 記憶の単位と帰属 (設計 1 + 実装 3)
 
 **3. エピソードの単位確定 (episode.md v0.2 の完成 + 細切れ解消の裁定)**
-現状: 設計中。細切れ解消 (1 往復 30 分 = 1 エピソード問題) と **digest の二重記述** ([`chronicle_split_episode_digest_double_description.md`](../issues/chronicle_split_episode_digest_double_description.md) — 会話と作業の交差でエピソードが割れる問題) は、本件に合流させて一度に裁定する。
+現状: **設計議論進行中 (Wave 1 第一夜 = 2026-08-10 に骨格決着)**。器と縁の二本立て / 切れ目に時計を使わない (閉じ = 量と畳みの需要) / 中断状態の新設 — episode.md 冒頭の「⚡ 2026-08-10 到達点」参照。細切れ解消 (1 往復 30 分 = 1 エピソード問題) は**中断状態の新設で解消の方向が確定**。**digest の二重記述** ([`chronicle_split_episode_digest_double_description.md`](../issues/chronicle_split_episode_digest_double_description.md)) は中断モデル (割られた作業は最初から一つの器) で構造から消える見込み — v1.0 改稿で確定させる。議論の途中で**Track 撤廃が前提工事として先行**した (§2-16)。
 理由: エピソードは退場・編纂・帰属タグ・経験値ノートの発火単位。単位の意味が出荷後に変わると、新旧の記憶が別粒度で混在し、束ね直しは解釈的移行になる。
 補足: episode.md は設計がかなり進んでいる (三つの顔 / LoD / Lv1 生成は裁定済み。Lv1 のエピソード整列生成は W4 で実装済み。**AUTONOMOUS 化 (§4) は 2026-08-09 に再裁定対象へ戻った**)。残りは未決 3 件 + 細切れ・二重記述の裁定 + 実装。**実装範囲の線引きは裁定済み (まはー 2026-08-09)**: 記憶側 (LoD) に加え**世界側 (チャット露出 §8・Beat 型化 §9) も門の内** — 「見せ方を想定しないと記憶側の精度が落ちる。結局 b の実装までやってしまった方がいい」。**監査役 (§7) のみ v0.4 送り**。
 doc: [`episode.md`](../intent/episode.md)
@@ -57,7 +57,7 @@ doc: [`user_messages_missing_episode_attribution.md`](../issues/user_messages_mi
 doc: [`work_session_digest_never_reaches_chronicle.md`](../issues/work_session_digest_never_reaches_chronicle.md)
 
 **6. 孤児エピソードを閉じる者**
-現状: 未着手。**Wave 0 から Wave 1 へ移動 (2026-08-09)** — issue に未裁定の設計判断が残っていた: 会話の出来事の寿命を Track に従属させる (A) か独立させる (B) か。これは Wave 1「エピソードの単位と正史」の寿命意味論そのものなので、そこで裁定してから実装する。
+現状: **裁定済み (2026-08-10、Wave 1 第一夜) — 問題が条文ごと消える方向で決着**。旧 A/B (寿命を Track に従属させるか) は問いごと無効化: 押し出しは「中断」、閉じは「量と畳みの需要」になり、閉じ忘れという概念が構造に存在しなくなる (episode.md ⚡ 到達点 5)。残 = Wave 3 での器の実装に吸収 (単独の修正はしない)。
 理由: 別 Track に押し出された会話エピソードは誰も閉じず、digest されず、Chronicle にも入らないまま累積する。
 doc: [`open_conversation_orphaned_by_track_displacement.md`](../issues/open_conversation_orphaned_by_track_displacement.md)
 
@@ -110,6 +110,13 @@ doc: [`memory_continuity_graph.md`](../issues/memory_continuity_graph.md)
 現状: **実装済み (2026-08-09、Wave 0)**。UI 表示 (アラーム管理モーダル・ペルソナメニュー) と README を「アラーム」へ。実装名 (ScheduleModal / PersonaSchedule / API パス) は変えない — 実装名≠表示名。**ペルソナ側の語彙 (schedule_management Playbook の表示名) は未改名** — ペルソナのプロンプト・キャッシュに触るため、モデル格再設計 (Wave 2〜3) の語彙整理に相乗りさせる。
 理由 (裁定): 習慣テンプレートとは統合しない (曜日別・インターバル実行はテンプレートの器に収まらず、取り込むと膨らむ)。「スケジュール」という名称が時間割と概念の混同を生むため呼び分けを立てる。
 出典: phase_6 の旧廃止構想は除籍済み (§6)。
+
+### Wave 1 からの派生 (2026-08-10)
+
+**16. Track の撤廃**
+現状: **設計済み・裁定 3 点決着 ([`track_retirement.md`](../intent/track_retirement.md))。実装待ち**。住人 10 人の行き先確定: 関心 → ペルソナ固有のコマ一覧 (仮称レパートリー) + 経験の台帳 + タスク親参照の張り替え / alert → 判断点直結 + 空砲機構の撤去 / 刻印 → 目的の縁へ世代交代。
+理由 (裁定): エピソードの設計議論が三度 Track に足を取られた — 溶ける予定の概念が判断語彙・記憶の刻印・UI の中心に居座ったままでは、新設計がすべて汚染される。**撤廃は一体の工事で、UI・テーブル退役まで v0.3.0 の内で完遂する** (工程の輪切り出荷は不可 — まはー裁定)。永続データへの track:N 堆積は門の篩いそのもの。
+doc: [`track_retirement.md`](../intent/track_retirement.md)
 
 ---
 
@@ -220,7 +227,8 @@ doc: [`memory_continuity_graph.md`](../issues/memory_continuity_graph.md)
 - 実機検証はここではやらない (§4 — 再設計後にまとめる。器統合の消し込みは完了済み §2-12)
 
 **Wave 1 — 設計議論 #1: エピソードの単位と正史 (§2-3)**
-- episode.md の残レビュー 2 + 未決 3 + 細切れ解消 + digest 二重記述 + 編纂対象規則 (§2-5 と §2-9 はここの裁定に含める — 「どのタグ・どの記録が編纂に乗るか」は同じ一つの規則) + AUTONOMOUS 化の再裁定 (文脈系列の帰趨は Wave 2 と跨る)
+- **第一夜 (2026-08-10) 済み**: 器と縁 / 時計の退場 (閉じ = 量と需要) / 中断状態 / 再開判定 / 孤児消滅 (§2-6)。前提工事として **Track 撤廃計画を確定** (§2-16、裁定 3 点決着)
+- 残り: episode.md の残レビュー 2 + 未決 3 + digest 二重記述の確定 (中断モデルで消える見込みの検証) + 編纂対象規則 (§2-5 と §2-9 はここの裁定に含める — 「どのタグ・どの記録が編纂に乗るか」は同じ一つの規則) + AUTONOMOUS 化の再裁定 (文脈系列の帰趨は Wave 2 と跨る) + 畳み範囲 1:1 (§2-10)
 - 出口 = episode.md v1.0 確定 (実装範囲 = 記憶側 + チャット露出・Beat 型化。監査役は v0.4 — 裁定済み 2026-08-09)
 
 **Wave 2 — 設計議論 #2: モデル格と保温 (§2-1)**
@@ -228,7 +236,7 @@ doc: [`memory_continuity_graph.md`](../issues/memory_continuity_graph.md)
 - 出口 = model_tier (仮) intent 確定
 
 **Wave 3 — 実装: Wave 1+2 の本丸 (私)**
-- エピソード LoD 搭載制御 / 作業セッションの文脈系列移設 (Wave 1〜2 の再裁定に従う) / user 発言の帰属 (§2-4、書き込み時) / 編纂対象規則の改修 (§2-5+9) / 監督・保温 / タイムアウト比率
+- **Track 撤廃 (§2-16、track_retirement.md §4 の順序 1〜7 を UI・テーブル退役まで一体で)** / エピソード LoD 搭載制御 / 作業セッションの文脈系列移設 (Wave 1〜2 の再裁定に従う) / user 発言の帰属 (§2-4、書き込み時) / 編纂対象規則の改修 (§2-5+9) / 監督・保温 / タイムアウト比率
 - 各実装ごとにレビュー 1 巡 → 実機検証は束ねて夜へ
 
 **Wave 4 — 実装: 想起用タグ (§2-2) + 設計議論 #3: 連続性グラフ (§2-14)**
