@@ -44,6 +44,7 @@ Track が現に担っている仕事の全数。「現状」は当日のコー�
 |---|---|---|---|
 | 9 | **API・フロント UI** | tracks API ルート＋フロント約 20 ファイルが track に触れる（LifeView・RightSidebar・TasksModal 等） | 目的の木 UI ＋ エピソード表示へ貼り替え |
 | 10 | **ActionTrack テーブル＋永続データ内の track:N 参照** | slot の ref・purpose_tags の指し先・episode の origin_ref に track:N が書かれ続けている | 参照語彙を task:N（目的ノード）一本へ。テーブル退役は最後（migration） |
+| 11 | **ユーザー会話 20 件保持（user_conversation_preserver）** | オーナー会話の生メッセージを常時 20 件複製補完する v0.32 の特殊機構。**オーナー会話 Track の ID を鍵に動く**。2026-08-11 の棚卸しで発見（起草時の見落とし） | **機構ごと退役**（まはー承認 2026-08-11）。需要の引受先 = 会話開始時の読み戻し（arasuji_levels §15）＋会話チャンクの概要。詳細: episode.md ⚡ 到達点 19 |
 
 ## 3. 使える既存の器（新造を最小にする）
 
