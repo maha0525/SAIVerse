@@ -1,6 +1,6 @@
 # Intent: エピソード — 意味の層の設計（チャンク・コネクションとの分業）
 
-**ステータス**: v1.4（2026-08-11）。Wave 1 設計議論の裁定を統合。エピソードは「コマ・作業セッションの記録」一種類、関係の概念（コネクション）は廃止、旧エピソード概念の残存は §9 で棚卸し済み。まはーレビュー継続中 → 実装は Wave 3。
+**ステータス**: **v1.4 確定（2026-08-11 まはーレビュー通過）**。実装待ち（Wave 3）。エピソードは「コマ・作業セッションの記録」一種類、関係の概念（コネクション）は廃止、旧エピソード概念の残存は §9 で棚卸し済み。想起での使い方は想起の設計（gate §2-2）へ、episode_inheritance の改名とノード再設計は連続性グラフ（gate §2-14）へ宿題として引き継いだ。
 **親**: [`life.md`](life.md)（時間の階層） / [`persona_cognition/life_concept_map.md`](persona_cognition/life_concept_map.md)（§8 出来事・§9 記憶と想起）
 **姉妹**: [`arasuji_levels.md`](arasuji_levels.md)（チャンクとあらすじの規定はあちらが正典。本書からの変更は 2 点のみ — §4） / [`track_retirement.md`](track_retirement.md)（前提工事） / [`persona_cognition/recall_tags_and_track_reduction.md`](persona_cognition/recall_tags_and_track_reduction.md)（メッセージへの記録の親設計 — §3.5）
 **経緯**: v0.2（2026-07-13 裁定）→ Wave 1 設計議論（2026-08-10〜11）。途中案の検討と撤回の履歴は改訂履歴と git 履歴。
