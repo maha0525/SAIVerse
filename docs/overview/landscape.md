@@ -132,7 +132,7 @@ PulseController は「起こされた Pulse を捌く」層だが、**いつ Pul
 - **時間割（day plan）**: 起床判断（`judgment_day_open`）でペルソナ自身が一日のコマを編成し、コマ開始が EventScheduler へ決定論で予約される（`saiverse/day_plan.py` / `saiverse/autonomy_wiring.py`）。コマ発火で**予算（ラウンド数）付きの作業セッション**が走る — 旧「数分刻みの連続 Pulse」の正当な後継（粒度が機械的な刻みからコマ＝意味の単位に変わった）
 - **判断点（judgment points）**: 起床・就寝はスケジュール駆動、セッション終了・会話終了・イベント到着（on_event）は文脈駆動で発火し、ふりかえり・タスク裁定・候補採取・時間割の組み替えを行う
 - **AutonomyManager**（`autonomy_manager.py`）: 定期 tick は **watchdog に縮退** — 正常時は何もせず、「Active・起床時間帯なのに時間割が無い／コマ予約が途絶」のときだけ火入れし直す
-- **EventScheduler / InternalAlertPoller / Phenomena**: スケジュール実行・内部 alert（呼びかけ）ポーリング・外部イベントによる起動
+- **EventScheduler / Phenomena**: スケジュール実行・外部イベントによる起動。呼びかけ（alert）の生きている発火元はユーザー発話ひとつで、周期ポーリングは持たない（旧 InternalAlertPoller は §9）
 
 > 旧2層リズム（AutonomyManager 50分 tick ＋ SubLineScheduler 5秒ポーリング）は**廃止済み**（§9）。数分刻みの自律 Pulse は意味のある行動を生まない、という v1 失敗診断に基づく。
 
@@ -443,6 +443,7 @@ graph TD
 | **退役の episode スナップ（`_snap_evict_to_episode_boundary`）** | **撤去**（2026-07-25）。「退場範囲に open episode が入るならその手前まで退場を縮める / open が提示コンテキスト全体を占めるなら Metabolism を見送る」という回避策で、長い会話が続くと提示コンテキストが肥大し、閉じた瞬間に全部退場して**生コンテキストが急にゼロになる**欠陥があった。後継は `sea/eviction_plan.py` の `plan_eviction` — open episode を避けるのではなく、**単独で pulse 関節ごとに部分退場させる**（[chronicle_eviction](../intent/chronicle_eviction.md) §3/§5、[体験の構造](../intent/experience_structure.md) §6） |
 | **Chronicle の質量選抜 (比率10倍・卒業5倍・治療・非常弁・X発火) と恒等圧縮・転写** | **世代交代**（2026-07-28、[arasuji_levels](../intent/arasuji_levels.md)）。「大きさの物差し (被覆) で束ねる相手を選ぶ」設計は、選べない子 (バグ産の生ログ豆粒) が列を細切れにして**実測で全停止**しており、救済機構 (治療・非常弁) が本体を覆っていた。後継は**レベル別の並び + 予算 (上限/残す量) 超過で古い側を畳む一本規則** — 相手を選ばないので救済も要らない。恒等圧縮 (生ログを生のまま一次あらすじの席に置く) と転写 (episode digest の恒等転写、全ペルソナ発火0件) も廃止 = 「小さくても要約する」。エピソードの畳み拒否権 (open 単独・二段構え) も同時廃止 (需要の引受先: `docs/issues/open_episode_context_after_veto_removal.md`)。三水位は上限/残す量の二数へ (low は未使用の死に設定として残置、掃除は intent §12-8) |
 | **Metabolism の ON/OFF トグルと水位グローバル上書き** | **撤去**（2026-07-30、[issue](../issues/chat_options_metabolism_section_redesign.md)）。`manager.metabolism_enabled`（OFF = 従来スライディングウィンドウ）と `metabolism_*_chars_override`（全ペルソナ・全モデルへ波及する一本の上書き）、API `GET|POST /api/config/metabolism` を削除。OFF 経路は head のあらすじ枠との二重提示防止（畳み記録の除外名簿）が働かず、キャッシュ始点固定も失う「進化の止まった旧経路」だった。グローバル上書きは置き場（会話ごとの画面）と効く範囲（全体）がずれていた。後継: Metabolism は常時 ON、水位は**モデル定義一本**（`metabolism_*_chars`、モデル編集 UI に専用欄あり）。モデル定義で水位を null にする = Metabolism を持たない、が唯一のオプトアウト。チャットオプションの旧設定欄は read-only の状態表示（`GET /api/people/{id}/context-status` = 水位バー + 現在の提示文字数、§15 読み戻し込みでプレビューと一致）へ置換 |
+| **InternalAlertPoller（内部 alert ポーラ）と Handler の `tick()` 拡張点** | **機構ごと撤去**（2026-08-11、[Track 撤廃計画](../intent/track_retirement.md) §5-B 裁定②③）。60 秒周期で全 Track の `metadata.parameters` が `metadata.thresholds` を超えたかを判定し `set_alert` を撃つ機構（`saiverse/internal_alert_poller.py`）と、同じ周期で各 Track Handler の `tick(persona_id)` を呼ぶ拡張点。全数調査の結果、**閾値を書き込む側がコードに一箇所も存在せず一度も発火できない空砲**で、`tick` はどの Handler にも定義がない空の拡張点だった。将来の身体的欲求・知覚モニタリングは、必要になった時点で独立サブシステムとして設計する（Track の状態を経由しない）。撤去後、alert の生きている発火元は**ユーザー発話**（`UserConversationTrackHandler.on_user_utterance` — 別行動中の発話をメタ判断へ仲裁させる経路）**の一本のみ**。env `SAIVERSE_INTERNAL_ALERT_INTERVAL_SECONDS` も同時に消滅（もともとリファレンス未記載） |
 | **Fixture** | `observer.md` で構想のみ。テーブル未実装 |
 | **BuildingToolLink** | `BuildingToolLink` テーブルは実在するが数ヶ月触られておらず未使用。ツールがペルソナに届く経路は Spell（`spell=True`）と Playbook の TOOL ノードで、この紐付けテーブルではない（→ `stackchan_vessel.md` v0.5 でも「機能してない可能性」と記録） |
 

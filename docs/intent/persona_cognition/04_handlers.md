@@ -167,7 +167,9 @@ class AutonomousTrackHandler:
 
 ---
 
-## Handler tick 機構 (Phase 5 で導入)
+## ~~Handler tick 機構 (Phase 5 で導入)~~ — 撤回・撤去済み
+
+> **2026-08-11 撤去**（[track_retirement](../track_retirement.md) §5-B 裁定③）。以下の設計は実装されないまま、呼び出し側（`InternalAlertPoller` が `getattr(handler, "tick")` を探す枠組み）だけが存在し、**どの Handler にも `tick` の定義がない空の拡張点**だった。その呼び出し側ごと撤去した。環境変数 `SAIVERSE_HANDLER_TICK_INTERVAL_SECONDS` は一度も実装されていない（実在したのは poller 側の `SAIVERSE_INTERNAL_ALERT_INTERVAL_SECONDS`）。身体的欲求・スケジュール・知覚起因の起動は、必要になった時点で **Track の状態を経由しない独立サブシステム**として設計し直す。以下は当時の設計の記録。
 
 ### tick の責務
 
@@ -262,6 +264,8 @@ SAIVerseManager の既存の background polling loop に Handler tick の呼び�
 ---
 
 ## スケジュール統合方針
+
+> **前提が失効**（2026-08-11）: 下記は Handler の `tick()` を土台に置いた計画だが、その拡張点は上記のとおり撤去された。スケジュール起因の起動は現在 EventScheduler（時間割のコマ発火）が担っており、Track の alert を経由しない。
 
 既存の ScheduleManager (個別スケジュール作業) は段階的に Track の特性として吸収する。
 

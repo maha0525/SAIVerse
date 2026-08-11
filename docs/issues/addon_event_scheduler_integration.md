@@ -63,7 +63,7 @@ X 監視 addon の独自 thread / sleep loop を捨て、(2) の `schedule_perio
 - 既存ポーリング実装 (Phase 4-e で統合される側):
   - `saiverse/schedule_manager.py:58-71` (`_schedule_loop`)
   - `saiverse/autonomy_manager.py` (per-persona)
-  - `saiverse/internal_alert_poller.py`
+  - ~~`saiverse/internal_alert_poller.py`~~ — 2026-08-11 に機構ごと撤去済み（[track_retirement](../intent/track_retirement.md) §5-B）
   - `saiverse/saiverse_manager.py:341` (`_sds_background_loop`)
   - `saiverse/saiverse_manager.py:391` (`_db_polling_loop`)
 

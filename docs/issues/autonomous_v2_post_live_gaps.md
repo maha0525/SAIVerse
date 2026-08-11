@@ -328,7 +328,7 @@ A/B とは別に浮いた第3の根。まはーの整理から立った。
 |---|---|---|---|
 | running→pending | 30分無応答（`AI.USER_CONV_TIMEOUT_MINUTES`） | **会話 Track 限定** | `track_manager._handle_wait_response_timeout`→`pause`、provider=`saiverse_manager._wait_response_timeout_provider` |
 | running→pending（displaced） | 別 Track が activate された副作用 | 既存 running 全部 | `activate()` L557-559 |
-| pending/unstarted→alert | 自律先制: Track param が閾値超過 | 自律 Track | `internal_alert_poller:197` |
+| ~~pending/unstarted→alert~~ | ~~自律先制: Track param が閾値超過~~ | ~~自律 Track~~ | **撤去済み**（2026-08-11、[track_retirement](../intent/track_retirement.md) §5-B ②）。閾値の書き手が存在せず一度も発火しなかった |
 | pending→alert | ユーザー発話＋別 running と衝突→MetaLayer 仲裁 | 会話 Track | `user_conversation_handler:566` |
 | pending/unstarted→running | ユーザー発話＋running 衝突なし→直接 activate | 会話 Track | `user_conversation_handler:545` |
 

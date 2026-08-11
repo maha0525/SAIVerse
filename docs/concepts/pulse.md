@@ -35,7 +35,7 @@ PulseController は「起こされた Pulse を捌く」層で、**いつ起こ�
 |---|---|---|---|
 | **SubLineScheduler** | `saiverse/pulse_scheduler.py` | 5秒ポーリング | running 状態の Track を拾って Pulse を回す。自律 Track の「連続する Pulse」を駆動する主体 |
 | **AutonomyManager** | `saiverse/autonomy_manager.py` | 既定50分間隔 | per-persona の self-rescheduling timer。tick で `dispatch_autonomy_tick` → メタ判断 Pulse。自律バイオリズムの大リズム |
-| EventScheduler / InternalAlertPoller / Phenomena | — | イベント駆動 | スケジュール実行・内部 alert ポーリング・外部イベント起動 |
+| EventScheduler / Phenomena | — | イベント駆動 | スケジュール実行・外部イベント起動 |
 
 つまり自律稼働は2層のリズム: **大リズム**（AutonomyManager 50分のメタ判断 tick）→ Track 選択 → **小リズム**（SubLineScheduler 5秒で running 自律 Track の Pulse を連続実行）。
 

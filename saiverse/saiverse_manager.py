@@ -311,15 +311,17 @@ class SAIVerseManager(
         # このセットに入った persona は wait_response timeout を予約しない
         # (_wait_response_timeout_provider が None を返す)。
         self._debug_manual_mode_personas: set = set()
-        # Phase C-2: 内部 alert ポーラ (intent B v0.7 §"内部 alert ポーラ機構")
-        # Track パラメータの閾値超過 + Handler.tick() を定期駆動する。
-        from saiverse.internal_alert_poller import InternalAlertPoller
-        self.internal_alert_poller = InternalAlertPoller(self)
+        # NOTE: 旧 InternalAlertPoller (Track パラメータの閾値超過を 60 秒周期で
+        # 判定し set_alert を撃つ機構 + Handler.tick() 拡張点) は Track 撤廃計画の
+        # 裁定 B②③ で機構ごと撤去 (docs/intent/track_retirement.md §5-B)。閾値を
+        # 書き込む側がコードに存在せず一度も発火できなかった空砲で、tick は定義
+        # ゼロの空の拡張点だった。alert の生きている発火元はユーザー発話
+        # (UserConversationTrackHandler.on_user_utterance) 一本。
         logging.info(
             "Initialized cognitive-model runtime layers "
             "(MetaLayer registered as alert observer, "
             "UserConversationTrackHandler / SocialTrackHandler / AutonomousTrackHandler ready, "
-            "InternalAlertPoller + EventScheduler instantiated [will start at startup])."
+            "EventScheduler instantiated [will start at startup])."
         )
 
         # SEA runtime + Pulse controller (always enabled).
@@ -423,8 +425,8 @@ class SAIVerseManager(
 
         # ⚠️ 構築 / 起動 分離の不変条件:
         #   背景ループ (schedule_manager / phenomenon / integration /
-        #   internal_alert_poller / event_scheduler /
-        #   observer pull / AutonomyManager / 自律会話) の起動はここでは一切行わない。
+        #   event_scheduler / observer pull / AutonomyManager / 自律会話) の
+        #   起動はここでは一切行わない。
         #   すべて start() に集約し、main.py がワールド初期化 (MCP 接続・addon 登録)
         #   完了後に 1 回だけ呼ぶ。これより前に pulse / capture が走ると、未初期化の
         #   サブシステム基準で head を capture してしまい偽の差分通知が出る。
@@ -563,9 +565,6 @@ class SAIVerseManager(
         # NOTE: 旧 SubLineScheduler の起動は自律行動 v2 で廃止 (intent §9.3)。
         # autonomous Track への 30 秒連続 Pulse は存在しない。自律駆動は
         # 起床判断が編成する時間割のコマ発火 (EventScheduler 予約) が担う。
-
-        # Internal alert poller (intent B v0.7 §"内部 alert ポーラ機構")。
-        self.internal_alert_poller.start()
 
         # EventScheduler dispatcher loop。以降、push される予約 (TTL 接近 / interval /
         # schedule / db_polling / wait_response timeout / SDS heartbeat 等) が発火する。

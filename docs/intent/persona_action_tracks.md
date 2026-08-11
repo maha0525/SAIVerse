@@ -1175,7 +1175,9 @@ pending Track:
    - ツール経由 (`track_parameter_set` 等の追加スペル、Phase C-2 後半で導入)
    - 例: 「この掃除 Track は十分やったから dirtiness を 0 に戻す」
 
-## 内部 alert ポーラ機構 （v0.7 で新規）
+## ~~内部 alert ポーラ機構 （v0.7 で新規）~~ — 撤去済み
+
+> **2026-08-11 撤去**（[track_retirement](track_retirement.md) §5-B 裁定②③）。実装された姿は `saiverse/internal_alert_poller.py`（60 秒周期で `metadata.parameters` と `metadata.thresholds` を突き合わせて `set_alert` を撃つ）＋ Handler の `tick()` を探す枠組みだった。全数調査の結果、**閾値を書き込む側がコードに一箇所も無く一度も発火できない空砲**で、`tick` はどの Handler にも定義がない空の拡張点だった。両方まとめてファイルごと撤去。身体的欲求・知覚モニタリングは、必要になった時点で Track の状態を経由しない独立サブシステムとして設計する。以下は当時の設計の記録。
 
 Track 自身が条件超過で `set_alert` を発火する仕組み。
 

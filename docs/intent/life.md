@@ -202,7 +202,7 @@ provider の課金物理が逆向きだから（cache_lifecycle_control.md §1�
 | イベント到着判断の「いまの活動」（`judgment_points.build_on_event_situation_text`） | `get_running()` が user_conversation なら「ユーザーと会話中です」 | `day_plan.is_in_user_conversation`（開いている会話の出来事）。**2026-07-29 追加＝棚卸し漏れ**: 終了済みの会話について偽の現在状態を判断入力にしていた。会話が閉じているのに Track が running のまま残るのは案 Y 以降の正常形なので、「取り組んでいます」への読み替えもせず手すき扱いにする |
 | Track Chronicle の head 搭載（`get_memory_weave_context._get_track_chronicle_context`） | `get_running()` の Track のあらすじを MemoryWeave セクションが head に織る（user_conversation は除外・refresh は Metabolism のみ） | 一本目では**参照点として記録のみ**（挙動不変）。読み込み側の世代交代（head 自動搭載 → 起動時指示書＋机メモ→随意想起の二段〔life_concept_map §9.2 裁定〕）と、書き込み側（目的別あらすじ生成）のエピソード Lv1 Chronicle との統合は**二本目 intent の主題** |
 
-alert は本書のスコープ外（呼びかけへの分化は life_concept_map §5 の将来課題。現行の internal_alert_poller / on_event 経路は不変）。
+alert は本書のスコープ外（呼びかけへの分化は life_concept_map §5 の将来課題。on_event 経路は不変）。なお内部 alert ポーラは 2026-08-11 に機構ごと撤去された（[track_retirement](track_retirement.md) §5-B ②③）——本書の設計に影響はない（もともと一度も発火しない空砲だったため）。
 
 ### 7.4 redundant issue の根治
 

@@ -294,7 +294,9 @@ Track は **メタレイヤーから可観測な連続値パラメータ**を持
 - 外部イベント (occupancy 変化、addon からの値供給)
 - ペルソナ自身による明示更新 (ツール経由)
 
-### 内部 Alert (Internal Alert) （v0.10 で新規導入）
+### ~~内部 Alert (Internal Alert) （v0.10 で新規導入）~~ — 撤去済み
+
+> **2026-08-11 撤去**（[track_retirement](track_retirement.md) §5-B 裁定②③）。実装（`saiverse/internal_alert_poller.py` の 60 秒周期判定と Handler `tick()` 拡張点）はどちらも一度も発火せず、閾値を書き込む側のコードが存在しなかった。alert の生きている発火元はユーザー発話ひとつ。以下は当時の設計の記録。
 
 外部イベント由来ではなく、Track 自身がパラメータ閾値超過や定期判定で発火する alert。設計上は外部 alert と同じ経路 (`set_alert`) を通り、メタレイヤーから見ると区別する必要がない (発火源だけ context で識別される)。
 

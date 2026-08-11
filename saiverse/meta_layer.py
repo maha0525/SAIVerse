@@ -91,8 +91,8 @@ class MetaLayer:
         # 別ペルソナ同士は並行できる (ペルソナごとに独立した Lock)。
         #
         # `_persona_locks` の dict 自体への並行アクセスは `_locks_guard` で保護する。
-        # set_alert は judgment ループ中の deferred ops からは発火しない (UI / chat /
-        # internal_alert_poller など外部経路のみ) ため、再入の現実的リスクはなし。
+        # set_alert は judgment ループ中の deferred ops からは発火しない
+        # (UI / chat などの外部経路のみ) ため、再入の現実的リスクはなし。
         # 素の `threading.Lock` で十分。
         self._persona_locks: Dict[str, threading.Lock] = {}
         self._locks_guard = threading.Lock()

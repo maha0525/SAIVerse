@@ -235,10 +235,12 @@ action_tracks / notes テーブル + alert ベースのメタレイヤー + Hand
 
 Handler tick による内部 alert + Track パラメータ機構 + ScheduleManager の Track 化。「ペルソナが自分の意思で動く」を技術的に支える層。
 
+> **2026-08-11**: この Phase の土台だった内部 alert ポーラと Handler `tick()` 拡張点は、Track 撤廃計画の裁定 B②③ で機構ごと撤去された（[track_retirement](../track_retirement.md) §5-B）。自律駆動の後継は時間割＋判断点（自律行動 v2）で、身体的欲求・知覚モニタリングは必要時に Track を経由しない独立サブシステムとして設計する。
+
 | 項目 | 状態 | 旧称 |
 |------|------|------|
-| Handler `tick()` メソッド機構 (`SAIVERSE_HANDLER_TICK_INTERVAL_SECONDS`) | 🔲 | Intent B v0.7 |
-| 内部 alert ポーラ機構 (Handler tick 内で `set_alert` 発火) | 🔲 | Intent B v0.7 |
+| ~~Handler `tick()` メソッド機構 (`SAIVERSE_HANDLER_TICK_INTERVAL_SECONDS`)~~ | ❌ 撤回 (2026-08-11) | Intent B v0.7 |
+| ~~内部 alert ポーラ機構 (Handler tick 内で `set_alert` 発火)~~ | ❌ 撤去 (2026-08-11) | Intent B v0.7 |
 | Track パラメータ機構 (`metadata.parameters` 連続値、メタ判断時に注入) | 🔲 | Intent B v0.7 |
 | `track_parameter_set` ツール (ペルソナ自身による明示更新) | 🔲 | Intent B v0.7 |
 | `SomaticHandler` 雛形 (空腹度等の身体的欲求 Track) | 🔲 | Intent B v0.7 |

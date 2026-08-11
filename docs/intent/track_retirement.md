@@ -1,6 +1,6 @@
 # Intent: Track の撤廃 — 最後の住人たちの引っ越し計画
 
-**ステータス**: 設計中（v0.2、2026-08-10）。**裁定 3 点（A 関心の器 / B alert / C 門との線引き）すべて決着済み** — 残は実装範囲の詳細化と実装。まはーの作戦変更「Track の撤廃計画を完全に立ててからでないと、エピソードの単位の議論がまともにできない」を受けて起草。
+**ステータス**: 実装中（v0.2、2026-08-10）。**裁定 3 点（A 関心の器 / B alert / C 門との線引き）すべて決着済み**。**裁定 B の ②③（閾値ポーラ・Handler tick 拡張点の撤去）は 2026-08-11 に実装完了**（§5-B の実装欄）。残は住人台帳の他の項目 — 実装範囲の詳細化と実装。まはーの作戦変更「Track の撤廃計画を完全に立ててからでないと、エピソードの単位の議論がまともにできない」を受けて起草。
 **親**: [`persona_cognition/recall_tags_and_track_reduction.md`](persona_cognition/recall_tags_and_track_reduction.md)（§3.2/§4.3 — 「役割縮小 → 溶解」の方向自体は 2026-07-24 に裁定済み）/ [`persona_cognition/life_concept_map.md`](persona_cognition/life_concept_map.md) §10（Track ＝複数概念の未分化な束）
 **関連**: [`episode.md`](episode.md)（Wave 1「器と縁」の設計 — 本計画の完成を待って再開する）/ [`../overview/v030_release_gate.md`](../overview/v030_release_gate.md) §2-2
 
@@ -35,7 +35,7 @@ Track が現に担っている仕事の全数。「現状」は当日のコー�
 | # | 住人 | 現状 | 行き先 |
 |---|---|---|---|
 | 6 | **running 排他（いま動くのは 1 本）** | 「いま会話中か」の正典は出来事へ移管済み（案 Y）。ただし meta_layer の should_fire・deferred track ops（runtime_runner）・判断点の選択肢列挙（list_pickable_tracks が LIVE_STATUSES を読む）は Track 状態に依存したまま | 出来事（いま）＋時間割（予定）＋目的の木（選択肢）へ。**依存の付け替えが撤去順序の先頭**（recall_tags intent §6-6 の指摘どおり） |
-| 7 | **alert 状態機械** | 生きている発火元は 2 つだけ: ① 会話ハンドラ（他行動中のユーザー発話）② 閾値ポーラ（metadata.parameters の閾値超過 — 将来の身体的欲求用の拡張点）。まはー観察では半形骸化 | **未裁定（裁定点 B）**。素案: 「Track の状態」を経由せず、判断点の起動信号（イベント）へ直結する |
+| 7 | **alert 状態機械** | ~~生きている発火元は 2 つ~~ → **閾値ポーラと Handler tick 拡張点は 2026-08-11 に撤去済み**（§5-B ②③）。残る発火元は ① 会話ハンドラ（他行動中のユーザー発話）**の一本のみ** | ①は**据え置き**（裁定 B ①: 判断点の起動信号への直結は「今はやらない」）。②③は完了 |
 | 8 | **wait_response タイマー** | 出来事へ移管済み（タイマーは Track の状態をもう動かさない）。残骸のみ | 掃除のみ |
 
 ### 出口の住人
@@ -81,6 +81,8 @@ Track が現に担っている仕事の全数。「現状」は当日のコー�
 実態調査の結果、alert は実弾 1 種（user_utterance = 別行動中のユーザー発話 → メタ判断仲裁）・空砲 1 種（internal_alert = 閾値の書き手がコードに存在せず一度も発火不能）・空の拡張点 1 個（handler tick は定義ゼロ）だった。裁定:
 - **① user_utterance → 判断点の起動信号へ直結**（alert 状態を経由しない。「開いている出来事 ≠ 会話」のときのユーザー発話イベントとして機械判定）。**注記: これは特殊処理であり、後々「別行動中に外から刺激が来た」の一般形（ユーザー発話はその一種）として汎用機構に設計し直す見込み**（まはー）。今はやらない
 - **② 閾値ポーラ・③ tick 拡張点 → 機構ごと撤去**。将来の身体的欲求・知覚モニタリングは必要時に独立サブシステムとして設計（recall_tags intent §3.2 のまはー観察どおり）
+
+**②③ の実装（2026-08-11、完了）**: `saiverse/internal_alert_poller.py` をファイルごと削除し、`SAIVerseManager` の構築（`InternalAlertPoller` インスタンス化）と `start()` の起動配線、`meta_layer` の言及を撤去。Handler の `tick()` は実装が一つも無く、拡張点の実体は poller 側の `getattr(handler, "tick")` 探索だけだったため、poller の削除でそのまま消えた。環境変数 `SAIVERSE_INTERNAL_ALERT_INTERVAL_SECONDS` も消滅（`docs/reference/environment-vars.md` には元から未記載だったため、リファレンス側の削除は無し）。撤去後、`TrackManager.set_alert` の呼び出し元は `UserConversationTrackHandler.on_user_utterance`（＝①）**の一箇所のみ** — ①は据え置きなので alert 状態機械そのものは現役で残る。設計文書側の追従: landscape §9 に死んだ概念として記録、`persona_action_tracks.md` §内部 alert ポーラ機構 / `persona_cognition/04_handlers.md` §Handler tick 機構 / `persona_cognitive_model.md` §内部 Alert / `pulse_dispatch.md` §8 の β・γ に撤去の断り書き。
 
 **~~C. 門との線引き~~ — 撤回（まはー指摘 2026-08-10）**
 起草時は「UI 貼り替え・テーブル退役は出荷後でも遡及の傷を増やさない」と工程の輪切りを提案したが、これは**門の篩い（下限の道具）を出荷可否の定義に誤用した**もの。Track の UI が残ったまま裏の機構だけ退去した製品は破綻している（UI はユーザーへの世界の契約）。**概念の撤廃に半分という状態は無い — 始めるなら v0.3.0 の中で UI・テーブル退役まで完遂する。** §4 の順序は依存順であって出荷の切れ目ではない。

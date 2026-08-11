@@ -75,7 +75,6 @@ saiverse/
 ├── desire_engine.py        # 欲求の帳簿（六型・鮮度・再訪・淘汰の決定論処理、自律行動 v2 §5）
 ├── facility_map.py         # 型→公共施設の解決（Building ロールタグ、自律行動 v2 §6.1）
 ├── judgment_points.py      # 判断点コーディネータ（起床/セッション終了の動的スキーマ + 起動、judgment_points.md）
-├── internal_alert_poller.py# 内部 alert ポーリング
 ├── llm_router.py           # ツール呼び出し判定
 ├── gemini_clients.py       # Router/LLM client共通のGemini SDK client構築
 ├── model_configs.py        # モデル設定管理

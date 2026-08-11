@@ -318,8 +318,8 @@ USER (1) > SCHEDULE (2) > AUTO (3)
 | # | 経路 | 実装状況 | 実用状況 | 備考 |
 |---|---|---|---|---|
 | α | `UserConversationTrackHandler.on_user_utterance` で `set_alert` | ✅ 実装済 | ✅ 動いてる | ユーザー発話起因の alert 化 (2026-07-07 改訂: 別の running Track と衝突している場合のみ。衝突なしは直接 activate — §4.2) |
-| β | `InternalAlertPoller` 60秒 tick でパラメータ閾値超過 | ✅ 実装済 | 🟡 空回り | Track の `metadata.thresholds` 未設定なので閾値判定対象が無い、Phase 5 で運用化 |
-| γ | `InternalAlertPoller` 内で `Handler.tick()` を呼ぶ枠組み | ✅ 呼び出し側のみ | 🟡 各 Handler に `tick` 未実装 | Phase 5 で SomaticHandler / ScheduledHandler / PerceptualHandler を実装 |
+| ~~β~~ | ~~`InternalAlertPoller` 60秒 tick でパラメータ閾値超過~~ | ❌ 撤去済 | — | **機構ごと撤去**（2026-08-11、[track_retirement](../track_retirement.md) §5-B ②）。閾値を書き込む側がコードに存在せず一度も発火しなかった |
+| ~~γ~~ | ~~`InternalAlertPoller` 内で `Handler.tick()` を呼ぶ枠組み~~ | ❌ 撤去済 | — | **拡張点ごと撤去**（同 ③）。どの Handler にも `tick` の定義がない空の拡張点だった |
 | δ | 時間差ツール完了 → call_id 経由 alert | 🔲 Phase 5 構想 | 🔲 未実装 | Kitchen / dispatch_persona / X 投稿等のサブタスク |
 | ε | スケジュール時刻到来で Track alert 化 | 🔲 Phase 5 構想 | 🔲 未実装 | 旧 ScheduleManager の Track 化に伴う |
 
@@ -366,7 +366,7 @@ USER (1) > SCHEDULE (2) > AUTO (3)
 
 ### 9.6 段階 6: alert 発生経路の運用化 (🔲 Phase 5 と協調)
 
-- InternalAlertPoller の運用化 (Track にパラメータ閾値を設定して β/γ を実用化)
+- ~~InternalAlertPoller の運用化 (Track にパラメータ閾値を設定して β/γ を実用化)~~ → **撤回**（2026-08-11、[track_retirement](../track_retirement.md) §5-B）。身体的欲求・知覚モニタリングは、必要になった時点で Track の状態を経由しない独立サブシステムとして設計する
 - 時間差ツール (δ) と Track alert 化スケジュール (ε) を実装
 
 各段階は個別に検証可能 (1 段階ずつ実装してまはーが動作確認できる粒度) を意識する。
