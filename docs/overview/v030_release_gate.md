@@ -52,7 +52,7 @@ doc: [`episode.md`](../intent/episode.md)
 doc: [`user_messages_missing_episode_attribution.md`](../issues/user_messages_missing_episode_attribution.md)
 
 **5. 作業セッションの記憶が Chronicle へ入る道**
-現状: 未解決 (恒等転写の発火 0 件を 2026-07-28 実測、修正方針は設計判断が要る)。
+現状: 未解決。**Wave 2 へ従属 (まはー裁定 2026-08-11)** — 「作業セッション自体をどう取り扱うか (生ログ正史 = episode.md §4 の AUTONOMOUS 化再裁定) は Aspect の件と一緒にしか裁定できない」。編纂対象規則 (§2-9) からも session_digest はこの理由で除外を維持。
 理由: 生ログが畳まれた後では材料が消える。放置した期間のユーザーのペルソナの作業記憶が、長期記憶から構造的に欠損し続ける。
 doc: [`work_session_digest_never_reaches_chronicle.md`](../issues/work_session_digest_never_reaches_chronicle.md)
 
@@ -74,7 +74,7 @@ doc: [`chronicle_cross_thread_mixing.md`](../issues/chronicle_cross_thread_mixin
 doc: [`quick_spell.md`](../intent/quick_spell.md) / [`spell_loop_continuation_contract.md`](../issues/spell_loop_continuation_contract.md)
 
 **9. 除外タグのメッセージが編纂されず退場する (下限違反) の再裁定**
-現状: 浮遊 (issue 未起票。2026-07-28 pipeline audit §7-6 と記憶の川 §3 に記述のみ)。
+現状: **裁定済み (2026-08-11、Wave 1 第二夜)・実装待ち**。機構名義も編纂対象に入れる — 500 字以下はそのまま、超えたら決定論の一行圧縮 (LLM 不使用)、チャンク勘定は圧縮後サイズ、保存は全文のまま、被覆に原文 ID。条件は長さのみで種類では分けない。詳細 = episode.md ⚡ 到達点 7。session_digest のみ除外を維持し Wave 2 (生ログ正史) に従属。
 理由: handy_tool / spell / event_message / session_digest タグの記憶は「退場は必ず編纂」の下限を外れて消えている。どのタグを救うかの裁定 + 小改修。
 出典: [`2026-07-28_arasuji_pipeline_audit.md`](../handoff/2026-07-28_arasuji_pipeline_audit.md) §7-6
 
@@ -228,11 +228,13 @@ doc: [`track_retirement.md`](../intent/track_retirement.md)
 
 **Wave 1 — 設計議論 #1: エピソードの単位と正史 (§2-3)**
 - **第一夜 (2026-08-10) 済み**: 器と縁 / 時計の退場 (閉じ = 量と需要) / 中断状態 / 再開判定 / 孤児消滅 (§2-6)。前提工事として **Track 撤廃計画を確定** (§2-16、裁定 3 点決着)
-- 残り: episode.md の残レビュー 2 + 未決 3 + digest 二重記述の確定 (中断モデルで消える見込みの検証) + 編纂対象規則 (§2-5 と §2-9 はここの裁定に含める — 「どのタグ・どの記録が編纂に乗るか」は同じ一つの規則) + AUTONOMOUS 化の再裁定 (文脈系列の帰趨は Wave 2 と跨る) + 畳み範囲 1:1 (§2-10)
+- **第二夜 (2026-08-11) 済み**: 編纂対象規則 (§2-9 裁定 — 機構名義は 500 字閾値 + 決定論圧縮で編纂に乗せる)。**AUTONOMOUS 化の再裁定と作業ダイジェスト経路 (§2-5) は Wave 2 へ移動** (まはー: 作業セッションの処遇は Aspect と一体でしか裁定できない)
+- 残り: episode.md の残レビュー 2 (枠投下の補完文面) + 未決 2 (展開状態の既定量 / 中断再開の詳細 — 後者は Wave 2 に跨る) + digest 二重記述の消滅確認 (中断モデルで構造から消える見込みの検証) + 畳み範囲 1:1 (§2-10、下限裁定済みにつき実装設計のみ) + v1.0 改稿
 - 出口 = episode.md v1.0 確定 (実装範囲 = 記憶側 + チャット露出・Beat 型化。監査役は v0.4 — 裁定済み 2026-08-09)
 
 **Wave 2 — 設計議論 #2: モデル格と保温 (§2-1)**
 - 3 席 (声/監督/手足) の表 / 監督の発注・検収 / TTL 締切の保温 / 保温計測 / Beat 境界知覚 / タイムアウト×窓 (§2-13) / 器統合の残裁定 3 点
+- **Wave 1 から移動 (2026-08-11)**: 生ログ正史 (episode.md §4 AUTONOMOUS 化) の再裁定 + 作業ダイジェスト経路 (§2-5) — 作業セッションの処遇は Aspect と一体で裁定する
 - 出口 = model_tier (仮) intent 確定
 
 **Wave 3 — 実装: Wave 1+2 の本丸 (私)**
