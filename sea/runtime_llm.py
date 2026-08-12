@@ -1224,9 +1224,9 @@ def _build_spell_user_only_block(
             f'{icon_svg}'
             f'</svg></span>'
             f'<span>{display_name_escaped}</span>'
-            f'</summary>'
-            f'{result_escaped}'
-            f'</details>'
+            f'</summary>\n\n'
+            f'{result_escaped}\n\n'
+            f'</details>\n'
         )
     else:
         result_section = ""
@@ -1234,7 +1234,7 @@ def _build_spell_user_only_block(
         f'<user_only alt="{alt_escaped}">\n'
         f'{spell_line}\n'
         f'{result_section}'
-        f'</user_only>'
+        f'</user_only>\n'
     )
 
 

@@ -41,6 +41,22 @@ def test_success_block_uses_star_icon() -> None:
     assert "M12 2L15.09" in block
 
 
+def test_success_block_isolates_fenced_markdown_from_disclosure_tags() -> None:
+    result = "```\n<system>notice</system>\n```"
+    block = _build_spell_user_only_block(
+        "messagelog_get_around", {}, "特定時刻のログ取得", result,
+        success=True,
+    )
+
+    # A fenced result must start and end on lines independent from the raw
+    # HTML wrapper.  Otherwise Markdown reads ```</details> as a new opening
+    # fence whose info string is </details>, swallowing the continuation into
+    # the disclosure (production regression: aifi room, 2026-07-22 00:49:32).
+    assert "</summary>\n\n```\n" in block
+    assert "\n```\n\n</details>\n</user_only>\n" in block
+    assert "```</details>" not in block
+
+
 def test_failure_block_uses_cross_icon_and_error_class() -> None:
     block = _build_spell_user_only_block(
         "web_research", {"query": "x"}, "web_research",
