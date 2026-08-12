@@ -71,6 +71,43 @@ class TestCalculateCost(unittest.TestCase):
         cost = model_configs.calculate_cost("nonexistent-model-xyz", 1_000_000, 1_000_000)
         self.assertEqual(cost, 0.0)
 
+    def test_long_context_pricing_uses_standard_rates_at_threshold(self):
+        # Grok 4.6 stays on the short-context tier through exactly 200K input.
+        cost = model_configs.calculate_cost("grok-4.6", 200_000, 100_000)
+        self.assertAlmostEqual(cost, 1.0)  # 0.2M * $2 + 0.1M * $6
+
+    def test_long_context_pricing_switches_all_rates_above_threshold(self):
+        # Once the prompt exceeds 200K, xAI bills every token at the long tier.
+        cost = model_configs.calculate_cost(
+            "grok-4.6", 250_000, 100_000, cached_tokens=50_000,
+        )
+        # regular input: 0.2M * $4, cached input: 0.05M * $1, output: 0.1M * $12
+        self.assertAlmostEqual(cost, 2.05)
+
+    def test_long_context_rates_fall_back_field_by_field(self):
+        saved = model_configs.MODEL_CONFIGS
+        try:
+            model_configs.MODEL_CONFIGS = {
+                "tiered-probe": {
+                    "model": "tiered-probe",
+                    "pricing": {
+                        "input_per_1m_tokens": 1,
+                        "cached_input_per_1m_tokens": 0.1,
+                        "output_per_1m_tokens": 2,
+                        "long_context_threshold_tokens": 10,
+                        "long_context_input_per_1m_tokens": 3,
+                    },
+                }
+            }
+            cost = model_configs.calculate_cost(
+                "tiered-probe", 20, 10, cached_tokens=5,
+            )
+        finally:
+            model_configs.MODEL_CONFIGS = saved
+
+        expected = (15 / 1_000_000) * 3 + (5 / 1_000_000) * 0.1 + (10 / 1_000_000) * 2
+        self.assertAlmostEqual(cost, expected)
+
     @staticmethod
     def _codex_config_keys(configs):
         """Codex 設定を列挙する。
@@ -123,6 +160,58 @@ class TestModelSupportsImages(unittest.TestCase):
 
     def test_non_vision_model(self):
         self.assertFalse(model_configs.model_supports_images("nim-deepseek-v4-pro"))
+
+
+class TestAugust2026ModelCatalog(unittest.TestCase):
+    def test_new_model_ids_context_and_pricing(self):
+        expected = {
+            "claude-opus-5": ("claude-opus-5", 1_000_000, 5, 25),
+            "grok-4.6": ("grok-4.6", 500_000, 2, 6),
+            "sakana-namazu-v1.0": ("sakana-namazu-v1.0", 262_144, 0.95, 4),
+            "openrouter-deepseek-v4-pro-0813": (
+                "deepseek/deepseek-v4-pro-0813", 1_048_576, 0.435, 0.87,
+            ),
+            "openrouter-meta-muse-spark-1.2": (
+                "meta/muse-spark-1.2", 1_048_576, 1.25, 4.25,
+            ),
+            "openrouter-qwen3.8-max": (
+                "qwen/qwen3.8-max", 1_000_000, 2, 6,
+            ),
+            "openrouter-deepseek-v4-flash-latest": (
+                "~deepseek/deepseek-v4-flash-latest", 1_048_576, 0.079996, 0.252,
+            ),
+        }
+
+        for config_key, (api_model, context, input_rate, output_rate) in expected.items():
+            with self.subTest(model=config_key):
+                config = model_configs.get_model_config(config_key)
+                self.assertEqual(config.get("model"), api_model)
+                self.assertEqual(config.get("context_length"), context)
+                self.assertEqual(config.get("pricing", {}).get("input_per_1m_tokens"), input_rate)
+                self.assertEqual(config.get("pricing", {}).get("output_per_1m_tokens"), output_rate)
+
+    def test_sonnet_5_permanent_price_and_cache_rates(self):
+        pricing = model_configs.get_model_pricing("claude-sonnet-5")
+        self.assertIsNotNone(pricing)
+        self.assertEqual(
+            {
+                key: pricing[key]
+                for key in (
+                    "input_per_1m_tokens",
+                    "cached_input_per_1m_tokens",
+                    "cache_write_per_1m_tokens",
+                    "cache_write_1h_per_1m_tokens",
+                    "output_per_1m_tokens",
+                )
+            },
+            {
+                "input_per_1m_tokens": 2,
+                "cached_input_per_1m_tokens": 0.2,
+                "cache_write_per_1m_tokens": 2.5,
+                "cache_write_1h_per_1m_tokens": 4,
+                "output_per_1m_tokens": 10,
+            },
+        )
 
 
 class TestFindModelConfig(unittest.TestCase):

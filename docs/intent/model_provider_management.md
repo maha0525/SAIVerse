@@ -342,6 +342,12 @@ def get_llm_client(model: str, provider: str, context_length: int, config: dict 
 - pricing（任意、入力支援あり）
 - cache 設定（プロバイダが対応している場合のみ表示）
 
+料金が入力長で切り替わるモデルは、通常単価に加えて
+`pricing.long_context_threshold_tokens`（この値を**超えた**リクエストから切替）と
+`pricing.long_context_{input,cached_input,cache_write,output}_per_1m_tokens` を持てる。
+単価はリクエスト全体に適用し、長文側で省略した種類は通常単価へフォールバックする。
+これはプロバイダ請求と使用量画面の概算を一致させるためのモデルカタログ側の責務である。
+
 ### H. チャット UI 連携
 
 `ChatOptions.tsx` への追加:

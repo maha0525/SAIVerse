@@ -1,0 +1,26 @@
+{
+  "model": "sakana-namazu-v1.0",
+  "system_prompt": "現在の使用モデルはSakana Namazu v1.0です。",
+  "display_name": "Sakana Namazu v1.0",
+  "provider_ref": "sakana",
+  "context_length": 262144,
+  "supports_images": true,
+  "supports_structured_output": true,
+  "parameters": {
+    "max_tokens": {
+      "type": "int",
+      "min": 32,
+      "max": 65536,
+      "step": 1,
+      "default": 8192,
+      "label": "Max tokens",
+      "description": "Upper bound on generated tokens. Thinking tokens are billed at the output-token rate."
+    }
+  },
+  "pricing": {
+    "input_per_1m_tokens": 0.95,
+    "cached_input_per_1m_tokens": 0.15,
+    "output_per_1m_tokens": 4,
+    "currency": "USD"
+  }
+}

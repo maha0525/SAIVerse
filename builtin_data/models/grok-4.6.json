@@ -1,0 +1,61 @@
+{
+  "model": "grok-4.6",
+  "system_prompt": "",
+  "display_name": "Grok 4.6",
+  "provider_ref": "xai",
+  "context_length": 500000,
+  "reasoning_effort": "high",
+  "supports_structured_output": true,
+  "supports_images": true,
+  "parameters": {
+    "reasoning_effort": {
+      "type": "enum",
+      "options": [
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "default": "high",
+      "label": "Reasoning Effort",
+      "description": "Controls reasoning depth. Reasoning cannot be disabled for Grok 4.6."
+    },
+    "temperature": {
+      "type": "float",
+      "min": 0,
+      "max": 2,
+      "step": 0.1,
+      "default": 1,
+      "label": "Temperature",
+      "description": "Controls randomness."
+    },
+    "top_p": {
+      "type": "float",
+      "min": 0,
+      "max": 1,
+      "step": 0.05,
+      "default": 1,
+      "label": "Top P",
+      "description": "Nucleus sampling cutoff."
+    },
+    "max_tokens": {
+      "type": "int",
+      "min": 32,
+      "max": 16384,
+      "step": 1,
+      "default": 16384,
+      "label": "Max tokens",
+      "description": "Upper bound on generated tokens."
+    }
+  },
+  "pricing": {
+    "input_per_1m_tokens": 2,
+    "cached_input_per_1m_tokens": 0.5,
+    "output_per_1m_tokens": 6,
+    "long_context_threshold_tokens": 200000,
+    "long_context_input_per_1m_tokens": 4,
+    "long_context_cached_input_per_1m_tokens": 1,
+    "long_context_output_per_1m_tokens": 12,
+    "currency": "USD"
+  }
+}

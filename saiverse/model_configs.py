@@ -416,6 +416,9 @@ def get_model_pricing(model: str) -> Dict[str, Any] | None:
         Dict with keys:
             - input_per_1m_tokens: float (USD per 1M input tokens)
             - output_per_1m_tokens: float (USD per 1M output tokens)
+            - cached_input_per_1m_tokens: float (optional cache-read rate)
+            - long_context_threshold_tokens: int (optional, exclusive threshold)
+            - long_context_*_per_1m_tokens: float (optional rates above threshold)
             - currency: str (e.g., "USD")
         Or None if pricing not configured.
     """
@@ -472,15 +475,35 @@ def calculate_cost(
         LOGGER.debug("[DEBUG] No pricing found for model: %s", model)
         return 0.0
 
-    input_rate = pricing.get("input_per_1m_tokens", 0.0)
-    output_rate = pricing.get("output_per_1m_tokens", 0.0)
+    long_context_threshold = pricing.get("long_context_threshold_tokens")
+    use_long_context_rates = (
+        isinstance(long_context_threshold, int)
+        and not isinstance(long_context_threshold, bool)
+        and input_tokens > long_context_threshold
+    )
+    rate_prefix = "long_context_" if use_long_context_rates else ""
+
+    input_rate = pricing.get(
+        f"{rate_prefix}input_per_1m_tokens",
+        pricing.get("input_per_1m_tokens", 0.0),
+    )
+    output_rate = pricing.get(
+        f"{rate_prefix}output_per_1m_tokens",
+        pricing.get("output_per_1m_tokens", 0.0),
+    )
     # Cached tokens (read): use explicit cached rate if configured, otherwise same as input rate
-    cached_rate = pricing.get("cached_input_per_1m_tokens", input_rate)
+    cached_rate = pricing.get(
+        f"{rate_prefix}cached_input_per_1m_tokens",
+        pricing.get("cached_input_per_1m_tokens", input_rate),
+    )
     # Cache write tokens: use TTL-specific rate if available
     if cache_ttl == "1h" and "cache_write_1h_per_1m_tokens" in pricing:
         cache_write_rate = pricing["cache_write_1h_per_1m_tokens"]
     else:
-        cache_write_rate = pricing.get("cache_write_per_1m_tokens", input_rate)
+        cache_write_rate = pricing.get(
+            f"{rate_prefix}cache_write_per_1m_tokens",
+            pricing.get("cache_write_per_1m_tokens", input_rate),
+        )
 
     # Non-cached input tokens (input_tokens includes cached + cache_write, so subtract both)
     non_cached_input = max(0, input_tokens - cached_tokens - cache_write_tokens)
@@ -493,8 +516,10 @@ def calculate_cost(
     total = non_cached_cost + cached_cost + cache_write_cost + output_cost
     currency = pricing.get("currency", "USD")
     LOGGER.debug(
-        "[DEBUG] Cost calculated: %.6f %s (non_cached_in=%d @ %.4f, cached=%d @ %.4f, cache_write=%d @ %.4f, out=%d @ %.4f)",
-        total, currency, non_cached_input, input_rate, cached_tokens, cached_rate, cache_write_tokens, cache_write_rate, output_tokens, output_rate
+        "[DEBUG] Cost calculated: %.6f %s (tier=%s, non_cached_in=%d @ %.4f, cached=%d @ %.4f, cache_write=%d @ %.4f, out=%d @ %.4f)",
+        total, currency, "long" if use_long_context_rates else "standard",
+        non_cached_input, input_rate, cached_tokens, cached_rate,
+        cache_write_tokens, cache_write_rate, output_tokens, output_rate,
     )
     return total
 
