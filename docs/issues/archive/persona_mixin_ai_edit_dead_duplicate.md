@@ -1,12 +1,13 @@
 # Issue: `PersonaMixin` に AI 編集メソッドの死んだ複製が残り、保守され続けている
 
-**ステータス**: 🔲 未着手
+**ステータス**: ✅ 完了 (2026-08-12)
 **優先度**: low (= 動作影響なし。ただし「保守コストを払い続けている dead code」なので放置すると増え続ける)
 **作成日**: 2026-08-11
 **関連**:
-- `manager/persona.py:655` (`get_ai_details`) / `manager/persona.py:687` (`update_ai`) — 複製 (動かない)
+- `manager/persona.py` の `get_ai_details` / `update_ai` — 複製 (動かない)。2026-08-12 に削除
 - `manager/admin.py:1100` / `manager/admin.py:1158` — 本物
 - `saiverse/saiverse_manager.py:2491` / `saiverse/saiverse_manager.py:2508` — `self.admin` への委譲
+- `tests/test_admin_ai_edit_contract.py` — 本物の契約を固定するテスト (2026-08-12 追加)
 - `tests/test_mixin_host_contract.py` — `RuntimeService` の未解決参照を既知の負債として記録
 
 ## 背景
@@ -62,3 +63,8 @@
 ## ログ
 
 - 2026-08-11: 作業用 worktree `zealous-meninsky-d53f1b` の未コミット変更 (複製の削除 + テスト追加) を確認する過程で issue 化。前提 (複製が死んでいること) は現行ツリーでも成立していることを実行で確認。worktree 自体は成果物が 2 か月古く再利用できないため、本 issue に知見を移送した上で撤去した
+- 2026-08-12: 解決案 1 + 2 を実施してクローズ。
+  - `manager/persona.py` から `get_ai_details` / `update_ai` を削除。撤去後の解決先を実行で再確認し、`SAIVerseManager` / `AdminService` は自前定義 (= API 経路は無変更)、`RuntimeService` は当初の想定どおり両メソッドを失った (呼び出し元は repo 内に無い)
+  - `tests/test_admin_ai_edit_contract.py` を追加。in-memory SQLite (StaticPool) で `AdminService` の実 DB 往復を通し、主要項目の永続化 / 空文字のモデル指定が NULL になること / トグル・予算値を省略したとき既存値が変わらないこと / 0・負値が既定値運用に戻ること / 存在しない AI と派遣中の home city 変更を DB を変えずに断ること、を固定。あわせて `PersonaMixin` に同名メソッドが復活したら落ちる構造検査を置き、複製の再発を機械で止める
+  - 検証: フルスイート 4307 passed / 3 skipped (skip は `test_in_flight_check.py` の経過措置行の免除で、本変更とは無関係)、`ruff check` 通過。ワールドエディタでの往復確認は未実施 — ただし本変更で UI が通る経路のコードは 1 行も変わっていない (削除したのは `RuntimeService` からしか届かない複製)
+  - 積み残し: `PersonaMixin.create_ai` も同じ形の複製 (`AdminService` が別シグネチャで上書き、`SAIVerseManager` は `self.admin` へ委譲)。本 issue の範囲外として残した
