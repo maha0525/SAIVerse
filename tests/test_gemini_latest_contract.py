@@ -1,4 +1,4 @@
-"""Gemini July 2026 model definitions and GenerateContent contract tests."""
+"""Gemini latest-contract model definitions and GenerateContent contract tests."""
 
 from __future__ import annotations
 
@@ -24,6 +24,8 @@ def _make_client(model: str, config: dict | None = None) -> GeminiClient:
 class TestGeminiLatestModelDefinitions(unittest.TestCase):
     def test_new_models_have_free_and_paid_definitions(self):
         expected = {
+            "gemini-3.7-flash": ("gemini-3.7-flash", False),
+            "gemini-3.7-flash-paid": ("gemini-3.7-flash", True),
             "gemini-3.6-flash": ("gemini-3.6-flash", False),
             "gemini-3.6-flash-paid": ("gemini-3.6-flash", True),
             "gemini-3.5-flash-lite": ("gemini-3.5-flash-lite", False),
@@ -41,7 +43,27 @@ class TestGeminiLatestModelDefinitions(unittest.TestCase):
                 self.assertNotIn("top_p", config["parameters"])
                 self.assertNotIn("top_k", config["parameters"])
 
+    def test_thinking_levels_match_each_model_contract(self):
+        """3.7 Flash dropped ``minimal``; sending it returns an API error."""
+        expected = {
+            "gemini-3.7-flash": ["low", "medium", "high"],
+            "gemini-3.7-flash-paid": ["low", "medium", "high"],
+            "gemini-3.6-flash": ["minimal", "low", "medium", "high"],
+            "gemini-3.6-flash-paid": ["minimal", "low", "medium", "high"],
+        }
+        for config_key, options in expected.items():
+            with self.subTest(config_key=config_key):
+                thinking_level = model_configs.get_model_config(config_key)["parameters"][
+                    "thinking_level"
+                ]
+                self.assertEqual(thinking_level["options"], options)
+                self.assertIn(thinking_level["default"], options)
+
     def test_paid_model_pricing_matches_standard_tier(self):
+        self.assertAlmostEqual(
+            model_configs.calculate_cost("gemini-3.7-flash-paid", 1_000_000, 1_000_000),
+            9.0,
+        )
         self.assertAlmostEqual(
             model_configs.calculate_cost("gemini-3.6-flash-paid", 1_000_000, 1_000_000),
             9.0,
