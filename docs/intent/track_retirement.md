@@ -1,6 +1,6 @@
 # Intent: Track の撤廃 — 最後の住人たちの引っ越し計画
 
-**ステータス**: 実装中（v0.2、2026-08-10）。**裁定 3 点（A 関心の器 / B alert / C 門との線引き）すべて決着済み**。**裁定 B の ②③（閾値ポーラ・Handler tick 拡張点の撤去）は 2026-08-11 に実装完了**（§5-B の実装欄）。残は住人台帳の他の項目 — 実装範囲の詳細化と実装。まはーの作戦変更「Track の撤廃計画を完全に立ててからでないと、エピソードの単位の議論がまともにできない」を受けて起草。
+**ステータス**: 実装中（v0.3、2026-08-13）。**裁定 3 点（A 関心の器 / B alert / C 門との線引き）すべて決着済み**。**裁定 B の ②③（閾値ポーラ・Handler tick 拡張点の撤去）は 2026-08-11 に実装完了**（§5-B の実装欄）。**撤去順序①の範囲詰め（全数調査）は 2026-08-13 に完了 — §7 の裁定点 5 件がまはー待ち**。まはーの作戦変更「Track の撤廃計画を完全に立ててからでないと、エピソードの単位の議論がまともにできない」を受けて起草。
 **親**: [`persona_cognition/recall_tags_and_track_reduction.md`](persona_cognition/recall_tags_and_track_reduction.md)（§3.2/§4.3 — 「役割縮小 → 溶解」の方向自体は 2026-07-24 に裁定済み）/ [`persona_cognition/life_concept_map.md`](persona_cognition/life_concept_map.md) §10（Track ＝複数概念の未分化な束）
 **関連**: [`episode.md`](episode.md)（Wave 1「器と縁」の設計 — 本計画の完成を待って再開する）/ [`../overview/v030_release_gate.md`](../overview/v030_release_gate.md) §2-2
 
@@ -95,3 +95,57 @@ Track が現に担っている仕事の全数。「現状」は当日のコー�
 - 目的の参照語彙は**タスク（task:N）とレパートリー項目の二種**（裁定 A）。track:N は新規に書かない
 - メッセージには参加者（人物）・所属エピソード・目的参照を書き込み時に記録する（想起用タグの書き込み時記録と同一 — episode.md §3.5）
 - 「いま会話中か」は**待ちタイマーの生死**、予定は**時間割**、選択肢は**レパートリー＋タスク** — Track はどの問いの答えにも登場しない
+
+## 7. 撤去順序①の詳細範囲（2026-08-13 全数調査、まはー裁定待ち）
+
+§4 の先頭「判断点・meta_layer の Track 状態依存の付け替え」を実装可能な粒度へ詰めた調査。当日のコード確認に基づく事実と、付け替え地図の提案、裁定点 5 件から成る。
+
+### 7.1 調査した事実
+
+**(a) `MetaLayer.should_fire` は死体。** 本番の呼び出し元がゼロ（grep 全数: 定義本体・`test_cache_keepalive.py` の Fake（「呼ばれないこと」を検証する側）・文書のみ）。旧 TTL keepalive 経路が `run_cache_keepalive` に置き換わった際に呼び出しが消えた。読んでいたのは AUTONOMY_ENABLED / running Track / handler の wait_response。**付け替え不要、削除のみ。**
+
+**(b) v1 メタ判断（meta_layer の状況分類）の生きている入口は 3 本のみ。**
+
+1. `on_track_alert` ← `TrackManager.set_alert` ← `UserConversationTrackHandler` 熟慮経路（別 Track running 中のユーザー発話）＝住人 7 ①。set_alert の本番呼び出し元はこの一箇所（2026-08-13 再確認）
+2. `on_periodic_tick` ← `autonomy_wiring.handle_wait_response_timeout` — user_conversation **以外**（social 等）の wait_response タイムアウト。対ペルソナ社交の v2 判断点が未設計のためのフォールバック
+3. `on_periodic_tick` ← debug API（`api/routes/people/debug.py`、手動発火）
+
+入口から先が読む Track 状態: `on_periodic_tick` 冒頭の wait_response 抑止（running Track + handler）、`_classify_situation`（LIVE_STATUSES 全行 → running / alert / pending_or_unstarted → 6 状況分類。Playbook dispatch・response_schema の enum・状況テキストの Track 一覧が全部ここから）。出口は `meta_judgment_finalize` が track_activate / pause / complete / abort / create スペルを内部実行 → deferred_track_ops。**v1 は「Track 状態を読み、Track 状態を書く」で閉じた円環**であり、v2 判断点（時間割・出来事駆動）は判断の入力に Track 状態を使っていない（選択肢 enum を除く — (d)）。
+
+**(c) deferred track ops の enqueue 源は 2 系統。** ① ペルソナ自身のスペル詠唱（track_create / activate / pause / complete / abort — track_* ツール 7 種すべて spell=True で公開中）、② `meta_judgment_finalize` の内部実行。apply 先は TrackManager の 4 遷移で、activate は on_track_activated hook（切替通知注入・会話出来事 open・main_line Pulse 起動）を引き連れる。機構自体は書き込み側で、読む状態は無い。**v1 を消しても①が残る限り deferred ops 機構は消せない。**
+
+**(d) `list_pickable_tracks`（LIVE_STATUSES）の消費者は 6 箇所。** ① コマ ref / picked_tasks の enum（`collect_pickable_track_refs`）② 層2 棚入れ enum（`collect_purpose_refs`）③ コマ締めの帰属先 enum（`collect_slot_ref_enum`）④ head の PurposeBacklogSection（「進行中のこととやりたいこと」一覧）⑤ slot_close の帰属先提示行 ⑥ experience_ledger API（経験の台帳の索引 kind:"track"）。ほかに LIVE_STATUSES 直読みが 4 箇所: `find_interrupted_session`（机メモ＝住人 4、順序③）、`sanitize_timetable`（track:N コマ検証）、`timetable_template._forced_ref_problem`（テンプレ ref 検証）、`purpose_tree.list_first_tier`（目的の木の第一階層 API）。
+
+**(e) life_purpose_unset の受け皿は v1 にしか無い。** `judgment_points.py` に life_purpose の扱いはゼロ。v1 の状況分類（alert が無く LIFE_PURPOSE 未設定なら最優先）だけが生きる目的の初期設定を発火させる。入口が上記 3 本に痩せている現状でも既に到達機会は稀で、v1 退役で完全にゼロになる。
+
+### 7.2 付け替え地図（提案）
+
+| 依存 | 読んでいる Track の顔 | 行き先 | 実施フェーズ |
+|---|---|---|---|
+| should_fire | running + wait_response | （死体）削除 | ① |
+| on_periodic_tick の wait_response 抑止 | 相手の応答待ち中か | 出来事（開いている会話/社交の出来事）— v1 退役なら抑止ごと消滅 | ① |
+| _classify_situation の running / idle | いま何かしているか | 出来事（開いている出来事）＋時間割（現在コマ）— v1 退役なら分類ごと消滅 | ① |
+| _classify_situation の alert | 割り込みが来たか | 判断点の起動信号（裁定 B ①の直結） | 裁定点 2 |
+| life_purpose_unset 分類 | — | day_open 判断点の前段 等 | 裁定点 3 |
+| finalize の track スペル | 状態機械の書き込み | v1 退役と同時に消滅 | ① |
+| ペルソナの track_* スペル語彙 | 同上 | レパートリー操作スペル（誕生・引退、裁定 A 補足） | 裁定点 4 |
+| deferred ops 機構 | — | 最後の enqueue 源が消えるとき撤去 | 裁定点 4 に従属 |
+| enum 3 種（コマ / 棚 / 締め） | 選べる関心（track:N） | レパートリー項目参照 ＋ task:N | ④ |
+| head 一覧 / slot_close 提示行 | 同上 | 同上（enum と集合一致の不変条件ごと移す） | ④ |
+| sanitize / _forced_ref_problem | track:N の生存検証 | レパートリー項目の生存検証 | ④ |
+| purpose_tree 第一階層 | 木の大枝 | レパートリー項目 ＋ 親なし採用タスク | ④ |
+| experience_ledger 索引 | kind:"track" 行 | レパートリー項目 | ④ |
+
+**要旨**: 順序①の判断側依存は v1 メタ判断の中にほぼ閉じているため、「Track 状態の読み替え」ではなく「**v1 メタ判断の残り 3 入口を処理して v1 ごと退役させる**」のが最短の形。一方、選択肢・一覧・検証の系統（表の④群）は行き先がレパートリー＝順序④で新設される器のため、**順序①では付け替え先が存在しない**。起草時の §2 住人 6 は両系統を一括りにしていたが、実施フェーズは分かれる。
+
+### 7.3 裁定点（まはー）
+
+1. **順序①の実体の読み替え**: 「v1 メタ判断（meta_layer の状況分類）の退役」として工事する — この読み替えでよいか。付け替え（running → 出来事 等）を v1 の中で行う必要は無く、v1 自体が消える。私の推奨: 読み替えでよい。
+2. **入口 1（ユーザー発話衝突の alert）**: 裁定 B ①の「今はやらない」の範囲確認。§2 住人 7 と台帳は「直結そのものが据え置き」と読める書き方、§5-B 本文は「直結が行き先、汎用機構化だけ後回し」と読める書き方で、二通りに割れている。据え置きのままだと alert 状態機械＋ meta_judgment_alert Playbook が残り、v1 は退役できない（＝順序①がほぼ空になる）。私の推奨: 直結化（特殊処理のまま）を順序①に含める。
+3. **入口 2（social wait_response timeout）と life_purpose_unset の受け皿**: social 側は (a) post_conversation 判断点の流用 (b) 受け皿なし（対ペルソナ社交の実働が現状どの程度かに依存 — 未確認）(c) 社交判断点の新設、のどれか。life_purpose は day_open 判断点の前段へ移すのが私の案（未設定の間は目的設定判断を先に撃つ）。
+4. **track_* スペル語彙の引き上げ時期**: ①で v1 を消してもペルソナのスペルが残る限り deferred ops は残る。私の推奨: レパートリー語彙（④）が生まれるまで残し、④で語彙ごと入れ替える（①で外すと「関心を立てる/終える」の語彙が一時的に空く）。帰結として deferred ops 機構の撤去も④。
+5. **④群の工程移動の確認**: 7.2 の④群（enum・head 一覧・sanitize・purpose_tree・experience_ledger）を順序①から外し、順序④（レパートリー新設）と同一工事にする — この工程変更でよいか。
+
+### 7.4 順序①の実装範囲（裁定後に確定）
+
+裁定 1・2 が推奨どおりなら: should_fire 削除 ＋ ユーザー発話衝突の判断点直結化（alert 状態機械の撤去）＋ social timeout と life_purpose の受け皿移設 ＋ v1 メタ判断一式（_classify_situation / _SITUATION_PLAYBOOK_MAP / meta_judgment_* Playbook 5 種 / meta_judgment_finalize / debug API 経路）の退役。deferred ops・track スペル・選択肢系は④へ。
