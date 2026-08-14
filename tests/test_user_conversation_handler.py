@@ -498,6 +498,50 @@ def test_busy_utterance_engage_now_activates_and_starts_pulse_via_hook(
     mgr.run_sea_user.assert_called_once()
 
 
+def test_busy_detection_survives_conversation_episode_opened_later(
+    handler, tm, persona, manager_stub, monkeypatch
+):
+    """回帰 (2026-08-14 Codex 指摘 F2): 会話の出来事が作業より**後**に開いていても
+    「別の活動中」を見落とさない。
+
+    孤児化した会話の出来事 (Track が running を離れたのに閉じ損ねた行) が
+    作業セッションより後に開いている並びでは、「最後に開いた 1 件」を見る旧実装が
+    会話を見て打ち切り、仲裁を経ずに即応答していた。
+    """
+    mgr, _hm = manager_stub
+    track, _ = handler.get_or_create_track(persona, "1")
+    tm.pause(track.track_id)
+    _make_busy(mgr, persona)
+    # 作業セッションの後に会話の出来事を開く (= 最後に開いた open は会話)
+    episodes.open_conversation_episode(
+        mgr, persona, building_id="test_building", participants=[persona, "1"],
+    )
+    mgr.run_sea_user.reset_mock()
+
+    from saiverse import autonomy_wiring
+
+    conflict_calls = []
+
+    def fake_conflict(manager, persona_id, utterance_text, *, activate):
+        conflict_calls.append(persona_id)
+        return "judged:note_only"
+
+    monkeypatch.setattr(
+        autonomy_wiring, "handle_user_utterance_conflict", fake_conflict,
+    )
+
+    handler.on_user_utterance(
+        persona_id=persona,
+        user_id="1",
+        event={"role": "user", "content": "話しかけた"},
+        invoke_main_line=lambda *_a, **_kw: None,
+    )
+    # 仲裁を経由し、engage しないので Track は pending のまま
+    assert conflict_calls == [persona]
+    assert tm.get(track.track_id).status == STATUS_PENDING
+    assert mgr.run_sea_user.call_count == 0
+
+
 def test_busy_utterance_conflict_raise_does_not_propagate(
     handler, tm, persona, manager_stub, monkeypatch
 ):

@@ -1331,6 +1331,9 @@ def build_on_event_situation_text(
     # 会話以外の活動も同じ正典で読む: 開いている出来事 (会話以外の kind) が
     # あれば「取り組んでいます」。旧実装は running Track の題を読んでいたが、
     # 案 Y 以降の残留 running が嘘の源だった (track_retirement.md §7.4 で付け替え)。
+    # 会話以外の open は専用クエリで引く — 「最後に開いた 1 件」を見る読み方だと、
+    # 会話が作業より後に開いた並びで作業が見えず「手すきです」と嘘をつく
+    # (仲裁するかの判定と同じ集合を読む: get_open_non_conversation_episode)。
     activity = "手すきです。"
     if is_in_user_conversation(manager, persona_id):
         activity = "ユーザーと会話中です。"
@@ -1338,14 +1341,14 @@ def build_on_event_situation_text(
         try:
             from saiverse import episodes
 
-            open_ep = episodes.get_open_episode(manager, persona_id)
+            open_ep = episodes.get_open_non_conversation_episode(manager, persona_id)
         except Exception:
             LOGGER.warning(
-                "[judgment] get_open_episode failed for %s", persona_id,
-                exc_info=True,
+                "[judgment] get_open_non_conversation_episode failed for %s",
+                persona_id, exc_info=True,
             )
             open_ep = None
-        if open_ep is not None and open_ep.get("kind") != "conversation":
+        if open_ep is not None:
             meta = open_ep.get("meta") or {}
             title = meta.get("title") if isinstance(meta, dict) else None
             if title:

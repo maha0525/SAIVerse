@@ -559,6 +559,41 @@ def get_latest_closed_episode(
         db.close()
 
 
+def get_open_non_conversation_episode(
+    manager: Any, persona_id: str
+) -> Optional[Dict[str, Any]]:
+    """「別の活動中か」= 開いている会話以外の出来事 (無ければ None)。
+
+    :func:`get_open_episode` (kind 無指定) は「最後に開いた 1 件」しか返さない
+    ので、会話と作業の出来事が同時に開いていると、**どちらが後に開いたか**で
+    「別の活動中」の答えが変わってしまう (会話が後なら作業が見えない)。
+    「会話以外の open が 1 件でもあるか」は開いた順に依存しない問いなので、
+    conversation を除いた集合から直接引く。
+
+    同じ集合を「仲裁するかの判定」(user_conversation_handler) と「ペルソナへ
+    見せる いまの活動」(judgment_points.build_on_event_situation_text) の両方が
+    読む — 判定と提示は同じ集合から引く (list_pickable_tracks と同じ規律)。
+    複数開いていれば最後に開いた 1 件 (SHORT_ID 最大) を代表として返す。
+    """
+    if not persona_id:
+        return None
+    db = manager.SessionLocal()
+    try:
+        ep = (
+            db.query(Episode)
+            .filter(
+                Episode.PERSONA_ID == persona_id,
+                Episode.STATUS == STATUS_OPEN,
+                Episode.KIND != KIND_CONVERSATION,
+            )
+            .order_by(Episode.SHORT_ID.desc())
+            .first()
+        )
+        return _to_dict(ep) if ep is not None else None
+    finally:
+        db.close()
+
+
 def get_open_episode_by_origin(
     manager: Any, persona_id: str, origin_ref: str
 ) -> Optional[Dict[str, Any]]:

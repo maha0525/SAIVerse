@@ -594,15 +594,17 @@ class UserConversationTrackHandler:
         「いま」の真実は開いている出来事が持つ (life.md §7 案 Y)。読めない環境
         (manager 不在のテスト等) や読み取り失敗は「活動なし」に倒す — 呼びかけへ
         の応答を機構の不備で黙らせない。
+
+        判定は :func:`saiverse.episodes.get_open_non_conversation_episode` に
+        一本化する — 「最後に開いた 1 件」を見て会話ならそこで打ち切る読み方だと、
+        会話が作業より後に開いた並びで「別の活動中」を取りこぼす。
         """
         if self.manager is None:
             return None
         try:
             from saiverse import episodes
 
-            ep = episodes.get_open_episode(self.manager, persona_id)
-            if ep is not None and ep.get("kind") != episodes.KIND_CONVERSATION:
-                return ep
+            return episodes.get_open_non_conversation_episode(self.manager, persona_id)
         except Exception:
             logging.warning(
                 "[user-conv-handler] failed to read open episode for %s; "

@@ -1661,6 +1661,33 @@ def test_on_event_situation_shows_open_episode_activity(manager, task_refs):
     assert "標本集の整理" in result["args"]["situation_text"]
 
 
+def test_on_event_situation_activity_survives_stale_open_cache(manager, task_refs):
+    """回帰 (2026-08-14 Codex 指摘 F2): 「いまの活動」は仲裁の判定と同じ集合
+    (開いている会話以外の出来事) を DB から直に引く。
+
+    層0タグ用の open キャッシュに stale な会話 dict が残っていると、
+    「最後に開いた 1 件」を読む旧実装は会話を見て打ち切り、実際には開いている
+    作業セッションを「手すきです」と偽って LLM へ渡していた。
+    """
+    from saiverse import episodes
+
+    episodes.open_episode(
+        manager, PERSONA_ID, episodes.KIND_WORK_SESSION,
+        building_id="alice_room", participants=[PERSONA_ID],
+        meta={"title": "標本集の整理"},
+    )
+    episodes._cache_set_open(
+        manager, PERSONA_ID,
+        {"episode_id": "stale", "kind": episodes.KIND_CONVERSATION},
+    )
+    result = jp.run_judgment_point(
+        manager, PERSONA_ID, "on_event", {"event_text": "システム通知"},
+    )
+    situation_text = result["args"]["situation_text"]
+    assert "標本集の整理" in situation_text
+    assert "手すきです" not in situation_text
+
+
 def test_on_event_situation_running_track_alone_is_idle(manager, task_refs):
     """running Track が残っていても、開いている出来事が無ければ「手すき」。
     案 Y 以降 Track の running は残留するため、活動の根拠にしない。"""

@@ -181,6 +181,65 @@ def test_get_open_episode_uses_cache_without_db(session_factory):
 
 
 # ---------------------------------------------------------------------------
+# 0-b. get_open_non_conversation_episode (「別の活動中か」の判定集合)
+# ---------------------------------------------------------------------------
+
+
+def test_open_non_conversation_none_when_only_conversation(session_factory):
+    """開いているのが会話だけなら「別の活動」は無い。"""
+    manager = _make_manager(session_factory)
+    episodes.open_episode(manager, PERSONA_ID, episodes.KIND_CONVERSATION)
+    assert episodes.get_open_non_conversation_episode(manager, PERSONA_ID) is None
+
+
+@pytest.mark.parametrize("conversation_first", [True, False])
+def test_open_non_conversation_is_order_independent(session_factory, conversation_first):
+    """会話と作業が同時に開いていても、**開いた順に依らず**作業が見える。
+
+    回帰 (2026-08-14 Codex 指摘 F2): 「最後に開いた 1 件」を見る読み方だと、
+    会話が後に開いた並びで作業が隠れ、仲裁するかどうかが順序で変わっていた。
+    """
+    manager = _make_manager(session_factory)
+    if conversation_first:
+        episodes.open_episode(manager, PERSONA_ID, episodes.KIND_CONVERSATION)
+        work = episodes.open_episode(manager, PERSONA_ID, episodes.KIND_WORK_SESSION)
+    else:
+        work = episodes.open_episode(manager, PERSONA_ID, episodes.KIND_WORK_SESSION)
+        episodes.open_episode(manager, PERSONA_ID, episodes.KIND_CONVERSATION)
+
+    found = episodes.get_open_non_conversation_episode(manager, PERSONA_ID)
+    assert found is not None
+    assert found["episode_id"] == work["episode_id"]
+
+
+def test_open_non_conversation_ignores_stale_open_cache(session_factory):
+    """判定は DB を直に引く — 層0タグ用の open キャッシュに引きずられない。
+
+    ``get_open_episode(kind=None)`` のキャッシュは session モードの呼び出し元が
+    commit 後に無効化する契約なので、取りこぼしがあると stale な会話 dict が
+    居座りうる。その場合でも「別の活動中か」の答えは DB の実態で決まる。
+    """
+    manager = _make_manager(session_factory)
+    work = episodes.open_episode(manager, PERSONA_ID, episodes.KIND_WORK_SESSION)
+    episodes._cache_set_open(
+        manager, PERSONA_ID,
+        {"episode_id": "stale", "kind": episodes.KIND_CONVERSATION},
+    )
+
+    found = episodes.get_open_non_conversation_episode(manager, PERSONA_ID)
+    assert found is not None
+    assert found["episode_id"] == work["episode_id"]
+
+
+def test_open_non_conversation_ignores_closed_rows(session_factory):
+    """閉じた作業は「別の活動」ではない。"""
+    manager = _make_manager(session_factory)
+    work = episodes.open_episode(manager, PERSONA_ID, episodes.KIND_WORK_SESSION)
+    episodes.close_episode(manager, PERSONA_ID, work["episode_ref"])
+    assert episodes.get_open_non_conversation_episode(manager, PERSONA_ID) is None
+
+
+# ---------------------------------------------------------------------------
 # 1. 会話の出来事 (シム経路)
 # ---------------------------------------------------------------------------
 
