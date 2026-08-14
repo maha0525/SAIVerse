@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState, useRef, useCallback } from 'react';
-import { Home as HomeIcon, X, Edit3, Save, Image as ImageIcon, Loader2, Trash2, ArrowUp, DoorOpen } from 'lucide-react';
+import { Home as HomeIcon, X, Edit3, Save, Image as ImageIcon, Loader2, Trash2, ArrowUp, DoorOpen, Pencil, Check } from 'lucide-react';
 import styles from './CityMap.module.css';
 import PersonaMenu from './PersonaMenu';
 import MemoryModal from './MemoryModal';
@@ -152,6 +152,13 @@ export default function CityMap({ currentBuildingId, onSelectBuilding, refreshTr
     const [isEditMode, setIsEditMode] = useState(false);
     const [editedPositions, setEditedPositions] = useState<Record<string, { x: number; y: number }>>({});
     const [isSaving, setIsSaving] = useState(false);
+
+    // 街の表示名のその場編集 (City スコープのときだけ出す)。書き換わるのは
+    // 表示名 (CITYNAME) だけで、内部の識別子は変わらない
+    // (docs/intent/city_identity.md §4 不変条件 2)。
+    const [isEditingCityName, setIsEditingCityName] = useState(false);
+    const [cityNameDraft, setCityNameDraft] = useState('');
+    const [isSavingCityName, setIsSavingCityName] = useState(false);
 
     // セル個別ドラッグ状態 (編集モード時のみ active になる)
     const cellDragRef = useRef({
@@ -590,6 +597,44 @@ export default function CityMap({ currentBuildingId, onSelectBuilding, refreshTr
         }
     };
 
+    // 街の表示名の編集: 開始 → PATCH → 即時 fetch
+    const startCityNameEdit = () => {
+        setCityNameDraft(data?.city_name ?? '');
+        setIsEditingCityName(true);
+    };
+
+    const saveCityName = async () => {
+        if (cityIdRef == null) return;
+        const next = cityNameDraft.trim();
+        if (!next) {
+            alert('街の名前を入力してください');
+            return;
+        }
+        if (next === (data?.city_name ?? '')) {
+            setIsEditingCityName(false);
+            return;
+        }
+        setIsSavingCityName(true);
+        try {
+            const res = await fetch(`/api/world/cities/${cityIdRef}/name`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name: next }),
+            });
+            if (!res.ok) {
+                alert(`街の名前の保存に失敗しました (${res.status})`);
+                return;
+            }
+            setIsEditingCityName(false);
+            await fetchData();
+        } catch (err) {
+            console.error('City name update error', err);
+            alert('街の名前の更新に失敗しました');
+        } finally {
+            setIsSavingCityName(false);
+        }
+    };
+
     const savePositions = async () => {
         const positions = Object.entries(editedPositions).map(([building_id, pos]) => ({
             building_id,
@@ -763,11 +808,57 @@ export default function CityMap({ currentBuildingId, onSelectBuilding, refreshTr
                             <ArrowUp size={14} /> 上の階層へ
                         </button>
                     )}
-                    <h2 className={styles.title}>
-                        {scopeRegionId
-                            ? (data?.scope_region_name ?? scopeRegionId)
-                            : (data?.city_name ?? 'SAIVerse City')}
-                    </h2>
+                    {scopeRegionId ? (
+                        <h2 className={styles.title}>
+                            {data?.scope_region_name ?? scopeRegionId}
+                        </h2>
+                    ) : isEditingCityName ? (
+                        <div className={styles.titleRow}>
+                            <input
+                                className={styles.titleInput}
+                                value={cityNameDraft}
+                                onChange={(e) => setCityNameDraft(e.target.value)}
+                                onKeyDown={(e) => {
+                                    if (e.key === 'Enter') saveCityName();
+                                    if (e.key === 'Escape') setIsEditingCityName(false);
+                                }}
+                                disabled={isSavingCityName}
+                                maxLength={64}
+                                aria-label="街の名前"
+                                autoFocus
+                            />
+                            <button
+                                className={styles.titleIconBtn}
+                                onClick={saveCityName}
+                                disabled={isSavingCityName}
+                                title="保存"
+                            >
+                                {isSavingCityName ? <Loader2 size={15} className={styles.spin} /> : <Check size={15} />}
+                            </button>
+                            <button
+                                className={styles.titleIconBtn}
+                                onClick={() => setIsEditingCityName(false)}
+                                disabled={isSavingCityName}
+                                title="キャンセル"
+                            >
+                                <X size={15} />
+                            </button>
+                        </div>
+                    ) : (
+                        <div className={styles.titleRow}>
+                            <h2 className={styles.title}>
+                                {data?.city_name ?? 'SAIVerse City'}
+                            </h2>
+                            <button
+                                className={styles.titleIconBtn}
+                                onClick={startCityNameEdit}
+                                disabled={data?.city_id == null}
+                                title="街の名前を変更"
+                            >
+                                <Pencil size={14} />
+                            </button>
+                        </div>
+                    )}
                     <div className={styles.subtitle}>
                         {data ? `${buildings.length} buildings · ${buildings.reduce((acc, b) => acc + b.occupants.length, 0)} residents` : ' '}
                     </div>

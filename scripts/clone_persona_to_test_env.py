@@ -354,7 +354,7 @@ def _clone_ai_row(
         new_values["HOME_CITYID"] = dest_city.CITYID
         LOGGER.info(
             "HOME_CITYID: %s → %s (%s)",
-            source_values["HOME_CITYID"], dest_city.CITYID, dest_city.CITYNAME,
+            source_values["HOME_CITYID"], dest_city.CITYID, dest_city.CITY_SLUG,
         )
 
         new_private_room = _remap_building(

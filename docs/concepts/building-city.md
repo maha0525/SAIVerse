@@ -32,9 +32,14 @@ City は User が運営する一つの「世界」。複数の Building を束�
 
 ### City の属性（`City` テーブル）
 
+- `CITY_SLUG`（**内部の識別子**。ASCII 英数字とアンダースコアのみ。起動引数・`user_room` の BUILDINGID・ペルソナ ID・建物ログの保存先フォルダ・二重起動チェックの鍵が、すべてこの文字列から組み立てられる。**City 作成後は変更できない**）
+- `CITYNAME`（**表示名**。自由な文字列で一意性を要求しない。画面の見出し・一覧に出る）
+- `DESCRIPTION`（街の説明文）
 - `UI_PORT` / `API_PORT`（UI / API 公開ポート）
 - オンラインモードフラグ
 - `LAST_KNOWN_VERSION`（バージョン認識機構。アップデート時の状態移行を追跡）
+
+識別子と表示名を分ける理由・不変条件・移行の経緯は [`intent/city_identity.md`](../intent/city_identity.md)。**`NAME` が付く列は表示名**（`BUILDINGNAME` / `AINAME` と同じ規則）。
 
 ### 入退室の管理
 

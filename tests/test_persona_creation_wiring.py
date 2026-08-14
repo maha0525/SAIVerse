@@ -76,7 +76,7 @@ class PersonaCreationWiringTestCase(unittest.TestCase):
         db = self.SessionLocal()
         try:
             db.add(CityModel(
-                CITYID=1, USERID=1, CITYNAME="city_a", UI_PORT=3000, API_PORT=8000,
+                CITYID=1, USERID=1, CITY_SLUG="city_a", UI_PORT=3000, API_PORT=8000,
             ))
             db.commit()
         finally:

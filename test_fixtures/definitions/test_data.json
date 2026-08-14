@@ -10,7 +10,7 @@
   },
   "city": {
     "CITYID": 1,
-    "CITYNAME": "test_city",
+    "CITY_SLUG": "test_city",
     "DESCRIPTION": "Test city for automated testing",
     "TIMEZONE": "Asia/Tokyo",
     "UI_PORT": 18000,

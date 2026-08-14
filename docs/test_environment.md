@@ -137,7 +137,7 @@ python test_fixtures/test_api.py --base-url http://127.0.0.1:18000
   },
   "city": {
     "CITYID": 1,
-    "CITYNAME": "test_city",
+    "CITY_SLUG": "test_city",
     "UI_PORT": 18000,
     "API_PORT": 18001,
     ...

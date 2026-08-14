@@ -24,7 +24,7 @@ BASE_URL = "http://127.0.0.1:18000"
 # Expected test data (from test_fixtures/definitions/test_data.json)
 EXPECTED_CITY = {
     "CITYID": 1,
-    "CITYNAME": "test_city",
+    "CITY_SLUG": "test_city",
 }
 
 EXPECTED_BUILDINGS = [
@@ -82,7 +82,7 @@ def request(method: str, path: str, data: dict = None, streaming: bool = False) 
         raise
     except URLError as e:
         print(f"Connection Error: {e.reason}")
-        print(f"Is the test server running? Try: ./test_fixtures/start_test_server.sh")
+        print("Is the test server running? Try: ./test_fixtures/start_test_server.sh")
         raise
 
 
@@ -112,16 +112,16 @@ def test_city():
         # Find test city
         test_city = None
         for row in rows:
-            if row.get("CITYNAME") == EXPECTED_CITY["CITYNAME"]:
+            if row.get("CITY_SLUG") == EXPECTED_CITY["CITY_SLUG"]:
                 test_city = row
                 break
 
         if not test_city:
-            print(f"  FAIL: Test city '{EXPECTED_CITY['CITYNAME']}' not found")
-            print(f"  Cities in DB: {[r.get('CITYNAME') for r in rows]}")
+            print(f"  FAIL: Test city '{EXPECTED_CITY['CITY_SLUG']}' not found")
+            print(f"  Cities in DB: {[r.get('CITY_SLUG') for r in rows]}")
             return False
 
-        print(f"  City: {test_city.get('CITYNAME')} (ID: {test_city.get('CITYID')})")
+        print(f"  City: {test_city.get('CITY_SLUG')} (ID: {test_city.get('CITYID')})")
         print(f"  UI Port: {test_city.get('UI_PORT')}, API Port: {test_city.get('API_PORT')}")
         print("  OK: Test city exists")
         return True

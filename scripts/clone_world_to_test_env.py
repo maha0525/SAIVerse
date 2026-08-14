@@ -133,7 +133,7 @@ def _reset_runtime_state(
         report["autonomy_disabled_personas"] = cur.rowcount
 
         # City: ポート書き換え + オンラインモード解除 (複数 City は +10 ずつ)
-        city_rows = conn.execute("SELECT CITYID, CITYNAME FROM city ORDER BY CITYID").fetchall()
+        city_rows = conn.execute("SELECT CITYID, CITY_SLUG FROM city ORDER BY CITYID").fetchall()
         port_map = {}
         for i, (city_id, city_name) in enumerate(city_rows):
             new_ui, new_api = ui_port + i * 10, api_port + i * 10
@@ -372,7 +372,7 @@ def _print_summary(summary: Dict[str, Any]) -> None:
     LOGGER.info("  - 一日シム: SAIVERSE_HOME=%s SAIVERSE_USER_DATA_DIR=%s \\",
                 summary["dest_home"], str(Path(summary["dest_db"]).parent.parent))
     LOGGER.info("      python scripts/run_day_sim.py --scenario <file> --real"
-                " --city <CITYNAME> --db-file %s", summary["dest_db"])
+                " --city <CITY_SLUG> --db-file %s", summary["dest_db"])
     LOGGER.info("  - 判断点 playbook が本番 DB 未 import の場合のみ import_playbook.py を dest へ")
     LOGGER.info("=" * 64)
 

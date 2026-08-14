@@ -110,7 +110,7 @@ def seed_database(definitions: dict):
         city_data = definitions["city"]
         city = City(USERID=user_data["USERID"], **city_data)
         session.add(city)
-        LOGGER.info(f"Added city: {city_data['CITYNAME']}")
+        LOGGER.info(f"Added city: {city_data['CITY_SLUG']}")
 
         # Add buildings
         for bldg_data in definitions["buildings"]:

@@ -5,7 +5,7 @@
 
 REST API 全エンドポイントの一覧（自動生成）。すべて `/api` 配下にマウントされる。
 
-**エンドポイント数**: 364（tag グループ: 25）
+**エンドポイント数**: 365（tag グループ: 25）
 
 ## addon
 
@@ -468,6 +468,7 @@ REST API 全エンドポイントの一覧（自動生成）。すべて `/api` 
 | PUT | `/api/world/cities/{city_id}` |  |
 | DELETE | `/api/world/cities/{city_id}` |  |
 | PATCH | `/api/world/cities/{city_id}/map-background` | 街マップ画面から背景画像だけを軽量に更新する PATCH エンドポイント。 |
+| PATCH | `/api/world/cities/{city_id}/name` | 街マップ画面から City の表示名 (CITYNAME) だけを更新する PATCH。 |
 | POST | `/api/world/items` |  |
 | PUT | `/api/world/items/{item_id}` |  |
 | GET | `/api/world/items/{item_id}` | Get item details including owner information. |

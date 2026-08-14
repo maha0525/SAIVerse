@@ -100,6 +100,13 @@ def _render_default_sql(column) -> "str | None":
 KNOWN_COLUMN_RENAMES = {
     # 2026-06-12: 控室 (game 専用語) → 入口 (Region 汎用仕様)。docs/intent/region.md
     "region": {"LOBBY_BUILDING_ID": "ENTRANCE_BUILDING_ID"},
+    # 2026-08-14: City の名前欄を意味で分離 (docs/intent/city_identity.md)。
+    # 旧 CITYNAME は表示名ではなく内部の識別子 (起動引数・user_room の BUILDINGID・
+    # ペルソナ ID・ログ保存先フォルダ・二重起動チェックの鍵の材料) だったので
+    # CITY_SLUG へ改名し、空いた CITYNAME を表示名の列として新設する。
+    # 冪等性: 移行後の DB は CITYNAME (表示名) と CITY_SLUG の両方を持つので
+    # 「新列が無いときだけ」の条件によりこの rename は二度と発火しない。
+    "city": {"CITYNAME": "CITY_SLUG"},
 }
 
 
@@ -411,6 +418,11 @@ def migrate_database_in_place(db_path: str):
 
         # Post-migration: assign world-global short_ids to existing items.
         _backfill_item_short_ids(target_engine)
+
+        # Post-migration: City の表示名 (新設 CITYNAME) を DESCRIPTION から復元する。
+        # 全書換の列コピーは列名一致でしか運ばないので、旧 DESCRIPTION → 新 CITYNAME
+        # の移送はここで行う。docs/intent/city_identity.md §6。
+        _backfill_city_display_names(target_engine)
 
         # Post-migration: feed_item の採番高水位をソース (剪定前の真の値) と
         # 配送カーソルから継承する — コピーだけでは sequence が現存行の最大
@@ -842,6 +854,52 @@ def _backfill_schedule_instance_tokens(engine) -> None:
     except Exception as e:
         # NULL のままでも "legacy" fallback で動作は継続する (次回起動で再試行)。
         logging.warning("INSTANCE_TOKEN バックフィルに失敗しました（スキップ）: %s", e)
+
+
+def _backfill_city_display_names(engine) -> None:
+    """City の表示名 (CITYNAME) を埋める (冪等)。docs/intent/city_identity.md §6。
+
+    旧スキーマでは CITYNAME が内部の識別子で、表示名は DESCRIPTION に置かれて
+    いた (チュートリアルの「City名」の書き込み先がそこだった)。改名 ALTER で
+    識別子は CITY_SLUG へ退避し、新設の CITYNAME は空文字で始まるので、ここで
+    表示名を復元する。
+
+    移送元を DESCRIPTION にするのは、**チュートリアルで街の名前を入力した人の
+    入力を落とさない**ため。DESCRIPTION が seed の説明文のままだった世界では
+    表示名が一度だけ説明文になるが、それはマップ画面の編集で直せる (取り返しが
+    つく側の不都合を選ぶ)。まはー裁定 (2026-08-14) により DESCRIPTION 自体は
+    消さず両方に残す。
+
+    DESCRIPTION も空の世界では CITY_SLUG を入れる (表示名が空でも UI は
+    CITY_SLUG へフォールバックするが、編集の初期値として実体があった方がよい)。
+    空の CITYNAME だけを対象にするので起動ごとに無条件で呼んでよい。
+    """
+    try:
+        with engine.begin() as conn:
+            result = conn.execute(text(
+                "UPDATE city "
+                "SET CITYNAME = CASE "
+                "  WHEN DESCRIPTION IS NOT NULL AND trim(DESCRIPTION) != '' THEN DESCRIPTION "
+                "  ELSE CITY_SLUG END "
+                "WHERE CITYNAME IS NULL OR trim(CITYNAME) = ''"
+            ))
+            if result.rowcount:
+                logging.info(
+                    "City の表示名 (CITYNAME) を %d 行に復元しました。",
+                    result.rowcount,
+                )
+    except Exception as e:
+        # 表示名が空でも UI は CITY_SLUG へフォールバックするので運転は継続する。
+        logging.warning("City 表示名のバックフィルに失敗しました（スキップ）: %s", e)
+
+
+def backfill_city_display_names(db_path: str) -> None:
+    """City 表示名の復元を単体で走らせるエントリポイント。"""
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        _backfill_city_display_names(engine)
+    finally:
+        engine.dispose()
 
 
 def backfill_schedule_instance_tokens(db_path: str) -> None:

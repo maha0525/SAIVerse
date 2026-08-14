@@ -215,7 +215,7 @@ if __name__ == "__main__":
             raise RuntimeError(f"Could not find a city configured for API port {args.port} in the database.")
         
         MY_CITY_ID = city_config.CITYID
-        logging.info(f"API Server for City ID {MY_CITY_ID} ({city_config.CITYNAME}) is starting up.")
+        logging.info(f"API Server for City ID {MY_CITY_ID} ({city_config.CITY_SLUG}) is starting up.")
     finally:
         db.close()
 

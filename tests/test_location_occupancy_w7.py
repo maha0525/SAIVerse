@@ -78,7 +78,7 @@ class OccupancyRepairTest(unittest.TestCase):
         try:
             db.add(User(USERID=1, PASSWORD="x", USERNAME="u"))
             db.flush()
-            db.add(City(CITYID=1, USERID=1, CITYNAME="c", UI_PORT=3001, API_PORT=8001))
+            db.add(City(CITYID=1, USERID=1, CITY_SLUG="c", UI_PORT=3001, API_PORT=8001))
             db.add(AI(AIID="air", HOME_CITYID=1, AINAME="Air"))
             db.commit()
         finally:
@@ -208,7 +208,7 @@ class MoveEntityCasTest(unittest.TestCase):
         try:
             db.add(User(USERID=self.USER_ID, PASSWORD="x", USERNAME="まはー"))
             db.flush()
-            city = City(USERID=self.USER_ID, CITYNAME="c", UI_PORT=3001, API_PORT=8001)
+            city = City(USERID=self.USER_ID, CITY_SLUG="c", UI_PORT=3001, API_PORT=8001)
             db.add(city)
             db.flush()
             self.city_id = city.CITYID
@@ -506,7 +506,7 @@ class StartupOccupancyCheckerTest(unittest.TestCase):
         try:
             db.add(User(USERID=1, PASSWORD="x", USERNAME="u"))
             db.flush()
-            db.add(City(CITYID=1, USERID=1, CITYNAME="c", UI_PORT=3001, API_PORT=8001))
+            db.add(City(CITYID=1, USERID=1, CITY_SLUG="c", UI_PORT=3001, API_PORT=8001))
             db.add(AI(AIID="air", HOME_CITYID=1, AINAME="Air"))
             db.add(AI(AIID="quon", HOME_CITYID=1, AINAME="Quon"))
             db.commit()
@@ -760,7 +760,7 @@ class EnsureActiveOccupancyUniqueEntrypointTest(unittest.TestCase):
             try:
                 db.add(User(USERID=1, PASSWORD="x", USERNAME="u"))
                 db.flush()
-                db.add(City(CITYID=1, USERID=1, CITYNAME="c", UI_PORT=3001, API_PORT=8001))
+                db.add(City(CITYID=1, USERID=1, CITY_SLUG="c", UI_PORT=3001, API_PORT=8001))
                 db.add(AI(AIID="air", HOME_CITYID=1, AINAME="Air"))
                 db.add(BuildingOccupancyLog(
                     CITYID=1, AIID="air", BUILDINGID="room_a",

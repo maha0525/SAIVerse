@@ -35,7 +35,8 @@ SAIVerse の全テーブル・カラム定義（自動生成）。SQLite。本�
 |---|---|---|---|
 | `USERID` | INTEGER | FK→user.USERID, NOT NULL |  |
 | `CITYID` | INTEGER | PK, NOT NULL |  |
-| `CITYNAME` | VARCHAR(32) | NOT NULL |  |
+| `CITY_SLUG` | VARCHAR(32) | NOT NULL |  |
+| `CITYNAME` | VARCHAR(64) | NOT NULL, default='' |  |
 | `DESCRIPTION` | VARCHAR(1024) | NOT NULL, default='' |  |
 | `TIMEZONE` | VARCHAR(64) | NOT NULL, default='UTC' |  |
 | `UI_PORT` | INTEGER | NOT NULL |  |

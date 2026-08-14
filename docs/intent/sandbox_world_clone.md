@@ -96,7 +96,7 @@ python scripts/clone_world_to_test_env.py --persona quon_city_a
 # 一日シム (実 LLM) をその世界で回す
 SAIVERSE_HOME=test_data/.saiverse SAIVERSE_USER_DATA_DIR=test_data/user_data \
   python scripts/run_day_sim.py --scenario test_fixtures/scenarios/day_quon.json \
-  --real --city <本番の CITYNAME> --db-file test_data/user_data/database/saiverse.db
+  --real --city <本番の CITY_SLUG> --db-file test_data/user_data/database/saiverse.db
 
 # 状態の確認は検分 CLI (docs/intent/agent_inspection_cli.md)
 python scripts/inspect_world.py day-plan quon_city_a --env test

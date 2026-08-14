@@ -55,11 +55,14 @@ class InitializationMixin:
         """Step 1: Load City Configuration from DB."""
         db = self.SessionLocal()
         try:
-            my_city_config = db.query(CityModel).filter(CityModel.CITYNAME == city_name).first()
+            my_city_config = db.query(CityModel).filter(CityModel.CITY_SLUG == city_name).first()
             if not my_city_config:
-                # Fallback: find by CITYID=1 and auto-repair CITYNAME.
-                # This handles cases where the tutorial overwrote the internal
-                # city identifier (e.g. with a non-ASCII display name).
+                # Fallback: find by CITYID=1 and auto-repair CITY_SLUG.
+                # 旧チュートリアルが内部の識別子を表示名 (非 ASCII を含む) で
+                # 上書きしてしまった世界の救済。供給源は塞いだ — 表示名は
+                # CITYNAME が持ち、識別子は City 作成後に変更できない
+                # (docs/intent/city_identity.md §4 不変条件 2) — が、既に壊れた
+                # DB を起動できるようにするためこの経路は残す。
                 #
                 # 関所 (2026-07-31 席競合案件・十巡目): 同じ DB を所有する別の
                 # 稼働中プロセスがいる間は修復しない。runtime marker は City 名
@@ -75,7 +78,7 @@ class InitializationMixin:
                     raise ValueError(
                         f"City '{city_name}' not found in the database, and a "
                         f"running SAIVerse process already owns this database "
-                        f"({owner}). Refusing CITYNAME auto-repair — starting "
+                        f"({owner}). Refusing CITY_SLUG auto-repair — starting "
                         f"would run the same personas in two processes. Stop "
                         f"the running process first, or start it with its "
                         f"registered city name."
@@ -89,27 +92,27 @@ class InitializationMixin:
                     if city_count == 1 else None
                 )
                 if my_city_config:
-                    old_name = my_city_config.CITYNAME
+                    old_name = my_city_config.CITY_SLUG
                     LOGGER.warning(
-                        "City '%s' not found but CITYID=1 exists with CITYNAME='%s'. "
-                        "Auto-repairing CITYNAME to '%s'.",
+                        "City '%s' not found but CITYID=1 exists with CITY_SLUG='%s'. "
+                        "Auto-repairing CITY_SLUG to '%s'.",
                         city_name, old_name, city_name,
                     )
-                    my_city_config.CITYNAME = city_name
+                    my_city_config.CITY_SLUG = city_name
                     db.commit()
                 else:
                     raise ValueError(
                         f"City '{city_name}' not found in the database. "
                         "Please run 'python database/seed.py' first."
                         + (
-                            f" ({city_count} cities exist; CITYNAME auto-repair "
+                            f" ({city_count} cities exist; CITY_SLUG auto-repair "
                             "only applies to a single-city database)"
                             if city_count > 1 else ""
                         )
                     )
             
             self.city_id = my_city_config.CITYID
-            self.city_name = my_city_config.CITYNAME
+            self.city_name = my_city_config.CITY_SLUG
             self.user_room_id = f"user_room_{self.city_name}"
             self.ui_port = my_city_config.UI_PORT
             self.api_port = my_city_config.API_PORT
@@ -120,7 +123,7 @@ class InitializationMixin:
             # Load other cities' configs for inter-city communication
             other_cities = db.query(CityModel).filter(CityModel.CITYID != self.city_id).all()
             self.cities_config = {
-                city.CITYNAME: {
+                city.CITY_SLUG: {
                     "city_id": city.CITYID,
                     "api_base_url": f"http://127.0.0.1:{city.API_PORT}",
                     "timezone": getattr(city, "TIMEZONE", "UTC") or "UTC",

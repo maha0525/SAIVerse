@@ -17,6 +17,9 @@ interface PersonaWizardProps {
 
 interface City {
     CITYID: number;
+    /** 内部の識別子。ペルソナ ID のサフィックスに使う */
+    CITY_SLUG: string;
+    /** 表示名。選択肢のラベルに使う */
     CITYNAME: string;
     DESCRIPTION?: string;
 }
@@ -34,7 +37,9 @@ export default function PersonaWizard({ isOpen, onClose, onComplete, embedded }:
     const [systemPrompt, setSystemPrompt] = useState('');
     const [cities, setCities] = useState<City[]>([]);
     const [selectedCityId, setSelectedCityId] = useState<number | null>(null);
-    const [cityName, setCityName] = useState('');
+    // ペルソナ ID のサフィックスは City の内部識別子 (CITY_SLUG)。表示名ではない
+    // — 表示名は日本語も取りうるため ID に混ぜられない (docs/intent/city_identity.md)
+    const [citySlug, setCitySlug] = useState('');
 
     // Created persona info
     const [createdPersonaId, setCreatedPersonaId] = useState<string | null>(null);
@@ -64,7 +69,7 @@ export default function PersonaWizard({ isOpen, onClose, onComplete, embedded }:
                 setCities(data);
                 if (data.length > 0) {
                     setSelectedCityId(data[0].CITYID);
-                    setCityName(data[0].CITYNAME.toLowerCase().replace(/\s+/g, '_'));
+                    setCitySlug(data[0].CITY_SLUG);
                 }
             }
         } catch (e) {
@@ -76,7 +81,7 @@ export default function PersonaWizard({ isOpen, onClose, onComplete, embedded }:
         setSelectedCityId(cityId);
         const city = cities.find(c => c.CITYID === cityId);
         if (city) {
-            setCityName(city.CITYNAME.toLowerCase().replace(/\s+/g, '_'));
+            setCitySlug(city.CITY_SLUG);
         }
     };
 
@@ -130,8 +135,8 @@ export default function PersonaWizard({ isOpen, onClose, onComplete, embedded }:
             if (!personaId || !roomId) {
                 // Fallback: reconstruct locally (should not happen with updated API)
                 const baseId = customId.trim() || name.trim().toLowerCase().replace(/\s+/g, '_');
-                setCreatedPersonaId(`${baseId}_${cityName}`);
-                setCreatedRoomId(`${baseId}_${cityName}_room`);
+                setCreatedPersonaId(`${baseId}_${citySlug}`);
+                setCreatedRoomId(`${baseId}_${citySlug}_room`);
             } else {
                 setCreatedPersonaId(personaId);
                 setCreatedRoomId(roomId);
@@ -199,7 +204,7 @@ export default function PersonaWizard({ isOpen, onClose, onComplete, embedded }:
                         onChange={(e) => setCustomId(e.target.value.replace(/[^a-zA-Z0-9_]/g, ''))}
                         placeholder={name ? name.toLowerCase().replace(/\s+/g, '_') : 'air'}
                     />
-                    <span className={styles.idSuffix}>_{cityName}</span>
+                    <span className={styles.idSuffix}>_{citySlug}</span>
                 </div>
                 <p className={styles.hint}>
                     空欄の場合は名前から自動生成されます
@@ -214,7 +219,7 @@ export default function PersonaWizard({ isOpen, onClose, onComplete, embedded }:
                         onChange={(e) => handleCityChange(parseInt(e.target.value))}
                     >
                         {cities.map(c => (
-                            <option key={c.CITYID} value={c.CITYID}>{c.DESCRIPTION || c.CITYNAME}</option>
+                            <option key={c.CITYID} value={c.CITYID}>{c.CITYNAME || c.CITY_SLUG}</option>
                         ))}
                     </select>
                 </div>

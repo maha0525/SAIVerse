@@ -119,7 +119,7 @@ def another_running_process_owns_db(db_path: Path | str) -> tuple[bool, str]:
 
     City 名の異なるプロセスの並走は設計上許す (1 ホーム複数 City) が、**同じ
     DB の同じ City 実体を二重運転する事故**の判定材料として使う — 具体的には
-    ``_init_city_config`` の CITYNAME 自動修復が、稼働中プロセスの City を
+    ``_init_city_config`` の CITY_SLUG 自動修復が、稼働中プロセスの City を
     改名して乗っ取らないための関所 (2026-07-31 席競合案件・十巡目)。
 
     Returns:

@@ -86,7 +86,7 @@ class CloneTestBase(unittest.TestCase):
         Session = sessionmaker(bind=engine)
         with Session() as session:
             session.add(User(USERID=1, USERNAME="maha", PASSWORD="x", LOGGED_IN=False))
-            session.add(City(CITYID=42, USERID=1, CITYNAME="city_a",
+            session.add(City(CITYID=42, USERID=1, CITY_SLUG="city_a",
                              UI_PORT=8000, API_PORT=8001))
             session.add(Building(CITYID=42, BUILDINGID="prod_private_room",
                                  BUILDINGNAME="エアの私室"))
@@ -123,7 +123,7 @@ class CloneTestBase(unittest.TestCase):
         with Session() as session:
             session.add(User(USERID=1, USERNAME="test_user", PASSWORD="x", LOGGED_IN=True))
             if with_city:
-                session.add(City(CITYID=1, USERID=1, CITYNAME="test_city",
+                session.add(City(CITYID=1, USERID=1, CITY_SLUG="test_city",
                                  UI_PORT=18000, API_PORT=18001))
                 session.add(Building(CITYID=1, BUILDINGID="test_lobby",
                                      BUILDINGNAME="Test Lobby"))

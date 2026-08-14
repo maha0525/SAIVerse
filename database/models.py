@@ -247,7 +247,15 @@ class City(Base):
     # SQLAlchemy の sorted_tables が出す unresolvable cycles 警告 (将来 error 化) を解消する。
     USERID = Column(Integer, ForeignKey("user.USERID", use_alter=True, name="fk_city_user"), nullable=False)
     CITYID = Column(Integer, primary_key=True, autoincrement=True)
-    CITYNAME = Column(String(32), nullable=False)
+    # 内部の識別子 (ASCII 英数字とアンダースコアのみ)。起動引数・user_room の
+    # BUILDINGID・ペルソナ ID・建物ログの保存先フォルダ・二重起動チェックの鍵が
+    # すべてこの文字列から組み立てられるため、**City 作成後は変更できない**
+    # (docs/intent/city_identity.md §4 不変条件 2)。表示名は CITYNAME。
+    CITY_SLUG = Column(String(32), nullable=False)
+    # 表示名。自由な文字列 (日本語可) で一意性を要求しない。空なら UI は
+    # CITY_SLUG を代わりに表示する。**NAME が付く列は表示名** という規則を
+    # BUILDINGNAME / AINAME と共有する (docs/intent/city_identity.md §3)。
+    CITYNAME = Column(String(64), default="", nullable=False)
     DESCRIPTION = Column(String(1024), default="", nullable=False)
     TIMEZONE = Column(String(64), default="UTC", nullable=False)
     UI_PORT = Column(Integer, nullable=False)
@@ -260,7 +268,7 @@ class City(Base):
     # the city predates the version-aware system (treat as v0.3.0 or earlier).
     # 新規作成時は現行バージョンを刻む (AI と同様、作成直後のアップグレード通知を防ぐ)。
     LAST_KNOWN_VERSION = Column(String(64), nullable=True, default=_current_saiverse_version)
-    __table_args__ = (UniqueConstraint('USERID', 'CITYNAME', name='uq_user_city_name'), UniqueConstraint('UI_PORT', name='uq_ui_port'), UniqueConstraint('API_PORT', name='uq_api_port'))
+    __table_args__ = (UniqueConstraint('USERID', 'CITY_SLUG', name='uq_user_city_slug'), UniqueConstraint('UI_PORT', name='uq_ui_port'), UniqueConstraint('API_PORT', name='uq_api_port'))
 
 class Tool(Base):
     __tablename__ = "tool"

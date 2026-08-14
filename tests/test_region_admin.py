@@ -24,8 +24,8 @@ class RegionAdminTestCase(unittest.TestCase):
 
         db = self.SessionLocal()
         try:
-            db.add(CityModel(CITYID=1, USERID=1, CITYNAME="city_a", UI_PORT=3000, API_PORT=8000))
-            db.add(CityModel(CITYID=2, USERID=1, CITYNAME="city_b", UI_PORT=3001, API_PORT=9000))
+            db.add(CityModel(CITYID=1, USERID=1, CITY_SLUG="city_a", UI_PORT=3000, API_PORT=8000))
+            db.add(CityModel(CITYID=2, USERID=1, CITY_SLUG="city_b", UI_PORT=3001, API_PORT=9000))
             db.add(BuildingModel(CITYID=1, BUILDINGID="bldg_a", BUILDINGNAME="A"))
             db.add(BuildingModel(CITYID=2, BUILDINGID="bldg_b", BUILDINGNAME="B"))
             db.commit()
@@ -478,8 +478,8 @@ class BuildingCityImmutableTestCase(unittest.TestCase):
 
         db = self.SessionLocal()
         try:
-            db.add(CityModel(CITYID=1, USERID=1, CITYNAME="city_a", UI_PORT=3000, API_PORT=8000))
-            db.add(CityModel(CITYID=2, USERID=1, CITYNAME="city_b", UI_PORT=3001, API_PORT=9000))
+            db.add(CityModel(CITYID=1, USERID=1, CITY_SLUG="city_a", UI_PORT=3000, API_PORT=8000))
+            db.add(CityModel(CITYID=2, USERID=1, CITY_SLUG="city_b", UI_PORT=3001, API_PORT=9000))
             db.add(BuildingModel(
                 CITYID=1, BUILDINGID="bldg_a", BUILDINGNAME="A", CAPACITY=3,
             ))

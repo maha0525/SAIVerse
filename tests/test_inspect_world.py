@@ -54,7 +54,7 @@ def _make_world_db(path: Path) -> None:
     try:
         session.add(User(USERID=1, PASSWORD="x", USERNAME="tester"))
         session.flush()
-        session.add(City(CITYID=1, USERID=1, CITYNAME="test_city", UI_PORT=3001, API_PORT=8001))
+        session.add(City(CITYID=1, USERID=1, CITY_SLUG="test_city", UI_PORT=3001, API_PORT=8001))
         session.add(Building(BUILDINGID="lobby", CITYID=1, BUILDINGNAME="ロビー", CAPACITY=10))
         session.add(AI(
             AIID="alice", AINAME="アリス", HOME_CITYID=1,

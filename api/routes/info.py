@@ -334,12 +334,14 @@ def get_city_map(region_id: Optional[str] = None, manager = Depends(get_manager)
                 city_row = session.query(
                     CityModel.MAP_BACKGROUND_IMAGE,
                     CityModel.CITYNAME,
+                    CityModel.CITY_SLUG,
                 ).filter(CityModel.CITYID == city_id).first()
                 if city_row:
                     if city_row[0]:
                         map_background = city_row[0]
-                    if city_row[1]:
-                        city_name = city_row[1]
+                    # 見出しは表示名 (CITYNAME)。未設定なら識別子 (CITY_SLUG) を
+                    # 代わりに見せる (docs/intent/city_identity.md §4 不変条件 3)。
+                    city_name = (city_row[1] or "").strip() or city_row[2]
         finally:
             session.close()
     except Exception as e:

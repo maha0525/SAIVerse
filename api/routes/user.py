@@ -231,7 +231,7 @@ def update_user_profile(req: UpdateProfileRequest, manager = Depends(get_manager
         new_room_name = f"{req.display_name}の部屋"
         all_cities = session.query(CityModel).all()
         for city in all_cities:
-            user_room_id = f"user_room_{city.CITYNAME}"
+            user_room_id = f"user_room_{city.CITY_SLUG}"
             user_room = session.query(BuildingModel).filter_by(
                 BUILDINGID=user_room_id
             ).first()

@@ -11,6 +11,9 @@ interface Tool {
 
 interface City {
     CITYID: number;
+    /** 内部の識別子。表示名が空のときのフォールバック */
+    CITY_SLUG: string;
+    /** 表示名 */
     CITYNAME: string;
     DESCRIPTION?: string;
 }
@@ -288,7 +291,7 @@ export default function BuildingSettingsModal({ isOpen, onClose, buildingId, onS
                             <label>都市</label>
                             <select value={cityId} onChange={e => setCityId(parseInt(e.target.value))}>
                                 {cities.map(c => (
-                                    <option key={c.CITYID} value={c.CITYID}>{c.DESCRIPTION || c.CITYNAME}</option>
+                                    <option key={c.CITYID} value={c.CITYID}>{c.CITYNAME || c.CITY_SLUG}</option>
                                 ))}
                             </select>
                         </div>

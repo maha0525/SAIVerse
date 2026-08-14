@@ -28,6 +28,9 @@ def _check_result(result: str) -> dict:
 # --- Pydantic Models ---
 
 class CityCreate(BaseModel):
+    # slug = 内部の識別子 (英数字とアンダースコア)。作成時にしか決められない。
+    # name = 表示名 (自由な文字列)。docs/intent/city_identity.md §3
+    slug: str
     name: str
     description: str
     ui_port: int
@@ -35,6 +38,7 @@ class CityCreate(BaseModel):
     timezone: str
 
 class CityUpdate(BaseModel):
+    # 識別子 (slug) は受け取らない — City 作成後は変更できない (同 §4 不変条件 2)
     name: str
     description: str
     online_mode: bool
@@ -108,6 +112,11 @@ class BuildingPositionsUpdate(BaseModel):
 class CityMapBackgroundUpdate(BaseModel):
     map_background_image: Optional[str] = None
 
+
+class CityDisplayNameUpdate(BaseModel):
+    """街マップ画面から表示名だけを変える軽量更新のリクエスト。"""
+    name: str
+
 class AICreate(BaseModel):
     name: str
     system_prompt: str
@@ -175,11 +184,40 @@ class ItemUpdate(BaseModel):
 # City
 @router.post("/cities")
 def create_city(city: CityCreate, manager: SAIVerseManager = Depends(get_manager)):
-    return _check_result(manager.create_city(city.name, city.description, city.ui_port, city.api_port, city.timezone))
+    return _check_result(manager.create_city(city.slug, city.name, city.description, city.ui_port, city.api_port, city.timezone))
 
 @router.put("/cities/{city_id}")
 def update_city(city_id: int, city: CityUpdate, manager: SAIVerseManager = Depends(get_manager)):
     return _check_result(manager.update_city(city_id, city.name, city.description, city.online_mode, city.ui_port, city.api_port, city.timezone, city.host_avatar_path, None, city.map_background_image))
+
+@router.patch("/cities/{city_id}/name")
+def update_city_display_name(city_id: int, req: CityDisplayNameUpdate, manager: SAIVerseManager = Depends(get_manager)):
+    """街マップ画面から City の表示名 (CITYNAME) だけを更新する PATCH。
+
+    背景画像の PATCH と対になる軽量経路 (PUT /cities/{id} は全フィールド要求)。
+    内部の識別子 (CITY_SLUG) はここでも変更できない — City 作成後は不変
+    (docs/intent/city_identity.md §4 不変条件 2)。表示名は自由な文字列なので
+    文字種の検証は行わないが、前後の空白は落とす。
+    """
+    from database.models import City as CityModel
+    session = manager.SessionLocal()
+    try:
+        city = session.query(CityModel).filter(CityModel.CITYID == city_id).first()
+        if not city:
+            raise HTTPException(status_code=404, detail="City not found")
+        city.CITYNAME = (req.name or "").strip()
+        session.commit()
+        # 表示名が空なら UI は識別子を代わりに見せる (不変条件 3)。応答でも
+        # 「実際に画面へ出る文字列」を返して、呼び出し側の再取得を不要にする。
+        return {"name": city.CITYNAME, "display_name": city.CITYNAME or city.CITY_SLUG}
+    except HTTPException:
+        raise
+    except Exception as e:
+        session.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        session.close()
+
 
 @router.patch("/cities/{city_id}/map-background")
 def update_city_map_background(city_id: int, req: CityMapBackgroundUpdate, manager: SAIVerseManager = Depends(get_manager)):

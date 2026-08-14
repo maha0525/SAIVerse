@@ -116,7 +116,7 @@ class BlueprintMixin:
                         db.query(CityModel).filter_by(CITYID=city_id).first()
                     )
                     city_name_for_error = (
-                        target_city.CITYNAME if target_city else f"ID {city_id}"
+                        target_city.CITY_SLUG if target_city else f"ID {city_id}"
                     )
                     return (
                         "Error: A blueprint named "
@@ -190,7 +190,7 @@ class BlueprintMixin:
                 )
 
             home_city = db.query(CityModel).filter_by(CITYID=blueprint.CITYID).first()
-            new_ai_id = f"{entity_name.lower().replace(' ', '_')}_{home_city.CITYNAME}"
+            new_ai_id = f"{entity_name.lower().replace(' ', '_')}_{home_city.CITY_SLUG}"
             # AIID は ~/.saiverse/personas/<id>/ のフォルダ名になる
             # (manager/persona.py の同じ検査と対)
             if not is_safe_path_component(new_ai_id):
@@ -210,7 +210,7 @@ class BlueprintMixin:
             # 同じ私室 ID に落ちうる。
             private_room_id = build_identifier(
                 entity_name,
-                home_city.CITYNAME,
+                home_city.CITY_SLUG,
                 "room",
                 stem="persona",
                 ensure_unique=True,

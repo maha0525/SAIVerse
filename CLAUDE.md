@@ -51,7 +51,7 @@ python -m pytest         # tests (unittest also works)
 ruff check .             # or: ruff check --fix .
 ```
 
-Only `city_a` is seeded by default (`builtin_data/cities.json`). Starting an unregistered city name (`python main.py city_b`) on a single-city DB does **not** error: the CITYNAME auto-repair renames `CITYID=1` to the requested name (tutorial-rename rescue). Since 2026-07-31 the repair is refused while another running process owns the same DB (runtime-marker check) — renaming a live city would run the same personas in two processes.
+Only `city_a` is seeded by default (`builtin_data/cities.json`). The CLI argument is the City's **`CITY_SLUG`** (internal identifier), never its display name — see `docs/intent/city_identity.md`. Starting an unregistered slug (`python main.py city_b`) on a single-city DB does **not** error: the slug auto-repair renames `CITYID=1` to the requested slug (rescue for worlds damaged before the identifier was made immutable). Since 2026-07-31 the repair is refused while another running process owns the same DB (runtime-marker check) — renaming a live city would run the same personas in two processes.
 
 **After writing or modifying Python, always run `ruff check` on the changed files** before considering the task complete. It catches undefined names (e.g. `LOGGER` where `logging` was meant) that would otherwise fail at runtime.
 

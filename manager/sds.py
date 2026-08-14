@@ -169,7 +169,7 @@ class SDSMixin:
         try:
             other_cities = db.query(self.city_model).filter(self.city_model.CITYID != self.city_id).all()
             self.cities_config = {
-                city.CITYNAME: {
+                city.CITY_SLUG: {
                     "city_id": city.CITYID,
                     "api_base_url": f"http://127.0.0.1:{city.API_PORT}",
                     "timezone": getattr(city, "TIMEZONE", "UTC") or "UTC",

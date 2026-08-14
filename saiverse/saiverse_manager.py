@@ -2247,7 +2247,11 @@ class SAIVerseManager(
         host_avatar_upload: Optional[str] = None,
         map_background_image: Optional[str] = None,
     ) -> str:
-        """ワールドエディタからCityの設定を更新する"""
+        """ワールドエディタから City の設定を更新する。``name`` は表示名 (CITYNAME)。
+
+        内部の識別子 (CITY_SLUG) は作成後に変更できないため、ここでは受け取らない
+        (docs/intent/city_identity.md §4 不変条件 2)。
+        """
         return self.admin.update_city(
             city_id,
             name,
@@ -2276,9 +2280,9 @@ class SAIVerseManager(
 
     # --- World Editor: Create/Delete Methods ---
 
-    def create_city(self, name: str, description: str, ui_port: int, api_port: int, timezone_name: str) -> str:
-        """Creates a new city."""
-        return self.admin.create_city(name, description, ui_port, api_port, timezone_name)
+    def create_city(self, slug: str, name: str, description: str, ui_port: int, api_port: int, timezone_name: str) -> str:
+        """Creates a new city. ``slug`` = 内部の識別子、``name`` = 表示名。"""
+        return self.admin.create_city(slug, name, description, ui_port, api_port, timezone_name)
 
     def delete_city(self, city_id: int) -> str:
         """Deletes a city after checking dependencies."""

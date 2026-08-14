@@ -101,7 +101,7 @@ class FeedsApiTestBase(unittest.TestCase):
         try:
             db.add(User(USERID=1, PASSWORD="x", USERNAME="tester"))
             db.flush()
-            city = City(USERID=1, CITYNAME="test_city", UI_PORT=3001, API_PORT=8001)
+            city = City(USERID=1, CITY_SLUG="test_city", UI_PORT=3001, API_PORT=8001)
             db.add(city)
             db.flush()
             db.add(Building(
@@ -983,7 +983,7 @@ class FeedsApiCityIsolationTest(FeedsApiTestBase):
         db = self.Session()
         try:
             other_city = City(
-                USERID=1, CITYNAME="other_city", UI_PORT=3002, API_PORT=8002,
+                USERID=1, CITY_SLUG="other_city", UI_PORT=3002, API_PORT=8002,
             )
             db.add(other_city)
             db.flush()

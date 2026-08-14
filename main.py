@@ -353,7 +353,7 @@ def main():
     # 追加系 (新規テーブル / 新規列) は ALTER/CREATE で生きた DB に直接当てる軽量パスを優先する。
     # 全書換 (ファイル move) は他コネクションがファイルを開いていると Windows で WinError 32 に
     # なるため、 破壊的差分 (列削除/型変更) のときだけフォールバックする。
-    from database.migrate import needs_migration, migrate_database_in_place, try_additive_migration, backfill_track_short_ids, backfill_item_short_ids, backfill_day_plan_refs, backfill_desire_stage_normalization, drop_empty_legacy_note_tables, backfill_session_anchors, backfill_session_head_snapshots, backfill_schedule_instance_tokens, ensure_active_occupancy_unique, ensure_region_entrance_unique, ensure_episode_inheritance_table, ensure_feed_tables
+    from database.migrate import needs_migration, migrate_database_in_place, try_additive_migration, backfill_track_short_ids, backfill_item_short_ids, backfill_city_display_names, backfill_day_plan_refs, backfill_desire_stage_normalization, drop_empty_legacy_note_tables, backfill_session_anchors, backfill_session_head_snapshots, backfill_schedule_instance_tokens, ensure_active_occupancy_unique, ensure_region_entrance_unique, ensure_episode_inheritance_table, ensure_feed_tables
     if needs_migration(str(db_path)):
         logging.info("Database schema change detected. Running auto-migration...")
         if try_additive_migration(str(db_path)):
@@ -375,6 +375,12 @@ def main():
     # 分離を効かせるため一括採番する。NULL 行が無ければ no-op の冪等ステップ
     # なので起動ごとに無条件で呼んで問題ない。
     backfill_schedule_instance_tokens(str(db_path))
+
+    # City の表示名 (CITYNAME) 復元 (docs/intent/city_identity.md §6): 旧スキーマは
+    # CITYNAME が内部の識別子で、表示名は DESCRIPTION に置かれていた。改名 ALTER で
+    # 識別子を CITY_SLUG へ退避した後、新設の CITYNAME を DESCRIPTION から埋める。
+    # 空の CITYNAME だけを対象にする冪等ステップなので毎起動で呼んで問題ない。
+    backfill_city_display_names(str(db_path))
 
     # desire 正規化 (P3c-0): stage の物理刻印 + note 親バインドの撤去 + desire
     # ノート削除。同じく schema 変更を伴わないデータ移行で、各ステップが実行後は

@@ -29,7 +29,7 @@ def session() -> Session:
     sess = SessionLocal()
     sess.add(User(USERID=1, PASSWORD="x", USERNAME="tester"))
     sess.commit()
-    sess.add(City(CITYID=1, CITYNAME="test_city", USERID=1, UI_PORT=3000, API_PORT=8000))
+    sess.add(City(CITYID=1, CITY_SLUG="test_city", USERID=1, UI_PORT=3000, API_PORT=8000))
     sess.commit()
     try:
         yield sess

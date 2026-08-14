@@ -107,7 +107,7 @@ def test_another_running_process_owns_db_detects_foreign_owner(
 
 
 def test_cityname_auto_repair_refused_while_db_is_owned(tmp_path: Path) -> None:
-    """CITYNAME 自動修復は、同じ DB を所有する稼働中プロセスがいる間は拒否する。
+    """CITY_SLUG 自動修復は、同じ DB を所有する稼働中プロセスがいる間は拒否する。
 
     runtime marker は City 名でしか二重起動を弾かないため、稼働中の City を
     別名 (`python main.py city_b`) で起動すると、修復が CITYID=1 を改名して
@@ -128,7 +128,7 @@ def test_cityname_auto_repair_refused_while_db_is_owned(tmp_path: Path) -> None:
     try:
         db.add(User(USERID=1, PASSWORD="x", USERNAME="tester"))
         db.flush()
-        db.add(City(USERID=1, CITYNAME="city_a", UI_PORT=3001, API_PORT=8001))
+        db.add(City(USERID=1, CITY_SLUG="city_a", UI_PORT=3001, API_PORT=8001))
         db.commit()
     finally:
         db.close()
@@ -145,11 +145,11 @@ def test_cityname_auto_repair_refused_while_db_is_owned(tmp_path: Path) -> None:
         "saiverse.runtime_marker.another_running_process_owns_db",
         return_value=(True, "verified SAIVerse City 'city_a' process pid 999"),
     ):
-        with pytest.raises(ValueError, match="Refusing CITYNAME auto-repair"):
+        with pytest.raises(ValueError, match="Refusing CITY_SLUG auto-repair"):
             m._init_city_config("city_b")
     db = Session()
     try:
-        assert db.query(City).filter(City.CITYID == 1).first().CITYNAME == "city_a"
+        assert db.query(City).filter(City.CITYID == 1).first().CITY_SLUG == "city_a"
     finally:
         db.close()
 
@@ -160,7 +160,7 @@ def test_cityname_auto_repair_refused_while_db_is_owned(tmp_path: Path) -> None:
         m._init_city_config("city_b")
     db = Session()
     try:
-        assert db.query(City).filter(City.CITYID == 1).first().CITYNAME == "city_b"
+        assert db.query(City).filter(City.CITYID == 1).first().CITY_SLUG == "city_b"
     finally:
         db.close()
 
@@ -184,8 +184,8 @@ def test_cityname_auto_repair_refused_for_multi_city_db(tmp_path: Path) -> None:
     try:
         db.add(User(USERID=1, PASSWORD="x", USERNAME="tester"))
         db.flush()
-        db.add(City(USERID=1, CITYNAME="city_a", UI_PORT=3001, API_PORT=8001))
-        db.add(City(USERID=1, CITYNAME="city_b", UI_PORT=3002, API_PORT=8002))
+        db.add(City(USERID=1, CITY_SLUG="city_a", UI_PORT=3001, API_PORT=8001))
+        db.add(City(USERID=1, CITY_SLUG="city_b", UI_PORT=3002, API_PORT=8002))
         db.commit()
     finally:
         db.close()
@@ -206,7 +206,7 @@ def test_cityname_auto_repair_refused_for_multi_city_db(tmp_path: Path) -> None:
             m._init_city_config("city_c")
     db = Session()
     try:
-        assert db.query(City).filter(City.CITYID == 1).first().CITYNAME == "city_a"
+        assert db.query(City).filter(City.CITYID == 1).first().CITY_SLUG == "city_a"
     finally:
         db.close()
 

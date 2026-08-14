@@ -272,6 +272,59 @@
     text-shadow: 0 0 18px rgba(140, 160, 255, 0.45);
 }
 
+/* 見出しと、その右に置く編集ボタン。見出し自体は中央揃えのままにしたいので
+   行全体を中央寄せし、ボタンは見出しの右隣に流し込む。 */
+.titleRow {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+}
+
+/* 街の名前を変える鉛筆ボタン / 保存・キャンセル。普段は控えめで、
+   ホバーで浮かび上がる (見出しの主役は名前そのもの)。 */
+.titleIconBtn {
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    border-radius: 6px;
+    color: #d8dcff;
+    cursor: pointer;
+    padding: 4px 6px;
+    display: inline-flex;
+    align-items: center;
+    opacity: 0.5;
+    transition: opacity 0.15s ease, background 0.15s ease;
+}
+
+.titleIconBtn:hover:not(:disabled) {
+    opacity: 1;
+    background: rgba(255, 255, 255, 0.14);
+}
+
+.titleIconBtn:disabled {
+    opacity: 0.25;
+    cursor: not-allowed;
+}
+
+.titleInput {
+    background: rgba(255, 255, 255, 0.08);
+    border: 1px solid rgba(140, 160, 255, 0.45);
+    border-radius: 6px;
+    color: #d8dcff;
+    font-size: 1.4rem;
+    font-weight: 500;
+    letter-spacing: 0.15em;
+    text-align: center;
+    padding: 0.1rem 0.5rem;
+    max-width: 100%;
+    min-width: 8rem;
+}
+
+.titleInput:focus {
+    outline: none;
+    border-color: rgba(160, 180, 255, 0.8);
+}
+
 .subtitle {
     margin-top: 0.25rem;
     font-size: 0.8rem;
@@ -749,6 +802,26 @@
 
 :global([data-theme="light"]) .subtitle {
     color: rgba(40, 45, 60, 0.6);
+}
+
+:global([data-theme="light"]) .titleIconBtn {
+    background: rgba(40, 45, 60, 0.06);
+    border-color: rgba(60, 65, 90, 0.25);
+    color: #2a2d3a;
+}
+
+:global([data-theme="light"]) .titleIconBtn:hover:not(:disabled) {
+    background: rgba(40, 45, 60, 0.14);
+}
+
+:global([data-theme="light"]) .titleInput {
+    background: rgba(255, 255, 255, 0.75);
+    border-color: rgba(110, 120, 190, 0.55);
+    color: #2a2d3a;
+}
+
+:global([data-theme="light"]) .titleInput:focus {
+    border-color: rgba(90, 100, 180, 0.9);
 }
 
 /* タイトルバーの uppercase / 下線 */

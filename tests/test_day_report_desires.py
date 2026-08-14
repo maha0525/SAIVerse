@@ -40,7 +40,7 @@ class DepartedDesireSectionTests(unittest.TestCase):
         try:
             db.add(User(USERID=1, PASSWORD="x", USERNAME="t"))
             db.flush()
-            city = City(USERID=1, CITYNAME="c", UI_PORT=3001, API_PORT=8001)
+            city = City(USERID=1, CITY_SLUG="c", UI_PORT=3001, API_PORT=8001)
             db.add(city)
             db.flush()
             db.add(AI(AIID=PERSONA_ID, HOME_CITYID=city.CITYID, AINAME="Air"))

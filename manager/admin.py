@@ -109,14 +109,20 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
     # --- City management ---
 
     @staticmethod
-    def _validate_city_name(name: str) -> Optional[str]:
-        """Validate city name is ASCII alphanumeric + underscore only.
-        Returns an error message string if invalid, None if valid."""
-        if not name or not name.strip():
-            return "Error: City name cannot be empty."
-        if not re.match(r'^[a-zA-Z0-9_]+$', name):
+    def _validate_city_slug(slug: str) -> Optional[str]:
+        """City の内部識別子 (CITY_SLUG) を検証する。
+
+        起動引数・user_room の BUILDINGID・ペルソナ ID・建物ログの保存先フォルダ名
+        がこの文字列から組み立てられるため、ファイル名と ID に安全な ASCII 英数字と
+        アンダースコアだけを許す。表示名 (CITYNAME) はこの制限を受けない。
+
+        Returns: 不正なら理由の文字列、正しければ None。
+        """
+        if not slug or not slug.strip():
+            return "Error: City slug cannot be empty."
+        if not re.match(r'^[a-zA-Z0-9_]+$', slug):
             return (
-                "Error: City name must contain only alphanumeric characters "
+                "Error: City slug must contain only alphanumeric characters "
                 "and underscores (a-z, A-Z, 0-9, _)."
             )
         return None
@@ -134,10 +140,12 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
         host_avatar_upload: Optional[str] = None,
         map_background_image: Optional[str] = None,
     ) -> str:
-        name_error = self._validate_city_name(name)
-        if name_error:
-            return name_error
+        """City の設定を更新する。``name`` は**表示名** (CITYNAME)。
 
+        内部の識別子 (CITY_SLUG) はここでは変更できない — 発行済みの Building ID・
+        ペルソナ ID・ディスク上のログ保存先が既にその文字列を含んでおり、後から
+        変えると食い違う (docs/intent/city_identity.md §4 不変条件 2)。
+        """
         db = self.SessionLocal()
         try:
             city = db.query(CityModel).filter(CityModel.CITYID == city_id).first()
@@ -153,7 +161,7 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                     "timezone name (e.g., Asia/Tokyo)."
                 )
 
-            city.CITYNAME = name
+            city.CITYNAME = (name or "").strip()
             city.DESCRIPTION = description
             city.START_IN_ONLINE_MODE = online_mode
             city.UI_PORT = ui_port
@@ -176,15 +184,15 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
             if city.CITYID == self.state.city_id:
                 self.state.start_in_online_mode = online_mode
                 self.manager.start_in_online_mode = online_mode
-                self.state.city_name = name
-                self.manager.city_name = name
                 self.state.ui_port = ui_port
                 self.manager.ui_port = ui_port
                 self.state.api_port = api_port
                 self.manager.api_port = api_port
-                self.state.user_room_id = f"user_room_{self.state.city_name}"
-                self.manager.user_room_id = self.state.user_room_id
-                self.user_room_id = self.state.user_room_id
+                # 識別子 (CITY_SLUG) は不変なので、user_room_id / city_name /
+                # 建物ログの保存先は張り替えない。旧実装はここで user_room_id だけ
+                # メモリ上で書き換えており、DB の building 行とディスクのフォルダが
+                # 旧名のまま取り残されてユーザーの部屋が行方不明になっていた
+                # (docs/intent/city_identity.md §2-4 欠陥 A)。
                 self._update_timezone_cache(tz_candidate)
                 # _update_timezone_cache updates manager & state; sync admin's
                 # own cached copies so _create_persona / _load_single_persona
@@ -216,16 +224,26 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
             db.close()
 
     def create_city(
-        self, name: str, description: str, ui_port: int, api_port: int, timezone_name: str
+        self,
+        slug: str,
+        name: str,
+        description: str,
+        ui_port: int,
+        api_port: int,
+        timezone_name: str,
     ) -> str:
-        name_error = self._validate_city_name(name)
-        if name_error:
-            return name_error
+        """City を作る。``slug`` は内部の識別子、``name`` は表示名。
+
+        識別子は作成時にしか決められない (docs/intent/city_identity.md §4 不変条件 2)。
+        """
+        slug_error = self._validate_city_slug(slug)
+        if slug_error:
+            return slug_error
 
         db = self.SessionLocal()
         try:
-            if db.query(CityModel).filter_by(CITYNAME=name).first():
-                return f"Error: A city named '{name}' already exists."
+            if db.query(CityModel).filter_by(CITY_SLUG=slug).first():
+                return f"Error: A city with slug '{slug}' already exists."
             if (
                 db.query(CityModel)
                 .filter(
@@ -248,7 +266,8 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
 
             new_city = CityModel(
                 USERID=self.state.user_id,
-                CITYNAME=name,
+                CITY_SLUG=slug,
+                CITYNAME=(name or "").strip(),
                 DESCRIPTION=description,
                 UI_PORT=ui_port,
                 API_PORT=api_port,
@@ -257,9 +276,9 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
             db.add(new_city)
             db.commit()
             self._load_cities_from_db()
-            logging.info("Created new city '%s'.", name)
+            logging.info("Created new city '%s' (slug: %s).", name or slug, slug)
             return (
-                f"City '{name}' created successfully. "
+                f"City '{name or slug}' created successfully. "
                 "Please restart the application to use it."
             )
         except Exception as exc:
@@ -335,20 +354,20 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
 
             if db.query(BuildingModel).filter_by(CITYID=city_id).first():
                 return (
-                    f"Error: Cannot delete city '{city.CITYNAME}' because it still "
+                    f"Error: Cannot delete city '{city.CITY_SLUG}' because it still "
                     "contains buildings."
                 )
 
             if db.query(BuildingOccupancyLog).filter_by(CITYID=city_id).first():
                 return (
-                    f"Error: Cannot delete city '{city.CITYNAME}' due to remaining "
+                    f"Error: Cannot delete city '{city.CITY_SLUG}' due to remaining "
                     "occupancy logs. Please clean up buildings first."
                 )
 
             db.delete(city)
             db.commit()
-            logging.info("Deleted city '%s'.", city.CITYNAME)
-            return f"City '{city.CITYNAME}' deleted successfully."
+            logging.info("Deleted city '%s'.", city.CITY_SLUG)
+            return f"City '{city.CITY_SLUG}' deleted successfully."
         except Exception as exc:
             db.rollback()
             return f"Error: {exc}"
@@ -387,7 +406,7 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                 # フォールバック (issue 論点 1: 読み変換は導入せず、まず口を塞ぐ)
                 building_id = build_identifier(
                     name,
-                    city.CITYNAME,
+                    city.CITY_SLUG,
                     stem="building",
                     exists=lambda cid: db.query(BuildingModel)
                     .filter_by(BUILDINGID=cid)
@@ -614,7 +633,7 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
 
                 region_id = build_identifier(
                     name,
-                    city.CITYNAME,
+                    city.CITY_SLUG,
                     prefix="region",
                     exists=_region_id_taken,
                 )

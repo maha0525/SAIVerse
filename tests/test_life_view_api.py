@@ -111,11 +111,11 @@ class LifeViewApiTest(unittest.TestCase):
             db.add(User(USERID=1, PASSWORD="x", USERNAME="tester"))
             db.flush()
             city_a = City(
-                USERID=1, CITYNAME="city_a", UI_PORT=3001, API_PORT=8001,
+                USERID=1, CITY_SLUG="city_a", UI_PORT=3001, API_PORT=8001,
                 TIMEZONE=TZ_NAME,
             )
             city_b = City(
-                USERID=1, CITYNAME="city_b", UI_PORT=3002, API_PORT=8002,
+                USERID=1, CITY_SLUG="city_b", UI_PORT=3002, API_PORT=8002,
                 TIMEZONE="UTC",
             )
             db.add_all([city_a, city_b])

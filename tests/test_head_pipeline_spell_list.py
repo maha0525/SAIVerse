@@ -38,7 +38,7 @@ def isolated_manager(request):
     try:
         db.add(User(USERID=1, USERNAME="t", PASSWORD="x"))
         db.commit()
-        db.add(City(CITYID=1, USERID=1, CITYNAME="c", UI_PORT=3000, API_PORT=8000))
+        db.add(City(CITYID=1, USERID=1, CITY_SLUG="c", UI_PORT=3000, API_PORT=8000))
         db.commit()
         db.add(AI(
             AIID="air", HOME_CITYID=1, AINAME="Air",

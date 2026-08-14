@@ -56,8 +56,8 @@ class AdminAiEditContractTest(unittest.TestCase):
         try:
             db.add(User(USERID=1, PASSWORD="x", USERNAME="u"))
             db.flush()
-            db.add(City(CITYID=1, USERID=1, CITYNAME="city_a", UI_PORT=3000, API_PORT=8000))
-            db.add(City(CITYID=2, USERID=1, CITYNAME="city_b", UI_PORT=3001, API_PORT=8001))
+            db.add(City(CITYID=1, USERID=1, CITY_SLUG="city_a", UI_PORT=3000, API_PORT=8000))
+            db.add(City(CITYID=2, USERID=1, CITY_SLUG="city_b", UI_PORT=3001, API_PORT=8001))
             db.add(AI(AIID=AI_ID, HOME_CITYID=1, AINAME="Air"))
             db.commit()
         finally:

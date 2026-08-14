@@ -133,11 +133,20 @@ def _create_cities(db, cities_json_path: Path, seed_data: dict) -> dict:
         city_seed = seed_data.get("cities", {}).get(city_name, {})
         online_mode = city_seed.get("start_in_online_mode", False)
 
-        city_description = city_seed.get("description", city_name)
+        # 表示名 (CITYNAME) と説明文 (DESCRIPTION) は別物。旧 seed_data は
+        # description に表示名を入れていたので、display_name が無い定義では
+        # そちらへフォールバックする (docs/intent/city_identity.md §3)。
+        city_display_name = (
+            city_seed.get("display_name")
+            or city_seed.get("description")
+            or city_name
+        )
+        city_description = city_seed.get("description", "")
 
         new_city = City(
             USERID=1,
-            CITYNAME=city_name,
+            CITY_SLUG=city_name,
+            CITYNAME=city_display_name,
             DESCRIPTION=city_description,
             UI_PORT=config["ui_port"],
             API_PORT=config["api_port"],

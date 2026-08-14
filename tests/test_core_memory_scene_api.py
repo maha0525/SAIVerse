@@ -50,7 +50,7 @@ def _make_manager(persona_name="エア"):
     try:
         db.add(User(USERID=1, PASSWORD="x", USERNAME="tester"))
         db.flush()
-        city = City(USERID=1, CITYNAME="c", UI_PORT=3001, API_PORT=8001)
+        city = City(USERID=1, CITY_SLUG="c", UI_PORT=3001, API_PORT=8001)
         db.add(city)
         db.flush()
         db.add(AI(AIID="tester", HOME_CITYID=city.CITYID, AINAME=persona_name))

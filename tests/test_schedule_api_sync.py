@@ -70,7 +70,7 @@ class ScheduleApiSyncTest(unittest.TestCase):
         try:
             db.add(User(USERID=1, PASSWORD="x", USERNAME="tester"))
             db.flush()
-            city = City(USERID=1, CITYNAME="city_a", UI_PORT=3001, API_PORT=8001)
+            city = City(USERID=1, CITY_SLUG="city_a", UI_PORT=3001, API_PORT=8001)
             db.add(city)
             db.flush()
             db.add(AI(AIID=PERSONA_ID, HOME_CITYID=city.CITYID, AINAME="アリス"))

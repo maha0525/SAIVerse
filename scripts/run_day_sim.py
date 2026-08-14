@@ -346,7 +346,7 @@ def _build_mock_manager(db_file: Optional[str], scenario) -> Any:
             db.flush()
         city = db.query(City).first()
         if city is None:
-            city = City(USERID=1, CITYNAME="sim_city", UI_PORT=3001, API_PORT=8001)
+            city = City(USERID=1, CITY_SLUG="sim_city", UI_PORT=3001, API_PORT=8001)
             db.add(city)
             db.flush()
         if db.query(AI).filter(AI.AIID == persona_id).first() is None:

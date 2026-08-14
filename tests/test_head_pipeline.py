@@ -316,7 +316,7 @@ def isolated_db_session_factory(request):
     try:
         db.add(User(USERID=1, USERNAME="tester", PASSWORD="x"))
         db.commit()
-        db.add(City(CITYID=1, USERID=1, CITYNAME="test_city", UI_PORT=3000, API_PORT=8000))
+        db.add(City(CITYID=1, USERID=1, CITY_SLUG="test_city", UI_PORT=3000, API_PORT=8000))
         db.commit()
         db.add(AI(AIID="air", HOME_CITYID=1, AINAME="Air", DEFAULT_MODEL="claude-opus-4-7"))
         db.commit()

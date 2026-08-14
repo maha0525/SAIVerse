@@ -15,6 +15,9 @@ const Select = ({ children, ...props }: React.SelectHTMLAttributes<HTMLSelectEle
 
 interface City {
     CITYID: number;
+    /** 内部の識別子 (英数字・アンダースコア)。作成後は変更不可 */
+    CITY_SLUG: string;
+    /** 表示名 (自由な文字列)。空なら CITY_SLUG を代わりに表示する */
     CITYNAME: string;
     DESCRIPTION: string;
     UI_PORT: number;
@@ -225,7 +228,7 @@ export default function WorldEditor() {
     // --- City Handlers ---
     const handleCitySelect = (city: City) => {
         setSelectedCity(city);
-        setFormData({ name: city.CITYNAME, description: city.DESCRIPTION, ui_port: city.UI_PORT, api_port: city.API_PORT, timezone: city.TIMEZONE, online_mode: city.START_IN_ONLINE_MODE, map_background_image: city.MAP_BACKGROUND_IMAGE || '' });
+        setFormData({ name: city.CITYNAME, slug: city.CITY_SLUG, description: city.DESCRIPTION, ui_port: city.UI_PORT, api_port: city.API_PORT, timezone: city.TIMEZONE, online_mode: city.START_IN_ONLINE_MODE, map_background_image: city.MAP_BACKGROUND_IMAGE || '' });
     };
     const handleCreateCity = async () => { if (await apiCall('/api/world/cities', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(formData) })) { loadCities(); setFormData({}); } };
     const handleUpdateCity = async () => { if (await apiCall(`/api/world/cities/${selectedCity!.CITYID}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(formData) })) { loadCities(); } };
@@ -389,13 +392,21 @@ export default function WorldEditor() {
                     <div className={styles.pane}>
                         <div className={styles.list}>
                             <h3>City 一覧</h3>
-                            {cities.map(c => <div key={c.CITYID} className={`${styles.item} ${selectedCity?.CITYID === c.CITYID ? styles.selected : ''}`} onClick={() => handleCitySelect(c)}>{c.DESCRIPTION || c.CITYNAME}</div>)}
+                            {cities.map(c => <div key={c.CITYID} className={`${styles.item} ${selectedCity?.CITYID === c.CITYID ? styles.selected : ''}`} onClick={() => handleCitySelect(c)}>{c.CITYNAME || c.CITY_SLUG}</div>)}
                             <button className={styles.newBtn} onClick={() => { setSelectedCity(null); setFormData({}); }}>+ 新規作成</button>
                         </div>
                         <div className={styles.form}>
                             <h3>{selectedCity ? `City を編集` : '新しい City'}</h3>
-                            <Field label="ID（英数字・アンダースコアのみ）"><Input value={formData.name || ''} onChange={(e: any) => setFormData({ ...formData, name: e.target.value.replace(/[^a-zA-Z0-9_]/g, '') })} /></Field>
-                            <Field label="名前"><Input value={formData.description || ''} onChange={(e: any) => setFormData({ ...formData, description: e.target.value })} /></Field>
+                            <Field label="名前"><Input value={formData.name || ''} onChange={(e: any) => setFormData({ ...formData, name: e.target.value })} /></Field>
+                            {/* 内部の識別子は作成時にしか決められない。起動引数・部屋の
+                                BUILDINGID・ペルソナ ID・ログの保存先がこの文字列から
+                                作られるため、後から変えると食い違う
+                                (docs/intent/city_identity.md §4 不変条件 2)。 */}
+                            {selectedCity
+                                ? <Field label="内部ID（変更不可）"><Input value={selectedCity.CITY_SLUG} disabled style={{ opacity: 0.7, cursor: 'not-allowed' }} /></Field>
+                                : <Field label="内部ID（英数字・アンダースコアのみ）"><Input value={formData.slug || ''} onChange={(e: any) => setFormData({ ...formData, slug: e.target.value.replace(/[^a-zA-Z0-9_]/g, '') })} /></Field>
+                            }
+                            <Field label="説明"><TextArea value={formData.description || ''} onChange={(e: any) => setFormData({ ...formData, description: e.target.value })} /></Field>
                             <div className={styles.row}>
                                 <Field label="UI ポート"><NumInput value={formData.ui_port || ''} onChange={(e: any) => setFormData({ ...formData, ui_port: parseInt(e.target.value) })} /></Field>
                                 <Field label="API ポート"><NumInput value={formData.api_port || ''} onChange={(e: any) => setFormData({ ...formData, api_port: parseInt(e.target.value) })} /></Field>
@@ -432,7 +443,7 @@ export default function WorldEditor() {
                             {/* 既存 Building の City 変更は不可 (W7 柱5: 参照 scope を跨ぐため
                                 サーバ側でも拒否する)。編集時は表示のみ。 */}
                             <Field label="都市"><Select value={formData.city_id || ''} disabled={!!selectedBuilding} style={selectedBuilding ? { opacity: 0.7, cursor: 'not-allowed' } : undefined} onChange={(e: any) => setFormData({ ...formData, city_id: parseInt(e.target.value) })}>
-                                <option value="">City を選択...</option>{cities.map(c => <option key={c.CITYID} value={c.CITYID}>{c.DESCRIPTION || c.CITYNAME}</option>)}
+                                <option value="">City を選択...</option>{cities.map(c => <option key={c.CITYID} value={c.CITYID}>{c.CITYNAME || c.CITY_SLUG}</option>)}
                             </Select></Field>
                             <div className={styles.row}>
                                 <Field label="定員"><NumInput value={formData.capacity || 1} onChange={(e: any) => setFormData({ ...formData, capacity: parseInt(e.target.value) })} /></Field>
@@ -503,7 +514,7 @@ export default function WorldEditor() {
                             <h3>{selectedAI ? `ペルソナを編集` : '新しいペルソナ'}</h3>
                             <Field label="名前"><Input value={formData.name || ''} onChange={(e: any) => setFormData({ ...formData, name: e.target.value })} /></Field>
                             <Field label="ホーム都市"><Select value={formData.home_city_id || ''} onChange={(e: any) => setFormData({ ...formData, home_city_id: parseInt(e.target.value) })}>
-                                <option value="">City を選択...</option>{cities.map(c => <option key={c.CITYID} value={c.CITYID}>{c.DESCRIPTION || c.CITYNAME}</option>)}
+                                <option value="">City を選択...</option>{cities.map(c => <option key={c.CITYID} value={c.CITYID}>{c.CITYNAME || c.CITY_SLUG}</option>)}
                             </Select></Field>
                             {selectedAI && <>
                                 <Field label="デフォルトモデル"><Select value={formData.default_model || ''} onChange={(e: any) => setFormData({ ...formData, default_model: e.target.value })}>
@@ -573,7 +584,7 @@ export default function WorldEditor() {
                             <Field label="名前"><Input value={formData.name || ''} onChange={(e: any) => setFormData({ ...formData, name: e.target.value })} /></Field>
                             <Field label="タイプ"><Input value={formData.entity_type || 'ai'} onChange={(e: any) => setFormData({ ...formData, entity_type: e.target.value })} /></Field>
                             <Field label="都市"><Select value={formData.city_id || ''} onChange={(e: any) => setFormData({ ...formData, city_id: parseInt(e.target.value) })}>
-                                <option value="">City を選択...</option>{cities.map(c => <option key={c.CITYID} value={c.CITYID}>{c.DESCRIPTION || c.CITYNAME}</option>)}
+                                <option value="">City を選択...</option>{cities.map(c => <option key={c.CITYID} value={c.CITYID}>{c.CITYNAME || c.CITY_SLUG}</option>)}
                             </Select></Field>
                             <Field label="システムプロンプト"><TextArea style={{ minHeight: 200 }} value={formData.system_prompt || ''} onChange={(e: any) => setFormData({ ...formData, system_prompt: e.target.value })} /></Field>
                             <Field label="説明"><TextArea value={formData.description || ''} onChange={(e: any) => setFormData({ ...formData, description: e.target.value })} /></Field>

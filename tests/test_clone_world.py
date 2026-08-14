@@ -33,7 +33,7 @@ def _make_source_db(path: Path) -> None:
     try:
         session.add(User(USERID=1, PASSWORD="x", USERNAME="maha"))
         session.flush()
-        session.add(City(CITYID=1, USERID=1, CITYNAME="city_a",
+        session.add(City(CITYID=1, USERID=1, CITY_SLUG="city_a",
                          UI_PORT=3000, API_PORT=8000, START_IN_ONLINE_MODE=True))
         session.add(Building(BUILDINGID="library_a", CITYID=1,
                              BUILDINGNAME="図書館", CAPACITY=10,

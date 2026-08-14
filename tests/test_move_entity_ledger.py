@@ -60,7 +60,7 @@ class MoveEntityLedgerTest(unittest.TestCase):
         try:
             db.add(User(USERID=self.USER_ID, PASSWORD="x", USERNAME="まはー"))
             db.flush()
-            city = City(USERID=self.USER_ID, CITYNAME="c", UI_PORT=3001, API_PORT=8001)
+            city = City(USERID=self.USER_ID, CITY_SLUG="c", UI_PORT=3001, API_PORT=8001)
             db.add(city)
             db.flush()
             self.city_id = city.CITYID
