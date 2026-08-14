@@ -106,16 +106,44 @@ def wrap_up_conversation(persona_id: str, manager=Depends(get_manager)):
     案 Y (life.md §7) 以降タイムアウトは Track を pause しないため、ここでも
     pause しない。本番のタイムアウト経路 (handle_wait_response_timeout) を
     そのまま即時に呼ぶ。
+
+    **開いている会話の出来事があるときだけ撃つ**。案 Y では会話が終わっても
+    対ユーザー会話 Track は running のまま残るので、「running Track がある」は
+    会話中の証拠にならない。切り上げる会話が実在しないまま撃つと、
+    ``handle_conversation_end`` の「判定不能なら撃つ側に倒す」既定を通って
+    存在しない会話の振り返りが走り、**ペルソナ名義の記憶に作話が残る**
+    (2026-08-14 Codex 指摘 F5)。
     """
     tm = manager.track_manager
     running = tm.get_running(persona_id)
     if running is None:
         raise HTTPException(status_code=400, detail="running な Track がありません")
-    if running.track_type not in ("user_conversation", "social"):
+    if running.track_type != "user_conversation":
+        # social 等の wait_response Track は本番経路でも判断を撃たない
+        # (WARNING のみ)。呼んでも何も起きないので success を返さない。
         raise HTTPException(
             status_code=400,
-            detail=f"running Track の type={running.track_type} は wait_response 対象外",
+            detail=(
+                f"running Track の type={running.track_type} は会話終了判断の対象外です"
+                " (対ペルソナ社交の判断点は未設計 — track_retirement.md §7.3)"
+            ),
         )
+
+    from saiverse import episodes
+
+    open_conversation = episodes.get_open_episode(
+        manager, persona_id, kind=episodes.KIND_CONVERSATION,
+    )
+    if open_conversation is None:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "開いている会話の出来事がありません (会話は既に終了しています)。"
+                " Track が running のまま残るのは案 Y の仕様で、会話中の証拠には"
+                "なりません"
+            ),
+        )
+
     from saiverse.autonomy_wiring import handle_wait_response_timeout
 
     _run_in_background(
@@ -123,7 +151,10 @@ def wrap_up_conversation(persona_id: str, manager=Depends(get_manager)):
     )
     return DebugActionResponse(
         success=True,
-        message=f"会話を切り上げました (timeout 即時発火 track={running.track_id})",
+        message=(
+            f"会話を切り上げました (timeout 即時発火 track={running.track_id}"
+            f" episode={open_conversation.get('episode_ref')})"
+        ),
     )
 
 
