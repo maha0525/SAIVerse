@@ -235,7 +235,8 @@ class PulseDispatcher:
         post_session / on_event / day_close) が引き継いだため、定期経路は
         「時間割の発火が途絶えたときだけ火を入れ直す見張り」
         (saiverse.autonomy_wiring.watchdog_tick) になった。正常時は何もしない。
-        alert の即応経路 (MetaLayer.on_track_alert) はこの tick に依存せず存続。
+        (旧 v1 メタ判断は on_track_alert ごと退役 — track_retirement.md §7.4。
+        別行動中のユーザー発話の仲裁は on_event 判断点への直結が後継。)
         """
         try:
             from saiverse.autonomy_wiring import watchdog_tick

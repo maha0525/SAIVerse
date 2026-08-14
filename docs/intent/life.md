@@ -197,12 +197,12 @@ provider の課金物理が逆向きだから（cache_lifecycle_control.md §1�
 | wait_response タイムアウト（`track_manager._handle_wait_response_timeout`） | pause（running→pending）＋ episode close ＋ post_conversation 判断 | **episode close ＋ post_conversation 判断のみ**（Track 不動） |
 | 起動時のタイマー再確立（`saiverse_manager._on_persona_registered` §3 → `track_manager.ensure_wait_response_timeout`） | `get_running()` が居れば張る | 対ユーザー会話は**開いている kind='conversation' エピソードがある時だけ**張る（`_should_rearm_wait_response_timeout`）。**2026-07-29 追加＝棚卸し漏れの実害**: Track 不動化により対ユーザー会話は会話終了後も running のまま残るのに条件が running のままだったため、再起動のたびに全ペルソナぶん「起動 N 分後」の空タイムアウトが発火し、何日も前に終わった会話へ post_conversation 判断が空撃ちされていた（アイフィ: 最終発言 07-22 → 07-29 の起動 30 分後に「会話がひと区切りつきました」で独白し「やりたいこと」を 1 件生成）。判定は fail-closed（読めなければ張らない）——空撃ちはペルソナ本人名義の記憶を汚すため、タイマー欠落（次のユーザー発話で回復する）より害が重い |
 | ユーザー発話時の再開（`user_conversation_handler.on_user_utterance`） | pending→activate→切替通知注入 | 会話 Track が既に「選ばれている」なら activate 不要。新しい会話エピソードを開くだけ（通知消滅） |
-| メタ判断の状況分類（`meta_layer._SITUATION_PLAYBOOK_MAP`） | running の有無で分岐 | 当面存置（判断点への統合は §9 未決に従い案 Z へ持ち越し）。ただし判定入力を「開いているエピソード」に併記し、乖離をログで観測 |
+| メタ判断の状況分類（`meta_layer._SITUATION_PLAYBOOK_MAP`） | running の有無で分岐 | ~~当面存置（案 Z へ持ち越し）~~ → **2026-08-14 に v1 メタ判断ごと退役**（[track_retirement](track_retirement.md) §7.4 = 案 Z の状況分類側が前倒しで実現。running/alert カラム自体の廃止はテーブル退役⑦で） |
 | `activate` の displaced 押し出し＋切替通知 | 全 activate で発火 | 本物の目的切替（メタ判断・判断点・手動スペル発）に限定される——時間起因の activate が消えるため、経路はそのまま意味が正しくなる |
 | イベント到着判断の「いまの活動」（`judgment_points.build_on_event_situation_text`） | `get_running()` が user_conversation なら「ユーザーと会話中です」 | `day_plan.is_in_user_conversation`（開いている会話の出来事）。**2026-07-29 追加＝棚卸し漏れ**: 終了済みの会話について偽の現在状態を判断入力にしていた。会話が閉じているのに Track が running のまま残るのは案 Y 以降の正常形なので、「取り組んでいます」への読み替えもせず手すき扱いにする |
 | Track Chronicle の head 搭載（`get_memory_weave_context._get_track_chronicle_context`） | `get_running()` の Track のあらすじを MemoryWeave セクションが head に織る（user_conversation は除外・refresh は Metabolism のみ） | 一本目では**参照点として記録のみ**（挙動不変）。読み込み側の世代交代（head 自動搭載 → 起動時指示書＋机メモ→随意想起の二段〔life_concept_map §9.2 裁定〕）と、書き込み側（目的別あらすじ生成）のエピソード Lv1 Chronicle との統合は**二本目 intent の主題** |
 
-alert は本書のスコープ外（呼びかけへの分化は life_concept_map §5 の将来課題。on_event 経路は不変）。なお内部 alert ポーラは 2026-08-11 に機構ごと撤去された（[track_retirement](track_retirement.md) §5-B ②③）——本書の設計に影響はない（もともと一度も発火しない空砲だったため）。
+alert は本書のスコープ外（呼びかけへの分化は life_concept_map §5 の将来課題。on_event 経路は不変）。なお内部 alert ポーラは 2026-08-11 に機構ごと撤去された（[track_retirement](track_retirement.md) §5-B ②③）——本書の設計に影響はない（もともと一度も発火しない空砲だったため）。**2026-08-14 追記**: alert 状態機械そのものも順序①で撤去され、別行動中のユーザー発話の仲裁は on_event 判断点への直結になった（同 §7.4）。「別の活動中か」の機械判定も開いている出来事で行う——案 Y の「いま」の一本化が仲裁側にも到達した形。
 
 ### 7.4 redundant issue の根治
 

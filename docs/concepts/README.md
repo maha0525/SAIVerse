@@ -20,7 +20,7 @@ SAIVerse の中核概念を「**何で・どう動き・どこに実装され・
 
 - [Pulse / PulseController](pulse.md) — 認知サイクルと、その起動制御・時間機構
 - [Track / Handler](track.md) — 進行中の作業文脈（行動の線）と種別ごとの振る舞い
-- [Meta-Judgment](meta-judgment.md) — どの Track を動かすか決める上位視点
+- [Meta-Judgment](meta-judgment.md) — 🪦 旧 v1 判断機構（2026-08-14 退役、後継は判断点）。記録として残置
 - [line / aspect](line.md) — Track 内の処理レーンとキャッシュ制御
 
 ## 行動（landscape §4）

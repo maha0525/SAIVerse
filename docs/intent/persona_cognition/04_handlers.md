@@ -5,6 +5,8 @@
 
 このファイルは Track 種別ごとの**振る舞いの差**を実装する Handler パターンを集約する。
 
+> ⚠ **alert 化条件・メタ判断連携の記述は廃止 (2026-08-14)**: v1 メタ判断と alert 状態機械は Track 撤廃の順序① ([../track_retirement.md](../track_retirement.md) §7.4) で退役した。UserConversationTrackHandler の衝突時経路は on_event 判断点への直結 (`autonomy_wiring.handle_user_utterance_conflict`) に置き換わっている。
+
 ---
 
 ## 設計方針

@@ -5,6 +5,8 @@
 **関連 Intent**: [meta_judgment_structured.md](meta_judgment_structured.md), [track_chronicle.md](track_chronicle.md), [02_mechanics.md](02_mechanics.md), [04_handlers.md](04_handlers.md)
 **関連 handoff**: [handoff_2026-05-10.md](handoff_2026-05-10.md) (origin_track_id 経路修正の過程で本 Intent の必要性が顕在化)
 
+> ⚠ **熟慮経路 (1-B: set_alert → MetaLayer) は廃止 (2026-08-14)**: v1 メタ判断と alert 状態機械は Track 撤廃の順序① ([../track_retirement.md](../track_retirement.md) §7.4) で退役した。本文書の「熟慮経路」「メタ判断レーン (§6.3)」の記述は当時の設計記録。現在の仲裁は on_event 判断点への直結 (`autonomy_wiring.handle_user_utterance_conflict`、機械判定は「開いている出来事 ≠ 会話」)。判断 Pulse のレーン (submit_meta_judgment) 自体は v2 判断点が使い続けている。
+
 ---
 
 ## 1. これは何か

@@ -610,8 +610,11 @@ class GameLifecycleService:
     # 作成する。TrackManager が既存 running Track を pending に押し出すため、
     # 進行中の行動はここで自然に退避される。連続 auto-pulse 機構は存在しない
     # (旧 SubLineScheduler は自律行動 v2 で廃止) ので、この Track が勝手に回る
-    # ことはない。メタ判断の停止は MetaLayer.on_periodic_tick 側の
-    # is_participating ゲートで行う。
+    # ことはない。
+    # NOTE: 旧 v1 メタ判断の is_participating ゲート (参加中は定期判断を抑止)
+    # は v1 退役 (track_retirement.md §7.4) で消えた。v2 判断点・時間割の発火は
+    # 元からこのゲートを通っていない — ゲーム参加と自律駆動の相互作用は
+    # game_session Track の行き先 (§2 住人 12) と合わせて順序④で設計する。
 
     GAME_TRACK_TYPE = "game_session"
 

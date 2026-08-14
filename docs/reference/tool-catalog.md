@@ -7,7 +7,7 @@ SAIVerse に登録されている全ツールの一覧（自動生成）。概�
 作り方は [開発者ガイド: ツールの追加](../developer-guide/adding-tools.md)、
 平文から呼ぶ Spell 化は [concepts/spell.md](../concepts/spell.md) を参照。
 
-**登録ツール数**: 136（うち Spell 化: 92）
+**登録ツール数**: 135（うち Spell 化: 92）
 
 - `*` 付きの引数は必須。
 - **Spell** 列に表示名があるものは、ペルソナが平文応答から `/spell <名> ...` で呼べる。
@@ -69,7 +69,6 @@ SAIVerse に登録されている全ツールの一覧（自動生成）。概�
 | `memory_search_brief` | Search memory and return brief snippets with message IDs. Use this for finding relevant messages before reading full … | `query`: string, `keywords`: array, `topk`: integer, `max_snippet_chars`: integer, `start_date`: string, `end_date`: string | — |
 | `memory_write` | 記憶の地図帳（Memory Atlas）のページに書きます。宛先 memopedia:N は Memopedia ページ本文への追記（編集来歴が残ります）。宛先 core は新しいコア記憶を刻みます — コア記憶は常時開の特殊ページで… | `ref`: string, `content*`: string, `title`: string, `category`: string | 記憶のページに書く |
 | `messagelog_get_around` | Retrieve chat messages around a specific timestamp. Accepts Unix epoch (integer) or ISO 8601 string (e.g. '2026-04-14… | `timestamp*`: string, `count`: integer, `thread_id`: string | 特定時刻のログ取得 |
-| `meta_judgment_finalize` | Internal tool for meta_judgment v2 Playbooks only. Receives the judge node's structured output (dict), formats /spell… | `judgment_output*`: object, `situation_kind*`: string, `running_track_id`: string, `trigger_type`: string, `trigger_context`: string, `track_at_judgment_id`: string, `situation_text`: string, `recent_judgments`: string | — |
 | `move_persona` | Move the active persona to another building. (When called in persona context, persona_id must match the active persona.) | `building_id*`: string, `persona_id`: string | — |
 | `observer_read` | Read the latest observation data from a building fixture's sensor/monitor. Returns cached values — does not trigger n… | `observer_id*`: string, `metric_name`: string | オブザーバー観測値取得 |
 | `pdf_read` | Extract and read text from a PDF document item. Specify page range to read specific pages. Requires pypdf to be insta… | `item_id*`: string, `pages`: string, `max_chars`: integer | — |

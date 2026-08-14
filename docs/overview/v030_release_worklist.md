@@ -35,7 +35,9 @@
 
 ## 残タスク
 
-### ① メタ判断パルスの失敗時リカバリ ✅ — 実装完了・実機検証待ち（2026-06-27）
+### ① メタ判断パルスの失敗時リカバリ 🪦 — 対象機構ごと退役（2026-08-14）
+
+> v1 メタ判断は Track 撤廃の順序①（[track_retirement.md](../intent/track_retirement.md) §7.4）で退役し、本項のリカバリ機構（リトライ・連続失敗降格）も同時に削除された。issue は [archive/phase4_meta_judgment_recovery.md](../issues/archive/phase4_meta_judgment_recovery.md) へ。以下は当時の記録。
 
 - **問題**: `meta_judgment` Playbook 実行時の LLM エラー / パースエラー / Lock 解放が
   未ハンドル。一時的な API 失敗で**自律稼働が無音で止まる**。

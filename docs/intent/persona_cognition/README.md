@@ -229,6 +229,8 @@ action_tracks / notes テーブル + alert ベースのメタレイヤー + Hand
 
 **詳細**: `phases/phase_4_pulse_scheduler.md`、`revisions.md` v0.30、[meta_judgment_structured.md](meta_judgment_structured.md) (v2 詳細)
 
+> **2026-08-14**: 上表のメタ判断本体 (`on_periodic_tick` / `on_track_alert` / 状況分類 / retry ループ / メタ判断 v2 一式 = `_classify_situation`・`meta_judgment_*` Playbook・`meta_judgment_finalize`) は Track 撤廃の順序①で退役した（[track_retirement](../track_retirement.md) §7.4）。存続しているのは per-persona Lock・`META_JUDGMENT_CONFIG`・`meta_judgment_log`・`submit_meta_judgment` レーン（判断点が使用）。表の ✅ は当時の実装記録。
+
 ---
 
 ### Phase 5 — 自律稼働の本格化 (🔲 未着手)

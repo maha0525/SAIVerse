@@ -19,8 +19,11 @@ Playbook 起動) を持つが、**自動起動の配線は持たない** (中間
   対ユーザー会話 Track なら会話の出来事を閉じて **post_conversation** 判断を撃つ。
   1 往復も成立しなかった会話 (応答生成失敗等) では撃たない (偽前提の状況
   テキストは作話を誘発する — シムで実証済みの抑止を本番にも適用)。
-  それ以外の wait_response Track (social 等) は従来どおり MetaLayer の
-  イベント駆動メタ判断に委ねる (v2 判断点の対ペルソナ社交は未設計)
+  それ以外の wait_response Track (social 等) は WARNING のみ (v1 メタ判断は
+  退役済み。対ペルソナ会話は未実装 — track_retirement.md §7.3 裁定 3)
+- :func:`handle_user_utterance_conflict` — 別の活動中に届いたユーザー発話の
+  仲裁 (track_retirement.md §7.4 の直結化)。on_event 判断点を流用し、
+  engage_now のときだけ対ユーザー会話 Track を activate する
 - :func:`handle_external_event` — 実イベント (inject_persona_event) の入口。
   自律 ON かつユーザー会話中でなければ **on_event** 判断を撃ち、判断が
   engage_now を選んだときだけ従来の応対 Pulse を起動する。自律 OFF のペルソナは
@@ -831,8 +834,11 @@ def handle_wait_response_timeout(manager: Any, persona_id: str, track_id: str) -
 
     - 対ユーザー会話 Track → :func:`handle_conversation_end`
       (= v2 の「会話終了」判断点。intent §10-5)
-    - それ以外の wait_response Track (social 等) → 従来どおり MetaLayer の
-      イベント駆動メタ判断 (対ペルソナ社交の判断点は v2 未設計 — Phase 5 系統 ii)
+    - それ以外の wait_response Track (social 等) → **判断は撃たない** (WARNING
+      のみ)。旧フォールバック先だった v1 メタ判断は track_retirement.md §7.4 で
+      退役した。対ペルソナ会話そのものが未実装のためこの枝は現状発火しようが
+      なく、実装時には会話終了判断点を流用する方針だけ記録されている
+      (§7.3 裁定 3)
     - 最後に AutonomyManager (watchdog) の次回 tick を押し戻す (直後の
       watchdog と重ならないように)
     """
@@ -855,26 +861,12 @@ def handle_wait_response_timeout(manager: Any, persona_id: str, track_id: str) -
                 "persona=%s track=%s", persona_id, track_id,
             )
     else:
-        meta_layer = getattr(manager, "meta_layer", None)
-        if meta_layer is None:
-            LOGGER.warning(
-                "[autonomy-wiring] meta_layer not initialized; cannot fire "
-                "judgment for persona=%s track=%s", persona_id, track_id,
-            )
-        else:
-            try:
-                meta_layer.on_periodic_tick(
-                    persona_id,
-                    context={
-                        "trigger": "wait_response_timeout",
-                        "track_id": track_id,
-                    },
-                )
-            except Exception:
-                LOGGER.exception(
-                    "[autonomy-wiring] meta-judgment fire failed: persona=%s track=%s",
-                    persona_id, track_id,
-                )
+        LOGGER.warning(
+            "[autonomy-wiring] wait_response timeout for non-user_conversation "
+            "track %s (type=%s persona=%s); no judgment fired — v1 メタ判断は"
+            "退役済みで、対ペルソナ社交の判断点は未設計 (track_retirement.md §7.3)",
+            track_id, track_type, persona_id,
+        )
 
     # watchdog (AutonomyManager) の次回 tick を押し戻す (存在すれば)
     try:
@@ -1034,6 +1026,85 @@ def handle_external_event(
     LOGGER.info(
         "[autonomy-wiring] on_event judged %s (persona=%s); no immediate response",
         reaction, persona_id,
+    )
+    return f"judged:{reaction}"
+
+
+def handle_user_utterance_conflict(
+    manager: Any,
+    persona_id: str,
+    utterance_text: str,
+    *,
+    activate: Callable[[], None],
+) -> str:
+    """別の活動中に届いたユーザー発話の仲裁 (track_retirement.md §7.4 の直結化)。
+
+    旧経路 (set_alert → MetaLayer の v1 メタ判断) の置き換え。ユーザー発話を
+    「別行動中に外から届いた刺激」の一種として **on_event** 判断点へ直結し、
+    判断が engage_now を選んだときだけ ``activate()`` (対ユーザー会話 Track の
+    起動 = on_track_activated hook 経由で会話出来事が開き main_line が走る) を
+    呼ぶ。engage_now 以外なら応答しない (旧 alert 経路で activate されなかった
+    ときと同じ挙動)。
+
+    経路の判断基準 (:func:`handle_external_event` と同じ流儀):
+
+    - **自律 OFF のペルソナ**: 判断を経ず直接 ``activate()`` (常に応答)
+    - **判断が起動できなかった** (Playbook 未 import 等): 直接 ``activate()``。
+      ユーザーの呼びかけを機構の不備で黙殺する方が害が大きい
+    - **判断は受け付けられたが席が未解決** (indeterminate): 応答しない。
+      回復 tick が同じ判断を後で走らせうるため、ここで応答すると二重になる
+    - **判断は走ったが reaction が読めなかった**: 応答しない (二重応対の回避)
+
+    Returns:
+        経路ラベル (``direct:*`` / ``judged:*`` / ``none:*``)。ログ・テスト用。
+    """
+    if not _is_active(manager, persona_id):
+        activate()
+        return ROUTE_DIRECT_AUTONOMY_DISABLED
+
+    context: Dict[str, Any] = {
+        "event_text": f"ユーザーがあなたに話しかけました:\n{utterance_text}",
+        "is_alert": False,
+        "utterance_conflict": True,
+    }
+    result = fire_judgment_point(manager, persona_id, KIND_ON_EVENT, context)
+    if not result.get("submitted"):
+        if result.get("outcome") == OUTCOME_INDETERMINATE:
+            LOGGER.warning(
+                "[autonomy-wiring] utterance-conflict judgment left an "
+                "unresolved execution (%s); not responding to avoid double "
+                "handling (persona=%s execution=%s)",
+                result.get("reason"), persona_id, result.get("execution_id"),
+            )
+            return ROUTE_NONE_INDETERMINATE
+        LOGGER.info(
+            "[autonomy-wiring] utterance-conflict judgment unavailable (%s); "
+            "activating conversation directly (persona=%s)",
+            result.get("reason"), persona_id,
+        )
+        activate()
+        return ROUTE_DIRECT_JUDGMENT_UNAVAILABLE
+
+    reaction = _extract_reaction(result)
+    if reaction is None:
+        reaction = _reaction_from_ledger(manager, result.get("execution_id"))
+    if reaction == "engage_now":
+        LOGGER.info(
+            "[autonomy-wiring] utterance-conflict judged engage_now; "
+            "activating conversation (persona=%s)", persona_id,
+        )
+        activate()
+        return ROUTE_JUDGED_ENGAGE_NOW
+    if reaction is None:
+        LOGGER.warning(
+            "[autonomy-wiring] utterance-conflict judgment ran but reaction "
+            "could not be read; NOT responding to avoid double handling "
+            "(persona=%s)", persona_id,
+        )
+        return ROUTE_JUDGED_UNKNOWN
+    LOGGER.info(
+        "[autonomy-wiring] utterance-conflict judged %s (persona=%s); "
+        "no immediate response", reaction, persona_id,
     )
     return f"judged:{reaction}"
 

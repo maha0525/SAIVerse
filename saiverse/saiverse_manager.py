@@ -262,11 +262,12 @@ class SAIVerseManager(
         logging.info("Initialized Cached Head Architecture (registry + pipeline + store).")
 
         # --- Initialize cognitive-model runtime layers (Phase C-1) ---
-        # MetaLayer は alert observer として TrackManager に登録される。
-        # UserConversationTrackHandler はユーザー発話イベントの受け口として
-        # handle_user_input から呼ばれる (Track 状態判定 → 必要なら alert 遷移)。
+        # MetaLayer は判断 Pulse の共有基盤 (per-persona Lock・判断設定・判断ログ)。
+        # 旧 v1 メタ判断 (alert observer 登録 + 状況分類 dispatch) は退役済み
+        # (track_retirement.md §7.4)。UserConversationTrackHandler はユーザー発話
+        # イベントの受け口として handle_user_input から呼ばれる (Track 状態判定 →
+        # 別の活動中なら on_event 判断点へ直結)。
         self.meta_layer = MetaLayer(self)
-        self.track_manager.add_alert_observer(self.meta_layer.on_track_alert)
         # Intent A v0.14 [B] 移動: Track 状態遷移の起点でメタ判断ターン
         # (line_role='meta_judgment', scope='discardable') を 'committed' に昇格する。
         # メタ判断 Playbook が独白 + /spell 方式で /spell track_activate 等を発動 →
@@ -313,26 +314,22 @@ class SAIVerseManager(
         self._debug_manual_mode_personas: set = set()
         # NOTE: 旧 InternalAlertPoller (Track パラメータの閾値超過を 60 秒周期で
         # 判定し set_alert を撃つ機構 + Handler.tick() 拡張点) は Track 撤廃計画の
-        # 裁定 B②③ で機構ごと撤去 (docs/intent/track_retirement.md §5-B)。閾値を
-        # 書き込む側がコードに存在せず一度も発火できなかった空砲で、tick は定義
-        # ゼロの空の拡張点だった。alert の生きている発火元はユーザー発話
-        # (UserConversationTrackHandler.on_user_utterance) 一本。
+        # 裁定 B②③ で機構ごと撤去 (docs/intent/track_retirement.md §5-B)。alert
+        # 状態機械そのもの (set_alert + alert observer) も、最後の発火元だった
+        # ユーザー発話の仲裁が on_event 判断点への直結に置き換わったため撤去済み
+        # (同 §7.4)。
         logging.info(
             "Initialized cognitive-model runtime layers "
-            "(MetaLayer registered as alert observer, "
+            "(MetaLayer [judgment shared infra], "
             "UserConversationTrackHandler / SocialTrackHandler / AutonomousTrackHandler ready, "
             "EventScheduler instantiated [will start at startup])."
         )
 
         # SEA runtime + Pulse controller (always enabled).
-        # ⚠️ 起動直後レース対策: 自律 tick スレッド (AutonomyManager) は直後の
-        # _run_persona_post_registration() で起動する。そのスレッドが最初の tick を
-        # 発火した時点で pulse_controller がまだ None だと、メタ判断が正規の
-        # playbook 経路 (submit_meta_judgment → finalize) に行けず、ロスのある
-        # レガシー _run_judgment にフォールバックする。レガシー経路は
-        # meta_judgment_log は書くが line_role='meta_judgment' の SAIMemory
-        # メッセージを保存しないため、ペルソナの記憶に「なぜその Track を始めたか」
-        # が残らない (実害観測: 2026-06-29 14:34 の共創小説 Track)。
+        # ⚠️ 起動直後レース対策: 自律 tick スレッド (AutonomyManager watchdog) は
+        # 直後の _run_persona_post_registration() で起動する。そのスレッドが最初の
+        # tick を発火した時点で pulse_controller がまだ None だと、判断点が
+        # 起動できず skip される (判断機会の損失)。
         # → tick スレッド起動より前に、ここで確実に初期化しておく。
         self.sea_runtime: SEARuntime = SEARuntime(self)
         self.pulse_controller: PulseController = PulseController(self.sea_runtime)
@@ -1557,16 +1554,16 @@ class SAIVerseManager(
     # に統合済み (2026-06-09)。
 
     def stop_autonomy(self, persona_id: str) -> Dict[str, Any]:
-        """自律行動を実効的に停止する（停止ボタンと連続失敗リカバリの共用経路）。
+        """自律行動を実効的に停止する（停止ボタンの経路）。
 
-        停止ボタン（activity/stop）とメタ判断連続失敗リカバリ
-        （MetaLayer._handle_persistent_failure）が同じ挙動になるよう 1 箇所に
-        集約する（片方だけ直すと乖離するため）。
+        旧: メタ判断連続失敗リカバリ（v1 MetaLayer._handle_persistent_failure）
+        との共用経路だったが、v1 は退役した（track_retirement.md §7.4）。
+        停止の挙動はここ 1 箇所に集約されたまま。
 
           1. AutonomyManager.stop() — watchdog tick の予約 cancel
           2. running な autonomous Track を全 pause — Track の帳簿を待機状態に
-             揃える（旧 SubLineScheduler は v2 で廃止済みだが、running のまま
-             残すと get_running / メタ判断の状況分類が「作業中」と誤認する）
+             揃える（旧 SubLineScheduler は v2 で廃止済み。帳簿の running 残留は
+             get_running を読む残存箇所の誤認源になる）
           3. AUTONOMY_ENABLED → False（DB + in-memory）— 判断点・watchdog の
              ゲートが全て閉じる
           4. 対ユーザー Track をサイレント activate — プロンプト待ちに戻す
@@ -1908,8 +1905,8 @@ class SAIVerseManager(
            **会話終了判断 (post_conversation)** を撃つ — v2 の「会話終了」=
            wait_response タイムアウトによる会話出来事の close (intent v2 §10-5)。
            1 往復も成立しなかった会話では撃たない (作話防止)
-        2. それ以外の wait_response Track (social 等) は従来どおり
-           ``MetaLayer.on_periodic_tick`` (イベント駆動メタ判断)
+        2. それ以外の wait_response Track (social 等) は WARNING のみ
+           (旧フォールバック先の v1 メタ判断は退役 — track_retirement.md §7.3)
         3. AutonomyManager (watchdog) の次回 tick を ``now + interval`` に押し戻す
         """
         try:

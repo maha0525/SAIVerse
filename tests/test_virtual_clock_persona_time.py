@@ -6,7 +6,6 @@
 始まり)。対象は「ペルソナの文脈に乗る時刻」のみ:
 
 - sea/runtime.py ``SEARuntime._build_realtime_context`` (head の現在時刻)
-- saiverse/meta_layer.py ``MetaLayer._format_relative`` (状況テキストの相対時刻)
 - saiverse/schedule_manager.py ``_generate_schedule_prompt`` (現在の日時)
 
 仮想クロック無効時は従来挙動 (実時刻) と同値 = 本番挙動不変。
@@ -77,18 +76,8 @@ def test_realtime_context_uses_real_time_when_virtual_disabled():
     assert shown in formatted
 
 
-# ---------------------------------------------------------------------------
-# メタ判断の状況テキストの相対時刻 (MetaLayer._format_relative)
-# ---------------------------------------------------------------------------
-
-
-def test_meta_layer_relative_time_uses_virtual_clock():
-    from saiverse.meta_layer import MetaLayer
-
-    clock.enable_virtual(VIRTUAL_NOW)
-    # 仮想時刻の 5 分前 → 実時刻がいつでも「5分前」になる
-    dt = VIRTUAL_NOW - timedelta(minutes=5)
-    assert MetaLayer._format_relative(None, dt) == "5分前"
+# NOTE: MetaLayer._format_relative (v1 状況テキストの相対時刻) は v1 メタ判断
+# ごと退役した (track_retirement.md §7.4) ため、対応するテストも削除。
 
 
 # ---------------------------------------------------------------------------

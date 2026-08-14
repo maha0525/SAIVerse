@@ -9,8 +9,10 @@
   呼び、SAIMemory へは何も書かず、成功時のみ anchor touch (連鎖予約) すること
 - Active でない / anchor 失効済み のときは呼ばず、連鎖が自然停止すること
 
-MetaLayer の alert 即応経路 (on_track_alert) はこの変更の対象外 (A2 の
-切り分け表) — 本ファイルでは触らない。
+NOTE: 当時対象外とした MetaLayer の alert 即応経路 (on_track_alert) は、
+その後 v1 メタ判断ごと退役した (track_retirement.md §7.4)。FakeMetaLayer の
+should_fire / on_periodic_tick は「旧経路が呼ばれないこと」の観測用として残す
+(実 MetaLayer からは両メソッドとも消えている)。
 """
 from __future__ import annotations
 

@@ -499,9 +499,9 @@ class RuntimeService(
             ]
 
         # 対ユーザー Track のイベント受け口 (Phase C-1)
-        # Handler が Track の取得 / 状態判定 / alert 遷移 (→ MetaLayer 起動) を行い、
-        # 最後に invoke_main_line() で SEA を起動する。
-        # 通常会話 (Track が running 継続) では MetaLayer は呼ばれない。
+        # Handler が Track の取得 / 状態判定を行い、別の活動中なら on_event 判断点で
+        # 仲裁 (track_retirement.md §7.4 直結化)、それ以外は直接応答を起動する。
+        # 通常会話 (Track が running 継続) では判断は呼ばれない。
         user_id_str = str(self.state.user_id)
         replies: List[str] = []
         for persona in responding_personas:
@@ -684,8 +684,9 @@ class RuntimeService(
 
                     # 対ユーザー Track のイベント受け口 (Phase C-1)。
                     # pulse_dispatch.md §7 で PulseDispatcher 経由に統一済。
-                    # Track 状態判定 / alert 遷移 → on_track_activated hook で
-                    # main_line Pulse 起動の経路は Handler 内部で行う。
+                    # Track 状態判定 / 別の活動中の仲裁 (on_event 判断点直結) →
+                    # on_track_activated hook で main_line Pulse 起動の経路は
+                    # Handler 内部で行う。
                     captured_persona = persona
 
                     def _invoke_main_line(track_id: Optional[str] = None, p=captured_persona):

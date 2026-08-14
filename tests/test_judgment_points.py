@@ -1645,7 +1645,25 @@ def test_on_event_requires_event_text(manager):
         jp.run_judgment_point(manager, PERSONA_ID, "on_event")
 
 
-def test_on_event_situation_shows_running_activity(manager, task_refs):
+def test_on_event_situation_shows_open_episode_activity(manager, task_refs):
+    """「いまの活動」は開いている出来事 (会話以外) から導出する
+    (track_retirement.md §7.4 — 旧 running Track 読みの付け替え)。"""
+    from saiverse import episodes
+
+    episodes.open_episode(
+        manager, PERSONA_ID, episodes.KIND_WORK_SESSION,
+        building_id="alice_room", participants=[PERSONA_ID],
+        meta={"title": "標本集の整理"},
+    )
+    result = jp.run_judgment_point(
+        manager, PERSONA_ID, "on_event", {"event_text": "システム通知"},
+    )
+    assert "標本集の整理" in result["args"]["situation_text"]
+
+
+def test_on_event_situation_running_track_alone_is_idle(manager, task_refs):
+    """running Track が残っていても、開いている出来事が無ければ「手すき」。
+    案 Y 以降 Track の running は残留するため、活動の根拠にしない。"""
     manager.track_manager.create(
         persona_id=PERSONA_ID, track_type="autonomous", title="標本集の整理",
         initial_status="running",
@@ -1653,7 +1671,8 @@ def test_on_event_situation_shows_running_activity(manager, task_refs):
     result = jp.run_judgment_point(
         manager, PERSONA_ID, "on_event", {"event_text": "システム通知"},
     )
-    assert "標本集の整理" in result["args"]["situation_text"]
+    assert "手すきです" in result["args"]["situation_text"]
+    assert "標本集の整理" not in result["args"]["situation_text"]
 
 
 def _running_user_conversation_track(manager) -> str:

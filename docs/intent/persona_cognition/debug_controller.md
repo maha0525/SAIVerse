@@ -4,6 +4,8 @@
 **ステータス**: v0.1 起草 (2026-05-25)。**v0.2 (2026-07-13, life.md v0.5 §9.2-2 改修B)**: 自律行動 v2 で SubLineScheduler (running autonomous Track への 30 秒間隔 sub_line Pulse) 自体が廃止されたため、UI の「sub_line Pulse を 1 回」ボタンと「SubLineScheduler on/off」トグルを `frontend/src/components/DebugPanel.tsx` から削除した。バックエンド (`api/routes/people/debug.py` の `fire-subline-pulse` / `scheduler.subline`) は互換のため no-op のまま残存 (触る意味は無い)。以下 §「発火項目」「タイマー制御」の該当行は歴史的記録として残す。
 **関連**: [pulse_dispatch.md](pulse_dispatch.md), [04_handlers.md](04_handlers.md), `saiverse/pulse_scheduler.py`, `saiverse/meta_layer.py`, `saiverse/autonomy_manager.py`
 
+> ⚠ **v0.3 (2026-08-14, Track 撤廃 順序①)**: v1 メタ判断の退役（[../track_retirement.md](../track_retirement.md) §7.4）に伴い、`fire-meta-judgment` は廃止 no-op（`fire-subline-pulse` と同じ互換残置）、`wrap-up-conversation` は「pause + メタ判断」から「wait_response timeout の即時発火（`handle_wait_response_timeout` = 会話出来事 close + 会話終了判断、案 Y どおり pause しない）」へ置き換えた。以下の該当記述は歴史的記録。
+
 ## これは何か
 
 稼働中サーバーに対して、自律稼働のタイマーを無視して **メタ判断 / sub_line Pulse を手動で 1 回ずつ発火**でき、さらに**全タイマーを止めて完全手動でペルソナを駆動**できるデバッグツール。API + ペルソナ画面の UI パネルで提供する。

@@ -6,19 +6,18 @@ Intent A v0.9 / Intent B v0.6 における「対ユーザー会話 Track」(永�
 責務:
 - ユーザー発話を受けたときに対ユーザー Track の取得 / 自動作成
 - Track が running ならメインライン応答を直接起動
-- Track が running 以外でも、別の running Track と衝突していなければ直接
-  activate してメインライン応答を起動する (Idle への呼びかけは常に即応答。
+- Track が running 以外でも、別の活動中 (開いている会話以外の出来事) でなければ
+  直接 activate してメインライン応答を起動する (Idle への呼びかけは常に即応答。
   2026-07-07 改訂、pulse_dispatch.md §4.2)
-- 別の running Track と衝突している場合のみ alert 遷移を起こし、メタレイヤー
-  に仲裁を委ねる (alert observer 経由で MetaLayer が動く。activate されなければ
-  応答しない)
+- 別の活動中の場合のみ on_event 判断点へ直結し仲裁を委ねる
+  (autonomy_wiring.handle_user_utterance_conflict。engage_now でなければ
+  応答しない。旧 set_alert → MetaLayer 経路は track_retirement.md §7.4 で撤去)
 - Track が running に **遷移したタイミング** で Track コンテキストを SAIMemory に
   注入する (Intent A v0.12 / 議論 2026-04-28: 末尾追加でキャッシュ親和、ペルソナの
   認知としては「Track 切替を会話の流れの中で受け取る」自然な順序を実現)
 
 責務外:
-- alert への遷移ルールそのもの (TrackManager に委譲)
-- メタレイヤーの判断ロジック (MetaLayer が alert observer として独立に動く)
+- 仲裁の判断ロジックそのもの (on_event 判断点 = judgment_points / autonomy_wiring)
 - メインライン LLM 呼び出しの実装
 
 詳細: docs/intent/persona_action_tracks.md
@@ -481,17 +480,17 @@ class UserConversationTrackHandler:
 
         - running (新規作成 or 既存 running): Track 切替通知は不要 (新規作成時は
           ``on_track_activated`` hook が走って通知される)。直接メインライン起動。
-        - それ以外 (pending / alert / unstarted) で、同一ペルソナに**別の running
-          Track が無い**場合: メタ判断を経由せず ``TrackManager.activate`` で直接
-          running 化する (2026-07-07 改訂: life_purpose 横取りによる無応答の実害を
-          受け、running 衝突が無ければユーザー発話には常に即応答する)。activate
-          により ``on_track_activated`` hook が Track 切替通知の注入 + main_line
-          Pulse 起動を担う。
-        - それ以外で**別の running Track と衝突している**場合:
-          alert に遷移 → alert observer (MetaLayer) が同期実行され Track 切替判断
-          → MetaLayer が activate して running に遷移していれば
-          ``on_track_activated`` hook 経由で Track 切替通知が SAIMemory に注入される
-          → メインライン起動。activate されなかった場合は応答しない。
+        - それ以外 (pending / alert / unstarted) で、**別の活動中でない** (開いて
+          いる会話以外の出来事が無い) 場合: 判断を経由せず ``TrackManager.activate``
+          で直接 running 化する (2026-07-07 改訂: 衝突が無ければユーザー発話には
+          常に即応答する)。activate により ``on_track_activated`` hook が Track
+          切替通知の注入 + main_line Pulse 起動を担う。
+        - それ以外で**別の活動中** (開いている出来事 ≠ 会話) の場合:
+          on_event 判断点へ直結 (``handle_user_utterance_conflict``) → 判断が
+          engage_now を選べば activate → ``on_track_activated`` hook 経由で
+          Track 切替通知が注入されメインラインが起動する。engage_now 以外なら
+          応答しない (track_retirement.md §7.4 の直結化。旧 set_alert →
+          MetaLayer 経路は撤去)。
 
         Track 切替通知 (``_inject_track_context``) は ``on_track_activated`` hook
         経由に統一された (pulse_dispatch.md §5、段階 2)。本メソッドからは直接
@@ -542,52 +541,71 @@ class UserConversationTrackHandler:
                         persona_id,
                     )
         else:
-            # running 以外 (pending / alert / unstarted)。別の running Track と
-            # 衝突しているかで経路を分ける (2026-07-07 改訂、pulse_dispatch.md §4.2):
-            # - 衝突なし → 直接経路 (1-A'): メタ判断を経由せず直接 activate。
-            #   ユーザーの呼びかけには常に応答する。
-            # - 衝突あり → 熟慮経路 (1-B): set_alert → MetaLayer が仲裁。
-            running_other = self.track_manager.get_running(persona_id)
-            has_running_conflict = (
-                running_other is not None
-                and running_other.track_id != track.track_id
-            )
-            if not has_running_conflict:
-                # 直接経路 (1-A'): running 衝突なし → 直接 activate。
+            # running 以外 (pending / alert / unstarted)。「別の活動中か」で経路を
+            # 分ける (track_retirement.md §7.4 の直結化。旧 running-Track 衝突判定は
+            # 案 Y 以降 running が残留するため誤検知源だった):
+            # - 別の活動中でない → 直接経路 (1-A'): 判断を経由せず直接 activate。
+            #   ユーザーの呼びかけには常に応答する (2026-07-07 改訂)。
+            # - 別の活動中 (開いている出来事 ≠ 会話) → 直結経路 (1-B'): on_event
+            #   判断点へ直結し、engage_now のときだけ activate。
+            busy_episode = self._get_open_non_conversation_episode(persona_id)
+            if busy_episode is None:
+                # 直接経路 (1-A'): 別の活動なし → 直接 activate。
                 # TrackManager.activate 末尾で on_track_activated hook が走り、
                 # Track 切替通知の注入 + 会話出来事の開き + main_line Pulse 起動
                 # が行われる (invoke_main_line の直呼びで hook をバイパスしない)。
                 logging.info(
-                    "[user-conv-handler] Track %s status=%s; no running conflict -> "
+                    "[user-conv-handler] Track %s status=%s; no open activity -> "
                     "direct activate (main_line starts via on_track_activated hook)",
                     track.track_id, track.status,
                 )
                 self.track_manager.activate(track.track_id)
                 return
-            # 熟慮経路 (1-B): 別の running Track が存在する → set_alert →
-            # MetaLayer → activate されれば on_track_activated hook 経由で
-            # main_line Pulse が起動する。activate されなかった場合 (メタ判断が
-            # 現状維持を選んだ等) は応答しない (pulse_dispatch.md §4.2)。
-            # invoke_main_line のハードコード起動は廃止 (§9.3 段階 3)。
+            # 直結経路 (1-B'): 別の活動中 → on_event 判断点で仲裁
+            # (旧: set_alert → MetaLayer の v1 メタ判断。alert 状態は経由しない)。
+            # engage_now なら activate → on_track_activated hook 経由で
+            # Track 切替通知の注入と main_line Pulse 起動が行われる。
+            # engage_now 以外なら応答しない (旧経路と同じ挙動)。
             logging.info(
-                "[user-conv-handler] Track %s status=%s; running conflict with %s -> "
-                "raising alert for metalayer (no direct invoke_main_line)",
-                track.track_id, track.status, running_other.track_id,
+                "[user-conv-handler] Track %s status=%s; open activity %s (%s) -> "
+                "firing on_event judgment (no alert transition)",
+                track.track_id, track.status,
+                busy_episode.get("episode_ref") or busy_episode.get("episode_id"),
+                busy_episode.get("kind"),
             )
-            ctx = {
-                "trigger": "user_utterance",
-                "user_id": user_id,
-                "event": event,
-            }
-            # set_alert は内部で alert observer (MetaLayer) を同期呼び出しする。
-            # MetaLayer がメタ判断 Pulse を実行し、結果 activate されれば
-            # TrackManager.activate 末尾で on_track_activated hook が走り、
-            # その中で Track 切替通知の注入と main_line Pulse 起動が行われる。
-            self.track_manager.set_alert(track.track_id, context=ctx)
+            from saiverse.autonomy_wiring import handle_user_utterance_conflict
 
-            updated = self.track_manager.get(track.track_id)
-            logging.info(
-                "[user-conv-handler] Post-metalayer status=%s for track %s "
-                "(activate されていれば on_track_activated hook が main_line Pulse を起動)",
-                updated.status, track.track_id,
+            route = handle_user_utterance_conflict(
+                self.manager,
+                persona_id,
+                str(event.get("content") or ""),
+                activate=lambda: self.track_manager.activate(track.track_id),
             )
+            logging.info(
+                "[user-conv-handler] utterance-conflict route=%s for track %s",
+                route, track.track_id,
+            )
+
+    def _get_open_non_conversation_episode(
+        self, persona_id: str
+    ) -> Optional[Dict[str, Any]]:
+        """「別の活動中か」= 開いている会話以外の出来事 (あればその dict)。
+
+        「いま」の真実は開いている出来事が持つ (life.md §7 案 Y)。読めない環境
+        (manager 不在のテスト等) や読み取り失敗は「活動なし」に倒す — 呼びかけへ
+        の応答を機構の不備で黙らせない。
+        """
+        if self.manager is None:
+            return None
+        try:
+            from saiverse import episodes
+
+            ep = episodes.get_open_episode(self.manager, persona_id)
+            if ep is not None and ep.get("kind") != episodes.KIND_CONVERSATION:
+                return ep
+        except Exception:
+            logging.warning(
+                "[user-conv-handler] failed to read open episode for %s; "
+                "treating as no open activity", persona_id, exc_info=True,
+            )
+        return None

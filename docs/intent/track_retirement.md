@@ -34,8 +34,8 @@ Track が現に担っている仕事の全数。「現状」は当日のコー�
 
 | # | 住人 | 現状 | 行き先 |
 |---|---|---|---|
-| 6 | **running 排他（いま動くのは 1 本）** | 「いま会話中か」の正典は出来事へ移管済み（案 Y）。ただし meta_layer の should_fire・deferred track ops（runtime_runner）・判断点の選択肢列挙（list_pickable_tracks が LIVE_STATUSES を読む）は Track 状態に依存したまま | 出来事（いま）＋時間割（予定）＋目的の木（選択肢）へ。**依存の付け替えが撤去順序の先頭**（recall_tags intent §6-6 の指摘どおり） |
-| 7 | **alert 状態機械** | ~~生きている発火元は 2 つ~~ → **閾値ポーラと Handler tick 拡張点は 2026-08-11 に撤去済み**（§5-B ②③）。残る発火元は ① 会話ハンドラ（他行動中のユーザー発話）**の一本のみ** | ①は**据え置き**（裁定 B ①: 判断点の起動信号への直結は「今はやらない」）。②③は完了 |
+| 6 | **running 排他（いま動くのは 1 本）** | **判断側は退役完了（2026-08-14、§7.4 実装欄）**: should_fire 削除・v1 メタ判断一式撤去・on_event の「いまの活動」を出来事読みへ付け替え済み。残るのは選択肢列挙（list_pickable_tracks 系 = §7.2 の④群、行き先レパートリー）と deferred track ops（ペルソナの track_* スペルが enqueue 源、④で語彙ごと入れ替え） | 出来事（いま）＋時間割（予定）は**完了**。選択肢は順序④でレパートリーへ |
+| 7 | **alert 状態機械** | **撤去完了（2026-08-14、§7.4 実装欄）**。②③（閾値ポーラ・Handler tick）は 2026-08-11、①（会話ハンドラの発話仲裁）は順序①で on_event 判断点への直結に置き換え、set_alert + alert observer 機構ごと削除。STATUS_ALERT 定数と既存 DB 行は互換のため残置（書き手なし、掃除は⑦） | 完了（汎用機構化のみ将来課題 — 裁定 B ①注記） |
 | 8 | **wait_response タイマー** | 出来事へ移管済み（タイマーは Track の状態をもう動かさない）。残骸のみ | 掃除のみ |
 
 ### 出口の住人
@@ -159,3 +159,5 @@ v2 判断点側にも running Track の読みが **1 箇所だけ**残ってい�
 **付け替え**: `build_on_event_situation_text` の「いまの活動」を running Track から開いている出来事（会話以外の kind）の題へ。
 
 **追従**: シム基盤（day_scenario）の v1 互換スタブ、テスト（test_meta_layer の v1 部分・test_cache_keepalive の Fake・test_autonomy_wiring の social フォールバック）、ドキュメント（landscape §9・persona_cognition 各所・本 intent §2 住人 6/7）、tool catalog / api-endpoints の再生成。meta_judgment_* の DB playbooks 行は dispatch が消えるため無害な残骸 — 掃除は⑦の migration でテーブルごと。
+
+**実装（2026-08-14、完了 — まはー実機検証待ち）**: 上記の確定範囲どおり実装した。撤去 = `MetaLayer` を共有基盤（`_get_lock` / `_load_judgment_config` / `_record_judgment_log`）だけに刻み直し（`saiverse/meta_layer.py` 全面書き直し）、`TrackManager.set_alert`＋alert observer 機構削除、`meta_judgment*.json` 6 枚（NL 素体含む）と `meta_judgment_finalize.py` をファイル削除、debug API 2 本（fire-meta-judgment = 廃止 no-op / wrap-up-conversation = `handle_wait_response_timeout` 即時発火へ）、social timeout の else 枝 = WARNING 化。直結化 = `autonomy_wiring.handle_user_utterance_conflict` 新設（on_event 判断点流用、engage_now → activate、判断起動不能時は activate に倒す = 呼びかけを機構の不備で黙殺しない、indeterminate は二重応対回避で応答しない）、handler の衝突判定を running-Track 衝突から「開いている出来事 ≠ 会話」へ変更（案 Y の残留 running 誤検知も同時に解消）。付け替え = `build_on_event_situation_text` の「いまの活動」を開いている出来事（meta.title または kind 表示名）から導出。付随発見: 旧 v1 の is_participating ゲート（ゲーム参加中の定期判断抑止）は退役で完全消滅 — v2 判断点は元からこのゲートを通っておらず、ゲーム参加と自律駆動の相互作用は住人 12 と合わせて④で設計（`game_lifecycle.py` の NOTE に記録）。テスト: v1 専用 4 ファイル削除・`test_meta_layer` は共有基盤のみに書き直し・`test_stop_autonomy` 切り出し・handler/track_manager/judgment_points/autonomy_wiring の該当テストを新経路へ書き替え（alert 行互換の activate テスト追加）。

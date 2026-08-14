@@ -668,8 +668,9 @@ def test_conversation_end_defaults_to_fire_when_undetectable(
     assert fired == ["post_conversation"]
 
 
-def test_wait_response_timeout_routes_by_track_type(session_factory, monkeypatch):
-    """user_conversation → post_conversation / それ以外 → 従来メタ判断。"""
+def test_wait_response_timeout_routes_by_track_type(session_factory, monkeypatch, caplog):
+    """user_conversation → post_conversation / それ以外 → WARNING のみ
+    (旧フォールバック先の v1 メタ判断は退役 — track_retirement.md §7.3 裁定 3)。"""
     manager, persona = _make_manager(session_factory)
     conv_track = SimpleNamespace(track_type="user_conversation", track_id="t-conv")
     social_track = SimpleNamespace(track_type="social", track_id="t-soc")
@@ -680,6 +681,7 @@ def test_wait_response_timeout_routes_by_track_type(session_factory, monkeypatch
         wiring, "handle_conversation_end",
         lambda mgr, pid, tid: conv_ends.append(tid) or {"submitted": True},
     )
+    # 旧経路の観測用: v1 メタ判断 (on_periodic_tick) はもう呼ばれない
     ticks: List[Any] = []
     manager.meta_layer = SimpleNamespace(
         on_periodic_tick=lambda pid, context=None, force=False: ticks.append(context),
@@ -693,10 +695,12 @@ def test_wait_response_timeout_routes_by_track_type(session_factory, monkeypatch
     assert conv_ends == ["t-conv"]
     assert ticks == []
 
-    wiring.handle_wait_response_timeout(manager, PERSONA_ID, "t-soc")
+    import logging as _logging
+    with caplog.at_level(_logging.WARNING, logger="saiverse.autonomy_wiring"):
+        wiring.handle_wait_response_timeout(manager, PERSONA_ID, "t-soc")
     assert conv_ends == ["t-conv"]  # 増えない
-    assert len(ticks) == 1
-    assert ticks[0]["trigger"] == "wait_response_timeout"
+    assert ticks == []  # v1 メタ判断は退役 — social でも呼ばれない
+    assert any("no judgment fired" in r.message for r in caplog.records)
     # 両経路とも watchdog tick を押し戻す
     assert defers == ["defer", "defer"]
 

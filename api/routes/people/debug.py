@@ -64,18 +64,18 @@ def fire_meta_judgment(
     request: FireMetaJudgmentRequest,
     manager=Depends(get_manager),
 ):
-    """メタ判断 (on_periodic_tick) を 1 回手動発火. force=True で抑止 (Active/wait_response) を無視."""
-    meta_layer = getattr(manager, "meta_layer", None)
-    if meta_layer is None:
-        raise HTTPException(status_code=503, detail="meta_layer が初期化されていません")
-    _run_in_background(
-        meta_layer.on_periodic_tick,
-        persona_id,
-        {"trigger": "debug_manual"},
-        force=request.force,
-    )
+    """(廃止) 旧 v1 メタ判断 (on_periodic_tick) の手動発火。
+
+    v1 メタ判断は Track 撤廃の順序①で退役した (track_retirement.md §7.4)。
+    エンドポイントは UI 互換のため残すが何もしない。判断の手動検証は
+    判断点 (day_open / day_close 等) のスケジュール発火側で行う。
+    """
     return DebugActionResponse(
-        success=True, message=f"メタ判断を発火しました (force={request.force})"
+        success=False,
+        message=(
+            "v1 メタ判断は退役しました (Track 撤廃 順序①)。"
+            "自律判断は時間割のコマ発火 + 判断点が担います。"
+        ),
     )
 
 
@@ -101,7 +101,12 @@ def fire_subline_pulse(
 
 @router.post("/{persona_id}/debug/wrap-up-conversation", response_model=DebugActionResponse)
 def wrap_up_conversation(persona_id: str, manager=Depends(get_manager)):
-    """running の wait_response Track を pause + メタ判断発火 (wait_response timeout 相当を即時)."""
+    """wait_response timeout 相当を即時発火 (会話出来事の close + 会話終了判断)。
+
+    案 Y (life.md §7) 以降タイムアウトは Track を pause しないため、ここでも
+    pause しない。本番のタイムアウト経路 (handle_wait_response_timeout) を
+    そのまま即時に呼ぶ。
+    """
     tm = manager.track_manager
     running = tm.get_running(persona_id)
     if running is None:
@@ -111,17 +116,14 @@ def wrap_up_conversation(persona_id: str, manager=Depends(get_manager)):
             status_code=400,
             detail=f"running Track の type={running.track_type} は wait_response 対象外",
         )
-    try:
-        tm.pause(running.track_id)
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"pause 失敗: {exc}")
-    meta_layer = getattr(manager, "meta_layer", None)
-    if meta_layer is not None:
-        _run_in_background(
-            meta_layer.on_periodic_tick, persona_id, {"trigger": "debug_wrap_up"}
-        )
+    from saiverse.autonomy_wiring import handle_wait_response_timeout
+
+    _run_in_background(
+        handle_wait_response_timeout, manager, persona_id, running.track_id
+    )
     return DebugActionResponse(
-        success=True, message=f"会話を切り上げました (paused track={running.track_id})"
+        success=True,
+        message=f"会話を切り上げました (timeout 即時発火 track={running.track_id})",
     )
 
 

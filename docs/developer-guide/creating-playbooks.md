@@ -135,7 +135,7 @@ builtin_data/playbooks/public/     # 組み込み
 
 ## 設計哲学
 
-- **メタ判断の Playbook 選択は決定論的**: `meta_judgment_*` の選択は MetaLayer が Track/persona 状態から決める（`saiverse/meta_layer.py` の `_SITUATION_PLAYBOOK_MAP`）。軽量 LLM ルーターは廃止された
+- **判断 Playbook の選択は決定論的**: 判断 Playbook（`judgment_day_open` 等）の選択はコード側（`saiverse/judgment_points.py` + `autonomy_wiring.py`）が決める。軽量 LLM ルーターは廃止された。旧 v1 の `meta_judgment_*` 一族は 2026-08-14 退役（track_retirement.md §7.4）
 - **引数は Playbook 内で決める**: 各 Playbook がコンテキストを見て tool 引数を組む LLM ノードを持つ
 - **function calling を使わない**: ネイティブ tool call はプロンプトキャッシュを壊す。structured output + tool ノード固定実行が正道
 - **新フィールドを足すときは `sea/playbook_models.py` の node 定義も更新**。しないと `import_playbook.py` / `save_playbook` が Pydantic 検証で黙って落とす

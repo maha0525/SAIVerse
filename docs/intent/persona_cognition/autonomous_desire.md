@@ -1,5 +1,7 @@
 # Intent: 自律の源泉（欲求エンジンとやりたいこと候補）
 
+> ⚠ **v1 メタ判断経由の経路は退役 (2026-08-14, [../track_retirement.md](../track_retirement.md) §7.4)**: 本文書の「META 判断で候補を昇格 (promote)」「LIFE_PURPOSE 未設定なら目的設定判断を最優先」は v1 メタ判断の退役で発火経路を失った。候補の採用はスペル（purpose_adopt 等）と v2 判断点が現役。**生きる目的の初期設定は現在発火経路なし** — スキーマ再設計と合わせて別途設計する（track_retirement §7.3 裁定 3、まはー）。
+
 > **ステータス**: ✅ 実装完了・実機検証済 v0.2（2026-06-27 設計確定 → 2026-06-28 §8 タスク 1〜7 実装完了・テスト緑 → 2026-07-08 実機検証済＋`LIFE_PURPOSE` 実 DB migration 適用済、まはー）
 > **親**: [`01_concepts.md`](01_concepts.md)（Track / Note / メタレイヤー）
 > **関連**: [`mode_spell_permissions.md`](mode_spell_permissions.md)（Track操作はMETAのみ＝本設計の構造的前提）/

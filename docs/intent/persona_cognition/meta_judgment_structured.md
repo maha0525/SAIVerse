@@ -1,6 +1,8 @@
 # Intent: メタ判断 v2 (構造化出力ベース)
 
-**ステータス**: v0.3 実機検証済 (2026-07-08, まはー)。1 回目で 2 件の関連バグを修正済 (2026-05-10)
+> 🪦 **本機構は 2026-08-14 に退役した** ([track_retirement.md](../track_retirement.md) §7.4 撤去順序①)。状況分類 (`_classify_situation` / `_SITUATION_PLAYBOOK_MAP`)・`meta_judgment_*` Playbook 5 種・`meta_judgment_finalize` ツール・alert 状態機械 (`set_alert` + observer) は削除済み。後継は自律行動 v2 の判断点 (`saiverse/judgment_points.py` + `autonomy_wiring.py`)。別行動中のユーザー発話の仲裁は on_event 判断点への直結 (`handle_user_utterance_conflict`)。本文書は設計経緯の記録として残す。
+
+**ステータス**: 🪦 退役 (2026-08-14)。旧: v0.3 実機検証済 (2026-07-08, まはー)。1 回目で 2 件の関連バグを修正済 (2026-05-10)
 **親 Intent**: [`README.md`](README.md) (ペルソナ認知モデル全体)
 **置き換え対象**: [`02_mechanics.md`](02_mechanics.md) §「メタ判断の動作仕様」(構造化出力非使用方針) — 本 Intent 確定後に該当節をリダイレクト stub 化予定
 **関連 issue**: [`docs/issues/llm_provider_anyof_support.md`](../../issues/llm_provider_anyof_support.md)

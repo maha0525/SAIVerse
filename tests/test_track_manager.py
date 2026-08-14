@@ -600,28 +600,25 @@ def test_abort_rejects_already_terminal(tm, persona):
         tm.abort(t)
 
 
-def test_set_alert_from_pending(tm, persona):
-    t = tm.create(persona, "autonomous")
-    tm.activate(t)
-    tm.pause(t)
-    tm.set_alert(t)
-    assert tm.get(t).status == STATUS_ALERT
+# NOTE: 旧 set_alert (alert 状態への遷移) と alert observer 機構は
+# track_retirement.md §7.4 で撤去された。既存 DB の alert 行の互換として
+# 「alert からの activate」だけが生きている。
 
 
-def test_set_alert_no_op_when_running(tm, persona):
+def test_activate_from_legacy_alert_status(tm, persona, session_factory):
+    """既存 DB に残る alert 行 (旧 set_alert の遺産) からも activate できる。"""
+    from database.models import ActionTrack
+
     t = tm.create(persona, "autonomous")
+    db = session_factory()
+    try:
+        row = db.query(ActionTrack).filter(ActionTrack.track_id == t).first()
+        row.status = STATUS_ALERT
+        db.commit()
+    finally:
+        db.close()
     tm.activate(t)
-    tm.set_alert(t)
-    # running stays running (no-op)
     assert tm.get(t).status == STATUS_RUNNING
-
-
-def test_set_alert_rejects_terminal(tm, persona):
-    t = tm.create(persona, "autonomous")
-    tm.activate(t)
-    tm.complete(t)
-    with pytest.raises(InvalidTrackStateError):
-        tm.set_alert(t)
 
 
 # ---------------------------------------------------------------------------
@@ -680,7 +677,6 @@ def test_operations_on_unknown_track_raise(tm):
         ("pause", ("nope",)),
         ("complete", ("nope",)),
         ("abort", ("nope",)),
-        ("set_alert", ("nope",)),
         ("forget", ("nope",)),
         ("recall", ("nope",)),
     ]:
@@ -689,131 +685,5 @@ def test_operations_on_unknown_track_raise(tm):
             op(*args)
 
 
-# ---------------------------------------------------------------------------
-# Alert observer mechanism (Phase C-1)
-# ---------------------------------------------------------------------------
-
-def test_set_alert_notifies_observer(tm, persona):
-    """alert への実遷移時に observer が呼ばれる。"""
-    calls = []
-    tm.add_alert_observer(
-        lambda pid, tid, ctx: calls.append((pid, tid, ctx))
-    )
-    t = tm.create(persona, "autonomous", title="test track")
-    tm.activate(t)
-    tm.pause(t)  # running -> pending
-    tm.set_alert(t, context={"trigger": "test"})
-    assert len(calls) == 1
-    assert calls[0][0] == persona
-    assert calls[0][1] == t
-    # Phase 2.6: context は元値 + Track 識別情報で enrich される
-    ctx = calls[0][2]
-    assert ctx["trigger"] == "test"
-    assert ctx["target_track_title"] == "test track"
-    assert ctx["target_track_type"] == "autonomous"
-    assert "target_already_running" not in ctx  # 通常の遷移ではフラグなし
-
-
-def test_set_alert_no_op_when_running_still_notifies_with_flag(tm, persona):
-    """Phase 2.6: running 時は state は no-op だが observer には
-    target_already_running=True 付きで通知する。
-
-    自律先制と外部 alert の衝突を観察者が認識できるようにするため。
-    """
-    calls = []
-    tm.add_alert_observer(lambda pid, tid, ctx: calls.append((pid, tid, ctx)))
-    t = tm.create(persona, "autonomous", title="auto track")
-    tm.activate(t)
-    tm.set_alert(t, context={"trigger": "test"})
-    assert len(calls) == 1
-    pid, tid, ctx = calls[0]
-    assert pid == persona
-    assert tid == t
-    assert ctx["target_already_running"] is True
-    assert ctx["target_track_title"] == "auto track"
-    assert ctx["target_track_type"] == "autonomous"
-    assert ctx["trigger"] == "test"
-
-
-def test_set_alert_no_op_when_already_alert_does_not_notify(tm, persona):
-    """既に alert 状態の場合、二重通知しない。"""
-    t = tm.create(persona, "autonomous")
-    tm.activate(t)
-    tm.pause(t)
-    tm.set_alert(t)
-    # 1 回目で通知済みのはずなので、observer はそれ以降の追加分だけ見る
-    calls = []
-    tm.add_alert_observer(lambda *args: calls.append(args))
-    tm.set_alert(t)  # 既に alert なので no-op
-    assert calls == []
-
-
-def test_observer_exception_does_not_break_caller(tm, persona):
-    """observer の例外は呼び出し元に伝播しない。"""
-    def bad_observer(*args):
-        raise RuntimeError("boom")
-    tm.add_alert_observer(bad_observer)
-    t = tm.create(persona, "autonomous")
-    tm.activate(t)
-    tm.pause(t)
-    # 例外が伝播しないことを確認 (raise しなければテスト成功)
-    tm.set_alert(t)
-    assert tm.get(t).status == STATUS_ALERT
-
-
-def test_multiple_observers_all_notified(tm, persona):
-    """複数 observer 登録時、全員に通知される。"""
-    calls_a = []
-    calls_b = []
-    tm.add_alert_observer(lambda *args: calls_a.append(args))
-    tm.add_alert_observer(lambda *args: calls_b.append(args))
-    t = tm.create(persona, "autonomous")
-    tm.activate(t)
-    tm.pause(t)
-    tm.set_alert(t)
-    assert len(calls_a) == 1
-    assert len(calls_b) == 1
-
-
-def test_remove_alert_observer(tm, persona):
-    """remove 後は通知されない。"""
-    calls = []
-    cb = lambda *args: calls.append(args)  # noqa: E731
-    tm.add_alert_observer(cb)
-    tm.remove_alert_observer(cb)
-    t = tm.create(persona, "autonomous")
-    tm.activate(t)
-    tm.pause(t)
-    tm.set_alert(t)
-    assert calls == []
-
-
-def test_add_same_observer_twice_is_idempotent(tm, persona):
-    """同じ observer を二重登録しても 1 回しか呼ばれない。"""
-    calls = []
-    cb = lambda *args: calls.append(args)  # noqa: E731
-    tm.add_alert_observer(cb)
-    tm.add_alert_observer(cb)
-    t = tm.create(persona, "autonomous")
-    tm.activate(t)
-    tm.pause(t)
-    tm.set_alert(t)
-    assert len(calls) == 1
-
-
-def test_set_alert_default_context_includes_track_metadata(tm, persona):
-    """Phase 2.6: context を渡さなくても observer は Track 識別情報を含む dict を受け取る。
-
-    target_track_title / target_track_type が常に乗る (None でなければ)。
-    """
-    calls = []
-    tm.add_alert_observer(lambda pid, tid, ctx: calls.append(ctx))
-    t = tm.create(persona, "autonomous", title="auto")
-    tm.activate(t)
-    tm.pause(t)
-    tm.set_alert(t)
-    assert len(calls) == 1
-    ctx = calls[0]
-    assert ctx["target_track_title"] == "auto"
-    assert ctx["target_track_type"] == "autonomous"
-    assert "target_already_running" not in ctx  # 通常遷移ではフラグなし
+# NOTE: 旧 alert observer 機構 (add_alert_observer / _notify_alert) のテスト群は
+# 機構の撤去 (track_retirement.md §7.4) と同時に退役した。

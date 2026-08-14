@@ -114,9 +114,9 @@ class TrackManager:
         # callback: タイムアウト発火後に呼ばれる。Track の状態はもう動かさない
         # (life.md §7 案 Y, 2026-07-13): 「いま」の真実は開いているエピソードが持つ。
         #   - 用途: 会話 Track なら会話の出来事 close + post_conversation 判断
-        #     (autonomy_wiring.handle_wait_response_timeout)、それ以外は従来通り
-        #     メタ判断 Pulse の起動 (MetaLayer.on_periodic_tick) と
-        #     AutonomyManager の interval 再開要求。
+        #     (autonomy_wiring.handle_wait_response_timeout)。それ以外 (social 等)
+        #     は WARNING のみ (旧フォールバック先の v1 メタ判断は退役 —
+        #     track_retirement.md §7.3 裁定 3)。
         # どちらも None の場合はタイマー機構が完全に無効化される (テスト容易性)。
         self.wait_response_timeout_provider = wait_response_timeout_provider
         self.wait_response_timeout_callback = wait_response_timeout_callback
@@ -124,11 +124,10 @@ class TrackManager:
         # 旧 ActionTrack.tasks_json チェックリスト API は PersonaTaskManager の
         # track_task 互換層へ委譲する (unified_task_model.md §5 step 4)。
         self._task_manager = PersonaTaskManager(session_factory)
-        # alert 状態への遷移を購読する observer 群。
-        # signature: (persona_id: str, track_id: str, context: dict) -> None
-        # MetaLayer はここに登録される。TrackManager は観察対象を増やす責務を持たないため、
-        # 「どんな種別の Track の alert に反応するか」のフィルタは observer 側で判断する。
-        self._alert_observers: List[Callable[[str, str, dict], None]] = []
+        # NOTE: 旧 alert observer 機構 (set_alert + _alert_observers) は撤去済み
+        # (track_retirement.md §7.4)。最後の発火元だったユーザー発話の仲裁は
+        # on_event 判断点への直結 (autonomy_wiring.handle_user_utterance_conflict)
+        # が後継。STATUS_ALERT 定数は既存 DB 行の互換のため残る (書き手なし)。
         # 状態遷移 (alert 以外) を購読する observer 群。
         # signature: (persona_id: str, track_id: str, pulse_id: Optional[str]) -> None
         # 用途:
@@ -137,7 +136,6 @@ class TrackManager:
         #   「[B] 移動: 分岐ターンをそのまま残す」)
         # - PulseController が current pulse の origin_track_id と一致する状態
         #   変化を観測したら cancellation_token.cancel() を発動 (pulse_dispatch.md §6.2)
-        # set_alert は alert 観察ルートが別にあるためこの hook では発火しない。
         self._status_change_observers: List[Callable[[str, str, Optional[str]], None]] = []
         # Track activate (= running 遷移) を購読する observer 群。
         # signature: (persona_id: str, track: ActionTrack, pulse_id: Optional[str],
@@ -154,44 +152,6 @@ class TrackManager:
     # ------------------------------------------------------------------
     # Observer
     # ------------------------------------------------------------------
-
-    def add_alert_observer(
-        self, callback: Callable[[str, str, dict], None]
-    ) -> None:
-        """alert 状態への遷移時に呼ばれる callback を登録する。
-
-        callback signature: (persona_id, track_id, context) -> None
-        context は遷移を起こした側が任意で添えるメタ情報 (空 dict 可)。
-
-        observer の例外は外に伝播させない (1 つの observer の障害で他の
-        observer や呼び出し元の状態遷移処理を巻き込まないため)。
-        """
-        if callback in self._alert_observers:
-            return
-        self._alert_observers.append(callback)
-
-    def remove_alert_observer(
-        self, callback: Callable[[str, str, dict], None]
-    ) -> None:
-        """登録済みの alert observer を解除する。未登録なら何もしない。"""
-        try:
-            self._alert_observers.remove(callback)
-        except ValueError:
-            pass
-
-    def _notify_alert(
-        self, persona_id: str, track_id: str, context: Optional[dict] = None
-    ) -> None:
-        """alert 遷移を全 observer に通知する。各 observer の例外は握り潰さず WARN ログ。"""
-        ctx = context or {}
-        for cb in list(self._alert_observers):
-            try:
-                cb(persona_id, track_id, ctx)
-            except Exception:
-                logging.exception(
-                    "[track] alert observer raised: cb=%r persona=%s track=%s",
-                    cb, persona_id, track_id,
-                )
 
     def add_status_change_observer(
         self, callback: Callable[[str, str, Optional[str]], None]
@@ -772,8 +732,8 @@ class TrackManager:
         エピソードが持つため、時間経過で Track を pending に落とす操作
         (旧: ``self.pause(track_id)``) は死んだ。残る仕事は callback 起動のみ —
         会話 Track なら出来事の close + post_conversation 判断
-        (``autonomy_wiring.handle_wait_response_timeout``)、それ以外は従来通り
-        MetaLayer の定期判断。Track が同一のまま残るため、次のユーザー発話は
+        (``autonomy_wiring.handle_wait_response_timeout``)、それ以外は WARNING
+        のみ (v1 メタ判断は退役)。Track が同一のまま残るため、次のユーザー発話は
         ``on_user_utterance`` の「running のまま直接応答」経路に乗り、
         activate に伴う「Track 切替通知」は注入されない
         (docs/issues/redundant_track_switch_notification_on_reactivation.md の根治)。
@@ -910,85 +870,8 @@ class TrackManager:
         self._notify_status_change(track.persona_id, track_id, pulse_id)
         return track
 
-    def set_alert(
-        self, track_id: str, context: Optional[dict] = None
-    ) -> ActionTrack:
-        """Track を alert 状態にする。
-
-        他者から「すぐ確認してほしい」を伝えるための遷移。
-        既に running のものを alert にしても意味が薄いため、running は遷移しない。
-        completed/aborted からは不可。
-
-        Observer 通知の挙動 (Phase 2.6, 2026-05-01):
-
-        - **状態遷移あり** (pending/unstarted → alert): 通常の alert として
-          observer に通知。context は呼び出し元が渡したものをそのまま転送。
-        - **既 running** (state は no-op): observer に **`target_already_running=True`**
-          を付けて通知する。これがないとペルソナの自律先制と外部 alert イベント
-          が衝突した時に、メタ判断者が起動理由を認識できない (intent docs
-          §"自律先制と外部 alert のレース"参照)。
-        - **既 alert** (state は no-op): 重複通知を避けるため observer 通知しない。
-
-        Args:
-            track_id: 対象 Track ID。
-            context: observer に渡す任意のメタ情報 (発火源の種別、トリガとなった
-                発話内容のメッセージ ID 等を入れる想定)。
-        """
-        notify = False
-        notify_already_running = False  # Phase 2.6: 自律先制と外部 alert の衝突
-        persona_id_for_notify: Optional[str] = None
-        track_title_for_notify: Optional[str] = None
-        track_type_for_notify: Optional[str] = None
-        db = self.SessionLocal()
-        try:
-            track = self._fetch_or_raise(db, track_id)
-            if track.status in TERMINAL_STATUSES:
-                raise InvalidTrackStateError(
-                    f"cannot alert terminal track: {track_id}"
-                )
-            if track.status == STATUS_RUNNING:
-                # 既にアクティブ (no-op だが observer には通知する)。
-                # ペルソナが直前に自律判断で running 化していたケース等で、
-                # ユーザー発話のような外部イベントが「埋もれない」よう観察者へ届ける。
-                logging.debug("[track] set_alert no-op (running) %s", track_id)
-                persona_id_for_notify = track.persona_id
-                track_title_for_notify = track.title
-                track_type_for_notify = track.track_type
-                notify_already_running = True
-                db.expunge(track)
-                return track
-            if track.status == STATUS_ALERT:
-                # 既に alert (重複通知を避けるため observer 通知しない)
-                logging.debug("[track] set_alert no-op (already alert) %s", track_id)
-                db.expunge(track)
-                return track
-            track.status = STATUS_ALERT
-            persona_id_for_notify = track.persona_id
-            track_title_for_notify = track.title
-            track_type_for_notify = track.track_type
-            notify = True
-            db.commit()
-            db.refresh(track)
-            db.expunge(track)
-            logging.info("[track] alert %s persona=%s", track_id, track.persona_id)
-            return track
-        except Exception:
-            db.rollback()
-            raise
-        finally:
-            db.close()
-            if (notify or notify_already_running) and persona_id_for_notify is not None:
-                # observer 通知は DB トランザクション完了後に行う
-                # (observer 内で別 DB アクセスがあっても整合する)
-                # Phase 2.6: context を拡張 (target_already_running フラグ + Track 識別情報)
-                enriched_context = dict(context or {})
-                if notify_already_running:
-                    enriched_context["target_already_running"] = True
-                if track_title_for_notify:
-                    enriched_context.setdefault("target_track_title", track_title_for_notify)
-                if track_type_for_notify:
-                    enriched_context.setdefault("target_track_type", track_type_for_notify)
-                self._notify_alert(persona_id_for_notify, track_id, enriched_context)
+    # NOTE: 旧 set_alert (alert 状態への遷移 + observer 通知) は撤去済み
+    # (track_retirement.md §7.4)。STATUS_ALERT の行はもう新規に生まれない。
 
     # ------------------------------------------------------------------
     # 忘却
@@ -1011,9 +894,9 @@ class TrackManager:
     ) -> ActionTrack:
         """``action_tracks.metadata.parameters[name] = value`` を更新する。
 
-        Track パラメータは連続値 (0.0〜1.0 推奨) で、メタレイヤー判断時に
-        プロンプトに含められる + 内部 alert ポーラの閾値判定に使われる。
-        intent B v0.7 §"Track パラメータ機構".
+        Track パラメータは連続値 (0.0〜1.0 推奨)。intent B v0.7 §"Track
+        パラメータ機構"。旧読み手 (v1 メタ判断プロンプト・内部 alert ポーラ) は
+        いずれも退役済みで、現在は保存のみ。
         """
         if not parameter_name:
             raise ValueError("parameter_name is required")

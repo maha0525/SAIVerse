@@ -28,7 +28,7 @@ Pulse の入口となる2つの Playbook がある:
 
 ### 設計哲学（重要）
 
-- **メタ判断の Playbook 選択は決定論的**: どの `meta_judgment_*` を走らせるかは MetaLayer が Track / persona 状態から決める（`_SITUATION_PLAYBOOK_MAP`）。軽量 LLM ルーターは存在しない（廃止された）
+- **判断 Playbook の選択は決定論的**: どの判断 Playbook（`judgment_day_open` 等）を走らせるかはコード側（`saiverse/judgment_points.py` + `autonomy_wiring.py`）が決める。軽量 LLM ルーターは存在しない（廃止された）。旧 v1 の `meta_judgment_*` 一族は 2026-08-14 退役（[track_retirement.md](../intent/track_retirement.md) §7.4）
 - **引数は Playbook 内で決める**: 各 Playbook が、利用可能なコンテキスト（インベントリ・建物アイテム・会話履歴等）を見て tool 引数を決める LLM ノードを持つ
 - **function calling を使わない**: ネイティブツールコールはキャッシュを壊す。structured output + tool ノード固定実行が正道（→ [Spell](spell.md) の目的）
 - **リファレンス実装**: `generate_image_playbook.json`（`decide_prompt` LLM(response_schema) → `generate` TOOL(args_input) → `record` MEMORIZE の3段）

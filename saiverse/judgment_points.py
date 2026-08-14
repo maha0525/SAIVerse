@@ -1327,27 +1327,37 @@ def build_on_event_situation_text(
     # 何日も前に終わった会話について「ユーザーと会話中です」とペルソナへ渡してしまう
     # (2026-07-29 修正。同じ漏れの実害は起動時タイマー再確立の側で観測済み)。
     # 判定は day_plan.is_in_user_conversation に一本化する — 二つ目の実装を作らない。
+    #
+    # 会話以外の活動も同じ正典で読む: 開いている出来事 (会話以外の kind) が
+    # あれば「取り組んでいます」。旧実装は running Track の題を読んでいたが、
+    # 案 Y 以降の残留 running が嘘の源だった (track_retirement.md §7.4 で付け替え)。
     activity = "手すきです。"
     if is_in_user_conversation(manager, persona_id):
         activity = "ユーザーと会話中です。"
     else:
-        track_manager = getattr(manager, "track_manager", None)
-        if track_manager is not None:
-            try:
-                running = track_manager.get_running(persona_id)
-            except Exception:
-                LOGGER.warning(
-                    "[judgment] get_running failed for %s", persona_id, exc_info=True,
-                )
-                running = None
-            # 会話が閉じているのに user_conversation が running のまま残っているのは
-            # 案 Y 以降の正常形。これを「取り組んでいます」と読み替えてもやはり嘘なので、
-            # 手すき扱いのままにする。
-            if (
-                running is not None
-                and getattr(running, "track_type", None) != "user_conversation"
-            ):
-                activity = f"「{running.title or '(無題)'}」に取り組んでいます。"
+        try:
+            from saiverse import episodes
+
+            open_ep = episodes.get_open_episode(manager, persona_id)
+        except Exception:
+            LOGGER.warning(
+                "[judgment] get_open_episode failed for %s", persona_id,
+                exc_info=True,
+            )
+            open_ep = None
+        if open_ep is not None and open_ep.get("kind") != "conversation":
+            meta = open_ep.get("meta") or {}
+            title = meta.get("title") if isinstance(meta, dict) else None
+            if title:
+                activity = f"「{title}」に取り組んでいます。"
+            else:
+                kind_label = {
+                    "work_session": "作業セッション",
+                    "slot": "時間割のコマ",
+                    "presence": "在室",
+                    "stroll": "散策",
+                }.get(str(open_ep.get("kind") or ""), "別の活動")
+                activity = f"{kind_label}の最中です。"
 
     parts = [
         "[イベント到着判断]",

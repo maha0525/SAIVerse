@@ -44,10 +44,11 @@ def life_purpose_set(
         parts.append(f"仕事 {len(data['vocations'])} 件")
 
     # head 操作の内容型通知 (§6-4): 生きる目的 (life_purpose) の render 断片を
-    # 全 Session 窓へ届ける。META 判断の finalize (meta_judgment_finalize) も
-    # TOOL_REGISTRY 経由で本関数を叩くため、この一点で自動カバーされる
-    # (issue head_mutation_notification_gap の中核解消)。ヘルパー側は決して
-    # raise しない (通知はツール本体の結果を壊さない)。
+    # 全 Session 窓へ届ける。TOOL_REGISTRY 経由の呼び出しはどの経路でも
+    # この一点で自動カバーされる (issue head_mutation_notification_gap の中核解消。
+    # 旧 v1 メタ判断の finalize 経由呼び出しは退役 — track_retirement.md §7.4。
+    # 生きる目的の初期設定の発火経路は現在無く、形は別途設計 = §7.3 裁定 3)。
+    # ヘルパー側は決して raise しない (通知はツール本体の結果を壊さない)。
     from sea.head_pipeline.notify import notify_head_mutation_from_tool_context
 
     notify_head_mutation_from_tool_context(

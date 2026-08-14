@@ -3,9 +3,10 @@
 Handler の責務:
 - 対ユーザー Track の取得 / 自動作成
 - Track が running なら invoke_main_line を直接呼ぶ
-- Track が running 以外でも、別の running Track と衝突していなければ直接
-  activate → on_track_activated hook 経由で main_line 起動 (2026-07-07 改訂)
-- 別の running Track と衝突している場合のみ set_alert を発火 → MetaLayer 仲裁
+- Track が running 以外でも、別の活動中 (開いている会話以外の出来事) でなければ
+  直接 activate → on_track_activated hook 経由で main_line 起動 (2026-07-07 改訂)
+- 別の活動中の場合のみ on_event 判断点へ直結 (handle_user_utterance_conflict、
+  track_retirement.md §7.4。旧 set_alert → MetaLayer 経路は撤去)
 - Track が running に**遷移したタイミング**で Track コンテキストを SAIMemory に注入
 """
 from unittest.mock import MagicMock
@@ -19,7 +20,6 @@ from saiverse import episodes
 from saiverse.event_scheduler import EventScheduler
 from saiverse.track_handlers import UserConversationTrackHandler
 from saiverse.track_manager import (
-    STATUS_ALERT,
     STATUS_PENDING,
     STATUS_RUNNING,
     TrackManager,
@@ -171,11 +171,6 @@ def test_first_utterance_creates_track_and_starts_pulse_via_hook(handler, tm, pe
     Track コンテキスト注入 + main_line Pulse 起動 (invoke_main_line は呼ばれない)。"""
     mgr, history_manager = manager_stub
 
-    alert_observer_calls = []
-    tm.add_alert_observer(
-        lambda pid, tid, ctx: alert_observer_calls.append((pid, tid, ctx))
-    )
-
     invoked = []
     handler.on_user_utterance(
         persona_id=persona,
@@ -185,8 +180,6 @@ def test_first_utterance_creates_track_and_starts_pulse_via_hook(handler, tm, pe
     )
     # 新規作成時は hook 経由なので invoke_main_line ハードコードは呼ばれない
     assert invoked == []
-    # alert observer は呼ばれない (Track が新規 running なので)
-    assert alert_observer_calls == []
     # hook 内で Track コンテキスト注入が行われる
     history_manager.add_to_persona_only.assert_called_once()
     args, _kwargs = history_manager.add_to_persona_only.call_args
@@ -205,11 +198,6 @@ def test_subsequent_utterance_on_running_track_uses_invoke_main_line(handler, tm
     history_manager.reset_mock()  # 1 回目の注入呼び出しをクリア
     mgr.run_sea_user.reset_mock()  # 1 回目の hook 経由 Pulse 起動をクリア
 
-    alert_observer_calls = []
-    tm.add_alert_observer(
-        lambda pid, tid, ctx: alert_observer_calls.append((pid, tid, ctx))
-    )
-
     invoked = []
     handler.on_user_utterance(
         persona_id=persona,
@@ -219,7 +207,6 @@ def test_subsequent_utterance_on_running_track_uses_invoke_main_line(handler, tm
     )
     # 既存 running の場合は直接経路で invoke_main_line が呼ばれる
     assert invoked == [True]
-    assert alert_observer_calls == []
     # 既存 running セッション継続なので注入なし、hook 経由 Pulse 起動もなし
     history_manager.add_to_persona_only.assert_not_called()
     mgr.run_sea_user.assert_not_called()
@@ -381,22 +368,27 @@ def test_reactivation_after_real_track_switch_still_activates_and_notifies(
 
 
 # ---------------------------------------------------------------------------
-# on_user_utterance: pending + running 衝突なし → 直接 activate (2026-07-07 改訂)
+# on_user_utterance: pending + 別の活動なし → 直接 activate (2026-07-07 改訂)
 # ---------------------------------------------------------------------------
 
-def test_pending_track_without_running_conflict_directly_activates(handler, tm, persona, manager_stub):
-    """pending Track + 別の running Track なし → set_alert せず直接 activate。
-    on_track_activated hook 経由で Track コンテキスト注入 + main_line Pulse 起動
-    (Idle への呼びかけは常に即応答、pulse_dispatch.md §4.2 Q2 改訂)。"""
+def test_pending_track_without_open_activity_directly_activates(
+    handler, tm, persona, manager_stub, monkeypatch
+):
+    """pending Track + 開いている会話以外の出来事なし → 判断を経由せず直接
+    activate。on_track_activated hook 経由で Track コンテキスト注入 + main_line
+    Pulse 起動 (Idle への呼びかけは常に即応答、pulse_dispatch.md §4.2 Q2 改訂)。"""
     mgr, history_manager = manager_stub
     track, _ = handler.get_or_create_track(persona, "1")
-    tm.pause(track.track_id)  # running -> pending (他に running なし)
+    tm.pause(track.track_id)  # running -> pending
     history_manager.reset_mock()  # 初回注入をクリア
     mgr.run_sea_user.reset_mock()  # 初回 hook 経由 Pulse 起動をクリア
 
-    alert_observer_calls = []
-    tm.add_alert_observer(
-        lambda pid, tid, ctx: alert_observer_calls.append((pid, tid, ctx))
+    from saiverse import autonomy_wiring
+
+    conflict_calls = []
+    monkeypatch.setattr(
+        autonomy_wiring, "handle_user_utterance_conflict",
+        lambda *a, **kw: conflict_calls.append((a, kw)) or "judged:stub",
     )
 
     invoked = []
@@ -406,8 +398,8 @@ def test_pending_track_without_running_conflict_directly_activates(handler, tm, 
         event={"role": "user", "content": "話しかけた"},
         invoke_main_line=lambda *_a, **_kw: invoked.append(True),
     )
-    # メタ判断経路 (set_alert) は通らない
-    assert alert_observer_calls == []
+    # 直結経路 (on_event 判断) は通らない
+    assert conflict_calls == []
     # 直接 activate されて running になっている
     assert tm.get(track.track_id).status == STATUS_RUNNING
     # hook 経由で Track コンテキスト注入 + main_line Pulse 起動
@@ -418,35 +410,44 @@ def test_pending_track_without_running_conflict_directly_activates(handler, tm, 
 
 
 # ---------------------------------------------------------------------------
-# on_user_utterance: alert 経路 (別の running Track と衝突している場合のみ)
+# on_user_utterance: 直結経路 (別の活動中 = 開いている出来事 ≠ 会話。
+# track_retirement.md §7.4 — 旧 set_alert → MetaLayer 経路の後継)
 # ---------------------------------------------------------------------------
 
-def _create_conflicting_running_track(tm, persona):
-    """別種別の running Track (作業中の自律 Track 相当) を作る。"""
-    return tm.create(
-        persona_id=persona,
-        track_type="autonomous",
-        title="作業セッション",
-        initial_status=STATUS_RUNNING,
+def _make_busy(mgr, persona):
+    """「別の活動中」を作る: 会話の出来事を閉じ、作業セッションの出来事を開く。"""
+    episodes.close_conversation_episode(mgr, persona)
+    episodes.open_episode(
+        mgr, persona, episodes.KIND_WORK_SESSION,
+        building_id="test_building",
+        participants=[persona],
+        meta={"title": "作業セッション"},
     )
 
 
-def test_pending_track_with_running_conflict_triggers_alert_no_response_when_not_activated(
-    handler, tm, persona, manager_stub
+def test_busy_utterance_fires_direct_connection_and_passes_utterance(
+    handler, tm, persona, manager_stub, monkeypatch
 ):
-    """pending Track + 別の running Track あり → 熟慮経路 (set_alert)。
-    MetaLayer が activate しない場合は応答しない (pulse_dispatch.md §4.2)。
-    invoke_main_line のハードコード起動は廃止された (§9.3 段階 3)。"""
+    """pending Track + 別の活動中 → handle_user_utterance_conflict が呼ばれ、
+    発話テキストと activate callback が渡る。判断が engage しなければ
+    Track は pending のまま・応答なし (旧 alert 経路と同じ挙動)。"""
     mgr, history_manager = manager_stub
     track, _ = handler.get_or_create_track(persona, "1")
-    tm.pause(track.track_id)  # running -> pending
-    _create_conflicting_running_track(tm, persona)
-    history_manager.reset_mock()  # 初回注入をクリア
-    mgr.run_sea_user.reset_mock()  # 初回 hook 経由 Pulse 起動をクリア
+    tm.pause(track.track_id)
+    _make_busy(mgr, persona)
+    history_manager.reset_mock()
+    mgr.run_sea_user.reset_mock()
 
-    alert_observer_calls = []
-    tm.add_alert_observer(
-        lambda pid, tid, ctx: alert_observer_calls.append((pid, tid, ctx))
+    from saiverse import autonomy_wiring
+
+    conflict_calls = []
+
+    def fake_conflict(manager, persona_id, utterance_text, *, activate):
+        conflict_calls.append((persona_id, utterance_text))
+        return "judged:note_only"  # engage しない
+
+    monkeypatch.setattr(
+        autonomy_wiring, "handle_user_utterance_conflict", fake_conflict,
     )
 
     invoked = []
@@ -456,34 +457,35 @@ def test_pending_track_with_running_conflict_triggers_alert_no_response_when_not
         event={"role": "user", "content": "話しかけた"},
         invoke_main_line=lambda *_a, **_kw: invoked.append(True),
     )
-    assert len(alert_observer_calls) == 1
-    # 熟慮経路: invoke_main_line ハードコード廃止 + activate されていないので応答なし
+    assert conflict_calls == [(persona, "話しかけた")]
+    # engage しない → 応答なし・Track は pending のまま
     assert invoked == []
     assert mgr.run_sea_user.call_count == 0
-    # MetaLayer (= alert observer) が activate しないので Track は alert のまま
-    # → running への遷移なし → hook 走らず、コンテキスト注入もなし
-    assert tm.get(track.track_id).status == STATUS_ALERT
+    assert tm.get(track.track_id).status == STATUS_PENDING
     history_manager.add_to_persona_only.assert_not_called()
 
 
-def test_pending_track_with_metalayer_activating_starts_pulse_via_hook(
-    handler, tm, persona, manager_stub
+def test_busy_utterance_engage_now_activates_and_starts_pulse_via_hook(
+    handler, tm, persona, manager_stub, monkeypatch
 ):
-    """pending + running 衝突 → MetaLayer が activate して running になれば、
-    on_track_activated hook 経由で Track コンテキスト注入 + main_line Pulse 起動が
-    行われる (新仕様 §9.3 段階 3)。"""
+    """直結経路で判断が engage (activate callback を呼ぶ) → running になり、
+    on_track_activated hook 経由で Track コンテキスト注入 + main_line Pulse 起動。"""
     mgr, history_manager = manager_stub
     track, _ = handler.get_or_create_track(persona, "1")
     tm.pause(track.track_id)
-    _create_conflicting_running_track(tm, persona)
+    _make_busy(mgr, persona)
     history_manager.reset_mock()
     mgr.run_sea_user.reset_mock()
 
-    # MetaLayer の代わりに、alert observer で activate を行う
-    def mock_metalayer(pid, tid, ctx):
-        tm.activate(tid)
+    from saiverse import autonomy_wiring
 
-    tm.add_alert_observer(mock_metalayer)
+    def fake_conflict(manager, persona_id, utterance_text, *, activate):
+        activate()
+        return "judged:engage_now"
+
+    monkeypatch.setattr(
+        autonomy_wiring, "handle_user_utterance_conflict", fake_conflict,
+    )
 
     handler.on_user_utterance(
         persona_id=persona,
@@ -491,56 +493,40 @@ def test_pending_track_with_metalayer_activating_starts_pulse_via_hook(
         event={"role": "user", "content": "話しかけた"},
         invoke_main_line=lambda *_a, **_kw: None,
     )
-    # MetaLayer が activate したので running になっている
     assert tm.get(track.track_id).status == STATUS_RUNNING
-    # → hook 経由で Track コンテキスト注入と main_line Pulse 起動が行われる
     history_manager.add_to_persona_only.assert_called_once()
     mgr.run_sea_user.assert_called_once()
 
 
-def test_alert_observer_raise_does_not_propagate(handler, tm, persona, manager_stub):
-    """alert observer が例外を出しても on_user_utterance は例外を伝播しない。
-    (running 衝突あり = 熟慮経路。activate されないので Pulse 起動もしないが、
-    エラーで落ちないことを確認。)"""
+def test_busy_utterance_conflict_raise_does_not_propagate(
+    handler, tm, persona, manager_stub, monkeypatch
+):
+    """直結経路の例外は on_user_utterance の外に伝播しない (dispatcher 側の
+    フォールバックに任せる前に handler 内では落とさない)。"""
     mgr, _hm = manager_stub
     track, _ = handler.get_or_create_track(persona, "1")
     tm.pause(track.track_id)
-    _create_conflicting_running_track(tm, persona)
+    _make_busy(mgr, persona)
     mgr.run_sea_user.reset_mock()
 
-    def bad_observer(*args):
+    from saiverse import autonomy_wiring
+
+    def bad_conflict(manager, persona_id, utterance_text, *, activate):
         raise RuntimeError("boom")
 
-    tm.add_alert_observer(bad_observer)
-
-    invoked = []
-    # 例外伝播しないこと
-    handler.on_user_utterance(
-        persona_id=persona,
-        user_id="1",
-        event={"role": "user", "content": "x"},
-        invoke_main_line=lambda *_a, **_kw: invoked.append(True),
+    monkeypatch.setattr(
+        autonomy_wiring, "handle_user_utterance_conflict", bad_conflict,
     )
-    # activate されないので invoke_main_line も hook も呼ばれない
-    assert invoked == []
-    assert mgr.run_sea_user.call_count == 0
 
-
-def test_alert_status_after_handler_pending_path(handler, tm, persona, manager_stub):
-    """pending + running 衝突の経路を通った後、Track の status は alert になっている
-    (MetaLayer 未起動時)。"""
-    track, _ = handler.get_or_create_track(persona, "1")
-    tm.pause(track.track_id)
-    _create_conflicting_running_track(tm, persona)
-    assert tm.get(track.track_id).status == STATUS_PENDING
-
-    handler.on_user_utterance(
-        persona_id=persona,
-        user_id="1",
-        event={"role": "user", "content": "x"},
-        invoke_main_line=lambda *_a, **_kw: None,
-    )
-    assert tm.get(track.track_id).status == STATUS_ALERT
+    with pytest.raises(RuntimeError):
+        # Handler 自体は透過 — 例外時のフォールバック (invoke_main_line 直呼び)
+        # は PulseDispatcher.dispatch_user_utterance が担う (本体 §7)。
+        handler.on_user_utterance(
+            persona_id=persona,
+            user_id="1",
+            event={"role": "user", "content": "x"},
+            invoke_main_line=lambda *_a, **_kw: None,
+        )
 
 
 # ---------------------------------------------------------------------------

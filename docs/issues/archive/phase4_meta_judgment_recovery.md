@@ -1,6 +1,7 @@
 # Issue: Phase 4 — メタ判断 Pulse の失敗時リカバリ
 
-**ステータス**: ✅ 実装完了（実機検証待ち, 2026-06-27）
+**ステータス**: 🪦 クローズ（2026-08-14 — 対象機構ごと退役）。本 issue が守っていた v1 メタ判断（状況分類ディスパッチ）は Track 撤廃の順序①（[track_retirement.md](../../intent/track_retirement.md) §7.4）で退役し、案 B/C のリトライ・連続失敗降格機構も同時に削除された。案 A の Lock 規律（with lock + 例外時解放）は判断点側（`autonomy_wiring._judgment_lock`）が引き継いでいる。判断点側の失敗の扱いは実行台帳（execution_ledger — 成功 = finalize 完了の永続証跡、自動再実行禁止）が正典。
+旧: ✅ 実装完了（実機検証待ち, 2026-06-27）
 **優先度**: medium
 **作成日**: 2026-05-08
 **関連**: [docs/intent/persona_cognition/README.md](../intent/persona_cognition/README.md) Phase 4 進捗表, `saiverse/meta_layer.py`, [addon_event_scheduler_integration.md](addon_event_scheduler_integration.md)
