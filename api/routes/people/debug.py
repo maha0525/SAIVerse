@@ -7,9 +7,12 @@ UC-2「割り込みと復帰」等の検証で、自律稼働のタイマー
 ステップ実行する。発火系は LLM 呼び出しを伴うため別スレッドで投げ、
 API をブロックしない。
 
-NOTE: 旧 SubLineScheduler (autonomous Track への 30 秒連続 Pulse) は自律行動 v2
-で廃止された (intent autonomous_behavior_v2.md §9.3)。関連エンドポイント
-(fire-subline-pulse / scheduler.subline) は互換のため残すが no-op を返す。
+NOTE: 廃止機構の no-op エンドポイント (fire-meta-judgment / fire-subline-pulse /
+scheduler.subline) は 2026-08-14 に削除した。残していた理由は「UI 互換」だったが、
+呼んでいた画面 (DebugPanel の該当ボタン) が無くなったため、押しても必ず失敗する
+口だけが残る形になっていた。旧 SubLineScheduler は自律行動 v2 で
+(intent autonomous_behavior_v2.md §9.3)、v1 メタ判断は Track 撤廃 順序①で
+(track_retirement.md §7.4) それぞれ退役済み。
 """
 import logging
 import sqlite3
@@ -27,16 +30,7 @@ LOGGER = logging.getLogger(__name__)
 router = APIRouter()
 
 
-class FireMetaJudgmentRequest(BaseModel):
-    force: bool = False
-
-
-class FireSublinePulseRequest(BaseModel):
-    track_id: str
-
-
 class SchedulerControlRequest(BaseModel):
-    subline: Optional[bool] = None
     autonomy: Optional[bool] = None
     manual_mode: Optional[bool] = None
 
@@ -56,47 +50,6 @@ def _run_in_background(fn, *args, **kwargs) -> None:
                 "[debug] background fire failed: %s", getattr(fn, "__name__", fn)
             )
     threading.Thread(target=_target, name="DebugFire", daemon=True).start()
-
-
-@router.post("/{persona_id}/debug/fire-meta-judgment", response_model=DebugActionResponse)
-def fire_meta_judgment(
-    persona_id: str,
-    request: FireMetaJudgmentRequest,
-    manager=Depends(get_manager),
-):
-    """(廃止) 旧 v1 メタ判断 (on_periodic_tick) の手動発火。
-
-    v1 メタ判断は Track 撤廃の順序①で退役した (track_retirement.md §7.4)。
-    エンドポイントは UI 互換のため残すが何もしない。判断の手動検証は
-    判断点 (day_open / day_close 等) のスケジュール発火側で行う。
-    """
-    return DebugActionResponse(
-        success=False,
-        message=(
-            "v1 メタ判断は退役しました (Track 撤廃 順序①)。"
-            "自律判断は時間割のコマ発火 + 判断点が担います。"
-        ),
-    )
-
-
-@router.post("/{persona_id}/debug/fire-subline-pulse", response_model=DebugActionResponse)
-def fire_subline_pulse(
-    persona_id: str,
-    request: FireSublinePulseRequest,
-    manager=Depends(get_manager),
-):
-    """(廃止) 旧 autonomous Track の sub_line Pulse 手動起動。
-
-    自律行動 v2 で track_autonomous 連続 Pulse 経路ごと廃止された
-    (intent §9.3)。エンドポイントは UI 互換のため残すが何もしない。
-    """
-    return DebugActionResponse(
-        success=False,
-        message=(
-            "自律サブライン Pulse は自律行動 v2 で廃止されました "
-            "(駆動は時間割のコマ発火 + 判断点)。"
-        ),
-    )
 
 
 @router.post("/{persona_id}/debug/wrap-up-conversation", response_model=DebugActionResponse)
@@ -161,8 +114,6 @@ def wrap_up_conversation(persona_id: str, manager=Depends(get_manager)):
 @router.get("/{persona_id}/debug/scheduler")
 def get_scheduler_status(persona_id: str, manager=Depends(get_manager)):
     """タイマーの稼働状態を返す."""
-    subline = getattr(manager, "subline_scheduler", None)
-    subline_running = subline.is_running() if subline is not None else False
     autonomy_state = "stopped"
     ams = getattr(manager, "_autonomy_managers", None)
     if ams and persona_id in ams:
@@ -172,7 +123,6 @@ def get_scheduler_status(persona_id: str, manager=Depends(get_manager)):
             autonomy_state = "error"
     manual_personas = getattr(manager, "_debug_manual_mode_personas", set())
     return {
-        "subline_running": subline_running,
         "autonomy_state": autonomy_state,
         "manual_mode": persona_id in manual_personas,
     }
@@ -233,13 +183,8 @@ def control_scheduler(
     request: SchedulerControlRequest,
     manager=Depends(get_manager),
 ):
-    """タイマー制御. subline (全体) / autonomy (per-persona) / manual_mode (per-persona の wait_response timeout 停止)."""
+    """タイマー制御. autonomy (per-persona) / manual_mode (per-persona の wait_response timeout 停止)."""
     msgs = []
-
-    if request.subline is not None:
-        # 旧 SubLineScheduler は自律行動 v2 で廃止 (no-op)。フロントの一括制御
-        # (subline + autonomy + manual_mode の同時指定) を壊さないため raise しない。
-        msgs.append("SubLineScheduler は自律行動 v2 で廃止されました (no-op)")
 
     if request.autonomy is not None:
         from api.routes.people.autonomy import _get_or_create_autonomy

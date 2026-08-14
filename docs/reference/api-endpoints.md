@@ -5,7 +5,7 @@
 
 REST API 全エンドポイントの一覧（自動生成）。すべて `/api` 配下にマウントされる。
 
-**エンドポイント数**: 366（tag グループ: 25）
+**エンドポイント数**: 364（tag グループ: 25）
 
 ## addon
 
@@ -267,8 +267,6 @@ REST API 全エンドポイントの一覧（自動生成）。すべて `/api` 
 | POST | `/api/people/{persona_id}/core-memory/{memory_id}/confirm` | 未確認 (自動採取) のコア記憶をユーザーが「確認済み」にする。 |
 | POST | `/api/people/{persona_id}/core-memory/{memory_id}/restore` | ごみ箱からコア記憶を復元する。 |
 | GET | `/api/people/{persona_id}/day-plan` | ペルソナの時間割 (画面 B: 今日の予定表)。plan を持たない日は空配列。 |
-| POST | `/api/people/{persona_id}/debug/fire-meta-judgment` | (廃止) 旧 v1 メタ判断 (on_periodic_tick) の手動発火。 |
-| POST | `/api/people/{persona_id}/debug/fire-subline-pulse` | (廃止) 旧 autonomous Track の sub_line Pulse 手動起動。 |
 | POST | `/api/people/{persona_id}/debug/generate-embeddings` | Chronicle / Memopedia page / Fragment の未生成 embedding をバッチ生成. |
 | POST | `/api/people/{persona_id}/debug/memopedia-conversion/apply` | 変換を実行する。逐語の検算に落ちたら何も書かずに 409 を返す。 |
 | GET | `/api/people/{persona_id}/debug/memopedia-conversion/preview` | 下見: 変換したら何がどうなるかを、ページと Fragment を変えずに返す。 |
@@ -276,7 +274,7 @@ REST API 全エンドポイントの一覧（自動生成）。すべて `/api` 
 | POST | `/api/people/{persona_id}/debug/memopedia-conversion/revert` | 変換を丸ごと取り消す。 |
 | GET | `/api/people/{persona_id}/debug/memopedia-conversion/runs` | 取り消せる変換の一覧 (新しい順)。 |
 | GET | `/api/people/{persona_id}/debug/scheduler` | タイマーの稼働状態を返す. |
-| POST | `/api/people/{persona_id}/debug/scheduler` | タイマー制御. subline (全体) / autonomy (per-persona) / manual_mode (per-persona の wait_response timeout 停止). |
+| POST | `/api/people/{persona_id}/debug/scheduler` | タイマー制御. autonomy (per-persona) / manual_mode (per-persona の wait_response timeout 停止). |
 | POST | `/api/people/{persona_id}/debug/wrap-up-conversation` | wait_response timeout 相当を即時発火 (会話出来事の close + 会話終了判断)。 |
 | GET | `/api/people/{persona_id}/experience-ledger` | 台帳の索引 — カテゴリごとにグループ化した棚の一覧 (統計付き)。 |
 | GET | `/api/people/{persona_id}/experience-ledger/{page_id}` | ページを開く = 動的合成 (fragment / 関与あらすじの履歴 / 共起ページ)。 |
