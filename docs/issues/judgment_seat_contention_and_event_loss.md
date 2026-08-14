@@ -1,7 +1,7 @@
 # 判断点の席の競合制御と、イベントの取りこぼし
 
 **発見**: 2026-07-30（[判断プロンプトの静的一覧を head へ](judgment_static_lists_to_head.md) の Codex レビュー五巡目。移設の範囲外として切り出し）
-**状態**: 実装済・実機検証待ち（2026-07-31。③はまはー裁定で **B** に確定 — 下の「裁定の記録」。④⑤は 2026-08-14 追加・実装済）
+**状態**: 実装済・実機検証待ち（2026-07-31。③はまはー裁定で **B** に確定 — 下の「裁定の記録」。④⑤⑥は 2026-08-14 追加・実装済）
 **関連**: `docs/intent/execution_ledger.md`、`docs/overview/audit_remediation_plan.md`（実行台帳 W1〜）、`saiverse/judgment_points.py` / `saiverse/autonomy_wiring.py` / `saiverse/execution_ledger.py`
 
 ## なぜ切り出したか
@@ -71,6 +71,30 @@
 - 二重応対の境界: 既に会話が生きている（Track running **かつ**会話の出来事が開いている）なら activate しない。案 Y の残留 running を「応対済み」と読まないため、判定は開いている出来事で行う（running だけで判定すると、この発話への応答が失われる）。
 - 応対先を決められない payload（この機構より前の prepared 行）は、外部イベント形へ縮退**させない** — それが欠陥そのものなので、`unroutable`（再試行しても直らない）として ERROR で残して打ち切る。
 - `handle_user_utterance_conflict` の `track_id` / `user_id` は必須キーワード引数にした（唯一の呼び出し元が凍結を忘れたら TypeError で落ちる）。
+
+## ⑥ 二巡目（2026-08-14）で出た、④⑤の消し込み自体の穴と、同族の既存経路
+
+④⑤を直した差分へ Codex adversarial-review を回して high 8 + medium 2。裏取りの結果、8 件が本物、1 件は事実誤り、1 件は事実は正しいが結論が成立しなかった。
+
+**④⑤の消し込みが作った穴（私の新規コード）**
+
+- **回収の重複判定が「会話の出来事が開いている」を応答済みの根拠にしていた**。ライフビューの停止パッケージは `suppress_pulse=True` で会話 Track を activate し、hook は**会話の出来事を開いた上で** main_line だけスキップする（`user_conversation_handler.on_track_activated`）。つまり「出来事は開いているが応答は無い」状態が実在し、そこへ届いた発話が捨てられていた。→ 判定材料を「開いている会話の出来事の開始以降に、この Track 紐付けの assistant メッセージが実在するか」（`_conversation_had_exchange` と同じ証跡）へ変更。出来事が開いていなければ応答済みではない、証跡が読めなければ応答済みに倒す（二重応対の回避）。
+- **凍結 payload の Track を検証せず activate していた**。activate は他ペルソナの Track を running にして現在の Track を押し出せる操作なので、payload を信用の境界の外として扱い、所有者（`persona_id`）と種別（`user_conversation`）の一致を必須にした。不一致は `unroutable`。
+- **debug の切り上げが検証と背景発火の間で TOCTOU**。検証した `episode_ref` を `handle_wait_response_timeout` → `handle_conversation_end` まで運び、発火時に開いている会話が同じときだけ進める（違えば撃たない）。渡さなければ従来どおり無条件。
+- **残る既知の窓**: 応答済み判定と `activate` は原子的でない。判定の直後にライブ経路が応答すると、回収側の activate が二度目の main_line を起こしうる。完全に閉じるには `TrackManager` に「状態遷移が実際に起きたときだけ hook を通知する」条件付き activate が要る（血管が太いので別途）。
+
+**私が書いた契約を裏切っていた既存経路（族として同時に消した）**
+
+- **台帳 claim の例外が裸で上がっていた**（`fire_judgment_point`）。呼び出し側は結末を受け取れず、代替経路の可否を判定する材料が無いまま例外処理へ落ちる。行が作られたかも分からない（作られていれば回復 tick が拾う）ので `indeterminate` として結果化した。
+- **台帳 status の読み取り失敗を成功扱いしていた**（`run_judgment_point`）。fail-open で `submitted=True` のまま通り、結末も付かなかった。→ callback が finalize の `judgment_applied` を捕まえていればそれを一次証跡として成功、無ければ `indeterminate`。台帳の読み取り失敗だけを理由に、実際に下された判断は捨てない。
+- **回収 refire が副作用ゼロ確定の失敗を代替応対へ落としていなかった**。通常入口なら応対される失敗で、回収入口だけイベントが消えていた（しかも runtime exception で終端した行は prepared 回収にも戻らないので永久に失われる）。判定は通常入口と同じ `direct_fallback_allowed`。
+
+**採らなかった 2 件（裏取りの結果）**
+
+- 「任意例外が `LLMError` に包まれるので、副作用あり失敗を `no_effect` と誤分類する」— **ラッパーの実在は事実**（`sea/runtime_graph.py` / `sea/runtime_llm.py` は Playbook 実行中の任意の例外を LLMError に包む）。だが結論は成立しない: finalize が適用済みなら台帳は `applied` で、`applied → failed` は**不正遷移**なので分類が書けず、結末は `indeterminate` になる（代替経路は走らない）。**型判定は台帳の裏付けとセットでしか正しくない**ことを関数の docstring に明記し、回帰（`test_runtime_exception_after_finalize_is_indeterminate`）で固定した。
+- 「旧 prepared 行に種別 marker が無く、外部イベント形へ誤ルーティングされる」— **事実誤り**。`utterance_conflict` は順序①の実装（同日）から入っており、対象になりうる行は marker を持つ。応対先（track_id）だけが無いので `unroutable`（ERROR で打ち切り）になり、外部イベント形へは流れない。
+
+**切り出し**: on_event の冪等キー欠落（同じ刺激の再配送で二重応対）は、安定 ID の供給源設計が要るため [on_event_judgment_has_no_idempotency_key.md](on_event_judgment_has_no_idempotency_key.md) へ。
 
 ## 対応の記録（2026-07-31 実装）
 

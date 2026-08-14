@@ -456,12 +456,29 @@ def fire_judgment_point(
                 None if force
                 else _judgment_idempotency_key(manager, persona_id, kind, context)
             )
-            execution_id, runnable, existing_status = ledger.claim_execution(
-                f"judgment.{kind}",
-                idempotency_key=idempotency_key,
-                persona_id=persona_id,
-                payload=_serialize_judgment_context(context),
-            )
+            try:
+                execution_id, runnable, existing_status = ledger.claim_execution(
+                    f"judgment.{kind}",
+                    idempotency_key=idempotency_key,
+                    persona_id=persona_id,
+                    payload=_serialize_judgment_context(context),
+                )
+            except Exception:
+                # 台帳の claim が例外 (DB ロック競合・接続断等)。裸で上げると
+                # 呼び出し側は結末を受け取れず、代替経路の可否を判定できないまま
+                # 例外処理へ落ちる (2026-08-14 Codex 指摘)。**行が作られたかは
+                # 分からない** — 作られていれば回復 tick が prepared を拾って
+                # 判断を走らせるので、ここで代替応対すると二重になる。だから
+                # indeterminate = 応答しない、として結果化する。
+                LOGGER.error(
+                    "[autonomy-wiring] ledger claim failed for %s (persona=%s); "
+                    "cannot tell whether the row was created — treating as "
+                    "indeterminate (no direct fallback)",
+                    kind, persona_id, exc_info=True,
+                )
+                return {"kind": kind, "playbook": playbook_name,
+                        "submitted": False, "reason": "ledger claim failed",
+                        "outcome": OUTCOME_INDETERMINATE}
             if not runnable:
                 LOGGER.info(
                     "[autonomy-wiring] %s duplicate (status=%s); skipping "
@@ -804,7 +821,8 @@ def _conversation_had_exchange(manager: Any, persona_id: str, track_id: str) -> 
 
 
 def handle_conversation_end(
-    manager: Any, persona_id: str, track_id: str
+    manager: Any, persona_id: str, track_id: str,
+    *, expected_episode_ref: Optional[str] = None,
 ) -> Dict[str, Any]:
     """対ユーザー会話の終了処理: 出来事を閉じ、post_conversation 判断を撃つ。
 
@@ -813,7 +831,45 @@ def handle_conversation_end(
     会話の振り返り (作話) を誘発する (接地原則 v2 §3-1。2026-07-05 実 LLM シムで
     実証済みの抑止を本番へ適用)。往復判定は出来事を閉じる **前** に行う
     (会話区間の started_at が要るため)。
+
+    Args:
+        expected_episode_ref: 呼び出し元が「この会話を終える」と決めた時点で
+            見ていた会話の出来事。**指定すると、いま開いている会話がそれと同じ
+            ときだけ終了処理を進める**。呼び出し元の検査から実際の発火までに
+            間が空く経路 (debug の切り上げは背景スレッドで発火する) で、その間に
+            別経路が会話を閉じ / 新しい会話を開いていたら、ここで撃つ判断は
+            **別の会話、あるいは存在しない会話の振り返り**になる
+            (2026-08-14 Codex 二巡目)。None なら従来どおり無条件。
     """
+    if expected_episode_ref is not None:
+        from saiverse import episodes
+
+        try:
+            current = episodes.get_open_episode(
+                manager, persona_id, kind=episodes.KIND_CONVERSATION,
+            )
+        except Exception:
+            LOGGER.warning(
+                "[autonomy-wiring] failed to re-read the open conversation "
+                "episode before ending it (persona=%s track=%s); skipping to "
+                "avoid judging a conversation that may not exist",
+                persona_id, track_id, exc_info=True,
+            )
+            return {"kind": KIND_POST_CONVERSATION, "submitted": False,
+                    "reason": "conversation episode unreadable at fire time",
+                    "outcome": OUTCOME_ABORTED}
+        current_ref = (current or {}).get("episode_ref")
+        if current_ref != expected_episode_ref:
+            LOGGER.info(
+                "[autonomy-wiring] conversation %s is no longer the open episode "
+                "(now %s); skipping the end-of-conversation judgment "
+                "(persona=%s track=%s)",
+                expected_episode_ref, current_ref, persona_id, track_id,
+            )
+            return {"kind": KIND_POST_CONVERSATION, "submitted": False,
+                    "reason": "conversation already ended by another path",
+                    "outcome": OUTCOME_ABORTED}
+
     had_exchange = _conversation_had_exchange(manager, persona_id, track_id)
 
     # 会話の出来事を閉じる (A1 の運用の線)。記録専用 — 失敗しても判断は止めない。
@@ -845,11 +901,15 @@ def handle_conversation_end(
     return fire_judgment_point(manager, persona_id, KIND_POST_CONVERSATION, context)
 
 
-def handle_wait_response_timeout(manager: Any, persona_id: str, track_id: str) -> None:
+def handle_wait_response_timeout(
+    manager: Any, persona_id: str, track_id: str,
+    *, expected_episode_ref: Optional[str] = None,
+) -> None:
     """wait_response タイムアウト発火後の本番処理 (SAIVerseManager callback の実体)。
 
     - 対ユーザー会話 Track → :func:`handle_conversation_end`
-      (= v2 の「会話終了」判断点。intent §10-5)
+      (= v2 の「会話終了」判断点。intent §10-5)。``expected_episode_ref`` は
+      そのまま渡す (呼び出し元が見た会話と、発火時に開いている会話の照合)
     - それ以外の wait_response Track (social 等) → **判断は撃たない** (WARNING
       のみ)。旧フォールバック先だった v1 メタ判断は track_retirement.md §7.4 で
       退役した。対ペルソナ会話そのものが未実装のためこの枝は現状発火しようが
@@ -870,7 +930,10 @@ def handle_wait_response_timeout(manager: Any, persona_id: str, track_id: str) -
 
     if track_type == "user_conversation":
         try:
-            handle_conversation_end(manager, persona_id, track_id)
+            handle_conversation_end(
+                manager, persona_id, track_id,
+                expected_episode_ref=expected_episode_ref,
+            )
         except Exception:
             LOGGER.exception(
                 "[autonomy-wiring] post_conversation handling failed: "
@@ -1181,6 +1244,64 @@ RECOVERED_DISPATCH_UNKNOWN = "unknown"
 RECOVERED_DISPATCH_UNROUTABLE = "unroutable"
 
 
+def _conversation_already_answered(
+    manager: Any, persona_id: str, track_id: str
+) -> bool:
+    """いまの会話区間で、この Track の応答が既に出ているか。
+
+    :func:`_conversation_had_exchange` と同じ証跡 (開いている会話の出来事の
+    started_at 以降の assistant メッセージ) を、回収の重複判定に使う。
+
+    倒し方は用途で変える (両者で fail 方向が違うのは意図的):
+
+    - **会話の出来事が開いていない** → 応答済みではない (False)。会話は生きて
+      いないので、ここで activate しても二重にならない。停止パッケージの
+      ``suppress_pulse`` activate 直後 (出来事は開いたが main_line は走って
+      いない) もこの後の判定で拾う。
+    - **出来事は開いているが証跡が読めない** → 応答済みに倒す (True)。ライブ
+      経路が既に応対している可能性があり、重ねて activate すると二重応対になる。
+    """
+    from saiverse import episodes
+
+    try:
+        ep = episodes.get_open_episode(
+            manager, persona_id, kind=episodes.KIND_CONVERSATION,
+        )
+    except Exception:
+        LOGGER.warning(
+            "[autonomy-wiring] failed to read the open conversation episode "
+            "while recovering an utterance conflict (persona=%s); assuming a "
+            "live conversation", persona_id, exc_info=True,
+        )
+        return True
+    if ep is None:
+        return False
+
+    since = ep.get("started_at")
+    persona = _get_persona(manager, persona_id)
+    adapter = getattr(persona, "sai_memory", None) if persona is not None else None
+    checker = getattr(adapter, "has_track_assistant_message_since", None)
+    if not isinstance(since, int) or not callable(checker):
+        LOGGER.warning(
+            "[autonomy-wiring] cannot read the assistant-message evidence for "
+            "track %s (persona=%s); assuming the conversation was answered",
+            track_id, persona_id,
+        )
+        return True
+    try:
+        answered = checker(track_id, since)
+    except Exception:
+        LOGGER.warning(
+            "[autonomy-wiring] assistant-message lookup failed for track %s "
+            "(persona=%s); assuming the conversation was answered",
+            track_id, persona_id, exc_info=True,
+        )
+        return True
+    if answered is None:
+        return True
+    return bool(answered)
+
+
 def _activate_recovered_user_conversation(
     manager: Any, persona_id: str, context: Dict[str, Any]
 ) -> str:
@@ -1197,9 +1318,15 @@ def _activate_recovered_user_conversation(
     流し込まれ、応答は届くのに Track は running にならず会話の出来事も開かない
     (2026-08-14 Codex 指摘 F4)。
 
-    既に会話が生きている (Track が running かつ会話の出来事が開いている) 場合は
-    **何もしない** —— この発話はライブ経路が既に応対しており、ここで activate
-    すると切替通知と main_line がもう一度走る (二重応対)。
+    **既にこの会話区間で応答が出ている**なら何もしない —— ライブ経路が先に応対
+    していれば、ここで activate すると切替通知と main_line がもう一度走る。
+    判定材料は「開いている会話の出来事の開始以降に、この Track 紐付けの
+    assistant メッセージが実在するか」(``_conversation_had_exchange`` と同じ
+    証跡)。⚠ **出来事が開いていることを応答済みの根拠にしてはいけない** ——
+    ライフビューの停止パッケージは ``suppress_pulse=True`` で会話 Track を
+    activate し、hook は会話の出来事を開いた上で main_line だけスキップする。
+    つまり「出来事は開いているが応答は無い」状態が実在する (2026-08-14 Codex
+    指摘 — この誤認はユーザーの発話を捨てる)。
     """
     track_id = context.get("conversation_track_id")
     track_manager = getattr(manager, "track_manager", None)
@@ -1222,28 +1349,27 @@ def _activate_recovered_user_conversation(
         )
         return RECOVERED_DISPATCH_UNROUTABLE
 
-    if getattr(track, "status", None) == "running":
-        # 「いま会話中か」の真実は開いている会話の出来事が持つ (life.md §7 案 Y)。
-        # 案 Y 以降 Track の running は会話終了後も残るので、running だけでは
-        # 応対済みの根拠にならない。
-        try:
-            from saiverse.day_plan import is_in_user_conversation
+    # 凍結 payload は信用の境界の外にある (古い行・壊れた行・別ペルソナの行)。
+    # activate は他ペルソナの Track を running にして現在の Track を押し出せる
+    # 操作なので、**所有者と種別を確かめてから**でなければ触らない。
+    owner = getattr(track, "persona_id", None)
+    track_type = getattr(track, "track_type", None)
+    if owner != persona_id or track_type != "user_conversation":
+        LOGGER.error(
+            "[autonomy-wiring] recovered utterance-conflict payload points at a "
+            "track that is not this persona's user conversation "
+            "(track=%s owner=%s type=%s expected_persona=%s); not activating",
+            track_id, owner, track_type, persona_id,
+        )
+        return RECOVERED_DISPATCH_UNROUTABLE
 
-            live = is_in_user_conversation(manager, persona_id)
-        except Exception:
-            LOGGER.warning(
-                "[autonomy-wiring] conversation state unreadable while "
-                "recovering an utterance conflict (persona=%s); assuming live",
-                persona_id, exc_info=True,
-            )
-            live = True
-        if live:
-            LOGGER.info(
-                "[autonomy-wiring] recovered utterance-conflict target %s is "
-                "already in a live conversation; not activating again "
-                "(persona=%s)", track_id, persona_id,
-            )
-            return RECOVERED_DISPATCH_OK
+    if _conversation_already_answered(manager, persona_id, track_id):
+        LOGGER.info(
+            "[autonomy-wiring] recovered utterance-conflict target %s already "
+            "answered in this conversation episode; not activating again "
+            "(persona=%s)", track_id, persona_id,
+        )
+        return RECOVERED_DISPATCH_OK
 
     try:
         track_manager.activate(track_id)
@@ -1425,6 +1551,31 @@ def _schedule_recovered_response_retry(
     )
 
 
+def _dispatch_recovered_response_with_retry(
+    manager: Any,
+    persona_id: str,
+    context: Dict[str, Any],
+    execution_id: Optional[str],
+) -> str:
+    """回収の応対を 1 回起動し、副作用ゼロ確定の失敗だけ bounded backoff へ回す。
+
+    判断台帳は既に終端しているため prepared 回収では拾えない — 揮発予約の
+    再試行がこの応対の唯一の救済路 (Codex 五巡目 high3)。unknown (実行中の例外)
+    と unroutable (応対先が決まらない) は再試行しない。
+    """
+    outcome = _dispatch_recovered_response(manager, persona_id, context)
+    if outcome == RECOVERED_DISPATCH_OK:
+        LOGGER.info(
+            "[autonomy-wiring] recovered on_event response dispatched from the "
+            "frozen payload (persona=%s execution=%s)", persona_id, execution_id,
+        )
+    elif outcome == RECOVERED_DISPATCH_SAFE_FAILURE:
+        _schedule_recovered_response_retry(
+            manager, persona_id, context, execution_id, attempt=1,
+        )
+    return outcome
+
+
 def refire_judgment_from_recovery(
     manager: Any,
     persona_id: str,
@@ -1449,28 +1600,33 @@ def refire_judgment_from_recovery(
         manager, persona_id, judgment_kind,
         context=context, resume_execution_id=execution_id,
     )
-    if judgment_kind != KIND_ON_EVENT or not result.get("submitted"):
+    if judgment_kind != KIND_ON_EVENT:
+        return result
+    if not result.get("submitted"):
+        # 通常入口 (handle_external_event / handle_user_utterance_conflict) は
+        # 「LLM へ渡る前に止まった / 副作用ゼロ確定で失敗した」を代替応対へ落とす。
+        # 回収入口だけ無条件に return すると、同じ失敗でイベントが消える —
+        # しかも runtime exception で台帳が終端した行は prepared 回収にも戻らない
+        # ので、そこで永久に失われる (2026-08-14 Codex 指摘)。判定は通常入口と
+        # 同じ direct_fallback_allowed を使う (結末の無い結果は拒否側)。
+        if direct_fallback_allowed(result):
+            LOGGER.info(
+                "[autonomy-wiring] recovered %s did not start (%s); running the "
+                "typed fallback once (persona=%s execution=%s)",
+                judgment_kind, result.get("reason"), persona_id, execution_id,
+            )
+            _dispatch_recovered_response_with_retry(
+                manager, persona_id, context or {}, execution_id,
+            )
         return result
     reaction = _extract_reaction(result)
     if reaction is None:
         reaction = _reaction_from_ledger(manager, result.get("execution_id"))
     if reaction != "engage_now":
         return result
-    outcome = _dispatch_recovered_response(manager, persona_id, context or {})
-    if outcome == RECOVERED_DISPATCH_OK:
-        LOGGER.info(
-            "[autonomy-wiring] recovered on_event judged engage_now; response "
-            "re-dispatched from frozen payload (persona=%s execution=%s)",
-            persona_id, execution_id,
-        )
-    elif outcome == RECOVERED_DISPATCH_SAFE_FAILURE:
-        # 副作用ゼロ確定の明示失敗 (dispatcher 不在 / 関所閉鎖 / 受付前の例外) —
-        # 判断台帳は completed 済みで prepared 回収に戻れないため、揮発予約の
-        # bounded backoff で応対だけ再試行する (Codex 五巡目 high3)。unknown
-        # (実行中の例外) は再試行しない — 二重応対の方が害が大きい
-        _schedule_recovered_response_retry(
-            manager, persona_id, context or {}, execution_id, attempt=1,
-        )
+    _dispatch_recovered_response_with_retry(
+        manager, persona_id, context or {}, execution_id,
+    )
     return result
 
 

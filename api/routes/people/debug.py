@@ -99,8 +99,13 @@ def wrap_up_conversation(persona_id: str, manager=Depends(get_manager)):
 
     from saiverse.autonomy_wiring import handle_wait_response_timeout
 
+    # 検証した出来事そのものを背景処理へ渡す。ここは同期検証 → 背景発火なので、
+    # 間に自然タイムアウトや別の切り上げが会話を閉じ (さらに新しい会話を開き)
+    # うる。track_id だけ渡すと、発火側は「いま開いている会話」を無条件に終わらせ、
+    # 別の会話 / 存在しない会話の振り返りを撃つ (2026-08-14 Codex 二巡目)。
     _run_in_background(
-        handle_wait_response_timeout, manager, persona_id, running.track_id
+        handle_wait_response_timeout, manager, persona_id, running.track_id,
+        expected_episode_ref=open_conversation.get("episode_ref"),
     )
     return DebugActionResponse(
         success=True,

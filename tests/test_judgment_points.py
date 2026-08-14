@@ -516,6 +516,70 @@ def test_runtime_exception_outcome_follows_the_ledger_terminal(manager):
     assert _run(LLMError("down"), dead_ledger)["outcome"] == jp.OUTCOME_INDETERMINATE
 
 
+def _ledger_stub(**overrides):
+    """run_judgment_point が触る台帳 API だけを持つスタブ。"""
+    base = dict(
+        mark_running=lambda eid: None,
+        try_mark_running=lambda eid: True,
+        mark_failed=lambda eid, r: None,
+        mark_unknown=lambda eid, r: None,
+        get_execution=lambda eid: {"status": "applied"},
+    )
+    base.update(overrides)
+    return SimpleNamespace(**base)
+
+
+def test_unreadable_ledger_status_is_not_treated_as_success(manager):
+    """台帳 status が読めないとき、成功へ倒さない (2026-08-14 Codex 二巡目)。
+
+    旧実装は「legacy success verdict」として submitted=True のまま通し、結末も
+    付かなかった — 呼び出し側は代替経路の可否すら判定できない。finalize の証跡が
+    どこにも無いなら indeterminate。
+    """
+    def _boom(eid):
+        raise RuntimeError("ledger down")
+
+    manager.execution_ledger = _ledger_stub(get_execution=_boom)
+    result = jp.run_judgment_point(
+        manager, PERSONA_ID, "on_event", {"event_text": "来客"},
+        execution_id="exec-1",
+    )
+    assert result["submitted"] is False
+    assert result["outcome"] == jp.OUTCOME_INDETERMINATE
+    assert jp.direct_fallback_allowed(result) is False
+
+
+def test_unreadable_ledger_status_accepts_the_captured_finalize_event(manager):
+    """台帳が読めなくても、callback が finalize を捕まえていれば成功でよい。
+
+    judgment_applied イベントは台帳とは独立した一次証跡 — 台帳の読み取り失敗
+    だけを理由に、実際に下された判断を捨てない。
+    """
+    def _boom(eid):
+        raise RuntimeError("ledger down")
+
+    class _FinalizeEmitting(FakePulseController):
+        def submit_meta_judgment(self, persona_id, building_id, meta_playbook,
+                                 args=None, event_callback=None):
+            super().submit_meta_judgment(
+                persona_id, building_id, meta_playbook, args, event_callback,
+            )
+            if event_callback:
+                event_callback({
+                    "type": "judgment_applied", "kind": "on_event",
+                    "extras": ["reaction=engage_now"],
+                })
+
+    manager.execution_ledger = _ledger_stub(get_execution=_boom)
+    manager.pulse_controller = _FinalizeEmitting()
+    result = jp.run_judgment_point(
+        manager, PERSONA_ID, "on_event", {"event_text": "来客"},
+        execution_id="exec-1",
+    )
+    assert result["submitted"] is True
+    assert result["applied_events"][0]["extras"] == ["reaction=engage_now"]
+
+
 def test_post_session_without_session_result_raises(manager):
     """起きていないセッションの裁定を走らせない (契約違反は畳まず上げる)。
 

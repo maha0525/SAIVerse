@@ -55,7 +55,9 @@ class WrapUpConversationApiTest(unittest.TestCase):
 
         # 発火は別スレッドなので、呼ばれたかどうかだけを同期的に記録する。
         self._orig_run_in_background = debug_route._run_in_background
-        debug_route._run_in_background = lambda fn, *a, **kw: self.fired.append(a)
+        debug_route._run_in_background = (
+            lambda fn, *a, **kw: self.fired.append((fn, a, kw))
+        )
         self.addCleanup(
             setattr, debug_route, "_run_in_background", self._orig_run_in_background
         )
@@ -100,7 +102,7 @@ class WrapUpConversationApiTest(unittest.TestCase):
 
     def test_fires_when_conversation_episode_is_open(self):
         self._running_track("user_conversation")
-        episodes.open_conversation_episode(
+        ep = episodes.open_conversation_episode(
             self.manager, PERSONA_ID, building_id=BUILDING,
             participants=[PERSONA_ID, "1"],
         )
@@ -108,6 +110,36 @@ class WrapUpConversationApiTest(unittest.TestCase):
         self.assertEqual(res.status_code, 200)
         self.assertTrue(res.json()["success"])
         self.assertEqual(len(self.fired), 1)
+        # 検証した出来事そのものを背景処理へ渡す (TOCTOU の照合材料)。
+        self.assertEqual(
+            self.fired[0][2]["expected_episode_ref"], ep["episode_ref"],
+        )
+
+    def test_fire_time_check_skips_when_the_conversation_already_ended(self):
+        """検証と背景発火の間に会話が閉じたら、発火側で撃たない。
+
+        同期検証 → 背景発火の間に自然タイムアウトや別の切り上げが会話を閉じ、
+        さらに新しい会話が開きうる。track_id だけ渡すと発火側は「いま開いている
+        会話」を無条件に終わらせ、別の会話 / 存在しない会話の振り返りを撃つ
+        (2026-08-14 Codex 二巡目)。
+        """
+        from saiverse import autonomy_wiring
+
+        track_id = self._running_track("user_conversation")
+        ep = episodes.open_conversation_episode(
+            self.manager, PERSONA_ID, building_id=BUILDING,
+            participants=[PERSONA_ID, "1"],
+        )
+        self._post()
+        # 背景処理が走る前に別経路が会話を閉じた
+        episodes.close_conversation_episode(self.manager, PERSONA_ID)
+
+        result = autonomy_wiring.handle_conversation_end(
+            self.manager, PERSONA_ID, track_id,
+            expected_episode_ref=ep["episode_ref"],
+        )
+        self.assertFalse(result["submitted"])
+        self.assertIn("already ended", result["reason"])
 
     # -- 撃たない側 --------------------------------------------------------
 

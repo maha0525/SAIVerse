@@ -598,6 +598,20 @@ def _recover(mgr, persona, **overrides):
     return autonomy_wiring._dispatch_recovered_response(mgr, persona, context)
 
 
+def _set_answered(mgr, persona, answered):
+    """「この会話区間で応答が出たか」の証跡 (adapter の実 API) を差し込む。
+
+    ``answered`` が None なら API 自体を持たない adapter (証跡が読めない環境)。
+    """
+    adapter = mgr.personas[persona].sai_memory
+    if answered is None:
+        del adapter.has_track_assistant_message_since
+    else:
+        adapter.has_track_assistant_message_since = (
+            lambda track_id, since: answered
+        )
+
+
 def test_recovered_utterance_conflict_activates_the_frozen_track_once(
     handler, tm, persona, manager_stub
 ):
@@ -629,14 +643,10 @@ def test_recovered_utterance_conflict_activates_the_frozen_track_once(
         mgr, persona, kind=episodes.KIND_CONVERSATION) is not None
 
 
-def test_recovered_utterance_conflict_skips_when_conversation_is_live(
+def test_recovered_utterance_conflict_skips_when_already_answered(
     handler, tm, persona, manager_stub
 ):
-    """既に会話が生きているなら activate しない (二重応対の回避)。
-
-    案 Y では会話終了後も Track が running のまま残るので、判定は running では
-    なく **開いている会話の出来事** で行う。
-    """
+    """この会話区間で既に応答が出ているなら activate しない (二重応対の回避)。"""
     from saiverse import autonomy_wiring
 
     mgr, history_manager = manager_stub
@@ -645,6 +655,7 @@ def test_recovered_utterance_conflict_skips_when_conversation_is_live(
     episodes.open_conversation_episode(
         mgr, persona, building_id="test_building", participants=[persona, "1"],
     )
+    _set_answered(mgr, persona, True)
     history_manager.reset_mock()
     mgr.run_sea_user.reset_mock()
 
@@ -653,6 +664,61 @@ def test_recovered_utterance_conflict_skips_when_conversation_is_live(
     assert outcome == autonomy_wiring.RECOVERED_DISPATCH_OK
     assert mgr.run_sea_user.call_count == 0
     history_manager.add_to_persona_only.assert_not_called()
+
+
+def test_recovered_utterance_conflict_activates_after_silent_activate(
+    handler, tm, persona, manager_stub
+):
+    """回帰 (2026-08-14 Codex 二巡目): 会話の出来事が開いていても、応答が
+    出ていなければ activate する。
+
+    ライフビューの停止パッケージは ``suppress_pulse=True`` で会話 Track を
+    activate し、hook は**会話の出来事を開いた上で** main_line だけスキップする。
+    「出来事が開いている = 応対済み」と読むと、この状態で届いた発話が捨てられる。
+    """
+    from saiverse import autonomy_wiring
+
+    mgr, history_manager = manager_stub
+    mgr.track_manager = tm
+    track, _ = handler.get_or_create_track(persona, "1")
+    tm.pause(track.track_id)
+    tm.activate(track.track_id, suppress_pulse=True)  # 停止パッケージ相当
+    assert episodes.get_open_episode(
+        mgr, persona, kind=episodes.KIND_CONVERSATION) is not None
+    _set_answered(mgr, persona, False)  # 応答は出ていない
+    history_manager.reset_mock()
+    mgr.run_sea_user.reset_mock()
+
+    outcome = _recover(mgr, persona, conversation_track_id=track.track_id)
+
+    assert outcome == autonomy_wiring.RECOVERED_DISPATCH_OK
+    mgr.run_sea_user.assert_called_once()
+
+
+def test_recovered_utterance_conflict_rejects_another_personas_track(
+    handler, tm, persona, manager_stub
+):
+    """凍結 payload が別ペルソナ / 別種別の Track を指していたら activate しない。
+
+    activate は他ペルソナの Track を running にして現在の Track を押し出せる
+    操作なので、payload を信用の境界の外として扱う (2026-08-14 Codex 二巡目)。
+    """
+    from saiverse import autonomy_wiring
+
+    mgr, history_manager = manager_stub
+    mgr.track_manager = tm
+    other = tm.create(
+        persona_id="bob", track_type="user_conversation", title="対 bob 会話",
+        is_persistent=True,
+    )
+    history_manager.reset_mock()
+    mgr.run_sea_user.reset_mock()
+
+    outcome = _recover(mgr, persona, conversation_track_id=other)
+
+    assert outcome == autonomy_wiring.RECOVERED_DISPATCH_UNROUTABLE
+    assert tm.get(other).status != STATUS_RUNNING
+    assert mgr.run_sea_user.call_count == 0
 
 
 def test_recovered_utterance_conflict_reactivates_when_conversation_closed(

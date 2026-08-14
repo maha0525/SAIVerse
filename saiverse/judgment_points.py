@@ -2209,17 +2209,40 @@ def run_judgment_point(
             )
 
     submitted = True
+    #: 台帳 status を読めなかったときの結末 (読めた場合は None のまま)。
+    unread_outcome: Optional[str] = None
     if tracked:
         # A7: 成功 = finalize 完了の永続証跡 (台帳 status) から導出する。
         status: Optional[str] = None
         try:
             status = ledger.get_execution(execution_id)["status"]
         except Exception:
-            LOGGER.warning(
-                "[judgment] failed to read ledger status after %s "
-                "(persona=%s execution=%s); keeping legacy success verdict",
-                kind, persona_id, execution_id, exc_info=True,
-            )
+            # 台帳が読めない = 証跡が確認できない。**成功へ倒さない**
+            # (2026-08-14 Codex 指摘: 旧実装は初期値 submitted=True のまま通し、
+            # 結末も付かないので代替経路の可否すら判定できなかった)。
+            # ただし callback が finalize の judgment_applied を捕まえていれば、
+            # それは台帳とは独立した一次証跡なので成功として扱ってよい —
+            # 台帳の読み取り失敗だけを理由に、実際に下された判断を捨てない。
+            if applied_events:
+                LOGGER.warning(
+                    "[judgment] failed to read ledger status after %s; "
+                    "accepting the finalize event captured by the callback "
+                    "(persona=%s execution=%s)",
+                    kind, persona_id, execution_id, exc_info=True,
+                )
+            else:
+                LOGGER.warning(
+                    "[judgment] failed to read ledger status after %s and no "
+                    "finalize event was captured; treating the outcome as "
+                    "indeterminate (persona=%s execution=%s)",
+                    kind, persona_id, execution_id, exc_info=True,
+                )
+                submitted = False
+                unread_outcome = OUTCOME_INDETERMINATE
+                errors.append({
+                    "type": "error",
+                    "message": "ledger status unreadable after meta lane return",
+                })
         from saiverse.execution_ledger import (
             STATUS_APPLIED,
             STATUS_COMPLETED,
@@ -2269,8 +2292,9 @@ def run_judgment_point(
     if not submitted:
         # メタレーンは例外なく戻ったが成功の証跡が無い (finalize 証跡なし /
         # failed / unknown)。LLM も finalize も走った後かもしれないので、
-        # 呼び出し側の代替経路は許さない。
-        result["outcome"] = OUTCOME_RAN
+        # 呼び出し側の代替経路は許さない。台帳自体が読めなかった場合は
+        # 「走ったかどうかも分からない」= indeterminate。
+        result["outcome"] = unread_outcome or OUTCOME_RAN
     return result
 
 
@@ -2285,6 +2309,24 @@ def _runtime_failure_is_side_effect_free(exc: Exception) -> bool:
     **この 1 つの判定から導く** — 二箇所で例外型を読み分けると、片方だけ直した
     ときに「台帳は unknown なのに呼び出し側は再実行してよいと読む」形の食い違いが
     生まれる。
+
+    ⚠ **型だけでは「判断が適用済みか」は分からない** (2026-08-14 Codex 指摘)。
+    ``sea/runtime_graph.py`` と ``sea/runtime_llm.py`` は Playbook 実行中の
+    **任意の例外**を ``LLMError`` に包み直すため、ここへ届く LLMError は
+    「プロバイダが出力前に落ちた」とは限らず、finalize が判断を適用した**後**の
+    クラッシュでもありうる。それでも代替経路が判断を上書きしないのは、**台帳の
+    合法遷移が歯止めになっている**から:
+
+    - finalize が適用済み → 行は ``applied`` → ``applied → failed`` は不正遷移で
+      :func:`_classify_runtime_failure` が書けず None を返す → 結末は
+      ``indeterminate`` (代替経路は走らない)
+    - finalize 前 → 行は ``running`` → ``running → failed`` は合法 → ``no_effect``
+      (適用された判断が無いので、代替経路が上書きする決定も無い)
+
+    つまり**この関数の型判定は台帳の裏付けとセットでしか正しくない**。台帳の無い
+    経路 (execution_ledger を持たない manager = 旧テストスタブ) では裏付けが無く、
+    型の推定がそのまま結末になる。本番の manager は必ず台帳を持つ。
+    回帰は ``test_runtime_exception_after_finalize_is_indeterminate``。
     """
     from llm_clients.exceptions import LLMError
     from sea.beat_gate import BeatGateClosedError

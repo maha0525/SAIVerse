@@ -679,7 +679,7 @@ def test_wait_response_timeout_routes_by_track_type(session_factory, monkeypatch
     conv_ends: List[Any] = []
     monkeypatch.setattr(
         wiring, "handle_conversation_end",
-        lambda mgr, pid, tid: conv_ends.append(tid) or {"submitted": True},
+        lambda mgr, pid, tid, **kw: conv_ends.append(tid) or {"submitted": True},
     )
     # 旧経路の観測用: v1 メタ判断 (on_periodic_tick) はもう呼ばれない
     ticks: List[Any] = []
@@ -1089,6 +1089,93 @@ def test_external_event_side_effect_free_failure_falls_back_once(session_factory
     assert route == wiring.ROUTE_DIRECT_JUDGMENT_UNAVAILABLE
     assert dispatched == ["direct"]  # fallback は 1 回だけ
     assert ledger.list_unknown() == []
+
+
+def test_runtime_exception_after_finalize_is_indeterminate(session_factory):
+    """finalize が適用した**後**のクラッシュでは代替応対を走らせない。
+
+    2026-08-14 Codex 二巡目 medium: `sea/runtime_graph.py` と `runtime_llm.py` は
+    Playbook 実行中の**任意の例外**を LLMError に包み直すので、例外型だけでは
+    「出力前に落ちた」と「判断を適用した後に落ちた」を区別できない。歯止めは
+    台帳の合法遷移 —— applied → failed は不正遷移なので分類が書けず、結末は
+    indeterminate になる。ここが崩れると、機構が判断の決定を上書きして応答する。
+    """
+    from llm_clients.exceptions import LLMError
+
+    manager, _ = _make_manager(session_factory)
+    ledger = _attach_ledger(manager, session_factory)
+
+    class _ApplyThenBoom(FinalizingPulseController):
+        def submit_meta_judgment(self, persona_id, building_id, meta_playbook,
+                                 args=None, event_callback=None):
+            super().submit_meta_judgment(
+                persona_id, building_id, meta_playbook,
+                args=args, event_callback=event_callback,
+            )  # finalize 相当 (mark_applied) まで進む
+            # 汎用ラッパーと同じ形 — 中身は何であれ LLMError で届く
+            raise LLMError("wrapped failure after finalize")
+
+    manager.pulse_controller = _ApplyThenBoom(ledger)
+    dispatched: List[str] = []
+    route = wiring.handle_external_event(
+        manager, PERSONA_ID, "掲示板の告知",
+        dispatch_direct=lambda: dispatched.append("direct"),
+    )
+    assert route == wiring.ROUTE_NONE_INDETERMINATE
+    assert dispatched == []
+
+
+def test_ledger_claim_failure_is_reported_as_indeterminate(session_factory):
+    """台帳 claim の例外を裸で上げず、結末のある結果にする。
+
+    2026-08-14 Codex 二巡目: 例外のまま上げると呼び出し側は結末を受け取れず、
+    代替経路の可否を判定する材料が無い。行が作られたかも分からない (作られて
+    いれば回復 tick が拾う) ので indeterminate = 応答しない。
+    """
+    manager, _ = _make_manager(session_factory)
+
+    def _boom(*a, **k):
+        raise RuntimeError("database is locked")
+
+    manager.execution_ledger = SimpleNamespace(claim_execution=_boom)
+    dispatched: List[str] = []
+    route = wiring.handle_external_event(
+        manager, PERSONA_ID, "掲示板の告知",
+        dispatch_direct=lambda: dispatched.append("direct"),
+    )
+    assert route == wiring.ROUTE_NONE_INDETERMINATE
+    assert dispatched == []
+
+
+def test_recovery_refire_runs_the_typed_fallback_on_no_effect(
+    session_factory, monkeypatch,
+):
+    """回収の refire でも、副作用ゼロ確定の失敗は代替応対へ落とす。
+
+    2026-08-14 Codex 二巡目: 回収入口だけ無条件に return していたため、通常入口
+    なら応対されるはずの失敗でイベントが消えていた。しかも runtime exception で
+    台帳が終端した行は prepared 回収にも戻らないので、そこで永久に失われる。
+    """
+    from saiverse.judgment_points import OUTCOME_NO_EFFECT
+
+    manager, _ = _make_manager(session_factory)
+    _fake_fire(monkeypatch, {
+        "submitted": False, "reason": "runtime exception: LLMError('down')",
+        "outcome": OUTCOME_NO_EFFECT,
+    })
+    dispatched: List[Dict[str, Any]] = []
+    manager.pulse_dispatcher = SimpleNamespace(
+        dispatch_schedule_fire=lambda **kw: (
+            dispatched.append(kw)
+            or {"action": "execute", "runtime_outcome": "completed"}
+        ),
+    )
+    wiring.refire_judgment_from_recovery(
+        manager, PERSONA_ID, "on_event",
+        {"event_text": "掲示板の告知", "is_alert": False}, "exec-1",
+    )
+    assert len(dispatched) == 1
+    assert "[外部イベント通知]" in dispatched[0]["user_input"]
 
 
 def test_external_event_reaction_falls_back_to_ledger_result(
