@@ -139,7 +139,37 @@ class WrapUpConversationApiTest(unittest.TestCase):
             expected_episode_ref=ep["episode_ref"],
         )
         self.assertFalse(result["submitted"])
-        self.assertIn("already ended", result["reason"])
+        self.assertIn("no open conversation episode", result["reason"])
+
+    def test_fire_time_close_targets_only_the_verified_episode(self):
+        """照合と close は 1 手 (条件付き) —— 別の会話が開いていても閉じない。
+
+        「読んで照合 → 閉じる」の形だと、その間に別経路が閉じて新しい会話を
+        開いた場合に**別の会話を閉じてしまう** (2026-08-14 Codex 三巡目)。
+        """
+        from saiverse import autonomy_wiring
+
+        track_id = self._running_track("user_conversation")
+        first = episodes.open_conversation_episode(
+            self.manager, PERSONA_ID, building_id=BUILDING,
+            participants=[PERSONA_ID, "1"],
+        )
+        episodes.close_conversation_episode(self.manager, PERSONA_ID)
+        second = episodes.open_conversation_episode(
+            self.manager, PERSONA_ID, building_id=BUILDING,
+            participants=[PERSONA_ID, "1"],
+        )
+
+        result = autonomy_wiring.handle_conversation_end(
+            self.manager, PERSONA_ID, track_id,
+            expected_episode_ref=first["episode_ref"],
+        )
+        self.assertFalse(result["submitted"])
+        # 新しい会話は開いたまま (巻き添えで閉じられていない)
+        still_open = episodes.get_open_episode(
+            self.manager, PERSONA_ID, kind=episodes.KIND_CONVERSATION,
+        )
+        self.assertEqual(still_open["episode_ref"], second["episode_ref"])
 
     # -- 撃たない側 --------------------------------------------------------
 

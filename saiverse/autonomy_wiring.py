@@ -832,59 +832,57 @@ def handle_conversation_end(
     実証済みの抑止を本番へ適用)。往復判定は出来事を閉じる **前** に行う
     (会話区間の started_at が要るため)。
 
+    **閉じるべき会話が無ければ判断も撃たない** — 開いている会話が無いのに撃つと、
+    存在しない会話の振り返りがペルソナ名義の記憶に残る。
+
     Args:
         expected_episode_ref: 呼び出し元が「この会話を終える」と決めた時点で
-            見ていた会話の出来事。**指定すると、いま開いている会話がそれと同じ
-            ときだけ終了処理を進める**。呼び出し元の検査から実際の発火までに
-            間が空く経路 (debug の切り上げは背景スレッドで発火する) で、その間に
-            別経路が会話を閉じ / 新しい会話を開いていたら、ここで撃つ判断は
-            **別の会話、あるいは存在しない会話の振り返り**になる
-            (2026-08-14 Codex 二巡目)。None なら従来どおり無条件。
+            見ていた会話の出来事。**指定すると、その行が open のままのときだけ
+            閉じる条件付き更新**になり、負けたら判断も撃たない。呼び出し元の
+            検査から実際の発火までに間が空く経路 (debug の切り上げは背景スレッドで
+            発火する) で、その間に別経路が会話を閉じ / 新しい会話を開いていたら、
+            ここで撃つ判断は**別の会話、あるいは存在しない会話の振り返り**になる
+            (2026-08-14 Codex 二巡目・三巡目)。None なら「いま開いている会話」を
+            閉じる (自然タイムアウト経路)。
     """
-    if expected_episode_ref is not None:
-        from saiverse import episodes
-
-        try:
-            current = episodes.get_open_episode(
-                manager, persona_id, kind=episodes.KIND_CONVERSATION,
-            )
-        except Exception:
-            LOGGER.warning(
-                "[autonomy-wiring] failed to re-read the open conversation "
-                "episode before ending it (persona=%s track=%s); skipping to "
-                "avoid judging a conversation that may not exist",
-                persona_id, track_id, exc_info=True,
-            )
-            return {"kind": KIND_POST_CONVERSATION, "submitted": False,
-                    "reason": "conversation episode unreadable at fire time",
-                    "outcome": OUTCOME_ABORTED}
-        current_ref = (current or {}).get("episode_ref")
-        if current_ref != expected_episode_ref:
-            LOGGER.info(
-                "[autonomy-wiring] conversation %s is no longer the open episode "
-                "(now %s); skipping the end-of-conversation judgment "
-                "(persona=%s track=%s)",
-                expected_episode_ref, current_ref, persona_id, track_id,
-            )
-            return {"kind": KIND_POST_CONVERSATION, "submitted": False,
-                    "reason": "conversation already ended by another path",
-                    "outcome": OUTCOME_ABORTED}
-
+    # 往復判定は出来事を閉じる前に行う (会話区間の started_at が要るため)。
     had_exchange = _conversation_had_exchange(manager, persona_id, track_id)
 
-    # 会話の出来事を閉じる (A1 の運用の線)。記録専用 — 失敗しても判断は止めない。
-    # 閉じた出来事の参照は post_conversation 判断へ渡す (層2 棚入れの対象 §9.1)。
+    # 会話の出来事を閉じる (A1 の運用の線)。閉じた出来事の参照は
+    # post_conversation 判断へ渡す (層2 棚入れの対象 §9.1)。
+    # expected_episode_ref がある経路では**条件付き close** —— 照合と書き込みを
+    # 1 手に畳み、「照合してから閉じる」間に別経路が閉じて新しい会話を開いた
+    # ときに別の会話を閉じる窓を無くす (2026-08-14 Codex 三巡目)。
     episode_ref: Optional[str] = None
+    closed: Optional[Dict[str, Any]] = None
+    close_failed = False
     try:
         from saiverse.episodes import close_conversation_episode
 
-        closed = close_conversation_episode(manager, persona_id)
+        closed = close_conversation_episode(
+            manager, persona_id, expected_ref=expected_episode_ref,
+        )
         episode_ref = (closed or {}).get("episode_ref")
     except Exception:
+        close_failed = True
         LOGGER.warning(
             "[autonomy-wiring] failed to close conversation episode: "
             "persona=%s track=%s", persona_id, track_id, exc_info=True,
         )
+
+    if closed is None and not close_failed:
+        # 閉じるべき会話が無かった。**判断を撃たない** —— 開いている会話が
+        # 無いのに撃つと、存在しない会話の振り返り (作話) がペルソナ名義の
+        # 記憶に残る (F5 で debug 入口に入れた歯止めを、自然タイムアウトと
+        # 条件付き close の敗者にも広げた。2026-08-14 Codex 三巡目)。
+        LOGGER.info(
+            "[autonomy-wiring] no open conversation episode to end "
+            "(persona=%s track=%s expected=%s); skipping the judgment",
+            persona_id, track_id, expected_episode_ref,
+        )
+        return {"kind": KIND_POST_CONVERSATION, "submitted": False,
+                "reason": "no open conversation episode to end",
+                "outcome": OUTCOME_ABORTED}
 
     if not had_exchange:
         LOGGER.warning(

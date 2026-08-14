@@ -567,7 +567,7 @@ def test_unreadable_ledger_status_accepts_the_captured_finalize_event(manager):
             if event_callback:
                 event_callback({
                     "type": "judgment_applied", "kind": "on_event",
-                    "extras": ["reaction=engage_now"],
+                    "applied": True, "extras": ["reaction=engage_now"],
                 })
 
     manager.execution_ledger = _ledger_stub(get_execution=_boom)
@@ -578,6 +578,38 @@ def test_unreadable_ledger_status_accepts_the_captured_finalize_event(manager):
     )
     assert result["submitted"] is True
     assert result["applied_events"][0]["extras"] == ["reaction=engage_now"]
+
+
+def test_unreadable_ledger_status_rejects_a_failed_finalize_event(manager):
+    """finalize が **適用できなかった** イベントを成功の証拠にしない。
+
+    judgment_finalize は適用に失敗しても ``applied=False`` で judgment_applied を
+    emit する。type だけ見ると「適用に失敗した」を「適用した」と読む
+    (2026-08-14 Codex 三巡目)。
+    """
+    def _boom(eid):
+        raise RuntimeError("ledger down")
+
+    class _FailedFinalize(FakePulseController):
+        def submit_meta_judgment(self, persona_id, building_id, meta_playbook,
+                                 args=None, event_callback=None):
+            super().submit_meta_judgment(
+                persona_id, building_id, meta_playbook, args, event_callback,
+            )
+            if event_callback:
+                event_callback({
+                    "type": "judgment_applied", "kind": "on_event",
+                    "applied": False, "extras": [],
+                })
+
+    manager.execution_ledger = _ledger_stub(get_execution=_boom)
+    manager.pulse_controller = _FailedFinalize()
+    result = jp.run_judgment_point(
+        manager, PERSONA_ID, "on_event", {"event_text": "来客"},
+        execution_id="exec-1",
+    )
+    assert result["submitted"] is False
+    assert result["outcome"] == jp.OUTCOME_INDETERMINATE
 
 
 def test_post_session_without_session_result_raises(manager):

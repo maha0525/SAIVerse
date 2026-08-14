@@ -96,6 +96,20 @@
 
 **切り出し**: on_event の冪等キー欠落（同じ刺激の再配送で二重応対）は、安定 ID の供給源設計が要るため [on_event_judgment_has_no_idempotency_key.md](on_event_judgment_has_no_idempotency_key.md) へ。
 
+## ⑦ 三巡目（2026-08-14）— 収束せず、残りは「刺激の永続 ID」に集約された
+
+三巡目は high 6・medium 0。**6 件のうち 4 件が、角度を変えて同じ欠落（発話・イベント単位の永続 ID = receipt）を指していた**ため、それらは切り出し先の issue に集約し、範囲を「冪等キー」から「刺激の永続 ID そのもの」へ広げた。receipt 抜きで直せる 2 件はここで消した。
+
+**消した 2 件**
+
+- **条件付き close にしていなかった**。②で入れた「照合してから閉じる」は、`close_conversation_episode` が最新の open を**再検索して**閉じるため、照合と close の間に別経路が閉じて新しい会話を開くと**別の会話を閉じる**。→ `close_conversation_episode(expected_ref=...)` を条件付き更新（open のままの当該行だけ閉じる）にし、照合と書き込みを 1 手に畳んだ。負けたら判断も撃たない。
+- **「閉じるべき会話が無くても判断を撃つ」既定が自然タイムアウト経路に残っていた**。F5 で debug 入口には歯止めを入れたが、`handle_conversation_end` 自体の既定は撃つ側のままで、`test_conversation_end_defaults_to_fire_when_undetectable` がそれを期待値として固定していた（F5 の指摘が名指ししていたテスト）。→ 撃つ側へ倒してよいのは「**往復が判定できない**」ときだけで、「**会話が存在しない**」ときではない。テストを 2 本に割り、後者は撃たないことを固定した。
+- あわせて、②で入れた「callback の finalize イベントを台帳読み取り失敗時の証跡にする」判定を締めた。`judgment_finalize` は適用できなかった場合も `applied=False` で emit するので、`type` だけ見ると「適用に失敗した」を「適用した」と読む。→ `kind` 一致 かつ `applied` が真のときだけ成功扱い。
+
+**集約した 4 件**（[on_event_judgment_has_no_idempotency_key.md](on_event_judgment_has_no_idempotency_key.md) の「4 つの顔」）: 冪等キー／回収の重複判定の粒度（区間単位の証跡では先行発話への応答を誤認しうる）／回収 activate の TOCTOU／claim 失敗時の黙殺。いま入っている歯止めはいずれも receipt の近似で、順序として receipt が先に要る。
+
+**この時点の収束状態**: 収束していない（次の巡を投げれば同じ 4 件が別の顔で出る見込み）。ただし残りは実装の粗ではなく**設計の欠落**なので、巡を重ねても埋まらない — まはーの裁定待ち。
+
 ## 対応の記録（2026-07-31 実装）
 
 - **①** `run_judgment_point` の席取りを `_try_mark_running`（`try_mark_running` の prepared 限定 CAS、旧スタブは `mark_running` へ degrade）に変更。敗者は台帳に一切書かず `outcome=indeterminate` で離脱する（勝者が同じ判断を処理するため、呼び出し側は代替経路を走らせない）。

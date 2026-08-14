@@ -652,12 +652,17 @@ def test_conversation_end_zero_exchange_skips_judgment(
     ) is None
 
 
-def test_conversation_end_defaults_to_fire_when_undetectable(
+def test_conversation_end_fires_when_exchange_is_undetectable(
     session_factory, monkeypatch,
 ):
-    """出来事なし / adapter 未対応では判断を撃つ側に倒す (収穫の取りこぼし回避)。"""
+    """往復が判定できないだけなら撃つ側に倒す (実在した会話の収穫を捨てない)。
+
+    倒す先は「往復の有無」に限る — 会話の出来事そのものは開いている。
+    """
     manager, persona = _make_manager(session_factory)
-    # 出来事なし + adapter なし
+    clock.enable_virtual(datetime(2026, 7, 4, 15, 0, 0))
+    _open_conversation_episode(manager)
+    # adapter なし = 往復判定不能
     fired: List[Any] = []
     monkeypatch.setattr(
         wiring, "fire_judgment_point",
@@ -666,6 +671,29 @@ def test_conversation_end_defaults_to_fire_when_undetectable(
     )
     wiring.handle_conversation_end(manager, PERSONA_ID, "track-1")
     assert fired == ["post_conversation"]
+
+
+def test_conversation_end_without_an_open_episode_does_not_fire(
+    session_factory, monkeypatch,
+):
+    """回帰 (2026-08-14 Codex 三巡目): 閉じるべき会話が無ければ判断も撃たない。
+
+    旧既定は「出来事が無くても撃つ側に倒す」で、これが F5 で名指しされた作話の
+    入口だった —— 存在しない会話の振り返りがペルソナ名義の記憶に残る。撃つ側へ
+    倒してよいのは「往復が判定できない」ときだけで、「会話が存在しない」ときでは
+    ない (debug 入口に入れた歯止めを、自然タイムアウトにも広げた)。
+    """
+    manager, _ = _make_manager(session_factory)  # 会話の出来事なし
+    fired: List[Any] = []
+    monkeypatch.setattr(
+        wiring, "fire_judgment_point",
+        lambda mgr, pid, kind, context=None, **kw: fired.append(kind)
+        or {"submitted": True},
+    )
+    result = wiring.handle_conversation_end(manager, PERSONA_ID, "track-1")
+    assert fired == []
+    assert result["submitted"] is False
+    assert "no open conversation episode" in result["reason"]
 
 
 def test_wait_response_timeout_routes_by_track_type(session_factory, monkeypatch, caplog):

@@ -2223,7 +2223,16 @@ def run_judgment_point(
             # ただし callback が finalize の judgment_applied を捕まえていれば、
             # それは台帳とは独立した一次証跡なので成功として扱ってよい —
             # 台帳の読み取り失敗だけを理由に、実際に下された判断を捨てない。
-            if applied_events:
+            # ただし**イベントの中身を確かめる**: 同じ判断点 (kind) のもので、
+            # かつ applied が真のものだけ (finalize は適用できなかった場合も
+            # applied=False で emit する。type だけ見ると「適用に失敗した」を
+            # 「適用した」と読む。2026-08-14 Codex 三巡目)。
+            if any(
+                isinstance(ev, dict)
+                and ev.get("kind") == kind
+                and bool(ev.get("applied"))
+                for ev in applied_events
+            ):
                 LOGGER.warning(
                     "[judgment] failed to read ledger status after %s; "
                     "accepting the finalize event captured by the callback "

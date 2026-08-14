@@ -723,13 +723,70 @@ def close_conversation_episode(
     persona_id: str,
     *,
     digest_ref: Optional[str] = None,
+    expected_ref: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """開いている会話の出来事を閉じる。無ければ no-op で None を返す。
 
     会話終了 (wait_response タイムアウト / シムの leave イベント) から呼ばれる。
     閉じるのは「最後に開いた open な conversation 行」1 件のみ (会話は同時に
     ひとつ — 排他性は出来事側の性質 §8)。
+
+    Args:
+        expected_ref: 呼び出し元が「この会話を終える」と決めた時点で見ていた
+            出来事 (``episode:N`` / UUID)。**指定すると、その行が open のまま
+            のときだけ閉じる条件付き更新になる** (別経路が先に閉じていたら
+            None を返し、何も書かない)。「読んで照合してから閉じる」形だと、
+            照合と close の間に別経路が閉じて新しい会話を開いた場合に**別の会話を
+            閉じてしまう** — 照合と書き込みを 1 手に畳んで窓を無くす
+            (2026-08-14 Codex 三巡目。台帳の abandon_prepared と同じ規律)。
     """
+    if expected_ref is not None:
+        db = manager.SessionLocal()
+        try:
+            episode_id = _resolve_episode_id(db, persona_id, expected_ref)
+            updated = (
+                db.query(Episode)
+                .filter(
+                    Episode.EPISODE_ID == episode_id,
+                    Episode.PERSONA_ID == persona_id,
+                    Episode.KIND == KIND_CONVERSATION,
+                    Episode.STATUS == STATUS_OPEN,
+                )
+                .update(
+                    {
+                        Episode.STATUS: STATUS_CLOSED,
+                        Episode.ENDED_AT: _now_epoch(),
+                        **({Episode.DIGEST_REF: digest_ref}
+                           if digest_ref is not None else {}),
+                    },
+                    synchronize_session=False,
+                )
+            )
+            if not updated:
+                db.rollback()
+                LOGGER.info(
+                    "[episode] close_conversation: %s is no longer open "
+                    "(persona=%s); not closing anything", expected_ref, persona_id,
+                )
+                return None
+            db.commit()
+            ep = (
+                db.query(Episode)
+                .filter(Episode.EPISODE_ID == episode_id)
+                .first()
+            )
+            result = _to_dict(ep) if ep is not None else None
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+        _cache_drop(manager, persona_id)
+        LOGGER.info(
+            "[episode] closed(conditional) %s persona=%s", expected_ref, persona_id,
+        )
+        return result
+
     open_conv = get_open_episode(manager, persona_id, kind=KIND_CONVERSATION)
     if open_conv is None:
         LOGGER.debug(
