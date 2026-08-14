@@ -12,12 +12,16 @@
 
 ## 残っている論点 3 の中身
 
-- **City ID**: `AdminService._validate_city_name` が既に ASCII 英数字 + `_` を強制している (作成・更新の両方)。文字種の穴は無い。
-- **ペルソナ ID (AIID)**: 無検証。`custom_ai_id` も名前由来の自動生成も日本語が通る。AIID は `~/.saiverse/personas/<id>/` のフォルダ名になるため Building ID と同じ性質の永続キー。**ここが論点 3 の実体。**
+- **City の識別子 (CITY_SLUG)**: `AdminService._validate_city_slug` が ASCII 英数字 + `_` を強制する。2026-08-14 の識別子/表示名の分離 ([`intent/city_identity.md`](../intent/city_identity.md)) 以降、識別子は **City 作成時にしか決められない**ので検査点は作成の口ひとつ。表示名 (`CITYNAME`) は自由な文字列だが ID の材料にならないため穴にならない。
+- **ペルソナ ID (AIID)**: 無検証。`custom_ai_id` も名前由来の自動生成も日本語が通る。AIID は `~/.saiverse/personas/<id>/` のフォルダ名になるため Building ID と同じ性質の永続キー。**ここが論点 3 の実体で、いまも現役。**
+  - 非対称の中身: Building / Region / 私室の ID は `manager/ids.py` の `build_identifier` を通り、日本語名は連番へ落ちる。だが AIID 本体は `manager/persona.py` が `f"{name.lower().replace(' ', '_')}_{city_slug}"` を自作しており、この関所を通らない。**同じ作成操作の中で、私室 ID だけが契約を守り AIID は素通しになる。**
+  - 実測 (2026-08-15、まはーの実機): 「テラ」を新規作成 → `テラ_city_a`。本番 DB には `バッキー_city_a` も在住。
 
 ## 症状
 
-左サイドバー「場所」セクションの + ボタンからの Building 作成は名前しか聞かず、ID は `manager/admin.py create_building` が自動生成する。生成式は `name.lower().replace(' ', '_') + '_' + CITYNAME` — 日本語名は小文字化しても日本語のままなので、**日本語 ID がそのまま DB に入る**。カスタム ID を渡す経路 (グローバル設定側の作成フォーム等) も strip するだけで文字種検証なし。
+左サイドバー「場所」セクションの + ボタンからの Building 作成は名前しか聞かず、ID は `manager/admin.py create_building` が自動生成する。生成式は `name.lower().replace(' ', '_') + '_' + <City の識別子>` — 日本語名は小文字化しても日本語のままなので、**日本語 ID がそのまま DB に入る**。カスタム ID を渡す経路 (グローバル設定側の作成フォーム等) も strip するだけで文字種検証なし。
+
+(起票当時この City の識別子は `CITYNAME` 列だった。2026-08-14 に `CITY_SLUG` へ改名され、`CITYNAME` は表示名の列になっている。)
 
 ## 実態 (2026-08-08 時点の本番 DB)
 
