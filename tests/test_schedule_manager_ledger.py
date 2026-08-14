@@ -411,7 +411,11 @@ def test_classify_judgment_outcome_seat_contention_mappings():
     - duplicate:applied / completed = 判断は済んだ — settled_skip (前進)。
     - duplicate:unknown = LLM が動いたか不明 — unknown (自動再実行禁止)。
     """
-    from saiverse.judgment_points import OUTCOME_INDETERMINATE
+    from saiverse.judgment_points import (
+        OUTCOME_INDETERMINATE,
+        OUTCOME_NO_EFFECT,
+        OUTCOME_RAN,
+    )
     from saiverse.schedule_manager import ScheduleManager
 
     classify = ScheduleManager._classify_judgment_outcome
@@ -427,6 +431,18 @@ def test_classify_judgment_outcome_seat_contention_mappings():
         "submitted": False, "reason": "seat taken by another claimant",
         "outcome": OUTCOME_INDETERMINATE,
     })[0] == "waiting"
+    # ran = メタレーンが走った後に証跡なく戻った。duplicate:unknown と同じ理由で
+    # unknown (自動再実行禁止) — failed に落とすと backoff が再実行してしまう
+    # (2026-08-14 F3 で結末語彙を補ったときに揃えた)。
+    assert classify({
+        "submitted": False, "reason": "runtime exception: RuntimeError('x')",
+        "outcome": OUTCOME_RAN,
+    })[0] == "unknown"
+    # 副作用ゼロ確定の失敗は従来どおり failed (再試行安全)
+    assert classify({
+        "submitted": False, "reason": "runtime exception: LLMError('down')",
+        "outcome": OUTCOME_NO_EFFECT,
+    })[0] == "failed"
     # 既存のゲート裁定は不変
     assert classify({"submitted": False, "reason": "precondition not met"})[0] \
         == "settled_skip"

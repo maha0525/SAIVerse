@@ -455,6 +455,67 @@ def test_pre_dispatch_abort_releases_the_claimed_seat(manager):
         assert abandoned == [("exec-1", reason)]
 
 
+def test_direct_fallback_allowed_defaults_to_refusing(caplog):
+    """代替経路の可否表 (2026-08-14 F3)。**結末の無い結果は拒否**。
+
+    「submitted=False かつ indeterminate でなければ起動できなかった」と読む形は、
+    判断が走った後の失敗まで「起動できなかった」に含めてしまう。可否は結末の
+    語彙で明示し、書き忘れ (結末なし) は拒否側 + WARNING に倒す。
+    """
+    allowed = jp.direct_fallback_allowed
+    assert allowed({"submitted": False, "outcome": jp.OUTCOME_ABORTED}) is True
+    assert allowed({"submitted": False, "outcome": jp.OUTCOME_NO_EFFECT}) is True
+    assert allowed({"submitted": False, "outcome": jp.OUTCOME_RAN}) is False
+    assert allowed({"submitted": False, "outcome": jp.OUTCOME_INDETERMINATE}) is False
+
+    with caplog.at_level("WARNING", logger="saiverse.judgment_points"):
+        assert allowed({"submitted": False, "reason": "未知の経路"}) is False
+    assert any("no outcome" in r.message for r in caplog.records)
+
+
+def test_runtime_exception_outcome_follows_the_ledger_terminal(manager):
+    """実行時例外の結末は「台帳へ何を書けたか」から導く。
+
+    副作用ゼロ確定 (LLM エラー) → failed → no_effect (代替経路 OK)。
+    それ以外 → unknown → ran (代替経路 NG)。台帳遷移自体が失敗したら
+    indeterminate (書けなかったことを成功と読まない)。
+    """
+    from llm_clients.exceptions import LLMError
+
+    def _run(exc, ledger):
+        manager.execution_ledger = ledger
+        manager.pulse_controller = SimpleNamespace(
+            submit_meta_judgment=lambda **kw: (_ for _ in ()).throw(exc),
+        )
+        return jp.run_judgment_point(
+            manager, PERSONA_ID, "on_event", {"event_text": "来客"},
+            execution_id="exec-1",
+        )
+
+    marks: list = []
+    ok_ledger = SimpleNamespace(
+        mark_running=lambda eid: None,
+        try_mark_running=lambda eid: True,
+        mark_failed=lambda eid, r: marks.append(("failed", r)),
+        mark_unknown=lambda eid, r: marks.append(("unknown", r)),
+        get_execution=lambda eid: {"status": "prepared"},
+    )
+    assert _run(LLMError("down"), ok_ledger)["outcome"] == jp.OUTCOME_NO_EFFECT
+    assert marks[-1][0] == "failed"
+    assert _run(RuntimeError("boom"), ok_ledger)["outcome"] == jp.OUTCOME_RAN
+    assert marks[-1][0] == "unknown"
+
+    def _boom(*a, **k):
+        raise RuntimeError("ledger down")
+
+    dead_ledger = SimpleNamespace(
+        mark_running=lambda eid: None, try_mark_running=lambda eid: True,
+        mark_failed=_boom, mark_unknown=_boom,
+        get_execution=lambda eid: {"status": "prepared"},
+    )
+    assert _run(LLMError("down"), dead_ledger)["outcome"] == jp.OUTCOME_INDETERMINATE
+
+
 def test_post_session_without_session_result_raises(manager):
     """起きていないセッションの裁定を走らせない (契約違反は畳まず上げる)。
 

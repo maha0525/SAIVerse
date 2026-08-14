@@ -1907,13 +1907,49 @@ def build_judgment_args(
     }
 
 
-#: LLM 開始前に離脱したときの結末 (run_judgment_point の結果 dict ``outcome``)。
-#: ``aborted`` = 席を確実に放棄した (呼び出し側は代替経路へ進んでよい)。
-#: ``indeterminate`` = 席を放棄できなかった — 他の claimant が走らせているか、
-#: 台帳が応答しないため回復 tick に再発火されうる。**呼び出し側は代替経路を
-#: 走らせてはいけない** (同じイベントが二度処理される)。
+#: 判断が結末に至らなかったときの結末 (``submitted=False`` の結果 dict の
+#: ``outcome``)。呼び出し側が答えたい問いは 1 つ — **判断の代わりに自分で応対
+#: してよいか**。それは「判断が世界へ作用しえた地点まで進んだか」と「席が
+#: 残っていて後からもう一度走りうるか」で決まる。
+#:
+#: - ``aborted``: LLM へ渡る前に止まり、席は残っていない (そもそも取っていない /
+#:   放棄済み)。→ 代替経路 **OK**
+#: - ``no_effect``: メタレーンへ渡ったが、副作用ゼロが確定した失敗 (Beat 関所の
+#:   閉鎖 / LLM エラー) で戻り、台帳は failed 終端。→ 代替経路 **OK**
+#: - ``ran``: メタレーンが走った後、成功の証跡なしに戻った。finalize が判断を
+#:   適用済みかもしれない。→ 代替経路 **NG** (判断の決定を上書きしてしまう)
+#: - ``indeterminate``: 席が残っている / 別の claimant が走らせている / 台帳が
+#:   読めない。回復 tick に再発火されうる。→ 代替経路 **NG** (二重処理になる)
 OUTCOME_ABORTED = "aborted"
+OUTCOME_NO_EFFECT = "no_effect"
+OUTCOME_RAN = "ran"
 OUTCOME_INDETERMINATE = "indeterminate"
+
+#: 代替経路 (呼び出し側が判断を経ずに自分で応対する) を許す結末。
+_DIRECT_FALLBACK_OUTCOMES = frozenset({OUTCOME_ABORTED, OUTCOME_NO_EFFECT})
+
+
+def direct_fallback_allowed(result: Dict[str, Any]) -> bool:
+    """``submitted=False`` の判断結果に対し、代替経路を走らせてよいか。
+
+    **既定は「走らせない」**。``outcome`` の無い結果は「LLM が動いたかもしれない」
+    として扱う (2026-08-14 Codex 指摘 F3)。判断が走った後の失敗を「起動できな
+    かった」と読んで応対すると、finalize が note_only 等を適用した**後**に応答を
+    重ねてしまう —— 判断の決定を機構が上書きする形になる。
+
+    結末を書き忘れた経路は WARNING で表に出す。既定が拒否なので、書き忘れは
+    「ユーザーの呼びかけへの沈黙」として現れる —— 黙って通すより、ログに残して
+    気づける形にしておく。
+    """
+    outcome = result.get("outcome")
+    if outcome is None:
+        LOGGER.warning(
+            "[judgment] result has no outcome; refusing the direct fallback "
+            "(kind=%s reason=%s execution=%s)",
+            result.get("kind"), result.get("reason"), result.get("execution_id"),
+        )
+        return False
+    return outcome in _DIRECT_FALLBACK_OUTCOMES
 
 
 def _abandon_seat(ledger: Any, execution_id: Optional[str], reason: str) -> bool:
@@ -2146,10 +2182,22 @@ def run_judgment_point(
             "[judgment] %s Playbook raised: persona=%s error=%r",
             kind, persona_id, exc,
         )
+        # 結末は「台帳へ何を書けたか」から導く (書けなかった = 席の状態が不明)。
+        # 台帳の無い manager (旧テストスタブ) では例外の性質だけで決める。
         if tracked:
-            _classify_runtime_failure(ledger, execution_id, exc)
+            terminal = _classify_runtime_failure(ledger, execution_id, exc)
+            if terminal is None:
+                outcome = OUTCOME_INDETERMINATE
+            else:
+                outcome = OUTCOME_NO_EFFECT if terminal == "failed" else OUTCOME_RAN
+        else:
+            outcome = (
+                OUTCOME_NO_EFFECT if _runtime_failure_is_side_effect_free(exc)
+                else OUTCOME_RAN
+            )
         return {"kind": kind, "playbook": playbook_name, "args": args,
                 "submitted": False, "reason": f"runtime exception: {exc!r}",
+                "outcome": outcome,
                 "errors": errors, "applied_events": applied_events,
                 "execution_id": execution_id}
 
@@ -2215,39 +2263,76 @@ def run_judgment_point(
                 "message": f"ledger status {status} after meta lane return",
             })
 
-    return {"kind": kind, "playbook": playbook_name, "args": args,
-            "submitted": submitted, "errors": errors,
-            "applied_events": applied_events, "execution_id": execution_id}
+    result = {"kind": kind, "playbook": playbook_name, "args": args,
+              "submitted": submitted, "errors": errors,
+              "applied_events": applied_events, "execution_id": execution_id}
+    if not submitted:
+        # メタレーンは例外なく戻ったが成功の証跡が無い (finalize 証跡なし /
+        # failed / unknown)。LLM も finalize も走った後かもしれないので、
+        # 呼び出し側の代替経路は許さない。
+        result["outcome"] = OUTCOME_RAN
+    return result
 
 
-def _classify_runtime_failure(ledger: Any, execution_id: str, exc: Exception) -> None:
+def _runtime_failure_is_side_effect_free(exc: Exception) -> bool:
+    """submit_meta_judgment の例外が「副作用ゼロ確定」か (A7、D4)。
+
+    - BeatGateClosedError: 実行は始まっていない → 副作用ゼロ
+    - LLMError: 出力なし = 世界適用前 → 副作用ゼロ
+    - ExecutionCancelledException / その他: LLM が動いたか不明 → 副作用不明
+
+    台帳の終端 (failed / unknown) と呼び出し側の結末 (no_effect / ran) は
+    **この 1 つの判定から導く** — 二箇所で例外型を読み分けると、片方だけ直した
+    ときに「台帳は unknown なのに呼び出し側は再実行してよいと読む」形の食い違いが
+    生まれる。
+    """
+    from llm_clients.exceptions import LLMError
+    from sea.beat_gate import BeatGateClosedError
+
+    return isinstance(exc, (BeatGateClosedError, LLMError))
+
+
+def _classify_runtime_failure(
+    ledger: Any, execution_id: str, exc: Exception
+) -> Optional[str]:
     """submit_meta_judgment の例外を台帳の終端状態へ分類する (A7、D4)。
 
-    - BeatGateClosedError: 実行は始まっていない (副作用ゼロ) → failed
-    - LLMError: 出力なし = 世界適用前 → failed
-    - ExecutionCancelledException / その他: LLM が動いたか不明 → unknown
-      (自動再実行禁止の対象、intent §2.5)
+    副作用ゼロ確定 (:func:`_runtime_failure_is_side_effect_free`) なら failed、
+    そうでなければ unknown (自動再実行禁止の対象、intent §2.5)。
 
     台帳遷移自体の例外は握らず WARN に留める (二重障害でクラッシュさせない)。
+
+    Returns:
+        台帳へ実際に書いた終端 (``"failed"`` / ``"unknown"``)。遷移が失敗して
+        **何も書けなかった場合は None** — 呼び出し側はそれを「席の状態が不明」
+        として扱う (書けなかったことを成功と読まない)。
     """
     from llm_clients.exceptions import LLMError
     from sea.beat_gate import BeatGateClosedError
     from sea.cancellation import ExecutionCancelledException
 
+    if isinstance(exc, BeatGateClosedError):
+        detail = f"beat gate closed: {exc}"
+    elif isinstance(exc, LLMError):
+        detail = f"llm error: {exc}"
+    elif isinstance(exc, ExecutionCancelledException):
+        detail = f"cancelled: {exc}"
+    else:
+        detail = str(exc) or type(exc).__name__
+    terminal = "failed" if _runtime_failure_is_side_effect_free(exc) else "unknown"
+
     try:
-        if isinstance(exc, BeatGateClosedError):
-            ledger.mark_failed(execution_id, f"beat gate closed: {exc}")
-        elif isinstance(exc, LLMError):
-            ledger.mark_failed(execution_id, f"llm error: {exc}")
-        elif isinstance(exc, ExecutionCancelledException):
-            ledger.mark_unknown(execution_id, f"cancelled: {exc}")
+        if terminal == "failed":
+            ledger.mark_failed(execution_id, detail)
         else:
-            ledger.mark_unknown(execution_id, str(exc) or type(exc).__name__)
+            ledger.mark_unknown(execution_id, detail)
     except Exception:
         LOGGER.warning(
             "[judgment] ledger transition failed after runtime error "
             "(execution=%s original=%r)", execution_id, exc, exc_info=True,
         )
+        return None
+    return terminal
 
 
 # ---------------------------------------------------------------------------

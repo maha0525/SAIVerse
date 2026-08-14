@@ -1012,10 +1012,14 @@ class ScheduleManager:
         # LLM 実行中 / 台帳が応答しない)。この dispatch 自身は副作用ゼロだが、
         # 実処理の失敗ではないので waiting — 再試行の claim が上の duplicate
         # 分類で勝者の終端を照合する。settled_skip (前進) にしてはならない。
-        from saiverse.judgment_points import OUTCOME_INDETERMINATE
+        from saiverse.judgment_points import OUTCOME_INDETERMINATE, OUTCOME_RAN
 
         if result.get("outcome") == OUTCOME_INDETERMINATE:
             return "waiting", reason or "judgment seat indeterminate"
+        if result.get("outcome") == OUTCOME_RAN:
+            # メタレーンが走った後、成功の証跡なく戻った = LLM が動いたか不明。
+            # 自動再実行禁止 (intent §2.5) — failed (再試行安全) に落とさない。
+            return "unknown", reason or "judgment ran without success evidence"
         if (
             reason in cls._JUDGMENT_GATE_REASONS
             or reason.startswith("conversation had no exchange")

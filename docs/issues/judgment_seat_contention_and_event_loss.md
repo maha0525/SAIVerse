@@ -1,7 +1,7 @@
 # 判断点の席の競合制御と、イベントの取りこぼし
 
 **発見**: 2026-07-30（[判断プロンプトの静的一覧を head へ](judgment_static_lists_to_head.md) の Codex レビュー五巡目。移設の範囲外として切り出し）
-**状態**: 実装済・実機検証待ち（2026-07-31。③はまはー裁定で **B** に確定 — 下の「裁定の記録」）
+**状態**: 実装済・実機検証待ち（2026-07-31。③はまはー裁定で **B** に確定 — 下の「裁定の記録」。④は 2026-08-14 追加・実装済）
 **関連**: `docs/intent/execution_ledger.md`、`docs/overview/audit_remediation_plan.md`（実行台帳 W1〜）、`saiverse/judgment_points.py` / `saiverse/autonomy_wiring.py` / `saiverse/execution_ledger.py`
 
 ## なぜ切り出したか
@@ -44,6 +44,20 @@
 ### 裁定の記録（2026-07-31、まはー）
 
 **B を採用。** 根拠: 「台帳が応答しない」の実体は、本体 DB（saiverse.db）への `abandon_prepared` 書き込みが例外で失敗した瞬間で、現実的にはほぼ一瞬のロック競合（database is locked / Windows のファイルロック）。この分岐に来る時点で数秒前の claim は成功しているため、DB が恒久的に死んでいるケースはそもそもここに来ない。障害の正体が「一瞬」なら、保持して再試行すれば直っており、B がその形の障害への正しい処方箋。C の新構造（イベント本文の payload 持ち回し）は守備範囲の狭さに対して台帳の複雑さを一段増やすので見送り。
+
+## ④ 判断が走った後の失敗を「起動できなかった」と読み、決定を上書きして応答する
+
+**発見**: 2026-08-14（Track 撤廃 順序①の Codex レビュー high 指摘 F3。①より前から在る on_event 系の共通欠陥として、順序①の後始末ではなくここに記録する）
+
+呼び出し側（`handle_external_event` / `handle_user_utterance_conflict`）は「`submitted=False` かつ `outcome` が indeterminate **でなければ** 起動できなかった」と読んで代替経路（direct dispatch / activate）を走らせていた。ところが `outcome` を載せていたのは LLM 開始前の離脱経路だけで、**メタレーンへ渡った後の失敗（実行時例外 → 台帳 unknown、finalize 証跡なし、failed）は `outcome` を持たない**。したがって「finalize が note_only を適用した後に例外で落ちた」ケースが「起動できなかった」に分類され、判断の決定を機構が上書きして応答していた（不変条件 b 違反）。
+
+読み手が**キーの不在**から意味を推論していたのが根で、書き手が新しい失敗経路を足すたびに黙って代替経路が走る形だった。
+
+- 直し: 結末の語彙を「呼び出し側が代替経路を走らせてよいか」を答え切る形に広げ（`aborted` / `no_effect` / `ran` / `indeterminate`）、判定を `judgment_points.direct_fallback_allowed` 1 箇所に集約。**結末の無い結果は拒否側に倒し WARNING を出す**（書き忘れが沈黙として観測できる）。
+- 実行時例外の結末は「台帳へ何を書けたか」から導く（副作用ゼロ確定 → failed → `no_effect` = 代替経路 OK / それ以外 → unknown → `ran` = 代替経路 NG / 台帳遷移自体が失敗 → `indeterminate`）。例外型の読み分けは 1 関数に集約し、台帳の終端と呼び出し側の結末が食い違わないようにした。
+- `submitted=False` を返す全経路に結末を付けた（自律 OFF・Playbook 未 import = `aborted` / duplicate:running = `indeterminate` / duplicate:applied・completed・unknown = `ran` / resume 系 = `indeterminate`）。
+- schedule 側の精算（`_classify_judgment_outcome`）も同じ語彙に揃えた：`ran` は unknown（自動再実行禁止）。従来は「未知の reason は保守的に failed」で再試行に落ち、下流の duplicate:unknown 検出に救われていた。
+- **テストが欠陥を守っていた**: `test_external_event_runtime_error_marks_unknown_and_falls_back_once` は「generic RuntimeError で fallback が 1 回起きる」を期待値に固定していた。期待値を「fallback しない（`none:judgment_ran`）」へ改め、副作用ゼロ確定（LLM エラー）の対比テストを足した。直結経路（`handle_user_utterance_conflict`）は直接テストが 1 件も無かったので新設（自律 OFF / Playbook 欠如 / unknown / 副作用ゼロ / engage_now / note_only の 6 系統）。
 
 ## 対応の記録（2026-07-31 実装）
 

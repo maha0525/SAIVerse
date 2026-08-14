@@ -54,7 +54,9 @@ from saiverse.judgment_points import (
     KIND_POST_SESSION,
     OUTCOME_ABORTED,
     OUTCOME_INDETERMINATE,
+    OUTCOME_RAN,
     _abandon_seat,
+    direct_fallback_allowed,
     run_judgment_point,
     validate_judgment_context,
 )
@@ -148,6 +150,10 @@ ROUTE_JUDGED_UNKNOWN = "judged:unknown_reaction"
 #: 再発火されうる / 別の claimant が走らせている)。**代替経路を走らせない** —
 #: 二重応対の方が害が大きい (下の unknown_reaction と同じ判断)。
 ROUTE_NONE_INDETERMINATE = "none:judgment_indeterminate"
+#: 判断のメタレーンは走ったが、成功の証跡なしに戻った (unknown / finalize 証跡
+#: なし)。finalize が既に決定を適用しているかもしれないので、**代替経路を
+#: 走らせない** — 走らせると判断の決定を上書きして応答してしまう (指摘 F3)。
+ROUTE_NONE_JUDGMENT_RAN = "none:judgment_ran"
 
 
 # ---------------------------------------------------------------------------
@@ -382,7 +388,8 @@ def fire_judgment_point(
             "[autonomy-wiring] %s skipped (persona=%s autonomy disabled)", kind, persona_id,
         )
         return {"kind": kind, "playbook": playbook_name, "submitted": False,
-                "reason": "persona autonomy disabled"}
+                "reason": "persona autonomy disabled",
+                "outcome": OUTCOME_ABORTED}
 
     if not playbook_available(manager, playbook_name):
         LOGGER.warning(
@@ -392,7 +399,8 @@ def fire_judgment_point(
             playbook_name, kind, persona_id, playbook_name,
         )
         return {"kind": kind, "playbook": playbook_name, "submitted": False,
-                "reason": "playbook not imported"}
+                "reason": "playbook not imported",
+                "outcome": OUTCOME_ABORTED}
 
     with _judgment_lock(manager, persona_id):
         # 排他の層構造 (2026-07-31 席競合案件・九巡目裁定): 判断の直列化は
@@ -429,6 +437,7 @@ def fire_judgment_point(
                 return {"kind": kind, "playbook": playbook_name,
                         "submitted": False,
                         "reason": "resume execution not found",
+                        "outcome": OUTCOME_INDETERMINATE,
                         "execution_id": resume_execution_id}
             if row.get("status") != "prepared":
                 LOGGER.info(
@@ -439,6 +448,7 @@ def fire_judgment_point(
                 return {"kind": kind, "playbook": playbook_name,
                         "submitted": False,
                         "reason": f"resume target not prepared: {row.get('status')}",
+                        "outcome": OUTCOME_INDETERMINATE,
                         "execution_id": resume_execution_id}
             execution_id = resume_execution_id
         else:
@@ -458,9 +468,15 @@ def fire_judgment_point(
                     "(persona=%s execution=%s)",
                     kind, existing_status, persona_id, execution_id,
                 )
+                # running = 別の claimant が走行中 (席が残っている) /
+                # applied・completed・unknown = その判断はもう走った。
+                # どちらも呼び出し側の代替経路は禁止 (二重処理・決定の上書き)。
                 return {"kind": kind, "playbook": playbook_name,
                         "submitted": False,
                         "reason": f"duplicate:{existing_status}",
+                        "outcome": (OUTCOME_INDETERMINATE
+                                    if existing_status == "running"
+                                    else OUTCOME_RAN),
                         "execution_id": execution_id}
 
         if precondition is not None:
@@ -950,8 +966,12 @@ def handle_external_event(
     - **自律 ON かつ手すき**: on_event 判断を撃つ。判断が ``engage_now`` を
       選んだときだけ従来の応対 Pulse を起動する。insert_slot / note_only /
       ignore は finalize が適用済みなので応対は起動しない
-    - 判断が起動できなかった (Playbook 未 import 等) 場合はイベントを落とさない
-      よう従来経路へフォールバックする
+    - 判断が LLM へ渡る前に止まった / 副作用ゼロ確定で失敗した (Playbook
+      未 import・関所閉鎖・LLM エラー等) 場合はイベントを落とさないよう従来経路へ
+      フォールバックする。判定は :func:`~saiverse.judgment_points.
+      direct_fallback_allowed` (結末の無い結果は拒否側に倒す)
+    - 判断が走った後、成功の証跡なく戻った場合は応対を起動しない — finalize が
+      決定を適用済みかもしれず、応対するとそれを上書きする (2026-08-14 F3)
     - 判断は走ったが reaction が読めなかった場合は応対を起動しない
       (二重応対の方が害が大きい。WARNING で観察可能にする)
 
@@ -985,25 +1005,33 @@ def handle_external_event(
         context["dispatch_envelope"] = dispatch_envelope
     result = fire_judgment_point(manager, persona_id, KIND_ON_EVENT, context)
     if not result.get("submitted"):
-        from saiverse.judgment_points import OUTCOME_INDETERMINATE
-
-        if result.get("outcome") == OUTCOME_INDETERMINATE:
-            # 席を放棄できていない = 判断がこの後 (別 claimant / 回復 tick で)
-            # 走りうる。ここで応対すると同じイベントを二度処理する。
+        if direct_fallback_allowed(result):
+            LOGGER.info(
+                "[autonomy-wiring] on_event judgment unavailable (%s); "
+                "falling back to direct dispatch (persona=%s)",
+                result.get("reason"), persona_id,
+            )
+            dispatch_direct()
+            return ROUTE_DIRECT_JUDGMENT_UNAVAILABLE
+        if result.get("outcome") == OUTCOME_RAN:
+            # 判断は走った後で証跡なく戻った。finalize が note_only 等を適用済み
+            # かもしれないので、ここで応対すると決定を上書きする。
             LOGGER.warning(
-                "[autonomy-wiring] on_event judgment left an unresolved "
-                "execution (%s); not dispatching to avoid double handling "
-                "(persona=%s execution=%s)",
+                "[autonomy-wiring] on_event judgment ran without evidence of "
+                "success (%s); not dispatching to avoid overriding the "
+                "judgment (persona=%s execution=%s)",
                 result.get("reason"), persona_id, result.get("execution_id"),
             )
-            return ROUTE_NONE_INDETERMINATE
-        LOGGER.info(
-            "[autonomy-wiring] on_event judgment unavailable (%s); "
-            "falling back to direct dispatch (persona=%s)",
-            result.get("reason"), persona_id,
+            return ROUTE_NONE_JUDGMENT_RAN
+        # 席を放棄できていない = 判断がこの後 (別 claimant / 回復 tick で)
+        # 走りうる。ここで応対すると同じイベントを二度処理する。
+        LOGGER.warning(
+            "[autonomy-wiring] on_event judgment left an unresolved "
+            "execution (%s); not dispatching to avoid double handling "
+            "(persona=%s execution=%s)",
+            result.get("reason"), persona_id, result.get("execution_id"),
         )
-        dispatch_direct()
-        return ROUTE_DIRECT_JUDGMENT_UNAVAILABLE
+        return ROUTE_NONE_INDETERMINATE
 
     reaction = _extract_reaction(result)
     if reaction is None:
@@ -1049,11 +1077,18 @@ def handle_user_utterance_conflict(
     経路の判断基準 (:func:`handle_external_event` と同じ流儀):
 
     - **自律 OFF のペルソナ**: 判断を経ず直接 ``activate()`` (常に応答)
-    - **判断が起動できなかった** (Playbook 未 import 等): 直接 ``activate()``。
+    - **判断が LLM へ渡る前に止まった / 副作用ゼロ確定で失敗した**
+      (Playbook 未 import・関所閉鎖・LLM エラー等): 直接 ``activate()``。
       ユーザーの呼びかけを機構の不備で黙殺する方が害が大きい
+    - **判断は走ったが成功の証跡なく戻った** (ran): 応答しない。finalize が
+      note_only 等を適用済みかもしれず、応答すると決定を上書きする
     - **判断は受け付けられたが席が未解決** (indeterminate): 応答しない。
       回復 tick が同じ判断を後で走らせうるため、ここで応答すると二重になる
     - **判断は走ったが reaction が読めなかった**: 応答しない (二重応対の回避)
+
+    「起動できなかった」かどうかは :func:`~saiverse.judgment_points.
+    direct_fallback_allowed` が結末 (``outcome``) から決める — **結末の無い結果は
+    拒否側に倒す**。この判定を呼び出し側でやり直さないこと (2026-08-14 F3)。
 
     Returns:
         経路ラベル (``direct:*`` / ``judged:*`` / ``none:*``)。ログ・テスト用。
@@ -1069,21 +1104,29 @@ def handle_user_utterance_conflict(
     }
     result = fire_judgment_point(manager, persona_id, KIND_ON_EVENT, context)
     if not result.get("submitted"):
-        if result.get("outcome") == OUTCOME_INDETERMINATE:
+        if direct_fallback_allowed(result):
+            LOGGER.info(
+                "[autonomy-wiring] utterance-conflict judgment unavailable (%s); "
+                "activating conversation directly (persona=%s)",
+                result.get("reason"), persona_id,
+            )
+            activate()
+            return ROUTE_DIRECT_JUDGMENT_UNAVAILABLE
+        if result.get("outcome") == OUTCOME_RAN:
             LOGGER.warning(
-                "[autonomy-wiring] utterance-conflict judgment left an "
-                "unresolved execution (%s); not responding to avoid double "
-                "handling (persona=%s execution=%s)",
+                "[autonomy-wiring] utterance-conflict judgment ran without "
+                "evidence of success (%s); not responding to avoid overriding "
+                "the judgment (persona=%s execution=%s)",
                 result.get("reason"), persona_id, result.get("execution_id"),
             )
-            return ROUTE_NONE_INDETERMINATE
-        LOGGER.info(
-            "[autonomy-wiring] utterance-conflict judgment unavailable (%s); "
-            "activating conversation directly (persona=%s)",
-            result.get("reason"), persona_id,
+            return ROUTE_NONE_JUDGMENT_RAN
+        LOGGER.warning(
+            "[autonomy-wiring] utterance-conflict judgment left an "
+            "unresolved execution (%s); not responding to avoid double "
+            "handling (persona=%s execution=%s)",
+            result.get("reason"), persona_id, result.get("execution_id"),
         )
-        activate()
-        return ROUTE_DIRECT_JUDGMENT_UNAVAILABLE
+        return ROUTE_NONE_INDETERMINATE
 
     reaction = _extract_reaction(result)
     if reaction is None:

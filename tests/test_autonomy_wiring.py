@@ -794,11 +794,14 @@ def test_external_event_non_engage_reactions_do_not_dispatch(
     assert dispatched == []
 
 
-def test_external_event_falls_back_when_judgment_unavailable(
-    session_factory, monkeypatch,
-):
-    manager, _ = _make_manager(session_factory)
-    _fake_fire(monkeypatch, {"submitted": False, "reason": "playbook not imported"})
+def test_external_event_falls_back_when_judgment_unavailable(session_factory):
+    """Playbook 未 import は本物の fire_judgment_point 経由でも従来経路へ落ちる。
+
+    フェイクの戻り dict ではなく実物を通す — 「機構の不備でイベントを落とさない」
+    保証は、結末 (outcome) を書く側と読む側が噛み合って初めて成立する
+    (2026-08-14 F3 で代替経路を結末で絞ったため、片方だけ直すと沈黙する)。
+    """
+    manager, _ = _make_manager(session_factory, with_playbooks=False)
     dispatched: List[str] = []
     route = wiring.handle_external_event(
         manager, PERSONA_ID, "掲示板の告知",
@@ -806,6 +809,28 @@ def test_external_event_falls_back_when_judgment_unavailable(
     )
     assert route == wiring.ROUTE_DIRECT_JUDGMENT_UNAVAILABLE
     assert dispatched == ["direct"]
+
+
+def test_external_event_without_outcome_refuses_the_fallback(
+    session_factory, monkeypatch, caplog,
+):
+    """結末を書き忘れた結果は代替経路を許さない (既定は拒否・WARNING で表に出す)。
+
+    2026-08-14 F3: 「submitted=False かつ indeterminate でなければ起動不能」と
+    読む旧実装は、判断が走った後の失敗まで「起動できなかった」に含めていた。
+    未知の結果は走ったかもしれない側へ倒す。
+    """
+    manager, _ = _make_manager(session_factory)
+    _fake_fire(monkeypatch, {"submitted": False, "reason": "何かの新しい経路"})
+    dispatched: List[str] = []
+    with caplog.at_level("WARNING", logger="saiverse.judgment_points"):
+        route = wiring.handle_external_event(
+            manager, PERSONA_ID, "掲示板の告知",
+            dispatch_direct=lambda: dispatched.append("direct"),
+        )
+    assert route == wiring.ROUTE_NONE_INDETERMINATE
+    assert dispatched == []
+    assert any("no outcome" in r.message for r in caplog.records)
 
 
 def test_contract_violation_is_checked_before_claiming_a_seat(session_factory):
@@ -1008,24 +1033,54 @@ def test_external_event_unknown_reaction_avoids_double_handling(
     assert dispatched == []
 
 
-def test_external_event_runtime_error_marks_unknown_and_falls_back_once(
+class _BoomController:
+    """submit_meta_judgment が必ず例外を投げるフェイク。"""
+
+    def __init__(self, exc: Exception):
+        self.calls = 0
+        self._exc = exc
+
+    def submit_meta_judgment(self, **kwargs):
+        self.calls += 1
+        raise self._exc
+
+
+def test_external_event_runtime_error_marks_unknown_and_does_not_fall_back(
     session_factory,
 ):
-    """A7: メタレーンの例外が [] に偽装されず submitted=False になり、
-    direct dispatch fallback が 1 回だけ起きる。台帳は unknown 終端
-    (prepared ではないので回復 tick の refire 対象にならない)。"""
+    """A7 + F3: メタレーンの例外が [] に偽装されず submitted=False になり、台帳は
+    unknown 終端。**代替経路は走らせない** —— unknown = LLM が動いたか不明であり、
+    finalize が既に判断を適用している可能性がある。ここで応対すると判断の決定を
+    上書きする (2026-08-14 Codex 指摘 F3。旧実装はここで fallback していた)。"""
     manager, _ = _make_manager(session_factory)
     ledger = _attach_ledger(manager, session_factory)
+    manager.pulse_controller = _BoomController(RuntimeError("meta lane down"))
 
-    class _BoomController:
-        def __init__(self):
-            self.calls = 0
+    dispatched: List[str] = []
+    route = wiring.handle_external_event(
+        manager, PERSONA_ID, "掲示板の告知",
+        dispatch_direct=lambda: dispatched.append("direct"),
+    )
+    assert route == wiring.ROUTE_NONE_JUDGMENT_RAN
+    assert dispatched == []
+    assert manager.pulse_controller.calls == 1
+    unknown = ledger.list_unknown()
+    assert len(unknown) == 1
+    assert unknown[0]["kind"] == "judgment.on_event"
 
-        def submit_meta_judgment(self, **kwargs):
-            self.calls += 1
-            raise RuntimeError("meta lane down")
 
-    manager.pulse_controller = _BoomController()
+def test_external_event_side_effect_free_failure_falls_back_once(session_factory):
+    """副作用ゼロ確定の失敗 (LLM エラー) だけは代替経路を許す。
+
+    台帳は failed 終端 = 世界へ何も作用していない。イベントを落とす方が害なので
+    従来経路で 1 回だけ応対する。unknown 終端 (上のテスト) との対比。
+    """
+    from llm_clients.exceptions import LLMError
+
+    manager, _ = _make_manager(session_factory)
+    ledger = _attach_ledger(manager, session_factory)
+    manager.pulse_controller = _BoomController(LLMError("provider down"))
+
     dispatched: List[str] = []
     route = wiring.handle_external_event(
         manager, PERSONA_ID, "掲示板の告知",
@@ -1033,10 +1088,7 @@ def test_external_event_runtime_error_marks_unknown_and_falls_back_once(
     )
     assert route == wiring.ROUTE_DIRECT_JUDGMENT_UNAVAILABLE
     assert dispatched == ["direct"]  # fallback は 1 回だけ
-    assert manager.pulse_controller.calls == 1
-    unknown = ledger.list_unknown()
-    assert len(unknown) == 1
-    assert unknown[0]["kind"] == "judgment.on_event"
+    assert ledger.list_unknown() == []
 
 
 def test_external_event_reaction_falls_back_to_ledger_result(
@@ -1063,6 +1115,93 @@ def test_external_event_reaction_falls_back_to_ledger_result(
     )
     assert route == wiring.ROUTE_JUDGED_ENGAGE_NOW
     assert dispatched == ["direct"]
+
+
+# ---------------------------------------------------------------------------
+# handle_user_utterance_conflict: 別行動中のユーザー発話の仲裁
+# (track_retirement.md §7.4 の直結化。旧 set_alert → v1 メタ判断の後継)
+# ---------------------------------------------------------------------------
+
+
+def _conflict(manager, activated: List[str]) -> str:
+    return wiring.handle_user_utterance_conflict(
+        manager, PERSONA_ID, "ちょっといい？",
+        activate=lambda: activated.append("activate"),
+    )
+
+
+def test_utterance_conflict_autonomy_off_activates_directly(session_factory):
+    manager, _ = _make_manager(session_factory, active=False)
+    activated: List[str] = []
+    assert _conflict(manager, activated) == wiring.ROUTE_DIRECT_AUTONOMY_DISABLED
+    assert activated == ["activate"]
+
+
+def test_utterance_conflict_playbook_missing_activates_directly(session_factory):
+    """機構の不備 (Playbook 未 import) でユーザーの呼びかけを黙殺しない。"""
+    manager, _ = _make_manager(session_factory, with_playbooks=False)
+    activated: List[str] = []
+    assert _conflict(manager, activated) == wiring.ROUTE_DIRECT_JUDGMENT_UNAVAILABLE
+    assert activated == ["activate"]
+
+
+def test_utterance_conflict_runtime_error_does_not_activate(session_factory):
+    """F3 の本題: 判断が走った後に証跡なく落ちたら activate しない。
+
+    submit_meta_judgment の実行時例外は台帳 unknown = LLM が動いたか不明。
+    finalize が note_only を適用した後の例外だと、ここで activate すると
+    「応答しない」という判断の決定を機構が上書きして応答してしまう。
+    """
+    manager, _ = _make_manager(session_factory)
+    ledger = _attach_ledger(manager, session_factory)
+    manager.pulse_controller = _BoomController(RuntimeError("meta lane down"))
+
+    activated: List[str] = []
+    assert _conflict(manager, activated) == wiring.ROUTE_NONE_JUDGMENT_RAN
+    assert activated == []
+    assert len(ledger.list_unknown()) == 1
+
+
+def test_utterance_conflict_side_effect_free_failure_activates(session_factory):
+    """副作用ゼロ確定の失敗 (LLM エラー) なら activate してよい (台帳は failed)。"""
+    from llm_clients.exceptions import LLMError
+
+    manager, _ = _make_manager(session_factory)
+    ledger = _attach_ledger(manager, session_factory)
+    manager.pulse_controller = _BoomController(LLMError("provider down"))
+
+    activated: List[str] = []
+    assert _conflict(manager, activated) == wiring.ROUTE_DIRECT_JUDGMENT_UNAVAILABLE
+    assert activated == ["activate"]
+    assert ledger.list_unknown() == []
+
+
+def test_utterance_conflict_engage_now_activates(session_factory, monkeypatch):
+    manager, _ = _make_manager(session_factory)
+    _fake_fire(monkeypatch, {
+        "submitted": True,
+        "applied_events": [{
+            "type": "judgment_applied", "kind": "on_event",
+            "extras": ["reaction=engage_now"],
+        }],
+    })
+    activated: List[str] = []
+    assert _conflict(manager, activated) == wiring.ROUTE_JUDGED_ENGAGE_NOW
+    assert activated == ["activate"]
+
+
+def test_utterance_conflict_note_only_does_not_activate(session_factory, monkeypatch):
+    manager, _ = _make_manager(session_factory)
+    _fake_fire(monkeypatch, {
+        "submitted": True,
+        "applied_events": [{
+            "type": "judgment_applied", "kind": "on_event",
+            "extras": ["reaction=note_only"],
+        }],
+    })
+    activated: List[str] = []
+    assert _conflict(manager, activated) == "judged:note_only"
+    assert activated == []
 
 
 # ---------------------------------------------------------------------------
