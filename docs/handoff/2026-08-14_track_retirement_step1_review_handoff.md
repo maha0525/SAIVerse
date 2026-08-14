@@ -55,6 +55,20 @@
 2. 修正 → 対象テストのみ → 再レビュー（観点付き adversarial-review）→ 収束（指摘ゼロの観測）後にフルスイート 1 回。
 3. 収束後、intent §7.4 実装欄と in_flight 台帳の行を更新。
 
+## 消し込みの結果（2026-08-14、Opus セッション）
+
+5 件とも消し込み済み。コミットは 1 指摘 = 1 コミットで分けた。
+
+| 件 | 直した形 | 記録先 |
+|---|---|---|
+| F2 | `episodes.get_open_non_conversation_episode`（会話を除いた open の直接クエリ）を新設し、仲裁の判定と「いまの活動」の提示を同じ集合へ寄せた | intent §7.4 |
+| F5 | 切り上げ debug API に開いている会話の出来事の同期検証（無ければ 409）。social は success を返さない。デバッグ API のテストを新設 | intent §7.4 |
+| F6 | DebugPanel のボタン / SettingsModal の休眠設定 3 欄を削除、切り上げの説明を実挙動へ。あわせて no-op debug エンドポイント 3 本も削除（呼び手が消えたため） | intent §7.4 |
+| F3 | 結末語彙を `aborted` / `no_effect` / `ran` / `indeterminate` へ拡張し、判定を `direct_fallback_allowed` に集約（**結末なしは拒否側**）。同族 3 箇所（外部イベント / 仲裁 / schedule 精算）を同時に修正 | [issue](../issues/judgment_seat_contention_and_event_loss.md) ④ |
+| F4 | 仲裁の context に応対先を凍結し、回収側は種別で入口を選ぶ（仲裁 = 会話 Track の activate）。二重応対の境界は「開いている会話の出来事」で判定 | 同 issue ⑤ |
+
+F3/F4 は順序①より前から在る on_event 系の共通欠陥なので、経緯は track_retirement ではなく上記 issue に置いた（ハンドオフ §F3 の指示どおり）。テストが欠陥を守っていた 1 件（`test_external_event_runtime_error_marks_unknown_and_falls_back_once`）は期待値ごと入れ替え、直結経路（`handle_user_utterance_conflict`）には直接テストが 1 件も無かったので新設した。
+
 ## 参考
 
 - ローカル LLM レビューは今回機能しなかった。事後調査で確定した経緯: サーバー起動は成功していたが、サブエージェントがラッパーに 5 分タイムアウトを指定 → 多ターン巡回のレビューが途中で切られ、**モデルが書き上げた模様のレビュー本文（約 1,900 トークン）は受け手不在で失われた**。代行に立った Claude エージェントの手動検証は「指摘ゼロ」＝上の 6 件を一件も拾えていない（検出力の実測 0/6）。詳細と処方は memory `project_local_llm_review` の 2026-08-14 節。
