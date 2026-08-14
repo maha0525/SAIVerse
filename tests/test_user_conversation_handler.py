@@ -442,8 +442,11 @@ def test_busy_utterance_fires_direct_connection_and_passes_utterance(
 
     conflict_calls = []
 
-    def fake_conflict(manager, persona_id, utterance_text, *, activate):
-        conflict_calls.append((persona_id, utterance_text))
+    def fake_conflict(manager, persona_id, utterance_text, *, activate,
+                      track_id, user_id):
+        # 応対先の凍結 (F4) — 回復 tick が後から engage_now を出したときに
+        # activate する Track。handler が渡し損ねると回収が応対先を失う。
+        conflict_calls.append((persona_id, utterance_text, track_id, user_id))
         return "judged:note_only"  # engage しない
 
     monkeypatch.setattr(
@@ -457,7 +460,7 @@ def test_busy_utterance_fires_direct_connection_and_passes_utterance(
         event={"role": "user", "content": "話しかけた"},
         invoke_main_line=lambda *_a, **_kw: invoked.append(True),
     )
-    assert conflict_calls == [(persona, "話しかけた")]
+    assert conflict_calls == [(persona, "話しかけた", track.track_id, "1")]
     # engage しない → 応答なし・Track は pending のまま
     assert invoked == []
     assert mgr.run_sea_user.call_count == 0
@@ -479,7 +482,8 @@ def test_busy_utterance_engage_now_activates_and_starts_pulse_via_hook(
 
     from saiverse import autonomy_wiring
 
-    def fake_conflict(manager, persona_id, utterance_text, *, activate):
+    def fake_conflict(manager, persona_id, utterance_text, *, activate,
+                      track_id, user_id):
         activate()
         return "judged:engage_now"
 
@@ -522,7 +526,8 @@ def test_busy_detection_survives_conversation_episode_opened_later(
 
     conflict_calls = []
 
-    def fake_conflict(manager, persona_id, utterance_text, *, activate):
+    def fake_conflict(manager, persona_id, utterance_text, *, activate,
+                      track_id, user_id):
         conflict_calls.append(persona_id)
         return "judged:note_only"
 
@@ -555,7 +560,8 @@ def test_busy_utterance_conflict_raise_does_not_propagate(
 
     from saiverse import autonomy_wiring
 
-    def bad_conflict(manager, persona_id, utterance_text, *, activate):
+    def bad_conflict(manager, persona_id, utterance_text, *, activate,
+                     track_id, user_id):
         raise RuntimeError("boom")
 
     monkeypatch.setattr(
@@ -571,6 +577,151 @@ def test_busy_utterance_conflict_raise_does_not_propagate(
             event={"role": "user", "content": "x"},
             invoke_main_line=lambda *_a, **_kw: None,
         )
+
+
+# ---------------------------------------------------------------------------
+# 回復経路: 仲裁が席を残したまま落ちた後、回復 tick が engage_now を出した場合
+# (autonomy_wiring._dispatch_recovered_response。track_retirement F4)
+# ---------------------------------------------------------------------------
+
+
+def _recover(mgr, persona, **overrides):
+    """回収経路の応対を 1 回走らせる (台帳 payload 相当の context を渡す)。"""
+    from saiverse import autonomy_wiring
+
+    context = {
+        "event_text": "ユーザーがあなたに話しかけました:\nちょっといい？",
+        "is_alert": False,
+        "utterance_conflict": True,
+    }
+    context.update(overrides)
+    return autonomy_wiring._dispatch_recovered_response(mgr, persona, context)
+
+
+def test_recovered_utterance_conflict_activates_the_frozen_track_once(
+    handler, tm, persona, manager_stub
+):
+    """凍結された会話 Track を activate し、hook 経由で応対が **1 回だけ** 走る。
+
+    回収側が外部イベント形 (``<system>[外部イベント通知]`` + track_user_conversation)
+    へ縮退していた頃は、応答は届くのに Track は running にならず会話の出来事も
+    開かなかった (帳簿の乖離。2026-08-14 Codex 指摘 F4)。初回発火と同じ入口
+    (activate) を通すことで、切替通知・会話の出来事・main_line が揃う。
+    """
+    from saiverse import autonomy_wiring
+
+    mgr, history_manager = manager_stub
+    mgr.track_manager = tm
+    track, _ = handler.get_or_create_track(persona, "1")
+    tm.pause(track.track_id)
+    _make_busy(mgr, persona)
+    history_manager.reset_mock()
+    mgr.run_sea_user.reset_mock()
+
+    outcome = _recover(mgr, persona, conversation_track_id=track.track_id)
+
+    assert outcome == autonomy_wiring.RECOVERED_DISPATCH_OK
+    assert tm.get(track.track_id).status == STATUS_RUNNING
+    history_manager.add_to_persona_only.assert_called_once()  # 切替通知は 1 回
+    mgr.run_sea_user.assert_called_once()                     # main_line も 1 回
+    # 会話の出来事が開いている (「いま」の帳簿が応答と一致する)
+    assert episodes.get_open_episode(
+        mgr, persona, kind=episodes.KIND_CONVERSATION) is not None
+
+
+def test_recovered_utterance_conflict_skips_when_conversation_is_live(
+    handler, tm, persona, manager_stub
+):
+    """既に会話が生きているなら activate しない (二重応対の回避)。
+
+    案 Y では会話終了後も Track が running のまま残るので、判定は running では
+    なく **開いている会話の出来事** で行う。
+    """
+    from saiverse import autonomy_wiring
+
+    mgr, history_manager = manager_stub
+    mgr.track_manager = tm
+    track, _ = handler.get_or_create_track(persona, "1")  # 作成時に activate 済み
+    episodes.open_conversation_episode(
+        mgr, persona, building_id="test_building", participants=[persona, "1"],
+    )
+    history_manager.reset_mock()
+    mgr.run_sea_user.reset_mock()
+
+    outcome = _recover(mgr, persona, conversation_track_id=track.track_id)
+
+    assert outcome == autonomy_wiring.RECOVERED_DISPATCH_OK
+    assert mgr.run_sea_user.call_count == 0
+    history_manager.add_to_persona_only.assert_not_called()
+
+
+def test_recovered_utterance_conflict_reactivates_when_conversation_closed(
+    handler, tm, persona, manager_stub
+):
+    """running のまま残っているだけ (会話の出来事なし) なら activate する。
+
+    案 Y の残留 running を「応対済み」と読むと、この発話への応答が失われる。
+    """
+    from saiverse import autonomy_wiring
+
+    mgr, history_manager = manager_stub
+    mgr.track_manager = tm
+    track, _ = handler.get_or_create_track(persona, "1")
+    episodes.close_conversation_episode(mgr, persona)  # 会話は終了済み
+    history_manager.reset_mock()
+    mgr.run_sea_user.reset_mock()
+
+    outcome = _recover(mgr, persona, conversation_track_id=track.track_id)
+
+    assert outcome == autonomy_wiring.RECOVERED_DISPATCH_OK
+    assert tm.get(track.track_id).status == STATUS_RUNNING
+    mgr.run_sea_user.assert_called_once()
+
+
+def test_recovered_utterance_conflict_without_target_is_unroutable(
+    handler, tm, persona, manager_stub
+):
+    """応対先が凍結されていない古い payload は、外部イベント形へ縮退させない。
+
+    ユーザーの発話を「外部イベント通知」として流し込むのが F4 の欠陥そのもの
+    なので、応対先を決められないときは ERROR を残して打ち切る (再試行しても
+    直らない)。
+    """
+    from saiverse import autonomy_wiring
+
+    mgr, history_manager = manager_stub
+    mgr.track_manager = tm
+    handler.get_or_create_track(persona, "1")
+    history_manager.reset_mock()
+    mgr.run_sea_user.reset_mock()
+
+    outcome = _recover(mgr, persona)  # conversation_track_id なし
+
+    assert outcome == autonomy_wiring.RECOVERED_DISPATCH_UNROUTABLE
+    assert mgr.run_sea_user.call_count == 0
+
+
+def test_recovered_external_event_still_uses_the_event_dispatch(
+    persona, manager_stub
+):
+    """外部イベント (仲裁でない) は従来どおり応対 Pulse の再構成を通る。"""
+    from saiverse import autonomy_wiring
+
+    mgr, _hm = manager_stub
+    fired = []
+    mgr.pulse_dispatcher = MagicMock()
+    mgr.pulse_dispatcher.dispatch_schedule_fire.side_effect = (
+        lambda **kw: fired.append(kw) or {"action": "execute",
+                                          "runtime_outcome": "completed"}
+    )
+
+    outcome = autonomy_wiring._dispatch_recovered_response(
+        mgr, persona, {"event_text": "掲示板の告知", "is_alert": False},
+    )
+
+    assert outcome == autonomy_wiring.RECOVERED_DISPATCH_OK
+    assert len(fired) == 1
+    assert "[外部イベント通知]" in fired[0]["user_input"]
 
 
 # ---------------------------------------------------------------------------

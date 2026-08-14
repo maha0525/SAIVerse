@@ -1,7 +1,7 @@
 # 判断点の席の競合制御と、イベントの取りこぼし
 
 **発見**: 2026-07-30（[判断プロンプトの静的一覧を head へ](judgment_static_lists_to_head.md) の Codex レビュー五巡目。移設の範囲外として切り出し）
-**状態**: 実装済・実機検証待ち（2026-07-31。③はまはー裁定で **B** に確定 — 下の「裁定の記録」。④は 2026-08-14 追加・実装済）
+**状態**: 実装済・実機検証待ち（2026-07-31。③はまはー裁定で **B** に確定 — 下の「裁定の記録」。④⑤は 2026-08-14 追加・実装済）
 **関連**: `docs/intent/execution_ledger.md`、`docs/overview/audit_remediation_plan.md`（実行台帳 W1〜）、`saiverse/judgment_points.py` / `saiverse/autonomy_wiring.py` / `saiverse/execution_ledger.py`
 
 ## なぜ切り出したか
@@ -58,6 +58,19 @@
 - `submitted=False` を返す全経路に結末を付けた（自律 OFF・Playbook 未 import = `aborted` / duplicate:running = `indeterminate` / duplicate:applied・completed・unknown = `ran` / resume 系 = `indeterminate`）。
 - schedule 側の精算（`_classify_judgment_outcome`）も同じ語彙に揃えた：`ran` は unknown（自動再実行禁止）。従来は「未知の reason は保守的に failed」で再試行に落ち、下流の duplicate:unknown 検出に救われていた。
 - **テストが欠陥を守っていた**: `test_external_event_runtime_error_marks_unknown_and_falls_back_once` は「generic RuntimeError で fallback が 1 回起きる」を期待値に固定していた。期待値を「fallback しない（`none:judgment_ran`）」へ改め、副作用ゼロ確定（LLM エラー）の対比テストを足した。直結経路（`handle_user_utterance_conflict`）は直接テストが 1 件も無かったので新設（自律 OFF / Playbook 欠如 / unknown / 副作用ゼロ / engage_now / note_only の 6 系統）。
+
+## ⑤ 回収の応対が種別を落とし、ユーザー発話を「外部イベント通知」として流し込む
+
+**発見**: 2026-08-14（同レビュー high 指摘 F4）
+
+回収の応対（`_dispatch_recovered_event_response`）は外部イベント用に作られており、判断 context の種別を見ない。別行動中のユーザー発話の仲裁（`utterance_conflict`）が席を残したまま落ち、回復 tick が engage_now を出すと、**ユーザーの発話が `<system>[外部イベント通知]` + `track_user_conversation` の形で流し込まれる**。応答は届くが、対ユーザー会話 Track は running にならず、会話の出来事も開かず、Track 切替通知も出ない — 応答と帳簿が食い違う。
+
+初回の応対経路（`activate` → `on_track_activated` hook）が回収側に無いのが構造的な理由で、③④と同じ「初回と同じ入口を通せない」問題の別の顔。
+
+- 直し: 仲裁の context に**種別と応対先（`conversation_track_id` / `conversation_user_id`）を凍結**し、回収側は `_dispatch_recovered_response` で入口を選ぶ — 仲裁なら会話 Track の `activate`（hook が切替通知・会話の出来事・main_line をまとめて担うので初回と一致）、それ以外は従来の応対 Pulse 再構成。
+- 二重応対の境界: 既に会話が生きている（Track running **かつ**会話の出来事が開いている）なら activate しない。案 Y の残留 running を「応対済み」と読まないため、判定は開いている出来事で行う（running だけで判定すると、この発話への応答が失われる）。
+- 応対先を決められない payload（この機構より前の prepared 行）は、外部イベント形へ縮退**させない** — それが欠陥そのものなので、`unroutable`（再試行しても直らない）として ERROR で残して打ち切る。
+- `handle_user_utterance_conflict` の `track_id` / `user_id` は必須キーワード引数にした（唯一の呼び出し元が凍結を忘れたら TypeError で落ちる）。
 
 ## 対応の記録（2026-07-31 実装）
 

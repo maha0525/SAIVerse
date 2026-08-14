@@ -1123,10 +1123,11 @@ def test_external_event_reaction_falls_back_to_ledger_result(
 # ---------------------------------------------------------------------------
 
 
-def _conflict(manager, activated: List[str]) -> str:
+def _conflict(manager, activated: List[str], track_id: str = "track-1") -> str:
     return wiring.handle_user_utterance_conflict(
         manager, PERSONA_ID, "ちょっといい？",
         activate=lambda: activated.append("activate"),
+        track_id=track_id, user_id="1",
     )
 
 

@@ -1064,6 +1064,8 @@ def handle_user_utterance_conflict(
     utterance_text: str,
     *,
     activate: Callable[[], None],
+    track_id: str,
+    user_id: str,
 ) -> str:
     """別の活動中に届いたユーザー発話の仲裁 (track_retirement.md §7.4 の直結化)。
 
@@ -1090,6 +1092,16 @@ def handle_user_utterance_conflict(
     direct_fallback_allowed` が結末 (``outcome``) から決める — **結末の無い結果は
     拒否側に倒す**。この判定を呼び出し側でやり直さないこと (2026-08-14 F3)。
 
+    Args:
+        track_id: 応対先の対ユーザー会話 Track。``activate`` が閉じ込んでいる
+            のと同じ Track を**台帳 payload にも凍結する** — 判断が席を残した
+            まま落ちて回復 tick が後から engage_now を出したとき、回収側は
+            この Track を activate して応対する。凍結が無いと回収側は応対先を
+            知らず、ユーザーの発話を「外部イベント通知」の形で流し込むしかない
+            (Track は running にならず会話の出来事も開かない = 帳簿の乖離。
+            2026-08-14 Codex 指摘 F4)。
+        user_id: 相手のユーザー。診断用に payload へ同乗させる。
+
     Returns:
         経路ラベル (``direct:*`` / ``judged:*`` / ``none:*``)。ログ・テスト用。
     """
@@ -1100,7 +1112,13 @@ def handle_user_utterance_conflict(
     context: Dict[str, Any] = {
         "event_text": f"ユーザーがあなたに話しかけました:\n{utterance_text}",
         "is_alert": False,
+        # 回収側が「これは外部イベントではなくユーザー発話の仲裁」と判るための
+        # 種別と応対先。LLM へ渡る judgment_context には入らない
+        # (build_judgment_args の on_event は選別したキーだけ組む) — 台帳 payload
+        # に凍結して回復経路が読むためだけの同乗。
         "utterance_conflict": True,
+        "conversation_track_id": track_id,
+        "conversation_user_id": user_id,
     }
     result = fire_judgment_point(manager, persona_id, KIND_ON_EVENT, context)
     if not result.get("submitted"):
@@ -1152,13 +1170,109 @@ def handle_user_utterance_conflict(
     return f"judged:{reaction}"
 
 
-#: :func:`_dispatch_recovered_event_response` の結末。再試行してよいのは
-#: SAFE_FAILURE (副作用ゼロ確定) だけ — UNKNOWN (LLM が動いたか不明) を再試行
-#: すると、発話・記憶更新まで進んだ応対をもう一度走らせて二重応対になる
-#: (Codex 六巡目 high1。台帳の unknown = 自動再実行禁止と同じ規律)。
+#: 回収応対の結末。再試行してよいのは SAFE_FAILURE (副作用ゼロ確定) だけ —
+#: UNKNOWN (LLM が動いたか不明) を再試行すると、発話・記憶更新まで進んだ応対を
+#: もう一度走らせて二重応対になる (Codex 六巡目 high1。台帳の unknown =
+#: 自動再実行禁止と同じ規律)。UNROUTABLE は応対先が決まらない状態で、待っても
+#: 直らない (再試行しても同じ) — ERROR で残して打ち切る。
 RECOVERED_DISPATCH_OK = "dispatched"
 RECOVERED_DISPATCH_SAFE_FAILURE = "safe_failure"
 RECOVERED_DISPATCH_UNKNOWN = "unknown"
+RECOVERED_DISPATCH_UNROUTABLE = "unroutable"
+
+
+def _activate_recovered_user_conversation(
+    manager: Any, persona_id: str, context: Dict[str, Any]
+) -> str:
+    """回収経路で engage_now と判断された**ユーザー発話の仲裁**に応対する。
+
+    応対は初回と同じ入口 —— 凍結された対ユーザー会話 Track を
+    :meth:`TrackManager.activate` する。activate 末尾の ``on_track_activated``
+    hook が Track 切替通知の注入・会話の出来事の open・main_line Pulse の起動を
+    まとめて担うので、初回発火 (``handle_user_utterance_conflict`` の activate
+    callback) と帳簿が一致する。
+
+    外部イベント用の再構成 (:func:`_dispatch_recovered_event_response`) をここで
+    使ってはいけない —— ユーザーの発話が ``<system>[外部イベント通知]`` として
+    流し込まれ、応答は届くのに Track は running にならず会話の出来事も開かない
+    (2026-08-14 Codex 指摘 F4)。
+
+    既に会話が生きている (Track が running かつ会話の出来事が開いている) 場合は
+    **何もしない** —— この発話はライブ経路が既に応対しており、ここで activate
+    すると切替通知と main_line がもう一度走る (二重応対)。
+    """
+    track_id = context.get("conversation_track_id")
+    track_manager = getattr(manager, "track_manager", None)
+    if not track_id or track_manager is None:
+        LOGGER.error(
+            "[autonomy-wiring] recovered utterance-conflict judged engage_now "
+            "but the conversation target is unknown (track_id=%s "
+            "track_manager=%s); the response is lost (persona=%s)",
+            track_id, track_manager is not None, persona_id,
+        )
+        return RECOVERED_DISPATCH_UNROUTABLE
+
+    try:
+        track = track_manager.get(track_id)
+    except Exception:
+        LOGGER.error(
+            "[autonomy-wiring] recovered utterance-conflict target track %s "
+            "could not be read; the response is lost (persona=%s)",
+            track_id, persona_id, exc_info=True,
+        )
+        return RECOVERED_DISPATCH_UNROUTABLE
+
+    if getattr(track, "status", None) == "running":
+        # 「いま会話中か」の真実は開いている会話の出来事が持つ (life.md §7 案 Y)。
+        # 案 Y 以降 Track の running は会話終了後も残るので、running だけでは
+        # 応対済みの根拠にならない。
+        try:
+            from saiverse.day_plan import is_in_user_conversation
+
+            live = is_in_user_conversation(manager, persona_id)
+        except Exception:
+            LOGGER.warning(
+                "[autonomy-wiring] conversation state unreadable while "
+                "recovering an utterance conflict (persona=%s); assuming live",
+                persona_id, exc_info=True,
+            )
+            live = True
+        if live:
+            LOGGER.info(
+                "[autonomy-wiring] recovered utterance-conflict target %s is "
+                "already in a live conversation; not activating again "
+                "(persona=%s)", track_id, persona_id,
+            )
+            return RECOVERED_DISPATCH_OK
+
+    try:
+        track_manager.activate(track_id)
+    except Exception:
+        LOGGER.warning(
+            "[autonomy-wiring] recovered utterance-conflict activate failed "
+            "(track=%s persona=%s); safe to retry",
+            track_id, persona_id, exc_info=True,
+        )
+        return RECOVERED_DISPATCH_SAFE_FAILURE
+    LOGGER.info(
+        "[autonomy-wiring] recovered utterance-conflict activated the user "
+        "conversation track %s (persona=%s)", track_id, persona_id,
+    )
+    return RECOVERED_DISPATCH_OK
+
+
+def _dispatch_recovered_response(
+    manager: Any, persona_id: str, context: Dict[str, Any]
+) -> str:
+    """回収経路の応対 —— 台帳 payload に凍結された**種別**で入口を選ぶ。
+
+    ユーザー発話の仲裁は会話 Track の activate、それ以外の外部イベントは応対
+    Pulse の再構成。初回発火と同じ入口を通すのが原則で、種別を落として一律に
+    外部イベント形へ流すと帳簿が食い違う (F4)。
+    """
+    if context.get("utterance_conflict"):
+        return _activate_recovered_user_conversation(manager, persona_id, context)
+    return _dispatch_recovered_event_response(manager, persona_id, context)
 
 
 def _dispatch_recovered_event_response(
@@ -1280,7 +1394,7 @@ def _schedule_recovered_response_retry(
         return
 
     def _retry() -> None:
-        outcome = _dispatch_recovered_event_response(manager, persona_id, context)
+        outcome = _dispatch_recovered_response(manager, persona_id, context)
         if outcome == RECOVERED_DISPATCH_OK:
             LOGGER.info(
                 "[autonomy-wiring] recovered on_event response dispatched on "
@@ -1288,9 +1402,10 @@ def _schedule_recovered_response_retry(
                 attempt, persona_id, execution_id,
             )
             return
-        if outcome == RECOVERED_DISPATCH_UNKNOWN:
-            # LLM が動いたか不明 — 再試行すると二重応対になりうる。ここで打ち切る
-            # (ERROR は _dispatch_recovered_event_response が出している)
+        if outcome in (RECOVERED_DISPATCH_UNKNOWN, RECOVERED_DISPATCH_UNROUTABLE):
+            # unknown = LLM が動いたか不明 (再試行すると二重応対になりうる)。
+            # unroutable = 応対先が決まらない (待っても直らない)。どちらも
+            # ここで打ち切る (ERROR は応対関数が出している)
             return
         _schedule_recovered_response_retry(
             manager, persona_id, context, execution_id, attempt + 1,
@@ -1325,6 +1440,10 @@ def refire_judgment_from_recovery(
     (docs/issues/judgment_seat_contention_and_event_loss.md ③、Codex 三巡目)。
     reaction が読めなかった場合は応対を起動しない (handle_external_event の
     unknown_reaction と同じ裁定 — 二重応対の方が害が大きい)。
+
+    応対の入口は payload に凍結された種別で選ぶ (:func:`_dispatch_recovered_response`)
+    — ユーザー発話の仲裁は会話 Track の activate、外部イベントは応対 Pulse の
+    再構成 (同 ④、2026-08-14)。
     """
     result = fire_judgment_point(
         manager, persona_id, judgment_kind,
@@ -1337,7 +1456,7 @@ def refire_judgment_from_recovery(
         reaction = _reaction_from_ledger(manager, result.get("execution_id"))
     if reaction != "engage_now":
         return result
-    outcome = _dispatch_recovered_event_response(manager, persona_id, context or {})
+    outcome = _dispatch_recovered_response(manager, persona_id, context or {})
     if outcome == RECOVERED_DISPATCH_OK:
         LOGGER.info(
             "[autonomy-wiring] recovered on_event judged engage_now; response "

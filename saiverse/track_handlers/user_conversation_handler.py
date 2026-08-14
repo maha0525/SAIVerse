@@ -580,6 +580,12 @@ class UserConversationTrackHandler:
                 persona_id,
                 str(event.get("content") or ""),
                 activate=lambda: self.track_manager.activate(track.track_id),
+                # 応対先を判断の台帳 payload へ凍結する。判断が席を残したまま
+                # 落ちても、回復 tick の engage_now が同じ Track を activate
+                # できる (この凍結が無いと回収側は応対先を知らず、発話を
+                # 外部イベント通知の形で流し込むしかない — F4)。
+                track_id=track.track_id,
+                user_id=user_id,
             )
             logging.info(
                 "[user-conv-handler] utterance-conflict route=%s for track %s",
