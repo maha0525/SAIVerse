@@ -120,18 +120,22 @@ class MetaJudgmentConfig(BaseModel):
     """Phase 4-e: Per-persona meta-judgment Pulse parameters.
 
     All fields optional — missing keys fall back to MetaLayer's built-in defaults.
+
+    ⚠ v1 メタ判断の退役 (track_retirement.md §7.4) で読み手を失った休眠キーが
+    混ざっている (max_retries / retry_backoff_seconds / force_fail)。既存行が
+    round-trip で消えないよう受け口は残すが、**編集 UI は 2026-08-14 に削除した**
+    — 新しい読み手を生やす前に、そのキーが何を意味するかを決め直すこと。
     """
     cache_threshold_ratio: Optional[float] = None    # 0.0–1.0, default 0.3
-    max_retries: Optional[int] = None                # default 1
-    retry_backoff_seconds: Optional[int] = None      # default 5
-    periodic_interval_minutes: Optional[int] = None  # default 50 (メタ判断自動発話間隔)
-    keep_cache_alive: Optional[bool] = None          # default True (TTL 接近で前倒し fire)
+    max_retries: Optional[int] = None                # (休眠) 旧 v1 リトライ回数
+    retry_backoff_seconds: Optional[int] = None      # (休眠) 旧 v1 リトライ待機秒数
+    periodic_interval_minutes: Optional[int] = None  # default 50 (watchdog の間隔)
+    keep_cache_alive: Optional[bool] = None          # default True (TTL 接近で温め直す)
     # ライフビュー「作業のテンポ」: 自律 Track の Pulse 間隔 (秒) のペルソナ既定値。
     # update_ai は META_JUDGMENT_CONFIG を丸ごと置換するため、ここに定義しないと
     # SettingsModal 保存時にキーが消える (persona_activity_view.md §7)。
     autonomous_pulse_interval_seconds: Optional[int] = None  # default 30
-    # 開発者モード用デバッグフラグ: True なら meta_judgment を毎回強制失敗させる
-    # (① リカバリの実機検証用)。UI は開発者モード限定で表示する。
+    # (休眠) 旧 v1 開発者モードのデバッグフラグ。読み手は退役済み。
     force_fail: Optional[bool] = None  # default False
 
 

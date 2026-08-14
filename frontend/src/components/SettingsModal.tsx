@@ -14,15 +14,11 @@ interface SettingsModalProps {
 
 interface MetaJudgmentConfig {
     cache_threshold_ratio: number | null;
-    max_retries: number | null;
-    retry_backoff_seconds: number | null;
     periodic_interval_minutes: number | null;
     keep_cache_alive: boolean | null;
     // ライフビュー「作業のテンポ」(persona_activity_view.md §7)。
     // 本モーダルでは編集しないが、保存時に消さないよう保持が必要。
     autonomous_pulse_interval_seconds?: number | null;
-    // 開発者モード用デバッグ: true なら meta_judgment を毎回強制失敗させる。
-    force_fail?: boolean | null;
 }
 
 // 'default' = 設定なし (built-in default を使う)、'on'/'off' = 明示的な値
@@ -54,10 +50,10 @@ interface AIConfig {
 }
 
 // Built-in defaults — must stay in sync with saiverse/meta_layer.py:_DEFAULT_JUDGMENT_CONFIG
+// (リトライ系 max_retries / retry_backoff_seconds は v1 メタ判断の退役で読み手を
+//  失った休眠キー。編集 UI は 2026-08-14 に削除した — track_retirement.md §7.4)
 const META_JUDGMENT_DEFAULTS = {
     cache_threshold_ratio: 0.3,
-    max_retries: 1,
-    retry_backoff_seconds: 5,
     periodic_interval_minutes: 50,
     keep_cache_alive: true,
 };
@@ -116,7 +112,6 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
     const [autonomyStatus, setAutonomyStatus] = useState<AutonomyStatus | null>(null);
     const [autonomyInterval, setAutonomyInterval] = useState(5);
     const [isAutonomyLoading, setIsAutonomyLoading] = useState(false);
-    const [developerMode, setDeveloperMode] = useState(false);
 
     // Form state
     const [description, setDescription] = useState('');
@@ -143,13 +138,9 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
     const [newSpellLabel, setNewSpellLabel] = useState('');
     // Phase 4-e: empty string = use built-in default (NULL in DB)
     const [metaCacheThresholdRatio, setMetaCacheThresholdRatio] = useState<string>('');
-    const [metaMaxRetries, setMetaMaxRetries] = useState<string>('');
-    const [metaRetryBackoffSeconds, setMetaRetryBackoffSeconds] = useState<string>('');
     // 自動発話間隔は「自律行動マネージャー」の interval 入力に統合済 (Phase 4-e)。
     // META_JUDGMENT_CONFIG.periodic_interval_minutes は autonomy API 経由で永続化される。
     const [metaKeepCacheAlive, setMetaKeepCacheAlive] = useState<TriState>('default');
-    // 開発者モード用デバッグ: meta_judgment を毎回強制失敗させる (① リカバリ検証用)。
-    const [metaForceFail, setMetaForceFail] = useState<boolean>(false);
     // ロード時の META_JUDGMENT_CONFIG 全体。update_ai は config を丸ごと置換するため、
     // 本モーダルが編集しないキー (periodic_interval_minutes /
     // autonomous_pulse_interval_seconds 等、autonomy / activity API が永続化したもの)
@@ -176,10 +167,6 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
         if (isOpen) {
             loadModels();
             loadUsers();
-            fetch('/api/config/developer-mode')
-                .then(res => res.ok ? res.json() : null)
-                .then(data => { if (data) setDeveloperMode(data.enabled); })
-                .catch(() => {});
         }
     }, [isOpen]);
 
@@ -277,17 +264,10 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                 setMetaCacheThresholdRatio(
                     mjc?.cache_threshold_ratio != null ? String(mjc.cache_threshold_ratio) : ''
                 );
-                setMetaMaxRetries(
-                    mjc?.max_retries != null ? String(mjc.max_retries) : ''
-                );
-                setMetaRetryBackoffSeconds(
-                    mjc?.retry_backoff_seconds != null ? String(mjc.retry_backoff_seconds) : ''
-                );
                 setMetaKeepCacheAlive(
                     mjc?.keep_cache_alive == null ? 'default' :
                         (mjc.keep_cache_alive ? 'on' : 'off')
                 );
-                setMetaForceFail(mjc?.force_fail === true);
                 setUserConvTimeoutMinutes(
                     data.user_conv_timeout_minutes != null
                         ? String(data.user_conv_timeout_minutes)
@@ -413,20 +393,11 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                             if (obj[key] == null) delete obj[key];
                         }
                         const ratio = metaCacheThresholdRatio.trim();
-                        const retries = metaMaxRetries.trim();
-                        const backoff = metaRetryBackoffSeconds.trim();
                         const keepCache = metaKeepCacheAlive;
                         if (ratio) obj.cache_threshold_ratio = parseFloat(ratio);
                         else delete obj.cache_threshold_ratio;
-                        if (retries) obj.max_retries = parseInt(retries);
-                        else delete obj.max_retries;
-                        if (backoff) obj.retry_backoff_seconds = parseInt(backoff);
-                        else delete obj.retry_backoff_seconds;
                         if (keepCache !== 'default') obj.keep_cache_alive = (keepCache === 'on');
                         else delete obj.keep_cache_alive;
-                        // 開発者モードデバッグ: ON のときだけ書く (OFF はキーごと落とす)。
-                        if (metaForceFail) obj.force_fail = true;
-                        else delete obj.force_fail;
                         return Object.keys(obj).length > 0 ? obj : null;
                     })(),
                     // 2026-05-09: 空文字列 = 既定値 (= 0 を送って NULL に倒す)、
@@ -748,7 +719,7 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                             <DebugPanel personaId={personaId} />
 
                             <div className={styles.fieldGroup}>
-                                <label className={styles.label}>メタ判断 Pulse 設定</label>
+                                <label className={styles.label}>キャッシュ維持の設定</label>
                                 {(() => {
                                     // 実効値の解決 (default なら built-in default)
                                     const effectiveKeepCache = metaKeepCacheAlive === 'default'
@@ -757,36 +728,6 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                                     return (
                                         <>
                                             <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
-                                                <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-                                                    <span style={{ minWidth: '160px' }}>失敗時リトライ回数</span>
-                                                    <input
-                                                        type="number"
-                                                        step="1"
-                                                        min="0"
-                                                        placeholder={String(META_JUDGMENT_DEFAULTS.max_retries)}
-                                                        value={metaMaxRetries}
-                                                        onChange={(e) => setMetaMaxRetries(e.target.value)}
-                                                        style={{ width: '7rem' }}
-                                                    />
-                                                    <span style={{ fontSize: '0.85em', color: '#888' }}>
-                                                        (既定: {META_JUDGMENT_DEFAULTS.max_retries})
-                                                    </span>
-                                                </div>
-                                                <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-                                                    <span style={{ minWidth: '160px' }}>リトライ待機秒数</span>
-                                                    <input
-                                                        type="number"
-                                                        step="1"
-                                                        min="0"
-                                                        placeholder={String(META_JUDGMENT_DEFAULTS.retry_backoff_seconds)}
-                                                        value={metaRetryBackoffSeconds}
-                                                        onChange={(e) => setMetaRetryBackoffSeconds(e.target.value)}
-                                                        style={{ width: '7rem' }}
-                                                    />
-                                                    <span style={{ fontSize: '0.85em', color: '#888' }}>
-                                                        (既定: {META_JUDGMENT_DEFAULTS.retry_backoff_seconds}秒)
-                                                    </span>
-                                                </div>
                                                 <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
                                                     <span style={{ minWidth: '160px' }}>キャッシュ維持</span>
                                                     <select
@@ -818,26 +759,9 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                                                         (既定: {META_JUDGMENT_DEFAULTS.cache_threshold_ratio})
                                                     </span>
                                                 </div>
-                                                {developerMode && (
-                                                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-                                                        <span style={{ minWidth: '160px', color: '#e8590c' }}>
-                                                            🛠 メタ判断を強制失敗
-                                                        </span>
-                                                        <label style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', cursor: 'pointer' }}>
-                                                            <input
-                                                                type="checkbox"
-                                                                checked={metaForceFail}
-                                                                onChange={(e) => setMetaForceFail(e.target.checked)}
-                                                            />
-                                                            <span style={{ fontSize: '0.85em', color: '#888' }}>
-                                                                ON にすると毎回失敗させ、連続失敗→Idle 降格+通知を検証できます（検証後は必ず OFF に）
-                                                            </span>
-                                                        </label>
-                                                    </div>
-                                                )}
                                             </div>
                                             <div className={styles.description}>
-                                                メインモデルのキャッシュ TTL 残り割合が「キャッシュ閾値」を下回ると、メタ判断 Pulse を前倒しで発火します。Pulse が失敗した場合は「失敗時リトライ回数」の上限まで「リトライ待機秒数」を空けて再試行します。「キャッシュ維持」を OFF にすると TTL 接近時の前倒しを行いません（低頻度運用向け。キャッシュが切れることを許容します）。空欄の項目は既定値が適用されます。
+                                                会話のたびに送り直す前置き（プロンプト）は、モデル側のキャッシュに一定時間だけ残ります。その残り時間が「キャッシュ閾値」の割合を切ると、極小の呼び出しを入れてキャッシュを温め直します（応答を作るわけではありません）。「キャッシュ維持」を OFF にすると温め直しを行いません（低頻度運用向け。キャッシュが切れることを許容します）。空欄の項目は既定値が適用されます。
                                             </div>
                                         </>
                                     );
