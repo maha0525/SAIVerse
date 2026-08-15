@@ -564,6 +564,7 @@ class MigrateBuildingLogsTests(unittest.TestCase):
         self.assertEqual(self._scan(["room1"]), [])
 
     def test_scan_reports_live_rows_only(self) -> None:
+        """ファイル時代のメッセージ ID が DB のどの行にも無い部屋 (saiverse_navi 型)。"""
         db = self.SessionLocal()
         try:
             db.add(BuildingMessage(
@@ -576,12 +577,57 @@ class MigrateBuildingLogsTests(unittest.TestCase):
             db.close()
         self._make_building_log(
             "city_a", "room1",
-            [{"role": "user", "content": "old", "seq": 1, "message_id": "room1:1",
+            [{"role": "user", "content": "old", "seq": 7, "message_id": "room1:old7",
               "timestamp": "2026-05-01T10:00:00", "heard_by": []}],
         )
         deficits = self._scan(["room1"])
         self.assertEqual(len(deficits), 1)
         self.assertEqual(deficits[0]["kind"], "live_rows_only")
+        self.assertEqual(deficits[0]["missing"], 1)
+
+    def test_scan_silent_for_dual_written_entries(self) -> None:
+        """dual-write 期の環境: ファイル末尾の行が「通常経路の行」として DB に
+        居る場合、件数は食い違っても欠けではない — 警告を出さない
+        (本番データで 6 部屋の偽陽性を出した実測からの回帰固定)。"""
+        db = self.SessionLocal()
+        try:
+            db.add(BuildingMessage(
+                building_id="room1", seq=1, role="user", content="dual",
+                timestamp="2026-06-01T10:00:00", heard_by="[]", ingested_by="[]",
+                message_id="room1:1",
+            ))
+            db.commit()
+        finally:
+            db.close()
+        self._make_building_log(
+            "city_a", "room1",
+            [{"role": "user", "content": "dual", "seq": 1, "message_id": "room1:1",
+              "timestamp": "2026-06-01T10:00:00", "heard_by": []}],
+        )
+        self.assertEqual(self._scan(["room1"]), [])
+
+    def test_scan_reports_partial_when_imported_room_misses_entries(self) -> None:
+        """取り込み痕跡はあるが、ファイルにだけ居るメッセージが残っている部屋。"""
+        self._make_building_log(
+            "city_a", "room1",
+            [{"role": "user", "content": "a", "seq": 1, "message_id": "room1:1",
+              "timestamp": "2026-05-20T10:00:00", "heard_by": []}],
+        )
+        self._run_main([])
+        # 取り込み後、ファイルにだけ存在する行を追加 (DB に無い ID)
+        self._make_building_log(
+            "city_a", "room1",
+            [
+                {"role": "user", "content": "a", "seq": 1, "message_id": "room1:1",
+                 "timestamp": "2026-05-20T10:00:00", "heard_by": []},
+                {"role": "user", "content": "lost", "seq": 9, "message_id": "room1:lost9",
+                 "timestamp": "2026-05-20T10:00:01", "heard_by": []},
+            ],
+        )
+        deficits = self._scan(["room1"])
+        self.assertEqual(len(deficits), 1)
+        self.assertEqual(deficits[0]["kind"], "partial")
+        self.assertEqual(deficits[0]["missing"], 1)
 
     def test_scan_reports_unreadable_file(self) -> None:
         b_dir = self.home_path / "cities" / "city_a" / "buildings" / "room1"
@@ -590,6 +636,38 @@ class MigrateBuildingLogsTests(unittest.TestCase):
         deficits = self._scan(["room1"])
         self.assertEqual(len(deficits), 1)
         self.assertEqual(deficits[0]["kind"], "unreadable")
+
+    def test_scan_silent_for_no_id_entries_when_db_has_rows(self) -> None:
+        """message_id を持たないファイル行 (旧形式 host イベント) は、DB に行が
+        あれば dual-write 済みとみなして欠け扱いしない (本番 2 部屋で偽陽性を
+        出した実測からの回帰固定)。"""
+        db = self.SessionLocal()
+        try:
+            db.add(BuildingMessage(
+                building_id="room1", seq=1, role="host", content="moved",
+                timestamp="", heard_by="[]", ingested_by="[]",
+                message_id="room1:1",
+            ))
+            db.commit()
+        finally:
+            db.close()
+        self._make_building_log(
+            "city_a", "room1",
+            [{"role": "host", "content": "moved", "heard_by": []}],  # message_id なし
+        )
+        self.assertEqual(self._scan(["room1"]), [])
+
+    def test_scan_counts_no_id_entries_when_db_is_empty(self) -> None:
+        """DB に行が 1 つも無い部屋では、ID 無しのファイル行も欠けと数える
+        (ファイルが唯一の写し)。"""
+        self._make_building_log(
+            "city_a", "room1",
+            [{"role": "host", "content": "moved", "heard_by": []}],
+        )
+        deficits = self._scan(["room1"])
+        self.assertEqual(len(deficits), 1)
+        self.assertEqual(deficits[0]["kind"], "not_imported")
+        self.assertEqual(deficits[0]["missing"], 1)
 
     def test_scan_silent_for_building_without_legacy_file(self) -> None:
         """Phase 2+3 以降に作られた部屋 (log.json 無し) は検算の対象外。"""

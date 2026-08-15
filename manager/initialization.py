@@ -239,7 +239,7 @@ class InitializationMixin:
             elif d["kind"] == "live_rows_only":
                 level = "warning"
                 body = (
-                    f"部屋「{display}」の過去の会話履歴 {d['file_entries']} 件が"
+                    f"部屋「{display}」の過去の会話履歴のうち {d['missing']} 件が"
                     "旧形式のファイルに残ったまま取り込まれていません。この部屋には"
                     "新しい発言が既にあるため、後から自動で取り込むと順序が壊れます。"
                     "手動での対応が必要です。"
@@ -247,8 +247,8 @@ class InitializationMixin:
             elif d["kind"] == "partial":
                 level = "warning"
                 body = (
-                    f"部屋「{display}」の過去の会話履歴のうち一部だけが取り込まれて"
-                    f"います（ファイル {d['file_entries']} 件中 {d['imported_rows']} 件）。"
+                    f"部屋「{display}」の過去の会話履歴のうち {d['missing']} 件が"
+                    f"取り込まれていません（旧形式のファイルには {d['file_entries']} 件）。"
                 )
             else:  # not_imported
                 level = "critical"

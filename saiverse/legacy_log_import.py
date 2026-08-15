@@ -406,12 +406,26 @@ def scan_legacy_log_deficits(
     """登録済み building ごとに log.json ↔ DB の取り込み状況を突き合わせる。
 
     ループ内の帳簿でなく DB を SELECT し直して確かめる (自分の記帳を証拠にしない)。
-    戻り値の各 dict: {building_id, kind, file_entries, imported_rows, live_rows, path}
+
+    欠けの判定は件数比較でなく **メッセージ ID の突き合わせ**: ファイルの各
+    メッセージの message_id が、DB の message_id / legacy_message_id のどこにも
+    無いものだけを「欠け (missing)」と数える。dual-write 期の環境ではファイル
+    末尾の数件が「通常経路の行」として DB に居るため、件数比較だと欠けて
+    いないのに欠けて見える (2026-08-16 に本番データで 6 部屋の偽陽性を実測)。
+
+    戻り値の各 dict: {building_id, kind, reason, file_entries, missing,
+    imported_rows, live_rows, path}
     kind:
         "unreadable"     ... log.json が壊れていて読めない (取り込み痕跡も無い)
         "not_imported"   ... 履歴があるのに DB に 1 行も無い
-        "live_rows_only" ... 履歴があるのに取り込み痕跡が無く、通常経路の行だけある
-        "partial"        ... 取り込み行数がファイルの件数より少ない
+        "live_rows_only" ... ファイル時代の履歴が DB に無く、通常経路の行だけある
+        "partial"        ... 取り込みはあるが一部のメッセージが DB に無い
+
+    精度の限界: message_id を持たないファイル行 (旧形式の host イベント等) は
+    個別に突き合わせられない。DB にその部屋の行が 1 つも無いとき (= ファイルが
+    唯一の写し) だけ欠けと数え、行があるときは「同じ実行系が両側に書いた」と
+    みなして ID 付きの行だけで判定する (dual-write 期の移動イベントはファイル側
+    だけ ID 無しで、欠け扱いすると偽陽性になることを本番データで実測)。
     """
     deficits: List[dict] = []
     for building_id in building_ids:
@@ -441,6 +455,7 @@ def scan_legacy_log_deficits(
                     "kind": "unreadable",
                     "reason": unreadable_reason,
                     "file_entries": None,
+                    "missing": None,
                     "imported_rows": 0,
                     "live_rows": total_rows,
                     "path": str(log_path),
@@ -451,19 +466,44 @@ def scan_legacy_log_deficits(
         if file_entries == 0:
             continue
 
+        file_ids = set()
+        no_id_entries = 0
+        for m in messages:
+            mid = m.get("message_id") if isinstance(m, dict) else None
+            if isinstance(mid, str) and mid:
+                file_ids.add(mid)
+            else:
+                no_id_entries += 1
+
+        db_ids = set()
+        for mid, legacy_mid in (
+            db.query(BuildingMessage.message_id, BuildingMessage.legacy_message_id)
+            .filter_by(building_id=building_id)
+            .all()
+        ):
+            if mid:
+                db_ids.add(mid)
+            if legacy_mid:
+                db_ids.add(legacy_mid)
+
+        missing = len(file_ids - db_ids)
+        if total_rows == 0:
+            missing += no_id_entries
+        if missing == 0:
+            continue
+
         if imported_rows == 0 and total_rows == 0:
             kind = "not_imported"
         elif imported_rows == 0:
             kind = "live_rows_only"
-        elif imported_rows < file_entries:
-            kind = "partial"
         else:
-            continue
+            kind = "partial"
         deficits.append({
             "building_id": building_id,
             "kind": kind,
             "reason": None,
             "file_entries": file_entries,
+            "missing": missing,
             "imported_rows": imported_rows,
             "live_rows": total_rows - imported_rows,
             "path": str(log_path),
