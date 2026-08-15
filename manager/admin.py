@@ -9,6 +9,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from zoneinfo import ZoneInfo
 
+from sqlalchemy import func
+
 from saiverse.buildings import Building
 from database.models import (
     AI as AIModel,
@@ -242,7 +244,13 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
 
         db = self.SessionLocal()
         try:
-            if db.query(CityModel).filter_by(CITY_SLUG=slug).first():
+            # 大文字小文字を畳む: CITY_SLUG は ~/.saiverse/cities/<slug>/ の
+            # フォルダ名になるため (Windows は大文字小文字を区別しない)
+            if (
+                db.query(CityModel)
+                .filter(func.lower(CityModel.CITY_SLUG) == slug.lower())
+                .first()
+            ):
                 return f"Error: A city with slug '{slug}' already exists."
             if (
                 db.query(CityModel)
@@ -414,10 +422,18 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                     is not None,
                 )
 
-            if db.query(BuildingModel).filter_by(BUILDINGID=building_id).first():
+            # 大文字小文字を畳んで検査する: Building ID はフォルダ名
+            # (~/.saiverse/cities/<city>/buildings/<id>/) になり、Windows の
+            # ファイルシステムは大文字小文字を区別しないため、'Cafe' と 'cafe'
+            # を別 Building として通すとログの保存先が同じになる
+            if (
+                db.query(BuildingModel)
+                .filter(func.lower(BuildingModel.BUILDINGID) == building_id.lower())
+                .first()
+            ):
                 return (
                     f"Error: A building with the ID '{building_id}' "
-                    "already exists."
+                    "already exists (IDs are compared case-insensitively)."
                 )
 
             new_building = BuildingModel(
@@ -696,7 +712,12 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                 # ここへ来る衝突は「名前から導いた ID」か「カスタム ID」の場合。
                 # どちらもユーザーが選んだものなので、連番で黙って別 ID にせず
                 # エラーで返す (上の予約は、機械が選ぶ連番候補にだけ効く)。
-                if db.query(BuildingModel).filter_by(BUILDINGID=entrance_id).first():
+                # 大文字小文字を畳む理由は create_building の同じ検査と同じ
+                if (
+                    db.query(BuildingModel)
+                    .filter(func.lower(BuildingModel.BUILDINGID) == entrance_id.lower())
+                    .first()
+                ):
                     return f"Error: A building with the ID '{entrance_id}' already exists."
                 db.add(BuildingModel(
                     CITYID=city_id,

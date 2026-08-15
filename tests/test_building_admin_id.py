@@ -97,6 +97,15 @@ class BuildingAdminIdTestCase(unittest.TestCase):
         result = self._create("店", building_id="-shop")
         self.assertIn("Error", result)
 
+    def test_case_folded_duplicate_id_rejected(self):
+        # Building ID はフォルダ名 (~/.saiverse/cities/<city>/buildings/<id>/)
+        # になり、Windows は大文字小文字を区別しないため、'Cafe' と 'cafe' を
+        # 別 Building として通すとログの保存先が同じになる
+        self.assertNotIn("Error", self._create("店", building_id="cafe"))
+        result = self._create("店2", building_id="Cafe")
+        self.assertIn("Error", result)
+        self.assertIsNone(self._get("Cafe"))
+
 
 class IdentifierHelperTestCase(unittest.TestCase):
     """manager/ids.py — 全作成経路が共有する契約と生成式。"""
