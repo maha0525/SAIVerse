@@ -1,0 +1,84 @@
+# 過去ログ取り込みの自動化と検算 — レビュー消し込みハンドオフ (2026-08-16)
+
+**入口**: このファイルは Opus セッションの消し込みループの入口。設計の正典は
+[docs/intent/building_memory_unified.md](../intent/building_memory_unified.md) の
+「過去ログ取り込みの自動化と検算 (2026-08-16 改修)」節。
+運用規則は memory `project_codex_review_gate_workflow` (Fable はレビュー 1 巡のみ →
+本ハンドオフ記入で終了。消し込み・再レビュー・収束判定は Opus セッションの担当)。
+
+## 背景 (1 段落)
+
+テスタロッサの部屋の全履歴 (360 件) が Phase 2 切替 (2026-05-20) の移行から漏れて
+2.5 ヶ月沈黙していた。根因は移行 script が `log.json.corrupted_*` マーカーの存在だけで
+部屋を隔離扱いしてスキップしたこと。リリース版 v0.2.x ユーザーは同じ移行を全部屋で
+踏むため、再発防止として (1) 取り込みをバージョンアップグレード 0.3.0.dev4→dev5 の
+自動実行へ (2) スキップ判定を現物の健全性だけに (3) 毎起動の検算で漏れを UI バナーに、
+の三本柱を実装した。
+
+## コミット
+
+| コミット | 内容 |
+|---|---|
+| 082cae98 | 本体: saiverse/legacy_log_import.py 新設、dev5 ハンドラ 2 本、毎起動検算、CLI 2 本の薄型化、VERSION dev5、テスト |
+| 639d1801 | cursor 前進 (取り込んだ過去ログを未読新着に化けさせない) + ハンドラの失敗封じ込め (SAVEPOINT) |
+| ff5ed008 | 検算をメッセージ ID 突き合わせへ精密化 (dual-write 期の偽陽性 6 部屋を実測して排除) |
+
+## 検証状態
+
+- 対象テスト 42 件緑 (tests/test_migrate_building_logs_to_db.py / tests/test_upgrade_handlers_dev5_legacy_import.py)
+- フルスイート 4331 件緑 — ただし **082cae98 時点のツリー**。639d1801 / ff5ed008 は対象テストのみ
+- 本番データへの読み取り専用検査: 精密化後の検算は実欠け 2 部屋だけを検出
+  (saiverse_navi_city_a_room: live_rows_only missing 94 / testarossa_city_a_room: not_imported missing 329)
+- 実機 (backend 再起動での dev5 走行) は**未検証**
+
+## レビュー状況
+
+### ローカル LLM レビュー — 未実施 (正直な記録)
+
+差分がローカルモデルのコンテキスト (102400 tokens) を超過し、**ローカルモデル本体の
+レビューは一度も走っていない**。レビュー担当エージェントが代行した手動検査の指摘 2 件
+(ハンドラ外への例外漏れ / serialize が行単位 try の外) は、私が head で裏取りした上で
+639d1801 に反映した。「ローカルレビュー通過」とは扱わないこと。
+
+### Codex adversarial-review 1 巡 — verdict: **No-ship** (high 3 / medium 2)
+
+- ジョブ: review-msuowvko-1fxytl (6m26s, Phase done)。全文はジョブ result にあり、要点と私の裁定は下表。
+- ⚠️ **スコープ注意**: レビュー起動時の HEAD は 639d1801。**ff5ed008 (検算の ID 突き合わせ化) はレビュー対象外**。
+  私がレビュー走行中にコミットした落ち度で、F4 の一部は ff5ed008 が既に解消している。
+  Opus は消し込みと同じ巡で **ff5ed008 自体のレビュー**も観点に含めること。
+
+| # | 重大度 | 指摘 (要約) | 私の裁定 | 消し込みの入口 |
+|---|---|---|---|---|
+| F1 | high | conscious_log 取り込みの失敗を握り潰したまま dev5 が刻まれ、以後再試行されない。cursor の欠けは検算にも現れない (検算は building のみ)。既存 cursor 1 行でペルソナ単位一括 skip も粗い | **受諾**。「起動を止めない」と「失敗を確定させない」の両立が必要。処方は再設計が要る: 案 = cursor の欠けも毎起動検算に足す / 予期しない例外時はバージョンを刻まず再試行可能にする (framework の失敗経路に戻す) のどちらかをまはーと裁定 | saiverse/upgrade_handlers.py `_v0_3_0_dev5_conscious_log_cursor_import` |
+| F2 | high | 行単位 SAVEPOINT で末尾行が失敗すると、cursor をファイル件数由来の new_seq まで進めるため DB の実末尾より先へ行き、**以後の本物の新着が cursor に食われて見えない** | **受諾** (実バグ、修正は小さい)。cursor は「実際に INSERT できた最大 seq」までしか進めない + 1 件でも失敗した building は検算アラート対象に | saiverse/legacy_log_import.py `migrate_building` の cursor 前進部 |
+| F3 | high | 検算が 1 部屋の例外 (read_text の OSError / UnicodeDecodeError は load_log が拾わない) で丸ごと沈黙する。manager 側が scan 全体を単一 try で囲んでいるため | **受諾**。load_log の捕捉を広げ、scan は building ごとに例外隔離、検算自体の失敗も startup_alert に。付随 2 点は設計判断として保留: (a) 取り込み痕跡がある部屋の unreadable 無警告は意図した設計 (解消手段の無い騒音を避けた) (b) DB に居ない孤児 building ディレクトリの走査は「削除した部屋」と区別できず保留 — Opus 巡で再検討可 | saiverse/legacy_log_import.py `load_log` / manager/initialization.py `_check_legacy_building_log_import` |
+| F4 | medium | legacy_seq を取り込み痕跡の proxy に使う弱さ (seq 無し行は legacy_seq NULL で入る / 件数比較は同数別集合を見落とす) | **一部解消済み**: 件数比較の弱点は ff5ed008 の ID 突き合わせで解消。残: 冪等判定 (`migrate_building` の imported_count) は legacy_seq のままで、全行 seq 無しの部屋が「live_rows」に誤分類される (重複 INSERT は起きない)。判定を legacy_message_id も含む形にするか、Codex 案の明示マーカー列を足すかを Opus で | saiverse/legacy_log_import.py `migrate_building` 冒頭 |
+| F5 | medium | CLI 2 本が per-building / per-persona の commit 境界を失い、後半の失敗で先行分まで巻き戻る。正典の「失敗時は building_id 単位でロールバック」と矛盾 | **受諾**。CLI 側は building / persona ごとに commit を置く形へ戻す (アップグレード経路はエンティティ単位 commit のままで良い) | scripts/migrate_building_logs_to_db.py / scripts/migrate_conscious_log_to_db.py の main() |
+
+### Opus セッションへの依頼 (順序込み)
+
+1. F2 (小修正・実害明確) → F3 (検算の例外隔離) → F5 (CLI 境界) → F4 残 (冪等判定) → F1 (設計裁定が要る。まはーに 2 案を提示)
+2. ff5ed008 を含む全 3 コミットで再レビュー 1 巡 (収束は観測で判定、予測禁止)
+3. 収束後フルスイート 1 回 → 実機検証手順をまはーへ (下記)
+
+## 実機検証 (消し込み後、まはー)
+
+backend を再起動するだけで dev5 が走る。見るポイント:
+
+1. テスタロッサの部屋の履歴 (360 件) が UI に戻る
+2. ナビの部屋に「過去ログ 94 件未取込」の警告バナーが出る (これは正しい表示。手動対応の設計は別件)
+3. 起動ログに `[upgrade] building log import for city=city_a: ... inserted=...` の行
+4. テスタロッサの次の Pulse が過去ログの一気読みを**しない**こと (cursor 前進の効果)
+
+⚠️ **消し込み前の再起動は非推奨** (No-ship 判定のため)。まはーの環境に限れば実害リスクは
+低い (テスタロッサのファイルは健全で行失敗が起きにくく、cursor 取り込みは全ペルソナ skip)
+が、F2 の overshoot は行失敗が 1 件でも出れば実害になる。
+
+## 残課題 (このハンドオフの範囲外、忘れないための記録)
+
+- **ナビの部屋の手動取り込み設計**: 既存 72 行の前に旧 94 件を挿す順序問題。検算バナーが
+  毎起動出続けるので、うるさければ優先度を上げる
+- **conscious_log の remap 意味論**: リリース版ユーザーでアップグレード前の未読残が
+  大きい場合、その分は新着として消化される (既存設計のまま。intent 節に開放点として記載済み)
+- 隔離マーカーファイル (`log.json.corrupted_*`) 自体の後始末は不要 (どの機構も参照しなくなった。
+  ただし 4/26 事故の法医学的記録として残す)
