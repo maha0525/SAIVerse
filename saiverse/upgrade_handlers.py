@@ -443,9 +443,25 @@ def _v0_3_0_dev5_building_log_import(*, session: "Session", city) -> None:
     from saiverse.data_paths import get_saiverse_home
     from saiverse.legacy_log_import import import_building_logs
 
-    stats = import_building_logs(
-        session, get_saiverse_home(), city_filter=city.CITY_SLUG,
-    )
+    try:
+        # SAVEPOINT で自分の書き込みだけを囲う。session.rollback() にすると、
+        # 同一トランザクションに載っている前段ハンドラ (dev0〜dev4) の未コミット
+        # 変更まで巻き戻した上にバージョンだけ刻まれ、前段の処理が失われる。
+        with session.begin_nested():
+            stats = import_building_logs(
+                session, get_saiverse_home(), city_filter=city.CITY_SLUG,
+            )
+    except Exception:
+        # 例外を上へ返すと起動そのものが中断される (framework は handler 失敗 =
+        # abort)。取り込みの失敗でユーザーを起動不能にはしない — この取り込み分
+        # だけ巻き戻して続行し、取り込めなかった部屋は起動時の検算
+        # (manager/initialization.py) が毎起動アラートにする。
+        LOGGER.error(
+            "[upgrade] building log import for city=%s failed — continuing; "
+            "deficits will surface via the startup reconciliation alerts",
+            city.CITY_SLUG, exc_info=True,
+        )
+        return
     LOGGER.info(
         "[upgrade] building log import for city=%s: scanned=%d inserted=%d "
         "skipped(already=%d, live_rows=%d, unreadable=%d)",
@@ -472,9 +488,21 @@ def _v0_3_0_dev5_conscious_log_cursor_import(*, session: "Session", ai: "AI") ->
     if not persona_dir.is_dir():
         return
     stats = CursorStats()
-    migrate_persona_cursors(
-        session, persona_dir, stats, dry_run=False, only_if_no_existing_rows=True,
-    )
+    try:
+        # SAVEPOINT で自分の書き込みだけを囲う (city ハンドラと同じ理由)。
+        with session.begin_nested():
+            migrate_persona_cursors(
+                session, persona_dir, stats, dry_run=False,
+                only_if_no_existing_rows=True,
+            )
+    except Exception:
+        # 起動を止めない。cursor が欠けた場合の実害は「過去メッセージの再消化」で、
+        # 履歴の喪失ではない。
+        LOGGER.error(
+            "[upgrade] cursor import for ai=%s failed — continuing",
+            ai.AIID, exc_info=True,
+        )
+        return
     LOGGER.info(
         "[upgrade] cursor import for ai=%s: inserted=%d skipped(existing_rows=%d, missing=%d)",
         ai.AIID, stats.cursors_inserted,

@@ -175,26 +175,27 @@ def migrate_building(
         except (TypeError, ValueError):
             legacy_seq_int = None
 
-        # serialize_building_message は metadata.event を構造化分離してくれる。
-        # 新 seq / 新 message_id で上書きする。
-        record = serialize_building_message(building_id, msg)
-        record["seq"] = new_seq
-        record["message_id"] = new_message_id
-        record["legacy_seq"] = legacy_seq_int
-        record["legacy_message_id"] = legacy_msg_id
-
-        # legacy_message_id → 新 message_id マッピングを記録
-        # (重複時は最初に出会ったものを保持。 AddonMessageMetadata が
-        # 1 つの旧 message_id 1 つにしか紐付かない前提と整合)
-        if isinstance(legacy_msg_id, str) and legacy_msg_id:
-            map_key = (building_id, legacy_msg_id)
-            if map_key not in stats.legacy_message_id_map:
-                stats.legacy_message_id_map[map_key] = new_message_id
-
-        if dry_run:
-            local_inserted += 1
-            continue
         try:
+            # serialize_building_message は metadata.event を構造化分離してくれる。
+            # 新 seq / 新 message_id で上書きする。serialize も行単位 try の中 —
+            # 1 行の異常データで building 全体を落とさない。
+            record = serialize_building_message(building_id, msg)
+            record["seq"] = new_seq
+            record["message_id"] = new_message_id
+            record["legacy_seq"] = legacy_seq_int
+            record["legacy_message_id"] = legacy_msg_id
+
+            # legacy_message_id → 新 message_id マッピングを記録
+            # (重複時は最初に出会ったものを保持。 AddonMessageMetadata が
+            # 1 つの旧 message_id 1 つにしか紐付かない前提と整合)
+            if isinstance(legacy_msg_id, str) and legacy_msg_id:
+                map_key = (building_id, legacy_msg_id)
+                if map_key not in stats.legacy_message_id_map:
+                    stats.legacy_message_id_map[map_key] = new_message_id
+
+            if dry_run:
+                local_inserted += 1
+                continue
             # SAVEPOINT で行単位に隔離: 失敗行だけ巻き戻し、外側の
             # トランザクション (呼び出し側所有) には影響させない。
             with db.begin_nested():
@@ -209,6 +210,29 @@ def migrate_building(
 
     stats.messages_inserted += local_inserted
     stats.messages_skipped_invalid += local_invalid
+
+    # 既存の cursor 行を取り込み末尾まで前進させる (後退はさせない)。
+    # 過去ログは過去 — 取り込みで「未読の新着」に化けさせない。cursor=0 の行を
+    # 残すと、次の Pulse が数百件の過去ログを一気に消化しに行く (ファイル側の
+    # ingested_by は疎らで、印だけでは防げないことを 2026-08-16 に実測)。
+    # リリース版ユーザーの環境ではこの時点で cursor 行が無く no-op — 位置は
+    # 後続の conscious_log 取り込みが決める。
+    if not dry_run and local_inserted > 0:
+        cursor_rows = db.query(PersonaPulseCursor).filter_by(
+            BUILDING_ID=building_id
+        ).all()
+        advanced = 0
+        for row in cursor_rows:
+            if int(row.CURSOR_SEQ or 0) < new_seq:
+                row.CURSOR_SEQ = new_seq
+                advanced += 1
+            if int(row.ENTRY_MARKER_SEQ or 0) < new_seq:
+                row.ENTRY_MARKER_SEQ = new_seq
+        if advanced:
+            LOGGER.info(
+                "  %s: 既存 cursor %d 行を seq=%d へ前進 (取り込み分を既読扱いに)",
+                building_id, advanced, new_seq,
+            )
 
     LOGGER.info(
         "  %s: 取り込み=%d / 不正/エラー=%d",

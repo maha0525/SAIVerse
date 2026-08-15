@@ -232,6 +232,31 @@ def test_ai_handler_noop_without_persona_dir(session: Session, home: Path) -> No
     assert session.query(PersonaPulseCursor).count() == 0
 
 
+def test_city_handler_swallows_import_failure_and_keeps_prior_state(
+    session: Session, home: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """取り込みが例外で落ちても、ハンドラは (1) 例外を上へ返さない = 起動を
+    止めない、(2) 同一トランザクション上の前段ハンドラの未コミット変更を
+    巻き戻さない。"""
+    import saiverse.legacy_log_import as mod
+
+    city = _make_city(session, "test_city")
+    # 前段ハンドラの未コミット変更を模す
+    prior_ai = AI(AIID="prior", HOME_CITYID=1, AINAME="prior")
+    session.add(prior_ai)
+    session.flush()
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("import blew up")
+
+    monkeypatch.setattr(mod, "import_building_logs", _boom)
+
+    _v0_3_0_dev5_building_log_import(session=session, city=city)  # raise しないこと
+    session.commit()
+
+    assert session.query(AI).filter_by(AIID="prior").count() == 1
+
+
 # ---- 登録とチェーン ----
 
 def test_handlers_registered_with_dev5_edge() -> None:

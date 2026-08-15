@@ -477,6 +477,60 @@ class MigrateBuildingLogsTests(unittest.TestCase):
         self.assertEqual(rows[0].content, "a")
 
     # ------------------------------------------------------------------
+    # 取り込み時の cursor 前進 (過去ログを「未読の新着」に化けさせない)
+    # ------------------------------------------------------------------
+
+    def test_import_advances_existing_cursor_rows(self) -> None:
+        """cursor=0 の既存行がある部屋へ取り込むと、cursor が取り込み末尾へ進む。
+        進めないと次の Pulse が取り込んだ全過去ログを未読として消化しに行く。"""
+        from database.models import PersonaPulseCursor
+        db = self.SessionLocal()
+        try:
+            db.add(PersonaPulseCursor(
+                PERSONA_ID="p1", BUILDING_ID="room1", CURSOR_SEQ=0, ENTRY_MARKER_SEQ=0,
+            ))
+            db.commit()
+        finally:
+            db.close()
+
+        self._make_building_log(
+            "city_a", "room1",
+            [
+                {"role": "user", "content": "a", "seq": 1, "message_id": "room1:1",
+                 "timestamp": "2026-05-20T10:00:00", "heard_by": []},
+                {"role": "user", "content": "b", "seq": 2, "message_id": "room1:2",
+                 "timestamp": "2026-05-20T10:00:01", "heard_by": []},
+            ],
+        )
+        self._run_main([])
+
+        db = self.SessionLocal()
+        try:
+            row = db.query(PersonaPulseCursor).filter_by(
+                PERSONA_ID="p1", BUILDING_ID="room1"
+            ).one()
+            self.assertEqual(row.CURSOR_SEQ, 2)
+            self.assertEqual(row.ENTRY_MARKER_SEQ, 2)
+        finally:
+            db.close()
+
+    def test_import_does_not_create_cursor_rows(self) -> None:
+        """cursor 行が無い環境 (リリース版ユーザーの経路) では行を作らない —
+        位置は後続の conscious_log 取り込みが決める。"""
+        from database.models import PersonaPulseCursor
+        self._make_building_log(
+            "city_a", "room1",
+            [{"role": "user", "content": "a", "seq": 1, "message_id": "room1:1",
+              "timestamp": "2026-05-20T10:00:00", "heard_by": []}],
+        )
+        self._run_main([])
+        db = self.SessionLocal()
+        try:
+            self.assertEqual(db.query(PersonaPulseCursor).count(), 0)
+        finally:
+            db.close()
+
+    # ------------------------------------------------------------------
     # 起動時の検算: scan_legacy_log_deficits
     # ------------------------------------------------------------------
 
