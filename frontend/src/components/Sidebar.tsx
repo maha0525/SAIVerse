@@ -77,6 +77,26 @@ export default function Sidebar({ onMove, isOpen, onOpen, onClose, refreshTrigge
     const [lifeViewTarget, setLifeViewTarget] = useState<{ id: string; name: string } | null>(null);
     const [developerMode, setDeveloperMode] = useState(false);
     const [quarantinedIds, setQuarantinedIds] = useState<Set<string>>(new Set());
+    // システム欄の折り畳み。既定は閉 (低解像度端末で場所欄を圧迫しないため)。
+    // 初期値を localStorage から直接読むと SSR とのハイドレーション不一致になる
+    // ので、閉で描画してからマウント後の effect で復元する。
+    const [isSystemOpen, setIsSystemOpen] = useState(false);
+
+    useEffect(() => {
+        try {
+            if (localStorage.getItem('saiverse_sidebar_system_open') === '1') {
+                setIsSystemOpen(true);
+            }
+        } catch { /* 読めない環境では既定 (閉) のまま */ }
+    }, []);
+
+    const toggleSystemSection = () => {
+        const next = !isSystemOpen;
+        setIsSystemOpen(next);
+        try {
+            localStorage.setItem('saiverse_sidebar_system_open', next ? '1' : '0');
+        } catch { /* 保存に失敗しても開閉自体は動く */ }
+    };
 
     useEffect(() => {
         let cancelled = false;
@@ -406,28 +426,35 @@ export default function Sidebar({ onMove, isOpen, onOpen, onClose, refreshTrigge
                                         }}
                                         title={isQuarantined ? 'このビルディングは会話履歴ファイルが破損しているため隔離中です。アラートバナーから対応してください。' : undefined}
                                     >
-                                        {childRegionId && (
-                                            <button
-                                                onClick={(e) => { e.stopPropagation(); toggleRegion(childRegionId); }}
-                                                title={isExpanded ? '折り畳む' : '中を見る'}
-                                                style={{
-                                                    background: 'none', border: 'none', padding: 0,
-                                                    cursor: 'pointer', color: 'inherit',
-                                                    display: 'flex', alignItems: 'center',
-                                                }}
-                                            >
-                                                {isExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-                                            </button>
-                                        )}
-                                        <span>{b.name}</span>
-                                        {isQuarantined && (
-                                            <AlertTriangle size={14} style={{ color: '#ff6666' }} />
-                                        )}
-                                        {/* D-1 現在地マーカー: サーバ上の真の現在地に常に表示。
-                                            閲覧モード中 (= viewing != server-current) は
-                                            active hilight と乖離して、 「自分は今そこではなく
-                                            別の場所に居る」 が一瞥で分かる。 */}
-                                        {status?.current_building_id === b.id && <User size={14} style={{ opacity: 0.8 }} />}
+                                        {/* buildingItem は space-between なので子を「左=展開ボタン+名前 /
+                                            右=マーク類」の 2 グループに束ねる。バラで並べると入口行
+                                            (展開ボタンあり) だけ名前が右端へ押し出される。 */}
+                                        <span style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', minWidth: 0 }}>
+                                            {childRegionId && (
+                                                <button
+                                                    onClick={(e) => { e.stopPropagation(); toggleRegion(childRegionId); }}
+                                                    title={isExpanded ? '折り畳む' : '中を見る'}
+                                                    style={{
+                                                        background: 'none', border: 'none', padding: 0,
+                                                        cursor: 'pointer', color: 'inherit',
+                                                        display: 'flex', alignItems: 'center',
+                                                    }}
+                                                >
+                                                    {isExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                                                </button>
+                                            )}
+                                            <span>{b.name}</span>
+                                        </span>
+                                        <span style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                                            {isQuarantined && (
+                                                <AlertTriangle size={14} style={{ color: '#ff6666' }} />
+                                            )}
+                                            {/* D-1 現在地マーカー: サーバ上の真の現在地に常に表示。
+                                                閲覧モード中 (= viewing != server-current) は
+                                                active hilight と乖離して、 「自分は今そこではなく
+                                                別の場所に居る」 が一瞥で分かる。 */}
+                                            {status?.current_building_id === b.id && <User size={14} style={{ opacity: 0.8 }} />}
+                                        </span>
                                     </div>
                                     {children.map(cb => renderBuildingItem(cb, depth + 1))}
                                 </div>
@@ -440,8 +467,27 @@ export default function Sidebar({ onMove, isOpen, onOpen, onClose, refreshTrigge
                     })()}
                 </div>
 
-                {/* System Section */}
-                <div className={styles.sectionTitle}>システム</div>
+                {/* System Section: 常用でない項目群なので既定で畳む (低解像度端末で
+                    場所欄を圧迫しないため)。開閉の手つきは場所欄の Region 折り畳みと
+                    同じ chevron。開閉状態は localStorage に記憶。 */}
+                <button
+                    className={styles.sectionTitle}
+                    onClick={toggleSystemSection}
+                    aria-expanded={isSystemOpen}
+                    style={{
+                        display: 'flex', alignItems: 'center', gap: '0.3rem',
+                        cursor: 'pointer', userSelect: 'none',
+                        padding: '0.3rem 0',
+                        marginBottom: isSystemOpen ? '0.3rem' : '1rem',
+                        // button の UA スタイルを打ち消して見出しの見た目を保つ
+                        background: 'none', border: 'none', fontFamily: 'inherit',
+                        textAlign: 'left', width: '100%',
+                    }}
+                >
+                    {isSystemOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                    システム
+                </button>
+                {isSystemOpen && (
                 <div className={styles.buildingList} style={{ flex: 'none', marginBottom: '1rem' }}>
                     {developerMode && (
                         <div
@@ -503,6 +549,7 @@ export default function Sidebar({ onMove, isOpen, onOpen, onClose, refreshTrigge
                         </span>
                     </div>
                 </div>
+                )}
 
                 {/* Footer: Settings + Profile */}
                 <div className={styles.settingsFooter}>

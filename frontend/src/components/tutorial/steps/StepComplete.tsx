@@ -19,7 +19,7 @@ export default function StepComplete({ onStart }: StepCompleteProps) {
                 基本的な設定が完了しました。<br />
                 ペルソナとの生活をお楽しみください。<br /><br />
                 SAIVerseにはその他にも様々な機能があります。<br />
-                知りたい場合は、サイドバーの「チュートリアル」ボタンから選択してください。
+                知りたい場合は、サイドバーの「システム」を開いて「チュートリアル」を選択してください。
             </p>
 
             <button className={styles.startButton} onClick={onStart}>
