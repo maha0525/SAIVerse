@@ -1,11 +1,15 @@
-"""Building ID / Region ID の文字種契約と生成式。
+"""Building ID / Region ID / ペルソナ ID の文字種契約と生成式。
 
-docs/issues/building_id_no_charset_constraint.md 論点 1 (新規作成の口を塞ぐ)。
+docs/issues/building_id_no_charset_constraint.md 論点 1 (新規作成の口を塞ぐ)
+と論点 3 (ペルソナ ID への同契約の適用)。
 
 Building ID はログのフォルダパス (``~/.saiverse/cities/<city>/buildings/<id>/``)、
 ``saiverse://building/<id>/image`` URI、API のパス引数へ素で入る永続キーなので、
 ASCII 英数字 + ``_`` + ``-`` (先頭は英数字) だけを許す。Region ID も入口 Building の
-ID (``entrance_<region_id>``) の材料になるため、同じ契約に従わせる。
+ID (``entrance_<region_id>``) の材料になるため、同じ契約に従わせる。ペルソナ ID
+(AIID) も ``~/.saiverse/personas/<id>/`` のフォルダ名・API パス引数になる同じ性質の
+永続キーであり、2026-08-16 から同じ契約に従う (契約より前に作られた日本語 AIID は
+在籍したまま — 検査は作成の口にだけ掛かる)。
 
 **契約と生成式をこの 1 枚へ集約する。** 各作成経路が自前の f-string で ID を
 組むと、片方だけ塞いだ穴が残る — 2026-08-09 に実際そうなった: create_building
@@ -55,6 +59,20 @@ def entrance_id_for(region_id: str) -> str:
     return f"entrance_{region_id}"
 
 
+def private_room_candidate(ai_stem: str, city_slug: str) -> str:
+    """ペルソナ私室 Building の通常 ID (``<stem>_<city>_room``)。
+
+    :func:`build_identifier` に ``(ai_stem, city_slug, "room")`` を渡したときの
+    通常経路の結果と一致する。式を共有するのは :func:`entrance_id_for` と同じ
+    理由 — AIID の連番を選ぶ側が私室の空きも一緒に予約するため、「予約した ID」と
+    「実際に作る ID」を組む場所が二つになる。片方だけ変えると、空きを確かめた
+    ID と違う私室が生まれる。
+    """
+    return "_".join(
+        [slugify_identifier(ai_stem), slugify_identifier(city_slug), "room"]
+    )
+
+
 #: 単一のパス要素として使えない文字 (Windows の禁止文字を含む)
 _UNSAFE_PATH_CHARS = frozenset('/\\:*?"<>|')
 
@@ -84,6 +102,11 @@ def is_safe_path_component(value: str) -> bool:
     永続化済みの ID (旧データ・import・DB 直編集) はこの関数を通らないまま
     パス組み立てへ流れる。境界の保証は組み立て側に置く必要がある —
     docs/issues/persona_path_boundary_not_enforced_at_use.md。
+
+    2026-08-16 から作成の口は :func:`is_valid_identifier` の文字種契約
+    (より強い検査) で塞がれたため、この緩い検査の残る用途は上記の組み立て側
+    境界 — 契約より前に作られた日本語 AIID は在籍し続けるので、そこでは
+    「契約準拠か」ではなく「フォルダ名として安全か」だけを問える。
     """
     if not value or value in {".", ".."}:
         return False

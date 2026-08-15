@@ -14,11 +14,8 @@ from database.models import (
     City as CityModel,
     Tool as ToolModel,
 )
-from manager.ids import (
-    build_identifier,
-    is_safe_path_component,
-    path_component_error,
-)
+from manager.ids import build_identifier
+from manager.persona import ai_stem_taken
 from persona.core import PersonaCore
 from saiverse.buildings import Building
 from saiverse.model_configs import get_context_length, get_model_provider
@@ -190,27 +187,36 @@ class BlueprintMixin:
                 )
 
             home_city = db.query(CityModel).filter_by(CITYID=blueprint.CITYID).first()
-            new_ai_id = f"{entity_name.lower().replace(' ', '_')}_{home_city.CITY_SLUG}"
-            # AIID は ~/.saiverse/personas/<id>/ のフォルダ名になる
-            # (manager/persona.py の同じ検査と対)
-            if not is_safe_path_component(new_ai_id):
-                return False, path_component_error("Entity ID", new_ai_id)
+            # AIID は ~/.saiverse/personas/<id>/ のフォルダ名になる永続キーなので
+            # 文字種契約に従う (manager/persona.py の同じ生成と対)。entity_name は
+            # Blueprint 生成時にユーザー / ペルソナが決めるので日本語が来る —
+            # slug が残らなければ persona_<連番> へ落ち、連番を選ぶときは私室
+            # Building の空きも一緒に予約する (理由は manager/persona.py と同じ)。
+            city_slug = home_city.CITY_SLUG
+            ai_stem = build_identifier(
+                entity_name,
+                stem="persona",
+                exists=lambda s: ai_stem_taken(db, s, city_slug),
+            )
+            new_ai_id = f"{ai_stem}_{city_slug}"
 
-            if db.query(AIModel).filter_by(AIID=new_ai_id).first():
+            # 大文字小文字を畳む理由は manager/persona.py の同じ検査と同じ
+            # (AIID はフォルダ名になる)
+            if (
+                db.query(AIModel)
+                .filter(func.lower(AIModel.AIID) == new_ai_id.lower())
+                .first()
+            ):
                 return (
                     False,
                     f"An entity with the generated ID '{new_ai_id}' already exists.",
                 )
 
-            # 私室の Building ID は文字種契約を独立に満たす (manager/ids.py) —
-            # entity_name は Blueprint 生成時にユーザー / ペルソナが決めるので
-            # 日本語が来る。AIID 側の文字種は issue 論点 3 で未着手。
             # ensure_unique=True の理由は manager/persona.py の同じ箇所と同じ:
-            # slug 化は情報を落とすので、上の名前・AIID 重複検査を通った別個体が
-            # 同じ私室 ID に落ちうる。
+            # 私室と同じ ID の Building が既に存在しうる。
             private_room_id = build_identifier(
-                entity_name,
-                home_city.CITY_SLUG,
+                ai_stem,
+                city_slug,
                 "room",
                 stem="persona",
                 ensure_unique=True,

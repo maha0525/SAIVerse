@@ -19,11 +19,32 @@ from database.models import (
 )
 from manager.ids import (
     build_identifier,
-    is_safe_path_component,
-    path_component_error,
+    charset_error,
+    is_valid_identifier,
+    private_room_candidate,
 )
 from persona.core import PersonaCore
 from saiverse.model_configs import get_context_length, get_model_provider
+
+
+def ai_stem_taken(db, stem: str, city_slug: str) -> bool:
+    """``stem`` が AIID または私室 Building の席を埋めているか。
+
+    自動生成の連番 (persona_N / ruler_N) を選ぶ側が、AIID と私室の両方の空きを
+    まとめて予約するための検査。比較は大文字小文字を畳む — ID はフォルダ名
+    (``~/.saiverse/personas/<id>/``) になり、Windows のファイルシステムは大文字
+    小文字を区別しないため、DB 上は別行でも保存先が同じになる。
+    """
+    candidate = f"{stem}_{city_slug}".lower()
+    room = private_room_candidate(stem, city_slug).lower()
+    return (
+        db.query(AIModel).filter(func.lower(AIModel.AIID) == candidate).first()
+        is not None
+        or db.query(BuildingModel)
+        .filter(func.lower(BuildingModel.BUILDINGID) == room)
+        .first()
+        is not None
+    )
 
 
 class PersonaMixin:
@@ -437,8 +458,9 @@ class PersonaMixin:
         Args:
             name: Display name for the persona
             system_prompt: System prompt for the persona
-            custom_ai_id: Optional custom ID (alphanumeric + underscore). If not provided,
-                          auto-generated from name.
+            custom_ai_id: Optional custom ID。manager/ids.py の文字種契約
+                          (ASCII 英数字 + '_' '-'、先頭は英数字) を満たさなければ
+                          拒否。未指定なら名前から自動生成 (日本語名は persona_連番)。
             persona_role: Special persona role (AI.PERSONA_ROLE)。None=通常、'ruler'=Region RPG GM
             room_name / room_capacity / room_system_instruction / room_description:
                           私室のオーバーライド。Ruler では私室の代わりに Region の控室として使う
@@ -456,38 +478,53 @@ class PersonaMixin:
             if existing_ai:
                 return False, f"A persona named '{name}' already exists in this city.", None, None
 
-            # Use custom ID if provided, otherwise auto-generate from name
+            # AIID は ~/.saiverse/personas/<id>/ のフォルダ名・API パス引数に
+            # なる永続キーなので、Building / Region と同じ文字種契約に従う
+            # (manager/ids.py、issue 論点 3)。契約は ASCII のみを保証するので、
+            # パス脱出文字 (区切り・'..') の検査もこれで兼ねる。
             if custom_ai_id:
-                new_ai_id = f"{custom_ai_id}_{self.city_name}"
+                if not is_valid_identifier(custom_ai_id):
+                    return (False, charset_error("Persona ID", custom_ai_id), None, None)
+                ai_stem = custom_ai_id
             else:
-                new_ai_id = f"{name.lower().replace(' ', '_')}_{self.city_name}"
+                # 日本語名など slug が残らない名前は persona_<連番> へ落ちる。
+                # 連番を選ぶときは私室 Building の空きも一緒に予約する — 契約より
+                # 前に作られた「AIID は日本語のまま・私室だけ persona_N」という
+                # 既存ペルソナがいるため、AIID だけ見て選ぶと既存の私室と番号が
+                # 食い違う (entrance_id_for と同じ、選ぶ側が予約する形)。
+                # ensure_unique は付けない: slug が立つ名前の ID 衝突は下の
+                # 「already exists」で音を立てて返す (Building と同じ裁定 —
+                # 連番で黙って避けると、名前と違う ID が無言で生まれる)。
+                ai_stem = build_identifier(
+                    name,
+                    stem="persona",
+                    exists=lambda s: ai_stem_taken(db, s, self.city_name),
+                )
+            new_ai_id = f"{ai_stem}_{self.city_name}"
 
-            # AIID は ~/.saiverse/personas/<id>/ のフォルダ名になる。文字種を
-            # ASCII へ統一するかは未決 (issue 論点 3) だが、区切り文字や '..' で
-            # SAIVERSE_HOME の外へ書けてしまう穴は決着を待たずに塞ぐ
-
-            if not is_safe_path_component(new_ai_id):
-                return (False, path_component_error("Persona ID", new_ai_id), None, None)
-
-            if db.query(AIModel).filter_by(AIID=new_ai_id).first():
+            # 重複検査は大文字小文字を畳む: AIID はフォルダ名になり、Windows の
+            # ファイルシステムは大文字小文字を区別しないため、'alice' と 'Alice'
+            # を別ペルソナとして通すと記憶 DB・ログの保存先が同じになる
+            if (
+                db.query(AIModel)
+                .filter(func.lower(AIModel.AIID) == new_ai_id.lower())
+                .first()
+            ):
                 return (
                     False,
-                    f"A persona with the ID '{new_ai_id}' already exists.",
+                    f"A persona with the ID '{new_ai_id}' already exists "
+                    "(IDs are compared case-insensitively because they become "
+                    "folder names).",
                     None,
                     None,
                 )
 
-            # 私室の Building ID は AI ID 由来だが、文字種契約は Building 側で
-            # 独立に満たす (manager/ids.py) — AIID の文字種は issue 論点 3 で未着手
-            # なので、日本語名のペルソナでは AI ID と私室 ID の形が揃わない。
-            # 揃わないことより、パス・URI に日本語が入らないことを取る。
-            #
-            # ensure_unique=True が要る: slug 化は情報を落とすので、上の AIID 重複
-            # 検査を通った別ペルソナ (「A店」と「A森」など) が同じ私室 ID に落ちうる。
-            # 素通しにすると PK 衝突で commit が落ち、既存ペルソナの部屋を指す ID の
-            # まま下のインメモリ登録が走る。
+            # 私室の Building ID は契約済みの ai_stem から導く。ensure_unique=True
+            # は今も要る: 私室と同じ ID の Building が既に存在しうる (ユーザーが
+            # 手で作った Building や、契約前の遺産)。素通しにすると PK 衝突で
+            # commit が落ち、既存の部屋を指す ID のまま下のインメモリ登録が走る。
             new_building_id = build_identifier(
-                custom_ai_id or name,
+                ai_stem,
                 self.city_name,
                 "room",
                 stem="persona",

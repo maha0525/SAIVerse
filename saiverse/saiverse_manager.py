@@ -42,7 +42,8 @@ from manager.sds import SDSMixin
 from manager.background import DatabasePollingMixin
 from manager.history import HistoryMixin
 from manager.blueprints import BlueprintMixin
-from manager.persona import PersonaMixin
+from manager.ids import build_identifier, is_valid_identifier
+from manager.persona import PersonaMixin, ai_stem_taken
 from manager.visitors import VisitorMixin
 from manager.gateway import GatewayMixin
 from manager.user_state import UserStateMixin
@@ -2442,10 +2443,27 @@ class SAIVerseManager(
         if region.ruler_id:
             return f"Error: This region already has a Ruler ({region.ruler_id})."
 
+        # Ruler の AIID は原則 ruler_<region_id>。ただし文字種契約 (2026-08-09)
+        # より前に作られた非 ASCII Region ID では契約違反になるため、slug/連番
+        # (ruler_N) へ落とす。Ruler の参照は RULER_ID 列が持つので、この命名に
+        # 依存する箇所は無い。
+        ruler_stem = f"ruler_{region_id}"
+        if not is_valid_identifier(ruler_stem):
+            db = self.SessionLocal()
+            try:
+                ruler_stem = build_identifier(
+                    ruler_stem,
+                    stem="ruler",
+                    ensure_unique=True,
+                    exists=lambda s: ai_stem_taken(db, s, self.city_name),
+                )
+            finally:
+                db.close()
+
         success, message, ai_id, room_id = self._create_persona(
             name,
             system_prompt,
-            custom_ai_id=f"ruler_{region_id}",
+            custom_ai_id=ruler_stem,
             persona_role="ruler",
             room_name=f"{region.name} 控室",
             room_capacity=10,

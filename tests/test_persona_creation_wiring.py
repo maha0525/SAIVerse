@@ -28,9 +28,11 @@ from sqlalchemy.orm import sessionmaker
 from database.models import (
     AI as AIModel,
     Base,
+    Blueprint,
     Building as BuildingModel,
     City as CityModel,
 )
+from manager.blueprints import BlueprintMixin
 from manager.persona import PersonaMixin
 
 
@@ -144,79 +146,122 @@ class PersonaCreationWiringTestCase(unittest.TestCase):
         self.assertEqual(room_id, "sophie_city_a_room")
         self.assertEqual(self._room_id_in_db(ai_id), "sophie_city_a_room")
 
-    def test_japanese_name_gets_an_ascii_room_id(self):
+    def test_japanese_name_gets_a_serial_ascii_ai_id_and_matching_room(self):
+        # 日本語名は slug が残らないので AIID ごと persona_<連番> へ落ちる
+        # (issue 論点 3)。AIID と私室 ID は同じ連番を共有する
         ok, _msg, ai_id, room_id = self._create("エア")
         self.assertTrue(ok)
-        # AIID 側の文字種は issue 論点 3 で未着手なので日本語のまま。
-        # 私室 ID (パス・URI に入る) だけが ASCII に落ちる
-        self.assertNotIn("エア", room_id)
+        self.assertEqual(ai_id, "persona_1_city_a")
         self.assertEqual(room_id, "persona_1_city_a_room")
         self.assertEqual(self._room_id_in_db(ai_id), room_id)
 
-    def test_names_that_normalize_alike_get_distinct_room_ids(self):
+        ok2, _msg2, ai_id2, room_id2 = self._create("ミク")
+        self.assertTrue(ok2)
+        self.assertEqual(ai_id2, "persona_2_city_a")
+        self.assertEqual(room_id2, "persona_2_city_a_room")
+
+    def test_serial_ai_id_skips_rooms_taken_by_pre_contract_personas(self):
+        # 契約より前に作られた「AIID は日本語のまま・私室だけ persona_N」という
+        # ペルソナが本番にいる。AIID の空きだけ見て連番を選ぶと、新しい子の
+        # AIID (persona_1) と私室 (persona_2_..._room) の番号が食い違う —
+        # 連番を選ぶ側が私室の空きも一緒に予約することを押さえる
+        db = self.SessionLocal()
+        try:
+            db.add(AIModel(
+                AIID="テラ_city_a", HOME_CITYID=1, AINAME="テラ",
+                SYSTEMPROMPT="p", PRIVATE_ROOM_ID="persona_1_city_a_room",
+            ))
+            db.add(BuildingModel(
+                CITYID=1, BUILDINGID="persona_1_city_a_room",
+                BUILDINGNAME="テラの部屋", CAPACITY=1,
+            ))
+            db.commit()
+        finally:
+            db.close()
+
+        ok, _msg, ai_id, room_id = self._create("ミク")
+        self.assertTrue(ok)
+        self.assertEqual(ai_id, "persona_2_city_a")
+        self.assertEqual(room_id, "persona_2_city_a_room")
+
+    def test_names_that_normalize_alike_fail_loudly_not_silently(self):
         # slug 化は情報を落とす写像 — 「A店」と「A森」はどちらも a になる。
-        # AIID と名前の重複検査は別の文字列を見るのでここは素通しする
-        ok1, _m1, _id1, room1 = self._create("A店")
-        ok2, _m2, _id2, room2 = self._create("A森")
+        # 連番で黙って避けると名前と違う ID が無言で生まれるので、Building と
+        # 同じ裁定で「already exists」を音を立てて返す。世界状態は動かない
+        ok1, _m1, ai1, _room1 = self._create("A店")
         self.assertTrue(ok1)
-        self.assertTrue(ok2, f"2 人目の作成が失敗した: {_m2}")
-        self.assertNotEqual(room1, room2)
-        self.assertEqual(len(self._building_ids()), 2)
+        self.assertEqual(ai1, "a_city_a")
+
+        cache_before = dict(self.svc.building_map)
+        ok2, msg2, _id2, _room2 = self._create("A森")
+        self.assertFalse(ok2)
+        self.assertIn("already exists", msg2)
+        self.assertEqual(dict(self.svc.building_map), cache_before)
+
+    def test_case_folded_duplicate_ai_id_is_rejected(self):
+        # AIID はフォルダ名になり、Windows のファイルシステムは大文字小文字を
+        # 区別しない。'alice' と 'Alice' を別ペルソナとして通すと DB 上は別行
+        # なのに記憶 DB・ログの保存先が同じになるため、重複検査は大文字小文字を
+        # 畳む
+        ok1, _m1, _ai1, _room1 = self._create("X", custom_ai_id="alice")
+        self.assertTrue(ok1)
+
+        cache_before = dict(self.svc.building_map)
+        ok2, msg2, _ai2, _room2 = self._create("Y", custom_ai_id="Alice")
+        self.assertFalse(ok2)
+        self.assertIn("already exists", msg2)
+        self.assertEqual(dict(self.svc.building_map), cache_before)
+
+        # 名前由来の自動生成でも同じ畳み込みが効く (名前 'ALICE' → slug 'alice')
+        ok3, msg3, _ai3, _room3 = self._create("ALICE")
+        self.assertFalse(ok3)
+        self.assertIn("already exists", msg3)
 
     def test_second_persona_does_not_overwrite_the_first_room_in_cache(self):
-        # 退行の本体: 衝突した ID でインメモリ登録が走ると、既存ペルソナの
-        # 部屋と占有者が上書きされる
-        _ok1, _m1, ai1, room1 = self._create("A店")
-        _ok2, _m2, ai2, room2 = self._create("A森")
+        # 退行の本体だった形: 私室 ID が衝突したままインメモリ登録が走ると、
+        # 既存の部屋と占有者が上書きされる。AIID の重複検査が大文字小文字を
+        # 畳む今、残る衝突源は「私室と同じ ID の Building が既に存在する」場合
+        # (ユーザーが手で作った Building や契約前の遺産)
+        db = self.SessionLocal()
+        try:
+            db.add(BuildingModel(
+                CITYID=1, BUILDINGID="alice_city_a_room",
+                BUILDINGNAME="手作りの部屋", CAPACITY=1,
+            ))
+            db.commit()
+        finally:
+            db.close()
 
-        self.assertEqual(self.svc.occupants[room1], [ai1])
-        self.assertEqual(self.svc.occupants[room2], [ai2])
-        self.assertEqual(len(self.svc.buildings), 2)
-        self.assertEqual(len(self.svc.building_map), 2)
-        # ログの置き場も部屋ごとに分かれている (同じパスを共有しない)
-        self.assertNotEqual(
-            self.svc.building_memory_paths[room1],
-            self.svc.building_memory_paths[room2],
-        )
+        ok, _msg, ai_id, room_id = self._create("X", custom_ai_id="alice")
+        self.assertTrue(ok, f"作成が失敗した: {_msg}")
+        # 既存 Building の ID を奪わず、連番の私室へ落ちる
+        self.assertNotEqual(room_id, "alice_city_a_room")
+        self.assertEqual(self.svc.occupants[room_id], [ai_id])
+        # 既存 Building はインメモリ登録の対象外のまま (上書きされていない)
+        self.assertNotIn("alice_city_a_room", self.svc.building_map)
 
-    def test_custom_ai_id_with_non_ascii_still_yields_an_ascii_room_id(self):
-        # AIID は無検証なので日本語が通る (issue 論点 3)。私室 ID だけは
-        # 混在名でも ASCII 部分だけを残し、残らなければ連番へ落ちる
-        ok, _msg, ai_id, room_id = self._create("X", custom_ai_id="日本語ID")
-        self.assertTrue(ok)
-        self.assertEqual(ai_id, "日本語ID_city_a")
-        self.assertEqual(room_id, "id_city_a_room")
-
-        ok2, _msg2, ai_id2, room_id2 = self._create("Y", custom_ai_id="識別子")
-        self.assertTrue(ok2)
-        self.assertEqual(ai_id2, "識別子_city_a")
-        self.assertEqual(room_id2, "persona_1_city_a_room")
-
-    # --- AIID はフォルダ名になる (パス境界) ---
-
-    def test_ai_id_that_escapes_the_persona_directory_is_rejected(self):
-        # AIID は ~/.saiverse/personas/<id>/ のフォルダ名になるため、区切り文字が
-        # 通ると保存先が SAIVERSE_HOME の外へ出る。
-        # なお custom_ai_id が ".." 単体でも AIID は ".._city_a" になり、脱出でき
-        # ない普通のフォルダ名なので通る (検査は AIID 全体に対して行う)
-        for bad in ("../../outside", "a/b", "a\\b", "a:b", "a|b"):
+    def test_custom_ai_id_outside_the_charset_contract_is_rejected(self):
+        # custom ID は契約 (ASCII 英数字 + '_' '-'、先頭は英数字) を満たさなければ
+        # 拒否。日本語もパス脱出文字もここで一緒に落ちる
+        for bad in ("日本語ID", "識別子", "../../outside", "a/b", "a\\b",
+                    "a:b", "a|b", "..", "_leading", "-leading"):
             ok, msg, _ai, _room = self._create("X", custom_ai_id=bad)
             self.assertFalse(ok, f"{bad!r} が通ってしまった")
             self.assertIn("Error", msg)
             self.assertEqual(self.svc.building_map, {}, f"{bad!r} で世界状態が動いた")
 
-    def test_name_derived_ai_id_is_also_checked(self):
-        # 自動生成側 (custom_ai_id なし) も同じ境界を通る
-        ok, msg, _ai, _room = self._create("../escape")
-        self.assertFalse(ok)
-        self.assertIn("Error", msg)
-
-    def test_japanese_ai_id_is_still_allowed(self):
-        # 文字種を ASCII へ統一するかは未決 (issue 論点 3)。ここで塞ぐのは
-        # パス境界だけで、日本語 ID は従来どおり通す
-        ok, _msg, ai_id, _room = self._create("エア")
+    def test_custom_ai_id_with_hyphen_is_allowed(self):
+        ok, _msg, ai_id, room_id = self._create("X", custom_ai_id="neo-alice")
         self.assertTrue(ok)
-        self.assertEqual(ai_id, "エア_city_a")
+        self.assertEqual(ai_id, "neo-alice_city_a")
+        self.assertEqual(room_id, "neo-alice_city_a_room")
+
+    def test_path_characters_in_names_are_dropped_by_the_slug(self):
+        # 自動生成側は slug 化が契約外の文字 (区切り・'..' を含む) を捨てるので、
+        # 名前にパス文字が混ざっても安全な ID に落ちる
+        ok, _msg, ai_id, _room = self._create("../escape")
+        self.assertTrue(ok)
+        self.assertEqual(ai_id, "escape_city_a")
 
     # --- DB とキャッシュの整合 ---
 
@@ -272,6 +317,122 @@ class PersonaCreationWiringTestCase(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("already exists", msg)
         self.assertEqual(list(self.svc.building_map), buildings_before)
+
+
+class BlueprintSpawnWiringTestCase(unittest.TestCase):
+    """ブループリント孵化 (spawn_entity_from_blueprint) の配線契約。
+
+    AIID を作るもう一つの口。8/9 の Building ID 工事ではこの経路が漏れて
+    日本語 ID を作り続けた前科があるため、契約 (日本語名 → persona_連番、
+    私室と同じ連番を共有) を呼び出し側で押さえる。
+    """
+
+    def setUp(self):
+        fd, self.db_path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        self.engine = create_engine(f"sqlite:///{self.db_path}")
+        Base.metadata.create_all(self.engine)
+        self.SessionLocal = sessionmaker(bind=self.engine)
+
+        db = self.SessionLocal()
+        try:
+            db.add(CityModel(
+                CITYID=1, USERID=1, CITY_SLUG="city_a", UI_PORT=3000, API_PORT=8000,
+            ))
+            db.add(BuildingModel(
+                CITYID=1, BUILDINGID="plaza_city_a", BUILDINGNAME="広場", CAPACITY=5,
+            ))
+            db.add(Blueprint(
+                BLUEPRINT_ID=1, CITYID=1, NAME="homunculus",
+                BASE_SYSTEM_PROMPT="base prompt",
+            ))
+            db.commit()
+        finally:
+            db.close()
+
+        svc = BlueprintMixin.__new__(BlueprintMixin)
+        svc.SessionLocal = self.SessionLocal
+        svc.city_id = 1
+        svc.city_name = "city_a"
+        svc.model = "test-model"
+        svc.saiverse_home = Path(tempfile.mkdtemp())
+        svc.default_avatar = "avatar.png"
+        svc.user_room_id = "user_room_city_a"
+        svc.timezone_info = None
+        svc.timezone_name = "UTC"
+        plaza = type("_B", (), {"name": "広場", "capacity": 5})()
+        svc.buildings = [plaza]
+        svc.building_map = {"plaza_city_a": plaza}
+        svc.capacities = {"plaza_city_a": 5}
+        svc.occupants = {"plaza_city_a": []}
+        svc.building_memory_paths = {}
+        svc.building_histories = {"plaza_city_a": []}
+        svc.personas = {}
+        svc.avatar_map = {}
+        svc.id_to_name_map = {}
+        svc.persona_map = {}
+        svc.items = {}
+        svc.items_by_persona = {}
+        svc.get_persona_pending_events = lambda *a, **k: []
+        svc.archive_persona_events = lambda *a, **k: None
+        svc._on_persona_registered = lambda persona_id: None
+        svc.add_building_event = lambda *a, **k: None
+        svc._save_modified_buildings = lambda *a, **k: None
+        self.svc = svc
+
+    def tearDown(self):
+        self.engine.dispose()
+        os.unlink(self.db_path)
+
+    def _spawn(self, entity_name):
+        with patch("manager.blueprints.PersonaCore", _StubPersonaCore), \
+             patch("manager.blueprints.get_model_provider", return_value="stub"), \
+             patch("manager.blueprints.get_context_length", return_value=1000):
+            return self.svc.spawn_entity_from_blueprint(1, entity_name, "plaza_city_a")
+
+    def _ai_row(self, ai_id):
+        db = self.SessionLocal()
+        try:
+            return db.query(AIModel).filter_by(AIID=ai_id).first()
+        finally:
+            db.close()
+
+    def test_japanese_entity_name_gets_a_serial_ascii_ai_id_and_matching_room(self):
+        ok, msg = self._spawn("ホムンクルス")
+        self.assertTrue(ok, msg)
+        row = self._ai_row("persona_1_city_a")
+        self.assertIsNotNone(row, "AIID が persona_1_city_a になっていない")
+        self.assertEqual(row.PRIVATE_ROOM_ID, "persona_1_city_a_room")
+
+    def test_ascii_entity_name_keeps_the_readable_ai_id(self):
+        ok, msg = self._spawn("Golem")
+        self.assertTrue(ok, msg)
+        row = self._ai_row("golem_city_a")
+        self.assertIsNotNone(row)
+        self.assertEqual(row.PRIVATE_ROOM_ID, "golem_city_a_room")
+
+    def test_serial_skips_rooms_taken_by_pre_contract_personas(self):
+        # 契約前の「AIID は日本語・私室だけ persona_N」の既存個体がいても、
+        # 新しい個体は AIID と私室が同じ連番になる (manager/persona.py と同じ予約)
+        db = self.SessionLocal()
+        try:
+            db.add(AIModel(
+                AIID="テラ_city_a", HOME_CITYID=1, AINAME="テラ",
+                SYSTEMPROMPT="p", PRIVATE_ROOM_ID="persona_1_city_a_room",
+            ))
+            db.add(BuildingModel(
+                CITYID=1, BUILDINGID="persona_1_city_a_room",
+                BUILDINGNAME="テラの部屋", CAPACITY=1,
+            ))
+            db.commit()
+        finally:
+            db.close()
+
+        ok, msg = self._spawn("ホムンクルス")
+        self.assertTrue(ok, msg)
+        row = self._ai_row("persona_2_city_a")
+        self.assertIsNotNone(row, "既存私室の番号を飛ばした連番になっていない")
+        self.assertEqual(row.PRIVATE_ROOM_ID, "persona_2_city_a_room")
 
 
 if __name__ == "__main__":
