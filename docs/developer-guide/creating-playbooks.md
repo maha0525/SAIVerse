@@ -118,6 +118,8 @@ builtin_data/playbooks/public/     # 組み込み
 
 - `action` テンプレート内は `{var}` / `{nested.key}` で state を参照
 - `args_input` の文字列値は state キーパス、リテラル文字列は `{"$literal": "..."}`
+- **`_` 始まりの名前は runtime の予約 namespace** (`_messages` / `_pulse_context` 等)。Playbook が宣言する書き込み先 (input param 名 / `output_schema` / ノード id / `output_key` / `output_keys` / `output_mapping` / set の代入キー) に `_` 始まりを使うと**ロード時に検証エラーで弾かれる** (2026-08-16 W10)
+- **入力値は起動時に宣言型へ検証される** (2026-08-16 W10): `param_type: "number"` / `"boolean"` はクオートされた値 (`"2"` / `"true"`) を正規化、変換不能な値と `enum_values` 外の値は Playbook 起動前にエラーで止まる。required 欠落は警告ログ + 空文字 fallback (既存互換)
 
 ## canonical 実例（LLM → TOOL → MEMORIZE）
 

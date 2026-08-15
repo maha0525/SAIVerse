@@ -513,6 +513,15 @@ class ContextRequirements(BaseModel):
     )
 
 
+# State keys starting with "_" are the runtime's system namespace (_messages,
+# _pulse_context, _spell_enabled, _cancellation_token, ...). Playbook-declared
+# names must never be able to write there — a playbook that could overwrite
+# them could alter persona identity, permissions, cancellation, or Pulse
+# boundaries (Spell/Playbook 監査 2026-07-15 P1). Every loaded playbook passes
+# through PlaybookSchema construction, so its validator is the choke point.
+RESERVED_STATE_PREFIX = "_"
+
+
 class PlaybookSchema(BaseModel):
     name: str = Field(..., pattern=r"^[a-z0-9_]+$")
     display_name: Optional[str] = Field(default=None, description="Human-readable display name for UI. Falls back to name if not set.")
@@ -572,6 +581,48 @@ class PlaybookSchema(BaseModel):
 
     def node_map(self):
         return {n.id: n for n in self.nodes}
+
+    @model_validator(mode="after")
+    def _check_reserved_state_namespace(self) -> "PlaybookSchema":
+        """Reject playbook-declared names that would write into the ``_`` namespace.
+
+        Write vectors covered (everything a playbook author can aim at state):
+
+        - ``input_schema[].name``    → merged into initial state
+        - ``output_schema[]``        → written back into the parent state
+        - ``node.id``                → default ``output_key`` when none is given
+        - ``output_key`` / ``output_keys`` / ``output_mapping`` targets
+        - SET node ``assignments`` keys
+
+        Fail-closed: a violating playbook fails to load entirely rather than
+        loading with the dangerous name ignored.
+        """
+        def _reject(name: Any, where: str) -> None:
+            if isinstance(name, str) and name.startswith(RESERVED_STATE_PREFIX):
+                raise ValueError(
+                    f"Playbook '{self.name}': {where} '{name}' writes into the "
+                    f"reserved '_' state namespace (runtime system variables). "
+                    f"Rename it without the leading underscore."
+                )
+
+        for param in self.input_schema:
+            _reject(param.name, "input_schema param")
+        for key in self.output_schema or []:
+            _reject(key, "output_schema key")
+        for node in self.nodes:
+            _reject(node.id, "node id (used as default output_key)")
+            _reject(getattr(node, "output_key", None), f"node '{node.id}' output_key")
+            for entry in getattr(node, "output_keys", None) or []:
+                if isinstance(entry, str):
+                    _reject(entry, f"node '{node.id}' output_keys entry")
+                elif isinstance(entry, dict):
+                    for target in entry.values():
+                        _reject(target, f"node '{node.id}' output_keys target")
+            for target in (getattr(node, "output_mapping", None) or {}).values():
+                _reject(target, f"node '{node.id}' output_mapping target")
+            for key in (getattr(node, "assignments", None) or {}).keys():
+                _reject(key, f"node '{node.id}' assignment key")
+        return self
 
     @model_validator(mode="after")
     def _check_report_to_parent_contract(self) -> "PlaybookSchema":

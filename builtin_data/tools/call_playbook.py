@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from tools.context import get_active_persona_id, get_active_manager
+from tools.context import get_active_persona_id, get_active_manager, get_auto_mode
 from tools.core import ToolSchema
 
 
@@ -64,7 +64,7 @@ def call_playbook(playbook_name: str) -> str:
         persona_obj,
         building_id,
         user_input=None,
-        auto_mode=False,
+        auto_mode=get_auto_mode(),  # 呼び出し元 Pulse の実値を継承 (auto の子は auto)
         record_history=True,
         parent_state=parent_state,
     )

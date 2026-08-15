@@ -1380,7 +1380,7 @@ def _execute_handy_tool_inline(
         try:
             # ``llm_messages=messages`` snapshot lets spells like ``run_playbook``
             # fork their sub-line from the parent LLM node's actual messages.
-            with persona_context(persona_id, persona_dir, manager_ref, playbook_name=playbook_name, auto_mode=False, event_callback=event_callback, llm_messages=messages):
+            with persona_context(persona_id, persona_dir, manager_ref, playbook_name=playbook_name, auto_mode=bool(state.get("_auto_mode", False)), event_callback=event_callback, llm_messages=messages):
                 raw_result = tool_func(**tool_args)
             result_str = str(raw_result)
             LOGGER.info("[sea][handy] Executed %s → %s", tool_name, result_str[:200])
@@ -1493,15 +1493,16 @@ async def _run_spell_tool_async(
         # Forward the active PulseContext so Track-mutating spells can enqueue
         # their effect onto deferred_track_ops (Intent A v0.14 / Intent B v0.11).
         pulse_ctx = state.get("_pulse_context")
+        auto_mode = bool(state.get("_auto_mode", False))
 
         def _run():
             # ``llm_messages=messages`` snapshot lets spells like ``run_playbook``
             # fork their sub-line from the parent LLM node's actual messages.
-            with persona_context(persona_id, persona_dir, manager_ref, playbook_name=playbook_name, auto_mode=False, event_callback=event_callback, pulse_context=pulse_ctx, llm_messages=messages):
+            with persona_context(persona_id, persona_dir, manager_ref, playbook_name=playbook_name, auto_mode=auto_mode, event_callback=event_callback, pulse_context=pulse_ctx, llm_messages=messages):
                 return tool_func(**tool_args)
 
         if inspect.iscoroutinefunction(tool_func):
-            with persona_context(persona_id, persona_dir, manager_ref, playbook_name=playbook_name, auto_mode=False, event_callback=event_callback, pulse_context=pulse_ctx, llm_messages=messages):
+            with persona_context(persona_id, persona_dir, manager_ref, playbook_name=playbook_name, auto_mode=auto_mode, event_callback=event_callback, pulse_context=pulse_ctx, llm_messages=messages):
                 raw_result = await tool_func(**tool_args)
         else:
             raw_result = await asyncio.get_event_loop().run_in_executor(None, _run)
@@ -2466,7 +2467,7 @@ async def _decide_spell_args_via_playbook(
             runtime._run_playbook,
             pb, persona, building_id,
             None,  # user_input — decider reads spell_name via initial_params
-            False,  # auto_mode
+            bool(outer_state.get("_auto_mode", False)),  # auto_mode — 親 Pulse の実値を継承
             record_history=True,
             parent_state=decider_parent_state,
             event_callback=event_callback,
@@ -2879,9 +2880,10 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
 
         # ── Realtime spells: auto-execute bound spells and inject into realtime context ──
         # Configured per-persona and per-building via realtime_spell_binding table.
-        # Runs at most once per Pulse (gated by _realtime_spells_executed).
-        # Results are appended to the existing __realtime_context__ message in _messages.
-        if not state.get("_realtime_spells_executed"):
+        # Runs at most once per Pulse (gated by _realtime_spells_executed), and only
+        # when the persona's spell system is enabled — SPELL_ENABLED=false must stop
+        # this auto-execution path too, not just LLM-invoked spells (Spell 監査 P1).
+        if state.get("_spell_enabled") and not state.get("_realtime_spells_executed"):
             state["_realtime_spells_executed"] = True
             try:
                 await _execute_realtime_spells(
@@ -4108,6 +4110,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
         with persona_context(
             persona_id, persona_dir, manager_ref,
             playbook_name=playbook.name,
+            auto_mode=bool(state.get("_auto_mode", False)),
         ):
             return await node(state)
 

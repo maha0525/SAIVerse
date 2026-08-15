@@ -304,7 +304,12 @@ class SEARuntime:
         try:
             result = self._run_playbook(
                 playbook, persona, building_id, user_input,
-                auto_mode=False, record_history=True, event_callback=event_callback,
+                # auto_mode = 「応答ループにユーザーが居ない Pulse か」。run_meta_user は
+                # user / schedule / auto の共通入口なので pulse_type から導出する。
+                # None は PulseController を経ない直接呼び出し (レガシー) のみで、
+                # 確認ダイアログを黙って自動承認しない側 (=user 扱い) に倒す。
+                auto_mode=(pulse_type not in (None, "user")),
+                record_history=True, event_callback=event_callback,
                 cancellation_token=cancellation_token, pulse_type=pulse_type,
                 initial_params=effective_args if effective_args else None,
                 pulse_line_role=_root_role,
@@ -1158,6 +1163,14 @@ class SEARuntime:
                 event_callback({"type": "status", "content": f"{playbook.name} / {node_id}", "playbook": playbook.name, "node": node_id})
             trace_parts = []
             for key, value_template in assignments.items():
+                if key.startswith("_"):
+                    # system namespace (_messages / _pulse_context 等) への代入は
+                    # ロード時 validator が弾くが、値が効くのはここなので二重に防ぐ。
+                    LOGGER.warning(
+                        "[sea][set] Skipping reserved-namespace assignment '%s' in playbook '%s'",
+                        key, playbook.name,
+                    )
+                    continue
                 resolved_value = self._resolve_set_value(value_template, state)
                 state[key] = resolved_value
                 LOGGER.debug("[sea][set] %s = %s", key, resolved_value)

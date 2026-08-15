@@ -11,6 +11,67 @@ from sea.playbook_models import PlaybookSchema
 
 LOGGER = logging.getLogger(__name__)
 
+
+def _validate_input_param(playbook_name: str, param: Any, value: Any) -> Any:
+    """Validate/coerce one provided input value against its InputParam declaration.
+
+    Spell 監査 P2 (入力 contract の実行時検証) の消し込み。Playbook の入力には
+    tool 引数と違って下流の検証が存在しないため、ここが契約の唯一の検査点になる。
+    クオートされた数値/真偽値 (``"2"`` / ``"true"``) は宣言型へ正規化し、変換
+    できない値と enum 外の値は暗黙値で走らせず正直に失敗させる。
+
+    param_type が number / boolean / enum 以外 (string / object / 未知) は素通し。
+    enum_source (動的 enum) は実行時に集合を取れないため検査しない。
+    """
+    param_name = getattr(param, "name", "?")
+    ptype = getattr(param, "param_type", "string") or "string"
+
+    def _fail(reason: str) -> LLMError:
+        return LLMError(
+            f"Playbook '{playbook_name}' input '{param_name}': {reason} (got {value!r})",
+            user_message=(
+                f"プレイブック '{playbook_name}' の入力 '{param_name}' が"
+                f"契約に合いません: {reason}"
+            ),
+        )
+
+    if ptype == "number":
+        if isinstance(value, bool):
+            raise _fail("expected a number, got a boolean")
+        if isinstance(value, (int, float)):
+            return value
+        if isinstance(value, str):
+            stripped = value.strip()
+            try:
+                return int(stripped)
+            except ValueError:
+                pass
+            try:
+                return float(stripped)
+            except ValueError:
+                raise _fail("expected a number")
+        raise _fail("expected a number")
+
+    if ptype == "boolean":
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            low = value.strip().lower()
+            if low in ("true", "1", "yes"):
+                return True
+            if low in ("false", "0", "no"):
+                return False
+        raise _fail("expected a boolean")
+
+    if ptype == "enum":
+        enum_values = getattr(param, "enum_values", None)
+        if enum_values and value not in enum_values:
+            raise _fail(f"expected one of {enum_values}")
+        return value
+
+    return value
+
+
 def compile_with_langgraph(
     runtime,
     playbook: PlaybookSchema,
@@ -72,10 +133,29 @@ def compile_with_langgraph(
     for param in playbook.input_schema:
         param_name = param.name
 
+        # PlaybookSchema の validator (_check_reserved_state_namespace) がロード時に
+        # 弾くが、値が効くのはこの merge なのでここでも防御する (境界の二重化)。
+        if param_name.startswith("_"):
+            LOGGER.warning(
+                "[sea][LangGraph] Skipping reserved-namespace input param '%s' in playbook '%s'",
+                param_name, playbook.name,
+            )
+            continue
+
         if param_name in args_dict:
-            value = args_dict[param_name]
+            value = _validate_input_param(playbook.name, param, args_dict[param_name])
             LOGGER.debug("[sea][LangGraph] Resolved %s from args: %s", param_name, str(value)[:120] if value else "(empty)")
         else:
+            if getattr(param, "required", False) and param.default is None:
+                # 契約上は欠落エラーだが、既存 playbook の 52/94 パラメータが
+                # 「required かつ default なしで、呼び出しは値を渡さない」形に
+                # 依存しているため、ここでの強制は warn-only に留める (2026-08-16
+                # W10 裁定 — 完全強制は playbook データの required 棚卸しが前提)。
+                LOGGER.warning(
+                    "[sea][LangGraph] Playbook '%s' required input '%s' missing; "
+                    "falling back to empty string (contract violation, warn-only)",
+                    playbook.name, param_name,
+                )
             value = param.default if param.default is not None else ""
 
         inherited_vars[param_name] = value
@@ -180,6 +260,10 @@ def compile_with_langgraph(
         "_activity_trace": activity_trace,  # Shared trace of exec/tool activities
         "_pulse_context": pulse_ctx,  # Pulse-level log context (replaces _intermediate_msgs)
         "_spell_enabled": _spell_enabled,  # Per-persona spell system toggle
+        # 「応答ループにユーザーが居ない Pulse か」。spell/tool 実行時の
+        # persona_context(auto_mode=) と確認ダイアログの自動承認・auto フィルタが
+        # 読む。auto の Pulse から生まれた子が user に戻ることはない (単調 OR)。
+        "_auto_mode": bool(auto_mode) or bool(parent.get("_auto_mode", False)),
         # ライン強制フラグ (parent から継承、Phase C-2a)。
         # サブライン子 Playbook は run_playbook で _force_lightweight_model を立てる。
         # 子の中の LLM ノードがこれを見て軽量モデルを選ぶ。
@@ -366,6 +450,14 @@ def compile_with_langgraph(
     # Write back state variables to parent_state based on output_schema
     if parent_state is not None and isinstance(final_state, dict) and playbook.output_schema:
         for key in playbook.output_schema:
+            if key.startswith("_"):
+                # 親 state の system namespace への書き戻しは許可しない
+                # (ロード時 validator と対の実行時防御)。
+                LOGGER.warning(
+                    "[sea][LangGraph] Skipping reserved-namespace output_schema key '%s' in playbook '%s'",
+                    key, playbook.name,
+                )
+                continue
             if key in final_state:
                 value = final_state[key]
                 # Use _store_structured_result to also create flattened dot-notation keys
