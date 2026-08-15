@@ -29,7 +29,9 @@ const nextConfig: NextConfig = {
             fallback: [
                 {
                     source: '/api/:path*',
-                    destination: 'http://127.0.0.1:8000/api/:path*',
+                    // 既定は本番バックエンド。隔離テスト環境 (port 18000,
+                    // docs/test_environment.md) へ向けるときだけ env で差し替える
+                    destination: `${process.env.SAIVERSE_BACKEND_ORIGIN || 'http://127.0.0.1:8000'}/api/:path*`,
                 },
             ],
         };
