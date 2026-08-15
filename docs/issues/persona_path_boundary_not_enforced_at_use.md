@@ -20,8 +20,9 @@
 ## なぜ作成時の検査では足りないか
 
 2026-08-09 に `_create_persona` と `spawn_entity_from_blueprint` へ
-`is_safe_path_component` を入れた。**これは新しく作る ID を狭めただけで、境界を
-保証していない。** 通らない経路が残る:
+`is_safe_path_component` を入れた (2026-08-16 にさらに強い文字種契約
+`is_valid_identifier` へ載せ替え — building_id_no_charset_constraint 論点 3)。
+**これは新しく作る ID を狭めただけで、境界を保証していない。** 通らない経路が残る:
 
 - 既に DB にある ID (この検査より前に作られたもの)
 - import / エクスポート復元 / DB の直接編集で入った値
