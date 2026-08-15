@@ -464,11 +464,12 @@ def _v0_3_0_dev5_building_log_import(*, session: "Session", city) -> None:
         return
     LOGGER.info(
         "[upgrade] building log import for city=%s: scanned=%d inserted=%d "
-        "skipped(already=%d, live_rows=%d, unreadable=%d)",
+        "skipped(already=%d, live_rows=%d, unreadable=%d) failed=%d",
         city.CITY_SLUG, stats.buildings_scanned, stats.messages_inserted,
         stats.buildings_skipped_already_migrated,
         stats.buildings_skipped_live_rows,
         stats.buildings_skipped_unreadable,
+        stats.buildings_failed,
     )
 
 

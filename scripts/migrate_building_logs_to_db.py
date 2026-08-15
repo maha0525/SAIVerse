@@ -71,15 +71,17 @@ def main() -> int:
 
     db = SessionLocal()
     try:
+        # commit_per_building=True: 部屋ごとに確定させる。後半の部屋で失敗しても
+        # 先に取り込めた部屋の履歴を巻き戻さない (個別復旧の入口なので、途中まで
+        # でも進んだ分は残す方が復旧しやすい)。
         stats = import_building_logs(
             db,
             saiverse_home,
             city_filter=args.city,
             building_filter=args.building_id,
             dry_run=args.dry_run,
+            commit_per_building=True,
         )
-        if not args.dry_run:
-            db.commit()
     finally:
         db.close()
 
@@ -89,6 +91,7 @@ def main() -> int:
     LOGGER.warning("buildings_skipped_unreadable  : %d", stats.buildings_skipped_unreadable)
     LOGGER.warning("buildings_skipped_migrated    : %d", stats.buildings_skipped_already_migrated)
     LOGGER.warning("buildings_skipped_live_rows   : %d", stats.buildings_skipped_live_rows)
+    LOGGER.warning("buildings_failed              : %d", stats.buildings_failed)
     LOGGER.warning("messages_seen                 : %d", stats.messages_seen)
     LOGGER.warning("messages_inserted             : %d", stats.messages_inserted)
     LOGGER.warning("messages_skipped_invalid      : %d", stats.messages_skipped_invalid)

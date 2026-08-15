@@ -677,6 +677,206 @@ class MigrateBuildingLogsTests(unittest.TestCase):
         self._make_building_log("city_a", "room1", [])
         self.assertEqual(self._scan(["room1"]), [])
 
+    # ------------------------------------------------------------------
+    # 1 行の失敗を building 全体・cursor・他の部屋に波及させない
+    # (2026-08-16 Codex レビュー F2 / F3 / F5 の回帰固定)
+    # ------------------------------------------------------------------
+
+    def _import(self, **kwargs):
+        """import_building_logs を直接呼んで stats を返す (CLI を挟まない)。"""
+        from saiverse.legacy_log_import import import_building_logs
+        db = self.SessionLocal()
+        try:
+            return import_building_logs(db, self.home_path, **kwargs)
+        finally:
+            db.close()
+
+    def test_broken_entry_skips_only_that_row(self) -> None:
+        """dict でない要素が混じっていても、その行だけ落として他は取り込む。"""
+        self._make_building_log(
+            "city_a", "room1",
+            [
+                {"role": "user", "content": "a", "seq": 1, "message_id": "room1:1",
+                 "timestamp": "2026-05-20T10:00:00", "heard_by": []},
+                "壊れた要素",
+                {"role": "user", "content": "c", "seq": 3, "message_id": "room1:3",
+                 "timestamp": "2026-05-20T10:00:02", "heard_by": []},
+            ],
+        )
+        stats = self._import(commit_per_building=True)
+        self.assertEqual(stats.messages_inserted, 2)
+        self.assertEqual(stats.messages_skipped_invalid, 1)
+        self.assertEqual(stats.buildings_failed, 0)
+        contents = [r.content for r in self._all_db_messages()]
+        self.assertEqual(contents, ["a", "c"])
+
+    def test_cursor_does_not_overshoot_when_tail_row_fails(self) -> None:
+        """末尾の行が取り込めなかったとき、cursor は DB の実末尾までしか進めない。
+
+        ファイル件数 (=3) まで進めると、この部屋の次の本物の新着 (seq=3 で
+        採番される) が既読として食われ、永久に見えなくなる。
+        """
+        from database.models import PersonaPulseCursor
+        db = self.SessionLocal()
+        try:
+            db.add(PersonaPulseCursor(
+                PERSONA_ID="p1", BUILDING_ID="room1", CURSOR_SEQ=0, ENTRY_MARKER_SEQ=0,
+            ))
+            db.commit()
+        finally:
+            db.close()
+
+        self._make_building_log(
+            "city_a", "room1",
+            [
+                {"role": "user", "content": "a", "seq": 1, "message_id": "room1:1",
+                 "timestamp": "2026-05-20T10:00:00", "heard_by": []},
+                {"role": "user", "content": "b", "seq": 2, "message_id": "room1:2",
+                 "timestamp": "2026-05-20T10:00:01", "heard_by": []},
+                "壊れた末尾",
+            ],
+        )
+        self._run_main([])
+
+        rows = self._all_db_messages()
+        self.assertEqual([r.seq for r in rows], [1, 2])
+        db = self.SessionLocal()
+        try:
+            cursor = db.query(PersonaPulseCursor).filter_by(
+                PERSONA_ID="p1", BUILDING_ID="room1"
+            ).one()
+            self.assertEqual(cursor.CURSOR_SEQ, 2)
+            self.assertEqual(cursor.ENTRY_MARKER_SEQ, 2)
+        finally:
+            db.close()
+
+    def test_failing_building_does_not_roll_back_earlier_buildings(self) -> None:
+        """後半の部屋が丸ごと失敗しても、先に取り込めた部屋は確定したまま残る。"""
+        from saiverse.legacy_log_import import migrate_building
+
+        self._make_building_log(
+            "city_a", "room_a",
+            [{"role": "user", "content": "keep me", "seq": 1, "message_id": "room_a:1",
+              "timestamp": "2026-05-20T10:00:00", "heard_by": []}],
+        )
+        self._make_building_log(
+            "city_a", "room_b",
+            [{"role": "user", "content": "boom", "seq": 1, "message_id": "room_b:1",
+              "timestamp": "2026-05-20T10:00:01", "heard_by": []}],
+        )
+
+        def _boom_on_room_b(db, building_id, messages, stats, **kwargs):
+            if building_id == "room_b":
+                raise RuntimeError("simulated building-level failure")
+            return migrate_building(db, building_id, messages, stats, **kwargs)
+
+        with patch(
+            "saiverse.legacy_log_import.migrate_building", side_effect=_boom_on_room_b
+        ):
+            stats = self._import(commit_per_building=True)
+
+        self.assertEqual(stats.buildings_failed, 1)
+        rows = self._all_db_messages()
+        self.assertEqual([r.content for r in rows], ["keep me"])
+
+    def test_commit_boundary_is_per_building_only_for_cli(self) -> None:
+        """CLI 経路 (commit_per_building=True) は部屋ごとに確定し、アップグレード
+        経路 (既定) は 1 度も commit しない。
+
+        SQLite は最外周の SAVEPOINT を RELEASE した時点で確定してしまうため、
+        「データが残っているか」では境界を区別できない (2026-08-16 実測)。
+        commit の呼び出しそのものを数えて境界を固定する。
+        """
+        from saiverse.legacy_log_import import import_building_logs
+
+        for bid in ("room_a", "room_b"):
+            self._make_building_log(
+                "city_a", bid,
+                [{"role": "user", "content": bid, "seq": 1, "message_id": f"{bid}:1",
+                  "timestamp": "2026-05-20T10:00:00", "heard_by": []}],
+            )
+
+        def _count_commits(**kwargs) -> int:
+            db = self.SessionLocal()
+            calls = []
+            real_commit = db.commit
+            db.commit = lambda: (calls.append(1), real_commit())[1]
+            try:
+                import_building_logs(db, self.home_path, **kwargs)
+            finally:
+                db.close()
+            return len(calls)
+
+        # 部屋 2 つ + AddonMessageMetadata 付け替え後の 1 回
+        self.assertEqual(_count_commits(commit_per_building=True), 3)
+        # アップグレード経路は境界を持たない (framework のエンティティ単位 commit に相乗り)
+        self.assertEqual(_count_commits(), 0)
+        # dry-run は commit_per_building=True でも書かない
+        self.assertEqual(_count_commits(commit_per_building=True, dry_run=True), 0)
+
+    def test_import_recognizes_rows_with_only_legacy_message_id(self) -> None:
+        """legacy_seq が NULL でも legacy_message_id があれば取り込み済みと判定する
+        (元ファイルに seq が無い行だけの部屋を「通常経路の行あり」と誤らない)。"""
+        db = self.SessionLocal()
+        try:
+            db.add(BuildingMessage(
+                building_id="room1", seq=1, role="user", content="imported earlier",
+                timestamp="2026-05-01T10:00:00", heard_by="[]", ingested_by="[]",
+                message_id="room1:1", legacy_seq=None, legacy_message_id="old-uuid",
+            ))
+            db.commit()
+        finally:
+            db.close()
+        self._make_building_log(
+            "city_a", "room1",
+            [{"role": "user", "content": "imported earlier", "message_id": "old-uuid",
+              "timestamp": "2026-05-01T10:00:00", "heard_by": []}],
+        )
+        stats = self._import(commit_per_building=True)
+        self.assertEqual(stats.buildings_skipped_already_migrated, 1)
+        self.assertEqual(stats.buildings_skipped_live_rows, 0)
+
+    def test_scan_survives_undecodable_file(self) -> None:
+        """UTF-8 として読めないファイルでも例外にせず unreadable として報告する。"""
+        b_dir = self.home_path / "cities" / "city_a" / "buildings" / "room1"
+        b_dir.mkdir(parents=True, exist_ok=True)
+        (b_dir / "log.json").write_bytes(b"\xff\xfe\x00broken bytes")
+        deficits = self._scan(["room1"])
+        self.assertEqual(len(deficits), 1)
+        self.assertEqual(deficits[0]["kind"], "unreadable")
+
+    def test_scan_isolates_failure_to_one_building(self) -> None:
+        """1 部屋の検算が例外で倒れても、他の部屋の検算は続き、倒れた部屋は
+        check_failed として結果に残る (黙って 0 件を返すと「漏れ無し」と
+        区別がつかない)。"""
+        from saiverse import legacy_log_import as mod
+
+        self._make_building_log(
+            "city_a", "room_bad",
+            [{"role": "user", "content": "x", "seq": 1, "message_id": "room_bad:1",
+              "timestamp": "2026-05-20T10:00:00", "heard_by": []}],
+        )
+        self._make_building_log(
+            "city_a", "room_ok",
+            [{"role": "user", "content": "y", "seq": 1, "message_id": "room_ok:1",
+              "timestamp": "2026-05-20T10:00:01", "heard_by": []}],
+        )
+
+        real_scan_one = mod._scan_one_building
+
+        def _boom_on_bad(db, home, city, building_id):
+            if building_id == "room_bad":
+                raise RuntimeError("simulated scan failure")
+            return real_scan_one(db, home, city, building_id)
+
+        with patch.object(mod, "_scan_one_building", side_effect=_boom_on_bad):
+            deficits = self._scan(["room_bad", "room_ok"])
+
+        by_id = {d["building_id"]: d for d in deficits}
+        self.assertEqual(by_id["room_bad"]["kind"], "check_failed")
+        self.assertIn("simulated scan failure", by_id["room_bad"]["reason"])
+        self.assertEqual(by_id["room_ok"]["kind"], "not_imported")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -70,17 +70,28 @@ def main() -> int:
         return 0
 
     stats = CursorStats()
+    failed = 0
     db = SessionLocal()
     try:
+        # ペルソナごとに確定させる。1 人分の失敗で、先に移せた人の cursor まで
+        # 巻き戻さない (巻き戻すと、その人たちが過去ログを再消化しに行く)。
         for persona_dir in sorted(personas_root.iterdir()):
             if not persona_dir.is_dir():
                 continue
             if args.persona_id and persona_dir.name != args.persona_id:
                 continue
             LOGGER.info("→ %s", persona_dir.name)
-            migrate_persona_cursors(db, persona_dir, stats, dry_run=args.dry_run)
-        if not args.dry_run:
-            db.commit()
+            try:
+                migrate_persona_cursors(db, persona_dir, stats, dry_run=args.dry_run)
+                if not args.dry_run:
+                    db.commit()
+            except Exception:
+                LOGGER.error(
+                    "  %s: cursor 移管に失敗 — このペルソナだけ巻き戻して続行",
+                    persona_dir.name, exc_info=True,
+                )
+                db.rollback()
+                failed += 1
     finally:
         db.close()
 
@@ -89,6 +100,7 @@ def main() -> int:
     LOGGER.warning("personas_scanned        : %d", stats.personas_scanned)
     LOGGER.warning("personas_processed      : %d", stats.personas_processed)
     LOGGER.warning("personas_skipped_missing: %d", stats.personas_skipped_missing)
+    LOGGER.warning("personas_failed         : %d", failed)
     LOGGER.warning("cursors_inserted        : %d", stats.cursors_inserted)
     LOGGER.warning("cursors_updated         : %d", stats.cursors_updated)
     LOGGER.warning("cursors_zero_fallback   : %d", stats.cursors_zero_fallback)

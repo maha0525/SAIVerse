@@ -221,15 +221,36 @@ class InitializationMixin:
                 )
             finally:
                 db.close()
-        except Exception:
+        except Exception as e:
+            # 検算そのものが倒れたことを黙って飲まない。ここで return するだけだと
+            # 「漏れが無かった」と見分けがつかず、沈黙が正常の顔をしてしまう。
             LOGGER.warning("legacy building log check failed", exc_info=True)
+            self.startup_alerts.append({
+                "id": "legacy_log_check_failed",
+                "level": "warning",
+                "title": "過去ログの取り込み状況を確認できませんでした",
+                "message": (
+                    "旧形式の履歴ファイルとデータベースの突き合わせ（毎起動の確認）"
+                    f"に失敗しました（{type(e).__name__}: {e}）。取り込み漏れが"
+                    "あっても検出できていない可能性があります。"
+                ),
+                "details": {"error": f"{type(e).__name__}: {e}"},
+            })
             return
 
         for d in deficits:
             b_id = d["building_id"]
             b = self.building_map.get(b_id) if hasattr(self, "building_map") else None
             display = getattr(b, "name", None) or b_id
-            if d["kind"] == "unreadable":
+            if d["kind"] == "check_failed":
+                level = "warning"
+                body = (
+                    f"部屋「{display}」について、過去の会話履歴が新しい保存先"
+                    "（データベース）に取り込まれているかを確認できませんでした"
+                    f"（{d['reason']}）。この部屋だけ確認できていないため、"
+                    "取り込み漏れがあっても気づけません。"
+                )
+            elif d["kind"] == "unreadable":
                 level = "warning"
                 body = (
                     f"部屋「{display}」の旧形式の履歴ファイルが壊れていて読めません"

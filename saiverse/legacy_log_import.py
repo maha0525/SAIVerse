@@ -24,7 +24,10 @@ Building のチャットログは Phase 2+3 (2026-05-20, ec9eba70) で
   (2026-08-16 テスタロッサの部屋の取り込み漏れの根因)。
 - **黙って諦めない。** 取り込めなかった部屋は戻り値の stats / 検算結果に必ず
   現れ、呼び出し側がアラートにする。
-- **この関数群は commit しない。** トランザクション境界は呼び出し側が持つ
+- **巻き戻せる単位は部屋ひとつ。** 1 部屋の失敗が他の部屋を道連れにしない
+  (部屋ごとに SAVEPOINT を張る)。CLI 経路だけは ``commit_per_building=True`` で
+  部屋ごとに確定させ、後半の失敗で前半まで巻き戻らないようにする。
+- **既定では commit しない。** トランザクション境界は呼び出し側が持つ
   (アップグレード経路ではエンティティ単位の commit に相乗りする)。
 """
 from __future__ import annotations
@@ -35,7 +38,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 
-from sqlalchemy import func
+from sqlalchemy import func, or_
 
 from database.models import AddonMessageMetadata, BuildingMessage, PersonaPulseCursor
 from database.building_messages import serialize_building_message
@@ -53,6 +56,7 @@ class MigrationStats:
     buildings_skipped_unreadable: int = 0
     buildings_skipped_already_migrated: int = 0
     buildings_skipped_live_rows: int = 0
+    buildings_failed: int = 0
     messages_seen: int = 0
     messages_inserted: int = 0
     messages_skipped_invalid: int = 0
@@ -61,6 +65,31 @@ class MigrationStats:
     addon_metadata_skipped_conflict: int = 0
     # (building_id, legacy_message_id) -> new message_id ; 重複時は最初に出会った方
     legacy_message_id_map: Dict[Tuple[str, str], str] = field(default_factory=dict)
+
+
+def imported_row_filter():
+    """「この行は過去ログ取り込みで作られた」を判定する SQL 条件。
+
+    取り込みは元ファイルの seq / message_id を ``legacy_seq`` / ``legacy_message_id``
+    へ退避する。通常の書き込み経路 (``database.building_messages`` の
+    ``insert_building_message``) はこの 2 列を NULL のまま入れるため、どちらかが
+    埋まっていれば取り込み由来と判定できる。
+
+    冪等判定 (:func:`migrate_building`) と検算 (:func:`scan_legacy_log_deficits`)
+    の両方がこの 1 つの定義を使う — 2 箇所に別々の条件を書くと必ずずれるため。
+
+    **精度の限界**: 元ファイルの行が seq も message_id も持たない場合 (旧形式の
+    移動イベント等) は取り込んでも痕跡が残らず、この判定から漏れる。全行が
+    その形の部屋が本番データに 3 つある (2026-08-16 実測)。漏れたときの影響は
+    「取り込み済みの部屋を『通常経路の行あり』と誤ラベルする」だけで、行が 1 つ
+    でもある部屋は :func:`migrate_building` が必ず skip するため、二重取り込みに
+    はならない。正確に判定するには取り込み印の列を足す必要があり、実害が
+    ラベルだけなので見送っている。
+    """
+    return or_(
+        BuildingMessage.legacy_seq.isnot(None),
+        BuildingMessage.legacy_message_id.isnot(None),
+    )
 
 
 def find_log_files(
@@ -96,8 +125,12 @@ def find_log_files(
 def load_log(log_path: Path) -> Tuple[Optional[List[dict]], Optional[str]]:
     """log.json を読む。戻り値は (messages, 読めない理由)。
 
-    読めない理由 (str) が返るのは 0 バイト / JSON 破損 / 構造異常 のときで、
-    その場合 messages は None。
+    読めない理由 (str) が返るのは 0 バイト / 読み取り失敗 / 文字コード異常 /
+    JSON 破損 / 構造異常 のときで、その場合 messages は None。
+
+    **ファイルが原因で例外を投げない。** 呼び出し側の 1 つは毎起動の検算で、
+    そこで例外が漏れると 1 部屋の壊れたファイルが検算全体を黙らせる。読めない
+    ことは戻り値で伝え、判断は呼び出し側に渡す。
     """
     try:
         if log_path.stat().st_size == 0:
@@ -105,8 +138,14 @@ def load_log(log_path: Path) -> Tuple[Optional[List[dict]], Optional[str]]:
     except OSError as e:
         return None, f"stat 失敗 ({e})"
     try:
-        data = json.loads(log_path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as e:
+        raw = log_path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as e:
+        return None, f"UTF-8 として読めない ({e})"
+    except OSError as e:
+        return None, f"読み取り失敗 ({e})"
+    try:
+        data = json.loads(raw)
+    except (ValueError, RecursionError) as e:
         return None, f"JSON parse 失敗 ({e})"
     if not isinstance(data, list):
         return None, f"list ではない (type={type(data).__name__})"
@@ -135,10 +174,8 @@ def migrate_building(
 
     imported_count = (
         db.query(BuildingMessage)
-        .filter(
-            BuildingMessage.building_id == building_id,
-            BuildingMessage.legacy_seq.isnot(None),
-        )
+        .filter(BuildingMessage.building_id == building_id)
+        .filter(imported_row_filter())
         .count()
     )
     if imported_count > 0:
@@ -163,19 +200,26 @@ def migrate_building(
     local_inserted = 0
     local_invalid = 0
     new_seq = 0
+    # 実際に DB へ入った行の最大 seq。ファイル件数由来の new_seq とは別物で、
+    # 末尾の行が失敗すると両者はずれる (cursor 前進で使うのはこちら)。
+    max_inserted_seq = 0
     for msg in messages_list:
         new_seq += 1
         new_message_id = f"{building_id}:{new_seq}"
-        legacy_msg_id = msg.get("message_id")
-        legacy_seq_raw = msg.get("seq")
+        legacy_seq_int: Optional[int] = None
         try:
-            legacy_seq_int: Optional[int] = (
-                int(legacy_seq_raw) if legacy_seq_raw is not None else None
-            )
-        except (TypeError, ValueError):
-            legacy_seq_int = None
+            # ファイルの 1 要素が dict でないことがある (壊れた log.json)。
+            # ここの .get も行単位 try の中に置く — 外に出すと 1 行の異常で
+            # building 全体が巻き戻る。
+            legacy_msg_id = msg.get("message_id")
+            legacy_seq_raw = msg.get("seq")
+            try:
+                legacy_seq_int = (
+                    int(legacy_seq_raw) if legacy_seq_raw is not None else None
+                )
+            except (TypeError, ValueError):
+                legacy_seq_int = None
 
-        try:
             # serialize_building_message は metadata.event を構造化分離してくれる。
             # 新 seq / 新 message_id で上書きする。serialize も行単位 try の中 —
             # 1 行の異常データで building 全体を落とさない。
@@ -195,12 +239,14 @@ def migrate_building(
 
             if dry_run:
                 local_inserted += 1
+                max_inserted_seq = new_seq
                 continue
             # SAVEPOINT で行単位に隔離: 失敗行だけ巻き戻し、外側の
             # トランザクション (呼び出し側所有) には影響させない。
             with db.begin_nested():
                 db.add(BuildingMessage(**record))
             local_inserted += 1
+            max_inserted_seq = new_seq
         except Exception as e:
             LOGGER.warning(
                 "  INSERT 失敗 — skip: bid=%s legacy_seq=%s (%s)",
@@ -217,27 +263,41 @@ def migrate_building(
     # ingested_by は疎らで、印だけでは防げないことを 2026-08-16 に実測)。
     # リリース版ユーザーの環境ではこの時点で cursor 行が無く no-op — 位置は
     # 後続の conscious_log 取り込みが決める。
-    if not dry_run and local_inserted > 0:
+    #
+    # 前進先は **実際に INSERT できた最大 seq** (max_inserted_seq)。ファイル
+    # 件数由来の new_seq まで進めると、末尾の行が失敗したときに cursor が DB の
+    # 実末尾を追い越し、以後の本物の新着が「既読」として食われて永久に見えなく
+    # なる (この部屋の seq は max(seq)+1 で採番されるため、追い越した分がその
+    # まま新着の seq と重なる)。
+    if not dry_run and max_inserted_seq > 0:
         cursor_rows = db.query(PersonaPulseCursor).filter_by(
             BUILDING_ID=building_id
         ).all()
         advanced = 0
         for row in cursor_rows:
-            if int(row.CURSOR_SEQ or 0) < new_seq:
-                row.CURSOR_SEQ = new_seq
+            if int(row.CURSOR_SEQ or 0) < max_inserted_seq:
+                row.CURSOR_SEQ = max_inserted_seq
                 advanced += 1
-            if int(row.ENTRY_MARKER_SEQ or 0) < new_seq:
-                row.ENTRY_MARKER_SEQ = new_seq
+            if int(row.ENTRY_MARKER_SEQ or 0) < max_inserted_seq:
+                row.ENTRY_MARKER_SEQ = max_inserted_seq
         if advanced:
             LOGGER.info(
                 "  %s: 既存 cursor %d 行を seq=%d へ前進 (取り込み分を既読扱いに)",
-                building_id, advanced, new_seq,
+                building_id, advanced, max_inserted_seq,
             )
 
     LOGGER.info(
         "  %s: 取り込み=%d / 不正/エラー=%d",
         building_id, local_inserted, local_invalid,
     )
+    if local_invalid:
+        # 起動時の検算は message_id の突き合わせで欠けを見つけるため、失敗した行が
+        # message_id を持っていればバナーに出る。持たない行はここのログだけが痕跡。
+        LOGGER.warning(
+            "  %s: %d 件が取り込めなかった (message_id を持つ行は起動時の検算が"
+            "未取込として拾う)",
+            building_id, local_invalid,
+        )
     return "imported"
 
 
@@ -359,18 +419,29 @@ def import_building_logs(
     city_filter: Optional[str] = None,
     building_filter: Optional[str] = None,
     dry_run: bool = False,
+    commit_per_building: bool = False,
 ) -> MigrationStats:
-    """対象の log.json 群を building_messages へ取り込む。commit しない。
+    """対象の log.json 群を building_messages へ取り込む。
 
     冪等: 取り込み痕跡のある building は skip。読めないファイル・通常経路の行が
     先行する building も skip するが、いずれも stats に現れ、起動時の検算
     (:func:`scan_legacy_log_deficits`) が拾ってアラートにする。
+
+    部屋ひとつを SAVEPOINT で囲うので、1 部屋の失敗は他の部屋を巻き込まない
+    (失敗した部屋は行が 1 つも残らず、検算が「未取込」として拾う)。
+
+    Args:
+        commit_per_building: True なら部屋ごとに commit して確定させる。手動 CLI
+            用 — 後半の部屋の失敗で前半の取り込みまで巻き戻らないようにする。
+            False (既定) では commit せず、境界は呼び出し側が持つ
+            (アップグレード経路はエンティティ単位の commit に相乗りする)。
     """
     log_files = find_log_files(
         saiverse_home, city_filter=city_filter, building_filter=building_filter,
     )
     LOGGER.info("対象 log.json: %d 件", len(log_files))
 
+    commit_each = commit_per_building and not dry_run
     stats = MigrationStats()
     for log_path in log_files:
         building_id = log_path.parent.name
@@ -382,14 +453,38 @@ def import_building_logs(
             LOGGER.warning("  読めないため skip (%s): %s", unreadable_reason, log_path)
             stats.buildings_skipped_unreadable += 1
             continue
-        migrate_building(db, building_id, messages, stats, dry_run=dry_run)
+        try:
+            with db.begin_nested():
+                migrate_building(db, building_id, messages, stats, dry_run=dry_run)
+        except Exception:
+            LOGGER.error(
+                "  %s: 取り込みに失敗 — この部屋だけ巻き戻して続行 "
+                "(検算が未取込として拾う)",
+                building_id, exc_info=True,
+            )
+            stats.buildings_failed += 1
+            continue
+        if commit_each:
+            db.commit()
 
     # 再実行時 (全 building が既取り込みで map が空) のために、 既存 building_messages
     # から legacy_message_id → 新 message_id を再構築する。
     if not stats.legacy_message_id_map:
         rebuild_legacy_map_from_db(db, stats)
 
-    update_addon_metadata(db, stats, dry_run=dry_run)
+    # メタデータの付け替えに失敗しても、確定済みの取り込み行は残す
+    # (メッセージ本体の方が addon メタデータより失って困る)。
+    try:
+        with db.begin_nested():
+            update_addon_metadata(db, stats, dry_run=dry_run)
+    except Exception:
+        LOGGER.error(
+            "AddonMessageMetadata の付け替えに失敗 — 取り込んだメッセージは保持",
+            exc_info=True,
+        )
+    else:
+        if commit_each:
+            db.commit()
     return stats
 
 
@@ -420,6 +515,10 @@ def scan_legacy_log_deficits(
         "not_imported"   ... 履歴があるのに DB に 1 行も無い
         "live_rows_only" ... ファイル時代の履歴が DB に無く、通常経路の行だけある
         "partial"        ... 取り込みはあるが一部のメッセージが DB に無い
+        "check_failed"   ... その部屋の検算自体が例外で完了しなかった
+
+    部屋ひとつの失敗で検算全体を黙らせない: 例外は部屋ごとに捕まえ、"check_failed"
+    として結果に載せる (黙って 0 件を返すと「漏れ無し」と区別がつかない)。
 
     精度の限界: message_id を持たないファイル行 (旧形式の host イベント等) は
     個別に突き合わせられない。DB にその部屋の行が 1 つも無いとき (= ファイルが
@@ -429,86 +528,121 @@ def scan_legacy_log_deficits(
     """
     deficits: List[dict] = []
     for building_id in building_ids:
-        log_path = (
-            saiverse_home / "cities" / city_name / "buildings" / building_id / "log.json"
-        )
-        if not log_path.exists():
-            continue  # Phase 2+3 以降に作られた部屋。旧ファイルが無いのは正常
-
-        imported_rows = (
-            db.query(BuildingMessage)
-            .filter(
-                BuildingMessage.building_id == building_id,
-                BuildingMessage.legacy_seq.isnot(None),
+        try:
+            deficit = _scan_one_building(db, saiverse_home, city_name, building_id)
+        except Exception as e:
+            # 失敗したクエリでセッションが汚れていると次の部屋も巻き添えになる。
+            try:
+                db.rollback()
+            except Exception:
+                LOGGER.debug("検算の rollback にも失敗: building=%s", building_id)
+            LOGGER.warning(
+                "検算に失敗 — この部屋だけ飛ばして続行: building=%s",
+                building_id, exc_info=True,
             )
-            .count()
-        )
-        total_rows = (
-            db.query(BuildingMessage).filter_by(building_id=building_id).count()
-        )
-
-        messages, unreadable_reason = load_log(log_path)
-        if messages is None:
-            if imported_rows == 0:
-                deficits.append({
-                    "building_id": building_id,
-                    "kind": "unreadable",
-                    "reason": unreadable_reason,
-                    "file_entries": None,
-                    "missing": None,
-                    "imported_rows": 0,
-                    "live_rows": total_rows,
-                    "path": str(log_path),
-                })
+            deficits.append({
+                "building_id": building_id,
+                "kind": "check_failed",
+                "reason": f"{type(e).__name__}: {e}",
+                "file_entries": None,
+                "missing": None,
+                "imported_rows": None,
+                "live_rows": None,
+                "path": str(
+                    saiverse_home / "cities" / city_name / "buildings"
+                    / building_id / "log.json"
+                ),
+            })
             continue
-
-        file_entries = len(messages)
-        if file_entries == 0:
-            continue
-
-        file_ids = set()
-        no_id_entries = 0
-        for m in messages:
-            mid = m.get("message_id") if isinstance(m, dict) else None
-            if isinstance(mid, str) and mid:
-                file_ids.add(mid)
-            else:
-                no_id_entries += 1
-
-        db_ids = set()
-        for mid, legacy_mid in (
-            db.query(BuildingMessage.message_id, BuildingMessage.legacy_message_id)
-            .filter_by(building_id=building_id)
-            .all()
-        ):
-            if mid:
-                db_ids.add(mid)
-            if legacy_mid:
-                db_ids.add(legacy_mid)
-
-        missing = len(file_ids - db_ids)
-        if total_rows == 0:
-            missing += no_id_entries
-        if missing == 0:
-            continue
-
-        if imported_rows == 0 and total_rows == 0:
-            kind = "not_imported"
-        elif imported_rows == 0:
-            kind = "live_rows_only"
-        else:
-            kind = "partial"
-        deficits.append({
-            "building_id": building_id,
-            "kind": kind,
-            "reason": None,
-            "file_entries": file_entries,
-            "missing": missing,
-            "imported_rows": imported_rows,
-            "live_rows": total_rows - imported_rows,
-            "path": str(log_path),
-        })
+        if deficit is not None:
+            deficits.append(deficit)
     return deficits
+
+
+def _scan_one_building(
+    db, saiverse_home: Path, city_name: str, building_id: str,
+) -> Optional[dict]:
+    """1 部屋分の突き合わせ。欠けが無ければ None。
+
+    判定の意味と精度の限界は :func:`scan_legacy_log_deficits` の docstring 参照。
+    """
+    log_path = (
+        saiverse_home / "cities" / city_name / "buildings" / building_id / "log.json"
+    )
+    if not log_path.exists():
+        return None  # Phase 2+3 以降に作られた部屋。旧ファイルが無いのは正常
+
+    imported_rows = (
+        db.query(BuildingMessage)
+        .filter(BuildingMessage.building_id == building_id)
+        .filter(imported_row_filter())
+        .count()
+    )
+    total_rows = (
+        db.query(BuildingMessage).filter_by(building_id=building_id).count()
+    )
+
+    messages, unreadable_reason = load_log(log_path)
+    if messages is None:
+        if imported_rows == 0:
+            return {
+                "building_id": building_id,
+                "kind": "unreadable",
+                "reason": unreadable_reason,
+                "file_entries": None,
+                "missing": None,
+                "imported_rows": 0,
+                "live_rows": total_rows,
+                "path": str(log_path),
+            }
+        return None
+
+    file_entries = len(messages)
+    if file_entries == 0:
+        return None
+
+    file_ids = set()
+    no_id_entries = 0
+    for m in messages:
+        mid = m.get("message_id") if isinstance(m, dict) else None
+        if isinstance(mid, str) and mid:
+            file_ids.add(mid)
+        else:
+            no_id_entries += 1
+
+    db_ids = set()
+    for mid, legacy_mid in (
+        db.query(BuildingMessage.message_id, BuildingMessage.legacy_message_id)
+        .filter_by(building_id=building_id)
+        .all()
+    ):
+        if mid:
+            db_ids.add(mid)
+        if legacy_mid:
+            db_ids.add(legacy_mid)
+
+    missing = len(file_ids - db_ids)
+    if total_rows == 0:
+        missing += no_id_entries
+    if missing == 0:
+        return None
+
+    if imported_rows == 0 and total_rows == 0:
+        kind = "not_imported"
+    elif imported_rows == 0:
+        kind = "live_rows_only"
+    else:
+        kind = "partial"
+    return {
+        "building_id": building_id,
+        "kind": kind,
+        "reason": None,
+        "file_entries": file_entries,
+        "missing": missing,
+        "imported_rows": imported_rows,
+        "live_rows": total_rows - imported_rows,
+        "path": str(log_path),
+    }
 
 
 # ---------------------------------------------------------------------------
