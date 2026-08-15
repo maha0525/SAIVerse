@@ -74,6 +74,8 @@ python scripts/migrate_to_user_data.py --dry-run   # 既存データを ~/.saive
 
 その他: `migrate_building_logs_to_db.py` / `migrate_conscious_log_to_db.py` / `migrate_memory_tags.py` / `migrate_playbooks_to_lines.py` / `migrate_tasks_db_to_unified.py` / `migrate_track_tasks_json.py`。
 
+`migrate_building_logs_to_db.py` (旧 log.json → building_messages) と `migrate_conscious_log_to_db.py` (旧 conscious_log.json → persona_pulse_cursor) は 2026-08-16 から実体が `saiverse/legacy_log_import.py` にあり、バージョンアップグレード (`0.3.0.dev5`) で自動実行される。スクリプトは個別復旧・再実行用の入口。スキップ判定は「現物のファイルが読めるか」だけで行い、`log.json.corrupted_*` マーカーの有無では判定しない。取り込み漏れは毎起動の検算が UI バナーに出す (詳細: `docs/intent/building_memory_unified.md` の「過去ログ取り込みの自動化と検算」)。
+
 ## 開発 / 運用
 
 | スクリプト | 用途 |

@@ -1,4 +1,4 @@
-"""scripts/migrate_building_logs_to_db.py の振る舞いテスト。
+"""scripts/migrate_building_logs_to_db.py + saiverse/legacy_log_import.py の振る舞いテスト。
 
 - 一時 saiverse_home + 一時 SQLite で取り込み動作を確認
 - 全件保存 (重複 seq があっても落とさない)
@@ -6,7 +6,10 @@
 - AddonMessageMetadata 一括 UPDATE
 - 冪等性 (2 回実行で重複 INSERT しない、 building 単位 skip)
 - 0 バイト / JSON 異常 / 構造異常 のスキップ
-- 隔離マーカー (log.json.corrupted_*) のスキップ
+- 隔離マーカー (log.json.corrupted_*) が残っていても現物が健全なら取り込む
+  (2026-08-16 テスタロッサの部屋の取り込み漏れの再発防止)
+- 取り込み痕跡なしで通常経路の行がある building は skip (順序保護)
+- 起動時の検算 scan_legacy_log_deficits の判定
 """
 from __future__ import annotations
 
@@ -268,7 +271,11 @@ class MigrateBuildingLogsTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertEqual(len(self._all_db_messages()), 0)
 
-    def test_quarantine_marker_skipped(self) -> None:
+    def test_corrupted_marker_does_not_block_import(self) -> None:
+        """隔離マーカー (log.json.corrupted_*) が残っていても、現物の log.json が
+        健全なら取り込む。マーカーは事故時の退避物で、修復後の現物の健全性に
+        ついて何も語らない — マーカーの有無でスキップした結果、修復済みの部屋の
+        全履歴が移行から漏れた (2026-08-16 テスタロッサの部屋)。"""
         path = self._make_building_log(
             "city_a",
             "room_q",
@@ -278,7 +285,34 @@ class MigrateBuildingLogsTests(unittest.TestCase):
         (path.parent / "log.json.corrupted_20260519_120000").write_text("rescued", encoding="utf-8")
         rc = self._run_main([])
         self.assertEqual(rc, 0)
-        self.assertEqual(len(self._all_db_messages()), 0)
+        rows = self._all_db_messages()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].content, "hi")
+
+    def test_live_rows_without_import_trace_skipped(self) -> None:
+        """取り込み痕跡 (legacy_seq) が無いのに通常経路の行がある building は、
+        過去ログを後付けすると順序が壊れるため取り込まない。"""
+        db = self.SessionLocal()
+        try:
+            db.add(BuildingMessage(
+                building_id="room_live", seq=1, role="user", content="live msg",
+                timestamp="2026-06-01T10:00:00", heard_by="[]", ingested_by="[]",
+                message_id="room_live:1",
+            ))
+            db.commit()
+        finally:
+            db.close()
+
+        self._make_building_log(
+            "city_a", "room_live",
+            [{"role": "user", "content": "old msg", "seq": 1, "message_id": "room_live:1",
+              "timestamp": "2026-05-01T10:00:00", "heard_by": []}],
+        )
+        self._run_main([])
+        rows = self._all_db_messages()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].content, "live msg")
+        self.assertIsNone(rows[0].legacy_seq)
 
     def test_messages_without_seq_still_imported_with_null_legacy_seq(self) -> None:
         """seq なしの行も全件取り込む (新規連番採番)。 legacy_seq は NULL。"""
@@ -441,6 +475,75 @@ class MigrateBuildingLogsTests(unittest.TestCase):
         rows = self._all_db_messages()
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0].content, "a")
+
+    # ------------------------------------------------------------------
+    # 起動時の検算: scan_legacy_log_deficits
+    # ------------------------------------------------------------------
+
+    def _scan(self, building_ids: list) -> list:
+        from saiverse.legacy_log_import import scan_legacy_log_deficits
+        db = self.SessionLocal()
+        try:
+            return scan_legacy_log_deficits(db, self.home_path, "city_a", building_ids)
+        finally:
+            db.close()
+
+    def test_scan_reports_not_imported_building(self) -> None:
+        self._make_building_log(
+            "city_a", "room1",
+            [{"role": "user", "content": "hi", "seq": 1, "message_id": "room1:1",
+              "timestamp": "2026-05-20T10:00:00", "heard_by": []}],
+        )
+        deficits = self._scan(["room1"])
+        self.assertEqual(len(deficits), 1)
+        self.assertEqual(deficits[0]["building_id"], "room1")
+        self.assertEqual(deficits[0]["kind"], "not_imported")
+        self.assertEqual(deficits[0]["file_entries"], 1)
+
+    def test_scan_clean_after_import(self) -> None:
+        self._make_building_log(
+            "city_a", "room1",
+            [{"role": "user", "content": "hi", "seq": 1, "message_id": "room1:1",
+              "timestamp": "2026-05-20T10:00:00", "heard_by": []}],
+        )
+        self._run_main([])
+        self.assertEqual(self._scan(["room1"]), [])
+
+    def test_scan_reports_live_rows_only(self) -> None:
+        db = self.SessionLocal()
+        try:
+            db.add(BuildingMessage(
+                building_id="room1", seq=1, role="user", content="live",
+                timestamp="2026-06-01T10:00:00", heard_by="[]", ingested_by="[]",
+                message_id="room1:1",
+            ))
+            db.commit()
+        finally:
+            db.close()
+        self._make_building_log(
+            "city_a", "room1",
+            [{"role": "user", "content": "old", "seq": 1, "message_id": "room1:1",
+              "timestamp": "2026-05-01T10:00:00", "heard_by": []}],
+        )
+        deficits = self._scan(["room1"])
+        self.assertEqual(len(deficits), 1)
+        self.assertEqual(deficits[0]["kind"], "live_rows_only")
+
+    def test_scan_reports_unreadable_file(self) -> None:
+        b_dir = self.home_path / "cities" / "city_a" / "buildings" / "room1"
+        b_dir.mkdir(parents=True, exist_ok=True)
+        (b_dir / "log.json").write_text("{broken", encoding="utf-8")
+        deficits = self._scan(["room1"])
+        self.assertEqual(len(deficits), 1)
+        self.assertEqual(deficits[0]["kind"], "unreadable")
+
+    def test_scan_silent_for_building_without_legacy_file(self) -> None:
+        """Phase 2+3 以降に作られた部屋 (log.json 無し) は検算の対象外。"""
+        self.assertEqual(self._scan(["new_room"]), [])
+
+    def test_scan_silent_for_empty_legacy_file(self) -> None:
+        self._make_building_log("city_a", "room1", [])
+        self.assertEqual(self._scan(["room1"]), [])
 
 
 if __name__ == "__main__":

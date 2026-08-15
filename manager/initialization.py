@@ -198,6 +198,79 @@ class InitializationMixin:
         See docs/intent/building_memory_unified.md
         """
         self.building_histories: Dict[str, List[Dict[str, str]]] = {}
+        self._check_legacy_building_log_import()
+
+    def _check_legacy_building_log_import(self) -> None:
+        """旧 log.json ↔ DB の取り込み状況の検算 (毎起動の常設の関所)。
+
+        旧ファイルに履歴があるのに DB に取り込み痕跡が無い部屋を探し、見つかれば
+        startup_alerts (UI バナー) に載せる。取り込み自体はバージョンアップグレード
+        (upgrade_handlers dev5) や手動スクリプトの仕事で、ここは「漏れたら解消される
+        まで毎起動アラートが出続ける」ことだけを保証する。2026-08-16 の
+        テスタロッサの部屋 (隔離マーカー残置で移行がスキップされ、2 ヶ月半誰も
+        気づかなかった) の再発防止。
+        """
+        from saiverse.legacy_log_import import scan_legacy_log_deficits
+
+        try:
+            db = self.SessionLocal()
+            try:
+                deficits = scan_legacy_log_deficits(
+                    db, self.saiverse_home, self.city_name,
+                    [b.building_id for b in self.buildings],
+                )
+            finally:
+                db.close()
+        except Exception:
+            LOGGER.warning("legacy building log check failed", exc_info=True)
+            return
+
+        for d in deficits:
+            b_id = d["building_id"]
+            b = self.building_map.get(b_id) if hasattr(self, "building_map") else None
+            display = getattr(b, "name", None) or b_id
+            if d["kind"] == "unreadable":
+                level = "warning"
+                body = (
+                    f"部屋「{display}」の旧形式の履歴ファイルが壊れていて読めません"
+                    f"（{d['reason']}）。このままでは過去の会話履歴を新しい保存先"
+                    "（データベース）に取り込めません。"
+                )
+            elif d["kind"] == "live_rows_only":
+                level = "warning"
+                body = (
+                    f"部屋「{display}」の過去の会話履歴 {d['file_entries']} 件が"
+                    "旧形式のファイルに残ったまま取り込まれていません。この部屋には"
+                    "新しい発言が既にあるため、後から自動で取り込むと順序が壊れます。"
+                    "手動での対応が必要です。"
+                )
+            elif d["kind"] == "partial":
+                level = "warning"
+                body = (
+                    f"部屋「{display}」の過去の会話履歴のうち一部だけが取り込まれて"
+                    f"います（ファイル {d['file_entries']} 件中 {d['imported_rows']} 件）。"
+                )
+            else:  # not_imported
+                level = "critical"
+                body = (
+                    f"部屋「{display}」の過去の会話履歴 {d['file_entries']} 件が"
+                    "新しい保存先（データベース）に取り込まれておらず、画面に"
+                    "表示されません。データ自体は旧形式のファイルに残っています。"
+                    "scripts/migrate_building_logs_to_db.py を "
+                    f"--building-id {b_id} 付きで実行すると取り込めます。"
+                )
+            self.startup_alerts.append({
+                "id": f"legacy_log_deficit_{b_id}",
+                "level": level,
+                "title": f"過去ログが未取込: {display}",
+                "message": body,
+                "details": d,
+            })
+        if deficits:
+            LOGGER.warning(
+                "legacy building log check: %d 部屋で取り込み漏れを検出 (%s)",
+                len(deficits), ", ".join(d["building_id"] for d in deficits),
+            )
 
     def _quarantine_building(
         self,

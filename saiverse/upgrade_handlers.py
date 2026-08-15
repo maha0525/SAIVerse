@@ -427,6 +427,61 @@ def _v0_3_0_dev4_retired_autonomy_selected_playbook(*, session: "Session", city)
 
 # 各ハンドラは to_version の昇順に書くと読みやすい（実行順は upgrade.py 側で
 # select_handlers() がソートする）。
+# ---- v0.3.0.dev5: 旧ファイル形式ログの自動取り込み ----
+
+def _v0_3_0_dev5_building_log_import(*, session: "Session", city) -> None:
+    """旧 ``cities/<slug>/buildings/<bid>/log.json`` を building_messages へ取り込む。
+
+    リリース版 (v0.2.x, log.json 時代) から上がってきた環境で、世界が動き出す前に
+    過去の部屋ログを DB へ移す。手動スクリプト前提だった移行を自動化する —
+    走らなければ全部屋の過去ログがユーザーから見えなくなるため。
+
+    冪等: 取り込み痕跡 (legacy_seq 付き行) のある部屋は skip。取り込めなかった
+    部屋は起動時の検算 (manager/initialization.py) がアラートにするので、
+    ここでは黙って続行してよい。commit は Phase 1 機構がエンティティ単位で行う。
+    """
+    from saiverse.data_paths import get_saiverse_home
+    from saiverse.legacy_log_import import import_building_logs
+
+    stats = import_building_logs(
+        session, get_saiverse_home(), city_filter=city.CITY_SLUG,
+    )
+    LOGGER.info(
+        "[upgrade] building log import for city=%s: scanned=%d inserted=%d "
+        "skipped(already=%d, live_rows=%d, unreadable=%d)",
+        city.CITY_SLUG, stats.buildings_scanned, stats.messages_inserted,
+        stats.buildings_skipped_already_migrated,
+        stats.buildings_skipped_live_rows,
+        stats.buildings_skipped_unreadable,
+    )
+
+
+def _v0_3_0_dev5_conscious_log_cursor_import(*, session: "Session", ai: "AI") -> None:
+    """旧 ``personas/<id>/conscious_log.json`` の pulse cursor を DB へ移管する。
+
+    building log の取り込み (city ハンドラ) の後に走る前提 — run_startup_upgrade
+    は City → AI の順で実行するため、この順序は枠組みが保証する。
+
+    生きた cursor 行が既にある環境 (= DB 移行後も稼働してきた環境) では、
+    古いファイルのリマップ値で上書きしないよう何もしない。
+    """
+    from saiverse.data_paths import get_saiverse_home
+    from saiverse.legacy_log_import import CursorStats, migrate_persona_cursors
+
+    persona_dir = get_saiverse_home() / "personas" / ai.AIID
+    if not persona_dir.is_dir():
+        return
+    stats = CursorStats()
+    migrate_persona_cursors(
+        session, persona_dir, stats, dry_run=False, only_if_no_existing_rows=True,
+    )
+    LOGGER.info(
+        "[upgrade] cursor import for ai=%s: inserted=%d skipped(existing_rows=%d, missing=%d)",
+        ai.AIID, stats.cursors_inserted,
+        stats.personas_skipped_existing_rows, stats.personas_skipped_missing,
+    )
+
+
 HANDLERS: List[UpgradeHandler] = [
     UpgradeHandler(
         name="city_noop_v0_3_0_dev0",
@@ -537,6 +592,35 @@ HANDLERS: List[UpgradeHandler] = [
             "in persona_schedule.META_PLAYBOOK to track_user_conversation, so "
             "existing schedules don't error out after the v1 autonomy playbook "
             "retirement (P2c-3)."
+        ),
+    ),
+    UpgradeHandler(
+        name="v0_3_0_dev5_building_log_import",
+        scope="city",
+        from_version="0.3.0.dev4",
+        to_version="0.3.0.dev5",
+        run=_v0_3_0_dev5_building_log_import,
+        description=(
+            "Import legacy cities/<slug>/buildings/<bid>/log.json files into the "
+            "building_messages table. Automates the previously manual "
+            "migrate_building_logs_to_db.py so released v0.2.x users don't lose "
+            "room history when the read path switched to the DB (Phase 2+3). "
+            "Skips by current-file readability only — never by leftover "
+            "log.json.corrupted_* markers (the Testarossa room lesson)."
+        ),
+    ),
+    UpgradeHandler(
+        name="v0_3_0_dev5_conscious_log_cursor_import",
+        scope="ai",
+        from_version="0.3.0.dev4",
+        to_version="0.3.0.dev5",
+        run=_v0_3_0_dev5_conscious_log_cursor_import,
+        description=(
+            "Import legacy personas/<id>/conscious_log.json pulse cursors into "
+            "persona_pulse_cursor. Runs after the city-scope building log import "
+            "(framework runs City handlers before AI handlers), because cursor "
+            "remapping resolves through building_messages.legacy_seq. No-op when "
+            "the persona already has live cursor rows."
         ),
     ),
 ]
