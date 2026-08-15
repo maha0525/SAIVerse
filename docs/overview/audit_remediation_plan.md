@@ -115,7 +115,8 @@
 - **スコープ**: Spell 監査残 (realtime spell の SPELL_ENABLED 迂回・auto_mode 固定 / `_` 予約 namespace / 入力 contract)
 - **棚卸し (2026-08-16)**: 旧スコープの S9 (token trigger が件数 gate で拒否される) は**患部消滅で消し込み済み** — Metabolism 発火判定が [あらすじのレベル制](../intent/arasuji_levels.md) の字数三水位へ世代交代し、件数差分 gate が現行コードに存在しない (レビュー台帳 SEA 行に記録)
 - **実装済み (2026-08-16)**: ①realtime spell を `_spell_enabled` gate の内側へ + **auto_mode の正直化** (`auto_mode=True` を渡す箇所がリポジトリ全体に不在という実バグを発見 — 自律 Pulse のスペルが常に「ユーザー起動」として確認ダイアログ/auto フィルタに伝わっていた。root で pulse_type から導出し `state["_auto_mode"]` 単調 OR で運搬) / ②`_` 予約 namespace を PlaybookSchema validator で fail-closed 拒否 (全ロードが通る関所) + merge 3点の実行時防御。既存 builtin 21+DB 27 は違反ゼロを事前確認 / ③入力契約 = 提供値の型正規化 + 変換不能・enum 外値の正直な失敗。**required 欠落のみ warn-only** (既存 52/94 パラメータが依存、完全強制は playbook データ棚卸しが前提 — W10 裁定)。**意図的保留**: `check_spell_permission(aspect=None)` fail-open は Track 撤廃で解体予定のゲートのため据え置き ([track_retirement](../intent/track_retirement.md) スコープへ)。回帰 = 新規 30 件。明細はレビュー台帳の Spell 行
-- **完了条件**: 柱8 リストの全消し込み ✔ (残 = まはー実機検証: SPELL_ENABLED=false のペルソナで realtime spell が走らないこと / 自律 Pulse のスペルで確認ダイアログが出ずログに reason="auto" が出ること / 通常会話・判断点の無変化)
+- **Codex レビュー 1 巡 (2026-08-16)**: 判定 No-ship — **high 1 (schedule の ask_every_time 事前承認が auto 拒否に食われる確認済み回帰) + medium 4**、全件受諾。明細と裁定は [走行メモ](../handoff/2026-08-16_w10_spell_audit_remnants_handoff.md)。**消し込みは Opus セッション** (Fable 1 巡規律)。⚠️ F1 修正まで schedule から ask_every_time Playbook を起動する自動化は停止する
+- **完了条件**: 柱8 リストの全消し込み (残 = Codex 指摘 5 件の消し込み [Opus] → まはー実機検証: SPELL_ENABLED=false のペルソナで realtime spell が走らないこと / 自律 Pulse のスペルで確認ダイアログが出ずログに reason="auto" が出ること / schedule の事前承認が生きていること / 通常会話・判断点の無変化)
 
 ### W11 ☐ §6-6b — Beat ロックの実行トークン化
 
