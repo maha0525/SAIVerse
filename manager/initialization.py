@@ -220,7 +220,13 @@ class InitializationMixin:
         from database.models import BuildingMessage
         from sqlalchemy import func as sa_func
 
-        self.startup_seq_watermark: Dict[str, int] = {}
+        # **まず登録済みの全部屋を 0 で埋める。** SELECT の結果だけで作ると、
+        # 起動時に空だった部屋が水位に載らない。そこへ起動後の最初のメッセージが
+        # 届くと、水位が無いので「現在の末尾」= そのメッセージ自身が境界になり、
+        # ユーザーが送った 1 通目が誰にも読まれない (2026-08-16 Codex 指摘)。
+        self.startup_seq_watermark: Dict[str, int] = {
+            b.building_id: 0 for b in self.buildings
+        }
         try:
             db = self.SessionLocal()
             try:
@@ -233,13 +239,25 @@ class InitializationMixin:
                     .all()
                 )
                 for b_id, max_seq in rows:
-                    self.startup_seq_watermark[b_id] = int(max_seq or 0)
+                    self.startup_seq_watermark[b_id] = max(int(max_seq or 0), 0)
             finally:
                 db.close()
         except Exception:
-            # 取れなくても起動は続ける。水位が無い部屋は _ingest_round が
-            # その場の末尾を使う (起動直後の取りこぼしの窓だけが残る)。
-            LOGGER.warning("startup seq watermark の取得に失敗", exc_info=True)
+            # 水位を測れなかった。全部屋 0 のまま進む = 記録の無いペルソナは
+            # その部屋の履歴を全部読む。読み過ぎは高くつくが、ユーザーが送った
+            # メッセージを黙って捨てるよりはよい。気づけるようアラートに出す。
+            LOGGER.warning("[legacy-log] 起動時の会話の末尾を測れませんでした", exc_info=True)
+            self.startup_alerts.append({
+                "id": "startup_seq_watermark_failed",
+                "level": "warning",
+                "title": "会話の読み進み位置の基準を作れませんでした",
+                "message": (
+                    "起動時に各部屋の会話の末尾を数えられませんでした。"
+                    "読み進み位置の記録が無いペルソナが、その部屋の会話を"
+                    "最初から読み直すことがあります（費用がかかります）。"
+                ),
+                "details": {},
+            })
         LOGGER.info(
             "[legacy-log] 起動時の会話の末尾を %d 部屋分ひかえました",
             len(self.startup_seq_watermark),

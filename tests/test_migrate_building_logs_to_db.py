@@ -767,6 +767,41 @@ class MigrateBuildingLogsTests(unittest.TestCase):
         self.assertEqual(stats.buildings_failed, 1)
         self.assertEqual(self._all_db_messages(), [])
 
+    def test_rolled_back_room_does_not_move_addon_metadata(self) -> None:
+        """巻き戻した部屋の付随データは動かさない。
+
+        行ごとの ID 対応表は Python の辞書なので、DB を巻き戻しても残る。残った
+        まま付け替えを走らせると、**存在しない行の ID** へ AddonMessageMetadata を
+        向けてしまう。メッセージ本体と付随データが分裂する。
+        """
+        db = self.SessionLocal()
+        try:
+            db.add(AddonMessageMetadata(
+                message_id="room1:old1", addon_name="voice", key="audio", value="v1",
+            ))
+            db.commit()
+        finally:
+            db.close()
+        self._make_building_log(
+            "city_a", "room1",
+            [
+                {"role": "user", "content": "a", "seq": 1, "message_id": "room1:old1",
+                 "timestamp": "2026-05-20T10:00:00", "heard_by": []},
+                "壊れた要素",
+            ],
+        )
+        self._import(commit_per_building=True)
+
+        self.assertEqual(self._all_db_messages(), [])
+        db = self.SessionLocal()
+        try:
+            rows = db.query(AddonMessageMetadata).all()
+            self.assertEqual(len(rows), 1)
+            # 旧 ID のまま。存在しない負の ID へ動かさない
+            self.assertEqual(rows[0].message_id, "room1:old1")
+        finally:
+            db.close()
+
     def test_rolled_back_room_is_reported_as_not_imported(self) -> None:
         """全件やり直しになった部屋は、検算が「未取込」として拾う (黙らない)。"""
         self._make_building_log(

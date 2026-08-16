@@ -408,9 +408,12 @@ def _ingest_round(
             last_cursor = int(watermark[building_id])
             source = "起動時の末尾"
         else:
-            # 起動後に作られた部屋。作られた時点では空なので、その場の末尾でよい。
-            last_cursor = max((_msg_seq(m) for m in hist), default=0)
-            source = "現在の末尾"
+            # 水位に載っていない = 起動後に作られた部屋。作られた時点では空なので
+            # 0 でよい (その部屋の会話は全部、この部屋ができた後のもの)。
+            # **ここで「現在の末尾」を数えてはいけない** — 数えた時点で届いていた
+            # メッセージがそのまま境界になり、誰にも読まれなくなる。
+            last_cursor = 0
+            source = "部屋の最初"
         pulse_cursors[building_id] = last_cursor
         LOGGER.info(
             "%s %s building=%s: 読んだ位置の記録が無いため、%s seq=%d から開始する "

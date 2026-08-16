@@ -258,6 +258,11 @@ def migrate_building(
 
     total = len(pending)
     local_inserted = 0
+    # 対応表はこの部屋ぶんをまず手元に作る。stats へ合流させるのは全件入り切って
+    # から — 途中で失敗すると DB 行は巻き戻るのに、Python の辞書は巻き戻らない。
+    # 残ったまま update_addon_metadata が走ると、**存在しない行の ID** へ
+    # AddonMessageMetadata を付け替えて確定する (2026-08-16 Codex 指摘)。
+    local_id_map: Dict[Tuple[str, str], str] = {}
     for index, msg in enumerate(pending):
         # ファイル順を保ったまま base の手前へ詰める (先頭が最も小さい)。
         new_seq = base - total + index
@@ -290,8 +295,8 @@ def migrate_building(
             # 1 つの旧 message_id 1 つにしか紐付かない前提と整合)
             if isinstance(legacy_msg_id, str) and legacy_msg_id:
                 map_key = (building_id, legacy_msg_id)
-                if map_key not in stats.legacy_message_id_map:
-                    stats.legacy_message_id_map[map_key] = new_message_id
+                if map_key not in local_id_map:
+                    local_id_map[map_key] = new_message_id
 
             if dry_run:
                 local_inserted += 1
@@ -307,6 +312,9 @@ def migrate_building(
                 f"(ファイル側の番号={legacy_seq_int}): {e}"
             ) from e
 
+    # ここまで来た = 全件入った。対応表を全体へ合流させてよい。
+    for key, value in local_id_map.items():
+        stats.legacy_message_id_map.setdefault(key, value)
     stats.messages_inserted += local_inserted
 
     # cursor の操作は要らない。取り込んだ行の seq は必ず 0 未満で、「どこまで

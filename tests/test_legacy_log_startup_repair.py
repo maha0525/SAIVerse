@@ -94,6 +94,50 @@ class LegacyLogStartupRepairTests(unittest.TestCase):
         mgr._check_legacy_building_log_import()
         return mgr.startup_alerts
 
+    def _watermark(self, building_ids):
+        mgr = _Manager(self.SessionLocal, self.home, self.CITY, building_ids)
+        mgr._capture_startup_seq_watermark()
+        return mgr.startup_seq_watermark
+
+    # ------------------------------------------------------------------
+    # 起動時の水位 (読んだ位置の記録が無いペルソナの既読境界)
+    # ------------------------------------------------------------------
+
+    def test_empty_room_gets_a_zero_watermark(self) -> None:
+        """行が 1 つも無い部屋も水位に載る (値は 0)。
+
+        行がある部屋だけで水位を作ると、空の部屋がここから漏れる。漏れた部屋へ
+        起動後に最初のメッセージが届くと、境界がそのメッセージ自身になり、誰にも
+        読まれない。
+        """
+        db = self.SessionLocal()
+        try:
+            db.add(BuildingMessage(
+                building_id="room_with_rows", seq=3, role="user", content="x",
+                timestamp="2026-06-01T10:00:00", heard_by="[]", ingested_by="[]",
+                message_id="room_with_rows:3",
+            ))
+            db.commit()
+        finally:
+            db.close()
+
+        watermark = self._watermark(["room_with_rows", "room_empty"])
+        self.assertEqual(watermark, {"room_with_rows": 3, "room_empty": 0})
+
+    def test_watermark_ignores_imported_negative_rows(self) -> None:
+        """取り込んだ過去ログ (0 未満) は水位を押し下げない。"""
+        db = self.SessionLocal()
+        try:
+            db.add(BuildingMessage(
+                building_id="room1", seq=-5, role="user", content="古い会話",
+                timestamp="2026-04-01T10:00:00", heard_by="[]", ingested_by="[]",
+                message_id="room1:-5",
+            ))
+            db.commit()
+        finally:
+            db.close()
+        self.assertEqual(self._watermark(["room1"]), {"room1": 0})
+
     # ------------------------------------------------------------------
 
     def test_missing_history_is_imported_at_startup_without_a_banner(self) -> None:

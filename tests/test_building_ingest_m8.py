@@ -137,7 +137,7 @@ class BuildingIngestM8Test(unittest.TestCase):
     # 正常系
     # ------------------------------------------------------------------
 
-    def test_missing_cursor_record_starts_from_current_end(self):
+    def test_missing_cursor_record_starts_from_the_startup_watermark(self):
         """読んだ位置の記録が無い部屋では、たまっている履歴を読み込まない。
 
         記録が無いのを 0 (= 1 件目から全部未読) と解釈すると、部屋の全履歴を
@@ -146,6 +146,8 @@ class BuildingIngestM8Test(unittest.TestCase):
         """
         self._insert("user", "むかしの会話1")
         m2 = self._insert("user", "むかしの会話2")
+        # 起動時、この部屋には既に 2 件あった
+        self.manager.startup_seq_watermark = {self.BID: int(m2["seq"])}
         persona = self._build_persona(pulse_cursors={})  # 記録が無い状態
 
         count = auto_ingest_building_messages(persona, self.manager)
@@ -177,6 +179,38 @@ class BuildingIngestM8Test(unittest.TestCase):
         self.assertEqual(count, 1)
         self.assertEqual(self.adapter.appended_count("起動後に届いた発言"), 1)
         self.assertEqual(self.adapter.appended_count("起動前からあった発言"), 0)
+
+    def test_first_message_into_an_empty_room_is_not_swallowed(self):
+        """起動時に空だった部屋へ届いた 1 通目は読まれる。
+
+        水位を「行がある部屋」だけで作ると、空の部屋は水位に載らない。そこへ
+        最初のメッセージが届いたとき、その場の末尾を境界にすると**そのメッセージ
+        自身が境界**になり、誰にも読まれない。空の部屋の水位は 0。
+        """
+        # 起動時、この部屋は空 → 水位は 0
+        self.manager.startup_seq_watermark = {self.BID: 0}
+        self._insert("user", "空の部屋に届いた1通目")
+
+        persona = self._build_persona(pulse_cursors={})  # 記録が無い状態
+        count = auto_ingest_building_messages(persona, self.manager)
+
+        self.assertEqual(count, 1)
+        self.assertEqual(self.adapter.appended_count("空の部屋に届いた1通目"), 1)
+
+    def test_room_created_after_startup_reads_from_the_beginning(self):
+        """起動後に作られた部屋 (水位に載っていない) は、最初から読む。
+
+        作られた時点で空なので「全部読む」= その部屋の会話だけ。ここで現在の
+        末尾を数えると、数えた時点で届いていた分が読まれなくなる。
+        """
+        self.manager.startup_seq_watermark = {}  # この部屋は起動時に存在しない
+        self._insert("user", "新しい部屋の1通目")
+
+        persona = self._build_persona(pulse_cursors={})
+        count = auto_ingest_building_messages(persona, self.manager)
+
+        self.assertEqual(count, 1)
+        self.assertEqual(self.adapter.appended_count("新しい部屋の1通目"), 1)
 
     def test_happy_path_ingests_all_and_advances_cursor(self):
         m1 = self._insert("user", "こんにちは")
