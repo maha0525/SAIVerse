@@ -36,6 +36,11 @@ DEFAULT_REGISTRY_URL = (
 ENV_REGISTRY_URL = "SAIVERSE_ADDON_REGISTRY_URL"
 ENV_REGISTRY_PUBLIC_KEY = "SAIVERSE_ADDON_REGISTRY_PUBLIC_KEY"
 ENV_ALLOW_UNSIGNED_REGISTRY = "SAIVERSE_ALLOW_UNSIGNED_ADDON_REGISTRY"
+# 公式レジストリ (maha0525/saiverse-addon-registry) の署名検証用 Ed25519 公開鍵
+# (raw 32byte の base64)。秘密鍵はメンテナがリポジトリ外で保管する。
+# ローテーション時はこの値を差し替えてリリースする。
+# セルフホスト registry を使う場合は ENV_REGISTRY_PUBLIC_KEY で上書きできる。
+DEFAULT_REGISTRY_PUBLIC_KEY = "+ZKgzmLTqd3PzF0PUPYOy6vTQM9gk5FXCVaxbiFDER4="
 _DEFAULT_TTL_SECONDS = 300  # 5 分
 _FETCH_TIMEOUT_SECONDS = 15
 SUPPORTED_SCHEMA_VERSION = 1
@@ -249,7 +254,9 @@ def _verify_registry_document(data: dict, source_url: str) -> tuple[dict, str, s
     if isinstance(signed_payload, dict) and isinstance(signature, dict):
         if signature.get("algorithm") != "ed25519":
             raise ValueError("Addon registry signature algorithm must be ed25519")
-        public_key_raw = os.getenv(ENV_REGISTRY_PUBLIC_KEY, "").strip()
+        public_key_raw = (
+            os.getenv(ENV_REGISTRY_PUBLIC_KEY, "").strip() or DEFAULT_REGISTRY_PUBLIC_KEY
+        )
         if not public_key_raw:
             raise ValueError(
                 f"Signed addon registry requires pinned {ENV_REGISTRY_PUBLIC_KEY}"

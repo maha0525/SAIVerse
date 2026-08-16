@@ -67,6 +67,8 @@ upgrade registry import失敗、handler遷移graphの穴、未来version、変�
 
 公式Addon catalogの署名検証境界は実装済みだが、公開者の秘密鍵をrepository内で生成・保有してはならない。公式registry運用側でEd25519鍵を生成し、署名済みenvelopeをpublishし、raw public keyを `SAIVERSE_ADDON_REGISTRY_PUBLIC_KEY` として配布するまで、公式catalogは意図的にfail-closedとなる。
 
+**→ 2026-08-17 完了。** Ed25519鍵を生成し (秘密鍵はrepository外でメンテナ保管、key_id=`7f840ff5961afbd1`)、`saiverse-addon-registry` に署名スクリプト (`sign_registry.py`) と署名済みenvelope形式の `registry.json` をpublishした。公開鍵は本体 `saiverse/addon_registry.py` の `DEFAULT_REGISTRY_PUBLIC_KEY` に焼き込み (エンドユーザーのenv設定は不要、`SAIVERSE_ADDON_REGISTRY_PUBLIC_KEY` はセルフホスト用の上書き口として残存)。鍵ローテーションは新鍵で署名し直して焼き込み公開鍵を差し替えたリリースを出せばよい。
+
 旧ZIP overlay updaterは、旧release manifestなしでは「退役tracked file」と「ユーザーが追加した未知file」を安全に区別できないため廃止した。非Git配布を再導入する場合は、署名済みrelease manifestとprotected rootsを持つstaging/mirror swapとして設計する。
 
 ## 自動検証
