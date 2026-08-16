@@ -78,6 +78,31 @@
     background: #d15d5d;
 }
 
+/* 取り消しの効く操作 (ファイルを脇へ移すなど)。破壊的でないことを色で分ける。 */
+.secondaryButton {
+    margin: 8px 12px 8px 0;
+    padding: 6px 14px;
+    border-radius: 4px;
+    background: transparent;
+    color: #ddd;
+    border: 1px solid rgba(255, 255, 255, 0.35);
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    white-space: nowrap;
+    align-self: center;
+}
+
+.secondaryButton:hover:not(:disabled) {
+    background: rgba(255, 255, 255, 0.1);
+    border-color: rgba(255, 255, 255, 0.6);
+}
+
+.secondaryButton:disabled {
+    opacity: 0.55;
+    cursor: default;
+}
+
 .icon {
     flex-shrink: 0;
 }

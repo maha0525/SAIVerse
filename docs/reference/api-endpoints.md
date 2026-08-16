@@ -5,7 +5,7 @@
 
 REST API 全エンドポイントの一覧（自動生成）。すべて `/api` 配下にマウントされる。
 
-**エンドポイント数**: 365（tag グループ: 25）
+**エンドポイント数**: 366（tag グループ: 25）
 
 ## addon
 
@@ -394,6 +394,7 @@ REST API 全エンドポイントの一覧（自動生成）。すべて `/api` 
 |---|---|---|
 | GET | `/api/system/alerts` | Return system-level alerts populated during startup. |
 | GET | `/api/system/announcements` | Return announcements from the configured Gist. |
+| POST | `/api/system/legacy-log/{building_id}/archive` | 読めなくなった旧形式の履歴ファイルを脇へ退避し、警告を閉じる。 |
 | GET | `/api/system/quarantine` | Return all buildings currently quarantined due to log corruption. |
 | POST | `/api/system/quarantine/{building_id}/reset` | Reset a quarantined building to empty history (fresh start). |
 | POST | `/api/system/quarantine/{building_id}/restore` | Restore a quarantined building from a chosen backup file. |

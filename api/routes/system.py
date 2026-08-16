@@ -343,6 +343,64 @@ async def reset_quarantined_building(building_id: str):
         raise HTTPException(status_code=500, detail=f"Failed to reset: {exc}")
 
 
+@router.post("/legacy-log/{building_id}/archive", response_model=_QuarantineActionResponse)
+async def archive_unreadable_legacy_log(building_id: str):
+    """読めなくなった旧形式の履歴ファイルを脇へ退避し、警告を閉じる。
+
+    毎起動の検算は ``log.json`` という名前のファイルだけを見るので、名前を変えて
+    しまえば対象から外れ、警告は次の起動から出なくなる。**確認済みのフラグは
+    持たない** — ファイルが移っていること自体が「ユーザーが認識した」の記録に
+    なる (フラグを別に持つと、いつ消すか / いつ復活させるかの規則が増える)。
+
+    退避であって削除ではない。中身は同じフォルダに ``log.json.unreadable_<日時>``
+    として残るので、後から救う手が見つかれば使える。
+
+    対象は「今この瞬間、読めないと報告されている部屋」だけ。任意のパスを動かせる
+    口にはしない。
+    """
+    manager = app_state.manager
+    if manager is None or not hasattr(manager, "startup_alerts"):
+        raise HTTPException(status_code=503, detail="Manager not ready")
+
+    alert = next(
+        (
+            a for a in manager.startup_alerts
+            if (a.get("details") or {}).get("building_id") == building_id
+            and (a.get("details") or {}).get("kind") == "unreadable"
+        ),
+        None,
+    )
+    if alert is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Building {building_id} has no unreadable legacy log alert",
+        )
+
+    log_path = Path((alert.get("details") or {}).get("path", ""))
+    if not log_path.is_file():
+        # 既に手で動かされている。警告だけ閉じる。
+        manager.startup_alerts = [a for a in manager.startup_alerts if a is not alert]
+        return {"success": True, "message": "ファイルは既にありませんでした。警告を閉じます。"}
+
+    archived = log_path.with_name(
+        f"{log_path.name}.unreadable_{time.strftime('%Y%m%d_%H%M%S')}"
+    )
+    try:
+        os.replace(log_path, archived)
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"退避に失敗しました: {exc}")
+
+    manager.startup_alerts = [a for a in manager.startup_alerts if a is not alert]
+    LOGGER.info(
+        "archived unreadable legacy log: building=%s %s -> %s",
+        building_id, log_path, archived,
+    )
+    return {
+        "success": True,
+        "message": f"脇へ移しました: {archived.name}",
+    }
+
+
 @router.post("/update")
 async def trigger_update():
     """Trigger a self-update: spawn detached updater, then shutdown."""

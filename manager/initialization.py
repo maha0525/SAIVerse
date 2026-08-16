@@ -270,9 +270,11 @@ class InitializationMixin:
             elif d["kind"] == "unreadable":
                 level = "warning"
                 body = (
-                    f"部屋「{display}」の旧形式の履歴ファイルが壊れていて読めません"
-                    f"（{d['reason']}）。このままでは過去の会話履歴を新しい保存先"
-                    "（データベース）に取り込めません。"
+                    f"部屋「{display}」の古い会話が入ったファイルが壊れていて読めません"
+                    f"（{d['reason']}）。この部屋の古い会話は自動では戻せません。"
+                    "「ファイルを脇へ移す」を押すと、そのファイルの名前を変えて"
+                    "脇によけ、この警告は出なくなります。ファイル自体は消えないので、"
+                    "後から中身を救う手が見つかれば使えます。"
                 )
             else:
                 # 自動の取り込みを試したうえで、まだ入っていないもの。
@@ -294,7 +296,7 @@ class InitializationMixin:
             })
         if deficits:
             LOGGER.warning(
-                "legacy building log check: %d 部屋で取り込み漏れが残った (%s)",
+                "[legacy-log] %d 部屋で古い会話を移しきれませんでした: %s",
                 len(deficits), ", ".join(d["building_id"] for d in deficits),
             )
 
@@ -307,7 +309,7 @@ class InitializationMixin:
         from saiverse.legacy_log_import import import_building_logs
 
         LOGGER.info(
-            "legacy building log repair: %d 部屋を取り込む (%s)",
+            "[legacy-log] %d 部屋に古い会話が残っているので、いま移します: %s",
             len(building_ids), ", ".join(building_ids),
         )
         for b_id in building_ids:
@@ -319,13 +321,11 @@ class InitializationMixin:
                 )
             except Exception:
                 LOGGER.error(
-                    "legacy building log repair failed: building=%s",
-                    b_id, exc_info=True,
+                    "[legacy-log] %s: 古い会話を移せませんでした", b_id, exc_info=True,
                 )
                 continue
             LOGGER.info(
-                "legacy building log repair: building=%s 取り込み=%d 失敗=%d",
-                b_id, stats.messages_inserted, stats.buildings_failed,
+                "[legacy-log] %s: 古い会話 %d 件を移しました", b_id, stats.messages_inserted,
             )
 
     def _quarantine_building(

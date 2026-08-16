@@ -218,8 +218,8 @@ def migrate_building(
 
     if not pending:
         LOGGER.info(
-            "  %s: 入れるものが無い (DB %d 行 / ファイル %d 件) — skip",
-            building_id, total_rows, len(messages_list),
+            "  %s: 古いファイルの %d 件はすべて移し終わっているので、何もしません",
+            building_id, len(messages_list),
         )
         stats.buildings_skipped_already_migrated += 1
         return "already"
@@ -281,7 +281,7 @@ def migrate_building(
             local_inserted += 1
         except Exception as e:
             LOGGER.warning(
-                "  INSERT 失敗 — skip: bid=%s legacy_seq=%s (%s)",
+                "  %s: 古い会話 1 件を移せませんでした (ファイル側の番号=%s): %s",
                 building_id, legacy_seq_int, e,
             )
             local_invalid += 1
@@ -292,15 +292,15 @@ def migrate_building(
     # cursor の操作は要らない。取り込んだ行の seq は必ず 0 未満で、「どこまで
     # 読んだか」は 0 以上なので、負の seq は常に既読側に入る。
     LOGGER.info(
-        "  %s: 取り込み=%d / 不正・エラー=%d (seq %d 〜 %d)",
-        building_id, local_inserted, local_invalid, base - total, base - 1,
+        "  %s: 古い会話 %d 件を移しました (会話の並びでは %d 番から %d 番、"
+        "いま話している分より前に入ります)",
+        building_id, local_inserted, base - total, base - 1,
     )
     if local_invalid:
         # 起動時の検算は message_id の突き合わせで欠けを見つけるため、失敗した行が
         # message_id を持っていればバナーに出る。持たない行はここのログだけが痕跡。
         LOGGER.warning(
-            "  %s: %d 件が取り込めなかった (message_id を持つ行は起動時の検算が"
-            "未取込として拾う)",
+            "  %s: %d 件は移せませんでした。会話そのものは古いファイルに残っています",
             building_id, local_invalid,
         )
     return "imported"
@@ -455,7 +455,10 @@ def import_building_logs(
 
         messages, unreadable_reason = load_log(log_path)
         if messages is None:
-            LOGGER.warning("  読めないため skip (%s): %s", unreadable_reason, log_path)
+            LOGGER.warning(
+                "  %s: 古いファイルが読めません (%s): %s",
+                building_id, unreadable_reason, log_path,
+            )
             stats.buildings_skipped_unreadable += 1
             continue
         try:
@@ -463,8 +466,8 @@ def import_building_logs(
                 migrate_building(db, building_id, messages, stats, dry_run=dry_run)
         except Exception:
             LOGGER.error(
-                "  %s: 取り込みに失敗 — この部屋だけ巻き戻して続行 "
-                "(検算が未取込として拾う)",
+                "  %s: この部屋の古い会話を移せませんでした。"
+                "この部屋の分だけ元に戻して、他の部屋は続けます",
                 building_id, exc_info=True,
             )
             stats.buildings_failed += 1
@@ -542,7 +545,8 @@ def scan_legacy_log_deficits(
             except Exception:
                 LOGGER.debug("検算の rollback にも失敗: building=%s", building_id)
             LOGGER.warning(
-                "検算に失敗 — この部屋だけ飛ばして続行: building=%s",
+                "%s: 古い会話が移し終わっているかを確認できませんでした。"
+                "この部屋だけ飛ばして、他の部屋は確認します",
                 building_id, exc_info=True,
             )
             deficits.append({
