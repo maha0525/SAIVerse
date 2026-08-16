@@ -69,6 +69,16 @@ F1〜F4 は下記 §8 の消し込みループで全て解消 (F1+F4 は世代 I
 - 発端はまはーの「Hermes Agent が直接 OpenAI の認証ページを呼んでいた」という観察 (2026-08-16)。Hermes (NousResearch) の実装読解でデバイスコード方式と判明し、同日着手。読解の副産物 (curl_cffi 過剰装備の可能性・複数ログイン共存の傍証) は intent §6 に記録済み。
 - Hermes のクローンは `C:\Users\shuhe\AppData\Local\Temp\hermes-agent` に残してある (参照用・一時領域なので消えても再クローン可)。
 
+## 7.5 実機初回の欠陥と修正 (2026-08-16、まはー実機ログイン一発目)
+
+**症状**: ログインモーダルでコードを表示した直後、「ログイン確認の応答が JSON ではありませんでした」で失敗。ブラウザ認証を始める前の段階で毎回。
+
+**根因 (生応答で確定、推測なし)**: 認証まわりの HTTP に curl_cffi (Chrome の TLS 指紋を偽装) を使っていた。auth.openai.com は TLS 指紋がブラウザに見えるクライアントに、API の JSON でなく**人間向け HTML ログインページ (200 text/html)** を返す。そのためポーリングが JSON パースで落ちた。同じリクエストを素の httpx で投げると正しい `403 deviceauth_authorization_pending` が返る (probe で両方を並べて確認)。
+
+**修正**: 認証ホスト (auth.openai.com) の全通信を素の httpx へ (usercode / poll / token 交換 / refresh 再発行)。curl_cffi の偽装は推論ホスト (chatgpt.com) だけに残す。加えて、JSON パース失敗時に status + content-type + body 先頭を WARNING で残す診断ログを追加 (この欠陥がログに見えず probe を要したため)。修正後のコード経路で usercode(httpx→JSON) と poll(httpx→403 pending 正常処理) を実機確認済み。**トークン交換の一手だけはブラウザ完了が要るため未確認 = まはーの再ログインが最終確認** (同じ httpx セッション・同じ認証ホストなので同原理で直っているはず)。
+
+教訓 (memory 化候補): 「Hermes は認証ホストに素のクライアントを使う」と読解時に見えていた分岐を、実装で認証側まで curl_cffi に巻き込んで踏んだ。intent §6 に「curl_cffi は過剰装備かも」とメモしながら地雷を踏んだ = 読んだ知識を配置に落とせていなかった。
+
 ## 8. 消し込みループの経緯 (2〜8 巡目、同日夜)
 
 各巡の指摘は全件コード照合で裏取りしてから対応を決めた。誇張・空振りは 8 巡を通じてゼロ。

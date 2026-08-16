@@ -25,6 +25,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
+import httpx
 from curl_cffi import requests as cffi_requests
 from filelock import FileLock, Timeout as FileLockTimeout
 
@@ -593,11 +594,14 @@ class OpenAICodexClient(LLMClient):
             ) from exc
 
     def _request_refresh(self, refresh_token: str) -> Dict[str, Any]:
-        """POST to https://auth.openai.com/oauth/token with refresh_token grant."""
-        # Use a short-lived session that mirrors Codex CLI's headers but
-        # without the chatgpt.com cookie jar from `self._session`.
-        session = cffi_requests.Session(impersonate=CODEX_IMPERSONATE)
-        try:
+        """POST to https://auth.openai.com/oauth/token with refresh_token grant.
+
+        Plain httpx, NOT curl_cffi: the auth host serves the browser HTML page
+        to TLS-impersonating clients instead of the JSON token response (same
+        trap the device-code poll hit). Only the chatgpt.com inference host
+        needs the Chrome impersonation.
+        """
+        with httpx.Client(timeout=30.0, follow_redirects=False) as session:
             payload = {
                 "client_id": CODEX_OAUTH_CLIENT_ID,
                 "grant_type": "refresh_token",
@@ -611,12 +615,9 @@ class OpenAICodexClient(LLMClient):
                     "User-Agent": _build_user_agent(),
                 },
                 json=payload,
-                timeout=30,
             )
-            if not resp.ok:
-                err = getattr(resp, "text", None) or ""
-                if not err and hasattr(resp, "content"):
-                    err = resp.content.decode("utf-8", errors="replace")
+            if resp.status_code != 200:
+                err = resp.text or ""
                 raise RuntimeError(
                     f"refresh_token grant failed status={resp.status_code}: {err[:600]}"
                 )
@@ -624,11 +625,6 @@ class OpenAICodexClient(LLMClient):
                 return resp.json()
             except Exception as exc:  # noqa: BLE001
                 raise RuntimeError(f"refresh response was not JSON: {exc}") from exc
-        finally:
-            try:
-                session.close()
-            except Exception:
-                pass
 
     @staticmethod
     def _persist_refreshed_tokens(

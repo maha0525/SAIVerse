@@ -44,7 +44,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from curl_cffi import requests as cffi_requests
+import httpx
 from filelock import FileLock
 
 LOG = logging.getLogger("saiverse.llm_clients.openai_codex_auth")
@@ -370,7 +370,20 @@ class CodexDeviceLoginError(RuntimeError):
 
 
 def _http_session() -> Any:
-    return cffi_requests.Session(impersonate=CODEX_IMPERSONATE)
+    """Plain httpx for the auth host — deliberately NOT curl_cffi.
+
+    The device-auth endpoints on auth.openai.com serve the browser
+    verification HTML page (200 text/html) to any client whose TLS handshake
+    looks like a browser's. curl_cffi impersonates Chrome, so it gets that
+    HTML instead of the JSON API response (the deviceauth/token poll returns
+    the login page, not {"code":"deviceauth_authorization_pending"}), and
+    every poll fails to parse as JSON. Only the inference host
+    (chatgpt.com/backend-api/codex) needs the TLS impersonation to clear
+    Cloudflare; the auth host must be hit as a plain API client, exactly as
+    Codex CLI and Hermes Agent do. (Verified against the live endpoint
+    2026-08-16: curl_cffi → 200 text/html, httpx → 403 JSON pending.)
+    """
+    return httpx.Client(timeout=30.0, follow_redirects=False)
 
 
 def _auth_headers() -> Dict[str, str]:
@@ -379,6 +392,23 @@ def _auth_headers() -> Dict[str, str]:
         "originator": CODEX_ORIGINATOR,
         "User-Agent": build_user_agent(),
     }
+
+
+def _describe_response(resp: Any) -> str:
+    """status + content-type + short body preview, for diagnosing bad responses.
+
+    Never includes request credentials; the response body may echo an error
+    message but device-auth error bodies carry no secrets.
+    """
+    try:
+        ctype = resp.headers.get("content-type", "?")
+    except Exception:  # noqa: BLE001
+        ctype = "?"
+    try:
+        body = resp.text
+    except Exception:  # noqa: BLE001
+        body = "<unreadable>"
+    return f"status={resp.status_code} content-type={ctype!r} body[:200]={body[:200]!r}"
 
 
 class CodexDeviceLoginManager:
@@ -616,6 +646,7 @@ class CodexDeviceLoginManager:
         try:
             data = resp.json()
         except Exception as exc:  # noqa: BLE001
+            LOG.warning("usercode response was not JSON: %s", _describe_response(resp))
             raise CodexDeviceLoginError("デバイスコード応答が JSON ではありませんでした。") from exc
 
         user_code = data.get("user_code") or ""
@@ -739,6 +770,9 @@ class CodexDeviceLoginManager:
                     try:
                         return resp.json()
                     except Exception as exc:  # noqa: BLE001
+                        LOG.warning(
+                            "poll response was not JSON: %s", _describe_response(resp)
+                        )
                         raise CodexDeviceLoginError(
                             "ログイン確認の応答が JSON ではありませんでした。"
                         ) from exc
@@ -797,6 +831,7 @@ class CodexDeviceLoginManager:
         try:
             tokens = resp.json()
         except Exception as exc:  # noqa: BLE001
+            LOG.warning("token exchange response was not JSON: %s", _describe_response(resp))
             raise CodexDeviceLoginError("トークン交換の応答が JSON ではありませんでした。") from exc
         if not tokens.get("access_token"):
             raise CodexDeviceLoginError("トークン交換の応答に access_token がありません。")

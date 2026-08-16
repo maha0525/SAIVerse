@@ -62,9 +62,13 @@ UI ボタン → デバイスコード → ~/.saiverse/user_data/     → OpenAI
 - **lease 返却の不達で、閉じたはずのログイン試行が生き残りうる**（レビュー 3 巡目 R3-③ = start 応答の喪失・5 巡目 R5-③ = cancel の配送失敗。4 巡目 R4-② で影響を再評価のうえ族として受容、まはー裁定待ち）。フロントがサーバーへ lease を返せない経路（start 応答が届く前の接続断、cancel POST の失敗）では、閉じる操作でその試行を止められない。最悪ケースは「15 分の試行残置」に留まらない — その窓内にユーザーがブラウザ側の認証を完了すると、**モーダルを閉じて取り消したつもりのログインが成立し、トークンが永続化する**。回復は UI からのログアウト一発（logout は進行中の試行も全て、別プロセスの分まで無効化する）。発生には「localhost 上の HTTP 不達」と「その後にブラウザ認証を完了」の重なりが必要で、成立しても自分のアカウントに自分が入るだけであることから、これを塞ぐ TTL ハートビート・冪等 owner ID・cancel 再送キューの機構は複雑さが釣り合わないと判断して導入しない。
 - 既知 issue [api_state_changing_routes_have_no_origin_check](../issues/api_state_changing_routes_have_no_origin_check.md) は本ルートにも当てはまる（既存ルートと同じ姿勢で追随し、個別対策はしない）。
 
-### 観察メモ（Hermes 読解の副産物、本件のスコープ外）
+### クライアントの使い分け（実機で確定、2026-08-16）
 
-Hermes は推論本体（chatgpt.com）も TLS 偽装なしの素の httpx で通し、「Cloudflare の関門は `originator` ヘッダーの許可リストであって TLS 指紋ではない」とコメントしている。事実なら、うちの `curl_cffi` 依存は過剰装備の可能性がある——ただし彼らの主張の引き写しで未検証。動いているものを剥がす理由が生まれたとき（依存整理など）に思い出すこと。
+**認証ホスト（auth.openai.com）への通信は素の httpx を使い、curl_cffi の TLS 偽装は推論ホスト（chatgpt.com/backend-api/codex）だけに使う。** これは好みでなく必須の分岐で、実機一発目で踏んだ地雷から確定した: 認証ホストは、TLS 指紋がブラウザに見えるクライアント（curl_cffi の Chrome 偽装）に対して、API の JSON ではなく**人間向けの HTML ログインページ（200 text/html）を返す**。そのため device-code のポーリングが毎回 JSON パースで落ちた。同じリクエストを素の httpx で投げると正しい `403 {"code":"deviceauth_authorization_pending"}` が返る（生応答で確認済み）。Codex CLI も Hermes Agent も認証ホストには素のクライアントを使っている。トークン再発行 (`openai_codex.py._request_refresh`) も同じ認証ホストなので httpx。
+
+### 観察メモ（Hermes 読解の副産物、未検証・本件のスコープ外）
+
+Hermes は**推論本体**（chatgpt.com）も TLS 偽装なしの素の httpx で通し、「Cloudflare の関門は `originator` ヘッダーの許可リストであって TLS 指紋ではない」とコメントしている。事実なら、推論ホストの `curl_cffi` 依存も過剰装備の可能性がある——ただし彼らの主張の引き写しで未検証（上の認証ホストの話とは別。あちらは確定・修正済み、こちらは推論ホストの話で未確認）。動いているものを剥がす理由が生まれたとき（依存整理など）に思い出すこと。
 
 ## 7. 検証の旅路
 
