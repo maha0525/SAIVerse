@@ -103,71 +103,24 @@ SAMPLE_MESSAGES = [
 ]
 
 
-# ---- city scope: building log import ----
+# ---- city scope: 取り込みは毎起動の検算へ移した ----
 
-def test_city_handler_imports_building_logs(session: Session, home: Path) -> None:
+def test_city_handler_no_longer_imports(session: Session, home: Path) -> None:
+    """dev5 の City エッジは何もしない。
+
+    取り込みは `manager/initialization.py` の毎起動の検算が引き受けた
+    (`tests/test_legacy_log_startup_repair.py`)。ここに残すと、SQLite が
+    最外周の SAVEPOINT の RELEASE で確定するせいで、枠組みの commit より先に
+    確定してしまう。取り込みの中身の回帰は
+    `tests/test_migrate_building_logs_to_db.py` が持つ。
+    """
     city = _make_city(session, "test_city")
     _write_building_log(home, "test_city", "room1", SAMPLE_MESSAGES)
 
     _v0_3_0_dev5_building_log_import(session=session, city=city)
     session.commit()
 
-    rows = session.query(BuildingMessage).order_by(BuildingMessage.seq).all()
-    assert [r.content for r in rows] == ["hello", "hi!"]
-    # 取り込んだ過去ログは 0 未満。ファイル順のまま 0 の手前に詰まる
-    assert [r.seq for r in rows] == [-2, -1]
-    assert [r.legacy_seq for r in rows] == [10, 11]
-
-
-def test_city_handler_scopes_to_own_city(session: Session, home: Path) -> None:
-    city = _make_city(session, "city_x")
-    _write_building_log(home, "city_x", "room_x", SAMPLE_MESSAGES[:1])
-    _write_building_log(home, "city_y", "room_y", SAMPLE_MESSAGES[1:])
-
-    _v0_3_0_dev5_building_log_import(session=session, city=city)
-    session.commit()
-
-    ids = {r.building_id for r in session.query(BuildingMessage).all()}
-    assert ids == {"room_x"}
-
-
-def test_city_handler_idempotent(session: Session, home: Path) -> None:
-    city = _make_city(session, "test_city")
-    _write_building_log(home, "test_city", "room1", SAMPLE_MESSAGES)
-
-    for _ in range(2):
-        _v0_3_0_dev5_building_log_import(session=session, city=city)
-        session.commit()
-
-    assert session.query(BuildingMessage).count() == 2
-
-
-def test_city_handler_ignores_corrupted_marker(session: Session, home: Path) -> None:
-    """隔離マーカーが残っていても現物が健全なら取り込む (テスタロッサの部屋の教訓)。"""
-    city = _make_city(session, "test_city")
-    path = _write_building_log(home, "test_city", "room1", SAMPLE_MESSAGES)
-    (path.parent / "log.json.corrupted_20260426_213015").write_text("junk", encoding="utf-8")
-
-    _v0_3_0_dev5_building_log_import(session=session, city=city)
-    session.commit()
-
-    assert session.query(BuildingMessage).count() == 2
-
-
-def test_city_handler_survives_unreadable_file(session: Session, home: Path) -> None:
-    """壊れた log.json があってもハンドラは例外にせず他の部屋を取り込む
-    (起動を止めない。漏れは起動時の検算がアラートにする)。"""
-    city = _make_city(session, "test_city")
-    b_dir = home / "cities" / "test_city" / "buildings" / "broken"
-    b_dir.mkdir(parents=True)
-    (b_dir / "log.json").write_text("{broken", encoding="utf-8")
-    _write_building_log(home, "test_city", "room1", SAMPLE_MESSAGES)
-
-    _v0_3_0_dev5_building_log_import(session=session, city=city)
-    session.commit()
-
-    ids = {r.building_id for r in session.query(BuildingMessage).all()}
-    assert ids == {"room1"}
+    assert session.query(BuildingMessage).count() == 0
 
 
 # ---- ai scope: conscious_log cursor import ----
@@ -181,11 +134,12 @@ def _write_conscious_log(home: Path, persona_id: str, payload: dict) -> None:
 
 
 def test_ai_handler_imports_cursors_after_building_import(session: Session, home: Path) -> None:
-    """City ハンドラ (building log) → AI ハンドラ (cursor) の順で、seq 形式の
-    旧 cursor が legacy_seq 経由で新 seq にリマップされる。"""
-    city = _make_city(session, "test_city")
+    """取り込み済みの部屋に対して、seq 形式の旧 cursor が新 seq にリマップされる。"""
+    from saiverse.legacy_log_import import import_building_logs
+
+    _make_city(session, "test_city")
     _write_building_log(home, "test_city", "room1", SAMPLE_MESSAGES)
-    _v0_3_0_dev5_building_log_import(session=session, city=city)
+    import_building_logs(session, home, city_filter="test_city")
     session.commit()
 
     ai = _make_ai(session, "p1")
@@ -231,31 +185,6 @@ def test_ai_handler_noop_without_persona_dir(session: Session, home: Path) -> No
     _v0_3_0_dev5_conscious_log_cursor_import(session=session, ai=ai)
     session.commit()
     assert session.query(PersonaPulseCursor).count() == 0
-
-
-def test_city_handler_swallows_import_failure_and_keeps_prior_state(
-    session: Session, home: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """取り込みが例外で落ちても、ハンドラは (1) 例外を上へ返さない = 起動を
-    止めない、(2) 同一トランザクション上の前段ハンドラの未コミット変更を
-    巻き戻さない。"""
-    import saiverse.legacy_log_import as mod
-
-    city = _make_city(session, "test_city")
-    # 前段ハンドラの未コミット変更を模す
-    prior_ai = AI(AIID="prior", HOME_CITYID=1, AINAME="prior")
-    session.add(prior_ai)
-    session.flush()
-
-    def _boom(*args, **kwargs):
-        raise RuntimeError("import blew up")
-
-    monkeypatch.setattr(mod, "import_building_logs", _boom)
-
-    _v0_3_0_dev5_building_log_import(session=session, city=city)  # raise しないこと
-    session.commit()
-
-    assert session.query(AI).filter_by(AIID="prior").count() == 1
 
 
 # ---- 登録とチェーン ----
@@ -307,4 +236,5 @@ def test_city_end_to_end_stamps_version(session: Session, home: Path) -> None:
 
     session.refresh(city)
     assert city.LAST_KNOWN_VERSION == "0.3.0.dev5"
-    assert session.query(BuildingMessage).count() == 2
+    # 取り込みはこのエッジの仕事ではない (毎起動の検算が持つ)
+    assert session.query(BuildingMessage).count() == 0

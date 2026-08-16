@@ -745,8 +745,13 @@ class MigrateBuildingLogsTests(unittest.TestCase):
         finally:
             db.close()
 
-    def test_broken_entry_skips_only_that_row(self) -> None:
-        """dict でない要素が混じっていても、その行だけ落として他は取り込む。"""
+    def test_broken_entry_rolls_back_the_whole_room(self) -> None:
+        """1 行でも入らなければ、その部屋は丸ごと入らなかったことにする。
+
+        部分的に入れると 2 つの壊れ方が出る: message_id を持たない行が残ると
+        次回からその部屋が対象外になって検算も欠けを 0 と数える (黙って欠ける)。
+        残りを次回入れると採番が既存の負 seq の手前に付いてファイル順が崩れる。
+        """
         self._make_building_log(
             "city_a", "room1",
             [
@@ -758,20 +763,32 @@ class MigrateBuildingLogsTests(unittest.TestCase):
             ],
         )
         stats = self._import(commit_per_building=True)
-        self.assertEqual(stats.messages_inserted, 2)
-        self.assertEqual(stats.messages_skipped_invalid, 1)
-        self.assertEqual(stats.buildings_failed, 0)
-        contents = [r.content for r in self._all_db_messages()]
-        self.assertEqual(contents, ["a", "c"])
+        self.assertEqual(stats.messages_inserted, 0)
+        self.assertEqual(stats.buildings_failed, 1)
+        self.assertEqual(self._all_db_messages(), [])
 
-    def test_failed_row_leaves_a_gap_and_does_not_shift_others(self) -> None:
-        """途中の行が取り込めなくても、他の行の番号は詰め直さない。
-
-        詰め直すと、同じファイルを再取り込みしたときに別の番号が振られ、既に
-        個人記憶へ残した転記元の目印と食い違う。空いた番号が残るだけなら、
-        並び順にも既読判定にも影響しない。
-        """
+    def test_rolled_back_room_is_reported_as_not_imported(self) -> None:
+        """全件やり直しになった部屋は、検算が「未取込」として拾う (黙らない)。"""
         self._make_building_log(
+            "city_a", "room1",
+            [
+                {"role": "user", "content": "a", "seq": 1, "message_id": "room1:1",
+                 "timestamp": "2026-05-20T10:00:00", "heard_by": []},
+                "壊れた要素",
+            ],
+        )
+        self._import(commit_per_building=True)
+        deficits = self._scan(["room1"])
+        self.assertEqual(len(deficits), 1)
+        self.assertEqual(deficits[0]["kind"], "not_imported")
+
+    def test_retry_after_a_rollback_keeps_the_file_order(self) -> None:
+        """全件やり直しの後にファイルが直れば、ファイル順のまま入る。
+
+        部分的に入れて残りを次回入れる形だと、後から入れた分が既存の負 seq より
+        手前に付いて A,B,C が B,A,C になる。全件やり直しならそれが起きない。
+        """
+        path = self._make_building_log(
             "city_a", "room1",
             [
                 {"role": "user", "content": "a", "seq": 1, "message_id": "room1:1",
@@ -782,11 +799,22 @@ class MigrateBuildingLogsTests(unittest.TestCase):
             ],
         )
         self._run_main([])
+        self.assertEqual(self._all_db_messages(), [])
+
+        # ファイルが直った状態で再実行
+        path.write_text(json.dumps([
+            {"role": "user", "content": "a", "seq": 1, "message_id": "room1:1",
+             "timestamp": "2026-05-20T10:00:00", "heard_by": []},
+            {"role": "user", "content": "b", "seq": 2, "message_id": "room1:2",
+             "timestamp": "2026-05-20T10:00:01", "heard_by": []},
+            {"role": "user", "content": "c", "seq": 3, "message_id": "room1:3",
+             "timestamp": "2026-05-20T10:00:02", "heard_by": []},
+        ], ensure_ascii=False), encoding="utf-8")
+        self._run_main([])
 
         rows = self._all_db_messages()
-        # 3 件ぶんの席 (-3, -2, -1) を取り、真ん中が空く
-        self.assertEqual([r.seq for r in rows], [-3, -1])
-        self.assertEqual([r.content for r in rows], ["a", "c"])
+        self.assertEqual([r.content for r in rows], ["a", "b", "c"])
+        self.assertEqual([r.seq for r in rows], [-3, -2, -1])
 
     def test_failing_building_does_not_roll_back_earlier_buildings(self) -> None:
         """後半の部屋が丸ごと失敗しても、先に取り込めた部屋は確定したまま残る。"""

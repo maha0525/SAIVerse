@@ -430,46 +430,23 @@ def _v0_3_0_dev4_retired_autonomy_selected_playbook(*, session: "Session", city)
 # ---- v0.3.0.dev5: 旧ファイル形式ログの自動取り込み ----
 
 def _v0_3_0_dev5_building_log_import(*, session: "Session", city) -> None:
-    """旧 ``cities/<slug>/buildings/<bid>/log.json`` を building_messages へ取り込む。
+    """旧 log.json の取り込みは毎起動の検算が引き受けたので、ここでは何もしない。
 
-    リリース版 (v0.2.x, log.json 時代) から上がってきた環境で、世界が動き出す前に
-    過去の部屋ログを DB へ移す。手動スクリプト前提だった移行を自動化する —
-    走らなければ全部屋の過去ログがユーザーから見えなくなるため。
+    かつてはこのハンドラが取り込みを走らせていた。今は
+    ``manager/initialization.py`` の ``_check_legacy_building_log_import`` が
+    毎起動、漏れを見つけてその場で取り込む。同じ仕事を 2 箇所に置く理由が無く、
+    ここに残すと弊害の方が大きい:
 
-    冪等: 取り込み痕跡 (legacy_seq 付き行) のある部屋は skip。取り込めなかった
-    部屋は起動時の検算 (manager/initialization.py) がアラートにするので、
-    ここでは黙って続行してよい。commit は Phase 1 機構がエンティティ単位で行う。
+    - **確定の境界がずれる**: SQLite は最外周の SAVEPOINT を RELEASE した時点で
+      確定する。このハンドラの SAVEPOINT が最外周になると、取り込みは枠組みの
+      commit を待たずに確定し、後続ハンドラの失敗で巻き戻せなくなる
+      (バージョンだけ刻まれない状態と食い違う。2026-08-16 Codex 指摘)。
+    - **一度きり**: バージョンを刻んだ後は二度と走らない。漏れの再試行は
+      毎起動の検算が持つ方が確実。
+
+    エッジ自体は残す (0.3.0.dev4 → 0.3.0.dev5 の連なりを切らないため)。
     """
-    from saiverse.data_paths import get_saiverse_home
-    from saiverse.legacy_log_import import import_building_logs
-
-    try:
-        # SAVEPOINT で自分の書き込みだけを囲う。session.rollback() にすると、
-        # 同一トランザクションに載っている前段ハンドラ (dev0〜dev4) の未コミット
-        # 変更まで巻き戻した上にバージョンだけ刻まれ、前段の処理が失われる。
-        with session.begin_nested():
-            stats = import_building_logs(
-                session, get_saiverse_home(), city_filter=city.CITY_SLUG,
-            )
-    except Exception:
-        # 例外を上へ返すと起動そのものが中断される (framework は handler 失敗 =
-        # abort)。取り込みの失敗でユーザーを起動不能にはしない — この取り込み分
-        # だけ巻き戻して続行し、取り込めなかった部屋は起動時の検算
-        # (manager/initialization.py) が毎起動アラートにする。
-        LOGGER.error(
-            "[upgrade] building log import for city=%s failed — continuing; "
-            "deficits will surface via the startup reconciliation alerts",
-            city.CITY_SLUG, exc_info=True,
-        )
-        return
-    LOGGER.info(
-        "[upgrade] building log import for city=%s: scanned=%d inserted=%d "
-        "skipped(already=%d, unreadable=%d) failed=%d",
-        city.CITY_SLUG, stats.buildings_scanned, stats.messages_inserted,
-        stats.buildings_skipped_already_migrated,
-        stats.buildings_skipped_unreadable,
-        stats.buildings_failed,
-    )
+    del session, city
 
 
 def _v0_3_0_dev5_conscious_log_cursor_import(*, session: "Session", ai: "AI") -> None:
@@ -629,12 +606,11 @@ HANDLERS: List[UpgradeHandler] = [
         to_version="0.3.0.dev5",
         run=_v0_3_0_dev5_building_log_import,
         description=(
-            "Import legacy cities/<slug>/buildings/<bid>/log.json files into the "
-            "building_messages table. Automates the previously manual "
-            "migrate_building_logs_to_db.py so released v0.2.x users don't lose "
-            "room history when the read path switched to the DB (Phase 2+3). "
-            "Skips by current-file readability only — never by leftover "
-            "log.json.corrupted_* markers (the Testarossa room lesson)."
+            "No-op City edge for v0.3.0.dev5. The legacy log.json import moved to "
+            "the every-startup reconciliation in manager/initialization.py, which "
+            "retries on each boot and keeps the transaction boundary out of the "
+            "upgrade framework's SAVEPOINT (SQLite releases an outermost SAVEPOINT "
+            "as a commit)."
         ),
     ),
     UpgradeHandler(

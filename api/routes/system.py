@@ -376,7 +376,18 @@ async def archive_unreadable_legacy_log(building_id: str):
             detail=f"Building {building_id} has no unreadable legacy log alert",
         )
 
-    log_path = Path((alert.get("details") or {}).get("path", ""))
+    # alert に載っているパスは信用せず、サーバ側で組み直す。組み直したものが
+    # buildings の下にあり、名前が log.json であることまで確かめてから動かす
+    # (building_id に .. や絶対パスが混ざっていた場合に外へ出さないため)。
+    saiverse_home = getattr(manager, "saiverse_home", None)
+    city_name = getattr(manager, "city_name", None)
+    if saiverse_home is None or not city_name:
+        raise HTTPException(status_code=503, detail="Manager not ready")
+    buildings_root = (Path(saiverse_home) / "cities" / city_name / "buildings").resolve()
+    log_path = (buildings_root / building_id / "log.json").resolve()
+    if log_path.parent.parent != buildings_root or log_path.name != "log.json":
+        raise HTTPException(status_code=400, detail="Invalid building id")
+
     if not log_path.is_file():
         # 既に手で動かされている。警告だけ閉じる。
         manager.startup_alerts = [a for a in manager.startup_alerts if a is not alert]

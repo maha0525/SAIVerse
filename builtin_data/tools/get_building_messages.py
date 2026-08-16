@@ -395,19 +395,27 @@ def _ingest_round(
         # 無く、そのまま有料の推論に載る。
         #
         # 入室処理 (PersonaHistoryMixin._mark_entry) は初回訪問で既に「今ある分は
-        # 飛ばす」と判断している。記録が無いときも同じ判断に揃える — 今ある分は
-        # 読んだことにして、これから来る分だけを読む。記録が消える経路は入室を
-        # 通らないものばかり (起動時に既にその部屋にいる / 旧バージョンから上がって
-        # きて記録が移っていない / 記録の読み込みに失敗した) で、そこだけ逆の答えに
-        # なっていた。
+        # 飛ばす」と判断している。記録が無いときも同じ判断に揃える。記録が消える
+        # 経路は入室を通らないものばかり (起動時に既にその部屋にいる / 旧バージョン
+        # から上がってきて記録が移っていない / 記録の読み込みに失敗した)。
         #
-        # 失うのは「読まれなかったかもしれない過去」だけで、増えるものは無い。
-        last_cursor = max((_msg_seq(m) for m in hist), default=0)
+        # 境界は **起動時にひかえた末尾** (manager の startup_seq_watermark)。
+        # ここで今の末尾を数えると、起動してからこのペルソナが最初に喋るまでの間に
+        # ユーザーが送ったメッセージまで既読にしてしまう (2026-08-16 Codex 指摘)。
+        # 誰も書き込めない時点の水位を使えば、その窓が閉じる。
+        watermark = getattr(manager, "startup_seq_watermark", None) or {}
+        if building_id in watermark:
+            last_cursor = int(watermark[building_id])
+            source = "起動時の末尾"
+        else:
+            # 起動後に作られた部屋。作られた時点では空なので、その場の末尾でよい。
+            last_cursor = max((_msg_seq(m) for m in hist), default=0)
+            source = "現在の末尾"
         pulse_cursors[building_id] = last_cursor
         LOGGER.info(
-            "%s %s building=%s: 読んだ位置の記録が無いため、現在の末尾 seq=%d から"
-            "開始する (たまっている履歴は読み込まない)",
-            log_prefix, persona_id, building_id, last_cursor,
+            "%s %s building=%s: 読んだ位置の記録が無いため、%s seq=%d から開始する "
+            "(たまっている履歴は読み込まない)",
+            log_prefix, persona_id, building_id, source, last_cursor,
         )
     entry_limit = entry_markers.get(building_id, last_cursor)
 

@@ -199,6 +199,51 @@ class InitializationMixin:
         """
         self.building_histories: Dict[str, List[Dict[str, str]]] = {}
         self._check_legacy_building_log_import()
+        self._capture_startup_seq_watermark()
+
+    def _capture_startup_seq_watermark(self) -> None:
+        """部屋ごとの「世界が動き出す前の末尾」を記録する。
+
+        「どこまで読んだか」の記録が無いペルソナは、この値までを既読として始める
+        (`builtin_data/tools/get_building_messages.py` の `_ingest_round`)。
+
+        **なぜ Pulse のときに数えないのか**: 記録が無いペルソナが最初に喋るのは、
+        起動してからしばらく後になる。その間にユーザーが送ったメッセージは、
+        Pulse 時点の末尾に含まれてしまう。そこを境界にすると、**ユーザーが送った
+        本物のメッセージが読まれないまま既読になる**。境界は誰も書き込めない
+        時点で取らなければならない。
+
+        過去ログの取り込み (`_check_legacy_building_log_import`) の後に取る —
+        取り込んだ行の seq は 0 未満なので水位には影響しないが、順序を固定して
+        おく方が読み違えにくい。
+        """
+        from database.models import BuildingMessage
+        from sqlalchemy import func as sa_func
+
+        self.startup_seq_watermark: Dict[str, int] = {}
+        try:
+            db = self.SessionLocal()
+            try:
+                rows = (
+                    db.query(
+                        BuildingMessage.building_id,
+                        sa_func.max(BuildingMessage.seq),
+                    )
+                    .group_by(BuildingMessage.building_id)
+                    .all()
+                )
+                for b_id, max_seq in rows:
+                    self.startup_seq_watermark[b_id] = int(max_seq or 0)
+            finally:
+                db.close()
+        except Exception:
+            # 取れなくても起動は続ける。水位が無い部屋は _ingest_round が
+            # その場の末尾を使う (起動直後の取りこぼしの窓だけが残る)。
+            LOGGER.warning("startup seq watermark の取得に失敗", exc_info=True)
+        LOGGER.info(
+            "[legacy-log] 起動時の会話の末尾を %d 部屋分ひかえました",
+            len(self.startup_seq_watermark),
+        )
 
     def _check_legacy_building_log_import(self) -> None:
         """旧 log.json の取り込み漏れを毎起動で見つけ、その場で取り込む。

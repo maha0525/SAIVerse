@@ -93,7 +93,6 @@ def main() -> int:
     LOGGER.warning("buildings_failed              : %d", stats.buildings_failed)
     LOGGER.warning("messages_seen                 : %d", stats.messages_seen)
     LOGGER.warning("messages_inserted             : %d", stats.messages_inserted)
-    LOGGER.warning("messages_skipped_invalid      : %d", stats.messages_skipped_invalid)
     LOGGER.warning("addon_metadata_updated        : %d", stats.addon_metadata_updated)
     LOGGER.warning("addon_metadata_not_found      : %d", stats.addon_metadata_not_found)
     LOGGER.warning("addon_metadata_skipped_conflict: %d", stats.addon_metadata_skipped_conflict)

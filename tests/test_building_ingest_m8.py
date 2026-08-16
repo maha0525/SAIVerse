@@ -159,6 +159,25 @@ class BuildingIngestM8Test(unittest.TestCase):
         self.assertEqual(count, 1)
         self.assertEqual(self.adapter.appended_count("あたらしい会話"), 1)
 
+    def test_messages_arriving_after_startup_are_not_swallowed(self):
+        """記録が無いペルソナでも、起動後に届いた発言は読まれる。
+
+        既読の境界を「最初に読みに来た時点の末尾」で決めると、起動から
+        そのペルソナが最初に喋るまでの間にユーザーが送った発言まで既読になる。
+        境界は誰も書き込めない時点 (起動時にひかえた末尾) で取る。
+        """
+        old = self._insert("user", "起動前からあった発言")
+        self.manager.startup_seq_watermark = {self.BID: int(old["seq"])}
+        # 起動後、このペルソナが最初に喋る前にユーザーが送った発言
+        self._insert("user", "起動後に届いた発言")
+
+        persona = self._build_persona(pulse_cursors={})  # 記録が無い状態
+        count = auto_ingest_building_messages(persona, self.manager)
+
+        self.assertEqual(count, 1)
+        self.assertEqual(self.adapter.appended_count("起動後に届いた発言"), 1)
+        self.assertEqual(self.adapter.appended_count("起動前からあった発言"), 0)
+
     def test_happy_path_ingests_all_and_advances_cursor(self):
         m1 = self._insert("user", "こんにちは")
         m2 = self._insert("assistant", "やあ、いい天気だね", persona_id="speaker")

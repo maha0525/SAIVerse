@@ -12,6 +12,7 @@
 """
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -30,10 +31,17 @@ class LegacyLogArchiveApiTest(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
-        self.log_path = Path(self._tmp.name) / "log.json"
+        self.home = Path(self._tmp.name)
+        self.buildings_root = self.home / "cities" / "city_a" / "buildings"
+        self.log_path = self.buildings_root / self.BID / "log.json"
+        self.log_path.parent.mkdir(parents=True, exist_ok=True)
         self.log_path.write_text("{壊れている", encoding="utf-8")
 
-        self.manager = SimpleNamespace(startup_alerts=[self._alert(self.BID)])
+        self.manager = SimpleNamespace(
+            startup_alerts=[self._alert(self.BID)],
+            saiverse_home=self.home,
+            city_name="city_a",
+        )
         self._prev_manager = app_state.manager
         app_state.manager = self.manager
         self.addCleanup(self._restore_manager)
@@ -70,7 +78,7 @@ class LegacyLogArchiveApiTest(unittest.TestCase):
         self.assertTrue(res.json()["success"])
 
         self.assertFalse(self.log_path.exists())
-        moved = list(Path(self._tmp.name).glob("log.json.unreadable_*"))
+        moved = list(self.log_path.parent.glob("log.json.unreadable_*"))
         self.assertEqual(len(moved), 1)
         # 中身は消さない — 後で救う手が見つかれば使える
         self.assertEqual(moved[0].read_text(encoding="utf-8"), "{壊れている")
@@ -103,6 +111,24 @@ class LegacyLogArchiveApiTest(unittest.TestCase):
         res = self._archive(self.BID)
         self.assertEqual(res.status_code, 200)
         self.assertEqual(self.manager.startup_alerts, [])
+
+    def test_alert_path_is_not_trusted_and_cannot_escape_the_buildings_root(self) -> None:
+        """alert に入っているパスをそのまま動かさない。
+
+        部屋の ID に `..` が混ざっていると、buildings の外のファイルを動かせて
+        しまう。動かす先はサーバ側で組み直し、根の下にあることを確かめる。
+        """
+        outside = self.home / "log.json"
+        outside.write_text("外にあるファイル", encoding="utf-8")
+        escaping_id = f"..{os.sep}..{os.sep}.."
+        alert = self._alert(escaping_id)
+        alert["details"]["path"] = str(outside)  # 嘘のパスを載せる
+        self.manager.startup_alerts.append(alert)
+
+        res = self._archive(escaping_id)
+        self.assertEqual(res.status_code, 400)
+        self.assertTrue(outside.exists())
+        self.assertTrue(self.log_path.exists())
 
 
 if __name__ == "__main__":

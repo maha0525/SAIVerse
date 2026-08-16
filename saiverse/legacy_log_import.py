@@ -6,15 +6,16 @@ Building のチャットログは Phase 2+3 (2026-05-20, ec9eba70) で
 テーブルへ移行した。本モジュールはその「過去データの取り込み」の実体で、
 次の 3 経路から呼ばれる:
 
-1. **バージョンアップグレード** (``saiverse/upgrade_handlers.py`` の dev5 エッジ):
-   リリース版 (v0.2.x, log.json 時代) から上がってきた環境で、世界が動き出す前に
-   一度だけ自動実行される。リリース後のユーザーが手動スクリプトを知らなくても
-   過去ログが失われないための本経路。
-2. **起動時の検算** (``manager/initialization.py``): 毎起動、log.json に履歴が
-   あるのに DB に取り込み痕跡が無い部屋を探し、見つかれば startup_alerts
-   (UI バナー) に載せ続ける。取り込み漏れを沈黙させないための常設の関所。
-3. **手動 CLI** (``scripts/migrate_building_logs_to_db.py`` /
+1. **起動時の検算** (``manager/initialization.py``): 毎起動、log.json に履歴が
+   あるのに DB に無い部屋を探し、**その場で取り込む**。直せなかったものだけ
+   startup_alerts (UI バナー) に載せ続ける。リリース版 (v0.2.x, log.json 時代)
+   から上がってきた環境の過去ログも、この経路が拾う。
+2. **手動 CLI** (``scripts/migrate_building_logs_to_db.py`` /
    ``scripts/migrate_conscious_log_to_db.py``): 個別復旧・再実行用の薄い入口。
+
+かつてはバージョンアップグレードの dev5 エッジでも取り込んでいたが、SQLite が
+最外周の SAVEPOINT の RELEASE で確定してしまい、枠組みの commit 境界と食い違う
+ため撤去した (2026-08-16)。同じ仕事を 2 箇所に置く理由も無い。
 
 設計上の約束 (docs/intent/building_memory_unified.md):
 
@@ -24,11 +25,12 @@ Building のチャットログは Phase 2+3 (2026-05-20, ec9eba70) で
   (2026-08-16 テスタロッサの部屋の取り込み漏れの根因)。
 - **黙って諦めない。** 取り込めなかった部屋は戻り値の stats / 検算結果に必ず
   現れ、呼び出し側がアラートにする。
-- **巻き戻せる単位は部屋ひとつ。** 1 部屋の失敗が他の部屋を道連れにしない
-  (部屋ごとに SAVEPOINT を張る)。CLI 経路だけは ``commit_per_building=True`` で
-  部屋ごとに確定させ、後半の失敗で前半まで巻き戻らないようにする。
-- **既定では commit しない。** トランザクション境界は呼び出し側が持つ
-  (アップグレード経路ではエンティティ単位の commit に相乗りする)。
+- **部屋ひとつが「全部入るか、1 つも入らないか」の単位。** 1 行でも入らなければ
+  その部屋は丸ごと巻き戻す (理由は :func:`migrate_building` の docstring)。
+  1 部屋の失敗は他の部屋を道連れにしない (部屋ごとに SAVEPOINT を張る)。
+  CLI 経路だけは ``commit_per_building=True`` で部屋ごとに確定させ、後半の失敗で
+  前半まで巻き戻らないようにする。
+- **既定では commit しない。** トランザクション境界は呼び出し側が持つ。
 """
 from __future__ import annotations
 
@@ -46,6 +48,14 @@ from database.building_messages import serialize_building_message
 LOGGER = logging.getLogger(__name__)
 
 
+class LegacyLogPartialImport(Exception):
+    """1 部屋の取り込みが途中で失敗したことを示す。
+
+    呼び出し側はこの部屋の書き込みを丸ごと巻き戻す (:func:`migrate_building` の
+    docstring 参照)。
+    """
+
+
 # ---------------------------------------------------------------------------
 # Building log (log.json → building_messages)
 # ---------------------------------------------------------------------------
@@ -58,7 +68,6 @@ class MigrationStats:
     buildings_failed: int = 0
     messages_seen: int = 0
     messages_inserted: int = 0
-    messages_skipped_invalid: int = 0
     addon_metadata_updated: int = 0
     addon_metadata_not_found: int = 0
     addon_metadata_skipped_conflict: int = 0
@@ -176,18 +185,35 @@ def migrate_building(
       既読。過去ログを「未読の新着」に化けさせないための cursor 操作が要らなくなる。
     - **見分け**: その部屋の過去ログは seq < 0 で正確に引ける。
 
-    入れるのは **まだ DB に居ない発言だけ**。判定は起動時の検算
+    入れるのは **まだこの部屋に居ない発言だけ**。判定は起動時の検算
     (:func:`scan_legacy_log_deficits`) と同じ規則 — ファイルの各発言の
-    message_id が DB のどこにも無いものを「欠け」と数える。同じ規則を使うのは、
-    「取り込む対象」と「欠けとして警告する対象」がずれないため。
+    message_id がこの部屋の DB 行のどこにも無いものを「欠け」と数える。同じ規則を
+    使うのは、「取り込む対象」と「欠けとして警告する対象」がずれないため。
+    照合を部屋ごとに閉じるのは、message_id が ``<部屋ID>:<番号>`` の形で、部屋を
+    またいで同じ ID が出ないから (本番データで重複 0 件を実測)。
 
     message_id を持たない発言は、その部屋に行が 1 つも無いとき (= ファイルが
     唯一の写し) だけ入れる。行があるときは、既に入っているのか未取り込みなのかを
     見分けられないので触らない — 入れると同じ発言を二重に並べる。
 
+    **1 行でも入らなければ、この部屋は丸ごと入らなかったことにする**
+    (:class:`LegacyLogPartialImport` を送出し、呼び出し側が巻き戻す)。部分的に
+    入れると 2 つの壊れ方が出る:
+
+    - message_id を持たない行が残ると、次回からその部屋は「行がある」側に回って
+      対象外になり、検算も欠けを 0 と数える。**欠けたまま誰にも気づかれない。**
+    - 残りを次回入れると、採番が既存の負 seq より手前に付くので、ファイル順が
+      崩れる (A,B,C の B だけ失敗 → 再実行で B,A,C)。
+
+    全件やり直しなら、失敗した部屋は行が 1 つも無い状態で残り、検算が「未取込」
+    として毎起動アラートにする。うるさいが、黙って欠けるよりよい。
+
     Returns:
         "imported" ... 取り込みを実行した
         "already"  ... 入れるものが無い — 冪等 skip
+
+    Raises:
+        LegacyLogPartialImport: 1 行でも取り込めなかったとき
     """
     messages_list = list(messages)
     stats.messages_seen += len(messages_list)
@@ -224,8 +250,7 @@ def migrate_building(
         stats.buildings_skipped_already_migrated += 1
         return "already"
 
-    # 採番の起点。既に負の seq がある部屋 (前回の取り込みが途中で落ちた部屋) では
-    # その手前へ続ける。無ければ 0 の手前から。
+    # 採番の起点。既に負の seq がある部屋ではその手前へ続ける。無ければ 0 の手前から。
     min_seq = db.query(func.min(BuildingMessage.seq)).filter_by(
         building_id=building_id
     ).scalar()
@@ -233,11 +258,8 @@ def migrate_building(
 
     total = len(pending)
     local_inserted = 0
-    local_invalid = 0
     for index, msg in enumerate(pending):
         # ファイル順を保ったまま base の手前へ詰める (先頭が最も小さい)。
-        # 途中の行が失敗しても番号は詰め直さない — 空いた番号が残るだけで、
-        # 並び順にも既読判定にも影響しない。
         new_seq = base - total + index
         new_message_id = f"{building_id}:{new_seq}"
         legacy_seq_int: Optional[int] = None
@@ -274,20 +296,18 @@ def migrate_building(
             if dry_run:
                 local_inserted += 1
                 continue
-            # SAVEPOINT で行単位に隔離: 失敗行だけ巻き戻し、外側の
-            # トランザクション (呼び出し側所有) には影響させない。
-            with db.begin_nested():
-                db.add(BuildingMessage(**record))
+            db.add(BuildingMessage(**record))
+            db.flush()
             local_inserted += 1
         except Exception as e:
-            LOGGER.warning(
-                "  %s: 古い会話 1 件を移せませんでした (ファイル側の番号=%s): %s",
-                building_id, legacy_seq_int, e,
-            )
-            local_invalid += 1
+            # 1 行でも入らなければ、この部屋は「入らなかった」ことにする
+            # (下の docstring 参照 — 部分的に入れると欠けが沈黙するため)。
+            raise LegacyLogPartialImport(
+                f"{building_id}: 古い会話 1 件を移せませんでした "
+                f"(ファイル側の番号={legacy_seq_int}): {e}"
+            ) from e
 
     stats.messages_inserted += local_inserted
-    stats.messages_skipped_invalid += local_invalid
 
     # cursor の操作は要らない。取り込んだ行の seq は必ず 0 未満で、「どこまで
     # 読んだか」は 0 以上なので、負の seq は常に既読側に入る。
@@ -296,13 +316,6 @@ def migrate_building(
         "いま話している分より前に入ります)",
         building_id, local_inserted, base - total, base - 1,
     )
-    if local_invalid:
-        # 起動時の検算は message_id の突き合わせで欠けを見つけるため、失敗した行が
-        # message_id を持っていればバナーに出る。持たない行はここのログだけが痕跡。
-        LOGGER.warning(
-            "  %s: %d 件は移せませんでした。会話そのものは古いファイルに残っています",
-            building_id, local_invalid,
-        )
     return "imported"
 
 
@@ -464,6 +477,17 @@ def import_building_logs(
         try:
             with db.begin_nested():
                 migrate_building(db, building_id, messages, stats, dry_run=dry_run)
+        except LegacyLogPartialImport as e:
+            # 1 行でも入らなければ全件やり直し。中途半端に入れると欠けが沈黙する。
+            LOGGER.error(
+                "  %s: 途中で 1 件入らなかったので、この部屋は全件やり直しにします "
+                "(%s)。会話は古いファイルに残っていて、次の起動でもう一度試します",
+                building_id, e,
+            )
+            # messages_inserted はループを抜けた後に加算されるので、途中で
+            # 抜けたこの部屋の分は最初から数えられていない。
+            stats.buildings_failed += 1
+            continue
         except Exception:
             LOGGER.error(
                 "  %s: この部屋の古い会話を移せませんでした。"
