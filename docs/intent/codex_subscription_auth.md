@@ -1,6 +1,6 @@
 # Intent: Codex サブスク認証の自立 — SAIVerse 自身でログインする
 
-**ステータス**: 実装中 (v0.1, 2026-08-16)。全層実装済み・単体/フルスイート緑。Codex レビュー 1 巡目は No-ship (high 3 = ログイン試行の世代競合 / ストア操作のロック不統一 / トークンファイル権限、medium 1 = モーダル閉じ際の cancel 漏れ) — 全件裏取り済み・受諾。消し込みは Opus セッションへ ([ハンドオフ](../handoff/2026-08-16_codex_subscription_auth_handoff.md))。経緯: Hermes Agent の実装読解 (2026-08-16) で OpenAI のデバイスコード方式が判明し、まはー裁定で同日着手。
+**ステータス**: 検証待ち (v0.2, 2026-08-16)。全層実装済み・Codex レビュー **8 巡で approve (出荷可)** 到達 — 競合系の消し込み全経緯は [ハンドオフ](../handoff/2026-08-16_codex_subscription_auth_handoff.md) §8。テスト 44 本 + フルスイート 4455 緑。残り = ①§6「lease 返却不達の族」の受容のまはー裁定 ②まはーの実機ログイン検証 (ハンドオフ §4 に手順)。経緯: Hermes Agent の実装読解 (2026-08-16) で OpenAI のデバイスコード方式が判明し、まはー裁定で同日着手。消し込みは当初 Opus 予定をまはー裁定で同セッション続投。
 **関連**: [`model_provider_management.md`](model_provider_management.md)（プロバイダ管理の全体像。openai_codex は builtin 固定プロバイダ） / [`codex_window_addon.md`](codex_window_addon.md)（Codex CLI をラップする別機構。あちらは CLI 前提のまま＝本書のスコープ外）
 
 ---
@@ -59,6 +59,7 @@ UI ボタン → デバイスコード → ~/.saiverse/user_data/     → OpenAI
 - **client_id は Codex CLI のものを名乗り続ける。** OpenAI 非公認の利用形態である点は相乗り時代と同質（Hermes Agent・opencode 等の先行例と同じ立場）。OpenAI 側のポリシー変更で止まりうる。
 - **デバイスコードの各エンドポイントは非公開 API。** 予告なく変わりうる。止まった場合の脱出路として `~/.codex` 相乗り（= Codex CLI でログインし直す）が残る。
 - **同一 client_id の複数ログイン（SAIVerse と Codex CLI が別々の refresh_token を持つ）が共存できるか**は、Hermes Agent が複数アカウントのプールを実働させていることが傍証（推測の域。まはーの実機ログインで確定する）。
+- **lease 返却の不達で、閉じたはずのログイン試行が生き残りうる**（レビュー 3 巡目 R3-③ = start 応答の喪失・5 巡目 R5-③ = cancel の配送失敗。4 巡目 R4-② で影響を再評価のうえ族として受容、まはー裁定待ち）。フロントがサーバーへ lease を返せない経路（start 応答が届く前の接続断、cancel POST の失敗）では、閉じる操作でその試行を止められない。最悪ケースは「15 分の試行残置」に留まらない — その窓内にユーザーがブラウザ側の認証を完了すると、**モーダルを閉じて取り消したつもりのログインが成立し、トークンが永続化する**。回復は UI からのログアウト一発（logout は進行中の試行も全て、別プロセスの分まで無効化する）。発生には「localhost 上の HTTP 不達」と「その後にブラウザ認証を完了」の重なりが必要で、成立しても自分のアカウントに自分が入るだけであることから、これを塞ぐ TTL ハートビート・冪等 owner ID・cancel 再送キューの機構は複雑さが釣り合わないと判断して導入しない。
 - 既知 issue [api_state_changing_routes_have_no_origin_check](../issues/api_state_changing_routes_have_no_origin_check.md) は本ルートにも当てはまる（既存ルートと同じ姿勢で追随し、個別対策はしない）。
 
 ### 観察メモ（Hermes 読解の副産物、本件のスコープ外）

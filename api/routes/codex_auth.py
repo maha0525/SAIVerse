@@ -18,17 +18,31 @@ from __future__ import annotations
 import logging
 
 from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
 
 from llm_clients.openai_codex_auth import (
     LOGIN_MANAGER,
     CodexDeviceLoginError,
     auth_status,
-    delete_saiverse_store,
 )
 
 LOGGER = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+class CodexLoginCancelRequest(BaseModel):
+    """cancel の対象。両方とも login/start が返した値で、省略不可。
+
+    attempt_id だけでは足りない — 進行中の試行への start は同じ attempt_id に
+    相乗りする (同じコードを表示する) ため、閉じたモーダルの遅延 cancel が
+    開き直したモーダルの試行を殺してしまう。lease_id がどのクライアントの
+    取り下げかを識別し、全クライアントが取り下げたときだけ試行が止まる。
+    省略経路は世代ガードの迂回路になるので設けない (欠落は 422)。
+    """
+
+    attempt_id: int
+    lease_id: str
 
 
 @router.post("/login/start")
@@ -50,10 +64,14 @@ def codex_login_status():
 
 
 @router.post("/login/cancel")
-def codex_login_cancel():
-    """ログイン試行を放棄する (モーダルを閉じたときにフロントが呼ぶ)。"""
-    LOGIN_MANAGER.cancel()
-    return {"ok": True}
+def codex_login_cancel(request: CodexLoginCancelRequest):
+    """自分の lease を返却する (モーダルを閉じたときにフロントが呼ぶ)。
+
+    その試行の lease が全部返却されたときだけ試行そのものが止まる。
+    古い attempt_id・未知の lease_id・確定後の cancel は無視される。
+    """
+    cancelled = LOGIN_MANAGER.cancel(request.attempt_id, request.lease_id)
+    return {"ok": True, "cancelled": cancelled}
 
 
 @router.get("/status")
@@ -66,10 +84,14 @@ def codex_auth_status():
 def codex_logout():
     """SAIVerse 自前のトークンストアを削除する。
 
+    進行中のログイン試行の無効化とストア削除を manager 側の一つの
+    クリティカルセクションで行う — 別々にやると、ブラウザ側の認証が
+    logout とすれ違いで完了したとき、ワーカーがストアを再生成して
+    「ログアウトしたのに認証が復活」する。
     Codex CLI の ~/.codex/auth.json には決して触れない。自前ストアが無い
-    (CLI 相乗り中 or 未ログイン) 場合は removed=false で何もしない。
+    (CLI 相乗り中 or 未ログイン) 場合は removed=false。
     """
-    removed = delete_saiverse_store()
+    removed = LOGIN_MANAGER.logout_and_delete_store()
     status = auth_status()
     LOGGER.info("codex-auth: logout removed=%s now store=%s", removed, status.get("store"))
     return {"ok": True, "removed": removed, **status}

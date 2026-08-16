@@ -1,8 +1,10 @@
-# Codex サブスク認証の自立 — 実装 + Codex 1 巡 (No-ship) のハンドオフ
+# Codex サブスク認証の自立 — 実装 + Codex レビュー 8 巡 (approve 到達) の記録
 
 **日付**: 2026-08-16
-**書き手**: メティス (Fable セッション)。運用規則によりレビューは 1 巡で終了、消し込みは Opus セッションが引き取る。
-**intent**: [codex_subscription_auth.md](../intent/codex_subscription_auth.md) — 不変条件・責任分界・リスクは全部ここにある。**消し込み前に必読**。
+**書き手**: メティス (Fable セッション)。
+**経緯**: 当初は運用規則どおり「レビュー 1 巡 → Opus へハンドオフ」の予定だったが、まはー裁定 (クォータ余剰) で同セッションが消し込みを続投。**計 8 巡で approve (出荷可) に到達**。§8 に全巡の経緯。
+**intent**: [codex_subscription_auth.md](../intent/codex_subscription_auth.md) — 不変条件・責任分界・受容済みリスクは全部ここにある。
+**残り**: まはーの裁定 1 点 (lease 返却不達の族の受容、intent §6) + 実機ログイン検証 (§4)。コードとしての消し込みは完了。
 
 ## 1. 何を作ったか
 
@@ -46,12 +48,13 @@ refresh (`openai_codex.py._refresh_or_pickup_latest`) だけが `.json.lock` を
 
 **直し方**: 開始要求を出した時点から「試行中」として扱い、close/unmount では状態に関わらず cancel を送る。F1 の世代 ID を API に載せ (start が試行 ID を返し cancel に渡す)、遅延した旧 start/cancel が新試行を壊さない形に。
 
-## 3. 消し込みの入口 (Opus へ)
+## 3. 消し込みの結果 (同セッションで完了)
 
-1. intent §3 (不変条件) を読む → F1〜F4 を上の「直し方」の線で修正。F1 と F4 は世代 ID を API まで貫くと一度に閉じる。
-2. `python -m pytest tests/llm_clients/test_openai_codex_auth.py` + 競合テスト追加分 → 全緑後にフルスイート。
-3. Codex 再レビュー (観点は 1 巡目と同じ + 「F1〜F4 の修正が新たな穴を開けていないか」)。収束の判断は Codex でなくまはーに上げる。
-4. 収束後、in_flight 台帳の行と intent ステータス行を「検証待ち」へ更新。
+F1〜F4 は下記 §8 の消し込みループで全て解消 (F1+F4 は世代 ID → lease 方式へ発展、F2 は単一ストアロック + 一意 tmp、F3 は 0600)。最終形の要点:
+
+- **試行の世代 + lease (貸出札)**: start ごとに一意 lease を発行、cancel は lease の返却、全返却で試行停止。保存・状態更新は「現行世代かつ未 cancel」の関所を manager ロック内で通る。
+- **logout marker (永続 nonce)**: logout のたびにストアロック下で新しい乱数へ交換。試行は開始時に snapshot (初回はロック下で初期化 — "" は正当値として存在しない)、保存直前にストアロック下で等値再照合。**別プロセスの logout も、破損・削除の ABA も、すべて保存拒否側に倒れる (fail-closed)**。
+- **フロント UI 世代**: 開閉・リトライのたびに番号を進め、遅延した旧応答 (start も poll も) は画面に触らず自分の lease を自力返却。unmount でも lease 返却。
 
 ## 4. 消し込み後のまはー実機検証 (私では代行できない領域)
 
@@ -65,3 +68,19 @@ refresh (`openai_codex.py._refresh_or_pickup_latest`) だけが `.json.lock` を
 
 - 発端はまはーの「Hermes Agent が直接 OpenAI の認証ページを呼んでいた」という観察 (2026-08-16)。Hermes (NousResearch) の実装読解でデバイスコード方式と判明し、同日着手。読解の副産物 (curl_cffi 過剰装備の可能性・複数ログイン共存の傍証) は intent §6 に記録済み。
 - Hermes のクローンは `C:\Users\shuhe\AppData\Local\Temp\hermes-agent` に残してある (参照用・一時領域なので消えても再クローン可)。
+
+## 8. 消し込みループの経緯 (2〜8 巡目、同日夜)
+
+各巡の指摘は全件コード照合で裏取りしてから対応を決めた。誇張・空振りは 8 巡を通じてゼロ。
+
+| 巡 | 判定 | 指摘と対応 |
+|---|---|---|
+| 2 | No-ship | F1 の cancel が世代を共有し破れる / logout が試行を止めない / attempt_id 省略経路 / STARTING 並行 start → **lease 方式 + logout 統合 + 引数必須化 + start 直列化** |
+| 3 | No-ship | logout 後に queued start が復活 / unmount で lease 未返却 / start 応答喪失の孤児 lease → **logout epoch + unmount cleanup。孤児 lease は受容 (intent §6)** |
+| 4 | No-ship | 旧 cleanup が新 lease を巻き込む / 受容の影響過小評価 → **フロント UI 世代方式 (待ち合わせ廃止) + intent の最悪ケース明記** |
+| 5 | No-ship | logout が別プロセスに届かない / 旧 poll 応答の上書き / cancel 配送失敗 → **logout marker の永続化 + poll 世代ガード。配送失敗は R3-③ と同族として受容へ** |
+| 6 | No-ship | epoch counter の破損 ABA / retry が世代を進めない → **counter → 乱数 nonce (fail-closed) + start ごと世代 bump** |
+| 7 | No-ship | 欠落値 "" 自体が ABA の再利用点 → **初回 snapshot 前のロック下初期化 ("" の正当値を消滅)** |
+| 8 | **approve** | 出荷を阻む残存なし。受容済みの lease 返却不達族は判定から除外の明示 |
+
+テストは 23 → 44 本 (POSIX skip 1 込み)。フルスイートは各巡で回し続け最終 4455 緑。教訓は memory へ: 安全装置の値空間に「再利用可能な点」(counter の 0、欠落の "") を残すと ABA で破れる — nonce + 初期化で点を消す。

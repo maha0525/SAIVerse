@@ -6,11 +6,18 @@ import styles from './CodexLoginModal.module.css';
 import ModalOverlay from '../common/ModalOverlay';
 
 interface LoginStatus {
-    state: 'idle' | 'waiting' | 'success' | 'error';
+    state: 'idle' | 'starting' | 'waiting' | 'success' | 'error';
+    attempt_id?: number;
+    lease_id?: string;
     user_code?: string;
     verification_url?: string;
     error?: string;
     account_id?: string | null;
+}
+
+interface LoginLease {
+    attempt_id: number;
+    lease_id: string;
 }
 
 interface Props {
@@ -35,6 +42,16 @@ export default function CodexLoginModal({ isOpen, onClose, onSuccess }: Props) {
     // Poll timer + "did we already fire onSuccess" guard survive re-renders.
     const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
     const successNotifiedRef = useRef(false);
+    // この modal の UI 世代番号と、現世代が受け取った lease 群。閉じる
+    // (= returnAllLeases) たびに加えて「やり直す」を含む start のたびにも
+    // 世代を進める。遅れて settle した旧世代の応答 (start 応答も poll 応答も)
+    // は、自分の世代が死んでいると分かったら画面に触らず、lease を持って
+    // いれば自分で即返却する — 現世代の lease 群には決して混ざらない。
+    // 旧世代の cleanup が新世代の lease を巻き込む事故 (R4-①) と、リトライ
+    // 前の試行の遅延 poll がリトライ後の画面を上書きする事故 (R6-②) を、
+    // 同じ一つの番号で塞ぐ。
+    const openSeqRef = useRef(0);
+    const leasesRef = useRef<LoginLease[]>([]);
 
     const stopPolling = useCallback(() => {
         if (timerRef.current !== null) {
@@ -43,24 +60,67 @@ export default function CodexLoginModal({ isOpen, onClose, onSuccess }: Props) {
         }
     }, []);
 
-    const startLogin = useCallback(async () => {
+    const sendCancel = useCallback((lease: LoginLease) => {
+        fetch('/api/codex-auth/login/cancel', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(lease),
+        }).catch(() => {});
+    }, []);
+
+    // 現世代を閉じる: 世代番号を進めて (以後の遅延応答は自力返却に回る)、
+    // この世代が記録済みの lease を全部返す。冪等 — handleClose と unmount
+    // cleanup の両方から呼んでよい。
+    const returnAllLeases = useCallback(() => {
+        openSeqRef.current += 1;
+        const leases = [...leasesRef.current];
+        leasesRef.current = [];
+        for (const lease of leases) {
+            sendCancel(lease);
+        }
+    }, [sendCancel]);
+
+    const startLogin = useCallback(() => {
         setStartError(null);
         setCopied(false);
         successNotifiedRef.current = false;
-        try {
-            const res = await fetch('/api/codex-auth/login/start', { method: 'POST' });
-            if (!res.ok) {
-                const body = await res.json().catch(() => null);
-                setStartError(body?.detail || `ログイン開始に失敗しました (HTTP ${res.status})`);
-                return;
+        // start のたびに世代を進める: リトライ前の試行の飛行中応答は、settle
+        // した時点で世代不一致となり、この start が作る新しい画面状態に触れない。
+        openSeqRef.current += 1;
+        const mySeq = openSeqRef.current;
+        (async () => {
+            try {
+                const res = await fetch('/api/codex-auth/login/start', { method: 'POST' });
+                if (!res.ok) {
+                    const body = await res.json().catch(() => null);
+                    if (mySeq === openSeqRef.current) {
+                        setStartError(body?.detail || `ログイン開始に失敗しました (HTTP ${res.status})`);
+                    }
+                    return;
+                }
+                const data: LoginStatus = await res.json();
+                if (mySeq !== openSeqRef.current) {
+                    // この応答が属する世代はもう閉じられた — 受け取った lease を
+                    // その場で返し、画面には何も反映しない。
+                    if (data.attempt_id && data.lease_id) {
+                        sendCancel({ attempt_id: data.attempt_id, lease_id: data.lease_id });
+                    }
+                    return;
+                }
+                if (data.attempt_id && data.lease_id) {
+                    leasesRef.current.push({ attempt_id: data.attempt_id, lease_id: data.lease_id });
+                }
+                setStatus(data);
+            } catch (e) {
+                if (mySeq === openSeqRef.current) {
+                    setStartError(`ログイン開始に失敗しました: ${e}`);
+                }
             }
-            setStatus(await res.json());
-        } catch (e) {
-            setStartError(`ログイン開始に失敗しました: ${e}`);
-        }
-    }, []);
+        })();
+    }, [sendCancel]);
 
-    // Open → start the flow; close → abandon it (server side keeps nothing).
+    // Open → start the flow; close (isOpen=false) → stop polling. lease の
+    // 返却は handleClose が行う (下の unmount effect が最後の受け皿)。
     useEffect(() => {
         if (!isOpen) return;
         setStatus({ state: 'idle' });
@@ -70,14 +130,35 @@ export default function CodexLoginModal({ isOpen, onClose, onSuccess }: Props) {
         };
     }, [isOpen, startLogin, stopPolling]);
 
-    // While waiting, poll the backend for progress.
+    // unmount の受け皿: 設定画面ごと閉じられた・タブが切り替わったなど、
+    // handleClose を通らずにこのコンポーネントが消える経路でも lease を返す。
+    // 返さないと、サーバー側のログイン試行が最大 15 分生き続け、その間に
+    // ブラウザ側の認証を完了するとトークンが保存されてしまう。
+    useEffect(() => {
+        return () => {
+            stopPolling();
+            returnAllLeases();
+        };
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
+
+    // While waiting, poll the backend for progress. 応答が返る頃には世代が
+    // 変わっている (閉じた・開き直した) ことがあるので、start 応答と同じく
+    // 世代と attempt を照合してから画面へ反映する — 旧世代の飛行中応答が
+    // 新しい画面の waiting を上書きしてポーリングを止めてしまわないように。
     useEffect(() => {
         if (!isOpen || status.state !== 'waiting') return;
+        const mySeq = openSeqRef.current;
+        const myAttempt = status.attempt_id;
         timerRef.current = setInterval(async () => {
             try {
                 const res = await fetch('/api/codex-auth/login/status');
+                if (mySeq !== openSeqRef.current) return;
                 if (!res.ok) return;
                 const next: LoginStatus = await res.json();
+                if (mySeq !== openSeqRef.current) return;
+                if (next.attempt_id !== undefined && myAttempt !== undefined
+                    && next.attempt_id !== myAttempt) return;
                 setStatus(prev => ({ ...prev, ...next }));
                 if (next.state === 'success' && !successNotifiedRef.current) {
                     successNotifiedRef.current = true;
@@ -88,16 +169,16 @@ export default function CodexLoginModal({ isOpen, onClose, onSuccess }: Props) {
             }
         }, POLL_INTERVAL_MS);
         return () => stopPolling();
-    }, [isOpen, status.state, onSuccess, stopPolling]);
+    }, [isOpen, status.state, status.attempt_id, onSuccess, stopPolling]);
 
     const handleClose = useCallback(() => {
         stopPolling();
-        if (status.state === 'waiting') {
-            // ログイン待ちを放棄。コードは OpenAI 側で自然失効する。
-            fetch('/api/codex-auth/login/cancel', { method: 'POST' }).catch(() => {});
-        }
+        // どの状態で閉じても、この modal が受け取った lease を全部返却する
+        // (成功・失敗の確定後や、他のモーダルが lease を持つ間の cancel は
+        // バックエンドが無視する)。
+        returnAllLeases();
         onClose();
-    }, [status.state, onClose, stopPolling]);
+    }, [onClose, stopPolling, returnAllLeases]);
 
     const copyCode = useCallback(async () => {
         if (!status.user_code) return;
