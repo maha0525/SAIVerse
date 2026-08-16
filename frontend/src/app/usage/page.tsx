@@ -162,11 +162,19 @@ export default function UsagePage() {
         const allModels = new Set<string>();
 
         for (const item of dailyData) {
-            if ((item.currency || 'USD') !== effectiveCurrency) continue;
-            allModels.add(item.model_id);
+            // Register the date before any filtering so days whose usage is
+            // all $0 still keep their tick on the X axis (only their bars are
+            // empty), instead of the day disappearing from the chart.
             if (!dateMap.has(item.date)) {
                 dateMap.set(item.date, { date: item.date });
             }
+            if ((item.currency || 'USD') !== effectiveCurrency) continue;
+            // $0 rows (free/local models, unpriced models) are real usage but
+            // pure noise on a cost chart: skipping them here also drops the
+            // model from the legend and from day tooltips. Negative rows
+            // (future cache-refund corrections) must still pass.
+            if (item.cost_usd === 0) continue;
+            allModels.add(item.model_id);
             const entry = dateMap.get(item.date)!;
             entry[item.model_id] = ((entry[item.model_id] as number) || 0) + item.cost_usd;
         }
