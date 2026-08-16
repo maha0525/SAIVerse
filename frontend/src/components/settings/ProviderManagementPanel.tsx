@@ -1,7 +1,8 @@
 import React, { useEffect, useState, useCallback } from 'react';
-import { Plus, Edit2, Trash2, RefreshCw } from 'lucide-react';
+import { Plus, Edit2, Trash2, RefreshCw, LogIn, LogOut } from 'lucide-react';
 import styles from './ProviderManagementPanel.module.css';
 import ProviderEditorModal, { ProviderEditorMode } from './ProviderEditorModal';
+import CodexLoginModal from './CodexLoginModal';
 
 interface ProviderInfo {
     id: string;
@@ -11,6 +12,15 @@ interface ProviderInfo {
     api_key_env?: string | null;
     builtin: boolean;
     api_key_configured?: boolean | null;
+}
+
+interface CodexAuthStatus {
+    logged_in: boolean;
+    store: 'saiverse' | 'codex_cli' | null;
+    cli_available?: boolean;
+    account_id?: string | null;
+    access_token_expires_at?: string | null;
+    error?: string;
 }
 
 export default function ProviderManagementPanel() {
@@ -24,6 +34,8 @@ export default function ProviderManagementPanel() {
     // the change, rather than only in the docs, keeps it from looking like the
     // setting was ignored.
     const [notice, setNotice] = useState<string | null>(null);
+    const [codexStatus, setCodexStatus] = useState<CodexAuthStatus | null>(null);
+    const [codexLoginOpen, setCodexLoginOpen] = useState(false);
 
     const loadProviders = useCallback(async () => {
         setLoading(true);
@@ -40,9 +52,46 @@ export default function ProviderManagementPanel() {
         }
     }, []);
 
+    const loadCodexStatus = useCallback(async () => {
+        try {
+            const res = await fetch('/api/codex-auth/status');
+            if (res.ok) {
+                setCodexStatus(await res.json());
+            }
+        } catch (e) {
+            console.error('Failed to load codex auth status', e);
+        }
+    }, []);
+
     useEffect(() => {
         loadProviders();
-    }, [loadProviders]);
+        loadCodexStatus();
+    }, [loadProviders, loadCodexStatus]);
+
+    const handleCodexLogout = async () => {
+        if (!confirm('SAIVerse に保存した ChatGPT ログインを削除しますか？\n(Codex CLI 側のログインには影響しません)')) return;
+        try {
+            const res = await fetch('/api/codex-auth/logout', { method: 'POST' });
+            if (!res.ok) {
+                alert(`ログアウトに失敗しました (HTTP ${res.status})`);
+                return;
+            }
+            loadCodexStatus();
+        } catch (e) {
+            alert(`ログアウトに失敗しました: ${e}`);
+        }
+    };
+
+    const codexBadge = (status: CodexAuthStatus | null) => {
+        if (!status) return null;
+        if (status.logged_in && status.store === 'saiverse') {
+            return <span className={`${styles.badge} ${styles.badgeKeyOk}`}>ログイン済み</span>;
+        }
+        if (status.logged_in && status.store === 'codex_cli') {
+            return <span className={styles.badge}>Codex CLI の認証を利用中</span>;
+        }
+        return <span className={`${styles.badge} ${styles.badgeKeyMissing}`}>未ログイン</span>;
+    };
 
     const openCreate = () => {
         setEditorMode('create');
@@ -123,6 +172,7 @@ export default function ProviderManagementPanel() {
                                             {p.api_key_configured ? 'KEY OK' : 'KEY 未設定'}
                                         </span>
                                     )}
+                                    {p.protocol === 'openai_codex' && codexBadge(codexStatus)}
                                 </div>
                                 <div className={styles.rowSub}>
                                     {p.id} ・ {p.protocol}
@@ -130,6 +180,17 @@ export default function ProviderManagementPanel() {
                                 </div>
                             </div>
                             <div className={styles.rowActions}>
+                                {p.protocol === 'openai_codex' && (
+                                    codexStatus?.logged_in && codexStatus.store === 'saiverse' ? (
+                                        <button className={styles.iconBtn} onClick={handleCodexLogout}>
+                                            <LogOut size={12} /> ログアウト
+                                        </button>
+                                    ) : (
+                                        <button className={styles.iconBtn} onClick={() => setCodexLoginOpen(true)}>
+                                            <LogIn size={12} /> ChatGPT でログイン
+                                        </button>
+                                    )
+                                )}
                                 <button className={styles.iconBtn} onClick={() => openEdit(p.id)}>
                                     <Edit2 size={12} /> {p.builtin ? '上書き編集' : '編集'}
                                 </button>
@@ -146,6 +207,15 @@ export default function ProviderManagementPanel() {
                     ))}
                 </div>
             )}
+
+            <CodexLoginModal
+                isOpen={codexLoginOpen}
+                onClose={() => {
+                    setCodexLoginOpen(false);
+                    loadCodexStatus();
+                }}
+                onSuccess={loadCodexStatus}
+            />
 
             <ProviderEditorModal
                 isOpen={editorOpen}

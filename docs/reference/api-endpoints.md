@@ -5,7 +5,7 @@
 
 REST API 全エンドポイントの一覧（自動生成）。すべて `/api` 配下にマウントされる。
 
-**エンドポイント数**: 366（tag グループ: 25）
+**エンドポイント数**: 371（tag グループ: 26）
 
 ## addon
 
@@ -87,6 +87,16 @@ REST API 全エンドポイントの一覧（自動生成）。すべて `/api` 
 | POST | `/api/chat/spell-confirmation-response` | Respond to a generic spell confirmation request. |
 | POST | `/api/chat/stop` | Stop the active LLM generation for the user's current building. |
 | POST | `/api/chat/utter` | 発言契機入室。 必要なら自動 move を伴って chat を実行する。 |
+
+## codex-auth
+
+| メソッド | パス | 説明 |
+|---|---|---|
+| POST | `/api/codex-auth/login/cancel` | ログイン試行を放棄する (モーダルを閉じたときにフロントが呼ぶ)。 |
+| POST | `/api/codex-auth/login/start` | デバイスコードを申請し、ユーザーに見せる user_code を返す。 |
+| GET | `/api/codex-auth/login/status` | ログイン試行の進行状態を返す。フロントはこれをポーリングする。 |
+| POST | `/api/codex-auth/logout` | SAIVerse 自前のトークンストアを削除する。 |
+| GET | `/api/codex-auth/status` | どのトークンストアが認証源か・その健康状態を返す。 |
 
 ## config
 

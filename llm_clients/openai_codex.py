@@ -4,10 +4,13 @@ Phase 1: text-only generation.
 Phase 2: tool calling, structured output (response_schema), reasoning_effort.
 Phase 3: real SSE streaming + reasoning extraction + image input.
 
-Authentication is delegated to the Codex CLI: this client reads ~/.codex/auth.json
-that `codex login` produces and reuses its access_token + account_id. We do not
-refresh tokens ourselves; if the token has expired, the user must run `codex login`
-or let the Codex CLI refresh it.
+Authentication reads OAuth tokens from whichever store `openai_codex_auth`
+resolves: SAIVerse's own store (written by the in-app device-code login) wins;
+otherwise we piggyback on ~/.codex/auth.json that `codex login` produces.
+Expired access_tokens are refreshed in-process via the refresh_token grant and
+written back to the same file they were read from (refresh_tokens are
+single-use, so the file a token pair lives in owns its refreshed successor).
+See docs/intent/codex_subscription_auth.md.
 
 Cloudflare in front of chatgpt.com fingerprints clients by their TLS handshake.
 Plain `requests` / `httpx` get challenged; we use `curl_cffi` to impersonate
@@ -15,12 +18,9 @@ Chrome's TLS fingerprint, the same way Codex CLI's reqwest client gets through.
 """
 from __future__ import annotations
 
-import base64
 import codecs
 import json
 import logging
-import os
-import platform
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Tuple
@@ -29,19 +29,25 @@ from curl_cffi import requests as cffi_requests
 from filelock import FileLock, Timeout as FileLockTimeout
 
 from .base import LLMClient
+from .openai_codex_auth import (
+    CODEX_IMPERSONATE,
+    CODEX_ORIGINATOR,
+    CODEX_OAUTH_CLIENT_ID,
+    CODEX_REFRESH_TOKEN_URL,
+    NO_AUTH_HINT,
+    AuthStore,
+    access_token_expiry,
+    build_user_agent as _build_user_agent,
+    read_auth_store,
+    resolve_active_store,
+    write_auth_store,
+)
 from .openai_message_preparer import prepare_openai_messages
 from .schema_utils import normalize_schema_for_strict_json_output
 
 LOG = logging.getLogger("saiverse.llm_clients.openai_codex")
 
-CODEX_AUTH_FILE = Path.home() / ".codex" / "auth.json"
-CODEX_AUTH_LOCK_FILE = CODEX_AUTH_FILE.with_suffix(".json.lock")
 CODEX_BASE_URL = "https://chatgpt.com/backend-api/codex"
-CODEX_ORIGINATOR = "codex_cli_rs"
-CODEX_CLI_VERSION = "0.45.0"
-CODEX_IMPERSONATE = "chrome124"
-CODEX_OAUTH_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
-CODEX_REFRESH_TOKEN_URL = "https://auth.openai.com/oauth/token"
 SUPPORTED_REASONING_EFFORTS = ("low", "medium", "high", "xhigh")
 # Pre-emptively refresh when access_token has less than this many seconds left
 TOKEN_REFRESH_LEEWAY_SECONDS = 60.0
@@ -60,16 +66,6 @@ class CodexHTTPError(RuntimeError):
         super().__init__(
             f"Codex backend returned status={status_code}: {body[:1000]}"
         )
-
-
-def _build_user_agent() -> str:
-    arch = platform.machine() or "unknown"
-    system = platform.system() or "unknown"
-    release = platform.release() or "0"
-    return (
-        f"{CODEX_ORIGINATOR}/{CODEX_CLI_VERSION} "
-        f"({system} {release}; {arch}) python-saiverse"
-    )
 
 
 def _extract_json_object_candidate(text: str) -> str:
@@ -106,8 +102,8 @@ class OpenAICodexClient(LLMClient):
         * Reasoning text captured via `_store_reasoning` (consume_reasoning())
         * Image input through `{"type": "image_url"}` content parts
         * `reasoning_effort` parameter (low/medium/high/xhigh)
-    Out of scope:
-        * Auto refresh of expired OAuth tokens (delegated to Codex CLI)
+        * Auto refresh of expired OAuth tokens (401 → refresh_token grant →
+          write-back to the store the tokens came from)
     """
 
     def __init__(
@@ -140,14 +136,14 @@ class OpenAICodexClient(LLMClient):
             self._session = cffi_requests.Session(impersonate=CODEX_IMPERSONATE)
         return self._session
 
+    def _resolve_store(self) -> AuthStore:
+        store = resolve_active_store()
+        if store is None:
+            raise RuntimeError(f"Codex の認証情報が見つかりません。{NO_AUTH_HINT}")
+        return store
+
     def _load_auth(self) -> Dict[str, Any]:
-        if not CODEX_AUTH_FILE.exists():
-            raise RuntimeError(
-                f"{CODEX_AUTH_FILE} not found. Run `codex login` first, "
-                'and ensure ~/.codex/config.toml has '
-                '`cli_auth_credentials_store_mode = "file"`.'
-            )
-        return json.loads(CODEX_AUTH_FILE.read_text(encoding="utf-8"))
+        return read_auth_store(self._resolve_store().path)
 
     def _build_headers(self) -> Dict[str, str]:
         auth = self._load_auth()
@@ -156,7 +152,7 @@ class OpenAICodexClient(LLMClient):
         account_id = tokens.get("account_id")
         if not access_token:
             raise RuntimeError(
-                "auth.json has no tokens.access_token; run `codex login`"
+                f"認証ファイルに tokens.access_token がありません。{NO_AUTH_HINT}"
             )
         headers = {
             "Authorization": f"Bearer {access_token}",
@@ -470,30 +466,8 @@ class OpenAICodexClient(LLMClient):
             text = getattr(resp, "text", None) or ""
         return text
 
-    @staticmethod
-    def _decode_jwt_exp(token: str) -> Optional[datetime]:
-        """Best-effort `exp` claim extraction from a JWT (signature unverified)."""
-        if not token:
-            return None
-        parts = token.split(".")
-        if len(parts) != 3:
-            return None
-        payload_b64 = parts[1]
-        padded = payload_b64 + "=" * (-len(payload_b64) % 4)
-        try:
-            payload = json.loads(base64.urlsafe_b64decode(padded))
-        except Exception:  # noqa: BLE001
-            return None
-        exp = payload.get("exp")
-        if not isinstance(exp, (int, float)):
-            return None
-        try:
-            return datetime.fromtimestamp(int(exp), tz=timezone.utc)
-        except (OverflowError, OSError, ValueError):
-            return None
-
     def _seconds_until_expiry(self, access_token: str) -> Optional[float]:
-        exp = self._decode_jwt_exp(access_token)
+        exp = access_token_expiry(access_token)
         if exp is None:
             return None
         return (exp - datetime.now(tz=timezone.utc)).total_seconds()
@@ -565,26 +539,30 @@ class OpenAICodexClient(LLMClient):
         return resp
 
     def _refresh_or_pickup_latest(self, prior_access_token: Optional[str]) -> None:
-        """Make sure ~/.codex/auth.json holds a usable access_token.
+        """Make sure the active auth store holds a usable access_token.
 
-        Acquires a file lock, then:
-          1. Re-read auth.json. If `access_token` differs from `prior_access_token`
+        Resolves the active store (SAIVerse's own store, or ~/.codex/auth.json
+        when piggybacking on the Codex CLI), acquires its file lock, then:
+          1. Re-read the store. If `access_token` differs from `prior_access_token`
              AND has plenty of life left, assume another process (Codex CLI itself,
              or a parallel SAIVerse worker) refreshed it and we just pick it up.
           2. Otherwise, POST to OpenAI's refresh endpoint with the stored
-             refresh_token. Persist the new tokens via an atomic rename.
+             refresh_token. Persist the new tokens via an atomic rename — into
+             the same file they were read from (refresh_tokens are single-use;
+             cross-writing would break whichever process reads the other file).
 
         This avoids the `refresh_token_reused` failure mode where Codex CLI and
         SAIVerse race to spend the same one-shot refresh token.
         """
+        store = self._resolve_store()
         try:
-            lock = FileLock(str(CODEX_AUTH_LOCK_FILE), timeout=30)
+            lock = FileLock(str(store.lock_path), timeout=30)
         except Exception as exc:  # noqa: BLE001
-            raise RuntimeError(f"could not initialize auth.json lock: {exc}") from exc
+            raise RuntimeError(f"could not initialize auth store lock: {exc}") from exc
 
         try:
             with lock:
-                latest = self._load_auth()
+                latest = read_auth_store(store.path)
                 latest_tokens = latest.get("tokens") or {}
                 latest_access = latest_tokens.get("access_token")
                 latest_refresh = latest_tokens.get("refresh_token")
@@ -593,23 +571,24 @@ class OpenAICodexClient(LLMClient):
                     seconds = self._seconds_until_expiry(latest_access)
                     if seconds is None or seconds > TOKEN_REFRESH_LEEWAY_SECONDS:
                         LOG.info(
-                            "auth.json already holds a fresh access_token "
+                            "%s already holds a fresh access_token "
                             "(expires in %.0fs); skipping refresh",
+                            store.path,
                             seconds if seconds is not None else float("inf"),
                         )
                         return
 
                 if not latest_refresh:
                     raise RuntimeError(
-                        "auth.json has no refresh_token; run `codex login` again"
+                        f"{store.path} に refresh_token がありません。{NO_AUTH_HINT}"
                     )
 
                 LOG.info("refreshing Codex access_token via refresh_token grant")
                 refreshed = self._request_refresh(latest_refresh)
-                self._persist_refreshed_tokens(latest, refreshed)
+                self._persist_refreshed_tokens(store.path, latest, refreshed)
         except FileLockTimeout as exc:
             raise RuntimeError(
-                "could not acquire auth.json lock within 30s; another process "
+                "could not acquire auth store lock within 30s; another process "
                 "may be refreshing concurrently"
             ) from exc
 
@@ -653,10 +632,11 @@ class OpenAICodexClient(LLMClient):
 
     @staticmethod
     def _persist_refreshed_tokens(
+        store_path: Path,
         existing_auth: Dict[str, Any],
         refreshed: Dict[str, Any],
     ) -> None:
-        """Atomically write back auth.json with the refreshed tokens."""
+        """Atomically write the refreshed tokens back to the store they came from."""
         tokens = dict(existing_auth.get("tokens") or {})
         new_id = refreshed.get("id_token")
         new_access = refreshed.get("access_token")
@@ -670,14 +650,8 @@ class OpenAICodexClient(LLMClient):
         existing_auth["tokens"] = tokens
         existing_auth["last_refresh"] = datetime.now(tz=timezone.utc).isoformat()
 
-        tmp_path = CODEX_AUTH_FILE.with_suffix(".json.tmp")
-        # Indent for human readability, matching Codex CLI's serialize_pretty
-        tmp_path.write_text(
-            json.dumps(existing_auth, indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
-        os.replace(tmp_path, CODEX_AUTH_FILE)
-        LOG.info("auth.json updated with refreshed tokens")
+        write_auth_store(store_path, existing_auth)
+        LOG.info("auth store updated with refreshed tokens: %s", store_path)
 
     def _post_with_auth_retry(self, body: Dict[str, Any]) -> Any:
         """Run `_post_responses`, transparently refreshing once on 401."""
@@ -703,7 +677,7 @@ class OpenAICodexClient(LLMClient):
             except Exception as refresh_err:
                 raise RuntimeError(
                     f"Codex OAuth token expired and auto-refresh failed: "
-                    f"{refresh_err}. Run `codex login` to renew."
+                    f"{refresh_err}. {NO_AUTH_HINT}"
                 ) from refresh_err
             return self._post_responses(body)
 

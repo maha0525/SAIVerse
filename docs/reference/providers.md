@@ -30,6 +30,15 @@
 
 ローカルサーバー側に認証を掛けている場合は `api_key_env` を併記すれば、そちらが優先される（プレースホルダは環境変数が空のときだけ使われる）。この項目は UI（モデル管理 > プロバイダ > 「API キーなしで接続できるサーバー」）からも設定できる。
 
+### OpenAI Codex は API キーでなくログインで認証する
+
+`openai_codex` プロバイダは ChatGPT サブスクリプションの OAuth トークンを使うため、`api_key_env` を持たない。認証の入り口は2つあり、SAIVerse は次の優先順位でトークンを探す（解決は `llm_clients/openai_codex_auth.py` が一元管理）。
+
+1. **SAIVerse 自身のログイン**（推奨） — UI（モデル管理 > プロバイダ > `openai_codex` 行の「ChatGPT でログイン」）からデバイスコード方式でログインする。ブラウザで `auth.openai.com/codex/device` を開いて画面のコードを入力すると完了し、トークンは `~/.saiverse/user_data/codex_auth.json` に保存される。Codex CLI のインストールは不要
+2. **Codex CLI への相乗り**（従来方式） — `codex login` が作る `~/.codex/auth.json` を読む。`~/.codex/config.toml` に `cli_auth_credentials_store_mode = "file"` が必要
+
+1 のファイルが存在する間は常に 1 が使われる（壊れていても 2 へ黙って乗り換えない — 別アカウントへの無断切替を防ぐため）。期限切れトークンはどちらの方式でも SAIVerse が自動で更新し、**読んだ方のファイルへ**書き戻す。UI からのログアウトは 1 のファイルを消すだけで、`~/.codex` には決して触れない。設計は [`docs/intent/codex_subscription_auth.md`](../intent/codex_subscription_auth.md)。
+
 ### OpenRouter だけアプリ名を名乗る
 
 `openrouter` プロバイダは `default_headers` を持ち、LLM 呼び出しに次の3つを乗せる。OpenRouter はこれを見て呼び出し元アプリを判別し、[公開アプリランキング](https://openrouter.ai/apps) に集計する。

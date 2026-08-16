@@ -28,7 +28,7 @@ from api.routes import observer, feeds
 api_router.include_router(observer.router, prefix="/observer", tags=["observer"])
 api_router.include_router(feeds.router, prefix="/feeds", tags=["feeds"])
 
-from api.routes import addon, addon_actions, addon_catalog, addon_events, oauth
+from api.routes import addon, addon_actions, addon_catalog, addon_events, codex_auth, oauth
 # addon_events(/events など固定パス)を addon(/{addon_name} キャッチオール)より
 # 先に登録する。逆順だと GET /api/addon/events が GET /api/addon/{addon_name} に
 # 飲まれて 404 "Addon not found" になる。
@@ -37,3 +37,4 @@ api_router.include_router(addon_actions.router, prefix="/addon", tags=["addon-ac
 api_router.include_router(addon.router, prefix="/addon", tags=["addon"])
 api_router.include_router(addon_catalog.router, prefix="/addon-catalog", tags=["addon-catalog"])
 api_router.include_router(oauth.router, prefix="/oauth", tags=["oauth"])
+api_router.include_router(codex_auth.router, prefix="/codex-auth", tags=["codex-auth"])
