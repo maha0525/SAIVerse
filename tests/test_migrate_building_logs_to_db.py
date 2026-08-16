@@ -767,6 +767,88 @@ class MigrateBuildingLogsTests(unittest.TestCase):
         self.assertEqual(stats.buildings_failed, 1)
         self.assertEqual(self._all_db_messages(), [])
 
+    def test_mixed_run_updates_metadata_for_already_imported_rooms(self) -> None:
+        """新規取り込みの部屋と既取り込みの部屋が混ざっても、後者の付随データが
+        取り残されない。
+
+        対応表の再構築を「対応表が空のときだけ」にすると、新規取り込みが 1 部屋でも
+        あった実行では既取り込みの部屋の対応が補われず、その部屋の
+        AddonMessageMetadata が旧 ID のまま永久に残る。
+        """
+        # room_done は先に取り込んでおく
+        self._make_building_log(
+            "city_a", "room_done",
+            [{"role": "user", "content": "done", "seq": 1,
+              "message_id": "room_done:old1",
+              "timestamp": "2026-05-01T10:00:00", "heard_by": []}],
+        )
+        self._run_main([])
+
+        # room_done の付随データを後から足し、同時に新しい部屋を追加する
+        db = self.SessionLocal()
+        try:
+            db.add(AddonMessageMetadata(
+                message_id="room_done:old1", addon_name="voice", key="audio", value="late",
+            ))
+            db.commit()
+        finally:
+            db.close()
+        self._make_building_log(
+            "city_a", "room_new",
+            [{"role": "user", "content": "new", "seq": 1,
+              "message_id": "room_new:old1",
+              "timestamp": "2026-05-02T10:00:00", "heard_by": []}],
+        )
+        self._run_main([])
+
+        db = self.SessionLocal()
+        try:
+            rows = db.query(AddonMessageMetadata).all()
+            self.assertEqual(len(rows), 1)
+            # 旧 ID のまま取り残されていない
+            self.assertEqual(rows[0].message_id, "room_done:-1")
+        finally:
+            db.close()
+
+    def test_id_map_never_points_at_a_row_that_does_not_exist(self) -> None:
+        """対応表が指す新 message_id は、必ず DB に実在する。
+
+        これが崩れると update_addon_metadata が存在しない行へ付随データを向ける。
+        巻き戻った部屋・確定に失敗した部屋の分が対応表に残っていないことを、
+        「表の全エントリが DB に居るか」という形で確かめる (どの失敗経路でも
+        同じ 1 つの不変条件で見る)。
+        """
+        from saiverse.legacy_log_import import import_building_logs
+
+        # 成功する部屋と、途中で壊れて巻き戻る部屋を混ぜる
+        self._make_building_log(
+            "city_a", "room_ok",
+            [{"role": "user", "content": "ok", "seq": 1, "message_id": "room_ok:old1",
+              "timestamp": "2026-05-20T10:00:00", "heard_by": []}],
+        )
+        self._make_building_log(
+            "city_a", "room_broken",
+            [
+                {"role": "user", "content": "a", "seq": 1,
+                 "message_id": "room_broken:old1",
+                 "timestamp": "2026-05-20T10:00:00", "heard_by": []},
+                "壊れた要素",
+            ],
+        )
+        stats = self._import(commit_per_building=True)
+
+        self.assertEqual(stats.buildings_failed, 1)
+        db = self.SessionLocal()
+        try:
+            existing = {
+                m for (m,) in db.query(BuildingMessage.message_id).all() if m
+            }
+        finally:
+            db.close()
+        mapped = set(stats.legacy_message_id_map.values())
+        self.assertTrue(mapped, "対応表が空では検査にならない")
+        self.assertEqual(mapped - existing, set())
+
     def test_rolled_back_room_does_not_move_addon_metadata(self) -> None:
         """巻き戻した部屋の付随データは動かさない。
 

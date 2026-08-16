@@ -48,6 +48,17 @@ from database.building_messages import serialize_building_message
 LOGGER = logging.getLogger(__name__)
 
 
+@dataclass
+class BuildingImportResult:
+    """1 部屋の取り込み結果。**呼び出し側が確定を見届けてから** stats へ合流させる。
+
+    status: "imported" (取り込んだ) / "already" (入れるものが無い)
+    """
+    status: str
+    id_map: Dict[Tuple[str, str], str] = field(default_factory=dict)
+    inserted: int = 0
+
+
 class LegacyLogPartialImport(Exception):
     """1 部屋の取り込みが途中で失敗したことを示す。
 
@@ -248,7 +259,7 @@ def migrate_building(
             building_id, len(messages_list),
         )
         stats.buildings_skipped_already_migrated += 1
-        return "already"
+        return BuildingImportResult("already")
 
     # 採番の起点。既に負の seq がある部屋ではその手前へ続ける。無ければ 0 の手前から。
     min_seq = db.query(func.min(BuildingMessage.seq)).filter_by(
@@ -312,11 +323,6 @@ def migrate_building(
                 f"(ファイル側の番号={legacy_seq_int}): {e}"
             ) from e
 
-    # ここまで来た = 全件入った。対応表を全体へ合流させてよい。
-    for key, value in local_id_map.items():
-        stats.legacy_message_id_map.setdefault(key, value)
-    stats.messages_inserted += local_inserted
-
     # cursor の操作は要らない。取り込んだ行の seq は必ず 0 未満で、「どこまで
     # 読んだか」は 0 以上なので、負の seq は常に既読側に入る。
     LOGGER.info(
@@ -324,7 +330,11 @@ def migrate_building(
         "いま話している分より前に入ります)",
         building_id, local_inserted, base - total, base - 1,
     )
-    return "imported"
+    # **ここでは stats へ合流させない。** SAVEPOINT が RELEASE されるのは呼び出し側の
+    # with を抜けたときで、そこで失敗すれば DB 行は残らない。合流を関数の中でやると
+    # 「行は無いのに対応表と件数だけ残る」状態を作り、update_addon_metadata が
+    # 存在しない ID へ付け替える (2026-08-16 Codex 3 巡目の指摘)。
+    return BuildingImportResult("imported", local_id_map, local_inserted)
 
 
 def update_addon_metadata(db, stats: MigrationStats, *, dry_run: bool) -> None:
@@ -484,7 +494,15 @@ def import_building_logs(
             continue
         try:
             with db.begin_nested():
-                migrate_building(db, building_id, messages, stats, dry_run=dry_run)
+                result = migrate_building(
+                    db, building_id, messages, stats, dry_run=dry_run,
+                )
+            # SAVEPOINT を抜けた = この部屋の書き込みが確定した。ここで初めて
+            # 対応表と件数を合流させる (RELEASE が失敗すれば上の except に入り、
+            # 行も対応表も残らない)。
+            for key, value in result.id_map.items():
+                stats.legacy_message_id_map.setdefault(key, value)
+            stats.messages_inserted += result.inserted
         except LegacyLogPartialImport as e:
             # 1 行でも入らなければ全件やり直し。中途半端に入れると欠けが沈黙する。
             LOGGER.error(
@@ -507,10 +525,13 @@ def import_building_logs(
         if commit_each:
             db.commit()
 
-    # 再実行時 (全 building が既取り込みで map が空) のために、 既存 building_messages
-    # から legacy_message_id → 新 message_id を再構築する。
-    if not stats.legacy_message_id_map:
-        rebuild_legacy_map_from_db(db, stats)
+    # 既存 building_messages から legacy_message_id → 新 message_id を補う。
+    # **map が空のときだけ、にしてはいけない** — 新しく取り込んだ部屋と、既に
+    # 取り込み済みで skip した部屋が混ざると、後者の対応が永久に補われず、
+    # その部屋の AddonMessageMetadata が旧 ID のまま取り残される
+    # (2026-08-16 Codex 3 巡目の指摘)。今回入れた分を優先し、足りない分を DB から
+    # 埋める (rebuild 側が既存キーを上書きしない)。
+    rebuild_legacy_map_from_db(db, stats)
 
     # メタデータの付け替えに失敗しても、確定済みの取り込み行は残す
     # (メッセージ本体の方が addon メタデータより失って困る)。
