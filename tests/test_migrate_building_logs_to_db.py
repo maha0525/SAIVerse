@@ -106,11 +106,11 @@ class MigrateBuildingLogsTests(unittest.TestCase):
         self._run_main([])
         rows = self._all_db_messages()
         self.assertEqual(len(rows), 2)
-        # 新 seq は 1, 2 で連番採番
-        self.assertEqual(rows[0].seq, 1)
-        self.assertEqual(rows[1].seq, 2)
-        self.assertEqual(rows[0].message_id, "room1:1")
-        self.assertEqual(rows[1].message_id, "room1:2")
+        # 取り込んだ過去ログは 0 未満。ファイル順のまま 0 の手前に詰める
+        self.assertEqual(rows[0].seq, -2)
+        self.assertEqual(rows[1].seq, -1)
+        self.assertEqual(rows[0].message_id, "room1:-2")
+        self.assertEqual(rows[1].message_id, "room1:-1")
         # legacy_* に元情報
         self.assertEqual(rows[0].legacy_seq, 100)
         self.assertEqual(rows[1].legacy_seq, 101)
@@ -157,7 +157,7 @@ class MigrateBuildingLogsTests(unittest.TestCase):
         finally:
             db.close()
 
-        # log.json: 旧 seq=100 のメッセージ。 新 seq は 1 になる
+        # log.json: 旧 seq=100 のメッセージ。 1 件なので新 seq は -1 になる
         self._make_building_log(
             "city_a",
             "room1",
@@ -174,7 +174,7 @@ class MigrateBuildingLogsTests(unittest.TestCase):
         try:
             rows = db.query(AddonMessageMetadata).all()
             self.assertEqual(len(rows), 1)
-            self.assertEqual(rows[0].message_id, "room1:1")
+            self.assertEqual(rows[0].message_id, "room1:-1")
             self.assertEqual(rows[0].value, "/path/to/audio.ogg")
         finally:
             db.close()
@@ -204,12 +204,12 @@ class MigrateBuildingLogsTests(unittest.TestCase):
             ],
         )
         self._run_main([])
-        # 新 seq=1 が最初に出会った行 → AddonMessageMetadata は room1:1 へ
+        # 最初に出会った行 (2 件中の 1 件目 = seq -2) へ AddonMessageMetadata を寄せる
         db = self.SessionLocal()
         try:
             rows = db.query(AddonMessageMetadata).all()
             self.assertEqual(len(rows), 1)
-            self.assertEqual(rows[0].message_id, "room1:1")
+            self.assertEqual(rows[0].message_id, "room1:-2")
         finally:
             db.close()
 
@@ -289,9 +289,12 @@ class MigrateBuildingLogsTests(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0].content, "hi")
 
-    def test_live_rows_without_import_trace_skipped(self) -> None:
-        """取り込み痕跡 (legacy_seq) が無いのに通常経路の行がある building は、
-        過去ログを後付けすると順序が壊れるため取り込まない。"""
+    def test_existing_live_rows_get_legacy_history_prepended(self) -> None:
+        """既に会話が始まっている部屋でも、過去ログは時系列どおり前に入る。
+
+        既存の行は 1 つも動かさない — 行の seq / message_id はペルソナ個人の記憶に
+        残る転記元の目印や AddonMessageMetadata から参照されているため。
+        """
         db = self.SessionLocal()
         try:
             db.add(BuildingMessage(
@@ -305,17 +308,52 @@ class MigrateBuildingLogsTests(unittest.TestCase):
 
         self._make_building_log(
             "city_a", "room_live",
-            [{"role": "user", "content": "old msg", "seq": 1, "message_id": "room_live:1",
+            [{"role": "user", "content": "old msg", "seq": 7,
+              "message_id": "room_live:old7",
               "timestamp": "2026-05-01T10:00:00", "heard_by": []}],
         )
         self._run_main([])
         rows = self._all_db_messages()
-        self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0].content, "live msg")
-        self.assertIsNone(rows[0].legacy_seq)
+        self.assertEqual([r.content for r in rows], ["old msg", "live msg"])
+        self.assertEqual(rows[0].seq, -1)
+        self.assertEqual(rows[0].legacy_seq, 7)
+        # 既存の行は据え置き
+        self.assertEqual(rows[1].seq, 1)
+        self.assertEqual(rows[1].message_id, "room_live:1")
+        self.assertIsNone(rows[1].legacy_seq)
+
+    def test_second_prepend_continues_below_existing_negative_seqs(self) -> None:
+        """既に負の seq がある部屋では、さらにその手前へ続ける。"""
+        db = self.SessionLocal()
+        try:
+            db.add(BuildingMessage(
+                building_id="room1", seq=-1, role="user", content="前回入れた過去ログ",
+                timestamp="2026-04-01T10:00:00", heard_by="[]", ingested_by="[]",
+                message_id="room1:-1", legacy_seq=3, legacy_message_id="room1:old3",
+            ))
+            db.commit()
+        finally:
+            db.close()
+        # 取り込み痕跡があるので通常は skip される。migrate_building を直接呼んで
+        # 採番の起点だけを見る。
+        from saiverse.legacy_log_import import MigrationStats, migrate_building
+        db = self.SessionLocal()
+        try:
+            migrate_building(
+                db, "room1",
+                [{"role": "user", "content": "さらに古い", "seq": 1,
+                  "message_id": "room1:old1", "heard_by": []}],
+                MigrationStats(), dry_run=False,
+            )
+            db.commit()
+        finally:
+            db.close()
+        rows = self._all_db_messages()
+        self.assertEqual([r.seq for r in rows], [-2, -1])
+        self.assertEqual(rows[0].content, "さらに古い")
 
     def test_messages_without_seq_still_imported_with_null_legacy_seq(self) -> None:
-        """seq なしの行も全件取り込む (新規連番採番)。 legacy_seq は NULL。"""
+        """seq なしの行も全件取り込む。 legacy_seq は NULL。"""
         self._make_building_log(
             "city_a",
             "room1",
@@ -329,25 +367,20 @@ class MigrateBuildingLogsTests(unittest.TestCase):
         self._run_main([])
         rows = self._all_db_messages()
         self.assertEqual(len(rows), 2)
-        # 最初の行 (seq なし) は legacy_seq=NULL、 新 seq=1
-        self.assertEqual(rows[0].seq, 1)
+        # 最初の行 (seq なし) は legacy_seq=NULL、 新 seq=-2
+        self.assertEqual(rows[0].seq, -2)
         self.assertIsNone(rows[0].legacy_seq)
         self.assertIsNone(rows[0].legacy_message_id)
-        # 2 つ目は legacy_seq=1, 新 seq=2
-        self.assertEqual(rows[1].seq, 2)
+        # 2 つ目は legacy_seq=1, 新 seq=-1
+        self.assertEqual(rows[1].seq, -1)
         self.assertEqual(rows[1].legacy_seq, 1)
 
     def test_addon_metadata_two_phase_handles_swapped_message_ids(self) -> None:
         """二段階 UPDATE: 旧 seq=A と 旧 seq=B が new で互いの値に置き換わるケース。
 
-        旧 log.json:
-          - seq=10 行 → 新 seq=1 (= "room:1")
-          - seq=11 行 → 新 seq=2 (= "room:2")
-        AddonMessageMetadata:
-          - id=A: message_id="room:10" → 新 "room:1" に動かしたい
-          - id=B: message_id="room:11" → 新 "room:2" に動かしたい
-        逐次 UPDATE では衝突しないが、 もし旧 log で逆順 (seq=11 行が先、 seq=10 行が後)
-        だと: 旧 seq=11 → 新 1、 旧 seq=10 → 新 2 となる。 これでも問題なく完了することを確認。
+        旧 message_id 空間と新採番空間が重なると、逐次 UPDATE は中間状態で UNIQUE
+        制約に触れる。ここでは 2 件を逆順で入れて、二段階 UPDATE が衝突なく
+        完了することを見る。
         """
         db = self.SessionLocal()
         try:
@@ -361,7 +394,7 @@ class MigrateBuildingLogsTests(unittest.TestCase):
         finally:
             db.close()
 
-        # log.json: 順序は seq=11 → seq=10 (逆順)。 新採番では順に 1, 2
+        # log.json: 順序は seq=11 → seq=10 (逆順)。 新採番では順に -2, -1
         self._make_building_log(
             "city_a", "room1",
             [
@@ -373,14 +406,14 @@ class MigrateBuildingLogsTests(unittest.TestCase):
         )
         self._run_main([])
 
-        # AddonMessageMetadata: 旧 11 → 新 1、 旧 10 → 新 2
+        # AddonMessageMetadata: 旧 11 → 新 -2、 旧 10 → 新 -1
         db = self.SessionLocal()
         try:
             rows = db.query(AddonMessageMetadata).order_by(AddonMessageMetadata.value).all()
             self.assertEqual(len(rows), 2)
             by_value = {r.value: r.message_id for r in rows}
-            self.assertEqual(by_value["v_old_10"], "room1:2")
-            self.assertEqual(by_value["v_old_11"], "room1:1")
+            self.assertEqual(by_value["v_old_10"], "room1:-1")
+            self.assertEqual(by_value["v_old_11"], "room1:-2")
         finally:
             db.close()
 
@@ -388,16 +421,16 @@ class MigrateBuildingLogsTests(unittest.TestCase):
         """target に migration 対象外の既存行があれば、 migration 対象を捨てて既存を尊重する。
 
         既存:
-          - id=A: message_id="room1:1", addon=x, key=y  (= migration 対象外, 元から存在)
-          - id=B: message_id="room1:旧A", addon=x, key=y  (= migration 対象、 → "room1:1" に動かしたい)
-        log.json: 1 行だけ (seq=1, message_id="room1:旧A") → 新 message_id="room1:1"
+          - id=A: message_id="room1:-1", addon=x, key=y  (= migration 対象外, 元から存在)
+          - id=B: message_id="room1:旧A", addon=x, key=y  (= migration 対象、 → "room1:-1" に動かしたい)
+        log.json: 1 行だけ (message_id="room1:旧A") → 新 message_id="room1:-1"
         結果: id=A は不変、 id=B は削除される (= 既存を尊重)
         """
         db = self.SessionLocal()
         try:
             db.add(AddonMessageMetadata(
                 id=100,
-                message_id="room1:1", addon_name="x", key="y", value="existing",
+                message_id="room1:-1", addon_name="x", key="y", value="existing",
             ))
             db.add(AddonMessageMetadata(
                 id=200,
@@ -456,7 +489,7 @@ class MigrateBuildingLogsTests(unittest.TestCase):
         try:
             rows = db.query(AddonMessageMetadata).all()
             self.assertEqual(len(rows), 1)
-            self.assertEqual(rows[0].message_id, "room1:1")  # 新採番=1
+            self.assertEqual(rows[0].message_id, "room1:-1")  # 1 件なので新採番=-1
         finally:
             db.close()
 
@@ -477,12 +510,16 @@ class MigrateBuildingLogsTests(unittest.TestCase):
         self.assertEqual(rows[0].content, "a")
 
     # ------------------------------------------------------------------
-    # 取り込み時の cursor 前進 (過去ログを「未読の新着」に化けさせない)
+    # 取り込みは「どこまで読んだか」に触らない
+    # (負の seq は常に既読側に入るので、触る必要が無い)
     # ------------------------------------------------------------------
 
-    def test_import_advances_existing_cursor_rows(self) -> None:
-        """cursor=0 の既存行がある部屋へ取り込むと、cursor が取り込み末尾へ進む。
-        進めないと次の Pulse が取り込んだ全過去ログを未読として消化しに行く。"""
+    def test_import_leaves_cursor_rows_untouched(self) -> None:
+        """cursor=0 の行がある部屋へ取り込んでも、cursor は 0 のまま。
+
+        取り込んだ行の seq は必ず 0 未満なので、cursor=0 のままで既読側に入る。
+        前進させる仕掛けが要らない = 前進先を間違えて実末尾を追い越す事故も起きない。
+        """
         from database.models import PersonaPulseCursor
         db = self.SessionLocal()
         try:
@@ -504,19 +541,20 @@ class MigrateBuildingLogsTests(unittest.TestCase):
         )
         self._run_main([])
 
+        rows = self._all_db_messages()
+        self.assertEqual([r.seq for r in rows], [-2, -1])
         db = self.SessionLocal()
         try:
             row = db.query(PersonaPulseCursor).filter_by(
                 PERSONA_ID="p1", BUILDING_ID="room1"
             ).one()
-            self.assertEqual(row.CURSOR_SEQ, 2)
-            self.assertEqual(row.ENTRY_MARKER_SEQ, 2)
+            self.assertEqual(row.CURSOR_SEQ, 0)
+            self.assertEqual(row.ENTRY_MARKER_SEQ, 0)
         finally:
             db.close()
 
     def test_import_does_not_create_cursor_rows(self) -> None:
-        """cursor 行が無い環境 (リリース版ユーザーの経路) では行を作らない —
-        位置は後続の conscious_log 取り込みが決める。"""
+        """cursor 行が無い環境 (リリース版ユーザーの経路) では行を作らない。"""
         from database.models import PersonaPulseCursor
         self._make_building_log(
             "city_a", "room1",
@@ -529,6 +567,22 @@ class MigrateBuildingLogsTests(unittest.TestCase):
             self.assertEqual(db.query(PersonaPulseCursor).count(), 0)
         finally:
             db.close()
+
+    def test_new_message_after_import_starts_at_seq_1(self) -> None:
+        """過去ログしか無い部屋でも、次の発言は seq=1 から始まる (0 や負に落ちない)。"""
+        from database.building_messages import insert_building_message
+        self._make_building_log(
+            "city_a", "room1",
+            [{"role": "user", "content": "old", "seq": 1, "message_id": "room1:1",
+              "timestamp": "2026-05-20T10:00:00", "heard_by": []}],
+        )
+        self._run_main([])
+        saved = insert_building_message(
+            self.SessionLocal, "room1",
+            {"role": "user", "content": "new", "timestamp": "2026-06-01T00:00:00"},
+        )
+        self.assertEqual(saved["seq"], 1)
+        self.assertEqual([r.seq for r in self._all_db_messages()], [-1, 1])
 
     # ------------------------------------------------------------------
     # 起動時の検算: scan_legacy_log_deficits
@@ -710,45 +764,29 @@ class MigrateBuildingLogsTests(unittest.TestCase):
         contents = [r.content for r in self._all_db_messages()]
         self.assertEqual(contents, ["a", "c"])
 
-    def test_cursor_does_not_overshoot_when_tail_row_fails(self) -> None:
-        """末尾の行が取り込めなかったとき、cursor は DB の実末尾までしか進めない。
+    def test_failed_row_leaves_a_gap_and_does_not_shift_others(self) -> None:
+        """途中の行が取り込めなくても、他の行の番号は詰め直さない。
 
-        ファイル件数 (=3) まで進めると、この部屋の次の本物の新着 (seq=3 で
-        採番される) が既読として食われ、永久に見えなくなる。
+        詰め直すと、同じファイルを再取り込みしたときに別の番号が振られ、既に
+        個人記憶へ残した転記元の目印と食い違う。空いた番号が残るだけなら、
+        並び順にも既読判定にも影響しない。
         """
-        from database.models import PersonaPulseCursor
-        db = self.SessionLocal()
-        try:
-            db.add(PersonaPulseCursor(
-                PERSONA_ID="p1", BUILDING_ID="room1", CURSOR_SEQ=0, ENTRY_MARKER_SEQ=0,
-            ))
-            db.commit()
-        finally:
-            db.close()
-
         self._make_building_log(
             "city_a", "room1",
             [
                 {"role": "user", "content": "a", "seq": 1, "message_id": "room1:1",
                  "timestamp": "2026-05-20T10:00:00", "heard_by": []},
-                {"role": "user", "content": "b", "seq": 2, "message_id": "room1:2",
-                 "timestamp": "2026-05-20T10:00:01", "heard_by": []},
-                "壊れた末尾",
+                "壊れた真ん中",
+                {"role": "user", "content": "c", "seq": 3, "message_id": "room1:3",
+                 "timestamp": "2026-05-20T10:00:02", "heard_by": []},
             ],
         )
         self._run_main([])
 
         rows = self._all_db_messages()
-        self.assertEqual([r.seq for r in rows], [1, 2])
-        db = self.SessionLocal()
-        try:
-            cursor = db.query(PersonaPulseCursor).filter_by(
-                PERSONA_ID="p1", BUILDING_ID="room1"
-            ).one()
-            self.assertEqual(cursor.CURSOR_SEQ, 2)
-            self.assertEqual(cursor.ENTRY_MARKER_SEQ, 2)
-        finally:
-            db.close()
+        # 3 件ぶんの席 (-3, -2, -1) を取り、真ん中が空く
+        self.assertEqual([r.seq for r in rows], [-3, -1])
+        self.assertEqual([r.content for r in rows], ["a", "c"])
 
     def test_failing_building_does_not_roll_back_earlier_buildings(self) -> None:
         """後半の部屋が丸ごと失敗しても、先に取り込めた部屋は確定したまま残る。"""
@@ -834,7 +872,7 @@ class MigrateBuildingLogsTests(unittest.TestCase):
         )
         stats = self._import(commit_per_building=True)
         self.assertEqual(stats.buildings_skipped_already_migrated, 1)
-        self.assertEqual(stats.buildings_skipped_live_rows, 0)
+        self.assertEqual(stats.messages_inserted, 0)
 
     def test_scan_survives_undecodable_file(self) -> None:
         """UTF-8 として読めないファイルでも例外にせず unreadable として報告する。"""

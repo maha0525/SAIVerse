@@ -201,17 +201,26 @@ class InitializationMixin:
         self._check_legacy_building_log_import()
 
     def _check_legacy_building_log_import(self) -> None:
-        """旧 log.json ↔ DB の取り込み状況の検算 (毎起動の常設の関所)。
+        """旧 log.json の取り込み漏れを毎起動で見つけ、その場で取り込む。
 
-        旧ファイルに履歴があるのに DB に取り込み痕跡が無い部屋を探し、見つかれば
-        startup_alerts (UI バナー) に載せる。取り込み自体はバージョンアップグレード
-        (upgrade_handlers dev5) や手動スクリプトの仕事で、ここは「漏れたら解消される
-        まで毎起動アラートが出続ける」ことだけを保証する。2026-08-16 の
+        **見つけた本人が直す。** 見つけられるのに放置してバナーだけ出すと、
+        ユーザーは「取り込まれていません」と言われるだけで何もできない
+        (2026-08-16 まはー裁定)。取り込みは冪等 — 既に DB に居る発言は入れない —
+        なので毎起動走らせて構わない。
+
+        取り込んだ過去ログは 0 未満の seq を持ち、通常の発言 (1 以上) より必ず
+        前に並ぶ。既存の行は 1 つも動かないので、行を指している他の記録
+        (ペルソナ個人の記憶に残る転記元の目印、AddonMessageMetadata) もずれない。
+
+        直せなかったものだけ startup_alerts (UI バナー) に載せる。2026-08-16 の
         テスタロッサの部屋 (隔離マーカー残置で移行がスキップされ、2 ヶ月半誰も
         気づかなかった) の再発防止。
         """
         from saiverse.legacy_log_import import scan_legacy_log_deficits
 
+        # 直せる見込みのある種類。壊れて読めないファイルと、検算自体が倒れた部屋は
+        # 取り込みを試しても同じ場所で失敗するので触らない。
+        repairable = {"not_imported", "live_rows_only", "partial"}
         try:
             db = self.SessionLocal()
             try:
@@ -219,6 +228,14 @@ class InitializationMixin:
                     db, self.saiverse_home, self.city_name,
                     [b.building_id for b in self.buildings],
                 )
+                targets = [d["building_id"] for d in deficits if d["kind"] in repairable]
+                if targets:
+                    self._repair_legacy_building_logs(db, targets)
+                    # 直った証拠は自分の帳簿でなく DB から取り直す
+                    deficits = scan_legacy_log_deficits(
+                        db, self.saiverse_home, self.city_name,
+                        [b.building_id for b in self.buildings],
+                    )
             finally:
                 db.close()
         except Exception as e:
@@ -257,28 +274,16 @@ class InitializationMixin:
                     f"（{d['reason']}）。このままでは過去の会話履歴を新しい保存先"
                     "（データベース）に取り込めません。"
                 )
-            elif d["kind"] == "live_rows_only":
-                level = "warning"
+            else:
+                # 自動の取り込みを試したうえで、まだ入っていないもの。
+                # 種類 (not_imported / live_rows_only / partial) の違いは
+                # 直せなかった時点でユーザーには関係ないので、1 つの文にまとめる。
+                level = "critical" if d["kind"] == "not_imported" else "warning"
                 body = (
-                    f"部屋「{display}」の過去の会話履歴のうち {d['missing']} 件が"
-                    "旧形式のファイルに残ったまま取り込まれていません。この部屋には"
-                    "新しい発言が既にあるため、後から自動で取り込むと順序が壊れます。"
-                    "手動での対応が必要です。"
-                )
-            elif d["kind"] == "partial":
-                level = "warning"
-                body = (
-                    f"部屋「{display}」の過去の会話履歴のうち {d['missing']} 件が"
-                    f"取り込まれていません（旧形式のファイルには {d['file_entries']} 件）。"
-                )
-            else:  # not_imported
-                level = "critical"
-                body = (
-                    f"部屋「{display}」の過去の会話履歴 {d['file_entries']} 件が"
-                    "新しい保存先（データベース）に取り込まれておらず、画面に"
-                    "表示されません。データ自体は旧形式のファイルに残っています。"
-                    "scripts/migrate_building_logs_to_db.py を "
-                    f"--building-id {b_id} 付きで実行すると取り込めます。"
+                    f"部屋「{display}」の古い会話 {d['missing']} 件を新しい保存先"
+                    "（データベース）へ移そうとしましたが、移せませんでした。"
+                    "この分は画面に表示されません。"
+                    "会話そのものは古いファイルに残っているので、失われてはいません。"
                 )
             self.startup_alerts.append({
                 "id": f"legacy_log_deficit_{b_id}",
@@ -289,8 +294,38 @@ class InitializationMixin:
             })
         if deficits:
             LOGGER.warning(
-                "legacy building log check: %d 部屋で取り込み漏れを検出 (%s)",
+                "legacy building log check: %d 部屋で取り込み漏れが残った (%s)",
                 len(deficits), ", ".join(d["building_id"] for d in deficits),
+            )
+
+    def _repair_legacy_building_logs(self, db, building_ids: List[str]) -> None:
+        """取り込み漏れの見つかった部屋を、その場で取り込む。
+
+        部屋ごとに呼んで部屋ごとに確定させる — 後半で失敗しても、先に取り込めた
+        部屋の会話は残す。1 部屋の中の失敗の隔離は import_building_logs 側が持つ。
+        """
+        from saiverse.legacy_log_import import import_building_logs
+
+        LOGGER.info(
+            "legacy building log repair: %d 部屋を取り込む (%s)",
+            len(building_ids), ", ".join(building_ids),
+        )
+        for b_id in building_ids:
+            try:
+                stats = import_building_logs(
+                    db, self.saiverse_home,
+                    city_filter=self.city_name, building_filter=b_id,
+                    commit_per_building=True,
+                )
+            except Exception:
+                LOGGER.error(
+                    "legacy building log repair failed: building=%s",
+                    b_id, exc_info=True,
+                )
+                continue
+            LOGGER.info(
+                "legacy building log repair: building=%s 取り込み=%d 失敗=%d",
+                b_id, stats.messages_inserted, stats.buildings_failed,
             )
 
     def _quarantine_building(

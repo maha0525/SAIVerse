@@ -55,7 +55,6 @@ class MigrationStats:
     buildings_scanned: int = 0
     buildings_skipped_unreadable: int = 0
     buildings_skipped_already_migrated: int = 0
-    buildings_skipped_live_rows: int = 0
     buildings_failed: int = 0
     messages_seen: int = 0
     messages_inserted: int = 0
@@ -70,23 +69,27 @@ class MigrationStats:
 def imported_row_filter():
     """「この行は過去ログ取り込みで作られた」を判定する SQL 条件。
 
-    取り込みは元ファイルの seq / message_id を ``legacy_seq`` / ``legacy_message_id``
-    へ退避する。通常の書き込み経路 (``database.building_messages`` の
-    ``insert_building_message``) はこの 2 列を NULL のまま入れるため、どちらかが
-    埋まっていれば取り込み由来と判定できる。
+    使うのは検算 (:func:`scan_legacy_log_deficits`) だけで、報告の種類を
+    ``not_imported`` / ``live_rows_only`` / ``partial`` に振り分けるために引く。
+    **取り込むかどうかの判断には使わない** — そちらは「その発言が既に DB に
+    居るか」を message_id で見る (:func:`migrate_building`)。印の有無に頼ると、
+    印の残らない行があったときに二重取り込みを起こすため。
 
-    冪等判定 (:func:`migrate_building`) と検算 (:func:`scan_legacy_log_deficits`)
-    の両方がこの 1 つの定義を使う — 2 箇所に別々の条件を書くと必ずずれるため。
+    見分けの手がかり:
 
-    **精度の限界**: 元ファイルの行が seq も message_id も持たない場合 (旧形式の
-    移動イベント等) は取り込んでも痕跡が残らず、この判定から漏れる。全行が
-    その形の部屋が本番データに 3 つある (2026-08-16 実測)。漏れたときの影響は
-    「取り込み済みの部屋を『通常経路の行あり』と誤ラベルする」だけで、行が 1 つ
-    でもある部屋は :func:`migrate_building` が必ず skip するため、二重取り込みに
-    はならない。正確に判定するには取り込み印の列を足す必要があり、実害が
-    ラベルだけなので見送っている。
+    - ``seq < 0``: 現行の取り込みが使う番号帯。通常の発言は必ず 1 以上なので、
+      これだけで確実に見分けられる (元ファイルの中身に依存しない)。
+    - ``legacy_seq`` / ``legacy_message_id`` が埋まっている: 2026-08-16 より前の
+      取り込みは正の番号で入れていたので、この 2 列が唯一の手がかりになる。
+      通常の書き込み経路はこの 2 列を NULL のまま入れる。
+
+    旧取り込み分については、元ファイルの行が seq も message_id も持たない場合に
+    痕跡が残らず漏れる (全行がその形の部屋が本番データに 3 つある)。漏れても
+    影響は報告の種類がずれることだけ。その部屋に取り込むものがあるかどうかは
+    message_id の突き合わせが決めるので、二重取り込みにはならない。
     """
     return or_(
+        BuildingMessage.seq < 0,
         BuildingMessage.legacy_seq.isnot(None),
         BuildingMessage.legacy_message_id.isnot(None),
     )
@@ -160,51 +163,82 @@ def migrate_building(
     *,
     dry_run: bool,
 ) -> str:
-    """1 building 分のメッセージを全件 DB に取り込む (連番採番)。commit しない。
+    """1 building 分のメッセージを全件 DB に取り込む。commit しない。
+
+    **取り込んだ過去ログは 0 より小さい seq を持つ。** 通常の発言は 1 から順に
+    採番されるので、過去ログは必ずその手前に並ぶ。この一本の規則で 3 つのことが
+    同時に片付く:
+
+    - **並び順**: 既に会話が始まっている部屋でも、過去ログは時系列どおり前に入る。
+      既存の行は 1 つも動かさないので、行の seq / message_id を指している他の記録
+      (ペルソナ個人の記憶に残る転記元の目印、AddonMessageMetadata) がずれない。
+    - **既読の扱い**: 「どこまで読んだか」は 0 以上なので、負の seq は常にそれ以下 =
+      既読。過去ログを「未読の新着」に化けさせないための cursor 操作が要らなくなる。
+    - **見分け**: その部屋の過去ログは seq < 0 で正確に引ける。
+
+    入れるのは **まだ DB に居ない発言だけ**。判定は起動時の検算
+    (:func:`scan_legacy_log_deficits`) と同じ規則 — ファイルの各発言の
+    message_id が DB のどこにも無いものを「欠け」と数える。同じ規則を使うのは、
+    「取り込む対象」と「欠けとして警告する対象」がずれないため。
+
+    message_id を持たない発言は、その部屋に行が 1 つも無いとき (= ファイルが
+    唯一の写し) だけ入れる。行があるときは、既に入っているのか未取り込みなのかを
+    見分けられないので触らない — 入れると同じ発言を二重に並べる。
 
     Returns:
-        "imported"  ... 取り込みを実行した
-        "already"   ... 取り込み痕跡 (legacy_seq 付き行) が既にある — 冪等 skip
-        "live_rows" ... 取り込み痕跡は無いが通常経路の行が既にある。ここで取り込むと
-                        既存 seq の後ろに過去ログが並んで順序が壊れるため skip。
-                        呼び出し側 (起動時の検算) がアラートにする
+        "imported" ... 取り込みを実行した
+        "already"  ... 入れるものが無い — 冪等 skip
     """
     messages_list = list(messages)
     stats.messages_seen += len(messages_list)
 
-    imported_count = (
-        db.query(BuildingMessage)
-        .filter(BuildingMessage.building_id == building_id)
-        .filter(imported_row_filter())
-        .count()
+    total_rows = (
+        db.query(BuildingMessage).filter_by(building_id=building_id).count()
     )
-    if imported_count > 0:
+    db_ids = set()
+    if total_rows:
+        for mid, legacy_mid in (
+            db.query(BuildingMessage.message_id, BuildingMessage.legacy_message_id)
+            .filter_by(building_id=building_id)
+            .all()
+        ):
+            if mid:
+                db_ids.add(mid)
+            if legacy_mid:
+                db_ids.add(legacy_mid)
+
+    pending: List[dict] = []
+    for msg in messages_list:
+        mid = msg.get("message_id") if isinstance(msg, dict) else None
+        if isinstance(mid, str) and mid:
+            if mid not in db_ids:
+                pending.append(msg)
+        elif total_rows == 0:
+            pending.append(msg)
+
+    if not pending:
         LOGGER.info(
-            "  %s: 既に %d 件取り込み済み — skip", building_id, imported_count,
+            "  %s: 入れるものが無い (DB %d 行 / ファイル %d 件) — skip",
+            building_id, total_rows, len(messages_list),
         )
         stats.buildings_skipped_already_migrated += 1
         return "already"
 
-    live_count = (
-        db.query(BuildingMessage).filter_by(building_id=building_id).count()
-    )
-    if live_count > 0:
-        LOGGER.warning(
-            "  %s: 取り込み痕跡なしで通常経路の行が %d 件 — 過去ログを後付けすると"
-            "順序が壊れるため skip (手動対応が必要)",
-            building_id, live_count,
-        )
-        stats.buildings_skipped_live_rows += 1
-        return "live_rows"
+    # 採番の起点。既に負の seq がある部屋 (前回の取り込みが途中で落ちた部屋) では
+    # その手前へ続ける。無ければ 0 の手前から。
+    min_seq = db.query(func.min(BuildingMessage.seq)).filter_by(
+        building_id=building_id
+    ).scalar()
+    base = min(int(min_seq), 0) if min_seq is not None else 0
 
+    total = len(pending)
     local_inserted = 0
     local_invalid = 0
-    new_seq = 0
-    # 実際に DB へ入った行の最大 seq。ファイル件数由来の new_seq とは別物で、
-    # 末尾の行が失敗すると両者はずれる (cursor 前進で使うのはこちら)。
-    max_inserted_seq = 0
-    for msg in messages_list:
-        new_seq += 1
+    for index, msg in enumerate(pending):
+        # ファイル順を保ったまま base の手前へ詰める (先頭が最も小さい)。
+        # 途中の行が失敗しても番号は詰め直さない — 空いた番号が残るだけで、
+        # 並び順にも既読判定にも影響しない。
+        new_seq = base - total + index
         new_message_id = f"{building_id}:{new_seq}"
         legacy_seq_int: Optional[int] = None
         try:
@@ -239,14 +273,12 @@ def migrate_building(
 
             if dry_run:
                 local_inserted += 1
-                max_inserted_seq = new_seq
                 continue
             # SAVEPOINT で行単位に隔離: 失敗行だけ巻き戻し、外側の
             # トランザクション (呼び出し側所有) には影響させない。
             with db.begin_nested():
                 db.add(BuildingMessage(**record))
             local_inserted += 1
-            max_inserted_seq = new_seq
         except Exception as e:
             LOGGER.warning(
                 "  INSERT 失敗 — skip: bid=%s legacy_seq=%s (%s)",
@@ -257,38 +289,11 @@ def migrate_building(
     stats.messages_inserted += local_inserted
     stats.messages_skipped_invalid += local_invalid
 
-    # 既存の cursor 行を取り込み末尾まで前進させる (後退はさせない)。
-    # 過去ログは過去 — 取り込みで「未読の新着」に化けさせない。cursor=0 の行を
-    # 残すと、次の Pulse が数百件の過去ログを一気に消化しに行く (ファイル側の
-    # ingested_by は疎らで、印だけでは防げないことを 2026-08-16 に実測)。
-    # リリース版ユーザーの環境ではこの時点で cursor 行が無く no-op — 位置は
-    # 後続の conscious_log 取り込みが決める。
-    #
-    # 前進先は **実際に INSERT できた最大 seq** (max_inserted_seq)。ファイル
-    # 件数由来の new_seq まで進めると、末尾の行が失敗したときに cursor が DB の
-    # 実末尾を追い越し、以後の本物の新着が「既読」として食われて永久に見えなく
-    # なる (この部屋の seq は max(seq)+1 で採番されるため、追い越した分がその
-    # まま新着の seq と重なる)。
-    if not dry_run and max_inserted_seq > 0:
-        cursor_rows = db.query(PersonaPulseCursor).filter_by(
-            BUILDING_ID=building_id
-        ).all()
-        advanced = 0
-        for row in cursor_rows:
-            if int(row.CURSOR_SEQ or 0) < max_inserted_seq:
-                row.CURSOR_SEQ = max_inserted_seq
-                advanced += 1
-            if int(row.ENTRY_MARKER_SEQ or 0) < max_inserted_seq:
-                row.ENTRY_MARKER_SEQ = max_inserted_seq
-        if advanced:
-            LOGGER.info(
-                "  %s: 既存 cursor %d 行を seq=%d へ前進 (取り込み分を既読扱いに)",
-                building_id, advanced, max_inserted_seq,
-            )
-
+    # cursor の操作は要らない。取り込んだ行の seq は必ず 0 未満で、「どこまで
+    # 読んだか」は 0 以上なので、負の seq は常に既読側に入る。
     LOGGER.info(
-        "  %s: 取り込み=%d / 不正/エラー=%d",
-        building_id, local_inserted, local_invalid,
+        "  %s: 取り込み=%d / 不正・エラー=%d (seq %d 〜 %d)",
+        building_id, local_inserted, local_invalid, base - total, base - 1,
     )
     if local_invalid:
         # 起動時の検算は message_id の突き合わせで欠けを見つけるため、失敗した行が

@@ -90,7 +90,6 @@ def main() -> int:
     LOGGER.warning("buildings_scanned             : %d", stats.buildings_scanned)
     LOGGER.warning("buildings_skipped_unreadable  : %d", stats.buildings_skipped_unreadable)
     LOGGER.warning("buildings_skipped_migrated    : %d", stats.buildings_skipped_already_migrated)
-    LOGGER.warning("buildings_skipped_live_rows   : %d", stats.buildings_skipped_live_rows)
     LOGGER.warning("buildings_failed              : %d", stats.buildings_failed)
     LOGGER.warning("messages_seen                 : %d", stats.messages_seen)
     LOGGER.warning("messages_inserted             : %d", stats.messages_inserted)

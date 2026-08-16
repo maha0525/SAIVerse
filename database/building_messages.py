@@ -439,7 +439,10 @@ def insert_building_message_in_session(
     max_seq = db.query(sa_func.coalesce(sa_func.max(BuildingMessage.seq), 0)).filter_by(
         building_id=building_id
     ).scalar()
-    new_seq = int(max_seq or 0) + 1
+    # 通常の発言は必ず 1 以上。過去ログの取り込みは 0 未満を使う
+    # (saiverse/legacy_log_import.py) ので、その行しか無い部屋でも 0 や負に
+    # 落ちないよう下限を敷く。
+    new_seq = max(int(max_seq or 0), 0) + 1
     record["legacy_seq"] = orig_seq or None
     record["legacy_message_id"] = orig_message_id or None
     record["seq"] = new_seq

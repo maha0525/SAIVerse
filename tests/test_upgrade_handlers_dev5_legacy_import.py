@@ -114,7 +114,8 @@ def test_city_handler_imports_building_logs(session: Session, home: Path) -> Non
 
     rows = session.query(BuildingMessage).order_by(BuildingMessage.seq).all()
     assert [r.content for r in rows] == ["hello", "hi!"]
-    assert [r.seq for r in rows] == [1, 2]
+    # 取り込んだ過去ログは 0 未満。ファイル順のまま 0 の手前に詰まる
+    assert [r.seq for r in rows] == [-2, -1]
     assert [r.legacy_seq for r in rows] == [10, 11]
 
 
@@ -199,8 +200,8 @@ def test_ai_handler_imports_cursors_after_building_import(session: Session, home
     row = session.query(PersonaPulseCursor).filter_by(
         PERSONA_ID="p1", BUILDING_ID="room1"
     ).one()
-    # 旧 seq=10 の行は新 seq=1 に採番されている
-    assert row.CURSOR_SEQ == 1
+    # 旧 seq=10 の行は新 seq=-2 に採番されている
+    assert row.CURSOR_SEQ == -2
 
 
 def test_ai_handler_does_not_clobber_live_cursor_rows(session: Session, home: Path) -> None:
