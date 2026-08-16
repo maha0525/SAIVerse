@@ -93,11 +93,15 @@ class BuildingIngestM8Test(unittest.TestCase):
             db_session_factory=self.SessionLocal,
             memory_adapter=self.adapter,
         )
+        # 既定は「この部屋の記録はあるが、まだ 1 件も読んでいない」(= 0)。
+        # 記録そのものが無い状態は別の意味 (= 現在の末尾から始める) を持つので、
+        # 転記の振る舞いを見るテストの土台に混ぜない。
+        cursors = {self.BID: 0} if pulse_cursors is None else dict(pulse_cursors)
         return SimpleNamespace(
             persona_id=self.LISTENER,
             current_building_id=self.BID,
             history_manager=hm,
-            pulse_cursors=dict(pulse_cursors or {}),
+            pulse_cursors=cursors,
             entry_markers={},
             buildings={},
             sai_memory=self.adapter,
@@ -132,6 +136,28 @@ class BuildingIngestM8Test(unittest.TestCase):
     # ------------------------------------------------------------------
     # 正常系
     # ------------------------------------------------------------------
+
+    def test_missing_cursor_record_starts_from_current_end(self):
+        """読んだ位置の記録が無い部屋では、たまっている履歴を読み込まない。
+
+        記録が無いのを 0 (= 1 件目から全部未読) と解釈すると、部屋の全履歴を
+        一度に転記する。件数の上限は無く、そのまま有料の推論に載る。入室処理
+        (_mark_entry) が初回訪問で下しているのと同じ判断に揃える。
+        """
+        self._insert("user", "むかしの会話1")
+        m2 = self._insert("user", "むかしの会話2")
+        persona = self._build_persona(pulse_cursors={})  # 記録が無い状態
+
+        count = auto_ingest_building_messages(persona, self.manager)
+        self.assertEqual(count, 0)
+        self.assertEqual(self.adapter.appended, [])
+        self.assertEqual(persona.pulse_cursors[self.BID], int(m2["seq"]))
+
+        # 以後に届いた発言は普通に読む (記録が無いことを「もう読まない」にはしない)
+        self._insert("user", "あたらしい会話")
+        count = auto_ingest_building_messages(persona, self.manager)
+        self.assertEqual(count, 1)
+        self.assertEqual(self.adapter.appended_count("あたらしい会話"), 1)
 
     def test_happy_path_ingests_all_and_advances_cursor(self):
         m1 = self._insert("user", "こんにちは")
