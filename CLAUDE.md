@@ -47,7 +47,9 @@ python database/migrate.py           # schema changes, creates automatic backups
 
 ```bash
 python main.py city_a    # backend on 127.0.0.1:8000 (API at /api), frontend on :3000
-python -m pytest         # tests (unittest also works)
+python -m pytest         # full suite, parallel by default (~2 min). Add `-n 0` for
+                         # single-file / targeted runs — worker startup costs ~15s,
+                         # so `pytest tests/test_foo.py -n 0` is the fast form.
 ruff check .             # or: ruff check --fix .
 ```
 

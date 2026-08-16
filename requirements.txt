@@ -53,3 +53,8 @@ curl-cffi>=0.10.0
 
 # Linting
 ruff>=0.9.0
+
+# Testing
+pytest>=9.0.0
+pytest-asyncio>=1.0.0
+pytest-xdist>=3.8.0

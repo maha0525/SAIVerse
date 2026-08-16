@@ -7,18 +7,22 @@ SAIVerseのテスト実行方法を説明します。
 ### 全テスト
 
 ```bash
-# pytest
+# pytest（既定で並列実行。約2分で完走する — 2026-08-16 計測、24論理コア）
 python -m pytest
 
-# unittest
+# unittest（並列化されない・非推奨。全件を直列で回すと10分超かかる）
 python -m unittest discover tests
 ```
+
+pytest は `pyproject.toml` の設定（`-n auto --dist worksteal`）により pytest-xdist で並列実行される。並列を切りたいとき（デバッガ接続時や、出力を直列で読みたいとき）は `-n 0` を付ける。
 
 ### 特定のテストファイル
 
 ```bash
-python -m pytest tests/test_persona_mixins.py
+python -m pytest tests/test_persona_mixins.py -n 0
 ```
+
+`-n 0` は並列ワーカーを起動せずその場で実行する指定。対象が1ファイル程度ならワーカー起動（各ワーカーがアプリ本体を import し直す、約15秒）の方が高くつくため、ピンポイント実行では付けるのが速い。
 
 ### 特定のテストクラス・メソッド
 
