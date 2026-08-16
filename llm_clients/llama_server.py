@@ -32,6 +32,17 @@ _WARN_REPEAT_INTERVAL = 1800.0
 #: 確認するとグローバルロック越しに全リクエストが直列化するため間引く
 _EXTERNAL_RECHECK_INTERVAL = 30.0
 
+#: 世代番号の発番。プロセス内で単調増加させ、一度使った番号は二度使わない
+_generation_lock = threading.Lock()
+_generation_counter = 0
+
+
+def _next_generation() -> int:
+    global _generation_counter
+    with _generation_lock:
+        _generation_counter += 1
+        return _generation_counter
+
 
 @dataclass
 class ManagedServer:
@@ -46,6 +57,10 @@ class ManagedServer:
     #: idle checker が最初に busy を観測した時刻。busy_deadline の起算点。
     #: idle 観測・リクエスト完了 (lease 返却) でクリアされる
     busy_since: Optional[float] = None
+    #: このサーバー個体を指す番号。オブジェクトより長生きする記録 (警告の
+    #: 抑止表) の鍵に使う。id() は回収されたオブジェクトのアドレスを次の
+    #: オブジェクトへ再利用するため、旧世代の記録が新世代の鍵に化ける
+    generation: int = field(default_factory=_next_generation)
 
 
 class LlamaServerManager:
@@ -64,10 +79,10 @@ class LlamaServerManager:
         self._lock = threading.Lock()
         self._idle_checker: Optional[threading.Thread] = None
         self._idle_checker_stop = threading.Event()
-        # _slots_warned ((port, サーバー世代id) → 最終警告時刻) は専用ロックで
+        # _slots_warned ((port, 世代番号) → 最終警告時刻) は専用ロックで
         # 守る: /slots の問い合わせは self._lock 保持中にも走る (停止直前の
         # 再確認) ため、warn 経路が self._lock を取り直すと非再入ロックで
-        # 自己デッドロックする。世代 id をキーに含めるのは、旧世代の probe が
+        # 自己デッドロックする。世代番号をキーに含めるのは、旧世代の probe が
         # 再起動後に新世代の警告を抑止しないため
         self._slots_warned: Dict[tuple[int, int], float] = {}
         self._warn_lock = threading.Lock()
@@ -565,11 +580,15 @@ class LlamaServerManager:
 
         毎チェック (30秒間隔) で吠えるとログが埋まるが、一度きりだと
         リソースを握ったままの管理下サーバーが無言になる。間を取って
-        _WARN_REPEAT_INTERVAL ごとに繰り返す。キーにサーバー世代 (managed の
-        オブジェクト id) を含め、旧世代の probe が新世代の警告を抑止しない。
+        _WARN_REPEAT_INTERVAL ごとに繰り返す。キーにサーバーの世代番号を
+        含め、旧世代の probe が新世代の警告を抑止しない。
+
+        世代番号は単調増加の発番で、id() は使わない: この表はサーバー
+        オブジェクトより長生きするため、回収されたアドレスが次の世代へ
+        再利用されると旧世代の記録が新世代の鍵に化ける。
         """
         now = time.monotonic()
-        key = (port, id(managed))
+        key = (port, managed.generation)
         with self._warn_lock:
             last = self._slots_warned.get(key)
             if last is not None and now - last < _WARN_REPEAT_INTERVAL:

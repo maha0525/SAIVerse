@@ -142,7 +142,7 @@ def test_warning_repeats_after_interval(caplog):
     with patch("llm_clients.llama_server.httpx.get", return_value=_resp(501)):
         with caplog.at_level("WARNING"):
             mgr._probe_slots(PORT, managed)
-            mgr._slots_warned[(PORT, id(managed))] -= 1801.0
+            mgr._slots_warned[(PORT, managed.generation)] -= 1801.0
             mgr._probe_slots(PORT, managed)
     warnings = [r for r in caplog.records if "busy 判定不能" in r.getMessage()]
     assert len(warnings) == 2
@@ -151,12 +151,43 @@ def test_warning_repeats_after_interval(caplog):
 def test_warning_not_suppressed_across_generations(caplog):
     """旧世代の warn 記録が新世代 (再起動後) の警告を抑止しない。"""
     mgr = LlamaServerManager()
+    # 両方を変数に束ねて同時に生存させる。一時オブジェクトのまま続けて渡すと
+    # 二つが同じアドレスに載ることがあり、テストの成否が割り当ての運で決まる
+    old_gen, new_gen = _managed(), _managed()
     with patch("llm_clients.llama_server.httpx.get", return_value=_resp(501)):
         with caplog.at_level("WARNING"):
-            mgr._probe_slots(PORT, _managed())  # 旧世代
-            mgr._probe_slots(PORT, _managed())  # 新世代 (別オブジェクト)
+            mgr._probe_slots(PORT, old_gen)
+            mgr._probe_slots(PORT, new_gen)
     warnings = [r for r in caplog.records if "busy 判定不能" in r.getMessage()]
     assert len(warnings) == 2
+
+
+def test_generation_numbers_never_repeat():
+    """世代番号は使い回されない。
+
+    抑止表はサーバーオブジェクトより長生きするので、鍵は「回収されても
+    次の個体に渡らない値」でなければならない。
+    """
+    assert len({_managed().generation for _ in range(50)}) == 50
+
+
+def test_warning_not_suppressed_when_previous_generation_reused_address(caplog):
+    """回収された旧世代と同じアドレスに載っても、新世代は警告する。
+
+    鍵に id() を使っていた頃の実害: 一時オブジェクトが解放されると次の
+    ManagedServer が同じアドレスに載り、旧世代の「警告済み」記録がそのまま
+    新世代の鍵になって警告が消えた。pytest 並列実行で先行テストが変わると
+    割り当て履歴が変わるため、稀に落ちる形で表面化した (2026-08-16)。
+    """
+    mgr = LlamaServerManager()
+    managed = _managed()
+    # 旧世代がこのアドレスに載ったまま警告済みの記録を残して回収された状況
+    mgr._slots_warned[(PORT, id(managed))] = time.monotonic()
+    with patch("llm_clients.llama_server.httpx.get", return_value=_resp(501)):
+        with caplog.at_level("WARNING"):
+            assert mgr._probe_slots(PORT, managed) == "unknown"
+    warnings = [r for r in caplog.records if "busy 判定不能" in r.getMessage()]
+    assert len(warnings) == 1
 
 
 def test_connection_error_with_live_process_is_unknown_and_warns(caplog):
