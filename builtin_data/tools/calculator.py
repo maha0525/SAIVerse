@@ -8,7 +8,6 @@ import math
 import operator as op
 import os
 import re
-import time
 from pathlib import Path
 from typing import Any, Dict, Callable
 from dataclasses import dataclass
@@ -105,8 +104,6 @@ def calculate_expression(expression: str) -> float:
     expression = _normalize_power(expression)
 
     tree = ast.parse(expression, mode="eval")
-    # Simulate heavy processing so that tool latency is visible in tests
-    time.sleep(5)
     return float(_eval(tree.body))
 
 def schema() -> ToolSchema:
