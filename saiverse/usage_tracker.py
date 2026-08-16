@@ -39,6 +39,7 @@ class UsageTracker:
         self._pending_lock = threading.Lock()
         self._batch_size = 1  # Flush immediately for debugging
         self._session_factory = None
+        self._warned_unconfigured = False
 
     def configure(self, session_factory) -> None:
         """Configure the tracker with a session factory from the manager.
@@ -122,17 +123,27 @@ class UsageTracker:
             persona_id,
         )
 
-    def _get_session_factory(self):
-        """Get the session factory, preferring the configured one."""
-        if self._session_factory is not None:
-            return self._session_factory
-        # Fallback to the module-level SessionLocal
-        from database.session import SessionLocal
-        return SessionLocal
-
     def _flush_to_db(self) -> None:
         """Flush pending records to database. Must be called with _pending_lock held."""
         if not self._pending_records:
+            return
+
+        if self._session_factory is None:
+            # No explicit destination means this process never opted in to
+            # persistence (e.g. pytest). Never fall back to the module-level
+            # SessionLocal: that silently pointed at the production DB and let
+            # test runs pollute llm_usage_log with fake models (found 2026-08-16).
+            dropped = len(self._pending_records)
+            self._pending_records.clear()
+            if not self._warned_unconfigured:
+                self._warned_unconfigured = True
+                LOGGER.warning(
+                    "UsageTracker is not configured; dropping %d usage record(s). "
+                    "Call configure() at startup to persist usage.",
+                    dropped,
+                )
+            else:
+                LOGGER.debug("UsageTracker not configured; dropped %d record(s)", dropped)
             return
 
         records_to_write = self._pending_records[:]
@@ -141,7 +152,7 @@ class UsageTracker:
         try:
             from database.models import LLMUsageLog
 
-            session = self._get_session_factory()()
+            session = self._session_factory()
 
             try:
                 for record in records_to_write:
