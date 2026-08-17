@@ -54,7 +54,7 @@ F1〜F5 を消し込み、その過程で出た追加欠陥も同じループで
 | 4 | 引数省略形の pre_spell (`spell_args_decider` が**対象名まで**決める形) も user_configured 扱いだった | ユーザーが引数まで書いた起動だけを True に |
 | 5 | 指摘ゼロ | 収束を観測 |
 
-**裁定待ちで切り出した 2 件** ([許可ゲートの被覆](../issues/playbook_permission_gate_coverage.md)): SUBPLAY ノードが許可判定を通らない (素直にゲートを通すと既定 `ask_every_time` のせいで内部ステップのたびに確認が出る) / `user_only` が「ユーザーだけ起動可」と「二度と使わない」を兼ねている (確認ダイアログの文面はペルソナ枠で書かれており、前者の読みを支持する)。どちらも W10 以前から在る設計問題。
+**切り出した 2 件は同日まはー裁定済み** ([許可ゲートの被覆](../issues/archive/playbook_permission_gate_coverage.md)): ① `user_only` は「ペルソナに対する禁止」— ユーザー本人が名指しした起動は通す形へ実装、確認ダイアログのボタンも「ペルソナには使わせない」へ (「この」は付けない — 設定は City 単位で全ペルソナに効くため嘘になる、まはー指摘) / ② SUBPLAY が許可判定を通らない件は放置 (ペルソナが Playbook を書けるようになった時点で再考)。
 
 **隣接で起票**: [`_pulse_type` が子 Playbook に継承されない](../issues/pulse_type_not_inherited_by_subplaybooks.md) (head を描く model と実際に走る model のずれ)。当初は F1 と同じ根に数えていたが、承認を起動に紐づけたことで許可の側の症状は消えた。
 

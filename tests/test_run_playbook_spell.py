@@ -273,6 +273,33 @@ def test_run_playbook_returns_error_on_subline_exception():
     assert "LLM provider unreachable" in result
 
 
+def test_user_only_allows_the_users_own_invocation():
+    """`user_only` の禁止対象はペルソナ。ユーザー本人が名指しした起動は通る。
+
+    設定画面の表示は「ユーザー指定時のみ」、確認ダイアログのボタンは
+    「ペルソナには使わせない」。どちらもユーザー本人の使用は禁じていない
+    (まはー裁定 2026-08-17)。
+    """
+    pulse_ctx, sea_runtime, manager = _ask_every_time_setup()
+    sea_runtime._get_playbook_permission.return_value = "user_only"
+
+    result = _run_spell_with(pulse_ctx, manager, user_configured=True)
+
+    assert result == ("allowed", {})
+    sea_runtime._run_playbook.assert_called_once()
+
+
+def test_blocked_denies_even_the_users_own_invocation():
+    """`blocked` は完全封印。ユーザー本人の指定でも通さない。"""
+    pulse_ctx, sea_runtime, manager = _ask_every_time_setup()
+    sea_runtime._get_playbook_permission.return_value = "blocked"
+
+    result = _run_spell_with(pulse_ctx, manager, user_configured=True)
+
+    assert "not available" in result
+    sea_runtime._run_playbook.assert_not_called()
+
+
 @pytest.mark.parametrize(
     "permission,expected_reason",
     [

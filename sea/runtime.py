@@ -960,19 +960,25 @@ class SEARuntime:
         では設定済みの自動化が拒否されていた (2026-08-17 レビュー)。判定は
         ここに集約し、呼び出し側は結果の見せ方だけを持つ。
 
-        ``ask_every_time`` の判定順序そのものが仕様:
+        判定順序そのものが仕様:
 
-        1. **ユーザー自身が書いた起動なら許可** (``user_configured``) — チャット
+        1. **``blocked`` は常に拒否** — 完全封印。ユーザー自身の指定でも通さない
+        2. **ユーザー自身が書いた起動なら許可** (``user_configured``) — チャット
            UI の「ツール指定」やスケジュール設定画面で、ユーザーがその Playbook
            を名指しした起動。指定した行為が承認にあたるので、確認し直さない。
+           ``user_only`` (設定画面の表示は「ユーザー指定時のみ」、確認ダイアログの
+           「ペルソナには使わせない」が書き込む値) もここで通る — 禁止の対象は
+           ペルソナであってユーザー本人ではない (まはー裁定 2026-08-17)。
            **承認されているのは「その起動」であって Pulse ではない** — 同じ
            Pulse の中でペルソナが別の Playbook を思いついて唱えた場合は、
            下の通常の道を通る (Pulse 種別で許すと、設定画面で選んだ覚えのない
            Playbook まで無確認で走る)
-        2. **応答ループにユーザーが居ない (auto) なら拒否** — 誰も見ていない
+        3. **``user_only`` はペルソナ起動なら拒否**
+        4. **``ask_every_time`` 以外 (= ``auto_allow``) は許可**
+        5. **応答ループにユーザーが居ない (auto) なら拒否** — 誰も見ていない
            UI へ確認を出してブロックしない
-        3. **確認の宛先が無ければ拒否** — チャネル無しで黙って許可しない
-        4. それ以外は確認ダイアログ (``always_allow`` / ``never_use`` は
+        6. **確認の宛先が無ければ拒否** — チャネル無しで黙って許可しない
+        7. それ以外は確認ダイアログ (``always_allow`` / ``never_use`` は
            恒久設定として書き込む)
 
         Args:
@@ -997,6 +1003,11 @@ class SEARuntime:
         if perm == "blocked":
             return False, f"Playbook '{playbook_name}' is not available (permission: {perm})"
 
+        if user_configured:
+            # ユーザー本人が名指しした起動。user_only の禁止対象はペルソナで
+            # あってユーザーではない (設定画面の表示も「ユーザー指定時のみ」)。
+            return True, None
+
         if perm == "user_only":
             return False, (
                 f"Playbook '{playbook_name}' is user-only and cannot be started "
@@ -1005,9 +1016,6 @@ class SEARuntime:
 
         if perm != "ask_every_time":
             return True, None  # auto_allow
-
-        if user_configured:
-            return True, None
 
         if auto_mode:
             return False, (

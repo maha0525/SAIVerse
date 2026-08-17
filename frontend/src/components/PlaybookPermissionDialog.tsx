@@ -79,8 +79,12 @@ export default function PlaybookPermissionDialog({ request, onRespond }: Playboo
                         <button onClick={() => respond('always_allow')}>
                             常に許可する
                         </button>
+                        {/* 書き込まれる値は user_only (設定画面の表示は「ユーザー指定時のみ」)。
+                            禁止の対象はペルソナであってユーザー本人ではないので、文面もそう書く。
+                            「この」は付けない — 設定は City 単位で保存され、同じ街の全ペルソナに
+                            効くため、目の前の一人だけに見える書き方は嘘になる (まはー指摘 2026-08-17)。 */}
                         <button onClick={() => respond('never_use')}>
-                            以後使用しない
+                            ペルソナには使わせない
                         </button>
                     </div>
                 </div>
