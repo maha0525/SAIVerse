@@ -69,6 +69,5 @@ MetaLayer が Track/persona 状態から決定論的に選ぶ（→ [concepts/me
 |---|---|---|
 | `sub_speak` | — | 最終応答を合成して発話（統合 speak Playbook） |
 | `sub_think_meta` | — | 自律ステップの内的思考を合成 |
-| `meta_exec_speak` | — | Playbook を実行して結果を発話（`call_playbook` ツールが使用） |
 | `meta_simple_speak` | ツール不使用（喋るだけ） | speak のみ（`usel=True`） |
 | `spell_args_decider` | Spell 引数決定 | pre_spells で引数なし指定の Spell の引数を認知から決める内部 Playbook |

@@ -7,7 +7,7 @@ SAIVerse に登録されている全ツールの一覧（自動生成）。概�
 作り方は [開発者ガイド: ツールの追加](../developer-guide/adding-tools.md)、
 平文から呼ぶ Spell 化は [concepts/spell.md](../concepts/spell.md) を参照。
 
-**登録ツール数**: 135（うち Spell 化: 92）
+**登録ツール数**: 134（うち Spell 化: 92）
 
 - `*` 付きの引数は必須。
 - **Spell** 列に表示名があるものは、ペルソナが平文応答から `/spell <名> ...` で呼べる。
@@ -16,7 +16,6 @@ SAIVerse に登録されている全ツールの一覧（自動生成）。概�
 |---|---|---|---|
 | `addon_spell_help` | アドオンが提供する追加スペルの一覧とその使い方を返します。投稿・検索など詳細な操作を行う前に呼んでください。addon引数でアドオン名を絞り込めます（省略時は全アドオン、近い名前を渡せばファジーマッチします）。 | `addon`: string | アドオンスペル一覧 |
 | `calculate_expression` | Evaluate arithmetic expression with ^ (power) and ! (factorial). | `expression*`: string | — |
-| `call_playbook` | Call another playbook to perform a specialized task. Use this when you need to execute a specific capability (like se… | `playbook_name*`: string | — |
 | `chronicle_context_down` | 指定したChronicleエントリの下流コンテンツを取得します。Lv1エントリに対して使うと、そのChronicleがまとめている生のメッセージ全件を返します。Lv2以上に対して使うと、子ChronicleエントリのURIと全文を返し… | `entry_id*`: string | Chronicle下流参照 |
 | `chronicle_context_up` | 指定したChronicleエントリの上流コンテキストを取得します。親エントリ（上位レベルの要約）の全文と、同じ親に属する兄弟エントリ全件の全文とURIを返します。周辺の状況を把握し、さらに上位や横のエントリへナビゲートするための足がか… | `entry_id*`: string | Chronicle上流参照 |
 | `chronicle_read_detail` | Read a Chronicle (arasuji) entry in detail, including its source messages (for level 1) or child summary entries (for… | `entry_id*`: string, `include_sources`: boolean, `max_source_messages`: integer | — |

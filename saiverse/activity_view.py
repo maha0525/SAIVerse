@@ -132,6 +132,8 @@ _HIDDEN_TOOLS = frozenset({
     "note_open", "note_close",
     "thread_switch", "meta_judgment_finalize", "forget_recalled",
     "record_wait", "resolve_uri", "addon_spell_help",
+    # call_playbook は 2026-08-17 に撤去済み (どこからも起動されない残置物だった。
+    # 後継は run_playbook スペル)。旧ログ互換のためここには残す。
     "call_playbook", "run_playbook", "list_available_playbooks",
     "get_building_messages", "get_history", "get_memory_weave_context",
     "get_since_last_user_conversation", "get_situation_snapshot",
@@ -222,6 +224,8 @@ _SKIP_PLAYBOOK_NAMES = frozenset({
     "meta_judgment", "meta_judgment_alert", "meta_judgment_idle_empty",
     "meta_judgment_idle_pending", "meta_judgment_running",
     "meta_judgment_life_purpose",
+    # meta_exec_speak は 2026-08-17 に撤去済み (起動元の call_playbook ごと退役)。
+    # 旧ログ互換のためここには残す。
     "meta_exec_speak", "sub_speak", "sub_think_meta",
     "spell_args_decider", "meta_simple_speak",
 })

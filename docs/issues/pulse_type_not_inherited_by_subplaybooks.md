@@ -29,11 +29,9 @@
 2. tier のずれを直すなら、probe の導出を legacy フォールバックでなく「これから push される root aspect」から取る形も候補 (`aspect_from_pulse_type(pulse_type)` は既に `run_meta_user` が呼んでいる)。
 3. 回帰テストは「auto Pulse の子 Playbook が lightweight を選ぶ」。
 
-## 隣接: `call_playbook` ツールの要否
+## 隣接: `call_playbook` は撤去済み (2026-08-17、まはー裁定)
 
-`call_playbook` は builtin / 開発 DB のどの Playbook からも参照されておらず (spell でもない)、現状どこからも起動されない。残置の経緯は [revisions.md](../intent/persona_cognition/revisions.md)「旧 `call_playbook` は当面残置」。**削除するか、経路を直して残すかはまはー裁定待ち**。
-
-同ツールにあった「確認ダイアログの宛先 (`event_callback`) を子へ渡していない」欠陥 — user Pulse でも `_request_playbook_permission` が「チャネル無し = deny」で即拒否していた — は 2026-08-17 に修正済み (回帰: `tests/test_spell_auto_mode_w10.py`)。
+起票時点では「どこからも起動されないが残置されているツール」だった。全経路を走査して — Playbook のツールノード / `available_tools` / spell 宣言 / 旧ツール割り当てテーブル 3 つ (いずれも 0 行) / realtime binding / Python からの直接呼び出し — **参照ゼロ**を確認し、起動元だけが存在理由だった `meta_exec_speak` ごと撤去した。したがって本 issue の症状も `call_playbook` 経路では起きない (EXEC ノードは `meta_exec_speak` 以外にも書けるので、症状そのものは残る)。
 
 ## 関連
 

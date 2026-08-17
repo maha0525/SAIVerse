@@ -92,7 +92,7 @@ REST API 全エンドポイントの一覧（自動生成）。すべて `/api` 
 
 | メソッド | パス | 説明 |
 |---|---|---|
-| POST | `/api/codex-auth/login/cancel` | ログイン試行を放棄する (モーダルを閉じたときにフロントが呼ぶ)。 |
+| POST | `/api/codex-auth/login/cancel` | 自分の lease を返却する (モーダルを閉じたときにフロントが呼ぶ)。 |
 | POST | `/api/codex-auth/login/start` | デバイスコードを申請し、ユーザーに見せる user_code を返す。 |
 | GET | `/api/codex-auth/login/status` | ログイン試行の進行状態を返す。フロントはこれをポーリングする。 |
 | POST | `/api/codex-auth/logout` | SAIVerse 自前のトークンストアを削除する。 |

@@ -865,7 +865,7 @@ v0.24 で起動した `/run_playbook` Spell の MVP 制約 2 つを解消する�
 
 **旧 `call_playbook` ツールとの関係**:
 
-- 旧 `call_playbook` (meta_exec_speak 経由の間接実行) は当面残置
+- 旧 `call_playbook` (meta_exec_speak 経由の間接実行) は **2026-08-17 に `meta_exec_speak` ごと撤去** (どこからも起動されない残置物であることを全経路の走査で確認 — Playbook のツールノード / `available_tools` / spell / 旧ツール割り当てテーブル / realtime binding / Python 直接呼び出しのいずれにも参照なし。まはー裁定)
 - `/run_playbook` が実機定着して既存 Playbook の Spell 利用が広まったら廃止検討
 
 ### v0.23 (2026-05-01) — 段階 4-C 完了: 既存 Playbook を line メタデータベースに一括翻訳

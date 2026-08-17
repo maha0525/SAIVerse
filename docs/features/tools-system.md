@@ -34,7 +34,7 @@
 - 汎用: `calculate_expression`（計算）/ `generate_image`（画像生成）
 - アイテム: `item_move`（移動）/ `item_view`（閲覧）/ `item_annotate`（名前・概要の編集）
 - 記憶: `memory_recall`（想起）/ `switch_active_thread`（スレッド切替）/ Chronicle・Memopedia 系
-- Playbook: `run_playbook`（サブライン起動）/ `call_playbook`
+- Playbook: `run_playbook`（サブライン起動）
 
 MCP サーバー由来のツールも `spell_tools[]` 経由で Spell 化される（→ [MCP連携](./mcp-integration.md)）。
 

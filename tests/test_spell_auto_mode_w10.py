@@ -440,34 +440,6 @@ def test_exec_reads_auto_mode_from_state_not_factory_argument():
     assert runtime._run_playbook.called is False
 
 
-def test_call_playbook_forwards_the_pulse_event_channel(monkeypatch):
-    """`call_playbook` は呼び出し元 Pulse の UI チャネルを子へ渡す。
-
-    渡さないと、子の EXEC ノードが ask_every_time の Playbook を起こすときに
-    確認ダイアログの宛先を失い、`_request_playbook_permission` が「チャネル
-    無し = deny」で即拒否する。ユーザーが見ている会話でも「毎回確認」の
-    Playbook が黙って拒否される。
-    """
-    from builtin_data.tools import call_playbook as call_playbook_mod
-
-    sea_runtime = MagicMock()
-    sea_runtime._load_playbook_for = Mock(return_value=SimpleNamespace(name="meta_exec_speak"))
-    sea_runtime._run_playbook = Mock(return_value=["done"])
-    persona = SimpleNamespace(persona_id="pid", current_building_id="b1")
-    manager = SimpleNamespace(sea_runtime=sea_runtime, personas={"pid": persona})
-    sentinel_callback = Mock()
-
-    monkeypatch.setattr(call_playbook_mod, "get_active_persona_id", lambda: "pid")
-    monkeypatch.setattr(call_playbook_mod, "get_active_manager", lambda: manager)
-    monkeypatch.setattr(call_playbook_mod, "get_auto_mode", lambda: False)
-    monkeypatch.setattr(call_playbook_mod, "get_event_callback", lambda: sentinel_callback)
-
-    call_playbook_mod.call_playbook("risky_pb")
-
-    kwargs = sea_runtime._run_playbook.call_args.kwargs
-    assert kwargs["event_callback"] is sentinel_callback
-
-
 def test_exec_passes_effective_auto_mode_to_sub_playbook():
     """auto の親から起動された子 Playbook にも auto_mode=True が渡る (F2)。"""
     runtime, engine = _exec_engine(permission="auto_allow")
