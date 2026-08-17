@@ -3,6 +3,8 @@
 > ⚠ **v1 メタ判断経由の経路は退役 (2026-08-14, [../track_retirement.md](../track_retirement.md) §7.4)**: 本文書の「META 判断で候補を昇格 (promote)」「LIFE_PURPOSE 未設定なら目的設定判断を最優先」は v1 メタ判断の退役で発火経路を失った。候補の採用はスペル（purpose_adopt 等）と v2 判断点が現役。**生きる目的の初期設定は現在発火経路なし** — スキーマ再設計と合わせて別途設計する（track_retirement §7.3 裁定 3、まはー）。
 
 > **ステータス**: ✅ 実装完了・実機検証済 v0.2（2026-06-27 設計確定 → 2026-06-28 §8 タスク 1〜7 実装完了・テスト緑 → 2026-07-08 実機検証済＋`LIFE_PURPOSE` 実 DB migration 適用済、まはー）
+>
+> ⚠️ **2026-08-18 (v3 §9-5 決着による上書き)**: `LIFE_PURPOSE` 列は退役が決定 — purpose の一文はコア記憶へ、interests/vocations は手帳のアクティビティへ写す ([autonomous_behavior_v3.md](../autonomous_behavior_v3.md) §9-5)。§10 の発火席 (META 判断の `life_purpose_unset`) は 2026-08-14 の Track 撤廃順序①で受け皿なしで撤去済みで、新しい席は**システムタスク第一号 (自己定義)** — 空き Beat が引く。本書の①駆動文以外の実装は v3 までの経過形。
 > **親**: [`01_concepts.md`](01_concepts.md)（Track / Note / メタレイヤー）
 > **関連**: [`mode_spell_permissions.md`](mode_spell_permissions.md)（Track操作はMETAのみ＝本設計の構造的前提）/
 > [`unified_task_model.md`](unified_task_model.md)（③-0 で Task を一本化済み・本設計の土台）/
