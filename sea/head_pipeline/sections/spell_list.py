@@ -341,9 +341,10 @@ class SpellListSection:
                 # 登録される (mcp_addon_integration.md §I)。再起動直後は「まだ
                 # 今セッションで誰も取得していない」だけで、消えたわけではない。
                 # ここで stale 扱いにすると Pulse 前の head 構築 (プレビュー等)
-                # が capture_all → B リセットを起こし、初回取得時に全ツール
-                # ぶんの spell_added が知覚へ流れ込む。取得後の真の差分は
-                # Pulse 頭の検知が拾う。
+                # が欠損再 capture を起こし、A がツール未取得の姿になる — 保存
+                # 済みの B (ツールあり) との比較で「全ツール消滅→取得時に再出現」
+                # という偽差分が知覚へ流れ込む。取得後の真の差分は Pulse 頭の
+                # 検知が拾う。
                 LOGGER.debug(
                     "spell_list: stored snapshot references per_persona MCP "
                     "tools not yet fetched this session (%s); not stale",

@@ -460,6 +460,46 @@ def test_diff_notify_b_advances_only_after_durable_queue(
     assert len(_outbox_rows(session_factory)) == 1
 
 
+def test_diff_notify_direct_path_defers_labels_until_memory_ready(
+    pipeline, section, persona,
+):
+    """degrade 経路も配送確定後にだけ B を進める (Codex 2026-08-17 medium)。
+
+    旧実装は flush_diffs (advance=True) で先に B を進めてから SAIMemory readiness
+    を確認していたため、未 ready のとき通知を捨てた後も B が進み、その差分は
+    永久に届かなかった。未 ready では B 据え置き → ready 後の再検出で届くこと。
+    """
+    pushed: List[Any] = []
+    ready = {"value": False}
+    persona.sai_memory = SimpleNamespace(
+        is_ready=lambda: ready["value"],
+        push_perception=lambda kind, content, **kw: pushed.append((kind, content)),
+    )
+    persona.history_manager = None
+    manager = SimpleNamespace(personas={PERSONA_ID: persona})
+
+    pipeline.capture_all(_ctx(MODEL_A))
+    section.live_text = "未readyの変化"
+
+    # 1) 未 ready → 捨てずに据え置き (False)
+    assert inject_diff_notifications(
+        persona, manager, BUILDING, pipeline=pipeline, model_key=MODEL_A,
+    ) is False
+    assert pushed == []
+
+    # 2) ready 復帰 → 同じ差分が再検出されて届き、B が前進する
+    ready["value"] = True
+    assert inject_diff_notifications(
+        persona, manager, BUILDING, pipeline=pipeline, model_key=MODEL_A,
+    ) is True
+    assert pushed and "未readyの変化" in pushed[0][1]
+
+    # 3) B 前進済み → 再通知なし
+    assert inject_diff_notifications(
+        persona, manager, BUILDING, pipeline=pipeline, model_key=MODEL_A,
+    ) is False
+
+
 def test_diff_notify_without_ledger_keeps_legacy_direct_push(pipeline, section, persona):
     """degrade 経路 (manager に台帳なし) は従来どおり直接 push + B 前進。"""
     pushed: List[Any] = []

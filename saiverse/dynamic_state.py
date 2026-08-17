@@ -171,8 +171,9 @@ class DynamicStateManager:
         """Metabolism 発火時の hook。
 
         Phase 3-e: METABOLISM イベントを head_pipeline に dispatch。
-        全 Section の snapshot を再構築 + last_notified を A にリセット
-        (= 末尾通知の窓を最新でリスタート)。
+        全 Section の snapshot を再構築する。last_notified (通知の既読基準) には
+        触らない — 配送だけが進める (2026-08-17 まはー裁定。旧挙動の「A に
+        リセット」は、発火タイミング次第で未通知の差分を握り潰していた)。
 
         ``model_key``: 可視化は model の節目 (beat_execution_context.md §3.2) —
         anchor を進めた model の (persona, model) snapshot だけを再 capture する。

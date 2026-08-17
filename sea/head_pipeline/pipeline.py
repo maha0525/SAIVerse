@@ -79,6 +79,12 @@ class HeadPipeline:
         self._store = store  # None なら永続化なし (Phase 1 テスト / startup 前用)
         self._states: dict[tuple[str, str], _LineState] = {}
         self._lock = threading.RLock()
+        # (persona, model) ごとの store 保存の直列化ロック。B (last_notified) を
+        # 含む保存は必ずこのロック内で「保存時点の最新 in-memory B」を読み直して
+        # から書く — 古い B のコピーを抱えた保存が遅れて着地して、並行配送が
+        # 進めた durable B を巻き戻すのを封鎖する (Codex 2026-08-17 medium)。
+        # ロック順序は 保存ロック → self._lock の一方向のみ (逆順で取らない)。
+        self._persist_locks: dict[tuple[str, str], threading.Lock] = {}
 
     def attach_store(self, store: LineHeadSnapshotStore) -> None:
         """startup 後に DB session が用意できた段階で store を後付けする経路。"""
@@ -94,15 +100,21 @@ class HeadPipeline:
     def capture_all(self, ctx: LineHeadInput) -> LineHeadSnapshot:
         """全 Section の capture を走らせて新規 LineHeadSnapshot を作る。
 
-        Metabolism 発火時 / 初回 / snapshot 不在時に呼ぶ。state も更新し、
-        last_notified を新 snapshot にリセットする (= 通知済み = 直近 capture)。
+        Metabolism 発火時 / anchor TTL 切れ / 初回 / snapshot 不在時に呼ぶ。
+
+        不変条件 (2026-08-17 まはー裁定): **B (last_notified) は配送
+        (flush_diffs の前進 / advance_last_notified) だけが進める。** capture_all
+        は A (snapshot) を作り直すだけで、既存の B には触らない。撮り直しの
+        ついでに B を「今の状態」へ揃えると、前回の配送以降に起きた変化
+        (入退室等) が通知されないまま既読化される — TTL 切れ経由でエリスの
+        入退室通知が 1 ヶ月間全滅していた実バグの根。例外は「B が無い Section」
+        (初回 / 新規登録) のみで、B = 新 A で初期化する (初回に全内容を
+        「増えた」と通知するスパムの防止。capture_for_event / recapture_missing
+        の復帰時規約と同じ)。
         """
         sections = self._registry.all_sections()
         sections_dict: dict[str, object] = {}
         capture_failures: dict[str, str] = {}
-        # capture に失敗して既存値を再利用した Section 名。B (last_notified) の
-        # リセット対象から外すために覚えておく (下)。
-        reused_stale: set[str] = set()
         for section in sections:
             try:
                 sections_dict[section.name] = section.capture(ctx)
@@ -118,7 +130,6 @@ class HeadPipeline:
                 existing = self._existing_section_snapshot(ctx, section.name)
                 if existing is not None:
                     sections_dict[section.name] = existing
-                    reused_stale.add(section.name)
                 else:
                     capture_failures[section.name] = f"capture failed: {exc!r}"
 
@@ -145,16 +156,17 @@ class HeadPipeline:
             prev = self._states.get((ctx.persona_id, ctx.model_key))
             base = prev.snapshot.snapshot_version if prev is not None else stored_base
             snapshot.snapshot_version = base + 1
-            # B = A reset。ただし capture 失敗で**古い A を再利用した** Section は
-            # 除く — その Section の B は前回の Metabolism 以降の diff 通知で
-            # live state まで前進している。ここで古い A へ揃えると B が巻き戻り、
-            # 復旧後に「もう届けた追加・削除」をもう一度通知してしまう
-            # (2026-07-30 Codex 指摘 high1)。A が stale なら B も据え置く。
+            # B は配送だけが進める (docstring の不変条件): 既存 B は**全て**持ち
+            # 越し、B の無い Section (初回 / 新規登録) だけ B = 新 A で初期化。
+            # capture 失敗で A の key が省かれた Section の B も落とさない — B は
+            # 「どこまで届けたか」の独立した台帳で、A の欠損に巻き込むと復旧後の
+            # flush が故障期間中の差分を届けられない (Codex 2026-08-17)。capture
+            # 失敗で古い A を再利用した Section の据え置きも同じ持ち越しに含まれる
+            # — B を古い A へ巻き戻すと「もう届けた変化」を再通知してしまう
+            # (2026-07-30 Codex 指摘 high1)。
             notified = dict(sections_dict)
-            if reused_stale and prev is not None:
-                for name in reused_stale:
-                    if name in prev.last_notified_sections:
-                        notified[name] = prev.last_notified_sections[name]
+            if prev is not None:
+                notified.update(prev.last_notified_sections)
             state = _LineState(
                 snapshot=snapshot,
                 last_notified_sections=notified,
@@ -236,9 +248,12 @@ class HeadPipeline:
             for name, value in captured.items():
                 new_sections[name] = value
                 new_failures.pop(name, None)
-                # 欠損からの復帰は「初めて head に載る」扱い — B も新値に合わせ、
-                # 復帰直後の diff 通知スパムを防ぐ (capture_for_event と同じ規約)。
-                state.last_notified_sections[name] = value
+                # 欠損からの復帰: B が**無い** Section だけ B = 新値で初期化する
+                # (「初めて head に載る」扱い = 復帰直後の diff 通知スパム防止)。
+                # 既存 B は据え置き — A 欠損 (例: optional Section の serialize
+                # 失敗で store の A だけ欠けた行) に B を巻き込むと、故障期間中の
+                # 未通知差分が届かないまま既読化される (Codex 2026-08-17)。
+                state.last_notified_sections.setdefault(name, value)
                 state.dirty_sections.discard(name)
 
             new_snapshot = LineHeadSnapshot(
@@ -289,7 +304,14 @@ class HeadPipeline:
                 try:
                     new_sections[section.name] = section.capture(ctx)
                     capture_failures.pop(section.name, None)
-                    state.last_notified_sections[section.name] = new_sections[section.name]
+                    # B が無い Section だけ初期化。既存 B は据え置き — event での
+                    # 再 capture は A の最新化であって配送ではない。ここで B を
+                    # 新値に揃えると、未配送の差分 (例: capture_all 後・配送前に
+                    # refresh event が割り込んだ場合) が既読化される (Codex
+                    # 2026-08-17、C8 の不変条件)。
+                    state.last_notified_sections.setdefault(
+                        section.name, new_sections[section.name],
+                    )
                     state.dirty_sections.discard(section.name)
                 except Exception as exc:
                     LOGGER.exception(
@@ -656,6 +678,32 @@ class HeadPipeline:
                 return True
             return state.persisted_version >= target
 
+    def _persist_lock_for(self, persona_id: str, model_key: str) -> threading.Lock:
+        """(persona, model) の保存直列化ロックを取得 (無ければ作る)。"""
+        with self._lock:
+            key = (persona_id, model_key)
+            lock = self._persist_locks.get(key)
+            if lock is None:
+                lock = threading.Lock()
+                self._persist_locks[key] = lock
+            return lock
+
+    def _latest_notified_copy(
+        self, persona_id: str, model_key: str, fallback: dict[str, object],
+    ) -> dict[str, object]:
+        """保存直前に in-memory の最新 B を読み直す (state 不在なら fallback)。
+
+        呼び出し側が抱えてきた B のコピーは、コピー取得と保存の間に並行配送が
+        B を進めていると stale になる。保存は必ず最新を書く — B は単調にしか
+        進まないので、新しい B を古い A の版と一緒に保存しても害はない (逆は
+        再起動後の再通知重複になる)。
+        """
+        with self._lock:
+            state = self._states.get((persona_id, model_key))
+            if state is not None:
+                return dict(state.last_notified_sections)
+        return fallback
+
     def _persist_snapshot(
         self,
         snapshot: LineHeadSnapshot,
@@ -670,19 +718,27 @@ class HeadPipeline:
         記帳しない = 現行版は未確認のまま残り、ensure_persisted が現行を
         保存し直す。失敗は何も進めない。
 
+        B (last_notified) は引数のコピーではなく、保存直列化ロック内で読み直した
+        最新 in-memory 値を書く (:meth:`_latest_notified_copy` — 古いコピーの
+        遅延着地による durable B の巻き戻し封鎖)。
+
         store 未設定 (テスト / startup 前) は「永続化なし」が構成上の正なので
         True 扱い (fail-closed の対象外)。
         """
         if self._store is None:
             return True
-        try:
-            ok = self._store.save(snapshot, last_notified_sections)
-        except Exception:
-            LOGGER.exception(
-                "head_pipeline: store.save failed persona=%s model=%s",
-                snapshot.persona_id, snapshot.model_key,
+        with self._persist_lock_for(snapshot.persona_id, snapshot.model_key):
+            notified = self._latest_notified_copy(
+                snapshot.persona_id, snapshot.model_key, last_notified_sections,
             )
-            ok = False
+            try:
+                ok = self._store.save(snapshot, notified)
+            except Exception:
+                LOGGER.exception(
+                    "head_pipeline: store.save failed persona=%s model=%s",
+                    snapshot.persona_id, snapshot.model_key,
+                )
+                ok = False
         if ok:
             with self._lock:
                 state = self._states.get((snapshot.persona_id, snapshot.model_key))
@@ -702,13 +758,17 @@ class HeadPipeline:
     ) -> None:
         if self._store is None:
             return
-        try:
-            self._store.save_last_notified(persona_id, model_key, last_notified_sections)
-        except Exception:
-            LOGGER.exception(
-                "head_pipeline: store.save_last_notified failed persona=%s model=%s",
-                persona_id, model_key,
+        with self._persist_lock_for(persona_id, model_key):
+            notified = self._latest_notified_copy(
+                persona_id, model_key, last_notified_sections,
             )
+            try:
+                self._store.save_last_notified(persona_id, model_key, notified)
+            except Exception:
+                LOGGER.exception(
+                    "head_pipeline: store.save_last_notified failed persona=%s model=%s",
+                    persona_id, model_key,
+                )
 
     # ---- 内部ヘルパー ----
 

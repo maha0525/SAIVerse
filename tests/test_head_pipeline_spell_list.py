@@ -269,8 +269,9 @@ def test_missing_per_persona_mcp_tools_are_not_stale():
 
     per_persona のツール登録は Pulse 頭の本人取得で行われるため、再起動直後は
     「まだ誰も取得していない」だけで消えたわけではない。ここで失効にすると
-    Pulse 前の head 構築 (プレビュー等) が capture_all → 通知既読 (B) リセットを
-    起こし、初回取得時に全ツールぶんの spell_added が知覚へ流れ込む。
+    Pulse 前の head 構築 (プレビュー等) が欠損再 capture を起こして A がツール
+    未取得の姿になり、保存済み B との比較で「全ツール消滅→取得時に再出現」の
+    偽差分が知覚へ流れ込む。
     """
     from tools import SPELL_TOOL_SCHEMAS
     from tools.mcp_client import MCPClientManager

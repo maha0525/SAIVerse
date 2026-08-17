@@ -275,29 +275,45 @@ def _inject_diff_notifications_direct(
     ctx: LineHeadInput,
     building_id: str,
 ) -> bool:
-    """台帳が無い環境の degrade 経路 (= 従来挙動そのまま)。
+    """台帳が無い環境の degrade 経路 (配達保証なし)。
 
-    直接 push_perception + flush_diffs 内での B 前進 (配達保証なし)。
+    台帳経路と同じく「検出 (advance=False) → push → 成功後に B 前進」の順で行う。
+    旧実装は flush_diffs (advance=True) で先に B を進めてから SAIMemory readiness
+    と push を確認していたため、未 ready / push 失敗で通知を捨てた後も B だけが
+    進み、その差分は永久に再検出されなかった (Codex 2026-08-17 medium — C8 の
+    「配送確定後の前進」違反)。失敗時は B と dirty を据え置き、次回 flush の
+    再検出に委ねる (push 済みラベルの再通知はあり得る = at-least-once。台帳経路
+    の再配送と同じ倒し方)。
     """
-    labels = pipeline.flush_diffs(ctx, all_sections=True)
+    labels, detected = pipeline.flush_diffs(ctx, all_sections=True, advance=False)
     if not labels:
         return False
 
     sai_mem = getattr(persona, "sai_memory", None)
     if sai_mem is None or not sai_mem.is_ready():
         LOGGER.debug(
-            "head_pipeline: SAIMemory not ready, %d notification labels discarded",
+            "head_pipeline: SAIMemory not ready, %d notification labels deferred "
+            "(baseline kept for re-detection)",
             len(labels),
         )
         return False
 
+    push_failed = False
     for label in labels:
         try:
             sai_mem.push_perception("world_state", label.label)
         except Exception:
+            push_failed = True
             LOGGER.exception(
                 "head_pipeline: push_perception failed for world_state label",
             )
+    if push_failed:
+        # 一部でも失敗したら B を進めない — 次回 flush で全ラベル再検出される。
+        return False
+
+    for section_name, new_snapshot in detected.items():
+        pipeline.advance_last_notified(ctx.persona_id, section_name, new_snapshot)
+
     LOGGER.info(
         "head_pipeline: pushed %d world_state perception(s) for persona=%s building=%s",
         len(labels), ctx.persona_id, building_id,
@@ -391,6 +407,10 @@ def ensure_snapshot(pipeline: HeadPipeline, ctx: LineHeadInput) -> None:
     が積まれていて TTL を超過していたら、 snapshot 全体を再 capture する。
     prompt cache TTL が切れたタイミングでは「head 不変による cache hit」 の根拠が
     消えるので、 cache hit を諦めて最新状態を反映する方が情報量で勝る。
+    TTL 再 capture は head を最新化するだけで、通知の既読基準 (last_notified) には
+    触らない — 休止中に起きた差分 (入退室等) の通知は直後の flush_diffs に委ねる
+    (2026-08-17 実バグの修正: 撮り直しが基準を上書きし、入退室通知が届かないまま
+    既読化されていた。capture_all docstring の不変条件参照)。
     """
     if pipeline.has_snapshot(ctx.persona_id, ctx.model_key):
         snapshot = pipeline.get_snapshot(ctx.persona_id, ctx.model_key)
@@ -399,6 +419,9 @@ def ensure_snapshot(pipeline: HeadPipeline, ctx: LineHeadInput) -> None:
                 "head_pipeline: anchor TTL expired (in-memory snapshot), recapturing persona=%s model=%s",
                 ctx.persona_id, ctx.model_key,
             )
+            # capture_all は B (通知の既読基準) に触らない — 休止中の入退室等の
+            # 差分は直後の flush_diffs が届ける (2026-08-17 実バグの修正、
+            # capture_all docstring の不変条件参照)。
             pipeline.capture_all(ctx)
             return
         missing = _missing_section_names(pipeline, snapshot)
@@ -412,6 +435,8 @@ def ensure_snapshot(pipeline: HeadPipeline, ctx: LineHeadInput) -> None:
                 "head_pipeline: anchor TTL expired (loaded snapshot), recapturing persona=%s model=%s",
                 ctx.persona_id, ctx.model_key,
             )
+            # 上の in-memory 分岐と同じ — 再起動直後でも store から復元した B を
+            # 基準に、休止中の差分を次の flush で届ける。
             pipeline.capture_all(ctx)
             return
         missing = _missing_section_names(pipeline, snapshot)

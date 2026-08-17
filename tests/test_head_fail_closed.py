@@ -182,10 +182,12 @@ def test_required_capture_failure_with_existing_value_keeps_stale(pipeline, sect
 def test_stale_reuse_does_not_roll_back_last_notified(registry):
     """capture 失敗で A を据え置いた Section は、B (既読基準) も据え置く。
 
-    2026-07-30 Codex 指摘 high1。capture_all は B を新 A で丸ごと初期化する。
-    通常は A = 今 capture した最新なので正しいが、capture 失敗で**古い A を
-    再利用した** Section では、diff 通知で live state まで進んでいた B が
-    古い A へ巻き戻り、復旧後に「もう届けた変化」を再通知してしまう。
+    2026-07-30 Codex 指摘 high1。当時の capture_all は B を新 A で丸ごと初期化
+    しており、capture 失敗で**古い A を再利用した** Section では、diff 通知で
+    live state まで進んでいた B が古い A へ巻き戻り、復旧後に「もう届けた変化」
+    を再通知してしまう — という穴だった。2026-08-17 に初期化自体を撤去し、
+    現在は既存 B を持つ全 Section が無条件で据え置き (B は配送だけが進める)。
+    本テストはその据え置きが stale 再利用でも成り立つことの回帰として残す。
     """
     class DiffingSection(FlakySection):
         def diff_to_notifications(self, old, new):

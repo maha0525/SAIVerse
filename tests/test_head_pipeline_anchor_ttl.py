@@ -147,6 +147,46 @@ def test_ensure_snapshot_partial_ttl_only_one_field(pipeline):
     assert section.capture_count == 1
 
 
+class _DiffingSpellSection(_SpellListLike):
+    """diff 通知を実際に出す版 (入退室検知と同じ「集合の増減」型)。"""
+
+    def diff_to_notifications(self, old, new):
+        if old is None or new is None:
+            return []
+        return [
+            NotificationLabel(kind="spell_removed", label=f"{s} が使えなくなりました")
+            for s in sorted(set(old) - set(new))
+        ]
+
+
+def test_ttl_recapture_preserves_diff_baseline():
+    """TTL 超過の再 capture は B (通知の既読基準) を据え置く。
+
+    回帰 (2026-08-17 実運用): エリスの入退室通知が 1 ヶ月間全滅していた実バグ。
+    休止中に起きた変化 (ユーザー退室等) が、TTL 切れ Pulse 頭の capture_all で
+    「既読」に上書きされ、直後の flush_diffs が差分なしになっていた。
+    再 capture 後の flush で休止中の差分が届くことを検証する。
+    """
+    registry = HeadSectionRegistry()
+    section = _DiffingSpellSection()
+    section.live_spells = ("spell_a", "spell_b")
+    registry.register(section)
+    pipeline_obj = HeadPipeline(registry=registry)
+    now = time.time()
+
+    ensure_snapshot(
+        pipeline_obj, _make_ctx(anchor_updated_at=now - 60, cache_ttl_seconds=300),
+    )  # 初回 capture: A = B = (spell_a, spell_b)
+
+    section.live_spells = ("spell_a",)  # 休止中に spell_b が消えた
+
+    ctx_expired = _make_ctx(anchor_updated_at=now - 3600, cache_ttl_seconds=300)
+    ensure_snapshot(pipeline_obj, ctx_expired)  # TTL 超過 → 再 capture
+
+    labels = pipeline_obj.flush_diffs(ctx_expired, all_sections=True)
+    assert [label.kind for label in labels] == ["spell_removed"]
+
+
 # ---- build_line_head_input integration ----
 
 

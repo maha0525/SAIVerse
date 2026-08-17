@@ -230,6 +230,157 @@ def test_flush_diffs_detects_change_after_mark_dirty(pipeline, ctx, registry):
     assert kinds == ["spell_added", "spell_removed"]
 
 
+def test_capture_all_preserves_diff_baseline(pipeline, ctx, registry):
+    """capture_all は B (既読基準) に触らない — B は配送だけが進める。
+
+    回帰 (2026-08-17 実運用、まはー裁定): エリスの入退室通知が 1 ヶ月間全滅
+    していた。Pulse 頭の anchor TTL 切れで capture_all が B を「今の状態」に
+    上書きし、直後の flush_diffs が「差分なし」になっていた — 休止中に起きた
+    変化 (ユーザーの入退室等) が通知されないまま既読化される。同じ握り潰しは
+    Metabolism 発火・手動の記憶整理の capture_all でも起きるため、リセット
+    挙動そのものを撤去した。
+    """
+    pipeline.capture_all(ctx)                       # A = B = spell_a, spell_b
+    spell_section = registry.by_name("spell_list")
+    spell_section.live_spells = ["spell_a"]         # 未通知のまま spell_b が消えた
+    pipeline.capture_all(ctx)                       # TTL 切れ / Metabolism 相当
+    labels = pipeline.flush_diffs(ctx, all_sections=True)
+    assert [label.kind for label in labels] == ["spell_removed"]
+    # 届けた後は B が前進し、再通知しない
+    assert pipeline.flush_diffs(ctx, all_sections=True) == []
+
+
+def test_capture_all_initializes_baseline_for_new_sections(ctx):
+    """既存 B の無い Section (初回 / 新規登録) は B = 新 A で初期化する。
+
+    (新規登録 Section が「初回取得ぶん全部」を差分として通知するスパムを防ぐ、
+    capture_for_event / recapture_missing の復帰時と同じ規約。)
+    """
+    r = HeadSectionRegistry()
+    r.register(BuildingSection())
+    pipeline = HeadPipeline(registry=r)
+    pipeline.capture_all(ctx)
+    r.register(SpellListSection())                  # 途中から Section が増えた
+    pipeline.capture_all(ctx)
+    # 新規 spell_list は初期化済み = 全スペルを「増えた」と通知しない
+    assert pipeline.flush_diffs(ctx, all_sections=True) == []
+
+
+def test_metabolism_dispatch_preserves_diff_baseline(pipeline, ctx, registry):
+    """METABOLISM dispatch (= capture_all) 後も未通知の差分は次の flush で届く。
+
+    旧挙動は「B を A にリセット (通知の窓をリスタート)」で、Metabolism の発火
+    タイミング次第で Pulse 中の入退室等が通知されずに消えていた (2026-08-17
+    まはー裁定で撤去)。
+    """
+    pipeline.capture_all(ctx)
+    spell_section = registry.by_name("spell_list")
+    spell_section.live_spells = ["spell_a"]         # 未通知の変化
+    pipeline.dispatch_event(ctx, EventType.METABOLISM)
+    labels = pipeline.flush_diffs(ctx, all_sections=True)
+    assert [label.kind for label in labels] == ["spell_removed"]
+
+
+def test_capture_for_event_preserves_existing_baseline(pipeline, ctx, registry):
+    """refresh event の再 capture も既存 B を据え置く (Codex 2026-08-17 high)。
+
+    capture_all 後・配送前に refresh event が割り込むと、旧実装は該当 Section の
+    B を新値へ進めて未配送の差分を既読化していた。event 再 capture は A の
+    最新化であって配送ではない (C8)。
+    """
+    pipeline.capture_all(ctx)
+    building_section = registry.by_name("building")
+    building_section.building_name = "Vessel"       # 未通知の変化
+    pipeline.dispatch_event(ctx, EventType.BUILDING_ENTERED)  # building を再 capture
+    labels = pipeline.flush_diffs(ctx, all_sections=True)
+    assert [label.kind for label in labels] == ["building_renamed"]
+
+
+def test_recapture_missing_preserves_existing_baseline(pipeline, ctx, registry):
+    """欠損復帰の再 capture は、既存 B を持つ Section の B を上書きしない
+    (Codex 2026-08-17 high)。
+
+    A 欠損・B あり (例: store の optional Section serialize 失敗行から復旧) の
+    状態から recapture_missing で復帰したとき、故障期間中の未通知差分が次の
+    flush で届くこと。B が無い Section だけが「初めて head に載る」初期化を受ける。
+    """
+    pipeline.capture_all(ctx)                       # A = B = (spell_a, spell_b)
+    spell_section = registry.by_name("spell_list")
+    spell_section.live_spells = ["spell_a"]         # 故障期間中の変化
+    snapshot = pipeline.get_snapshot("air", MODEL)
+    snapshot.sections["spell_list"] = None          # A 欠損を再現 (B は残っている)
+    pipeline.recapture_missing(ctx, {"spell_list"})
+    labels = pipeline.flush_diffs(ctx, all_sections=True)
+    assert [label.kind for label in labels] == ["spell_removed"]
+
+
+def test_capture_all_keeps_baseline_when_section_capture_fails_without_existing(
+    ctx, registry,
+):
+    """capture 失敗で A の key が省かれても、既存 B は落とさない (Codex 2026-08-17)。
+
+    B は「どこまで届けたか」の独立した台帳。A の欠損に巻き込んで消すと、復旧後の
+    flush が故障期間中の差分を届けられない。
+    """
+    pipeline = HeadPipeline(registry=registry)
+    spell_section = registry.by_name("spell_list")
+    pipeline.capture_all(ctx)                       # A = B = (spell_a, spell_b)
+
+    # A の既存値も消した上で capture を失敗させる → key ごと省かれる経路
+    snapshot = pipeline.get_snapshot("air", MODEL)
+    snapshot.sections["spell_list"] = None
+    original_capture = spell_section.capture
+    spell_section.capture = lambda c: (_ for _ in ()).throw(RuntimeError("boom"))
+    pipeline.capture_all(ctx)                       # spell_list は capture_failures 行き
+
+    # 復旧。故障期間中に spell_b が消えていた
+    spell_section.capture = original_capture
+    spell_section.live_spells = ["spell_a"]
+    labels = pipeline.flush_diffs(ctx, all_sections=True)
+    assert [label.kind for label in labels] == ["spell_removed"]
+
+
+class _RecordingStore:
+    """store.save / save_last_notified が受け取った B を記録する最小フェイク。"""
+
+    def __init__(self):
+        self.saved_notified: list = []
+
+    def save(self, snapshot, last_notified_sections):
+        self.saved_notified.append(dict(last_notified_sections))
+        return True
+
+    def save_last_notified(self, persona_id, model_key, last_notified_sections):
+        self.saved_notified.append(dict(last_notified_sections))
+        return True
+
+    def load(self, persona_id, model_key):
+        return None
+
+    def load_version(self, persona_id, model_key):
+        return None
+
+
+def test_persist_rereads_latest_baseline(ctx, registry):
+    """保存は「保存時点の最新 in-memory B」を書く (Codex 2026-08-17 medium)。
+
+    古い B のコピーを抱えた保存が遅れて着地しても、並行配送が進めた B を
+    巻き戻さない — _persist_snapshot は引数のコピーでなくロック内で読み直した
+    最新値を store へ渡す。
+    """
+    store = _RecordingStore()
+    pipeline = HeadPipeline(registry=registry, store=store)
+    snapshot = pipeline.capture_all(ctx)
+
+    # 配送が B を前進させた (advance_last_notified 相当)
+    pipeline.advance_last_notified("air", "spell_list", ("delivered",))
+
+    # 遅れて着地する保存: 引数には古い B を渡す
+    stale_b = {"spell_list": ("stale",)}
+    pipeline._persist_snapshot(snapshot, stale_b)
+    assert store.saved_notified[-1]["spell_list"] == ("delivered",)
+
+
 def test_flush_diffs_does_not_double_notify(pipeline, ctx, registry):
     pipeline.capture_all(ctx)
     spell_section = registry.by_name("spell_list")

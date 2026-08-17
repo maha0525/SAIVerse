@@ -325,6 +325,21 @@ Section の `refresh_on_events` 未指定 = 空 frozenset = Metabolism のみで
 
 回帰: `tests/test_head_fail_closed.py`。
 
+### C8. 通知の既読基準 (last_notified) は配送だけが進める (2026-08-17)
+
+差分通知の基準値 B (`last_notified`) を動かしてよいのは、**配送が durable に確定した瞬間** (`flush_diffs` の前進 / `advance_last_notified`) と、**B がまだ無い Section の初期化** (初回 capture / 新規登録 / 欠損復帰 — 初回に全内容を「増えた」と通知するスパムの防止) だけ。snapshot の撮り直し (`capture_all`) は A を最新化するだけで B に触らない。
+
+背景: 旧実装は capture_all が B を新 A にリセットしており (「通知済み = 直近 capture」)、anchor TTL 切れの Pulse 頭・Metabolism 発火・手動の記憶整理がこのリセットを踏むたび、前回の配送以降に起きた差分が**通知されないまま既読化**されていた。実害: エリスの入退室通知が 2026-07-17 (§6-3b で model_key 解決が直り TTL 判定が実働開始) から 1 ヶ月間全滅。「A を最新に撮った」と「その差分を届けた」は別の事実であり、混ぜてはならない。
+
+付随する規約 (Codex レビュー 2026-08-17 で同族 3 件を消し込み):
+
+- **B は A から独立した台帳** — capture 失敗で A の key が省かれても、その Section の B は落とさない (落とすと復旧後に故障期間中の差分が届かない)。
+- **event 再 capture (`capture_for_event`)・欠損復帰 (`recapture_missing`) も同じ**: B が無い Section だけ初期化し、既存 B は据え置く。
+- **store への保存は「保存時点の最新 in-memory B」を書く** — 古い B のコピーを抱えた保存が遅れて着地して、並行配送が進めた durable B を巻き戻さないよう、(persona, model) 単位で保存を直列化し、保存直前に B を読み直す。B は単調にしか進まないので「新しい B + 古い A の版」は無害、逆は再起動後の再通知重複になる。
+- **台帳なしの degrade 配送経路も「検出 → push 成功 → B 前進」の順** — push 失敗・SAIMemory 未 ready では B を据え置き、次回 flush の再検出に委ねる (at-least-once)。
+
+回帰: `tests/test_head_pipeline.py` (capture_all / METABOLISM dispatch / capture_for_event / recapture_missing の基準据え置き、保存時の B 読み直し)、`tests/test_head_pipeline_anchor_ttl.py` (TTL 切れ再 capture 後の配送)、`tests/test_head_mutation_notify.py` (degrade 経路の配送確定後前進)。
+
 ---
 
 ## 7. 実装方針 (Phase 分け)
