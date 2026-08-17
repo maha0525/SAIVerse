@@ -10,6 +10,15 @@ _PERSONA_PATH: ContextVar[Optional[str]] = ContextVar("saiverse_persona_path", d
 _MANAGER: ContextVar[Optional[Any]] = ContextVar("saiverse_manager_ref", default=None)
 _PLAYBOOK_NAME: ContextVar[Optional[str]] = ContextVar("saiverse_playbook_name", default=None)
 _AUTO_MODE: ContextVar[bool] = ContextVar("saiverse_auto_mode", default=False)
+# この spell 呼び出しを**ユーザー自身が書いたか**。True になるのは、チャット UI
+# の「ツール指定」やスケジュール設定画面でユーザーが選んだ起動 (= pre_spells) を
+# 実行するときだけで、ペルソナが発話中に唱えたスペルは常に False。
+# Playbook 許可ゲート (``SEARuntime.decide_playbook_permission``) が「毎回確認」の
+# Playbook を確認なしで通してよいかの根拠に使う — 承認したのは Pulse ではなく
+# 「ユーザーが設定画面で指定したその起動」なので、Pulse の種別では代用できない。
+_USER_CONFIGURED_INVOCATION: ContextVar[bool] = ContextVar(
+    "saiverse_user_configured_invocation", default=False
+)
 _EVENT_CALLBACK: ContextVar[Optional[Any]] = ContextVar("saiverse_event_callback", default=None)
 _MESSAGE_ID: ContextVar[Optional[str]] = ContextVar("saiverse_message_id", default=None)
 # Active PulseContext for the running spell/tool. Track-mutating spells
@@ -61,6 +70,15 @@ def get_active_playbook_name() -> Optional[str]:
 
 def get_auto_mode() -> bool:
     return _AUTO_MODE.get()
+
+
+def is_user_configured_invocation() -> bool:
+    """True iff the running spell was invoked by the user's own configuration.
+
+    ユーザーが UI / スケジュール設定で指定した起動 (pre_spells) だけが True。
+    ペルソナが唱えたスペルは False。
+    """
+    return _USER_CONFIGURED_INVOCATION.get()
 
 
 def get_event_callback() -> Optional[Any]:
@@ -197,6 +215,7 @@ def persona_context(
     message_id: Optional[str] = None,
     pulse_context: Optional[Any] = None,
     llm_messages: Optional[List[Dict[str, Any]]] = None,
+    user_configured: bool = False,
 ) -> Iterator[None]:
     """Temporarily set the active persona identity for tool execution.
 
@@ -209,6 +228,7 @@ def persona_context(
     token_manager = _MANAGER.set(manager)
     token_playbook = _PLAYBOOK_NAME.set(playbook_name)
     token_auto = _AUTO_MODE.set(auto_mode)
+    token_user_configured = _USER_CONFIGURED_INVOCATION.set(user_configured)
     token_event_cb = _EVENT_CALLBACK.set(event_callback)
     token_msg_id = _MESSAGE_ID.set(message_id)
     token_pulse_ctx = _PULSE_CONTEXT.set(pulse_context)
@@ -221,6 +241,7 @@ def persona_context(
         _MANAGER.reset(token_manager)
         _PLAYBOOK_NAME.reset(token_playbook)
         _AUTO_MODE.reset(token_auto)
+        _USER_CONFIGURED_INVOCATION.reset(token_user_configured)
         _EVENT_CALLBACK.reset(token_event_cb)
         _MESSAGE_ID.reset(token_msg_id)
         _PULSE_CONTEXT.reset(token_pulse_ctx)

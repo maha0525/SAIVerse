@@ -13,15 +13,24 @@ Spell/Playbook 監査 (2026-07-15) の残 finding 2 点を固定する:
 """
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, Mock
 
 import pytest
 from pydantic import ValidationError
 
+import tools
 from llm_clients.exceptions import LLMError
 from sea.playbook_models import InputParam, PlaybookSchema
 from sea.runtime import SEARuntime
+from sea.runtime_engine import RuntimeEngine
 from sea.runtime_graph import _validate_input_param, compile_with_langgraph
+from sea.runtime_nodes import lg_tool_call_node
+from sea.runtime_state import (
+    apply_output_mapping,
+    resolve_state_value,
+    set_playbook_var,
+    store_structured_result,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -130,6 +139,103 @@ def test_runtime_skips_reserved_output_schema_writeback(monkeypatch):
     assert parent_state["ok_key"] == "from-child"        # 通常キーは通る
 
 
+def test_reserved_write_is_refused_at_the_single_door():
+    """全ての書き込み口が通る一箇所 (set_playbook_var) が `_` を拒否する。"""
+    state = {"_messages": ["original"]}
+
+    assert set_playbook_var(state, "_messages", "boom", where="test") is False
+    assert set_playbook_var(state, "ok", "yes", where="test") is True
+    assert state["_messages"] == ["original"]
+    assert state["ok"] == "yes"
+
+
+def test_output_mapping_skips_reserved_target():
+    """LLM ノードの output_mapping ターゲットからシステム変数を書けない。"""
+    state = {"_messages": ["original"], "router": {"a": "x", "b": "y"}}
+    apply_output_mapping(state, "router", {"router.a": "_messages", "router.b": "good"})
+
+    assert state["_messages"] == ["original"]
+    assert state["good"] == "y"
+
+
+def test_store_structured_result_skips_reserved_key():
+    """structured output の output_key が `_` なら派生キーごと書かれない。"""
+    state = {"_pulse_context": "original"}
+    store_structured_result(state, "_pulse_context", {"a": 1})
+
+    assert state["_pulse_context"] == "original"
+    assert "_pulse_context.a" not in state
+
+
+def _fake_tool_playbook() -> SimpleNamespace:
+    return SimpleNamespace(name="pb", display_name=None)
+
+
+def _tool_persona() -> SimpleNamespace:
+    return SimpleNamespace(persona_id="pid", persona_name="p", persona_log_path=None, manager_ref=None)
+
+
+def test_tool_node_skips_reserved_output_key(monkeypatch):
+    """TOOL ノードの output_key / output_keys からシステム変数を書けない。"""
+    monkeypatch.setitem(tools.TOOL_REGISTRY, "w10_contract_tool", lambda: "result")
+
+    engine = RuntimeEngine(MagicMock(), SimpleNamespace(city_id=1), Mock(), {})
+    node_def = SimpleNamespace(
+        id="t1", action="w10_contract_tool", args_input=None,
+        output_key="_spell_enabled", output_keys=None, important=False,
+    )
+    node = engine.lg_tool_node(node_def, _tool_persona(), _fake_tool_playbook())
+
+    state: dict = {"_spell_enabled": True, "_messages": []}
+    asyncio.run(node(state))
+
+    assert state["_spell_enabled"] is True   # 上書きされていない
+    assert state["last"] == "result"         # 通常経路は動いている
+
+
+def test_tool_node_reserved_output_keys_do_not_shift_positions(monkeypatch):
+    """output_keys の一部が `_` でも、残りの位置は元のまま格納される。"""
+    monkeypatch.setitem(tools.TOOL_REGISTRY, "w10_tuple_tool", lambda: ("a", "b", "c"))
+
+    engine = RuntimeEngine(MagicMock(), SimpleNamespace(city_id=1), Mock(), {})
+    node_def = SimpleNamespace(
+        id="t2", action="w10_tuple_tool", args_input=None,
+        output_key=None, output_keys=["first", "_messages", "third"], important=False,
+    )
+    node = engine.lg_tool_node(node_def, _tool_persona(), _fake_tool_playbook())
+
+    state: dict = {"_messages": []}
+    asyncio.run(node(state))
+
+    assert state["first"] == "a"
+    assert state["_messages"] != "b"   # システム変数は守られる
+    assert state["third"] == "c"       # 位置はずれない
+
+
+def test_tool_call_node_skips_reserved_output_key(monkeypatch):
+    """TOOL_CALL ノードの output_key からシステム変数を書けない。"""
+    monkeypatch.setitem(tools.TOOL_REGISTRY, "w10_contract_tool", lambda: "result")
+
+    runtime = MagicMock()
+    runtime._resolve_state_value = lambda state, path: resolve_state_value(state, path)
+    runtime._append_tool_result_message = Mock()
+    node = lg_tool_call_node(
+        runtime,
+        SimpleNamespace(id="tc1", call_source="fc", output_key="_cancellation_token"),
+        _tool_persona(),
+        _fake_tool_playbook(),
+    )
+
+    state: dict = {
+        "fc": {"name": "w10_contract_tool", "args": {}},
+        "_cancellation_token": None,
+    }
+    asyncio.run(node(state))
+
+    assert state["_cancellation_token"] is None
+    assert state["last"] == "result"
+
+
 def test_set_node_skips_reserved_assignment():
     runtime = SEARuntime(SimpleNamespace(building_histories={}))
     node_def = SimpleNamespace(id="s1", assignments={"_messages": "boom", "good": "ok"})
@@ -184,6 +290,89 @@ def test_enum_param_membership():
         _validate_input_param("pb", p, "chaos")
 
 
+def test_empty_static_enum_is_rejected_at_load():
+    """空の静的 enum は「何も許さない宣言」。制約なしとして素通ししない (F5)。"""
+    with pytest.raises(ValidationError, match="enum"):
+        InputParam(name="mode", description="x", param_type="enum", enum_values=[])
+
+
+def test_enum_without_any_value_source_is_rejected_at_load():
+    """静的リストも動的 source も無い enum は宣言として成立しない (F5)。"""
+    with pytest.raises(ValidationError, match="enum"):
+        InputParam(name="mode", description="x", param_type="enum")
+
+
+@pytest.mark.parametrize("enum_values", [[], ["even", "free"]])
+def test_enum_values_and_enum_source_cannot_both_be_declared(enum_values):
+    """選択肢の供給源は一つだけ。
+
+    UI へ選択肢を出す API は enum_source を優先し、実行時の検証は静的集合を
+    見る。両立を許すと「UI で選べた値が実行時に弾かれる」宣言が書けてしまう
+    ので、規則で優先順位を捌かず、書ける口をなくす。
+    """
+    with pytest.raises(ValidationError, match="mutually exclusive"):
+        InputParam(
+            name="mode", description="x", param_type="enum",
+            enum_values=enum_values, enum_source="playbooks:router_callable",
+        )
+
+
+def test_dynamic_enum_wins_over_static_list_for_stale_declarations():
+    """validator を経ていない宣言で両方あるときは動的側に倒す (API と同じ順位)。
+
+    静的集合で弾くと、UI が enum_source から出した選択肢が実行時に拒否される。
+    """
+    stale = SimpleNamespace(
+        name="mode", param_type="enum",
+        enum_values=["even"], enum_source="playbooks:router_callable",
+    )
+    assert _validate_input_param("pb", stale, "anything") == "anything"
+
+
+def test_empty_static_enum_rejects_every_value_at_runtime():
+    """ロード時検証を経ていない stale な宣言でも、空 enum は fail-closed (F5)。
+
+    truthiness 判定 (``if enum_values``) だと空リストが「制約なし」に化けて
+    どんな値も通っていた。
+    """
+    stale = SimpleNamespace(name="mode", param_type="enum", enum_values=[], enum_source=None)
+    with pytest.raises(LLMError):
+        _validate_input_param("pb", stale, "anything")
+
+
+def test_typed_default_is_normalized_at_load():
+    """宣言された default も入力値と同じ型契約を通る (F4)。"""
+    p = InputParam(name="budget", description="x", param_type="number", default="12")
+    assert p.default == 12
+
+    b = InputParam(name="flag", description="x", param_type="boolean", default="true")
+    assert b.default is True
+
+
+def test_unconvertible_default_fails_the_load():
+    with pytest.raises(ValidationError, match="default value"):
+        InputParam(name="budget", description="x", param_type="number", default="abc")
+
+
+def test_enum_default_outside_values_fails_the_load():
+    with pytest.raises(ValidationError, match="default value"):
+        InputParam(
+            name="mode", description="x", param_type="enum",
+            enum_values=["even", "free"], default="chaos",
+        )
+
+
+def test_playbook_with_bad_default_fails_to_load():
+    """default の型違反は Playbook ごとロードを失敗させる (fail-closed)。"""
+    with pytest.raises(ValidationError, match="default value"):
+        PlaybookSchema(**_pb_dict(
+            input_schema=[{
+                "name": "budget", "description": "x",
+                "param_type": "number", "default": "abc",
+            }],
+        ))
+
+
 def test_enum_param_dynamic_source_not_checked():
     """enum_source (動的 enum) は実行時に集合を取れないため素通し。"""
     p = _param(param_type="enum", enum_source="playbooks:router_callable")
@@ -207,6 +396,27 @@ def test_compile_applies_validation_to_provided_args(monkeypatch):
         MagicMock(), playbook, SimpleNamespace(execution_state={}), "b1",
         None, False, base_messages=[], pulse_id="p1",
         parent_state={"_args": {"budget": "12"}},
+    )
+
+    assert captured["budget"] == 12
+
+
+def test_compile_applies_validation_to_declared_default(monkeypatch):
+    """default 経由の値も宣言型へ正規化されて state に載る (F4)。
+
+    ロード時に正規化済みでも、validator を経ていない schema オブジェクト
+    (直接組み立て / stale) が同じ穴を開けないことを固定する。
+    """
+    captured = _capture_initial_state(monkeypatch)
+    stale = SimpleNamespace(
+        name="budget", param_type="number", required=False,
+        default="12", enum_values=None, enum_source=None,
+    )
+    playbook = _ns_playbook(input_schema=[stale])
+
+    compile_with_langgraph(
+        MagicMock(), playbook, SimpleNamespace(execution_state={}), "b1",
+        None, False, base_messages=[], pulse_id="p1", parent_state={},
     )
 
     assert captured["budget"] == 12

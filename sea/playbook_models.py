@@ -435,6 +435,80 @@ NodeDef = Union[
     ExecNodeDef, StelisStartNodeDef, StelisEndNodeDef
 ]
 
+class ParamContractError(ValueError):
+    """値が ``InputParam`` の宣言 (型 / enum) に合わない。"""
+
+
+def coerce_param_value(
+    value: Any,
+    param_type: str,
+    enum_values: Optional[List[str]] = None,
+    enum_source: Optional[str] = None,
+) -> Any:
+    """値を宣言型へ正規化して返す。合わない値は :class:`ParamContractError`。
+
+    Playbook の入力には tool 引数と違って下流の検証が存在しないため、ここが
+    契約の唯一の検査点になる。クオートされた数値/真偽値 (``"2"`` / ``"true"``)
+    は宣言型へ正規化し、変換できない値と enum 外の値は暗黙値で走らせず正直に
+    失敗させる。呼ばれるのは 2 箇所で、どちらも同じ判定を通す:
+
+    - ロード時: ``InputParam.default`` (宣言そのものの検算)
+    - 実行時: 呼び出しが渡した値 (``sea/runtime_graph.py``)
+
+    ``string`` / ``object`` / 未知型は素通し。enum は静的 ``enum_values`` が
+    宣言されているときだけ集合を検査する (``enum_source`` の動的 enum は
+    実行時に集合を取れない)。両方が来た場合は ``enum_source`` を優先する —
+    UI へ選択肢を出す API (``api/routes/config.py`` の ``resolved_options``)
+    が同じ優先順位で動的側を表示するため、ここで静的集合を当てると「UI で
+    選べた値が実行時に弾かれる」ずれになる。宣言としては両立を許さない
+    (下の :meth:`InputParam._check_declaration_against_type` がロード時に
+    弾く) ので、この分岐に来るのは validator を経ていない値だけ。
+    """
+    ptype = param_type or "string"
+
+    if ptype == "number":
+        if isinstance(value, bool):
+            raise ParamContractError("expected a number, got a boolean")
+        if isinstance(value, (int, float)):
+            return value
+        if isinstance(value, str):
+            stripped = value.strip()
+            try:
+                return int(stripped)
+            except ValueError:
+                pass
+            try:
+                return float(stripped)
+            except ValueError:
+                raise ParamContractError("expected a number") from None
+        raise ParamContractError("expected a number")
+
+    if ptype == "boolean":
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            low = value.strip().lower()
+            if low in ("true", "1", "yes"):
+                return True
+            if low in ("false", "0", "no"):
+                return False
+        raise ParamContractError("expected a boolean")
+
+    if ptype == "enum":
+        if enum_source:
+            return value
+        # ``is None`` で判定する。空リストを「制約なし」と読む truthiness 判定は、
+        # 何も許さない宣言を素通しにする fail-open だった (2026-08-16 W10 F5)。
+        # 空リスト自体は下の宣言検査がロード時に弾く。
+        if enum_values is None:
+            return value
+        if value not in enum_values:
+            raise ParamContractError(f"expected one of {enum_values}")
+        return value
+
+    return value
+
+
 class InputParam(BaseModel):
     name: str
     description: str
@@ -475,6 +549,54 @@ class InputParam(BaseModel):
         description="UI widget type: 'text', 'textarea', 'dropdown', 'radio'. "
                     "Defaults to 'dropdown' for enum, 'text' for string."
     )
+
+    @model_validator(mode="after")
+    def _check_declaration_against_type(self) -> "InputParam":
+        """宣言そのものを型契約に照らす (ロード時 fail-closed)。
+
+        1. enum は許す値の供給源を**ちょうど一つ**持つ (静的 ``enum_values``
+           か動的 ``enum_source`` のどちらか)。
+           - 供給源ゼロ・空リストは「何も許さない宣言」で、実行時に制約なし
+             として素通しされていた (W10 F5)
+           - 両方の宣言は禁止する。UI へ選択肢を出す API は ``enum_source``
+             を優先し、実行時の検証は静的集合を見るため、両立を許すと「UI で
+             選べた値が実行時に弾かれる」ずれが宣言できてしまう。優先順位を
+             規則で捌くのではなく、食い違う宣言を書けなくする
+        2. ``default`` は呼び出しが渡す値と同じ検証を通す。``number`` の
+           default が ``"12"`` のまま state に載ると、args 経由なら正規化される
+           はずの値が型の違うまま下流へ流れる (W10 F4)。変換できる形なら
+           ここで正規化し、できない宣言は Playbook ごとロードを失敗させる。
+        """
+        if self.param_type == "enum":
+            if self.enum_source and self.enum_values is not None:
+                raise ValueError(
+                    f"input param '{self.name}': enum_values and enum_source are "
+                    f"mutually exclusive. Declare exactly one source of allowed values."
+                )
+            if self.enum_values is not None and not self.enum_values:
+                raise ValueError(
+                    f"input param '{self.name}': enum_values is an empty list. "
+                    f"An enum that allows nothing can never be satisfied — "
+                    f"list the allowed values or use enum_source."
+                )
+            if not self.enum_source and not self.enum_values:
+                raise ValueError(
+                    f"input param '{self.name}': param_type='enum' but neither "
+                    f"enum_values (non-empty) nor enum_source is declared. "
+                    f"An enum with no allowed values can never be satisfied."
+                )
+        if self.default is not None:
+            try:
+                self.default = coerce_param_value(
+                    self.default, self.param_type,
+                    enum_values=self.enum_values, enum_source=self.enum_source,
+                )
+            except ParamContractError as exc:
+                raise ValueError(
+                    f"input param '{self.name}': default value {self.default!r} "
+                    f"does not match param_type='{self.param_type}' ({exc})"
+                ) from exc
+        return self
 
 
 class ContextRequirements(BaseModel):

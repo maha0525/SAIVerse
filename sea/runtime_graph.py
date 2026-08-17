@@ -7,7 +7,12 @@ from typing import Any, Callable, Dict, List, Optional
 from llm_clients.exceptions import LLMError
 from sea.cancellation import CancellationToken, ExecutionCancelledException
 from sea.langgraph_runner import compile_playbook
-from sea.playbook_models import PlaybookSchema
+from sea.playbook_models import (
+    ParamContractError,
+    PlaybookSchema,
+    coerce_param_value,
+)
+from sea.runtime_state import playbook_write_key
 
 LOGGER = logging.getLogger(__name__)
 
@@ -15,61 +20,27 @@ LOGGER = logging.getLogger(__name__)
 def _validate_input_param(playbook_name: str, param: Any, value: Any) -> Any:
     """Validate/coerce one provided input value against its InputParam declaration.
 
-    Spell 監査 P2 (入力 contract の実行時検証) の消し込み。Playbook の入力には
-    tool 引数と違って下流の検証が存在しないため、ここが契約の唯一の検査点になる。
-    クオートされた数値/真偽値 (``"2"`` / ``"true"``) は宣言型へ正規化し、変換
-    できない値と enum 外の値は暗黙値で走らせず正直に失敗させる。
-
-    param_type が number / boolean / enum 以外 (string / object / 未知) は素通し。
-    enum_source (動的 enum) は実行時に集合を取れないため検査しない。
+    Spell 監査 P2 (入力 contract の実行時検証) の消し込み。判定そのものは
+    ``sea.playbook_models.coerce_param_value`` が持ち (ロード時の ``default``
+    検証と同じ関数)、ここはそれを実行時の失敗の形 = ``LLMError`` に着せ替える
+    だけ。
     """
     param_name = getattr(param, "name", "?")
-    ptype = getattr(param, "param_type", "string") or "string"
-
-    def _fail(reason: str) -> LLMError:
-        return LLMError(
-            f"Playbook '{playbook_name}' input '{param_name}': {reason} (got {value!r})",
+    try:
+        return coerce_param_value(
+            value,
+            getattr(param, "param_type", "string") or "string",
+            enum_values=getattr(param, "enum_values", None),
+            enum_source=getattr(param, "enum_source", None),
+        )
+    except ParamContractError as exc:
+        raise LLMError(
+            f"Playbook '{playbook_name}' input '{param_name}': {exc} (got {value!r})",
             user_message=(
                 f"プレイブック '{playbook_name}' の入力 '{param_name}' が"
-                f"契約に合いません: {reason}"
+                f"契約に合いません: {exc}"
             ),
-        )
-
-    if ptype == "number":
-        if isinstance(value, bool):
-            raise _fail("expected a number, got a boolean")
-        if isinstance(value, (int, float)):
-            return value
-        if isinstance(value, str):
-            stripped = value.strip()
-            try:
-                return int(stripped)
-            except ValueError:
-                pass
-            try:
-                return float(stripped)
-            except ValueError:
-                raise _fail("expected a number")
-        raise _fail("expected a number")
-
-    if ptype == "boolean":
-        if isinstance(value, bool):
-            return value
-        if isinstance(value, str):
-            low = value.strip().lower()
-            if low in ("true", "1", "yes"):
-                return True
-            if low in ("false", "0", "no"):
-                return False
-        raise _fail("expected a boolean")
-
-    if ptype == "enum":
-        enum_values = getattr(param, "enum_values", None)
-        if enum_values and value not in enum_values:
-            raise _fail(f"expected one of {enum_values}")
-        return value
-
-    return value
+        ) from exc
 
 
 def compile_with_langgraph(
@@ -134,29 +105,35 @@ def compile_with_langgraph(
         param_name = param.name
 
         # PlaybookSchema の validator (_check_reserved_state_namespace) がロード時に
-        # 弾くが、値が効くのはこの merge なのでここでも防御する (境界の二重化)。
-        if param_name.startswith("_"):
-            LOGGER.warning(
-                "[sea][LangGraph] Skipping reserved-namespace input param '%s' in playbook '%s'",
-                param_name, playbook.name,
-            )
+        # 弾くが、値が効くのはこの merge なのでここでも同じ door を通す。
+        if playbook_write_key(
+            param_name, where=f"playbook '{playbook.name}' input param",
+        ) is None:
             continue
 
         if param_name in args_dict:
             value = _validate_input_param(playbook.name, param, args_dict[param_name])
             LOGGER.debug("[sea][LangGraph] Resolved %s from args: %s", param_name, str(value)[:120] if value else "(empty)")
         else:
-            if getattr(param, "required", False) and param.default is None:
-                # 契約上は欠落エラーだが、既存 playbook の 52/94 パラメータが
-                # 「required かつ default なしで、呼び出しは値を渡さない」形に
-                # 依存しているため、ここでの強制は warn-only に留める (2026-08-16
-                # W10 裁定 — 完全強制は playbook データの required 棚卸しが前提)。
-                LOGGER.warning(
-                    "[sea][LangGraph] Playbook '%s' required input '%s' missing; "
-                    "falling back to empty string (contract violation, warn-only)",
-                    playbook.name, param_name,
-                )
-            value = param.default if param.default is not None else ""
+            default_value = getattr(param, "default", None)
+            if default_value is not None:
+                # 宣言された default も呼び出しが渡す値と同じ検査を通す。
+                # ロード時 (InputParam validator) で正規化済みだが、値が効くのは
+                # ここなので validator を経ていない schema オブジェクトにも
+                # 同じ契約を当てる。
+                value = _validate_input_param(playbook.name, param, default_value)
+            else:
+                if getattr(param, "required", False):
+                    # 契約上は欠落エラーだが、既存 playbook の 52/94 パラメータが
+                    # 「required かつ default なしで、呼び出しは値を渡さない」形に
+                    # 依存しているため、ここでの強制は warn-only に留める (2026-08-16
+                    # W10 裁定 — 完全強制は playbook データの required 棚卸しが前提)。
+                    LOGGER.warning(
+                        "[sea][LangGraph] Playbook '%s' required input '%s' missing; "
+                        "falling back to empty string (contract violation, warn-only)",
+                        playbook.name, param_name,
+                    )
+                value = ""
 
         inherited_vars[param_name] = value
 
@@ -450,13 +427,11 @@ def compile_with_langgraph(
     # Write back state variables to parent_state based on output_schema
     if parent_state is not None and isinstance(final_state, dict) and playbook.output_schema:
         for key in playbook.output_schema:
-            if key.startswith("_"):
-                # 親 state の system namespace への書き戻しは許可しない
-                # (ロード時 validator と対の実行時防御)。
-                LOGGER.warning(
-                    "[sea][LangGraph] Skipping reserved-namespace output_schema key '%s' in playbook '%s'",
-                    key, playbook.name,
-                )
+            # 親 state の system namespace への書き戻しは許可しない
+            # (ロード時 validator と対の実行時防御)。
+            if playbook_write_key(
+                key, where=f"playbook '{playbook.name}' output_schema key",
+            ) is None:
                 continue
             if key in final_state:
                 value = final_state[key]

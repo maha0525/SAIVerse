@@ -1,6 +1,11 @@
 from __future__ import annotations
 
-from tools.context import get_active_persona_id, get_active_manager, get_auto_mode
+from tools.context import (
+    get_active_manager,
+    get_active_persona_id,
+    get_auto_mode,
+    get_event_callback,
+)
 from tools.core import ToolSchema
 
 
@@ -58,7 +63,13 @@ def call_playbook(playbook_name: str) -> str:
     # Create a state dict with the target playbook name
     parent_state = {"selected_playbook": playbook_name}
 
-    # Execute the playbook
+    # Execute the playbook.
+    #
+    # event_callback は呼び出し元 Pulse の UI チャネル。渡さないと
+    # meta_exec_speak の EXEC ノードが `ask_every_time` の Playbook を起こす
+    # ときに確認ダイアログを出す先を失い、`_request_playbook_permission` が
+    # 「チャネル無し = deny」で即座に拒否する — ユーザーが見ている会話でも
+    # 「毎回確認」の Playbook が黙って拒否される (2026-08-17 レビュー指摘)。
     outputs = sea_runtime._run_playbook(
         meta_exec_speak,
         persona_obj,
@@ -67,6 +78,7 @@ def call_playbook(playbook_name: str) -> str:
         auto_mode=get_auto_mode(),  # 呼び出し元 Pulse の実値を継承 (auto の子は auto)
         record_history=True,
         parent_state=parent_state,
+        event_callback=get_event_callback(),
     )
 
     # Return the last output (should be the final speech)

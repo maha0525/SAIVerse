@@ -6,6 +6,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from llm_clients.exceptions import LLMError
 from saiverse.logging_config import log_sea_trace
+from sea.runtime_state import effective_auto_mode, set_playbook_var
 
 LOGGER = logging.getLogger(__name__)
 
@@ -37,7 +38,7 @@ def lg_tool_call_node(runtime: Any, node_def: Any, persona: Any, playbook: Any, 
             LOGGER.error(error_msg)
             state["last"] = error_msg
             if output_key:
-                state[output_key] = error_msg
+                set_playbook_var(state, output_key, error_msg, where=f"node '{node_id}' output_key")
             return state
         if not isinstance(tool_args, dict):
             LOGGER.warning("[sea][tool_call] tool_args is not a dict (%s), using empty args", type(tool_args).__name__)
@@ -50,7 +51,7 @@ def lg_tool_call_node(runtime: Any, node_def: Any, persona: Any, playbook: Any, 
             LOGGER.error(error_msg)
             state["last"] = error_msg
             if output_key:
-                state[output_key] = error_msg
+                set_playbook_var(state, output_key, error_msg, where=f"node '{node_id}' output_key")
             return state
 
         persona_obj = state.get("_persona_obj") or persona
@@ -64,8 +65,10 @@ def lg_tool_call_node(runtime: Any, node_def: Any, persona: Any, playbook: Any, 
             _current_msg_id = state.get("_last_message_id")
             # PulseContext も state 経由で受け渡す (Intent A v0.14 deferred Track ops)。
             _pulse_ctx = state.get("_pulse_context")
+            # auto_mode は factory の capture 値でなく state の実効値を読む。
+            _eff_auto_mode = effective_auto_mode(state, auto_mode)
             if persona_id and persona_dir:
-                with persona_context(persona_id, persona_dir, manager_ref, playbook_name=playbook.name, auto_mode=auto_mode, event_callback=event_callback, message_id=_current_msg_id, pulse_context=_pulse_ctx):
+                with persona_context(persona_id, persona_dir, manager_ref, playbook_name=playbook.name, auto_mode=_eff_auto_mode, event_callback=event_callback, message_id=_current_msg_id, pulse_context=_pulse_ctx):
                     result = await maybe_await_tool_result(tool_func, **tool_args)
             else:
                 result = await maybe_await_tool_result(tool_func, **tool_args)
@@ -96,7 +99,7 @@ def lg_tool_call_node(runtime: Any, node_def: Any, persona: Any, playbook: Any, 
                     )
             state["last"] = result_str
             if output_key:
-                state[output_key] = result
+                set_playbook_var(state, output_key, result, where=f"node '{node_id}' output_key")
 
             # Save tool call ID before _append_tool_result_message clears it
             _tc_id_for_im = state.get("_last_tool_call_id")
@@ -117,7 +120,7 @@ def lg_tool_call_node(runtime: Any, node_def: Any, persona: Any, playbook: Any, 
             error_msg = f"Tool error ({tool_name}): {exc}"
             state["last"] = error_msg
             if output_key:
-                state[output_key] = error_msg
+                set_playbook_var(state, output_key, error_msg, where=f"node '{node_id}' output_key")
             LOGGER.exception("[sea][tool_call] %s failed", tool_name)
 
             # Save tool call ID before _append_tool_result_message clears it
@@ -212,7 +215,10 @@ def lg_subplay_node(runtime: Any, node_def: Any, persona: Any, building_id: str,
                 or sub_line == "sub"
             )
             sub_outputs = runtime._run_playbook(
-                sub_pb, persona, eff_bid, sub_input, auto_mode, True, state, event_callback,
+                # auto_mode は factory の capture 値でなく state の実効値を渡す
+                # (親 Pulse が auto なら子も auto)。
+                sub_pb, persona, eff_bid, sub_input, effective_auto_mode(state, auto_mode),
+                True, state, event_callback,
                 cancellation_token=cancellation_token,
                 isolate_pulse_context=isolate,
                 line=sub_line,

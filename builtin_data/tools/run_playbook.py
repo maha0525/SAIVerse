@@ -33,6 +33,7 @@ from tools.context import (
     get_active_pulse_context,
     get_auto_mode,
     get_event_callback,
+    is_user_configured_invocation,
 )
 from tools.core import ToolSchema
 
@@ -130,7 +131,6 @@ def run_playbook(name: str) -> Union[str, Tuple[str, Dict[str, Any]]]:
         manager,
         playbook,
         persona_obj,
-        pulse_ctx,
     )
     if permission_error is not None:
         return permission_error
@@ -245,63 +245,34 @@ def _check_playbook_permission(
     manager: object,
     playbook: object,
     persona_obj: object,
-    pulse_ctx: object,
 ) -> str | None:
-    """Recheck city permission at the exact ``run_playbook`` execution point."""
-    city_id = getattr(manager, "city_id", None)
-    get_permission = getattr(sea_runtime, "_get_playbook_permission", None)
-    if city_id is None or not callable(get_permission):
+    """Recheck city permission at the exact ``run_playbook`` execution point.
+
+    判定そのものは ``SEARuntime.decide_playbook_permission`` が持つ (Playbook の
+    EXEC ノードと同じ規則)。ここが持つのはスペルの戻り値の形だけ。
+
+    2026-08-17 以前はこの関数が独自に「CONVERSATION アスペクトかつ
+    ``event_callback`` があるときだけ確認する」と書いていた。schedule Pulse は
+    UI チャネルを持たないため、**スケジュール設定画面でユーザーが明示選択した
+    Playbook** (= pre_spell の ``/run_playbook``) が毎回拒否されていた — 同じ
+    規則を二度書いた結果、EXEC 側にだけ「schedule は事前承認」がある状態。
+    """
+    decide = getattr(sea_runtime, "decide_playbook_permission", None)
+    if not callable(decide):
         return None
 
     playbook_name = str(getattr(playbook, "name", ""))
-    permission = get_permission(city_id, playbook_name)
-    LOGGER.info(
-        "[run_playbook] Execute-time permission: playbook=%s city=%s permission=%s",
+    allowed, denial_reason = decide(
+        getattr(manager, "city_id", None),
         playbook_name,
-        city_id,
-        permission,
+        persona_obj,
+        user_configured=is_user_configured_invocation(),
+        auto_mode=get_auto_mode(),
+        event_callback=get_event_callback(),
     )
-    if permission in {"blocked", "user_only"}:
-        return (
-            f"[run_playbook error] Playbook '{playbook_name}' is not available "
-            f"(permission: {permission})."
-        )
-    if permission != "ask_every_time":
+    if allowed:
         return None
-
-    active_line = pulse_ctx.current_line()
-    active_aspect = getattr(active_line, "aspect", None)
-    from sea.pulse_context import Aspect
-
-    event_callback = get_event_callback()
-    request_permission = getattr(sea_runtime, "_request_playbook_permission", None)
-    if (
-        active_aspect is not Aspect.CONVERSATION
-        or event_callback is None
-        or not callable(request_permission)
-    ):
-        return (
-            f"[run_playbook error] Playbook '{playbook_name}' requires explicit "
-            "user permission and cannot be started from this execution context."
-        )
-
-    response = request_permission(playbook_name, persona_obj, event_callback)
-    if response == "always_allow":
-        set_permission = getattr(sea_runtime, "_set_playbook_permission", None)
-        if callable(set_permission):
-            set_permission(city_id, playbook_name, "auto_allow")
-        return None
-    if response == "allow":
-        return None
-    if response == "never_use":
-        set_permission = getattr(sea_runtime, "_set_playbook_permission", None)
-        if callable(set_permission):
-            set_permission(city_id, playbook_name, "user_only")
-    reason = "timed out" if response == "timeout" else "was denied"
-    return (
-        f"[run_playbook error] User permission for Playbook '{playbook_name}' "
-        f"{reason}."
-    )
+    return f"[run_playbook error] {denial_reason}"
 
 
 def _not_found_message(

@@ -7,6 +7,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from saiverse.logging_config import log_sea_trace
 from sea.playbook_models import PlaybookSchema
+from sea.runtime_state import effective_auto_mode, set_playbook_var
 from sea.runtime_utils import _format, _resolve_template_arg
 from tools import TOOL_REGISTRY, canonicalize_tool_name
 from tools.context import persona_context
@@ -87,8 +88,11 @@ class RuntimeEngine:
                 # PulseContext も同様に state 経由で受け渡す。track_* 系スペル等が
                 # 「Pulse 完了時に deferred 適用」するために必須 (Intent A v0.14)。
                 _pulse_ctx = state.get("_pulse_context")
+                # auto_mode は factory が capture した引数でなく state の実効値
+                # (親 Pulse からの継承込み) を読む。
+                _eff_auto_mode = effective_auto_mode(state, auto_mode)
                 if persona_id and persona_dir:
-                    with persona_context(persona_id, persona_dir, manager_ref, playbook_name=playbook.name, auto_mode=auto_mode, event_callback=event_callback, message_id=_current_msg_id, pulse_context=_pulse_ctx):
+                    with persona_context(persona_id, persona_dir, manager_ref, playbook_name=playbook.name, auto_mode=_eff_auto_mode, event_callback=event_callback, message_id=_current_msg_id, pulse_context=_pulse_ctx):
                         result = await maybe_await_tool_result(tool_func, **kwargs)
                 else:
                     result = await maybe_await_tool_result(tool_func, **kwargs)
@@ -133,8 +137,8 @@ class RuntimeEngine:
                     # Expand tuple to multiple state variables
                     for i, key in enumerate(output_keys):
                         if i < len(result):
-                            state[key] = result[i]
-                            LOGGER.debug("[sea][LangGraph] Stored tuple[%d] in state[%s]: %s", i, key, str(result[i]))
+                            if set_playbook_var(state, key, result[i], where=f"node '{node_id}' output_keys[{i}]"):
+                                LOGGER.debug("[sea][LangGraph] Stored tuple[%d] in state[%s]: %s", i, key, str(result[i]))
                     # Set last to first element (primary result)
                     state["last"] = str(result[0]) if result else ""
                 elif isinstance(result, tuple):
@@ -145,7 +149,7 @@ class RuntimeEngine:
 
                 # Store result in state if output_key is specified (legacy single-value)
                 if output_key and not output_keys:
-                    state[output_key] = result
+                    set_playbook_var(state, output_key, result, where=f"node '{node_id}' output_key")
 
                 # Append to PulseContext
                 _pulse_ctx = state.get("_pulse_context")
@@ -176,11 +180,11 @@ class RuntimeEngine:
                 state["last"] = error_msg
                 # Populate output_keys so downstream nodes can resolve template variables
                 if output_keys:
-                    for key in output_keys:
-                        state[key] = None
-                    state[output_keys[0]] = error_msg
+                    for i, key in enumerate(output_keys):
+                        set_playbook_var(state, key, None, where=f"node '{node_id}' output_keys[{i}]")
+                    set_playbook_var(state, output_keys[0], error_msg, where=f"node '{node_id}' output_keys[0]")
                 if output_key and not output_keys:
-                    state[output_key] = error_msg
+                    set_playbook_var(state, output_key, error_msg, where=f"node '{node_id}' output_key")
                 LOGGER.exception("SEA LangGraph tool %s failed", tool_name)
                 # Append error to PulseContext
                 _pulse_ctx = state.get("_pulse_context")
@@ -225,6 +229,10 @@ class RuntimeEngine:
             node_id = getattr(node_def, "id", "exec")
             if event_callback:
                 event_callback({"type": "status", "content": f"{playbook.name} / {node_id}", "playbook": playbook.name, "node": node_id})
+            # auto_mode は factory が capture した引数でなく state の実効値
+            # (親 Pulse からの継承込み) を読む。以降の許可判定と子 Playbook への
+            # 引き渡しは全てこの値を使う。
+            eff_auto_mode = effective_auto_mode(state, auto_mode)
             selected_playbook = state.get(playbook_source)
             sub_name = selected_playbook or state.get("last") or ""
             clean_name = str(sub_name).strip()
@@ -266,65 +274,29 @@ class RuntimeEngine:
             eff_bid = self.runtime._effective_building_id(persona, building_id)
 
             # ── Playbook permission check ──
+            # 判定は runtime.decide_playbook_permission に集約 (同じ規則を
+            # /run_playbook スペル側と共有する)。ここが持つのは結果の見せ方だけ。
+            #
+            # ``user_configured=False`` 固定: EXEC が起こす Playbook 名は state の
+            # ``selected_playbook`` から来る (router LLM の選択か、呼び出し側が
+            # 積んだ値)。ユーザーが設定画面で名指しした起動は pre_spells 経路
+            # (``/run_playbook``) を通るので、そちらだけが事前承認を名乗る。
             city_id = getattr(self.manager, "city_id", None)
-            if city_id is not None:
-                perm = self.runtime._get_playbook_permission(city_id, clean_name)
-                log_sea_trace(playbook.name, node_id, "PERM", f"{clean_name} → {perm}")
-
-                if perm == "blocked":
-                    denial_msg = f"Playbook '{clean_name}' is not available (permission: {perm})"
-                    self.runtime._notify_persona_permission_result(state, persona, clean_name, denial_msg, event_callback)
-                    return state
-
-                if perm == "user_only":
-                    denial_msg = (
-                        f"Playbook '{clean_name}' is user-only and cannot be started "
-                        "by a persona or autonomous execution."
-                    )
-                    self.runtime._notify_persona_permission_result(
-                        state,
-                        persona,
-                        clean_name,
-                        denial_msg,
-                        event_callback,
-                    )
-                    return state
-
-                if perm == "ask_every_time":
-                    if auto_mode:
-                        denial_msg = f"Playbook '{clean_name}' requires user permission but running in auto mode. Skipped."
-                        self.runtime._notify_persona_permission_result(state, persona, clean_name, denial_msg, event_callback)
-                        return state
-
-                    # Schedule pulses (external events, timed schedules) have no
-                    # frontend connection for interactive dialogs.  The user's
-                    # act of configuring the automation serves as pre-approval.
-                    pulse_type = state.get("_pulse_type")
-                    if pulse_type == "schedule":
-                        log_sea_trace(playbook.name, node_id, "PERM", f"{clean_name}: auto-allow for schedule pulse")
-                        # Fall through to execution
-                    else:
-                        response = self.runtime._request_playbook_permission(clean_name, persona, event_callback)
-
-                        if response in ("deny", "timeout"):
-                            denial_msg = (
-                                f"User denied execution of playbook '{clean_name}'. Please respond without using this tool."
-                                if response == "deny"
-                                else f"Permission request for playbook '{clean_name}' timed out. Please respond without using this tool."
-                            )
-                            self.runtime._notify_persona_permission_result(state, persona, clean_name, denial_msg, event_callback)
-                            return state
-
-                        if response == "always_allow":
-                            self.runtime._set_playbook_permission(city_id, clean_name, "auto_allow")
-
-                        if response == "never_use":
-                            denial_msg = f"User disabled playbook '{clean_name}'. This playbook will not be available in future. Please respond without using this tool."
-                            self.runtime._set_playbook_permission(city_id, clean_name, "user_only")
-                            self.runtime._notify_persona_permission_result(state, persona, clean_name, denial_msg, event_callback)
-                            return state
-
-                # perm == "auto_allow" or allowed via dialog → continue
+            allowed, denial_msg = self.runtime.decide_playbook_permission(
+                city_id, clean_name, persona,
+                user_configured=False,
+                auto_mode=eff_auto_mode,
+                event_callback=event_callback,
+            )
+            log_sea_trace(
+                playbook.name, node_id, "PERM",
+                f"{clean_name} → {'allow' if allowed else 'deny'}",
+            )
+            if not allowed:
+                self.runtime._notify_persona_permission_result(
+                    state, persona, clean_name, denial_msg, event_callback,
+                )
+                return state
 
             # Determine execution mode
             execution = getattr(node_def, "execution", "inline") or "inline"
@@ -348,7 +320,7 @@ class RuntimeEngine:
             try:
                 cancellation_token = state.get("_cancellation_token")
                 sub_outputs = await asyncio.to_thread(
-                    self.runtime._run_playbook, sub_pb, persona, eff_bid, sub_input, auto_mode, True, state, event_callback,
+                    self.runtime._run_playbook, sub_pb, persona, eff_bid, sub_input, eff_auto_mode, True, state, event_callback,
                     cancellation_token=cancellation_token,
                     isolate_pulse_context=(execution == "subagent"),
                 )

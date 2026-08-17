@@ -43,6 +43,7 @@ from sea.runtime_state import (
     resolve_nested_value,
     resolve_set_value,
     resolve_state_value,
+    set_playbook_var,
     store_structured_result,
 )
 
@@ -940,6 +941,113 @@ class SEARuntime:
         except Exception:
             LOGGER.warning("[sea][perm] Failed to set permission for %s", playbook_name, exc_info=True)
 
+    def decide_playbook_permission(
+        self,
+        city_id: Optional[int],
+        playbook_name: str,
+        persona: Any,
+        *,
+        user_configured: bool,
+        auto_mode: bool,
+        event_callback: Optional[Callable[[Dict[str, Any]], None]],
+    ) -> Tuple[bool, Optional[str]]:
+        """City スコープの Playbook 許可を判定する、ただ一つの場所。
+
+        Playbook を起こす口は 2 つある — Playbook の EXEC ノード
+        (``sea/runtime_engine.py``) と ``/run_playbook`` スペル
+        (``builtin_data/tools/run_playbook.py``)。同じ規則を二度書いた結果、
+        片方だけに事前承認の考慮があり、スケジュール UI が実際に使うスペル側
+        では設定済みの自動化が拒否されていた (2026-08-17 レビュー)。判定は
+        ここに集約し、呼び出し側は結果の見せ方だけを持つ。
+
+        ``ask_every_time`` の判定順序そのものが仕様:
+
+        1. **ユーザー自身が書いた起動なら許可** (``user_configured``) — チャット
+           UI の「ツール指定」やスケジュール設定画面で、ユーザーがその Playbook
+           を名指しした起動。指定した行為が承認にあたるので、確認し直さない。
+           **承認されているのは「その起動」であって Pulse ではない** — 同じ
+           Pulse の中でペルソナが別の Playbook を思いついて唱えた場合は、
+           下の通常の道を通る (Pulse 種別で許すと、設定画面で選んだ覚えのない
+           Playbook まで無確認で走る)
+        2. **応答ループにユーザーが居ない (auto) なら拒否** — 誰も見ていない
+           UI へ確認を出してブロックしない
+        3. **確認の宛先が無ければ拒否** — チャネル無しで黙って許可しない
+        4. それ以外は確認ダイアログ (``always_allow`` / ``never_use`` は
+           恒久設定として書き込む)
+
+        Args:
+            city_id: 判定対象の City。``None`` なら判定せず許可 (City 文脈の
+                無い CLI / テスト経路)。
+            user_configured: この起動をユーザー自身が指定したか。ペルソナの
+                認知が選んだ起動では必ず False。
+
+        Returns:
+            ``(allowed, denial_reason)``。拒否のとき ``denial_reason`` は
+            ペルソナへ見せる理由文。
+        """
+        if city_id is None:
+            return True, None
+
+        perm = self._get_playbook_permission(city_id, playbook_name)
+        LOGGER.info(
+            "[sea][perm] %s → %s (city=%s, user_configured=%s, auto_mode=%s)",
+            playbook_name, perm, city_id, user_configured, auto_mode,
+        )
+
+        if perm == "blocked":
+            return False, f"Playbook '{playbook_name}' is not available (permission: {perm})"
+
+        if perm == "user_only":
+            return False, (
+                f"Playbook '{playbook_name}' is user-only and cannot be started "
+                "by a persona or autonomous execution."
+            )
+
+        if perm != "ask_every_time":
+            return True, None  # auto_allow
+
+        if user_configured:
+            return True, None
+
+        if auto_mode:
+            return False, (
+                f"Playbook '{playbook_name}' requires user permission but running "
+                "in auto mode. Skipped."
+            )
+
+        if event_callback is None:
+            return False, (
+                f"Playbook '{playbook_name}' requires explicit user permission but "
+                "there is no channel to ask on. Skipped."
+            )
+
+        response = self._request_playbook_permission(playbook_name, persona, event_callback)
+
+        if response == "always_allow":
+            self._set_playbook_permission(city_id, playbook_name, "auto_allow")
+            return True, None
+
+        if response == "allow":
+            return True, None
+
+        if response == "never_use":
+            self._set_playbook_permission(city_id, playbook_name, "user_only")
+            return False, (
+                f"User disabled playbook '{playbook_name}'. This playbook will not "
+                "be available in future. Please respond without using this tool."
+            )
+
+        if response == "timeout":
+            return False, (
+                f"Permission request for playbook '{playbook_name}' timed out. "
+                "Please respond without using this tool."
+            )
+
+        return False, (
+            f"User denied execution of playbook '{playbook_name}'. "
+            "Please respond without using this tool."
+        )
+
     def _request_playbook_permission(
         self,
         playbook_name: str,
@@ -1163,16 +1271,14 @@ class SEARuntime:
                 event_callback({"type": "status", "content": f"{playbook.name} / {node_id}", "playbook": playbook.name, "node": node_id})
             trace_parts = []
             for key, value_template in assignments.items():
-                if key.startswith("_"):
-                    # system namespace (_messages / _pulse_context 等) への代入は
-                    # ロード時 validator が弾くが、値が効くのはここなので二重に防ぐ。
-                    LOGGER.warning(
-                        "[sea][set] Skipping reserved-namespace assignment '%s' in playbook '%s'",
-                        key, playbook.name,
-                    )
-                    continue
                 resolved_value = self._resolve_set_value(value_template, state)
-                state[key] = resolved_value
+                # system namespace (_messages / _pulse_context 等) への代入は
+                # ロード時 validator が弾くが、値が効くのはここなので二重に防ぐ。
+                if not set_playbook_var(
+                    state, key, resolved_value,
+                    where=f"playbook '{playbook.name}' node '{node_id}' assignment",
+                ):
+                    continue
                 LOGGER.debug("[sea][set] %s = %s", key, resolved_value)
                 trace_parts.append(f"{key}={str(resolved_value)[:80]}")
             log_sea_trace(playbook.name, node_id, "SET", ", ".join(trace_parts))

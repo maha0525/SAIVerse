@@ -21,6 +21,7 @@ from sea.runtime_utils import _format, _is_llm_streaming_enabled
 from saiverse.logging_config import log_sea_trace
 from sea.playbook_models import PlaybookSchema
 from sea.pulse_context import resolve_execution_context
+from sea.runtime_state import playbook_write_key, set_playbook_var
 from saiverse.usage_tracker import get_usage_tracker
 # Module-level imports for tools registry symbols.
 #
@@ -1444,8 +1445,14 @@ async def _run_spell_tool_async(
     playbook_name: str,
     event_callback: Optional[Callable],
     messages: Optional[list] = None,
+    user_configured: bool = False,
 ) -> Tuple[str, Optional[Dict[str, Any]], bool]:
     """Execute a single spell tool. Returns ``(result_string, metadata, ok)``.
+
+    ``user_configured=True`` はこの起動をユーザー自身が書いた場合 (UI の
+    「ツール指定」・スケジュール設定の pre_spells) だけに立てる。ペルソナが
+    発話中に唱えたスペルでは常に False。Playbook 許可ゲートが「毎回確認」を
+    確認なしで通してよいかの根拠に使う。
 
     ``ok=False`` は機械的失敗 (実行中の例外 / レジストリ未登録) — quick_spell.md
     §3.3 Phase 1。従来は例外が文字列に溶けて成功と区別できず、例外死が
@@ -1498,11 +1505,11 @@ async def _run_spell_tool_async(
         def _run():
             # ``llm_messages=messages`` snapshot lets spells like ``run_playbook``
             # fork their sub-line from the parent LLM node's actual messages.
-            with persona_context(persona_id, persona_dir, manager_ref, playbook_name=playbook_name, auto_mode=auto_mode, event_callback=event_callback, pulse_context=pulse_ctx, llm_messages=messages):
+            with persona_context(persona_id, persona_dir, manager_ref, playbook_name=playbook_name, auto_mode=auto_mode, event_callback=event_callback, pulse_context=pulse_ctx, llm_messages=messages, user_configured=user_configured):
                 return tool_func(**tool_args)
 
         if inspect.iscoroutinefunction(tool_func):
-            with persona_context(persona_id, persona_dir, manager_ref, playbook_name=playbook_name, auto_mode=auto_mode, event_callback=event_callback, pulse_context=pulse_ctx, llm_messages=messages):
+            with persona_context(persona_id, persona_dir, manager_ref, playbook_name=playbook_name, auto_mode=auto_mode, event_callback=event_callback, pulse_context=pulse_ctx, llm_messages=messages, user_configured=user_configured):
                 raw_result = await tool_func(**tool_args)
         else:
             raw_result = await asyncio.get_event_loop().run_in_executor(None, _run)
@@ -2595,7 +2602,13 @@ async def _execute_pre_spells(
         normalized = _normalize_spell_line(spell_name, args)
         decided.append((spell_name, args, normalized))
 
+    # 引数まで含めてユーザーが書いた起動 (fully_specified) と、名前だけ指定されて
+    # 引数はペルソナの認知が決めた起動 (decided) を区別して持つ。承認されている
+    # のは前者だけ — 例えば `/spell name='run_playbook'` (引数省略形) では
+    # **どの Playbook を起こすかを LLM が決める**ので、ユーザーが名指しした起動
+    # として扱ってはいけない。
     valid_specs: List[Tuple[str, dict, str]] = fully_specified + decided
+    user_written = [True] * len(fully_specified) + [False] * len(decided)
     if not valid_specs:
         return
 
@@ -2624,7 +2637,7 @@ async def _execute_pre_spells(
     # results: (result_text, result_meta, executed)。executed=False はゲートで
     # ブロックされた spell。
     results: List[Tuple[str, Optional[Dict[str, Any]], bool]] = []
-    for name, args, _ in valid_specs:
+    for (name, args, _), _user_written in zip(valid_specs, user_written):
         _block_msg = check_spell_permission(name, _active_aspect)
         if _block_msg is not None:
             LOGGER.info(
@@ -2634,9 +2647,13 @@ async def _execute_pre_spells(
             results.append((_block_msg, None, False))
             continue
         # ok=False (例外 / 未登録) は [Spell Error] として注入される (Phase 1)
+        # user_configured: ユーザーが引数まで書いた起動だけ True。「毎回確認」の
+        # Playbook をここで確認し直すと、ユーザーが今まさに指定した実行を問い返す
+        # ことになり、schedule では宛先の無い確認になって必ず失敗する。逆に引数を
+        # LLM が決めた起動は「ユーザーが名指しした」とは言えないので通常の道へ。
         _rtext, _rmeta, _ok = await _run_spell_tool_async(
             name, args, persona, state, playbook.name, event_callback,
-            messages=messages,
+            messages=messages, user_configured=_user_written,
         )
         results.append((_rtext, _rmeta, _ok))
 
@@ -3248,11 +3265,18 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                 text_key = None
                 function_call_key = None
                 if output_keys_spec:
+                    # 基点の名前をここで一度検査しておけば、下流で組み立てる派生
+                    # キー ("{function_call_key}.args.{name}" 等) も同じ判定に乗る。
                     for mapping in output_keys_spec:
                         if "text" in mapping:
-                            text_key = mapping["text"]
+                            text_key = playbook_write_key(
+                                mapping["text"], where=f"node '{node_id}' output_keys.text",
+                            )
                         if "function_call" in mapping:
-                            function_call_key = mapping["function_call"]
+                            function_call_key = playbook_write_key(
+                                mapping["function_call"],
+                                where=f"node '{node_id}' output_keys.function_call",
+                            )
 
                 # Debug: log result type and keys
                 LOGGER.info("[DEBUG] LLM result type='%s', has content=%s, has tool_name=%s",
@@ -4049,8 +4073,9 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                 # If output_key is specified but no response_schema, store the raw text
                 if not schema_consumed:
                     output_key = getattr(node_def, "output_key", None)
-                    if output_key:
-                        state[output_key] = text
+                    if output_key and set_playbook_var(
+                        state, output_key, text, where=f"node '{node_id}' output_key",
+                    ):
                         LOGGER.info("[sea][llm] Stored plain text to state['%s'] = %s", output_key, text)
 
                 # Process output_keys even in normal mode (no tools)
@@ -4058,7 +4083,11 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                 if output_keys_spec:
                     for mapping in output_keys_spec:
                         if "text" in mapping:
-                            text_key = mapping["text"]
+                            text_key = playbook_write_key(
+                                mapping["text"], where=f"node '{node_id}' output_keys.text",
+                            )
+                            if text_key is None:
+                                break
                             state[text_key] = text
                             LOGGER.info("[sea][llm] (normal mode) Stored state['%s'] = %s", text_key, text)
                             state["has_speak_content"] = True

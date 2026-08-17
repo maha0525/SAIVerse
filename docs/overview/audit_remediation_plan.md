@@ -110,13 +110,15 @@
 - **凍結理由 (2026-08-16)**: 自律行動の運転そのものが [autonomous_behavior_v3](../intent/autonomous_behavior_v3.md) で再設計中 (運転の v0.4 分離裁定 2026-08-01)。v2 配線への gate 新設は土台ごと入れ替わるため、v3 の運転設計が確定した時点でその一部として再定義する。**A10 (完全手動モード gate) の finding は未解決のまま** — 凍結であって解決ではない。v3 側の設計時に本 wave のスコープ (行動系/掃除系の二分) を持ち込むこと
 - **完了条件**: 手動モードで自律系が完全停止し、掃除系が止まらないことの回帰固定
 
-### W10 ☑ 柱8 — 独立小物 — 実装済み・実機検証待ち (2026-08-16)
+### W10 ☑ 柱8 — 独立小物 — 実装 + レビュー消し込み完了・実機検証待ち (2026-08-17)
 
 - **スコープ**: Spell 監査残 (realtime spell の SPELL_ENABLED 迂回・auto_mode 固定 / `_` 予約 namespace / 入力 contract)
 - **棚卸し (2026-08-16)**: 旧スコープの S9 (token trigger が件数 gate で拒否される) は**患部消滅で消し込み済み** — Metabolism 発火判定が [あらすじのレベル制](../intent/arasuji_levels.md) の字数三水位へ世代交代し、件数差分 gate が現行コードに存在しない (レビュー台帳 SEA 行に記録)
 - **実装済み (2026-08-16)**: ①realtime spell を `_spell_enabled` gate の内側へ + **auto_mode の正直化** (`auto_mode=True` を渡す箇所がリポジトリ全体に不在という実バグを発見 — 自律 Pulse のスペルが常に「ユーザー起動」として確認ダイアログ/auto フィルタに伝わっていた。root で pulse_type から導出し `state["_auto_mode"]` 単調 OR で運搬) / ②`_` 予約 namespace を PlaybookSchema validator で fail-closed 拒否 (全ロードが通る関所) + merge 3点の実行時防御。既存 builtin 21+DB 27 は違反ゼロを事前確認 / ③入力契約 = 提供値の型正規化 + 変換不能・enum 外値の正直な失敗。**required 欠落のみ warn-only** (既存 52/94 パラメータが依存、完全強制は playbook データ棚卸しが前提 — W10 裁定)。**意図的保留**: `check_spell_permission(aspect=None)` fail-open は Track 撤廃で解体予定のゲートのため据え置き ([track_retirement](../intent/track_retirement.md) スコープへ)。回帰 = 新規 30 件。明細はレビュー台帳の Spell 行
-- **Codex レビュー 1 巡 (2026-08-16)**: 判定 No-ship — **high 1 (schedule の ask_every_time 事前承認が auto 拒否に食われる確認済み回帰) + medium 4**、全件受諾。明細と裁定は [走行メモ](../handoff/2026-08-16_w10_spell_audit_remnants_handoff.md)。**消し込みは Opus セッション** (Fable 1 巡規律)。⚠️ F1 修正まで schedule から ask_every_time Playbook を起動する自動化は停止する
-- **完了条件**: 柱8 リストの全消し込み (残 = Codex 指摘 5 件の消し込み [Opus] → まはー実機検証: SPELL_ENABLED=false のペルソナで realtime spell が走らないこと / 自律 Pulse のスペルで確認ダイアログが出ずログに reason="auto" が出ること / schedule の事前承認が生きていること / 通常会話・判断点の無変化)
+- **Codex レビュー 1 巡 (2026-08-16)**: 判定 No-ship — **high 1 (schedule の ask_every_time 事前承認が auto 拒否に食われる確認済み回帰) + medium 4**、全件受諾。明細と裁定は [走行メモ](../handoff/2026-08-16_w10_spell_audit_remnants_handoff.md)
+- **消し込み完了 (2026-08-17、Opus セッション。レビュー 5 巡で指摘ゼロを観測、フルスイート 4498 緑)**: F1〜F5 を消し込み、消し込み中に見つかった追加欠陥も同じ巡で処理した。芯は **Playbook 許可判定の一本化** — 同じ規則が EXEC ノードと `/run_playbook` スペルに二重に書かれていたため、schedule でユーザーが設定画面から選んだ Playbook を実際に起こす経路 (スペル側) だけが拒否され続けていた。判定を `SEARuntime.decide_playbook_permission` へ集約し、事前承認は Pulse の種別ではなく**「ユーザー自身が書いた起動か」**(`user_configured`) に紐づける形へ。経緯と各巡の裁定は [走行メモ](../handoff/2026-08-16_w10_spell_audit_remnants_handoff.md) §消し込み、明細はレビュー台帳の Spell 行
+- **裁定待ちで切り出した 2 件**: [許可ゲートの被覆](../issues/playbook_permission_gate_coverage.md) (SUBPLAY が許可判定を通らない / `user_only` が「ユーザーだけ起動可」と「二度と使わない」を兼ねる) — どちらも W10 以前から在る設計問題で、直すと権限の意味論が動くため単独で扱う
+- **完了条件**: まはー実機検証 — SPELL_ENABLED=false のペルソナで realtime spell が走らないこと / 自律 Pulse のスペルで確認ダイアログが出ずログに reason="auto" が出ること / **スケジュール設定画面で選んだ Playbook が確認なしで起動すること** / 通常会話・判断点の無変化
 
 ### W11 ☐ §6-6b — Beat ロックの実行トークン化
 

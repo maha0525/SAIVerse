@@ -42,7 +42,23 @@
 
 **却下 0 件**。処方はいずれも Codex 案の方向で妥当 (F1 のみ順序の入れ替え先を「schedule 判定を前へ」と確定)。
 
-## 残作業 (Opus セッション向け)
+## 消し込み (2026-08-17、Opus セッション) — レビュー 5 巡で収束、フルスイート 4498 緑
+
+F1〜F5 を消し込み、その過程で出た追加欠陥も同じループで処理した。**芯は一つ** — 同じ許可規則が二箇所に別々に書かれていたこと。以下は巡ごとの経緯。
+
+| 巡 | 出たもの | 裁定と処置 |
+|---|---|---|
+| 1 | `call_playbook` が子へ `event_callback` を渡さず、user Pulse でも `ask_every_time` が「チャネル無し=deny」で即拒否 / enum の選択肢供給源の優先順位が API (動的優先) と実行時 (静的優先) で食い違う | 前者は修正。後者は**両立をロード時に禁止** — 優先順位の規則で捌かず、食い違う宣言を書けなくする |
+| 2 | **F1 の的外し**: schedule で Playbook を指定する実経路は EXEC でなく `/run_playbook` スペル (ScheduleModal →`pre_spells` → ScheduleManager が UI チャネル無しで発火)。スペル側の関所は「CONVERSATION アスペクト+`event_callback` があるときだけ確認」と別に書かれ、schedule を必ず拒否していた。権限の既定が `ask_every_time` なので例外でなく標準ケース | 判定を `SEARuntime.decide_playbook_permission` へ集約し、EXEC とスペルの両方が通る形に。呼び出し側は結果の見せ方だけを持つ |
+| 3 | 集約した規則が**「schedule Pulse なら何でも許可」のワイルドカード**になっていた (同じ Pulse でペルソナが唱えた別 Playbook も無確認で走る) | 承認の粒度を Pulse でなく**「ユーザー自身が書いた起動か」**へ。`persona_context(user_configured=)` の contextvar で運び、立てるのは `_execute_pre_spells` だけ。**EXEC の schedule 特例は撤去** — EXEC が起こす名は router LLM か呼び出し側が積んだ値で、ユーザーの名指しではない (走行メモ F1 の文面「EXEC の判定順序を入れ替え」からは外れる。裁定の理由 =「設定行為が承認」を素直に適用すると承認は起動に付く) |
+| 4 | 引数省略形の pre_spell (`spell_args_decider` が**対象名まで**決める形) も user_configured 扱いだった | ユーザーが引数まで書いた起動だけを True に |
+| 5 | 指摘ゼロ | 収束を観測 |
+
+**裁定待ちで切り出した 2 件** ([許可ゲートの被覆](../issues/playbook_permission_gate_coverage.md)): SUBPLAY ノードが許可判定を通らない (素直にゲートを通すと既定 `ask_every_time` のせいで内部ステップのたびに確認が出る) / `user_only` が「ユーザーだけ起動可」と「二度と使わない」を兼ねている (確認ダイアログの文面はペルソナ枠で書かれており、前者の読みを支持する)。どちらも W10 以前から在る設計問題。
+
+**隣接で起票**: [`_pulse_type` が子 Playbook に継承されない](../issues/pulse_type_not_inherited_by_subplaybooks.md) (head を描く model と実際に走る model のずれ)。当初は F1 と同じ根に数えていたが、承認を起動に紐づけたことで許可の側の症状は消えた。
+
+## 残作業 (旧・Opus セッション向け — 上の消し込みで完了)
 
 1. **F1 (high・確認済み回帰) から着手** — schedule 事前承認の順序修正 + user/auto/schedule × ask_every_time 回帰テスト。F2〜F5 は上表の修正方向で消し込み → 再レビューループ (収束 = 指摘ゼロの観測、予測禁止)
 2. 収束後フルスイート 1 回 → コミット
