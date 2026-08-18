@@ -203,11 +203,15 @@ class SAIMemoryAdapter:
             from sai_memory.desk import init_desk_tables
             init_desk_tables(self.conn)
 
-            # Initialize perception_buffer table (知覚バッファ, 冪等)。未消費の知覚を
-            # 溜める永続テーブルで、Pulse 消費時に messages へ書き出す。会話履歴とは
+            # Initialize perception_buffer table (知覚台帳, 冪等)。未消費の知覚を
+            # 溜め、消費バッチ (確定文面) を持つ永続テーブル。会話履歴とは
             # 別テーブルだが memory.db に同居する (perception_buffer.py 参照)。
+            # resource_id は旧二段 flush の一度きり清算が (resource_id,
+            # created_at) 索引で範囲限定するために渡す。
             from sai_memory.perception_buffer import init_perception_buffer_table
-            init_perception_buffer_table(self.conn)
+            init_perception_buffer_table(
+                self.conn, resource_id=self.settings.resource_id,
+            )
 
             # P4-c 一回きり移行: vividness='vivid' のページを desk_items へ open。
             # 「鮮明＝常設掲示」という旧意図を、desk が生まれた後の正しい後継へ
@@ -436,9 +440,9 @@ class SAIMemoryAdapter:
     # 知覚バッファ (Perception Buffer) — docs/intent/perception_buffer.md
     # ------------------------------------------------------------------
     #
-    # 未消費の知覚を溜め (push)、Pulse 開始時に型別 reduce して 1 メッセージで
-    # SAIMemory へ書き出す (flush = 消費)。書き込みは客観時間で随時、消費は主観
-    # 時間の一歩 (Pulse) でのみ。
+    # 未消費の知覚を溜め (push)、Beat 頭で型別 reduce して台帳に消費印を打つ
+    # (flush = 消費, §10.2)。書き込みは客観時間で随時、消費は主観時間の一歩
+    # (Beat) でのみ。提示は runtime_context の時刻順マージが担う (§10.3)。
 
     def push_perception(
         self,
@@ -450,10 +454,10 @@ class SAIMemoryAdapter:
         media: Optional[list] = None,
         metadata: Optional[str] = None,
     ) -> None:
-        """知覚を 1 件バッファに積む (まだ SAIMemory には入れない)。
+        """知覚を 1 件バッファに積む (ペルソナはまだ知覚しない)。
 
-        ``media`` は画像等の添付 (``[{"path","mime_type","role"}, ...]``)。消費時に
-        event_message の metadata.media へ載る。
+        ``media`` は画像等の添付 (``[{"path","mime_type","role"}, ...]``)。提示時に
+        マージブロックの metadata.media へ載る。
         """
         if not self._ready:
             return
@@ -482,8 +486,33 @@ class SAIMemoryAdapter:
 
         フィード配送 (saiverse/feed_manager.py) 等の冪等ガード用の読み口。
         push_ledger_perception の outbox_id 照合と同じ流儀 (LIKE で絞って
-        JSON parse で確定)。消費済み (messages へ flush 済み) の分は照合しない —
-        消費済み位置の管理は呼び出し側のカーソル等が担う。
+        JSON parse で確定)。消費済みの分は照合しない — 消費済み位置の管理は
+        呼び出し側のカーソル等が担う (消費済み行も台帳に残るようになったので、
+        ``consumed_at IS NULL`` で明示的に未消費へ絞る)。
+        """
+        if not self._ready or not key or not value:
+            return False
+        with self._db_lock:
+            rows = self.conn.execute(
+                "SELECT metadata FROM perception_buffer "
+                "WHERE consumed_at IS NULL AND metadata LIKE ?",
+                (f"%{value}%",),
+            ).fetchall()
+        for row in rows:
+            try:
+                meta = json.loads(row[0]) if row[0] else None
+            except (TypeError, ValueError):
+                continue
+            if isinstance(meta, dict) and meta.get(key) == value:
+                return True
+        return False
+
+    def has_perception_marker(self, key: str, value: str) -> bool:
+        """知覚台帳の全行 (未消費 + 消費済み) を対象に metadata[key] == value を照合する。
+
+        「一度きり」の通知 (アップグレード通知など) の冪等ガード用。消費済み行が
+        台帳に残るようになった (W14) ので、消費を跨いだ「もう届けたか」を台帳
+        だけで答えられる。
         """
         if not self._ready or not key or not value:
             return False
@@ -501,215 +530,135 @@ class SAIMemoryAdapter:
                 return True
         return False
 
-    #: 知覚の消費 (flush) で event_message の metadata に刻む冪等キー。値は
-    #: この消費で書き出した知覚 id の配列。
-    #:
-    #: append の行 commit と perception_buffer の delete は別 commit なので、
-    #: その間で失敗すると「SAIMemory には在るのに pending も残る」状態になる
-    #: (delete 自体の失敗 / 二つの commit の間でのプロセス死)。次の flush は
-    #: この刻印だけを手がかりに「もう書いた分」を見分けられる — 無ければ同じ
-    #: 知覚をもう一度 event_message として書く (Codex レビュー #2, 2026-08-08。
-    #: 当時はもう一つ、行の commit 後の embedding 失敗が「保存失敗」として
-    #: 返る経路があり、これが最も頻度の高い供給源だった — そちらは
-    #: _append_message 側で塞いだ)。
-    #:
-    #: 前提: **flush は Beat の内側でしか呼ばれない** (Pulse 頭 = sea/runtime.py の
-    #: run_meta_user、ラウンド途中 = sea/runtime_llm.py のスペルループ。どちらも
-    #: beat_gate の persona 単位ロックを保持している)。だから「照合 → 書く →
-    #: 削る」の間に同じペルソナの別の flush は割り込まない。この照合はプロセスを
-    #: 跨ぐ排他ではないので、flush の呼び出し口を Beat の外や別プロセスへ増やす
-    #: なら、ここは DB 側の一意制約で claim する形に作り替えが要る。
-    PERCEPTION_IDS_META_KEY = "perception_ids"
+    def flush_perception_buffer(
+        self,
+        *,
+        pulse_id: Optional[str] = None,
+        manager: Optional[Any] = None,
+    ) -> bool:
+        """未消費の知覚を消費する (Beat 頭の消費、bool ラッパー)。
 
-    #: 上の照合で遡る余裕 (秒)。知覚が積まれた時刻と、それを書き出した
-    #: event_message の時刻は別々の壁時計読み取りなので、NTP 補正等で時計が
-    #: 巻き戻ると「後で書いた行の方が古い」並びが起こりうる。余裕なしだと
-    #: そのとき照合が黙って空振りし、二度書きを止められない。
-    PERCEPTION_LOOKBACK_SLACK_SEC = 3600
-
-    def _already_written_perception_ids(self, items: list) -> set:
-        """``items`` のうち、既に SAIMemory へ書き終えている知覚 id を返す。
-
-        走査は「最古の未消費知覚が積まれた時刻 (− 余裕) 以降」に絞る — 中断した
-        flush の event_message は、それが書き出した知覚より後に書かれているので
-        この窓の中にいる。(resource_id, created_at) の索引に乗るため、通常
-        (中断が無い運転) は直近の数行しか読まない。
-
-        照会自体に失敗したときは空集合 = 「重複ガードなしで従来どおり書く」。
-        知覚を届けないより、壊れた DB での二重書き込みを受ける (fail-open)。
-        """
-        if not items:
-            return set()
-        cutoff = (
-            min(int(it.created_at) for it in items)
-            - self.PERCEPTION_LOOKBACK_SLACK_SEC
-        )
-        try:
-            with self._db_lock:
-                rows = self.conn.execute(
-                    "SELECT metadata FROM messages "
-                    "WHERE resource_id = ? AND created_at >= ? AND metadata LIKE ?",
-                    (
-                        self.settings.resource_id,
-                        cutoff,
-                        f"%{self.PERCEPTION_IDS_META_KEY}%",
-                    ),
-                ).fetchall()
-        except Exception:
-            LOGGER.warning(
-                "[perception_buffer] could not look up already-written "
-                "perceptions; proceeding without the duplicate guard",
-                exc_info=True,
-            )
-            return set()
-        written: set = set()
-        for row in rows:
-            try:
-                meta = json.loads(row[0]) if row[0] else None
-            except (TypeError, ValueError):
-                continue
-            if not isinstance(meta, dict):
-                continue
-            ids = meta.get(self.PERCEPTION_IDS_META_KEY)
-            if isinstance(ids, list):
-                written.update(i for i in ids if isinstance(i, int))
-        return written
-
-    def flush_perception_buffer(self) -> bool:
-        """未消費の知覚を型別 reduce して 1 メッセージで SAIMemory へ書き出す (Beat 消費)。
-
-        Beat の頭 (Pulse 開始 = 最初の Beat / スペルループの周の切れ目 = 続く Beat、
-        perception_buffer.md §4.2 の 2026-08-08 改訂) で呼ばれる。書き出しに成功した
-        項目だけバッファから削除する (append 失敗時は残して次 Beat で再試行 =
-        永続バッファゆえ知覚を落とさない)。
         Returns: 1 件以上消費したら True。
         """
-        return self.flush_perception_buffer_payload() is not None
+        return (
+            self.flush_perception_buffer_payload(pulse_id=pulse_id, manager=manager)
+            is not None
+        )
 
-    def flush_perception_buffer_payload(self) -> Optional[dict]:
-        """flush_perception_buffer の本体。消費した合成メッセージを返す。
+    def flush_perception_buffer_payload(
+        self,
+        *,
+        pulse_id: Optional[str] = None,
+        manager: Optional[Any] = None,
+    ) -> Optional[dict]:
+        """未消費の知覚を型別 reduce し、消費バッチを確定する (Beat 頭の消費)。
+
+        W14 知覚レンダリング (perception_buffer.md §10.2): 消費は「メッセージ行を
+        書く → 項目を削除する」の二段ではなく、**単一トランザクションの消費バッチ
+        確定** (``create_consumption_batch``) — バッチ行にレンダリング済み文面
+        (reduce → format の結果 = ペルソナが見た文そのもの) が永続化され、項目には
+        (consumed_at, batch_id) の印が入る。messages に event_message 行は作らない
+        — 以後の提示はコンテキスト組み立て (sea/runtime_context.py) が messages と
+        未付記バッチを時刻順マージして行う。二段 commit の隙間を塞ぐためにあった
+        C6 の照合機構 (perception_ids 突き合わせ) は、二度書きの口が構造ごと
+        消えたので退役した (§10.7 C6。旧実装は git 履歴が保険)。
 
         戻り値は ``{"content": "<system>…</system>", "media": [...]}``
-        (消費するものが無い / 書き出し失敗時は None)。ラウンド途中の Beat 頭
-        消費 (sea/runtime_llm.py の spell ループ) は、この戻り値をそのまま
-        作業中の messages に append して「SAIMemory に書いた内容」と「続きの
-        生成が見る内容」を一致させる。
+        (消費するものが無い / バッチを確定できなかったときは None)。ラウンド途中の
+        Beat 頭消費 (sea/runtime_llm.py の spell ループ) は、この戻り値をそのまま
+        作業中の messages に append して「バッチに確定した内容」と「続きの生成が
+        見る内容」を一致させる。tx 失敗時は pending のまま残り、次の Beat 頭で
+        再試行される (SEA 監査 S5: 知覚を落とさない)。
 
-        再試行の冪等性: 直前の消費が「書き出し済み・削除未達」で中断していた
-        分は、書き直さず削除だけやり直す (PERCEPTION_IDS_META_KEY 参照)。
+        ``pulse_id``: 消費した Beat の属する Pulse (呼び出し側が持っていれば)。
+        ``manager``: 開いている出来事 (episode) の照会用。層0タグと同じ供給源
+        (saiverse.episodes.get_open_episode) から batch の ``episode_id`` を引く。
+        どちらも無ければ NULL で記帳する。
         """
         if not self._ready:
             return None
         from sai_memory.perception_buffer import (
-            delete_perceptions,
+            create_consumption_batch,
             format_perception_message,
             list_pending,
             reduce_perceptions,
         )
-        with self._db_lock:
-            items = list_pending(self.conn)
-        if not items:
-            return None
-        # 中断した flush の後始末: SAIMemory へ書き終えているのに pending に
-        # 残っている分は、削除だけやり直して今回の書き出しからは外す
-        # (二度書かない = PERCEPTION_IDS_META_KEY の役目)。
-        written = self._already_written_perception_ids(items)
-        if written:
-            stale_ids = [it.id for it in items if it.id in written]
-            items = [it for it in items if it.id not in written]
-            LOGGER.warning(
-                "[perception_buffer] %d item(s) were already written to "
-                "SAIMemory by an interrupted flush; deleting them without "
-                "re-appending (ids=%s)", len(stale_ids), stale_ids,
-            )
+        # 消費時に開いている出来事 (episode)。sea/runtime.py の _store_memory が
+        # origin_episode を刻むのと同じ供給源 (per-persona キャッシュ付きの
+        # get_open_episode)。失敗しても消費は止めない (記帳が NULL になるだけ)。
+        episode_id: Optional[str] = None
+        if manager is not None and getattr(manager, "SessionLocal", None) is not None:
             try:
-                with self._db_lock:
-                    delete_perceptions(self.conn, stale_ids)
+                from saiverse.episodes import get_open_episode
+                open_ep = get_open_episode(manager, self.persona_id)
+                if open_ep and open_ep.get("episode_ref"):
+                    episode_id = str(open_ep["episode_ref"])
             except Exception:
-                # 削除できなくても書き直しはしない (今回の対象から外し済み)。
-                # 次の Beat 頭で同じ後始末をやり直す。
-                LOGGER.warning(
-                    "[perception_buffer] could not delete already-written "
-                    "item(s); retrying the cleanup at the next Beat head",
-                    exc_info=True,
+                LOGGER.debug(
+                    "[perception_buffer] open-episode lookup failed; consuming "
+                    "without an episode_id on the batch", exc_info=True,
                 )
-            if not items:
-                # 新しく書き出すものは無いので None (呼び出し側は何も差し込ま
-                # ない)。ここへ来る並びでは、後始末した知覚は**既にペルソナの
-                # 目に入っている**: 削除だけ失敗した回は書き出した本体を呼び出し
-                # 側へ返して差し込み済み、プロセスが落ちた回は再起動後の提示
-                # コンテキスト構築が SAIMemory から読む。改めて差し込むと、
-                # 後者で同じ通知が二度見えることになる。
-                return None
-        reduced = reduce_perceptions(items)
-        text = format_perception_message(reduced)
-        # reduce 後の全知覚の添付メディア (画像等) を集約して 1 メッセージに載せる。
-        # 移動時の内装画像・他ペルソナ外見画像などがここで event_message に付く。
-        # path で重複排除 (同じ画像を二重添付しない)。
-        media: list = []
-        seen_media: set = set()
-        for it in reduced:
-            for m in it.media_list():
-                key = m.get("path") if isinstance(m, dict) else None
-                if key and key in seen_media:
-                    continue
-                if key:
-                    seen_media.add(key)
-                media.append(m)
-        # tz-aware UTC ISO 必須 (naive だと system TZ 解釈で ±9h ずれる)。
-        # event_message = Track 横断メタログ (origin_track_id は付けない)。
-        from datetime import datetime, timezone
-        metadata: dict = {
-            "tags": ["internal", "event_message", "perception"],
-            # 冪等キー: この消費で買い取った知覚 id (reduce で畳まれて本文に
-            # 出なかった分も、delete の対象なので全部刻む)。
-            self.PERCEPTION_IDS_META_KEY: [it.id for it in items],
-        }
-        if media:
-            metadata["media"] = media
-        message = {
-            "role": "user",
-            "content": f"<system>{text}</system>",
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "metadata": metadata,
-            "line_role": "main_line",
-            "scope": "committed",
-        }
-        try:
-            mid = self.append_persona_message(message)
-        except Exception:
-            LOGGER.warning(
-                "[perception_buffer] flush append failed; keeping %d item(s) for retry",
-                len(items), exc_info=True,
-            )
-            return None
-        if not mid:
-            # _append_message は DB 例外を内部で握って None を返す (= 通常の
-            # 保存失敗は例外として届かない)。None は「行が入らなかった」の意味
-            # なので、pending を保持して次 Beat で再試行する (SEA 監査 S5:
-            # None を成功扱いすると知覚が不可逆に消える)。行の commit 後に
-            # embedding が落ちた回はここへ来ない — 保存は成功として id が返る
-            # (2026-08-08 に _append_message 側で分離。それ以前はここへ落ちて、
-            # 再試行が同じ知覚の二度書きになっていた)。
-            LOGGER.warning(
-                "[perception_buffer] flush append returned no message id; "
-                "keeping %d item(s) for retry", len(items),
-            )
-            return None
         try:
             with self._db_lock:
-                delete_perceptions(self.conn, [it.id for it in items])
+                items = list_pending(self.conn)
+                if not items:
+                    return None
+                reduced = reduce_perceptions(items)
+                text = format_perception_message(reduced)
+                # reduce 後の全知覚の添付メディアを集約して 1 ブロックに載せる。
+                # path で重複排除 (同じ画像を二重添付しない)。
+                media: list = []
+                seen_media: set = set()
+                for it in reduced:
+                    for m in it.media_list():
+                        key = m.get("path") if isinstance(m, dict) else None
+                        if key and key in seen_media:
+                            continue
+                        if key:
+                            seen_media.add(key)
+                        media.append(m)
+                # 境界キー: バッチ確定時点で最後に保存済みの message の正典
+                # 順序キー (created_at, rowid)。Chronicle 無効ペルソナの窓絞りが
+                # anchor 行と同秒のバッチを正典順どおりに判定するための記帳。
+                # 取れなければ NULL (旧世代と同じ epoch 比較へフォールバック)。
+                boundary_created_at = boundary_rowid = None
+                try:
+                    boundary = self.conn.execute(
+                        "SELECT created_at, rowid FROM messages "
+                        "ORDER BY created_at DESC, rowid DESC LIMIT 1"
+                    ).fetchone()
+                    if boundary is not None:
+                        boundary_created_at = int(boundary[0])
+                        boundary_rowid = int(boundary[1])
+                except Exception:
+                    LOGGER.debug(
+                        "[perception_buffer] boundary key lookup failed; "
+                        "recording batch without one", exc_info=True,
+                    )
+                # 消費バッチを単一 tx で確定 (バッチ INSERT + 項目への印)。
+                # reduce で畳まれて本文に出なかった分も消費済みになる
+                # (相殺は未消費の間だけ = C2)。
+                create_consumption_batch(
+                    self.conn,
+                    [it.id for it in items],
+                    consumed_at=int(time.time()),
+                    rendered_text=text,
+                    pulse_id=pulse_id,
+                    episode_id=episode_id,
+                    media=media or None,
+                    boundary_created_at=boundary_created_at,
+                    boundary_rowid=boundary_rowid,
+                )
         except Exception:
-            # 書き出しは成功している。ここで例外を投げると、呼び出し側は
-            # 「書けたのに受け取れない」= その Beat では知覚を見られない。
-            # pending は残るが、次の Beat 頭の後始末 (冒頭の照合) が
-            # 書き直さずに削除だけやり直すので、二度書きにはならない。
+            # tx 失敗 (rollback 済み) = 消費不成立。pending は無傷なので次の
+            # Beat 頭で再試行される。ここで本文を返すと「知覚した」ことになるのに
+            # バッチが無い = 証跡と提示がズレるため、返さない。
             LOGGER.warning(
-                "[perception_buffer] flush wrote the message but could not "
-                "clear %d item(s); cleanup deferred to the next Beat head",
-                len(items), exc_info=True,
+                "[perception_buffer] flush could not record the consumption "
+                "batch; keeping items pending for retry", exc_info=True,
             )
-        return {"content": message["content"], "media": media}
+            return None
+        return {"content": f"<system>{text}</system>", "media": media}
 
     # ------------------------------------------------------------------
     # 実行台帳の配送口 (Execution Ledger outbox delivery)
@@ -843,10 +792,12 @@ class SAIMemoryAdapter:
     ) -> bool:
         """outbox 配送 (target='perception.push') 専用の厳格な書き込み口。
 
-        - 冪等: 未消費バッファに同じ ledger_outbox_id が既在なら積まない (False)。
-          消費済み分との照合は構造上できないが、Pulse 前関所 (pending flush) が
-          消費 (Pulse) より先に必ず走る順序保証 (intent §2.2 fail-closed) により、
-          「配送成功 → 消費 → 再配送」の並びは起こらない。
+        - 冪等: 専用列 ``ledger_outbox_id`` の UNIQUE 索引で **DB 側が原子的に**
+          重複を弾く (2026-08-19 Codex 第八巡 #1 — 旧実装の「metadata JSON を
+          LIKE 走査 → 無ければ INSERT」は check-then-act で同時配送の競合に
+          破れ、消費済み行が溜まるほど走査が線形悪化した)。消費済み行も台帳に
+          残るので、この冪等は消費を自然に跨ぐ (「配送成功 → 消費 → 再配送」
+          でも二重にならない)。metadata には従来どおり照合・監査用に併記する。
         - 失敗は例外 (push_perception の「未 ready なら黙って return」を踏襲しない)。
 
         Returns: 積んだら True、冪等スキップなら False。
@@ -875,26 +826,18 @@ class SAIMemoryAdapter:
                 marker["producer_metadata"] = metadata
         from sai_memory.perception_buffer import push_perception
         with self._db_lock:
-            rows = self.conn.execute(
-                "SELECT metadata FROM perception_buffer WHERE metadata LIKE ?",
-                (f"%{self.LEDGER_OUTBOX_META_KEY}%",),
-            ).fetchall()
-            for row in rows:
-                try:
-                    meta = json.loads(row[0]) if row[0] else None
-                except (TypeError, ValueError):
-                    continue
-                if isinstance(meta, dict) and meta.get(self.LEDGER_OUTBOX_META_KEY) == int(outbox_id):
-                    LOGGER.info(
-                        "[ledger-delivery] duplicate perception suppressed: outbox_id=%s",
-                        outbox_id,
-                    )
-                    return False
-            push_perception(
+            item_id = push_perception(
                 self.conn, kind, content,
                 reduce_key=reduce_key, salient=salient, media=media,
                 metadata=json.dumps(marker, ensure_ascii=False),
+                ledger_outbox_id=str(int(outbox_id)),
             )
+        if item_id is None:
+            LOGGER.info(
+                "[ledger-delivery] duplicate perception suppressed: outbox_id=%s",
+                outbox_id,
+            )
+            return False
         return True
 
     def add_clips(self, message_id: str, spans) -> int:

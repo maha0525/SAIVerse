@@ -171,6 +171,9 @@ export default function MemoryRecall({ personaId }: MemoryRecallProps) {
     const [unifiedSearchMemopedia, setUnifiedSearchMemopedia] = useState(true);
     const [unifiedSearchFragments, setUnifiedSearchFragments] = useState(true);
     const [unifiedSearchMessages, setUnifiedSearchMessages] = useState(true);
+    // 消費済み知覚バッチ (W14 §10.5 の読み口)。退場付記で digest 側が集約に
+    // 落ちても、ここから全文へ到達できる。
+    const [unifiedSearchPerceptions, setUnifiedSearchPerceptions] = useState(true);
     const [unifiedResult, setUnifiedResult] = useState<UnifiedResult | null>(null);
     const [unifiedLoading, setUnifiedLoading] = useState(false);
     const [unifiedError, setUnifiedError] = useState<string | null>(null);
@@ -195,6 +198,7 @@ export default function MemoryRecall({ personaId }: MemoryRecallProps) {
                     search_memopedia: unifiedSearchMemopedia,
                     search_fragments: unifiedSearchFragments,
                     search_messages: unifiedSearchMessages,
+                    search_perceptions: unifiedSearchPerceptions,
                 }),
             });
             if (!res.ok) {
@@ -597,6 +601,9 @@ export default function MemoryRecall({ personaId }: MemoryRecallProps) {
                 lines.push(`[${n}] Message: ${hit.title}`);
                 lines.push(`    URI: ${hit.uri}`);
                 lines.push(`    ${hit.content}`);
+            } else if (hit.source_type === 'perception') {
+                lines.push(`[${n}] 知覚: ${hit.title}`);
+                lines.push(`    ${hit.content}`);
             } else {
                 lines.push(`[${n}] Memopedia: ${hit.title}`);
                 if (hit.category) lines.push(`    カテゴリ: ${hit.category}`);
@@ -684,6 +691,7 @@ export default function MemoryRecall({ personaId }: MemoryRecallProps) {
                         <option value="memopedia">Memopedia</option>
                         <option value="fragment">Fragment</option>
                         <option value="message">Messages</option>
+                        <option value="perception">知覚 (通知の記録)</option>
                     </select>
                 </div>
             </div>
@@ -708,6 +716,11 @@ export default function MemoryRecall({ personaId }: MemoryRecallProps) {
                     <input type="checkbox" checked={unifiedSearchMessages}
                            onChange={(e) => setUnifiedSearchMessages(e.target.checked)} />
                     Messages
+                </label>
+                <label className={styles.toggleLabel}>
+                    <input type="checkbox" checked={unifiedSearchPerceptions}
+                           onChange={(e) => setUnifiedSearchPerceptions(e.target.checked)} />
+                    知覚
                 </label>
             </div>
 
@@ -771,6 +784,7 @@ export default function MemoryRecall({ personaId }: MemoryRecallProps) {
                                             {hit.source_type === 'chronicle' ? 'Chronicle'
                                                 : hit.source_type === 'fragment' ? 'Fragment'
                                                 : hit.source_type === 'message' ? 'Message'
+                                                : hit.source_type === 'perception' ? '知覚'
                                                 : 'Memopedia'}
                                             {hit.level != null && ` Lv${hit.level}`}
                                             {hit.category && ` [${hit.category}]`}
@@ -779,15 +793,18 @@ export default function MemoryRecall({ personaId }: MemoryRecallProps) {
                                             <div className={styles.contentPreview}>
                                                 <strong>{hit.title}</strong>
                                                 {hit.content && <><br />{hit.content}</>}
-                                                <br />
-                                                <code style={{ fontSize: '0.7rem', color: '#666' }}>{hit.uri}</code>
+                                                {hit.uri && <>
+                                                    <br />
+                                                    <code style={{ fontSize: '0.7rem', color: '#666' }}>{hit.uri}</code>
+                                                </>}
                                             </div>
                                         </td>
                                         <td style={{ textAlign: 'center' }}>
                                             <button
                                                 onClick={() => handleAddToWorkingMemory(hit)}
-                                                disabled={addingToWm === hit.source_id}
-                                                title="ワーキングメモリに追加"
+                                                disabled={addingToWm === hit.source_id || !hit.uri}
+                                                title={hit.uri ? 'ワーキングメモリに追加'
+                                                    : '知覚バッチは URI を持たないため追加できません'}
                                                 style={{
                                                     background: wmAddResult?.id === hit.source_id && wmAddResult.ok
                                                         ? 'rgba(43, 138, 62, 0.2)' : 'none',

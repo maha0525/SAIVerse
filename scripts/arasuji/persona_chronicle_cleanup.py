@@ -283,6 +283,10 @@ def execute(
     ).fetchone()[0]
     try:
         conn.execute("BEGIN IMMEDIATE")
+        # 知覚バッチの付記印を削除と同一 tx で返す (W14 — 印だけ残すと転写先の
+        # 無い「付記済み」= 知覚の恒久消失。perception_buffer.unmark_batches_annexed)。
+        from sai_memory.perception_buffer import unmark_batches_annexed
+        unmark_batches_annexed(conn, list(delete_ids))
         conn.execute(
             f"DELETE FROM memopedia_pages WHERE id IN ({ph}) "
             f"AND category='chronicle'", tuple(delete_ids))
@@ -308,6 +312,7 @@ def execute(
                 f"DELETE FROM memopedia_fragment_embeddings "
                 f"WHERE fragment_id IN ({fph})", tuple(frag_ids))
         if page_ids:
+            unmark_batches_annexed(conn, list(page_ids))  # 非 chronicle なら no-op
             conn.execute(
                 f"DELETE FROM memopedia_pages WHERE id IN ({pph})",
                 tuple(page_ids))

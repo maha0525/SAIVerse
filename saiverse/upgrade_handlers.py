@@ -94,7 +94,16 @@ def _v0_3_0_dynamic_state_reset(*, session: "Session", ai: "AI") -> None:
 
 
 def _insert_upgrade_notification(persona_id: str) -> None:
-    """ペルソナの SAIMemory にアップデート検知通知を1件挿入する。"""
+    """ペルソナへアップデート検知通知を届ける (知覚バッファ経由・一度きり)。
+
+    W14 (perception_buffer.md §10.6) で event_message 直挿しから知覚バッファ
+    (kind='world_state') へ移送した。冪等は upgrade_id の二段照合:
+
+    - legacy: 移送前に messages へ直挿しされた行 (metadata.upgrade_id)。
+    - 台帳: 知覚バッファの全行 (未消費 + 消費済み — 消費済み行も残るので、
+      消費を跨いでも「もう届けた」が台帳だけで分かる)。
+    """
+    import json as _json
     from saiverse_memory.adapter import SAIMemoryAdapter
 
     adapter = SAIMemoryAdapter(persona_id)
@@ -102,39 +111,37 @@ def _insert_upgrade_notification(persona_id: str) -> None:
     if not adapter.is_ready():
         raise RuntimeError(f"SAIMemory not ready for {persona_id}")
 
-    upgrade_id = f"v0_3_0_dynamic_state_reset:{persona_id}:0.3.0.dev0"
-    with adapter._db_lock:
-        existing = adapter.conn.execute(
-            "SELECT 1 FROM messages WHERE json_extract(metadata, '$.upgrade_id') = ? LIMIT 1",
-            (upgrade_id,),
-        ).fetchone()
-    if existing:
-        LOGGER.info("[handler] upgrade notification already exists for %s", persona_id)
-        return
+    try:
+        upgrade_id = f"v0_3_0_dynamic_state_reset:{persona_id}:0.3.0.dev0"
+        with adapter._db_lock:
+            existing = adapter.conn.execute(
+                "SELECT 1 FROM messages WHERE json_extract(metadata, '$.upgrade_id') = ? LIMIT 1",
+                (upgrade_id,),
+            ).fetchone()
+        if existing or adapter.has_perception_marker("upgrade_id", upgrade_id):
+            LOGGER.info("[handler] upgrade notification already exists for %s", persona_id)
+            return
 
-    # `event_message` タグがペルソナの会話コンテキストに取り込まれるキー
-    # (sea/runtime_context.py の required_tags 参照)。dynamic_state.py の
-    # 既存イベント通知と同じ扱いにする。`system_event` / `version_upgrade` は
-    # 後から検索/フィルタするための識別子。
-    message = {
-        "role": "user",
-        "content": (
-            "<system>[システム通知]\n"
-            "- SAIVerse v0.3.0 へのアップデートを検知しました。"
-            "Memopediaの状態同期がリセットされました</system>"
-        ),
-        "metadata": {
-            "tags": ["internal", "event_message", "system_event", "version_upgrade"],
-            "upgrade_id": upgrade_id,
-        },
-    }
-    message_id = adapter.append_persona_message(message)
-    if not message_id:
-        raise RuntimeError(f"Failed to insert upgrade notification for {persona_id}")
-    LOGGER.info(
-        "[handler] inserted v0.3.0 upgrade notification into SAIMemory for %s",
-        persona_id,
-    )
+        adapter.push_perception(
+            "world_state",
+            "SAIVerse v0.3.0 へのアップデートを検知しました。"
+            "Memopediaの状態同期がリセットされました",
+            metadata=_json.dumps(
+                {"upgrade_id": upgrade_id, "system_event": "version_upgrade"},
+                ensure_ascii=False,
+            ),
+        )
+        LOGGER.info(
+            "[handler] queued v0.3.0 upgrade notification into perception buffer for %s",
+            persona_id,
+        )
+    finally:
+        # 使い捨て adapter は閉じる (Windows では開いた conn が temp/backup の
+        # ファイル操作を妨げる)。
+        try:
+            adapter.close()
+        except Exception:
+            pass
 
 
 # ---- v0.3.0.dev1: 削除済み Playbook 名のスケジュール書き換え ----

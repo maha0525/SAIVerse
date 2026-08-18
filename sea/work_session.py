@@ -315,7 +315,9 @@ def run_work_session(
                 _sai_mem = getattr(persona, "sai_memory", None)
                 _flush_fn = getattr(_sai_mem, "flush_perception_buffer", None)
                 if _outermost and _flush_fn is not None:
-                    _flush_fn()
+                    # pulse_id = 作業セッション Pulse root の id。manager は
+                    # 消費バッチの episode_id 照会用 (層0タグと同じ供給源)。
+                    _flush_fn(pulse_id=pulse_id, manager=manager)
             except Exception:
                 LOGGER.warning(
                     "[work_session] Beat-head perception flush failed for %s; "

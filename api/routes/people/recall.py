@@ -465,6 +465,10 @@ class UnifiedRecallRequest(BaseModel):
     search_memopedia: bool = True
     search_fragments: bool = True
     search_messages: bool = True
+    # 消費済み知覚バッチ (W14 §10.5 の読み口)。unified_recall 本体の既定は
+    # False (opt-in) だが、ユーザー向けの Memory タブ検索は「退場付記の集約から
+    # 全文へ到達する」入口なので既定 ON。
+    search_perceptions: bool = True
 
 
 class UnifiedRecallHit(BaseModel):
@@ -524,6 +528,7 @@ def unified_recall_endpoint(
                 search_memopedia=request.search_memopedia,
                 search_fragments=request.search_fragments,
                 search_messages=request.search_messages,
+                search_perceptions=request.search_perceptions,
                 persona_id=persona_id,
             )
 
@@ -544,6 +549,23 @@ def unified_recall_endpoint(
                     msg = get_message(adapter.conn, h.source_id)
                     if msg:
                         h.content = msg.content
+                elif h.source_type == "perception":
+                    # 全文への到達手段 (W14 §10.5): 抜粋でなくバッチの確定文面
+                    # (rendered_text) をそのまま返す。
+                    try:
+                        bid = int(str(h.source_id).split(":", 1)[1])
+                        row = adapter.conn.execute(
+                            "SELECT rendered_text FROM perception_batches "
+                            "WHERE id = ?",
+                            (bid,),
+                        ).fetchone()
+                        if row and row[0]:
+                            h.content = row[0]
+                    except Exception:
+                        logger.debug(
+                            "[unified-recall] perception full-text fetch failed",
+                            exc_info=True,
+                        )
 
             return UnifiedRecallResponse(
                 query=query,

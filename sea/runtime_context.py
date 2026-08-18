@@ -250,6 +250,10 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
                 limit_value = 2000  # fallback
                 used_anchor = False
                 recent = []
+                # 提示窓の境界 (anchor)。Chronicle 無効ペルソナのバッチ絞り
+                # (下のマージ) が「履歴が空でも窓より古いものは忘れる」を
+                # 判定するのに使う (2026-08-19 Codex 第二巡 #3)。
+                history_anchor_id: Optional[str] = None
 
                 # 実行 model が水位を持つか。モデル定義で水位を null にした model は
                 # Metabolism を持たない = anchor を使わない (これが唯一のオプトアウト、
@@ -296,6 +300,7 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
                             persona, model_key=model_key,
                             persist_advance=persist_anchor_advance,
                         )
+                        history_anchor_id = anchor_id
 
                         if anchor_id:
                             # Case 1 or 2: valid anchor found
@@ -378,6 +383,7 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
                             anchor_id, resolution = runtime.session_lifecycle.resolve_metabolism_anchor(
                                 persona, model_key=model_key, persist_advance=False,
                             )
+                            history_anchor_id = anchor_id
                             if anchor_id:
                                 recent_from_anchor = history_mgr.get_history_from_anchor(
                                     anchor_id,
@@ -466,6 +472,17 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
                             LOGGER.debug("[sea][prepare-context] Resolved count-based metabolism anchor %s (call-local); DB persist deferred to post-LLM-success", oldest_id)
 
                 LOGGER.debug("[sea][prepare-context] Got %d history messages", len(recent))
+
+                # ---- 未付記バッチの時刻順マージ (W14, perception_buffer.md §10.3) ----
+                # 消費された知覚は messages に行を作らない (§10.1)。提示は生ログと
+                # 未付記の消費バッチをここで時刻順にマージする。提示から下ろす
+                # 唯一の手段は退場付記の印 (annexed_entry_id) — 付記されるまで
+                # 消えない。legacy の event_message 行は生ログ側にそのまま居るので、
+                # 混在期間も両方が自然に並ぶ。
+                recent = _merge_consumed_perceptions(
+                    runtime, persona, recent, anchor_id=history_anchor_id,
+                )
+
                 # Enrich messages with attachment context
                 enriched_recent = runtime._enrich_history_with_attachments(recent)
 
@@ -599,6 +616,188 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
 
     # ---- Token budget check ----
     return messages
+
+
+def _payload_epoch(msg: Dict[str, Any]) -> Optional[int]:
+    """提示メッセージの時刻を epoch 秒で読む。
+
+    adapter 経由の payload は ``created_at`` (epoch int) を持つ。それが無い行
+    (テストのスタブ等) は ``timestamp`` (ISO 文字列) を tz-aware に解釈して
+    フォールバックする。どちらも無ければ None (= 比較不能)。
+    """
+    created = msg.get("created_at")
+    if created is not None:
+        try:
+            return int(created)
+        except (TypeError, ValueError):
+            pass
+    ts = msg.get("timestamp")
+    if ts:
+        try:
+            from datetime import datetime, timezone
+            dt = datetime.fromisoformat(str(ts))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return int(dt.timestamp())
+        except (TypeError, ValueError):
+            pass
+    return None
+
+
+def _chronicle_enabled_for(runtime: Any, persona: Any) -> bool:
+    """Chronicle 編纂が有効か — generate_chronicle の入口と同じフラグを読む。
+
+    _run_metabolism_locked が編纂可否に使う二段 (env ENABLE_MEMORY_WEAVE_CONTEXT
+    × ペルソナ単位トグル) をそのまま写す。判定できないときは True (= バッチを
+    隠さない側) に倒す — 「編纂なしで忘れる」は明示的な選択のときだけ。
+    """
+    import os
+    try:
+        memory_weave_enabled = os.getenv(
+            "ENABLE_MEMORY_WEAVE_CONTEXT", "",
+        ).lower() in ("true", "1")
+        lifecycle = getattr(runtime, "session_lifecycle", None)
+        if lifecycle is None:
+            return True
+        return bool(
+            memory_weave_enabled
+            and lifecycle.is_chronicle_enabled_for_persona(persona)
+        )
+    except Exception:
+        return True
+
+
+def _anchor_order_key(
+    sai_mem: Any, anchor_id: Optional[str],
+) -> Optional[tuple]:
+    """anchor 行の正典順序キー (created_at, rowid)。引けなければ None。
+
+    messages の時系列は (created_at, rowid) の辞書式順が正典 (W8)。epoch だけの
+    比較は anchor と同秒に確定したバッチの直前/直後を区別できない。
+    """
+    if not anchor_id:
+        return None
+    try:
+        with sai_mem._db_lock:
+            row = sai_mem.conn.execute(
+                "SELECT created_at, rowid FROM messages WHERE id = ?",
+                (anchor_id,),
+            ).fetchone()
+        if row is None or row[0] is None:
+            return None
+        return (int(row[0]), int(row[1]))
+    except Exception:
+        return None
+
+
+def _merge_consumed_perceptions(
+    runtime: Any, persona: Any, recent: List[Dict[str, Any]],
+    *,
+    anchor_id: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """提示履歴に未付記の消費バッチを時刻順マージする (W14, §10.3)。
+
+    - バッチの ``rendered_text`` (消費時に確定したペルソナが見た文面) を
+      ``<system>`` 包みでそのまま出す — 生の台帳項目からの再構成 (再 reduce /
+      再 format) はしない (reduce で消えた中間状態の復活・秒精度の時刻衝突に
+      よるグループ混線の根)。
+    - **提示から下ろす唯一の手段は退場付記の印** (``annexed_entry_id``)。窓や
+      fold スパンの計算は持たない — 付記されるまで消えないので、下限「退場した
+      ものは必ず編纂されている」が提示側でも常に成立する。履歴が空でも未付記
+      バッチは提示される。
+    - 例外は Chronicle 無効のペルソナ (「編纂なしで忘れる」を選んだ) のみ:
+      提示窓 (cutoff = anchor 境界、無ければ提示最古行) より古いバッチは会話と
+      同じように忘れる。**履歴が空でも** anchor が立っていれば絞る — 生ログ窓が
+      空の瞬間に過去バッチを全部再提示しない (2026-08-19 Codex 第二巡 #3)。
+      anchor も履歴も無い完全ブートストラップだけは全提示 (隠さない側)。
+    - 失敗はマージなし (元の履歴のまま) に倒して WARN — 履歴ゼロで走らせる
+      よりも知覚欠けの方が被害が小さい。
+    """
+    sai_mem = getattr(persona, "sai_memory", None)
+    if sai_mem is None or not getattr(sai_mem, "is_ready", lambda: False)():
+        return recent
+    try:
+        from sai_memory.perception_buffer import list_unannexed_batches
+        with sai_mem._db_lock:
+            batches = list_unannexed_batches(sai_mem.conn)
+        if not batches:
+            return recent
+
+        if not _chronicle_enabled_for(runtime, persona):
+            anchor_key = _anchor_order_key(sai_mem, anchor_id)
+            if anchor_key is not None:
+                # 提示窓と同じ包含規則: 窓は正典順序キー (created_at, rowid) が
+                # anchor 以上の行。バッチは確定時点の境界キー (最後に保存済み
+                # だった行のキー) で同じ比較をする — anchor と同秒でも
+                # 「anchor 行より前に確定したバッチ」だけが窓の外になる。
+                # 境界キーの無い旧バッチは consumed_at の epoch 比較へ
+                # フォールバック。
+                def _in_window(b: Any) -> bool:
+                    if (
+                        b.boundary_created_at is not None
+                        and b.boundary_rowid is not None
+                    ):
+                        return (
+                            (b.boundary_created_at, b.boundary_rowid)
+                            >= anchor_key
+                        )
+                    return b.consumed_at >= anchor_key[0]
+                batches = [b for b in batches if _in_window(b)]
+            else:
+                cutoff: Optional[int] = None
+                for msg in recent:
+                    epoch = _payload_epoch(msg)
+                    if epoch is not None:
+                        cutoff = epoch if cutoff is None else min(cutoff, epoch)
+                if cutoff is not None:
+                    batches = [b for b in batches if b.consumed_at >= cutoff]
+            if not batches:
+                return recent
+
+        blocks: List[Dict[str, Any]] = []
+        for batch in batches:
+            metadata: Dict[str, Any] = {
+                # 旧 flush の event_message 行と同型のタグ + マージ由来の目印。
+                "tags": ["internal", "event_message", "perception"],
+                "__consumed_perception__": True,
+                "__perception_batch_id__": batch.id,
+            }
+            media = batch.media_list()
+            if media:
+                metadata["media"] = media
+            blocks.append({
+                "role": "user",
+                "content": f"<system>{batch.rendered_text}</system>",
+                "created_at": batch.consumed_at,
+                "metadata": metadata,
+            })
+
+        # 二本の時系列マージ: ブロックは「自分の consumed_at 以下の生ログ」の
+        # 直後に入る (同時刻なら生ログが先 — 消費は書き込みの後に起きた事実)。
+        merged: List[Dict[str, Any]] = []
+        bi = 0
+        for msg in recent:
+            epoch = _payload_epoch(msg)
+            while (
+                bi < len(blocks)
+                and epoch is not None
+                and blocks[bi]["created_at"] < epoch
+            ):
+                merged.append(blocks[bi])
+                bi += 1
+            merged.append(msg)
+        merged.extend(blocks[bi:])
+        LOGGER.debug(
+            "[sea][prepare-context] merged %d perception batch block(s) "
+            "into history", len(blocks),
+        )
+        return merged
+    except Exception:
+        LOGGER.warning(
+            "[sea][prepare-context] perception batch merge failed; "
+            "presenting history without perceptions", exc_info=True,
+        )
+        return recent
 
 
 def _maybe_inject_auto_recall(

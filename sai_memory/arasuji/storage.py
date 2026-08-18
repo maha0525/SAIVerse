@@ -778,7 +778,11 @@ def delete_incomplete_entries(
                     (json.dumps(pmeta, ensure_ascii=False), pid),
                 )
 
-    # Delete the incomplete entries
+    # Delete the incomplete entries。付記印の返却は削除と同一 tx —
+    # 印だけ残すと転写先の無い「付記済み」= 知覚の恒久消失になる
+    # (perception_buffer.unmark_batches_annexed の docstring 参照)。
+    from sai_memory.perception_buffer import unmark_batches_annexed
+    unmark_batches_annexed(conn, list(deleted_ids))
     placeholders = ",".join("?" for _ in deleted_ids)
     cur = conn.execute(
         f"DELETE FROM memopedia_pages WHERE id IN ({placeholders}) AND category = ?",
@@ -814,6 +818,9 @@ def delete_entry(conn: sqlite3.Connection, entry_id: str) -> bool:
                 (json.dumps(meta, ensure_ascii=False), ROOT_CHRONICLE_ID, sid),
             )
 
+    # 付記印の返却は削除と同一 tx (perception_buffer.unmark_batches_annexed)。
+    from sai_memory.perception_buffer import unmark_batches_annexed
+    unmark_batches_annexed(conn, [entry_id])
     conn.execute(
         "DELETE FROM memopedia_pages WHERE id = ? AND category = ?",
         (entry_id, CATEGORY_CHRONICLE),
@@ -851,7 +858,10 @@ def delete_entry_and_update_parent(
                 (json.dumps(pmeta, ensure_ascii=False), parent_id),
             )
 
-    # Delete entry
+    # Delete entry。付記印の返却は削除と同一 tx
+    # (perception_buffer.unmark_batches_annexed)。
+    from sai_memory.perception_buffer import unmark_batches_annexed
+    unmark_batches_annexed(conn, [entry_id])
     conn.execute(
         "DELETE FROM memopedia_pages WHERE id = ? AND category = ?",
         (entry_id, CATEGORY_CHRONICLE),
@@ -975,7 +985,10 @@ def dismantle_entry(
                     (json.dumps(pmeta, ensure_ascii=False), entry.parent_id),
                 )
 
-    # 3. Delete this entry
+    # 3. Delete this entry。付記印の返却は削除と同一 tx
+    # (perception_buffer.unmark_batches_annexed)。
+    from sai_memory.perception_buffer import unmark_batches_annexed
+    unmark_batches_annexed(conn, [entry_id])
     conn.execute(
         "DELETE FROM memopedia_pages WHERE id = ? AND category = ?",
         (entry_id, CATEGORY_CHRONICLE),
@@ -1019,6 +1032,15 @@ def get_entries_by_thread(
 
 def clear_all_entries(conn: sqlite3.Connection) -> int:
     """Delete all arasuji entries (not the root_chronicle trunk). Returns count deleted."""
+    # 全エントリが消えるので、付記印は全部返す (削除と同一 tx)。戻った
+    # バッチは提示に再登場し、次の編纂の一括回収が引き取る。
+    try:
+        conn.execute(
+            "UPDATE perception_batches SET annexed_entry_id = NULL "
+            "WHERE annexed_entry_id IS NOT NULL"
+        )
+    except sqlite3.OperationalError:
+        pass  # perception_batches の無い DB
     cur = conn.execute(
         "DELETE FROM memopedia_pages WHERE category = ? AND is_trunk = 0",
         (CATEGORY_CHRONICLE,),
@@ -1139,6 +1161,132 @@ def regenerate_entry(
     ):
         _withdraw_replacement()
         return None
+
+    # 旧付記の継承 (2026-08-19 Codex 第三巡 #3 / 第六巡 #3): 再生成は本文を
+    # 原本メッセージから作り直すため、旧 entry に付記されていた知覚バッチ**と
+    # legacy event_message の転写**を再収集して replacement 本文へ決定論転写し、
+    # バッチの印は**同一 tx** で新 id へ付け替える。これを飛ばすと、バッチは
+    # unmark で提示へ戻るまで digest から欠け、legacy (印を持たない) は再生成の
+    # たびに黙って消える。継承に失敗しても swap は止めない — バッチは下の削除
+    # (delete_entry_and_update_parent) の unmark が印を戻し、提示に残って次の
+    # 編纂の一括回収が引き取る (fail-open)。
+    try:
+        from sai_memory.arasuji.executor import (
+            collect_legacy_event_items_in_key_range,
+            format_perception_annex,
+            legacy_event_items_by_ids,
+        )
+        from sai_memory.perception_buffer import (
+            list_batches_annexed_to,
+            reassign_batches_annexed,
+        )
+        old_batches = list_batches_annexed_to(conn, entry_id)
+        # legacy の継承は二段 (第七巡 #2):
+        # 正 — 付記時に entry metadata へ構造化保存された annexed_legacy_ids を
+        # 読む (空リストも「付記済みで legacy ゼロ」の確定情報)。
+        # フォールバック — キーの無い旧 entry は source message 両端の正典順序
+        # キー (created_at, rowid) の閉区間で再収集する。epoch の end_time+1
+        # 区間は同秒の隣接 entry の legacy を誤収集する。
+        legacy_items: list = []
+        old_meta_row = conn.execute(
+            "SELECT metadata FROM memopedia_pages WHERE id = ? AND category = ?",
+            (entry_id, CATEGORY_CHRONICLE),
+        ).fetchone()
+        try:
+            old_meta = (
+                json.loads(old_meta_row[0])
+                if old_meta_row and old_meta_row[0] else {}
+            )
+        except (TypeError, ValueError):
+            old_meta = {}
+        stored_legacy_ids = (
+            old_meta.get("annexed_legacy_ids")
+            if isinstance(old_meta, dict) else None
+        )
+        if isinstance(stored_legacy_ids, list):
+            legacy_items = legacy_event_items_by_ids(
+                conn, [str(s) for s in stored_legacy_ids],
+            )
+        else:
+            boundary_rows = conn.execute(
+                "SELECT id, created_at, rowid FROM messages WHERE id IN (?, ?)",
+                (messages[0].id, messages[-1].id),
+            ).fetchall()
+            keys = {row[0]: (int(row[1]), int(row[2])) for row in boundary_rows}
+            lo_key = keys.get(messages[0].id)
+            hi_key = keys.get(messages[-1].id)
+            if lo_key is not None and hi_key is not None:
+                legacy_items = collect_legacy_event_items_in_key_range(
+                    conn, lo_key, hi_key,
+                    thread_id=getattr(messages[0], "thread_id", None),
+                )
+        # 新 entry へ継承する annexed_legacy_ids。stored が list なら**空でも
+        # 無条件に**引き継ぐ (2026-08-19 Codex 第八巡 #3 — 空を落とすと legacy
+        # ゼロ entry の二度目の再生成がフォールバックの時刻収集に落ち、隣接
+        # 期間の legacy を拾いうる)。フォールバック経路は今回収集した集合。
+        inherited_legacy_ids = (
+            [str(s) for s in stored_legacy_ids]
+            if isinstance(stored_legacy_ids, list)
+            else [d["id"] for d in legacy_items if d.get("id")]
+        )
+        annex_items = legacy_items + [
+            {
+                "kind": "perception",
+                "at": b.consumed_at,
+                "text": b.rendered_text,
+            }
+            for b in old_batches
+        ]
+        annex_items.sort(key=lambda d: d["at"])
+        annex_text = format_perception_annex(annex_items)
+        try:
+            if annex_text:
+                conn.execute(
+                    "UPDATE memopedia_pages SET content = content || ? "
+                    "WHERE id = ? AND category = ?",
+                    (f"\n\n{annex_text}", new_entry.id, CATEGORY_CHRONICLE),
+                )
+            # 継承した legacy id を新 entry の metadata にも刻む — 次の
+            # 再生成が正の経路 (構造化保存) を使えるように。転写の有無とは
+            # 独立に書く (空リストも確定情報)。
+            new_meta_row = conn.execute(
+                "SELECT metadata FROM memopedia_pages "
+                "WHERE id = ? AND category = ?",
+                (new_entry.id, CATEGORY_CHRONICLE),
+            ).fetchone()
+            try:
+                new_meta = (
+                    json.loads(new_meta_row[0])
+                    if new_meta_row and new_meta_row[0] else {}
+                )
+            except (TypeError, ValueError):
+                new_meta = {}
+            if isinstance(new_meta, dict):
+                new_meta["annexed_legacy_ids"] = inherited_legacy_ids
+                conn.execute(
+                    "UPDATE memopedia_pages SET metadata = ? "
+                    "WHERE id = ? AND category = ?",
+                    (
+                        json.dumps(new_meta, ensure_ascii=False),
+                        new_entry.id, CATEGORY_CHRONICLE,
+                    ),
+                )
+            if old_batches:
+                reassign_batches_annexed(conn, entry_id, new_entry.id)
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        refreshed = get_entry(conn, new_entry.id)
+        if refreshed is not None:
+            new_entry = refreshed
+    except Exception:
+        logging.getLogger(__name__).warning(
+            "[arasuji] failed to inherit perception/legacy annex from %s to %s; "
+            "batches will return to presentation via the deletion unmark",
+            entry_id, new_entry.id, exc_info=True,
+        )
+
     try:
         success, _ = delete_entry_and_update_parent(conn, entry_id)
         if not success:

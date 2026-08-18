@@ -470,6 +470,19 @@ def execute_merge(
     if absorbed is None:
         raise ValueError(f"execute_merge: absorbed ページが見つかりません: {absorbed_page_id}")
 
+    # Chronicle エントリは merge の対象外 — soft-delete が知覚バッチの付記印を
+    # 孤立させる保護 (ChronicleProtectedError) と同族。検知層は chronicle を候補に
+    # しないが、**変更前**に検証してプランを failed に落とす — 検証なしで進むと
+    # 手前の update/移動が済んだ後の delete_page 例外で中途半端に止まり、
+    # プランが done 扱いにならないまま部分変更だけが残る (2026-08-19 Codex
+    # 第四巡 #1)。
+    for label, page in (("survivor", survivor), ("absorbed", absorbed)):
+        if page.category == "chronicle":
+            raise ValueError(
+                f"execute_merge: {label} ページ ({page.id}) は Chronicle エントリ"
+                "です — Chronicle は編纂系の専用経路でのみ操作できます"
+            )
+
     # 同じ晩の先行プランで閉架された相手を掴んでいないか（1 ページ 1 晩 1 操作を
     # 検知側で守っているが、実行側でも閉架だけは弾く）
     _assert_active(conn, survivor.id, "survivor")

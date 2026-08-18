@@ -2248,7 +2248,12 @@ async def _run_spell_loop(
                     and _beat_gate.held_depth(_beat_persona_id) == 1
                 )
                 if _flush_payload_fn is not None and _is_outermost_beat:
-                    _perception_payload = _flush_payload_fn()
+                    # pulse_id は前倒しブロックで定義済みのローカルを再利用。
+                    # manager は消費バッチの episode_id 照会用。
+                    _perception_payload = _flush_payload_fn(
+                        pulse_id=pulse_id,
+                        manager=getattr(runtime, "manager", None),
+                    )
                     if _perception_payload:
                         _perc_msg: Dict[str, Any] = {
                             "role": "user",

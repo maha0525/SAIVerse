@@ -585,12 +585,17 @@ def test_move_failure_runs_in_place_and_notifies_persona(manager, task_refs):
     """移動失敗 (満員等) は現在地で実行 + その事実をペルソナに通知する。
 
     黙って現在地文脈にならないこと: current_building_id は旧地のまま、
-    event_message タグの system 通知が SAIMemory に入り、ハンドラは実行される。
+    kind='world_state' の知覚がバッファに積まれ (W14 で event_message 直挿しから
+    移送)、ハンドラは実行される。
     """
     persona = manager.personas[PERSONA_ID]
     notices: List[Dict[str, Any]] = []
     persona.sai_memory = SimpleNamespace(
-        append_persona_message=lambda payload: notices.append(payload),
+        push_perception=(
+            lambda kind, content, **kw: notices.append(
+                {"kind": kind, "content": content}
+            )
+        ),
     )
     manager.occupancy_manager.fail_with = "図書館は定員オーバーです"
     day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
@@ -611,13 +616,13 @@ def test_move_failure_runs_in_place_and_notifies_persona(manager, task_refs):
     # フォールバック: 移動せず現在地で実行 (コマ自体は流れない)
     assert mock_ws.call_count == 1
     assert persona.current_building_id == "alice_room"
-    # 失敗の事実がペルソナに見える形で記録される
+    # 失敗の事実がペルソナに見える形で記録される (知覚バッファ経由)
     assert len(notices) == 1
     content = notices[0]["content"]
     assert "移動できませんでした" in content
     assert "記事を調べる" in content        # どのコマか
     assert "定員オーバー" in content          # なぜか
-    assert "event_message" in notices[0]["metadata"]["tags"]
+    assert notices[0]["kind"] == "world_state"
     slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
     assert slots[0]["status"] == "done"
 

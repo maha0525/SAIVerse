@@ -3607,32 +3607,28 @@ def _record_move_failure(
     manager: Any, persona: Any, slot: Dict[str, Any],
     current: Any, target: Any, reason: Any,
 ) -> None:
-    """施設移動の失敗をペルソナに見える形で記録する (SAIMemory system 通知)。
+    """施設移動の失敗をペルソナに見える形で記録する (知覚バッファ経由)。
 
     移動失敗時のフォールバックは「移動せず現在地で実行」だが、それが黙って
     起きるとペルソナは「予定の場所で作業した」つもりのまま現在地の文脈で
-    振る舞う (接地原則違反の温床)。event_message タグ付きで通知を挿入し、
-    次の head 構築時にペルソナの context へ乗るようにする。
+    振る舞う (接地原則違反の温床)。知覚バッファ (kind='world_state') に積み、
+    次の Beat 頭の消費でペルソナの context へ乗る (W14: event_message 直挿しの
+    移送, perception_buffer.md §10.6)。
     """
     adapter = getattr(persona, "sai_memory", None)
-    if adapter is None or not hasattr(adapter, "append_persona_message"):
+    if adapter is None or not hasattr(adapter, "push_perception"):
         return
     target_name = _building_display_name(manager, target)
     current_name = _building_display_name(manager, current)
     title = str(slot.get("title") or slot.get("kind") or "").strip()
     reason_text = str(reason or "理由不明")
-    message = {
-        "role": "user",
-        "content": (
-            "<system>[システム通知] "
-            f"時間割のコマ「{title}」で予定していた場所「{target_name}」へ"
-            f"移動できませんでした（{reason_text}）。"
-            f"このコマは現在地「{current_name}」で行います。</system>"
-        ),
-        "metadata": {"tags": ["internal", "event_message", "day_plan"]},
-    }
+    content = (
+        f"時間割のコマ「{title}」で予定していた場所「{target_name}」へ"
+        f"移動できませんでした（{reason_text}）。"
+        f"このコマは現在地「{current_name}」で行います。"
+    )
     try:
-        adapter.append_persona_message(message)
+        adapter.push_perception("world_state", content)
     except Exception:
         LOGGER.warning(
             "[day_plan] failed to record move failure notice (persona=%s)",

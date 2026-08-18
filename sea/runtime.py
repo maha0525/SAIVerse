@@ -217,7 +217,10 @@ class SEARuntime:
         try:
             sai_mem = getattr(persona, "sai_memory", None)
             if sai_mem is not None:
-                sai_mem.flush_perception_buffer()
+                # pulse_id はこの時点ではまだ採番されていない (state["_pulse_id"]
+                # は run_playbook で立つ) ので NULL 記帳。manager は消費バッチの
+                # episode_id 照会用 (層0タグと同じ供給源)。
+                sai_mem.flush_perception_buffer(manager=self.manager)
         except Exception:
             LOGGER.exception("[perception_buffer] flush failed in run_meta_user")
 

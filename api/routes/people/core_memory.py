@@ -65,7 +65,8 @@ router = APIRouter()
 
 
 def _notify_persona_correction(adapter, notice: str, *, reduce_key: Optional[str] = None) -> None:
-    """訂正 1 件を知覚バッファへ積む (Pulse 消費時に event_message として知覚される)。
+    """訂正 1 件を知覚バッファへ積む (Beat 頭の消費で台帳に消費印が入り、提示は
+    時刻順マージが担う — W14, perception_buffer.md §10)。
 
     ``notice`` はペルソナに見せる本文。push 失敗は API 応答を妨げない
     (WARNING に落として続行 — 通知はメインの DB 反映より優先度が低い)。

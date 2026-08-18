@@ -1003,11 +1003,22 @@ def delete_page(adapter, ref: str) -> str:
 
         norm_ref = f"memopedia:{page.short_id}" if page.short_id else f"memopedia:{page.id}"
         msg_id = _active_message_id()
-        if not memopedia.delete_page(
-            page.id,
-            ref_start_message_id=msg_id, ref_end_message_id=msg_id,
-            edit_source="ai_conversation",
-        ):
+        from sai_memory.memopedia import ChronicleProtectedError
+        try:
+            deleted = memopedia.delete_page(
+                page.id,
+                ref_start_message_id=msg_id, ref_end_message_id=msg_id,
+                edit_source="ai_conversation",
+            )
+        except ChronicleProtectedError:
+            # "Error" 始まり = 呼び出し側 (memory_delete) の head 変異通知を
+            # 抑止する規約。保護を「削除成功」と誤通知しない。
+            return (
+                f"Error: {norm_ref} は Chronicle (時間の地図) の一部で保護されて"
+                "います。Chronicle の整理はシステム側 (記憶の整理) が行うため、"
+                "このスペルでは消せません"
+            )
+        if not deleted:
             return f"ページを消せませんでした: {norm_ref}"
 
         # 机に開いていたら即時クローズ (次の Metabolism を待たない)

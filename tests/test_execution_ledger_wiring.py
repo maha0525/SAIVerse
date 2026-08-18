@@ -484,11 +484,17 @@ class TestPerceptionPushDelivery:
         assert adapter.LEDGER_OUTBOX_META_KEY in meta
         assert meta["origin"] == "test"  # 送り主 metadata は保持
 
-        # 既存の消費経路 (Pulse 開始時 flush) でペルソナの記憶に届く
-        assert adapter.flush_perception_buffer() is True
-        messages = _persona_messages(adapter)
-        assert len(messages) == 1
-        assert "エアリスが私室に入ってきた。" in messages[0][1]
+        # 既存の消費経路 (Beat 頭 flush) で消費印が打たれる (W14: messages に
+        # 行は作らない — 提示は runtime_context の時刻順マージが担う)。
+        payload = adapter.flush_perception_buffer_payload()
+        assert payload is not None
+        assert "エアリスが私室に入ってきた。" in payload["content"]
+        assert _persona_messages(adapter) == []
+        from sai_memory.perception_buffer import list_consumed_since
+        with adapter._db_lock:
+            consumed = list_consumed_since(adapter.conn, 0)
+        assert len(consumed) == 1
+        assert consumed[0].consumed_at is not None
 
     def test_redelivery_does_not_duplicate(self, manager, adapter, session_factory):
         ledger = manager.execution_ledger

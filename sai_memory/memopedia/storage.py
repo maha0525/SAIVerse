@@ -637,6 +637,20 @@ def update_page(
     if page is None:
         return None
 
+    # Chronicle エントリの親替えはこの汎用 API では行わない (move_pages_to_parent
+    # と同じ保護境界 — 現行の呼び出し元に parent_id を渡すものは無い)。
+    if (
+        parent_id is not ...
+        and page.category == "chronicle"
+        and parent_id != page.parent_id
+    ):
+        import logging
+        logging.getLogger(__name__).warning(
+            "[memopedia] refusing to reparent chronicle page %s via update_page "
+            "(boundary guard)", page_id,
+        )
+        return None
+
     new_title = title if title is not None else page.title
     new_summary = summary if summary is not None else page.summary
     new_content = content if content is not None else page.content
@@ -661,12 +675,124 @@ def update_page(
     return get_page(conn, page_id)
 
 
-def delete_page(conn: sqlite3.Connection, page_id: str) -> bool:
-    """Delete a page and all its descendants, including fragments."""
+def _detach_chronicle_page(conn: sqlite3.Connection, page: "MemopediaPage") -> None:
+    """異常配置の chronicle ページを正規の「未統合」状態へ退避する。
+
+    delete_page の境界ガードが、通常ページ配下へ移動された chronicle 行を
+    見つけたときの修復。単なる親替えでは足りない (2026-08-19 Codex 第七巡 #1):
+
+    1. root_chronicle の存在保証 (無い DB で親替えすると宙づり参照になる)。
+    2. parent_id='root_chronicle' と **metadata.is_consolidated=0 の同時更新** —
+       統合済み (is_consolidated=1) のまま root 直下に置くと、束ね (bands) の
+       「未統合だけを数える」勘定から漏れ続ける半端な状態になる。
+    3. 旧親 Chronicle (Lv2+) が生きていれば、その source_ids から退避した子への
+       参照を外す — 残すと「source に居るのに子として繋がっていない」宙づり参照
+       が解体・再編纂の照合を混乱させる。
+    """
+    import logging
+    _logger = logging.getLogger(__name__)
+
+    # 1. root_chronicle の存在保証 (arasuji 側の冪等ヘルパーを使う)。
+    try:
+        from sai_memory.arasuji.storage import _ensure_root_chronicle
+        _ensure_root_chronicle(conn)
+    except Exception:
+        _logger.warning(
+            "[memopedia] could not ensure root_chronicle before detaching %s",
+            page.id, exc_info=True,
+        )
+
+    # 2. 親替え + is_consolidated=0 の同時更新。
+    meta = dict(page.metadata or {})
+    meta["is_consolidated"] = 0
+    conn.execute(
+        "UPDATE memopedia_pages SET parent_id = 'root_chronicle', "
+        "metadata = ?, updated_at = ? WHERE id = ?",
+        (json.dumps(meta, ensure_ascii=False), int(time.time()), page.id),
+    )
+
+    # 3. 旧親 Chronicle の source_ids 整合: 退避した子を参照している生きた
+    #    chronicle ページから外す (LIKE で絞って JSON parse で確定)。
+    try:
+        rows = conn.execute(
+            "SELECT id, metadata FROM memopedia_pages "
+            "WHERE category = 'chronicle' AND id != ? AND metadata LIKE ?",
+            (page.id, f"%{page.id}%"),
+        ).fetchall()
+        for parent_id_, meta_json in rows:
+            try:
+                pmeta = json.loads(meta_json) if meta_json else None
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(pmeta, dict):
+                continue
+            source_ids = pmeta.get("source_ids")
+            if not (isinstance(source_ids, list) and page.id in source_ids):
+                continue
+            pmeta["source_ids"] = [s for s in source_ids if s != page.id]
+            if "source_count" in pmeta:
+                pmeta["source_count"] = len(pmeta["source_ids"])
+            conn.execute(
+                "UPDATE memopedia_pages SET metadata = ? WHERE id = ?",
+                (json.dumps(pmeta, ensure_ascii=False), parent_id_),
+            )
+            _logger.info(
+                "[memopedia] removed detached chronicle child %s from parent "
+                "%s source_ids", page.id, parent_id_,
+            )
+    except Exception:
+        _logger.warning(
+            "[memopedia] old-parent source_ids cleanup failed while detaching %s",
+            page.id, exc_info=True,
+        )
+    conn.commit()
+
+
+def delete_page(
+    conn: sqlite3.Connection, page_id: str, *, allow_chronicle: bool = False,
+) -> bool:
+    """Delete a page and all its descendants, including fragments.
+
+    **Chronicle 境界 (2026-08-19 Codex 第六巡 #1)**: chronicle カテゴリのページは
+    ``allow_chronicle=True`` を明示した呼び出しだけが消せる。入口 (Memopedia
+    core の拒否・import/clear の除外) の検査は境界の保証ではない — 「Chronicle を
+    通常ページ配下へ移動 → 一括 clear」の並びで、この関数の**子孫再帰**が
+    カテゴリを見ずに物理削除する迂回路が実在した。守りたい結果 (Chronicle 行が
+    消えない) はここ = 実際に DELETE を発行する場所で検査する。Chronicle の
+    正規削除 (arasuji storage の delete_entry 系 / clear_all_entries / cleanup
+    スクリプト) は本関数を通らず自前の SQL + 付記印返却で行うため、現行の
+    本番コードに ``allow_chronicle=True`` を渡す呼び出しは存在しない。
+
+    拒否の単位は**該当 chronicle サブツリーの skip** (削除全体は継続):
+    既存セマンティクスは再帰の各行が個別 commit する非原子設計で、「全体を
+    失敗させる」形は後付けできない (拒否に気づいた時点で子は消えている)。
+    かつ全体失敗型は、異常配置の chronicle 1 行が通常ページの削除を恒久に
+    人質に取る。skip した chronicle は root_chronicle 直下へ退避する —
+    親が直後に消えても宙づり参照にならない (view は parent を見ないので
+    可視性は変わらず、退避は「未統合」状態として正規の形)。
+    """
+    page = get_page(conn, page_id)
+    if (
+        page is not None
+        and page.category == "chronicle"
+        and not allow_chronicle
+    ):
+        import logging
+        logging.getLogger(__name__).warning(
+            "[memopedia] refusing to hard-delete chronicle page %s "
+            "(boundary guard); detaching it back under root_chronicle", page_id,
+        )
+        if page.parent_id != "root_chronicle" and page.id != "root_chronicle":
+            parent = get_page(conn, page.parent_id) if page.parent_id else None
+            if parent is None or parent.category != "chronicle":
+                # 異常配置 (通常ページ配下) の修復: 正規の未統合位置へ戻す。
+                _detach_chronicle_page(conn, page)
+        return False
+
     # First, recursively delete children
     children = get_children(conn, page_id)
     for child in children:
-        delete_page(conn, child.id)
+        delete_page(conn, child.id, allow_chronicle=allow_chronicle)
 
     # Delete fragment embeddings, then fragments
     conn.execute(
@@ -677,6 +803,11 @@ def delete_page(conn: sqlite3.Connection, page_id: str) -> bool:
     conn.execute("DELETE FROM memopedia_fragments WHERE entity_id = ?", (page_id,))
     # Delete page states
     conn.execute("DELETE FROM memopedia_page_states WHERE page_id = ?", (page_id,))
+    # Chronicle ページ (arasuji entry) が消える場合は知覚バッチの付記印を
+    # 同一 tx で返す — カテゴリを問わず呼んで無害 (chronicle 以外のページを
+    # 指す印は存在しない)。詳細は perception_buffer.unmark_batches_annexed。
+    from sai_memory.perception_buffer import unmark_batches_annexed
+    unmark_batches_annexed(conn, [page_id])
     # Delete the page itself
     conn.execute("DELETE FROM memopedia_pages WHERE id = ?", (page_id,))
     conn.commit()
@@ -1241,6 +1372,18 @@ def move_pages_to_parent(
 
         page = get_page(conn, page_id)
         if page is None:
+            continue
+
+        # Chronicle エントリは動かさない — 保護境界 (delete_page の chronicle
+        # ガード) の外 (通常ページ配下) へ運び出す操作は可視性破壊の族
+        # (2026-08-19 Codex 第六巡 #1)。Chronicle 内部の親替え (束ね/解体) は
+        # arasuji storage が自前の UPDATE で行い、この API を通らない。
+        if page.category == "chronicle":
+            import logging
+            logging.getLogger(__name__).warning(
+                "[memopedia] refusing to move chronicle page %s (boundary guard)",
+                page_id,
+            )
             continue
 
         # Check for circular reference (don't allow moving a page under its own descendant)

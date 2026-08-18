@@ -363,14 +363,28 @@ class CoreMemorySceneApiTest(unittest.TestCase):
         with self.adapter._db_lock:
             return list_pending(self.adapter.conn)
 
-    # --- 知覚バッファ経由 (2026-07-09): 訂正は push → Pulse 消費 (flush) で SAIMemory へ ---
+    def _consumed_perceptions(self):
+        """知覚台帳の消費済み項目 (消費時刻 → 発生順) を返す。"""
+        from sai_memory.perception_buffer import list_consumed_since
+        with self.adapter._db_lock:
+            return list_consumed_since(self.adapter.conn, 0)
 
-    def test_edit_pushes_to_buffer_then_flush_notifies(self):
+    def _count_flush_messages(self, needle: str) -> int:
+        with self.adapter._db_lock:
+            row = self.adapter.conn.execute(
+                "SELECT COUNT(*) FROM messages WHERE content LIKE ?",
+                (f"%{needle}%",),
+            ).fetchone()
+        return int(row[0])
+
+    # --- 知覚バッファ経由: 訂正は push → Beat 頭の消費 (flush) で消費印 (W14) ---
+
+    def test_edit_pushes_to_buffer_then_flush_marks_consumed(self):
         mid = self._seed_core_memory("旧い本文", confirmed=0)
         req = UpdateCoreMemoryRequest(content="ユーザーが直した新しい本文")
         update_core_memory_item("tester", mid, req, manager=self.manager)
 
-        # 訂正時点ではまだ SAIMemory に入らない (知覚バッファに溜まるだけ)。
+        # 訂正時点ではまだ知覚されない (知覚バッファに溜まるだけ)。
         self.assertEqual(self._correction_notices(), [])
         pending = self._pending_perceptions()
         self.assertEqual(len(pending), 1)
@@ -378,68 +392,51 @@ class CoreMemorySceneApiTest(unittest.TestCase):
         self.assertEqual(pending[0].reduce_key, f"core:{mid}")
         self.assertIn("ユーザーが直した新しい本文", pending[0].content)
 
-        # 消費 (Pulse 相当) すると 1 メッセージで SAIMemory に入り、バッファは空になる。
-        self.assertTrue(self.adapter.flush_perception_buffer())
-        notices = self._correction_notices()
-        self.assertEqual(len(notices), 1)
-        n = notices[0]
-        self.assertIn("ユーザーが直した新しい本文", n["content"])
-        self.assertIn(f"core:{mid}", n["content"])
-        self.assertEqual(n["role"], "user")
-        self.assertEqual(n["line_role"], "main_line")
-        self.assertEqual(n["scope"], "committed")
-        self.assertIn("event_message", n["tags"])
-        self.assertIn("perception", n["tags"])
+        # 消費 (Beat 頭) = 台帳の消費印。messages に event_message 行は作らない
+        # (perception_buffer.md §10.1/§10.2 — 提示は時刻順マージが担う)。
+        payload = self.adapter.flush_perception_buffer_payload()
+        self.assertIsNotNone(payload)
+        self.assertIn("ユーザーが直した新しい本文", payload["content"])
+        self.assertIn(f"core:{mid}", payload["content"])
+        self.assertTrue(payload["content"].startswith("<system>"))
+        self.assertEqual(self._correction_notices(), [])   # 行を作らない
         self.assertEqual(self._pending_perceptions(), [])
+        consumed = self._consumed_perceptions()
+        self.assertEqual(len(consumed), 1)
+        self.assertIsNotNone(consumed[0].consumed_at)
 
     def test_delete_flush_carries_removed_content(self):
         mid = self._seed_core_memory("消される秘密の内容")
         delete_core_memory_item("tester", mid, manager=self.manager)
-        self.assertTrue(self.adapter.flush_perception_buffer())
-        notices = self._correction_notices()
-        self.assertEqual(len(notices), 1)
-        # 削除で head から消えるので、失われた内容を通知に載せる
-        self.assertIn("消される秘密の内容", notices[0]["content"])
-        self.assertIn("削除", notices[0]["content"])
+        payload = self.adapter.flush_perception_buffer_payload()
+        self.assertIsNotNone(payload)
+        # 削除で head から消えるので、失われた内容を消費本文に載せる
+        self.assertIn("消される秘密の内容", payload["content"])
+        self.assertIn("削除", payload["content"])
 
     def test_same_memory_ops_reduce_to_latest(self):
-        # 同一コア記憶への複数操作は 1 Pulse 内 (未消費) で最新に集約される。
+        # 同一コア記憶への複数操作は未消費の間に最新へ集約される (C2)。
         mid = self._seed_core_memory("復元される内容")
         delete_core_memory_item("tester", mid, manager=self.manager)
         restore_core_memory_item("tester", mid, manager=self.manager)
-        # バッファには 2 件溜まっているが、reduce_key が同じなので消費は最新 1 件のみ。
+        # バッファには 2 件溜まっているが、reduce_key が同じなので本文は最新 1 件のみ。
         self.assertEqual(len(self._pending_perceptions()), 2)
-        self.assertTrue(self.adapter.flush_perception_buffer())
-        notices = self._correction_notices()
-        self.assertEqual(len(notices), 1)
-        self.assertIn("復元", notices[0]["content"])
-        self.assertNotIn("削除しました", notices[0]["content"])
+        payload = self.adapter.flush_perception_buffer_payload()
+        self.assertIsNotNone(payload)
+        self.assertIn("復元", payload["content"])
+        self.assertNotIn("削除しました", payload["content"])
+        # reduce で畳まれた分も消費印は打たれる (相殺は未消費の間だけ)。
+        self.assertEqual(len(self._consumed_perceptions()), 2)
 
     def test_flush_empty_buffer_is_noop(self):
         self.assertFalse(self.adapter.flush_perception_buffer())
         self.assertEqual(self._correction_notices(), [])
+        self.assertEqual(self._consumed_perceptions(), [])
 
-    def test_flush_attaches_media_to_message(self):
-        # 移動先の様子など、メディア付き知覚は flush で event_message の
-        # metadata.media に載る (内装画像・外見画像を運ぶ経路)。
-        import json
-        media = [{"path": "/img/ai_room.png", "mime_type": "image/png", "role": "image"}]
-        self.adapter.push_perception("surroundings", "AI談話室の様子…", media=media)
-        self.assertTrue(self.adapter.flush_perception_buffer())
-        with self.adapter._db_lock:
-            row = self.adapter.conn.execute(
-                "SELECT metadata FROM messages WHERE content LIKE ? ORDER BY created_at DESC LIMIT 1",
-                ("%AI談話室の様子%",),
-            ).fetchone()
-        self.assertIsNotNone(row)
-        meta = json.loads(row[0]) if row[0] else {}
-        self.assertEqual(meta.get("media"), media)
-        self.assertIn("perception", meta.get("tags", []))
-
-    def test_flush_payload_returns_message_body(self):
+    def test_flush_payload_returns_message_body_and_media(self):
         # Beat 頭のラウンド途中消費 (sea/runtime_llm.py の spell ループ) 用:
-        # 消費した合成メッセージ本体が返り、作業中 messages への append と
-        # SAIMemory への書き込みが同じ内容になる。
+        # 消費した合成メッセージ本体と media が返り、作業中 messages への差し込みと
+        # 以後の提示マージが同じ内容になる。
         media = [{"path": "/img/x.png", "mime_type": "image/png", "role": "image"}]
         self.adapter.push_perception("surroundings", "移動先の様子テスト", media=media)
         payload = self.adapter.flush_perception_buffer_payload()
@@ -448,9 +445,35 @@ class CoreMemorySceneApiTest(unittest.TestCase):
         self.assertTrue(payload["content"].startswith("<system>"))
         self.assertEqual(payload["media"], media)
         self.assertEqual(self._pending_perceptions(), [])
+        # messages には何も書かれない (§10.1)。
+        self.assertEqual(self._count_flush_messages("移動先の様子テスト"), 0)
         # 空バッファでは None (bool ラッパーは False)
         self.assertIsNone(self.adapter.flush_perception_buffer_payload())
         self.assertFalse(self.adapter.flush_perception_buffer())
+
+    def test_flush_records_batch_with_rendered_text(self):
+        # 消費は 1 バッチ = 提示の 1 ブロック (§10.2/§10.3)。pulse_id と確定
+        # 文面 (reduce → format の結果) はバッチ行が持ち、項目はバッチ id で
+        # まとまる (秒精度時刻からグループを再構成しない)。
+        from sai_memory.perception_buffer import list_unannexed_batches
+        self.adapter.push_perception("world_state", "グループ検証 A")
+        self.adapter.push_perception("world_state", "グループ検証 B")
+        self.assertTrue(
+            self.adapter.flush_perception_buffer(pulse_id="pulse-xyz")
+        )
+        with self.adapter._db_lock:
+            batches = list_unannexed_batches(self.adapter.conn)
+        self.assertEqual(len(batches), 1)
+        self.assertEqual(batches[0].pulse_id, "pulse-xyz")
+        self.assertIn("グループ検証 A", batches[0].rendered_text)
+        self.assertIn("グループ検証 B", batches[0].rendered_text)
+        # manager を渡していないので episode は NULL。
+        self.assertIsNone(batches[0].episode_id)
+        consumed = self._consumed_perceptions()
+        self.assertEqual(len(consumed), 2)
+        self.assertTrue(
+            all(it.consumed_batch_id == batches[0].id for it in consumed)
+        )
 
     def test_confirm_does_not_push(self):
         mid = self._seed_core_memory("未確認", confirmed=0)
@@ -461,125 +484,82 @@ class CoreMemorySceneApiTest(unittest.TestCase):
         self.assertEqual(self._correction_notices(), [])
 
     # ------------------------------------------------------------------
-    # SEA 監査 S5 (W5): append の「None を返す静かな失敗」で pending を消さない
+    # SEA 監査 S5 (W14 改訂): 消費印 (UPDATE) が打てなければ pending 保持
     # ------------------------------------------------------------------
 
-    def _count_flush_messages(self, needle: str) -> int:
-        with self.adapter._db_lock:
-            row = self.adapter.conn.execute(
-                "SELECT COUNT(*) FROM messages WHERE content LIKE ?",
-                (f"%{needle}%",),
-            ).fetchone()
-        return int(row[0])
-
-    def test_flush_keeps_pending_when_append_returns_none(self):
-        # _append_message は DB/embedding 例外を内部で握って None を返す —
-        # その経路で pending が全削除されると知覚が不可逆に消える (S5)。
+    def test_flush_keeps_pending_when_batch_tx_fails(self):
         self.adapter.push_perception("world_state", "S5検証: 世界が変わった")
-        with patch.object(self.adapter, "append_persona_message", return_value=None):
-            self.assertFalse(self.adapter.flush_perception_buffer())
-        pending = self._pending_perceptions()
-        self.assertEqual(len(pending), 1)
-        self.assertEqual(self._count_flush_messages("S5検証"), 0)
-        # 障害が解ければ次 Pulse の flush で一度だけ消費される。
-        self.assertTrue(self.adapter.flush_perception_buffer())
-        self.assertEqual(self._pending_perceptions(), [])
-        self.assertEqual(self._count_flush_messages("S5検証"), 1)
-        # 再 flush しても二重にならない (pending は消費済み)。
-        self.assertFalse(self.adapter.flush_perception_buffer())
-        self.assertEqual(self._count_flush_messages("S5検証"), 1)
-
-    def test_flush_keeps_pending_when_append_raises(self):
-        self.adapter.push_perception("world_state", "S5例外: 保存が例外で落ちた")
-        with patch.object(
-            self.adapter, "append_persona_message",
+        with patch(
+            "sai_memory.perception_buffer.create_consumption_batch",
             side_effect=RuntimeError("db down"),
         ):
             self.assertFalse(self.adapter.flush_perception_buffer())
+        # 消費不成立 = pending 無傷・消費印なし (知覚を落とさない)。
         self.assertEqual(len(self._pending_perceptions()), 1)
+        self.assertEqual(self._consumed_perceptions(), [])
+        # 障害が解ければ次 Beat の flush で一度だけ消費される。
         self.assertTrue(self.adapter.flush_perception_buffer())
         self.assertEqual(self._pending_perceptions(), [])
-        self.assertEqual(self._count_flush_messages("S5例外"), 1)
+        self.assertEqual(len(self._consumed_perceptions()), 1)
+        # 再 flush しても二重にならない (消費済みは対象外)。
+        self.assertFalse(self.adapter.flush_perception_buffer())
+        self.assertEqual(len(self._consumed_perceptions()), 1)
 
     # ------------------------------------------------------------------
-    # Codex レビュー #2 (2026-08-08): 「書き終えたのに pending が残った」回の
-    # 再試行で、同じ知覚が二度 SAIMemory へ入らないこと。
+    # C6 退役 (§10.7): 消費が単一 tx になり、二度書きが構造的に不可能なこと
     # ------------------------------------------------------------------
 
-    def test_embedding_failure_after_commit_still_returns_message_id(self):
-        # 埋め込みは行の commit 後に作る派生物 — その失敗を「保存できなかった」
-        # として None で返すと、呼び出し側が保存済みの行を書き直しに来る。
-        self.adapter.push_perception("world_state", "埋め込み失敗検証: 行は入る")
-        with patch.object(
-            self.adapter.embedder, "embed", side_effect=RuntimeError("cuda oom"),
-        ) as embed_mock:
-            payload = self.adapter.flush_perception_buffer_payload()
-        self.assertTrue(embed_mock.called)  # 埋め込みを本当に通っている
-        # 保存は成功扱い → 本体が返り、pending も消える (二度書きの機会が無い)
-        self.assertIsNotNone(payload)
-        self.assertIn("埋め込み失敗検証", payload["content"])
-        self.assertEqual(self._count_flush_messages("埋め込み失敗検証"), 1)
-        self.assertEqual(self._pending_perceptions(), [])
-
-    def _commit_then_lose_id(self):
-        """行は commit されるのに mid が失われる append の再現。
-
-        「書けたか不明」で pending を残す経路 (SEA 監査 S5) をなぞる — その
-        再試行が二度書きにならないことを確かめるための仕掛け。
-        """
-        real = self.adapter.append_persona_message
-
-        def _wrapper(message, **kwargs):
-            real(message, **kwargs)
-            return None
-
-        return patch.object(
-            self.adapter, "append_persona_message", side_effect=_wrapper,
+    def test_consumption_is_single_transaction_no_double_write(self):
+        # 旧 C6 は「行を書く → 削除」の二段 commit の隙間を照合で塞いでいた。
+        # 新経路は消費 = バッチ確定の単一 tx だけなので、「書けたのに残った」
+        # 中間状態が存在しない: 消費済み行の再消費は tx ごと拒否され、
+        # messages への書き込み自体が無い。
+        from sai_memory.perception_buffer import (
+            create_consumption_batch,
+            list_unannexed_batches,
         )
+        self.adapter.push_perception("world_state", "単一tx検証")
+        self.assertTrue(self.adapter.flush_perception_buffer())
+        consumed = self._consumed_perceptions()
+        self.assertEqual(len(consumed), 1)
+        first_stamp = consumed[0].consumed_at
 
-    def test_flush_does_not_duplicate_when_id_lost_after_commit(self):
-        self.adapter.push_perception("world_state", "重複検証: 行は残った")
-        with self._commit_then_lose_id():
-            self.assertFalse(self.adapter.flush_perception_buffer())
-        # 呼び出し側には失敗として届くので pending は残る (S5) が、行は在る
-        self.assertEqual(self._count_flush_messages("重複検証"), 1)
-        self.assertEqual(len(self._pending_perceptions()), 1)
-        # 次の Beat 頭: 書き終えている分と見分けて、削除だけやり直す
+        # 再 flush は no-op — バッチは増えない。
         self.assertFalse(self.adapter.flush_perception_buffer())
-        self.assertEqual(self._count_flush_messages("重複検証"), 1)
-        self.assertEqual(self._pending_perceptions(), [])
+        consumed = self._consumed_perceptions()
+        self.assertEqual(len(consumed), 1)
+        self.assertEqual(consumed[0].consumed_at, first_stamp)
+        with self.adapter._db_lock:
+            self.assertEqual(len(list_unannexed_batches(self.adapter.conn)), 1)
 
-    def test_flush_delivers_payload_then_cleans_up_when_delete_fails(self):
-        # ローカルレビューの保留と同根: append 済み・delete 失敗。書き出しは
-        # 成功しているので本体は返し (その Beat で読める)、pending の後始末は
-        # 次の Beat 頭へ回す — 書き直しはしない。
-        self.adapter.push_perception("world_state", "削除失敗検証: 消えなかった")
+        # 消費済み id での再消費は tx ごと拒否される。
+        with self.adapter._db_lock:
+            with self.assertRaises(ValueError):
+                create_consumption_batch(
+                    self.adapter.conn, [consumed[0].id],
+                    consumed_at=9999999999, rendered_text="x",
+                )
+            self.assertEqual(len(list_unannexed_batches(self.adapter.conn)), 1)
+        # messages には最初から何も書かれていない。
+        self.assertEqual(self._count_flush_messages("単一tx検証"), 0)
+
+    def test_flush_after_failed_flush_still_delivers_new_perceptions(self):
+        # 失敗回の残りが新しい知覚を巻き添えにしない。
+        self.adapter.push_perception("world_state", "中断分: 未消費のまま残る知覚")
         with patch(
-            "sai_memory.perception_buffer.delete_perceptions",
-            side_effect=RuntimeError("delete down"),
+            "sai_memory.perception_buffer.create_consumption_batch",
+            side_effect=RuntimeError("db down"),
         ):
-            payload = self.adapter.flush_perception_buffer_payload()
-        self.assertIsNotNone(payload)
-        self.assertIn("削除失敗検証", payload["content"])
-        self.assertEqual(self._count_flush_messages("削除失敗検証"), 1)
-        self.assertEqual(len(self._pending_perceptions()), 1)
-        # 次の Beat 頭: 書き直さず削除だけやり直す (差し込みは済んでいるので None)
-        self.assertFalse(self.adapter.flush_perception_buffer())
-        self.assertEqual(self._count_flush_messages("削除失敗検証"), 1)
-        self.assertEqual(self._pending_perceptions(), [])
-
-    def test_flush_after_interrupted_flush_still_delivers_new_perceptions(self):
-        # 後始末が新しい知覚を巻き添えにしない (裏返しの失敗の検査)。
-        self.adapter.push_perception("world_state", "中断分: 書き終えた知覚")
-        with self._commit_then_lose_id():
             self.assertFalse(self.adapter.flush_perception_buffer())
-        self.adapter.push_perception("world_state", "新着分: まだ書いていない知覚")
+        self.adapter.push_perception("world_state", "新着分: 後から届いた知覚")
         self.assertEqual(len(self._pending_perceptions()), 2)
 
-        self.assertTrue(self.adapter.flush_perception_buffer())
+        payload = self.adapter.flush_perception_buffer_payload()
+        self.assertIsNotNone(payload)
+        self.assertIn("中断分", payload["content"])
+        self.assertIn("新着分", payload["content"])
         self.assertEqual(self._pending_perceptions(), [])
-        self.assertEqual(self._count_flush_messages("中断分"), 1)   # 書き直さない
-        self.assertEqual(self._count_flush_messages("新着分"), 1)   # 届く
+        self.assertEqual(len(self._consumed_perceptions()), 2)
 
 
 if __name__ == "__main__":

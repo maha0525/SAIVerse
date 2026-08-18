@@ -151,6 +151,12 @@ def store_memopedia_embedding(
 def get_memopedia_embeddings(conn: sqlite3.Connection) -> List[tuple]:
     """Get all Memopedia embeddings.
 
+    Chronicle エントリ (P3b の物理統合で memopedia_pages に同居) は除外する —
+    Chronicle は専用ソース (arasuji_embeddings / chronicle キーワード検索) が
+    持つ。同一行を memopedia ソースとしても拾うと、同 id のヒットが chronicle
+    ヒットを上書きし、W14 の perception→Chronicle 併合が成立しない (2026-08-19
+    Codex 第五巡 #3 — 二重拾い自体は物理統合以来の既存挙動)。
+
     Returns:
         List of (page_id, vector, title, summary, category, short_id)
     """
@@ -160,6 +166,7 @@ def get_memopedia_embeddings(conn: sqlite3.Connection) -> List[tuple]:
         FROM memopedia_embeddings e
         JOIN memopedia_pages p ON e.page_id = p.id
         WHERE (p.is_deleted = 0 OR p.is_deleted IS NULL)
+          AND (p.category IS NULL OR p.category != 'chronicle')
         """,
     )
     result = []
@@ -181,6 +188,9 @@ def count_memopedia_embeddings(conn: sqlite3.Connection) -> int:
 def get_memopedia_pages_without_embeddings(conn: sqlite3.Connection) -> List[tuple]:
     """Get Memopedia pages that don't have embeddings yet (excluding root/trunk pages).
 
+    Chronicle エントリは除外 — memopedia_embeddings を作らない (Chronicle の
+    埋め込みは arasuji_embeddings が正準。get_memopedia_embeddings の docstring)。
+
     Returns:
         List of (page_id, title, summary)
     """
@@ -192,6 +202,7 @@ def get_memopedia_pages_without_embeddings(conn: sqlite3.Connection) -> List[tup
         WHERE e.page_id IS NULL
           AND p.id NOT LIKE 'root_%'
           AND p.is_trunk = 0
+          AND (p.category IS NULL OR p.category != 'chronicle')
         """,
     )
     return cur.fetchall()
@@ -624,11 +635,14 @@ def _keyword_excerpt(content: str, keywords: List[str]) -> str:
 # - chronicle: medium-length summaries, moderate count → decent allocation
 # - memopedia: few pages, broader summaries → minimal to avoid irrelevant fills
 # - message: variable length, already covered by Chronicle → minimal
+# - perception: 消費バッチの確定文面 (W14 §10.5 の読み口)。退場付記で digest 側は
+#   集約に落ちても、ここから全文へ到達できる → minimal
 SOURCE_ALLOCATIONS = {
     "chronicle": 3,
     "memopedia": 1,
     "fragment": 5,
     "message": 1,
+    "perception": 1,
 }
 
 FOCUS_MULTIPLIER = 4
@@ -662,6 +676,7 @@ def unified_recall(
     search_memopedia: bool = True,
     search_fragments: bool = True,
     search_messages: bool = True,
+    search_perceptions: bool = False,
     chronicle_level: int = 1,
     persona_id: Optional[str] = None,
 ) -> List[RecallHit]:
@@ -681,6 +696,12 @@ def unified_recall(
         search_memopedia: Include Memopedia pages in search.
         search_fragments: Include Memopedia fragments in search.
         search_messages: Include raw chat messages in search (default: off).
+        search_perceptions: Include consumed perception batches (W14 §10.5 の
+            読み口 — 消費済みの知覚の確定文面。キーワード検索のみ・未消費は
+            含めない)。**既定 False (opt-in)** — 表示分岐 (source_type
+            "perception"・空 URI) と枠課金を扱える経路 (Memory タブ検索 API)
+            だけが明示 ON にする。付記済みバッチが転写先 Chronicle と両方
+            ヒットした場合は Chronicle 側へ寄せる (二重表示しない)。
         chronicle_level: Chronicle level to search (default: 1).
         persona_id: Persona ID for URI generation.
 
@@ -701,13 +722,19 @@ def unified_recall(
     if search_messages:
         base = SOURCE_ALLOCATIONS.get("message", 1)
         source_caps["message"] = base * (FOCUS_MULTIPLIER if focus == "message" else 1)
+    if search_perceptions:
+        base = SOURCE_ALLOCATIONS.get("perception", 1)
+        source_caps["perception"] = base * (FOCUS_MULTIPLIER if focus == "perception" else 1)
 
     total_cap = topk if topk is not None else sum(source_caps.values())
 
     # --- Keyword search ---
     # Search per-keyword and count matches per entry, avoiding OR+limit issues.
-    keyword_hits: dict[str, RecallHit] = {}  # source_id → hit
-    keyword_match_count: dict[str, int] = {}  # source_id → number of keywords matched
+    # キーは (source_type, source_id) で名前空間化する — Chronicle エントリは
+    # memopedia_pages に同居しており (P3b)、素の id をキーにすると別ソースの
+    # ヒットが同じ枠を上書きしうる (2026-08-19 Codex 第五巡 #3 の堅牢化)。
+    keyword_hits: dict[tuple, RecallHit] = {}  # (source_type, source_id) → hit
+    keyword_match_count: dict[tuple, int] = {}  # 同キー → number of keywords matched
 
     query_keywords = query.split()
 
@@ -728,16 +755,18 @@ def unified_recall(
 
         for entry_id in all_chronicle_ids:
             count = sum(1 for ids in kw_id_sets if entry_id in ids)
-            keyword_match_count[entry_id] = count
+            keyword_match_count[("chronicle", entry_id)] = count
 
-        # Fetch entry details only for matched IDs (sorted by match count desc)
+        # Fetch entry details only for matched IDs。候補化は id ソートの安定順 —
+        # set の反復順に依存すると RRF の順位 (= 同点の採否) が呼び出しごとに
+        # 揺れる (2026-08-19 Codex 第八巡 #2)。
         if all_chronicle_ids:
             from sai_memory.arasuji.storage import get_entry
-            for entry_id in all_chronicle_ids:
+            for entry_id in sorted(all_chronicle_ids):
                 entry = get_entry(conn, entry_id)
                 if entry:
                     time_range = _format_time_range(entry.start_time, entry.end_time)
-                    keyword_hits[entry.id] = RecallHit(
+                    keyword_hits[("chronicle", entry.id)] = RecallHit(
                         source_type="chronicle",
                         source_id=entry.id,
                         title=f"Chronicle Lv{entry.level}: {time_range}",
@@ -751,14 +780,17 @@ def unified_recall(
                     )
 
     if search_memopedia:
-        # For each keyword, find matching Memopedia page IDs
+        # For each keyword, find matching Memopedia page IDs。
+        # Chronicle エントリ (同居ページ) は除外 — 専用ソースが持つ
+        # (get_memopedia_embeddings の docstring)。
         kw_id_sets = []
         for kw in query_keywords:
             cur = conn.execute(
                 "SELECT id FROM memopedia_pages WHERE "
                 "(title LIKE ? OR summary LIKE ? OR content LIKE ?) "
                 "AND id NOT LIKE 'root_%' "
-                "AND (is_deleted = 0 OR is_deleted IS NULL)",
+                "AND (is_deleted = 0 OR is_deleted IS NULL) "
+                "AND (category IS NULL OR category != 'chronicle')",
                 (f"%{kw}%", f"%{kw}%", f"%{kw}%"),
             )
             kw_id_sets.append({row[0] for row in cur.fetchall()})
@@ -769,14 +801,14 @@ def unified_recall(
 
         for page_id in all_memopedia_ids:
             count = sum(1 for ids in kw_id_sets if page_id in ids)
-            keyword_match_count[page_id] = count
+            keyword_match_count[("memopedia", page_id)] = count
 
         if all_memopedia_ids:
             from sai_memory.memopedia.storage import get_page
-            for page_id in all_memopedia_ids:
+            for page_id in sorted(all_memopedia_ids):  # 安定順 (第八巡 #2)
                 page = get_page(conn, page_id)
                 if page:
-                    keyword_hits[page.id] = RecallHit(
+                    keyword_hits[("memopedia", page.id)] = RecallHit(
                         source_type="memopedia",
                         source_id=page.id,
                         title=page.title,
@@ -805,7 +837,7 @@ def unified_recall(
 
         for frag_id in all_fragment_ids:
             count = sum(1 for ids in kw_id_sets if frag_id in ids)
-            keyword_match_count[frag_id] = count
+            keyword_match_count[("fragment", frag_id)] = count
 
         if all_fragment_ids:
             placeholders = ",".join("?" for _ in all_fragment_ids)
@@ -814,12 +846,13 @@ def unified_recall(
                 f"f.source_date, p.title, p.category, p.short_id "
                 f"FROM memopedia_fragments f "
                 f"LEFT JOIN memopedia_pages p ON f.entity_id = p.id "
-                f"WHERE f.id IN ({placeholders})",
-                list(all_fragment_ids),
+                f"WHERE f.id IN ({placeholders}) "
+                f"ORDER BY f.id",  # 安定順 (第八巡 #2)
+                sorted(all_fragment_ids),
             )
             for row in cur.fetchall():
                 fid, fcontent, eid, ceid, sdate, etitle, ecat, eshort = row
-                keyword_hits[fid] = RecallHit(
+                keyword_hits[("fragment", fid)] = RecallHit(
                     source_type="fragment",
                     source_id=fid,
                     title=etitle,
@@ -852,19 +885,21 @@ def unified_recall(
 
         for mid in all_message_ids:
             count = sum(1 for ids in kw_id_sets if mid in ids)
-            keyword_match_count[mid] = count
+            keyword_match_count[("message", mid)] = count
 
         if all_message_ids:
             placeholders = ",".join("?" for _ in all_message_ids)
             cur = conn.execute(
-                f"SELECT id, content, role, created_at FROM messages WHERE id IN ({placeholders})",
-                list(all_message_ids),
+                f"SELECT id, content, role, created_at FROM messages "
+                f"WHERE id IN ({placeholders}) "
+                f"ORDER BY created_at, id",  # 安定順 (第八巡 #2)
+                sorted(all_message_ids),
             )
             for row in cur.fetchall():
                 mid, mcontent, mrole, mcreated = row
                 title = f"{mrole} @ {_format_timestamp(mcreated)}"
                 excerpt = _keyword_excerpt(mcontent, query_keywords) if mcontent else ""
-                keyword_hits[mid] = RecallHit(
+                keyword_hits[("message", mid)] = RecallHit(
                     source_type="message",
                     source_id=mid,
                     title=title,
@@ -874,8 +909,65 @@ def unified_recall(
                     start_time=mcreated,
                 )
 
+    if search_perceptions:
+        # 消費バッチの確定文面 (W14 §10.5 の読み口)。キーワード検索のみ —
+        # バッチは埋め込みを持たない (低頻度・短文の通知が主で、退場付記後の
+        # 全文到達手段を保証するのが目的)。未消費 (perception_buffer の pending)
+        # は含めない — まだペルソナが知覚していないものを想起で先に見せない。
+        # 付記済みバッチも含める: 付記は digest への転写 (集約されうる) で、
+        # ここが全文への到達路になる。
+        # ソース id は "perception:{id}" に接頭辞化する (バッチ id は小さい整数
+        # で、素のままだと参照として紛らわしい)。map キーの衝突自体は
+        # (source_type, source_id) の名前空間化が防ぐ。
+        kw_id_sets = []
+        try:
+            for kw in query_keywords:
+                cur = conn.execute(
+                    "SELECT id FROM perception_batches WHERE rendered_text LIKE ?",
+                    (f"%{kw}%",),
+                )
+                kw_id_sets.append({f"perception:{row[0]}" for row in cur.fetchall()})
+        except sqlite3.OperationalError:
+            kw_id_sets = []  # perception_batches の無い DB (旧世代)
+
+        all_batch_ids: set[str] = set()
+        for ids in kw_id_sets:
+            all_batch_ids |= ids
+
+        for bid in all_batch_ids:
+            count = sum(1 for ids in kw_id_sets if bid in ids)
+            keyword_match_count[("perception", bid)] = count
+
+        if all_batch_ids:
+            raw_ids = sorted(int(b.split(":", 1)[1]) for b in all_batch_ids)
+            placeholders = ",".join("?" for _ in raw_ids)
+            # 知覚は (consumed_at, id) の安定順で候補化する (第八巡 #2)。
+            cur = conn.execute(
+                f"SELECT id, consumed_at, rendered_text, annexed_entry_id "
+                f"FROM perception_batches WHERE id IN ({placeholders}) "
+                f"ORDER BY consumed_at, id",
+                raw_ids,
+            )
+            for row in cur.fetchall():
+                bid = f"perception:{row[0]}"
+                consumed_at, rendered_text = row[1], row[2] or ""
+                keyword_hits[("perception", bid)] = RecallHit(
+                    source_type="perception",
+                    source_id=bid,
+                    title=f"知覚 @ {_format_timestamp(consumed_at)}",
+                    content=_keyword_excerpt(rendered_text, query_keywords),
+                    score=0.0,
+                    # 知覚バッチには saiverse:// の kind が (まだ) 無い。URI は
+                    # 空で返し、参照は source_type + source_id が担う。
+                    uri="",
+                    start_time=consumed_at,
+                    # 付記先 Chronicle (None = 未付記)。下の併合で使う。
+                    chronicle_entry_id=row[3],
+                )
+
     # --- Embedding search ---
-    embedding_hits: dict[str, RecallHit] = {}
+    # キーは keyword_hits と同じ (source_type, source_id) の名前空間。
+    embedding_hits: dict[tuple, RecallHit] = {}
 
     vectors = embedder.embed([query], is_query=True)
     q = np.array(vectors[0], dtype=np.float32)
@@ -905,7 +997,7 @@ def unified_recall(
             )))
         scored.sort(key=lambda x: x[1], reverse=True)
         for sid, _, hit in scored[:total_cap * 2]:
-            embedding_hits[sid] = hit
+            embedding_hits[("chronicle", sid)] = hit
 
     if search_memopedia:
         corpus = get_memopedia_embeddings(conn)
@@ -928,7 +1020,7 @@ def unified_recall(
             )))
         scored.sort(key=lambda x: x[1], reverse=True)
         for sid, _, hit in scored[:total_cap * 2]:
-            embedding_hits[sid] = hit
+            embedding_hits[("memopedia", sid)] = hit
 
     if search_fragments:
         corpus = get_fragment_embeddings(conn)
@@ -953,7 +1045,7 @@ def unified_recall(
             )))
         scored.sort(key=lambda x: x[1], reverse=True)
         for sid, _, hit in scored[:total_cap * 2]:
-            embedding_hits[sid] = hit
+            embedding_hits[("fragment", sid)] = hit
 
     if search_messages:
         corpus = get_message_embeddings(conn)
@@ -976,7 +1068,7 @@ def unified_recall(
             excerpt, used_chunk_index = reconstruct_message_excerpt(
                 conn, msg_id, chunk_index, content or "",
             )
-            embedding_hits[msg_id] = RecallHit(
+            embedding_hits[("message", msg_id)] = RecallHit(
                 source_type="message",
                 source_id=msg_id,
                 title=title,
@@ -991,12 +1083,12 @@ def unified_recall(
     # --- RRF fusion ---
     RRF_K = 60  # Standard RRF constant
 
-    # Build rank maps
-    keyword_rank: dict[str, int] = {}
+    # Build rank maps (キーは (source_type, source_id))
+    keyword_rank: dict[tuple, int] = {}
     for rank, sid in enumerate(keyword_hits.keys()):
         keyword_rank[sid] = rank + 1
 
-    embedding_rank: dict[str, int] = {}
+    embedding_rank: dict[tuple, int] = {}
     # Sort embedding hits by score for ranking
     sorted_embed = sorted(embedding_hits.items(), key=lambda x: x[1].score, reverse=True)
     for rank, (sid, _) in enumerate(sorted_embed):
@@ -1009,7 +1101,7 @@ def unified_recall(
     # Entries matching more keywords always rank above those matching fewer,
     # regardless of embedding similarity. Within the same match-count layer,
     # RRF score determines the order.
-    rrf_scored: list[tuple[str, int, float]] = []  # (source_id, match_count, rrf_score)
+    rrf_scored: list[tuple] = []  # ((source_type, source_id), match_count, rrf_score)
     for sid in all_ids:
         score = 0.0
         if sid in keyword_rank:
@@ -1019,33 +1111,69 @@ def unified_recall(
         match_count = keyword_match_count.get(sid, 0)
         rrf_scored.append((sid, match_count, score))
 
-    # Sort by match_count DESC first, then RRF score DESC
-    rrf_scored.sort(key=lambda x: (x[1], x[2]), reverse=True)
+    # Sort by match_count DESC first, then RRF score DESC。同点は
+    # (source_type, source_id) の辞書順で決定的にタイブレークする (第八巡 #2 —
+    # 同点の並びが揺れると採否 [topk/枠] と固定点併合の結果が呼び出しごとに変わる)。
+    rrf_scored.sort(key=lambda x: (-x[1], -x[2], x[0][0], x[0][1]))
 
     # Build final result using per-source caps computed at the top.
-    source_counts: dict[str, int] = {}
-    results: List[RecallHit] = []
-    for sid, match_count, rrf_score in rrf_scored:
-        if len(results) >= total_cap:
-            break
-        hit = keyword_hits.get(sid) or embedding_hits.get(sid)
-        if not hit:
-            continue
-        st = hit.source_type
-        cap = source_caps.get(st, 0)
-        if source_counts.get(st, 0) >= cap:
-            continue
-        hit.score = rrf_score
-        # Carry the raw cosine similarity onto the returned hit even when the
-        # keyword variant won the ``or`` above (keyword hits have embed_score=None).
-        # A hit present in both maps was compared against the query embedding, so
-        # its cosine lives on the embedding-map twin.
-        if hit.embed_score is None:
-            embed_twin = embedding_hits.get(sid)
-            if embed_twin is not None:
-                hit.embed_score = embed_twin.embed_score
-        results.append(hit)
-        source_counts[st] = source_counts.get(st, 0) + 1
+    def _select(excluded_perception_targets: set) -> List[RecallHit]:
+        source_counts: dict[str, int] = {}
+        selected: List[RecallHit] = []
+        for sid, match_count, rrf_score in rrf_scored:
+            if len(selected) >= total_cap:
+                break
+            hit = keyword_hits.get(sid) or embedding_hits.get(sid)
+            if not hit:
+                continue
+            # perception → Chronicle の併合: 転写先が採用結果に居る perception は
+            # 選ばない (digest 側が全文を持つ)。除外して空いた枠は、この選抜が
+            # RRF 順にそのまま次の候補で埋める = 再充填 (第七巡 #3 — 後段の
+            # 削除だけだと focus の枠を消費したまま件数が欠ける)。
+            if (
+                hit.source_type == "perception"
+                and hit.chronicle_entry_id
+                and hit.chronicle_entry_id in excluded_perception_targets
+            ):
+                continue
+            st = hit.source_type
+            cap = source_caps.get(st, 0)
+            if source_counts.get(st, 0) >= cap:
+                continue
+            hit.score = rrf_score
+            # Carry the raw cosine similarity onto the returned hit even when the
+            # keyword variant won the ``or`` above (keyword hits have embed_score=None).
+            # A hit present in both maps was compared against the query embedding, so
+            # its cosine lives on the embedding-map twin.
+            if hit.embed_score is None:
+                embed_twin = embedding_hits.get(sid)
+                if embed_twin is not None:
+                    hit.embed_score = embed_twin.embed_score
+            selected.append(hit)
+            source_counts[st] = source_counts.get(st, 0) + 1
+        return selected
 
-    results.sort(key=lambda h: h.score, reverse=True)
+    # 併合の基準は「**最終採用結果に**転写先が居るか」(2026-08-19 Codex 第六巡
+    # #2 — 候補集合で判定すると、転写先が RRF/枠/topk で落選したとき perception
+    # ごと消える)。除外が選抜結果を変える (空いた枠に別の Chronicle が入る等)
+    # ので、除外集合 = 「現在の採用結果の Chronicle id」が安定するまで選び直す。
+    # 収束しない稀な振動はループ上限で打ち切り、最後の結果を採る。
+    excluded: set = set()
+    prev_excluded: Optional[set] = None
+    results = _select(excluded)
+    if search_perceptions:
+        for _ in range(10):
+            selected_chronicle_ids = {
+                h.source_id for h in results if h.source_type == "chronicle"
+            }
+            if selected_chronicle_ids == excluded:
+                break  # 固定点: 採用中の Chronicle を指す perception は既に除外済み
+            if prev_excluded is not None and selected_chronicle_ids == prev_excluded:
+                break  # 2 周期の振動 — 打ち切り (最後の結果を採る)
+            prev_excluded = excluded
+            excluded = selected_chronicle_ids
+            results = _select(excluded)
+
+    # 最終ソートも決定的タイブレーク付き (score 同点 → source_type → source_id)。
+    results.sort(key=lambda h: (-h.score, h.source_type, str(h.source_id)))
     return results

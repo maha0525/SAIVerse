@@ -65,10 +65,18 @@ def memopedia_manage(
                         f"削除すると子ページも全て削除されます。"
                         f"本当に削除する場合はもう一度このツールを呼んでください。"
                     )
-            result = memopedia.delete_page(
-                resolved_id,
-                edit_source="autonomy_manage",
-            )
+            from sai_memory.memopedia import ChronicleProtectedError
+            try:
+                result = memopedia.delete_page(
+                    resolved_id,
+                    edit_source="autonomy_manage",
+                )
+            except ChronicleProtectedError:
+                return (
+                    f"ページ '{page.title}' は Chronicle (時間の地図) の一部で"
+                    "保護されています。Chronicle の整理は記憶の整理 (Metabolism)"
+                    " が行うため、このツールでは削除できません"
+                )
             if result:
                 return f"ページ '{page.title}' を削除しました"
             return f"ページ '{page.title}' の削除に失敗しました"

@@ -579,8 +579,10 @@ def test_beat_head_perception_flush_injected(session_factory, persona):
     }]
     persona.sai_memory = SimpleNamespace(
         get_current_thread=lambda: "p1:persona_main",
+        # W14: 消費点は pulse_id / manager を渡す (消費バッチの pulse_id /
+        # episode_id 記帳用)。スタブは受けるだけ。
         flush_perception_buffer_payload=(
-            lambda: payloads.pop(0) if payloads else None
+            lambda **_kw: payloads.pop(0) if payloads else None
         ),
     )
     responses = [
@@ -632,7 +634,7 @@ def test_session_start_consumes_perceptions_before_context(session_factory, pers
     events: List[str] = []
     persona.sai_memory = SimpleNamespace(
         get_current_thread=lambda: "p1:persona_main",
-        flush_perception_buffer=lambda: events.append("flush") or True,
+        flush_perception_buffer=lambda **_kw: events.append("flush") or True,
     )
     # スペル無しの応答 1 回 = 周が一度も成立しない運転
     manager, runtime, client = _make_env(session_factory, persona, ["調べ終えた。"])
@@ -669,7 +671,7 @@ def test_session_head_fetches_mcp_tools_before_consuming(session_factory, person
     calls: List[Dict[str, Any]] = []
     persona.sai_memory = SimpleNamespace(
         get_current_thread=lambda: "p1:persona_main",
-        flush_perception_buffer=lambda: events.append("flush") or True,
+        flush_perception_buffer=lambda **_kw: events.append("flush") or True,
     )
     manager, runtime, client = _make_env(session_factory, persona, ["調べ終えた。"])
 
@@ -716,10 +718,10 @@ def test_beat_head_flush_skipped_when_not_outermost(session_factory, persona):
     persona.sai_memory = SimpleNamespace(
         get_current_thread=lambda: "p1:persona_main",
         flush_perception_buffer=(
-            lambda: flush_calls.append("session_head") or True
+            lambda **_kw: flush_calls.append("session_head") or True
         ),
         flush_perception_buffer_payload=(
-            lambda: flush_calls.append("round_boundary") or None
+            lambda **_kw: flush_calls.append("round_boundary") or None
         ),
     )
     responses = [

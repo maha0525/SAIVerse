@@ -178,9 +178,24 @@ def update_memopedia_page(
     if page_id.startswith("root_"):
         raise HTTPException(status_code=400, detail="Cannot edit root pages")
     
+    from sai_memory.memopedia import ChronicleProtectedError
+
     with get_adapter(persona_id, manager) as adapter:
         try:
             memopedia = _get_memopedia(adapter)
+            # 事前検証 (2026-08-19 Codex 第五巡 #2): chronicle × is_trunk=True は
+            # **update_page より前に** 409 で止める。update_page 確定後に
+            # set_trunk で弾くと、本文だけ変わって trunk 化は拒否という部分適用
+            # (409 なのにページは変わった) になる。
+            if request.is_trunk:
+                page = memopedia.get_page(page_id)
+                if page is not None and page.category == "chronicle":
+                    raise HTTPException(
+                        status_code=409,
+                        detail=str(
+                            ChronicleProtectedError(page_id, "trunk promotion")
+                        ),
+                    )
             updated = memopedia.update_page(
                 page_id,
                 title=request.title,
@@ -190,7 +205,11 @@ def update_memopedia_page(
                 edit_source="manual_ui",
             )
             if request.is_trunk is not None:
-                memopedia.set_trunk(page_id, request.is_trunk)
+                try:
+                    memopedia.set_trunk(page_id, request.is_trunk)
+                except ChronicleProtectedError as exc:
+                    # 保険 (事前検証との ms 級競合)。保護は 404 と区別して 409。
+                    raise HTTPException(status_code=409, detail=str(exc))
                 updated = memopedia.get_page(page_id)
             if not updated:
                 raise HTTPException(status_code=404, detail="Page not found")
@@ -217,10 +236,16 @@ def delete_memopedia_page(persona_id: str, page_id: str, manager = Depends(get_m
     if page_id.startswith("root_"):
         raise HTTPException(status_code=400, detail="Cannot delete root pages")
     
+    from sai_memory.memopedia import ChronicleProtectedError
+
     with get_adapter(persona_id, manager) as adapter:
         try:
             memopedia = _get_memopedia(adapter)
-            success = memopedia.delete_page(page_id, edit_source="manual_ui")
+            try:
+                success = memopedia.delete_page(page_id, edit_source="manual_ui")
+            except ChronicleProtectedError as exc:
+                # 保護は「未発見 (404)」でなく衝突 (409) として区別して返す。
+                raise HTTPException(status_code=409, detail=str(exc))
             if not success:
                 raise HTTPException(status_code=404, detail="Page not found or could not be deleted")
             return {"success": True}
@@ -358,10 +383,16 @@ def set_memopedia_page_trunk(
     if page_id.startswith("root_"):
         raise HTTPException(status_code=400, detail="Cannot modify root pages")
 
+    from sai_memory.memopedia import ChronicleProtectedError
+
     with get_adapter(persona_id, manager) as adapter:
         try:
             memopedia = _get_memopedia(adapter)
-            updated = memopedia.set_trunk(page_id, request.is_trunk)
+            try:
+                updated = memopedia.set_trunk(page_id, request.is_trunk)
+            except ChronicleProtectedError as exc:
+                # 保護は「未発見 (404)」でなく衝突 (409) として区別して返す。
+                raise HTTPException(status_code=409, detail=str(exc))
             if not updated:
                 raise HTTPException(status_code=404, detail="Page not found")
             return {

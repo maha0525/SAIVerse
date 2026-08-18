@@ -87,12 +87,20 @@ def coverage_chars(messages: Sequence[Message]) -> int:
 
 @dataclass
 class PlannedChunk:
-    """整列計画の 1 チャンク = 生成される一次あらすじ 1 個。"""
+    """整列計画の 1 チャンク = 生成される一次あらすじ 1 個。
+
+    ``group_key``: このチャンクが属する fold 群 (``run_groups`` 由来の所属キー。
+    群なし = None)。退場付記 (executor) が「付記スパンの敷き詰めは同一群の中
+    だけ」(perception_buffer.md §10.4) を守るために運ぶ — 群と群の間には生きた
+    提示中の範囲が挟まりうるので、群を跨いで期間を敷き詰めると提示中の知覚を
+    先取りで digest へ畳んでしまう。
+    """
 
     kind: str  # 常に CHUNK_LLM_BATCH
     messages: List[Message]
     episode_refs: List[str] = field(default_factory=list)
     coverage_chars: int = 0
+    group_key: object = None
 
     @property
     def message_ids(self) -> List[str]:
@@ -159,14 +167,14 @@ def plan_alignment(
     #    安全装置で、どの上位設計 — thread 単位取得 / episode 単位ソート —
     #    を採っても成立し続ける不変条件)。
     group_keys = _run_group_keys(messages, run_groups)
-    runs: List[List[Message]] = []
+    runs: List[tuple] = []  # (group_key, List[Message])
     current: List[Message] = []
     current_group: object = None
     current_thread: object = None
     for msg in messages:
         if msg.id in processed_ids:
             if current:
-                runs.append(current)
+                runs.append((current_group, current))
                 current = []
                 current_group = None
                 current_thread = None
@@ -174,21 +182,21 @@ def plan_alignment(
         group = group_keys.get(msg.id)
         thread = getattr(msg, "thread_id", None)
         if current and (group != current_group or thread != current_thread):
-            runs.append(current)
+            runs.append((current_group, current))
             current = []
         current.append(msg)
         current_group = group
         current_thread = thread
     if current:
-        runs.append(current)
+        runs.append((current_group, current))
 
     chunks: List[PlannedChunk] = []
-    for run in runs:
-        chunks.extend(_plan_run(run, target_chars=target_chars))
+    for group, run in runs:
+        chunks.extend(_plan_run(run, target_chars=target_chars, group_key=group))
 
     return AlignmentPlan(
         chunks=chunks,
-        total_unprocessed=sum(len(r) for r in runs),
+        total_unprocessed=sum(len(r) for _, r in runs),
     )
 
 
@@ -283,6 +291,7 @@ def _plan_run(
     run: List[Message],
     *,
     target_chars: int,
+    group_key: object = None,
 ) -> List[PlannedChunk]:
     """1 つの連続 run をチャンク列にする。
 
@@ -297,6 +306,7 @@ def _plan_run(
             messages=msgs,
             episode_refs=_distinct_refs(msgs),
             coverage_chars=coverage_chars(msgs),
+            group_key=group_key,
         )
 
     out: List[PlannedChunk] = []

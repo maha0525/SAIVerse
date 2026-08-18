@@ -1,4 +1,4 @@
-from .core import Memopedia
+from .core import ChronicleProtectedError, Memopedia
 from .storage import (
     init_memopedia_tables,
     CATEGORY_PEOPLE,
@@ -9,6 +9,7 @@ from .storage import (
 )
 
 __all__ = [
+    "ChronicleProtectedError",
     "Memopedia",
     "init_memopedia_tables",
     "CATEGORY_PEOPLE",

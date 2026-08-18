@@ -57,6 +57,30 @@ from sai_memory.memopedia.storage import (
 LOGGER = logging.getLogger(__name__)
 
 
+class ChronicleProtectedError(RuntimeError):
+    """Chronicle エントリ (時間の地図ページ) への可視性操作の拒否。
+
+    soft delete (is_deleted=1) や trunk 化 (is_trunk=1) は互換ビュー
+    ``arasuji_entries`` から entry を消すのに、知覚バッチの付記印
+    (annexed_entry_id) を戻す仕組みを持たない — 「付記済み = 提示に出ない」の
+    まま転写先も不可視という知覚の恒久消失を作る (2026-08-19 Codex 第三巡 #1)。
+    Chronicle の削除は専用経路 (sai_memory/arasuji/storage.py の delete_entry 系
+    — 付記印の返却を同一 tx で行う) だけを許可する。
+
+    False/None で返すと呼び出し側が「未発見」と区別できない (同 第四巡 #1) ので
+    専用例外で表明する (流儀は ChunkExecutionError / BackupError と同じ
+    RuntimeError 派生)。
+    """
+
+    def __init__(self, page_id: str, operation: str) -> None:
+        self.page_id = page_id
+        self.operation = operation
+        super().__init__(
+            f"chronicle page {page_id} is protected from {operation}; "
+            "use the arasuji deletion APIs instead"
+        )
+
+
 @dataclass
 class EntityNotes:
     """1 エンティティぶんの適用内容 (:meth:`Memopedia.apply_entity_notes` の入力)。
@@ -530,6 +554,11 @@ class Memopedia:
             page = get_page(self.conn, page_id)
             if page is None:
                 return False
+            # Chronicle エントリはここでは消さない — 理由と経路は
+            # ChronicleProtectedError の docstring。「未発見の False」と区別
+            # できるよう専用例外で表明する。
+            if page.category == "chronicle":
+                raise ChronicleProtectedError(page_id, "soft delete")
 
             # Record delete in edit history. Before-state captures the page
             # as it existed prior to deletion so rollback can restore it.
@@ -916,6 +945,12 @@ class Memopedia:
             # Skip root pages (they're auto-created on init)
             if page.id.startswith("root_"):
                 continue
+            # Chronicle エントリは export しない — level / source_ids / short_id
+            # が metadata JSON にあり、この形式では運ばれない (import しても
+            # 壊れた entry しか復元できない)。Chronicle の持ち出しは編纂系の
+            # 専用経路の領分 (2026-08-19 Codex 第五巡 #1)。
+            if page.category == "chronicle":
+                continue
             pages_data.append({
                 "id": page.id,
                 "parent_id": page.parent_id,
@@ -951,12 +986,16 @@ class Memopedia:
 
         with self._lock:
             if clear_existing:
-                # Delete all non-root pages
+                # Delete all non-root pages。Chronicle エントリは対象外 —
+                # Memopedia の一括操作が時間の地図を物理削除してはいけない
+                # (一括削除の専用経路は arasuji 側の clear_all_entries だけ。
+                # 2026-08-19 Codex 第五巡 #1 — W14 以前からの既存欠陥)。
                 from sai_memory.memopedia.storage import get_all_pages, delete_page
                 existing = get_all_pages(self.conn)
                 for page in existing:
-                    if not page.id.startswith("root_"):
-                        delete_page(self.conn, page.id)
+                    if page.id.startswith("root_") or page.category == "chronicle":
+                        continue
+                    delete_page(self.conn, page.id)
                 LOGGER.info("Cleared existing pages")
 
             # Import pages - need to handle parent relationships
@@ -983,6 +1022,16 @@ class Memopedia:
                 summary = page_data.get("summary", "")
                 content = page_data.get("content", "")
                 category = page_data.get("category", "")
+
+                # Chronicle エントリは import でも作らない — この形式は
+                # metadata (level / source_ids) を運ばず、壊れた entry しか
+                # 生めない (export 側でも除外済み。旧 export の残骸対策)。
+                if category == "chronicle":
+                    LOGGER.warning(
+                        "Skipping chronicle page %s in import (chronicle is "
+                        "managed by the arasuji pipeline)", page_id,
+                    )
+                    continue
 
                 # Skip if page already exists
                 if get_page(self.conn, page_id):
@@ -1019,9 +1068,12 @@ class Memopedia:
             existing = get_all_pages(self.conn)
             deleted = 0
             for page in existing:
-                if not page.id.startswith("root_"):
-                    delete_page(self.conn, page.id)
-                    deleted += 1
+                # Chronicle は対象外 (専用の一括削除 = arasuji clear_all_entries。
+                # 2026-08-19 Codex 第五巡 #1 — W14 以前からの既存欠陥)。
+                if page.id.startswith("root_") or page.category == "chronicle":
+                    continue
+                delete_page(self.conn, page.id)
+                deleted += 1
             LOGGER.info("Deleted %d pages", deleted)
             return deleted
 
@@ -1047,6 +1099,16 @@ class Memopedia:
             return None
 
         with self._lock:
+            # Chronicle エントリの trunk **化** (is_trunk=True) は拒否 — 互換
+            # ビュー arasuji_entries は is_trunk=0 の行だけを見せるので、trunk
+            # フラグは soft delete と同じ「entry を提示から外す」操作になる
+            # (ChronicleProtectedError の docstring)。歯止めの条件は目的
+            # (可視性を奪う操作を止める) から引く: is_trunk=False は可視性を
+            # 奪わない冪等な安全操作なので通す (既に 0 なら no-op で現在
+            # ページが返る)。
+            page = get_page(self.conn, page_id)
+            if page is not None and page.category == "chronicle" and is_trunk:
+                raise ChronicleProtectedError(page_id, "trunk promotion")
             result = set_trunk_flag(self.conn, page_id, is_trunk)
             if result:
                 LOGGER.info("Set trunk flag for page %s to %s", page_id, is_trunk)

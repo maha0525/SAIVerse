@@ -2694,13 +2694,16 @@ class SessionLifecycle:
         # とは限らない (提示コンテキストの途中を畳むため) ので、fold ごとに区切って渡し、離れた
         # 範囲が一つのあらすじに束ねられること (§4-5 連続束ねのみ) を防ぐ。
         #
-        # 一致するのは**Chronicle 対象の集合に限っての話**。除外タグ
-        # (handy_tool / spell / event_message / session_digest) のメッセージは
-        # fold に入っていても編纂されずに退場する — これは本設計で入った圧縮区間では
-        # なく旧実装から続く既知の欠けで、下限「退場したものは必ず編纂されている」
-        # を字義どおりには満たしていない。実際に圧縮区間が空いた範囲は
-        # `_apply_eviction_plan` が「あらすじを持たない fold は退場させない」で
-        # 拾う (退場そのものを見送るので、消えるのではなく生ログのまま残る)。
+        # 一致するのは**Chronicle 対象の集合に限っての話**。除外タグのうち
+        # event_message (legacy の直挿し通知) と消費済み知覚 (W14 で行を作らなく
+        # なった分) は、編纂時に executor の決定論付記 (perception_buffer.md
+        # §10.4) が fold 期間ぶんを digest へ転写する — この二種については下限
+        # 「退場したものは必ず編纂されている」が通った。残る既知の欠けは
+        # handy_tool / spell / session_digest のメッセージで、これらは fold に
+        # 入っていても編纂されずに退場する (短期→長期の入口選別 issue の領分)。
+        # 実際に圧縮区間が空いた範囲は `_apply_eviction_plan` が「あらすじを
+        # 持たない fold は退場させない」で拾う (退場そのものを見送るので、
+        # 消えるのではなく生ログのまま残る)。
         chronicle_status = "disabled"
         if chronicle_enabled:
             try:
