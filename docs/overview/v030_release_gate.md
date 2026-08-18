@@ -189,23 +189,36 @@ doc: [`track_retirement.md`](../intent/track_retirement.md)
 | B | Region の入口の出自 (自動生成 / ユーザー指定) を永続化していない | Region 削除でユーザー所有の Building が巻き添えで消えうる。作成時の予約名拒否で新規は塞いだが既存は残る | **遡及できない傷になりうる**。出自を後から列に足しても、既存 Region の入口が auto か explicit かは判別不能 (ID の形からしか推測できない)。出荷後に Region が増えるほど判別不能なデータが増える | [region.md §3.1](../intent/region.md) |
 | C | パス境界の保証が使用側に無い (persona_id から生値でパスを組む箇所が 10) | 区切り文字を含む ID が既存 DB にあると、保存先が SAIVERSE_HOME の外に作られる。作成の口は塞いだが既存値・import には効かない | 危険な配置が既にできてしまうと**移動 = マイグレーション**になる。現実の発生源は攻撃者より「事故で区切り文字が入った ID」「移行スクリプトが作った値」 | [issue](../issues/persona_path_boundary_not_enforced_at_use.md) |
 | D | reload が既存 PersonaCore へ届かない (PersonaCore が構築時に自分の dict を持つ) | 起動後に作った建物が既存ペルソナから見えず、削除した建物が見え続ける。再起動で解消する | **データの傷ではなく実行時の挙動**。遡及の問題は無く、マイグレーションも不要 | A の issue に併記 |
-
 | E | 記憶の保守 (編纂候補・命名候補のレビュー) が就寝判断に相乗りしている | 自律行動を使わないペルソナの記憶の棚が、誰にも整理されない (就寝判断が発火しないため)。会話だけで暮らすペルソナの記憶が構造的に二級になる | 就寝判断の解体 (v3) で置き場が消えるため、記憶側の機構への移設が必須。放置期間の乱れは後からの整理で回復可能に見えるが、置き場の設計は v3 実装と同時が安い | [autonomous_behavior_v3.md](../intent/autonomous_behavior_v3.md) §6 (2026-08-12 発見・まはー指摘) |
+| F | デバッグの「完全手動モード」が文言どおりには止まらない (v1 の亡霊) | 「全タイマー停止して手動へ」を押しても schedule と時間割の予約は止まらず、自動 LLM 発火が続く。実際に止まるのは会話の応答待ちタイマーの予約だけ。手動で駆動しているつもりの観測結果に、本人の裁定によらない自動発火が混ざる | ペルソナの永続データの**形式**は変わらないためマイグレーションは不要。ただし止まっていないつもりの発火は履歴を実際に増やすので、その分は後から取り消せない。W9 (柱 7) が v3 待ち凍結のため、運転の v0.4 分離裁定に従うなら v0.4 側へ落ちる見込み | [issue](../issues/debug_full_manual_mode_v1_ghost.md) / [W9](audit_remediation_plan.md) (監査 A10、2026-07-14 発見・2026-08-16 に未解決を再確認) |
+| G | ライフビューの次パルス ETA が常に 0 (書き手が存在しない dead code) | 「次の行動まで 0 秒」と出続ける。実際の駆動は時間割なので、この一行だけが嘘をつく | 表示だけの問題で永続データに触れないため**追加式**。加えて Track 撤廃 (§2-16 = 門の内) の撤去順序 ⑥ で必ず触る箇所なので、独立に仕分けるまでもなく ⑥ の実装と同時に決着すると見ている | [issue](../issues/life_view_pulse_eta_dead_code.md) / [track_retirement.md](../intent/track_retirement.md) §4-⑥ |
 
 **出自**: A〜D はいずれも v0.3.0 の門 Wave 0 (Building ID の文字種契約) のレビューで
 浮上した。**A・C・D は作業前から存在**し、B は既存部分が作業前から存在する。E は
-Wave 2 の設計議論 (就寝判断の棚卸し) で浮上した。
+Wave 2 の設計議論 (就寝判断の棚卸し) で浮上した。F・G は 2026-08-18 の §6 実態確認
+で、閉じられると思われていた issue が実は生きていたことから登載した — **どちらも
+作業前から存在する**。
 
 ---
 
-## §6 棚卸しで見つかった、閉じられる可能性のあるもの
+## §6 棚卸しで見つかった、閉じられる可能性のあるもの — ✅ 全 6 行の実態確認を完了 (2026-08-18)
 
-- [`subline_scheduler_ignores_activity_state.md`](../issues/subline_scheduler_ignores_activity_state.md) — SubLineScheduler は 2026-07-06 に削除済み・ACTIVITY_STATE カラムも 07-14 に撤去済みのため、**二重に stale の可能性** (要確認 → archive 候補)
-- [`debug_full_manual_mode_v1_ghost.md`](../issues/debug_full_manual_mode_v1_ghost.md) / [`life_view_pulse_eta_dead_code.md`](../issues/life_view_pulse_eta_dead_code.md) — 掃除裁定済み・退役が素直と明記済み
-- `unified_memory_architecture.md` — 後継に全て置き換えられたが廃止宣言が無い (歴史文書化の宣言だけ要る)
-- `mode_spell_permissions.md` — 「実装状況: 未着手」の記載が残るが実装・実機検証済み (2026-06-28)。doc の追従漏れ
-- `roadmap_status.md` — 2026-07-16 で更新停止。7 月下旬以降の大工事 (W 系・レベル制・時間割・RSS・器統合) が未反映。本書の確定と同時に改訂する
-- **ScheduleManager 廃止構想 (phase_6) — ✅ 除籍済み (まはー裁定 2026-08-09)**: 現物の `saiverse/schedule_manager.py` は push 駆動 + 実行台帳統合の現役基盤 (起床・就寝の判断点発火も担う)。習慣テンプレートとの統合もしない — 混同対策は名称変更「アラーム」系 (§2-15)。phase_6 の当該節 (+ Stelis Track 化の節) に除籍注記を記入済み
+起草時 (2026-08-09) に「閉じられるかもしれない」として並べた 6 行を、1 行ずつ現物のコードと doc に当たって確認した。**5 行は既に決着しており、残る 1 行 (issue 2 本) は閉じられないことが確定した。** この節は以後、確認の記録として残す (新しく見つかった stale はここに足さず、§9 へ足す)。
+
+### 決着済み 5 行
+
+- [`subline_scheduler_ignores_activity_state.md`](../issues/archive/subline_scheduler_ignores_activity_state.md) — **✅ archive 済み (2026-08-09)**。指摘の主語 (SubLineScheduler、2026-07-06 削除) も述語 (ACTIVITY_STATE カラム、2026-07-14 撤去) も存在しないため、対象消滅として閉鎖した。
+- [`unified_memory_architecture.md`](../intent/unified_memory_architecture.md) — **✅ 歴史文書の宣言を記入済み (2026-08-09)**。後継 (認知モデル / Memory Atlas / あらすじレベル制 / エピソード) へ全て置き換わったこと、現行仕様の根拠として参照しないことを冒頭に明記した。
+- [`mode_spell_permissions.md`](../intent/persona_cognition/mode_spell_permissions.md) — **✅ 実装状況の行を追従済み (2026-08-09)**。実体は `sea/mode_spell_permissions.py` の `check_spell_permission` で、2026-06-28 に実機検証まで済んでいた。「未着手」の記載だけが取り残されていた。
+- [`roadmap_status.md`](roadmap_status.md) — **✅ v1.3 へ改訂済み (2026-08-09)**。7 月の大工事 (自律行動 v2 / 実行台帳 W 系 / 時間割改修 / あらすじレベル制 / RSS) を反映し、リリース範囲の正典を本書へ移譲した。**この行自体が 2026-08-18 まで「2026-07-16 で更新停止」と書かれたまま残っており、棚卸しの記録が棚卸しされていなかった** (まはー指摘)。
+- **ScheduleManager 廃止構想 (phase_6) — ✅ 除籍済み (まはー裁定 2026-08-09)**: 現物の `saiverse/schedule_manager.py` は push 駆動 + 実行台帳統合の現役基盤 (起床・就寝の判断点発火も担う)。習慣テンプレートとの統合もしない — 混同対策は名称変更「アラーム」系 (§2-15)。phase_6 の当該節 (+ Stelis Track 化の節) に除籍注記が入っていることを 2026-08-18 に再確認した。
+
+### 閉じられなかった 1 行 (issue 2 本、いずれも現物が生きている)
+
+起草時は「掃除裁定済み・退役が素直と明記済み」と書いていたが、**裁定が下りているのは「掃除する」ところまでで、掃除そのものは行われていない**。2 本とも issue は open のまま残し、解決の場所を各 doc に書き足した。
+
+- [`debug_full_manual_mode_v1_ghost.md`](../issues/debug_full_manual_mode_v1_ghost.md) — **💤 v3 待ち凍結**。完全手動モードは UI (`DebugPanel.tsx` の「全タイマー停止して手動へ」)・API・実行台帳の掃除判定・回帰テストに現役で繋がっている。同じ機能を扱う監査側の W9 (柱 7) が 2026-08-16 に v3 待ち凍結となった ([audit_remediation_plan.md](audit_remediation_plan.md)) のと同じ理由 — 何が自動で発火するのかが v3 の運転設計で決まらないと「全タイマーを止める」の実態を定義できない。門の内外は未仕分けのため §9-F に登載した。
+- [`life_view_pulse_eta_dead_code.md`](../issues/life_view_pulse_eta_dead_code.md) — **🔲 未着手 (対象は生存)**。`last_pulse_at` を書くコードはリポジトリ全体に今も存在せず (2026-08-18 全数検索)、ライフビューは「次の行動まで」を常に 0 で描画し続けている。この ETA は running Track の metadata を読む UI なので、**Track 撤廃 (§2-16) の撤去順序 ⑥「UI・API の貼り替え」で必ず触る箇所**にあたる。順序 ⑥ の側からも本 issue を参照するようにした ([track_retirement.md](../intent/track_retirement.md) §4)。門の内外は未仕分けのため §9-G に登載した。
 
 ---
 
@@ -239,7 +252,7 @@ Wave 2 の設計議論 (就寝判断の棚卸し) で浮上した。
 
 **Wave 0 — 地均し (裁定不要、いま動ける)**
 - 私の並行実装 (裁定済み・独立): user 発言の帰属付与 (§2-4) / Building ID 制約 (§2-11) / 畳み範囲 1:1 (§2-10) / スレッド混線分離 (§2-7) / quick_spell (§2-8) / アラーム名称変更 (§2-15)。孤児エピソード close (§2-6) は A/B 未裁定が見つかり Wave 1 へ移動
-- 掃除: stale issue の確認→archive (§6) / doc 追従 (mode_spell_permissions・unified_memory_architecture・roadmap_status)
+- 掃除: **✅ 完了 (2026-08-18)** — §6 の 6 行を 1 行ずつ実態確認した。archive 1 件 (subline_scheduler) と doc 追従 3 件 (mode_spell_permissions・unified_memory_architecture・roadmap_status) は 2026-08-09 に済んでいた。閉じられなかった 2 件 (完全手動モード・ライフビュー ETA) は issue を open のまま残し、§9-F・§9-G へ登載した
 - 実機検証はここではやらない (§4 — 再設計後にまとめる。器統合の消し込みは完了済み §2-12)
 
 **Wave 1 — 設計議論 #1: エピソードの単位と正史 (§2-3) — ✅ 完了 (2026-08-11、episode.md v1.4 確定)**
