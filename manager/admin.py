@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy import func
 
+from saiverse import task_book
 from saiverse.buildings import Building
 from database.models import (
     AI as AIModel,
@@ -1419,6 +1420,13 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
         finally:
             db.close()
     def delete_ai(self, ai_id: str) -> str:
+        """Deletes an AI after checking its state.
+
+        既存の流儀 (同一 transaction 内で関連テーブル → ai 行の順に処理し、
+        最後に一括 commit) に合わせて、タスク帳 (task_book) の当該ペルソナ行も
+        ここで**削除**する (残置ではなく削除 — FK は宣言のみで DB は強制しない
+        アプリ層検査の方針のため、消さないと孤児行が残る)。
+        """
         if self._is_seeded_entity(ai_id):
             return "Error: Seeded AIs cannot be deleted."
 
@@ -1437,6 +1445,8 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                 BuildingOccupancyLog.AIID == ai_id,
                 BuildingOccupancyLog.EXIT_TIMESTAMP.is_(None),
             ).update({"EXIT_TIMESTAMP": datetime.now()})
+
+            task_book.purge_persona_entries(db, ai_id)
 
             db.delete(ai)
             db.commit()

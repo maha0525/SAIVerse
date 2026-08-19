@@ -1214,6 +1214,49 @@ def ensure_episode_inheritance_table(db_path: str) -> None:
         engine.dispose()
 
 
+def _ensure_task_book_table(engine) -> None:
+    """タスク帳 (task_book) を軽量パスで揃える。
+
+    autonomous_behavior_v3.md §4.1-2 (相手のある一件の台帳)。新規テーブルは
+    needs_migration → try_additive_migration の汎用パスでも作られるが、実行台帳・
+    継承エッジと同様「テーブル追加は素早く確実に適用したい」ため
+    CREATE TABLE IF NOT EXISTS 相当の冪等な軽量シンク経路を別途持つ
+    (schema_sync.ensure_table_columns_indexes に委譲)。既存 DB に対しては
+    テーブル追加のみ (既存行に触れず、行 0 件で無害)。列の後付け
+    (IDEM_KEY 等) と UNIQUE インデックス (uq_task_book_idem) も同じ委譲で
+    ALTER / CREATE INDEX により追従される。CHECK 制約 (ck_task_book_due_at_integer)
+    は SQLite が既存テーブルへ後付けできないが、テーブル未作成時の table.create()
+    が制約込みの完全形で作るため、CHECK 無しの task_book は存在しない (本テーブルは
+    制約込みの定義で一括出荷され、それ以前のリリースに存在しない)。書き込み経路の
+    型検査 (saiverse/task_book.py の _validate_epoch) が同じ不変条件を二重に守る。
+    """
+    try:
+        from database.schema_sync import ensure_table_columns_indexes
+        from database.models import TaskBookEntry
+        ensure_table_columns_indexes(engine, TaskBookEntry.__table__)
+        # REVISION (楽観ロック版数) は後付け列だと NULL で入る (schema_sync の
+        # ADD COLUMN は default を付けない)。NULL のままだと遷移 UPDATE の
+        # WHERE REVISION = ? が既存行に一致せず遷移不能になるため 0 へ埋める
+        # (冪等 — 埋めた後は 0 件更新)。
+        from sqlalchemy import text as _text
+        with engine.begin() as conn:
+            conn.execute(_text(
+                "UPDATE task_book SET REVISION = 0 WHERE REVISION IS NULL"
+            ))
+    except Exception as e:
+        logging.error("タスク帳テーブルの作成に失敗しました: %s", e, exc_info=True)
+        raise
+
+
+def ensure_task_book_table(db_path: str) -> None:
+    """タスク帳テーブルの軽量シンクを単体で走らせるエントリポイント。"""
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        _ensure_task_book_table(engine)
+    finally:
+        engine.dispose()
+
+
 def _ensure_feed_tables(engine) -> None:
     """フィード取り込み 3 テーブル (feed_subscription / feed_item / feed_read_cursor)
     を軽量パスで現行スキーマへ収束させる。

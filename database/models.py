@@ -1,4 +1,5 @@
 from sqlalchemy import (
+    CheckConstraint,
     Column,
     Index,
     Integer,
@@ -1389,5 +1390,99 @@ class ExecutionOutboxItem(Base):
         Index("idx_execution_outbox_persona_status", "PERSONA_ID", "STATUS"),
         # execution 単位の全配送確認 (applied → completed の証跡) 用
         Index("idx_execution_outbox_execution", "EXECUTION_ID", "STATUS"),
+    )
+
+
+# ============================================================================
+# タスク帳 (Task Book) — 相手のある一件の台帳
+# docs/intent/autonomous_behavior_v3.md §4.1-2 / §4.2 / §9-5
+# ============================================================================
+
+class TaskBookEntry(Base):
+    """タスク帳: 相手のある約束・依頼の一件 (autonomous_behavior_v3.md §4.1-2)。
+
+    現行の統合タスクテーブル (persona_task) を痩せた形に作り直したもの。
+    UI にも「タスク帳」の名で出る。設計の軸は二本 (2026-08-19 裁定):
+
+    - **器を決めるのは相手の有無**。相手のいる約束・依頼は、期限が無くても
+      タスク帳に入る (失くすことが許されないから機械が持つ)。
+    - **機械の引き当て (締め切り優先の決定論) に乗るのは期限のある行だけ**。
+      ``DUE_AT`` は省略可で、**NULL = 期限なし** — 「ずっと一緒にいようね」型の
+      約束に嘘の期限を発明させない。「永続」と「未定」の区別は持たない
+      (機械の扱いが同じで、読む消費者がいない)。期限なしの行は急かされず、
+      空きティックの選択材料として目に入るだけ。
+
+    この軸から、受け入れられる行は三形: **相手のある一件** (期限任意) /
+    **期限つきの自分だけの一件** (「帰宅前に仕上げたいもの」型) /
+    **システムタスク** (ORIGIN='system'、期限も相手も任意)。期限も相手も
+    無い行はタスク帳ではなく手帳 (やりたいメモ) の領分で、受け入れない。
+
+    状態は §4.2 の三値 (ある / やり終えた / 取り下げた) = 'open' / 'done' /
+    'withdrawn'。完遂の接地 (§9-5): 相手のある一件の完遂には成果物参照
+    (``ARTIFACT_REF``) か顛末一行 (``OUTCOME``) が要る — v2 の空洞完了
+    (やった風の独白で done) を防ぐ証跡。自分だけの一件は任意。
+
+    システムタスク (§9-5) もこの行の亜種 (``ORIGIN`` = 'system'): 機械が
+    ペルソナに差し込む急ぎでない依頼。引き当て順は 締め切り → システムタスク
+    → プール。
+
+    - 時刻は epoch 秒 int。刻印は必ず ``saiverse.clock.now()`` 経由
+      (仮想クロック尊重 — ExecutionLedgerEntry と同じ判断で server_default は
+      使わない)。
+    - 操作は saiverse/task_book.py に集約する — 生 SQL で書かないこと。
+    """
+    __tablename__ = "task_book"
+    TASK_ID = Column(String(36), primary_key=True)  # uuid4
+    PERSONA_ID = Column(String(255), ForeignKey("ai.AIID"), nullable=False)
+    # 中身 — 実行の瞬間に再発明が要らない具体さ (指示書)。
+    CONTENT = Column(Text, nullable=False)
+    # 期限 (epoch 秒)。NULL = 期限なし — 期限のない約束は正当な行。
+    # 機械の締め切り引き当てに乗るのは NOT NULL の行だけ。
+    DUE_AT = Column(Integer, nullable=True)
+    # 相手 ('user' / ペルソナ ID / 'system' 等)。タスク帳に入る行は原則相手がいる。
+    COUNTERPART = Column(String(255), nullable=True)
+    # 出自 ('user' | 'sluice' | 'system' | 'migration' 等)。
+    ORIGIN = Column(String(32), nullable=False)
+    # 出どころへの参照 (メッセージ ID 等)。不透明に保持するだけ。
+    ORIGIN_REF = Column(String(255), nullable=True)
+    # 'open' (ある) | 'done' (やり終えた) | 'withdrawn' (取り下げた)。
+    STATUS = Column(String(16), nullable=False, default="open")
+    # 成果物参照 — 相手のある完遂の証跡。
+    ARTIFACT_REF = Column(String(255), nullable=True)
+    # 顛末一行 — 参照できる物が無い行為系の完遂の代替。
+    OUTCOME = Column(Text, nullable=True)
+    CREATED_AT = Column(Integer, nullable=False)  # epoch 秒 (clock.now() 経由)
+    CLOSED_AT = Column(Integer, nullable=True)    # done / withdrawn になった時刻
+    META_JSON = Column(Text, nullable=True)
+    # 冪等キー — 同じ書き込み試行の再実行 (スルースの再試行等) で同じ約束が
+    # 別 TASK_ID として増えるのを防ぐ。キーは呼び手が採番する
+    # (例: スルース実行 ID + 操作番号)。NULL の行は一意制約にかからない。
+    IDEM_KEY = Column(String(255), nullable=True)
+    # 楽観ロックの版数 — update/update の並行競合 (後書きが先書きを黙って
+    # 上書きする消失) を検出する。遷移 UPDATE の WHERE に「読んだ時点の値」を
+    # 含め、SET で +1 する (saiverse/task_book.py の _guarded_transition)。
+    # add_entry は 0 で作る。軽量シンク (schema_sync) の後付け列は NULL で
+    # 入るため、migrate.py の _ensure_task_book_table が 0 へ埋める。
+    REVISION = Column(Integer, nullable=False, default=0)
+    __table_args__ = (
+        # open 一覧 (ティックの引き当て・UI) 用
+        Index("idx_task_book_persona_status", "PERSONA_ID", "STATUS"),
+        # 締め切り引き当て (DUE_AT 昇順走査) 用
+        Index("idx_task_book_persona_due", "PERSONA_ID", "DUE_AT"),
+        # 冪等キーの一意性 (NULL は SQLite では制約にかからず、既存動作は不変)。
+        # UniqueConstraint ではなく UNIQUE インデックスなのは、migrate.py の
+        # 軽量シンク (schema_sync) が table.indexes しか同期しないため —
+        # インデックスなら既存 DB にも CREATE UNIQUE INDEX で追従できる。
+        Index("uq_task_book_idem", "PERSONA_ID", "IDEM_KEY", unique=True),
+        # DUE_AT の型を DB 境界でも守る — SQLite は列型を強制しないため、生 SQL
+        # で文字列の期限が永続すると期限順比較 (DUE_AT 昇順の引き当て) を毒する。
+        # 注意: schema_sync の軽量シンク (ensure_table_columns_indexes) は CHECK
+        # を既存テーブルへ後付けできない (ALTER TABLE ADD CONSTRAINT が SQLite に
+        # 無い)。task_book はこの変更時点で未リリースの新設テーブルなので、
+        # 新規作成時 (table.create) に効けば十分。
+        CheckConstraint(
+            "DUE_AT IS NULL OR typeof(DUE_AT) = 'integer'",
+            name="ck_task_book_due_at_integer",
+        ),
     )
 

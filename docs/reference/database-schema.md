@@ -7,7 +7,7 @@ SAIVerse の全テーブル・カラム定義（自動生成）。SQLite。本�
 `~/.saiverse/user_data/database/saiverse.db`。概念的な位置づけは
 [concepts/](../concepts/README.md) 各ページを参照。
 
-**テーブル数**: 50
+**テーブル数**: 51
 
 ## addon_config
 
@@ -599,6 +599,26 @@ SAIVerse の全テーブル・カラム定義（自動生成）。SQLite。本�
 | `SNAPSHOT_VERSION` | INTEGER | NOT NULL, default=1 |  |
 | `CAPTURED_AT` | DATETIME | NOT NULL |  |
 | `UPDATED_AT` | DATETIME | NOT NULL |  |
+
+## task_book
+
+| カラム | 型 | 制約 | 説明 |
+|---|---|---|---|
+| `TASK_ID` | VARCHAR(36) | PK, NOT NULL |  |
+| `PERSONA_ID` | VARCHAR(255) | FK→ai.AIID, NOT NULL |  |
+| `CONTENT` | TEXT | NOT NULL |  |
+| `DUE_AT` | INTEGER | — |  |
+| `COUNTERPART` | VARCHAR(255) | — |  |
+| `ORIGIN` | VARCHAR(32) | NOT NULL |  |
+| `ORIGIN_REF` | VARCHAR(255) | — |  |
+| `STATUS` | VARCHAR(16) | NOT NULL, default='open' |  |
+| `ARTIFACT_REF` | VARCHAR(255) | — |  |
+| `OUTCOME` | TEXT | — |  |
+| `CREATED_AT` | INTEGER | NOT NULL |  |
+| `CLOSED_AT` | INTEGER | — |  |
+| `META_JSON` | TEXT | — |  |
+| `IDEM_KEY` | VARCHAR(255) | — |  |
+| `REVISION` | INTEGER | NOT NULL, default=0 |  |
 
 ## thinking_request
 
