@@ -239,6 +239,19 @@ def init_db(db_path: str, *, check_same_thread: bool = True) -> sqlite3.Connecti
     for col in ("group_label", "action", "target_page_id", "suggested_title", "target_category"):
         _ensure_column(conn, "memory_notes", col, "TEXT")
 
+    # 自律行動 v3 形の層 (2026-08-19): 手帳 (activities / memos)、連続性グラフ
+    # (thread_edges)、想起用タグの辺 (chunk_page_edges)。定義と読み書き関数は
+    # 各モジュールが持ち、ここでは器の用意だけを相乗りさせる (冪等)。
+    # 正典: docs/intent/autonomous_behavior_v3.md §13.1/§13.6、
+    # docs/issues/memory_continuity_graph.md 決着節。
+    from sai_memory.memory.continuity import init_continuity_tables
+    from sai_memory.memory.pocketbook import init_pocketbook_tables
+    from sai_memory.memory.recall_edges import init_chunk_page_edge_tables
+
+    init_pocketbook_tables(conn)
+    init_continuity_tables(conn)
+    init_chunk_page_edge_tables(conn)
+
     conn.commit()
     return conn
 
