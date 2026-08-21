@@ -15,6 +15,11 @@ from sai_memory.memory.entity_extractor import (
 from sai_memory.memory.storage import Message
 
 
+def _parse_entities(response):
+    """抽出部分だけを見るテストのための細口 (B2 欄は別クラスで見る)。"""
+    return _parse_extraction_response(response).entities
+
+
 class TestParseExtractionResponse(unittest.TestCase):
     """Test JSON parsing of LLM responses."""
 
@@ -25,7 +30,7 @@ class TestParseExtractionResponse(unittest.TestCase):
                 {"name": "SAIVerse", "category": "terms", "summary": "AIプラットフォーム", "notes": ["開発中のシステム"]},
             ]
         }, ensure_ascii=False)
-        result = _parse_extraction_response(response)
+        result = _parse_entities(response)
         self.assertEqual(len(result), 2)
         self.assertEqual(result[0].name, "エイド")
         self.assertEqual(result[0].category, "people")
@@ -35,7 +40,7 @@ class TestParseExtractionResponse(unittest.TestCase):
 
     def test_json_in_code_block(self):
         response = '```json\n{"entities": [{"name": "Test", "category": "terms", "notes": ["note1"]}]}\n```'
-        result = _parse_extraction_response(response)
+        result = _parse_entities(response)
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0].name, "Test")
 
@@ -49,7 +54,7 @@ class TestParseExtractionResponse(unittest.TestCase):
     def test_empty_entities(self):
         """entities キーがあって空 = 正常な抽出ゼロ (これだけが空リスト)。"""
         response = json.dumps({"entities": []})
-        self.assertEqual(_parse_extraction_response(response), [])
+        self.assertEqual(_parse_entities(response), [])
 
     def test_invalid_json_is_a_failure(self):
         with self.assertRaises(ExtractionFailed):
@@ -85,7 +90,7 @@ class TestParseExtractionResponse(unittest.TestCase):
 
     def test_notes_as_a_bare_string_becomes_one_note(self):
         """⭐ notes を素の文字列で返す LLM がいる。一文字ずつ Fragment にしない。"""
-        result = _parse_extraction_response(json.dumps({
+        result = _parse_entities(json.dumps({
             "entities": [{"name": "x", "category": "terms", "notes": "ひとつの事実"}],
         }, ensure_ascii=False))
         self.assertEqual(result[0].notes, ["ひとつの事実"])
@@ -98,7 +103,7 @@ class TestParseExtractionResponse(unittest.TestCase):
 
     def test_entity_without_a_name_is_skipped_not_fatal(self):
         """名前の無い項目だけを飛ばす (良い項目まで巻き添えにしない)。"""
-        result = _parse_extraction_response(json.dumps({
+        result = _parse_entities(json.dumps({
             "entities": [
                 {"name": "", "notes": ["捨てる"]},
                 {"name": "Valid", "category": "terms", "notes": ["残る"]},
@@ -113,7 +118,7 @@ class TestParseExtractionResponse(unittest.TestCase):
                 {"name": "Valid", "category": "terms", "notes": ["note"]},
             ]
         })
-        result = _parse_extraction_response(response)
+        result = _parse_entities(response)
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0].name, "Valid")
 
@@ -125,7 +130,7 @@ class TestParseExtractionResponse(unittest.TestCase):
                 {"name": "HasNotes", "category": "terms", "notes": ["note"]},
             ]
         })
-        result = _parse_extraction_response(response)
+        result = _parse_entities(response)
         self.assertEqual(len(result), 2)
         self.assertEqual(result[0].name, "OnlySummary")
         self.assertEqual(result[0].summary, "概要あり")
@@ -137,7 +142,7 @@ class TestParseExtractionResponse(unittest.TestCase):
                 {"name": "Test", "category": "invalid_cat", "notes": ["note"]},
             ]
         })
-        result = _parse_extraction_response(response)
+        result = _parse_entities(response)
         self.assertEqual(result[0].category, "terms")
 
     def test_list_format(self):
@@ -145,7 +150,7 @@ class TestParseExtractionResponse(unittest.TestCase):
         response = json.dumps([
             {"name": "Test", "category": "people", "notes": ["note"]},
         ])
-        result = _parse_extraction_response(response)
+        result = _parse_entities(response)
         self.assertEqual(len(result), 1)
 
 
@@ -166,6 +171,12 @@ class TestBuildExtractionPrompt(unittest.TestCase):
         prompt = _build_extraction_prompt("会話", existing_pages="[people]\n  - まはー")
         self.assertIn("まはー", prompt)
         self.assertIn("既存のMemopedia", prompt)
+
+    def test_asks_for_involved_entities(self):
+        """B2 欄は入力を変えず、出力に一欄増やすだけ (recall_tags §9.3)。"""
+        prompt = _build_extraction_prompt("会話")
+        self.assertIn("involved_entities", prompt)
+        self.assertIn("新しく判明した情報が無くても列挙してください", prompt)
 
 
 class TestExtractEntities(unittest.TestCase):
@@ -402,16 +413,707 @@ class TestBatchCallbackContract(unittest.TestCase):
         """
         import sqlite3
         import threading
-        from sai_memory.memory.entity_extractor import extract_and_reflect
+        from sai_memory.memory.entity_extractor import (
+            ExtractionOutput,
+            extract_and_reflect,
+        )
 
         lock = threading.RLock()
         conn = sqlite3.connect(":memory:")
         with patch("sai_memory.memopedia.Memopedia") as memo_cls, patch(
-            "sai_memory.memory.entity_extractor.extract_entities",
-            return_value=[],
+            "sai_memory.memory.entity_extractor.extract_entities_and_involvement",
+            return_value=ExtractionOutput(),
         ):
             extract_and_reflect(MagicMock(), conn, [self._msg()], db_lock=lock)
         memo_cls.assert_called_once_with(conn, db_lock=lock)
+
+
+class TestInvolvedEntitiesParsing(unittest.TestCase):
+    """B2 欄 (involved_entities) の読み取り — 要素単位で棄却し、抽出は壊さない。"""
+
+    def _involved(self, payload):
+        return _parse_extraction_response(
+            json.dumps(payload, ensure_ascii=False)
+        ).involved_titles
+
+    def test_titles_are_read_and_stripped(self):
+        self.assertEqual(
+            self._involved({
+                "entities": [],
+                "involved_entities": ["  まはー ", "スタックチャン"],
+            }),
+            ["まはー", "スタックチャン"],
+        )
+
+    def test_missing_field_is_not_a_failure(self):
+        """⭐ 欄の無い応答 (欄を無視したモデル) でも抽出は成立する。"""
+        output = _parse_extraction_response(json.dumps({
+            "entities": [{"name": "エイド", "category": "people", "notes": ["n"]}],
+        }, ensure_ascii=False))
+        self.assertEqual([e.name for e in output.entities], ["エイド"])
+        self.assertEqual(output.involved_titles, [])
+
+    def test_wrong_type_drops_only_the_tags(self):
+        """⭐ 欄の型が違っても抽出まで巻き添えにしない。
+
+        タグの取りこぼしは後から全記憶を走査して遡及できるが、知識は拾い直しに
+        失敗すれば永久に落ちる。だから非対称に扱う。
+        """
+        output = _parse_extraction_response(json.dumps({
+            "entities": [{"name": "エイド", "category": "people", "notes": ["n"]}],
+            "involved_entities": {"a": 1},
+        }, ensure_ascii=False))
+        self.assertEqual([e.name for e in output.entities], ["エイド"])
+        self.assertEqual(output.involved_titles, [])
+
+    def test_bare_string_becomes_one_title(self):
+        self.assertEqual(
+            self._involved({"entities": [], "involved_entities": "まはー"}),
+            ["まはー"],
+        )
+
+    def test_non_string_element_is_dropped_not_fatal(self):
+        self.assertEqual(
+            self._involved({
+                "entities": [],
+                "involved_entities": ["まはー", {"name": "壊れた"}, "エイド"],
+            }),
+            ["まはー", "エイド"],
+        )
+
+    def test_duplicates_collapse(self):
+        self.assertEqual(
+            self._involved({
+                "entities": [],
+                "involved_entities": ["まはー", "まはー"],
+            }),
+            ["まはー"],
+        )
+
+    def test_legacy_list_response_has_no_tags(self):
+        """entities を包まない旧形式には B2 欄を載せる場所が無い。"""
+        output = _parse_extraction_response(json.dumps([
+            {"name": "Test", "category": "people", "notes": ["note"]},
+        ]))
+        self.assertEqual(output.involved_titles, [])
+
+
+class TestInvolvementEdges(unittest.TestCase):
+    """B2 欄 → タイトル照合 → chunk_page_edges の辺 (recall_tags §9.3)。"""
+
+    def setUp(self):
+        from sai_memory.arasuji import init_arasuji_tables
+        from sai_memory.memopedia import Memopedia
+        from sai_memory.memory.storage import init_db
+
+        self.conn = init_db(":memory:")
+        init_arasuji_tables(self.conn)
+        self.memopedia = Memopedia(self.conn)
+        self.maha = self.memopedia.create_page(
+            parent_id="root_people", title="まはー",
+        )
+        self.stackchan = self.memopedia.create_page(
+            parent_id="root_terms", title="スタックチャン",
+        )
+
+    def tearDown(self):
+        self.conn.close()
+
+    def _client(self, *, entities=None, involved=None, omit_involved=False):
+        payload = {"entities": entities if entities is not None else []}
+        if not omit_involved:
+            payload["involved_entities"] = involved if involved is not None else []
+        client = MagicMock()
+        client.generate.return_value = json.dumps(payload, ensure_ascii=False)
+        return client
+
+    def _msgs(self):
+        return [
+            Message(id="m1", thread_id="t", role="user", content="調べ物をした",
+                    resource_id="r", created_at=1000, metadata={}),
+        ]
+
+    def _edges(self, chronicle_id="entry-1"):
+        from sai_memory.memory.recall_edges import list_entity_pages_for_chronicle
+
+        return list_entity_pages_for_chronicle(self.conn, chronicle_id)
+
+    def test_involved_titles_become_edges(self):
+        """⭐ 新しく判明した知識がゼロでも、関与した対象には辺が張られる。
+
+        「新情報が無くても、その対象のための調べ物・作業を含む」(§9.3) —— ここで
+        打ち切ると B2 欄を足した意味がなくなる。
+        """
+        from sai_memory.memory.entity_extractor import extract_and_reflect
+
+        results = extract_and_reflect(
+            self._client(involved=["まはー", "スタックチャン"]),
+            self.conn, self._msgs(), chronicle_entry_id="entry-1",
+        )
+
+        self.assertEqual(results, [])
+        self.assertEqual(
+            sorted(self._edges()), sorted([self.maha.id, self.stackchan.id]),
+        )
+
+    def test_edges_are_written_alongside_extraction(self):
+        """抽出とタグ付けは同じコールに乗る別の仕事 — 両方が着地する。"""
+        from sai_memory.memory.entity_extractor import extract_and_reflect
+
+        results = extract_and_reflect(
+            self._client(
+                entities=[{
+                    "name": "エイド", "category": "people",
+                    "summary": "AI", "notes": ["新情報"],
+                }],
+                involved=["まはー"],
+            ),
+            self.conn, self._msgs(), chronicle_entry_id="entry-1",
+        )
+
+        self.assertEqual([r.entity_name for r in results], ["エイド"])
+        self.assertEqual(self._edges(), [self.maha.id])
+
+    def test_unresolved_title_is_dropped_and_extraction_still_succeeds(self):
+        """⭐ 照合できないタイトルはその 1 件だけ捨てる (指し先は実体ページに限る)。
+
+        自由語を辺にすると、表記ゆれのぶんだけ誰も辿れないノードが増える。
+        """
+        from sai_memory.memory.entity_extractor import extract_and_reflect
+
+        results = extract_and_reflect(
+            self._client(
+                entities=[{
+                    "name": "エイド", "category": "people",
+                    "summary": "AI", "notes": ["新情報"],
+                }],
+                involved=["まはーさん", "そのプロジェクトの調べ物"],
+            ),
+            self.conn, self._msgs(), chronicle_entry_id="entry-1",
+        )
+
+        self.assertEqual([r.entity_name for r in results], ["エイド"])
+        self.assertEqual(self._edges(), [])
+
+    def test_category_shelves_are_not_edge_targets(self):
+        """カテゴリの棚 (「人物」等) を指し先にしない — 遡りの材料にならない。"""
+        from sai_memory.memory.entity_extractor import extract_and_reflect
+
+        extract_and_reflect(
+            self._client(involved=["人物", "まはー"]),
+            self.conn, self._msgs(), chronicle_entry_id="entry-1",
+        )
+        self.assertEqual(self._edges(), [self.maha.id])
+
+    def test_a_page_created_by_this_extraction_can_be_tagged(self):
+        """この回に作られたページも関与の指し先になれる (関与は事実で新旧は無関係)。"""
+        from sai_memory.memory.entity_extractor import extract_and_reflect
+
+        results = extract_and_reflect(
+            self._client(
+                entities=[{
+                    "name": "エイド", "category": "people",
+                    "summary": "AI", "notes": ["新情報"],
+                }],
+                involved=["エイド"],
+            ),
+            self.conn, self._msgs(), chronicle_entry_id="entry-1",
+        )
+        self.assertEqual(self._edges(), [results[0].page_id])
+
+    def test_rerunning_the_same_extraction_does_not_duplicate_edges(self):
+        """⭐ 冪等 — 拾い直しで同じ抽出をもう一度走らせても辺は重ならない。"""
+        from sai_memory.memory.entity_extractor import extract_and_reflect
+
+        for _ in range(2):
+            extract_and_reflect(
+                self._client(involved=["まはー", "スタックチャン"]),
+                self.conn, self._msgs(), chronicle_entry_id="entry-1",
+            )
+
+        rows = self.conn.execute(
+            "SELECT COUNT(*) FROM chunk_page_edges WHERE chronicle_page_id = ?",
+            ("entry-1",),
+        ).fetchone()[0]
+        self.assertEqual(rows, 2)
+
+    def test_missing_involved_field_leaves_extraction_intact(self):
+        """⭐ 欄そのものが無い応答でも既存の抽出は壊れない (辺はゼロ)。"""
+        from sai_memory.memory.entity_extractor import extract_and_reflect
+
+        results = extract_and_reflect(
+            self._client(
+                entities=[{
+                    "name": "エイド", "category": "people",
+                    "summary": "AI", "notes": ["新情報"],
+                }],
+                omit_involved=True,
+            ),
+            self.conn, self._msgs(), chronicle_entry_id="entry-1",
+        )
+        self.assertEqual([r.entity_name for r in results], ["エイド"])
+        self.assertEqual(self._edges(), [])
+
+    def test_without_a_chronicle_id_no_edge_is_invented(self):
+        """辺を張る先が無い回は、辺を作らずに抽出だけ通す。"""
+        from sai_memory.memory.entity_extractor import extract_and_reflect
+
+        extract_and_reflect(
+            self._client(involved=["まはー"]),
+            self.conn, self._msgs(), chronicle_entry_id=None,
+        )
+        rows = self.conn.execute(
+            "SELECT COUNT(*) FROM chunk_page_edges"
+        ).fetchone()[0]
+        self.assertEqual(rows, 0)
+
+    def test_edge_write_failure_is_not_swallowed(self):
+        """⭐ 辺の書き込みの失敗を空成功にしない。
+
+        呼び出し元 (executor / bands) が付箋に貼り、次の Metabolism が抽出ごと
+        拾い直す —— ここで握り潰すと、その回の関与は誰にも回収されない。
+        """
+        from sai_memory.memory.entity_extractor import extract_and_reflect
+
+        with patch(
+            "sai_memory.memory.entity_extractor.add_chunk_page_edge",
+            side_effect=RuntimeError("disk full"),
+        ):
+            with self.assertRaises(RuntimeError):
+                extract_and_reflect(
+                    self._client(involved=["まはー"]),
+                    self.conn, self._msgs(), chronicle_entry_id="entry-1",
+                )
+
+    def test_backlog_retry_writes_the_edges(self):
+        """⭐ 付箋の拾い直し経路でも辺が張られる。
+
+        辺は抽出と同じコールの産物なので、拾い直しは抽出ごとやり直す = 辺も
+        書き直される。冪等なので、一度書けていた辺が重複することもない。
+        """
+        from sai_memory.arasuji.storage import create_entry
+        from sai_memory.memory.entity_extractor import (
+            make_batch_callback,
+            record_extraction_failure,
+            retry_extraction_backlog,
+        )
+        from sai_memory.memory.storage import add_message
+
+        mid = add_message(self.conn, "t", "user", "調べ物をした", created_at=1000)
+        create_entry(
+            self.conn, level=1, content="調べ物をした",
+            source_ids=[mid], source_count=1, message_count=1,
+            entry_id="entry-1",
+        )
+        record_extraction_failure(self.conn, "entry-1")
+
+        client = self._client(
+            entities=[{
+                "name": "エイド", "category": "people",
+                "summary": "AI", "notes": ["新情報"],
+            }],
+            involved=["まはー"],
+        )
+        stats = retry_extraction_backlog(
+            self.conn, make_batch_callback(client, self.conn),
+        )
+
+        self.assertEqual(stats["recovered"], 1)
+        self.assertEqual(self._edges(), [self.maha.id])
+
+    def test_a_taken_over_claim_writes_no_edges(self):
+        """⭐ 取り置きを取り戻された実行は、辺も書かない。
+
+        新知識ゼロの回は Memopedia のトランザクションが走らないため、書き込み
+        直前の検査 (precondition) がどこも通らなくなる。辺の前で通す。
+        """
+        from sai_memory.arasuji.storage import create_entry
+        from sai_memory.memory.entity_extractor import (
+            make_batch_callback,
+            record_extraction_failure,
+            retry_extraction_backlog,
+        )
+        from sai_memory.memory.storage import add_message
+
+        mid = add_message(self.conn, "t", "user", "調べ物をした", created_at=1000)
+        create_entry(
+            self.conn, level=1, content="調べ物をした",
+            source_ids=[mid], source_count=1, message_count=1,
+            entry_id="entry-1",
+        )
+        record_extraction_failure(self.conn, "entry-1")
+
+        inner = make_batch_callback(self._client(involved=["まはー"]), self.conn)
+
+        def steal_then_extract(messages, eid, precondition=None):
+            # 拾い直しに時間が掛かっている間に、別の実行が取り置きを取り戻した
+            self.conn.execute(
+                "UPDATE entity_extraction_backlog SET version = version + 1 "
+                "WHERE entry_id = ?", (eid,),
+            )
+            self.conn.commit()
+            inner(messages, eid, precondition=precondition)
+
+        stats = retry_extraction_backlog(self.conn, steal_then_extract)
+
+        self.assertEqual(stats["skipped"], 1)
+        self.assertEqual(self._edges(), [], "取り下げた実行が辺を書いている")
+
+    # ----- 取り置きの検査と辺の書き込みの競合 (Codex 2026-08-21 #1) -----
+
+    def _backlogged_entry(self):
+        """付箋 1 枚 + 元メッセージ + Chronicle エントリを用意して entry_id を返す。"""
+        from sai_memory.arasuji.storage import create_entry
+        from sai_memory.memory.entity_extractor import record_extraction_failure
+        from sai_memory.memory.storage import add_message
+
+        mid = add_message(self.conn, "t", "user", "調べ物をした", created_at=1000)
+        create_entry(
+            self.conn, level=1, content="調べ物をした",
+            source_ids=[mid], source_count=1, message_count=1,
+            entry_id="entry-1",
+        )
+        record_extraction_failure(self.conn, "entry-1")
+        return "entry-1"
+
+    def _steal_claim(self, entry_id="entry-1"):
+        """別の実行が取り置きを取り戻した状況を作る (版を進める)。"""
+        self.conn.execute(
+            "UPDATE entity_extraction_backlog SET version = version + 1 "
+            "WHERE entry_id = ?", (entry_id,),
+        )
+        self.conn.commit()
+
+    def _run_retry_stealing_before_the_edges(self, client):
+        """タイトル解決の直前で取り置きを奪ってから拾い直しを走らせる。
+
+        奪う位置は「Memopedia への反映が終わった後・辺の INSERT の前」——
+        検査が辺の書き込みの外にあった頃に開いていた窓そのもの。
+        """
+        from sai_memory.memory import entity_extractor as ee
+
+        real_resolve = ee._resolve_involved_page_ids
+
+        def steal_then_resolve(memopedia, titles):
+            self._steal_claim()
+            return real_resolve(memopedia, titles)
+
+        with patch.object(
+            ee, "_resolve_involved_page_ids", side_effect=steal_then_resolve,
+        ):
+            return ee.retry_extraction_backlog(
+                self.conn, ee.make_batch_callback(client, self.conn),
+            )
+
+    def test_a_claim_stolen_after_reflect_writes_no_edges(self):
+        """⭐ 反映が済んだ後に取り置きを奪われた実行は、辺を書かない。
+
+        新知識があった回は Memopedia 側の検査を通ってしまう。そこから辺の
+        INSERT が届くまでの間に取り置きが動くと、失効した実行の辺が確定して
+        いた —— 検査は辺の書き込みと同じトランザクションの中で行う。
+        """
+        self._backlogged_entry()
+        client = self._client(
+            entities=[{
+                "name": "エイド", "category": "people",
+                "summary": "AI", "notes": ["新情報"],
+            }],
+            involved=["まはー"],
+        )
+
+        stats = self._run_retry_stealing_before_the_edges(client)
+
+        self.assertEqual(stats["skipped"], 1)
+        self.assertEqual(self._edges(), [], "失効した実行が辺を書いている")
+
+    def test_a_claim_stolen_before_the_edges_writes_none_with_zero_entities(self):
+        """⭐ 新知識ゼロの拾い直しでも、辺の直前で奪われたら 1 本も書かない。
+
+        この経路は Memopedia のトランザクションが走らないので、辺の書き込みの
+        中の検査だけが最後の歯止めになる。
+        """
+        self._backlogged_entry()
+
+        stats = self._run_retry_stealing_before_the_edges(
+            self._client(involved=["まはー", "スタックチャン"]),
+        )
+
+        self.assertEqual(stats["skipped"], 1)
+        self.assertEqual(self._edges(), [], "失効した実行が辺を書いている")
+
+    def test_an_intact_claim_writes_the_edges(self):
+        """取り置きが自分のままなら、同じ経路で辺は普通に書かれる。
+
+        上二つの「書かない」が、検査ではなく別の理由で起きていないことの対。
+        """
+        from sai_memory.memory.entity_extractor import (
+            make_batch_callback,
+            retry_extraction_backlog,
+        )
+
+        self._backlogged_entry()
+        stats = retry_extraction_backlog(
+            self.conn,
+            make_batch_callback(
+                self._client(involved=["まはー", "スタックチャン"]), self.conn,
+            ),
+        )
+
+        self.assertEqual(stats["recovered"], 1)
+        self.assertEqual(
+            sorted(self._edges()), sorted([self.maha.id, self.stackchan.id]),
+        )
+
+    def test_the_claim_version_does_not_move_between_check_and_commit(self):
+        """⭐ 検査を通してから辺が確定するまで、取り置きの版が動かない。
+
+        版は :func:`_still_ours` が照合する値そのもの。検査と INSERT が同じ
+        トランザクションに入っていれば、その間に別の実行が版を進めることは
+        できない (SQLite の書き込みロックが待たせる)。ここでは INSERT の
+        まっただ中で版を読み、検査時と同じ値であることを確かめる。
+        """
+        from sai_memory.memory import entity_extractor as ee
+
+        self._backlogged_entry()
+        seen_versions = []
+
+        def read_version():
+            row = self.conn.execute(
+                "SELECT version FROM entity_extraction_backlog WHERE entry_id = ?",
+                ("entry-1",),
+            ).fetchone()
+            return row[0] if row else None
+
+        real_still_ours = ee._still_ours
+
+        def watching_still_ours(conn, entry_id, version):
+            check = real_still_ours(conn, entry_id, version)
+
+            def wrapped():
+                check()
+                seen_versions.append(("check", read_version()))
+            return wrapped
+
+        real_add = ee.add_chunk_page_edge
+
+        def watching_add(*args, **kwargs):
+            seen_versions.append(("insert", read_version()))
+            return real_add(*args, **kwargs)
+
+        with patch.object(ee, "_still_ours", side_effect=watching_still_ours), \
+                patch.object(ee, "add_chunk_page_edge", side_effect=watching_add):
+            stats = ee.retry_extraction_backlog(
+                self.conn,
+                ee.make_batch_callback(
+                    self._client(involved=["まはー", "スタックチャン"]), self.conn,
+                ),
+            )
+
+        self.assertEqual(stats["recovered"], 1)
+        self.assertEqual([w for w, _ in seen_versions], ["check", "insert", "insert"])
+        versions = {v for _, v in seen_versions}
+        self.assertEqual(
+            len(versions), 1,
+            f"検査から辺の確定までに取り置きの版が動いた: {seen_versions}",
+        )
+
+    def test_a_failed_edge_rolls_back_the_ones_already_written(self):
+        """⭐ 辺は 1 回の抽出ぶんがまとめて入るか、1 本も入らないか。
+
+        1 本ずつ確定していると、途中で落ちた回に「検査を通った証拠のない辺」が
+        残る。検査と INSERT を同じトランザクションに収めた副産物として、
+        部分的な記帳も無くなる。
+        """
+        from sai_memory.memory import entity_extractor as ee
+
+        real_add = ee.add_chunk_page_edge
+        calls = []
+
+        def failing_add(*args, **kwargs):
+            calls.append(args)
+            if len(calls) == 2:
+                raise RuntimeError("disk full")
+            return real_add(*args, **kwargs)
+
+        with patch.object(ee, "add_chunk_page_edge", side_effect=failing_add):
+            with self.assertRaises(RuntimeError):
+                ee.extract_and_reflect(
+                    self._client(involved=["まはー", "スタックチャン"]),
+                    self.conn, self._msgs(), chronicle_entry_id="entry-1",
+                )
+
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(self._edges(), [], "先に書けた辺が残っている")
+
+
+class TestInvolvementEdgeCleanup(unittest.TestCase):
+    """チャンク／実体ページの物理削除で、辺が孤児にならない (Codex 2026-08-21 #2)。
+
+    ``chunk_page_edges`` には外部キーも削除連鎖も無いので、削除を発行する側が
+    同じトランザクションで辺を落とす。ここで数え上げているのが、非テストコードに
+    ある ``DELETE FROM memopedia_pages`` の全部。
+    """
+
+    def setUp(self):
+        from sai_memory.arasuji import init_arasuji_tables
+        from sai_memory.memopedia import Memopedia
+        from sai_memory.memory.recall_edges import init_chunk_page_edge_tables
+        from sai_memory.memory.storage import init_db
+
+        self.conn = init_db(":memory:")
+        init_arasuji_tables(self.conn)
+        self.memopedia = Memopedia(self.conn)
+        init_chunk_page_edge_tables(self.conn)
+        self.maha = self.memopedia.create_page(
+            parent_id="root_people", title="まはー",
+        )
+
+    def tearDown(self):
+        self.conn.close()
+
+    def _chunk(self, *, content="調べ物をした", **kw):
+        from sai_memory.arasuji.storage import create_entry
+
+        return create_entry(
+            self.conn, level=1, content=content,
+            source_ids=[], source_count=0, message_count=0, **kw,
+        )
+
+    def _edge(self, chronicle_id, entity_id=None):
+        from sai_memory.memory.recall_edges import add_chunk_page_edge
+
+        add_chunk_page_edge(
+            self.conn, chronicle_id, entity_id or self.maha.id,
+        )
+
+    def _edge_count(self):
+        return self.conn.execute(
+            "SELECT COUNT(*) FROM chunk_page_edges"
+        ).fetchone()[0]
+
+    def test_deleting_a_chunk_removes_its_edges(self):
+        from sai_memory.arasuji.storage import delete_entry
+
+        entry = self._chunk()
+        self._edge(entry.id)
+        self.assertTrue(delete_entry(self.conn, entry.id))
+        self.assertEqual(self._edge_count(), 0)
+
+    def test_deleting_a_chunk_with_its_parent_removes_its_edges(self):
+        from sai_memory.arasuji.storage import delete_entry_and_update_parent
+
+        entry = self._chunk()
+        self._edge(entry.id)
+        success, _ = delete_entry_and_update_parent(self.conn, entry.id)
+        self.assertTrue(success)
+        self.assertEqual(self._edge_count(), 0)
+
+    def test_dismantling_a_chunk_removes_its_edges(self):
+        from sai_memory.arasuji.storage import (
+            add_to_parent_source_ids,
+            dismantle_entry,
+        )
+
+        child = self._chunk(content="子")
+        parent = self._chunk(content="親")
+        add_to_parent_source_ids(self.conn, child.id, parent.id)
+        self._edge(parent.id)
+        self._edge(child.id)
+
+        success, _ = dismantle_entry(self.conn, parent.id)
+        self.assertTrue(success)
+        # 親だけが消える (子は未束ねへ戻るだけ) ので、子の辺は残る
+        self.assertEqual(self._edge_count(), 1)
+        from sai_memory.memory.recall_edges import list_chronicle_pages_for_entity
+        self.assertEqual(
+            list_chronicle_pages_for_entity(self.conn, self.maha.id), [child.id],
+        )
+
+    def test_deleting_incomplete_chunks_removes_their_edges(self):
+        from sai_memory.arasuji.storage import delete_incomplete_entries
+
+        entry = self._chunk(origin_track_id="track-1", is_incomplete=True)
+        self._edge(entry.id)
+        self.assertEqual(delete_incomplete_entries(self.conn, "track-1"), 1)
+        self.assertEqual(self._edge_count(), 0)
+
+    def test_clearing_all_chunks_removes_all_edges(self):
+        from sai_memory.arasuji.storage import clear_all_entries
+
+        for i in range(3):
+            self._edge(self._chunk(content=f"c{i}").id)
+        self.assertEqual(self._edge_count(), 3)
+        clear_all_entries(self.conn)
+        self.assertEqual(self._edge_count(), 0)
+
+    def test_regenerating_a_chunk_leaves_no_edge_for_the_replaced_id(self):
+        """⭐ 再生成は別 id の新エントリへ差し替える — 旧 id の辺を残さない。
+
+        旧辺は新エントリの再抽出でも消えない (指し先の id が違う) ため、
+        置換のたびに「存在しないチャンク」を指す辺が積み上がっていた。
+        """
+        from sai_memory.arasuji.storage import get_entry, regenerate_entry
+        from sai_memory.memory.storage import add_message
+
+        mid = add_message(self.conn, "t", "user", "調べ物をした", created_at=1000)
+        old = self._chunk(content="旧本文")
+        self.conn.execute(
+            "UPDATE memopedia_pages SET metadata = json_set(metadata, "
+            "'$.source_ids', json_array(?)) WHERE id = ?",
+            (mid, old.id),
+        )
+        self.conn.commit()
+        self._edge(old.id)
+
+        replacement = self._chunk(content="新本文")
+
+        with patch(
+            "scripts.arasuji.build_arasuji_core.regenerate_entry_from_messages",
+            return_value=replacement,
+        ):
+            new_entry = regenerate_entry(self.conn, old.id)
+
+        self.assertIsNotNone(new_entry, "再生成が成立していない")
+        self.assertIsNone(get_entry(self.conn, old.id))
+        self.assertEqual(
+            self._edge_count(), 0,
+            "置換されたチャンクを指す辺が孤児として残っている",
+        )
+
+    def test_physically_deleting_an_entity_page_removes_its_edges(self):
+        """⭐ 逆側 — 実体ページの物理削除 (clear_all_pages / import の入れ替え)。
+
+        ``Memopedia.delete_page`` は soft-delete なのでここには来ない (行が
+        残る = 辺の指し先も残る)。物理削除は storage 側の同名関数だけ。
+        """
+        from sai_memory.memopedia.storage import delete_page
+
+        entry = self._chunk()
+        self._edge(entry.id)
+        self.assertTrue(delete_page(self.conn, self.maha.id))
+        self.assertEqual(self._edge_count(), 0)
+
+    def test_clear_all_pages_removes_entity_edges(self):
+        entry = self._chunk()
+        self._edge(entry.id)
+        self.memopedia.clear_all_pages()
+        self.assertEqual(self._edge_count(), 0)
+
+    def test_soft_deleting_an_entity_page_keeps_its_edges(self):
+        """soft-delete では辺を落とさない — ページ行は残り、復元もされうる。"""
+        entry = self._chunk()
+        self._edge(entry.id)
+        self.assertTrue(self.memopedia.delete_page(self.maha.id))
+        self.assertEqual(self._edge_count(), 1)
+
+    def test_cleanup_is_a_noop_without_the_edge_table(self):
+        """辺のテーブルがまだ無い DB (抽出が一度も走っていない) でも削除は通る。"""
+        from sai_memory.arasuji.storage import delete_entry
+
+        entry = self._chunk()
+        self.conn.execute("DROP TABLE chunk_page_edges")
+        self.conn.commit()
+        self.assertTrue(delete_entry(self.conn, entry.id))
 
 
 class TestExtractionBacklog(unittest.TestCase):

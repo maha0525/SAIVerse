@@ -808,6 +808,13 @@ def delete_page(
     # 指す印は存在しない)。詳細は perception_buffer.unmark_batches_annexed。
     from sai_memory.perception_buffer import unmark_batches_annexed
     unmark_batches_annexed(conn, [page_id])
+    # 想起用タグの辺 (chunk_page_edges) も同一 tx で落とす。ここは**実体ページ
+    # 側**の物理削除経路 (Memopedia.clear_all_pages /
+    # import_json(clear_existing=True)) —— 辺に外部キーは無いので、残すと
+    # 「このチャンクに居合わせた実体」が存在しないページを指す。両向き消える
+    # 関数なので、chronicle を allow_chronicle=True で消す場合もここで片付く。
+    from sai_memory.memory.recall_edges import delete_chunk_page_edges
+    delete_chunk_page_edges(conn, [page_id])
     # Delete the page itself
     conn.execute("DELETE FROM memopedia_pages WHERE id = ?", (page_id,))
     conn.commit()

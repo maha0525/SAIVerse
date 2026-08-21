@@ -287,6 +287,10 @@ def execute(
         # 無い「付記済み」= 知覚の恒久消失。perception_buffer.unmark_batches_annexed)。
         from sai_memory.perception_buffer import unmark_batches_annexed
         unmark_batches_annexed(conn, list(delete_ids))
+        # 想起用タグの辺も同一 tx で落とす — 辺に外部キーは無く、消えたページを
+        # 指す辺は誰にも消されない (recall_edges.delete_chunk_page_edges)。
+        from sai_memory.memory.recall_edges import delete_chunk_page_edges
+        delete_chunk_page_edges(conn, list(delete_ids))
         conn.execute(
             f"DELETE FROM memopedia_pages WHERE id IN ({ph}) "
             f"AND category='chronicle'", tuple(delete_ids))
@@ -313,6 +317,7 @@ def execute(
                 f"WHERE fragment_id IN ({fph})", tuple(frag_ids))
         if page_ids:
             unmark_batches_annexed(conn, list(page_ids))  # 非 chronicle なら no-op
+            delete_chunk_page_edges(conn, list(page_ids))  # 実体側の辺 (両向き)
             conn.execute(
                 f"DELETE FROM memopedia_pages WHERE id IN ({pph})",
                 tuple(page_ids))

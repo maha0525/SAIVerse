@@ -783,6 +783,10 @@ def delete_incomplete_entries(
     # (perception_buffer.unmark_batches_annexed の docstring 参照)。
     from sai_memory.perception_buffer import unmark_batches_annexed
     unmark_batches_annexed(conn, list(deleted_ids))
+    # 想起用タグの辺も同一 tx で落とす — 辺に外部キーは無く、消えたチャンクを
+    # 指す辺は誰にも消されない (recall_edges.delete_chunk_page_edges)。
+    from sai_memory.memory.recall_edges import delete_chunk_page_edges
+    delete_chunk_page_edges(conn, deleted_ids)
     placeholders = ",".join("?" for _ in deleted_ids)
     cur = conn.execute(
         f"DELETE FROM memopedia_pages WHERE id IN ({placeholders}) AND category = ?",
@@ -821,6 +825,9 @@ def delete_entry(conn: sqlite3.Connection, entry_id: str) -> bool:
     # 付記印の返却は削除と同一 tx (perception_buffer.unmark_batches_annexed)。
     from sai_memory.perception_buffer import unmark_batches_annexed
     unmark_batches_annexed(conn, [entry_id])
+    # 想起用タグの辺も同一 tx で落とす (recall_edges.delete_chunk_page_edges)。
+    from sai_memory.memory.recall_edges import delete_chunk_page_edges
+    delete_chunk_page_edges(conn, [entry_id])
     conn.execute(
         "DELETE FROM memopedia_pages WHERE id = ? AND category = ?",
         (entry_id, CATEGORY_CHRONICLE),
@@ -862,6 +869,11 @@ def delete_entry_and_update_parent(
     # (perception_buffer.unmark_batches_annexed)。
     from sai_memory.perception_buffer import unmark_batches_annexed
     unmark_batches_annexed(conn, [entry_id])
+    # 想起用タグの辺も同一 tx で落とす。再生成 (regenerate_entry) はこの関数で
+    # 旧エントリを消して別 id の新エントリへ差し替えるので、ここを飛ばすと
+    # 旧 id を指す辺が孤児として残る (recall_edges.delete_chunk_page_edges)。
+    from sai_memory.memory.recall_edges import delete_chunk_page_edges
+    delete_chunk_page_edges(conn, [entry_id])
     conn.execute(
         "DELETE FROM memopedia_pages WHERE id = ? AND category = ?",
         (entry_id, CATEGORY_CHRONICLE),
@@ -989,6 +1001,9 @@ def dismantle_entry(
     # (perception_buffer.unmark_batches_annexed)。
     from sai_memory.perception_buffer import unmark_batches_annexed
     unmark_batches_annexed(conn, [entry_id])
+    # 想起用タグの辺も同一 tx で落とす (recall_edges.delete_chunk_page_edges)。
+    from sai_memory.memory.recall_edges import delete_chunk_page_edges
+    delete_chunk_page_edges(conn, [entry_id])
     conn.execute(
         "DELETE FROM memopedia_pages WHERE id = ? AND category = ?",
         (entry_id, CATEGORY_CHRONICLE),
@@ -1041,6 +1056,16 @@ def clear_all_entries(conn: sqlite3.Connection) -> int:
         )
     except sqlite3.OperationalError:
         pass  # perception_batches の無い DB
+    # 消えるチャンクを先に数え上げ、想起用タグの辺を同一 tx で落とす
+    # (recall_edges.delete_chunk_page_edges)。
+    from sai_memory.memory.recall_edges import delete_chunk_page_edges
+    doomed_ids = [
+        row[0] for row in conn.execute(
+            "SELECT id FROM memopedia_pages WHERE category = ? AND is_trunk = 0",
+            (CATEGORY_CHRONICLE,),
+        )
+    ]
+    delete_chunk_page_edges(conn, doomed_ids)
     cur = conn.execute(
         "DELETE FROM memopedia_pages WHERE category = ? AND is_trunk = 0",
         (CATEGORY_CHRONICLE,),

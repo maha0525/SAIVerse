@@ -8,6 +8,14 @@ and extracts knowledge specific to each entity in a single LLM call.
 The extracted entities are directly reflected in Memopedia:
 - New entities get a new page created
 - Existing entities get notes appended to their page
+
+同じ LLM コールにもう一つ別の仕事が相乗りする (想起用タグ、B2 欄):
+``involved_entities`` = 「この範囲が関与した既存ページの列挙。新情報が無くても、
+その対象のための調べ物・作業を含む」。抽出 (新知識) とタグ付け (関与) は
+**同じ継ぎ目に乗る別の仕事**で、生成後にタイトル → page_id の解決層を挟んでから
+``chunk_page_edges`` の辺として記帳する。
+正典: docs/intent/persona_cognition/recall_tags_and_track_reduction.md §9.3 /
+docs/intent/autonomous_behavior_v3.md §13.6「B2 欄と辺の格納」。
 """
 
 from __future__ import annotations
@@ -22,6 +30,10 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
 
+from sai_memory.memory.recall_edges import (
+    add_chunk_page_edge,
+    init_chunk_page_edge_tables,
+)
 from sai_memory.memory.storage import Message
 from sai_memory.memopedia.storage import CATEGORY_DEFS, category_keys
 
@@ -46,6 +58,13 @@ CATEGORY_ROOT_IDS: Dict[str, str] = {
     k: f"root_{k}" for k in category_keys("extractable")
 }
 
+#: 想起用タグ (``involved_entities``) の指し先にできるページのカテゴリ。
+#: 「指し先は実体ページに限り自由語は許さない」(recall_tags §9.3) の実装で、
+#: 抽出プロンプトが一覧で見せている範囲 (:func:`_format_page_list`) と同じに
+#: 揃える —— 見せていない棚 (Chronicle・コア記憶・テーマ) を指し先にすると、
+#: LLM が見ていないものへ辺が張れてしまう。
+INVOLVEMENT_TARGET_CATEGORIES: tuple = tuple(category_keys("extractable"))
+
 
 @dataclass
 class ExtractedEntity:
@@ -54,6 +73,21 @@ class ExtractedEntity:
     category: str
     summary: str = ""
     notes: List[str] = field(default_factory=list)
+
+
+@dataclass
+class ExtractionOutput:
+    """抽出コール 1 回ぶんの応答。同じコールに乗る二つの仕事を分けて持つ。
+
+    - ``entities``: この会話で**新たに判明した知識** (Memopedia へ反映する)
+    - ``involved_titles``: この範囲が**関与した既存ページのタイトル** (B2 欄)。
+      新情報が無くても、その対象のための調べ物・作業をしていれば載る。
+      ここではまだ生のタイトル文字列で、page_id への解決は
+      :func:`_resolve_involved_page_ids` が別に行う。
+    """
+
+    entities: List["ExtractedEntity"] = field(default_factory=list)
+    involved_titles: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -167,6 +201,20 @@ def _build_extraction_prompt(
         f"- categoryは {' / '.join(category_keys('extractable'))} のいずれかを指定してください",
         "- 日本語で出力してください",
         "",
+        "## この会話が関与した対象（involved_entities）",
+        "",
+        "上の抽出とは**別の仕事**です。新しく判明した情報の有無に関係なく、"
+        "この会話が関わった対象を列挙してください。",
+        "",
+        "- 「関わった」とは、その対象について話した／その対象のための調べ物・"
+        "作業・準備をした、ということです",
+        "- **新しく判明した情報が無くても列挙してください**。"
+        "entities に挙がらなかった対象こそ、ここで拾う価値があります",
+        "- 既存のMemopediaページ一覧にあるタイトルを、**一覧に書かれているとおりの"
+        "表記で**書いてください（表記が違うと照合できず捨てられます）",
+        "- 一覧に無い名前、説明的な言い回し、一般名詞は書かないでください",
+        "- 関わった対象が無い場合は空のリストを返してください",
+        "",
         "## 出力形式",
         "",
         "以下のJSON形式で出力してください。",
@@ -179,7 +227,8 @@ def _build_extraction_prompt(
                     "summary": "このエンティティが何であるかの一文定義",
                     "notes": ["文脈を含む事実1", "文脈を含む事実2"],
                 },
-            ]
+            ],
+            "involved_entities": ["既存ページのタイトル1", "既存ページのタイトル2"],
         }, ensure_ascii=False, indent=2),
         "```",
         "",
@@ -204,13 +253,20 @@ def _format_messages(messages: List[Message]) -> str:
     return "\n\n".join(lines)
 
 
-def _parse_extraction_response(response: str) -> List[ExtractedEntity]:
-    """Parse LLM response into ExtractedEntity list.
+def _parse_extraction_response(response: str) -> ExtractionOutput:
+    """Parse LLM response into an :class:`ExtractionOutput`.
 
     Raises:
         ExtractionFailed: JSON として読めない／期待した形をしていない応答。
             「抽出ゼロ」と区別できないまま空リストを返すと、失敗が成功として
             付箋から剥がれる。
+
+    Note:
+        ``involved_entities`` (B2 欄) の欠落や型不正は :class:`ExtractionFailed`
+        にしない —— 抽出 (新知識) はそれ自体が成立しており、落ちた回をまるごと
+        やり直させるほうが害が大きい。取りこぼしたタグは後から全記憶を走査して
+        遡及できる (recall_tags §9.3 の保険) が、知識は拾い直しに失敗すれば
+        永久に落ちる。非対称なのはこの理由による。
     """
     if not response:
         raise ExtractionFailed("entity extraction returned an empty response")
@@ -231,10 +287,13 @@ def _parse_extraction_response(response: str) -> List[ExtractedEntity]:
         ) from exc
 
     if isinstance(parsed, list):
-        # 旧形式 (entities を包まない素の配列) の後方互換
+        # 旧形式 (entities を包まない素の配列) の後方互換。この形には
+        # involved_entities を載せる場所が無い
         entities_raw = parsed
+        involved_titles: List[str] = []
     elif isinstance(parsed, dict) and "entities" in parsed:
         entities_raw = parsed["entities"]
+        involved_titles = _parse_involved_titles(parsed.get("involved_entities"))
     else:
         # 指示した形 ({"entities": [...]}) でない = 抽出が成立していない。
         # 「entities キーはあるが空リスト」だけが正常な抽出ゼロ。
@@ -284,7 +343,47 @@ def _parse_extraction_response(response: str) -> List[ExtractedEntity]:
         if notes or summary:
             results.append(ExtractedEntity(name=name, category=category, summary=summary, notes=notes))
 
-    return results
+    return ExtractionOutput(entities=results, involved_titles=involved_titles)
+
+
+def _parse_involved_titles(raw: Any) -> List[str]:
+    """``involved_entities`` (B2 欄) を生のタイトル列として読む。
+
+    欄そのものが無い／型が違うときは空リストを返す (:func:`_parse_extraction_response`
+    の Note 参照)。要素単位の不正はその要素だけ捨てる —— タグは選別ではなく
+    遡りの材料なので、1 件の型不正で残り全部を巻き添えにしない。
+    """
+    if raw is None:
+        # 欄が無い応答 (旧プロンプトのモデル・欄を無視したモデル)。抽出は成立
+        # しているので黙って通す —— 毎チャンク WARNING を出しても打つ手がない
+        return []
+    if isinstance(raw, str):
+        # 1 件だけを素の文字列で返すモデルがいる (notes と同じ癖)。一文字ずつ
+        # タイトルとして照合しにいかないよう、ここで 1 件のリストに読み替える
+        raw = [raw]
+    if not isinstance(raw, list):
+        LOGGER.warning(
+            "Entity extraction: 'involved_entities' is not a list (%s) — "
+            "この回の想起用タグは記帳しません (抽出そのものは続行)",
+            type(raw).__name__,
+        )
+        return []
+
+    titles: List[str] = []
+    seen = set()
+    for item in raw:
+        if not isinstance(item, str):
+            LOGGER.warning(
+                "Entity extraction: involved_entities の要素が文字列ではないため"
+                "捨てました: %s", str(item)[:120],
+            )
+            continue
+        title = item.strip()
+        if not title or title in seen:
+            continue
+        seen.add(title)
+        titles.append(title)
+    return titles
 
 
 def _text_field(item: Dict[str, Any], key: str) -> str:
@@ -332,15 +431,20 @@ def _format_page_list(memopedia) -> str:
     return "\n".join(lines)
 
 
-def extract_entities(
+def extract_entities_and_involvement(
     client,
     messages: List[Message],
     *,
     episode_context: str = "",
     existing_pages: str = "",
     persona_id: Optional[str] = None,
-) -> List[ExtractedEntity]:
-    """Extract entities and per-entity knowledge from conversation messages.
+) -> ExtractionOutput:
+    """1 回の LLM コールで、新知識の抽出と関与の列挙をまとめて取る。
+
+    同じコールに乗る別々の仕事 (recall_tags §9.3):
+    ``entities`` が新たに判明した知識、``involved_titles`` がこの範囲の関与した
+    既存ページのタイトル (B2 欄)。入力は B2 欄を足す前と同じで、増えるのは
+    出力の数百文字だけ。
 
     Args:
         client: LLM client.
@@ -350,19 +454,19 @@ def extract_entities(
         persona_id: Optional persona ID for usage tracking.
 
     Returns:
-        List of ExtractedEntity with names, categories, and notes.
-        空リストは「抽出するものが無かった」——処理する材料が無い場合も含む。
+        :class:`ExtractionOutput`。空の ``entities`` は「抽出するものが無かった」
+        ——処理する材料が無い場合も含む。
 
     Raises:
         ExtractionFailed: LLM 呼び出しの失敗・空応答・読めない応答。呼び出し元
             （executor / bands）が付箋に貼り、次の Metabolism が拾い直す。
     """
     if not messages:
-        return []
+        return ExtractionOutput()
 
     conversation = _format_messages(messages)
     if not conversation.strip():
-        return []
+        return ExtractionOutput()
 
     prompt = _build_extraction_prompt(
         conversation,
@@ -382,15 +486,37 @@ def extract_entities(
     if not response:
         raise ExtractionFailed("entity extraction LLM returned an empty response")
 
-    entities = _parse_extraction_response(response)
+    output = _parse_extraction_response(response)
     LOGGER.info(
-        "Extracted %d entities from %d messages",
-        len(entities), len(messages),
+        "Extracted %d entities and %d involved titles from %d messages",
+        len(output.entities), len(output.involved_titles), len(messages),
     )
-    for ent in entities:
+    for ent in output.entities:
         LOGGER.debug("  Entity '%s' [%s]: %d notes", ent.name, ent.category, len(ent.notes))
 
-    return entities
+    return output
+
+
+def extract_entities(
+    client,
+    messages: List[Message],
+    *,
+    episode_context: str = "",
+    existing_pages: str = "",
+    persona_id: Optional[str] = None,
+) -> List[ExtractedEntity]:
+    """新知識の抽出だけを取る (:func:`extract_entities_and_involvement` の細口)。
+
+    Memopedia の作り直しなど、Chronicle のチャンクに紐づかない呼び出し元が使う
+    ——辺を張る先 (チャンクのページ id) が無い経路では、関与の列挙を受け取っても
+    記帳できないため。
+    """
+    return extract_entities_and_involvement(
+        client, messages,
+        episode_context=episode_context,
+        existing_pages=existing_pages,
+        persona_id=persona_id,
+    ).entities
 
 
 
@@ -467,6 +593,174 @@ def reflect_to_memopedia(
     return results
 
 
+# ---------------------------------------------------------------------------
+# 想起用タグ (B2 欄) — タイトル → page_id の解決と、辺の記帳
+#
+# 生成時点の involved_entities はただの文字列で、表記ゆれを含みうる (粒度実験で
+# 2 回実演された: 自由語彙の半角化 / 閉語彙でも周辺文脈の表記に引きずられる)。
+# 指し先を実体ページに限り自由語を許さないため、ここで既存ページのタイトルと
+# 照合して page_id へ落とす層を挟む (recall_tags §9.3)。
+# ---------------------------------------------------------------------------
+
+
+def _resolve_involved_page_ids(memopedia, titles: List[str]) -> List[str]:
+    """関与タイトルを既存 Memopedia ページの id へ解決する (完全一致)。
+
+    照合の厳密さは既存の抽出経路に合わせる —— :meth:`Memopedia.apply_entity_notes`
+    が同名ページを探すのも ``find_page_by_title`` の完全一致で、こちらだけ曖昧に
+    寄せると「ページは新規作成されたのにタグは別のページへ張られる」がありうる。
+    前後の空白は :func:`_parse_involved_titles` が既に落としている。
+
+    解決できなかったタイトルは**その 1 件だけ**捨てて WARNING に残す。タグは選別
+    ではなく遡りの材料で、取りこぼしは後から全記憶を走査して遡及できる
+    (recall_tags §9.3) —— 逆に曖昧照合で誤ったページへ張った辺は、遡りを毒する。
+
+    Raises:
+        Exception: ページの読み取り自体が失敗したときは、そのまま外へ出す。
+            「読めなかった」を「無かった」と同じ扱いにすると、DB が壊れている
+            回に**タグが 1 件も無い正常な回**の顔で通り過ぎる。
+    """
+    resolved: List[str] = []
+    seen = set()
+    for title in titles:
+        page = None
+        for category in INVOLVEMENT_TARGET_CATEGORIES:
+            page = memopedia.find_by_title(title, category)
+            if page is not None:
+                break
+        if page is None:
+            LOGGER.warning(
+                "[recall-tags] 関与タイトル '%s' に一致する実体ページが無いため"
+                "辺を張りません (指し先は実体ページに限る)", title[:80],
+            )
+            continue
+        if page.is_trunk:
+            # カテゴリの棚そのもの (「人物」「用語」…)。実体ではないので指し先に
+            # しない —— 全チャンクが棚へ繋がると、遡りの材料として役に立たない
+            LOGGER.warning(
+                "[recall-tags] 関与タイトル '%s' はカテゴリの棚のため辺を"
+                "張りません", title[:80],
+            )
+            continue
+        if page.id in seen:
+            continue
+        seen.add(page.id)
+        resolved.append(page.id)
+    return resolved
+
+
+def _record_involvement_edges(
+    conn: sqlite3.Connection,
+    chronicle_page_id: str,
+    entity_page_ids: List[str],
+    *,
+    db_lock: Optional[Any] = None,
+    precondition: Optional[Callable[[], None]] = None,
+) -> int:
+    """解決済みのページ id をチャンクとの辺として記帳する。新しく張れた本数を返す。
+
+    書き込みは冪等 (:func:`~sai_memory.memory.recall_edges.add_chunk_page_edge`)
+    なので、拾い直しで同じ抽出をもう一度走らせても辺は重ならない。
+    失敗は握り潰さない —— 呼び出し元 (executor / bands) が付箋に貼り、次の
+    Metabolism が抽出ごと拾い直す。
+
+    ``precondition`` (「いま書いてよい状態か」の検査) は**錠前を保持したまま、
+    INSERT と同じトランザクションの中**で呼ぶ。検査だけ別の錠・別の commit で
+    行うと、検査を通ってから INSERT が届くまでの隙に別の実行が取り置きを進め、
+    失効した実行の辺が確定してしまう (Codex レビュー 2026-08-21 #1)。
+    Memopedia 側 (:meth:`Memopedia.apply_entity_notes`) が同じ形をしているのに、
+    辺だけ検査の外に出ている理由は無い。
+    """
+    if not entity_page_ids:
+        return 0
+    created = 0
+    # 錠前は「渡されなければ配り所から引く」(sai_memory.db_locks) —— 検査と
+    # INSERT を、同じ DB を触る他の書き手と同じ錠前の下で直列化する。
+    # BEGIN IMMEDIATE は別プロセスとの競合しか止めない (db_locks の docstring)。
+    if db_lock is None:
+        from sai_memory.db_locks import lock_for
+        db_lock = lock_for(conn)
+    with db_lock:
+        own_tx = not conn.in_transaction
+        init_chunk_page_edge_tables(conn, commit=own_tx)
+        if own_tx:
+            conn.execute("BEGIN IMMEDIATE")
+        try:
+            if precondition is not None:
+                precondition()
+            for page_id in entity_page_ids:
+                if page_id == chronicle_page_id:
+                    # チャンク自身への辺。指し先を実体ページのカテゴリに絞って
+                    # いる限り起きないが、起きたなら解決層かページのカテゴリが
+                    # 壊れている —— 黙って捨てず声を出す
+                    LOGGER.warning(
+                        "[recall-tags] chronicle=%s が自分自身を指しています — "
+                        "辺は張りません", chronicle_page_id[:12],
+                    )
+                    continue
+                if add_chunk_page_edge(
+                    conn, chronicle_page_id, page_id, commit=False,
+                ):
+                    created += 1
+            if own_tx:
+                conn.commit()
+        except Exception:
+            if own_tx:
+                try:
+                    conn.rollback()
+                except Exception:
+                    LOGGER.warning(
+                        "[recall-tags] 辺の書き込みの rollback に失敗しました",
+                        exc_info=True,
+                    )
+            raise
+    return created
+
+
+def record_involvement(
+    conn: sqlite3.Connection,
+    memopedia,
+    chronicle_page_id: Optional[str],
+    involved_titles: List[str],
+    *,
+    db_lock: Optional[Any] = None,
+    precondition: Optional[Callable[[], None]] = None,
+) -> int:
+    """B2 欄を辺にするところまでを一続きで行う。新しく張れた本数を返す。
+
+    チャンク (あらすじ) も実体も Memopedia ページなので、辺はページ id 同士。
+    チャンク側の id は Chronicle エントリの id をそのまま使う —— Chronicle の
+    エントリ 1 件は trunk ``root_chronicle`` 配下のページとして格納されており、
+    ページ id は旧 arasuji entry の UUID をそのまま流用している
+    (:mod:`sai_memory.arasuji.storage` の P3b 物理統合)。つまり
+    ``chronicle_entry_id`` は既にチャンクのページ id そのもの。
+
+    ``precondition`` は :func:`_record_involvement_edges` へそのまま渡す
+    (書き込みと同じトランザクションの中で通す)。
+    """
+    if not involved_titles:
+        return 0
+    if not chronicle_page_id:
+        # 辺を張る先が無い。タグは生成されたのに落とすので、黙って捨てない
+        LOGGER.warning(
+            "[recall-tags] 関与 %d 件を記帳できません — このチャンクの Chronicle "
+            "ページ id が渡されていないため、辺を張る先がありません",
+            len(involved_titles),
+        )
+        return 0
+
+    page_ids = _resolve_involved_page_ids(memopedia, involved_titles)
+    created = _record_involvement_edges(
+        conn, chronicle_page_id, page_ids,
+        db_lock=db_lock, precondition=precondition,
+    )
+    LOGGER.info(
+        "[recall-tags] chronicle=%s: 関与 %d 件中 %d 件を解決、辺 %d 本を記帳",
+        chronicle_page_id[:12], len(involved_titles), len(page_ids), created,
+    )
+    return created
+
+
 def extract_and_reflect(
     client,
     conn: sqlite3.Connection,
@@ -480,7 +774,12 @@ def extract_and_reflect(
 ) -> List[EntityExtractionResult]:
     """Extract entities from messages and reflect them to Memopedia in one call.
 
-    Convenience function that combines extract_entities() + reflect_to_memopedia().
+    Convenience function that combines extract_entities_and_involvement() +
+    reflect_to_memopedia() + record_involvement().
+
+    同じ LLM コールに乗る二つ目の仕事 (想起用タグ) もここで着地する: B2 欄の
+    タイトルを既存ページの id へ解決し、``chunk_page_edges`` へ辺として記帳する。
+    **新知識がゼロでも辺は書く** —— 関与は新情報の有無と別だから (§9.3)。
 
     Args:
         client: LLM client.
@@ -489,19 +788,28 @@ def extract_and_reflect(
         episode_context: Chronicle context for surrounding events.
         persona_id: Optional persona ID for usage tracking.
         chronicle_entry_id: ID of the Chronicle Lv-1 entry for Fragment linkage.
+            想起用タグの辺ではチャンク側のページ id としても使う
+            (:func:`record_involvement` 参照 — 同じ id である理由もそちら)。
         db_lock: SAIMemoryAdapter の ``_db_lock``。省いても Memopedia は DB
             ファイルの錠前を配り所から取る (``sai_memory.db_locks``) ので同じ
             ものになる —— 渡すのは、付箋の書き込みなど Memopedia を通らない
             経路でも同じ錠前を使うため
             (docs/issues/memopedia_writers_bypass_adapter_lock.md)。
         precondition: 書き込みの直前 (トランザクションの中) で呼ばれる検査。
-            例外を投げれば何も書かれない (:func:`reflect_to_memopedia`)。
+            例外を投げれば何も書かれない。**Memopedia への反映
+            (:func:`reflect_to_memopedia`) と辺の記帳
+            (:func:`record_involvement`) の両方**で、それぞれの書き込みと同じ
+            トランザクションの中から呼ばれる。
 
     Returns:
         List of results describing what was created/updated.
 
     Raises:
-        ExtractionFailed: 抽出が成立しなかった（:func:`extract_entities` 参照）。
+        ExtractionFailed: 抽出が成立しなかった
+            (:func:`extract_entities_and_involvement` 参照)。
+        Exception: ページの読み取りや辺の書き込みが失敗したときはそのまま外へ
+            出す —— 握り潰して空成功にすると、呼び出し元が付箋を貼れず、この回の
+            関与は誰にも拾い直されない。
     """
     from sai_memory.memopedia import Memopedia
     # テーブルの用意は Memopedia のコンストラクタが**ロックの内側で**行う。
@@ -510,24 +818,47 @@ def extract_and_reflect(
 
     existing_pages = _format_page_list(memopedia)
 
-    entities = extract_entities(
+    output = extract_entities_and_involvement(
         client, messages,
         episode_context=episode_context,
         existing_pages=existing_pages,
         persona_id=persona_id,
     )
 
-    if not entities:
-        return []
+    if (
+        precondition is not None
+        and not output.entities
+        and not output.involved_titles
+    ):
+        # 何も書くものが無かった回。reflect も辺の記帳も走らないので、検査が
+        # 一度も通らない —— 取り置きを取り戻された実行が「拾い直した」顔で
+        # 成功を返さないよう、ここで一度だけ通す
+        precondition()
 
-    source_time = max((m.created_at for m in messages), default=None)
+    results: List[EntityExtractionResult] = []
+    if output.entities:
+        source_time = max((m.created_at for m in messages), default=None)
+        results = reflect_to_memopedia(
+            output.entities, memopedia,
+            source_time=int(source_time) if source_time else None,
+            chronicle_entry_id=chronicle_entry_id,
+            precondition=precondition,
+        )
 
-    return reflect_to_memopedia(
-        entities, memopedia,
-        source_time=int(source_time) if source_time else None,
-        chronicle_entry_id=chronicle_entry_id,
-        precondition=precondition,
+    # 辺の記帳は Memopedia への反映の**後**。この回に新しく作られたページも
+    # 関与の指し先になれる (関与しているのは事実で、ページの新旧は関係ない)。
+    #
+    # 新知識ゼロでも関与は起きる (「新情報が無くても、その対象のための調べ物・
+    # 作業を含む」recall_tags §9.3) ので、entities の有無で打ち切らない。
+    # ``precondition`` は reflect の成否に関わらず渡す —— reflect が自分の
+    # 書き込みの中で検査しているのに、辺だけ免除される理由が無い。reflect を
+    # 通ってから辺が届くまでの間にも取り置きは動きうる (Codex 2026-08-21 #1)。
+    record_involvement(
+        conn, memopedia, chronicle_entry_id, output.involved_titles,
+        db_lock=db_lock, precondition=precondition,
     )
+
+    return results
 
 
 # ---------------------------------------------------------------------------
