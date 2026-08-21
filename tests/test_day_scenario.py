@@ -209,7 +209,7 @@ class FakeWorkRuntime:
                       pulse_context=None, line_role=None, line_id=None,
                       origin_track_id=None, scope=None, paired_action_text=None,
                       thought_signature=None, spell_origin_id=None, spell_seq=None,
-                      return_message_id=False):
+                      return_message_id=False, beat_state=None):
         resolved_scope = scope
         if pulse_context is not None and resolved_scope is None:
             resolved_scope = pulse_context.current_line_metadata().get("scope")

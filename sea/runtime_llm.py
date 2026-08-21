@@ -17,6 +17,7 @@ from llm_clients.exceptions import LLMError
 from sea.beat_gate import BeatGateClosedError
 from sea.cancellation import ExecutionCancelledException
 from sea.mcp_tool_refresh import refresh_mcp_tools_at_head
+from sea.message_stamp import append_presented_message_id, record_call_tokens
 from sea.runtime_utils import _format, _is_llm_streaming_enabled
 from saiverse.logging_config import log_sea_trace
 from sea.playbook_models import PlaybookSchema
@@ -177,6 +178,10 @@ def _record_llm_usage(
     usage = llm_client.consume_usage()
     if debug_log:
         LOGGER.info("[DEBUG] consume_usage returned: %s", usage)
+    # トークン三つ組の刻印材料 (sea/message_stamp.py)。usage の有無に関わらず
+    # 必ず通す — usage が無いときに前のコールの値が state に残ると、この生成の
+    # メッセージに別のコールの数字が乗る。
+    record_call_tokens(state, usage)
     if not usage:
         if debug_log:
             LOGGER.warning("[DEBUG] No usage data from LLM client")
@@ -325,6 +330,149 @@ def _emit_say_and_capture(
         if message_id:
             state["_last_message_id"] = str(message_id)
     return bmsg
+
+
+def _respeak_after_stream_timeout(
+    *,
+    runtime,
+    llm_client,
+    persona,
+    building_id: Optional[str],
+    playbook,
+    node_def,
+    state: dict,
+    messages: List[Dict[str, Any]],
+    partial_text: str,
+    eff_bid: Optional[str],
+    pulse_id: Optional[str],
+    stream_error: Dict[str, Any],
+    event_callback: Optional[Callable[[Dict[str, Any]], None]],
+) -> str:
+    """サーバータイムアウト (504 DEADLINE_EXCEEDED) で切れた応答の続きを生成する。
+
+    ストリームがサーバー側で中断されると、途中まで届いた本文 (``partial_text``)
+    と、その続きを書かせる 2 回目のコールという **2 つの生成** が 1 ノードの中に
+    並ぶ。この 2 つは別々の LLM コールなので、記録も別々に扱う:
+
+    - 部分文は中断した初回コールの成果。刻印 (前駆 + 三つ組) は state が
+      まだ初回コールの値を持っている **継続コールを打つ前に** 確定させる。
+    - 継続文は継続コールの成果。継続ストリームを読み終えたら通常コールと
+      同じ ``_record_llm_usage`` を通し、三つ組・Pulse 合算・usage_tracker・
+      anchor touch を継続コールのもので更新してから、それを Building 履歴の
+      metadata に載せる。これを飛ばすと継続文に初回コールの数字が乗り
+      (他人の記帳を自分の事実として刻む)、継続分の課金がどこにも残らない。
+
+    戻り値は下流 (memorize / output_key) が使う本文 — 継続が空だった場合は
+    ``partial_text`` をそのまま返す (= 従来どおり部分文で確定)。
+    """
+    err_code = stream_error.get("code", 504)
+    err_msg = stream_error.get(
+        "message", "Deadline expired before operation could complete.",
+    )
+    LOGGER.warning(
+        "[sea][llm] Triggering re-speak after 504 stream interruption for persona=%s",
+        getattr(persona, "persona_id", None),
+    )
+
+    # 1. Emit info event to frontend
+    if event_callback:
+        event_callback({
+            "type": "info",
+            "content": (
+                f"ℹ️ メッセージの生成が予期せず終了しました。"
+                f"({err_code} {err_msg})\n"
+                "ペルソナが再発言を行います。"
+            ),
+            "persona_id": getattr(persona, "persona_id", None),
+        })
+
+    # 2. Store partial to SAIMemory now (before continuation, to preserve order)
+    #    刻印はこの時点の state から取る = 中断した初回コールの三つ組。
+    partial_message_id = runtime._store_memory(
+        persona, partial_text,
+        role="assistant",
+        tags=["conversation"],
+        pulse_id=state.get("_pulse_id"),
+        # 2026-05-20: thought_signature 永続化 (stream 中断時の partial 経路)
+        thought_signature=state.get("_last_thought_signature"),
+        beat_state=state,
+        return_message_id=True,
+    )
+
+    # 3. Build continuation messages:
+    #    existing context + assistant(partial) + user(<system>prompt</system>)
+    cont_messages = list(messages) + [
+        {"role": "assistant", "content": partial_text},
+        {"role": "user", "content": (
+            "<system>あなたの応答がサーバータイムアウトにより途中で終了しました。"
+            "続きがあれば引き続き発言してください。</system>"
+        )},
+    ]
+    # 継続コールが実際に見る最後の永続行は、いま保存した部分文そのもの
+    # (上の cont_messages に入れた assistant 行と同じ内容)。前駆刻印の材料を
+    # ここで進めておかないと、継続文の刻印が中断前の履歴末尾を指したままになる。
+    if partial_message_id:
+        append_presented_message_id(state, str(partial_message_id))
+
+    # 4. Stream continuation
+    cont_chunks: List[str] = []
+    cont_iter = None
+    try:
+        cont_iter = llm_client.generate_stream(
+            cont_messages,
+            tools=[],
+            temperature=runtime._default_temperature(persona),
+            **runtime._get_cache_kwargs(getattr(persona, "persona_id", None)),
+        )
+        for cont_chunk in cont_iter:
+            if isinstance(cont_chunk, dict):
+                continue
+            cont_chunks.append(cont_chunk)
+            if event_callback:
+                event_callback({
+                    "type": "streaming_chunk",
+                    "content": cont_chunk,
+                    "persona_id": getattr(persona, "persona_id", None),
+                    "node_id": getattr(node_def, "id", "llm"),
+                    "pulse_id": state.get("_pulse_id"),
+                })
+    finally:
+        if hasattr(cont_iter, "close"):
+            cont_iter.close()
+
+    # 5. 継続コールの使用量を通常コールと同じ形で消費する。**空応答でも必ず
+    #    通す** — トークンは消費されているし、通さなければ初回コールの三つ組が
+    #    state に居残って次の生成へ漏れる。
+    cont_usage_metadata = _record_llm_usage(
+        runtime, llm_client, persona, building_id,
+        playbook.name, "llm_stream_continuation", state, debug_log=True,
+    )
+
+    cont_text = "".join(cont_chunks)
+    if not cont_text.strip():
+        LOGGER.warning("[sea][llm] Re-speak after 504 returned empty response")
+        return partial_text
+
+    # Send streaming_complete for continuation
+    if event_callback:
+        event_callback({
+            "type": "streaming_complete",
+            "persona_id": getattr(persona, "persona_id", None),
+            "node_id": getattr(node_def, "id", "llm"),
+            "pulse_id": state.get("_pulse_id"),
+        })
+    # Store continuation to building history。使用量は継続コールのもの
+    # (UI のドットもこれで出る)。
+    cont_say_metadata = _build_say_metadata(
+        state, llm_usage_metadata=cont_usage_metadata,
+    )
+    runtime._emit_say(
+        persona, eff_bid, cont_text, pulse_id=pulse_id,
+        metadata=cont_say_metadata if cont_say_metadata else None,
+    )
+    # 下流の compose/memorize ノードが SAIMemory に保存するのは継続文
+    # (部分文は上で直接保存済み)。
+    return cont_text
 
 
 def _finalize_beat(runtime, beat: BeatExecution) -> None:
@@ -517,6 +665,7 @@ def _finalize_beat(runtime, beat: BeatExecution) -> None:
                 spell_origin_id=_spell_origin,
                 spell_seq=_spell_final_seq,
                 return_message_id=True,
+                beat_state=state,
             )
             if not stored_message_id:
                 _memorize_ok = False
@@ -573,6 +722,7 @@ def _finalize_beat(runtime, beat: BeatExecution) -> None:
             playbook_name=playbook.name,
             # 2026-05-20: thought_signature 永続化 (important dual-write 経路)
             thought_signature=state.get("_last_thought_signature"),
+            beat_state=state,
         ):
             LOGGER.warning("[sea][llm] Important dual-write failed for node %s", node_id)
 
@@ -1952,12 +2102,21 @@ async def _run_spell_loop(
                     paired_action_text=action_text if _is_first_round else None,
                     spell_origin_id=_spell_origin_id,
                     spell_seq=loop_count,
-                    return_message_id=_is_first_round,
+                    return_message_id=True,
+                    beat_state=state,
                 )
                 if _is_first_round and _stored_id:
                     _spell_origin_id = _stored_id
                     state["_spell_loop_origin_id"] = _spell_origin_id
                     state["_spell_loop_count"] = loop_count
+                # 前駆刻印の材料 (sea/message_stamp.py): この行は上で
+                # messages へ積んだので、次のラウンド (と最終継続) の
+                # プロンプトに実際に入る。足さないと次の生成の前駆刻印が
+                # _prepare_context 時点の履歴末尾を指し続け、「実際に見て
+                # いた最後のメッセージ」ではなくなる。スペル結果の注入行は
+                # 永続 ID を持たないので足さない。
+                if _stored_id:
+                    append_presented_message_id(state, _stored_id)
 
             # Execute this round's spells SEQUENTIALLY, in the textual order they
             # were cast. Spells frequently mutate state that is unsafe under
@@ -2333,6 +2492,9 @@ async def _run_spell_loop(
                 )
 
             retry_usage = llm_client.consume_usage()
+            # このラウンドの生成を作ったコールの三つ組 (sea/message_stamp.py)。
+            # 直後の _store_memory がラウンドの発言を刻むので、ここで更新する。
+            record_call_tokens(state, retry_usage)
             if retry_usage:
                 get_usage_tracker().record_usage(
                     model_id=retry_usage.model,
@@ -3859,88 +4021,21 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                         # ── 504 DEADLINE_EXCEEDED: re-speak after partial response ──
                         _stream_err = state.pop("_stream_error", None)
                         if _stream_err and text.strip():
-                            _err_code = _stream_err.get("code", 504)
-                            _err_msg = _stream_err.get("message", "Deadline expired before operation could complete.")
-                            LOGGER.warning(
-                                "[sea][llm] Triggering re-speak after 504 stream interruption for persona=%s",
-                                getattr(persona, "persona_id", None),
+                            text = _respeak_after_stream_timeout(
+                                runtime=runtime,
+                                llm_client=llm_client,
+                                persona=persona,
+                                building_id=building_id,
+                                playbook=playbook,
+                                node_def=node_def,
+                                state=state,
+                                messages=messages,
+                                partial_text=text,
+                                eff_bid=eff_bid,
+                                pulse_id=pulse_id,
+                                stream_error=_stream_err,
+                                event_callback=event_callback,
                             )
-
-                            # 1. Emit info event to frontend
-                            if event_callback:
-                                event_callback({
-                                    "type": "info",
-                                    "content": (
-                                        f"ℹ️ メッセージの生成が予期せず終了しました。"
-                                        f"({_err_code} {_err_msg})\n"
-                                        "ペルソナが再発言を行います。"
-                                    ),
-                                    "persona_id": getattr(persona, "persona_id", None),
-                                })
-
-                            # 2. Store partial to SAIMemory now (before continuation, to preserve order)
-                            runtime._store_memory(
-                                persona, text,
-                                role="assistant",
-                                tags=["conversation"],
-                                pulse_id=state.get("_pulse_id"),
-                                # 2026-05-20: thought_signature 永続化 (stream 中断時の partial 経路)
-                                thought_signature=state.get("_last_thought_signature"),
-                            )
-
-                            # 3. Build continuation messages:
-                            #    existing context + assistant(partial) + user(<system>prompt</system>)
-                            _cont_messages = list(messages) + [
-                                {"role": "assistant", "content": text},
-                                {"role": "user", "content": (
-                                    "<system>あなたの応答がサーバータイムアウトにより途中で終了しました。"
-                                    "続きがあれば引き続き発言してください。</system>"
-                                )},
-                            ]
-
-                            # 4. Stream continuation
-                            _cont_chunks: list[str] = []
-                            try:
-                                _cont_iter = llm_client.generate_stream(
-                                    _cont_messages,
-                                    tools=[],
-                                    temperature=runtime._default_temperature(persona),
-                                    **runtime._get_cache_kwargs(getattr(persona, "persona_id", None)),
-                                )
-                                for _cont_chunk in _cont_iter:
-                                    if isinstance(_cont_chunk, dict):
-                                        continue
-                                    _cont_chunks.append(_cont_chunk)
-                                    if event_callback:
-                                        event_callback({
-                                            "type": "streaming_chunk",
-                                            "content": _cont_chunk,
-                                            "persona_id": getattr(persona, "persona_id", None),
-                                            "node_id": getattr(node_def, "id", "llm"),
-                                            "pulse_id": state.get("_pulse_id"),
-                                        })
-                            finally:
-                                if hasattr(_cont_iter, "close"):
-                                    _cont_iter.close()
-
-                            _cont_text = "".join(_cont_chunks)
-
-                            if _cont_text.strip():
-                                # Send streaming_complete for continuation
-                                if event_callback:
-                                    event_callback({
-                                        "type": "streaming_complete",
-                                        "persona_id": getattr(persona, "persona_id", None),
-                                        "node_id": getattr(node_def, "id", "llm"),
-                                        "pulse_id": state.get("_pulse_id"),
-                                    })
-                                # Store continuation to building history
-                                runtime._emit_say(persona, eff_bid, _cont_text, pulse_id=pulse_id)
-                                # state["speak_content"] = continuation so compose/memorize node
-                                # stores it to SAIMemory (partial was stored directly above)
-                                text = _cont_text
-                            else:
-                                LOGGER.warning("[sea][llm] Re-speak after 504 returned empty response")
 
                     # Store reasoning in state for downstream speak/say nodes
                     _store_reasoning_in_state(state, reasoning_text, reasoning_details)

@@ -4,6 +4,7 @@ import logging
 import uuid
 from typing import Any, Callable, Dict, List, Optional
 
+from sea.message_stamp import record_presented_message_ids
 from sea.playbook_models import PlaybookSchema
 
 LOGGER = logging.getLogger(__name__)
@@ -245,6 +246,9 @@ def run_playbook(
             persona_voiced=True,
         )
         parent["_prefix_anchor_id"] = _context_meta.get("prefix_anchor_id")
+        # 前駆刻印の材料 (sea/message_stamp.py): 今回の生成が実際に見た履歴の
+        # ID 列。末尾が「この生成が見ていた最後のメッセージ」になる。
+        record_presented_message_ids(parent, _context_meta)
         LOGGER.info("[sea][run-playbook] %s: _prepare_context returned %d messages", playbook.name, len(base_messages))
         _auto_recall_text = getattr(persona, "_pending_auto_recall_text", None)
         if _auto_recall_text:

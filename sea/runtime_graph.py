@@ -255,6 +255,12 @@ def compile_with_langgraph(
         # この値だけを使う (persona 属性フォールバックは廃止)。サブライン
         # (line='sub') は親の prefix をコピーするため親の値をそのまま継承する。
         "_prefix_anchor_id": parent.get("_prefix_anchor_id"),
+        # 前駆刻印の材料 (sea/message_stamp.py): _prepare_context が実際に
+        # プロンプトへ組み込んだ履歴メッセージの ID 列。生成メッセージの
+        # metadata へ「見ていた最後のメッセージ」として刻む。サブライン
+        # (line='sub') は親の prefix をコピーする = 親と同じものを見ている
+        # ので、anchor と同じく親の値をそのまま継承する。
+        "_presented_message_ids": parent.get("_presented_message_ids"),
         # UI-triggered pre-spells: executed once at the entry of the first LLM node.
         # Only seeded for top-level Pulses; sub-pulses (sub_play / run_playbook)
         # must not re-execute UI choices. Top-level is detected by absence of

@@ -195,6 +195,45 @@ function getFileType(filename: string, mimeType: string): 'image' | 'document' |
     return 'unknown';
 }
 
+/**
+ * キャッシュヒットの点。
+ *
+ * その発言を作った生成が「温まったコンテキスト」から生まれたときだけ、
+ * メッセージの足元に小さい点を常時出す。ホバー (キーボードなら focus) で
+ * トークンの三つ組 — 入力 / うちキャッシュ読み / 出力 — を実数で見せる。
+ *
+ * **冷えているときは何も出さない。** 冷えの警告を出しても受け手に打てる手が
+ * なく、サーバー側の一時的な不調でも冷えるため (2026-08-19 まはー裁定)。
+ * 見えるのは「効いている」だけ。
+ *
+ * 数字の出どころは既存の building message metadata (llm_usage /
+ * llm_usage_total) で、新しい API は要らない。
+ */
+function CacheHitDot({ usage, total }: {
+    usage?: MessageLLMUsage;
+    total?: MessageLLMUsageTotal;
+}) {
+    // 複数コールの Pulse は合算を、単発は単発の実数を見せる (足元の使用量
+    // チップと同じ選び方)。ライブの say イベントは合算しか運ばないので、
+    // 単発が無いときも合算へ落とす。
+    const useTotal = !!total && (!usage || total.call_count > 1);
+    const cached = useTotal ? (total?.total_cached_tokens ?? 0) : (usage?.cached_tokens ?? 0);
+    if (!cached) return null;
+    const input = useTotal ? (total?.total_input_tokens ?? 0) : (usage?.input_tokens ?? 0);
+    const output = useTotal ? (total?.total_output_tokens ?? 0) : (usage?.output_tokens ?? 0);
+    const label = `キャッシュヒット: 入力 ${input.toLocaleString()} トークンのうち ${cached.toLocaleString()} をキャッシュから読み込み / 出力 ${output.toLocaleString()} トークン`;
+    return (
+        <span className={styles.cacheDotWrap} tabIndex={0} role="img" aria-label={label}>
+            <span className={styles.cacheDot} />
+            <div className={styles.cacheDotTooltip}>
+                <div>入力 {input.toLocaleString()} tokens</div>
+                <div>うちキャッシュ読み {cached.toLocaleString()} tokens</div>
+                <div>出力 {output.toLocaleString()} tokens</div>
+            </div>
+        </span>
+    );
+}
+
 export default function Home() {
     // Enable user presence tracking (heartbeat + visibility)
     useActivityTracker();
@@ -2739,6 +2778,7 @@ export default function Home() {
                                 {(msg.timestamp || msg.llm_usage || msg.llm_usage_total) && (
                                     <div className={styles.cardFooter}>
                                         {msg.timestamp && <span>{new Date(msg.timestamp).toLocaleString()}</span>}
+                                        <CacheHitDot usage={msg.llm_usage} total={msg.llm_usage_total} />
                                         {msg.llm_usage_total && msg.llm_usage_total.call_count > 1 ? (
                                             // Show total usage when multiple LLM calls were made
                                             <span className={styles.llmUsageWrap}>

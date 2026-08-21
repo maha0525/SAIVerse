@@ -470,8 +470,60 @@
     align-items: center;
 }
 
-.cardFooter > span:not(.llmUsageWrap) {
+.cardFooter > span:not(.llmUsageWrap):not(.cacheDotWrap) {
     opacity: 0.6;
+}
+
+/* キャッシュヒットの点 (v0.3 「メッセージ刻印」③)。
+   その発言の生成が温まったコンテキストから生まれたときだけ常時出る印。
+   冷えの警告は出さない (2026-08-19 まはー裁定) ので、赤や警告色は使わず
+   アクセント色 1 つで「効いている」だけを示す。色はテーマ変数なので
+   ライト / ダークの両方でそのまま成立する。 */
+.cacheDotWrap {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    outline: none;
+}
+
+.cacheDot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--accent-primary, #06b6d4);
+    box-shadow: 0 0 4px var(--accent-primary, #06b6d4);
+    opacity: 0.7;
+    transition: opacity 0.15s ease;
+}
+
+.cacheDotWrap:hover .cacheDot,
+.cacheDotWrap:focus .cacheDot {
+    opacity: 1;
+}
+
+.cacheDotTooltip {
+    display: none;
+    position: absolute;
+    bottom: calc(100% + 6px);
+    /* 右端を点に合わせて本体は左へ伸ばす。フッターは右寄せなので、中央
+       揃えにすると狭い画面でカードの右へはみ出す。 */
+    right: 0;
+    background: var(--bg-tertiary, #111827);
+    border: 1px solid var(--border-color, #374151);
+    color: var(--text-primary, #f3f4f6);
+    border-radius: 6px;
+    padding: 0.35rem 0.55rem;
+    font-size: 0.65rem;
+    line-height: 1.5;
+    white-space: nowrap;
+    z-index: 100;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+}
+
+.cacheDotWrap:hover .cacheDotTooltip,
+.cacheDotWrap:focus .cacheDotTooltip,
+.cacheDotWrap:focus-within .cacheDotTooltip {
+    display: block;
 }
 
 .llmUsageWrap {

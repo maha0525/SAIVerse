@@ -177,7 +177,7 @@ class MockWorkRuntime:
                       pulse_context=None, line_role=None, line_id=None,
                       origin_track_id=None, scope=None, paired_action_text=None,
                       thought_signature=None, spell_origin_id=None, spell_seq=None,
-                      return_message_id=False):
+                      return_message_id=False, beat_state=None):
         from saiverse import clock
 
         resolved_scope = scope

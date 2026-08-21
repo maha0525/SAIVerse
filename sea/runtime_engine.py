@@ -6,6 +6,7 @@ import uuid
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from saiverse.logging_config import log_sea_trace
+from sea.message_stamp import stamp_generation_metadata
 from sea.playbook_models import PlaybookSchema
 from sea.runtime_state import effective_auto_mode, set_playbook_var
 from sea.runtime_utils import _format, _resolve_template_arg
@@ -444,6 +445,9 @@ class RuntimeEngine:
                 # 2026-05-20: thought_signature 永続化 (MEMORIZE node 経由 / assistant 役のみ意味あり)。
                 # role != "assistant" の場合は state 値に関わらず無害 (signature 解釈は Gemini text Part のみ)。
                 thought_signature=state.get("_last_thought_signature") if role == "assistant" else None,
+                # 書き込み時の機械刻印 (v3 §7.1)。role='assistant' の
+                # ときだけ効く (判定は _store_memory 側)。
+                beat_state=state,
             ):
                 LOGGER.warning("Failed to store memory in MEMORIZE node %s", node_id)
                 if event_callback:
@@ -515,6 +519,10 @@ class RuntimeEngine:
         if auto_recall_text:
             # 記憶アーキv2 §4.5: reasoning と同じ流儀で「ふと浮かんだ記憶」を永続化。
             speak_metadata["auto_recall"] = auto_recall_text
+        # 書き込み時の機械刻印 (v3 §7.1)。SPEAK ノードの emit_speak は
+        # add_to_persona_only 経由で memory.db にも 1 行残す = 生成メッセージの
+        # 永続点なので、_store_memory 経路と同じ刻印を載せる。
+        speak_metadata = stamp_generation_metadata(speak_metadata, state) or {}
         building_msg = self.emitters["speak"](persona, eff_bid, text, pulse_id=pulse_id, extra_metadata=speak_metadata if speak_metadata else None)
         if outputs is not None:
             outputs.append(text)

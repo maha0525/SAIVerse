@@ -47,6 +47,7 @@ from typing import Any, Callable, Dict, List, Optional, Set
 from saiverse import clock
 from saiverse.usage_tracker import get_usage_tracker
 from sea.mcp_tool_refresh import refresh_mcp_tools_at_head
+from sea.message_stamp import record_call_tokens, record_presented_message_ids
 
 LOGGER = logging.getLogger(__name__)
 
@@ -366,6 +367,9 @@ def run_work_session(
                 # 履歴を含むため、通常は実 anchor が載る (touch は Beat 内)。
                 "_prefix_anchor_id": _context_meta.get("prefix_anchor_id"),
             }
+            # 前駆刻印の材料 (sea/message_stamp.py): この生成が実際に見た
+            # 履歴の ID 列。末尾がこの生成の前駆になる。
+            record_presented_message_ids(state, _context_meta)
             # node_def / playbook は _run_spell_loop・_store_memory が参照する
             # 最小属性 (memorize.tags / name) だけを持つ軽量スタブ。
             node_def = SimpleNamespace(
@@ -462,6 +466,7 @@ def run_work_session(
                     tags=[RAW_LOG_TAG], pulse_id=pulse_id,
                     playbook_name=WORK_SESSION_PLAYBOOK_NAME,
                     pulse_context=pulse_ctx,
+                    beat_state=state,
                 )
                 pulse_ctx.append(PulseLogEntry(
                     role="assistant", content=continuation,
@@ -743,6 +748,9 @@ def _record_llm_usage(
     (builtin_data/tools/tell.py) も同じ器で計上する — playbook_name だけ変わる。
     """
     usage = llm_client.consume_usage() if hasattr(llm_client, "consume_usage") else None
+    # トークン三つ組の刻印材料 (sea/message_stamp.py)。usage が取れなかった
+    # ときも通して、前のコールの値を state に残さない。
+    record_call_tokens(state, usage)
     if not usage:
         return
     persona_id = getattr(persona, "persona_id", None)

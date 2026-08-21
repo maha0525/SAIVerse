@@ -130,6 +130,7 @@ def tell(target: str, gist: str = "") -> str:
     if runtime is None:
         return "声を出す仕組み (runtime) が利用できません。"
 
+    from sea.message_stamp import record_presented_message_ids
     from sea.pulse_context import Aspect, PulseLogEntry, resolve_execution_context
     from sea.work_session import _extract_text, _record_llm_usage
 
@@ -155,9 +156,11 @@ def tell(target: str, gist: str = "") -> str:
         # しか効かないため、別スレッドから取り直すと「親スレッドは結果待ち・
         # ツールスレッドはロック待ち」で永久に固まる (Codex レビュー
         # 2026-08-08 critical)。知覚消費も最外 Beat の頭が担う。
+        _context_meta: Dict[str, Any] = {}
         messages = list(runtime._prepare_context(
             persona, building_id, None, pulse_id=pulse_id,
             model_key=execution_context.model_key,
+            context_meta=_context_meta,
             persona_voiced=True,
         ))
         directive = _build_directive(target_display, (gist or "").strip())
@@ -170,6 +173,9 @@ def tell(target: str, gist: str = "") -> str:
             "_execution_context": execution_context,
             "_messages": messages,
         }
+        # 前駆刻印の材料 (sea/message_stamp.py): この発話が実際に見た履歴の
+        # ID 列。末尾がこの生成の前駆になる。
+        record_presented_message_ids(state, _context_meta)
         node_def = SimpleNamespace(id="tell_speech", memorize=None, speak=True)
         llm_client, selected_model = runtime.select_llm_client(
             node_def, persona, execution_context=execution_context, state=state,
@@ -244,6 +250,7 @@ def tell(target: str, gist: str = "") -> str:
             pulse_id=pulse_id, metadata=dict(tell_meta),
             playbook_name=_PLAYBOOK_NAME, pulse_context=pulse_ctx,
             return_message_id=True,
+            beat_state=state,
         )
         LOGGER.info(
             "[tell] spoken: persona=%s building=%s target=%s len=%d "

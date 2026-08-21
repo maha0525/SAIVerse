@@ -1,6 +1,6 @@
 # Issue: ペルソナ認識の連続性を表すグラフ構造（thread/message の前駆エッジ）
 
-**ステータス**: 🔵 設計決着 (2026-08-19 まはー裁定・末尾の「決着」節)・実装待ち (v0.3 形の層に刻印と器、消費は後続)
+**ステータス**: 🟣 v0.3 分は実装済み (2026-08-21: ①の前駆刻印 = 束 5 sea/message_stamp.py、②の器 thread_edges = 束 1 sai_memory/memory/continuity.py)・消費と分岐時の記帳は後続 wave
 **優先度**: 大きい（記憶アーキv3 級）。**「やはり対応した方がいい、近いうちに」（まはー 2026-07-13）**。ただしメティス記憶ブリッジ MVP のブロッカーにはしない（MVP は thread スコープ生成で偽連続性を回避し、`parentUuid` 保存で再編材料だけ確保する）
 **作成日**: 2026-07-13
 **関連**: [`../intent/memory_architecture_v2.md`](../intent/memory_architecture_v2.md) / [`../intent/metis_memory_bridge.md`](../intent/metis_memory_bridge.md) / [`chronicle_cross_thread_mixing.md`](chronicle_cross_thread_mixing.md)

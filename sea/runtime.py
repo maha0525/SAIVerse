@@ -19,6 +19,7 @@ from saiverse.usage_tracker import get_usage_tracker
 from sea.cancellation import CancellationToken, ExecutionCancelledException
 from sea.langgraph_runner import compile_playbook
 from sea.mcp_tool_refresh import refresh_mcp_tools_at_head
+from sea.message_stamp import build_generation_stamp, stamp_generation_metadata
 from sea.playbook_models import NodeType, PlaybookSchema, PlaybookValidationError, validate_playbook_graph
 from sea.pulse_context import ExecutionContext, default_lightweight_model, resolve_execution_context
 from sea.runtime_context import prepare_context as prepare_context_impl
@@ -1251,7 +1252,12 @@ class SEARuntime:
             event_callback({"type": "status", "content": f"{playbook.name} / think", "playbook": playbook.name, "node": "think"})
         text = state.get("last") or ""
         pulse_id = state.get("_pulse_id") or str(uuid.uuid4())
-        self._emit_think(persona, pulse_id, text)
+        # 書き込み時の機械刻印 (v3 §7.1)。独白も LLM が書いた本人の言葉で、
+        # memory.db に 1 行残る = 生成メッセージの永続点。
+        self._emit_think(
+            persona, pulse_id, text,
+            extra_metadata=stamp_generation_metadata(None, state),
+        )
         if outputs is not None:
             outputs.append(text)
         if event_callback:
@@ -1632,6 +1638,7 @@ class SEARuntime:
         spell_origin_id: Optional[str] = None,
         spell_seq: Optional[int] = None,
         return_message_id: bool = False,
+        beat_state: Optional[Dict[str, Any]] = None,
     ) -> Any:
         """Store a message to SAIMemory. Returns True on success, False on failure.
 
@@ -1652,6 +1659,13 @@ class SEARuntime:
           from ``scope='discardable'`` to ``'committed'`` when action='switch'.
           Default False keeps the bool return so existing callers are
           unchanged.
+        - ``beat_state``: 生成を回していた LangGraph / セッションの state。
+          渡された **かつ role が assistant のとき**だけ、書き込み時の機械刻印
+          (前駆刻印 + トークン三つ組) を metadata へ足す。刻印そのものの規則は
+          この一箇所だけが持ち、呼び出し元は材料の載った state を渡すだけ
+          (docs/intent/autonomous_behavior_v3.md §7.1 /
+          sea/message_stamp.py)。assistant 以外 (システム記録・スペル結果・
+          ツール応答) は「生成」ではないので刻まない。
         """
         if not text:
             return "" if return_message_id else True
@@ -1750,6 +1764,14 @@ class SEARuntime:
 
         if resolved_aspect:
             msg_metadata["aspect"] = resolved_aspect
+
+        # -- 書き込み時の機械刻印 (v3 §7.1): 前駆刻印 + トークン三つ組 --
+        # 生成 (= LLM が書いたペルソナ本人の言葉) にだけ刻む。材料が無ければ
+        # 何も足さない — 提示ゼロの生成に前駆は無く、使用量を返さないコールに
+        # 三つ組は無い (欠落を 0 と偽らない)。
+        if (role or "assistant") == "assistant" and beat_state is not None:
+            for _stamp_key, _stamp_value in build_generation_stamp(beat_state).items():
+                msg_metadata.setdefault(_stamp_key, _stamp_value)
 
         # audience: 同じ Building にいる他ペルソナ・ユーザーを記録
         if role == "assistant" and "audience" not in msg_metadata:
@@ -1889,8 +1911,8 @@ class SEARuntime:
             final_sub_seq=final_sub_seq, final_voice_text=final_voice_text,
         )
 
-    def _emit_think(self, persona: Any, pulse_id: str, text: str, record_history: bool = True) -> None:
-        self._emitters.emit_think(persona, pulse_id, text, record_history=record_history)
+    def _emit_think(self, persona: Any, pulse_id: str, text: str, record_history: bool = True, extra_metadata: Optional[Dict[str, Any]] = None) -> None:
+        self._emitters.emit_think(persona, pulse_id, text, record_history=record_history, extra_metadata=extra_metadata)
 
     def _notify_unity_speak(self, persona: Any, text: str) -> None:
         self._emitters.notify_unity_speak(persona, text)

@@ -6,6 +6,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from llm_clients.exceptions import LLMError
 from saiverse.logging_config import log_sea_trace
+from sea.message_stamp import clear_call_tokens
 from sea.runtime_state import effective_auto_mode, set_playbook_var
 
 LOGGER = logging.getLogger(__name__)
@@ -233,6 +234,9 @@ def lg_subplay_node(runtime: Any, node_def: Any, persona: Any, building_id: str,
             if execution == "subagent" and subagent_thread_id:
                 runtime._end_subagent_thread(persona, subagent_thread_id, subagent_parent_id, generate_chronicle=False, pulse_context=state.get("_pulse_context"))
             state["last"] = f"Sub-playbook error: {exc}"
+            # 途中まで走った子が LLM を呼んでいる可能性がある上、この本文は
+            # そもそも生成ではなく機構の文字列。親の三つ組を載せない。
+            clear_call_tokens(state)
             return state
         finally:
             # サブライン実行で立てた _force_lightweight_model フラグを親スコープに残さない
@@ -248,6 +252,20 @@ def lg_subplay_node(runtime: Any, node_def: Any, persona: Any, building_id: str,
             log_sea_trace(playbook.name, node_id, "SUBPLAY", f"← {sub_name} [subagent ended, chronicle={'yes' if chronicle else 'no'}]")
         last_text = sub_outputs[-1] if sub_outputs else ""
         state["last"] = last_text
+        # 書き込み時の機械刻印 (sea/message_stamp.py): ここで親の state["last"]
+        # に入ったのは **子 Playbook の LLM が書いた本文**。子のコールの三つ組は
+        # 子 state に閉じていて親へは戻らないので、親 state には親の直前コールの
+        # 三つ組が残ったままになる。この後で親の SPEAK / MEMORIZE がこの本文を
+        # 刻むと、他人のコールの数字がその本文の事実として記録される。
+        #
+        # 子の三つ組を親へ引き継ぐ案 (帰属を正しくする) は採らなかった:
+        # last_text は子の出力列の末尾 (= 任意のノードの出力) で、子の最後の
+        # LLM コールがその本文を書いたとは限らない。しかも _run_playbook は
+        # 子の出力リストしか返さず、子の final_state は親へ届かない
+        # (system キーの書き戻しは playbook_write_key が禁じている)。帰属を
+        # 確定できない以上、刻印なしに倒す。親が次に自前の LLM ノードを回せば
+        # _record_llm_usage が三つ組を載せ直す。
+        clear_call_tokens(state)
         if getattr(node_def, "propagate_output", False) and sub_outputs and outputs is not None:
             outputs.extend(sub_outputs)
 

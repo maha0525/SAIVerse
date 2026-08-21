@@ -483,7 +483,19 @@ class RuntimeEmitters:
 
         return building_msg
 
-    def emit_think(self, persona: Any, pulse_id: str, text: str, record_history: bool = True) -> None:
+    def emit_think(
+        self,
+        persona: Any,
+        pulse_id: str,
+        text: str,
+        record_history: bool = True,
+        extra_metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """THINK ノードの独白を SAIMemory (memory.db) へ 1 行残す。
+
+        ``extra_metadata``: 書き込み時の機械刻印など、tags 以外に載せる欄。
+        ``tags`` キーは既定の ``internal`` に追記される。
+        """
         if not record_history:
             return
         adapter = getattr(persona, "sai_memory", None)
@@ -493,10 +505,20 @@ class RuntimeEmitters:
                 # writes through append_persona_message directly so we attach the
                 # key to the dict here (handoff_2026-05-10).
                 pulse_track_id = getattr(persona, "_current_pulse_origin_track_id", None)
+                think_metadata: Dict[str, Any] = {"tags": ["internal"]}
+                if isinstance(extra_metadata, dict):
+                    for key, value in extra_metadata.items():
+                        if key == "tags":
+                            extra_tags = (
+                                [str(t) for t in value if t] if isinstance(value, list) else []
+                            )
+                            think_metadata["tags"].extend(extra_tags)
+                        else:
+                            think_metadata[key] = value
                 msg: Dict[str, Any] = {
                     "role": "assistant",
                     "content": text,
-                    "metadata": {"tags": ["internal"]},
+                    "metadata": think_metadata,
                     # Phase 3 段階 4-D (2026-05-09): pulse_id 専用カラムへ。
                     # 旧 `pulse:{uuid}` タグの併行記録は廃止。
                     "pulse_id": pulse_id,
