@@ -41,7 +41,6 @@ from saiverse import autonomy_wiring as wiring
 from saiverse import clock
 from saiverse import day_plan
 from saiverse.event_scheduler import EventScheduler
-from saiverse.track_manager import TrackManager
 
 PERSONA_ID = "alice"
 PLAN_DATE = "2026-07-04"
@@ -109,7 +108,6 @@ def manager(session_factory):
         SessionLocal=session_factory,
         personas=personas,
         event_scheduler=EventScheduler(),  # start() しない (同期検証)
-        track_manager=TrackManager(session_factory=session_factory),
         buildings=[],
         pulse_controller=SimpleNamespace(submit_meta_judgment=lambda **kwargs: None),
     )

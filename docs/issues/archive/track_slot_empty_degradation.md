@@ -1,6 +1,6 @@
 # Issue: track:N コマが空 Track で無音縮退 — day_open の約束と実装の不一致
 
-**ステータス**: ✅ 解決 (2026-07-19、方向1 で修正・回帰固定) — 実機再検証待ち
+**ステータス**: ✅ 解決 — さらに 2026-08-22 (束 6c) で **`track:N` コマの機構ごと退役**したため、実機再検証も対象消滅した。詳細は末尾の「対象消滅」節
 **作成日**: 2026-07-19
 **関連**: [autonomous_v2_post_live_gaps.md](autonomous_v2_post_live_gaps.md) 束B (世界に向く last mile) の親戚 / `saiverse/day_plan.py` `run_worker_slot_session` / [track_episode_continuity.md](track_episode_continuity.md) (同じ Track 再訪の文脈)
 
@@ -53,3 +53,9 @@ experience_structure の実装で作業セッションの digest / episode ま�
 回帰 tests/test_track_slot_ref.py(真に空=縮退 / note あり=回る)。
 experience_structure の digest/episode 工事と独立の day_plan 局所修正。
 残: まはー実機再検証(track コマが縮退せず回るか)
+
+## 対象消滅 (2026-08-22、v0.3.0 の門 束 6c)
+
+**`track:N` コマの指示書組み立て (`day_plan._build_track_instruction` / `_read_track_desk_memo`) を削除した。** 材料が全滅していたため — Track の題・机メモ・配下の生存タスクは 2026-08-21 の Track ランタイム退役 ([track_retirement.md](../intent/track_retirement.md) §8) で書き手ごと消えており、この関数は到達不能なコードだった。旧データに残る `track:N` の ref は、他の未知参照と同じく「対象なし」のテンプレートでセッションを回す (`_REF_RE` は `track` を受理し続ける — 既存の時間割を「不正な ref」に化けさせないため)。
+
+**この issue が守っていた芯は消えていない**: 「ペルソナが書いた意図 (note) を実行系が読まずに落とす」という失敗の型は、v0.4 のティック設計で「やること」を渡す形を作り直すときに、また問われる。当時の裁定「タスクが無い = やることが無い、という等式は誤り」は v3 の設計に引き継がれている — ティックが受け取るのは**確定情報**であって問いではない (autonomous_behavior_v3.md §5)。

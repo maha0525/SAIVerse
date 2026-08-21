@@ -3,46 +3,38 @@
 `builtin_data/playbooks/public/` に同梱される Playbook の一覧（手書き・用途別）。概念は [concepts/playbook.md](../concepts/playbook.md)、作り方は [開発者ガイド: Playbook 作成](../developer-guide/creating-playbooks.md) を参照。
 
 **フラグの意味**:
-- `router_callable`（rc）= メタ判断・`run_playbook` / `exec` から呼び出せる
+- `router_callable`（rc）= `run_playbook` / `exec` から呼び出せる
 - `can_run_as_child`（child）= サブライン（`/run_playbook` / subplay `line="sub"`）として起動でき、`report_to_parent` を親に返す
 - `user_selectable`（usel）= UI でユーザーがメタ Playbook として選べる
 
-> 新規追加・改名時はここも更新する（[CLAUDE.md > Documentation Maintenance]）。正確な定義は各 JSON を参照。
+> **この表の行は `builtin_data/playbooks/public/` に実在する JSON とだけ対応させる。** 退役した Playbook は行ごと消す（「退役」と書き添えて残すと、呼び出せるものの一覧として読まれてしまう）。新規追加・改名・削除のときはここも同じコミットで直す（[CLAUDE.md > Documentation Maintenance]）。正確な定義は各 JSON を参照。
 
-## メタ判断（自律制御の中枢）
+## 判断点（自律行動の意思決定層）
 
-MetaLayer が Track/persona 状態から決定論的に選ぶ（→ [concepts/meta-judgment.md](../concepts/meta-judgment.md)）。dispatch される状況別5つは構造化出力ベース。
+kind → Playbook 名の対応は `saiverse/judgment_points.py` の `JUDGMENT_PLAYBOOK_MAP` がコードで固定し、`saiverse/autonomy_wiring.py` の `fire_judgment_point` が起動する（→ [intent/persona_cognition/judgment_points.md](../intent/persona_cognition/judgment_points.md)）。**どれを走らせるかを LLM が選ぶ経路は無い** — 発火点と Playbook は 1 対 1 の決定論。
 
-| Playbook | 表示名 | 用途 |
-|---|---|---|
-| `meta_judgment_running` | メタ判断 (running) | running Track があるとき。`continue/pause/complete/abort` を選ぶ |
-| `meta_judgment_idle_pending` | メタ判断 (idle + pending) | アイドル + 保留 Track あり。`activate` / `create` を選ぶ |
-| `meta_judgment_idle_empty` | メタ判断 (idle, no pending) | アイドル + 保留なし。新規 Track を必ず立てる |
-| `meta_judgment_alert` | メタ判断 (alert) | alert 状態の Track があるとき |
-| `meta_judgment_life_purpose` | メタ判断 (生きる目的の設定) | LIFE_PURPOSE 未設定時。他より先に起動し目的をドラフト |
-| `meta_judgment` | メタ判断 | base（NL 独白 + `/spell`）。dispatch マップには含まれない別系統 |
-
-## 判断点（自律行動 v2 の意思決定層）
-
-`saiverse/judgment_points.py` の `run_judgment_point` が起動する（→ [intent/persona_cognition/judgment_points.md](../intent/persona_cognition/judgment_points.md)）。メタ判断と同じ様式: 構造化出力 + 動的 enum 注入 + `judgment_finalize` ツールでの検証・適用（メインキャッシュへの JSON 非混入）。
+様式は共通で、構造化出力（`response_schema`）+ 動的 enum 注入 + `judgment_finalize` ツールでの検証・適用（メインキャッシュへの JSON 非混入）。4 枚とも `rc=False` / `usel=False`（ユーザーにも `run_playbook` にも開いていない）。
 
 | Playbook | 表示名 | 用途 |
 |---|---|---|
-| `judgment_day_open` | 起床判断 (day_open) | 今日の時間割の編成 + 予算配分 + 欲求→関心の昇格 |
-| `judgment_post_conversation` | 会話終了判断 (post_conversation) | 会話からの収穫（picked_tasks は origin_quote 必須の接地）+ 中断中セッションの扱い + 残り時間割の整え |
-| `judgment_post_session` | セッション終了判断 (post_session) | タスクの裁定（done は実在成果物 ref 必須の接地検証つき）+ 残り時間割の整え |
-| `judgment_on_event` | イベント到着判断 (on_event) | 反応の選択（engage_now / insert_slot / note_only / ignore）。alert は engage_now のみに縮退 |
-| `judgment_day_close` | 就寝判断 (day_close) | 予定 vs 実績のふりかえり + 明日の自分へのメモ + 欲求のたな卸し + ユーザーへの報告種 |
+| `judgment_day_open` | 起床判断 (day_open) | 今日の時間割の編成（コマの `ref` は実在タスク `task:N`、`facility` は実在 Building の動的 enum）+ 作業ラウンドの日次予算の提示 |
+| `judgment_post_session` | セッション終了判断 (post_session) | 作業セッションの裁定。`done` は**このセッションが実際に作った成果物**の ref が必須（接地検証）+ セッションの実績要約（`digest` 欄）の生成 + 残り時間割の整え |
+| `judgment_on_event` | イベント到着判断 (on_event) | 反応の選択（engage_now / insert_slot / note_only / ignore）。alert イベントではスキーマが engage_now のみに縮退する |
+| `judgment_day_close` | 就寝判断 (day_close) | 予定 vs 実績のふりかえり + 明日の自分へのメモ + ユーザーへの報告種 + 記憶の編纂候補・命名候補のレビュー（候補ゼロなら欄ごと出さない） |
 
-## Track メインライン
+**退役した判断点・スキーマ欄**（新しいコードから参照しないこと）:
 
-各 Track 種別の会話・行動を回すメインライン Playbook（→ [concepts/track.md](../concepts/track.md)）。
+- **会話終了判断（`judgment_post_conversation`）** — 2026-08-16 裁定で退役し、JSON も削除済み（[autonomous_behavior_v3.md](../intent/autonomous_behavior_v3.md) §8 / §13.3）。会話に切れ目は定義できないため、約束・やりたいことの捕獲は Metabolism のスルースの一手へ一本化され、待ちを閉じる帳簿処理だけが `autonomy_wiring.handle_conversation_end` に残った。
+- **v1 メタ判断一式（`meta_judgment` / `meta_judgment_running` / `_idle_pending` / `_idle_empty` / `_alert` / `_life_purpose`）** — 2026-08-14 に Playbook・`_SITUATION_PLAYBOOK_MAP`・`meta_judgment_finalize` ツールごと削除（[track_retirement.md](../intent/track_retirement.md) §7.4）。生きる目的の初期設定（`meta_judgment_life_purpose`）は受け皿なしで撤去され、後継はシステムタスクの第一号として v3 §9-5 で設計中。
+- **欲求・Track まわりの欄**（`promotions` / `new_desires` / `desire_reviews` / `track_op` / `episode_purposes` の一部）— 欲求プールと Track の供給源が機構ごと消えたため、スキーマから落ちている（v3 §8）。判断 Playbook の JSON 本文に退役欄名・退役 namespace（`desire:` / `track:`）が現れないことは `tests/test_judgment_playbook_prompt_contract.py` が機械検査する。
+
+## 会話メインライン
 
 | Playbook | 表示名 | usel | 用途 |
 |---|---|:--:|---|
-| `track_user_conversation` | 対ユーザー会話 Track | ✓ | 対ユーザー会話。重量級 LLM で応答生成 + `track_*`/`note_*` スペル |
-| `track_social` | 交流 Track | | 他ペルソナとの会話（入口は未実装） |
-| `track_external` | 外部通信 Track | | X / Discord / Elyth 等への通信 |
+| `track_user_conversation` | 対ユーザー会話 Track | ✓ | **ユーザー会話の既定メインライン。名前は Track 時代の遺物で、いま Track は一切経由しない**（会話の入口は `saiverse/user_conversation.py`）。ペルソナの `META_PLAYBOOK` 既定値であり、`saiverse/upgrade_handlers.py` が削除済み Playbook 名を巻き取る先でもある |
+| `track_social` | 交流 Track | | **雛形のみ — 起動経路は存在しない。** 他ペルソナとの会話を回す Handler が 2026-08-21（束 6 第三便）に削除され、この JSON を名指しするコードはゼロ |
+| `track_external` | 外部通信 Track | | **雛形のみ — 起動経路は存在しない。** X / Discord / Elyth 等への通信用に置かれたが、同上 |
 
 > **v1 自律系は退役済み**（2026-07-10、時間割への完全移行 — [features/autonomous-mode.md](../features/autonomous-mode.md)）: `track_autonomous` / `meta_autonomy_decision` は削除。`autonomy_creation` / `autonomy_web_research` は `builtin_data/playbooks/archive/` へ（復活時は `memory_*` 語彙で再設計）。`autonomy_memory_organization` / `fragment_organize` も archive（P4 庭仕事ワーカーへ転生予定）。
 

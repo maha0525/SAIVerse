@@ -33,7 +33,6 @@ from sqlalchemy.pool import StaticPool
 from database.models import AI, Base, City, User
 from saiverse import clock, day_plan
 from saiverse.event_scheduler import EventScheduler
-from saiverse.track_manager import TrackManager
 
 PERSONA_ID = "alice"
 PLAN_DATE = "2026-07-04"
@@ -137,7 +136,6 @@ def manager(session_factory, monkeypatch):
         ],
         occupancy_manager=StubOccupancy(personas),
         event_scheduler=EventScheduler(),  # start() しない
-        track_manager=TrackManager(session_factory=session_factory),
         life_session=stub,
     )
 

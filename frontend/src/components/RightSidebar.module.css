@@ -156,107 +156,6 @@
     min-width: 0;
 }
 
-/* 「話しかけやすさ」表示 (life.md §9.1)。クリックでライフビューを開く。
-   常時表示する唯一のインジケータ (owner裁定、2026-07-14)。
-   lives 未宣言のペルソナには表示されない。 */
-.lifeStateChip {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.3rem;
-    align-self: flex-start;
-    padding: 0.1rem 0.4rem 0.1rem 0.25rem;
-    background: none;
-    border: none;
-    border-radius: 9999px;
-    cursor: pointer;
-    max-width: 100%;
-}
-
-.lifeStateChip:hover {
-    background: rgba(34, 197, 94, 0.15);
-}
-
-.lifeStateDot {
-    width: 7px;
-    height: 7px;
-    border-radius: 50%;
-    flex-shrink: 0;
-}
-
-.lifeStateLabel {
-    font-size: 0.7rem;
-    color: #9ca3af;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-}
-
-/* 自律行動 OFF の控えめな表示 (ブレーカー方式: 入っているのが当たり前の
-   ON は常時表示せず、OFF のときだけ知らせる)。lifeStateChip とは別概念
-   と一目でわかるよう、色ドットでなくアイコンで区別する。 */
-.autonomyOffChip {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.3rem;
-    align-self: flex-start;
-    padding: 0.1rem 0.4rem 0.1rem 0.25rem;
-    background: none;
-    border: none;
-    border-radius: 9999px;
-    cursor: pointer;
-    max-width: 100%;
-}
-
-.autonomyOffChip:hover {
-    background: rgba(156, 163, 175, 0.15);
-}
-
-.autonomyOffIcon {
-    flex-shrink: 0;
-    color: #9ca3af;
-}
-
-.autonomyOffLabel {
-    font-size: 0.7rem;
-    color: #9ca3af;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-}
-
-/* 「いま何をしているか」の活動ラベル (running 自律 Track の題名)。
-   話しかけやすさ (lifeStateChip) とは別情報なので併記される。
-   中身があるときだけ出る (バックエンドが null を返せば非表示)。 */
-.activityLabelChip {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.3rem;
-    align-self: flex-start;
-    padding: 0.1rem 0.4rem 0.1rem 0.25rem;
-    background: none;
-    border: none;
-    border-radius: 9999px;
-    cursor: pointer;
-    max-width: 100%;
-}
-
-.activityLabelChip:hover {
-    background: rgba(96, 165, 250, 0.15);
-}
-
-.activityLabelIcon {
-    flex-shrink: 0;
-    color: #60a5fa;
-}
-
-.activityLabelText {
-    font-size: 0.7rem;
-    color: #93c5fd;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-}
-
 .empty {
     font-size: 0.9rem;
     color: #6b7280;
@@ -520,27 +419,6 @@
 
 :global([data-theme="light"]) .empty {
     color: #94a3b8;
-}
-
-:global([data-theme="light"]) .autonomyOffIcon,
-:global([data-theme="light"]) .autonomyOffLabel {
-    color: #64748b;
-}
-
-:global([data-theme="light"]) .autonomyOffChip:hover {
-    background: rgba(100, 116, 139, 0.12);
-}
-
-:global([data-theme="light"]) .activityLabelIcon {
-    color: #2563eb;
-}
-
-:global([data-theme="light"]) .activityLabelText {
-    color: #1d4ed8;
-}
-
-:global([data-theme="light"]) .activityLabelChip:hover {
-    background: rgba(37, 99, 235, 0.12);
 }
 
 :global([data-theme="light"]) .card {

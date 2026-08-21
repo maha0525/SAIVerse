@@ -35,10 +35,6 @@ class PulseTimelineMessage(BaseModel):
 
 class PulseTimelineItem(BaseModel):
     pulse_id: str
-    track_id: Optional[str]
-    track_title: Optional[str]
-    track_type: Optional[str]
-    track_seq: Optional[int]  # この Track 内で何番目の Pulse か (#N)
     line_roles: List[str]
     message_count: int
     first_created_at: Optional[float]
@@ -94,23 +90,18 @@ def _thread_prefix(persona_id: str) -> str:
     return f"{persona_id}:%"
 
 
-# Track 内連番 (track_seq) は内側で全 Pulse 通しに計算してから外側で新しい順 LIMIT。
-# LIMIT を内側にかけると seq が範囲内連番になり「この Track で何回目か」が狂う。
+# Track の題・種別・連番の欄は束 6c (2026-08-22) で撤去した — 書き手 (Pulse への
+# origin_track_id 刻印) が 2026-08-21 に退役して、新しい Pulse では常に空だったため
+# (track_retirement.md §8.6)。
 _SUMMARY_SQL = """
-    SELECT pulse_id, origin_track_id, first_ca, last_ca, cnt, roles, seq FROM (
-        SELECT pulse_id,
-               origin_track_id,
-               MIN(created_at) AS first_ca,
-               MAX(created_at) AS last_ca,
-               COUNT(*) AS cnt,
-               GROUP_CONCAT(DISTINCT line_role) AS roles,
-               ROW_NUMBER() OVER (
-                   PARTITION BY origin_track_id ORDER BY MIN(created_at)
-               ) AS seq
-        FROM messages
-        WHERE thread_id LIKE ? AND pulse_id IS NOT NULL
-        GROUP BY pulse_id
-    )
+    SELECT pulse_id,
+           MIN(created_at) AS first_ca,
+           MAX(created_at) AS last_ca,
+           COUNT(*) AS cnt,
+           GROUP_CONCAT(DISTINCT line_role) AS roles
+    FROM messages
+    WHERE thread_id LIKE ? AND pulse_id IS NOT NULL
+    GROUP BY pulse_id
     ORDER BY last_ca DESC
     LIMIT ?
 """
@@ -155,29 +146,12 @@ def get_pulse_timeline(
             cur = adapter.conn.execute(_SUMMARY_SQL, (_thread_prefix(persona_id), limit))
             rows = cur.fetchall()
 
-    # track_id -> (title, type) を解決 (action_tracks は saiverse.db 側)
-    track_ids = {r[1] for r in rows if r[1]}
-    track_map: dict = {}
-    tm = getattr(manager, "track_manager", None)
-    if tm is not None:
-        for tid in track_ids:
-            try:
-                t = tm.get(tid)
-                track_map[tid] = (t.title, t.track_type)
-            except Exception:
-                track_map[tid] = (None, None)
-
     items: List[PulseTimelineItem] = []
     for r in rows:
-        pulse_id, track_id, first_ca, last_ca, cnt, roles, seq = r
-        title, ttype = track_map.get(track_id, (None, None))
+        pulse_id, first_ca, last_ca, cnt, roles = r
         items.append(
             PulseTimelineItem(
                 pulse_id=pulse_id,
-                track_id=track_id,
-                track_title=title,
-                track_type=ttype,
-                track_seq=int(seq) if seq is not None else None,
                 line_roles=sorted((roles or "").split(",")) if roles else [],
                 message_count=int(cnt),
                 first_created_at=float(first_ca) if first_ca is not None else None,

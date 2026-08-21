@@ -16,11 +16,11 @@ judgment_day_close) の最終ノードで呼ばれる。kind ディスパッチ:
    - day_close: tomorrow_memo + day_theme + user_report_seeds → plan meta
 
 会話終了判断 (post_conversation) の適用は 2026-08-16 の裁定で退役した
-(autonomous_behavior_v3.md §8 / §13.3)。欲求まわりの適用 (promotions →
-track_create / new_desires → purpose_seed / desire_reviews) と track_op も、
-Track 操作スペルと欲求プールの退役で機構ごと消えた。
-3. 整形済みテキスト ``monologue + 適用結果の要約行 + /spell 行 (成功分のみ)`` を
-   SAIMemory に ``role='assistant', line_role='meta_judgment'`` で保存する。
+(autonomous_behavior_v3.md §8 / §13.3)。欲求まわりの適用 (promotions /
+new_desires / desire_reviews) と track_op も、Track 操作スペルと欲求プールの
+退役で機構ごと消えた。
+3. 整形済みテキスト ``monologue + 適用結果の要約行`` を SAIMemory に
+   ``role='assistant', line_role='meta_judgment'`` で保存する。
    メインキャッシュに LLM の生 JSON は残らない (不変条件 v2-A 継承)。
 
 W1 Chunk B (A8/A9/A11): ``manager.execution_ledger`` と
@@ -28,16 +28,21 @@ W1 Chunk B (A8/A9/A11): ``manager.execution_ledger`` と
 入口で台帳 status=running を検査して再 finalize の二重適用を封じ、SAIMemory
 判断行は直書きでなく ``mark_applied`` の outbox (``saimemory.append``) に凍結
 する (配送失敗は「適用済み・記録待ち」として pending に残り関所/回復 tick が
-引き継ぐ)。失敗した spell は本人の /spell 行にせず、システム名義の適用失敗
-通知 (``perception.push``, kind=judgment_apply_failure) で本人に届ける。
-どちらかが無い環境 (台帳なし・旧テスト) は従来の直書きに degrade する。
+引き継ぐ)。台帳が無い環境 (旧テスト・mock シム) は従来の直書きに degrade する。
+
+⚠ **判断が直接スペルを撃つ経路は束 6c (2026-08-22) で消えた。** 唯一の実行口
+だった ``_fire_spell`` の呼び手が Track 操作と欲求プールの退役で全滅したため、
+関数ごと撤去した。「失敗した spell を本人の /spell 行にせず、システム名義の適用
+失敗通知 (``perception.push``) で届ける」という A11/不変条件 7 の規律は、供給源が
+消えたので発火する場面が無くなった — 規律そのものは正しいので、判断がまたスペルを
+撃つ形になったときはここへ書き戻す。
 
 W1 Chunk C (D9): post_session は digest 統合 (judgment_points.md §6 改定) —
 judge の構造化出力 ``digest`` 欄 (required) から SAIMemory ダイジェスト行
 (``sea.work_session.DIGEST_TAG`` / main_line / committed) を組み、tracked では
-outbox の**第 1 項目** (``saimemory.append_digest``、判断行より先) として配送、
-配送成功時に handler が ``episodes.set_digest_ref`` で出来事の再訪の鍵を後段
-確定する。untracked は直書き + set_digest_ref 直呼びに degrade する。
+outbox の**第 1 項目** (``saimemory.append_digest``、判断行より先) として配送する。
+untracked は直書きに degrade する。出来事へ再訪の鍵を刻む後段は束 6c
+(2026-08-22) で退役した (v3 §7 — 専用の記録行を持たない)。
 
 詳細: ``docs/intent/persona_cognition/judgment_points.md`` /
 ``docs/handoff/2026-07-19_w1_judgment_ledger_handoff.md`` D6〜D10
@@ -88,64 +93,6 @@ _KIND_LABELS = {
 }
 
 
-def _spell_to_text(name: str, args: Dict[str, Any]) -> str:
-    """記録用の /spell 行 (正準形式。実行は args dict で直接渡る)。"""
-    return f"/spell name='{name}' args={json.dumps(args, ensure_ascii=False)}"
-
-
-def _fire_spell(
-    name: str,
-    args: Dict[str, Any],
-    spells_record: List[Dict[str, Any]],
-    warnings: List[str],
-) -> bool:
-    """TOOL_REGISTRY 経由でスペルを実行する (meta_judgment_finalize と同じ経路)。
-
-    Track 系スペルは PulseContext の deferred-track-ops に enqueue され、Pulse
-    完了時に適用される。
-
-    A11 (SpellOutcome): 成功/失敗を戻り値と record の ``success`` で表明する。
-    tool 不在・実行例外は failure = warnings 追加 + False (呼び出し側は
-    committed への寄与にしないこと)。ToolResult がエラー文字列を**正常 return
-    する**型 (戻り値 str が "Error"/"エラー" 始まり等) の判定は今回のスコープ外
-    — 例外と不在のみを failure と扱う (2026-07-19 審査済みスコープ)。
-
-    Returns:
-        True = 実行成功 (committed へ寄与してよい) / False = 失敗。
-    """
-    from tools import TOOL_REGISTRY
-
-    tool_func = TOOL_REGISTRY.get(name)
-    if tool_func is None:
-        LOGGER.warning("[judgment_finalize] spell %r not found in registry", name)
-        spells_record.append({
-            "name": name, "args": dict(args), "success": False,
-            "result": "tool not found in registry",
-        })
-        warnings.append(
-            f"スペル {name} の適用に失敗: ツールが見つかりません (未実行)"
-        )
-        return False
-    try:
-        result = tool_func(**args)
-        if isinstance(result, tuple):
-            result_str = str(result[0]) if result else ""
-        else:
-            result_str = str(result)
-        spells_record.append({
-            "name": name, "args": dict(args), "success": True, "result": result_str,
-        })
-        return True
-    except Exception as exc:
-        LOGGER.exception("[judgment_finalize] spell %r raised", name)
-        spells_record.append({
-            "name": name, "args": dict(args), "success": False,
-            "result": f"error: {exc}",
-        })
-        warnings.append(f"スペル {name} の適用に失敗: {exc}")
-        return False
-
-
 # ---------------------------------------------------------------------------
 # 表示用ヘルパ (番号だけの参照/コマに人が読める表題を添える)
 # ---------------------------------------------------------------------------
@@ -190,25 +137,21 @@ def _normalize_artifact_ref(manager: Any, persona_id: str, ref: str) -> str:
 
 
 def _ref_label(manager: Any, persona_id: str, ref: str) -> str:
-    """統一参照 (track:N / task:N / episode:N) に人が読める表題を添える。
+    """統一参照 (task:N / episode:N) に人が読める表題を添える。
 
     「番号だけ」の参照 (task:4) を独白/適用サマリに残すと、あとで読むまはーにも
     ペルソナ自身にも中身が分からない (ユーザー向け表示の原則)。解決できたら
     ``task:4「タスク名」`` の形に、失敗したら素の ref を返す (表題は装飾であって
     記録の骨は ref — 解決失敗で記録を落とさない)。
+
+    ⚠ ``track:N`` の解決は束 6c (2026-08-22) で削除した (Track の退役)。旧データの
+    ``track:N`` は表題なしの素の文字列へ縮退する。
     """
     ref = (ref or "").strip()
     if not ref:
         return ref
     try:
-        if ref.startswith("track:"):
-            tm = getattr(manager, "track_manager", None)
-            if tm is not None:
-                track = tm.get(tm.resolve_track_ref(persona_id, ref))
-                title = (getattr(track, "title", None) or "").strip()
-                if title:
-                    return f"{ref}「{title}」"
-        elif ref.startswith("task:"):
+        if ref.startswith("task:"):
             ptm = PersonaTaskManager(manager.SessionLocal)
             task = ptm.get_task(
                 ptm.resolve_task_ref(persona_id, normalize_task_ref(ref)),
@@ -253,7 +196,6 @@ def _finalize_day_open(
     ctx: Dict[str, Any],
     lines: List[str],
     warnings: List[str],
-    spells_record: List[Dict[str, Any]],
 ) -> bool:
     """起床判断の適用。timetable を保存できたら True (committed)。"""
     applied = False
@@ -724,7 +666,6 @@ def _finalize_post_session(
     ctx: Dict[str, Any],
     lines: List[str],
     warnings: List[str],
-    spells_record: List[Dict[str, Any]],
 ) -> bool:
     """セッション終了判断の適用。何か 1 つでも適用したら True (committed)。"""
     applied = _apply_task_verdict(manager, persona_id, output, ctx, lines, warnings)
@@ -786,7 +727,6 @@ def _finalize_on_event(
     ctx: Dict[str, Any],
     lines: List[str],
     warnings: List[str],
-    spells_record: List[Dict[str, Any]],
     summary_extras: List[str],
 ) -> bool:
     """イベント到着判断の適用。
@@ -1309,13 +1249,12 @@ def _build_session_digest_message(
 
     旧 work_session 直書き (削除済み ``sea.work_session`` の digest 保存) と
     同形: tags=[DIGEST_TAG] / line_role='main_line' / scope='committed' /
-    metadata.work_session (ws_meta を judgment_context から復元) /
-    metadata.origin_episode / tz-aware timestamp。day_close の
-    ``_collect_today_session_digests`` (DIGEST_TAG + committed) と一日新聞
-    (metadata.work_session) が読む形を必ず保つ。
+    metadata.work_session (ws_meta を judgment_context から復元) / tz-aware
+    timestamp。day_close の ``_collect_today_session_digests``
+    (DIGEST_TAG + committed) と一日新聞 (metadata.work_session) が読む形を必ず保つ。
 
-    NOTE: ``origin_track_id`` の刻印は 2026-08-21 に退役した
-    (track_retirement.md §2 住人 3)。
+    NOTE: ``origin_track_id`` の刻印は 2026-08-21 に、``origin_episode`` の刻印は
+    2026-08-22 (束 6c、v3 §7) に退役した。
     """
     from sea.work_session import DIGEST_TAG
 
@@ -1323,9 +1262,6 @@ def _build_session_digest_message(
     ws_meta = ctx.get("ws_meta")
     if isinstance(ws_meta, dict) and ws_meta:
         metadata["work_session"] = dict(ws_meta)
-    episode_ref = str(ctx.get("episode_ref") or "").strip() or None
-    if episode_ref:
-        metadata["origin_episode"] = episode_ref
     message: Dict[str, Any] = {
         "role": "assistant",
         "content": digest_text,
@@ -1342,13 +1278,14 @@ def _write_session_digest_direct(
     manager: Any,
     persona_id: str,
     digest_message: Dict[str, Any],
-    episode_ref: Optional[str],
 ) -> None:
-    """untracked degrade 経路の digest 直書き + digest_ref 直呼び (D9-5)。
+    """untracked degrade 経路の digest 直書き (D9-5)。
 
-    台帳の無い環境 (旧テスト・mock シム) でも digest は残す。message id が
-    取れれば episodes.set_digest_ref で再訪の鍵も刻む (mock adapter が id を
-    返さない場合は digest_ref なしのまま — WARN のみ)。
+    台帳の無い環境 (旧テスト・mock シム) でも digest は残す。
+
+    ⚠ 束 6c (2026-08-22) で ``episodes.set_digest_ref`` による「出来事へ再訪の鍵を
+    刻む」後段が消えた — エピソードという専用の記録行を持たなくなったため
+    (v3 §7)。digest そのものは SAIMemory の行として残る。
     """
     persona = (getattr(manager, "personas", None) or {}).get(persona_id)
     adapter = getattr(persona, "sai_memory", None) if persona is not None else None
@@ -1359,32 +1296,11 @@ def _write_session_digest_direct(
         )
         return
     try:
-        mid = adapter.append_persona_message(digest_message)
+        adapter.append_persona_message(digest_message)
     except Exception:
         LOGGER.exception(
             "[judgment_finalize] failed to append session digest (persona=%s)",
             persona_id,
-        )
-        return
-    if not (isinstance(mid, str) and mid):
-        LOGGER.warning(
-            "[judgment_finalize] session digest stored without message id; "
-            "episode digest_ref not set (persona=%s episode=%s)",
-            persona_id, episode_ref,
-        )
-        return
-    if not episode_ref:
-        return
-    try:
-        from saiverse import episodes as episodes_mod
-
-        episodes_mod.set_digest_ref(
-            manager, persona_id, episode_ref, f"message:{mid}"
-        )
-    except Exception:
-        LOGGER.warning(
-            "[judgment_finalize] failed to set episode digest_ref "
-            "(persona=%s episode=%s)", persona_id, episode_ref, exc_info=True,
         )
 
 
@@ -1455,7 +1371,6 @@ def judgment_finalize(
     # --- 実行単位の冪等 (A8/D6): tracked で running でなければ再適用しない ----
     from saiverse.execution_ledger import STATUS_RUNNING
     from saiverse.execution_ledger_wiring import (
-        TARGET_PERCEPTION_PUSH,
         TARGET_SAIMEMORY_APPEND,
         TARGET_SAIMEMORY_APPEND_DIGEST,
     )
@@ -1474,21 +1389,19 @@ def judgment_finalize(
 
     lines: List[str] = []
     warnings: List[str] = []
-    spells_record: List[Dict[str, Any]] = []
     summary_extras: List[str] = []
 
     if kind == KIND_DAY_OPEN:
         committed = _finalize_day_open(
-            manager, persona_id, output, ctx, lines, warnings, spells_record,
+            manager, persona_id, output, ctx, lines, warnings,
         )
     elif kind == KIND_POST_SESSION:
         committed = _finalize_post_session(
-            manager, persona_id, output, ctx, lines, warnings, spells_record,
+            manager, persona_id, output, ctx, lines, warnings,
         )
     elif kind == KIND_ON_EVENT:
         committed = _finalize_on_event(
-            manager, persona_id, output, ctx, lines, warnings, spells_record,
-            summary_extras,
+            manager, persona_id, output, ctx, lines, warnings, summary_extras,
         )
     elif kind == KIND_DAY_CLOSE:
         committed = _finalize_day_close(
@@ -1501,15 +1414,13 @@ def judgment_finalize(
 
     # --- digest 統合 (D9-5): post_session の digest 欄 → SAIMemory ダイジェスト行 ---
     # tracked では outbox の第 1 項目 (判断行より前 = FIFO で digest が先) に
-    # 積み、配送 handler (saimemory.append_digest) が append + set_digest_ref を
-    # 行う。untracked は直書き + set_digest_ref 直呼び (degrade でも digest は残す)。
+    # 積み、配送 handler (saimemory.append_digest) が append する。untracked は
+    # 直書き (degrade でも digest は残す)。
     digest_message: Optional[Dict[str, Any]] = None
-    digest_episode_ref: Optional[str] = None
     if kind == KIND_POST_SESSION:
         digest_text = str(output.get("digest") or "").strip()
         if digest_text:
             digest_message = _build_session_digest_message(ctx, digest_text)
-            digest_episode_ref = str(ctx.get("episode_ref") or "").strip() or None
         else:
             # スキーマ required なので通常は入る — 空は観測に残す (黙らせない)
             warnings.append(
@@ -1520,15 +1431,11 @@ def judgment_finalize(
         LOGGER.warning("[judgment_finalize] (%s/%s) %s", persona_id, kind, w)
 
     # --- 整形済みテキスト (JSON 非混入; 不変条件 v2-A) --------------------
-    # A11: 本人記憶の判断行には**成功した spell だけ**を正準形で載せる。
-    # 失敗した行為を本人名義の /spell 行にしない (未実行の行為の捏造防止)。
-    spells_ok = [s for s in spells_record if s.get("success")]
-    spells_failed = [s for s in spells_record if not s.get("success")]
-    spell_lines = [_spell_to_text(s["name"], s["args"]) for s in spells_ok]
-    body_parts = [p for p in (monologue, "\n".join(lines), "\n".join(spell_lines)) if p]
+    # 判断が直接スペルを撃つ経路は束 6c で消えたので、本文は独白と適用結果の
+    # 要約行だけになった (module docstring の ⚠ 参照)。
+    body_parts = [p for p in (monologue, "\n".join(lines)) if p]
     final_text = "\n\n".join(body_parts) or "(empty judgment)"
-    # A11: scope への寄与も成功 spell のみ。
-    scope = "committed" if committed or spells_ok else "discardable"
+    scope = "committed" if committed else "discardable"
 
     message = _build_judgment_message(
         manager, kind, ctx, final_text, monologue, scope, situation_text,
@@ -1541,11 +1448,6 @@ def judgment_finalize(
             "kind": kind,
             "committed": committed,
             "scope": scope,
-            "spells": {
-                "attempted": len(spells_record),
-                "succeeded": len(spells_ok),
-                "failed": len(spells_failed),
-            },
             "warnings": len(warnings),
         }
         if kind == KIND_ON_EVENT:
@@ -1570,10 +1472,7 @@ def judgment_finalize(
             outbox_items.append({
                 "target": TARGET_SAIMEMORY_APPEND_DIGEST,
                 "persona_id": persona_id,
-                "payload": {
-                    "message": digest_message,
-                    "episode_ref": digest_episode_ref,
-                },
+                "payload": {"message": digest_message},
             })
         outbox_items.append({
             "target": TARGET_SAIMEMORY_APPEND,
@@ -1584,26 +1483,6 @@ def judgment_finalize(
                 "thread_suffix": None,
             },
         })
-        if spells_failed:
-            # 失敗 spell はシステム名義の適用失敗通知 (perception.push) で本人に
-            # 届ける — 本人の行為に変換しない (不変条件 7)。客観+丁寧語。
-            failed_desc = "、".join(
-                f"{s['name']} (エラー: {s['result']})" for s in spells_failed
-            )
-            kind_label = _KIND_LABELS.get(kind, kind)
-            outbox_items.append({
-                "target": TARGET_PERCEPTION_PUSH,
-                "persona_id": persona_id,
-                "payload": {
-                    "kind": "judgment_apply_failure",
-                    "content": (
-                        f"{kind_label}の適用のうち、次の操作が失敗しました: "
-                        f"{failed_desc}。世界には反映されていません。"
-                    ),
-                    "reduce_key": f"judgment_apply_failure:{kind}",
-                    "salient": True,
-                },
-            })
         # mark_applied の失敗 (台帳遷移例外) は素直に raise する: 世界更新は
         # 済み・台帳は running のまま → run_judgment_point が unknown 化 →
         # 照合対象として観測面に残る (intent の「分裂を見えるようにする」)。
@@ -1616,9 +1495,7 @@ def judgment_finalize(
         # --- 従来経路 (台帳なし環境・旧テスト): SAIMemory 直書き -----------
         # digest は判断行より先に書く (tracked の FIFO と同順)。
         if digest_message is not None:
-            _write_session_digest_direct(
-                manager, persona_id, digest_message, digest_episode_ref,
-            )
+            _write_session_digest_direct(manager, persona_id, digest_message)
         persona = (getattr(manager, "personas", None) or {}).get(persona_id)
         if persona is not None:
             adapter = getattr(persona, "sai_memory", None)
@@ -1632,7 +1509,6 @@ def judgment_finalize(
 
     summary = (
         f"Judgment finalized (kind={kind}, applied={committed}, "
-        f"spells={len(spells_record)}/{len(spells_ok)}/{len(spells_failed)}, "
         f"warnings={len(warnings)}, scope={scope})"
     )
     if summary_extras:
@@ -1654,12 +1530,6 @@ def judgment_finalize(
                 "kind": kind,
                 "applied": committed,
                 "extras": list(summary_extras),
-                # A11/D8: 失敗を構造化して渡す (attempted/succeeded/failed)。
-                "spells": {
-                    "attempted": len(spells_record),
-                    "succeeded": len(spells_ok),
-                    "failed": len(spells_failed),
-                },
             })
     except Exception:
         LOGGER.debug(

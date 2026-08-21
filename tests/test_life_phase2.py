@@ -45,7 +45,6 @@ from saiverse import judgment_points as jp
 from saiverse.day_simulator import DaySimulator
 from saiverse.event_scheduler import EventScheduler
 from saiverse.persona_task_manager import PersonaTaskManager
-from saiverse.track_manager import TrackManager
 from tool_loader import load_builtin_tool
 
 PERSONA_ID = "alice"
@@ -128,7 +127,6 @@ def manager(session_factory):
         personas=personas,
         occupancy_manager=StubOccupancy(personas),
         event_scheduler=EventScheduler(),  # start() しない (シム/同期検証)
-        track_manager=TrackManager(session_factory=session_factory),
         buildings=[
             SimpleNamespace(building_id="library", name="図書館"),
             SimpleNamespace(building_id="workshop", name="工房"),
@@ -1318,7 +1316,12 @@ def test_lives_day_settlement_writes_only_lives_canon(manager, task_ref):
 
 def test_lives_day_settlement_failure_retains_reserved_rounds(manager, task_ref):
     """A5: ライフのある日で精算 tx が転けたら、予約額 (5) が lives.used_rounds に残り、
-    実測 (3) への返金は適用されない (後続コマが未消費扱いで超過実行しない安全側)。"""
+    実測 (3) への返金は適用されない (後続コマが未消費扱いで超過実行しない安全側)。
+
+    障害の注入点は台帳 applied の書き込み。2026-08-22 (束 6c) までは出来事を
+    閉じる手を壊していたが、その手はコマの出来事ごと退役した (v3 §7)。同じ
+    精算 tx に残る書き込みなので、転けたときの収束状態は変わらない。
+    """
     ledger = _attach_ledger(manager)
     day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [_slot("09:00", budget_rounds=5)])
     day_plan.save_lives(manager, PERSONA_ID, PLAN_DATE, [
@@ -1326,9 +1329,12 @@ def test_lives_day_settlement_failure_retains_reserved_rounds(manager, task_ref)
     ])
     clock.enable_virtual(BASE + timedelta(hours=9))
 
+    def _boom(*a, **k):
+        raise RuntimeError("applied write fail")
+
     with patch("sea.work_session.run_work_session",
                return_value=_mock_result(rounds_used=3)), \
-            patch("saiverse.episodes.close_episode", side_effect=RuntimeError("commit fail")):
+            patch.object(ledger, "mark_applied", side_effect=_boom):
         day_plan._fire_slot(manager, PERSONA_ID, PLAN_DATE, 0)
 
     slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)

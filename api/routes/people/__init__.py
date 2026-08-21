@@ -3,13 +3,13 @@ from typing import List
 from fastapi import APIRouter
 from pydantic import BaseModel
 
-from . import summon, memory, recall, config, autonomous
+from . import summon, memory, recall, config
 from . import import_chatlog, reembed, memopedia, native_export_import
-from . import schedule, tasks, inventory, arasuji
-from . import pulse_logs, memory_notes, working_memory, autonomy
+from . import schedule, inventory, arasuji
+from . import pulse_logs, memory_notes, working_memory
 from . import storage_layers, cache_status, context_status, debug, pulse_timeline
-from . import activity, realtime_spell, core_memory, life, life_settings
-from . import timetable_template, experience_ledger
+from . import realtime_spell, core_memory, life
+from . import experience_ledger
 
 router = APIRouter()
 
@@ -43,28 +43,22 @@ router.include_router(summon.router, tags=["people"])
 router.include_router(memory.router, tags=["people"])
 router.include_router(recall.router, tags=["people"])
 router.include_router(config.router, tags=["people"])
-router.include_router(autonomous.router, tags=["people"])
 router.include_router(import_chatlog.router, tags=["people"])
 router.include_router(native_export_import.router, tags=["people"])
 router.include_router(reembed.router, tags=["people"])
 router.include_router(memopedia.router, tags=["people"])
 router.include_router(schedule.router, tags=["people"])
-router.include_router(tasks.router, tags=["people"])
 router.include_router(inventory.router, tags=["people"])
 router.include_router(arasuji.router, tags=["people"])
 router.include_router(pulse_logs.router, tags=["people"])
 router.include_router(memory_notes.router, tags=["people"])
 router.include_router(working_memory.router, tags=["people"])
-router.include_router(autonomy.router, tags=["people"])
 router.include_router(storage_layers.router, tags=["people"])
 router.include_router(cache_status.router, tags=["people"])
 router.include_router(context_status.router, tags=["people"])
 router.include_router(debug.router, tags=["people"])
 router.include_router(pulse_timeline.router, tags=["people"])
-router.include_router(activity.router, tags=["people"])
 router.include_router(realtime_spell.router, tags=["people"])
 router.include_router(core_memory.router, tags=["people"])
 router.include_router(life.router, tags=["people"])
-router.include_router(life_settings.router, tags=["people"])
-router.include_router(timetable_template.router, tags=["people"])
 router.include_router(experience_ledger.router, tags=["people"])

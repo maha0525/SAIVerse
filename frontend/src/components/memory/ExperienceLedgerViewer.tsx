@@ -40,7 +40,7 @@ interface PurposeStats {
 interface PurposeRow {
     ref: string;
     title: string;
-    kind: 'task' | 'desire' | 'track';
+    kind: 'task';
     stats: PurposeStats;
 }
 
@@ -89,8 +89,6 @@ interface ExperienceLedgerViewerProps {
 
 const PURPOSE_KIND_LABEL: Record<PurposeRow['kind'], string> = {
     task: 'タスク',
-    desire: 'やりたいこと',
-    track: '関心',
 };
 
 // "2026-08-03" → "08/03"。想定外の形はそのまま出す。

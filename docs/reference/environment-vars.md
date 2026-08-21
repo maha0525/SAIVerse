@@ -1,6 +1,8 @@
 # 環境変数
 
-`.env`（リポジトリルート）で設定する。ここは**よく使う変数の抜粋**で、正の一覧は [`.env.example`](../../.env.example) を参照（コード内には他にも多数の `os.getenv` 参照がある）。
+`.env`（リポジトリルート）で設定する。ここは**よく使う変数の抜粋**で、書き方の見本は [`.env.example`](../../.env.example)（コード内には他にも多数の `os.getenv` 参照がある）。
+
+**「既定」の欄はコードが未設定時に使う値**（`.env.example` が同梱している値とは一致しないことがある。差がある行にはその旨を書いてある）。**読み手のいない変数はこの表に載せない** — 設定しても何も起きない変数を一覧に残すと、効かない設定を書いて原因を探す時間が生まれるため。⚠ `.env.example` 側には読み手を失ったキーがまだ残っている（2026-08-22 時点で `SAIVERSE_LLM_CONTEXT_DUMP` / `MEMORY_WEAVE_MAINTAIN_INTERVAL` など）ので、**「.env.example に書いてある＝効く」ではない**。効くかどうかの正はこの表とコードの `os.getenv`。
 
 ## LLM API キー / 接続
 
@@ -9,14 +11,13 @@
 | `GEMINI_API_KEY` | Google Gemini（有料枠。推奨） |
 | `GEMINI_FREE_API_KEY` | Gemini 無料枠用 |
 | `OPENAI_API_KEY` | OpenAI |
-| `ANTHROPIC_API_KEY` / `CLAUDE_API_KEY` | Anthropic Claude |
+| `CLAUDE_API_KEY` | Anthropic Claude。**キーを読むのはこの名前だけ**（`builtin_data/providers/anthropic.json` の `api_key_env` と `llm_clients/anthropic.py` の両方）。`ANTHROPIC_API_KEY` は初期セットアップウィザードの「キーが入っているか」の判定（`api/routes/tutorial.py`）でしか見られないので、これだけ設定しても実際の呼び出しは失敗する |
 | `NVIDIA_API_KEY` | NVIDIA NIM |
 | `XAI_API_KEY` | xAI (Grok) |
 | `OPENROUTER_API_KEY` | OpenRouter |
-| `MOONSHOT_API_KEY` | Moonshot (Kimi) |
-| `OLLAMA_BASE_URL` | ローカル Ollama サーバー URL |
+| `OLLAMA_BASE_URL` | ローカル Ollama サーバー URL（未設定なら `OLLAMA_HOST` を見る） |
 
-プロバイダごとの `api_key_env` は [プロバイダ一覧](providers.md) を参照。
+プロバイダごとの `api_key_env` は [プロバイダ一覧](providers.md) を参照。Kimi (Moonshot) のようにユーザーが自分で追加するプロバイダのキー名は、そのプロバイダ設定の `api_key_env` に書いた名前がそのまま使われる（組み込みの決め打ちは無い。手順は [custom_providers.md](../custom_providers.md) ケース 3）。
 
 ## SAIMemory / 記憶
 
@@ -26,20 +27,17 @@
 | `SAIMEMORY_EMBED_MODEL_PATH` | - | ローカル埋め込みモデルのパス |
 | `SAIMEMORY_EMBED_CUDA` | 自動 | `1`=GPU 強制 / `0`=CPU 強制 / 未設定=自動 |
 | `SAIMEMORY_MEMORY` | `on` | 記憶機能の ON/OFF |
-| `SAIMEMORY_MEMORY_LAST_MESSAGES` | `40` | 直近何件を文脈に載せるか |
+| `SAIMEMORY_MEMORY_LAST_MESSAGES` | `8` | 直近何件を文脈に載せるか（`.env.example` は `40` を同梱） |
 | `SAIMEMORY_MEMORY_SEMANTIC_RECALL` | `true` | セマンティック想起 |
 | `SAIMEMORY_MEMORY_TOPK` | `5` | 想起の上位件数 |
-| `SAIMEMORY_MEMORY_RANGE_BEFORE` / `_AFTER` | `2` | 想起ヒット前後の取得件数 |
+| `SAIMEMORY_MEMORY_RANGE_BEFORE` / `_AFTER` | `1` | 想起ヒット前後の取得件数（`.env.example` は各 `2` を同梱） |
 | `SAIMEMORY_MEMORY_CHUNK_MIN_CHARS` / `_MAX_CHARS` | `120` / `480` | チャンク文字数 |
-| `SAIVERSE_RECALL_SNIPPET_MAX_CHARS` 他 | `8000` | 想起スニペットの最大文字数（通常/stream/pulse） |
+| `SAIVERSE_RECALL_SNIPPET_MAX_CHARS` | `8000` | 想起スニペットの最大文字数（通常）。stream / pulse は別名で `SAIVERSE_RECALL_SNIPPET_STREAM_MAX_CHARS`（`800`）/ `SAIVERSE_RECALL_SNIPPET_PULSE_MAX_CHARS`（`1200`） |
 | `MEMORY_WEAVE_MODEL` | `gemini-3.1-flash-lite-preview` | Chronicle/Memopedia 生成・編纂 (curation) モデル。ペルソナ別 `MEMORY_WEAVE_MODEL` (DB) が優先 (`saiverse/memory_weave_llm.py`) |
-| `MEMORY_WEAVE_BATCH_SIZE` | `20` | **廃止 (W4)** — 生成は episode 整列 + サイズ束ねに世代交代 (`SAIVERSE_CHRONICLE_BAND_BUDGET` 系へ)。設定しても無視される |
-| `MEMORY_WEAVE_CONSOLIDATION_SIZE` | `10` | **廃止 (W4)** — 統合は列のあふれ束ねに世代交代。設定しても無視される |
-| `MEMORY_WEAVE_MAINTAIN_INTERVAL` | `200` | メンテ間隔 |
-| `SAIVERSE_CHRONICLE_BAND_BUDGET` | `10000` | 一次あらすじチャンクの標準被覆字数 U (体験の構造 §4-6・§11-8 のモック検証値)。整列計画・退場計画の基準単位。**束ねの発火には使われない** (2026-07-27 世代交代 — 発火は `SAIVERSE_CHRONICLE_CHAR_BUDGET` の 1/4、[chronicle_consolidation](../intent/chronicle_consolidation.md) §3) |
-| `SAIVERSE_CHRONICLE_BAND_BASE` | `10` | 次数の底 B (幾何級数)。次数 k の標準被覆 = U×B^(k-1)。**束ねの発火・相手選びには使われない** (同上 — 現在はコスト概算のみが参照) |
-| `SAIVERSE_CHRONICLE_MIN_DIGEST_CHARS` | `1000` | LLM 圧縮する最小被覆字数。未満は恒等圧縮 (生のまま一次あらすじに置く、LLM なし) |
-| `SAIVERSE_CHRONICLE_MAX_BAND_CONSOLIDATIONS_PER_RUN` | `3` | 1 回の Metabolism で実行する束ね+治療の LLM コール上限 (LLM コスト暴走防止の安全弁) |
+| `MEMORY_WEAVE_BATCH_SIZE` | `20` | **本体では廃止 (W4)** — 生成は整列 + サイズ束ねに世代交代 (`SAIVERSE_CHRONICLE_BAND_BUDGET` 系へ)。本番経路では無視され、読むのは一括生成スクリプト `scripts/arasuji/build_arasuji_core.py` だけ |
+| `MEMORY_WEAVE_CONSOLIDATION_SIZE` | `10` | **本体では廃止 (W4)** — 統合は列のあふれ束ねに世代交代。読み手は上と同じくスクリプトのみ |
+| `SAIVERSE_CHRONICLE_BAND_BUDGET` | `10000` | 一次あらすじチャンクの標準被覆字数 U (体験の構造 §4-6・§11-8 のモック検証値)。整列計画・退場計画の基準単位 (`sai_memory/arasuji/alignment.py`)。**束ねの発火には使われない** (2026-07-27 世代交代 — 発火は `SAIVERSE_CHRONICLE_CHAR_BUDGET` の 1/4、[chronicle_consolidation](../intent/chronicle_consolidation.md) §3) |
+| `SAIVERSE_CHRONICLE_MAX_BAND_CONSOLIDATIONS_PER_RUN` | `3` | 1 回の Metabolism で実行する束ね+治療の LLM コール上限 (LLM コスト暴走防止の安全弁、`sai_memory/arasuji/bands.py`) |
 | `SAIVERSE_CHRONICLE_CHAR_BUDGET` | `20000` | weave の General Chronicle 読み込みの文字数予算。超過時は年表を粗いレベルへ畳んで全期間をカバーする（最古を落とさない）。**この 1/4 が束ねの発火閾値 X を兼ねる** ([chronicle_consolidation](../intent/chronicle_consolidation.md) §3 — 発火と提示を同じノブに連動させる)。記憶アーキv2 §6.2 |
 | `SAIVERSE_SLUICE_ENABLED` | `1` | スルース（Metabolism 時のコア記憶・手帳メモ・約束の採取。旧 gold_panning）の全体トグル。`0` で無効（defer-to-hot ごと従来挙動に戻る。無効時は採取なしで退場が進む）。intent `gold_panning.md`（旧名のまま）+ `autonomous_behavior_v3.md` §13 |
 | `SAIVERSE_SLUICE_PENDING_CAP` | `1.5` | defer-to-hot 圧力弁。ウィンドウが high watermark のこの倍率を超えたらキャッシュが冷たくても Metabolism を実行する |
@@ -79,7 +77,7 @@
 | `SAIVERSE_DEFAULT_LIGHTWEIGHT_MODEL` | 既定の軽量モデル |
 | `GEMINI_TIMEOUT_SECONDS` | Gemini タイムアウト（既定 180） |
 | `SAIVERSE_ATTACHMENT_LIMIT` | 添付上限（既定 4） |
-| `SAIVERSE_DISABLE_GEMINI_STREAMING` / `_SSE_PATCH` | Gemini ストリーミング関連のフォールバック制御 |
+| `SAIVERSE_DISABLE_GEMINI_STREAMING` / `SAIVERSE_DISABLE_GEMINI_SSE_PATCH` | Gemini ストリーミング関連のフォールバック制御（`llm_clients/gemini.py`） |
 
 ## ログ / デバッグ
 
@@ -87,8 +85,6 @@
 |---|---|
 | `SAIVERSE_LOG_LEVEL` | `DEBUG` / `INFO` / `WARNING` |
 | `SAIVERSE_SEA_TRACE` | `1` で SEA Playbook 実行トレースを `sea_trace.log` に詳細出力 |
-| `SAIVERSE_SUBLINE_SCHEDULER_ENABLED` | SubLineScheduler の有効/無効（既定有効） |
-| `SAIVERSE_LLM_CONTEXT_DUMP` | LLM コンテキストダンプ先ファイル |
 
 ## パス / テスト
 

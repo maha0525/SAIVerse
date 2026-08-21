@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+import uuid
 from datetime import datetime
 from types import SimpleNamespace
 from typing import Any, Dict, List
@@ -30,7 +31,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from database.models import AI, Base, City, User
+from database.models import AI, ActionTrack, Base, City, User
 from saiverse import clock
 from saiverse import slot_close
 from saiverse.persona_task_manager import (
@@ -38,7 +39,6 @@ from saiverse.persona_task_manager import (
     STAGE_CANDIDATE,
     PersonaTaskManager,
 )
-from saiverse.track_manager import TrackManager
 from sea.work_session import (
     ENDED_FINISHED,
     SessionCloseContext,
@@ -139,15 +139,23 @@ def manager(session_factory, persona):
     mgr = SimpleNamespace(
         SessionLocal=session_factory,
         personas={PERSONA_ID: persona},
-        track_manager=TrackManager(session_factory=session_factory),
         sea_runtime=None,  # close 単体テストでは close_ctx.runtime を使う
     )
 
-    # 生きた目的ノード: track:1 (関心) / task:1 (配下タスク) / task:2 (欲求候補)
-    track_id = mgr.track_manager.create(
-        persona_id=PERSONA_ID, track_type="autonomous",
-        title="言葉の標本集", initial_status="running",
-    )
+    # タスクの親になる Track 行。TrackManager は 2026-08-22 (束 6c) に退役したので、
+    # 旧データ相当の ActionTrack 行を ORM で直接置く。生きた目的ノードとして
+    # 締めに出るのは配下の task:1 / task:2 だけ。
+    track_id = str(uuid.uuid4())
+    db = session_factory()
+    try:
+        db.add(ActionTrack(
+            track_id=track_id, persona_id=PERSONA_ID, short_id=1,
+            title="言葉の標本集", track_type="autonomous", status="running",
+        ))
+        db.commit()
+    finally:
+        db.close()
+
     ptm = PersonaTaskManager(session_factory)
     ptm.create_task(
         persona_id=PERSONA_ID, title="序文の下書き", goal="書き出しを決める",

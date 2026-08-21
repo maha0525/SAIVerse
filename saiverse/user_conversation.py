@@ -1,20 +1,30 @@
-"""ユーザーとの会話の入口 — Track を経由しない会話経路 (束 6 第三便、2026-08-21)。
+"""ユーザーとの会話の入口 — Track も出来事も経由しない会話経路。
 
 Track は「ペルソナがやっていること」を全部入れる器として v1 で生まれ、会話も
 その器に乗せられていた。撤廃計画 (docs/intent/track_retirement.md §2 住人 2)
-の裁定どおり、会話の実体は次の三つに分解して持ち主へ返した:
+の裁定で会話は Track から降り (2026-08-21、束 6 第三便)、続く束 6c
+(2026-08-22) で **出来事 (Episode) というテーブルの行からも降りた**
+(autonomous_behavior_v3.md §7「エピソードという専用の記録行は持たない」)。
 
-- **いま会話中か** = 開いている ``kind='conversation'`` の出来事 (Episode)
+会話の実体は三つに分解して持ち主へ返してある:
+
+- **いま会話中か** = **メモリ内の会話状態** (ペルソナ単位。本モジュールが持つ)
 - **応答する** = main_line Pulse (``manager.run_sea_user``)
 - **会話の終わり** = 沈黙タイマー (本モジュールの ``arm_conversation_timeout``)
 
-旧 ``UserConversationTrackHandler`` が持っていた仕事のうち、Track 固有だった
-もの (Track 切替通知の SAIMemory 注入 / Track タイトルの生成と自己修復 /
-``on_track_activated`` hook 経由の連鎖) は器ごと退役した。
+**始まりと終わりは「遷移の一行」として Building ログに実在する** (v3 §7 の表:
+「始まり・終わりの実在イベント → 遷移の一行 (機構名義のシステムメッセージ)」)。
+名義は機構 (``role='host'``) で、ペルソナ名義 (assistant) では**書かない** —
+機構の記録をペルソナの声として残すと、ペルソナが自分の口調をそこから誤学習する。
+
+**再起動でメモリ内状態は消える = 「会話していない」に一貫して倒れる。** これは
+欠陥ではなく設計 (v3 §9-9): 会話の束ねは表示時に ``conversation`` タグの範囲から
+導出するので、状態が消えても記録は失われない。旧実装 (出来事の行) は逆に、閉じ
+損ねた行が再起動を跨いで「永遠に会話中」として残る事故を持っていた。
 
 責務:
 - ユーザー発話イベントの受け口 (:func:`on_user_utterance`)
-- 会話の開始 (出来事を開く → main_line 起動 → 沈黙タイマー装填)
+- 会話の開始 (会話状態を立てる → 遷移の一行 → main_line 起動 → 沈黙タイマー装填)
 - 沈黙タイマーの装填 / 解除 / 発火
 
 責務外:
@@ -28,7 +38,7 @@ import logging
 import threading
 import uuid
 from datetime import timedelta
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from saiverse import clock
 
@@ -94,7 +104,7 @@ def _lookup_persona(manager: Any, persona_id: str) -> Optional[Any]:
 
 
 # ---------------------------------------------------------------------------
-# 沈黙タイマーの予約世代トークン (Codex 指摘 2)
+# 沈黙タイマーの予約 — 世代トークン + 会話の身元 (Codex 指摘 2 / 2026-08-22 指摘 1)
 # ---------------------------------------------------------------------------
 #
 # EventScheduler は期限到来エントリを heap と ``_entries_by_key`` の**両方から
@@ -105,51 +115,86 @@ def _lookup_persona(manager: Any, persona_id: str) -> Optional[Any]:
 # そこで予約ごとに一意なトークンを発行し、callback は**自分が現行の予約である
 # ことを照合できたときだけ**動く。照合値に乱数 nonce を使うのは repo の規律 —
 # カウンタや時刻は 0 や既定値のような再到達可能な点を持ち、そこで破れる。
-# 出来事の参照 (episode_ref) では足りない: 同じ会話に対するタイマー延長
-# (再装填) も別世代として区別する必要があるため。
+# 会話の識別子だけでは足りない: 同じ会話に対するタイマー延長 (再装填) も別世代
+# として区別する必要があるため。
+#
+# ⚠ トークンだけでも足りない。トークンの照合が通ってから終了処理が状態を落とす
+# までの間に、別スレッドが会話 A を閉じて会話 B を開くと、古い callback は
+# **通ったトークンを手に**新しい会話 B を閉じてしまう。そこで予約は
+# 「世代トークン + そのとき開いていた会話の識別子」の組で持ち、
+#
+#   - 発火した callback は :func:`handle_conversation_timeout` へ会話の識別子を
+#     ``expected_conversation_id`` として渡す (条件付き解除になる)
+#   - 予約の解除も「その会話の予約であるときだけ」効く
+#     (:func:`cancel_conversation_timeout` の ``expected_conversation_id``)
+#
+# の二段で、古い世代が新しい会話に触れる経路を塞ぐ。
 
-_TOKENS_ATTR = "_conversation_timeout_tokens"
+_RESERVATIONS_ATTR = "_conversation_timeout_reservations"
 _TOKENS_LOCK = threading.Lock()
 #: manager へ属性を生やせない環境 (frozen オブジェクト等) 用の退避先。
-_FALLBACK_TOKENS: Dict[str, str] = {}
+_FALLBACK_RESERVATIONS: Dict[str, Dict[str, Any]] = {}
 
 
-def _timeout_tokens(manager: Any) -> Dict[str, str]:
-    """予約世代トークンの置き場 (manager ごと)。``_TOKENS_LOCK`` 配下で呼ぶこと。"""
+def _timeout_reservations(manager: Any) -> Dict[str, Dict[str, Any]]:
+    """沈黙タイマー予約の置き場 (manager ごと)。``_TOKENS_LOCK`` 配下で呼ぶこと。
+
+    値は ``{"token": str, "conversation_id": str | None}``。
+    """
     if manager is None:
-        return _FALLBACK_TOKENS
-    tokens = getattr(manager, _TOKENS_ATTR, None)
-    if not isinstance(tokens, dict):
-        tokens = {}
+        return _FALLBACK_RESERVATIONS
+    reservations = getattr(manager, _RESERVATIONS_ATTR, None)
+    if not isinstance(reservations, dict):
+        reservations = {}
         try:
-            setattr(manager, _TOKENS_ATTR, tokens)
+            setattr(manager, _RESERVATIONS_ATTR, reservations)
         except (AttributeError, TypeError):
-            return _FALLBACK_TOKENS
-    return tokens
+            return _FALLBACK_RESERVATIONS
+    return reservations
 
 
-def _consume_timeout_token(manager: Any, persona_id: str, token: str) -> bool:
+def _consume_timeout_reservation(
+    manager: Any, persona_id: str, token: str, conversation_id: Optional[str]
+) -> bool:
     """``token`` が現行の予約なら消費して True。古い世代なら False (= no-op)。
 
     照合と消費を 1 手に畳む — 「照合してから消す」形だと、その隙間に入った
-    再装填の世代まで一緒に消せてしまう。
+    再装填の世代まで一緒に消せてしまう。会話の識別子も併せて照合する: 予約は
+    「どの会話の沈黙を見張っているか」まで含めて 1 つの世代なので、片方でも
+    違えばこの callback は現行ではない。
     """
     with _TOKENS_LOCK:
-        tokens = _timeout_tokens(manager)
-        if tokens.get(persona_id) != token:
+        reservations = _timeout_reservations(manager)
+        current = reservations.get(persona_id)
+        if current is None:
             return False
-        tokens.pop(persona_id, None)
+        if current.get("token") != token:
+            return False
+        if current.get("conversation_id") != conversation_id:
+            return False
+        reservations.pop(persona_id, None)
         return True
 
 
 # ---------------------------------------------------------------------------
-# 会話開始の排他 (Codex 指摘 3)
+# 会話の開始と終了の排他 (Codex 指摘 3 / 2026-08-22 指摘 1)
 # ---------------------------------------------------------------------------
 #
-# 「開いている会話を探す → 無ければ開く」は検索と INSERT が別処理なので、同じ
-# ペルソナへの同時発話が双方「未開」と判定して出来事と Pulse を二重に作れる。
-# タイマーの key はペルソナ単位で 1 本に潰れるため、後から開いた行だけが閉じられ、
-# 先行行はタイマーの無い開きっぱなしとして残る。
+# 「開いている会話を探す → 無ければ開く」は検索と登録が別処理なので、同じ
+# ペルソナへの同時発話が双方「未開」と判定して会話と Pulse を二重に作れる。
+# タイマーの key はペルソナ単位で 1 本に潰れるため、後から開いた会話だけが
+# 閉じられ、先行分はタイマーの無い開きっぱなしとして残る。
+#
+# **終了処理も同じロックで直列化する** (``autonomy_wiring.handle_conversation_end``
+# がこのロックを取る)。開始と終了が別々のロックだと、「会話 A を閉じる」処理の
+# 途中で会話 B が開き、A の後片付け (予約の解除) が B の予約を消す並びが残る。
+#
+# ⚠ ロックは**応答 (Pulse) を含まない**。Pulse は LLM 呼び出しを含む長い処理で、
+# それをロックの中に置くと、EventScheduler の dispatch スレッド (沈黙タイマーの
+# callback を同期実行する) が LLM の後ろで待たされ、他ペルソナの予約まで止まる。
+# ロックが原子化する必要があるのは「開いているか調べる → 状態を立てる →
+# 遷移の一行 → 予約を張る」までで、そこを抜けた後の相乗り判定はロック無しでも
+# 正しく効く (状態は既に立っている)。
 #
 # 再入 (RLock) を許すのは、Pulse の内部から会話開始が再び呼ばれた場合に自分自身で
 # 固まらないため。再入した側は再検査で「既に開いている」を見て相乗りする。
@@ -158,7 +203,12 @@ _START_LOCKS: Dict[str, threading.RLock] = {}
 _START_LOCKS_GUARD = threading.Lock()
 
 
-def _conversation_lock(persona_id: str) -> threading.RLock:
+def conversation_lock(persona_id: str) -> threading.RLock:
+    """このペルソナの会話の開始 / 終了を直列化する再入可能ロック。
+
+    ``autonomy_wiring.handle_conversation_end`` も同じロックを取る (終了処理を
+    開始処理と直列化するため)。
+    """
     with _START_LOCKS_GUARD:
         lock = _START_LOCKS.get(persona_id)
         if lock is None:
@@ -168,94 +218,186 @@ def _conversation_lock(persona_id: str) -> threading.RLock:
 
 
 # ---------------------------------------------------------------------------
-# 会話の出来事 (Episode)
+# 会話状態 (メモリ内) — 「いま会話中か」の正典
 # ---------------------------------------------------------------------------
+#
+# 旧実装は ``episodes`` テーブルの open な ``kind='conversation'`` 行だった。
+# v3 §7 の裁定でエピソードという専用の記録行を持たなくなったので、状態はプロセス
+# 内のメモリに移り、**始まりと終わりの実在イベントだけが Building ログの
+# 「遷移の一行」として残る**。
+#
+# キャッシュではなく正典なので、DB フォールバックは持たない。再起動で状態が
+# 消えるのは設計どおり — 「会話していない」に一貫して倒れる (v3 §9-9)。
+#
+# 置き場を manager 属性にするのは open-episode キャッシュ (旧 episodes.py) と
+# 同じ理由: テストが別々の in-memory DB を持つ複数 manager を同一プロセスで作る
+# ため、モジュールグローバルだと persona_id 衝突で漏れる。
+
+_STATE_ATTR = "_open_conversation_state"
+_STATE_LOCK = threading.Lock()
+#: manager へ属性を生やせない環境 (frozen オブジェクト等) 用の退避先。
+_FALLBACK_STATE: Dict[str, Dict[str, Any]] = {}
+
+
+def _state_map(manager: Any) -> Dict[str, Dict[str, Any]]:
+    """会話状態の置き場 (manager ごと)。``_STATE_LOCK`` 配下で呼ぶこと。"""
+    if manager is None:
+        return _FALLBACK_STATE
+    state = getattr(manager, _STATE_ATTR, None)
+    if not isinstance(state, dict):
+        state = {}
+        try:
+            setattr(manager, _STATE_ATTR, state)
+        except (AttributeError, TypeError):
+            return _FALLBACK_STATE
+    return state
 
 
 def get_open_conversation(manager: Any, persona_id: str) -> Optional[Dict[str, Any]]:
-    """開いている会話の出来事 (無ければ None)。読み取り失敗も None。
+    """いま開いている会話 (無ければ None)。
 
-    「いま会話中か」の唯一の真実 (life.md §7 案 Y)。読めない環境 (manager 不在の
-    テスト等) と読み取り失敗は「会話していない」に倒す — 呼びかけへの応答を
-    機構の不備で黙らせないため (会話していない側に倒すと直接応答へ進む)。
-    """
-    if manager is None or getattr(manager, "SessionLocal", None) is None:
-        return None
-    try:
-        from saiverse import episodes
-
-        return episodes.get_open_episode(
-            manager, persona_id, kind=episodes.KIND_CONVERSATION,
-        )
-    except Exception:
-        LOGGER.warning(
-            "[user-conv] failed to read the open conversation episode for %s; "
-            "treating the persona as not in a conversation",
-            persona_id, exc_info=True,
-        )
-        return None
-
-
-def _open_conversation_episode(
-    manager: Any, persona_id: str, user_id: Optional[str]
-) -> Optional[Dict[str, Any]]:
-    """``kind='conversation'`` の出来事を開く (冪等 — 既に開いていれば no-op)。
-
-    **開設の成功は main_line 起動の前提**。開けなかったら送出する (2026-08-21
-    Codex 指摘 6)。出来事は単なる記録ではなく「いま会話中か」の正典なので、
-    記録の無いまま応答を返すと、次の発話の経路判定・別行動中の仲裁・沈黙タイマー
-    による終了・Metabolism のスルースが揃って狂う。黙って応答するより、見えて
-    失敗する方が正しい。
-
-    ⚠ 旧経路 (Track 時代の ``on_track_activated`` hook) はここを WARN で握り
-    潰していたが、あの頃の「いま会話中か」は Track の status が持っており、
-    出来事は付随的な記録にすぎなかった。正典の持ち主が変わったので、失敗の
-    扱いも変わる。
+    「いま会話中か」の唯一の真実。メモリ内の読み出しなので失敗しようがない —
+    旧実装の「読み取り失敗は会話していない側に倒す」フォールバックは対象消滅
+    した (倒し方の意図は生きている: 状態が無ければ直接応答へ進み、呼びかけを
+    機構の不備で黙らせない)。
 
     Returns:
-        開いた (または既に開いていた) 出来事 dict。台帳そのものが無い環境
-        (manager / SessionLocal 不在) では None。
+        ``{"conversation_id", "persona_id", "building_id", "participants",
+        "started_at"}`` の dict。``started_at`` は epoch 秒 (仮想クロック基準)。
     """
-    if manager is None or getattr(manager, "SessionLocal", None) is None:
-        # 台帳が「壊れている」のではなく「存在しない」環境。get_open_conversation も
-        # 一貫して None を返すので、会話は毎回「開始」として一貫して扱われる。
+    if not persona_id:
         return None
-    persona = _lookup_persona(manager, persona_id)
-    building_id = getattr(persona, "current_building_id", None)
-    participants = [persona_id] + ([str(user_id)] if user_id else [])
+    with _STATE_LOCK:
+        return _state_map(manager).get(persona_id)
 
-    from saiverse.episodes import open_conversation_episode
 
-    return open_conversation_episode(
-        manager,
-        persona_id,
-        building_id=building_id,
-        participants=participants,
-    )
+def _set_open_conversation(
+    manager: Any,
+    persona_id: str,
+    *,
+    building_id: Optional[str],
+    participants: List[str],
+) -> Dict[str, Any]:
+    """会話状態を立てて、その dict を返す (呼び出し元がロック内で使う)。"""
+    state = {
+        "conversation_id": f"conv:{uuid.uuid4().hex}",
+        "persona_id": persona_id,
+        "building_id": building_id,
+        "participants": list(participants),
+        "started_at": int(clock.now().timestamp()),
+    }
+    with _STATE_LOCK:
+        _state_map(manager)[persona_id] = state
+    return state
+
+
+def clear_open_conversation(
+    manager: Any, persona_id: str, *, expected_conversation_id: Optional[str] = None
+) -> Optional[Dict[str, Any]]:
+    """会話状態を落として、落とした状態を返す (無ければ None)。
+
+    Args:
+        expected_conversation_id: 指定すると**その会話が現行のときだけ**落とす
+            条件付き解除になる。照合と解除は 1 手 (ロック内) — 「読んで照合して
+            から落とす」形だと、その隙間に別経路が会話を閉じ、新しい会話を開いた
+            場合に**別の会話**を落とす (2026-08-14 Codex 三巡目の規律を器ごと
+            引き継ぐ)。
+    """
+    with _STATE_LOCK:
+        state = _state_map(manager)
+        current = state.get(persona_id)
+        if current is None:
+            return None
+        if (
+            expected_conversation_id is not None
+            and current.get("conversation_id") != expected_conversation_id
+        ):
+            return None
+        return state.pop(persona_id, None)
 
 
 def _get_open_non_conversation_episode(
     manager: Any, persona_id: str
 ) -> Optional[Dict[str, Any]]:
-    """「別の活動中か」= 開いている会話以外の出来事 (あればその dict)。
+    """「別の活動中か」— v0.3 では常に None (仲裁は直接応答へ縮退)。
 
-    判定は :func:`saiverse.episodes.get_open_non_conversation_episode` に一本化
-    する — 「最後に開いた 1 件」を見て会話ならそこで打ち切る読み方だと、会話が
-    作業より後に開いた並びで「別の活動中」を取りこぼす。読めない環境や読み取り
-    失敗は「活動なし」に倒す (呼びかけへの応答を機構の不備で黙らせない)。
+    旧実装は「開いている会話以外の出来事」を引いていたが、束 6c で出来事の
+    書き手が全滅した (v3 §7) ので、**新しい活動の行はどこからも生まれない**。
+    既存 DB に残る旧 open 行を読むと、退役した機構の残骸を理由に仲裁が永久に
+    発火し続けるので、読みごと止める。
+
+    関数を残すのは、v0.4 のティック設計が「別の活動中か」の答えを作り直す口が
+    ここだから (autonomous_behavior_v3.md §9-3: 並走の組を数え上げて防ぐ / 耐える
+    を決める工事)。それまでは「活動なし」= 呼びかけには常に直接応答する。
     """
-    if manager is None:
-        return None
-    try:
-        from saiverse import episodes
+    return None
 
-        return episodes.get_open_non_conversation_episode(manager, persona_id)
+
+# ---------------------------------------------------------------------------
+# 遷移の一行 (Building ログ)
+# ---------------------------------------------------------------------------
+
+
+#: 遷移の一行の event 種別 (``metadata.event.type``)。できごと UI の導出と
+#: チャンクの切れ目の目印がこの刻印を読む (v3 §7 / §9-9)。
+CONVERSATION_TRANSITION_EVENT = "conversation_transition"
+
+
+def _write_transition_line(
+    manager: Any, state: Dict[str, Any], *, action: str
+) -> None:
+    """会話の始まり / 終わりを Building ログへ 1 行残す (機構名義)。
+
+    v3 §7 の表「始まり・終わりの実在イベント → 遷移の一行 (機構名義のシステム
+    メッセージとしてログに実在)」の実装。エピソードの行が消えても、**始まりと
+    終わりが実在する**という v1.4 の芯はこの形で生きる。
+
+    ⚠ 名義は機構 (``role='host'``) — 移動・City Transfer と同じ席。ペルソナ名義
+    (``assistant``) では書かない。機構の記録を本人の声として残すと、ペルソナが
+    「自分は普段こう喋る」をそこから誤学習する (このリポジトリの絶対規則)。
+
+    記録専用なので失敗しても会話は止めない (WARNING のみ)。
+    """
+    building_id = state.get("building_id")
+    if not building_id:
+        return
+    add_event = getattr(manager, "add_building_event", None)
+    if not callable(add_event):
+        return
+
+    persona_id = str(state.get("persona_id") or "")
+    name = (getattr(manager, "id_to_name_map", None) or {}).get(persona_id, persona_id)
+    label = "会話が始まりました" if action == "start" else "会話が終わりました"
+    content = (
+        "<div class=\"note-box\">💬 Conversation:<br>"
+        f"<b>{name}とユーザーの{label}</b></div>"
+    )
+    try:
+        add_event(
+            building_id,
+            {
+                "role": "host",
+                "content": content,
+                "metadata": {
+                    "event": {
+                        "type": CONVERSATION_TRANSITION_EVENT,
+                        "action": action,
+                        "persona_id": persona_id,
+                        "conversation_id": state.get("conversation_id"),
+                        "participants": list(state.get("participants") or []),
+                        "started_at": state.get("started_at"),
+                    }
+                },
+            },
+            heard_by=list(
+                (getattr(manager, "occupants", None) or {}).get(building_id, [])
+            ),
+        )
     except Exception:
         LOGGER.warning(
-            "[user-conv] failed to read the open episode for %s; "
-            "treating as no open activity", persona_id, exc_info=True,
+            "[user-conv] failed to write the conversation-transition line "
+            "(persona=%s action=%s)", persona_id, action, exc_info=True,
         )
-    return None
 
 
 # ---------------------------------------------------------------------------
@@ -322,8 +464,10 @@ def arm_conversation_timeout(
     刻むと仮想日付のシミュレーション中に期限がシミュレーション終了後へ飛び、
     開いた会話の出来事が最後まで閉じない (2026-08-21 Codex 指摘 1)。
 
-    予約には一意な世代トークンを添える。走り出した古い callback が新しい会話を
-    閉じる競合を塞ぐため — 詳細はモジュール上部の「予約世代トークン」節。
+    予約には一意な世代トークンと、**そのとき開いていた会話の識別子**を添える。
+    走り出した古い callback が新しい会話を閉じる競合を塞ぐため — 詳細はモジュール
+    上部の「沈黙タイマーの予約」節。会話が開いていない状態で張られた予約は
+    見張る相手を持たないので、発火しても何も閉じない (誰かの会話を巻き込まない)。
 
     Args:
         only_if_absent: True なら**有効な予約が無いときだけ**張る。起動時の
@@ -340,75 +484,128 @@ def arm_conversation_timeout(
     if minutes is None:
         return False
 
-    fire_at = clock.now() + timedelta(minutes=int(minutes))
-    key = _timeout_key(persona_id)
-    token = uuid.uuid4().hex
+    # 「いま開いている会話を読む → 予約に焼き付ける」を会話ロックの中で行う。
+    # 外で読むと、読んだ直後に会話が入れ替わった予約が生まれる。
+    with conversation_lock(persona_id):
+        open_conversation = get_open_conversation(manager, persona_id)
+        conversation_id = (
+            open_conversation.get("conversation_id")
+            if open_conversation is not None else None
+        )
+        fire_at = clock.now() + timedelta(minutes=int(minutes))
+        key = _timeout_key(persona_id)
+        token = uuid.uuid4().hex
 
-    def _on_timeout(pid: str = persona_id, tok: str = token) -> None:
-        if not _consume_timeout_token(manager, pid, tok):
-            # この予約は既に別の予約に取って代わられている (再装填 / 解除)。
-            # 走り出した後では EventScheduler 側から止められないので、ここで降りる。
-            LOGGER.info(
-                "[user-conv] a superseded conversation-timeout callback fired for "
-                "%s; ignoring it (a newer reservation owns the conversation)", pid,
-            )
-            return
-        handle_conversation_timeout(manager, pid)
-
-    # 登録とトークンの発行を 1 つのロック区間に畳む。分けると、その隙間に入った
-    # 別スレッドの予約のトークンを後から上書きして、生きている予約を no-op に
-    # 変えてしまう。
-    with _TOKENS_LOCK:
-        if only_if_absent:
-            # 判定と登録を EventScheduler のロック内で一息に行う。has_key で確認して
-            # から schedule する形 (check-then-act) では、その隙間に通常経路が入れた
-            # 予約を上書きしうる。
-            armed = scheduler.schedule_if_absent(
-                fire_at=fire_at, callback=_on_timeout, key=key,
-            )
-            if not armed:
+        def _on_timeout(
+            pid: str = persona_id,
+            tok: str = token,
+            cid: Optional[str] = conversation_id,
+        ) -> None:
+            if not _consume_timeout_reservation(manager, pid, tok, cid):
+                # この予約は既に別の予約に取って代わられている (再装填 / 解除)。
+                # 走り出した後では EventScheduler 側から止められないので、ここで降りる。
                 LOGGER.info(
-                    "[user-conv] conversation timeout already armed for %s "
-                    "(leaving the existing reservation untouched)", persona_id,
+                    "[user-conv] a superseded conversation-timeout callback fired "
+                    "for %s; ignoring it (a newer reservation owns the "
+                    "conversation)", pid,
                 )
-                return False
-        else:
-            scheduler.schedule(fire_at=fire_at, callback=_on_timeout, key=key)
-        _timeout_tokens(manager)[persona_id] = token
+                return
+            if cid is None:
+                # 会話が開いていないときに張られた予約。閉じる相手を持たないので、
+                # 「いま開いている会話」を掴んで閉じてはいけない。
+                LOGGER.warning(
+                    "[user-conv] a conversation-timeout callback fired for %s but "
+                    "it was armed without an open conversation; closing nothing",
+                    pid,
+                )
+                return
+            handle_conversation_timeout(manager, pid, expected_conversation_id=cid)
+
+        # 登録と予約の記帳を 1 つのロック区間に畳む。分けると、その隙間に入った
+        # 別スレッドの予約を後から上書きして、生きている予約を no-op に変えてしまう。
+        with _TOKENS_LOCK:
+            if only_if_absent:
+                # 判定と登録を EventScheduler のロック内で一息に行う。has_key で
+                # 確認してから schedule する形 (check-then-act) では、その隙間に
+                # 通常経路が入れた予約を上書きしうる。
+                armed = scheduler.schedule_if_absent(
+                    fire_at=fire_at, callback=_on_timeout, key=key,
+                )
+                if not armed:
+                    LOGGER.info(
+                        "[user-conv] conversation timeout already armed for %s "
+                        "(leaving the existing reservation untouched)", persona_id,
+                    )
+                    return False
+            else:
+                scheduler.schedule(fire_at=fire_at, callback=_on_timeout, key=key)
+            _timeout_reservations(manager)[persona_id] = {
+                "token": token, "conversation_id": conversation_id,
+            }
 
     LOGGER.info(
-        "[user-conv] armed the conversation timeout: persona=%s timeout_min=%s "
-        "fire_at=%s only_if_absent=%s",
-        persona_id, minutes, fire_at.isoformat(timespec="seconds"), only_if_absent,
+        "[user-conv] armed the conversation timeout: persona=%s conversation=%s "
+        "timeout_min=%s fire_at=%s only_if_absent=%s",
+        persona_id, conversation_id, minutes,
+        fire_at.isoformat(timespec="seconds"), only_if_absent,
     )
     return True
 
 
-def cancel_conversation_timeout(manager: Any, persona_id: str) -> None:
-    """沈黙タイマーを解除する (会話の出来事を閉じたとき / 手動モード ON)。
+def cancel_conversation_timeout(
+    manager: Any, persona_id: str, *, expected_conversation_id: Optional[str] = None
+) -> bool:
+    """沈黙タイマーを解除する (会話を閉じたとき / 手動モード ON)。
 
-    トークンを先に落とす — EventScheduler の cancel は「まだ heap に居る予約」に
-    しか効かないので、既に走り出した callback はトークンの側でしか止められない。
+    予約の記帳を先に落とす — EventScheduler の cancel は「まだ heap に居る予約」に
+    しか効かないので、既に走り出した callback は記帳の側でしか止められない。
+
+    Args:
+        expected_conversation_id: 指定すると**その会話のために張られた予約だけ**を
+            解除する条件付きの解除になる。会話 A を閉じた後片付けが、その間に
+            開いた会話 B の予約を消してしまう並びを塞ぐため — B は自前の予約を
+            持っており、A の後片付けはそれに触れてはいけない。照合と解除は 1 手
+            (同じロック区間) で行う。None なら無条件 (手動モード ON のように
+            「このペルソナのタイマーを止める」意図の経路)。
+
+    Returns:
+        解除したら True。対象の予約が無い / 別の会話の予約だったら False。
     """
     with _TOKENS_LOCK:
-        _timeout_tokens(manager).pop(persona_id, None)
-    scheduler = getattr(manager, "event_scheduler", None)
-    if scheduler is None:
-        return
-    scheduler.cancel(_timeout_key(persona_id))
+        reservations = _timeout_reservations(manager)
+        current = reservations.get(persona_id)
+        if expected_conversation_id is not None and (
+            current is None
+            or current.get("conversation_id") != expected_conversation_id
+        ):
+            # 記帳が無い = この予約は既に発火して消費されている (解除する相手が
+            # 居ない)。記帳が別の会話 = その予約は新しい会話のもので、閉じた側の
+            # 後片付けが触れてよい相手ではない。どちらも「何もしない」が正しい。
+            LOGGER.info(
+                "[user-conv] leaving the conversation timeout of %s alone: the "
+                "live reservation belongs to %s, not to %s",
+                persona_id,
+                current.get("conversation_id") if current else None,
+                expected_conversation_id,
+            )
+            return False
+        reservations.pop(persona_id, None)
+        scheduler = getattr(manager, "event_scheduler", None)
+        if scheduler is not None:
+            scheduler.cancel(_timeout_key(persona_id))
+    return True
 
 
 def rearm_conversation_timeout_on_load(manager: Any, persona_id: str) -> None:
     """起動時のタイマー再確立 (``_on_persona_registered``)。
 
-    EventScheduler はインメモリなので、予約は再起動で失われる。開いている会話の
-    出来事があるペルソナにだけ張り直す — 既に終わった会話へ張ると、起動 N 分後に
-    タイムアウトが空撃ちされる (2026-07-29 実機で観測)。
+    ⚠ **v0.3 (束 6c) 以降、ここは常に no-op で終わる。** 会話状態はプロセス内の
+    メモリが持つので、再起動した時点でどのペルソナも「会話していない」— 張り直す
+    べき待ちが構造上存在しない (v3 §9-9)。
 
-    読み取りに失敗したときは「会話していない」に倒れる (:func:`get_open_conversation`
-    の契約) ので張らない。旧実装が持っていた「判定不能なら読み取りを再試行する」
-    経路は、会話が開いていれば次のユーザー発話が必ず装填し直す (Track 時代と違い
-    仲裁経路を経ても最後は本モジュールが張る) ため不要になった。
+    関数を残すのは配線 (``_on_persona_registered``) の口としてで、旧実装が防いで
+    いた事故 (終わった会話へ張り直して起動 N 分後に空撃ち、2026-07-29 実機で観測)
+    は、供給源ごと消えたことで再発しない。
     """
     if get_open_conversation(manager, persona_id) is None:
         return
@@ -416,23 +613,29 @@ def rearm_conversation_timeout_on_load(manager: Any, persona_id: str) -> None:
 
 
 def handle_conversation_timeout(
-    manager: Any, persona_id: str, *, expected_episode_ref: Optional[str] = None
+    manager: Any, persona_id: str, *, expected_conversation_id: Optional[str] = None
 ) -> None:
-    """沈黙タイマーの発火 — 会話の出来事を閉じる帳簿処理。
+    """沈黙タイマーの発火 — 会話状態を落とす帳簿処理。
 
     会話終了判断 (post_conversation) は 2026-08-16 の裁定で退役した
     (autonomous_behavior_v3.md §13.3)。ここに残るのは待ちを閉じる帳簿処理だけ。
 
+    帳簿処理の本体 (``autonomy_wiring.handle_conversation_end``) は会話ロックを
+    取り、会話の開始と直列化される。
+
     Args:
-        expected_episode_ref: 呼び出し元が「この会話を終える」と決めた時点で
-            見ていた会話の出来事。指定すると条件付き close になる (debug の
-            切り上げのように、検証から実行までに間が空く経路で使う)。
+        expected_conversation_id: 呼び出し元が「この会話を終える」と決めた時点で
+            見ていた会話。指定すると条件付き解除になる。**沈黙タイマーの通常発火
+            も指定する** — 予約が張られた時点で開いていた会話を焼き付けてあり、
+            走り出した後に会話が入れ替わっても別の会話を閉じないため
+            (2026-08-22 指摘 1)。debug の切り上げのように、検証から実行までに
+            間が空く経路も同じ器を使う。
     """
     try:
         from saiverse.autonomy_wiring import handle_conversation_end
 
         handle_conversation_end(
-            manager, persona_id, expected_episode_ref=expected_episode_ref,
+            manager, persona_id, expected_conversation_id=expected_conversation_id,
         )
     except Exception:
         LOGGER.exception(
@@ -464,16 +667,25 @@ def start_conversation(
     *,
     pulse_options: Optional[Dict[str, Any]] = None,
 ) -> bool:
-    """会話を開始する: 出来事を開く → main_line Pulse → 沈黙タイマー装填。
+    """会話を開始する: 会話状態 → 遷移の一行 → main_line Pulse → 沈黙タイマー。
 
     旧 ``TrackManager.activate`` → ``on_track_activated`` hook が連鎖させていた
-    副作用のうち、Track なしでも要るもの**だけ**をここで直接行う。
+    副作用のうち、Track なしでも要るもの**だけ**をここで直接行う。会話の器は
+    2026-08-21 に Track から出来事の行へ、2026-08-22 (束 6c) に出来事の行から
+    メモリ内状態 + 遷移の一行へ移った (v3 §7) — 意味論は据え置きで器だけが変わる。
 
-    三手 (検索 → 開設 → Pulse とタイマー) はペルソナ単位のロックで原子化する。
-    同時発話が双方「未開」と判定して出来事と Pulse を二重に作るのを防ぐため
-    (2026-08-21 Codex 指摘 3)。競合に負けた側は既に開いた出来事へ相乗りし、
+    三手 (検査 → 状態を立てる → 遷移の一行とタイマー) はペルソナ単位のロックで
+    原子化する。同時発話が双方「未開」と判定して会話と Pulse を二重に作るのを
+    防ぐため (2026-08-21 Codex 指摘 3)。競合に負けた側は既に開いた会話へ相乗りし、
     Pulse を起こさずタイマーだけ張り直す — ユーザーの発話は
     ``auto_ingest_building_messages`` 経由で先行 Pulse の入力に含まれる。
+
+    **応答 (Pulse) はロックを抜けてから起こす。** 同じロックを終了処理も取る
+    ようになった (2026-08-22 指摘 1) ため、Pulse をロックの中に置くと、沈黙
+    タイマーの callback を同期実行する EventScheduler の dispatch スレッドが
+    LLM 呼び出しの後ろで待たされる。二重 Pulse の封じはロックの中で状態を
+    立て切ることで既に効いており、後から来た発話はロックを抜けた状態を見て
+    相乗りする。
 
     ユーザー発話メッセージは別経路 (building_histories →
     ``auto_ingest_building_messages``) で取り込まれるため、Pulse の ``user_input``
@@ -487,43 +699,46 @@ def start_conversation(
 
     Returns:
         会話を開始したら True。既に開いていて相乗りしたら False。
-
-    Raises:
-        UserUtteranceError: 会話の出来事を開けなかったとき (stage=open_episode)。
     """
-    with _conversation_lock(persona_id):
+    with conversation_lock(persona_id):
         # ロック内での再検査。ロックの外の判定は競合に対して何も保証しない。
         existing = get_open_conversation(manager, persona_id)
         if existing is not None:
             LOGGER.info(
                 "[user-conv] conversation %s is already open for %s; riding along "
-                "instead of opening a second one", existing.get("episode_ref"),
+                "instead of opening a second one", existing.get("conversation_id"),
                 persona_id,
             )
             _arm_quietly(manager, persona_id)
             return False
 
-        try:
-            _open_conversation_episode(manager, persona_id, user_id)
-        except Exception as exc:
-            LOGGER.exception(
-                "[user-conv] failed to open the conversation episode (persona=%s); "
-                "not starting the main_line pulse", persona_id,
-            )
-            raise UserUtteranceError(
-                f"failed to open the conversation episode for {persona_id}: {exc}",
-                stage="open_episode",
-                side_effects_done=False,
-                fallback_safe=False,
-            ) from exc
+        persona = _lookup_persona(manager, persona_id)
+        building_id = getattr(persona, "current_building_id", None)
+        participants = [persona_id] + ([str(user_id)] if user_id else [])
+        state = _set_open_conversation(
+            manager, persona_id,
+            building_id=building_id, participants=participants,
+        )
+        LOGGER.info(
+            "[user-conv] conversation %s opened for %s (building=%s)",
+            state["conversation_id"], persona_id, building_id,
+        )
+        # 遷移の一行は記録専用なので、失敗しても会話は進める。旧経路で「開設の
+        # 成功を Pulse 起動の前提にする」(2026-08-21 Codex 指摘 6) と決めたのは、
+        # 当時の出来事の行が「いま会話中か」の**正典**だったから。正典がメモリ内
+        # 状態へ移った今、この一行は正典ではなく記録に戻り、失敗の扱いも戻る。
+        _write_transition_line(manager, state, action="start")
+        # 予約はロックの中で張る。Pulse をロックの外へ出したので、ここで張らないと
+        # 「開いているのにタイマーが無い会話」がロックの外に一瞬でも現れる。
+        _arm_quietly(manager, persona_id)
 
-        try:
-            _start_main_line_pulse(manager, persona_id, pulse_options)
-        finally:
-            # 応答の成否に関わらず張る。ここで張り損ねると、開いた会話の出来事が
-            # 永久に閉じない。
-            _arm_quietly(manager, persona_id)
-        return True
+    try:
+        _start_main_line_pulse(manager, persona_id, pulse_options)
+    finally:
+        # 応答の成否に関わらず張り直す (会話に動きがあった瞬間が装填点)。
+        # ここで張り損ねても、ロック内で張った予約が会話を閉じてくれる。
+        _arm_quietly(manager, persona_id)
+    return True
 
 
 def _arm_quietly(manager: Any, persona_id: str) -> None:
@@ -633,16 +848,19 @@ def on_user_utterance(
       (``invoke_main_line``)。応答後に沈黙タイマーを張り直す。
     - **開いていない かつ 別の活動中でない**: :func:`start_conversation` で
       会話を開始する (ユーザーの呼びかけには常に即応答 — 2026-07-07 改訂)。
-    - **開いていない かつ 別の活動中** (開いている出来事 ≠ 会話): on_event 判断点
-      へ直結し仲裁を委ねる (``autonomy_wiring.handle_user_utterance_conflict``)。
-      判断が engage_now を選べば :func:`start_conversation`、選ばなければ応答
-      しない (track_retirement.md §7.4 の直結化)。
+    - **開いていない かつ 別の活動中**: on_event 判断点へ直結し仲裁を委ねる
+      (``autonomy_wiring.handle_user_utterance_conflict``)。判断が engage_now を
+      選べば :func:`start_conversation`、選ばなければ応答しない
+      (track_retirement.md §7.4 の直結化)。
+
+    ⚠ **v0.3 (束 6c) では 3 本目の経路に入らない** —
+    :func:`_get_open_non_conversation_episode` が常に None を返すため、判定は
+    実質「会話中か / そうでないか」の二分岐へ縮退する。活動の器を作り直すのは
+    v0.4 のティック設計 (v3 §9-3)。
 
     旧実装は 1 段目の判定に「対ユーザー会話 Track が running か」を使っていた。
     案 Y (life.md §7) 以降その running は会話が終わっても残るため、仲裁は事実上
-    「初回の発話」と「ゲーム参加で押し出された後」でしか発火しなかった。会話の
-    器を出来事へ移した本便で、判定は §7.4 が設計どおりに書いていた
-    「開いている出来事 ≠ 会話」に揃う。
+    「初回の発話」と「ゲーム参加で押し出された後」でしか発火しなかった。
 
     Args:
         pulse_options: 会話開始経路で main_line Pulse へ転送する起動オプション
@@ -659,7 +877,7 @@ def on_user_utterance(
     if open_conversation is not None:
         LOGGER.debug(
             "[user-conv] conversation %s is open for %s; direct main-line response",
-            open_conversation.get("episode_ref"), persona_id,
+            open_conversation.get("conversation_id"), persona_id,
         )
         try:
             invoke_main_line()
@@ -673,7 +891,7 @@ def on_user_utterance(
             ) from exc
         finally:
             # 沈黙タイマーは一度発火すると消費される一回限りの予約。同期応答の
-            # 後に張り直さないと、二度目以降の会話で出来事が永久に閉じなくなる。
+            # 後に張り直さないと、二度目以降の会話が永久に閉じなくなる。
             # タイマー再装填の失敗だけを理由に dispatcher 側で応答を再試行すると
             # 二重発話になり得るので、応答本体の例外は外へ保ったまま housekeeping
             # の失敗はログへ残して吸収する。

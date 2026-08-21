@@ -1541,16 +1541,11 @@ class SessionLifecycle:
             if f.chronicle_entry_ids or set(f.message_ids) <= absorbed
         ]
 
-        # §6 pulse 関節細分: 実際に退場する open episode の部分だけを子 episode 化。
-        # 渡すのは refs を刻んだ側 (FoldedRange) — 子 episode の DIGEST_REF は
-        # 再訪の鍵なので、あらすじ id を持っていない計画側の Fold では空になる。
-        # あらすじを持たない吸収退場 (disabled / 編纂対象ゼロ) では子 episode を
-        # **作らない** — 子の存在は「その部分の記憶はあらすじ経由で持っている」
-        # (experience_structure §6) の構造宣言であり、digest 無しの子と digest 層の
-        # 継承エッジは再訪先の無い嘘の構造になる (Codex レビュー 2026-07-27)。
-        for fold in applied:
-            if fold.episode_ref and fold.chronicle_entry_ids:
-                self._record_partial_episode(persona, fold)
+        # §6 pulse 関節細分 (open episode の部分退場を子 episode 化) は束 6c
+        # (2026-08-22) で書き手ごと退役した — エピソードという専用の記録行を
+        # 持たなくなったので (v3 §7)、分割すべき親も生まれない。畳んだ範囲の
+        # 記録は Chronicle エントリが持つ (`_record_partial_episode` の失敗時
+        # フォールバックが元から「あらすじが record of record」だった)。
 
         # 圧縮区間として持ち続けるのは「提示コンテキストに残っていて、かつあらすじを引ける」範囲だけ。
         # 飲み込まれた分のあらすじは head の Chronicle 枠が担当する。
@@ -1633,82 +1628,6 @@ class SessionLifecycle:
             fold.chronicle_short_ids = [
                 e.short_id for e in seen.values() if e.short_id is not None
             ]
-
-    def _record_partial_episode(self, persona, fold: "FoldedRange") -> None:
-        """open episode の部分退場を子 episode として刻む (experience_structure §6)。
-
-        長さを理由に出来事を分割はしない — 親 episode は開いたまま。退場した
-        pulse 群だけを「丸ごと退場済みの部分」として子 episode に写し、閉じて
-        digest 参照を持たせる。親から子へ digest 層の継承エッジを張り、親の
-        「その部分の記憶はあらすじ経由で持っている」を構造として残す (§3.3)。
-        """
-        persona_id = getattr(persona, "persona_id", None)
-        parent_ref = fold.episode_ref
-        if not persona_id or not parent_ref or self.manager is None:
-            return
-        try:
-            from saiverse.episodes import (
-                close_episode,
-                get_by_ref,
-                invalidate_open_cache,
-                open_episode,
-            )
-            from saiverse.experience_inheritance import record_edges
-
-            parent = get_by_ref(self.manager, persona_id, parent_ref)
-            kind = (parent or {}).get("kind") or "other"
-            digest_ref = None
-            if getattr(fold, "chronicle_entry_ids", None):
-                digest_ref = f"chronicle:{fold.chronicle_entry_ids[0]}"
-
-            # open → close → 継承エッジを**一つのトランザクション**で束ねる。
-            # 分けると close の失敗で「開きっぱなしの子」が残り、それが
-            # get_open_episode の「最後に開いた open」を奪って以後の会話が
-            # 合成 episode に付く (世界状態の破壊)。
-            db = self.manager.SessionLocal()
-            try:
-                child = open_episode(
-                    self.manager, persona_id, kind,
-                    building_id=(parent or {}).get("building_id"),
-                    origin_ref=parent_ref,
-                    meta={
-                        "partial_of": parent_ref,
-                        "partial_reason": "metabolism_eviction",
-                        "covered_messages": len(fold.message_ids),
-                    },
-                    session=db,
-                )
-                child_ref = child.get("episode_ref")
-                close_episode(
-                    self.manager, persona_id, child_ref,
-                    digest_ref=digest_ref, session=db,
-                )
-                record_edges(
-                    self.manager, persona_id, parent_ref,
-                    [{"parent_ref": child_ref, "layer": "digest",
-                      "origin": "metabolism_partial_fold"}],
-                    session=db,
-                )
-                db.commit()
-            except Exception:
-                db.rollback()
-                raise
-            finally:
-                db.close()
-            # session 指定時は open/close がキャッシュを触らない契約なので、
-            # commit 後に呼び出し側 (ここ) が整合を負う。
-            invalidate_open_cache(self.manager, persona_id)
-            LOGGER.info(
-                "[metabolism] partial fold of open episode %s recorded as child "
-                "%s (%d messages, persona=%s)",
-                parent_ref, child_ref, len(fold.message_ids), persona_id,
-            )
-        except Exception:
-            LOGGER.warning(
-                "[metabolism] failed to record partial episode for %s (persona=%s); "
-                "the fold itself stands (chronicle entry is the record of record)",
-                parent_ref, persona_id, exc_info=True,
-            )
 
     def run_metabolism(
         self,

@@ -47,12 +47,11 @@ from saiverse.day_scenario import (
     RealConversationUserEventDriver,
     ScenarioPlayer,
     SyncJudgmentDispatcher,
-    EpisodeSimUserEventDriver,
+    ConversationStateSimUserEventDriver,
     parse_scenario,
 )
 from saiverse.event_scheduler import EventScheduler
 from saiverse.persona_task_manager import PersonaTaskManager
-from saiverse.track_manager import TrackManager
 
 PERSONA_ID = "alice"
 PLAN_DATE = "2026-07-04"
@@ -107,8 +106,7 @@ class RecordingAdapter:
         mid = f"msg-{len(self.messages) + 1}"
         payload["id"] = mid
         self.messages.append(payload)
-        # 実 adapter と同じく message id を返す (digest 直書き経路が
-        # episodes.set_digest_ref の鍵に使う)
+        # 実 adapter と同じく message id を返す
         return mid
 
     def recent_persona_messages_by_count(self, max_messages, *, required_tags=None,
@@ -272,7 +270,6 @@ def _make_manager(session_factory, tmp_path, judge_fn, session_responses):
             SimpleNamespace(building_id="workshop", name="工房"),
         ],
         event_scheduler=EventScheduler(),  # start() しない (DES 前提)
-        track_manager=TrackManager(session_factory=session_factory),
         occupancy_manager=StubOccupancy(),
         sea_runtime=FakeWorkRuntime(llm, personas),
         _session_llm=llm,
@@ -447,24 +444,12 @@ def test_standard_day_runs_end_to_end(standard_run):
         (PERSONA_ID, "ai", "workshop", "alice_room"),
     ]
 
-    # 会話の出来事が開かれ、退室で閉じている (Track は経由しない — 2026-08-21)
-    from database.models import Episode
-    from saiverse import episodes
+    # 会話は開かれ、退室で閉じている。器は Track (v1) → 出来事の行 (2026-08-21)
+    # → メモリ内の会話状態 (2026-08-22、束 6c) と三代目で、いま残るのは
+    # 「開いていない」という事実だけ (autonomous_behavior_v3.md §7)。
+    from saiverse import user_conversation as uc
 
-    db = manager.SessionLocal()
-    try:
-        conversations = (
-            db.query(Episode)
-            .filter(
-                Episode.PERSONA_ID == PERSONA_ID,
-                Episode.KIND == episodes.KIND_CONVERSATION,
-            )
-            .all()
-        )
-        assert len(conversations) == 1
-        assert conversations[0].STATUS == "closed"
-    finally:
-        db.close()
+    assert uc.get_open_conversation(manager, PERSONA_ID) is None
 
 
 def test_standard_day_artifact_item_exists_and_task_completed(standard_run):
@@ -563,67 +548,25 @@ def test_standard_day_report_contents(standard_run, tmp_path):
     assert path.read_text(encoding="utf-8") == report
 
 
-def test_standard_day_episodes_recorded(standard_run):
-    """活性化 A1: 一日の実経路から出来事 (Episode) 行が生まれる。
+def test_standard_day_records_no_episode_rows(standard_run):
+    """束 6c (2026-08-22): 一日を通しても出来事 (Episode) の行は 1 つも生まれない。
 
-    期待列 (short_id 順): 知るコマ (slot) → その作業セッション (work_session)
-    → 作るコマ (slot) → その作業セッション → 会話 (conversation、15:00-15:30)
-    → 休むコマ (presence、record_level 透過)。skip されたコマは無いので 6 行。
+    旧テストは「コマ → 作業セッション → 会話 → 休む」の 6 行が並ぶことを固定して
+    いたが、autonomous_behavior_v3.md §7 の裁定でエピソードという専用の記録行を
+    持たなくなった。行が持っていた情報の行き先は同 §7 の表のとおり — どの件の実行
+    かはメッセージへの記録、始まりと終わりは遷移の一行、完了と成果物は台帳の一件。
+
+    ここで固定するのは「新しい行がどこからも生まれない」ことだけ。旧世界のデータを
+    読む口 (saiverse/episodes.py の読み取り API) は別に残っている。
     """
     manager, result, elapsed, created_item_ids = standard_run
     from database.models import Episode
-    from saiverse import episodes as ep_mod
 
     db = manager.SessionLocal()
     try:
-        rows = (
-            db.query(Episode)
-            .filter(Episode.PERSONA_ID == PERSONA_ID)
-            .order_by(Episode.SHORT_ID.asc())
-            .all()
-        )
-        for r in rows:
-            db.expunge(r)
+        assert db.query(Episode).filter(Episode.PERSONA_ID == PERSONA_ID).count() == 0
     finally:
         db.close()
-
-    assert [r.KIND for r in rows] == [
-        "slot", "work_session", "slot", "work_session", "conversation", "presence",
-    ]
-    # 一日の終わりには全て閉じている
-    assert all(r.STATUS == ep_mod.STATUS_CLOSED for r in rows)
-
-    # コマ出来事: meta.title = コマの title、origin_ref = コマ参照
-    slot_learn = rows[0]
-    meta_learn = json.loads(slot_learn.META_JSON)
-    assert meta_learn["title"] == "標本の材料を探す"
-    assert slot_learn.ORIGIN_REF == f"day_plan:{PERSONA_ID}:{PLAN_DATE}:0"
-    assert slot_learn.BUILDING_ID == "library"
-
-    # 作業セッション出来事: 出自 = 包んでいるコマ出来事、meta 書式契約 (§14)
-    ws_learn = rows[1]
-    assert ws_learn.ORIGIN_REF == f"episode:{slot_learn.SHORT_ID}"
-    meta_ws_create = json.loads(rows[3].META_JSON)
-    assert meta_ws_create["title"] == "共有文の下書きを書く"
-    assert meta_ws_create["artifacts"] == created_item_ids
-    # digest 統合 (D9): work_session は digest_ref=None で閉じ、post_session
-    # finalize の digest 直書き (untracked degrade) が set_digest_ref で後段確定
-    assert rows[3].DIGEST_REF is not None
-    assert rows[3].DIGEST_REF.startswith("message:msg-")
-
-    # 会話出来事: 15:00 開始 / 15:30 終了 (仮想クロック経由の epoch)
-    conv = rows[4]
-    assert conv.STARTED_AT == int(datetime(2026, 7, 4, 15, 0, 0).timestamp())
-    assert conv.ENDED_AT == int(datetime(2026, 7, 4, 15, 30, 0).timestamp())
-    assert PERSONA_ID in json.loads(conv.PARTICIPANTS_JSON)
-    # 15:00 時点の現在地 (14:00 に工房へ移動済み)
-    assert conv.BUILDING_ID == "workshop"
-    assert conv.OCCURRENCE_ID == f"conv:workshop:{conv.STARTED_AT}"
-
-    # 自室で過ごすコマ: presence + record_level 透過 (「実行済み」と偽らない)
-    rest = rows[5]
-    meta_rest = json.loads(rest.META_JSON)
-    assert meta_rest["record_level"] == day_plan.RECORD_LEVEL_PRESENCE_ONLY
 
 
 # ---------------------------------------------------------------------------
@@ -725,7 +668,7 @@ def _make_real_driver_manager(persona, reply: bool, monkeypatch):
     monkeypatch.setattr(uc, "get_open_conversation", _fake_get_open)
     monkeypatch.setattr(uc, "start_conversation", _fake_start)
     monkeypatch.setattr(
-        day_scenario, "_close_conversation_episode",
+        day_scenario, "_close_conversation_state",
         lambda mgr, persona_id: state.__setitem__("open", False),
     )
     return manager

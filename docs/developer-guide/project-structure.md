@@ -68,13 +68,20 @@ saiverse/
 ├── clock.py                # 仮想クロック（時刻の一元供給源、一日シミュレータ用）
 ├── day_simulator.py        # DES ドライバ（仮想時刻でイベントキューを早回し）
 ├── day_plan.py             # 時間割の保存とコマ発火配線 + 日次予算台帳（自律行動 v2 §4.2/§4.5）
-├── episodes.py             # 出来事（episode）エンベロープの CRUD／open・close（life_concept_map §8）
-├── user_conversation.py    # ユーザーとの会話の入口（出来事 open + main_line 起動 + 沈黙タイマー。Track は経由しない）
+├── episodes.py             # 出来事（episode）の**読み取り専用**の口。書き込み API は 2026-08-22 に退役し、
+│                           #   テーブルと既存行は旧データの残置として残る（v3 §7）
+├── user_conversation.py    # ユーザーとの会話の入口。「いま会話中か」はメモリ内の会話状態、応答は main_line
+│                           #   Pulse、終わりは沈黙タイマー。始まり／終わりは Building ログの遷移の一行（機構名義）
+├── task_book.py            # タスク帳（相手のある一件・期限つきの一件。v3 §4.1）
+├── v3_shape_migration.py   # v0.3「形の層」への機械写し（LIFE_PURPOSE / 旧 Track の関心 / desire 候補 →
+│                           #   コア記憶・手帳）。ペルソナ登録フックから一回だけ走る（v3 §9-8）
 ├── experience_inheritance.py # 継承エッジ（範囲ノード間の認識連続性 DAG、experience_structure §3.3 / W13）
 ├── day_scenario.py         # シナリオプレイヤー（一日シナリオの仮想時刻再生、自律行動 v2 §12）
-├── day_report.py           # 一日レポート「一日新聞」（予定 vs 実績・成果物・欲求・予算の日次まとめ）
+├── day_report.py           # 一日レポート「一日新聞」（予定 vs 実績・成果物・予算の日次まとめ）
 ├── facility_map.py         # 型→公共施設の解決（Building ロールタグ、自律行動 v2 §6.1）
-├── judgment_points.py      # 判断点コーディネータ（起床/セッション終了の動的スキーマ + 起動、judgment_points.md）
+├── slot_kind_catalog.py    # コマ種別カタログ（kind は固定列挙でなく資源 3 層で増減する）
+├── judgment_points.py      # 判断点コーディネータ（起床/セッション終了/イベント到着/就寝の動的スキーマ +
+│                           #   起動、judgment_points.md）
 ├── llm_router.py           # ツール呼び出し判定
 ├── gemini_clients.py       # Router/LLM client共通のGemini SDK client構築
 ├── model_configs.py        # モデル設定管理
@@ -82,14 +89,23 @@ saiverse/
 ├── provider_security.py    # provider credentialと接続先URLの束縛・SSRF境界
 ├── file_policy.py          # persisted pathのmanaged root境界
 ├── runtime_marker.py       # City単位process identity marker（保守操作の停止判定）
-├── meta_layer.py           # メタ判断まわり
+├── meta_layer.py           # 判断 Pulse の共有基盤だけが残る（per-persona Lock / 判断ログ / 設定読み。
+│                           #   v1 メタ判断の状況分類は 2026-08-14 に退役）
 ├── buildings.py            # Building モデルヘルパ
 ├── data_paths.py           # パス管理（user_data/builtin_data）
 ├── addon_*.py              # アドオン機構（loader/installer/registry 等）
-├── note_manager.py         # メモ機構
 ├── observer_manager.py     # Observer（定期観測 Fixture）
 └── ...                     # その他コアモジュール
 ```
+
+**2026-08-21〜22 に消えたモジュール**（新しいコードから参照しない）:
+
+| 消えたもの | いまの持ち主 |
+|---|---|
+| `saiverse/track_manager.py` | 機構ごと退役。`ActionTrack` テーブルと既存行だけが読み取り専用の残置として残る（[track_retirement.md](../intent/track_retirement.md)）。`SAIVerseManager` に `.track_manager` はもう無い |
+| `saiverse/activity_view.py` | ライフビュー UI と同時に退役。「暮らしの窓」としての作り直しは v0.4（[autonomous_behavior_v3.md](../intent/autonomous_behavior_v3.md) §9-9） |
+| `api/routes/episodes.py` / `api/routes/people/{activity,autonomy,autonomous,life_settings,timetable_template,tasks}.py` | ルートごと削除。`people/life.py` に残るのは `/clips` だけ |
+| フロント: `LifeView` / `LifeSettingsModal` / `TimetableTemplateModal` / `TasksModal` / `EventsTimeline` / `EventsModal` / `PersonaProfileModal` / `app/events/` | 同上。自律行動の運転面は v0.3 では UI ごと隠す方針（v3 §11） |
 
 ### api/
 
@@ -107,9 +123,12 @@ api/
 │   ├── mcp.py        #   MCP
 │   ├── addon*.py     #   アドオン（catalog / actions / events）
 │   ├── admin.py      #   管理機能
+│   ├── people/       #   ペルソナ別（記憶・想起・スケジュール・デバッグ等のサブパッケージ）
 │   └── ...
 └── utils/
 ```
+
+実在するルートの一覧は自動生成の [api-endpoints.md](../reference/api-endpoints.md) が正（この木は入口の説明で、網羅ではない）。
 
 ### scripts/
 
@@ -152,9 +171,11 @@ sea/
 ├── pulse_controller.py   # PulseController（優先度制御・割り込み）
 ├── pulse_context.py      # PulseContext（Aspect / line 階層）
 ├── mode_spell_permissions.py # モード別 Spell 許可
-├── work_session.py       # 予算付き作業セッションランナー（自律行動 v2 §4.3）
+├── work_session.py       # 予算付き作業セッションランナー（自律行動 v2 §4.3）。**休眠** — v3 §8 で退役予定で、
+│                         #   出来事を開く／閉じる処理は 2026-08-22 に no-op 化済み
 ├── mcp_tool_refresh.py   # 頭での per_persona MCP ツール一覧の取得（mcp_addon_integration §I）
 ├── session_lifecycle.py  # Anchor / Metabolism / Chronicle 生成（Session の節目管理）
+├── sluice.py             # スルース（退場の関所での採取: コア記憶 / 手帳のメモ / 約束。旧 gold_panning）
 ├── eviction_plan.py      # 退場計画（純関数。episode 単位・文字数三水位）
 ├── window_refill.py      # 読み戻しの計画（純関数。残す量を下回る窓の開き直し — arasuji_levels §15）
 ├── session_window.py     # 提示コンテキストと圧縮区間の digest 置き換え
@@ -190,7 +211,8 @@ SAIMemory 記憶システム本体（per-persona の `memory.db`）。
 
 ```
 sai_memory/
-├── memory/           # 生ログ（Thread/Message）・recall・entity_extractor
+├── memory/           # 生ログ（Thread/Message）・recall・entity_extractor・pocketbook（手帳: アクティビティ +
+│                     #   メモ）・continuity（連続性の刻印）
 ├── arasuji/          # Chronicle（あらすじ）生成（generator/storage/context）
 ├── memopedia/        # Memopedia（知識グラフ。core/storage/generator）
 ├── core_memory.py    # コア記憶（記憶アーキv2 ゾーンA。memory.db 同居）
@@ -247,12 +269,15 @@ database/
 ```
 builtin_data/
 ├── tools/            # 組み込みツール定義（*.py 直下）
-├── playbooks/        # 組み込み Playbook
-│   └── public/       #   router_callable な Playbook 群（meta_judgment*.json 等）
+├── playbooks/        # 組み込み Playbook（同梱一覧は reference/playbook-catalog.md）
+│   ├── public/       #   稼働中の Playbook 群（判断点 / 会話メインライン / 能力 / サブ内部）
+│   └── archive/      #   退役済みの保管庫（読み込まれない）
+├── slot_kinds/       # 組み込みコマ種別カタログ（時間割の kind 語彙）
 ├── models/           # 組み込みモデル設定（1モデル1JSON）
 ├── providers/        # 組み込みプロバイダ設定（接続先定義）
 ├── phenomena/        # 組み込み Phenomena
 ├── prompts/          # 組み込みプロンプト
+├── feeds/            # 組み込み RSS フィードのプリセット
 ├── icons/            # 組み込みアイコン
 ├── cities.json       # City 初期設定
 └── seed_data.json    # シード用データ

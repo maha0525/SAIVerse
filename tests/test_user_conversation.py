@@ -1,23 +1,28 @@
-"""saiverse/user_conversation.py — Track を経由しない会話経路のテスト。
+"""saiverse/user_conversation.py — Track も出来事も経由しない会話経路のテスト。
 
-芯 (track_retirement.md §2 住人 2): 会話の実体は「開いている会話の出来事 +
-main_line 起動 + 沈黙タイマー」の三つで、Track はどこにも登場しない。
+芯 (autonomous_behavior_v3.md §7 / track_retirement.md §2 住人 2): 会話の実体は
+**メモリ内の会話状態 + main_line 起動 + 沈黙タイマー**の三つ。Track はどこにも
+登場せず、束 6c (2026-08-22) からは出来事 (Episode) の行も登場しない — 始まりと
+終わりだけが「遷移の一行」として Building ログに残る。
 
 覆う振る舞い:
 - 会話が開いていれば直接メインライン起動 + 沈黙タイマーの張り直し
-- 会話が閉じていて別の活動もなければ会話開始 (出来事 open → main_line → タイマー)
-- 会話が閉じていて別の活動中なら on_event 判断点へ直結 (engage_now でだけ会話開始)
+- 会話が閉じていれば会話開始 (状態を立てる → 遷移の一行 → main_line → タイマー)
+- 別の活動中の仲裁経路 (v0.3 では供給源ゼロ。routing だけ回帰で固定する)
 - 沈黙タイマーの対象外判定 (デバッグ完全手動モード / タイムアウト 0 以下)
-- タイムアウト発火で会話の出来事が閉じ、予約も解除される
-- 起動時の張り直しは「会話が開いているペルソナ」だけ
+- タイムアウト発火で会話状態が落ち、終わりの一行が残り、予約も解除される
+- 再起動 (状態が空) では張り直す待ちが構造上存在しない
 
-2026-08-21 Codex レビューで塞いだ穴 (以下の 6 件はいずれも回帰テスト付き):
+2026-08-21 Codex レビューで塞いだ穴のうち、器の差し替えを越えて生きているもの:
 - 沈黙タイマーが仮想クロックで刻まれる (実時刻ではない)
 - 取って代わられた予約の callback が新しい会話を閉じない (世代トークン)
-- 同時発話で会話の出来事と Pulse が二重に作られない (ペルソナ単位のロック)
+- 同時発話で会話と Pulse が二重に作られない (ペルソナ単位のロック)
 - 副作用の後の失敗を dispatcher が直接応答で肩代わりしない (二重応答の封じ)
 - 新規会話の初回発話にも Pulse 起動オプションが届く
-- 会話の出来事を開けなかったら応答せず送出する
+
+⚠ 旧「会話の出来事を開けなかったら応答しない」(Codex 指摘 6) の回帰は対象消滅した。
+あの厳しさは出来事の行が「いま会話中か」の**正典**だったことに由来する。正典が
+メモリ内状態へ移り、Building ログの一行は記録に戻ったので、書けなくても会話は進む。
 """
 import threading
 from datetime import datetime, timedelta
@@ -29,8 +34,8 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from database.models import AI, Base, City, Episode, User
-from saiverse import clock, episodes, user_conversation as uc
+from database.models import AI, Base, City, User
+from saiverse import clock, user_conversation as uc
 from saiverse.event_scheduler import EventScheduler
 from saiverse.pulse_dispatcher import PulseDispatcher
 
@@ -75,6 +80,9 @@ def manager(session_factory):
         personas={PERSONA_ID: persona},
         event_scheduler=EventScheduler(),  # start() しない (発火は手で回す)
         run_sea_user=MagicMock(return_value=[]),
+        add_building_event=MagicMock(return_value={}),
+        occupants={"test_building": [PERSONA_ID]},
+        id_to_name_map={PERSONA_ID: "Alice"},
         _active_sse_callbacks={},
         _debug_manual_mode_personas=set(),
         _autonomy_managers={},
@@ -83,27 +91,38 @@ def manager(session_factory):
     return mgr
 
 
-def _open_conversations(mgr):
-    db = mgr.SessionLocal()
-    try:
-        return (
-            db.query(Episode)
-            .filter(
-                Episode.PERSONA_ID == PERSONA_ID,
-                Episode.KIND == episodes.KIND_CONVERSATION,
-            )
-            .all()
-        )
-    finally:
-        db.close()
+def _open_conversation(mgr):
+    """いま開いている会話 (無ければ None)。"""
+    return uc.get_open_conversation(mgr, PERSONA_ID)
+
+
+def _start_conversation_state(mgr):
+    """本番の入口を通さずに会話状態だけ立てる (前提条件のセットアップ用)。"""
+    return uc._set_open_conversation(
+        mgr, PERSONA_ID, building_id="test_building", participants=[PERSONA_ID],
+    )
+
+
+def _transition_actions(mgr):
+    """Building ログへ書かれた遷移の一行の action 列 (start / end)。"""
+    actions = []
+    for call in mgr.add_building_event.call_args_list:
+        event = (call.args[1].get("metadata") or {}).get("event") or {}
+        if event.get("type") == uc.CONVERSATION_TRANSITION_EVENT:
+            actions.append(event.get("action"))
+    return actions
 
 
 @pytest.fixture(autouse=True)
-def _real_clock():
-    """どのテストも実クロックで始まり、仮想モードを持ち越さない。"""
+def _clean_state():
+    """どのテストも実クロック + 空の会話状態で始まる (持ち越さない)。"""
     clock.disable_virtual()
+    uc._FALLBACK_STATE.clear()
+    uc._FALLBACK_RESERVATIONS.clear()
     yield
     clock.disable_virtual()
+    uc._FALLBACK_STATE.clear()
+    uc._FALLBACK_RESERVATIONS.clear()
 
 
 def _armed(mgr):
@@ -115,6 +134,18 @@ def _reservation(mgr):
     return mgr.event_scheduler._entries_by_key.get(uc._timeout_key(PERSONA_ID))
 
 
+def _pretend_busy(monkeypatch, busy):
+    """「別の活動中」を差し込む。
+
+    v0.3 では :func:`uc._get_open_non_conversation_episode` が常に None を返す
+    (出来事の書き手が全滅したため — v3 §7)。仲裁経路そのものは v0.4 のティック
+    設計が作り直す口として残っているので、routing の正しさだけをここで固定する。
+    """
+    monkeypatch.setattr(
+        uc, "_get_open_non_conversation_episode", lambda *_a, **_kw: busy,
+    )
+
+
 # ---------------------------------------------------------------------------
 # on_user_utterance: 経路の分岐
 # ---------------------------------------------------------------------------
@@ -122,9 +153,7 @@ def _reservation(mgr):
 
 def test_open_conversation_answers_directly_and_rearms_the_timeout(manager):
     """会話が開いていれば直接メインライン起動。応答後にタイマーを張り直す。"""
-    episodes.open_conversation_episode(
-        manager, PERSONA_ID, building_id="test_building",
-    )
+    _start_conversation_state(manager)
     invoke = MagicMock()
 
     uc.on_user_utterance(
@@ -135,8 +164,8 @@ def test_open_conversation_answers_directly_and_rearms_the_timeout(manager):
     # 会話開始経路 (空入力の main_line) は通らない
     manager.run_sea_user.assert_not_called()
     assert _armed(manager) is True
-    # 出来事は開き直されない (冪等)
-    assert len(_open_conversations(manager)) == 1
+    # 会話は開き直されない (始まりの一行も増えない)
+    assert _transition_actions(manager) == []
 
 
 def test_no_conversation_and_no_activity_starts_the_conversation(manager):
@@ -155,16 +184,46 @@ def test_no_conversation_and_no_activity_starts_the_conversation(manager):
     assert args[2] == ""
     assert "origin_track_id" not in kwargs
 
-    convs = _open_conversations(manager)
-    assert len(convs) == 1 and convs[0].STATUS == "open"
+    conv = _open_conversation(manager)
+    assert conv is not None
+    assert conv["building_id"] == "test_building"
+    assert conv["participants"] == [PERSONA_ID, USER_ID]
+    assert _armed(manager) is True
+
+
+def test_the_start_writes_one_transition_line_under_the_mechanism_name(manager):
+    """始まりは機構名義 (role='host') の一行として Building ログに実在する。
+
+    v3 §7 の表「始まり・終わりの実在イベント → 遷移の一行」。ペルソナ名義
+    (assistant) では書かない — 機構の記録を本人の声として残すと口調を誤学習する。
+    """
+    uc.start_conversation(manager, PERSONA_ID, USER_ID)
+
+    manager.add_building_event.assert_called_once()
+    building_id, message = manager.add_building_event.call_args.args[:2]
+    assert building_id == "test_building"
+    assert message["role"] == "host"
+    event = message["metadata"]["event"]
+    assert event["type"] == uc.CONVERSATION_TRANSITION_EVENT
+    assert event["action"] == "start"
+    assert event["persona_id"] == PERSONA_ID
+    assert event["conversation_id"] == _open_conversation(manager)["conversation_id"]
+
+
+def test_a_failed_transition_line_does_not_stop_the_response(manager):
+    """遷移の一行は記録であって正典ではない — 書けなくても会話は進む。"""
+    manager.add_building_event.side_effect = RuntimeError("building log is down")
+
+    assert uc.start_conversation(manager, PERSONA_ID, USER_ID) is True
+
+    manager.run_sea_user.assert_called_once()
+    assert _open_conversation(manager) is not None
     assert _armed(manager) is True
 
 
 def test_busy_with_another_activity_fires_the_on_event_judgment(manager, monkeypatch):
     """会話が閉じていて別の活動中なら on_event 判断点へ直結する。"""
-    episodes.open_episode(
-        manager, PERSONA_ID, episodes.KIND_WORK_SESSION, building_id="test_building",
-    )
+    _pretend_busy(monkeypatch, {"kind": "work_session", "episode_ref": "episode:1"})
     seen = {}
 
     def _fake_conflict(mgr, persona_id, text, *, engage, user_id):
@@ -184,14 +243,12 @@ def test_busy_with_another_activity_fires_the_on_event_judgment(manager, monkeyp
     # 判断が engage_now を出さなければ応答しない
     invoke.assert_not_called()
     manager.run_sea_user.assert_not_called()
-    assert _open_conversations(manager) == []
+    assert _open_conversation(manager) is None
 
 
 def test_busy_and_engage_now_starts_the_conversation(manager, monkeypatch):
     """仲裁が engage_now を選んだら、初回発火と同じ入口で会話が始まる。"""
-    episodes.open_episode(
-        manager, PERSONA_ID, episodes.KIND_WORK_SESSION, building_id="test_building",
-    )
+    _pretend_busy(monkeypatch, {"kind": "work_session", "episode_ref": "episode:1"})
 
     def _fake_conflict(mgr, persona_id, text, *, engage, user_id):
         engage()
@@ -206,9 +263,17 @@ def test_busy_and_engage_now_starts_the_conversation(manager, monkeypatch):
     )
 
     manager.run_sea_user.assert_called_once()
-    convs = _open_conversations(manager)
-    assert len(convs) == 1 and convs[0].STATUS == "open"
+    assert _open_conversation(manager) is not None
     assert _armed(manager) is True
+
+
+def test_the_busy_lookup_is_degraded_to_none_in_v03(manager):
+    """v0.3 では「別の活動中」の供給源がゼロ — 仲裁は直接応答へ縮退する。
+
+    旧 DB に閉じ損ねた open な出来事が残っていても仲裁が永久発火しないことを
+    ここで固定する (読みごと止めた理由そのもの)。
+    """
+    assert uc._get_open_non_conversation_episode(manager, PERSONA_ID) is None
 
 
 def test_main_line_failure_still_arms_the_timeout(manager):
@@ -218,7 +283,7 @@ def test_main_line_failure_still_arms_the_timeout(manager):
     uc.start_conversation(manager, PERSONA_ID, USER_ID)
 
     assert _armed(manager) is True
-    assert len(_open_conversations(manager)) == 1
+    assert _open_conversation(manager) is not None
 
 
 # ---------------------------------------------------------------------------
@@ -261,30 +326,26 @@ def test_only_if_absent_keeps_the_live_reservation(manager):
 
 
 def test_timeout_closes_the_conversation_and_releases_the_reservation(manager):
-    episodes.open_conversation_episode(
-        manager, PERSONA_ID, building_id="test_building",
-    )
-    uc.arm_conversation_timeout(manager, PERSONA_ID)
+    uc.start_conversation(manager, PERSONA_ID, USER_ID)
 
     uc.handle_conversation_timeout(manager, PERSONA_ID)
 
-    convs = _open_conversations(manager)
-    assert len(convs) == 1 and convs[0].STATUS == "closed"
+    assert _open_conversation(manager) is None
     assert _armed(manager) is False
+    # 始まりと終わりが両方ログに実在する
+    assert _transition_actions(manager) == ["start", "end"]
 
 
-def test_timeout_with_a_stale_expected_ref_closes_nothing(manager):
+def test_timeout_with_a_stale_expected_id_closes_nothing(manager):
     """検証時に見ていた会話が既に別のものへ入れ替わっていたら閉じない。"""
-    episodes.open_conversation_episode(
-        manager, PERSONA_ID, building_id="test_building",
-    )
+    uc.start_conversation(manager, PERSONA_ID, USER_ID)
 
     uc.handle_conversation_timeout(
-        manager, PERSONA_ID, expected_episode_ref="episode:999",
+        manager, PERSONA_ID, expected_conversation_id="conv:deadbeef",
     )
 
-    convs = _open_conversations(manager)
-    assert len(convs) == 1 and convs[0].STATUS == "open"
+    assert _open_conversation(manager) is not None
+    assert _transition_actions(manager) == ["start"]
 
 
 # ---------------------------------------------------------------------------
@@ -292,15 +353,19 @@ def test_timeout_with_a_stale_expected_ref_closes_nothing(manager):
 # ---------------------------------------------------------------------------
 
 
-def test_rearm_on_load_skips_when_no_conversation_is_open(manager):
+def test_rearm_on_load_is_a_no_op_after_a_restart(manager):
+    """再起動後は会話状態が空 = 「会話していない」— 張り直す待ちが存在しない。
+
+    旧実装 (出来事の行) は閉じ損ねた行が再起動を跨いで「永遠に会話中」として
+    残る事故を持っていた。器をメモリ内状態にしたことで供給源ごと消えた。
+    """
     uc.rearm_conversation_timeout_on_load(manager, PERSONA_ID)
     assert _armed(manager) is False
 
 
-def test_rearm_on_load_arms_when_a_conversation_is_open(manager):
-    episodes.open_conversation_episode(
-        manager, PERSONA_ID, building_id="test_building",
-    )
+def test_rearm_on_load_arms_while_a_conversation_is_live(manager):
+    """同一プロセス内で会話が生きていれば、失われた予約は埋め直せる。"""
+    _start_conversation_state(manager)
     uc.rearm_conversation_timeout_on_load(manager, PERSONA_ID)
     assert _armed(manager) is True
 
@@ -314,14 +379,12 @@ def test_timeout_is_armed_and_fires_on_the_virtual_clock(manager):
     """仮想日付のシミュレーション中でも、期限は仮想時刻基準で来て会話が閉じる。
 
     実時刻 (``datetime.now()``) で刻むと、期限がシミュレーション終了後へ飛んで
-    開いた会話の出来事が最後まで閉じない。
+    開いた会話が最後まで閉じない。
     """
     start = datetime(2026, 8, 21, 9, 0, 0)
     clock.enable_virtual(start)
 
-    episodes.open_conversation_episode(
-        manager, PERSONA_ID, building_id="test_building",
-    )
+    _start_conversation_state(manager)
     assert uc.arm_conversation_timeout(manager, PERSONA_ID) is True
 
     expected = start + timedelta(minutes=uc.DEFAULT_CONVERSATION_TIMEOUT_MINUTES)
@@ -330,14 +393,13 @@ def test_timeout_is_armed_and_fires_on_the_virtual_clock(manager):
     # まだ期限前: 何も起きない
     clock.advance_to(start + timedelta(minutes=5))
     assert manager.event_scheduler.run_due(clock.now()) == 0
-    assert _open_conversations(manager)[0].STATUS == "open"
+    assert _open_conversation(manager) is not None
 
     # 仮想時刻を期限の先へ進めると発火して会話が閉じる
     clock.advance_to(expected + timedelta(minutes=1))
     assert manager.event_scheduler.run_due(clock.now()) == 1
 
-    convs = _open_conversations(manager)
-    assert len(convs) == 1 and convs[0].STATUS == "closed"
+    assert _open_conversation(manager) is None
     assert _armed(manager) is False
 
 
@@ -359,9 +421,7 @@ def _detach_reservation(mgr):
 
 
 def test_a_superseded_timeout_callback_does_not_close_the_new_conversation(manager):
-    episodes.open_conversation_episode(
-        manager, PERSONA_ID, building_id="test_building",
-    )
+    _start_conversation_state(manager)
     uc.arm_conversation_timeout(manager, PERSONA_ID)
     stale = _detach_reservation(manager)
 
@@ -372,44 +432,40 @@ def test_a_superseded_timeout_callback_does_not_close_the_new_conversation(manag
     stale.callback()
 
     # 古い世代は降りる: 会話は開いたまま、新しい予約も生きている
-    assert _open_conversations(manager)[0].STATUS == "open"
+    assert _open_conversation(manager) is not None
     assert _reservation(manager) is fresh
     assert fresh.cancelled is False
 
     # 現行世代なら閉じる
     fresh.callback()
-    assert _open_conversations(manager)[0].STATUS == "closed"
+    assert _open_conversation(manager) is None
 
 
 def test_rearming_the_same_conversation_also_supersedes_the_old_callback(manager):
-    """同じ出来事のままタイマーを延長した場合も、古い世代は無効になる。
+    """同じ会話のままタイマーを延長した場合も、古い世代は無効になる。
 
-    出来事の参照だけを照合値にすると、この並び (会話は同じ / 予約だけ新しい) を
+    会話の識別子だけを照合値にすると、この並び (会話は同じ / 予約だけ新しい) を
     区別できず、延長したはずの会話が古い callback に閉じられる。
     """
-    episodes.open_conversation_episode(
-        manager, PERSONA_ID, building_id="test_building",
-    )
+    _start_conversation_state(manager)
     uc.arm_conversation_timeout(manager, PERSONA_ID)
     stale = _detach_reservation(manager)
     uc.arm_conversation_timeout(manager, PERSONA_ID)  # 同じ会話のまま延長
 
     stale.callback()
 
-    assert _open_conversations(manager)[0].STATUS == "open"
+    assert _open_conversation(manager) is not None
 
 
 def test_a_cancelled_reservation_cannot_fire_after_it_started(manager):
-    episodes.open_conversation_episode(
-        manager, PERSONA_ID, building_id="test_building",
-    )
+    _start_conversation_state(manager)
     uc.arm_conversation_timeout(manager, PERSONA_ID)
     stale = _detach_reservation(manager)
 
     uc.cancel_conversation_timeout(manager, PERSONA_ID)
     stale.callback()
 
-    assert _open_conversations(manager)[0].STATUS == "open"
+    assert _open_conversation(manager) is not None
 
 
 def test_each_reservation_gets_a_distinct_random_token(manager):
@@ -417,16 +473,152 @@ def test_each_reservation_gets_a_distinct_random_token(manager):
     seen = set()
     for _ in range(5):
         uc.arm_conversation_timeout(manager, PERSONA_ID)
-        seen.add(manager._conversation_timeout_tokens[PERSONA_ID])
+        seen.add(manager._conversation_timeout_reservations[PERSONA_ID]["token"])
     assert len(seen) == 5
 
 
 # ---------------------------------------------------------------------------
-# 指摘 3: 同時発話でも会話の出来事と Pulse は一つだけ
+# 2026-08-22 指摘 1: 予約は「どの会話を見張っているか」まで持つ
 # ---------------------------------------------------------------------------
 
 
-def test_concurrent_start_opens_one_episode_and_one_pulse(manager):
+def test_a_timeout_armed_without_an_open_conversation_closes_nothing(manager):
+    """会話が開いていないときに張られた予約は、閉じる相手を持たない。
+
+    見張る会話を焼き付けずに発火させると、その予約は「いま開いている会話」を
+    掴んで閉じてしまう — 自分とは無関係に始まった会話でも。
+    """
+    assert uc.arm_conversation_timeout(manager, PERSONA_ID) is True
+    stale = _detach_reservation(manager)
+
+    # 予約が走り出した後で、無関係な会話が始まる
+    _start_conversation_state(manager)
+
+    stale.callback()
+
+    assert _open_conversation(manager) is not None
+
+
+def test_cancelling_a_timeout_only_touches_that_conversation_s_reservation(manager):
+    """予約の解除は「その会話のために張られた予約」だけに効く。
+
+    会話の終了処理は状態を落としてから予約を解除する。その隙間に別の会話が
+    始まっていたら、解除してよい相手はもう居ない (新しい会話は自分の予約を
+    持っており、消されると永久に閉じない会話になる)。
+    """
+    _start_conversation_state(manager)
+    uc.arm_conversation_timeout(manager, PERSONA_ID)
+    conversation = _open_conversation(manager)["conversation_id"]
+
+    # 別の会話の名前で解除しようとしても効かない
+    assert uc.cancel_conversation_timeout(
+        manager, PERSONA_ID, expected_conversation_id="conv:someone-else",
+    ) is False
+    assert _armed(manager) is True
+
+    # 自分の会話の名前なら効く
+    assert uc.cancel_conversation_timeout(
+        manager, PERSONA_ID, expected_conversation_id=conversation,
+    ) is True
+    assert _armed(manager) is False
+
+
+def test_cancelling_without_an_expected_conversation_is_unconditional(manager):
+    """手動モード ON のように「このペルソナのタイマーを止める」意図は無条件。"""
+    _start_conversation_state(manager)
+    uc.arm_conversation_timeout(manager, PERSONA_ID)
+
+    assert uc.cancel_conversation_timeout(manager, PERSONA_ID) is True
+    assert _armed(manager) is False
+
+
+def test_closing_a_stale_conversation_leaves_the_live_reservation_alone(manager):
+    """会話 A の後片付けは、その後に始まった会話 B の予約を消さない。
+
+    予約の解除は「閉じた会話の予約であるとき」だけ効く。無条件に解除すると、
+    B は開いたままタイマーの無い会話として残り、永久に閉じない。
+    """
+    uc.start_conversation(manager, PERSONA_ID, USER_ID)  # 会話 A
+    conversation_a = _open_conversation(manager)["conversation_id"]
+    uc.handle_conversation_timeout(
+        manager, PERSONA_ID, expected_conversation_id=conversation_a,
+    )
+    uc.start_conversation(manager, PERSONA_ID, USER_ID)  # 会話 B
+    conversation_b = _open_conversation(manager)["conversation_id"]
+    assert conversation_b != conversation_a
+
+    # 会話 A のために張られた古い予約が、いまさら後片付けを走らせる
+    uc.handle_conversation_timeout(
+        manager, PERSONA_ID, expected_conversation_id=conversation_a,
+    )
+
+    assert _open_conversation(manager)["conversation_id"] == conversation_b
+    assert _armed(manager) is True
+
+
+def test_a_conversation_started_during_another_s_close_keeps_its_timer(manager):
+    """会話 A の終了処理の**最中**に会話 B が始まっても、B は無傷で残る。
+
+    指摘 1 の現物。終了処理が開始処理と直列化されていないと、B は A の後片付けの
+    途中で開き、A の予約解除が B の予約を巻き添えにする (B はタイマーの無い会話
+    として残り、永久に閉じない)。
+    """
+    uc.start_conversation(manager, PERSONA_ID, USER_ID)  # 会話 A
+    conversation_a = _open_conversation(manager)["conversation_id"]
+    stale = _detach_reservation(manager)
+
+    closing = threading.Event()
+    release = threading.Event()
+    original = manager.add_building_event.side_effect
+
+    def _block_on_the_end_line(building_id, message, **kwargs):
+        event = (message.get("metadata") or {}).get("event") or {}
+        if event.get("action") == "end":
+            closing.set()
+            release.wait(10)
+        return original(building_id, message, **kwargs) if original else {}
+
+    manager.add_building_event.side_effect = _block_on_the_end_line
+
+    started = {}
+
+    def _start_b():
+        started["opened"] = uc.start_conversation(manager, PERSONA_ID, USER_ID)
+
+    closer = threading.Thread(target=stale.callback, name="close-a")
+    starter = threading.Thread(target=_start_b, name="start-b")
+    try:
+        closer.start()
+        assert closing.wait(10) is True
+
+        starter.start()
+        # 直列化されていれば starter は A の終了処理が終わるまで進めない
+        starter.join(timeout=0.3)
+        assert starter.is_alive() is True
+    finally:
+        # 途中で転んでもロックを握った closer を必ず解放する — 残すと後続の
+        # テストが会話ロックで止まる。
+        release.set()
+        closer.join(timeout=10)
+        if starter.ident is not None:
+            starter.join(timeout=10)
+    assert not closer.is_alive() and not starter.is_alive()
+
+    assert started["opened"] is True
+    conversation_b = _open_conversation(manager)
+    assert conversation_b is not None
+    assert conversation_b["conversation_id"] != conversation_a
+    # B は自分の予約を持ったまま (A の後片付けに巻き込まれていない)
+    assert _armed(manager) is True
+    assert _transition_actions(manager) == ["start", "end", "start"]
+
+
+# ---------------------------------------------------------------------------
+# 指摘 3: 同時発話でも会話と Pulse は一つだけ
+# ---------------------------------------------------------------------------
+
+
+def test_concurrent_start_opens_one_conversation_and_one_pulse(manager):
     barrier = threading.Barrier(2)
     started = threading.Event()
 
@@ -451,23 +643,22 @@ def test_concurrent_start_opens_one_episode_and_one_pulse(manager):
     assert not any(t.is_alive() for t in threads)
 
     assert started.is_set()
-    convs = _open_conversations(manager)
-    assert len(convs) == 1 and convs[0].STATUS == "open"
+    assert _open_conversation(manager) is not None
     assert manager.run_sea_user.call_count == 1
+    # 始まりの一行も 1 本だけ
+    assert _transition_actions(manager) == ["start"]
     # 勝ちが 1、相乗りが 1
     assert sorted(results.values()) == [False, True]
     assert _armed(manager) is True
 
 
 def test_start_conversation_rides_along_an_already_open_conversation(manager):
-    episodes.open_conversation_episode(
-        manager, PERSONA_ID, building_id="test_building",
-    )
+    existing = _start_conversation_state(manager)
 
     assert uc.start_conversation(manager, PERSONA_ID, USER_ID) is False
 
     manager.run_sea_user.assert_not_called()
-    assert len(_open_conversations(manager)) == 1
+    assert _open_conversation(manager) is existing
     # 相乗りでも会話は動いているので沈黙タイマーは張り直す
     assert _armed(manager) is True
 
@@ -512,9 +703,7 @@ def test_first_utterance_of_a_new_conversation_keeps_the_pulse_options(manager):
 
 def test_the_arbitration_engage_closure_keeps_the_pulse_options(manager, monkeypatch):
     """仲裁が engage_now を選んだ経路でも、初回と同じオプションが届く。"""
-    episodes.open_episode(
-        manager, PERSONA_ID, episodes.KIND_WORK_SESSION, building_id="test_building",
-    )
+    _pretend_busy(monkeypatch, {"kind": "work_session", "episode_ref": "episode:1"})
 
     def _fake_conflict(mgr, persona_id, text, *, engage, user_id):
         engage()
@@ -553,45 +742,6 @@ def test_unknown_pulse_options_are_dropped(manager):
     _, kwargs = manager.run_sea_user.call_args
     assert "origin_track_id" not in kwargs
     assert kwargs["metadata"] == {"a": 1}
-
-
-# ---------------------------------------------------------------------------
-# 指摘 6: 会話の出来事を開けなかったら応答しない
-# ---------------------------------------------------------------------------
-
-
-def _break_episode_open(monkeypatch):
-    def _boom(*_args, **_kwargs):
-        raise RuntimeError("episode INSERT failed")
-
-    monkeypatch.setattr("saiverse.episodes.open_conversation_episode", _boom)
-
-
-def test_a_failed_episode_open_stops_the_response(manager, monkeypatch):
-    _break_episode_open(monkeypatch)
-
-    with pytest.raises(uc.UserUtteranceError) as excinfo:
-        uc.start_conversation(manager, PERSONA_ID, USER_ID)
-
-    assert excinfo.value.stage == "open_episode"
-    assert excinfo.value.side_effects_done is False
-    assert excinfo.value.fallback_safe is False
-    manager.run_sea_user.assert_not_called()
-    assert _armed(manager) is False
-
-
-def test_a_failed_episode_open_propagates_through_the_utterance_entry(
-    manager, monkeypatch
-):
-    _break_episode_open(monkeypatch)
-    invoke = MagicMock()
-
-    with pytest.raises(uc.UserUtteranceError):
-        uc.on_user_utterance(
-            manager, PERSONA_ID, USER_ID, {"content": "こんにちは"}, invoke,
-        )
-
-    invoke.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -658,9 +808,7 @@ def test_dispatcher_surfaces_the_original_error_after_side_effects(manager):
     何も出ないまま応答だけが消える。
     """
     boom = RuntimeError("the model refused")
-    episodes.open_conversation_episode(
-        manager, PERSONA_ID, building_id="test_building",
-    )
+    _start_conversation_state(manager)
     # 会話が開いているので直接応答経路 — 応答本体 (invoke_main_line) が転ぶ
     invoke = MagicMock(side_effect=boom)
 
@@ -669,18 +817,6 @@ def test_dispatcher_surfaces_the_original_error_after_side_effects(manager):
 
     assert excinfo.value is boom
     invoke.assert_called_once_with()  # 1 回だけ (フォールバックで 2 回目を呼ばない)
-
-
-def test_dispatcher_raises_when_the_conversation_record_is_missing(
-    manager, monkeypatch
-):
-    _break_episode_open(monkeypatch)
-    invoke = MagicMock()
-
-    with pytest.raises(uc.UserUtteranceError):
-        _dispatch(manager, invoke)
-
-    invoke.assert_not_called()
 
 
 def test_dispatcher_does_not_double_answer_when_arming_fails_after_the_pulse(
@@ -698,7 +834,7 @@ def test_dispatcher_does_not_double_answer_when_arming_fails_after_the_pulse(
     # 会話開始経路 (空入力の main_line) が 1 回だけ走り、直接応答は呼ばれない
     assert manager.run_sea_user.call_count == 1
     invoke.assert_not_called()
-    assert len(_open_conversations(manager)) == 1
+    assert _open_conversation(manager) is not None
 
 
 def test_dispatcher_forwards_the_pulse_options(manager):

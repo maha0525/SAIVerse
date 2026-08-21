@@ -571,9 +571,11 @@ class SAIMemoryAdapter:
         再試行される (SEA 監査 S5: 知覚を落とさない)。
 
         ``pulse_id``: 消費した Beat の属する Pulse (呼び出し側が持っていれば)。
-        ``manager``: 開いている出来事 (episode) の照会用。層0タグと同じ供給源
-        (saiverse.episodes.get_open_episode) から batch の ``episode_id`` を引く。
-        どちらも無ければ NULL で記帳する。
+        無ければ NULL で記帳する。
+
+        ``manager``: 引数として残るが、束 6c (2026-08-22) 以降は使われない —
+        batch の ``episode_id`` を引いていた供給源 (開いている出来事) が退役した
+        (v3 §7)。列は旧データの読み手のために残置し、新しい行は常に NULL。
         """
         if not self._ready:
             return None
@@ -583,21 +585,8 @@ class SAIMemoryAdapter:
             list_pending,
             reduce_perceptions,
         )
-        # 消費時に開いている出来事 (episode)。sea/runtime.py の _store_memory が
-        # origin_episode を刻むのと同じ供給源 (per-persona キャッシュ付きの
-        # get_open_episode)。失敗しても消費は止めない (記帳が NULL になるだけ)。
+        # 出来事の刻印は束 6c (2026-08-22) で退役 (v3 §7)。
         episode_id: Optional[str] = None
-        if manager is not None and getattr(manager, "SessionLocal", None) is not None:
-            try:
-                from saiverse.episodes import get_open_episode
-                open_ep = get_open_episode(manager, self.persona_id)
-                if open_ep and open_ep.get("episode_ref"):
-                    episode_id = str(open_ep["episode_ref"])
-            except Exception:
-                LOGGER.debug(
-                    "[perception_buffer] open-episode lookup failed; consuming "
-                    "without an episode_id on the batch", exc_info=True,
-                )
         try:
             with self._db_lock:
                 items = list_pending(self.conn)

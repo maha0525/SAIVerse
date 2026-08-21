@@ -26,7 +26,6 @@ from .occupancy_manager import OccupancyManager
 from .conversation_manager import ConversationManager
 from .schedule_manager import ScheduleManager
 from .integration_manager import IntegrationManager
-from .track_manager import TrackManager
 from .meta_layer import MetaLayer
 from .pulse_dispatcher import PulseDispatcher
 from phenomena.manager import PhenomenonManager
@@ -226,12 +225,6 @@ class SAIVerseManager(
         logging.info("Initialized BeatGate (per-persona Beat lock + ledger gate).")
 
         # --- Initialize cognitive-model managers (Phase B-5) ---
-        # Track の永続化を扱う純粋ロジックレイヤー。会話経路からは 2026-08-21 に
-        # 切り離された (docs/intent/track_retirement.md §2 住人 2) — 残る読み手は
-        # 時間割の track:N コマ・想起の歩き・経験の台帳で、退役は順序④。
-        self.track_manager = TrackManager(session_factory=self.SessionLocal)
-        logging.info("Initialized cognitive-model managers (TrackManager).")
-
         # --- Initialize Cached Head Architecture (Phase 2-h) ---
         # Section registry + pipeline + store の wiring。LLM context の head 部分を
         # Section snapshot 経由で構築するための基盤。詳細:
@@ -1227,6 +1220,19 @@ class SAIVerseManager(
                 persona_id,
             )
 
+        # 6. (v3 §9-8) 旧データの機械写し: LIFE_PURPOSE / Track の関心 / desire 候補
+        #    → コア記憶と手帳 (per-persona memory.db)。一回きり・冪等で、写し元は
+        #    無傷のまま残す。詳細: saiverse/v3_shape_migration.py
+        try:
+            from saiverse.v3_shape_migration import migrate_persona_to_v3_shape
+
+            migrate_persona_to_v3_shape(self, persona_id)
+        except Exception:
+            logging.exception(
+                "[on_persona_registered] Failed to copy legacy data into the "
+                "v0.3 shape: %s", persona_id,
+            )
+
     def _run_persona_post_registration(self) -> None:
         """起動時: 全ペルソナに対して _on_persona_registered を実行する。"""
         if not self.personas:
@@ -1487,30 +1493,25 @@ class SAIVerseManager(
         停止の挙動はここ 1 箇所に集約されたまま。
 
           1. AutonomyManager.stop() — watchdog tick の予約 cancel
-          2. running な autonomous Track を全 pause — Track の帳簿を待機状態に
-             揃える（旧 SubLineScheduler は v2 で廃止済み。帳簿の running 残留は
-             get_running を読む残存箇所の誤認源になる）
-          3. AUTONOMY_ENABLED → False（DB + in-memory）— 判断点・watchdog の
+          2. AUTONOMY_ENABLED → False（DB + in-memory）— 判断点・watchdog の
              ゲートが全て閉じる
 
-        旧ステップ 4「対ユーザー Track をサイレント activate（プロンプト待ちに
-        戻す）」は 2026-08-21 に対象消滅した。会話が Track を経由しなくなり、
-        「プロンプト待ち」は *会話の出来事が開いていない状態* そのものになった
-        ため、停止時に戻すべき帳簿が無い（ユーザーが話しかければ
-        ``saiverse.user_conversation`` が会話を開いて応答する）。
+        撤去した旧ステップ:
+
+        - 「running な autonomous Track を全 pause」— 2026-08-22（束 6c）。Track
+          ランタイムが退役して running Track を作る書き手が消えたので、揃える
+          帳簿そのものが無い。
+        - 「対ユーザー Track をサイレント activate（プロンプト待ちに戻す）」—
+          2026-08-21。会話が Track を経由しなくなり、「プロンプト待ち」は
+          *会話が開いていない状態* そのものになったため（ユーザーが話しかければ
+          ``saiverse.user_conversation`` が会話を開いて応答する）。
 
         Returns:
-            {"paused_tracks": List[str], "autonomy_running": bool}
+            {"autonomy_running": bool}
         """
         from saiverse.autonomy_manager import AutonomyManager
-        from saiverse.track_manager import (
-            STATUS_RUNNING,
-            InvalidTrackStateError,
-            TrackNotFoundError,
-        )
 
         persona = self.personas.get(persona_id)
-        tm = self.track_manager
 
         # 1. 定期 tick 停止
         if not hasattr(self, "_autonomy_managers"):
@@ -1521,20 +1522,7 @@ class SAIVerseManager(
             self._autonomy_managers[persona_id] = am
         am.stop()
 
-        # 2. running な autonomous Track を pause（帳簿を待機状態に揃える）
-        paused: List[str] = []
-        for track in tm.list_for_persona(persona_id, statuses=[STATUS_RUNNING]):
-            if track.track_type != "autonomous":
-                continue
-            try:
-                tm.pause(track.track_id)
-                paused.append(track.track_id)
-            except (InvalidTrackStateError, TrackNotFoundError) as exc:
-                logging.warning(
-                    "[stop-autonomy] failed to pause track %s: %s", track.track_id, exc,
-                )
-
-        # 3. AUTONOMY_ENABLED → False（DB + in-memory）
+        # 2. AUTONOMY_ENABLED → False（DB + in-memory）
         db = self.SessionLocal()
         try:
             from database.models import AI as AIModel
@@ -1552,13 +1540,8 @@ class SAIVerseManager(
         if persona is not None:
             persona.autonomy_enabled = False
 
-        logging.info(
-            "[stop-autonomy] persona=%s paused_tracks=%s", persona_id, paused,
-        )
-        return {
-            "paused_tracks": paused,
-            "autonomy_running": am.is_running,
-        }
+        logging.info("[stop-autonomy] persona=%s", persona_id)
+        return {"autonomy_running": am.is_running}
 
     def start_autonomous_conversations(self):
         """Start all autonomous conversation managers."""

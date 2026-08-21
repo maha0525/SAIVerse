@@ -571,10 +571,22 @@ class EpisodeUnitEvictionTest(unittest.TestCase):
     """退場の形 (docs/intent/arasuji_levels.md §3/§4)。
 
     残す量 (watermarks.target) より古い側を、古い順に U ずつ刻んで全部畳む。
-    エピソードに畳みを止める権利は無い — open episode も普通に畳まれ、
-    部分エピソード記録 (open_episode_ref) は立たない。切り位置は pulse 関節に
-    寄せる。
+    エピソードに畳みを止める権利は無い — 帰属も開閉も畳みに影響しない。
+
+    ⚠ 部分エピソード記録 (``_record_partial_episode``) を見ていたケースは
+    束 6c (2026-08-22、autonomous_behavior_v3.md §7) で削除した。「エピソード
+    という専用の記録行は持たない」の裁定でメソッドごと退役し、畳んだ範囲の
+    記録は Chronicle エントリが持つようになったので、「呼ばれない」ことを
+    固定する相手が存在しない。畳み自体の挙動テストはそのまま残す。
+
+    帰属タグ (``metadata.origin_episode``) の刻印も同じ裁定で退役したので、
+    ここで渡す ``episode_ref`` は旧世代が書き残した行に付いている値の再現
+    (畳みの判定には使われず、被覆元の錨として記録されるだけ)。
     """
+
+    #: 旧世代のメッセージに残っている帰属タグ (episodes テーブルは読み取り専用の
+    #: 残置なので、行そのものは作らない — 畳みは値を読むだけで引かない)。
+    LEGACY_EPISODE_REF = "episode:1"
 
     def setUp(self):
         self.session_factory, self._engine = _make_session_factory()
@@ -586,9 +598,8 @@ class EpisodeUnitEvictionTest(unittest.TestCase):
         lifecycle.is_chronicle_enabled_for_persona = lambda p: True
         lifecycle.generate_chronicle = lambda p, cb=None, **kw: chronicle_status
         lifecycle.ensure_recall_embeddings = lambda p: None
-        # 編纂参照・子 episode 記帳は別テストの守備範囲 (ここでは退場の形だけ見る)
+        # 編纂参照の引き当ては別テストの守備範囲 (ここでは退場の形だけ見る)
         lifecycle._attach_chronicle_refs = _stub_chronicle_refs
-        lifecycle._record_partial_episode = lambda p, f: None
         return lifecycle
 
     def _persona(self, messages=()):
@@ -596,10 +607,6 @@ class EpisodeUnitEvictionTest(unittest.TestCase):
             persona_id=PERSONA_ID, persona_name="エア", model="std-model",
             sai_memory=None, history_manager=_history_manager(messages),
         )
-
-    def _open_episode(self):
-        from saiverse.episodes import KIND_CONVERSATION, open_episode
-        return open_episode(self.manager, PERSONA_ID, KIND_CONVERSATION)
 
     def _run(self, lifecycle, messages, watermarks, *, band_budget=2_000):
         window = _window(messages)
@@ -625,7 +632,7 @@ class EpisodeUnitEvictionTest(unittest.TestCase):
         旧設計は open episode を守る二段構えを持ち、それが取り残しと恒久的な
         詰まりの温床だった。新設計では帰属も開閉も畳みに影響しない。
         """
-        ref = self._open_episode()["episode_ref"]
+        ref = self.LEGACY_EPISODE_REF
         msgs = [_msg(f"m{i}", 100 + i, chars=500, episode_ref=ref) for i in range(2)]
         msgs += [_msg(f"n{i}", 200 + i, chars=1_000) for i in range(3)]
         lifecycle = self._make_lifecycle("ok")
@@ -634,13 +641,16 @@ class EpisodeUnitEvictionTest(unittest.TestCase):
         self._run(lifecycle, msgs, Watermarks(low=0, target=1_000, high=5_000))
         self.assertEqual(self._anchor(lifecycle), "n1")
 
-    def test_open_episode_folds_at_pulse_joint_without_partial_record(self):
-        """open episode の畳みは pulse 関節で切れ、部分エピソード記録は立たない。
+    def test_fold_cuts_at_pulse_joint(self):
+        """畳みは pulse 関節で切れる (帰属が同じでも関節をまたがない)。
 
-        旧設計の pulse 関節細分 (open_episode_ref → 子 episode 化) は
-        現設計の計画からは発火しない (intent §12-5 — 機構は休眠)。
+        ⚠ 元は test_open_episode_folds_at_pulse_joint_without_partial_record で、
+        「部分エピソード記録 (open_episode_ref → 子 episode 化) が呼ばれない」
+        ことも一緒に固定していた。その機構は束 6c (2026-08-22、v3 §7) で
+        ``_record_partial_episode`` ごと退役したため、後半の主張は相手を失った
+        (呼ばれないメソッドが存在しない)。切り位置の主張だけを残す。
         """
-        ref = self._open_episode()["episode_ref"]
+        ref = self.LEGACY_EPISODE_REF
         msgs = [
             _msg("a0", 100, chars=1_000, episode_ref=ref, pulse_id="p1"),
             _msg("a1", 101, chars=1_000, episode_ref=ref, pulse_id="p1"),
@@ -648,24 +658,15 @@ class EpisodeUnitEvictionTest(unittest.TestCase):
             _msg("a3", 103, chars=1_000, episode_ref=ref, pulse_id="p2"),
         ]
         lifecycle = self._make_lifecycle("ok")
-        folded = []
-        lifecycle._record_partial_episode = lambda p, f: folded.append(f.message_ids)
         self._run(lifecycle, msgs, Watermarks(low=0, target=2_000, high=3_000))
         # p1 が丸ごと退場し、anchor は a2 へ。p2 は残す量の側なので残る。
         self.assertEqual(self._anchor(lifecycle), "a2")
-        # 部分エピソード記録は呼ばれない (計画が open_episode_ref を立てない)。
-        self.assertEqual(folded, [])
 
-    def test_closed_episodes_bundle_across_boundaries(self):
-        """closed 同士は episode をまたいで束ねて U に届かせる (§3)。"""
-        from saiverse.episodes import close_episode
-        ep1 = self._open_episode()
-        close_episode(self.manager, PERSONA_ID, ep1["episode_id"])
-        ep2 = self._open_episode()
-        close_episode(self.manager, PERSONA_ID, ep2["episode_id"])
+    def test_messages_bundle_across_episode_boundaries(self):
+        """帰属の違うメッセージも束ねて U に届かせる (§3 — 境界に拒否権は無い)。"""
         msgs = [
-            _msg("c0", 100, chars=1_000, episode_ref=ep1["episode_ref"]),
-            _msg("c1", 101, chars=1_000, episode_ref=ep2["episode_ref"]),
+            _msg("c0", 100, chars=1_000, episode_ref="episode:1"),
+            _msg("c1", 101, chars=1_000, episode_ref="episode:2"),
             _msg("c2", 102, chars=1_000),
             _msg("c3", 103, chars=1_000),
         ]
@@ -705,11 +706,10 @@ class EpisodeUnitEvictionTest(unittest.TestCase):
         ずつ積み上がり、JSON と照会コストが単調に増える。
         """
         from sea.session_window import FoldedRange
-        open_ref = self._open_episode()["episode_ref"]
         msgs = [
             # 先頭 a0 は既存の圧縮区間 [m1,m2] と同じ畳み範囲に入る → 重なり
             # スキップで畳まれず、anchor は動けない (圧縮区間が残る形)
-            _msg("a0", 100, chars=500, episode_ref=open_ref),
+            _msg("a0", 100, chars=500, episode_ref=self.LEGACY_EPISODE_REF),
             _msg("m1", 101, chars=1_000), _msg("m2", 102, chars=1_000),
             _msg("m3", 103, chars=1_000), _msg("m4", 104, chars=1_000),
             _msg("k0", 200, chars=1_000), _msg("k1", 201, chars=1_000),
@@ -747,8 +747,9 @@ class EpisodeUnitEvictionTest(unittest.TestCase):
 
     # test_partial_fold_records_closed_child_episode_with_digest は削除 (2026-07-28):
     # 部分エピソード記録 (open_episode_ref → 子 episode 化) は新計画から発火
-    # しない休眠機構になった (arasuji_levels.md §12-5)。不発火の保証は
-    # test_open_episode_folds_at_pulse_joint_without_partial_record が固定する。
+    # しない休眠機構になった (arasuji_levels.md §12-5)。その休眠機構は束 6c
+    # (2026-08-22、v3 §7) で `_record_partial_episode` ごと撤去されたので、
+    # 「発火しない」ことを見張るテストも要らなくなった。
 
     def test_anchor_moved_outside_eviction_clears_holes(self):
         """退場経路以外で anchor が差し替わったら圧縮区間を捨てる。
@@ -807,7 +808,15 @@ class ApplierVetoDeadlockTest(unittest.TestCase):
     顔その2: あらすじを恒久に失った圧縮区間の記録は Metabolism 冒頭で捨てる。
     残すと提示 (生ログに fail-open) と二重記録判定の生死の読みが食い違い、
     その範囲を含む束ねが毎ラウンド丸ごと拒否される。
+
+    ⚠ 「digest 無しの吸収退場が子 episode を作らない」ことを見ていたケースは
+    束 6c (2026-08-22、autonomous_behavior_v3.md §7) で削除した。子 episode を
+    刻む ``_record_partial_episode`` がエピソード記録行の退役ごと消えたので、
+    作らない相手が存在しない。
     """
+
+    #: 旧世代のメッセージに残っている帰属タグ (EpisodeUnitEvictionTest と同じ扱い)。
+    LEGACY_EPISODE_REF = "episode:1"
 
     def setUp(self):
         self.session_factory, self._engine = _make_session_factory()
@@ -819,7 +828,6 @@ class ApplierVetoDeadlockTest(unittest.TestCase):
         lifecycle.is_chronicle_enabled_for_persona = lambda p: True
         lifecycle.generate_chronicle = lambda p, cb=None, **kw: "ok"
         lifecycle.ensure_recall_embeddings = lambda p: None
-        lifecycle._record_partial_episode = lambda p, f: None
         return lifecycle
 
     def _persona(self, messages=()):
@@ -851,11 +859,9 @@ class ApplierVetoDeadlockTest(unittest.TestCase):
         旧実装は e0 を「あらすじ待ち」で見送り続け、計画が毎ラウンド同じ提案を
         して永久ループしていた。
         """
-        from saiverse.episodes import KIND_CONVERSATION, open_episode
-        open_ref = open_episode(self.manager, PERSONA_ID, KIND_CONVERSATION)["episode_ref"]
         msgs = [
             _msg("e0", 100, chars=2_000),                      # 除外タグのみの範囲 (単独で U)
-            _msg("o0", 101, chars=500, episode_ref=open_ref),
+            _msg("o0", 101, chars=500, episode_ref=self.LEGACY_EPISODE_REF),
             _msg("c0", 102, chars=1_000),
             _msg("c1", 103, chars=1_000),
             _msg("k0", 200, chars=1_000),                      # 残す量の側
@@ -886,39 +892,12 @@ class ApplierVetoDeadlockTest(unittest.TestCase):
         self.assertEqual(len(saved), 1)
         self.assertEqual(saved[0], [])
 
-    def test_absorbed_fold_without_digest_records_no_child_episode(self):
-        """digest を持たない吸収退場 (編纂対象ゼロの open fold) は子 episode を
-        作らない。子は「その部分はあらすじ経由で持っている」の構造宣言なので、
-        digest 無しの子 + digest 層エッジは再訪先の無い嘘になる (Codex 指摘)。"""
-        from saiverse.episodes import KIND_CONVERSATION, open_episode
-        open_ref = open_episode(self.manager, PERSONA_ID, KIND_CONVERSATION)["episode_ref"]
-        msgs = [
-            _msg("e0", 100, chars=500, episode_ref=open_ref),  # 除外タグのみの open
-            _msg("c0", 102, chars=1_000),
-            _msg("c1", 103, chars=1_000),
-            _msg("k0", 200, chars=1_000),
-            _msg("k1", 201, chars=1_000),
-        ]
-        lifecycle = self._make_lifecycle()
-
-        def _attach(persona, folds):
-            for i, fold in enumerate(folds):
-                if "e0" not in fold.message_ids:
-                    fold.chronicle_entry_ids = [f"entry-{i}"]
-        lifecycle._attach_chronicle_refs = _attach
-        lifecycle._fold_has_chronicle_material = (
-            lambda p, f: "e0" not in f.message_ids
-        )
-        recorded = []
-        lifecycle._record_partial_episode = lambda p, f: recorded.append(f.message_ids)
-        lifecycle.save_folded_ranges = lambda pid, mk, folds: None
-
-        self._run(lifecycle, msgs, Watermarks(low=2_000, target=2_000, high=5_000))
-
-        # e0 も c0/c1 も吸収されて anchor は k0 へ。だが e0 (digest 無し) の
-        # 子 episode 記帳は行われない。
-        self.assertEqual(self._anchor(lifecycle), "k0")
-        self.assertEqual(recorded, [])
+    # test_absorbed_fold_without_digest_records_no_child_episode は削除
+    # (2026-08-22、束 6c / v3 §7): 「digest 無しの吸収退場は子 episode を作らない」
+    # という主張は、子 episode を作る `_record_partial_episode` が存在していた
+    # 時代のもの。エピソードという専用の記録行を持たなくなり、書き手ごと消えた
+    # ので、作られないことを見張る相手がいない。吸収退場そのものの挙動は
+    # test_excluded_only_fold_is_absorbed_instead_of_vetoed が固定している。
 
     def test_fold_with_material_but_no_entry_is_still_vetoed(self):
         """顔その1の境界: 編纂対象を**含む**のにあらすじが無い fold は従来どおり

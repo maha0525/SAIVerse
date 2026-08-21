@@ -80,38 +80,12 @@ interface ModelChoice {
     name: string;
 }
 
-interface AutonomousStatus {
-    autonomy_enabled: boolean;
-    system_running: boolean;
-    is_active: boolean;
-}
-
-interface AutonomyStatus {
-    persona_id: string;
-    state: string;
-    interval_minutes: number;
-    decision_model: string | null;
-    execution_model: string | null;
-    stelis_thread_id: string | null;
-    current_cycle_id: string | null;
-    last_report: {
-        cycle_id: string;
-        playbook: string | null;
-        intent: string;
-        status: string;
-    } | null;
-}
-
 export default function SettingsModal({ isOpen, onClose, personaId }: SettingsModalProps) {
     const [config, setConfig] = useState<AIConfig | null>(null);
     const [availableModels, setAvailableModels] = useState<ModelChoice[]>([]);
     const [availableUsers, setAvailableUsers] = useState<UserChoice[]>([]);
     const [isLoading, setIsLoading] = useState(false);
     const [isSaving, setIsSaving] = useState(false);
-    const [autonomousStatus, setAutonomousStatus] = useState<AutonomousStatus | null>(null);
-    const [autonomyStatus, setAutonomyStatus] = useState<AutonomyStatus | null>(null);
-    const [autonomyInterval, setAutonomyInterval] = useState(5);
-    const [isAutonomyLoading, setIsAutonomyLoading] = useState(false);
 
     // Form state
     const [description, setDescription] = useState('');
@@ -122,6 +96,9 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
     const [audioModel, setAudioModel] = useState<string>('');
     const [videoModel, setVideoModel] = useState<string>('');
     const [memoryWeaveModel, setMemoryWeaveModel] = useState<string>('');
+    // ⚠ 自律行動の ON/OFF は v0.3 で UI から隠した (autonomous_behavior_v3.md
+    // §11「運転 UI は隠す」)。state だけ残すのは、ロードした値をそのまま保存へ
+    // 往復させるため — 送らないと PATCH が既存の設定を既定値で塗り潰す。
     const [autonomyEnabled, setAutonomyEnabled] = useState<boolean>(true);
     const [chronicleEnabled, setChronicleEnabled] = useState(true);
     const [autonomousChronicleEnabled, setAutonomousChronicleEnabled] = useState(true);
@@ -283,25 +260,6 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                 console.error("Failed to load config");
             }
 
-            // Also load autonomous status
-            const statusRes = await fetch(`/api/people/${targetPersonaId}/autonomous/status`);
-            if (isStale()) return;
-            if (statusRes.ok) {
-                const statusData = await statusRes.json();
-                if (isStale()) return;
-                setAutonomousStatus(statusData);
-            }
-
-            // Load autonomy manager status
-            const autonomyRes = await fetch(`/api/people/${targetPersonaId}/autonomy`);
-            if (isStale()) return;
-            if (autonomyRes.ok) {
-                const autonomyData = await autonomyRes.json();
-                if (isStale()) return;
-                setAutonomyStatus(autonomyData);
-                setAutonomyInterval(autonomyData.interval_minutes);
-            }
-
             // Load Chronicle cost estimate
             try {
                 const costRes = await fetch(`/api/people/${targetPersonaId}/arasuji/cost-estimate`);
@@ -426,49 +384,6 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
             alert("設定の保存中にエラーが発生しました");
         } finally {
             setIsSaving(false);
-        }
-    };
-
-    const fetchAutonomyStatus = async () => {
-        try {
-            const res = await fetch(`/api/people/${personaId}/autonomy`);
-            if (res.ok) {
-                const data = await res.json();
-                setAutonomyStatus(data);
-                setAutonomyInterval(data.interval_minutes);
-            }
-        } catch (e) {
-            console.error('Failed to fetch autonomy status:', e);
-        }
-    };
-
-    const handleAutonomyStart = async () => {
-        setIsAutonomyLoading(true);
-        try {
-            const res = await fetch(`/api/people/${personaId}/autonomy/start`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ interval_minutes: autonomyInterval }),
-            });
-            if (res.ok) await fetchAutonomyStatus();
-        } catch (e) {
-            console.error('Failed to start autonomy:', e);
-        } finally {
-            setIsAutonomyLoading(false);
-        }
-    };
-
-    const handleAutonomyStop = async () => {
-        setIsAutonomyLoading(true);
-        try {
-            const res = await fetch(`/api/people/${personaId}/autonomy/stop`, {
-                method: 'POST',
-            });
-            if (res.ok) await fetchAutonomyStatus();
-        } catch (e) {
-            console.error('Failed to stop autonomy:', e);
-        } finally {
-            setIsAutonomyLoading(false);
         }
     };
 
@@ -602,118 +517,6 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                                     ))}
                                 </select>
                                 <div className={styles.description}>動画ファイルの要約生成に使用するモデル（Gemini系推奨）。</div>
-                            </div>
-
-                            <div className={styles.fieldGroup}>
-                                <label className={styles.label}>自律行動</label>
-                                <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-                                    <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
-                                        <input
-                                            type="checkbox"
-                                            checked={autonomyEnabled}
-                                            onChange={(e) => setAutonomyEnabled(e.target.checked)}
-                                        />
-                                        <span>{autonomyEnabled ? '有効（自分から考えて動きます）' : '無効（話しかけられるまで待機します）'}</span>
-                                    </label>
-                                </div>
-                                <div className={styles.description}>
-                                    オフにしても、話しかければ通常どおり応答します。自分から発言・行動することだけを止めます。
-                                </div>
-                                {autonomousStatus && (
-                                    <div className={styles.description} style={{
-                                        marginTop: '0.5rem',
-                                        padding: '0.5rem',
-                                        background: autonomousStatus.is_active ? 'rgba(0, 200, 0, 0.1)' : 'rgba(100, 100, 100, 0.1)',
-                                        borderRadius: '4px'
-                                    }}>
-                                        {autonomousStatus.is_active ? (
-                                            <span>✅ このペルソナは自発的に発言します。</span>
-                                        ) : autonomousStatus.system_running ? (
-                                            <span>⏸️ 自律システムは動作中ですが、このペルソナは自律行動オフの状態です。</span>
-                                        ) : (
-                                            <span>⚠️ 自律システムは動作していません。</span>
-                                        )}
-                                    </div>
-                                )}
-                            </div>
-
-                            {/* Autonomy Manager Control */}
-                            <div className={styles.fieldGroup}>
-                                <label className={styles.label}>自律行動マネージャー</label>
-                                <div style={{
-                                    padding: '0.75rem',
-                                    background: 'rgba(100, 100, 100, 0.1)',
-                                    borderRadius: '6px',
-                                    display: 'flex',
-                                    flexDirection: 'column',
-                                    gap: '0.5rem',
-                                }}>
-                                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap' }}>
-                                        <span style={{
-                                            fontSize: '0.85rem',
-                                            padding: '2px 8px',
-                                            borderRadius: '10px',
-                                            background: autonomyStatus?.state === 'stopped'
-                                                ? 'rgba(100,100,100,0.2)'
-                                                : autonomyStatus?.state === 'waiting'
-                                                    ? 'rgba(255,193,7,0.15)'
-                                                    : 'rgba(0,200,0,0.15)',
-                                            color: autonomyStatus?.state === 'stopped'
-                                                ? '#888'
-                                                : autonomyStatus?.state === 'waiting'
-                                                    ? '#ffd43b'
-                                                    : '#69db7c',
-                                        }}>
-                                            {autonomyStatus?.state || 'stopped'}
-                                        </span>
-
-                                        {(!autonomyStatus || autonomyStatus.state === 'stopped') ? (
-                                            <button
-                                                onClick={handleAutonomyStart}
-                                                disabled={isAutonomyLoading}
-                                                style={{
-                                                    padding: '4px 12px',
-                                                    borderRadius: '4px',
-                                                    border: '1px solid #2b8a3e',
-                                                    background: 'rgba(43, 138, 62, 0.1)',
-                                                    color: '#69db7c',
-                                                    cursor: 'pointer',
-                                                    fontSize: '0.85rem',
-                                                }}
-                                            >
-                                                開始
-                                            </button>
-                                        ) : (
-                                            <button
-                                                onClick={handleAutonomyStop}
-                                                disabled={isAutonomyLoading}
-                                                style={{
-                                                    padding: '4px 12px',
-                                                    borderRadius: '4px',
-                                                    border: '1px solid #c92a2a',
-                                                    background: 'rgba(201, 42, 42, 0.1)',
-                                                    color: '#ff6b6b',
-                                                    cursor: 'pointer',
-                                                    fontSize: '0.85rem',
-                                                }}
-                                            >
-                                                停止
-                                            </button>
-                                        )}
-                                    </div>
-
-                                    {autonomyStatus?.last_report && (
-                                        <div style={{ fontSize: '0.8rem', color: '#888' }}>
-                                            前回: {autonomyStatus.last_report.playbook || '—'} / {autonomyStatus.last_report.status}
-                                            {autonomyStatus.last_report.intent && (
-                                                <span> — {autonomyStatus.last_report.intent.slice(0, 50)}</span>
-                                            )}
-                                        </div>
-                                    )}
-                                </div>
-                                <div className={styles.description}>
-                                    自律稼働の見張りタイマー（watchdog）の状態です。通常は上の「自律行動」トグル（有効⇔無効）と連動して自動的に開始・停止するため、ここを直接操作する必要はありません。
-                                </div>
                             </div>
 
                             <DebugPanel personaId={personaId} />

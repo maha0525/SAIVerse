@@ -24,7 +24,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from database.models import AI, Base, City, User
+from database.models import AI, Base, City, Episode, User
 from sai_memory.purpose_tags import (
     LAYER_SHELVE,
     init_purpose_tags_tables,
@@ -36,7 +36,6 @@ from saiverse import episodes
 from saiverse import judgment_points as jp
 from saiverse.event_scheduler import EventScheduler
 from saiverse.persona_task_manager import PersonaTaskManager
-from saiverse.track_manager import TrackManager
 from tool_loader import load_builtin_tool
 
 PERSONA_ID = "alice"
@@ -108,7 +107,6 @@ def manager(session_factory):
         SessionLocal=session_factory,
         personas={PERSONA_ID: persona},
         event_scheduler=EventScheduler(),
-        track_manager=TrackManager(session_factory=session_factory),
         buildings=[SimpleNamespace(building_id="library", name="図書館")],
     )
 
@@ -137,12 +135,26 @@ def _persona_ctx(manager, tmp_path):
     return persona_context(PERSONA_ID, tmp_path, manager=manager)
 
 
-def _closed_conversation_episode(manager) -> str:
-    ep = episodes.open_conversation_episode(
-        manager, PERSONA_ID, building_id="alice_room",
-    )
-    closed = episodes.close_episode(manager, PERSONA_ID, ep["episode_id"])
-    return closed["episode_ref"]
+def _closed_episode(manager, short_id: int, kind: str) -> str:
+    """今日の暦日に閉じた出来事の行を ORM で直に置いて ``episode:N`` を返す。
+
+    ``saiverse.episodes`` の書き込み API は 2026-08-22 (束 6c) に全廃され、
+    ``episodes`` テーブルは旧データの読み取り専用の残置になった (v3 §7)。
+    day_close の層2 棚入れはいまもその残置を読むので、検証用の行はこちらで
+    直接用意する。
+    """
+    started = int(BASE.replace(hour=10, minute=0).timestamp())
+    db = manager.SessionLocal()
+    try:
+        db.add(Episode(
+            EPISODE_ID=f"ep-{short_id}", PERSONA_ID=PERSONA_ID, SHORT_ID=short_id,
+            KIND=kind, STARTED_AT=started, ENDED_AT=started + 600,
+            BUILDING_ID="alice_room", STATUS="closed",
+        ))
+        db.commit()
+    finally:
+        db.close()
+    return f"episode:{short_id}"
 
 
 # ---------------------------------------------------------------------------
@@ -191,9 +203,8 @@ def test_purpose_enum_includes_backlog_tasks(manager, backlog_task):
 
 def test_day_close_schema_uses_episode_purpose_pairs(manager, backlog_task):
     """day_close は今日閉じた出来事すべてが対象 → {episode, purpose} ペア。"""
-    ep1 = _closed_conversation_episode(manager)
-    ep2 = episodes.open_episode(manager, PERSONA_ID, episodes.KIND_WORK_SESSION)
-    ep2 = episodes.close_episode(manager, PERSONA_ID, ep2["episode_id"])["episode_ref"]
+    ep1 = _closed_episode(manager, 1, episodes.KIND_CONVERSATION)
+    ep2 = _closed_episode(manager, 2, episodes.KIND_WORK_SESSION)
     args = jp.build_judgment_args(manager, PERSONA_ID, jp.KIND_DAY_CLOSE, {})
     props = args["response_schema"]["properties"]
     assert "episode_purposes" in props

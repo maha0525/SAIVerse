@@ -21,13 +21,12 @@
 ``consume_budget`` が実測値で積算する。台帳の無い日 (day_open 前 / 旧データ)
 はゲート無効 = 従来挙動 (後方互換)。
 
-「ユーザー会話中」の判定は開いている kind='conversation' の出来事 (Episode)
-の有無 (``saiverse.episodes.get_open_episode``)。無応答タイムアウト (既定 30 分、
-AI.USER_CONV_TIMEOUT_MINUTES) が会話の出来事を閉じる瞬間が v2 の「会話終了」に
-相当する (life.md §7 案 Y, 2026-07-13)。旧実装は running Track が
-user_conversation 種別かで判定していたが、Track はもう時間経過で状態を
-動かさない (running のまま残り続けうる) ため、この述語には使えなくなった —
-「いま」の真実は Track ではなく開いている出来事が持つ。
+「ユーザー会話中」の判定は**メモリ内の会話状態**の有無
+(``saiverse.user_conversation.get_open_conversation``)。無応答タイムアウト
+(既定 30 分、AI.USER_CONV_TIMEOUT_MINUTES) が会話状態を落とす瞬間が「会話終了」に
+相当する。正典の器は三代目 — Track の status (v1) → 開いている会話の出来事
+(life.md §7 案 Y、2026-07-13) → メモリ内状態 (autonomous_behavior_v3.md §7、
+2026-08-22)。**意味論は三代とも不変**で、変わったのは「いま」を持つ場所だけ。
 
 kind 別ハンドラはレジストリ方式 (``register_slot_handler``)。kind の語彙は
 コマ種別カタログ (``saiverse.slot_kind_catalog``、timetable_redesign.md §5.5)
@@ -294,9 +293,11 @@ _EVEN_MODE_PROVIDERS = frozenset({"anthropic", "openai"})
 
 _TIME_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
 # コマは目的ノードを任意階層で指せる (P5, life_concept_map.md §3.1):
-# task:N (採用済み) / desire:N (候補=お試し採用) / track:N (大枝=関心そのもの)
+# task:N (採用済み) / desire:N (候補=お試し採用)。
+# ⚠ track:N (大枝) の分岐は束 6c (2026-08-22) で削除した (Track の退役)。正規表現は
+# 旧データの検証で受理し続けるために track を残す — 既存の時間割に書かれた
+# track:N を「不正な ref」に化けさせない (v3 §9-8 ①: 旧データは残置して壊さない)。
 _REF_RE = re.compile(r"^(task|desire|track):(\d+)$")
-_TRACK_REF_RE = re.compile(r"^track:(\d+)$")
 
 
 def is_valid_hhmm(value: Any) -> bool:
@@ -3559,24 +3560,26 @@ def get_user_conversation_state(manager: Any, persona_id: str) -> Optional[bool]
       前提で自律を進めても、取り返しのつかない出来事は起きない
     - ユーザーへ声を出す側 (tell スペル) は fail-closed にする — 会話中に
       重ねて話しかける失敗は届いた後では取り消せない
+
+    ⚠ 器がメモリ内の会話状態になった 2026-08-22 (束 6c、v3 §7) 以降、読み取りは
+    失敗しようがないので実際には None を返さない。三値のまま残すのは、v0.4 で
+    別プロセス / 別ノードから状態を引く形になったときに「不明」が復活しうるため
+    (呼び出し側の fail 方向の設計を今のうちに壊さない)。
     """
     try:
-        from saiverse import episodes
+        from saiverse.user_conversation import get_open_conversation
 
-        ep = episodes.get_open_episode(
-            manager, persona_id, kind=episodes.KIND_CONVERSATION,
-        )
+        return get_open_conversation(manager, persona_id) is not None
     except Exception:
         LOGGER.warning(
-            "[day_plan] get_open_episode failed (persona=%s); conversation state unknown",
-            persona_id, exc_info=True,
+            "[day_plan] failed to read the conversation state (persona=%s); "
+            "conversation state unknown", persona_id, exc_info=True,
         )
         return None
-    return ep is not None
 
 
 def is_in_user_conversation(manager: Any, persona_id: str) -> bool:
-    """ユーザー会話中か。開いている kind='conversation' の出来事があれば True。
+    """ユーザー会話中か。開いている会話状態があれば True。
 
     読み取りに失敗したときは False (fail-open)。不明と「会話していない」を
     区別したい呼び出し側は :func:`get_user_conversation_state` を使う。
@@ -3586,11 +3589,10 @@ def is_in_user_conversation(manager: Any, persona_id: str) -> bool:
     に残っており、終了済みの会話を「ユーザーと会話中です」と LLM へ渡していた
     (案 Y の追従漏れ)。同型の再発を防ぐため、判定の実装はここ 1 つに保つ。
 
-    life.md §7 案 Y (2026-07-13): 「いま」の真実は開いているエピソードが持つ。
-    無応答タイムアウトが会話の出来事を閉じた瞬間が v2 の「会話終了」に相当する
-    (``autonomy_wiring.handle_conversation_end``)。旧実装 (running Track が
-    user_conversation 種別か) は、Track がもう時間経過で pending に落ちない
-    (running のまま残り続けうる) ため使えない。
+    正典の器は三代目 — Track の status (v1) → 開いている会話の出来事
+    (life.md §7 案 Y、2026-07-13) → **メモリ内の会話状態** (v3 §7、2026-08-22)。
+    「無応答タイムアウトが会話を終わらせる」という意味論は三代とも不変
+    (``autonomy_wiring.handle_conversation_end``)。
     """
     return get_user_conversation_state(manager, persona_id) is True
 
@@ -3745,25 +3747,8 @@ def effective_budget_total(slots: Iterable[Dict[str, Any]]) -> int:
 
 
 # ---------------------------------------------------------------------------
-# コマの出来事 (Episode): 実行区間の記録 (life_concept_map.md §8.1)
+# コマの出来事 (Episode): 束 6c (2026-08-22) で書き手ごと退役 — v3 §7
 # ---------------------------------------------------------------------------
-
-
-def _episode_kind_for_slot(slot_kind: Any) -> str:
-    """コマ種別 → 出来事 kind の写像。
-
-    作業セッション系のコマは中の作業セッションが別の出来事
-    (kind='work_session') を開くため、コマの実行区間そのものは kind='slot'
-    として並存させる (セッション側の origin_ref がコマ出来事を指して親子が
-    読める)。それ以外 (出かける/自室で過ごす/自由時間) は presence — 実行の
-    中身 (コマ開始の Pulse の思考) は SAIMemory 側に残り、出来事としては
-    「その場に居た」区間の記録でよい (旧 暮らし/休む と同じ扱い)。
-    """
-    from saiverse import episodes
-
-    if slot_kind in WORKER_SESSION_KINDS:
-        return episodes.KIND_SLOT
-    return episodes.KIND_PRESENCE
 
 
 def _slot_origin_ref(persona_id: str, plan_date_str: str, index: int) -> str:
@@ -3782,36 +3767,15 @@ def _slot_origin_ref(persona_id: str, plan_date_str: str, index: int) -> str:
 def _open_slot_episode(
     manager: Any, persona_id: str, plan_date_str: str, slot: Dict[str, Any], index: int
 ) -> Optional[str]:
-    """コマの実行区間の出来事を開き、episode_ref を返す (失敗時 None)。
+    """[退役] コマの実行区間の出来事を開く — 束 6c (2026-08-22) で常に None。
 
-    呼び出し点は発火チェック (繰り下げ / 予算 / ハンドラ有無) と施設移動を
-    抜けた後 — skip されたコマは出来事を作らない。場所は移動後の現在地。
-    出来事は記録専用でコマの実行には影響しない (失敗は WARN のみ)。
+    エピソードという専用の記録行は持たなくなった (v3 §7)。コマが「どの件の実行
+    だったか」はメッセージへの記録が、完了と成果物は台帳の一件が持つ。
+
+    関数を残すのは、時間割そのものが v0.4 のティック設計まで休眠として残るため
+    (機構を丸ごと削らない — 呼び出し点の並びを壊さずに供給だけ止める)。
     """
-    try:
-        from saiverse import episodes
-
-        persona = (getattr(manager, "personas", {}) or {}).get(persona_id)
-        building_id = getattr(persona, "current_building_id", None)
-        meta: Dict[str, Any] = {"slot_kind": str(slot.get("kind") or "")}
-        title = str(slot.get("title") or "").strip()
-        if title:
-            meta["title"] = title
-        ep = episodes.open_episode(
-            manager, persona_id,
-            _episode_kind_for_slot(slot.get("kind")),
-            building_id=building_id,
-            participants=[persona_id],
-            origin_ref=_slot_origin_ref(persona_id, plan_date_str, index),
-            meta=meta,
-        )
-        return ep.get("episode_ref")
-    except Exception:
-        LOGGER.warning(
-            "[day_plan] failed to open slot episode (persona=%s date=%s index=%d)",
-            persona_id, plan_date_str, index, exc_info=True,
-        )
-        return None
+    return None
 
 
 def _close_slot_episode(
@@ -3820,22 +3784,11 @@ def _close_slot_episode(
     episode_ref: Optional[str],
     slot_after: Optional[Dict[str, Any]],
 ) -> None:
-    """コマの出来事を閉じる。record_level (presence_only 等) を meta に透過する。"""
-    if not episode_ref:
-        return
-    try:
-        from saiverse import episodes
+    """[退役] コマの出来事を閉じる — 束 6c (2026-08-22) で no-op。
 
-        meta: Optional[Dict[str, Any]] = None
-        record_level = str((slot_after or {}).get("record_level") or "")
-        if record_level:
-            meta = {"record_level": record_level}
-        episodes.close_episode(manager, persona_id, episode_ref, meta=meta)
-    except Exception:
-        LOGGER.warning(
-            "[day_plan] failed to close slot episode %s (persona=%s)",
-            episode_ref, persona_id, exc_info=True,
-        )
+    :func:`_open_slot_episode` が開かないので、閉じる相手が構造上存在しない。
+    """
+    return None
 
 
 def _apply_budget_gate(
@@ -4421,7 +4374,7 @@ def _reserve_slot_tx(
     gated: bool,
     reserved: int,
 ) -> Optional[str]:
-    """予約 tx: 台帳 running + slot fired + 予算予約 + episode open を単一 commit。
+    """予約 tx: 台帳 running + slot fired + 予算予約を単一 commit。
 
     対象コマは発火時 ``index`` ではなく不変 ``slot_id`` で **同 session 内で** 引く —
     claim 後・予約前に別判断が :func:`replace_remaining_slots` で配列を組み替えても、
@@ -4429,7 +4382,8 @@ def _reserve_slot_tx(
     ハンドラを始めさせない (mark_running より前なので副作用ゼロ)。
 
     Returns:
-        開いた出来事の episode_ref (episodes.open_episode の戻り)。
+        常に None (束 6c で episode open が退役 — v3 §7)。呼び出し側の
+        ``episode_ref`` の受け渡しは v0.4 の作り直しまで形だけ残る。
 
     Raises:
         _SlotVanished: 対象コマが消えた / 発火不能 (呼び出し元は prepared のときだけ
@@ -4437,11 +4391,10 @@ def _reserve_slot_tx(
         _ClaimLost: prepared → running の席取りに負けた (同 execution_id を共有する
             並走発火の勝者が既に running / 完了済み)。全ロールバック済み — 呼び出し
             元は台帳に触らず離脱する。
-        Exception: その他の失敗は全ロールバック (slot pending・予算不変・episode 無し・
-            台帳 prepared のまま) して再送出 — 呼び出し元がハンドラを呼ばずに return する。
+        Exception: その他の失敗は全ロールバック (slot pending・予算不変・台帳
+            prepared のまま) して再送出 — 呼び出し元がハンドラを呼ばずに return する。
     """
     from database.models import PersonaDayPlan
-    from saiverse import episodes
 
     db = manager.SessionLocal()
     try:
@@ -4514,25 +4467,9 @@ def _reserve_slot_tx(
                 f"date={plan_date_str} slot={slot_id})"
             )
 
-        # 出来事を開く (同 session。origin_ref は発火時 index — 回復が payload の index
-        # から同じ origin_ref を再構成して逆引きするため一貫させる)。
-        persona = (getattr(manager, "personas", {}) or {}).get(persona_id)
-        building_id = getattr(persona, "current_building_id", None)
-        ep_meta: Dict[str, Any] = {"slot_kind": str(slot.get("kind") or "")}
-        title = str(slot.get("title") or "").strip()
-        if title:
-            ep_meta["title"] = title
-        ep = episodes.open_episode(
-            manager, persona_id,
-            _episode_kind_for_slot(slot.get("kind")),
-            building_id=building_id,
-            participants=[persona_id],
-            origin_ref=_slot_origin_ref(persona_id, plan_date_str, index),
-            meta=ep_meta,
-            session=db,
-        )
-        episode_ref = ep.get("episode_ref")
-
+        # 出来事を開く手は束 6c (2026-08-22) で退役した (v3 §7)。予約 tx が束ねる
+        # のは台帳 running + slot fired + 予算予約の三つになり、episode_ref は
+        # 常に None を返す。
         db.commit()
     except Exception:
         db.rollback()
@@ -4540,9 +4477,7 @@ def _reserve_slot_tx(
     finally:
         db.close()
 
-    # commit 成功後: open キャッシュを無効化 (未コミット状態を映さない契約)。
-    episodes.invalidate_open_cache(manager, persona_id)
-    return episode_ref
+    return None
 
 
 def _settle_slot_tx(
@@ -4567,11 +4502,9 @@ def _settle_slot_tx(
 
     ``used_rounds`` が **非負** int でない (None・負数・非 int) なら delta=0 で予約額を
     そのまま消費として残す (負数は旧 consume 系と同じく信頼せず弾く安全側)。有効な
-    実測なら delta は負 = 返金になりうる。例外時は全ロールバック (slot fired・episode
-    open・台帳 running・予算は予約額のまま) して再送出する。
+    実測なら delta は負 = 返金になりうる。例外時は全ロールバック (slot fired・
+    台帳 running・予算は予約額のまま) して再送出する。
     """
-    from saiverse import episodes
-
     valid_used = (
         isinstance(used_rounds, int)
         and not isinstance(used_rounds, bool)
@@ -4606,18 +4539,16 @@ def _settle_slot_tx(
         original_payload = row.slots_json
         slots = _row_slots(row)
         target = _find_slot_index_by_id(slots, slot_id)
-        done_slot: Optional[Dict[str, Any]] = None
         world_update: Dict[Any, Any] = {}
         if target is not None:
             slots[target]["status"] = STATUS_DONE
-            done_slot = slots[target]
             world_update[PersonaDayPlan.slots_json] = json.dumps(
                 slots, ensure_ascii=False,
             )
         else:
             LOGGER.warning(
                 "[day_plan] slot id=%s not found during settlement (persona=%s "
-                "date=%s len=%d); done not written (episode/台帳 は精算する)",
+                "date=%s len=%d); done not written (台帳 は精算する)",
                 slot_id, persona_id, plan_date_str, len(slots),
             )
 
@@ -4651,16 +4582,7 @@ def _settle_slot_tx(
                     f"date={plan_date_str} slot={slot_id})"
                 )
 
-        # 出来事を閉じる (同 session。record_level を meta へ透過)
-        if episode_ref:
-            close_meta: Optional[Dict[str, Any]] = None
-            record_level = str((done_slot or {}).get("record_level") or "")
-            if record_level:
-                close_meta = {"record_level": record_level}
-            episodes.close_episode(
-                manager, persona_id, episode_ref, meta=close_meta, session=db,
-            )
-
+        # 出来事を閉じる手は束 6c (2026-08-22) で退役した (v3 §7)。
         # 台帳 running → applied (outbox 無し。memory.db を跨ぐ書き込みは精算段階に
         # 無い — ハンドラが memory.db に書くのは running 区間)
         ledger.mark_applied(exec_id, session=db, result={
@@ -4677,10 +4599,8 @@ def _settle_slot_tx(
     finally:
         db.close()
 
-    # commit 成功後: open キャッシュ無効化 → 台帳 completed (outbox 無しなので
-    # applied → completed が通る。別 commit でよい)。
-    if episode_ref:
-        episodes.invalidate_open_cache(manager, persona_id)
+    # commit 成功後: 台帳 completed (outbox 無しなので applied → completed が通る。
+    # 別 commit でよい)。
     ledger.mark_completed(exec_id)
 
 
@@ -4702,17 +4622,17 @@ def settle_stale_slot(
 
     - **予算は調整しない** — 予約額 (= 実効予算 = 使える上限) をそのまま消費として
       残す (実測が不明な crash 回復では返金しない保守側。A5 の設計思想)。
-    - **episode_ref は逆引き結果** (origin_ref からの :func:`get_open_episode_by_origin`)
-      を使う。無ければ close を省く。
     - slot は ``fired → done`` (既に done 等なら触らない)。
     - 台帳は ``running → applied`` (result に ``recovered: True``)、commit 後に
       ``completed``。
+
+    ``episode_ref`` は束 6c (2026-08-22) で常に None になった (v3 §7 — 開く手が
+    無いので閉じる相手も無い)。引数は呼び出し側の形を壊さないために残る。
 
     冪等: 実行が running でなければ (= 既に別 tick が settle 済み) 何もしない。
     ``mark_applied`` は running→applied の合法遷移なので、二重 tick の 2 本目が
     IllegalTransitionError で落ちる前に status を確認して skip する。
     """
-    from saiverse import episodes
     from saiverse.execution_ledger import STATUS_RUNNING as _LEDGER_RUNNING
 
     # 冪等ガード: running でなければ触らない (二重 tick の 2 本目は既に applied)。
@@ -4732,7 +4652,6 @@ def settle_stale_slot(
         return
 
     db = manager.SessionLocal()
-    closed_episode = False
     try:
         row = _load_plan_row(db, persona_id, plan_date_str)
         # slot fired → done (既に done/skipped 等なら触らない — 帳簿を上書きしない)。
@@ -4774,24 +4693,11 @@ def settle_stale_slot(
         else:
             LOGGER.warning(
                 "[day_plan] settle_stale_slot: plan row missing "
-                "(persona=%s date=%s index=%d id=%s); settling ledger/episode only",
+                "(persona=%s date=%s index=%d id=%s); settling the ledger only",
                 persona_id, plan_date_str, index, slot_id,
             )
 
-        # 出来事を閉じる (逆引き結果、同 session)。既に閉じていれば close は no-op。
-        if episode_ref:
-            try:
-                episodes.close_episode(
-                    manager, persona_id, episode_ref, session=db,
-                )
-                closed_episode = True
-            except episodes.EpisodeNotFoundError:
-                LOGGER.warning(
-                    "[day_plan] settle_stale_slot: episode %s not found "
-                    "(persona=%s); closing ledger without it",
-                    episode_ref, persona_id,
-                )
-
+        # 出来事を閉じる手は束 6c (2026-08-22) で退役した (v3 §7)。
         # 台帳 running → applied (outbox 無し。予算は予約額のまま = 保守精算)
         ledger.mark_applied(execution_id, session=db, result={
             "kind": "slot.fire",
@@ -4807,14 +4713,11 @@ def settle_stale_slot(
     finally:
         db.close()
 
-    # commit 成功後: open キャッシュ無効化 → 台帳 completed。
-    if closed_episode:
-        episodes.invalidate_open_cache(manager, persona_id)
     ledger.mark_completed(execution_id)
     LOGGER.info(
         "[day_plan] settle_stale_slot: recovered slot.fire settled "
-        "(persona=%s date=%s index=%d exec=%s episode=%s)",
-        persona_id, plan_date_str, index, execution_id, episode_ref,
+        "(persona=%s date=%s index=%d exec=%s)",
+        persona_id, plan_date_str, index, execution_id,
     )
 
 
@@ -4866,120 +4769,6 @@ def _resolve_ref(manager: Any, persona_id: str, ref: str) -> Optional[str]:
 
 
 # ---------------------------------------------------------------------------
-# 大枝 (track:N) コマの指示書 (P5: コマ参照の任意階層化、life_concept_map.md §3.1)
-# ---------------------------------------------------------------------------
-
-
-def _read_track_desk_memo(track: Any) -> Optional[Dict[str, Any]]:
-    """Track metadata から作業メモ (desk_memo) を読む。無ければ None。"""
-    raw = getattr(track, "track_metadata", None)
-    if not raw:
-        return None
-    try:
-        metadata = json.loads(raw)
-    except (TypeError, ValueError):
-        return None
-    memo = metadata.get("desk_memo") if isinstance(metadata, dict) else None
-    return memo if isinstance(memo, dict) else None
-
-
-def _build_track_instruction(
-    manager: Any, persona_id: str, slot: Dict[str, Any], ref: str
-) -> tuple[Optional[str], Optional[str]]:
-    """track:N コマの指示書を Track の文脈 (title・机メモ・配下の生存タスク) から組む。
-
-    大枝コマの実行意味 (§3.1「中身はその場の判断」): 発火時に Track の状況を
-    見てセッション 1 本を回す。**中身が空の Track** (配下に生存タスク・机メモ・
-    コマの覚え書き (note) のいずれも無い) は presence 相当に縮退する — 充填生成で
-    セッションを回すと v1 の空回りに逆戻りするため (§6 無意味の予算の注意)。
-
-    ただし note があれば縮退しない: ペルソナが編成時に書いた覚え書き
-    (「構想を練る」等) はこのコマの意図そのものなので、生存タスクが無くても
-    それを目標にセッションを回す — day_open の約束「関心を指せば開始時に状況を
-    見て決める」との整合 (issue track_slot_empty_degradation)。
-
-    Returns:
-        ``(instruction, track_id)``。縮退時は ``(None, track_id)``。
-        Track が解決できない場合は ``(None, None)`` (呼び出し側で WARN 済み想定)。
-    """
-    track_manager = getattr(manager, "track_manager", None)
-    if track_manager is None:
-        LOGGER.warning("[day_plan] track ref %r but manager has no track_manager", ref)
-        return None, None
-    try:
-        track_id = track_manager.resolve_track_ref(persona_id, ref)
-        track = track_manager.get(track_id)
-    except Exception:
-        LOGGER.warning(
-            "[day_plan] track ref %r could not be resolved (persona=%s)",
-            ref, persona_id, exc_info=True,
-        )
-        return None, None
-
-    title = getattr(track, "title", None) or "(無題)"
-    intent = (getattr(track, "intent", None) or "").strip()
-    memo = _read_track_desk_memo(track)
-    note = (slot.get("note") or "").strip()
-
-    from saiverse.persona_task_manager import PersonaTaskManager
-
-    try:
-        ptm = PersonaTaskManager(manager.SessionLocal)
-        live_tasks = ptm.list_tasks(
-            persona_id, track_id=track_id,
-            statuses=("pending", "active", "paused"), include_steps=False,
-        )
-    except Exception:
-        LOGGER.warning(
-            "[day_plan] failed to list tasks under track %s (persona=%s)",
-            track_id, persona_id, exc_info=True,
-        )
-        live_tasks = []
-
-    if not live_tasks and not memo and not note:
-        # 中身が空 (生存タスク・机メモ・コマの覚え書きのいずれも無い) →
-        # presence 縮退 (呼び出し側が record_level を刻む)
-        return None, track_id
-
-    parts = [f"目的: 関心「{title}」を前に進める。"]
-    if intent:
-        parts.append(f"この関心の意図: {intent}")
-    if note:
-        parts.append(f"このコマの覚え書き: {note}")
-    if memo:
-        memo_label = "詰まり" if memo.get("status") == "blocked" else "続き"
-        parts.append(
-            f"前回の作業メモ [{memo_label}]: {str(memo.get('text') or '').strip() or '(記載なし)'}"
-        )
-    if live_tasks:
-        lines = ["この関心の下にあるタスク:"]
-        for t in live_tasks:
-            t_ref = t.get("task_ref") or "task:?"
-            goal = (t.get("goal") or "").strip()
-            lines.append(
-                f"- {t_ref} [{t.get('status')}] {t.get('title') or '(無題)'}"
-                + (f"（目標: {goal}）" if goal else "")
-            )
-        parts.append("\n".join(lines))
-        opening = "この中から今のコマで実際に進められることを選んで取り組むこと。"
-    else:
-        # 生存タスク一覧が無い (note / 机メモだけで回る大枝) — 指示語の指す先が
-        # 無いので、意図と覚え書きに沿って取り組ませる。
-        opening = (
-            "この関心の意図とこのコマの覚え書きに沿って、今のコマで実際に"
-            "進められることに取り組むこと。"
-        )
-    parts.append(
-        opening
-        + "スペルで実際に実行・確認できたことだけを行い、成果は document_create 等の"
-        "スペルで実際に残すこと。"
-        "完成条件: 実際にやったことが読み返せる形で残っていること。"
-        "実際にやったこと以外を「やった」と書かないこと。"
-    )
-    return "\n".join(parts), track_id
-
-
-# ---------------------------------------------------------------------------
 # 組み込みハンドラ
 # ---------------------------------------------------------------------------
 
@@ -5007,43 +4796,24 @@ def run_worker_slot_session(
 
     ref の階層でセッションの形が変わる (P5, life_concept_map.md §3.1):
 
-    - task:N / desire:N / none — 型別テンプレートの指示書 (従来どおり。
-      desire コマ = お試し採用: 発火時にそのまま欲求を生きる。採用への昇格は
-      しない — それは判断点の仕事)
-    - track:N (大枝) — Track の title・机メモ・コマの note・配下の生存タスクから
-      指示書を組む (:func:`_build_track_instruction`)。**生存タスク・机メモ・note が
-      すべて空の Track だけ presence 相当に縮退** し、セッションを回さず ``None``
-      を返す (呼び出し側は判断点を撃たず予算も消費しない)。note があれば縮退せず、
-      それを目標にセッションを回す (issue track_slot_empty_degradation)
+    ref は型別テンプレートの指示書を組むのに使う (task:N / desire:N / none)。
+    desire コマ = お試し採用: 発火時にそのまま欲求を生きる。採用への昇格はしない
+    — それは判断点の仕事。
+
+    ⚠ ``track:N`` (大枝) コマの分岐は束 6c (2026-08-22) で削除した。指示書の材料
+    (Track の title・机メモ・配下の生存タスク) がすべて退役して到達不能だったため
+    (track_retirement.md §8.3)。旧データに残る ``track:N`` の ref は、他の未知参照と
+    同じく「対象なし」のテンプレートで回る。
 
     Returns:
         ``sea.work_session.WorkSessionResult`` (raise しない契約)。
-        presence 縮退時のみ ``None``。
     """
     kind = slot["kind"]
     ref = slot.get("ref") or REF_NONE
-    track_id: Optional[str] = None
-    if _TRACK_REF_RE.match(ref):
-        instruction, track_id = _build_track_instruction(manager, persona_id, slot, ref)
-        if instruction is None:
-            # 中身が空 (または解決不能) → presence 縮退。詳細な実行記録が
-            # 無いことを slot に永続化する (暮らし/休む スタブと同じ正直さ)。
-            LOGGER.info(
-                "[day_plan] track slot degraded to presence (empty track): "
-                "persona=%s date=%s index=%d ref=%s",
-                persona_id, plan_date_str, index, ref,
-            )
-            _update_slot(
-                manager, persona_id, plan_date_str, index,
-                expected_id=slot.get("id"),
-                record_level=RECORD_LEVEL_PRESENCE_ONLY,
-            )
-            return None
-    else:
-        template = _WORKER_INSTRUCTION_TEMPLATES[kind]
-        target = _resolve_ref(manager, persona_id, ref) or _NO_REF_TARGET
-        note = (slot.get("note") or "").strip() or "(記載なし)"
-        instruction = template.format(note=note, target=target)
+    template = _WORKER_INSTRUCTION_TEMPLATES[kind]
+    target = _resolve_ref(manager, persona_id, ref) or _NO_REF_TARGET
+    note = (slot.get("note") or "").strip() or "(記載なし)"
+    instruction = template.format(note=note, target=target)
 
     budget = int(slot.get("budget_rounds") or 0)
     if budget < 1:
@@ -5059,25 +4829,19 @@ def run_worker_slot_session(
     from sea.work_session import run_work_session
     from saiverse.slot_close import make_close_hook
 
-    # track:N コマではセッションの対象タスクは無い (Track 単位の取り組み)。
-    # task_ref を track 参照で埋めると post_session の task_verdict が偽対象を
-    # 裁定してしまうため、track_id 側に流す。
-    #
     # close_hook = コマ締めの一手 (T4: 帰属判定 + 経験値ノート、同一コール)。
     # v1 で締めコールを持つのは作業セッション系コマ (=この関数) のみ — 軽い
     # 一手コマ (出かける/自室で過ごす) は Pulse 記録が SAIMemory に残り、
     # あらすじ→関与タグは代謝側 (B2) の担当なので、コマごとの LLM コスト
     # 倍化を避けて締めコールを足さない (saiverse/slot_close.py 冒頭)。
-    is_track_ref = track_id is not None
     close_hook = make_close_hook(manager, persona_id, plan_date_str, slot, index)
     result = run_work_session(
         persona_id,
         instruction,
         budget,
-        task_ref=ref if (ref != REF_NONE and not is_track_ref) else None,
+        task_ref=ref if ref != REF_NONE else None,
         metadata={"day_plan": {"plan_date": plan_date_str, "slot_index": index, "kind": kind}},
         manager=manager,
-        track_id=track_id,
         title=str(slot.get("title") or "").strip() or None,
         close_hook=close_hook,
     )
@@ -5211,9 +4975,7 @@ def _handle_worker_slot(
             "budget_rounds": int(slot.get("budget_rounds") or 0) or None,
             "episode_attribution_done": attribution_done,
         }
-        # track:N コマの対象は Track (WorkSessionResult.track_id 経由で判断点へ
-        # 届く)。task_ref に track 参照を入れると task_verdict が壊れる。
-        if ref != REF_NONE and not _TRACK_REF_RE.match(ref):
+        if ref != REF_NONE:
             context["task_ref"] = ref
         fire_judgment_point(manager, persona_id, KIND_POST_SESSION, context)
     except Exception:

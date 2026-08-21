@@ -13,22 +13,15 @@ import {
     Video,
     Anchor,
     Activity,
-    PauseCircle,
     X,
 } from 'lucide-react';
 import ItemModal from './ItemModal';
 import PersonaMenu from './PersonaMenu';
-import PersonaProfileModal from './PersonaProfileModal';
-import LifeView from './LifeView';
-import EventsModal from './EventsModal';
 import ModalOverlay from './common/ModalOverlay';
 import fixtureStyles from './FixtureModal.module.css';
 import MemoryModal from './MemoryModal';
 import ScheduleModal from './ScheduleModal';
-import TasksModal from './TasksModal';
 import SettingsModal from './SettingsModal';
-import LifeSettingsModal from './LifeSettingsModal';
-import TimetableTemplateModal from './TimetableTemplateModal';
 import InventoryModal from './InventoryModal';
 import BuildingSettingsModal from './BuildingSettingsModal';
 
@@ -50,38 +43,9 @@ interface Occupant {
     id: string;
     name: string;
     avatar?: string;
-    // 自律行動 (自分から考えて動くこと) の ON/OFF。ブレーカーと同じ発想で、
-    // 入っているのが当たり前の ON は常時表示しない。false のときだけ
-    // 「止めています」の控えめな表示を出す (owner裁定、2026-07-14)。
-    // 未設定 (null/undefined) は「不明」扱いで何も出さない。
-    autonomy_enabled?: boolean | null;
-    // 「いま何をしているか」— running な自律 Track の題名から作る短いラベル。
-    // 話しかけやすさ (life_state) とは別概念。中身を言えないときは
-    // バックエンドが null を返すので何も表示しない (build_activity_label)。
-    activity_label?: string | null;
-    // 「話しかけやすさ」表示 (life.md §9.1)。AI のみ。null = lives 未宣言 (非表示)。
-    life_state?: string | null;      // "in_life" (活動中) / "valley" (休憩中)
-    life_until?: string | null;      // in_life のときだけ "HH:MM" (現在ライフの終了時刻)
-}
-
-// 「話しかけやすさ」ドットの色・文言 (life.md §9.1)。実装名 (ライフ/lives) は
-// 出さず、日常語で「気軽に話しかけられます」の意味が伝わる表現にする。
-const LIFE_STATE_DOT_COLORS: Record<string, string> = {
-    in_life: '#22c55e',
-    valley: '#9ca3af',
-};
-
-function lifeStateTooltip(state: string, until?: string | null): string {
-    if (state === 'in_life') {
-        return until
-            ? `活動中 (${until} まで) — 気軽に話しかけられます`
-            : '活動中 — 気軽に話しかけられます';
-    }
-    return '休憩中 — 話しかけると起きます';
-}
-
-function lifeStateLabel(state: string): string {
-    return state === 'in_life' ? '活動中' : '休憩中';
+    // ⚠ 暮らし系の表示 (話しかけやすさ / いま何をしているか / 自律 OFF) は
+    // v0.3 で隠した (autonomous_behavior_v3.md §11「運転 UI は隠す」)。供給する
+    // 運転そのものが v0.4 なので、動いていない状態を UI に出さない。
 }
 
 interface Item {
@@ -125,27 +89,15 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger, currentB
     // Modal States
     const [showMemory, setShowMemory] = useState(false);
     const [showSchedule, setShowSchedule] = useState(false);
-    const [showTasks, setShowTasks] = useState(false);
     const [showSettings, setShowSettings] = useState(false);
-    const [showLifeSettings, setShowLifeSettings] = useState(false);
-    const [showTimetableTemplate, setShowTimetableTemplate] = useState(false);
     const [showInventory, setShowInventory] = useState(false);
-    const [showProfile, setShowProfile] = useState(false);
     const [showBuildingSettings, setShowBuildingSettings] = useState(false);
-    // ライフビュー (観察面サイドパネル)。インジケータ直クリックでも開くため、
-    // PersonaMenu の selectedPersona とは独立に対象を保持する。
-    const [lifeViewPersona, setLifeViewPersona] = useState<Occupant | null>(null);
-    // ライフビューの「今日のできごとを見る」から開くできごとモーダルの絞り込み対象。
-    // Sidebar 側の EventsModal とは別インスタンス (どちらも self-contained なので
-    // ローカル state で足りる。null = 閉じている)。
-    const [eventsPersonaId, setEventsPersonaId] = useState<string | null>(null);
 
     // Keep track of which persona is active for modals
     // When opening a modal, we use selectedPersona's ID.
     // We need to keep the ID even if selectedPersona is cleared (though typically we might close menu first).
     const [activeModalPersonaId, setActiveModalPersonaId] = useState<string | null>(null);
     const [activeModalPersonaName, setActiveModalPersonaName] = useState<string | null>(null);
-    const [activeModalPersonaAvatar, setActiveModalPersonaAvatar] = useState<string | null>(null);
 
     // 2026-04-30 のエリス上書き事故 (feedback_modal_id_integrity.md) の再発防止:
     // サーバ side global の user_current_building_id が他デバイスの操作で変動すると、
@@ -213,15 +165,9 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger, currentB
         setSelectedPersona(null);
         setShowMemory(false);
         setShowSchedule(false);
-        setShowTasks(false);
         setShowSettings(false);
-        setShowLifeSettings(false);
-        setShowTimetableTemplate(false);
         setShowInventory(false);
-        setShowProfile(false);
         setShowBuildingSettings(false);
-        setLifeViewPersona(null);
-        setEventsPersonaId(null);
     }, [details?.id]);
 
     // Polling for real-time updates when sidebar is open
@@ -277,27 +223,21 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger, currentB
     // activeModalPersonaId だけが上書きされ、対象モーダルは開いたまま personaId プロパティ
     // だけが切り替わる現象が起きる。このとき「フォームの中身は古いまま、保存先 ID だけ新しい」
     // という極めて危険な状態になりうるため、いったんすべてのモーダルを閉じてから開き直す。
-    const openModal = (type: 'memory' | 'schedule' | 'tasks' | 'settings' | 'lifeSettings' | 'timetableTemplate' | 'inventory' | 'profile') => {
+    const openModal = (type: 'memory' | 'schedule' | 'settings' | 'inventory') => {
         if (!selectedPersona) return;
         const newId = selectedPersona.id;
         const newName = selectedPersona.name;
-        const newAvatar = selectedPersona.avatar ?? null;
 
-        const anyOpen = showMemory || showSchedule || showTasks || showSettings || showLifeSettings || showTimetableTemplate || showInventory || showProfile;
+        const anyOpen = showMemory || showSchedule || showSettings || showInventory;
         const sameTarget = anyOpen && activeModalPersonaId === newId;
 
         const applyOpen = () => {
             setActiveModalPersonaId(newId);
             setActiveModalPersonaName(newName);
-            setActiveModalPersonaAvatar(newAvatar);
             if (type === 'memory') setShowMemory(true);
             if (type === 'schedule') setShowSchedule(true);
-            if (type === 'tasks') setShowTasks(true);
             if (type === 'settings') setShowSettings(true);
-            if (type === 'lifeSettings') setShowLifeSettings(true);
-            if (type === 'timetableTemplate') setShowTimetableTemplate(true);
             if (type === 'inventory') setShowInventory(true);
-            if (type === 'profile') setShowProfile(true);
         };
 
         // Close the menu in either branch.
@@ -309,46 +249,13 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger, currentB
             // 再度 isOpen=true になったとき新しい personaId で loadConfig をやり直す。
             setShowMemory(false);
             setShowSchedule(false);
-            setShowTasks(false);
             setShowSettings(false);
-            setShowLifeSettings(false);
-            setShowTimetableTemplate(false);
             setShowInventory(false);
-            setShowProfile(false);
             // 次の tick で開く: state 反映と useEffect cleanup を間に挟むため
             setTimeout(applyOpen, 0);
             return;
         }
 
-        applyOpen();
-    };
-
-    // ライフビューの「詳しく見る」からメモリーモーダル (Pulse タイムライン) を開く。
-    // openModal と同じ ID 整合性対策 (feedback_modal_id_integrity.md): 別ペルソナの
-    // モーダルが開いていたら全部閉じてから次 tick で開き直す。
-    const openMemoryFor = (target: Occupant) => {
-        const anyOpen = showMemory || showSchedule || showTasks || showSettings || showLifeSettings || showTimetableTemplate || showInventory || showProfile;
-        const sameTarget = anyOpen && activeModalPersonaId === target.id;
-
-        const applyOpen = () => {
-            setActiveModalPersonaId(target.id);
-            setActiveModalPersonaName(target.name);
-            setActiveModalPersonaAvatar(target.avatar ?? null);
-            setShowMemory(true);
-        };
-
-        if (anyOpen && !sameTarget) {
-            setShowMemory(false);
-            setShowSchedule(false);
-            setShowTasks(false);
-            setShowSettings(false);
-            setShowLifeSettings(false);
-            setShowTimetableTemplate(false);
-            setShowInventory(false);
-            setShowProfile(false);
-            setTimeout(applyOpen, 0);
-            return;
-        }
         applyOpen();
     };
 
@@ -458,62 +365,6 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger, currentB
                                             </div>
                                             <div className={styles.occupantInfo}>
                                                 <span className={styles.occupantName}>{user.name}</span>
-                                                {/* 常時表示する唯一の状態表示: 「話しかけやすさ」(life.md §9.1)。
-                                                    lives 未宣言 (life_state が null) のときは何も出さない —
-                                                    誤情報を出さないための沈黙 (試金石: 嘘なく即答できるか)。 */}
-                                                {user.life_state && (
-                                                    <button
-                                                        className={styles.lifeStateChip}
-                                                        title={lifeStateTooltip(user.life_state, user.life_until)}
-                                                        onClick={(e) => {
-                                                            e.stopPropagation();
-                                                            setLifeViewPersona(user);
-                                                        }}
-                                                    >
-                                                        <span
-                                                            className={styles.lifeStateDot}
-                                                            style={{ backgroundColor: LIFE_STATE_DOT_COLORS[user.life_state] || '#9ca3af' }}
-                                                        />
-                                                        <span className={styles.lifeStateLabel}>
-                                                            {lifeStateLabel(user.life_state)}
-                                                        </span>
-                                                    </button>
-                                                )}
-                                                {/* 「いま何をしているか」(running 自律 Track の題名から作る短いラベル)。
-                                                    話しかけやすさとは別の情報なので併記する。中身を言えないとき
-                                                    (Track なし / 題名も意図も空) はバックエンドが null を返すので
-                                                    何も出ない — ライフ由来の「活動中」と文言が重複しない。 */}
-                                                {user.activity_label && (
-                                                    <button
-                                                        className={styles.activityLabelChip}
-                                                        title={`いま: ${user.activity_label}`}
-                                                        onClick={(e) => {
-                                                            e.stopPropagation();
-                                                            setLifeViewPersona(user);
-                                                        }}
-                                                    >
-                                                        <Activity size={12} className={styles.activityLabelIcon} />
-                                                        <span className={styles.activityLabelText}>
-                                                            {user.activity_label}
-                                                        </span>
-                                                    </button>
-                                                )}
-                                                {/* 自律行動 OFF の控えめな表示 (ブレーカー方式)。入っているのが
-                                                    当たり前の ON は常時表示せず、明示的に止めているときだけ
-                                                    知らせる。クリックでライフビューを開く (owner裁定、2026-07-14)。 */}
-                                                {user.autonomy_enabled === false && (
-                                                    <button
-                                                        className={styles.autonomyOffChip}
-                                                        title="自律行動を止めています（話しかければ通常どおり応答します）"
-                                                        onClick={(e) => {
-                                                            e.stopPropagation();
-                                                            setLifeViewPersona(user);
-                                                        }}
-                                                    >
-                                                        <PauseCircle size={12} className={styles.autonomyOffIcon} />
-                                                        <span className={styles.autonomyOffLabel}>自律行動を止めています</span>
-                                                    </button>
-                                                )}
                                             </div>
                                         </div>
                                     ))
@@ -646,18 +497,9 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger, currentB
                         personaName={selectedPersona.name}
                         avatarUrl={selectedPersona.avatar || "/api/static/icons/host.png"}
                         buildingId={details?.id ?? currentBuildingId ?? null}
-                        onOpenLifeView={() => {
-                            const target = selectedPersona;
-                            setSelectedPersona(null);
-                            setLifeViewPersona(target);
-                        }}
-                        onOpenProfile={() => openModal('profile')}
                         onOpenMemory={() => openModal('memory')}
                         onOpenSchedule={() => openModal('schedule')}
-                        onOpenTasks={() => openModal('tasks')}
                         onOpenSettings={() => openModal('settings')}
-                        onOpenLifeSettings={() => openModal('lifeSettings')}
-                        onOpenTimetableTemplate={() => openModal('timetableTemplate')}
                         onOpenInventory={() => openModal('inventory')}
                         onDismissed={() => {
                             // dismiss 成功 → details を即時 refetch して滞在ペルソナ表示を更新。
@@ -682,45 +524,15 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger, currentB
                             onClose={() => setShowSchedule(false)}
                             personaId={activeModalPersonaId}
                         />
-                        <TasksModal
-                            isOpen={showTasks}
-                            onClose={() => setShowTasks(false)}
-                            personaId={activeModalPersonaId}
-                        />
                         <SettingsModal
                             isOpen={showSettings}
                             onClose={() => setShowSettings(false)}
                             personaId={activeModalPersonaId}
                         />
-                        <LifeSettingsModal
-                            isOpen={showLifeSettings}
-                            onClose={() => setShowLifeSettings(false)}
-                            personaId={activeModalPersonaId}
-                            personaName={activeModalPersonaName || undefined}
-                        />
-                        <TimetableTemplateModal
-                            isOpen={showTimetableTemplate}
-                            onClose={() => setShowTimetableTemplate(false)}
-                            personaId={activeModalPersonaId}
-                            personaName={activeModalPersonaName || undefined}
-                        />
                         <InventoryModal
                             isOpen={showInventory}
                             onClose={() => setShowInventory(false)}
                             personaId={activeModalPersonaId}
-                        />
-                        <PersonaProfileModal
-                            isOpen={showProfile}
-                            onClose={() => setShowProfile(false)}
-                            personaId={activeModalPersonaId}
-                            personaName={activeModalPersonaName || undefined}
-                            avatarUrl={activeModalPersonaAvatar || "/api/static/icons/host.png"}
-                            onOpenTasks={() => {
-                                // 「頼まれごと・約束」は既存のタスク画面を再利用する。
-                                // 同一ペルソナのままなので ID 整合性対策の閉じ直しは不要。
-                                setShowProfile(false);
-                                setShowTasks(true);
-                            }}
                         />
                     </>
                 )}
@@ -734,37 +546,6 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger, currentB
                         onSaved={() => fetchDetails()}
                     />
                 )}
-
-                {/* ライフビュー (観察面サイドパネル) */}
-                {lifeViewPersona && (
-                    <LifeView
-                        isOpen={!!lifeViewPersona}
-                        onClose={() => setLifeViewPersona(null)}
-                        personaId={lifeViewPersona.id}
-                        personaName={lifeViewPersona.name}
-                        onOpenMemory={() => {
-                            const target = lifeViewPersona;
-                            setLifeViewPersona(null);
-                            if (target) openMemoryFor(target);
-                        }}
-                        // できごとモーダル (z1000) はパネル (z900) の上に重なるので
-                        // ライフビューは開いたまま。モーダルを閉じれば戻ってくる。
-                        onOpenEvents={() => setEventsPersonaId(lifeViewPersona.id)}
-                    />
-                )}
-
-                {/* できごとモーダル (ライフビューからこの子で絞り込んで開く)。
-                    「いま」行のペルソナ名クリックはライフビューへ戻す双方向リンク:
-                    モーダルを閉じてから対象を差し替える。 */}
-                <EventsModal
-                    isOpen={eventsPersonaId != null}
-                    onClose={() => setEventsPersonaId(null)}
-                    initialPersonaId={eventsPersonaId}
-                    onOpenLifeView={(p) => {
-                        setEventsPersonaId(null);
-                        setLifeViewPersona({ id: p.id, name: p.name });
-                    }}
-                />
             </div>
         </>
     );

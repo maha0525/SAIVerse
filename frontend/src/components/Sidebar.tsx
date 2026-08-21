@@ -2,14 +2,12 @@
 
 import { useEffect, useState, useRef, type ReactNode } from 'react';
 import styles from './Sidebar.module.css';
-import { Settings, Zap, BarChart2, UserPlus, Plus, X, HelpCircle, User, Bell, Package, AlertTriangle, ChevronRight, ChevronDown, Newspaper } from 'lucide-react';
+import { Settings, Zap, BarChart2, UserPlus, Plus, X, HelpCircle, User, Bell, Package, AlertTriangle, ChevronRight, ChevronDown } from 'lucide-react';
 import GlobalSettingsModal from './GlobalSettingsModal';
 import UserProfileModal from './UserProfileModal';
 import PersonaWizard from './PersonaWizard';
 import TutorialSelectModal from './tutorial/TutorialSelectModal';
 import AddonManagerModal from './AddonManagerModal';
-import EventsModal from './EventsModal';
-import LifeView from './LifeView';
 
 interface UserStatus {
     is_online: boolean;  // Backward compatibility
@@ -68,13 +66,8 @@ export default function Sidebar({ onMove, isOpen, onOpen, onClose, refreshTrigge
     const [isCreatingBuilding, setIsCreatingBuilding] = useState(false);
     const [isTutorialSelectOpen, setIsTutorialSelectOpen] = useState(false);
     const [isAddonManagerOpen, setIsAddonManagerOpen] = useState(false);
-    // できごとはページ遷移でなくモーダルで開く (チャットの書きかけメッセージを失わないため)
-    const [isEventsOpen, setIsEventsOpen] = useState(false);
-    // できごとの初期絞り込み (ライフビューの「今日のできごとを見る」から再度開く時のみ設定)
-    const [eventsPersonaId, setEventsPersonaId] = useState<string | null>(null);
-    // できごとの「いま」行から開くライフビュー。RightSidebar のライフビューとは
-    // 別インスタンス (LifeView は personaId だけで self-contained なのでローカルで足りる)
-    const [lifeViewTarget, setLifeViewTarget] = useState<{ id: string; name: string } | null>(null);
+    // ⚠ 「できごと」とライフビューへの導線は v0.3 で隠した
+    // (autonomous_behavior_v3.md §11「運転 UI は隠す」)。
     const [developerMode, setDeveloperMode] = useState(false);
     const [quarantinedIds, setQuarantinedIds] = useState<Set<string>>(new Set());
     // システム欄の折り畳み。既定は閉 (低解像度端末で場所欄を圧迫しないため)。
@@ -504,14 +497,6 @@ export default function Sidebar({ onMove, isOpen, onOpen, onClose, refreshTrigge
                     )}
                     <div
                         className={styles.buildingItem}
-                        onClick={() => setIsEventsOpen(true)}
-                    >
-                        <span style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                            <Newspaper size={16} /> できごと
-                        </span>
-                    </div>
-                    <div
-                        className={styles.buildingItem}
                         onClick={() => {
                             window.location.href = '/announcements';
                             if (onClose) onClose();
@@ -612,41 +597,6 @@ export default function Sidebar({ onMove, isOpen, onOpen, onClose, refreshTrigge
                     isOpen={isAddonManagerOpen}
                     onClose={() => setIsAddonManagerOpen(false)}
                 />
-
-                <EventsModal
-                    isOpen={isEventsOpen}
-                    onClose={() => {
-                        setIsEventsOpen(false);
-                        // メニューから次に開く時は「みんな」に戻す
-                        setEventsPersonaId(null);
-                    }}
-                    initialPersonaId={eventsPersonaId}
-                    onOpenLifeView={(p) => {
-                        // できごと (閉じた列) からその子の生中継へ: モーダルを
-                        // 閉じてからライフビューを開く (重なり回避)
-                        setIsEventsOpen(false);
-                        setEventsPersonaId(null);
-                        setLifeViewTarget(p);
-                    }}
-                />
-
-                {/* できごとから開くライフビュー (観察面サイドパネル)。
-                    「今日のできごとを見る」で絞り込み済みのできごとへ戻れる
-                    (モーダル z1000 がパネル z900 の上に重なるので開いたままでよい)。
-                    メモリーモーダルの機構は Sidebar に無いため onOpenMemory は渡さない
-                    (「詳しく見る」リンクが出ないだけで他は同じ)。 */}
-                {lifeViewTarget && (
-                    <LifeView
-                        isOpen={!!lifeViewTarget}
-                        onClose={() => setLifeViewTarget(null)}
-                        personaId={lifeViewTarget.id}
-                        personaName={lifeViewTarget.name}
-                        onOpenEvents={() => {
-                            setEventsPersonaId(lifeViewTarget.id);
-                            setIsEventsOpen(true);
-                        }}
-                    />
-                )}
             </aside>
         </>
     );

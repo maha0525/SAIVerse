@@ -1,16 +1,18 @@
 """自律稼働デバッグコントローラー API (api/routes/people/debug.py) の HTTP テスト。
 
 対象は「切り上げ (wrap-up-conversation)」の発火条件。「いま会話中か」の真実は
-開いている会話の出来事が持つ (life.md §7 案 Y)。開いている会話が無いまま撃つと、
-別の会話あるいは存在しない会話を閉じることになる (2026-08-14 Codex 指摘 F5)。
+**メモリ内の会話状態**が持つ (autonomous_behavior_v3.md §7、束 6c)。開いている
+会話が無いまま撃つと、別の会話あるいは存在しない会話を閉じることになる
+(2026-08-14 Codex 指摘 F5)。
 
-会話終了判断は 2026-08-16 に退役したので (autonomous_behavior_v3.md §8/§13.3)、
-``handle_conversation_end`` が返すのは判断の結果ではなく閉じた帳簿の事実
-(``closed`` / ``episode_ref``) になった。
+会話終了判断は 2026-08-16 に退役したので (v3 §8/§13.3)、``handle_conversation_end``
+が返すのは判断の結果ではなく閉じた帳簿の事実 (``closed`` / ``conversation_id``)。
+
+⚠ 「会話以外の出来事が開いているだけでは撃たない」の回帰は対象消滅した — 出来事の
+行を作る書き手が全滅したので (v3 §7)、その状態を作り出す手段が無い。
 
 TestClient はワーカースレッドでルートを実行するため、DB は :memory: でなく
-file sqlite + check_same_thread=False で共有する (test_life_settings_api.py と
-同じ流儀)。
+file sqlite + check_same_thread=False で共有する。
 """
 from __future__ import annotations
 
@@ -26,7 +28,7 @@ from sqlalchemy.orm import sessionmaker
 
 from api.deps import get_manager
 from database.models import AI, Base, City, User
-from saiverse import episodes
+from saiverse import user_conversation as uc
 
 PERSONA_ID = "alice"
 BUILDING = "alice_room"
@@ -50,6 +52,10 @@ class WrapUpConversationApiTest(unittest.TestCase):
             SessionLocal=self.Session,
             personas={PERSONA_ID: SimpleNamespace(persona_id=PERSONA_ID)},
         )
+        # 会話状態は manager にぶら下がるので、テストごとに新しい manager =
+        # 空の状態から始まる。退避先 (_FALLBACK_STATE) は使われないが念のため。
+        uc._FALLBACK_STATE.clear()
+        self.addCleanup(uc._FALLBACK_STATE.clear)
 
         from api.routes.people import debug as debug_route
 
@@ -88,23 +94,26 @@ class WrapUpConversationApiTest(unittest.TestCase):
         finally:
             db.close()
 
+    def _open_conversation(self):
+        return uc._set_open_conversation(
+            self.manager, PERSONA_ID,
+            building_id=BUILDING, participants=[PERSONA_ID, "1"],
+        )
+
     def _post(self):
         return self.client.post(f"/api/people/{PERSONA_ID}/debug/wrap-up-conversation")
 
     # -- 撃つ側 ------------------------------------------------------------
 
-    def test_fires_when_conversation_episode_is_open(self):
-        ep = episodes.open_conversation_episode(
-            self.manager, PERSONA_ID, building_id=BUILDING,
-            participants=[PERSONA_ID, "1"],
-        )
+    def test_fires_when_a_conversation_is_open(self):
+        conv = self._open_conversation()
         res = self._post()
         self.assertEqual(res.status_code, 200)
         self.assertTrue(res.json()["success"])
         self.assertEqual(len(self.fired), 1)
-        # 検証した出来事そのものを背景処理へ渡す (TOCTOU の照合材料)。
+        # 検証した会話そのものを背景処理へ渡す (TOCTOU の照合材料)。
         self.assertEqual(
-            self.fired[0][2]["expected_episode_ref"], ep["episode_ref"],
+            self.fired[0][2]["expected_conversation_id"], conv["conversation_id"],
         )
 
     def test_fire_time_check_skips_when_the_conversation_already_ended(self):
@@ -116,73 +125,53 @@ class WrapUpConversationApiTest(unittest.TestCase):
         (2026-08-14 Codex 二巡目)。
         """
         from saiverse import autonomy_wiring
-        ep = episodes.open_conversation_episode(
-            self.manager, PERSONA_ID, building_id=BUILDING,
-            participants=[PERSONA_ID, "1"],
-        )
+
+        conv = self._open_conversation()
         self._post()
         # 背景処理が走る前に別経路が会話を閉じた
-        episodes.close_conversation_episode(self.manager, PERSONA_ID)
+        uc.clear_open_conversation(self.manager, PERSONA_ID)
 
         result = autonomy_wiring.handle_conversation_end(
             self.manager, PERSONA_ID,
-            expected_episode_ref=ep["episode_ref"],
+            expected_conversation_id=conv["conversation_id"],
         )
         self.assertFalse(result["closed"])
-        self.assertIn("no open conversation episode", result["reason"])
+        self.assertIn("no open conversation", result["reason"])
 
-    def test_fire_time_close_targets_only_the_verified_episode(self):
-        """照合と close は 1 手 (条件付き) —— 別の会話が開いていても閉じない。
+    def test_fire_time_close_targets_only_the_verified_conversation(self):
+        """照合と解除は 1 手 (条件付き) —— 別の会話が開いていても閉じない。
 
         「読んで照合 → 閉じる」の形だと、その間に別経路が閉じて新しい会話を
         開いた場合に**別の会話を閉じてしまう** (2026-08-14 Codex 三巡目)。
         """
         from saiverse import autonomy_wiring
-        first = episodes.open_conversation_episode(
-            self.manager, PERSONA_ID, building_id=BUILDING,
-            participants=[PERSONA_ID, "1"],
-        )
-        episodes.close_conversation_episode(self.manager, PERSONA_ID)
-        second = episodes.open_conversation_episode(
-            self.manager, PERSONA_ID, building_id=BUILDING,
-            participants=[PERSONA_ID, "1"],
-        )
+
+        first = self._open_conversation()
+        uc.clear_open_conversation(self.manager, PERSONA_ID)
+        second = self._open_conversation()
 
         result = autonomy_wiring.handle_conversation_end(
             self.manager, PERSONA_ID,
-            expected_episode_ref=first["episode_ref"],
+            expected_conversation_id=first["conversation_id"],
         )
         self.assertFalse(result["closed"])
         # 新しい会話は開いたまま (巻き添えで閉じられていない)
-        still_open = episodes.get_open_episode(
-            self.manager, PERSONA_ID, kind=episodes.KIND_CONVERSATION,
+        still_open = uc.get_open_conversation(self.manager, PERSONA_ID)
+        self.assertEqual(
+            still_open["conversation_id"], second["conversation_id"],
         )
-        self.assertEqual(still_open["episode_ref"], second["episode_ref"])
 
     # -- 撃たない側 --------------------------------------------------------
 
-    def test_rejects_when_no_open_conversation_episode(self):
+    def test_rejects_when_no_conversation_is_open(self):
         """開いている会話が無ければ撃たない。"""
         res = self._post()
         self.assertEqual(res.status_code, 409)
         self.assertEqual(self.fired, [])
 
-    def test_rejects_after_conversation_episode_closed(self):
-        episodes.open_conversation_episode(
-            self.manager, PERSONA_ID, building_id=BUILDING,
-            participants=[PERSONA_ID, "1"],
-        )
-        episodes.close_conversation_episode(self.manager, PERSONA_ID)
-        res = self._post()
-        self.assertEqual(res.status_code, 409)
-        self.assertEqual(self.fired, [])
-
-    def test_non_conversation_episode_is_not_a_success(self):
-        """会話以外の出来事 (作業中など) が開いているだけでは撃たない。"""
-        episodes.open_episode(
-            self.manager, PERSONA_ID, episodes.KIND_WORK_SESSION,
-            building_id=BUILDING,
-        )
+    def test_rejects_after_the_conversation_was_closed(self):
+        self._open_conversation()
+        uc.clear_open_conversation(self.manager, PERSONA_ID)
         res = self._post()
         self.assertEqual(res.status_code, 409)
         self.assertEqual(self.fired, [])

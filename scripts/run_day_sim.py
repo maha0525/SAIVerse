@@ -318,7 +318,6 @@ def _build_mock_manager(db_file: Optional[str], scenario) -> Any:
     from database.models import AI, Base, City, User
     from saiverse.day_scenario import MockJudgmentPulseController
     from saiverse.event_scheduler import EventScheduler
-    from saiverse.track_manager import TrackManager
 
     if db_file:
         engine = create_engine(f"sqlite:///{db_file}",
@@ -373,7 +372,6 @@ def _build_mock_manager(db_file: Optional[str], scenario) -> Any:
             SimpleNamespace(building_id="workshop", name="工房"),
         ],
         event_scheduler=EventScheduler(),  # start() しない (DES 前提)
-        track_manager=TrackManager(session_factory=session_factory),
         occupancy_manager=_StubOccupancy(),
         sea_runtime=MockWorkRuntime(MockSessionLLMClient()),
         _engine=engine,

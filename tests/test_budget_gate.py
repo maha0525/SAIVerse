@@ -32,7 +32,6 @@ from saiverse import day_plan
 from saiverse.day_simulator import DaySimulator
 from saiverse.event_scheduler import EventScheduler
 from saiverse.persona_task_manager import PersonaTaskManager
-from saiverse.track_manager import TrackManager
 from tool_loader import load_builtin_tool
 
 PERSONA_ID = "alice"
@@ -112,7 +111,6 @@ def manager(session_factory):
         personas=personas,
         occupancy_manager=StubOccupancy(personas),
         event_scheduler=EventScheduler(),  # start() しない (シム前提)
-        track_manager=TrackManager(session_factory=session_factory),
         buildings=[
             SimpleNamespace(building_id="library", name="図書館"),
             SimpleNamespace(building_id="workshop", name="工房"),

@@ -17,11 +17,11 @@ DES ドライバ (``saiverse.day_simulator.DaySimulator``) の上に載り、シ
    ラップが同 kind を **上書き登録** して置き換えるため二重発火しない
    (ラップは result への記録と mock/sync ディスパッチを担う)
 3. ユーザーイベント (message / leave) はドライバが再生する。mock
-   (:class:`EpisodeSimUserEventDriver`) は「会話中 = 開いている会話の出来事」の
-   open / close のみ、実 LLM モード
+   (:class:`ConversationStateSimUserEventDriver`) は「会話中 = メモリ内の会話
+   状態」(v3 §7) の set / clear のみ、実 LLM モード
    (:class:`RealConversationUserEventDriver`) は building_messages への発話記録
    + main_line Pulse という実チャット経路を同期に通す。
-   leave では会話の出来事を閉じるだけ (会話終了判断は 2026-08-16 に退役 —
+   leave では会話状態を落とすだけ (会話終了判断は 2026-08-16 に退役 —
    autonomous_behavior_v3.md §8/§13.3)
 4. events は **イベント到着判断** (on_event)
 5. sleep 時刻に **就寝判断** (day_close)
@@ -255,41 +255,45 @@ def load_scenario(path: Path | str) -> DayScenario:
 # ---------------------------------------------------------------------------
 
 
-def _ensure_conversation_episode(manager: Any, persona_id: str) -> None:
-    """会話の出来事 (kind='conversation') を開く (冪等)。
+def _ensure_conversation_state(manager: Any, persona_id: str) -> None:
+    """会話状態を立てる (冪等)。
 
-    実 manager (--real) では UserConversationTrackHandler の track_activated
-    hook が既に開いている場合があり、その場合は no-op になる。mock 構成
-    (最小スタブ manager) では observer が居ないため、ここが唯一の開き点。
-    出来事は記録専用 — 失敗してもシナリオ再生を止めない。
+    シムは本番の入口 (:func:`saiverse.user_conversation.start_conversation`) を
+    通さず、**会話中フラグだけ**を再生する構成なので、状態を直接立てる。
+    記録専用 — 失敗してもシナリオ再生を止めない。
     """
     try:
+        from saiverse import user_conversation as uc
+
+        if uc.get_open_conversation(manager, persona_id) is not None:
+            return
         persona = (getattr(manager, "personas", None) or {}).get(persona_id)
         building_id = getattr(persona, "current_building_id", None)
         participants = [persona_id]
         user_id = getattr(manager, "user_id", None)
         if user_id is not None:
             participants.append(str(user_id))
-        from saiverse.episodes import open_conversation_episode
-        open_conversation_episode(
+        state = uc._set_open_conversation(
             manager, persona_id,
             building_id=building_id, participants=participants,
         )
+        uc._write_transition_line(manager, state, action="start")
     except Exception:
         LOGGER.warning(
-            "[day_scenario] failed to open conversation episode (persona=%s)",
+            "[day_scenario] failed to open the conversation state (persona=%s)",
             persona_id, exc_info=True,
         )
 
 
-def _close_conversation_episode(manager: Any, persona_id: str) -> None:
-    """開いている会話の出来事を閉じる (無ければ no-op)。"""
+def _close_conversation_state(manager: Any, persona_id: str) -> None:
+    """開いている会話状態を落とす (無ければ no-op)。"""
     try:
-        from saiverse.episodes import close_conversation_episode
-        close_conversation_episode(manager, persona_id)
+        from saiverse.autonomy_wiring import handle_conversation_end
+
+        handle_conversation_end(manager, persona_id)
     except Exception:
         LOGGER.warning(
-            "[day_scenario] failed to close conversation episode (persona=%s)",
+            "[day_scenario] failed to close the conversation state (persona=%s)",
             persona_id, exc_info=True,
         )
 
@@ -310,12 +314,12 @@ class UserEventDriver:
         raise NotImplementedError
 
 
-class EpisodeSimUserEventDriver(UserEventDriver):
-    """会話中フラグを「開いている会話の出来事」で表現するシム内ドライバ。
+class ConversationStateSimUserEventDriver(UserEventDriver):
+    """会話中フラグだけを再生するシム内ドライバ。
 
     本番の「ユーザー会話中」判定 (``day_plan.is_in_user_conversation``) が見るのは
-    **開いている kind='conversation' の出来事**なので、message で出来事を開き、
-    leave で閉じる。会話本文の再生 (実 Pulse) はしない — 配線テストの対象は
+    **メモリ内の会話状態** (v3 §7、束 6c) なので、message で状態を立て、leave で
+    落とす。会話本文の再生 (実 Pulse) はしない — 配線テストの対象は
     「会話中の繰り下げ」。
     """
 
@@ -325,10 +329,10 @@ class EpisodeSimUserEventDriver(UserEventDriver):
         if get_open_conversation(manager, persona_id) is not None:
             LOGGER.info(
                 "[day_scenario] user message while already in conversation "
-                "(persona=%s); keeping the open episode", persona_id,
+                "(persona=%s); keeping the open conversation", persona_id,
             )
             return
-        _ensure_conversation_episode(manager, persona_id)
+        _ensure_conversation_state(manager, persona_id)
         LOGGER.info(
             "[day_scenario] conversation started: persona=%s text=%r",
             persona_id, text[:60],
@@ -343,23 +347,23 @@ class EpisodeSimUserEventDriver(UserEventDriver):
                 "(persona=%s); ignoring", persona_id,
             )
             return False
-        # 会話の出来事を閉じる (本番の沈黙タイマー経路に対応するシム側の閉じ点。
+        # 会話状態を落とす (本番の沈黙タイマー経路に対応するシム側の閉じ点。
         # leave = 運用の線 §8)
-        _close_conversation_episode(manager, persona_id)
+        _close_conversation_state(manager, persona_id)
         LOGGER.info("[day_scenario] conversation ended: persona=%s", persona_id)
         return True
 
 
-class RealConversationUserEventDriver(EpisodeSimUserEventDriver):
+class RealConversationUserEventDriver(ConversationStateSimUserEventDriver):
     """行動テスト (実 LLM モード) 用: ユーザー発話を本物の会話経路へ注入するドライバ。
 
-    mock の :class:`EpisodeSimUserEventDriver` が「会話中フラグ (出来事)」だけを
+    mock の :class:`ConversationStateSimUserEventDriver` が会話中フラグだけを
     再生するのに対し、本ドライバは実チャット経路 (``manager/runtime.py``
     ``handle_user_input_stream`` の backend_worker) と同じ順序で正規経路を叩く:
 
     1. ユーザー発話を building_messages へ記録 (heard_by = ペルソナ + ユーザー)
     2. 会話が開いていなければ ``saiverse.user_conversation.start_conversation``
-       — 会話の出来事を開き、main_line Pulse (``manager.run_sea_user``) を起動し、
+       — 会話状態を立て、main_line Pulse (``manager.run_sea_user``) を起動し、
        沈黙タイマーを張る。Pulse 冒頭の auto_ingest が (1) の発話をペルソナ記憶
        (memory.db) へ取り込む。Pulse は :class:`SyncJudgmentDispatcher` の
        ``submit_user`` 経由で呼び出しスレッド上で同期実行される (DES 単一スレッド)
@@ -677,7 +681,7 @@ class ScenarioPlayer:
     """シナリオを仮想クロックで再生するプレイヤー (モジュール docstring 参照)。"""
 
     def __init__(self, user_event_driver: Optional[UserEventDriver] = None) -> None:
-        self.user_event_driver = user_event_driver or EpisodeSimUserEventDriver()
+        self.user_event_driver = user_event_driver or ConversationStateSimUserEventDriver()
 
     # ------------------------------------------------------------------
     # 実行

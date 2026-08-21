@@ -30,7 +30,6 @@ from saiverse.persona_task_manager import (
     STATUS_COMPLETED,
     PersonaTaskManager,
 )
-from saiverse.track_manager import TrackManager
 from tool_loader import load_builtin_tool
 from tools.context import persona_context
 
@@ -52,14 +51,15 @@ class PurposeToolsTestCase(unittest.TestCase):
         Base.metadata.create_all(self.engine)
         self.SessionLocal = sessionmaker(bind=self.engine)
         self.ptm = PersonaTaskManager(self.SessionLocal)
-        self.tm = TrackManager(session_factory=self.SessionLocal)
 
         # load 済みスペル module の manager singleton を temp DB 版へ差し替え
         _mod_decompose._task_manager = self.ptm
         _mod_step._task_manager = self.ptm
         _mod_close._task_manager = self.ptm
 
-        # 自律 Track を1本 (track:1 が解決できるように)
+        # タスクの親になる Track 行を 1 本。TrackManager は 2026-08-22 (束 6c) に
+        # 退役したので、旧データ相当の ActionTrack 行を ORM で直接置く。
+        # (PersonaTaskManager の parent_kind='track' 経路はまだ生きている)
         self.track_id = str(uuid.uuid4())
         db = self.SessionLocal()
         db.add(ActionTrack(

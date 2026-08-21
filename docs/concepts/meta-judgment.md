@@ -1,6 +1,6 @@
 # Meta-Judgment（メタ判断）
 
-> 🪦 **v1 メタ判断（本ページが記述する状況分類ディスパッチ）は 2026-08-14 に退役した**（[track_retirement.md](../intent/track_retirement.md) §7.4 撤去順序①）。`_SITUATION_PLAYBOOK_MAP`・`meta_judgment_*` Playbook・`meta_judgment_finalize`・alert 状態機械は削除済み。**現行の判断機構は自律行動 v2 の判断点**（[judgment_points.md](../intent/persona_cognition/judgment_points.md)、起床・就寝・コマ・会話終了・イベント到着）。別行動中のユーザー発話の仲裁は on_event 判断点への直結（`autonomy_wiring.handle_user_utterance_conflict`）。`line_role='meta_judgment'`・`meta_judgment_log`・`submit_meta_judgment` レーンの語彙は判断点が引き継いで現役。以下は当時の記録。
+> 🪦 **v1 メタ判断（本ページが記述する状況分類ディスパッチ）は 2026-08-14 に退役した**（[track_retirement.md](../intent/track_retirement.md) §7.4 撤去順序①）。`_SITUATION_PLAYBOOK_MAP`・`meta_judgment_*` Playbook・`meta_judgment_finalize`・alert 状態機械は削除済み。**現行の判断機構は判断点**（[judgment_points.md](../intent/persona_cognition/judgment_points.md)。起床 day_open・就寝 day_close・セッション終了 post_session・イベント到着 on_event の 4 つ）。**会話終了（post_conversation）は 2026-08-16 に退役した** — 会話に切れ目は定義できず、「30 分沈黙 = 会話の終わり」という恣意的な仮定の上に席を置いていたため（[autonomous_behavior_v3.md](../intent/autonomous_behavior_v3.md) §13.3）。本人の声の捕獲は Metabolism のスルースの一手へ一本化された。別行動中のユーザー発話の仲裁は on_event 判断点への直結（`autonomy_wiring.handle_user_utterance_conflict`）。`line_role='meta_judgment'`・`meta_judgment_log`・`submit_meta_judgment` レーンの語彙は判断点が引き継いで現役。以下は当時の記録。
 
 > 開発者向け概念リファレンス。**全体の位置づけ**は [landscape §3](../overview/landscape.md)、**設計意図**は intent [`persona_cognitive_model.md`](../intent/persona_cognitive_model.md) を参照。
 

@@ -580,23 +580,26 @@ def test_schedule_manager_normal_playbooks_untouched(session_factory, monkeypatc
 # 会話終了 (wait_response タイムアウト) の帳簿処理
 #
 # 会話終了判断 (post_conversation) は 2026-08-16 の裁定で退役した
-# (autonomous_behavior_v3.md §8/§13.3)。残るのは「会話の出来事を閉じる」だけ。
+# (autonomous_behavior_v3.md §8/§13.3)。残るのは「会話状態を落とす」だけ。
+# 器は束 6c (2026-08-22) に出来事の行からメモリ内状態へ移った (同 §7)。
 # ---------------------------------------------------------------------------
 
 
-def _open_conversation_episode(manager):
-    from saiverse import episodes
+def _open_conversation(manager):
+    from saiverse import user_conversation as uc
 
-    return episodes.open_conversation_episode(
+    return uc._set_open_conversation(
         manager, PERSONA_ID, building_id="alice_room",
         participants=[PERSONA_ID, "1"],
     )
 
 
-def test_conversation_end_closes_the_episode(session_factory, monkeypatch):
+def test_conversation_end_clears_the_conversation_state(session_factory, monkeypatch):
+    from saiverse import user_conversation as uc
+
     manager, _persona = _make_manager(session_factory)
     clock.enable_virtual(datetime(2026, 7, 4, 15, 0, 0))
-    ep = _open_conversation_episode(manager)
+    conv = _open_conversation(manager)
 
     fired: List[Any] = []
     monkeypatch.setattr(
@@ -608,20 +611,15 @@ def test_conversation_end_closes_the_episode(session_factory, monkeypatch):
     # 判断は撃たれない (退役済み) — 帳簿処理だけが起きる
     assert fired == []
     assert result["closed"] is True
-    assert result["episode_ref"] == ep["episode_ref"]
-
-    from saiverse import episodes
-
-    assert episodes.get_open_episode(
-        manager, PERSONA_ID, kind=episodes.KIND_CONVERSATION,
-    ) is None
+    assert result["conversation_id"] == conv["conversation_id"]
+    assert uc.get_open_conversation(manager, PERSONA_ID) is None
 
 
-def test_conversation_end_without_an_open_episode_is_a_no_op(
+def test_conversation_end_without_an_open_conversation_is_a_no_op(
     session_factory, monkeypatch,
 ):
     """閉じるべき会話が無ければ何も起きない (帳簿は事実だけを記す)。"""
-    manager, _ = _make_manager(session_factory)  # 会話の出来事なし
+    manager, _ = _make_manager(session_factory)  # 会話状態なし
     fired: List[Any] = []
     monkeypatch.setattr(
         wiring, "fire_judgment_point",
@@ -631,7 +629,7 @@ def test_conversation_end_without_an_open_episode_is_a_no_op(
     result = wiring.handle_conversation_end(manager, PERSONA_ID)
     assert fired == []
     assert result["closed"] is False
-    assert "no open conversation episode" in result["reason"]
+    assert "no open conversation" in result["reason"]
 
 
 def test_conversation_end_cancels_the_silence_timeout(session_factory):
@@ -643,7 +641,7 @@ def test_conversation_end_cancels_the_silence_timeout(session_factory):
 
     manager, _persona = _make_manager(session_factory)
     clock.enable_virtual(datetime(2026, 7, 4, 15, 0, 0))
-    _open_conversation_episode(manager)
+    _open_conversation(manager)
     assert uc.arm_conversation_timeout(manager, PERSONA_ID) is True
 
     wiring.handle_conversation_end(manager, PERSONA_ID)
@@ -703,13 +701,13 @@ def test_external_event_not_active_goes_direct(session_factory, monkeypatch):
 
 
 def test_external_event_in_conversation_goes_direct(session_factory, monkeypatch):
-    """会話中判定は開いている kind='conversation' の出来事 (life.md §7 案 Y)。
+    """会話中判定はメモリ内の会話状態 (autonomous_behavior_v3.md §7)。
 
-    旧実装は running Track の種別で判定していたが、Track はもう時間経過で
-    状態を動かさないため出来事の open/close が「会話中」の唯一の真実になった。
+    正典は三代目 — Track の status (v1) → 開いている会話の出来事 (案 Y、
+    2026-07-13) → メモリ内の会話状態 (束 6c、2026-08-22)。判定の意味論は不変。
     """
     manager, _ = _make_manager(session_factory)
-    _open_conversation_episode(manager)
+    _open_conversation(manager)
     calls = _fake_fire(monkeypatch, {"submitted": True})
     dispatched: List[str] = []
     route = wiring.handle_external_event(

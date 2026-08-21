@@ -15,10 +15,9 @@ W5/M8 (記憶監査「Building→個人記憶の転記が cursor を先行確定
 
 帰属 (層0タグ、2026-08-09 まはー裁定):
 
-- 転記 entry には**転記先ペルソナ**の開いている出来事 (origin_episode) と
-  line_role / scope (main_line / committed) を刻む (:func:`_stamp_layer0`)。
-  これが無かったことで user 発言 (会話の相手側) が出来事の記録に構造上
-  一件も入らなかった (docs/issues/user_messages_missing_episode_attribution.md)。
+- 転記 entry には line_role / scope (main_line / committed) を刻む
+  (:func:`_stamp_layer0`)。出来事への帰属 (origin_episode) は束 6c
+  (2026-08-22) で刻印ごと退役した (v3 §7 — 専用の記録行を持たない)。
 - 過去分のバックフィルはしない — 事後の帰属は推測 = 捏造に近づく。
 """
 from __future__ import annotations
@@ -42,66 +41,22 @@ class _TranscribeFailed(RuntimeError):
     """転記の失敗 (memory 書き込みが failed)。ラウンドはここで停止する。"""
 
 
-def _open_episode_ref(manager: Any, persona_id: str) -> Optional[str]:
-    """転記先ペルソナの開いている出来事の episode_ref を返す (無ければ None)。
+def _stamp_layer0(entry: Dict[str, Any]) -> None:
+    """転記 entry に層0タグ (line_role / scope) を刻む。
 
-    sea/runtime._store_memory の層0タグと同じ構え: 記録専用で、解決失敗は
-    転記を止めない。get_open_episode は per-persona キャッシュ持ちなので
-    高頻度呼び出しでも DB を引かない。
-
-    **参照失敗でも転記を止めない (fail-open) — 2026-08-09 裁定。** 失敗した行の
-    帰属は再試行されず永久に欠けるが、それでもこちらを取る:
-
-    - 失敗しても *誤った* 帰属は生まれない。:func:`_stamp_layer0` は話し手から
-      継承した値を無条件に捨て、解決できたときだけ刻む。帰結は「タグが無い」
-      だけで、無帰属の行も編纂 (sea/eviction_plan) の畳みには入る。
-    - fail-closed (参照失敗でラウンドを止めて次周回に回す) にすると、
-      get_open_episode が恒常的に落ちる不具合を踏んだ日に、ペルソナがユーザーの
-      言葉を一切聞かなくなる。失う側が「タグ」から「会話」へ跳ね上がる。
-
-    失敗は WARNING で残す。ただしこれは事後の調査手段であって歯止めではない —
-    誰も見ていなければ欠落は静かに残る。
-    """
-    if manager is None or getattr(manager, "SessionLocal", None) is None:
-        return None
-    try:
-        from saiverse.episodes import get_open_episode
-        open_ep = get_open_episode(manager, persona_id)
-        if open_ep:
-            return open_ep.get("episode_ref")
-    except Exception:
-        # 「開いている出来事が無い」(正常・無ログ) と参照失敗を区別する
-        LOGGER.warning(
-            "[building_ingest] open-episode lookup failed (persona=%s); "
-            "transcribing without origin_episode — these rows keep no episode "
-            "attribution and are not retried", persona_id, exc_info=True,
-        )
-    return None
-
-
-def _stamp_layer0(entry: Dict[str, Any], origin_episode_ref: Optional[str]) -> None:
-    """転記 entry に層0タグ (origin_episode / line_role / scope) を刻む。
-
-    - origin_episode: **転記先ペルソナ**の開いている出来事のみ有効。episode_ref
-      (``episode:N``) の N はペルソナ内連番なので、話し手側 metadata の deepcopy
-      で継承された値は受信側では別の出来事を指す — 無条件に捨てて受信側の値で
-      刻み直す。
     - line_role / scope: 欠落 (NULL) は読み出し側で main_line / committed に
       救済される。それでも明示するのは、NULL の救済を持たない完全一致 SQL が
       転記行を構造的に落とした実害があるため (2026-07-29。当時の被害者だった
       ユーザー会話 20 件保持は退役済み — track_retirement.md 住人 11 — だが、
       「読み手ごとに救済の有無が違う」構図は残るので刻む側で揃える)。
+    - origin_episode: 束 6c (2026-08-22) で刻印ごと退役 (v3 §7)。話し手側の
+      metadata から deepcopy で継承された値は**捨てる** — episode:N の N は
+      ペルソナ内連番なので、受信側では別の出来事を指す嘘の帰属になる。
+      既に書かれた行の origin_episode は残置 (v3 §9-8「書き換えない」)。
     """
     metadata = entry.setdefault("metadata", {})
     if isinstance(metadata, dict):
-        inherited = metadata.pop("origin_episode", None)
-        if inherited is not None and inherited != origin_episode_ref:
-            LOGGER.debug(
-                "[building_ingest] dropped inherited origin_episode %r "
-                "(receiver's open episode: %r)", inherited, origin_episode_ref,
-            )
-        if origin_episode_ref:
-            metadata["origin_episode"] = origin_episode_ref
+        metadata.pop("origin_episode", None)
     entry.setdefault("line_role", "main_line")
     entry.setdefault("scope", "committed")
 
@@ -225,7 +180,6 @@ def _transcribe_message(
     history_manager: Any,
     id_to_name_map: Dict[str, str],
     check_provenance: bool,
-    origin_episode_ref: Optional[str] = None,
 ) -> Tuple[str, Optional[str], bool]:
     """building message 1 件をペルソナ記憶へ転記する (tool 版 / auto 版の共通核)。
 
@@ -270,7 +224,7 @@ def _transcribe_message(
         ts_value = m.get("timestamp")
         if isinstance(ts_value, str):
             entry["timestamp"] = ts_value
-        _stamp_layer0(entry, origin_episode_ref)
+        _stamp_layer0(entry)
         _append_and_mark(
             entry, m,
             persona=persona, manager=manager, persona_id=persona_id,
@@ -320,10 +274,7 @@ def _transcribe_message(
         ts_value = m.get("timestamp")
         if isinstance(ts_value, str):
             entry["timestamp"] = ts_value
-        # host event は世界の変化通知だが origin_episode は付ける —
-        # 「そのとき何の出来事の中に居たか」の軸なので、出来事の最中に知覚した
-        # 世界の変化はその出来事の記録に属する。
-        _stamp_layer0(entry, origin_episode_ref)
+        _stamp_layer0(entry)
         _append_and_mark(
             entry, m,
             persona=persona, manager=manager, persona_id=persona_id,
@@ -341,7 +292,7 @@ def _transcribe_message(
         ts_value = m.get("timestamp")
         if isinstance(ts_value, str):
             entry["timestamp"] = ts_value
-        _stamp_layer0(entry, origin_episode_ref)
+        _stamp_layer0(entry)
         _append_and_mark(
             entry, m,
             persona=persona, manager=manager, persona_id=persona_id,
@@ -440,9 +391,6 @@ def _ingest_round(
     ingested_count = 0
     private_count = 0
     perceived: Dict[str, int] = {}
-    # 帰属 (層0タグ) はラウンドで一度だけ解決する — 1 ラウンドの転記は同じ
-    # 「いま」の知覚なので、途中で出来事が切り替わっても snapshot を貫く。
-    origin_episode_ref = _open_episode_ref(manager, persona_id)
     # 最初の転記候補だけ provenance 照会 (M8: 宙に浮いた転記は高々 1 件で、
     # 必ず次ラウンドの最初の転記候補になる — 走査をラウンド 1 回に有界化)。
     provenance_pending = True
@@ -456,7 +404,6 @@ def _ingest_round(
                 building_id=building_id, history_manager=history_manager,
                 id_to_name_map=id_to_name_map,
                 check_provenance=provenance_pending,
-                origin_episode_ref=origin_episode_ref,
             )
         except Exception:
             LOGGER.warning(

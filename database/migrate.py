@@ -1257,6 +1257,164 @@ def ensure_task_book_table(db_path: str) -> None:
         engine.dispose()
 
 
+def _due_at_to_local_epoch(value):
+    """``persona_task.due_at`` を epoch 秒 (整数) へ。解釈できなければ None。
+
+    ``due_at`` は**タイムゾーンを持たないローカル時刻**として書かれている
+    (``persona/tasks/store.py`` の ``_coerce_due_at`` は ISO 文字列から ``Z`` を
+    剥がして naive の datetime にする)。写し先のタスク帳 ``DUE_AT`` も
+    ローカル解釈の epoch で読み書きされている (``sea/sluice.py`` は
+    ``int(dt.timestamp())`` で書き、``datetime.fromtimestamp()`` で表示する)。
+    naive な datetime の ``timestamp()`` は Python がローカルとして解釈するので、
+    それが両者を一致させる唯一の変換になる。
+
+    SQLite 側の ``strftime('%s', ...)`` は引数を UTC として解釈するため使えない
+    (Asia/Tokyo では 9 時間ずれる — 2026-08-22 Codex 指摘 4)。
+
+    ``value`` は生 SQL 経由だと SQLAlchemy の型変換を通らず文字列で来る
+    (``'2026-08-24 12:00:00.000000'``) ので、datetime と文字列の両方を受ける。
+    """
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return None
+        try:
+            parsed = datetime.fromisoformat(raw)
+        except ValueError:
+            return None
+    else:
+        return None
+    try:
+        return int(parsed.timestamp())
+    except (ValueError, OSError, OverflowError):
+        # 環境の timestamp() が受けない日付 (Windows の 0001-01-01 等)。
+        return None
+
+
+def _migrate_deadline_tasks_to_task_book(engine) -> None:
+    """締め切りつきタスク (persona_task) をタスク帳 (task_book) へ機械写しする。
+
+    autonomous_behavior_v3.md §9-8「判断なしの機械写し」の中央 DB 側。統合タスク
+    テーブルのうち、v3 のタスク帳に席があるのは**期限のある生きた一件だけ**
+    (§13.6「残る仕事は『締め切りの一件』だけ」)。写す条件はそれをそのまま書いた
+    もの: ``due_at IS NOT NULL`` かつ ``status IN (pending, active, paused)``。
+
+    **相手 (COUNTERPART) は NULL で入れる。** persona_task に相手を表す列は無く、
+    'user' を既定にすると「ユーザーとの約束」という**存在しなかった事実**を発明
+    することになる (捏造)。期限があるので §4.1-2 の合法形の三形②「期限つきの
+    自分だけの一件」に当たり、相手なしのまま正当に載る。副次的な効き目として、
+    完遂時の成果物参照の必須 (相手のある一件だけの縛り、§9-5) を偽って課さない。
+
+    ``DUE_AT`` は epoch 秒の整数 (persona_task の ``due_at`` は DateTime なので
+    変換する)。変換は **Python 側でローカルタイムとして** 行い、パースできない値の
+    行は落とす (NULL の DUE_AT で入れると相手も期限も無い不正な行になる)。
+
+    ⚠ **SQLite の ``strftime('%s', ...)`` は使えない** (2026-08-22 Codex 指摘 4)。
+    あれは引数を UTC として解釈するが、``persona_task.due_at`` はタイムゾーンを
+    持たないローカル時刻の DateTime である。書き込み側 (``persona/tasks/store.py``
+    の ``_coerce_due_at`` は ISO 文字列の ``Z`` を剥がして naive の datetime にする)
+    も、写し先の読み手 (``sea/sluice.py`` は ``int(dt.timestamp())`` で epoch 化し、
+    ``datetime.fromtimestamp(due_at)`` で表示する) も、どちらもローカル解釈で
+    一貫している。UTC 解釈で写すと Asia/Tokyo では期限が 9 時間ずれる。
+    naive の datetime に対する Python の ``timestamp()`` はローカル解釈なので、
+    それがそのまま正しい変換になる。
+
+    冪等: ``IDEM_KEY = 'migration:persona_task:<id>'`` と
+    ``uq_task_book_idem (PERSONA_ID, IDEM_KEY)`` の組で、二周目は
+    ``WHERE NOT EXISTS`` に弾かれて 0 件。**写し元は無傷で残す** (v3 §9-8 ①)。
+    """
+    import uuid
+
+    from sqlalchemy import text as _text
+
+    try:
+        with engine.begin() as conn:
+            exists = conn.execute(_text(
+                "SELECT 1 FROM sqlite_master WHERE type='table' "
+                "AND name IN ('persona_task', 'task_book') "
+                "GROUP BY 1 HAVING COUNT(*) = 2"
+            )).fetchone()
+            if exists is None:
+                return
+            rows = conn.execute(_text(
+                """
+                SELECT t.id, t.persona_id, t.title, t.due_at
+                FROM persona_task AS t
+                WHERE t.due_at IS NOT NULL
+                  AND t.status IN ('pending', 'active', 'paused')
+                  AND t.title IS NOT NULL
+                  AND trim(t.title) != ''
+                """
+            )).fetchall()
+
+            created_at = int(datetime.now().timestamp())
+            copied = 0
+            for task_id, persona_id, title, due_raw in rows:
+                due_epoch = _due_at_to_local_epoch(due_raw)
+                if due_epoch is None:
+                    logging.warning(
+                        "[v3機械写し] persona_task %s の due_at (%r) を epoch へ "
+                        "変換できないため、この行は写しませんでした",
+                        task_id, due_raw,
+                    )
+                    continue
+                idem_key = f"migration:persona_task:{task_id}"
+                result = conn.execute(
+                    _text(
+                        """
+                        INSERT INTO task_book (
+                            TASK_ID, PERSONA_ID, CONTENT, DUE_AT, COUNTERPART,
+                            ORIGIN, ORIGIN_REF, STATUS, ARTIFACT_REF, OUTCOME,
+                            CREATED_AT, CLOSED_AT, META_JSON, IDEM_KEY, REVISION
+                        )
+                        SELECT
+                            :task_book_id, :persona_id, :content, :due_at, NULL,
+                            'migration', :origin_ref, 'open', NULL, NULL,
+                            :created_at, NULL, NULL, :idem_key, 0
+                        WHERE NOT EXISTS (
+                            SELECT 1 FROM task_book AS b
+                            WHERE b.PERSONA_ID = :persona_id
+                              AND b.IDEM_KEY = :idem_key
+                        )
+                        """
+                    ),
+                    {
+                        "task_book_id": str(uuid.uuid4()),
+                        "persona_id": persona_id,
+                        "content": title,
+                        "due_at": due_epoch,
+                        "origin_ref": f"task:{task_id}",
+                        "created_at": created_at,
+                        "idem_key": idem_key,
+                    },
+                )
+                copied += result.rowcount or 0
+            if copied:
+                logging.info(
+                    "[v3機械写し] 締め切りつきタスク %d 件をタスク帳へ写しました "
+                    "(写し元の persona_task は無傷で残ります)",
+                    copied,
+                )
+    except Exception as e:
+        logging.error(
+            "締め切りつきタスクのタスク帳への写しに失敗しました: %s", e, exc_info=True,
+        )
+        raise
+
+
+def migrate_deadline_tasks_to_task_book(db_path: str) -> None:
+    """締め切りつきタスク → タスク帳の機械写しを単体で走らせるエントリポイント。"""
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        _migrate_deadline_tasks_to_task_book(engine)
+    finally:
+        engine.dispose()
+
+
 def _ensure_feed_tables(engine) -> None:
     """フィード取り込み 3 テーブル (feed_subscription / feed_item / feed_read_cursor)
     を軽量パスで現行スキーマへ収束させる。

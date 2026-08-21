@@ -54,41 +54,40 @@ def _run_in_background(fn, *args, **kwargs) -> None:
 
 @router.post("/{persona_id}/debug/wrap-up-conversation", response_model=DebugActionResponse)
 def wrap_up_conversation(persona_id: str, manager=Depends(get_manager)):
-    """沈黙タイマー相当を即時発火 (会話出来事の close)。
+    """沈黙タイマー相当を即時発火 (会話状態の解除)。
 
     本番のタイムアウト経路
     (``saiverse.user_conversation.handle_conversation_timeout``) をそのまま
     即時に呼ぶ。
 
-    **開いている会話の出来事があるときだけ撃つ**。切り上げる会話が実在しない
-    まま撃つと、存在しない会話の帳簿処理が走る (2026-08-14 Codex 指摘 F5)。
+    **開いている会話があるときだけ撃つ**。切り上げる会話が実在しないまま撃つと、
+    存在しない会話の帳簿処理が走る (2026-08-14 Codex 指摘 F5)。
     """
-    from saiverse import episodes
-
-    open_conversation = episodes.get_open_episode(
-        manager, persona_id, kind=episodes.KIND_CONVERSATION,
+    from saiverse.user_conversation import (
+        get_open_conversation,
+        handle_conversation_timeout,
     )
+
+    open_conversation = get_open_conversation(manager, persona_id)
     if open_conversation is None:
         raise HTTPException(
             status_code=409,
-            detail="開いている会話の出来事がありません (会話は既に終了しています)",
+            detail="開いている会話がありません (会話は既に終了しています)",
         )
 
-    from saiverse.user_conversation import handle_conversation_timeout
-
-    # 検証した出来事そのものを背景処理へ渡す。ここは同期検証 → 背景発火なので、
+    # 検証した会話そのものを背景処理へ渡す。ここは同期検証 → 背景発火なので、
     # 間に自然タイムアウトや別の切り上げが会話を閉じ (さらに新しい会話を開き)
     # うる。渡さないと、発火側は「いま開いている会話」を無条件に終わらせ、
     # 別の会話 / 存在しない会話を閉じる (2026-08-14 Codex 二巡目)。
     _run_in_background(
         handle_conversation_timeout, manager, persona_id,
-        expected_episode_ref=open_conversation.get("episode_ref"),
+        expected_conversation_id=open_conversation.get("conversation_id"),
     )
     return DebugActionResponse(
         success=True,
         message=(
             "会話を切り上げました (沈黙タイマーの即時発火 "
-            f"episode={open_conversation.get('episode_ref')})"
+            f"conversation={open_conversation.get('conversation_id')})"
         ),
     )
 
@@ -159,6 +158,25 @@ def generate_embeddings(persona_id: str, manager=Depends(get_manager)):
     )
 
 
+def _get_or_create_autonomy(persona_id: str, manager):
+    """このペルソナの AutonomyManager を取り出す (無ければ作る)。
+
+    束 6c (2026-08-22) で ``api/routes/people/autonomy.py`` (自律行動マネージャーの
+    操作 API) を削除したので、唯一の残った消費者であるデバッグ操作面へ引き取った。
+    本番の起動・停止は ``SAIVerseManager.ensure_autonomy_for`` が
+    ``AUTONOMY_ENABLED`` に同期して行う。
+    """
+    from saiverse.autonomy_manager import AutonomyManager
+
+    if not hasattr(manager, "_autonomy_managers"):
+        manager._autonomy_managers = {}
+    if persona_id not in manager._autonomy_managers:
+        manager._autonomy_managers[persona_id] = AutonomyManager(
+            persona_id=persona_id, manager=manager,
+        )
+    return manager._autonomy_managers[persona_id]
+
+
 @router.post("/{persona_id}/debug/scheduler", response_model=DebugActionResponse)
 def control_scheduler(
     persona_id: str,
@@ -169,7 +187,6 @@ def control_scheduler(
     msgs = []
 
     if request.autonomy is not None:
-        from api.routes.people.autonomy import _get_or_create_autonomy
         am = _get_or_create_autonomy(persona_id, manager)
         if request.autonomy:
             am.start()

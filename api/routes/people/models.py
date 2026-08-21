@@ -197,17 +197,6 @@ class UpdateAIConfigRequest(BaseModel):
 
 
 # -----------------------------------------------------------------------------
-# Autonomous Status Models
-# -----------------------------------------------------------------------------
-
-class AutonomousStatusResponse(BaseModel):
-    persona_id: str
-    autonomy_enabled: bool
-    system_running: bool
-    is_active: bool  # True if actually doing autonomous conversation
-
-
-# -----------------------------------------------------------------------------
 # Import / Export Models
 # -----------------------------------------------------------------------------
 
@@ -360,45 +349,12 @@ class UpdateScheduleRequest(BaseModel):
     args: Optional[dict] = None  # Playbook arguments (e.g., {"selected_playbook": "xxx"})
 
 
-# -----------------------------------------------------------------------------
-# Task Management Models
-# -----------------------------------------------------------------------------
-
-class TaskStep(BaseModel):
-    id: str
-    position: int
-    title: str
-    description: Optional[str]
-    status: str
-    notes: Optional[str]
-    updated_at: str
-
-class TaskRecordModel(BaseModel):
-    id: str
-    title: str
-    goal: str
-    summary: str
-    status: str
-    priority: str
-    active_step_id: Optional[str]
-    updated_at: str
-    steps: List[TaskStep]
-    # 統合 Task の所属 (unified_task_model.md): 'note'=候補 / 'track'=Track 小目標 / None=単独。
-    parent_kind: Optional[str] = None
-    task_ref: Optional[str] = None        # "task:N" (persona 内通し番号)
-    parent_label: Optional[str] = None    # UI 表示用: "候補" / "t:N {title}" / "単独"
-
-class CreateTaskRequest(BaseModel):
-    title: str
-    goal: str
-    summary: str
-    notes: Optional[str] = None
-    priority: str = "normal"
-    steps: List[dict] # {title, description, ...}
-
-class UpdateTaskStatusRequest(BaseModel):
-    status: str
-    reason: Optional[str] = None
+# タスク管理 API の直列化モデル (TaskStep / TaskRecordModel / CreateTaskRequest /
+# UpdateTaskStatusRequest) は、束 6c (2026-08-22) でタスク管理 UI とルート
+# (api/routes/people/tasks.py) を撤去したときに読み手ごと消えた
+# (autonomous_behavior_v3.md §11「運転 UI は隠す」)。「やること」の器は v3 で
+# ルーチン / タスク帳 / 手帳の三つに分かれ、タスク帳の読み書きは
+# saiverse/task_book.py が素の dict で行う。
 
 
 # -----------------------------------------------------------------------------

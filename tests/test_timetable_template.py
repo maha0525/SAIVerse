@@ -8,7 +8,7 @@
 - テンプレ未設定のペルソナは従来どおりの全生成 (移行の安全弁)
 - 途中起動: 正午起動で午前のテンプレコマが「流れた」(missed_start) 記録 +
   午後から合流し、丸めクランプ (現在時刻への繰り上げ) が起きないこと
-- API 3 本 (GET/PUT/DELETE) の正常系 + 検証エラー (422)
+- コマ種別カタログ API (/api/config/slot-kinds) の語彙と提示順
 
 harness は tests/test_judgment_points.py と同流儀 (in-memory SQLite +
 SimpleNamespace manager + 仮想クロック)。
@@ -27,14 +27,12 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from api.deps import get_manager
 from database.models import AI, Base, City, PersonaSchedule, User
 from saiverse import clock
 from saiverse import day_plan
 from saiverse import timetable_template as tt
 from saiverse.event_scheduler import EventScheduler
 from saiverse.persona_task_manager import PersonaTaskManager
-from saiverse.track_manager import TrackManager
 from tool_loader import load_builtin_tool
 
 PERSONA_ID = "alice"
@@ -103,7 +101,6 @@ def manager(session_factory):
         SessionLocal=session_factory,
         personas={PERSONA_ID: persona},
         event_scheduler=EventScheduler(),  # start() しない (同期検証のみ)
-        track_manager=TrackManager(session_factory=session_factory),
         buildings=[
             SimpleNamespace(building_id="library", name="図書館"),
             SimpleNamespace(building_id="workshop", name="工房"),
@@ -592,83 +589,15 @@ def test_day_open_situation_text_shows_template_and_holes(manager, task_refs):
 
 
 # ---------------------------------------------------------------------------
-# API (GET / PUT / DELETE)
+# API
 # ---------------------------------------------------------------------------
-
-
-@pytest.fixture
-def client(manager):
-    from api.routes.people import timetable_template as tt_route
-
-    app = FastAPI()
-    app.include_router(tt_route.router, prefix="/api/people")
-    app.dependency_overrides[get_manager] = lambda: manager
-    with TestClient(app) as c:
-        yield c
-
-
-def test_api_roundtrip(client, manager, task_refs):
-    url = f"/api/people/{PERSONA_ID}/timetable-template"
-
-    # 未設定は null
-    res = client.get(url)
-    assert res.status_code == 200
-    assert res.json() is None
-
-    res = client.put(url, json={"slots": _template_slots()})
-    assert res.status_code == 200
-    body = res.json()
-    assert body["enabled"] is True
-    assert [s["start"] for s in body["slots"]] == ["09:00", "13:00", "20:00"]
-
-    res = client.get(url)
-    assert res.status_code == 200
-    assert res.json()["slots"] == body["slots"]
-
-    res = client.delete(url)
-    assert res.status_code == 200
-    assert res.json() == {"deleted": True}
-    assert client.get(url).json() is None
-    assert client.delete(url).json() == {"deleted": False}
-
-
-@pytest.mark.parametrize("slots, needle", [
-    # 逆順は保存前の正規化で並べ直るため、422 に残るのは同時刻の重複
-    ([{"start": "09:00"}, {"start": "09:00"}], "ascending"),
-    ([{"start": "09:00", "kind": "暮らし"}], "暮らし"),      # カタログ外 kind の明示
-    ([{"start": "09:00", "budget_rounds": -1}], "budget_rounds"),
-])
-def test_api_put_validation_errors(client, slots, needle):
-    res = client.put(
-        f"/api/people/{PERSONA_ID}/timetable-template", json={"slots": slots},
-    )
-    assert res.status_code == 422
-    assert needle in json.dumps(res.json(), ensure_ascii=False)
-
-
-def test_api_unknown_persona_is_404(client):
-    assert client.get("/api/people/nobody/timetable-template").status_code == 404
-    assert client.delete("/api/people/nobody/timetable-template").status_code == 404
-    assert client.put(
-        "/api/people/nobody/timetable-template",
-        json={"slots": [{"start": "09:00"}]},
-    ).status_code == 404
-    assert client.get(
-        "/api/people/nobody/timetable-template/facilities"
-    ).status_code == 404
-
-
-def test_api_facilities_match_judgment_enum(client, manager):
-    """場所セレクトの選択肢 = 起床判断の facility enum と同じ集合 (T2b)。"""
-    from saiverse import judgment_points as jp
-
-    res = client.get(f"/api/people/{PERSONA_ID}/timetable-template/facilities")
-    assert res.status_code == 200
-    options = res.json()
-    assert [o["id"] for o in options] == jp.collect_facility_ids(manager)
-    names = {o["id"]: o["name"] for o in options}
-    assert names["library"] == "図書館"
-    assert names["own_room"] == "自室"
+#
+# ⚠ 習慣テンプレート API (GET/PUT/DELETE `/api/people/{id}/timetable-template`
+# と .../facilities) のテストは 2026-08-22 (束 6c) に削除した。ルーター
+# `api/routes/people/timetable_template.py` ごと退役し、テンプレートを編集する
+# 画面 (TimetableTemplateModal) も同時に消えたため、検証すべき HTTP 経路が
+# 実在しない。テンプレートの実体 `saiverse/timetable_template.py` は生きている
+# ので、その CRUD・検証・「埋める」化のテストは上のとおり全て残してある。
 
 
 def test_api_slot_kinds_lists_catalog():

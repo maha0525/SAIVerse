@@ -5,7 +5,7 @@
 
 REST API 全エンドポイントの一覧（自動生成）。すべて `/api` 配下にマウントされる。
 
-**エンドポイント数**: 367（tag グループ: 26）
+**エンドポイント数**: 347（tag グループ: 25）
 
 ## addon
 
@@ -150,12 +150,6 @@ REST API 全エンドポイントの一覧（自動生成）。すべて `/api` 
 | POST | `/api/db/tables/{table_name}` | Insert or Update a row. |
 | DELETE | `/api/db/tables/{table_name}` | Delete a row by Primary Key(s). |
 
-## episodes
-
-| メソッド | パス | 説明 |
-|---|---|---|
-| GET | `/api/episodes` | City に属するペルソナの当日 episodes を返す (画面 A: 今日のできごと)。 |
-
 ## feeds
 
 | メソッド | パス | 説明 |
@@ -240,9 +234,6 @@ REST API 全エンドポイントの一覧（自動生成）。すべて `/api` 
 | GET | `/api/people/spells` | List Spells available for schedule / pre_spells UI selection. |
 | POST | `/api/people/summon/{persona_id}` | Summon a persona to the target building. |
 | GET | `/api/people/summonable` | List personas that can be summoned (not in current room, not dispatched). |
-| GET | `/api/people/{persona_id}/activity-view` | ライフビューの集約データ (いま / 最近 / 設定) を返す。 |
-| POST | `/api/people/{persona_id}/activity/start` | 再生: 自律行動を始めさせる (persona_activity_view.md §6.1)。 |
-| POST | `/api/people/{persona_id}/activity/stop` | 停止: 「いつもの、プロンプトを静かに待っている AI」に戻す |
 | GET | `/api/people/{persona_id}/arasuji` | List Chronicle entries for a persona (part of Memory Weave). |
 | DELETE | `/api/people/{persona_id}/arasuji` | Delete ALL Chronicle entries and reset progress. |
 | GET | `/api/people/{persona_id}/arasuji/cost-estimate` | Estimate the cost of generating Chronicle for unprocessed messages. |
@@ -258,11 +249,6 @@ REST API 全エンドポイントの一覧（自動生成）。すべて `/api` 
 | GET | `/api/people/{persona_id}/arasuji/{entry_id}/fragments` | Get Memopedia fragments generated from a Chronicle entry. |
 | GET | `/api/people/{persona_id}/arasuji/{entry_id}/messages` | Get the source raw messages for a Level 1 Chronicle entry. |
 | POST | `/api/people/{persona_id}/arasuji/{entry_id}/regenerate` | Regenerate a specific Chronicle entry while preserving parent relationship. |
-| GET | `/api/people/{persona_id}/autonomous/status` | Get autonomous operation status for a persona. |
-| GET | `/api/people/{persona_id}/autonomy` | Get current autonomy status for a persona. |
-| PUT | `/api/people/{persona_id}/autonomy/config` | Update autonomy configuration. |
-| POST | `/api/people/{persona_id}/autonomy/start` | Start autonomous behavior for a persona. |
-| POST | `/api/people/{persona_id}/autonomy/stop` | Stop autonomous behavior for a persona. |
 | POST | `/api/people/{persona_id}/cache-config` | persona の cache 設定 ("off"/"5m"/"1h") を設定する (Phase 2、in-memory・非永続)。 |
 | GET | `/api/people/{persona_id}/cache-status` | 指定ペルソナの prompt cache 状態 (効いてるか / 残り秒) を read-only で返す。 |
 | GET | `/api/people/{persona_id}/clips` | メッセージ群に付いた観測点 (点クリップ) をバッチで返す (画面 C: ハイライト)。 |
@@ -276,7 +262,6 @@ REST API 全エンドポイントの一覧（自動生成）。すべて `/api` 
 | DELETE | `/api/people/{persona_id}/core-memory/{memory_id}` | コア記憶を soft-delete する (ごみ箱へ)。物理削除はせず復元可能に残す。 |
 | POST | `/api/people/{persona_id}/core-memory/{memory_id}/confirm` | 未確認 (自動採取) のコア記憶をユーザーが「確認済み」にする。 |
 | POST | `/api/people/{persona_id}/core-memory/{memory_id}/restore` | ごみ箱からコア記憶を復元する。 |
-| GET | `/api/people/{persona_id}/day-plan` | ペルソナの時間割 (画面 B: 今日の予定表)。plan を持たない日は空配列。 |
 | POST | `/api/people/{persona_id}/debug/generate-embeddings` | Chronicle / Memopedia page / Fragment の未生成 embedding をバッチ生成. |
 | POST | `/api/people/{persona_id}/debug/memopedia-conversion/apply` | 変換を実行する。逐語の検算に落ちたら何も書かずに 409 を返す。 |
 | GET | `/api/people/{persona_id}/debug/memopedia-conversion/preview` | 下見: 変換したら何がどうなるかを、ページと Fragment を変えずに返す。 |
@@ -285,7 +270,7 @@ REST API 全エンドポイントの一覧（自動生成）。すべて `/api` 
 | GET | `/api/people/{persona_id}/debug/memopedia-conversion/runs` | 取り消せる変換の一覧 (新しい順)。 |
 | GET | `/api/people/{persona_id}/debug/scheduler` | タイマーの稼働状態を返す. |
 | POST | `/api/people/{persona_id}/debug/scheduler` | タイマー制御. autonomy (per-persona) / manual_mode (per-persona の会話沈黙タイマー停止). |
-| POST | `/api/people/{persona_id}/debug/wrap-up-conversation` | 沈黙タイマー相当を即時発火 (会話出来事の close)。 |
+| POST | `/api/people/{persona_id}/debug/wrap-up-conversation` | 沈黙タイマー相当を即時発火 (会話状態の解除)。 |
 | GET | `/api/people/{persona_id}/experience-ledger` | 台帳の索引 — カテゴリごとにグループ化した棚の一覧 (統計付き)。 |
 | GET | `/api/people/{persona_id}/experience-ledger/{page_id}` | ページを開く = 動的合成 (fragment / 関与あらすじの履歴 / 共起ページ)。 |
 | POST | `/api/people/{persona_id}/import/extension` | Import Chrome extension export (JSON or Markdown) in background. |
@@ -297,8 +282,6 @@ REST API 全エンドポイントの一覧（自動生成）。すべて `/api` 
 | POST | `/api/people/{persona_id}/import/official/preview` | Preview ChatGPT export file and return conversation list for selection. |
 | GET | `/api/people/{persona_id}/import/official/status` | Get the status of official import task. |
 | GET | `/api/people/{persona_id}/items` | List items held by a persona. |
-| GET | `/api/people/{persona_id}/life-settings` | 現在のライフ設定 + 自動判定モード + 最低予算ガイドをまとめて返す。 |
-| PUT | `/api/people/{persona_id}/life-settings` | 起床・就寝・予算・モード上書きを 1 リクエストで保存する。 |
 | POST | `/api/people/{persona_id}/memopedia/build-from-logs` | Start building Memopedia pages from chat logs as a background job. |
 | GET | `/api/people/{persona_id}/memopedia/export` | Export all Memopedia pages as JSON. |
 | POST | `/api/people/{persona_id}/memopedia/generate` | Start Memopedia page generation as a background job. |
@@ -346,20 +329,12 @@ REST API 全エンドポイントの一覧（自動生成）。すべて `/api` 
 | DELETE | `/api/people/{persona_id}/schedules/{schedule_id}` | Delete a schedule. |
 | POST | `/api/people/{persona_id}/schedules/{schedule_id}/toggle` | Toggle schedule enabled status. |
 | GET | `/api/people/{persona_id}/storage-layers` | Return a unified view of the 7-layer storage for one persona. |
-| GET | `/api/people/{persona_id}/tasks` | List all tasks for a persona (候補 / Track 小目標 / 単独 を所属ラベル付きで)。 |
-| POST | `/api/people/{persona_id}/tasks` | Create a new task. |
-| PATCH | `/api/people/{persona_id}/tasks/{task_id}` | Update task status. |
-| GET | `/api/people/{persona_id}/tasks/{task_id}/history` | Get history for a specific task. |
 | GET | `/api/people/{persona_id}/threads` | List all conversation threads for a persona. |
 | DELETE | `/api/people/{persona_id}/threads/{thread_id}` | Delete a thread. |
 | PUT | `/api/people/{persona_id}/threads/{thread_id}/activate` | Set a thread as the active thread for the persona. |
 | GET | `/api/people/{persona_id}/threads/{thread_id}/export-native` | Export a single thread as native SAIVerse JSON. |
 | GET | `/api/people/{persona_id}/threads/{thread_id}/messages` | List messages in a thread with pagination. |
 | POST | `/api/people/{persona_id}/threads/{thread_id}/messages` | Add a new message to a thread. |
-| GET | `/api/people/{persona_id}/timetable-template` | 習慣テンプレートを返す。未設定なら null。 |
-| PUT | `/api/people/{persona_id}/timetable-template` | 習慣テンプレートを検証して保存する。 |
-| DELETE | `/api/people/{persona_id}/timetable-template` | 習慣テンプレートを削除する (以後の起床判断は従来の全生成に戻る)。 |
-| GET | `/api/people/{persona_id}/timetable-template/facilities` | テンプレート編集 UI の場所セレクト用: 行ける場所の一覧 (id + 表示名)。 |
 | POST | `/api/people/{persona_id}/track-logs/bulk-delete` | Delete multiple track_local_log rows owned by persona's tracks. |
 | DELETE | `/api/people/{persona_id}/track-logs/{log_id}` | Delete a single track_local_log row. |
 | POST | `/api/people/{persona_id}/unified-recall` | Search across Chronicle and Memopedia using embeddings. |

@@ -3,9 +3,15 @@
 - 正常系: episode ヘッダ (参照 / kind / 表題 / 期間) + 原本全文 (切り詰めなし)
 - episode 不在 / 原本 0 件は丁寧語でその旨を返す
 - schema: spell=True / episode 引数 required
+
+NOTE: episodes テーブルは束 6c (2026-08-22、autonomous_behavior_v3.md §7) で
+**読み取り専用の残置**になった (書き込み API は退役)。このスペルはその残置行を
+読む口として生きているので、fixture の行は ORM で直接挿入する。
 """
 from __future__ import annotations
 
+import json
+import uuid
 from datetime import datetime
 from types import SimpleNamespace
 from typing import Any, Dict, List
@@ -15,7 +21,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from database.models import Base
+from database.models import Base, Episode
 from saiverse import clock
 from saiverse import episodes as ep_mod
 from tool_loader import load_builtin_tool
@@ -81,13 +87,32 @@ def _ctx(manager, tmp_path):
 
 
 def _make_episode(manager, *, title="共有文の下書きを書く", close=True):
-    ep = ep_mod.open_episode(
-        manager, PERSONA_ID, ep_mod.KIND_WORK_SESSION,
-        building_id="workshop", meta={"title": title},
-    )
-    if close:
-        ep_mod.close_episode(manager, PERSONA_ID, ep["episode_ref"])
-    return ep["episode_ref"]
+    """episodes の残置行を 1 件作り、その ``episode:N`` を返す。
+
+    ⚠ 書き込み API (open_episode / close_episode) は束 6c (2026-08-22、
+    autonomous_behavior_v3.md §7) で退役した — エピソードという専用の記録行を
+    持たなくなったため。episode_read は残置行を読むスペルとして生きているので、
+    fixture は ORM で行を直接挿入する (旧世代が書き残した行を読む状況の再現)。
+    """
+    started_at = int(BASE_TIME.timestamp())
+    episode_ref = "episode:1"
+    db = manager.SessionLocal()
+    try:
+        db.add(Episode(
+            EPISODE_ID=str(uuid.uuid4()),
+            PERSONA_ID=PERSONA_ID,
+            SHORT_ID=1,
+            KIND=ep_mod.KIND_WORK_SESSION,
+            STARTED_AT=started_at,
+            ENDED_AT=started_at if close else None,
+            BUILDING_ID="workshop",
+            STATUS=ep_mod.STATUS_CLOSED if close else ep_mod.STATUS_OPEN,
+            META_JSON=json.dumps({"title": title}, ensure_ascii=False),
+        ))
+        db.commit()
+    finally:
+        db.close()
+    return episode_ref
 
 
 def test_episode_read_renders_header_and_full_transcript(manager, tool_mod, tmp_path):

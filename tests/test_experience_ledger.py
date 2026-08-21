@@ -24,7 +24,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from api.deps import get_manager
-from database.models import AI, Base, City, User
+from database.models import AI, ActionTrack, Base, City, User
 from sai_memory.experience_ledger import build_ledger_index, build_ledger_page
 from sai_memory.memopedia.storage import create_fragment, create_page
 from sai_memory.purpose_tags import LAYER_SHELVE, add_tag
@@ -361,12 +361,13 @@ def session_factory():
 @pytest.fixture
 def full_client(conn, seeded, session_factory):
     """main DB (目的ノード) 込みの TestClient。fixtures は test_slot_close_note の流儀。"""
+    import uuid
+
     from saiverse.persona_task_manager import (
         PARENT_TRACK,
         STAGE_CANDIDATE,
         PersonaTaskManager,
     )
-    from saiverse.track_manager import TrackManager
 
     from api.routes.people import experience_ledger as route
 
@@ -382,11 +383,20 @@ def full_client(conn, seeded, session_factory):
     finally:
         db.close()
 
-    track_manager = TrackManager(session_factory=session_factory)
-    track_id = track_manager.create(
-        persona_id=PERSONA_ID, track_type="autonomous",
-        title="言葉の標本集", initial_status="running",
-    )
+    # タスクの親になる Track 行。TrackManager は 2026-08-22 (束 6c) に退役したので、
+    # 旧データ相当の ActionTrack 行を ORM で直接置く。索引に出るのはタスク側だけで、
+    # この行自体は「親が実在する」以上の意味を持たない。
+    track_id = str(uuid.uuid4())
+    db = session_factory()
+    try:
+        db.add(ActionTrack(
+            track_id=track_id, persona_id=PERSONA_ID, short_id=1,
+            title="言葉の標本集", track_type="autonomous", status="running",
+        ))
+        db.commit()
+    finally:
+        db.close()
+
     ptm = PersonaTaskManager(session_factory)
     ptm.create_task(
         persona_id=PERSONA_ID, title="序文の下書き", goal="書き出しを決める",
@@ -399,7 +409,6 @@ def full_client(conn, seeded, session_factory):
 
     manager = SimpleNamespace(
         SessionLocal=session_factory,
-        track_manager=track_manager,
         personas={
             PERSONA_ID: SimpleNamespace(sai_memory=StubMemoryAdapter(conn))
         },

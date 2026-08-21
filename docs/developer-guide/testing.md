@@ -36,7 +36,7 @@ python -m pytest tests/<file>.py::<TestClass>::<test_method>
 
 ## テストファイル
 
-`tests/` に 100 本超（`test_*.py`）。代表例:
+`tests/` に 230 本超（`test_*.py`）。代表例:
 
 | ファイル | 対象 |
 |----------|------|
@@ -46,15 +46,17 @@ python -m pytest tests/<file>.py::<TestClass>::<test_method>
 | `test_persona_mixins.py` | ペルソナMixin |
 | `test_sai_memory_storage.py` | SAIMemoryストレージ |
 | `test_sai_memory_chunking.py` | メッセージ分割 |
-| `test_task_tools.py` | タスク関連ツール |
-| `test_track_manager.py` | Track 管理 |
-| `test_pulse_scheduler.py` | SubLineScheduler |
+| `test_purpose_tools.py` | タスク・目的まわりのスペル |
+| `test_user_conversation.py` | ユーザー会話の入口（会話状態・沈黙タイマー・仲裁） |
+| `test_judgment_points.py` | 判断点の入出力（動的スキーマ・状況テキスト） |
+| `test_sluice.py` | スルース（Metabolism の退場の関所での採取） |
+| `test_v3_shape_migration.py` | v0.3「形の層」への機械写し（LIFE_PURPOSE / 旧 Track の関心 / desire 候補 → コア記憶・手帳） |
 | `test_autonomy_manager.py` | AutonomyManager |
 | `test_entity_extractor.py` | Memopedia エンティティ抽出 |
 | `test_image_generator.py` | 画像生成 |
 | `test_thread_switch_tool.py` | スレッド切替 |
 
-全一覧は `ls tests/test_*.py` で確認する。
+全一覧は `ls tests/test_*.py` で確認する。**この表は代表例なので、対象コードを消したらここの行も同じコミットで消す**（消えたファイルが残っていると「回帰テストがある」と誤読される）。
 
 ## テストの書き方
 

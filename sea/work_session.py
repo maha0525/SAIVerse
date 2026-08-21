@@ -599,39 +599,13 @@ def _open_ws_episode(
     task_ref: Optional[str],
     title: Optional[str],
 ) -> Optional[str]:
-    """kind='work_session' の出来事を開き、episode_ref を返す (失敗時 None)。
+    """[退役] 作業セッションの出来事を開く — 束 6c (2026-08-22) で常に None。
 
-    出自 (origin_ref): 開いている kind='slot' の出来事 (コマ発火の実行区間 —
-    day_plan._fire_slot が開く) があればその参照。コマ外の直接呼び出しでは
-    task_ref。どちらも無ければ None (= 自発)。
+    エピソードという専用の記録行は持たなくなった (v3 §7)。作業セッション機構
+    そのものは v0.4 の再設計 (v3 §8「作業セッション運転の退役」) まで休眠として
+    残るので、呼び出し点の並びは壊さずに供給だけ止める。
     """
-    try:
-        from saiverse import episodes
-
-        origin_ref: Optional[str] = None
-        slot_ep = episodes.get_open_episode(
-            manager, persona_id, kind=episodes.KIND_SLOT,
-        )
-        if slot_ep is not None and slot_ep.get("episode_ref"):
-            origin_ref = slot_ep["episode_ref"]
-        elif task_ref:
-            origin_ref = task_ref
-
-        meta = {"title": title} if title else None
-        ep = episodes.open_episode(
-            manager, persona_id, episodes.KIND_WORK_SESSION,
-            building_id=building_id,
-            participants=[persona_id],
-            origin_ref=origin_ref,
-            meta=meta,
-        )
-        return ep.get("episode_ref")
-    except Exception:
-        LOGGER.warning(
-            "[work_session] failed to open episode (persona=%s) — "
-            "session continues without it", persona_id, exc_info=True,
-        )
-        return None
+    return None
 
 
 def _close_ws_episode(
@@ -644,31 +618,8 @@ def _close_ws_episode(
     ended_reason: str,
     digest_ref: Optional[str],
 ) -> None:
-    """作業セッションの出来事を閉じる (meta 書式契約 life_concept_map.md §14)。
-
-    ``meta.title`` / ``meta.artifacts`` はフロント (lib/episodeText.ts) が読む
-    キー名 — 変えないこと。事実の記録のみを書く (意味づけは書かない §9)。
-    """
-    if not episode_ref or manager is None:
-        return
-    try:
-        from saiverse import episodes
-
-        meta: Dict[str, Any] = {
-            "artifacts": list(artifacts),
-            "ended_reason": ended_reason,
-        }
-        if title:
-            meta["title"] = title
-        episodes.close_episode(
-            manager, persona_id, episode_ref,
-            digest_ref=digest_ref, meta=meta,
-        )
-    except Exception:
-        LOGGER.warning(
-            "[work_session] failed to close episode %s (persona=%s)",
-            episode_ref, persona_id, exc_info=True,
-        )
+    """[退役] 作業セッションの出来事を閉じる — 束 6c (2026-08-22) で no-op。"""
+    return None
 
 
 def _resolve_manager_from_context() -> Optional[Any]:

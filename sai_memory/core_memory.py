@@ -81,6 +81,11 @@ CATEGORY_CORE = "core"
 # 復元する際はこの reserved keys を除いた残りを再直列化する。
 _RESERVED_META_KEYS = {"core_id", "kind", "confirmed", "deleted_at"}
 
+#: 「一度きり書く」呼び出しが再実行の照合に使う metadata キー
+#: (:func:`find_core_memory_by_idem_key`)。reserved ではないので
+#: ``CoreMemory.metadata`` にそのまま往復し、由来として読める。
+IDEM_KEY_META = "idem_key"
+
 _CORE_PAGE_COLS = "id, title, summary, content, created_at, updated_at, metadata, is_deleted"
 
 
@@ -372,6 +377,32 @@ def get_core_memory(
     訂正導線の通知 (仮想センサー) が「何が変わったか」を得るための読み口。
     """
     row = _fetch_core_row_by_core_id(conn, memory_id, include_deleted=include_deleted)
+    return _core_memory_from_row(row) if row else None
+
+
+def find_core_memory_by_idem_key(
+    conn: sqlite3.Connection, idem_key: str,
+) -> Optional[CoreMemory]:
+    """``metadata`` に同じ :data:`IDEM_KEY_META` を持つコア記憶を返す (無ければ None)。
+
+    ``add_core_memory`` は内部で ``conn.commit()` するため、呼び出し側の
+    トランザクションに載せて「後続が転んだらコア記憶ごと巻き戻す」ことができない。
+    一度きりの書き込み (移行など) が再実行で二重にならないよう、呼び出し側が
+    ``metadata`` へ自分で決めた一意キーを刻み、書く前にここで照会する
+    (get-or-create)。
+
+    **本文ではなくキーで照合する**のが肝で、本人が中身を書き換えた後に
+    再実行されても二重にならない。**ごみ箱 (soft-delete 済み) も対象**にする —
+    本人が消したものを再実行で蘇らせないため。
+    """
+    row = conn.execute(
+        f"SELECT {_CORE_PAGE_COLS} FROM memopedia_pages "
+        "WHERE parent_id = ? AND category = ? "
+        "AND json_extract(metadata, '$." + IDEM_KEY_META + "') = ? "
+        "ORDER BY CAST(json_extract(metadata, '$.core_id') AS INTEGER) ASC "
+        "LIMIT 1",
+        (ROOT_CORE_ID, CATEGORY_CORE, idem_key),
+    ).fetchone()
     return _core_memory_from_row(row) if row else None
 
 

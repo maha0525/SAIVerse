@@ -35,8 +35,12 @@ SQL と既存のローカル埋め込み検索 (fastembed) で完結する (§9.
 木の構造辺が読む「目的ノード」の写像 (:func:`_resolve_purpose_node` /
 :func:`_list_node_children`) は、2026-08-21 まで ``saiverse/purpose_tree.py``
 にあった。目的の木という概念そのものが退役した (autonomous_behavior_v3.md §9-5)
-のに伴い、唯一残る読み手である本モジュールへ最小限だけ移した。Track テーブル
-本体の退役時に、この辺の設計ごと問い直す。
+のに伴い、唯一残る読み手である本モジュールへ最小限だけ移した。
+
+束 6c (2026-08-22) で Track が概念ごと退役し、**木の構造辺に残るのは「タスク →
+そのステップ」と「来歴 (promoted_from)」の二つだけ**になった。親 (Track) を経由
+する辺と兄弟の辺は、解決先が消えて到達不能だったので撤去した
+(track_retirement.md §9)。想起の辺の設計は v3 §13.2「ふと目に入る」で作り直す。
 """
 from __future__ import annotations
 
@@ -163,21 +167,6 @@ def _snippet(text: Optional[str]) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _track_to_node(track: Any) -> Dict[str, Any]:
-    """ActionTrack 行を目的ノード dict に写す。"""
-    ref = (
-        references.to_short_ref("track", track.short_id)
-        if track.short_id is not None else track.track_id
-    )
-    return {
-        "node_kind": "track",
-        "ref": ref,
-        "id": track.track_id,
-        "title": track.title,
-        "promoted_from": [],
-    }
-
-
 def _task_to_node(task: Dict[str, Any]) -> Dict[str, Any]:
     """persona_task dict を目的ノード dict に写す。"""
     return {
@@ -186,7 +175,6 @@ def _task_to_node(task: Dict[str, Any]) -> Dict[str, Any]:
         "id": task["id"],
         "title": task.get("title"),
         "promoted_from": task.get("promoted_from") or [],
-        "track_id": task.get("track_id"),
     }
 
 
@@ -204,13 +192,16 @@ def _step_to_node(step: Dict[str, Any]) -> Dict[str, Any]:
 def _resolve_purpose_node(
     manager: Any, persona_id: str, ref: str
 ) -> Dict[str, Any]:
-    """``track:N`` / ``task:N`` / UUID / saiverse:// URI を目的ノード dict に解決する。
+    """``task:N`` / UUID / saiverse:// URI を目的ノード dict に解決する。
+
+    ``track:N`` の分岐は束 6c (2026-08-22) で削除した — Track が概念ごと退役した
+    ため。旧データに残る ``track:N`` 参照は「解決できない参照」として扱う
+    (v3 §9-8 ①: 旧行は読み取り専用の残置で、新しい意味を持たせない)。
 
     Raises:
         NodeNotFoundError: 解決できないとき (未知 kind・実体なし)。
     """
     from saiverse.persona_task_manager import PersonaTaskManager, TaskNotFoundError
-    from saiverse.track_manager import TrackManager, TrackNotFoundError
 
     text = (ref or "").strip()
     if not text:
@@ -219,22 +210,11 @@ def _resolve_purpose_node(
         parsed = references.parse_ref(text)
         kind, key = parsed.kind, parsed.key
     except ValueError:
-        # 素の UUID (track は 36 桁ハイフンあり / task は 32 桁 hex)
-        if len(text) == 36 and text.count("-") == 4:
-            kind, key = "track", text
-        elif len(text) == 32 and "-" not in text:
+        # 素の UUID (task は 32 桁 hex)
+        if len(text) == 32 and "-" not in text:
             kind, key = "task", text
         else:
             raise NodeNotFoundError(f"unresolvable node reference: {ref!r}")
-    if kind == "track":
-        tm = TrackManager(session_factory=manager.SessionLocal)
-        try:
-            track_id = tm.resolve_track_ref(
-                persona_id, key if not key.isdigit() else f"track:{key}"
-            )
-            return _track_to_node(tm.get(track_id))
-        except TrackNotFoundError as exc:
-            raise NodeNotFoundError(str(exc)) from exc
     if kind == "task":
         ptm = PersonaTaskManager(manager.SessionLocal)
         try:
@@ -254,21 +234,17 @@ def _list_node_children(
 ) -> List[Dict[str, Any]]:
     """目的ノードの子を返す。
 
-    - track ノード → その Track に束ねられた persona_task
     - task ノード → その steps (末端)
     - step ノード → 空
+
+    ``track`` ノードの分岐 (その Track に束ねられた persona_task を返す) は
+    束 6c (2026-08-22) で削除した — :func:`_resolve_purpose_node` が track を
+    解決しなくなったため到達不能だった。
     """
     from saiverse.persona_task_manager import PersonaTaskManager
 
     node = _resolve_purpose_node(manager, persona_id, node_ref)
     ptm = PersonaTaskManager(manager.SessionLocal)
-    if node["node_kind"] == "track":
-        return [
-            _task_to_node(t)
-            for t in ptm.list_tasks(
-                persona_id, track_id=node["id"], include_steps=False
-            )
-        ]
     if node["node_kind"] == "task":
         task = ptm.get_task(node["id"], persona_id=persona_id)
         return [_step_to_node(s) for s in task.get("steps", [])]
@@ -306,7 +282,7 @@ def _resolve_target(
                 ) if p
             )
             return _snippet(label), int(ep.get("started_at") or 0)
-        elif parsed.kind in ("track", "task"):
+        elif parsed.kind == "task":
             node = _resolve_purpose_node(manager, persona_id, ref)
             return _snippet(node.get("title")), 0
         elif parsed.kind == "memopedia" and conn is not None and lock is not None:
@@ -432,7 +408,7 @@ def walk(
                             (s, tag.target_ref, other, hop.target_ref),
                         )
 
-    # --- 辺 2: 木の構造 (親子・兄弟・来歴 promoted_from) ---
+    # --- 辺 2: 木の構造 (子 = ステップ・来歴 promoted_from) ---
     for s, node in seed_nodes.items():
         try:
             children = _list_node_children(manager, persona_id, s)
@@ -443,32 +419,10 @@ def walk(
         for origin_ref in (node.get("promoted_from") or [])[:MAX_PER_EDGE]:
             snip, created = _resolve_target(manager, adapter, persona_id, origin_ref)
             _add(origin_ref, "tree", snip, created, 0, (s, origin_ref))
-        # 親と兄弟 (task が track に接がれている場合)
-        if node.get("node_kind") == "task" and node.get("track_id"):
-            try:
-                parent = _resolve_purpose_node(
-                    manager, persona_id, node["track_id"]
-                )
-            except NodeNotFoundError:
-                parent = None
-            if parent is not None:
-                _add(
-                    parent["ref"], "tree", _snippet(parent.get("title")),
-                    0, 0, (s, parent["ref"]),
-                )
-                try:
-                    siblings = _list_node_children(
-                        manager, persona_id, parent["ref"]
-                    )
-                except NodeNotFoundError:
-                    siblings = []
-                for sib in siblings[:MAX_PER_EDGE]:
-                    if sib["ref"] == node.get("ref"):
-                        continue
-                    _add(
-                        sib["ref"], "tree", _snippet(sib.get("title")),
-                        0, 0, (s, parent["ref"], sib["ref"]),
-                    )
+        # ⚠ 「親と兄弟」の辺 (task が track に接がれている場合) は束 6c
+        # (2026-08-22) で撤去した。親の解決先が Track で、Track が概念ごと退役した
+        # ため (track_retirement.md §9)。タスク同士の親子は元から存在しないので、
+        # 木の構造として残るのは「子 (ステップ)」と「来歴 (promoted_from)」だけ。
 
     # --- 辺 3: clip (purpose_ref 一致・未貼り付けのクリップ = 旧 mark 観測点) ---
     if has_memory:

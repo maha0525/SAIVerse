@@ -5,8 +5,8 @@ mock run_work_session + DaySimulator (仮想クロック) で検証する:
 
 - 3 コマ (9:00 調べる / 14:00 随筆を書く / 20:00 自室で過ごす) が仮想時刻順に
   発火し、作業セッション系コマが mock run_work_session を正しい指示書引数で呼ぶ
-- ユーザー会話中 (running user_conversation Track) は繰り下げ → 10 分後に
-  再発火。繰り下げ 3 回で skipped。会話終了 (pause) 後は再発火で実行される
+- ユーザー会話中 (開いている会話の出来事がある) は繰り下げ → 10 分後に
+  再発火。繰り下げ 3 回で skipped。会話終了 (出来事の close) 後は再発火で実行される
 - reschedule_pending_slots の冪等性 (二重 push で二重発火しない)
 - バリデーション: 時刻降順・不正 kind・kind/ref 不整合などで save が ValueError
 
@@ -31,7 +31,6 @@ from saiverse import day_plan
 from saiverse.day_simulator import DaySimulator
 from saiverse.event_scheduler import EventScheduler
 from saiverse.persona_task_manager import STAGE_CANDIDATE, PersonaTaskManager
-from saiverse.track_manager import STATUS_RUNNING, TrackManager
 
 PERSONA_ID = "alice"
 PLAN_DATE = "2026-07-04"
@@ -72,7 +71,7 @@ def manager(session_factory):
     """SAIVerseManager の最小スタブ。
 
     day_plan が触る実属性のみ: SessionLocal / personas / occupancy_manager /
-    event_scheduler / track_manager。
+    event_scheduler。
     """
     db = session_factory()
     try:
@@ -119,7 +118,6 @@ def manager(session_factory):
         personas=personas,
         occupancy_manager=StubOccupancy(personas),
         event_scheduler=EventScheduler(),  # start() しない (シム前提)
-        track_manager=TrackManager(session_factory=session_factory),
     )
 
 
@@ -394,40 +392,27 @@ def test_three_slots_fire_in_virtual_time_order(manager, task_refs):
 # ---------------------------------------------------------------------------
 
 
-def _start_user_conversation(manager) -> str:
-    """対ユーザー会話 Track を running で作り、会話の出来事も開く (= 会話中の状態)。
+def _start_user_conversation(manager) -> None:
+    """本番の入口を通さずに会話状態だけ立てる (= ユーザー会話中の状態)。
 
-    「ユーザー会話中」の判定は開いている kind='conversation' の出来事の有無
-    (life.md §7 案 Y、``day_plan.is_in_user_conversation``)。Track の running
-    状態だけでは「会話中」と判定されなくなったため、出来事も明示的に開く。
+    「ユーザー会話中」の判定 (``day_plan.is_in_user_conversation``) が見る器は
+    三代目 — Track の status (v1) → 開いている会話の出来事 (案 Y) →
+    **メモリ内の会話状態** (2026-08-22 の束 6c、v3 §7)。前の二代を作っていた
+    TrackManager と出来事の書き込み API はどちらも退役したので、いまの器を直に
+    立てる (test_user_conversation.py の ``_start_conversation_state`` と同流儀)。
     """
-    from saiverse import episodes
+    from saiverse import user_conversation as uc
 
-    track_id = manager.track_manager.create(
-        persona_id=PERSONA_ID,
-        track_type="user_conversation",
-        title="対 tester 会話",
-        is_persistent=True,
-        output_target="building:current",
-        metadata=json.dumps({"user_id": "1"}),
-        initial_status=STATUS_RUNNING,
-    )
-    episodes.open_conversation_episode(
+    uc._set_open_conversation(
         manager, PERSONA_ID, building_id="alice_room", participants=[PERSONA_ID, "1"],
     )
-    return track_id
 
 
 def _end_user_conversation(manager) -> None:
-    """会話終了 (wait_response タイムアウト相当): 会話の出来事を閉じる。
+    """会話終了 (無応答タイムアウト相当): 会話状態を落とす。"""
+    from saiverse import user_conversation as uc
 
-    life.md §7 案 Y 以降、タイムアウトは Track を pause しない (running のまま)。
-    「会話中」判定に効くのは出来事の close だけなので、ここでも Track の pause
-    ではなく出来事の close で会話終了を再現する。
-    """
-    from saiverse import episodes
-
-    episodes.close_conversation_episode(manager, PERSONA_ID)
+    uc.clear_open_conversation(manager, PERSONA_ID)
 
 
 def test_slot_deferred_three_times_then_skipped(manager, task_refs):
@@ -1568,6 +1553,14 @@ def _save_single_gated_slot(manager, task_refs, *, budget_rounds=5):
     ])
 
 
+# ⚠ 障害注入の手 (2026-08-22 / 束 6c で差し替え): 旧テストは予約 tx / 精算 tx を
+# ``saiverse.episodes.open_episode`` / ``close_episode`` の例外で転かせていたが、
+# コマの出来事を開閉する手が退役して (v3 §7) 両 tx から消えた。いまも tx の中で
+# 走る書き込み (予算 meta の更新・台帳 applied) を代わりの注入点にしている。
+# 出来事が open のまま残ることを見ていた assert は、開く相手ごと無くなったので
+# 落とした — 収束状態の残り (slot・台帳・予算) は不変のまま検証する。
+
+
 def test_reservation_tx_failure_skips_handler_and_leaves_state_unchanged(manager, task_refs):
     """A5: 予約 tx が転けたら handler は 0 回・slot pending・予算不変・台帳 prepared。"""
     _attach_ledger(manager)
@@ -1575,7 +1568,9 @@ def test_reservation_tx_failure_skips_handler_and_leaves_state_unchanged(manager
     _save_single_gated_slot(manager, task_refs)
     clock.enable_virtual(BASE + timedelta(hours=9))
 
-    with patch("saiverse.episodes.open_episode", side_effect=RuntimeError("db down")), \
+    # 予算予約の書き込みで転かす (台帳 running を取った後・commit の前)
+    with patch.object(day_plan, "_apply_budget_delta_to_meta",
+                      side_effect=RuntimeError("db down")), \
             patch("sea.work_session.run_work_session") as mock_ws:
         day_plan._fire_slot(manager, PERSONA_ID, PLAN_DATE, 0)
 
@@ -1586,40 +1581,14 @@ def test_reservation_tx_failure_skips_handler_and_leaves_state_unchanged(manager
     assert day_plan.get_budget_state(manager, PERSONA_ID, PLAN_DATE)["used"] == 0
     # 台帳は prepared のまま (mark_running が同 tx で巻き戻る) — 安全に再実行できる
     assert len(manager.execution_ledger.list_prepared("slot.fire")) == 1
-    from saiverse import episodes
-    assert episodes.get_open_episode(manager, PERSONA_ID) is None
 
 
-def test_settlement_failure_leaves_fired_open_running_with_reserved_budget(manager, task_refs):
-    """A6/A5: 精算 tx (episode close) 失敗 → slot=fired・episode=open・台帳=running・
-    予算は予約額のまま (返金されない)。回復で拾える状態に収束する。"""
-    ledger = _attach_ledger(manager)
-    day_plan.init_budget_ledger(manager, PERSONA_ID, PLAN_DATE, 20)
-    _save_single_gated_slot(manager, task_refs, budget_rounds=5)
-    clock.enable_virtual(BASE + timedelta(hours=9))
+def test_settlement_failure_leaves_fired_running_with_reserved_budget(manager, task_refs):
+    """A6/A5: 精算 tx の書き込み失敗 → slot=fired・台帳=running・予算は予約額のまま。
 
-    with patch("sea.work_session.run_work_session",
-               return_value=_mock_work_session_result(rounds_used=3)) as mock_ws, \
-            patch("saiverse.episodes.close_episode", side_effect=RuntimeError("commit fail")):
-        day_plan._fire_slot(manager, PERSONA_ID, PLAN_DATE, 0)
-
-    assert mock_ws.call_count == 1  # ハンドラは走った
-    slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
-    assert slots[0]["status"] == "fired"  # done に進まない (精算ロールバック)
-    from saiverse import episodes
-    open_ep = episodes.get_open_episode(manager, PERSONA_ID)
-    assert open_ep is not None and open_ep["status"] == "open"  # 出来事は開いたまま
-    exec_id = _slot_exec_id(manager)
-    assert ledger.get_execution(exec_id)["status"] == "running"
-    # 予算は予約額 (5) のまま — 実測 3 への精算 (返金) は適用されない (A5 の安全側)
-    assert day_plan.get_budget_state(manager, PERSONA_ID, PLAN_DATE)["used"] == 5
-
-
-def test_settlement_failure_via_mark_applied_is_also_atomic(manager, task_refs):
-    """A6: 精算 tx 内の台帳 applied 書き込み失敗でも done/episode/予算が全ロールバック。
-
-    done 保存・episode close・予算調整・applied は単一 tx なので、どの書き込みが
-    転けても収束状態は同じ (fired・open・running・予約額保持)。
+    done 保存・予算調整・台帳 applied は単一 tx なので、どの書き込みが転けても
+    収束状態は同じ (fired・running・予約額保持) で、回復が拾える状態に落ち着く。
+    ここでは台帳 applied を転かす。
     """
     ledger = _attach_ledger(manager)
     day_plan.init_budget_ledger(manager, PERSONA_ID, PLAN_DATE, 20)
@@ -1630,16 +1599,16 @@ def test_settlement_failure_via_mark_applied_is_also_atomic(manager, task_refs):
         raise RuntimeError("applied write fail")
 
     with patch("sea.work_session.run_work_session",
-               return_value=_mock_work_session_result(rounds_used=3)), \
+               return_value=_mock_work_session_result(rounds_used=3)) as mock_ws, \
             patch.object(ledger, "mark_applied", side_effect=_boom):
         day_plan._fire_slot(manager, PERSONA_ID, PLAN_DATE, 0)
 
+    assert mock_ws.call_count == 1  # ハンドラは走った
     slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
-    assert slots[0]["status"] == "fired"
-    from saiverse import episodes
-    assert episodes.get_open_episode(manager, PERSONA_ID) is not None
+    assert slots[0]["status"] == "fired"  # done に進まない (精算ロールバック)
     exec_id = _slot_exec_id(manager)
     assert ledger.get_execution(exec_id)["status"] == "running"
+    # 予算は予約額 (5) のまま — 実測 3 への精算 (返金) は適用されない (A5 の安全側)
     assert day_plan.get_budget_state(manager, PERSONA_ID, PLAN_DATE)["used"] == 5
 
 
@@ -2306,8 +2275,8 @@ def test_replace_day_plan_all_excluded_by_life_leaves_plan_and_reservations(mana
 # ---------------------------------------------------------------------------
 # D5: 精算失敗で running のまま残ったコマ発火の settle-close 回復
 #
-# test_settlement_failure_...（上）が作る収束状態 (fired/open/running/予約額保持)
-# を、deadline 超過後に回復 tick の _collect_stale_slot_executions が一度だけ
+# test_settlement_failure_...（上）が作る収束状態 (fired/running/予約額保持) を、
+# deadline 超過後に回復 tick の _collect_stale_slot_executions が一度だけ
 # settle-close することを統合的に確認する。
 # ---------------------------------------------------------------------------
 
@@ -2327,27 +2296,34 @@ def _age_execution(manager, execution_id, seconds):
 
 
 def _make_stale_settled_slot(manager, task_refs):
-    """精算 tx (episode close) を壊して fired/open/running/予約額保持 に収束させる。"""
+    """精算 tx (台帳 applied) を壊して fired/running/予約額保持 に収束させる。
+
+    旧実装は出来事を閉じる手を壊していたが、その手は 2026-08-22 (束 6c) に
+    退役したので、同じ tx に残る台帳 applied の書き込みを壊す。
+    """
     ledger = _attach_ledger(manager)
     day_plan.init_budget_ledger(manager, PERSONA_ID, PLAN_DATE, 20)
     _save_single_gated_slot(manager, task_refs, budget_rounds=5)
     clock.enable_virtual(BASE + timedelta(hours=9))
+
+    def _boom(*a, **k):
+        raise RuntimeError("applied write fail")
+
     with patch("sea.work_session.run_work_session",
                return_value=_mock_work_session_result(rounds_used=3)), \
-            patch("saiverse.episodes.close_episode", side_effect=RuntimeError("commit fail")):
+            patch.object(ledger, "mark_applied", side_effect=_boom):
         day_plan._fire_slot(manager, PERSONA_ID, PLAN_DATE, 0)
     return ledger, _slot_exec_id(manager)
 
 
 def test_recovery_settle_closes_stale_running_slot(manager, task_refs):
     """回復: deadline 超過の running slot.fire が settle-close される
-    (episode closed・slot done・台帳 completed・予算は予約額 5 のまま)。"""
-    from saiverse import episodes, execution_ledger_wiring as wiring
+    (slot done・台帳 completed・予算は予約額 5 のまま)。"""
+    from saiverse import execution_ledger_wiring as wiring
 
     ledger, exec_id = _make_stale_settled_slot(manager, task_refs)
     # 収束状態の確認
     assert ledger.get_execution(exec_id)["status"] == "running"
-    assert episodes.get_open_episode(manager, PERSONA_ID) is not None
 
     # deadline (900s) 超過へ (仮想時計を 20 分進める)
     clock.advance_to(BASE + timedelta(hours=9, minutes=20))
@@ -2356,7 +2332,6 @@ def test_recovery_settle_closes_stale_running_slot(manager, task_refs):
     assert ledger.get_execution(exec_id)["status"] == "completed"
     slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
     assert slots[0]["status"] == "done"
-    assert episodes.get_open_episode(manager, PERSONA_ID) is None  # 閉じた
     # 予算は予約額のまま (返金しない保守精算)
     assert day_plan.get_budget_state(manager, PERSONA_ID, PLAN_DATE)["used"] == 5
 
@@ -2472,33 +2447,11 @@ def test_slot_idempotency_key_is_stable_id_not_index(manager, task_refs):
     assert day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)[0]["status"] == "done"
 
 
-def test_recovery_closes_orphaned_unknown_slot_episode(manager, task_refs):
-    """Finding 3: ハンドラ例外 + episode close 失敗が重なると episode が open のまま
-    unknown へ進む。回復がその孤児 episode を閉じる (slot/台帳の状態は保つ)。"""
-    from saiverse import episodes, execution_ledger_wiring as wiring
-
-    ledger = _attach_ledger(manager)
-    day_plan.init_budget_ledger(manager, PERSONA_ID, PLAN_DATE, 20)
-    _save_single_gated_slot(manager, task_refs, budget_rounds=5)
-    clock.enable_virtual(BASE + timedelta(hours=9))
-
-    with patch("sea.work_session.run_work_session", side_effect=RuntimeError("boom")), \
-            patch("saiverse.episodes.close_episode", side_effect=RuntimeError("close fail")):
-        day_plan._fire_slot(manager, PERSONA_ID, PLAN_DATE, 0)
-
-    exec_id = _slot_exec_id(manager)
-    assert ledger.get_execution(exec_id)["status"] == "unknown"
-    assert episodes.get_open_episode(manager, PERSONA_ID) is not None  # 孤児
-
-    wiring._close_orphaned_unknown_slot_episodes(manager)
-
-    assert episodes.get_open_episode(manager, PERSONA_ID) is None  # 閉じた
-    # slot は fired のまま (handler 失敗なので done ではない)、台帳も unknown のまま
-    assert day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)[0]["status"] == "fired"
-    assert ledger.get_execution(exec_id)["status"] == "unknown"
-    # 冪等: 二度目は open episode が無いので no-op (例外を投げない)
-    wiring._close_orphaned_unknown_slot_episodes(manager)
-    assert episodes.get_open_episode(manager, PERSONA_ID) is None
+# ⚠ ``test_recovery_closes_orphaned_unknown_slot_episode`` (Finding 3 の回帰) は
+# 2026-08-22 (束 6c) に削除した。ハンドラ例外と出来事の close 失敗が重なって
+# 「open のまま unknown へ進んだ孤児 episode」を掃除する回復
+# (``execution_ledger_wiring._close_orphaned_unknown_slot_episodes``) が、コマの
+# 出来事を開く手ごと退役したため (v3 §7)。開く手が無ければ孤児も生まれない。
 
 
 def test_negative_used_rounds_is_rejected_no_over_refund(manager, task_refs):

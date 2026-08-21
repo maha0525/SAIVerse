@@ -780,9 +780,9 @@ def handle_scheduled_judgment(
 
 def handle_conversation_end(
     manager: Any, persona_id: str,
-    *, expected_episode_ref: Optional[str] = None,
+    *, expected_conversation_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """対ユーザー会話の終了処理: 会話の出来事を閉じる (機械の帳簿処理のみ)。
+    """対ユーザー会話の終了処理: 会話状態を落とす (機械の帳簿処理のみ)。
 
     会話終了判断 (post_conversation) は 2026-08-16 の裁定で退役した
     (autonomous_behavior_v3.md §8 / §13.3)。会話に切れ目は定義できず、
@@ -790,64 +790,73 @@ def handle_conversation_end(
     本人の声の捕獲 (約束・やりたいこと・コア記憶) は Metabolism のスルースの
     一手へ一本化され、ここに残るのは待ちを閉じる帳簿処理だけになった。
 
+    器は 2026-08-22 (束 6c) に「出来事の行を閉じる」から「メモリ内の会話状態を
+    落とす + 終わりの遷移の一行を Building ログへ書く」へ変わった (v3 §7)。
+    条件付き解除の意味論はそのまま持ち越している。
+
+    **全体を会話ロック (``user_conversation.conversation_lock``) の中で行う**
+    (2026-08-22 指摘 1)。三手 (状態を落とす → 終わりの一行 → 予約の解除) の
+    途中で新しい会話が開くと、後片付けがその会話の予約を消す並びが残るため、
+    会話の開始と同じロックで直列化する。ロックが会話開始側の Pulse を含まない
+    のは意図的で、詳細は ``user_conversation`` の「会話の開始と終了の排他」節。
+
     Args:
-        expected_episode_ref: 呼び出し元が「この会話を終える」と決めた時点で
-            見ていた会話の出来事。**指定すると、その行が open のままのときだけ
-            閉じる条件付き更新**になる。呼び出し元の検査から実際の実行までに
-            間が空く経路 (debug の切り上げは背景スレッドで走る) で、その間に
-            別経路が会話を閉じ / 新しい会話を開いていたら、ここで閉じるのは
-            **別の会話**になる (2026-08-14 Codex 二巡目・三巡目)。None なら
-            「いま開いている会話」を閉じる (自然タイムアウト経路)。
+        expected_conversation_id: 呼び出し元が「この会話を終える」と決めた時点で
+            見ていた会話。**指定すると、その会話が現行のままのときだけ落とす
+            条件付き解除**になる。呼び出し元の検査から実際の実行までに間が空く
+            経路 (debug の切り上げは背景スレッドで走る / 沈黙タイマーの callback は
+            EventScheduler のスレッドで走る) で、その間に別経路が会話を閉じ /
+            新しい会話を開いていたら、ここで閉じるのは**別の会話**になる
+            (2026-08-14 Codex 二巡目・三巡目)。None なら「いま開いている会話」を
+            閉じる。
 
     Returns:
-        ``{"closed": bool, "episode_ref": str | None, "reason": str | None}``。
+        ``{"closed": bool, "conversation_id": str | None, "reason": str | None}``。
     """
-    # expected_episode_ref がある経路では**条件付き close** —— 照合と書き込みを
-    # 1 手に畳み、「照合してから閉じる」間に別経路が閉じて新しい会話を開いた
-    # ときに別の会話を閉じる窓を無くす (2026-08-14 Codex 三巡目)。
-    closed: Optional[Dict[str, Any]] = None
-    try:
-        from saiverse.episodes import close_conversation_episode
+    from saiverse import user_conversation as uc
 
-        closed = close_conversation_episode(
-            manager, persona_id, expected_ref=expected_episode_ref,
-        )
-    except Exception:
-        LOGGER.warning(
-            "[autonomy-wiring] failed to close conversation episode: persona=%s",
-            persona_id, exc_info=True,
-        )
-        return {"closed": False, "episode_ref": None,
-                "reason": "close_conversation_episode raised"}
-
-    if closed is None:
-        LOGGER.info(
-            "[autonomy-wiring] no open conversation episode to end "
-            "(persona=%s expected=%s)", persona_id, expected_episode_ref,
-        )
-        return {"closed": False, "episode_ref": None,
-                "reason": "no open conversation episode to end"}
-
-    # 会話が閉じた = 待ちも終わった。沈黙タイマーは一回限りの予約なので、
-    # 自然発火した経路では既に消費されている。debug の切り上げのように外から
-    # 閉じた経路では生きた予約が残るため、ここで解除する (残すと次の会話の
-    # 途中で発火して、始まったばかりの会話を閉じてしまう)。
-    try:
-        from saiverse.user_conversation import cancel_conversation_timeout
-
-        cancel_conversation_timeout(manager, persona_id)
-    except Exception:
-        LOGGER.warning(
-            "[autonomy-wiring] failed to cancel the conversation timeout "
-            "(persona=%s)", persona_id, exc_info=True,
+    with uc.conversation_lock(persona_id):
+        # 照合と解除は 1 手 (clear_open_conversation がロック内で行う) —— 「照合して
+        # から落とす」間に別経路が閉じて新しい会話を開いたときに、別の会話を落とす窓を
+        # 無くす (2026-08-14 Codex 三巡目の規律を器ごと引き継ぐ)。
+        closed = uc.clear_open_conversation(
+            manager, persona_id, expected_conversation_id=expected_conversation_id,
         )
 
-    episode_ref = closed.get("episode_ref")
+        if closed is None:
+            LOGGER.info(
+                "[autonomy-wiring] no open conversation to end "
+                "(persona=%s expected=%s)", persona_id, expected_conversation_id,
+            )
+            return {"closed": False, "conversation_id": None,
+                    "reason": "no open conversation to end"}
+
+        conversation_id = closed.get("conversation_id")
+
+        # 終わりの遷移の一行 (機構名義)。v3 §7「始まり・終わりの実在イベント」。
+        uc._write_transition_line(manager, closed, action="end")
+
+        # 会話が閉じた = 待ちも終わった。沈黙タイマーは一回限りの予約なので、
+        # 自然発火した経路では既に消費されている。debug の切り上げのように外から
+        # 閉じた経路では生きた予約が残るため、ここで解除する (残すと次の会話の
+        # 途中で発火して、始まったばかりの会話を閉じてしまう)。
+        # **いま閉じた会話の予約だけ**を対象にする — 別の会話の予約が生きている
+        # なら、それはこの後片付けが触れてよい相手ではない。
+        try:
+            uc.cancel_conversation_timeout(
+                manager, persona_id, expected_conversation_id=conversation_id,
+            )
+        except Exception:
+            LOGGER.warning(
+                "[autonomy-wiring] failed to cancel the conversation timeout "
+                "(persona=%s)", persona_id, exc_info=True,
+            )
+
     LOGGER.info(
-        "[autonomy-wiring] closed the conversation episode %s (persona=%s)",
-        episode_ref, persona_id,
+        "[autonomy-wiring] closed the conversation %s (persona=%s)",
+        conversation_id, persona_id,
     )
-    return {"closed": True, "episode_ref": episode_ref, "reason": None}
+    return {"closed": True, "conversation_id": conversation_id, "reason": None}
 
 
 # ---------------------------------------------------------------------------
@@ -1135,33 +1144,23 @@ RECOVERED_DISPATCH_UNROUTABLE = "unroutable"
 def _conversation_already_answered(manager: Any, persona_id: str) -> bool:
     """いまの会話区間で、このペルソナの応答が既に出ているか。
 
-    証跡は「開いている会話の出来事の started_at 以降の assistant メッセージ」で、
+    証跡は「開いている会話の ``started_at`` 以降の assistant メッセージ」で、
     これを回収の重複判定に使う。
 
     倒し方に注意 (fail 方向が用途で決まる):
 
-    - **会話の出来事が開いていない** → 応答済みではない (False)。会話は生きて
-      いないので、ここで会話を開いても二重にならない。
-    - **出来事は開いているが証跡が読めない** → 応答済みに倒す (True)。ライブ
-      経路が既に応対している可能性があり、重ねて起動すると二重応対になる。
+    - **会話が開いていない** → 応答済みではない (False)。会話は生きていないので、
+      ここで会話を開いても二重にならない。
+    - **会話は開いているが証跡が読めない** → 応答済みに倒す (True)。ライブ経路が
+      既に応対している可能性があり、重ねて起動すると二重応対になる。
     """
-    from saiverse import episodes
+    from saiverse.user_conversation import get_open_conversation
 
-    try:
-        ep = episodes.get_open_episode(
-            manager, persona_id, kind=episodes.KIND_CONVERSATION,
-        )
-    except Exception:
-        LOGGER.warning(
-            "[autonomy-wiring] failed to read the open conversation episode "
-            "while recovering an utterance conflict (persona=%s); assuming a "
-            "live conversation", persona_id, exc_info=True,
-        )
-        return True
-    if ep is None:
+    conv = get_open_conversation(manager, persona_id)
+    if conv is None:
         return False
 
-    since = ep.get("started_at")
+    since = conv.get("started_at")
     persona = _get_persona(manager, persona_id)
     adapter = getattr(persona, "sai_memory", None) if persona is not None else None
     checker = getattr(adapter, "has_assistant_message_since", None)

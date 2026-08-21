@@ -27,7 +27,6 @@ import json
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 from typing import Any, Dict, List
-from unittest.mock import patch
 
 import pytest
 from sqlalchemy import create_engine
@@ -51,7 +50,6 @@ from saiverse.persona_task_manager import (
     PersonaTaskManager,
     TaskConflictError,
 )
-from saiverse.track_manager import TrackManager
 from tool_loader import load_builtin_tool
 
 PERSONA_ID = "alice"
@@ -148,7 +146,6 @@ def manager(session_factory):
         SessionLocal=session_factory,
         personas={PERSONA_ID: persona},
         event_scheduler=EventScheduler(),  # start() しない (同期検証のみ)
-        track_manager=TrackManager(session_factory=session_factory),
         buildings=[
             SimpleNamespace(building_id="library", name="図書館"),
             SimpleNamespace(building_id="workshop", name="工房"),
@@ -695,12 +692,15 @@ def _session_result(**over):
     return WorkSessionResult(**base)
 
 
+# ⚠ 以下の post_session 群は 2026-08-22 (束 6c) まで、judgment_context に
+# ``track_id`` を積むために自律 Track を 1 本作っていた。Track ランタイムの退役で
+# 作る手が無くなり、finalize 側にも track_id の読み手が残っていないので、生成ごと
+# 落とした。判断そのもの (成果物の接地・タスク遷移・記録) の検証は変えていない。
+
+
 def test_post_session_schema_drops_done_branch_without_artifacts(manager, task_refs):
-    track_id = manager.track_manager.create(
-        persona_id=PERSONA_ID, track_type="autonomous", title="調べ物",
-    )
     ctx = {"session_result": _session_result(artifacts=[]),
-           "task_ref": "task:1", "track_id": track_id, "budget_rounds": 8}
+           "task_ref": "task:1", "budget_rounds": 8}
     result = jp.run_judgment_point(manager, PERSONA_ID, "post_session", ctx)
 
     args = result["args"]
@@ -740,9 +740,6 @@ def test_post_session_schema_done_branch_with_artifact_enum(manager, task_refs):
 def test_post_session_done_completes_task_and_records_artifact(
     manager, ptm, task_refs, finalize_mod, tmp_path
 ):
-    track_id = manager.track_manager.create(
-        persona_id=PERSONA_ID, track_type="autonomous", title="調べ物",
-    )
     output = {
         "monologue": "覚え書きができた。ここで一区切りにする。",
         "task_verdict": {"status": "done", "artifact_ref": "item-abc",
@@ -750,7 +747,7 @@ def test_post_session_done_completes_task_and_records_artifact(
         "remaining_timetable": None,
     }
     ctx = json.dumps({"plan_date": PLAN_DATE, "artifacts": ["item-abc"],
-                      "task_ref": "task:1", "track_id": track_id})
+                      "task_ref": "task:1"})
     with _persona_ctx(manager, tmp_path):
         finalize_mod.judgment_finalize(
             judgment_output=output, kind="post_session", judgment_context=ctx,
@@ -781,9 +778,6 @@ def test_post_session_done_normalizes_persona_facing_artifact_ref(
     manager.resolve_item_ref_for_persona = (
         lambda persona_id, ref: raw_id if ref == "item:404" else ref
     )
-    track_id = manager.track_manager.create(
-        persona_id=PERSONA_ID, track_type="autonomous", title="調べ物",
-    )
     output = {
         "monologue": "設計書を書けた。",
         "task_verdict": {"status": "done", "artifact_ref": "item:404",
@@ -791,7 +785,7 @@ def test_post_session_done_normalizes_persona_facing_artifact_ref(
         "remaining_timetable": None,
     }
     ctx = json.dumps({"plan_date": PLAN_DATE, "artifacts": [raw_id],
-                      "task_ref": "task:1", "track_id": track_id})
+                      "task_ref": "task:1"})
     with _persona_ctx(manager, tmp_path):
         finalize_mod.judgment_finalize(
             judgment_output=output, kind="post_session", judgment_context=ctx,
@@ -816,9 +810,6 @@ def test_post_session_unresolvable_artifact_ref_still_rejected(
         raise RuntimeError("resolver exploded")
 
     manager.resolve_item_ref_for_persona = _boom
-    track_id = manager.track_manager.create(
-        persona_id=PERSONA_ID, track_type="autonomous", title="調べ物",
-    )
     output = {
         "monologue": "できたはず。",
         "task_verdict": {"status": "done", "artifact_ref": "item:999",
@@ -826,7 +817,7 @@ def test_post_session_unresolvable_artifact_ref_still_rejected(
         "remaining_timetable": None,
     }
     ctx = json.dumps({"plan_date": PLAN_DATE, "artifacts": ["item-abc"],
-                      "task_ref": "task:1", "track_id": track_id})
+                      "task_ref": "task:1"})
     with caplog.at_level("WARNING"):
         with _persona_ctx(manager, tmp_path):
             finalize_mod.judgment_finalize(
@@ -842,9 +833,6 @@ def test_post_session_fake_artifact_ref_is_rejected(
     manager, ptm, task_refs, finalize_mod, tmp_path, caplog
 ):
     """偽の artifact_ref ではタスクを完了させない (やったフリの棄却)。"""
-    track_id = manager.track_manager.create(
-        persona_id=PERSONA_ID, track_type="autonomous", title="調べ物",
-    )
     output = {
         "monologue": "できたはず。",
         "task_verdict": {"status": "done", "artifact_ref": "item-zzz",
@@ -852,7 +840,7 @@ def test_post_session_fake_artifact_ref_is_rejected(
         "remaining_timetable": None,
     }
     ctx = json.dumps({"plan_date": PLAN_DATE, "artifacts": ["item-abc"],
-                      "task_ref": "task:1", "track_id": track_id})
+                      "task_ref": "task:1"})
     with caplog.at_level("WARNING"):
         with _persona_ctx(manager, tmp_path):
             finalize_mod.judgment_finalize(
@@ -863,25 +851,19 @@ def test_post_session_fake_artifact_ref_is_rejected(
     assert task["status"] == "pending", "偽 artifact_ref でタスクが完了してしまった"
     assert task["artifact_refs"] == []
     assert any("item-zzz" in r.message for r in caplog.records)
-    # continue 相当に降格しても Track は書き換えない (2026-08-21 に書き手を撤去)
-    track = manager.track_manager.get(track_id)
-    assert not track.track_metadata or "desk_memo" not in json.loads(
-        track.track_metadata
-    )
 
 
-def test_post_session_desk_memo_stays_in_the_monologue_only(
+def test_post_session_continue_leaves_the_task_pending(
     manager, ptm, task_refs, finalize_mod, tmp_path
 ):
-    """continue 裁定の作業メモは独白記録にだけ残る (Track へは書かない)。
+    """continue 裁定ではタスクを動かさない (作業メモは独白記録にだけ残る)。
 
-    旧実装は Track metadata にも保存していたが、その読み手 (track:N コマの
-    指示書) は Track 撤廃で到達不能になっており、2026-08-21 に書き手ごと退役
-    した (track_retirement.md §2 住人 4)。
+    旧名は ``..._desk_memo_stays_in_the_monologue_only`` で、「作業メモが Track
+    metadata へ書かれないこと」も一緒に見ていた。書き手は 2026-08-21 に退役し
+    (track_retirement.md §2 住人 4)、読み手も Track ごと消えた (2026-08-22 の
+    束 6c) ので、その assert は対象消滅として落とした。continue の意味論の検証は
+    そのまま残す。
     """
-    track_id = manager.track_manager.create(
-        persona_id=PERSONA_ID, track_type="autonomous", title="調べ物",
-    )
     output = {
         "monologue": "途中まで進んだ。語源の話が面白い。",
         "task_verdict": {"status": "continue",
@@ -889,16 +871,12 @@ def test_post_session_desk_memo_stays_in_the_monologue_only(
         "remaining_timetable": None,
     }
     ctx = json.dumps({"plan_date": PLAN_DATE, "artifacts": [],
-                      "task_ref": "task:1", "track_id": track_id})
+                      "task_ref": "task:1"})
     with _persona_ctx(manager, tmp_path):
         finalize_mod.judgment_finalize(
             judgment_output=output, kind="post_session", judgment_context=ctx,
         )
 
-    track = manager.track_manager.get(track_id)
-    assert not track.track_metadata or "desk_memo" not in json.loads(
-        track.track_metadata
-    )
     # continue の意味論は不変 — タスクは動かない
     task = ptm.get_task(
         ptm.resolve_task_ref(PERSONA_ID, "task:1"), persona_id=PERSONA_ID,
@@ -1128,12 +1106,12 @@ def test_post_session_re_done_on_completed_task_is_rejected(
 ):
     """finalize 側の二重ガード: 終了済みタスクへの done 裁定は適用しない。
 
-    artifact_refs への多重追記も、終了済みタスクへの desk_memo (偽の
-    「中断中の作業」化) もしない。
+    artifact_refs への多重追記をしない。
+
+    旧テストは「終了済みタスクへ desk_memo を書いて偽の『中断中の作業』にしない」
+    ことも Track metadata で見ていたが、2026-08-22 (束 6c) の Track 退役で
+    書き先ごと消えたのでその assert は落とした。
     """
-    track_id = manager.track_manager.create(
-        persona_id=PERSONA_ID, track_type="autonomous", title="調べ物",
-    )
     task_id = ptm.resolve_task_ref(PERSONA_ID, "task:1")
     ptm.update_task_status(task_id, status="completed",
                            actor="test", persona_id=PERSONA_ID)
@@ -1147,7 +1125,7 @@ def test_post_session_re_done_on_completed_task_is_rejected(
         "remaining_timetable": None,
     }
     ctx = json.dumps({"plan_date": PLAN_DATE, "artifacts": ["item-new"],
-                      "task_ref": "task:1", "track_id": track_id})
+                      "task_ref": "task:1"})
     with caplog.at_level("WARNING"):
         with _persona_ctx(manager, tmp_path):
             summary, _, _ = finalize_mod.judgment_finalize(
@@ -1158,9 +1136,6 @@ def test_post_session_re_done_on_completed_task_is_rejected(
     assert task["status"] == "completed"
     assert task["artifact_refs"] == ["item-old"], "終了済みタスクに成果物が多重追記された"
     assert any("既に completed" in r.message for r in caplog.records)
-    # desk_memo も書かれない (終了済みタスクを「中断中」に見せない)
-    track = manager.track_manager.get(track_id)
-    assert not track.track_metadata or "desk_memo" not in json.loads(track.track_metadata)
     assert "applied=False" in summary
 
 
@@ -1271,101 +1246,49 @@ def test_on_event_requires_event_text(manager):
         jp.run_judgment_point(manager, PERSONA_ID, "on_event")
 
 
-def test_on_event_situation_shows_open_episode_activity(manager, task_refs):
-    """「いまの活動」は開いている出来事 (会話以外) から導出する
-    (track_retirement.md §7.4 — 旧 running Track 読みの付け替え)。"""
-    from saiverse import episodes
-
-    episodes.open_episode(
-        manager, PERSONA_ID, episodes.KIND_WORK_SESSION,
-        building_id="alice_room", participants=[PERSONA_ID],
-        meta={"title": "標本集の整理"},
-    )
-    result = jp.run_judgment_point(
-        manager, PERSONA_ID, "on_event", {"event_text": "システム通知"},
-    )
-    assert "標本集の整理" in result["args"]["situation_text"]
+# ⚠ 「いまの活動」に会話以外の作業を出すテスト 3 本
+# (``..._shows_open_episode_activity`` / ``..._activity_survives_stale_open_cache`` /
+# ``..._running_track_alone_is_idle``) は 2026-08-22 (束 6c) に削除した。会話以外の
+# 活動を答える器そのものが供給源ごと消えたため — 出来事の書き手も Track ランタイム
+# も退役し (v3 §7)、「いま何に取り組んでいるか」に答えられる集合が v0.3 には無い
+# (作り直しは v0.4 のティック設計、v3 §9-3)。残る二値は「会話中か、手すきか」だけ。
 
 
-def test_on_event_situation_activity_survives_stale_open_cache(manager, task_refs):
-    """回帰 (2026-08-14 Codex 指摘 F2): 「いまの活動」は仲裁の判定と同じ集合
-    (開いている会話以外の出来事) を DB から直に引く。
+def _open_user_conversation(manager) -> None:
+    """本番の入口を通さずに会話状態だけ立てる (前提条件のセットアップ用)。
 
-    層0タグ用の open キャッシュに stale な会話 dict が残っていると、
-    「最後に開いた 1 件」を読む旧実装は会話を見て打ち切り、実際には開いている
-    作業セッションを「手すきです」と偽って LLM へ渡していた。
+    「会話中か」の器は三代目 (Track の status → 会話の出来事 → メモリ内の会話状態、
+    2026-08-22 の束 6c)。前の二代を作る手はどちらも退役したので、いまの器を直に立てる。
     """
-    from saiverse import episodes
+    from saiverse import user_conversation as uc
 
-    episodes.open_episode(
-        manager, PERSONA_ID, episodes.KIND_WORK_SESSION,
-        building_id="alice_room", participants=[PERSONA_ID],
-        meta={"title": "標本集の整理"},
-    )
-    episodes._cache_set_open(
-        manager, PERSONA_ID,
-        {"episode_id": "stale", "kind": episodes.KIND_CONVERSATION},
-    )
-    result = jp.run_judgment_point(
-        manager, PERSONA_ID, "on_event", {"event_text": "システム通知"},
-    )
-    situation_text = result["args"]["situation_text"]
-    assert "標本集の整理" in situation_text
-    assert "手すきです" not in situation_text
-
-
-def test_on_event_situation_running_track_alone_is_idle(manager, task_refs):
-    """running Track が残っていても、開いている出来事が無ければ「手すき」。
-    案 Y 以降 Track の running は残留するため、活動の根拠にしない。"""
-    manager.track_manager.create(
-        persona_id=PERSONA_ID, track_type="autonomous", title="標本集の整理",
-        initial_status="running",
-    )
-    result = jp.run_judgment_point(
-        manager, PERSONA_ID, "on_event", {"event_text": "システム通知"},
-    )
-    assert "手すきです" in result["args"]["situation_text"]
-    assert "標本集の整理" not in result["args"]["situation_text"]
-
-
-def _running_user_conversation_track(manager) -> str:
-    """対ユーザー会話 Track を running で作る (会話の出来事は開かない)。"""
-    return manager.track_manager.create(
-        persona_id=PERSONA_ID, track_type="user_conversation",
-        title="対 tester 会話", is_persistent=True, initial_status="running",
-    )
-
-
-def test_on_event_situation_says_in_conversation_when_episode_open(manager, task_refs):
-    """開いている会話の出来事があるときだけ「ユーザーと会話中です」と伝える。"""
-    from saiverse import episodes
-
-    _running_user_conversation_track(manager)
-    episodes.open_conversation_episode(
+    uc._set_open_conversation(
         manager, PERSONA_ID, building_id="alice_room",
         participants=[PERSONA_ID, "1"],
     )
+
+
+def test_on_event_situation_says_in_conversation_when_conversation_open(manager, task_refs):
+    """開いている会話があるときだけ「ユーザーと会話中です」と伝える。"""
+    _open_user_conversation(manager)
     result = jp.run_judgment_point(
         manager, PERSONA_ID, "on_event", {"event_text": "システム通知"},
     )
     assert "ユーザーと会話中です" in result["args"]["situation_text"]
 
 
-def test_on_event_situation_not_in_conversation_when_episode_closed(manager, task_refs):
-    """回帰 (2026-07-29): 会話が閉じていれば running のままでも「会話中」と言わない。
+def test_on_event_situation_is_idle_when_no_conversation_open(manager, task_refs):
+    """回帰 (2026-07-29): 会話が終わっていれば「会話中」と言わない。
 
-    案 Y (life.md §7) 以降、対ユーザー会話 Track は会話終了後も running のまま残る。
-    種別で判定していた旧実装は、何日も前に終わった会話について「ユーザーと会話中です」
-    をペルソナへ渡していた。「取り組んでいます」への読み替えもやはり嘘なので、
-    手すき扱いのままにする。
+    旧実装は「対ユーザー会話 Track の種別」で判定していたため、何日も前に終わった
+    会話について「ユーザーと会話中です」をペルソナへ渡していた。「取り組んでいます」
+    への読み替えもやはり嘘なので、手すき扱いのままにする。
     """
-    _running_user_conversation_track(manager)  # 会話の出来事は開かない = 終了済み
     result = jp.run_judgment_point(
         manager, PERSONA_ID, "on_event", {"event_text": "システム通知"},
     )
     situation_text = result["args"]["situation_text"]
     assert "ユーザーと会話中です" not in situation_text
-    assert "対 tester 会話" not in situation_text
     assert "手すきです" in situation_text
 
 
@@ -2123,13 +2046,26 @@ def test_complete_with_artifact_rejects_other_execution(
 
 
 def _ws_episode(manager):
-    """work_session の出来事を開いて閉じる (digest_ref=None のまま)。"""
-    from saiverse import episodes as ep_mod
-    ep = ep_mod.open_episode(
-        manager, PERSONA_ID, ep_mod.KIND_WORK_SESSION, building_id="alice_room",
-    )
-    ep_mod.close_episode(manager, PERSONA_ID, ep["episode_ref"])
-    return ep["episode_ref"]
+    """閉じた work_session の出来事の行を ORM で直に置いて ``episode:N`` を返す。
+
+    ``saiverse.episodes`` の書き込み API は 2026-08-22 (束 6c) に全廃され、
+    ``episodes`` テーブルは旧データの読み取り専用の残置になった (v3 §7)。
+    post_session は原本の引き当てにこの参照を使い続けるので、行だけ直接用意する。
+    """
+    from database.models import Episode
+
+    started = int(BASE.timestamp())
+    db = manager.SessionLocal()
+    try:
+        db.add(Episode(
+            EPISODE_ID="ep-ws-1", PERSONA_ID=PERSONA_ID, SHORT_ID=1,
+            KIND="work_session", STARTED_AT=started, ENDED_AT=started + 1800,
+            BUILDING_ID="alice_room", STATUS="closed",
+        ))
+        db.commit()
+    finally:
+        db.close()
+    return "episode:1"
 
 
 def _ws_meta_fixture():
@@ -2212,8 +2148,12 @@ def test_post_session_transcript_unavailable_is_explicit(manager, task_refs):
 def test_post_session_finalize_writes_digest_untracked(
     manager, ptm, task_refs, finalize_mod, tmp_path, session_factory,
 ):
-    """untracked degrade: digest 直書き (判断行より先) + set_digest_ref 直呼び。"""
-    from database.models import Episode
+    """untracked degrade: digest 直書き (判断行より先)。
+
+    2026-08-22 (束 6c) までは直書きの後段で ``episodes.set_digest_ref`` が
+    「出来事へ再訪の鍵を刻む」ところまで見ていたが、専用の記録行を持たなくなり
+    (v3 §7) その後段ごと退役した。digest そのものは SAIMemory の行として残る。
+    """
     from sea.work_session import DIGEST_TAG
 
     episode_ref = _ws_episode(manager)
@@ -2241,24 +2181,15 @@ def test_post_session_finalize_writes_digest_untracked(
     assert digest_msg["scope"] == "committed"
     assert digest_msg["line_role"] == "main_line"
     assert digest_msg["metadata"]["work_session"] == ws_meta
-    assert digest_msg["metadata"]["origin_episode"] == episode_ref
+    # ``origin_episode`` の刻印は 2026-08-22 (束 6c) に退役した (v3 §7)
+    assert "origin_episode" not in digest_msg["metadata"]
     assert "meta_judgment" in judgment_msg["metadata"]["tags"]
-
-    # episode の再訪の鍵が message:{id} で後段確定 (FakeAdapter は m1 を返す)
-    db = session_factory()
-    try:
-        ep = db.query(Episode).filter(Episode.PERSONA_ID == PERSONA_ID).first()
-        assert ep.DIGEST_REF == "message:m1"
-    finally:
-        db.close()
 
 
 def test_post_session_finalize_empty_digest_warns(
     manager, ptm, task_refs, finalize_mod, tmp_path, session_factory, caplog,
 ):
     """digest 欠落 (スキーマ違反相当) は WARN + digest なしで判断行のみ。"""
-    from database.models import Episode
-
     episode_ref = _ws_episode(manager)
     output = {
         "monologue": "終えた。",
@@ -2278,12 +2209,6 @@ def test_post_session_finalize_empty_digest_warns(
     msgs = manager.personas[PERSONA_ID].sai_memory.messages
     assert len(msgs) == 1  # 判断行のみ
     assert "meta_judgment" in msgs[0]["metadata"]["tags"]
-    db = session_factory()
-    try:
-        ep = db.query(Episode).filter(Episode.PERSONA_ID == PERSONA_ID).first()
-        assert ep.DIGEST_REF is None
-    finally:
-        db.close()
 
 
 def test_post_session_finalize_tracked_digest_outbox_first(

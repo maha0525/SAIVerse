@@ -1,6 +1,6 @@
 # Intent: Track の撤廃 — 最後の住人たちの引っ越し計画
 
-**ステータス**: 実装中（v0.4、2026-08-21）。**会話経路の Track なし化は §8 で完了（束 6 第三便、まはー実機検証待ち）**。**裁定 3 点（A 関心の器 / B alert / C 門との線引き）すべて決着済み**。**裁定 B の ②③（閾値ポーラ・Handler tick 拡張点の撤去）は 2026-08-11 に実装完了**（§5-B の実装欄）。**撤去順序①の範囲は §7 で確定（裁定 5 点すべて 2026-08-14 に決着）— 実装フェーズ**。まはーの作戦変更「Track の撤廃計画を完全に立ててからでないと、エピソードの単位の議論がまともにできない」を受けて起草。
+**ステータス**: **完了（2026-08-22、まはー実機検証待ち）** — §9 で `TrackManager` への参照がゼロになり、モジュールごと削除した。`ActionTrack` テーブルと既存データは読み取り専用の残置（v3 §9-8 ①）。会話経路の Track なし化は §8（束 6 第三便）。**裁定 3 点（A 関心の器 / B alert / C 門との線引き）すべて決着済み**。**裁定 B の ②③（閾値ポーラ・Handler tick 拡張点の撤去）は 2026-08-11 に実装完了**（§5-B の実装欄）。**撤去順序①の範囲は §7 で確定（裁定 5 点すべて 2026-08-14 に決着）— 実装フェーズ**。まはーの作戦変更「Track の撤廃計画を完全に立ててからでないと、エピソードの単位の議論がまともにできない」を受けて起草。
 **親**: [`persona_cognition/recall_tags_and_track_reduction.md`](persona_cognition/recall_tags_and_track_reduction.md)（§3.2/§4.3 — 「役割縮小 → 溶解」の方向自体は 2026-07-24 に裁定済み）/ [`persona_cognition/life_concept_map.md`](persona_cognition/life_concept_map.md) §10（Track ＝複数概念の未分化な束）
 **関連**: [`episode.md`](episode.md)（Wave 1「器と縁」の設計 — 本計画の完成を待って再開する）/ [`../overview/v030_release_gate.md`](../overview/v030_release_gate.md) §2-2
 
@@ -233,3 +233,46 @@ v2 判断点側にも running Track の読みが **1 箇所だけ**残ってい�
 ### 8.6 副作用として縮退した表示
 
 `api/routes/people/activity.py` の「最近」ダイジェストは、Pulse の Track 刻印から autonomous 種別を拾っていた。書き手が消えたので**対象は meta_judgment Pulse だけになる**。旧ログの `/spell track_*` 引数から Track の題を引く解決器（`track_resolver`）も撤去し、素の文言へ縮退する。供給源の作り直しはライフビュー本体の世代交代（autonomous_behavior_v3.md §9-9「暮らしの窓」）と同じ工事に属する。
+
+---
+
+## 9. Track ランタイムの退去 — 最後の 8 人（2026-08-22 実装、v0.3.0 の門 束 6c）
+
+**この便で `TrackManager` への参照がゼロになり、`saiverse/track_manager.py` をモジュールごと削除した。** §8 で書き手が全員退去した後も、旧データを読む側が 8 箇所残っていた。それぞれの行き先:
+
+| # | 残っていた読み手 | 処置 |
+|---|---|---|
+| 1 | 時間割の `track:N` コマの指示書（`day_plan._build_track_instruction` / `_read_track_desk_memo`） | **削除**。材料（Track の題・机メモ・配下の生存タスク）が §8 で全滅して到達不能だった。旧データの `track:N` を指す ref は、他の未知参照と同じく「対象なし」のテンプレートで回る（`_REF_RE` は受理を続ける — 既存の時間割を「不正な ref」に化けさせない） |
+| 2 | 想起の歩き（`recall_walk._resolve_purpose_node` の track 分岐と `_track_to_node`） | **削除**。`track:N` は解決できない参照として扱う |
+| 3 | `judgment_finalize._ref_label` の表題解決 | **表示を素の文字列へ縮退**。`track:N` は表題なしでそのまま出る |
+| 4 | `api/routes/info.py` の「いま何をしているか」（`activity_label`） | **欄ごと撤去**。供給源（running な autonomous Track）が §8 で消えて常に null だった。同じ場所の「話しかけやすさ」（`life_state` / `life_until`）も、唯一の読み手だった UI を v0.3 で隠したので一緒に外した |
+| 5 | `api/routes/people/activity.py`（ライフビュー API） | **ファイルごと削除**（下の §9.2）。支えていた `saiverse/activity_view.py` も参照ゼロになり削除 |
+| 6 | `api/routes/people/pulse_timeline.py` の Track 題・種別・連番の欄 | **欄ごと撤去**。`origin_track_id` の書き手が §8 で消え、新しい Pulse では常に空だった |
+| 7 | 一日シム基盤（`scripts/run_day_sim.py` のスタブ manager） | `track_manager` の注入を削除 |
+| 8 | `SAIVerseManager.stop_autonomy` の「running な autonomous Track を全 pause」 | **ステップごと撤去**。揃えるべき帳簿が存在しない。停止は 2 ステップ（watchdog 停止 → `AUTONOMY_ENABLED=False`）になり、戻り値から `paused_tracks` が消えた |
+
+**残したもの**: `ActionTrack` テーブルと既存の行、`storage_layers` の `track_local_log` 索引、`database/migrate.py` の旧移行、そして `messages.origin_track_id` / `building_messages.origin_track_id` の列（§8.4 と同じ理由）。いずれも**読み取り専用の残置**で、v0.3 の機械写し（`saiverse/v3_shape_migration.py`）が生きた Track の題を手帳のアクティビティへ複写する入力にもなる（autonomous_behavior_v3.md §9-8 ②）。
+
+### 9.1 §2 住人台帳の決着
+
+| # | 住人 | 決着 |
+|---|---|---|
+| 1 | 関心（目的の木の大枝） | **手帳のアクティビティへ**（v3 §13.1）。v0.3 の機械写しが「完了・中止でない Track」の題を `origin='migration'` のアクティビティとして複写する |
+| 3 | origin_track_id | 列と読み手は残置（§8.4）。掃除はテーブル退役の migration |
+| 4 | 机メモ / 中断中セッション | **引っ越し先ごと消滅**。読み手（①）と書き手（§8.3 の `save_desk_memo`）が両方退去した。作業メモは独白記録に残る |
+| 5 | Track Chronicle | 生成は 2026-07-21 に廃止済み。読み込みは旧データ向けに残置 |
+| 9 | API・フロント UI | **削除**（下の §9.2） |
+| 10 | ActionTrack テーブル | **読み取り専用の残置**。物理削除はしない — v3 §9-8 ①「削除はいつでもできる」の哲学で、ペルソナ所有のデータを v0.3 で壊さない |
+
+住人 2・6・7・8・11・12 は §8 までに決着済み。**これで台帳の全員が持ち主へ渡り、Track は概念として消えた。**
+
+### 9.2 UI と API の削除（§5-C の約束の履行）
+
+裁定 C は「概念の撤廃に半分という状態は無い — 始めるなら v0.3.0 の中で UI・テーブル退役まで完遂する」だった。UI 側はこの便で果たした:
+
+- **フロント**: LifeView / LifeSettingsModal / TimetableTemplateModal / TasksModal / EventsTimeline / EventsModal / PersonaProfileModal と `/events` ページを削除。PersonaMenu からその 5 つの入口、RightSidebar から「話しかけやすさ」「いま何をしているか」「自律行動を止めています」の 3 チップ、Sidebar から「できごと」を削除。SettingsModal の自律 ON/OFF トグルと自律行動マネージャー欄も外した（`autonomy_enabled` の値自体はロード→保存で往復させ、設定を黙って塗り潰さない）
+- **API**: `activity` / `autonomy` / `autonomous` / `life_settings` / `timetable_template` / `tasks` の 6 ルートモジュールと `api/routes/episodes.py` を削除。`life.py` は `/clips` だけを残して `/day-plan` を削除
+
+ただし**テーブル退役（順序⑦）はやらない**。v3 §9-8 ① の裁定が「旧データは読み取り専用の残置」に変えたためで、C の趣旨（半端な製品を出さない）は UI の完遂で満たされている — ユーザーから見て Track はもうどこにも無い。
+
+⚠ **これは Track の撤去が終わったという意味であって、自律行動の運転が動くという意味ではない。** v0.3 では運転そのものを隠している（v3 §11）。暮らしの窓（v3 §9-9）は v0.4 の工事。

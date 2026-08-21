@@ -411,37 +411,20 @@ class BuildingIngestM8Test(unittest.TestCase):
             # 開いている出来事が無ければ origin_episode は付けない
             self.assertNotIn("origin_episode", entry.get("metadata") or {}, needle)
 
-    def test_transcription_stamps_open_episode(self):
-        """転記先ペルソナの開いている出来事が全転記種別に刻まれる (会話の
-        第一声 = user 発言が出来事の記録に入る)。"""
-        from saiverse import episodes
+    # test_transcription_stamps_open_episode は削除 (2026-08-22、束 6c /
+    # autonomous_behavior_v3.md §7): 転記 entry へ「開いている出来事」を刻む
+    # 帰属タグ (origin_episode) は、エピソードという専用の記録行の退役と一緒に
+    # 刻印ごと消えた。刻まれないことは
+    # test_transcription_stamps_line_role_and_scope が固定している。
 
-        ep = episodes.open_conversation_episode(
-            self.manager, self.LISTENER, building_id=self.BID,
-            participants=[self.LISTENER, "user_owner"],
-        )
-        self.assertTrue(ep.get("episode_ref"))
-        self._insert("user", "第一声のユーザー発言")
-        self._insert("assistant", "相手ペルソナの返事", persona_id="speaker")
-        self._insert("host", "<b>会話中の世界イベント</b>")
-        count = auto_ingest_building_messages(self.persona, self.manager)
-        self.assertEqual(count, 3)
-        for needle in ("第一声のユーザー発言", "相手ペルソナの返事", "会話中の世界イベント"):
-            entry = self._appended_by_needle(needle)
-            self.assertEqual(
-                (entry.get("metadata") or {}).get("origin_episode"),
-                ep["episode_ref"], needle,
-            )
+    def test_inherited_origin_episode_is_dropped(self):
+        """話し手側 metadata から deepcopy で継承された origin_episode は捨てる。
 
-    def test_inherited_origin_episode_is_replaced(self):
-        """話し手側 metadata から deepcopy で継承された origin_episode は、
-        受信側では別の出来事 (episode_ref はペルソナ内連番) を指すため、
-        受信側の開いている出来事で刻み直す。"""
-        from saiverse import episodes
-
-        ep = episodes.open_conversation_episode(
-            self.manager, self.LISTENER, building_id=self.BID,
-        )
+        episode:N の N はペルソナ内連番なので、受信側でそのまま残すと別の
+        出来事を指す嘘の帰属になる。刻印自体が退役した今 (束 6c) も、継承値を
+        落とす掃除は必要 — 転記は話し手の metadata を丸ごと deepcopy するため、
+        黙って持ち込まれる。
+        """
         msg = {
             "role": "assistant",
             "content": "話し手の出来事参照を運ぶ発話",
@@ -455,10 +438,7 @@ class BuildingIngestM8Test(unittest.TestCase):
         count = auto_ingest_building_messages(self.persona, self.manager)
         self.assertEqual(count, 1)
         entry = self._appended_by_needle("話し手の出来事参照を運ぶ発話")
-        self.assertEqual(
-            (entry.get("metadata") or {}).get("origin_episode"),
-            ep["episode_ref"],
-        )
+        self.assertNotIn("origin_episode", entry.get("metadata") or {})
 
 
 if __name__ == "__main__":

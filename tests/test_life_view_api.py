@@ -1,10 +1,15 @@
-"""ライフ UI 4画面のバックエンド API テスト。
+"""暮らしビュー API に残った 1 本 (点クリップ) のテスト。
 
 対象:
-- GET /api/episodes                          (api/routes/episodes.py — 画面 A)
-- GET /api/people/{id}/day-plan              (api/routes/people/life.py — 画面 B)
-- GET /api/people/{id}/clips                (同上 — 画面 C)
-- GET /api/people/{id}/profile-tree は退役済み (2026-08-21) — 404 を固定する
+- GET /api/people/{id}/clips  (api/routes/people/life.py — 画面 C)
+
+**退役した仲間の 404 も一緒に固定する** — 消したつもりのルートが別経路で生き
+残っていないことの回帰:
+
+- GET /api/people/{id}/profile-tree  (2026-08-21、目的の木が概念ごと消滅 — v3 §9-5)
+- GET /api/people/{id}/day-plan      (2026-08-22 束 6c、読み手のライフビューと
+                                      できごと UI を v0.3 で隠した — v3 §11)
+- GET /api/episodes                  (同上。エピソードの行が退役 — v3 §7)
 
 一時 DB (temp dir の file sqlite) + 一時 persona dir を使い本番に触れない。
 TestClient で HTTP 経由の検証 (クエリ検証・エラー系含む)。TestClient は
@@ -29,7 +34,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from api.deps import get_manager
-from database.models import AI, Base, Building, City, Episode, User
+from database.models import AI, Base, Building, City, User
 
 TZ_NAME = "Asia/Tokyo"
 TZ = ZoneInfo(TZ_NAME)
@@ -87,12 +92,10 @@ class LifeViewApiTest(unittest.TestCase):
             personas={"air": SimpleNamespace(sai_memory=self.adapter)},
         )
 
-        # --- TestClient (episodes + people/life ルーターのみの薄いアプリ) ---
-        from api.routes import episodes as episodes_route
+        # --- TestClient (people/life ルーターのみの薄いアプリ) ---
         from api.routes.people import life as life_route
 
         app = FastAPI()
-        app.include_router(episodes_route.router, prefix="/api/episodes")
         app.include_router(life_route.router, prefix="/api/people")
         app.dependency_overrides[get_manager] = lambda: self.manager
         self.client = TestClient(app)
@@ -134,324 +137,6 @@ class LifeViewApiTest(unittest.TestCase):
             db.commit()
         finally:
             db.close()
-
-    def _seed_episodes(self):
-        """TEST_DATE (Asia/Tokyo) の episodes を直接 INSERT する。"""
-        rows = [
-            # air: 午前のコマ実績 (closed, カフェ)
-            Episode(
-                EPISODE_ID="ep-air-1", PERSONA_ID="air", SHORT_ID=1, KIND="slot",
-                STARTED_AT=_epoch(9), ENDED_AT=_epoch(10), BUILDING_ID="cafe",
-                PARTICIPANTS_JSON=json.dumps(["air"]), ORIGIN_REF="day_plan:0",
-                STATUS="closed", META_JSON=json.dumps({"note": "詩作"}),
-            ),
-            # air / quon: 同一の世界的できごと (occurrence で束ねる会話)
-            Episode(
-                EPISODE_ID="ep-air-2", PERSONA_ID="air", SHORT_ID=2,
-                KIND="conversation", OCCURRENCE_ID="occ-1",
-                STARTED_AT=_epoch(13), ENDED_AT=_epoch(13, 30),
-                BUILDING_ID="cafe", STATUS="closed",
-            ),
-            Episode(
-                EPISODE_ID="ep-quon-1", PERSONA_ID="quon", SHORT_ID=1,
-                KIND="conversation", OCCURRENCE_ID="occ-1",
-                STARTED_AT=_epoch(13, 5), ENDED_AT=_epoch(13, 30),
-                BUILDING_ID="cafe", STATUS="closed",
-            ),
-            # air: 開きっぱなしのできごと (「いま」行。ended_at なし)
-            Episode(
-                EPISODE_ID="ep-air-3", PERSONA_ID="air", SHORT_ID=3,
-                KIND="presence", STARTED_AT=_epoch(15), ENDED_AT=None,
-                STATUS="open",
-            ),
-            # air: 前日のできごと (窓の外 → 出ない)
-            Episode(
-                EPISODE_ID="ep-air-old", PERSONA_ID="air", SHORT_ID=4,
-                KIND="stroll", STARTED_AT=_epoch(9, 0, "2026-07-05"),
-                ENDED_AT=_epoch(10, 0, "2026-07-05"), STATUS="closed",
-            ),
-            # 別 City のペルソナのできごと (city_a のタイムラインに出ない)
-            Episode(
-                EPISODE_ID="ep-stranger-1", PERSONA_ID="stranger", SHORT_ID=1,
-                KIND="slot", STARTED_AT=_epoch(9), ENDED_AT=_epoch(10),
-                STATUS="closed",
-            ),
-        ]
-        db = self.Session()
-        try:
-            db.add_all(rows)
-            db.commit()
-        finally:
-            db.close()
-
-    # ------------------------------------------------------------------
-    # A: GET /api/episodes
-    # ------------------------------------------------------------------
-
-    def test_episodes_timeline(self):
-        self._seed_episodes()
-        resp = self.client.get(
-            "/api/episodes", params={"city_id": self.city_a_id, "date": TEST_DATE},
-        )
-        self.assertEqual(resp.status_code, 200)
-        body = resp.json()
-        self.assertEqual(body["date"], TEST_DATE)
-        self.assertEqual(body["timezone"], TZ_NAME)
-        self.assertEqual(body["day_start"], _epoch(0))
-        self.assertEqual(body["day_end"], _epoch(0, 0, "2026-07-07"))
-
-        eps = body["episodes"]
-        ids = [e["episode_id"] for e in eps]
-        # 前日の行と別 City の行は出ない
-        self.assertNotIn("ep-air-old", ids)
-        self.assertNotIn("ep-stranger-1", ids)
-        self.assertEqual(set(ids), {"ep-air-1", "ep-air-2", "ep-quon-1", "ep-air-3"})
-
-        # 同一 occurrence の行は隣接する (grouping key = occurrence_id)
-        occ_positions = [i for i, e in enumerate(eps) if e["group_key"] == "occ-1"]
-        self.assertEqual(len(occ_positions), 2)
-        self.assertEqual(occ_positions[1] - occ_positions[0], 1)
-
-        by_id = {e["episode_id"]: e for e in eps}
-        # 表示名解決
-        self.assertEqual(by_id["ep-air-1"]["persona_name"], "エア")
-        self.assertEqual(by_id["ep-air-1"]["building_name"], "カフェ")
-        self.assertEqual(
-            by_id["ep-air-1"]["persona_avatar_url"],
-            "/api/static/user_icons/air.png",
-        )
-        self.assertEqual(by_id["ep-quon-1"]["persona_name"], "クオン")
-        # occurrence 無し行の group_key は episode_id (単独グループ)
-        self.assertEqual(by_id["ep-air-1"]["group_key"], "ep-air-1")
-        # open 行 (「いま」行) も返り、ended_at は None
-        self.assertEqual(by_id["ep-air-3"]["status"], "open")
-        self.assertIsNone(by_id["ep-air-3"]["ended_at"])
-        self.assertIsNone(by_id["ep-air-3"]["ended_at_iso"])
-        # epoch と ISO の両方が返る (ISO は City タイムゾーン)
-        self.assertEqual(by_id["ep-air-1"]["started_at"], _epoch(9))
-        self.assertTrue(by_id["ep-air-1"]["started_at_iso"].startswith("2026-07-06T09:00"))
-
-    def test_episodes_empty_day(self):
-        resp = self.client.get(
-            "/api/episodes", params={"city_id": self.city_a_id, "date": TEST_DATE},
-        )
-        self.assertEqual(resp.status_code, 200)
-        self.assertEqual(resp.json()["episodes"], [])
-
-    def test_episodes_invalid_params(self):
-        # 不正な日付 → 400
-        resp = self.client.get(
-            "/api/episodes", params={"city_id": self.city_a_id, "date": "07/06"},
-        )
-        self.assertEqual(resp.status_code, 400)
-        # 未知の City → 404
-        resp = self.client.get("/api/episodes", params={"city_id": 9999})
-        self.assertEqual(resp.status_code, 404)
-        # city_id 欠落 → 422 (FastAPI のクエリ検証)
-        resp = self.client.get("/api/episodes")
-        self.assertEqual(resp.status_code, 422)
-
-    # ------------------------------------------------------------------
-    # B: GET /api/people/{id}/day-plan
-    # ------------------------------------------------------------------
-
-    def test_day_plan(self):
-        from saiverse.day_plan import consume_budget, init_budget_ledger, save_day_plan
-
-        save_day_plan(self.manager, "air", TEST_DATE, [
-            {"start": "08:00", "kind": "随筆を書く", "ref": "none",
-             "facility": "own_room", "budget_rounds": 4,
-             "title": "詩を書く", "note": "朝の静けさで", "status": "done"},
-            {"start": "12:00", "kind": "出かける", "ref": "none",
-             "facility": "cafe", "budget_rounds": 0, "title": "昼を過ごす",
-             "note": "", "status": "done", "record_level": "presence_only"},
-            {"start": "15:00", "kind": "調べる", "ref": "none",
-             "facility": "cafe", "budget_rounds": 4, "title": "調べ物",
-             "note": "", "status": "skipped", "skip_reason": "budget_exhausted"},
-        ])
-        init_budget_ledger(self.manager, "air", TEST_DATE, 10)
-        consume_budget(self.manager, "air", TEST_DATE, 3)
-
-        resp = self.client.get(
-            "/api/people/air/day-plan", params={"date": TEST_DATE},
-        )
-        self.assertEqual(resp.status_code, 200)
-        body = resp.json()
-        self.assertEqual(body["persona_id"], "air")
-        self.assertEqual(body["date"], TEST_DATE)
-        self.assertEqual(body["budget"], {"total": 10, "used": 3, "remaining": 7})
-
-        slots = body["slots"]
-        self.assertEqual(len(slots), 3)
-        self.assertEqual(
-            [s["index"] for s in slots], [0, 1, 2],
-        )
-        self.assertEqual(slots[0]["start"], "08:00")
-        self.assertEqual(slots[0]["title"], "詩を書く")
-        self.assertEqual(slots[0]["status"], "done")
-        self.assertEqual(slots[0]["result_label"], "実行済み")
-        # presence_only の done は「実行済み」と偽らない
-        self.assertEqual(slots[1]["record_level"], "presence_only")
-        self.assertEqual(slots[1]["result_label"], "時間を過ごした（詳細な記録なし）")
-        # skipped はシステム都合が明示される
-        self.assertEqual(slots[2]["skip_reason"], "budget_exhausted")
-        self.assertIn("予算切れ", slots[2]["result_label"])
-
-    def test_day_plan_budget_fractional_used_returns_200(self):
-        """ライフ宣言日の予算消費は used_rounds × κ で小数になる (2026-07-18 実バグ)。
-
-        DayPlanBudget.used が int 宣言だと Pydantic の応答検証が 0.4 → int を
-        拒否して 500 になり、ライフビューの「今日の予定」が取得失敗になる。
-        """
-        from saiverse.day_plan import (
-            LIFE_ROUND_BUDGET_FACTOR,
-            consume_life_rounds,
-            save_day_plan,
-            save_lives,
-        )
-
-        save_day_plan(self.manager, "air", TEST_DATE, [
-            {"start": "08:00", "kind": "随筆を書く", "ref": "none", "facility": "own_room",
-             "budget_rounds": 4, "title": "詩を書く", "note": ""},
-        ])
-        save_lives(self.manager, "air", TEST_DATE, [
-            {"start": "07:00", "end": "12:00", "budget_pulses": 18, "mode": "free"},
-        ])
-        # air の実バグ再現: 2 ラウンド消費 → used = 2 × κ (端数)
-        consume_life_rounds(self.manager, "air", TEST_DATE, 2, at_time="08:00")
-
-        resp = self.client.get(
-            "/api/people/air/day-plan", params={"date": TEST_DATE},
-        )
-        self.assertEqual(resp.status_code, 200)
-        budget = resp.json()["budget"]
-        expected_used = 2 * LIFE_ROUND_BUDGET_FACTOR
-        self.assertAlmostEqual(budget["used"], expected_used)
-        self.assertAlmostEqual(budget["remaining"], 18 - expected_used)
-
-    def test_day_plan_empty_day(self):
-        resp = self.client.get(
-            "/api/people/air/day-plan", params={"date": "2026-01-01"},
-        )
-        self.assertEqual(resp.status_code, 200)
-        body = resp.json()
-        self.assertEqual(body["slots"], [])
-        self.assertIsNone(body["budget"])
-
-    def test_day_plan_errors(self):
-        resp = self.client.get(
-            "/api/people/air/day-plan", params={"date": "not-a-date"},
-        )
-        self.assertEqual(resp.status_code, 400)
-        resp = self.client.get("/api/people/nobody/day-plan")
-        self.assertEqual(resp.status_code, 404)
-
-    # ------------------------------------------------------------------
-    # B-2: lives / life_status (life.md §9.1/§9.2, Phase4 見せ方)
-    # ------------------------------------------------------------------
-
-    def test_day_plan_lives_and_life_status_in_life(self):
-        from saiverse import clock
-        from saiverse.day_plan import consume_life_pulse, save_day_plan, save_lives
-
-        save_day_plan(self.manager, "air", TEST_DATE, [
-            {"start": "08:00", "kind": "随筆を書く", "ref": "none", "facility": "own_room",
-             "budget_rounds": 4, "title": "詩を書く", "note": ""},
-            {"start": "15:00", "kind": "調べる", "ref": "none", "facility": "cafe",
-             "budget_rounds": 4, "title": "調べ物", "note": ""},
-        ])
-        save_lives(self.manager, "air", TEST_DATE, [
-            {"start": "07:00", "end": "12:00", "budget_pulses": 6, "mode": "free"},
-            {"start": "14:00", "end": "20:00", "budget_pulses": 8, "mode": "free"},
-        ])
-        consume_life_pulse(self.manager, "air", TEST_DATE, at_time="08:00")
-
-        clock.enable_virtual(datetime(2026, 7, 6, 9, 30))  # ライフ0の区間内
-        try:
-            resp = self.client.get(
-                "/api/people/air/day-plan", params={"date": TEST_DATE},
-            )
-        finally:
-            clock.disable_virtual()
-        self.assertEqual(resp.status_code, 200)
-        body = resp.json()
-
-        lives = body["lives"]
-        self.assertEqual(len(lives), 2)
-        self.assertEqual(lives[0]["start"], "07:00")
-        self.assertEqual(lives[0]["end"], "12:00")
-        self.assertEqual(lives[0]["mode"], "free")
-        self.assertEqual(lives[0]["budget_pulses"], 6)
-        self.assertEqual(lives[0]["used_pulses"], 1)
-        self.assertEqual(lives[0]["used_rounds"], 0)
-        self.assertEqual(lives[0]["consumed"], 1.0)
-        self.assertEqual(lives[0]["remaining"], 5.0)
-
-        self.assertEqual(body["life_status"], {
-            "lives_declared": True, "in_life": True, "life_index": 0,
-        })
-
-    def test_day_plan_life_status_in_valley(self):
-        from saiverse import clock
-        from saiverse.day_plan import save_day_plan, save_lives
-
-        save_day_plan(self.manager, "air", TEST_DATE, [
-            {"start": "08:00", "kind": "随筆を書く", "ref": "none", "facility": "own_room",
-             "budget_rounds": 4, "title": "詩を書く", "note": ""},
-            {"start": "15:00", "kind": "調べる", "ref": "none", "facility": "cafe",
-             "budget_rounds": 4, "title": "調べ物", "note": ""},
-        ])
-        save_lives(self.manager, "air", TEST_DATE, [
-            {"start": "07:00", "end": "12:00", "budget_pulses": 6, "mode": "free"},
-            {"start": "14:00", "end": "20:00", "budget_pulses": 8, "mode": "free"},
-        ])
-
-        clock.enable_virtual(datetime(2026, 7, 6, 13, 0))  # 二つのライフの間 (谷)
-        try:
-            resp = self.client.get(
-                "/api/people/air/day-plan", params={"date": TEST_DATE},
-            )
-        finally:
-            clock.disable_virtual()
-        self.assertEqual(resp.status_code, 200)
-        body = resp.json()
-        self.assertEqual(len(body["lives"]), 2)
-        # 谷 = 宣言はあるが in_life=False (「未宣言」とは区別される)
-        self.assertEqual(body["life_status"], {
-            "lives_declared": True, "in_life": False, "life_index": None,
-        })
-
-    def test_day_plan_life_status_undeclared(self):
-        """lives 未宣言の日は lives_declared=False (life_status 自体は省略しない)。"""
-        from saiverse import clock
-
-        clock.enable_virtual(datetime(2026, 7, 6, 9, 30))
-        try:
-            resp = self.client.get(
-                "/api/people/air/day-plan", params={"date": TEST_DATE},
-            )
-        finally:
-            clock.disable_virtual()
-        self.assertEqual(resp.status_code, 200)
-        body = resp.json()
-        self.assertEqual(body["lives"], [])
-        self.assertEqual(body["life_status"], {
-            "lives_declared": False, "in_life": False, "life_index": None,
-        })
-
-    def test_day_plan_life_status_none_for_non_current_date(self):
-        """過去日を眺めているときは life_status 自体を返さない (嘘の「いま」を出さない)。"""
-        from saiverse import clock
-
-        clock.enable_virtual(datetime(2026, 7, 6, 9, 30))  # 「いま」= 2026-07-06
-        try:
-            resp = self.client.get(
-                "/api/people/air/day-plan", params={"date": "2026-01-01"},
-            )
-        finally:
-            clock.disable_virtual()
-        self.assertEqual(resp.status_code, 200)
-        self.assertIsNone(resp.json()["life_status"])
 
     # ------------------------------------------------------------------
     # C: GET /api/people/{id}/clips
@@ -513,13 +198,22 @@ class LifeViewApiTest(unittest.TestCase):
         self.assertEqual(resp.status_code, 404)
 
     # ------------------------------------------------------------------
-    # D: GET /api/people/{id}/profile-tree は 2026-08-21 に退役した
-    #    (目的の木が概念ごと消滅 — autonomous_behavior_v3.md §9-5)
+    # 退役したルートの 404 (消し忘れの回帰)
     # ------------------------------------------------------------------
 
-    def test_profile_tree_route_is_gone(self):
-        resp = self.client.get("/api/people/air/profile-tree")
-        self.assertEqual(resp.status_code, 404)
+    def test_retired_routes_are_gone(self):
+        """profile-tree / day-plan / episodes はもうどこにも生えていない。
+
+        いずれも供給する概念か読み手ごと退役した (docstring の一覧を参照)。
+        ルートだけが生き残ると、動かない画面が「壊れている」顔で残る。
+        """
+        for path in (
+            "/api/people/air/profile-tree",
+            "/api/people/air/day-plan",
+            "/api/episodes",
+        ):
+            with self.subTest(path=path):
+                self.assertEqual(self.client.get(path).status_code, 404)
 
 
 if __name__ == "__main__":

@@ -970,39 +970,15 @@ def build_on_event_situation_text(
     # (2026-07-29 修正。同じ漏れの実害は起動時タイマー再確立の側で観測済み)。
     # 判定は day_plan.is_in_user_conversation に一本化する — 二つ目の実装を作らない。
     #
-    # 会話以外の活動も同じ正典で読む: 開いている出来事 (会話以外の kind) が
-    # あれば「取り組んでいます」。旧実装は running Track の題を読んでいたが、
-    # 案 Y 以降の残留 running が嘘の源だった (track_retirement.md §7.4 で付け替え)。
-    # 会話以外の open は専用クエリで引く — 「最後に開いた 1 件」を見る読み方だと、
-    # 会話が作業より後に開いた並びで作業が見えず「手すきです」と嘘をつく
-    # (仲裁するかの判定と同じ集合を読む: get_open_non_conversation_episode)。
+    # 会話以外の活動は、束 6c (2026-08-22) で供給源ごと消えた —— 出来事の書き手が
+    # 全滅したので (v3 §7)、「いま何に取り組んでいるか」を答えられる器が v0.3 には
+    # 無い。判定 (仲裁) と提示 (ここ) は同じ集合から引くという不変条件はそのまま
+    # で、集合が空になった: 仲裁側の
+    # ``user_conversation._get_open_non_conversation_episode`` も常に None を返す。
+    # 器の作り直しは v0.4 のティック設計 (v3 §9-3)。
     activity = "手すきです。"
     if is_in_user_conversation(manager, persona_id):
         activity = "ユーザーと会話中です。"
-    else:
-        try:
-            from saiverse import episodes
-
-            open_ep = episodes.get_open_non_conversation_episode(manager, persona_id)
-        except Exception:
-            LOGGER.warning(
-                "[judgment] get_open_non_conversation_episode failed for %s",
-                persona_id, exc_info=True,
-            )
-            open_ep = None
-        if open_ep is not None:
-            meta = open_ep.get("meta") or {}
-            title = meta.get("title") if isinstance(meta, dict) else None
-            if title:
-                activity = f"「{title}」に取り組んでいます。"
-            else:
-                kind_label = {
-                    "work_session": "作業セッション",
-                    "slot": "時間割のコマ",
-                    "presence": "在室",
-                    "stroll": "散策",
-                }.get(str(open_ep.get("kind") or ""), "別の活動")
-                activity = f"{kind_label}の最中です。"
 
     parts = [
         "[イベント到着判断]",
@@ -1376,8 +1352,11 @@ def build_judgment_args(
         ws_extra = _ws_get(sr, "extra", None)
         if isinstance(ws_extra, dict) and ws_extra:
             judgment_context["ws_meta"]["extra"] = dict(ws_extra)
-        # episode_ref は shelving に関係なく載せる (digest 配送の set_digest_ref
-        # と RESULT_JSON が読む)。purpose_refs は shelving 時のみ。
+        # episode_ref は shelving に関係なく載せる (RESULT_JSON が読む)。
+        # purpose_refs は shelving 時のみ。
+        # ⚠ 束 6c (2026-08-22) で作業セッションが出来事を開かなくなったので
+        # (v3 §7)、episode_ref は実質いつも None。digest 配送の set_digest_ref も
+        # 同便で退役した。旧データを持つ環境からの値だけがここを通る。
         if episode_ref:
             judgment_context["episode_ref"] = str(episode_ref)
         if shelving:

@@ -205,10 +205,6 @@ def run_startup_recovery(manager: "SAIVerseManager") -> None:
     except Exception:
         LOGGER.exception("[ledger-wiring] startup slot.fire settle-close failed")
     try:
-        _close_orphaned_unknown_slot_episodes(manager)
-    except Exception:
-        LOGGER.exception("[ledger-wiring] startup orphaned-episode close failed")
-    try:
         # applied 残留の照合掃除 (W3 Codex 第七陣 — tick と同じ)。
         ledger.sweep_applied()
     except Exception:
@@ -243,10 +239,6 @@ def _recovery_tick(manager: "SAIVerseManager") -> None:
         _collect_stale_slot_executions(manager)
     except Exception:
         LOGGER.exception("[ledger-wiring] recovery tick: slot.fire settle-close failed")
-    try:
-        _close_orphaned_unknown_slot_episodes(manager)
-    except Exception:
-        LOGGER.exception("[ledger-wiring] recovery tick: orphaned-episode close failed")
     try:
         ledger.recover_stale_running(
             max_age_seconds=RUNNING_DEADLINE_SECONDS,
@@ -336,8 +328,8 @@ def _settle_one_stale_slot(manager: "SAIVerseManager", row: Dict[str, Any]) -> N
     再構成して開いている出来事を逆引きし、:func:`saiverse.day_plan.settle_stale_slot`
     に委ねる (episode close + slot done + 台帳 applied/completed、予算は予約額のまま)。
     """
-    # 遅延 import (wiring は day_plan / episodes から独立に import され得る)。
-    from saiverse import day_plan, episodes
+    # 遅延 import (wiring は day_plan から独立に import され得る)。
+    from saiverse import day_plan
 
     ledger = manager.execution_ledger
     execution_id = row.get("execution_id")
@@ -367,69 +359,12 @@ def _settle_one_stale_slot(manager: "SAIVerseManager", row: Dict[str, Any]) -> N
     # slot_id (不変 ID) は精算対象コマの特定に使う。この修正より前の payload には
     # 無い (None) — その場合 settle 側は done 書き込みを省いて episode/台帳だけ締める。
     slot_id = payload.get("slot_id")
-    origin_ref = day_plan._slot_origin_ref(persona_id, plan_date, index)
-    open_ep = episodes.get_open_episode_by_origin(manager, persona_id, origin_ref)
-    episode_ref = open_ep.get("episode_ref") if open_ep else None
+    # episode_ref は束 6c (2026-08-22) で常に None — 出来事の書き手が退役した
+    # (v3 §7) ので、逆引きすべき open な行がそもそも生まれない。
     day_plan.settle_stale_slot(
         manager, ledger, execution_id, persona_id, plan_date, index, slot_id,
-        episode_ref,
+        None,
     )
-
-
-def _close_orphaned_unknown_slot_episodes(manager: "SAIVerseManager") -> None:
-    """回復: handler 例外 + episode close 失敗が重なって unknown へ進んだ slot.fire の
-    孤児 open episode を閉じる (A6 の handler 例外経路、Codex 指摘)。
-
-    handler 例外経路は best-effort で episode を閉じてから ``mark_unknown`` する。
-    close が失敗すると episode が open のまま unknown へ進むが、settle-close
-    (:func:`_collect_stale_slot_executions`) は **running のみ** 対象なので拾えない。
-    ここは episode を閉じるだけ — slot は fired のまま (handler は失敗しており done
-    ではない)、台帳も unknown のまま (LLM が動いたか不明の照合対象)。孤児 episode を
-    解消して後続記録の誤帰属を止めるのが目的。
-
-    open episode が既に無ければ no-op なので冪等 (二度目以降の tick は空振り)。
-    個別の例外は tick を殺さない。
-    """
-    ledger = manager.execution_ledger
-    try:
-        rows = ledger.list_unknown()
-    except Exception:
-        LOGGER.exception("[ledger-wiring] failed to list unknown executions")
-        return
-    from saiverse import day_plan, episodes
-
-    for row in rows:
-        if row.get("kind") != SLOT_FIRE_KIND:
-            continue
-        payload = row.get("payload")
-        if not isinstance(payload, dict):
-            continue
-        persona_id = payload.get("persona_id")
-        plan_date = payload.get("plan_date")
-        index = payload.get("index")
-        if (
-            not persona_id
-            or not plan_date
-            or not isinstance(index, int)
-            or isinstance(index, bool)
-        ):
-            continue
-        try:
-            origin_ref = day_plan._slot_origin_ref(persona_id, plan_date, index)
-            open_ep = episodes.get_open_episode_by_origin(manager, persona_id, origin_ref)
-            if not open_ep:
-                continue
-            episodes.close_episode(manager, persona_id, open_ep["episode_ref"])
-            LOGGER.info(
-                "[ledger-wiring] closed orphaned episode %s for unknown slot.fire "
-                "(execution=%s persona=%s)",
-                open_ep.get("episode_ref"), row.get("execution_id"), persona_id,
-            )
-        except Exception:
-            LOGGER.exception(
-                "[ledger-wiring] failed to close orphaned episode for unknown "
-                "slot.fire (execution=%s)", row.get("execution_id"),
-            )
 
 
 def _refire_first_attempts(manager: "SAIVerseManager") -> Dict[str, int]:
@@ -962,14 +897,13 @@ def _make_saimemory_append_digest_handler(
     """target='saimemory.append_digest' — 作業セッション digest の配送 (D9-5)。
 
     payload 契約 (積む側 = judgment_finalize の post_session):
-        {"message": {...DIGEST_TAG / main_line / committed のダイジェスト行...},
-         "episode_ref": str | None}
+        {"message": {...DIGEST_TAG / main_line / committed のダイジェスト行...}}
     冪等 append (adapter.append_ledger_message — 再配送は既存 message id を
-    返す) の後、``episodes.set_digest_ref`` で出来事の再訪の鍵
-    (``message:{id}``) を確定する。set_digest_ref も冪等 (同値 no-op / 別値は
-    WARN + 非上書き) なので、append 済み→digest_ref 前のクラッシュ再配送でも
-    二重にならない。set_digest_ref の失敗は例外 = 配送失敗 (pending 残存 →
-    次 tick / 関所が引き継ぐ)。
+    返す) だけを行う。
+
+    ⚠ 束 6c (2026-08-22) で ``episodes.set_digest_ref`` による「出来事へ再訪の鍵を
+    刻む」後段が消えた — エピソードという専用の記録行を持たなくなったため
+    (v3 §7)。payload の ``episode_ref`` は旧世代の残留分だけで、読まない。
     """
     def handler(item: Dict[str, Any]) -> None:
         payload = item.get("payload")
@@ -982,20 +916,13 @@ def _make_saimemory_append_digest_handler(
             )
         persona_id = item.get("persona_id")
         adapter = _resolve_adapter(manager, persona_id)
-        mid = adapter.append_ledger_message(
+        adapter.append_ledger_message(
             message,
             execution_id=item["execution_id"],
             outbox_id=item["outbox_id"],
             building_id=None,
             thread_suffix=None,
         )
-        episode_ref = payload.get("episode_ref")
-        if episode_ref:
-            from saiverse import episodes
-
-            episodes.set_digest_ref(
-                manager, persona_id, str(episode_ref), f"message:{mid}"
-            )
     return handler
 
 

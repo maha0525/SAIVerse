@@ -103,9 +103,15 @@ PROVIDER_CONFIG = [
 ]
 
 # Provider to env key mapping
+#
+# ⚠ ここに書いてよいのは、**LLM クライアントが実際に読む**環境変数だけ。合わない
+# 名前を並べると「設定済み」と表示されたあと実行時に鍵なしで落ちる — 案内の側が
+# 嘘をつく形になる。anthropic は 2026-08-22 に ``ANTHROPIC_API_KEY`` を外した:
+# builtin_data/providers/anthropic.json も llm_clients/anthropic.py も
+# ``CLAUDE_API_KEY`` しか見ていないため。
 PROVIDER_ENV_KEYS = {
     "openai": ["OPENAI_API_KEY"],
-    "anthropic": ["ANTHROPIC_API_KEY", "CLAUDE_API_KEY"],
+    "anthropic": ["CLAUDE_API_KEY"],
     "gemini": ["GEMINI_API_KEY", "GEMINI_FREE_API_KEY"],
     "ollama": [],  # Local, always available
     "llama_cpp": [],  # Local, always available

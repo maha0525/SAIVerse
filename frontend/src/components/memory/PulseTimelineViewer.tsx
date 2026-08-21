@@ -1,7 +1,9 @@
 import { useState, useEffect, useCallback } from 'react';
 
 // Pulse タイムライン: SAIMemory messages を pulse_id でグルーピングして
-// 自律 Track の動作を可視化する。設計: docs/intent/persona_cognition/debug_controller.md
+// Pulse ごとの動作を可視化する。設計: docs/intent/persona_cognition/debug_controller.md
+// ⚠ Track の題・種別・連番の表示欄は束 6c (2026-08-22) で撤去した — 書き手が
+// 退役して常に空だったため (docs/intent/track_retirement.md §8.6)。
 
 interface Props {
     personaId: string;
@@ -9,10 +11,6 @@ interface Props {
 
 interface PulseItem {
     pulse_id: string;
-    track_id: string | null;
-    track_title: string | null;
-    track_type: string | null;
-    track_seq: number | null;
     line_roles: string[];
     message_count: number;
     first_created_at: number | null;
@@ -229,15 +227,6 @@ export default function PulseTimelineViewer({ personaId }: Props) {
                 <div key={p.pulse_id} style={cardStyle}>
                     <div style={headerStyle} onClick={() => toggle(p.pulse_id)}>
                         <span style={{ color: '#888', fontSize: '0.75rem' }}>{fmtTime(p.last_created_at)}</span>
-                        <span style={{ fontWeight: 600 }}>
-                            {p.track_title || '(no track)'}
-                            {p.track_type ? ` (${p.track_type})` : ''}
-                        </span>
-                        {p.track_seq != null && (
-                            <span style={{ background: 'rgba(255,255,255,0.1)', padding: '1px 6px', borderRadius: '8px', fontSize: '0.75rem' }}>
-                                #{p.track_seq}
-                            </span>
-                        )}
                         {p.line_roles.map((lr) => (
                             <span
                                 key={lr}

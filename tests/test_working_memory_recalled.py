@@ -29,15 +29,10 @@ class TestRecalledIds(unittest.TestCase):
     def tearDown(self):
         self.conn.close()
 
-    def _make_ready(self):
-        type(self.adapter)._ready = property(lambda self: True)
-
     def test_get_recalled_ids_empty(self):
-        self._make_ready()
         self.assertEqual(self.adapter.get_recalled_ids(), [])
 
     def test_add_recalled_id(self):
-        self._make_ready()
         self.adapter.add_recalled_id("chronicle", "entry_1", "Test Entry", "uri://1")
         ids = self.adapter.get_recalled_ids()
         self.assertEqual(len(ids), 1)
@@ -46,7 +41,6 @@ class TestRecalledIds(unittest.TestCase):
         self.assertIn("recalled_at", ids[0])
 
     def test_add_duplicate_refreshes_position(self):
-        self._make_ready()
         self.adapter.add_recalled_id("chronicle", "entry_1", "First", "uri://1")
         self.adapter.add_recalled_id("memopedia", "page_1", "Second", "uri://2")
         self.adapter.add_recalled_id("chronicle", "entry_1", "First Updated", "uri://1")
@@ -57,7 +51,6 @@ class TestRecalledIds(unittest.TestCase):
         self.assertEqual(ids[1]["title"], "First Updated")
 
     def test_fifo_eviction(self):
-        self._make_ready()
         for i in range(12):
             self.adapter.add_recalled_id("chronicle", f"entry_{i}", f"E{i}", f"uri://{i}")
         ids = self.adapter.get_recalled_ids()
@@ -69,7 +62,6 @@ class TestRecalledIds(unittest.TestCase):
         self.assertIn("entry_11", remaining)
 
     def test_remove_recalled_id(self):
-        self._make_ready()
         self.adapter.add_recalled_id("chronicle", "entry_1", "Test", "uri://1")
         self.adapter.add_recalled_id("memopedia", "page_1", "Test2", "uri://2")
         self.assertTrue(self.adapter.remove_recalled_id("entry_1"))
@@ -78,22 +70,24 @@ class TestRecalledIds(unittest.TestCase):
         self.assertEqual(ids[0]["id"], "page_1")
 
     def test_remove_nonexistent_returns_false(self):
-        self._make_ready()
         self.assertFalse(self.adapter.remove_recalled_id("nonexistent"))
 
     def test_clear_recalled_ids(self):
-        self._make_ready()
         self.adapter.add_recalled_id("chronicle", "entry_1", "Test", "uri://1")
         self.adapter.add_recalled_id("memopedia", "page_1", "Test2", "uri://2")
         self.assertEqual(self.adapter.clear_recalled_ids(), 2)
         self.assertEqual(self.adapter.get_recalled_ids(), [])
 
     def test_clear_empty_returns_zero(self):
-        self._make_ready()
         self.assertEqual(self.adapter.clear_recalled_ids(), 0)
 
     def test_not_ready_returns_defaults(self):
-        type(self.adapter)._ready = property(lambda self: False)
+        # 未 ready は「接続が無い」という実際の姿で作る。以前はここで
+        # ``type(self.adapter)._ready = property(...)`` と本番クラスを書き換えて
+        # いたが、戻さないためプロセス寿命で漏れ、同一 xdist ワーカーに載った
+        # 他ファイル (test_execution_ledger_wiring.py の未 ready 検査) が
+        # is_ready() の patch を効かせられなくなっていた。
+        self.adapter.conn = None
         self.assertEqual(self.adapter.get_recalled_ids(), [])
         self.adapter.add_recalled_id("chronicle", "entry_1", "Test", "uri://1")
         self.assertEqual(self.adapter.get_recalled_ids(), [])
@@ -101,7 +95,6 @@ class TestRecalledIds(unittest.TestCase):
         self.assertEqual(self.adapter.clear_recalled_ids(), 0)
 
     def test_preserves_other_working_memory_keys(self):
-        self._make_ready()
         wm = {"situation_snapshot": {"building": "hall_1"}, "custom_key": 42}
         self.adapter.save_working_memory(wm)
         self.adapter.add_recalled_id("chronicle", "entry_1", "Test", "uri://1")

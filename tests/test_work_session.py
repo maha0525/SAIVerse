@@ -457,35 +457,13 @@ def test_malformed_args_fed_back_and_retried(session_factory, persona):
     )
 
 
-def test_episode_closed_with_null_digest_ref(session_factory, persona):
-    """出来事は digest_ref=None で閉じる (D9-1)。
-
-    digest_ref は後段の配送 handler (saimemory.append_digest →
-    episodes.set_digest_ref) が確定する — セッション終了時点では NULL が正
-    (「適用済み・記録待ち」の観測可能状態)。
-    """
-    from database.models import Episode
-
-    responses = [
-        _spell_line("草稿"),
-        "終わり。",
-    ]
-    manager, runtime, client = _make_env(session_factory, persona, responses)
-    created_ids: List[str] = []
-    p_names, p_exec = _patched_spell_env(session_factory, created_ids)
-
-    with p_names, p_exec:
-        result = _run(manager, budget=3)
-
-    assert result.episode_ref, "セッションの出来事が開かれているはず"
-    db = session_factory()
-    try:
-        ep = db.query(Episode).filter(Episode.PERSONA_ID == "p1").first()
-        assert ep is not None
-        assert ep.STATUS == "closed"
-        assert ep.DIGEST_REF is None
-    finally:
-        db.close()
+# test_episode_closed_with_null_digest_ref は削除 (2026-08-22、束 6c /
+# autonomous_behavior_v3.md §7): 作業セッションが出来事行を開いて閉じ、
+# 再訪の鍵 (digest_ref) を後段の配送 handler が確定する、という段取り自体が
+# 退役した。エピソードという専用の記録行を持たなくなり (`_open_ws_episode` /
+# `_close_ws_episode` は None を返す空の残骸)、セッションの記録は Chronicle
+# エントリと台帳が持つ。行が作られないことは
+# test_life_profile_no_episode_and_permissive_instruction が見ている。
 
 
 def test_error_returns_error_result(session_factory, persona, caplog):

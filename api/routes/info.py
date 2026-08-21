@@ -117,51 +117,17 @@ def get_building_details(building_id: Optional[str] = None, manager = Depends(ge
                 persona = manager.personas[oid]
                 avatar = avatar_path_to_url(persona.avatar_image)
 
-                # ライフビューの常在インジケータ: running な自律 Track があれば
-                # その title/intent から短い活動ラベルを作る (LLM 不要のテンプレート整形、
-                # persona_activity_view.md §4.2)。
-                activity_label = None
-                try:
-                    from saiverse.activity_view import build_activity_label
-                    from saiverse.track_manager import STATUS_RUNNING
-                    tm = getattr(manager, "track_manager", None)
-                    if tm is not None:
-                        for track in tm.list_for_persona(oid, statuses=[STATUS_RUNNING]):
-                            if track.track_type == "autonomous":
-                                activity_label = build_activity_label(track.title, track.intent)
-                                break
-                except Exception:
-                    LOGGER.warning(
-                        "[info] Failed to build activity label for %s", oid, exc_info=True,
-                    )
-
-                # 「話しかけやすさ」表示 (life.md §9.1): 既存の occupants ポーリング
-                # (10 秒) に相乗りし、新しい高頻度ポーリングは作らない。
-                life_state = None
-                life_until = None
-                try:
-                    from saiverse.day_plan import get_life_status_now
-                    status = get_life_status_now(manager, oid)
-                    if status["lives_declared"]:
-                        if status["in_life"]:
-                            life_state = "in_life"
-                            life = status.get("life") or {}
-                            life_until = life.get("end")
-                        else:
-                            life_state = "valley"
-                except Exception:
-                    LOGGER.warning(
-                        "[info] Failed to compute life state for %s", oid, exc_info=True,
-                    )
-
+                # ⚠ 暮らし系の欄 (activity_label / life_state / life_until) は
+                # 束 6c (2026-08-22) で撤去した。供給源だった running 自律 Track は
+                # Track ランタイムの退役で書き手ごと消え (track_retirement.md §8.6)、
+                # 「話しかけやすさ」の読み手 (RightSidebar のチップ) は v0.3 で
+                # 隠した (autonomous_behavior_v3.md §11「運転 UI は隠す」)。
+                # 作り直しは v0.4 の「暮らしの窓」(v3 §9-9)。
                 occupants_list.append({
                     "id": oid,
                     "name": persona.persona_name,
                     "avatar": avatar,
                     "autonomy_enabled": getattr(persona, "autonomy_enabled", None),
-                    "activity_label": activity_label,
-                    "life_state": life_state,
-                    "life_until": life_until,
                 })
             elif oid == user_id_str:
                 # SAIVerse は現状単一ユーザー (USERID=1) 想定なので

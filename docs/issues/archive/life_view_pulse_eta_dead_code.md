@@ -1,6 +1,6 @@
 # Issue: ライフビュー「いま」節の次パルス ETA が常に 0（last_pulse_at が誰にも書かれていない）
 
-**ステータス**: 🔲 未着手（2026-08-18 実態確認 — 書き手は今も不在。解決は Track 撤廃の撤去順序 ⑥ で行う。下の「現況」参照）
+**ステータス**: ✅ 解決（2026-08-22、束 6c — 表示ごと退役）
 **優先度**: low
 **作成日**: 2026-07-14
 **関連**: `saiverse/activity_view.py` の `resolve_autonomous_pulse_interval` / `last_pulse_at` 参照
@@ -18,3 +18,17 @@ v2 の駆動は時間割・判断点ベースで「次パルスの ETA」とい�
 **閉じられない。書き手はいまも存在しない。** リポジトリ全体を検索したところ、`last_pulse_at` に触れるコードは読み手 1 箇所（`api/routes/people/activity.py:466`）と、`scripts/debug_track.py` のコメント内の言及だけだった。書き込みは Python 側のどこにも無い（`metadata[...] = ...` 形の代入も併せて確認した）。表示側も生きていて、`frontend/src/components/LifeView.tsx:257` が「次の行動まで …」を今も描画している。読み手のコードには「まだ一度も Pulse が走っていない → 次の poll で発火する」というコメントと共に `eta = 0` へ倒す分岐があるため、ユーザーには常に 0 が見える。
 
 **解決の場所**: この ETA は running な autonomous Track の metadata を読む UI/API なので、[Track 撤廃](../intent/track_retirement.md) の撤去順序 ⑥「UI・API の貼り替え」（住人 9）で必ず触る箇所にあたる。表示ごと退役させるか、次のコマ・次の判断点の予定表示へ置き換えるかは、そこで貼り替えと同時に決める。同 doc の順序 ⑥ からも本 issue を参照するようにした（2026-08-18）。
+
+## 解決（2026-08-22、v0.3.0 の門 束 6c）
+
+**表示ごと退役した。** 読み手 (`api/routes/people/activity.py`)・支えていた純ロジック
+(`saiverse/activity_view.py`)・描画側 (`frontend/src/components/LifeView.tsx`) を
+すべて削除した。自律行動の**運転**を v0.3 のリリース要件から外し、運転 UI を隠す
+裁定 ([autonomous_behavior_v3.md](../intent/autonomous_behavior_v3.md) §11) に
+まとめて含まれた形。
+
+置き換え先の設計を今決めなかったのは、v3 §9-9 が観察面そのものを再定義したため —
+ライフビューは「機械の運転席」から「暮らしの窓」へ世代交代し、そこに何を出すかは
+v0.4 の工事で決まる。**「次の行動まで …」という問い自体が v3 では形を変える**
+(ティックは間隔で来るので、次の一手までの時間は T から機械的に分かる)。
+
