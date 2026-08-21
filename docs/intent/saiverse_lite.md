@@ -69,6 +69,12 @@ Lite はそのための、スマホ単体で完結する軽量アプリである
 ### v1.x（順次）
 - 埋め込みによる意味想起（transformers.js + multilingual-e5-small =
   本体 SAIMemory と同モデルを WASM で端末内実行）
+- **端末内モデル**: 鍵も通信も要らない選択肢として、Gemma 4 E2B / E4B を
+  ブラウザの WebGPU で動かす。BYOK とは別の柱で、「API キーを持たない人」と
+  「会話を一切外へ出したくない人」の両方への入口になる。
+  設計と実測は Lite リポジトリの `docs/gemma4_on_device.md`
+  （2026-08-21 に provider・UI まで実装し、PC ブラウザでの会話を確認。
+  残 = 端末保存（OPFS）とスマホ実機）
 - TTS / 画像添付 / 通知
 
 ### v2
