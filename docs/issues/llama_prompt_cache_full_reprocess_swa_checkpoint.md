@@ -2,7 +2,7 @@
 
 **状態**: 未解決 (2026-08-07 起票)。**道を決める前の調査段階** — 有力そうな案はあるが、採否を決めるだけの材料がまだ無い。
 
-関連: [`llm_clients/llama_cache.py`](../../llm_clients/llama_cache.py) / fork = `temp/llama-fork` (branch `codex/turboquant-multimodal-slot-save`) / 同ファイルの別欠陥 = [`llama_cache_control_requests_unauthenticated.md`](llama_cache_control_requests_unauthenticated.md), [`llama_cached_client_state_delegation_missing.md`](llama_cached_client_state_delegation_missing.md)
+関連: [`llm_clients/llama_cache.py`](../../llm_clients/llama_cache.py) / fork = `temp/llama-fork` (branch `saiverse/main`) / 同ファイルの別欠陥 = [`llama_cache_control_requests_unauthenticated.md`](llama_cache_control_requests_unauthenticated.md), [`llama_cached_client_state_delegation_missing.md`](llama_cached_client_state_delegation_missing.md)
 
 ## 現象
 
@@ -97,8 +97,8 @@ llama.cpp には**文脈チェックポイント** (context checkpoint) があ�
 
 ## 関連リソース
 
-- fork: `temp/llama-fork` (`origin = maha0525/llama.cpp`, 土台は TurboQuant)
-- slot cache 実装: commit `c8e7584a9 feat: add multimodal slot cache to TurboQuant`
+- fork: `temp/llama-fork` (`origin = maha0525/llama.cpp`, 土台は TurboQuant)。主線は `saiverse/main` 固定。
+- slot cache 実装: 主線の先頭付近にある commit `feat: add multimodal slot cache to TurboQuant`。TurboQuant を取り込むたび rebase するのでコミットハッシュは変わる。ここにハッシュを書かないこと。
 - 起動設定: `temp/llama-fork/build/bin/Release/start_gemma4_31B_abliterated.bat`
 - モデル設定: `~/.saiverse/user_data/models/llama-cpp-cuda-gemma4-31b-abliterated.json`
 - 実測ログ: `~/.saiverse/user_data/logs/20260806_155519/` (`llama_server_8088.log`, `llm_io.log` の 2515 / 2517 行目)

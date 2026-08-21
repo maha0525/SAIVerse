@@ -1,6 +1,6 @@
 # Intent Document: llama.cpp multimodal slot save/restore 実装 (SAIVerse 専用 fork)
 
-> **Scope**: 本ドキュメントは SAIVerse 本体ではなく、SAIVerse が依存する `ggml-org/llama.cpp` のマルチモーダル KV キャッシュ永続化対応の設計を記す。原実装は `temp/llama-fork/` (fork: `maha0525/llama.cpp`、ブランチ: `feature/multimodal-slot-save`) にあり、2026-07-23 に `TheTom/llama-cpp-turboquant` の `feature/turboquant-kv-cache` を基底とする `codex/turboquant-multimodal-slot-save` へ移植した。upstream への PR は当面投げない（§2-5 参照）。
+> **Scope**: 本ドキュメントは SAIVerse 本体ではなく、SAIVerse が依存する `ggml-org/llama.cpp` のマルチモーダル KV キャッシュ永続化対応の設計を記す。実装は `temp/llama-fork/` (fork: `maha0525/llama.cpp`) の主線ブランチ **`saiverse/main`** にある。upstream への PR は当面投げない（§2-5 参照）。ブランチ運用は §13 を参照。
 
 ## 0. 現在の実装状態 (2026-07-23)
 
@@ -332,3 +332,37 @@ fork ビルドの `llama-server.exe` で SAIVerse を起動し、画像入りペ
 そのため当面 upstream PR は投げず、SAIVerse 用 fork を公開する形を取る。将来 upstream に提案する場合は、まはーが llama.cpp 内部を学習した上で**書き直す**（または別のコントリビュータが興味を持ったタイミングで託す）。
 
 この判断は 2026-05-11 に確定。
+
+## 13. fork の運用 (2026-08-22 確立)
+
+### ブランチは固定名の一本
+
+主線は **`saiverse/main`** だけ。名前に日付もハッシュも入れない。TurboQuant (`TheTom/llama-cpp-turboquant` の `feature/turboquant-kv-cache`) を取り込むときは、このブランチを rebase する。ブランチ名は変えない。
+
+時点は名前ではなくタグで残す。
+
+- `base/turboquant-<取り込み日>-<TurboQuant 側の短縮ハッシュ>` — どの時点の TurboQuant を土台にしたか
+- `backup/pre-rebase-<日付>` — rebase 直前の状態。取り込みに失敗したときの戻り先
+
+健全性の目安は「TurboQuant の主線 + 自作コミット2個」であること。`git rev-list --left-right --count turboquant/feature/turboquant-kv-cache...saiverse/main` が `0 2` を返せば正常で、左が 0 でなければ取り込み漏れ、右が増えていれば差分が育っている。
+
+**docs にコミットハッシュを書かない。** rebase のたびに必ず変わる。指すときはブランチ名とコミット題名で指す。
+
+なぜこうしたか: 2026-08-11 まで `update/turboquant-<日付>` という命名だったため、取り込みのたびにブランチ名が変わり、docs の参照が毎回腐っていた。実際この intent と `docs/issues/llama_prompt_cache_full_reprocess_swa_checkpoint.md` は、どちらも既に使われていないブランチ名と rebase 前のコミットハッシュを指していた。
+
+### GitHub 上の「fork 元」表示は付け替えない
+
+`maha0525/llama.cpp` は GitHub 上では `ggml-org/llama.cpp` からの fork として登録されているが、中身は TurboQuant の系統で、本家とは 144 コミット離れている (2026-08-22 時点)。この表示は実態と食い違うが、付け替えない。
+
+fork 元の表示が実務で効くのは PR の送り先が既定になることだけで、upstream にも TurboQuant にも PR を投げない方針 (§12) では効く場面がない。一方で付け替えれば既存のブランチ・タグ・issue の履歴を失う。デフォルトブランチを `master` から `saiverse/main` に変えたことで、リポジトリを開いたときに実態が見えるようにはなっている。
+
+### upstream の動向 (2026-08-22 時点)
+
+upstream が multimodal の slot save/restore に近い変更を二つ入れた。**どちらも本 fork を不要にはしない。**
+
+1. `server : allow text-only slot save/restore with mtmd (#25076)` — 旧 `check_no_mtmd()` が `check_slot_no_media()` に置き換わり、`--mmproj` 付きで起動していても**その会話に画像や音声が入っていなければ** save/restore を許すようになった。画像が入った会話は今も拒否される。save ハンドラも `get_text_tokens()` しか保存しない。§1 に書いた「テキスト専用ペルソナだけを救う対応では意味がない」がそのまま当てはまる。
+2. `mtmd: add chunk save/load function (#26645)` — `mtmd_input_chunk_save()` / `mtmd_input_chunk_load()` が mtmd 層に入った。ただし server 側とは接続されておらず、slot save/restore ハンドラからは呼ばれていない。
+
+2 は本 fork の `mtmd_input_chunk_serialize/deserialize` と役割が重なる。将来この upstream 部品の上に自作分を載せ替えれば、fork の差分を減らせる余地がある (§2 不変条件5 に沿う)。現時点では両者が並存している。
+
+ガードのリネーム (`check_no_mtmd` → `check_slot_no_media`) には対応済みで、fork はリネーム後の名前を外している。
