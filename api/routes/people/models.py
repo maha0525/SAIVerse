@@ -621,35 +621,6 @@ class StorageLayersResponse(BaseModel):
     truncated: bool  # true when limit was reached
 
 
-# -----------------------------------------------------------------------------
-# Tracks Viewer Models (Intent A v0.14, Intent B v0.11 — action_track 一覧表示)
-# -----------------------------------------------------------------------------
-
-class TrackItem(BaseModel):
-    """One ActionTrack row, with metadata JSON parsed for the UI."""
-    track_id: str
-    persona_id: str
-    title: Optional[str] = None
-    track_type: str
-    is_persistent: bool
-    output_target: str
-    status: str  # running / alert / pending / unstarted / completed / aborted
-    is_forgotten: bool
-    intent: Optional[str] = None
-    track_metadata: Optional[dict] = None  # parsed JSON, None if not set
-    last_active_at: Optional[float] = None
-    last_message_at: Optional[float] = None  # MAX(messages.created_at) WHERE origin_track_id=track_id
-    created_at: Optional[float] = None
-    completed_at: Optional[float] = None
-    aborted_at: Optional[float] = None
-
-
-class TracksStatusCount(BaseModel):
-    status: str
-    count: int
-
-
-class TracksResponse(BaseModel):
-    items: List[TrackItem]
-    total: int
-    status_counts: List[TracksStatusCount]
+# NOTE: Tracks Viewer のモデル (TrackItem / TracksStatusCount / TracksResponse) は
+# 2026-08-21 に API ルートごと退役した (track_retirement.md §2 住人 9)。フロントの
+# 消費はゼロで、残っていた読み手は debug スクリプトだけだった。

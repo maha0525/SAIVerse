@@ -1029,14 +1029,6 @@ class TestInvolvementEdgeCleanup(unittest.TestCase):
             list_chronicle_pages_for_entity(self.conn, self.maha.id), [child.id],
         )
 
-    def test_deleting_incomplete_chunks_removes_their_edges(self):
-        from sai_memory.arasuji.storage import delete_incomplete_entries
-
-        entry = self._chunk(origin_track_id="track-1", is_incomplete=True)
-        self._edge(entry.id)
-        self.assertEqual(delete_incomplete_entries(self.conn, "track-1"), 1)
-        self.assertEqual(self._edge_count(), 0)
-
     def test_clearing_all_chunks_removes_all_edges(self):
         from sai_memory.arasuji.storage import clear_all_entries
 

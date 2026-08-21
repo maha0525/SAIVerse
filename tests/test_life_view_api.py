@@ -4,7 +4,7 @@
 - GET /api/episodes                          (api/routes/episodes.py — 画面 A)
 - GET /api/people/{id}/day-plan              (api/routes/people/life.py — 画面 B)
 - GET /api/people/{id}/clips                (同上 — 画面 C)
-- GET /api/people/{id}/profile-tree          (同上 — 画面 D)
+- GET /api/people/{id}/profile-tree は退役済み (2026-08-21) — 404 を固定する
 
 一時 DB (temp dir の file sqlite) + 一時 persona dir を使い本番に触れない。
 TestClient で HTTP 経由の検証 (クエリ検証・エラー系含む)。TestClient は
@@ -513,70 +513,12 @@ class LifeViewApiTest(unittest.TestCase):
         self.assertEqual(resp.status_code, 404)
 
     # ------------------------------------------------------------------
-    # D: GET /api/people/{id}/profile-tree
+    # D: GET /api/people/{id}/profile-tree は 2026-08-21 に退役した
+    #    (目的の木が概念ごと消滅 — autonomous_behavior_v3.md §9-5)
     # ------------------------------------------------------------------
 
-    def test_profile_tree(self):
-        from saiverse.persona_task_manager import PersonaTaskManager
-        from saiverse.purpose_tree import create_candidate, name_theme
-        from saiverse.track_manager import TrackManager
-
-        tm = TrackManager(session_factory=self.Session)
-        track_id = tm.create(
-            "air", track_type="autonomous", title="言葉集め",
-            intent="街の言葉を標本にする", initial_status="running",
-        )
-
-        # 候補 (やってみたいこと)。来歴 = 接地参照つき
-        cand = create_candidate(
-            self.manager, "air", "歌をつくってみたい", source_ref="episode:2",
-        )
-        # 命名テーマ = 親なし採用ノード (第一階層)
-        theme = name_theme(self.manager, "air", "夕暮れの観察", [cand["ref"]])
-        # アーカイブ済み候補は candidates から消える
-        archived = create_candidate(
-            self.manager, "air", "やめた候補", source_ref="episode:3",
-        )
-        PersonaTaskManager(self.Session).update_task_status(
-            archived["id"], status="cancelled", actor="test", persona_id="air",
-        )
-
+    def test_profile_tree_route_is_gone(self):
         resp = self.client.get("/api/people/air/profile-tree")
-        self.assertEqual(resp.status_code, 200)
-        body = resp.json()
-        self.assertEqual(body["persona_id"], "air")
-
-        first = {n["title"]: n for n in body["first_tier"]}
-        # 第一階層 = 生きている Track + 親なし採用ノード (候補は含まれない)
-        self.assertIn("言葉集め", first)
-        self.assertIn("夕暮れの観察", first)
-        self.assertNotIn("歌をつくってみたい", first)
-        track_node = first["言葉集め"]
-        self.assertEqual(track_node["node_kind"], "track")
-        self.assertEqual(track_node["id"], track_id)
-        self.assertIsNotNone(track_node["last_activity_at"])  # running 化で刻まれる
-        theme_node = first["夕暮れの観察"]
-        self.assertEqual(theme_node["node_kind"], "task")
-        # 命名の来歴 (§15 自己所有感の担保)
-        self.assertEqual(theme_node["promoted_from"], [cand["ref"]])
-        self.assertEqual(theme_node["id"], theme["id"])
-
-        cands = body["candidates"]
-        self.assertEqual(len(cands), 1)
-        self.assertEqual(cands[0]["title"], "歌をつくってみたい")
-        self.assertEqual(cands[0]["stage"], "candidate")
-        self.assertEqual(cands[0]["source_ref"], "episode:2")
-        self.assertEqual(cands[0]["ref"], cand["ref"])
-
-    def test_profile_tree_empty(self):
-        resp = self.client.get("/api/people/quon/profile-tree")
-        self.assertEqual(resp.status_code, 200)
-        body = resp.json()
-        self.assertEqual(body["first_tier"], [])
-        self.assertEqual(body["candidates"], [])
-
-    def test_profile_tree_unknown_persona(self):
-        resp = self.client.get("/api/people/nobody/profile-tree")
         self.assertEqual(resp.status_code, 404)
 
 

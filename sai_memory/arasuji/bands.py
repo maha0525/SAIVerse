@@ -248,6 +248,10 @@ def _load_rows(
     """
     from sai_memory.arasuji.storage import _ENTRY_COLUMNS, _row_to_entry
 
+    # origin_track_id / is_incomplete のフィルタは、書き手が退役した今も残す
+    # (track_retirement.md 住人 5)。新しい entry はどちらも必ず NULL / 0 になるが、
+    # **既存 DB には Track Chronicle 時代の行がそのまま残っている** — 外すと当時
+    # Track 単位で書かれた作業メモが一般 Chronicle の並びに混ざる。
     rows = conn.execute(
         f"SELECT {_ENTRY_COLUMNS} FROM arasuji_entries "
         "WHERE is_consolidated = 0 AND origin_track_id IS NULL "
@@ -375,6 +379,8 @@ def _mark_uncompiled_gaps(
             tuple(sql_params) + params,
         ).fetchone()
         # 2. 未統合の下位レベルノード (レベル2 以上の並びのみ)
+        # origin_track_id / is_incomplete のフィルタを残す理由は _load_rows と同じ
+        # (既存 DB に残る Track Chronicle 時代の行を並びへ混ぜない)。
         if hit is None and level > 1:
             hit = conn.execute(
                 "SELECT 1 FROM arasuji_entries "

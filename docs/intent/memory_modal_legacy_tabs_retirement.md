@@ -22,7 +22,7 @@
 | 旧タブ固有の表示・操作 | 判定 | 退役後の扱い |
 |---|---|---|
 | 全 Track の内部 status、forgotten、raw metadata、内部 ID、各種 timestamp | 実装検証情報。日常の自己像・活動観察には不要 | API `GET /api/people/{id}/tracks` を保守用に残す |
-| Track 個別の pause / activate | 検証用操作。正規のユーザー操作はライフビューの自律 ON/OFF | API と `scripts/debug_track.py` を保守用に残す |
+| Track 個別の pause / activate | 検証用操作。正規のユーザー操作はライフビューの自律 ON/OFF | ~~API と `scripts/debug_track.py` を保守用に残す~~ → **両方とも 2026-08-21 に削除** ([Track 撤廃計画](track_retirement.md) §8) |
 | main/sub の保存メッセージ、line role、scope | Pulse タイムライン／チャットログと重複 | 正規画面を利用 |
 | meta judgment の trigger context、commit flag、raw prompt snapshot | 内部診断情報。ライフビューは判断結果を日常語で表示し、Pulse タイムラインは入出力を表示 | `storage-layers` API を保守用に残す |
 | track local log | 現行コードに書き込み元がなく、旧データの診断用途のみ | API を保守用に残す |

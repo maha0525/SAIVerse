@@ -610,7 +610,6 @@ class TestDayCloseSchema:
         schema = jp.build_day_close_schema(
             manager=manager,
             persona_id="alice",
-            touched_desire_refs=[],
             curation_candidates=candidates,
         )
         assert "curation_reviews" in schema["properties"]
@@ -627,7 +626,6 @@ class TestDayCloseSchema:
         schema = jp.build_day_close_schema(
             manager=manager,
             persona_id="alice",
-            touched_desire_refs=[],
             curation_candidates=[],
         )
         assert "curation_reviews" not in schema["properties"]
@@ -639,7 +637,6 @@ class TestDayCloseSchema:
         schema = jp.build_day_close_schema(
             manager=manager,
             persona_id="alice",
-            touched_desire_refs=[],
             curation_candidates=None,
         )
         assert "curation_reviews" not in schema["properties"]

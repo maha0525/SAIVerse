@@ -136,7 +136,7 @@ def tell(target: str, gist: str = "") -> str:
 
     pulse_id = str(uuid.uuid4())
     pulse_ctx = runtime._get_or_create_pulse_context(pulse_id)
-    pulse_ctx.push_line(aspect=Aspect.CONVERSATION, track_id=None)
+    pulse_ctx.push_line(aspect=Aspect.CONVERSATION)
     # 投函が済んだ後の失敗を「何も起きなかった」と報告しないための印。
     # 声は取り消せないので、届いた後のエラーは「届いた + 記録で失敗」と返す。
     delivered = False

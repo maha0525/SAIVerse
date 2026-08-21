@@ -2,7 +2,7 @@
 
 対象: sea/head_pipeline/notify.py / pipeline.advance_last_notified /
 flush_diffs(advance=False) / integration.inject_diff_notifications の outbox 化 /
-memory 系スペルの成功点結線 / life_purpose diff の render 断片同梱。
+memory 系スペルの成功点結線。
 
 固定する仕様 (beat_execution_context.md §3.3 / issue head_mutation_notification_gap):
 
@@ -12,8 +12,7 @@ memory 系スペルの成功点結線 / life_purpose diff の render 断片同�
 3. 台帳が無い環境は直接 push_perception へ degrade する。
 4. push 確定後、B (last_notified) は該当 persona の**全 model 行**で前進し、
    backstop flush_diffs が同じ変化を再通知しない。
-5. ツール成功点 (memory_write → core_memory / life_purpose_set → life_purpose)
-   から通知が発火する。
+5. ツール成功点 (memory_write → core_memory) から通知が発火する。
 6. S3: inject_diff_notifications の B 前進は outbox 積みの durable 確定後。
    配送予約に失敗したら B は据え置かれ、次回 flush で再検出される。
 """
@@ -317,7 +316,7 @@ def test_flush_diffs_advance_false_returns_detection_and_keeps_b(pipeline, secti
 
 
 # ---------------------------------------------------------------------------
-# 5. ツール成功点からの発火 (memory_write → core_memory / life_purpose_set → life_purpose)
+# 5. ツール成功点からの発火 (memory_write → core_memory)
 # ---------------------------------------------------------------------------
 
 
@@ -383,37 +382,6 @@ def test_memory_write_error_does_not_fire(session_factory, ledger, tmp_path):
 
     assert result.startswith("Error")
     assert _outbox_rows(session_factory) == []
-
-
-def test_life_purpose_set_fires_notification(session_factory, ledger, tmp_path):
-    import builtin_data.tools.life_purpose_set as lps
-    from tools.context import persona_context
-
-    section = _MutableSection(name="life_purpose", text="生きる目的: 旅をする")
-    registry = HeadSectionRegistry()
-    registry.register(section)
-    pipeline = HeadPipeline(registry=registry)
-
-    persona = SimpleNamespace(
-        persona_id=PERSONA_ID, model=MODEL_A, current_building_id=BUILDING,
-    )
-    manager = _tool_manager(session_factory, ledger, persona)
-
-    with patch.object(
-        lps, "set_life_purpose", return_value={"purpose": "旅をする"},
-    ), patch(
-        "sea.head_pipeline.notify.get_default_pipeline", return_value=pipeline,
-    ):
-        with persona_context(PERSONA_ID, tmp_path, manager=manager):
-            result = lps.life_purpose_set(purpose="旅をする")
-
-    assert result.startswith("生きる目的を保存しました")
-    rows = _outbox_rows(session_factory)
-    assert len(rows) == 1
-    payload = json.loads(rows[0].PAYLOAD_JSON)
-    assert json.loads(payload["metadata"]) == {"section": "life_purpose"}
-    assert payload["content"].startswith("生きる目的を更新しました")
-    assert "生きる目的: 旅をする" in payload["content"]
 
 
 # ---------------------------------------------------------------------------
@@ -520,32 +488,3 @@ def test_diff_notify_without_ledger_keeps_legacy_direct_push(pipeline, section, 
     assert inject_diff_notifications(
         persona, manager, BUILDING, pipeline=pipeline, model_key=MODEL_A,
     ) is False
-
-
-# ---------------------------------------------------------------------------
-# 7. life_purpose の diff ラベルに render 断片が同梱される
-# ---------------------------------------------------------------------------
-
-
-def test_life_purpose_diff_label_includes_render_fragment():
-    from sea.head_pipeline.sections.life_purpose import (
-        LifePurposeSection,
-        LifePurposeSnapshot,
-    )
-
-    section = LifePurposeSection()
-    old = LifePurposeSnapshot(drive_text="d", purpose_text="")
-    new = LifePurposeSnapshot(
-        drive_text="d",
-        purpose_text="## あなたの生きる目的\n世界を旅して回ること。",
-    )
-
-    labels = section.diff_to_notifications(old, new)
-    assert len(labels) == 1
-    assert labels[0].kind == "life_purpose_set"
-    assert labels[0].label.startswith("生きる目的が更新されました")
-    # 内容 (render 断片) が同梱される — 旧実装はラベル一行のみだった
-    rendered = section.render(new)
-    assert rendered is not None
-    assert rendered.text in labels[0].label
-    assert "世界を旅して回ること。" in labels[0].label

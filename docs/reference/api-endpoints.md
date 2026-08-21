@@ -5,7 +5,7 @@
 
 REST API 全エンドポイントの一覧（自動生成）。すべて `/api` 配下にマウントされる。
 
-**エンドポイント数**: 371（tag グループ: 26）
+**エンドポイント数**: 367（tag グループ: 26）
 
 ## addon
 
@@ -284,8 +284,8 @@ REST API 全エンドポイントの一覧（自動生成）。すべて `/api` 
 | POST | `/api/people/{persona_id}/debug/memopedia-conversion/revert` | 変換を丸ごと取り消す。 |
 | GET | `/api/people/{persona_id}/debug/memopedia-conversion/runs` | 取り消せる変換の一覧 (新しい順)。 |
 | GET | `/api/people/{persona_id}/debug/scheduler` | タイマーの稼働状態を返す. |
-| POST | `/api/people/{persona_id}/debug/scheduler` | タイマー制御. autonomy (per-persona) / manual_mode (per-persona の wait_response timeout 停止). |
-| POST | `/api/people/{persona_id}/debug/wrap-up-conversation` | wait_response timeout 相当を即時発火 (会話出来事の close + 会話終了判断)。 |
+| POST | `/api/people/{persona_id}/debug/scheduler` | タイマー制御. autonomy (per-persona) / manual_mode (per-persona の会話沈黙タイマー停止). |
+| POST | `/api/people/{persona_id}/debug/wrap-up-conversation` | 沈黙タイマー相当を即時発火 (会話出来事の close)。 |
 | GET | `/api/people/{persona_id}/experience-ledger` | 台帳の索引 — カテゴリごとにグループ化した棚の一覧 (統計付き)。 |
 | GET | `/api/people/{persona_id}/experience-ledger/{page_id}` | ページを開く = 動的合成 (fragment / 関与あらすじの履歴 / 共起ページ)。 |
 | POST | `/api/people/{persona_id}/import/extension` | Import Chrome extension export (JSON or Markdown) in background. |
@@ -328,7 +328,6 @@ REST API 全エンドポイントの一覧（自動生成）。すべて `/api` 
 | POST | `/api/people/{persona_id}/meta-judgment/bulk-delete` | Delete multiple meta_judgment_log rows in one request. |
 | DELETE | `/api/people/{persona_id}/meta-judgment/{judgment_id}` | Delete a single meta_judgment_log row owned by ``persona_id``. |
 | POST | `/api/people/{persona_id}/organize-memory` | 手動の記憶整理 — 残す量より古い側を今すぐあらすじに畳む。 |
-| GET | `/api/people/{persona_id}/profile-tree` | ペルソナのプロフィール用の目的の木 (画面 D)。読み取り専用の集約。 |
 | GET | `/api/people/{persona_id}/pulse-logs` | List pulse_id summaries with pagination (newest first). |
 | GET | `/api/people/{persona_id}/pulse-logs/{pulse_id}` | Get all log entries for a specific pulse. |
 | GET | `/api/people/{persona_id}/pulse-timeline` | messages を pulse_id でグルーピングした Pulse サマリ一覧 (新しい順)。 |
@@ -363,9 +362,6 @@ REST API 全エンドポイントの一覧（自動生成）。すべて `/api` 
 | GET | `/api/people/{persona_id}/timetable-template/facilities` | テンプレート編集 UI の場所セレクト用: 行ける場所の一覧 (id + 表示名)。 |
 | POST | `/api/people/{persona_id}/track-logs/bulk-delete` | Delete multiple track_local_log rows owned by persona's tracks. |
 | DELETE | `/api/people/{persona_id}/track-logs/{log_id}` | Delete a single track_local_log row. |
-| GET | `/api/people/{persona_id}/tracks` | List ActionTracks for the persona, with status-count summary. |
-| POST | `/api/people/{persona_id}/tracks/{track_id}/activate` | Activate a Track (→ running). |
-| POST | `/api/people/{persona_id}/tracks/{track_id}/pause` | Pause a running/alert Track (→ pending). |
 | POST | `/api/people/{persona_id}/unified-recall` | Search across Chronicle and Memopedia using embeddings. |
 | GET | `/api/people/{persona_id}/working-memory` | Get current working memory recalled IDs. |
 | POST | `/api/people/{persona_id}/working-memory/recall` | Add a recalled ID to working memory. |

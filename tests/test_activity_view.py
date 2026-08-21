@@ -196,47 +196,19 @@ def test_digest_meta_judgment_no_spells():
     assert "現状を続ける" in label
 
 
-def test_digest_meta_judgment_activate_autonomous():
-    """track_activate で autonomous Track に切り替え → タイトル表示"""
-    mock_track = MagicMock()
-    mock_track.track_type = "autonomous"
-    mock_track.title = "メモ整理"
+def test_digest_meta_judgment_activate_degrades_without_a_resolver():
+    """track_activate は素の文言へ縮退する。
+
+    Track の題を引く解決器は 2026-08-21 に撤去した — この /spell の書き手
+    (track_* スペル) は既に退役しており、残っていたのは古いログの装飾だけ
+    だったため (track_retirement.md §2 住人 9)。
+    """
     label = build_digest_label(
         track_title=None, track_type=None,
         line_roles=["meta_judgment"], tool_calls=[],
         spells_emitted=[{"name": "track_activate", "args": {"track_id": "t:3"}}],
-        track_resolver={"t:3": mock_track},
     )
-    assert "メモ整理" in label
-    assert "すること" in label
-
-
-def test_digest_meta_judgment_activate_user_conversation():
-    """track_activate で user_conversation Track → 「あなたと話す」"""
-    mock_track = MagicMock()
-    mock_track.track_type = "user_conversation"
-    mock_track.title = "対 user1 会話"
-    label = build_digest_label(
-        track_title=None, track_type=None,
-        line_roles=["meta_judgment"], tool_calls=[],
-        spells_emitted=[{"name": "track_activate", "args": {"track_id": "t:1"}}],
-        track_resolver={"t:1": mock_track},
-    )
-    assert "あなたと話す" in label
-
-
-def test_digest_meta_judgment_activate_social():
-    """track_activate で social Track → 「他のペルソナと話す」"""
-    mock_track = MagicMock()
-    mock_track.track_type = "social"
-    mock_track.title = "対 bob 会話"
-    label = build_digest_label(
-        track_title=None, track_type=None,
-        line_roles=["meta_judgment"], tool_calls=[],
-        spells_emitted=[{"name": "track_activate", "args": {"track_id": "t:2"}}],
-        track_resolver={"t:2": mock_track},
-    )
-    assert "他のペルソナ" in label
+    assert "別の作業に切り替えた" in label
 
 
 def test_digest_meta_judgment_track_create():

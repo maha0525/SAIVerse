@@ -35,12 +35,7 @@ from saiverse.activity_view import (
     parse_tool_calls_json,
     resolve_autonomous_pulse_interval,
 )
-from saiverse.track_manager import (
-    STATUS_RUNNING,
-    TERMINAL_STATUSES,
-    InvalidTrackStateError,
-    TrackNotFoundError,
-)
+from saiverse.track_manager import STATUS_RUNNING
 
 from .autonomy import _get_or_create_autonomy
 from .utils import get_adapter
@@ -192,20 +187,19 @@ def _resolve_playbook_display_names(manager, names: set) -> Dict[str, str]:
     return result
 
 
-def _get_wait_response_timeout_eta(manager, persona_id: str) -> Optional[int]:
-    """running な user_conversation Track の wait_response timeout 残り秒数。"""
-    tm = getattr(manager, "track_manager", None)
+def _get_conversation_timeout_eta(manager, persona_id: str) -> Optional[int]:
+    """開いている会話の沈黙タイマーの残り秒数 (予約が無ければ None)。"""
     scheduler = getattr(manager, "event_scheduler", None)
-    if tm is None or scheduler is None:
+    if scheduler is None:
         return None
-    for track in tm.list_for_persona(persona_id, statuses=[STATUS_RUNNING]):
-        if track.track_type != "user_conversation":
-            continue
-        key = tm._wait_response_timeout_key(track.track_id)
-        entry = getattr(scheduler, "_entries_by_key", {}).get(key)
-        if entry is not None and not entry.cancelled:
-            remaining = entry.fire_at_ts - time.time()
-            return max(0, int(remaining))
+    from saiverse import clock
+    from saiverse.user_conversation import _timeout_key
+
+    entry = getattr(scheduler, "_entries_by_key", {}).get(_timeout_key(persona_id))
+    if entry is not None and not entry.cancelled:
+        # 予約は clock.now() 基準で刻まれている。実時刻で引くと仮想クロック運転中に
+        # 残り秒数が現実離れした値になる (予約側と同じ時計を見る)。
+        return max(0, int(entry.fire_at_ts - clock.now().timestamp()))
     return None
 
 
@@ -232,8 +226,14 @@ _PULSE_TOOLS_SQL_TEMPLATE = """
 def _build_recent_items(manager, persona_id: str) -> List[ActivityRecentItem]:
     """「最近」ダイジェストを組み立てる。1 Pulse = 1 行 (§10 決定 2)。
 
-    対象: origin Track が autonomous 種別の Pulse、および meta_judgment Pulse。
-    user_conversation Pulse はチャットに既に見えているため除外する。
+    対象: meta_judgment Pulse。
+
+    ⚠ 2026-08-21 の会話経路の Track なし化で、Pulse の Track 刻印
+    (``messages.origin_track_id``) の書き手が全て退役した。旧実装はここで
+    ``origin_track_id`` から Track を引いて「autonomous 種別の Pulse」を拾って
+    いたが、その供給源ごと消えたため対象は meta_judgment Pulse だけになる。
+    ダイジェストの供給源の作り直しは、ライフビュー本体の世代交代
+    (autonomous_behavior_v3.md §9-9 — 暮らしの窓) と同じ工事に属する。
     """
     thread_pattern = f"{persona_id}:%"
     with get_adapter(persona_id, manager) as adapter:
@@ -243,27 +243,12 @@ def _build_recent_items(manager, persona_id: str) -> List[ActivityRecentItem]:
             )
             pulse_rows = cur.fetchall()
 
-        # Track 解決 (autonomous 判定)
-        track_ids = {r[1] for r in pulse_rows if r[1]}
-        track_map: Dict[str, Any] = {}
-        tm = getattr(manager, "track_manager", None)
-        if tm is not None:
-            for tid in track_ids:
-                try:
-                    track_map[tid] = tm.get(tid)
-                except Exception:
-                    track_map[tid] = None
-
         selected: List[tuple] = []
-        for pulse_id, track_id, last_ca, roles in pulse_rows:
+        for pulse_id, _track_id, last_ca, roles in pulse_rows:
             line_roles = (roles or "").split(",") if roles else []
-            track = track_map.get(track_id) if track_id else None
-            track_type = getattr(track, "track_type", None)
-            is_autonomous = track_type == "autonomous"
-            is_meta = "meta_judgment" in line_roles
-            if not (is_autonomous or is_meta):
+            if "meta_judgment" not in line_roles:
                 continue
-            selected.append((pulse_id, track, line_roles, last_ca))
+            selected.append((pulse_id, None, line_roles, last_ca))
             if len(selected) >= _RECENT_LIMIT:
                 break
 
@@ -294,26 +279,10 @@ def _build_recent_items(manager, persona_id: str) -> List[ActivityRecentItem]:
     if meta_pulse_ids:
         meta_details = _load_meta_judgment_details(manager, persona_id, meta_pulse_ids)
 
-    # Track 解決マップ: spells_emitted 内の track_id を解決するのに使う
-    # (既に track_map にある + spells の中の未知 track_id を追加解決)
-    all_spell_track_ids: set = set()
-    for detail in meta_details.values():
-        for spell in detail.get("spells") or []:
-            args = spell.get("args", {})
-            tid = args.get("track_id", "")
-            if tid:
-                all_spell_track_ids.add(tid)
-    spell_track_resolver: Dict[str, Any] = {}
-    if all_spell_track_ids and tm is not None:
-        for tid in all_spell_track_ids:
-            if tid in track_map:
-                spell_track_resolver[tid] = track_map[tid]
-            else:
-                try:
-                    resolved_tid = tm.resolve_track_ref(persona_id, tid)
-                    spell_track_resolver[tid] = tm.get(resolved_tid)
-                except Exception:
-                    pass
+    # NOTE: 旧ログの /spell track_* 引数に載った track_id を Track の題へ解決する
+    # マップ (track_resolver) は 2026-08-21 に撤去した。書き手 (track_* スペル) は
+    # 6b で退役済みで、残っていたのは古いログの表示だけ。解決できない参照は
+    # 素の文言 (「別の作業に切り替えた」等) へ縮退する。
 
     # Playbook display_name を DB から一括解決
     all_pb_names: set = set()
@@ -333,7 +302,6 @@ def _build_recent_items(manager, persona_id: str) -> List[ActivityRecentItem]:
             playbook_names=playbooks_by_pulse.get(pulse_id),
             playbook_display_names=pb_display_names,
             spells_emitted=detail.get("spells"),
-            track_resolver=spell_track_resolver,
             judgment_kind=detail.get("judgment_kind"),
         )
         items.append(
@@ -492,7 +460,7 @@ def get_activity_view(persona_id: str, manager=Depends(get_manager)):
         now=now_items,
         recent=recent_items,
         next_meta_tick_eta_seconds=am.get_next_tick_eta_seconds(),
-        next_wait_response_timeout_seconds=_get_wait_response_timeout_eta(manager, persona_id),
+        next_wait_response_timeout_seconds=_get_conversation_timeout_eta(manager, persona_id),
     )
 
 
@@ -534,19 +502,21 @@ def stop_activity(persona_id: str, manager=Depends(get_manager)):
     1. AutonomyManager.stop() — watchdog tick の予約 cancel
     2. running な autonomous Track を全て pause (帳簿を待機状態に揃える)
     3. AUTONOMY_ENABLED → False (判断点・watchdog のゲートが閉じる)
-    4. 対ユーザー Track をサイレント activate (suppress_pulse=True —
-       停止ボタンで自動発言させない、不変条件 4)
+
+    旧ステップ 4「対ユーザー Track をサイレント activate」は 2026-08-21 に対象
+    消滅した (会話が Track を経由しなくなり、「プロンプト待ち」は会話の出来事が
+    開いていない状態そのものになった)。停止ボタンで自動発言させない不変条件は、
+    停止時に main_line を一切起動しないことで保たれる。
     """
     # 存在確認のみ (実処理は manager.stop_autonomy に集約)。
     _get_persona_or_404(manager, persona_id)
 
-    # 停止の 4 ステップ (AM 停止 / Track pause / OFF / 対ユーザー Track 復帰) は
-    # manager.stop_autonomy に集約。メタ判断連続失敗リカバリと同じ経路を通す。
+    # 停止の 3 ステップ (AM 停止 / Track pause / OFF) は manager.stop_autonomy に集約。
     result = manager.stop_autonomy(persona_id)
 
     LOGGER.info(
-        "[activity] stop: persona=%s paused_tracks=%s user_track_activated=%s",
-        persona_id, result["paused_tracks"], result["user_track_activated"],
+        "[activity] stop: persona=%s paused_tracks=%s",
+        persona_id, result["paused_tracks"],
     )
     return ActivityToggleResponse(
         success=True,

@@ -393,6 +393,9 @@ def serialize_building_message(building_id: str, building_msg: Dict[str, Any]) -
         "metadata_json": metadata_json,
         "message_id": building_msg.get("message_id"),
         "client_message_id": building_msg.get("client_message_id"),
+        # origin_track_id: 生きた書き手はもう無い (2026-08-21 の会話経路の Track
+        # なし化で全経路が退役)。列と既存データの読み手が残っている間は「値が
+        # 来たら書く」受け口だけ残す。掃除は Track テーブル退役の migration。
         "origin_track_id": building_msg.get("origin_track_id"),
         "pulse_id": building_msg.get("pulse_id"),
     }

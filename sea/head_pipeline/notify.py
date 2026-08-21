@@ -1,14 +1,14 @@
 """head 操作の内容型通知 (beat_execution_context.md §3.3 / 統合工事 §6-4)。
 
 issue: docs/issues/head_mutation_notification_gap.md — head の元データ
-(コア記憶・机・生きる目的・Memopedia 目次) をスペルで操作したとき、操作の
-生ログが読み手の窓に入らない場合 (別 line / 別 model の Session)、読み手の
-LLM は変更を知る手段が無かった。
+(コア記憶・机・Memopedia 目次) をスペルで操作したとき、操作の生ログが読み手の
+窓に入らない場合 (別 line / 別 model の Session)、読み手の LLM は変更を知る
+手段が無かった。
 
 解 (§3.3 の確定裁定):
 
-- **操作起点 push 型**: 操作したツール (memory_write / memory_open /
-  life_purpose_set 等) が成功時に自分で通知を発行する。snapshot 差分検出
+- **操作起点 push 型**: 操作したツール (memory_write / memory_open 等) が
+  成功時に自分で通知を発行する。snapshot 差分検出
   (flush_diffs) はツールを経由しない変化 (UI 編集・migration 等) を拾う
   backstop に退く。
 - **内容忠実性の構造的保証**: 通知本文は ``section.capture(ctx)`` →
@@ -177,8 +177,8 @@ def notify_head_mutation_from_tool_context(
 ) -> None:
     """ツール実行中の contextvars から persona / manager を解決して通知する。
 
-    各 memory 系スペル (builtin_data/tools/memory_*.py / life_purpose_set.py)
-    の成功 return 直前から呼ぶ薄い便宜口。persona が解決できない環境
+    各 memory 系スペル (builtin_data/tools/memory_*.py) の成功 return 直前から
+    呼ぶ薄い便宜口。persona が解決できない環境
     (CLI 直叩き / persona 未ロードの fallback adapter 経路) は黙って skip する
     — その環境には届け先の窓が無い。決して raise しない。
     """

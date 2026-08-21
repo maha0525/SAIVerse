@@ -498,20 +498,16 @@ class RuntimeService(
                 '<div class="note-box">発言を保存できなかったため、処理を開始しませんでした。再送してください。</div>'
             ]
 
-        # 対ユーザー Track のイベント受け口 (Phase C-1)
-        # Handler が Track の取得 / 状態判定を行い、別の活動中なら on_event 判断点で
-        # 仲裁 (track_retirement.md §7.4 直結化)、それ以外は直接応答を起動する。
-        # 通常会話 (Track が running 継続) では判断は呼ばれない。
+        # ユーザー発話イベントの受け口 (saiverse.user_conversation)。
+        # 会話が開いていれば直接応答を起動し、閉じていて別の活動中なら on_event
+        # 判断点で仲裁する (track_retirement.md §7.4 直結化)。
         user_id_str = str(self.state.user_id)
         replies: List[str] = []
         for persona in responding_personas:
             captured_persona = persona
 
-            def _invoke_main_line(track_id: Optional[str] = None, p=captured_persona):
-                self.manager.run_sea_user(
-                    p, building_id, message,
-                    origin_track_id=track_id,
-                )
+            def _invoke_main_line(p=captured_persona):
+                self.manager.run_sea_user(p, building_id, message)
 
             # pulse_dispatch.md §7: PulseDispatcher 経由で起動 (例外時の
             # フォールバックは Dispatcher が担う)
@@ -682,14 +678,13 @@ class RuntimeService(
                         response_queue.put({"type": "cancelled", "content": "生成を中止しました。"})
                         break
 
-                    # 対ユーザー Track のイベント受け口 (Phase C-1)。
-                    # pulse_dispatch.md §7 で PulseDispatcher 経由に統一済。
-                    # Track 状態判定 / 別の活動中の仲裁 (on_event 判断点直結) →
-                    # on_track_activated hook で main_line Pulse 起動の経路は
-                    # Handler 内部で行う。
+                    # ユーザー発話イベントの受け口。pulse_dispatch.md §7 で
+                    # PulseDispatcher 経由に統一済。会話が開いているかの判定と、
+                    # 別の活動中の仲裁 (on_event 判断点直結) / 会話の開始は
+                    # saiverse.user_conversation 内部で行う。
                     captured_persona = persona
 
-                    def _invoke_main_line(track_id: Optional[str] = None, p=captured_persona):
+                    def _invoke_main_line(p=captured_persona):
                         self.manager.run_sea_user(
                             p, building_id, message,
                             metadata=metadata,
@@ -697,14 +692,26 @@ class RuntimeService(
                             args=args,
                             event_callback=_enrich_event,
                             pre_spells=pre_spells,
-                            origin_track_id=track_id,
                         )
+
+                    # 会話開始経路 (user_input は空で auto_ingest が拾う) にも同じ
+                    # 起動オプションを届ける。渡さないと、新規会話の初回発話だけ
+                    # 選択 Playbook・引数・pre-spell・SSE 出力が落ちて、継続発話と
+                    # 挙動が変わる (2026-08-21 Codex 指摘 5)。
+                    pulse_options = {
+                        "metadata": metadata,
+                        "meta_playbook": meta_playbook,
+                        "args": args,
+                        "pre_spells": pre_spells,
+                        "event_callback": _enrich_event,
+                    }
 
                     self.manager.pulse_dispatcher.dispatch_user_utterance(
                         persona_id=captured_persona.persona_id,
                         user_id=user_id_str,
                         event=user_entry,
                         invoke_main_line=_invoke_main_line,
+                        pulse_options=pulse_options,
                     )
                     # Check stop event after each persona completes
                     if stop_event.is_set():

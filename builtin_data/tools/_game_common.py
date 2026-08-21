@@ -1,6 +1,6 @@
 """game Region (Region RPG) ツール群の共通ヘルパー。
 
-_track_common.py と同様、schema() を持たないためツールとしては登録されない。
+先頭がアンダースコアで schema() を持たないため、ツールとしては登録されない。
 設計意図: temp/region_rpg_intent.md §F (リポジトリ外管理)
 """
 import logging

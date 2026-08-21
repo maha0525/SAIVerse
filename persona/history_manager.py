@@ -84,26 +84,13 @@ class HistoryManager:
         data.extend(msgs)
         target.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
 
-    def _prepare_message(
-        self,
-        msg: Dict[str, Any],
-        *,
-        origin_track_id: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        """Ensures a message has a timestamp and persona_id if applicable.
-
-        ``origin_track_id`` is forwarded to SAIMemory's ``messages.origin_track_id``
-        column via ``_sync_to_memory`` → ``append_persona_message`` (which reads
-        the key from the message dict). Explicit msg-level key wins; the argument
-        only fills in when not pre-set.
-        """
+    def _prepare_message(self, msg: Dict[str, Any]) -> Dict[str, Any]:
+        """Ensures a message has a timestamp and persona_id if applicable."""
         new_msg = msg.copy()
         if "timestamp" not in new_msg:
             new_msg["timestamp"] = datetime.now(timezone.utc).isoformat()
         if new_msg.get("role") == "assistant" and "persona_id" not in new_msg:
             new_msg["persona_id"] = self.persona_id
-        if origin_track_id is not None and "origin_track_id" not in new_msg:
-            new_msg["origin_track_id"] = origin_track_id
         metadata = new_msg.get("metadata")
         if metadata is not None:
             if isinstance(metadata, dict):
@@ -191,7 +178,6 @@ class HistoryManager:
         building_id: str,
         *,
         heard_by: Optional[List[str]] = None,
-        origin_track_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Adds a message to both persona log and building DB.
 
@@ -202,7 +188,7 @@ class HistoryManager:
                 "add_message: building %s is quarantined — refusing", building_id
             )
             return {}
-        prepared_msg = self._prepare_message(msg, origin_track_id=origin_track_id)
+        prepared_msg = self._prepare_message(msg)
         if heard_by:
             metadata = prepared_msg.setdefault("metadata", {})
             if isinstance(metadata, dict):
@@ -226,7 +212,6 @@ class HistoryManager:
         msg: Dict[str, str],
         *,
         heard_by: Optional[List[str]] = None,
-        origin_track_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Adds a message only to the building DB (skip persona log)."""
         if building_id in self._quarantined_buildings:
@@ -234,7 +219,7 @@ class HistoryManager:
                 "add_to_building_only: building %s is quarantined — refusing", building_id
             )
             return {}
-        prepared_msg = self._prepare_message(msg, origin_track_id=origin_track_id)
+        prepared_msg = self._prepare_message(msg)
         for_insert = self._prepare_for_insert(prepared_msg, heard_by)
         from database.building_messages import insert_building_message
         building_msg = insert_building_message(self._db_session_factory, building_id, for_insert)
@@ -244,7 +229,6 @@ class HistoryManager:
         self,
         msg: Dict[str, str],
         *,
-        origin_track_id: Optional[str] = None,
         sync_to_memory: bool = True,
         memory_first: bool = False,
     ) -> Tuple[str, Optional[str]]:
@@ -267,7 +251,7 @@ class HistoryManager:
             ``sync_to_memory=False`` のときは ``("skipped", None)``。
             既存呼び出し元は戻り値を無視してよい。
         """
-        prepared_msg = self._prepare_message(msg, origin_track_id=origin_track_id)
+        prepared_msg = self._prepare_message(msg)
         if memory_first and sync_to_memory:
             status, mid = self._sync_to_memory(
                 channel="persona", building_id=None, message=prepared_msg

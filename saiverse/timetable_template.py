@@ -441,21 +441,6 @@ def _forced_ref_problem(manager: Any, persona_id: str, ref: str) -> Optional[str
     """
     if ref == day_plan.REF_NONE:
         return None
-    if day_plan._TRACK_REF_RE.match(ref):
-        track_manager = getattr(manager, "track_manager", None)
-        if track_manager is None:
-            return "track_manager が無く解決できません"
-        from saiverse.track_manager import LIVE_STATUSES, TrackNotFoundError
-
-        try:
-            track = track_manager.get(
-                track_manager.resolve_track_ref(persona_id, ref)
-            )
-        except TrackNotFoundError:
-            return "存在しません"
-        if track.status not in LIVE_STATUSES:
-            return f"既に {track.status} の Track です"
-        return None
     from saiverse.judgment_points import normalize_task_ref
     from saiverse.persona_task_manager import (
         PersonaTaskManager,

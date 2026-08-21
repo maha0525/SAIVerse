@@ -15,7 +15,7 @@ kind + 実体参照で包む共通エンベロープ (``episodes`` テーブル�
 - 閉じ処理は意味を書かない — 再訪の鍵 (``digest_ref``) だけ書く (§9)。
 - 参照は統一文法 (saiverse/references.py) の ``episode:N`` に相乗りする (§8.1)。
 - DB access は ``manager.SessionLocal()`` → try/finally close の既存流儀
-  (desire_engine と同じく manager を第一引数に取るモジュール関数群)。
+  (day_plan と同じく manager を第一引数に取るモジュール関数群)。
 
 P1 (DB 基盤) 時点では本モジュールはどこからも呼ばれない (休眠)。配線は P2 以降。
 """
@@ -538,10 +538,8 @@ def get_latest_closed_episode(
 ) -> Optional[Dict[str, Any]]:
     """最後に閉じた出来事 1 件を返す (無ければ None)。
 
-    層2 棚入れ (life_concept_map.md §9.1) の判断点が「いま閉じたばかりの
-    出来事」を引くフォールバック入口 (post_conversation は close 直後に
-    判断が走るため、SHORT_ID 最大の closed 行 = 当該会話)。open と同じく
-    SHORT_ID 降順で選ぶ (仮想クロック下の同秒 ENDED_AT に頑健)。
+    「いま閉じたばかりの出来事」を引く入口。open と同じく SHORT_ID 降順で
+    選ぶ (仮想クロック下の同秒 ENDED_AT に頑健)。
     """
     if not persona_id:
         return None
@@ -572,7 +570,7 @@ def get_open_non_conversation_episode(
 
     同じ集合を「仲裁するかの判定」(user_conversation_handler) と「ペルソナへ
     見せる いまの活動」(judgment_points.build_on_event_situation_text) の両方が
-    読む — 判定と提示は同じ集合から引く (list_pickable_tracks と同じ規律)。
+    読む — 判定と提示は同じ集合から引く。
     複数開いていれば最後に開いた 1 件 (SHORT_ID 最大) を代表として返す。
     """
     if not persona_id:

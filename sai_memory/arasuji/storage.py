@@ -58,9 +58,11 @@ class ArasujiEntry:
     parent_id: Optional[str]  # parent arasuji ID if consolidated
     is_consolidated: bool
     created_at: int
-    # Track Chronicle (v0.32, 2026-05-09): NULL = General Chronicle (Track 横断), set = Track Chronicle (origin_track_id 紐付き)
+    # Track Chronicle (v0.32, 2026-05-09) の名残。**書き手は退役済み**
+    # (track_retirement.md 住人 5) — 新しい entry では常に None / False。
+    # 既存 DB には Track 由来の行が残っているので、それを General Chronicle の
+    # 読みから外すためのフィルタ用に列と属性だけ生かしてある。
     origin_track_id: Optional[str] = None
-    # incomplete Lv1 (Track Chronicle, v0.32): バッチサイズ未満で作られた一時 Lv1。後で 20 件揃った時に削除して正規 Lv1 に作り直される
     is_incomplete: bool = False
     # Per-DB sequential ID (P2a, 2026-07-10: Memory Atlas の ch:N 短縮参照用。
     # memopedia_pages.short_id と同じ流儀)。既存 DB では追加系 migration で backfill。
@@ -299,6 +301,10 @@ def init_arasuji_tables(conn: sqlite3.Connection) -> None:
         f"CREATE INDEX IF NOT EXISTS idx_chronicle_thread ON memopedia_pages"
         f"(json_extract(metadata, '$.thread_id')) WHERE category = '{CATEGORY_CHRONICLE}'"
     )
+    # ⚠️ 以下 2 本の track 索引は、Track Chronicle の退役 (track_retirement.md 住人 5)
+    # で引き手がいなくなった。既存 DB には索引が残るので、撤去は列の掃除と同じ
+    # migration で行う (v0.3 の機械写し便)。ここだけ消すと新規 DB と既存 DB で
+    # 索引の有無が食い違う。
     conn.execute(
         f"CREATE INDEX IF NOT EXISTS idx_chronicle_track ON memopedia_pages"
         f"(json_extract(metadata, '$.origin_track_id')) WHERE category = '{CATEGORY_CHRONICLE}'"
@@ -402,8 +408,6 @@ def create_entry(
     message_count: int,
     entry_id: Optional[str] = None,
     thread_id: Optional[str] = None,
-    origin_track_id: Optional[str] = None,
-    is_incomplete: bool = False,
     extra_metadata: Optional[Dict[str, Any]] = None,
     commit: bool = True,
 ) -> ArasujiEntry:
@@ -412,10 +416,6 @@ def create_entry(
     Args:
         thread_id: If set, associates this entry with a specific thread
                    (e.g., Stelis thread). NULL = main thread.
-        origin_track_id: Track Chronicle 用 (v0.32, 2026-05-09)。set すると Track 紐付き。
-                         NULL = General Chronicle (Track 横断)。
-        is_incomplete: バッチサイズ未満で作られた一時 Lv1 (Track Chronicle 用)。
-                       後で 20 件揃った時に削除して正規 Lv1 に作り直される。
         extra_metadata: 由来メタ等の追加フィールド (digest_origin /
                         coverage_chars / episode_refs — W4 D4)。標準キーと
                         衝突した場合は標準キーが勝つ。
@@ -436,8 +436,6 @@ def create_entry(
         "source_count": source_count,
         "message_count": message_count,
         "is_consolidated": 0,
-        "is_incomplete": 1 if is_incomplete else 0,
-        "origin_track_id": origin_track_id,
         "thread_id": thread_id,
         "short_id": sid,
     })
@@ -466,8 +464,6 @@ def create_entry(
         parent_id=None,
         is_consolidated=False,
         created_at=page.created_at,
-        origin_track_id=origin_track_id,
-        is_incomplete=is_incomplete,
         short_id=sid,
     )
 
@@ -679,121 +675,6 @@ def get_max_level(conn: sqlite3.Connection) -> int:
     cur = conn.execute("SELECT MAX(level) FROM arasuji_entries")
     row = cur.fetchone()
     return row[0] if row and row[0] is not None else 0
-
-
-# ----- Track Chronicle helpers (v0.32, 2026-05-09) -----
-
-
-def get_track_entries(
-    conn: sqlite3.Connection,
-    origin_track_id: str,
-    *,
-    level: Optional[int] = None,
-    only_unconsolidated: bool = False,
-    include_incomplete: bool = True,
-) -> List[ArasujiEntry]:
-    """Get Track Chronicle entries for a specific Track.
-
-    Args:
-        origin_track_id: 対象 Track の ID
-        level: フィルタする level (None = 全 level)
-        only_unconsolidated: 上位 level に統合されていないものだけ取得
-        include_incomplete: incomplete Lv1 も含めるか (False で正規 Lv1 のみ)
-    """
-    query = (
-        f"SELECT {_ENTRY_COLUMNS} FROM arasuji_entries WHERE origin_track_id = ?"
-    )
-    params: List[Any] = [origin_track_id]
-    if level is not None:
-        query += " AND level = ?"
-        params.append(level)
-    if only_unconsolidated:
-        query += " AND is_consolidated = 0"
-    if not include_incomplete:
-        query += " AND is_incomplete = 0"
-    query += " ORDER BY end_time ASC"
-    cur = conn.execute(query, params)
-    return [_row_to_entry(row) for row in cur.fetchall()]
-
-
-def get_incomplete_entries(
-    conn: sqlite3.Connection,
-    origin_track_id: str,
-) -> List[ArasujiEntry]:
-    """Get incomplete Lv1 entries for a Track (for re-generation check)."""
-    cur = conn.execute(
-        f"SELECT {_ENTRY_COLUMNS} FROM arasuji_entries "
-        f"WHERE origin_track_id = ? AND level = 1 AND is_incomplete = 1 "
-        f"ORDER BY end_time ASC",
-        (origin_track_id,),
-    )
-    return [_row_to_entry(row) for row in cur.fetchall()]
-
-
-def delete_incomplete_entries(
-    conn: sqlite3.Connection,
-    origin_track_id: str,
-) -> int:
-    """Delete all incomplete Lv1 entries for a Track. Used when regenerating
-    proper Lv1 from accumulated messages.
-
-    Also removes deleted IDs from parent (Lv2+) entries' source_ids_json
-    to prevent dangling references.
-
-    Returns the number of deleted entries.
-    """
-    # Collect IDs and their parent_ids before deletion (parent_id here is the
-    # view's un-mapped value: NULL for un-consolidated entries).
-    rows = conn.execute(
-        "SELECT id, parent_id FROM arasuji_entries "
-        "WHERE origin_track_id = ? AND level = 1 AND is_incomplete = 1",
-        (origin_track_id,),
-    ).fetchall()
-
-    if not rows:
-        return 0
-
-    deleted_ids = {row[0] for row in rows}
-
-    # Group by parent_id to batch-update each parent
-    parents_to_update: dict[str, list[str]] = {}
-    for row in rows:
-        pid = row[1]
-        if pid:
-            parents_to_update.setdefault(pid, []).append(row[0])
-
-    for pid, child_ids in parents_to_update.items():
-        parent = get_entry(conn, pid)
-        if parent:
-            new_source_ids = [
-                sid for sid in parent.source_ids if sid not in deleted_ids
-            ]
-            prow = _get_chronicle_page_row(conn, pid)
-            if prow is not None:
-                _ppid, _pparent, _pcontent, pmeta_json, _pcreated = prow
-                pmeta = _parse_chronicle_meta(pmeta_json)
-                pmeta["source_ids"] = new_source_ids
-                conn.execute(
-                    "UPDATE memopedia_pages SET metadata = ? WHERE id = ?",
-                    (json.dumps(pmeta, ensure_ascii=False), pid),
-                )
-
-    # Delete the incomplete entries。付記印の返却は削除と同一 tx —
-    # 印だけ残すと転写先の無い「付記済み」= 知覚の恒久消失になる
-    # (perception_buffer.unmark_batches_annexed の docstring 参照)。
-    from sai_memory.perception_buffer import unmark_batches_annexed
-    unmark_batches_annexed(conn, list(deleted_ids))
-    # 想起用タグの辺も同一 tx で落とす — 辺に外部キーは無く、消えたチャンクを
-    # 指す辺は誰にも消されない (recall_edges.delete_chunk_page_edges)。
-    from sai_memory.memory.recall_edges import delete_chunk_page_edges
-    delete_chunk_page_edges(conn, deleted_ids)
-    placeholders = ",".join("?" for _ in deleted_ids)
-    cur = conn.execute(
-        f"DELETE FROM memopedia_pages WHERE id IN ({placeholders}) AND category = ?",
-        list(deleted_ids) + [CATEGORY_CHRONICLE],
-    )
-    conn.commit()
-    return cur.rowcount
 
 
 def delete_entry(conn: sqlite3.Connection, entry_id: str) -> bool:

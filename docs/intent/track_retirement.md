@@ -1,6 +1,6 @@
 # Intent: Track の撤廃 — 最後の住人たちの引っ越し計画
 
-**ステータス**: 実装中（v0.4、2026-08-14）。**裁定 3 点（A 関心の器 / B alert / C 門との線引き）すべて決着済み**。**裁定 B の ②③（閾値ポーラ・Handler tick 拡張点の撤去）は 2026-08-11 に実装完了**（§5-B の実装欄）。**撤去順序①の範囲は §7 で確定（裁定 5 点すべて 2026-08-14 に決着）— 実装フェーズ**。まはーの作戦変更「Track の撤廃計画を完全に立ててからでないと、エピソードの単位の議論がまともにできない」を受けて起草。
+**ステータス**: 実装中（v0.4、2026-08-21）。**会話経路の Track なし化は §8 で完了（束 6 第三便、まはー実機検証待ち）**。**裁定 3 点（A 関心の器 / B alert / C 門との線引き）すべて決着済み**。**裁定 B の ②③（閾値ポーラ・Handler tick 拡張点の撤去）は 2026-08-11 に実装完了**（§5-B の実装欄）。**撤去順序①の範囲は §7 で確定（裁定 5 点すべて 2026-08-14 に決着）— 実装フェーズ**。まはーの作戦変更「Track の撤廃計画を完全に立ててからでないと、エピソードの単位の議論がまともにできない」を受けて起草。
 **親**: [`persona_cognition/recall_tags_and_track_reduction.md`](persona_cognition/recall_tags_and_track_reduction.md)（§3.2/§4.3 — 「役割縮小 → 溶解」の方向自体は 2026-07-24 に裁定済み）/ [`persona_cognition/life_concept_map.md`](persona_cognition/life_concept_map.md) §10（Track ＝複数概念の未分化な束）
 **関連**: [`episode.md`](episode.md)（Wave 1「器と縁」の設計 — 本計画の完成を待って再開する）/ [`../overview/v030_release_gate.md`](../overview/v030_release_gate.md) §2-2
 
@@ -25,8 +25,8 @@ Track が現に担っている仕事の全数。「現状」は当日のコー�
 | # | 住人 | 現状（確認済みの事実） | 行き先 |
 |---|---|---|---|
 | 1 | **関心（目的の木の大枝）** | 判断語彙の中心として現役。会話終了判断が「新しい関心として立てる」で Track を作る。時間割のコマは ref=track:N を指せる。会話で拾ったタスクは「どの関心にぶら下げるか」を Track から選ぶ（picked_tasks）。タスクの親は track_id 固定（タスク同士の親子は無い） | **裁定済み（§5-A）**: ペルソナ固有のコマの一覧（仮称: レパートリー）＋ Memopedia ページの経験の台帳 ＋ タスク（親をレパートリー項目参照へ張り替え） |
-| 2 | **関係の器（永続 Track）** | 対ユーザー会話 Track と交流 Track（is_persistent）。「エアと話す」の常設枠 | 三分割: 意図＝「話す・聞く」型のレパートリー項目 / 知識＝人物ページの経験の台帳（§5-A）/ **記録＝メッセージへの記録からの導出**（episode.md v1.3 §3.3 — 会話のための行は作らない。「エアとの会話の歴史」は参加者にエアが記録されているメッセージ列の検索で得る。途中案の「対話エピソード」は行の中身が人物参照の複製に潰れるため削除）。会話の実行面（待ち・「いま会話中か」）は待ちタイマーへ移管 |
-| 3 | **origin_track_id（またいで集める鍵）** | 発言・思考一行ごとに現役で刻印。44 ファイルに波及 | **origin_purpose（目的の直接参照）へ世代交代 — Wave 1 の「目的の縁」と同一の工事**。エピソード・メッセージに目的を直接刻む |
+| 2 | **関係の器（永続 Track）** | ~~対ユーザー会話 Track と交流 Track（is_persistent）~~ → **会話経路から撤去済み（2026-08-21、§8）**。会話の器は `saiverse/user_conversation.py`（会話の出来事 + main_line 起動 + 沈黙タイマー） | 三分割: 意図＝「話す・聞く」型のレパートリー項目 / 知識＝人物ページの経験の台帳（§5-A）/ **記録＝メッセージへの記録からの導出**（episode.md v1.3 §3.3 — 会話のための行は作らない）。会話の実行面（待ち・「いま会話中か」）は**移管完了** |
+| 3 | **origin_track_id（またいで集める鍵）** | **書き手は全撤去済み（2026-08-21、§8）**。列と既存データ、旧データ向けの読み手（arasuji の bands/context フィルタ・pulse_timeline・storage_layers・inspect_world・native_export）は残置 | **origin_purpose（目的の直接参照）へ世代交代 — Wave 1 の「目的の縁」と同一の工事**。列そのものの掃除は⑦の migration |
 | 4 | **机メモ / 中断中セッション** | track_metadata に格納。「中断中セッション」の列挙は Track の机メモ走査 | **中断中エピソードの「しおり」へ**（2026-08-10 議論: 中断中セッションは器の中断の既存実装そのもの。住所を Track → エピソードへ移す） |
 | 5 | **Track Chronicle（目的別あらすじ）** | 生成コード（arasuji/generator.py の track 分岐）と head 自動搭載（get_memory_weave_context）の呼び出しが現存 | エピソード Lv1 概要の導出へ世代交代（episode.md §6.2/6.3 で設計済み。読者への供給が途切れないことの確認後） |
 
@@ -36,7 +36,7 @@ Track が現に担っている仕事の全数。「現状」は当日のコー�
 |---|---|---|---|
 | 6 | **running 排他（いま動くのは 1 本）** | **判断側は退役完了（2026-08-14、§7.4 実装欄）**: should_fire 削除・v1 メタ判断一式撤去・on_event の「いまの活動」を出来事読みへ付け替え済み。残るのは選択肢列挙（list_pickable_tracks 系 = §7.2 の④群、行き先レパートリー）と deferred track ops（ペルソナの track_* スペルが enqueue 源、④で語彙ごと入れ替え） | 出来事（いま）＋時間割（予定）は**完了**。選択肢は順序④でレパートリーへ |
 | 7 | **alert 状態機械** | **撤去完了（2026-08-14、§7.4 実装欄）**。②③（閾値ポーラ・Handler tick）は 2026-08-11、①（会話ハンドラの発話仲裁）は順序①で on_event 判断点への直結に置き換え、set_alert + alert observer 機構ごと削除。STATUS_ALERT 定数と既存 DB 行は互換のため残置（書き手なし、掃除は⑦） | 完了（汎用機構化のみ将来課題 — 裁定 B ①注記） |
-| 8 | **wait_response タイマー** | 出来事へ移管済み（タイマーは Track の状態をもう動かさない）。残骸のみ | 掃除のみ |
+| 8 | **wait_response タイマー** | **撤去済み（2026-08-21、§8）**。後継は `saiverse/user_conversation.py` の沈黙タイマー（key はペルソナ、発火の仕事は会話の出来事を閉じることだけ） | 完了 |
 
 ### 出口の住人
 
@@ -45,7 +45,7 @@ Track が現に担っている仕事の全数。「現状」は当日のコー�
 | 9 | **API・フロント UI** | tracks API ルート＋フロント約 20 ファイルが track に触れる（LifeView・RightSidebar・TasksModal 等） | 目的の木 UI ＋ エピソード表示へ貼り替え |
 | 10 | **ActionTrack テーブル＋永続データ内の track:N 参照** | slot の ref・purpose_tags の指し先・episode の origin_ref に track:N が書かれ続けている | 参照語彙を task:N（目的ノード）一本へ。テーブル退役は最後（migration） |
 | 11 | **ユーザー会話 20 件保持（user_conversation_preserver）** | オーナー会話の生メッセージを常時 20 件複製補完する v0.32 の特殊機構。**オーナー会話 Track の ID を鍵に動く**。2026-08-11 の棚卸しで発見（起草時の見落とし） | **機構ごと退役**（まはー承認 2026-08-11）。需要の引受先 = 会話開始時の読み戻し（arasuji_levels §15）＋会話チャンクの概要。詳細: episode.md ⚡ 到達点 19 |
-| 12 | **ゲームセッションの参加帳簿（game_lifecycle）** | RPG セッション開始時に参加ペルソナごと game_session Track を running で作り、終了時に complete する（`saiverse/game_lifecycle.py`）。参加中かの正典は region.state（`is_participating`）で、Track は帳簿の影。2026-08-14 の順序①調査で発見（起草時の見落とし） | 出来事（ゲーム参加の出来事）へ、または region.state 一本で足りるなら単純撤去。実施は順序④（詳細設計はその時点） |
+| 12 | **ゲームセッションの参加帳簿（game_lifecycle）** | **単純撤去済み（2026-08-21、§8）**。参加中かの正典は region.state（`is_participating`）一本 | 完了 |
 
 ## 3. 使える既存の器（新造を最小にする）
 
@@ -168,3 +168,68 @@ v2 判断点側にも running Track の読みが **1 箇所だけ**残ってい�
 - **F5**: debug の切り上げ発火に、開いている会話の出来事の同期検証を追加（無ければ 409）。案 Y の残留 running を「会話中」と読んで撃つと、存在しない会話の振り返りがペルソナ名義の記憶に残る。social Track は success を返さない（本番経路でも判断は撃たれない）。
 - **F6**: 退役した操作面を UI から削除（DebugPanel の「メタ判断を 1 回」ボタンと force、SettingsModal の休眠設定 3 欄）。あわせて no-op で残していた debug エンドポイント 3 本も削除した（呼び手が消えたため）。
 - **F3 / F4**: いずれも順序①より前から在る **on_event 系の共通欠陥**なので、経緯は [judgment_seat_contention_and_event_loss.md](../issues/judgment_seat_contention_and_event_loss.md) ④⑤へ記録した（F3 = 判断が走った後の失敗を「起動できなかった」と読んで決定を上書きしていた／F4 = 回収の応対が種別を落としてユーザー発話を外部イベント形で流し込んでいた）。
+
+---
+
+## 8. 会話経路の Track なし化（2026-08-21 実装、v0.3.0 の門 束 6 第三便）
+
+**この便の芯**: ユーザーとの会話が **TrackManager を一切経由せずに**流れるようにする。Track は「会話の器」ではなく帳簿の影だった。会話の実体は三つに分解して持ち主へ返した——**開いている会話の出来事**（いま会話中か）／**main_line Pulse**（応答する）／**沈黙タイマー**（会話の終わり）。新しい住処は `saiverse/user_conversation.py` の一枚で、この三つがそこに揃っている。
+
+### 8.1 旧 `on_track_activated` hook が連れていた副作用の数え上げと行き先
+
+`TrackManager.activate` / `create(initial_status=running)` は末尾で observer を撃ち、`UserConversationTrackHandler.on_track_activated` が三つを連鎖させていた。加えて activate 自身が二つ、`get_or_create_track` が一つ持っていた。全六件の行き先:
+
+| # | 旧・副作用 | 行き先 |
+|---|---|---|
+| 1 | 会話の出来事を開く（`_open_conversation_episode`） | `user_conversation.start_conversation` が直接呼ぶ（`origin_ref` の `track:N` は付けない） |
+| 2 | Track 切替通知の SAIMemory 注入（`_inject_track_context`） | **退役**。Track が無い世界に「切り替わった Track」の通知は存在しない |
+| 3 | main_line Pulse の起動（`_start_main_line_pulse`） | `user_conversation._start_main_line_pulse` が直接呼ぶ（SSE callback の拾い方も同じ） |
+| 4 | Track タイトルの生成と自己修復（`_make_title` / `_heal_legacy_title`） | **退役**（Track 行を作らない） |
+| 5 | wait_response タイマーの予約（`TrackManager._schedule_wait_response_timeout`） | `user_conversation.arm_conversation_timeout`（key はペルソナ、基準は常に `now`） |
+| 6 | 状態遷移 observer の通知（メタ判断ターンの scope 昇格 / 進行中 Pulse の cancel） | **退役**。どちらも発火元（v1 メタ判断の Track 操作）が既に死んでいた |
+
+`suppress_pulse`（ライフビューの停止パッケージが使うサイレント activate）も対象消滅した——「プロンプト待ち」は *会話の出来事が開いていない状態* そのものになったので、停止時に戻すべき帳簿が無い（`stop_autonomy` は 3 ステップへ）。
+
+### 8.2 仲裁の発火条件が変わった（唯一の意味論の変化）
+
+`handle_user_utterance_conflict` の**判断そのもの**は不変（on_event 判断点の流用、engage_now でだけ応対、起動不能なら応対に倒す、indeterminate は応答しない）。変わったのは**その手前のゲート**:
+
+- 旧: 「対ユーザー会話 Track が running か」→ 案 Y 以降その running は会話が終わっても残るため、仲裁は事実上「初回の発話」と「ゲーム参加で押し出された後」でしか発火しなかった
+- 新: 「**会話の出来事が開いているか**」→ 開いていれば直接応答、閉じていて別の活動中なら仲裁
+
+これは §7.4 が設計として書いていた機械判定（「開いている出来事 ≠ 会話」）そのもので、F2 の注記にある「案 Y の残留 running 誤検知」を器ごと解消した形。**結果として仲裁は設計どおりの頻度で発火するようになる**（＝今より増える）。F1 の裁定（「別行動中でも会話を優先」）は残留 running という偶然の産物に乗っていたので、仲裁経路そのものの存在意義は予定どおり順序④で問い直す。
+
+### 8.3 撤去したもの
+
+- **ファイル削除**: `saiverse/track_handlers/`（4 ファイル）／ `sea/pulse_root_context.py`（`get_handler_for_track` の最後の消費者が消えた）／ `api/routes/people/tracks.py`（フロント消費ゼロ）／ `scripts/debug_track.py`
+- **`TrackManager` から**: wait_response タイマー機構一式（provider / callback / schedule / cancel / ensure / handle）、状態遷移 observer、`on_track_activated` observer、`suppress_pulse`、`get_entry_line_role`、`event_scheduler` 依存
+- **`origin_track_id` の書き手**: `sea/runtime.py`（`_resolve_pulse_root_line` ごと）／ `sea/runtime_emitters.py`（`persona._current_pulse_origin_track_id`）／ `sea/runtime_graph.py` / `runtime_runner.py`（`pulse_line_role` / `pulse_line_track_id`）／ `sea/pulse_context.py`（`LineFrame.track_id`）／ `sea/pulse_controller.py`（`ExecutionRequest.origin_track_id`）／ `persona/history_manager.py`（3 メソッドの kwarg）／ `builtin_data/tools/get_building_messages.py` / `judgment_finalize.py` ／ `manager/runtime.py` ／ `saiverse_manager.run_sea_user`
+- **アダプタの読み手**: `get_track_last_message_time` / `get_track_last_message_times`（消費者は Tracks API と wait_response タイマーだけだった）。`has_track_assistant_message_since` は persona スコープの `has_assistant_message_since` へ置き換え
+- **`save_desk_memo`**（`judgment_points.py`）と `task_verdict` からの呼び出し: 読み手（`day_plan._build_track_instruction`）は既に到達不能で、書き手だけが残っていた。continue / blocked の裁定の意味論は不変（作業メモは独白記録に残る）
+- **`game_lifecycle` の `_on_game_started` / `_on_game_ended`**: 参加中かの正典は `region.state` 一本（読み手ゼロを確認して単純撤去）
+
+### 8.4 残したもの（と、その理由）
+
+- **`messages.origin_track_id` / `building_messages.origin_track_id` の列と既存データ**: 旧データ向けの読み手が生きている（arasuji の bands/context フィルタ・pulse_timeline・storage_layers・inspect_world・native_export）。掃除は⑦の migration でテーブルごと
+- **永続層の受け口 2 箇所**（`saiverse_memory/adapter._append_message` と `database/building_messages._to_row` の `message.get("origin_track_id")`）: 「値が来たら書く」だけの 1 行。列が残る間は、復元・取り込み系が過去の値を載せた dict を渡してきたときに黙って落とさないために残す
+- **`TrackManager` 本体**: 読み手が残っている（時間割の `track:N` コマ = `day_plan`、想起の歩き = `recall_walk`、経験の台帳、`judgment_finalize._ref_label` の表題解決、`api/routes/info.py` と `activity.py` の「いま」表示、`pulse_timeline`）。いずれも撤去順序④以降
+
+### 8.5 レビューで塞いだ穴（2026-08-21 Codex、7 件）
+
+新しい住処 `saiverse/user_conversation.py` は「Track が抱えていた仕事を引き取る」だけでは足りず、Track が偶然埋めていた穴が 7 つ表に出た。回帰テストは `tests/test_user_conversation.py` と `tests/test_judgment_playbook_prompt_contract.py`。
+
+| # | 穴 | 塞ぎ方 |
+|---|---|---|
+| 1 | 沈黙タイマーが実時刻（`datetime.now()`）で刻まれ、仮想日付のシミュレーション中に期限がシム終了後へ飛んでいた | `saiverse.clock.now()` 基準に統一（EventScheduler / DaySimulator と同じ時計）。`activity.py` の残り秒表示も同じ時計へ |
+| 2 | 期限到来エントリは heap と `_entries_by_key` の両方から外れてから callback が走るので、その隙間の再予約を `schedule()` が取り消せず、**古い callback が新しい会話を閉じられた** | 予約ごとに**乱数 nonce** を発行し、callback は現行予約と照合できたときだけ動く。照合と消費は 1 手（カウンタ・時刻・出来事参照はいずれも再到達点を持つので使わない——同じ会話のタイマー延長も別世代として区別する必要がある） |
+| 3 | 「開いている会話を探す → 無ければ開く」が検索と INSERT の二手だったため、同時発話で出来事と Pulse が二重に作れた（タイマー key はペルソナ単位で 1 本なので、先行行だけがタイマー無しで残る） | ペルソナ単位のロック（プロセス内 RLock）でロック内再検査を含めて原子化。競合に負けた側は既存の出来事へ相乗りし、Pulse を起こさずタイマーだけ張り直す |
+| 4 | PulseDispatcher が受け口の**任意の**例外で直接応答へフォールバックしていたため、タイマー装填だけ転んだ並びで同じ発話がもう一度処理された（二重応答） | 受け口が `UserUtteranceError` に「どこまで実行したか」（`side_effects_done` / `fallback_safe`）を載せて送出。フォールバックは副作用の手前で転んだときだけ。副作用の後は呼び直さず、元の例外をそのまま上へ通す（握り潰すと `handle_user_input_stream` の LLMError 変換に届かず、画面に何も出ないまま応答が消える） |
+| 5 | 新規会話の初回発話だけ `run_sea_user(..., "", event_callback=...)` の裸呼び出しになり、選択 Playbook・引数・pre-spell が落ちていた（継続発話の closure は保持していた） | `pulse_options`（metadata / meta_playbook / args / pre_spells / event_callback）を runtime → dispatcher → 受け口 → 会話開始まで通す。仲裁の engage closure も同じ値を持つ |
+| 6 | 出来事の開設失敗を WARN で握り潰して応答へ進んでいた | **開設の成功を Pulse 起動の前提にする**（失敗は送出）。旧経路（Track 時代の `on_track_activated`）は同じ失敗を握り潰していたが、あの頃の「いま会話中か」の正典は Track の status であり、出来事は付随的な記録にすぎなかった。正典の持ち主が変わったので失敗の扱いも変わる——記録なしの応答は経路判定・仲裁・沈黙タイマー・スルースを揃って狂わせる。なお「台帳そのものが無い環境」（manager / SessionLocal 不在）は従来どおり素通し（壊れているのではなく存在しないので、判定は一貫して「会話していない」に倒れる） |
+| 7 | 判断 Playbook のプロンプトが、6b でスキーマと finalize から落ちた欄（`promotions` / `new_desires` / `desire_reviews`）と退役した参照 namespace（`desire:` / `track:`）をまだ指示していた | 3 枚の JSON から削除。再発防止として、判断 Playbook の全文に退役欄名・退役 namespace が現れないことの機械検査を追加 |
+
+**⑦（migration）への引き継ぎ**: 直したのは `builtin_data/playbooks/public/` の JSON だけで、**DB の `playbooks` テーブルは触っていない**（`scripts/import_playbook.py` はリリース時の運用）。既存の世界では取り込みまで旧プロンプトが残る。
+
+### 8.6 副作用として縮退した表示
+
+`api/routes/people/activity.py` の「最近」ダイジェストは、Pulse の Track 刻印から autonomous 種別を拾っていた。書き手が消えたので**対象は meta_judgment Pulse だけになる**。旧ログの `/spell track_*` 引数から Track の題を引く解決器（`track_resolver`）も撤去し、素の文言へ縮退する。供給源の作り直しはライフビュー本体の世代交代（autonomous_behavior_v3.md §9-9「暮らしの窓」）と同じ工事に属する。

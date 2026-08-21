@@ -34,8 +34,8 @@ def test_mode_gate_applies_at_registered_callable_boundary() -> None:
         return "executed"
 
     wrapped = _wrap_with_authorization_gate(
-        "track_create",
-        _schema("track_create", spell=True),
+        "purpose_close",
+        _schema("purpose_close", spell=True),
         raw,
     )
     with persona_context(

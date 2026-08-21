@@ -552,28 +552,25 @@ class TestChronicleCharBudget(unittest.TestCase):
         self.assertTrue(ctx)
         self.assertTrue(any("Invalid SAIVERSE_CHRONICLE_CHAR_BUDGET" in m for m in cm.output))
 
-    def test_track_chronicle_path_unaffected(self):
-        """origin_track_id path (Track Chronicle) must stay count-based (§6.2 item 5).
+    def test_count_based_path_ignores_env_budget(self):
+        """char_budget=None は env を無視して従来の件数ベースのままであること。
 
-        Calling with char_budget=None (as the Track caller does) must not invoke
-        the budget ladder, regardless of the env var.
+        (旧 test_track_chronicle_path_unaffected。Track Chronicle は退役したが
+        char_budget=None の経路自体は生成スクリプト等に残るので、その保証を
+        Track に依存しない形で残す。)
         """
-        # Build a Track-scoped hierarchy.
-        lv1_ids = []
         for i in range(15):
             start = (i + 1) * 100
             end = start + 99
-            entry = create_entry(
+            create_entry(
                 self.conn, level=1, content=f"T{i} " + ("t" * 200),
                 source_ids=[], start_time=start, end_time=end,
-                source_count=1, message_count=20, origin_track_id="track-x",
+                source_count=1, message_count=20,
             )
-            lv1_ids.append(entry.id)
         with mock.patch.dict(os.environ, {"SAIVERSE_CHRONICLE_CHAR_BUDGET": "100"}):
             # Even with a tiny env budget, None means legacy: no promotion re-run.
             ctx = get_episode_context(
                 self.conn, max_entries=50, char_budget=None,
-                origin_track_id="track-x",
             )
         # All 15 Lv1 present (no budget-driven coarsening), proving env ignored.
         self.assertEqual(len(ctx), 15)

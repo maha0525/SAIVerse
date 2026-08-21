@@ -41,8 +41,8 @@ mock シムの不変条件は回帰スイート `tests/test_day_sim_regression.p
 ## `--real` の前提
 
 1. テスト環境を用意（`python test_fixtures/setup_test_env.py`、環境変数は `SAIVERSE_HOME=test_data/.saiverse` / `SAIVERSE_USER_DATA_DIR=test_data/user_data` の test_fixtures 流儀）
-2. 判断点 playbook 5 本をその DB に import：
-   `python scripts/import_playbook.py --file builtin_data/playbooks/public/judgment_day_open.json`（day_open / post_session / post_conversation / on_event / day_close の 5 ファイル）
+2. 判断点 playbook 4 本をその DB に import：
+   `python scripts/import_playbook.py --file builtin_data/playbooks/public/judgment_day_open.json`（day_open / post_session / on_event / day_close の 4 ファイル）
 3. `persona_id` を実在ペルソナに書き換え、`LIGHTWEIGHT_MODEL` が設定されていることを確認（セッション実行は軽量モデル）
 4. 施設を使いたい場合は Building にロールタグを付与（任意。無ければ own_room で全部進む）:
    `sqlite3 <db> "UPDATE building SET FACILITY_ROLES='[\"library\"]' WHERE BUILDINGID='<id>';"`

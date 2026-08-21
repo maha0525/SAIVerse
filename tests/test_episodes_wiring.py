@@ -30,7 +30,7 @@ from sqlalchemy.pool import StaticPool
 
 from database.models import AI, Base, City, Episode, Item, User
 from saiverse import clock, day_plan, episodes
-from saiverse.day_scenario import TrackSimUserEventDriver
+from saiverse.day_scenario import EpisodeSimUserEventDriver
 from saiverse.track_manager import TrackManager
 from sea.pulse_context import PulseContext
 from sea.work_session import ENDED_ERROR, ENDED_FINISHED, run_work_session
@@ -246,7 +246,7 @@ def test_open_non_conversation_ignores_closed_rows(session_factory):
 
 def test_conversation_episode_opens_and_closes_on_virtual_clock(session_factory):
     manager = _make_manager(session_factory)
-    driver = TrackSimUserEventDriver()
+    driver = EpisodeSimUserEventDriver()
 
     start = datetime(2026, 7, 4, 15, 0, 0)
     clock.enable_virtual(start)
@@ -289,7 +289,7 @@ def test_conversation_episode_opens_and_closes_on_virtual_clock(session_factory)
 
 def test_conversation_leave_without_conversation_creates_nothing(session_factory):
     manager = _make_manager(session_factory)
-    driver = TrackSimUserEventDriver()
+    driver = EpisodeSimUserEventDriver()
     assert driver.end_conversation(manager, PERSONA_ID) is False
     assert _episode_rows(session_factory) == []
 
@@ -392,7 +392,7 @@ class FakeRuntime:
     def _store_memory(self, persona, text, *, role="assistant", tags=None,
                       pulse_id=None, metadata=None, playbook_name=None,
                       pulse_context=None, line_role=None, line_id=None,
-                      origin_track_id=None, scope=None, paired_action_text=None,
+                      scope=None, paired_action_text=None,
                       thought_signature=None, spell_origin_id=None, spell_seq=None,
                       return_message_id=False, beat_state=None):
         self._store_seq += 1

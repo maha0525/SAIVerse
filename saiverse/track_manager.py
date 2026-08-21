@@ -19,6 +19,14 @@ NOTE: 「待ち (waiting) Track」機構は v0.31 (2026-05-09) で廃止され�
 Phase 5 の時間差ツール基盤が同等機能 (Pulse 中断 → 完了通知で再開) を
 提供する。詳細: docs/intent/persona_cognition/handoff_waiting_track_removal.md
 
+NOTE (2026-08-21, track_retirement.md §2 住人 2): **会話は Track を経由しない**。
+ユーザーとの会話の器 (出来事の open / main_line 起動 / 沈黙タイマー) は
+``saiverse/user_conversation.py`` へ移り、それに伴い本クラスから wait_response
+タイマー機構・状態遷移 observer・``on_track_activated`` hook・
+``get_entry_line_role`` が撤去された。残る読み手は時間割の track:N コマ
+(day_plan)・想起の歩き (recall_walk)・経験の台帳・一部 API で、テーブルごとの
+退役は撤去順序④以降。
+
 詳細: docs/intent/persona_action_tracks.md
 """
 from __future__ import annotations
@@ -27,14 +35,13 @@ import json
 import logging
 import re
 import uuid
-from datetime import datetime, timedelta
-from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
+from datetime import datetime
+from typing import Callable, Iterable, List, Optional
 
 from sqlalchemy import func as sa_func
 from sqlalchemy.orm import Session
 
 from database.models import ActionTrack
-from saiverse.persona_task_manager import PersonaTaskManager
 
 _SHORT_REF_RE = re.compile(r"^track:(\d+)$", re.IGNORECASE)
 
@@ -55,9 +62,6 @@ LIVE_STATUSES = ALL_STATUSES - TERMINAL_STATUSES
 ACTIVATABLE_STATUSES = frozenset({
     STATUS_UNSTARTED, STATUS_PENDING, STATUS_ALERT,
 })
-
-# 候補補充 Track (autonomous_desire.md §11) の識別子 (track_metadata.role)。
-DESIRE_REFILL_ROLE = "desire_refill"
 
 
 class TrackError(Exception):
@@ -87,161 +91,18 @@ class TrackManager:
     分離が必要になった場合は呼び出し側でロックを追加する。
     """
 
-    def __init__(
-        self,
-        session_factory: Callable[[], Session],
-        event_scheduler: Optional[Any] = None,
-        wait_response_timeout_provider: Optional[
-            Callable[[Any], Optional[Tuple[int, Optional[datetime]]]]
-        ] = None,
-        wait_response_timeout_callback: Optional[
-            Callable[[str, str], None]
-        ] = None,
-    ):
+    def __init__(self, session_factory: Callable[[], Session]):
         self.SessionLocal = session_factory
-        # Phase 4-e: wait_response timeout 等の予約 push に使う。None の場合
-        # (tools 等の独立インスタンス) はタイマー機構が無効化される。
-        self.event_scheduler = event_scheduler
-        # 2026-05-09: post_complete_behavior='wait_response' な Track が活性化したまま
-        # 長期 idle になり、メタ判断が抑止されて自律稼働が止まる症状の脱出経路
-        # (docs/intent/persona_cognition/handoff_2026-05-09.md §4)。
-        # provider: ``track -> (timeout_minutes, base_time) or None``
-        #   - None を返したら Track はタイムアウト対象外 (= wait_response でない、
-        #     ペルソナがロードされていない、等)。
-        #   - base_time は最終メッセージの created_at 想定。NULL ならスケジュール側で
-        #     ``datetime.now()`` にフォールバックする (= ペルソナが activate した
-        #     直後の Track が即タイムアウトする事故を回避)。
-        # callback: タイムアウト発火後に呼ばれる。Track の状態はもう動かさない
-        # (life.md §7 案 Y, 2026-07-13): 「いま」の真実は開いているエピソードが持つ。
-        #   - 用途: 会話 Track なら会話の出来事 close + post_conversation 判断
-        #     (autonomy_wiring.handle_wait_response_timeout)。それ以外 (social 等)
-        #     は WARNING のみ (旧フォールバック先の v1 メタ判断は退役 —
-        #     track_retirement.md §7.3 裁定 3)。
-        # どちらも None の場合はタイマー機構が完全に無効化される (テスト容易性)。
-        self.wait_response_timeout_provider = wait_response_timeout_provider
-        self.wait_response_timeout_callback = wait_response_timeout_callback
-        # Track 内タスク (旧 track_task) は統合 persona_task テーブルに一本化された。
-        # 旧 ActionTrack.tasks_json チェックリスト API は PersonaTaskManager の
-        # track_task 互換層へ委譲する (unified_task_model.md §5 step 4)。
-        self._task_manager = PersonaTaskManager(session_factory)
         # NOTE: 旧 alert observer 機構 (set_alert + _alert_observers) は撤去済み
         # (track_retirement.md §7.4)。最後の発火元だったユーザー発話の仲裁は
         # on_event 判断点への直結 (autonomy_wiring.handle_user_utterance_conflict)
         # が後継。STATUS_ALERT 定数は既存 DB 行の互換のため残る (書き手なし)。
-        # 状態遷移 (alert 以外) を購読する observer 群。
-        # signature: (persona_id: str, track_id: str, pulse_id: Optional[str]) -> None
-        # 用途:
-        # - メタ判断ターン (line_role='meta_judgment', scope='discardable') を
-        #   Track 切替起点で 'committed' に昇格する hook (Intent A v0.14
-        #   「[B] 移動: 分岐ターンをそのまま残す」)
-        # - PulseController が current pulse の origin_track_id と一致する状態
-        #   変化を観測したら cancellation_token.cancel() を発動 (pulse_dispatch.md §6.2)
-        self._status_change_observers: List[Callable[[str, str, Optional[str]], None]] = []
-        # Track activate (= running 遷移) を購読する observer 群。
-        # signature: (persona_id: str, track: ActionTrack, pulse_id: Optional[str],
-        #             suppress_pulse: bool) -> None
-        # 用途: pulse_dispatch.md §5 で定義した on_track_activated hook。
-        # Handler 側で _inject_track_context や Pulse 起動を担う統一経路。
-        # `_status_change_observers` とは別軸で、activate 時のみ発火する
-        # (pause / complete / abort 等では発火しない)。
-        # suppress_pulse=True はライフビューの停止パッケージ (activity/stop) 用:
-        # Handler は Track 切替通知の注入のみ行い、Pulse 起動をスキップする
-        # (docs/intent/persona_activity_view.md §6.3)。
-        self._track_activated_observers: List[Callable[..., None]] = []
-
-    # ------------------------------------------------------------------
-    # Observer
-    # ------------------------------------------------------------------
-
-    def add_status_change_observer(
-        self, callback: Callable[[str, str, Optional[str]], None]
-    ) -> None:
-        """alert 以外の状態遷移 (activate/pause/complete/abort) を購読する。
-
-        callback signature: (persona_id, track_id, pulse_id) -> None
-        pulse_id は当該遷移を起こした Pulse の ID。Pulse 外で呼ばれた場合 (CLI /
-        テスト) は None。observer 側は None ならスキップして良い。
-
-        SAIVerseManager 起動時に以下を登録する:
-        - `_promote_meta_judgment_in_pulse` — Intent A v0.14 [B] 移動の hook
-        - `PulseController._on_track_status_change` — pulse_dispatch.md §6.2 の
-          current pulse cancel 経路
-
-        observer の例外は握り潰さず WARN ログ。
-        """
-        if callback in self._status_change_observers:
-            return
-        self._status_change_observers.append(callback)
-
-    def remove_status_change_observer(
-        self, callback: Callable[[str, str, Optional[str]], None]
-    ) -> None:
-        """登録済みの status_change observer を解除する。未登録なら何もしない。"""
-        try:
-            self._status_change_observers.remove(callback)
-        except ValueError:
-            pass
-
-    def _notify_status_change(
-        self, persona_id: str, track_id: str, pulse_id: Optional[str]
-    ) -> None:
-        """状態遷移 (alert 以外) を全 observer に通知する。"""
-        for cb in list(self._status_change_observers):
-            try:
-                cb(persona_id, track_id, pulse_id)
-            except Exception:
-                logging.exception(
-                    "[track] status_change observer raised: cb=%r persona=%s track=%s pulse=%s",
-                    cb, persona_id, track_id, pulse_id,
-                )
-
-    def add_track_activated_observer(
-        self, callback: Callable[..., None]
-    ) -> None:
-        """Track の activate (= running 遷移) を購読する callback を登録する。
-
-        callback signature: (persona_id, track, pulse_id, suppress_pulse) -> None
-        ``track`` は遷移後の ``ActionTrack`` (detached, 読み取り専用想定)。
-        ``pulse_id`` は呼び出し元の Pulse ID (Pulse 外なら None)。
-        ``suppress_pulse`` が True のとき、Handler は activate に伴う Pulse 起動を
-        スキップする (Track 切替通知の注入は行う)。
-
-        pulse_dispatch.md §5 で定義した on_track_activated hook の登録口。
-        Handler 側で track_type をフィルタして自分の責務範囲を判定する
-        (TrackManager は種別判定の責務を持たない)。
-
-        observer の例外は外に伝播させない (1 つの observer の障害で他の
-        observer や状態遷移処理を巻き込まないため)。
-        """
-        if callback in self._track_activated_observers:
-            return
-        self._track_activated_observers.append(callback)
-
-    def remove_track_activated_observer(
-        self, callback: Callable[..., None]
-    ) -> None:
-        """登録済みの track_activated observer を解除する。未登録なら何もしない。"""
-        try:
-            self._track_activated_observers.remove(callback)
-        except ValueError:
-            pass
-
-    def _notify_track_activated(
-        self,
-        persona_id: str,
-        track: Any,
-        pulse_id: Optional[str],
-        suppress_pulse: bool = False,
-    ) -> None:
-        """Track の activate を全 observer に通知する。各 observer の例外は握り潰さず WARN ログ。"""
-        for cb in list(self._track_activated_observers):
-            try:
-                cb(persona_id, track, pulse_id, suppress_pulse)
-            except Exception:
-                logging.exception(
-                    "[track] track_activated observer raised: cb=%r persona=%s track=%s",
-                    cb, persona_id, getattr(track, "track_id", None),
-                )
+        # NOTE (2026-08-21): 状態遷移 observer (_status_change_observers) と
+        # activate observer (on_track_activated hook) も購読者ごと撤去した。
+        # 前者の購読者はメタ判断ターンの scope 昇格と PulseController の Pulse
+        # cancel で、どちらも発火元 (v1 メタ判断の Track 操作) が既に退役していた。
+        # 後者は会話の器そのもので、saiverse/user_conversation.py が直接呼ぶ形に
+        # 置き換わった。
 
     # ------------------------------------------------------------------
     # CRUD
@@ -329,63 +190,7 @@ class TrackManager:
         finally:
             db.close()
 
-        # running 作成時は activate 相当の後処理を実行
-        if initial_status == STATUS_RUNNING:
-            for displaced_id in displaced_track_ids:
-                self._cancel_wait_response_timeout(displaced_id)
-            self._schedule_wait_response_timeout(track)
-            for displaced_id in displaced_track_ids:
-                self._notify_status_change(persona_id, displaced_id, None)
-            self._notify_status_change(persona_id, track_id, None)
-            self._notify_track_activated(persona_id, track, None)
-
         return track_id
-
-    def ensure_desire_refill_track(self, persona_id: str) -> str:
-        """ペルソナの「やりたいことを探す」永続 Track を get-or-create する。
-
-        候補補充 Track (autonomous_desire.md §11): 候補生成の動線 + idle 即帰宅の
-        歯止め。``track_metadata.role == 'desire_refill'`` で識別する singleton。
-        全ペルソナ共通・永続 (complete/abort 不可)・autonomous (sub_line/軽量)。
-        自律 ON 時に ensure する。既に在ればその track_id を返す。
-
-        Returns:
-            track_id (UUID 文字列)
-        """
-        if not persona_id:
-            raise ValueError("persona_id is required")
-        db = self.SessionLocal()
-        try:
-            rows = db.query(ActionTrack).filter_by(persona_id=persona_id).all()
-            for t in rows:
-                if not t.track_metadata:
-                    continue
-                try:
-                    md = json.loads(t.track_metadata)
-                except (TypeError, ValueError):
-                    continue
-                if isinstance(md, dict) and md.get("role") == DESIRE_REFILL_ROLE:
-                    return t.track_id
-        finally:
-            db.close()
-
-        metadata = json.dumps(
-            {"role": DESIRE_REFILL_ROLE, "entry_line_role": "sub_line"},
-            ensure_ascii=False,
-        )
-        return self.create(
-            persona_id=persona_id,
-            track_type="autonomous",
-            title="やりたいことを探す",
-            intent=(
-                "自分の生きる目的・趣味・興味・これまでの記憶をもとに、"
-                "これからやってみたいことを見つけて、purpose_seed スペルで候補として"
-                "書き留める。やることが尽きたときに立ち寄る、自分のための探索。"
-            ),
-            is_persistent=True,
-            metadata=metadata,
-            initial_status=STATUS_UNSTARTED,
-        )
 
     def get(self, track_id: str) -> ActionTrack:
         """Track を取得。存在しなければ TrackNotFoundError。"""
@@ -410,32 +215,6 @@ class TrackManager:
             db.commit()
         finally:
             db.close()
-
-    def get_entry_line_role(self, track_id: str) -> str:
-        """Read the Track's entry_line_role from its metadata JSON.
-
-        The entry_line_role determines which model/cache type drives the Track's
-        Pulse: 'main_line' (heavyweight, used for other-talk Tracks) or
-        'sub_line' (lightweight, used for autonomous work). Set at creation
-        time by track_create and immutable thereafter (Intent A v0.14, Intent B
-        v0.11). Defaults to 'main_line' for safety when metadata is missing or
-        malformed — matches Intent A invariant 9 (other-talk is heavyweight).
-        """
-        try:
-            track = self.get(track_id)
-        except TrackNotFoundError:
-            return "main_line"
-        if not track.track_metadata:
-            return "main_line"
-        try:
-            meta = json.loads(track.track_metadata)
-            if isinstance(meta, dict):
-                role = meta.get("entry_line_role")
-                if role in ("main_line", "sub_line"):
-                    return role
-        except (TypeError, ValueError):
-            pass
-        return "main_line"
 
     def list_for_persona(
         self,
@@ -477,27 +256,11 @@ class TrackManager:
     # 状態遷移
     # ------------------------------------------------------------------
 
-    def activate(
-        self,
-        track_id: str,
-        *,
-        pulse_id: Optional[str] = None,
-        suppress_pulse: bool = False,
-    ) -> ActionTrack:
+    def activate(self, track_id: str) -> ActionTrack:
         """Track をアクティブ化する。
 
         - 同一ペルソナの既存 running が居れば pending に押し出す
         - 自身が completed/aborted なら InvalidTrackStateError
-
-        ``pulse_id`` は呼び出し元の Pulse 識別子。Pulse 完了時の deferred apply
-        ルートから渡される。観察者 (status_change observer) が pulse_id ベースで
-        メタ判断ターンを昇格する用途。Pulse 外 (CLI/テスト) では None で OK。
-
-        ``suppress_pulse=True`` はサイレント activate: track_activated observer に
-        フラグを伝搬し、Handler 側で activate に伴う Pulse 起動をスキップさせる。
-        ライフビューの停止パッケージが「ユーザー待ちに戻す」ために使う —
-        Track 切替通知の SAIMemory 注入は通常通り行われる
-        (docs/intent/persona_activity_view.md §6.3)。
         """
         db = self.SessionLocal()
         try:
@@ -542,27 +305,9 @@ class TrackManager:
             raise
         finally:
             db.close()
-        # 押し出された Track の wait_response タイマーを解除する。activate 経由の
-        # auto-pause は _set_status を通らないので、ここで明示的に解除しないと
-        # 旧 running 用のタイマーが残り続けて誤発火する。
-        for displaced_id in displaced_track_ids:
-            self._cancel_wait_response_timeout(displaced_id)
-        # 新たに running になった Track が wait_response 型なら自動 pause タイマーを予約。
-        self._schedule_wait_response_timeout(track)
-        # 押し出された Track にも status_change を通知 (pulse_dispatch.md §6.2:
-        # 進行中 Pulse の cancel 経路。押し出された Track の Pulse は意味を失うので
-        # PulseController の observer が cancel する)。
-        for displaced_id in displaced_track_ids:
-            self._notify_status_change(track.persona_id, displaced_id, pulse_id)
-        # Notify status change observers for the activated track itself
-        # (commit/close 完了後、別 session 不要なため)
-        self._notify_status_change(track.persona_id, track_id, pulse_id)
-        # Notify track_activated observers (pulse_dispatch.md §5)
-        # Handler 側が _inject_track_context や Pulse 起動を担う統一経路。
-        self._notify_track_activated(track.persona_id, track, pulse_id, suppress_pulse)
         return track
 
-    def pause(self, track_id: str, *, pulse_id: Optional[str] = None) -> ActionTrack:
+    def pause(self, track_id: str) -> ActionTrack:
         """running -> pending。
 
         alert からの pause は **禁止** (Intent A v0.9 の 03_data_model.md §
@@ -573,248 +318,14 @@ class TrackManager:
         対応せず無視できてしまう。alert の解消は実際に対応 (activate /
         complete / abort) を取った時のみ許される。
         """
-        result = self._set_status(
+        return self._set_status(
             track_id,
             new_status=STATUS_PENDING,
             allowed_from={STATUS_RUNNING},
             log_label="paused",
-            pulse_id=pulse_id,
-        )
-        self._cancel_wait_response_timeout(track_id)
-        return result
-
-    # ------------------------------------------------------------------
-    # Phase 4-e: wait_response timeout の EventScheduler 連携
-    # ------------------------------------------------------------------
-
-    def ensure_wait_response_timeout(
-        self, persona_id: str, *, only_if_absent: bool = False
-    ) -> None:
-        """ペルソナの現在 running な Track に wait_response タイムアウトタイマーを
-        張り直す (冪等)。
-
-        タイマーの仕事は「Track を pause する」ではなく「会話出来事を閉じ、
-        判断 (post_conversation / メタ判断) を起動する」こと (life.md §7 案 Y、
-        2026-07-13 — Track の状態は時間経過で動かさない)。
-
-        wait_response タイマーは Track が running に遷移する瞬間 (activate /
-        create(initial_status=running)) にしか予約されず、EventScheduler は
-        インメモリのため**再起動で失われる**。起動時に DB からロードした
-        running Track にはタイマーが無い状態になる。本メソッドはそれを補う。
-
-        対象外判定 (wait_response 以外 / AUTONOMY_ENABLED=False /
-        ペルソナ unloaded 等) はすべて ``wait_response_timeout_provider`` に
-        委ねる (= activate 時と同じ単一ゲート)。同 key で再 schedule しても
-        EventScheduler が上書きするので冪等。
-
-        Args:
-            only_if_absent: True なら**有効な予約が無いときだけ**張る
-                (``EventScheduler.schedule_if_absent``)。起動時の復旧など
-                「失われた予約を埋める」用途で使う。上書きしてしまうと、
-                その間に通常経路 (ユーザー発話への同期応答 / activate) が
-                張った予約を潰し、基準時刻が now へ丸め直されて**期限が後退する**。
-        """
-        running = self.get_running(persona_id)
-        if running is not None:
-            self._schedule_wait_response_timeout(running, only_if_absent=only_if_absent)
-
-    @staticmethod
-    def _wait_response_timeout_key(track_id: str) -> str:
-        return f"wait_response_timeout:{track_id}"
-
-    def _schedule_wait_response_timeout(
-        self, track: Any, *, only_if_absent: bool = False
-    ) -> None:
-        """running になった Track が wait_response 型ならタイムアウトタイマーを予約する。
-
-        タイマー発火時の仕事は「会話出来事を閉じて判断を起動する」こと
-        (life.md §7 案 Y) — Track の状態遷移はもう起こさない。
-
-        ``wait_response_timeout_provider`` で「対象か / タイマー基準は」を SAIVerseManager
-        に委ねる。本メソッドはスケジューリングのみを行う。
-
-        基準時刻 (base_time) は最終メッセージの created_at を想定する。これにより:
-        - 直近メッセージがあった Track: 直近 + N 分後に発火
-        - メッセージが無い Track: base_time=None → ``now`` にフォールバック
-        - **base_time が現在時刻より過去**: activate 時点が事実上の「ユーザー宛て呼びかけ」
-          開始なので、``now`` を基準にしてフレッシュな N 分の猶予を与える
-          (2026-05-10 修正)。これがないと、長期 idle Track をペルソナが
-          自律 activate するたびに「即タイムアウト → 即判断発火 → 再 activate」の
-          タイトループが起きる (メタ判断 v2 で構造化出力が Track 操作を強制する
-          ようになったことで顕在化した既存設計の欠陥。2026-05-10 時点は
-          「即 pause」も伴っていたが、その pause は life.md §7 案 Y で撤去した
-          — フォールバック自体の必要性は変わらない)。
-
-        基底時刻が条件未達の場合の race は、_handle_wait_response_timeout 側で
-        provider を再呼び出しして idle_for を見て再評価する。
-        """
-        if (
-            self.event_scheduler is None
-            or self.wait_response_timeout_provider is None
-            or track is None
-        ):
-            return
-        try:
-            result = self.wait_response_timeout_provider(track)
-        except Exception:
-            logging.exception(
-                "[track] wait_response_timeout_provider raised for %s",
-                getattr(track, "track_id", "?"),
-            )
-            return
-        if result is None:
-            return
-        minutes, base_time = result
-        if not minutes or minutes <= 0:
-            return
-        now = datetime.now()
-        # base_time が None / 過去のときは activate 時刻 (now) を基準にする。
-        # 過去の最終メッセージ時刻をそのまま使うと、長期 idle 状態の Track を
-        # 自律 activate した瞬間に「過去 + 30分 = まだ過去」で EventScheduler が
-        # 即発火してしまい、メタ判断ループに陥る (上記 docstring 参照)。
-        if base_time is None or base_time < now:
-            base = now
-        else:
-            base = base_time
-        fire_at = base + timedelta(minutes=int(minutes))
-        track_id = track.track_id
-        persona_id = track.persona_id
-
-        def _on_timeout(tid: str = track_id, pid: str = persona_id) -> None:
-            self._handle_wait_response_timeout(tid, pid)
-
-        key = self._wait_response_timeout_key(track_id)
-        if only_if_absent:
-            # 復旧経路: 判定と登録を EventScheduler のロック内で一息に行う。
-            # has_key で確認してから schedule する形 (check-then-act) では、
-            # その隙間に通常経路が入れた予約を上書きしうる。
-            armed = self.event_scheduler.schedule_if_absent(
-                fire_at=fire_at, callback=_on_timeout, key=key,
-            )
-            if not armed:
-                logging.info(
-                    "[track] wait_response timeout already armed: track=%s persona=%s "
-                    "(leaving the existing reservation untouched)",
-                    track_id, persona_id,
-                )
-                return
-        else:
-            self.event_scheduler.schedule(
-                fire_at=fire_at, callback=_on_timeout, key=key,
-            )
-        logging.info(
-            "[track] scheduled wait_response timeout: track=%s persona=%s "
-            "base=%s timeout_min=%s fire_at=%s only_if_absent=%s",
-            track_id, persona_id,
-            base.isoformat(timespec="seconds"),
-            minutes,
-            fire_at.isoformat(timespec="seconds"),
-            only_if_absent,
         )
 
-    def _cancel_wait_response_timeout(self, track_id: str) -> None:
-        """wait_response タイマーをキャンセル (pause/abort/complete/alert/活性置換 等で呼ぶ)。"""
-        if self.event_scheduler is None:
-            return
-        self.event_scheduler.cancel(self._wait_response_timeout_key(track_id))
-
-    def _handle_wait_response_timeout(self, track_id: str, persona_id: str) -> None:
-        """EventScheduler から呼ばれる wait_response timeout callback。
-
-        race 回避のため発火時にもう一度 provider を呼んで状態を再評価する:
-        - Track が既に running でなければ: 何もしない (ユーザー発話等で抜けた)
-        - provider が None を返す (= もう wait_response 対象でない): 何もしない
-        - 最終メッセージから N 分未満しか経過していない: 再スケジュール
-        - 上記をクリアしたら: callback を呼ぶ (会話出来事の close / メタ判断発火)
-
-        life.md §7 案 Y (2026-07-13): このタイムアウトはもう Track の状態を
-        動かさない (running のまま)。「いま何をしているか」の真実は開いている
-        エピソードが持つため、時間経過で Track を pending に落とす操作
-        (旧: ``self.pause(track_id)``) は死んだ。残る仕事は callback 起動のみ —
-        会話 Track なら出来事の close + post_conversation 判断
-        (``autonomy_wiring.handle_wait_response_timeout``)、それ以外は WARNING
-        のみ (v1 メタ判断は退役)。Track が同一のまま残るため、次のユーザー発話は
-        ``on_user_utterance`` の「running のまま直接応答」経路に乗り、
-        activate に伴う「Track 切替通知」は注入されない
-        (docs/issues/redundant_track_switch_notification_on_reactivation.md の根治)。
-        """
-        try:
-            current = self.get(track_id)
-        except TrackNotFoundError:
-            logging.debug(
-                "[track] wait_response timeout: track %s not found (deleted?)",
-                track_id,
-            )
-            return
-
-        if current.status != STATUS_RUNNING:
-            logging.debug(
-                "[track] wait_response timeout fired but status=%s (no longer running): track=%s",
-                current.status, track_id,
-            )
-            return
-
-        if self.wait_response_timeout_provider is None:
-            return
-        try:
-            result = self.wait_response_timeout_provider(current)
-        except Exception:
-            logging.exception(
-                "[track] wait_response_timeout_provider raised on fire for %s",
-                track_id,
-            )
-            return
-        if result is None:
-            # ペルソナ unloaded 等で対象外になった
-            logging.debug(
-                "[track] wait_response timeout fired but provider returned None: track=%s",
-                track_id,
-            )
-            return
-        minutes, base_time = result
-        if not minutes or minutes <= 0:
-            return
-
-        now = datetime.now()
-        if base_time is not None:
-            idle_for = now - base_time
-            if idle_for < timedelta(minutes=int(minutes)):
-                # まだ閾値に達していない → 残り時間で再予約
-                remaining = timedelta(minutes=int(minutes)) - idle_for
-                fire_at = now + remaining
-                track_id_local = track_id
-                persona_id_local = persona_id
-
-                def _on_retry(tid: str = track_id_local, pid: str = persona_id_local) -> None:
-                    self._handle_wait_response_timeout(tid, pid)
-
-                self.event_scheduler.schedule(
-                    fire_at=fire_at,
-                    callback=_on_retry,
-                    key=self._wait_response_timeout_key(track_id),
-                )
-                logging.debug(
-                    "[track] wait_response timeout re-scheduled (idle=%ss < threshold=%dmin): track=%s",
-                    int(idle_for.total_seconds()), minutes, track_id,
-                )
-                return
-
-        # 条件成立 → callback (Track の状態は動かさない — life.md §7 案 Y)
-        logging.info(
-            "[track] wait_response timeout reached: track=%s persona=%s timeout_min=%s",
-            track_id, persona_id, minutes,
-        )
-
-        if self.wait_response_timeout_callback is not None:
-            try:
-                self.wait_response_timeout_callback(persona_id, track_id)
-            except Exception:
-                logging.exception(
-                    "[track] wait_response_timeout_callback raised: persona=%s track=%s",
-                    persona_id, track_id,
-                )
-
-    def complete(self, track_id: str, *, pulse_id: Optional[str] = None) -> ActionTrack:
+    def complete(self, track_id: str) -> ActionTrack:
         """running -> completed。永続 Track は不可。"""
         db = self.SessionLocal()
         try:
@@ -838,11 +349,9 @@ class TrackManager:
             raise
         finally:
             db.close()
-        self._cancel_wait_response_timeout(track_id)
-        self._notify_status_change(track.persona_id, track_id, pulse_id)
         return track
 
-    def abort(self, track_id: str, *, pulse_id: Optional[str] = None) -> ActionTrack:
+    def abort(self, track_id: str) -> ActionTrack:
         """任意の非終了状態 -> aborted。永続 Track は不可。"""
         db = self.SessionLocal()
         try:
@@ -866,8 +375,6 @@ class TrackManager:
             raise
         finally:
             db.close()
-        self._cancel_wait_response_timeout(track_id)
-        self._notify_status_change(track.persona_id, track_id, pulse_id)
         return track
 
     # NOTE: 旧 set_alert (alert 状態への遷移 + observer 通知) は撤去済み
@@ -988,43 +495,11 @@ class TrackManager:
             f"(expected 'track:N' or UUID format)"
         )
 
-    # ------------------------------------------------------------------
-    # Track タスクリスト
-    # ------------------------------------------------------------------
-
-    def get_tasks(self, track_id: str) -> List[Dict[str, Any]]:
-        """Track のタスクリストを ``[{id, title, done}]`` で返す。
-
-        統合 persona_task テーブル (track_id バインド) から取得する。旧 tasks_json
-        互換の ``{title, done}`` に加え ``id`` を含む (呼び出し側は title/done のみ参照)。
-        """
-        return self._task_manager.get_track_tasks(track_id)
-
-    def add_task(self, track_id: str, title: str) -> List[Dict[str, Any]]:
-        """Track にタスクを追加して更新後のリストを返す。
-
-        persona_id は Track 行から導出する (統合テーブルは persona スコープ)。
-        """
-        persona_id = self._task_persona_id(track_id)
-        return self._task_manager.add_track_task(track_id, title, persona_id=persona_id)
-
-    def complete_task(self, track_id: str, index: int) -> List[Dict[str, Any]]:
-        """Track のタスクを完了にして更新後のリストを返す。"""
-        persona_id = self._task_persona_id(track_id)
-        return self._task_manager.complete_track_task(track_id, index, persona_id=persona_id)
-
-    def format_task_list(self, track_id: str) -> str:
-        """Track のタスクリストを Markdown チェックリスト形式で返す。"""
-        return self._task_manager.format_track_task_list(track_id)
-
-    def _task_persona_id(self, track_id: str) -> str:
-        """Track の persona_id を引く (タスク書き込みに必要)。存在しなければ raise。"""
-        db = self.SessionLocal()
-        try:
-            track = self._fetch_or_raise(db, track_id)
-            return track.persona_id
-        finally:
-            db.close()
+    # NOTE: 旧 Track タスクリスト API (get_tasks / add_task / complete_task /
+    # format_task_list) は 2026-08-21 に撤去した。委譲先の
+    # ``PersonaTaskManager`` の track_task 互換層 (get_track_tasks ほか) は
+    # 束 6 第二便で既に退役しており、**呼べば AttributeError になる委譲**が
+    # 呼び手ゼロのまま残っていた (track_retirement.md §7.2 ④群の取りこぼし)。
 
     def _fetch_or_raise(self, db: Session, track_id: str) -> ActionTrack:
         track = db.query(ActionTrack).filter_by(track_id=track_id).first()
@@ -1038,8 +513,6 @@ class TrackManager:
         new_status: str,
         allowed_from: Iterable[str],
         log_label: str,
-        *,
-        pulse_id: Optional[str] = None,
     ) -> ActionTrack:
         allowed_set = set(allowed_from)
         db = self.SessionLocal()
@@ -1059,7 +532,6 @@ class TrackManager:
             raise
         finally:
             db.close()
-        self._notify_status_change(track.persona_id, track_id, pulse_id)
         return track
 
     def _set_forgotten(self, track_id: str, value: bool) -> ActionTrack:

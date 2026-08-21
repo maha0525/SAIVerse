@@ -125,7 +125,10 @@ _TOOL_PHRASES: Dict[str, Tuple[str, str, List[str]]] = {
 _HIDDEN_TOOLS = frozenset({
     "track_create", "track_pause", "track_activate", "track_complete",
     "track_abort", "track_list", "task_add", "task_done",
-    "task_update_step", "task_decompose", "desire_add", "life_purpose_set",
+    "task_update_step", "task_decompose", "desire_add",
+    # life_purpose_set は 2026-08-21 に撤去済み (LIFE_PURPOSE 列の退役、
+    # autonomous_behavior_v3.md §9-5)。旧ログ互換のためここには残す。
+    "life_purpose_set",
     "track_parameter_set",
     # note_open/note_close は P3c① で退役済み (旧ログ互換のためここに残す。
     # 後継は memory_open/memory_close)
@@ -223,6 +226,7 @@ _SKIP_PLAYBOOK_NAMES = frozenset({
     "track_autonomous", "track_user_conversation", "track_social", "track_external",
     "meta_judgment", "meta_judgment_alert", "meta_judgment_idle_empty",
     "meta_judgment_idle_pending", "meta_judgment_running",
+    # meta_judgment_life_purpose は v1 メタ判断ごと退役済み。旧ログ互換で残す。
     "meta_judgment_life_purpose",
     # meta_exec_speak は 2026-08-17 に撤去済み (起動元の call_playbook ごと退役)。
     # 旧ログ互換のためここには残す。
@@ -233,34 +237,27 @@ _SKIP_PLAYBOOK_NAMES = frozenset({
 
 def _format_meta_judgment_result(
     spells_emitted: Optional[Sequence[Dict[str, Any]]],
-    track_resolver: Optional[Dict[str, Any]] = None,
 ) -> str:
     """メタ判断 (MetaLayer: alert/running/idle_pending/idle_empty/life_purpose)
     Pulse の結果を「○○をすることにした」に詳細化する。
 
     spells_emitted は meta_judgment_finalize が実行した /spell の一覧
-    ([{"name":..., "args":...}, ...])。track_resolver は {track_id: ActionTrack}
-    の辞書で、Track のタイトルと種別を引くのに使う。
+    ([{"name":..., "args":...}, ...])。
+
+    ⚠ 現れうるのは**旧ログの行だけ**。ここが読む /spell (track_* / life_purpose_set)
+    の書き手はすべて退役済みで、Track の題を引く解決器も 2026-08-21 に撤去した
+    (書き手が消えた後は古い行の装飾しか残らなかったため)。題を引けない参照は
+    素の文言へ縮退する。
     """
     if not spells_emitted:
         return "次にすることを考えた → 現状を続けることにした"
     for spell in spells_emitted:
         name = spell.get("name", "")
         args = spell.get("args", {})
+        # life_purpose_set は撤去済みのスペル。旧ログにしか現れない。
         if name == "life_purpose_set":
             return "生きる目的を考えた"
         if name == "track_activate":
-            tid = args.get("track_id", "")
-            track = (track_resolver or {}).get(tid)
-            if track is not None:
-                ttype = getattr(track, "track_type", "")
-                ttitle = getattr(track, "title", "")
-                if ttype == "user_conversation":
-                    return "次にすることを考えた → あなたと話すことにした"
-                if ttype == "social":
-                    return "次にすることを考えた → 他のペルソナと話すことにした"
-                if ttitle:
-                    return f"次にすることを考えた → 「{_truncate(ttitle, 24)}」をすることにした"
             return "次にすることを考えた → 別の作業に切り替えた"
         if name == "track_create":
             ttitle = args.get("title", "")
@@ -303,7 +300,6 @@ _JUDGMENT_KIND_LABELS: Dict[str, str] = {
 def _format_judgment_point_result(
     judgment_kind: str,
     spells_emitted: Optional[Sequence[Dict[str, Any]]],
-    track_resolver: Optional[Dict[str, Any]] = None,
 ) -> str:
     """判断点 Pulse の結果を「その節目で何を考えたか」+ (分かれば) 実際に
     動いたことの一言に詳細化する。
@@ -341,12 +337,7 @@ def _format_judgment_point_result(
                 )
             break
         if name == "track_complete":
-            track = (track_resolver or {}).get(args.get("track_id", ""))
-            ttitle = getattr(track, "title", "") if track is not None else ""
-            detail = (
-                f"「{_truncate(ttitle, 24)}」を完了にした"
-                if ttitle else "作業を完了にした"
-            )
+            detail = "作業を完了にした"
             break
     if detail:
         return f"{base} → {detail}"
@@ -362,7 +353,6 @@ def build_digest_label(
     playbook_names: Optional[Sequence[str]] = None,
     playbook_display_names: Optional[Dict[str, str]] = None,
     spells_emitted: Optional[Sequence[Dict[str, Any]]] = None,
-    track_resolver: Optional[Dict[str, Any]] = None,
     judgment_kind: Optional[str] = None,
 ) -> str:
     """Pulse 1 件をダイジェスト 1 行 (生活の言葉) に変換する。
@@ -385,11 +375,11 @@ def build_digest_label(
     """
     # 1. 判断点 Pulse (day_open/post_conversation/post_session/on_event/day_close)
     if judgment_kind:
-        return _format_judgment_point_result(judgment_kind, spells_emitted, track_resolver)
+        return _format_judgment_point_result(judgment_kind, spells_emitted)
 
     # 2. メタ判断 Pulse (MetaLayer: alert/running/idle_pending/idle_empty/life_purpose)
     if "meta_judgment" in line_roles:
-        return _format_meta_judgment_result(spells_emitted, track_resolver)
+        return _format_meta_judgment_result(spells_emitted)
 
     # 3. ツール実行
     phrases: List[str] = []

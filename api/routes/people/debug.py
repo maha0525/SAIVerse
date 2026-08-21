@@ -3,7 +3,7 @@
 設計: docs/intent/persona_cognition/debug_controller.md
 
 UC-2「割り込みと復帰」等の検証で、自律稼働のタイマー
-(AutonomyManager watchdog / wait_response timeout 30分) を無視して手動で
+(AutonomyManager watchdog / 会話の沈黙タイマー 30分) を無視して手動で
 ステップ実行する。発火系は LLM 呼び出しを伴うため別スレッドで投げ、
 API をブロックしない。
 
@@ -54,34 +54,15 @@ def _run_in_background(fn, *args, **kwargs) -> None:
 
 @router.post("/{persona_id}/debug/wrap-up-conversation", response_model=DebugActionResponse)
 def wrap_up_conversation(persona_id: str, manager=Depends(get_manager)):
-    """wait_response timeout 相当を即時発火 (会話出来事の close + 会話終了判断)。
+    """沈黙タイマー相当を即時発火 (会話出来事の close)。
 
-    案 Y (life.md §7) 以降タイムアウトは Track を pause しないため、ここでも
-    pause しない。本番のタイムアウト経路 (handle_wait_response_timeout) を
-    そのまま即時に呼ぶ。
+    本番のタイムアウト経路
+    (``saiverse.user_conversation.handle_conversation_timeout``) をそのまま
+    即時に呼ぶ。
 
-    **開いている会話の出来事があるときだけ撃つ**。案 Y では会話が終わっても
-    対ユーザー会話 Track は running のまま残るので、「running Track がある」は
-    会話中の証拠にならない。切り上げる会話が実在しないまま撃つと、
-    ``handle_conversation_end`` の「判定不能なら撃つ側に倒す」既定を通って
-    存在しない会話の振り返りが走り、**ペルソナ名義の記憶に作話が残る**
-    (2026-08-14 Codex 指摘 F5)。
+    **開いている会話の出来事があるときだけ撃つ**。切り上げる会話が実在しない
+    まま撃つと、存在しない会話の帳簿処理が走る (2026-08-14 Codex 指摘 F5)。
     """
-    tm = manager.track_manager
-    running = tm.get_running(persona_id)
-    if running is None:
-        raise HTTPException(status_code=400, detail="running な Track がありません")
-    if running.track_type != "user_conversation":
-        # social 等の wait_response Track は本番経路でも判断を撃たない
-        # (WARNING のみ)。呼んでも何も起きないので success を返さない。
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"running Track の type={running.track_type} は会話終了判断の対象外です"
-                " (対ペルソナ社交の判断点は未設計 — track_retirement.md §7.3)"
-            ),
-        )
-
     from saiverse import episodes
 
     open_conversation = episodes.get_open_episode(
@@ -90,28 +71,24 @@ def wrap_up_conversation(persona_id: str, manager=Depends(get_manager)):
     if open_conversation is None:
         raise HTTPException(
             status_code=409,
-            detail=(
-                "開いている会話の出来事がありません (会話は既に終了しています)。"
-                " Track が running のまま残るのは案 Y の仕様で、会話中の証拠には"
-                "なりません"
-            ),
+            detail="開いている会話の出来事がありません (会話は既に終了しています)",
         )
 
-    from saiverse.autonomy_wiring import handle_wait_response_timeout
+    from saiverse.user_conversation import handle_conversation_timeout
 
     # 検証した出来事そのものを背景処理へ渡す。ここは同期検証 → 背景発火なので、
     # 間に自然タイムアウトや別の切り上げが会話を閉じ (さらに新しい会話を開き)
-    # うる。track_id だけ渡すと、発火側は「いま開いている会話」を無条件に終わらせ、
-    # 別の会話 / 存在しない会話の振り返りを撃つ (2026-08-14 Codex 二巡目)。
+    # うる。渡さないと、発火側は「いま開いている会話」を無条件に終わらせ、
+    # 別の会話 / 存在しない会話を閉じる (2026-08-14 Codex 二巡目)。
     _run_in_background(
-        handle_wait_response_timeout, manager, persona_id, running.track_id,
+        handle_conversation_timeout, manager, persona_id,
         expected_episode_ref=open_conversation.get("episode_ref"),
     )
     return DebugActionResponse(
         success=True,
         message=(
-            f"会話を切り上げました (timeout 即時発火 track={running.track_id}"
-            f" episode={open_conversation.get('episode_ref')})"
+            "会話を切り上げました (沈黙タイマーの即時発火 "
+            f"episode={open_conversation.get('episode_ref')})"
         ),
     )
 
@@ -188,7 +165,7 @@ def control_scheduler(
     request: SchedulerControlRequest,
     manager=Depends(get_manager),
 ):
-    """タイマー制御. autonomy (per-persona) / manual_mode (per-persona の wait_response timeout 停止)."""
+    """タイマー制御. autonomy (per-persona) / manual_mode (per-persona の会話沈黙タイマー停止)."""
     msgs = []
 
     if request.autonomy is not None:
@@ -202,17 +179,22 @@ def control_scheduler(
             msgs.append("AutonomyManager 停止")
 
     if request.manual_mode is not None:
+        from saiverse.user_conversation import (
+            arm_conversation_timeout,
+            cancel_conversation_timeout,
+            get_open_conversation,
+        )
+
         manual_personas = manager._debug_manual_mode_personas
-        running = manager.track_manager.get_running(persona_id)
         if request.manual_mode:
             manual_personas.add(persona_id)
-            if running is not None:
-                manager.track_manager._cancel_wait_response_timeout(running.track_id)
-            msgs.append("完全手動モード ON (wait_response timeout 停止)")
+            cancel_conversation_timeout(manager, persona_id)
+            msgs.append("完全手動モード ON (会話の沈黙タイマー停止)")
         else:
             manual_personas.discard(persona_id)
-            if running is not None:
-                manager.track_manager._schedule_wait_response_timeout(running)
+            # 会話が開いているペルソナだけ張り直す (閉じた会話へ張ると空撃ちになる)。
+            if get_open_conversation(manager, persona_id) is not None:
+                arm_conversation_timeout(manager, persona_id)
             msgs.append("完全手動モード OFF")
 
     if not msgs:

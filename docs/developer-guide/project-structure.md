@@ -69,10 +69,10 @@ saiverse/
 ├── day_simulator.py        # DES ドライバ（仮想時刻でイベントキューを早回し）
 ├── day_plan.py             # 時間割の保存とコマ発火配線 + 日次予算台帳（自律行動 v2 §4.2/§4.5）
 ├── episodes.py             # 出来事（episode）エンベロープの CRUD／open・close（life_concept_map §8）
+├── user_conversation.py    # ユーザーとの会話の入口（出来事 open + main_line 起動 + 沈黙タイマー。Track は経由しない）
 ├── experience_inheritance.py # 継承エッジ（範囲ノード間の認識連続性 DAG、experience_structure §3.3 / W13）
 ├── day_scenario.py         # シナリオプレイヤー（一日シナリオの仮想時刻再生、自律行動 v2 §12）
 ├── day_report.py           # 一日レポート「一日新聞」（予定 vs 実績・成果物・欲求・予算の日次まとめ）
-├── desire_engine.py        # 欲求の帳簿（六型・鮮度・再訪・淘汰の決定論処理、自律行動 v2 §5）
 ├── facility_map.py         # 型→公共施設の解決（Building ロールタグ、自律行動 v2 §6.1）
 ├── judgment_points.py      # 判断点コーディネータ（起床/セッション終了の動的スキーマ + 起動、judgment_points.md）
 ├── llm_router.py           # ツール呼び出し判定
@@ -86,7 +86,6 @@ saiverse/
 ├── buildings.py            # Building モデルヘルパ
 ├── data_paths.py           # パス管理（user_data/builtin_data）
 ├── addon_*.py              # アドオン機構（loader/installer/registry 等）
-├── life_purpose.py         # 自律の源泉（欲求・目的）
 ├── note_manager.py         # メモ機構
 ├── observer_manager.py     # Observer（定期観測 Fixture）
 └── ...                     # その他コアモジュール
@@ -152,7 +151,6 @@ sea/
 ├── playbook_models.py    # ノード定義スキーマ（LLMNodeDef / ToolNodeDef 等）
 ├── pulse_controller.py   # PulseController（優先度制御・割り込み）
 ├── pulse_context.py      # PulseContext（Aspect / line 階層）
-├── pulse_root_context.py # ルートコンテキスト
 ├── mode_spell_permissions.py # モード別 Spell 許可
 ├── work_session.py       # 予算付き作業セッションランナー（自律行動 v2 §4.3）
 ├── mcp_tool_refresh.py   # 頭での per_persona MCP ツール一覧の取得（mcp_addon_integration §I）

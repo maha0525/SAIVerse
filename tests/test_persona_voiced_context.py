@@ -128,14 +128,16 @@ def test_persona_head_sections_are_fixed():
     """
     original_twelve = frozenset({
         "common_prompt", "persona_self", "core_memory", "building", "spell_list",
-        "autonomy_modes", "life_purpose", "desk", "memopedia_index",
+        "autonomy_modes", "self_image", "desk", "memopedia_index",
         "available_playbooks", "memory_weave", "visual_context",
     })
     assert original_twelve <= PERSONA_HEAD_SECTIONS, "既存の章が落ちている"
     assert PERSONA_HEAD_SECTIONS == original_twelve | {
         # 2026-07-30: 判断プロンプトが毎回貼り直していた静的な一覧の移設先
-        # (docs/issues/judgment_static_lists_to_head.md)
-        "facilities", "purpose_backlog",
+        # (docs/issues/judgment_static_lists_to_head.md)。同時に移設された
+        # purpose_backlog は 2026-08-21 に節ごと退役した (中身の pickable
+        # tracks と欲求候補が供給源ごと消えたため)。
+        "facilities",
     }
 
 

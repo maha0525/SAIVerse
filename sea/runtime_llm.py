@@ -675,12 +675,10 @@ def _finalize_beat(runtime, beat: BeatExecution) -> None:
                     len(_memorize_pat) if _memorize_pat else 0, memorize_scope,
                     _spell_origin,
                 )
-                # メタ判断ターンの scope='discardable' → 'committed' 昇格は
-                # TrackManager の状態遷移 hook 経由で行う (saiverse_manager.py
-                # 内の hook が pulse_id ベースで pulse 内の line_role='meta_judgment'
-                # AND scope='discardable' を検索して UPDATE する)。
-                # ここでは何もしない: 保存は scope='discardable' のままで完了し、
-                # その Pulse 内で Track 状態遷移が起きれば後で hook が拾う。
+                # NOTE: 旧「メタ判断ターンの scope='discardable' → 'committed'
+                # 昇格」は Track 状態遷移 hook 経由だったが、発火元 (v1 メタ判断の
+                # Track 操作) の退役に続いて hook そのものも 2026-08-21 に撤去した。
+                # 判断ターンは scope='discardable' のまま残る。
 
         if not _memorize_ok and event_callback:
             event_callback({"type": "warning", "content": "記憶の保存に失敗しました。会話内容が記録されていない可能性があります。", "warning_code": "memorize_failed", "display": "toast"})
@@ -1647,8 +1645,8 @@ async def _run_spell_tool_async(
         persona_dir = getattr(persona_obj, "persona_log_path", None)
         persona_dir = persona_dir.parent if persona_dir else Path.cwd()
         manager_ref = getattr(persona_obj, "manager_ref", None)
-        # Forward the active PulseContext so Track-mutating spells can enqueue
-        # their effect onto deferred_track_ops (Intent A v0.14 / Intent B v0.11).
+        # Forward the active PulseContext so spells can read the running Pulse
+        # (thread stack / logs / meta judgment buffer).
         pulse_ctx = state.get("_pulse_context")
         auto_mode = bool(state.get("_auto_mode", False))
 
@@ -2282,7 +2280,7 @@ async def _run_spell_loop(
             # combined (system). This avoids N separate result entries per round.
             #
             # 7-layer storage routing (Intent A v0.14, Intent B v0.11):
-            # - line_role / line_id / origin_track_id come from the active LineFrame
+            # - line_role / line_id come from the active LineFrame
             #   on PulseContext. This makes the entry land in the layer that
             #   matches the caller's line (e.g. main_line → [2], sub_line root →
             #   [3], sub_line nested → [4] when scope='volatile').

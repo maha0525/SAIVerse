@@ -60,21 +60,19 @@ def _purpose_tag_stats_bulk(conn) -> Dict[str, Dict[str, Any]]:
 def _collect_purpose_rows(
     manager: Any, persona_id: str, stats_by_ref: Dict[str, Dict[str, Any]]
 ) -> List[Dict[str, Any]]:
-    """生きた目的ノード (タスク / 欲求候補 / Track) の索引行。
+    """生きたタスクの索引行。
 
-    供給は判断 enum・head 一覧と同じ関数 (judgment_points) — 台帳だけ違う
-    集合を見せない。main DB が引けない環境 (テストの薄い manager 等) では
-    空リスト (索引の memory.db 分は独立して返る。フェイルオープン)。
+    供給は判断 enum と同じ関数 (judgment_points) — 台帳だけ違う集合を見せない。
+    旧 kind の ``desire`` (欲求候補) と ``track`` (関心) は、欲求プールと Track
+    操作の退役で供給源ごと消えた (autonomous_behavior_v3.md §8 /
+    track_retirement.md §7.2 ④群)。main DB が引けない環境 (テストの薄い manager
+    等) では空リスト (索引の memory.db 分は独立して返る。フェイルオープン)。
     統計は集計済みの ``stats_by_ref`` から引くだけ (ここでは memory.db に
     触らない — ロック区間を短く保つ)。
     """
     rows: List[Dict[str, Any]] = []
     try:
-        from saiverse.judgment_points import (
-            list_backlog_tasks,
-            list_desire_tasks,
-            list_pickable_tracks,
-        )
+        from saiverse.judgment_points import list_backlog_tasks
 
         for t in list_backlog_tasks(manager, persona_id):
             ref = t.get("task_ref")
@@ -87,27 +85,6 @@ def _collect_purpose_rows(
                         "stats": stats_by_ref.get(ref, dict(_ZERO_STATS)),
                     }
                 )
-        for t in list_desire_tasks(manager, persona_id):
-            ref = t.get("task_ref")
-            if ref:
-                rows.append(
-                    {
-                        "ref": ref,
-                        "title": t.get("title") or "(無題)",
-                        "kind": "desire",
-                        "stats": stats_by_ref.get(ref, dict(_ZERO_STATS)),
-                    }
-                )
-        for tr in list_pickable_tracks(manager, persona_id):
-            ref = f"track:{tr.short_id}"
-            rows.append(
-                {
-                    "ref": ref,
-                    "title": getattr(tr, "title", None) or "(無題)",
-                    "kind": "track",
-                    "stats": stats_by_ref.get(ref, dict(_ZERO_STATS)),
-                }
-            )
     except Exception:
         LOGGER.warning(
             "[experience-ledger] failed to collect purpose nodes (persona=%s); "

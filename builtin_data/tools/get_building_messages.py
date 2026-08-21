@@ -87,8 +87,10 @@ def _stamp_layer0(entry: Dict[str, Any], origin_episode_ref: Optional[str]) -> N
       で継承された値は受信側では別の出来事を指す — 無条件に捨てて受信側の値で
       刻み直す。
     - line_role / scope: 欠落 (NULL) は読み出し側で main_line / committed に
-      救済されるが、補完 SQL の完全一致が転記行を構造的に落とした実害がある
-      (user_conversation_preserver、2026-07-29) ため明示する。
+      救済される。それでも明示するのは、NULL の救済を持たない完全一致 SQL が
+      転記行を構造的に落とした実害があるため (2026-07-29。当時の被害者だった
+      ユーザー会話 20 件保持は退役済み — track_retirement.md 住人 11 — だが、
+      「読み手ごとに救済の有無が違う」構図は残るので刻む側で揃える)。
     """
     metadata = entry.setdefault("metadata", {})
     if isinstance(metadata, dict):
@@ -172,7 +174,6 @@ def _append_and_mark(
     manager: Any,
     persona_id: str,
     history_manager: Any,
-    origin_track_id: Optional[str],
     check_provenance: bool,
 ) -> None:
     """転記 entry を memory 先行で追記し、成功後に ingested marker を立てる。
@@ -207,7 +208,7 @@ def _append_and_mark(
         )
     else:
         status, _mid = history_manager.add_to_persona_only(
-            entry, origin_track_id=origin_track_id, memory_first=True
+            entry, memory_first=True
         )
         if status == "failed":
             raise _TranscribeFailed(f"memory append failed (ref={ref})")
@@ -223,7 +224,6 @@ def _transcribe_message(
     building_id: str,
     history_manager: Any,
     id_to_name_map: Dict[str, str],
-    origin_track_id: Optional[str],
     check_provenance: bool,
     origin_episode_ref: Optional[str] = None,
 ) -> Tuple[str, Optional[str], bool]:
@@ -274,7 +274,7 @@ def _transcribe_message(
         _append_and_mark(
             entry, m,
             persona=persona, manager=manager, persona_id=persona_id,
-            history_manager=history_manager, origin_track_id=origin_track_id,
+            history_manager=history_manager,
             check_provenance=check_provenance,
         )
         return ("ingested", speaker, True)
@@ -320,15 +320,14 @@ def _transcribe_message(
         ts_value = m.get("timestamp")
         if isinstance(ts_value, str):
             entry["timestamp"] = ts_value
-        # host event は世界の変化通知 = Track 横断のメタログ扱いで
-        # origin_track_id は付けない (handoff_2026-05-10)。origin_episode は
-        # 付ける — Track と違い「そのとき何の出来事の中に居たか」の軸なので、
-        # 出来事の最中に知覚した世界の変化はその出来事の記録に属する。
+        # host event は世界の変化通知だが origin_episode は付ける —
+        # 「そのとき何の出来事の中に居たか」の軸なので、出来事の最中に知覚した
+        # 世界の変化はその出来事の記録に属する。
         _stamp_layer0(entry, origin_episode_ref)
         _append_and_mark(
             entry, m,
             persona=persona, manager=manager, persona_id=persona_id,
-            history_manager=history_manager, origin_track_id=None,
+            history_manager=history_manager,
             check_provenance=check_provenance,
         )
         return ("ingested", "システム", True)
@@ -346,7 +345,7 @@ def _transcribe_message(
         _append_and_mark(
             entry, m,
             persona=persona, manager=manager, persona_id=persona_id,
-            history_manager=history_manager, origin_track_id=origin_track_id,
+            history_manager=history_manager,
             check_provenance=check_provenance,
         )
         return ("ingested", "ユーザー", True)
@@ -363,7 +362,6 @@ def _ingest_round(
     building_id: str,
     persona_id: str,
     id_to_name_map: Dict[str, str],
-    origin_track_id: Optional[str],
     log_prefix: str,
 ) -> Tuple[int, int, Dict[str, int]]:
     """building history の未読分を 1 ラウンド転記する (tool 版 / auto 版の共通核)。
@@ -456,7 +454,7 @@ def _ingest_round(
                 m,
                 persona=persona, manager=manager, persona_id=persona_id,
                 building_id=building_id, history_manager=history_manager,
-                id_to_name_map=id_to_name_map, origin_track_id=origin_track_id,
+                id_to_name_map=id_to_name_map,
                 check_provenance=provenance_pending,
                 origin_episode_ref=origin_episode_ref,
             )
@@ -524,24 +522,10 @@ def get_building_messages(building_id: Optional[str] = None) -> str:
     # Get id_to_name_map for speaker name resolution
     id_to_name_map = getattr(persona, "id_to_name_map", {})
 
-    # Resolve origin_track_id from the persona's currently-running Track so the
-    # ingested messages can be persisted with the correct Track scope. Tool-path
-    # callers come in mid-Pulse, so a running Track is normally present; if not
-    # we leave it None (matches pre-fix behavior).
-    origin_track_id: Optional[str] = None
-    try:
-        track_manager = getattr(manager, "track_manager", None)
-        if track_manager is not None:
-            running = track_manager.get_running(persona_id)
-            if running is not None:
-                origin_track_id = running.track_id
-    except Exception:
-        LOGGER.debug("get_building_messages: failed to resolve running track", exc_info=True)
-
     ingested_count, private_count, perceived = _ingest_round(
         persona=persona, manager=manager, history_manager=history_manager,
         building_id=building_id, persona_id=persona_id,
-        id_to_name_map=id_to_name_map, origin_track_id=origin_track_id,
+        id_to_name_map=id_to_name_map,
         log_prefix="[get_building_messages]",
     )
 
@@ -553,21 +537,11 @@ def get_building_messages(building_id: Optional[str] = None) -> str:
     return f"{perceived_count}件の新規メッセージを認識しました（{details}）"
 
 
-def auto_ingest_building_messages(
-    persona: Any,
-    manager: Any,
-    *,
-    origin_track_id: Optional[str] = None,
-) -> int:
+def auto_ingest_building_messages(persona: Any, manager: Any) -> int:
     """Automatically ingest new building messages at pulse start.
 
     Mirrors get_building_messages() but takes persona/manager directly
     instead of using tool context vars. Called automatically before each pulse.
-
-    ``origin_track_id`` is forwarded to ``add_to_persona_only`` so the ingested
-    user/assistant/host messages persist with the correct Track scope in
-    SAIMemory (handoff_2026-05-10). The caller (``run_meta_user``) supplies
-    this from the Pulse-bound Track.
 
     Returns the number of messages ingested.
     """
@@ -594,7 +568,7 @@ def auto_ingest_building_messages(
     ingested_count, _private_count, _perceived = _ingest_round(
         persona=persona, manager=manager, history_manager=history_manager,
         building_id=building_id, persona_id=persona_id,
-        id_to_name_map=id_to_name_map, origin_track_id=origin_track_id,
+        id_to_name_map=id_to_name_map,
         log_prefix="[auto_ingest]",
     )
 

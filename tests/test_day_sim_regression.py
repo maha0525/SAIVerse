@@ -68,8 +68,9 @@ class DayStandardRegressionTest(unittest.TestCase):
         self.assertEqual(kinds[0], "day_open")
         self.assertEqual(kinds[-1], "day_close")
         self.assertIn("post_session", kinds)
-        self.assertIn("post_conversation", kinds)
         self.assertIn("on_event", kinds)
+        # 会話終了判断は 2026-08-16 に退役 (退室は帳簿処理だけ)
+        self.assertNotIn("post_conversation", kinds)
 
     def test_all_slots_reach_terminal_status(self):
         non_terminal = [

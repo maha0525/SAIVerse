@@ -12,7 +12,7 @@
 
 稼働中サーバーに対して、自律稼働のタイマーを無視して **メタ判断 / sub_line Pulse を手動で 1 回ずつ発火**でき、さらに**全タイマーを止めて完全手動でペルソナを駆動**できるデバッグツール。API + ペルソナ画面の UI パネルで提供する。
 
-`scripts/debug_track.py` は DB 直叩きで稼働中サーバーのインメモリ状態に効かない (別物)。本ツールは稼働中の `SAIVerseManager` に直接働きかける。
+(旧 `scripts/debug_track.py` は DB 直叩きで稼働中サーバーのインメモリ状態に効かない別物だった。2026-08-21 に Tracks API ごと削除済み — [Track 撤廃計画](../track_retirement.md) §8。) 本ツールは稼働中の `SAIVerseManager` に直接働きかける。
 
 ## なぜ必要か
 

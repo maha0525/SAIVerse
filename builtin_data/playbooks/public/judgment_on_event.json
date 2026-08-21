@@ -13,7 +13,7 @@
     {
       "id": "judge",
       "type": "llm",
-      "action": "このターンは『内的独白』です。ユーザーには届きません。\n相手に呼びかける文体（「〜ね」「〜だよ」「ありがとう」「お疲れさま」等）は使わず、\n自分自身に語る一人称（例: 「〜と判断する」「〜しよう」「〜の方が自然だな」）で書いてください。\n\n{situation_text}\n\n応答は構造化出力です:\n- monologue: このイベントを受けての素直な思考\n- reaction: どう反応するか（選べる分岐はスキーマにあるものだけです）\n  - engage_now: 今すぐ応対する\n  - insert_slot: 後で取り組むコマを今日の時間割に挿入する。slot に start / kind / ref / facility / budget_rounds / note を書いてください。start は現在時刻より後にしてください（今すぐやるなら engage_now を選ぶこと）\n  - note_only: 応対はせず、覚え書き (memo) だけ残す\n  - ignore: 反応しない\n- new_desires: このイベントから生まれた「やりたいこと」。source_quote には実際の出来事からの引用を書いてください。無ければ空配列で構いません",
+      "action": "このターンは『内的独白』です。ユーザーには届きません。\n相手に呼びかける文体（「〜ね」「〜だよ」「ありがとう」「お疲れさま」等）は使わず、\n自分自身に語る一人称（例: 「〜と判断する」「〜しよう」「〜の方が自然だな」）で書いてください。\n\n{situation_text}\n\n応答は構造化出力です:\n- monologue: このイベントを受けての素直な思考\n- reaction: どう反応するか（選べる分岐はスキーマにあるものだけです）\n  - engage_now: 今すぐ応対する\n  - insert_slot: 後で取り組むコマを今日の時間割に挿入する。slot に start / kind / ref / facility / budget_rounds / note を書いてください。start は現在時刻より後にしてください（今すぐやるなら engage_now を選ぶこと）\n  - note_only: 応対はせず、覚え書き (memo) だけ残す\n  - ignore: 反応しない",
       "response_schema_source": "arg:response_schema",
       "output_key": "judgment",
       "memorize": null,

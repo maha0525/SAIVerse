@@ -453,7 +453,9 @@ def test_judgment_pulses_accumulate_separately_from_budget(manager, session_fact
     wiring.handle_scheduled_judgment(manager, PERSONA_ID, "judgment_day_open")
 
     clock.advance_to(BASE + timedelta(hours=12))
-    wiring.fire_judgment_point(manager, PERSONA_ID, "post_conversation")
+    wiring.fire_judgment_point(
+        manager, PERSONA_ID, "on_event", {"event_text": "掲示板の告知"},
+    )
 
     # ライフ窓 (07:00-22:00) の終了は排他的境界 (get_life_for_time は
     # [start, end) 判定) — ちょうど 22:00 だと記帳対象外になるため、
@@ -463,7 +465,7 @@ def test_judgment_pulses_accumulate_separately_from_budget(manager, session_fact
 
     lives = day_plan.get_lives(manager, PERSONA_ID, PLAN_DATE)
     assert len(lives) == 1
-    # 判断点の発火 3 回 (day_open・post_conversation・day_close) が
+    # 判断点の発火 3 回 (day_open・on_event・day_close) が
     # fire_judgment_point 共通末尾の record_judgment_pulse でそれぞれ 1 ずつ
     # 記帳される — day_open/day_close もライフ確定・終了処理とは別枠で
     # 判断点として数えられる。

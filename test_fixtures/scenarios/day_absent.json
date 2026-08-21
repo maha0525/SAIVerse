@@ -5,7 +5,6 @@
   "sleep": "22:00",
   "daily_budget_rounds": 10,
   "seed": {
-    "desires": [],
     "tasks": []
   },
   "user_events": [

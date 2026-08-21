@@ -7,15 +7,14 @@ pulse_dispatch.md §7 で定義した統一ディスパッチャ層。各起点�
 
 責務:
 - イベント受け口 (各起点が呼ぶ統一インターフェース)
-- 経路選択 (直接経路 / 熟慮経路) — 経路マッピングはイベント種別ごとに固定
-  ハードコード。動的な Track 状態判定は Handler に委譲する
-- 実行先の振り分け (Handler / PulseController.submit_xxx / MetaLayer)
+- 経路選択 — 経路マッピングはイベント種別ごとに固定ハードコード
+- 実行先の振り分け (会話経路 / PulseController.submit_xxx / 判断点)
 - 共通処理を仕込む受け皿 (メトリクス / pre-spell 注入 / 経路別ログ等の余地)
 
 責務外:
-- Track 状態の動的判定 (Handler 内に残す: 種別ごとの振る舞い差を吸収する責務)
+- 会話の状態判定 (``saiverse.user_conversation`` に残す)
 - Pulse の priority 制御 (PulseController に委譲)
-- メタ判断のロジック (MetaLayer に委譲)
+- 判断点のロジック (saiverse.autonomy_wiring / judgment_points に委譲)
 
 詳細: docs/intent/persona_cognition/pulse_dispatch.md §7
 """
@@ -45,37 +44,82 @@ class PulseDispatcher:
         persona_id: str,
         user_id: str,
         event: Dict[str, Any],
-        invoke_main_line: Callable[..., Any],
+        invoke_main_line: Callable[[], Any],
+        pulse_options: Optional[Dict[str, Any]] = None,
     ) -> None:
-        """ユーザー発話イベントを UserConversationTrackHandler にディスパッチする。
+        """ユーザー発話イベントを会話経路 (``saiverse.user_conversation``) へ渡す。
 
-        Track 状態判定 (running → 直接経路 1-A, それ以外 → 熟慮経路 1-B) は
-        Handler 内で行う (種別固有の振る舞いなので Handler 責務)。本メソッドは
-        Handler への委譲 + 共通処理 + 例外時のフォールバックを担う。
+        経路判定 (会話継続 → 直接応答 / 会話が閉じていて別の活動中 → on_event
+        判断点での仲裁) は受け口側が行う。本メソッドは委譲 + 共通処理 + 例外時の
+        フォールバックを担う。
 
-        Handler が例外を出した場合は ``invoke_main_line()`` を直接呼んで応答を
-        守る (現状の handle_user_input フォールバックと同等)。
+        **フォールバックは「まだ何もしていない失敗」に限る** (2026-08-21 Codex
+        指摘 4)。旧実装は受け口の任意の例外で ``invoke_main_line()`` を呼び直して
+        いたが、新規会話では出来事の開設と main_line 起動の**後**に沈黙タイマーの
+        装填が走るため、装填だけ転んだ並びで同じ発話がもう一度処理され二重応答に
+        なった。受け口は :class:`~saiverse.user_conversation.UserUtteranceError`
+        に「どこまで実行したか」を載せて送出するので、その申告で分岐する:
+
+        - ``fallback_safe=True``: 副作用の手前で転んだ → 直接応答で肩代わりする
+          (旧フォールバックと同じ救済)。
+        - ``side_effects_done=True``: 応答・台帳・判断点のどれかが既に動いた →
+          **呼び直さず**、元の例外をそのまま上へ通す。握り潰さないのは、
+          ``handle_user_input_stream`` の backend_worker が LLMError を専用の
+          エラーイベントへ変換しており、ここで飲むとユーザーの画面に何も出ない
+          まま応答が消えるため (旧実装は 2 回目の呼び出しでこの例外を再生産して
+          いた — 失敗の見え方は保ち、二重実行だけをやめる)。
+        - どちらでもない (会話の出来事を開けなかった): 送出する。記録なしの応答は
+          「いま会話中か」の判定・仲裁・スルースを揃って狂わせるので、黙って
+          返すより見えて失敗する方が正しい (Codex 指摘 6)。
+
+        Args:
+            pulse_options: 会話開始経路で main_line Pulse へ転送する起動オプション
+                (metadata / meta_playbook / args / pre_spells / event_callback)。
+                ``invoke_main_line`` の closure が抱えているものと同じ値を渡す。
         """
-        handler = getattr(self.manager, "user_conversation_handler", None)
-        if handler is None:
-            LOGGER.warning(
-                "[dispatcher] user_utterance: user_conversation_handler unavailable; "
-                "falling back to direct invoke_main_line (persona=%s)",
-                persona_id,
-            )
-            invoke_main_line()
-            return
+        from saiverse.user_conversation import UserUtteranceError, on_user_utterance
+
         try:
-            handler.on_user_utterance(
+            on_user_utterance(
+                self.manager,
                 persona_id=persona_id,
                 user_id=user_id,
                 event=event,
                 invoke_main_line=invoke_main_line,
+                pulse_options=pulse_options,
             )
-        except Exception:
+        except UserUtteranceError as e:
+            if e.fallback_safe:
+                LOGGER.exception(
+                    "[dispatcher] user_utterance handling failed at stage=%s before "
+                    "any side effect; falling back to invoke_main_line (persona=%s)",
+                    e.stage, persona_id,
+                )
+                invoke_main_line()
+                return
+            if e.side_effects_done:
+                LOGGER.exception(
+                    "[dispatcher] user_utterance handling failed at stage=%s after "
+                    "side effects were already performed; NOT retrying the response "
+                    "(persona=%s)",
+                    e.stage, persona_id,
+                )
+                # 元の例外を通す (LLMError の専用エラー表示を殺さないため)。
+                if e.__cause__ is not None:
+                    raise e.__cause__
+                raise
             LOGGER.exception(
-                "[dispatcher] user_utterance handler raised; falling back to invoke_main_line "
-                "(persona=%s)",
+                "[dispatcher] user_utterance handling failed at stage=%s; refusing to "
+                "answer without a conversation record (persona=%s)",
+                e.stage, persona_id,
+            )
+            raise
+        except Exception:
+            # 受け口が分類しなかった失敗 (import 失敗など、経路に入る手前)。
+            # 副作用は起きていないので旧来どおり直接応答で救う。
+            LOGGER.exception(
+                "[dispatcher] user_utterance handling raised before the handler "
+                "classified it; falling back to invoke_main_line (persona=%s)",
                 persona_id,
             )
             invoke_main_line()

@@ -695,10 +695,15 @@ class TestPreparedCollection:
         assert "expired" in entry["error"]
         assert calls == []  # refire はされない
 
-    def test_post_conversation_prepared_expires(self, manager, monkeypatch):
+    def test_day_close_prepared_expires(self, manager, monkeypatch):
+        """回収対象は day_open / day_close の 2 kind。
+
+        旧 judgment.post_conversation もここに載っていたが、会話終了判断の退役
+        (2026-08-16) で kind ごと消えた。
+        """
         clock.enable_virtual(self.BASE)
         ledger = manager.execution_ledger
-        eid = self._claim_prepared(ledger, "judgment.post_conversation")
+        eid = self._claim_prepared(ledger, "judgment.day_close")
         calls = self._patch_fire(monkeypatch)
         clock.advance_to(datetime(2026, 7, 19, 9, 40, 0))
         wiring._collect_prepared_judgments(manager)

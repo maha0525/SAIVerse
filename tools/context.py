@@ -21,11 +21,9 @@ _USER_CONFIGURED_INVOCATION: ContextVar[bool] = ContextVar(
 )
 _EVENT_CALLBACK: ContextVar[Optional[Any]] = ContextVar("saiverse_event_callback", default=None)
 _MESSAGE_ID: ContextVar[Optional[str]] = ContextVar("saiverse_message_id", default=None)
-# Active PulseContext for the running spell/tool. Track-mutating spells
-# (track_create / track_activate / track_pause / track_complete / track_abort)
-# read this and enqueue their effect onto ``deferred_track_ops`` so the
-# operation lands at Pulse completion, not mid-Pulse (Intent A v0.14, Intent B
-# v0.11). Tools that don't touch Tracks ignore it.
+# Active PulseContext for the running spell/tool. Spells that need to know the
+# running Pulse (thread stack / logs / meta judgment buffer) read it; the rest
+# ignore it.
 _PULSE_CONTEXT: ContextVar[Optional[Any]] = ContextVar("saiverse_pulse_context", default=None)
 # Snapshot of the currently-running LLM node's messages list. Spell loops set
 # this when invoking a spell so spells like ``run_playbook`` can fork a sub-line

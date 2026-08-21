@@ -1,14 +1,14 @@
 """purpose スペル群 (P2c-1) の結合テスト。
 
-concept_consolidation.md「P2: 統一スペル動詞」の地図別動詞 + P2c-0 決定4
-(候補を生む seed と木に接ぐ adopt は別動詞):
+concept_consolidation.md「P2: 統一スペル動詞」の地図別動詞:
 
-- purpose_seed: 候補を生む (旧 desire_add 後継。接地 source の維持を検証)
-- purpose_adopt: 候補の採用 (接ぎ木) / 枝への小目標追加 (旧 task_add 後継)
 - purpose_decompose: ステップ分解 (旧 task_decompose 後継)
 - purpose_step: ステップ状態更新 (旧 task_update_step 後継)
 - purpose_close: 完了・中止・休眠の stage 遷移 (旧 task_done 後継 + 拡張)
-- モード権限 (旧 task/desire 系と同一のゲート)
+- モード権限 (旧 task 系と同一のゲート)
+
+``purpose_seed`` / ``purpose_adopt`` は 2026-08-21 に退役した (欲求プールと
+目的の木が機構ごと消えたため — autonomous_behavior_v3.md §8/§9-5)。
 
 スペルは module レベルで SessionLocal に束縛した manager singleton を持つため、
 テストは load 後の module 上で singleton を temp DB 版に差し替える
@@ -25,8 +25,6 @@ from sqlalchemy.orm import sessionmaker
 from database.models import ActionTrack, Base
 from saiverse.persona_task_manager import (
     PARENT_TRACK,
-    STAGE_ADOPTED,
-    STAGE_CANDIDATE,
     STAGE_DORMANT,
     STATUS_CANCELLED,
     STATUS_COMPLETED,
@@ -36,8 +34,6 @@ from saiverse.track_manager import TrackManager
 from tool_loader import load_builtin_tool
 from tools.context import persona_context
 
-_mod_seed = load_builtin_tool("purpose_seed")
-_mod_adopt = load_builtin_tool("purpose_adopt")
 _mod_decompose = load_builtin_tool("purpose_decompose")
 _mod_step = load_builtin_tool("purpose_step")
 _mod_close = load_builtin_tool("purpose_close")
@@ -59,11 +55,6 @@ class PurposeToolsTestCase(unittest.TestCase):
         self.tm = TrackManager(session_factory=self.SessionLocal)
 
         # load 済みスペル module の manager singleton を temp DB 版へ差し替え
-        # (P3c-0: purpose_seed も purpose_tree 経由になったので、SessionLocal
-        # だけ差し替える shim 流儀に統一)。
-        _mod_seed._manager.SessionLocal = self.SessionLocal
-        _mod_adopt._track_manager = self.tm
-        _mod_adopt._manager.SessionLocal = self.SessionLocal
         _mod_decompose._task_manager = self.ptm
         _mod_step._task_manager = self.ptm
         _mod_close._task_manager = self.ptm
@@ -81,123 +72,6 @@ class PurposeToolsTestCase(unittest.TestCase):
     def tearDown(self) -> None:
         self.engine.dispose()
         self.tmp.cleanup()
-
-    # ------------------------------------------------------------------
-    # purpose_seed — 候補を生む (接地の維持)
-    # ------------------------------------------------------------------
-
-    def test_seed_creates_parentless_candidate_with_grounding(self):
-        """P3c-0: 候補は親なし + stage='candidate' で生まれる (desire ノートの子ではない)。"""
-        with persona_context(self.persona_id, self.persona_dir):
-            out = _mod_seed.purpose_seed(
-                title="風景スケッチの練習をしたい",
-                type="作る",
-                source="窓から見た夕暮れの色",
-            )
-        self.assertIn("task:1", out)
-        self.assertIn("作る", out)
-        tasks = self.ptm.list_tasks(self.persona_id, stage=STAGE_CANDIDATE)
-        self.assertEqual(len(tasks), 1)
-        t = tasks[0]
-        self.assertIsNone(t["parent_kind"])
-        self.assertIsNone(t["note_id"])
-        self.assertEqual(t["stage"], STAGE_CANDIDATE)  # 候補 = 木の外
-        self.assertEqual(t["desire_type"], "作る")
-        # 接地の維持 (旧 desire_add の source 規律そのまま)
-        self.assertEqual(t["desire_source"], "窓から見た夕暮れの色")
-        # 帳簿の初期化 (P3c-0: 実効 stage='candidate' が判定条件になった)。
-        self.assertEqual(t["desire_state"], "fresh")
-        self.assertEqual(t["touch_count"], 0)
-        self.assertIsNotNone(t["last_touched_at"])
-
-    def test_seed_without_type_is_unclassified(self):
-        with persona_context(self.persona_id, self.persona_dir):
-            out = _mod_seed.purpose_seed(title="新しい言語を学びたい", source="ふと思った")
-        self.assertIn("未分類", out)
-
-    def test_seed_rejects_invalid_type(self):
-        with persona_context(self.persona_id, self.persona_dir):
-            out = _mod_seed.purpose_seed(title="なにか", type="遊ぶ")
-        self.assertIn("Error", out)
-        self.assertIn("遊ぶ", out)
-
-    def test_seed_requires_source(self):
-        """P3c-0: source は purpose_tree.create_candidate の接地原則で必須。"""
-        with persona_context(self.persona_id, self.persona_dir):
-            out = _mod_seed.purpose_seed(title="根拠のない思いつき")
-        self.assertIn("Error", out)
-        self.assertEqual(self.ptm.list_tasks(self.persona_id, stage=STAGE_CANDIDATE), [])
-
-    # ------------------------------------------------------------------
-    # purpose_adopt — 候補の採用 (接ぎ木) / 枝への小目標追加
-    # ------------------------------------------------------------------
-
-    def _seed_candidate(self, title="読書会を開きたい"):
-        with persona_context(self.persona_id, self.persona_dir):
-            out = _mod_seed.purpose_seed(title=title, source="友人の一言")
-        self.assertIn("task:", out)
-        return self.ptm.list_tasks(self.persona_id, stage=STAGE_CANDIDATE)[-1]
-
-    def test_adopt_candidate_without_parent_stands_first_tier(self):
-        cand = self._seed_candidate()
-        with persona_context(self.persona_id, self.persona_dir):
-            out = _mod_adopt.purpose_adopt(candidate_ref=cand["task_ref"])
-        self.assertIn("採用しました", out)
-        self.assertIn("第一階層", out)
-        adopted = self.ptm.get_task(cand["id"], persona_id=self.persona_id)
-        self.assertEqual(adopted["stage"], STAGE_ADOPTED)
-        self.assertIsNone(adopted["parent_kind"])  # 親なし採用ノード
-
-    def test_adopt_candidate_under_track(self):
-        cand = self._seed_candidate()
-        with persona_context(self.persona_id, self.persona_dir):
-            out = _mod_adopt.purpose_adopt(
-                candidate_ref=cand["task_ref"], parent_ref="track:1",
-            )
-        self.assertIn("採用しました", out)
-        adopted = self.ptm.get_task(cand["id"], persona_id=self.persona_id)
-        self.assertEqual(adopted["stage"], STAGE_ADOPTED)
-        self.assertEqual(adopted["parent_kind"], PARENT_TRACK)
-        self.assertEqual(adopted["track_id"], self.track_id)
-
-    def test_adopt_rejects_non_candidate(self):
-        # 既に採用済み (track 内小目標) は候補ではない → エラー
-        task = self.ptm.create_task(
-            persona_id=self.persona_id, title="採用済み",
-            parent_kind=PARENT_TRACK, track_id=self.track_id, auto_activate=False,
-        )
-        with persona_context(self.persona_id, self.persona_dir):
-            out = _mod_adopt.purpose_adopt(candidate_ref=task["task_ref"])
-        self.assertIn("Error", out)
-
-    def test_adopt_title_creates_task_in_track(self):
-        # 旧 task_add 後継: 枝に新しい小目標を直接作る
-        with persona_context(self.persona_id, self.persona_dir):
-            out = _mod_adopt.purpose_adopt(title="資料を調べる", parent_ref="track:1")
-        self.assertIn("小目標を追加しました", out)
-        tasks = self.ptm.list_tasks(self.persona_id, track_id=self.track_id)
-        self.assertEqual(len(tasks), 1)
-        self.assertEqual(tasks[0]["parent_kind"], PARENT_TRACK)
-
-    def test_adopt_title_requires_parent(self):
-        with persona_context(self.persona_id, self.persona_dir):
-            out = _mod_adopt.purpose_adopt(title="宙に浮く小目標")
-        self.assertIn("Error", out)
-        self.assertIn("purpose_seed", out)  # 候補にしたいなら seed への誘導
-
-    def test_adopt_requires_exactly_one_of_candidate_or_title(self):
-        with persona_context(self.persona_id, self.persona_dir):
-            neither = _mod_adopt.purpose_adopt()
-            both = _mod_adopt.purpose_adopt(
-                candidate_ref="task:1", title="両方", parent_ref="track:1",
-            )
-        self.assertIn("Error", neither)
-        self.assertIn("Error", both)
-
-    def test_adopt_unknown_candidate_reports_error(self):
-        with persona_context(self.persona_id, self.persona_dir):
-            out = _mod_adopt.purpose_adopt(candidate_ref="task:999")
-        self.assertIn("Error", out)
 
     # ------------------------------------------------------------------
     # purpose_decompose / purpose_step
@@ -293,8 +167,7 @@ class PurposeSpellPermissionTests(unittest.TestCase):
     """purpose 動詞は旧 task/desire 系と同じモード権限 (mode_spell_permissions.md §5)。"""
 
     PURPOSE_SPELLS = (
-        "purpose_seed", "purpose_adopt", "purpose_decompose",
-        "purpose_step", "purpose_close",
+        "purpose_decompose", "purpose_step", "purpose_close",
     )
 
     def test_purpose_allowed_in_autonomous_and_conversation(self):
@@ -324,12 +197,10 @@ class PurposeSpellPermissionTests(unittest.TestCase):
 
 
 class PurposeSpellSchemaTests(unittest.TestCase):
-    """4+1 本全てが spell=True で露出し、説明が動詞の違いを明文化していること。"""
+    """残る 3 本が spell=True で露出していること。"""
 
     def test_all_registered_as_spells(self):
         for mod, name in (
-            (_mod_seed, "purpose_seed"),
-            (_mod_adopt, "purpose_adopt"),
             (_mod_decompose, "purpose_decompose"),
             (_mod_step, "purpose_step"),
             (_mod_close, "purpose_close"),
@@ -338,67 +209,6 @@ class PurposeSpellSchemaTests(unittest.TestCase):
             self.assertEqual(sch.name, name)
             self.assertTrue(sch.spell)
             self.assertTrue(sch.spell_display_name)
-
-    def test_seed_and_adopt_descriptions_distinguish_verbs(self):
-        # seed=生む / adopt=接ぐ の違いが説明文に焼き込まれている
-        seed_desc = _mod_seed.schema().description
-        adopt_desc = _mod_adopt.schema().description
-        self.assertIn("候補", seed_desc)
-        self.assertIn("purpose_adopt", seed_desc)
-        self.assertIn("接ぎます", adopt_desc)
-        self.assertIn("purpose_seed", adopt_desc)
-
-
-class TrackCreatePromoteTest(unittest.TestCase):
-    """track_create(from_candidate=) で候補 Task が Track へ昇格する (§6, 案A)。
-
-    旧 tests/test_open_notes.py から移設 (P3c①: Note/NoteManager 退役に伴い
-    同ファイルを削除。本クラスは Note/NoteManager と無関係な track_create の
-    昇格挙動テストなので、purpose 系スペル群と同居するこのファイルへ移す)。
-    """
-
-    def setUp(self):
-        from tool_loader import load_builtin_tool
-
-        self.engine = create_engine("sqlite:///:memory:")
-        Base.metadata.create_all(self.engine)
-        self.Session = sessionmaker(bind=self.engine)
-        self.ptm = PersonaTaskManager(self.Session)
-        self.tm = TrackManager(session_factory=self.Session)
-        self.mod = load_builtin_tool("track_create")
-        self.mod._track_manager = self.tm
-        self.mod._task_manager = self.ptm
-
-        self.tmp = tempfile.TemporaryDirectory()
-        self.persona_dir = Path(self.tmp.name) / "air"
-        self.persona_dir.mkdir(parents=True)
-
-    def tearDown(self):
-        self.engine.dispose()
-        self.tmp.cleanup()
-
-    def test_from_candidate_promotes_into_new_track(self):
-        cand = self.ptm.create_task(
-            persona_id="air", title="新言語を学ぶ",
-            stage=STAGE_CANDIDATE, desire_source="test-seed", auto_activate=False,
-        )
-        ref = cand["task_ref"]
-        with persona_context("air", self.persona_dir):
-            msg, _snippet, _ = self.mod.track_create(
-                track_type="autonomous", title="言語学習",
-                from_candidate=ref, activate=False,
-            )
-        self.assertIn("昇格", msg)
-        # 候補プールから消えている。
-        pool = self.ptm.list_tasks("air", stage=STAGE_CANDIDATE)
-        self.assertEqual(pool, [])
-        # 昇格後の Task は Track 紐付けになっている。
-        promoted = self.ptm.get_task(cand["id"], persona_id="air")
-        self.assertEqual(promoted["parent_kind"], PARENT_TRACK)
-        self.assertIsNone(promoted["note_id"])
-        # P3c-0: track_create の from_candidate 直呼び経路は purpose_tree.adopt
-        # を通らないため、promote_to_track 自体が stage='adopted' を刻む。
-        self.assertEqual(promoted["stage"], STAGE_ADOPTED)
 
 
 if __name__ == "__main__":

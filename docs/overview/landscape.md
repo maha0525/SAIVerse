@@ -148,11 +148,13 @@ PulseController は「起こされた Pulse を捌く」層だが、**いつ Pul
 | 世界の要求の受け口 | 呼びかけ（alert） |
 | 時間を受け取る順番 | 時間割＋判断点 |
 
-`action_track` の行データ（title・意図・机メモ）は第一階層の目的ノードとして存続し、`task:N` / `track:N` の統一参照で指せる。永続 Track（対ユーザー会話・交流）は構成系の営みノードとして残る。物理統合（persona_task と Memopedia ページの同一実体化）は P3c 予定。
+`action_track` の行データ（title・意図）は第一階層の目的ノードとして存続し、`task:N` / `track:N` の統一参照で指せる。物理統合（persona_task と Memopedia ページの同一実体化）は P3c 予定。
+
+> **⚠️ 撤廃の途中**: 永続 Track（対ユーザー会話・交流）は **2026-08-21 に器ごと撤去された**（[Track 撤廃計画](../intent/track_retirement.md) §8）。ユーザーとの会話は Track を経由せず、`saiverse/user_conversation.py`（開いている会話の出来事 + main_line 起動 + 沈黙タイマー）が担う。いま Track に残っている仕事は時間割の `track:N` コマ・想起の歩き・経験の台帳の索引だけで、いずれも撤去順序④以降で引っ越す。**新しいコードから Track を参照しないこと。**
 
 > **継承 DAG（範囲ノード間の認識の連続性）**: 出来事（episode）は時系列に一列で並ぶだけでなく、**継承エッジ**（`episode_inheritance` テーブル、`saiverse/experience_inheritance.py`）で「どの範囲を元に続きを始めたか」を張れる第二の関係を持つ（[体験の構造](../intent/experience_structure.md) §3.3、W13 で器を実装）。エッジは層付き（`fact`＝スレッド継続・リプランティング・分岐再生成の直接の元 / `digest`＝メモリ・digest 経由で知っている非直接親）で、1 出来事は 0..n 親を持てる（DAG）。会話の分岐・再生成・並列体験の統合（γδ→ε）・SAIVerse Lite 帰還マージ・メティス取り込みを同一機構で表す。**継承 ≠ 時刻**（created_at を継承の代用にしていたことが時系列の嘘の根本原因）。記帳は `open_episode(predecessors=...)` で範囲が開いた瞬間に機械的（選択なし＝エッジ 0 本＝直列の縮退で既存データ無害）。継承チェーンに閉じた咀嚼生成・分岐再生成 UI・メティス取り込みの配線は後続 wave。
 
-> **ペルソナ間会話の現状**: 交流（Social）Track はペルソナ同士の会話の器で、`SocialTrackHandler` と自動作成はあるが、**「他ペルソナ発話イベントの受け口」（入口）が未実装**。そのためペルソナ間会話の機序はまだ成立しておらず、この地図でも描けていない（→ [`roadmap_status.md`](roadmap_status.md) §2）。
+> **ペルソナ間会話の現状**: **未実装**。旧・交流（Social）Track とその Handler・常設作成は、入口（他ペルソナ発話イベントの受け口）が一度も実装されないまま 2026-08-21 に退役した。対ペルソナ社交は v0.4 の運転領域として設計し直す（→ [`roadmap_status.md`](roadmap_status.md) §2）。
 
 ### 判断点（旧 Meta-Judgment）
 
@@ -444,6 +446,11 @@ graph TD
 | **Chronicle の質量選抜 (比率10倍・卒業5倍・治療・非常弁・X発火) と恒等圧縮・転写** | **世代交代**（2026-07-28、[arasuji_levels](../intent/arasuji_levels.md)）。「大きさの物差し (被覆) で束ねる相手を選ぶ」設計は、選べない子 (バグ産の生ログ豆粒) が列を細切れにして**実測で全停止**しており、救済機構 (治療・非常弁) が本体を覆っていた。後継は**レベル別の並び + 予算 (上限/残す量) 超過で古い側を畳む一本規則** — 相手を選ばないので救済も要らない。恒等圧縮 (生ログを生のまま一次あらすじの席に置く) と転写 (episode digest の恒等転写、全ペルソナ発火0件) も廃止 = 「小さくても要約する」。エピソードの畳み拒否権 (open 単独・二段構え) も同時廃止 (需要の引受先: `docs/issues/open_episode_context_after_veto_removal.md`)。三水位は上限/残す量の二数へ (low は未使用の死に設定として残置、掃除は intent §12-8) |
 | **Metabolism の ON/OFF トグルと水位グローバル上書き** | **撤去**（2026-07-30、[issue](../issues/chat_options_metabolism_section_redesign.md)）。`manager.metabolism_enabled`（OFF = 従来スライディングウィンドウ）と `metabolism_*_chars_override`（全ペルソナ・全モデルへ波及する一本の上書き）、API `GET|POST /api/config/metabolism` を削除。OFF 経路は head のあらすじ枠との二重提示防止（畳み記録の除外名簿）が働かず、キャッシュ始点固定も失う「進化の止まった旧経路」だった。グローバル上書きは置き場（会話ごとの画面）と効く範囲（全体）がずれていた。後継: Metabolism は常時 ON、水位は**モデル定義一本**（`metabolism_*_chars`、モデル編集 UI に専用欄あり）。モデル定義で水位を null にする = Metabolism を持たない、が唯一のオプトアウト。チャットオプションの旧設定欄は read-only の状態表示（`GET /api/people/{id}/context-status` = 水位バー + 現在の提示文字数、§15 読み戻し込みでプレビューと一致）へ置換 |
 | **InternalAlertPoller（内部 alert ポーラ）と Handler の `tick()` 拡張点** | **機構ごと撤去**（2026-08-11、[Track 撤廃計画](../intent/track_retirement.md) §5-B 裁定②③）。60 秒周期で全 Track の `metadata.parameters` が `metadata.thresholds` を超えたかを判定し `set_alert` を撃つ機構（`saiverse/internal_alert_poller.py`）と、同じ周期で各 Track Handler の `tick(persona_id)` を呼ぶ拡張点。全数調査の結果、**閾値を書き込む側がコードに一箇所も存在せず一度も発火できない空砲**で、`tick` はどの Handler にも定義がない空の拡張点だった。将来の身体的欲求・知覚モニタリングは、必要になった時点で独立サブシステムとして設計する（Track の状態を経由しない）。撤去後、alert の生きている発火元は**ユーザー発話**（`UserConversationTrackHandler.on_user_utterance` — 別行動中の発話をメタ判断へ仲裁させる経路）**の一本のみ**だった — その一本も 2026-08-14 の順序①（上の行）で on_event 判断点への直結に置き換わり、alert 状態機械ごと撤去された。env `SAIVERSE_INTERNAL_ALERT_INTERVAL_SECONDS` も同時に消滅（もともとリファレンス未記載） |
+| **Track 種別ごとの Handler 三種と `on_track_activated` hook** | **機構ごと撤去**（2026-08-21、[Track 撤廃計画](../intent/track_retirement.md) §8）。`saiverse/track_handlers/`（UserConversation / Social / Autonomous）と `sea/pulse_root_context.py::get_handler_for_track`、`TrackManager` の activate observer・状態遷移 observer・`suppress_pulse`・wait_response タイマー機構一式・`get_entry_line_role` を削除。**ユーザーとの会話は Track を経由しなくなった** — 会話の器は `saiverse/user_conversation.py` の三点（開いている会話の出来事＝いま会話中か／main_line Pulse ＝応答／沈黙タイマー＝会話の終わり）。仲裁（`handle_user_utterance_conflict`）の判断は不変で、発火のゲートだけが「会話 Track が running か」から「**会話の出来事が開いていないか**」へ揃った（案 Y の残留 running 誤検知が器ごと消えた）。`social` / `autonomous` Handler は対ペルソナ社交と自律運転の再設計（v0.4）に先立って退役 |
+| **`messages.origin_track_id` の書き手** | **全撤去**（2026-08-21、同 §8）。Pulse-root の Track 解決（`_resolve_pulse_root_line`）・`persona._current_pulse_origin_track_id`・`LineFrame.track_id`・`ExecutionRequest.origin_track_id`・`history_manager` の kwarg・`get_building_messages` / `judgment_finalize` の刻印を削除。`line_role` / `scope` / モデル格の供給源は **aspect 一本**になった。列と既存データ、旧データ向けの読み手（arasuji の bands/context フィルタ・pulse_timeline・storage_layers・inspect_world・native_export）は残置し、掃除はテーブル退役の migration で |
+| **`game_session` Track（ゲーム参加の帳簿）** | **単純撤去**（2026-08-21、同 §8）。参加中かの正典は `region.state`（`is_participating`）一本で、Track は読み手ゼロの影だった。唯一の副作用「既存 running Track の pending 押し出し」が会話 Track に当たると、ユーザーの発話が仲裁経路へ迂回する誤作動源になっていた |
+| **`save_desk_memo`（作業メモの Track 保存）** | **書き手ごと撤去**（2026-08-21、同 §8）。読み手（`day_plan._build_track_instruction`）は Track 撤廃で到達不能になっており、書き手（セッション終了判断の `task_verdict` の continue / blocked）だけが残っていた。作業メモは独白記録に残る（引っ越し先の中断中エピソードのしおりは §2 住人 4） |
+| **Tracks API（`/api/people/{id}/tracks*`）と `scripts/debug_track.py`** | **削除**（2026-08-21、同 §8）。フロントの消費はゼロで、残っていた読み手は debug スクリプトだけだった |
 | **Fixture** | `observer.md` で構想のみ。テーブル未実装 |
 | **BuildingToolLink** | `BuildingToolLink` テーブルは実在するが数ヶ月触られておらず未使用。ツールがペルソナに届く経路は Spell（`spell=True`）と Playbook の TOOL ノードで、この紐付けテーブルではない（→ `stackchan_vessel.md` v0.5 でも「機能してない可能性」と記録） |
 

@@ -6,8 +6,10 @@ snapshot のみから組み立てる。
 
 旧経路は Chronicle / Track Chronicle / Memopedia の 3 種類を **別々の user message**
 として流していて、preview UI もそれを ``__memory_weave_type__`` メタデータで
-ラベル分けしていた。本 Section は 3 種類を独立 entry として snapshot に保持し、
-composition (integration.py) 側でそれぞれ別 message として展開する形を維持する。
+ラベル分けしていた。本 Section は種類ごとに独立 entry として snapshot に保持し、
+composition (integration.py) 側でそれぞれ別 message として展開する形を維持する
+(現存するのは chronicle のみ — Track Chronicle は track_retirement.md 住人 5 で
+退役、Memopedia 索引は MemopediaIndexSection へ移った)。
 
 記憶アーキv2 §7.1 (2026-07-04): Memopedia 索引の head 常時掲示は既定で廃止し、
 知識への接触は自動想起 (ゾーンC) + 深掘りスペルに一本化した。
@@ -42,8 +44,8 @@ LOGGER = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class MemoryWeaveEntry:
-    """1 種類 (chronicle / track_chronicle / memopedia) 分のコンテキスト。"""
-    kind: str       # "chronicle" / "track_chronicle" / "memopedia"
+    """1 種類分のコンテキスト。現存する kind は "chronicle" のみ。"""
+    kind: str
     content: str    # message content (intro + 本文を結合済み)
 
 
@@ -82,13 +84,6 @@ class MemoryWeaveSection:
         persona_dir_path = getattr(sai_mem, "persona_dir", None) if sai_mem else None
         persona_dir = str(persona_dir_path) if persona_dir_path else None
 
-        # metabolism anchor を渡して、track_chronicle の生メッセージダンプから
-        # 「履歴 (anchor 以降) に既に載っている分」を除外させる (重複トークン削減)。
-        # 正は session_anchor 行 (persona, ctx.model_key) — 旧
-        # history_manager.metabolism_anchor_message_id (persona 単一可変属性) は
-        # 廃止 (beat_execution_context.md §3.2)。読めない環境 (テストスタブ等) は
-        # None = 除外なし (従来のフォールバックと同じ縮退)。
-        anchor_id = None
         # 提示コンテキストの中で digest に置き換えて見せている範囲のあらすじは head から外す
         # (chronicle_eviction.md §6 — 同じあらすじが提示コンテキストと head に二重で出ると、
         #  同じ出来事が二度あったかのような時系列の錯覚をペルソナに招く)。
@@ -100,7 +95,6 @@ class MemoryWeaveSection:
             model_key = getattr(ctx, "model_key", None)
             if callable(load_entry) and model_key:
                 entry = load_entry(ctx.persona_id, str(model_key))
-                anchor_id = entry.get("anchor_id") if entry else None
                 from sea.session_window import deserialize_folds
                 for fold in deserialize_folds(entry.get("folded_ranges") if entry else None):
                     folded_entry_ids.extend(fold.chronicle_entry_ids)
@@ -112,13 +106,12 @@ class MemoryWeaveSection:
 
         # P4-d: Memopedia 索引は MemopediaIndexSection が担当する。
         # get_memory_weave_context 自体が Memopedia 索引に一切関与しなくなった
-        # (2026-07-14、include_memopedia 引数ごと削除) ため、ここでは
-        # Chronicle / Track Chronicle のみを取得する。
+        # (2026-07-14、include_memopedia 引数ごと削除) ため、ここで取れるのは
+        # Chronicle だけ。
         try:
             with persona_context(ctx.persona_id, persona_dir, manager):
                 mw_messages = get_memory_weave_context(
                     persona_id=ctx.persona_id, persona_dir=persona_dir,
-                    history_anchor_message_id=anchor_id,
                     exclude_chronicle_entry_ids=folded_entry_ids or None,
                 )
         except Exception:

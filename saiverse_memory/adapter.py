@@ -2486,72 +2486,31 @@ class SAIMemoryAdapter:
             LOGGER.warning("Failed to list active Stelis threads: %s", exc)
             return []
 
-    def get_track_last_message_time(self, track_id: str) -> Optional[datetime]:
-        """Return ``MAX(messages.created_at)`` for the given ``origin_track_id``.
+    def has_assistant_message_since(self, since_epoch: int) -> Optional[bool]:
+        """``since_epoch`` 以降にこのペルソナの assistant メッセージがあるか。
 
-        Used by:
-        - Track viewer UI: show how long ago each Track had any activity.
-        - Meta-judgment prompt: inject "this Track was last active N hours ago"
-          into the Track list shown to the persona, so past meta-judgment monologue
-          (which may claim "Track X is running steadily") cannot drown out the
-          current factual state.
-        - wait_response auto-pause timer: base the timeout on the latest
-          message rather than ``last_active_at`` (the latter doesn't get
-          touched while a wait_response Track is idle).
-
-        Returns ``None`` if the adapter is not ready, or no message references
-        this track_id, or the most recent message is missing ``created_at``.
-        """
-        if not self._ready or not track_id:
-            return None
-        try:
-            with self._db_lock:
-                row = self.conn.execute(
-                    "SELECT MAX(created_at) FROM messages WHERE origin_track_id = ?",
-                    (track_id,),
-                ).fetchone()
-        except Exception as exc:
-            LOGGER.warning(
-                "Failed to query last message time for track %s: %s",
-                track_id, exc,
-            )
-            return None
-        if not row or row[0] is None:
-            return None
-        try:
-            return datetime.fromtimestamp(int(row[0]))
-        except (TypeError, ValueError, OSError):
-            return None
-
-    def has_track_assistant_message_since(
-        self, track_id: str, since_epoch: int
-    ) -> Optional[bool]:
-        """``since_epoch`` 以降に当該 Track 紐付きの assistant メッセージがあるか。
-
-        自律行動 v2 の会話終了判断 (post_conversation) の「1 往復も成立しなかった
-        会話では判断を撃たない」抑止 (saiverse/autonomy_wiring.py) が使う。
-        対ユーザー会話 Track は永続なので「Track にメッセージがあるか」だけでは
-        過去の会話に反応してしまう — 今回の会話区間 (会話の出来事の started_at
-        以降) で切る。
+        ユーザー発話の仲裁の回収経路 (``saiverse/autonomy_wiring.py``) が「いまの
+        会話区間で既に応答が出ているか」を判定するのに使う。区間の切り口は会話の
+        出来事の ``started_at`` — adapter はペルソナ単位なので、追加の絞り込みは
+        要らない (旧実装は ``origin_track_id`` で絞っていたが、その刻印は Track
+        撤廃で書き手ごと退役した)。
 
         Returns:
             True / False。判定不能 (adapter 未 ready / クエリ失敗) は None —
-            呼び出し側がフォールバック (撃つ側に倒す) を決める。
+            呼び出し側がフォールバック (応答済みに倒す) を決める。
         """
-        if not self._ready or not track_id:
+        if not self._ready:
             return None
         try:
             with self._db_lock:
                 row = self.conn.execute(
                     "SELECT 1 FROM messages "
-                    "WHERE origin_track_id = ? AND role = 'assistant' "
-                    "AND created_at >= ? LIMIT 1",
-                    (track_id, int(since_epoch)),
+                    "WHERE role = 'assistant' AND created_at >= ? LIMIT 1",
+                    (int(since_epoch),),
                 ).fetchone()
         except Exception as exc:
             LOGGER.warning(
-                "Failed to query assistant message for track %s since %s: %s",
-                track_id, since_epoch, exc,
+                "Failed to query assistant messages since %s: %s", since_epoch, exc,
             )
             return None
         return row is not None
@@ -2611,47 +2570,11 @@ class SAIMemoryAdapter:
             })
         return out
 
-    def get_track_last_message_times(
-        self, track_ids: Iterable[str]
-    ) -> Dict[str, datetime]:
-        """Bulk variant of :meth:`get_track_last_message_time`.
-
-        Skips ``None`` / empty track_ids and returns only entries that have at
-        least one message. Used by the Tracks API to avoid an N+1 query when
-        rendering the viewer.
-        """
-        ids = [tid for tid in (track_ids or []) if tid]
-        if not self._ready or not ids:
-            return {}
-        # SQLite has a parameter limit (~999); chunk just in case the caller
-        # passes a huge list (e.g. include_forgotten=True with old data).
-        result: Dict[str, datetime] = {}
-        chunk_size = 500
-        try:
-            with self._db_lock:
-                for start in range(0, len(ids), chunk_size):
-                    batch = ids[start:start + chunk_size]
-                    placeholders = ",".join("?" * len(batch))
-                    rows = self.conn.execute(
-                        f"SELECT origin_track_id, MAX(created_at) "
-                        f"FROM messages WHERE origin_track_id IN ({placeholders}) "
-                        f"GROUP BY origin_track_id",
-                        batch,
-                    ).fetchall()
-                    for tid, ts in rows:
-                        if tid is None or ts is None:
-                            continue
-                        try:
-                            result[tid] = datetime.fromtimestamp(int(ts))
-                        except (TypeError, ValueError, OSError):
-                            continue
-        except Exception as exc:
-            LOGGER.warning(
-                "Failed to query last message times for %d tracks: %s",
-                len(ids), exc,
-            )
-            return result
-        return result
+    # NOTE: 旧 ``get_track_last_message_time`` / ``get_track_last_message_times``
+    # (``messages.origin_track_id`` で MAX(created_at) を引く読み手) は
+    # 2026-08-21 に撤去した。消費者は Tracks API と wait_response タイマーの
+    # 基準時刻で、どちらも会話経路の Track なし化で退役した
+    # (track_retirement.md §2 住人 3・9)。列と既存データはそのまま残る。
 
     def get_messages_with_persona_in_audience(
         self,
@@ -2727,6 +2650,11 @@ class SAIMemoryAdapter:
             # 7-layer storage metadata (Intent A v0.14, Intent B v0.11). Carried
             # on the message dict by callers that have a PulseContext line frame
             # available; absent here when called from legacy code paths.
+            # ``origin_track_id``: 生きた書き手はもう無い (2026-08-21 の Track
+            # なし化で全経路が退役)。列と既存データの読み手は残っているので、
+            # 「値が来たら書く」受け口だけ残す — 復元・取り込み系が過去の値を
+            # 載せた dict を渡してきたときに黙って落とさないため。列ごとの掃除は
+            # Track テーブル退役の migration (撤去順序⑦) で行う。
             origin_track_id = message.get("origin_track_id")
             line_role = message.get("line_role")
             line_id = message.get("line_id")

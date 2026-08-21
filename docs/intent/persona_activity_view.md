@@ -39,7 +39,7 @@ SAIVerse が目指すのは、AI 自身の自律性を実現しユーザーと�
 2. **LLM コールゼロ**: 表示内容は既存データ (Track / pulse-logs / 自律フラグ・ライフ) のテンプレート整形のみで作る。観察のために LLM を呼ばない
 3. **デバッグ面との役割分担**: ライフビューは生活が見える窓、メモリーモーダルは点検面。深掘りはライフビューから Pulse タイムラインへのリンク 1 本で接続し、ライフビューに pulse_id・line_role 等の内部語彙を露出しない
 4. **停止操作は予期しない自動発言を起こさない**: 停止トグルを押した瞬間にペルソナが喋り出してはならない (§6.3)
-5. **開示は生活リズム層のみ**: ライフビューに出す操作は再生/停止トグルだけ (v0.4: 間隔 2 種は退役、§7)。Track 個別の pause/resume と raw metadata は 2026-07-16 にメモリーモーダルの Tracks タブから退役し、保守用 API と `scripts/debug_track.py` だけに残す。META_JUDGMENT_CONFIG の調律は SettingsModal / DebugPanel に残留する (ACTIVITY_STATE 4 値の直接変更は 2026-07-14 の解体で**選択肢ごと消滅**した — 自律フラグ 1 本になり、そのトグルがまさに本ビューの再生/停止)
+5. **開示は生活リズム層のみ**: ライフビューに出す操作は再生/停止トグルだけ (v0.4: 間隔 2 種は退役、§7)。Track 個別の pause/resume と raw metadata は 2026-07-16 にメモリーモーダルの Tracks タブから退役し、保守用 API と `scripts/debug_track.py` に残していたが、**その両方も 2026-08-21 に削除された** ([Track 撤廃計画](track_retirement.md) §8)。META_JUDGMENT_CONFIG の調律は SettingsModal / DebugPanel に残留する (ACTIVITY_STATE 4 値の直接変更は 2026-07-14 の解体で**選択肢ごと消滅**した — 自律フラグ 1 本になり、そのトグルがまさに本ビューの再生/停止)
 
 ## 4. UI 設計
 
@@ -109,20 +109,20 @@ SAIVerse が目指すのは、AI 自身の自律性を実現しユーザーと�
 1. `AutonomyManager.stop()` — 定期 tick の予約 cancel
 2. running な autonomous Track を全て pause — Track の帳簿を待機状態に揃える。**当初これが「実効的な停止」だった**理由は、v1 の SubLineScheduler が ACTIVITY_STATE を見ずに Pulse を打ち続けていたため。その SubLineScheduler は自律行動 v2 で**モジュールごと削除済み** (landscape §9) なので、現在の停止の実効はフラグ側 (次項) が握る。この pause は「running のまま残すと `get_running` / メタ判断の状況分類が『作業中』と誤認する」ために続けている (`saiverse/saiverse_manager.py` の stop-autonomy)
 3. `AUTONOMY_ENABLED` → `False` — 判断点・watchdog のゲートが全て閉じる
-4. 対ユーザー Track (user_conversation) を**サイレント activate** (§6.3) — running 化してユーザー発話に即応できる状態に戻す
+4. ~~対ユーザー Track (user_conversation) を**サイレント activate** (§6.3)~~ — **2026-08-21 に対象消滅** (§6.3)
 
 停止の対象は autonomous 種別の Track のみ。social Track 等は本トグルのスコープ外。
 
-### 6.3 サイレント activate (pulse_dispatch.md §5 との整合)
+### 6.3 ~~サイレント activate~~ — 対象消滅 (2026-08-21)
 
-`TrackManager.activate()` (`saiverse/track_manager.py:441`) は末尾で `_track_activated_observers` に通知し、`UserConversationTrackHandler.on_track_activated` (`saiverse/track_handlers/user_conversation_handler.py:244`) が以下 2 つを行う:
+> **この節の機構は器ごと退役した** ([Track 撤廃計画](track_retirement.md) §8)。会話が Track を経由しなくなり、「プロンプト待ち」は *会話の出来事が開いていない状態* そのものになったので、停止時に戻すべき帳簿が無い。守っていた不変条件 4 (**停止ボタンでペルソナが喋り出さない**) は、停止経路が main_line を一切起動しないことで保たれる。以下は経緯の記録。
+
+旧設計: `TrackManager.activate()` は末尾で `_track_activated_observers` に通知し、`UserConversationTrackHandler.on_track_activated` が以下 2 つを行っていた:
 
 - `_inject_track_context` — Track 切替通知の SAIMemory 注入
 - `_start_main_line_pulse` — 空 input での main_line Pulse 起動 (= **ペルソナが喋り出す**)
 
-停止トグル経由の activate で後者が走ると、停止ボタンを押した瞬間にペルソナが自動発言する。ユーザーはそれを予期しないため、抑制が必須 (不変条件 4)。
-
-設計: `activate()` にフラグ (例 `suppress_pulse: bool = False`) を追加し、observer 通知に伝搬する。Handler 側はフラグを見て `_start_main_line_pulse` のみスキップし、**`_inject_track_context` は実施する** — ペルソナの認知としては「ユーザー待ちに戻った」と知るべきであり、Track 切替通知の注入経路統一 (pulse_dispatch.md §5.3) も維持される。hook 自体を発火させない案は、切替通知まで失われるため採らない。
+停止トグル経由の activate で後者が走ると、停止ボタンを押した瞬間にペルソナが自動発言する。ユーザーはそれを予期しないため、`activate()` に `suppress_pulse: bool = False` を足して observer 通知へ伝搬し、Handler 側が `_start_main_line_pulse` のみスキップする形で抑制していた (`_inject_track_context` は実施 — ペルソナの認知としては「ユーザー待ちに戻った」と知るべき、という理由)。Handler・hook・フラグ・切替通知のすべてが 2026-08-21 に撤去されている。
 
 ### 6.4 既存 API との関係
 
@@ -202,19 +202,22 @@ GET /api/people/{persona_id}/activity-view
 
 ## 11. 実装記録 (2026-06-13)
 
+> **注 (2026-08-21)**: 下表は起草当時の配置。サイレント activate 関連の行は
+> [Track 撤廃計画](track_retirement.md) §8 で機構ごと消えている (§6.3)。
+
 | 役割 | ファイル |
 |---|---|
 | ダイジェスト整形 / 間隔解決の純粋ロジック | `saiverse/activity_view.py` |
-| サイレント activate (`suppress_pulse` フラグ) | `saiverse/track_manager.py` (`activate` + observer 通知)、`saiverse/track_handlers/*.py` (3 Handler の `on_track_activated` 第 4 引数) |
+| ~~サイレント activate (`suppress_pulse` フラグ)~~ | ~~`saiverse/track_manager.py` / `saiverse/track_handlers/*.py`~~ — 2026-08-21 撤去 |
 | 作業のテンポのペルソナ設定層 | `saiverse/meta_layer.py` (`_DEFAULT_JUDGMENT_CONFIG.autonomous_pulse_interval_seconds`)、`saiverse/pulse_scheduler.py` (`_load_persona_judgment_config` + 解決順差し替え) |
 | API (集約 / start / stop / intervals) | `api/routes/people/activity.py` |
 | 常在インジケータのデータ供給 | `api/routes/info.py` (occupants に `activity_state` / `activity_label`) |
 | ライフビューパネル | `frontend/src/components/LifeView.tsx` + `.module.css` |
 | インジケータ + 配線 | `frontend/src/components/RightSidebar.tsx` (occupant チップ + LifeView mount)、`PersonaMenu.tsx` (Life View 項目) |
-| テスト | `tests/test_activity_view.py`、`tests/test_user_conversation_handler.py` (サイレント activate 2 件) |
+| テスト | `tests/test_activity_view.py`（会話経路のテストは `tests/test_user_conversation.py` へ世代交代） |
 
 実装中の発見と対処:
 
 - **`pulse_interval_seconds: 0` は「毎 poll 連続実行」の有効値**。間隔解決で 1 秒に clamp すると既存仕様 (`test_tick_increments_consecutive_count`) が壊れる。0 を通し、負値のみ 0 に丸める
 - **SettingsModal の META_JUDGMENT_CONFIG 再構築バグ (既存) を修正**: 保存時にフォーム 4 項目だけで config を組み直していたため、autonomy API が永続化した `periodic_interval_minutes` (および新キー) が SettingsModal 保存で消えていた。ロード時の config からマージする方式に変更。API 側も `MetaJudgmentConfig` (pydantic) に `autonomous_pulse_interval_seconds` を追加して round-trip を保証
-- 対ユーザー Track が存在しないペルソナの停止: activate ステップはスキップ (次のユーザー発話で通常経路により Track が作られる)
+- ~~対ユーザー Track が存在しないペルソナの停止: activate ステップはスキップ~~ — 2026-08-21 に activate ステップごと消滅 (§6.3)

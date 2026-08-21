@@ -1,24 +1,23 @@
-"""判断点 5 種のテスト (judgment_points.md §4〜§8)。
+"""判断点 4 種のテスト (judgment_points.md §4〜§8)。
 
 一時 DB (in-memory SQLite) + mock LLM 出力 (構造化出力 dict) + 仮想クロックで検証:
 
-- day_open: 動的スキーマ (ref/facility enum、promotions の空 enum 回避)、
-  decay_desires の前処理、finalize による save_day_plan + EventScheduler push、
-  不正 ref のコマだけ棄却 + WARN
-- post_conversation: picked_tasks (track_ref enum + origin_quote 接地)、
-  resume_session の動的挿入 (中断中セッションがあるときのみ)、収穫ゼロ正常、
-  remaining_timetable 全置換、resume_now の即時コマ挿入 / drop の作業メモ片づけ
+- day_open: 動的スキーマ (ref/facility enum)、finalize による save_day_plan +
+  EventScheduler push、不正 ref のコマだけ棄却 + WARN
 - post_session: artifacts 空で done 分岐がスキーマから消える (やったフリの構造的封じ)、
   done + 実在 artifact_ref でタスク completed + artifact_refs 記録、
   偽 artifact_ref は棄却、desk_memo が Track metadata に載る、
-  track_op='complete' の全タスク消化ゲート、remaining_timetable の全置換
+  remaining_timetable の全置換
 - on_event: reaction の 4 分岐、alert での engage_now 縮退 (スキーマ + finalize
   二重ガード)、insert_slot の時刻整合検証、note_only の plan meta 覚え書き
-- day_close: 今日触れた欲求のみの desire_reviews enum、tomorrow_memo が
-  翌朝 day_open の状況テキストに現れる (連結。生の実績表 = 旧 day_digest は
-  再供給しない、2026-07-29)、apply_desire_reviews の適用
+- day_close: tomorrow_memo が翌朝 day_open の状況テキストに現れる (連結。
+  生の実績表 = 旧 day_digest は再供給しない、2026-07-29)
 - 生成スキーマに additionalProperties が含まれない (プロバイダ正規化層に任せる)
 - LLM の生 JSON がメインキャッシュ (SAIMemory 記録) に混入しない (不変条件 v2-A)
+
+会話終了判断 (post_conversation) と欲求まわりの欄 (promotions / new_desires /
+desire_reviews / track_op) は 2026-08-21 に退役した
+(autonomous_behavior_v3.md §8 / track_retirement.md §7.2 ④群)。
 
 teardown で engine.dispose() + clock.disable_virtual() を必ず行う。
 """
@@ -49,7 +48,6 @@ from saiverse import day_plan
 from saiverse import judgment_points as jp
 from saiverse.event_scheduler import EventScheduler
 from saiverse.persona_task_manager import (
-    STAGE_CANDIDATE,
     PersonaTaskManager,
     TaskConflictError,
 )
@@ -166,19 +164,23 @@ def ptm(manager):
 
 @pytest.fixture
 def task_refs(manager, ptm):
-    """task:1 (バックログ) と desire:2 (欲求候補) を用意する。"""
+    """バックログタスクを 2 本 (task:1 / task:2) 用意する。
+
+    2026-08-21 まで task:2 は欲求候補 (stage='candidate') だった。欲求プールの
+    退役 (autonomous_behavior_v3.md §8) で候補は enum にも一覧にも載らなくなった
+    ため、素のバックログタスクに置き換えた。
+    """
     t1 = ptm.create_task(
         persona_id=PERSONA_ID, title="蒸留記事の続きを読む",
         goal="要点を覚え書きにする", auto_activate=False,
     )
     t2 = ptm.create_task(
         persona_id=PERSONA_ID, title="言葉の標本集",
-        stage=STAGE_CANDIDATE, desire_source="test-seed",
-        origin="autonomous", auto_activate=False, desire_type="作る",
+        origin="autonomous", auto_activate=False,
     )
     assert t1["task_ref"] == "task:1"
     assert t2["task_ref"] == "task:2"
-    return {"task": "task:1", "desire": "task:2"}
+    return {"task": "task:1", "task2": "task:2"}
 
 
 @pytest.fixture
@@ -220,19 +222,6 @@ def test_day_open_dispatch_builds_schema_and_situation(manager, ptm, task_refs, 
     day_plan.update_plan_meta(manager, PERSONA_ID, YESTERDAY,
                               {"tomorrow_memo": "明日は標本集の続きから"})
 
-    # 放置された欲求 (20 日前が最終接触) — decay の前処理で期限切れになるはず
-    stale = ptm.create_task(
-        persona_id=PERSONA_ID, title="古い思いつき",
-        stage=STAGE_CANDIDATE, desire_source="test-seed", auto_activate=False,
-    )
-    db = session_factory()
-    try:
-        row = db.query(PersonaTask).filter(PersonaTask.id == stale["id"]).first()
-        row.last_touched_at = BASE - timedelta(days=20)
-        db.commit()
-    finally:
-        db.close()
-
     result = jp.run_judgment_point(manager, PERSONA_ID, "day_open")
 
     assert result["submitted"] is True
@@ -243,16 +232,15 @@ def test_day_open_dispatch_builds_schema_and_situation(manager, ptm, task_refs, 
 
     args = subs[0]["args"]
     # 状況テキスト: 昨日の自分からのメモ・予算 (= その朝にしか意味がない情報)。
-    # 静的な一覧 (バックログ・欲求・施設) は head へ移設済み
+    # 静的な一覧 (施設) は head へ移設済み
     # (docs/issues/judgment_static_lists_to_head.md、2026-07-30)。
     text = args["situation_text"]
     assert "明日は標本集の続きから" in text
     assert "日次予算: 40" in text
-    assert "言葉の標本集" not in text, "バックログが状況テキストに再送されている"
     assert "- library:" not in text, "施設一覧が状況テキストに再送されている"
     assert "やりたいこと候補:" not in text, "欲求一覧が状況テキストに再送されている"
 
-    # 動的スキーマ: 実在 ref / facility の enum。期限切れ欲求は含まれない
+    # 動的スキーマ: 実在 ref / facility の enum
     schema = args["response_schema"]
     _assert_no_additional_properties(schema)
     slot = schema["properties"]["timetable"]["items"]
@@ -260,114 +248,27 @@ def test_day_open_dispatch_builds_schema_and_situation(manager, ptm, task_refs, 
     assert "task:1" in ref_enum
     assert "task:2" in ref_enum
     assert "none" in ref_enum
-    assert "task:3" not in ref_enum, "decay で期限切れになった欲求が enum に残っている"
     assert slot["properties"]["facility"]["enum"] == ["library", "workshop", "own_room"]
     # 表題 (title): 各コマにペルソナ自身が付ける (一日新聞の主役列)
     assert "title" in slot["properties"]
     assert "title" in slot["required"]
     assert "短い表題" in text  # プロンプト側の指示
-    # 昇格候補ゼロ → promotions フィールド自体が無い (空 enum 事故防止)
+    # promotions (欲求 → 関心の昇格) は 2026-08-21 に欄ごと退役した
     assert "promotions" not in schema["properties"]
-
-    # decay の前処理が実際に走っている (期限切れ = cancelled + expired)
-    stale_after = ptm.get_task(stale["id"], persona_id=PERSONA_ID)
-    assert stale_after["status"] == "cancelled"
-    assert stale_after["desire_state"] == "expired"
 
     # judgment_context には plan_date が載る
     ctx = json.loads(args["judgment_context"])
     assert ctx["plan_date"] == PLAN_DATE
 
 
-def test_day_open_desire_candidate_lines_match_ref_enum(manager, task_refs):
-    """やりたいこと候補の各行の ref 表記が、コマ ref の enum の要素と一致する。
-
-    回帰防止 (2026-07-05 実 LLM 一日シム): プロンプトが欲求を task:2 と生表示し、
-    enum は desire:2 だったため、ペルソナの書いた task:2 が制約デコードで
-    無関係な task:1 に滑った。表示と enum の整合そのものを固定する。
-
-    2026-07-30 の移設後、表示側は head の PurposeBacklogSection、enum 側は
-    従来どおり判断点。**別々の場所になったからこそ**この整合は壊れうるので、
-    検査は移設先を跨いで続ける。
-    """
-    from sea.head_pipeline.sections.purpose_backlog import PurposeBacklogSection
-
-    jp.run_judgment_point(manager, PERSONA_ID, "day_open")
-    args = manager.pulse_controller.submissions[0]["args"]
-    slot = args["response_schema"]["properties"]["timetable"]["items"]
-    ref_enum = set(slot["properties"]["ref"]["enum"])
-
-    section = PurposeBacklogSection()
-    ctx = SimpleNamespace(persona_id=PERSONA_ID, manager=manager)
-    text = section.render(section.capture(ctx)).text
-
-    lines = text.splitlines()
-    start = lines.index("やりたいこと候補:")
-    candidate_lines = []
-    for line in lines[start + 1:]:
-        if not line.startswith("- "):
-            break
-        candidate_lines.append(line)
-    assert candidate_lines, "やりたいこと候補が 1 行も無い (フィクスチャの前提が崩れた)"
-    for line in candidate_lines:
-        ref = line[2:].split(" ", 1)[0]
-        assert ref in ref_enum, f"表示 ref {ref!r} が enum {sorted(ref_enum)} に無い: {line}"
-
-
-def test_head_backlog_refs_are_all_selectable(manager, task_refs):
-    """head に並ぶ ref が、判断で選べる ref の集合と一致すること。
-
-    2026-07-30 Codex 指摘 high2 の回帰。**新しく立てた関心を含む**ことが要点:
-    会話終了判断の「新しい関心として立てる」で作られる Track は
-    ``track_manager.create`` の既定 = unstarted で生まれる。これが選択肢から
-    落ちると、立てたばかりの関心に翌朝コマを割り当てられない。コマの検証
-    (sanitize_timetable) は元から生きた Track を受理していたので、狭かったのは
-    選択肢の側だった。
-
-    初回の修正は逆に head を狭めて揃えてしまい、この既存の欠陥を隠していた。
-    集合の一致は「判断が指し示せるものすべて」へ揃える。
-    """
-    import re
-
-    from sea.head_pipeline.sections.purpose_backlog import PurposeBacklogSection
-
-    manager.track_manager.create(
-        persona_id=PERSONA_ID, track_type="autonomous", title="立てたばかりの関心",
-    )
-    manager.track_manager.create(
-        persona_id=PERSONA_ID, track_type="autonomous", title="進行中の関心",
-        initial_status="running",
-    )
-
-    section = PurposeBacklogSection()
-    text = section.render(
-        section.capture(SimpleNamespace(persona_id=PERSONA_ID, manager=manager))
-    ).text
-
-    slot_ref_enum = set(jp.collect_slot_ref_enum(manager, PERSONA_ID))
-    track_enum = set(jp.collect_pickable_track_refs(manager, PERSONA_ID))
-
-    shown = set(re.findall(r"(?:track|task):\d+", text))
-    assert shown, "head の一覧に ref が 1 つも無い (フィクスチャの前提が崩れた)"
-    for ref in shown:
-        assert ref in slot_ref_enum, f"head の {ref} がコマの ref enum に無い"
-    shown_tracks = {r for r in shown if r.startswith("track:")}
-    assert shown_tracks == track_enum, "head の Track と選べる Track が食い違う"
-
-    # 立てたばかりの関心 (unstarted) も、進行中の関心も、両方が揃う
-    assert "進行中の関心" in text
-    assert "立てたばかりの関心" in text
-
-
 def test_db_failure_while_building_args_fails_the_ledger_row(manager):
     """引数の組み立てで DB が落ちても、例外は入口まで漏れず席が終端化すること。
 
-    2026-07-30 Codex 三巡目。判断が指し示せる Track の取得は握りつぶしを外した
-    ので、DB 障害はここまで上がってくる。この関数の契約は「起動できなければ
-    理由つきの結果 dict」で、呼び出し側 (on_event の direct fallback /
-    schedule の backoff) はその戻り値で分岐する — 例外を素通しすると席が
-    prepared のまま残り、呼び出し側の代替経路も回復 tick の再発火も両方が
-    動きうる。
+    2026-07-30 Codex 三巡目。目的ノードの取得は握りつぶしを外したので、DB 障害は
+    ここまで上がってくる。この関数の契約は「起動できなければ理由つきの結果
+    dict」で、呼び出し側 (on_event の direct fallback / schedule の backoff) は
+    その戻り値で分岐する — 例外を素通しすると席が prepared のまま残り、
+    呼び出し側の代替経路も回復 tick の再発火も両方が動きうる。
     """
     abandoned: list = []
     manager.execution_ledger = SimpleNamespace(
@@ -382,10 +283,10 @@ def test_db_failure_while_building_args_fails_the_ledger_row(manager):
     def boom(*a, **k):
         raise RuntimeError("db is down")
 
-    manager.track_manager = SimpleNamespace(list_for_persona=boom, get_running=boom)
+    manager.SessionLocal = boom
 
     result = jp.run_judgment_point(
-        manager, PERSONA_ID, "post_conversation", execution_id="exec-1",
+        manager, PERSONA_ID, "day_open", execution_id="exec-1",
     )
 
     assert result["submitted"] is False
@@ -629,40 +530,6 @@ def test_contract_violation_raises_even_when_persona_is_missing(manager):
         jp.run_judgment_point(manager, PERSONA_ID, "on_event", {})
 
 
-def test_new_track_from_conversation_is_selectable_for_timetable(manager):
-    """会話終了判断が立てた関心に、翌朝コマを割り当てられること。
-
-    judgment_finalize は initial_status 未指定で Track を作る (= unstarted)。
-    その Track がコマの ref enum に載らなければ、立てた関心に時間を割けない。
-    """
-    track_id = manager.track_manager.create(
-        persona_id=PERSONA_ID, track_type="autonomous", title="会話から立てた関心",
-    )
-    ref = f"track:{manager.track_manager.get(track_id).short_id}"
-    assert ref in jp.collect_slot_ref_enum(manager, PERSONA_ID)
-
-    # 検証側 (sanitize) も同じ Track を受理する = enum と検証が一致
-    slots, warnings = jp.sanitize_timetable(manager, PERSONA_ID, [{
-        "start": "10:00", "kind": "随筆を書く", "title": "関心に取り組む",
-        "ref": ref, "facility": "own_room", "note": "",
-    }])
-    assert warnings == []
-    assert slots and slots[0]["ref"] == ref
-
-
-def test_day_open_promotions_enum_present_when_candidates(manager, task_refs):
-    from saiverse.desire_engine import touch_desire
-
-    for _ in range(3):
-        touch_desire(manager, PERSONA_ID, task_refs["desire"])
-
-    result = jp.run_judgment_point(manager, PERSONA_ID, "day_open")
-    schema = result["args"]["response_schema"]
-    _assert_no_additional_properties(schema)
-    promos = schema["properties"]["promotions"]
-    assert promos["items"]["properties"]["desire_ref"]["enum"] == ["task:2"]
-
-
 # ---------------------------------------------------------------------------
 # day_open: finalize (保存 + push + 不正 ref 棄却 + JSON 非混入)
 # ---------------------------------------------------------------------------
@@ -814,48 +681,6 @@ def test_day_open_finalize_rounds_and_excludes_slots_with_life_declared(
     assert "（3番目の予定は活動時間の外のため外しました）" in content
 
 
-def test_day_open_finalize_promotions_fire_track_create(
-    manager, task_refs, finalize_mod, tmp_path, caplog
-):
-    from saiverse.desire_engine import touch_desire
-
-    for _ in range(3):
-        touch_desire(manager, PERSONA_ID, task_refs["desire"])
-
-    calls: List[Dict[str, Any]] = []
-
-    def fake_track_create(**kwargs):
-        calls.append(kwargs)
-        return "created"
-
-    output = {
-        "monologue": "標本集はもう関心と呼んでいい。",
-        "timetable": [_rest_slot("09:00")],
-        "promotions": [
-            {"desire_ref": "task:2", "title": "言葉の標本集",
-             "intent": "気に入った言い回しを集める"},
-            {"desire_ref": "task:9", "title": "架空", "intent": "x"},  # 候補にない
-        ],
-    }
-    import tools as tools_pkg
-    with caplog.at_level("WARNING"):
-        with patch.dict(tools_pkg.TOOL_REGISTRY, {"track_create": fake_track_create}):
-            with _persona_ctx(manager, tmp_path):
-                finalize_mod.judgment_finalize(
-                    judgment_output=output, kind="day_open",
-                    judgment_context=json.dumps({"plan_date": PLAN_DATE}),
-                )
-
-    assert len(calls) == 1
-    assert calls[0]["from_candidate"] == "task:2"  # desire:2 → task:2 に正規化
-    assert calls[0]["track_type"] == "autonomous"
-    assert calls[0]["title"] == "言葉の標本集"
-    assert any("task:9" in r.message for r in caplog.records)
-    # 発動した /spell 行が記録テキストに載る
-    content = manager.personas[PERSONA_ID].sai_memory.messages[0]["content"]
-    assert "/spell name='track_create'" in content
-
-
 # ---------------------------------------------------------------------------
 # post_session: スキーマ (done 分岐の接地ゲート)
 # ---------------------------------------------------------------------------
@@ -888,8 +713,8 @@ def test_post_session_schema_drops_done_branch_without_artifacts(manager, task_r
     assert "成果物はありません" in args["situation_text"]
     assert "「完了 (done)」は選べません" in args["situation_text"]
 
-    # track_op は track が分かっているので出る
-    assert schema["properties"]["track_op"]["enum"] == ["none", "complete"]
+    # track_op は 2026-08-21 に欄ごと退役した (Track 操作スペルの退役)
+    assert "track_op" not in schema["properties"]
 
 
 def test_post_session_schema_done_branch_with_artifact_enum(manager, task_refs):
@@ -903,8 +728,6 @@ def test_post_session_schema_done_branch_with_artifact_enum(manager, task_refs):
     done = variants[0]
     assert done["properties"]["status"]["const"] == "done"
     assert done["properties"]["artifact_ref"]["enum"] == ["item-abc"]
-    # track 不明 → track_op フィールド自体を出さない
-    assert "track_op" not in schema["properties"]
     assert result["submitted"] is True
     assert result["playbook"] == "judgment_post_session"
 
@@ -924,7 +747,6 @@ def test_post_session_done_completes_task_and_records_artifact(
         "monologue": "覚え書きができた。ここで一区切りにする。",
         "task_verdict": {"status": "done", "artifact_ref": "item-abc",
                          "desk_memo": "覚え書き完成"},
-        "new_desires": [],
         "remaining_timetable": None,
     }
     ctx = json.dumps({"plan_date": PLAN_DATE, "artifacts": ["item-abc"],
@@ -1041,107 +863,47 @@ def test_post_session_fake_artifact_ref_is_rejected(
     assert task["status"] == "pending", "偽 artifact_ref でタスクが完了してしまった"
     assert task["artifact_refs"] == []
     assert any("item-zzz" in r.message for r in caplog.records)
-    # continue 相当に降格し、作業メモは Track に残る
+    # continue 相当に降格しても Track は書き換えない (2026-08-21 に書き手を撤去)
     track = manager.track_manager.get(track_id)
-    memo = json.loads(track.track_metadata)["desk_memo"]
-    assert memo["text"] == "続きは明日"
+    assert not track.track_metadata or "desk_memo" not in json.loads(
+        track.track_metadata
+    )
 
 
-def test_post_session_desk_memo_and_new_desires(
-    manager, task_refs, finalize_mod, tmp_path, caplog
+def test_post_session_desk_memo_stays_in_the_monologue_only(
+    manager, ptm, task_refs, finalize_mod, tmp_path
 ):
+    """continue 裁定の作業メモは独白記録にだけ残る (Track へは書かない)。
+
+    旧実装は Track metadata にも保存していたが、その読み手 (track:N コマの
+    指示書) は Track 撤廃で到達不能になっており、2026-08-21 に書き手ごと退役
+    した (track_retirement.md §2 住人 4)。
+    """
     track_id = manager.track_manager.create(
         persona_id=PERSONA_ID, track_type="autonomous", title="調べ物",
     )
-    desire_calls: List[Dict[str, Any]] = []
-
-    def fake_purpose_seed(**kwargs):
-        desire_calls.append(kwargs)
-        return "added"
-
     output = {
         "monologue": "途中まで進んだ。語源の話が面白い。",
         "task_verdict": {"status": "continue",
                          "desk_memo": "第3節まで読了。次は第4節から"},
-        "new_desires": [
-            {"type": "作る", "title": "語源メモを一冊にまとめたい",
-             "source_quote": "第3節の『言葉は化石を運ぶ』という一文"},
-            {"type": "遊ぶ", "title": "無効な型", "source_quote": "x"},  # 未知の型
-        ],
         "remaining_timetable": None,
     }
     ctx = json.dumps({"plan_date": PLAN_DATE, "artifacts": [],
                       "task_ref": "task:1", "track_id": track_id})
-    import tools as tools_pkg
-    with caplog.at_level("WARNING"):
-        with patch.dict(tools_pkg.TOOL_REGISTRY, {"purpose_seed": fake_purpose_seed}):
-            with _persona_ctx(manager, tmp_path):
-                finalize_mod.judgment_finalize(
-                    judgment_output=output, kind="post_session", judgment_context=ctx,
-                )
+    with _persona_ctx(manager, tmp_path):
+        finalize_mod.judgment_finalize(
+            judgment_output=output, kind="post_session", judgment_context=ctx,
+        )
 
-    # desk_memo (作業メモ) が Track metadata に載る
     track = manager.track_manager.get(track_id)
-    memo = json.loads(track.track_metadata)["desk_memo"]
-    assert memo["text"] == "第3節まで読了。次は第4節から"
-    assert memo["status"] == "continue"
-    assert memo["task_ref"] == "task:1"
-
-    # new_desires → purpose_seed (type/source 付き; P2c-1 で desire_add から切替)。
-    # 未知の型は棄却 + WARN
-    assert len(desire_calls) == 1
-    assert desire_calls[0] == {
-        "title": "語源メモを一冊にまとめたい",
-        "type": "作る",
-        "source": "第3節の『言葉は化石を運ぶ』という一文",
-    }
-    assert any("遊ぶ" in r.message for r in caplog.records)
-
-
-def test_post_session_track_complete_requires_all_tasks_done(
-    manager, ptm, task_refs, finalize_mod, tmp_path, caplog
-):
-    track_id = manager.track_manager.create(
-        persona_id=PERSONA_ID, track_type="autonomous", title="調べ物",
+    assert not track.track_metadata or "desk_memo" not in json.loads(
+        track.track_metadata
     )
-    ptm.add_track_task(track_id, "残っている小目標", persona_id=PERSONA_ID)
-
-    complete_calls: List[Dict[str, Any]] = []
-
-    def fake_track_complete(**kwargs):
-        complete_calls.append(kwargs)
-        return "completed"
-
-    output = {
-        "monologue": "この Track はもう畳める。",
-        "task_verdict": {"status": "continue", "desk_memo": "x"},
-        "track_op": "complete",
-        "remaining_timetable": None,
-    }
-    ctx = json.dumps({"plan_date": PLAN_DATE, "artifacts": [],
-                      "task_ref": "task:1", "track_id": track_id})
-
-    import tools as tools_pkg
-    # 未消化タスクあり → 棄却
-    with caplog.at_level("WARNING"):
-        with patch.dict(tools_pkg.TOOL_REGISTRY, {"track_complete": fake_track_complete}):
-            with _persona_ctx(manager, tmp_path):
-                finalize_mod.judgment_finalize(
-                    judgment_output=output, kind="post_session", judgment_context=ctx,
-                )
-    assert complete_calls == []
-    assert any("未消化のタスク" in r.message for r in caplog.records)
-
-    # 全タスク消化後 → 許可
-    open_task = ptm.get_track_tasks(track_id)[0]
-    ptm.update_task_status(open_task["id"], status="completed",
-                           actor="test", persona_id=PERSONA_ID)
-    with patch.dict(tools_pkg.TOOL_REGISTRY, {"track_complete": fake_track_complete}):
-        with _persona_ctx(manager, tmp_path):
-            finalize_mod.judgment_finalize(
-                judgment_output=output, kind="post_session", judgment_context=ctx,
-            )
-    assert complete_calls == [{"track_id": track_id}]
+    # continue の意味論は不変 — タスクは動かない
+    task = ptm.get_task(
+        ptm.resolve_task_ref(PERSONA_ID, "task:1"), persona_id=PERSONA_ID,
+    )
+    assert task["status"] == "pending"
 
 
 def test_post_session_remaining_timetable_replaces_and_cancels_stale(
@@ -1457,299 +1219,6 @@ def test_missing_persona_returns_unsubmitted(manager):
 
 
 # ---------------------------------------------------------------------------
-# post_conversation: 起動 (スキーマ + 状況テキスト + resume の動的挿入)
-# ---------------------------------------------------------------------------
-
-
-def test_post_conversation_dispatch_schema_and_situation(manager, task_refs):
-    manager.track_manager.create(
-        persona_id=PERSONA_ID, track_type="autonomous", title="調べ物",
-        initial_status="running",
-    )
-
-    result = jp.run_judgment_point(manager, PERSONA_ID, "post_conversation")
-
-    assert result["submitted"] is True
-    assert result["playbook"] == "judgment_post_conversation"
-    args = result["args"]
-    schema = args["response_schema"]
-    _assert_no_additional_properties(schema)
-
-    picked = schema["properties"]["picked_tasks"]["items"]
-    assert picked["properties"]["track_ref"]["enum"] == ["track:1", "new"]
-    assert picked["required"] == ["title", "track_ref", "origin_quote"]
-    # 中断中セッションなし → resume_session フィールド自体が無い (空 enum 事故防止)
-    assert "resume_session" not in schema["properties"]
-    assert set(schema["required"]) == {
-        "monologue", "picked_tasks", "new_desires", "remaining_timetable",
-    }
-
-    text = args["situation_text"]
-    assert "07:00" in text  # 現在時刻
-    # track_ref の選択材料 (どの track:N が何か) と既存タスク・欲求の一覧は
-    # head の PurposeBacklogSection に常駐する。一日に何度も走るこの判断が、
-    # 同じ台帳を毎回貼り直さないことを固定する (2026-07-30 移設)。
-    assert "調べ物" not in text
-    assert "言葉の標本集" not in text
-    # 一覧が消えても「重複して作るな」という要求そのものは残る
-    assert "重ねて作らないでください" in text
-
-    ctx = json.loads(args["judgment_context"])
-    assert ctx["plan_date"] == PLAN_DATE
-    assert ctx["track_refs"] == ["track:1"]
-    assert "resume" not in ctx
-
-
-def test_post_conversation_resume_appears_only_with_interrupted_session(
-    manager, task_refs
-):
-    track_id = manager.track_manager.create(
-        persona_id=PERSONA_ID, track_type="autonomous", title="調べ物",
-    )
-    jp.save_desk_memo(manager, track_id, {
-        "text": "第3節まで読了。次は第4節から", "status": "continue",
-        "task_ref": "task:1", "updated_at": "2026-07-03T22:00:00",
-    })
-
-    result = jp.run_judgment_point(manager, PERSONA_ID, "post_conversation")
-    args = result["args"]
-    schema = args["response_schema"]
-    _assert_no_additional_properties(schema)
-    assert schema["properties"]["resume_session"]["enum"] == [
-        "resume_now", "defer_to_slot", "drop",
-    ]
-    assert "第3節まで読了" in args["situation_text"]
-
-    ctx = json.loads(args["judgment_context"])
-    assert ctx["resume"]["track_id"] == track_id
-    assert ctx["resume"]["task_ref"] == "task:1"
-
-
-# ---------------------------------------------------------------------------
-# post_conversation: finalize
-# ---------------------------------------------------------------------------
-
-
-def test_post_conversation_finalize_creates_tasks_with_origin_quote(
-    manager, ptm, task_refs, finalize_mod, tmp_path, caplog
-):
-    track_id = manager.track_manager.create(
-        persona_id=PERSONA_ID, track_type="autonomous", title="調べ物",
-        initial_status="running",
-    )
-    output = {
-        "monologue": "約束を忘れないうちに書き留めておく。",
-        "picked_tasks": [
-            {"title": "蒸留メモを見せる", "track_ref": "track:1",
-             "origin_quote": "「できたら見せてほしい」と言われた"},
-            {"title": "新しい題材を探す", "track_ref": "new",
-             "origin_quote": "「次は何を作るの？」と聞かれた"},
-            {"title": "引用なしの思いつき", "track_ref": "track:1",
-             "origin_quote": ""},  # 接地なし → 棄却
-        ],
-        "new_desires": [],
-        "remaining_timetable": None,
-    }
-    ctx = json.dumps({"plan_date": PLAN_DATE, "track_refs": ["track:1"]})
-    with caplog.at_level("WARNING"):
-        with _persona_ctx(manager, tmp_path):
-            summary, _, _ = finalize_mod.judgment_finalize(
-                judgment_output=output, kind="post_conversation",
-                judgment_context=ctx, situation_text="[会話終了判断] ...",
-            )
-
-    # 既存 Track (t:1) にタスクが 1 件、origin_quote は notes に保存される
-    bound = ptm.list_tasks(
-        PERSONA_ID, track_id=track_id, parent_kind="track", include_steps=False,
-    )
-    assert len(bound) == 1
-    assert bound[0]["title"] == "蒸留メモを見せる"
-    assert bound[0]["notes"] == "「できたら見せてほしい」と言われた"
-
-    # track_ref='new' → 新規 autonomous Track が立ち、タスクが紐づく
-    new_tracks = [
-        t for t in manager.track_manager.list_for_persona(PERSONA_ID)
-        if t.title == "新しい題材を探す"
-    ]
-    assert len(new_tracks) == 1
-    assert new_tracks[0].track_type == "autonomous"
-    assert new_tracks[0].status == "unstarted"
-    assert "entry_line_role" in json.loads(new_tracks[0].track_metadata)
-    new_bound = ptm.list_tasks(
-        PERSONA_ID, track_id=new_tracks[0].track_id,
-        parent_kind="track", include_steps=False,
-    )
-    assert len(new_bound) == 1
-    assert new_bound[0]["notes"] == "「次は何を作るの？」と聞かれた"
-
-    # origin_quote 無しは棄却 + WARN
-    assert any("origin_quote" in r.message for r in caplog.records)
-    all_titles = [
-        t["title"] for t in ptm.list_tasks(PERSONA_ID, include_steps=False)
-    ]
-    assert "引用なしの思いつき" not in all_titles
-
-    recorded = manager.personas[PERSONA_ID].sai_memory.messages[0]
-    assert recorded["scope"] == "committed"
-    assert '"picked_tasks"' not in recorded["content"]  # JSON 非混入
-    assert "judgment:post_conversation" in recorded["metadata"]["tags"]
-    assert "applied=True" in summary
-
-
-def test_post_conversation_zero_harvest_is_normal(
-    manager, task_refs, finalize_mod, tmp_path
-):
-    """収穫ゼロ (両配列空 + 時間割変更なし) は警告なしの正常系。"""
-    output = {
-        "monologue": "ただの雑談だった。心地よい時間だったな。",
-        "picked_tasks": [],
-        "new_desires": [],
-        "remaining_timetable": None,
-    }
-    ctx = json.dumps({"plan_date": PLAN_DATE, "track_refs": []})
-    with _persona_ctx(manager, tmp_path):
-        summary, _, _ = finalize_mod.judgment_finalize(
-            judgment_output=output, kind="post_conversation", judgment_context=ctx,
-        )
-
-    assert "warnings=0" in summary
-    assert "applied=False" in summary
-    recorded = manager.personas[PERSONA_ID].sai_memory.messages[0]
-    assert recorded["scope"] == "discardable"
-    assert "ただの雑談だった" in recorded["content"]
-
-
-def test_post_conversation_remaining_timetable_full_replace(
-    manager, task_refs, finalize_mod, tmp_path
-):
-    day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
-        {"start": "14:00", "kind": "調べる", "ref": "task:1",
-         "facility": "library", "budget_rounds": 5, "note": "調べもの"},
-        _rest_slot("20:00"),
-    ])
-    day_plan.schedule_day_plan(manager, PERSONA_ID, PLAN_DATE)
-    assert manager.event_scheduler.pending_count() == 2
-
-    output = {
-        "monologue": "会話で時間を使ったから、残りは一本にまとめる。",
-        "picked_tasks": [],
-        "new_desires": [],
-        "remaining_timetable": [
-            {"start": "16:00", "kind": "調べる", "ref": "task:1",
-             "facility": "library", "budget_rounds": 4, "note": "続き"},
-        ],
-    }
-    ctx = json.dumps({"plan_date": PLAN_DATE, "track_refs": []})
-    with _persona_ctx(manager, tmp_path):
-        finalize_mod.judgment_finalize(
-            judgment_output=output, kind="post_conversation", judgment_context=ctx,
-        )
-
-    slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
-    assert [(s["start"], s["status"]) for s in slots] == [("16:00", "pending")]
-    assert manager.event_scheduler.pending_count() == 1
-
-
-def test_post_conversation_resume_now_inserts_immediate_slot(
-    manager, task_refs, finalize_mod, tmp_path
-):
-    """resume_now = 凍結タスクを参照する作業コマの現在時刻への即時挿入。
-
-    kind / facility / 予算は同じタスクを指していた元コマから引き継ぐ。
-    """
-    track_id = manager.track_manager.create(
-        persona_id=PERSONA_ID, track_type="autonomous", title="調べ物",
-    )
-    day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
-        {"start": "06:30", "kind": "調べる", "ref": "task:1",
-         "facility": "library", "budget_rounds": 5, "note": "朝の調べもの",
-         "status": "fired"},
-        _rest_slot("21:00"),
-    ])
-    output = {
-        "monologue": "会話も終わったし、さっきの続きに戻ろう。",
-        "picked_tasks": [],
-        "new_desires": [],
-        "remaining_timetable": None,
-        "resume_session": "resume_now",
-    }
-    ctx = json.dumps({
-        "plan_date": PLAN_DATE, "track_refs": [],
-        "resume": {"track_id": track_id, "task_ref": "task:1",
-                   "text": "第3節まで読了"},
-    })
-    with _persona_ctx(manager, tmp_path):
-        summary, _, _ = finalize_mod.judgment_finalize(
-            judgment_output=output, kind="post_conversation", judgment_context=ctx,
-        )
-
-    slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
-    assert [(s["start"], s["status"]) for s in slots] == [
-        ("06:30", "fired"), ("07:00", "pending"), ("21:00", "pending"),
-    ]
-    inserted = slots[1]
-    assert inserted["kind"] == "調べる"           # 元コマから引き継ぎ
-    assert inserted["ref"] == "task:1"
-    assert inserted["facility"] == "library"    # 元コマから引き継ぎ
-    assert inserted["budget_rounds"] == 5       # 元コマから引き継ぎ
-    assert manager.event_scheduler.has_key(
-        day_plan._slot_key(PERSONA_ID, PLAN_DATE, inserted["id"])
-    )
-    assert "applied=True" in summary
-
-
-def test_post_conversation_resume_drop_clears_desk_memo(
-    manager, task_refs, finalize_mod, tmp_path
-):
-    track_id = manager.track_manager.create(
-        persona_id=PERSONA_ID, track_type="autonomous", title="調べ物",
-    )
-    jp.save_desk_memo(manager, track_id, {
-        "text": "第3節まで", "status": "continue", "task_ref": "task:1",
-        "updated_at": "2026-07-03T22:00:00",
-    })
-    assert jp.find_interrupted_session(manager, PERSONA_ID) is not None
-
-    output = {
-        "monologue": "あの作業はもういい。区切りにする。",
-        "picked_tasks": [], "new_desires": [], "remaining_timetable": None,
-        "resume_session": "drop",
-    }
-    ctx = json.dumps({
-        "plan_date": PLAN_DATE, "track_refs": [],
-        "resume": {"track_id": track_id, "task_ref": "task:1", "text": "第3節まで"},
-    })
-    with _persona_ctx(manager, tmp_path):
-        finalize_mod.judgment_finalize(
-            judgment_output=output, kind="post_conversation", judgment_context=ctx,
-        )
-
-    track = manager.track_manager.get(track_id)
-    assert "desk_memo" not in json.loads(track.track_metadata)
-    assert jp.find_interrupted_session(manager, PERSONA_ID) is None
-
-
-def test_post_conversation_resume_without_interrupted_session_rejected(
-    manager, task_refs, finalize_mod, tmp_path, caplog
-):
-    """ctx に resume が無い (= 中断中セッションが無い) のに選ばれたら棄却。"""
-    output = {
-        "monologue": "……",
-        "picked_tasks": [], "new_desires": [], "remaining_timetable": None,
-        "resume_session": "resume_now",
-    }
-    ctx = json.dumps({"plan_date": PLAN_DATE, "track_refs": []})
-    with caplog.at_level("WARNING"):
-        with _persona_ctx(manager, tmp_path):
-            finalize_mod.judgment_finalize(
-                judgment_output=output, kind="post_conversation",
-                judgment_context=ctx,
-            )
-    assert any("中断中セッションがありません" in r.message for r in caplog.records)
-    assert day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE) is None
-
-
-# ---------------------------------------------------------------------------
 # on_event: 起動 (4 分岐スキーマ / alert 縮退)
 # ---------------------------------------------------------------------------
 
@@ -2026,36 +1495,19 @@ def test_on_event_finalize_alert_rejects_non_engage(
 
 
 # ---------------------------------------------------------------------------
-# day_close: 起動 (今日触れた欲求のみの enum + 予定 vs 実績)
+# day_close: 起動 (予定 vs 実績)
 # ---------------------------------------------------------------------------
 
 
 def test_day_close_dispatch_schema_and_situation(
     manager, ptm, task_refs, session_factory
 ):
-    from saiverse.desire_engine import touch_desire
-
     day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
         {"start": "09:00", "kind": "調べる", "ref": "task:1",
          "facility": "library", "budget_rounds": 5, "note": "記事の続き",
          "status": "done"},
         {**_rest_slot("21:00"), "status": "pending"},
     ])
-    # desire:2 は今日 (仮想 2026-07-04) 触れた
-    touch_desire(manager, PERSONA_ID, task_refs["desire"])
-    # 触れていない欲求 (作成も接触も昨日以前) は enum に出ない
-    old = ptm.create_task(
-        persona_id=PERSONA_ID, title="以前からの思いつき",
-        stage=STAGE_CANDIDATE, desire_source="test-seed", auto_activate=False,
-    )
-    db = session_factory()
-    try:
-        row = db.query(PersonaTask).filter(PersonaTask.id == old["id"]).first()
-        row.created_at = BASE - timedelta(days=3)
-        row.last_touched_at = BASE - timedelta(days=3)
-        db.commit()
-    finally:
-        db.close()
 
     result = jp.run_judgment_point(manager, PERSONA_ID, "day_close")
 
@@ -2064,11 +1516,6 @@ def test_day_close_dispatch_schema_and_situation(
     args = result["args"]
     schema = args["response_schema"]
     _assert_no_additional_properties(schema)
-    reviews = schema["properties"]["desire_reviews"]["items"]["properties"]
-    assert reviews["desire_ref"]["enum"] == ["task:2"], (
-        "今日触れていない欲求が enum に混入している"
-    )
-    assert reviews["verdict"]["enum"] == ["keep", "fading", "fulfilled"]
     assert schema["properties"]["user_report_seeds"]["maxItems"] == 3
     assert schema["required"] == ["monologue", "tomorrow_memo"]
 
@@ -2076,11 +1523,11 @@ def test_day_close_dispatch_schema_and_situation(
     assert "09:00" in text and "実行済み" in text  # 予定 vs 実績
     assert "21:00" in text and "未実施" in text
     assert "消化 5 / 計画 5" in text  # 予算 (計画値) の対照
-    assert "言葉の標本集" in text  # 今日触れた欲求一覧
-    assert "以前からの思いつき" not in text
+    # 欲求一覧は退役した (2026-08-21)
+    assert "やりたいこと" not in text
 
     ctx = json.loads(args["judgment_context"])
-    assert ctx["touched_desire_refs"] == ["task:2"]
+    assert ctx["plan_date"] == PLAN_DATE
 
 
 def test_day_close_situation_shows_system_skip_honestly(manager, task_refs):
@@ -2093,7 +1540,7 @@ def test_day_close_situation_shows_system_skip_honestly(manager, task_refs):
         {"start": "09:00", "kind": "調べる", "ref": "task:1",
          "facility": "library", "budget_rounds": 5, "note": "記事の続き",
          "status": "done"},
-        {"start": "21:00", "kind": "日記を書く", "ref": task_refs["desire"],
+        {"start": "21:00", "kind": "日記を書く", "ref": task_refs["task2"],
          "facility": "own_room", "budget_rounds": 8, "note": "気づきの整理",
          "status": "skipped",
          "skip_reason": day_plan.SKIP_REASON_NO_HANDLER},
@@ -2133,26 +1580,12 @@ def test_day_close_situation_shows_presence_only_honestly(manager, task_refs):
     assert "時間を過ごした（詳細な記録なし）" in living_line
 
 
-def test_day_close_schema_omits_desire_reviews_when_none_touched(
-    manager, ptm, task_refs, session_factory
-):
-    # fixture の desire:2 は「今日作成」扱いなので、作成日を過去に倒す
-    desire_id = ptm.resolve_task_ref(PERSONA_ID, "task:2")
-    db = session_factory()
-    try:
-        row = db.query(PersonaTask).filter(PersonaTask.id == desire_id).first()
-        row.created_at = BASE - timedelta(days=2)
-        row.last_touched_at = BASE - timedelta(days=2)
-        db.commit()
-    finally:
-        db.close()
-
+def test_day_close_schema_has_no_desire_reviews(manager, task_refs):
+    """欲求のたな卸し欄は 2026-08-21 に退役した (欲求プールが機構ごと消滅)。"""
     result = jp.run_judgment_point(manager, PERSONA_ID, "day_close")
     schema = result["args"]["response_schema"]
     _assert_no_additional_properties(schema)
-    assert "desire_reviews" not in schema["properties"], (
-        "触れた欲求ゼロなのに desire_reviews が要求されている (空 enum 事故)"
-    )
+    assert "desire_reviews" not in schema["properties"]
 
 
 # ---------------------------------------------------------------------------
@@ -2163,27 +1596,19 @@ def test_day_close_schema_omits_desire_reviews_when_none_touched(
 def test_day_close_finalize_and_day_open_linkage(
     manager, ptm, task_refs, finalize_mod, tmp_path, caplog
 ):
-    from saiverse.desire_engine import touch_desire
-
     day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
         {"start": "09:00", "kind": "調べる", "ref": "task:1",
          "facility": "library", "budget_rounds": 5, "note": "記事の続き",
          "status": "done"},
     ])
-    touch_desire(manager, PERSONA_ID, task_refs["desire"])
 
     output = {
         "monologue": "概ね予定どおりに進んだ一日だった。",
         "tomorrow_memo": "朝一は標本集の整理から始める",
         "day_theme": "収集",
-        "desire_reviews": [
-            {"desire_ref": "task:2", "verdict": "fulfilled"},
-            {"desire_ref": "task:9", "verdict": "keep"},  # 触れていない → 棄却
-        ],
         "user_report_seeds": ["蒸留記事の要点を覚え書きにまとめた"],
     }
-    ctx = json.dumps({"plan_date": PLAN_DATE,
-                      "touched_desire_refs": ["task:2"]})
+    ctx = json.dumps({"plan_date": PLAN_DATE})
     with caplog.at_level("WARNING"):
         with _persona_ctx(manager, tmp_path):
             summary, _, _ = finalize_mod.judgment_finalize(
@@ -2198,13 +1623,6 @@ def test_day_close_finalize_and_day_open_linkage(
     assert meta["day_theme"] == "収集"
     assert meta["user_report_seeds"] == ["蒸留記事の要点を覚え書きにまとめた"]
     assert "day_digest" not in meta
-
-    # desire_reviews: fulfilled は即消化 (completed)、enum 外は棄却 + WARN
-    desire = ptm.get_task(
-        ptm.resolve_task_ref(PERSONA_ID, "task:2"), persona_id=PERSONA_ID,
-    )
-    assert desire["status"] == "completed"
-    assert any("task:9" in r.message for r in caplog.records)
 
     recorded = manager.personas[PERSONA_ID].sai_memory.messages[0]
     assert recorded["scope"] == "committed"
@@ -2231,7 +1649,7 @@ def test_day_close_finalize_empty_memo_warns(
     空 updates で同じエコーを出すと、引き継ぎ消失が成功の顔で残る
     (2026-07-29 Codex 指摘 high2)。"""
     output = {"monologue": "……", "tomorrow_memo": ""}
-    ctx = json.dumps({"plan_date": PLAN_DATE, "touched_desire_refs": []})
+    ctx = json.dumps({"plan_date": PLAN_DATE})
     with caplog.at_level("WARNING"):
         with _persona_ctx(manager, tmp_path):
             summary, _, _ = finalize_mod.judgment_finalize(
@@ -2559,142 +1977,6 @@ def test_finalize_untracked_with_ledger_but_no_execution_id(
     assert len(adapter.messages) == 1  # 直書き
     assert adapter.ledger_messages == []
     assert _pending_outbox(session_factory, eid) == 0
-
-
-# ---------------------------------------------------------------------------
-# 実行台帳フロー (W1 Chunk B / A11: SpellOutcome)
-# ---------------------------------------------------------------------------
-
-
-def _desire_output(*titles):
-    return {
-        "monologue": "やりたいことが増えた。",
-        "task_verdict": None,
-        "new_desires": [
-            {"type": "作る", "title": t, "source_quote": "会話の引用"}
-            for t in titles
-        ],
-        "remaining_timetable": None,
-    }
-
-
-def test_spell_failure_is_not_committed_and_notifies(
-    manager, task_refs, finalize_mod, tmp_path, session_factory, caplog,
-):
-    """A11 (1): tool 例外 → applied=False / 正準 /spell 行なし /
-    judgment_apply_failure が outbox に積まれ perception へ届く。"""
-    from saiverse import execution_ledger as XL
-
-    ledger, eid = _tracked_execution(manager, "post_session")
-    adapter = manager.personas[PERSONA_ID].sai_memory
-
-    def broken_purpose_seed(**kwargs):
-        raise RuntimeError("seed store down")
-
-    ctx = json.dumps({"plan_date": PLAN_DATE, "artifacts": [],
-                      "task_ref": "task:1", "execution_id": eid})
-    import tools as tools_pkg
-    with caplog.at_level("WARNING"):
-        with patch.dict(tools_pkg.TOOL_REGISTRY,
-                        {"purpose_seed": broken_purpose_seed}):
-            with _persona_ctx(manager, tmp_path):
-                summary, _, _ = finalize_mod.judgment_finalize(
-                    judgment_output=_desire_output("語源メモ"),
-                    kind="post_session", judgment_context=ctx,
-                )
-
-    assert "applied=False" in summary
-    assert "spells=1/0/1" in summary
-    assert "scope=discardable" in summary
-    assert any("purpose_seed" in r.message for r in caplog.records)
-
-    entry = ledger.get_execution(eid)
-    assert entry["result"]["spells"] == {
-        "attempted": 1, "succeeded": 0, "failed": 1,
-    }
-    assert entry["result"]["committed"] is False
-
-    # 配送: 判断行 (成功形 /spell なし) + システム名義の適用失敗通知
-    assert ledger.flush_pending_for_persona(PERSONA_ID) is True
-    assert len(adapter.ledger_messages) == 1
-    content = adapter.ledger_messages[0][1]["content"]
-    assert "/spell" not in content
-    assert adapter.ledger_messages[0][1]["scope"] == "discardable"
-    assert len(adapter.perceptions) == 1
-    notice = adapter.perceptions[0]
-    assert notice["kind"] == "judgment_apply_failure"
-    assert notice["reduce_key"] == "judgment_apply_failure:post_session"
-    assert notice["salient"] is True
-    assert "purpose_seed" in notice["content"]
-    assert "世界には反映されていません" in notice["content"]
-
-
-def test_spell_partial_success_separates_counts_and_lines(
-    manager, task_refs, finalize_mod, tmp_path, session_factory,
-):
-    """A11 (2): 一部成功 → 成功分だけ正準 /spell 形、件数は attempted/succeeded/
-    failed に分離、scope は committed (成功 spell あり)。"""
-    ledger, eid = _tracked_execution(manager, "post_session")
-    adapter = manager.personas[PERSONA_ID].sai_memory
-
-    def flaky_purpose_seed(**kwargs):
-        if kwargs.get("title") == "壊れる方":
-            raise RuntimeError("boom")
-        return "added"
-
-    ctx = json.dumps({"plan_date": PLAN_DATE, "artifacts": [],
-                      "task_ref": "task:1", "execution_id": eid})
-    import tools as tools_pkg
-    with patch.dict(tools_pkg.TOOL_REGISTRY,
-                    {"purpose_seed": flaky_purpose_seed}):
-        with _persona_ctx(manager, tmp_path):
-            summary, _, _ = finalize_mod.judgment_finalize(
-                judgment_output=_desire_output("成功する方", "壊れる方"),
-                kind="post_session", judgment_context=ctx,
-            )
-
-    assert "applied=True" in summary
-    assert "spells=2/1/1" in summary
-    assert "scope=committed" in summary
-    entry = ledger.get_execution(eid)
-    assert entry["result"]["spells"] == {
-        "attempted": 2, "succeeded": 1, "failed": 1,
-    }
-
-    assert ledger.flush_pending_for_persona(PERSONA_ID) is True
-    content = adapter.ledger_messages[0][1]["content"]
-    assert content.count("/spell") == 1
-    assert "成功する方" in content
-    # 失敗した方は /spell 行に載らず、通知に載る
-    spell_line = [ln for ln in content.splitlines() if ln.startswith("/spell")][0]
-    assert "壊れる方" not in spell_line
-    assert len(adapter.perceptions) == 1
-    assert "壊れる方" in adapter.perceptions[0]["content"] or \
-        "purpose_seed" in adapter.perceptions[0]["content"]
-
-
-def test_spell_tool_not_found_untracked_warns_without_spell_line(
-    manager, task_refs, finalize_mod, tmp_path, caplog,
-):
-    """A11 (3): tool 不在も failure。untracked では warnings ログのみ
-    (perception 通知なし) で、判断行に成功形 /spell は残らない。"""
-    output = _desire_output("行き場のない欲求")
-    ctx = json.dumps({"plan_date": PLAN_DATE, "artifacts": [],
-                      "task_ref": "task:1"})
-    import tools as tools_pkg
-    with caplog.at_level("WARNING"):
-        with patch.dict(tools_pkg.TOOL_REGISTRY, {}, clear=True):
-            with _persona_ctx(manager, tmp_path):
-                summary, _, _ = finalize_mod.judgment_finalize(
-                    judgment_output=output, kind="post_session",
-                    judgment_context=ctx,
-                )
-    assert "applied=False" in summary
-    assert "spells=1/0/1" in summary
-    assert any("ツールが見つかりません" in r.message for r in caplog.records)
-    recorded = manager.personas[PERSONA_ID].sai_memory.messages[0]
-    assert recorded["scope"] == "discardable"
-    assert "/spell" not in recorded["content"]
 
 
 # ---------------------------------------------------------------------------

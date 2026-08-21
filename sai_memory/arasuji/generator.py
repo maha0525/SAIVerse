@@ -159,10 +159,6 @@ def generate_level1_arasuji(
     debug_log_path: Optional[Path] = None,
     persona_id: Optional[str] = None,
     thread_id: Optional[str] = None,
-    origin_track_id: Optional[str] = None,
-    is_incomplete: bool = False,
-    track_title: Optional[str] = None,
-    track_intent: Optional[str] = None,
 ) -> Optional[ArasujiEntry]:
     """Generate a level-1 arasuji from messages.
 
@@ -173,10 +169,6 @@ def generate_level1_arasuji(
         dry_run: If True, don't save to database
         include_timestamp: If False, omit timestamps from prompt (useful when dates are unreliable)
         memopedia_context: Optional semantic memory context (page titles, summaries, keywords)
-        origin_track_id: Track Chronicle 用 (v0.32)。set すると Track 紐付き entry として保存される。
-                         set のとき抽出プロンプトを Track 目的駆動に切り替える
-        is_incomplete: バッチサイズ未満で作る一時 Lv1 のフラグ (Track Chronicle 用)
-        track_title / track_intent: Track Chronicle 抽出時にプロンプトに入れる Track 識別情報
 
     Returns:
         Created ArasujiEntry or None on failure
@@ -206,30 +198,10 @@ def generate_level1_arasuji(
     if not conversation.strip():
         return None
 
-    # Build prompt — Track Chronicle と General Chronicle で抽出視点が異なる (v0.32)。
-    # General: 出来事のあらすじ。Track: Track 目的駆動の作業遂行情報抽出。
-    is_track_chronicle = origin_track_id is not None
-
-    if is_track_chronicle:
-        title_str = track_title or "(無題)"
-        intent_str = (track_intent or "").strip()
-        prompt_parts = [
-            "あなたはペルソナ自身の記憶整理の頭脳です。"
-            f"以下は、トラック「{title_str}」での作業履歴の一部です。",
-            "このトラックの目的に沿って、後で再開した時に作業を続けるために必要な情報を抽出してください。",
-            "",
-        ]
-        if intent_str:
-            prompt_parts.extend([
-                "## このトラックの意図",
-                intent_str,
-                "",
-            ])
-    else:
-        prompt_parts = [
-            "あなたは記憶の記録者です。以下の会話から、出来事のあらすじを書いてください。",
-            "",
-        ]
+    prompt_parts = [
+        "あなたは記憶の記録者です。以下の会話から、出来事のあらすじを書いてください。",
+        "",
+    ]
 
     if context:
         prompt_parts.extend([
@@ -245,38 +217,21 @@ def generate_level1_arasuji(
             "",
         ])
 
-    if is_track_chronicle:
-        prompt_parts.extend([
-            "## 今回まとめる範囲のメッセージ",
-            conversation,
-            "",
-            "## 指示",
-            "- このトラックでの「作業遂行情報」を簡潔に抽出する",
-            "- 含めるべき要素: 計画 / 完了済みの作業 / 進行中の課題 / 待ち事項・未解決の問い / 結論・決定",
-            "- このトラックの目的と無関係な雑談・脱線は省略する",
-            "- 固有名詞・参照中のリソース・重要な数値は保持する",
-            "- 段落構成は自由 (箇条書きでもよい)。長くなりすぎず、5〜10 文程度を目安",
-            "- **日時情報（【2025-01-07 23:56 ~】など）は書かないでください**（自動で付与されます）",
-            "- **「あらすじ」などの見出しは書かないでください**（本文のみ出力）",
-            "",
-            "作業遂行情報を日本語で書いてください。",
-        ])
-    else:
-        prompt_parts.extend([
-            "## 今回記録する会話",
-            conversation,
-            "",
-            "## 指示",
-            "- 3〜5文程度で、何が起きたか、誰と何を話したかを要約",
-            "- 時系列の流れがわかるように書く",
-            "- 固有名詞や重要な詳細は保持する",
-            "- 感情や雰囲気も含める",
-            "- 「〜について話した」のような抽象的な記述は避け、具体的に書く",
-            "- **日時情報（【2025-01-07 23:56 ~】など）は書かないでください**（自動で付与されます）",
-            "- **「あらすじ」などの見出しは書かないでください**（本文のみ出力）",
-            "",
-            "あらすじを日本語で書いてください。",
-        ])
+    prompt_parts.extend([
+        "## 今回記録する会話",
+        conversation,
+        "",
+        "## 指示",
+        "- 3〜5文程度で、何が起きたか、誰と何を話したかを要約",
+        "- 時系列の流れがわかるように書く",
+        "- 固有名詞や重要な詳細は保持する",
+        "- 感情や雰囲気も含める",
+        "- 「〜について話した」のような抽象的な記述は避け、具体的に書く",
+        "- **日時情報（【2025-01-07 23:56 ~】など）は書かないでください**（自動で付与されます）",
+        "- **「あらすじ」などの見出しは書かないでください**（本文のみ出力）",
+        "",
+        "あらすじを日本語で書いてください。",
+    ])
 
     prompt = "\n".join(prompt_parts)
 
@@ -334,8 +289,6 @@ def generate_level1_arasuji(
             parent_id=None,
             is_consolidated=False,
             created_at=0,
-            origin_track_id=origin_track_id,
-            is_incomplete=is_incomplete,
         )
 
     # --- DB save with retry (LLM result is already obtained, no re-call) ---
@@ -352,13 +305,8 @@ def generate_level1_arasuji(
                 source_count=len(messages),
                 message_count=len(messages),
                 thread_id=thread_id,
-                origin_track_id=origin_track_id,
-                is_incomplete=is_incomplete,
             )
-            LOGGER.info(
-                "Created level-1 arasuji: track=%s incomplete=%s content=%s",
-                origin_track_id or "(general)", is_incomplete, content[:60],
-            )
+            LOGGER.info("Created level-1 arasuji: content=%s", content[:60])
             return entry
         except Exception as e:
             LOGGER.warning(

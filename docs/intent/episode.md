@@ -169,7 +169,7 @@ v1.3 まで「エピソードコネクション」として残していた関係
 | 対象 | 扱い |
 |---|---|
 | 30 分タイムアウトによる会話の区切り | タイマーは世界側の「返事を待つ」の管理だけに縮小（§3.3） |
-| kind='conversation' のエピソード（現行実装） | **撤去** — 会話はエピソードを持たない（§3.3）。会話行の開き口（user_conversation_handler）・occurrence の載せ場所・既存データの扱いは §9 |
+| kind='conversation' のエピソード（現行実装） | **撤去** — 会話はエピソードを持たない（§3.3）。会話行の開き口（`saiverse/user_conversation.py`。2026-08-21 に旧 user_conversation_handler から世代交代）・occurrence の載せ場所・既存データの扱いは §9 |
 | 展開の保護リスト（7/13） | 廃止（§4.3） |
 | user_conversation_preserver（20 件保持） | 退役 — track_retirement 住人 11（§4.3） |
 | 孤児エピソード問題 | 構造消滅 — 会話にエピソードが無い（§3.3） |
@@ -209,7 +209,7 @@ v1.3 まで「エピソードコネクション」として残していた関係
 | 残存 | 現状 | 行き先 |
 |---|---|---|
 | `saiverse/episodes.py` の会話まわり | kind='conversation' 定数・会話専用の開き口と検索・occurrence | 撤去。occurrence の対応づけは人物の組か転記元の共有 ID へ（§3.3） |
-| user_conversation_handler | 会話開始時に会話エピソードを開く | 撤去（開くものが無い） |
+| `saiverse/user_conversation.py` (旧 user_conversation_handler) | 会話開始時に会話エピソードを開く | 撤去（開くものが無い） |
 | day_plan.is_in_user_conversation | 「いま会話中か」を開いている会話エピソードで判定（life.md §7 の 2026-07 裁定） | **待ちタイマーの生死の判定へ変更**（§3.3。life.md 側の記述も追従） |
 | autonomy_wiring.handle_conversation_end | 会話終了時に会話エピソードを閉じる | 閉じる操作ごと撤去（会話終了判断そのもの＝ペルソナが次の行動へ移る世界側の処理は残る） |
 | judgment_points の状況テキスト | 開いている会話エピソードを参照 | 待ちタイマー判定へ |

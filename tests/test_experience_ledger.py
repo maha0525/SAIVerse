@@ -430,9 +430,7 @@ class TestPurposeRows:
         assert by_ref["task:1"]["stats"]["record_count"] == 2
         assert by_ref["task:1"]["stats"]["first_date"] is not None
 
-        assert by_ref["task:2"]["kind"] == "desire"
-        assert by_ref["task:2"]["stats"]["record_count"] == 0
-
-        track_refs = [p for p in purposes if p["kind"] == "track"]
-        assert len(track_refs) == 1
-        assert track_refs[0]["title"] == "言葉の標本集"
+        # 欲求候補 (kind='desire') と関心 (kind='track') の索引行は 2026-08-21 に
+        # 供給源ごと退役した — 索引に残るのは生きたタスクだけ。
+        assert "task:2" not in by_ref
+        assert {p["kind"] for p in purposes} == {"task"}

@@ -286,13 +286,17 @@ def _tags(adapter):
 
 
 def test_belongs_to_enum_is_live_refs_plus_none_new(manager, persona, adapter):
-    """belongs_to enum = 実在の生きた目的ノード (task/desire/track) + none + new。"""
+    """belongs_to enum = 実在の生きたタスク + none + new。
+
+    2026-08-21: 欲求候補 (task:2) と関心 (track:1) は供給源ごと退役したので、
+    enum にも一覧にも載らない。
+    """
     client = _run_close(manager, persona, {"belongs_to": "none", "note": ""})
 
     schema = client.calls[0]["response_schema"]
     enum = schema["properties"]["belongs_to"]["enum"]
-    # collect_slot_ref_enum の順序: バックログタスク → 欲求候補 → 関心 → none、+ new
-    assert enum == ["task:1", "task:2", "track:1", "none", "new"]
+    # collect_slot_ref_enum の順序: バックログタスク → none、+ new
+    assert enum == ["task:1", "none", "new"]
 
 
 def test_close_prompt_grounding_and_prior_ref(manager, persona, adapter):
@@ -308,8 +312,9 @@ def test_close_prompt_grounding_and_prior_ref(manager, persona, adapter):
     assert "実際にやったこと" in prompt                    # 接地条件
     assert "空のままでかまいません" in prompt              # 充填の禁忌
     assert "task:1" in prompt and "序文の下書き" in prompt  # 選択肢一覧 (題つき)
-    assert "雲の写真を集めたい" in prompt                  # 欲求候補も載る
-    assert "言葉の標本集" in prompt                        # 関心も載る
+    # 欲求候補・関心は退役したので一覧に載らない (2026-08-21)
+    assert "雲の写真を集めたい" not in prompt
+    assert "言葉の標本集" not in prompt
     assert "事前の予定では、このコマは task:1" in prompt   # 事前 ref は参考情報
     assert "後の自分のために" in prompt                    # 経験値ノートの意義 (§4)
 
@@ -377,11 +382,11 @@ def test_json_string_response_is_parsed(manager, persona, adapter):
 
 def test_attribution_tag_written(manager, persona, adapter):
     """belongs_to の実在参照が層2 (棚入れ) タグとして episode に載る。"""
-    _run_close(manager, persona, {"belongs_to": "task:2", "note": ""})
+    _run_close(manager, persona, {"belongs_to": "task:1", "note": ""})
 
     from sai_memory.purpose_tags import LAYER_SHELVE
 
-    assert _tags(adapter) == [(EPISODE_REF, "task:2", LAYER_SHELVE)]
+    assert _tags(adapter) == [(EPISODE_REF, "task:1", LAYER_SHELVE)]
 
 
 def test_none_and_new_write_no_tag(manager, persona, adapter):

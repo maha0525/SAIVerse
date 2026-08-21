@@ -7,7 +7,7 @@ SAIVerse に登録されている全ツールの一覧（自動生成）。概�
 作り方は [開発者ガイド: ツールの追加](../developer-guide/adding-tools.md)、
 平文から呼ぶ Spell 化は [concepts/spell.md](../concepts/spell.md) を参照。
 
-**登録ツール数**: 134（うち Spell 化: 92）
+**登録ツール数**: 124（うち Spell 化: 82）
 
 - `*` 付きの引数は必須。
 - **Spell** 列に表示名があるものは、ペルソナが平文応答から `/spell <名> ...` で呼べる。
@@ -44,8 +44,7 @@ SAIVerse に登録されている全ツールの一覧（自動生成）。概�
 | `item_annotate` | Update an item's name and/or description (概要). Provide name, description, or both (at least one is required). Use thi… | `item_id*`: string, `name`: string, `description`: string | アイテム名・概要の編集 |
 | `item_move` | Move items to a building, your inventory, or inside a bag. Specify comma-separated item IDs and a destination. | `item_ids*`: string, `destination_type*`: string, `destination_id`: string | アイテム移動 |
 | `item_view` | View item details. For pictures: shows the image. For documents: shows full text. For bags: shows contents list. Supp… | `item_id`: string, `item_ids`: string | アイテム閲覧 |
-| `judgment_finalize` | Internal tool for judgment-point Playbooks only (judgment_day_open / judgment_post_conversation / judgment_post_sessi… | `judgment_output*`: object, `kind*`: string, `judgment_context`: string, `situation_text`: string | — |
-| `life_purpose_set` | Save your confirmed life purpose / interests / vocations. Use this once, during the first-time self-definition: after… | `purpose*`: string, `interests`: array, `vocations`: array | 生きる目的を保存 |
+| `judgment_finalize` | Internal tool for judgment-point Playbooks only (judgment_day_open / judgment_post_session / judgment_on_event / judg… | `judgment_output*`: object, `kind*`: string, `judgment_context`: string, `situation_text`: string | — |
 | `list_available_playbooks` | List playbooks available for router selection based on persona and building context. | `persona_id`: string, `building_id`: string | — |
 | `list_city_buildings` | List all buildings in the current city with their IDs and occupant personas. | (なし) | — |
 | `memopedia_delete_fragment` | Memopediaのフラグメント（断片知識）を1件削除します。memopedia_list_fragments で確認したIDを指定してください。 | `fragment_id*`: string | — |
@@ -71,10 +70,8 @@ SAIVerse に登録されている全ツールの一覧（自動生成）。概�
 | `move_persona` | Move the active persona to another building. (When called in persona context, persona_id must match the active persona.) | `building_id*`: string, `persona_id`: string | — |
 | `observer_read` | Read the latest observation data from a building fixture's sensor/monitor. Returns cached values — does not trigger n… | `observer_id*`: string, `metric_name`: string | オブザーバー観測値取得 |
 | `pdf_read` | Extract and read text from a PDF document item. Specify page range to read specific pages. Requires pypdf to be insta… | `item_id*`: string, `pages`: string, `max_chars`: integer | — |
-| `purpose_adopt` | 目的の木に接ぎます（adopt = 接ぐ。候補を生むのは purpose_seed）。candidate_ref（task:N）を指定すると、書き留めてあった候補を採用して木に接ぎます — parent_ref（track:N）を添え… | `candidate_ref`: string, `title`: string, `parent_ref`: string | 目的の木に接ぐ |
 | `purpose_close` | 目的ノード（task:N）を閉じます。outcome で閉じ方を選びます: completed（やり遂げた）/ cancelled（やらないと決めた）/ dormant（今は続けないが、いつか戻るかもしれない — 休眠）。 | `node_ref*`: string, `outcome`: string, `reason`: string | 目的を閉じる |
 | `purpose_decompose` | 目的ノード（task:N）をステップに分解します。steps 配列の各要素は title（と任意の description）を持つオブジェクトで、既存のステップはすべて置き換えられます。1つのステップの進捗を更新するには purpos… | `node_ref*`: string, `steps*`: array | 目的をステップに分解 |
-| `purpose_seed` | 「いつかやりたい」と思いついたことを、候補として書き留めます（seed = 候補を生む。木に接ぐ = 採用は purpose_adopt が担います）。候補はやりたいことの候補プールに保管され、後から採用されて目的の木に接がれます。1… | `title*`: string, `goal`: string, `type`: string, `source*`: string | やりたいことを書き留める |
 | `purpose_step` | 目的ノード（task:N）の中の1ステップの状態とメモを更新します。ステップへの分解（全置換）は purpose_decompose を使ってください。 | `node_ref*`: string, `step_position*`: integer, `status*`: string, `notes`: string, `auto_advance`: boolean | 目的のステップを更新 |
 | `read_url_content` | Fetch a web page URL and return its content as readable Markdown text. | `url*`: string, `max_chars`: integer | — |
 | `read_url_outline` | 指定したURLのページ内容を読み込み、短いページなら全文、長いページなら見出し階層（h1〜h4）を返します。長いページは続けて read_url_section で必要な節を深掘りしてください。閾値はデフォルト 5000 文字、環境変… | `url*`: string, `full_threshold`: integer | ページ概要 |
@@ -90,13 +87,6 @@ SAIVerse に登録されている全ツールの一覧（自動生成）。概�
 | `send_email_to_user` | Send an email to a user by USERID using SMTP settings from environment variables. Adds persona display name to From i… | `user_id*`: integer, `subject*`: string, `body*`: string | メール送信 |
 | `switch_active_thread` | Record a persona thread switch by inserting a system message that references messages from another thread, and update… | `target_thread*`: string, `summary`: string, `range_before`: integer | — |
 | `tell` | Speak out loud to someone here, in your own voice. Specify who it is for: 'user' (the user), 'all' (everyone in this … | `target*`: string, `gist`: string | 声をかける |
-| `track_abort` | Abort a track without completion. Use when giving up on the work. Persistent core tracks (user_conversation, social) … | `track_id*`: string | トラック中止 |
-| `track_activate` | Activate a track (set its status to 'running'). If another track was running, it is automatically moved to 'pending'.… | `track_id*`: string | トラック起動 |
-| `track_complete` | Mark a running track as 'completed'. The track must be currently running. Persistent core tracks (user_conversation, … | `track_id*`: string | トラック完了 |
-| `track_create` | Create a new action track for the persona. Tracks represent ongoing work contexts. The new track starts in 'unstarted… | `track_type*`: string, `title`: string, `intent`: string, `output_target`: string, `is_persistent`: boolean, `metadata`: string, `activate`: boolean, `entry_line_role`: string, `from_candidate`: string | トラック作成 |
-| `track_list` | List the persona's tracks. By default, forgotten tracks are excluded. Use 'statuses' to filter by status (e.g., ['run… | `statuses`: array, `include_forgotten`: boolean | トラック一覧 |
-| `track_parameter_set` | Set a continuous-value parameter on a Track (e.g. dirtiness, hunger, hours_since_check). The value is stored in actio… | `track_id*`: string, `parameter_name*`: string, `value*`: number | トラックパラメータ更新 |
-| `track_pause` | Pause a running track to 'pending' state. Use this when switching to another task without finishing the current one. … | `track_id*`: string | トラック後回し |
 | `update_working_memory` | Update a key in working memory. Working memory persists across pulses and server restarts. Use for short-term state l… | `key*`: string, `value*`: any | — |
 | `generate_image_local` | Generate an image using a local ComfyUI server. Supports customizable workflows with positive/negative prompts. The A… | `title*`: string, `positive_prompt*`: string, `negative_prompt`: string, `workflow_file`: string, `batch_count`: integer | — |
 | `body_gesture` | 仮想身体でその場の短いジェスチャーを実行する。action_instructionにはARDYへ渡す動作指示を英語で書く。未生成なら生成開始後すぐ戻り、完了は後から知覚する。空ならpresetのfriendly_waveを即時再生して… | `intent`: string, `action_instruction`: string, `expression_preset`: string, `expression_intensity`: number | 身体でジェスチャーする |

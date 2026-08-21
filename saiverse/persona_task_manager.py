@@ -9,9 +9,12 @@
 - 状態遷移 (active/paused/completed/cancelled) + ステップ更新
 - 親バインド: Track 内小目標 (track_id) / 未所属。候補は親なし +
   stage='candidate' (P3c-0 desire 正規化以降。note_id 経由の親バインドは撤去済み)
-- 昇格 (候補 → Track) = 親を track_id に張り替え (コピー/破棄しない)
-- 旧 track_task 互換層 (get_track_tasks / add_track_task / complete_track_task /
-  format_track_task_list) — 既存の Track チェックリスト呼び出しを温存する
+
+2026-08-21 に Track 結合の書き込み面を退役させた (track_retirement.md §7.2 ④群):
+昇格 (``promote_to_track``) と旧 track_task 互換層 (``get_track_tasks`` /
+``add_track_task`` / ``complete_track_task`` / ``format_track_task_list``)。
+呼び手 (purpose_tree / track_create スペル / TrackManager のチェックリスト API)
+が全て消えたため。残っているのは素のタスク CRUD と状態遷移。
 
 責務外:
 - スペル登録 (builtin_data/tools 配下で別途)
@@ -55,7 +58,9 @@ TERMINAL_TASK_STATUSES = frozenset({STATUS_COMPLETED, STATUS_CANCELLED})
 PARENT_NOTE = "note"    # 候補 (desire ノート内のやりたいこと)
 PARENT_TRACK = "track"  # Track 内の実行小目標 (旧 track_task)
 
-# --- 欲求の帳簿: desire_state 値 (自律行動 v2 §5.3。運用は saiverse/desire_engine.py) ---
+# --- 欲求の帳簿: desire_state 値 (自律行動 v2 §5.3)。
+# 運用していた saiverse/desire_engine.py は 2026-08-21 に退役した。値は既存 DB 行の
+# 読み取りのために残っている (列の掃除は Track テーブル退役と同じ工程)。---
 DESIRE_STATE_FRESH = "fresh"      # 新鮮 (既定。NULL も fresh 扱い)
 DESIRE_STATE_FADING = "fading"    # 薄れつつある (放置 or 就寝レビューの fading 裁定)
 DESIRE_STATE_EXPIRED = "expired"  # 期限切れ (status=cancelled の論理アーカイブと対で付く)
@@ -347,8 +352,8 @@ class PersonaTaskManager:
 
         ``desire_type`` / ``desire_source`` は欲求の六型と接地参照 (自律行動 v2 §5)。
         候補 (実効 stage='candidate') では帳簿 (last_touched_at / touch_count /
-        desire_state) も初期化する。値の検証は呼び出し側 (purpose_tree.create_candidate
-        等) の責務 — 本レイヤーは priority / origin と同じく永続化のみ担う。
+        desire_state) も初期化する。値の検証は呼び出し側の責務 — 本レイヤーは
+        priority / origin と同じく永続化のみ担う。
 
         ``stage`` / ``nature`` / ``promoted_from`` は目的ノードの段階・種別・来歴
         (life_concept_map.md §3.1)。**P3c-0 (desire 正規化) 以降、stage は常に
@@ -406,9 +411,9 @@ class PersonaTaskManager:
                 desire_type=desire_type,
                 desire_source=desire_source,
                 # 帳簿の初期化は候補 (実効 stage='candidate') のみ。鮮度の起点 = 作成時刻。
-                # P3c-0: 判定条件を kind==PARENT_NOTE から実効 stage へ変更 — これにより
-                # purpose_tree.create_candidate 経由 (parent_kind なし) の候補にも帳簿が
-                # 正しく付くようになる (旧条件では帳簿が初期化されないバグ予備軍だった)。
+                # P3c-0: 判定条件を kind==PARENT_NOTE から実効 stage へ変更 — 親なしで
+                # 生まれる候補にも帳簿が正しく付くようにするため。候補を作る経路は
+                # 2026-08-21 に全て退役したので、現在この枝を通る新規行は無い。
                 desire_state=DESIRE_STATE_FRESH if effective_stage == STAGE_CANDIDATE else None,
                 last_touched_at=now if effective_stage == STAGE_CANDIDATE else None,
                 touch_count=0 if effective_stage == STAGE_CANDIDATE else None,
@@ -586,8 +591,9 @@ class PersonaTaskManager:
 
         - status=completed → stage=completed
         - status=cancelled かつ現在の desire_state が既に 'expired' → stage=dormant
-          (desire_engine.decay_desires は先に desire_state=expired を書いてから
-          この遷移を呼ぶので、ここで dormant が刻める — 順序が不変条件)
+          (旧 desire_engine.decay_desires は先に desire_state=expired を書いてから
+          この遷移を呼んでいた。同エンジンは 2026-08-21 に退役したので、この枝は
+          既存 DB 行の再遷移でしか通らない)
         - status=cancelled (その他) → stage=aborted
         - 生存 status (pending/active/paused) への遷移 → stage は据え置き
           (candidate は candidate のまま、adopted は adopted のまま)
@@ -1008,53 +1014,12 @@ class PersonaTaskManager:
     # 親バインド: 昇格 (候補 → Track)
     # ------------------------------------------------------------------
 
-    def promote_to_track(
-        self, task_id: str, track_id: str, *, persona_id: Optional[str] = None, actor: Optional[str] = None
-    ) -> Dict[str, Any]:
-        """候補 Task の親を ``note_id`` → ``track_id`` に張り替える (= 昇格)。
-
-        Task をコピー/破棄せず親だけ付け替えるので、履歴・ステップ・status は
-        そのまま連続する (不変条件2)。stage も 'adopted' に刻印する — track_create
-        の from_candidate 直呼び経路は purpose_tree.adopt を通らないため、ここで
-        刻まないと stage が候補のまま (または NULL) 残ってしまう (P3c-0)。
-        """
-        now = _now()
-        db = self.SessionLocal()
-        try:
-            task = self._fetch_task_or_raise(db, task_id, persona_id)
-            prev_note = task.note_id
-            task.parent_kind = PARENT_TRACK
-            task.note_id = None
-            task.track_id = track_id
-            task.stage = STAGE_ADOPTED
-            task.updated_at = now
-            task.last_actor = actor
-            task.version = task.version + 1
-            self._insert_history(
-                db,
-                task_id=task_id,
-                step_id=None,
-                event_type="promote_to_track",
-                payload={"from_note_id": prev_note, "to_track_id": track_id},
-                actor=actor,
-            )
-            db.commit()
-            LOGGER.info("[task] promoted %s note=%s -> track=%s", task_id, prev_note, track_id)
-        except Exception:
-            db.rollback()
-            raise
-        finally:
-            db.close()
-        return self.get_task(task_id, persona_id=persona_id)
-
     def detach_parent(
         self, task_id: str, *, persona_id: Optional[str] = None, actor: Optional[str] = None
     ) -> Dict[str, Any]:
         """Task の親バインドを外して未所属にする (parent_kind/note_id/track_id を NULL)。
 
-        親なし採用ノード (life_concept_map.md §3.1「採用時の親なし — 第一階層に
-        小さく立つ」) を作る採用操作 (saiverse/purpose_tree.py の adopt) が使う。
-        promote_to_track と同じく行をコピー/破棄せず親だけ変える (履歴つき)。
+        行をコピー/破棄せず親だけ変える (履歴つき)。
         """
         now = _now()
         db = self.SessionLocal()
@@ -1099,9 +1064,10 @@ class PersonaTaskManager:
     ) -> Dict[str, Any]:
         """目的ノードの段階・種別・来歴を更新する (life_concept_map.md §3.1)。
 
-        None の引数は据え置き (部分更新)。stage の遷移規則 (candidate→adopted 等)
-        の検証は呼び出し側 (saiverse/purpose_tree.py) の責務 — 本レイヤーは
-        priority / origin と同じく永続化のみ担う。履歴 (set_purpose_fields) つき。
+        None の引数は据え置き (部分更新)。stage の遷移規則の検証は呼び出し側
+        (現在の唯一の呼び手は ``purpose_close`` スペルの休眠遷移) の責務 —
+        本レイヤーは priority / origin と同じく永続化のみ担う。
+        履歴 (set_purpose_fields) つき。
         """
         if stage is None and nature is None and promoted_from is None:
             raise ValueError("at least one of stage/nature/promoted_from is required")
@@ -1168,82 +1134,3 @@ class PersonaTaskManager:
             ]
         finally:
             db.close()
-
-    # ------------------------------------------------------------------
-    # 旧 track_task 互換層 (Track 内チェックリスト)
-    # ------------------------------------------------------------------
-    # 旧 TrackManager.get_tasks/add_task/complete_task/format_task_list は
-    # ActionTrack.tasks_json の ``[{title, done}]`` を扱っていた。統合後は
-    # track_id バインドの persona_task 行に置き換える。互換 API を提供して
-    # 既存の Track チェックリスト呼び出しを温存する。
-
-    def get_track_tasks(self, track_id: str) -> List[Dict[str, Any]]:
-        """Track 内小目標を ``[{title, done}]`` 互換形式で position 順に返す。"""
-        db = self.SessionLocal()
-        try:
-            rows = (
-                db.query(PersonaTask)
-                .filter(
-                    PersonaTask.track_id == track_id,
-                    PersonaTask.parent_kind == PARENT_TRACK,
-                )
-                .order_by(PersonaTask.created_at.asc())
-                .all()
-            )
-            return [
-                {
-                    "id": r.id,
-                    "short_id": r.short_id,
-                    "task_ref": f"task:{r.short_id}" if r.short_id is not None else None,
-                    "title": r.title,
-                    "done": r.status in TERMINAL_TASK_STATUSES,
-                }
-                for r in rows
-            ]
-        finally:
-            db.close()
-
-    def add_track_task(
-        self, track_id: str, title: str, *, persona_id: str, actor: Optional[str] = None
-    ) -> List[Dict[str, Any]]:
-        """Track に小目標を追加して更新後のリスト (互換形式) を返す。"""
-        self.create_task(
-            persona_id=persona_id,
-            title=title,
-            goal=title,
-            parent_kind=PARENT_TRACK,
-            track_id=track_id,
-            actor=actor,
-            auto_activate=False,
-        )
-        return self.get_track_tasks(track_id)
-
-    def complete_track_task(
-        self, track_id: str, index: int, *, persona_id: Optional[str] = None, actor: Optional[str] = None
-    ) -> List[Dict[str, Any]]:
-        """Track 内小目標を index 指定で完了にし更新後のリスト (互換形式) を返す。"""
-        tasks = self.get_track_tasks(track_id)
-        if index < 0 or index >= len(tasks):
-            raise ValueError(f"task index out of range: {index} (total {len(tasks)})")
-        self.update_task_status(
-            tasks[index]["id"],
-            status=STATUS_COMPLETED,
-            actor=actor,
-            persona_id=persona_id,
-        )
-        return self.get_track_tasks(track_id)
-
-    def format_track_task_list(self, track_id: str) -> str:
-        """Track 内小目標を Markdown チェックリスト形式で返す。
-
-        各行に ``task:N`` 参照子を見せる (done/update_step/decompose はこの参照で指す)。
-        """
-        tasks = self.get_track_tasks(track_id)
-        if not tasks:
-            return "(タスクなし)"
-        lines = []
-        for t in tasks:
-            mark = "x" if t.get("done") else " "
-            ref = t.get("task_ref") or "task:?"
-            lines.append(f"- [{mark}] {ref} {t['title']}")
-        return "\n".join(lines)

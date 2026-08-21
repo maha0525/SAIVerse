@@ -10,90 +10,6 @@ from sea.playbook_models import PlaybookSchema
 LOGGER = logging.getLogger(__name__)
 
 
-def _apply_deferred_track_ops(parent_state: Dict[str, Any], persona: Any) -> None:
-    """Flush queued Track operations at Pulse-root completion.
-
-    Track-mutating spells (track_create activate=True / track_activate /
-    track_pause / track_complete / track_abort) enqueue their effects onto
-    PulseContext.deferred_track_ops during the Pulse instead of applying them
-    immediately. This runs once the root Playbook returns, so Track switches
-    happen at Pulse boundaries and don't bleed into the current Pulse's
-    main-cache continuation. (Intent A v0.14, Intent B v0.11)
-
-    Newly running Tracks are not kicked immediately here — track_activated
-    observers (Track 切替通知の注入等) run inside TrackManager.activate, and
-    autonomous execution is driven by day-plan slot firing / judgment points
-    (自律行動 v2。旧 SubLineScheduler の連続 Pulse は廃止 — intent §9.3)。
-    """
-    pulse_ctx = parent_state.get("_pulse_context") if parent_state else None
-    if pulse_ctx is None or not getattr(pulse_ctx, "deferred_track_ops", None):
-        return
-
-    manager_ref = getattr(persona, "manager_ref", None)
-    track_manager = getattr(manager_ref, "track_manager", None) if manager_ref else None
-    if track_manager is None:
-        LOGGER.warning(
-            "[deferred-track-ops] No TrackManager available on persona=%s — "
-            "%d queued op(s) dropped",
-            getattr(persona, "persona_id", "?"),
-            len(pulse_ctx.deferred_track_ops),
-        )
-        pulse_ctx.deferred_track_ops.clear()
-        return
-
-    op_count = len(pulse_ctx.deferred_track_ops)
-    LOGGER.info(
-        "[deferred-track-ops] Applying %d op(s) at Pulse-root completion (persona=%s)",
-        op_count, getattr(persona, "persona_id", "?"),
-    )
-
-    # pulse_id を TrackManager メソッドに渡すと、状態遷移 hook がメタ判断ターン
-    # (line_role='meta_judgment', scope='discardable') を pulse 内で検索して
-    # 'committed' に昇格できる (Intent A v0.14 [B] 移動)。Pulse 外 / 古い呼び出し
-    # 経路では pulse_id=None になり、その場合 hook 側で skip される。
-    pulse_id = getattr(pulse_ctx, "pulse_id", None)
-
-    activated_track_id: Optional[str] = None
-    for op in pulse_ctx.deferred_track_ops:
-        try:
-            if op.op_type == "activate":
-                track_manager.activate(op.track_id, pulse_id=pulse_id)
-                activated_track_id = op.track_id
-            elif op.op_type == "pause":
-                track_manager.pause(op.track_id, pulse_id=pulse_id)
-            elif op.op_type == "complete":
-                track_manager.complete(op.track_id, pulse_id=pulse_id)
-            elif op.op_type == "abort":
-                track_manager.abort(op.track_id, pulse_id=pulse_id)
-            else:
-                LOGGER.warning(
-                    "[deferred-track-ops] Unknown op_type=%s (track_id=%s) — skipped",
-                    op.op_type, op.track_id,
-                )
-                continue
-            LOGGER.info(
-                "[deferred-track-ops] Applied %s for track_id=%s",
-                op.op_type, op.track_id,
-            )
-        except Exception as exc:
-            LOGGER.warning(
-                "[deferred-track-ops] Failed to apply %s for track_id=%s: %s",
-                op.op_type, op.track_id, exc,
-            )
-
-    pulse_ctx.deferred_track_ops.clear()
-
-    if activated_track_id:
-        # No immediate pulse kick here — Track activation is bookkeeping.
-        # Autonomous execution is driven by day-plan slot firing / judgment
-        # points (自律行動 v2). track_activated observers already ran inside
-        # TrackManager.activate.
-        LOGGER.info(
-            "[deferred-track-ops] Track %s is now running",
-            activated_track_id,
-        )
-
-
 def run_playbook(
     runtime: Any,
     playbook: PlaybookSchema,
@@ -109,8 +25,6 @@ def run_playbook(
     initial_params: Optional[Dict[str, Any]] = None,
     isolate_pulse_context: bool = False,
     line: str = "main",
-    pulse_line_role: Optional[str] = None,
-    pulse_line_track_id: Optional[str] = None,
     pulse_line_aspect: Optional[Any] = None,  # sea.pulse_context.Aspect
     pre_spells: Optional[List[str]] = None,
 ) -> List[str]:
@@ -276,8 +190,6 @@ def run_playbook(
         cancellation_token=cancellation_token,
         pulse_type=pulse_type,
         isolate_pulse_context=isolate_pulse_context,
-        pulse_line_role=pulse_line_role,
-        pulse_line_track_id=pulse_line_track_id,
         pulse_line_aspect=pulse_line_aspect,
         line=line,
     )
@@ -291,10 +203,5 @@ def run_playbook(
             persona.execution_state["node"] = None
             persona.execution_state["status"] = "idle"
         return []
-
-    # NOTE: deferred Track ops are flushed inside ``compile_with_langgraph``'s
-    # finally block (sea/runtime_graph.py) where the PulseContext actually
-    # lives. Calling _apply_deferred_track_ops here would no-op because
-    # `parent` doesn't carry _pulse_context across LangGraph state boundaries.
 
     return compiled_ok

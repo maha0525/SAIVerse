@@ -1,11 +1,11 @@
 {
   "name": "judgment_day_close",
   "display_name": "就寝判断 (day_close)",
-  "description": "自律行動 v2 の判断点: 就寝。今日の予定 vs 実績をふりかえり、明日の自分へのメモ・欲求のたな卸し・ユーザーへの報告種を決める。desire_reviews の enum は今日触れた欲求のみ。ふりかえりの実績要約 (day_digest) は finalize が決定論で構築し、翌朝の起床判断が読む。詳細は docs/intent/persona_cognition/judgment_points.md §8。",
+  "description": "自律行動 v2 の判断点: 就寝。今日の予定 vs 実績をふりかえり、明日の自分へのメモ・ユーザーへの報告種を決める。ふりかえりの実績要約 (day_digest) は finalize が決定論で構築し、翌朝の起床判断が読む。詳細は docs/intent/persona_cognition/judgment_points.md §8。",
   "input_schema": [
-    {"name": "situation_text", "description": "judgment_points が組み立てた状況テキスト (今日の時間割の予定 vs 実績対照 / セッションダイジェスト / 予算消費 / 今日触れた欲求一覧)。", "required": false, "default": ""},
-    {"name": "judgment_context", "description": "finalize の検証・適用に使う文脈 (JSON 文字列: plan_date / touched_desire_refs)。", "required": false, "default": "{}"},
-    {"name": "response_schema", "param_type": "object", "description": "judgment_points が動的に組み立てた JSON Schema (desire_reviews は今日触れた欲求のみ。触れた欲求ゼロならフィールドなし)。", "required": false, "default": null}
+    {"name": "situation_text", "description": "judgment_points が組み立てた状況テキスト (今日の時間割の予定 vs 実績対照 / セッションダイジェスト / 予算消費)。", "required": false, "default": ""},
+    {"name": "judgment_context", "description": "finalize の検証・適用に使う文脈 (JSON 文字列: plan_date)。", "required": false, "default": "{}"},
+    {"name": "response_schema", "param_type": "object", "description": "judgment_points が動的に組み立てた JSON Schema (今日閉じた出来事と採用済みタスクの enum 注入済み。候補ゼロのフィールドは出さない)。", "required": false, "default": null}
   ],
   "router_callable": false,
   "user_selectable": false,
@@ -13,7 +13,7 @@
     {
       "id": "judge",
       "type": "llm",
-      "action": "このターンは『内的独白』です。ユーザーには届きません。\n相手に呼びかける文体（「〜ね」「〜だよ」「ありがとう」「お疲れさま」等）は使わず、\n自分自身に語る一人称（例: 「〜と判断する」「〜しよう」「〜の方が自然だな」）で書いてください。\n\n{situation_text}\n\n応答は構造化出力です:\n- monologue: 一日のふりかえり。予定と実際のズレに触れてください\n- tomorrow_memo: 明日の自分へのメモ（明日の起床判断が最初に読みます。どこから始めるか・何を忘れたくないか）\n- day_theme: 今日という一日を一言で表すなら（任意）\n- desire_reviews (欄がある場合のみ): 今日触れた「やりたいこと」のたな卸し。keep (まだ持っていたい) / fading (薄れてきた) / fulfilled (満たされた) を正直に\n- user_report_seeds: 帰ってきたユーザーに自分から話したいこと（最大 3 件）。上の実績・ダイジェストにある、今日実際に起きたことに限ります。作り話や予定だけの話を書いてはいけません",
+      "action": "このターンは『内的独白』です。ユーザーには届きません。\n相手に呼びかける文体（「〜ね」「〜だよ」「ありがとう」「お疲れさま」等）は使わず、\n自分自身に語る一人称（例: 「〜と判断する」「〜しよう」「〜の方が自然だな」）で書いてください。\n\n{situation_text}\n\n応答は構造化出力です:\n- monologue: 一日のふりかえり。予定と実際のズレに触れてください\n- tomorrow_memo: 明日の自分へのメモ（明日の起床判断が最初に読みます。どこから始めるか・何を忘れたくないか）\n- day_theme: 今日という一日を一言で表すなら（任意）\n- user_report_seeds: 帰ってきたユーザーに自分から話したいこと（最大 3 件）。上の実績・ダイジェストにある、今日実際に起きたことに限ります。作り話や予定だけの話を書いてはいけません",
       "response_schema_source": "arg:response_schema",
       "output_key": "judgment",
       "memorize": null,

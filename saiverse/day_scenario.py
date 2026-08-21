@@ -17,12 +17,12 @@ DES ドライバ (``saiverse.day_simulator.DaySimulator``) の上に載り、シ
    ラップが同 kind を **上書き登録** して置き換えるため二重発火しない
    (ラップは result への記録と mock/sync ディスパッチを担う)
 3. ユーザーイベント (message / leave) はドライバが再生する。mock
-   (:class:`TrackSimUserEventDriver`) は「会話中フラグ = running な
-   user_conversation Track」の作成 / 完了のみ、実 LLM モード
+   (:class:`EpisodeSimUserEventDriver`) は「会話中 = 開いている会話の出来事」の
+   open / close のみ、実 LLM モード
    (:class:`RealConversationUserEventDriver`) は building_messages への発話記録
-   + Track activate 経由の main_line Pulse という実チャット経路を同期に通す。
-   leave で **会話終了判断** (post_conversation) を撃つ — ただし 1 往復も
-   成立しなかった会話では撃たない (偽前提の状況テキストは作話を誘発するため)
+   + main_line Pulse という実チャット経路を同期に通す。
+   leave では会話の出来事を閉じるだけ (会話終了判断は 2026-08-16 に退役 —
+   autonomous_behavior_v3.md §8/§13.3)
 4. events は **イベント到着判断** (on_event)
 5. sleep 時刻に **就寝判断** (day_close)
 
@@ -78,7 +78,6 @@ from saiverse.judgment_points import (
     KIND_DAY_CLOSE,
     KIND_DAY_OPEN,
     KIND_ON_EVENT,
-    KIND_POST_CONVERSATION,
     KIND_POST_SESSION,
     run_judgment_point,
 )
@@ -100,14 +99,6 @@ PLAYBOOK_TO_KIND: Dict[str, str] = {v: k for k, v in JUDGMENT_PLAYBOOK_MAP.items
 # ---------------------------------------------------------------------------
 # シナリオ定義
 # ---------------------------------------------------------------------------
-
-
-@dataclass
-class SeedDesire:
-    """種の欲求 (desire ノート内の候補 Task として植える)。"""
-    title: str
-    type: Optional[str] = None
-    source: str = ""
 
 
 @dataclass
@@ -141,7 +132,6 @@ class DayScenario:
     wake: str
     sleep: str
     daily_budget_rounds: Optional[int] = None
-    seed_desires: List[SeedDesire] = field(default_factory=list)
     seed_tasks: List[SeedTask] = field(default_factory=list)
     user_events: List[UserEvent] = field(default_factory=list)
     events: List[WorldEvent] = field(default_factory=list)
@@ -195,22 +185,13 @@ def parse_scenario(data: Dict[str, Any]) -> DayScenario:
     seed = data.get("seed") or {}
     if not isinstance(seed, dict):
         raise ValueError(f"scenario.seed must be a dict (got {type(seed).__name__})")
-    desires: List[SeedDesire] = []
-    for i, d in enumerate(seed.get("desires") or []):
-        if not isinstance(d, dict) or not str(d.get("title") or "").strip():
-            raise ValueError(f"scenario.seed.desires[{i}] requires a title")
-        dtype = d.get("type")
-        if dtype is not None:
-            from saiverse.desire_engine import DESIRE_TYPES
-            if dtype not in DESIRE_TYPES:
-                raise ValueError(
-                    f"scenario.seed.desires[{i}].type={dtype!r} is not one of {DESIRE_TYPES}"
-                )
-        desires.append(SeedDesire(
-            title=str(d["title"]).strip(),
-            type=dtype,
-            source=str(d.get("source") or ""),
-        ))
+    if seed.get("desires"):
+        # 欲求プールの退役 (autonomous_behavior_v3.md §8) で植える先が消えた。
+        # 黙って無視すると「植えたつもり」のシナリオが走るので断る。
+        raise ValueError(
+            "scenario.seed.desires は廃止されました "
+            "(欲求プールは退役 — autonomous_behavior_v3.md §8)"
+        )
     tasks: List[SeedTask] = []
     for i, t in enumerate(seed.get("tasks") or []):
         if not isinstance(t, dict) or not str(t.get("title") or "").strip():
@@ -257,7 +238,6 @@ def parse_scenario(data: Dict[str, Any]) -> DayScenario:
         wake=wake,
         sleep=sleep,
         daily_budget_rounds=budget,
-        seed_desires=desires,
         seed_tasks=tasks,
         user_events=user_events,
         events=events,
@@ -329,111 +309,74 @@ class UserEventDriver:
         """
         raise NotImplementedError
 
-    def conversation_had_exchange(self, manager: Any, persona_id: str) -> bool:
-        """現在の会話で 1 往復以上 (ユーザー発話 + ペルソナ応答) 成立したか。
 
-        ScenarioPlayer が leave 時に読む — False なら会話終了判断
-        (post_conversation) を撃たない (存在しない会話の振り返り = 作話を
-        誘発しないため。接地原則 v2 §3-1)。
-
-        既定は True: mock 配線テスト (TrackSimUserEventDriver) は会話本文を
-        再生せず「会話が成立した」ものとして扱う (検証対象は判断の配線)。
-        """
-        return True
-
-
-class TrackSimUserEventDriver(UserEventDriver):
-    """会話中フラグを running な user_conversation Track で表現するシム内ドライバ。
+class EpisodeSimUserEventDriver(UserEventDriver):
+    """会話中フラグを「開いている会話の出来事」で表現するシム内ドライバ。
 
     本番の「ユーザー会話中」判定 (``day_plan.is_in_user_conversation``) が見るのは
-    **開いている kind='conversation' の出来事**であって Track の running 種別ではない
-    (life.md §7 案 Y)。そのため message では running Track を作るだけでなく会話の
-    出来事も開き (:func:`begin_conversation`)、leave で complete + close する。
-    会話本文の再生 (実 Pulse) はしない — 配線テストの対象は「会話中の繰り下げ」と
-    「会話終了判断の発火」。
+    **開いている kind='conversation' の出来事**なので、message で出来事を開き、
+    leave で閉じる。会話本文の再生 (実 Pulse) はしない — 配線テストの対象は
+    「会話中の繰り下げ」。
     """
 
     def begin_conversation(self, manager: Any, persona_id: str, text: str) -> None:
-        track_manager = manager.track_manager
-        running = track_manager.get_running(persona_id)
-        if running is not None and getattr(running, "track_type", None) == "user_conversation":
+        from saiverse.user_conversation import get_open_conversation
+
+        if get_open_conversation(manager, persona_id) is not None:
             LOGGER.info(
                 "[day_scenario] user message while already in conversation "
-                "(persona=%s); keeping the running track", persona_id,
+                "(persona=%s); keeping the open episode", persona_id,
             )
-            _ensure_conversation_episode(manager, persona_id)
             return
-        track_id = track_manager.create(
-            persona_id=persona_id,
-            track_type="user_conversation",
-            title="ユーザーとの会話 (シナリオ再生)",
-            metadata=json.dumps(
-                {"scenario": True, "first_message": text[:120]}, ensure_ascii=False,
-            ),
-            initial_status="running",
-        )
         _ensure_conversation_episode(manager, persona_id)
         LOGGER.info(
-            "[day_scenario] conversation started: persona=%s track=%s text=%r",
-            persona_id, track_id, text[:60],
+            "[day_scenario] conversation started: persona=%s text=%r",
+            persona_id, text[:60],
         )
 
     def end_conversation(self, manager: Any, persona_id: str) -> bool:
-        track_manager = manager.track_manager
-        running = track_manager.get_running(persona_id)
-        if running is None or getattr(running, "track_type", None) != "user_conversation":
+        from saiverse.user_conversation import get_open_conversation
+
+        if get_open_conversation(manager, persona_id) is None:
             LOGGER.warning(
-                "[day_scenario] leave event but no user conversation is running "
+                "[day_scenario] leave event but no conversation is open "
                 "(persona=%s); ignoring", persona_id,
             )
             return False
-        # 本番由来の対ユーザー会話 Track は永続 (is_persistent=true) で
-        # completed への遷移が禁止されている。leave の意味論は本番の
-        # wait_response 自動 pause と同じ running → pending (world clone した
-        # 実ペルソナで 2026-07-06 に顕在化。シム内で新規作成した非永続 Track
-        # は従来どおり complete で畳む)
-        if getattr(running, "is_persistent", False):
-            track_manager.pause(running.track_id)
-        else:
-            track_manager.complete(running.track_id)
-        # 会話の出来事を閉じる (本番の wait_response タイムアウト経路に対応する
-        # シム側の閉じ点。leave = 運用の線 §8)
+        # 会話の出来事を閉じる (本番の沈黙タイマー経路に対応するシム側の閉じ点。
+        # leave = 運用の線 §8)
         _close_conversation_episode(manager, persona_id)
-        LOGGER.info(
-            "[day_scenario] conversation ended: persona=%s track=%s",
-            persona_id, running.track_id,
-        )
+        LOGGER.info("[day_scenario] conversation ended: persona=%s", persona_id)
         return True
 
 
-class RealConversationUserEventDriver(TrackSimUserEventDriver):
+class RealConversationUserEventDriver(EpisodeSimUserEventDriver):
     """行動テスト (実 LLM モード) 用: ユーザー発話を本物の会話経路へ注入するドライバ。
 
-    mock の :class:`TrackSimUserEventDriver` が「会話中フラグ (Track)」だけを
+    mock の :class:`EpisodeSimUserEventDriver` が「会話中フラグ (出来事)」だけを
     再生するのに対し、本ドライバは実チャット経路 (``manager/runtime.py``
     ``handle_user_input_stream`` の backend_worker) と同じ順序で正規経路を叩く:
 
     1. ユーザー発話を building_messages へ記録 (heard_by = ペルソナ + ユーザー)
-    2. user_conversation Track を running で作成 — 実 TrackManager の
-       track_activated observer (UserConversationTrackHandler) が Track 切替通知の
-       注入と main_line Pulse の起動 (``manager.run_sea_user``) を行い、Pulse
-       冒頭の auto_ingest が (1) の発話をペルソナ記憶 (memory.db) へ取り込む。
-       Pulse は :class:`SyncJudgmentDispatcher` の ``submit_user`` 経由で
-       呼び出しスレッド上で同期実行される (DES 単一スレッド)
-    3. 会話中の追加メッセージは実経路の「running Track → 直接メインライン起動」
-       と同型に ``manager.run_sea_user`` を直接呼ぶ
-    4. Pulse 後にペルソナ応答が building_messages に実在するかを検査して
-       「会話が成立したか」を記録する (:meth:`conversation_had_exchange`)。
-       応答ゼロの会話では ScenarioPlayer が会話終了判断を撃たない
+    2. 会話が開いていなければ ``saiverse.user_conversation.start_conversation``
+       — 会話の出来事を開き、main_line Pulse (``manager.run_sea_user``) を起動し、
+       沈黙タイマーを張る。Pulse 冒頭の auto_ingest が (1) の発話をペルソナ記憶
+       (memory.db) へ取り込む。Pulse は :class:`SyncJudgmentDispatcher` の
+       ``submit_user`` 経由で呼び出しスレッド上で同期実行される (DES 単一スレッド)
+    3. 会話中の追加メッセージは実経路の「会話が開いている → 直接メインライン
+       起動」と同型に ``manager.run_sea_user`` を直接呼ぶ
+    4. Pulse 後にペルソナ応答が building_messages に実在するかを検査し、応答ゼロ
+       なら WARNING に残す (観察のみ — 会話終了判断は退役した)
 
     前提: manager は実 SAIVerseManager (persona に history_manager がある)。
     """
 
-    def __init__(self) -> None:
-        #: persona_id → 現在の会話で 1 往復以上成立したか
-        self._had_exchange: Dict[str, bool] = {}
-
     def begin_conversation(self, manager: Any, persona_id: str, text: str) -> None:
+        from saiverse.user_conversation import (
+            get_open_conversation,
+            start_conversation,
+        )
+
         persona = (getattr(manager, "personas", None) or {}).get(persona_id)
         if persona is None:
             raise RuntimeError(f"persona '{persona_id}' not found on manager")
@@ -444,62 +387,29 @@ class RealConversationUserEventDriver(TrackSimUserEventDriver):
         # (1) ユーザー発話を building_messages へ記録 (実チャット経路の pre-add)
         seq_before = self._record_user_message(manager, persona, building_id, text)
 
-        track_manager = manager.track_manager
-        running = track_manager.get_running(persona_id)
-        if running is not None and getattr(running, "track_type", None) == "user_conversation":
-            # (3) 会話継続: 実経路の「既存 running → 直接メインライン起動」と同型
+        if get_open_conversation(manager, persona_id) is not None:
+            # (3) 会話継続: 実経路の「会話が開いている → 直接メインライン起動」と同型
             LOGGER.info(
                 "[day_scenario] user message in ongoing conversation "
-                "(persona=%s track=%s); invoking main line directly",
-                persona_id, running.track_id,
+                "(persona=%s); invoking main line directly", persona_id,
             )
-            _ensure_conversation_episode(manager, persona_id)
-            manager.run_sea_user(
-                persona, building_id, text, origin_track_id=running.track_id,
-            )
+            manager.run_sea_user(persona, building_id, text)
         else:
-            # (2) Track を running で作成 → track_activated observer が Track
-            # 切替通知 + main_line Pulse (user_input は auto_ingest 経由) を起動
-            track_id = track_manager.create(
-                persona_id=persona_id,
-                track_type="user_conversation",
-                title="ユーザーとの会話 (シナリオ再生)",
-                output_target="building:current",
-                metadata=json.dumps(
-                    {"scenario": True, "first_message": text[:120]},
-                    ensure_ascii=False,
-                ),
-                initial_status="running",
-            )
+            # (2) 会話開始: 実経路と同じ入口 (出来事 open + main_line + タイマー)
+            start_conversation(manager, persona_id, str(getattr(manager, "user_id", "")))
             LOGGER.info(
                 "[day_scenario] conversation started via real path: "
-                "persona=%s track=%s text=%r",
-                persona_id, track_id, text[:60],
+                "persona=%s text=%r", persona_id, text[:60],
             )
-            # 実 manager では track_activated observer (UserConversationTrackHandler)
-            # が既に出来事を開いている — 冪等なので二重には開かない。
-            _ensure_conversation_episode(manager, persona_id)
 
         # (4) 応答の実在検査 (building_messages の追記で確認 — 接地)
         replied = self._persona_replied_after(manager, persona, building_id, seq_before)
-        self._had_exchange[persona_id] = self._had_exchange.get(persona_id, False) or replied
         if not replied:
             LOGGER.warning(
                 "[day_scenario] persona did not reply to user message "
                 "(persona=%s text=%r) — this conversation has no exchange yet",
                 persona_id, text[:60],
             )
-
-    def end_conversation(self, manager: Any, persona_id: str) -> bool:
-        ended = super().end_conversation(manager, persona_id)
-        if ended:
-            # 次の会話のために往復フラグを畳む (leave 時の判定は ScenarioPlayer が
-            # end_conversation の前に conversation_had_exchange で読む)
-            self._had_exchange.pop(persona_id, None)
-        return ended
-
-    def conversation_had_exchange(self, manager: Any, persona_id: str) -> bool:
-        return self._had_exchange.get(persona_id, False)
 
     # ------------------------------------------------------------------
     # 内部
@@ -680,8 +590,8 @@ class SyncJudgmentDispatcher:
 
     - ``submit_meta_judgment``: 判断点 (``run_judgment_point``) の起動経路
     - ``submit_user``: ユーザー会話 Pulse。実チャット経路
-      (UserConversationTrackHandler → ``manager.run_sea_user``) がシム中の
-      Track activate から呼んでくる。実 ``PulseController.submit_user`` と
+      (``saiverse.user_conversation`` → ``manager.run_sea_user``) がシム中の
+      会話開始から呼んでくる。実 ``PulseController.submit_user`` と
       同シグネチャ (これが無いと --real でユーザー会話が AttributeError で
       不発になる — 2026-07-05 クオン一日シムの実バグ)
 
@@ -727,7 +637,6 @@ class SyncJudgmentDispatcher:
         args: Optional[Dict[str, Any]] = None,
         event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
         pre_spells: Optional[List[str]] = None,
-        origin_track_id: Optional[str] = None,
     ) -> Optional[List[str]]:
         """ユーザー会話 Pulse を呼び出しスレッドで同期実行する。
 
@@ -746,7 +655,6 @@ class SyncJudgmentDispatcher:
             args=args,
             event_callback=event_callback,
             pre_spells=pre_spells,
-            origin_track_id=origin_track_id,
             pulse_type="user",
         )
 
@@ -763,14 +671,13 @@ class ScenarioRunResult:
     executed_events: int = 0
     judgments: List[Dict[str, Any]] = field(default_factory=list)
     seeded_task_refs: List[str] = field(default_factory=list)
-    seeded_desire_refs: List[str] = field(default_factory=list)
 
 
 class ScenarioPlayer:
     """シナリオを仮想クロックで再生するプレイヤー (モジュール docstring 参照)。"""
 
     def __init__(self, user_event_driver: Optional[UserEventDriver] = None) -> None:
-        self.user_event_driver = user_event_driver or TrackSimUserEventDriver()
+        self.user_event_driver = user_event_driver or EpisodeSimUserEventDriver()
 
     # ------------------------------------------------------------------
     # 実行
@@ -847,8 +754,7 @@ class ScenarioPlayer:
         return datetime.combine(plan_day, dt_time(int(hh), int(mm)))
 
     def _seed(self, manager: Any, sc: DayScenario, result: ScenarioRunResult) -> None:
-        """種のタスク・欲求を DB に植える (シナリオの初期状態)。"""
-        from saiverse import purpose_tree
+        """種のタスクを DB に植える (シナリオの初期状態)。"""
         from saiverse.persona_task_manager import PersonaTaskManager
 
         ptm = PersonaTaskManager(manager.SessionLocal)
@@ -862,23 +768,9 @@ class ScenarioPlayer:
                 actor="day_scenario_seed",
             )
             result.seeded_task_refs.append(task.get("task_ref") or task["id"])
-        if sc.seed_desires:
-            for seed_desire in sc.seed_desires:
-                # purpose_tree.create_candidate は唯一の候補作成入口 (P3c-0)。
-                # 接地原則で source_ref が必須のため、シナリオ側が空にしている
-                # ケースはシナリオ自体を来歴として使う (シム専用の種まきなので
-                # 実接地の対象外)。
-                node = purpose_tree.create_candidate(
-                    manager, sc.persona_id, seed_desire.title,
-                    seed_desire.source or f"day_scenario_seed:{sc.plan_date}",
-                    desire_type=seed_desire.type, actor="day_scenario_seed",
-                    origin="autonomous",
-                )
-                ref = node.get("ref") or node["id"]
-                result.seeded_desire_refs.append(ref)
         LOGGER.info(
-            "[day_scenario] seeded: persona=%s tasks=%s desires=%s",
-            sc.persona_id, result.seeded_task_refs, result.seeded_desire_refs,
+            "[day_scenario] seeded: persona=%s tasks=%s",
+            sc.persona_id, result.seeded_task_refs,
         )
 
     # ------------------------------------------------------------------
@@ -1001,31 +893,9 @@ class ScenarioPlayer:
             if ue.type == USER_EVENT_MESSAGE:
                 self.user_event_driver.begin_conversation(manager, persona_id, ue.text)
             elif ue.type == USER_EVENT_LEAVE:
-                had_exchange = self.user_event_driver.conversation_had_exchange(
-                    manager, persona_id,
-                )
-                ended = self.user_event_driver.end_conversation(manager, persona_id)
-                if not ended:
-                    return
-                if had_exchange:
-                    # 会話終了 = 会話終了判断の発火点 (intent §4.2)
-                    self._judge(manager, persona_id, KIND_POST_CONVERSATION, {}, result)
-                else:
-                    # 1 往復も成立しなかった会話 (応答生成の失敗等) では判断を
-                    # 撃たない。「会話がひと区切りつきました」という前提が偽の
-                    # 状況テキストは、存在しない会話の振り返り (作話) を誘発する
-                    # (接地原則 v2 §3-1。2026-07-05 実 LLM シムで実証)。
-                    LOGGER.warning(
-                        "[day_scenario] conversation ended with zero exchange "
-                        "(persona=%s); skipping post_conversation judgment",
-                        persona_id,
-                    )
-                    result.judgments.append({
-                        "kind": KIND_POST_CONVERSATION,
-                        "at": clock.now().isoformat(timespec="seconds"),
-                        "submitted": False,
-                        "reason": "conversation had no exchange; judgment skipped",
-                    })
+                # 会話の終わりは機械の帳簿処理だけ (出来事を閉じる)。会話終了判断は
+                # 2026-08-16 の裁定で退役した (autonomous_behavior_v3.md §8/§13.3)。
+                self.user_event_driver.end_conversation(manager, persona_id)
         return _callback
 
     def _make_world_event_callback(

@@ -142,10 +142,14 @@ class AI(Base):
     # (docs/intent/persona_cognition/handoff_2026-05-09.md §4)。NULL なら既定値 30 分。
     # 軽量モデルと重量級モデルで「自然な対話の間」が違うためペルソナ別に持つ。
     USER_CONV_TIMEOUT_MINUTES = Column(Integer, nullable=True)
-    # 自律の源泉 (autonomous_desire.md §4): ペルソナの「生きる目的 / 趣味 / 仕事」。
-    # 自律初回 ON 時に C 案聞き取りでドラフト→ユーザー確認→確定し保存する。
-    # JSON {"purpose": str, "interests": [str], "vocations": [str]}。NULL = 未設定
-    # (= 聞き取り未実施)。AUTONOMOUS / META プロンプトに常駐注入される (§4.5)。
+    # ⚠️ 退役済みの列 (autonomous_behavior_v3.md §9-5「LIFE_PURPOSE 列は丸ごと
+    # 退役」)。**読み手も書き手も既に存在しない** — ヘルパ (saiverse/life_purpose.py)、
+    # head セクション、保存スペル (life_purpose_set) は 2026-08-21 に全て撤去した。
+    # 列と既存データだけを残してあるのは、v0.3 の移行 (§9-8 の機械写し) が
+    # 入力として読むため: purpose の一文 → コア記憶 / interests・vocations →
+    # 手帳のアクティビティ。**その移行を流し終えるまで列を落とさないこと**
+    # (落とすと写し元が消える)。
+    # 形式: JSON {"purpose": str, "interests": [str], "vocations": [str]} / NULL = 未設定。
     LIFE_PURPOSE = Column(Text, nullable=True)
 
 

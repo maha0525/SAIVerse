@@ -101,12 +101,6 @@ class ExecutionRequest:
     # See docs/intent/persona_cognition/nested_subline_spell.md §13.
     pre_spells: Optional[List[str]] = None
     event_callback: Optional[Callable[[Dict[str, Any]], None]] = None
-    # Track id this Pulse is bound to. Set by the Handler that triggered the
-    # Pulse (e.g. UserConversationTrackHandler.on_user_utterance picks the
-    # matching user_conversation Track even when its status is alert/pending,
-    # so messages persist with origin_track_id even when no Track is running).
-    # See docs/intent/persona_cognition/handoff_2026-05-10.md.
-    origin_track_id: Optional[str] = None
     pulse_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     cancellation_token: CancellationToken = field(default_factory=CancellationToken)
     
@@ -318,7 +312,6 @@ class PulseController:
             meta_playbook=request.meta_playbook,
             args=request.args,
             event_callback=request.event_callback,
-            origin_track_id=request.origin_track_id,
             is_resumption=True,
             original_prompt=request.user_input,
         )
@@ -430,7 +423,6 @@ class PulseController:
             cancellation_token=request.cancellation_token,
             pulse_type=request.type,
             pre_spells=request.pre_spells,
-            origin_track_id=request.origin_track_id,
         )
     
     def _build_resumption_prompt(self, request: ExecutionRequest) -> str:
@@ -466,7 +458,6 @@ class PulseController:
             }
             persona.history_manager.add_message(
                 msg, request.building_id, heard_by=None,
-                origin_track_id=request.origin_track_id,
             )
         except Exception:
             LOGGER.exception("[PulseController] Failed to record interruption message")
@@ -616,38 +607,11 @@ class PulseController:
         )
         return self.submit(request)
 
-    # ------------------------------------------------------------------
-    # Track 状態変化 → current pulse cancel 経路 (pulse_dispatch.md §6.2)
-    # ------------------------------------------------------------------
-
-    def on_track_status_change(
-        self,
-        persona_id: str,
-        track_id: str,
-        pulse_id: Optional[str],
-    ) -> None:
-        """TrackManager.add_status_change_observer 経由で呼ばれる。
-
-        メタ判断結果による Track 状態変化 (例: 自律 Track が pending に押し
-        出される) を受けて、その Track 起点の進行中 Pulse (メインレーン) を
-        ``cancellation_token.cancel()`` で止める。
-
-        メタ判断レーン (_current_meta) は対象外: メタ判断 Pulse 自身が起こした
-        状態変化で自分を cancel する事故を避けるため。
-        """
-        current = self._current.get(persona_id)
-        if current is None:
-            return
-        if current.origin_track_id != track_id:
-            return
-        if current.cancellation_token.is_cancelled():
-            return
-        LOGGER.info(
-            "[PulseController] Track %s status changed; cancelling current pulse "
-            "(persona=%s pulse_id=%s type=%s)",
-            track_id, persona_id, current.pulse_id, current.type,
-        )
-        current.cancellation_token.cancel(interrupted_by="track_status_change")
+    # NOTE: 旧 ``on_track_status_change`` (Track 状態変化で進行中 Pulse を cancel
+    # する observer。pulse_dispatch.md §6.2) は 2026-08-21 に撤去した。発火元だった
+    # v1 メタ判断の Track 操作が退役し、判定に使っていた
+    # ``ExecutionRequest.origin_track_id`` も Track 撤廃で書き手ごと消えた
+    # (track_retirement.md §2 住人 3・6)。
 
     # ------------------------------------------------------------------
     # Convenience methods for callers
@@ -663,7 +627,6 @@ class PulseController:
         args: Optional[Dict[str, Any]] = None,
         event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
         pre_spells: Optional[List[str]] = None,
-        origin_track_id: Optional[str] = None,
     ) -> Optional[List[str]]:
         """Submit a user input request."""
         request = ExecutionRequest(
@@ -676,7 +639,6 @@ class PulseController:
             args=args,
             pre_spells=pre_spells,
             event_callback=event_callback,
-            origin_track_id=origin_track_id,
         )
         return self.submit(request)
     

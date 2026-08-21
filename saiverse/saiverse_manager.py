@@ -29,11 +29,6 @@ from .integration_manager import IntegrationManager
 from .track_manager import TrackManager
 from .meta_layer import MetaLayer
 from .pulse_dispatcher import PulseDispatcher
-from .track_handlers import (
-    AutonomousTrackHandler,
-    SocialTrackHandler,
-    UserConversationTrackHandler,
-)
 from phenomena.manager import PhenomenonManager
 from phenomena.triggers import TriggerEvent, TriggerType
 from sqlalchemy.orm import sessionmaker
@@ -118,9 +113,8 @@ class SAIVerseManager(
         self.modified_buildings: Set[str] = set()
         # SSE event_callback registry keyed by building_id. Populated by
         # handle_user_input_stream while a user SSE is open; consumed by
-        # on_track_activated hook so main_line pulses triggered via deferred
-        # track activation can route events back to the user's SSE.
-        # See: docs/intent/pulse_dispatch.md §9.3 (on_track_activated 経由起動)
+        # saiverse.user_conversation.start_conversation so the main_line pulse it
+        # starts can route events back to the user's SSE.
         self._active_sse_callbacks: Dict[str, Callable[[Dict[str, Any]], None]] = {}
 
         # --- Phase 1: Data Loading ---
@@ -211,8 +205,8 @@ class SAIVerseManager(
         from saiverse.game_lifecycle import GameLifecycleService
         self.game_lifecycle = GameLifecycleService(self)
 
-        # Phase 4-e: EventScheduler を TrackManager より先に作成する。
-        # TrackManager の wait_response_timeout 予約 push 等に使うため。
+        # Phase 4-e: EventScheduler。会話の沈黙タイマー (saiverse.user_conversation)
+        # や判断点の予約 push に使う。
         from saiverse.event_scheduler import EventScheduler
         self.event_scheduler = EventScheduler()
 
@@ -232,14 +226,10 @@ class SAIVerseManager(
         logging.info("Initialized BeatGate (per-persona Beat lock + ledger gate).")
 
         # --- Initialize cognitive-model managers (Phase B-5) ---
-        # Track / Note の永続化を扱う純粋ロジックレイヤー。
-        # Intent A v0.9 / Intent B v0.6 参照。
-        self.track_manager = TrackManager(
-            session_factory=self.SessionLocal,
-            event_scheduler=self.event_scheduler,
-            wait_response_timeout_provider=self._wait_response_timeout_provider,
-            wait_response_timeout_callback=self._wait_response_timeout_callback,
-        )
+        # Track の永続化を扱う純粋ロジックレイヤー。会話経路からは 2026-08-21 に
+        # 切り離された (docs/intent/track_retirement.md §2 住人 2) — 残る読み手は
+        # 時間割の track:N コマ・想起の歩き・経験の台帳で、退役は順序④。
+        self.track_manager = TrackManager(session_factory=self.SessionLocal)
         logging.info("Initialized cognitive-model managers (TrackManager).")
 
         # --- Initialize Cached Head Architecture (Phase 2-h) ---
@@ -265,42 +255,10 @@ class SAIVerseManager(
         # --- Initialize cognitive-model runtime layers (Phase C-1) ---
         # MetaLayer は判断 Pulse の共有基盤 (per-persona Lock・判断設定・判断ログ)。
         # 旧 v1 メタ判断 (alert observer 登録 + 状況分類 dispatch) は退役済み
-        # (track_retirement.md §7.4)。UserConversationTrackHandler はユーザー発話
-        # イベントの受け口として handle_user_input から呼ばれる (Track 状態判定 →
-        # 別の活動中なら on_event 判断点へ直結)。
+        # (track_retirement.md §7.4)。ユーザー発話イベントの受け口は
+        # saiverse.user_conversation (会話が開いているかで直接応答 / on_event
+        # 判断点への直結を分ける — Track は経由しない)。
         self.meta_layer = MetaLayer(self)
-        # Intent A v0.14 [B] 移動: Track 状態遷移の起点でメタ判断ターン
-        # (line_role='meta_judgment', scope='discardable') を 'committed' に昇格する。
-        # メタ判断 Playbook が独白 + /spell 方式で /spell track_activate 等を発動 →
-        # Pulse 完了時に TrackManager.activate(...) が呼ばれる → このルートで pulse_id
-        # ベースに当該 pulse 内のメタ判断ターンを committed 化する。
-        self.track_manager.add_status_change_observer(self._promote_meta_judgment_in_pulse)
-        self.user_conversation_handler = UserConversationTrackHandler(
-            track_manager=self.track_manager,
-            manager=self,
-        )
-        self.social_track_handler = SocialTrackHandler(
-            track_manager=self.track_manager,
-        )
-        self.autonomous_track_handler = AutonomousTrackHandler(
-            track_manager=self.track_manager,
-            manager=self,
-        )
-        # pulse_dispatch.md §5: Track activate (= running 遷移) 時に各 Handler の
-        # on_track_activated hook を発火する。Handler 側で track_type をフィルタ
-        # して自分の責務範囲を判定する (TrackManager は種別判定の責務を持たない)。
-        # ケース1 (ユーザー発話 → alert → metalayer → activate) と ケース2
-        # (自律 tick → metalayer → activate) の両方で同じ経路で Track 切替通知が
-        # 出るようになる。
-        self.track_manager.add_track_activated_observer(
-            self.user_conversation_handler.on_track_activated
-        )
-        self.track_manager.add_track_activated_observer(
-            self.social_track_handler.on_track_activated
-        )
-        self.track_manager.add_track_activated_observer(
-            self.autonomous_track_handler.on_track_activated
-        )
         # pulse_dispatch.md §7: ペルソナを動かす全イベントの一元的なディスパッチャ。
         # 各起点コード (manager/runtime, ScheduleManager, AutonomyManager,
         # phenomena 系) は self.pulse_dispatcher 経由でイベントを発火させる。
@@ -310,19 +268,19 @@ class SAIVerseManager(
         # (saiverse/day_plan.py) + 判断点 (saiverse/autonomy_wiring.py) が担う。
         self.pulse_dispatcher = PulseDispatcher(self)
         # デバッグコントローラー (debug_controller.md): 完全手動モード対象ペルソナ。
-        # このセットに入った persona は wait_response timeout を予約しない
-        # (_wait_response_timeout_provider が None を返す)。
+        # このセットに入った persona は会話の沈黙タイマーを予約しない
+        # (saiverse.user_conversation.conversation_timeout_minutes が None を返す)。
         self._debug_manual_mode_personas: set = set()
         # NOTE: 旧 InternalAlertPoller (Track パラメータの閾値超過を 60 秒周期で
         # 判定し set_alert を撃つ機構 + Handler.tick() 拡張点) は Track 撤廃計画の
         # 裁定 B②③ で機構ごと撤去 (docs/intent/track_retirement.md §5-B)。alert
         # 状態機械そのもの (set_alert + alert observer) も、最後の発火元だった
         # ユーザー発話の仲裁が on_event 判断点への直結に置き換わったため撤去済み
-        # (同 §7.4)。
+        # (同 §7.4)。Track 種別ごとの Handler 三種と on_track_activated hook は
+        # 会話経路の Track なし化 (2026-08-21) で機構ごと退役した。
         logging.info(
             "Initialized cognitive-model runtime layers "
-            "(MetaLayer [judgment shared infra], "
-            "UserConversationTrackHandler / SocialTrackHandler / AutonomousTrackHandler ready, "
+            "(MetaLayer [judgment shared infra], PulseDispatcher ready, "
             "EventScheduler instantiated [will start at startup])."
         )
 
@@ -334,12 +292,6 @@ class SAIVerseManager(
         # → tick スレッド起動より前に、ここで確実に初期化しておく。
         self.sea_runtime: SEARuntime = SEARuntime(self)
         self.pulse_controller: PulseController = PulseController(self.sea_runtime)
-        # pulse_dispatch.md §6.2: Track 状態変化で current pulse を cancel する経路。
-        # メタ判断結果として Track が pending に押し出された場合、その Track 起点の
-        # 進行中 Pulse は意味を失うので cancellation_token.cancel() で止める。
-        self.track_manager.add_status_change_observer(
-            self.pulse_controller.on_track_status_change
-        )
 
         # ライフサイクル状態: __init__ 完了時点ではまだ False。start() が全背景ループを
         # 起動する瞬間に True になる。ensure_autonomy_for はこのフラグで「起動前は
@@ -353,7 +305,7 @@ class SAIVerseManager(
         self._load_user_state_from_db()
 
         # --- ペルソナ登録後の共通初期化 ---
-        # 全ペルソナに対して交流 Track 確保 + AutonomyManager 同期を実行する。
+        # 全ペルソナに対して AutonomyManager 同期と各種予約の再確立を実行する。
         # _on_persona_registered は動的作成/Blueprint からも呼ばれる統一フック。
         self._run_persona_post_registration()
 
@@ -514,7 +466,7 @@ class SAIVerseManager(
         # NOTE: 自律会話マネージャ・AutonomyManager (Active ペルソナ)・server_start
         # トリガの起動はすべて start() に移設した。__init__ は構築のみで、pulse /
         # capture を生む背景ループは 1 本も起こさない (初期化完了前レース防止の不変条件)。
-        # _run_persona_post_registration() は track 確保等の冪等な下ごしらえだけを行い、
+        # _run_persona_post_registration() は予約の再確立等の冪等な下ごしらえだけを行い、
         # ensure_autonomy_for は _started=False の間 no-op になる。
 
     def start(self) -> None:
@@ -565,7 +517,7 @@ class SAIVerseManager(
         # 起床判断が編成する時間割のコマ発火 (EventScheduler 予約) が担う。
 
         # EventScheduler dispatcher loop。以降、push される予約 (TTL 接近 / interval /
-        # schedule / db_polling / wait_response timeout / SDS heartbeat 等) が発火する。
+        # schedule / db_polling / 会話の沈黙タイマー / SDS heartbeat 等) が発火する。
         # 予約自体は __init__ 中に heap へ積まれているが、ここで dispatcher が動き出す
         # まで 1 件も発火しない。
         self.event_scheduler.start()
@@ -731,14 +683,8 @@ class SAIVerseManager(
         except Exception as exc:
             logging.exception("SEA auto run failed: %s", exc)
 
-    def run_sea_user(self, persona, building_id: str, user_input: str, metadata: Optional[Dict[str, Any]] = None, meta_playbook: Optional[str] = None, args: Optional[Dict[str, Any]] = None, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None, pre_spells: Optional[List[str]] = None, origin_track_id: Optional[str] = None) -> List[str]:
-        """Run user input via PulseController.
-
-        ``origin_track_id`` 指定時はその Track 文脈の Pulse として走る。
-        UserConversationTrackHandler が pending/alert 状態の Track でも文脈を
-        保持できるよう、Handler 起動経路から渡される。未指定時は SEA runtime が
-        ``get_running`` フォールバックで解決する。
-        """
+    def run_sea_user(self, persona, building_id: str, user_input: str, metadata: Optional[Dict[str, Any]] = None, meta_playbook: Optional[str] = None, args: Optional[Dict[str, Any]] = None, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None, pre_spells: Optional[List[str]] = None) -> List[str]:
+        """Run user input via PulseController."""
         try:
             result = self.pulse_controller.submit_user(
                 persona_id=persona.persona_id,
@@ -749,7 +695,6 @@ class SAIVerseManager(
                 args=args,
                 event_callback=event_callback,
                 pre_spells=pre_spells,
-                origin_track_id=origin_track_id,
             )
             return result if result else []
         except LLMError:
@@ -1218,25 +1163,9 @@ class SAIVerseManager(
         Blueprint spawn のいずれの経路でも同じ後処理が走ることを保証する。
         各ステップは独立で、1 つが失敗しても残りは実行される。
         """
-        # 1. 交流 Track 確保 (冪等)
-        try:
-            self.social_track_handler.ensure_track(persona_id)
-        except Exception:
-            logging.exception(
-                "[on_persona_registered] Failed to ensure social track: %s",
-                persona_id,
-            )
-
-        # 1b. 候補補充 Track 確保 (冪等, autonomous_desire.md §11)。
-        #     AUTONOMY_ENABLED に依らず全ペルソナへ常設する。これにより起動 (再起動含む)
-        #     と動的作成の両方で「やりたいことを探す」永続 Track が必ず 1 本付く。
-        try:
-            self.track_manager.ensure_desire_refill_track(persona_id)
-        except Exception:
-            logging.exception(
-                "[on_persona_registered] Failed to ensure desire-refill track: %s",
-                persona_id,
-            )
+        # (旧 1. 交流 Track / 1b. 候補補充 Track の常設は 2026-08-21 に退役 —
+        #  欲求プールが機構ごと消え、対ペルソナ社交の運転は v0.4 の管轄に
+        #  なったため。autonomous_behavior_v3.md §8 / track_retirement.md §2)
 
         # 2. AutonomyManager を AUTONOMY_ENABLED に同期
         #    (True なら起動、False なら何もしない)
@@ -1248,23 +1177,19 @@ class SAIVerseManager(
                 persona_id,
             )
 
-        # 3. (C) wait_response タイムアウトタイマーの再確立。
-        #    タイマーは activate 時にしか張られず EventScheduler はインメモリの
-        #    ため再起動で失われる。ロード済みの running Track へ張り直す。
-        #    自律 OFF のペルソナは provider の AUTONOMY_ENABLED ゲート (A) で
-        #    skip されるので、ここで全ペルソナを処理しても大量発火しない
-        #    (例外: user_conversation は自律 OFF でも張る — episode close のため。
-        #    provider の 2026-07-07 例外条項を参照)。
-        #    (新規作成経路では running Track がまだ無いので実質 no-op。)
-        #    対ユーザー会話だけは「会話が開いていること」を追加条件にする
-        #    (2026-07-29、_rearm_wait_response_timeout_on_load を参照。
-        #    判定不能なら張らずに読み取りだけ再試行する)。
+        # 3. (C) 会話の沈黙タイマーの再確立。EventScheduler はインメモリなので
+        #    予約は再起動で失われる。**開いている会話の出来事があるペルソナに
+        #    だけ**張り直す — 既に終わった会話へ張ると、起動 N 分後にタイム
+        #    アウトが空撃ちされる (2026-07-29 実機で観測)。
+        #    (新規作成経路では会話が開いていないので実質 no-op。)
         try:
-            self._rearm_wait_response_timeout_on_load(persona_id)
+            from saiverse.user_conversation import rearm_conversation_timeout_on_load
+
+            rearm_conversation_timeout_on_load(self, persona_id)
         except Exception:
             logging.exception(
-                "[on_persona_registered] Failed to (re)schedule wait_response timeout: %s",
-                persona_id,
+                "[on_persona_registered] Failed to (re)schedule the conversation "
+                "timeout: %s", persona_id,
             )
 
         # 4. (自律行動 v2) 当日 day_plan のコマ予約を再確立 (冪等)。
@@ -1567,16 +1492,19 @@ class SAIVerseManager(
              get_running を読む残存箇所の誤認源になる）
           3. AUTONOMY_ENABLED → False（DB + in-memory）— 判断点・watchdog の
              ゲートが全て閉じる
-          4. 対ユーザー Track をサイレント activate — プロンプト待ちに戻す
+
+        旧ステップ 4「対ユーザー Track をサイレント activate（プロンプト待ちに
+        戻す）」は 2026-08-21 に対象消滅した。会話が Track を経由しなくなり、
+        「プロンプト待ち」は *会話の出来事が開いていない状態* そのものになった
+        ため、停止時に戻すべき帳簿が無い（ユーザーが話しかければ
+        ``saiverse.user_conversation`` が会話を開いて応答する）。
 
         Returns:
-            {"paused_tracks": List[str], "user_track_activated": bool,
-             "autonomy_running": bool}
+            {"paused_tracks": List[str], "autonomy_running": bool}
         """
         from saiverse.autonomy_manager import AutonomyManager
         from saiverse.track_manager import (
             STATUS_RUNNING,
-            TERMINAL_STATUSES,
             InvalidTrackStateError,
             TrackNotFoundError,
         )
@@ -1624,478 +1552,13 @@ class SAIVerseManager(
         if persona is not None:
             persona.autonomy_enabled = False
 
-        # 4. 対ユーザー Track をサイレント activate（プロンプト待ちに戻す）
-        user_track_activated = False
-        user_tracks = [
-            t for t in tm.list_for_persona(persona_id)
-            if t.track_type == "user_conversation" and t.status not in TERMINAL_STATUSES
-        ]
-        if user_tracks:
-            target = user_tracks[0]  # last_active_at desc の先頭 = 最新
-            if target.status != STATUS_RUNNING:
-                try:
-                    tm.activate(target.track_id, suppress_pulse=True)
-                    user_track_activated = True
-                except (InvalidTrackStateError, TrackNotFoundError) as exc:
-                    logging.warning(
-                        "[stop-autonomy] failed to activate user track %s: %s",
-                        target.track_id, exc,
-                    )
-
         logging.info(
-            "[stop-autonomy] persona=%s paused_tracks=%s user_track_activated=%s",
-            persona_id, paused, user_track_activated,
+            "[stop-autonomy] persona=%s paused_tracks=%s", persona_id, paused,
         )
         return {
             "paused_tracks": paused,
-            "user_track_activated": user_track_activated,
             "autonomy_running": am.is_running,
         }
-
-    # ------------------------------------------------------------------
-    # wait_response Track のタイムアウトタイマー (handoff_2026-05-09.md §4)。
-    # 発火時の仕事は Track の pause ではなく会話出来事の close + 判断起動
-    # (life.md §7 案 Y, 2026-07-13)。
-    # ------------------------------------------------------------------
-
-    _DEFAULT_WAIT_RESPONSE_TIMEOUT_MINUTES = 30
-
-    #: 再確立が「判定不能」だったときの読み取り再試行の間隔 (秒)。使い切ったら諦める。
-    _REARM_RETRY_DELAYS_SEC = (30, 120, 300)
-
-    def _rearm_wait_response_timeout_on_load(
-        self, persona_id: str, *, attempt: int = 0
-    ) -> None:
-        """起動時のタイマー再確立 (_on_persona_registered §3) の入口。
-
-        ``_should_rearm_wait_response_timeout`` が **判定不能 (None)** を返した場合
-        (DB の一時障害でロード出来なかった等) は、張らずに終わるのではなく
-        **読み取りだけを後で再試行する**。判断 (post_conversation) はこの経路では
-        一切撃たない — 再試行するのは「タイマーを張るべきかの読み取り」だけ。
-
-        再試行が要る理由 (2026-07-29, Codex 指摘): 判定不能を「張らない」で終わらせると、
-        正当に開いている会話がタイマーを失ったまま永久に閉じなくなりうる。当初は
-        「次のユーザー発話で UserConversationHandler が張り直す」を回復経路として
-        当てにしていたが、**別 Track が running のときユーザー発話は alert 経路に入り**、
-        メタ判断が会話 Track を activate しない限り再装填されない。回復の前提が
-        常には成立しないので、こちら側で再試行を持つ。
-        """
-        decision = self._should_rearm_wait_response_timeout(persona_id)
-        if decision is None:
-            self._schedule_rearm_retry(persona_id, attempt)
-            return
-        if not decision:
-            return
-        # only_if_absent=True: 既に有効な予約があるなら触らない。復旧は「予約が
-        # 失われていること」を埋める仕事で、生きている予約を置き換える仕事ではない。
-        # 上書きすると、待っている間に通常経路 (ユーザー発話への同期応答 / activate)
-        # が張った予約を潰し、下流が base_time を now へ丸めるぶん**期限が後退する**
-        # (再試行の遅延ぶん、最大 _REARM_RETRY_DELAYS_SEC の末尾秒)。
-        # 判定と登録は EventScheduler のロック内で一息に行う — has_key で確認して
-        # から張る形 (check-then-act) では、その隙間に通常経路が割り込める
-        # (2026-07-29 Codex 指摘。ensure_ の内側には Track と設定 DB の読み直しが
-        # あるので隙間は実在する)。
-        self.track_manager.ensure_wait_response_timeout(
-            persona_id, only_if_absent=True,
-        )
-
-    def _schedule_rearm_retry(self, persona_id: str, attempt: int) -> None:
-        """判定不能だった再確立を ``_REARM_RETRY_DELAYS_SEC`` 後にもう一度試す。"""
-        scheduler = getattr(self, "event_scheduler", None)
-        if scheduler is None:
-            return
-        if attempt >= len(self._REARM_RETRY_DELAYS_SEC):
-            logging.warning(
-                "[wait_response_timeout] giving up re-arm for %s after %d attempts; "
-                "an open conversation may stay open until the persona's conversation "
-                "Track is activated again", persona_id, attempt,
-            )
-            return
-        delay = self._REARM_RETRY_DELAYS_SEC[attempt]
-
-        def _retry(pid: str = persona_id, nxt: int = attempt + 1) -> None:
-            self._rearm_wait_response_timeout_on_load(pid, attempt=nxt)
-
-        scheduler.schedule(
-            fire_at=datetime.now() + timedelta(seconds=delay),
-            callback=_retry,
-            key=f"wait_response_rearm_retry:{persona_id}",
-        )
-        logging.warning(
-            "[wait_response_timeout] re-arm undecidable for %s; retrying the read "
-            "in %ds (attempt %d/%d)",
-            persona_id, delay, attempt + 1, len(self._REARM_RETRY_DELAYS_SEC),
-        )
-
-    def _should_rearm_wait_response_timeout(self, persona_id: str) -> Optional[bool]:
-        """起動時のタイマー再確立 (_on_persona_registered §3) を張ってよいか。
-
-        life.md §7 案 Y (2026-07-13) 以降、対ユーザー会話 Track は会話が終わっても
-        running のまま残る (永続 Track で、時間経過では状態を動かさない)。つまり
-        ``status == running`` はもう「いま会話中」を意味しない — 「いま」の真実は
-        **開いている会話の出来事 (Episode)** が持つ。
-
-        再確立の条件を running だけにすると、とっくに終わった会話に対して起動の
-        N 分後にタイムアウトが発火し、post_conversation 判断が空撃ちされる。
-        2026-07-29 実機で観測: 最終発言が 07-22 のアイフィが、起動 30 分後に
-        「会話がひと区切りつきました」の状況テキストで振り返り、1 週間前の会話を
-        たった今のこととして独白し「やりたいこと」を 1 件生成した (再起動のたびに
-        全ペルソナぶん再発する)。
-
-        Returns:
-            True  — 張ってよい
-            False — 張るべきでない (会話は既に終わっている / running Track が無い)
-            None  — **判定不能** (DB 読み取り失敗)。呼び出し元
-                    ``_rearm_wait_response_timeout_on_load`` が読み取りを再試行する。
-                    判定不能を False と混ぜないこと — 前者は「まだ分からない」で
-                    あって「張らなくてよい」ではない。
-
-        対ユーザー会話以外の Track (social 等) は Episode を持たないので従来どおり。
-
-        NOTE: この判定を ``_wait_response_timeout_provider`` や
-        ``TrackManager._schedule_wait_response_timeout`` 側へ置くことはできない。
-        create / activate は ``_schedule_wait_response_timeout`` を
-        ``on_track_activated`` hook (= 会話の出来事を開く点) より **先** に呼ぶため
-        (track_manager.py の create/activate 参照)、会話開始時に必ず「まだ開いて
-        いない」と判定され、タイマーが二度と立たなくなる。
-        """
-        try:
-            running = self.track_manager.get_running(persona_id)
-        except Exception:
-            logging.warning(
-                "[wait_response_timeout] Failed to read running track for %s; "
-                "re-arm undecidable", persona_id, exc_info=True,
-            )
-            return None
-        if running is None:
-            return False  # ensure_ 側でも no-op だが、意図を明示する
-        if getattr(running, "track_type", None) != "user_conversation":
-            return True
-
-        try:
-            from saiverse import episodes
-
-            open_conv = episodes.get_open_episode(
-                self, persona_id, kind=episodes.KIND_CONVERSATION,
-            )
-        except Exception:
-            logging.warning(
-                "[wait_response_timeout] Failed to read open conversation episode "
-                "for %s; re-arm undecidable", persona_id, exc_info=True,
-            )
-            return None
-        if open_conv is None:
-            logging.info(
-                "[wait_response_timeout] no open conversation for %s "
-                "(track=%s is running but the conversation already ended); "
-                "not re-arming the timeout",
-                persona_id, running.track_id,
-            )
-            return False
-        return True
-
-    def _wait_response_timeout_provider(self, track):
-        """TrackManager.activate() から呼ばれる timeout 設定 provider。
-
-        Returns:
-            (timeout_minutes, last_message_time) — 対象 Track が
-                ``post_complete_behavior=='wait_response'`` の場合
-            None — Handler 不明 / wait_response 以外 / ペルソナ unloaded /
-                AUTONOMY_ENABLED=False
-
-        ``last_message_time`` は SAIMemory の ``MAX(messages.created_at) WHERE
-        origin_track_id=...`` から取る (Track 紐付きメッセージの最新)。
-        メッセージが無ければ None で返し、TrackManager 側が ``datetime.now()``
-        にフォールバックする (= activate 直後の即時タイムアウトを防ぐ)。
-
-        本 provider は schedule 時 (``_schedule_wait_response_timeout``) と
-        発火時 re-eval (``_handle_wait_response_timeout``) の両方から呼ばれる
-        単一ゲート。AUTONOMY_ENABLED 判定もここに置くことで、自律 OFF の
-        ペルソナでは「予約しない」「(ON→OFF に落ちていたら) 発火時の
-        callback を起動しない」の両方が一箇所で効く。
-        """
-        # デバッグ完全手動モード: 対象ペルソナは wait_response timeout を予約しない
-        # (debug_controller.md)。None を返すと _schedule_wait_response_timeout が skip。
-        if getattr(track, "persona_id", None) in self._debug_manual_mode_personas:
-            return None
-        try:
-            from sea.pulse_root_context import get_handler_for_track
-            handler = get_handler_for_track(self, track)
-            if handler is None:
-                return None
-            behavior = getattr(handler, "post_complete_behavior", None)
-            if behavior != "wait_response":
-                return None
-
-            persona_id = track.persona_id
-            persona = self.personas.get(persona_id)
-            if persona is None:
-                return None
-
-            # (A) AUTONOMY_ENABLED ゲート: 自律 OFF のペルソナでは wait_response
-            # タイマーを予約しない。schedule 時は予約 skip、発火時 re-eval では
-            # None 返却で _handle_wait_response_timeout が何もせず early return。
-            #
-            # ただし user_conversation は例外 (2026-07-07): 会話 episode の close
-            # (A1 配線) がこのタイマーに乗っており、記録系は「認知不変・全ペルソナ」
-            # が原則 (life_concept_map.md §8)。自律 OFF のまま会話が永遠に「いま」に
-            # 残る実害をまはーが観測。タイマー・close は全員に、
-            # post_conversation 判断は fire_judgment_point 内の AUTONOMY_ENABLED
-            # ゲートが従来通り絞る (自律 OFF は close のみで判断は走らない)。
-            # Track の pause は life.md §7 案 Y (2026-07-13) で撤去済み — Track は
-            # もう時間経過で状態を動かさない。
-            autonomy_enabled = bool(getattr(persona, "autonomy_enabled", False))
-            if (
-                not autonomy_enabled
-                and getattr(track, "track_type", None) != "user_conversation"
-            ):
-                return None
-
-            # AI.USER_CONV_TIMEOUT_MINUTES (NULL=デフォルト) を読み出す
-            timeout_minutes = self._DEFAULT_WAIT_RESPONSE_TIMEOUT_MINUTES
-            try:
-                from database.models import AI
-                db = self.SessionLocal()
-                try:
-                    ai_row = db.query(AI).filter_by(AIID=persona_id).first()
-                    if ai_row is not None and ai_row.USER_CONV_TIMEOUT_MINUTES is not None:
-                        timeout_minutes = int(ai_row.USER_CONV_TIMEOUT_MINUTES)
-                finally:
-                    db.close()
-            except Exception:
-                logging.warning(
-                    "[wait_response_timeout] Failed to read USER_CONV_TIMEOUT_MINUTES "
-                    "for %s; using default %d",
-                    persona_id, self._DEFAULT_WAIT_RESPONSE_TIMEOUT_MINUTES,
-                    exc_info=True,
-                )
-
-            if timeout_minutes <= 0:
-                return None  # 0 / 負値 = タイマー無効化
-
-            last_msg_time = None
-            adapter = getattr(persona, "sai_memory", None)
-            if adapter is not None:
-                try:
-                    last_msg_time = adapter.get_track_last_message_time(track.track_id)
-                except Exception:
-                    logging.warning(
-                        "[wait_response_timeout] Failed to read last_message_time "
-                        "for track=%s persona=%s",
-                        track.track_id, persona_id,
-                        exc_info=True,
-                    )
-            return (timeout_minutes, last_msg_time)
-        except Exception:
-            logging.exception(
-                "[wait_response_timeout] provider unexpectedly failed for track=%s",
-                getattr(track, "track_id", "?"),
-            )
-            return None
-
-    def _wait_response_timeout_callback(self, persona_id: str, track_id: str) -> None:
-        """TrackManager から呼ばれる timeout 発火後 callback。
-
-        ``TrackManager._handle_wait_response_timeout`` はもう Track の状態を
-        動かさない (life.md §7 案 Y, 2026-07-13: 「いま」の真実は開いている
-        エピソードが持つ。Track は判断だけが動かす)。Track は running のまま
-        本 callback が呼ばれる。実体は
-        ``saiverse.autonomy_wiring.handle_wait_response_timeout``:
-
-        1. 対ユーザー会話 Track なら、開いている会話の出来事 (Episode) を閉じ、
-           **会話終了判断 (post_conversation)** を撃つ — v2 の「会話終了」=
-           wait_response タイムアウトによる会話出来事の close (intent v2 §10-5)。
-           1 往復も成立しなかった会話では撃たない (作話防止)
-        2. それ以外の wait_response Track (social 等) は WARNING のみ
-           (旧フォールバック先の v1 メタ判断は退役 — track_retirement.md §7.3)
-        3. AutonomyManager (watchdog) の次回 tick を ``now + interval`` に押し戻す
-        """
-        try:
-            from saiverse.autonomy_wiring import handle_wait_response_timeout
-
-            handle_wait_response_timeout(self, persona_id, track_id)
-        except Exception:
-            logging.exception(
-                "[wait_response_timeout] handling failed: persona=%s track=%s",
-                persona_id, track_id,
-            )
-
-    # ------------------------------------------------------------------
-    # メタ判断ターン scope 昇格 hook (Intent A v0.14 [B] 移動)
-    # ------------------------------------------------------------------
-
-    def _promote_meta_judgment_in_pulse(
-        self, persona_id: str, track_id: str, pulse_id: Optional[str]
-    ) -> None:
-        """TrackManager の状態遷移 hook で呼ばれる。
-
-        当該 pulse_id 内の ``line_role='meta_judgment' AND scope='discardable'``
-        なメッセージを ``scope='committed'`` に昇格する。これにより独白 + /spell
-        方式のメタ判断でも Intent A v0.14 [B] 移動の「分岐ターンをそのまま残す」
-        を実現する (Track 切替 = メタ判断の確定 → 移動先 Track の冒頭来歴として
-        メインキャッシュに残るべき)。
-
-        ``track_id`` は状態変化が起きた Track の id (signature 拡張、本処理では
-        未使用だが PulseController._on_track_status_change 等の他 observer は
-        利用する: pulse_dispatch.md §6.2)。
-
-        - ``pulse_id`` が None (CLI / テスト) の場合は何もしない (該当 Pulse 不在)。
-        - ペルソナがメモリにロードされていない場合も skip。
-        - メッセージが見つからなくても (= 通常会話の中で /spell track_pause を
-          発動した等、メタ判断 Playbook を経由していない場合) 静かに 0 件 UPDATE
-          で終わる。これは正しい挙動 (continue 相当のため昇格不要)。
-        """
-        if not pulse_id:
-            return
-        persona = self.personas.get(persona_id)
-        if persona is None:
-            return
-        persona_log_path = getattr(persona, "persona_log_path", None)
-        if persona_log_path is None:
-            return
-        db_path = persona_log_path.parent / "memory.db"
-        if not db_path.exists():
-            logging.warning(
-                "[meta-judgment-promote] memory.db not found at %s for persona=%s",
-                db_path, persona_id,
-            )
-            return
-
-        # Phase 2.5 (2026-05-01): messages.pulse_id 専用カラムに対する INDEX 付き
-        # 直接 WHERE で昇格を行う。旧実装は metadata.tags の "pulse:{uuid}" を
-        # json_each で参照していたが INDEX が効かず線形スキャンになっていた。
-        import sqlite3
-        try:
-            conn = sqlite3.connect(str(db_path))
-            try:
-                cur = conn.execute(
-                    """
-                    UPDATE messages SET scope = 'committed'
-                    WHERE pulse_id = ?
-                      AND line_role = 'meta_judgment'
-                      AND scope = 'discardable'
-                    """,
-                    (pulse_id,),
-                )
-                if cur.rowcount > 0:
-                    logging.info(
-                        "[meta-judgment-promote] Promoted %d meta_judgment row(s) "
-                        "to 'committed' (pulse_id=%s persona=%s)",
-                        cur.rowcount, pulse_id, persona_id,
-                    )
-                    # Track Chronicle (v0.32, 2026-05-09): 昇格が発生した = 当該 Pulse で
-                    # Track 切り替えが起きた、と判断して切り替え先 Track の Chronicle を
-                    # 独立メッセージとして history 末尾近くに INSERT する。
-                    # 詳細は docs/intent/persona_cognition/track_chronicle.md
-                    try:
-                        self._insert_track_chronicle_on_switch(
-                            conn, persona_id, pulse_id, db_path,
-                        )
-                    except Exception:
-                        logging.exception(
-                            "[track-chronicle-insert] Failed (pulse_id=%s persona=%s)",
-                            pulse_id, persona_id,
-                        )
-                conn.commit()
-            finally:
-                conn.close()
-        except Exception:
-            logging.exception(
-                "[meta-judgment-promote] Failed to promote (pulse_id=%s persona=%s)",
-                pulse_id, persona_id,
-            )
-
-    def _insert_track_chronicle_on_switch(
-        self,
-        conn,
-        persona_id: str,
-        pulse_id: str,
-        db_path,
-    ) -> None:
-        """Track 切り替え時に切り替え先 Track の Chronicle を history 末尾近くに挿入する。
-
-        v0.32 (2026-05-09): _promote_meta_judgment_in_pulse の延長で呼ばれる。
-        メタ判断独白が committed 昇格された直後 = Track 切り替えが発生したタイミング。
-
-        冪等性: 同 pulse_id + 同 track_id で既に Track Chronicle メッセージがあれば skip。
-        """
-        import json as _json
-        import time as _time
-        import uuid as _uuid
-        # 切り替え先 Track = 現在の running track
-        track = self.track_manager.get_running(persona_id)
-        if track is None:
-            return
-        track_id = getattr(track, "track_id", None)
-        if not track_id:
-            return
-
-        # ユーザー会話 Track は親スレッド保持機構が生メッセージで文脈を担保するため、
-        # Track Chronicle 切り替え時挿入はスキップ (v0.32, 2026-05-09)
-        if getattr(track, "track_type", None) == "user_conversation":
-            logging.debug(
-                "[track-chronicle-insert] Skipping user_conversation track=%s",
-                track_id,
-            )
-            return
-
-        # 冪等性チェック: 同 pulse_id + 同 origin_track_id で既に挿入済みなら skip
-        cur = conn.execute(
-            "SELECT id FROM messages "
-            "WHERE pulse_id = ? AND origin_track_id = ? "
-            "AND line_role = 'main_line' AND scope = 'committed' "
-            "AND content LIKE '<system>%トラック「%作業履歴%</system>' "
-            "LIMIT 1",
-            (pulse_id, track_id),
-        )
-        if cur.fetchone() is not None:
-            logging.debug(
-                "[track-chronicle-insert] already inserted for pulse=%s track=%s, skip",
-                pulse_id, track_id,
-            )
-            return
-
-        # Track Chronicle テキスト取得
-        from sai_memory.arasuji.context import get_episode_context, format_episode_context
-        episode = get_episode_context(conn, max_entries=50, origin_track_id=track_id)
-        if not episode:
-            logging.debug(
-                "[track-chronicle-insert] no chronicle entries for track=%s, skip",
-                track_id,
-            )
-            return
-        formatted = format_episode_context(episode, include_level_info=True)
-        title = getattr(track, "title", None) or "(無題)"
-        content = (
-            f"<system>\n## トラック「{title}」での作業履歴\n\n{formatted}\n</system>"
-        )
-
-        # SAIMemory messages テーブルに INSERT (Track 切り替え通知メッセージとして)
-        msg_id = str(_uuid.uuid4())
-        now = int(_time.time())
-        # 該当ペルソナのデフォルト thread_id を採用 (= persona の messagelog 既定)
-        # 簡略化のため NULL で挿入。SAIMemoryAdapter.log_message と互換。
-        metadata = {"tags": ["track_chronicle_insert"]}
-        conn.execute(
-            "INSERT INTO messages "
-            "(id, thread_id, role, content, resource_id, created_at, metadata, "
-            "origin_track_id, line_role, line_id, scope, pulse_id) "
-            "VALUES (?, NULL, ?, ?, NULL, ?, ?, ?, 'main_line', NULL, 'committed', ?)",
-            (
-                msg_id,
-                "user",
-                content,
-                now,
-                _json.dumps(metadata, ensure_ascii=False),
-                track_id,
-                pulse_id,
-            ),
-        )
-        logging.info(
-            "[track-chronicle-insert] inserted Track Chronicle message: "
-            "pulse=%s track=%s title=%s chars=%d",
-            pulse_id, track_id, title, len(content),
-        )
 
     def start_autonomous_conversations(self):
         """Start all autonomous conversation managers."""

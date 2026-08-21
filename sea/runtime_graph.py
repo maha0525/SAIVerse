@@ -57,8 +57,6 @@ def compile_with_langgraph(
     cancellation_token: Optional[CancellationToken] = None,
     pulse_type: Optional[str] = None,
     isolate_pulse_context: bool = False,
-    pulse_line_role: Optional[str] = None,
-    pulse_line_track_id: Optional[str] = None,
     pulse_line_aspect: Optional[Any] = None,  # sea.pulse_context.Aspect
     line: str = "main",
 ) -> Optional[List[str]]:
@@ -190,23 +188,19 @@ def compile_with_langgraph(
     _thread_depth_entry = pulse_ctx.thread_stack_depth()
 
     # Pulse-root only: push the entry-line frame onto the line stack so messages
-    # produced during this Pulse get the right line_role / line_id / origin_track_id
-    # in their SAIMemory metadata (Intent A v0.14, Intent B v0.11). The pop runs in
-    # the finally block alongside _flush_pulse_logs.
+    # produced during this Pulse get the right line_role / line_id in their
+    # SAIMemory metadata (Intent A v0.14, Intent B v0.11). The pop runs in the
+    # finally block alongside _flush_pulse_logs.
     _pushed_root_line = False
     _pushed_sub_line = False
-    if parent_pulse_ctx is None and (pulse_line_aspect is not None or pulse_line_role):
-        # Pulse-root: アスペクト (v0.2 §10) を push。aspect があれば role/scope/
-        # model tier はそこから導出される。legacy 経路 (aspect=None) では role を直接使う。
-        pulse_ctx.push_line(
-            role=pulse_line_role or "main_line",
-            track_id=pulse_line_track_id,
-            aspect=pulse_line_aspect,
-        )
+    if parent_pulse_ctx is None and pulse_line_aspect is not None:
+        # Pulse-root: アスペクト (v0.2 §10) を push。role / scope / model tier は
+        # すべてそこから導出される。
+        pulse_ctx.push_line(aspect=pulse_line_aspect)
         _pushed_root_line = True
         LOGGER.debug(
-            "[runtime_graph] Pushed Pulse-root line: aspect=%s role=%s track_id=%s pulse_id=%s",
-            pulse_line_aspect, pulse_line_role, pulse_line_track_id, pulse_id,
+            "[runtime_graph] Pushed Pulse-root line: aspect=%s pulse_id=%s",
+            pulse_line_aspect, pulse_id,
         )
     elif parent_pulse_ctx is not None and line == "sub":
         # サブライン (run_playbook スペル / spell_args_decider 等, §10.4): WORKER
@@ -214,7 +208,7 @@ def compile_with_langgraph(
         # しなくても sub_line / volatile / 軽量 になり、書き忘れによる main_line
         # 汚染が原理的に起きない。pop は finally で行う。
         from sea.pulse_context import Aspect
-        _sub_frame = pulse_ctx.push_line(aspect=Aspect.WORKER, track_id=pulse_line_track_id)
+        _sub_frame = pulse_ctx.push_line(aspect=Aspect.WORKER)
         _pushed_sub_line = True
         LOGGER.debug(
             "[runtime_graph] Pushed sub-line (WORKER): line_id=%s parent=%s pulse_id=%s",
@@ -339,9 +333,7 @@ def compile_with_langgraph(
             )
 
         # Pop the Pulse-root line frame we pushed before LangGraph execution.
-        # Done before flush so the PulseContext.deferred_track_ops apply step
-        # below sees a clean stack — though current ops don't read line state
-        # at apply time, keeping this order matches a reader's expectation
+        # Done before flush so the books are settled on a clean stack
         # ("the Pulse is done, the line is closed, then we settle the books").
         if _pushed_root_line or _pushed_sub_line:
             try:
@@ -363,34 +355,12 @@ def compile_with_langgraph(
             if _final_pulse_ctx:
                 runtime._flush_pulse_logs(persona, _final_pulse_ctx)
 
-                # CRITICAL ORDER: deferred_track_ops の中身は
-                # _apply_deferred_track_ops 完了時に clear される (runtime_runner.py:81)。
-                # そのため、メタ判断 Pulse の committed_to_main_cache (= activate op
-                # が発動したかの派生フラグ) は **apply の前に** 評価する必要がある。
-                # apply 後に見ると常に空 = False になる (実機 2026-05-01 で観測済み)。
                 _meta_buffer = getattr(_final_pulse_ctx, "meta_judgment_buffer", None)
+                # 旧 committed_to_main_cache は「この Pulse で Track の activate op が
+                # 発動したか」の派生フラグだった。Track 操作スペルと deferred track ops
+                # の退役 (track_retirement.md §7.2 ④群) で発動源が消えたため、常に
+                # False になる。
                 _committed_for_meta_log = False
-                if _meta_buffer is not None:
-                    _committed_for_meta_log = any(
-                        op.op_type == "activate"
-                        for op in _final_pulse_ctx.deferred_track_ops
-                    )
-
-                # Apply deferred Track operations queued by spells during this Pulse.
-                # Same pulse-root condition as _flush_pulse_logs above — Track switches
-                # land at Pulse boundaries (Intent A v0.14, Intent B v0.11). Done here
-                # (rather than in runtime_runner.run_playbook) because the
-                # PulseContext only lives in LangGraph state, not in `parent`.
-                try:
-                    from sea.runtime_runner import _apply_deferred_track_ops
-                    _apply_deferred_track_ops(
-                        {"_pulse_context": _final_pulse_ctx},
-                        persona,
-                    )
-                except Exception:
-                    LOGGER.exception(
-                        "[runtime_graph] Failed to apply deferred Track ops at Pulse-root completion"
-                    )
 
                 # Flush meta judgment buffer to meta_judgment_log table
                 # (Phase 2 / handoff Part 2). pulse_type == 'meta_judgment' の Pulse

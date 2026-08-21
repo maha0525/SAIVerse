@@ -5,7 +5,7 @@
 記録する (timetable_redesign.md §5.4 / experience_ledger.md §4-§6 二家系の
 「節目の本人記録」):
 
-1. **帰属 (belongs_to)**: このコマの経験は結局どの関心・タスク・欲求に属したか。
+1. **帰属 (belongs_to)**: このコマの経験は結局どのタスクに属したか。
    事前 ref (slot.ref) は参考情報としてプロンプトに出すが、判断は実績ベース。
    結果は purpose_tags 棚 (層2 棚入れ、recall_tags_and_track_reduction.md §9.4
    の帰属契約) へ ``episode (work_session) → belongs_to`` で載る。
@@ -167,13 +167,13 @@ def _build_response_schema(belongs_to_enum: List[str]) -> Dict[str, Any]:
 
 
 def _collect_belongs_to_enum(manager: Any, persona_id: str) -> List[str]:
-    """belongs_to の enum: 実在の生きた目的ノード + "none" + "new"。
+    """belongs_to の enum: 実在の生きたタスク + "none" + "new"。
 
     集合はコマの ref enum (:func:`saiverse.judgment_points.collect_slot_ref_enum`
-    = バックログタスク + 欲求候補 + 生きた Track + "none") と同一供給。head の
-    一覧 (PurposeBacklogSection) と同じ供給源なので「読む情報と選べる選択肢の
-    一致」(judgment_points の不変条件) がそのまま成り立つ。track:N を含めるのは
-    track:N コマ (P5 大枝コマ) の実績が none に落ちないため。
+    = バックログタスク + "none") と同一供給 — 帰属先の選択肢とコマの選択肢が
+    食い違わないようにする。旧供給にあった欲求候補と track:N は、欲求プールと
+    Track 操作の退役で消えた (autonomous_behavior_v3.md §8 /
+    track_retirement.md §7.2 ④群)。
     """
     from saiverse.judgment_points import collect_slot_ref_enum
 
@@ -184,11 +184,7 @@ def _collect_belongs_to_enum(manager: Any, persona_id: str) -> List[str]:
 
 def _build_choice_lines(manager: Any, persona_id: str) -> List[str]:
     """帰属先一覧の提示行 (ref + 題)。enum と同じ供給関数から組む。"""
-    from saiverse.judgment_points import (
-        list_backlog_tasks,
-        list_desire_tasks,
-        list_pickable_tracks,
-    )
+    from saiverse.judgment_points import list_backlog_tasks
 
     lines: List[str] = []
     try:
@@ -196,14 +192,6 @@ def _build_choice_lines(manager: Any, persona_id: str) -> List[str]:
             ref = t.get("task_ref")
             if ref:
                 lines.append(f"- {ref} 「{t.get('title') or '(無題)'}」（タスク）")
-        for t in list_desire_tasks(manager, persona_id):
-            ref = t.get("task_ref")
-            if ref:
-                lines.append(f"- {ref} 「{t.get('title') or '(無題)'}」（欲求候補）")
-        for tr in list_pickable_tracks(manager, persona_id):
-            lines.append(
-                f"- track:{tr.short_id} 「{getattr(tr, 'title', None) or '(無題)'}」（関心）"
-            )
     except Exception:
         LOGGER.warning(
             "[slot_close] failed to build choice lines (persona=%s)",
@@ -242,8 +230,8 @@ def _build_close_prompt(
         f"「{kind}」のコマが終わりました。締めとして、今のセッションの実績を"
         "二つだけ記録します。\n"
         "\n"
-        "1. 帰属 (belongs_to): このコマでやったことは、結局どの関心・タスク・"
-        "欲求のためのものになりましたか。実際にやったこと (実績) に基づいて、"
+        "1. 帰属 (belongs_to): このコマでやったことは、結局どのタスクのための"
+        "ものになりましたか。実際にやったこと (実績) に基づいて、"
         "下の一覧から選んでください。\n"
         f"{prior_ref_line}"
         "どれにも属さなければ \"none\"、既存のどれでもない新しい何かに繋がった"

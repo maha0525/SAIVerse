@@ -19,7 +19,7 @@ addon 由来のポーリング (X 監視等) は本 Phase ではスコープ外�
 責務外:
 - リトライポリシー (callback 側のドメイン責務)
 - callback の例外による再試行 (WARN ログ + 該当予約消去のみ)
-- Alert 観察ルート (TrackManager._notify_alert の同期 callback で別途処理)
+  (旧「Alert 観察ルート」の記述は、alert 状態機械の退役で対象消滅した)
 
 仮想クロック対応 (自律行動 v2 §12):
 - 時刻の読み出しは ``saiverse.clock.now()`` に一元化 (実モードでは挙動不変)

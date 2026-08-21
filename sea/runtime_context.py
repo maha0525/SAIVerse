@@ -57,12 +57,14 @@ def _reframe_autonomous_messages(messages: List[Dict[str, Any]]) -> List[Dict[st
 #: (docs/issues/llm_call_entry_point_standardization.md の確認事項)。
 PERSONA_HEAD_SECTIONS: frozenset[str] = frozenset({
     "common_prompt", "persona_self", "core_memory", "building", "spell_list",
-    "autonomy_modes", "life_purpose", "desk", "memopedia_index",
+    "autonomy_modes", "self_image", "desk", "memopedia_index",
     "available_playbooks", "memory_weave", "visual_context",
     # 2026-07-30: 判断プロンプトが毎回貼り直していた静的な一覧の移設先
     # (docs/issues/judgment_static_lists_to_head.md)。用途で出し分けない —
     # 判断点だけに出すと同じ model の head が二種類になる。
-    "facilities", "purpose_backlog",
+    # (もう一つの移設先だった purpose_backlog は 2026-08-21 に節ごと退役した —
+    #  中身の pickable tracks と欲求候補が供給源ごと消えたため)
+    "facilities",
 })
 
 
@@ -488,62 +490,12 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
                 # Enrich messages with attachment context
                 enriched_recent = runtime._enrich_history_with_attachments(recent)
 
-                # ユーザー会話 Track 親保持機構 (v0.32, 2026-05-09)
-                # オーナーユーザーとの会話メッセージを history 内既存数で不足する分だけ
-                # 上部に補完する。Metabolism やコンテキスト圧縮で生メッセージが消えても
-                # 親スレッドとして必ず一定数を確保する。詳細:
-                # docs/intent/persona_cognition/track_chronicle.md (Stelis 親子モデル流用)
-                supplementary_msgs: List[Dict[str, Any]] = []
-                supplementary_oldest_ts: Optional[int] = None
-                try:
-                    from saiverse.user_conversation_preserver import (
-                        get_owner_user_conversation_track_id,
-                        get_supplementary_user_conversation_messages,
-                    )
-                    persona_id_for_owner = getattr(persona, "persona_id", None)
-                    if persona_id_for_owner:
-                        owner_track_id = get_owner_user_conversation_track_id(
-                            persona_id_for_owner, runtime.manager
-                        )
-                        if owner_track_id:
-                            sai_mem = getattr(persona, "sai_memory", None)
-                            supplementary_msgs, supplementary_oldest_ts = (
-                                get_supplementary_user_conversation_messages(
-                                    sai_mem, owner_track_id, enriched_recent,
-                                )
-                            )
-                except Exception:
-                    LOGGER.debug(
-                        "[sea][prepare-context] User-conversation supplement failed",
-                        exc_info=True,
-                    )
-
-                # 時刻アンカー① (v0.32): 上部補完メッセージの直前。
-                # 「以下、YYYY-MM-DD HH:MM:SS 以降のユーザーとの会話です」
-                if supplementary_msgs:
-                    if supplementary_oldest_ts:
-                        try:
-                            from datetime import datetime as _dt
-                            ts_str = _dt.fromtimestamp(int(supplementary_oldest_ts)).strftime(
-                                "%Y-%m-%d %H:%M:%S"
-                            )
-                            messages.append({
-                                "role": "user",
-                                "content": f"<system>以下、{ts_str} 以降のユーザーとの会話です</system>",
-                            })
-                            LOGGER.debug(
-                                "[sea][prepare-context] Inserted timestamp anchor①: %s",
-                                ts_str,
-                            )
-                        except (TypeError, ValueError, OSError):
-                            pass
-                    messages.extend(supplementary_msgs)
-
-                # 時刻アンカー② (v0.32, 2026-05-09): history 内の最古残存メッセージの直前に
+                # 時刻アンカー (v0.32, 2026-05-09): history 内の最古残存メッセージの直前に
                 # 「以下、YYYY-MM-DD HH:MM:SS 以降のやり取りです」を揮発挿入する。
                 # メッセージそのものに時刻メタを付ける副作用 (ペルソナが時刻を真似する) を
-                # 避けるため、Metabolism 起点に 1 か所だけ。詳細は
-                # docs/intent/persona_cognition/track_chronicle.md §7
+                # 避けるため、Metabolism 起点に 1 か所だけ。
+                # (v0.32 には上部補完メッセージ用の「アンカー①」が別に居たが、
+                #  補完機構ごと退役した — track_retirement.md 住人 11)
                 if enriched_recent:
                     oldest_msg = enriched_recent[0]
                     oldest_ts = oldest_msg.get("created_at") or oldest_msg.get("timestamp")
@@ -558,12 +510,12 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
                             }
                             messages.append(anchor_msg)
                             LOGGER.debug(
-                                "[sea][prepare-context] Inserted timestamp anchor②: %s",
+                                "[sea][prepare-context] Inserted timestamp anchor: %s",
                                 ts_str,
                             )
                         except (TypeError, ValueError, OSError):
                             LOGGER.debug(
-                                "[sea][prepare-context] Skipping timestamp anchor② (invalid ts=%r)",
+                                "[sea][prepare-context] Skipping timestamp anchor (invalid ts=%r)",
                                 oldest_ts,
                             )
 
@@ -573,13 +525,12 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
                 # 実入力の履歴 ID 列 (2026-08-19, sluice の見た集合の一次情報):
                 # この呼び出しが**実際にプロンプトへ組み込んだ**履歴メッセージの
                 # ID を out-param で呼び出し元へ返す (戻り値と既存キーは不変 —
-                # prefix_anchor_id と同じ call-local の器)。上部補完 (owner 会話の
-                # 親保持) も実入力なので含める。履歴構築が失敗した場合はこのキー
-                # 自体が書かれない — 読み手 (sea/sluice.py) はキー不在を
+                # prefix_anchor_id と同じ call-local の器)。履歴構築が失敗した場合は
+                # このキー自体が書かれない — 読み手 (sea/sluice.py) はキー不在を
                 # fail-closed (退場停止) に写像する。
                 if context_meta is not None:
                     presented_ids: List[str] = []
-                    for _msg in list(supplementary_msgs) + list(enriched_recent):
+                    for _msg in enriched_recent:
                         _mid = _msg.get("id") if isinstance(_msg, dict) else None
                         if _mid:
                             presented_ids.append(str(_mid))
@@ -1071,7 +1022,6 @@ def _swap_preview_weave_for_refill(
             new_weave = get_memory_weave_context(
                 persona_id=persona_id,
                 persona_dir=persona_dir,
-                history_anchor_message_id=refill_plan.get("new_anchor_id"),
                 exclude_chronicle_entry_ids=exclude_ids or None,
                 raise_on_error=True,
             )

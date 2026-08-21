@@ -22,8 +22,8 @@ LOGGER = logging.getLogger(__name__)
 # promotion to the next level.  Legacy count-based traversal only —
 # 予算モード (head の General Chronicle) は累積質量ルール
 # (:func:`_traverse_episode_mass`) に世代交代した (2026-07-27、
-# docs/intent/chronicle_consolidation.md §6)。件数ベースは Track Chronicle
-# 等の char_budget=None 経路と get_episode_context_for_timerange に残る。
+# docs/intent/chronicle_consolidation.md §6)。件数ベースは char_budget=None
+# の経路 (バッチ生成スクリプト等) と get_episode_context_for_timerange に残る。
 MIN_ENTRIES_PER_LEVEL: int = 10
 
 # 累積質量ルールの下限係数: 次に見せるノードに「ここまでに見せた質量の
@@ -49,7 +49,7 @@ _MAX_COMPRESSION_ROUNDS: int = 1000
 
 # ``char_budget`` の sentinel。呼び出し側が「予算制で読みたい (具体値は env/既定に
 # 委ねる)」と表明するときに渡す。``char_budget=None`` (未指定) は旧来の件数上限
-# ベース (Track Chronicle 等、予算制を持ち込みたくない経路) を意味し、区別する。
+# ベース (予算制を持ち込みたくない経路) を意味し、区別する。
 USE_DEFAULT_BUDGET: int = -1
 
 
@@ -93,32 +93,20 @@ def _format_timestamp(ts: Optional[int]) -> str:
     return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
 
 
-def _get_all_arasuji_sorted(
-    conn: sqlite3.Connection,
-    *,
-    origin_track_id: Optional[str] = None,
-) -> List[ArasujiEntry]:
+def _get_all_arasuji_sorted(conn: sqlite3.Connection) -> List[ArasujiEntry]:
     """Get all arasuji entries sorted by end_time descending (newest first).
 
-    Args:
-        origin_track_id: Track Chronicle 用 (v0.32, 2026-05-09)。set すると
-            該当 Track の entry のみ。NULL なら General Chronicle (origin_track_id IS NULL) のみ。
+    ``origin_track_id`` が NULL の entry だけを対象にする。Track Chronicle
+    (v0.32) は退役したが (track_retirement.md 住人 5)、**既存 DB には Track 由来の
+    行がそのまま残っている** — このフィルタを外すと、当時 Track 単位の作業メモ
+    として書かれた文章が一般 Chronicle として読まれてしまう。書き手が消えても
+    フィルタは残す。
     """
-    if origin_track_id is not None:
-        from sai_memory.arasuji.storage import get_track_entries
-        # Track Chronicle: 当該 Track の全 level、incomplete 含む
-        all_entries = get_track_entries(
-            conn, origin_track_id, level=None, only_unconsolidated=False, include_incomplete=True
-        )
-    else:
-        # General Chronicle: origin_track_id IS NULL の entry のみ。
-        # Track Chronicle が混在しないようにフィルタ (v0.32)
-        max_level = get_max_level(conn)
-        all_entries: List[ArasujiEntry] = []
-        for level in range(1, max_level + 1):
-            entries = get_entries_by_level(conn, level, order_by_time=True)
-            # Track 紐付き entry を除外
-            all_entries.extend([e for e in entries if e.origin_track_id is None])
+    max_level = get_max_level(conn)
+    all_entries: List[ArasujiEntry] = []
+    for level in range(1, max_level + 1):
+        entries = get_entries_by_level(conn, level, order_by_time=True)
+        all_entries.extend([e for e in entries if e.origin_track_id is None])
 
     # Sort by end_time descending (newest first)
     all_entries.sort(key=lambda e: e.end_time or 0, reverse=True)
@@ -521,7 +509,6 @@ def get_episode_context(
     *,
     max_entries: int = 100,
     include_raw_messages: bool = True,
-    origin_track_id: Optional[str] = None,
     char_budget: Optional[int] = None,
     exclude_entry_ids: Optional[Set[str]] = None,
 ) -> List[ContextEntry]:
@@ -552,9 +539,9 @@ def get_episode_context(
     overflow is accepted and a WARNING is logged.
 
     Backward compatibility: ``char_budget=None`` (the default) keeps the legacy
-    pure count-based behavior (used by Track Chronicle, which must not change —
-    §6.2 item 5). To opt into budget mode with the env/default value, pass
-    ``char_budget=USE_DEFAULT_BUDGET``; to pin an explicit budget, pass an int.
+    pure count-based behavior. To opt into budget mode with the env/default
+    value, pass ``char_budget=USE_DEFAULT_BUDGET``; to pin an explicit budget,
+    pass an int.
 
     Args:
         conn: Database connection
@@ -574,8 +561,8 @@ def get_episode_context(
     Returns:
         List of ContextEntry objects, ordered from oldest to newest
     """
-    # Get all arasuji sorted by end_time descending (Track filter applied if set)
-    all_arasuji = _get_all_arasuji_sorted(conn, origin_track_id=origin_track_id)
+    # Get all arasuji sorted by end_time descending
+    all_arasuji = _get_all_arasuji_sorted(conn)
     if exclude_entry_ids:
         all_arasuji = [e for e in all_arasuji if e.id not in exclude_entry_ids]
 
@@ -592,8 +579,7 @@ def get_episode_context(
     # (raw messages after this are "unprocessed")
     start_position_time = latest_arasuji.end_time
 
-    # Budget mode is opt-in: char_budget=None means legacy count-based (Track
-    # Chronicle keeps its behavior unchanged, §6.2 item 5).
+    # Budget mode is opt-in: char_budget=None means legacy count-based.
     effective_budget = _resolve_char_budget(char_budget) if char_budget is not None else 0
 
     # Budget disabled (None or explicit 0): legacy pure count-based behavior.

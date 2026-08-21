@@ -87,9 +87,8 @@ class WorkSessionResult:
             (total_input_tokens / total_output_tokens / total_cost_usd /
             call_count / models_used 等)。
         task_ref: 呼び出し時に渡された対象タスク参照 (透過)。
-        track_id: 呼び出し時に渡された所属 Track ID (透過)。track:N コマ
-            (P5 コマ参照の任意階層化) では判断点がここから desk_memo /
-            track_op の対象を読む。
+        track_id: 呼び出し時に渡された所属 Track ID (透過)。セッション終了判断が
+            desk_memo の保存先として読む。
         episode_ref: このセッションの出来事 (kind='work_session') の参照。
             セッション終了判断の層2 棚入れ (episode_purposes) と原本注入
             (D9-2) の対象。
@@ -170,8 +169,11 @@ def run_work_session(
         metadata: ダイジェストの SAIMemory metadata に添える追加情報。
         manager: SAIVerseManager。省略時は ``tools.context.get_active_manager()``
             (ツール実行中の contextvar) から解決する。
-        track_id: セッションが属する Track の ID (あれば)。ラインの
-            origin_track_id として記録される。
+        track_id: セッションが属する Track の ID (あれば)。結果 (
+            :class:`WorkSessionResult` / :class:`SessionCloseContext`) へ透過する
+            だけで、本モジュールは Track を読み書きしない (ラインへの
+            origin_track_id 刻印は 2026-08-21 に退役 — track_retirement.md
+            §2 住人 3)。
         title: セッションの短い表題 (コマの title / タスク題)。出来事
             (Episode) の ``meta.title`` に透過する (meta 書式契約
             life_concept_map.md §14)。省略可。
@@ -259,7 +261,7 @@ def run_work_session(
         pulse_ctx = runtime._get_or_create_pulse_context(pulse_id)
         from sea.pulse_context import Aspect, PulseLogEntry, resolve_execution_context
 
-        pulse_ctx.push_line(aspect=Aspect.WORKER, track_id=track_id)
+        pulse_ctx.push_line(aspect=Aspect.WORKER)
         frame_pushed = True
 
         # WORKER フレームが active な状態で解決 → 軽量モデルが導出される

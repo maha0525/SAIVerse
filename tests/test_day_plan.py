@@ -2501,30 +2501,6 @@ def test_recovery_closes_orphaned_unknown_slot_episode(manager, task_refs):
     assert episodes.get_open_episode(manager, PERSONA_ID) is None
 
 
-def test_reservation_failure_does_not_touch_desire(manager, task_refs):
-    """Finding 4: 予約 tx が転けたら touch_desire は呼ばれない (取り組んでいない欲求を
-    再試行のたびに再訪記録して昇格候補へ押し上げない)。予約成立後に初めて touch する。"""
-    _attach_ledger(manager)
-    day_plan.init_budget_ledger(manager, PERSONA_ID, PLAN_DATE, 20)
-    _save_single_gated_slot(manager, task_refs, budget_rounds=5)  # ref = task:...
-    clock.enable_virtual(BASE + timedelta(hours=9))
-
-    with patch("saiverse.episodes.open_episode", side_effect=RuntimeError("db down")), \
-            patch("saiverse.desire_engine.touch_desire") as mock_touch, \
-            patch("sea.work_session.run_work_session"):
-        day_plan._fire_slot(manager, PERSONA_ID, PLAN_DATE, 0)
-    assert mock_touch.call_count == 0  # 予約が転けたので再訪も記録しない
-
-    # 予約が成立すれば touch は一度だけ呼ばれる (予約後へ移動したことの確認)
-    with patch("saiverse.desire_engine.touch_desire") as mock_touch2, \
-            patch("sea.work_session.run_work_session",
-                  return_value=_mock_work_session_result(rounds_used=3)), \
-            patch("saiverse.autonomy_wiring.fire_judgment_point",
-                  return_value={"submitted": False}):
-        day_plan._fire_slot(manager, PERSONA_ID, PLAN_DATE, 0)
-    assert mock_touch2.call_count == 1
-
-
 def test_negative_used_rounds_is_rejected_no_over_refund(manager, task_refs):
     """Finding 5: ハンドラが負の used_rounds を返しても返金として受理しない — 予約額を
     そのまま消費として残し、台帳にも負値を保存しない (旧 consume 系と同じ非負要求)。"""

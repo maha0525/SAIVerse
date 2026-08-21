@@ -91,11 +91,10 @@ LOGGER = logging.getLogger(__name__)
 #
 # 旧語彙 (六型 + 暮らし/休む) は時間割の kind としては**封印** (intent §5.5) —
 # 新規時間割の検証 (_validate_and_normalize_slots / sanitize_timetable) では
-# 拒否される。定数として残すのは:
-# - 欲求の六型分類 (desire_engine.DESIRE_TYPES / purpose_seed) が**別概念**と
-#   してこの語彙を使い続けるため (欲求タクソノミの再設計は T1 のスコープ外)
-# - 旧 kind で保存済みの時間割の表示・帳簿保持を壊さないため (表示経路は
-#   kind 文字列を素通しする)
+# 拒否される。定数として残すのは、旧 kind で保存済みの時間割の表示・帳簿保持を
+# 壊さないため (表示経路は kind 文字列を素通しする)。
+# もう一つの利用者だった欲求の六型分類 (desire_engine.DESIRE_TYPES /
+# purpose_seed) は 2026-08-21 に機構ごと退役した。
 # ---------------------------------------------------------------------------
 
 # 旧・六型 (autonomous_behavior_v2.md §5.1。時間割 kind としては封印済み)
@@ -4149,21 +4148,8 @@ def _fire_slot(
         slot.get("facility"), reserved, exec_id,
     )
 
-    # desire 参照コマの発火 = 欲求への再訪。帳簿 (touch_count / 鮮度) に記録する
-    # (v2 §5.3「何度も選ばれ再訪される欲求は関心に深まる」)。**予約 tx が成立した後**
-    # に付ける — 予約前だと episode open 失敗等で予約が転けても touch_count だけ増え、
-    # 再試行のたびに実際には取り組んでいない欲求を昇格候補に押し上げてしまう
-    # (予約成立 = 「取り組みに向かった」の確定点)。ハンドラの成否には依らない。
-    ref = slot.get("ref") or REF_NONE
-    if ref != REF_NONE and ref.startswith("task:"):
-        try:
-            from saiverse.desire_engine import touch_desire
-            touch_desire(manager, persona_id, ref)
-        except Exception:
-            LOGGER.warning(
-                "[day_plan] touch_desire failed (persona=%s ref=%s); continuing",
-                persona_id, ref, exc_info=True,
-            )
+    # (旧: desire 参照コマの発火時に欲求の帳簿へ再訪を記録していた。欲求プールの
+    #  退役 (autonomous_behavior_v3.md §8) で記録先ごと消えた)
 
     # --- ハンドラ (running 区間) ---
     try:
@@ -4256,17 +4242,6 @@ def _fire_slot_legacy(
     )
 
     episode_ref = _open_slot_episode(manager, persona_id, plan_date_str, slot, index)
-
-    ref = slot.get("ref") or REF_NONE
-    if ref != REF_NONE and ref.startswith("task:"):
-        try:
-            from saiverse.desire_engine import touch_desire
-            touch_desire(manager, persona_id, ref)
-        except Exception:
-            LOGGER.warning(
-                "[day_plan] touch_desire failed (persona=%s ref=%s); continuing",
-                persona_id, ref, exc_info=True,
-            )
 
     try:
         used_rounds = handler(manager, persona_id, plan_date_str, slot, index)

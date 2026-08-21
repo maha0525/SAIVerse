@@ -107,12 +107,12 @@ PREPARED_REFIRE_EXPIRE_AFTER_SECONDS = 1800.0
 
 #: prepared 回収 (#2): 期限切れで failed に落とす kind と期限秒数。
 #: day_open / day_close は watchdog が自然再発火する (claim が failed キーを
-#: 退避して回る)。post_conversation は会話の瞬間が過ぎており refire しない。
+#: 退避して回る)。旧 post_conversation はここに載っていたが、会話終了判断の
+#: 退役 (2026-08-16) で kind ごと消えた。
 PREPARED_EXPIRE_AFTER_SECONDS = 1800.0
 PREPARED_EXPIRE_KINDS = (
     f"{JUDGMENT_KIND_PREFIX}day_open",
     f"{JUDGMENT_KIND_PREFIX}day_close",
-    f"{JUDGMENT_KIND_PREFIX}post_conversation",
 )
 
 #: schedule 発火の台帳 KIND (W3。ScheduleManager 側の定数と同値 — wiring は

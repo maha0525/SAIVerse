@@ -1,11 +1,10 @@
 """タグ層2 (棚入れ) のテスト — life_concept_map.md §9.1 層2 / A3。
 
-判断点 (post_conversation / post_session / day_close) の response_schema に
-episode_purposes フィールドが動的に載り、judgment_finalize が層2 タグ
+判断点 (post_session / day_close) の response_schema に episode_purposes
+フィールドが動的に載り、judgment_finalize が層2 タグ
 (target=episode:N, layer=2) として purpose_tags へ永続化することを検証する:
 
 - 対象の出来事 + 目的 enum が揃ったときだけフィールドが出る (空 enum 事故防止)
-- post_conversation は「最後に閉じた会話の出来事」へのフォールバック解決
 - post_session は WorkSessionResult.episode_ref から対象を得る
 - day_close は {episode, purpose} ペア (今日閉じた出来事すべてが対象)
 - finalize: enum 内の ref は purpose_tags 行になる / enum 外は該当項目だけ棄却
@@ -120,13 +119,17 @@ def finalize_mod():
 
 
 @pytest.fixture
-def running_track(manager):
-    """pickable (running) な Track track:1 を用意する。"""
-    track_id = manager.track_manager.create(
-        persona_id=PERSONA_ID, track_type="autonomous",
-        title="言葉の標本集", initial_status="running",
+def backlog_task(manager):
+    """purpose enum に載る生きたバックログタスク task:1 を用意する。
+
+    2026-08-21 まではここが running Track (track:1) だった。Track 撤廃で
+    purpose enum の供給が task:N だけになったため、器を差し替えた。
+    """
+    ptm = PersonaTaskManager(manager.SessionLocal)
+    task = ptm.create_task(
+        persona_id=PERSONA_ID, title="言葉の標本集", auto_activate=False,
     )
-    return track_id
+    return task["id"]
 
 
 def _persona_ctx(manager, tmp_path):
@@ -147,42 +150,20 @@ def _closed_conversation_episode(manager) -> str:
 # ---------------------------------------------------------------------------
 
 
-def test_post_conversation_schema_has_episode_purposes(manager, running_track):
-    """閉じた会話の出来事 + 生きた目的があるとき episode_purposes が載る。
-
-    episode_ref は context に無くても「最後に閉じた会話」へフォールバックする。
-    """
-    ref = _closed_conversation_episode(manager)
-    args = jp.build_judgment_args(manager, PERSONA_ID, jp.KIND_POST_CONVERSATION, {})
-    props = args["response_schema"]["properties"]
-    assert "episode_purposes" in props
-    assert props["episode_purposes"]["items"]["enum"] == ["track:1"]
-    import json
-    ctx = json.loads(args["judgment_context"])
-    assert ctx["episode_ref"] == ref
-    assert ctx["purpose_refs"] == ["track:1"]
-    assert "episode_purposes" in args["situation_text"]
-
-
-def test_post_conversation_schema_omits_field_without_episode(manager, running_track):
-    """閉じた会話の出来事が無ければフィールドを出さない (偽対象を作らない)。"""
-    args = jp.build_judgment_args(manager, PERSONA_ID, jp.KIND_POST_CONVERSATION, {})
-    props = args["response_schema"]["properties"]
-    assert "episode_purposes" not in props
-    import json
-    ctx = json.loads(args["judgment_context"])
-    assert "episode_ref" not in ctx
-
-
-def test_post_conversation_schema_omits_field_without_purposes(manager):
-    """目的 (track/task) がゼロならフィールドを出さない (空 enum 事故防止)。"""
-    _closed_conversation_episode(manager)
-    args = jp.build_judgment_args(manager, PERSONA_ID, jp.KIND_POST_CONVERSATION, {})
+def test_post_session_schema_omits_field_without_purposes(manager):
+    """目的 (task:N) がゼロならフィールドを出さない (空 enum 事故防止)。"""
+    sr = {
+        "digest": "調べ物をした", "artifacts": [], "rounds_used": 3,
+        "ended_reason": "finished", "episode_ref": "episode:7",
+    }
+    args = jp.build_judgment_args(
+        manager, PERSONA_ID, jp.KIND_POST_SESSION, {"session_result": sr},
+    )
     assert "episode_purposes" not in args["response_schema"]["properties"]
 
 
 def test_post_session_schema_reads_episode_ref_from_session_result(
-    manager, running_track,
+    manager, backlog_task,
 ):
     """post_session は WorkSessionResult.episode_ref を対象の出来事として読む。"""
     sr = {
@@ -200,16 +181,15 @@ def test_post_session_schema_reads_episode_ref_from_session_result(
     assert "episode_purposes" in args["situation_text"]
 
 
-def test_purpose_enum_includes_backlog_tasks(manager, running_track):
-    """purpose enum は track:N + 採用済みバックログ task:N (欲求候補は含めない)。"""
+def test_purpose_enum_includes_backlog_tasks(manager, backlog_task):
+    """purpose enum は採用済みバックログ task:N のみ (track:N は退役)。"""
     ptm = PersonaTaskManager(manager.SessionLocal)
     ptm.create_task(persona_id=PERSONA_ID, title="読書メモ", auto_activate=False)
     refs = jp.collect_purpose_refs(manager, PERSONA_ID)
-    assert "track:1" in refs
-    assert "task:1" in refs
+    assert sorted(refs) == ["task:1", "task:2"]
 
 
-def test_day_close_schema_uses_episode_purpose_pairs(manager, running_track):
+def test_day_close_schema_uses_episode_purpose_pairs(manager, backlog_task):
     """day_close は今日閉じた出来事すべてが対象 → {episode, purpose} ペア。"""
     ep1 = _closed_conversation_episode(manager)
     ep2 = episodes.open_episode(manager, PERSONA_ID, episodes.KIND_WORK_SESSION)
@@ -219,13 +199,13 @@ def test_day_close_schema_uses_episode_purpose_pairs(manager, running_track):
     assert "episode_purposes" in props
     item = props["episode_purposes"]["items"]
     assert set(item["properties"]["episode"]["enum"]) == {ep1, ep2}
-    assert item["properties"]["purpose"]["enum"] == ["track:1"]
+    assert item["properties"]["purpose"]["enum"] == ["task:1"]
     # 選択材料: 今日の出来事一覧が状況テキストに載る
     assert "[今日の出来事]" in args["situation_text"]
     assert ep1 in args["situation_text"]
 
 
-def test_day_close_schema_omits_pairs_without_closed_episodes(manager, running_track):
+def test_day_close_schema_omits_pairs_without_closed_episodes(manager, backlog_task):
     args = jp.build_judgment_args(manager, PERSONA_ID, jp.KIND_DAY_CLOSE, {})
     assert "episode_purposes" not in args["response_schema"]["properties"]
 
@@ -235,105 +215,100 @@ def test_day_close_schema_omits_pairs_without_closed_episodes(manager, running_t
 # ---------------------------------------------------------------------------
 
 
-def test_finalize_post_conversation_writes_layer2_tags(
-    manager, finalize_mod, tmp_path, running_track,
+def _post_session_ctx(purpose_refs):
+    import json
+    return json.dumps({
+        "plan_date": "2026-07-04",
+        "episode_ref": "episode:3",
+        "purpose_refs": purpose_refs,
+    })
+
+
+def test_finalize_post_session_writes_layer2_tags(
+    manager, finalize_mod, tmp_path, backlog_task,
 ):
     output = {
-        "monologue": "この会話は標本集の話だった。",
-        "picked_tasks": [],
-        "new_desires": [],
+        "monologue": "このセッションは標本集の作業だった。",
+        "digest": "標本集の序文を書いた。",
         "remaining_timetable": None,
-        "episode_purposes": ["track:1"],
+        "episode_purposes": ["task:1"],
     }
-    import json
-    ctx = json.dumps({
-        "plan_date": "2026-07-04", "track_refs": ["track:1"],
-        "episode_ref": "episode:3", "purpose_refs": ["track:1"],
-    })
     with _persona_ctx(manager, tmp_path):
-        summary, *_ = finalize_mod.judgment_finalize(
-            judgment_output=output, kind="post_conversation", judgment_context=ctx,
+        finalize_mod.judgment_finalize(
+            judgment_output=output, kind="post_session",
+            judgment_context=_post_session_ctx(["task:1"]),
         )
     adapter = manager.personas[PERSONA_ID].sai_memory
     tags = list_by_target(adapter.conn, "episode:3")
     assert len(tags) == 1
-    assert tags[0].purpose_ref == "track:1"
+    assert tags[0].purpose_ref == "task:1"
     assert tags[0].layer == LAYER_SHELVE
     # 適用エコーがペルソナの文脈 (記録本文) に乗る
     assert adapter.messages
-    assert "棚に入れた" in adapter.messages[0]["content"]
+    assert any("棚に入れた" in m["content"] for m in adapter.messages)
 
 
 def test_shelving_line_includes_purpose_title(
-    manager, finalize_mod, tmp_path, running_track,
+    manager, finalize_mod, tmp_path, backlog_task,
 ):
-    """棚入れの適用エコーに purpose の表題が載る (task:N/track:N を番号だけにしない)。
+    """棚入れの適用エコーに purpose の表題が載る (task:N を番号だけにしない)。
 
-    「episode:3 を track:1 の棚に入れた」だと、あとで読むまはーにもペルソナ自身
-    にも中身が分からない (ユーザー向け表示の原則)。track:1「言葉の標本集」の形で
+    「episode:3 を task:1 の棚に入れた」だと、あとで読むまはーにもペルソナ自身
+    にも中身が分からない (ユーザー向け表示の原則)。task:1「言葉の標本集」の形で
     表題を添える。episode:3 は実在しないので素の ref に落ちる (解決失敗で記録を
     落とさない — 表題は装飾)。
     """
     output = {
-        "monologue": "この会話は標本集の話だった。",
-        "picked_tasks": [],
-        "new_desires": [],
+        "monologue": "このセッションは標本集の作業だった。",
+        "digest": "標本集の序文を書いた。",
         "remaining_timetable": None,
-        "episode_purposes": ["track:1"],
+        "episode_purposes": ["task:1"],
     }
-    import json
-    ctx = json.dumps({
-        "plan_date": "2026-07-04", "track_refs": ["track:1"],
-        "episode_ref": "episode:3", "purpose_refs": ["track:1"],
-    })
     with _persona_ctx(manager, tmp_path):
         finalize_mod.judgment_finalize(
-            judgment_output=output, kind="post_conversation", judgment_context=ctx,
+            judgment_output=output, kind="post_session",
+            judgment_context=_post_session_ctx(["task:1"]),
         )
-    content = manager.personas[PERSONA_ID].sai_memory.messages[0]["content"]
-    assert "track:1「言葉の標本集」" in content
+    contents = "\n".join(
+        m["content"] for m in manager.personas[PERSONA_ID].sai_memory.messages
+    )
+    assert "task:1「言葉の標本集」" in contents
 
 
 def test_finalize_rejects_out_of_enum_purpose(
-    manager, finalize_mod, tmp_path, running_track,
+    manager, finalize_mod, tmp_path, backlog_task,
 ):
     """enum 外の purpose ref は該当項目だけ棄却され、タグ行は生まれない。"""
     output = {
         "monologue": "x",
-        "picked_tasks": [],
-        "new_desires": [],
+        "digest": "d",
         "remaining_timetable": None,
         "episode_purposes": ["task:99"],
     }
-    import json
-    ctx = json.dumps({
-        "plan_date": "2026-07-04", "track_refs": [],
-        "episode_ref": "episode:3", "purpose_refs": ["track:1"],
-    })
     with _persona_ctx(manager, tmp_path):
         finalize_mod.judgment_finalize(
-            judgment_output=output, kind="post_conversation", judgment_context=ctx,
+            judgment_output=output, kind="post_session",
+            judgment_context=_post_session_ctx(["task:1"]),
         )
     adapter = manager.personas[PERSONA_ID].sai_memory
     assert list_by_target(adapter.conn, "episode:3") == []
 
 
-def test_finalize_day_close_pairs(manager, finalize_mod, tmp_path, running_track):
+def test_finalize_day_close_pairs(manager, finalize_mod, tmp_path, backlog_task):
     """day_close の {episode, purpose} ペア適用 + enum 外 episode の棄却。"""
     output = {
         "monologue": "今日を閉じる。",
         "tomorrow_memo": "明日は続きから",
         "episode_purposes": [
-            {"episode": "episode:1", "purpose": "track:1"},
-            {"episode": "episode:9", "purpose": "track:1"},  # enum 外 → 棄却
+            {"episode": "episode:1", "purpose": "task:1"},
+            {"episode": "episode:9", "purpose": "task:1"},  # enum 外 → 棄却
         ],
     }
     import json
     ctx = json.dumps({
         "plan_date": "2026-07-04",
-        "touched_desire_refs": [],
         "episode_refs": ["episode:1", "episode:2"],
-        "purpose_refs": ["track:1"],
+        "purpose_refs": ["task:1"],
     })
     with _persona_ctx(manager, tmp_path):
         finalize_mod.judgment_finalize(
@@ -347,7 +322,7 @@ def test_finalize_day_close_pairs(manager, finalize_mod, tmp_path, running_track
 
 
 def test_finalize_warns_when_adapter_lacks_tag_api(
-    manager, finalize_mod, tmp_path, running_track,
+    manager, finalize_mod, tmp_path, backlog_task,
 ):
     """adapter が目的タグ未対応でも判断全体は落ちない (WARN のみ)。"""
     class Bare:
@@ -358,17 +333,13 @@ def test_finalize_warns_when_adapter_lacks_tag_api(
 
     manager.personas[PERSONA_ID].sai_memory = Bare()
     output = {
-        "monologue": "x", "picked_tasks": [], "new_desires": [],
-        "remaining_timetable": None, "episode_purposes": ["track:1"],
+        "monologue": "x", "digest": "d",
+        "remaining_timetable": None, "episode_purposes": ["task:1"],
     }
-    import json
-    ctx = json.dumps({
-        "plan_date": "2026-07-04", "track_refs": [],
-        "episode_ref": "episode:3", "purpose_refs": ["track:1"],
-    })
     with _persona_ctx(manager, tmp_path):
         summary, *_ = finalize_mod.judgment_finalize(
-            judgment_output=output, kind="post_conversation", judgment_context=ctx,
+            judgment_output=output, kind="post_session",
+            judgment_context=_post_session_ctx(["task:1"]),
         )
     assert "Judgment finalized" in summary
 

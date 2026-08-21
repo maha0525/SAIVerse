@@ -34,8 +34,8 @@ LOGGER = logging.getLogger(__name__)
 # 既知 Section の役割マッピング。新規 Section 追加時はここに分類を足す。
 # 並び順 = system メッセージ内の出力順。各 Section の order 属性に合わせる
 # (common_prompt < persona_self < core_memory(250) < building(300) < facilities(310) <
-#  available_playbooks(400) < autonomy_modes(550) < life_purpose(560) <
-#  purpose_backlog(570) < spell_list(600) < desk(730))。
+#  available_playbooks(400) < autonomy_modes(550) < self_image(560) <
+#  spell_list(600) < desk(730))。
 # 旧 open_notes(720) は P3c① (concept_consolidation.md「Note → テーマノード移行」)
 # で退役し、後継の desk (机の物理) に置き換わった。
 SYSTEM_PROMPT_SECTION_NAMES: tuple[str, ...] = (
@@ -51,8 +51,7 @@ SYSTEM_PROMPT_SECTION_NAMES: tuple[str, ...] = (
     "facilities",
     "available_playbooks",
     "autonomy_modes",
-    "life_purpose",
-    "purpose_backlog",
+    "self_image",
     "spell_list",
     "desk",
     # P4-d: Memopedia 目次 (opt-in 実験。per-persona フラグ MEMOPEDIA_INDEX_ENABLED
@@ -571,10 +570,9 @@ def _compose_messages(
             "content": "\n\n---\n\n".join(system_parts),
         })
 
-    # Memory Weave: snapshot から chronicle / track_chronicle / memopedia の
-    # entry を取り出して、それぞれ個別 user message として展開する。preview UI
-    # は metadata.__memory_weave_type__ で section ラベルを切り替えるため、
-    # 1 つにまとめずに 3 つの message を保つ必要がある。
+    # Memory Weave: snapshot の entry を種類ごとに個別 user message として展開
+    # する。preview UI は metadata.__memory_weave_type__ で section ラベルを
+    # 切り替えるため、1 つにまとめない (現存する種類は chronicle のみ)。
     if MEMORY_WEAVE_SECTION_NAME in rendered_by_name:
         mw_section_snapshot = (
             snapshot.sections.get(MEMORY_WEAVE_SECTION_NAME)

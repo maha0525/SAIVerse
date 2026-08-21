@@ -1,4 +1,4 @@
-"""Build Memory Weave context for LLM with Chronicle (Arasuji) and Memopedia."""
+﻿"""Build Memory Weave context for LLM with Chronicle (Arasuji) and Memopedia."""
 
 from __future__ import annotations
 
@@ -19,15 +19,13 @@ def get_memory_weave_context(
     persona_id: Optional[str] = None,
     persona_dir: Optional[str] = None,
     max_chronicle_entries: int = 50,
-    history_anchor_message_id: Optional[str] = None,
     exclude_chronicle_entry_ids: Optional[List[str]] = None,
     raise_on_error: bool = False,
 ) -> List[Dict[str, Any]]:
-    """Build Memory Weave context messages containing Chronicle (General + Track).
+    """Build Memory Weave context messages containing the Chronicle.
 
     This provides the persona with:
     - Chronicle: Recent events in detail, older events in summary (hierarchical)
-    - Track Chronicle: work history for the active track
 
     記憶アーキv2 §7.1 (2026-07-04): Memopedia 索引の head 常時掲示は**廃止**し、
     知識への接触はゾーン C の自動想起 (sea/auto_recall.py) + 深掘りスペルに一本化した。
@@ -45,9 +43,8 @@ def get_memory_weave_context(
     Args:
         persona_id: Persona ID (auto-detected if not provided)
         persona_dir: Persona directory path (auto-detected if not provided)
-        max_chronicle_entries: Max Chronicle entries. General Chronicle は §6.2
-            の文字数予算制に移行したためこの値は安全弁の下限として扱われる (予算が
-            主制御)。Track Chronicle 側では従来どおり件数上限として効く。
+        max_chronicle_entries: Max Chronicle entries. Chronicle は §6.2 の文字数
+            予算制に移行したためこの値は安全弁の下限として扱われる (予算が主制御)。
         exclude_chronicle_entry_ids: head の Chronicle 枠から外すエントリ id。
             提示コンテキストの中で元の時系列位置に digest を差し込んでいる範囲を渡す
             (docs/intent/chronicle_eviction.md §6) — 同じあらすじが提示コンテキストと head の
@@ -97,21 +94,13 @@ def get_memory_weave_context(
             raise_on_error=raise_on_error,
         )
 
-        # 1.5. Get Track Chronicle context for active track (v0.32, 2026-05-09)
-        # アクティブ Track が無いペルソナや track_manager 利用不可な環境では空文字
-        track_chronicle_text, track_title = _get_track_chronicle_context(
-            conn, persona_id, max_entries=max_chronicle_entries,
-            history_anchor_message_id=history_anchor_message_id,
-            raise_on_error=raise_on_error,
-        )
-
         # 記憶アーキv2 §7.1: Memopedia 索引の head 常時掲示は既定で廃止 (自動想起 +
         # 深掘りスペルに一本化)。MEMOPEDIA_INDEX_ENABLED トグル (後方互換) の描画は
         # MemopediaIndexSection に一本化されているため、本関数はもう関与しない。
         conn.close()
 
-        # Build separate messages for Chronicle / Track Chronicle / Memopedia
-        # so the context preview can show token breakdown per source
+        # Chronicle は独立した user message として流す (context preview が
+        # __memory_weave_type__ で section ラベルを切り替えるため)
         messages: List[Dict[str, Any]] = []
         if chronicle_text:
             messages.append({
@@ -122,24 +111,10 @@ def get_memory_weave_context(
                     "__memory_weave_type__": "chronicle",
                 },
             })
-        if track_chronicle_text:
-            messages.append({
-                "role": "user",
-                "content": (
-                    f"以下は、現在アクティブなトラック「{track_title}」での作業履歴です。"
-                    f"このトラックを再開・継続する際の文脈情報として参照してください。\n\n"
-                    f"{track_chronicle_text}"
-                ),
-                "metadata": {
-                    MEMORY_WEAVE_CONTEXT_MARKER: True,
-                    "__memory_weave_type__": "track_chronicle",
-                },
-            })
         total_chars = sum(len(m["content"]) for m in messages)
         LOGGER.info(
-            "get_memory_weave_context: Generated %d messages (%d chars total, track_chronicle=%s)",
+            "get_memory_weave_context: Generated %d messages (%d chars total)",
             len(messages), total_chars,
-            "yes" if track_chronicle_text else "no",
         )
         return messages
 
@@ -159,18 +134,17 @@ def _get_chronicle_context(
     exclude_entry_ids: Optional[set] = None,
     raise_on_error: bool = False,
 ) -> str:
-    """Get General Chronicle (Arasuji) context using hierarchical algorithm.
+    """Get Chronicle (Arasuji) context using hierarchical algorithm.
 
-    v0.32 (2026-05-09): Track Chronicle と排他にするため、内部で
-    origin_track_id IS NULL の entry のみが対象になる (get_episode_context が
-    origin_track_id=None で呼ばれると General Chronicle のみフィルタする実装)。
+    Track Chronicle 時代の行 (origin_track_id 付き) は :func:`get_episode_context`
+    の側で並びから外れる — 書き手は退役したが既存 DB には残っているため
+    (track_retirement.md 住人 5)。
 
-    記憶アーキv2 §6.2 (Phase 3, 2026-07-04): General Chronicle の読み込みは件数上限
-    から文字数予算制へ移行した。件数上限だと超過時に最古が黙って落ちる (不変条件
+    記憶アーキv2 §6.2 (Phase 3, 2026-07-04): Chronicle の読み込みは件数上限から
+    文字数予算制へ移行した。件数上限だと超過時に最古が黙って落ちる (不変条件
     §10-4) ため、``char_budget=USE_DEFAULT_BUDGET`` を渡して予算制を有効化する。既定
     予算は 20,000 字 / env ``SAIVERSE_CHRONICLE_CHAR_BUDGET`` で調整可。``max_entries``
-    は安全弁として残す (予算制側が主制御)。Track Chronicle 側 (_get_track_chronicle_context)
-    は従来どおり件数上限のまま (§6.2 item 5)。
+    は安全弁として残す (予算制側が主制御)。
     """
     # import 文だけを ModuleNotFoundError で受ける — モジュール不在は
     # 「本当に無い」= 正当な空 (strict でも空のまま)。export 欠落や依存の
@@ -211,169 +185,6 @@ def _get_chronicle_context(
             raise  # 読取失敗を「成功した空」に変換しない (strict 経路)
         LOGGER.warning("Failed to get Chronicle context: %s", exc)
         return ""
-
-
-def _get_track_chronicle_context(
-    conn: sqlite3.Connection,
-    persona_id: str,
-    max_entries: int = 50,
-    history_anchor_message_id: Optional[str] = None,
-    raise_on_error: bool = False,
-) -> tuple[str, str]:
-    """Get Track Chronicle context for the persona's currently active track.
-
-    v0.32 (2026-05-09): Track 内必要情報の維持機構の読み込み側。
-    アクティブ Track が無い場合は ("", "") を返す。
-
-    Chronicle 化されていない時間帯の Track 紐付きメッセージ (押し出されたが
-    1000 字未満でスキップされた等) は、SAIMemory から直接取得して
-    「### Chronicle 化されていないメッセージ」セクションとして添える。
-    詳細は docs/intent/persona_cognition/track_chronicle.md §5
-
-    Returns:
-        (formatted_text, track_title) — テキストが空なら表示不要
-    """
-    # import 文だけを ModuleNotFoundError で受ける (General Chronicle 側と
-    # 同じ境界 — export 欠落等の素の ImportError と本体実行中の ImportError は
-    # 読取失敗として strict 時に再送出)。
-    try:
-        from tools.context import get_active_manager
-        from sai_memory.arasuji.context import (
-            format_episode_context,
-            get_episode_context,
-        )
-    except ModuleNotFoundError:
-        LOGGER.debug("Track Chronicle module not available")
-        return "", ""
-    except ImportError as exc:
-        if raise_on_error:
-            raise
-        LOGGER.warning("Track Chronicle module import is broken: %s", exc)
-        return "", ""
-    try:
-        manager = get_active_manager()
-        if not manager:
-            return "", ""
-        track_manager = getattr(manager, "track_manager", None)
-        if not track_manager:
-            return "", ""
-
-        track = track_manager.get_running(persona_id)
-        if track is None:
-            return "", ""
-
-        track_id = getattr(track, "track_id", None)
-        if not track_id:
-            return "", ""
-
-        # ユーザー会話 Track は親スレッド保持機構で別途扱うため Track Chronicle セクションは出さない
-        # (v0.32, 2026-05-09)。詳細: docs/intent/persona_cognition/track_chronicle.md §11
-        if getattr(track, "track_type", None) == "user_conversation":
-            return "", ""
-
-        context = get_episode_context(
-            conn, max_entries=max_entries, origin_track_id=track_id
-        )
-
-        title = getattr(track, "title", None) or "(無題)"
-        parts: List[str] = []
-        if context:
-            parts.append(format_episode_context(context, include_level_info=True))
-
-        # Chronicle 化されていない Track 紐付きメッセージを取得 (v0.32 §5-3)。
-        # 1000 字未満でスキップされた分や、まだ Metabolism が走っていない分が対象。
-        raw_text = _get_track_unprocessed_messages_text(
-            conn, track_id, history_anchor_message_id=history_anchor_message_id
-        )
-        if raw_text:
-            parts.append("### Chronicle 化されていないメッセージ")
-            parts.append(raw_text)
-
-        if not parts:
-            return "", ""
-        return "\n\n".join(parts), title
-    except Exception:
-        if raise_on_error:
-            raise  # 読取失敗を「成功した空」に変換しない (strict 経路)
-        LOGGER.warning("Failed to get Track Chronicle context", exc_info=True)
-        return "", ""
-
-
-def _get_track_unprocessed_messages_text(
-    conn: sqlite3.Connection,
-    track_id: str,
-    *,
-    max_messages: int = 100,
-    history_anchor_message_id: Optional[str] = None,
-) -> str:
-    """Track 紐付きで Chronicle 化されていないメッセージを生で取得して整形する。
-
-    v0.32 (2026-05-09): Chronicle 化されていない時間帯の補完。
-    Chronicle entry の source_ids 集合に含まれないメッセージが対象。
-
-    2026-06-29: ``history_anchor_message_id`` (metabolism anchor) より新しい
-    メッセージは会話履歴 (anchor 以降を読む) に既に載っているので除外する。
-    これが無いと、自律 Track の生発言が head(track_chronicle) と tail(履歴) に
-    二重に乗り、トークンを浪費する (10k+ tokens の重複)。anchor が無い場合は
-    従来どおり全件 (metabolism 無効環境向けフォールバック)。
-    """
-    from datetime import datetime as _dt
-
-    # anchor より新しいメッセージは履歴に載るので除外するための cutoff (epoch)。
-    anchor_cutoff: Optional[int] = None
-    if history_anchor_message_id:
-        row = conn.execute(
-            "SELECT created_at FROM messages WHERE id = ?",
-            (history_anchor_message_id,),
-        ).fetchone()
-        if row and row[0] is not None:
-            anchor_cutoff = int(row[0])
-
-    # 当該 Track の正規 Lv1 entry の source_ids を「処理済み」として収集
-    cur = conn.execute(
-        "SELECT json_each.value "
-        "FROM arasuji_entries, json_each(source_ids_json) "
-        "WHERE level = 1 AND origin_track_id = ? AND is_incomplete = 0",
-        (track_id,),
-    )
-    processed_ids = {row[0] for row in cur.fetchall()}
-
-    # Track 紐付きメッセージから処理済み + 履歴提示コンテキスト内 (anchor 以降) を除外して取得
-    sql = (
-        "SELECT id, role, content, created_at FROM messages "
-        "WHERE origin_track_id = ? "
-        "AND line_role = 'main_line' AND scope = 'committed' "
-        "AND NOT EXISTS ("
-        "  SELECT 1 FROM json_each(metadata, '$.tags') WHERE json_each.value IN ('handy_tool', 'spell', 'event_message')"
-        ") "
-    )
-    params: List[Any] = [track_id]
-    if anchor_cutoff is not None:
-        sql += "AND created_at < ? "
-        params.append(anchor_cutoff)
-    sql += f"ORDER BY created_at ASC, rowid ASC LIMIT {int(max_messages)}"
-    cur = conn.execute(sql, params)
-    unprocessed = [
-        row for row in cur.fetchall() if row[0] not in processed_ids
-    ]
-    if not unprocessed:
-        return ""
-
-    lines: List[str] = ["```"]
-    for msg_id, role, content, created_at in unprocessed:
-        try:
-            ts = _dt.fromtimestamp(int(created_at)).strftime("%Y-%m-%d %H:%M")
-        except (TypeError, ValueError, OSError):
-            ts = "?"
-        # role 表記の整形
-        role_label = {"user": "ユーザー", "assistant": "ペルソナ"}.get(role, role or "?")
-        # content の前後空白除去 + 過度に長いものは末尾省略
-        content_clean = (content or "").strip()
-        if len(content_clean) > 500:
-            content_clean = content_clean[:500] + "…"
-        lines.append(f"- [{ts}] {role_label}: {content_clean}")
-    lines.append("```")
-    return "\n".join(lines)
 
 
 # Tool definition for registry (optional, mainly used via runtime.py)

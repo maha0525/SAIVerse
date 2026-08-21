@@ -1,10 +1,12 @@
 """自律稼働デバッグコントローラー API (api/routes/people/debug.py) の HTTP テスト。
 
-対象は「切り上げ (wrap-up-conversation)」の発火条件。案 Y (life.md §7) 以降、
-対ユーザー会話 Track は会話が終わっても running のまま残るので、running Track の
-存在は会話中の証拠にならない。開いている会話の出来事が無いまま撃つと
-``handle_conversation_end`` の「判定不能なら撃つ側に倒す」既定を通り、存在しない
-会話の振り返りがペルソナ名義の記憶に残る (2026-08-14 Codex 指摘 F5)。
+対象は「切り上げ (wrap-up-conversation)」の発火条件。「いま会話中か」の真実は
+開いている会話の出来事が持つ (life.md §7 案 Y)。開いている会話が無いまま撃つと、
+別の会話あるいは存在しない会話を閉じることになる (2026-08-14 Codex 指摘 F5)。
+
+会話終了判断は 2026-08-16 に退役したので (autonomous_behavior_v3.md §8/§13.3)、
+``handle_conversation_end`` が返すのは判断の結果ではなく閉じた帳簿の事実
+(``closed`` / ``episode_ref``) になった。
 
 TestClient はワーカースレッドでルートを実行するため、DB は :memory: でなく
 file sqlite + check_same_thread=False で共有する (test_life_settings_api.py と
@@ -25,7 +27,6 @@ from sqlalchemy.orm import sessionmaker
 from api.deps import get_manager
 from database.models import AI, Base, City, User
 from saiverse import episodes
-from saiverse.track_manager import TrackManager
 
 PERSONA_ID = "alice"
 BUILDING = "alice_room"
@@ -48,7 +49,6 @@ class WrapUpConversationApiTest(unittest.TestCase):
         self.manager = SimpleNamespace(
             SessionLocal=self.Session,
             personas={PERSONA_ID: SimpleNamespace(persona_id=PERSONA_ID)},
-            track_manager=TrackManager(session_factory=self.Session),
         )
 
         from api.routes.people import debug as debug_route
@@ -88,20 +88,12 @@ class WrapUpConversationApiTest(unittest.TestCase):
         finally:
             db.close()
 
-    def _running_track(self, track_type: str) -> str:
-        return self.manager.track_manager.create(
-            persona_id=PERSONA_ID, track_type=track_type,
-            title=f"{track_type} track", is_persistent=True,
-            initial_status="running",
-        )
-
     def _post(self):
         return self.client.post(f"/api/people/{PERSONA_ID}/debug/wrap-up-conversation")
 
     # -- 撃つ側 ------------------------------------------------------------
 
     def test_fires_when_conversation_episode_is_open(self):
-        self._running_track("user_conversation")
         ep = episodes.open_conversation_episode(
             self.manager, PERSONA_ID, building_id=BUILDING,
             participants=[PERSONA_ID, "1"],
@@ -119,13 +111,11 @@ class WrapUpConversationApiTest(unittest.TestCase):
         """検証と背景発火の間に会話が閉じたら、発火側で撃たない。
 
         同期検証 → 背景発火の間に自然タイムアウトや別の切り上げが会話を閉じ、
-        さらに新しい会話が開きうる。track_id だけ渡すと発火側は「いま開いている
-        会話」を無条件に終わらせ、別の会話 / 存在しない会話の振り返りを撃つ
+        さらに新しい会話が開きうる。照合材料を渡さないと発火側は「いま開いている
+        会話」を無条件に終わらせ、別の会話 / 存在しない会話を閉じる
         (2026-08-14 Codex 二巡目)。
         """
         from saiverse import autonomy_wiring
-
-        track_id = self._running_track("user_conversation")
         ep = episodes.open_conversation_episode(
             self.manager, PERSONA_ID, building_id=BUILDING,
             participants=[PERSONA_ID, "1"],
@@ -135,10 +125,10 @@ class WrapUpConversationApiTest(unittest.TestCase):
         episodes.close_conversation_episode(self.manager, PERSONA_ID)
 
         result = autonomy_wiring.handle_conversation_end(
-            self.manager, PERSONA_ID, track_id,
+            self.manager, PERSONA_ID,
             expected_episode_ref=ep["episode_ref"],
         )
-        self.assertFalse(result["submitted"])
+        self.assertFalse(result["closed"])
         self.assertIn("no open conversation episode", result["reason"])
 
     def test_fire_time_close_targets_only_the_verified_episode(self):
@@ -148,8 +138,6 @@ class WrapUpConversationApiTest(unittest.TestCase):
         開いた場合に**別の会話を閉じてしまう** (2026-08-14 Codex 三巡目)。
         """
         from saiverse import autonomy_wiring
-
-        track_id = self._running_track("user_conversation")
         first = episodes.open_conversation_episode(
             self.manager, PERSONA_ID, building_id=BUILDING,
             participants=[PERSONA_ID, "1"],
@@ -161,10 +149,10 @@ class WrapUpConversationApiTest(unittest.TestCase):
         )
 
         result = autonomy_wiring.handle_conversation_end(
-            self.manager, PERSONA_ID, track_id,
+            self.manager, PERSONA_ID,
             expected_episode_ref=first["episode_ref"],
         )
-        self.assertFalse(result["submitted"])
+        self.assertFalse(result["closed"])
         # 新しい会話は開いたまま (巻き添えで閉じられていない)
         still_open = episodes.get_open_episode(
             self.manager, PERSONA_ID, kind=episodes.KIND_CONVERSATION,
@@ -174,14 +162,12 @@ class WrapUpConversationApiTest(unittest.TestCase):
     # -- 撃たない側 --------------------------------------------------------
 
     def test_rejects_when_no_open_conversation_episode(self):
-        """running のまま残った Track だけでは撃たない (案 Y の残留 running)。"""
-        self._running_track("user_conversation")
+        """開いている会話が無ければ撃たない。"""
         res = self._post()
         self.assertEqual(res.status_code, 409)
         self.assertEqual(self.fired, [])
 
     def test_rejects_after_conversation_episode_closed(self):
-        self._running_track("user_conversation")
         episodes.open_conversation_episode(
             self.manager, PERSONA_ID, building_id=BUILDING,
             participants=[PERSONA_ID, "1"],
@@ -191,20 +177,14 @@ class WrapUpConversationApiTest(unittest.TestCase):
         self.assertEqual(res.status_code, 409)
         self.assertEqual(self.fired, [])
 
-    def test_social_track_is_not_a_success(self):
-        """social は本番経路でも判断を撃たない (WARNING のみ) — success を返さない。"""
-        self._running_track("social")
-        episodes.open_conversation_episode(
-            self.manager, PERSONA_ID, building_id=BUILDING,
-            participants=[PERSONA_ID, "bob"],
+    def test_non_conversation_episode_is_not_a_success(self):
+        """会話以外の出来事 (作業中など) が開いているだけでは撃たない。"""
+        episodes.open_episode(
+            self.manager, PERSONA_ID, episodes.KIND_WORK_SESSION,
+            building_id=BUILDING,
         )
         res = self._post()
-        self.assertEqual(res.status_code, 400)
-        self.assertEqual(self.fired, [])
-
-    def test_rejects_when_no_running_track(self):
-        res = self._post()
-        self.assertEqual(res.status_code, 400)
+        self.assertEqual(res.status_code, 409)
         self.assertEqual(self.fired, [])
 
 

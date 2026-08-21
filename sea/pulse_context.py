@@ -165,15 +165,15 @@ class LineFrame:
               * meta_judgment     → [1] meta-judgment log (with discardable scope)
         parent_id: Parent LineFrame's ``line_id``, or ``None`` when this is the
             root line for the current Pulse.
-        track_id: Active Track at line creation time. Mirrored to
-            ``messages.origin_track_id`` for stored messages.
         created_at: Unix epoch timestamp for diagnostics.
+
+    NOTE (2026-08-21): ``track_id`` (``messages.origin_track_id`` へ写す欄) は
+    Track 撤廃で書き手ごと退役した (track_retirement.md §2 住人 3)。
     """
 
     line_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     role: str = "main_line"
     parent_id: Optional[str] = None
-    track_id: Optional[str] = None
     created_at: int = field(default_factory=lambda: int(time.time()))
     # 認知モデル v0.2 (§10): このラインのアスペクト。設定されていれば line_role /
     # scope / model tier の唯一の供給源となり、role はアスペクトから導出される。
@@ -318,34 +318,6 @@ def resolve_execution_context(
 
 
 @dataclass
-class DeferredTrackOp:
-    """A Track operation queued during a Pulse, applied when the Pulse completes.
-
-    Direct in-Pulse Track switching causes the LLM to keep emitting "next-Track
-    work" within the current Pulse's main cache, because the cache already
-    contains the persona's stated decision to switch (Intent A v0.14, Intent B
-    v0.11). Deferring all Track-status-changing operations until Pulse
-    completion guarantees that Track switches happen at Pulse boundaries —
-    the persona's current Pulse winds down naturally, then the next Pulse
-    starts under the new active Track.
-
-    Last-wins resolution applies only between competing ``activate`` ops in the
-    same Pulse (multiple "set running Track" requests). Other op types stack
-    in order so a sequence like ``pause(A) → create(B) → activate(B)`` applies
-    cleanly at flush time.
-    """
-
-    op_type: str
-    # 'create_post_activate' / 'activate' / 'pause' / 'complete' / 'abort'
-    # Note: track_create itself runs immediately so the persona can read the
-    # new track_id in the same round; only the optional activate-after-create
-    # path is enqueued, recorded as 'activate' with the new track_id.
-    track_id: Optional[str]
-    args: Dict[str, Any] = field(default_factory=dict)
-    requested_at: int = field(default_factory=lambda: int(time.time()))
-
-
-@dataclass
 class PulseContext:
     """Shared mutable log list for a single Pulse execution.
 
@@ -356,10 +328,6 @@ class PulseContext:
     The ``_line_stack`` field tracks the currently-running line hierarchy
     (Intent A v0.14, Intent B v0.11). Push when entering a new line, pop when
     it completes. The topmost frame is the active line at any point.
-
-    The ``deferred_track_ops`` queue holds Track operations issued by spell
-    invocations during the Pulse; the runtime applies them at Pulse completion
-    so Track switches never interrupt the current Pulse's content generation.
 
     The ``_thread_stack`` field (S4, beat_execution_context.md 不変条件6) records
     parent thread ids for Stelis / subagent thread switches performed during
@@ -374,7 +342,6 @@ class PulseContext:
     logs: List[PulseLogEntry] = field(default_factory=list)
     _line_stack: List[LineFrame] = field(default_factory=list)
     _thread_stack: List[str] = field(default_factory=list)
-    deferred_track_ops: List[DeferredTrackOp] = field(default_factory=list)
     # メタ判断 Pulse 用バッファ (Intent A v0.15 + Phase 2)。
     # pulse_type == 'meta_judgment' の Pulse でのみ populate される。
     # spell loop が判断 LLM 応答 + 発動 spell + 各 spell の結果を蓄積し、
@@ -397,7 +364,6 @@ class PulseContext:
     def push_line(
         self,
         role: str = "main_line",
-        track_id: Optional[str] = None,
         parent_id: Optional[str] = None,
         aspect: Optional[Aspect] = None,
     ) -> LineFrame:
@@ -408,8 +374,6 @@ class PulseContext:
                 / ``'nested'``). 認知モデル v0.2 以降は ``aspect`` を渡すのが既定で、
                 その場合 role はアスペクトから導出され本引数は無視される。``aspect``
                 を渡さない legacy 経路でのみ role が直接使われる。
-            track_id: Active Track for the new line. If ``None``, inherits from
-                the current line on the stack.
             parent_id: Parent line ID. If ``None``, inferred from the topmost
                 frame on the stack (an empty stack yields a root line).
             aspect: このラインのアスペクト (§10)。設定すると line_role / scope /
@@ -423,9 +387,7 @@ class PulseContext:
         current = self.current_line()
         if parent_id is None and current is not None:
             parent_id = current.line_id
-        if track_id is None and current is not None:
-            track_id = current.track_id
-        frame = LineFrame(role=role, parent_id=parent_id, track_id=track_id, aspect=aspect)
+        frame = LineFrame(role=role, parent_id=parent_id, aspect=aspect)
         self._line_stack.append(frame)
         return frame
 
@@ -450,16 +412,15 @@ class PulseContext:
         """Return the active line's storage metadata as a flat dict.
 
         Convenience for ``_store_memory`` calls that need to forward
-        ``line_role`` / ``line_id`` / ``origin_track_id``. Returns empty values
-        when no line is active (caller falls back to legacy behavior).
+        ``line_role`` / ``line_id``. Returns empty values when no line is active
+        (caller falls back to legacy behavior).
         """
         current = self.current_line()
         if current is None:
-            return {"line_role": None, "line_id": None, "origin_track_id": None, "scope": None, "aspect": None}
+            return {"line_role": None, "line_id": None, "scope": None, "aspect": None}
         return {
             "line_role": current.role,
             "line_id": current.line_id,
-            "origin_track_id": current.track_id,
             # アスペクト由来の scope (§10.3)。legacy frame では None で、
             # _store_memory 側で SQL 既定 'committed' に落ちる。
             "scope": current.scope,
@@ -625,52 +586,6 @@ class PulseContext:
                     clearer()
                 except Exception:
                     LOGGER.debug("[pulse_context] clear_pulse_scoped_parent failed", exc_info=True)
-
-    # ------------------------------------------------------------------
-    # Deferred Track operations (Intent A v0.14, Intent B v0.11)
-    # ------------------------------------------------------------------
-
-    def enqueue_track_op(
-        self,
-        op_type: str,
-        track_id: Optional[str] = None,
-        **args: Any,
-    ) -> DeferredTrackOp:
-        """Queue a Track operation to be applied at Pulse completion.
-
-        For ``activate`` ops, last-wins resolution is applied: if the queue
-        already contains an activate op, the older one is dropped with a
-        warning before the new one is appended. This handles spell-loop rounds
-        where the LLM tries to set multiple "next active" Tracks at once.
-
-        Other op types (``pause`` / ``complete`` / ``abort``) preserve order so
-        sequences like ``pause(A) → activate(B)`` produce the expected final
-        state.
-        """
-        if op_type == "activate":
-            existing = [op for op in self.deferred_track_ops if op.op_type == "activate"]
-            if existing:
-                LOGGER.warning(
-                    "[pulse_context] Replacing %d earlier activate op(s) with new track_id=%s "
-                    "(last-wins; earlier targets: %s)",
-                    len(existing), track_id,
-                    [op.track_id for op in existing],
-                )
-                self.deferred_track_ops = [
-                    op for op in self.deferred_track_ops if op.op_type != "activate"
-                ]
-
-        op = DeferredTrackOp(op_type=op_type, track_id=track_id, args=dict(args))
-        self.deferred_track_ops.append(op)
-        LOGGER.debug(
-            "[pulse_context] Enqueued deferred track op: type=%s track_id=%s args=%s",
-            op_type, track_id, args,
-        )
-        return op
-
-    def has_deferred_track_ops(self) -> bool:
-        """True when at least one Track op is queued for Pulse completion."""
-        return bool(self.deferred_track_ops)
 
     # ------------------------------------------------------------------
     # Meta judgment buffer (Phase 2 — handoff_2026-04-30 Part 2)

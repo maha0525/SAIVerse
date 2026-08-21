@@ -4,7 +4,8 @@ mock LLM (LLM コストゼロ) で一日を端から端まで回す配線テス�
 
 - 標準の一日: 9:00 起床 (day_open が時間割を編成) → 10:00 調べる (図書館) →
   14:00 随筆を書く (工房、mock 成果物 = 実 Item) → 15:00 ユーザー会話割り込み →
-  15:30 会話終了 (post_conversation) → 20:00 自室で過ごす → 22:00 就寝 (day_close)
+  15:30 会話終了 (出来事を閉じる帳簿処理のみ) → 20:00 自室で過ごす →
+  22:00 就寝 (day_close)
   - 成果物 Item が DB に実在する
   - タスクが artifact_refs 付きで completed になる
   - 日次予算台帳が実測ラウンドで消費される
@@ -38,6 +39,7 @@ from sqlalchemy.pool import StaticPool
 from database.models import AI, Base, City, Item, User
 from saiverse import clock
 from saiverse import day_plan
+from saiverse import day_scenario
 from saiverse import judgment_points as jp
 from saiverse.day_report import generate_day_report, save_day_report
 from saiverse.day_scenario import (
@@ -45,7 +47,7 @@ from saiverse.day_scenario import (
     RealConversationUserEventDriver,
     ScenarioPlayer,
     SyncJudgmentDispatcher,
-    TrackSimUserEventDriver,
+    EpisodeSimUserEventDriver,
     parse_scenario,
 )
 from saiverse.event_scheduler import EventScheduler
@@ -207,7 +209,7 @@ class FakeWorkRuntime:
     def _store_memory(self, persona, text, *, role="assistant", tags=None,
                       pulse_id=None, metadata=None, playbook_name=None,
                       pulse_context=None, line_role=None, line_id=None,
-                      origin_track_id=None, scope=None, paired_action_text=None,
+                      scope=None, paired_action_text=None,
                       thought_signature=None, spell_origin_id=None, spell_seq=None,
                       return_message_id=False, beat_state=None):
         resolved_scope = scope
@@ -345,7 +347,6 @@ def _standard_judge(kind: str, args: Dict[str, Any]) -> Dict[str, Any]:
                 if artifacts else
                 "記事を 3 件確認して、標本集に使えそうな言い回しを頭に留めた。"
             ),
-            "new_desires": [],
             "remaining_timetable": None,
         }
         if ctx.get("task_ref"):
@@ -359,10 +360,6 @@ def _standard_judge(kind: str, args: Dict[str, Any]) -> Dict[str, Any]:
                     "status": "continue", "desk_memo": "材料は集まりつつある",
                 }
         return output
-    if kind == "post_conversation":
-        return {"monologue": "楽しい会話だった。拾うものは特にない。",
-                "picked_tasks": [], "new_desires": [],
-                "remaining_timetable": None}
     if kind == "day_close":
         return {
             "monologue": "予定と実際を見比べた。概ね予定どおりの一日だった。",
@@ -391,9 +388,12 @@ _STANDARD_SCENARIO = {
     "sleep": "22:00",
     "daily_budget_rounds": 20,
     "seed": {
-        "desires": [{"title": "言葉の標本集", "type": "作る",
-                     "source": "会話で言い回しを褒められた"}],
-        "tasks": [{"title": "共有文の下書きを書く", "goal": "本文が実在すること"}],
+        # task:1 / task:2 の順で植わる (種まきはリスト順)。旧シナリオでは task:2 は
+        # 欲求候補だったが、欲求プールの退役で素のバックログタスクになった。
+        "tasks": [
+            {"title": "共有文の下書きを書く", "goal": "本文が実在すること"},
+            {"title": "言葉の標本集", "goal": "気に入った言い回しを集める"},
+        ],
     },
     "user_events": [
         {"at": "15:00", "type": "message", "text": "ただいま。調子はどう？"},
@@ -427,9 +427,10 @@ def test_standard_day_runs_end_to_end(standard_run):
 
     # イベント消化: day_open + コマ 3 + ユーザーイベント 2 + day_close = 7
     assert result.executed_events == 7
-    # 判断点の並び: 起床 → セッション終了 x2 → 会話終了 → 就寝
+    # 判断点の並び: 起床 → セッション終了 x2 → 就寝
+    # (会話終了判断は 2026-08-16 に退役 — 退室は帳簿処理だけ)
     assert [j["kind"] for j in result.judgments] == [
-        "day_open", "post_session", "post_session", "post_conversation", "day_close",
+        "day_open", "post_session", "post_session", "day_close",
     ]
     assert all(j["submitted"] for j in result.judgments)
     # 仮想時刻は就寝時刻で止まっている
@@ -446,14 +447,24 @@ def test_standard_day_runs_end_to_end(standard_run):
         (PERSONA_ID, "ai", "workshop", "alice_room"),
     ]
 
-    # ユーザー会話 Track が作られ、退室で completed になっている
-    completed = [
-        t for t in manager.track_manager.list_for_persona(
-            PERSONA_ID, statuses=["completed"],
+    # 会話の出来事が開かれ、退室で閉じている (Track は経由しない — 2026-08-21)
+    from database.models import Episode
+    from saiverse import episodes
+
+    db = manager.SessionLocal()
+    try:
+        conversations = (
+            db.query(Episode)
+            .filter(
+                Episode.PERSONA_ID == PERSONA_ID,
+                Episode.KIND == episodes.KIND_CONVERSATION,
+            )
+            .all()
         )
-        if t.track_type == "user_conversation"
-    ]
-    assert len(completed) == 1
+        assert len(conversations) == 1
+        assert conversations[0].STATUS == "closed"
+    finally:
+        db.close()
 
 
 def test_standard_day_artifact_item_exists_and_task_completed(standard_run):
@@ -476,12 +487,6 @@ def test_standard_day_artifact_item_exists_and_task_completed(standard_run):
     )
     assert task["status"] == "completed"
     assert task["artifact_refs"] == created_item_ids
-
-    # 調べる コマの desire 参照 → 再訪が帳簿に載る
-    desire = ptm.get_task(
-        ptm.resolve_task_ref(PERSONA_ID, "task:2"), persona_id=PERSONA_ID,
-    )
-    assert desire["touch_count"] == 1
 
 
 def test_standard_day_budget_ledger_reflects_actual_rounds(standard_run):
@@ -538,9 +543,6 @@ def test_standard_day_report_contents(standard_run, tmp_path):
     #  厳密チェックが無いと [起床判断] 等の状況テキストがセッション扱いになる)
     assert "[起床判断]" not in report
     assert "[就寝判断]" not in report
-    # 欲求の動き (今日生まれた種の欲求と再訪)
-    assert "[作る] 言葉の標本集 — 出自: 会話で言い回しを褒められた" in report
-    assert "再訪: 1 回" in report
     # 予算 (実測)
     assert "消費 2 / 全体 20 ラウンド（残り 18）" in report
     # 就寝のふりかえり (独白・明日の自分へのメモ・報告種)
@@ -632,7 +634,7 @@ def test_standard_day_episodes_recorded(standard_run):
 def test_sync_dispatcher_submit_user_runs_sea_user_path():
     """SyncJudgmentDispatcher.submit_user が実 SEA のユーザー会話経路を同期で叩く。
 
-    回帰: --real で UserConversationTrackHandler → run_sea_user →
+    回帰: --real で会話経路 (saiverse.user_conversation) → run_sea_user →
     pulse_controller.submit_user が AttributeError になり、ユーザー発話への
     応答が一切生成されなかった。
     """
@@ -651,7 +653,6 @@ def test_sync_dispatcher_submit_user_runs_sea_user_path():
 
     out = dispatcher.submit_user(
         persona_id=PERSONA_ID, building_id="lobby", user_input="",
-        origin_track_id="track-1",
     )
 
     assert out == ["応答した"]
@@ -659,7 +660,6 @@ def test_sync_dispatcher_submit_user_runs_sea_user_path():
     assert calls[0]["persona"] is persona
     assert calls[0]["pulse_type"] == "user"
     assert calls[0]["building_id"] == "lobby"
-    assert calls[0]["origin_track_id"] == "track-1"
 
     with pytest.raises(RuntimeError, match="not found"):
         dispatcher.submit_user(
@@ -673,8 +673,7 @@ class _FakeHistoryManager:
     def __init__(self):
         self.building: List[Dict[str, Any]] = []
 
-    def add_to_building_only(self, building_id, msg, *, heard_by=None,
-                             origin_track_id=None):
+    def add_to_building_only(self, building_id, msg, *, heard_by=None):
         entry = dict(msg)
         entry["seq"] = len(self.building) + 1
         entry["heard_by"] = list(heard_by or [])
@@ -685,51 +684,18 @@ class _FakeHistoryManager:
         return list(self.building)
 
 
-class _FakeTrackManagerWithHook:
-    """create(initial_status='running') で observer (main_line 起動) を模す。"""
-
-    def __init__(self, on_activate=None):
-        self.on_activate = on_activate
-        self.created: List[Dict[str, Any]] = []
-        self.running_track = None
-        self.completed: List[str] = []
-        self.paused: List[str] = []
-
-    def get_running(self, persona_id):
-        return self.running_track
-
-    def create(self, persona_id, track_type, title=None, intent=None,
-               output_target="none", is_persistent=False, metadata=None,
-               initial_status="unstarted"):
-        track_id = f"track-{len(self.created) + 1}"
-        self.created.append({
-            "track_id": track_id, "track_type": track_type,
-            "output_target": output_target, "initial_status": initial_status,
-        })
-        self.running_track = SimpleNamespace(
-            track_id=track_id, track_type=track_type,
-        )
-        if self.on_activate is not None:
-            self.on_activate(track_id)
-        return track_id
-
-    def complete(self, track_id):
-        self.completed.append(track_id)
-        self.running_track = None
-
-    def pause(self, track_id):
-        self.paused.append(track_id)
-        self.running_track = None
-
-
-def _make_real_driver_manager(persona, reply: bool):
+def _make_real_driver_manager(persona, reply: bool, monkeypatch):
     """RealConversationUserEventDriver 用の最小 manager フェイク。
 
     reply=True なら run_sea_user (実 Pulse の代役) がペルソナ応答を
     building_messages に書く。False なら何も書かない (応答生成失敗の再現)。
+
+    会話の出来事 (Episode) は DB を用意せずに済むよう
+    ``saiverse.user_conversation`` の読み書きを差し替えて模す。
     """
     manager = SimpleNamespace(personas={PERSONA_ID: persona}, user_id=1)
     sea_calls: List[Dict[str, Any]] = []
+    state = {"open": False}
 
     def run_sea_user(p, building_id, user_input, **kwargs):
         sea_calls.append({
@@ -744,22 +710,34 @@ def _make_real_driver_manager(persona, reply: bool):
         return ["おかえり"] if reply else []
 
     manager.run_sea_user = run_sea_user
-    manager.track_manager = _FakeTrackManagerWithHook(
-        on_activate=lambda tid: manager.run_sea_user(
-            persona, persona.current_building_id, "", origin_track_id=tid,
-        ),
-    )
     manager._sea_calls = sea_calls
+    manager._conversation_state = state
+
+    from saiverse import user_conversation as uc
+
+    def _fake_get_open(mgr, persona_id):
+        return {"episode_ref": "episode:1"} if state["open"] else None
+
+    def _fake_start(mgr, persona_id, user_id):
+        state["open"] = True
+        run_sea_user(persona, persona.current_building_id, "")
+
+    monkeypatch.setattr(uc, "get_open_conversation", _fake_get_open)
+    monkeypatch.setattr(uc, "start_conversation", _fake_start)
+    monkeypatch.setattr(
+        day_scenario, "_close_conversation_episode",
+        lambda mgr, persona_id: state.__setitem__("open", False),
+    )
     return manager
 
 
-def test_real_driver_records_user_message_and_detects_reply():
+def test_real_driver_records_user_message_and_detects_reply(monkeypatch):
     """実会話ドライバ: 発話の building 記録 + 応答の実在検査 + 会話継続の直接起動。"""
     persona = SimpleNamespace(
         persona_id=PERSONA_ID, current_building_id="lobby",
         history_manager=_FakeHistoryManager(),
     )
-    manager = _make_real_driver_manager(persona, reply=True)
+    manager = _make_real_driver_manager(persona, reply=True, monkeypatch=monkeypatch)
     driver = RealConversationUserEventDriver()
 
     driver.begin_conversation(manager, PERSONA_ID, "ただいま")
@@ -768,100 +746,35 @@ def test_real_driver_records_user_message_and_detects_reply():
     assert hist[0]["role"] == "user" and hist[0]["content"] == "ただいま"
     # auto_ingest の取り込み条件 (heard_by にペルソナ) + 閲覧者フィルタ (ユーザー)
     assert PERSONA_ID in hist[0]["heard_by"] and "1" in hist[0]["heard_by"]
-    # Track は実経路と同じ output_target で running 作成される
-    assert manager.track_manager.created == [{
-        "track_id": "track-1", "track_type": "user_conversation",
-        "output_target": "building:current", "initial_status": "running",
-    }]
-    assert driver.conversation_had_exchange(manager, PERSONA_ID) is True
-
-    # 会話継続: 2 通目は既存 running Track へ直接メインライン起動 (Track 追加なし)
+    # 会話開始は実経路と同じ入口 (start_conversation) を通り、user_input は空
+    # (発話は auto_ingest が building_messages から拾う)
+    assert manager._conversation_state["open"] is True
+    assert manager._sea_calls[0]["user_input"] == ""
+    # 会話継続: 2 通目は開いている会話へ直接メインライン起動 (発話本文つき)
     driver.begin_conversation(manager, PERSONA_ID, "つかれたー……")
-    assert len(manager.track_manager.created) == 1
     assert manager._sea_calls[-1]["user_input"] == "つかれたー……"
-    assert manager._sea_calls[-1]["origin_track_id"] == "track-1"
 
     assert driver.end_conversation(manager, PERSONA_ID) is True
-    assert manager.track_manager.completed == ["track-1"]
+    assert manager._conversation_state["open"] is False
 
 
-def test_end_conversation_pauses_persistent_track():
-    """本番由来の永続会話 Track は complete でなく pause で畳む。
+def test_real_driver_warns_when_persona_does_not_reply(caplog, monkeypatch):
+    """応答が building_messages に実在しない会話は WARNING に残る (観察のみ)。
 
-    world clone した実ペルソナで顕在化 (2026-07-06): 対ユーザー会話 Track は
-    is_persistent=true で completed への遷移が禁止。leave の意味論は本番の
-    wait_response 自動 pause と同じ running → pending。
+    会話終了判断が退役した (2026-08-16) ので、往復の有無で判断を撃つ / 撃たないを
+    分ける機構は無くなった。残るのはシムの観察ログだけ。
     """
-    tm = _FakeTrackManagerWithHook()
-    tm.running_track = SimpleNamespace(
-        track_id="t-persistent", track_type="user_conversation", is_persistent=True,
-    )
-    manager = SimpleNamespace(track_manager=tm)
-    driver = TrackSimUserEventDriver()
-
-    assert driver.end_conversation(manager, PERSONA_ID) is True
-    assert tm.paused == ["t-persistent"]
-    assert tm.completed == []
-
-
-def test_real_driver_flags_zero_exchange_when_no_reply(caplog):
-    """応答が building_messages に実在しない会話は「成立していない」と記録される。"""
     persona = SimpleNamespace(
         persona_id=PERSONA_ID, current_building_id="lobby",
         history_manager=_FakeHistoryManager(),
     )
-    manager = _make_real_driver_manager(persona, reply=False)
+    manager = _make_real_driver_manager(persona, reply=False, monkeypatch=monkeypatch)
     driver = RealConversationUserEventDriver()
 
     with caplog.at_level("WARNING", logger="saiverse.day_scenario"):
         driver.begin_conversation(manager, PERSONA_ID, "ただいま")
 
-    assert driver.conversation_had_exchange(manager, PERSONA_ID) is False
     assert any("did not reply" in r.message for r in caplog.records)
-
-
-class _NoExchangeDriver(TrackSimUserEventDriver):
-    """会話は再生するが「往復ゼロ」を申告するドライバ (応答生成失敗の再現)。"""
-
-    def conversation_had_exchange(self, manager, persona_id):
-        return False
-
-
-def test_zero_exchange_conversation_skips_post_conversation(session_factory, tmp_path):
-    """1 往復も成立しなかった会話では post_conversation 判断を撃たない。
-
-    回帰: --real で応答生成が失敗したのに「会話がひと区切りつきました」前提の
-    判断が走り、ペルソナが存在しない会話の振り返りを書いた (作話の温床)。
-    """
-    manager = _make_manager(
-        session_factory, tmp_path, _standard_judge, list(_SESSION_RESPONSES),
-    )
-    created: List[str] = []
-    p_names, p_exec = _patched_spells(session_factory, created)
-    with p_names, p_exec:
-        result = ScenarioPlayer(user_event_driver=_NoExchangeDriver()).run(
-            manager, dict(_STANDARD_SCENARIO),
-        )
-
-    # post_conversation は submitted されず、skip の帳簿だけが残る
-    # (_standard_judge は post_conversation が来たら応答を返すので、撃たれて
-    #  いないことは submitted 記録の不在で判定できる)
-    post_conv = [j for j in result.judgments if j["kind"] == "post_conversation"]
-    assert len(post_conv) == 1
-    assert post_conv[0]["submitted"] is False
-    assert "no exchange" in post_conv[0]["reason"]
-    # 会話イベント自体は再生されている (Track が completed)
-    completed = [
-        t for t in manager.track_manager.list_for_persona(
-            PERSONA_ID, statuses=["completed"],
-        )
-        if t.track_type == "user_conversation"
-    ]
-    assert len(completed) == 1
-    # 他の判断点は通常どおり
-    assert [j["kind"] for j in result.judgments if j["submitted"]] == [
-        "day_open", "post_session", "post_session", "day_close",
-    ]
 
 
 def test_pre_existing_periodic_reservations_cleared_before_sim(
@@ -906,7 +819,7 @@ def test_pre_existing_periodic_reservations_cleared_before_sim(
     # シナリオ由来のイベントは通常どおり消化される (標準の一日と同数)
     assert result.executed_events == 7
     assert [j["kind"] for j in result.judgments] == [
-        "day_open", "post_session", "post_session", "post_conversation", "day_close",
+        "day_open", "post_session", "post_session", "day_close",
     ]
 
 

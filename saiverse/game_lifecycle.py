@@ -86,7 +86,6 @@ class GameLifecycleService:
         err = self._write_state(region_id, new_state)
         if err:
             return err
-        self._on_game_started(region_id, participants)
 
         # ユーザーが既に Region 内にいる場合はその場にパーティーを集合させる。
         # (通常は控室から開始 → ユーザーの最初の移動で追従が発火する)
@@ -198,7 +197,6 @@ class GameLifecycleService:
         err = self._write_state(region_id, new_state)
         if err:
             return err
-        self._on_game_ended(region_id, participants)
 
         # パーティー全員 (参加者 + Ruler) を控室へ帰還させる。state リセット後に
         # 行うことで、移動フック (auto-pause) と入場ゲートが反応しない。
@@ -604,19 +602,22 @@ class GameLifecycleService:
         }
 
     # ------------------------------------------------------------------
-    # Track 拘束 (専用 Track `game_session`)
+    # 参加帳簿
     # ------------------------------------------------------------------
-    # ゲーム開始時に参加ペルソナへ game_session Track を initial_status=running で
-    # 作成する。TrackManager が既存 running Track を pending に押し出すため、
-    # 進行中の行動はここで自然に退避される。連続 auto-pulse 機構は存在しない
-    # (旧 SubLineScheduler は自律行動 v2 で廃止) ので、この Track が勝手に回る
-    # ことはない。
+    # 「このペルソナはいまゲームに参加しているか」の正典は ``region.state``
+    # (phase + participants) で、:meth:`is_participating` がそこだけを読む。
+    #
+    # 旧実装はこれに加えて、開始時に参加ペルソナへ ``game_session`` Track を
+    # running で作り、終了時に complete していた (帳簿の影)。2026-08-21 に単純
+    # 撤去した — 読み手が一つも無く、唯一の副作用は「既存 running Track を
+    # pending へ押し出す」ことだったが、その押し出しが会話 Track に当たると
+    # ユーザーの発話が仲裁経路へ迂回する誤作動源になっていた
+    # (track_retirement.md §2 住人 12)。
+    #
     # NOTE: 旧 v1 メタ判断の is_participating ゲート (参加中は定期判断を抑止)
     # は v1 退役 (track_retirement.md §7.4) で消えた。v2 判断点・時間割の発火は
     # 元からこのゲートを通っていない — ゲーム参加と自律駆動の相互作用は
-    # game_session Track の行き先 (§2 住人 12) と合わせて順序④で設計する。
-
-    GAME_TRACK_TYPE = "game_session"
+    # v0.4 のティックスケジューラ設計で扱う。
 
     def active_game_for_user(self) -> Optional[Dict[str, Any]]:
         """ユーザーが参加中 (playing/paused) のゲームがあれば、現在地に関わらず
@@ -667,66 +668,6 @@ class GameLifecycleService:
             if pid in [str(p) for p in region.state.get("participants", [])]:
                 return True
         return False
-
-    def _on_game_started(self, region_id: str, participants: List[str]) -> None:
-        tm = getattr(self.manager, "track_manager", None)
-        if tm is None:
-            return
-        region = self.manager.regions.get(region_id)
-        region_name = region.name if region else region_id
-        session_id = region.state.get("session_id") if region else None
-        from saiverse.track_manager import STATUS_RUNNING
-        for pid in participants:
-            if pid not in self.manager.personas:
-                continue  # user はスキップ (Track はペルソナのもの)
-            try:
-                track_id = tm.create(
-                    persona_id=pid,
-                    track_type=self.GAME_TRACK_TYPE,
-                    title=f"ゲームセッション: {region_name}",
-                    intent=(
-                        f"Region『{region_name}』で GM (Ruler) の進行する RPG セッションに"
-                        "参加している。ゲームが終了するまでこの活動に専念する。"
-                    ),
-                    metadata=json.dumps(
-                        {"region_id": region_id, "session_id": session_id},
-                        ensure_ascii=False,
-                    ),
-                    initial_status=STATUS_RUNNING,
-                )
-                LOGGER.info(
-                    "[game_lifecycle] game_session track %s created for persona %s",
-                    track_id, pid,
-                )
-            except Exception:
-                LOGGER.exception(
-                    "[game_lifecycle] Failed to create game_session track for persona %s", pid
-                )
-
-    def _on_game_ended(self, region_id: str, participants: List[str]) -> None:
-        tm = getattr(self.manager, "track_manager", None)
-        if tm is None:
-            return
-        from saiverse.track_manager import STATUS_PENDING, STATUS_RUNNING
-        for pid in participants:
-            if pid not in self.manager.personas:
-                continue
-            try:
-                tracks = tm.list_for_persona(
-                    pid, statuses=[STATUS_RUNNING, STATUS_PENDING]
-                )
-                for track in tracks:
-                    if track.track_type != self.GAME_TRACK_TYPE:
-                        continue
-                    tm.complete(track.track_id)
-                    LOGGER.info(
-                        "[game_lifecycle] game_session track %s completed for persona %s",
-                        track.track_id, pid,
-                    )
-            except Exception:
-                LOGGER.exception(
-                    "[game_lifecycle] Failed to complete game_session track for persona %s", pid
-                )
 
     # ------------------------------------------------------------------
     # helpers

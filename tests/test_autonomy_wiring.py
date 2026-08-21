@@ -7,7 +7,8 @@
 - handle_scheduled_judgment: 判断点スケジュール (day_open / day_close) の変換と
   時刻駆動できない kind の棄却。ScheduleManager からの経路分岐
 - handle_wait_response_timeout / handle_conversation_end: 会話終了 →
-  post_conversation の発火 / 0 往復会話の抑止 / social Track の従来経路温存
+  会話の出来事を閉じる帳簿処理 / social Track は WARNING のみ
+  (会話終了判断は autonomous_behavior_v3.md §8/§13.3 で退役)
 - handle_external_event: on_event 判断の経路判断基準 (自律 ON / 会話中 /
   engage_now の応対起動 / フォールバック)
 - watchdog_tick: 正常時 no-op / plan 欠如時のみ day_open 再発火 /
@@ -576,20 +577,11 @@ def test_schedule_manager_normal_playbooks_untouched(session_factory, monkeypatc
 
 
 # ---------------------------------------------------------------------------
-# post_conversation: 会話終了 (wait_response タイムアウト)
+# 会話終了 (wait_response タイムアウト) の帳簿処理
+#
+# 会話終了判断 (post_conversation) は 2026-08-16 の裁定で退役した
+# (autonomous_behavior_v3.md §8/§13.3)。残るのは「会話の出来事を閉じる」だけ。
 # ---------------------------------------------------------------------------
-
-
-class _ExchangeAdapter:
-    """has_track_assistant_message_since の記録付きスタブ。"""
-
-    def __init__(self, answer):
-        self.answer = answer
-        self.queries: List[Any] = []
-
-    def has_track_assistant_message_since(self, track_id, since_epoch):
-        self.queries.append((track_id, since_epoch))
-        return self.answer
 
 
 def _open_conversation_episode(manager):
@@ -601,11 +593,10 @@ def _open_conversation_episode(manager):
     )
 
 
-def test_conversation_end_fires_post_conversation(session_factory, monkeypatch):
-    manager, persona = _make_manager(session_factory)
+def test_conversation_end_closes_the_episode(session_factory, monkeypatch):
+    manager, _persona = _make_manager(session_factory)
     clock.enable_virtual(datetime(2026, 7, 4, 15, 0, 0))
     ep = _open_conversation_episode(manager)
-    persona.sai_memory = _ExchangeAdapter(answer=True)
 
     fired: List[Any] = []
     monkeypatch.setattr(
@@ -613,38 +604,12 @@ def test_conversation_end_fires_post_conversation(session_factory, monkeypatch):
         lambda mgr, pid, kind, context=None, **kw: fired.append(kind)
         or {"submitted": True},
     )
-    result = wiring.handle_conversation_end(manager, PERSONA_ID, "track-1")
-    assert fired == ["post_conversation"]
-    assert result["submitted"] is True
-    # 往復判定は会話区間 (出来事の started_at) で切っている
-    assert persona.sai_memory.queries == [("track-1", ep["started_at"])]
-    # 出来事は閉じられている
-    from saiverse import episodes
-
-    assert episodes.get_open_episode(
-        manager, PERSONA_ID, kind=episodes.KIND_CONVERSATION,
-    ) is None
-
-
-def test_conversation_end_zero_exchange_skips_judgment(
-    session_factory, monkeypatch, caplog,
-):
-    manager, persona = _make_manager(session_factory)
-    clock.enable_virtual(datetime(2026, 7, 4, 15, 0, 0))
-    _open_conversation_episode(manager)
-    persona.sai_memory = _ExchangeAdapter(answer=False)
-
-    fired: List[Any] = []
-    monkeypatch.setattr(
-        wiring, "fire_judgment_point",
-        lambda *a, **kw: fired.append(a) or {"submitted": True},
-    )
-    with caplog.at_level("WARNING", logger="saiverse.autonomy_wiring"):
-        result = wiring.handle_conversation_end(manager, PERSONA_ID, "track-1")
+    result = wiring.handle_conversation_end(manager, PERSONA_ID)
+    # 判断は撃たれない (退役済み) — 帳簿処理だけが起きる
     assert fired == []
-    assert result["submitted"] is False
-    assert "no exchange" in result["reason"]
-    # 出来事は 0 往復でも閉じる (会話区間の帳簿は事実)
+    assert result["closed"] is True
+    assert result["episode_ref"] == ep["episode_ref"]
+
     from saiverse import episodes
 
     assert episodes.get_open_episode(
@@ -652,37 +617,10 @@ def test_conversation_end_zero_exchange_skips_judgment(
     ) is None
 
 
-def test_conversation_end_fires_when_exchange_is_undetectable(
+def test_conversation_end_without_an_open_episode_is_a_no_op(
     session_factory, monkeypatch,
 ):
-    """往復が判定できないだけなら撃つ側に倒す (実在した会話の収穫を捨てない)。
-
-    倒す先は「往復の有無」に限る — 会話の出来事そのものは開いている。
-    """
-    manager, persona = _make_manager(session_factory)
-    clock.enable_virtual(datetime(2026, 7, 4, 15, 0, 0))
-    _open_conversation_episode(manager)
-    # adapter なし = 往復判定不能
-    fired: List[Any] = []
-    monkeypatch.setattr(
-        wiring, "fire_judgment_point",
-        lambda mgr, pid, kind, context=None, **kw: fired.append(kind)
-        or {"submitted": True},
-    )
-    wiring.handle_conversation_end(manager, PERSONA_ID, "track-1")
-    assert fired == ["post_conversation"]
-
-
-def test_conversation_end_without_an_open_episode_does_not_fire(
-    session_factory, monkeypatch,
-):
-    """回帰 (2026-08-14 Codex 三巡目): 閉じるべき会話が無ければ判断も撃たない。
-
-    旧既定は「出来事が無くても撃つ側に倒す」で、これが F5 で名指しされた作話の
-    入口だった —— 存在しない会話の振り返りがペルソナ名義の記憶に残る。撃つ側へ
-    倒してよいのは「往復が判定できない」ときだけで、「会話が存在しない」ときでは
-    ない (debug 入口に入れた歯止めを、自然タイムアウトにも広げた)。
-    """
+    """閉じるべき会話が無ければ何も起きない (帳簿は事実だけを記す)。"""
     manager, _ = _make_manager(session_factory)  # 会話の出来事なし
     fired: List[Any] = []
     monkeypatch.setattr(
@@ -690,47 +628,49 @@ def test_conversation_end_without_an_open_episode_does_not_fire(
         lambda mgr, pid, kind, context=None, **kw: fired.append(kind)
         or {"submitted": True},
     )
-    result = wiring.handle_conversation_end(manager, PERSONA_ID, "track-1")
+    result = wiring.handle_conversation_end(manager, PERSONA_ID)
     assert fired == []
-    assert result["submitted"] is False
+    assert result["closed"] is False
     assert "no open conversation episode" in result["reason"]
 
 
-def test_wait_response_timeout_routes_by_track_type(session_factory, monkeypatch, caplog):
-    """user_conversation → post_conversation / それ以外 → WARNING のみ
-    (旧フォールバック先の v1 メタ判断は退役 — track_retirement.md §7.3 裁定 3)。"""
-    manager, persona = _make_manager(session_factory)
-    conv_track = SimpleNamespace(track_type="user_conversation", track_id="t-conv")
-    social_track = SimpleNamespace(track_type="social", track_id="t-soc")
-    manager.track_manager.tracks = {"t-conv": conv_track, "t-soc": social_track}
+def test_conversation_end_cancels_the_silence_timeout(session_factory):
+    """会話を閉じたら沈黙タイマーの予約も解除する。
 
+    残すと、次の会話の途中で古い予約が発火して始まったばかりの会話を閉じる。
+    """
+    from saiverse import user_conversation as uc
+
+    manager, _persona = _make_manager(session_factory)
+    clock.enable_virtual(datetime(2026, 7, 4, 15, 0, 0))
+    _open_conversation_episode(manager)
+    assert uc.arm_conversation_timeout(manager, PERSONA_ID) is True
+
+    wiring.handle_conversation_end(manager, PERSONA_ID)
+
+    entry = manager.event_scheduler._entries_by_key.get(uc._timeout_key(PERSONA_ID))
+    assert entry is None or entry.cancelled
+
+
+def test_conversation_timeout_defers_the_watchdog_tick(session_factory, monkeypatch):
+    """沈黙タイマーの発火は帳簿処理のあと watchdog の次回 tick を押し戻す。"""
+    from saiverse import user_conversation as uc
+
+    manager, _persona = _make_manager(session_factory)
     conv_ends: List[Any] = []
     monkeypatch.setattr(
         wiring, "handle_conversation_end",
-        lambda mgr, pid, tid, **kw: conv_ends.append(tid) or {"submitted": True},
-    )
-    # 旧経路の観測用: v1 メタ判断 (on_periodic_tick) はもう呼ばれない
-    ticks: List[Any] = []
-    manager.meta_layer = SimpleNamespace(
-        on_periodic_tick=lambda pid, context=None, force=False: ticks.append(context),
+        lambda mgr, pid, **kw: conv_ends.append(pid) or {"closed": True},
     )
     defers: List[str] = []
     manager._autonomy_managers = {
         PERSONA_ID: SimpleNamespace(defer_next_tick=lambda: defers.append("defer")),
     }
 
-    wiring.handle_wait_response_timeout(manager, PERSONA_ID, "t-conv")
-    assert conv_ends == ["t-conv"]
-    assert ticks == []
+    uc.handle_conversation_timeout(manager, PERSONA_ID)
 
-    import logging as _logging
-    with caplog.at_level(_logging.WARNING, logger="saiverse.autonomy_wiring"):
-        wiring.handle_wait_response_timeout(manager, PERSONA_ID, "t-soc")
-    assert conv_ends == ["t-conv"]  # 増えない
-    assert ticks == []  # v1 メタ判断は退役 — social でも呼ばれない
-    assert any("no judgment fired" in r.message for r in caplog.records)
-    # 両経路とも watchdog tick を押し戻す
-    assert defers == ["defer", "defer"]
+    assert conv_ends == [PERSONA_ID]
+    assert defers == ["defer"]
 
 
 # ---------------------------------------------------------------------------
@@ -1238,47 +1178,47 @@ def test_external_event_reaction_falls_back_to_ledger_result(
 # ---------------------------------------------------------------------------
 
 
-def _conflict(manager, activated: List[str], track_id: str = "track-1") -> str:
+def _conflict(manager, engaged: List[str]) -> str:
     return wiring.handle_user_utterance_conflict(
         manager, PERSONA_ID, "ちょっといい？",
-        activate=lambda: activated.append("activate"),
-        track_id=track_id, user_id="1",
+        engage=lambda: engaged.append("engage"),
+        user_id="1",
     )
 
 
-def test_utterance_conflict_autonomy_off_activates_directly(session_factory):
+def test_utterance_conflict_autonomy_off_engages_directly(session_factory):
     manager, _ = _make_manager(session_factory, active=False)
-    activated: List[str] = []
-    assert _conflict(manager, activated) == wiring.ROUTE_DIRECT_AUTONOMY_DISABLED
-    assert activated == ["activate"]
+    engaged: List[str] = []
+    assert _conflict(manager, engaged) == wiring.ROUTE_DIRECT_AUTONOMY_DISABLED
+    assert engaged == ["engage"]
 
 
-def test_utterance_conflict_playbook_missing_activates_directly(session_factory):
+def test_utterance_conflict_playbook_missing_engages_directly(session_factory):
     """機構の不備 (Playbook 未 import) でユーザーの呼びかけを黙殺しない。"""
     manager, _ = _make_manager(session_factory, with_playbooks=False)
-    activated: List[str] = []
-    assert _conflict(manager, activated) == wiring.ROUTE_DIRECT_JUDGMENT_UNAVAILABLE
-    assert activated == ["activate"]
+    engaged: List[str] = []
+    assert _conflict(manager, engaged) == wiring.ROUTE_DIRECT_JUDGMENT_UNAVAILABLE
+    assert engaged == ["engage"]
 
 
-def test_utterance_conflict_runtime_error_does_not_activate(session_factory):
+def test_utterance_conflict_runtime_error_does_not_engage(session_factory):
     """F3 の本題: 判断が走った後に証跡なく落ちたら activate しない。
 
     submit_meta_judgment の実行時例外は台帳 unknown = LLM が動いたか不明。
-    finalize が note_only を適用した後の例外だと、ここで activate すると
+    finalize が note_only を適用した後の例外だと、ここで会話を開始すると
     「応答しない」という判断の決定を機構が上書きして応答してしまう。
     """
     manager, _ = _make_manager(session_factory)
     ledger = _attach_ledger(manager, session_factory)
     manager.pulse_controller = _BoomController(RuntimeError("meta lane down"))
 
-    activated: List[str] = []
-    assert _conflict(manager, activated) == wiring.ROUTE_NONE_JUDGMENT_RAN
-    assert activated == []
+    engaged: List[str] = []
+    assert _conflict(manager, engaged) == wiring.ROUTE_NONE_JUDGMENT_RAN
+    assert engaged == []
     assert len(ledger.list_unknown()) == 1
 
 
-def test_utterance_conflict_side_effect_free_failure_activates(session_factory):
+def test_utterance_conflict_side_effect_free_failure_engages(session_factory):
     """副作用ゼロ確定の失敗 (LLM エラー) なら activate してよい (台帳は failed)。"""
     from llm_clients.exceptions import LLMError
 
@@ -1286,13 +1226,13 @@ def test_utterance_conflict_side_effect_free_failure_activates(session_factory):
     ledger = _attach_ledger(manager, session_factory)
     manager.pulse_controller = _BoomController(LLMError("provider down"))
 
-    activated: List[str] = []
-    assert _conflict(manager, activated) == wiring.ROUTE_DIRECT_JUDGMENT_UNAVAILABLE
-    assert activated == ["activate"]
+    engaged: List[str] = []
+    assert _conflict(manager, engaged) == wiring.ROUTE_DIRECT_JUDGMENT_UNAVAILABLE
+    assert engaged == ["engage"]
     assert ledger.list_unknown() == []
 
 
-def test_utterance_conflict_engage_now_activates(session_factory, monkeypatch):
+def test_utterance_conflict_engage_now_engages(session_factory, monkeypatch):
     manager, _ = _make_manager(session_factory)
     _fake_fire(monkeypatch, {
         "submitted": True,
@@ -1301,12 +1241,12 @@ def test_utterance_conflict_engage_now_activates(session_factory, monkeypatch):
             "extras": ["reaction=engage_now"],
         }],
     })
-    activated: List[str] = []
-    assert _conflict(manager, activated) == wiring.ROUTE_JUDGED_ENGAGE_NOW
-    assert activated == ["activate"]
+    engaged: List[str] = []
+    assert _conflict(manager, engaged) == wiring.ROUTE_JUDGED_ENGAGE_NOW
+    assert engaged == ["engage"]
 
 
-def test_utterance_conflict_note_only_does_not_activate(session_factory, monkeypatch):
+def test_utterance_conflict_note_only_does_not_engage(session_factory, monkeypatch):
     manager, _ = _make_manager(session_factory)
     _fake_fire(monkeypatch, {
         "submitted": True,
@@ -1315,9 +1255,9 @@ def test_utterance_conflict_note_only_does_not_activate(session_factory, monkeyp
             "extras": ["reaction=note_only"],
         }],
     })
-    activated: List[str] = []
-    assert _conflict(manager, activated) == "judged:note_only"
-    assert activated == []
+    engaged: List[str] = []
+    assert _conflict(manager, engaged) == "judged:note_only"
+    assert engaged == []
 
 
 # ---------------------------------------------------------------------------
@@ -1569,7 +1509,7 @@ def test_autonomy_tick_dispatches_watchdog_not_meta_judgment(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# adapter: has_track_assistant_message_since (往復判定の実 SQL)
+# adapter: has_assistant_message_since (回収の重複判定の実 SQL)
 # ---------------------------------------------------------------------------
 
 
@@ -1581,8 +1521,8 @@ class _DummyEmbedder:
         return [[0.0] * 3 for _ in texts]
 
 
-def test_adapter_has_track_assistant_message_since(tmp_path, monkeypatch):
-    """実 SAIMemoryAdapter で往復判定 SQL (role / origin_track_id / created_at) を検証。"""
+def test_adapter_has_assistant_message_since(tmp_path, monkeypatch):
+    """実 SAIMemoryAdapter で重複判定 SQL (role / created_at) を検証。"""
     from unittest.mock import patch as _patch
     from datetime import timezone, timedelta
 
@@ -1602,22 +1542,18 @@ def test_adapter_has_track_assistant_message_since(tmp_path, monkeypatch):
                 "role": "assistant",
                 "content": "おかえり",
                 "timestamp": (t0 - timedelta(seconds=100)).isoformat(),
-                "origin_track_id": "t-1",
             })
             adapter.append_persona_message({
                 "role": "user",
                 "content": "ただいま",
                 "timestamp": t0.isoformat(),
-                "origin_track_id": "t-1",
             })
             epoch = int(t0.timestamp())
             # 会話区間に assistant 応答がある
-            assert adapter.has_track_assistant_message_since("t-1", epoch - 200) is True
+            assert adapter.has_assistant_message_since(epoch - 200) is True
             # 区間開始が応答より後 → 今回の会話では応答していない
             # (user 発話だけでは往復にならない)
-            assert adapter.has_track_assistant_message_since("t-1", epoch - 50) is False
-            # 別 Track には無い
-            assert adapter.has_track_assistant_message_since("t-9", epoch - 200) is False
+            assert adapter.has_assistant_message_since(epoch - 50) is False
         finally:
             adapter.close()
 

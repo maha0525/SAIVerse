@@ -285,22 +285,20 @@ class GameLifecycleTestCase(unittest.TestCase):
         self.svc.on_entity_moved("air", "outside", "b1")
         self.assertEqual(self.region.state["phase"], "playing")
 
-    # --- Track 拘束 ---
+    # --- 参加帳簿 ---
 
-    def test_start_creates_game_session_track_for_personas_only(self):
-        self._start()
-        created = self.manager.track_manager.created
-        # persona 'air' のみ。user '1' には作らない
-        self.assertEqual(len(created), 1)
-        persona_id, track_type, initial_status = created[0]
-        self.assertEqual(persona_id, "air")
-        self.assertEqual(track_type, "game_session")
-        self.assertEqual(initial_status, "running")
+    def test_game_lifecycle_does_not_touch_tracks(self):
+        """参加中かの正典は region.state 一本。Track の影は 2026-08-21 に撤去した。
 
-    def test_end_completes_game_session_tracks(self):
+        旧実装は開始時に ``game_session`` Track を running で作り、終了時に
+        complete していた。その副作用 (既存 running Track の pending 押し出し)
+        が会話 Track に当たると、ユーザーの発話が仲裁経路へ迂回する誤作動源に
+        なっていた (track_retirement.md §2 住人 12)。
+        """
         self._start()
+        self.assertEqual(self.manager.track_manager.created, [])
         self.svc.end_game("r1", outcome="gameover")
-        self.assertEqual(self.manager.track_manager.completed, ["t0"])
+        self.assertEqual(self.manager.track_manager.completed, [])
 
     def test_is_participating(self):
         self.assertFalse(self.svc.is_participating("air"))

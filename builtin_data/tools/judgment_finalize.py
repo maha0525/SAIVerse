@@ -1,27 +1,24 @@
 """judgment_finalize: 判断点 (judgment_points.md) の後処理ツール。
 
-判断点 Playbook (judgment_day_open / judgment_post_conversation /
-judgment_post_session / judgment_on_event / judgment_day_close) の最終ノードで
-呼ばれる。meta_judgment_finalize と同じ様式の kind ディスパッチ:
+判断点 Playbook (judgment_day_open / judgment_post_session / judgment_on_event /
+judgment_day_close) の最終ノードで呼ばれる。kind ディスパッチ:
 
 1. judge LLM ノードが返した dict (構造化出力結果) を受け取る
 2. kind に応じて検証・適用する。不正な項目は **該当項目だけ棄却 + WARN**
    (判断全体を落とさない。握り潰さない)
-   - day_open: timetable 検証 → save_day_plan + schedule_day_plan。
-     promotions → track_create (from_candidate) スペル
-   - post_conversation: picked_tasks → タスク作成 (origin_quote 必須の接地、
-     track_ref='new' は新規 autonomous Track) / resume_session (resume_now は
-     再開コマの即時挿入 / drop は作業メモ片づけ) / new_desires /
-     remaining_timetable
+   - day_open: timetable 検証 → save_day_plan + schedule_day_plan
    - post_session: task_verdict 適用 (done は artifact_ref の接地検証つき) /
-     desk_memo → Track metadata / track_op / new_desires → purpose_seed /
-     remaining_timetable → 残りコマの全置換
+     desk_memo → 独白記録のみ / remaining_timetable → 残りコマの全置換
    - on_event: reaction (engage_now は結果への反映のみ — 応対の起動は
      呼び出し側の責務 / insert_slot は時刻整合検証つき挿入 / note_only は
      plan meta への覚え書き / ignore は記録のみ)。alert では engage_now 以外を
      棄却 (スキーマ縮退の二重ガード)
-   - day_close: tomorrow_memo + day_theme + user_report_seeds → plan meta /
-     desire_reviews → apply_desire_reviews (今日触れた欲求のみ)
+   - day_close: tomorrow_memo + day_theme + user_report_seeds → plan meta
+
+会話終了判断 (post_conversation) の適用は 2026-08-16 の裁定で退役した
+(autonomous_behavior_v3.md §8 / §13.3)。欲求まわりの適用 (promotions →
+track_create / new_desires → purpose_seed / desire_reviews) と track_op も、
+Track 操作スペルと欲求プールの退役で機構ごと消えた。
 3. 整形済みテキスト ``monologue + 適用結果の要約行 + /spell 行 (成功分のみ)`` を
    SAIMemory に ``role='assistant', line_role='meta_judgment'`` で保存する。
    メインキャッシュに LLM の生 JSON は残らない (不変条件 v2-A 継承)。
@@ -54,29 +51,20 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from saiverse import clock
 from saiverse import day_plan as day_plan_mod
-from saiverse.desire_engine import DESIRE_TYPES, apply_desire_reviews
 from saiverse.judgment_points import (
     KIND_DAY_CLOSE,
     KIND_DAY_OPEN,
     KIND_ON_EVENT,
-    KIND_POST_CONVERSATION,
     KIND_POST_SESSION,
     REACTION_ENGAGE_NOW,
     REACTION_IGNORE,
     REACTION_INSERT_SLOT,
     REACTION_NOTE_ONLY,
-    RESUME_DEFER,
-    RESUME_DROP,
-    RESUME_NOW,
-    clear_desk_memo,
-    collect_promotion_refs,
     insert_timetable_slot,
     normalize_task_ref,
     sanitize_timetable,
-    save_desk_memo,
 )
 from saiverse.persona_task_manager import (
-    PARENT_TRACK,
     STATUS_CANCELLED,
     STATUS_COMPLETED,
     PersonaTaskManager,
@@ -94,7 +82,6 @@ LOGGER = logging.getLogger("saiverse.tools.judgment_finalize")
 # 適用失敗のシステム通知 (perception.push) で使う、ユーザー向けの判断名。
 _KIND_LABELS = {
     KIND_DAY_OPEN: "起床判断",
-    KIND_POST_CONVERSATION: "会話終了判断",
     KIND_POST_SESSION: "セッション終了判断",
     KIND_ON_EVENT: "イベント到着判断",
     KIND_DAY_CLOSE: "就寝判断",
@@ -268,7 +255,7 @@ def _finalize_day_open(
     warnings: List[str],
     spells_record: List[Dict[str, Any]],
 ) -> bool:
-    """起床判断の適用。timetable 保存 or promotions 発火があれば True (committed)。"""
+    """起床判断の適用。timetable を保存できたら True (committed)。"""
     applied = False
     plan_date = ctx.get("plan_date") or clock.now().date().isoformat()
 
@@ -400,30 +387,6 @@ def _finalize_day_open(
                     )
                 lines.append(budget_line + "）")
 
-    # --- promotions: 欲求 → 関心 (Track 化) ------------------------------
-    promo_valid = set(collect_promotion_refs(manager, persona_id))
-    for i, promo in enumerate(output.get("promotions") or []):
-        if not isinstance(promo, dict):
-            warnings.append(f"promotions[{i}] rejected: not a dict")
-            continue
-        desire_ref = str(promo.get("desire_ref") or "").strip()
-        title = str(promo.get("title") or "").strip()
-        if desire_ref not in promo_valid:
-            warnings.append(
-                f"promotions[{i}] rejected: {desire_ref!r} は昇格候補にありません"
-            )
-            continue
-        if not title:
-            warnings.append(f"promotions[{i}] rejected: title が空です")
-            continue
-        # A11: 失敗した昇格は committed への寄与にしない (warnings は _fire_spell が積む)
-        applied |= _fire_spell("track_create", {
-            "track_type": "autonomous",
-            "title": title,
-            "intent": str(promo.get("intent") or ""),
-            "from_candidate": normalize_task_ref(desire_ref),
-        }, spells_record, warnings)
-
     # v0.5 (life.md §3/§11.2): ライフはもう LLM が宣言しない — ユーザー設定
     # (PersonaSchedule の起床・就寝) からシステムが day_open 発火時に確定して
     # 焼く (呼び出し元は saiverse.autonomy_wiring.fire_judgment_point、
@@ -494,8 +457,7 @@ def _apply_episode_purposes_single(
 ) -> bool:
     """episode_purposes (purpose 参照の配列) の適用 — 対象の出来事は判断文脈で単一。
 
-    post_conversation (閉じた会話) / post_session (セッション) が使う。
-    enum 外 ref は該当項目だけ棄却 + WARN。
+    post_session (セッション) が使う。enum 外 ref は該当項目だけ棄却 + WARN。
     """
     raw = output.get("episode_purposes")
     if not raw:
@@ -563,40 +525,8 @@ def _apply_episode_purposes_pairs(
 
 
 # ---------------------------------------------------------------------------
-# 共通適用部品 (post_conversation / post_session / on_event が共有)
+# 共通適用部品 (post_session / on_event が共有)
 # ---------------------------------------------------------------------------
-
-
-def _apply_new_desires(
-    output: Dict[str, Any],
-    warnings: List[str],
-    spells_record: List[Dict[str, Any]],
-) -> bool:
-    """new_desires → purpose_seed スペル (type/source 付き; v2 §5.2)。
-
-    P2c-1 で候補生成の動詞を desire_add → purpose_seed へ切替 (引数は同一)。
-    """
-    applied = False
-    for i, desire in enumerate(output.get("new_desires") or []):
-        if not isinstance(desire, dict):
-            warnings.append(f"new_desires[{i}] rejected: not a dict")
-            continue
-        dtype = desire.get("type")
-        title = str(desire.get("title") or "").strip()
-        source_quote = str(desire.get("source_quote") or "").strip()
-        if dtype not in DESIRE_TYPES:
-            warnings.append(f"new_desires[{i}] rejected: 未知の型 {dtype!r}")
-            continue
-        if not title:
-            warnings.append(f"new_desires[{i}] rejected: title が空です")
-            continue
-        # A11: 失敗した欲求作成は committed への寄与にしない
-        applied |= _fire_spell("purpose_seed", {
-            "title": title,
-            "type": dtype,
-            "source": source_quote,
-        }, spells_record, warnings)
-    return applied
 
 
 def _apply_remaining_timetable(
@@ -773,31 +703,14 @@ def _apply_task_verdict(
             status = "continue"
 
     if status in ("continue", "blocked"):
+        # 作業メモ (desk_memo) は独白記録にだけ残す。旧実装は Track の metadata へ
+        # も保存していたが、その格納先を読む経路は既に到達不能で、2026-08-21 の
+        # 会話経路の Track なし化に合わせて書き手ごと退役した
+        # (track_retirement.md §2 住人 4 — 引っ越し先は中断中エピソードのしおり)。
+        # continue / blocked の裁定の意味論 (タスクを動かさない) は変えていない。
         memo_label = "詰まり" if status == "blocked" else "続き"
         if desk_memo:
             lines.append(f"（作業メモ [{memo_label}]: {desk_memo}）")
-        track_id = ctx.get("track_id")
-        if track_id:
-            memo = {
-                "text": desk_memo,
-                "status": status,
-                "task_ref": str(task_ref),
-                "updated_at": clock.now().isoformat(timespec="seconds"),
-            }
-            try:
-                if save_desk_memo(manager, str(track_id), memo):
-                    applied = True
-                else:
-                    warnings.append(
-                        f"desk_memo の保存先 Track {track_id!r} が見つかりません"
-                    )
-            except Exception as exc:
-                LOGGER.exception("[judgment_finalize] save_desk_memo raised")
-                warnings.append(f"desk_memo の保存に失敗: {exc}")
-        else:
-            warnings.append(
-                "desk_memo の保存先 Track が不明のため、独白記録にのみ残します"
-            )
     elif status not in ("done",):
         warnings.append(f"task_verdict rejected: 未知の status={status!r}")
 
@@ -816,34 +729,6 @@ def _finalize_post_session(
     """セッション終了判断の適用。何か 1 つでも適用したら True (committed)。"""
     applied = _apply_task_verdict(manager, persona_id, output, ctx, lines, warnings)
 
-    # --- track_op: complete は Track の全タスク消化済みのときのみ --------
-    track_op = output.get("track_op")
-    track_id = ctx.get("track_id")
-    if track_op == "complete":
-        if not track_id:
-            warnings.append("track_op 'complete' rejected: 対象 Track が不明です")
-        else:
-            ptm = PersonaTaskManager(manager.SessionLocal)
-            open_tasks = [
-                t for t in ptm.get_track_tasks(str(track_id)) if not t.get("done")
-            ]
-            if open_tasks:
-                refs = ", ".join(t.get("task_ref") or "task:?" for t in open_tasks)
-                warnings.append(
-                    f"track_op 'complete' rejected: 未消化のタスクが残っています ({refs})"
-                )
-            else:
-                # A11: 失敗した Track 完了は committed への寄与にしない
-                applied |= _fire_spell(
-                    "track_complete", {"track_id": str(track_id)},
-                    spells_record, warnings,
-                )
-    elif track_op not in (None, "none"):
-        warnings.append(f"track_op rejected: 未知の値 {track_op!r}")
-
-    # --- new_desires → purpose_seed (type/source 付き; v2 §5.2) ----------
-    applied |= _apply_new_desires(output, warnings, spells_record)
-
     # --- episode_purposes → 層2 棚入れタグ (§9.1) -------------------------
     applied |= _apply_episode_purposes_single(
         manager, persona_id, output, ctx, lines, warnings,
@@ -853,271 +738,6 @@ def _finalize_post_session(
     applied |= _apply_remaining_timetable(
         manager, persona_id, output, ctx, lines, warnings,
     )
-
-    return applied
-
-
-# ---------------------------------------------------------------------------
-# post_conversation
-# ---------------------------------------------------------------------------
-
-
-def _create_picked_task(
-    manager: Any,
-    persona_id: str,
-    ptm: PersonaTaskManager,
-    title: str,
-    track_ref: str,
-    origin_quote: str,
-    valid_track_refs: set,
-    lines: List[str],
-    warnings: List[str],
-) -> bool:
-    """picked_tasks 1 件の適用 (タスク作成。track_ref='new' は新規 Track も)。"""
-    track_manager = getattr(manager, "track_manager", None)
-    track_id: Optional[str] = None
-    dest_label = "(未所属)"
-
-    if track_ref == "new":
-        # 新しい関心として Track を立てる (track_create 相当。unstarted のまま —
-        # 稼働させるかは以後のメタ判断/起床判断に委ねる)
-        if track_manager is None:
-            warnings.append(
-                f"picked_task「{title}」: track_manager が無いため Track を作れません; "
-                "未所属タスクとして作成します"
-            )
-        else:
-            try:
-                try:
-                    # 通常経路: tools ローダが builtin tools ディレクトリを
-                    # sys.path に載せている (tools/__init__.py)。
-                    from _track_common import resolve_default_entry_line_role
-                    entry_line_role = resolve_default_entry_line_role("autonomous")
-                except ImportError:
-                    # 単体ロード (テスト等) では _track_common が見えない。
-                    # resolve_default_entry_line_role 自身の unknown fallback と
-                    # 同じ安全側 (= main_line) に倒す。
-                    entry_line_role = "main_line"
-                track_id = track_manager.create(
-                    persona_id=persona_id,
-                    track_type="autonomous",
-                    title=title,
-                    intent=f"会話からの持ち帰り。根拠: {origin_quote}",
-                    metadata=json.dumps(
-                        {"entry_line_role": entry_line_role}, ensure_ascii=False,
-                    ),
-                )
-                created = track_manager.get(track_id)
-                short = (
-                    f"track:{created.short_id}" if created.short_id is not None
-                    else track_id[:8]
-                )
-                dest_label = f"新しい関心「{title}」({short})"
-            except Exception as exc:
-                LOGGER.exception(
-                    "[judgment_finalize] track create for picked_task failed"
-                )
-                warnings.append(
-                    f"picked_task「{title}」rejected: Track の作成に失敗: {exc}"
-                )
-                return False
-    else:
-        if track_ref not in valid_track_refs:
-            warnings.append(
-                f"picked_task「{title}」rejected: track_ref={track_ref!r} は"
-                "選択可能な Track にありません"
-            )
-            return False
-        if track_manager is None:
-            warnings.append(
-                f"picked_task「{title}」rejected: track_manager が無いため "
-                f"{track_ref!r} を解決できません"
-            )
-            return False
-        try:
-            track_id = track_manager.resolve_track_ref(persona_id, track_ref)
-        except Exception as exc:
-            warnings.append(
-                f"picked_task「{title}」rejected: track_ref={track_ref!r} が"
-                f"解決できません: {exc}"
-            )
-            return False
-        dest_label = track_ref
-
-    task = ptm.create_task(
-        persona_id=persona_id,
-        title=title,
-        # origin_quote は接地の証跡としてタスクの自由記述 (notes) に残す
-        notes=origin_quote,
-        parent_kind=PARENT_TRACK if track_id else None,
-        track_id=track_id,
-        auto_activate=False,
-        actor="judgment_post_conversation",
-    )
-    lines.append(
-        f"（会話からタスクを拾った: {task.get('task_ref')}「{title}」→ {dest_label}）"
-    )
-    return True
-
-
-def _apply_resume_now(
-    manager: Any,
-    persona_id: str,
-    plan_date: str,
-    resume_ctx: Dict[str, Any],
-    lines: List[str],
-    warnings: List[str],
-) -> bool:
-    """resume_session='resume_now' の適用。
-
-    **妥協点** (judgment_points.md §5): セッションの凍結コンテキストを復元する
-    「再開機構」は未実装のため、resume_now は「凍結済み作業メモ付きタスクを参照
-    する作業セッション系コマの現在時刻への即時挿入」で表現する。kind / facility /
-    予算は今日の時間割で同じタスクを指していた元コマから引き継ぐ (元コマが無い /
-    元コマの kind が現行の作業セッション系でない場合は「調べる」/ own_room /
-    既定予算 — 挿入コマは検証を通る有効な kind でなければならず、読み・想起
-    ベースの「調べる」が再開の既定として最も接地が破れにくい)。挿入されたコマは
-    即時発火し、作業メモはセッション指示書の参照先 (Track metadata) に残ったまま
-    新セッションが走る。
-    """
-    task_ref = str(resume_ctx.get("task_ref") or "").strip()
-    if not task_ref:
-        warnings.append("resume_now rejected: 再開対象の task_ref が不明です")
-        return False
-
-    worker_kinds = day_plan_mod.worker_session_kinds()
-    kind = "調べる" if "調べる" in worker_kinds else worker_kinds[0]
-    facility = day_plan_mod.FACILITY_OWN_ROOM
-    budget = day_plan_mod.DEFAULT_BUDGET_ROUNDS
-    norm = normalize_task_ref(task_ref)
-    for s in day_plan_mod.load_day_plan(manager, persona_id, plan_date) or []:
-        if normalize_task_ref(str(s.get("ref") or "")) == norm:
-            if s.get("kind") in worker_kinds:
-                kind = s["kind"]
-            facility = s.get("facility") or facility
-            if int(s.get("budget_rounds") or 0) > 0:
-                budget = int(s["budget_rounds"])
-            break
-
-    memo_text = str(resume_ctx.get("text") or "").strip()
-    note = "中断していた作業の再開"
-    if memo_text:
-        note += f"（作業メモ: {memo_text[:60]}）"
-    now_hhmm = clock.now().strftime("%H:%M")
-    slot = {
-        "start": now_hhmm,
-        "kind": kind,
-        "title": "中断していた作業を再開する",
-        "ref": task_ref,
-        "facility": facility,
-        "budget_rounds": budget,
-        "note": note,
-    }
-    pushed, insert_warnings = insert_timetable_slot(
-        manager, persona_id, plan_date, slot,
-    )
-    warnings.extend(insert_warnings)
-    if pushed is None:
-        return False
-    lines.append(
-        f"（中断していた作業 {task_ref} を今すぐ再開する: {slot['start']} の"
-        f"「{kind}」コマとして挿入）"
-    )
-    return True
-
-
-def _finalize_post_conversation(
-    manager: Any,
-    persona_id: str,
-    output: Dict[str, Any],
-    ctx: Dict[str, Any],
-    lines: List[str],
-    warnings: List[str],
-    spells_record: List[Dict[str, Any]],
-) -> bool:
-    """会話終了判断の適用。何か 1 つでも適用したら True (committed)。
-
-    収穫ゼロ (picked_tasks / new_desires が空 + timetable 変更なし +
-    resume なし) は正常系 — 全会話がタスクを生むわけではない (§5)。
-    """
-    applied = False
-    plan_date = ctx.get("plan_date") or clock.now().date().isoformat()
-    valid_track_refs = set(ctx.get("track_refs") or [])
-    ptm = PersonaTaskManager(manager.SessionLocal)
-
-    # --- picked_tasks → タスク作成 (origin_quote 必須の接地) --------------
-    for i, picked in enumerate(output.get("picked_tasks") or []):
-        if not isinstance(picked, dict):
-            warnings.append(f"picked_tasks[{i}] rejected: not a dict")
-            continue
-        title = str(picked.get("title") or "").strip()
-        track_ref = str(picked.get("track_ref") or "").strip()
-        origin_quote = str(picked.get("origin_quote") or "").strip()
-        if not title:
-            warnings.append(f"picked_tasks[{i}] rejected: title が空です")
-            continue
-        if not origin_quote:
-            # 無根拠のタスク発生をここで塞ぐ (§5 — 接地の証跡)
-            warnings.append(
-                f"picked_tasks[{i}]「{title}」rejected: origin_quote (根拠となる"
-                "会話中の発言の引用) がありません"
-            )
-            continue
-        try:
-            applied |= _create_picked_task(
-                manager, persona_id, ptm, title, track_ref, origin_quote,
-                valid_track_refs, lines, warnings,
-            )
-        except Exception as exc:
-            LOGGER.exception("[judgment_finalize] picked_task creation raised")
-            warnings.append(f"picked_tasks[{i}]「{title}」の作成に失敗: {exc}")
-
-    # --- new_desires → purpose_seed --------------------------------------
-    applied |= _apply_new_desires(output, warnings, spells_record)
-
-    # --- episode_purposes → 層2 棚入れタグ (§9.1) -------------------------
-    applied |= _apply_episode_purposes_single(
-        manager, persona_id, output, ctx, lines, warnings,
-    )
-
-    # --- remaining_timetable: 全置換を先に適用してから resume_now を挿入 --
-    applied |= _apply_remaining_timetable(
-        manager, persona_id, output, ctx, lines, warnings,
-    )
-
-    # --- resume_session (中断中セッションがあったときのみ ctx に resume) --
-    resume_choice = output.get("resume_session")
-    resume_ctx = ctx.get("resume")
-    if resume_choice is not None:
-        if not isinstance(resume_ctx, dict) or not resume_ctx:
-            warnings.append(
-                "resume_session rejected: 中断中セッションがありません"
-            )
-        elif resume_choice == RESUME_NOW:
-            applied |= _apply_resume_now(
-                manager, persona_id, plan_date, resume_ctx, lines, warnings,
-            )
-        elif resume_choice == RESUME_DEFER:
-            # 時間割側 (remaining_timetable) に委ねる。状態は変えない。
-            lines.append("（中断中の作業は残りの時間割の中で再開する）")
-        elif resume_choice == RESUME_DROP:
-            track_id = str(resume_ctx.get("track_id") or "")
-            try:
-                if track_id and clear_desk_memo(manager, track_id):
-                    applied = True
-                    lines.append("（中断中の作業は取りやめ、作業メモを片づけた）")
-                else:
-                    warnings.append(
-                        f"resume_session 'drop': 作業メモの削除先 Track "
-                        f"{track_id!r} が見つかりません"
-                    )
-            except Exception as exc:
-                LOGGER.exception("[judgment_finalize] clear_desk_memo raised")
-                warnings.append(f"作業メモの片づけに失敗: {exc}")
-        else:
-            warnings.append(
-                f"resume_session rejected: 未知の値 {resume_choice!r}"
-            )
 
     return applied
 
@@ -1236,7 +856,6 @@ def _finalize_on_event(
     else:
         warnings.append(f"reaction rejected: 未知の type {rtype!r}")
 
-    applied |= _apply_new_desires(output, warnings, spells_record)
     return applied
 
 
@@ -1498,7 +1117,9 @@ def _finalize_day_close(
     - tomorrow_memo / day_theme / user_report_seeds → 当日 plan 行の meta_json
       (翌朝の day_open は「昨日 = この plan_date」の meta を読む —
       ``build_day_open_situation_text`` と対になる読み書き)
-    - desire_reviews → apply_desire_reviews (今日触れた欲求のみ。enum 外は棄却)
+
+    ``desire_reviews`` (欲求のたな卸し) は欄ごと退役した — 欲求プールが機構ごと
+    消えたため (autonomous_behavior_v3.md §8)。
 
     旧 day_digest (実績の決定論要約の保存コピー) は 2026-07-29 撤去 —
     唯一の読者だった day_open の [昨日のふりかえり] を廃止したため。昨日の
@@ -1563,34 +1184,6 @@ def _finalize_day_close(
         # 消失が成功の顔で残る (2026-07-29 Codex 指摘 high2)。保存もエコーも
         # せず、事実を独白側の要約行に残す。
         lines.append("（明日へのメモは残さなかった）")
-
-    # --- desire_reviews → apply_desire_reviews (今日触れた欲求のみ) -------
-    valid_refs = set(ctx.get("touched_desire_refs") or [])
-    reviews: List[Dict[str, Any]] = []
-    for i, review in enumerate(output.get("desire_reviews") or []):
-        if not isinstance(review, dict):
-            warnings.append(f"desire_reviews[{i}] rejected: not a dict")
-            continue
-        ref = str(review.get("desire_ref") or "")
-        if ref not in valid_refs:
-            warnings.append(
-                f"desire_reviews[{i}] rejected: {ref!r} は今日触れた欲求にありません"
-            )
-            continue
-        reviews.append({"desire_ref": ref, "verdict": review.get("verdict")})
-    if reviews:
-        result = apply_desire_reviews(manager, persona_id, reviews)
-        for skipped_ref in result.get("skipped") or []:
-            warnings.append(f"desire_review を適用できませんでした: {skipped_ref}")
-        n_fulfilled = len(result.get("fulfilled") or [])
-        n_fading = len(result.get("fading") or [])
-        n_kept = len(result.get("kept") or [])
-        if n_fulfilled or n_fading or n_kept:
-            applied = True
-            lines.append(
-                f"（やりたいことのたな卸し: 満たされた {n_fulfilled} / "
-                f"薄れていく {n_fading} / 持ち続ける {n_kept}）"
-            )
 
     # --- episode_purposes → 層2 棚入れタグ ({episode, purpose} ペア; §9.1) --
     applied |= _apply_episode_purposes_pairs(
@@ -1716,10 +1309,13 @@ def _build_session_digest_message(
 
     旧 work_session 直書き (削除済み ``sea.work_session`` の digest 保存) と
     同形: tags=[DIGEST_TAG] / line_role='main_line' / scope='committed' /
-    origin_track_id / metadata.work_session (ws_meta を judgment_context から
-    復元) / metadata.origin_episode / tz-aware timestamp。day_close の
+    metadata.work_session (ws_meta を judgment_context から復元) /
+    metadata.origin_episode / tz-aware timestamp。day_close の
     ``_collect_today_session_digests`` (DIGEST_TAG + committed) と一日新聞
     (metadata.work_session) が読む形を必ず保つ。
+
+    NOTE: ``origin_track_id`` の刻印は 2026-08-21 に退役した
+    (track_retirement.md §2 住人 3)。
     """
     from sea.work_session import DIGEST_TAG
 
@@ -1739,9 +1335,6 @@ def _build_session_digest_message(
         "line_role": "main_line",
         "scope": "committed",
     }
-    track_id = str(ctx.get("track_id") or "").strip() or None
-    if track_id:
-        message["origin_track_id"] = track_id
     return message
 
 
@@ -1886,10 +1479,6 @@ def judgment_finalize(
 
     if kind == KIND_DAY_OPEN:
         committed = _finalize_day_open(
-            manager, persona_id, output, ctx, lines, warnings, spells_record,
-        )
-    elif kind == KIND_POST_CONVERSATION:
-        committed = _finalize_post_conversation(
             manager, persona_id, output, ctx, lines, warnings, spells_record,
         )
     elif kind == KIND_POST_SESSION:
@@ -2085,14 +1674,12 @@ def schema() -> ToolSchema:
         name="judgment_finalize",
         description=(
             "Internal tool for judgment-point Playbooks only (judgment_day_open / "
-            "judgment_post_conversation / judgment_post_session / "
-            "judgment_on_event / judgment_day_close). Receives the judge node's "
-            "structured output (dict), validates and applies it per judgment kind "
-            "(day plan save, task verdict with artifact grounding, desk memo, "
-            "promotions, picked tasks with origin-quote grounding, event "
-            "reactions, day-close review, new desires), and persists the "
-            "resulting monologue + summary text to SAIMemory. Invalid items are "
-            "rejected individually with warnings."
+            "judgment_post_session / judgment_on_event / judgment_day_close). "
+            "Receives the judge node's structured output (dict), validates and "
+            "applies it per judgment kind (day plan save, task verdict with "
+            "artifact grounding, desk memo, event reactions, day-close review), "
+            "and persists the resulting monologue + summary text to SAIMemory. "
+            "Invalid items are rejected individually with warnings."
         ),
         parameters={
             "type": "object",

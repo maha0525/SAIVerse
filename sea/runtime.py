@@ -97,15 +97,8 @@ class SEARuntime:
         cancellation_token: Optional[CancellationToken] = None,
         pulse_type: str = "user",
         pre_spells: Optional[List[str]] = None,
-        origin_track_id: Optional[str] = None,
     ) -> List[str]:
-        """Router -> subgraph -> speak. Returns spoken strings for gateway/UI.
-
-        ``origin_track_id`` 指定時はその Track の文脈で Pulse を走らせる。
-        Handler 起動経路 (例: UserConversationTrackHandler) が、pending/alert
-        状態の Track でも文脈を保持するために渡してくる。
-        未指定時は ``_resolve_pulse_root_line`` が ``get_running`` で取りに行く。
-        """
+        """Router -> subgraph -> speak. Returns spoken strings for gateway/UI."""
         # Check for cancellation before starting
         if cancellation_token:
             cancellation_token.raise_if_cancelled()
@@ -136,7 +129,6 @@ class SEARuntime:
                 cancellation_token=cancellation_token,
                 pulse_type=pulse_type,
                 pre_spells=pre_spells,
-                origin_track_id=origin_track_id,
             )
 
     def _run_meta_user_locked(
@@ -151,24 +143,15 @@ class SEARuntime:
         cancellation_token: Optional[CancellationToken] = None,
         pulse_type: str = "user",
         pre_spells: Optional[List[str]] = None,
-        origin_track_id: Optional[str] = None,
     ) -> List[str]:
         """:meth:`run_meta_user` の本体 (Beat ロック保持下で実行される)。"""
         # Store pulse_type in persona for tools to access
         persona._current_pulse_type = pulse_type
 
-        # Resolve Pulse-root track_id up-front so downstream injectors
-        # (DynamicState event message, building auto-ingest, emit_*) can all
-        # tag their writes with the Track scope. Caller-supplied origin_track_id
-        # wins; otherwise falls back to ``get_running``. Same resolver as the
-        # one used for push_line below.
-        _root_role, _root_track_id = self._resolve_pulse_root_line(
-            persona, override_track_id=origin_track_id,
-        )
         # 認知モデル v0.2 (§10.2): Pulse-root のアスペクトを pulse_type から導出する。
         # auto→AUTONOMOUS / meta_judgment→META / それ以外→CONVERSATION。これが
-        # line_role / scope / model tier の供給源となり、track の entry_line_role
-        # (legacy, main_line/sub_line) には依存しない。
+        # line_role / scope / model tier の唯一の供給源 (旧 Track の
+        # entry_line_role による出し分けは 2026-08-21 に撤去)。
         from sea.pulse_context import aspect_from_pulse_type
         _root_aspect = aspect_from_pulse_type(pulse_type)
 
@@ -201,7 +184,7 @@ class SEARuntime:
         # ※会話取り込みの知覚バッファ統合は Phase 2 (会話統合) で対応予定。現状は従来経路。
         try:
             from builtin_data.tools.get_building_messages import auto_ingest_building_messages
-            auto_ingest_building_messages(persona, self.manager, origin_track_id=_root_track_id)
+            auto_ingest_building_messages(persona, self.manager)
         except Exception:
             LOGGER.exception("[auto_ingest] Failed in run_meta_user")
 
@@ -299,31 +282,19 @@ class SEARuntime:
             except Exception:
                 LOGGER.exception("[metabolism] window refill failed")
 
-        # ``_root_role`` / ``_root_track_id`` were resolved up-front (above the
-        # injector calls). Pulse 中に emit_speak/emit_say/emit_think などの
-        # emitter 経路から書き込まれるメッセージにも origin_track_id を付与する
-        # ため、persona に一時保持する。emitters 側はここから読む。
-        # run_meta_user 終了時に finally でクリアする (handoff_2026-05-10)。
-        prev_pulse_track = getattr(persona, "_current_pulse_origin_track_id", None)
-        persona._current_pulse_origin_track_id = _root_track_id
-        try:
-            result = self._run_playbook(
-                playbook, persona, building_id, user_input,
-                # auto_mode = 「応答ループにユーザーが居ない Pulse か」。run_meta_user は
-                # user / schedule / auto の共通入口なので pulse_type から導出する。
-                # None は PulseController を経ない直接呼び出し (レガシー) のみで、
-                # 確認ダイアログを黙って自動承認しない側 (=user 扱い) に倒す。
-                auto_mode=(pulse_type not in (None, "user")),
-                record_history=True, event_callback=event_callback,
-                cancellation_token=cancellation_token, pulse_type=pulse_type,
-                initial_params=effective_args if effective_args else None,
-                pulse_line_role=_root_role,
-                pulse_line_track_id=_root_track_id,
-                pulse_line_aspect=_root_aspect,
-                pre_spells=pre_spells,
-            )
-        finally:
-            persona._current_pulse_origin_track_id = prev_pulse_track
+        result = self._run_playbook(
+            playbook, persona, building_id, user_input,
+            # auto_mode = 「応答ループにユーザーが居ない Pulse か」。run_meta_user は
+            # user / schedule / auto の共通入口なので pulse_type から導出する。
+            # None は PulseController を経ない直接呼び出し (レガシー) のみで、
+            # 確認ダイアログを黙って自動承認しない側 (=user 扱い) に倒す。
+            auto_mode=(pulse_type not in (None, "user")),
+            record_history=True, event_callback=event_callback,
+            cancellation_token=cancellation_token, pulse_type=pulse_type,
+            initial_params=effective_args if effective_args else None,
+            pulse_line_aspect=_root_aspect,
+            pre_spells=pre_spells,
+        )
 
         # Post-response metabolism check (DB ベースで件数比較)。
         # model_key = この Pulse の実行 model (beat_execution_context.md §3.2 —
@@ -355,57 +326,12 @@ class SEARuntime:
 
         return result
 
-    # ---------------- helpers -----------------
-    def _resolve_pulse_root_line(
-        self,
-        persona: Any,
-        *,
-        override_track_id: Optional[str] = None,
-    ) -> Tuple[Optional[str], Optional[str]]:
-        """Resolve (entry_line_role, track_id) for the persona's current Pulse root.
-
-        Resolution order:
-        1. ``override_track_id`` if supplied — Handler-driven path. The Track
-           may be in any status (running / alert / pending), but we still
-           anchor messages to it so SAIMemory queries can find them
-           (handoff_2026-05-10).
-        2. ``track_manager.get_running`` — legacy Same-Persona invariant 1
-           path: at most one running Track per persona.
-
-        Returns (None, None) when neither resolves — runtime then skips
-        ``push_line`` and stored messages get NULL line_role/origin_track_id
-        (pre-v0.11 behavior).
-        """
-        try:
-            track_manager = getattr(self.manager, "track_manager", None)
-            if track_manager is None:
-                return None, None
-            if override_track_id:
-                role = track_manager.get_entry_line_role(override_track_id)
-                LOGGER.debug(
-                    "[runtime] _resolve_pulse_root_line override: track_id=%s role=%s",
-                    override_track_id, role,
-                )
-                return role, override_track_id
-            persona_id = getattr(persona, "persona_id", None)
-            if not persona_id:
-                return None, None
-            running = track_manager.get_running(persona_id)
-            if running is None:
-                LOGGER.debug(
-                    "[runtime] _resolve_pulse_root_line: no running Track for persona=%s "
-                    "(messages will be stored with NULL origin_track_id)",
-                    persona_id,
-                )
-                return None, None
-            role = track_manager.get_entry_line_role(running.track_id)
-            return role, running.track_id
-        except Exception:
-            LOGGER.exception(
-                "[runtime] Failed to resolve Pulse-root line for persona=%s",
-                getattr(persona, "persona_id", None),
-            )
-            return None, None
+    # NOTE: 旧 ``_resolve_pulse_root_line`` (running Track から
+    # (entry_line_role, track_id) を引いて Pulse-root ラインに刻む解決器) は
+    # 2026-08-21 に撤去した。line_role / scope / model tier の供給源は
+    # ``Aspect`` に一本化済みで (pulse_context.aspect_from_pulse_type)、
+    # ``origin_track_id`` の刻印は Track 撤廃で書き手ごと退役した
+    # (docs/intent/track_retirement.md §2 住人 3)。
 
     # ---------------- core runner -----------------
     def _run_playbook(
@@ -423,8 +349,6 @@ class SEARuntime:
         initial_params: Optional[Dict[str, Any]] = None,
         isolate_pulse_context: bool = False,
         line: str = "main",
-        pulse_line_role: Optional[str] = None,
-        pulse_line_track_id: Optional[str] = None,
         pulse_line_aspect: Optional[Any] = None,  # sea.pulse_context.Aspect
         pre_spells: Optional[List[str]] = None,
     ) -> List[str]:
@@ -443,8 +367,6 @@ class SEARuntime:
             initial_params=initial_params,
             isolate_pulse_context=isolate_pulse_context,
             line=line,
-            pulse_line_role=pulse_line_role,
-            pulse_line_track_id=pulse_line_track_id,
             pulse_line_aspect=pulse_line_aspect,
             pre_spells=pre_spells,
         )
@@ -464,8 +386,6 @@ class SEARuntime:
         cancellation_token: Optional[CancellationToken] = None,
         pulse_type: Optional[str] = None,
         isolate_pulse_context: bool = False,
-        pulse_line_role: Optional[str] = None,
-        pulse_line_track_id: Optional[str] = None,
         pulse_line_aspect: Optional[Any] = None,  # sea.pulse_context.Aspect
         line: str = "main",
     ) -> Optional[List[str]]:
@@ -483,8 +403,6 @@ class SEARuntime:
             cancellation_token=cancellation_token,
             pulse_type=pulse_type,
             isolate_pulse_context=isolate_pulse_context,
-            pulse_line_role=pulse_line_role,
-            pulse_line_track_id=pulse_line_track_id,
             pulse_line_aspect=pulse_line_aspect,
             line=line,
         )
@@ -1631,7 +1549,6 @@ class SEARuntime:
         pulse_context: Optional[Any] = None,
         line_role: Optional[str] = None,
         line_id: Optional[str] = None,
-        origin_track_id: Optional[str] = None,
         scope: Optional[str] = None,
         paired_action_text: Optional[str] = None,
         thought_signature: Optional[bytes] = None,
@@ -1645,10 +1562,9 @@ class SEARuntime:
         7-layer storage metadata (Intent A v0.14, Intent B v0.11):
 
         - ``pulse_context``: When supplied (and the explicit ``line_role`` /
-          ``line_id`` / ``origin_track_id`` are not), the active line frame's
-          metadata is read via ``current_line_metadata()`` so callers in the
-          ``sea/runtime_llm.py`` Spell loop and LLM-node memorize paths can
-          omit boilerplate.
+          ``line_id`` are not), the active line frame's metadata is read via
+          ``current_line_metadata()`` so callers in the ``sea/runtime_llm.py``
+          Spell loop and LLM-node memorize paths can omit boilerplate.
         - Explicit overrides take precedence over the auto-resolved values
           (used e.g. when a meta-judgment branch turn must be tagged
           ``scope='discardable'`` regardless of the surrounding line).
@@ -1701,13 +1617,11 @@ class SEARuntime:
         # the active LineFrame on the supplied PulseContext.
         resolved_line_role = line_role
         resolved_line_id = line_id
-        resolved_track_id = origin_track_id
         resolved_scope = scope
         resolved_aspect: Optional[str] = None
         if pulse_context is not None and (
             resolved_line_role is None
             or resolved_line_id is None
-            or resolved_track_id is None
             or resolved_scope is None
         ):
             try:
@@ -1718,8 +1632,6 @@ class SEARuntime:
                 resolved_line_role = meta.get("line_role")
             if resolved_line_id is None:
                 resolved_line_id = meta.get("line_id")
-            if resolved_track_id is None:
-                resolved_track_id = meta.get("origin_track_id")
             if resolved_scope is None:
                 resolved_scope = meta.get("scope")
             resolved_aspect = meta.get("aspect")
@@ -1729,8 +1641,6 @@ class SEARuntime:
             message["line_role"] = resolved_line_role
         if resolved_line_id is not None:
             message["line_id"] = resolved_line_id
-        if resolved_track_id is not None:
-            message["origin_track_id"] = resolved_track_id
         if resolved_scope is not None:
             message["scope"] = resolved_scope
         if paired_action_text is not None:

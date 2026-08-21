@@ -62,12 +62,9 @@ class RuntimeEmitters:
                 heard_by_list = list(occupants)
                 if persona.persona_id not in heard_by_list:
                     heard_by_list.append(persona.persona_id)
-                # Pulse-bound origin_track_id (set by run_meta_user). Falls back
-                # to None when emit is invoked outside a Pulse (defensive).
-                pulse_track_id = getattr(persona, "_current_pulse_origin_track_id", None)
                 # SAIMemory: 生のテキスト（<in_heart>タグ含む）を保存。ペルソナが
                 # 書いた item:N は安定 short_id なのでそのまま記憶に残せる。
-                persona.history_manager.add_to_persona_only(msg, origin_track_id=pulse_track_id)
+                persona.history_manager.add_to_persona_only(msg)
                 # building_histories / gateway: <in_heart>除去。item 参照は item:N /
                 # saiverse://item/N が既に安定・world共通なので解決 pin は不要。
                 building_content = strip_in_heart(text)
@@ -79,7 +76,6 @@ class RuntimeEmitters:
                 building_msg_dict = {**msg, "content": building_content}
                 building_msg = persona.history_manager.add_to_building_only(
                     building_id, building_msg_dict, heard_by=heard_by_list,
-                    origin_track_id=pulse_track_id,
                 )
                 # BuildingHistory保存完了直後にmessage_idを確定させる。
                 # これにより後続のアドオンツール（TTSなど）が get_active_message_id() で
@@ -176,11 +172,8 @@ class RuntimeEmitters:
             # building_content 自体は UI / 履歴用に <user_only> ラップを保持する。
             building_content_for_hook = strip_user_only(building_content)
             building_msg_for_hist = {**msg, "content": building_content}
-            # Pulse-bound origin_track_id (set by run_meta_user)
-            pulse_track_id = getattr(persona, "_current_pulse_origin_track_id", None)
             building_msg = persona.history_manager.add_to_building_only(
                 building_id, building_msg_for_hist, heard_by=heard_by_list,
-                origin_track_id=pulse_track_id,
             )
             # BuildingHistory 保存完了直後に message_id を ContextVar に確定させる。
             # 後続のアドオンツール (TTS 等) が get_active_message_id() で正しい ID を
@@ -264,12 +257,9 @@ class RuntimeEmitters:
         if persona.persona_id not in heard_by:
             heard_by.append(persona.persona_id)
 
-        pulse_track_id = getattr(persona, "_current_pulse_origin_track_id", None)
-
         try:
             building_msg = persona.history_manager.add_to_building_only(
-                building_id, placeholder_msg,
-                heard_by=heard_by, origin_track_id=pulse_track_id,
+                building_id, placeholder_msg, heard_by=heard_by,
             )
         except Exception:
             LOGGER.exception("emit_speak_start: failed to register placeholder")
@@ -417,7 +407,6 @@ class RuntimeEmitters:
                     message_id, building_id,
                 )
 
-            pulse_track_id = getattr(persona, "_current_pulse_origin_track_id", None)
             persona_msg: Dict[str, Any] = {
                 "role": "assistant",
                 "content": text,
@@ -436,8 +425,7 @@ class RuntimeEmitters:
             # ペルソナ履歴 (log.json) と建物履歴 (= update_building_message
             # 経由) には全文 1 件を残しつつ、 SAIMemory には書かない。
             persona.history_manager.add_to_persona_only(
-                persona_msg, origin_track_id=pulse_track_id,
-                sync_to_memory=False,
+                persona_msg, sync_to_memory=False,
             )
 
             self.runtime.manager.gateway_handle_ai_replies(
@@ -501,10 +489,6 @@ class RuntimeEmitters:
         adapter = getattr(persona, "sai_memory", None)
         try:
             if adapter and adapter.is_ready():
-                # Pulse-bound origin_track_id (set by run_meta_user). emit_think
-                # writes through append_persona_message directly so we attach the
-                # key to the dict here (handoff_2026-05-10).
-                pulse_track_id = getattr(persona, "_current_pulse_origin_track_id", None)
                 think_metadata: Dict[str, Any] = {"tags": ["internal"]}
                 if isinstance(extra_metadata, dict):
                     for key, value in extra_metadata.items():
@@ -524,8 +508,6 @@ class RuntimeEmitters:
                     "pulse_id": pulse_id,
                     "persona_id": persona.persona_id,
                 }
-                if pulse_track_id is not None:
-                    msg["origin_track_id"] = pulse_track_id
                 adapter.append_persona_message(msg)
         except Exception:
             LOGGER.warning("think message not stored", exc_info=True)

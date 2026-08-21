@@ -156,8 +156,8 @@ class BuildDayCloseSchemaTest(unittest.TestCase):
     """build_day_close_schema の naming_candidates 引数の効果を検証する。
 
     実際のシグネチャ:
-      build_day_close_schema(manager, persona_id, touched_desire_refs, ..., naming_candidates=None)
-    manager / persona_id / touched_desire_refs の最低限 mock を渡す。
+      build_day_close_schema(manager, persona_id, ..., naming_candidates=None)
+    manager / persona_id の最低限 mock を渡す。
     """
 
     def _make_minimal_manager(self):
@@ -182,7 +182,6 @@ class BuildDayCloseSchemaTest(unittest.TestCase):
         return build_day_close_schema(
             manager,
             "test_persona",
-            [],  # touched_desire_refs
             naming_candidates=naming_candidates,
         )
 

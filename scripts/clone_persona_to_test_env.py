@@ -101,6 +101,8 @@ PERSISTENT_COLUMNS = [
     "META_JUDGMENT_CONFIG",
     "PERSONA_ROLE",
     "USER_CONV_TIMEOUT_MINUTES",
+    # 退役済みの列 (読み手も書き手も無い、database/models.py の注記参照)。
+    # v0.3 の移行が写し元として読むので、テスト環境でも複製して残す。
     "LIFE_PURPOSE",
 ]
 

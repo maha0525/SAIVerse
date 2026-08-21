@@ -175,7 +175,7 @@ class MockWorkRuntime:
     def _store_memory(self, persona, text, *, role="assistant", tags=None,
                       pulse_id=None, metadata=None, playbook_name=None,
                       pulse_context=None, line_role=None, line_id=None,
-                      origin_track_id=None, scope=None, paired_action_text=None,
+                      scope=None, paired_action_text=None,
                       thought_signature=None, spell_origin_id=None, spell_seq=None,
                       return_message_id=False, beat_state=None):
         from saiverse import clock
@@ -280,7 +280,6 @@ def _default_mock_judge(kind: str, args: Dict[str, Any]) -> Dict[str, Any]:
             # digest 統合 (W1 Chunk C / D9): post_session 自身が実績要約を書く
             # (response_schema で required)。
             "digest": "指示書のとおりに作業した (mock 裁定の実績要約)。",
-            "new_desires": [],
             "remaining_timetable": None,
         }
         if ctx.get("task_ref"):
@@ -294,11 +293,6 @@ def _default_mock_judge(kind: str, args: Dict[str, Any]) -> Dict[str, Any]:
                     "status": "continue", "desk_memo": "続きは次のコマで (mock)",
                 }
         return output
-    if kind == "post_conversation":
-        return {
-            "monologue": "会話が終わった (mock 裁定)。",
-            "picked_tasks": [], "new_desires": [], "remaining_timetable": None,
-        }
     if kind == "on_event":
         if ctx.get("is_alert"):
             return {"monologue": "すぐに応対する (mock 裁定)。",
@@ -492,7 +486,7 @@ def generate_raw_log(
     lines.append(f"# 一日シム生データ — {persona_id} {scenario.plan_date} (mode={mode})")
     lines.append("")
     lines.append(f"- 実行統計: events={result.executed_events} / judgments={len(result.judgments)}")
-    lines.append(f"- 種まき: tasks={result.seeded_task_refs} desires={result.seeded_desire_refs}")
+    lines.append(f"- 種まき: tasks={result.seeded_task_refs}")
 
     # ログセッションへの参照 (フル LLM I/O は llm_io.log / sea_trace.log にある)
     try:
@@ -714,7 +708,7 @@ def main() -> int:
             # 判断点・ユーザー会話 Pulse は同期実行 (DES 単一スレッド)。実
             # PulseController はレーン管理を持つため、シナリオ実行中だけ
             # 差し替える。ユーザー発話は実チャット経路 (building_messages 記録
-            # → Track activate → main_line Pulse) を通すドライバで注入する。
+            # → 会話の出来事 open → main_line Pulse) を通すドライバで注入する。
             original_controller = manager.pulse_controller
             manager.pulse_controller = SyncJudgmentDispatcher(manager)
             try:

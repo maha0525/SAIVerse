@@ -68,16 +68,15 @@ class TestLineFrameAspect(unittest.TestCase):
 class TestPushLineMetadata(unittest.TestCase):
     def test_push_aspect_exposes_line_role_and_scope(self):
         pc = PulseContext(pulse_id="p1")
-        pc.push_line(aspect=Aspect.WORKER, track_id="trk")
+        pc.push_line(aspect=Aspect.WORKER)
         meta = pc.current_line_metadata()
         self.assertEqual(meta["line_role"], "sub_line")
         self.assertEqual(meta["scope"], "volatile")
-        self.assertEqual(meta["origin_track_id"], "trk")
 
     def test_autonomous_root_then_worker_subline(self):
         # Pulse-root = AUTONOMOUS (main_line/committed), その下に WORKER サブライン
         pc = PulseContext(pulse_id="p1")
-        pc.push_line(aspect=Aspect.AUTONOMOUS, track_id="trk")
+        pc.push_line(aspect=Aspect.AUTONOMOUS)
         root_meta = pc.current_line_metadata()
         self.assertEqual(root_meta["line_role"], "main_line")
         self.assertEqual(root_meta["scope"], "committed")
@@ -86,8 +85,7 @@ class TestPushLineMetadata(unittest.TestCase):
         sub_meta = pc.current_line_metadata()
         self.assertEqual(sub_meta["line_role"], "sub_line")
         self.assertEqual(sub_meta["scope"], "volatile")
-        # WORKER サブラインは AUTONOMOUS root を親として track_id を継承
-        self.assertEqual(sub.track_id, "trk")
+        # WORKER サブラインは AUTONOMOUS root を親に持つ
         self.assertIsNotNone(sub.parent_id)
 
         pc.pop_line()
