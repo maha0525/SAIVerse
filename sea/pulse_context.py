@@ -223,7 +223,7 @@ class ExecutionContext:
             ``get_current_thread()`` の解決値。Stelis / subagent の切替は
             ``PulseContext.push_thread`` / ``pop_thread`` が adapter と同期する)。
         line_id: 実行中ラインの ``LineFrame.line_id``。frame の無い実行
-            (keepalive / gold_panning 等の Pulse 外呼び出し) では空文字。
+            (keepalive / sluice 等の Pulse 外呼び出し) では空文字。
         aspect: このラインのアスペクト (§10)。legacy frame / frame 無しでは None。
         model_key: この Beat で実行する model の解決値 (aspect の tier から導出)。
         pulse_id: 所属 Pulse。Pulse 外の実行では空文字。
@@ -263,7 +263,7 @@ def resolve_execution_context(
     Args:
         persona: PersonaCore (またはテスト用の互換オブジェクト)。
         pulse_context: 現在の PulseContext。Pulse 外の実行 (keepalive /
-            gold_panning) では None。
+            sluice) では None。
         state: 実行 state。legacy frame (aspect 無し) の tier フォールバック
             フラグと ``_pulse_id`` の供給源。無ければ standard 扱い。
         execution_id: 実行台帳の ID (柱1)。本段階では常に None。

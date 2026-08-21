@@ -111,7 +111,7 @@ head は capture→store→render で既にこの規律を卒業している (�
 | day_report (一日新聞) | life ノードの digest |
 | あらすじのあらすじ | 時代ノードの digest |
 | Track Chronicle 1000字スキップ | 恒等圧縮の前例 (§4-3 に一般化) |
-| gold_panning | 退場時の解釈層抽出 (咀嚼と別軸で共存) |
+| スルース (sluice、旧 gold_panning) | 退場時の解釈層抽出 (咀嚼と別軸で共存) |
 | 窓集計新聞 | 知覚レンダリングの前例 (§7) |
 | thread スコープ生成 (bridge §3.5) | 継承チェーン閉じ生成の近似 → 一般解へ |
 | 中間ノード方式 (thread ノード) | 包含の木の thread 範囲ノード |

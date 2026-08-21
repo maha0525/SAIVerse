@@ -114,7 +114,7 @@ class SEARuntime:
         # persona 単位で直列化する。関所 (pending flush) が通らない場合は
         # hold が BeatGateClosedError を投げ、そのまま呼び出し側
         # (PulseController) へ伝播する — 実行は始まっておらず副作用ゼロ。
-        # spell → run_playbook の子ライン、Pulse 内の Metabolism / gold_panning
+        # spell → run_playbook の子ライン、Pulse 内の Metabolism / sluice
         # は同一スレッド再入 (RLock) で親 Beat の直列域を継承する。
         # manager に beat_gate が無い環境 (テストの SimpleNamespace 等) では
         # hold_beat が nullcontext を返して no-op。
@@ -1906,7 +1906,7 @@ class SEARuntime:
     )
 
     def _spawn_session_close(self, persona_id: str) -> None:
-        """セッションクローズ (砂金採り + Chronicle 前倒し) を daemon スレッドで実行する。
+        """セッションクローズ (スルース採取) を daemon スレッドで実行する。
 
         呼び出し元 (:meth:`run_cache_keepalive` の not-Active 分岐) は EventScheduler の
         dispatch スレッド上で走るため、そこで重い LLM 処理を同期実行すると後続の予約が
@@ -1918,13 +1918,13 @@ class SEARuntime:
                 self.session_lifecycle.run_session_close_for(persona_id)
             except Exception:
                 LOGGER.exception(
-                    "[gold_panning] session close thread crashed (persona=%s)", persona_id,
+                    "[sluice] session close thread crashed (persona=%s)", persona_id,
                 )
 
         threading.Thread(
             target=_target,
             daemon=True,
-            name=f"gold-panning-close-{persona_id}",
+            name=f"sluice-close-{persona_id}",
         ).start()
 
     def run_cache_keepalive(self, persona_id: str, model_key: Optional[str] = None) -> bool:
@@ -1963,7 +1963,7 @@ class SEARuntime:
             )
             # ペルソナの自律行動が OFF = セッションが閉じた瞬間で、anchor がまだ
             # 温かい可能性が高い唯一の停止分岐 (docs/intent/gold_panning.md §3.6)。
-            # ここで砂金採り (セッションクローズ) を別スレッドに委譲する。
+            # ここでスルース (セッションクローズ採取) を別スレッドに委譲する。
             self._spawn_session_close(persona_id)
             return False
 

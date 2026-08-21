@@ -14,7 +14,7 @@
 - **LLM を呼んでいるファイル: 23**
 - **そのうち Usage を計上しているもの: 6**
 
-計上しているもの: `sea/runtime_llm.py` / `sea/runtime.py` / `sea/work_session.py` / `sea/gold_panning.py` / `sai_memory/memopedia/generator.py` / `sai_memory/arasuji/generator.py`
+計上しているもの: `sea/runtime_llm.py` / `sea/runtime.py` / `sea/work_session.py` / `sea/sluice.py` (旧 gold_panning) / `sai_memory/memopedia/generator.py` / `sai_memory/arasuji/generator.py`
 
 計上していないものの例: `saiverse/media_summary.py`（画像・音声・動画・文書の概要, 6箇所）, `sai_memory/curation_ops.py`（記憶の編纂, 3箇所）, `sai_memory/memory/note_executor.py`（3箇所）, `sai_memory/arasuji/bands.py` / `executor.py`, `saiverse/meta_layer.py`, `manager/admin.py`, `manager/background.py`, `persona/core.py`
 
@@ -36,7 +36,7 @@
 LLM 呼び出しには性質の異なる二種類がある。
 
 **カテゴリ1: ペルソナ名義の稼働**
-出力が `assistant` としてペルソナ本人の発話・思考になる。会話、判断点（起床/就寝/セッション終了/会話終了）、`work_session`、`gold_panning`。
+出力が `assistant` としてペルソナ本人の発話・思考になる。会話、判断点（起床/就寝/セッション終了/会話終了）、`work_session`、`sluice`（旧 gold_panning）。
 必要なもの: head 一式 ＋ 会話履歴。人格の連続性が要件（→ ペルソナ倫理。履歴なしで走らせたものを本人名義で記録してはならない）。
 
 **カテゴリ2: 機構名義の処理**
@@ -75,7 +75,7 @@ LLM 呼び出しには性質の異なる二種類がある。
 
 `prepare_context` に `persona_voiced: bool = False` を追加。`True` の呼び出しで履歴ゼロが指定されたら `PersonaVoiceWithoutHistoryError` で LLM 到達前に落とす。
 
-印を付けた本番の呼び出し元: `sea/runtime_runner.py`（メインライン Playbook）、`sea/work_session.py`、`sea/gold_panning.py`。
+印を付けた本番の呼び出し元: `sea/runtime_runner.py`（メインライン Playbook）、`sea/work_session.py`、`sea/sluice.py`。
 
 この関所は `ContextRequirements` に依存しない。将来「一日をまとめる」処理や外部ゲートウェイが独自にメッセージ列を組んでペルソナ名義で書こうとしても、印を付ければ同じ検査に入る。
 

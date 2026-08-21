@@ -16,7 +16,7 @@
 
 発火点は :func:`sea.work_session.run_work_session` の ``close_hook`` (Beat
 ロック内・セッションの messages と model がそのまま = 直前コールの prefix
-cache が熱い。gold_panning と同じ理由でこの瞬間に置く)。
+cache が熱い。sluice と同じ理由でこの瞬間に置く)。
 
 **v1 スコープ**: 締めコールを持つのは作業セッション系コマのみ。軽い一手コマ
 (出かける/自室で過ごす) は Pulse 記録が SAIMemory に残り、あらすじ→関与タグは

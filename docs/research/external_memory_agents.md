@@ -62,7 +62,7 @@ hypmem は "Stay out of personhood" を明文化し、embodied-claude も host �
 
 ### ★★★ replay consolidation（embodied-claude）
 - **機構**: 記憶想起の「リプレイ」を時間窓で回し、共活性化した記憶ペアの結合を強化する。使われた繋がりが太る＝使用が記憶構造を書き換える。
-- **SAIVerse の現状**: Metabolism は eviction・Chronicle 生成・gold_panning を行うが、「想起の反復で連想を強化する」神経科学寄りの再固定は無い。
+- **SAIVerse の現状**: Metabolism は eviction・Chronicle 生成・スルース (sluice、旧 gold_panning) を行うが、「想起の反復で連想を強化する」神経科学寄りの再固定は無い。
 - **効く案件**: **Memory Atlas** の代謝設計、**記憶アーキv2**。上の連想ネットワークとセットで意味を持つ（重みを張る機構と、重みを育てる機構）。
 
 ### ★★ camera-position recall / 視点に紐づく空間記憶（embodied-claude）

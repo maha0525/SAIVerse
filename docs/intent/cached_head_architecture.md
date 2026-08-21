@@ -321,7 +321,7 @@ Section の `refresh_on_events` 未指定 = 空 frozenset = Metabolism のみで
 - **persist は commit 成否を返す** (`store.save` → bool。DB commit 失敗 / required Section の serialize 失敗 / required の実体値欠損は **DB に書き込まずに** False — 既存の正常な永続行を欠損行で上書きしない)。旧版の upsert は版条件付き UPDATE 一文で拒否 (並行保存の巻き戻り封鎖)。失敗が残る間は `ensure_persisted` が再試行し、成功するまで LLM を止める — 保存できていない head で応答を確定させると、restart 時に旧 head へ黙ってロールバックした事実と矛盾するため。ここでの不変条件は「durable な版 >= 描画する版」の**単調性**であって版の厳密一致ではない (restart が前進方向にしか動かなければ S6 の害は起きない)。optional Section の serialize 失敗は省いて保存し、restart 後の欠損再 capture で自己回復する。
 - **optional Section の失敗は degrade** (警告ログ + head から欠落) し、次 Pulse の再 capture で自動回復する。
 - required Section は capture 内で読み取り例外を握って空を返してはならない (core_memory の旧実装が該当 — DB 読み失敗が「コア記憶ゼロの本人」に化けていた)。構造的な不在 (SAIMemory 未初期化等) だけを空として返す。
-- 中断の受け皿: 会話 Pulse は呼び出し元へエラー、判断点・作業コマ・schedule は実行台帳の failed 行 (再試行あり)、gold_panning / keepalive は既存の失敗隔離で degrade。
+- 中断の受け皿: 会話 Pulse は呼び出し元へエラー、判断点・作業コマ・schedule は実行台帳の failed 行 (再試行あり)、keepalive は既存の失敗隔離で degrade。スルース (旧 gold_panning) は 2026-08-19 に失敗 = 退場停止 → 次回 Metabolism 再試行の硬い格へ昇格した (autonomous_behavior_v3.md §13.3)。
 
 回帰: `tests/test_head_fail_closed.py`。
 

@@ -474,7 +474,7 @@ def run_work_session(
 
             # ---- コマ締めの一手 (T4: 帰属判定 + 経験値ノート) ----
             # セッションと同じ messages / model のまま (直前コールで prefix が
-            # 熱い — gold_panning の defer-to-hot と同じ理由) 呼び出し側の
+            # 熱い — sluice の defer-to-hot と同じ理由) 呼び出し側の
             # close_hook に構造化出力 1 発を委ねる。hold_beat の内側 = 記録は
             # ロック下で、の不変条件に従う。締めは油であって燃料ではない —
             # 失敗はコマ (セッション) の完了を壊さない。

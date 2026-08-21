@@ -379,11 +379,21 @@ def update_entry(
     *,
     content: Any = _UNSET,
     due_at: Any = _UNSET,
+    expected_revision: Optional[int] = None,
 ) -> Dict[str, Any]:
     """open な一件の中身 (content) と期限 (due_at) を変更する。
 
     ``due_at=None`` の明示指定は「期限を外す」(期限なしへ戻す) — 省略
     (変更しない) と区別する。閉じた行 (done / withdrawn) は変更できない。
+
+    ``expected_revision`` を与えると、行の読み直しではなく**その値**を楽観ロック
+    (:func:`_guarded_transition` の WHERE) に使う — スナップショット時点の
+    revision で CAS する口 (スルースがプロンプト同梱一覧の時点の姿に対して
+    判断した更新を、実行中のユーザー編集へ黙って上書きしないため)。スナップ
+    ショット以降に他所の更新が確定していれば revision mismatch の
+    TaskBookError になる。省略 (None) は従来どおり読み直した現在値で CAS する
+    (None が正当な期待値になるのは軽量シンク後付け列の未 backfill 行だけで、
+    その行は読み直しでも None を得るため、意味は同じに落ちる)。
 
     受け入れ不変条件 (§4.1) は更新後の姿にも効く: 期限を外した結果が
     「相手なし・期限なし・origin 非 system」になる更新は拒否する
@@ -397,6 +407,12 @@ def update_entry(
         content = _require_str("content", content)
     if due_at is not _UNSET:
         _validate_epoch("due_at", due_at)
+    if expected_revision is not None and (
+        isinstance(expected_revision, bool) or not isinstance(expected_revision, int)
+    ):
+        raise TaskBookError(
+            f"expected_revision must be an int or None: {expected_revision!r}"
+        )
 
     db = manager.SessionLocal()
     try:
@@ -417,7 +433,10 @@ def update_entry(
             values[TaskBookEntry.CONTENT] = content  # _require_str で strip 済み
         if due_at is not _UNSET:
             values[TaskBookEntry.DUE_AT] = due_at
-        _guarded_transition(db, persona_id, task_id, values, entry.REVISION)
+        revision_for_cas = (
+            entry.REVISION if expected_revision is None else expected_revision
+        )
+        _guarded_transition(db, persona_id, task_id, values, revision_for_cas)
         return _reload_dict(db, persona_id, task_id)
     finally:
         db.close()

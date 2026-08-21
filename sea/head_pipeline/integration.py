@@ -96,7 +96,7 @@ def build_line_head_input(
     head の同定キーは (persona_id, model_key) (beat_execution_context.md §3.1)。
     ``model_key`` は「この head をどの Session (persona, model) に向けて
     組むか」— ExecutionContext が届いている呼び出し元 (LLM node / work_session /
-    gold_panning / keepalive) は ``execution_context.model_key`` を明示で渡す。
+    sluice / keepalive) は ``execution_context.model_key`` を明示で渡す。
     None なら persona の標準 model にフォールバックする (起動時 capture /
     dynamic_state の world イベント dispatch 等、実行の身分が無い経路)。
     """

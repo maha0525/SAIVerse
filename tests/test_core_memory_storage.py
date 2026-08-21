@@ -165,6 +165,7 @@ class CoreMemoryLegacyMigrationTest(unittest.TestCase):
             [
                 (1, "普通のメモ", 1000, 1000, "note", None, 1, None),
                 (2, "user「A」\nエア「B」", 2000, 2000, "scene", scene_meta, 1, None),
+                # 旧世代 (sluice 改名前) の自動採取行 — 実 DB に残る歴史データの再現。
                 (3, "自動採取メモ", 3000, 3000, "note", json.dumps({"source": "gold_panning"}), 0, None),
                 (4, "削除済みメモ", 4000, 4500, "note", None, 1, 4500),
             ],
@@ -197,7 +198,7 @@ class CoreMemoryLegacyMigrationTest(unittest.TestCase):
         self.assertEqual(meta["anchor_id"], "m1")
         self.assertEqual(meta["date_range"], ["2025-01-01", "2025-01-01"])
 
-        # 未確認フラグ (gold_panning 由来) が保全されている。
+        # 未確認フラグ (旧世代 gold_panning 由来の歴史データ) が保全されている。
         auto_item = next(i for i in items if i.id == 3)
         self.assertEqual(auto_item.confirmed, 0)
         self.assertEqual(json.loads(auto_item.metadata)["source"], "gold_panning")

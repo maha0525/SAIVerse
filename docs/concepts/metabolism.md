@@ -58,7 +58,7 @@ Metabolism の起点を指すマーカー。
 
 - anchor は **`session_anchor` テーブル**（1 行 = 1 (persona, model)、列 = `ANCHOR_MESSAGE_ID / TTL_SECONDS / UPDATED_AT`）に持つ（§6-3a、2026-07-17。旧 `AI.METABOLISM_ANCHORS` 単一 JSON 列は backfill の変換元としてのみ残存）
 - `UPDATED_AT` は prompt cache write 時刻で、LLM コール成功後に `touch_anchor_after_llm_call` で touch される。記帳先は **usage.model（実際に応答した model）**、touch する anchor は prefix 組成時の値を `state["_prefix_anchor_id"]` で call-local に運ぶ（persona 属性経由は廃止 — §6-5）
-- `UPDATED_AT + ttl < now` で TTL 切れ = **キャッシュが冷えた**という温度情報。keep-alive / 見張り / gold_panning の defer 判定が読む。**勝手に提示範囲を縮めない**（§13 — 旧「TTL 切れ → 次の context 構築で Metabolism trigger」は撤去）。ただし冷え切った後は保守作業の解禁条件になる（§14 — 冷えた anchor の最前線への前進・先回り畳み。判定式は `_anchor_entry_is_hot` の一枚）
+- `UPDATED_AT + ttl < now` で TTL 切れ = **キャッシュが冷えた**という温度情報。keep-alive / 見張り / スルース (sluice、旧 gold_panning) の defer 判定が読む。**勝手に提示範囲を縮めない**（§13 — 旧「TTL 切れ → 次の context 構築で Metabolism trigger」は撤去）。ただし冷え切った後は保守作業の解禁条件になる（§14 — 冷えた anchor の最前線への前進・先回り畳み。判定式は `_anchor_entry_is_hot` の一枚）
 - **二層分離（§6-5、2026-07-17）**: 編纂（Chronicle 生成）は persona に一度（実行台帳の冪等 claim `metabolism.run`）、退役（anchor 前進）は model ごと。**退役は編纂の成功（status ok / disabled）でゲート**され、編纂失敗時は据え置き → 次回自然再試行（S2 根治）
 
 **実装済**。

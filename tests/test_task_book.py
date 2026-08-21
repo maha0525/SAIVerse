@@ -156,6 +156,43 @@ class TaskBookTests(unittest.TestCase):
         fetched = TB.get_entry(self.manager, "p1", entry["task_id"])
         self.assertEqual(fetched["due_at"], 1000)  # 拒否後も無傷
 
+    def test_update_entry_expected_revision_cas(self):
+        """スナップショット時点の revision で CAS する口 (スルースの競合検出)。
+
+        古い revision を渡した update は revision mismatch で拒否され、正しい
+        revision なら通る。省略 (None) は従来どおり読み直した現在値で CAS。
+        """
+        entry = TB.add_entry(self.manager, "p1", "中身", origin="user", due_at=1000)
+        self.assertEqual(entry["revision"], 0)
+        # 他所の更新が確定して revision 0 → 1。
+        TB.update_entry(self.manager, "p1", entry["task_id"], content="他所の更新")
+        # スナップショット (revision=0) に基づく古い判断は拒否される。
+        with self.assertRaises(TB.TaskBookError):
+            TB.update_entry(
+                self.manager, "p1", entry["task_id"],
+                content="古い判断", expected_revision=0,
+            )
+        fetched = TB.get_entry(self.manager, "p1", entry["task_id"])
+        self.assertEqual(fetched["content"], "他所の更新")  # 上書きされていない
+        # 現在の revision (1) を渡せば通る。
+        updated = TB.update_entry(
+            self.manager, "p1", entry["task_id"],
+            content="現在値に基づく更新", expected_revision=1,
+        )
+        self.assertEqual(updated["content"], "現在値に基づく更新")
+        self.assertEqual(updated["revision"], 2)
+
+    def test_update_entry_expected_revision_rejects_non_int(self):
+        entry = TB.add_entry(self.manager, "p1", "中身", origin="user", due_at=1000)
+        for bad in (True, "0", 1.5):
+            with self.assertRaises(TB.TaskBookError):
+                TB.update_entry(
+                    self.manager, "p1", entry["task_id"],
+                    content="新", expected_revision=bad,
+                )
+        fetched = TB.get_entry(self.manager, "p1", entry["task_id"])
+        self.assertEqual(fetched["content"], "中身")  # 拒否後も無傷
+
     def test_raw_sql_string_due_at_is_rejected_by_check_constraint(self):
         """DB 境界の最終保証 — アプリ層を通らない生 SQL でも、文字列の DUE_AT
         は CHECK (ck_task_book_due_at_integer) が拒否する。"""

@@ -489,7 +489,7 @@ class RetirementGateTest(unittest.TestCase):
         messages = [_msg(f"m{i}", 100 + i, chars=1_000) for i in range(5)]
         window = _window(messages)
         with patch.dict(os.environ, {"ENABLE_MEMORY_WEAVE_CONTEXT": "true"}), \
-                patch.dict(os.environ, {"SAIVERSE_GOLD_PANNING_ENABLED": "0"}), \
+                patch.dict(os.environ, {"SAIVERSE_SLUICE_ENABLED": "0"}), \
                 patch.dict(os.environ, {"SAIVERSE_CHRONICLE_BAND_BUDGET": "2500"}), \
                 patch("saiverse.dynamic_state.DynamicStateManager.on_metabolism",
                       lambda *a, **k: None):
@@ -604,7 +604,7 @@ class EpisodeUnitEvictionTest(unittest.TestCase):
     def _run(self, lifecycle, messages, watermarks, *, band_budget=2_000):
         window = _window(messages)
         with patch.dict(os.environ, {"ENABLE_MEMORY_WEAVE_CONTEXT": "true"}), \
-                patch.dict(os.environ, {"SAIVERSE_GOLD_PANNING_ENABLED": "0"}), \
+                patch.dict(os.environ, {"SAIVERSE_SLUICE_ENABLED": "0"}), \
                 patch.dict(os.environ,
                            {"SAIVERSE_CHRONICLE_BAND_BUDGET": str(band_budget)}), \
                 patch("saiverse.dynamic_state.DynamicStateManager.on_metabolism",
@@ -725,7 +725,7 @@ class EpisodeUnitEvictionTest(unittest.TestCase):
         saved = []
         lifecycle.save_folded_ranges = lambda pid, mk, folds: saved.append(folds)
         with patch.dict(os.environ, {"ENABLE_MEMORY_WEAVE_CONTEXT": "true"}), \
-                patch.dict(os.environ, {"SAIVERSE_GOLD_PANNING_ENABLED": "0"}), \
+                patch.dict(os.environ, {"SAIVERSE_SLUICE_ENABLED": "0"}), \
                 patch.dict(os.environ, {"SAIVERSE_CHRONICLE_BAND_BUDGET": "2000"}), \
                 patch("saiverse.dynamic_state.DynamicStateManager.on_metabolism",
                       lambda *a, **k: None):
@@ -831,7 +831,7 @@ class ApplierVetoDeadlockTest(unittest.TestCase):
     def _run(self, lifecycle, messages, watermarks, *, window=None):
         window = window or _window(messages)
         with patch.dict(os.environ, {"ENABLE_MEMORY_WEAVE_CONTEXT": "true"}), \
-                patch.dict(os.environ, {"SAIVERSE_GOLD_PANNING_ENABLED": "0"}), \
+                patch.dict(os.environ, {"SAIVERSE_SLUICE_ENABLED": "0"}), \
                 patch.dict(os.environ, {"SAIVERSE_CHRONICLE_BAND_BUDGET": "2000"}), \
                 patch("saiverse.dynamic_state.DynamicStateManager.on_metabolism",
                       lambda *a, **k: None):
@@ -1159,7 +1159,7 @@ class MetabolismVisualizationDispatchTest(unittest.TestCase):
         )
         dispatched = []
         window = _window(messages)
-        with patch.dict(os.environ, {"SAIVERSE_GOLD_PANNING_ENABLED": "0"}), \
+        with patch.dict(os.environ, {"SAIVERSE_SLUICE_ENABLED": "0"}), \
                 patch.dict(os.environ, {"SAIVERSE_CHRONICLE_BAND_BUDGET": "2500"}), \
                 patch("saiverse.dynamic_state.DynamicStateManager.on_metabolism",
                       lambda p, m, model_key=None: dispatched.append(model_key)):
@@ -1208,7 +1208,7 @@ class MetabolismVisualizationDispatchTest(unittest.TestCase):
 
         window = _window(messages)
         with patch.dict(os.environ, {
-            "SAIVERSE_GOLD_PANNING_ENABLED": "0",
+            "SAIVERSE_SLUICE_ENABLED": "0",
             "SAIVERSE_CHRONICLE_BAND_BUDGET": "2500",
             "ENABLE_MEMORY_WEAVE_CONTEXT": "true",
         }), patch("sea.session_lifecycle.compile_groups_from_folds", _spy), \

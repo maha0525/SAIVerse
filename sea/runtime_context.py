@@ -145,14 +145,16 @@ class PersonaVoiceWithoutHistoryError(RuntimeError):
 def prepare_context(runtime, persona: Any, building_id: str, user_input: Optional[str], requirements: Optional[Any] = None, pulse_id: Optional[str] = None, warnings: Optional[List[Dict[str, Any]]] = None, preview_only: bool = False, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None, cancellation_token: Optional[Any] = None, pulse_type: Optional[str] = None, model_key: Optional[str] = None, context_meta: Optional[Dict[str, Any]] = None, persona_voiced: bool = False, persist_anchor_advance: bool = True) -> List[Dict[str, Any]]:
     # model_key: この context を届ける Session (persona, model) の実行 model
     # (beat_execution_context.md §3.1 — head は (persona, model) に一つ)。
-    # ExecutionContext が届いている呼び出し元 (work_session / gold_panning /
+    # ExecutionContext が届いている呼び出し元 (work_session / sluice /
     # keepalive / run_playbook の Pulse-root) が execution_context.model_key を
     # 渡す。None なら persona の標準 model にフォールバック (preview 等)。
     #
     # context_meta: 呼び出し元が渡す out-param dict (§3.2 の call-local anchor)。
     # この呼び出しで prefix に採用した anchor の ID を
     # ``context_meta["prefix_anchor_id"]`` に書き戻す (anchor を使わない組成では
-    # 書かない)。呼び出し元は state["_prefix_anchor_id"] に載せ、LLM 成功後の
+    # 書かない)。履歴組成が成功したときは、実際にプロンプトへ組み込んだ履歴
+    # メッセージの ID 列を ``context_meta["presented_message_ids"]`` に書き戻す
+    # (sluice の「見た集合」の一次情報 — 履歴構築失敗時はキー不在)。呼び出し元は state["_prefix_anchor_id"] に載せ、LLM 成功後の
     # ``touch_anchor_after_llm_call(anchor_id=...)`` に渡す。旧実装の
     # ``history_manager.metabolism_anchor_message_id`` (persona 単一可変属性) は
     # 廃止した — TTL 失効後に旧 anchor を touch する事故 (記憶監査第 4 片) の根治。
@@ -567,6 +569,21 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
 
                 enriched_recent = _reframe_autonomous_messages(enriched_recent)
                 messages.extend(enriched_recent)
+
+                # 実入力の履歴 ID 列 (2026-08-19, sluice の見た集合の一次情報):
+                # この呼び出しが**実際にプロンプトへ組み込んだ**履歴メッセージの
+                # ID を out-param で呼び出し元へ返す (戻り値と既存キーは不変 —
+                # prefix_anchor_id と同じ call-local の器)。上部補完 (owner 会話の
+                # 親保持) も実入力なので含める。履歴構築が失敗した場合はこのキー
+                # 自体が書かれない — 読み手 (sea/sluice.py) はキー不在を
+                # fail-closed (退場停止) に写像する。
+                if context_meta is not None:
+                    presented_ids: List[str] = []
+                    for _msg in list(supplementary_msgs) + list(enriched_recent):
+                        _mid = _msg.get("id") if isinstance(_msg, dict) else None
+                        if _mid:
+                            presented_ids.append(str(_mid))
+                    context_meta["presented_message_ids"] = presented_ids
             except Exception as exc:
                 LOGGER.exception("[sea][prepare-context] Failed to get history: %s", exc)
 

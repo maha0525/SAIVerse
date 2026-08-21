@@ -74,7 +74,8 @@ ROOT_CORE_ID = "root_core"
 CATEGORY_CORE = "core"
 
 # コア記憶固有のメタ情報キー。add_core_memory の ``metadata`` 引数 (呼び出し側が
-# 渡す任意 JSON、例: gold_panning の {"source": "gold_panning"} や scene の
+# 渡す任意 JSON、例: sluice の {"source": "sluice"} (旧世代の行は
+# {"source": "gold_panning"} のまま残る) や scene の
 # {"anchor_id":..., "message_ids":..., "date_range":...}) はこれらのキーと
 # フラットにマージしてページの metadata 列へ入れる。CoreMemory.metadata へ
 # 復元する際はこの reserved keys を除いた残りを再直列化する。
@@ -265,7 +266,7 @@ def add_core_memory(
 
     ``kind`` / ``metadata`` は 'scene' (実会話の切り抜き) / 由来参照用。
     ``confirmed`` は 0 で「未確認 (自動採取)」= ユーザーの確認待ち。ペルソナ自身や
-    ユーザーの手動追加は 1 (確認済み)。gold_panning の自動採取だけ 0 で書く。
+    ユーザーの手動追加は 1 (確認済み)。sluice の自動採取だけ 0 で書く。
     既存呼び出し (省略) は後方互換で confirmed=1 のまま動く。
     """
     from sai_memory.memopedia.storage import create_page, generate_diff, record_page_edit
@@ -304,7 +305,7 @@ def update_core_memory(
 ) -> bool:
     """既存のコア記憶を書き換える。対象が存在すれば True。
 
-    ``confirmed`` を渡すと確認フラグも更新する (gold_panning の自動 update は
+    ``confirmed`` を渡すと確認フラグも更新する (sluice の自動 update は
     confirmed=0 で「未確認」に戻し、ユーザーの再確認を促す)。省略時は現状維持。
     削除済み (ごみ箱) 対象への更新も許容する (旧 core_memories 実装と同じ挙動)。
     """
@@ -342,7 +343,7 @@ def update_core_memory(
 def remove_core_memory(conn: sqlite3.Connection, memory_id: int) -> bool:
     """コア記憶を soft-delete する (ごみ箱へ移す)。生存中の対象があれば True。
 
-    物理削除しないのは、gold_panning の自動 remove やペルソナの誤削除を
+    物理削除しないのは、sluice の自動 remove やペルソナの誤削除を
     ユーザーが後から復元できるようにするため (restore_core_memory)。
     memopedia の ``is_deleted`` と metadata の ``deleted_at`` を両方刻む
     (memopedia:N 経由でこのページに触れた場合の整合を保つ)。

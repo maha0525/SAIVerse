@@ -294,7 +294,7 @@ def test_keepalive_failure_does_not_touch_anchor(_mock_cache):
 
 
 @patch("saiverse.model_configs.get_cache_config", return_value={"type": "implicit"})
-@patch("sea.gold_panning.is_enabled", return_value=True)
+@patch("sea.sluice.is_enabled", return_value=True)
 def test_keepalive_non_explicit_reschedules_watchdog_without_llm(_mock_enabled, _mock_cache):
     """非 explicit キャッシュ (Gemini/implicit 等) では keep-alive LLM を呼ばず、
     セッション見張り (クローズ採取の足場) だけ再予約する (gold_panning.md §3.6)。"""

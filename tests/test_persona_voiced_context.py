@@ -170,7 +170,7 @@ def _prepare_context_call_kwargs(module_path: str) -> list[dict]:
 
 @pytest.mark.parametrize("module_path", [
     "sea/work_session.py",
-    "sea/gold_panning.py",
+    "sea/sluice.py",
     "sea/runtime_runner.py",
 ])
 def test_production_persona_callers_pass_the_marker(module_path):

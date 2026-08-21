@@ -231,7 +231,7 @@ class TestSelectLLMClientParity:
         assert model == "standard-model"
 
     def test_no_pulse_context_keepalive_style(self):
-        """keepalive / gold_panning 経路: pulse_context なし → standard tier。"""
+        """keepalive / sluice 経路: pulse_context なし → standard tier。"""
         persona = _persona()
         runtime = _runtime()
         ec = resolve_execution_context(persona, None)

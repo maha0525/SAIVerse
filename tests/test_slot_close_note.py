@@ -360,7 +360,7 @@ def test_empty_note_writes_nothing(manager, persona, adapter):
 
 
 def test_json_string_response_is_parsed(manager, persona, adapter):
-    """generate が JSON 文字列で返すクライアントでも解釈できる (gold_panning と同型)。"""
+    """generate が JSON 文字列で返すクライアントでも解釈できる (sluice と同型)。"""
     _run_close(manager, persona, json.dumps(
         {"belongs_to": "task:1", "note": "文字列経由の学び。"}, ensure_ascii=False,
     ))

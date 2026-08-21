@@ -1,5 +1,7 @@
 # gold_panning（砂金採り）— 押し出される記憶からの恒常知識の採取
 
+**⚠️ 2026-08-19 世代交代**: 本機構は **スルース (sluice)** へ改名・拡張された（`sea/sluice.py`。正典は `autonomous_behavior_v3.md` §13）。変わった点: ①応答スキーマに手帳メモ（want/did）と約束（promises）が加わった ②「失敗しても退場が進む」柔らかい格は廃止され、**スルース失敗 = 退場停止 → 次回再試行**（あらすじ生成と同格の硬いゲート）③環境変数は `SAIVERSE_SLUICE_*` へ改名 ④メモには担当範囲（前回パンマーカー〜今回）の span が機械刻印される。本 doc の設計理由（キャッシュ経済・pan マーカー・defer-to-hot・セッションクローズ Phase 3）は sluice にそのまま生きているため、旧名のまま存置する。以下の「gold_panning」は読み替えること。
+
 **Status**: v0.1（2026-07-07 起草、まはー×エアの設計議論に基づく）。**完了**（2026-07-10 まはー実機検証済み）。
 **2026-07-08 改訂**: 実運用で **SCENE 自動採取が暴走（1 回で数千字）** したため、gold_panning の自動採取は **NOTE（add / update / remove）のみ**に絞った。SCENE 種別自体（`create_scene_core_memory`）と手動ツール（`core_memory_add_scene`）は存置し、gold_panning の response_schema・プロンプト・ファジー照合（`_resolve_quote` 等）・`SAIVERSE_GOLD_PANNING_MIN_QUOTE_CHARS` を除去。以降 §5 以下の scene 採取に関する記述は「手動ツール経由のみ」と読み替えること。
 **2026-07-08 改訂その2**: セッションクローズ採取の window 起点を metabolism anchor から gold_panning 自身の **pan マーカー**に変更（初回は anchor を「読んでいる範囲の先頭」として使用、性質フィルタ main_line/committed は外して読んでいる生履歴全体を範囲に取る）。metabolism anchor は cache TTL 都合で動く点なので採取範囲の境界に不適で、失効・張り直しで window が縮む（sophie 実機で 4 件に縮む問題）。不変条件「gold_panning の範囲 ⊇ Metabolism eviction」は起点=前回処理末尾で保たれる。§3.6 参照。（応答後経路との整合: pan マーカーは時系列で前進するので位置ずれは穴を生まず、user 発話も window カウント外だが発動時の context には載るため採取材料になる。応答後経路の変更は不要。）

@@ -67,7 +67,7 @@
 | **土地への参照様式** | **クリップ**（範囲） | **クリップ**（点〜引用） | **クリップ**（origin_quote 等）＋ artifact_refs |
 | **開閉** | **ページ開閉に移植**（読み出し経路を Memopedia 開閉に揃える——ここだけ開閉無関係だとペルソナが触る時に困る。直近章は既定で開く等の既定則が要る） | open/close per thread（`PageState`）。**コア記憶＝常時開＋`is_important`** | 「開いている目的」＝出来事側の性質（旧 TrackOpenNote） |
 | **既存 root との対応** | （新設） | people / terms / events / **plans** | （新設。plans からの自動昇格はしない、下記） |
-| **編纂の担い手** | Metabolism バッチ（ArasujiGenerator） | 同バッチ相乗り（entity_extractor）＋ gold_panning ＋ ペルソナ自身のスペル | 判断点（起床・就寝の接ぎ直し）＋ 収穫（クリップ→candidate） |
+| **編纂の担い手** | Metabolism バッチ（ArasujiGenerator） | 同バッチ相乗り（entity_extractor）＋ スルース (sluice、旧 gold_panning) ＋ ペルソナ自身のスペル | 判断点（起床・就寝の接ぎ直し）＋ 収穫（クリップ→candidate） |
 
 - **vividness は廃止確定**（まはー 2026-07-10）: 減衰未発動（バグ疑い）＋ head 索引廃止で効果なし、に加えて**「見えなくするだけで生産性がない」＝lifecycle として不成立**。置換は構造状態（肥大化/過小）——見えなくする代わりに、分割・統合という生産的な代謝を駆動する。
 - **意味の地図の代謝は半分実装済み**（事実確認 2026-07-10）: `scripts/maintain_memopedia.py` が `merge-similar`（LLM類似統合）/ `split-large`（5000字超分割）を持つ。ただし**手動スクリプトで lifecycle 未配線**——「操作は在るが代謝になっていない」。Atlas 化＝これをノード状態駆動で判断点/Metabolism に配線する話。`note_organizer.py`（目標2000字・圧縮閾値3000字の配置計画）にも同じ思想の閾値がある（生死未確認）。
@@ -427,7 +427,7 @@ P2c の前提となる消費者棚卸しは **[docs/handoff/2026-07-10_memory_at
 1. **できごと / Beat / Pulse の階層明示** — 「できごと＝Pulse の集合」は「Pulse＝Beat の集合」と同型。ここは綺麗に階層構造として定義しなおせる。課題2つ: ①「できごと」の名前をなんとかしたい ②Beat が実体（型）を持たないのをなんとかしたい（既存 issue: `beat_concept_not_typed_in_implementation.md`）。総じて **Beat ⊂ Pulse ⊂ できごと を明示的な階層として定義**。
 2. **時間割 = schedule 統合** — 時間割（`PersonaDayPlan`）は「できごとの発生を未来の日時に予約するもの」＝ schedule（EventScheduler）と本質同じ。統合可能。
 3. **spell ⊇ Playbook（Playbook はスペルの類型）** — `run_playbook` スペルで Playbook を呼んでいる以上、ペルソナから見てスペルと Playbook の差はほぼ無い。**Playbook をスペルの一類型**と定義できるのでは。
-4. **Metabolism / anchor = Session サイクルの命名** — Session 概念が明確になれば、Metabolism は「Session サイクルの中でやること」に名前を付けただけになる。anchor も同様。砂金採り（gold_panning）の発火タイミングもここに綺麗に収まる。→ [`session.md`](session.md) の明確化とセット。
+4. **Metabolism / anchor = Session サイクルの命名** — Session 概念が明確になれば、Metabolism は「Session サイクルの中でやること」に名前を付けただけになる。anchor も同様。スルース（sluice、旧 gold_panning）の発火タイミングもここに綺麗に収まる。→ [`session.md`](session.md) の明確化とセット。
 5. **事前実行スペル = Schedule と Building/Persona 設定の統一** — 事前実行スペル（pre_spells）が Schedule と Building/Persona ごとの設定で「似て非なる制御」をしている。統一したい。
 
 ---

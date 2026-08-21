@@ -879,8 +879,9 @@ class SessionLifecycle:
         (life_concept_map.md §14 A2、まはー決定 2026-07-07) → いまは「セッション
         見張り」に一般化した。explicit キャッシュ (Anthropic) では見張りが keep-alive
         を兼ねる (同一 prefix を温め直す)。非 explicit では見張りは温めず、TTL 接近時に
-        :meth:`run_cache_keepalive` を再発火させてセッションクローズ (gold_panning
-        Phase 3) を採取する足場になる (docs/intent/gold_panning.md §3.6)。
+        :meth:`run_cache_keepalive` を再発火させてセッションクローズ (sluice
+        Phase 3) を採取する足場になる (docs/intent/gold_panning.md §3.6 —
+        機構の intent は旧名のまま残る)。
 
         計算: ``fire_at = now + cache_ttl_seconds * (1 - cache_threshold_ratio)``
         (キャッシュ寿命のうち threshold_ratio 分が残ったタイミング)。
@@ -972,22 +973,22 @@ class SessionLifecycle:
 
         explicit の keep-alive と違い、LLM で prefix を温め直さない。目的はただ一つ:
         TTL 接近時に :meth:`run_cache_keepalive` を再発火させ、その時点でペルソナが
-        Active でなければセッションクローズ (gold_panning Phase 3) を採取すること。
+        Active でなければセッションクローズ (sluice Phase 3) を採取すること。
         Active のままなら見張りを再予約して待つ (docs/intent/gold_panning.md §3.6)。
 
         explicit 経路との違い:
 
         - ``keep_cache_alive`` ゲートには従わない (見張りは keep-alive ではない)。
-        - gold_panning が無効なら予約しない (見張りの唯一の目的がクローズ採取のため)。
+        - sluice が無効なら予約しない (見張りの唯一の目的がクローズ採取のため)。
 
         ``is_enabled()`` は **発火時ではなく予約時** に読む。含意: env
-        (``SAIVERSE_GOLD_PANNING_ENABLED``) を切り替えても既に入っている予約は生き
+        (``SAIVERSE_SLUICE_ENABLED``) を切り替えても既に入っている予約は生き
         続け、次の予約 (再発火 → 再予約の輪) から反映される。
 
         予約 key は explicit と共通の ``f"ttl:{persona_id}:{model_key}"``
         ((persona, model) ごとに独立予約 — beat_execution_context.md §3.1)。
         """
-        from sea.gold_panning import is_enabled
+        from sea.sluice import is_enabled
 
         persona_id = getattr(persona, "persona_id", None)
         if not persona_id:
@@ -995,7 +996,7 @@ class SessionLifecycle:
 
         if not is_enabled():
             LOGGER.debug(
-                "[watchdog] session watchdog skipped (gold_panning disabled): persona=%s model=%s",
+                "[watchdog] session watchdog skipped (sluice disabled): persona=%s model=%s",
                 persona_id, model_key,
             )
             return
@@ -1073,7 +1074,7 @@ class SessionLifecycle:
             persona._metabolism_token_triggered = False
 
         # defer-to-hot で繰り延べ中のフラグ (token_triggered と同格で should_run に
-        # OR 参加する)。docs/intent/gold_panning.md §3.7
+        # OR 参加する)。docs/intent/gold_panning.md §3.7 (sluice の旧名 intent)
         pending = getattr(persona, "_metabolism_pending", False)
 
         watermarks = self.get_metabolism_watermarks(persona, model_key)
@@ -1121,11 +1122,11 @@ class SessionLifecycle:
             persona._metabolism_pending = False
             return
 
-        # defer-to-hot (docs/intent/gold_panning.md §3.7): gold_panning は直前の
+        # defer-to-hot (docs/intent/gold_panning.md §3.7): sluice は直前の
         # (main_line, default) コールで温まった prefix に 1 手足すのが安い条件。
-        # キャッシュが冷たければ Metabolism ごと繰り延べる。gold_panning 無効時は
-        # 熱さ判定をスキップして従来どおり即実行する (defer は gold_panning のためにある)。
-        from sea.gold_panning import get_pending_cap, is_enabled
+        # キャッシュが冷たければ Metabolism ごと繰り延べる。sluice 無効時は
+        # 熱さ判定をスキップして従来どおり即実行する (defer は sluice のためにある)。
+        from sea.sluice import get_pending_cap, is_enabled
         if is_enabled():
             cap = get_pending_cap()
             pressure_limit = (
@@ -1136,14 +1137,14 @@ class SessionLifecycle:
                 # 圧力弁: 繰り延べ続けて毎ターン肥大ウィンドウを読むより、一回の
                 # コールド代のほうが安い。明示ログを残す (不変条件 §5-1 の例外)。
                 LOGGER.warning(
-                    "[gold_panning] pressure valve: running metabolism cold "
+                    "[sluice] pressure valve: running metabolism cold "
                     "(persona=%s, %d chars > limit=%.0f)",
                     getattr(persona, "persona_id", "?"), current_chars, pressure_limit,
                 )
             elif not self._is_cache_hot(persona, model_key):
                 persona._metabolism_pending = True
                 LOGGER.info(
-                    "[gold_panning] deferring metabolism (cache cold) for %s; pending set",
+                    "[sluice] deferring metabolism (cache cold) for %s; pending set",
                     getattr(persona, "persona_id", "?"),
                 )
                 return
@@ -1401,7 +1402,7 @@ class SessionLifecycle:
             )
         except Exception:
             LOGGER.warning(
-                "[gold_panning] failed to read anchor state for hot check (persona=%s)",
+                "[sluice] failed to read anchor state for hot check (persona=%s)",
                 getattr(persona, "persona_id", "?"), exc_info=True,
             )
             return False
@@ -1414,7 +1415,7 @@ class SessionLifecycle:
 
         「冷え切った」の判定式はこの一枚だけ (arasuji_levels.md §14-6-3 —
         判定式を二枚にしない)。読み手: :meth:`_is_cache_hot` (keep-alive /
-        gold_panning defer)、:meth:`resolve_metabolism_anchor` (機構1)、
+        sluice defer)、:meth:`resolve_metabolism_anchor` (機構1)、
         :meth:`cold_precompaction_status` (機構3)。
         """
         if not entry or not entry.get("updated_at"):
@@ -1754,7 +1755,7 @@ class SessionLifecycle:
         (編纂なしで忘れる設計合意)。
 
         Beat ロック (beat_execution_context.md §3.4): Metabolism は persona の
-        記憶 (Chronicle / gold_panning のコア記憶採取記録) に書くため、入口で
+        記憶 (Chronicle / sluice の採取判断記録) に書くため、入口で
         beat_gate.hold(purpose="metabolism") を通す。Pulse 内 (run_meta_user
         経由) の呼び出しは同一スレッドの RLock 再入で無害 (関所も再実行され
         ない)。
@@ -2729,21 +2730,85 @@ class SessionLifecycle:
         # (2026-07-04 の実測で確認済み)。自動想起 (ゾーン C) の再現率を支える。
         self.ensure_recall_embeddings(persona)
 
-        # 2.8. gold_panning (砂金採り) — Chronicle 生成後・eviction 前の温まった
-        # prefix で、押し出される会話から恒常知識をコア記憶に採取する。
-        # 失敗隔離は不変条件 (docs/intent/gold_panning.md §5-2): gold_panning が
-        # どう死んでもアンカー更新 (下の step 3) は必ず実行される。
-        try:
-            from sea.gold_panning import run_gold_panning
-            run_gold_panning(self, persona, building_id, current_messages, evict_count, event_callback)
-        except Exception:
-            LOGGER.exception("[gold_panning] failed; metabolism continues")
+        # 2.8. スルース (sluice) — Chronicle 生成後・eviction 前の温まった
+        # prefix で、押し出される会話からコア記憶・手帳メモ・約束を採取する。
+        # 確実に通るゲート (autonomous_behavior_v3.md §13.3): スルースが失敗したら
+        # 退場を止める — あらすじ生成の失敗と同格で、anchor が据え置かれるので
+        # watermark 超過が残り、次の maybe_run_metabolism が自然に再試行する。
+        # 旧 gold_panning の「失敗しても退場が進む」柔らかい格は廃止 (2026-08-19)。
+        # 編纂が failed / deferred の回は走らせない — 退場は既に止まっており、
+        # 走らせるとパンマーカーだけ前進して再試行時の担当範囲が痩せる。
+        sluice_status = "ok"
+        sluice_seen_ids: Optional[List[str]] = None
+        sluice_seen_end: Optional[str] = None
+        sluice_finalize = None
+        if chronicle_status in ("ok", "disabled"):
+            try:
+                from sea.sluice import run_sluice
+                sluice_summary = run_sluice(
+                    self, persona, building_id, current_messages, evict_count,
+                    event_callback, finalize=False,
+                )
+                sluice_seen_ids = (sluice_summary or {}).get("seen_ids")
+                sluice_seen_end = (sluice_summary or {}).get("seen_span_end")
+                sluice_finalize = (sluice_summary or {}).get("finalize")
+            except Exception:
+                LOGGER.exception(
+                    "[sluice] failed; eviction blocked, will retry on next metabolism",
+                )
+                sluice_status = "failed"
+
+        # 2.9. 二段の検算と確定 (Codex 第五巡 修正 2 — v3 §13.3 の不変条件:
+        # 全経験は退場前に一度本人の目を通る)。seen_ids が None なのは disabled
+        # スキップだけで、そのとき退場は「採取なしで忘れる」設計どおり進む。
+        #
+        # ① 確定 (マーカー前進 + 台帳 completed) のゲート: マーカーの新位置
+        #    (seen_span_end) 以前の窓のメッセージが**全件 seen に含まれる**とき
+        #    だけ確定する。コールド実行の anchor 前進で窓の頭が LLM 入力から
+        #    漏れた回にマーカーを進めると、その未提示メッセージは次回の担当
+        #    範囲からも漏れて永遠に採取されない — その回は確定を保留し、記録は
+        #    applied のまま次回の再適用に委ねる。
+        # ② 退場のゲート: 退場計画の対象 ID **全件**が seen に含まれるときだけ
+        #    退場する。新着 (seen の後ろ) が計画に入った回はここで止まる —
+        #    ①は通る (マーカーは未提示を跨がない) ので確定は済み、次回の
+        #    Metabolism が新しいスルースで新着を見てから退場する (現行の
+        #    「新着は退場見送り → 次回の新スルース」経路)。
+        if sluice_status == "ok" and sluice_seen_ids is not None:
+            finalize_ok = _marker_advance_is_safe(
+                current_messages, sluice_seen_ids, sluice_seen_end,
+            )
+            evict_ok = _eviction_within_seen(plan, sluice_seen_ids)
+            if finalize_ok and sluice_finalize is not None:
+                try:
+                    sluice_finalize()
+                except Exception:
+                    LOGGER.exception(
+                        "[sluice] finalize failed; eviction blocked "
+                        "(record stays applied, will retry on next metabolism)",
+                    )
+                    sluice_status = "failed"
+            elif not finalize_ok:
+                LOGGER.info(
+                    "[sluice] finalize withheld: marker advance to %s would skip "
+                    "messages the sluice never saw (persona=%s); record stays "
+                    "applied for re-application on the next metabolism",
+                    sluice_seen_end, persona_id,
+                )
+            if sluice_status == "ok" and not (finalize_ok and evict_ok):
+                LOGGER.info(
+                    "[sluice] eviction deferred (finalize_ok=%s evict_ok=%s, "
+                    "persona=%s, seen=%d ids); the next metabolism will run a "
+                    "fresh sluice over the unseen range first",
+                    finalize_ok, evict_ok, persona_id, len(sluice_seen_ids),
+                )
+                sluice_status = "unseen_tail"
 
         # 3. Update anchor to new window start — S2 ガード: 編纂が済んだ
-        # ("ok") か編纂を持たない設計 ("disabled") のときだけ退役する。
-        # failed / deferred は据え置き — watermark 超過が残るので、次の
-        # maybe_run_metabolism が自然に再試行する (beat_execution_context.md §3.2)。
-        if chronicle_status in ("ok", "disabled"):
+        # ("ok") か編纂を持たない設計 ("disabled")、かつスルースが通った
+        # ときだけ退役する。failed / deferred は据え置き — watermark 超過が
+        # 残るので、次の maybe_run_metabolism が自然に再試行する
+        # (beat_execution_context.md §3.2 / autonomous_behavior_v3.md §13.3)。
+        if chronicle_status in ("ok", "disabled") and sluice_status == "ok":
             self._apply_eviction_plan(
                 persona, model_key, window, plan, chronicle_status,
             )
@@ -2769,18 +2834,29 @@ class SessionLifecycle:
             return "ok"
         else:
             LOGGER.warning(
-                "[metabolism] anchor held back (chronicle_status=%s, model=%s); "
-                "will retry on next maybe_run_metabolism",
-                chronicle_status, model_key,
+                "[metabolism] anchor held back (chronicle_status=%s, "
+                "sluice_status=%s, model=%s); will retry on next "
+                "maybe_run_metabolism",
+                chronicle_status, sluice_status, model_key,
             )
+            if chronicle_status not in ("ok", "disabled"):
+                message = "記憶の整理を見送りました（Chronicle生成が完了しなかったため、次回に再試行します）"
+                ret = chronicle_status  # "failed" / "deferred" (手動入口の結果報告用)
+            elif sluice_status == "unseen_tail":
+                # スルース自体は成功している (採取とマーカー前進は確定済み)。
+                # 退場だけを次回へ譲る。
+                message = "記憶の整理を見送りました（採取が済んでいない新しい会話があるため、次回に改めて整理します）"
+                ret = "deferred"
+            else:
+                message = "記憶の整理を見送りました（記憶の採取（スルース）が完了しなかったため、次回に再試行します）"
+                ret = "failed"
             if event_callback:
                 event_callback({
                     "type": "metabolism",
                     "status": "completed",
-                    "content": "記憶の整理を見送りました（Chronicle生成が完了しなかったため、次回に再試行します）",
+                    "content": message,
                 })
-            # "failed" / "deferred" をそのまま返す (手動入口が結果報告に使う)
-            return chronicle_status
+            return ret
 
     def _retry_extraction_backlog(
         self,
@@ -3002,7 +3078,7 @@ class SessionLifecycle:
         全量整理は None (現行どおり全未編纂を時系列で整列)。
 
         全入口 (①応答後 Metabolism ②会話前 anchor 失効 ③手動 organize-memory
-        ④session close ⑤①内 gold_panning) が合流する一点のため、編纂の冪等
+        ④session close ⑤①内 sluice) が合流する一点のため、編纂の冪等
         claim (実行台帳 kind="metabolism.run"、M1 の解) はここで行う
         (beat_execution_context.md §3.2 — 編纂は persona に一度)。
 
@@ -3573,17 +3649,65 @@ class SessionLifecycle:
             LOGGER.exception("[metabolism] Embedding generation failed")
 
     def run_session_close_for(self, persona_id: str) -> None:
-        """persona_id からペルソナを引いて gold_panning のセッションクローズを走らせる。
+        """persona_id からペルソナを引いて sluice のセッションクローズを走らせる。
 
         SEARuntime._spawn_session_close の別スレッドから呼ばれる薄いラッパ。
         run_cache_keepalive と同じく manager.personas から引く。
         """
         persona = (getattr(self.manager, "personas", None) or {}).get(persona_id)
         if persona is None:
-            LOGGER.debug("[gold_panning] session close: persona not found (%s)", persona_id)
+            LOGGER.debug("[sluice] session close: persona not found (%s)", persona_id)
             return
-        from sea.gold_panning import run_session_close
+        from sea.sluice import run_session_close
         run_session_close(self, persona)
+
+
+def _marker_advance_is_safe(
+    current_messages: List[Dict[str, Any]],
+    seen_ids: List[str],
+    seen_end_id: Optional[str],
+) -> bool:
+    """パンマーカーを seen_end_id へ進めてよいか (未提示メッセージを跨がないか)。
+
+    窓 (current_messages) の並びで seen_end_id 以前にある全メッセージが seen に
+    含まれるときだけ True。跨ぐ形でマーカーが進むと、跨がれた未提示メッセージは
+    次回の担当範囲 (マーカー以降) からも漏れて永遠に採取されない (Codex 第五巡
+    修正 2 の芯)。seen_end_id が無い (マーカーは進まない) なら常に安全。
+    seen_end_id が窓に見つからない場合は安全側の False (確定保留)。
+    """
+    if not seen_end_id:
+        return True
+    seen = {str(message_id) for message_id in seen_ids}
+    target = str(seen_end_id)
+    ids = [
+        str(m.get("id")) for m in current_messages
+        if isinstance(m, dict) and m.get("id")
+    ]
+    end_pos: Optional[int] = None
+    for index in range(len(ids) - 1, -1, -1):  # 複数一致は後勝ち
+        if ids[index] == target:
+            end_pos = index
+            break
+    if end_pos is None:
+        return False
+    return all(message_id in seen for message_id in ids[: end_pos + 1])
+
+
+def _eviction_within_seen(plan, seen_ids: List[str]) -> bool:
+    """退場計画の対象 ID 全件がスルースの見た集合に含まれるかを検算する。
+
+    v3 §13.3 の不変条件 (全経験は退場前に一度本人の目を通る) の退場側の検算。
+    末尾位置の勘定 (代理指標) ではなく **ID 集合の包含**で見る — コールド実行で
+    _prepare_context が anchor を前進させ、退場計画の土台とスルース入力がズレる
+    並び (Codex 第三巡 修正 1) は末尾勘定では拾えない。1 件でも欠ければ False
+    (退場見送り)。次回の Metabolism でスルースが今の窓を見れば自然に通る。
+    """
+    seen = {str(message_id) for message_id in seen_ids}
+    for fold in plan.folds:
+        for message_id in fold.message_ids:
+            if str(message_id) not in seen:
+                return False
+    return True
 
 
 def collect_folded_chronicle_entry_ids(

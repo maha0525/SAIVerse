@@ -5,7 +5,7 @@ docs/intent/execution_ledger.md §2.2-2.3 の実装:
 
 - **Beat ロック**: persona 単位の :class:`threading.RLock`。persona の記憶に
   書く可能性のある生成処理 (会話 Pulse / META 判断 / 自律 / 作業セッション /
-  Metabolism / gold_panning) を直列化する。どの記録も直前の記録を読める状態で
+  Metabolism / sluice) を直列化する。どの記録も直前の記録を読める状態で
   生成される — 「一直線 = 踏まえた」が構造的に真になる (不変条件 9)。
 - **関所 (fail-closed)**: Beat の開始 (= 最外周のロック取得) 直後に
   ``execution_ledger.flush_pending_for_persona`` を実行し、pending が残る

@@ -19,7 +19,7 @@ scene 作成の窓切り出し・整形・保存は sai_memory.core_memory.creat
 に集約されており、スペル (memory_clip mode='transcribe' paste_to='core'、旧
 core_memory_add_scene) と本 API が同じ関数を呼ぶ。
 
-訂正導線 (confirm/edit/delete/restore) は gold_panning の自動採取 (confirmed=0) を
+訂正導線 (confirm/edit/delete/restore) は sluice の自動採取 (confirmed=0) を
 含むコア記憶をユーザーが後追いで直せるようにするための面。ユーザーの edit/delete/
 restore は「仮想センサー」(_notify_persona_correction) でペルソナへ event_message
 通知する — 記憶を黙って書き換えず本人が気づける形にして自己像の尊厳を保つ
