@@ -344,12 +344,12 @@ class SluiceRunTest(_AdapterTestBase):
 
     # -- 2026-08-22 掃討フェーズ 束 3 指摘 3-1 ---------------------------
 
-    def test_a_preview_only_memory_is_not_overwritten(self):
-        """⭐ 先頭だけ見せた記憶を丸ごと書き換えさせない。
+    def test_a_long_scene_memory_is_not_overwritten(self):
+        """⭐ 場面の記憶 (実会話の写し) を丸ごと書き換えさせない。
 
-        CAS が守るのは「実行中に他人が書き換えていないか」だけで、「本人が全文を
-        見たか」は守らない。切り詰めた先頭だけを見たまま update が返ると、誰も
-        書き換えていないので CAS は通り、全文がその先頭に潰れる。
+        CAS が守るのは「実行中に他人が書き換えていないか」だけで、写しの改変は
+        守らない。先頭だけを見たまま update が返ると、誰も書き換えていないので
+        CAS は通り、全文がその先頭に潰れる。
         """
         from sai_memory.core_memory import add_core_memory
         from sea.sluice import _SCENE_PREVIEW_CHARS
@@ -371,13 +371,15 @@ class SluiceRunTest(_AdapterTestBase):
         cores = self._list_core()
         self.assertEqual(cores[0].content, full)
         row = _read_sluice_record(self.adapter)
-        self.assertIn("先頭だけ", row[0])
+        self.assertIn("場面の記憶", row[0])
 
-    def test_a_short_scene_memory_is_still_updatable(self):
-        """切り詰めずに見せた場面の記憶は、従来どおり書き換えられる。
+    def test_a_short_scene_memory_is_also_rejected(self):
+        """⭐ 80 字以下の場面の記憶も書き換えられない (歯止めは長さではなく種類)。
 
-        歯止めが「scene 種すべて」へ広がると、全文を見せている相手まで直せなく
-        なる。効くのは「全文を見せていないとき」だけ。
+        2026-08-22 裁定で塞いだ穴 (docs/issues/sluice_truncated_scene_update.md)。
+        以前ここは「切り詰めずに見せた scene は直せる」を仕様として固定して
+        いたが、scene は実会話の写しなので、全文を見せていても本人が書き換える
+        ことは捏造にあたる。歯止めを長さで書くと、短い写しだけ改変できる穴が残る。
         """
         from sai_memory.core_memory import add_core_memory
         from sea.sluice import _SCENE_PREVIEW_CHARS
@@ -391,12 +393,53 @@ class SluiceRunTest(_AdapterTestBase):
         ])
         summary, _ = self._run(result)
 
-        self.assertEqual(summary["ops_applied"], 1)
+        self.assertEqual(summary["ops_applied"], 0)
+        self.assertEqual(summary["ops_failed"], 1)
         cores = self._list_core()
-        self.assertEqual(cores[0].content, "書き直した本文")
+        self.assertEqual(cores[0].content, short)  # 写しは無傷
+        row = _read_sluice_record(self.adapter)
+        self.assertIn("場面の記憶", row[0])
+
+    def test_a_scene_memory_can_still_be_removed(self):
+        """写しを消すことは改変ではない — remove は従来どおり通る。"""
+        from sai_memory.core_memory import add_core_memory
+
+        with self.adapter._db_lock:
+            mid = add_core_memory(self.adapter.conn, "短い場面", kind="scene")
+
+        result = _sluice_result(reflection="整えた", ops=[
+            {"op": "remove", "memory_id": mid},
+        ])
+        summary, _ = self._run(result)
+
+        self.assertEqual(summary["ops_applied"], 1)
+        self.assertEqual(self._list_core(), [])
+
+    def test_scene_is_still_presented_truncated(self):
+        """提示側の切り詰めは先頭 80 字のまま (歯止めを種類へ移しても変えない)。
+
+        歯止めと提示が別の規則になったので、提示側が黙って全文提示へ変わって
+        いないことをここで固定する (プロンプトの分量が跳ねるのを防ぐ)。
+        """
+        from sea.sluice import _SCENE_PREVIEW_CHARS, _is_presented_truncated
+
+        class _Mem:
+            def __init__(self, kind, content):
+                self.kind = kind
+                self.content = content
+
+        self.assertTrue(
+            _is_presented_truncated(_Mem("scene", "あ" * (_SCENE_PREVIEW_CHARS + 1)))
+        )
+        self.assertFalse(
+            _is_presented_truncated(_Mem("scene", "あ" * _SCENE_PREVIEW_CHARS))
+        )
+        self.assertFalse(
+            _is_presented_truncated(_Mem("note", "あ" * (_SCENE_PREVIEW_CHARS + 1)))
+        )
 
     def test_a_long_note_memory_is_still_updatable(self):
-        """長くても scene 種でなければ切り詰めていないので、書き換えられる。"""
+        """長くても scene 種でなければ写しではないので、書き換えられる。"""
         from sai_memory.core_memory import add_core_memory
         from sea.sluice import _SCENE_PREVIEW_CHARS
 
@@ -756,6 +799,55 @@ class SluiceApplyExtensionTest(_AdapterTestBase):
         rows = self._memo_rows()
         self.assertEqual(rows[0][4], "m3")  # マーカーの次から
         self.assertEqual(rows[0][5], "m4")
+
+    # -- 2026-08-22 掃討フェーズ 束 3: 担当範囲をまたぐ内容重複 ------------
+
+    def test_same_memo_from_a_later_span_is_not_written_twice(self):
+        """⭐ 退場が繰り越された次の回に同じメモが返っても、二行目を書かない。
+
+        issue の具体的な並び (docs/issues/sluice_memo_duplicate_across_spans.md):
+        Metabolism #1 が m0..m4 を見てメモを書く → 退場は繰り越され、窓には
+        採取済みの m0..m4 が残ったまま新着 m5/m6 が積まれる → #2 の担当範囲は
+        m5..m6 なので冪等キーが変わり、同じ内容でも通ってしまっていた。
+        """
+        result = {
+            **_sluice_result(),
+            "did_memos": [
+                {"new_activity_name": "小説を書く", "text": "星を拾う話の続きを書いた"},
+            ],
+        }
+        msgs1 = [{"id": f"m{i}", "content": "x"} for i in range(5)]
+        summary1, _ = self._run(result, current_messages=msgs1)
+        self.assertEqual(summary1["memos_applied"], 1)
+        self.assertEqual(len(self._memo_rows()), 1)
+
+        # 退場が繰り越された回: 窓には採取済みの m0..m4 が残り、m5/m6 が積まれる。
+        msgs2 = [{"id": f"m{i}", "content": "x"} for i in range(7)]
+        summary2, _ = self._run(result, current_messages=msgs2, run_id="run-2")
+
+        rows = self._memo_rows()
+        self.assertEqual(len(rows), 1)  # 二行目は書かれない
+        self.assertEqual(rows[0][6], "sluice:m0..m4:m0")  # 一行目 (初回の刻印) が残る
+        # スキップは成功扱い (退場停止のゲートに乗せない)。
+        self.assertEqual(summary2["memos_failed"], 0)
+        record = _read_sluice_record(self.adapter)[0]
+        self.assertIn("既に手帳にあるため採りませんでした", record)
+
+    def test_prompt_states_the_span_scope(self):
+        """⭐ 手帳の節で、今回の対象範囲を本人へ明示する (重複の供給源を塞ぐ)。"""
+        msgs = [{"id": f"m{i}", "content": "x"} for i in range(5)]
+        _summary, client = self._run(
+            _sluice_result(), current_messages=msgs, marker="m2",
+        )
+        prompt = client.calls[0]["messages"][-1]["content"]
+        self.assertIn("今回の対象は直近 2 通の会話です", prompt)
+        self.assertIn("それより前は前回の整理で採取済みです", prompt)
+
+    def test_prompt_says_whole_window_when_the_marker_is_gone(self):
+        """マーカーが窓に無い (初回 / 押し出されて消えた) ときは窓全体が対象。"""
+        _summary, client = self._run(_sluice_result())
+        prompt = client.calls[0]["messages"][-1]["content"]
+        self.assertIn("今回は手元の会話全体が対象です", prompt)
 
     # -- 冪等: 同じ担当範囲 (span) の再適用が重複しない --------------------
 

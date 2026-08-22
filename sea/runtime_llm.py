@@ -17,7 +17,11 @@ from llm_clients.exceptions import LLMError
 from sea.beat_gate import BeatGateClosedError
 from sea.cancellation import ExecutionCancelledException
 from sea.mcp_tool_refresh import refresh_mcp_tools_at_head
-from sea.message_stamp import append_presented_message_id, record_call_tokens
+from sea.message_stamp import (
+    append_presented_message_id,
+    clear_call_tokens,
+    record_call_tokens,
+)
 from sea.runtime_utils import _format, _is_llm_streaming_enabled
 from saiverse.logging_config import log_sea_trace
 from sea.playbook_models import PlaybookSchema
@@ -49,6 +53,17 @@ from tools.context import persona_context
 from sea.mode_spell_permissions import check_spell_permission
 
 LOGGER = logging.getLogger(__name__)
+
+#: 「この Beat の本文は既に SAIMemory へ保存済み」の印。値は保存した本文そのもの。
+#:
+#: 504 で切れた応答の続きが空だったとき、部分文は
+#: :func:`_respeak_after_stream_timeout` の中で保存済みなので、下流の memorize が
+#: もう一度書くと本人が同じ言葉を二度言ったことになる。値を本文にしてあるのは、
+#: 印を置いた後で本文が差し替わった (spell の continuation 等) ときに一致せず、
+#: 通常どおり保存されるため — 取りこぼすより二重に書く方へ倒す。
+#: 印は :func:`_finalize_beat` が必ず pop して消費する (残すと次の Beat の保存を
+#: 黙って止める)。出自: docs/issues/stamp_empty_continuation_double_save.md。
+_ALREADY_STORED_STATE_KEY = "_beat_response_already_stored"
 
 
 def _maybe_record_cache_storage(usage, persona_id: str | None, building_id: str | None) -> None:
@@ -362,8 +377,12 @@ def _respeak_after_stream_timeout(
       metadata に載せる。これを飛ばすと継続文に初回コールの数字が乗り
       (他人の記帳を自分の事実として刻む)、継続分の課金がどこにも残らない。
 
-    戻り値は下流 (memorize / output_key) が使う本文 — 継続が空だった場合は
-    ``partial_text`` をそのまま返す (= 従来どおり部分文で確定)。
+    戻り値は下流 (memorize / output_key) が使う本文。継続が空だった場合も
+    ``partial_text`` を返す — 本人が実際に言ったのは部分文なので、state["last"] /
+    assistant message / PulseContext にはそれが載るべきだから。ただし部分文は
+    この関数が既に保存しているので、**その一行を二度書かせない印**
+    (:data:`_ALREADY_STORED_STATE_KEY`) を state に置き、:func:`_finalize_beat`
+    の memorize だけを飛ばす。
     """
     err_code = stream_error.get("code", 504)
     err_msg = stream_error.get(
@@ -451,6 +470,21 @@ def _respeak_after_stream_timeout(
     cont_text = "".join(cont_chunks)
     if not cont_text.strip():
         LOGGER.warning("[sea][llm] Re-speak after 504 returned empty response")
+        # 新しい発言は生まれなかった。部分文は上の _store_memory で保存済みなので、
+        # 下流の memorize がもう一度書くと本人が同じ言葉を二度言ったことになる
+        # (docs/issues/stamp_empty_continuation_double_save.md)。この行だけを
+        # 飛ばす印を置く — 戻り値は部分文のまま返す (空文字を返すと空の
+        # assistant 行が後続の messages へ流れ込む。2026-04-28 に潰した経路)。
+        state[_ALREADY_STORED_STATE_KEY] = partial_text
+        # 継続コールの三つ組は state に載っている (_record_llm_usage は空応答でも
+        # 必ず通すので) が、この Beat はもう行を書かない。落とさなければ、次に
+        # 書かれる行に「その本文を書いていないコール」の数字が乗る。
+        #
+        # 前駆 (presented ids) は落とさない — 直前に append した部分文の id は、
+        # 次に書かれる行が実際に見た最後の永続行として正しいまま。clear_call_tokens
+        # と対で落とす規律は「本文の作り手が変わった区間」のためのもので、ここは
+        # 作り手が変わったのではなく、新しい本文が生まれなかっただけ。
+        clear_call_tokens(state)
         return partial_text
 
     # Send streaming_complete for continuation
@@ -491,6 +525,9 @@ def _finalize_beat(runtime, beat: BeatExecution) -> None:
       important dual-write）。経路ごとに取得点が違うため、ここでは
       ``state["_last_thought_signature"]`` に集約済みの値だけを読む
       （`docs/intent/thought_signature_persistence.md`）。
+    - **同じ本文を二度保存しない**。既に保存済みの本文で来た Beat
+      （504 の継続が空だった経路）は memorize だけを飛ばす
+      （:data:`_ALREADY_STORED_STATE_KEY`）。
     """
     persona = beat.persona
     node_def = beat.node_def
@@ -502,6 +539,9 @@ def _finalize_beat(runtime, beat: BeatExecution) -> None:
     prompt = beat.prompt
     text = beat.continuation
     schema_consumed = beat.schema_consumed
+    # 保存済みの印は**必ずここで消費する** — 残すと次の Beat の memorize を
+    # 黙って止める。判定は下の memorize で本文と突き合わせる。
+    already_stored_text = state.pop(_ALREADY_STORED_STATE_KEY, None)
 
     state["last"] = text
     # Structured output may return a dict; serialise to JSON string
@@ -625,7 +665,17 @@ def _finalize_beat(runtime, beat: BeatExecution) -> None:
         # Save response (assistant role) — paired with the prompt that
         # produced it, so the action template lives alongside the response
         # rather than as a separate fake-user turn.
-        if text and text != "(error in llm node)":
+        #
+        # already_stored_text と一致する本文は書かない: 504 の継続が空だった回、
+        # 部分文は _respeak_after_stream_timeout が既に保存している。もう一度
+        # 書くと本人が同じ言葉を二度言ったことになる
+        # (docs/issues/stamp_empty_continuation_double_save.md)。一致しなければ
+        # 通常どおり保存する — 印が古い/本文が差し替わった場合に取りこぼさない。
+        if (
+            text
+            and text != "(error in llm node)"
+            and not (already_stored_text is not None and text == already_stored_text)
+        ):
             # If structured output was consumed, format as JSON string for memory
             content_to_save = text
             if schema_consumed and isinstance(text, dict):
@@ -706,8 +756,17 @@ def _finalize_beat(runtime, beat: BeatExecution) -> None:
                 )
 
     # Important flag: dual-write to messages (long-term memory) if not already memorized
+    #
+    # memorize と同じ本文を書く経路なので、保存済みの印も同じように効かせる —
+    # 片方だけ塞ぐと important ノードの 504 空継続で二重保存が残る。
     _is_important = getattr(node_def, "important", False)
-    if _is_important and not memorize_config and text and text != "(error in llm node)":
+    if (
+        _is_important
+        and not memorize_config
+        and text
+        and text != "(error in llm node)"
+        and not (already_stored_text is not None and text == already_stored_text)
+    ):
         pulse_id = state.get("_pulse_id")
         content_to_save = text
         if schema_consumed and isinstance(text, dict):

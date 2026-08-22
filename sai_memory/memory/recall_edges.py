@@ -18,7 +18,7 @@ import sqlite3
 import time
 from typing import Iterable, List, Optional
 
-from sai_memory.memory.pocketbook import validate_epoch
+from sai_memory.memory.pocketbook import owns_transaction, validate_epoch
 
 #: 1 文 (``IN (...)``) に載せるページ id の上限。SQLite の変数上限
 #: (古いビルドでは 999) に当たらない範囲へ刻む。
@@ -37,8 +37,10 @@ def init_chunk_page_edge_tables(
     Args:
         commit: False にすると確定しない。呼び出し元が既にトランザクションを
             開いている場合に渡す —— ここで commit すると他人の書き込みを
-            巻き込んで確定してしまう。
+            巻き込んで確定してしまう。渡し忘れても、呼び出し元が既に束を
+            開いていれば確定しない (:func:`~sai_memory.memory.pocketbook.owns_transaction`)。
     """
+    owns_txn = owns_transaction(conn, commit)
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS chunk_page_edges (
@@ -53,7 +55,7 @@ def init_chunk_page_edge_tables(
         "CREATE INDEX IF NOT EXISTS idx_chunk_page_edges_entity "
         "ON chunk_page_edges(entity_page_id)"
     )
-    if commit:
+    if owns_txn:
         conn.commit()
 
 
@@ -72,8 +74,10 @@ def add_chunk_page_edge(
             同じトランザクションに収める呼び出し元
             (:func:`~sai_memory.memory.entity_extractor._record_involvement_edges`)
             が渡す —— 1 本ずつ確定すると、検査を通った後に失効した実行の辺が
-            確定済みで残る。
+            確定済みで残る。渡し忘れても、呼び出し元が既に束を開いていれば
+            確定しない (:func:`~sai_memory.memory.pocketbook.owns_transaction`)。
     """
+    owns_txn = owns_transaction(conn, commit)
     # ページ ID は本システムでは常に文字列。非文字列は TEXT affinity の変換で
     # '123' の顔に着地して Memopedia ページ ID と照合できない辺が永続する —
     # 暗黙変換で救わず入口で拒否する (continuity.add_thread_edge と同族の口)。
@@ -94,7 +98,7 @@ def add_chunk_page_edge(
         "chronicle_page_id, entity_page_id, created_at) VALUES (?, ?, ?)",
         (chronicle_page_id, entity_page_id, ts),
     )
-    if commit:
+    if owns_txn:
         conn.commit()
     return cur.rowcount > 0
 

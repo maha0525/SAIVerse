@@ -1,6 +1,20 @@
 # 手帳まわりの `commit` 引数が「トランザクションの所有」を検査していない
 
-**状態**: 裁定済み・実装待ち (2026-08-22 裁定)。**現に壊れている経路は無い** — 罠が開いているだけ。直し方は下の「裁定」節で確定した。
+**状態**: ✅ 完了 (2026-08-22 実装・回帰テスト済み)。裁定どおり所有判定をヘルパへ集約した。
+
+## 実装 (2026-08-22)
+
+判定を `pocketbook.owns_transaction(conn, commit)` 一つに集約し、`pocketbook.py` の書き込み関数すべて (`add_activity` / `get_or_create_activity` / `rename_activity` / `close_activity` / `add_memo`) が**最初の execute より前**に一度だけ取った結果を、成功時の commit と失敗時の rollback の両方で使う形に揃えた。`recall_edges.add_chunk_page_edge` にも同じ形を当てた。`continuity.add_thread_edge` は既に所有判定を持つので触っていない。
+
+裁定の範囲に無かったが同じ形だったので一緒に直したもの: `init_pocketbook_tables` と `recall_edges.init_chunk_page_edge_tables` の末尾の確定。前者は `commit` の旗すら持たず無条件に確定していた (断り方が無いぶん悪い)。
+
+ヘルパの置き場を `pocketbook.py` にしたのは、同モジュールの `validate_epoch` を `recall_edges` / `continuity` が既に import している前例に合わせたため。
+
+回帰テスト (`tests/test_pocketbook_and_edges.py::TestTransactionOwnership`): ①既定のまま呼んでも呼び出し元の未確定分を確定させない (rollback で全部消える)、②`IntegrityError` の収束経路でも呼び出し元の束を巻き戻さない、③辺の記帳も同じ規則。修正を外すと 4 件落ちることを確認した (④は既存テストの契約変更ぶん)。
+
+**既存テストの契約を一つ書き換えた**: `test_add_memo_idem_hit_with_commit_true_commits_the_transaction` は「commit=True なら呼び手の未確定分も一緒に確定する」を仕様として固定していた (この issue の ⚠ 節が指摘した考え方そのもの)。所有判定の導入で契約が変わったため、`test_add_memo_idem_hit_does_not_confirm_callers_transaction` へ置き換え、ロック残りを見る側は `test_add_memo_idem_hit_leaves_no_lock_when_it_owns_the_transaction` として所有する場合に限定した。
+
+**同じ形が残っている隣 (未着手)**: `sai_memory/arasuji/storage.py` (2 箇所) と `sai_memory/memopedia/storage.py` (4 箇所) が同じ「`commit=True` 既定 + 所有を検査しない `if commit:`」を持つ。裁定の範囲外なので今回は触っていない。
 
 ## 裁定 (2026-08-22、まはー + Fable)
 

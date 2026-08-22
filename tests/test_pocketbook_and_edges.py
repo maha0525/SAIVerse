@@ -693,23 +693,21 @@ class TestPocketbookConcurrency(PocketbookTestBase):
         count = self.conn.execute("SELECT COUNT(*) FROM memos").fetchone()[0]
         self.assertEqual(count, 2)
 
-    def test_add_memo_idem_hit_with_commit_true_commits_the_transaction(self):
-        """⭐ 冪等ヒットの早期 return も commit=True の契約どおりトランザクション
-        を確定する — 同接続の未確定分 (commit=False の add_activity) も一緒に
-        確定され、return 後に書き込みロックが残らない。"""
+    def test_add_memo_idem_hit_leaves_no_lock_when_it_owns_the_transaction(self):
+        """⭐ 冪等ヒットの早期 return がロックを残さない — 本関数が所有する場合。
+
+        呼び出し元が束を開いていなければ、冪等ヒットでも確定してから返る
+        (トランザクションが無ければ commit は no-op)。return 後に書き込み
+        ロックが残らないことを、別接続の書き込みが通ることで示す。
+        """
         m1 = pocketbook.add_memo(
             self.conn, self.act.id, "2026-08-19", "did", "一度目",
             idem_key="run-1:op-1")
-
-        # 同接続に未確定の書き込みを置いてから、冪等ヒットを commit=True で呼ぶ。
-        pending = pocketbook.add_activity(
-            self.conn, "未確定の活動", "sluice", commit=False)
-        self.assertTrue(self.conn.in_transaction)
         m2 = pocketbook.add_memo(
             self.conn, self.act.id, "2026-08-19", "did", "二度目 (再試行)",
             idem_key="run-1:op-1", commit=True)
         self.assertEqual(m2.id, m1.id)
-        self.assertFalse(self.conn.in_transaction)  # 確定済み — ロックが残らない
+        self.assertFalse(self.conn.in_transaction)
 
         # 別接続 (timeout 短め) の書き込みが成功する — ロック残りなしの証拠。
         writer = sqlite3.connect(self.db_path, timeout=0.5)
@@ -720,8 +718,33 @@ class TestPocketbookConcurrency(PocketbookTestBase):
             (self.act.id,))
         writer.commit()
 
-        # 未確定分は rollback ではなく確定された (契約: 呼び手の分も一緒に確定)。
-        self.assertIsNotNone(pocketbook.get_activity(self.conn, pending.id))
+    def test_add_memo_idem_hit_does_not_confirm_callers_transaction(self):
+        """⭐ 呼び出し元が束を開いていれば、冪等ヒットでも確定しない (所有の旗)。
+
+        2026-08-22 裁定で契約が変わった箇所
+        (docs/issues/pocketbook_commit_flag_is_not_ownership_check.md)。
+        以前ここは「commit=True なら呼び手の未確定分も一緒に確定する」を仕様と
+        して固定していたが、それは呼び出し元が後から取り消せる範囲を奪う挙動
+        だった。所有していない束の確定も巻き戻しも、呼び出し元に委ねる。
+        書き込みロックは束を開いた側が持ち、閉じるのもその側の責任。
+        """
+        m1 = pocketbook.add_memo(
+            self.conn, self.act.id, "2026-08-19", "did", "一度目",
+            idem_key="run-1:op-1")
+
+        # 同接続に未確定の書き込みを置いてから、冪等ヒットを既定のまま呼ぶ。
+        pending = pocketbook.add_activity(
+            self.conn, "未確定の活動", "sluice", commit=False)
+        self.assertTrue(self.conn.in_transaction)
+        m2 = pocketbook.add_memo(
+            self.conn, self.act.id, "2026-08-19", "did", "二度目 (再試行)",
+            idem_key="run-1:op-1", commit=True)
+        self.assertEqual(m2.id, m1.id)
+        self.assertTrue(self.conn.in_transaction)  # 呼び出し元の束は開いたまま
+
+        # 呼び出し元は自分の束をまだ取り消せる — 未確定分は消える。
+        self.conn.rollback()
+        self.assertIsNone(pocketbook.get_activity(self.conn, pending.id))
 
     def test_get_or_create_activity_two_connection_interleave_converges(self):
         """⭐ 二接続のインターリーブで open な同名が二本にならない —
@@ -931,6 +954,122 @@ class TestEdgeDeletionOnlyIgnoresAMissingTable(PocketbookTestBase):
         count = self.conn.execute(
             "SELECT COUNT(*) FROM chunk_page_edges").fetchone()[0]
         self.assertEqual(count, 1)
+
+
+class TestFindMemoByContent(PocketbookTestBase):
+    """内容ベースの重複判定は「同じ日・同じ活動・同じ種類・同じ本文」の四つ組。
+
+    出自: docs/issues/sluice_memo_duplicate_across_spans.md (2026-08-22 裁定)。
+    手帳は日々の記録なので、日が違えば同じ本文でも別の事実 —— 単純な内容一致で
+    弾くと正しい記録が落ちる。種類 (want / did) も同じ理由で分ける。
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.act = pocketbook.add_activity(self.conn, "小説を書く", "sluice")
+        self.other = pocketbook.add_activity(self.conn, "絵の練習", "sluice")
+        pocketbook.add_memo(
+            self.conn, self.act.id, "2026-08-22", "did", "続きを書いた")
+
+    def test_the_same_four_tuple_is_found(self):
+        found = pocketbook.find_memo_by_content(
+            self.conn, self.act.id, "2026-08-22", "did", "続きを書いた")
+        self.assertIsNotNone(found)
+        self.assertEqual(found.text, "続きを書いた")
+
+    def test_a_different_day_is_not_a_duplicate(self):
+        """「今日も小説を書いた」が二日続くのは重複ではなく事実。"""
+        self.assertIsNone(pocketbook.find_memo_by_content(
+            self.conn, self.act.id, "2026-08-23", "did", "続きを書いた"))
+
+    def test_a_different_kind_is_not_a_duplicate(self):
+        """「やりたい」と「やった」は同じ本文でも別の記録。"""
+        self.assertIsNone(pocketbook.find_memo_by_content(
+            self.conn, self.act.id, "2026-08-22", "want", "続きを書いた"))
+
+    def test_a_different_activity_is_not_a_duplicate(self):
+        self.assertIsNone(pocketbook.find_memo_by_content(
+            self.conn, self.other.id, "2026-08-22", "did", "続きを書いた"))
+
+    def test_a_different_text_is_not_a_duplicate(self):
+        self.assertIsNone(pocketbook.find_memo_by_content(
+            self.conn, self.act.id, "2026-08-22", "did", "冒頭を書き直した"))
+
+    def test_invalid_arguments_are_rejected(self):
+        """入口の検査は兄弟関数と同じ口 (暗黙変換で救わない)。"""
+        with self.assertRaises(ValueError):
+            pocketbook.find_memo_by_content(
+                self.conn, self.act.id, "2026-8-22", "did", "続きを書いた")
+        with self.assertRaises(ValueError):
+            pocketbook.find_memo_by_content(
+                self.conn, self.act.id, "2026-08-22", "todo", "続きを書いた")
+        with self.assertRaises(ValueError):
+            pocketbook.find_memo_by_content(
+                self.conn, True, "2026-08-22", "did", "続きを書いた")
+
+
+class TestTransactionOwnership(PocketbookTestBase):
+    """``commit=True`` は「所有の旗」— 呼び出し元の束を巻き込まない。
+
+    出自: docs/issues/pocketbook_commit_flag_is_not_ownership_check.md
+    (2026-08-22 裁定)。既定 (``commit=True``) のまま、既にトランザクションを
+    開いている接続から呼ばれたとき、確定も巻き戻しも呼び出し元に委ねること。
+    巻き込んで確定させる (成功時) と呼び出し元は後から取り消せなくなり、
+    巻き込んで捨てる (失敗時) と呼び出し元の書き込みが黙って消える。
+    """
+
+    def test_add_memo_default_commit_does_not_confirm_callers_writes(self):
+        """成功しても、呼び出し元の未確定分を確定させない (rollback で全部消える)。"""
+        act = pocketbook.add_activity(self.conn, "小説を書く", "sluice")
+
+        self.conn.execute("BEGIN")
+        self.conn.execute(
+            "UPDATE activities SET name = ? WHERE id = ?", ("改名した", act.id)
+        )
+        pocketbook.add_memo(  # 既定の commit=True のまま — 所有していないので確定しない
+            self.conn, act.id, "2026-08-22", "did", "冒頭の三行を書いた"
+        )
+        self.conn.rollback()
+
+        # 呼び出し元の改名も、その束の中で書かれたメモも、両方消えている
+        self.assertEqual(pocketbook.get_activity(self.conn, act.id).name, "小説を書く")
+        self.assertEqual(pocketbook.list_memos(self.conn, act.id), [])
+
+    def test_add_activity_integrity_error_does_not_discard_callers_writes(self):
+        """IntegrityError の収束経路でも、呼び出し元の束を巻き戻さない。"""
+        existing = pocketbook.add_activity(self.conn, "小説を書く", "sluice")
+
+        self.conn.execute("BEGIN")
+        self.conn.execute(
+            "INSERT INTO memos(activity_id, date, kind, text) VALUES (?, ?, ?, ?)",
+            (existing.id, "2026-08-22", "did", "呼び出し元の書き込み"),
+        )
+        # open 同名 → 部分 UNIQUE に弾かれ、既存行へ収束する経路を通る
+        got = pocketbook.add_activity(self.conn, "小説を書く", "sluice")
+        self.assertEqual(got.id, existing.id)
+
+        # 呼び出し元の束は生きたまま — 巻き戻されていない
+        self.assertTrue(self.conn.in_transaction)
+        self.conn.commit()
+        self.assertEqual(
+            [m.text for m in pocketbook.list_memos(self.conn, existing.id)],
+            ["呼び出し元の書き込み"],
+        )
+
+    def test_add_chunk_page_edge_default_commit_does_not_confirm_callers_writes(self):
+        """辺の記帳も同じ規則 (recall_edges 側の同型)。"""
+        self.conn.execute("BEGIN")
+        self.conn.execute(
+            "INSERT INTO chunk_page_edges("
+            "chronicle_page_id, entity_page_id, created_at) VALUES (?, ?, ?)",
+            ("chron-caller", "page-caller", 1),
+        )
+        recall_edges.add_chunk_page_edge(self.conn, "chron-1", "page-a")
+        self.conn.rollback()
+
+        count = self.conn.execute(
+            "SELECT COUNT(*) FROM chunk_page_edges").fetchone()[0]
+        self.assertEqual(count, 0)
 
 
 if __name__ == "__main__":

@@ -621,12 +621,43 @@ class TestStreamTimeoutContinuation:
         assert metadata["llm_usage"]["input_tokens"] == 1500
         assert metadata["llm_usage"]["output_tokens"] == 60
 
-    def test_empty_continuation_still_clears_the_stale_triple(self):
-        """継続が空でもトークンは消費されている。初回の数字を居残らせない。"""
+    def test_empty_continuation_leaves_no_triple_behind(self):
+        """⭐ 継続が空 = この Beat はもう行を書かない。三つ組を残さない。
+
+        2026-08-22 裁定で挙動が変わった箇所
+        (docs/issues/stamp_empty_continuation_double_save.md)。以前は継続コールの
+        三つ組が state に残る形で固定されていた (初回の数字を居残らせないため)。
+        行が書かれないと決まった以上、残すと次に書かれる行 — その本文を書いて
+        いない別ノードの発言 — にその数字が乗る。初回の数字が居残らないことも
+        同時に満たす。継続コールの使用量そのものは _record_llm_usage で
+        usage_tracker へ記帳済みなので、費用の記録は失われない。
+        """
         result, state, _spy, _runtime, _client = self._run(cont_chunks=("",))
         assert result == "途中まで書い"
-        # 継続コールの usage が state を上書きしている (初回の 1200 ではない)
-        assert state[CALL_TOKENS_STATE_KEY]["input"] == 1500
+        assert CALL_TOKENS_STATE_KEY not in state
+
+    def test_empty_continuation_marks_the_partial_as_already_stored(self):
+        """⭐ 部分文は保存済み — 下流の memorize に同じ行を書かせない印を置く。
+
+        戻り値は部分文のまま (本人が実際に言ったのはそれ) なので、印が無いと
+        下流がもう一度保存し、本人が同じ言葉を二度言ったことになる。
+        """
+        from sea.runtime_llm import _ALREADY_STORED_STATE_KEY
+
+        result, state, spy, _runtime, _client = self._run(cont_chunks=("",))
+        assert result == "途中まで書い"
+        # この関数の中で保存されたのは部分文の一行だけ
+        assert [r["text"] for r in spy.assistant_rows()] == ["途中まで書い"]
+        assert state[_ALREADY_STORED_STATE_KEY] == "途中まで書い"
+
+    def test_continuation_present_leaves_no_already_stored_mark(self):
+        """継続があった回は二行 (部分文 + 継続文) が正しいので、印を置かない。"""
+        from sea.runtime_llm import _ALREADY_STORED_STATE_KEY
+
+        result, state, spy, _runtime, _client = self._run()
+        assert result == "続きです。"
+        assert [r["text"] for r in spy.assistant_rows()] == ["途中まで書い"]
+        assert _ALREADY_STORED_STATE_KEY not in state
 
     def test_continuation_without_usage_leaves_no_triple(self):
         """使用量を返さなかった継続コール — 初回の数字を借りない。"""

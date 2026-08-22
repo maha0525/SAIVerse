@@ -16,7 +16,11 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from sea.runtime_llm import BeatExecution, _finalize_beat
+from sea.runtime_llm import (
+    _ALREADY_STORED_STATE_KEY,
+    BeatExecution,
+    _finalize_beat,
+)
 
 
 def _playbook(name="pb", display_name="表示名"):
@@ -308,6 +312,55 @@ class ImportantDualWriteTest(FinalizeTestBase):
             continuation="(error in llm node)",
         ))
         self.runtime._store_memory.assert_not_called()
+
+
+class AlreadyStoredResponseTest(FinalizeTestBase):
+    """既に保存済みの本文で来た Beat は、同じ行をもう一度書かない。
+
+    出自: docs/issues/stamp_empty_continuation_double_save.md (2026-08-22 裁定)。
+    504 で切れた応答の続きが空だった回、部分文は
+    ``_respeak_after_stream_timeout`` の中で保存済みで、戻り値としても返る
+    (本人が実際に言ったのは部分文だから)。印が無いと下流がもう一度保存し、
+    本人が同じ言葉を二度言ったことになる。
+    """
+
+    def test_memorize_is_skipped_for_the_already_stored_text(self):
+        state = {_ALREADY_STORED_STATE_KEY: "response"}
+        _finalize_beat(self.runtime, _beat(
+            state=state, node_def=_node_def(memorize=True),
+        ))
+        self.runtime._store_memory.assert_not_called()
+
+    def test_important_dual_write_is_skipped_too(self):
+        """memorize と同じ本文を書く隣の経路にも同じ歯止めが効く。"""
+        state = {_ALREADY_STORED_STATE_KEY: "response"}
+        _finalize_beat(self.runtime, _beat(
+            state=state, node_def=_node_def(important=True),
+        ))
+        self.runtime._store_memory.assert_not_called()
+
+    def test_a_different_text_is_still_saved(self):
+        """印が古い / 本文が差し替わった回は通常どおり保存する (取りこぼさない)。"""
+        state = {_ALREADY_STORED_STATE_KEY: "途中まで書い"}
+        _finalize_beat(self.runtime, _beat(
+            state=state, node_def=_node_def(memorize=True),
+            continuation="別のノードの発言",
+        ))
+        self.runtime._store_memory.assert_called_once()
+
+    def test_the_mark_is_consumed_so_the_next_beat_saves(self):
+        """印は必ず消費する — 残すと次の Beat の保存を黙って止める。"""
+        state = {_ALREADY_STORED_STATE_KEY: "response"}
+        _finalize_beat(self.runtime, _beat(
+            state=state, node_def=_node_def(memorize=True),
+        ))
+        self.assertNotIn(_ALREADY_STORED_STATE_KEY, state)
+
+        self.runtime._store_memory.reset_mock()
+        _finalize_beat(self.runtime, _beat(
+            state=state, node_def=_node_def(memorize=True),
+        ))
+        self.runtime._store_memory.assert_called_once()
 
 
 if __name__ == "__main__":

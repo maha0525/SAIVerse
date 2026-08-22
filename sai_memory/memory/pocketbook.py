@@ -37,12 +37,38 @@ MEMO_KINDS = ("did", "want")
 _DATE_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
 
 
+def owns_transaction(conn: sqlite3.Connection, commit: bool = True) -> bool:
+    """この呼び出しがトランザクションの持ち主かを判定する。
+
+    本モジュールの書き込み関数は ``commit=True`` を既定に持つが、これは
+    「確定してよい」ではなく「**この関数がトランザクションを所有する**」の旗
+    である。呼び手が既に束を開いている (``conn.in_transaction``) ところへ
+    既定のまま呼ばれたとき、旗を額面どおり受け取ると呼び手の未確定分まで
+    巻き込んで確定させ (成功時)、あるいは巻き込んで捨てる (失敗時)。所有は
+    ``commit`` だけでは決まらず、呼び手の状態と合わせて初めて決まる。
+
+    ⚠ **最初の ``execute`` より前に一度だけ**呼び、その結果を成功時の commit
+    と失敗時の rollback の**両方**で使うこと。DML を一文でも実行すると暗黙に
+    トランザクションが開き、以後 ``conn.in_transaction`` は呼び手の有無に
+    関わらず True になるため、実行後に判定しても意味を成さない。片方だけを
+    所有判定にすると、失敗時に呼び手の束を巻き戻す経路が残る。
+
+    出自: docs/issues/pocketbook_commit_flag_is_not_ownership_check.md
+    (2026-08-22 裁定 — 判定をここ一箇所に集約し、書き写しをやめる)。
+    """
+    return bool(commit) and not conn.in_transaction
+
+
 def init_pocketbook_tables(conn: sqlite3.Connection) -> None:
     """手帳のテーブル二枚 (activities / memos) を用意する。冪等。"""
     # storage が init_db 内で本モジュールを import する (相互依存の腕が片方
     # 遅延) ため、逆向きのこの import も遅延させて循環を避ける。
     from sai_memory.memory.storage import _ensure_column
 
+    # commit の旗を持たない関数だが、末尾の確定が呼び手の束を巻き込む構図は
+    # 書き込み関数と同じ (むしろ断り方が無いぶん悪い) — 所有判定を最初の
+    # execute より前に取る。
+    owns_txn = owns_transaction(conn)
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS activities (
@@ -89,7 +115,8 @@ def init_pocketbook_tables(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_memos_idem ON memos(idem_key)"
     )
-    conn.commit()
+    if owns_txn:
+        conn.commit()
 
 
 @dataclass
@@ -214,7 +241,9 @@ def add_activity(
     open な同名が既にあると INSERT は部分 UNIQUE (idx_activities_open_name)
     に弾かれる — そのときは既存の open 同名行へ収束して返す (get-or-create)。
     ``commit=False`` は、呼び手が一連の操作を一つのトランザクションに束ねて
-    最後に ``conn.commit()`` する用 (既定 True = 従来どおり即 commit)。
+    最後に ``conn.commit()`` する用 (既定 True = 従来どおり即 commit)。既定の
+    まま呼ばれても、呼び手が既にトランザクションを開いていれば確定も巻き戻しも
+    しない (:func:`owns_transaction` — 所有していない束には触らない)。
     """
     if origin not in ACTIVITY_ORIGINS:
         raise ValueError(
@@ -223,6 +252,7 @@ def add_activity(
     if not isinstance(name, str) or not name.strip():
         raise ValueError("activity name must be a non-empty string")
     validate_epoch("born_at", born_at)
+    owns_txn = owns_transaction(conn, commit)
     ts = int(time.time()) if born_at is None else born_at
     try:
         cur = conn.execute(
@@ -230,15 +260,15 @@ def add_activity(
             "VALUES (?, 'open', ?, ?, NULL)",
             (name.strip(), ts, origin),
         )
-        if commit:
+        if owns_txn:
             conn.commit()
     except sqlite3.IntegrityError:
         # open 同名の部分 UNIQUE (idx_activities_open_name) に弾かれた — 並行の
         # 追加が先に入っている。DB 境界の最終保証なので、既存の open 同名行を
-        # 読み直して返す (get-or-create へ収束)。commit=True (本関数所有) は
-        # 失敗した文が暗黙に開いたトランザクションを先に巻き戻す。commit=False
-        # は失敗した文だけが巻き戻っており、束は呼び手が閉じるので触らない。
-        if commit:
+        # 読み直して返す (get-or-create へ収束)。所有しているとき (owns_txn) は
+        # 失敗した文が暗黙に開いたトランザクションを先に巻き戻す。所有していない
+        # ときは失敗した文だけが巻き戻っており、束は呼び手が閉じるので触らない。
+        if owns_txn:
             conn.rollback()
         row = conn.execute(
             f"SELECT {_ACTIVITY_COLUMNS} FROM activities "
@@ -249,10 +279,10 @@ def add_activity(
             raise
         return _row_to_activity(row)
     except BaseException:
-        # commit=True (本関数がトランザクションを所有) の失敗で、失敗した文が
+        # 本関数がトランザクションを所有しているときの失敗で、失敗した文が
         # 暗黙に開いたトランザクションを開きっぱなしにしない — 巻き戻してから
-        # 送出する。commit=False は呼び手の束なので触らない。
-        if commit:
+        # 送出する。所有していなければ呼び手の束なので触らない。
+        if owns_txn:
             conn.rollback()
         raise
     return Activity(
@@ -302,7 +332,7 @@ def get_or_create_activity(
     if not isinstance(name, str) or not name.strip():
         raise ValueError("activity name must be a non-empty string")
     stripped = name.strip()
-    manage_txn = commit and not conn.in_transaction
+    manage_txn = owns_transaction(conn, commit)
     if manage_txn:
         conn.execute("BEGIN IMMEDIATE")
     try:
@@ -345,17 +375,18 @@ def rename_activity(
     _validate_activity_id(activity_id)
     if not isinstance(new_name, str) or not new_name.strip():
         raise ValueError("activity name must be a non-empty string")
+    owns_txn = owns_transaction(conn, commit)
     try:
         cur = conn.execute(
             "UPDATE activities SET name = ? WHERE id = ?",
             (new_name.strip(), activity_id),
         )
-        if commit:
+        if owns_txn:
             conn.commit()
     except BaseException:
-        # commit=True (本関数所有) の失敗はトランザクションを開きっぱなしに
-        # しない — 巻き戻してから送出する。commit=False は呼び手の束に委ねる。
-        if commit:
+        # 所有しているときの失敗はトランザクションを開きっぱなしにしない —
+        # 巻き戻してから送出する。所有していなければ呼び手の束に委ねる。
+        if owns_txn:
             conn.rollback()
         raise
     return cur.rowcount > 0
@@ -375,6 +406,7 @@ def close_activity(
     """
     _validate_activity_id(activity_id)
     validate_epoch("closed_at", closed_at)
+    owns_txn = owns_transaction(conn, commit)
     ts = int(time.time()) if closed_at is None else closed_at
     try:
         cur = conn.execute(
@@ -382,12 +414,12 @@ def close_activity(
             "WHERE id = ? AND status = 'open'",
             (ts, activity_id),
         )
-        if commit:
+        if owns_txn:
             conn.commit()
     except BaseException:
-        # commit=True (本関数所有) の失敗はトランザクションを開きっぱなしに
-        # しない — 巻き戻してから送出する。commit=False は呼び手の束に委ねる。
-        if commit:
+        # 所有しているときの失敗はトランザクションを開きっぱなしにしない —
+        # 巻き戻してから送出する。所有していなければ呼び手の束に委ねる。
+        if owns_txn:
             conn.rollback()
         raise
     return cur.rowcount > 0
@@ -423,6 +455,42 @@ def _get_memo_by_idem_key(conn: sqlite3.Connection, idem_key: str) -> Optional[M
     return _row_to_memo(row) if row else None
 
 
+def find_memo_by_content(
+    conn: sqlite3.Connection,
+    activity_id: int,
+    date: str,
+    kind: str,
+    text: str,
+) -> Optional[Memo]:
+    """同じ日・同じアクティビティ・同じ種類・同じ本文のメモを探す (重複防止用)。
+
+    冪等キー (``idem_key``) が守るのは「同じ担当範囲の同じ番号」の再適用だけ
+    なので、担当範囲が変われば同じ内容でも別キーになって通る。退場が次回へ
+    繰り越された回は採取済みの会話が窓に残り、本人が同じメモをもう一度返す —
+    その内容ベースの重複をここで見つける。
+
+    日付を条件に含めるのは、手帳が日々の記録だから — 「今日も小説を書いた」が
+    二日続くのは重複ではなく事実で、単純な内容一致で弾くと正しい記録が落ちる。
+    種類 (want / did) も分けるのは同じ理由 (「やりたい」と「やった」は別の記録)。
+
+    照合は書き込みと同じトランザクションの中で行うこと (check-then-act の隙間を
+    作らない)。出自: docs/issues/sluice_memo_duplicate_across_spans.md。
+    """
+    _validate_activity_id(activity_id)
+    _validate_date(date)
+    if kind not in MEMO_KINDS:
+        raise ValueError(f"unknown memo kind: {kind!r} (expected one of {MEMO_KINDS})")
+    if not isinstance(text, str):
+        raise ValueError(f"memo text must be a string, got: {text!r}")
+    row = conn.execute(
+        f"SELECT {_MEMO_COLUMNS} FROM memos "
+        "WHERE activity_id = ? AND date = ? AND kind = ? AND text = ? "
+        "ORDER BY id ASC LIMIT 1",
+        (activity_id, date, kind, text),
+    ).fetchone()
+    return _row_to_memo(row) if row else None
+
+
 def add_memo(
     conn: sqlite3.Connection,
     activity_id: int,
@@ -441,8 +509,11 @@ def add_memo(
     同じメモが二重に書かれるのを防ぐ (既存が勝つ)。キーは呼び手 (スルース) が
     スルース実行 ID + 操作番号で採番する。省略 (None) は従来どおり毎回新規。
     ``commit=False`` は、呼び手が一連の操作を一つのトランザクションに束ねて
-    最後に ``conn.commit()`` する用 (既定 True = 従来どおり即 commit)。
+    最後に ``conn.commit()`` する用 (既定 True = 従来どおり即 commit)。既定の
+    まま呼ばれても、呼び手が既にトランザクションを開いていれば確定も巻き戻しも
+    しない (:func:`owns_transaction`)。
     """
+    owns_txn = owns_transaction(conn, commit)
     _validate_activity_id(activity_id)
     if kind not in MEMO_KINDS:
         raise ValueError(f"unknown memo kind: {kind!r} (expected one of {MEMO_KINDS})")
@@ -464,12 +535,12 @@ def add_memo(
     if idem_key is not None:
         existing = _get_memo_by_idem_key(conn, idem_key)
         if existing is not None:
-            # commit=True の契約は「この呼び出しから戻るときトランザクションが
-            # 確定している」— INSERT 経路と同様、冪等ヒットの早期 return でも
-            # 確定してから返す (呼び手の未確定分も一緒に確定される)。確定せず
-            # 返すと、同接続に未確定の書き込みがあるとき書き込みロックが残り、
-            # 他接続を塞ぐ。トランザクションが無ければ commit は no-op で無害。
-            if commit:
+            # 所有しているときの契約は「この呼び出しから戻るときトランザクション
+            # が確定している」— INSERT 経路と同様、冪等ヒットの早期 return でも
+            # 確定してから返す。確定せず返すと、同接続に未確定の書き込みがある
+            # とき書き込みロックが残り、他接続を塞ぐ。所有していない (呼び手が
+            # 束を開いている) ときは確定しない — 呼び手の未確定分を巻き込む。
+            if owns_txn:
                 conn.commit()
             return existing
     try:
@@ -479,16 +550,16 @@ def add_memo(
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
             (activity_id, date, kind, text, span_start_id, span_end_id, idem_key),
         )
-        if commit:
+        if owns_txn:
             conn.commit()
     except sqlite3.IntegrityError:
         # 並行の add が同じ idem_key を先に入れた (UNIQUE idx_memos_idem) —
-        # 既存行を読み直して返す (冪等)。commit=True (本関数がトランザクション
-        # を所有) なら、失敗した INSERT が暗黙に開いたトランザクションを先に
+        # 既存行を読み直して返す (冪等)。本関数がトランザクションを所有して
+        # いるなら、失敗した INSERT が暗黙に開いたトランザクションを先に
         # 巻き戻す — 開いたまま return するとこの接続が書き込みロックを
-        # 握り続け、他接続の書き込みを塞ぐ。commit=False は呼び手の束なので
+        # 握り続け、他接続の書き込みを塞ぐ。所有していなければ呼び手の束なので
         # 巻き戻さない (失敗した文だけが巻き戻り、束は呼び手が閉じる)。
-        if commit:
+        if owns_txn:
             conn.rollback()
         if idem_key is None:
             raise
@@ -499,7 +570,7 @@ def add_memo(
     except BaseException:
         # IntegrityError 以外の失敗 (ロック競合等) も同じ規則で巻き戻してから
         # 送出する。
-        if commit:
+        if owns_txn:
             conn.rollback()
         raise
     return Memo(

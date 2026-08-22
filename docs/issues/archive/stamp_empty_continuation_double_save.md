@@ -1,6 +1,20 @@
 # 504 の継続が空応答のとき、二重保存された部分文に継続コールの数字が乗る
 
-**状態**: 裁定済み・実装待ち (2026-08-22 裁定)。直す場所は下の「裁定」節で確定した — 二重保存そのものを直す。
+**状態**: ✅ 完了 (2026-08-22 実装・回帰テスト済み)。二重保存そのものを塞いだ。
+
+## 実装 (2026-08-22)
+
+**先に下流を読んだ結果、空文字を返す案は採れなかった**。`_finalize_beat` は空文字なら memorize を飛ばす (`if text and ...`) ので二重保存は消えるが、その手前で `state["last"]` / `state["_messages"]` の assistant 行 / PulseContext / output_key にも空が載る。空の assistant 行が後続の messages へ流れ込む経路は 2026-04-28 のまはー指摘で潰した場所で、そこを開け直すことになる。本人が実際に言ったのは部分文なので、これらには部分文が載るのが正しい。
+
+そこで**戻り値は部分文のまま返し、保存済みの印だけを state に置いて memorize を飛ばす**形にした。印 (`_ALREADY_STORED_STATE_KEY`) の値は保存した本文そのもので、`_finalize_beat` が冒頭で必ず pop して消費し (残すと次の Beat の保存を黙って止める)、本文が一致したときだけ保存を飛ばす。一致で判定するのは、印が古い / 途中で本文が差し替わった (spell の continuation 等) 回に取りこぼさないため。
+
+**隣も塞いだ**: `_finalize_beat` には memorize のほかに important ノードの dual-write という「同じ本文を書く」経路がもう一本ある。片方だけ塞ぐと important ノードの 504 空継続で二重保存が残るので、同じ条件を当てた。
+
+`clear_call_tokens(state)` は裁定どおり呼ぶ。**前駆 (presented ids) は落とさない** — 直前に append した部分文の id は「次に書かれる行が実際に見た最後の永続行」として正しいまま。clear_call_tokens と対で落とす規律は「本文の作り手が変わった区間」のためのもので、ここは作り手が変わったのではなく新しい本文が生まれなかっただけ。
+
+回帰テスト: `tests/test_message_stamp.py` に「空継続 → 部分文の一行だけ + 保存済みの印 + 三つ組が残らない」「継続あり → 印を置かない (二行が正しい)」、`tests/test_beat_finalize.py::AlreadyStoredResponseTest` に「印と一致する本文は memorize も dual-write も飛ばす」「一致しなければ保存する」「印は必ず消費される」。修正を外すと落ちることを両側で確認した。
+
+**既存テストの契約を一つ書き換えた**: `test_empty_continuation_still_clears_the_stale_triple` は「継続コールの三つ組が state に残る」を固定していた (初回の数字を居残らせないため)。行が書かれないと決まった以上残せないので、`test_empty_continuation_leaves_no_triple_behind` へ置き換えた。
 
 ## 裁定 (2026-08-22、まはー + Fable)
 

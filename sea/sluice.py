@@ -233,17 +233,30 @@ def _truncate(text: str, limit: int) -> str:
     return text[:limit] + "…"
 
 
-def _is_presented_truncated(memory: Any) -> bool:
-    """その項目を、プロンプトへ**先頭だけ**載せたか (全文を見せていないか)。
+def _is_scene_memory(memory: Any) -> bool:
+    """その項目が場面の記憶 (実会話の写し) か。
 
-    提示側 (:func:`_build_sluice_prompt`) の切り詰め規則と対になる判定。適用側が
-    「全文を見ていない相手を丸ごと上書きさせない」歯止めに使う。
+    scene は本人が話した会話をそのまま写したもので、口調のアンカーとして使う
+    (このモジュール冒頭の不変条件「scene は参照コピーのみ」)。本人が「直す」
+    ことは会話の写しを書き換えること — つまり捏造にあたるので、**長さに関係
+    なく** update の対象外にする。remove は対象外にしない (写しを消すことは
+    改変ではない)。
 
-    ⚠ 規則をここ一箇所に置くのは、提示と判定が別々に書かれると片方だけ変わった
-    ときに歯止めが黙って外れるため。提示の条件を変えるときはこの関数も一緒に見る
-    こと (両方を貫くテストが tests/test_sluice_core_ops.py にある)。
+    出自: docs/issues/sluice_truncated_scene_update.md (2026-08-22 裁定 —
+    歯止めの条件を「切り詰めて見せたか」から「場面の記憶そのものか」へ移した。
+    長さで書くと 80 字以下の scene だけ書き換えられる穴が残る)。
     """
-    if memory is None or getattr(memory, "kind", None) != "scene":
+    return memory is not None and getattr(memory, "kind", None) == "scene"
+
+
+def _is_presented_truncated(memory: Any) -> bool:
+    """その項目を、プロンプトへ**先頭だけ**載せるか (提示側の切り詰め規則)。
+
+    :func:`_build_sluice_prompt` が「こういう場面がある」と分かる長さへ刻む
+    ための判定で、役目は提示だけ。適用側の歯止めは長さではなく種類で決める
+    (:func:`_is_scene_memory`) ので、この関数は歯止めには使わない。
+    """
+    if not _is_scene_memory(memory):
         return False
     body = (getattr(memory, "content", None) or "").replace("\n", " ")
     return len(body) > _SCENE_PREVIEW_CHARS
@@ -339,17 +352,50 @@ def _core_content_hash(content: Optional[str]) -> str:
     return hashlib.sha256((content or "").encode("utf-8")).hexdigest()
 
 
+def _scope_sentence(span_new_count: Optional[int]) -> str:
+    """「今回どこが対象か」を本人へ伝える一行を組む。
+
+    プロンプトは手帳の節で「この範囲で」と言うのに、その範囲がどこなのかを
+    一言も書いていなかった。退場が次回へ繰り越された回 (``unseen_tail``) は
+    採取済みの会話が窓に残ったまま再び目に入るので、どこまで採取済みかを
+    知らされていない本人は同じメモをもう一度返す (重複の供給源)。
+
+    件数は機械が知る値だけで組む — 本人の申告は使わない (§13.6)。
+    ``span_new_count`` が None のときはマーカーが窓に無い (初回 / 押し出されて
+    消えた) ので、窓全体が対象。
+
+    ⚠ コンテキスト超過の後退 (§13.5-1) が起きた回は、実際に見せる通数がここで
+    宣言した数より少なくなる (プロンプトは後退前に一度だけ組む)。「それより前は
+    採取済み」の部分は後退しても真のままなので、件数だけが概数になる。
+
+    出自: docs/issues/sluice_memo_duplicate_across_spans.md (2026-08-22 裁定 —
+    機械側の重複防止と対で、供給源をここで塞ぐ)。
+    """
+    if span_new_count is None:
+        return "今回は手元の会話全体が対象です。"
+    if span_new_count <= 0:
+        return "前回の整理以降、新しいやり取りはありません。"
+    return (
+        f"今回の対象は直近 {span_new_count} 通の会話です。"
+        "それより前は前回の整理で採取済みです。"
+    )
+
+
 def _build_sluice_prompt(
     persona: Any,
     activities: List[Tuple[int, str]],
     open_tasks: List[Dict[str, Any]],
     core_memories: List[Any],
     total_chars: int,
+    *,
+    span_new_count: Optional[int],
 ) -> str:
     """<system> 包みの注入プロンプトを組む (keepalive の末尾通知と同じ面)。
 
     ``core_memories`` / ``total_chars`` は :func:`_read_core_state` の読みを
     呼び出し元から受け取る (CAS スナップショットと同じ姿を見せるため)。
+    ``span_new_count`` は今回の担当範囲の通数 (None = 窓全体) — 手帳の節で
+    対象範囲を明示するのに使う (:func:`_scope_sentence`)。
     """
     from builtin_data.tools._core_memory_common import resolve_core_memory_budget
 
@@ -392,6 +438,7 @@ def _build_sluice_prompt(
         "- 既存のコア記憶と矛盾する新情報（帰国・引っ越しなど。矛盾は update で解消）。\n"
         "\n"
         "2) 手帳 (want_memos / did_memos):\n"
+        f"- {_scope_sentence(span_new_count)}\n"
         "- この範囲で、やりたいと思ったこと・実際にやったことはありますか?\n"
         "  無ければ空で構いません。あれば、活動の名前（「小説を書く」「絵の練習」\n"
         "  のような粒度。下の一覧にあるものは activity_id で参照）と、今日の中身\n"
@@ -565,25 +612,21 @@ def _apply_ops(
                     current is not None
                     and _core_content_hash(current.content) == snap_hash
                 )
-                # 提示で切り詰めた項目を丸ごと上書きさせない。
+                # 場面の記憶 (scene) は書き換えの対象外 — 長さ不問。
                 #
-                # CAS が守るのは「実行中に他人が書き換えていないか」だけで、
-                # 「本人が全文を見たか」は守らない。切り詰めた先頭だけを見たまま
-                # update を返すと、誰も書き換えていないので CAS は通り、全文が
-                # その先頭に潰れる。編集履歴から復元はできるが、それは事故の
-                # 後始末であって歯止めではない。システム側の切り詰めが本人の
-                # 言葉を痩せさせるのは、このリポジトリの絶対規則に反する
-                # (2026-08-22 掃討フェーズ 束 3 指摘 3-1)。
+                # scene は実際の会話の写しで、本人が「直す」ことは会話の写しを
+                # 書き換えること、つまり捏造にあたる (このモジュール冒頭の
+                # 不変条件「scene は参照コピーのみ」)。提示は先頭 80 字に
+                # 刻んでいるが、歯止めをその長さで書くと 80 字以下の scene だけ
+                # 書き換えられる穴が残る — 目的 (写しを改変させない) から導けば
+                # 条件は種類の一行になる (2026-08-22 裁定、
+                # docs/issues/sluice_truncated_scene_update.md)。
                 #
-                # CAS が通っている = 本文はプロンプト作成時から変わっていないので、
-                # 現物へ提示と同じ規則を当てれば「切り詰めて見せたか」を再現できる。
-                # 全文を見せるか、この種を update の対象から外すかは設計の裁定待ち
-                # (docs/issues/sluice_truncated_scene_update.md)。それまでは
-                # 壊さない側へ倒す。
-                preview_only = cas_ok and _is_presented_truncated(current)
+                # remove は対象外にしない (写しを消すことは改変ではない)。
+                scene_locked = cas_ok and _is_scene_memory(current)
                 ok = (
                     cas_ok
-                    and not preview_only
+                    and not scene_locked
                     and update_core_memory(
                         adapter.conn, target_id, content, confirmed=0,
                     )
@@ -598,15 +641,15 @@ def _apply_ops(
                     "[sluice] core update rejected: core:%s changed since "
                     "snapshot (CAS mismatch)", memory_id,
                 )
-            elif preview_only:
+            elif scene_locked:
                 failed += 1
                 lines.append(
-                    f"update 失敗: core:{memory_id} は全文ではなく先頭だけを"
-                    "お見せしています。全文を見ていない状態では書き換えません。"
+                    f"update 失敗: core:{memory_id} は場面の記憶 (実会話の写し) "
+                    "なので書き換えの対象外です。"
                 )
                 LOGGER.warning(
-                    "[sluice] core update rejected: core:%s was presented "
-                    "truncated (preview only)", memory_id,
+                    "[sluice] core update rejected: core:%s is a scene memory "
+                    "(verbatim copy — not editable)", memory_id,
                 )
             elif ok:
                 applied += 1
@@ -701,6 +744,11 @@ def _apply_memos(
     - 一連の書き込みは commit=False で束ね、最後に一括 commit する。要素単位の
       不正 (空本文・一覧外 id) はその要素だけ捨てるが、ストレージ例外は送出する
       (スルース失敗 = 退場停止のゲートに乗せる)。
+    - 内容ベースの重複防止 (コア記憶 add の内容一致ガードと同じ二段構え): 同じ
+      日・同じアクティビティ・同じ種類・同じ本文の既存メモがあればスキップする
+      (成功扱い)。冪等キーは担当範囲が変わると別キーになるので、繰り越された
+      回の再提案を止められない。照合は書き込みと同じロック・同じトランザク
+      ションの中で行う (docs/issues/sluice_memo_duplicate_across_spans.md)。
     """
     items: List[Tuple[str, Any]] = (
         [("want", m) for m in (want_memos or [])]
@@ -713,7 +761,11 @@ def _apply_memos(
     if adapter is None or getattr(adapter, "conn", None) is None:
         return (0, len(items), ["手帳ストレージが利用できず、メモを書けませんでした。"])
 
-    from sai_memory.memory.pocketbook import add_memo, get_or_create_activity
+    from sai_memory.memory.pocketbook import (
+        add_memo,
+        find_memo_by_content,
+        get_or_create_activity,
+    )
     from saiverse import clock
 
     today = clock.now().date().isoformat()
@@ -768,6 +820,18 @@ def _apply_memos(
                     lines.append(
                         f"{kind_label[kind]}メモをスキップ: activity_id も "
                         "new_activity_name もありません。"
+                    )
+                    continue
+                # 内容ベースの重複防止 — 同じロック・同じトランザクションの中で
+                # 照合してから書く (check-then-act の隙間を作らない)。同じ束の中で
+                # 先に書いたメモも同じ接続から見えるので、一回の結果に同じメモが
+                # 二つ入っていた場合もここで止まる。
+                duplicate = find_memo_by_content(conn, aid, today, kind, text)
+                if duplicate is not None:
+                    applied += 1
+                    lines.append(
+                        f"手帳「{aname}」の{kind_label[kind]}メモは既に手帳にある"
+                        f"ため採りませんでした: {text}"
                     )
                     continue
                 add_memo(
@@ -1608,6 +1672,7 @@ def _call_sluice_llm(
     building_id: str,
     span_ids: List[str],
     span_end_full: Optional[str],
+    span_new_count: Optional[int],
 ) -> Dict[str, Any]:
     """LLM 呼び出しフェーズ (context 組み → 後退つき generate → usage → 検証)。
 
@@ -1673,6 +1738,7 @@ def _call_sluice_llm(
     }
     prompt = _build_sluice_prompt(
         persona, activities, open_tasks, core_memories, core_total_chars,
+        span_new_count=span_new_count,
     )
 
     node_def = SimpleNamespace(id="sluice", memorize=None, speak=False)
@@ -1884,6 +1950,13 @@ def run_sluice(
         if isinstance(m, dict) and m.get("id")
     ]
     span_start_id, span_end_full = _compute_span(current_messages, prev_marker)
+    # 対象範囲の通数 — プロンプトで本人へ明示する材料 (:func:`_scope_sentence`)。
+    # マーカーが窓に無い (初回 / 押し出されて消えた) ときは None = 窓全体が対象。
+    span_new_count = (
+        _count_new_since_marker(current_messages, prev_marker)
+        if prev_marker and prev_marker in span_ids
+        else None
+    )
 
     # 実行台帳: identity は (persona, span_start_id)。同じ担当範囲の記録済み
     # 構造化結果があれば LLM を呼ばず再利用する (設計は _LEDGER_KIND 上のコメント)。
@@ -1960,6 +2033,7 @@ def run_sluice(
         try:
             call = _call_sluice_llm(
                 lifecycle, persona, building_id, span_ids, span_end_full,
+                span_new_count,
             )
         except Exception as exc:
             # LLM 失敗・出力不適合 = 適用前の検証棄却 (副作用ゼロ) → failed。
