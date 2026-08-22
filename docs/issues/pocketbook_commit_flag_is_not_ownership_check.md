@@ -1,6 +1,14 @@
 # 手帳まわりの `commit` 引数が「トランザクションの所有」を検査していない
 
-**状態**: 未解決 (2026-08-22 起票)。**現に壊れている経路は無い** — 罠が開いているだけ。直し方に設計判断が要るため裁定待ち。
+**状態**: 裁定済み・実装待ち (2026-08-22 裁定)。**現に壊れている経路は無い** — 罠が開いているだけ。直し方は下の「裁定」節で確定した。
+
+## 裁定 (2026-08-22、まはー + Fable)
+
+**直す。やり方は選択肢 B と D を一緒にやる形** — 「自分がトランザクションの持ち主か」の判定を一つの小さなヘルパに切り出し、`pocketbook.py` の書き込み関数すべてに同じ形で当てる。判定の中身は同じモジュールの `get_or_create_activity` が既に持っている形 (`commit and not conn.in_transaction`、**最初の execute より前**に一度だけ取る) をそのまま写す。commit 側と rollback 側の両方がその判定を使う。
+
+**C (誤用を例外で落とす) と既定値の反転は採らない。** 持ち主の判定が正しくなれば、トランザクションの中から既定 (`commit=True`) のまま呼んでも「持ち主ではないので確定も巻き戻しもしない」となり、外側の持ち主が後で確定する。つまり誤用が誤用でなくなるので、落とす理由が消える。既定値の反転は呼び出し元を全部書き換える割に得るものがない。
+
+**実装先**: 掃討フェーズの Opus セッション (作業指示は [裁定ハンドオフ](../handoff/2026-08-22_v3_shape_layer_rulings_handoff.md))。
 
 関連: [`sai_memory/memory/pocketbook.py`](../../sai_memory/memory/pocketbook.py) / [`sai_memory/memory/recall_edges.py`](../../sai_memory/memory/recall_edges.py) / [`sai_memory/memory/continuity.py`](../../sai_memory/memory/continuity.py)
 出自: v0.3 形の層の掃討フェーズ、ローカル LLM レビュー 束 1 の指摘 2 (2026-08-22)。同レビューの指摘 1 (辺の削除が `OperationalError` を種類で分けずに握る) は原因が一意だったため修正済み。
