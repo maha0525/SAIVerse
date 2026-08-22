@@ -844,3 +844,74 @@ def test_dispatcher_forwards_the_pulse_options(manager):
 
     manager.run_sea_user.assert_called_once()
     _assert_options_forwarded(manager, options)
+
+
+# ---------------------------------------------------------------------------
+# 2026-08-22 掃討フェーズ 指摘 1: 応答の飛行中に古いタイマーが発火する並び
+# ---------------------------------------------------------------------------
+#
+# 既存の世代テストは「張り直し → 古い callback が発火」という**安全な順序**しか
+# 試していなかった。実機で踏むのは逆順で、沈黙の終わり際に来た発話への応答中に
+# 前回の予約が発火する。会話 ID が変わらないため後片付けの照合をすり抜け、
+# 応答後に張り直した予約まで巻き添えで取り消される。
+
+
+def test_a_timer_firing_during_the_reply_does_not_close_the_live_conversation(manager):
+    """沈黙の終わり際の発話: 応答中に前回の予約が発火しても会話は閉じない。
+
+    再現する並び:
+      1. 会話 A が開いていて、予約 T1 の期限が目前
+      2. ユーザーが発話 → 継続経路が応答を起こす
+      3. 応答の生成中に T1 が発火する (dispatch は取り出し済みなので止められない)
+
+    ここで T1 が会話 A を閉じてしまうと、ユーザーがまさに話している会話に
+    「会話が終わりました」の一行が書かれ、次の発話が新しい会話になる。
+    """
+    _start_conversation_state(manager)
+    uc.arm_conversation_timeout(manager, PERSONA_ID)
+    stale = _detach_reservation(manager)
+
+    fired: list[str] = []
+
+    def _reply_while_the_old_timer_fires():
+        # 応答の生成中に、取り出し済みの古い予約が期限を迎える
+        stale.callback()
+        fired.append("timer")
+
+    uc.on_user_utterance(
+        manager, PERSONA_ID, USER_ID, {"content": "ただいま"},
+        _reply_while_the_old_timer_fires,
+    )
+
+    assert fired == ["timer"], "古い予約が発火する並びを再現できていない"
+    # 会話は開いたまま — 話している最中に閉じられていない
+    assert _open_conversation(manager) is not None
+    # 「会話が終わりました」の一行が書かれていない
+    assert _transition_actions(manager) == []
+    # 応答後の張り直しが生きている (巻き添えで取り消されていない)
+    assert _armed(manager) is True
+
+
+def test_the_reply_path_arms_before_invoking_the_main_line(manager):
+    """継続経路は応答を起こす**前**に張り直す (開始経路と同じ規律)。
+
+    この一行が消えると上のテストが落ちる。順序そのものを固定して、
+    「応答後だけで足りる」という読み違いで戻されるのを防ぐ。
+    """
+    _start_conversation_state(manager)
+    uc.arm_conversation_timeout(manager, PERSONA_ID)
+    before = _reservation(manager)
+
+    seen: dict[str, object] = {}
+
+    def _capture_reservation_at_reply_time():
+        seen["at_reply"] = _reservation(manager)
+
+    uc.on_user_utterance(
+        manager, PERSONA_ID, USER_ID, {"content": "ただいま"},
+        _capture_reservation_at_reply_time,
+    )
+
+    # 応答が始まった時点で、既に別の予約へ入れ替わっている
+    assert seen["at_reply"] is not None
+    assert seen["at_reply"] is not before
