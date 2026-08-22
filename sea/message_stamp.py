@@ -116,6 +116,28 @@ def clear_call_tokens(state: Optional[Dict[str, Any]]) -> None:
     state.pop(CALL_TOKENS_STATE_KEY, None)
 
 
+def clear_presented_message_ids(state: Optional[Dict[str, Any]]) -> None:
+    """前駆の材料を落とす (この state からは帰属を確定できない、の印)。
+
+    :func:`clear_call_tokens` と**必ず対で呼ぶ**。理由が同じだから — 本文の
+    作り手が変わった区間では、三つ組が他人のコールのものになるのと同じ理屈で、
+    前駆も他人が見た列になる。
+
+    具体的には子 Playbook の中継 (``lg_subplay_node``)。子は自前の
+    ``_prepare_context`` で別の履歴を見て本文を書くが、親 state に残っている
+    のは**親が見せた列**の末尾。落とさずに親の SPEAK / MEMORIZE が刻むと、
+    その本文を書いた LLM が**一度も見ていないメッセージ**を前駆として記録する
+    — 欠落ではなく捏造になる (2026-08-22 掃討フェーズ 束 5 指摘 1)。
+
+    子の提示列を親へ引き継ぐ案を採らないのは三つ組と同じ理由 — ``last_text``
+    は子の出力列の末尾で、子の最後のコールがその本文を書いたとは限らず、
+    子の final_state も親へ届かない。確定できないので刻印なしへ倒す。
+    """
+    if not isinstance(state, dict):
+        return
+    state.pop(PRESENTED_IDS_STATE_KEY, None)
+
+
 def record_call_tokens(state: Optional[Dict[str, Any]], usage: Any) -> None:
     """LLM コール 1 回分の三つ組を state に残す (直近のコール = この生成)。
 

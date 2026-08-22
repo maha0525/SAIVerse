@@ -34,6 +34,7 @@ from sea.message_stamp import (
     append_presented_message_id,
     build_generation_stamp,
     clear_call_tokens,
+    clear_presented_message_ids,
     normalize_token_triple,
     record_call_tokens,
     record_presented_message_ids,
@@ -127,13 +128,63 @@ class TestAppendPresentedMessageId:
 
 
 class TestClearCallTokens:
-    def test_drops_the_triple_and_keeps_the_predecessor(self):
-        """作り手が変わった行では三つ組だけを落とす (前駆の器は共有のまま)。"""
+    def test_drops_only_the_triple(self):
+        """三つ組だけを落とす (前駆は clear_presented_message_ids の担当)。
+
+        ⚠ このテストは以前「前駆の器は共有のまま」を**正しい振る舞いとして**
+        固定していた。そのため「作り手が変わった区間で前駆だけ残る」欠陥が
+        テストを通り抜けていた (2026-08-22 掃討フェーズ 束 5 指摘 1)。関数
+        単体の責務としては三つ組だけを落とすのが正しく、**対で呼ぶ責任は
+        呼び出し側にある** — その対を固定するのが下の TestClearedInPairs。
+        """
         state: Dict[str, Any] = {PRESENTED_IDS_STATE_KEY: ["m1"]}
         record_call_tokens(state, _usage())
         clear_call_tokens(state)
         assert CALL_TOKENS_STATE_KEY not in state
         assert state[PRESENTED_IDS_STATE_KEY] == ["m1"]
+
+
+class TestClearPresentedMessageIds:
+    def test_drops_the_precursor(self):
+        state: Dict[str, Any] = {PRESENTED_IDS_STATE_KEY: ["m1", "m2"]}
+        clear_presented_message_ids(state)
+        assert PRESENTED_IDS_STATE_KEY not in state
+
+    def test_a_missing_key_is_not_an_error(self):
+        state: Dict[str, Any] = {}
+        clear_presented_message_ids(state)
+        assert state == {}
+
+    def test_a_non_dict_state_is_ignored(self):
+        clear_presented_message_ids(None)
+
+
+class TestClearedInPairs:
+    """作り手が変わった区間では、三つ組と前駆が**両方**落ちる。
+
+    片方だけ落とすと「この本文を書いた LLM が一度も見ていないメッセージ」を
+    前駆として刻む = 欠落ではなく捏造になる。子 Playbook の中継
+    (lg_subplay_node) がその区間で、両方を落とすことで刻印なしへ倒れる。
+    """
+
+    def test_nothing_is_stamped_after_both_are_cleared(self):
+        state: Dict[str, Any] = {PRESENTED_IDS_STATE_KEY: ["parent-tail"]}
+        record_call_tokens(state, _usage())
+        # 中継の場で対にして落とす (lg_subplay_node と同じ順)
+        clear_call_tokens(state)
+        clear_presented_message_ids(state)
+
+        assert build_generation_stamp(state) == {}
+
+    def test_clearing_only_the_triple_still_fabricates_a_precursor(self):
+        """⭐ 片方だけでは足りないことの実証 (この欠陥そのものの再現)。"""
+        state: Dict[str, Any] = {PRESENTED_IDS_STATE_KEY: ["parent-tail"]}
+        record_call_tokens(state, _usage())
+        clear_call_tokens(state)
+
+        stamp = build_generation_stamp(state)
+        # 三つ組は消えたのに、親が見せた列の末尾が前駆として残ってしまう
+        assert stamp.get(PREDECESSOR_META_KEY) == "parent-tail"
 
 
 class TestBuildGenerationStamp:
@@ -738,6 +789,21 @@ class TestSubPlaybookRelayIsNotStamped:
         _runtime, _persona, state = self._parent_after_subplay()
         assert state["last"] == "子が書いた本文。"
         assert CALL_TOKENS_STATE_KEY not in state
+
+    def test_relay_drops_the_parents_precursor(self):
+        """⭐ 前駆も落ちる — 子の LLM が見ていない列を刻ませない。
+
+        三つ組と同じ理由で落とす。親 state に残っているのは**親が見せた列**の
+        末尾 (hist-1) で、この本文を書いた子の LLM は一度も見ていない。残すと
+        欠落ではなく捏造になる (2026-08-22 掃討フェーズ 束 5 指摘 1)。
+        """
+        _runtime, _persona, state = self._parent_after_subplay()
+        assert PRESENTED_IDS_STATE_KEY not in state
+
+    def test_relay_leaves_nothing_to_stamp(self):
+        """中継の直後に刻もうとしても、材料が無いので印は付かない。"""
+        _runtime, _persona, state = self._parent_after_subplay()
+        assert build_generation_stamp(state) == {}
 
     def test_parent_speak_emits_the_relay_without_a_token_mark(self):
         """親 SPEAK が中継本文を出しても、三つ組は metadata に載らない。"""

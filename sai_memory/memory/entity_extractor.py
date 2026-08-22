@@ -649,6 +649,29 @@ def _resolve_involved_page_ids(memopedia, titles: List[str]) -> List[str]:
     return resolved
 
 
+def _page_still_exists(conn, page_id: str) -> bool:
+    """そのページ行がまだ在るか (辺の INSERT と同じトランザクションで呼ぶ)。
+
+    ⚠ **論理削除 (``is_deleted=1``) は「在る」と数える。** 行は残り復元もされうる
+    ので、辺の指し先としては生きている —— 物理削除する側だけが辺を落とす、という
+    :func:`~sai_memory.memory.recall_edges.delete_chunk_page_edges` の配線と同じ
+    線引きを保つ。ここで論理削除を落とすと、復元されたページの辺だけが失われる。
+
+    テーブルがまだ無い DB (Memopedia を一度も使っていない) では「在る」を返す —
+    存在を否定できないので辺を捨てない。捨てて困るのは、後から実体が現れたとき
+    にその期間だけタグが欠ける形で、静かな取りこぼしになる。
+    """
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM memopedia_pages WHERE id = ? LIMIT 1", (page_id,)
+        ).fetchone()
+    except sqlite3.OperationalError as exc:
+        if "no such table" in str(exc):
+            return True
+        raise
+    return row is not None
+
+
 def _record_involvement_edges(
     conn: sqlite3.Connection,
     chronicle_page_id: str,
@@ -696,6 +719,20 @@ def _record_involvement_edges(
                     LOGGER.warning(
                         "[recall-tags] chronicle=%s が自分自身を指しています — "
                         "辺は張りません", chronicle_page_id[:12],
+                    )
+                    continue
+                if not _page_still_exists(conn, page_id):
+                    # タイトルの解決は錠前の外で済ませてある。その後 INSERT が
+                    # 届くまでの隙に、別の書き手がそのページを物理削除できる
+                    # (Memopedia の削除・Chronicle の再生成・修復スクリプト)。
+                    # 消えた先へ張ると、削除側の後始末はもう済んでいるので誰も
+                    # 拾わない孤児になる。指し先の存在は INSERT と同じ
+                    # トランザクションの中で確かめる —— 取り置きの検査を
+                    # ここへ入れたのと同じ理由 (2026-08-22 掃討フェーズ 束 4 指摘 1)。
+                    LOGGER.warning(
+                        "[recall-tags] 指し先のページ %s は既に消えています — "
+                        "辺は張りません (chronicle=%s)",
+                        page_id[:12], chronicle_page_id[:12],
                     )
                     continue
                 if add_chunk_page_edge(

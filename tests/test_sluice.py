@@ -342,6 +342,77 @@ class SluiceRunTest(_AdapterTestBase):
         self.assertIn("update 失敗", row[0])
         self.assertEqual(row[1], "discardable")  # 採取なし
 
+    # -- 2026-08-22 掃討フェーズ 束 3 指摘 3-1 ---------------------------
+
+    def test_a_preview_only_memory_is_not_overwritten(self):
+        """⭐ 先頭だけ見せた記憶を丸ごと書き換えさせない。
+
+        CAS が守るのは「実行中に他人が書き換えていないか」だけで、「本人が全文を
+        見たか」は守らない。切り詰めた先頭だけを見たまま update が返ると、誰も
+        書き換えていないので CAS は通り、全文がその先頭に潰れる。
+        """
+        from sai_memory.core_memory import add_core_memory
+        from sea.sluice import _SCENE_PREVIEW_CHARS
+
+        full = "あ" * (_SCENE_PREVIEW_CHARS + 200)
+        with self.adapter._db_lock:
+            mid = add_core_memory(self.adapter.conn, full, kind="scene")
+
+        # 本人が見えていた範囲 (先頭 + 省略記号) をそのまま返してくる
+        seen = full[:_SCENE_PREVIEW_CHARS] + "…"
+        result = _sluice_result(reflection="整えた", ops=[
+            {"op": "update", "memory_id": mid, "content": seen},
+        ])
+        summary, _ = self._run(result)
+
+        self.assertEqual(summary["ops_applied"], 0)
+        self.assertEqual(summary["ops_failed"], 1)
+        # 全文が生きている (痩せていない)
+        cores = self._list_core()
+        self.assertEqual(cores[0].content, full)
+        row = _read_sluice_record(self.adapter)
+        self.assertIn("先頭だけ", row[0])
+
+    def test_a_short_scene_memory_is_still_updatable(self):
+        """切り詰めずに見せた場面の記憶は、従来どおり書き換えられる。
+
+        歯止めが「scene 種すべて」へ広がると、全文を見せている相手まで直せなく
+        なる。効くのは「全文を見せていないとき」だけ。
+        """
+        from sai_memory.core_memory import add_core_memory
+        from sea.sluice import _SCENE_PREVIEW_CHARS
+
+        short = "い" * (_SCENE_PREVIEW_CHARS - 10)
+        with self.adapter._db_lock:
+            mid = add_core_memory(self.adapter.conn, short, kind="scene")
+
+        result = _sluice_result(reflection="整えた", ops=[
+            {"op": "update", "memory_id": mid, "content": "書き直した本文"},
+        ])
+        summary, _ = self._run(result)
+
+        self.assertEqual(summary["ops_applied"], 1)
+        cores = self._list_core()
+        self.assertEqual(cores[0].content, "書き直した本文")
+
+    def test_a_long_note_memory_is_still_updatable(self):
+        """長くても scene 種でなければ切り詰めていないので、書き換えられる。"""
+        from sai_memory.core_memory import add_core_memory
+        from sea.sluice import _SCENE_PREVIEW_CHARS
+
+        long_note = "う" * (_SCENE_PREVIEW_CHARS + 200)
+        with self.adapter._db_lock:
+            mid = add_core_memory(self.adapter.conn, long_note)  # kind='note'
+
+        result = _sluice_result(reflection="整えた", ops=[
+            {"op": "update", "memory_id": mid, "content": "書き直した本文"},
+        ])
+        summary, _ = self._run(result)
+
+        self.assertEqual(summary["ops_applied"], 1)
+        cores = self._list_core()
+        self.assertEqual(cores[0].content, "書き直した本文")
+
     # -- case 3b: remove op ----------------------------------------------
 
     def test_remove_op(self):

@@ -137,9 +137,18 @@ def delete_chunk_page_edges(
                 f"   OR entity_page_id IN ({placeholders})",
                 block + block,
             )
-        except sqlite3.OperationalError:
-            # 想起用タグが一度も走っていない DB にはテーブルが無い。削除の
-            # 巻き添えで落とさない (辺が無いのだから孤児も生まれない)。
+        except sqlite3.OperationalError as exc:
+            # 見逃してよいのは「テーブルがまだ無い」だけ — 想起用タグが一度も
+            # 走っていない DB のこと。辺が無いのだから孤児も生まれない。
+            #
+            # ⚠ 種類を見ずに握ると、``database is locked`` や I/O エラーまで
+            # 飲み込む。呼び出し元は辺の削除と**同じトランザクション**でページ
+            # 本体を消すので (docstring 参照)、途中で落ちたことに気づかないまま
+            # 削除を進め、消えたページを指す辺が孤児として残る。返り値は呼び出し元
+            # 4 箇所とも見ていないので、気づく機会は例外だけしかない
+            # (2026-08-22 掃討フェーズ 束 1 指摘 1)。
+            if "no such table" not in str(exc):
+                raise
             return deleted
         deleted += cur.rowcount
     return deleted

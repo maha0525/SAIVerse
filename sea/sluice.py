@@ -233,6 +233,22 @@ def _truncate(text: str, limit: int) -> str:
     return text[:limit] + "…"
 
 
+def _is_presented_truncated(memory: Any) -> bool:
+    """その項目を、プロンプトへ**先頭だけ**載せたか (全文を見せていないか)。
+
+    提示側 (:func:`_build_sluice_prompt`) の切り詰め規則と対になる判定。適用側が
+    「全文を見ていない相手を丸ごと上書きさせない」歯止めに使う。
+
+    ⚠ 規則をここ一箇所に置くのは、提示と判定が別々に書かれると片方だけ変わった
+    ときに歯止めが黙って外れるため。提示の条件を変えるときはこの関数も一緒に見る
+    こと (両方を貫くテストが tests/test_sluice_core_ops.py にある)。
+    """
+    if memory is None or getattr(memory, "kind", None) != "scene":
+        return False
+    body = (getattr(memory, "content", None) or "").replace("\n", " ")
+    return len(body) > _SCENE_PREVIEW_CHARS
+
+
 def _list_open_activities(persona: Any) -> List[Tuple[int, str]]:
     """開いているアクティビティの (id, name) 一覧。
 
@@ -343,7 +359,9 @@ def _build_sluice_prompt(
     core_lines: List[str] = []
     for mem in core_memories:
         body = mem.content or ""
-        if mem.kind == "scene":
+        if _is_presented_truncated(mem):
+            # 切り詰めの規則は _is_presented_truncated が持つ (適用側の歯止めと
+            # 同じ判定を使う — 別々に書くと片方だけ変わって歯止めが外れる)。
             body = _truncate(body.replace("\n", " "), _SCENE_PREVIEW_CHARS)
         core_lines.append(f"- [core:{mem.id}] {body}")
 
@@ -547,8 +565,28 @@ def _apply_ops(
                     current is not None
                     and _core_content_hash(current.content) == snap_hash
                 )
-                ok = cas_ok and update_core_memory(
-                    adapter.conn, target_id, content, confirmed=0,
+                # 提示で切り詰めた項目を丸ごと上書きさせない。
+                #
+                # CAS が守るのは「実行中に他人が書き換えていないか」だけで、
+                # 「本人が全文を見たか」は守らない。切り詰めた先頭だけを見たまま
+                # update を返すと、誰も書き換えていないので CAS は通り、全文が
+                # その先頭に潰れる。編集履歴から復元はできるが、それは事故の
+                # 後始末であって歯止めではない。システム側の切り詰めが本人の
+                # 言葉を痩せさせるのは、このリポジトリの絶対規則に反する
+                # (2026-08-22 掃討フェーズ 束 3 指摘 3-1)。
+                #
+                # CAS が通っている = 本文はプロンプト作成時から変わっていないので、
+                # 現物へ提示と同じ規則を当てれば「切り詰めて見せたか」を再現できる。
+                # 全文を見せるか、この種を update の対象から外すかは設計の裁定待ち
+                # (docs/issues/sluice_truncated_scene_update.md)。それまでは
+                # 壊さない側へ倒す。
+                preview_only = cas_ok and _is_presented_truncated(current)
+                ok = (
+                    cas_ok
+                    and not preview_only
+                    and update_core_memory(
+                        adapter.conn, target_id, content, confirmed=0,
+                    )
                 )
             if not cas_ok:
                 failed += 1
@@ -559,6 +597,16 @@ def _apply_ops(
                 LOGGER.warning(
                     "[sluice] core update rejected: core:%s changed since "
                     "snapshot (CAS mismatch)", memory_id,
+                )
+            elif preview_only:
+                failed += 1
+                lines.append(
+                    f"update 失敗: core:{memory_id} は全文ではなく先頭だけを"
+                    "お見せしています。全文を見ていない状態では書き換えません。"
+                )
+                LOGGER.warning(
+                    "[sluice] core update rejected: core:%s was presented "
+                    "truncated (preview only)", memory_id,
                 )
             elif ok:
                 applied += 1

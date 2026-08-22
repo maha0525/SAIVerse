@@ -892,5 +892,46 @@ class TestChunkPageEdges(PocketbookTestBase):
         self.assertEqual(count, 0)
 
 
+class TestEdgeDeletionOnlyIgnoresAMissingTable(PocketbookTestBase):
+    """辺の削除が見逃してよいのは「テーブルが無い」だけ (2026-08-22 掃討 束 1 指摘 1)。
+
+    呼び出し元はページ本体の削除と**同じトランザクション**でこの関数を呼び、
+    戻り値を見ていない。だから途中で落ちたことに気づける機会は例外だけしかない。
+    種類を見ずに OperationalError を握ると、ロック競合や I/O エラーで削除が
+    中断しても正常返りになり、消えたページを指す辺が孤児として残る。
+    """
+
+    def test_a_missing_table_is_ignored(self):
+        """抽出が一度も走っていない DB では 0 を返す (巻き添えで落とさない)。"""
+        self.conn.execute("DROP TABLE IF EXISTS chunk_page_edges")
+
+        self.assertEqual(
+            recall_edges.delete_chunk_page_edges(self.conn, ["page-a"]), 0
+        )
+
+    def test_other_operational_errors_are_raised(self):
+        """ロック競合などは握り潰さず送出する — 呼び出し元の tx を巻き戻させる。"""
+        recall_edges.add_chunk_page_edge(self.conn, "chron-1", "page-a")
+
+        class _LockedConn:
+            """DELETE だけロック競合で落ちる接続 (sqlite3.Connection は差替不可)。"""
+
+            def __init__(self, real):
+                self._real = real
+
+            def execute(self, sql, *args, **kwargs):
+                if sql.lstrip().upper().startswith("DELETE"):
+                    raise sqlite3.OperationalError("database is locked")
+                return self._real.execute(sql, *args, **kwargs)
+
+        with self.assertRaises(sqlite3.OperationalError):
+            recall_edges.delete_chunk_page_edges(_LockedConn(self.conn), ["page-a"])
+
+        # 辺は消えていない (削除は成立しなかった)
+        count = self.conn.execute(
+            "SELECT COUNT(*) FROM chunk_page_edges").fetchone()[0]
+        self.assertEqual(count, 1)
+
+
 if __name__ == "__main__":
     unittest.main()

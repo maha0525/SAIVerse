@@ -6,7 +6,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from llm_clients.exceptions import LLMError
 from saiverse.logging_config import log_sea_trace
-from sea.message_stamp import clear_call_tokens
+from sea.message_stamp import clear_call_tokens, clear_presented_message_ids
 from sea.runtime_state import effective_auto_mode, set_playbook_var
 
 LOGGER = logging.getLogger(__name__)
@@ -235,8 +235,9 @@ def lg_subplay_node(runtime: Any, node_def: Any, persona: Any, building_id: str,
                 runtime._end_subagent_thread(persona, subagent_thread_id, subagent_parent_id, generate_chronicle=False, pulse_context=state.get("_pulse_context"))
             state["last"] = f"Sub-playbook error: {exc}"
             # 途中まで走った子が LLM を呼んでいる可能性がある上、この本文は
-            # そもそも生成ではなく機構の文字列。親の三つ組を載せない。
+            # そもそも生成ではなく機構の文字列。親の三つ組も前駆も載せない。
             clear_call_tokens(state)
+            clear_presented_message_ids(state)
             return state
         finally:
             # サブライン実行で立てた _force_lightweight_model フラグを親スコープに残さない
@@ -265,7 +266,13 @@ def lg_subplay_node(runtime: Any, node_def: Any, persona: Any, building_id: str,
         # (system キーの書き戻しは playbook_write_key が禁じている)。帰属を
         # 確定できない以上、刻印なしに倒す。親が次に自前の LLM ノードを回せば
         # _record_llm_usage が三つ組を載せ直す。
+        #
+        # **前駆も同じ理由で落とす。** 親 state に残っているのは親が見せた列の
+        # 末尾で、この本文を書いた子の LLM は一度も見ていない。残すと「見ていない
+        # メッセージを前駆として刻む」= 欠落ではなく捏造になる
+        # (2026-08-22 掃討フェーズ 束 5 指摘 1)。
         clear_call_tokens(state)
+        clear_presented_message_ids(state)
         if getattr(node_def, "propagate_output", False) and sub_outputs and outputs is not None:
             outputs.extend(sub_outputs)
 

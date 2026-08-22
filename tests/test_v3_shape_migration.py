@@ -24,6 +24,7 @@ import os
 import tempfile
 import time
 import unittest
+import unittest.mock
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -141,6 +142,43 @@ class DeadlineTaskToTaskBookTest(unittest.TestCase):
         _migrate_deadline_tasks_to_task_book(self.engine)
         rows = self._entries()
         self.assertEqual([r.CONTENT for r in rows], ["納品する"])
+
+    # -- 2026-08-22 掃討フェーズ 束 6c 指摘 1a --------------------------
+
+    def test_one_bad_row_does_not_block_the_whole_migration(self):
+        """⭐ 汚れた 1 行があっても、正常な行は写る。
+
+        全行を単一トランザクションに束ねると、1 行の制約違反で全件ロールバック +
+        例外送出になり、再起動しても同じ行でまた落ちる = **移行が永久に完了
+        しない**。行ごとの SAVEPOINT がそれを防ぐ。
+
+        再現は「写し先の主キーを衝突させる」形で行う (実データの汚れが写し先の
+        制約に触れる並びの代表)。
+        """
+        import uuid as _uuid
+        from datetime import datetime as _dt
+
+        db = self.Session()
+        try:
+            db.add(PersonaTask(
+                id="k-second", persona_id=PERSONA_ID, title="二件目",
+                status="pending", due_at=_dt(2026, 8, 25, 9, 0, 0),
+            ))
+            db.commit()
+        finally:
+            db.close()
+
+        # 全行に同じ TASK_ID を割り当てさせ、2 行目以降を主キー衝突で落とす
+        fixed = _uuid.uuid4()
+        with unittest.mock.patch.object(_uuid, "uuid4", lambda: fixed):
+            # 例外が外へ出ないこと自体が第一の検証
+            _migrate_deadline_tasks_to_task_book(self.engine)
+
+        rows = self._entries()
+        self.assertEqual(
+            len(rows), 1,
+            "1 行目は確定し、衝突した行だけが飛ばされる (全件ロールバックしない)",
+        )
 
     def test_due_at_becomes_an_epoch_integer(self):
         _migrate_deadline_tasks_to_task_book(self.engine)

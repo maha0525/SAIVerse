@@ -1345,6 +1345,7 @@ def _migrate_deadline_tasks_to_task_book(engine) -> None:
                 SELECT t.id, t.persona_id, t.title, t.due_at
                 FROM persona_task AS t
                 WHERE t.due_at IS NOT NULL
+                  AND t.persona_id IS NOT NULL
                   AND t.status IN ('pending', 'active', 'paused')
                   AND t.title IS NOT NULL
                   AND trim(t.title) != ''
@@ -1353,9 +1354,12 @@ def _migrate_deadline_tasks_to_task_book(engine) -> None:
 
             created_at = int(datetime.now().timestamp())
             copied = 0
+            skipped_due = 0
+            skipped_error = 0
             for task_id, persona_id, title, due_raw in rows:
                 due_epoch = _due_at_to_local_epoch(due_raw)
                 if due_epoch is None:
+                    skipped_due += 1
                     logging.warning(
                         "[v3機械写し] persona_task %s の due_at (%r) を epoch へ "
                         "変換できないため、この行は写しませんでした",
@@ -1363,8 +1367,19 @@ def _migrate_deadline_tasks_to_task_book(engine) -> None:
                     )
                     continue
                 idem_key = f"migration:persona_task:{task_id}"
-                result = conn.execute(
-                    _text(
+                # 行ごとに SAVEPOINT を張る。1 行の INSERT が制約違反で落ちても
+                # 巻き戻るのはその行だけで、正常な行と、この関数の外側の移行は
+                # 巻き添えにならない。
+                #
+                # ⚠ ここを守らないと**移行が永久に完了しない**。全行が単一
+                # トランザクションだと、汚れた 1 行 (旧スキーマの残骸など) が
+                # あるだけで全件ロールバック + 例外送出になり、再起動しても同じ
+                # 行がまた選ばれて同じ所で落ちる。ユーザーからは原因が見えない
+                # まま毎回失敗し続ける (2026-08-22 掃討フェーズ 束 6c 指摘 1a)。
+                nested = conn.begin_nested()
+                try:
+                    result = conn.execute(
+                        _text(
                         """
                         INSERT INTO task_book (
                             TASK_ID, PERSONA_ID, CONTENT, DUE_AT, COUNTERPART,
@@ -1382,22 +1397,36 @@ def _migrate_deadline_tasks_to_task_book(engine) -> None:
                         )
                         """
                     ),
-                    {
-                        "task_book_id": str(uuid.uuid4()),
-                        "persona_id": persona_id,
-                        "content": title,
-                        "due_at": due_epoch,
-                        "origin_ref": f"task:{task_id}",
-                        "created_at": created_at,
-                        "idem_key": idem_key,
-                    },
-                )
+                        {
+                            "task_book_id": str(uuid.uuid4()),
+                            "persona_id": persona_id,
+                            "content": title,
+                            "due_at": due_epoch,
+                            "origin_ref": f"task:{task_id}",
+                            "created_at": created_at,
+                            "idem_key": idem_key,
+                        },
+                    )
+                except Exception:
+                    nested.rollback()
+                    skipped_error += 1
+                    logging.warning(
+                        "[v3機械写し] persona_task %s をタスク帳へ写せませんでした "
+                        "— この行だけ飛ばして続けます", task_id, exc_info=True,
+                    )
+                    continue
+                nested.commit()
                 copied += result.rowcount or 0
-            if copied:
+            # 写せなかった行がある回は必ずまとめを出す。1 行ずつの警告だけだと、
+            # 古い形式の due_at が大量にある世界で「全件飛ばされた」ことが流れて
+            # 見えなくなる (指摘 3d)。
+            if copied or skipped_due or skipped_error:
                 logging.info(
-                    "[v3機械写し] 締め切りつきタスク %d 件をタスク帳へ写しました "
-                    "(写し元の persona_task は無傷で残ります)",
-                    copied,
+                    "[v3機械写し] 締め切りつきタスク: 対象 %d 件中 %d 件を"
+                    "タスク帳へ写しました (期限を読めず飛ばした %d 件 / "
+                    "書き込みに失敗して飛ばした %d 件。写し元の persona_task は"
+                    "無傷で残ります)",
+                    len(rows), copied, skipped_due, skipped_error,
                 )
     except Exception as e:
         logging.error(

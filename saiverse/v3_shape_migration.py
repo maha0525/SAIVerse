@@ -185,9 +185,16 @@ def _read_sources(manager: Any, persona_id: str) -> Optional[Dict[str, Any]]:
             if {"title", "persona_id", "status"} <= columns:
                 rows = db.execute(
                     text(
+                        # status IS NULL を明示的に拾う: SQL の NOT IN は
+                        # NULL に対して NULL (= 偽) を返すため、条件を書かないと
+                        # 「完了でも中止でもない生きた関心」が黙って落ちる。
+                        # 列は NOT NULL だが、この移行が読むのは**既に配布済みの
+                        # 世界の DB** で、古いスキーマの残骸が入りうる
+                        # (2026-08-22 掃討フェーズ 束 6c 指摘 3a)。
                         "SELECT title FROM action_track "
-                        "WHERE persona_id = :pid AND status NOT IN "
-                        "('completed', 'aborted')"
+                        "WHERE persona_id = :pid AND ("
+                        "  status NOT IN ('completed', 'aborted') "
+                        "  OR status IS NULL)"
                     ),
                     {"pid": persona_id},
                 ).fetchall()
@@ -212,7 +219,9 @@ def _read_sources(manager: Any, persona_id: str) -> Optional[Dict[str, Any]]:
                         "WHERE persona_id = :pid "
                         "AND (desire_type IS NOT NULL OR desire_state IS NOT NULL "
                         "     OR desire_source IS NOT NULL) "
-                        "AND status NOT IN ('completed', 'cancelled')"
+                        # NOT IN の NULL 落ち対策 (指摘 3a と同型)。
+                        "AND (status NOT IN ('completed', 'cancelled') "
+                        "     OR status IS NULL)"
                     ),
                     {"pid": persona_id},
                 ).fetchall()

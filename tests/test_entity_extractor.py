@@ -946,6 +946,50 @@ class TestInvolvementEdges(unittest.TestCase):
         self.assertEqual(self._edges(), [], "先に書けた辺が残っている")
 
 
+class TestEdgeTargetMustStillExist(TestInvolvementEdges):
+    """指し先が消えていたら辺を張らない (2026-08-22 掃討フェーズ 束 4 指摘 1)。
+
+    タイトルの解決は錠前の外で済ませてあるので、そこから INSERT が届くまでの隙に
+    別の書き手がページを物理削除できる。削除側の後始末 (delete_chunk_page_edges)
+    は既に走り終えているため、その後に張られた辺は誰にも拾われない孤児になる。
+    """
+
+    def _record(self, page_ids, chronicle_id="entry-1"):
+        from sai_memory.memory.entity_extractor import _record_involvement_edges
+
+        return _record_involvement_edges(self.conn, chronicle_id, page_ids)
+
+    def test_a_vanished_page_gets_no_edge(self):
+        """物理削除されたページ id へは張らない。"""
+        from sai_memory.memopedia.storage import delete_page
+
+        page_id = self.maha.id
+        delete_page(self.conn, page_id)
+
+        self.assertEqual(self._record([page_id]), 0)
+        self.assertEqual(self._edges(), [])
+
+    def test_a_surviving_page_still_gets_its_edge(self):
+        """生きているページには従来どおり張る (検査で正しい辺まで落とさない)。"""
+        self.assertEqual(self._record([self.maha.id]), 1)
+        self.assertEqual(self._edges(), [self.maha.id])
+
+    def test_a_soft_deleted_page_still_gets_its_edge(self):
+        """⭐ 論理削除は「消えた」に数えない — 行は残り、復元もされうる。
+
+        物理削除する側だけが辺を落とす、という delete_chunk_page_edges の配線と
+        同じ線引きを保つ。ここで落とすと、復元されたページの辺だけが失われる。
+        """
+        self.conn.execute(
+            "UPDATE memopedia_pages SET is_deleted = 1 WHERE id = ?",
+            (self.maha.id,),
+        )
+        self.conn.commit()
+
+        self.assertEqual(self._record([self.maha.id]), 1)
+        self.assertEqual(self._edges(), [self.maha.id])
+
+
 class TestInvolvementEdgeCleanup(unittest.TestCase):
     """チャンク／実体ページの物理削除で、辺が孤児にならない (Codex 2026-08-21 #2)。
 
