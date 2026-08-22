@@ -38,6 +38,25 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 
+#: 実会話の写し (口調・性格のアンカー) を表す項目種別。
+#:
+#: この種の本文は**ペルソナ本人には書き換えさせない** — 写しの改変は、本人が
+#: 言っていない言葉を本人の発言として残すことになる。ユーザー本人の訂正は
+#: 改変にあたらないので通す (:func:`update_core_memory` の ``allow_scene``)。
+SCENE_KIND = "scene"
+
+
+class SceneMemoryNotEditable(Exception):
+    """場面の記憶 (実会話の写し) を書き換えようとした。
+
+    ペルソナ側の書き込み口 (スルース / memory_write スペル) は、この例外に
+    到達する前に自分で判定して本人向けの説明を返す。ここまで来るのは
+    「判定を忘れた新しい口」だけなので、黙って通さず落とす — 入口を数え切る
+    設計は必ず漏れるので、結果を作る場所が最後の保証を持つ
+    (docs/issues/archive/sluice_truncated_scene_update.md)。
+    """
+
+
 @dataclass(frozen=True)
 class CoreMemory:
     """コア記憶 1 件。
@@ -305,14 +324,35 @@ def add_core_memory(
     return core_id
 
 
+def is_scene_core_memory(conn: sqlite3.Connection, memory_id: int) -> bool:
+    """その項目が場面の記憶 (実会話の写し) か。対象が無ければ False。
+
+    ペルソナ側の書き込み口が「書き換えの対象外です」と本人へ説明するために、
+    書き込みを試みる前に引く。判定の literal は :data:`SCENE_KIND` 一箇所。
+    """
+    row = _fetch_core_row_by_core_id(conn, memory_id, include_deleted=True)
+    if row is None:
+        return False
+    _pid, _title, _summary, _content, _created, _updated, meta = _parse_core_row(row)
+    return (meta.get("kind") or "note") == SCENE_KIND
+
+
 def update_core_memory(
-    conn: sqlite3.Connection, memory_id: int, content: str, *, confirmed: Optional[int] = None,
+    conn: sqlite3.Connection, memory_id: int, content: str, *,
+    confirmed: Optional[int] = None, allow_scene: bool = False,
 ) -> bool:
     """既存のコア記憶を書き換える。対象が存在すれば True。
 
     ``confirmed`` を渡すと確認フラグも更新する (sluice の自動 update は
     confirmed=0 で「未確認」に戻し、ユーザーの再確認を促す)。省略時は現状維持。
     削除済み (ごみ箱) 対象への更新も許容する (旧 core_memories 実装と同じ挙動)。
+
+    ``allow_scene``: 既定では場面の記憶 (:data:`SCENE_KIND`) の書き換えを
+    :class:`SceneMemoryNotEditable` で拒む。写しの改変は本人が言っていない
+    言葉を本人の発言として残すことになるため。**ユーザー本人の訂正だけ**が
+    ``allow_scene=True`` を渡す (それは改変ではなく、本人の外からの修正)。
+    ペルソナ側の口は自分で :func:`is_scene_core_memory` を引いて本人向けの
+    説明を返すので、この例外に到達しない。
     """
     from sai_memory.memopedia.storage import generate_diff, record_page_edit
 
@@ -320,6 +360,12 @@ def update_core_memory(
     if row is None:
         return False
     page_id, title, summary, old_content, _created_at, _updated_at, meta = _parse_core_row(row)
+
+    if not allow_scene and (meta.get("kind") or "note") == SCENE_KIND:
+        raise SceneMemoryNotEditable(
+            f"core:{memory_id} is a scene memory (a verbatim copy of a real "
+            "conversation); rewriting it is not allowed from this path"
+        )
 
     if confirmed is not None:
         meta["confirmed"] = int(confirmed)
@@ -571,7 +617,7 @@ def create_scene_core_memory(
         ensure_ascii=False,
     )
 
-    new_id = add_core_memory(conn, transcript, kind="scene", metadata=metadata)
+    new_id = add_core_memory(conn, transcript, kind=SCENE_KIND, metadata=metadata)
 
     # 由来参照を範囲クリップとして切り出し、このコア記憶へ貼る (土地参照の統一
     # プリミティブ、concept_consolidation.md「クリップ」)。正リンクはクリップ側の

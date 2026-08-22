@@ -14,7 +14,7 @@
 
 **既存テストの契約を一つ書き換えた**: `test_add_memo_idem_hit_with_commit_true_commits_the_transaction` は「commit=True なら呼び手の未確定分も一緒に確定する」を仕様として固定していた (この issue の ⚠ 節が指摘した考え方そのもの)。所有判定の導入で契約が変わったため、`test_add_memo_idem_hit_does_not_confirm_callers_transaction` へ置き換え、ロック残りを見る側は `test_add_memo_idem_hit_leaves_no_lock_when_it_owns_the_transaction` として所有する場合に限定した。
 
-**同じ形が残っている隣 (未着手)**: `sai_memory/arasuji/storage.py` (2 箇所) と `sai_memory/memopedia/storage.py` (4 箇所) が同じ「`commit=True` 既定 + 所有を検査しない `if commit:`」を持つ。裁定の範囲外なので今回は触っていない。
+**同じ形が残っている隣**: `sai_memory/arasuji/storage.py` (2 箇所) と `sai_memory/memopedia/storage.py` (4 箇所) が同じ「`commit=True` 既定 + 所有を検査しない `if commit:`」を持つ。裁定の範囲外なので今回は触らず、[別 issue](../storage_writers_commit_flag_is_not_ownership_check.md) へ切り出した (同日の Codex 横断走査も独立に同じ 6 箇所を指摘)。
 
 ## 裁定 (2026-08-22、まはー + Fable)
 

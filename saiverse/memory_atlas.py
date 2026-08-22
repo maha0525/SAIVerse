@@ -850,11 +850,20 @@ def _write_core_new(conn, text: str, core_budget: Optional[int]) -> str:
 def _write_core_update(
     conn, key: Optional[str], text: str, core_budget: Optional[int]
 ) -> str:
-    from sai_memory.core_memory import update_core_memory
+    from sai_memory.core_memory import is_scene_core_memory, update_core_memory
 
     mid = _parse_int(key)
     if mid is None:
         return f"コア記憶の参照が不正です: core:{key}"
+    # 場面の記憶 (実会話の写し) は本人には書き換えさせない — スルースの update と
+    # 同じ規則。ここを塞がないと、スルースで拒まれた書き換えが memory_write から
+    # そのまま通る (2026-08-22 Codex 横断走査の指摘、
+    # docs/issues/archive/sluice_truncated_scene_update.md)。
+    if is_scene_core_memory(conn, mid):
+        return (
+            f"コア記憶 core:{mid} は場面の記憶 (実会話の写し) なので"
+            "書き換えの対象外です。"
+        )
     if not update_core_memory(conn, mid, text):
         return f"コア記憶が見つかりません: core:{mid}"
     note = _core_budget_note(conn, core_budget)

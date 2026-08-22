@@ -532,6 +532,26 @@ class WritePageTests(_AtlasTestBase):
         result = atlas.write_page(self.adapter, "core:999", "内容")
         self.assertIn("見つかりません", result)
 
+    def test_write_core_one_refuses_a_scene_memory(self):
+        """⭐ 場面の記憶 (実会話の写し) は memory_write からも書き換えられない。
+
+        スルースの update だけを塞いでも、同じことが memory_write スペルから
+        通ってしまう (2026-08-22 Codex 横断走査の指摘)。守りたいのは「写しが
+        改変されないこと」なので、ペルソナ側の口は全部同じ規則で断る。
+        docs/issues/archive/sluice_truncated_scene_update.md
+        """
+        from sai_memory.core_memory import add_core_memory, get_core_memory
+
+        mid = add_core_memory(self.adapter.conn, "ユーザー「おはよう」", kind="scene")
+        result = atlas.write_page(self.adapter, f"core:{mid}", "書き換えた本文")
+
+        self.assertIn("場面の記憶", result)
+        self.assertIn("対象外", result)
+        # 写しは無傷
+        self.assertEqual(
+            get_core_memory(self.adapter.conn, mid).content, "ユーザー「おはよう」",
+        )
+
     def test_write_memopedia_appends_with_edit_history(self):
         from sai_memory.memopedia import Memopedia
 

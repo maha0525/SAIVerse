@@ -71,6 +71,31 @@ class CoreMemoryStorageTest(unittest.TestCase):
     def test_update_missing_returns_false(self):
         self.assertFalse(update_core_memory(self.conn, 999, "x"))
 
+    def test_update_refuses_a_scene_memory_by_default(self):
+        """⭐ 写しの改変は、書き込みを作る場所が最後の保証として断る。
+
+        ペルソナ側の口 (スルース / memory_write) はここへ来る前に自分で判定して
+        本人向けの説明を返す。ここまで来るのは「判定を忘れた新しい口」だけなので、
+        黙って通さず落とす — 入口を数え切る設計は必ず漏れる。
+        docs/issues/archive/sluice_truncated_scene_update.md
+        """
+        from sai_memory.core_memory import SceneMemoryNotEditable, get_core_memory
+
+        mid = add_core_memory(self.conn, "ユーザー「おはよう」", kind="scene")
+        with self.assertRaises(SceneMemoryNotEditable):
+            update_core_memory(self.conn, mid, "書き換えた本文")
+        self.assertEqual(get_core_memory(self.conn, mid).content, "ユーザー「おはよう」")
+
+    def test_update_allows_a_scene_memory_for_the_user_correction(self):
+        """ユーザー本人の訂正は改変ではない — 唯一開いている導線。"""
+        from sai_memory.core_memory import get_core_memory
+
+        mid = add_core_memory(self.conn, "ユーザー「おはよう」", kind="scene")
+        self.assertTrue(
+            update_core_memory(self.conn, mid, "ユーザーが直した", allow_scene=True)
+        )
+        self.assertEqual(get_core_memory(self.conn, mid).content, "ユーザーが直した")
+
     def test_remove_existing(self):
         mid = add_core_memory(self.conn, "消す対象")
         self.assertTrue(remove_core_memory(self.conn, mid))

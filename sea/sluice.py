@@ -242,11 +242,17 @@ def _is_scene_memory(memory: Any) -> bool:
     なく** update の対象外にする。remove は対象外にしない (写しを消すことは
     改変ではない)。
 
-    出自: docs/issues/sluice_truncated_scene_update.md (2026-08-22 裁定 —
-    歯止めの条件を「切り詰めて見せたか」から「場面の記憶そのものか」へ移した。
+    種別の literal は :data:`sai_memory.core_memory.SCENE_KIND` 一箇所が持つ。
+    書き込みの最後の保証も同モジュール (`update_core_memory` が既定で拒む) が
+    持っていて、ここはその手前で本人向けの説明を返すための判定。
+
+    出自: docs/issues/archive/sluice_truncated_scene_update.md (2026-08-22 裁定
+    — 歯止めの条件を「切り詰めて見せたか」から「場面の記憶そのものか」へ移した。
     長さで書くと 80 字以下の scene だけ書き換えられる穴が残る)。
     """
-    return memory is not None and getattr(memory, "kind", None) == "scene"
+    from sai_memory.core_memory import SCENE_KIND
+
+    return memory is not None and getattr(memory, "kind", None) == SCENE_KIND
 
 
 def _is_presented_truncated(memory: Any) -> bool:

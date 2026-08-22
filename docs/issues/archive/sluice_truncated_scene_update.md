@@ -10,6 +10,15 @@
 
 **既存テストの仕様を一つ反転した**: `test_a_short_scene_memory_is_still_updatable` は「切り詰めずに見せた scene は直せる」を仕様として固定していた。裁定はこれを穴と判定したので、拒否を期待する形へ書き換えた。
 
+### 追補 (同日 — 歯止めを境界へ移した)
+
+Codex の横断走査が、**スルースだけを塞いでも `memory_write` スペルから同じ書き換えが通る**ことを指摘した (`saiverse/memory_atlas.py` の `_write_core_update` → `update_core_memory`、種類を見ていなかった)。私の歯止めの置き場所が間違っていた — 守りたいのは「写しが改変されないこと」なので、入口ではなく**書き込みを作る場所**が保証を持つべきだった (memory の「入口の検査は境界の保証ではない」)。
+
+- `sai_memory/core_memory.py`: 種別の literal を `SCENE_KIND` 一箇所へ。`update_core_memory` は既定で scene の書き換えを `SceneMemoryNotEditable` で拒む (**最後の保証** — 判定を忘れた新しい口が黙って通らない)。判定を引くための `is_scene_core_memory` も同居させた
+- ユーザー本人の訂正だけが `allow_scene=True` を渡す (`api/routes/people/core_memory.py`)。改変ではなく外からの修正で、issue が言う「別の導線」がこれ
+- ペルソナ側の口 (スルース / `memory_write`) は書き込みを試みる前に自分で判定し、本人向けの説明を返す。例外に到達させないのは、スルースが storage 例外を退場停止のゲートに乗せる設計だから (写しを直そうとしただけで整理全体が止まるのは過剰)
+- 回帰テスト: `memory_write` からの scene 書き換えが拒否され写しが無傷なこと / `update_core_memory` が既定で例外を投げること / `allow_scene=True` なら通ること / ユーザー API 経由なら scene も直せること。いずれも歯止めを外すと落ちることを確認した
+
 ## 裁定 (2026-08-22、まはー + Fable)
 
 **選択肢 B。ただし歯止めの条件を、長さではなく種類 (`kind == "scene"`) で書く。** 実データを数える必要はない。

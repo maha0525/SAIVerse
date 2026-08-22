@@ -624,7 +624,14 @@ def update_core_memory_item(
         with adapter._db_lock:
             init_core_memory_table(adapter.conn)
             # ユーザーが目を通して直した = 確認済みに倒す。
-            ok = update_core_memory(adapter.conn, memory_id, content, confirmed=1)
+            # allow_scene=True: 場面の記憶 (実会話の写し) の書き換えを禁じて
+            # いるのは**ペルソナ本人**に対してで、写しの改変が本人の言葉の捏造に
+            # なるため。ユーザーによる訂正は捏造ではなく外からの修正なので、
+            # ここが唯一の直せる導線として開いている
+            # (docs/issues/archive/sluice_truncated_scene_update.md)。
+            ok = update_core_memory(
+                adapter.conn, memory_id, content, confirmed=1, allow_scene=True,
+            )
             if not ok:
                 raise HTTPException(
                     status_code=404,

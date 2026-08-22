@@ -277,6 +277,25 @@ class CoreMemorySceneApiTest(unittest.TestCase):
         self.assertEqual(listing.items[0].content, "ユーザーが直した本文")
         self.assertEqual(listing.items[0].confirmed, 1)
 
+    def test_update_can_correct_a_scene_memory(self):
+        """⭐ 場面の記憶を直せる導線はユーザーのここだけ (ペルソナ側は全部拒否)。
+
+        docs/issues/archive/sluice_truncated_scene_update.md
+        """
+        from sai_memory.core_memory import add_core_memory, init_core_memory_table
+
+        with self.adapter._db_lock:
+            init_core_memory_table(self.adapter.conn)
+            mid = add_core_memory(
+                self.adapter.conn, "ユーザー「おはよう」", kind="scene",
+            )
+        req = UpdateCoreMemoryRequest(content="ユーザーが直した写し")
+        resp = update_core_memory_item("tester", mid, req, manager=self.manager)
+
+        self.assertTrue(resp.ok)
+        listing = list_core_memory("tester", manager=self.manager)
+        self.assertEqual(listing.items[0].content, "ユーザーが直した写し")
+
     def test_update_empty_content_400(self):
         from fastapi import HTTPException
         mid = self._seed_core_memory("本文")
