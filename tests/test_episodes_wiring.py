@@ -4,8 +4,9 @@
 その配線は束 6c (2026-08-22、autonomous_behavior_v3.md §7) で全部退役した —
 「エピソードという専用の記録行は持たない」の裁定で、開閉の書き手 (会話シム
 経路 / run_work_session / day_plan._fire_slot / SEARuntime._store_memory の
-origin_episode 刻印) が消え、旧エピソードの情報は遷移の一行・台帳・Chronicle
-が持つようになった。以下の節はその書き手ごと削除した:
+origin_episode 刻印) が消え、旧エピソードの情報は台帳・Chronicle が持つように
+なった (始まりと終わりはどこにも記録しない — 2026-08-23 裁定)。以下の節はその
+書き手ごと削除した:
 
 - 会話の出来事 (day_scenario の EpisodeSimUserEventDriver、occurrence_id の
   Building 共有) — ドライバごと退役

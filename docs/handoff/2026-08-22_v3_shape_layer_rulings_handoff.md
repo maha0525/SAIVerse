@@ -14,7 +14,7 @@
 | (2) [scene を先頭だけ見せて書き換えさせる](../issues/archive/sluice_truncated_scene_update.md) | scene は長さ不問で update 対象外 (不変条件「scene は参照コピーのみ」から導く)。提示は 80 字のまま | **修正** |
 | (3) [手帳メモだけ重複防止が無い](../issues/archive/sluice_memo_duplicate_across_spans.md) | 同じ日・同じアクティビティ・同じ本文をスキップ (B) + プロンプトに今回の対象範囲を明示 (供給源) | **修正** |
 | (4) [504 空継続で部分文が二重保存](../issues/archive/stamp_empty_continuation_double_save.md) | 二重保存そのものを直す (C)。数字だけ落とす B は採らない | **修正** |
-| (5) [会話ロックを持ったまま DB 書き込み](../issues/conversation_lock_held_across_db_write.md) | v0.3 では触らない。v0.4 のスケジューラ再設計へ (実時計 tick と同じ机) | **凍結** |
+| (5) [会話ロックを持ったまま DB 書き込み](../issues/archive/conversation_lock_held_across_db_write.md) | v0.3 では触らない。v0.4 のスケジューラ再設計へ (実時計 tick と同じ机) | **凍結** → **解決** (2026-08-23、遷移の一行の撤去で対象消滅) |
 
 ---
 

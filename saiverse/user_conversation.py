@@ -12,10 +12,12 @@ Track は「ペルソナがやっていること」を全部入れる器とし�
 - **応答する** = main_line Pulse (``manager.run_sea_user``)
 - **会話の終わり** = 沈黙タイマー (本モジュールの ``arm_conversation_timeout``)
 
-**始まりと終わりは「遷移の一行」として Building ログに実在する** (v3 §7 の表:
-「始まり・終わりの実在イベント → 遷移の一行 (機構名義のシステムメッセージ)」)。
-名義は機構 (``role='host'``) で、ペルソナ名義 (assistant) では**書かない** —
-機構の記録をペルソナの声として残すと、ペルソナが自分の口調をそこから誤学習する。
+**始まりと終わりはどこにも記録しない。** 会話に終わりの合図は実在しないので、
+実在しない区切りを記録に書くとどう置いても捏造になる (docs/intent/episode.md の
+不変条件)。2026-08-22 の束 6c は始まり / 終わりを機構名義の 1 行として Building
+ログへ書いていたが、その行がペルソナの記憶へ写って文脈を汚していたため、
+2026-08-23 のまはー裁定で機構ごと撤去した (代替の記録も作らない)。できごと UI
+(v0.4) が区間を要るときは、発言の時刻と沈黙の幅から導出する。
 
 **再起動でメモリ内状態は消える = 「会話していない」に一貫して倒れる。** これは
 欠陥ではなく設計 (v3 §9-9): 会話の束ねは表示時に ``conversation`` タグの範囲から
@@ -24,7 +26,7 @@ Track は「ペルソナがやっていること」を全部入れる器とし�
 
 責務:
 - ユーザー発話イベントの受け口 (:func:`on_user_utterance`)
-- 会話の開始 (会話状態を立てる → 遷移の一行 → main_line 起動 → 沈黙タイマー装填)
+- 会話の開始 (会話状態を立てる → main_line 起動 → 沈黙タイマー装填)
 - 沈黙タイマーの装填 / 解除 / 発火
 
 責務外:
@@ -192,9 +194,9 @@ def _consume_timeout_reservation(
 # ⚠ ロックは**応答 (Pulse) を含まない**。Pulse は LLM 呼び出しを含む長い処理で、
 # それをロックの中に置くと、EventScheduler の dispatch スレッド (沈黙タイマーの
 # callback を同期実行する) が LLM の後ろで待たされ、他ペルソナの予約まで止まる。
-# ロックが原子化する必要があるのは「開いているか調べる → 状態を立てる →
-# 遷移の一行 → 予約を張る」までで、そこを抜けた後の相乗り判定はロック無しでも
-# 正しく効く (状態は既に立っている)。
+# ロックが原子化する必要があるのは「開いているか調べる → 状態を立てる → 予約を
+# 張る」までで、そこを抜けた後の相乗り判定はロック無しでも正しく効く
+# (状態は既に立っている)。
 #
 # 再入 (RLock) を許すのは、Pulse の内部から会話開始が再び呼ばれた場合に自分自身で
 # 固まらないため。再入した側は再検査で「既に開いている」を見て相乗りする。
@@ -223,8 +225,8 @@ def conversation_lock(persona_id: str) -> threading.RLock:
 #
 # 旧実装は ``episodes`` テーブルの open な ``kind='conversation'`` 行だった。
 # v3 §7 の裁定でエピソードという専用の記録行を持たなくなったので、状態はプロセス
-# 内のメモリに移り、**始まりと終わりの実在イベントだけが Building ログの
-# 「遷移の一行」として残る**。
+# 内のメモリだけが持つ。**始まりと終わりはどこにも記録しない** (2026-08-23 裁定。
+# 会話に区切りは保存しない = episode.md の不変条件)。
 #
 # キャッシュではなく正典なので、DB フォールバックは持たない。再起動で状態が
 # 消えるのは設計どおり — 「会話していない」に一貫して倒れる (v3 §9-9)。
@@ -331,73 +333,6 @@ def _get_open_non_conversation_episode(
     を決める工事)。それまでは「活動なし」= 呼びかけには常に直接応答する。
     """
     return None
-
-
-# ---------------------------------------------------------------------------
-# 遷移の一行 (Building ログ)
-# ---------------------------------------------------------------------------
-
-
-#: 遷移の一行の event 種別 (``metadata.event.type``)。できごと UI の導出と
-#: チャンクの切れ目の目印がこの刻印を読む (v3 §7 / §9-9)。
-CONVERSATION_TRANSITION_EVENT = "conversation_transition"
-
-
-def _write_transition_line(
-    manager: Any, state: Dict[str, Any], *, action: str
-) -> None:
-    """会話の始まり / 終わりを Building ログへ 1 行残す (機構名義)。
-
-    v3 §7 の表「始まり・終わりの実在イベント → 遷移の一行 (機構名義のシステム
-    メッセージとしてログに実在)」の実装。エピソードの行が消えても、**始まりと
-    終わりが実在する**という v1.4 の芯はこの形で生きる。
-
-    ⚠ 名義は機構 (``role='host'``) — 移動・City Transfer と同じ席。ペルソナ名義
-    (``assistant``) では書かない。機構の記録を本人の声として残すと、ペルソナが
-    「自分は普段こう喋る」をそこから誤学習する (このリポジトリの絶対規則)。
-
-    記録専用なので失敗しても会話は止めない (WARNING のみ)。
-    """
-    building_id = state.get("building_id")
-    if not building_id:
-        return
-    add_event = getattr(manager, "add_building_event", None)
-    if not callable(add_event):
-        return
-
-    persona_id = str(state.get("persona_id") or "")
-    name = (getattr(manager, "id_to_name_map", None) or {}).get(persona_id, persona_id)
-    label = "会話が始まりました" if action == "start" else "会話が終わりました"
-    content = (
-        "<div class=\"note-box\">💬 Conversation:<br>"
-        f"<b>{name}とユーザーの{label}</b></div>"
-    )
-    try:
-        add_event(
-            building_id,
-            {
-                "role": "host",
-                "content": content,
-                "metadata": {
-                    "event": {
-                        "type": CONVERSATION_TRANSITION_EVENT,
-                        "action": action,
-                        "persona_id": persona_id,
-                        "conversation_id": state.get("conversation_id"),
-                        "participants": list(state.get("participants") or []),
-                        "started_at": state.get("started_at"),
-                    }
-                },
-            },
-            heard_by=list(
-                (getattr(manager, "occupants", None) or {}).get(building_id, [])
-            ),
-        )
-    except Exception:
-        LOGGER.warning(
-            "[user-conv] failed to write the conversation-transition line "
-            "(persona=%s action=%s)", persona_id, action, exc_info=True,
-        )
 
 
 # ---------------------------------------------------------------------------
@@ -673,15 +608,16 @@ def start_conversation(
     *,
     pulse_options: Optional[Dict[str, Any]] = None,
 ) -> bool:
-    """会話を開始する: 会話状態 → 遷移の一行 → main_line Pulse → 沈黙タイマー。
+    """会話を開始する: 会話状態 → main_line Pulse → 沈黙タイマー。
 
     旧 ``TrackManager.activate`` → ``on_track_activated`` hook が連鎖させていた
     副作用のうち、Track なしでも要るもの**だけ**をここで直接行う。会話の器は
     2026-08-21 に Track から出来事の行へ、2026-08-22 (束 6c) に出来事の行から
-    メモリ内状態 + 遷移の一行へ移った (v3 §7) — 意味論は据え置きで器だけが変わる。
+    メモリ内状態へ移った (v3 §7) — 意味論は据え置きで器だけが変わる。始まりを
+    記録に残さないのは 2026-08-23 の裁定 (会話に区切りは保存しない)。
 
-    三手 (検査 → 状態を立てる → 遷移の一行とタイマー) はペルソナ単位のロックで
-    原子化する。同時発話が双方「未開」と判定して会話と Pulse を二重に作るのを
+    三手 (検査 → 状態を立てる → タイマー) はペルソナ単位のロックで原子化する。
+    同時発話が双方「未開」と判定して会話と Pulse を二重に作るのを
     防ぐため (2026-08-21 Codex 指摘 3)。競合に負けた側は既に開いた会話へ相乗りし、
     Pulse を起こさずタイマーだけ張り直す — ユーザーの発話は
     ``auto_ingest_building_messages`` 経由で先行 Pulse の入力に含まれる。
@@ -729,11 +665,6 @@ def start_conversation(
             "[user-conv] conversation %s opened for %s (building=%s)",
             state["conversation_id"], persona_id, building_id,
         )
-        # 遷移の一行は記録専用なので、失敗しても会話は進める。旧経路で「開設の
-        # 成功を Pulse 起動の前提にする」(2026-08-21 Codex 指摘 6) と決めたのは、
-        # 当時の出来事の行が「いま会話中か」の**正典**だったから。正典がメモリ内
-        # 状態へ移った今、この一行は正典ではなく記録に戻り、失敗の扱いも戻る。
-        _write_transition_line(manager, state, action="start")
         # 予約はロックの中で張る。Pulse をロックの外へ出したので、ここで張らないと
         # 「開いているのにタイマーが無い会話」がロックの外に一瞬でも現れる。
         _arm_quietly(manager, persona_id)

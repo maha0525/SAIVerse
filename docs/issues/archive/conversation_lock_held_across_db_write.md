@@ -1,6 +1,12 @@
 # 会話ロックを持ったまま DB へ書いていて、単一の発火スレッドが止まる
 
-**状態**: 凍結 — v0.3 では触らない (2026-08-22 裁定)。v0.4 の予定表 (スケジューラ) の作り直しで、[実時計 tick の issue](autonomy_manager_tick_uses_wall_clock.md) と同じ机で構造から直す。
+**状態**: **解決 (2026-08-23、遷移の一行の撤去により対象が消滅)**。
+
+## 決着 (2026-08-23)
+
+ロックの中にあった DB 書き込みは、会話の始まり / 終わりを Building ログへ書く「遷移の一行」**そのもの**だった。同日のまはー裁定 (「会話に終了の概念は無い。ユーザーにもペルソナにも見せる必要は一切ない。建物のログにも残す必要は無い」) でこの一行を機構ごと撤去したため、`handle_conversation_end` のロック内に残るのは `clear_open_conversation` → `cancel_conversation_timeout` だけになり、**ロック内の DB 書き込みが 0 になった**。本 issue の問題は補修ではなく供給源の消滅で解決した。
+
+v0.4 へ持ち込む要件 (発火スレッドの callback が会話ロック・DB 書き込み・LLM を待たない構造) は、[実時計 tick の issue](../autonomy_manager_tick_uses_wall_clock.md) の末尾へ「同じ机で扱う要件」として移した。以下は当時の記録。
 
 ## 裁定 (2026-08-22、まはー + Fable)
 
@@ -12,7 +18,7 @@ v0.3 の露出は限定的 — このスレッドが運ぶのは沈黙タイマ�
 
 **v0.4 で持ち込む要件**: 発火スレッドの callback が、会話ロック・DB 書き込み・LLM 呼び出しのいずれも待たない構造にする。会話の開始と終了の一行の順序は、ロックの外で書いても壊れないこと (順序の鍵をロック内で確定するか、書き込みをペルソナ単位で直列化する)。
 
-関連: [`saiverse/user_conversation.py`](../../saiverse/user_conversation.py) / [`saiverse/autonomy_wiring.py`](../../saiverse/autonomy_wiring.py) / [`saiverse/event_scheduler.py`](../../saiverse/event_scheduler.py)
+関連: [`saiverse/user_conversation.py`](../../../saiverse/user_conversation.py) / [`saiverse/autonomy_wiring.py`](../../../saiverse/autonomy_wiring.py) / [`saiverse/event_scheduler.py`](../../../saiverse/event_scheduler.py)
 出自: v0.3 形の層の掃討フェーズ、ローカル LLM レビューの指摘 2 (2026-08-22)。同じレビューの指摘 1 (応答中に古いタイマーが会話を閉じる) は原因が特定できたためその場で修正済み。
 
 ## 何が起きるか

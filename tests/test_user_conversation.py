@@ -2,15 +2,17 @@
 
 芯 (autonomous_behavior_v3.md §7 / track_retirement.md §2 住人 2): 会話の実体は
 **メモリ内の会話状態 + main_line 起動 + 沈黙タイマー**の三つ。Track はどこにも
-登場せず、束 6c (2026-08-22) からは出来事 (Episode) の行も登場しない — 始まりと
-終わりだけが「遷移の一行」として Building ログに残る。
+登場せず、束 6c (2026-08-22) からは出来事 (Episode) の行も登場しない。始まりと
+終わりは**どこにも記録しない** (2026-08-23 裁定。会話に区切りは保存しない =
+docs/intent/episode.md の不変条件)。
 
 覆う振る舞い:
 - 会話が開いていれば直接メインライン起動 + 沈黙タイマーの張り直し
-- 会話が閉じていれば会話開始 (状態を立てる → 遷移の一行 → main_line → タイマー)
+- 会話が閉じていれば会話開始 (状態を立てる → main_line → タイマー)
+- 会話の開始でも終了でも Building ログに何も書かれない
 - 別の活動中の仲裁経路 (v0.3 では供給源ゼロ。routing だけ回帰で固定する)
 - 沈黙タイマーの対象外判定 (デバッグ完全手動モード / タイムアウト 0 以下)
-- タイムアウト発火で会話状態が落ち、終わりの一行が残り、予約も解除される
+- タイムアウト発火で会話状態が落ち、予約も解除される
 - 再起動 (状態が空) では張り直す待ちが構造上存在しない
 
 2026-08-21 Codex レビューで塞いだ穴のうち、器の差し替えを越えて生きているもの:
@@ -21,8 +23,8 @@
 - 新規会話の初回発話にも Pulse 起動オプションが届く
 
 ⚠ 旧「会話の出来事を開けなかったら応答しない」(Codex 指摘 6) の回帰は対象消滅した。
-あの厳しさは出来事の行が「いま会話中か」の**正典**だったことに由来する。正典が
-メモリ内状態へ移り、Building ログの一行は記録に戻ったので、書けなくても会話は進む。
+あの厳しさは出来事の行が「いま会話中か」の**正典**だったことに由来する。正典は
+メモリ内状態だけが持ち、会話の開設に DB 書き込みは絡まなくなった。
 """
 import threading
 from datetime import datetime, timedelta
@@ -103,14 +105,14 @@ def _start_conversation_state(mgr):
     )
 
 
-def _transition_actions(mgr):
-    """Building ログへ書かれた遷移の一行の action 列 (start / end)。"""
-    actions = []
-    for call in mgr.add_building_event.call_args_list:
-        event = (call.args[1].get("metadata") or {}).get("event") or {}
-        if event.get("type") == uc.CONVERSATION_TRANSITION_EVENT:
-            actions.append(event.get("action"))
-    return actions
+def _building_log_writes(mgr):
+    """会話の開始 / 終了が Building ログへ書いたメッセージ (常に空であるべき)。
+
+    会話に区切りは保存しない (docs/intent/episode.md の不変条件) ので、開始でも
+    終了でも建物ログには一行も増えない。増やすと ``get_building_messages`` の
+    取り込みがそれをペルソナの memory.db へ写し、文脈が汚れる (2026-08-23)。
+    """
+    return [call.args[1] for call in mgr.add_building_event.call_args_list]
 
 
 @pytest.fixture(autouse=True)
@@ -164,8 +166,8 @@ def test_open_conversation_answers_directly_and_rearms_the_timeout(manager):
     # 会話開始経路 (空入力の main_line) は通らない
     manager.run_sea_user.assert_not_called()
     assert _armed(manager) is True
-    # 会話は開き直されない (始まりの一行も増えない)
-    assert _transition_actions(manager) == []
+    # 会話は開き直されないし、建物ログにも何も書かれない
+    assert _building_log_writes(manager) == []
 
 
 def test_no_conversation_and_no_activity_starts_the_conversation(manager):
@@ -191,34 +193,24 @@ def test_no_conversation_and_no_activity_starts_the_conversation(manager):
     assert _armed(manager) is True
 
 
-def test_the_start_writes_one_transition_line_under_the_mechanism_name(manager):
-    """始まりは機構名義 (role='host') の一行として Building ログに実在する。
+def test_the_start_and_the_end_write_nothing_to_the_building_log(manager):
+    """会話の開始でも終了でも、建物ログには一行も書かれない。
 
-    v3 §7 の表「始まり・終わりの実在イベント → 遷移の一行」。ペルソナ名義
-    (assistant) では書かない — 機構の記録を本人の声として残すと口調を誤学習する。
+    会話に終わりの合図は実在しないので、実在しない区切りを記録に書くとどう置いても
+    捏造になる (docs/intent/episode.md の不変条件)。実害の形も具体的だった: 機構名義
+    (role='host') の行は ``get_building_messages`` の取り込みが自動でペルソナの
+    memory.db へ写すため、「会話が始まりました / 終わりました」が毎回ペルソナの文脈
+    に載っていた (2026-08-23 にまはーが実機で発見し、機構ごと撤去)。
     """
-    uc.start_conversation(manager, PERSONA_ID, USER_ID)
-
-    manager.add_building_event.assert_called_once()
-    building_id, message = manager.add_building_event.call_args.args[:2]
-    assert building_id == "test_building"
-    assert message["role"] == "host"
-    event = message["metadata"]["event"]
-    assert event["type"] == uc.CONVERSATION_TRANSITION_EVENT
-    assert event["action"] == "start"
-    assert event["persona_id"] == PERSONA_ID
-    assert event["conversation_id"] == _open_conversation(manager)["conversation_id"]
-
-
-def test_a_failed_transition_line_does_not_stop_the_response(manager):
-    """遷移の一行は記録であって正典ではない — 書けなくても会話は進む。"""
-    manager.add_building_event.side_effect = RuntimeError("building log is down")
-
     assert uc.start_conversation(manager, PERSONA_ID, USER_ID) is True
-
-    manager.run_sea_user.assert_called_once()
     assert _open_conversation(manager) is not None
-    assert _armed(manager) is True
+    assert _building_log_writes(manager) == []
+
+    uc.handle_conversation_timeout(manager, PERSONA_ID)
+
+    assert _open_conversation(manager) is None
+    assert _building_log_writes(manager) == []
+    manager.add_building_event.assert_not_called()
 
 
 def test_busy_with_another_activity_fires_the_on_event_judgment(manager, monkeypatch):
@@ -332,8 +324,7 @@ def test_timeout_closes_the_conversation_and_releases_the_reservation(manager):
 
     assert _open_conversation(manager) is None
     assert _armed(manager) is False
-    # 始まりと終わりが両方ログに実在する
-    assert _transition_actions(manager) == ["start", "end"]
+    assert _building_log_writes(manager) == []
 
 
 def test_timeout_with_a_stale_expected_id_closes_nothing(manager):
@@ -345,7 +336,7 @@ def test_timeout_with_a_stale_expected_id_closes_nothing(manager):
     )
 
     assert _open_conversation(manager) is not None
-    assert _transition_actions(manager) == ["start"]
+    assert _building_log_writes(manager) == []
 
 
 # ---------------------------------------------------------------------------
@@ -556,12 +547,17 @@ def test_closing_a_stale_conversation_leaves_the_live_reservation_alone(manager)
     assert _armed(manager) is True
 
 
-def test_a_conversation_started_during_another_s_close_keeps_its_timer(manager):
+def test_a_conversation_started_during_another_s_close_keeps_its_timer(
+    manager, monkeypatch,
+):
     """会話 A の終了処理の**最中**に会話 B が始まっても、B は無傷で残る。
 
     指摘 1 の現物。終了処理が開始処理と直列化されていないと、B は A の後片付けの
     途中で開き、A の予約解除が B の予約を巻き添えにする (B はタイマーの無い会話
     として残り、永久に閉じない)。
+
+    A の終了処理を途中で止めるために、ロックの中の最後の一手 (予約の解除) を
+    差し替えて待たせる。
     """
     uc.start_conversation(manager, PERSONA_ID, USER_ID)  # 会話 A
     conversation_a = _open_conversation(manager)["conversation_id"]
@@ -569,16 +565,14 @@ def test_a_conversation_started_during_another_s_close_keeps_its_timer(manager):
 
     closing = threading.Event()
     release = threading.Event()
-    original = manager.add_building_event.side_effect
+    original_cancel = uc.cancel_conversation_timeout
 
-    def _block_on_the_end_line(building_id, message, **kwargs):
-        event = (message.get("metadata") or {}).get("event") or {}
-        if event.get("action") == "end":
-            closing.set()
-            release.wait(10)
-        return original(building_id, message, **kwargs) if original else {}
+    def _block_while_cancelling(*args, **kwargs):
+        closing.set()
+        release.wait(10)
+        return original_cancel(*args, **kwargs)
 
-    manager.add_building_event.side_effect = _block_on_the_end_line
+    monkeypatch.setattr(uc, "cancel_conversation_timeout", _block_while_cancelling)
 
     started = {}
 
@@ -610,7 +604,7 @@ def test_a_conversation_started_during_another_s_close_keeps_its_timer(manager):
     assert conversation_b["conversation_id"] != conversation_a
     # B は自分の予約を持ったまま (A の後片付けに巻き込まれていない)
     assert _armed(manager) is True
-    assert _transition_actions(manager) == ["start", "end", "start"]
+    assert _building_log_writes(manager) == []
 
 
 # ---------------------------------------------------------------------------
@@ -645,8 +639,7 @@ def test_concurrent_start_opens_one_conversation_and_one_pulse(manager):
     assert started.is_set()
     assert _open_conversation(manager) is not None
     assert manager.run_sea_user.call_count == 1
-    # 始まりの一行も 1 本だけ
-    assert _transition_actions(manager) == ["start"]
+    assert _building_log_writes(manager) == []
     # 勝ちが 1、相乗りが 1
     assert sorted(results.values()) == [False, True]
     assert _armed(manager) is True
@@ -864,8 +857,8 @@ def test_a_timer_firing_during_the_reply_does_not_close_the_live_conversation(ma
       2. ユーザーが発話 → 継続経路が応答を起こす
       3. 応答の生成中に T1 が発火する (dispatch は取り出し済みなので止められない)
 
-    ここで T1 が会話 A を閉じてしまうと、ユーザーがまさに話している会話に
-    「会話が終わりました」の一行が書かれ、次の発話が新しい会話になる。
+    ここで T1 が会話 A を閉じてしまうと、ユーザーがまさに話している最中に会話が
+    切られ、次の発話が新しい会話になる。
     """
     _start_conversation_state(manager)
     uc.arm_conversation_timeout(manager, PERSONA_ID)
@@ -886,8 +879,7 @@ def test_a_timer_firing_during_the_reply_does_not_close_the_live_conversation(ma
     assert fired == ["timer"], "古い予約が発火する並びを再現できていない"
     # 会話は開いたまま — 話している最中に閉じられていない
     assert _open_conversation(manager) is not None
-    # 「会話が終わりました」の一行が書かれていない
-    assert _transition_actions(manager) == []
+    assert _building_log_writes(manager) == []
     # 応答後の張り直しが生きている (巻き添えで取り消されていない)
     assert _armed(manager) is True
 

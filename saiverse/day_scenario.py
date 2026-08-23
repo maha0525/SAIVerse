@@ -260,7 +260,7 @@ def _ensure_conversation_state(manager: Any, persona_id: str) -> None:
 
     シムは本番の入口 (:func:`saiverse.user_conversation.start_conversation`) を
     通さず、**会話中フラグだけ**を再生する構成なので、状態を直接立てる。
-    記録専用 — 失敗してもシナリオ再生を止めない。
+    メモリ内状態だけを触る — 失敗してもシナリオ再生を止めない。
     """
     try:
         from saiverse import user_conversation as uc
@@ -273,11 +273,10 @@ def _ensure_conversation_state(manager: Any, persona_id: str) -> None:
         user_id = getattr(manager, "user_id", None)
         if user_id is not None:
             participants.append(str(user_id))
-        state = uc._set_open_conversation(
+        uc._set_open_conversation(
             manager, persona_id,
             building_id=building_id, participants=participants,
         )
-        uc._write_transition_line(manager, state, action="start")
     except Exception:
         LOGGER.warning(
             "[day_scenario] failed to open the conversation state (persona=%s)",
