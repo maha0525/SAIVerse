@@ -1,7 +1,7 @@
 # 判断点の席の競合制御と、イベントの取りこぼし
 
 **発見**: 2026-07-30（[判断プロンプトの静的一覧を head へ](judgment_static_lists_to_head.md) の Codex レビュー五巡目。移設の範囲外として切り出し）
-**状態**: 実装済・実機検証待ち（2026-07-31。③はまはー裁定で **B** に確定 — 下の「裁定の記録」。④⑤⑥は 2026-08-14 追加・実装済）
+**状態**: 💤 **凍結 (2026-08-23)** — v0.3 の止め具 (`saiverse/autonomy_wiring.py` の `AUTONOMOUS_DRIVING_SHIPPED = False`、正典は [autonomous_behavior_v3.md](../intent/autonomous_behavior_v3.md) §11.1) により判断点が一つも発火しないため、実機検証が成立しない。**実装は入ったまま (撤去していない)**。再開は v0.4 で運転 (時間割 + 判断点) を配線するとき。旧状態 = 実装済・実機検証待ち（2026-07-31。③はまはー裁定で **B** に確定 — 下の「裁定の記録」。④⑤⑥は 2026-08-14 追加・実装済）
 **関連**: `docs/intent/execution_ledger.md`、`docs/overview/audit_remediation_plan.md`（実行台帳 W1〜）、`saiverse/judgment_points.py` / `saiverse/autonomy_wiring.py` / `saiverse/execution_ledger.py`
 
 ## なぜ切り出したか
@@ -141,3 +141,11 @@
 フルスイート 3449 件緑。
 残 = 収束判定 (十一巡目まで消化済) → コミット → 実機検証
 **コミット済みを確認 (2026-08-07)**: 実装は 8d0ee00 / 15da635 として既にコミット済みだった (台帳の「コミット待ち」が stale)。残 = 実機検証のみ。観察項目は [統合検証手順](../handoff/2026-08-07_timetable_live_verification_run.md) Step 3 の横断観察に相乗り。
+
+### 凍結 (2026-08-23、まはー裁定) — 台帳から外した行の文面
+
+台帳 (in_flight.md) から本件の行を外した。外す直前の次アクション欄の文面をここへ移送する:
+
+> 裁定 B (保持+再試行窓) で実装・コミット済み。範囲外は event_delivery_reachability_gaps へ切り出し済み。次 = 実機検証 (時間割の統合検証手順に相乗り — 判断の二重発火なし・waiting 系 ERROR の静穏を観察)。
+
+凍結の理由: 観察項目 (判断の二重発火・waiting 系 ERROR) はどちらも判断点が発火して初めて現れるもので、止め具が入っている間は観察対象そのものが存在しない。実装と回帰テストはそのまま残す。再開は v0.4 で運転を配線するとき。

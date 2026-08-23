@@ -266,3 +266,11 @@ Codexレビュー10巡27件消し込み。
 **Phase 4 Metabolism=実装済・実機検証待ち(2026-07-21、W4)**: M2残片をepisode整列の新設経路で消化(体験の構造 工程(2)と統合) — チャンク単一tx・列のあふれ束ね親子単一tx・evict boundary・digest材料除外・API生成ジョブのM1 claim結線。
 **Phase 5 配送系と移動=実装済・実機検証待ち(2026-07-21、W5)**: S5(perception flushのNone検査)+M8(転記cursor後行確定+provenance冪等)+ライフ境界通知outbox化(マーカーと単一commit)+B1(move.entity台帳化) — **これで段階移行計画Phase 0〜5が全段実装済み**。
 残: まはー実機検証
+
+### 検証範囲の絞り込み (2026-08-23、まはー裁定) — 台帳の次アクションを狭めた
+
+本件は**凍結しない** (台帳に残る)。ただし v0.3 の止め具 (`saiverse/autonomy_wiring.py` の `AUTONOMOUS_DRIVING_SHIPPED = False`、正典は [autonomous_behavior_v3.md](autonomous_behavior_v3.md) §11.1) により、**判断点・時間割・配送の段の実機検証は v0.3 では成立しない** — 判断点も時間割のコマも発火せず、ライフ境界通知も移動も走らないため、台帳が包んでいる実行そのものが起きない。**v0.3 で見るのはスルース (Metabolism) 経路だけ**にする。判断点・時間割・配送の段の検証は、v0.4 で運転 (時間割 + 判断点) を配線するときに一緒に行う。
+
+台帳の次アクション欄を上の範囲へ狭めた。狭める直前の文面をここへ移送する:
+
+> 段階移行 Phase 0〜5 (基盤+Beat ロック / 判断点 / 時間割・予算 / schedule / Metabolism / 配送・移動) が全段実装済み。大原則 = LLM 自動再実行禁止。次 = まはーの実機検証。

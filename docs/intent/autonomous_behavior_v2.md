@@ -1,6 +1,6 @@
 # Intent: 自律行動 v2 — 身体・意志・世界
 
-**ステータス**: draft v0.1 (2026-07-04)。レビュー待ち。
+**ステータス**: 💤 **凍結 (2026-08-23、まはー裁定)** — v0.3 の止め具 (`saiverse/autonomy_wiring.py` の `AUTONOMOUS_DRIVING_SHIPPED = False`、正典は [autonomous_behavior_v3.md](autonomous_behavior_v3.md) §11.1) により判断点・見張り・時間割のコマが発火しないため、活性化配線の実機検証が成立しない。**実装は入ったまま (撤去していない)**。再開は v0.4 で運転 (時間割 + 判断点) を配線するとき。旧ステータス = draft v0.1 (2026-07-04)。レビュー待ち。
 **親 intent**: `autonomous_living.md`（自律生活のビジョン。本書はその実現設計の全面改訂）
 **関連**: `persona_action_tracks.md` / `persona_cognition/meta_judgment_structured.md` / `persona_cognition/autonomous_desire.md`
 **詳細仕様**: 判断点の入出力（見るもの・response_schema）は [`persona_cognition/judgment_points.md`](persona_cognition/judgment_points.md)
@@ -333,3 +333,11 @@ ACTIVITY_STATE が親スイッチ(スケジュール有効≠発火)。
 **実機発見の表示バグ §3-2/3/4 は修正済**(fe5cd59 判断点サマリの表題付与 / 130bf4a できごとの slot+work_session 親子畳み込み。
 §3-4 の見た目確認は次回フロント再ビルド後、[fixes handoff](../handoff/2026-07-12_first_day_live_fixes_handoff.md) §3)。
 **§3-1 purpose_seed が分身モードで撃てない件はまはー裁定待ち**
+
+### 凍結 (2026-08-23、まはー裁定) — 台帳から外した行の文面
+
+台帳 (in_flight.md) から本件の行を外した。外す直前の次アクション欄の文面をここへ移送する:
+
+> 実機初日を走行済み — 起床判断・時間割・作業セッションまで動作、発見したバグは修正済み。次 = 再起動して過ぎたコマの即時発火テスト → 夕方コマ → 就寝裁定 → 編纂初陣。§3-1 (purpose_seed が分身モードで撃てない) はまはー裁定待ち。
+
+凍結の理由: 次の一手として並んでいた四つ (過ぎたコマの即時発火・夕方コマ・就寝裁定・編纂初陣) は、いずれも判断点かコマの発火が前提で、止め具の下では一つも走らない。実装と回帰テストはそのまま残す。§3-1 の裁定も再開時まで持ち越す。再開は v0.4 で運転を配線するとき。
