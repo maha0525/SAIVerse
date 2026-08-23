@@ -92,7 +92,7 @@ _lock = threading.Lock()
 # key 数だけ常に dict サイズが保たれる。 message_id が大量に増え続ける状況
 # (例: 長時間稼働で 10 万 message) でも、 dict のエントリはハンドラ数 ×
 # active key 数で抑えられる (完了した Future への参照は他から保持されてない
-# ので GC される)。 念のため定期 GC は ``_gc_chain_state`` で行う。
+# ので GC される)。 完了した Future のエントリは ``_on_chain_done`` が消す。
 _chain_state: Dict[Tuple[str, str, int], Future] = {}
 _chain_lock = threading.Lock()
 
