@@ -1,8 +1,9 @@
 # 目的の木 (persona_task / task:N / purpose_* スペル) と手帳が、ペルソナから見て「やりたいことの置き場」として二つ並んでいる
 
-**状態**: 未解決 (2026-08-23 起票)。**裁定待ち** — 目的の木を退役させて手帳を後継にするか、v0.4 で両方を生かすなら役割分担を決めるか。v0.3 を止める理由にはならない (どちらも壊れてはいない)。
+**状態**: 裁定済み (A、2026-08-23)。**一段目 実装済み / 二段目 v0.4** — 目的の木を退役させ、手帳を後継に確定した。ペルソナから見える口は塞いだので、この issue に残っているのは二段目 (内部の配線の撤去) だけ。v0.3 は自律 OFF でその配線は動かないため、v0.3 を止める理由にはならない。
 
-関連: [`saiverse/persona_task_manager.py`](../../saiverse/persona_task_manager.py) / [`builtin_data/tools/purpose_close.py`](../../builtin_data/tools/purpose_close.py) / `purpose_decompose.py` / `purpose_step.py` / `builtin_data/tools/memory_read.py` (`task:N` 参照) / [`sai_memory/memory/pocketbook.py`](../../sai_memory/memory/pocketbook.py) / [`saiverse/task_book.py`](../../saiverse/task_book.py)
+関連: [`saiverse/persona_task_manager.py`](../../saiverse/persona_task_manager.py) / [`saiverse/memory_atlas.py`](../../saiverse/memory_atlas.py) (`task:N` の解決) / [`builtin_data/tools/memory_read.py`](../../builtin_data/tools/memory_read.py) / [`sai_memory/memory/pocketbook.py`](../../sai_memory/memory/pocketbook.py) / [`saiverse/task_book.py`](../../saiverse/task_book.py)
+※ `builtin_data/tools/purpose_close.py` / `purpose_decompose.py` / `purpose_step.py` は 2026-08-23 に削除済み (下の裁定)。
 出自: 2026-08-23、手帳のスペル (「手帳を開く」「手帳に書く」) を足すにあたり、記憶系スペル 16 本を洗い出して使い分けの材料を検めたとき。
 
 ## 何が並んでいるか
@@ -35,3 +36,30 @@
 
 - 本番の `persona_task` に、open な目的ノードが何件・どんな内容で残っているか (読み取り専用で数えられる: `scripts/inspect_world.py tasks <persona>`)。
 - `purpose_*` スペルが直近で撃たれた記録があるか (llm_io / sea_trace)。
+
+## 裁定 (2026-08-23、まはー)
+
+**選択肢 A を採る** — 目的の木を退役させ、手帳を後継に確定する。ただし工事は二段に分ける。
+
+### 一段目 (2026-08-23 実施済み): ペルソナから見える口を閉じる
+
+「ペルソナが目的の木を操作する口」と「ペルソナに目的の木を宣伝する文」だけを消した。
+
+- `purpose_close` / `purpose_decompose` / `purpose_step` の三本を削除 (`builtin_data/tools/`)。テスト `tests/test_purpose_tools.py` も同時に削除。
+- `sea/mode_spell_permissions.py` のゲート表 `TASK_CONTROL_SPELLS` は空になった (表が空でも判定は素通しなので動作は変わらない。機構ごと畳むかは v0.4 で問う)。
+- 地図帳スペル 4 本 (`memory_read` / `memory_open` / `memory_close` / `memory_delete`) の説明文と引数説明から `task:N` を外した。`memory_delete` の「目的ノード (task:N) を終えるには purpose_close を使ってください」という案内も消した。`memory_open` の `purpose_ref` 引数 (値の形が `task:N` しか無かった) も schema から降ろした。
+- `memory_open task:N` は**拒否**に変えた (机に開く = 本人の文脈に常駐させる口なので閉じる)。`memory_read task:N` は**通る**まま (自動想起が古い参照を流したときに読めないと困る)。`memory_close task:N` も**通る**まま (退役前に机へ開かれた行を本人が下ろせるように)。`memory_delete task:N` は元々拒否なので変えていない。
+- ペルソナに見せる ref の書式例 (`memory_atlas._REF_EXAMPLES`) からも `task:4` を降ろした。
+
+既存の目的ノードの中身を手帳へ機械写しは**しない**。ステップの進捗を「やったメモ」へ、未完の目的を「やりたいメモ」へ写すには意味の解釈が要るため (v3 §9-8 の規則)。
+
+### 二段目 (v0.4 の運転設計と一緒): 内部の配線を撤去する
+
+v0.3 は自律 OFF なので、以下はどれも動かない。運転を作り直すときに一緒に片付ける。
+
+- `saiverse/memory_atlas.py` の `task` 分岐本体 (`_read_task` / `_resolve_task_ref_for_desk` / `snapshot_desk` の task 描画)。
+- `saiverse/recall_walk.py` の目的ノードを辿る辺。
+- 判断点の棚入れ (`saiverse/judgment_points.py::collect_purpose_refs` と `builtin_data/tools/judgment_finalize.py` の `episode_purposes`)、および時間割のコマが指す `task:N` (`builtin_data/playbooks/public/judgment_day_open.json` のプロンプトが「実在のタスク (task:N) を指してください」と書いている)。
+- `saiverse/persona_task_manager.py` と `persona_task` テーブル。
+
+この issue は二段目が残るため `docs/issues/` に置いたまま。

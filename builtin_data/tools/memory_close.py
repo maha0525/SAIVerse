@@ -4,9 +4,12 @@ concept_consolidation.md「開閉制御 — 机の物理」の実装。``memory_
 机に開いたページを明示的に閉じる。閉じても目次 (検索・想起) からは消えない
 ので、閉じることを怖がる必要はない。
 
-対応 ref: ``m:N`` (Memopedia) / ``ch:N`` (Chronicle) / ``task:N`` (目的ノード。
-P3c①②で対応)。コア記憶は常時開のシステム常設ピンなので対象外 (``core`` /
-``c:N`` は「閉じられません」を返す)。
+対応 ref: ``m:N`` (Memopedia) / ``ch:N`` (Chronicle)。コア記憶は常時開の
+システム常設ピンなので対象外 (``core`` / ``c:N`` は「閉じられません」を返す)。
+
+``task:N`` (目的ノード) を閉じる実装も残してある — 目的の木の退役
+(2026-08-23) 以前に机へ開かれたページを本人が下ろせなくなると困るため。
+新規に開く口は ``memory_open`` 側で閉じた。
 """
 from __future__ import annotations
 
@@ -55,15 +58,15 @@ def schema() -> ToolSchema:
         description=(
             "机に開いた記憶の地図帳のページを閉じ、棚に戻します。"
             "閉じても目次（検索・想起）からは消えません。必要ならまた開けます。"
-            "参照は memopedia:N（Memopedia）/ chronicle:N（Chronicle）/ task:N（目的ノード）"
-            "の形式です（コア記憶は常時開のため対象外です）。"
+            "参照は memopedia:N（Memopedia）/ chronicle:N（Chronicle）の形式です"
+            "（コア記憶は常時開のため対象外です）。"
         ),
         parameters={
             "type": "object",
             "properties": {
                 "ref": {
                     "type": "string",
-                    "description": "閉じたいページの参照（例: m:3 / ch:5 / task:2）",
+                    "description": "閉じたいページの参照（例: m:3 / ch:5）",
                 },
             },
             "required": ["ref"],

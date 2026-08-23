@@ -1109,7 +1109,8 @@ def _coerce_arg_to_type(value: Any, json_type: str) -> Any:
     LLM が spell 行を生成する際、``"index": "2"`` のように integer / number /
     boolean を文字列でクオートしてしまうケースが頻出する。そのまま tool に渡すと
     ``step_position`` のような整数比較が ``str < int`` で TypeError になる
-    (purpose_step の実例)。schema の宣言型に向けて文字列値だけを変換する。
+    (実例は退役した purpose_step スペルで観測された)。schema の宣言型に向けて
+    文字列値だけを変換する。
 
     変換できない値はそのまま返し (tool 側のバリデーションに委ねる)、すでに正しい
     型の値は touch しない。型の緩めではなく schema 宣言型への正規化。

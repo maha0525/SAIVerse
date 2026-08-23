@@ -254,13 +254,13 @@ class OpenClosePageTests(_AtlasTestBase):
         self.assertIn(f"chronicle:{entry.short_id}", self._desk_refs())
         self.assertIn("机に開きました", result)
 
-    def test_open_task_without_manager_reports_not_found(self):
-        # task:N (目的の地図) は main DB 在住 — manager (world 文脈) を渡さない
-        # 呼び出しでは解決できず、memopedia:N の未知参照と同じ「見つかりません」を返す
-        # (P3c①② で task:N の開閉は実装済み。manager 込みの動作は
-        # TaskDeskTests でカバーする)。
+    def test_open_task_is_rejected_as_read_only(self):
+        # 目的の木の退役 (2026-08-23) 以後、task:N は机に開けない。実在確認より
+        # 前に断るので manager の有無に関わらず同じ文面が返る (manager 込みの
+        # 回帰は TaskDeskTests でカバーする)。
         result = atlas.open_page(self.adapter, "task:1")
-        self.assertIn("見つかりません", result)
+        self.assertIn("机に開けません", result)
+        self.assertIn("memory_read task:1", result)
         self.assertEqual(self._desk_refs(), set())
 
     def test_open_clip_is_rejected_with_read_hint(self):
@@ -791,9 +791,12 @@ class DeletePageTests(_AtlasTestBase):
         result = atlas.delete_page(self.adapter, "core")
         self.assertIn("消せません", result)
 
-    def test_delete_task_redirects_to_purpose_close(self):
+    def test_delete_task_is_rejected_without_naming_a_retired_spell(self):
+        # 目的の木の退役 (2026-08-23) 前は purpose_close へ誘導していた文面。
+        # スペルが消えたので、消せないことだけを本人に返す。
         result = atlas.delete_page(self.adapter, "task:1")
-        self.assertIn("purpose_close", result)
+        self.assertIn("消せません", result)
+        self.assertNotIn("purpose_close", result)
 
 
 class ClipTranscribeTests(_AtlasTestBase):
@@ -1087,42 +1090,47 @@ class TaskReadTests(_AtlasTestBase):
         self.assertIn("見つかりません", result)
 
 class TaskDeskTests(TaskReadTests):
-    """task:N (目的ノード) の机開閉 (P3c①②)。
+    """task:N (目的ノード) と机 — 目的の木の退役 (2026-08-23) 後の姿。
 
-    ``purpose_ref`` (この開きが紐づく目的) は既に desk に実装済み — ここでは
-    ref 自体が task:N である場合の open/close/snapshot を検証する。
+    新規に開く口は閉じた (open は断る) が、退役より前に机へ開かれた行を
+    本人が下ろせなくなると困るので、close と机の描画 (snapshot_desk) は
+    残置。したがって「既に机にある」状態は desk へ直接置いて作る。
     setUp/_make_task は TaskReadTests から継承 (manager 込みの土台を共用)。
     """
 
-    def test_open_task_registers_desk_item(self):
+    def _put_on_desk(self, ref: str):
+        """退役前に開かれた机の行を模す (open_page はもう task を受けない)。"""
+        from sai_memory.desk import open_item
+
+        open_item(self.adapter.conn, ref)
+
+    def test_open_task_is_rejected_even_when_node_exists(self):
+        # 実在する目的ノードでも机には開けない (読み取り専用の残置)。
         task = self._make_task()
         ref = task["task_ref"]
         result = atlas.open_page(self.adapter, ref, manager=self.manager)
-        self.assertIn("机に開きました", result)
-        self.assertIn(ref, self._desk_refs())
+        self.assertIn("机に開けません", result)
+        self.assertIn("memory_read", result)
+        self.assertEqual(self._desk_refs(), set())
 
-    def test_open_task_returns_content_inline(self):
-        # 開く＝読む行為を兼ねる (memopedia:N と同じ)。task の整形は _read_task と共通
-        task = self._make_task()
-        result = atlas.open_page(self.adapter, task["task_ref"], manager=self.manager)
-        self.assertIn(task["title"], result)
-
-    def test_open_unknown_task_reports_not_found(self):
+    def test_open_unknown_task_is_rejected_the_same_way(self):
+        # 実在確認より前に断るので、未知の番号でも文面は同じ (存在の漏洩もない)。
         result = atlas.open_page(self.adapter, "task:999", manager=self.manager)
-        self.assertIn("見つかりません", result)
+        self.assertIn("机に開けません", result)
         self.assertEqual(self._desk_refs(), set())
 
     def test_close_task_removes_desk_item(self):
         task = self._make_task()
         ref = task["task_ref"]
-        atlas.open_page(self.adapter, ref, manager=self.manager)
+        self._put_on_desk(ref)
         result = atlas.close_page(self.adapter, ref, manager=self.manager)
         self.assertIn("机から閉じました", result)
         self.assertEqual(self._desk_refs(), set())
 
     def test_close_task_without_manager_reports_not_found(self):
-        # close も open と対称 — manager が無いと task:N は解決できない
+        # close は実在確認を通るので、manager が無いと task:N は解決できない
         task = self._make_task()
+        self._put_on_desk(task["task_ref"])
         result = atlas.close_page(self.adapter, task["task_ref"])
         self.assertIn("見つかりません", result)
 
@@ -1131,7 +1139,7 @@ class TaskDeskTests(TaskReadTests):
             steps=[{"title": "下調べ"}], desire_source="きっかけ",
         )
         ref = task["task_ref"]
-        atlas.open_page(self.adapter, ref, manager=self.manager)
+        self._put_on_desk(ref)
 
         pages, evicted, dropped = atlas.snapshot_desk(self.adapter, manager=self.manager)
 
@@ -1150,7 +1158,7 @@ class TaskDeskTests(TaskReadTests):
 
         task = self._make_task()
         ref = task["task_ref"]
-        atlas.open_page(self.adapter, ref, manager=self.manager)
+        self._put_on_desk(ref)
 
         ptm = PersonaTaskManager(self.manager.SessionLocal)
         ptm.update_task_status(

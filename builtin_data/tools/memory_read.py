@@ -5,8 +5,12 @@ concept_consolidation.md「P2: 統一スペル動詞 v0.2」の read。中身が
 取らない、既定の行為。常に見える状態を保ちたいときは ``memory_open`` を使う。
 
 対応 ref: ``m:N`` (Memopedia) / ``core`` (コア記憶全件) / ``c:N`` (コア記憶1件)
-/ ``ch:N`` (Chronicle) / ``p:N`` (クリップ — クリップが写す生ログの全文) / ``task:N``
-(目的ノード — 段階・状態・ステップ・貼られたクリップ。P2c-1 で解決)。
+/ ``ch:N`` (Chronicle) / ``p:N`` (クリップ — クリップが写す生ログの全文)。
+
+``task:N`` (目的ノード) の読み取りも通る — ただし目的の木は 2026-08-23 に
+退役したので、説明文からは降ろしてある (自動想起が古い参照を出したときに
+読めないと困るための読み取り専用の残置。
+docs/issues/purpose_tree_vs_pocketbook_succession.md)。
 """
 from __future__ import annotations
 
@@ -53,15 +57,15 @@ def schema() -> ToolSchema:
             "（机の場所は取りません）。常に見える状態を保ちたい場合は "
             "memory_open を使ってください。"
             "参照は memopedia:N（Memopedia）/ core（コア記憶全件）/ core:N（コア記憶1件）/ "
-            "chronicle:N（Chronicle）/ clip:N（クリップ — そのクリップが写す会話の生ログ全文）/ "
-            "task:N（目的ノード — 段階・ステップ・貼られたクリップ）の形式です。"
+            "chronicle:N（Chronicle）/ clip:N（クリップ — そのクリップが写す会話の生ログ全文）"
+            "の形式です。"
         ),
         parameters={
             "type": "object",
             "properties": {
                 "ref": {
                     "type": "string",
-                    "description": "読みたいページの参照（例: m:3 / core / c:2 / ch:5 / p:1 / task:4）",
+                    "description": "読みたいページの参照（例: m:3 / core / c:2 / ch:5 / p:1）",
                 },
             },
             "required": ["ref"],

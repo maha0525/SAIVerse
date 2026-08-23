@@ -6,9 +6,13 @@ Metabolism を跨いで head に残り続ける — 高価で明示的な行為�
 「読む」＝その場に流れる（場所を取らない）のに対し、「開く」＝机に残り続ける
 （机の場所を取る）。
 
-対応 ref: ``m:N`` (Memopedia) / ``ch:N`` (Chronicle) / ``task:N`` (目的ノード。
-P3c①②で対応)。コア記憶は常時開のシステム常設ピンなので対象外 (``core`` /
-``c:N`` は「既に開いています」を返す)。
+対応 ref: ``m:N`` (Memopedia) / ``ch:N`` (Chronicle)。コア記憶は常時開の
+システム常設ピンなので対象外 (``core`` / ``c:N`` は「既に開いています」を返す)。
+
+``task:N`` (目的ノード) は 2026-08-23 に机の対象から外れた — 目的の木が
+退役し、本人の文脈に常駐させる口を閉じたため
+(docs/issues/purpose_tree_vs_pocketbook_succession.md)。読むだけなら
+``memory_read task:N`` が今も通る。
 """
 from __future__ import annotations
 
@@ -24,12 +28,18 @@ from tools.core import ToolSchema
 
 
 def memory_open(ref: str, purpose_ref: Optional[str] = None) -> str:
-    """ページを机に開いたままにする (Metabolism を跨いで head に残り続ける)。"""
+    """ページを机に開いたままにする (Metabolism を跨いで head に残り続ける)。
+
+    ``purpose_ref`` (この開きが紐づく目的) は 2026-08-23 に schema から降ろした —
+    唯一の値の形が ``task:N`` (退役した目的の木) だったため。desk 側の列と
+    ``open_page`` の受け口は残っているので、内部の呼び手はそのまま渡せる。
+    """
     persona_id = get_active_persona_id()
     if not persona_id:
         raise RuntimeError("Active persona is not set")
 
-    # manager は task:N (目的ノード = main DB 在住) の解決にのみ使われる
+    # manager は task:N の実在確認 (main DB 在住) にのみ使われる — open は
+    # task:N を拒むが、拒否の判定自体は memory_atlas 側で行う
     manager = get_active_manager()
     with open_persona_memory() as adapter:
         if not adapter.is_ready():
@@ -66,19 +76,15 @@ def schema() -> ToolSchema:
             "「開く」は以後の思考で常に見える状態が続きますが、机の広さ"
             "（文字数予算）を消費します。机が溢れると、長く触っていない"
             "ページから自動的に棚へ戻ります。"
-            "参照は memopedia:N（Memopedia）/ chronicle:N（Chronicle）/ task:N（目的ノード）"
-            "の形式です（コア記憶は常時開のため対象外です）。"
+            "参照は memopedia:N（Memopedia）/ chronicle:N（Chronicle）の形式です"
+            "（コア記憶は常時開のため対象外です）。"
         ),
         parameters={
             "type": "object",
             "properties": {
                 "ref": {
                     "type": "string",
-                    "description": "机に開きたいページの参照（例: m:3 / ch:5 / task:2）",
-                },
-                "purpose_ref": {
-                    "type": "string",
-                    "description": "この開きが紐づく目的の参照（任意、例: task:2）",
+                    "description": "机に開きたいページの参照（例: m:3 / ch:5）",
                 },
             },
             "required": ["ref"],

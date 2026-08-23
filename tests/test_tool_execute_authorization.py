@@ -26,6 +26,18 @@ def _pulse(aspect: Aspect) -> PulseContext:
     return pulse
 
 
+def _gated(name: str = "gated_spell"):
+    """``name`` をモード別ゲートの対象表に載せる。
+
+    実在のスペル名を借りない — 表の中身は退役のたびに動くが (2026-08-23 に
+    purpose_* 三種が消えて空になった)、ここで検証したいのは表の中身ではなく
+    「登録された callable の境界でゲートが効くか」なので、架空の名前で固定する。
+    """
+    from sea import mode_spell_permissions as msp
+
+    return patch.object(msp, "TASK_CONTROL_SPELLS", frozenset({name}))
+
+
 def test_mode_gate_applies_at_registered_callable_boundary() -> None:
     calls: list[dict] = []
 
@@ -34,11 +46,11 @@ def test_mode_gate_applies_at_registered_callable_boundary() -> None:
         return "executed"
 
     wrapped = _wrap_with_authorization_gate(
-        "purpose_close",
-        _schema("purpose_close", spell=True),
+        "gated_spell",
+        _schema("gated_spell", spell=True),
         raw,
     )
-    with persona_context(
+    with _gated(), persona_context(
         "persona-1",
         Path.cwd(),
         pulse_context=_pulse(Aspect.WORKER),
@@ -98,13 +110,13 @@ def test_async_tools_use_the_same_execute_time_gate() -> None:
         return "executed"
 
     wrapped = _wrap_with_authorization_gate(
-        "purpose_close",
-        _schema("purpose_close", spell=True),
+        "gated_spell",
+        _schema("gated_spell", spell=True),
         raw,
     )
 
     async def run() -> str:
-        with persona_context(
+        with _gated(), persona_context(
             "persona-1",
             Path.cwd(),
             pulse_context=_pulse(Aspect.META),
@@ -149,7 +161,7 @@ def test_composite_action_does_not_unwrap_common_authorization_gate() -> None:
         called = True
         return "executed"
 
-    name = "purpose_close"
+    name = "gated_spell"
     previous = TOOL_REGISTRY.get(name)
     TOOL_REGISTRY[name] = _wrap_with_authorization_gate(
         name,
@@ -158,7 +170,7 @@ def test_composite_action_does_not_unwrap_common_authorization_gate() -> None:
     )
 
     async def run() -> str:
-        with persona_context(
+        with _gated(name), persona_context(
             "persona-1",
             Path.cwd(),
             pulse_context=_pulse(Aspect.META),

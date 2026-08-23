@@ -120,6 +120,8 @@
 
 **地図別動詞**（目的の地図のみ。時間の地図の編纂はシステム側なので動詞なし）:
 
+> ⚠️ **この節は退役した**（2026-08-23、[issue](../issues/purpose_tree_vs_pocketbook_succession.md) 裁定 A）。三つ目の地図＝目的の木そのものが手帳（メモ欄と約束の欄）に後を譲り、下の動詞は `purpose_adopt` / `purpose_seed`（2026-08-21）に続いて `purpose_step` / `purpose_close` / `purpose_decompose` も削除された。地図帳の共通動詞（上の表）から `task:N` の言及も外れ、`memory_read task:N` だけが読み取り専用で残っている。以下は当時の設計の記録。
+
 | 動詞 | 意味 | 置換する既存スペル |
 |---|---|---|
 | `purpose_adopt` | 候補を木に接ぐ（採用。クリップ→candidate の収穫もここ） | task_request_creation 系 |

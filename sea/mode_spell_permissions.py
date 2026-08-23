@@ -12,7 +12,9 @@
 | 分身モード (WORKER)         | ❌        |
 
 Track 操作の列は 2026-08-21 に消えた — ``track_create`` 以下 7 種のスペルが
-機構ごと退役したため (track_retirement.md §7.2 ④群)。
+機構ごと退役したため (track_retirement.md §7.2 ④群)。Task 操作の列も
+2026-08-23 に中身を失った — 目的の木が手帳に後を譲って退役し、``purpose_*``
+三種が削除されたため (purpose_tree_vs_pocketbook_succession.md の裁定 A)。
 
 - 読み取り系 (``get_task_summary`` 等) と汎用スペル
   (recall / note / memopedia / image / web 等) は全モード無制限 (= ここに載せない)。
@@ -30,15 +32,14 @@ from typing import Optional
 from sea.pulse_context import Aspect
 
 # Task 操作スペル (mutating)。タスク一本化 (unified_task_model.md) 後の統合スペル群。
-# task は task:N 参照で指す。旧 standalone スペル (task_change_active /
-# task_close / task_request_creation) は撤去された。
 # 2026-08-21: 欲求プールの退役 (autonomous_behavior_v3.md §8) で purpose_seed /
 # purpose_adopt がスペルごと消えたため、ゲート対象から外した。
-TASK_CONTROL_SPELLS = frozenset({
-    "purpose_decompose",  # 目的ノードをステップに分解 (旧 task_decompose 後継)
-    "purpose_step",       # 目的ノードのステップ更新 (旧 task_update_step 後継)
-    "purpose_close",      # 完了・中止・休眠 (旧 task_done 後継)
-})
+# 2026-08-23: 目的の木そのものが手帳に後を譲って退役し、残っていた
+# purpose_decompose / purpose_step / purpose_close の三本も削除された
+# (docs/issues/purpose_tree_vs_pocketbook_succession.md の裁定 A、一段目)。
+# その結果このゲート表は空になっている — 表が空でも判定関数は素通しなので
+# 動作は変わらない。機構ごと畳むかどうかは v0.4 の運転設計で問う。
+TASK_CONTROL_SPELLS: frozenset = frozenset()
 
 # 旧「自己定義スペル」カテゴリ (life_purpose_set 1 件) は、LIFE_PURPOSE 列の退役
 # (autonomous_behavior_v3.md §9-5) でスペルごと消えたためゲート対象から外した。

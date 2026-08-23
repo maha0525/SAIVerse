@@ -7,7 +7,7 @@ SAIVerse に登録されている全ツールの一覧（自動生成）。概�
 作り方は [開発者ガイド: ツールの追加](../developer-guide/adding-tools.md)、
 平文から呼ぶ Spell 化は [concepts/spell.md](../concepts/spell.md) を参照。
 
-**登録ツール数**: 126（うち Spell 化: 84）
+**登録ツール数**: 123（うち Spell 化: 81）
 
 - `*` 付きの引数は必須。
 - **Spell** 列に表示名があるものは、ペルソナが平文応答から `/spell <名> ...` で呼べる。
@@ -56,9 +56,9 @@ SAIVerse に登録されている全ツールの一覧（自動生成）。概�
 | `memopedia_note` | Write a knowledge fragment to a Memopedia page. Each call creates one fragment (a single fact or note) linked to the … | `content*`: string, `title`: string, `summary`: string, `category`: string, `keywords`: array, `page_id`: string | — |
 | `memopedia_save_page` | Save a Memopedia knowledge page. If a page with the same title exists, it is updated. Otherwise a new page is created… | `title*`: string, `summary`: string, `content`: string, `category`: string, `keywords`: array | — |
 | `memory_clip` | 会話の生ログからクリップを切り出し、記憶の地図帳のページに貼ります。quote を指定すると点クリップ（そのメッセージ内の逐語引用。本文と一字一句一致している必要があります）、省略すると範囲クリップ（anchor の前後 rounds… | `anchor*`: string, `quote`: string, `rounds`: integer, `paste_to`: string, `mode`: string | クリップを切り出して貼る |
-| `memory_close` | 机に開いた記憶の地図帳のページを閉じ、棚に戻します。閉じても目次（検索・想起）からは消えません。必要ならまた開けます。参照は memopedia:N（Memopedia）/ chronicle:N（Chronicle）/ task:N… | `ref*`: string | 記憶のページを机から閉じる |
+| `memory_close` | 机に開いた記憶の地図帳のページを閉じ、棚に戻します。閉じても目次（検索・想起）からは消えません。必要ならまた開けます。参照は memopedia:N（Memopedia）/ chronicle:N（Chronicle）の形式です（コア… | `ref*`: string | 記憶のページを机から閉じる |
 | `memory_delete` | 記憶の地図帳（Memory Atlas）のページをごみ箱に移動します（完全に消えるわけではありません）。対象は core:N（コア記憶1件）と memopedia:N（Memopedia ページ）です。Chronicle（chroni… | `ref*`: string | 記憶のページをごみ箱へ |
-| `memory_open` | 記憶の地図帳（Memory Atlas）の1ページを机に開いたままにします。開くと、そのページの現在の内容が結果に表示されます（読む行為を兼ねるため、memory_read を続けて撃つ必要はありません）。「読む（memory_rea… | `ref*`: string, `purpose_ref`: string | 記憶のページを机に開く |
+| `memory_open` | 記憶の地図帳（Memory Atlas）の1ページを机に開いたままにします。開くと、そのページの現在の内容が結果に表示されます（読む行為を兼ねるため、memory_read を続けて撃つ必要はありません）。「読む（memory_rea… | `ref*`: string | 記憶のページを机に開く |
 | `memory_read` | 記憶の地図帳（Memory Atlas）の1ページをその場で読みます。読んだ内容は会話の流れに残り、時間とともに流れていきます（机の場所は取りません）。常に見える状態を保ちたい場合は memory_open を使ってください。参照は … | `ref*`: string | 記憶のページを読む |
 | `memory_read_around` | Read the conversation context around a specific message. Use this after memory_search_brief to expand context around … | `message_id*`: string, `window`: integer | — |
 | `memory_recall` | Recall relevant past messages from long-term memory. Use 'query' for semantic (meaning-based) search and 'keywords' f… | `query`: string, `keywords`: array, `max_chars`: integer, `topk`: integer, `start_date`: string, `end_date`: string | — |
@@ -72,9 +72,6 @@ SAIVerse に登録されている全ツールの一覧（自動生成）。概�
 | `pdf_read` | Extract and read text from a PDF document item. Specify page range to read specific pages. Requires pypdf to be insta… | `item_id*`: string, `pages`: string, `max_chars`: integer | — |
 | `pocketbook_open` | 自分の手帳を開いて読みます。手帳には「やりたい・やった」のメモ欄と、「約束」の欄があります。記憶の地図帳（memory_read など）は知っていること・あったことを引く場所で、手帳は自分のやりたいこと・やったこと・約束を書きとめる場… | `activity`: string, `before`: string, `limit`: integer | 手帳を開く |
 | `pocketbook_write` | 自分の手帳に一行書きます。やりたいこと・やったことはメモ欄へ、誰かとの約束や引き受けた頼まれごとは約束の欄へ入ります（kind で選ぶと、どちらの欄に入るかは自動で決まります）。どちらか迷ったら、相手がいるなら約束です。記憶の地図帳（… | `kind*`: string, `text*`: string, `activity`: string, `counterpart`: string, `due`: string | 手帳に書く |
-| `purpose_close` | 目的ノード（task:N）を閉じます。outcome で閉じ方を選びます: completed（やり遂げた）/ cancelled（やらないと決めた）/ dormant（今は続けないが、いつか戻るかもしれない — 休眠）。 | `node_ref*`: string, `outcome`: string, `reason`: string | 目的を閉じる |
-| `purpose_decompose` | 目的ノード（task:N）をステップに分解します。steps 配列の各要素は title（と任意の description）を持つオブジェクトで、既存のステップはすべて置き換えられます。1つのステップの進捗を更新するには purpos… | `node_ref*`: string, `steps*`: array | 目的をステップに分解 |
-| `purpose_step` | 目的ノード（task:N）の中の1ステップの状態とメモを更新します。ステップへの分解（全置換）は purpose_decompose を使ってください。 | `node_ref*`: string, `step_position*`: integer, `status*`: string, `notes`: string, `auto_advance`: boolean | 目的のステップを更新 |
 | `read_url_content` | Fetch a web page URL and return its content as readable Markdown text. | `url*`: string, `max_chars`: integer | — |
 | `read_url_outline` | 指定したURLのページ内容を読み込み、短いページなら全文、長いページなら見出し階層（h1〜h4）を返します。長いページは続けて read_url_section で必要な節を深掘りしてください。閾値はデフォルト 5000 文字、環境変… | `url*`: string, `full_threshold`: integer | ページ概要 |
 | `read_url_section` | URLのページ内から、見出し名やキーワードで指定した節だけを抽出して読み込みます。 read_url_outline で長文と判定されたページの深掘り用です。 まず見出し（h1〜h4）の部分一致を試み、見つからなければ本文キーワード一… | `url*`: string, `section_query*`: string, `around`: integer | ページ節読み込み |

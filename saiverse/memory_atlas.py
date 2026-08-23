@@ -19,10 +19,13 @@ memory_read.py`` 等) から呼ばれる薄い変換層で、地図の実体に�
   範囲クリップは区間の生ログ全文、点クリップは対象メッセージ本文＋引用箇所が
   tail に流れる (机にも head にも触らない。concept_consolidation.md
   「クリップの見え方」)
-- ``task:N`` — 目的の地図 (目的ノード)。read は解決済み (P2c-1)、開閉も
-  P3c①②で対応済み — 実体は main DB (persona_task) なので ``manager``
-  (world 文脈) を追加で受ける。書く (memory_write) / 切り出して貼る
-  (memory_clip) は引き続き未対応 (purpose 動詞の領分)
+- ``task:N`` — 退役した目的の木 (目的ノード) の読み取り専用の残置。実体は
+  main DB (persona_task) なので ``manager`` (world 文脈) を追加で受ける。
+  読む (memory_read) と机から閉じる (memory_close) は通るが、**新規に机へ
+  開くことはできない** — 2026-08-23 に目的の木が手帳へ後を譲って退役し、
+  本人の文脈に常駐させる口を閉じたため
+  (docs/issues/purpose_tree_vs_pocketbook_succession.md 裁定 A・一段目)。
+  書く (memory_write) / 切り出して貼る (memory_clip) は元々未対応
 
 いずれも旧 prefix (``m:`` / ``c:`` / ``ch:`` / ``p:``) と ``saiverse://`` URI
 形式でも書ける — 書式の受理は統一グラマー (``saiverse/references.py``) が
@@ -56,9 +59,11 @@ memory_read clip:N で全文」。折り畳み状態のような新しい状態�
 **開閉 (机の物理)**: ``open_page`` / ``close_page`` は ``sai_memory/desk.py``
 に委譲する。コア記憶 (``core`` / ``c:N``) は常時開のシステム常設ピンなので
 机の対象外 — open は「既に開いている」、close は「閉じられない」を返す。
-``task:N`` (目的ノード) は main DB 在住のため ``manager`` を追加で受ける
-(P3c①②)。完了/中止 (TERMINAL_TASK_STATUSES) の目的ノードは soft-delete
-された Memopedia ページと同じ「無い」扱いになり、机から自動で下ろされる。
+``task:N`` (目的ノード) は open からは断られる (2026-08-23 の退役)。既に机に
+ある行を下ろす close と、机の描画 (snapshot_desk) は残置 — こちらは main DB
+在住のため ``manager`` を追加で受ける。完了/中止 (TERMINAL_TASK_STATUSES) の
+目的ノードは soft-delete された Memopedia ページと同じ「無い」扱いになり、
+机から自動で下ろされる。
 """
 from __future__ import annotations
 
@@ -96,7 +101,9 @@ _KIND_TO_ATLAS = {
 }
 
 #: ペルソナに ref 形式を教えるための例示 (エラーメッセージ用)。
-_REF_EXAMPLES = "memopedia:3 / core / core:2 / chronicle:5 / clip:1 / task:4"
+# ペルソナに見せる ref の書式例 (不正な ref のエラー文で使う)。目的の木は
+# 退役したので task:N は載せない (2026-08-23)。
+_REF_EXAMPLES = "memopedia:3 / core / core:2 / chronicle:5 / clip:1"
 
 
 def _parse_ref(ref: str) -> Tuple[str, Optional[str]]:
@@ -642,7 +649,15 @@ def open_page(
             "クリップは机に開けません（クリップは土地への参照です）。"
             f"memory_read clip:{key} でその場で読めます。"
         )
-    if kind not in ("memopedia", "chronicle", "task"):
+    if kind == "task":
+        # 目的の木の退役 (2026-08-23、purpose_tree_vs_pocketbook_succession.md
+        # 裁定 A 一段目)。開く＝本人の文脈に常駐させることなので新規は断る。
+        # 既に机にあるものは close_page で下ろせる (実装は残置)。
+        return (
+            "目的ノードは机に開けません（今は読むだけのページです）。"
+            f"memory_read task:{key} でその場で読めます。"
+        )
+    if kind not in ("memopedia", "chronicle"):
         raise AtlasRefError(f"未対応の ref kind: {kind}")
 
     norm_ref = _normalize_ref_for_desk(adapter, kind, key, manager=manager)
@@ -671,10 +686,8 @@ def open_page(
         name = _resolve_persona_name(adapter, None)
         if norm_kind == "memopedia":
             rendered = _read_memopedia(adapter, norm_key, name)
-        elif norm_kind == "chronicle":
+        else:  # chronicle — open できる kind はこの 2 種だけ
             rendered = _read_chronicle(conn, norm_key, name)
-        else:
-            rendered = _read_task(adapter, norm_key, manager, name)
         lines.append("")
         lines.append(rendered)
     except Exception:
@@ -958,7 +971,7 @@ def delete_page(adapter, ref: str) -> str:
       と同じ経路 — 復元可能)
     - ``m:N``: Memopedia の soft-delete (``is_deleted``。復元は後回しのごみ箱仕様)
     - ``ch:N`` (編纂はシステム側) / ``p:N`` (クリップは歴史として残す §5.1) /
-      ``core`` 全体 / ``task:N`` (purpose_close の領分) は消せない
+      ``core`` 全体 / ``task:N`` (退役した目的の木の読み取り専用の残置) は消せない
 
     削除したページが机に開いていたら desk からも即時クローズする (放置しても
     次の Metabolism で dropped になるが、即時の方が誠実)。
@@ -980,7 +993,7 @@ def delete_page(adapter, ref: str) -> str:
     if kind == "task":
         return (
             f"目的ノード (task:{key}) はこのスペルでは消せません。"
-            "完了・中止・休眠にするには purpose_close を使ってください。"
+            "今は読むだけのページです。"
         )
 
     if kind == "core_one":
