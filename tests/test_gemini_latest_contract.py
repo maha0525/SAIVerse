@@ -105,6 +105,81 @@ class TestGeminiLatestGenerateContentContract(unittest.TestCase):
         self.assertEqual(config_kwargs["max_output_tokens"], 1234)
         self.assertEqual(config_kwargs["stop_sequences"], ["STOP"])
 
+    def test_per_call_output_cap_overrides_the_model_config(self):
+        """Per-call max_output_tokens wins over the model config, and leaves
+        calls that do not pass it untouched.
+
+        The sluice needs to cap exactly one call so a runaway structured output
+        cannot burn tens of thousands of tokens
+        (docs/issues/sluice_structured_output_digit_loop.md).
+        """
+        client = _make_client("gemini-3.6-flash")
+        client.configure_parameters({"max_output_tokens": 65536})
+
+        capped: dict = {}
+        client._apply_generation_parameters(
+            capped, temperature=None, max_output_tokens=4096,
+        )
+        self.assertEqual(capped["max_output_tokens"], 4096)
+
+        uncapped: dict = {}
+        client._apply_generation_parameters(uncapped, temperature=None)
+        self.assertEqual(uncapped["max_output_tokens"], 65536)
+
+    def test_per_call_output_cap_applies_without_a_model_config(self):
+        client = _make_client("gemini-3.6-flash")
+
+        config_kwargs: dict = {}
+        client._apply_generation_parameters(
+            config_kwargs, temperature=None, max_output_tokens=4096,
+        )
+        self.assertEqual(config_kwargs["max_output_tokens"], 4096)
+
+    def test_structured_output_parse_failure_keeps_the_raw_body(self):
+        """A parse failure inside the SDK must not swallow the response body.
+
+        google-genai parses structured output in
+        ``GenerateContentResponse._from_response`` and only catches
+        ``JSONDecodeError``; a body that is valid JSON but blows CPython's
+        integer-string limit escapes as a bare ValueError, taking the text with
+        it. The client lifts the SDK frame's ``result_text`` so the body reaches
+        llm_io.log instead of being lost.
+        """
+        from google.genai import types
+
+        from llm_clients.gemini import _sdk_structured_parse_failure
+
+        # Reproduce the production failure through the real SDK: a 200 response
+        # whose text is a digit loop, parsed with a dict response_schema.
+        body = '{"reflection": "x", "memory_id": ' + "2" * 65000 + "}"
+        response = {
+            "candidates": [{
+                "content": {"parts": [{"text": body}], "role": "model"},
+                "finishReason": "STOP",
+            }],
+        }
+        kwargs = {"config": {"response_schema": {"type": "OBJECT"}}}
+
+        try:
+            types.GenerateContentResponse._from_response(
+                response=response, kwargs=kwargs,
+            )
+        except ValueError as exc:
+            message = str(exc)
+            matched, raw = _sdk_structured_parse_failure(exc)
+        else:  # pragma: no cover - the SDK must still fail here
+            self.fail("the SDK no longer raises on an oversized integer literal")
+
+        self.assertIn("4300 digits", message)
+        self.assertTrue(matched)
+        self.assertEqual(raw, body)
+
+        # An unrelated failure is left alone (no frame match, nothing recovered).
+        try:
+            raise ValueError("unrelated")
+        except ValueError as exc:
+            self.assertEqual(_sdk_structured_parse_failure(exc), (False, None))
+
     def test_older_models_keep_sampling_parameter_support(self):
         client = _make_client("gemini-3.5-flash")
         client.configure_parameters({"top_p": 0.8, "top_k": 20})

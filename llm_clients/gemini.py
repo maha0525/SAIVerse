@@ -37,6 +37,39 @@ except Exception:  # pragma: no cover - absence is fine
 _sse_error_local: threading.local = threading.local()
 
 
+def _sdk_structured_parse_failure(exc: BaseException) -> Tuple[bool, Optional[str]]:
+    """Detect a structured-output parse failure raised *inside* the google-genai SDK.
+
+    With ``config.response_schema`` set to a dict/Schema, the SDK parses the
+    model's text itself in ``types.GenerateContentResponse._from_response``
+    (``result.parsed = json.loads(result_text)``) and only catches
+    ``json.decoder.JSONDecodeError`` (verified in google-genai 1.63.0). A body
+    that is valid JSON but exceeds CPython's integer-string conversion limit —
+    the digit loop of docs/issues/sluice_structured_output_digit_loop.md —
+    raises a bare ``ValueError`` that escapes, taking the whole response object
+    with it: the caller never sees the text, so the failure cannot be diagnosed.
+
+    This walks the traceback for that SDK frame and lifts its ``result_text``
+    local (the raw model output) so it can be logged. It reads SDK internals by
+    name, so it degrades instead of breaking: the first element says whether the
+    failure came from that frame, the second is the raw body when it could be
+    recovered and ``None`` when it could not.
+    """
+    tb = exc.__traceback__
+    matched = False
+    raw_text: Optional[str] = None
+    while tb is not None:
+        frame = tb.tb_frame
+        module = frame.f_globals.get("__name__", "")
+        if frame.f_code.co_name == "_from_response" and module.startswith("google.genai"):
+            matched = True
+            value = frame.f_locals.get("result_text")
+            if isinstance(value, str):
+                raw_text = value
+        tb = tb.tb_next
+    return matched, raw_text
+
+
 def _install_gemini_stream_patch() -> None:
     disable_flag = os.getenv("SAIVERSE_DISABLE_GEMINI_SSE_PATCH")
     if disable_flag and disable_flag.lower() not in {"0", "false", "off"}:
@@ -1176,8 +1209,18 @@ class GeminiClient(LLMClient):
         self,
         cfg_kwargs: Dict[str, Any],
         temperature: float | None,
+        *,
+        max_output_tokens: int | None = None,
     ) -> None:
-        """Apply request parameters while enforcing model capabilities."""
+        """Apply request parameters while enforcing model capabilities.
+
+        ``max_output_tokens`` is a per-call override that wins over the model
+        config (``self._request_params``). Callers that must cap a single call
+        — e.g. the sluice, whose structured output must not run away into a
+        digit loop (docs/issues/sluice_structured_output_digit_loop.md) —
+        pass it as a keyword to :meth:`generate`; every other call is
+        unaffected.
+        """
         if self._supports_sampling_parameters:
             effective_temp = (
                 temperature if temperature is not None else self._request_params.get("temperature")
@@ -1196,6 +1239,9 @@ class GeminiClient(LLMClient):
         for param in ("max_output_tokens", "stop_sequences"):
             if param in self._request_params:
                 cfg_kwargs[param] = self._request_params[param]
+
+        if max_output_tokens is not None:
+            cfg_kwargs["max_output_tokens"] = max_output_tokens
 
     def _last_user(self, messages: List[Any]) -> str:
         for message in reversed(messages):
@@ -1243,10 +1289,11 @@ class GeminiClient(LLMClient):
         temperature: float | None = None,
         enable_cache: bool = False,
         cache_ttl: Any = None,
+        max_output_tokens: int | None = None,
         **_: Any,
     ) -> str | Dict[str, Any]:
         """Unified generate method.
-        
+
         Args:
             messages: Conversation messages
             tools: Tool specifications. If provided, returns Dict with tool detection.
@@ -1254,7 +1301,9 @@ class GeminiClient(LLMClient):
             history_snippets: Optional history context
             response_schema: Optional JSON schema for structured output
             temperature: Optional temperature override
-            
+            max_output_tokens: Per-call output cap. Overrides the model config
+                for this call only; other calls are untouched.
+
         Returns:
             str: Text response when tools is None or empty
             Dict: Tool detection result when tools is provided, with keys:
@@ -1279,7 +1328,9 @@ class GeminiClient(LLMClient):
             "safety_settings": self._build_safety_settings(),
         }
 
-        self._apply_generation_parameters(cfg_kwargs, temperature)
+        self._apply_generation_parameters(
+            cfg_kwargs, temperature, max_output_tokens=max_output_tokens,
+        )
 
         # Tool configuration
         if use_tools:
@@ -1344,11 +1395,43 @@ class GeminiClient(LLMClient):
         for attempt in range(max_retries):
             try:
                 if use_non_streaming:
-                    resp = active_client.models.generate_content(
-                        model=model_id,
-                        contents=contents,
-                        config=types.GenerateContentConfig(**cfg_kwargs),
-                    )
+                    try:
+                        resp = active_client.models.generate_content(
+                            model=model_id,
+                            contents=contents,
+                            config=types.GenerateContentConfig(**cfg_kwargs),
+                        )
+                    except Exception as sdk_exc:
+                        # Structured-output parse failures happen inside the SDK
+                        # and would otherwise take the response body with them.
+                        from_sdk_parse, raw_text = _sdk_structured_parse_failure(sdk_exc)
+                        if not from_sdk_parse:
+                            raise
+                        if raw_text is not None:
+                            get_llm_logger().warning(
+                                "Gemini structured output failed to parse inside the SDK "
+                                "(model=%s, %s: %s). Raw body (%d chars) follows:\n%s",
+                                model_id, type(sdk_exc).__name__, sdk_exc,
+                                len(raw_text), raw_text,
+                            )
+                            logging.warning(
+                                "[gemini] schema 付き応答の解析に失敗 (model=%s, %s) — "
+                                "生の本文 %d 字を llm_io.log に残しました",
+                                model_id, type(sdk_exc).__name__, len(raw_text),
+                            )
+                            detail = f"raw body kept in llm_io.log ({len(raw_text)} chars)"
+                        else:
+                            logging.warning(
+                                "[gemini] schema 付き応答の解析に失敗 (model=%s, %s) — "
+                                "本文は SDK 内で失われた",
+                                model_id, type(sdk_exc).__name__,
+                            )
+                            detail = "本文は SDK 内で失われた"
+                        raise InvalidRequestError(
+                            f"schema 付き応答の解析に失敗 ({detail}): {sdk_exc}",
+                            sdk_exc,
+                            user_message="LLMからの応答を解析できませんでした。再度お試しください。",
+                        ) from sdk_exc
                 else:
                     stream = active_client.models.generate_content_stream(
                         model=model_id,
@@ -1811,6 +1894,7 @@ class GeminiClient(LLMClient):
         temperature: float | None = None,
         enable_cache: bool = False,
         cache_ttl: Any = None,
+        max_output_tokens: int | None = None,
         **_: Any,
     ) -> Iterator[str]:
         disable_stream = os.getenv("SAIVERSE_DISABLE_GEMINI_STREAMING")
@@ -1824,6 +1908,7 @@ class GeminiClient(LLMClient):
                 temperature=temperature,
                 enable_cache=enable_cache,
                 cache_ttl=cache_ttl,
+                max_output_tokens=max_output_tokens,
             )
             yield result
             return
@@ -1868,7 +1953,7 @@ class GeminiClient(LLMClient):
 
         active_client = self.client
         try:
-            stream = self._start_stream(active_client, messages, tools_spec, tool_cfg, use_tools, temperature, response_schema, enable_cache=enable_cache, cache_ttl=cache_ttl)
+            stream = self._start_stream(active_client, messages, tools_spec, tool_cfg, use_tools, temperature, response_schema, enable_cache=enable_cache, cache_ttl=cache_ttl, max_output_tokens=max_output_tokens)
         except Exception as exc:
             if self._is_payment_error(exc) or self._is_authentication_error(exc):
                 raise self._convert_to_llm_error(exc, "streaming")
@@ -1876,7 +1961,7 @@ class GeminiClient(LLMClient):
                 if active_client is self.free_client and self.paid_client:
                     logging.info("Retrying with paid Gemini API key due to rate limit")
                     active_client = self.paid_client
-                    stream = self._start_stream(active_client, messages, tools_spec, tool_cfg, use_tools, temperature, response_schema, enable_cache=enable_cache, cache_ttl=cache_ttl)
+                    stream = self._start_stream(active_client, messages, tools_spec, tool_cfg, use_tools, temperature, response_schema, enable_cache=enable_cache, cache_ttl=cache_ttl, max_output_tokens=max_output_tokens)
                 else:
                     retry_delay = self._extract_retry_delay(exc)
                     if retry_delay:
@@ -1886,7 +1971,7 @@ class GeminiClient(LLMClient):
                             self.model, capped_delay,
                         )
                         time.sleep(capped_delay)
-                        stream = self._start_stream(active_client, messages, tools_spec, tool_cfg, use_tools, temperature, response_schema, enable_cache=enable_cache, cache_ttl=cache_ttl)
+                        stream = self._start_stream(active_client, messages, tools_spec, tool_cfg, use_tools, temperature, response_schema, enable_cache=enable_cache, cache_ttl=cache_ttl, max_output_tokens=max_output_tokens)
                     else:
                         logging.warning("Rate limit exceeded for model=%s", self.model)
                         raise self._convert_to_llm_error(exc, "streaming")
@@ -2147,6 +2232,7 @@ class GeminiClient(LLMClient):
         *,
         enable_cache: bool = False,
         cache_ttl: Any = None,
+        max_output_tokens: int | None = None,
     ):
         sys_msg, contents = self._convert_messages(messages)
         self._validate_contents(contents)
@@ -2172,7 +2258,9 @@ class GeminiClient(LLMClient):
         if thinking_config is not None:
             cfg_kwargs["thinking_config"] = thinking_config
 
-        self._apply_generation_parameters(cfg_kwargs, temperature)
+        self._apply_generation_parameters(
+            cfg_kwargs, temperature, max_output_tokens=max_output_tokens,
+        )
 
         # Auto cache mode / B 戦略
         _auto_cleanup_name: Optional[str] = None

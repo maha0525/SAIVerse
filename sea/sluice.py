@@ -6,7 +6,7 @@ Metabolism の eviction 直前、メインラインの温まった prefix (head 
 
 採取する器は三つ (autonomous_behavior_v3.md §13.3 / §13.6):
 
-- コア記憶 ops (add / update / remove) — 恒常知識
+- コア記憶 (core_adds / core_updates / core_removes) — 恒常知識
 - 手帳メモ (want_memos / did_memos) — アクティビティへの日付つき一行
 - 約束 (promises) — タスク帳への add / update
 
@@ -122,13 +122,57 @@ def get_close_min_messages() -> int:
 # ---------------------------------------------------------------------------
 # response_schema (Gemini 制約: additionalProperties 禁止、フラット)
 # ---------------------------------------------------------------------------
+#
+# 型の規律 (2026-08-24、docs/issues/sluice_structured_output_digit_loop.md):
+#
+# 1. **Gemini に向ける構造化出力の型には数値の欄を置かない。** JSON の数値
+#    リテラルは文法で閉じられない (桁をいくら並べても違反にならない) ので、
+#    制約付きデコードがその中でループに入ると何も止められない。参照は
+#    プロンプトに載せた語の写し (`core:3` / `act:2`) を文字列で受け取り、
+#    番号の解決はこちら側で行う。
+# 2. **任意の欄を飛ばした先に、飛ばした中身を吐き出せる欄が来る型を作らない。**
+#    モデルが書きたいものに対応する必須欄を、その順番で用意する。旧 `ops`
+#    (op / content / memory_id、必須は op だけ) は「書き換えなのに本文を
+#    飛ばして参照欄へ入る」並びを文法上作れてしまい、参照欄に本文や独り言が
+#    流れ込んだ。操作を種類ごとの一覧に分け、必須と順番を文法で縛ることで、
+#    その並びが作れなくなる (3 モデル × 10 回で 30/30 正常。旧型は本番 7/7 失敗)。
+#
+# 欄の並び (dict の挿入順) はそのまま REST の propertyOrdering になる
+# (llm_clients/gemini.py の _schema_from_json)。並べ替えると検証した型と
+# 別物になるので、順序も含めて実験で通した形のまま維持する。
+
+#: 参照欄の書式。桁数を 9 までに縛るのは、暴走した長大な数字列を int() へ
+#: 渡さないため (Python の整数文字列変換上限で例外になり、要素棄却ではなく
+#: pan 全体が落ちる)。実物の ID はどちらも小さい。
+_CORE_REF_RE = re.compile(r"^core:([0-9]{1,9})$")
+_ACTIVITY_REF_RE = re.compile(r"^act:([0-9]{1,9})$")
+
+#: 参照欄の description (コア記憶。三つの一覧で共用する)。
+_CORE_REF_DESCRIPTION = "同梱の「現在のコア記憶」一覧の core:N をそのまま写す (例: core:2)。"
+
+
+def _parse_ref(raw: Any, pattern: re.Pattern) -> Optional[int]:
+    """``core:N`` / ``act:N`` の文字列参照を番号へ解決する。不正は None。
+
+    受け付けるのは**プロンプトに載せた語そのままの写し**だけ (前後の空白は
+    落とす)。数字だけ (``"2"``)、後ろに本文が続くもの
+    (``"core:2reset core:2 …"``)、文字列ですらないものは None = 要素棄却の
+    合図で、呼び出し側がその要素だけ捨てて結果行に残す。
+    """
+    if not isinstance(raw, str):
+        return None
+    matched = pattern.match(raw.strip())
+    if matched is None:
+        return None
+    return int(matched.group(1))
+
 
 _MEMO_ITEM_SCHEMA: Dict[str, Any] = {
     "type": "object",
     "properties": {
-        "activity_id": {
-            "type": "integer",
-            "description": "同梱の「開いているアクティビティ一覧」から選んだ ID。一覧に無い活動のときは省略して new_activity_name を使う。",
+        "activity_ref": {
+            "type": "string",
+            "description": "同梱の「開いているアクティビティ一覧」の act:N をそのまま写す (例: act:1)。一覧に無い活動のときは省略して new_activity_name を使う。",
         },
         "new_activity_name": {
             "type": "string",
@@ -149,26 +193,53 @@ _RESPONSE_SCHEMA: Dict[str, Any] = {
             "type": "string",
             "description": "採取判断の短い独白。採取なしでも一言。",
         },
-        "ops": {
+        "core_adds": {
             "type": "array",
-            "description": "コア記憶への操作列。採取なしなら空配列。",
+            "description": "新しく刻むコア記憶。採取なしなら空配列。",
             "items": {
                 "type": "object",
                 "properties": {
-                    "op": {
+                    "content": {
                         "type": "string",
-                        "enum": ["add", "update", "remove"],
+                        "description": "新しいコア記憶の本文",
+                    },
+                },
+                "required": ["content"],
+            },
+        },
+        "core_updates": {
+            "type": "array",
+            "description": (
+                "書き換え。memory_ref は同梱の一覧の core:N をそのまま写し、"
+                "content は書き換え後の本文 (全文)。採取なしなら空配列。"
+            ),
+            "items": {
+                "type": "object",
+                "properties": {
+                    "memory_ref": {
+                        "type": "string",
+                        "description": _CORE_REF_DESCRIPTION,
                     },
                     "content": {
                         "type": "string",
-                        "description": "add / update の本文。",
-                    },
-                    "memory_id": {
-                        "type": "integer",
-                        "description": "update / remove 対象の core:N の N。",
+                        "description": "書き換え後の本文 (全文)。",
                     },
                 },
-                "required": ["op"],
+                "required": ["memory_ref", "content"],
+            },
+        },
+        "core_removes": {
+            "type": "array",
+            "description": "不要になったコア記憶の削除。採取なしなら空配列。",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "memory_ref": {
+                        "type": "string",
+                        "description": _CORE_REF_DESCRIPTION,
+                    },
+                },
+                "required": ["memory_ref"],
             },
         },
         "want_memos": {
@@ -215,8 +286,17 @@ _RESPONSE_SCHEMA: Dict[str, Any] = {
     # 全欄必須 (Codex 第七巡 修正 1): 「空」は明示的な空配列だけ。欄の省略を
     # 「採取なし」へ丸めると、モデルが欄を出力しなかった回の採取が静かに失われ、
     # ゲート (§13.3) が通ったことにされる。
-    "required": ["reflection", "ops", "want_memos", "did_memos", "promises"],
+    "required": [
+        "reflection", "core_adds", "core_updates", "core_removes",
+        "want_memos", "did_memos", "promises",
+    ],
 }
+
+#: スルースの LLM コールの出力上限。実測の応答は 195〜411 トークン
+#: (docs/issues/sluice_structured_output_digit_loop.md の再現性実験) なので、
+#: 4,096 は正常な応答を切らない。目的は暴走したときの被害の頭打ち — 旧型の
+#: 本番失敗は 1 回あたり 79 秒・数万トークンを焼いていた。
+_MAX_OUTPUT_TOKENS = 4096
 
 
 # ---------------------------------------------------------------------------
@@ -490,16 +570,16 @@ def _build_sluice_prompt(
         "ことがあれば、いま記録できます。押し出された後ではこの会話は手元から\n"
         "消えるため、採るならこのタイミングだけです。\n"
         "\n"
-        "1) コア記憶 (ops):\n"
+        "1) コア記憶 (core_adds / core_updates / core_removes):\n"
         "- 状態の変化（生活・仕事・健康・関係性など、いま進行中の事実）。状態には\n"
         "  日付を含めてください（例: 2026年6月頃〜 ユーザーは海外赴任中、9月帰国予定）。\n"
-        "- 既存のコア記憶と矛盾する新情報（帰国・引っ越しなど。矛盾は update で解消）。\n"
+        "- 既存のコア記憶と矛盾する新情報（帰国・引っ越しなど。矛盾は core_updates で書き換え）。\n"
         "\n"
         "2) 手帳のメモ欄 (want_memos / did_memos):\n"
         f"- {_scope_sentence(span_new_count)}\n"
         "- この範囲で、やりたいと思ったこと・実際にやったことはありますか?\n"
         "  無ければ空で構いません。あれば、活動の名前（「小説を書く」「絵の練習」\n"
-        "  のような粒度。下の一覧にあるものは activity_id で参照）と、今日の中身\n"
+        "  のような粒度。下の一覧にあるものは act:N で参照）と、今日の中身\n"
         "  一行 (text) で。\n"
         f"{today_block}"
         "\n"
@@ -514,8 +594,8 @@ def _build_sluice_prompt(
         "姿勢:\n"
         "- **採取しないのが普通です。** ほとんどの記憶整理では何も採りません\n"
         "  （各欄は空配列）。無理に何かを刻もうとしないでください。\n"
-        "- 応答には全ての欄 (reflection / ops / want_memos / did_memos /\n"
-        "  promises) を含めてください。採るものが無い欄は空配列で。\n"
+        "- 応答には全ての欄 (reflection / core_adds / core_updates / core_removes /\n"
+        "  want_memos / did_memos / promises) を含めてください。採るものが無い欄は空配列で。\n"
         "- 既にコア記憶・手帳にあることは再度採らないでください。\n"
         "\n"
         f"### 現在のコア記憶（合計 {total_chars:,} 字 / 目安 {budget:,} 字）\n"
@@ -532,16 +612,20 @@ def _build_sluice_prompt(
 
 
 # ---------------------------------------------------------------------------
-# コア記憶 ops の適用 (tool 関数を経由せず直接)
+# コア記憶の操作の適用 (tool 関数を経由せず直接)
 # ---------------------------------------------------------------------------
 
-def _apply_ops(
+def _apply_core_ops(
     persona: Any,
-    ops: List[Dict[str, Any]],
+    core_adds: List[Dict[str, Any]],
+    core_updates: List[Dict[str, Any]],
+    core_removes: List[Dict[str, Any]],
     *,
     core_snapshot: Optional[Dict[str, str]],
 ) -> tuple[int, int, List[str]]:
-    """ops を順に適用し、(成功数, 失敗数, 結果テキスト行) を返す。
+    """コア記憶の三一覧を順に適用し、(成功数, 失敗数, 結果テキスト行) を返す。
+
+    順番は追加 → 書き換え → 削除 (応答スキーマの欄の並びと同じ)。
 
     CAS (Codex 第七巡 修正 2 — タスク帳 CAS の同族): ``core_snapshot`` は
     プロンプト作成時に読んだコア記憶現況の {id: 本文ハッシュ}。update / remove は
@@ -552,8 +636,8 @@ def _apply_ops(
     (None = 旧形式の記録) / id がスナップショットに無い場合も要素棄却 —
     推定で適用しない (第五巡の裁定と同族)。
 
-    粒度分け (メモ/約束の適用と同じ規律): **入力の不正** (非 dict 要素・未知の
-    op・空本文・不正/不在の memory_id 参照) はその要素だけ棄却して結果行に残す。
+    粒度分け (メモ/約束の適用と同じ規律): **入力の不正** (非 dict 要素・空本文・
+    ``core:N`` の形でない / 一覧に無い memory_ref) はその要素だけ棄却して結果行に残す。
     **ストレージ例外** (DB 書き込み障害等) は送出してゲート (退場停止 → 台帳
     applied のまま → 次回再適用) に乗せる — 要素失敗へ丸めると台帳が completed
     になり、本人が指定した記憶操作が静かに永遠に失われる。
@@ -578,200 +662,192 @@ def _apply_ops(
     applied = 0
     failed = 0
     lines: List[str] = []
+    total = len(core_adds) + len(core_updates) + len(core_removes)
 
     if adapter is None or getattr(adapter, "conn", None) is None:
-        return (0, len(ops), ["コア記憶ストレージが利用できず、採取を適用できませんでした。"])
+        return (0, total, ["コア記憶ストレージが利用できず、採取を適用できませんでした。"])
 
     # 同一本文ガード用の生存コア記憶 (最初の add で遅延ロード)。
     alive_contents: Optional[Dict[str, int]] = None
 
-    def _coerce_memory_id(raw: Any) -> Optional[int]:
-        """memory_id の入力検査。不正は None (要素棄却の合図)。"""
-        try:
-            return int(raw)
-        except (TypeError, ValueError):
+    def _snapshot_hash(target_id: int) -> Optional[str]:
+        """スナップショット時点の本文ハッシュ。無い = 一覧外 or 記録が旧形式。"""
+        if core_snapshot is None:
             return None
+        return core_snapshot.get(str(target_id))
 
-    for op in ops:
+    # 以下、ストレージ呼び出し (list/add/update/remove_core_memory) は
+    # 意図的に例外を握らない — 障害は送出してゲートに乗せる (docstring)。
+    for op in core_adds:
         if not isinstance(op, dict):
             failed += 1
-            lines.append(f"不正な op 形式のためスキップ: {op!r}")
+            lines.append(f"不正なコア記憶の追加形式のためスキップ: {op!r}")
             continue
-        kind = op.get("op")
-        # 以下、ストレージ呼び出し (list/add/update/remove_core_memory) は
-        # 意図的に例外を握らない — 障害は送出してゲートに乗せる (docstring)。
-        if kind == "add":
-            content = (op.get("content") or "").strip()
-            if not content:
-                failed += 1
-                lines.append("add 失敗: 本文が空でした。")
-                continue
-            if alive_contents is None:
-                with adapter._db_lock:
-                    alive = list_core_memories(adapter.conn)
-                alive_contents = {
-                    (m.content or "").strip(): m.id for m in alive
-                }
-            dup_id = alive_contents.get(content)
-            if dup_id is not None:
-                applied += 1
-                lines.append(
-                    f"コア記憶 core:{dup_id} と同一内容のため再採取をスキップしました。"
-                )
-                continue
+        content = (op.get("content") or "").strip()
+        if not content:
+            failed += 1
+            lines.append("add 失敗: 本文が空でした。")
+            continue
+        if alive_contents is None:
             with adapter._db_lock:
-                new_id = add_core_memory(
-                    adapter.conn, content,
-                    metadata=json.dumps({"source": "sluice"}),
-                    confirmed=0,  # 自動採取はユーザー確認待ち
-                )
+                alive = list_core_memories(adapter.conn)
+            alive_contents = {
+                (m.content or "").strip(): m.id for m in alive
+            }
+        dup_id = alive_contents.get(content)
+        if dup_id is not None:
             applied += 1
-            alive_contents[content] = new_id
-            # 記録は <system> 包みのシステム通知として SAIMemory に残る
-            # (_persist_record 参照)。省略・切り詰めは採取事実の改変になるため、
-            # 本文は全文を書く (不変条件 §5-8 / 2026-07-07 まはー指摘)。
-            lines.append(f"コア記憶 core:{new_id} に採取: {content}")
-
-        elif kind == "update":
-            memory_id = op.get("memory_id")
-            content = (op.get("content") or "").strip()
-            if memory_id is None:
-                failed += 1
-                lines.append("update 失敗: memory_id が指定されていません。")
-                continue
-            if not content:
-                failed += 1
-                lines.append(f"update 失敗: core:{memory_id} の新しい本文が空でした。")
-                continue
-            target_id = _coerce_memory_id(memory_id)
-            if target_id is None:
-                failed += 1
-                lines.append(f"update 失敗: memory_id が不正です ({memory_id!r})。")
-                continue
-            snap_hash = (
-                None if core_snapshot is None
-                else core_snapshot.get(str(target_id))
+            lines.append(
+                f"コア記憶 core:{dup_id} と同一内容のため再採取をスキップしました。"
             )
-            if snap_hash is None:
-                failed += 1
-                lines.append(
-                    f"update 失敗: core:{memory_id} のスナップショット情報が"
-                    "無いため適用しませんでした。"
-                )
-                continue
-            with adapter._db_lock:
-                current = next(
-                    (
-                        m for m in list_core_memories(adapter.conn)
-                        if int(m.id) == target_id
-                    ),
-                    None,
-                )
-                cas_ok = (
-                    current is not None
-                    and _core_content_hash(current.content) == snap_hash
-                )
-                # 場面の記憶 (scene) は書き換えの対象外 — 長さ不問。
-                #
-                # scene は実際の会話の写しで、本人が「直す」ことは会話の写しを
-                # 書き換えること、つまり捏造にあたる (このモジュール冒頭の
-                # 不変条件「scene は参照コピーのみ」)。提示は先頭 80 字に
-                # 刻んでいるが、歯止めをその長さで書くと 80 字以下の scene だけ
-                # 書き換えられる穴が残る — 目的 (写しを改変させない) から導けば
-                # 条件は種類の一行になる (2026-08-22 裁定、
-                # docs/issues/sluice_truncated_scene_update.md)。
-                #
-                # remove は対象外にしない (写しを消すことは改変ではない)。
-                scene_locked = cas_ok and _is_scene_memory(current)
-                ok = (
-                    cas_ok
-                    and not scene_locked
-                    and update_core_memory(
-                        adapter.conn, target_id, content, confirmed=0,
-                    )
-                )
-            if not cas_ok:
-                failed += 1
-                lines.append(
-                    f"記憶 core:{memory_id} は実行中に変更されたため"
-                    "適用しませんでした。"
-                )
-                LOGGER.warning(
-                    "[sluice] core update rejected: core:%s changed since "
-                    "snapshot (CAS mismatch)", memory_id,
-                )
-            elif scene_locked:
-                failed += 1
-                lines.append(
-                    f"update 失敗: core:{memory_id} は場面の記憶 (実会話の写し) "
-                    "なので書き換えの対象外です。"
-                )
-                LOGGER.warning(
-                    "[sluice] core update rejected: core:%s is a scene memory "
-                    "(verbatim copy — not editable)", memory_id,
-                )
-            elif ok:
-                applied += 1
-                lines.append(f"コア記憶 core:{memory_id} を更新: {content}")
-            else:
-                failed += 1
-                lines.append(f"update 失敗: core:{memory_id} が見つかりませんでした。")
-
-        elif kind == "remove":
-            memory_id = op.get("memory_id")
-            if memory_id is None:
-                failed += 1
-                lines.append("remove 失敗: memory_id が指定されていません。")
-                continue
-            target_id = _coerce_memory_id(memory_id)
-            if target_id is None:
-                failed += 1
-                lines.append(f"remove 失敗: memory_id が不正です ({memory_id!r})。")
-                continue
-            snap_hash = (
-                None if core_snapshot is None
-                else core_snapshot.get(str(target_id))
+            continue
+        with adapter._db_lock:
+            new_id = add_core_memory(
+                adapter.conn, content,
+                metadata=json.dumps({"source": "sluice"}),
+                confirmed=0,  # 自動採取はユーザー確認待ち
             )
-            if snap_hash is None:
-                failed += 1
-                lines.append(
-                    f"remove 失敗: core:{memory_id} のスナップショット情報が"
-                    "無いため適用しませんでした。"
-                )
-                continue
-            with adapter._db_lock:
-                current = next(
-                    (
-                        m for m in list_core_memories(adapter.conn)
-                        if int(m.id) == target_id
-                    ),
-                    None,
-                )
-                cas_ok = (
-                    current is not None
-                    and _core_content_hash(current.content) == snap_hash
-                )
-                ok = cas_ok and remove_core_memory(adapter.conn, target_id)
-            if not cas_ok:
-                failed += 1
-                lines.append(
-                    f"記憶 core:{memory_id} は実行中に変更されたため"
-                    "適用しませんでした。"
-                )
-                LOGGER.warning(
-                    "[sluice] core remove rejected: core:%s changed since "
-                    "snapshot (CAS mismatch)", memory_id,
-                )
-            elif ok:
-                applied += 1
-                lines.append(f"コア記憶 core:{memory_id} を削除しました。")
-            else:
-                failed += 1
-                lines.append(f"remove 失敗: core:{memory_id} が見つかりませんでした。")
+        applied += 1
+        alive_contents[content] = new_id
+        # 記録は <system> 包みのシステム通知として SAIMemory に残る
+        # (_persist_record 参照)。省略・切り詰めは採取事実の改変になるため、
+        # 本文は全文を書く (不変条件 §5-8 / 2026-07-07 まはー指摘)。
+        lines.append(f"コア記憶 core:{new_id} に採取: {content}")
 
+    for op in core_updates:
+        if not isinstance(op, dict):
+            failed += 1
+            lines.append(f"不正なコア記憶の書き換え形式のためスキップ: {op!r}")
+            continue
+        raw_ref = op.get("memory_ref")
+        target_id = _parse_ref(raw_ref, _CORE_REF_RE)
+        if target_id is None:
+            failed += 1
+            lines.append(
+                f"update 失敗: memory_ref が core:N の形ではありません ({raw_ref!r})。"
+            )
+            continue
+        content = (op.get("content") or "").strip()
+        if not content:
+            failed += 1
+            lines.append(f"update 失敗: core:{target_id} の新しい本文が空でした。")
+            continue
+        snap_hash = _snapshot_hash(target_id)
+        if snap_hash is None:
+            failed += 1
+            lines.append(
+                f"update 失敗: core:{target_id} のスナップショット情報が"
+                "無いため適用しませんでした。"
+            )
+            continue
+        with adapter._db_lock:
+            current = next(
+                (
+                    m for m in list_core_memories(adapter.conn)
+                    if int(m.id) == target_id
+                ),
+                None,
+            )
+            cas_ok = (
+                current is not None
+                and _core_content_hash(current.content) == snap_hash
+            )
+            # 場面の記憶 (scene) は書き換えの対象外 — 長さ不問。
+            #
+            # scene は実際の会話の写しで、本人が「直す」ことは会話の写しを
+            # 書き換えること、つまり捏造にあたる (このモジュール冒頭の
+            # 不変条件「scene は参照コピーのみ」)。提示は先頭 80 字に
+            # 刻んでいるが、歯止めをその長さで書くと 80 字以下の scene だけ
+            # 書き換えられる穴が残る — 目的 (写しを改変させない) から導けば
+            # 条件は種類の一行になる (2026-08-22 裁定、
+            # docs/issues/sluice_truncated_scene_update.md)。
+            #
+            # 削除は対象外にしない (写しを消すことは改変ではない)。
+            scene_locked = cas_ok and _is_scene_memory(current)
+            ok = (
+                cas_ok
+                and not scene_locked
+                and update_core_memory(
+                    adapter.conn, target_id, content, confirmed=0,
+                )
+            )
+        if not cas_ok:
+            failed += 1
+            lines.append(
+                f"記憶 core:{target_id} は実行中に変更されたため"
+                "適用しませんでした。"
+            )
+            LOGGER.warning(
+                "[sluice] core update rejected: core:%s changed since "
+                "snapshot (CAS mismatch)", target_id,
+            )
+        elif scene_locked:
+            failed += 1
+            lines.append(
+                f"update 失敗: core:{target_id} は場面の記憶 (実会話の写し) "
+                "なので書き換えの対象外です。"
+            )
+            LOGGER.warning(
+                "[sluice] core update rejected: core:%s is a scene memory "
+                "(verbatim copy — not editable)", target_id,
+            )
+        elif ok:
+            applied += 1
+            lines.append(f"コア記憶 core:{target_id} を更新: {content}")
         else:
             failed += 1
-            lines.append(f"未知の op '{kind}' をスキップしました。")
+            lines.append(f"update 失敗: core:{target_id} が見つかりませんでした。")
+
+    for op in core_removes:
+        if not isinstance(op, dict):
+            failed += 1
+            lines.append(f"不正なコア記憶の削除形式のためスキップ: {op!r}")
+            continue
+        raw_ref = op.get("memory_ref")
+        target_id = _parse_ref(raw_ref, _CORE_REF_RE)
+        if target_id is None:
+            failed += 1
+            lines.append(
+                f"remove 失敗: memory_ref が core:N の形ではありません ({raw_ref!r})。"
+            )
+            continue
+        snap_hash = _snapshot_hash(target_id)
+        if snap_hash is None:
+            failed += 1
+            lines.append(
+                f"remove 失敗: core:{target_id} のスナップショット情報が"
+                "無いため適用しませんでした。"
+            )
+            continue
+        with adapter._db_lock:
+            current = next(
+                (
+                    m for m in list_core_memories(adapter.conn)
+                    if int(m.id) == target_id
+                ),
+                None,
+            )
+            cas_ok = (
+                current is not None
+                and _core_content_hash(current.content) == snap_hash
+            )
+            ok = cas_ok and remove_core_memory(adapter.conn, target_id)
+        if not cas_ok:
+            failed += 1
+            lines.append(
+                f"記憶 core:{target_id} は実行中に変更されたため"
+                "適用しませんでした。"
+            )
+            LOGGER.warning(
+                "[sluice] core remove rejected: core:%s changed since "
+                "snapshot (CAS mismatch)", target_id,
+            )
+        elif ok:
+            applied += 1
+            lines.append(f"コア記憶 core:{target_id} を削除しました。")
+        else:
+            failed += 1
+            lines.append(f"remove 失敗: core:{target_id} が見つかりませんでした。")
 
     return (applied, failed, lines)
 
@@ -793,8 +869,9 @@ def _apply_memos(
     """want/did メモを手帳 (pocketbook) に書く。(成功数, 失敗数, 結果行) を返す。
 
     - ``new_activity_name`` は get_or_create_activity(origin='sluice') で収束させる。
-    - ``activity_id`` はプロンプトに同梱した一覧 (``offered_activities``) に無い id
-      を拒否し、その要素だけ捨ててログに残す (LLM の発明 id を書かせない)。
+    - ``activity_ref`` は ``act:N`` の形の写しだけを受け取り (:func:`_parse_ref`)、
+      プロンプトに同梱した一覧 (``offered_activities``) に無い番号を拒否して、
+      その要素だけ捨ててログに残す (LLM の発明 id を書かせない)。
     - 冪等キーは「安定プレフィックス (span 由来) + 操作番号」— 同じ担当範囲の
       再適用 (部分失敗 → 次回 Metabolism の再処理) で重複しない。
     - span_start_id / span_end_id はこのスルースの一手が担当した範囲 (前回の
@@ -849,35 +926,43 @@ def _apply_memos(
                     lines.append(f"{kind_label[kind]}メモをスキップ: 本文が空でした。")
                     continue
                 new_name = (memo.get("new_activity_name") or "").strip()
-                activity_id = memo.get("activity_id")
+                activity_ref = memo.get("activity_ref")
                 if new_name:
                     activity = get_or_create_activity(
                         conn, new_name, "sluice", commit=False,
                     )
                     aid = activity.id
                     aname = activity.name
-                elif activity_id is not None:
-                    if (
-                        isinstance(activity_id, bool)
-                        or not isinstance(activity_id, int)
-                        or activity_id not in offered_activities
-                    ):
+                elif activity_ref is not None:
+                    parsed_aid = _parse_ref(activity_ref, _ACTIVITY_REF_RE)
+                    if parsed_aid is None:
                         failed += 1
                         lines.append(
-                            f"{kind_label[kind]}メモをスキップ: activity_id={activity_id!r} "
-                            "は一覧にありません。"
+                            f"{kind_label[kind]}メモをスキップ: "
+                            f"activity_ref={activity_ref!r} は act:N の形ではありません。"
                         )
                         LOGGER.warning(
-                            "[sluice] memo rejected: activity_id %r not in offered list "
-                            "(persona=%s)", activity_id, persona_id,
+                            "[sluice] memo rejected: activity_ref %r is not act:N "
+                            "(persona=%s)", activity_ref, persona_id,
                         )
                         continue
-                    aid = activity_id
-                    aname = offered_activities[activity_id]
+                    if parsed_aid not in offered_activities:
+                        failed += 1
+                        lines.append(
+                            f"{kind_label[kind]}メモをスキップ: "
+                            f"act:{parsed_aid} は一覧にありません。"
+                        )
+                        LOGGER.warning(
+                            "[sluice] memo rejected: act:%s not in offered list "
+                            "(persona=%s)", parsed_aid, persona_id,
+                        )
+                        continue
+                    aid = parsed_aid
+                    aname = offered_activities[parsed_aid]
                 else:
                     failed += 1
                     lines.append(
-                        f"{kind_label[kind]}メモをスキップ: activity_id も "
+                        f"{kind_label[kind]}メモをスキップ: activity_ref も "
                         "new_activity_name もありません。"
                     )
                     continue
@@ -1471,11 +1556,19 @@ class SluiceEmptySeenSetError(RuntimeError):
     """
 
 
-_LIST_FIELDS = ("ops", "want_memos", "did_memos", "promises")
+_LIST_FIELDS = (
+    "core_adds", "core_updates", "core_removes",
+    "want_memos", "did_memos", "promises",
+)
+
+#: コア記憶の三一覧 (棄却の件数を「コア記憶の操作」へ束ねるときに使う)。
+_CORE_FIELDS = ("core_adds", "core_updates", "core_removes")
 
 #: 判断ターン記録・ログ用の欄の呼び名 (まはーが読む面には実装名を出さない)。
 _FIELD_LABELS: Dict[str, str] = {
-    "ops": "コア記憶の操作",
+    "core_adds": "コア記憶の追加",
+    "core_updates": "コア記憶の書き換え",
+    "core_removes": "コア記憶の削除",
     "want_memos": "やりたいメモ",
     "did_memos": "やったメモ",
     "promises": "約束",
@@ -1488,12 +1581,14 @@ _FIELD_LABELS: Dict[str, str] = {
 #: 壊れた記録が再利用され続けて同じ例外を繰り返す — だから**凍結より前**に
 #: 検査し、型の壊れた要素だけを落とす。
 _ELEMENT_FIELD_TYPES: Dict[str, Dict[str, str]] = {
-    "ops": {"op": "string", "content": "string", "memory_id": "integer"},
+    "core_adds": {"content": "string"},
+    "core_updates": {"memory_ref": "string", "content": "string"},
+    "core_removes": {"memory_ref": "string"},
     "want_memos": {
-        "activity_id": "integer", "new_activity_name": "string", "text": "string",
+        "activity_ref": "string", "new_activity_name": "string", "text": "string",
     },
     "did_memos": {
-        "activity_id": "integer", "new_activity_name": "string", "text": "string",
+        "activity_ref": "string", "new_activity_name": "string", "text": "string",
     },
     "promises": {
         "op": "string", "content": "string", "due": "string",
@@ -1553,10 +1648,11 @@ def _parse_structured_result(
     fail-closed の粒度: **全体の型** (dict でない / 必須欄 — reflection と
     4 つの操作列全部 — の欠落・null / 各欄が配列でない / 配列要素が object で
     ない / reflection が文字列でない) は送出。
-    **要素内フィールドの型不正** (content が文字列でない、memory_id が整数で
-    ない等) はその要素だけ落として棄却の記録に残す (Codex 第八巡 修正 6)。
-    **中身の参照・値の不正** (未知の op、空本文、一覧外の activity_id / task_ref、
-    解釈不能な due) は従来どおり適用側の要素単位棄却に委ねる。
+    **要素内フィールドの型不正** (content や memory_ref が文字列でない等) は
+    その要素だけ落として棄却の記録に残す (Codex 第八巡 修正 6)。
+    **中身の参照・値の不正** (空本文、``core:N`` / ``act:N`` の形でない参照、
+    一覧に無い参照、未知の promise op、解釈不能な due) は従来どおり適用側の
+    要素単位棄却に委ねる。
     """
     if isinstance(result, str):
         try:
@@ -1643,12 +1739,36 @@ def _parse_structured_result(
 _LEDGER_KIND = "sluice.pan"
 
 
+#: 応答形式の世代印。旧世代 (``ops`` 一本) の記録が同じ担当範囲に残っている
+#: 環境で、新しい実行を**別キー**に立てるために使う。台帳は applied → failed の
+#: 遷移を許さない (状態機械の規約) ので、読めない旧行は退避も上書きもせず
+#: そのまま残し、こちらが別キーで走り直す。
+_RESPONSE_FORMAT_TAG = "core3"
+
+
 def _get_ledger(lifecycle: Any) -> Optional[Any]:
     """manager 所有の ExecutionLedger を引く。無ければ None (台帳なしで動く)。"""
     manager = getattr(lifecycle, "manager", None)
     if manager is None:
         return None
     return getattr(manager, "execution_ledger", None)
+
+
+def _is_legacy_response(response: Any) -> bool:
+    """記録済み結果が旧世代 (``ops`` 一本) の応答形式か。
+
+    新形式はコア記憶の三一覧 (``core_adds`` / ``core_updates`` /
+    ``core_removes``) を必ず全部持つ — :func:`_parse_structured_result` が
+    凍結より前に全欄必須で検証しているため。旧形式をそのまま適用側へ渡すと
+    三一覧が空として読まれ、「コア記憶の採取ゼロ」で completed になる
+    (本人が指定した記憶操作が静かに消える)。だから再利用せず、新しい LLM
+    コールでやり直す (fail-closed)。
+    """
+    if not isinstance(response, dict):
+        return True
+    if "ops" in response:
+        return True
+    return not all(field in response for field in _CORE_FIELDS)
 
 
 def _find_recorded_result(ledger: Any, ledger_key: str) -> Optional[Dict[str, Any]]:
@@ -1833,6 +1953,10 @@ def _call_sluice_llm(
                 tools=[],
                 response_schema=_RESPONSE_SCHEMA,
                 temperature=runtime._default_temperature(persona),
+                # このコールだけの出力上限 (per-call)。対応していない
+                # プロバイダのクライアントは generate の **kwargs が
+                # 黙って落とす — 上限が効かないだけで、例外にはしない。
+                max_output_tokens=_MAX_OUTPUT_TOKENS,
                 **runtime._get_cache_kwargs(persona_id),
             )
             break
@@ -2031,10 +2155,19 @@ def run_sluice(
     ledger_key = (
         f"{persona_id}:{span_start_id}" if (persona_id and span_start_id) else None
     )
-    recorded = (
-        _find_recorded_result(ledger, ledger_key)
-        if (ledger is not None and ledger_key) else None
-    )
+    recorded = None
+    if ledger is not None and ledger_key:
+        recorded = _find_recorded_result(ledger, ledger_key)
+        if recorded is not None and _is_legacy_response(recorded.get("response")):
+            # 旧世代の応答形式は適用側が読めない — 再利用せず、別キーで新しい
+            # LLM コールを立てる (_RESPONSE_FORMAT_TAG の説明を参照)。
+            LOGGER.warning(
+                "[sluice] 記録の形式が古いため再利用しません "
+                "(execution=%s key=%s persona=%s) — 新しい実行として採り直します",
+                recorded.get("execution_id"), ledger_key, persona_id,
+            )
+            ledger_key = f"{ledger_key}#format-{_RESPONSE_FORMAT_TAG}"
+            recorded = _find_recorded_result(ledger, ledger_key)
 
     execution_id: Optional[str] = None
     ledger_status: Optional[str] = None
@@ -2171,7 +2304,9 @@ def run_sluice(
         raw = parsed_result.get(key, [])
         return list(raw) if isinstance(raw, list) else []
 
-    ops = _as_list("ops")
+    core_adds = _as_list("core_adds")
+    core_updates = _as_list("core_updates")
+    core_removes = _as_list("core_removes")
     want_memos = _as_list("want_memos")
     did_memos = _as_list("did_memos")
     promises = _as_list("promises")
@@ -2187,9 +2322,10 @@ def run_sluice(
     else:
         idem_prefix = f"sluice:{run_id}"
 
-    # 4. 適用: コア記憶 ops → 手帳メモ → 約束 (全て冪等 — 再適用で重複しない)。
-    ops_applied, ops_failed, ops_lines = _apply_ops(
-        persona, ops, core_snapshot=core_snapshot,
+    # 4. 適用: コア記憶 → 手帳メモ → 約束 (全て冪等 — 再適用で重複しない)。
+    ops_applied, ops_failed, ops_lines = _apply_core_ops(
+        persona, core_adds, core_updates, core_removes,
+        core_snapshot=core_snapshot,
     )
     memos_applied, memos_failed, memo_lines = _apply_memos(
         persona, want_memos, did_memos,
@@ -2210,7 +2346,7 @@ def run_sluice(
         if text:
             rejection_lines.append(text)
         field = item.get("field")
-        if field == "ops":
+        if field in _CORE_FIELDS:
             ops_failed += 1
         elif field in ("want_memos", "did_memos"):
             memos_failed += 1

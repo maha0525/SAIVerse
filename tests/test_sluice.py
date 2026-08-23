@@ -1,10 +1,11 @@
 """sluice (スルース) のユニットテスト。旧 gold_panning テストの世代交代先。
 
-- コア記憶 ops 適用 (add / update / remove) が実 SAIMemory (temp DB) に届くこと
+- コア記憶の適用 (core_adds / core_updates / core_removes) が実 SAIMemory
+  (temp DB) に届くこと
 - 手帳メモ (want/did) が activities/memos に span・idem 込みで書かれること
 - 約束 (promises) がタスク帳 (temp 中央 DB) に書かれること
 - 同じ実行 ID (run_id) の再適用が重複しないこと
-- 一覧に無い activity_id の要素だけが捨てられ、他は適用されること
+- 一覧に無い / 形の違う activity_ref の要素だけが捨てられ、他は適用されること
 - **確実に通るゲート**: スルース失敗で退場 (anchor 前進) が止まり、成功で進むこと
 - コンテキスト超過で後退再試行 (§13.5-1) が働くこと
 - defer-to-hot: anchor 冷で pending が立ち metabolism がスキップ / 圧力弁で実行
@@ -53,7 +54,9 @@ def _sluice_result(**overrides):
     """
     base = {
         "reflection": "x",
-        "ops": [],
+        "core_adds": [],
+        "core_updates": [],
+        "core_removes": [],
         "want_memos": [],
         "did_memos": [],
         "promises": [],
@@ -225,7 +228,7 @@ class _AdapterTestBase(unittest.TestCase):
 
 
 class SluiceRunTest(_AdapterTestBase):
-    """実 SAIMemory (temp DB) 経由で ops 適用と判断ターン記録を実証する。"""
+    """実 SAIMemory (temp DB) 経由でコア記憶の適用と判断ターン記録を実証する。"""
 
     def _persona(self):
         return SimpleNamespace(
@@ -250,12 +253,12 @@ class SluiceRunTest(_AdapterTestBase):
         with self.adapter._db_lock:
             return list_core_memories(self.adapter.conn)
 
-    # -- case 1: add op --------------------------------------------------
+    # -- case 1: core_adds -----------------------------------------------
 
-    def test_add_op_writes_core_memory_and_committed_record(self):
+    def test_core_add_writes_core_memory_and_committed_record(self):
         result = _sluice_result(
             reflection="赴任のことを覚えておく",
-            ops=[{"op": "add", "content": "2026年6月頃〜 まはーは海外赴任中（9月帰国予定）"}],
+            core_adds=[{"content": "2026年6月頃〜 まはーは海外赴任中（9月帰国予定）"}],
         )
         summary, client = self._run(result)
         self.assertEqual(summary["ops_applied"], 1)
@@ -284,7 +287,7 @@ class SluiceRunTest(_AdapterTestBase):
 
         result = _sluice_result(
             reflection="赴任のことを覚えておく",
-            ops=[{"op": "add", "content": "2026年6月頃〜 まはーは海外赴任中"}],
+            core_adds=[{"content": "2026年6月頃〜 まはーは海外赴任中"}],
         )
         self._run(result)
 
@@ -302,9 +305,9 @@ class SluiceRunTest(_AdapterTestBase):
         self.assertIn("event_message", tags)
         self.assertIn("sluice", tags)
 
-    # -- case 2: empty ops -> discardable --------------------------------
+    # -- case 2: 採取なし -> discardable ----------------------------------
 
-    def test_empty_ops_writes_nothing_and_discardable_record(self):
+    def test_empty_capture_writes_nothing_and_discardable_record(self):
         result = _sluice_result(reflection="今回は採取なし")
         summary, _ = self._run(result)
         self.assertEqual(summary["ops_applied"], 0)
@@ -315,15 +318,15 @@ class SluiceRunTest(_AdapterTestBase):
         _content, scope, _line_role = row
         self.assertEqual(scope, "discardable")
 
-    # -- case 3a: update op ----------------------------------------------
+    # -- case 3a: core_updates --------------------------------------------
 
-    def test_update_op(self):
+    def test_core_update(self):
         from sai_memory.core_memory import add_core_memory
         with self.adapter._db_lock:
             mid = add_core_memory(self.adapter.conn, "旧: 赴任は3月まで")
 
-        result = _sluice_result(reflection="更新", ops=[
-            {"op": "update", "memory_id": mid, "content": "新: 赴任は9月まで"},
+        result = _sluice_result(reflection="更新", core_updates=[
+            {"memory_ref": f"core:{mid}", "content": "新: 赴任は9月まで"},
         ])
         summary, _ = self._run(result)
         self.assertEqual(summary["ops_applied"], 1)
@@ -331,9 +334,9 @@ class SluiceRunTest(_AdapterTestBase):
         self.assertEqual(len(cores), 1)
         self.assertEqual(cores[0].content, "新: 赴任は9月まで")
 
-    def test_update_op_missing_target_is_failure(self):
-        result = _sluice_result(ops=[
-            {"op": "update", "memory_id": 999, "content": "存在しない対象"},
+    def test_core_update_missing_target_is_failure(self):
+        result = _sluice_result(core_updates=[
+            {"memory_ref": "core:999", "content": "存在しない対象"},
         ])
         summary, _ = self._run(result)
         self.assertEqual(summary["ops_applied"], 0)
@@ -341,6 +344,72 @@ class SluiceRunTest(_AdapterTestBase):
         row = _read_sluice_record(self.adapter)
         self.assertIn("update 失敗", row[0])
         self.assertEqual(row[1], "discardable")  # 採取なし
+
+    # -- 2026-08-24: 文字列参照の検査 -------------------------------------
+    # docs/issues/sluice_structured_output_digit_loop.md
+
+    def test_malformed_memory_ref_element_dropped_others_applied(self):
+        """⭐ core:N の形でない参照はその要素だけ棄却し、正しい要素は適用する。
+
+        参照欄に本文や推敲が流れ込む壊れ方は実在する — 文字列参照の実験で
+        3.7-flash が `core:2reset core:2 -> core:2 update core:2 content: …` を
+        返した。裸の数字も、一覧に無い番号も、同じく要素単位で捨てる。
+        """
+        from sai_memory.core_memory import add_core_memory
+        with self.adapter._db_lock:
+            first = add_core_memory(self.adapter.conn, "書き換えられない記憶")
+            second = add_core_memory(self.adapter.conn, "書き換えられる記憶")
+
+        result = _sluice_result(core_updates=[
+            {"memory_ref": str(first), "content": "裸の数字の参照"},
+            {
+                "memory_ref": f"core:{first}reset core:{first} 2026年9月頃〜",
+                "content": "本文が混ざった参照",
+            },
+            {"memory_ref": "core:99", "content": "一覧に無い参照"},
+            {"memory_ref": f"core:{second}", "content": "正しい参照で書き換え"},
+        ])
+        summary, _ = self._run(result)
+
+        self.assertEqual(summary["ops_applied"], 1)
+        self.assertEqual(summary["ops_failed"], 3)
+        cores = {c.id: c.content for c in self._list_core()}
+        self.assertEqual(cores[first], "書き換えられない記憶")  # 無傷
+        self.assertEqual(cores[second], "正しい参照で書き換え")
+        record = _read_sluice_record(self.adapter)[0]
+        self.assertIn("memory_ref が core:N の形ではありません", record)
+        self.assertIn("core:99 のスナップショット情報が無いため", record)
+
+    def test_core_ops_missing_required_field_are_rejected(self):
+        """⭐ 本文の無い書き換え・参照の無い削除は要素棄却 (schema では必須だが、
+        台帳の記録の再適用や別実装から欠けた入力が来ても握り潰さない)。"""
+        from sai_memory.core_memory import add_core_memory
+        with self.adapter._db_lock:
+            mid = add_core_memory(self.adapter.conn, "元の本文")
+
+        summary, _ = self._run(_sluice_result(
+            core_updates=[
+                {"memory_ref": f"core:{mid}"},
+                {"memory_ref": f"core:{mid}", "content": "   "},
+            ],
+            core_removes=[{}],
+        ))
+
+        self.assertEqual(summary["ops_applied"], 0)
+        self.assertEqual(summary["ops_failed"], 3)
+        self.assertEqual(self._list_core()[0].content, "元の本文")
+        record = _read_sluice_record(self.adapter)[0]
+        self.assertIn(f"update 失敗: core:{mid} の新しい本文が空でした", record)
+        self.assertIn("remove 失敗: memory_ref が core:N の形ではありません", record)
+
+    def test_llm_call_carries_the_output_cap(self):
+        """⭐ 出力上限はこのコールだけに付ける (暴走したときの課金と待ち時間の
+        頭打ち)。対応しないプロバイダでは generate の **kwargs が黙って落とす。"""
+        _summary, client = self._run(_sluice_result())
+        self.assertEqual(sluice._MAX_OUTPUT_TOKENS, 4096)
+        self.assertEqual(
+            client.calls[0]["kwargs"].get("max_output_tokens"), 4096,
+        )
 
     # -- 2026-08-22 掃討フェーズ 束 3 指摘 3-1 ---------------------------
 
@@ -360,8 +429,8 @@ class SluiceRunTest(_AdapterTestBase):
 
         # 本人が見えていた範囲 (先頭 + 省略記号) をそのまま返してくる
         seen = full[:_SCENE_PREVIEW_CHARS] + "…"
-        result = _sluice_result(reflection="整えた", ops=[
-            {"op": "update", "memory_id": mid, "content": seen},
+        result = _sluice_result(reflection="整えた", core_updates=[
+            {"memory_ref": f"core:{mid}", "content": seen},
         ])
         summary, _ = self._run(result)
 
@@ -388,8 +457,8 @@ class SluiceRunTest(_AdapterTestBase):
         with self.adapter._db_lock:
             mid = add_core_memory(self.adapter.conn, short, kind="scene")
 
-        result = _sluice_result(reflection="整えた", ops=[
-            {"op": "update", "memory_id": mid, "content": "書き直した本文"},
+        result = _sluice_result(reflection="整えた", core_updates=[
+            {"memory_ref": f"core:{mid}", "content": "書き直した本文"},
         ])
         summary, _ = self._run(result)
 
@@ -407,8 +476,8 @@ class SluiceRunTest(_AdapterTestBase):
         with self.adapter._db_lock:
             mid = add_core_memory(self.adapter.conn, "短い場面", kind="scene")
 
-        result = _sluice_result(reflection="整えた", ops=[
-            {"op": "remove", "memory_id": mid},
+        result = _sluice_result(reflection="整えた", core_removes=[
+            {"memory_ref": f"core:{mid}"},
         ])
         summary, _ = self._run(result)
 
@@ -447,8 +516,8 @@ class SluiceRunTest(_AdapterTestBase):
         with self.adapter._db_lock:
             mid = add_core_memory(self.adapter.conn, long_note)  # kind='note'
 
-        result = _sluice_result(reflection="整えた", ops=[
-            {"op": "update", "memory_id": mid, "content": "書き直した本文"},
+        result = _sluice_result(reflection="整えた", core_updates=[
+            {"memory_ref": f"core:{mid}", "content": "書き直した本文"},
         ])
         summary, _ = self._run(result)
 
@@ -456,15 +525,15 @@ class SluiceRunTest(_AdapterTestBase):
         cores = self._list_core()
         self.assertEqual(cores[0].content, "書き直した本文")
 
-    # -- case 3b: remove op ----------------------------------------------
+    # -- case 3b: core_removes ---------------------------------------------
 
-    def test_remove_op(self):
+    def test_core_remove(self):
         from sai_memory.core_memory import add_core_memory
         with self.adapter._db_lock:
             mid = add_core_memory(self.adapter.conn, "消す予定のメモ")
 
         result = _sluice_result(
-            reflection="整理", ops=[{"op": "remove", "memory_id": mid}],
+            reflection="整理", core_removes=[{"memory_ref": f"core:{mid}"}],
         )
         summary, _ = self._run(result)
         self.assertEqual(summary["ops_applied"], 1)
@@ -489,7 +558,7 @@ class SluiceRunTest(_AdapterTestBase):
         """採取欄の省略・null は fail-closed (Codex 第七巡 修正 1) — 「空」は
         明示的な空配列だけ。旧形式 ({"reflection", "ops"} のみ) も棄却される。"""
         with self.assertRaises(sluice.SluiceOutputError):
-            self._run({"reflection": "x", "ops": []})  # want/did/promises 欠落
+            self._run({"reflection": "x", "ops": []})  # 旧形式 = 欄が揃わない
         with self.assertRaises(sluice.SluiceOutputError):
             self._run({**_sluice_result(), "promises": None})  # null も不可
         missing_reflection = _sluice_result()
@@ -508,8 +577,8 @@ class SluiceRunTest(_AdapterTestBase):
             mid = add_core_memory(self.adapter.conn, "旧: 赴任は3月まで")
         adapter = self.adapter
 
-        result = _sluice_result(ops=[
-            {"op": "update", "memory_id": mid, "content": "スルースの古い判断"},
+        result = _sluice_result(core_updates=[
+            {"memory_ref": f"core:{mid}", "content": "スルースの古い判断"},
         ])
 
         class EditingDuringCallClient(FakeLLMClient):
@@ -543,7 +612,7 @@ class SluiceRunTest(_AdapterTestBase):
             mid = add_core_memory(self.adapter.conn, "消される予定だった")
         adapter = self.adapter
 
-        result = _sluice_result(ops=[{"op": "remove", "memory_id": mid}])
+        result = _sluice_result(core_removes=[{"memory_ref": f"core:{mid}"}])
 
         class EditingDuringCallClient(FakeLLMClient):
             def generate(self, *args, **kwargs):
@@ -564,19 +633,19 @@ class SluiceRunTest(_AdapterTestBase):
         self.assertEqual(len(cores), 1)  # 消されていない
         self.assertEqual(cores[0].content, "ユーザーが書き直した")
 
-    def test_missing_ops_field_fails_closed(self):
+    def test_missing_capture_field_fails_closed(self):
         with self.assertRaises(sluice.SluiceOutputError):
             self._run({"reflection": "x"})
 
     def test_wrong_field_type_fails_closed(self):
         with self.assertRaises(sluice.SluiceOutputError):
-            self._run({"ops": "not-a-list"})
+            self._run({**_sluice_result(), "core_adds": "not-a-list"})
         with self.assertRaises(sluice.SluiceOutputError):
-            self._run({"ops": [], "want_memos": {"text": "配列でない"}})
+            self._run({**_sluice_result(), "want_memos": {"text": "配列でない"}})
 
     def test_non_object_element_fails_closed(self):
         with self.assertRaises(sluice.SluiceOutputError):
-            self._run({"ops": ["add"]})
+            self._run({**_sluice_result(), "core_adds": ["add"]})
 
     # -- case: usage recording + anchor touch ----------------------------
 
@@ -601,8 +670,8 @@ class SluiceRunTest(_AdapterTestBase):
 
     def test_disabled_toggle_skips(self):
         with patch.dict(os.environ, {"SAIVERSE_SLUICE_ENABLED": "0"}):
-            summary, client = self._run(_sluice_result(ops=[
-                {"op": "add", "content": "刻まれないはず"},
+            summary, client = self._run(_sluice_result(core_adds=[
+                {"content": "刻まれないはず"},
             ]))
         self.assertTrue(summary["skipped"])
         self.assertEqual(summary["reason"], "disabled")
@@ -631,31 +700,32 @@ class SluiceRunTest(_AdapterTestBase):
 
     # -- case: 要素内フィールドの型不正 (Codex 第八巡 修正 6) ----------------
 
-    def test_type_invalid_op_field_is_dropped_without_crashing(self):
-        """content が文字列でない ops は、pan 全体を落とさずその要素だけ棄却する
-        (旧実装は .strip() が要素単位の例外処理の外で AttributeError になった)。"""
+    def test_type_invalid_core_add_field_is_dropped_without_crashing(self):
+        """content が文字列でない core_adds は、pan 全体を落とさずその要素だけ
+        棄却する (旧実装は .strip() が要素単位の例外処理の外で AttributeError に
+        なった)。"""
         summary, _ = self._run(_sluice_result(
             reflection="型が壊れた採取",
-            ops=[{"op": "add", "content": 123}],
+            core_adds=[{"content": 123}],
         ))
         self.assertFalse(summary["skipped"])
         self.assertEqual(summary["ops_applied"], 0)
         self.assertEqual(summary["ops_failed"], 1)
         self.assertEqual(self._list_core(), [])
         record = _read_sluice_record(self.adapter)[0]
-        self.assertIn("コア記憶の操作の1件目を棄却", record)
+        self.assertIn("コア記憶の追加の1件目を棄却", record)
         self.assertIn("content が文字列ではありません", record)
 
-    def test_type_invalid_memory_id_is_dropped(self):
-        """memory_id が整数でない update も要素棄却 (真偽値も整数扱いしない)。"""
-        summary, _ = self._run(_sluice_result(ops=[
-            {"op": "update", "memory_id": True, "content": "真偽値の id"},
-            {"op": "remove", "memory_id": "3"},
-        ]))
+    def test_type_invalid_memory_ref_is_dropped(self):
+        """memory_ref が文字列でない要素は検証段で棄却する (整数・真偽値も不可)。"""
+        summary, _ = self._run(_sluice_result(
+            core_updates=[{"memory_ref": 2, "content": "整数の参照"}],
+            core_removes=[{"memory_ref": True}],
+        ))
         self.assertEqual(summary["ops_applied"], 0)
         self.assertEqual(summary["ops_failed"], 2)
         record = _read_sluice_record(self.adapter)[0]
-        self.assertIn("memory_id が整数ではありません", record)
+        self.assertIn("memory_ref が文字列ではありません", record)
 
     def test_prompt_includes_open_activities(self):
         from sai_memory.memory.pocketbook import add_activity, close_activity
@@ -756,7 +826,7 @@ class SluiceApplyExtensionTest(_AdapterTestBase):
                 {"new_activity_name": "小説を書く", "text": "星を拾う話の続きを書きたい"},
             ],
             "did_memos": [
-                {"activity_id": act.id, "text": "クロッキーを30分"},
+                {"activity_ref": f"act:{act.id}", "text": "クロッキーを30分"},
             ],
         }
         summary, _ = self._run(result)
@@ -901,9 +971,9 @@ class SluiceApplyExtensionTest(_AdapterTestBase):
         names = [a.name for a in self._activities()]
         self.assertEqual(names.count("小説を書く"), 1)
 
-    # -- 一覧に無い activity_id の要素だけ捨てる ---------------------------
+    # -- 一覧に無い / 形の違う activity_ref の要素だけ捨てる ----------------
 
-    def test_unknown_activity_id_element_dropped_others_applied(self):
+    def test_unknown_activity_ref_element_dropped_others_applied(self):
         from sai_memory.memory.pocketbook import add_activity
         with self.adapter._db_lock:
             act = add_activity(self.adapter.conn, "絵の練習", "user")
@@ -911,8 +981,8 @@ class SluiceApplyExtensionTest(_AdapterTestBase):
         result = {
             **_sluice_result(),
             "did_memos": [
-                {"activity_id": 999, "text": "発明された id"},
-                {"activity_id": act.id, "text": "正しい参照"},
+                {"activity_ref": "act:999", "text": "発明された参照"},
+                {"activity_ref": f"act:{act.id}", "text": "正しい参照"},
             ],
         }
         summary, _ = self._run(result)
@@ -923,7 +993,31 @@ class SluiceApplyExtensionTest(_AdapterTestBase):
         self.assertEqual(rows[0][3], "正しい参照")
         # 捨てた事実は判断ターンの記録に残る (黙って捨てない)。
         record = _read_sluice_record(self.adapter)[0]
-        self.assertIn("activity_id=999", record)
+        self.assertIn("act:999 は一覧にありません", record)
+
+    def test_malformed_activity_ref_element_dropped_others_applied(self):
+        """⭐ act:N の形でない参照 (裸の数字・本文の混入) もその要素だけ棄却する。"""
+        from sai_memory.memory.pocketbook import add_activity
+        with self.adapter._db_lock:
+            act = add_activity(self.adapter.conn, "絵の練習", "user")
+
+        result = {
+            **_sluice_result(),
+            "did_memos": [
+                {"activity_ref": str(act.id), "text": "裸の数字"},
+                {
+                    "activity_ref": f"act:{act.id} 絵の練習 クロッキー",
+                    "text": "本文が混ざった参照",
+                },
+                {"activity_ref": f"act:{act.id}", "text": "正しい参照"},
+            ],
+        }
+        summary, _ = self._run(result)
+        self.assertEqual(summary["memos_applied"], 1)
+        self.assertEqual(summary["memos_failed"], 2)
+        self.assertEqual([r[3] for r in self._memo_rows()], ["正しい参照"])
+        record = _read_sluice_record(self.adapter)[0]
+        self.assertIn("act:N の形ではありません", record)
 
     # -- 約束: add (期限あり / なし / 解釈不能) と update ------------------
 
@@ -1052,16 +1146,16 @@ class SluiceApplyExtensionTest(_AdapterTestBase):
 
         result = {
             **_sluice_result(reflection="型不正が混ざった応答"),
-            "ops": [
-                {"op": "add", "content": 123},
-                {"op": "add", "content": "正しいコア記憶"},
+            "core_adds": [
+                {"content": 123},
+                {"content": "正しいコア記憶"},
             ],
             "want_memos": [
-                {"activity_id": act.id, "text": ["配列は文字列でない"]},
+                {"activity_ref": f"act:{act.id}", "text": ["配列は文字列でない"]},
             ],
             "did_memos": [
-                {"activity_id": "1", "text": "activity_id が文字列"},
-                {"activity_id": act.id, "text": "正しいメモ"},
+                {"activity_ref": 1, "text": "activity_ref が数値"},
+                {"activity_ref": f"act:{act.id}", "text": "正しいメモ"},
             ],
             "promises": [
                 {"op": "add", "content": "期限が配列", "due": []},
@@ -1084,7 +1178,7 @@ class SluiceApplyExtensionTest(_AdapterTestBase):
         self.assertEqual([r["content"] for r in self._task_rows()], ["正しい約束"])
 
         record = _read_sluice_record(self.adapter)[0]
-        self.assertIn("コア記憶の操作の1件目を棄却", record)
+        self.assertIn("コア記憶の追加の1件目を棄却", record)
         self.assertIn("やりたいメモの1件目を棄却", record)
         self.assertIn("やったメモの1件目を棄却", record)
         self.assertIn("約束の1件目を棄却", record)
@@ -1505,7 +1599,7 @@ class SluiceLedgerRetryTest(_AdapterTestBase):
 
     _RESULT = {
         **_sluice_result(reflection="採取"),
-        "ops": [{"op": "add", "content": "まはーは海外赴任中"}],
+        "core_adds": [{"content": "まはーは海外赴任中"}],
         "want_memos": [{"new_activity_name": "小説を書く", "text": "続きを書きたい"}],
         "promises": [{"op": "add", "content": "水曜までに挿絵を渡す", "due": "2026-08-26"}],
     }
@@ -1720,7 +1814,9 @@ class SluiceLedgerRetryTest(_AdapterTestBase):
             mid = add_core_memory(self.adapter.conn, "旧: 内容")
         result = {
             **_sluice_result(reflection="更新"),
-            "ops": [{"op": "update", "memory_id": mid, "content": "スルースの古い判断"}],
+            "core_updates": [
+                {"memory_ref": f"core:{mid}", "content": "スルースの古い判断"},
+            ],
             "want_memos": [{"new_activity_name": "小説を書く", "text": "続き"}],
         }
         # 1 回目: メモ書き込み障害で applied 凍結 (update は適用済み)。
@@ -1760,8 +1856,8 @@ class SluiceLedgerRetryTest(_AdapterTestBase):
         self.assertTrue(runnable)
         self.assertTrue(self.ledger.try_mark_running(execution_id))
         self.ledger.mark_applied(execution_id, result={
-            "response": _sluice_result(ops=[
-                {"op": "update", "memory_id": mid, "content": "古い判断"},
+            "response": _sluice_result(core_updates=[
+                {"memory_ref": f"core:{mid}", "content": "古い判断"},
             ]),
             "span_start_id": "m0", "span_end_id": "m4",
             "seen_ids": [f"m{i}" for i in range(5)],
@@ -1775,6 +1871,58 @@ class SluiceLedgerRetryTest(_AdapterTestBase):
         record = _read_sluice_record(self.adapter)[0]
         self.assertIn("スナップショット情報が無いため適用しませんでした", record)
         self.assertEqual(self._ledger_row()["status"], "completed")
+
+    def test_legacy_ops_record_is_not_reused_and_a_new_call_runs(self):
+        """⭐ 旧世代 (ops 一本) の記録済み結果は再利用しない。
+
+        そのまま適用側へ渡すとコア記憶の三一覧が空として読まれ、「採取ゼロ」で
+        completed になる (本人が指定した記憶操作が静かに消える)。台帳は
+        applied → failed の遷移を許さないので旧行はそのまま残し、形式印つきの
+        別キーで新しい LLM コールを立てて採り直す (fail-closed)。
+        """
+        from sai_memory.core_memory import add_core_memory
+        with self.adapter._db_lock:
+            mid = add_core_memory(self.adapter.conn, "旧: 内容")
+        execution_id, runnable, _status = self.ledger.claim_execution(
+            "sluice.pan", "tester:m0", "tester",
+        )
+        self.assertTrue(runnable)
+        self.assertTrue(self.ledger.try_mark_running(execution_id))
+        self.ledger.mark_applied(execution_id, result={
+            "response": {
+                "reflection": "旧形式",
+                "ops": [
+                    {"op": "update", "memory_id": mid, "content": "旧形式の判断"},
+                ],
+                "want_memos": [], "did_memos": [], "promises": [],
+            },
+            "span_start_id": "m0", "span_end_id": "m4",
+            "seen_ids": [f"m{i}" for i in range(5)],
+            "offered_activities": {}, "offered_tasks": {},
+            "core_snapshot": {str(mid): sluice._core_content_hash("旧: 内容")},
+            "prompt": "p",
+        })
+
+        with self.assertLogs("sea.sluice", level="WARNING") as logs:
+            summary, client, persona = self._run(self._RESULT)
+
+        self.assertTrue(
+            any("記録の形式が古いため再利用しません" in line for line in logs.output),
+        )
+        self.assertEqual(len(client.calls), 1)  # 新しい LLM コールで採り直す
+        self.assertFalse(summary["skipped"])
+        # 旧形式の update は適用されていない (本文は無傷)。
+        contents = [c.content for c in self._list_core()]
+        self.assertIn("旧: 内容", contents)
+        self.assertIn("まはーは海外赴任中", contents)
+        self.assertNotIn("旧形式の判断", contents)
+        # 旧行は触らず applied のまま、新しい実行は形式印つきキーで completed。
+        self.assertEqual(self._ledger_row()["status"], "applied")
+        retried = self.ledger.find_execution(
+            "sluice.pan", f"tester:m0#format-{sluice._RESPONSE_FORMAT_TAG}",
+        )
+        self.assertEqual(retried["status"], "completed")
+        self.assertEqual(persona._sluice_last_pan_id, "m4")
 
     def test_recorded_result_without_seen_ids_fails_closed(self):
         """seen_ids の無い記録は span から再構成しない (Codex 第五巡 修正 1 —
@@ -1989,7 +2137,7 @@ class SluiceLedgerRetryTest(_AdapterTestBase):
         同じ例外を繰り返す縁を断つ。棄却の事実は記録から復元される。"""
         result = {
             **_sluice_result(reflection="採取"),
-            "ops": [{"op": "add", "content": 123}],
+            "core_adds": [{"content": 123}],
             "want_memos": [{"new_activity_name": "小説を書く", "text": "続き"}],
         }
         with patch(
@@ -2001,9 +2149,9 @@ class SluiceLedgerRetryTest(_AdapterTestBase):
         row = self._ledger_row()
         self.assertEqual(row["status"], "applied")
         # 凍結された応答から型不正の要素は消えている。
-        self.assertEqual(row["result"]["response"]["ops"], [])
+        self.assertEqual(row["result"]["response"]["core_adds"], [])
         self.assertTrue(
-            any(r.get("field") == "ops" for r in row["result"]["rejections"]),
+            any(r.get("field") == "core_adds" for r in row["result"]["rejections"]),
         )
 
         # 再適用は同じ例外を繰り返さず完走し、棄却は判断ターンに残る。
@@ -2014,7 +2162,7 @@ class SluiceLedgerRetryTest(_AdapterTestBase):
         self.assertEqual(len(self._memo_rows()), 1)
         self.assertEqual(self._ledger_row()["status"], "completed")
         record = _read_sluice_record(self.adapter)[0]
-        self.assertIn("コア記憶の操作の1件目を棄却", record)
+        self.assertIn("コア記憶の追加の1件目を棄却", record)
 
     def test_success_records_completed_and_result(self):
         summary, _client, _persona = self._run(self._RESULT)
@@ -2024,7 +2172,7 @@ class SluiceLedgerRetryTest(_AdapterTestBase):
         self.assertEqual(row["result"]["span_start_id"], "m0")
         self.assertEqual(row["result"]["span_end_id"], "m4")
         self.assertEqual(
-            row["result"]["response"]["ops"][0]["content"], "まはーは海外赴任中",
+            row["result"]["response"]["core_adds"][0]["content"], "まはーは海外赴任中",
         )
 
 
@@ -2407,7 +2555,7 @@ class SluiceGateTest(_AdapterTestBase):
     def test_run_metabolism_omitted_field_response_blocks_eviction(self):
         """採取欄を省略した応答 (旧形式) は fail-closed — 退場が止まる
         (Codex 第七巡 修正 1)。"""
-        client = FakeLLMClient({"reflection": "x", "ops": []})  # 欄省略の応答
+        client = FakeLLMClient({"reflection": "x", "core_adds": []})  # 欄省略の応答
         messages = _metabolism_messages()
         lifecycle, anchor_updates = self._make_metabolism_lifecycle(
             client, presented_ids=[m["id"] for m in messages],
@@ -3067,7 +3215,7 @@ class PanMarkerPersistenceTest(_AdapterTestBase):
         persona = self._fresh_persona()
         result = {
             **_sluice_result(reflection="赴任を覚える"),
-            "ops": [{"op": "add", "content": "テスト用のコア記憶"}],
+            "core_adds": [{"content": "テスト用のコア記憶"}],
         }
         with patch(
             "sai_memory.memory.storage.set_embed_metadata",
@@ -3094,6 +3242,74 @@ class PanMarkerPersistenceTest(_AdapterTestBase):
         with self.adapter._db_lock:
             cores = list_core_memories(self.adapter.conn)
         self.assertEqual(len(cores), 1)
+
+
+class SluiceResponseSchemaShapeTest(unittest.TestCase):
+    """応答スキーマの形を機械で固定する。
+
+    出自: docs/issues/sluice_structured_output_digit_loop.md (2026-08-24)。
+    ここが緩むと、本番で 7 回連続の失敗を起こした型へ静かに戻れてしまう。
+    """
+
+    def _walk(self, node, path="$"):
+        """スキーマの全ノードを (パス, ノード) で辿る。"""
+        yield path, node
+        if isinstance(node, dict):
+            for key, child in (node.get("properties") or {}).items():
+                yield from self._walk(child, f"{path}.{key}")
+            if "items" in node:
+                yield from self._walk(node["items"], f"{path}[]")
+
+    def test_no_numeric_field_anywhere_in_the_schema(self):
+        """⭐ Gemini に向ける型に数値の欄を置かない。
+
+        JSON の数値リテラルは文法で閉じられない (桁をいくら並べても違反に
+        ならない) ので、制約付きデコードがその中でループに入ると何も止められ
+        ない。参照は文字列 (core:N / act:N) で受け取り、番号はこちらで解決する。
+        """
+        numeric = [
+            path for path, node in self._walk(sluice._RESPONSE_SCHEMA)
+            if isinstance(node, dict) and node.get("type") in ("integer", "number")
+        ]
+        self.assertEqual(numeric, [])
+
+    def test_core_ops_are_split_by_kind_with_required_fields_in_order(self):
+        """⭐ 任意の欄を飛ばした先に、飛ばした中身を吐き出せる欄が来る型にしない。
+
+        書き換えは参照と本文が両方必須で参照が先 — 「本文を飛ばして参照欄へ
+        入る」並びを文法上作れなくする (実験で効いた唯一の条件)。欄の並びは
+        そのまま REST の propertyOrdering になるので、順序ごと固定する。
+        """
+        props = sluice._RESPONSE_SCHEMA["properties"]
+        self.assertEqual(list(props), [
+            "reflection", "core_adds", "core_updates", "core_removes",
+            "want_memos", "did_memos", "promises",
+        ])
+        self.assertEqual(sluice._RESPONSE_SCHEMA["required"], list(props))
+        self.assertEqual(props["core_adds"]["items"]["required"], ["content"])
+        updates = props["core_updates"]["items"]
+        self.assertEqual(list(updates["properties"]), ["memory_ref", "content"])
+        self.assertEqual(updates["required"], ["memory_ref", "content"])
+        self.assertEqual(
+            props["core_removes"]["items"]["required"], ["memory_ref"],
+        )
+        for field in ("want_memos", "did_memos"):
+            self.assertEqual(
+                list(props[field]["items"]["properties"]),
+                ["activity_ref", "new_activity_name", "text"],
+            )
+
+    def test_parse_ref_accepts_only_the_offered_wording(self):
+        """参照の解決は同梱の語の写しだけを通す (前後の空白は許す)。"""
+        self.assertEqual(sluice._parse_ref("core:2", sluice._CORE_REF_RE), 2)
+        self.assertEqual(sluice._parse_ref("  core:2  ", sluice._CORE_REF_RE), 2)
+        self.assertEqual(sluice._parse_ref("act:1", sluice._ACTIVITY_REF_RE), 1)
+        for bad in (
+            "2", "core:", "core:2 の記憶", "core:2reset core:2", "act:1", None, 2, True,
+            # 桁数の上限 — 暴走した数字列を int() へ渡さない (変換上限で落ちる)。
+            "core:" + "2" * 5000,
+        ):
+            self.assertIsNone(sluice._parse_ref(bad, sluice._CORE_REF_RE))
 
 
 if __name__ == "__main__":

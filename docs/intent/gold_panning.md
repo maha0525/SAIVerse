@@ -88,7 +88,7 @@
 
 structured output の中身:
 
-- `ops`: `add`（note）/ `update` / `remove` / `add_scene`（指差し、§3.4）の列
+- コア記憶への操作: **種類ごとに分けた三つの一覧** (`core_adds` / `core_updates` / `core_removes`)。参照は同梱の一覧の語をそのまま写す文字列 (`core:3`)。⚠️ 欄の正典は [autonomous_behavior_v3.md §13.6](autonomous_behavior_v3.md) — 2026-08-24 に旧 `ops` 一本 (`op` + 整数の `memory_id`) から差し替えた ([issue](../issues/sluice_structured_output_digit_loop.md))
 - **空リスト＝「今回は砂金なし」が正規の応答**。刻むのは例外であるという姿勢をプロンプトで維持する（毎バッチ何か刻みたくなる圧への対抗）
 
 ### 3.4 scene は「指差し」— ペルソナは引用し、複製はシステムがやる
