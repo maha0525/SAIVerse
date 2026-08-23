@@ -1,6 +1,8 @@
 # Issue: デバッグの「完全手動モード（全タイマー停止）」は v1 の亡霊——退役 or 実態縮退の裁定済み掃除
 
-**ステータス**: 💤 v3 待ち凍結（掃除対象であることはまはー裁定済み 2026-07-14。実施時期は自律行動 v3 の運転設計と一体 — 下の「現況」参照。2026-08-18 実態確認）
+**ステータス**: ✅ 解決 (2026-08-23)。完全手動モードのトグルと API (`POST /debug/scheduler`) を、会話の切り上げ・Autonomy 切替と一緒に撤去した (commit 45d93792、まはー裁定「いずれも要らない」)。立てる口が消えたので `manager._debug_manual_mode_personas` は常に空で、読み手 (user_conversation / execution_ledger_wiring / スケジュール照合) は到達しない枝として残る — その撤去は v0.3 の止め具 (`AUTONOMOUS_DRIVING_SHIPPED`) を外す v0.4 の作業と一緒に行う (intent debug_controller.md に明記)。以下は当時の記録。
+
+**旧ステータス**: 💤 v3 待ち凍結（掃除対象であることはまはー裁定済み 2026-07-14。実施時期は自律行動 v3 の運転設計と一体 — 下の「現況」参照。2026-08-18 実態確認）
 **優先度**: low（実害なし・表示と実態の乖離）
 **作成日**: 2026-07-14
 **関連**: `frontend/src/components/DebugPanel.tsx`（完全手動モードトグル）/ `api/routes/people/debug.py` / `saiverse/saiverse_manager.py` L295・L1625（現役の読み手）/ `docs/intent/persona_cognition/debug_controller.md`
