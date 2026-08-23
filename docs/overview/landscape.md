@@ -159,6 +159,8 @@ PulseController は「起こされた Pulse を捌く」層だが、**いつ Pul
 
 「何をするか」をペルソナが決める上位視点。旧メタ判断（50分 tick の状況分類ディスパッチ）は**判断点5種に置換された**: 起床（`judgment_day_open`＝時間割の編成）・就寝（`judgment_day_close`＝ふりかえりと接ぎ直し）・セッション終了・会話終了・イベント到着（on_event）。いずれも**出来事の境界**（文脈の濃い場所）に置かれ、構造化出力でタスク裁定・時間割の組み替えを行う（`builtin_data/tools/judgment_finalize.py`）。判断点が退役した目的の木（§9）へ書く配線は残置で、撤去は v0.4 の運転設計と一緒に行う。**判断材料は Session（短期記憶、§6）から得る**。判断ログは `meta_judgment_log` に蓄積される。alert（呼びかけ）即応のみ旧経路が存続。
 
+> **⚠️ v0.3 では判断点は一つも発火しない**（2026-08-23）。自律の駆動（判断点・watchdog・コマの再予約・実イベントの判断経由）は v0.4 の管轄で、v0.3 は `saiverse/autonomy_wiring.py` の定数 `AUTONOMOUS_DRIVING_SHIPPED=False` が全体の止め具になっている（自律ゲートの唯一の判定関数 `is_autonomy_on` が常に False を返す）。ペルソナごとの `AUTONOMY_ENABLED` の値は DB に残り、v0.4 で定数ごと削除すれば元の姿に戻る。実イベントと仲裁は判断を経ない直接応答（v0.2 と同じ）。→ [`autonomous_behavior_v3.md`](../intent/autonomous_behavior_v3.md) §11.1
+
 ### line（ラインの3軸）
 
 Track 内の処理は複数の **line** に分かれ、3つの独立した軸で規定される:
@@ -526,7 +528,7 @@ graph TD
 | コア記憶 | 意味の地図の常時開特殊ページ | `core_memories` テーブル（`core:N` / `core`） |
 | 目的の木 | 退役（§9）。後継は手帳（メモ欄と約束の欄） | `persona_task`（main DB、`task:N`）は読み取り専用の残置 |
 | 発言→Pulse のマネージャー | SAIVerseManager + PulseController | `run_sea_user` → `submit_user` |
-| 自律駆動 | 時間割 + 判断点（+ watchdog） | `saiverse/day_plan.py` / `autonomy_wiring.py`（旧2層リズムは廃止 §9） |
+| 自律駆動 | 時間割 + 判断点（+ watchdog）。**v0.3 では止め具で発火しない** | `saiverse/day_plan.py` / `autonomy_wiring.py`（旧2層リズムは廃止 §9。止め具 = `AUTONOMOUS_DRIVING_SHIPPED`） |
 
 ### ドキュメント⇄実装の乖離（要追従）
 

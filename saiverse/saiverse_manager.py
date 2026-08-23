@@ -532,6 +532,14 @@ class SAIVerseManager(
         # 2. Active ペルソナの AutonomyManager を起動する。起動前は
         #    ensure_autonomy_for が _started ゲートで no-op にしていたぶんを、
         #    _started=True になった今ここでまとめて立てる。
+        #    v0.3 の止め具 (autonomy_wiring.AUTONOMOUS_DRIVING_SHIPPED) が
+        #    効いている間は 1 本も立たない — その事実をここで一度だけ告げる。
+        try:
+            from saiverse.autonomy_wiring import log_shipping_gate_once
+
+            log_shipping_gate_once()
+        except Exception:
+            logging.exception("[start] Failed to log the v0.3 autonomy gate")
         for persona_id in list(self.personas.keys()):
             try:
                 self.ensure_autonomy_for(persona_id)
@@ -1191,9 +1199,12 @@ class SAIVerseManager(
         #    (同 key 上書きなので二重発火しない。過去時刻は即時扱い —
         #    起床済みの一日を再起動後に続きから駆動する)。自律 OFF のペルソナは
         #    再開 (自律 ON 化) 後の watchdog が拾う。
+        #    判定は autonomy_wiring.is_autonomy_on 一本 — v0.3 の止め具が効いて
+        #    いる間はここも走らない (autonomous_behavior_v3.md §11)。
         try:
-            persona = self.personas.get(persona_id)
-            if persona is not None and bool(getattr(persona, "autonomy_enabled", False)):
+            from saiverse.autonomy_wiring import is_autonomy_on
+
+            if is_autonomy_on(self, persona_id):
                 from saiverse.day_plan import reschedule_pending_slots
 
                 # downtime_recovery: ここはプロセス起動時の再確立 — サーバーが
@@ -1441,12 +1452,16 @@ class SAIVerseManager(
     # ------------------------------------------------------------------
 
     def ensure_autonomy_for(self, persona_id: str) -> None:
-        """指定ペルソナの AutonomyManager を AUTONOMY_ENABLED に同期する。
+        """指定ペルソナの AutonomyManager を自律ゲートに同期する。
 
-        AUTONOMY_ENABLED=True のみ定期発火 ON。False なら起動しない。
-        既に起動中で False になった場合は停止する。
+        自律ゲート (``autonomy_wiring.is_autonomy_on``) が True のときだけ
+        watchdog tick を起動する。False なら起動せず、既に起動中なら停止する。
+        ゲートは AUTONOMY_ENABLED に v0.3 の止め具を掛けたもの — 止め具が効いて
+        いる間は AutonomyManager が 1 本も立たない
+        (autonomous_behavior_v3.md §11)。
         """
         from saiverse.autonomy_manager import AutonomyManager
+        from saiverse.autonomy_wiring import is_autonomy_on
 
         # 起動前 (start() 前) は AutonomyManager スレッドを立てない。起動時の全 ON
         # ペルソナぶんは start() がまとめて同期する。動的作成 / Blueprint 経路は
@@ -1461,7 +1476,7 @@ class SAIVerseManager(
         if persona is None:
             return
 
-        enabled = bool(getattr(persona, "autonomy_enabled", False))
+        enabled = is_autonomy_on(self, persona_id)
         am = self._autonomy_managers.get(persona_id)
 
         if enabled:

@@ -1869,6 +1869,12 @@ class SEARuntime:
         if persona is None:
             LOGGER.debug("[keepalive] persona not found: %s", persona_id)
             return False
+        # ⚠️ ここは意図的に autonomy_wiring.is_autonomy_on (v0.3 の止め具つき
+        # ゲート) を通さない。この分岐は「駆動するか」ではなく「セッションが
+        # 閉じた瞬間か」の判定で、通すと止め具が効いている間ずっとスルース
+        # (セッションクローズ採取) が撃たれ続ける — 止め具が止めるのは駆動だけで、
+        # 会話・スルース・キャッシュ経済は v0.3 でも生きている
+        # (autonomous_behavior_v3.md §11.1)。
         if not bool(getattr(persona, "autonomy_enabled", False)):
             LOGGER.debug(
                 "[keepalive] skipped (persona=%s autonomy disabled)", persona_id,
