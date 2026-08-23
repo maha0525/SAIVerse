@@ -5,7 +5,7 @@
 
 REST API 全エンドポイントの一覧（自動生成）。すべて `/api` 配下にマウントされる。
 
-**エンドポイント数**: 349（tag グループ: 25）
+**エンドポイント数**: 346（tag グループ: 25）
 
 ## addon
 
@@ -268,9 +268,6 @@ REST API 全エンドポイントの一覧（自動生成）。すべて `/api` 
 | POST | `/api/people/{persona_id}/debug/memopedia-conversion/preview` | 判断を織り込んだ下見。 |
 | POST | `/api/people/{persona_id}/debug/memopedia-conversion/revert` | 変換を丸ごと取り消す。 |
 | GET | `/api/people/{persona_id}/debug/memopedia-conversion/runs` | 取り消せる変換の一覧 (新しい順)。 |
-| GET | `/api/people/{persona_id}/debug/scheduler` | タイマーの稼働状態を返す. |
-| POST | `/api/people/{persona_id}/debug/scheduler` | タイマー制御. autonomy (per-persona) / manual_mode (per-persona の会話沈黙タイマー停止). |
-| POST | `/api/people/{persona_id}/debug/wrap-up-conversation` | 沈黙タイマー相当を即時発火 (会話状態の解除)。 |
 | GET | `/api/people/{persona_id}/experience-ledger` | 台帳の索引 — カテゴリごとにグループ化した棚の一覧 (統計付き)。 |
 | GET | `/api/people/{persona_id}/experience-ledger/{page_id}` | ページを開く = 動的合成 (fragment / 関与あらすじの履歴 / 共起ページ)。 |
 | POST | `/api/people/{persona_id}/import/extension` | Import Chrome extension export (JSON or Markdown) in background. |

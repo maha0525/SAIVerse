@@ -1,11 +1,9 @@
-"""自律稼働デバッグコントローラー API.
+"""デバッグコントローラー API.
 
 設計: docs/intent/persona_cognition/debug_controller.md
 
-UC-2「割り込みと復帰」等の検証で、自律稼働のタイマー
-(AutonomyManager watchdog / 会話の沈黙タイマー 30分) を無視して手動で
-ステップ実行する。発火系は LLM 呼び出しを伴うため別スレッドで投げ、
-API をブロックしない。
+ペルソナ設定画面から手で叩ける保守操作の口。現在は Embedding の一括生成と
+Memopedia の本文 → Fragment 変換を提供する。
 
 NOTE: 廃止機構の no-op エンドポイント (fire-meta-judgment / fire-subline-pulse /
 scheduler.subline) は 2026-08-14 に削除した。残していた理由は「UI 互換」だったが、
@@ -13,10 +11,16 @@ scheduler.subline) は 2026-08-14 に削除した。残していた理由は「U
 口だけが残る形になっていた。旧 SubLineScheduler は自律行動 v2 で
 (intent autonomous_behavior_v2.md §9.3)、v1 メタ判断は Track 撤廃 順序①で
 (track_retirement.md §7.4) それぞれ退役済み。
+
+NOTE: 2026-08-23 (まはーの実機検証) に ``wrap-up-conversation`` と
+``GET/POST scheduler`` (autonomy 切替 / 完全手動モード) を削除した。会話終了判断は
+v3 で退役し (autonomous_behavior_v3.md §8/§13.3) 会話は沈黙タイマーだけで閉じる。
+Autonomy 系は v0.3 の止め具 (``saiverse/autonomy_wiring.py`` の
+``AUTONOMOUS_DRIVING_SHIPPED = False``、autonomous_behavior_v3.md §11.1) で
+判断点・見張り・コマが発火しないため、切り替えても効果が無かった。
 """
 import logging
 import sqlite3
-import threading
 from contextlib import contextmanager
 from typing import Dict, Optional
 
@@ -30,83 +34,9 @@ LOGGER = logging.getLogger(__name__)
 router = APIRouter()
 
 
-class SchedulerControlRequest(BaseModel):
-    autonomy: Optional[bool] = None
-    manual_mode: Optional[bool] = None
-
-
 class DebugActionResponse(BaseModel):
     success: bool
     message: str
-
-
-def _run_in_background(fn, *args, **kwargs) -> None:
-    """発火系を別スレッドで投げて API をブロックしない."""
-    def _target():
-        try:
-            fn(*args, **kwargs)
-        except Exception:
-            LOGGER.exception(
-                "[debug] background fire failed: %s", getattr(fn, "__name__", fn)
-            )
-    threading.Thread(target=_target, name="DebugFire", daemon=True).start()
-
-
-@router.post("/{persona_id}/debug/wrap-up-conversation", response_model=DebugActionResponse)
-def wrap_up_conversation(persona_id: str, manager=Depends(get_manager)):
-    """沈黙タイマー相当を即時発火 (会話状態の解除)。
-
-    本番のタイムアウト経路
-    (``saiverse.user_conversation.handle_conversation_timeout``) をそのまま
-    即時に呼ぶ。
-
-    **開いている会話があるときだけ撃つ**。切り上げる会話が実在しないまま撃つと、
-    存在しない会話の帳簿処理が走る (2026-08-14 Codex 指摘 F5)。
-    """
-    from saiverse.user_conversation import (
-        get_open_conversation,
-        handle_conversation_timeout,
-    )
-
-    open_conversation = get_open_conversation(manager, persona_id)
-    if open_conversation is None:
-        raise HTTPException(
-            status_code=409,
-            detail="開いている会話がありません (会話は既に終了しています)",
-        )
-
-    # 検証した会話そのものを背景処理へ渡す。ここは同期検証 → 背景発火なので、
-    # 間に自然タイムアウトや別の切り上げが会話を閉じ (さらに新しい会話を開き)
-    # うる。渡さないと、発火側は「いま開いている会話」を無条件に終わらせ、
-    # 別の会話 / 存在しない会話を閉じる (2026-08-14 Codex 二巡目)。
-    _run_in_background(
-        handle_conversation_timeout, manager, persona_id,
-        expected_conversation_id=open_conversation.get("conversation_id"),
-    )
-    return DebugActionResponse(
-        success=True,
-        message=(
-            "会話を切り上げました (沈黙タイマーの即時発火 "
-            f"conversation={open_conversation.get('conversation_id')})"
-        ),
-    )
-
-
-@router.get("/{persona_id}/debug/scheduler")
-def get_scheduler_status(persona_id: str, manager=Depends(get_manager)):
-    """タイマーの稼働状態を返す."""
-    autonomy_state = "stopped"
-    ams = getattr(manager, "_autonomy_managers", None)
-    if ams and persona_id in ams:
-        try:
-            autonomy_state = ams[persona_id].get_status().get("state", "unknown")
-        except Exception:
-            autonomy_state = "error"
-    manual_personas = getattr(manager, "_debug_manual_mode_personas", set())
-    return {
-        "autonomy_state": autonomy_state,
-        "manual_mode": persona_id in manual_personas,
-    }
 
 
 @router.post("/{persona_id}/debug/generate-embeddings", response_model=DebugActionResponse)
@@ -156,67 +86,6 @@ def generate_embeddings(persona_id: str, manager=Depends(get_manager)):
         success=True,
         message=f"Embedding 生成完了: Chronicle={n_chr}, Pages={n_page}, Fragments={n_frag}",
     )
-
-
-def _get_or_create_autonomy(persona_id: str, manager):
-    """このペルソナの AutonomyManager を取り出す (無ければ作る)。
-
-    束 6c (2026-08-22) で ``api/routes/people/autonomy.py`` (自律行動マネージャーの
-    操作 API) を削除したので、唯一の残った消費者であるデバッグ操作面へ引き取った。
-    本番の起動・停止は ``SAIVerseManager.ensure_autonomy_for`` が
-    ``AUTONOMY_ENABLED`` に同期して行う。
-    """
-    from saiverse.autonomy_manager import AutonomyManager
-
-    if not hasattr(manager, "_autonomy_managers"):
-        manager._autonomy_managers = {}
-    if persona_id not in manager._autonomy_managers:
-        manager._autonomy_managers[persona_id] = AutonomyManager(
-            persona_id=persona_id, manager=manager,
-        )
-    return manager._autonomy_managers[persona_id]
-
-
-@router.post("/{persona_id}/debug/scheduler", response_model=DebugActionResponse)
-def control_scheduler(
-    persona_id: str,
-    request: SchedulerControlRequest,
-    manager=Depends(get_manager),
-):
-    """タイマー制御. autonomy (per-persona) / manual_mode (per-persona の会話沈黙タイマー停止)."""
-    msgs = []
-
-    if request.autonomy is not None:
-        am = _get_or_create_autonomy(persona_id, manager)
-        if request.autonomy:
-            am.start()
-            msgs.append("AutonomyManager 開始")
-        else:
-            am.stop()
-            msgs.append("AutonomyManager 停止")
-
-    if request.manual_mode is not None:
-        from saiverse.user_conversation import (
-            arm_conversation_timeout,
-            cancel_conversation_timeout,
-            get_open_conversation,
-        )
-
-        manual_personas = manager._debug_manual_mode_personas
-        if request.manual_mode:
-            manual_personas.add(persona_id)
-            cancel_conversation_timeout(manager, persona_id)
-            msgs.append("完全手動モード ON (会話の沈黙タイマー停止)")
-        else:
-            manual_personas.discard(persona_id)
-            # 会話が開いているペルソナだけ張り直す (閉じた会話へ張ると空撃ちになる)。
-            if get_open_conversation(manager, persona_id) is not None:
-                arm_conversation_timeout(manager, persona_id)
-            msgs.append("完全手動モード OFF")
-
-    if not msgs:
-        return DebugActionResponse(success=False, message="制御対象が指定されていません")
-    return DebugActionResponse(success=True, message=" / ".join(msgs))
 
 
 # ---------------------------------------------------------------------------
