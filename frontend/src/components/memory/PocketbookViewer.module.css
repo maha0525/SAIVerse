@@ -1,0 +1,239 @@
+/* 手帳 / タスク帳の読み口。配色は globals.css のセマンティック変数だけを使い、
+   ライト / ダーク両テーマに追従する (ハードコード色はエラー文字色のみ)。
+   本文はペルソナ本人の言葉なので切り詰めず、長ければ折り返す。 */
+
+.container {
+    height: 100%;
+    width: 100%;
+    overflow-y: auto;
+    overflow-x: hidden;
+    padding: 1rem 1.25rem;
+    color: var(--text-primary);
+    box-sizing: border-box;
+}
+
+.header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 0.9rem;
+    color: var(--text-secondary);
+    padding-bottom: 0.75rem;
+    border-bottom: 1px solid var(--border-color);
+    margin-bottom: 0.75rem;
+}
+
+.notice {
+    padding: 1rem 0;
+    color: var(--text-secondary);
+    font-size: 0.9rem;
+}
+
+.error {
+    padding: 1rem 0;
+    color: #e5484d;
+    font-size: 0.9rem;
+}
+
+.section {
+    margin-bottom: 1.5rem;
+}
+
+.sectionHeader {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin-bottom: 0.5rem;
+}
+
+.sectionTitle {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin: 0 0 0.5rem;
+    font-size: 0.92rem;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.sectionHeader .sectionTitle {
+    margin-bottom: 0;
+}
+
+.toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 0.82rem;
+    color: var(--text-secondary);
+    cursor: pointer;
+    user-select: none;
+}
+
+.toggle input {
+    cursor: pointer;
+    accent-color: var(--accent-primary);
+}
+
+.emptyNote {
+    font-size: 0.82rem;
+    color: var(--text-secondary);
+    padding: 0.35rem 0;
+}
+
+/* ---- アクティビティと手帳 ---- */
+
+.activityList,
+.memoList,
+.taskList {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.activityCard {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    padding: 0.6rem 0.8rem;
+    max-width: 100%;
+    box-sizing: border-box;
+}
+
+/* 閉じたアクティビティは歴史として薄く出す (行は消さない)。 */
+.activityClosed {
+    opacity: 0.62;
+}
+
+.activityHead {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-bottom: 0.45rem;
+}
+
+.activityName {
+    font-size: 0.95rem;
+    font-weight: 600;
+    min-width: 0;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+    max-width: 100%;
+}
+
+.badge {
+    flex-shrink: 0;
+    font-size: 0.72rem;
+    color: var(--text-primary);
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border-color);
+    border-radius: 999px;
+    padding: 1px 9px;
+    white-space: nowrap;
+}
+
+.badgeMuted {
+    flex-shrink: 0;
+    font-size: 0.72rem;
+    color: var(--text-secondary);
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border-color);
+    border-radius: 999px;
+    padding: 1px 9px;
+    white-space: nowrap;
+}
+
+.memoList {
+    gap: 4px;
+}
+
+.memoItem {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    flex-wrap: wrap;
+    padding: 0.3rem 0.1rem;
+    font-size: 0.86rem;
+    line-height: 1.55;
+    border-top: 1px dashed var(--border-color);
+    max-width: 100%;
+}
+
+.memoDate {
+    flex-shrink: 0;
+    font-size: 0.76rem;
+    color: var(--text-secondary);
+    font-variant-numeric: tabular-nums;
+}
+
+.memoKind {
+    flex-shrink: 0;
+    font-size: 0.72rem;
+    border-radius: 999px;
+    padding: 1px 8px;
+    border: 1px solid var(--border-color);
+    white-space: nowrap;
+}
+
+.memoKindWant {
+    color: var(--accent-primary);
+    background: var(--bg-tertiary);
+}
+
+.memoKindDid {
+    color: var(--text-secondary);
+    background: var(--bg-tertiary);
+}
+
+.memoText {
+    flex: 1;
+    min-width: 0;
+    white-space: pre-wrap;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+    max-width: 100%;
+}
+
+/* ---- 約束・依頼 (タスク帳) ---- */
+
+.taskItem {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    padding: 0.55rem 0.8rem;
+    max-width: 100%;
+    box-sizing: border-box;
+}
+
+.taskContent {
+    font-size: 0.9rem;
+    line-height: 1.55;
+    white-space: pre-wrap;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+    max-width: 100%;
+}
+
+.taskMeta {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+.taskMetaItem {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 0.76rem;
+    color: var(--text-secondary);
+}

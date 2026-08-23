@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { X, MessageSquare, Download, Book, Bug, Layers, Activity, Anchor, Footprints } from 'lucide-react';
+import { X, MessageSquare, Download, Book, Bug, Layers, Activity, Anchor, Footprints, Notebook } from 'lucide-react';
 import styles from './MemoryModal.module.css';
 import MemoryBrowser from './memory/MemoryBrowser';
 import MemoryImport from './memory/MemoryImport';
@@ -8,6 +8,7 @@ import MemoryRecall from './memory/MemoryRecall';
 import CoreMemoryScene from './memory/CoreMemoryScene';
 import ArasujiViewer from './memory/ArasujiViewer';
 import ExperienceLedgerViewer from './memory/ExperienceLedgerViewer';
+import PocketbookViewer from './memory/PocketbookViewer';
 import PulseTimelineViewer from './memory/PulseTimelineViewer';
 import ModalOverlay from './common/ModalOverlay';
 
@@ -18,7 +19,7 @@ interface MemoryModalProps {
     personaName?: string;
 }
 
-type Tab = 'browser' | 'core_memory' | 'arasuji' | 'memopedia' | 'experience' | 'pulse_timeline' | 'import' | 'debug';
+type Tab = 'browser' | 'core_memory' | 'pocketbook' | 'arasuji' | 'memopedia' | 'experience' | 'pulse_timeline' | 'import' | 'debug';
 
 export default function MemoryModal({ isOpen, onClose, personaId, personaName }: MemoryModalProps) {
     const [activeTab, setActiveTab] = useState<Tab>('browser');
@@ -49,6 +50,16 @@ export default function MemoryModal({ isOpen, onClose, personaId, personaName }:
                     >
                         <Anchor size={16} style={{ display: 'inline', marginRight: 8, verticalAlign: 'text-bottom' }} />
                         コア記憶
+                    </button>
+                    {/* 手帳 (autonomous_behavior_v3.md §13)。ペルソナが自分で書く
+                        アクティビティ・メモと、引き受けている約束 (タスク帳) の
+                        読み口。v0.3 は読むだけ。 */}
+                    <button
+                        className={`${styles.tab} ${activeTab === 'pocketbook' ? styles.activeTab : ''}`}
+                        onClick={() => setActiveTab('pocketbook')}
+                    >
+                        <Notebook size={16} style={{ display: 'inline', marginRight: 8, verticalAlign: 'text-bottom' }} />
+                        手帳
                     </button>
                     <button
                         className={`${styles.tab} ${activeTab === 'arasuji' ? styles.activeTab : ''}`}
@@ -100,6 +111,7 @@ export default function MemoryModal({ isOpen, onClose, personaId, personaName }:
                 <div className={styles.content}>
                     {activeTab === 'browser' && <MemoryBrowser personaId={personaId} />}
                     {activeTab === 'core_memory' && <CoreMemoryScene personaId={personaId} />}
+                    {activeTab === 'pocketbook' && <PocketbookViewer personaId={personaId} />}
                     {activeTab === 'arasuji' && <ArasujiViewer personaId={personaId} />}
                     {activeTab === 'memopedia' && <MemopediaViewer personaId={personaId} />}
                     {activeTab === 'experience' && <ExperienceLedgerViewer personaId={personaId} />}

@@ -124,11 +124,14 @@ api/
 │   ├── addon*.py     #   アドオン（catalog / actions / events）
 │   ├── admin.py      #   管理機能
 │   ├── people/       #   ペルソナ別（記憶・想起・スケジュール・デバッグ等のサブパッケージ）
+│   │   └── pocketbook.py  #     手帳（アクティビティ + メモ）とタスク帳の読み口（読み取り専用）
 │   └── ...
 └── utils/
 ```
 
 実在するルートの一覧は自動生成の [api-endpoints.md](../reference/api-endpoints.md) が正（この木は入口の説明で、網羅ではない）。
+
+`people/pocketbook.py` の画面側の相方は `frontend/src/components/memory/PocketbookViewer.tsx`（メモリタブの「手帳」節）。v0.3 では両方とも読むだけで、訂正の口は持たない（[autonomous_behavior_v3.md](../intent/autonomous_behavior_v3.md) §13.2.1）。
 
 ### scripts/
 

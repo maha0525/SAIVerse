@@ -5,7 +5,7 @@
 
 REST API 全エンドポイントの一覧（自動生成）。すべて `/api` 配下にマウントされる。
 
-**エンドポイント数**: 347（tag グループ: 25）
+**エンドポイント数**: 349（tag グループ: 25）
 
 ## addon
 
@@ -311,6 +311,7 @@ REST API 全エンドポイントの一覧（自動生成）。すべて `/api` 
 | POST | `/api/people/{persona_id}/meta-judgment/bulk-delete` | Delete multiple meta_judgment_log rows in one request. |
 | DELETE | `/api/people/{persona_id}/meta-judgment/{judgment_id}` | Delete a single meta_judgment_log row owned by ``persona_id``. |
 | POST | `/api/people/{persona_id}/organize-memory` | 手動の記憶整理 — 残す量より古い側を今すぐあらすじに畳む。 |
+| GET | `/api/people/{persona_id}/pocketbook` | 手帳を読む — アクティビティごとにメモを日付降順で束ねて返す。 |
 | GET | `/api/people/{persona_id}/pulse-logs` | List pulse_id summaries with pagination (newest first). |
 | GET | `/api/people/{persona_id}/pulse-logs/{pulse_id}` | Get all log entries for a specific pulse. |
 | GET | `/api/people/{persona_id}/pulse-timeline` | messages を pulse_id でグルーピングした Pulse サマリ一覧 (新しい順)。 |
@@ -329,6 +330,7 @@ REST API 全エンドポイントの一覧（自動生成）。すべて `/api` 
 | DELETE | `/api/people/{persona_id}/schedules/{schedule_id}` | Delete a schedule. |
 | POST | `/api/people/{persona_id}/schedules/{schedule_id}/toggle` | Toggle schedule enabled status. |
 | GET | `/api/people/{persona_id}/storage-layers` | Return a unified view of the 7-layer storage for one persona. |
+| GET | `/api/people/{persona_id}/task-book` | タスク帳の open な一件を作成順に返す (読み取り専用)。 |
 | GET | `/api/people/{persona_id}/threads` | List all conversation threads for a persona. |
 | DELETE | `/api/people/{persona_id}/threads/{thread_id}` | Delete a thread. |
 | PUT | `/api/people/{persona_id}/threads/{thread_id}/activate` | Set a thread as the active thread for the persona. |

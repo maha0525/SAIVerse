@@ -10,6 +10,7 @@ from . import pulse_logs, memory_notes, working_memory
 from . import storage_layers, cache_status, context_status, debug, pulse_timeline
 from . import realtime_spell, core_memory, life
 from . import experience_ledger
+from . import pocketbook
 
 router = APIRouter()
 
@@ -62,3 +63,4 @@ router.include_router(realtime_spell.router, tags=["people"])
 router.include_router(core_memory.router, tags=["people"])
 router.include_router(life.router, tags=["people"])
 router.include_router(experience_ledger.router, tags=["people"])
+router.include_router(pocketbook.router, tags=["people"])
