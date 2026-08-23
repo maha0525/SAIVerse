@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { Loader2, ChevronLeft, BookOpen, Layers, Trash2, Play, Settings, Square, Edit2, Save, X } from 'lucide-react';
 import styles from './ArasujiViewer.module.css';
 import ModalOverlay from '../common/ModalOverlay';
+import ContextVolumeBar, { ContextStatus, canDrawContextVolumeBar } from '../common/ContextVolumeBar';
 
 interface ArasujiEntry {
     id: string;
@@ -58,6 +59,11 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
 
     // Generation state
     const [showGenerateModal, setShowGenerateModal] = useState(false);
+    // 確認窓で見せる送信量 (GET /api/people/{id}/context-status)。手動の畳みは
+    // 「今の量 > 残す量」でなければ何もしない (sea/session_lifecycle.py の
+    // run_manual_compaction が noop を返す) ので、押す前に判断材料を出す。
+    const [contextStatus, setContextStatus] = useState<ContextStatus | null>(null);
+    const [contextStatusError, setContextStatusError] = useState(false);
     const [generationJob, setGenerationJob] = useState<{
         jobId: string;
         status: string;
@@ -304,6 +310,88 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
     // 旧設定 (最大件数 / 日時 / Memopedia) と全量前提のコスト見積もりは廃止。
     const openGenerateModal = () => {
         setShowGenerateModal(true);
+    };
+
+    // 確認窓を開くたびに送信量を取り直す (水位はモデル依存で、会話でも動く)。
+    // ChatOptions の「データ送信量の管理」と同じ読み方 — 前の値は即座に消して、
+    // 取得に失敗したときに古い数字を出し続けないようにする。
+    useEffect(() => {
+        setContextStatus(null);
+        setContextStatusError(false);
+        if (!showGenerateModal || !personaId) return;
+        let cancelled = false;
+        (async () => {
+            try {
+                const res = await fetch(`/api/people/${encodeURIComponent(personaId)}/context-status`);
+                if (cancelled) return;
+                if (!res.ok) {
+                    setContextStatusError(true);
+                    return;
+                }
+                const data = await res.json();
+                if (!cancelled) setContextStatus(data);
+            } catch (e) {
+                console.error('Failed to fetch context status', e);
+                if (!cancelled) setContextStatusError(true);
+            }
+        })();
+        return () => { cancelled = true; };
+    }, [showGenerateModal, personaId]);
+
+    // 畳めるか = run_manual_compaction が noop を返さない条件 (今の量 > 残す量)。
+    // 読めなかったとき・水位を持たないモデル・起点未確立は「畳めない」に倒す
+    // (空振りの実行をさせない)。
+    const canFold = !!contextStatus && contextStatus.metabolism
+        && contextStatus.presented_chars != null && contextStatus.target_chars != null
+        && contextStatus.presented_chars > contextStatus.target_chars;
+
+    // 実行できない理由 (ボタンの tooltip)。本文は確認窓の中に出しているので、
+    // ここは同じ理由を短く言い直したものにする。
+    const generateDisabledReason = (): string | undefined => {
+        if (canFold) return undefined;
+        if (contextStatusError) return '送信量を読めませんでした';
+        if (!contextStatus) return '送信量を確認しています';
+        if (!contextStatus.metabolism) return 'このモデルは水位を持たない設定です';
+        if (contextStatus.measurement_failed) return 'いまの送信量を測定できませんでした';
+        if (contextStatus.presented_chars == null) return 'まだ会話の起点がありません';
+        return '畳むものがありません';
+    };
+
+    // 確認窓の判断材料 (横棒 + いまの状況の一文)。文言は ChatOptions の
+    // 「データ送信量の管理」と揃える。
+    const renderGenerateContextBody = () => {
+        if (contextStatusError) {
+            return <p className={styles.generateStatusText}>送信量を読めませんでした。畳めるかどうか判断できないため、実行できません。</p>;
+        }
+        if (!contextStatus) {
+            return <p className={styles.generateStatusText}>送信量を確認しています...</p>;
+        }
+        if (!contextStatus.metabolism) {
+            return (
+                <p className={styles.generateStatusText}>
+                    このモデル（{contextStatus.model || '未設定'}）は水位を持たない設定のため、履歴の自動整理は行われません。
+                </p>
+            );
+        }
+        const presented = contextStatus.presented_chars;
+        const target = contextStatus.target_chars;
+        if (presented == null || target == null) {
+            return contextStatus.measurement_failed ? (
+                <p className={styles.generateStatusText}>いまの送信量を測定できませんでした。畳めるかどうか判断できないため、実行できません。</p>
+            ) : (
+                <p className={styles.generateStatusText}>まだ会話の起点がありません。最初の会話で確立されます。</p>
+            );
+        }
+        return (
+            <>
+                {canDrawContextVolumeBar(contextStatus) && <ContextVolumeBar status={contextStatus} />}
+                <p className={styles.generateStatusText}>
+                    {canFold
+                        ? `いまの会話は ${presented.toLocaleString()} 文字で、残す量 ${target.toLocaleString()} 文字を超えているぶんが畳まれます。`
+                        : 'いまの会話は残す量以下なので、畳むものがありません。'}
+                </p>
+            </>
+        );
     };
 
     const startGeneration = async () => {
@@ -941,11 +1029,19 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                             古い会話履歴をあらすじ（Chronicle）に畳みます。直近の会話はそのまま残ります。
                             畳む量に応じて軽量モデルの LLM 呼び出しが数回発生します。
                         </p>
+                        <div className={styles.generateContextBox}>
+                            {renderGenerateContextBody()}
+                        </div>
                         <div className={styles.modalActions}>
                             <button className={styles.cancelBtn} onClick={() => setShowGenerateModal(false)}>
                                 キャンセル
                             </button>
-                            <button className={styles.startBtn} onClick={startGeneration}>
+                            <button
+                                className={styles.startBtn}
+                                onClick={startGeneration}
+                                disabled={!canFold}
+                                title={generateDisabledReason()}
+                            >
                                 <Play size={14} />
                                 実行
                             </button>

@@ -3,6 +3,7 @@ import styles from './ChatOptions.module.css';
 import { X, ChevronDown, Star } from 'lucide-react';
 import { formatCost } from '@/lib/formatCost';
 import ModelEditorModal from './settings/ModelEditorModal';
+import ContextVolumeBar, { ContextStatus, canDrawContextVolumeBar } from './common/ContextVolumeBar';
 
 interface RateLimitInfo {
     rpd: number;
@@ -53,18 +54,8 @@ interface CacheStatus {
     cache_setting: string;             // Phase 2: 実効 cache 設定 ("off" | "5m" | "1h")
 }
 
-// 提示コンテキストの現在量と水位 (GET /api/people/{id}/context-status, read-only)
-interface ContextStatus {
-    persona_id: string;
-    model: string | null;
-    metabolism: boolean;              // 実効モデルが水位を持つか
-    low_chars: number | null;         // 最初に読み込む量
-    target_chars: number | null;      // 残す量 (整理後にここへ揃える)
-    high_chars: number | null;        // 上限 (超えたら整理)
-    presented_chars: number | null;   // 現在の提示コンテキスト文字数 (読み戻し後)
-    refill_applied: boolean;
-    measurement_failed: boolean;      // 計測失敗 (null を「起点なし」と読ませない)
-}
+// ContextStatus (GET /api/people/{id}/context-status) の型と横棒の描画は
+// common/ContextVolumeBar に置いてある — Chronicle 生成の確認窓と共有する。
 
 interface ChatOptionsProps {
     isOpen: boolean;
@@ -644,37 +635,10 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
                 </span>
             );
         }
-        const presented = contextStatus.presented_chars;
-        const target = contextStatus.target_chars;
-        const high = contextStatus.high_chars;
-        // バーの右端 = 上限。上限なし (文字数では整理しない) モデルは残す量の 2 倍を目安に描く。
-        const scaleMax = high ?? (target != null ? target * 2 : null);
         return (
             <>
-                {presented != null && scaleMax != null ? (
-                    <>
-                        <div className={styles.contextBar}>
-                            <div
-                                className={styles.contextBarFill}
-                                style={{
-                                    width: `${Math.min(100, (presented / scaleMax) * 100)}%`,
-                                    background: high != null && presented > high ? '#f87171'
-                                        : target != null && presented > target ? '#fbbf24'
-                                        : '#34d399',
-                                }}
-                            />
-                            {target != null && target <= scaleMax && (
-                                <div className={styles.contextBarMarker} style={{ left: `${(target / scaleMax) * 100}%` }} />
-                            )}
-                        </div>
-                        <div className={styles.contextStatRow}>
-                            <span>現在 {presented.toLocaleString()}字{contextStatus.refill_applied ? '（読み戻し後）' : ''}</span>
-                            <span>
-                                残す量 {target != null ? `${target.toLocaleString()}字` : '—'} ／
-                                上限 {high != null ? `${high.toLocaleString()}字` : 'なし'}
-                            </span>
-                        </div>
-                    </>
+                {canDrawContextVolumeBar(contextStatus) ? (
+                    <ContextVolumeBar status={contextStatus} />
                 ) : contextStatus.measurement_failed ? (
                     <span className={styles.hint}>現在量を測定できませんでした（水位のみ表示しています）。</span>
                 ) : (
