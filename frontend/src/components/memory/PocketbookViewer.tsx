@@ -120,7 +120,7 @@ export default function PocketbookViewer({ personaId }: PocketbookViewerProps) {
             <div className={styles.header}>
                 <Notebook size={16} />
                 <span>
-                    ペルソナが自分で書いている手帳と、引き受けている約束の一覧です。ここでは読むだけで、書き換えはできません。
+                    ペルソナが自分で書いている手帳です。メモ欄と約束の欄があり、ここでは読むだけで、書き換えはできません。
                 </span>
             </div>
 
@@ -133,7 +133,7 @@ export default function PocketbookViewer({ personaId }: PocketbookViewerProps) {
                         <div className={styles.sectionHeader}>
                             <h4 className={styles.sectionTitle}>
                                 <Notebook size={14} />
-                                アクティビティと手帳
+                                メモ欄 (やりたい・やった)
                             </h4>
                             <label className={styles.toggle}>
                                 <input
@@ -193,7 +193,7 @@ export default function PocketbookViewer({ personaId }: PocketbookViewerProps) {
                     <section className={styles.section}>
                         <h4 className={styles.sectionTitle}>
                             <Handshake size={14} />
-                            約束・依頼 (タスク帳)
+                            約束の欄
                         </h4>
                         {tasks.length === 0 ? (
                             <div className={styles.emptyNote}>開いている約束はありません。</div>

@@ -28,6 +28,15 @@ from dataclasses import dataclass
 from typing import List, Optional
 
 #: activities.origin の閉語彙 (§13.6)。
+#:
+#: - ``sluice``: **ペルソナ本人由来** — スルースの採取と、本人が唱える手帳の
+#:   スペル (``pocketbook_write``) の両方がこれ。読み口 UI の表示も
+#:   「ペルソナが書いた」で、区別しているのは「誰が立てたか」であって
+#:   「どの機構を通ったか」ではない (2026-08-23、§13.2.1 でスペルを足したとき
+#:   に語の意味をこちらへ確定させた — 語を増やすと UI の表示も同じ一語に
+#:   潰れるだけで、区別が使われる先が無い)
+#: - ``user``: ユーザーが立てた / ``initial``: キャラクター作成時の初期関心 /
+#:   ``migration``: 既存データからの機械写し
 ACTIVITY_ORIGINS = ("sluice", "user", "initial", "migration")
 
 #: memos.kind の閉語彙 (§13.1)。

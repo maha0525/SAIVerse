@@ -72,7 +72,9 @@ class PocketbookActivity(BaseModel):
     id: int
     name: str
     status: str        # 'open' | 'closed'
-    origin: str        # 'sluice' | 'user' | 'initial' | 'migration'
+    # origin: 'sluice' (ペルソナ本人由来 — スルースの採取と手帳のスペルの両方) |
+    # 'user' | 'initial' | 'migration'
+    origin: str
     born_at: int
     closed_at: Optional[int] = None
     last_memo_date: Optional[str] = None

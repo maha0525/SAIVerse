@@ -290,6 +290,45 @@ def _list_open_activities(persona: Any) -> List[Tuple[int, str]]:
     return [(a.id, a.name) for a in activities]
 
 
+#: メモ種類 (memos.kind) の表示名。プロンプトと適用結果の記録で共用する。
+_MEMO_KIND_LABEL = {"want": "やりたい", "did": "やった"}
+
+
+def _list_today_memos(
+    persona: Any, activities: List[Tuple[int, str]]
+) -> List[Tuple[str, str, str]]:
+    """今日の日付のメモを (種類, アクティビティ名, 本文) で横断に取る。
+
+    目的は重複の抑え: 本人が昼に手帳のスペル (``pocketbook_write``) で書いた
+    「やりたい」を、夜のスルースが文言違いでまた採る並びを減らす。載せるのは
+    **今日の分だけ**なので数行で収まり、プロンプト肥大の管理 (§13.5-6) を
+    崩さない。機械側の重複防止 (:func:`find_memo_by_content`) は同じ本文しか
+    止められないので、供給源をここで塞ぐ。
+
+    アクティビティ一覧 (:func:`_list_open_activities`) の読みを引数で受け、
+    その配下だけを見る (:func:`_read_core_state` と同じく、プロンプトに見せる
+    姿と同じ読みから組む)。読み出しの例外は空一覧へ丸めず送出する
+    (fail-closed) — 空へ丸めると「今日はまだ何も書いていない」と本人へ見せた
+    まま、既に書いたものを再び採らせる。
+    """
+    from sai_memory.memory.pocketbook import list_memos
+    from saiverse import clock
+
+    adapter = getattr(persona, "sai_memory", None)
+    if adapter is None or getattr(adapter, "conn", None) is None:
+        raise SluiceStorageUnavailableError(
+            "memory.db connection is missing; cannot list today's memos"
+        )
+    today = clock.now().date().isoformat()
+    rows: List[Tuple[str, str, str]] = []
+    with adapter._db_lock:
+        for activity_id, name in activities:
+            for memo in list_memos(adapter.conn, activity_id):
+                if memo.date == today:
+                    rows.append((memo.kind, name, memo.text))
+    return rows
+
+
 def _list_open_tasks(lifecycle: Any, persona: Any) -> List[Dict[str, Any]]:
     """open なタスク帳の一件一覧 (task_id / content / due_at / revision)。
 
@@ -395,13 +434,16 @@ def _build_sluice_prompt(
     total_chars: int,
     *,
     span_new_count: Optional[int],
+    today_memos: Optional[List[Tuple[str, str, str]]] = None,
 ) -> str:
     """<system> 包みの注入プロンプトを組む (keepalive の末尾通知と同じ面)。
 
     ``core_memories`` / ``total_chars`` は :func:`_read_core_state` の読みを
     呼び出し元から受け取る (CAS スナップショットと同じ姿を見せるため)。
     ``span_new_count`` は今回の担当範囲の通数 (None = 窓全体) — 手帳の節で
-    対象範囲を明示するのに使う (:func:`_scope_sentence`)。
+    対象範囲を明示するのに使う (:func:`_scope_sentence`)。``today_memos`` は
+    :func:`_list_today_memos` の読み (今日すでに書いたメモ) — 無ければその節を
+    出さない。
     """
     from builtin_data.tools._core_memory_common import resolve_core_memory_budget
 
@@ -429,7 +471,17 @@ def _build_sluice_prompt(
     if open_tasks:
         task_block = "\n".join(_format_task_line(t) for t in open_tasks)
     else:
-        task_block = "（開いているタスクはありません）"
+        task_block = "（開いている約束はありません）"
+
+    # 今日すでに手帳に書いたもの (本人がスペルで書いた分を含む)。無ければ節ごと
+    # 出さない — 空の見出しは「今日は何も書いていない」の主張になる。
+    if today_memos:
+        today_block = "- 今日すでに手帳に書いたもの:\n" + "\n".join(
+            f"  - [{_MEMO_KIND_LABEL.get(kind, kind)}] {name}: {text}"
+            for kind, name, text in today_memos
+        ) + "\n"
+    else:
+        today_block = ""
 
     prompt = (
         "<system>\n"
@@ -443,17 +495,18 @@ def _build_sluice_prompt(
         "  日付を含めてください（例: 2026年6月頃〜 ユーザーは海外赴任中、9月帰国予定）。\n"
         "- 既存のコア記憶と矛盾する新情報（帰国・引っ越しなど。矛盾は update で解消）。\n"
         "\n"
-        "2) 手帳 (want_memos / did_memos):\n"
+        "2) 手帳のメモ欄 (want_memos / did_memos):\n"
         f"- {_scope_sentence(span_new_count)}\n"
         "- この範囲で、やりたいと思ったこと・実際にやったことはありますか?\n"
         "  無ければ空で構いません。あれば、活動の名前（「小説を書く」「絵の練習」\n"
         "  のような粒度。下の一覧にあるものは activity_id で参照）と、今日の中身\n"
         "  一行 (text) で。\n"
+        f"{today_block}"
         "\n"
-        "3) 約束 (promises):\n"
+        "3) 手帳の約束の欄 (promises):\n"
         "- ユーザーとの約束や引き受けた依頼が生まれたり変わったりしていましたか?\n"
         "  無ければ空で構いません。期限が明示されていないなら due は書かないで\n"
-        "  ください（期限を発明しない）。既に下のタスク帳一覧にあるものを再び\n"
+        "  ください（期限を発明しない）。既に下の「手帳の約束の欄」にあるものを再び\n"
         "  add する必要はありません — 内容や期限に変化があれば、その task の ID を\n"
         "  task_ref にして update を使えます。期限が撤回されたときは clear_due で\n"
         "  期限を外せます。\n"
@@ -468,10 +521,10 @@ def _build_sluice_prompt(
         f"### 現在のコア記憶（合計 {total_chars:,} 字 / 目安 {budget:,} 字）\n"
         f"{core_block}\n"
         "\n"
-        "### 開いているアクティビティ（手帳）\n"
+        "### 手帳のメモ欄（開いているアクティビティ）\n"
         f"{activity_block}\n"
         "\n"
-        "### 開いているタスク帳（約束・依頼）\n"
+        "### 手帳の約束の欄（開いている約束・依頼）\n"
         f"{task_block}\n"
         "</system>"
     )
@@ -780,7 +833,7 @@ def _apply_memos(
     applied = 0
     failed = 0
     lines: List[str] = []
-    kind_label = {"want": "やりたい", "did": "やった"}
+    kind_label = _MEMO_KIND_LABEL
 
     with adapter._db_lock:
         conn = adapter.conn
@@ -895,8 +948,13 @@ _DUE_MIN_YEAR = 1970
 _DUE_MAX_YEAR = 9999
 
 
-def _parse_due(raw: str) -> tuple[Optional[int], Optional[str]]:
+def parse_due(raw: str) -> tuple[Optional[int], Optional[str]]:
     """LLM 出力の期限文字列を epoch 秒へ変換する。(epoch, 解釈不能の理由) を返す。
+
+    「期限の文字列をどう読むか」の規則はこの関数**一箇所**が持つ — スルースだけ
+    でなく、本人が唱える手帳のスペル (``pocketbook_write``) も同じ入力形
+    ('YYYY-MM-DD') を同じ意味で読む必要があるため公開している。二箇所に同じ
+    規則を書くと、同じ日付文字列がタスク帳の中で二つの epoch を持つ。
 
     理由が非 None のとき、呼び出し側は**約束を失わない方向**で処理する (まはー
     裁定 2026-08-19 — タスク帳の芯は「失くすことが許されない」): add は期限なしで
@@ -999,7 +1057,7 @@ def _apply_promises(
         op = promise.get("op")
         content = (promise.get("content") or "").strip()
         due_raw = (promise.get("due") or "").strip()
-        due_at, due_error = _parse_due(due_raw)
+        due_at, due_error = parse_due(due_raw)
         if due_error is not None:
             # 約束は失わない (まはー裁定): 期限だけを落とし、記録に明記する。
             LOGGER.warning(
@@ -1742,9 +1800,12 @@ def _call_sluice_llm(
     core_snapshot: Dict[str, str] = {
         str(mem.id): _core_content_hash(mem.content) for mem in core_memories
     }
+    # 今日すでに手帳に書いたもの (本人がスペルで書いた分を含む) — 同じ日の
+    # 再採取を減らすため、アクティビティ一覧と同じ読みの配下から一度で取る。
+    today_memos = _list_today_memos(persona, activities)
     prompt = _build_sluice_prompt(
         persona, activities, open_tasks, core_memories, core_total_chars,
-        span_new_count=span_new_count,
+        span_new_count=span_new_count, today_memos=today_memos,
     )
 
     node_def = SimpleNamespace(id="sluice", memorize=None, speak=False)

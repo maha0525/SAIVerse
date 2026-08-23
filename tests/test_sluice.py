@@ -849,6 +849,33 @@ class SluiceApplyExtensionTest(_AdapterTestBase):
         prompt = client.calls[0]["messages"][-1]["content"]
         self.assertIn("今回は手元の会話全体が対象です", prompt)
 
+    def test_prompt_lists_what_was_already_written_today(self):
+        """⭐ 本人がスペルで書いた今日のメモを載せる (同じ日の再採取を減らす)。"""
+        from sai_memory.memory.pocketbook import add_activity, add_memo
+        from saiverse import clock
+
+        today = clock.now().date().isoformat()
+        with self.adapter._db_lock:
+            act = add_activity(self.adapter.conn, "小説を書く", "user")
+            add_memo(self.adapter.conn, act.id, today, "want", "星を拾う話を書きたい")
+            # 昨日のメモは載らない (載せるのは今日の分だけ)。
+            add_memo(self.adapter.conn, act.id, "2026-01-01", "did", "去年の分")
+
+        _summary, client = self._run(_sluice_result())
+        prompt = client.calls[0]["messages"][-1]["content"]
+        self.assertIn("今日すでに手帳に書いたもの:", prompt)
+        self.assertIn("  - [やりたい] 小説を書く: 星を拾う話を書きたい", prompt)
+        self.assertNotIn("去年の分", prompt)
+
+    def test_prompt_omits_the_today_section_when_nothing_was_written(self):
+        from sai_memory.memory.pocketbook import add_activity
+
+        with self.adapter._db_lock:
+            add_activity(self.adapter.conn, "小説を書く", "user")
+        _summary, client = self._run(_sluice_result())
+        prompt = client.calls[0]["messages"][-1]["content"]
+        self.assertNotIn("今日すでに手帳に書いたもの", prompt)
+
     # -- 冪等: 同じ担当範囲 (span) の再適用が重複しない --------------------
 
     def test_same_span_reapply_is_idempotent(self):
@@ -1249,7 +1276,7 @@ class SluiceApplyExtensionTest(_AdapterTestBase):
     def test_prompt_with_no_open_tasks_shows_placeholder(self):
         _summary, client = self._run(_sluice_result())
         prompt = client.calls[0]["messages"][-1]["content"]
-        self.assertIn("（開いているタスクはありません）", prompt)
+        self.assertIn("（開いている約束はありません）", prompt)
 
     def test_promise_update_to_offered_task_id_succeeds(self):
         """同梱一覧に載る task_id への update は検証を通過して適用される。"""

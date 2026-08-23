@@ -7,7 +7,7 @@ SAIVerse に登録されている全ツールの一覧（自動生成）。概�
 作り方は [開発者ガイド: ツールの追加](../developer-guide/adding-tools.md)、
 平文から呼ぶ Spell 化は [concepts/spell.md](../concepts/spell.md) を参照。
 
-**登録ツール数**: 124（うち Spell 化: 82）
+**登録ツール数**: 126（うち Spell 化: 84）
 
 - `*` 付きの引数は必須。
 - **Spell** 列に表示名があるものは、ペルソナが平文応答から `/spell <名> ...` で呼べる。
@@ -70,6 +70,8 @@ SAIVerse に登録されている全ツールの一覧（自動生成）。概�
 | `move_persona` | Move the active persona to another building. (When called in persona context, persona_id must match the active persona.) | `building_id*`: string, `persona_id`: string | — |
 | `observer_read` | Read the latest observation data from a building fixture's sensor/monitor. Returns cached values — does not trigger n… | `observer_id*`: string, `metric_name`: string | オブザーバー観測値取得 |
 | `pdf_read` | Extract and read text from a PDF document item. Specify page range to read specific pages. Requires pypdf to be insta… | `item_id*`: string, `pages`: string, `max_chars`: integer | — |
+| `pocketbook_open` | 自分の手帳を開いて読みます。手帳には「やりたい・やった」のメモ欄と、「約束」の欄があります。記憶の地図帳（memory_read など）は知っていること・あったことを引く場所で、手帳は自分のやりたいこと・やったこと・約束を書きとめる場… | `activity`: string, `before`: string, `limit`: integer | 手帳を開く |
+| `pocketbook_write` | 自分の手帳に一行書きます。やりたいこと・やったことはメモ欄へ、誰かとの約束や引き受けた頼まれごとは約束の欄へ入ります（kind で選ぶと、どちらの欄に入るかは自動で決まります）。どちらか迷ったら、相手がいるなら約束です。記憶の地図帳（… | `kind*`: string, `text*`: string, `activity`: string, `counterpart`: string, `due`: string | 手帳に書く |
 | `purpose_close` | 目的ノード（task:N）を閉じます。outcome で閉じ方を選びます: completed（やり遂げた）/ cancelled（やらないと決めた）/ dormant（今は続けないが、いつか戻るかもしれない — 休眠）。 | `node_ref*`: string, `outcome`: string, `reason`: string | 目的を閉じる |
 | `purpose_decompose` | 目的ノード（task:N）をステップに分解します。steps 配列の各要素は title（と任意の description）を持つオブジェクトで、既存のステップはすべて置き換えられます。1つのステップの進捗を更新するには purpos… | `node_ref*`: string, `steps*`: array | 目的をステップに分解 |
 | `purpose_step` | 目的ノード（task:N）の中の1ステップの状態とメモを更新します。ステップへの分解（全置換）は purpose_decompose を使ってください。 | `node_ref*`: string, `step_position*`: integer, `status*`: string, `notes`: string, `auto_advance`: boolean | 目的のステップを更新 |

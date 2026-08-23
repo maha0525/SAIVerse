@@ -289,7 +289,8 @@ def add_entry(
 
     Args:
         content: 中身 — 実行の瞬間に再発明が要らない具体さ (指示書)。
-        origin: 出自 ('user' | 'sluice' | 'system' | 'migration' 等)。必須。
+        origin: 出自 ('user' | 'sluice' | 'persona' = 本人が手帳のスペルで書いた |
+            'system' | 'migration' 等)。必須。
         due_at: 期限 (epoch 秒)。**省略 = 期限なし** — 期限のない約束は正当な行。
         counterpart: 相手 ('user' / ペルソナ ID / 'system' 等)。strip され、
             空白のみは None (相手なし) と同じ扱い。
