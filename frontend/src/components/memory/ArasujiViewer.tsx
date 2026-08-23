@@ -60,8 +60,9 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
     // Generation state
     const [showGenerateModal, setShowGenerateModal] = useState(false);
     // 確認窓で見せる送信量 (GET /api/people/{id}/context-status)。手動の畳みは
-    // 「今の量 > 残す量」でなければ何もしない (sea/session_lifecycle.py の
-    // run_manual_compaction が noop を返す) ので、押す前に判断材料を出す。
+    // 「残す量を U (fold_unit_chars) 文字以上超えている」でなければ何もしない
+    // (sea/session_lifecycle.py の run_manual_compaction が noop を返す) ので、
+    // 押す前に判断材料を出す。
     const [contextStatus, setContextStatus] = useState<ContextStatus | null>(null);
     const [contextStatusError, setContextStatusError] = useState(false);
     const [generationJob, setGenerationJob] = useState<{
@@ -338,12 +339,23 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
         return () => { cancelled = true; };
     }, [showGenerateModal, personaId]);
 
-    // 畳めるか = run_manual_compaction が noop を返さない条件 (今の量 > 残す量)。
+    // 畳めるか = 実際に畳みが起きる条件。整理 (sea/eviction_plan.py::plan_eviction)
+    // は「残す量より古い側」を U 文字 (fold_unit_chars) ずつの範囲に刻んで畳むので、
+    // 残す量を超えていても超過が U 未満なら何も畳まれない (backend は noop を返す)。
     // 読めなかったとき・水位を持たないモデル・起点未確立は「畳めない」に倒す
     // (空振りの実行をさせない)。
-    const canFold = !!contextStatus && contextStatus.metabolism
+    const overflowChars = contextStatus
         && contextStatus.presented_chars != null && contextStatus.target_chars != null
-        && contextStatus.presented_chars > contextStatus.target_chars;
+        ? contextStatus.presented_chars - contextStatus.target_chars
+        : null;
+    // fold_unit_chars を返さない古い backend では昨日の判定 (今の量 > 残す量) に落とす。
+    const foldUnitChars = contextStatus?.fold_unit_chars ?? null;
+    const foldUnitKnown = foldUnitChars != null && foldUnitChars > 0;
+    const shortfallChars = foldUnitKnown && overflowChars != null
+        ? foldUnitChars - overflowChars
+        : null;
+    const canFold = !!contextStatus && contextStatus.metabolism && overflowChars != null
+        && (foldUnitKnown ? overflowChars >= foldUnitChars : overflowChars > 0);
 
     // 実行できない理由 (ボタンの tooltip)。本文は確認窓の中に出しているので、
     // ここは同じ理由を短く言い直したものにする。
@@ -354,6 +366,9 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
         if (!contextStatus.metabolism) return 'このモデルは水位を持たない設定です';
         if (contextStatus.measurement_failed) return 'いまの送信量を測定できませんでした';
         if (contextStatus.presented_chars == null) return 'まだ会話の起点がありません';
+        if (foldUnitKnown && overflowChars != null && overflowChars > 0 && shortfallChars != null) {
+            return `整理は ${foldUnitChars.toLocaleString()} 文字ずつ畳むため、あと ${shortfallChars.toLocaleString()} 文字たまるまで畳めません`;
+        }
         return '畳むものがありません';
     };
 
@@ -382,14 +397,23 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                 <p className={styles.generateStatusText}>まだ会話の起点がありません。最初の会話で確立されます。</p>
             );
         }
+        const overflow = presented - target;
+        let statusText: string;
+        if (overflow <= 0) {
+            statusText = 'いまの会話は残す量以下なので、畳むものがありません。';
+        } else if (!foldUnitKnown) {
+            // 古い backend (U を返さない) — 昨日までの言い方に落とす。
+            statusText = `いまの会話は ${presented.toLocaleString()} 文字で、残す量 ${target.toLocaleString()} 文字を超えているぶんが畳まれます。`;
+        } else if (overflow >= foldUnitChars) {
+            const rounds = Math.floor(overflow / foldUnitChars);
+            statusText = `いまの会話は残す量を ${overflow.toLocaleString()} 文字超えていて、古い側から ${foldUnitChars.toLocaleString()} 文字ずつ畳みます（今回は ${rounds.toLocaleString()} 回ぶん）。`;
+        } else {
+            statusText = `いまの会話は残す量を ${overflow.toLocaleString()} 文字超えていますが、整理は ${foldUnitChars.toLocaleString()} 文字ずつ畳むため、あと ${(foldUnitChars - overflow).toLocaleString()} 文字たまるまで畳めません。`;
+        }
         return (
             <>
                 {canDrawContextVolumeBar(contextStatus) && <ContextVolumeBar status={contextStatus} />}
-                <p className={styles.generateStatusText}>
-                    {canFold
-                        ? `いまの会話は ${presented.toLocaleString()} 文字で、残す量 ${target.toLocaleString()} 文字を超えているぶんが畳まれます。`
-                        : 'いまの会話は残す量以下なので、畳むものがありません。'}
-                </p>
+                <p className={styles.generateStatusText}>{statusText}</p>
             </>
         );
     };

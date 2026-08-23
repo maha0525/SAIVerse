@@ -651,6 +651,9 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
                 )}
                 <span className={styles.hint}>
                     会話履歴は始点を固定したまま送られ、上限を超えると古い出来事から順にあらすじへ畳んで「残す量」まで整理します。
+                    {contextStatus.fold_unit_chars != null && contextStatus.fold_unit_chars > 0 && (
+                        `整理は古い側から ${contextStatus.fold_unit_chars.toLocaleString()} 文字ずつ畳むので、残す量をその分だけ超えるまでは畳みません。`
+                    )}
                     畳みすぎて残す量を下回ったときは、次の会話の前に畳んだ範囲を自動で開き直します。
                     水位を変えたいときは、設定のモデル編集から（モデルごとの設定です）。
                 </span>

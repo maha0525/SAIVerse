@@ -31,8 +31,14 @@ def get_context_status(persona_id: str, manager=Depends(get_manager)) -> dict[st
     - ``presented_chars``: 次の user Pulse で実際に送られる提示コンテキストの
       文字数。§15 読み戻しが適用されるならその適用後 (プレビューと一致)。
       anchor 未確立 (まだ会話が始まっていない) や persona 未ロードでは None。
+    - ``fold_unit_chars``: 一次あらすじの標準被覆 U。整理は残す量より古い側を
+      U ずつの範囲に刻んで畳むので、「残す量を超えている」だけでは畳めない
+      (``sea/eviction_plan.py::plan_eviction``)。UI が「実行できるか」を実際の
+      条件と同じ形で判定できるように返す。
     - 一切の行を書かない (resolve は persist_advance=False)。
     """
+    from sai_memory.arasuji.alignment import chronicle_band_budget
+
     details = manager.get_ai_details(persona_id)
     if not details:
         raise HTTPException(status_code=404, detail="Persona not found")
@@ -48,6 +54,7 @@ def get_context_status(persona_id: str, manager=Depends(get_manager)) -> dict[st
         "target_chars": None,         # 残す量 (整理後にここへ揃える)
         "high_chars": None,           # 上限 (超えたら整理が走る)
         "presented_chars": None,      # 現在の提示コンテキスト文字数 (読み戻し後)
+        "fold_unit_chars": chronicle_band_budget(),  # 一度に畳む単位 U (env 由来の定数)
         "refill_applied": False,      # presented_chars が §15 読み戻し込みの値か
         "measurement_failed": False,  # 計測が失敗した (None を「起点なし」と読ませない)
     }

@@ -11,6 +11,9 @@ export interface ContextStatus {
     target_chars: number | null;      // 残す量 (整理後にここへ揃える)
     high_chars: number | null;        // 上限 (超えたら整理)
     presented_chars: number | null;   // 現在の提示コンテキスト文字数 (読み戻し後)
+    // 一度に畳む単位 U (整理は残す量より古い側を U 文字ずつ刻んで畳む)。
+    // 古い backend は返さないので optional — 無いときは呼び出し側が旧判定に落とす。
+    fold_unit_chars?: number | null;
     refill_applied: boolean;
     measurement_failed: boolean;      // 計測失敗 (null を「起点なし」と読ませない)
 }

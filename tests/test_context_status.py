@@ -135,6 +135,30 @@ def test_bootstrap_is_not_flagged_as_failure():
     assert status["measurement_failed"] is False
 
 
+def test_fold_unit_chars_is_reported_for_the_fold_decision():
+    """「畳めるか」の判定に要る U (一次あらすじの標準被覆) を必ず返す。
+
+    整理は残す量より古い側を U ずつ刻んで畳むので、「残す量を超えている」だけ
+    では畳めない。UI が実際の条件で実行可否を判定できるよう、水位を持たない
+    モデルでも同じ欄を返す (欄の有無で分岐させない)。
+    """
+    from sai_memory.arasuji.alignment import chronicle_band_budget
+
+    unit = chronicle_band_budget()
+    assert unit > 0
+
+    persona = SimpleNamespace(persona_id=PERSONA_ID, model="model-a")
+    lc = _lifecycle(presented=[_msg("m1", 2500)])
+    status = get_context_status(PERSONA_ID, _manager(persona=persona, lifecycle=lc))
+    assert status["fold_unit_chars"] == unit
+
+    no_watermarks = get_context_status(
+        PERSONA_ID, _manager(persona=persona, lifecycle=_lifecycle(watermarks=None)),
+    )
+    assert no_watermarks["metabolism"] is False
+    assert no_watermarks["fold_unit_chars"] == unit
+
+
 def test_watermark_resolution_failure_is_500():
     """水位解決の失敗を「水位を持たないモデル」(正常) に偽装しない。"""
     persona = SimpleNamespace(persona_id=PERSONA_ID, model="model-a")
