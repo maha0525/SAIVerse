@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -638,7 +639,18 @@ def _add_l1_entry(conn, source_ids):
 
 
 def _adapter(conn):
-    return SimpleNamespace(conn=conn, is_ready=lambda: True)
+    # _db_lock は sluice のパンマーカー読み書き (_load_pan_marker /
+    # _save_pan_marker) が使う。機構1 の頭打ち判定がそれを通るので、実物と
+    # 同じく再入可能ロックを持たせる。
+    return SimpleNamespace(
+        conn=conn, is_ready=lambda: True, _db_lock=threading.RLock(),
+    )
+
+
+def _set_pan_marker(persona, last_id):
+    """スルースが ``last_id`` まで見た状態にする (永続 + persona 属性)。"""
+    from sea.sluice import _save_pan_marker
+    _save_pan_marker(persona, last_id)
 
 
 def test_frontier_anchor_id_derivation(tmp_path):
@@ -702,6 +714,7 @@ def test_resolve_cold_self_anchor_advances_to_frontier(session_factory, tmp_path
     persona = SimpleNamespace(
         persona_id=PERSONA_ID, model="model-a", sai_memory=_adapter(conn),
     )
+    _set_pan_marker(persona, "m4")  # スルースは最前線より先まで見ている
     assert lc.resolve_metabolism_anchor(persona) == ("m3", "frontier")
 
     row = lc.load_anchor_entry(PERSONA_ID, "model-a")
@@ -746,6 +759,7 @@ def test_resolve_cold_advance_not_persisted_in_preview(session_factory, tmp_path
     persona = SimpleNamespace(
         persona_id=PERSONA_ID, model="model-a", sai_memory=_adapter(conn),
     )
+    _set_pan_marker(persona, "m4")
     assert lc.resolve_metabolism_anchor(
         persona, persist_advance=False,
     ) == ("m3", "frontier")
@@ -825,6 +839,7 @@ def test_resolve_cold_advance_preserves_live_folds(session_factory, tmp_path):
     persona = SimpleNamespace(
         persona_id=PERSONA_ID, model="model-a", sai_memory=_adapter(conn),
     )
+    _set_pan_marker(persona, "m6")
 
     assert lc.resolve_metabolism_anchor(persona) == ("m3", "frontier")
 
@@ -856,10 +871,193 @@ def test_resolve_stays_at_self_anchor_when_advance_write_fails(session_factory, 
     persona = SimpleNamespace(
         persona_id=PERSONA_ID, model="model-a", sai_memory=_adapter(conn),
     )
+    _set_pan_marker(persona, "m4")
 
     with patch.object(lc, "_advance_anchor_preserving_folds", return_value=False):
         assert lc.resolve_metabolism_anchor(persona) == ("m1", "self")
     assert lc.load_anchor_entry(PERSONA_ID, "model-a")["anchor_id"] == "m1"
+    conn.close()
+
+
+# ---------------------------------------------------------------------------
+# 起点はスルースのパンマーカーを越えない (2026-08-23、v3 §13.3 との整合)
+# ---------------------------------------------------------------------------
+
+
+def test_get_next_message_id(tmp_path):
+    """正典順で「その次」を引く (パンマーカーの次 = 前進の上限)。"""
+    from sai_memory.memory.storage import get_next_message_id
+
+    conn = _memory_conn(tmp_path)
+    for i in range(1, 4):
+        _add_message(conn, f"m{i}", 1000 + i)
+    assert get_next_message_id(conn, "m1") == "m2"
+    assert get_next_message_id(conn, "m3") is None  # 最後尾には次が無い
+    assert get_next_message_id(conn, "ghost") is None
+    conn.close()
+
+
+def test_cold_advance_is_capped_at_the_sluice_pan_marker(
+    session_factory, tmp_path, caplog,
+):
+    """最前線がマーカーより先でも、起点はマーカーの次までしか進まない。
+
+    Chronicle が覆っているだけでは退場を許さない (v3 §13.3) — スルースが見て
+    いない範囲を提示から落とすと、その範囲は本人の目を通らずに消える
+    (2026-08-23 実機事故)。
+    """
+    lc = _make_lifecycle(session_factory)
+    conn = _memory_conn(tmp_path)
+    for i in range(1, 7):
+        _add_message(conn, f"m{i}", 1000 + i)
+    _add_l1_entry(conn, ["m1", "m2", "m3", "m4"])  # 最前線 = m5
+
+    stale = _now() - timedelta(days=3)
+    lc.upsert_anchor_entry(PERSONA_ID, "model-a", {
+        "anchor_id": "m1", "updated_at": stale.isoformat(), "ttl_seconds": 300,
+    })
+    persona = SimpleNamespace(
+        persona_id=PERSONA_ID, model="model-a", sai_memory=_adapter(conn),
+    )
+    _set_pan_marker(persona, "m2")  # スルースは m2 までしか見ていない
+
+    with caplog.at_level("INFO", logger="sea.session_lifecycle"):
+        assert lc.resolve_metabolism_anchor(persona) == ("m3", "frontier")
+    assert "cold anchor advance capped at the sluice pan marker" in caplog.text
+    assert lc.load_anchor_entry(PERSONA_ID, "model-a")["anchor_id"] == "m3"
+    conn.close()
+
+
+def test_cold_advance_skipped_without_a_pan_marker(
+    session_factory, tmp_path, caplog,
+):
+    """スルース未走行 (マーカー無し) のペルソナでは前進しない (fail-closed)。"""
+    lc = _make_lifecycle(session_factory)
+    conn = _memory_conn(tmp_path)
+    for i in range(1, 5):
+        _add_message(conn, f"m{i}", 1000 + i)
+    _add_l1_entry(conn, ["m1", "m2"])  # 最前線 = m3
+
+    stale = _now() - timedelta(days=3)
+    lc.upsert_anchor_entry(PERSONA_ID, "model-a", {
+        "anchor_id": "m1", "updated_at": stale.isoformat(), "ttl_seconds": 300,
+    })
+    persona = SimpleNamespace(
+        persona_id=PERSONA_ID, model="model-a", sai_memory=_adapter(conn),
+    )
+
+    with caplog.at_level("DEBUG", logger="sea.session_lifecycle"):
+        assert lc.resolve_metabolism_anchor(persona) == ("m1", "self")
+    assert "cold anchor advance skipped: no sluice pan marker" in caplog.text
+    assert lc.load_anchor_entry(PERSONA_ID, "model-a")["anchor_id"] == "m1"
+    conn.close()
+
+
+def test_cold_advance_reaches_frontier_when_the_marker_is_past_it(
+    session_factory, tmp_path,
+):
+    """マーカーが最前線以降なら従来どおり最前線まで進む (機構1 の本来の目的)。
+
+    マーカーがちょうど最前線にある場合も、最前線までの範囲は全部スルースを
+    通っているので頭打ちにならない。
+    """
+    lc = _make_lifecycle(session_factory)
+    conn = _memory_conn(tmp_path)
+    for i in range(1, 7):
+        _add_message(conn, f"m{i}", 1000 + i)
+    _add_l1_entry(conn, ["m1", "m2"])  # 最前線 = m3
+
+    stale = _now() - timedelta(days=3)
+    for marker in ("m3", "m5"):
+        lc.upsert_anchor_entry(PERSONA_ID, "model-a", {
+            "anchor_id": "m1", "updated_at": stale.isoformat(), "ttl_seconds": 300,
+        })
+        persona = SimpleNamespace(
+            persona_id=PERSONA_ID, model="model-a", sai_memory=_adapter(conn),
+        )
+        _set_pan_marker(persona, marker)
+        assert lc.resolve_metabolism_anchor(persona) == ("m3", "frontier")
+        assert lc.load_anchor_entry(PERSONA_ID, "model-a")["anchor_id"] == "m3"
+    conn.close()
+
+
+def _history_manager(ids, chars=1_000):
+    """anchor 以降を返す最小の history_manager (提示ウィンドウの材料)。"""
+    payloads = [
+        {"id": mid, "content": "x" * chars, "created_at": 1000 + n}
+        for n, mid in enumerate(ids, start=1)
+    ]
+
+    def get_history_from_anchor(
+        anchor, required_line_roles=None, required_scopes=None, pulse_id=None,
+    ):
+        if anchor not in ids:
+            return []
+        return [dict(p) for p in payloads[ids.index(anchor):]]
+
+    return SimpleNamespace(get_history_from_anchor=get_history_from_anchor)
+
+
+def test_manual_compaction_with_failing_sluice_does_not_shrink_the_window(
+    session_factory, tmp_path,
+):
+    """2026-08-23 実機事故の並びの回帰: 手動整理で Chronicle 生成が成功し、その
+    直後にスルースが失敗しても、提示ウィンドウの文字数は減らない。
+
+    事故は「スルース自身のプロンプト組成が起点を解決した瞬間に機構1 が発火し、
+    いま生成した Chronicle の最前線まで起点が進む」並びで起きた。ここでは起点が
+    既にマーカーの次 (= 通過済みの境界) にあるので、機構1 は 1 通も動かせない。
+    """
+    from sea.eviction_plan import Watermarks, message_chars
+
+    lc = _make_lifecycle(session_factory)
+    conn = _memory_conn(tmp_path)
+    ids = [f"m{i}" for i in range(1, 9)]
+    for n, mid in enumerate(ids, start=1):
+        _add_message(conn, mid, 1000 + n)
+    _add_l1_entry(conn, ["m1", "m2", "m3", "m4", "m5"])  # 最前線 = m6
+
+    stale = _now() - timedelta(days=3)
+    lc.upsert_anchor_entry(PERSONA_ID, "model-a", {
+        "anchor_id": "m3", "updated_at": stale.isoformat(), "ttl_seconds": 300,
+    })
+    persona = SimpleNamespace(
+        persona_id=PERSONA_ID, model="model-a", sai_memory=_adapter(conn),
+        current_building_id="room", history_manager=_history_manager(ids),
+    )
+    _set_pan_marker(persona, "m2")  # スルースは m2 まで = 起点 m3 の一つ手前
+
+    lc.ensure_recall_embeddings = lambda p: None
+    lc._retry_extraction_backlog = lambda p, **kw: None
+    lc.generate_chronicle = lambda p, cb=None, **kw: "ok"
+
+    before = message_chars(lc.get_presented_window(persona, "model-a").presented)
+
+    resolved = []
+
+    def _failing_sluice(lifecycle, persona_, building_id, current_messages,
+                        evict_count, event_callback=None, finalize=False):
+        # スルースは自分のプロンプトを組む — その組成が起点を解決する (実機の並び)。
+        resolved.append(
+            lifecycle.resolve_metabolism_anchor(persona_, model_key="model-a"),
+        )
+        raise RuntimeError("structured output loop")
+
+    with patch.object(lc, "is_chronicle_enabled_for_persona", return_value=True), \
+            patch.object(lc, "get_metabolism_watermarks",
+                         return_value=Watermarks(low=2_000, target=2_000, high=4_000)), \
+            patch.dict(os.environ, {
+                "ENABLE_MEMORY_WEAVE_CONTEXT": "true",
+                "SAIVERSE_CHRONICLE_BAND_BUDGET": "2500",
+            }), \
+            patch("sea.sluice.run_sluice", _failing_sluice):
+        status = lc.run_manual_compaction(persona)
+
+    assert status == "failed"                      # 退場は止まった
+    assert resolved == [("m3", "self")]            # 組成中も起点は動かない
+    assert lc.load_anchor_entry(PERSONA_ID, "model-a")["anchor_id"] == "m3"
+    after = message_chars(lc.get_presented_window(persona, "model-a").presented)
+    assert after == before
     conn.close()
 
 

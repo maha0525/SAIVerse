@@ -481,8 +481,17 @@ class SessionLifecycle:
         冷え切った後は保守作業が解禁される (§14-1) — 自行が編纂の最前線 (§14-2、
         Chronicle の source_ids から導出) より後ろに取り残されていれば、最前線まで
         前進させる (機構1)。編纂も LLM も伴わない行更新のみで、休眠 model の
-        復帰不能 (§12-10 極端形) の主対策。飛ばす範囲は最前線の定義により必ず
-        Chronicle が覆っている (被覆の保存 §7-1 は構成的に成立)。
+        復帰不能 (§12-10 極端形) の主対策。
+
+        不変条件 (2026-08-23): **起点はスルースのパンマーカーを越えない。**
+        飛ばす範囲は最前線の定義により必ず Chronicle が覆っているが、それだけ
+        では足りない — 押し出される記憶は必ずスルースを通る
+        (autonomous_behavior_v3.md §13.3) ので、前進先はさらに「スルースが最後に
+        見た位置 (パンマーカー) の次」で頭打ちにする。マーカーが読めない
+        (スルース未走行 / 読み取り失敗) なら前進しない (fail-closed)。
+        経緯: 手動整理で Chronicle 生成成功 → スルース自身のプロンプト組成で
+        機構1 が発火して起点が前進 → スルース失敗、の並びで、スルースを
+        通っていない範囲がペルソナの提示範囲から消えた (2026-08-23 実機)。
 
         Args:
             model_key: 「自 model」として扱う model。ExecutionContext が届いている
@@ -522,12 +531,23 @@ class SessionLifecycle:
                     "[metabolism] Anchor resolved: self model '%s' (hot)", persona_model,
                 )
                 return (self_anchor, "self")
-            # §14-2 機構1: 冷え切った自行は最前線まで前進してよい。
+            # §14-2 機構1: 冷え切った自行は最前線まで前進してよい。ただし
+            # 前進先はスルースのパンマーカーの次で頭打ちにする (v3 §13.3 —
+            # 押し出される記憶は必ずスルースを通る)。
             frontier = self._resolve_frontier_anchor(persona)
+            target = None
             if (
                 frontier
                 and frontier != self_anchor
                 and self._is_ahead_of(persona, frontier, self_anchor)
+            ):
+                target = self._cap_advance_at_pan_marker(
+                    persona, frontier, persona_id, persona_model,
+                )
+            if (
+                target
+                and target != self_anchor
+                and self._is_ahead_of(persona, target, self_anchor)
             ):
                 if persist_advance:
                     # 温度は据え置く — 前進はキャッシュの主張ではないので、
@@ -536,7 +556,7 @@ class SessionLifecycle:
                     # 列ごとクリアするが、最前線の後方にはまだ提示に生きる fold が
                     # ありうる (Codex 2巡目 2026-07-29)。
                     advanced = self._advance_anchor_preserving_folds(
-                        persona, persona_id, persona_model, frontier,
+                        persona, persona_id, persona_model, target,
                         self_entry.get("updated_at")
                         # 元の時刻が無い行は「十分に過去」で冷えを表す
                         # (epoch 0 は TZ 次第で負になり Windows で扱えない)
@@ -555,11 +575,13 @@ class SessionLifecycle:
                         )
                         return (self_anchor, "self")
                     LOGGER.info(
-                        "[metabolism] cold anchor advanced to chronicle frontier "
-                        "(persona=%s model=%s %s -> %s)",
-                        persona_id, persona_model, self_anchor, frontier,
+                        # 「最前線まで」とは書かない — パンマーカーで頭打ちに
+                        # なった回は target が最前線より手前になる。
+                        "[metabolism] cold anchor advanced "
+                        "(persona=%s model=%s %s -> %s, frontier=%s)",
+                        persona_id, persona_model, self_anchor, target, frontier,
                     )
-                return (frontier, "frontier")
+                return (target, "frontier")
             LOGGER.debug(
                 "[metabolism] Anchor resolved: self model '%s' (cold, no advance)",
                 persona_model,
@@ -630,6 +652,96 @@ class SessionLifecycle:
         except Exception:
             LOGGER.warning(
                 "[metabolism] frontier derivation failed (persona=%s)",
+                getattr(persona, "persona_id", "?"), exc_info=True,
+            )
+            return None
+
+    def _load_sluice_pan_marker(self, persona) -> Optional[str]:
+        """スルースのパンマーカー (最後に採取した末尾 message id) を読む。
+
+        真実は sluice が持つので読み方も sluice の関数
+        (:func:`sea.sluice._load_pan_marker` — persona 属性 → memory.db の
+        embed_metadata の read-through) をそのまま使う。二枚目の読み方を
+        書かない。
+
+        Returns:
+            マーカー。まだ一度もスルースが走っていない (キーが無い)、または
+            読み取りに失敗した場合は None。呼び出し側は None を「前進を
+            許可できない」に倒す (fail-closed)。
+        """
+        try:
+            from sea.sluice import _load_pan_marker
+            return _load_pan_marker(persona)
+        except Exception:
+            LOGGER.warning(
+                "[metabolism] sluice pan marker unreadable; treating it as "
+                "absent (persona=%s)",
+                getattr(persona, "persona_id", "?"), exc_info=True,
+            )
+            return None
+
+    def _cap_advance_at_pan_marker(
+        self, persona, frontier: str,
+        persona_id: Optional[str], model_key: str,
+    ) -> Optional[str]:
+        """機構1 の前進先を、スルースのパンマーカーの次で頭打ちにする。
+
+        不変条件 (2026-08-23): 起点はスルースが見た位置より先へは進まない。
+        マーカーは「スルースが最後に見た範囲の末尾」なので、マーカーを含む
+        範囲までは通過済み — 前進してよいのは「マーカーの次」まで。
+
+        Returns:
+            前進先の message id (最前線かパンマーカーの次)。前進を許可でき
+            ないときは None: マーカーが無い (スルース未走行 / 読み取り失敗)、
+            正典順が引けない、マーカーの次が存在しない。
+        """
+        marker = self._load_sluice_pan_marker(persona)
+        if not marker:
+            LOGGER.debug(
+                "[metabolism] cold anchor advance skipped: no sluice pan marker "
+                "(persona=%s model=%s frontier=%s)",
+                persona_id, model_key, frontier,
+            )
+            return None
+        cmp_result = self._compare_positions(persona, frontier, marker)
+        if cmp_result is None:
+            LOGGER.info(
+                "[metabolism] cold anchor advance skipped: cannot order the "
+                "frontier against the sluice pan marker "
+                "(persona=%s model=%s frontier=%s marker=%s)",
+                persona_id, model_key, frontier, marker,
+            )
+            return None
+        if cmp_result <= 0:
+            # 最前線はマーカー以前 = 飛ばす範囲は全部スルースを通っている。
+            return frontier
+        cap = self._next_position_after(persona, marker)
+        if not cap:
+            LOGGER.info(
+                "[metabolism] cold anchor advance skipped: no message after the "
+                "sluice pan marker (persona=%s model=%s frontier=%s marker=%s)",
+                persona_id, model_key, frontier, marker,
+            )
+            return None
+        if cap != frontier:
+            LOGGER.info(
+                "[metabolism] cold anchor advance capped at the sluice pan marker "
+                "(persona=%s frontier=%s marker=%s)",
+                persona_id, frontier, marker,
+            )
+        return cap
+
+    def _next_position_after(self, persona, message_id: str) -> Optional[str]:
+        """正典順で ``message_id`` の直後にあるメッセージの id (引けなければ None)。"""
+        adapter = getattr(persona, "sai_memory", None)
+        if not adapter or not adapter.is_ready():
+            return None
+        try:
+            from sai_memory.memory.storage import get_next_message_id
+            return get_next_message_id(adapter.conn, message_id)
+        except Exception:
+            LOGGER.warning(
+                "[metabolism] next-message lookup failed (persona=%s)",
                 getattr(persona, "persona_id", "?"), exc_info=True,
             )
             return None

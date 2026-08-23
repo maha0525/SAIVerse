@@ -732,6 +732,44 @@ def get_messages_before_id(
     return rows
 
 
+def get_next_message_id(
+    conn: sqlite3.Connection, message_id: str
+) -> Optional[str]:
+    """正典順 ``(created_at, rowid)`` で ``message_id`` の**直後**にある行の id。
+
+    境界の規律は :func:`get_messages_from_id` と同じ正典順序キー (W8 / SEA 監査
+    S7) で、境界行自身は含まない (排他)。thread では絞らない — 「この位置より
+    後ろのメッセージは 1 件も無い」と言い切れる最も手前の位置を返すため
+    (絞ると別 thread の行を跨いでしまう)。
+
+    用途は起点 (session_anchor) の前進を「スルースが見た範囲の末尾の次」で
+    頭打ちにする判定 (:mod:`sea.session_lifecycle` の §14 機構 1)。起点は位置
+    としてだけ使われる (:func:`get_messages_from_id` は別 thread の行でも
+    その ``(created_at, rowid)`` を境界として扱う) ので、返り値が要求 thread の
+    行である必要はない。
+
+    Returns:
+        直後の行の id。``message_id`` が存在しない、または直後の行が無い
+        (最後尾) 場合は None。
+    """
+    anchor = conn.execute(
+        "SELECT created_at, rowid FROM messages WHERE id = ?",
+        (str(message_id),),
+    ).fetchone()
+    if not anchor:
+        return None
+    anchor_ts = int(anchor[0]) if anchor[0] is not None else None
+    after_sql, after_params = _canonical_after_clause(
+        anchor_ts, int(anchor[1]), inclusive=False
+    )
+    row = conn.execute(
+        f"SELECT id FROM messages WHERE {after_sql} "
+        "ORDER BY created_at ASC, rowid ASC LIMIT 1",
+        after_params,
+    ).fetchone()
+    return str(row[0]) if row else None
+
+
 def get_messages_by_resource(conn: sqlite3.Connection, resource_id: str) -> List[Message]:
     cur = conn.execute(
         "SELECT id, thread_id, role, content, resource_id, created_at, metadata FROM messages WHERE resource_id=? ORDER BY created_at ASC, rowid ASC",
