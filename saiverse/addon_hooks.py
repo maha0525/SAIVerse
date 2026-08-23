@@ -205,9 +205,14 @@ def _submit_chained(
             _chained_invoke, handler, payload, prev_future,
         )
         _chain_state[chain_key] = new_future
-        new_future.add_done_callback(
-            lambda fut, k=chain_key: _on_chain_done(k, fut)
-        )
+    # add_done_callback は _chain_lock の外で呼ぶこと。 Future が既に完了して
+    # いると callback はこのスレッドで即座に同期実行され、 _on_chain_done が
+    # _chain_lock を取りに行く。 ロックの中で登録すると、 submit した仕事が
+    # ここに到達する前に終わった並びで自分自身を待つ (2026-08-23 にフル
+    # スイートで実際に踏んだ自己デッドロック)。
+    new_future.add_done_callback(
+        lambda fut, k=chain_key: _on_chain_done(k, fut)
+    )
 
 
 def _chained_invoke(

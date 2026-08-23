@@ -275,6 +275,57 @@ class AddonHooksTests(unittest.TestCase):
         # seq=1 は例外で skip、 残り 4 件は順序保たれる
         self.assertEqual(observed, [0, 2, 3, 4])
 
+    def test_order_key_future_completed_before_callback_registration(self) -> None:
+        """submit した Future が add_done_callback より先に完了していても固まらない。
+
+        ``Future.add_done_callback`` は Future が既に完了していると callback を
+        呼び出し元スレッドで即座に同期実行する。 その callback (_on_chain_done)
+        が _chain_lock を取るので、 登録をロックの中で行うと自分自身を待つ
+        自己デッドロックになる (2026-08-23 フルスイートで実際に発生)。
+
+        本物のプールでは確率的にしか踏まないので、 submit 時点で同期実行して
+        完了済み Future を返す executor に差し替え、 この並びを毎回強制する。
+        """
+        from concurrent.futures import Future
+
+        class _ImmediateExecutor:
+            def submit(self, fn: Any, *args: Any, **kwargs: Any) -> Future:
+                fut: Future = Future()
+                try:
+                    fut.set_result(fn(*args, **kwargs))
+                except BaseException as exc:  # noqa: BLE001 - 完了済み Future を返す
+                    fut.set_exception(exc)
+                return fut
+
+        observed: List[int] = []
+
+        def handler(*, seq: int, **_p: Any) -> None:
+            observed.append(seq)
+
+        addon_hooks.register_hook("persona_speak", handler)
+        n = 50
+
+        def run() -> None:
+            for i in range(n):
+                addon_hooks.dispatch_hook("persona_speak", order_key="m1", seq=i)
+
+        original = addon_hooks._executor
+        addon_hooks._executor = _ImmediateExecutor()  # type: ignore[assignment]
+        try:
+            worker = threading.Thread(target=run, daemon=True)
+            worker.start()
+            worker.join(timeout=5.0)
+            self.assertFalse(
+                worker.is_alive(),
+                "dispatch_hook deadlocked on _chain_lock "
+                "(add_done_callback ran _on_chain_done synchronously)",
+            )
+        finally:
+            addon_hooks._executor = original
+        self.assertEqual(observed, list(range(n)))
+        # 完了済み Future のエントリは _on_chain_done で掃除されている
+        self.assertEqual(addon_hooks._chain_state, {})
+
     # ------------------------------------------------------------------
     # 不明イベント
     # ------------------------------------------------------------------
