@@ -849,6 +849,17 @@ def _run_chronicle_generation(
                 error="別の整理が同じ範囲を処理中または処理済みです。しばらく待って再実行してください。",
                 error_code="window_claimed",
             )
+        elif status == "deferred_sluice_unseen":
+            # スルース (採取) と編纂は確定済みで、退場だけが次回へ繰り越された。
+            # claim 競合 (window_claimed) と混ぜると「別の整理が処理中」という
+            # 嘘になる (docs/issues/metabolism_deferral_mislabeled_as_window_claim.md 従)。
+            # 読めていない範囲は末尾の新着とは限らない (冷えた起点の前進で窓の
+            # 頭側が漏れる並びもある) — 文面で「新しい会話」と断定しない。
+            _update_job(
+                job_id, status="failed",
+                error="記憶の整理を見送りました（今回の採取で読めていない範囲があったため、畳みは次回の整理で続きから進みます）。",
+                error_code="sluice_unseen",
+            )
         elif status == "disabled":
             _update_job(
                 job_id, status="failed",

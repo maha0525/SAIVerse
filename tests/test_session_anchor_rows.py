@@ -494,7 +494,8 @@ def test_manual_compaction_propagates_failure_and_cancel(session_factory):
     msgs = [{"id": f"m{i}", "content": "x" * 1000} for i in range(10)]
     token = CancellationToken()
     for inner, expected in [
-        ("failed", "failed"), ("deferred", "deferred"), ("nothing", "noop"),
+        ("failed", "failed"), ("deferred", "deferred"),
+        ("deferred_sluice_unseen", "deferred_sluice_unseen"), ("nothing", "noop"),
     ]:
         with _weave_on(), \
                 patch.object(lc, "get_metabolism_watermarks",

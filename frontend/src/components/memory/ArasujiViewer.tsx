@@ -642,6 +642,8 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                         server_error: '🔧',
                         empty_response: '📭',
                         safety_filter: '🛡️',
+                        window_claimed: '🔒',
+                        sluice_unseen: '🔁',
                     };
                     const guidanceMap: Record<string, string> = {
                         empty_response: 'しばらく時間を置いてから再実行してください。繰り返し発生する場合は、サーバーの障害情報を確認してください。',
@@ -651,6 +653,8 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                         payment: 'APIキーの残高や支払い設定を確認してください。',
                         authentication: 'APIキーの設定を確認してください。',
                         server_error: 'LLMサーバーで障害が発生しています。しばらく時間を置いてから再実行してください。',
+                        window_claimed: '別の整理が同じ範囲を処理中または処理済みです。しばらく待ってから再実行してください。',
+                        sluice_unseen: '今回の採取（スルース）で読めていない範囲があったため、畳みを見送りました。採取の結果は保存されており、畳みは次回の整理で続きから進みます。',
                     };
                     const icon = (code && iconMap[code]) || '❌';
                     const guidance = (code && guidanceMap[code]) || '予期しないエラーが発生しました。Technical Detailsを確認し、問題が続く場合は管理者に連絡してください。';

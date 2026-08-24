@@ -2284,7 +2284,7 @@ class MetabolismUnseenTailGuardTest(_AdapterTestBase):
         lifecycle2, anchors2 = self._make_lifecycle(client2)
         persona2 = self._persona(grown)
         ret2 = self._run_metabolism(lifecycle2, persona2, grown)
-        self.assertEqual(ret2, "deferred")
+        self.assertEqual(ret2, "deferred_sluice_unseen")
         self.assertEqual(client2.calls, [])       # LLM は呼ばれない
         self.assertEqual(anchors2, [])            # 未見の新着は退場されない
         self.assertEqual(persona2._sluice_last_pan_id, "m4")
@@ -2327,7 +2327,7 @@ class MetabolismUnseenTailGuardTest(_AdapterTestBase):
         )
         persona = self._persona(base)
         ret = self._run_metabolism(lifecycle, persona, base)
-        self.assertEqual(ret, "deferred")
+        self.assertEqual(ret, "deferred_sluice_unseen")
         self.assertEqual(anchors, [])           # 退場 (anchor 前進) は止まる
         self.assertEqual(len(client.calls), 1)  # スルース自体は走って成功している
         # 確定も保留される (Codex 第五巡 修正 2): マーカーがヘッドギャップ
@@ -2356,7 +2356,7 @@ class MetabolismUnseenTailGuardTest(_AdapterTestBase):
             client1, presented_ids=["m2", "m3", "m4"],
         )
         ret1 = self._run_metabolism(lifecycle1, self._persona(base), base)
-        self.assertEqual(ret1, "deferred")
+        self.assertEqual(ret1, "deferred_sluice_unseen")
         self.assertEqual(anchors1, [])
 
         # 2 回目: anchor 前進が永続し、窓は m2 から始まる (会話も m5..m9 まで

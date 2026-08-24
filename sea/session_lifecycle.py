@@ -1678,6 +1678,10 @@ class SessionLifecycle:
         - "nothing": 畳むものが無かった (提示コンテキスト空 / 畳める範囲なし)
         - "failed" / "deferred": 編纂が完了せず anchor 据え置き (次回再試行)。
           deferred はユーザーキャンセル・確認拒否・別入口との claim 競合。
+        - "deferred_sluice_unseen": 編纂・スルースとも成功したが、スルースが
+          読めていない範囲 (末尾の新着とは限らない — 冷えた起点の前進で窓の
+          頭側が漏れる並びもある) に退場計画が届いたため退場だけを次回へ
+          譲った (anchor 据え置き。再実行すると続きから整理できる)。
 
         呼び出し元のうち自動発火 (maybe_run_metabolism) は戻り値を使わない
         (次回の水位判定が自然に再試行する)。手動入口 (run_manual_compaction)
@@ -1746,6 +1750,8 @@ class SessionLifecycle:
             - "noop": 既に残す量以下、または畳める範囲が無い (何もしていない)
             - "failed": 編纂が失敗し anchor 据え置き (再実行で再試行できる)
             - "deferred": キャンセル、または別入口との claim 競合 (同上)
+            - "deferred_sluice_unseen": スルースが読めていない範囲があり退場
+              だけ見送った (採取と編纂は確定済み。再実行で続きから整理できる)
             - "disabled": Chronicle 生成が無効 (weave env OFF / persona トグル OFF)。
               手動入口の同意文は「Chronicle に畳む」なので、編纂なしの退場 (忘却)
               を黙って実行しない — 何も畳まず設定の案内に倒す (Codex 再レビュー
@@ -1810,7 +1816,7 @@ class SessionLifecycle:
 
         Returns:
             "skip" (条件外・超過なし) / run_metabolism の結果
-            ("ok"/"nothing"/"failed"/"deferred")。
+            ("ok"/"nothing"/"failed"/"deferred"/"deferred_sluice_unseen")。
         """
         model_key = str(model_key or getattr(persona, "model", "") or "") or None
         if not model_key:
@@ -2482,7 +2488,8 @@ class SessionLifecycle:
 
         Returns:
             :meth:`cold_precompaction_status` の値 (条件不成立時)、または
-            run_metabolism の結果 ("ok"/"nothing"/"failed"/"deferred")。
+            run_metabolism の結果 ("ok"/"nothing"/"failed"/"deferred"/
+            "deferred_sluice_unseen")。
             関所 (pending flush) が通らないときは "deferred" (次の tick に譲る)。
         """
         from sea.beat_gate import BeatGateClosedError, hold_beat
@@ -2793,9 +2800,14 @@ class SessionLifecycle:
                 ret = chronicle_status  # "failed" / "deferred" (手動入口の結果報告用)
             elif sluice_status == "unseen_tail":
                 # スルース自体は成功している (採取とマーカー前進は確定済み)。
-                # 退場だけを次回へ譲る。
-                message = "記憶の整理を見送りました（採取が済んでいない新しい会話があるため、次回に改めて整理します）"
-                ret = "deferred"
+                # 退場だけを次回へ譲る。理由を戻り値で運ぶ — 手動入口
+                # (run_manual_compaction → arasuji.py / organize-memory) が
+                # 「別の整理が処理中」(claim 競合の文面) と混同して報告しない
+                # ため (docs/issues/metabolism_deferral_mislabeled_as_window_claim.md 従)。
+                # 読めていない範囲は末尾の新着とは限らない (冷えた起点の前進で
+                # 窓の頭側が漏れる並びが実機の初出) — 文面で新着と断定しない。
+                message = "記憶の整理を見送りました（今回の採取で読めていない範囲があるため、次回に改めて整理します）"
+                ret = "deferred_sluice_unseen"
             else:
                 message = "記憶の整理を見送りました（記憶の採取（スルース）が完了しなかったため、次回に再試行します）"
                 ret = "failed"
