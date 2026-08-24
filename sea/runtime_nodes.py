@@ -92,12 +92,6 @@ def lg_tool_call_node(runtime: Any, node_def: Any, persona: Any, playbook: Any, 
                     _at.append({"action": "tool_call", "name": tool_name, "playbook": pb_display})
                 if event_callback:
                     event_callback({"type": "activity", "action": "tool_call", "name": tool_name, "playbook": pb_display, "status": "completed", "persona_id": getattr(persona, "persona_id", None), "persona_name": getattr(persona, "persona_name", None), "pulse_id": state.get("_pulse_id")})
-                    LOGGER.debug(
-                        "[sea][diag] activity emitted (tool_call, meta/sub guarded): name=%s playbook=%s persona=%s pulse=%s",
-                        tool_name, pb_display,
-                        getattr(persona, "persona_id", None),
-                        state.get("_pulse_id"),
-                    )
             state["last"] = result_str
             if output_key:
                 set_playbook_var(state, output_key, result, where=f"node '{node_id}' output_key")

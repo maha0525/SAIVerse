@@ -601,11 +601,6 @@ class RuntimeService(
                             avatar_path_to_url(p.avatar_image)
                             or "/api/static/builtin_icons/host.png"
                         )
-            if isinstance(event, dict):
-                logging.debug(
-                    "[sse][diag][enrich] type=%s persona=%s pulse=%s",
-                    event.get("type"), event.get("persona_id"), event.get("pulse_id"),
-                )
             response_queue.put(event)
 
         # Register the SSE callback so on_track_activated 経由で起動される
@@ -748,11 +743,6 @@ class RuntimeService(
                     item = response_queue.get(timeout=2.0)
                     if item is None:
                         break
-                    if isinstance(item, dict):
-                        logging.debug(
-                            "[sse][diag][yield] type=%s persona=%s pulse=%s",
-                            item.get("type"), item.get("persona_id"), item.get("pulse_id"),
-                        )
                     yield json.dumps(item, ensure_ascii=False) + "\n"
                     # cancelled イベント送信後はストリーム終了
                     if isinstance(item, dict) and item.get("type") == "cancelled":

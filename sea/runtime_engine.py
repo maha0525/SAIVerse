@@ -126,12 +126,6 @@ class RuntimeEngine:
                             "persona_name": getattr(persona, "persona_name", None),
                             "pulse_id": state.get("_pulse_id"),
                         })
-                        LOGGER.debug(
-                            "[sea][diag] activity emitted (tool, NO meta/sub guard): name=%s playbook=%s persona=%s pulse=%s",
-                            tool_name, pb_display,
-                            getattr(persona, "persona_id", None),
-                            state.get("_pulse_id"),
-                        )
 
                 # Handle tuple results with output_keys (for multi-value returns)
                 if output_keys and isinstance(result, tuple):
@@ -480,12 +474,6 @@ class RuntimeEngine:
                         "persona_name": getattr(persona, "persona_name", None),
                         "pulse_id": state.get("_pulse_id"),
                     })
-                    LOGGER.debug(
-                        "[sea][diag] activity emitted (memorize, meta/sub guarded): name=%s playbook=%s persona=%s pulse=%s",
-                        node_label, pb_display,
-                        getattr(persona, "persona_id", None),
-                        state.get("_pulse_id"),
-                    )
 
             # Debug: log speak_content at end of memorize node
             speak_content = state.get("speak_content", "")
