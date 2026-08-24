@@ -294,10 +294,14 @@ def test_keepalive_failure_does_not_touch_anchor(_mock_cache):
 
 
 @patch("saiverse.model_configs.get_cache_config", return_value={"type": "implicit"})
-@patch("sea.sluice.is_enabled", return_value=True)
-def test_keepalive_non_explicit_reschedules_watchdog_without_llm(_mock_enabled, _mock_cache):
+def test_keepalive_non_explicit_does_nothing(_mock_cache):
     """非 explicit キャッシュ (Gemini/implicit 等) では keep-alive LLM を呼ばず、
-    セッション見張り (クローズ採取の足場) だけ再予約する (gold_panning.md §3.6)。"""
+    再予約もしない。
+
+    予約は explicit にしか立たない (schedule_cache_ttl_pulse) が、予約後に model の
+    キャッシュ設定が非 explicit へ変わっていたらここへ来る — 何もせず落ちる
+    (2026-08-24: 見張りだけを再予約していた経路は、その唯一の目的だった
+    セッションクローズ採取の撤去と同時に消した)。"""
     persona = _persona()
     scheduler = FakeScheduler()
     runtime, _ = _make_runtime(persona, scheduler=scheduler)
@@ -308,5 +312,5 @@ def test_keepalive_non_explicit_reschedules_watchdog_without_llm(_mock_enabled, 
     assert runtime.run_cache_keepalive("air") is False
     # 温め直す実キャッシュがないので LLM は呼ばない
     assert client.calls == []
-    # 見張りとしてタイマーだけ再予約される (次の TTL 接近でクローズ採取を試みる)
-    assert "ttl:air:claude-x" in scheduler.scheduled
+    # 再予約もしない (次の本物の呼び出しが改めて予約する)
+    assert "ttl:air:claude-x" not in scheduler.scheduled

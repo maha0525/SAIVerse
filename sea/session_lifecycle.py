@@ -984,38 +984,30 @@ class SessionLifecycle:
             LOGGER.debug("[metabolism] Token threshold check failed", exc_info=True)
 
     def schedule_cache_ttl_pulse(self, persona, model_key: str, cache_type: str) -> None:
-        """anchor touch 直後に「セッションの見張り」を EventScheduler に予約する。
+        """anchor touch 直後に、キャッシュ TTL 接近時の keep-alive を EventScheduler に予約する。
 
         歴史的経緯: この予約はもともと ``MetaLayer.on_periodic_tick`` (v1 状況分類の
-        メタ判断 Pulse) を発火していた → keep-alive LLM コールに置き換わり
-        (life_concept_map.md §14 A2、まはー決定 2026-07-07) → いまは「セッション
-        見張り」に一般化した。explicit キャッシュ (Anthropic) では見張りが keep-alive
-        を兼ねる (同一 prefix を温め直す)。非 explicit では見張りは温めず、TTL 接近時に
-        :meth:`run_cache_keepalive` を再発火させてセッションクローズ (sluice
-        Phase 3) を採取する足場になる (docs/intent/gold_panning.md §3.6 —
-        機構の intent は旧名のまま残る)。
+        メタ判断 Pulse) を発火していた → keep-alive LLM コールに置き換わった
+        (life_concept_map.md §14 A2、まはー決定 2026-07-07)。
 
         計算: ``fire_at = now + cache_ttl_seconds * (1 - cache_threshold_ratio)``
         (キャッシュ寿命のうち threshold_ratio 分が残ったタイミング)。
         cache_threshold_ratio はペルソナの ``META_JUDGMENT_CONFIG`` から取得。
 
-        callback は :meth:`run_cache_keepalive` — explicit では意味的に不活性な極小
-        LLM コールで同一 prefix を温め直すだけで、**判断 (メタ判断 / 判断点) は行わない**。
+        callback は :meth:`run_cache_keepalive` — 意味的に不活性な極小 LLM コールで
+        同一 prefix を温め直すだけで、**判断 (メタ判断 / 判断点) は行わない**。
         schedule した時刻と発火時刻の間にユーザー対話が入って TTL 起点が更新
         された場合、再 touch で予約が上書きされるため、古い予約は自然に消える。
 
-        ``cache_type == 'explicit'`` (Anthropic) は従来どおり keep-alive を予約する。
-        非 explicit (gemini_explicit / implicit 等) は :meth:`_schedule_session_watchdog`
-        に委譲して見張りのみ予約する (temp を温めない・keep_cache_alive に従わない)。
+        予約するのは ``cache_type == 'explicit'`` (Anthropic) のときだけ。非 explicit
+        (gemini_explicit / implicit 等) は温め直す先が無いので何も予約しない
+        (2026-08-24: 非 explicit で見張りだけを回していた経路は、その唯一の目的だった
+        セッションクローズ採取の撤去と同時に消した)。
 
         ``META_JUDGMENT_CONFIG.keep_cache_alive == False`` の場合は予約しない
         (低頻度ペルソナ向け: 24 時間間隔等で cache 切れ覚悟の運用)。
-        ※ このゲートは explicit (keep-alive) 専用。見張りは keepalive ではないので
-        keep_cache_alive 設定には従わせない。
         """
         if cache_type != "explicit":
-            # 非 explicit: keep-alive ではなくセッション見張りとして予約する。
-            self._schedule_session_watchdog(persona, model_key, cache_type)
             return
 
         manager = self.manager
@@ -1078,81 +1070,6 @@ class SessionLifecycle:
         LOGGER.debug(
             "[metabolism] scheduled cache TTL keep-alive: persona=%s model=%s in %.0fs (ttl=%ds, threshold=%.2f)",
             persona_id, model_key, wait_seconds, ttl_seconds, threshold_ratio,
-        )
-
-    def _schedule_session_watchdog(self, persona, model_key: str, cache_type: str) -> None:
-        """非 explicit キャッシュ (gemini_explicit / implicit 等) のセッション見張り予約。
-
-        explicit の keep-alive と違い、LLM で prefix を温め直さない。目的はただ一つ:
-        TTL 接近時に :meth:`run_cache_keepalive` を再発火させ、その時点でペルソナが
-        Active でなければセッションクローズ (sluice Phase 3) を採取すること。
-        Active のままなら見張りを再予約して待つ (docs/intent/gold_panning.md §3.6)。
-
-        explicit 経路との違い:
-
-        - ``keep_cache_alive`` ゲートには従わない (見張りは keep-alive ではない)。
-        - sluice が無効なら予約しない (見張りの唯一の目的がクローズ採取のため)。
-
-        ``is_enabled()`` は **発火時ではなく予約時** に読む。含意: env
-        (``SAIVERSE_SLUICE_ENABLED``) を切り替えても既に入っている予約は生き
-        続け、次の予約 (再発火 → 再予約の輪) から反映される。
-
-        予約 key は explicit と共通の ``f"ttl:{persona_id}:{model_key}"``
-        ((persona, model) ごとに独立予約 — beat_execution_context.md §3.1)。
-        """
-        from sea.sluice import is_enabled
-
-        persona_id = getattr(persona, "persona_id", None)
-        if not persona_id:
-            return
-
-        if not is_enabled():
-            LOGGER.debug(
-                "[watchdog] session watchdog skipped (sluice disabled): persona=%s model=%s",
-                persona_id, model_key,
-            )
-            return
-
-        manager = self.manager
-        scheduler = getattr(manager, "event_scheduler", None) if manager else None
-        meta_layer = getattr(manager, "meta_layer", None) if manager else None
-        if scheduler is None:
-            return
-
-        ttl_seconds = self.get_anchor_validity_seconds(model_key, persona_id)
-        if ttl_seconds <= 0:
-            return
-
-        # threshold_ratio は explicit 経路と同じ解決 (META_JUDGMENT_CONFIG,
-        # 既定 0.3, 同じガード)。meta_layer 不在時は既定にフォールバック
-        # (keep_cache_alive は見張りでは参照しない)。
-        threshold_ratio = 0.3
-        if meta_layer is not None:
-            try:
-                judgment_config = meta_layer._load_judgment_config(persona)
-                threshold_ratio = float(judgment_config.get("cache_threshold_ratio", 0.3))
-            except Exception:
-                threshold_ratio = 0.3
-        if not (0.0 < threshold_ratio < 1.0):
-            threshold_ratio = 0.3
-
-        wait_seconds = ttl_seconds * (1.0 - threshold_ratio)
-        fire_at = datetime.now() + timedelta(seconds=wait_seconds)
-        key = f"ttl:{persona_id}:{model_key}"
-
-        def _fire_callback() -> None:
-            try:
-                self.runtime.run_cache_keepalive(persona_id, model_key)
-            except Exception:
-                LOGGER.exception(
-                    "[watchdog] session watchdog raised: persona=%s model=%s",
-                    persona_id, model_key,
-                )
-
-        scheduler.schedule(fire_at=fire_at, callback=_fire_callback, key=key)
-        LOGGER.debug(
-            "[watchdog] scheduled session watchdog: persona=%s model=%s type=%s in %.0fs (ttl=%ds, threshold=%.2f)",
-            persona_id, model_key, cache_type, wait_seconds, ttl_seconds, threshold_ratio,
         )
 
     def maybe_run_metabolism(
@@ -2451,8 +2368,9 @@ class SessionLifecycle:
         """全 persona を巡回して先回り畳み (§14-4) の条件を検査する。
 
         検査は読みだけ (安い・LLM なし)。畳みが要る persona だけ daemon
-        スレッドへ逃がす — EventScheduler の dispatch スレッドで LLM を回さない
-        (:meth:`SEARuntime._spawn_session_close` と同じ規約)。
+        スレッドへ逃がす — EventScheduler の dispatch スレッドで重い LLM 処理を
+        同期実行すると後続の予約が滞るため (saiverse/event_scheduler.py の
+        docstring: 重い処理は別 thread に投げる)。
         """
         try:
             personas = dict(getattr(self.manager, "personas", None) or {})
@@ -3678,19 +3596,6 @@ class SessionLifecycle:
                 )
         except Exception:
             LOGGER.exception("[metabolism] Embedding generation failed")
-
-    def run_session_close_for(self, persona_id: str) -> None:
-        """persona_id からペルソナを引いて sluice のセッションクローズを走らせる。
-
-        SEARuntime._spawn_session_close の別スレッドから呼ばれる薄いラッパ。
-        run_cache_keepalive と同じく manager.personas から引く。
-        """
-        persona = (getattr(self.manager, "personas", None) or {}).get(persona_id)
-        if persona is None:
-            LOGGER.debug("[sluice] session close: persona not found (%s)", persona_id)
-            return
-        from sea.sluice import run_session_close
-        run_session_close(self, persona)
 
 
 def _marker_advance_is_safe(

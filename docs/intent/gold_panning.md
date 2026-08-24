@@ -1,6 +1,8 @@
 # gold_panning（砂金採り）— 押し出される記憶からの恒常知識の採取
 
-**⚠️ 2026-08-19 世代交代**: 本機構は **スルース (sluice)** へ改名・拡張された（`sea/sluice.py`。正典は `autonomous_behavior_v3.md` §13）。変わった点: ①応答スキーマに手帳メモ（want/did）と約束（promises）が加わった ②「失敗しても退場が進む」柔らかい格は廃止され、**スルース失敗 = 退場停止 → 次回再試行**（あらすじ生成と同格の硬いゲート）③環境変数は `SAIVERSE_SLUICE_*` へ改名 ④メモには担当範囲（前回パンマーカー〜今回）の span が機械刻印される。本 doc の設計理由（キャッシュ経済・pan マーカー・defer-to-hot・セッションクローズ Phase 3）は sluice にそのまま生きているため、旧名のまま存置する。以下の「gold_panning」は読み替えること。
+**⚠️ 2026-08-19 世代交代**: 本機構は **スルース (sluice)** へ改名・拡張された（`sea/sluice.py`。正典は `autonomous_behavior_v3.md` §13）。変わった点: ①応答スキーマに手帳メモ（want/did）と約束（promises）が加わった ②「失敗しても退場が進む」柔らかい格は廃止され、**スルース失敗 = 退場停止 → 次回再試行**（あらすじ生成と同格の硬いゲート）③環境変数は `SAIVERSE_SLUICE_*` へ改名 ④メモには担当範囲（前回パンマーカー〜今回）の span が機械刻印される。本 doc の設計理由（キャッシュ経済・pan マーカー・defer-to-hot）は sluice にそのまま生きているため、旧名のまま存置する。以下の「gold_panning」は読み替えること。
+
+**⚠️ 2026-08-24 撤去**: セッションクローズ採取（Phase 3 / §3.6）は撤去された。スルースの自動実行は Metabolism の一本になり、手動実行（Memory 窓の Chronicle 生成）だけがそれと並ぶ。理由と消えた実体は §3.6 冒頭の注記にある。
 
 **Status**: v0.1（2026-07-07 起草、まはー×エアの設計議論に基づく）。**完了**（2026-07-10 まはー実機検証済み）。
 **2026-07-08 改訂**: 実運用で **SCENE 自動採取が暴走（1 回で数千字）** したため、gold_panning の自動採取は **NOTE（add / update / remove）のみ**に絞った。SCENE 種別自体（`create_scene_core_memory`）と手動ツール（`core_memory_add_scene`）は存置し、gold_panning の response_schema・プロンプト・ファジー照合（`_resolve_quote` 等）・`SAIVERSE_GOLD_PANNING_MIN_QUOTE_CHARS` を除去。以降 §5 以下の scene 採取に関する記述は「手動ツール経由のみ」と読み替えること。
@@ -13,7 +15,7 @@
 - `docs/intent/cached_head_architecture.md` / `docs/intent/cache_lifecycle_control.md` — キャッシュ経済の不変条件に従属する
 - `docs/concepts/metabolism.md` — Metabolism の実行点2つ（§3.1）は同 doc にも反映済み
 - `docs/issues/session_lifecycle_extraction_design.md` — 実装の前提リファクタ（Phase 0）
-- `docs/intent/session.md`（起草中 v0.1）— セッションクローズ（§3.6）は Session 概念のライフサイクルフックとして実装する
+- `docs/intent/session.md`（起草中 v0.1）— セッションクローズ（§3.6）を Session 概念のライフサイクルフックとして実装する構想だった（2026-08-24 に §3.6 ごと撤去。この doc も未起草のまま）
 
 ---
 
@@ -77,7 +79,7 @@
 ### 3.2 gold_panning の実行点
 
 - **(a) 応答後 Metabolism の内部**: `_run_metabolism` の Chronicle 生成後・アンカー更新（eviction）前。直前の応答コールで prefix が温まっている
-- **(b) セッションクローズ**: keepalive 連鎖の自然停止点（§3.6）。キャッシュがまだ温かい最後の瞬間
+- **(b) セッションクローズ** 🧊 **2026-08-24 撤去**: keepalive 連鎖の自然停止点（§3.6）。キャッシュがまだ温かい最後の瞬間。現在の自動実行は (a) の一本だけで、これと並ぶのは手動実行（Memory 窓の Chronicle 生成）のみ
 - **会話前（Case 3）では実行しない**: キャッシュ全滅でコールドな上、会話開始レイテンシに新規 LLM コールが乗る。(b) により通常は Case 3 に採取すべき仕事が残らない
 
 ### 3.3 一手の形 — メインラインに1ターン足すだけ
@@ -103,9 +105,21 @@ structured output の中身:
 
 直前にメインラインで default モデルが喋っている（それが実行条件、§3.7）ため、**必ずキャッシュがある**。lightweight は同一 prefix のキャッシュを持たず、フルコンテキストの冷読みになる——節約のつもりが最も高くつく選択肢（2026-07-07 まはー決定）。品質ではなくキャッシュ経済が根拠であることに注意。
 
-### 3.6 セッションクローズ（実行点 b）— 閉じるときに畳む
+### 3.6 セッションクローズ（実行点 b）— 閉じるときに畳む 🧊 **2026-08-24 撤去**
 
-> **⚠️ 2026-07-29 一部撤去裁定**: 本節の「Chronicle の前倒し生成」は [arasuji_levels.md](arasuji_levels.md) §13 で撤去が裁定された。前提だった「起点失効で提示範囲が縮む (Case 3)」自体が廃止され、編纂の自動発火は予算超過の一本になったため、前倒しする仕事が消滅した。セッションクローズにおける **gold_panning 本体（状態事実の採取）はこの裁定の対象外で、引き続き有効**。以下の記述は歴史的経緯として残す。
+> **⚠️ 2026-08-24 撤去裁定（まはー）**: 会話終了検知（セッションクローズ）でスルースを走らせる経路を**撤去した**。スルースの自動実行は Metabolism（予算超過 / トークン閾値 / pending の再開）の一本になり、手動実行（Memory 窓の Chronicle 生成）だけがそれと並ぶ。本節の記述はすべて歴史的経緯として残す。
+>
+> 撤去の理由:
+>
+> - 「押し出される記憶は必ずスルースを通る」という関所は Metabolism 側（退場の適用ゲートとパンマーカー）が持っており、クローズ採取は best-effort で何も守っていなかった。撤去しても不変条件は崩れない。
+> - 鮮度を理由にスルースの実行回数を増やさない。10 万字程度の範囲から重要な項目を抜き出せないモデルは、そもそも SAIVerse で動けない。
+> - 期限の相対表現（「明日」）が誤変換されるリスクは、「各メッセージの日付が LLM に見えない」ことの問題であって、クローズ採取を残す理由にはならない。本当に重大なら、日付が変わったときのシステム通知などで別途補強する案件になる。
+> - 鮮度が要る記録の受け皿は本人の手帳スペル（`pocketbook_open` / `pocketbook_write`）である。書くのは本人、押し出されるときの一括の拾い上げは関所、という役割分担になる。
+> - 撤去直前のコードでも、クローズ採取は `AUTONOMY_ENABLED=False` のペルソナにしか発火していなかった。自律 ON のペルソナはすでに Metabolism 一本で生きていたので、この撤去は OFF のペルソナを ON と同じ扱いに揃えることでもある。
+>
+> 消えた実体: `sea/sluice.py` の `run_session_close` / `_run_session_close_locked` / `get_close_min_messages`、`sea/runtime.py` の `_spawn_session_close`、`sea/session_lifecycle.py` の `run_session_close_for` / `_schedule_session_watchdog`、env `SAIVERSE_SLUICE_CLOSE_MIN_MESSAGES`。副作用として、クローズ時に走っていた `ensure_recall_embeddings` の catch-up（想起用埋め込みの取りこぼし回収）も無くなった — 埋め込み生成は Metabolism 内の 2 箇所と手動整理でだけ走る。この副作用の実幅は狭い: 埋め込み対象（Chronicle / Memopedia ページ / Fragment）を**作る**のは編纂の実行点そのもので、そこでは毎回 `ensure_recall_embeddings` が呼ばれる。失われたのは「その場で埋め込みに失敗した分を、次の編纂を待たず会話終了時に拾い直す機会」だけで、しかもクローズ経路は `AUTONOMY_ENABLED=False` のペルソナでしか発火していなかった（自律 ON のペルソナは撤去前からこの機会を持っていない）。
+
+> **⚠️ 2026-07-29 一部撤去裁定**: 本節の「Chronicle の前倒し生成」は [arasuji_levels.md](arasuji_levels.md) §13 で撤去が裁定された。前提だった「起点失効で提示範囲が縮む (Case 3)」自体が廃止され、編纂の自動発火は予算超過の一本になったため、前倒しする仕事が消滅した。この時点では、セッションクローズにおける **gold_panning 本体（状態事実の採取）はこの裁定の対象外で、引き続き有効**とされていた（その採取自体が上の 2026-08-24 裁定で撤去された）。
 
 §3.1 のサイレント eviction 穴を塞ぐ本命。畳む場所を「次に開くとき」（Case 3）から「閉じるとき」に移す:
 
@@ -116,7 +130,7 @@ structured output の中身:
 
 ガード: 前回採取以降の新規 main_line メッセージが下限（初期案 10 件）未満ならスキップする。短いセッションのたびに振り返らせない。
 
-**非 explicit キャッシュ（Gemini 等）対応（2026-07-07 追記）**: TTL 発火の予約は当初 `cache_type == "explicit"`（Anthropic）限定で、Gemini（`gemini_explicit`）ではクローズが構造的に発火しなかった。対応として TTL 発火を「セッション見張り」に一般化: 非 explicit でも予約し（間隔は anchor validity 20分 ×(1-threshold_ratio) ≒ 14分）、発火時に not Active ならクローズ（全型共通）、Active ＋ explicit なら keepalive（従来）、Active ＋ 非 explicit なら **LLM を呼ばずタイマーのみ再予約**（keepalive する実キャッシュがないため）。非 explicit の予約は `SAIVERSE_GOLD_PANNING_ENABLED` でゲート（見張りの唯一の目的がクローズ採取のため）。`keep_cache_alive` 設定は keepalive 専用のままで見張りには適用しない。
+**非 explicit キャッシュ（Gemini 等）対応（2026-07-07 追記。2026-08-24 に撤去済み — 見張りの予約は explicit だけに戻り、非 explicit では `schedule_cache_ttl_pulse` が何も予約しない）**: TTL 発火の予約は当初 `cache_type == "explicit"`（Anthropic）限定で、Gemini（`gemini_explicit`）ではクローズが構造的に発火しなかった。対応として TTL 発火を「セッション見張り」に一般化: 非 explicit でも予約し（間隔は anchor validity 20分 ×(1-threshold_ratio) ≒ 14分）、発火時に not Active ならクローズ（全型共通）、Active ＋ explicit なら keepalive（従来）、Active ＋ 非 explicit なら **LLM を呼ばずタイマーのみ再予約**（keepalive する実キャッシュがないため）。非 explicit の予約は `SAIVERSE_GOLD_PANNING_ENABLED` でゲート（見張りの唯一の目的がクローズ採取のため）。`keep_cache_alive` 設定は keepalive 専用のままで見張りには適用しない。
 
 ### 3.7 defer-to-hot — 実行条件と繰り延べ
 
@@ -177,9 +191,9 @@ gold_panning が安い条件は「直前の成功コールと同じ（main_line,
 - **Phase 0（準備リファクタ、2026-07-07 実装済み）**: SessionLifecycle 抽出（`docs/issues/session_lifecycle_extraction_design.md` Step 1。`sea/session_lifecycle.py` 新設＋SEARuntime 委譲シム、挙動不変）。`docs/concepts/metabolism.md` への実行点2つの明記
 - **Phase 1（本丸、2026-07-07 実装済み・実機検証待ち）**: 実行点 (a) — 応答後 Metabolism 内の一手（`sea/gold_panning.py`）。note の add / update / remove ＋ defer-to-hot ＋ pending 圧力弁。設定は `SAIVERSE_GOLD_PANNING_*` env（`docs/reference/environment-vars.md`）
 - **Phase 2（2026-07-07 実装済み・実機検証待ち）**: scene の指差し（NFKC 正規化部分一致 → SequenceMatcher 比率 0.8 の2段照合 → `create_scene_core_memory` 接続）
-- **Phase 3（2026-07-07 実装済み・実機検証待ち）**: 実行点 (b) — セッションクローズ。吊り位置は `run_cache_keepalive` の not-Active 分岐（§7-6 の決定参照）。クローズ処理は EventScheduler の dispatch スレッドを占有しないよう別スレッド委譲（`SEARuntime._spawn_session_close`）。本体は `sea/gold_panning.py run_session_close`（マーカーガード＋ in-flight ガード＋ Chronicle 前倒し force 生成）。**2026-07-29: このうち Chronicle 前倒し force 生成は撤去裁定（§3.6 冒頭の注記参照）。採取（pan）は残る**
+- **Phase 3（2026-07-07 実装済み・実機検証待ち）**: 実行点 (b) — セッションクローズ。吊り位置は `run_cache_keepalive` の not-Active 分岐（§7-6 の決定参照）。クローズ処理は EventScheduler の dispatch スレッドを占有しないよう別スレッド委譲（`SEARuntime._spawn_session_close`）。本体は `sea/gold_panning.py run_session_close`（マーカーガード＋ in-flight ガード＋ Chronicle 前倒し force 生成）。**2026-07-29: このうち Chronicle 前倒し force 生成は撤去裁定。2026-08-24: 残っていた採取（pan）も含めて Phase 3 は丸ごと撤去された（§3.6 冒頭の注記参照）**
 
-Phase 1 単体でも「会話が続いている限りの状態変化」は守れる。Phase 3 で「会話が途切れる直前に話された状態変化」まで網が届く。
+Phase 1 単体でも「会話が続いている限りの状態変化」は守れる。Phase 3 は「会話が途切れる直前に話された状態変化」まで網を届かせる狙いだったが、2026-08-24 に撤去され、その網は Metabolism（実行点 a）の関所一本に戻った。
 
 ---
 

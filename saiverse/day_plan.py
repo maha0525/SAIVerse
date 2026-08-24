@@ -2575,10 +2575,10 @@ def _sync_cache_ttl_for_life_end(manager: Any, persona_id: str, life: Dict[str, 
 def _cancel_keepalive_reservation(manager: Any, persona_id: str) -> bool:
     """ライフ終端で keep-alive 予約を全 model 分 cancel する (谷では温めない)。
 
-    ``sea.session_lifecycle.SessionLifecycle.schedule_cache_ttl_pulse`` /
-    ``_schedule_session_watchdog`` の予約 key は (persona, model) 単位の
-    ``ttl:{persona_id}:{model_key}`` (beat_execution_context.md §3.1)。終端側は
-    どの model の Session が見張り中か列挙できないため prefix で一括 cancel する。
+    ``sea.session_lifecycle.SessionLifecycle.schedule_cache_ttl_pulse`` の予約
+    key は (persona, model) 単位の ``ttl:{persona_id}:{model_key}``
+    (beat_execution_context.md §3.1)。終端側はどの model の Session に予約が
+    入っているか列挙できないため prefix で一括 cancel する。
     ライフ中に未発火の予約が残っていても、この cancel で確実に止まる —
     :func:`is_keepalive_allowed` による発火時ゲートは二重の安全網。
 

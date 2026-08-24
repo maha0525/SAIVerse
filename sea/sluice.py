@@ -46,8 +46,8 @@ LOGGER = logging.getLogger(__name__)
 #: シムではない)。優先順は 新キー > 旧キー > 既定。旧キーが効いたら非推奨
 #: WARNING をキーごとに一度だけ出す。目的は、旧 SAIVERSE_GOLD_PANNING_ENABLED=0
 #: で採取を止めていた環境が、改名後の更新で黙って採取 (課金) を再開する事故の
-#: 防止。旧実装が読んでいたキーは ENABLED / PENDING_CAP / CLOSE_MIN_MESSAGES の
-#: 3 つで、いずれも同名置換 (SAIVERSE_GOLD_PANNING_* → SAIVERSE_SLUICE_*)。
+#: 防止。旧実装が読んでいたキーのうち今も生きているのは ENABLED / PENDING_CAP の
+#: 2 つで、いずれも同名置換 (SAIVERSE_GOLD_PANNING_* → SAIVERSE_SLUICE_*)。
 _LEGACY_ENV_WARNED: set = set()
 
 
@@ -93,17 +93,6 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
-def _env_int(name: str, default: int) -> int:
-    raw = _read_env_with_legacy(name)
-    if raw is None:
-        return default
-    try:
-        return int(raw)
-    except ValueError:
-        LOGGER.warning("[sluice] invalid int for %s=%r; using default %s", name, raw, default)
-        return default
-
-
 def is_enabled() -> bool:
     """全体トグル。"0"/"false" で無効化 (defer-to-hot ごと無効になる)。"""
     return _env_flag("SAIVERSE_SLUICE_ENABLED", True)
@@ -112,11 +101,6 @@ def is_enabled() -> bool:
 def get_pending_cap() -> float:
     """defer-to-hot 圧力弁の倍率 (high watermark の何倍で「コールドでも実行」に倒すか)。"""
     return _env_float("SAIVERSE_SLUICE_PENDING_CAP", 1.5)
-
-
-def get_close_min_messages() -> int:
-    """セッションクローズ (Phase 3) 時のスキップ下限。"""
-    return _env_int("SAIVERSE_SLUICE_CLOSE_MIN_MESSAGES", 10)
 
 
 # ---------------------------------------------------------------------------
@@ -419,8 +403,8 @@ def _list_open_tasks(lifecycle: Any, persona: Any) -> List[Dict[str, Any]]:
     fail-closed (Codex 第四巡 修正 2): 読み出しの例外は空一覧へ丸めず送出する —
     空へ丸めると、その回のスルースは既存の約束を知らずに再 add し (重複)、
     update の口も失う。「正常に空」(例外なしの空リスト) と「取得不能」(送出) を
-    区別する。manager 未構成 (タスク帳の器そのものが無い環境 — テストハーネス・
-    session close の縮退) だけは設計上の「タスク帳なし」として空を返す。
+    区別する。manager 未構成 (タスク帳の器そのものが無い環境 — テストハーネス
+    など) だけは設計上の「タスク帳なし」として空を返す。
     """
     manager = getattr(lifecycle, "manager", None)
     persona_id = getattr(persona, "persona_id", None)
@@ -1354,10 +1338,11 @@ def _persist_record(
 # pan マーカー永続化 (再起動を跨ぐ「前回採取した末尾 id」)
 # ---------------------------------------------------------------------------
 #
-# マーカーは run_session_close の「新規メッセージ数」ガードの基準であり、メモの
-# span (担当範囲) の起点でもある。消えると窓全体が新規扱いになり採取 LLM コールが
-# 1 回余分に走る。message id と同じ memory.db (embed_metadata KV) に置くことで、
-# memory.db のリストア/差し替えでも id の指す先とマーカーがずれない。
+# マーカーはメモの span (担当範囲) の起点であり、同じ範囲を採り直したときに
+# 適用を重複させないための冪等キーの土台でもある。消えると窓全体が新規扱いに
+# なり採取 LLM コールが 1 回余分に走る。message id と同じ memory.db
+# (embed_metadata KV) に置くことで、memory.db のリストア/差し替えでも id の
+# 指す先とマーカーがずれない。
 # read-through: 取得は persona 属性→無ければ永続ストア→属性にキャッシュ。
 # 保存は属性と永続ストアの両方 (write-through)。
 
@@ -2062,8 +2047,8 @@ def run_sluice(
     確定の二段階化 (Codex 第五巡 修正 2): 適用 (コア記憶・メモ・約束) までは
     本体が行い、**確定 (台帳の mark_completed + 判断ターン記録の永続 + 完了通知 +
     パンマーカー前進)** は返り値の ``finalize`` クロージャに割ってある。
-    ``finalize=True`` (既定) は従来どおり本体内で即確定する (直接呼び・
-    セッションクローズ経路は挙動不変)。``finalize=False`` の呼び出し元
+    ``finalize=True`` (既定) は本体内で即確定する (Memory 窓からの手動生成など
+    直接呼びの経路)。``finalize=False`` の呼び出し元
     (run_metabolism) は、マーカー前進が未提示メッセージを跨がないことを検算して
     からクロージャを呼ぶ — 確定を保留した回の記録は台帳に applied のまま残り、
     次回は記録の再適用から入り直す (適用は冪等なので重複しない)。
@@ -2392,9 +2377,8 @@ def run_sluice(
         _persist_record(
             persona, record_text, prompt_snapshot, applied_total=applied_total,
         )
-        # pan マーカー: 次回の担当範囲の起点・セッションクローズ (Phase 3) の
-        # 「新規メッセージ」判定用に、**実際に LLM に渡した範囲の末尾 id**
-        # (span_end_id) を記録する。永続 (memory.db) が先、属性は成功後
+        # pan マーカー: 次回の担当範囲の起点として、**実際に LLM に渡した範囲の
+        # 末尾 id** (span_end_id) を記録する。永続 (memory.db) が先、属性は成功後
         # (_save_pan_marker — 失敗は送出)。
         if span_end_id:
             _save_pan_marker(persona, span_end_id)
@@ -2437,8 +2421,7 @@ def run_sluice(
 
 
 # ---------------------------------------------------------------------------
-# セッションクローズ (Phase 3): TTL 発火時にペルソナが Active でない = セッションが
-# 閉じた瞬間のスルース。docs/intent/gold_panning.md §3.6 (機構の intent は旧名のまま)。
+# 担当範囲の通数勘定 (:func:`run_sluice` がプロンプトへ載せる材料)
 # ---------------------------------------------------------------------------
 
 def _count_new_since_marker(
@@ -2464,190 +2447,3 @@ def _count_new_since_marker(
     if idx is None:
         return len(current_messages)
     return len(current_messages) - idx - 1
-
-
-def run_session_close(lifecycle: Any, persona: Any) -> Dict[str, Any]:
-    """セッションクローズ時のスルース。
-
-    run_cache_keepalive の not-Active 分岐 (セッションが閉じ、anchor がまだ温かい
-    可能性が高い唯一の停止点) から別スレッド経由で呼ばれる。
-
-    旧実装はここで Chronicle の前倒し全量生成も行っていたが、arasuji_levels.md
-    §13 (2026-07-29) で撤去した — 編纂の自動発火は予算超過 (応答後 Metabolism)
-    の一本で、クローズは編纂しない。採取 (pan) はマーカーガードを通過し、かつ
-    キャッシュが熱いときだけ走る (不変条件 §5-1: クローズはコールド例外を作らない)。
-    戻り値の "chronicle" キーは互換のため常に False で残す。
-
-    クローズ採取は退場を伴わないため「確実に通るゲート」(§13.3) の対象外 —
-    失敗は best-effort のまま (呼び出しスレッドの例外ログで終わる)。ゲートが
-    効くのは Metabolism 内 (run_metabolism → run_sluice) の経路。
-
-    Beat ロック (beat_execution_context.md §3.4): この経路は
-    SEARuntime._spawn_session_close の**別スレッド**で走り、persona の記憶
-    (採取判断の記録) に書くため、最外周をここで
-    beat_gate.hold(purpose="sluice") に入れる。Pulse 内 (run_meta_user →
-    Metabolism → run_sluice) の実行は呼び出し元の hold の同一スレッド
-    再入で自動カバーされる (このエントリは通らない)。関所 fail-closed は
-    skipped_reason='gate_closed' として静かに見送る (クローズ採取は best-effort。
-    pending の配送は回復 tick が引き継ぐ)。
-
-    Returns:
-        {"panned": bool, "chronicle": bool, "skipped_reason": str|None}
-    """
-    persona_id = getattr(persona, "persona_id", None)
-
-    if not is_enabled():
-        return {"panned": False, "chronicle": False, "skipped_reason": "disabled"}
-
-    adapter = getattr(persona, "sai_memory", None)
-    if adapter is None or not getattr(adapter, "is_ready", lambda: False)():
-        return {"panned": False, "chronicle": False, "skipped_reason": "no_memory"}
-
-    # in-flight ガード: 同一ペルソナのクローズが二重に走らないようにする。
-    if getattr(persona, "_sluice_close_inflight", False):
-        LOGGER.debug(
-            "[sluice] session close already in-flight; skipping (persona=%s)", persona_id,
-        )
-        return {"panned": False, "chronicle": False, "skipped_reason": "inflight"}
-
-    persona._sluice_close_inflight = True
-    try:
-        from sea.beat_gate import BeatGateClosedError, hold_beat
-        try:
-            with hold_beat(
-                getattr(lifecycle, "manager", None), persona_id,
-                purpose="sluice",
-            ):
-                return _run_session_close_locked(lifecycle, persona, persona_id)
-        except BeatGateClosedError as exc:
-            LOGGER.warning(
-                "[sluice] session close skipped: Beat gate closed "
-                "(persona=%s): %s", persona_id, exc,
-            )
-            return {"panned": False, "chronicle": False, "skipped_reason": "gate_closed"}
-    finally:
-        persona._sluice_close_inflight = False
-
-
-def _run_session_close_locked(
-    lifecycle: Any, persona: Any, persona_id: Optional[str],
-) -> Dict[str, Any]:
-    """:func:`run_session_close` の本体 (Beat ロック保持下で実行される)。"""
-    panned = False
-    chronicle_done = False
-    skipped_reason: Optional[str] = None
-
-    # window の起点はスルース自身の pan マーカー (前回処理した末尾)。
-    # metabolism anchor は退場 (畳み) で前進する点なので採取範囲の起点には
-    # 使わない — 畳みが走っただけで未採取メッセージが範囲外へ落ちる (旧 TTL
-    # リセット時代の実害: 2026-07-08 sophie 実機で anchor が当日リセットされ
-    # window が main_line/committed/現スレッド絞りで 4 件に縮んでいた。TTL
-    # リセット自体は arasuji_levels.md §13 で廃止)。初回 (マーカー無し) は
-    # 「今コンテキストに載っている生履歴の先頭」として metabolism anchor を起点に使う
-    # (この時 anchor は読んでいる範囲の先頭を表す)。
-    # 性質フィルタ (main_line/committed) は付けない: 読んでいる生履歴全体を範囲に取る
-    # (main_line 限定は metabolism のカウント用で、スルースの範囲とは別軸)。
-    history_mgr = getattr(persona, "history_manager", None)
-    if not history_mgr:
-        return {"panned": False, "chronicle": False, "skipped_reason": "no_history"}
-
-    pan_marker = _load_pan_marker(persona)
-    window_start = pan_marker
-    if not window_start:
-        # 初回 (マーカー無し) のみ metabolism anchor を起点に使う。正は
-        # session_anchor 行 (persona, model) — スルースは standard tier
-        # (persona.model) 固定 (intent §5-7) なのでその行を読む。旧
-        # history_manager.metabolism_anchor_message_id (persona 単一可変属性)
-        # は廃止 (beat_execution_context.md §3.2)。
-        _load_entry = getattr(lifecycle, "load_anchor_entry", None)
-        _model = getattr(persona, "model", None)
-        if callable(_load_entry) and _model:
-            try:
-                _entry = _load_entry(persona_id, str(_model))
-                window_start = _entry.get("anchor_id") if _entry else None
-            except Exception:
-                LOGGER.warning(
-                    "[sluice] session close: anchor row read failed (persona=%s)",
-                    persona_id, exc_info=True,
-                )
-    if not window_start:
-        LOGGER.info(
-            "[sluice] session close: no window start; skipping (persona=%s)", persona_id,
-        )
-        return {"panned": False, "chronicle": False, "skipped_reason": "no_anchor"}
-
-    current_messages = history_mgr.get_history_from_anchor(window_start) or []
-
-    # マーカーガード: 新規件数 (マーカー以降。初回は全件) が close_min 未満なら採取
-    # スキップ。
-    new_count = _count_new_since_marker(current_messages, pan_marker)
-    close_min = get_close_min_messages()
-    pan_allowed = new_count >= close_min
-    if not pan_allowed:
-        skipped_reason = "below_min"
-        LOGGER.info(
-            "[sluice] session close: new messages below close_min "
-            "(persona=%s new=%d min=%d); skipping pan", persona_id, new_count, close_min,
-        )
-
-    # (旧: ここに Chronicle 前倒し全量生成があった — arasuji_levels.md §13 で
-    #  撤去。編纂の自動発火は予算超過の一本。)
-    # ensure_recall_embeddings はクローズで必ず実行 (run_metabolism と同じ思想:
-    # ローカル・無料で、Chronicle 生成の成否・トグルに相乗りさせない)。
-    try:
-        lifecycle.ensure_recall_embeddings(persona)
-    except Exception:
-        LOGGER.exception(
-            "[sluice] session close: ensure_recall_embeddings failed (persona=%s)", persona_id,
-        )
-
-    # 採取 (マーカーガード通過時のみ、かつ hot のときだけ)。
-    if pan_allowed:
-        building_id = getattr(persona, "current_building_id", None)
-        if not building_id:
-            skipped_reason = "no_building"
-            LOGGER.info(
-                "[sluice] session close: no current_building_id (persona=%s); skipping pan",
-                persona_id,
-            )
-        elif not lifecycle._is_cache_hot(persona):
-            skipped_reason = "cold"
-            LOGGER.info(
-                "[sluice] session close: cache cold (persona=%s); skipping pan "
-                "(invariant §5-1: no cold exception)", persona_id,
-            )
-        else:
-            summary = run_sluice(
-                lifecycle, persona, building_id, current_messages,
-                evict_count=0, event_callback=None, finalize=False,
-            )
-            panned = True
-            # マーカー安全ゲート (Codex 第六巡 修正 1): クローズ側の窓は無フィルタ
-            # の生履歴 (sub-line / discardable 込み) で、_prepare_context が実際に
-            # 組む提示対象 (main_line/committed) より広い。マーカー候補
-            # (seen_span_end) は窓の末尾勘定なので、LLM が見ていない ID を指しうる。
-            # 判定は seen と同じ ID 空間 (提示対象) で行う — seen は提示列の先頭
-            # 切片なので、「新マーカー位置以前の提示対象メッセージ全件 ⊆ seen」は
-            # 「マーカーが seen に含まれる」ことと同値。含まれなければ確定を
-            # 保留する (マーカー据え置き — 次回クローズが同じ範囲を採り直す。
-            # 適用は冪等キーで重複しない)。
-            seen_end = summary.get("seen_span_end")
-            seen_set = {str(i) for i in (summary.get("seen_ids") or [])}
-            finalize_fn = summary.get("finalize")
-            if seen_end is None or str(seen_end) in seen_set:
-                if finalize_fn is not None:
-                    finalize_fn()
-            else:
-                skipped_reason = "finalize_withheld"
-                LOGGER.info(
-                    "[sluice] session close: finalize withheld — marker "
-                    "candidate %s is not in the seen set (persona=%s); the "
-                    "next close will re-cover the range (idempotent)",
-                    seen_end, persona_id,
-                )
-
-    LOGGER.info(
-        "[sluice] session close done: persona=%s panned=%s chronicle=%s skipped_reason=%s",
-        persona_id, panned, chronicle_done, skipped_reason,
-    )
-    return {"panned": panned, "chronicle": chronicle_done, "skipped_reason": skipped_reason}

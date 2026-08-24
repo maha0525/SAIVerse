@@ -4,7 +4,6 @@ import asyncio
 import json
 import logging
 import os
-import threading
 import uuid
 from datetime import datetime, timedelta
 from datetime import timezone as dt_timezone
@@ -1817,28 +1816,6 @@ class SEARuntime:
         "「.」とだけ返答してください）</system>"
     )
 
-    def _spawn_session_close(self, persona_id: str) -> None:
-        """セッションクローズ (スルース採取) を daemon スレッドで実行する。
-
-        呼び出し元 (:meth:`run_cache_keepalive` の not-Active 分岐) は EventScheduler の
-        dispatch スレッド上で走るため、そこで重い LLM 処理を同期実行すると後続の予約が
-        滞る (saiverse/event_scheduler.py の docstring: 重い処理は別 thread に投げる)。
-        別スレッドに逃がして即 return する。
-        """
-        def _target() -> None:
-            try:
-                self.session_lifecycle.run_session_close_for(persona_id)
-            except Exception:
-                LOGGER.exception(
-                    "[sluice] session close thread crashed (persona=%s)", persona_id,
-                )
-
-        threading.Thread(
-            target=_target,
-            daemon=True,
-            name=f"sluice-close-{persona_id}",
-        ).start()
-
     def run_cache_keepalive(self, persona_id: str, model_key: Optional[str] = None) -> bool:
         """メインキャッシュの keep-alive: 意味的に不活性な極小 LLM コール 1 回。
 
@@ -1869,20 +1846,12 @@ class SEARuntime:
         if persona is None:
             LOGGER.debug("[keepalive] persona not found: %s", persona_id)
             return False
-        # ⚠️ ここは意図的に autonomy_wiring.is_autonomy_on (v0.3 の止め具つき
-        # ゲート) を通さない。この分岐は「駆動するか」ではなく「セッションが
-        # 閉じた瞬間か」の判定で、通すと止め具が効いている間ずっとスルース
-        # (セッションクローズ採取) が撃たれ続ける — 止め具が止めるのは駆動だけで、
-        # 会話・スルース・キャッシュ経済は v0.3 でも生きている
-        # (autonomous_behavior_v3.md §11.1)。
+        # 自律行動が OFF のペルソナは温め直さない — keep-alive 連鎖はここで
+        # 自然に止まり、次の本物の呼び出しまで走らない。
         if not bool(getattr(persona, "autonomy_enabled", False)):
             LOGGER.debug(
                 "[keepalive] skipped (persona=%s autonomy disabled)", persona_id,
             )
-            # ペルソナの自律行動が OFF = セッションが閉じた瞬間で、anchor がまだ
-            # 温かい可能性が高い唯一の停止分岐 (docs/intent/gold_panning.md §3.6)。
-            # ここでスルース (セッションクローズ採取) を別スレッドに委譲する。
-            self._spawn_session_close(persona_id)
             return False
 
         # life.md §5.2: keep-alive 連鎖はライフに従属する。その日 lives が宣言
@@ -1913,9 +1882,10 @@ class SEARuntime:
         model_key = str(model_key)
 
         # 非 explicit キャッシュ (gemini_explicit / implicit 等): keep-alive LLM は
-        # 呼ばない。見張りとしてタイマーだけ再予約し、次の TTL 接近まで待つ。
-        # クローズ採取は上の not-Active 分岐が担うため、Active のここでは温めない。
-        # (docs/intent/gold_panning.md §3.6)
+        # 呼ばない。予約は explicit のときだけ立つ
+        # (:meth:`SessionLifecycle.schedule_cache_ttl_pulse`) が、予約後に model の
+        # キャッシュ設定が非 explicit へ変わっていた場合はここへ来る — 何もせず
+        # 落とす (再予約もしない。次の本物の呼び出しが改めて予約する)。
         try:
             from saiverse.model_configs import get_cache_config
             cache_type = (get_cache_config(model_key) or {}).get("type", "implicit")
@@ -1923,17 +1893,10 @@ class SEARuntime:
             cache_type = "implicit"
         if cache_type != "explicit":
             LOGGER.debug(
-                "[keepalive] non-explicit cache; re-scheduling watchdog only "
+                "[keepalive] non-explicit cache; skipping "
                 "(persona=%s model=%s type=%s)",
                 persona_id, model_key, cache_type,
             )
-            try:
-                self.session_lifecycle.schedule_cache_ttl_pulse(persona, model_key, cache_type)
-            except Exception:
-                LOGGER.exception(
-                    "[keepalive] failed to re-schedule session watchdog (persona=%s)",
-                    persona_id,
-                )
             return False
 
         # anchor の生存確認: 既に失効しているキャッシュは温め直さない

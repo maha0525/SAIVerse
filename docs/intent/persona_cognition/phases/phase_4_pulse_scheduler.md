@@ -57,6 +57,8 @@ NULL 運用 = built-in default、`MetaLayer._DEFAULT_JUDGMENT_CONFIG` で管理�
 
 #### キャッシュ TTL 監視
 
+> ⚠ 本節は v0.30 当時の記録。現行 (2026-08-24 時点) は大きく変わっている: 予約は `SessionLifecycle.schedule_cache_ttl_pulse`、key は (persona, model) 単位の `ttl:{persona_id}:{model_key}`、発火するのはメタ判断ではなく keep-alive (意味的に不活性な極小 LLM コール。メタ判断 v1 は退役済み)。予約が立つのは explicit キャッシュ (Anthropic) のみで、非 explicit には何も予約しない (非 explicit の見張りタイマーは、その唯一の目的だったセッションクローズ採取と一緒に 2026-08-24 に撤去)。
+
 `anchor touch` 直後に `_schedule_cache_ttl_pulse` で TTL 接近時刻を予約 (key=`ttl:<persona_id>`)。再 touch で予約上書きされるので「対話継続中は前倒し fire しない、TTL 残り少なくなったら自動的にメタ判断が走る」挙動。`keep_cache_alive=False` のペルソナはこの予約をスキップ + 既存予約を cancel する。
 
 ### 4. waiting Track timeout の push 化 (v0.31 で廃止)

@@ -29,7 +29,7 @@ Fold=`[m0, m2]` で `m1` が退場しない場合:
 
 `sea/session_lifecycle.py:1183` 付近。fold の message id と **1 件でも重なる** entry を、その fold の `chronicle_entry_ids` に付ける。entry の `source_ids` がその fold に**収まっている**ことは確認していない。
 
-全量整理 (`compile_groups=None` の経路 — force / session close / organize-memory / anchor 失効) は退場範囲と無関係に一次あらすじを作るので、後から退場する複数の範囲と、その間に残るメッセージまで一つの entry が覆いうる。その entry が fold に付くと:
+全量整理 (`compile_groups=None` の経路 — force / organize-memory / anchor 失効) は退場範囲と無関係に一次あらすじを作るので、後から退場する複数の範囲と、その間に残るメッセージまで一つの entry が覆いうる。その entry が fold に付くと:
 
 - 圧縮区間の置き換えが、退場せず生ログのまま残るメッセージまで語り直す (二重)
 - 同じ広域 entry が複数の fold に付けば、同じ内容が離れた位置に二度出る

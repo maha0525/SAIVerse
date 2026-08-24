@@ -1514,8 +1514,6 @@ class LegacyEnvMigrationTest(unittest.TestCase):
     _KEYS = (
         "SAIVERSE_SLUICE_ENABLED", "SAIVERSE_GOLD_PANNING_ENABLED",
         "SAIVERSE_SLUICE_PENDING_CAP", "SAIVERSE_GOLD_PANNING_PENDING_CAP",
-        "SAIVERSE_SLUICE_CLOSE_MIN_MESSAGES",
-        "SAIVERSE_GOLD_PANNING_CLOSE_MIN_MESSAGES",
     )
 
     def setUp(self):
@@ -1545,8 +1543,6 @@ class LegacyEnvMigrationTest(unittest.TestCase):
     def test_legacy_numeric_keys_fall_back(self):
         os.environ["SAIVERSE_GOLD_PANNING_PENDING_CAP"] = "2.5"
         self.assertEqual(sluice.get_pending_cap(), 2.5)
-        os.environ["SAIVERSE_GOLD_PANNING_CLOSE_MIN_MESSAGES"] = "7"
-        self.assertEqual(sluice.get_close_min_messages(), 7)
 
     def test_warning_emitted_once_per_key(self):
         os.environ["SAIVERSE_GOLD_PANNING_ENABLED"] = "0"
@@ -2686,289 +2682,12 @@ class SluiceGateTest(_AdapterTestBase):
         self.assertEqual(dispatched, ["light-model"])
 
 
-class SessionCloseTest(_AdapterTestBase):
-    """sluice.run_session_close (Phase 3) を実 SAIMemory (temp DB) で検証する。"""
+class CacheTtlPulseScheduleTest(unittest.TestCase):
+    """schedule_cache_ttl_pulse は explicit キャッシュのときだけ予約する。
 
-    # -- fixtures -------------------------------------------------------
-
-    def _make_lifecycle(self, client, *, hot, chronicle_enabled=True,
-                        presented_ids="auto"):
-        from unittest.mock import MagicMock
-
-        lifecycle = SimpleNamespace(
-            runtime=FakeRuntime(client, presented_ids=presented_ids),
-        )
-        lifecycle.is_chronicle_enabled_for_persona = lambda p: chronicle_enabled
-        lifecycle.generate_chronicle = MagicMock(return_value="ok")
-        lifecycle.ensure_recall_embeddings = MagicMock()
-        lifecycle._is_cache_hot = lambda p: hot
-        # 初回 (pan マーカー無し) の window 起点は session_anchor 行から読まれる
-        # (§6-5 で persona 属性は廃止)。
-        lifecycle.load_anchor_entry = lambda pid, mk: {"anchor_id": "cache_anchor"}
-        return lifecycle
-
-    def _make_persona(self, messages, *, last_pan_id=None, building_id="b"):
-        history_mgr = SimpleNamespace()
-        history_mgr.get_history_from_anchor = (
-            lambda anchor, required_line_roles=None, required_scopes=None: messages
-        )
-        persona = SimpleNamespace(
-            persona_id="tester", persona_name="エア", model="claude-x",
-            sai_memory=self.adapter, history_manager=history_mgr,
-            current_building_id=building_id,
-        )
-        if last_pan_id is not None:
-            persona._sluice_last_pan_id = last_pan_id
-        return persona
-
-    @staticmethod
-    def _msgs(n):
-        return [{"id": f"m{i}", "role": "user", "content": f"msg {i}"} for i in range(n)]
-
-    # -- case 1: marker guard skips pan but Chronicle runs --------------
-
-    def test_marker_guard_skips_pan_without_chronicle(self):
-        msgs = self._msgs(12)
-        client = FakeLLMClient(_sluice_result())
-        lifecycle = self._make_lifecycle(client, hot=True)
-        # marker が最新 id と一致 → 新規 0 件 → 採取スキップ。
-        # 編纂はどの分岐でも呼ばれない (§13: クローズは編纂しない)。
-        persona = self._make_persona(msgs, last_pan_id="m11")
-        with patch.dict(os.environ, {"ENABLE_MEMORY_WEAVE_CONTEXT": "true"}), \
-                patch("sea.sluice.run_sluice") as pan:
-            result = sluice.run_session_close(lifecycle, persona)
-        pan.assert_not_called()
-        lifecycle.generate_chronicle.assert_not_called()
-        self.assertFalse(result["panned"])
-        self.assertFalse(result["chronicle"])
-        self.assertEqual(result["skipped_reason"], "below_min")
-
-    # -- case 2: enough new + hot -> pan runs, marker updates ------------
-
-    def test_new_messages_hot_pans_and_updates_marker(self):
-        msgs = self._msgs(5)
-        client = FakeLLMClient(_sluice_result(reflection="採取なし"))
-        lifecycle = self._make_lifecycle(
-            client, hot=True, presented_ids=[m["id"] for m in msgs],
-        )
-        persona = self._make_persona(msgs, last_pan_id=None)
-        with patch.dict(os.environ, {"SAIVERSE_SLUICE_CLOSE_MIN_MESSAGES": "3"}):
-            result = sluice.run_session_close(lifecycle, persona)
-        self.assertTrue(result["panned"])
-        # 実 run_sluice が LLM を 1 回呼んでいる。
-        self.assertEqual(len(client.calls), 1)
-        # マーカーが窓の末尾 id に更新される。
-        self.assertEqual(persona._sluice_last_pan_id, "m4")
-
-    # -- case: window 起点は pan マーカー・性質フィルタ無し (2026-07-08 sophie 修正) --
-
-    def _persona_recording_history(self, messages, *, last_pan_id=None):
-        calls = []
-
-        def fake_get(anchor, required_line_roles=None, required_scopes=None):
-            calls.append((anchor, required_line_roles, required_scopes))
-            return messages
-
-        history_mgr = SimpleNamespace()
-        history_mgr.get_history_from_anchor = fake_get
-        persona = SimpleNamespace(
-            persona_id="tester", persona_name="エア", model="claude-x",
-            sai_memory=self.adapter, history_manager=history_mgr, current_building_id="b",
-        )
-        if last_pan_id is not None:
-            persona._sluice_last_pan_id = last_pan_id
-        return persona, calls
-
-    def test_window_starts_from_pan_marker_without_line_filter(self):
-        """window 起点は pan マーカー (cache 都合で動く metabolism anchor でない)、かつ
-        性質フィルタ (main_line/committed) を付けない。metabolism anchor + main_line 絞りで
-        window が 4 件に縮んだ sophie 問題の修正。"""
-        persona, calls = self._persona_recording_history(self._msgs(12), last_pan_id="prev_pan")
-        lifecycle = self._make_lifecycle(FakeLLMClient(_sluice_result()), hot=True)
-        with patch.dict(os.environ, {"SAIVERSE_SLUICE_CLOSE_MIN_MESSAGES": "3"}):
-            sluice.run_session_close(lifecycle, persona)
-        start, lr, sc = calls[0]
-        self.assertEqual(start, "prev_pan")   # metabolism anchor "cache_anchor" ではない
-        self.assertIsNone(lr)                 # 性質フィルタ無し
-        self.assertIsNone(sc)
-
-    def test_initial_window_uses_anchor_as_read_head(self):
-        """初回 (pan マーカー無し) は metabolism anchor を『読んでいる範囲の先頭』として
-        起点に使い、全生履歴 (12件) を window にして採取する。"""
-        persona, calls = self._persona_recording_history(self._msgs(12), last_pan_id=None)
-        lifecycle = self._make_lifecycle(FakeLLMClient(_sluice_result()), hot=True)
-        with patch.dict(os.environ, {"SAIVERSE_SLUICE_CLOSE_MIN_MESSAGES": "3"}):
-            result = sluice.run_session_close(lifecycle, persona)
-        self.assertEqual(calls[0][0], "cache_anchor")  # 初回は anchor 起点
-        self.assertTrue(result["panned"])              # 12件全部新規 → close_min 3 超え
-
-    # -- case 3: cold -> pan skipped ------------------------------------
-
-    def test_cold_skips_pan_and_never_generates_chronicle(self):
-        """§13 (arasuji_levels.md): クローズは編纂しない (cold は採取も skip)。"""
-        msgs = self._msgs(5)
-        client = FakeLLMClient(_sluice_result())
-        lifecycle = self._make_lifecycle(client, hot=False)
-        persona = self._make_persona(msgs, last_pan_id=None)
-        with patch.dict(os.environ, {
-            "ENABLE_MEMORY_WEAVE_CONTEXT": "true",
-            "SAIVERSE_SLUICE_CLOSE_MIN_MESSAGES": "3",
-        }), patch("sea.sluice.run_sluice") as pan:
-            result = sluice.run_session_close(lifecycle, persona)
-        pan.assert_not_called()
-        lifecycle.generate_chronicle.assert_not_called()
-        self.assertFalse(result["panned"])
-        self.assertFalse(result["chronicle"])
-        self.assertEqual(result["skipped_reason"], "cold")
-
-    # -- case 4: in-flight guard + flag reset ---------------------------
-
-    def test_inflight_guard_and_flag_reset(self):
-        msgs = self._msgs(5)
-        client = FakeLLMClient(_sluice_result())
-
-        # (a) flag が立っていると再入は skip され、何も走らない。
-        busy = self._make_persona(msgs, last_pan_id=None)
-        busy._sluice_close_inflight = True
-        lifecycle_a = self._make_lifecycle(client, hot=True)
-        with patch.dict(os.environ, {"ENABLE_MEMORY_WEAVE_CONTEXT": "true"}), \
-                patch("sea.sluice.run_sluice") as pan:
-            result = sluice.run_session_close(lifecycle_a, busy)
-        self.assertEqual(result["skipped_reason"], "inflight")
-        pan.assert_not_called()
-        lifecycle_a.generate_chronicle.assert_not_called()
-
-        # (b) 正常終了後は flag が False に戻る。
-        fresh = self._make_persona(msgs, last_pan_id=None)
-        lifecycle_b = self._make_lifecycle(client, hot=True)
-        with patch.dict(os.environ, {"SAIVERSE_SLUICE_CLOSE_MIN_MESSAGES": "3"}), \
-                patch("sea.sluice.run_sluice"):
-            sluice.run_session_close(lifecycle_b, fresh)
-        self.assertFalse(getattr(fresh, "_sluice_close_inflight", True))
-
-    # -- case 5: chain termination (2nd call pans nothing) --------------
-
-    def test_chain_terminates_on_second_call(self):
-        msgs = self._msgs(5)
-        client = FakeLLMClient(_sluice_result())
-        lifecycle = self._make_lifecycle(
-            client, hot=True, presented_ids=[m["id"] for m in msgs],
-        )
-        persona = self._make_persona(msgs, last_pan_id=None)
-        with patch.dict(os.environ, {"SAIVERSE_SLUICE_CLOSE_MIN_MESSAGES": "3"}):
-            first = sluice.run_session_close(lifecycle, persona)
-            second = sluice.run_session_close(lifecycle, persona)
-        self.assertTrue(first["panned"])
-        self.assertFalse(second["panned"])
-        self.assertEqual(second["skipped_reason"], "below_min")
-        # 追加 LLM コールが起きない = 連鎖はちょうど 1 回で止まる。
-        self.assertEqual(len(client.calls), 1)
-
-    # -- case 6: クローズ経路のマーカー安全ゲート (Codex 第六巡 修正 1) ------
-
-    def test_close_withholds_marker_when_window_has_unpresented_tail(self):
-        """クローズ側の窓 (無フィルタ — sub-line/discardable 込み) の末尾が LLM の
-        提示対象に無いとき、マーカーはその ID を跨いで進まない (確定保留)。"""
-        # 窓は w0..w11 (無フィルタ)。提示対象は main_line/committed の w0..w8 だけ
-        # — 末尾 w9..w11 (sub-line/discardable 相当) を LLM は見ていない。
-        msgs = self._msgs(12)  # id: m0..m11
-        presented = [f"m{i}" for i in range(9)]
-        client = FakeLLMClient(_sluice_result())
-        lifecycle = self._make_lifecycle(
-            client, hot=True, presented_ids=presented,
-        )
-        persona = self._make_persona(msgs, last_pan_id=None)
-        with patch.dict(os.environ, {"SAIVERSE_SLUICE_CLOSE_MIN_MESSAGES": "3"}):
-            result = sluice.run_session_close(lifecycle, persona)
-        # スルース (LLM) は走ったが、マーカー候補 m11 は未提示 → 確定保留。
-        self.assertEqual(len(client.calls), 1)
-        self.assertTrue(result["panned"])
-        self.assertEqual(result["skipped_reason"], "finalize_withheld")
-        self.assertIsNone(getattr(persona, "_sluice_last_pan_id", None))
-        from sai_memory.memory.storage import get_embed_metadata
-        with self.adapter._db_lock:
-            self.assertIsNone(
-                get_embed_metadata(self.adapter.conn, sluice._PAN_MARKER_KEY),
-            )
-
-    def test_close_finalizes_when_marker_is_in_seen_set(self):
-        """窓の末尾が提示対象に含まれていれば従来どおり確定 (マーカー前進)。"""
-        msgs = self._msgs(5)
-        client = FakeLLMClient(_sluice_result())
-        lifecycle = self._make_lifecycle(
-            client, hot=True, presented_ids=[m["id"] for m in msgs],
-        )
-        persona = self._make_persona(msgs, last_pan_id=None)
-        with patch.dict(os.environ, {"SAIVERSE_SLUICE_CLOSE_MIN_MESSAGES": "3"}):
-            result = sluice.run_session_close(lifecycle, persona)
-        self.assertTrue(result["panned"])
-        self.assertIsNone(result["skipped_reason"])
-        self.assertEqual(persona._sluice_last_pan_id, "m4")
-
-    # -- case 6b: クローズ経路もマーカー読み取り失敗で止まる (第八巡 修正 5) ---
-
-    def test_close_marker_read_failure_propagates(self):
-        """クローズ採取は best-effort だが、マーカーの読み取り失敗は「マーカー
-        無し」へ丸めず送出する (呼び出しスレッドがログして終わる)。丸めると窓
-        全体が新規扱いになり、採取済みの範囲を採り直したうえでマーカーを
-        後ろへ書き戻しうる。"""
-        msgs = self._msgs(12)
-        client = FakeLLMClient(_sluice_result())
-        lifecycle = self._make_lifecycle(client, hot=True)
-        persona = self._make_persona(msgs, last_pan_id=None)
-        with patch(
-            "sai_memory.memory.storage.get_embed_metadata",
-            side_effect=RuntimeError("db read error"),
-        ):
-            with self.assertRaises(RuntimeError):
-                sluice.run_session_close(lifecycle, persona)
-        self.assertEqual(client.calls, [])
-        # in-flight フラグは finally で戻る (次回のクローズを塞がない)。
-        self.assertFalse(getattr(persona, "_sluice_close_inflight", True))
-
-    # -- case 7: クローズは編纂しない (§13) — weave 有効・hot でも呼ばれない ---
-
-    def test_session_close_never_generates_chronicle(self):
-        """arasuji_levels.md §13: 編纂の自動発火は予算超過の一本。クローズは
-        採取 (pan) だけを行い、weave 有効・キャッシュ hot でも編纂しない。"""
-        msgs = self._msgs(5)
-        client = FakeLLMClient(_sluice_result())
-        lifecycle = self._make_lifecycle(client, hot=True)
-        persona = self._make_persona(msgs, last_pan_id=None)
-        with patch.dict(os.environ, {
-            "ENABLE_MEMORY_WEAVE_CONTEXT": "true",
-            "SAIVERSE_SLUICE_CLOSE_MIN_MESSAGES": "3",
-        }), patch("sea.sluice.run_sluice") as pan:
-            result = sluice.run_session_close(lifecycle, persona)
-        pan.assert_called_once()
-        lifecycle.generate_chronicle.assert_not_called()
-        self.assertTrue(result["panned"])
-        self.assertFalse(result["chronicle"])
-
-
-class KeepaliveSessionCloseHookTest(unittest.TestCase):
-    """run_cache_keepalive の自律 OFF 分岐がセッションクローズを spawn すること。"""
-
-    def test_not_active_branch_spawns_session_close(self):
-        from sea.runtime import SEARuntime
-
-        persona = SimpleNamespace(autonomy_enabled=False)
-        rt = SimpleNamespace(manager=SimpleNamespace(personas={"tester": persona}))
-        spawned = []
-        rt._spawn_session_close = lambda pid: spawned.append(pid)
-        rt.run_cache_keepalive = SEARuntime.run_cache_keepalive.__get__(rt)
-
-        result = rt.run_cache_keepalive("tester")
-
-        self.assertFalse(result)
-        self.assertEqual(spawned, ["tester"])
-
-
-class SessionWatchdogScheduleTest(unittest.TestCase):
-    """schedule_cache_ttl_pulse の見張り一般化 (非 explicit でも予約する)。
-
-    explicit (Anthropic) は従来どおり keep-alive を予約し、非 explicit
-    (gemini_explicit / implicit) はセッション見張りを予約する。
+    非 explicit (gemini_explicit / implicit) は温め直す先が無いので何も予約しない
+    (2026-08-24: 見張りだけを回していた経路は、その唯一の目的だったセッション
+    クローズ採取の撤去と同時に消した)。
     """
 
     def _make_lifecycle(self, scheduled, ttl=1200, threshold=0.3):
@@ -2987,43 +2706,32 @@ class SessionWatchdogScheduleTest(unittest.TestCase):
         manager = SimpleNamespace(event_scheduler=scheduler, meta_layer=meta_layer)
         lc = SimpleNamespace(manager=manager, runtime=SimpleNamespace())
         lc.get_anchor_validity_seconds = lambda model_key, persona_id=None: ttl
-        lc._schedule_session_watchdog = SessionLifecycle._schedule_session_watchdog.__get__(lc)
         lc.schedule_cache_ttl_pulse = SessionLifecycle.schedule_cache_ttl_pulse.__get__(lc)
         return lc
 
-    def test_non_explicit_schedules_watchdog(self):
+    def test_non_explicit_schedules_nothing(self):
         scheduled = []
         lc = self._make_lifecycle(scheduled, ttl=1200, threshold=0.3)
         persona = SimpleNamespace(persona_id="air", model="gem")
-        before = datetime.now()
         lc.schedule_cache_ttl_pulse(persona, "gem", "gemini_explicit")
-        self.assertEqual(len(scheduled), 1)
-        fire_at, _callback, key = scheduled[0]
-        self.assertEqual(key, "ttl:air:gem")
-        # anchor validity 1200 × (1 - 0.3) = 840s
-        self.assertAlmostEqual((fire_at - before).total_seconds(), 840, delta=5)
-
-    def test_non_explicit_skipped_when_sluice_disabled(self):
-        scheduled = []
-        lc = self._make_lifecycle(scheduled)
-        persona = SimpleNamespace(persona_id="air", model="gem")
-        with patch.dict(os.environ, {"SAIVERSE_SLUICE_ENABLED": "0"}):
-            lc.schedule_cache_ttl_pulse(persona, "gem", "gemini_explicit")
         self.assertEqual(scheduled, [])
 
-    def test_explicit_schedules_regardless_of_sluice_flag(self):
+    def test_explicit_schedules_keepalive(self):
         """explicit (Anthropic) の keep-alive 予約は sluice フラグに影響されない。"""
         scheduled = []
         lc = self._make_lifecycle(scheduled, ttl=3600, threshold=0.3)
         persona = SimpleNamespace(persona_id="air", model="claude-x")
+        before = datetime.now()
         with patch.dict(os.environ, {"SAIVERSE_SLUICE_ENABLED": "0"}):
             lc.schedule_cache_ttl_pulse(persona, "claude-x", "explicit")
         self.assertEqual(len(scheduled), 1)
         fire_at, _callback, key = scheduled[0]
         self.assertEqual(key, "ttl:air:claude-x")
+        # anchor validity 3600 x (1 - 0.3) = 2520s
+        self.assertAlmostEqual((fire_at - before).total_seconds(), 2520, delta=5)
 
     def test_explicit_keep_cache_alive_false_cancels(self):
-        """explicit の keep_cache_alive=False ゲートは無変更 (見張りには波及しない)。"""
+        """explicit の keep_cache_alive=False ゲートは無変更。"""
         from sea.session_lifecycle import SessionLifecycle
 
         scheduled = []
@@ -3046,10 +2754,24 @@ class SessionWatchdogScheduleTest(unittest.TestCase):
         self.assertEqual(scheduled, [("cancel", "ttl:air:claude-x")])
 
 
-class KeepaliveNonExplicitBranchTest(unittest.TestCase):
-    """run_cache_keepalive: 自律 ON + 非 explicit は LLM を呼ばず見張りだけ再予約。"""
+class KeepaliveEarlyReturnTest(unittest.TestCase):
+    """run_cache_keepalive が LLM に到達せず落ちる 2 つの分岐。"""
 
-    def test_active_non_explicit_reschedules_without_llm(self):
+    def test_autonomy_off_returns_without_warming(self):
+        """自律 OFF のペルソナは温め直さない (keep-alive 連鎖の自然停止)。"""
+        from sea.runtime import SEARuntime
+
+        persona = SimpleNamespace(autonomy_enabled=False, model="gem")
+        rt = SimpleNamespace(manager=SimpleNamespace(personas={"air": persona}))
+        rt.run_cache_keepalive = SEARuntime.run_cache_keepalive.__get__(rt)
+
+        # rt に session_lifecycle も _prepare_context も与えていないので、この
+        # 分岐より先へ進んだら AttributeError で顕在化する。
+        self.assertFalse(rt.run_cache_keepalive("air"))
+
+    def test_non_explicit_returns_without_llm_or_rescheduling(self):
+        """予約は explicit にしか立たないが、発火時に非 explicit へ変わっていたら
+        何もせず落ちる (再予約もしない — 次の本物の呼び出しが改めて予約する)。"""
         from sea.runtime import SEARuntime
 
         persona = SimpleNamespace(autonomy_enabled=True, model="gem")
@@ -3064,28 +2786,14 @@ class KeepaliveNonExplicitBranchTest(unittest.TestCase):
         rt.run_cache_keepalive = SEARuntime.run_cache_keepalive.__get__(rt)
 
         # get_cache_config を gemini_explicit にすると LLM 経路 (_prepare_context 等)
-        # に入らず見張り再予約で return False するはず。rt にそれらのメソッドを
-        # 与えていないので、もし到達したら AttributeError で顕在化する。
-        with patch("saiverse.model_configs.get_cache_config", return_value={"type": "gemini_explicit"}):
+        # に入らず return False するはず。rt にそれらのメソッドを与えていないので、
+        # もし到達したら AttributeError で顕在化する。
+        with patch("saiverse.model_configs.get_cache_config",
+                   return_value={"type": "gemini_explicit"}):
             result = rt.run_cache_keepalive("air")
 
         self.assertFalse(result)
-        self.assertEqual(rescheduled, [("gem", "gemini_explicit")])
-
-    def test_not_active_non_explicit_spawns_session_close(self):
-        """自律 OFF 分岐は cache 型非依存でクローズ spawn (gemini でも同じ)。"""
-        from sea.runtime import SEARuntime
-
-        persona = SimpleNamespace(autonomy_enabled=False, model="gem")
-        rt = SimpleNamespace(manager=SimpleNamespace(personas={"air": persona}))
-        spawned = []
-        rt._spawn_session_close = lambda pid: spawned.append(pid)
-        rt.run_cache_keepalive = SEARuntime.run_cache_keepalive.__get__(rt)
-
-        result = rt.run_cache_keepalive("air")
-
-        self.assertFalse(result)
-        self.assertEqual(spawned, ["air"])
+        self.assertEqual(rescheduled, [])
 
 
 class PanMarkerPersistenceTest(_AdapterTestBase):
@@ -3144,40 +2852,27 @@ class PanMarkerPersistenceTest(_AdapterTestBase):
         # 新キーへ写されている。
         self.assertEqual(self._read_store(), "legacy-id")
 
-    # -- case 2: 新 persona で run_session_close のガードが効く -----------
+    # -- case 2: 再起動後も担当範囲は永続マーカーの次から始まる -------------
 
-    def test_marker_guard_effective_after_restart(self):
-        from unittest.mock import MagicMock
-
+    def test_span_starts_from_persisted_marker_after_restart(self):
+        """属性キャッシュを持たない persona (プロセス再起動相当) でも、担当範囲は
+        永続ストアのマーカーの次から始まる — 採取済みの範囲を採り直さない。"""
         msgs = [{"id": f"m{i}", "content": "x"} for i in range(12)]
-        self._run_pan(self._fresh_persona(), msgs)  # marker → m11
+        self._run_pan(self._fresh_persona(), msgs[:8])  # marker -> m7
+        self.assertEqual(self._read_store(), "m7")
 
-        # 再起動相当の fresh persona (属性キャッシュ無し) で run_session_close。
-        history_mgr = SimpleNamespace()
-        history_mgr.get_history_from_anchor = (
-            lambda anchor, required_line_roles=None, required_scopes=None: msgs
-        )
-        reader = SimpleNamespace(
-            persona_id="tester", persona_name="エア", model="claude-x",
-            sai_memory=self.adapter, history_manager=history_mgr,
-            current_building_id="b",
-        )
+        # 再起動相当の fresh persona (属性キャッシュ無し)。窓は m0..m11 だが、
+        # 担当範囲は永続マーカーの次 (m8) から始まる。
+        reader = self._fresh_persona()
         self.assertIsNone(getattr(reader, "_sluice_last_pan_id", None))
-
-        lifecycle = SimpleNamespace(
-            runtime=FakeRuntime(FakeLLMClient(_sluice_result())),
-        )
-        lifecycle.is_chronicle_enabled_for_persona = lambda p: False
-        lifecycle.generate_chronicle = MagicMock()
-        lifecycle.ensure_recall_embeddings = MagicMock()
-        lifecycle._is_cache_hot = lambda p: True
-
-        # close_min デフォルト (10) に対し新規 0 件 → below_min で採取スキップ。
-        with patch("sea.sluice.run_sluice") as pan:
-            result = sluice.run_session_close(lifecycle, reader)
-        pan.assert_not_called()
-        self.assertFalse(result["panned"])
-        self.assertEqual(result["skipped_reason"], "below_min")
+        self._run_pan(reader, msgs, result=_sluice_result(
+            reflection="回収",
+            did_memos=[{"new_activity_name": "散歩", "text": "川沿いを歩いた"}],
+        ))
+        row = self.adapter.conn.execute(
+            "SELECT span_start_id, span_end_id FROM memos"
+        ).fetchone()
+        self.assertEqual((row[0], row[1]), ("m8", "m11"))
         # read-through で永続ストアの marker が属性へ昇格している。
         self.assertEqual(reader._sluice_last_pan_id, "m11")
 
