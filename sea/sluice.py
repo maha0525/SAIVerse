@@ -1842,6 +1842,8 @@ def _call_sluice_llm(
     span_ids: List[str],
     span_end_full: Optional[str],
     span_new_count: Optional[int],
+    window_anchor_id: Optional[str] = None,
+    model_key: Optional[str] = None,
 ) -> Dict[str, Any]:
     """LLM 呼び出しフェーズ (context 組み → 後退つき generate → usage → 検証)。
 
@@ -1861,15 +1863,32 @@ def _call_sluice_llm(
     runtime = lifecycle.runtime
     persona_id = getattr(persona, "persona_id", None)
 
-    # standard tier (default モデル固定)。lightweight への分岐は書かない (intent §5-7)。
+    # model は呼び出し元 (run_metabolism) が窓を撮ったのと同じ model_key に
+    # 揃える (Codex 2026-08-24 #2): 窓と畳み (folds) と anchor 行は
+    # (persona, model) ごとなので、ここで別 model に解決すると退場計画の窓と
+    # スルース入力が別物になり、prefix の凍結 (pinned_anchor_id) も別 Session
+    # の起点を凍結する誤りになる。窓取得・畳み適用・hot 判定・prefix 組成・
+    # LLM 呼び出しの全部がこの一つの model_key で揃う。
+    # intent gold_panning §5-7「lightweight への分岐は書かない」は tier 分岐の
+    # 禁止 (判断の質を軽量 tier へ落とさない) であって、セッションの model へ
+    # の統一とは別問題 (§5-7 の注記参照)。model_key が来ない互換経路
+    # (直接呼び) だけ従来どおり standard tier を解決する。
     # Beat 相当の開始点 — Pulse 外なので pulse_context=None (beat_execution_context §2.1)。
     # _prepare_context より先に解決するのは、head を同じ model の Session
     # (persona, model) に向けて render するため (§3.1)。
     from sea.pulse_context import resolve_execution_context
     execution_context = resolve_execution_context(persona, None)
+    if model_key and execution_context.model_key != model_key:
+        execution_context = execution_context.with_model(model_key)
 
     # メインラインと同じ context を組み、末尾に注入プロンプトを 1 つ足す。
     # 直前の応答コールで prefix が温まっている前提 (defer-to-hot が保証)。
+    # 起点の凍結 (window_anchor_id → pinned_anchor_id): 呼び出し元
+    # (run_metabolism) が実行頭に撮った窓の起点をそのまま使い、組成中の起点
+    # 前進 (§14-2 機構1) を判定ごと走らせない — 「一回の整理は一つの一貫した
+    # 窓で最後まで走る」(2026-08-24 まはー裁定)。前回の会話 prefix はこの
+    # 起点で組まれているので、凍結は温まった prefix を守る方向でもある
+    # (実行中の前進はむしろ prefix を変えてキャッシュを壊していた)。
     # context_meta: 今回の prefix の anchor を call-local で受け取る (§3.2)。
     context_meta: Dict[str, Any] = {}
     context_messages = list(runtime._prepare_context(
@@ -1877,10 +1896,12 @@ def _call_sluice_llm(
         context_meta=context_meta,
         # コア記憶・手帳の採取はメインラインへの一手 = ペルソナ本人の判断として残る。
         persona_voiced=True,
+        pinned_anchor_id=window_anchor_id,
     ) or [])
     # 見た集合の一次情報 (Codex 第四巡 修正 1): _prepare_context が**実際に
     # プロンプトへ組み込んだ**履歴メッセージの ID 列を out-param で受け取る。
-    # コールド実行の anchor 前進も、この列が組成の実体から来るので自然に映る。
+    # 起点を凍結しない呼び出し (window_anchor_id=None の互換経路) では anchor
+    # 前進も、この列が組成の実体から来るので自然に映る。
     # 取得できない (履歴構築の失敗・契約を満たさない代替実装) は fail-closed —
     # 別読みの近似や「渡された窓で代用」の fail-open はしない。
     presented_ids_raw = context_meta.get("presented_message_ids")
@@ -2038,6 +2059,8 @@ def run_sluice(
     *,
     run_id: Optional[str] = None,
     finalize: bool = True,
+    window_anchor_id: Optional[str] = None,
+    model_key: Optional[str] = None,
 ) -> Dict[str, Any]:
     """スルース本体。押し出し直前のメインライン prefix に 1 手足して採取を判断させる。
 
@@ -2060,6 +2083,22 @@ def run_sluice(
             窓の先頭からの連続とは限らない — chronicle_eviction.md §5)。
         run_id: スルース実行 ID (冪等キーの種)。省略時は乱数採番。テストと
             再適用検証用に注入可能にしてある。
+        window_anchor_id: ``current_messages`` を撮った窓の起点。渡されると
+            スルースのプロンプト組成はこの起点に**凍結**され、組成中の起点
+            前進 (§14-2 機構1) は判定ごと走らない — 退場計画の土台とスルース
+            入力が同じ窓になる (2026-08-24 まはー裁定「一回の整理は一つの
+            一貫した窓で最後まで走る」)。凍結起点で組めなければ
+            :class:`~sea.runtime_context.PinnedAnchorUnavailableError` が
+            送出され、退場停止に乗る (通常解決へのフォールバック禁止)。
+            None は互換経路 (窓が起点を持たないブートストラップ等) で、
+            従来どおり組成側が起点を解決する。**契約: 非空の
+            ``current_messages`` を渡す呼び出し元は必ず起点も渡すこと** —
+            渡さないと組成側の解決 (§14-2 前進つき) が復活し、退場計画の
+            土台とスルース入力が別々の窓になる (run_metabolism は関所で
+            この形を "failed" に落とす)。
+        model_key: 呼び出し元 (run_metabolism) が窓を撮った model。プロンプト
+            組成 (head / 畳み / prefix) と LLM 呼び出しをこの model の
+            Session に揃える。None は互換経路で standard tier を解決する。
 
     Returns:
         {"ops_applied": int, "ops_failed": int,
@@ -2218,7 +2257,8 @@ def run_sluice(
         try:
             call = _call_sluice_llm(
                 lifecycle, persona, building_id, span_ids, span_end_full,
-                span_new_count,
+                span_new_count, window_anchor_id=window_anchor_id,
+                model_key=model_key,
             )
         except Exception as exc:
             # LLM 失敗・出力不適合 = 適用前の検証棄却 (副作用ゼロ) → failed。

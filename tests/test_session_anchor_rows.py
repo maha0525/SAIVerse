@@ -1006,8 +1006,10 @@ def test_manual_compaction_with_failing_sluice_does_not_shrink_the_window(
     直後にスルースが失敗しても、提示ウィンドウの文字数は減らない。
 
     事故は「スルース自身のプロンプト組成が起点を解決した瞬間に機構1 が発火し、
-    いま生成した Chronicle の最前線まで起点が進む」並びで起きた。ここでは起点が
-    既にマーカーの次 (= 通過済みの境界) にあるので、機構1 は 1 通も動かせない。
+    いま生成した Chronicle の最前線まで起点が進む」並びで起きた。現行仕様
+    (起点の凍結、2026-08-24) ではスルースは起点を解決しない — 呼び出し元が
+    実行頭に撮った窓の起点が window_anchor_id で渡り、失敗しても anchor 行と
+    提示ウィンドウは実行前のまま残ることを固定する。
     """
     from sea.eviction_plan import Watermarks, message_chars
 
@@ -1034,14 +1036,15 @@ def test_manual_compaction_with_failing_sluice_does_not_shrink_the_window(
 
     before = message_chars(lc.get_presented_window(persona, "model-a").presented)
 
-    resolved = []
+    pinned = []
 
     def _failing_sluice(lifecycle, persona_, building_id, current_messages,
-                        evict_count, event_callback=None, finalize=False):
-        # スルースは自分のプロンプトを組む — その組成が起点を解決する (実機の並び)。
-        resolved.append(
-            lifecycle.resolve_metabolism_anchor(persona_, model_key="model-a"),
-        )
+                        evict_count, event_callback=None, finalize=False,
+                        window_anchor_id=None, model_key=None):
+        # 新仕様 (起点の凍結): スルースは起点を自分で解決しない — 呼び出し元が
+        # 実行頭に撮った窓の起点が window_anchor_id で渡ってくる。ここで失敗
+        # しても、その凍結値と anchor 行が動いていないことを下で検算する。
+        pinned.append((window_anchor_id, model_key))
         raise RuntimeError("structured output loop")
 
     with patch.object(lc, "is_chronicle_enabled_for_persona", return_value=True), \
@@ -1055,7 +1058,7 @@ def test_manual_compaction_with_failing_sluice_does_not_shrink_the_window(
         status = lc.run_manual_compaction(persona)
 
     assert status == "failed"                      # 退場は止まった
-    assert resolved == [("m3", "self")]            # 組成中も起点は動かない
+    assert pinned == [("m3", "model-a")]           # 実行頭の窓の起点と model が凍結で届く
     assert lc.load_anchor_entry(PERSONA_ID, "model-a")["anchor_id"] == "m3"
     after = message_chars(lc.get_presented_window(persona, "model-a").presented)
     assert after == before

@@ -2589,6 +2589,20 @@ class SessionLifecycle:
                 "(persona=%s)", persona_id,
             )
             return "nothing"
+        if not window.anchor_id:
+            # 関所 (Codex 2026-08-24 #1): 非空の窓が起点を持たないのは契約違反。
+            # 本番の全呼び出し元 (maybe_run_metabolism / run_manual_compaction /
+            # emergency / cold precompaction) は get_presented_window 経由で窓を
+            # 作り、起点なしは空窓になるのでここへは到達しない — 型の上でだけ
+            # 手組みの窓で通れる。起点なしのまま進むとスルースの凍結
+            # (window_anchor_id) が None になり、組成側の起点解決 (§14-2 前進
+            # つき) が復活して「一つの一貫した窓」が破れる — fail-closed。
+            LOGGER.error(
+                "[metabolism] non-empty window without anchor_id (persona=%s, "
+                "%d messages); refusing to run — the sluice would compose on an "
+                "unpinned window", persona_id, len(current_messages),
+            )
+            return "failed"
 
         # §15-3 印戻し: 読み戻しで生に開いた圧縮区間は、退場計画より先に digest
         # 提示へ戻す (既存あらすじの再利用 = 編纂ゼロの畳み)。印戻しだけで残す量に
@@ -2701,9 +2715,16 @@ class SessionLifecycle:
         if chronicle_status in ("ok", "disabled"):
             try:
                 from sea.sluice import run_sluice
+                # window_anchor_id: 実行頭に撮った窓の起点をスルースへ渡し、
+                # プロンプト組成をこの起点に凍結する — 実行中に Chronicle が
+                # 確定して機構1 (§14-2) が動いても、退場計画の土台とスルース
+                # 入力は同じ窓のまま (2026-08-24 まはー裁定「一回の整理は
+                # 一つの一貫した窓で最後まで走る」)。
                 sluice_summary = run_sluice(
                     self, persona, building_id, current_messages, evict_count,
                     event_callback, finalize=False,
+                    window_anchor_id=window.anchor_id,
+                    model_key=model_key,
                 )
                 sluice_seen_ids = (sluice_summary or {}).get("seen_ids")
                 sluice_seen_end = (sluice_summary or {}).get("seen_span_end")

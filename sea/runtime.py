@@ -2102,7 +2102,7 @@ class SEARuntime:
 
     # ---------------- context preparation -----------------
 
-    def _prepare_context(self, persona: Any, building_id: str, user_input: Optional[str], requirements: Optional[Any] = None, pulse_id: Optional[str] = None, warnings: Optional[List[Dict[str, Any]]] = None, preview_only: bool = False, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None, cancellation_token: Optional[Any] = None, pulse_type: Optional[str] = None, model_key: Optional[str] = None, context_meta: Optional[Dict[str, Any]] = None, persona_voiced: bool = False, persist_anchor_advance: bool = True) -> List[Dict[str, Any]]:
+    def _prepare_context(self, persona: Any, building_id: str, user_input: Optional[str], requirements: Optional[Any] = None, pulse_id: Optional[str] = None, warnings: Optional[List[Dict[str, Any]]] = None, preview_only: bool = False, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None, cancellation_token: Optional[Any] = None, pulse_type: Optional[str] = None, model_key: Optional[str] = None, context_meta: Optional[Dict[str, Any]] = None, persona_voiced: bool = False, persist_anchor_advance: bool = True, pinned_anchor_id: Optional[str] = None) -> List[Dict[str, Any]]:
         return prepare_context_impl(
             self,
             persona,
@@ -2119,6 +2119,7 @@ class SEARuntime:
             context_meta=context_meta,
             persona_voiced=persona_voiced,
             persist_anchor_advance=persist_anchor_advance,
+            pinned_anchor_id=pinned_anchor_id,
         )
 
     # ---- Context Preview (read-only, no side effects) ----

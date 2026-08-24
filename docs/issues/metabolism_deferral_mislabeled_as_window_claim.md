@@ -38,9 +38,15 @@
 - `ArasujiViewer.tsx` の案内表に `window_claimed` / `sluice_unseen` を追加 (「予期しないエラー」への落下を解消)。`PersonaMenu.tsx` の organize-memory 側も追従。
 - 回帰: `tests/test_arasuji_generation_status_mapping.py` (写像 3 件・新規、文面が「新しい会話」と断定しないことも固定) + 既存 unseen 系の戻り値更新。歯止めを外すと対応テストが落ちることを実測済み。
 
-## 残す設計課題 (v0.4 候補)
+## 根本修理済み (2026-08-24) — 起点の凍結
 
-冷えた起点の手動生成では、この見送りが毎回一度は出る (次回で続きから進むので詰まないが、一手多い)。一押しで退場まで通したいなら「関所の照合を、スルースが実際に使った起点以降の行に限定する」形が候補 — 機構 1 の前進はパンマーカー頭打ち (d71facaa) で守られているので不変条件は保てる見込み。ただし退場の中心不変条件を触る変更なので、v0.3 では踏み込まない。
+まはー裁定: **「一回の整理 (Metabolism) は一つの一貫した窓で最後まで走る」** — 見送り + 次回続行という動き自体を欠陥と認定し、根本修理した。表示修正 (上の節、別コミット) が「見送りを正直に報告する」だったのに対し、こちらは「その見送り自体を起こさなくする」。
+
+- `run_metabolism` は実行頭に撮った窓の起点 (`window.anchor_id`) を `run_sluice` → `_prepare_context` の新引数 `pinned_anchor_id` として渡す。凍結された組成は `resolve_metabolism_anchor` を呼ばない — §14-2 (機構 1) の起点前進は**判定ごと**走らないので、実行中に Chronicle が確定して最前線が動いても、退場計画の土台とスルース入力は同じ窓のまま。既存の `persist_anchor_advance=False` (前進を計算するが永続化しない、keepalive 用) とは別の意味論。
+- **fail-closed**: 凍結起点で履歴が組めないときは `PinnedAnchorUnavailableError` (sea/runtime_context.py) を送出し、通常解決へフォールバックしない — フォールバックはこの競合を静かに再導入する穴になる。送出は退場停止に写像され、次回の Metabolism が再試行する。
+- キャッシュにも順方向: 前回の会話 prefix は凍結する起点で組まれているので、実行中の前進 (prefix を変えてキャッシュを壊す方向だった) を止めることはキャッシュヒットを守る。
+- **末尾の新着への安全弁は残る**: 関所 (`_marker_advance_is_safe` / `_eviction_within_seen`) は従来どおりで、記録済み結果の再適用時に窓が新着で伸びていれば退場は見送られる (`test_reapply_does_not_evict_unseen_tail`)。凍結したのは起点 (頭側) だけ。
+- 仕様テストの入れ替え: 旧「見送りが正しい」を固定していた `test_cold_run_anchor_advance_blocks_eviction` / `test_cold_run_head_gap_recovers_on_next_metabolism` は、`test_pinned_window_evicts_in_one_run` (一発退場 + seen が実行頭の窓の全行を覆う) / `test_pinned_anchor_unavailable_fails_closed` に置き換え。凍結組成の fail-closed 契約は `PinnedHistoryCompositionTest` が直接固定する。
 
 ## 検証
 

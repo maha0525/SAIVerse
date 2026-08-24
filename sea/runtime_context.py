@@ -130,6 +130,55 @@ def history_spec_is_empty(history_depth: Any) -> bool:
         return False
 
 
+class PinnedAnchorUnavailableError(RuntimeError):
+    """起点を凍結した組成 (``pinned_anchor_id``) で、その起点から履歴を組めなかった。
+
+    起点の凍結は「一回の整理 (Metabolism) は一つの一貫した窓で最後まで走る」
+    (2026-08-24 まはー裁定) のための機構で、使うのは Metabolism 実行内の
+    スルース経路だけ。凍結が効かないときに通常の起点解決へ黙って落とすと、
+    凍結で塞いだ競合 (実行中の §14-2 起点前進で、退場計画の土台とスルース
+    入力が別々の窓になる) が静かに再導入される — だからフォールバックせず
+    送出する (fail-closed)。呼び出し元 (run_sluice → run_metabolism) は
+    スルース失敗 = 退場停止に写像し、次回の Metabolism が再試行する。
+    """
+
+
+def _pinned_history_from_anchor(
+    runtime,
+    persona,
+    history_mgr,
+    pinned_anchor_id: str,
+    model_key: Optional[str],
+    required_line_roles: List[str],
+    required_scopes: List[str],
+    pulse_id: Optional[str],
+) -> List[Dict[str, Any]]:
+    """凍結された起点から提示履歴を組む (fail-closed)。
+
+    :func:`resolve_metabolism_anchor` を呼ばない — §14-2 (機構1) の前進判定
+    自体を行わないのが凍結の意味論で、``persist_anchor_advance=False``
+    (前進を計算するが永続化しない、keepalive 用) とは別物。組めなかったら
+    :class:`PinnedAnchorUnavailableError` を送出する (通常解決への
+    フォールバック禁止 — クラス docstring 参照)。
+    """
+    recent = history_mgr.get_history_from_anchor(
+        pinned_anchor_id,
+        required_line_roles=required_line_roles,
+        required_scopes=required_scopes,
+        pulse_id=pulse_id,
+    )
+    recent = runtime.session_lifecycle.apply_window_folds(
+        persona, model_key, recent,
+    )
+    if not recent:
+        raise PinnedAnchorUnavailableError(
+            f"pinned anchor {pinned_anchor_id!r} yielded no history "
+            f"(persona={getattr(persona, 'persona_id', None)!r}); refusing to "
+            "fall back to anchor resolution"
+        )
+    return recent
+
+
 class PersonaVoiceWithoutHistoryError(RuntimeError):
     """ペルソナ名義の稼働なのに会話履歴が無い状態で LLM を走らせようとした。
 
@@ -144,7 +193,7 @@ class PersonaVoiceWithoutHistoryError(RuntimeError):
     """
 
 
-def prepare_context(runtime, persona: Any, building_id: str, user_input: Optional[str], requirements: Optional[Any] = None, pulse_id: Optional[str] = None, warnings: Optional[List[Dict[str, Any]]] = None, preview_only: bool = False, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None, cancellation_token: Optional[Any] = None, pulse_type: Optional[str] = None, model_key: Optional[str] = None, context_meta: Optional[Dict[str, Any]] = None, persona_voiced: bool = False, persist_anchor_advance: bool = True) -> List[Dict[str, Any]]:
+def prepare_context(runtime, persona: Any, building_id: str, user_input: Optional[str], requirements: Optional[Any] = None, pulse_id: Optional[str] = None, warnings: Optional[List[Dict[str, Any]]] = None, preview_only: bool = False, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None, cancellation_token: Optional[Any] = None, pulse_type: Optional[str] = None, model_key: Optional[str] = None, context_meta: Optional[Dict[str, Any]] = None, persona_voiced: bool = False, persist_anchor_advance: bool = True, pinned_anchor_id: Optional[str] = None) -> List[Dict[str, Any]]:
     # model_key: この context を届ける Session (persona, model) の実行 model
     # (beat_execution_context.md §3.1 — head は (persona, model) に一つ)。
     # ExecutionContext が届いている呼び出し元 (work_session / sluice /
@@ -173,6 +222,20 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
             " 指定されました。ペルソナ名義の稼働から会話履歴を外すことはできません"
             " (人格を必要としない処理なら persona_voiced=False で呼んでください)。"
             f" persona={getattr(persona, 'persona_id', None)!r}"
+        )
+
+    # 起点の凍結 (pinned_anchor_id) は anchor 起点の提示組成 (history_depth
+    # "full") でだけ意味を持つ。別の depth や履歴の無い persona で黙って
+    # 無視すると、凍結したつもりの呼び出し元 (sluice) が通常解決の窓で走る —
+    # ここで落とす (fail-closed)。
+    if pinned_anchor_id is not None and (
+        reqs.history_depth != "full"
+        or getattr(persona, "history_manager", None) is None
+    ):
+        raise PinnedAnchorUnavailableError(
+            f"pinned_anchor_id={pinned_anchor_id!r} requires history_depth='full' "
+            f"and a history_manager (got depth={reqs.history_depth!r}, "
+            f"persona={getattr(persona, 'persona_id', None)!r})"
         )
 
     messages: List[Dict[str, Any]] = []
@@ -284,7 +347,29 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
                         )
 
                 if history_depth == "full":
-                    if not metabolism_active:
+                    if pinned_anchor_id is not None:
+                        # 起点の凍結 (2026-08-24 まはー裁定「一回の整理は一つの
+                        # 一貫した窓で最後まで走る」): resolve_metabolism_anchor
+                        # を呼ばず、呼び出し元 (run_metabolism) が実行頭に撮った
+                        # 窓の起点から組む。実行中に Chronicle が確定して最前線
+                        # が動いても、この組成は動かない — §14-2 (機構1) の前進
+                        # 判定ごと走らせない。組めなければ送出 (fail-closed、
+                        # ヘルパーの docstring 参照)。
+                        recent = _pinned_history_from_anchor(
+                            runtime, persona, history_mgr, pinned_anchor_id,
+                            model_key, required_line_roles, required_scopes,
+                            pulse_id,
+                        )
+                        history_anchor_id = pinned_anchor_id
+                        used_anchor = True
+                        if context_meta is not None:
+                            context_meta["prefix_anchor_id"] = pinned_anchor_id
+                        LOGGER.debug(
+                            "[sea][prepare-context] Pinned-anchor retrieval: "
+                            "%d messages from anchor %s (no anchor resolution)",
+                            len(recent), pinned_anchor_id,
+                        )
+                    elif not metabolism_active:
                         limit_value = _minimal_load_chars(runtime, persona, model_key)
                         LOGGER.debug(
                             "[sea][prepare-context] Model has no watermarks; sliding window %d chars",
@@ -535,6 +620,11 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
                         if _mid:
                             presented_ids.append(str(_mid))
                     context_meta["presented_message_ids"] = presented_ids
+            except PinnedAnchorUnavailableError:
+                # 凍結起点の失敗は握らない — ここで warning に丸めると、呼び出し
+                # 元 (sluice) は「presented_message_ids 不在」という遠い顔の
+                # 失敗になる。実名で送出して退場停止に乗せる。
+                raise
             except Exception as exc:
                 LOGGER.exception("[sea][prepare-context] Failed to get history: %s", exc)
 

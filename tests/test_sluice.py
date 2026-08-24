@@ -129,12 +129,27 @@ class FakeRuntime:
     - list: その ID 列をそのまま書く (実入力と窓のズレの模擬)。
     - None: キー自体を書かない (履歴構築失敗の模擬 — sluice は fail-closed)。
 
+    ``pinned_presented`` (dict[anchor_id -> ids] | None) は起点の凍結
+    (pinned_anchor_id) の模擬。None (既定) は凍結を持たない旧来動作
+    (既存テストの互換)。dict を渡したテストでは本物の実装
+    (sea/runtime_context.py) の契約を写す:
+
+    - pinned が渡ってきて dict にその起点があれば、その ID 列から履歴本体
+      (id つきメッセージ列) を組んで返し、metadata (presented_message_ids) も
+      同じ列にする (= 凍結された窓が LLM 入力そのものになる)。
+    - pinned が dict に無ければ PinnedAnchorUnavailableError を送出する
+      (fail-closed — 通常解決へ落ちない)。
+    - pinned が渡ってこなければ ``presented_ids`` (= 組成側が起点を解決した
+      場合の入力) に落ちる — 「凍結が渡らなければ実行中の前進で頭が漏れる」
+      環境の再現。
+
     既定の context_messages は id を持つ履歴を 1 通含む — スルースは「1 通も
     見ていない結果」を凍結しない (Codex 第八巡 修正 2) ため、正常系のフェイクは
     見た集合が空にならないようにする。
     """
 
-    def __init__(self, client, context_messages=None, presented_ids="auto"):
+    def __init__(self, client, context_messages=None, presented_ids="auto",
+                 pinned_presented=None):
         self.client = client
         self.touched = []
         self.context_messages = context_messages or [
@@ -142,18 +157,42 @@ class FakeRuntime:
             {"role": "user", "content": "u0", "id": "ctx0"},
         ]
         self.presented_ids = presented_ids
+        self.pinned_presented = pinned_presented
+        self.prepare_calls = []
 
     def _prepare_context(self, persona, building_id, user_input, *args,
-                         context_meta=None, **kwargs):
-        if context_meta is not None and self.presented_ids is not None:
-            if self.presented_ids == "auto":
-                ids = [
-                    str(m["id"]) for m in self.context_messages
-                    if isinstance(m, dict) and m.get("id")
-                ]
-            else:
-                ids = [str(i) for i in self.presented_ids]
-            context_meta["presented_message_ids"] = ids
+                         context_meta=None, pinned_anchor_id=None, **kwargs):
+        self.prepare_calls.append({
+            "pinned_anchor_id": pinned_anchor_id,
+            "model_key": kwargs.get("model_key"),
+        })
+        pinned_ids = None
+        if self.pinned_presented is not None and pinned_anchor_id is not None:
+            if pinned_anchor_id not in self.pinned_presented:
+                from sea.runtime_context import PinnedAnchorUnavailableError
+                raise PinnedAnchorUnavailableError(
+                    f"pinned anchor {pinned_anchor_id!r} yielded no history (fake)"
+                )
+            pinned_ids = [str(i) for i in self.pinned_presented[pinned_anchor_id]]
+        if pinned_ids is not None:
+            # 凍結された窓を LLM 入力の本体としても返す — テストは metadata
+            # だけでなく「LLM に渡った messages の ID 列」まで検証できる。
+            if context_meta is not None:
+                context_meta["presented_message_ids"] = list(pinned_ids)
+            return [{"role": "system", "content": "HEAD"}] + [
+                {"role": "user", "content": f"history-{mid}", "id": mid}
+                for mid in pinned_ids
+            ]
+        if context_meta is not None:
+            if self.presented_ids is not None:
+                if self.presented_ids == "auto":
+                    ids = [
+                        str(m["id"]) for m in self.context_messages
+                        if isinstance(m, dict) and m.get("id")
+                    ]
+                else:
+                    ids = [str(i) for i in self.presented_ids]
+                context_meta["presented_message_ids"] = ids
         return list(self.context_messages)
 
     def _select_llm_client(self, node_def, persona, needs_structured_output=False, state=None):
@@ -2213,10 +2252,12 @@ class MetabolismUnseenTailGuardTest(_AdapterTestBase):
         except (PermissionError, OSError):
             pass
 
-    def _make_lifecycle(self, client, presented_ids="auto"):
+    def _make_lifecycle(self, client, presented_ids="auto", pinned_presented=None):
         from sea.session_lifecycle import SessionLifecycle
 
-        runtime = FakeRuntime(client, presented_ids=presented_ids)
+        runtime = FakeRuntime(
+            client, presented_ids=presented_ids, pinned_presented=pinned_presented,
+        )
         lifecycle = SessionLifecycle(runtime, self.manager)
         lifecycle.ensure_recall_embeddings = lambda p: None
         lifecycle._attach_chronicle_refs = _stub_chronicle_refs
@@ -2312,78 +2353,128 @@ class MetabolismUnseenTailGuardTest(_AdapterTestBase):
         memo_rows = self.adapter.conn.execute("SELECT text FROM memos").fetchall()
         self.assertEqual(len(memo_rows), 1)
 
-    # -- コールド実行相当: _prepare_context の anchor 前進で入力がズレる並び ----
+    # -- 起点の凍結: 一回の整理は一つの一貫した窓で最後まで走る --------------
 
-    def test_cold_run_anchor_advance_blocks_eviction(self):
-        """コールド実行では _prepare_context 自身が anchor を前進させ、スルースの
-        LLM 入力から退場対象が漏れうる (Codex 第三巡 修正 1)。実入力 ID 列
-        (presented_message_ids) に退場計画の対象 ID 全件が含まれなければ退場は
-        止まる (Codex 第四巡 修正 1: 見た集合は実入力由来)。"""
+    def test_pinned_window_evicts_in_one_run(self):
+        """一回の整理は一つの一貫した窓で最後まで走る (2026-08-24 まはー裁定)。
+
+        旧挙動: スルースのプロンプト組成が実行中に起点を前進させ (Chronicle
+        確定 → §14-2 機構1)、実入力から窓の頭が漏れて退場が次回へ見送られて
+        いた (2026-08-24 エリス実機: 窓 106 行 vs seen 98 行)。現行:
+        run_metabolism が実行頭の窓の起点を run_sluice → _prepare_context
+        (pinned_anchor_id) へ凍結で渡すので、スルースは同じ窓の全行を見て、
+        退場まで一発で通る。
+        """
         base = _metabolism_messages()  # m0..m4 — 退場計画は m0..m2 を畳む
         client = FakeLLMClient(_sluice_result())
-        # 実入力は anchor 前進後の m2..m4 だけ (m0, m1 が漏れる)。
         lifecycle, anchors = self._make_lifecycle(
-            client, presented_ids=["m2", "m3", "m4"],
+            client,
+            # 凍結が渡らなければ組成は前進後の m2..m4 を返す (旧経路の再現)。
+            presented_ids=["m2", "m3", "m4"],
+            # 凍結が効けば実行頭の窓 (m0..m4) の全行が実入力になる。
+            pinned_presented={"m0": [m["id"] for m in base]},
         )
         persona = self._persona(base)
         ret = self._run_metabolism(lifecycle, persona, base)
-        self.assertEqual(ret, "deferred_sluice_unseen")
-        self.assertEqual(anchors, [])           # 退場 (anchor 前進) は止まる
-        self.assertEqual(len(client.calls), 1)  # スルース自体は走って成功している
-        # 確定も保留される (Codex 第五巡 修正 2): マーカーがヘッドギャップ
-        # (未提示の m0, m1) を跨いで m4 へ進むと、m0, m1 は次回の担当範囲からも
-        # 漏れて永遠に採取されない。台帳は applied のまま次回の再適用に委ねる。
-        self.assertIsNone(getattr(persona, "_sluice_last_pan_id", None))
-        from sai_memory.memory.storage import get_embed_metadata
-        with self.adapter._db_lock:
-            self.assertIsNone(
-                get_embed_metadata(self.adapter.conn, sluice._PAN_MARKER_KEY),
+        self.assertEqual(ret, "ok")
+        self.assertTrue(anchors)                # 退場 (anchor 前進) が一発で進む
+        self.assertEqual(len(client.calls), 1)
+        # スルースには実行頭の窓の起点が凍結で渡っている。
+        self.assertEqual(
+            lifecycle.runtime.prepare_calls[-1]["pinned_anchor_id"], "m0",
+        )
+        # LLM に実際に渡った messages の本体が凍結された窓 (m0..m4) を含む —
+        # metadata (presented_message_ids) だけの偽装ではない (Codex #3)。
+        sent = client.calls[0]["messages"]
+        self.assertEqual(
+            [m["id"] for m in sent if isinstance(m, dict) and m.get("id")],
+            [m["id"] for m in base],
+        )
+        # seen は実行頭の窓の全行を覆い、記録は completed で確定している。
+        row = self.ledger.find_execution("sluice.pan", "tester:m0")
+        self.assertEqual(row["status"], "completed")
+        self.assertEqual(row["result"]["seen_ids"], [m["id"] for m in base])
+        # マーカーも窓の末尾まで確定。
+        self.assertEqual(persona._sluice_last_pan_id, "m4")
+
+    def test_nonempty_window_without_anchor_fails_closed(self):
+        """非空の窓が起点を持たないまま run_metabolism へ来たら関所で止まる。
+
+        本番の呼び出し元は get_presented_window 経由 (起点なしは空窓) なので
+        到達しないが、型の上では手組みの窓で通れる — 起点なしのまま進むと
+        スルースの凍結が None になり、組成側の起点解決 (§14-2 前進つき) が
+        復活する (Codex 2026-08-24 #1)。
+        """
+        base = _metabolism_messages()
+        client = FakeLLMClient(_sluice_result())
+        lifecycle, anchors = self._make_lifecycle(client)
+        window = SessionWindow(
+            anchor_id=None, raw=list(base), presented=list(base), folds=[],
+        )
+        with patch.dict(os.environ, {"SAIVERSE_CHRONICLE_BAND_BUDGET": "2500"}), \
+                patch("saiverse.dynamic_state.DynamicStateManager.on_metabolism",
+                      lambda *a, **k: None):
+            ret = lifecycle.run_metabolism(
+                self._persona(base), "b", window, _METABOLISM_WATERMARKS, None,
             )
+        self.assertEqual(ret, "failed")
+        self.assertEqual(anchors, [])       # 退場 (anchor 前進) は走らない
+        self.assertEqual(client.calls, [])  # スルースの LLM も呼ばれない
+
+    def test_metabolism_model_key_reaches_sluice_composition(self):
+        """呼び出し元 (run_metabolism) の model_key がスルースの組成と実行に届く。
+
+        窓・畳み・anchor 行は (persona, model) ごと — スルースが別 model で
+        解決すると退場計画の窓とスルース入力が別 Session になる (Codex
+        2026-08-24 #2)。組成 (_prepare_context の model_key)・LLM 選択・退役
+        (update_anchor_for_model) の全部が同じ model_key で揃うことを固定する。
+        """
+        base = _metabolism_messages()
+        client = FakeLLMClient(_sluice_result())
+        lifecycle, anchors = self._make_lifecycle(
+            client, presented_ids=[m["id"] for m in base],
+        )
+        persona = self._persona(base)  # persona.model = "claude-x"
+        window = _metabolism_window(base)
+        with patch.dict(os.environ, {"SAIVERSE_CHRONICLE_BAND_BUDGET": "2500"}), \
+                patch("saiverse.dynamic_state.DynamicStateManager.on_metabolism",
+                      lambda *a, **k: None):
+            ret = lifecycle.run_metabolism(
+                persona, "b", window, _METABOLISM_WATERMARKS, None,
+                model_key="model-b",
+            )
+        self.assertEqual(ret, "ok")
+        # 組成が呼び出し元の model で走った (persona.model への再解決ではない)。
+        self.assertEqual(
+            lifecycle.runtime.prepare_calls[-1]["model_key"], "model-b",
+        )
+        # 退役 (anchor 前進) も同じ model の行だけ。
+        self.assertTrue(anchors)
+        self.assertTrue(all(m == "model-b" for m, _aid in anchors))
+
+    def test_pinned_anchor_unavailable_fails_closed(self):
+        """凍結起点で組めないときは通常解決へ落ちず、スルース失敗 = 退場停止。
+
+        フォールバックは「実行中の起点前進で窓が二枚になる」競合を静かに
+        再導入する穴になる — PinnedAnchorUnavailableError が送出され、LLM は
+        呼ばれず、台帳は failed、次回の Metabolism が新しい窓で再試行する。
+        """
+        base = _metabolism_messages()
+        client = FakeLLMClient(_sluice_result())
+        lifecycle, anchors = self._make_lifecycle(
+            client,
+            presented_ids=[m["id"] for m in base],
+            pinned_presented={},  # どの起点も解決できない
+        )
+        persona = self._persona(base)
+        ret = self._run_metabolism(lifecycle, persona, base)
+        self.assertEqual(ret, "failed")
+        self.assertEqual(anchors, [])           # 退場 (anchor 前進) は止まる
+        self.assertEqual(client.calls, [])      # LLM は呼ばれない
+        self.assertIsNone(getattr(persona, "_sluice_last_pan_id", None))
         self.assertEqual(
             self.ledger.find_execution("sluice.pan", "tester:m0")["status"],
-            "applied",
-        )
-
-    def test_cold_run_head_gap_recovers_on_next_metabolism(self):
-        """コールド anchor ズレ → 次回回収の統合。anchor 前進が永続した次回の
-        Metabolism では窓自体が m2 から始まり、新しい担当範囲 (key も新しい) の
-        フレッシュなスルースが走って確定・退場まで進む。"""
-        base = _metabolism_messages()  # m0..m4
-
-        # 1 回目: 実入力 m2..m4 (ヘッドギャップ) → 確定保留・退場見送り。
-        client1 = FakeLLMClient(_sluice_result())
-        lifecycle1, anchors1 = self._make_lifecycle(
-            client1, presented_ids=["m2", "m3", "m4"],
-        )
-        ret1 = self._run_metabolism(lifecycle1, self._persona(base), base)
-        self.assertEqual(ret1, "deferred_sluice_unseen")
-        self.assertEqual(anchors1, [])
-
-        # 2 回目: anchor 前進が永続し、窓は m2 から始まる (会話も m5..m9 まで
-        # 進んだ)。span 起点が m2 になるため台帳の key も新しく、フレッシュな
-        # スルースが窓全体を見て走る。
-        advanced = base[2:] + [
-            {"id": f"m{i}", "content": "x" * 1_000, "created_at": 100 + i}
-            for i in range(5, 10)
-        ]
-        client2 = FakeLLMClient(_sluice_result())
-        lifecycle2, anchors2 = self._make_lifecycle(
-            client2, presented_ids=[m["id"] for m in advanced],
-        )
-        persona2 = self._persona(advanced)
-        ret2 = self._run_metabolism(lifecycle2, persona2, advanced)
-        self.assertEqual(ret2, "ok")
-        self.assertEqual(len(client2.calls), 1)  # 新しい LLM コール
-        self.assertTrue(anchors2)                # 退場 (anchor 前進) が進む
-        self.assertEqual(persona2._sluice_last_pan_id, "m9")  # 確定済み
-        self.assertEqual(
-            self.ledger.find_execution("sluice.pan", "tester:m2")["status"],
-            "completed",
-        )
-        # 旧記録 (tester:m0) は applied の孤児として残る (再利用されない)。
-        self.assertEqual(
-            self.ledger.find_execution("sluice.pan", "tester:m0")["status"],
-            "applied",
+            "failed",
         )
 
     def test_cold_run_full_containment_allows_eviction(self):
@@ -2407,6 +2498,60 @@ class MetabolismUnseenTailGuardTest(_AdapterTestBase):
         self.assertEqual(ret, "failed")
         self.assertEqual(anchors, [])
         self.assertEqual(client.calls, [])  # LLM は呼ばれない
+
+
+class PinnedHistoryCompositionTest(unittest.TestCase):
+    """起点を凍結した履歴組成 (_pinned_history_from_anchor) の単体。
+
+    本物の実装 (sea/runtime_context.py) の fail-closed 契約を直接固定する —
+    上の FakeRuntime はこの契約の写しなので、契約そのものはここが正典。
+    """
+
+    def _runtime(self, fold_result=None):
+        return SimpleNamespace(
+            session_lifecycle=SimpleNamespace(
+                apply_window_folds=lambda persona, model_key, msgs: (
+                    msgs if fold_result is None else fold_result
+                ),
+            ),
+        )
+
+    def test_composes_from_pinned_anchor_without_resolution(self):
+        """凍結起点から読み、resolve_metabolism_anchor には触れない。"""
+        from sea.runtime_context import _pinned_history_from_anchor
+
+        rows = [{"id": "m0"}, {"id": "m1"}]
+        calls = []
+
+        def _get(anchor, **kwargs):
+            calls.append((anchor, kwargs))
+            return list(rows)
+
+        history_mgr = SimpleNamespace(get_history_from_anchor=_get)
+        out = _pinned_history_from_anchor(
+            self._runtime(), SimpleNamespace(persona_id="p"), history_mgr,
+            "m0", "model-a", ["main_line"], ["committed"], None,
+        )
+        self.assertEqual(out, rows)
+        self.assertEqual(calls[0][0], "m0")
+        self.assertEqual(calls[0][1]["required_line_roles"], ["main_line"])
+        self.assertEqual(calls[0][1]["required_scopes"], ["committed"])
+
+    def test_empty_history_raises_fail_closed(self):
+        """凍結起点で 1 行も組めないときは送出 — 通常解決へ落ちない。"""
+        from sea.runtime_context import (
+            PinnedAnchorUnavailableError,
+            _pinned_history_from_anchor,
+        )
+
+        history_mgr = SimpleNamespace(
+            get_history_from_anchor=lambda anchor, **kwargs: [],
+        )
+        with self.assertRaises(PinnedAnchorUnavailableError):
+            _pinned_history_from_anchor(
+                self._runtime(), SimpleNamespace(persona_id="p"), history_mgr,
+                "gone", "model-a", ["main_line"], ["committed"], None,
+            )
 
 
 class DeferToHotTest(unittest.TestCase):
