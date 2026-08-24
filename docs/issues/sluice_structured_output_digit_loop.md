@@ -91,6 +91,34 @@ Web の報告 (同じ症状):
 
 回帰テスト: `tests/test_sluice.py` (参照の書式・必須欄・手帳の参照・旧形式の記録・schema の形) と `tests/test_gemini_latest_contract.py` (出力上限の per-call 優先・実 SDK での本文回収)。歯止めを一つずつ無効化して、対応するテストが落ちることを実測した。
 
+## 同じ危険がどこまで及ぶか — 機械検査で数え直した (2026-08-24)
+
+スルースの型を直しただけでは、この事故は「スルースの事故」として閉じてしまう。**数値欄を Gemini に向ける限りどこでも起きる**ので、見張りを型ひとつではなく経路全体にかけた。
+
+検査は `tests/test_response_schema_no_numeric_fields.py`、走査の道具は `tests/schema_scan.py`。手で並べた一覧ではなく、その場でファイルシステムを走査するので、新しい Playbook やスペルが増えたら何もしなくても対象に入る。
+
+型が制約付きデコードに届く経路は 3 つあった。
+
+- **経路 A — Playbook JSON の `response_schema`**: `builtin_data/playbooks/` に直接書かれた型 (`archive/` は退役済みで対象外)。15 型を走査して違反 7 欄。
+- **経路 B — Python 側で組み立てる型**: `sea/sluice.py` の `_RESPONSE_SCHEMA` (修正済み)、`saiverse/judgment_points.py` の判断点、`sai_memory/curation_ops.py` の夜間編纂など。実行時に enum を注入するものがあるため、関数を呼ばずソースを構文解析して型の literal を探す形にした。33 型を走査して違反 2 欄。
+- **経路 C — スペルの引数の型が `response_schema` に化ける (この検査を作る過程で見つかった)**: `builtin_data/playbooks/public/spell_args_decider.json` が `"response_schema_source": "spell:{spell_name}"` を持ち、ランタイム (`sea/runtime_llm.py` の `_resolve_response_schema_source`) が `SPELL_TOOL_SCHEMAS[spell_name].parameters` を解決する。**ペルソナが引数指定なしの形 (`/spell name='X'`) でスペルを唱えると、そのスペルの引数の型がそのまま構造化出力の型として Gemini へ渡る。** 33 型を走査して違反 13 欄 (10 スペル)。
+
+**違反は合計 22 欄。** 起票時に数えていた「4 Playbook」は経路 A のファイル数で、欄単位でも経路単位でも足りていなかった。
+
+| 経路 | 違反 | 内訳 |
+|---|---|---|
+| A: Playbook JSON | 7 欄 | 建物作成 `capacity` / 文書検索 `start_line`・`end_line` / 予定管理 `days_of_week[]`・`interval_seconds`・`schedule_id` / Web 調査 `max_results` |
+| B: Python | 2 欄 | `judgment_points.py::_build_slot_schema $.budget_rounds` (v0.4 の配線前に直す) / `curation_ops.py::plan_split $.sections[].block_indices[]` (編纂の再開前に直す) |
+| C: スペルの引数 | 13 欄 | `document_read` (3) / `document_search` (2) / `game_create_building` / `memory_clip` / `messagelog_get_around` / `pocketbook_open` / `read_url_outline` / `read_url_section` / `resolve_uri` / `send_email_to_user` |
+
+**22 欄が等しく危ないとは限らない。** 実験で壊れた形は「本文を書きたいのに任意の欄を飛ばして、隣の数値欄へ本文を吐き出す」並びだった。数値欄の隣に文章を書く欄があり、しかも欄が任意になっているものが危ない。純粋に数を訊いているだけの欄 (`resolve_uri` の `max_total_chars` など) は同じ道に乗っているというだけで、実際に壊れるかは叩いてみないと分からない。**どれを直すかは隔離実験で裏を取ってから決める** (この issue の再現実験と同じ手順)。それまでは検査の `KNOWN_NUMERIC_FIELDS` に既知として載せてあり、直したら行を消す。
+
+一覧は両方向で検算する — 載っていない数値欄が現れても落ちるし、載っているのに見つからなくなっても落ちる。片方向だけの一覧は時間が経つほど嘘に近づくため。歯止めが実際に落ちることは両方向とも実測した。
+
+**検査の穴 (設計上の割り切り、`tests/schema_scan.py` の冒頭にも明記)**: `expansion_data/` のアドオンが持ち込むスペル、`~/.saiverse/user_data/` の利用者定義、DB の `playbooks` テーブルに直接入った型は走査の外。特に `saiverse/composite_actions.py` の `_action_param_schema` はアドオンの JSON に書かれた `integer` / `number` をそのままスペルの引数の型へ写すので、数値欄を持つスペルをアドオンが作れてしまう。塞ぐなら登録の入口で検出する形が要る。
+
+**関数呼び出し経路は今日は届いていない**: `sea/runtime.py::_build_tools_spec` が `GEMINI_TOOLS_SPEC` から宣言を組む経路は、ノードに `available_tools` がある場合だけ発火し、現役 Playbook で持つものは 1 本も無い (`archive/` の 4 本のみ)。ただし `llm_clients/gemini.py` の `generate_stream` は `tools` を省略すると登録済み全ツールを宣言として送る既定値なので、`tools=[]` の書き忘れが将来この経路を開く。現行の呼び出しは全て明示済み。**関数呼び出しの引数でも同じ桁のループが起きるかは未検証。**
+
 ## 別 issue との関係
 
 [cold_anchor_advance_bypasses_sluice.md](cold_anchor_advance_bypasses_sluice.md): スルースが失敗しても起点が進んでいた。本 issue が直っても、あちらが直らなければ退場の不変条件は守れない。両方直してからリリース。

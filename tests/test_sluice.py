@@ -24,6 +24,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from schema_scan import numeric_fields  # tests/schema_scan.py
 from sea import sluice
 from sea.eviction_plan import Watermarks
 from sea.session_window import SessionWindow
@@ -3251,27 +3252,18 @@ class SluiceResponseSchemaShapeTest(unittest.TestCase):
     ここが緩むと、本番で 7 回連続の失敗を起こした型へ静かに戻れてしまう。
     """
 
-    def _walk(self, node, path="$"):
-        """スキーマの全ノードを (パス, ノード) で辿る。"""
-        yield path, node
-        if isinstance(node, dict):
-            for key, child in (node.get("properties") or {}).items():
-                yield from self._walk(child, f"{path}.{key}")
-            if "items" in node:
-                yield from self._walk(node["items"], f"{path}[]")
-
     def test_no_numeric_field_anywhere_in_the_schema(self):
         """⭐ Gemini に向ける型に数値の欄を置かない。
 
         JSON の数値リテラルは文法で閉じられない (桁をいくら並べても違反に
         ならない) ので、制約付きデコードがその中でループに入ると何も止められ
         ない。参照は文字列 (core:N / act:N) で受け取り、番号はこちらで解決する。
+
+        同じ規律をシステム全体 (Playbook JSON / Python 側の組み立て / スペルの
+        引数) へ広げた見張りが tests/test_response_schema_no_numeric_fields.py
+        にあり、型を辿る道具はそちらと共有している (tests/schema_scan.py)。
         """
-        numeric = [
-            path for path, node in self._walk(sluice._RESPONSE_SCHEMA)
-            if isinstance(node, dict) and node.get("type") in ("integer", "number")
-        ]
-        self.assertEqual(numeric, [])
+        self.assertEqual(numeric_fields(sluice._RESPONSE_SCHEMA), [])
 
     def test_core_ops_are_split_by_kind_with_required_fields_in_order(self):
         """⭐ 任意の欄を飛ばした先に、飛ばした中身を吐き出せる欄が来る型にしない。

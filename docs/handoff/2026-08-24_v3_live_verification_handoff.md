@@ -11,8 +11,8 @@
 | 何 | 状態 | 次 |
 |---|---|---|
 | **スルースの実機検証** (チェックリスト 5 番) | 型を直した (e79fc211) が、**入力が変わったときの信頼性は実機で初めて分かる** | エリスと 10 往復ほど話して送信量が「残す量 + 10,000」(= 110,000 文字) を超えたら、Memory 窓 → Chronicle → 緑の「生成」→ 確認窓が「畳めます」なら実行。結果は `backend.log` の `[sluice]` 行と、Memory 窓の「手帳」タブ・「コア記憶」タブ。**自動整理は上限 200,000 まで走らない**ので手で押す |
-| **数値欄を持つ他の構造化出力 4 Playbook** | 数え済み、未着手 | 建物作成 (`capacity`) / 文書検索 (`start_line`/`end_line`) / 予定管理 (`days_of_week`/`interval_seconds`/`schedule_id`) / Web 調査 (`max_results`)。スルースと同じ手順 (隔離で送信を組み、3 モデルに叩いて崩れないことを見てから型を変える)。回数はまはーに事前に言う。起床判断 (`budget_rounds`) は v0.4 の配線前、夜間編纂 (`block_indices` 整数配列) は編纂の再開前に直す |
-| **「組み込みの型に数値欄が無い」の機械検査** | 未着手 | スルースの型には入れた (`test_no_numeric_field_anywhere_in_the_schema`)。Playbook JSON と Python 内の schema 全体へ広げる |
+| **数値欄を持つ他の構造化出力** | 数え直し済み、修正は未着手 | 機械検査が **22 欄**を数えた (Playbook 7 / Python 2 / スペルの引数 13)。「4 Playbook」は経路 A のファイル数で足りていなかった。スルースと同じ手順 (隔離で送信を組み、3 モデルに叩いて崩れないことを見てから型を変える) で直すが、22 欄が等しく危ないわけではない — 数値欄の隣に文章を書く任意の欄がある並びが危ない。**どれを叩くかを絞ってから回数をまはーに提示する**。起床判断 (`budget_rounds`) は v0.4 の配線前、夜間編纂 (`block_indices`) は編纂の再開前 |
+| **「組み込みの型に数値欄が無い」の機械検査** | ✅ 実装済み (検収済み・未コミット) | `tests/test_response_schema_no_numeric_fields.py` + 走査の道具 `tests/schema_scan.py`。3 経路をその場で走査するので新しい Playbook・スペルが増えたら自動で対象に入る。既知の 22 欄は `KNOWN_NUMERIC_FIELDS` に載せ、**新しい違反でも、直したのに消し忘れた行でも落ちる**両方向の検算つき。詳細は [issue](../issues/sluice_structured_output_digit_loop.md) の「同じ危険がどこまで及ぶか」 |
 | 機構 1 の Case 2 の穴 | 裁定待ち | 自 model の起点行が無い初回は頭打ちの対象外 ([issue](../issues/cold_anchor_advance_bypasses_sluice.md) の⚠️) |
 | 凍結した運転依存の 6 件 | 凍結 | v0.4 で運転を配線するとき再開 (867d913e) |
 
