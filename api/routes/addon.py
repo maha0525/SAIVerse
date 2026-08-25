@@ -451,9 +451,10 @@ def set_addon_enabled(addon_name: str, body: SetEnabledRequest, manager=Depends(
     # サーバーの行が残っている」状態で画面が一覧を取り直してしまう。 有効化は
     # global サーバーの subprocess 起動 (spawn + 初期化で数十秒) を含むので、
     # 待つと画面が固まる — そちらは起動中の行が見えるので待たなくてよい。
+    mcp_settled: Optional[bool] = None
     try:
         from tools.mcp_client import notify_addon_toggled_sync
-        notify_addon_toggled_sync(
+        mcp_settled = notify_addon_toggled_sync(
             addon_name,
             body.is_enabled,
             wait_timeout=None if body.is_enabled else 5.0,
@@ -531,7 +532,15 @@ def set_addon_enabled(addon_name: str, body: SetEnabledRequest, manager=Depends(
     except Exception as exc:
         LOGGER.debug("addon: broadcast failed for '%s': %s", addon_name, exc)
 
-    return {"addon_name": addon_name, "is_enabled": body.is_enabled}
+    # ``mcp_settled`` は「戻った時点で MCP 側の反映が終わっているか」。
+    # False = 待ち切れなかった (反映は続いている)、None = 待っていない。
+    # 画面はこれを見て、終わっていなければ少し置いて一覧を取り直す —
+    # 待ち時間を超えた teardown で「切ったのに行が残る」が再発しないように。
+    return {
+        "addon_name": addon_name,
+        "is_enabled": body.is_enabled,
+        "mcp_settled": mcp_settled,
+    }
 
 
 @router.get("/{addon_name}/config")

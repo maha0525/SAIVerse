@@ -12,6 +12,8 @@ subprocess 起動 (spawn + 初期化) を含んで数十秒かかるからで、
 """
 from __future__ import annotations
 
+import concurrent.futures
+import logging
 import sys
 import unittest
 from pathlib import Path
@@ -120,6 +122,122 @@ class NotifyAddonToggledWaitTests(unittest.TestCase):
              ) as scheduled:
             mcp_client.notify_addon_toggled_sync("addonA", False, wait_timeout=0.01)
         scheduled.call_args.args[0].close()
+
+
+class ToggleOutcomeReachesTheCallerTests(unittest.TestCase):
+    """待った結果が呼び出し元に伝わるか。失敗が沈黙しないか。
+
+    ローカルレビュー (2026-08-26) の指摘。待ち切れなかった回も例外を握って
+    黙って戻っていたため、**API は常に成功を返し、画面は「畳み終わった」前提で
+    一覧を取り直していた**。teardown が待ち時間を超えると、直したはずの
+    「切ったのに行が残る」がそのまま再発する。加えて、待ちのタイムアウトと
+    反映そのものの失敗が同じ except に落ちて同じ文面でログされていたため、
+    ログを読んだ人が失敗を「継続中」と読む。
+    """
+
+    def _notify(self, *, side_effect=None, **kwargs):
+        from tools import mcp_client
+
+        future = MagicMock()
+        if side_effect is not None:
+            future.result.side_effect = side_effect
+        with patch.object(mcp_client, "get_mcp_manager", return_value=MagicMock()), \
+             patch.object(mcp_client, "_loop", MagicMock()), \
+             patch.object(
+                 mcp_client.asyncio, "run_coroutine_threadsafe", return_value=future,
+             ) as scheduled:
+            outcome = mcp_client.notify_addon_toggled_sync("addonA", False, **kwargs)
+        scheduled.call_args.args[0].close()
+        return outcome, future
+
+    def test_settled_reports_true(self):
+        outcome, _ = self._notify(wait_timeout=5.0)
+
+        self.assertIs(outcome, True)
+
+    def test_timeout_reports_false(self):
+        """待ち切れなかったのを「成功」として返さない。"""
+        outcome, _ = self._notify(
+            side_effect=concurrent.futures.TimeoutError("still applying"),
+            wait_timeout=5.0,
+        )
+
+        self.assertIs(outcome, False)
+
+    def test_failure_reports_false(self):
+        outcome, _ = self._notify(side_effect=RuntimeError("boom"), wait_timeout=5.0)
+
+        self.assertIs(outcome, False)
+
+    def test_not_waiting_reports_unknown_not_success(self):
+        """待っていない回は None (分からない)。True にすると嘘になる。"""
+        outcome, _ = self._notify()
+
+        self.assertIsNone(outcome)
+
+    def test_timeout_leaves_a_watcher_so_a_later_failure_is_not_silent(self):
+        """タイムアウト後に反映が失敗しても、誰も result() を呼ばない。
+
+        concurrent.futures.Future は未回収の例外を自分では報告しないので、
+        見届け役を付けないと痕跡なく消える。
+        """
+        _, future = self._notify(
+            side_effect=concurrent.futures.TimeoutError("still applying"),
+            wait_timeout=5.0,
+        )
+
+        future.add_done_callback.assert_called_once()
+
+    def test_failure_is_not_logged_as_still_in_progress(self):
+        """反映の失敗と、待ちのタイムアウトを同じ文面にしない。"""
+        from tools import mcp_client
+
+        with self.assertLogs(mcp_client.LOGGER.name, level=logging.WARNING) as captured:
+            self._notify(side_effect=RuntimeError("boom"), wait_timeout=5.0)
+        failure_msg = captured.records[0].getMessage()
+
+        with self.assertLogs(mcp_client.LOGGER.name, level=logging.WARNING) as captured:
+            self._notify(
+                side_effect=concurrent.futures.TimeoutError("x"), wait_timeout=5.0,
+            )
+        timeout_msg = captured.records[0].getMessage()
+
+        self.assertIn("failed", failure_msg)
+        self.assertNotIn("still being applied", failure_msg)
+        self.assertIn("still being applied", timeout_msg)
+
+
+class SetEnabledResponseTests(SetEnabledWaitsOnlyWhenDisablingTests):
+    """``PUT /{addon}/enabled`` のレスポンスが反映状況を運ぶか。
+
+    画面はこれを見て「終わっていなければ少し置いて取り直す」を決める。
+    """
+
+    def _toggle_with_outcome(self, is_enabled: bool, outcome):
+        from api.routes.addon import SetEnabledRequest, set_addon_enabled
+        from tools import mcp_client
+
+        notify = MagicMock(return_value=outcome)
+        with patch.object(mcp_client, "notify_addon_toggled_sync", new=notify):
+            return set_addon_enabled(
+                "addonA", SetEnabledRequest(is_enabled=is_enabled), manager=MagicMock(),
+            )
+
+    def test_settled_is_reported(self):
+        result = self._toggle_with_outcome(False, True)
+
+        self.assertIs(result["mcp_settled"], True)
+
+    def test_unsettled_is_reported(self):
+        """待ち切れなかったことが画面まで届く (ここが塞がっていないと再発する)。"""
+        result = self._toggle_with_outcome(False, False)
+
+        self.assertIs(result["mcp_settled"], False)
+
+    def test_not_waiting_reports_none(self):
+        result = self._toggle_with_outcome(True, None)
+
+        self.assertIsNone(result["mcp_settled"])
 
 
 if __name__ == "__main__":

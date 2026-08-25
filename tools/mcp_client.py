@@ -2830,7 +2830,7 @@ def notify_addon_toggled_sync(
     is_enabled: bool,
     *,
     wait_timeout: Optional[float] = None,
-) -> None:
+) -> Optional[bool]:
     """Thread-safe hook called from API routes when an addon is toggled.
 
     Schedules the MCP state update on the dedicated MCP event loop so
@@ -2841,6 +2841,12 @@ def notify_addon_toggled_sync(
     「戻った時点で一覧に反映されている」ことを前提にできる必要があるとき
     (無効化の直後に画面が一覧を取り直す) に使う。 待ち切れなかった場合も
     例外にはしない — 反映は続いているので、警告を残して戻る。
+
+    Returns:
+        反映が終わったかどうか。待たなかった場合 (``wait_timeout=None``) と
+        MCP が動いていない場合は ``None`` — **「分からない」であって成功では
+        ない**。呼び出し元はこれを見て「戻った時点で一覧に反映されている」と
+        言い切れるかを決める (``False`` なら、少し置いて取り直す等が要る)。
     """
     manager = get_mcp_manager()
     if manager is None:
@@ -2865,17 +2871,60 @@ def notify_addon_toggled_sync(
         loop,
     )
     if wait_timeout is None:
-        return
+        return None
     try:
         future.result(timeout=wait_timeout)
-    except Exception as exc:
+        return True
+    except concurrent.futures.TimeoutError:
+        # 待ち切れなかっただけで、反映そのものはまだ続いている。ただし
+        # この先で失敗して終わる可能性があり、その回は誰も result() を
+        # 呼ばないので痕跡なく消える (concurrent.futures.Future は未回収の
+        # 例外を自分では報告しない — asyncio.Future と違う)。見届け役を残す。
+        future.add_done_callback(
+            lambda f: _log_late_toggle_outcome(f, addon_name, is_enabled)
+        )
         LOGGER.warning(
             "notify_addon_toggled_sync: toggle did not settle within %ss "
-            "(addon=%s, enabled=%s); it is still being applied: %s",
+            "(addon=%s, enabled=%s); it is still being applied",
             wait_timeout,
             addon_name,
             is_enabled,
+        )
+        return False
+    except Exception as exc:
+        # 待っている間に反映そのものが失敗した。これは「継続中」ではない —
+        # 同じ文面に混ぜると、ログを読んだ人が失敗を進行中として数える。
+        LOGGER.warning(
+            "notify_addon_toggled_sync: toggle failed (addon=%s, enabled=%s): %s",
+            addon_name,
+            is_enabled,
             exc,
+        )
+        return False
+
+
+def _log_late_toggle_outcome(
+    future: "concurrent.futures.Future",
+    addon_name: str,
+    is_enabled: bool,
+) -> None:
+    """待ち切れなかったトグルの、その後の顛末を記録する。"""
+    try:
+        future.result()
+    except Exception as exc:
+        LOGGER.warning(
+            "notify_addon_toggled_sync: toggle failed after the wait timed out "
+            "(addon=%s, enabled=%s): %s",
+            addon_name,
+            is_enabled,
+            exc,
+        )
+    else:
+        LOGGER.info(
+            "notify_addon_toggled_sync: toggle settled after the wait timed out "
+            "(addon=%s, enabled=%s)",
+            addon_name,
+            is_enabled,
         )
 
 

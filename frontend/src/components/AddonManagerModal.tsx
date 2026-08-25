@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useCallback, Suspense } from 'react';
+import React, { useState, useEffect, useCallback, useRef, Suspense } from 'react';
 import { X, Package, ChevronDown, ChevronRight, Trash2, Plus, Store } from 'lucide-react';
 import ModalOverlay from './common/ModalOverlay';
 import MCPSection from './MCPSection';
@@ -719,15 +719,16 @@ function ParamsSection({
      * update_addon_config を参照)。保存に失敗したら見た目を元に戻す。
      */
     const deleteGlobalSecret = async (key: string) => {
-        const prevParams = globalParams;
-        const prevIsSet = globalSecretIsSet;
+        const previousValue = globalParams[key];
         const next = { ...globalParams, [key]: null };
         setGlobalParams(next);
-        setGlobalSecretIsSet({ ...globalSecretIsSet, [key]: false });
+        setGlobalSecretIsSet((prev) => ({ ...prev, [key]: false }));
         const ok = await saveGlobal(next);
         if (!ok) {
-            setGlobalParams(prevParams);
-            setGlobalSecretIsSet(prevIsSet);
+            // 戻すのは「この鍵だけ」。保存を待つ数秒の間に別の項目を編集して
+            // いると、丸ごと巻き戻す形ではその編集まで巻き添えで消える。
+            setGlobalParams((prev) => ({ ...prev, [key]: previousValue }));
+            setGlobalSecretIsSet((prev) => ({ ...prev, [key]: true }));
         }
     };
 
@@ -797,7 +798,8 @@ function ParamsSection({
      * 意思表示で、空欄では消えない。失敗したら見た目を元に戻す。
      */
     const deletePersonaSecret = async (personaId: string, key: string) => {
-        const prev = personaConfigs;
+        const previousValue = personaConfigs
+            .find((c) => c.persona_id === personaId)?.params[key];
         setPersonaConfigs((cur) =>
             cur.map((c) =>
                 c.persona_id === personaId
@@ -810,7 +812,20 @@ function ParamsSection({
             )
         );
         const ok = await savePersona(personaId, { [key]: null });
-        if (!ok) setPersonaConfigs(prev);
+        if (!ok) {
+            // グローバル側と同じ理由で、戻すのはこの鍵だけにする。
+            setPersonaConfigs((cur) =>
+                cur.map((c) =>
+                    c.persona_id === personaId
+                        ? {
+                            ...c,
+                            params: { ...c.params, [key]: previousValue },
+                            secret_is_set: { ...c.secret_is_set, [key]: true },
+                        }
+                        : c
+                )
+            );
+        }
     };
 
     if (configurableSchemas.length === 0 && !hasPersonaSection) {
@@ -939,7 +954,9 @@ function AddonCard({
 }: {
     addon: AddonInfo;
     personas: { id: string; name: string }[];
-    onToggleEnabled: (addonName: string, enabled: boolean) => void;
+    /** ``mcpSettled`` = 戻った時点で MCP 側の反映が終わっていたか。
+     *  false なら畳んでいる途中、null なら待っていない (有効化)。 */
+    onToggleEnabled: (addonName: string, enabled: boolean, mcpSettled?: boolean | null) => void;
     onConfigChanged?: () => void | Promise<void>;
 }) {
     const [expanded, setExpanded] = useState(false);
@@ -956,7 +973,8 @@ function AddonCard({
                 const body = await res.json().catch(() => ({}));
                 throw new Error(body.detail || `Toggle failed: ${res.status}`);
             }
-            onToggleEnabled(addon.addon_name, enabled);
+            const body = await res.json().catch(() => ({}));
+            onToggleEnabled(addon.addon_name, enabled, body.mcp_settled ?? null);
         } catch (err) {
             alert(err instanceof Error ? err.message : 'Addon toggle failed');
         }
@@ -1042,6 +1060,14 @@ export default function AddonManagerModal({ isOpen, onClose }: AddonManagerModal
     const [fetchError, setFetchError] = useState<string | null>(null);
     // アドオンのトグルを MCP セクションへ伝えるための数。進めると取り直す。
     const [mcpRefreshKey, setMcpRefreshKey] = useState(0);
+    // 畳み終わりを待ち切れなかったときの、遅れての取り直しタイマー。
+    // モーダルを閉じたら止める (閉じた後に状態を触らない)。
+    const settleTimerRef = useRef<number | null>(null);
+    useEffect(() => () => {
+        if (settleTimerRef.current !== null) {
+            window.clearTimeout(settleTimerRef.current);
+        }
+    }, []);
 
     // addons のみ再 fetch。 addon panel 内で AddonConfig が内部的に書き
     // 換わった (= stackchan-addon のペアリング操作で master_token rotate)
@@ -1087,7 +1113,11 @@ export default function AddonManagerModal({ isOpen, onClose }: AddonManagerModal
         }).finally(() => setLoading(false));
     }, [isOpen]);
 
-    const handleToggleEnabled = (addonName: string, enabled: boolean) => {
+    const handleToggleEnabled = (
+        addonName: string,
+        enabled: boolean,
+        mcpSettled?: boolean | null,
+    ) => {
         setAddons((prev) =>
             prev.map((a) => a.addon_name === addonName ? { ...a, is_enabled: enabled } : a)
         );
@@ -1095,6 +1125,21 @@ export default function AddonManagerModal({ isOpen, onClose }: AddonManagerModal
         // 気づけない。ここで取り直しを促さないと、無効にしたアドオンの
         // サーバー行がモーダルを開き直すまで残る。
         setMcpRefreshKey((k) => k + 1);
+
+        // 反映が終わったと言い切れない回は、いま取り直したものが最終形とは
+        // 限らない。少し置いてもう一度取り直す。
+        //   false = 待ち切れなかった (畳んでいる途中)
+        //   null  = そもそも待っていない (有効化。サーバー登録との競合で
+        //           行がまだ出ていないことがある)
+        if (mcpSettled !== true) {
+            if (settleTimerRef.current !== null) {
+                window.clearTimeout(settleTimerRef.current);
+            }
+            settleTimerRef.current = window.setTimeout(() => {
+                settleTimerRef.current = null;
+                setMcpRefreshKey((k) => k + 1);
+            }, 3000);
+        }
     };
 
     if (!isOpen) return null;
