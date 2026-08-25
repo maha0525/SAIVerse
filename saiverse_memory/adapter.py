@@ -1782,6 +1782,14 @@ class SAIMemoryAdapter:
             payload["scope"] = msg.scope
         if msg.pulse_id is not None:
             payload["pulse_id"] = msg.pulse_id
+        # スペルの群の印 (2026-08-25): 退場計画 (sea/eviction_plan.py) が
+        # 「スペルの群は退場の境目で割れない」を守るために要る。起点行 (最初の
+        # 唱え) 自身は NULL で、起点は「自分の id が他行の spell_origin_id に
+        # なっている」ことで識別する — 判定側 (sai_memory.memory.storage.
+        # spell_group_spans) がその非対称を持つ。spell_seq は退場計画が使わない
+        # ので載せない。
+        if getattr(msg, "spell_origin_id", None) is not None:
+            payload["spell_origin_id"] = msg.spell_origin_id
         # v0.32 (2026-05-09): Track Chronicle / ユーザー会話 Track 親保持機構で利用。
         if getattr(msg, "origin_track_id", None) is not None:
             payload["origin_track_id"] = msg.origin_track_id

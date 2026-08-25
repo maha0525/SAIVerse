@@ -28,7 +28,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence, Set
 
-from sai_memory.memory.storage import Message
+from sai_memory.memory.storage import Message, spell_group_spans
 
 LOGGER = logging.getLogger(__name__)
 
@@ -66,8 +66,9 @@ def message_episode_ref(msg: Message) -> Optional[str]:
     """メッセージの episode 帰属 (層0タグ) を読む。
 
     origin_episode 専用列を優先し、無ければ metadata JSON へフォールバック
-    する (get_messages_for_chronicle の SELECT は 7 列で専用列を含まないため、
-    実運用ではフォールバック側が主経路になる)。
+    する。get_messages_for_chronicle の SELECT は 2026-08-25 から他の読み出しと
+    同じ専用列込みになったので、専用列を持つ世代の行は専用列側で解決される
+    (フォールバックは専用列の導入前に書かれた行のため)。
     """
     ref = getattr(msg, "origin_episode", None)
     if ref:
@@ -153,6 +154,12 @@ def plan_alignment(
 
     Returns:
         AlignmentPlan。チャンクは時系列順。
+
+    スペルの群 (``spell_origin_id`` の印) を割らない責任は run の**内側**だけに
+    ある (:func:`_plan_run`)。ここの run 分割 (processed 挟み / 群の所属変化 /
+    thread 変化) が群を割る入力は、呼び出し側の絞り込みか既存データの形が
+    そうなっているということで、整列側では救えない — 束ねない側へ倒す不変条件
+    (偽の隣接の禁止) の方が優先する。
     """
     # 1. 連続 run 化: processed を跨ぐ束ねはしない。呼び出し側が指定した
     #    範囲の群 (run_groups) が変わるところでも切る。
@@ -298,7 +305,20 @@ def _plan_run(
     被覆 ``target_chars`` (U) に達したところでチャンクを閉じる。末尾の端数は
     直前のチャンクに吸収する (無ければ小さなチャンクのまま — 小さくても
     要約する)。
+
+    ただし**スペルの群の内側では閉じない** — 「唱え → 結果 → 結果を読んだ発話」
+    のひとまとまり (``spell_origin_id`` の印) は、群の最後のメンバーまで含めて
+    から閉じる。ここのチャンクの切れ目は「冷えた anchor の前進」
+    (arasuji_levels.md §14-2) 経由で退場の境目になるので、群の途中で閉じると
+    anchor の前進先が群の内側に落ち、唱えを失った結果だけが窓に残る。
     """
+    # 群の内側 (最初のメンバー .. 最後のメンバーの 1 つ手前) では閉じない。
+    # 群の最後のメンバーの位置では閉じてよい。
+    blocked: Set[int] = set()
+    for lo, hi in spell_group_spans(
+        [(m.id, getattr(m, "spell_origin_id", None)) for m in run]
+    ):
+        blocked.update(range(lo, hi))
 
     def _make(msgs: List[Message]) -> PlannedChunk:
         return PlannedChunk(
@@ -311,9 +331,9 @@ def _plan_run(
 
     out: List[PlannedChunk] = []
     pending: List[Message] = []
-    for msg in run:
+    for index, msg in enumerate(run):
         pending.append(msg)
-        if coverage_chars(pending) >= target_chars:
+        if coverage_chars(pending) >= target_chars and index not in blocked:
             out.append(_make(pending))
             pending = []
     if pending:

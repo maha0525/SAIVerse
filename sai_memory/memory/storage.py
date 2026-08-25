@@ -497,6 +497,55 @@ def _row_to_message(row: Tuple[Any, ...]) -> Message:
     )
 
 
+def spell_group_spans(
+    rows: Sequence[Tuple[str, Optional[str]]],
+) -> List[Tuple[int, int]]:
+    """スペルの群が占める添字の区間を返す (この列の規則の一点管理)。
+
+    スペルの群 = 「唱え (assistant 行) → 結果 (system 行 ``[Spell Result: ...]``)
+    → 結果を読んだ発話 (assistant 行) → …」のひとまとまり。``spell_origin_id``
+    列が群の印になる。
+
+    **非対称に注意**: 群の起点行 (最初の唱え) 自身の ``spell_origin_id`` は
+    NULL である。起点は「自分の ``id`` が他の行の ``spell_origin_id`` として
+    現れる」ことでしか識別できない。だから群の鍵は次の規則で決める:
+
+    - ``spell_origin_id`` が入っていれば、その値。
+    - 入っていなくても、自分の ``id`` が列内のどこかの ``spell_origin_id`` として
+      現れるなら、自分の ``id``。
+    - どちらでもなければ群に属さない。
+
+    Args:
+        rows: 正典順に並んだ ``(message_id, spell_origin_id)`` の列。
+
+    Returns:
+        各群が占める添字の閉区間 ``(最初, 最後)`` を、開始位置の昇順で並べたもの。
+        区間の内側には群に属さない行 (event_message やメタ判断の割り込み) が
+        混じりうる — 区間は「群の最初のメンバーから最後のメンバーまで」であって
+        メンバーの集合ではない。1 件しか無い群 (幅ゼロ) は境目を割りようが
+        ないので返さない。
+
+    純関数 — DB も I/O も触らない。
+    """
+    origins = {str(origin) for _, origin in rows if origin}
+    spans: Dict[str, List[int]] = {}
+    for index, (message_id, origin) in enumerate(rows):
+        if origin:
+            key = str(origin)
+        elif str(message_id) in origins:
+            key = str(message_id)
+        else:
+            continue
+        span = spans.get(key)
+        if span is None:
+            spans[key] = [index, index]
+        else:
+            span[1] = index
+    out = [(lo, hi) for lo, hi in spans.values() if hi > lo]
+    out.sort()
+    return out
+
+
 def add_message(
     conn: sqlite3.Connection,
     thread_id: str,
@@ -2062,7 +2111,8 @@ def get_messages_for_chronicle(
 
     cur = conn.execute(
         f"""
-        SELECT id, thread_id, role, content, resource_id, created_at, metadata
+        SELECT id, thread_id, role, content, resource_id, created_at, metadata,
+               {_LINE_METADATA_COLUMNS}
         FROM messages
         WHERE {clause}
         ORDER BY created_at ASC, rowid ASC

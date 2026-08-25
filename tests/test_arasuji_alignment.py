@@ -24,8 +24,14 @@ from sai_memory.memory.storage import Message
 TARGET = 100
 
 
-def _msg(mid, content, episode=None, created_at=None, thread_id="main"):
-    """テストメッセージ。episode は metadata 側 (実運用の主経路) に置く。"""
+def _msg(mid, content, episode=None, created_at=None, thread_id="main",
+         spell_origin=None):
+    """テストメッセージ。episode は metadata 側 (実運用の主経路) に置く。
+
+    ``spell_origin`` は ``spell_origin_id`` 列 (スペルの群の印)。**群の起点行
+    (最初の唱え) 自身は NULL** — 起点は「自分の id が他行の spell_origin として
+    現れる」ことで識別する。
+    """
     return Message(
         id=mid,
         thread_id=thread_id,
@@ -34,6 +40,7 @@ def _msg(mid, content, episode=None, created_at=None, thread_id="main"):
         resource_id=None,
         created_at=created_at if created_at is not None else int(mid.replace("m", "")),
         metadata={"origin_episode": episode} if episode else None,
+        spell_origin_id=spell_origin,
     )
 
 
@@ -227,6 +234,64 @@ class TestChunkCutting(unittest.TestCase):
         plan = _plan(msgs)
         self.assertEqual(len(plan.chunks), 1)
         self.assertEqual(plan.chunks[0].episode_refs, ["episode:1", "episode:2"])
+
+
+class TestSpellGroupChunking(unittest.TestCase):
+    """スペルの群の内側でチャンクを閉じない。
+
+    ここのチャンクの切れ目は「冷えた anchor の前進」(arasuji_levels.md §14-2)
+    経由で退場の境目になる — 群の途中で閉じると anchor の前進先が群の内側に
+    落ち、唱えを失った結果だけがペルソナの窓に残る (記憶の捏造)。
+
+    編纂対象からはスペル結果行 (タグ spell) が除外されるので、ここで見える群の
+    メンバーは唱えと「結果を読んだ発話」だけ。それでも群の鍵は
+    spell_origin_id で引ける。
+    """
+
+    def test_chunk_does_not_close_inside_a_spell_group(self):
+        """U に達しても群の最後のメンバーまで含めてから閉じる。"""
+        msgs = [
+            _msg("m1", "a" * 60),
+            _msg("m2", "b" * 60),                      # 唱え = 群の起点 (印 NULL)
+            _msg("m3", "c" * 60, spell_origin="m2"),   # 結果を読んだ発話
+            _msg("m4", "d" * 60),
+            _msg("m5", "e" * 60),
+            _msg("m6", "f" * 60),
+        ]
+        plan = _plan(msgs)
+        # m1+m2 で 120 ≥ 100 だが m2 は群の途中 — m3 まで含めて閉じる。
+        self.assertEqual(
+            [c.message_ids for c in plan.chunks],
+            [["m1", "m2", "m3"], ["m4", "m5", "m6"]],
+        )
+
+    def test_group_with_many_members_is_kept_whole(self):
+        """群が U を大きく超えても割らない (群は 1 つのチャンクに収まる)。"""
+        msgs = [
+            _msg("m1", "a" * 60),
+            _msg("m2", "b" * 60),                      # 唱え
+            _msg("m3", "c" * 60, spell_origin="m2"),
+            _msg("m4", "d" * 60, spell_origin="m2"),
+            _msg("m5", "e" * 60, spell_origin="m2"),
+        ]
+        plan = _plan(msgs)
+        self.assertEqual(len(plan.chunks), 1)
+        self.assertEqual(
+            plan.chunks[0].message_ids, ["m1", "m2", "m3", "m4", "m5"],
+        )
+
+    def test_cut_right_after_the_group_is_allowed(self):
+        """群の最後のメンバーの位置では閉じてよい (群の外の境目は正当)。"""
+        msgs = [
+            _msg("m1", "a" * 60),                      # 唱え
+            _msg("m2", "b" * 60, spell_origin="m1"),
+            _msg("m3", "c" * 60),
+            _msg("m4", "d" * 60),
+        ]
+        plan = _plan(msgs)
+        self.assertEqual(
+            [c.message_ids for c in plan.chunks], [["m1", "m2"], ["m3", "m4"]],
+        )
 
 
 class TestPlanSummary(unittest.TestCase):

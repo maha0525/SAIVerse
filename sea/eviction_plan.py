@@ -9,9 +9,14 @@ docs/intent/arasuji_levels.md §3 / §4 の実装 (レベル0 の並び)。
 - 規則は全レベル共通の一本 — 「予算の上限を超えたら発火し、古い側を
   『残す量』に収まるまで畳んで 1 つ上のレベル (一次あらすじ) へ送る」。
 - 畳み材料は約 U (一次あらすじの標準被覆、既定 1 万字) ずつに刻む。切り位置は
-  発言の切れ目 (pulse 関節) に寄せる — エピソードには**畳みを止める権利は無い**
+  発言の切れ目 (関節) に寄せる — エピソードには**畳みを止める権利は無い**
   (開いているエピソードも畳む。守っていた需要の引受先は
   docs/issues/open_episode_context_after_veto_removal.md)。
+- **スペルの群は退場の境目で割れない** — 「唱え → 結果 → 結果を読んだ発話」の
+  ひとまとまり (``spell_origin_id`` の印) の内側に、保護境界も fold の切れ目も
+  落とさない。割れると窓が ``<system>[Spell Result: ...]`` から始まり、唱えた
+  記憶が無いのに結果だけがある状態 = 記憶の捏造になる。関節の単位は
+  :func:`_joint_units` が pulse の run とスペルの群を併合して決める。
 - 末尾の U に届かない端数は畳まず残す — 次の Metabolism で新しい生ログと
   地続きのまま次の畳みに入るので、小さい一次あらすじを作らない。
 - 発火判定 (上限) は呼び出し側の責務。ここは「残す量」だけを使う。
@@ -22,6 +27,8 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Set
+
+from sai_memory.memory.storage import spell_group_spans
 
 LOGGER = logging.getLogger(__name__)
 
@@ -142,14 +149,107 @@ def _pulse_of(msg: Dict[str, Any]) -> Optional[str]:
     return str(value) if value else None
 
 
+def _spell_spans(messages: Sequence[Dict[str, Any]]) -> List[tuple]:
+    """提示コンテキスト上のスペル群が占める添字の区間 (開始昇順)。
+
+    群の範囲を決める規則そのものは ``spell_origin_id`` 列の持ち主
+    (:func:`sai_memory.memory.storage.spell_group_spans`) にある — ここは
+    提示 payload から ``(id, spell_origin_id)`` の列を作って渡すだけ
+    (規則の二枚目を作らない)。
+    """
+    return spell_group_spans(
+        [(str(m.get("id")), m.get("spell_origin_id")) for m in messages]
+    )
+
+
+def _spell_group_key(
+    messages: Sequence[Dict[str, Any]], lo: int, hi: int,
+) -> str:
+    """区間 ``[lo, hi]`` が表すスペル群の鍵 (= 起点行の message id)。
+
+    起点行自身の ``spell_origin_id`` は NULL なので、区間の中で最初に
+    ``spell_origin_id`` を持つ行からその値を読む。1 件も無い (起点行しか
+    区間に居ない) 場合は区間先頭の id を鍵として返す。ログ用。
+    """
+    for i in range(lo, hi + 1):
+        origin = messages[i].get("spell_origin_id")
+        if origin:
+            return str(origin)
+    return str(messages[lo].get("id"))
+
+
+def _joint_units(messages: Sequence[Dict[str, Any]]) -> List[tuple]:
+    """「切ってよい関節」で区切った単位を、添字の閉区間 ``(開始, 終了)`` で返す。
+
+    単位の内側に境目 (保護境界・fold の切れ目) は落とさない。単位は 2 段で作る:
+
+    1. 連続する同一 ``pulse_id`` の run。``pulse_id`` が無い行は単独の単位
+       (関節を勝手に作らない)。
+    2. スペルの群 (:func:`_spell_spans`) と重なる単位は、群の区間ごと 1 つの
+       単位へ併合する。群の内側に割り込んだ行 (``pulse_id`` を持たない
+       event_message、別 pulse の committed なメタ判断) も同じ単位に入る —
+       この割り込みで pulse の連続が切れることが、境目が群の内側に落ちる
+       (唱えが退場済みなのに結果の行だけ窓に残る) 欠陥の発生源だった。
+
+    単に隣り合っているだけの単位は併合しない (隣接する単位の境目は正当な境目)。
+    """
+    units: List[List[int]] = []
+    current_pulse: Optional[str] = None
+    for index, msg in enumerate(messages):
+        pulse = _pulse_of(msg)
+        if units and pulse is not None and pulse == current_pulse:
+            units[-1][1] = index
+            continue
+        units.append([index, index])
+        current_pulse = pulse
+
+    for lo, hi in _spell_spans(messages):
+        first = _unit_index_of(units, lo)
+        last = _unit_index_of(units, hi)
+        if first is None or last is None or first == last:
+            continue
+        units[first:last + 1] = [[units[first][0], units[last][1]]]
+
+    return [(start, end) for start, end in units]
+
+
+def _unit_index_of(units: Sequence[Sequence[int]], position: int) -> Optional[int]:
+    """``position`` を含む単位の添字 (単位は隙間なく並ぶので線形走査で足りる)。"""
+    for i, (start, end) in enumerate(units):
+        if start <= position <= end:
+            return i
+    return None
+
+
 def _protection_boundary(
-    messages: Sequence[Dict[str, Any]], keep_chars: int,
+    messages: Sequence[Dict[str, Any]],
+    keep_chars: int,
+    units: Optional[Sequence[tuple]] = None,
 ) -> int:
     """残す量 (保護範囲) の開始インデックスを返す。
 
-    最新側から遡って ``keep_chars`` 分を保護する。境界が pulse の途中に落ちたら
-    **古い側へ** 関節まで下げる — メッセージ単位でぶつ切りにせず、保護範囲を
-    広げる方向に倒す (「刻むときは pulse を丸ごと」experience_structure.md §6)。
+    最新側から遡って ``keep_chars`` 分を保護する。境界が関節の単位
+    (:func:`_joint_units` — pulse の run にスペルの群を併合したもの) の途中に
+    落ちたら **古い側へ** 単位の先頭まで下げる — メッセージ単位でぶつ切りに
+    せず、保護範囲を広げる方向に倒す (「刻むときは pulse を丸ごと」
+    experience_structure.md §6)。
+
+    **脱出弁** — 古い側へ寄せると境界が消える (素の境界を含む単位が提示の先頭
+    ``index 0`` から始まっている) 場合だけ、寄せる向きを変える:
+
+    - 原則は **新しい側へ寄せる** (``unit_end + 1``)。その単位はまるごと退場候補に
+      入り、境目は単位の外に落ちる。保護範囲は残す量より狭くなるが、単位
+      (スペルの群を含みうる) を割らずに前進できる — 字数の厳密さより
+      「境目を単位の内側に落とさない」不変条件を優先する。``protected_from`` は
+      報告用の値で、残す量を保証する契約は誰も持っていない。
+    - 例外は **その単位が提示コンテキスト全体** のとき (``unit_end + 1`` が
+      提示の外)。新しい側へ寄せると保護範囲が空になり anchor の指す先が無く
+      なるので、このときだけ素の境界で切る = 単位を割る (割った位置がスペル群の
+      内側なら WARNING)。
+
+    どちらの向きでも境界は 1 以上になるので、退場候補が空になって
+    「上限をどれだけ超えても退場が一切進まない」状態にはならない
+    (arasuji_levels.md §4-1 の「上限を超えたら必ず前進する」)。
     """
     if keep_chars <= 0:
         return len(messages)
@@ -163,23 +263,68 @@ def _protection_boundary(
     else:
         # 提示コンテキスト全体でも残す量に届かない = 全部が保護範囲。
         return 0
-    # pulse 関節へスナップ (古い側 = 保護範囲を広げる向き)。
+    # 関節へスナップ (古い側 = 保護範囲を広げる向き)。
     raw_boundary = boundary
-    pulse = _pulse_of(messages[boundary])
-    if pulse is not None:
-        while boundary > 0 and _pulse_of(messages[boundary - 1]) == pulse:
-            boundary -= 1
-    if boundary <= 0 < raw_boundary:
-        # スナップで候補がゼロになった = 1 つの pulse が残す量を超えている。
-        # 関節の綺麗さより前進を優先し、素の境界で切る — でないと巨大 pulse が
-        # 居座る間、上限をどれだけ超えても退場が一切進まない
-        # (Codex レビュー 2026-07-28 medium)。
+    if units is None:
+        units = _joint_units(messages)
+    unit_index = _unit_index_of(units, boundary)
+    if unit_index is None:
+        # どの単位にも属さない位置 (単位は隙間なく並ぶので通常は起きない)。
+        return boundary
+    unit_start, unit_end = units[unit_index]
+    boundary = unit_start
+    if boundary > 0 or raw_boundary <= 0:
+        return boundary
+
+    # --- 脱出弁 ---
+    # 古い側へ寄せると境界が消えた = 素の境界 (raw_boundary) を含む単位が提示の
+    # 先頭 (index 0) から始まっている。このまま 0 を返すと退場候補が空になり、
+    # 上限をどれだけ超えても退場が一切進まない (Codex レビュー 2026-07-28
+    # medium。arasuji_levels.md §4-1 の「上限を超えたら必ず前進する」)。
+    if unit_end + 1 < len(messages):
+        # 原則: 新しい側へ寄せる。単位はまるごと退場候補に入り、境目は単位の外に
+        # 落ちる — 単位 (スペルの群を含みうる) を割らずに前進できる。保護範囲が
+        # 残す量より狭くなるのは承知の上で、不変条件の方を採る。
         LOGGER.info(
-            "[eviction] a single pulse exceeds the keep amount; cutting "
-            "mid-pulse at index %d to keep eviction moving", raw_boundary,
+            "[eviction] 脱出弁: 先頭から始まる関節単位 (添字 %d..%d) が残す量を"
+            "覆っているので、境界を単位の外 (index %d) へ新しい側に寄せる — "
+            "単位はまるごと退場候補に入り、群は割れない",
+            unit_start, unit_end, unit_end + 1,
         )
-        return raw_boundary
-    return boundary
+        return unit_end + 1
+    # 例外: その単位が提示コンテキスト全体。新しい側へ寄せると保護範囲が空に
+    # なり anchor の指す先が無くなるので、ここだけは素の境界で切る = 単位を割る。
+    broken = _spell_span_broken_at(messages, raw_boundary)
+    if broken is not None:
+        lo, hi = broken
+        LOGGER.warning(
+            "[eviction] 脱出弁: 提示コンテキスト全体が 1 つの関節単位なので "
+            "index %d で切るが、その位置はスペル群 %s (添字 %d..%d) の"
+            "内側にある — 唱えと結果が退場の境目で割れる",
+            raw_boundary, _spell_group_key(messages, lo, hi), lo, hi,
+        )
+    else:
+        LOGGER.info(
+            "[eviction] 脱出弁: 提示コンテキスト全体が 1 つの関節単位なので "
+            "index %d で単位を割って切る (新しい側へ寄せると保護範囲が空に"
+            "なるため)", raw_boundary,
+        )
+    return raw_boundary
+
+
+def _spell_span_broken_at(
+    messages: Sequence[Dict[str, Any]], position: int,
+) -> Optional[tuple]:
+    """``position`` で切るとスペル群を割ることになるなら、その区間を返す。
+
+    区間 ``(lo, hi)`` の**内側**、つまり ``lo < position <= hi`` の位置で切ると
+    群のメンバーが境目の両側に分かれる。``position == lo`` は群の手前で切るので
+    割らない。
+    """
+    for lo, hi in _spell_spans(messages):
+        if lo < position <= hi:
+            return (lo, hi)
+    return None
 
 
 def _is_folded_placeholder(msg: Dict[str, Any]) -> bool:
@@ -188,21 +333,23 @@ def _is_folded_placeholder(msg: Dict[str, Any]) -> bool:
     return bool(isinstance(meta, dict) and meta.get("__folded_range__"))
 
 
-def _pulse_groups(messages: Sequence[Dict[str, Any]]) -> List[List[Dict[str, Any]]]:
-    """連続メッセージを pulse (認知の一巡) 単位に束ねる。
+def _units_before(
+    messages: Sequence[Dict[str, Any]],
+    units: Sequence[tuple],
+    boundary: int,
+) -> List[List[Dict[str, Any]]]:
+    """保護境界より古い側を、関節の単位ごとのメッセージ列にして返す。
 
-    pulse_id が無いメッセージは単独の群として扱う (関節を勝手に作らない)。
+    境界が単位の途中に落ちるのは、脱出弁の例外経路 (提示コンテキスト全体が
+    1 つの単位で、素の境界で割るしかない場合。:func:`_protection_boundary`) だけ。
+    その場合は最後の単位を境界で切り詰める。
     """
-    groups: List[List[Dict[str, Any]]] = []
-    current_pulse: Optional[str] = None
-    for msg in messages:
-        pulse = _pulse_of(msg)
-        if groups and pulse is not None and pulse == current_pulse:
-            groups[-1].append(msg)
-            continue
-        groups.append([msg])
-        current_pulse = pulse
-    return groups
+    out: List[List[Dict[str, Any]]] = []
+    for start, end in units:
+        if start >= boundary:
+            break
+        out.append(list(messages[start:min(end + 1, boundary)]))
+    return out
 
 
 def plan_eviction(
@@ -225,8 +372,9 @@ def plan_eviction(
 
     計画: 残す量より古い側を、古い順に U ずつの範囲に刻んで全部畳む。
 
-    - 切り位置は pulse 関節 (発言の切れ目) に寄せる — U に達したら、いまの
-      pulse を最後まで含めてそこで切る。
+    - 切り位置は関節 (発言の切れ目) に寄せる — U に達したら、いまの関節の単位
+      (:func:`_joint_units`: pulse の run + スペルの群) を最後まで含めてそこで
+      切る。
     - 既に畳まれた置き換え (壁) は材料に入れない。壁の手前に U 未満の端数が
       残る場合だけ、端数のまま畳む (残すと壁に挟まれて永久に取り残されるため。
       旧世代データでのみ起きる — 現設計の適用は畳んだ先頭を anchor が
@@ -252,13 +400,13 @@ def plan_eviction(
         )
         return plan
 
-    boundary = _protection_boundary(messages, watermarks.target)
+    units = _joint_units(messages)
+    boundary = _protection_boundary(messages, watermarks.target, units)
     plan.protected_from = boundary
     if boundary <= 0:
         # 退場候補範囲が無い = 残す量だけで提示コンテキストが埋まっている。
         return plan
 
-    candidates = list(messages[:boundary])
     folds: List[Fold] = []
     remaining = total
 
@@ -273,7 +421,7 @@ def plan_eviction(
         remaining -= _net_reduction(pending)
 
     pending: List[Dict[str, Any]] = []
-    for group in _pulse_groups(candidates):
+    for group in _units_before(messages, units, boundary):
         if any(_is_folded_placeholder(m) for m in group):
             # 壁 (畳み済みの置き換え)。材料に入れない。手前の端数は、残すと
             # 壁に挟まれて永久に取り残されるので、端数のまま畳む。

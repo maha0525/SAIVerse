@@ -3,13 +3,112 @@ import unittest
 from sai_memory.memory.recall import semantic_recall, semantic_recall_groups
 from sai_memory.memory.storage import (
     add_message,
+    get_messages_for_chronicle,
     get_messages_from_id,
     get_messages_paginated,
     get_messages_with_persona_in_audience,
     get_or_create_thread,
     init_db,
     replace_message_embeddings,
+    spell_group_spans,
 )
+
+
+class TestSpellGroupSpans(unittest.TestCase):
+    """spell_group_spans — スペルの群が占める添字の区間 (規則の一点管理)。
+
+    退場の境目 (保護境界・fold の切れ目・編纂チャンクの切れ目) を群の内側に
+    落とさないための材料。ここを間違えると、ペルソナの窓が結果の行から始まり
+    「唱えた記憶が無いのに結果だけある」= 記憶の捏造になる。
+    """
+
+    def test_origin_row_has_no_marker_of_its_own(self):
+        """起点行 (最初の唱え) の spell_origin_id は NULL — それでも群に入る。
+
+        起点は「自分の id が他の行の spell_origin_id として現れる」ことでしか
+        識別できない。この非対称を落とすと区間が起点を含まず、境目が唱えと
+        結果の間に落ちる。
+        """
+        rows = [
+            ("a", None),
+            ("s0", None),        # 唱え = 起点 (印は NULL)
+            ("s1", "s0"),        # 結果を読んだ発話
+        ]
+        self.assertEqual(spell_group_spans(rows), [(1, 2)])
+
+    def test_span_covers_interlopers_inside_the_group(self):
+        """群の内側に割り込んだ行 (event_message / メタ判断) も区間に入る。
+
+        区間は「最初のメンバーから最後のメンバーまで」であってメンバーの集合
+        ではない — 割り込みごと 1 つの単位として扱わないと、そこが境目に
+        なってしまう。
+        """
+        rows = [
+            ("s0", None),        # 唱え
+            ("ev", None),        # [システム通知] — 群のメンバーではない
+            ("mj", None),        # committed なメタ判断
+            ("s1", "s0"),        # 結果を読んだ発話
+        ]
+        self.assertEqual(spell_group_spans(rows), [(0, 3)])
+
+    def test_single_member_group_is_not_returned(self):
+        """1 件しか無い群 (幅ゼロ) は境目を割りようがないので返さない。"""
+        self.assertEqual(spell_group_spans([("s0", None), ("a", None)]), [])
+        # 印だけがあって起点行が列に居ない場合も、1 件なら幅ゼロ。
+        self.assertEqual(spell_group_spans([("s1", "gone")]), [])
+
+    def test_multiple_groups_are_returned_in_start_order(self):
+        rows = [
+            ("p0", None),
+            ("p1", "p0"),
+            ("x", None),
+            ("q0", None),
+            ("q1", "q0"),
+            ("q2", "q0"),
+        ]
+        self.assertEqual(spell_group_spans(rows), [(0, 1), (3, 5)])
+
+    def test_group_whose_origin_row_is_absent_still_spans_its_members(self):
+        """起点行が列の外 (既に退場済み) でも、残ったメンバーは 1 つの群。"""
+        rows = [("s1", "gone"), ("mid", None), ("s2", "gone")]
+        self.assertEqual(spell_group_spans(rows), [(0, 2)])
+
+    def test_empty_input(self):
+        self.assertEqual(spell_group_spans([]), [])
+
+
+class TestChronicleSelectCarriesLineMetadata(unittest.TestCase):
+    """get_messages_for_chronicle が専用列 (spell_origin_id ほか) を運ぶこと。
+
+    編纂チャンクの切れ目を群の内側に落とさない判定は spell_origin_id が要る。
+    SELECT が 7 列だと列は常に None になり、判定が黙って無効化される。
+    """
+
+    def setUp(self):
+        self.conn = init_db(":memory:")
+        get_or_create_thread(self.conn, "thread-1", resource_id="resource-1")
+
+    def tearDown(self):
+        self.conn.close()
+
+    def test_spell_origin_id_is_populated(self):
+        origin = add_message(
+            self.conn, thread_id="thread-1", role="model",
+            content="唱える", pulse_id="p1",
+        )
+        add_message(
+            self.conn, thread_id="thread-1", role="model",
+            content="結果を読んだ発話", pulse_id="p2",
+            spell_origin_id=origin, spell_seq=1,
+        )
+        rows = get_messages_for_chronicle(self.conn)
+        self.assertEqual(len(rows), 2)
+        self.assertIsNone(rows[0].spell_origin_id)
+        self.assertEqual(rows[1].spell_origin_id, origin)
+        # 同じ SELECT で運ばれる他の専用列も埋まる (origin_episode の
+        # metadata フォールバックが主経路ではなくなった)。
+        self.assertEqual(rows[0].pulse_id, "p1")
+        self.assertEqual(rows[1].pulse_id, "p2")
 
 
 class DummyEmbedder:

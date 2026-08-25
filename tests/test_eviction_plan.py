@@ -13,6 +13,9 @@ docs/intent/arasuji_levels.md §3 (一本規則) / §4 (レベル0 の特別さ)
   地続きで畳まれる — 小さい一次あらすじを作らない)。
 - 既に畳まれた置き換え (壁) は材料に入れない。壁の手前の端数だけは、残すと
   永久に取り残されるので端数のまま畳む (旧世代データでのみ起きる経路)。
+- **スペルの群は退場の境目で割れない** — 「唱え → 結果 → 結果を読んだ発話」の
+  ひとまとまり (spell_origin_id の印) の内側に、保護境界も fold の切れ目も
+  落とさない。
 - compile_groups_from_folds: fold が「退場しないメッセージ」をまたいでいたら
   割ってから編纂へ渡す (偽の隣接の禁止)。
 """
@@ -31,7 +34,15 @@ from sea.session_window import FOLDED_MARKER
 U = 2_000  # 一次あらすじの標準被覆 (テスト内での U)
 
 
-def msg(mid, at, *, chars=1_000, ep=None, pulse=None, folded=False):
+def msg(mid, at, *, chars=1_000, ep=None, pulse=None, folded=False,
+        spell_origin=None):
+    """提示 payload 1 件。
+
+    ``spell_origin`` は SAIMemory の ``spell_origin_id`` 列 (スペルの群の印)。
+    **群の起点行 (最初の唱え) 自身は NULL** なので、起点は「自分の id が他行の
+    spell_origin として現れる」ことでしか識別できない — テストの並びもその
+    非対称のまま書く。
+    """
     payload = {"id": mid, "content": "x" * chars, "created_at": at}
     meta = {}
     if ep:
@@ -42,6 +53,8 @@ def msg(mid, at, *, chars=1_000, ep=None, pulse=None, folded=False):
         payload["metadata"] = meta
     if pulse:
         payload["pulse_id"] = pulse
+    if spell_origin:
+        payload["spell_origin_id"] = spell_origin
     return payload
 
 
@@ -90,9 +103,12 @@ class ProtectionTest(unittest.TestCase):
         self.assertEqual(result.protected_from, 1)
 
     def test_giant_single_pulse_does_not_deadlock_eviction(self):
-        """1 つの pulse が残す量を超えていても、退場は必ず前進する —
-        スナップで候補がゼロになるなら素の境界で切る
-        (Codex レビュー 2026-07-28 medium)。"""
+        """1 つの pulse が残す量を超えていても、退場は必ず前進する。
+
+        この並びは提示コンテキスト全体が 1 つの pulse = 1 単位なので、脱出弁は
+        例外経路 (新しい側へ寄せると保護範囲が空になる) に入り、素の境界で切る
+        (Codex レビュー 2026-07-28 medium)。
+        """
         msgs = [
             msg(f"g{i}", 100 + i, chars=40_000, pulse="p1") for i in range(4)
         ]
@@ -208,6 +224,159 @@ class WallTest(unittest.TestCase):
         self.assertIn(["s0"], ids)
         self.assertIn(["m0", "m1"], ids)
         self.assertNotIn("w0", folded_ids(result))
+
+
+class SpellGroupIsNotSplitTest(unittest.TestCase):
+    """スペルの群は退場の境目で割れない。
+
+    群 = 「唱え (assistant) → 結果 (system ``[Spell Result: ...]``) → 結果を
+    読んだ発話 (assistant)」のひとまとまり。境目が群の内側に落ちると、ペルソナの
+    窓が結果の行から始まり「唱えた記憶が無いのに結果だけある」= 記憶の捏造に
+    なる。
+
+    群の内側には別 pulse の行が割り込む — 提示ウィンドウの絞り込み
+    (main_line / committed) を通り抜ける 2 種類:
+
+    1. event_message 行 (line_role NULL の legacy 救済で通る。pulse_id 無し)
+    2. committed なメタ判断 (別 pulse_id)
+
+    この割り込みで pulse の連続が切れるため、pulse だけを関節にしていた頃は
+    スナップがそこで止まって境目が群の内側に落ちていた。
+    """
+
+    def _window_with_interloper(self, interloper):
+        """[a0][唱え s0][割り込み][s0 を受けた発話][k0][k1] の並び。"""
+        return [
+            msg("a0", 100, pulse="p0"),
+            msg("s0", 101, pulse="p1"),          # 唱え = 群の起点 (印は NULL)
+            interloper,
+            msg("s1", 103, pulse="p2", spell_origin="s0"),
+            msg("k0", 104, pulse="p3"),
+            msg("k1", 105, pulse="p4"),
+        ]
+
+    def _assert_group_not_split(self, result, group_ids):
+        evicted = set(folded_ids(result))
+        inside = [mid for mid in group_ids if mid in evicted]
+        self.assertIn(
+            len(inside), (0, len(group_ids)),
+            f"スペルの群が退場の境目で割れている (退場側: {inside})",
+        )
+
+    def test_event_message_interloper_does_not_split_the_group(self):
+        """pulse を持たない event_message が割り込んでも保護境界は群の先頭へ。
+
+        これが本番で最頻の形 — スペルでペルソナが移動した直後の
+        「[システム通知] 現在地が…に変わりました」が唱えと結果の間に入る。
+        """
+        msgs = self._window_with_interloper(msg("ev", 102))  # pulse_id 無し
+        result = plan(msgs, keep=3_000)
+        # 素の境界は index 3 (s1) — 群の内側。群の先頭 (index 1) まで下がる。
+        self.assertEqual(result.protected_from, 1)
+        self._assert_group_not_split(result, ["s0", "s1"])
+
+    def test_meta_judgment_interloper_does_not_split_the_group(self):
+        """committed なメタ判断 (別 pulse_id) が割り込んでも同じ。"""
+        msgs = self._window_with_interloper(msg("mj", 102, pulse="pm"))
+        result = plan(msgs, keep=3_000)
+        self.assertEqual(result.protected_from, 1)
+        self._assert_group_not_split(result, ["s0", "s1"])
+
+    def test_origin_row_with_null_marker_is_part_of_the_group(self):
+        """起点行の spell_origin_id は NULL — それでも群に含めて境目を下げる。
+
+        印の付いた行 (s1) だけを群と見なすと区間の幅がゼロになり、境目が
+        唱え (s0) と結果を読んだ発話 (s1) の間に落ちる。
+        """
+        msgs = self._window_with_interloper(msg("ev", 102))
+        result = plan(msgs, keep=3_000)
+        # 印を持つ最初の行 (index 3) ではなく、起点 (index 1) まで下がる。
+        self.assertEqual(result.protected_from, 1)
+
+    def test_fold_cut_does_not_close_inside_the_group(self):
+        """U に達しても群の途中では fold を閉じない (最後のメンバーまで含める)。
+
+        fold の切れ目も「唱えとその結果が別のあらすじに分かれる」境目なので、
+        保護境界と同じ不変条件で守る。
+        """
+        msgs = [
+            msg("a0", 100, pulse="p0"),
+            msg("s0", 101, pulse="p1"),          # 唱え (U=2,000 はここで到達)
+            msg("ev", 102),                       # 割り込み
+            msg("s1", 103, pulse="p2", spell_origin="s0"),
+            msg("a1", 104, pulse="p4"),
+            msg("k0", 105, pulse="p5"),
+            msg("k1", 106, pulse="p6"),
+        ]
+        result = plan(msgs, keep=2_000)
+        self.assertEqual(result.protected_from, 5)
+        self.assertEqual(len(result.folds), 1)
+        self.assertEqual(
+            result.folds[0].message_ids, ["a0", "s0", "ev", "s1"],
+        )
+
+    def test_escape_valve_pushes_the_boundary_past_the_unit_instead_of_splitting(self):
+        """脱出弁の原則: 古い側へ寄せられないなら**新しい側へ**寄せる。
+
+        素の境界を含む単位が提示の先頭から始まっていると、古い側へのスナップで
+        境界が 0 になり退場候補が空になる。そこで境界を単位の終わりの次へ動かし、
+        単位をまるごと退場候補に入れる — 群を割らずに前進できる。保護範囲は
+        残す量より少し狭くなるが、``protected_from`` は報告用の値であって
+        残す量を保証する契約は誰も持っていない。
+        """
+        msgs = [
+            msg("s0", 100, chars=40_000, pulse="p1"),   # 唱え = 群の起点
+            msg("ev", 101, chars=40_000),                # 割り込み (pulse 無し)
+            msg("s1", 102, chars=40_000, pulse="p2", spell_origin="s0"),
+            msg("k0", 103, chars=40_000, pulse="p3"),
+            msg("k1", 104, chars=40_000, pulse="p4"),
+        ]
+        # 残す量 100,000字 → 素の境界は index 2 (s1) で群の内側。古い側へ寄せると
+        # 群の先頭 = index 0 になり候補が消えるので、新しい側 (index 3) へ寄せる。
+        result = plan(msgs, keep=100_000)
+        self.assertEqual(result.protected_from, 3)
+        # 群のメンバーは全員まとめて退場候補側 = 境目で割れていない。
+        self.assertFalse(result.is_empty)
+        self.assertEqual(folded_ids(result), ["s0", "ev", "s1"])
+        self._assert_group_not_split(result, ["s0", "s1"])
+
+    def test_escape_valve_does_not_warn_when_it_avoids_splitting(self):
+        """新しい側へ寄せられた回は群を割っていないので WARNING を出さない。
+
+        WARNING は「不変条件を手放した」印なので、手放していない回に出すと
+        本当に割れた回が埋もれる。
+        """
+        msgs = [
+            msg("s0", 100, chars=40_000, pulse="p1"),
+            msg("ev", 101, chars=40_000),
+            msg("s1", 102, chars=40_000, pulse="p2", spell_origin="s0"),
+            msg("k0", 103, chars=40_000, pulse="p3"),
+            msg("k1", 104, chars=40_000, pulse="p4"),
+        ]
+        with self.assertNoLogs("sea.eviction_plan", "WARNING"):
+            plan(msgs, keep=100_000)
+
+    def test_escape_valve_splits_and_warns_when_the_unit_is_the_whole_window(self):
+        """例外: 提示コンテキスト全体が 1 つの単位なら素の境界で切る。
+
+        新しい側へ寄せると保護範囲が空になり anchor の指す先が無くなるので、
+        ここだけは単位を割ってでも前進する (「上限を超えたら必ず前進する」
+        arasuji_levels.md §4-1)。ただし黙って通さない — どの群を割ったかが
+        分かる WARNING を出す (INFO ではなく)。
+        """
+        msgs = [
+            msg("s0", 100, chars=40_000, pulse="p1"),
+            msg("ev", 101, chars=40_000),
+            msg("s1", 102, chars=40_000, pulse="p2", spell_origin="s0"),
+            msg("s2", 103, chars=40_000, pulse="p3", spell_origin="s0"),
+        ]
+        # 群が [s0..s2] 全体を覆う = 提示コンテキスト全体が 1 単位。
+        with self.assertLogs("sea.eviction_plan", "WARNING") as logs:
+            result = plan(msgs, keep=60_000)
+        self.assertEqual(result.protected_from, 2)
+        self.assertFalse(result.is_empty)
+        self.assertEqual(folded_ids(result), ["s0", "ev"])
+        self.assertTrue(any("s0" in line for line in logs.output))
 
 
 class CompileGroupsTest(unittest.TestCase):
