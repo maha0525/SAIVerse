@@ -1918,3 +1918,57 @@
         transform: rotate(360deg);
     }
 }
+
+
+/* ------------------------------------------------------------------
+   中断された発言の「続きの生成」と、返事が来なかった発言の「再送」。
+   追加の推論はこの二つのボタンの後ろにしか無い (2026-08-25 まはー裁定)。
+   設計: docs/issues/user_utterance_path_failure_inventory.md
+
+   通常の cardActions は hover まで opacity:0 だが、この二つは
+   「気づいてもらえないと機能そのものが無い」ので常に見せる。
+   ------------------------------------------------------------------ */
+
+.cardActionsPinned {
+    opacity: 1;
+}
+
+.continueBtn,
+.retryBtn {
+    gap: 0.3rem;
+    padding: 0.3rem 0.6rem;
+    opacity: 1;
+    font-size: 0.78rem;
+    line-height: 1;
+    border: 1px solid rgba(255, 255, 255, 0.22);
+    background: rgba(255, 255, 255, 0.06);
+    color: inherit;
+}
+
+.continueBtn:hover:not(:disabled),
+.retryBtn:hover:not(:disabled) {
+    background: rgba(255, 255, 255, 0.14);
+    border-color: rgba(255, 255, 255, 0.36);
+}
+
+.continueBtn:disabled,
+.retryBtn:disabled {
+    opacity: 0.4;
+    cursor: default;
+}
+
+.actionBtnLabel {
+    white-space: nowrap;
+}
+
+:global([data-theme="light"]) .continueBtn,
+:global([data-theme="light"]) .retryBtn {
+    border-color: rgba(0, 0, 0, 0.18);
+    background: rgba(0, 0, 0, 0.04);
+}
+
+:global([data-theme="light"]) .continueBtn:hover:not(:disabled),
+:global([data-theme="light"]) .retryBtn:hover:not(:disabled) {
+    background: rgba(0, 0, 0, 0.09);
+    border-color: rgba(0, 0, 0, 0.3);
+}

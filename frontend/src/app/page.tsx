@@ -26,7 +26,7 @@ import PlaybookPermissionDialog, { PermissionRequestData } from '@/components/Pl
 import SpellConfirmDialog, { SpellConfirmData } from '@/components/SpellConfirmDialog';
 import ChronicleConfirmDialog, { ChronicleConfirmData } from '@/components/ChronicleConfirmDialog';
 import ModalOverlay from '@/components/common/ModalOverlay';
-import { Send, Plus, Paperclip, Eye, X, Info, Users, Menu, Copy, Check, SlidersHorizontal, ChevronDown, AlertTriangle, ArrowUpCircle, Loader, RefreshCw, Square, Bell, Map as MapIcon } from 'lucide-react';
+import { Send, Plus, Paperclip, Eye, X, Info, Users, Menu, Copy, Check, SlidersHorizontal, ChevronDown, AlertTriangle, ArrowUpCircle, Loader, RefreshCw, Square, Bell, Map as MapIcon, CornerDownRight, RotateCcw } from 'lucide-react';
 import { useActivityTracker } from '@/hooks/useActivityTracker';
 import { useAddonEvents } from '@/hooks/useAddonEvents';
 import { useActiveClientTab } from '@/hooks/useActiveClientTab';
@@ -128,8 +128,14 @@ interface Message {
     // Warning information
     isWarning?: boolean;
     warningCode?: string;
-    // Info notification (e.g. stream interrupted, re-speaking)
+    // Info notification (e.g. stream interrupted)
     isInfo?: boolean;
+    // この発言は言い切っていない (生成が中断された)。立っている間だけ
+    // 「続きの生成」ボタンを出す。サーバーの metadata["_interrupted"] 由来。
+    interrupted?: boolean;
+    // この発言に返事が来なかった。立っている間だけ「再送」ボタンを出す。
+    // 発言そのものは残っているので、押しても送り直しにはならない (応答だけ)。
+    needsRetry?: boolean;
     // Reasoning (thinking) from LLM
     reasoning?: string;
     // 自動想起 (記憶アーキv2 §4.5): この Pulse で末尾注入された「ふと浮かんだ記憶」ブロック。
@@ -1540,169 +1546,74 @@ export default function Home() {
         }
     }, []);
 
-    const handleSendMessage = async () => {
-        if ((!inputValue.trim() && attachments.length === 0) || loadingStatus) return;
-        // Block send while a video is still uploading, or if any attachment errored.
-        const pendingUpload = attachments.find(a => a.uploading);
-        if (pendingUpload) {
-            alert(`動画「${pendingUpload.name}」のアップロード中です。完了まで少し待って。`);
-            return;
-        }
-        const errored = attachments.find(a => a.error);
-        if (errored) {
-            alert(`添付「${errored.name}」のアップロードに失敗してる: ${errored.error}\n削除してから送って。`);
-            return;
-        }
-        isProcessingRef.current = true;
+    // ------------------------------------------------------------------
+    // 応答ストリームの読み手
+    //
+    // 送信・続きの生成・やり直しの三つの入口が同じ読み手を共有する。入口ごとに
+    // 書き分けると、片方だけ直った分岐がいずれ必ず生まれる。
+    // 設計: docs/issues/user_utterance_path_failure_inventory.md
+    // ------------------------------------------------------------------
 
-        // Optimistic update
-        // Temporary ID for key prop until refreshed
-        const tempId = `temp-${Date.now()}`;
-        const userMsg: Message = {
-            id: tempId, role: 'user', content: inputValue,
-            sender: userDisplayNameRef.current || undefined,
-            avatar: userAvatarRef.current || undefined,
-            images: attachments
-                .filter(a => a.type === 'image' && a.base64)
-                .map(a => ({ url: `data:${a.mimeType};base64,${a.base64}`, mime_type: a.mimeType })),
-            audios: attachments
-                .filter(a => a.type === 'audio' && a.base64)
-                .map(a => ({ url: `data:${a.mimeType};base64,${a.base64}`, mime_type: a.mimeType })),
-            // Video preview uses the blob URL (no base64 copy); it's only valid for
-            // this session, but the next history fetch replaces it with a real
-            // /api/media/video/<name> URL from the server.
-            videos: attachments
-                .filter(a => a.type === 'video' && a.previewUrl)
-                .map(a => ({ url: a.previewUrl as string, mime_type: a.mimeType })),
-        };
-        setMessages(prev => [...prev, userMsg]);
-        setInputValue('');
-        setLoadingStatus('Thinking...');
+    // 返事が来なかった発言に「再送」を出すための印。出口 3 / 7 で立てる。
+    const markRetryable = (messageId: string) => {
+        setMessages(prev => prev.map(m => (
+            m.id === messageId && m.role === 'user' ? { ...m, needsRetry: true } : m
+        )));
+    };
 
-        const currentAttachments = attachments;
-        const currentPlaybook = selectedPlaybook;
-        const currentPlaybookArgs = playbookArgs;
-
-        setAttachments([]);
-        // Reset playbook args after sending
-        setPlaybookArgs({});
-
-        // ツール指定モードの場合は UI 状態 (Playbook 1 つ + Spell 複数) を
-        // pre_spells エントリ列に変換して送る。meta_playbook と args は送らない
-        // (UI センチネルはサーバー側に存在しない Playbook 名なので、そのまま渡すと
-        // "playbook not found" になる)。pre_spells のフォーマットは
-        // バックエンドの _SPELL_PATTERN / _SPELL_PATTERN_NO_ARGS と互換
-        // (sea/runtime_llm.py)。
-        const isToolSelectedMode = currentPlaybook === TOOL_MODE_SELECTED;
-        const selectedToolName = isToolSelectedMode
-            ? (currentPlaybookArgs?.selected_playbook || null)
-            : null;
-        const selectedSpellNames: string[] = isToolSelectedMode && Array.isArray(currentPlaybookArgs?.selected_spells)
-            ? (currentPlaybookArgs.selected_spells as string[])
-            : [];
-        const preSpellsBuilt = isToolSelectedMode
-            ? buildPreSpellsFromUI(selectedToolName, selectedSpellNames)
-            : [];
-        const preSpells = preSpellsBuilt.length > 0 ? preSpellsBuilt : undefined;
-        const sendMetaPlaybook = isToolSelectedMode ? undefined : (currentPlaybook || undefined);
-        const sendArgs = !isToolSelectedMode && Object.keys(currentPlaybookArgs).length > 0
-            ? currentPlaybookArgs
-            : undefined;
-
-        // B-2 idempotency: 送信操作 1 回につき 1 つの UUID を生成。
-        // fetch retry 等で同じ送信が複数回 backend に届いても、 backend は
-        // UNIQUE(client_message_id) で既存行を返すだけで二重 INSERT しない。
-        // See: docs/intent/building_memory_unified.md §B-2
-        //
-        // 注: crypto.randomUUID() は Secure Context 限定なので、 Tailscale
-        // 経由スマホ等 (http://100.x.x.x:3000) では throw する。 そのケース
-        // では非 secure context でも使える getRandomValues で UUID v4 を
-        // 手組みするフォールバックに落ちる。
-        const clientMessageId = (() => {
-            if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
-                try { return crypto.randomUUID(); } catch { /* fall through */ }
+    // ストリームが閉じた後の後片付け。読み終わっても、途中で切れても、fetch が
+    // 失敗しても必ず通す。
+    const finishReplyCycle = async () => {
+            // ストリームが閉じた後に metabolism の遅延タイマーが発火すると
+            // スピナーが復活して二度と消えなくなるため、必ずここで潰す。
+            if (metabolismStatusTimerRef.current) {
+                clearTimeout(metabolismStatusTimerRef.current);
+                metabolismStatusTimerRef.current = null;
             }
-            const bytes = new Uint8Array(16);
-            crypto.getRandomValues(bytes);
-            bytes[6] = (bytes[6] & 0x0f) | 0x40; // version 4
-            bytes[8] = (bytes[8] & 0x3f) | 0x80; // variant
-            const hex = Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
-            return `${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${hex.slice(20)}`;
-        })();
-
-        try {
-            // C-2: /chat/utter は発言契機入室。 target_building_id (= UI 上で
-            // 表示中の建物) がサーバの真の現在地と異なれば、 backend が atomic
-            // に move を実行してから発言処理に入る。 同建物発言なら move skip。
-            const res = await fetch('/api/chat/utter', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    message: userMsg.content,
-                    target_building_id: currentBuildingIdRef.current,
-                    // B-1 CAS: クライアントが認識しているサーバの真の現在地。
-                    // サーバ側と一致しなければ 409 で他クライアントの先行 move
-                    // を検出できる。
-                    expected_from_building_id: serverCurrentBuildingIdRef.current,
-                    attachments: currentAttachments.length > 0 ? currentAttachments.map(a => (
-                        a.type === 'video' && a.uri
-                            ? { uri: a.uri, filename: a.name, type: a.type, mime_type: a.mimeType }
-                            : { data: a.base64, filename: a.name, type: a.type, mime_type: a.mimeType }
-                    )) : undefined,
-                    meta_playbook: sendMetaPlaybook,
-                    args: sendArgs,
-                    pre_spells: preSpells,
-                    client_message_id: clientMessageId,
-                })
-            });
-
-            if (res.status === 409) {
-                // CAS conflict (= B-1): 他クライアントが先に動いていた。
-                // ユーザーに通知し、 status を再取得して serverCurrentBuildingId
-                // を真の現在地に同期する。 メッセージ自体は再送が必要。
-                let conflictMsg = '他のクライアントが先に移動したため、 発言は受け付けられませんでした。 最新状態に同期します。';
-                try {
-                    const data = await res.json();
-                    if (data?.detail?.message) conflictMsg = data.detail.message;
-                    if (data?.detail?.current_building_id) {
-                        updateServerBuildingId(data.detail.current_building_id);
+            setLoadingStatus(null);
+            // Finalize any orphaned _streaming messages left after the stream ends
+            // (e.g. activity events that arrived after the last streaming_complete)
+            setMessages(prev => {
+                const lastIdx = prev.length - 1;
+                if (lastIdx >= 0 && prev[lastIdx]._streaming) {
+                    const msg = prev[lastIdx];
+                    const { _streaming, _streamingThinking, _activities, ...rest } = msg;
+                    // Empty content + no activities → discard entirely
+                    if (!rest.content && (!_activities || _activities.length === 0)) {
+                        return prev.slice(0, -1);
                     }
-                } catch { /* ignore JSON parse */ }
-                alert(conflictMsg);
-                // status を再取得して UI と整合させる
-                try {
-                    const statusRes = await fetch('/api/user/status');
-                    if (statusRes.ok) {
-                        const statusData = await statusRes.json();
-                        if (statusData?.current_building_id) {
-                            updateServerBuildingId(statusData.current_building_id);
-                        }
-                    }
-                } catch (statusErr) {
-                    console.error('Failed to refetch status after CAS conflict', statusErr);
+                    // Has activities or content → finalize as completed message
+                    return [...prev.slice(0, -1), {
+                        ...rest,
+                        ...(_streamingThinking && { reasoning: _streamingThinking }),
+                        ...((_activities && _activities.length > 0) && { activity_trace: _activities }),
+                    }];
                 }
-                setLoadingStatus(null);
-                return;
-            }
-
-            if (!res.ok) {
-                let errorDetails = `Status: ${res.status} ${res.statusText}`;
-                try {
-                    const errorText = await res.text();
-                    errorDetails += ` - Body: ${errorText}`;
-                } catch (e) { console.error('Failed to read error response body:', e); }
-                throw new Error(`Failed to send message. ${errorDetails}`);
-            }
-
-            // 楽観的更新: utter が成功した時点で、 サーバ側の真の現在地は
-            // target_building_id に移動済 (= utter が atomic に auto-move
-            // した)。 次回発言時の expected_from が古い値だと 409 になるので
-            // ここで先に同期しておく。
-            updateServerBuildingId(currentBuildingIdRef.current);
-            // Sidebar / RightSidebar の status / details を再 fetch させて
-            // D-1 マーカーや滞在ユーザー表示をサーバの新しい現在地に追従させる。
+                return prev;
+            });
+            await syncAfterResponse(); // Merge server state (IDs, avatars) without replacing messages
+            isProcessingRef.current = false; // Allow polling AFTER sync completes
             setMoveTrigger(prev => prev + 1);
+            // Refresh RPD usage after message sent
+            if (selectedModelRateLimit && selectedModel) {
+                fetch(`/api/usage/rpd?model_id=${encodeURIComponent(selectedModel)}`)
+                    .then(res => res.ok ? res.json() : null)
+                    .then((data: { used: number; limit: number }[] | null) => {
+                        if (data && data.length > 0) setRpdUsage({ used: data[0].used, limit: data[0].limit });
+                    })
+                    .catch(() => {});
+            }
+    };
 
+    const consumeReplyStream = async (
+        res: Response,
+        source: 'send' | 'continue' | 'retry',
+    ) => {
+        // 発言が届いたことをサーバーから聞けたか。通信が途中で切れたとき、
+        // 「届いたか分からない」(出口 7) と「届いたが返事が無かった」(出口 3) を
+        // 分けるのに使う。分からないときに分かった顔をしないための材料。
+        let landedMessageId: string | null = null;
+        try {
             if (!res.body) throw new Error("No response body");
             const reader = res.body.getReader();
             const decoder = new TextDecoder();
@@ -1899,6 +1810,9 @@ export default function Home() {
                                         reasoning,
                                         ...((_activities && _activities.length > 0) && { activity_trace: _activities }),
                                         ...(streamCompleteImages && { images: streamCompleteImages }),
+                                        // 途中で切れた発言。再読込を待たずに印を立て、
+                                        // その場で「続きの生成」を出せるようにする。
+                                        ...(event.interrupted && { interrupted: true }),
                                     }];
                                 }
                                 return prev;
@@ -1997,6 +1911,9 @@ export default function Home() {
                                 errorDetail: event.technical_detail,
                                 timestamp: new Date().toISOString()
                             }]);
+                            // 発言は届いているのに返事が生まれなかった (出口 3)。
+                            // 送り直しではなく「もう一度応答を得る」を出す。
+                            if (landedMessageId) markRetryable(landedMessageId);
                         } else if (event.type === 'metabolism') {
                             if (event.status === 'completed') {
                                 // Show completion message briefly, then transition
@@ -2017,6 +1934,9 @@ export default function Home() {
                         } else if (event.type === 'user_message_id') {
                             // Update the optimistic user message (temp id) with server-assigned id
                             if (event.message_id) {
+                                // サーバーが発言を受け取った証拠。通信が後で切れても
+                                // 「届いたかどうか分からない」ではなくなる。
+                                landedMessageId = event.message_id;
                                 setMessages(prev => {
                                     // Find the last user message with a temp id and update it
                                     for (let i = prev.length - 1; i >= 0; i--) {
@@ -2109,50 +2029,250 @@ export default function Home() {
                     }
                 }
             }
-
         } catch (error) {
             console.error(error);
-            setMessages(prev => [...prev, { role: 'assistant', content: "Error: Failed to send message." }]);
+            if (source === 'send' && !landedMessageId) {
+                // 出口 7: サーバーに届いたかどうか、こちら側からは原理的に
+                // 分からない。分かった顔をせず、そのまま伝える。
+                setMessages(prev => [...prev, {
+                    role: 'system',
+                    content: '通信が途中で切れました。発言が届いたかどうかは分かりません。履歴を確認してください。',
+                    isError: true,
+                    errorCode: 'unknown_outcome',
+                    timestamp: new Date().toISOString(),
+                }]);
+            } else {
+                setMessages(prev => [...prev, {
+                    role: 'system',
+                    content: source === 'continue'
+                        ? '続きの生成が途中で切れました。'
+                        : '通信が途中で切れました。',
+                    isError: true,
+                    errorCode: 'stream_broken',
+                    timestamp: new Date().toISOString(),
+                }]);
+                if (landedMessageId) markRetryable(landedMessageId);
+            }
         } finally {
-            // ストリームが閉じた後に metabolism の遅延タイマーが発火すると
-            // スピナーが復活して二度と消えなくなるため、必ずここで潰す。
-            if (metabolismStatusTimerRef.current) {
-                clearTimeout(metabolismStatusTimerRef.current);
-                metabolismStatusTimerRef.current = null;
+            await finishReplyCycle();
+        }
+    };
+
+    const handleSendMessage = async () => {
+        if ((!inputValue.trim() && attachments.length === 0) || loadingStatus) return;
+        // Block send while a video is still uploading, or if any attachment errored.
+        const pendingUpload = attachments.find(a => a.uploading);
+        if (pendingUpload) {
+            alert(`動画「${pendingUpload.name}」のアップロード中です。完了まで少し待って。`);
+            return;
+        }
+        const errored = attachments.find(a => a.error);
+        if (errored) {
+            alert(`添付「${errored.name}」のアップロードに失敗してる: ${errored.error}\n削除してから送って。`);
+            return;
+        }
+        isProcessingRef.current = true;
+
+        // Optimistic update
+        // Temporary ID for key prop until refreshed
+        const tempId = `temp-${Date.now()}`;
+        const userMsg: Message = {
+            id: tempId, role: 'user', content: inputValue,
+            sender: userDisplayNameRef.current || undefined,
+            avatar: userAvatarRef.current || undefined,
+            images: attachments
+                .filter(a => a.type === 'image' && a.base64)
+                .map(a => ({ url: `data:${a.mimeType};base64,${a.base64}`, mime_type: a.mimeType })),
+            audios: attachments
+                .filter(a => a.type === 'audio' && a.base64)
+                .map(a => ({ url: `data:${a.mimeType};base64,${a.base64}`, mime_type: a.mimeType })),
+            // Video preview uses the blob URL (no base64 copy); it's only valid for
+            // this session, but the next history fetch replaces it with a real
+            // /api/media/video/<name> URL from the server.
+            videos: attachments
+                .filter(a => a.type === 'video' && a.previewUrl)
+                .map(a => ({ url: a.previewUrl as string, mime_type: a.mimeType })),
+        };
+        setMessages(prev => [...prev, userMsg]);
+        setInputValue('');
+        setLoadingStatus('Thinking...');
+
+        const currentAttachments = attachments;
+        const currentPlaybook = selectedPlaybook;
+        const currentPlaybookArgs = playbookArgs;
+
+        setAttachments([]);
+        // Reset playbook args after sending
+        setPlaybookArgs({});
+
+        // ツール指定モードの場合は UI 状態 (Playbook 1 つ + Spell 複数) を
+        // pre_spells エントリ列に変換して送る。meta_playbook と args は送らない
+        // (UI センチネルはサーバー側に存在しない Playbook 名なので、そのまま渡すと
+        // "playbook not found" になる)。pre_spells のフォーマットは
+        // バックエンドの _SPELL_PATTERN / _SPELL_PATTERN_NO_ARGS と互換
+        // (sea/runtime_llm.py)。
+        const isToolSelectedMode = currentPlaybook === TOOL_MODE_SELECTED;
+        const selectedToolName = isToolSelectedMode
+            ? (currentPlaybookArgs?.selected_playbook || null)
+            : null;
+        const selectedSpellNames: string[] = isToolSelectedMode && Array.isArray(currentPlaybookArgs?.selected_spells)
+            ? (currentPlaybookArgs.selected_spells as string[])
+            : [];
+        const preSpellsBuilt = isToolSelectedMode
+            ? buildPreSpellsFromUI(selectedToolName, selectedSpellNames)
+            : [];
+        const preSpells = preSpellsBuilt.length > 0 ? preSpellsBuilt : undefined;
+        const sendMetaPlaybook = isToolSelectedMode ? undefined : (currentPlaybook || undefined);
+        const sendArgs = !isToolSelectedMode && Object.keys(currentPlaybookArgs).length > 0
+            ? currentPlaybookArgs
+            : undefined;
+
+        // B-2 idempotency: 送信操作 1 回につき 1 つの UUID を生成。
+        // fetch retry 等で同じ送信が複数回 backend に届いても、 backend は
+        // UNIQUE(client_message_id) で既存行を返すだけで二重 INSERT しない。
+        // See: docs/intent/building_memory_unified.md §B-2
+        //
+        // 注: crypto.randomUUID() は Secure Context 限定なので、 Tailscale
+        // 経由スマホ等 (http://100.x.x.x:3000) では throw する。 そのケース
+        // では非 secure context でも使える getRandomValues で UUID v4 を
+        // 手組みするフォールバックに落ちる。
+        const clientMessageId = (() => {
+            if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+                try { return crypto.randomUUID(); } catch { /* fall through */ }
             }
-            setLoadingStatus(null);
-            // Finalize any orphaned _streaming messages left after the stream ends
-            // (e.g. activity events that arrived after the last streaming_complete)
-            setMessages(prev => {
-                const lastIdx = prev.length - 1;
-                if (lastIdx >= 0 && prev[lastIdx]._streaming) {
-                    const msg = prev[lastIdx];
-                    const { _streaming, _streamingThinking, _activities, ...rest } = msg;
-                    // Empty content + no activities → discard entirely
-                    if (!rest.content && (!_activities || _activities.length === 0)) {
-                        return prev.slice(0, -1);
-                    }
-                    // Has activities or content → finalize as completed message
-                    return [...prev.slice(0, -1), {
-                        ...rest,
-                        ...(_streamingThinking && { reasoning: _streamingThinking }),
-                        ...((_activities && _activities.length > 0) && { activity_trace: _activities }),
-                    }];
-                }
-                return prev;
+            const bytes = new Uint8Array(16);
+            crypto.getRandomValues(bytes);
+            bytes[6] = (bytes[6] & 0x0f) | 0x40; // version 4
+            bytes[8] = (bytes[8] & 0x3f) | 0x80; // variant
+            const hex = Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
+            return `${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${hex.slice(20)}`;
+        })();
+
+        try {
+            // C-2: /chat/utter は発言契機入室。 target_building_id (= UI 上で
+            // 表示中の建物) がサーバの真の現在地と異なれば、 backend が atomic
+            // に move を実行してから発言処理に入る。 同建物発言なら move skip。
+            const res = await fetch('/api/chat/utter', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    message: userMsg.content,
+                    target_building_id: currentBuildingIdRef.current,
+                    // B-1 CAS: クライアントが認識しているサーバの真の現在地。
+                    // サーバ側と一致しなければ 409 で他クライアントの先行 move
+                    // を検出できる。
+                    expected_from_building_id: serverCurrentBuildingIdRef.current,
+                    attachments: currentAttachments.length > 0 ? currentAttachments.map(a => (
+                        a.type === 'video' && a.uri
+                            ? { uri: a.uri, filename: a.name, type: a.type, mime_type: a.mimeType }
+                            : { data: a.base64, filename: a.name, type: a.type, mime_type: a.mimeType }
+                    )) : undefined,
+                    meta_playbook: sendMetaPlaybook,
+                    args: sendArgs,
+                    pre_spells: preSpells,
+                    client_message_id: clientMessageId,
+                })
             });
-            await syncAfterResponse(); // Merge server state (IDs, avatars) without replacing messages
-            isProcessingRef.current = false; // Allow polling AFTER sync completes
-            setMoveTrigger(prev => prev + 1);
-            // Refresh RPD usage after message sent
-            if (selectedModelRateLimit && selectedModel) {
-                fetch(`/api/usage/rpd?model_id=${encodeURIComponent(selectedModel)}`)
-                    .then(res => res.ok ? res.json() : null)
-                    .then((data: { used: number; limit: number }[] | null) => {
-                        if (data && data.length > 0) setRpdUsage({ used: data[0].used, limit: data[0].limit });
-                    })
-                    .catch(() => {});
+
+            if (res.status === 409) {
+                // CAS conflict (= B-1): 他クライアントが先に動いていた。
+                // ユーザーに通知し、 status を再取得して serverCurrentBuildingId
+                // を真の現在地に同期する。 メッセージ自体は再送が必要。
+                let conflictMsg = '他のクライアントが先に移動したため、 発言は受け付けられませんでした。 最新状態に同期します。';
+                try {
+                    const data = await res.json();
+                    if (data?.detail?.message) conflictMsg = data.detail.message;
+                    if (data?.detail?.current_building_id) {
+                        updateServerBuildingId(data.detail.current_building_id);
+                    }
+                } catch { /* ignore JSON parse */ }
+                alert(conflictMsg);
+                // status を再取得して UI と整合させる
+                try {
+                    const statusRes = await fetch('/api/user/status');
+                    if (statusRes.ok) {
+                        const statusData = await statusRes.json();
+                        if (statusData?.current_building_id) {
+                            updateServerBuildingId(statusData.current_building_id);
+                        }
+                    }
+                } catch (statusErr) {
+                    console.error('Failed to refetch status after CAS conflict', statusErr);
+                }
+                // 後片付けは必ず通す。読み手を切り出したことで、この早期 return は
+                // もう外側の finally に拾われない (isProcessingRef が立ったままだと
+                // 履歴の追従が止まる)。
+                await finishReplyCycle();
+                return;
             }
+
+            if (!res.ok) {
+                let errorDetails = `Status: ${res.status} ${res.statusText}`;
+                try {
+                    const errorText = await res.text();
+                    errorDetails += ` - Body: ${errorText}`;
+                } catch (e) { console.error('Failed to read error response body:', e); }
+                throw new Error(`Failed to send message. ${errorDetails}`);
+            }
+
+            // 楽観的更新: utter が成功した時点で、 サーバ側の真の現在地は
+            // target_building_id に移動済 (= utter が atomic に auto-move
+            // した)。 次回発言時の expected_from が古い値だと 409 になるので
+            // ここで先に同期しておく。
+            updateServerBuildingId(currentBuildingIdRef.current);
+            // Sidebar / RightSidebar の status / details を再 fetch させて
+            // D-1 マーカーや滞在ユーザー表示をサーバの新しい現在地に追従させる。
+            setMoveTrigger(prev => prev + 1);
+
+            await consumeReplyStream(res, 'send');
+        } catch (error) {
+            console.error(error);
+            setMessages(prev => [...prev, {
+                role: 'system',
+                content: '送信できませんでした。接続を確認してもう一度お試しください。',
+                isError: true,
+                errorCode: 'send_failed',
+                timestamp: new Date().toISOString(),
+            }]);
+            await finishReplyCycle();
+        }
+    };
+
+    // 追加の推論は必ずこの二つのボタンの後ろにある (2026-08-25 まはー裁定)。
+    // どちらも発言を送り直さない — 起こすのは応答だけ。
+    const runMessageAction = async (
+        endpoint: 'continue' | 'retry',
+        messageId: string,
+    ) => {
+        if (loadingStatus) return;
+        isProcessingRef.current = true;
+        setLoadingStatus('Thinking...');
+        // 押した瞬間にボタンを下ろす。二度押しで二重に走らせない。
+        setMessages(prev => prev.map(m => (
+            m.id === messageId
+                ? { ...m, ...(endpoint === 'continue' ? { interrupted: false } : { needsRetry: false }) }
+                : m
+        )));
+        try {
+            const res = await fetch(`/api/chat/${endpoint}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ message_id: messageId }),
+            });
+            if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+            await consumeReplyStream(res, endpoint);
+        } catch (error) {
+            console.error(error);
+            setMessages(prev => [...prev, {
+                role: 'system',
+                content: endpoint === 'continue'
+                    ? '続きを起こせませんでした。'
+                    : 'やり直せませんでした。',
+                isError: true,
+                errorCode: 'action_failed',
+                timestamp: new Date().toISOString(),
+            }]);
+            await finishReplyCycle();
         }
     };
 
@@ -2676,7 +2796,7 @@ export default function Home() {
                                         <div className={styles.errorContent}>
                                             <div className={styles.errorHeader}>
                                                 <span className={styles.errorIcon}>
-                                                    {({rate_limit: '⏱️', timeout: '⏰', safety_filter: '🛡️', server_error: '🔧', empty_response: '📭', authentication: '🔑', payment: '💳'} as Record<string, string>)[msg.errorCode || ''] || '⚠️'}
+                                                    {({rate_limit: '⏱️', timeout: '⏰', safety_filter: '🛡️', server_error: '🔧', empty_response: '📭', authentication: '🔑', payment: '💳', no_response: '💭', unknown_outcome: '❓', stream_broken: '🔌', send_failed: '🔌', message_not_found: '🔍'} as Record<string, string>)[msg.errorCode || ''] || '⚠️'}
                                                 </span>
                                                 <span className={styles.errorMessage}>{msg.content}</span>
                                             </div>
@@ -2689,6 +2809,18 @@ export default function Home() {
                                                     payment: 'APIキーの残高や支払い設定を確認してください。',
                                                     authentication: 'APIキーの設定を確認してください。',
                                                     server_error: 'LLMサーバーで障害が発生しています。しばらく時間を置いてから再送信してください。',
+                                                    // 発言は届いている。だから送り直しではなく、
+                                                    // その発言の「再送」ボタンで応答だけを求める。
+                                                    no_response: 'あなたの発言は記録に残っています。返事だけが生まれなかったので、発言の「再送」から応答をもう一度求められます。',
+                                                    // 出口 7: こちら側からは届いたかどうか分からない。
+                                                    // 分かった顔をせず、確認の手立てだけを示す。
+                                                    unknown_outcome: '発言が届いたかどうかは、この画面からは判断できません。同じ内容を送り直す前に、履歴に残っているかを確認してください。',
+                                                    stream_broken: '接続が途中で切れました。ここまでの内容は残っています。',
+                                                    send_failed: 'サーバーに接続できませんでした。SAIVerse が起動しているかを確認してください。',
+                                                    message_not_found: 'この発言は記録に残っていません。入力欄からもう一度送ってください。',
+                                                    empty_message: '空のまま送信されました。内容を入れてから送ってください。',
+                                                    no_current_building: 'いまいる場所が確定していません。画面を再読み込みするか、建物を選び直してください。',
+                                                    action_failed: '操作をサーバーに届けられませんでした。接続を確認してもう一度お試しください。',
                                                 } as Record<string, string>)[msg.errorCode || ''] || '予期しないエラーが発生しました。問題が続く場合は管理者に連絡してください。'}
                                             </div>
                                             {msg.errorDetail && (
@@ -2813,7 +2945,7 @@ export default function Home() {
                                         )}
                                     </div>
                                 )}
-                                <div className={styles.cardActions}>
+                                <div className={`${styles.cardActions} ${(msg.interrupted || msg.needsRetry) ? styles.cardActionsPinned : ''}`}>
                                     <button
                                         className={`${styles.actionBtn} ${copiedMessageId === (msg.id || `msg-${idx}`) ? styles.copied : ''}`}
                                         onClick={() => handleCopyMessage(msg.id || `msg-${idx}`, msg.content)}
@@ -2821,6 +2953,32 @@ export default function Home() {
                                     >
                                         {copiedMessageId === (msg.id || `msg-${idx}`) ? <Check size={14} /> : <Copy size={14} />}
                                     </button>
+                                    {/* 途中で終わった発言にだけ「続きの生成」を出す。
+                                        追加の推論はユーザーの一押しの後ろに置く。 */}
+                                    {msg.role === 'assistant' && msg.interrupted && msg.id && (
+                                        <button
+                                            className={`${styles.actionBtn} ${styles.continueBtn}`}
+                                            onClick={() => runMessageAction('continue', msg.id as string)}
+                                            disabled={!!loadingStatus}
+                                            title="この発言は途中で終わっています。続きを話してもらう"
+                                        >
+                                            <CornerDownRight size={14} />
+                                            <span className={styles.actionBtnLabel}>続きの生成</span>
+                                        </button>
+                                    )}
+                                    {/* 返事が来なかった発言にだけ「再送」を出す。発言は
+                                        残っているので、押しても送り直しにはならない。 */}
+                                    {msg.role === 'user' && msg.needsRetry && msg.id && (
+                                        <button
+                                            className={`${styles.actionBtn} ${styles.retryBtn}`}
+                                            onClick={() => runMessageAction('retry', msg.id as string)}
+                                            disabled={!!loadingStatus}
+                                            title="この発言に返事が来ていません。もう一度応答を求める"
+                                        >
+                                            <RotateCcw size={14} />
+                                            <span className={styles.actionBtnLabel}>再送</span>
+                                        </button>
+                                    )}
                                     {/* アドオンバブルボタン（assistantメッセージにのみ表示） */}
                                     {msg.role === 'assistant' && addonBubbleButtons.length > 0 && (
                                         <AddonBubbleButtons

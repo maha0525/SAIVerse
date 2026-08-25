@@ -443,9 +443,23 @@ CLAUDE.md の「例外処理・救済機構が本体を覆い始めたら止ま�
 - ✅ 続きが生まれたら、元の発言の `_interrupted` を降ろしてボタンを消す
 - ✅ `_interrupted` を chat history API (`ChatMessage.interrupted`) と `streaming_complete`
   イベントの両方に載せた。再読込を待たずにボタンが出せる
-- ⬜ **フロントエンド**: バブルのボタン 2 種 / 失敗のダイアログ / 出口 7 / ダークモード。
-  `handleSendMessage` の中に約 450 行インラインで書かれた NDJSON 消費を、3 つの入口
-  (送信・続き・再送) で共有できる形へ切り出すのが最初の一手
+- ✅ **フロントエンド** (2026-08-26)。`handleSendMessage` に約 450 行インラインで書かれていた
+  NDJSON 消費を `consumeReplyStream(res, source)` へ切り出し、送信・続き・再送の三つの入口が
+  同じ読み手を共有する形にした (入口ごとに書き分けると、片方だけ直った分岐がいずれ生まれる)。
+  後片付けも `finishReplyCycle()` に集約
+- ✅ バブルのボタン 2 種。**`cardActions` は hover まで `opacity: 0`** だったので、この二つだけ
+  常時表示にする `cardActionsPinned` を足した — 気づいてもらえないと機能が無いのと同じ
+- ✅ 出口 7 を実装。`user_message_id` イベントが届いていたかで「届いたか分からない」と
+  「届いたが返事が無かった」を分ける。**分からないときに分かった顔をしない**ための材料
+- ✅ 失敗の説明文を error_code ごとに用意 (`no_response` / `unknown_outcome` / `stream_broken` /
+  `send_failed` / `message_not_found` / `empty_message` / `no_current_building` / `action_failed`)
+- ✅ ダークモード。このプロジェクトの CSS は**ダークが既定で `[data-theme="light"]` が上書き**する
+  作りなので、それに合わせた
+- ⚠️ **切り出しで一度穴を開けた**: 409 (位置競合) の早期 `return` が、外側の `finally` が消えたことで
+  後片付けを飛ばすようになっていた (`isProcessingRef` が立ったままで履歴の追従が止まる)。
+  同じ形の早期 return を全部洗って、これ 1 件だけだったことを確認して塞いだ
+- ⬜ **実機での見え方は未確認**。型検査・lint (新規エラーなし)・本番ビルドは通っているが、
+  中断された発言を実際に作らないとボタンの見え方は確認できない
 
 **設計の決定 (実装中に確定したもの)**:
 
