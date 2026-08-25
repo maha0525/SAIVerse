@@ -402,8 +402,9 @@ CLAUDE.md の「例外処理・救済機構が本体を覆い始めたら止ま�
   次の Beat の発言まで中断扱いになる
 - ✅ 派生: `respeak_split_message_unification` は**対象消滅で archive** — 二回目のコールが無く
   なったので、一つの発言が二つに分裂する経路が構造から消えた
-- ⏭ **空 placeholder の掃除は束 2 へ移した**。残るのは「Beat が例外で丸ごと落ちた場合」だけで、
-  それは束 2 の例外処理と同じ場所を触るため。中断と停止の経路は finalize を通るので印が付く
+- ⏭ **空 placeholder の掃除は独立 issue へ切り出した**
+  ([orphaned_streaming_placeholder_cleanup](orphaned_streaming_placeholder_cleanup.md))。
+  残るのは「Beat が例外で丸ごと落ちた場合」だけで、中断と停止の経路は finalize を通るので印が付く
 
 **束 2 — 無言をなくす (バックエンド)** ✅ **ほぼ完了 (2026-08-25)**
 
