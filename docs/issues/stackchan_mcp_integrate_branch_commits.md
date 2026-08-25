@@ -121,6 +121,8 @@ upstream/main を base にしたので、 これらは自動的に新ブラン�
 |---|---|---|---|---|---|---|
 | 28 | `5a44af0` | `36f5209` | add boot_session_id to GetDeviceStatusJson for host-side reboot detection | `dev/integration` | **未送 (= 独立 PR 候補)**、 addon avatar_loader が require、 取り込み漏れ事後発見 | cherry-pick |
 
+> **2026-08-25 追記 — この PR は不要になった。** upstream #357 (`23792aa`) が gateway の `get_status` に WS 接続ごとの `session_id` を載せる形で同じ問題を解決した。firmware を触らずに済む分そちらの方が軽く、しかも「再起動」だけでなく「切れて繋ぎ直した」場合にも値が変わるので、後から device が接続してきたケースも拾える。SAIVerse 側の `avatar_loader` は `get_device_info` ではなく `get_status` を見るよう改修済み。fork 側の `boot_session_id` は upstream に送らない。
+
 ### Group 10: matrix mode rendering (= PR-E2 #211 の素材)
 
 | # | new SHA | source SHA | 内容 | 由来ブランチ | upstream PR 状態 | 取得方法 |

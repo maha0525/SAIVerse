@@ -865,6 +865,8 @@ upstream/main (= 全 merged PR が入る: #225 / #210 / #217 / #212 / #223 / #20
 
 `feature/fix-wifi-first-attempt-comeback-timer` の `47f09ac` (cancel in-flight connect on timeout) は cherry-pick 結果が空 = upstream #186 内で同等改修が入っているため skip。
 
+> **2026-08-25 追記 — この PR は不要になった。** upstream #357 (`23792aa`) が gateway の `get_status` に WS 接続ごとの `session_id` を載せる形で同じ問題を解決した。firmware を触らずに済む分そちらの方が軽く、しかも「再起動」だけでなく「切れて繋ぎ直した」場合にも値が変わるので、後から device が接続してきたケースも拾える。SAIVerse 側の `avatar_loader` は `get_device_info` ではなく `get_status` を見るよう改修済み。fork 側の `boot_session_id` は upstream に送らない。
+
 ### conflict resolution の経験
 
 duplicate commit (= fork で先行 cherry-pick された PR が upstream に別 SHA で merge される) との conflict は 5 ファイルで発生:
