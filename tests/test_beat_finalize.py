@@ -17,7 +17,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from sea.runtime_llm import (
-    _ALREADY_STORED_STATE_KEY,
+    INTERRUPTED_METADATA_KEY,
     BeatExecution,
     _finalize_beat,
 )
@@ -314,53 +314,67 @@ class ImportantDualWriteTest(FinalizeTestBase):
         self.runtime._store_memory.assert_not_called()
 
 
-class AlreadyStoredResponseTest(FinalizeTestBase):
-    """既に保存済みの本文で来た Beat は、同じ行をもう一度書かない。
+class InterruptedMarkTest(FinalizeTestBase):
+    """中断された発言は「言い切っていない」印を付けたまま記憶へ入る。
 
-    出自: docs/issues/stamp_empty_continuation_double_save.md (2026-08-22 裁定)。
-    504 で切れた応答の続きが空だった回、部分文は
-    ``_respeak_after_stream_timeout`` の中で保存済みで、戻り値としても返る
-    (本人が実際に言ったのは部分文だから)。印が無いと下流がもう一度保存し、
-    本人が同じ言葉を二度言ったことになる。
+    設計: docs/issues/user_utterance_path_failure_inventory.md (2026-08-25 裁定)。
+    途中で切れた本文をそのまま保存すると、機構が本人に代わって「ここで言い終わった」
+    と決めたことになる。印があれば、残しても言い切ったとは記録しない。
     """
 
-    def test_memorize_is_skipped_for_the_already_stored_text(self):
-        state = {_ALREADY_STORED_STATE_KEY: "response"}
+    @staticmethod
+    def _metadata_of(call):
+        return call.kwargs.get("metadata") or {}
+
+    def test_the_mark_rides_along_to_memorize(self):
+        state = {INTERRUPTED_METADATA_KEY: True}
         _finalize_beat(self.runtime, _beat(
             state=state, node_def=_node_def(memorize=True),
         ))
-        self.runtime._store_memory.assert_not_called()
+        self.runtime._store_memory.assert_called_once()
+        metadata = self._metadata_of(self.runtime._store_memory.call_args)
+        self.assertTrue(metadata.get(INTERRUPTED_METADATA_KEY))
 
-    def test_important_dual_write_is_skipped_too(self):
-        """memorize と同じ本文を書く隣の経路にも同じ歯止めが効く。"""
-        state = {_ALREADY_STORED_STATE_KEY: "response"}
+    def test_the_mark_rides_along_to_the_important_dual_write(self):
+        """memorize と同じ本文を書く隣の経路にも同じ印が載る。"""
+        state = {INTERRUPTED_METADATA_KEY: True}
         _finalize_beat(self.runtime, _beat(
             state=state, node_def=_node_def(important=True),
         ))
-        self.runtime._store_memory.assert_not_called()
+        self.runtime._store_memory.assert_called_once()
+        metadata = self._metadata_of(self.runtime._store_memory.call_args)
+        self.assertTrue(metadata.get(INTERRUPTED_METADATA_KEY))
 
-    def test_a_different_text_is_still_saved(self):
-        """印が古い / 本文が差し替わった回は通常どおり保存する (取りこぼさない)。"""
-        state = {_ALREADY_STORED_STATE_KEY: "途中まで書い"}
+    def test_an_ordinary_beat_carries_no_mark(self):
         _finalize_beat(self.runtime, _beat(
-            state=state, node_def=_node_def(memorize=True),
-            continuation="別のノードの発言",
+            state={}, node_def=_node_def(memorize=True),
         ))
         self.runtime._store_memory.assert_called_once()
+        metadata = self._metadata_of(self.runtime._store_memory.call_args)
+        self.assertNotIn(INTERRUPTED_METADATA_KEY, metadata)
 
-    def test_the_mark_is_consumed_so_the_next_beat_saves(self):
-        """印は必ず消費する — 残すと次の Beat の保存を黙って止める。"""
-        state = {_ALREADY_STORED_STATE_KEY: "response"}
+    def test_the_mark_is_consumed_so_it_does_not_leak_to_the_next_beat(self):
+        """印は必ず消費する — 残すと次に言い終えた発言まで中断扱いになる。"""
+        state = {INTERRUPTED_METADATA_KEY: True}
         _finalize_beat(self.runtime, _beat(
             state=state, node_def=_node_def(memorize=True),
         ))
-        self.assertNotIn(_ALREADY_STORED_STATE_KEY, state)
+        self.assertNotIn(INTERRUPTED_METADATA_KEY, state)
 
         self.runtime._store_memory.reset_mock()
         _finalize_beat(self.runtime, _beat(
             state=state, node_def=_node_def(memorize=True),
         ))
-        self.runtime._store_memory.assert_called_once()
+        metadata = self._metadata_of(self.runtime._store_memory.call_args)
+        self.assertNotIn(INTERRUPTED_METADATA_KEY, metadata)
+
+    def test_the_mark_is_consumed_even_when_nothing_is_saved(self):
+        """本文が空で保存を通らない回でも消費する (消費点が保存の分岐の外にある)。"""
+        state = {INTERRUPTED_METADATA_KEY: True}
+        _finalize_beat(self.runtime, _beat(
+            state=state, node_def=_node_def(memorize=True), continuation="",
+        ))
+        self.assertNotIn(INTERRUPTED_METADATA_KEY, state)
 
 
 if __name__ == "__main__":

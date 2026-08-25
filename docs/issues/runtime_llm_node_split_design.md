@@ -56,6 +56,8 @@ Beat 生成の心臓部でありながら部分テスト不能・修正事故率
                 （placeholder 発番 2858-2869 / retry 2871-2928 / cancel finalize 2930-2959 /
                   usage 2961-2998 / reasoning 3000-3016 / Spell loop + finalize 3018-3152 /
                   spell なし完了 3153-3229 / 504 re-speak 3231-3315）
+                 ※ 504 re-speak は 2026-08-25 に撤去済み（中断は印を立てて閉じるだけ）。
+                   行番号は撤去前のもので、以降ずれている
    3322-3489    B-sync: 非 streaming（usage / reasoning / Spell loop / speak emit）
    3491-3518    B-共通: structured output 処理 / output_key(s) 格納
 3519-3528   [例外] LLMError 変換

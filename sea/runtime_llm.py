@@ -19,7 +19,6 @@ from sea.cancellation import ExecutionCancelledException
 from sea.mcp_tool_refresh import refresh_mcp_tools_at_head
 from sea.message_stamp import (
     append_presented_message_id,
-    clear_call_tokens,
     record_call_tokens,
 )
 from sea.runtime_utils import _format, _is_llm_streaming_enabled
@@ -55,16 +54,14 @@ from sea.mode_spell_permissions import check_spell_permission
 
 LOGGER = logging.getLogger(__name__)
 
-#: 「この Beat の本文は既に SAIMemory へ保存済み」の印。値は保存した本文そのもの。
+#: 「この発言は言い切っていない」の印。中断された生成の部分文に立てる。
 #:
-#: 504 で切れた応答の続きが空だったとき、部分文は
-#: :func:`_respeak_after_stream_timeout` の中で保存済みなので、下流の memorize が
-#: もう一度書くと本人が同じ言葉を二度言ったことになる。値を本文にしてあるのは、
-#: 印を置いた後で本文が差し替わった (spell の continuation 等) ときに一致せず、
-#: 通常どおり保存されるため — 取りこぼすより二重に書く方へ倒す。
-#: 印は :func:`_finalize_beat` が必ず pop して消費する (残すと次の Beat の保存を
-#: 黙って止める)。出自: docs/issues/stamp_empty_continuation_double_save.md。
-_ALREADY_STORED_STATE_KEY = "_beat_response_already_stored"
+#: 立つのは二つの経路 — サーバー側でストリームが切れたときと、ユーザーが停止した
+#: とき。どちらも本人が言い終えたのではないので、印が無いと「機構が本人に代わって
+#: ここで言い終わったと決めた」ことになる (= 切り詰めと同型の捏造)。印があれば、
+#: 残しても言い切ったとは記録しない。UI はこの印が立った発言にだけ「続きの生成」
+#: を出す。設計: docs/issues/user_utterance_path_failure_inventory.md
+INTERRUPTED_METADATA_KEY = "_interrupted"
 
 
 def _maybe_record_cache_storage(usage, persona_id: str | None, building_id: str | None) -> None:
@@ -348,168 +345,6 @@ def _emit_say_and_capture(
     return bmsg
 
 
-def _respeak_after_stream_timeout(
-    *,
-    runtime,
-    llm_client,
-    persona,
-    building_id: Optional[str],
-    playbook,
-    node_def,
-    state: dict,
-    messages: List[Dict[str, Any]],
-    partial_text: str,
-    eff_bid: Optional[str],
-    pulse_id: Optional[str],
-    stream_error: Dict[str, Any],
-    event_callback: Optional[Callable[[Dict[str, Any]], None]],
-) -> str:
-    """サーバータイムアウト (504 DEADLINE_EXCEEDED) で切れた応答の続きを生成する。
-
-    ストリームがサーバー側で中断されると、途中まで届いた本文 (``partial_text``)
-    と、その続きを書かせる 2 回目のコールという **2 つの生成** が 1 ノードの中に
-    並ぶ。この 2 つは別々の LLM コールなので、記録も別々に扱う:
-
-    - 部分文は中断した初回コールの成果。刻印 (前駆 + 三つ組) は state が
-      まだ初回コールの値を持っている **継続コールを打つ前に** 確定させる。
-    - 継続文は継続コールの成果。継続ストリームを読み終えたら通常コールと
-      同じ ``_record_llm_usage`` を通し、三つ組・Pulse 合算・usage_tracker・
-      anchor touch を継続コールのもので更新してから、それを Building 履歴の
-      metadata に載せる。これを飛ばすと継続文に初回コールの数字が乗り
-      (他人の記帳を自分の事実として刻む)、継続分の課金がどこにも残らない。
-
-    戻り値は下流 (memorize / output_key) が使う本文。継続が空だった場合も
-    ``partial_text`` を返す — 本人が実際に言ったのは部分文なので、state["last"] /
-    assistant message / PulseContext にはそれが載るべきだから。ただし部分文は
-    この関数が既に保存しているので、**その一行を二度書かせない印**
-    (:data:`_ALREADY_STORED_STATE_KEY`) を state に置き、:func:`_finalize_beat`
-    の memorize だけを飛ばす。
-    """
-    err_code = stream_error.get("code", 504)
-    err_msg = stream_error.get(
-        "message", "Deadline expired before operation could complete.",
-    )
-    LOGGER.warning(
-        "[sea][llm] Triggering re-speak after 504 stream interruption for persona=%s",
-        getattr(persona, "persona_id", None),
-    )
-
-    # 1. Emit info event to frontend
-    if event_callback:
-        event_callback({
-            "type": "info",
-            "content": (
-                f"ℹ️ メッセージの生成が予期せず終了しました。"
-                f"({err_code} {err_msg})\n"
-                "ペルソナが再発言を行います。"
-            ),
-            "persona_id": getattr(persona, "persona_id", None),
-        })
-
-    # 2. Store partial to SAIMemory now (before continuation, to preserve order)
-    #    刻印はこの時点の state から取る = 中断した初回コールの三つ組。
-    partial_message_id = runtime._store_memory(
-        persona, partial_text,
-        role="assistant",
-        tags=["conversation"],
-        pulse_id=state.get("_pulse_id"),
-        # 2026-05-20: thought_signature 永続化 (stream 中断時の partial 経路)
-        thought_signature=state.get("_last_thought_signature"),
-        beat_state=state,
-        return_message_id=True,
-    )
-
-    # 3. Build continuation messages:
-    #    existing context + assistant(partial) + user(<system>prompt</system>)
-    cont_messages = list(messages) + [
-        {"role": "assistant", "content": partial_text},
-        {"role": "user", "content": (
-            "<system>あなたの応答がサーバータイムアウトにより途中で終了しました。"
-            "続きがあれば引き続き発言してください。</system>"
-        )},
-    ]
-    # 継続コールが実際に見る最後の永続行は、いま保存した部分文そのもの
-    # (上の cont_messages に入れた assistant 行と同じ内容)。前駆刻印の材料を
-    # ここで進めておかないと、継続文の刻印が中断前の履歴末尾を指したままになる。
-    if partial_message_id:
-        append_presented_message_id(state, str(partial_message_id))
-
-    # 4. Stream continuation
-    cont_chunks: List[str] = []
-    cont_iter = None
-    try:
-        cont_iter = llm_client.generate_stream(
-            cont_messages,
-            tools=[],
-            temperature=runtime._default_temperature(persona),
-            **runtime._get_cache_kwargs(getattr(persona, "persona_id", None)),
-        )
-        for cont_chunk in cont_iter:
-            if isinstance(cont_chunk, dict):
-                continue
-            cont_chunks.append(cont_chunk)
-            if event_callback:
-                event_callback({
-                    "type": "streaming_chunk",
-                    "content": cont_chunk,
-                    "persona_id": getattr(persona, "persona_id", None),
-                    "node_id": getattr(node_def, "id", "llm"),
-                    "pulse_id": state.get("_pulse_id"),
-                })
-    finally:
-        if hasattr(cont_iter, "close"):
-            cont_iter.close()
-
-    # 5. 継続コールの使用量を通常コールと同じ形で消費する。**空応答でも必ず
-    #    通す** — トークンは消費されているし、通さなければ初回コールの三つ組が
-    #    state に居残って次の生成へ漏れる。
-    cont_usage_metadata = _record_llm_usage(
-        runtime, llm_client, persona, building_id,
-        playbook.name, "llm_stream_continuation", state, debug_log=True,
-    )
-
-    cont_text = "".join(cont_chunks)
-    if not cont_text.strip():
-        LOGGER.warning("[sea][llm] Re-speak after 504 returned empty response")
-        # 新しい発言は生まれなかった。部分文は上の _store_memory で保存済みなので、
-        # 下流の memorize がもう一度書くと本人が同じ言葉を二度言ったことになる
-        # (docs/issues/stamp_empty_continuation_double_save.md)。この行だけを
-        # 飛ばす印を置く — 戻り値は部分文のまま返す (空文字を返すと空の
-        # assistant 行が後続の messages へ流れ込む。2026-04-28 に潰した経路)。
-        state[_ALREADY_STORED_STATE_KEY] = partial_text
-        # 継続コールの三つ組は state に載っている (_record_llm_usage は空応答でも
-        # 必ず通すので) が、この Beat はもう行を書かない。落とさなければ、次に
-        # 書かれる行に「その本文を書いていないコール」の数字が乗る。
-        #
-        # 前駆 (presented ids) は落とさない — 直前に append した部分文の id は、
-        # 次に書かれる行が実際に見た最後の永続行として正しいまま。clear_call_tokens
-        # と対で落とす規律は「本文の作り手が変わった区間」のためのもので、ここは
-        # 作り手が変わったのではなく、新しい本文が生まれなかっただけ。
-        clear_call_tokens(state)
-        return partial_text
-
-    # Send streaming_complete for continuation
-    if event_callback:
-        event_callback({
-            "type": "streaming_complete",
-            "persona_id": getattr(persona, "persona_id", None),
-            "node_id": getattr(node_def, "id", "llm"),
-            "pulse_id": state.get("_pulse_id"),
-        })
-    # Store continuation to building history。使用量は継続コールのもの
-    # (UI のドットもこれで出る)。
-    cont_say_metadata = _build_say_metadata(
-        state, llm_usage_metadata=cont_usage_metadata,
-    )
-    runtime._emit_say(
-        persona, eff_bid, cont_text, pulse_id=pulse_id,
-        metadata=cont_say_metadata if cont_say_metadata else None,
-    )
-    # 下流の compose/memorize ノードが SAIMemory に保存するのは継続文
-    # (部分文は上で直接保存済み)。
-    return cont_text
-
-
 def _finalize_beat(runtime, beat: BeatExecution) -> None:
     """④確定 — 生成し終えた Beat を記録先へ配る。
 
@@ -526,9 +361,6 @@ def _finalize_beat(runtime, beat: BeatExecution) -> None:
       important dual-write）。経路ごとに取得点が違うため、ここでは
       ``state["_last_thought_signature"]`` に集約済みの値だけを読む
       （`docs/intent/thought_signature_persistence.md`）。
-    - **同じ本文を二度保存しない**。既に保存済みの本文で来た Beat
-      （504 の継続が空だった経路）は memorize だけを飛ばす
-      （:data:`_ALREADY_STORED_STATE_KEY`）。
     """
     persona = beat.persona
     node_def = beat.node_def
@@ -540,9 +372,10 @@ def _finalize_beat(runtime, beat: BeatExecution) -> None:
     prompt = beat.prompt
     text = beat.continuation
     schema_consumed = beat.schema_consumed
-    # 保存済みの印は**必ずここで消費する** — 残すと次の Beat の memorize を
-    # 黙って止める。判定は下の memorize で本文と突き合わせる。
-    already_stored_text = state.pop(_ALREADY_STORED_STATE_KEY, None)
+    # 「言い切っていない」印は**必ずここで消費する** — 残すと、次の Beat が
+    # 普通に言い終えた発言にまで印が漏れる (本文が空で memorize を通らない回が
+    # あるため、消費は保存の分岐の中ではなくこの位置に置く)。
+    interrupted = bool(state.pop(INTERRUPTED_METADATA_KEY, None))
 
     state["last"] = text
     # Structured output may return a dict; serialise to JSON string
@@ -667,16 +500,7 @@ def _finalize_beat(runtime, beat: BeatExecution) -> None:
         # produced it, so the action template lives alongside the response
         # rather than as a separate fake-user turn.
         #
-        # already_stored_text と一致する本文は書かない: 504 の継続が空だった回、
-        # 部分文は _respeak_after_stream_timeout が既に保存している。もう一度
-        # 書くと本人が同じ言葉を二度言ったことになる
-        # (docs/issues/stamp_empty_continuation_double_save.md)。一致しなければ
-        # 通常どおり保存する — 印が古い/本文が差し替わった場合に取りこぼさない。
-        if (
-            text
-            and text != "(error in llm node)"
-            and not (already_stored_text is not None and text == already_stored_text)
-        ):
+        if text and text != "(error in llm node)":
             # If structured output was consumed, format as JSON string for memory
             content_to_save = text
             if schema_consumed and isinstance(text, dict):
@@ -689,6 +513,11 @@ def _finalize_beat(runtime, beat: BeatExecution) -> None:
                 _memorize_metadata["reasoning"] = beat.reasoning_text
             if beat.reasoning_details is not None:
                 _memorize_metadata["reasoning_details"] = beat.reasoning_details
+            # 「言い切っていない」印は建物履歴とペルソナの記憶の両方に載せる。
+            # 記憶の側に無いと、本人が後で自分の言葉を読み返したときに、途中で
+            # 切れた発言を言い切ったものとして受け取る。
+            if interrupted:
+                _memorize_metadata[INTERRUPTED_METADATA_KEY] = True
 
             _memorize_sig = state.get("_last_thought_signature")
             LOGGER.debug(
@@ -751,16 +580,12 @@ def _finalize_beat(runtime, beat: BeatExecution) -> None:
                 })
 
     # Important flag: dual-write to messages (long-term memory) if not already memorized
-    #
-    # memorize と同じ本文を書く経路なので、保存済みの印も同じように効かせる —
-    # 片方だけ塞ぐと important ノードの 504 空継続で二重保存が残る。
     _is_important = getattr(node_def, "important", False)
     if (
         _is_important
         and not memorize_config
         and text
         and text != "(error in llm node)"
-        and not (already_stored_text is not None and text == already_stored_text)
     ):
         pulse_id = state.get("_pulse_id")
         content_to_save = text
@@ -771,6 +596,12 @@ def _finalize_beat(runtime, beat: BeatExecution) -> None:
             role="assistant",
             tags=["conversation"],
             pulse_id=pulse_id,
+            # memorize と同じ本文を書く経路なので、「言い切っていない」印も
+            # 同じように載せる — 片方だけだと important ノードの発言だけが
+            # 印無しで記憶に残る。
+            metadata=(
+                {INTERRUPTED_METADATA_KEY: True} if interrupted else None
+            ),
             playbook_name=playbook.name,
             # 2026-05-20: thought_signature 永続化 (important dual-write 経路)
             thought_signature=state.get("_last_thought_signature"),
@@ -3870,11 +3701,19 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                     # finalize しないよう pipeline_msg_id を倒しておく。
                     if cancelled_during_stream and pipeline_msg_id:
                         pipeline_sub_seq += 1
+                        # 停止された発言も本人が言い終えたものではないので、
+                        # ストリーム中断と同じ印を立てる (中断の主語は違うが、
+                        # 「言い切っていない」という事実は同じ)。
+                        if (text or "").strip():
+                            state[INTERRUPTED_METADATA_KEY] = True
                         try:
                             runtime._emit_speak_finalize(
                                 persona, pipeline_eff_bid, pipeline_msg_id, text or "",
                                 pulse_id=state.get("_pulse_id"),
-                                extra_metadata=None,
+                                extra_metadata=(
+                                    {INTERRUPTED_METADATA_KEY: True}
+                                    if (text or "").strip() else None
+                                ),
                                 final_sub_seq=pipeline_sub_seq,
                                 final_voice_text="",
                             )
@@ -4061,6 +3900,15 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                             completion_event["metadata"] = _speak_base_metadata
                         event_callback(completion_event)
 
+                        # サーバー側でストリームが切れていたら、その本文は本人が
+                        # 言い終えたものではない。**続きは打たない** — 追加の推論は
+                        # ユーザーの一押しの後ろに置く (2026-08-25 まはー裁定)。
+                        # ここでやるのは印を立てることだけで、Beat はそのまま閉じる。
+                        # 設計: docs/issues/user_utterance_path_failure_inventory.md
+                        _stream_err = state.pop("_stream_error", None)
+                        if _stream_err and text.strip():
+                            state[INTERRUPTED_METADATA_KEY] = True
+
                         # Record to Building history with usage metadata (include pulse total)
                         pulse_id = state.get("_pulse_id")
                         msg_metadata = _build_say_metadata(
@@ -4070,6 +3918,8 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                             reasoning_text=reasoning_text,
                             reasoning_details=reasoning_details,
                         )
+                        if state.get(INTERRUPTED_METADATA_KEY):
+                            msg_metadata[INTERRUPTED_METADATA_KEY] = True
                         eff_bid = runtime._effective_building_id(persona, building_id)
 
                         if pipeline_msg_id:
@@ -4102,24 +3952,24 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                                 pulse_id=pulse_id, metadata=msg_metadata,
                             )
 
-                        # ── 504 DEADLINE_EXCEEDED: re-speak after partial response ──
-                        _stream_err = state.pop("_stream_error", None)
                         if _stream_err and text.strip():
-                            text = _respeak_after_stream_timeout(
-                                runtime=runtime,
-                                llm_client=llm_client,
-                                persona=persona,
-                                building_id=building_id,
-                                playbook=playbook,
-                                node_def=node_def,
-                                state=state,
-                                messages=messages,
-                                partial_text=text,
-                                eff_bid=eff_bid,
-                                pulse_id=pulse_id,
-                                stream_error=_stream_err,
-                                event_callback=event_callback,
+                            LOGGER.warning(
+                                "[sea][llm] Generation was cut short by the server "
+                                "(code=%s); keeping the partial utterance with the "
+                                "interrupted mark and closing the beat",
+                                _stream_err.get("code"),
                             )
+                            if event_callback:
+                                event_callback({
+                                    "type": "info",
+                                    "content": (
+                                        "ℹ️ メッセージの生成が途中で終了しました。"
+                                        f"({_stream_err.get('code', 504)} "
+                                        f"{_stream_err.get('message', '')})".rstrip()
+                                        + "\nここまでの発言はそのまま残ります。"
+                                    ),
+                                    "persona_id": getattr(persona, "persona_id", None),
+                                })
 
                     # Store reasoning in state for downstream speak/say nodes
                     _store_reasoning_in_state(state, reasoning_text, reasoning_details)

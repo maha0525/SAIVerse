@@ -162,7 +162,8 @@ LLM streaming chunk 受信ループで、 句読点 (= `。、！？，；：` �
 - spell loop 完了後 (or 通常完了後) に `_emit_speak_finalize(persona, building_id, msg_id, text=full_merged_or_plain, final_sub_seq=next_seq, final_voice_text="")` で確定
   - `final_voice_text=""` 固定: voice-tts は sub-speak 経由で全テキストを既に受け取っているので、 finalize hook では 「stream close + wav 保存」 のみ依頼する。 残テキストの送信を最終処理に残さない設計 (= 2026-05-16 改修。 旧設計では `_compute_pipeline_remainder_voice` で 全文 vs 既送 の文字列比較をしていたが、 whitespace 差や `<user_only>` 除去後の改行差で prefix 一致が崩れ、 fallback で全文 fallback → voice-tts 二重合成を起こしていた)
 - speak: false node の場合: 同じく `final_voice_text=""` で finalize して placeholder の `_streaming_placeholder=True` を残さない
-- 504 (DEADLINE_EXCEEDED) 中断: partial を finalize で確定、 続く re-speak 経路は `_emit_say` (= 別 message_id) で続行
+- サーバー側のストリーム中断 (504 DEADLINE_EXCEEDED 等): partial を finalize で確定し、その metadata に「言い切っていない」印 `_interrupted` を載せて Beat を閉じる。**続きは自動で打たない** (2026-08-25 まはー裁定 — 追加の推論はユーザーの一押しの後ろに置く)。旧 re-speak 経路 (`_emit_say` で別 message_id を作って続行) は撤去済み — 発言が分裂する縁もここで消えた ([archive/respeak_split_message_unification.md](../issues/archive/respeak_split_message_unification.md))
+- ユーザーの停止による中断: 同じく partial を finalize で確定し、同じ `_interrupted` の印を載せる (中断の主語は違うが「言い切っていない」事実は同じ)
 
 ### Phase 2-C 残テキスト送信設計の変遷 (2026-05-15 → 2026-05-16)
 
