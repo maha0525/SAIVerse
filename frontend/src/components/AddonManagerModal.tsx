@@ -1040,6 +1040,8 @@ export default function AddonManagerModal({ isOpen, onClose }: AddonManagerModal
     const [personas, setPersonas] = useState<{ id: string; name: string }[]>([]);
     const [loading, setLoading] = useState(false);
     const [fetchError, setFetchError] = useState<string | null>(null);
+    // アドオンのトグルを MCP セクションへ伝えるための数。進めると取り直す。
+    const [mcpRefreshKey, setMcpRefreshKey] = useState(0);
 
     // addons のみ再 fetch。 addon panel 内で AddonConfig が内部的に書き
     // 換わった (= stackchan-addon のペアリング操作で master_token rotate)
@@ -1089,6 +1091,10 @@ export default function AddonManagerModal({ isOpen, onClose }: AddonManagerModal
         setAddons((prev) =>
             prev.map((a) => a.addon_name === addonName ? { ...a, is_enabled: enabled } : a)
         );
+        // MCP セクションはアドオンカードの外に居るので、自分ではトグルに
+        // 気づけない。ここで取り直しを促さないと、無効にしたアドオンの
+        // サーバー行がモーダルを開き直すまで残る。
+        setMcpRefreshKey((k) => k + 1);
     };
 
     if (!isOpen) return null;
@@ -1125,7 +1131,7 @@ export default function AddonManagerModal({ isOpen, onClose }: AddonManagerModal
                     {activeTab === 'installed' && (
                         <>
                             {!loading && !fetchError && (
-                                <MCPSection defaultCollapsed={true} />
+                                <MCPSection defaultCollapsed={true} refreshKey={mcpRefreshKey} />
                             )}
                             {loading && <p className={styles.loadingText}>読み込み中...</p>}
                             {!loading && fetchError && (

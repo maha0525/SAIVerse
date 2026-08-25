@@ -2825,12 +2825,22 @@ async def _shutdown_all_instances_of_server(
         await manager._shutdown_instance(instance_key)
 
 
-def notify_addon_toggled_sync(addon_name: str, is_enabled: bool) -> None:
+def notify_addon_toggled_sync(
+    addon_name: str,
+    is_enabled: bool,
+    *,
+    wait_timeout: Optional[float] = None,
+) -> None:
     """Thread-safe hook called from API routes when an addon is toggled.
 
     Schedules the MCP state update on the dedicated MCP event loop so
     that refcount arithmetic and subprocess lifecycle stay on one thread.
     Safe to call when MCP is not initialized (no-op).
+
+    ``wait_timeout`` を渡すと、その秒数だけ反映の完了を待つ。 呼び出し元が
+    「戻った時点で一覧に反映されている」ことを前提にできる必要があるとき
+    (無効化の直後に画面が一覧を取り直す) に使う。 待ち切れなかった場合も
+    例外にはしない — 反映は続いているので、警告を残して戻る。
     """
     manager = get_mcp_manager()
     if manager is None:
@@ -2850,10 +2860,23 @@ def notify_addon_toggled_sync(addon_name: str, is_enabled: bool) -> None:
             is_enabled,
         )
         return
-    asyncio.run_coroutine_threadsafe(
+    future = asyncio.run_coroutine_threadsafe(
         _apply_addon_toggle(manager, addon_name, is_enabled),
         loop,
     )
+    if wait_timeout is None:
+        return
+    try:
+        future.result(timeout=wait_timeout)
+    except Exception as exc:
+        LOGGER.warning(
+            "notify_addon_toggled_sync: toggle did not settle within %ss "
+            "(addon=%s, enabled=%s); it is still being applied: %s",
+            wait_timeout,
+            addon_name,
+            is_enabled,
+            exc,
+        )
 
 
 def initialize_mcp_sync() -> Optional[MCPClientManager]:

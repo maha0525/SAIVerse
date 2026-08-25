@@ -48,6 +48,13 @@ interface MCPSectionProps {
     addonName?: string;
     /** Start collapsed. Default: true (opened by explicit user click). */
     defaultCollapsed?: boolean;
+    /** 値が変わるたびに一覧を取り直す。
+     *
+     *  このセクションはアドオンの有効/無効トグルの外側に居るので、自分では
+     *  トグルに気づけない。 親が数を進めることで「いま取り直して」と伝える。
+     *  これが無いと、アドオンを無効にしてもサーバーの行が残り続け、モーダルを
+     *  開き直すまで消えなかった。 */
+    refreshKey?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -88,6 +95,7 @@ function extractQualifiedFromInstanceKey(instanceKey: string): string {
 export default function MCPSection({
     addonName,
     defaultCollapsed = true,
+    refreshKey = 0,
 }: MCPSectionProps) {
     const [expanded, setExpanded] = useState(!defaultCollapsed);
     const [servers, setServers] = useState<MCPServerStatus[]>([]);
@@ -138,7 +146,7 @@ export default function MCPSection({
         if (expanded) {
             void fetchState();
         }
-    }, [expanded, fetchState]);
+    }, [expanded, fetchState, refreshKey]);
 
     const runAction = async (
         actionKey: string,

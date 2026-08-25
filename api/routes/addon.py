@@ -446,9 +446,18 @@ def set_addon_enabled(addon_name: str, body: SetEnabledRequest, manager=Depends(
     # Notify MCP layer so that any MCP servers declared by this addon get
     # their refcount / lifecycle updated (start on enable, shutdown on
     # disable). See docs/intent/mcp_addon_integration.md §3.
+    #
+    # 無効化のときだけ完了を待つ。 畳むのは速く、かつ待たないと「切ったのに
+    # サーバーの行が残っている」状態で画面が一覧を取り直してしまう。 有効化は
+    # global サーバーの subprocess 起動 (spawn + 初期化で数十秒) を含むので、
+    # 待つと画面が固まる — そちらは起動中の行が見えるので待たなくてよい。
     try:
         from tools.mcp_client import notify_addon_toggled_sync
-        notify_addon_toggled_sync(addon_name, body.is_enabled)
+        notify_addon_toggled_sync(
+            addon_name,
+            body.is_enabled,
+            wait_timeout=None if body.is_enabled else 5.0,
+        )
     except Exception as exc:
         LOGGER.warning(
             "addon: MCP notification failed for '%s' (enabled=%s): %s",
