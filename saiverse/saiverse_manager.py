@@ -701,9 +701,14 @@ class SAIVerseManager(
         except LLMError:
             # Propagate LLM errors to the caller for frontend display
             raise
-        except Exception as exc:
-            logging.exception("SEA user run failed: %s", exc)
-            return []
+        except Exception:
+            # LLMError 以外も同じく通す。ここで [] を返すと、あらゆる失敗が
+            # 「応答が無かった」と区別できない形に潰れ、画面には何も出ない
+            # (2026-08-24 実害)。呼び出し元は 2 つとも受け口の分類
+            # (UserUtteranceError) か backend_worker の catch-all に入るので、
+            # 通した先で必ずエラーイベントになる。
+            logging.exception("SEA user run failed")
+            raise
 
     @property
     def all_personas(self) -> Dict[str, Union[PersonaCore, RemotePersonaProxy]]:

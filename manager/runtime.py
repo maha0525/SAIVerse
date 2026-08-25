@@ -36,6 +36,28 @@ try:
 except ImportError:
     TRIGGERS_AVAILABLE = False
 
+#: 「ユーザーに何かが届いた」と数える NDJSON イベントの型。
+#:
+#: 数えないのは進み具合の表示 (status / think / activity / auto_recall /
+#: streaming_thinking / streaming_discard / metabolism / user_message_id / ping)。
+#: 考えている様子だけ出して黙って終わるのは、ユーザーから見れば無言だから。
+#: 確認待ちのダイアログ (permission_request 等) は、ストリームが閉じても画面に
+#: 操作が残るので「届いた」に数える。
+#: 設計: docs/issues/user_utterance_path_failure_inventory.md
+_OUTCOME_EVENT_TYPES = frozenset({
+    "say",
+    "streaming_chunk",
+    "streaming_complete",
+    "error",
+    "cancelled",
+    "duplicate_command",
+    "permission_request",
+    "spell_confirmation",
+    "chronicle_confirm",
+    "warning",
+    "info",
+})
+
 class RuntimeService(
     VisitorMixin, GatewayMixin, SDSMixin, DatabasePollingMixin, PersonaMixin
 ):
@@ -539,14 +561,26 @@ class RuntimeService(
             pre_spells,
             client_message_id,
         )
+        # 生 HTML を NDJSON へ流すと、フロントの JSON.parse が落ちて
+        # console.error だけになり、画面には何も出ない (下の not_in_building が
+        # 同じ理由で JSON へ直された 2026-07-21 の指摘が、この 2 箇所には
+        # 届いていなかった)。
         if not message or not str(message).strip():
             logging.error("[runtime] handle_user_input_stream got empty message; aborting to avoid corrupt routing")
-            yield '<div class="note-box">入力が空でした。再送してください。</div>'
+            yield json.dumps({
+                "type": "error",
+                "error_code": "empty_message",
+                "content": "入力が空でした。もう一度送ってください。",
+            }, ensure_ascii=False) + "\n"
             return
 
         building_id = building_id or self.state.user_current_building_id
         if not building_id:
-            yield '<div class="note-box">エラー: ユーザーの現在地が不明です。</div>'
+            yield json.dumps({
+                "type": "error",
+                "error_code": "no_current_building",
+                "content": "現在いる場所が分からないため、発言を届けられませんでした。",
+            }, ensure_ascii=False) + "\n"
             return
         # 分離監査 P1-3 (W7 柱5) の多層防御: HTTP 層 (/chat/send) と同じ現在地
         # 照合。HTTP を通らない呼び出し元が別 Building へ発言を配送する経路も塞ぐ。
@@ -563,7 +597,6 @@ class RuntimeService(
                 "error_code": "not_in_building",
                 "content": "現在地ではない建物への発言はできません。",
                 "current_building_id": self.state.user_current_building_id,
-                "retryable": False,
             }, ensure_ascii=False) + "\n"
             return
         logging.debug("[runtime] handle_user_input_stream building_id=%s", building_id)
@@ -588,6 +621,12 @@ class RuntimeService(
         stop_event = threading.Event()
         self.manager._active_stop_events[building_id] = stop_event
 
+        # 「ユーザーに何かが届いたか」の記録。失敗の入口を一つずつ塞ぐのではなく、
+        # **結果を作る場所で一度だけ検査する** — 入口を数え切る守り方は必ず漏れる
+        # (応答者ゼロ・握り潰された例外・早期 return が、どれも同じ「無言」に
+        # 落ちていた)。設計: docs/issues/user_utterance_path_failure_inventory.md
+        outcome_seen = {"value": False}
+
         def _enrich_event(event):
             """Enrich streaming events with resolved persona name and avatar URL."""
             if isinstance(event, dict) and event.get("persona_id"):
@@ -601,6 +640,8 @@ class RuntimeService(
                             avatar_path_to_url(p.avatar_image)
                             or "/api/static/builtin_icons/host.png"
                         )
+            if isinstance(event, dict) and event.get("type") in _OUTCOME_EVENT_TYPES:
+                outcome_seen["value"] = True
             response_queue.put(event)
 
         # Register the SSE callback so on_track_activated 経由で起動される
@@ -636,7 +677,6 @@ class RuntimeService(
                         "current_building_id": saved_user_message.get(
                             "current_building_id"
                         ),
-                        "retryable": False,
                     })
                     return
 
@@ -648,7 +688,6 @@ class RuntimeService(
                             "発言を保存できなかったため、応答処理を開始しませんでした。"
                             "同じ内容を再送できます。"
                         ),
-                        "retryable": True,
                     })
                     return
 
@@ -716,21 +755,38 @@ class RuntimeService(
             except LLMError as e:
                 logging.error("SEA worker LLM error: %s", e, exc_info=True)
                 if stop_event.is_set():
-                    response_queue.put({"type": "cancelled", "content": "生成を中止しました。"})
+                    _enrich_event({"type": "cancelled", "content": "生成を中止しました。"})
                 else:
-                    response_queue.put(e.to_dict())
+                    _enrich_event(e.to_dict())
             except Exception as e:
                 logging.error("SEA worker error", exc_info=True)
                 if stop_event.is_set():
-                    response_queue.put({"type": "cancelled", "content": "生成を中止しました。"})
+                    _enrich_event({"type": "cancelled", "content": "生成を中止しました。"})
                 else:
-                    response_queue.put({
+                    _enrich_event({
                         "type": "error",
                         "error_code": "unknown",
                         "content": "予期せぬエラーが発生しました。",
                         "technical_detail": str(e),
                     })
             finally:
+                # 出口 3: 発言は受け取ったのに、何ひとつ画面へ出ないまま終わる回を
+                # ここで捕まえる。上のどの経路を通っても (応答者ゼロ / 早期 return /
+                # 握り潰された失敗 / 例外) 最後は必ずここへ来るので、検査は一箇所で
+                # 足りる。理由が言えないときも「起きたこと」だけは必ず伝える。
+                if not outcome_seen["value"] and not stop_event.is_set():
+                    logging.warning(
+                        "[runtime] the utterance was accepted but nothing reached the "
+                        "user (building=%s, responding_personas=%d)",
+                        building_id, len(responding_personas),
+                    )
+                    _enrich_event({
+                        "type": "error",
+                        "error_code": "no_response",
+                        "content": (
+                            "発言は受け取りましたが、返事が生まれませんでした。"
+                        ),
+                    })
                 response_queue.put(None)  # 番兵
 
         threading.Thread(target=backend_worker, daemon=True).start()

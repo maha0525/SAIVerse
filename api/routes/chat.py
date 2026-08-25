@@ -1097,8 +1097,13 @@ def send_message(req: SendMessageRequest, manager = Depends(get_manager)):
     # NOTE: 関数内で `import logging` / `import json` すると名前が関数全体で
     # ローカル扱いになり、それより前の分岐 (添付競合 cleanup 等) で
     # UnboundLocalError になる (2026-07-21 Codex 第五巡 P2) — module import を使う。
-    try:
-        def response_generator():
+    def response_generator():
+        # ここで起きる失敗は、下の `return StreamingResponse(...)` を抜けた**後**に
+        # 走る。外側に try/except を置いても届かない (ジェネレータの本体は、返した
+        # 時点ではまだ一行も実行されていない)。ヘッダ送出後の例外はストリームが
+        # 途中で切れるだけになり、画面には何も出ないので、本体をここで包む。
+        # 設計: docs/issues/user_utterance_path_failure_inventory.md
+        try:
             # Yield an initial status event to flush headers (with padding for buffering)
             yield json.dumps({"type": "status", "content": "processing"}, ensure_ascii=False) + " " * 2048 + "\n"
 
@@ -1119,7 +1124,6 @@ def send_message(req: SendMessageRequest, manager = Depends(get_manager)):
                         "ませんでした。最新状態に同期します。"
                     ),
                     "current_building_id": live_bid,
-                    "retryable": False,
                 }, ensure_ascii=False) + "\n"
                 return
 
@@ -1156,12 +1160,16 @@ def send_message(req: SendMessageRequest, manager = Depends(get_manager)):
                         )
                         created_items.clear()
                 yield chunk
+        except Exception as e:
+            logging.error("Error while streaming the reply", exc_info=True)
+            yield json.dumps({
+                "type": "error",
+                "error_code": "unknown",
+                "content": "応答の配信中にエラーが発生しました。",
+                "technical_detail": str(e),
+            }, ensure_ascii=False) + "\n"
 
-        return StreamingResponse(response_generator(), media_type="application/x-ndjson")
-
-    except Exception as e:
-        logging.error(f"Error sending message: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+    return StreamingResponse(response_generator(), media_type="application/x-ndjson")
 
 
 # ---- Utter: 発言契機入室 (C-2) ----
@@ -1176,7 +1184,7 @@ class UtterRequest(BaseModel):
     コマンドの意味論 (分離監査 P1-3 / W7 柱5 で正直化):
     - **入室**は `move.entity` 台帳実行として原子的に確定する (W5)。
     - **発言**は durable insert が認知開始の前提条件 (insert 失敗 = Pulse 不起動、
-      retryable エラーで返す)。
+      エラーイベントで返す)。
     - 「入室成功 → 発言 insert 失敗」では入室は残る (発言契機の入室は物理事実)。
       再送は current == target になるため move をスキップし、`client_message_id`
       の冪等キーで発言は一度だけ載る。

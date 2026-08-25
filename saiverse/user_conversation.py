@@ -757,10 +757,19 @@ def _start_main_line_pulse(
             event_callback=event_callback,
             **options,
         )
-    except Exception:
-        LOGGER.exception(
-            "[user-conv] main_line pulse start failed: persona=%s", persona_id,
-        )
+    except Exception as exc:
+        # 握り潰さない。ここで飲むと、会話が開いていない相手への発話だけが
+        # 「返事も説明も出ないまま終わる」形になっていた (2026-08-24 実害)。
+        # 継続経路 (直接応答) と同じ分類に載せて上へ通す — 素の例外で上げると
+        # ディスパッチャの分類漏れ経路が invoke_main_line() を呼び直して
+        # 二重発話になるため、必ず UserUtteranceError で包む。
+        # 会話状態は既に開いており Pulse も起動済みなので side_effects_done=True。
+        raise UserUtteranceError(
+            f"the conversation-start main-line pulse failed for {persona_id}: {exc}",
+            stage="conversation_start",
+            side_effects_done=True,
+            fallback_safe=False,
+        ) from exc
 
 
 # ---------------------------------------------------------------------------

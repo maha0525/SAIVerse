@@ -272,10 +272,31 @@ def test_main_line_failure_still_arms_the_timeout(manager):
     """応答が転んでも沈黙タイマーは張る (開いた会話が永久に閉じないのを防ぐ)。"""
     manager.run_sea_user.side_effect = RuntimeError("boom")
 
-    uc.start_conversation(manager, PERSONA_ID, USER_ID)
+    with pytest.raises(uc.UserUtteranceError):
+        uc.start_conversation(manager, PERSONA_ID, USER_ID)
 
     assert _armed(manager) is True
     assert _open_conversation(manager) is not None
+
+
+def test_main_line_failure_is_reported_instead_of_swallowed(manager):
+    """会話開始の失敗を握り潰さない — 飲むと画面に何も出ないまま応答が消える。
+
+    分類は継続経路 (直接応答) と揃える。素の例外で上げるとディスパッチャの
+    分類漏れ経路が invoke_main_line() を呼び直して二重発話になるため、必ず
+    UserUtteranceError で包む。会話状態と Pulse は既に動いているので
+    side_effects_done=True、肩代わりの再実行は禁止で fallback_safe=False。
+    出自: docs/issues/user_utterance_path_failure_inventory.md (2026-08-24 実害)
+    """
+    manager.run_sea_user.side_effect = RuntimeError("boom")
+
+    with pytest.raises(uc.UserUtteranceError) as excinfo:
+        uc.start_conversation(manager, PERSONA_ID, USER_ID)
+
+    assert excinfo.value.stage == "conversation_start"
+    assert excinfo.value.side_effects_done is True
+    assert excinfo.value.fallback_safe is False
+    assert isinstance(excinfo.value.__cause__, RuntimeError)
 
 
 # ---------------------------------------------------------------------------
