@@ -223,3 +223,104 @@ class TestInsertHelper(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestWithdrawBuildingMessage(_PathMockMixin, unittest.TestCase):
+    """発言の取り下げ — 世界の記録から行を消す唯一の経路。
+
+    取り消せるかどうかは好みでは決まらず、**ペルソナがもう読んだか**で決まる
+    (2026-08-25 まはー裁定)。読まれた後に消すと、ペルソナは「聞いた覚えが
+    あるのに記録が無い」状態になり、無言で消えるより悪い。
+    設計: docs/issues/user_utterance_path_failure_inventory.md
+    """
+
+    BID = "room"
+
+    def setUp(self) -> None:
+        self.engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(self.engine)
+        self.SessionLocal = sessionmaker(bind=self.engine, autocommit=False, autoflush=False)
+        self.addCleanup(self.engine.dispose)
+        self.addCleanup(gc.collect)
+        self._start_path_mocks()
+
+    def _insert(self, *, role="user", content="こんばんは", ingested_by=None):
+        saved = insert_building_message(
+            self.SessionLocal, self.BID,
+            {"role": role, "content": content, "heard_by": ["p1"], "ingested_by": []},
+        )
+        message_id = str(saved["message_id"])
+        if ingested_by:
+            db = self.SessionLocal()
+            try:
+                row = db.query(BuildingMessage).filter_by(
+                    building_id=self.BID, message_id=message_id,
+                ).first()
+                row.ingested_by = json.dumps(ingested_by)
+                db.commit()
+            finally:
+                db.close()
+        return message_id
+
+    def _withdraw(self, message_id):
+        from database.building_messages import withdraw_building_message_in_db
+        return withdraw_building_message_in_db(
+            self.SessionLocal, self.BID, message_id,
+        )
+
+    def test_an_unread_message_is_withdrawn_and_its_text_comes_back(self):
+        """まだ誰も読んでいない発言は取り下げ、本文を手元へ返す。"""
+        mid = self._insert(content="やっぱりやめる")
+
+        withdrawn, reason, content = self._withdraw(mid)
+
+        self.assertTrue(withdrawn)
+        self.assertEqual(reason, "withdrawn")
+        self.assertEqual(content, "やっぱりやめる")
+        self.assertEqual(fetch_building_messages(self.SessionLocal, self.BID), [])
+
+    def test_a_message_someone_has_read_is_refused(self):
+        """一人でも記憶へ転記していたら消さない。行はそのまま残る。"""
+        mid = self._insert(ingested_by=["p1"])
+
+        withdrawn, reason, content = self._withdraw(mid)
+
+        self.assertFalse(withdrawn)
+        self.assertEqual(reason, "already_heard")
+        self.assertIsNone(content)
+        self.assertEqual(len(fetch_building_messages(self.SessionLocal, self.BID)), 1)
+
+    def test_only_user_messages_can_be_withdrawn(self):
+        """取り消せるのは自分の発言だけ。ペルソナの発言は対象外。"""
+        mid = self._insert(role="assistant")
+
+        withdrawn, reason, _content = self._withdraw(mid)
+
+        self.assertFalse(withdrawn)
+        self.assertEqual(reason, "wrong_role")
+        self.assertEqual(len(fetch_building_messages(self.SessionLocal, self.BID)), 1)
+
+    def test_a_missing_message_reports_not_found(self):
+        withdrawn, reason, _content = self._withdraw("room:9999")
+
+        self.assertFalse(withdrawn)
+        self.assertEqual(reason, "not_found")
+
+    def test_unreadable_ingested_by_refuses_rather_than_deletes(self):
+        """判断できないときは消さない方へ倒す (取り消しは元に戻せない)。"""
+        mid = self._insert()
+        db = self.SessionLocal()
+        try:
+            row = db.query(BuildingMessage).filter_by(
+                building_id=self.BID, message_id=mid,
+            ).first()
+            row.ingested_by = "{壊れた JSON"
+            db.commit()
+        finally:
+            db.close()
+
+        withdrawn, reason, _content = self._withdraw(mid)
+
+        self.assertFalse(withdrawn)
+        self.assertEqual(reason, "already_heard")
+        self.assertEqual(len(fetch_building_messages(self.SessionLocal, self.BID)), 1)

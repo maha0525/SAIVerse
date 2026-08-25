@@ -15,7 +15,7 @@ import json
 import logging
 import sqlite3
 import time
-from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
+from typing import Any, Callable, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session
@@ -713,3 +713,91 @@ def update_building_message_in_db(
             return
         finally:
             db.close()
+
+
+def withdraw_building_message_in_db(
+    session_factory: Optional[Callable[[], "Session"]],
+    building_id: str,
+    message_id: str,
+    *,
+    expected_role: str = "user",
+    _max_retries: int = 5,
+) -> Tuple[bool, str, Optional[str]]:
+    """まだ誰の記憶にも入っていないユーザー発言を、建物の記録から取り下げる。
+
+    **世界の記録から行を消す唯一の経路**なので、条件は狭く固定する:
+
+    - ``role`` が ``expected_role`` (既定はユーザー発言) であること
+    - ``ingested_by`` が空であること — 一人でも記憶へ転記していたら消さない。
+      消すと、そのペルソナは「聞いた覚えがあるのに記録が無い」状態になり、
+      無言で消えるより悪い (2026-08-25 まはー裁定)
+
+    ``ingested_by`` を見るのは、取り込みの目盛り (pulse_cursors) からの推測ではなく
+    **実際に転記された記録そのもの**だから。目盛りが先へ進んでいても転記されて
+    いない行は、以後どのペルソナにも読まれないので取り下げてよい。
+
+    Returns:
+        ``(取り下げたか, 理由コード, 取り下げた本文)``。理由コードは
+        ``"withdrawn"`` / ``"not_found"`` / ``"already_heard"`` / ``"wrong_role"``
+        / ``"unavailable"``。
+    """
+    if session_factory is None:
+        return (False, "unavailable", None)
+
+    from database.models import BuildingMessage
+
+    for attempt in range(_max_retries):
+        db = session_factory()
+        try:
+            obj = db.query(BuildingMessage).filter_by(
+                building_id=building_id,
+                message_id=message_id,
+            ).first()
+            if obj is None:
+                return (False, "not_found", None)
+            if obj.role != expected_role:
+                return (False, "wrong_role", None)
+            heard = []
+            if obj.ingested_by:
+                try:
+                    parsed = json.loads(obj.ingested_by)
+                    if isinstance(parsed, list):
+                        heard = [str(p) for p in parsed if p]
+                except json.JSONDecodeError:
+                    # 読めない = 判断できない。消さない方へ倒す。
+                    LOGGER.warning(
+                        "withdraw_building_message: ingested_by is malformed; "
+                        "refusing to withdraw bid=%s msg_id=%s",
+                        building_id, message_id,
+                    )
+                    return (False, "already_heard", None)
+            if heard:
+                return (False, "already_heard", None)
+            content = obj.content
+            db.delete(obj)
+            db.commit()
+            LOGGER.info(
+                "withdraw_building_message: removed bid=%s msg_id=%s (nobody had read it)",
+                building_id, message_id,
+            )
+            return (True, "withdrawn", content)
+        except Exception as exc:
+            db.rollback()
+            if _is_database_locked(exc) and attempt < _max_retries - 1:
+                wait = 0.5 * (2 ** attempt)
+                LOGGER.warning(
+                    "withdraw_building_message: database locked (attempt %d/%d), "
+                    "retrying in %.1fs: bid=%s msg_id=%s",
+                    attempt + 1, _max_retries, wait, building_id, message_id,
+                )
+                time.sleep(wait)
+                continue
+            LOGGER.warning(
+                "Failed to withdraw building message: building_id=%s msg_id=%s",
+                building_id, message_id,
+                exc_info=True,
+            )
+            return (False, "unavailable", None)
+        finally:
+            db.close()
+    return (False, "unavailable", None)

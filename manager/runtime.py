@@ -1039,6 +1039,56 @@ class RuntimeService(
             building_id, responding_personas[0], "",
         )
 
+    def withdraw_user_message(self, message_id: str) -> Dict[str, Any]:
+        """まだ誰も読んでいない自分の発言を取り下げ、本文を手元へ返す。
+
+        取り消せるかどうかは好みでは決まらず、**ペルソナがもう読んだか**で決まる
+        (2026-08-25 まはー裁定)。読まれた後に消すと、ペルソナは「聞いた覚えが
+        あるのに記録が無い」状態になり、無言で消えるより悪い。
+        """
+        building_id = self.state.user_current_building_id
+        if not building_id:
+            return {
+                "withdrawn": False, "reason": "unavailable",
+                "message": "現在いる場所が分からないため、取り消せませんでした。",
+            }
+
+        from database.building_messages import withdraw_building_message_in_db
+
+        session_factory = getattr(self, "SessionLocal", None)
+        withdrawn, reason, content = withdraw_building_message_in_db(
+            session_factory, building_id, str(message_id),
+        )
+        if withdrawn:
+            # メモリ内の建物履歴からも落とす (DB だけ消すと、再読込まで画面に残る)。
+            try:
+                history = self.building_histories.get(building_id)
+                if isinstance(history, list):
+                    history[:] = [
+                        m for m in history
+                        if str(m.get("message_id")) != str(message_id)
+                    ]
+            except Exception:
+                logging.exception(
+                    "[runtime] failed to drop the withdrawn message from the "
+                    "in-memory history (msg=%s)", message_id,
+                )
+            return {"withdrawn": True, "reason": reason, "content": content or ""}
+
+        explain = {
+            "already_heard": (
+                "この発言はもうペルソナが聞いています。取り消すと、"
+                "聞いた覚えがあるのに記録が無い状態になるため、取り消せません。"
+            ),
+            "not_found": "この発言は記録に残っていません。",
+            "wrong_role": "取り消せるのは自分の発言だけです。",
+            "unavailable": "取り消しを実行できませんでした。",
+        }
+        return {
+            "withdrawn": False, "reason": reason,
+            "message": explain.get(reason, explain["unavailable"]),
+        }
+
     def preview_context(
         self, message: str, building_id: Optional[str] = None,
         meta_playbook: Optional[str] = None,

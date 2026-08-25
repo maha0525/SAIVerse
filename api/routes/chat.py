@@ -1229,6 +1229,26 @@ def retry_message(req: MessageActionRequest, manager = Depends(get_manager)):
     return StreamingResponse(gen(), media_type="application/x-ndjson")
 
 
+class WithdrawResponse(BaseModel):
+    withdrawn: bool
+    reason: str
+    # 取り下げた本文。フロントはこれを入力欄へ戻す (消したのではなく、手元に返す)。
+    content: Optional[str] = None
+    # 取り下げられなかったときの、ユーザー向けの理由。
+    message: Optional[str] = None
+
+
+@router.post("/withdraw", response_model=WithdrawResponse)
+def withdraw_message(req: MessageActionRequest, manager = Depends(get_manager)):
+    """まだ誰も読んでいない自分の発言を取り下げ、本文を入力欄へ返す。
+
+    取り消せるかどうかは、ペルソナがもう読んだかで決まる。読まれた後は
+    取り消せない — 消すと記憶と記録が食い違うため (2026-08-25 まはー裁定)。
+    """
+    result = manager.withdraw_user_message(req.message_id)
+    return WithdrawResponse(**result)
+
+
 # ---- Utter: 発言契機入室 (C-2) ----
 
 class UtterRequest(BaseModel):

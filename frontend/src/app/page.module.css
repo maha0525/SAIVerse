@@ -1934,7 +1934,8 @@
 }
 
 .continueBtn,
-.retryBtn {
+.retryBtn,
+.withdrawBtn {
     gap: 0.3rem;
     padding: 0.3rem 0.6rem;
     opacity: 1;
@@ -1946,13 +1947,15 @@
 }
 
 .continueBtn:hover:not(:disabled),
-.retryBtn:hover:not(:disabled) {
+.retryBtn:hover:not(:disabled),
+.withdrawBtn:hover:not(:disabled) {
     background: rgba(255, 255, 255, 0.14);
     border-color: rgba(255, 255, 255, 0.36);
 }
 
 .continueBtn:disabled,
-.retryBtn:disabled {
+.retryBtn:disabled,
+.withdrawBtn:disabled {
     opacity: 0.4;
     cursor: default;
 }
@@ -1962,13 +1965,15 @@
 }
 
 :global([data-theme="light"]) .continueBtn,
-:global([data-theme="light"]) .retryBtn {
+:global([data-theme="light"]) .retryBtn,
+:global([data-theme="light"]) .withdrawBtn {
     border-color: rgba(0, 0, 0, 0.18);
     background: rgba(0, 0, 0, 0.04);
 }
 
 :global([data-theme="light"]) .continueBtn:hover:not(:disabled),
-:global([data-theme="light"]) .retryBtn:hover:not(:disabled) {
+:global([data-theme="light"]) .retryBtn:hover:not(:disabled),
+:global([data-theme="light"]) .withdrawBtn:hover:not(:disabled) {
     background: rgba(0, 0, 0, 0.09);
     border-color: rgba(0, 0, 0, 0.3);
 }

@@ -1284,6 +1284,10 @@ class SAIVerseManager(
         """既にあるユーザー発言に対して、応答だけをやり直す。"""
         yield from self.runtime.retry_user_message_stream(message_id)
 
+    def withdraw_user_message(self, message_id: str) -> Dict[str, Any]:
+        """まだ誰も読んでいない自分の発言を取り下げ、本文を手元へ返す。"""
+        return self.runtime.withdraw_user_message(message_id)
+
     def cancel_active_generation(self) -> bool:
         """Cancel the active LLM generation for personas in the user's current building.
 

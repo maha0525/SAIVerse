@@ -5,7 +5,7 @@
 
 REST API 全エンドポイントの一覧（自動生成）。すべて `/api` 配下にマウントされる。
 
-**エンドポイント数**: 348（tag グループ: 25）
+**エンドポイント数**: 349（tag グループ: 25）
 
 ## addon
 
@@ -89,6 +89,7 @@ REST API 全エンドポイントの一覧（自動生成）。すべて `/api` 
 | POST | `/api/chat/spell-confirmation-response` | Respond to a generic spell confirmation request. |
 | POST | `/api/chat/stop` | Stop the active LLM generation for the user's current building. |
 | POST | `/api/chat/utter` | 発言契機入室。 必要なら自動 move を伴って chat を実行する。 |
+| POST | `/api/chat/withdraw` | まだ誰も読んでいない自分の発言を取り下げ、本文を入力欄へ返す。 |
 
 ## codex-auth
 

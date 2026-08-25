@@ -26,7 +26,7 @@ import PlaybookPermissionDialog, { PermissionRequestData } from '@/components/Pl
 import SpellConfirmDialog, { SpellConfirmData } from '@/components/SpellConfirmDialog';
 import ChronicleConfirmDialog, { ChronicleConfirmData } from '@/components/ChronicleConfirmDialog';
 import ModalOverlay from '@/components/common/ModalOverlay';
-import { Send, Plus, Paperclip, Eye, X, Info, Users, Menu, Copy, Check, SlidersHorizontal, ChevronDown, AlertTriangle, ArrowUpCircle, Loader, RefreshCw, Square, Bell, Map as MapIcon, CornerDownRight, RotateCcw } from 'lucide-react';
+import { Send, Plus, Paperclip, Eye, X, Info, Users, Menu, Copy, Check, SlidersHorizontal, ChevronDown, AlertTriangle, ArrowUpCircle, Loader, RefreshCw, Square, Bell, Map as MapIcon, CornerDownRight, RotateCcw, Undo2 } from 'lucide-react';
 import { useActivityTracker } from '@/hooks/useActivityTracker';
 import { useAddonEvents } from '@/hooks/useAddonEvents';
 import { useActiveClientTab } from '@/hooks/useActiveClientTab';
@@ -2276,6 +2276,48 @@ export default function Home() {
         }
     };
 
+    // 発言を「なかったことにする」。取り消せるかどうかは好みでは決まらず、
+    // ペルソナがもう読んだかで決まる (読まれた後は取り消せない)。消すのではなく
+    // 入力欄へ返す — ユーザーの発言はユーザーのものなので、手元に戻す形にする。
+    const handleWithdrawMessage = async (messageId: string) => {
+        if (loadingStatus) return;
+        try {
+            const res = await fetch('/api/chat/withdraw', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ message_id: messageId }),
+            });
+            if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+            const data = await res.json();
+            if (data.withdrawn) {
+                setMessages(prev => prev.filter(m => m.id !== messageId));
+                setInputValue(prev => (
+                    prev.trim() ? `${prev}\n${data.content || ''}` : (data.content || '')
+                ));
+                requestAnimationFrame(() => adjustTextareaHeight());
+            } else {
+                setMessages(prev => prev.map(m => (
+                    m.id === messageId ? { ...m, needsRetry: false } : m
+                )));
+                setMessages(prev => [...prev, {
+                    role: 'system',
+                    content: data.message || '取り消せませんでした。',
+                    isInfo: true,
+                    timestamp: new Date().toISOString(),
+                }]);
+            }
+        } catch (error) {
+            console.error(error);
+            setMessages(prev => [...prev, {
+                role: 'system',
+                content: '取り消しをサーバーに届けられませんでした。',
+                isError: true,
+                errorCode: 'action_failed',
+                timestamp: new Date().toISOString(),
+            }]);
+        }
+    };
+
     const handleStopGeneration = async () => {
         // Signal backend to cancel active LLM generation
         // Don't abort() the fetch — let the backend's cancellation flow
@@ -2977,6 +3019,19 @@ export default function Home() {
                                         >
                                             <RotateCcw size={14} />
                                             <span className={styles.actionBtnLabel}>再送</span>
+                                        </button>
+                                    )}
+                                    {/* 返事が来なかった発言は、なかったことにもできる。
+                                        ただしペルソナがもう読んでいたら断られる。 */}
+                                    {msg.role === 'user' && msg.needsRetry && msg.id && (
+                                        <button
+                                            className={`${styles.actionBtn} ${styles.withdrawBtn}`}
+                                            onClick={() => handleWithdrawMessage(msg.id as string)}
+                                            disabled={!!loadingStatus}
+                                            title="この発言を取り消して、入力欄に戻す（まだ誰も読んでいない場合のみ）"
+                                        >
+                                            <Undo2 size={14} />
+                                            <span className={styles.actionBtnLabel}>取り消す</span>
                                         </button>
                                     )}
                                     {/* アドオンバブルボタン（assistantメッセージにのみ表示） */}
