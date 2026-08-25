@@ -265,13 +265,29 @@ async def _reconnect_addon_mcp(addon_name: str) -> None:
         return
     if not results:
         return
-    failed = [name for name, ok in results.items() if not ok]
+
+    from tools.mcp_client import RECONNECT_FAILED, RECONNECT_NO_INSTANCES
+
+    failed = [name for name, outcome in results.items() if outcome == RECONNECT_FAILED]
+    idle = [name for name, outcome in results.items() if outcome == RECONNECT_NO_INSTANCES]
     if failed:
+        # 分母は「実際に繋ぎ直そうとしたもの」— 繋ぐ相手がいなかったサーバーを
+        # 混ぜると、読む人が失敗の割合を過小に見積もる。
+        attempted = [name for name in results if name not in idle]
         LOGGER.warning(
-            "addon: MCP reconnect partial failure for '%s' (failed=%s, all=%s)",
-            addon_name, failed, list(results.keys()),
+            "addon: MCP reconnect partial failure for '%s' (failed=%s, attempted=%s)",
+            addon_name, failed, attempted,
         )
-    else:
+    if idle:
+        # per_persona はペルソナが動き出すまで接続を持たない。設定を保存した
+        # だけの時点で繋ぐ相手が居ないのは**正常**なので、警告に混ぜない
+        # (混ぜると、後からログを読んだ人が失敗として数える)。
+        LOGGER.info(
+            "addon: MCP reconnect had nothing to reconnect for '%s' (servers=%s); "
+            "per_persona servers connect at the persona's next pulse head",
+            addon_name, idle,
+        )
+    if not failed and not idle:
         LOGGER.info(
             "addon: MCP reconnect ok for '%s' (servers=%s)",
             addon_name, list(results.keys()),

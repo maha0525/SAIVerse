@@ -57,17 +57,49 @@ def list_failures() -> List[Dict[str, Any]]:
 
 @router.post("/servers/{server_name}/reconnect")
 async def reconnect_server(server_name: str) -> Dict[str, Any]:
-    """Reconnect all instances of the given qualified server name."""
-    from tools.mcp_client import get_mcp_manager, reconnect_mcp_server
+    """Reconnect all instances of the given qualified server name.
+
+    「繋ぎ直す接続がまだ無い」は失敗ではない (per_persona はペルソナが動き出す
+    まで接続を持たない) ので、その回は ``message`` で知らせ、``error`` は載せ
+    ない。 画面はこの 2 つを見分けて、失敗と通知を出し分ける。
+    """
+    from tools.mcp_client import (
+        RECONNECT_NO_INSTANCES,
+        RECONNECT_RECONNECTED,
+        get_mcp_manager,
+        reconnect_mcp_server,
+    )
 
     manager = get_mcp_manager()
     if manager is None:
         return {"success": False, "error": "MCP is not initialized"}
 
-    success = await reconnect_mcp_server(server_name)
-    if success:
-        return {"success": True, "server_name": server_name}
-    return {"success": False, "error": f"Failed to reconnect '{server_name}'"}
+    outcome = await reconnect_mcp_server(server_name)
+    if outcome == RECONNECT_RECONNECTED:
+        return {"success": True, "outcome": outcome, "server_name": server_name}
+
+    if outcome == RECONNECT_NO_INSTANCES:
+        message = f"「{server_name}」には、いま繋ぎ直す接続がありません。"
+        scope = (manager._server_meta.get(server_name) or {}).get("scope", "global")
+        if scope == "per_persona":
+            message += (
+                "このサーバーはペルソナごとに繋がるので、"
+                "設定を変えた後は、そのペルソナが次に動いたとき (会話や自律の Pulse) "
+                "に新しい設定で接続されます。"
+            )
+        return {
+            "success": False,
+            "outcome": outcome,
+            "server_name": server_name,
+            "message": message,
+        }
+
+    return {
+        "success": False,
+        "outcome": outcome,
+        "server_name": server_name,
+        "error": f"Failed to reconnect '{server_name}'",
+    }
 
 
 @router.post("/instances/stop")

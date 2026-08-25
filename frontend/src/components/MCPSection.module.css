@@ -74,6 +74,18 @@
     border-radius: 0.4rem;
 }
 
+/* 失敗ではない通知 (操作が空振りに終わった理由の説明)。
+   赤で出すと正常な状態を異常に見せてしまうので、青系で分ける。 */
+.noticeText {
+    color: #1d4ed8;
+    padding: 0.5rem 0.75rem;
+    font-size: 0.8rem;
+    margin: 0;
+    background: #eff6ff;
+    border-radius: 0.4rem;
+    line-height: 1.5;
+}
+
 .subHeader {
     font-size: 0.8rem;
     font-weight: 600;
@@ -358,6 +370,11 @@
 :global([data-theme="dark"]) .errorText {
     background: rgba(127, 29, 29, 0.25);
     color: #fca5a5;
+}
+
+:global([data-theme="dark"]) .noticeText {
+    background: rgba(30, 58, 138, 0.25);
+    color: #93c5fd;
 }
 
 :global([data-theme="dark"]) .loadingText,

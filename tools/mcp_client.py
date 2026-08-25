@@ -109,6 +109,18 @@ ERROR_CATEGORY_PROCESS_CRASH = "process_crash"
 ERROR_CATEGORY_BUSY = "busy"
 ERROR_CATEGORY_UNKNOWN = "unknown"
 
+# --- Reconnect outcomes ---------------------------------------------------
+#
+# 「繋ぎ直した」「繋ごうとして失敗した」「繋ぎ直す相手がいなかった」は別の
+# 結果である。 bool ひとつに潰すと最後のものが失敗の顔で表に出るが、
+# per_persona のサーバーは起動時に接続を張らないので、**接続が無いのが常態**。
+# 2026-08-25、再起動直後に再接続ボタンを押しても無反応に見えた件の根 —
+# 「対象なし」が「失敗」と同じ False になり、その False を API が HTTP 200 に
+# 包み、画面が HTTP ステータスしか見ていなかった (三段重ね)。
+RECONNECT_RECONNECTED = "reconnected"
+RECONNECT_FAILED = "failed"
+RECONNECT_NO_INSTANCES = "no_instances"
+
 _CATEGORY_JP = {
     ERROR_CATEGORY_RUNTIME_MISSING: "必要なランタイム（npx/uvx/python 等）が見つかりません",
     ERROR_CATEGORY_MISSING_CONFIG: "必須の設定値が未設定です",
@@ -1878,8 +1890,13 @@ class MCPClientManager:
 
     # -- Reconnect / manual stop ----------------------------------------
 
-    async def reconnect_server(self, qualified_name: str) -> bool:
+    async def reconnect_server(self, qualified_name: str) -> str:
         """Reconnect all instances of a given qualified server name.
+
+        Returns one of ``RECONNECT_RECONNECTED`` / ``RECONNECT_FAILED`` /
+        ``RECONNECT_NO_INSTANCES``. The last one is **not** a failure: a
+        per_persona server has no instances until a persona's Pulse head
+        opens one, so "nothing to reconnect" is its normal resting state.
 
         Re-loads raw config from the source JSON and re-interpolates against
         the current AddonConfig DB before each reconnect, so AddonConfig
@@ -1928,7 +1945,7 @@ class MCPClientManager:
             seen.add(key)
             matching.append(key)
         if not matching:
-            return False
+            return RECONNECT_NO_INSTANCES
 
         # Server is going down → drop ready flag so future on_server_ready
         # subscribers won't fire immediately based on stale state.
@@ -2094,8 +2111,8 @@ class MCPClientManager:
         # ready は「このサーバーを今から呼べるか」の合図なので、全 instance の
         # 成功ではなく **1 つでも生きているか** で立てる。複数 instance (ペルソナ
         # ごと / vessel ごと) のうち 1 つが失敗しただけで、生きている instance の
-        # 購読者 (avatar_loader 等) を待たせ続ける理由はない。戻り値の success は
-        # 従来どおり「全 instance が繋ぎ直せたか」を意味する (呼び出し元の報告用)。
+        # 購読者 (avatar_loader 等) を待たせ続ける理由はない。戻り値は従来どおり
+        # 「全 instance が繋ぎ直せたか」を意味する (呼び出し元の報告用)。
         any_alive = False
         for instance_key in matching:
             conn = self._connections.get(instance_key)
@@ -2104,7 +2121,7 @@ class MCPClientManager:
                 break
         if any_alive:
             self._fire_server_ready(qualified_name)
-        return success
+        return RECONNECT_RECONNECTED if success else RECONNECT_FAILED
 
     # -- Server-ready event hook ----------------------------------------
     # Lets addons (e.g. avatar_loader) trigger work the moment a server
@@ -2605,14 +2622,15 @@ async def shutdown_mcp() -> None:
     _manager = None
 
 
-async def reconnect_mcp_server(server_name: str) -> bool:
+async def reconnect_mcp_server(server_name: str) -> str:
+    """Reconnect one qualified server. Returns a ``RECONNECT_*`` outcome."""
     manager = get_mcp_manager()
     if manager is None:
-        return False
+        return RECONNECT_FAILED
     return await run_on_mcp_loop(manager.reconnect_server(server_name))
 
 
-async def reconnect_addon_mcp_servers(addon_name: str) -> Dict[str, bool]:
+async def reconnect_addon_mcp_servers(addon_name: str) -> Dict[str, str]:
     """Reconnect all MCP servers declared by the given addon.
 
     Used by the addon config update API to push AddonConfig changes
@@ -2621,8 +2639,11 @@ async def reconnect_addon_mcp_servers(addon_name: str) -> Dict[str, bool]:
     their env at spawn time, so the only way to apply DB changes is
     kill + respawn via ``reconnect_server``.
 
-    Returns a ``{qualified_name: success}`` map. Empty dict if the addon
-    has no MCP servers or MCP isn't initialized.
+    Returns a ``{qualified_name: RECONNECT_* outcome}`` map. Empty dict if the
+    addon has no MCP servers or MCP isn't initialized. Note that
+    ``RECONNECT_NO_INSTANCES`` is the expected outcome for a per_persona
+    server that no persona has opened yet — callers must not report it as a
+    failure.
     """
     manager = get_mcp_manager()
     if manager is None:
@@ -2632,17 +2653,16 @@ async def reconnect_addon_mcp_servers(addon_name: str) -> Dict[str, bool]:
         for qname, meta in manager._server_meta.items()
         if meta.get("addon_name") == addon_name
     ]
-    results: Dict[str, bool] = {}
+    results: Dict[str, str] = {}
     for name in server_names:
         try:
-            ok = await run_on_mcp_loop(manager.reconnect_server(name))
-            results[name] = ok
+            results[name] = await run_on_mcp_loop(manager.reconnect_server(name))
         except Exception as exc:
             LOGGER.warning(
                 "MCP: reconnect raised for addon '%s' server '%s': %s",
                 addon_name, name, exc,
             )
-            results[name] = False
+            results[name] = RECONNECT_FAILED
     return results
 
 

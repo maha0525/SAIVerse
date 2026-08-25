@@ -24,6 +24,8 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from tools.mcp_client import RECONNECT_FAILED, RECONNECT_RECONNECTED
+
 
 class ReconnectAddonMcpServersTests(unittest.TestCase):
     """``tools.mcp_client.reconnect_addon_mcp_servers`` behavior."""
@@ -42,7 +44,7 @@ class ReconnectAddonMcpServersTests(unittest.TestCase):
             "addonB__gamma": {"addon_name": "addonB"},
             "builtin__delta": {"addon_name": None},
         }
-        manager.reconnect_server = AsyncMock(return_value=True)
+        manager.reconnect_server = AsyncMock(return_value=RECONNECT_RECONNECTED)
 
         async def _passthrough(coro):
             return await coro
@@ -52,7 +54,7 @@ class ReconnectAddonMcpServersTests(unittest.TestCase):
             results = self._run(mcp_client.reconnect_addon_mcp_servers("addonA"))
 
         self.assertEqual(set(results.keys()), {"addonA__alpha", "addonA__beta"})
-        self.assertTrue(all(results.values()))
+        self.assertTrue(all(v == RECONNECT_RECONNECTED for v in results.values()))
         self.assertEqual(manager.reconnect_server.call_count, 2)
 
     def test_returns_empty_when_no_matching_servers(self):
@@ -62,7 +64,7 @@ class ReconnectAddonMcpServersTests(unittest.TestCase):
         manager._server_meta = {
             "addonB__gamma": {"addon_name": "addonB"},
         }
-        manager.reconnect_server = AsyncMock(return_value=True)
+        manager.reconnect_server = AsyncMock(return_value=RECONNECT_RECONNECTED)
 
         with patch.object(mcp_client, "get_mcp_manager", return_value=manager):
             results = self._run(mcp_client.reconnect_addon_mcp_servers("addonA"))
@@ -78,9 +80,9 @@ class ReconnectAddonMcpServersTests(unittest.TestCase):
 
         self.assertEqual(results, {})
 
-    def test_per_server_failure_recorded_as_false(self):
+    def test_per_server_failure_recorded_as_failed(self):
         """If reconnect_server raises for one server, others still run and
-        the failing one is reported as ``False`` in the results map."""
+        the failing one is reported as ``RECONNECT_FAILED`` in the map."""
         from tools import mcp_client
 
         manager = MagicMock()
@@ -92,7 +94,7 @@ class ReconnectAddonMcpServersTests(unittest.TestCase):
         async def _reconnect(name):
             if name == "addonA__alpha":
                 raise RuntimeError("boom")
-            return True
+            return RECONNECT_RECONNECTED
 
         manager.reconnect_server = AsyncMock(side_effect=_reconnect)
 
@@ -103,8 +105,8 @@ class ReconnectAddonMcpServersTests(unittest.TestCase):
              patch.object(mcp_client, "run_on_mcp_loop", side_effect=_passthrough):
             results = self._run(mcp_client.reconnect_addon_mcp_servers("addonA"))
 
-        self.assertEqual(results["addonA__alpha"], False)
-        self.assertEqual(results["addonA__beta"], True)
+        self.assertEqual(results["addonA__alpha"], RECONNECT_FAILED)
+        self.assertEqual(results["addonA__beta"], RECONNECT_RECONNECTED)
 
 
 class AddonConfigEndpointsTriggerReconnectTests(unittest.TestCase):

@@ -11,6 +11,8 @@ from tools import SPELL_TOOL_NAMES, SPELL_TOOL_SCHEMAS, register_external_tool, 
 from tools.core import ToolSchema
 from tools.mcp_client import (
     ERROR_CATEGORY_MISSING_CONFIG,
+    RECONNECT_FAILED,
+    RECONNECT_NO_INSTANCES,
     MCPClientManager,
     MCPServerConnection,
     _make_instance_key,
@@ -865,7 +867,7 @@ class MCPConfigTestCase(unittest.TestCase):
         with mock.patch("saiverse.addon_config.get_params", return_value={}):
             ok = asyncio.run(mgr.reconnect_server("srv"))
 
-        self.assertFalse(ok)
+        self.assertEqual(ok, RECONNECT_FAILED)
         self.assertEqual(fake.connect_count, 0)
         self.assertNotIn("srv:persona:air_city_a", mgr._connections)
         self.assertEqual(
@@ -997,7 +999,7 @@ class MCPConfigTestCase(unittest.TestCase):
         ):
             ok = asyncio.run(mgr.reconnect_server("srv"))
 
-        self.assertFalse(ok)
+        self.assertEqual(ok, RECONNECT_FAILED)
         self.assertEqual(fake.connect_count, 1)
         # 死んだ接続を掴み続けない = 遅延起動 / 次の Pulse 頭がやり直せる
         self.assertNotIn("srv:persona:air_city_a", mgr._connections)
@@ -1167,7 +1169,10 @@ class MCPConfigTestCase(unittest.TestCase):
         ):
             ok = asyncio.run(mgr.reconnect_server("srv"))
 
-        self.assertFalse(ok)   # 対象が無いので何もしていない
+        # 「繋ぎ直す相手がいない」であって失敗ではない。ここを失敗と同じ値に
+        # 潰すと、per_persona の常態 (まだ誰も繋いでいない) が画面で失敗の顔に
+        # なる — 2026-08-25 に再接続ボタンが無反応に見えた件の根。
+        self.assertEqual(ok, RECONNECT_NO_INSTANCES)
         self.assertEqual(started, [])
 
     def test_reconnect_can_restart_a_down_instance(self) -> None:

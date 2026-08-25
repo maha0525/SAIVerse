@@ -94,11 +94,22 @@ export default function MCPSection({
     const [failures, setFailures] = useState<MCPFailure[]>([]);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
+    // 失敗ではないが、操作が空振りに終わったことを伝える通知。
+    // 例: per_persona サーバーの再接続で、まだ繋ぎ直す接続が無かったとき。
+    // これを error と同じ赤で出すと、正常な状態を異常として見せてしまう。
+    const [notice, setNotice] = useState<string | null>(null);
     const [actionInProgress, setActionInProgress] = useState<string | null>(null);
 
-    const fetchState = useCallback(async () => {
+    /**
+     * サーバー一覧と失敗一覧を取り直す。
+     *
+     * ``clearError`` を false にすると、いま出ているメッセージを残したまま
+     * 取り直す。 操作 (runAction) の直後はこれを使う — 操作の結果を出した
+     * すぐ後に取り直しが走るので、無条件に消すと結果が一瞬で消えてしまう。
+     */
+    const fetchState = useCallback(async (clearError = true) => {
         setLoading(true);
-        setError(null);
+        if (clearError) setError(null);
         try {
             const [serversResp, failuresResp] = await Promise.all([
                 fetch('/api/mcp/servers'),
@@ -134,22 +145,38 @@ export default function MCPSection({
         doAction: () => Promise<Response>,
     ) => {
         setActionInProgress(actionKey);
+        setNotice(null);
         try {
             const resp = await doAction();
             if (!resp.ok) {
                 const text = await resp.text();
                 console.error('[MCPSection] action failed:', actionKey, resp.status, text);
                 setError(`操作に失敗しました (${resp.status}): ${text}`);
-            } else {
-                setError(null);
+                return;
             }
+            // ここが 2026-08-25 の「押しても無反応」の直接原因だった箇所。
+            // これらの API は失敗も HTTP 200 で返す ({"success": false, ...})
+            // ので、ステータスだけ見ていると失敗が黙って消える。本文まで読む。
+            // error = 本当に失敗した / message = 失敗ではないが空振りした。
+            const body = await resp.json().catch(() => null);
+            if (body && body.success === false) {
+                console.warn('[MCPSection] action did not take effect:', actionKey, body);
+                if (body.message) {
+                    setNotice(String(body.message));
+                    setError(null);
+                } else {
+                    setError(String(body.error || '操作は完了しませんでした'));
+                }
+                return;
+            }
+            setError(null);
         } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
             console.error('[MCPSection] action error:', actionKey, msg);
             setError(msg);
         } finally {
             setActionInProgress(null);
-            await fetchState();
+            await fetchState(false);
         }
     };
 
@@ -232,6 +259,9 @@ export default function MCPSection({
                     {loading && <p className={styles.loadingText}>読み込み中...</p>}
                     {error && (
                         <p className={styles.errorText}>エラー: {error}</p>
+                    )}
+                    {notice && (
+                        <p className={styles.noticeText}>{notice}</p>
                     )}
 
                     {!loading &&
