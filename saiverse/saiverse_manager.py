@@ -1276,6 +1276,14 @@ class SAIVerseManager(
             client_message_id=client_message_id,
         )
 
+    def continue_persona_message_stream(self, message_id: str) -> Iterator[str]:
+        """途中で終わったペルソナの発言の続きを起こす (ユーザーの一押しが起点)。"""
+        yield from self.runtime.continue_persona_message_stream(message_id)
+
+    def retry_user_message_stream(self, message_id: str) -> Iterator[str]:
+        """既にあるユーザー発言に対して、応答だけをやり直す。"""
+        yield from self.runtime.retry_user_message_stream(message_id)
+
     def cancel_active_generation(self) -> bool:
         """Cancel the active LLM generation for personas in the user's current building.
 

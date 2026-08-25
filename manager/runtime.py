@@ -816,6 +816,229 @@ class RuntimeService(
             self.manager._active_stop_events.pop(building_id, None)
             self.manager._active_sse_callbacks.pop(building_id, None)
 
+    # ------------------------------------------------------------------
+    # やり直しと続き — ユーザーの一押しから起こす生成
+    #
+    # 追加の推論はすべてボタンの後ろに置く (2026-08-25 まはー裁定)。この二つの
+    # 口はどちらも「発言はもう履歴にある」前提で、**応答だけ**を起こす。だから
+    # ユーザーの発言を作り直したり、二重に保存したりしない。
+    # 設計: docs/issues/user_utterance_path_failure_inventory.md
+    # ------------------------------------------------------------------
+
+    #: 中断された発言の続きを頼むとき、プロンプトの入力欄に載せる文。
+    #:
+    #: ``<system>`` で包むのは「これは機構の言葉であって、ユーザーの発言では
+    #: ない」という印。ユーザー名義のテキストを機構が作らないことは SAIVerse の
+    #: 一線なので、入力欄の席を借りるときは必ずこの形にする (建物ログの取り込みが
+    #: システム通知に使っている包みと同じ)。この文は永続化されない — ユーザー
+    #: レーンの ``user_input`` はプロンプトへ渡るだけで、記憶には残らない。
+    CONTINUE_INSTRUCTION = (
+        "<system>あなたの直前の発言は、途中で途切れたまま終わっています。"
+        "その続きを、前の発言にそのままつながる形で話してください。"
+        "言い直しや要約はせず、続きだけを述べてください。</system>"
+    )
+
+    def _find_building_message(
+        self, building_id: str, message_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        """建物履歴から message_id の 1 件を引く (無ければ None)。"""
+        try:
+            history = self.manager.get_building_history(building_id)
+        except Exception:
+            logging.exception(
+                "[runtime] failed to read the building history (building=%s)",
+                building_id,
+            )
+            return None
+        for msg in history or []:
+            if str(msg.get("message_id")) == str(message_id):
+                return msg
+        return None
+
+    def _stream_persona_pulse(
+        self, building_id: str, persona: Any, user_input: str,
+    ) -> Iterator[str]:
+        """1 体のペルソナの Pulse を起こし、その NDJSON イベントを流す。
+
+        ``handle_user_input_stream`` と同じ器 (キュー + ワーカー + 出口 3 の検査)
+        を使うが、**ユーザー発言の永続化は行わない** — 発言はもう履歴にあるので、
+        ここでもう一度書くと同じ発言が二度載る。
+        """
+        response_queue: queue.Queue = queue.Queue()
+        stop_event = threading.Event()
+        self.manager._active_stop_events[building_id] = stop_event
+
+        outcome_seen = {"value": False}
+
+        def _enrich_event(event):
+            if isinstance(event, dict) and event.get("persona_id"):
+                p = self.personas.get(event["persona_id"])
+                if p:
+                    if not event.get("persona_name"):
+                        event["persona_name"] = p.persona_name
+                    if not event.get("persona_avatar"):
+                        event["persona_avatar"] = (
+                            avatar_path_to_url(p.avatar_image)
+                            or "/api/static/builtin_icons/host.png"
+                        )
+            if isinstance(event, dict) and event.get("type") in _OUTCOME_EVENT_TYPES:
+                outcome_seen["value"] = True
+            response_queue.put(event)
+
+        self.manager._active_sse_callbacks[building_id] = _enrich_event
+
+        def worker():
+            try:
+                self.manager.run_sea_user(
+                    persona, building_id, user_input,
+                    event_callback=_enrich_event,
+                )
+            except LLMError as e:
+                logging.error("pulse worker LLM error: %s", e, exc_info=True)
+                if stop_event.is_set():
+                    _enrich_event({"type": "cancelled", "content": "生成を中止しました。"})
+                else:
+                    _enrich_event(e.to_dict())
+            except Exception as e:
+                logging.error("pulse worker error", exc_info=True)
+                if stop_event.is_set():
+                    _enrich_event({"type": "cancelled", "content": "生成を中止しました。"})
+                else:
+                    _enrich_event({
+                        "type": "error",
+                        "error_code": "unknown",
+                        "content": "予期せぬエラーが発生しました。",
+                        "technical_detail": str(e),
+                    })
+            finally:
+                if not outcome_seen["value"] and not stop_event.is_set():
+                    logging.warning(
+                        "[runtime] the pulse produced nothing for the user "
+                        "(building=%s persona=%s)",
+                        building_id, getattr(persona, "persona_id", None),
+                    )
+                    _enrich_event({
+                        "type": "error",
+                        "error_code": "no_response",
+                        "content": "返事が生まれませんでした。",
+                    })
+                response_queue.put(None)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+        try:
+            while True:
+                try:
+                    item = response_queue.get(timeout=2.0)
+                    if item is None:
+                        break
+                    yield json.dumps(item, ensure_ascii=False) + "\n"
+                    if isinstance(item, dict) and item.get("type") == "cancelled":
+                        while True:
+                            if response_queue.get(timeout=5.0) is None:
+                                break
+                        break
+                except queue.Empty:
+                    yield json.dumps({"type": "ping"}, ensure_ascii=False) + "\n"
+        finally:
+            self.manager._active_stop_events.pop(building_id, None)
+            self.manager._active_sse_callbacks.pop(building_id, None)
+
+    def continue_persona_message_stream(self, message_id: str) -> Iterator[str]:
+        """途中で終わったペルソナの発言の、続きだけを起こす。"""
+        building_id = self.state.user_current_building_id
+        if not building_id:
+            yield json.dumps({
+                "type": "error",
+                "error_code": "no_current_building",
+                "content": "現在いる場所が分からないため、続きを起こせませんでした。",
+            }, ensure_ascii=False) + "\n"
+            return
+
+        target = self._find_building_message(building_id, message_id)
+        if target is None or target.get("role") != "assistant":
+            yield json.dumps({
+                "type": "error",
+                "error_code": "message_not_found",
+                "content": "続きを起こす発言が見つかりませんでした。",
+            }, ensure_ascii=False) + "\n"
+            return
+        if not (target.get("metadata") or {}).get("_interrupted"):
+            yield json.dumps({
+                "type": "error",
+                "error_code": "not_interrupted",
+                "content": "この発言は途中で終わっていないため、続きはありません。",
+            }, ensure_ascii=False) + "\n"
+            return
+
+        persona = self.personas.get(target.get("persona_id"))
+        if persona is None:
+            yield json.dumps({
+                "type": "error",
+                "error_code": "persona_not_found",
+                "content": "発言したペルソナが見つかりませんでした。",
+            }, ensure_ascii=False) + "\n"
+            return
+
+        yield from self._stream_persona_pulse(
+            building_id, persona, self.CONTINUE_INSTRUCTION,
+        )
+
+        # 続きが生まれたので、元の発言はもう「続きを待っている」状態ではない。
+        # 印を降ろしてボタンを消す (中断があった事実は、続けて並ぶ 2 つの発言
+        # そのものが残す)。**失敗しても本体の結果は変えない** — 印が残った回は
+        # もう一度押せるだけで、害にならない。
+        try:
+            persona.history_manager.update_building_message(
+                building_id, str(message_id),
+                metadata={**(target.get("metadata") or {}), "_interrupted": False},
+            )
+        except Exception:
+            logging.exception(
+                "[runtime] failed to clear the interrupted mark (msg=%s)", message_id,
+            )
+
+    def retry_user_message_stream(self, message_id: str) -> Iterator[str]:
+        """既にある自分の発言に対して、応答だけをやり直す。
+
+        発言は履歴に残っているので、**送り直さない**。同じ発言が二度載るのを
+        防ぐのがこの口の存在理由で、ユーザーには「再送」の 1 ボタンに見える。
+        """
+        building_id = self.state.user_current_building_id
+        if not building_id:
+            yield json.dumps({
+                "type": "error",
+                "error_code": "no_current_building",
+                "content": "現在いる場所が分からないため、やり直せませんでした。",
+            }, ensure_ascii=False) + "\n"
+            return
+
+        target = self._find_building_message(building_id, message_id)
+        if target is None or target.get("role") != "user":
+            # 発言が残っていない = 出口 4。手元の文をそのまま送り直せばよいので、
+            # フロントは入力欄への差し戻しへ倒す。
+            yield json.dumps({
+                "type": "error",
+                "error_code": "message_not_found",
+                "content": "この発言は記録に残っていません。もう一度送ってください。",
+            }, ensure_ascii=False) + "\n"
+            return
+
+        responding_personas = self._build_responding_personas(building_id)
+        if not responding_personas:
+            yield json.dumps({
+                "type": "error",
+                "error_code": "no_response",
+                "content": "この場所には、応答できる相手がいません。",
+            }, ensure_ascii=False) + "\n"
+            return
+
+        # 応答は最初の 1 体に絞る。全員に振り直すと、既に答えた相手まで
+        # もう一度喋ることになる。
+        yield from self._stream_persona_pulse(
+            building_id, responding_personas[0], "",
+        )
+
     def preview_context(
         self, message: str, building_id: Optional[str] = None,
         meta_playbook: Optional[str] = None,

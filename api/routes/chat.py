@@ -59,6 +59,11 @@ class ChatMessage(BaseModel):
     activity_trace: Optional[List[dict]] = None
     llm_usage: Optional[ChatMessageLLMUsage] = None
     llm_usage_total: Optional[ChatMessageLLMUsageTotal] = None
+    # この発言は言い切っていない (生成がサーバー側の中断かユーザーの停止で切れた)。
+    # 画面はこの印が立った発言にだけ「続きの生成」を出す。
+    # 永続化は metadata["_interrupted"] (sea/runtime_llm.py INTERRUPTED_METADATA_KEY)。
+    # 設計: docs/issues/user_utterance_path_failure_inventory.md
+    interrupted: bool = False
 
 class ChatHistoryResponse(BaseModel):
     history: List[ChatMessage]
@@ -258,7 +263,8 @@ def serialize_history_message(manager, msg: Dict[str, Any], message_id: str) -> 
         auto_recall=auto_recall_data,
         activity_trace=activity_trace_data,
         llm_usage=llm_usage_data,
-        llm_usage_total=llm_usage_total_data
+        llm_usage_total=llm_usage_total_data,
+        interrupted=bool(metadata.get("_interrupted")) if metadata else False,
     )
 
 
@@ -1170,6 +1176,57 @@ def send_message(req: SendMessageRequest, manager = Depends(get_manager)):
             }, ensure_ascii=False) + "\n"
 
     return StreamingResponse(response_generator(), media_type="application/x-ndjson")
+
+
+# ---- やり直しと続き (ユーザーの一押しから起こす生成) ----
+#
+# 追加の推論はすべてボタンの後ろに置く (2026-08-25 まはー裁定)。どちらの口も
+# 「発言はもう履歴にある」前提で応答だけを起こすので、発言を送り直さない。
+# 設計: docs/issues/user_utterance_path_failure_inventory.md
+
+
+class MessageActionRequest(BaseModel):
+    message_id: str
+
+
+@router.post("/continue")
+def continue_message(req: MessageActionRequest, manager = Depends(get_manager)):
+    """途中で終わったペルソナの発言の、続きだけを起こす。"""
+    def gen():
+        try:
+            yield json.dumps({"type": "status", "content": "processing"}, ensure_ascii=False) + " " * 2048 + "\n"
+            for chunk in manager.continue_persona_message_stream(req.message_id):
+                yield chunk
+        except Exception as e:
+            logging.error("Error while continuing a message", exc_info=True)
+            yield json.dumps({
+                "type": "error",
+                "error_code": "unknown",
+                "content": "続きの生成中にエラーが発生しました。",
+                "technical_detail": str(e),
+            }, ensure_ascii=False) + "\n"
+
+    return StreamingResponse(gen(), media_type="application/x-ndjson")
+
+
+@router.post("/retry")
+def retry_message(req: MessageActionRequest, manager = Depends(get_manager)):
+    """既にあるユーザー発言に対して、応答だけをやり直す。"""
+    def gen():
+        try:
+            yield json.dumps({"type": "status", "content": "processing"}, ensure_ascii=False) + " " * 2048 + "\n"
+            for chunk in manager.retry_user_message_stream(req.message_id):
+                yield chunk
+        except Exception as e:
+            logging.error("Error while retrying a message", exc_info=True)
+            yield json.dumps({
+                "type": "error",
+                "error_code": "unknown",
+                "content": "やり直しの生成中にエラーが発生しました。",
+                "technical_detail": str(e),
+            }, ensure_ascii=False) + "\n"
+
+    return StreamingResponse(gen(), media_type="application/x-ndjson")
 
 
 # ---- Utter: 発言契機入室 (C-2) ----

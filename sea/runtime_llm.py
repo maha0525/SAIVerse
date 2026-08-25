@@ -3887,6 +3887,18 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                         _speak_metadata_key = getattr(node_def, "metadata_key", None)
                         _speak_base_metadata = state.get(_speak_metadata_key) if _speak_metadata_key else None
 
+                        # サーバー側でストリームが切れていたら、その本文は本人が
+                        # 言い終えたものではない。**続きは打たない** — 追加の推論は
+                        # ユーザーの一押しの後ろに置く (2026-08-25 まはー裁定)。
+                        # ここでやるのは印を立てることだけで、Beat はそのまま閉じる。
+                        # 判定は完了イベントより**前**に置く — 画面は再読込を待たずに
+                        # 「続きの生成」を出せなければならないので、印を同じイベントに
+                        # 載せて渡す。設計:
+                        # docs/issues/user_utterance_path_failure_inventory.md
+                        _stream_err = state.pop("_stream_error", None)
+                        if _stream_err and text.strip():
+                            state[INTERRUPTED_METADATA_KEY] = True
+
                         # Send completion event with reasoning and metadata
                         completion_event: Dict[str, Any] = {
                             "type": "streaming_complete",
@@ -3898,16 +3910,9 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                             completion_event["reasoning"] = reasoning_text
                         if _speak_base_metadata and isinstance(_speak_base_metadata, dict):
                             completion_event["metadata"] = _speak_base_metadata
+                        if state.get(INTERRUPTED_METADATA_KEY):
+                            completion_event["interrupted"] = True
                         event_callback(completion_event)
-
-                        # サーバー側でストリームが切れていたら、その本文は本人が
-                        # 言い終えたものではない。**続きは打たない** — 追加の推論は
-                        # ユーザーの一押しの後ろに置く (2026-08-25 まはー裁定)。
-                        # ここでやるのは印を立てることだけで、Beat はそのまま閉じる。
-                        # 設計: docs/issues/user_utterance_path_failure_inventory.md
-                        _stream_err = state.pop("_stream_error", None)
-                        if _stream_err and text.strip():
-                            state[INTERRUPTED_METADATA_KEY] = True
 
                         # Record to Building history with usage metadata (include pulse total)
                         pulse_id = state.get("_pulse_id")
