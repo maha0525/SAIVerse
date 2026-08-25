@@ -60,6 +60,31 @@ def find_closest(
     return None
 
 
+def find_close_matches(
+    value: str,
+    candidates: Iterable[str],
+    *,
+    limit: int = 5,
+    threshold: float = 0.7,
+) -> list:
+    """``value`` に近い候補を近い順に並べて返す。該当なしなら空リスト。
+
+    :func:`find_closest` が「1 つにスナップする」ための関数なのに対し、こちらは
+    「候補を並べて見せる」ための関数 (エラーメッセージのヒント等)。 外れた候補が
+    混ざると読み手をかえって惑わせるので、既定の閾値は find_closest より厳しい。
+
+    Args:
+        value: 入力値
+        candidates: 候補一覧
+        limit: 返す最大件数
+        threshold: ``difflib.SequenceMatcher.ratio()`` に対する最小閾値 (0.0-1.0)
+    """
+    candidates_list = [c for c in candidates if c]
+    if not candidates_list or not value:
+        return []
+    return difflib.get_close_matches(value, candidates_list, n=limit, cutoff=threshold)
+
+
 def resolve_fuzzy(
     value: str,
     candidates: Iterable[str],

@@ -54,7 +54,7 @@ unknown だけのとき `loop_count == 0` で抜けるため、`/spell name='web
 ### ヒントを賢く返す (高価値)
 ただ「存在しない」と返すより、原因に応じた誘導を入れる:
 - unknown 名が **playbook 名と一致** したら → 「`web_research` は playbook です。`/spell name='run_playbook' args={'name': 'web_research'}` を使ってください」と具体的に案内する
-- それ以外は利用可能な spell 一覧を添える
+- それ以外は利用可能な spell 一覧を添える → **2026-08-25 に「名前が近いものだけ」へ変更**。全列挙は訂正すべき一点を埋め、取り違えのたびにペルソナの文脈を食っていた (下のログ参照)
 
 これでまはーが手で指摘した内容をシステムが自動化でき、一般ユーザーの取りこぼしも拾える。
 
@@ -81,7 +81,7 @@ unknown だけのとき `loop_count == 0` で抜けるため、`/spell name='web
 `sea/runtime_llm.py` / `frontend/src/app/page.module.css`:
 
 - **コア**: `_run_spell_loop` のラウンド本体を「valid + unknown を位置順の統一レコード (`round_records`) に畳む」構造に変更。unknown spell は実行せず `_build_unknown_spell_error` で誤りを `[Spell Error: ...]` として LLM に返し、`loop_count` を回して再発言させる。`if not valid_spells and not unknown_spells: break` で通常応答 (spell なし) のみ即抜け。`_MAX_SPELL_LOOPS` が暴走止め。
-- **ヒント**: `_build_unknown_spell_error` — unknown 名が router_callable Playbook (`list_available_playbooks` 経由) と一致したら `run_playbook` の正しい呼び出し形を案内、それ以外は `SPELL_TOOL_NAMES` 一覧を提示。
+- **ヒント**: `_build_unknown_spell_error` — unknown 名が router_callable Playbook (`list_available_playbooks` 経由) と一致したら `run_playbook` の正しい呼び出し形を案内。それ以外は `_close_spell_names` が返す**名前が近いスペルだけ**を挙げ、一覧の在処 (スペル一覧セクション / `addon_spell_help`) を案内する。
 - **UI 失敗表示 (バツ印)**: `_build_spell_user_only_block(success=False)` で × アイコン + `spellResultError` クラスに分岐。CSS に赤系の `.spellResult.spellResultError` を追加 (× は summary の `currentColor` を拾う)。失敗ブロックは結果が空でも必ず描画。
 - **漏れ対策**: `_extract_first_text_before` と `_run_spell_loop` の `text_before` を「最初の任意 spell 行」基準に統一。unknown 行が valid より前にある場合も生 `/spell` が bubble1 に漏れない。
 - **テスト**: `tests/test_spell_misfire_feedback.py` (× ブロック生成 / ヒント生成の回帰)。
@@ -94,3 +94,4 @@ unknown だけのとき `loop_count == 0` で抜けるため、`/spell name='web
 ## ログ
 - 2026-06-03: 起票。エアが `/spell name='web_research'` (playbook を直接 spell 名に指定) で不発になった件をまはーが指摘。不発の握り潰し + 生 `/spell` 行漏れの 2 症状を確認し、既存のエラー→再発言土台の流用 + ユーザーへの失敗表示 (バツ印) まで方針を固めて起票。
 - 2026-06-03: コア + ヒント + UI 失敗表示 + 漏れ対策を実装、テスト追加。構文崩れ層と上限到達時の最終挙動は残課題として保留。
+- 2026-08-25: ヒントの全列挙をやめ、名前が近いものだけに絞った。Elyth の API キーを消した実機検証で、消えたスペルを呼んだエリスに登録済み 127 個が丸ごと返り、まはーが「さすがに長すぎる」と指摘。照合はフルネーム (閾値 0.7) とツール名 (最後の `__` 以降、閾値 0.8) の二経路 — 閾値 0.6 のフルネーム照合だと、消えた Elyth のスペル名に無関係な stackchan / X が 5 件並ぶことを実測で確認したため。

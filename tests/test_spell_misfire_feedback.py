@@ -7,7 +7,9 @@ Covers the two user-visible building blocks of the misfire path:
   misfired spell distinctly from a successful one.
 - ``_build_unknown_spell_error`` produces a corrective hint: when the unknown
   spell name is actually a router_callable Playbook, it guides the persona to
-  ``run_playbook``; otherwise it lists the registered spells.
+  ``run_playbook``; otherwise it offers the *close* spell names only (listing
+  every registered spell buried the correction and burned context — see the
+  2026-08-25 Elyth key-deletion run).
 
 詳細: docs/issues/spell_misfire_user_feedback.md
 """
@@ -126,6 +128,76 @@ def test_unknown_spell_error_degrades_without_playbook_tool() -> None:
     ):
         msg = _build_unknown_spell_error("web_research", _persona(), "bld_1")
     assert "存在しません" in msg
+
+
+# ---------------------------------------------------------------------------
+# _build_unknown_spell_error: 候補は「近い名前」だけ — 全列挙はしない
+#
+# 2026-08-25、Elyth の API キーを消した直後にペルソナが消えたスペルを呼び、
+# 登録済み 127 個が丸ごと並んだメッセージが返った。訂正すべき一点が埋もれる上、
+# 取り違えのたびにペルソナの文脈をそれだけ食う。
+# ---------------------------------------------------------------------------
+
+# 実世界の縮図: アドオン名の長い共通接頭辞 + 同名ツールの重複
+_REGISTERED = {
+    "memory_write",
+    "memory_read",
+    "memory_delete",
+    "document_search",
+    "document_create",
+    "saiverse-stackchan-addon__set_mouth",
+    "saiverse-stackchan-addon__stackchan__set_mouth",
+    "saiverse-stackchan-addon__stackchan__get_device_info",
+    "saiverse-x-addon__x_post_tweet",
+    "saiverse-x-addon__x_get_user",
+}
+
+
+def _unknown(spell_name: str) -> str:
+    with patch("sea.runtime_llm.SPELL_TOOL_NAMES", _REGISTERED), \
+            patch.dict("sea.runtime_llm.TOOL_REGISTRY", {}, clear=True):
+        return _build_unknown_spell_error(spell_name, _persona(), "bld_1")
+
+
+def test_typo_gets_the_intended_spell_as_a_candidate() -> None:
+    msg = _unknown("memory_wirte")
+    assert "memory_write" in msg
+    # 無関係なアドオンのスペルは混ざらない
+    assert "saiverse-stackchan-addon" not in msg
+
+
+def test_vanished_spell_offers_no_bogus_candidate() -> None:
+    """鍵を消して消滅した Elyth のスペル名 — 近い名前は本当に無い。
+
+    ここで無理に候補を出すと、ペルソナは無関係なスペルへ誘導される。
+    """
+    msg = _unknown("saiverse-elyth-addon__elyth__get_information")
+    assert "存在しません" in msg
+    assert "名前が近いスペル" not in msg
+    # 案内先だけは示す
+    assert "addon_spell_help" in msg
+
+
+def test_does_not_dump_the_whole_registry() -> None:
+    msg = _unknown("saiverse-elyth-addon__elyth__create_post")
+    for name in _REGISTERED:
+        assert name not in msg
+
+
+def test_bare_name_with_ambiguous_owner_lists_both_owners() -> None:
+    """アドオン名を落とした呼び出しで、同名ツールが複数あるケース。
+
+    候補が一意なら canonicalize_spell_name が救うので、ここまで落ちてくるのは
+    曖昧な時だけ。どちらを指したいのか選べるよう、両方を出す。
+    """
+    msg = _unknown("set_mouth")
+    assert "saiverse-stackchan-addon__set_mouth" in msg
+    assert "saiverse-stackchan-addon__stackchan__set_mouth" in msg
+
+
+def test_hint_points_at_where_the_full_list_lives() -> None:
+    msg = _unknown("totally_made_up_name")
+    assert "addon_spell_help" in msg
 
 
 # ---------------------------------------------------------------------------

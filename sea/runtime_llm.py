@@ -50,6 +50,7 @@ from tools import (
 )
 from tools.core import parse_tool_result
 from tools.context import persona_context
+from tools.fuzzy import find_close_matches
 from sea.mode_spell_permissions import check_spell_permission
 
 LOGGER = logging.getLogger(__name__)
@@ -1473,6 +1474,41 @@ def _list_router_callable_playbook_names(persona: Any, building_id: Optional[str
         return []
 
 
+def _close_spell_names(spell_name: str, limit: int = 5) -> list:
+    """名前が近い登録済みスペルを近い順に返す。該当なしなら空。
+
+    スペル名は ``<アドオン名>__<ツール名>`` の形が多いため、フルネーム同士を
+    比べるとアドオン名の共通部分だけで似て見えてしまう (実測: 消えた Elyth の
+    スペル名に対して、閾値 0.6 では無関係な stackchan / X のスペルが 5 件並んだ)。
+    そこでフルネームの照合は閾値を高く取り、加えて**ツール名 (最後の ``__`` 以降)
+    同士**も突き合わせる。 後者はペルソナがアドオン名を落として素の名前で呼ぶ
+    間違いに効く — その形は :func:`canonicalize_spell_name` が候補一意のときだけ
+    救ってくれるので、複数アドオンが同名ツールを持つ場合はここまで落ちてくる。
+    """
+    available = sorted(SPELL_TOOL_NAMES)
+    if not available or not spell_name:
+        return []
+
+    def _tail(name: str) -> str:
+        return name.rsplit("__", 1)[-1]
+
+    by_tail: dict = {}
+    for name in available:
+        by_tail.setdefault(_tail(name), []).append(name)
+
+    hits = list(find_close_matches(spell_name, available, limit=limit, threshold=0.7))
+    for tail in find_close_matches(_tail(spell_name), list(by_tail), limit=limit, threshold=0.8):
+        hits.extend(by_tail[tail])
+
+    seen = set()
+    ordered = []
+    for name in hits:
+        if name not in seen:
+            seen.add(name)
+            ordered.append(name)
+    return ordered[:limit]
+
+
 def _build_unknown_spell_error(spell_name: str, persona: Any, building_id: Optional[str]) -> str:
     """Build a corrective error message for an unknown (unregistered) spell.
 
@@ -1480,7 +1516,12 @@ def _build_unknown_spell_error(spell_name: str, persona: Any, building_id: Optio
     (e.g. ``/spell name='web_research'``) instead of going through the
     ``run_playbook`` spell. When the unknown name matches a router_callable
     Playbook, point the persona at the correct ``run_playbook`` form so it can
-    self-correct on the retry round. Otherwise list the registered spells.
+    self-correct on the retry round.
+
+    Otherwise, offer only the *close* names. Listing every registered spell
+    (127 of them on the repo owner's world as of 2026-08-25) buries the actual
+    correction and burns the persona's context on every misfire — and the full
+    list is already in the persona's spell-list head section anyway.
     """
     playbook_names = _list_router_callable_playbook_names(persona, building_id)
 
@@ -1491,10 +1532,13 @@ def _build_unknown_spell_error(spell_name: str, persona: Any, building_id: Optio
             f"/spell name='run_playbook' args={{\"name\": \"{spell_name}\"}}"
         )
 
-    available = ", ".join(sorted(SPELL_TOOL_NAMES)) or "(なし)"
-    hint = (
-        f"「{spell_name}」というスペルは存在しません。"
-        f"利用可能なスペル: {available}。"
+    hint = f"「{spell_name}」というスペルは存在しません。"
+    close = _close_spell_names(spell_name)
+    if close:
+        hint += f"名前が近いスペル: {', '.join(close)}。"
+    hint += (
+        "使えるスペルの一覧はスペル一覧セクションにあります。"
+        "アドオンが提供する追加スペルは addon_spell_help で確認できます。"
     )
     if playbook_names:
         hint += (
