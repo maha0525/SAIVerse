@@ -50,6 +50,10 @@ interface AddonInfo {
     is_enabled: boolean;
     params_schema: AddonParamSchema[];
     params: Record<string, unknown>;
+    // API キー・トークンなど伏せ字で返る項目の「値が入っているか」。
+    // サーバー側 (_secret_param_keys) が唯一の判定者なので、UI は
+    // キー名から推測せずこの辞書だけを見る。
+    secret_is_set?: Record<string, boolean>;
     ui_extensions: {
         bubble_buttons: unknown[];
         input_buttons: unknown[];
@@ -61,6 +65,7 @@ interface PersonaPersonaConfig {
     persona_id: string;
     persona_name: string;
     params: Record<string, unknown>;
+    secret_is_set: Record<string, boolean>;
 }
 
 interface AddonManagerModalProps {
@@ -78,12 +83,18 @@ function ParamControl({
     onChange,
     addonName,
     personaId,
+    secretIsSet,
+    onDeleteSecret,
 }: {
     schema: AddonParamSchema;
     value: unknown;
     onChange: (key: string, val: unknown) => void;
     addonName?: string;
     personaId?: string;
+    // この項目が「伏せ字で返る値」で、かつ実際に値が保存されているとき true。
+    // サーバーの secret_is_set をそのまま渡す。
+    secretIsSet?: boolean;
+    onDeleteSecret?: () => void;
 }) {
     const current = value !== undefined ? value : schema.default;
 
@@ -102,25 +113,15 @@ function ParamControl({
             );
 
         case 'text':
-            return (
-                <input
-                    type="text"
-                    className={styles.textInput}
-                    value={String(current ?? '')}
-                    placeholder={schema.placeholder ?? ''}
-                    onChange={(e) => onChange(schema.key, e.target.value)}
-                />
-            );
-
         case 'password':
             return (
-                <input
-                    type="password"
-                    className={styles.textInput}
-                    value={String(current ?? '')}
-                    placeholder={schema.placeholder ?? ''}
-                    autoComplete="off"
-                    onChange={(e) => onChange(schema.key, e.target.value)}
+                <TextParamControl
+                    schema={schema}
+                    value={current}
+                    masked={schema.type === 'password'}
+                    onChange={onChange}
+                    secretIsSet={secretIsSet}
+                    onDeleteSecret={onDeleteSecret}
                 />
             );
 
@@ -204,6 +205,69 @@ function ParamControl({
         default:
             return <span className={styles.unsupported}>（未対応の型: {schema.type}）</span>;
     }
+}
+
+// ---------------------------------------------------------------------------
+// TextParamControl — 1 行テキスト入力 (text / password 共通)
+//
+// API キーやトークンはサーバーが伏せ字 (********) にして返すので、欄に見えて
+// いる文字は本物の値ではない。 そのため欄を空にして保存しても、サーバーは
+// 「触っていない」と判断して元の値を書き戻す (= 消えない)。 削除の意思表示は
+// 値 null を送ることでしか行えないので、その口をこのボタンとして出す。
+// ---------------------------------------------------------------------------
+
+function TextParamControl({
+    schema,
+    value,
+    masked,
+    onChange,
+    secretIsSet,
+    onDeleteSecret,
+}: {
+    schema: AddonParamSchema;
+    value: unknown;
+    masked: boolean;
+    onChange: (key: string, val: unknown) => void;
+    secretIsSet?: boolean;
+    onDeleteSecret?: () => void;
+}) {
+    const input = (
+        <input
+            type={masked ? 'password' : 'text'}
+            className={styles.textInput}
+            value={String(value ?? '')}
+            placeholder={schema.placeholder ?? ''}
+            autoComplete={masked ? 'off' : undefined}
+            onChange={(e) => onChange(schema.key, e.target.value)}
+        />
+    );
+
+    // 値が保存されている secret 項目にだけ削除ボタンを出す
+    if (!secretIsSet || !onDeleteSecret) return input;
+
+    const handleDelete = () => {
+        const ok = window.confirm(
+            `保存されている「${schema.label}」を削除します。\n\n`
+            + '画面には伏せ字でしか表示されないため、ここから元の値を取り戻すことはできません。\n'
+            + '発行元から取得し直すことになります。よろしいですか？'
+        );
+        if (ok) onDeleteSecret();
+    };
+
+    return (
+        <div className={styles.secretInputRow}>
+            {input}
+            <button
+                type="button"
+                className={styles.secretDeleteBtn}
+                onClick={handleDelete}
+                title="保存されている値を削除する"
+                aria-label={`${schema.label} を削除`}
+            >
+                <Trash2 size={13} />
+            </button>
+        </div>
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -599,6 +663,15 @@ function ParamsSection({
     useEffect(() => {
         setGlobalParams(addon.params ?? {});
     }, [addon.params]);
+
+    // 「値が保存されている secret 項目」の一覧。削除ボタンの出し分けに使う。
+    const [globalSecretIsSet, setGlobalSecretIsSet] = useState<Record<string, boolean>>(
+        addon.secret_is_set ?? {},
+    );
+    useEffect(() => {
+        setGlobalSecretIsSet(addon.secret_is_set ?? {});
+    }, [addon.secret_is_set]);
+
     const [personaConfigs, setPersonaConfigs] = useState<PersonaPersonaConfig[]>([]);
     const [saving, setSaving] = useState(false);
     const [selectedPersonaId, setSelectedPersonaId] = useState<string>('');
@@ -612,8 +685,8 @@ function ParamsSection({
     const hasPersonaSection = personaConfigurableSchemas.length > 0 || hasOAuthFlows;
     const [showAdvanced, setShowAdvanced] = useState(false);
 
-    // 保存（グローバル）
-    const saveGlobal = useCallback(async (params: Record<string, unknown>) => {
+    // 保存（グローバル）。成功したかどうかを返す (削除操作の巻き戻し判定に使う)
+    const saveGlobal = useCallback(async (params: Record<string, unknown>): Promise<boolean> => {
         setSaving(true);
         try {
             const res = await fetch(`/api/addon/${addon.addon_name}/config`, {
@@ -625,8 +698,10 @@ function ParamsSection({
                 const body = await res.json().catch(() => ({}));
                 throw new Error(body.detail || `Save failed: ${res.status}`);
             }
+            return true;
         } catch (err) {
             alert(err instanceof Error ? err.message : 'Addon config save failed');
+            return false;
         } finally {
             setSaving(false);
         }
@@ -638,6 +713,24 @@ function ParamsSection({
         saveGlobal(next);
     };
 
+    /**
+     * secret 項目 (API キー等) の削除。値 null が「消す」の意思表示で、
+     * 空欄は「触っていない」と解釈されて元の値が書き戻される (サーバー側の
+     * update_addon_config を参照)。保存に失敗したら見た目を元に戻す。
+     */
+    const deleteGlobalSecret = async (key: string) => {
+        const prevParams = globalParams;
+        const prevIsSet = globalSecretIsSet;
+        const next = { ...globalParams, [key]: null };
+        setGlobalParams(next);
+        setGlobalSecretIsSet({ ...globalSecretIsSet, [key]: false });
+        const ok = await saveGlobal(next);
+        if (!ok) {
+            setGlobalParams(prevParams);
+            setGlobalSecretIsSet(prevIsSet);
+        }
+    };
+
     // ペルソナ設定のロード（per-persona params がある時だけ取得）
     useEffect(() => {
         if (personaConfigurableSchemas.length === 0) return;
@@ -645,7 +738,12 @@ function ParamsSection({
             personas.map((p) =>
                 fetch(`/api/addon/${addon.addon_name}/config/persona/${p.id}`)
                     .then((r) => r.json())
-                    .then((data) => ({ persona_id: p.id, persona_name: p.name, params: data.params ?? {} }))
+                    .then((data) => ({
+                        persona_id: p.id,
+                        persona_name: p.name,
+                        params: data.params ?? {},
+                        secret_is_set: data.secret_is_set ?? {},
+                    }))
             )
         ).then((configs) => {
             // 全 persona 分を保持。空なら defaults でレンダーされるので filter しない
@@ -657,7 +755,7 @@ function ParamsSection({
      * 1キー単位で merge 保存する。API 側は merge セマンティクスなので、
      * 既存の他キー (OAuth トークン等) は破壊されない。
      */
-    const savePersona = async (personaId: string, partial: Record<string, unknown>) => {
+    const savePersona = async (personaId: string, partial: Record<string, unknown>): Promise<boolean> => {
         try {
             const res = await fetch(`/api/addon/${addon.addon_name}/config/persona/${personaId}`, {
                 method: 'PUT',
@@ -668,8 +766,10 @@ function ParamsSection({
                 const body = await res.json().catch(() => ({}));
                 throw new Error(body.detail || `Save failed: ${res.status}`);
             }
+            return true;
         } catch (err) {
             alert(err instanceof Error ? err.message : 'Persona config save failed');
+            return false;
         }
     };
 
@@ -683,10 +783,34 @@ function ParamsSection({
             }
             // まだ personaConfigs に居なければ新規エントリ
             const personaName = personas.find((p) => p.id === personaId)?.name ?? personaId;
-            return [...prev, { persona_id: personaId, persona_name: personaName, params: { [key]: val } }];
+            return [
+                ...prev,
+                { persona_id: personaId, persona_name: personaName, params: { [key]: val }, secret_is_set: {} },
+            ];
         });
         // merge 保存: 変更したキーだけ送る
         savePersona(personaId, { [key]: val });
+    };
+
+    /**
+     * ペルソナ別 secret 項目の削除。グローバル側と同じく null が「消す」の
+     * 意思表示で、空欄では消えない。失敗したら見た目を元に戻す。
+     */
+    const deletePersonaSecret = async (personaId: string, key: string) => {
+        const prev = personaConfigs;
+        setPersonaConfigs((cur) =>
+            cur.map((c) =>
+                c.persona_id === personaId
+                    ? {
+                        ...c,
+                        params: { ...c.params, [key]: null },
+                        secret_is_set: { ...c.secret_is_set, [key]: false },
+                    }
+                    : c
+            )
+        );
+        const ok = await savePersona(personaId, { [key]: null });
+        if (!ok) setPersonaConfigs(prev);
     };
 
     if (configurableSchemas.length === 0 && !hasPersonaSection) {
@@ -694,8 +818,9 @@ function ParamsSection({
     }
 
     // 選択中ペルソナの params。未保存ペルソナでは空 dict を使い、各 ParamControl が default にフォールバックする
-    const selectedPersonaParams: Record<string, unknown> =
-        personaConfigs.find((c) => c.persona_id === selectedPersonaId)?.params ?? {};
+    const selectedPersonaConfig = personaConfigs.find((c) => c.persona_id === selectedPersonaId);
+    const selectedPersonaParams: Record<string, unknown> = selectedPersonaConfig?.params ?? {};
+    const selectedPersonaSecretIsSet: Record<string, boolean> = selectedPersonaConfig?.secret_is_set ?? {};
 
     return (
         <div className={styles.paramsSection}>
@@ -710,6 +835,8 @@ function ParamsSection({
                                 value={globalParams[schema.key]}
                                 onChange={handleGlobalChange}
                                 addonName={addon.addon_name}
+                                secretIsSet={globalSecretIsSet[schema.key]}
+                                onDeleteSecret={() => deleteGlobalSecret(schema.key)}
                             />
                         </ParamRow>
                     ))}
@@ -732,6 +859,8 @@ function ParamsSection({
                                                 value={globalParams[schema.key]}
                                                 onChange={handleGlobalChange}
                                                 addonName={addon.addon_name}
+                                                secretIsSet={globalSecretIsSet[schema.key]}
+                                                onDeleteSecret={() => deleteGlobalSecret(schema.key)}
                                             />
                                         </ParamRow>
                                     ))}
@@ -774,6 +903,8 @@ function ParamsSection({
                                                 onChange={(key, val) => handlePersonaChange(selectedPersonaId, key, val)}
                                                 addonName={addon.addon_name}
                                                 personaId={selectedPersonaId}
+                                                secretIsSet={selectedPersonaSecretIsSet[schema.key]}
+                                                onDeleteSecret={() => deletePersonaSecret(selectedPersonaId, schema.key)}
                                             />
                                         </ParamRow>
                                     ))}

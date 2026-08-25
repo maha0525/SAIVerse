@@ -478,6 +478,33 @@
     max-width: 120px;
 }
 
+/* --- Secret 項目 (API キー / トークン) の入力欄 + 削除ボタン ---
+   色は fileDeleteBtn と同じ中間グレー系で、明暗どちらのテーマでも読める
+   ため [data-theme="dark"] の上書きは置いていない。 */
+
+.secretInputRow {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+}
+
+.secretDeleteBtn {
+    background: none;
+    border: none;
+    color: #94a3b8;
+    cursor: pointer;
+    padding: 0.2rem;
+    border-radius: 0.25rem;
+    display: flex;
+    align-items: center;
+    flex-shrink: 0;
+}
+
+.secretDeleteBtn:hover {
+    color: #ef4444;
+    background: rgba(239, 68, 68, 0.1);
+}
+
 .unsupported {
     font-size: 0.8rem;
     color: #94a3b8;
@@ -928,6 +955,15 @@
     }
     .slider {
         flex: 1;
+    }
+    .secretInputRow {
+        width: 100%;
+    }
+    /* 上の .textInput { width: 100% } のままだと削除ボタンぶんが溢れるので、
+       flex-basis 側で幅を決めさせる */
+    .secretInputRow .textInput {
+        flex: 1;
+        min-width: 0;
     }
     .fileControl,
     .fileDropArea {

@@ -539,6 +539,12 @@ async def update_addon_config(addon_name: str, body: UpdateParamsRequest, _manag
     ``${addon.X.Y}`` placeholder 値を subprocess の env に反映させる。
     MCP subprocess は spawn 時の env 固定なので、 DB の値を変えても
     kill + respawn しないと反映されない。
+
+    secret 扱いのキー (API キー・トークン等) は画面に伏せ字でしか出ないため、
+    空欄や ``"********"`` が送られてきたら「触っていない」とみなして既存値を
+    温存する。**明示的に値 ``None`` を送った時だけ削除**する (UI の削除ボタン
+    がこの経路)。この区別が無いと、伏せ字を保存し直しただけで鍵が壊れるか、
+    逆に鍵を消す手段が一切無いか、のどちらかになる。
     """
     db = _get_session()
     manifest = _load_manifest(_get_addon_dir(addon_name))
@@ -548,6 +554,10 @@ async def update_addon_config(addon_name: str, body: UpdateParamsRequest, _manag
         merged = dict(body.params)
         secret_keys = _secret_param_keys(manifest, set(existing) | set(merged))
         for key in secret_keys:
+            if key in body.params and body.params[key] is None:
+                # 明示的な削除指示。空欄 (= 触っていない) と区別する。
+                merged.pop(key, None)
+                continue
             if merged.get(key) in (None, "", "********"):
                 if key in existing:
                     merged[key] = existing[key]
@@ -615,7 +625,10 @@ async def update_addon_persona_config(
     完全上書きにすると例えば「個別設定を作成」UI が default 値だけ送った時に
     OAuth トークン (x_access_token 等) を破壊する事故が起きる。
 
-    body.params に値 ``None`` を渡すとそのキーは削除される。
+    body.params に値 ``None`` を渡すとそのキーは削除される。secret 扱いの
+    キーでは、空欄と ``"********"`` は「触っていない」として既存値を温存し、
+    ``None`` だけが削除の意思表示になる (グローバル側の update_addon_config
+    と同じ規約)。
     """
     from database.models import AddonPersonaConfig
 
