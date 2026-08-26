@@ -114,8 +114,8 @@ def test_cancelled_records_runtime_outcome():
         ExecutionCancelledException(interrupted_by="user")
     ))
     request = _schedule_request()
-    # _record_interruption は persona.history_manager を触るが、フェイク persona
-    # には無い → 内部で握られる (contract: submit は [] を返す)
+    # 中断を記憶へ書く機構は 2026-08-26 に撤去した。ここで確かめるのは
+    # 「中断は cancelled として記録され、submit は [] を返す」という契約だけ。
     result = pc.submit(request)
     assert result == []
     assert request.runtime_outcome == "cancelled"

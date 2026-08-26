@@ -359,8 +359,17 @@ class PulseController:
                 "[PulseController] Execution cancelled for persona %s, interrupted_by=%s",
                 persona_id, e.interrupted_by
             )
-            # Record interruption to memory
-            self._record_interruption(request, e.interrupted_by)
+            # ここで中断を記憶へ書く機構はもう無い (2026-08-26 撤去)。
+            #
+            # 届く条件が「生成が始まる前に止められた」= 一言も出ていない回だけで、
+            # 707 セッションの記録を数えて実際に通ったのは 1 回だった。そして
+            # 一言も出ていない回は、ペルソナから見れば「返事が生まれなかった」回と
+            # 区別がつかない — そちらには昔から何も書いておらず、中断だけ機構の声を
+            # 足すと、そこだけ不揃いになる。
+            #
+            # 途中まで喋ってから止められた回は、言いかけた本文と中断の通告を
+            # ``sea/runtime_llm.py`` の停止の後片付けで書いている (そちらは例外に
+            # 包まれる前を通るので確実に届く)。
             return []
         except LLMError:
             # Propagate LLM errors to the caller for frontend display
@@ -435,32 +444,6 @@ class PulseController:
 </system>
 
 {original}"""
-    
-    def _record_interruption(self, request: ExecutionRequest, interrupted_by: Optional[str]) -> None:
-        """Record interruption message to SAIMemory."""
-        persona = self._get_persona(request.persona_id)
-        if persona is None:
-            return
-        
-        will_resume = request.config.on_blocked == "wait"
-        content = f"<system>(中断: {interrupted_by}からのリクエストを優先しました)</system>"
-
-        try:
-            msg = {
-                "role": "user",
-                "content": content,
-                "metadata": {
-                    "pulse_id": request.pulse_id,
-                    "tags": ["internal", "interrupted"],
-                    "interrupted_by": interrupted_by,
-                    "will_resume": will_resume,
-                },
-            }
-            persona.history_manager.add_message(
-                msg, request.building_id, heard_by=None,
-            )
-        except Exception:
-            LOGGER.exception("[PulseController] Failed to record interruption message")
     
     def _process_queue(self, persona_id: str) -> None:
         """Process the next item in the queue for a persona."""
