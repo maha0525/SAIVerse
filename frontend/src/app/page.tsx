@@ -2897,19 +2897,35 @@ export default function Home() {
                         // System notices (world events / warnings / info) are NOT AI utterances:
                         // render them author-less and compact, distinct from user/assistant bubbles.
                         // Errors stay as assistant cards (role 'assistant', has retry/detail affordances).
-                        const isSystemNotice = (msg.role === 'host' || msg.role === 'system') && !msg.isError;
+                        // 機構からペルソナへの通告は、LLM 側の制約で role が 'user' に
+                        // なる — 多くのモデルが会話の途中に現れる system ロールを
+                        // 受け付けないため (SAIVerse の基本形)。だが**ユーザーの発言では
+                        // ない**ので、ユーザーの名前とアイコンで描いてはいけない。
+                        // <system> タグを目印に、作者のいない通知として出す。
+                        const systemTagged = msg.role === 'user'
+                            && /^\s*<system>[\s\S]*<\/system>\s*$/.test(msg.content || '');
+                        const isSystemNotice =
+                            (msg.role === 'host' || msg.role === 'system' || systemTagged)
+                            && !msg.isError;
+                        // タグは機構どうしの目印なので、画面には出さない。
+                        const noticeBody = systemTagged
+                            ? (msg.content || '')
+                                .replace(/^\s*<system>/, '')
+                                .replace(/<\/system>\s*$/, '')
+                                .trim()
+                            : msg.content;
                         if (isSystemNotice) {
                             return (
                                 <div key={msg.id || idx} className={styles.systemNotice}>
                                     {msg.isWarning ? (
                                         <div className={`${styles.systemNoticeInner} ${styles.systemNoticeWarning}`}>
                                             <span className={styles.systemNoticeIcon}>⚠️</span>
-                                            <span>{msg.content}</span>
+                                            <span>{noticeBody}</span>
                                         </div>
                                     ) : msg.isInfo ? (
                                         <div className={`${styles.systemNoticeInner} ${styles.systemNoticeInfo}`}>
                                             <span className={styles.systemNoticeIcon}>ℹ️</span>
-                                            <span>{msg.content}</span>
+                                            <span>{noticeBody}</span>
                                         </div>
                                     ) : (
                                         <div className={styles.systemNoticeInner}>
@@ -2918,7 +2934,7 @@ export default function Home() {
                                                 rehypePlugins={MARKDOWN_REHYPE_PLUGINS}
                                                 urlTransform={markdownUrlTransform}
                                                 components={markdownComponents}
-                                            >{prepareMessageMarkdown(msg.content)}</ReactMarkdown>
+                                            >{prepareMessageMarkdown(noticeBody)}</ReactMarkdown>
                                         </div>
                                     )}
                                     {msg.timestamp && (
