@@ -3760,6 +3760,34 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                                 "interrupted": True,
                             })
 
+                        # 言いかけた本文を、本人の記憶にも残す。
+                        #
+                        # 記憶へ転記する ``memorize`` も、上と同じ理由でこの先には
+                        # 届かない。建物の記録には残るのに本人の記憶には残らないので、
+                        # **世界には刻まれたのに本人だけが覚えていない**状態になって
+                        # いた (2026-08-26 実機で発覚。まはー裁定で残す形に決定)。
+                        #
+                        # 「言い切っていない」印を付けて書く — 完成した発言と同じ顔で
+                        # 記憶に入ると、後から想起したときに言い切ったものとして扱われる。
+                        if (text or "").strip():
+                            try:
+                                runtime._store_memory(
+                                    persona,
+                                    text,
+                                    role="assistant",
+                                    tags=["conversation"],
+                                    pulse_id=state.get("_pulse_id"),
+                                    metadata={INTERRUPTED_METADATA_KEY: True},
+                                    playbook_name=playbook.name,
+                                    beat_state=state,
+                                )
+                            except Exception:
+                                LOGGER.warning(
+                                    "[sea][pipeline] could not store the interrupted "
+                                    "utterance to memory (msg=%s)",
+                                    pipeline_msg_id, exc_info=True,
+                                )
+
                     # Record usage (even if cancelled — tokens were consumed)
                     llm_usage_metadata: Dict[str, Any] | None = _record_llm_usage(
                         runtime, llm_client, persona, building_id,
