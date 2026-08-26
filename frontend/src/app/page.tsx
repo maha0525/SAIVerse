@@ -140,6 +140,11 @@ interface Message {
     // 生まれていないので needsRetry は残す — 消すと、応答を得る唯一の手段
     // (再送) まで一緒に失われる。消えるのは「取り消す」だけ。
     withdrawBlocked?: boolean;
+    // やり直しても結果が変わらない印 (応答できる相手がいない等)。
+    // needsRetry と混ぜない: 「返事が来ていない」と「やり直す余地がある」は
+    // 別の事実で、混ぜると相手が居ない部屋で**誰も読んでいない発言の
+    // 「取り消す」まで消える**。消えるのは「再送」だけ。
+    retryUseless?: boolean;
     // Reasoning (thinking) from LLM
     reasoning?: string;
     // 自動想起 (記憶アーキv2 §4.5): この Pulse で末尾注入された「ふと浮かんだ記憶」ブロック。
@@ -1558,10 +1563,36 @@ export default function Home() {
     // 設計: docs/issues/user_utterance_path_failure_inventory.md
     // ------------------------------------------------------------------
 
-    // 返事が来なかった発言に「再送」を出すための印。出口 3 / 7 で立てる。
-    const markRetryable = (messageId: string) => {
+    // 画面に出る案内 (エラー・お知らせ) は、いまの状態の表示であって履歴では
+    // ない。サーバーには保存されず、別の建物を見て戻ったりページを開き直すと
+    // 消える — その揮発性に合わせて、**次の操作を始めたら消す** (2026-08-26
+    // まはー裁定)。時間では消さない: 読んでいない可能性が普通にあるので、
+    // 消える引き金はユーザーの操作だけにする。
+    //
+    // isError / isWarning / isInfo が立つのは画面側で作った案内だけで、履歴から
+    // 復元した発言には付かない (履歴はサーバーの行をそのまま並べる)。だから
+    // この条件で本物の発言を巻き込むことはない。印を持たない system の
+    // お知らせ行はサーバー由来なので残す。
+    const clearTransientNotices = () => {
+        setMessages(prev => prev.filter(
+            m => !m.isError && !m.isWarning && !m.isInfo,
+        ));
+    };
+
+    // やり直しても結果が変わらない終わり方。ここに載る札のときは「再送」を
+    // 出さない — 押しても同じ結果しか返らない操作を勧めることになるから。
+    const RETRY_CHANGES_NOTHING = new Set(['no_responder']);
+
+    // 返事が来なかった発言に印を立てる。出口 3 / 7。
+    //
+    // ``useless`` は「やり直しても結果が変わらない」— 相手が居ない部屋など。
+    // その回も **needsRetry は立てる**: 返事が来ていないのは事実だし、誰にも
+    // 読まれていない以上「取り消す」は使えるべきだから。落とすのは「再送」だけ。
+    const markRetryable = (messageId: string, useless = false) => {
         setMessages(prev => prev.map(m => (
-            m.id === messageId && m.role === 'user' ? { ...m, needsRetry: true } : m
+            m.id === messageId && m.role === 'user'
+                ? { ...m, needsRetry: true, retryUseless: useless }
+                : m
         )));
     };
 
@@ -1617,6 +1648,13 @@ export default function Home() {
         // 「届いたか分からない」(出口 7) と「届いたが返事が無かった」(出口 3) を
         // 分けるのに使う。分からないときに分かった顔をしないための材料。
         let landedMessageId: string | null = null;
+        // ペルソナが実際に言葉を出したか。呼び出し元が「走らせた」と「返事が
+        // 生まれた」を取り違えないための報告。バックエンドの続き生成も同じ線で
+        // 印を降ろすかを決めており、こちらだけ別の線 (ストリームが始まったか)
+        // を引くと、片方だけ正しい状態になる。
+        let replied = false;
+        // 最後に届いたエラーの札。「やり直しても変わらない」かの判定に使う。
+        let lastErrorCode: string | null = null;
         try {
             if (!res.body) throw new Error("No response body");
             const reader = res.body.getReader();
@@ -1744,6 +1782,7 @@ export default function Home() {
                             });
                             setLoadingStatus('Thinking...');
                         } else if (event.type === 'streaming_chunk') {
+                            if (String(event.content || '').trim()) replied = true;
                             // Streaming: append chunk to last message or create new one
                             const avatarUrl = event.persona_avatar || (event.persona_id ? `/api/chat/persona/${event.persona_id}/avatar` : undefined);
                             const evtPulseId: string | undefined = event.pulse_id || undefined;
@@ -1823,6 +1862,7 @@ export default function Home() {
                             });
                             setLoadingStatus('Thinking...');
                         } else if (event.type === 'say') {
+                            if (String(event.content || '').trim()) replied = true;
                             console.log('[DEBUG] Received say event:', event);
                             const avatarUrl = event.persona_avatar || (event.persona_id ? `/api/chat/persona/${event.persona_id}/avatar` : undefined);
 
@@ -1915,9 +1955,18 @@ export default function Home() {
                                 errorDetail: event.technical_detail,
                                 timestamp: new Date().toISOString()
                             }]);
+                            const errorCode: string = event.error_code || 'unknown';
+                            lastErrorCode = errorCode;
                             // 発言は届いているのに返事が生まれなかった (出口 3)。
                             // 送り直しではなく「もう一度応答を得る」を出す。
-                            if (landedMessageId) markRetryable(landedMessageId);
+                            // 応答できる相手が居ない回は「再送」だけを落とす —
+                            // 発言は誰にも読まれていないので「取り消す」は残る。
+                            if (landedMessageId) {
+                                markRetryable(
+                                    landedMessageId,
+                                    RETRY_CHANGES_NOTHING.has(errorCode),
+                                );
+                            }
                         } else if (event.type === 'metabolism') {
                             if (event.status === 'completed') {
                                 // Show completion message briefly, then transition
@@ -2060,10 +2109,12 @@ export default function Home() {
         } finally {
             await finishReplyCycle();
         }
+        return { replied, errorCode: lastErrorCode };
     };
 
     const handleSendMessage = async () => {
         if ((!inputValue.trim() && attachments.length === 0) || loadingStatus) return;
+        clearTransientNotices();
         // Block send while a video is still uploading, or if any attachment errored.
         const pendingUpload = attachments.find(a => a.uploading);
         if (pendingUpload) {
@@ -2249,6 +2300,7 @@ export default function Home() {
         messageId: string,
     ) => {
         if (loadingStatus) return;
+        clearTransientNotices();
         isProcessingRef.current = true;
         setLoadingStatus('Thinking...');
         // 押した瞬間にボタンを下ろす。二度押しで二重に走らせない。
@@ -2257,7 +2309,23 @@ export default function Home() {
                 ? { ...m, ...(endpoint === 'continue' ? { interrupted: false } : { needsRetry: false }) }
                 : m
         )));
-        let streamStarted = false;
+        // 下ろしたボタンを戻す。**線は「応答が生まれたか」** — 「ストリームが
+        // 始まったか」ではない。始まっても中で「応答できる相手がいません」が
+        // 返るだけの回があり、そこで戻さないとボタンが消えたまま残る。
+        // ただし、やり直しても結果が変わらない終わり方 (相手が居ない) では
+        // 戻さない — 押しても同じ結果しか返らない操作を出し続けることになる。
+        const restoreAffordance = (retryUseless = false) => {
+            setMessages(prev => prev.map(m => (
+                m.id === messageId
+                    ? {
+                        ...m,
+                        ...(endpoint === 'continue'
+                            ? { interrupted: true }
+                            : { needsRetry: true, retryUseless }),
+                    }
+                    : m
+            )));
+        };
         try {
             const res = await fetch(`/api/chat/${endpoint}`, {
                 method: 'POST',
@@ -2265,31 +2333,15 @@ export default function Home() {
                 body: JSON.stringify({ message_id: messageId }),
             });
             if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
-            streamStarted = true;
-            await consumeReplyStream(res, endpoint);
+            const outcome = await consumeReplyStream(res, endpoint);
+            if (!outcome.replied) {
+                restoreAffordance(
+                    RETRY_CHANGES_NOTHING.has(outcome.errorCode || ''),
+                );
+            }
         } catch (error) {
             console.error(error);
-            if (!streamStarted) {
-                // 応答が始まる前に落ちた = 何も起きていない。押した瞬間に
-                // 下ろしたボタンを戻す。戻さないと「押した」が「済んだ」と
-                // 同じ扱いになり、この発言はセッション中ずっとやり直せなく
-                // なる (needsRetry はサーバー由来の印を持たないので、再読込
-                // でも戻らない)。
-                // ストリームが始まった後の失敗はここでは戻さない —
-                // 途中まで生まれている可能性があり、正は サーバー側にある
-                // (consumeReplyStream の catch が landedMessageId を見て
-                // 付け直す)。
-                setMessages(prev => prev.map(m => (
-                    m.id === messageId
-                        ? {
-                            ...m,
-                            ...(endpoint === 'continue'
-                                ? { interrupted: true }
-                                : { needsRetry: true }),
-                        }
-                        : m
-                )));
-            }
+            restoreAffordance();
             setMessages(prev => [...prev, {
                 role: 'system',
                 content: endpoint === 'continue'
@@ -2308,6 +2360,7 @@ export default function Home() {
     // 入力欄へ返す — ユーザーの発言はユーザーのものなので、手元に戻す形にする。
     const handleWithdrawMessage = async (messageId: string) => {
         if (loadingStatus) return;
+        clearTransientNotices();
         try {
             const res = await fetch('/api/chat/withdraw', {
                 method: 'POST',
@@ -2869,7 +2922,7 @@ export default function Home() {
                                         <div className={styles.errorContent}>
                                             <div className={styles.errorHeader}>
                                                 <span className={styles.errorIcon}>
-                                                    {({rate_limit: '⏱️', timeout: '⏰', safety_filter: '🛡️', server_error: '🔧', empty_response: '📭', authentication: '🔑', payment: '💳', no_response: '💭', unknown_outcome: '❓', stream_broken: '🔌', send_failed: '🔌', message_not_found: '🔍'} as Record<string, string>)[msg.errorCode || ''] || '⚠️'}
+                                                    {({rate_limit: '⏱️', timeout: '⏰', safety_filter: '🛡️', server_error: '🔧', empty_response: '📭', authentication: '🔑', payment: '💳', no_response: '💭', no_responder: '🚪', unknown_outcome: '❓', stream_broken: '🔌', send_failed: '🔌', message_not_found: '🔍'} as Record<string, string>)[msg.errorCode || ''] || '⚠️'}
                                                 </span>
                                                 <span className={styles.errorMessage}>{msg.content}</span>
                                             </div>
@@ -2885,6 +2938,10 @@ export default function Home() {
                                                     // 発言は届いている。だから送り直しではなく、
                                                     // その発言の「再送」ボタンで応答だけを求める。
                                                     no_response: 'あなたの発言は記録に残っています。返事だけが生まれなかったので、発言の「再送」から応答をもう一度求められます。',
+                                                    // 応答できる相手がいない回。ここで「再送」を勧めると、
+                                                    // 何度押しても結果の変わらない操作を勧めることになる。
+                                                    // できるのは場所を変えるか、誰かが来るのを待つこと。
+                                                    no_responder: 'あなたの発言は記録に残っています。ただし、この場所には応答できる相手がいないので、やり直しても結果は変わりません。別の場所へ移るか、誰かが来るのを待ってください。',
                                                     // 出口 7: こちら側からは届いたかどうか分からない。
                                                     // 分かった顔をせず、確認の手立てだけを示す。
                                                     unknown_outcome: '発言が届いたかどうかは、この画面からは判断できません。同じ内容を送り直す前に、履歴に残っているかを確認してください。',
@@ -3041,7 +3098,8 @@ export default function Home() {
                                     )}
                                     {/* 返事が来なかった発言にだけ「再送」を出す。発言は
                                         残っているので、押しても送り直しにはならない。 */}
-                                    {msg.role === 'user' && msg.needsRetry && msg.id && (
+                                    {msg.role === 'user' && msg.needsRetry
+                                        && !msg.retryUseless && msg.id && (
                                         <button
                                             className={`${styles.actionBtn} ${styles.retryBtn}`}
                                             onClick={() => runMessageAction('retry', msg.id as string)}

@@ -787,13 +787,28 @@ class RuntimeService(
                         "user (building=%s, responding_personas=%d)",
                         building_id, len(responding_personas),
                     )
-                    _enrich_event({
-                        "type": "error",
-                        "error_code": "no_response",
-                        "content": (
-                            "発言は受け取りましたが、返事が生まれませんでした。"
-                        ),
-                    })
+                    # 「返事が生まれなかった」には二種類ある。応答できる相手が
+                    # そもそも居ない回は、やり直しても永久に結果が変わらない —
+                    # 同じ札で扱うと、画面が「再送から応答をもう一度求められ
+                    # ます」という**果たせない約束**を出す。ここは理由を知って
+                    # いる (数を数えてログにも出している) ので、知っていること
+                    # を言う。
+                    if not responding_personas:
+                        _enrich_event({
+                            "type": "error",
+                            "error_code": "no_responder",
+                            "content": (
+                                "この場所には、応答できる相手がいません。"
+                            ),
+                        })
+                    else:
+                        _enrich_event({
+                            "type": "error",
+                            "error_code": "no_response",
+                            "content": (
+                                "発言は受け取りましたが、返事が生まれませんでした。"
+                            ),
+                        })
                 response_queue.put(None)  # 番兵
 
         threading.Thread(target=backend_worker, daemon=True).start()
@@ -1085,9 +1100,11 @@ class RuntimeService(
 
         responding_personas = self._build_responding_personas(building_id)
         if not responding_personas:
+            # ① と同じ事実なので同じ札。別々の札で呼ぶと、画面の側が
+            # 「やり直しても無駄」を経路ごとに判断する羽目になる。
             yield json.dumps({
                 "type": "error",
-                "error_code": "no_response",
+                "error_code": "no_responder",
                 "content": "この場所には、応答できる相手がいません。",
             }, ensure_ascii=False) + "\n"
             return

@@ -146,8 +146,19 @@ def _no_response(events) -> list[dict]:
     return [e for e in events if e.get("error_code") == "no_response"]
 
 
+def _no_responder(events) -> list[dict]:
+    return [e for e in events if e.get("error_code") == "no_responder"]
+
+
 def test_an_empty_room_says_so_instead_of_ending_in_silence() -> None:
-    """応答できるペルソナが一人もいない部屋。発言は残るが返事は生まれない。"""
+    """応答できるペルソナが一人もいない部屋。発言は残るが返事は生まれない。
+
+    ⚠️ この検査はもともと汎用の ``no_response`` を期待していた。実機検証
+    (2026-08-26) で、その札のまま画面に出すと「発言の『再送』から応答をもう
+    一度求められます」という**果たせない約束**になると分かったため、専用の
+    ``no_responder`` へ変えた。テストの名前 (「部屋が空だとそう言う」) の方が
+    最初から正しく、検査だけが汎用の札を仕様として固定していた。
+    """
     service = _runtime([])
     saved = {"message_id": "room:1", "_was_inserted": True}
 
@@ -161,7 +172,9 @@ def test_an_empty_room_says_so_instead_of_ending_in_silence() -> None:
             )
         )
 
-    assert len(_no_response(events)) == 1
+    assert len(_no_responder(events)) == 1
+    assert _no_response(events) == []
+    assert "応答できる相手がいません" in _no_responder(events)[0]["content"]
 
 
 def test_a_swallowed_dispatch_failure_still_reaches_the_user() -> None:
@@ -383,3 +396,41 @@ def test_continue_separates_an_unreadable_history_from_a_missing_message() -> No
 
     assert [e.get("error_code") for e in unreadable] == ["history_unavailable"]
     assert [e.get("error_code") for e in missing] == ["message_not_found"]
+
+
+def test_a_silent_room_with_someone_in_it_keeps_the_generic_wording() -> None:
+    """相手が居るのに返事が生まれなかった回は、やり直す余地があるので別の札。"""
+    persona = SimpleNamespace(persona_id="p1")
+    service = _runtime([persona])
+    saved = {"message_id": "room:1", "_was_inserted": True}
+    service.manager.pulse_dispatcher.dispatch_user_utterance = MagicMock(
+        return_value=None,
+    )
+
+    with patch(
+        "database.building_messages.insert_building_message_with_location_guard",
+        return_value=saved,
+    ):
+        events = _events(
+            service.handle_user_input_stream(
+                "hello", building_id="room", client_message_id="cmd-1",
+            )
+        )
+
+    assert len(_no_response(events)) == 1
+    assert _no_responder(events) == []
+
+
+def test_retry_uses_the_same_label_for_the_same_fact() -> None:
+    """同じ事実 (相手が居ない) には、通常送信と再送で同じ札を使う。
+
+    札が経路ごとに違うと、画面の側が「やり直しても無駄か」を経路ごとに
+    判断する羽目になる。
+    """
+    service = _runtime([])
+    service.manager.get_building_history = lambda building_id: [
+        {"message_id": "room:7", "role": "user", "content": "hello"},
+    ]
+    events = _events(service.retry_user_message_stream("room:7"))
+
+    assert [event.get("error_code") for event in events] == ["no_responder"]
