@@ -1818,6 +1818,125 @@ async def _consume_pipeline_stream(
     return text, sub_seq, spell_detected, cancelled
 
 
+def _settle_cancelled_utterance(
+    *,
+    runtime: Any,
+    persona: Any,
+    state: Dict[str, Any],
+    node_def: Any,
+    playbook: Any,
+    event_callback: Optional[Callable[[Dict[str, Any]], None]],
+    building_id: str,
+    msg_id: Optional[str],
+    sub_seq: int,
+    text: str,
+) -> int:
+    """止められた発言を、その場で確定させる。返すのは進めた後の ``sub_seq``。
+
+    **止められた回は、この関数を通らないと発言が消える。** 下書き行 (placeholder)
+    は本文が空のまま作られ、確定して初めて中身が入る。確定しないと content が空の
+    ままデータベースに残り、画面はそれを描かないので、**本人が喋った内容がどこにも
+    無くなる** (2026-08-26 実機で発生。生成し終わった直後に停止ボタンが押された回で、
+    下の「呼ぶ場所」の二つ目が無かったため本文が失われた)。
+
+    ここで揃えるのは四つ:
+
+    1. **下書き行を本文で確定させる** — 消滅を防ぐ本体。同時に voice-tts の
+       ストリームも閉じる。
+    2. **「言い切っていない」印を画面へ渡す** — 止められた Beat はこの先で
+       例外を投げて抜けるので、通常の完了イベントは決して届かない。印が届かないと
+       画面は再読込するまで「続きの生成」を出せない。
+    3. **言いかけた本文を本人の記憶へ書く** — 記憶へ転記する ``memorize`` も同じ
+       理由で届かない。建物の記録には残るのに本人だけが覚えていない、という
+       食い違いを防ぐ。「言い切っていない」印を付けて書くので、後から想起しても
+       言い切ったものとは扱われない。
+    4. **中断があった事実を建物の記録へ置く** — 途中で切られた発言は他のペルソナ
+       から見ても不自然な場所で終わっている。それが本人の言い切りなのか外から
+       止められたのかを知れる方がよい (2026-08-26 まはー裁定)。役は ``host`` で、
+       入退室の通知と同じ道を通る。取り込みの側が建物名を添えて
+       ``user`` + ``<system>`` へ組み替えてから各ペルソナの記憶へ配るので、
+       **ここでその形を自分で作らない**。
+
+    本人の発言そのものには一切手を入れない。機構が足した注記は、ペルソナが自分の
+    文体として模倣し始めるため、独立した一行として後ろに置く。
+    """
+    body = (text or "").strip()
+    if body:
+        state[INTERRUPTED_METADATA_KEY] = True
+
+    if msg_id:
+        sub_seq += 1
+        try:
+            runtime._emit_speak_finalize(
+                persona, building_id, msg_id, text or "",
+                pulse_id=state.get("_pulse_id"),
+                extra_metadata=(
+                    {INTERRUPTED_METADATA_KEY: True} if body else None
+                ),
+                final_sub_seq=sub_seq,
+                final_voice_text="",
+            )
+            state["_last_message_id"] = msg_id
+        except Exception:
+            LOGGER.warning(
+                "[sea][pipeline] cancellation finalize raised; "
+                "placeholder may remain unconfirmed",
+                exc_info=True,
+            )
+        LOGGER.info(
+            "[sea][pipeline] Cancelled: finalized placeholder "
+            "msg=%s seq=%d partial_len=%d",
+            msg_id, sub_seq, len(text or ""),
+        )
+
+    if event_callback and state.get(INTERRUPTED_METADATA_KEY):
+        event_callback({
+            "type": "streaming_complete",
+            "persona_id": getattr(persona, "persona_id", None),
+            "node_id": getattr(node_def, "id", "llm"),
+            "pulse_id": state.get("_pulse_id"),
+            "interrupted": True,
+        })
+
+    if not body:
+        return sub_seq
+
+    try:
+        runtime._store_memory(
+            persona,
+            text,
+            role="assistant",
+            tags=["conversation"],
+            pulse_id=state.get("_pulse_id"),
+            metadata={INTERRUPTED_METADATA_KEY: True},
+            playbook_name=playbook.name,
+            beat_state=state,
+        )
+    except Exception:
+        LOGGER.warning(
+            "[sea][pipeline] could not store the interrupted utterance to "
+            "memory (msg=%s)", msg_id, exc_info=True,
+        )
+
+    try:
+        persona.history_manager.add_to_building_only(
+            building_id,
+            {
+                "role": "host",
+                "content": (
+                    "(ユーザーの操作により、ここで発言が中断されました)"
+                ),
+            },
+        )
+    except Exception:
+        LOGGER.warning(
+            "[sea][pipeline] could not record the interruption notice to the "
+            "building (msg=%s)", msg_id, exc_info=True,
+        )
+
+    return sub_seq
+
+
 async def _run_spell_loop(
     text: str,
     spell_enabled: bool,
@@ -3698,138 +3817,23 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                             max_stream_retries
                         )
 
-                    # 停止された発言も本人が言い終えたものではないので、ストリーム
-                    # 中断と同じ印を立てる (中断の主語は違うが、「言い切っていない」
-                    # という事実は同じ)。**下書き行を作れたかどうかとは無関係に立てる**
-                    # — 作れなかった回は下流の救済経路で保存されるので、ここで印を
-                    # 落とすと、停止された部分文が言い終えた発言の顔で履歴に残る。
-                    if cancelled_during_stream and (text or "").strip():
-                        state[INTERRUPTED_METADATA_KEY] = True
-
-                    # Cancellation cleanup: placeholder を発番済みのまま
-                    # cancellation で抜けた場合、 voice-tts 側 audio_stream が
-                    # close されず、 building history の _streaming_placeholder
-                    # も残り続ける。 ここで finalize して 「partial で確定 +
-                    # voice-tts に is_final=True を送って stream close + wav
-                    # 保存」 を強制する。確定させた事実は pipeline_finalized で
-                    # 下流へ渡す (ID を倒すと「作れなかった」と区別がつかない)。
-                    if cancelled_during_stream and pipeline_msg_id:
-                        pipeline_sub_seq += 1
-                        try:
-                            runtime._emit_speak_finalize(
-                                persona, pipeline_eff_bid, pipeline_msg_id, text or "",
-                                pulse_id=state.get("_pulse_id"),
-                                extra_metadata=(
-                                    {INTERRUPTED_METADATA_KEY: True}
-                                    if (text or "").strip() else None
-                                ),
-                                final_sub_seq=pipeline_sub_seq,
-                                final_voice_text="",
-                            )
-                            state["_last_message_id"] = pipeline_msg_id
-                        except Exception:
-                            LOGGER.warning(
-                                "[sea][pipeline] cancellation finalize raised; "
-                                "placeholder may remain unconfirmed",
-                                exc_info=True,
-                            )
-                        LOGGER.info(
-                            "[sea][pipeline] Cancelled mid-stream: finalized placeholder "
-                            "msg=%s seq=%d partial_len=%d",
-                            pipeline_msg_id, pipeline_sub_seq, len(text or ""),
+                    # ストリームの途中で止められた回。下書き行を本文で確定させ、
+                    # 印・記憶・記録を揃える (詳しくは
+                    # ``_settle_cancelled_utterance`` の docstring)。
+                    if cancelled_during_stream:
+                        pipeline_sub_seq = _settle_cancelled_utterance(
+                            runtime=runtime,
+                            persona=persona,
+                            state=state,
+                            node_def=node_def,
+                            playbook=playbook,
+                            event_callback=event_callback,
+                            building_id=pipeline_eff_bid,
+                            msg_id=pipeline_msg_id,
+                            sub_seq=pipeline_sub_seq,
+                            text=text,
                         )
                         pipeline_finalized = True
-
-                        # 「言い切っていない」印を**ここで**画面へ渡す。
-                        #
-                        # 停止された Beat は、この先の spell round の境目で
-                        # ExecutionCancelledException を投げて抜ける。だから通常の
-                        # 完了イベント (印を載せている) までは決して届かない —
-                        # 画面は印を受け取れず、再読込するまで「続きの生成」を
-                        # 出せなかった (2026-08-26 実機で発覚: 停止直後は出ず、
-                        # 別の部屋へ移って戻ると出る)。
-                        #
-                        # このイベントは worker の ``cancelled`` より前に流れるので、
-                        # ``cancelled`` 以降を捨てる読み手の後片付けにも巻き込まれない。
-                        if event_callback and state.get(INTERRUPTED_METADATA_KEY):
-                            event_callback({
-                                "type": "streaming_complete",
-                                "persona_id": getattr(persona, "persona_id", None),
-                                "node_id": getattr(node_def, "id", "llm"),
-                                "pulse_id": state.get("_pulse_id"),
-                                "interrupted": True,
-                            })
-
-                        # 言いかけた本文を、本人の記憶にも残す。
-                        #
-                        # 記憶へ転記する ``memorize`` も、上と同じ理由でこの先には
-                        # 届かない。建物の記録には残るのに本人の記憶には残らないので、
-                        # **世界には刻まれたのに本人だけが覚えていない**状態になって
-                        # いた (2026-08-26 実機で発覚。まはー裁定で残す形に決定)。
-                        #
-                        # 「言い切っていない」印を付けて書く — 完成した発言と同じ顔で
-                        # 記憶に入ると、後から想起したときに言い切ったものとして扱われる。
-                        if (text or "").strip():
-                            try:
-                                runtime._store_memory(
-                                    persona,
-                                    text,
-                                    role="assistant",
-                                    tags=["conversation"],
-                                    pulse_id=state.get("_pulse_id"),
-                                    metadata={INTERRUPTED_METADATA_KEY: True},
-                                    playbook_name=playbook.name,
-                                    beat_state=state,
-                                )
-                            except Exception:
-                                LOGGER.warning(
-                                    "[sea][pipeline] could not store the interrupted "
-                                    "utterance to memory (msg=%s)",
-                                    pipeline_msg_id, exc_info=True,
-                                )
-
-                            # 中断があった事実を、その場にいる全員が読める形で残す。
-                            #
-                            # 途中で切られた発言は、他のペルソナから見ても不自然な
-                            # 場所で終わっている。それが本人の言い切りなのか外から
-                            # 止められたのかを知れる方がよい — 途中終了は「口に指を
-                            # 立てて制止する」場面で、その場にいる者が目撃していて
-                            # おかしくない (2026-08-26 まはー裁定)。だから建物の記録へ
-                            # 置き、居合わせた全員へ配る。
-                            #
-                            # **本人の発言そのものには一切手を入れない。** 機構が
-                            # 足した注記は、ペルソナが自分の文体として模倣し始める。
-                            # だから独立した一行として、発言の後ろに置く。metadata の
-                            # 印は本人からは知覚できないので、知らせたい事実は
-                            # コンテキストに載る形で別に要る。
-                            #
-                            # 役は ``host`` — 建物で起きた出来事に使う既存の役で、
-                            # 入退室の通知と同じ。取り込みの側 (get_building_messages)
-                            # が建物名を添えて ``user`` + ``<system>`` へ組み替えて
-                            # から各ペルソナの記憶へ配るので、**ここでその形を自分で
-                            # 作らない** (作ると画面が発言者つきの吹き出しで描く)。
-                            #
-                            # 述べるのは「ユーザーの操作で中断された」という事実だけ。
-                            # 「続きを求められたら話せる」までは書かない — それを読む
-                            # 時点で本人は次の発言の最中なので、続けたければそこで
-                            # 話せばよく、知っても使い道がない (同裁定)。
-                            try:
-                                persona.history_manager.add_to_building_only(
-                                    pipeline_eff_bid,
-                                    {
-                                        "role": "host",
-                                        "content": (
-                                            "(ユーザーの操作により、"
-                                            "ここで発言が中断されました)"
-                                        ),
-                                    },
-                                )
-                            except Exception:
-                                LOGGER.warning(
-                                    "[sea][pipeline] could not record the interruption "
-                                    "notice to the building (msg=%s)",
-                                    pipeline_msg_id, exc_info=True,
-                                )
 
                     # Record usage (even if cancelled — tokens were consumed)
                     llm_usage_metadata: Dict[str, Any] | None = _record_llm_usage(
@@ -3869,21 +3873,50 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                             "cancellation_token": cancellation_token,
                         }
 
-                    text, _continuation_ns, _spell_loop_count_ns = await _run_spell_loop(
-                        text=text,
-                        spell_enabled=_spell_enabled,
-                        llm_client=llm_client,
-                        runtime=runtime,
-                        persona=persona,
-                        building_id=building_id,
-                        state=state,
-                        messages=messages,
-                        playbook=playbook,
-                        event_callback=event_callback,
-                        node_def=node_def,
-                        pipeline_streaming_state=_pipeline_spell_state,
-                        action_text=prompt,
-                    )
+                    try:
+                        text, _continuation_ns, _spell_loop_count_ns = await _run_spell_loop(
+                            text=text,
+                            spell_enabled=_spell_enabled,
+                            llm_client=llm_client,
+                            runtime=runtime,
+                            persona=persona,
+                            building_id=building_id,
+                            state=state,
+                            messages=messages,
+                            playbook=playbook,
+                            event_callback=event_callback,
+                            node_def=node_def,
+                            pipeline_streaming_state=_pipeline_spell_state,
+                            action_text=prompt,
+                        )
+                    except ExecutionCancelledException:
+                        # **生成し終えた直後に止められた回がここへ来る。**
+                        #
+                        # ストリームが最後まで流れきると ``cancelled_during_stream``
+                        # は立たないので、上の後片付けは走らない。そして spell round の
+                        # 頭で取り消しが見つかると、ここから例外で抜けて、下にある
+                        # 通常の確定処理にも届かない。**その結果、下書き行が本文の入ら
+                        # ないまま残り、画面はそれを描かないので発言そのものが消えた**
+                        # (2026-08-26 実機で発生。停止を押すのが一瞬遅れた回で、
+                        # ソフィーの発言がデータベースからも画面からも失われた)。
+                        #
+                        # 止められた事実は変わらないので、ストリーム中に止められた回と
+                        # 同じ後始末を通してから、例外はそのまま上へ返す。
+                        if pipeline_msg_id and not pipeline_finalized:
+                            pipeline_sub_seq = _settle_cancelled_utterance(
+                                runtime=runtime,
+                                persona=persona,
+                                state=state,
+                                node_def=node_def,
+                                playbook=playbook,
+                                event_callback=event_callback,
+                                building_id=pipeline_eff_bid,
+                                msg_id=pipeline_msg_id,
+                                sub_seq=pipeline_sub_seq,
+                                text=text,
+                            )
+                            pipeline_finalized = True
+                        raise
 
                     if _pipeline_spell_state is not None:
                         pipeline_sub_seq = int(_pipeline_spell_state.get("sub_seq", pipeline_sub_seq) or pipeline_sub_seq)
