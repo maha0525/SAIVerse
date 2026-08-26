@@ -2283,8 +2283,11 @@ export default function Home() {
                 // ままなので「同じものをもう一度送る」ができない。動画はサーバー側に
                 // 再送用のファイルが残るので、URI を手放すと参照できない置き土産に
                 // なる。
+                // 送っている間にも添付は足せる (ボタンは閉じていない)。丸ごと
+                // 置き換えると、その間に足したものとアップロード中の状態まで消える。
+                // 手が入っていないときだけ戻す。
                 if (currentAttachments.length > 0) {
-                    setAttachments(currentAttachments);
+                    setAttachments(prev => (prev.length > 0 ? prev : currentAttachments));
                 }
                 requestAnimationFrame(() => adjustTextareaHeight());
                 setMessages(prev => [...prev, {

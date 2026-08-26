@@ -75,6 +75,16 @@ _SPEECH_EVENT_TYPES = frozenset({"say", "streaming_chunk"})
 _CONTENT_BEARING_TYPES = frozenset({"say", "streaming_chunk"})
 
 
+def _stream_key(event: Dict[str, Any]) -> str:
+    """撤回を照合するための、断片の出どころ。
+
+    一度の送信で複数のペルソナが並行して喋ることがある。断片の取り消しを
+    出どころで照合しないと、**あとから来た誰かの取り消しが、別の誰かの届いた
+    発言まで無かったことにする**。
+    """
+    return f"{event.get('persona_id') or ''}/{event.get('pulse_id') or ''}"
+
+
 def _note_outcome(outcome_seen: Dict[str, Any], event: Any) -> None:
     """「ユーザーに何かが届いたか」の判定を、イベント 1 件分だけ進める。
 
@@ -82,29 +92,61 @@ def _note_outcome(outcome_seen: Dict[str, Any], event: Any) -> None:
     「いま出した吹き出しを捨てて、整形済みのものを後で出す」ための合図で、
     その後 ``say`` が来ない終わり方 (ツール呼び出しだけで終わった回など) も
     ある。断片で立てた印をそのままにすると、画面には何も残っていないのに
-    「届いた」と数えてしまい、無言のまま終わる。だから断片由来の印は
-    ``from_stream`` として区別し、discard で撤回できるようにする。
+    「届いた」と数えてしまい、無言のまま終わる。
 
-    確定した発言やエラー通知は撤回されないので、区別せず立てたままにする。
+    そこで断片は出どころごとに ``pending`` へ置き、取り消しは同じ出どころの
+    ものだけを消す。確定した発言やエラー通知は撤回されないので ``value`` に
+    立てる。
     """
     if not isinstance(event, dict):
         return
     etype = event.get("type")
+    pending: Dict[str, bool] = outcome_seen.setdefault("pending", {})
     if etype == "streaming_discard":
-        if outcome_seen.get("from_stream"):
-            outcome_seen["value"] = False
-            outcome_seen["from_stream"] = False
+        pending.pop(_stream_key(event), None)
         return
     if etype not in _OUTCOME_EVENT_TYPES:
         return
-    if etype in _CONTENT_BEARING_TYPES:
-        if not str(event.get("content") or "").strip():
-            return
-        outcome_seen["value"] = True
-        outcome_seen["from_stream"] = (etype == "streaming_chunk")
+    if etype in _CONTENT_BEARING_TYPES and not str(event.get("content") or "").strip():
+        return
+    if etype == "streaming_chunk":
+        pending[_stream_key(event)] = True
         return
     outcome_seen["value"] = True
-    outcome_seen["from_stream"] = False
+
+
+def _outcome_reached(outcome_seen: Dict[str, Any]) -> bool:
+    """「ユーザーに何かが届いた」と言えるか。
+
+    確定した結果が一つでもあるか、取り消されずに残っている断片があれば届いている。
+    """
+    return bool(outcome_seen.get("value")) or bool(outcome_seen.get("pending"))
+
+
+def _note_speech(spoke: Dict[str, Any], event: Any) -> None:
+    """「ペルソナが実際に言葉を出したか」を、イベント 1 件分だけ進める。
+
+    ``_note_outcome`` と同じ理由で断片は取り消されうる。ここを取り消さないと、
+    引っ込めた断片だけで「喋った」と数え、続きの生成の印を降ろしてしまう
+    (= 続きを取る手段が消える)。
+    """
+    if not isinstance(event, dict):
+        return
+    etype = event.get("type")
+    pending: Dict[str, bool] = spoke.setdefault("pending", {})
+    if etype == "streaming_discard":
+        pending.pop(_stream_key(event), None)
+        spoke["value"] = bool(spoke.get("said")) or bool(pending)
+        return
+    if etype not in _SPEECH_EVENT_TYPES:
+        return
+    if not str(event.get("content") or "").strip():
+        return
+    if etype == "streaming_chunk":
+        pending[_stream_key(event)] = True
+    else:
+        spoke["said"] = True
+    spoke["value"] = True
 
 class RuntimeService(
     VisitorMixin, GatewayMixin, SDSMixin, DatabasePollingMixin, PersonaMixin
@@ -594,6 +636,32 @@ class RuntimeService(
             persona._save_session_metadata()
         return replies
 
+    def _cancel_after_disconnect(
+        self, building_id: str, stop_event: threading.Event,
+    ) -> None:
+        """読み手が去ったあと、走っている生成を実際に止める。
+
+        停止イベントだけでは足りない。あれは worker が「次のペルソナへ進むか」を
+        見るためのもので、**いま走っている LLM / Spell / tool には届かない**。
+        止めるには実行中の要求が持つ取り消しの合図 (cancellation token) を立てる
+        必要があり、それは画面の「停止」ボタンと同じ経路
+        (``cancel_active_generation``) が持っている。
+
+        止めないと、誰も受け取らない応答のために料金が発生し、ペルソナが喋って
+        履歴に残る。
+
+        **正常に終わった回では呼ばない。** 後片付け (保存・音声の締め・記憶への
+        転記) の途中で取り消しが立つと、そちらが中断される。
+        """
+        stop_event.set()
+        try:
+            self.manager.cancel_active_generation()
+        except Exception:
+            logging.exception(
+                "[runtime] could not cancel the generation after the reader left "
+                "(building=%s)", building_id,
+            )
+
     def handle_user_input_stream(
         self, message: str, metadata: Optional[Dict[str, Any]] = None, meta_playbook: Optional[str] = None,
         args: Optional[Dict[str, Any]] = None, building_id: Optional[str] = None,
@@ -673,7 +741,7 @@ class RuntimeService(
         # **結果を作る場所で一度だけ検査する** — 入口を数え切る守り方は必ず漏れる
         # (応答者ゼロ・握り潰された例外・早期 return が、どれも同じ「無言」に
         # 落ちていた)。設計: docs/issues/user_utterance_path_failure_inventory.md
-        outcome_seen: Dict[str, Any] = {"value": False, "from_stream": False}
+        outcome_seen: Dict[str, Any] = {"value": False, "pending": {}}
 
         def _enrich_event(event):
             """Enrich streaming events with resolved persona name and avatar URL."""
@@ -821,7 +889,7 @@ class RuntimeService(
                 # ここで捕まえる。上のどの経路を通っても (応答者ゼロ / 早期 return /
                 # 握り潰された失敗 / 例外) 最後は必ずここへ来るので、検査は一箇所で
                 # 足りる。理由が言えないときも「起きたこと」だけは必ず伝える。
-                if not outcome_seen["value"] and not stop_event.is_set():
+                if not _outcome_reached(outcome_seen) and not stop_event.is_set():
                     logging.warning(
                         "[runtime] the utterance was accepted but nothing reached the "
                         "user (building=%s, responding_personas=%d)",
@@ -853,6 +921,7 @@ class RuntimeService(
 
         threading.Thread(target=backend_worker, daemon=True).start()
 
+        disconnected = False
         # メインスレッド: キューを監視してクライアントに送信
         try:
             while True:
@@ -873,13 +942,12 @@ class RuntimeService(
                 except queue.Empty:
                     # プロキシ等のタイムアウトを防ぐためのPing
                     yield json.dumps({"type": "ping"}, ensure_ascii=False) + "\n"
+        except GeneratorExit:
+            disconnected = True
+            raise
         finally:
-            # 読み手が去った回 (ブラウザを閉じた / 通信が切れた) も必ずここへ来る。
-            # 生成は別スレッドで走っているので、**止めると言わない限り走り続ける**
-            # — 誰も受け取らない応答のために LLM を呼び、料金が発生し、ペルソナが
-            # 喋って履歴に残る。正常に終わった回はワーカーがもう畳まれているので、
-            # ここで立てても何も起きない。
-            stop_event.set()
+            if disconnected:
+                self._cancel_after_disconnect(building_id, stop_event)
             # 片付けるのは**自分が置いたもの**だけ。この registry は建物ごとに
             # 一枠しかないので、同じ建物で次のストリームが始まると上書きされる。
             # 無条件に pop すると、先に終わった側が後から始まった側の停止イベント
@@ -957,7 +1025,7 @@ class RuntimeService(
         stop_event = threading.Event()
         self.manager._active_stop_events[building_id] = stop_event
 
-        outcome_seen: Dict[str, Any] = {"value": False, "from_stream": False}
+        outcome_seen: Dict[str, Any] = {"value": False, "pending": {}}
 
         def _enrich_event(event):
             if isinstance(event, dict) and event.get("persona_id"):
@@ -971,13 +1039,8 @@ class RuntimeService(
                             or "/api/static/builtin_icons/host.png"
                         )
             _note_outcome(outcome_seen, event)
-            if (
-                spoke is not None
-                and isinstance(event, dict)
-                and event.get("type") in _SPEECH_EVENT_TYPES
-                and str(event.get("content") or "").strip()
-            ):
-                spoke["value"] = True
+            if spoke is not None:
+                _note_speech(spoke, event)
             response_queue.put(event)
 
         self.manager._active_sse_callbacks[building_id] = _enrich_event
@@ -1006,7 +1069,7 @@ class RuntimeService(
                         "technical_detail": str(e),
                     })
             finally:
-                if not outcome_seen["value"] and not stop_event.is_set():
+                if not _outcome_reached(outcome_seen) and not stop_event.is_set():
                     logging.warning(
                         "[runtime] the pulse produced nothing for the user "
                         "(building=%s persona=%s)",
@@ -1021,6 +1084,7 @@ class RuntimeService(
 
         threading.Thread(target=worker, daemon=True).start()
 
+        disconnected = False
         try:
             while True:
                 try:
@@ -1035,10 +1099,13 @@ class RuntimeService(
                         break
                 except queue.Empty:
                     yield json.dumps({"type": "ping"}, ensure_ascii=False) + "\n"
+        except GeneratorExit:
+            disconnected = True
+            raise
         finally:
-            # 読み手が去っても生成は止まらない (理由は handle_user_input_stream 側の
-            # 同じ節を参照)。「続きの生成」と「再送」もここを通る。
-            stop_event.set()
+            if disconnected:
+                # 「続きの生成」と「再送」もここを通る。
+                self._cancel_after_disconnect(building_id, stop_event)
             # 片付けるのは自分が置いたものだけ (同上)。
             if self.manager._active_stop_events.get(building_id) is stop_event:
                 self.manager._active_stop_events.pop(building_id, None)

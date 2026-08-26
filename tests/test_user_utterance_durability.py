@@ -24,6 +24,7 @@ def _runtime(responders=None) -> RuntimeService:
         _active_stop_events={},
         _active_sse_callbacks={},
         pulse_dispatcher=MagicMock(),
+        cancel_active_generation=MagicMock(),
     )
     return service
 
@@ -574,15 +575,20 @@ def test_cleanup_leaves_a_newer_registration_alone() -> None:
     assert service.manager._active_sse_callbacks.get("room") is newer_callback
 
 
-def _stream_with(events_to_emit):
-    """指定のイベントだけを流して終わるストリームと、その土台を返す。"""
-    persona = SimpleNamespace(persona_id="p1")
-    service = _runtime([persona])
+def _stream_with(events_to_emit, responders=None):
+    """指定のイベントだけを流して終わるストリームと、その土台を返す。
+
+    イベントが ``persona_id`` を持っていればそちらを使う (複数のペルソナが並ぶ
+    回を組み立てるため)。
+    """
+    if responders is None:
+        responders = [SimpleNamespace(persona_id="p1")]
+    service = _runtime(responders)
 
     def _emit(**kwargs):
         cb = service.manager._active_sse_callbacks["room"]
         for event in events_to_emit:
-            cb(dict(event, persona_id="p1"))
+            cb({"persona_id": "p1", **event})
 
     service.manager.pulse_dispatcher.dispatch_user_utterance = MagicMock(
         side_effect=_emit,
@@ -638,12 +644,36 @@ def test_blank_chunks_alone_are_silence() -> None:
     assert len(_no_response(_run(service))) == 1
 
 
-def test_closing_the_stream_tells_the_worker_to_stop() -> None:
-    """読み手が去ったら生成を止める。
+def test_one_personas_discard_does_not_erase_anothers_answer() -> None:
+    """片方の取り消しが、別のペルソナの届いた発言まで無かったことにしない。
 
-    生成は別スレッドで走っているので、止めると言わない限り走り続ける — 誰も
-    受け取らない応答のために LLM を呼び、料金が発生し、ペルソナが喋って履歴に
-    残る。
+    一度の送信で複数のペルソナが並行して喋ることがある。取り消しを出どころで
+    照合しないと、あとから来たツール呼び出しだけのペルソナの取り消しが、既に
+    喋った相手の結果まで消して「無言だった」ことにする。
+    """
+    service = _stream_with(
+        [
+            {"type": "streaming_chunk", "content": "こんにちは",
+             "persona_id": "p1", "pulse_id": "a"},
+            {"type": "streaming_chunk", "content": "…",
+             "persona_id": "p2", "pulse_id": "b"},
+            {"type": "streaming_discard", "persona_id": "p2", "pulse_id": "b"},
+        ],
+        responders=[
+            SimpleNamespace(persona_id="p1"),
+            SimpleNamespace(persona_id="p2"),
+        ],
+    )
+
+    assert _no_response(_run(service)) == []
+
+
+def test_closing_the_stream_cancels_the_running_generation() -> None:
+    """読み手が去ったら、走っている生成そのものを止める。
+
+    停止イベントだけでは worker が「次のペルソナへ進むか」を見るところで止まる
+    だけで、走っている LLM / Spell / tool には届かない。止めないと、誰も受け取ら
+    ない応答のために料金が発生し、ペルソナが喋って履歴に残る。
     """
     persona = SimpleNamespace(persona_id="p1")
     service = _runtime([persona])
@@ -670,3 +700,17 @@ def test_closing_the_stream_tells_the_worker_to_stop() -> None:
         stream.close()    # ブラウザを閉じる
 
     assert captured["stop_event"].is_set()
+    service.manager.cancel_active_generation.assert_called_once()
+
+
+def test_a_stream_that_finishes_normally_cancels_nothing() -> None:
+    """最後まで配り終えた回では取り消さない。
+
+    後片付け (保存・音声の締め・記憶への転記) の途中で取り消しが立つと、そちらが
+    中断される。
+    """
+    service = _stream_with([{"type": "say", "content": "hello back"}])
+
+    _run(service)
+
+    service.manager.cancel_active_generation.assert_not_called()

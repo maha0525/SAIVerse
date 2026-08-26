@@ -2306,7 +2306,12 @@ class MCPClientManager:
         instance_key = _make_instance_key(
             qualified_name, persona_id if scope == "per_persona" else None
         )
-        if instance_key not in self._connections and scope == "global":
+        # 生きているかまで見る。キーが残っているだけの死んだ接続 (``call_tool`` が
+        # 失敗して ``disconnect()`` した後も ``_connections`` からは消えない) を
+        # 「起動済み」と読むと、繋がっていないサーバーを成功として返してしまう。
+        # 兄弟の ``register_instance`` は最初からこの判定を持っている。
+        existing = self._connections.get(instance_key)
+        if (existing is None or not existing.connected) and scope == "global":
             try:
                 await self._start_instance(instance_key, qualified_name, persona_id=None)
             except Exception as exc:
