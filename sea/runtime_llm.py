@@ -1708,6 +1708,7 @@ async def _consume_pipeline_stream(
     sub_seq_start: int,
     cancellation_token: Any,
     event_callback: Optional[Callable],
+    progress: Optional[dict] = None,
 ) -> Tuple[str, int, bool, bool]:
     """1 つの LLM streaming call を消費し、 sub-speak 発火と UI への
     ``streaming_chunk`` イベント送出を担う。
@@ -1727,6 +1728,12 @@ async def _consume_pipeline_stream(
     - ``pipeline_msg_id``: ``_emit_speak_start`` で発番した placeholder ID。
       None の場合は sub-speak emit を行わない (= UI streaming_chunk のみ)
     - ``sub_seq_start``: 既に消費済の sub-speak 連番。 この値の次から発番
+    - ``progress``: 非 None なら、消費の**途中経過**をこの dict へ書き続ける
+      (``text_chunks``: 受信済み chunk のリストへの参照 / ``sub_seq``: 発火済みの
+      最新連番)。ストリーム消費中に例外が出ると返り値の tuple は呼び出し元へ
+      届かないため、途中まで受けた本文と進んだ連番はここからしか回収できない
+      (Beat の出口の後始末が読む。2026-08-27 Codex 指摘 — 無いと、途中死した回の
+      確定が空文字になり、final の連番が発火済みの sub-speak と衝突する)
 
     返り値:
     ``(text, next_sub_seq, spell_detected, cancelled)``
@@ -1743,6 +1750,10 @@ async def _consume_pipeline_stream(
     spell_detected = False
     cancelled = False
     last_emit_pos = 0
+    if progress is not None:
+        # リスト参照ごと渡す — 以後の append がそのまま呼び出し元から見える
+        progress["text_chunks"] = text_chunks
+        progress["sub_seq"] = sub_seq
 
     def _emit_fragment(fragment: str) -> None:
         """voice-able な fragment を 1 つ sub-speak として送出。"""
@@ -1750,6 +1761,8 @@ async def _consume_pipeline_stream(
         if not _has_voiceable_content(fragment):
             return
         sub_seq += 1
+        if progress is not None:
+            progress["sub_seq"] = sub_seq
         runtime._emit_sub_speak(
             persona,
             runtime._effective_building_id(persona, building_id),
@@ -1818,7 +1831,21 @@ async def _consume_pipeline_stream(
     return text, sub_seq, spell_detected, cancelled
 
 
-def _settle_cancelled_utterance(
+def _is_user_interruption(interrupted_by: Optional[str]) -> bool:
+    """取り消しの起点がユーザーかを、取り消しに刻まれた原因から判定する。
+
+    値の出どころは二系統: 停止ボタン (``saiverse_manager`` の "user_stop") と、
+    優先度の高い要求による割り込み (``PulseController`` が ``request.type`` を
+    そのまま刻む — "user" / "auto" / "schedule")。**例外の型では判定しない** —
+    schedule や auto の割り込みも同じ ``ExecutionCancelledException`` で届くので、
+    型だけ見ると機構起点の中断に「ユーザーの操作により」という誤った通告が
+    ペルソナの記憶に入る (2026-08-27 Codex 指摘)。原因が刻まれていない (None)
+    ときはユーザーと断定しない。
+    """
+    return interrupted_by in ("user", "user_stop")
+
+
+def _settle_interrupted_utterance(
     *,
     runtime: Any,
     persona: Any,
@@ -1830,14 +1857,23 @@ def _settle_cancelled_utterance(
     msg_id: Optional[str],
     sub_seq: int,
     text: str,
+    by_user: bool,
 ) -> int:
-    """止められた発言を、その場で確定させる。返すのは進めた後の ``sub_seq``。
+    """途中で終わった発言を、その場で確定させる。返すのは進めた後の ``sub_seq``。
 
-    **止められた回は、この関数を通らないと発言が消える。** 下書き行 (placeholder)
+    **途中で終わった回は、この関数を通らないと発言が消える。** 下書き行 (placeholder)
     は本文が空のまま作られ、確定して初めて中身が入る。確定しないと content が空の
     ままデータベースに残り、画面はそれを描かないので、**本人が喋った内容がどこにも
-    無くなる** (2026-08-26 実機で発生。生成し終わった直後に停止ボタンが押された回で、
-    下の「呼ぶ場所」の二つ目が無かったため本文が失われた)。
+    無くなる** (2026-08-26 実機で発生。生成し終わった直後に停止ボタンが押された回が
+    当時どの呼び出し経路にも拾われず、本文が失われた)。
+
+    呼ぶ場所は二つ: ストリームの途中で止められた回 (``cancelled_during_stream``)
+    と、Beat が例外で抜けた回 (``_settle_placeholder_on_beat_death`` = Beat の
+    出口)。前者を通った回は確定済みの印が立つので、後者では二重に走らない。
+
+    ``by_user``: 発言を終わらせたのが誰か。ユーザーの停止 (True) か、Beat を
+    落とした例外 — LLM エラー等 (False) か。変わるのは中断の通告の文面だけで、
+    確定・印・記憶の三つは原因によらず同じに揃える。
 
     ここで揃えるのは四つ:
 
@@ -1852,7 +1888,8 @@ def _settle_cancelled_utterance(
        言い切ったものとは扱われない。
     4. **中断があった事実を建物の記録へ置く** — 途中で切られた発言は他のペルソナ
        から見ても不自然な場所で終わっている。それが本人の言い切りなのか外から
-       止められたのかを知れる方がよい (2026-08-26 まはー裁定)。役は ``host`` で、
+       止められたのかを知れる方がよい (2026-08-26 まはー裁定)。文面は ``by_user``
+       で変わる (ユーザーの操作を明記 / 原因を書かない一文)。役は ``host`` で、
        入退室の通知と同じ道を通る。取り込みの側が建物名を添えて
        ``user`` + ``<system>`` へ組み替えてから各ペルソナの記憶へ配るので、
        **ここでその形を自分で作らない**。
@@ -1884,19 +1921,27 @@ def _settle_cancelled_utterance(
                 exc_info=True,
             )
         LOGGER.info(
-            "[sea][pipeline] Cancelled: finalized placeholder "
+            "[sea][pipeline] Interrupted (%s): finalized placeholder "
             "msg=%s seq=%d partial_len=%d",
-            msg_id, sub_seq, len(text or ""),
+            "user" if by_user else "error", msg_id, sub_seq, len(text or ""),
         )
 
     if event_callback and state.get(INTERRUPTED_METADATA_KEY):
-        event_callback({
-            "type": "streaming_complete",
-            "persona_id": getattr(persona, "persona_id", None),
-            "node_id": getattr(node_def, "id", "llm"),
-            "pulse_id": state.get("_pulse_id"),
-            "interrupted": True,
-        })
+        # 印の配達に失敗しても、この後ろの記憶と通告は諦めない (他の三つの
+        # 書き込みは個別に握ってあるのに、ここだけ素通しだった)。
+        try:
+            event_callback({
+                "type": "streaming_complete",
+                "persona_id": getattr(persona, "persona_id", None),
+                "node_id": getattr(node_def, "id", "llm"),
+                "pulse_id": state.get("_pulse_id"),
+                "interrupted": True,
+            })
+        except Exception:
+            LOGGER.warning(
+                "[sea][pipeline] could not deliver the interrupted mark to the "
+                "UI (msg=%s)", msg_id, exc_info=True,
+            )
 
     if not body:
         return sub_seq
@@ -1923,8 +1968,14 @@ def _settle_cancelled_utterance(
             building_id,
             {
                 "role": "host",
+                # 非ユーザー起点 (LLM エラー・schedule/auto の割り込み) は原因を
+                # 書かない — 「エラー」と括ると割り込みの回に嘘になる。通告の
+                # 目的は「本人の言い切りではなく外から切られた」を伝えることで、
+                # 原因の種別は必須ではない (2026-08-27 まはー委任で推奨案を採用)。
                 "content": (
                     "(ユーザーの操作により、ここで発言が中断されました)"
+                    if by_user
+                    else "(ここで発言が中断されました)"
                 ),
             },
         )
@@ -2502,6 +2553,11 @@ async def _run_spell_loop(
                     temperature=runtime._default_temperature(persona),
                     **runtime._get_cache_kwargs(getattr(persona, "persona_id", None)),
                 )
+                # progress に spell 側の器そのものを渡す — retry ストリームの
+                # 途中で死んでも、発火済みの sub-speak 連番が器に残り、Beat の
+                # 出口の後始末が最新値で final を打てる (本文の回収は行わない:
+                # ここで死んだ回の確定本文は round 1 の text であって retry の
+                # 部分文ではない)。
                 _retry_text, _retry_sub_seq, _retry_spell_detected, _retry_cancelled = await _consume_pipeline_stream(
                     _retry_stream,
                     runtime=runtime,
@@ -2513,6 +2569,7 @@ async def _run_spell_loop(
                     sub_seq_start=int(pipeline_streaming_state.get("sub_seq", 0) or 0),
                     cancellation_token=pipeline_streaming_state.get("cancellation_token"),
                     event_callback=event_callback,
+                    progress=pipeline_streaming_state,
                 )
                 pipeline_streaming_state["sub_seq"] = _retry_sub_seq
                 retry_result = _retry_text
@@ -3141,6 +3198,92 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
         text = ""
         schema_consumed = False
         prompt = None  # Will store the expanded prompt for memorize
+
+        # ── Pipeline Streaming の下書き行 (placeholder) の追跡 ──
+        # 発番するのは normal-mode streaming 経路 (下の use_streaming ブロック)
+        # だけだが、except 節の後始末が参照するため Beat の入り口で初期化する。
+        # pipeline_finalized は「下書き行をもう確定させた」の印。ID を None に
+        # 倒して兼用すると「確定済み」と「そもそも作れなかった」が同じ値になり、
+        # 下流が救済のつもりで同じ本文をもう一度 Building へ書き込む。
+        pipeline_msg_id: Optional[str] = None
+        pipeline_eff_bid: str = ""
+        pipeline_sub_seq = 0
+        pipeline_finalized = False
+        _pipeline_spell_state: Optional[dict] = None
+        # 本文ストリームの途中経過 (_consume_pipeline_stream が書き続ける)。
+        # ストリーム消費中に例外が出ると返り値は届かないため、途中まで受けた
+        # 本文と発火済みの sub-speak 連番は、この器からしか回収できない。
+        _stream_progress: Dict[str, Any] = {}
+
+        def _settle_placeholder_on_beat_death(exc: BaseException) -> None:
+            """Beat がどんな形で死んでも、未確定の下書き行を残さない。
+
+            下書き行は本文の器で、確定して初めて中身が入る。確定しないまま Beat が
+            死ぬと、本文の入らない行がデータベースに残り、画面はそれを描かないので
+            **発言そのものが消える** (2026-05-19〜08-26 の 3 ヶ月で 32 件。経緯は
+            docs/issues/orphaned_streaming_placeholder_cleanup.md)。
+
+            発番から確定までの間に例外を投げうる箇所は一つずつ塞げる数ではない
+            (ストリーム呼び出し、spell loop、finalize 経路自身の失敗、
+            asyncio.CancelledError)。だから入口側で数え上げず、**Beat の出口で
+            「確定していない下書き行が残っていたら確定させる」**を一括で保証する。
+            通告の文面は、取り消しに刻まれた原因 (``interrupted_by``) がユーザー
+            起点のときだけ「ユーザーの操作により」になる (``_is_user_interruption``)
+            — 生成し終えた直後の停止のように、途中の後片付けを通らず例外だけが
+            届く形がある (2026-08-26 実機で発言消滅として発覚)。
+            """
+            nonlocal pipeline_sub_seq, pipeline_finalized
+            if not pipeline_msg_id or pipeline_finalized:
+                return
+            pipeline_finalized = True
+            try:
+                # sub_seq の最新値は、本文ストリームの途中経過と spell loop 側の
+                # 器のどちらかで進んでいることがある。古い値で final を打つと
+                # voice-tts の連番が既出の番号と衝突する。
+                pipeline_sub_seq = max(
+                    pipeline_sub_seq,
+                    int(_stream_progress.get("sub_seq", 0) or 0),
+                )
+                if _pipeline_spell_state is not None:
+                    pipeline_sub_seq = max(
+                        pipeline_sub_seq,
+                        int(_pipeline_spell_state.get("sub_seq", 0) or 0),
+                    )
+                # ストリーム消費の途中で死んだ回は、呼び出し元の text に本文が
+                # まだ届いていない。途中経過から受信済みの chunk を回収する
+                # (回収しないと、画面と音声には流れた言葉が空文字で確定する)。
+                salvage_text = text if isinstance(text, str) else ""
+                if not salvage_text.strip():
+                    _partial_chunks = _stream_progress.get("text_chunks")
+                    if _partial_chunks:
+                        _partial = "".join(_partial_chunks)
+                        if _partial.strip():
+                            salvage_text = _partial
+                pipeline_sub_seq = _settle_interrupted_utterance(
+                    runtime=runtime,
+                    persona=persona,
+                    state=state,
+                    node_def=node_def,
+                    playbook=playbook,
+                    event_callback=event_callback,
+                    building_id=pipeline_eff_bid,
+                    msg_id=pipeline_msg_id,
+                    sub_seq=pipeline_sub_seq,
+                    text=salvage_text,
+                    by_user=(
+                        isinstance(exc, ExecutionCancelledException)
+                        and _is_user_interruption(exc.interrupted_by)
+                    ),
+                )
+            except Exception:
+                # ここで新しい例外を立てると、Beat を落とした元の例外が
+                # すり替わる。後始末の失敗は記録だけして、元の例外を通す。
+                LOGGER.exception(
+                    "[sea][pipeline] placeholder settle on beat death failed "
+                    "(msg=%s) — the draft row may remain unconfirmed",
+                    pipeline_msg_id,
+                )
+
         try:
             # Phase 3 段階 4-D (2026-05-09): context_profile / CONTEXT_PROFILES 経路を削除。
             # 最新仕様 (Intent A v0.14, Intent B v0.11) では line: 'main'/'sub' に集約されており、
@@ -3739,8 +3882,8 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                     # finalize 時に _effective_building_id で再解決すると移動後の
                     # Building を見に行って update が空振りし、 content が空の
                     # placeholder が永久に残る (2026-06-11 Region RPG 実機で発覚)。
-                    pipeline_eff_bid: str = runtime._effective_building_id(persona, building_id)
-                    pipeline_msg_id: Optional[str] = runtime._emit_speak_start(
+                    pipeline_eff_bid = runtime._effective_building_id(persona, building_id)
+                    pipeline_msg_id = runtime._emit_speak_start(
                         persona,
                         pipeline_eff_bid,
                         pulse_id=state.get("_pulse_id"),
@@ -3750,13 +3893,6 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                             "[sea][pipeline] _emit_speak_start failed; "
                             "downstream finalize will be skipped — placeholder leak risk",
                         )
-                    pipeline_sub_seq = 0
-                    # 下書き行を「もう確定させた」かどうか。停止の後片付けで確定
-                    # させた回と、下書き行をそもそも作れなかった回は、下流にとって
-                    # 意味が正反対 (前者は何もしなくていい / 後者は救済が要る)。
-                    # ID を None に倒して兼用すると二つが同じ値になり、下流が救済の
-                    # つもりで同じ本文をもう一度 Building へ書き込む。
-                    pipeline_finalized = False
 
                     for stream_attempt in range(max_stream_retries):
                         stream_iter = llm_client.generate_stream(
@@ -3776,6 +3912,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                             sub_seq_start=pipeline_sub_seq,
                             cancellation_token=cancellation_token,
                             event_callback=event_callback,
+                            progress=_stream_progress,
                         )
                         text = _initial_text
                         if _initial_cancelled:
@@ -3819,9 +3956,9 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
 
                     # ストリームの途中で止められた回。下書き行を本文で確定させ、
                     # 印・記憶・記録を揃える (詳しくは
-                    # ``_settle_cancelled_utterance`` の docstring)。
+                    # ``_settle_interrupted_utterance`` の docstring)。
                     if cancelled_during_stream:
-                        pipeline_sub_seq = _settle_cancelled_utterance(
+                        pipeline_sub_seq = _settle_interrupted_utterance(
                             runtime=runtime,
                             persona=persona,
                             state=state,
@@ -3832,6 +3969,9 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                             msg_id=pipeline_msg_id,
                             sub_seq=pipeline_sub_seq,
                             text=text,
+                            by_user=_is_user_interruption(
+                                getattr(cancellation_token, "interrupted_by", None)
+                            ),
                         )
                         pipeline_finalized = True
 
@@ -3865,7 +4005,6 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                     # 以降の LLM 呼び出しも streaming 化される。 retry の chunk が
                     # UI に流れつつ、 文区切りで sub-speak も発火する。 helper は
                     # state dict を in-place mutate して sub_seq を更新する。
-                    _pipeline_spell_state: Optional[dict] = None
                     if pipeline_msg_id and not pipeline_finalized:
                         _pipeline_spell_state = {
                             "msg_id": pipeline_msg_id,
@@ -3873,50 +4012,27 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                             "cancellation_token": cancellation_token,
                         }
 
-                    try:
-                        text, _continuation_ns, _spell_loop_count_ns = await _run_spell_loop(
-                            text=text,
-                            spell_enabled=_spell_enabled,
-                            llm_client=llm_client,
-                            runtime=runtime,
-                            persona=persona,
-                            building_id=building_id,
-                            state=state,
-                            messages=messages,
-                            playbook=playbook,
-                            event_callback=event_callback,
-                            node_def=node_def,
-                            pipeline_streaming_state=_pipeline_spell_state,
-                            action_text=prompt,
-                        )
-                    except ExecutionCancelledException:
-                        # **生成し終えた直後に止められた回がここへ来る。**
-                        #
-                        # ストリームが最後まで流れきると ``cancelled_during_stream``
-                        # は立たないので、上の後片付けは走らない。そして spell round の
-                        # 頭で取り消しが見つかると、ここから例外で抜けて、下にある
-                        # 通常の確定処理にも届かない。**その結果、下書き行が本文の入ら
-                        # ないまま残り、画面はそれを描かないので発言そのものが消えた**
-                        # (2026-08-26 実機で発生。停止を押すのが一瞬遅れた回で、
-                        # ソフィーの発言がデータベースからも画面からも失われた)。
-                        #
-                        # 止められた事実は変わらないので、ストリーム中に止められた回と
-                        # 同じ後始末を通してから、例外はそのまま上へ返す。
-                        if pipeline_msg_id and not pipeline_finalized:
-                            pipeline_sub_seq = _settle_cancelled_utterance(
-                                runtime=runtime,
-                                persona=persona,
-                                state=state,
-                                node_def=node_def,
-                                playbook=playbook,
-                                event_callback=event_callback,
-                                building_id=pipeline_eff_bid,
-                                msg_id=pipeline_msg_id,
-                                sub_seq=pipeline_sub_seq,
-                                text=text,
-                            )
-                            pipeline_finalized = True
-                        raise
+                    # 生成し終えた直後に止められた回は、spell round の頭で
+                    # ExecutionCancelledException が出てここから例外で抜ける
+                    # (2026-08-26 実機で「発言そのものが消える」として発覚)。
+                    # 下書き行の後始末は Beat の出口
+                    # (``_settle_placeholder_on_beat_death``) が LLM エラー等と
+                    # まとめて一括で受け止める。
+                    text, _continuation_ns, _spell_loop_count_ns = await _run_spell_loop(
+                        text=text,
+                        spell_enabled=_spell_enabled,
+                        llm_client=llm_client,
+                        runtime=runtime,
+                        persona=persona,
+                        building_id=building_id,
+                        state=state,
+                        messages=messages,
+                        playbook=playbook,
+                        event_callback=event_callback,
+                        node_def=node_def,
+                        pipeline_streaming_state=_pipeline_spell_state,
+                        action_text=prompt,
+                    )
 
                     if _pipeline_spell_state is not None:
                         pipeline_sub_seq = int(_pipeline_spell_state.get("sub_seq", pipeline_sub_seq) or pipeline_sub_seq)
@@ -3948,6 +4064,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                                     final_sub_seq=pipeline_sub_seq,
                                     final_voice_text="",
                                 )
+                                pipeline_finalized = True
                         else:
                             pulse_id = state.get("_pulse_id")
 
@@ -4000,6 +4117,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                                     final_sub_seq=pipeline_sub_seq,
                                     final_voice_text="",
                                 )
+                                pipeline_finalized = True
                                 state["_last_message_id"] = pipeline_msg_id
                                 LOGGER.info(
                                     "[sea][pipeline] Normal-stream spell+finalize: msg=%s final_seq=%d",
@@ -4087,6 +4205,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                                 final_sub_seq=pipeline_sub_seq,
                                 final_voice_text="",
                             )
+                            pipeline_finalized = True
                             state["_last_message_id"] = pipeline_msg_id
                             LOGGER.info(
                                 "[sea][pipeline] Normal-stream finalize: msg=%s final_seq=%d",
@@ -4278,16 +4397,26 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                             LOGGER.info("[sea][llm] (normal mode) Stored state['%s'] = %s", text_key, text)
                             state["has_speak_content"] = True
                             break
-        except LLMError:
+        except LLMError as exc:
             # Propagate LLM errors to the caller for proper handling
+            _settle_placeholder_on_beat_death(exc)
             raise
         except Exception as exc:
+            _settle_placeholder_on_beat_death(exc)
             LOGGER.error("SEA LangGraph LLM failed: %s: %s", type(exc).__name__, exc)
             # Convert to LLMError so it propagates to the frontend
             raise LLMError(
                 f"LLM node failed: {type(exc).__name__}: {exc}",
                 original_error=exc,
             ) from exc
+        except asyncio.CancelledError as exc:
+            # タスクの取り消し (サーバー停止等) は Exception では捕まらないだけで、
+            # 下書き行を孤児にする力は同じ。確定だけ済ませてそのまま伝播させる。
+            # BaseException 全部 (KeyboardInterrupt / SystemExit / GeneratorExit)
+            # まで広げない — インタープリタ終了の道筋に DB 書き込みの副作用を
+            # 足さない (2026-08-27 Codex 指摘で絞った)。
+            _settle_placeholder_on_beat_death(exc)
+            raise
         # ── ④確定: 生成し終えた Beat を記録先へ配る ──
         _beat = BeatExecution.from_node_locals(
             persona=persona,
