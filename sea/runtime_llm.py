@@ -3740,6 +3740,26 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                         )
                         pipeline_finalized = True
 
+                        # 「言い切っていない」印を**ここで**画面へ渡す。
+                        #
+                        # 停止された Beat は、この先の spell round の境目で
+                        # ExecutionCancelledException を投げて抜ける。だから通常の
+                        # 完了イベント (印を載せている) までは決して届かない —
+                        # 画面は印を受け取れず、再読込するまで「続きの生成」を
+                        # 出せなかった (2026-08-26 実機で発覚: 停止直後は出ず、
+                        # 別の部屋へ移って戻ると出る)。
+                        #
+                        # このイベントは worker の ``cancelled`` より前に流れるので、
+                        # ``cancelled`` 以降を捨てる読み手の後片付けにも巻き込まれない。
+                        if event_callback and state.get(INTERRUPTED_METADATA_KEY):
+                            event_callback({
+                                "type": "streaming_complete",
+                                "persona_id": getattr(persona, "persona_id", None),
+                                "node_id": getattr(node_def, "id", "llm"),
+                                "pulse_id": state.get("_pulse_id"),
+                                "interrupted": True,
+                            })
+
                     # Record usage (even if cancelled — tokens were consumed)
                     llm_usage_metadata: Dict[str, Any] | None = _record_llm_usage(
                         runtime, llm_client, persona, building_id,
@@ -3921,7 +3941,11 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                             completion_event["metadata"] = _speak_base_metadata
                         if state.get(INTERRUPTED_METADATA_KEY):
                             completion_event["interrupted"] = True
-                        event_callback(completion_event)
+                        # 停止された回は、この上流で既に印つきの完了を送っている
+                        # (そこから先は例外で抜けるため、ここまで届かない)。二度
+                        # 送っても害は無いが、意味の重複は残さない。
+                        if not pipeline_finalized:
+                            event_callback(completion_event)
 
                         # Record to Building history with usage metadata (include pulse total)
                         pulse_id = state.get("_pulse_id")
