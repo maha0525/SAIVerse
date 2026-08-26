@@ -188,6 +188,44 @@ class ToggleOutcomeReachesTheCallerTests(unittest.TestCase):
 
         future.add_done_callback.assert_called_once()
 
+    def test_not_waiting_also_leaves_a_watcher(self):
+        """待たずに戻る回にも見届け役を付ける (隣を忘れた型の消し込み)。
+
+        「誰も result() を呼ばない」のは待ち切れた回だけではない。有効化は
+        最初から待たずに戻るので、その先で失敗しても痕跡なく消えていた —
+        危険の説明は既にコード内のコメントにあり、手当てが片方にしか
+        付いていなかった (2026-08-26 ローカルレビュー)。
+        """
+        _, future = self._notify()
+
+        future.add_done_callback.assert_called_once()
+
+    def test_the_late_outcome_does_not_claim_a_timeout_that_never_happened(self):
+        """待っていない回の顛末を「待ち切れた後」と書かない。
+
+        書くと、ログを読んだ人が起きていないタイムアウトを数える。
+        """
+        from tools import mcp_client
+
+        failed = MagicMock()
+        failed.result.side_effect = RuntimeError("boom")
+
+        with self.assertLogs(mcp_client.LOGGER.name, level=logging.WARNING) as captured:
+            mcp_client._log_late_toggle_outcome(
+                failed, "addonA", True, waited=False,
+            )
+        not_waited = captured.records[0].getMessage()
+
+        with self.assertLogs(mcp_client.LOGGER.name, level=logging.WARNING) as captured:
+            mcp_client._log_late_toggle_outcome(
+                failed, "addonA", True, waited=True,
+            )
+        waited = captured.records[0].getMessage()
+
+        self.assertNotIn("timed out", not_waited)
+        self.assertIn("no one waiting", not_waited)
+        self.assertIn("timed out", waited)
+
     def test_failure_is_not_logged_as_still_in_progress(self):
         """反映の失敗と、待ちのタイムアウトを同じ文面にしない。"""
         from tools import mcp_client

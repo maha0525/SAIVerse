@@ -2871,6 +2871,15 @@ def notify_addon_toggled_sync(
         loop,
     )
     if wait_timeout is None:
+        # 待たずに戻る回も、待ち切れた回と**まったく同じ理由で**誰も
+        # result() を呼ばない。見届け役を付けないと、この先で失敗しても
+        # ログが一行も出ずに消える。下の TimeoutError 側にだけ付けていた
+        # のは、同じ危険の隣を忘れた形だった。
+        future.add_done_callback(
+            lambda f: _log_late_toggle_outcome(
+                f, addon_name, is_enabled, waited=False,
+            )
+        )
         return None
     try:
         future.result(timeout=wait_timeout)
@@ -2881,7 +2890,9 @@ def notify_addon_toggled_sync(
         # 呼ばないので痕跡なく消える (concurrent.futures.Future は未回収の
         # 例外を自分では報告しない — asyncio.Future と違う)。見届け役を残す。
         future.add_done_callback(
-            lambda f: _log_late_toggle_outcome(f, addon_name, is_enabled)
+            lambda f: _log_late_toggle_outcome(
+                f, addon_name, is_enabled, waited=True,
+            )
         )
         LOGGER.warning(
             "notify_addon_toggled_sync: toggle did not settle within %ss "
@@ -2907,22 +2918,34 @@ def _log_late_toggle_outcome(
     future: "concurrent.futures.Future",
     addon_name: str,
     is_enabled: bool,
+    *,
+    waited: bool,
 ) -> None:
-    """待ち切れなかったトグルの、その後の顛末を記録する。"""
+    """呼び出し元が結果を回収しないトグルの、その後の顛末を記録する。
+
+    ``waited`` は顛末の出どころの区別 — ``True`` なら待ったが待ち切れなかった
+    回、``False`` なら最初から待たずに戻った回 (有効化)。**どちらも「誰も
+    result() を呼ばない」点は同じ**で、見届け役が要る理由も同じ。ログの文面
+    だけを言い分ける (「待ち切れた後」と書くと、待っていない回の顛末まで
+    タイムアウトの結果として読まれる)。
+    """
+    tail = "after the wait timed out" if waited else "with no one waiting for it"
     try:
         future.result()
     except Exception as exc:
         LOGGER.warning(
-            "notify_addon_toggled_sync: toggle failed after the wait timed out "
+            "notify_addon_toggled_sync: toggle failed %s "
             "(addon=%s, enabled=%s): %s",
+            tail,
             addon_name,
             is_enabled,
             exc,
         )
     else:
         LOGGER.info(
-            "notify_addon_toggled_sync: toggle settled after the wait timed out "
+            "notify_addon_toggled_sync: toggle settled %s "
             "(addon=%s, enabled=%s)",
+            tail,
             addon_name,
             is_enabled,
         )
