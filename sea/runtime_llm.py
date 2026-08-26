@@ -3788,6 +3788,43 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                                     pipeline_msg_id, exc_info=True,
                                 )
 
+                            # 中断があった事実を、その場にいる全員が読める形で残す。
+                            #
+                            # 途中で切られた発言は、他のペルソナから見ても不自然な
+                            # 場所で終わっている。それが本人の言い切りなのか外から
+                            # 止められたのかを知れる方がよい — 途中終了は「口に指を
+                            # 立てて制止する」場面で、その場にいる者が目撃していて
+                            # おかしくない (2026-08-26 まはー裁定)。だから本人の記憶
+                            # だけでなく建物の記録へ置き、居合わせた全員へ配る。
+                            #
+                            # **本人の発言そのものには一切手を入れない。** 機構が
+                            # 足した注記は、ペルソナが自分の文体として模倣し始める。
+                            # だから独立した user + <system> メッセージとして、発言の
+                            # 後ろに置く。metadata の印は本人からは知覚できないので、
+                            # 知らせたい事実はコンテキストに載る形で別に要る。
+                            #
+                            # 述べるのは「ユーザーの操作で中断された」という事実だけ。
+                            # 「続きを求められたら話せる」までは書かない — それを読む
+                            # 時点で本人は次の発言の最中なので、続けたければそこで
+                            # 話せばよく、知っても使い道がない (同裁定)。
+                            try:
+                                persona.history_manager.add_to_building_only(
+                                    pipeline_eff_bid,
+                                    {
+                                        "role": "user",
+                                        "content": (
+                                            "<system>(ユーザーの操作により、"
+                                            "ここで発言が中断されました)</system>"
+                                        ),
+                                    },
+                                )
+                            except Exception:
+                                LOGGER.warning(
+                                    "[sea][pipeline] could not record the interruption "
+                                    "notice to the building (msg=%s)",
+                                    pipeline_msg_id, exc_info=True,
+                                )
+
                     # Record usage (even if cancelled — tokens were consumed)
                     llm_usage_metadata: Dict[str, Any] | None = _record_llm_usage(
                         runtime, llm_client, persona, building_id,
