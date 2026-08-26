@@ -284,3 +284,102 @@ def test_progress_events_alone_do_not_count_as_an_answer() -> None:
         )
 
     assert len(_no_response(events)) == 1
+
+
+# --- 2026-08-26 ローカルレビューの消し込み ------------------------------------
+# 芯は一つ: 「試みた」を「成功した」と同じ扱いにしない。続きが一言も生まれ
+# なかった回に印を降ろすと二度と押せなくなり、履歴が読めなかった回を「無い」
+# と言うと送り直しで同じ発言が二度載る。
+
+
+def _interrupted_message(persona_id: str = "p1") -> dict:
+    return {
+        "message_id": "room:7",
+        "role": "assistant",
+        "persona_id": persona_id,
+        "content": "途中まで",
+        "metadata": {"_interrupted": True},
+    }
+
+
+def test_continue_keeps_the_mark_when_nothing_was_spoken() -> None:
+    """続きが一言も生まれなかった回は、中断の印を降ろさない。"""
+    history_manager = MagicMock()
+    persona = SimpleNamespace(persona_id="p1", history_manager=history_manager)
+    service = _runtime([persona])
+    service.personas = {"p1": persona}
+    service.manager.get_building_history = lambda building_id: [_interrupted_message()]
+
+    def _silent_pulse(building_id, target, user_input, spoke=None):
+        # 何も喋らないまま error だけ出して終わる Pulse。
+        yield json.dumps({"type": "error", "error_code": "unknown"}) + "\n"
+
+    service._stream_persona_pulse = _silent_pulse
+    events = _events(service.continue_persona_message_stream("room:7"))
+
+    assert any(event.get("error_code") == "unknown" for event in events)
+    history_manager.update_building_message.assert_not_called()
+
+
+def test_continue_clears_the_mark_once_the_persona_actually_spoke() -> None:
+    """続きが生まれた回は、これまでどおり印を降ろす。"""
+    history_manager = MagicMock()
+    persona = SimpleNamespace(persona_id="p1", history_manager=history_manager)
+    service = _runtime([persona])
+    service.personas = {"p1": persona}
+    service.manager.get_building_history = lambda building_id: [_interrupted_message()]
+
+    def _speaking_pulse(building_id, target, user_input, spoke=None):
+        if spoke is not None:
+            spoke["value"] = True
+        yield json.dumps({"type": "say", "content": "続きです"}) + "\n"
+
+    service._stream_persona_pulse = _speaking_pulse
+    _events(service.continue_persona_message_stream("room:7"))
+
+    history_manager.update_building_message.assert_called_once()
+    _, kwargs = history_manager.update_building_message.call_args
+    assert kwargs["metadata"]["_interrupted"] is False
+
+
+def test_retry_does_not_ask_for_a_resend_when_the_history_cannot_be_read() -> None:
+    """履歴が読めなかった回に「もう一度送ってください」と言わない。
+
+    言うと送り直しで同じ発言が二度載る — この口が防ごうとしているものそのもの。
+    """
+    service = _runtime([])
+
+    def _boom(building_id):
+        raise RuntimeError("db is down")
+
+    service.manager.get_building_history = _boom
+    events = _events(service.retry_user_message_stream("room:7"))
+
+    assert [event.get("error_code") for event in events] == ["history_unavailable"]
+    assert not any("もう一度送ってください" in (e.get("content") or "") for e in events)
+
+
+def test_retry_still_reports_a_genuinely_missing_message() -> None:
+    """本当に記録が無い回は、これまでどおり送り直しを勧める。"""
+    service = _runtime([])
+    service.manager.get_building_history = lambda building_id: []
+    events = _events(service.retry_user_message_stream("room:7"))
+
+    assert [event.get("error_code") for event in events] == ["message_not_found"]
+
+
+def test_continue_separates_an_unreadable_history_from_a_missing_message() -> None:
+    """continue 側も同じ区別を持つ (片方だけ直すと隣を忘れた形が残る)。"""
+    service = _runtime([])
+
+    def _boom(building_id):
+        raise RuntimeError("db is down")
+
+    service.manager.get_building_history = _boom
+    unreadable = _events(service.continue_persona_message_stream("room:7"))
+
+    service.manager.get_building_history = lambda building_id: []
+    missing = _events(service.continue_persona_message_stream("room:7"))
+
+    assert [e.get("error_code") for e in unreadable] == ["history_unavailable"]
+    assert [e.get("error_code") for e in missing] == ["message_not_found"]

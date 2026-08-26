@@ -58,6 +58,13 @@ _OUTCOME_EVENT_TYPES = frozenset({
     "info",
 })
 
+#: ペルソナが実際に言葉を出したと数えるイベントの型。
+#:
+#: 上の ``_OUTCOME_EVENT_TYPES`` はエラー通知も含む — 「出口が塞がっていない」
+#: を見る側の判定としては正しいが、「新しい発言が生まれたか」には使えない。
+#: 続きの生成のように「生まれたときだけ状態を進めたい」側はこちらを見る。
+_SPEECH_EVENT_TYPES = frozenset({"say", "streaming_chunk"})
+
 class RuntimeService(
     VisitorMixin, GatewayMixin, SDSMixin, DatabasePollingMixin, PersonaMixin
 ):
@@ -840,8 +847,17 @@ class RuntimeService(
 
     def _find_building_message(
         self, building_id: str, message_id: str,
-    ) -> Optional[Dict[str, Any]]:
-        """建物履歴から message_id の 1 件を引く (無ければ None)。"""
+    ) -> Tuple[Optional[Dict[str, Any]], str]:
+        """建物履歴から message_id の 1 件を引く。
+
+        戻り値は ``(件, 理由)`` で、理由は ``"found"`` / ``"not_found"`` /
+        ``"unavailable"`` の三択。**「記録に無い」と「履歴を読めなかった」を
+        同じ値に潰さない** — 読めなかった回に「記録に残っていません。もう一度
+        送ってください」と案内すると、ユーザーが送り直して同じ発言が二度載る。
+        それを防ぐのが「再送」の口の存在理由なので、潰すと裏口から破ることに
+        なる。兄弟の ``withdraw_building_message_in_db`` は最初からこの区別を
+        持っており (``"unavailable"``)、こちらだけが持っていなかった。
+        """
         try:
             history = self.manager.get_building_history(building_id)
         except Exception:
@@ -849,20 +865,27 @@ class RuntimeService(
                 "[runtime] failed to read the building history (building=%s)",
                 building_id,
             )
-            return None
+            return None, "unavailable"
         for msg in history or []:
             if str(msg.get("message_id")) == str(message_id):
-                return msg
-        return None
+                return msg, "found"
+        return None, "not_found"
 
     def _stream_persona_pulse(
         self, building_id: str, persona: Any, user_input: str,
+        spoke: Optional[Dict[str, bool]] = None,
     ) -> Iterator[str]:
         """1 体のペルソナの Pulse を起こし、その NDJSON イベントを流す。
 
         ``handle_user_input_stream`` と同じ器 (キュー + ワーカー + 出口 3 の検査)
         を使うが、**ユーザー発言の永続化は行わない** — 発言はもう履歴にあるので、
         ここでもう一度書くと同じ発言が二度載る。
+
+        ``spoke`` を渡すと、ペルソナが実際に言葉を出したときだけ
+        ``spoke["value"]`` が ``True`` になる。呼び出し元が「走らせた」と
+        「言葉が生まれた」を取り違えないための報告口で、``outcome_seen`` とは
+        別物 — あちらはエラー通知も「出口が塞がっていない」として数えるので、
+        「新しい発言ができたか」の判定には使えない。
         """
         response_queue: queue.Queue = queue.Queue()
         stop_event = threading.Event()
@@ -883,6 +906,13 @@ class RuntimeService(
                         )
             if isinstance(event, dict) and event.get("type") in _OUTCOME_EVENT_TYPES:
                 outcome_seen["value"] = True
+            if (
+                spoke is not None
+                and isinstance(event, dict)
+                and event.get("type") in _SPEECH_EVENT_TYPES
+                and str(event.get("content") or "").strip()
+            ):
+                spoke["value"] = True
             response_queue.put(event)
 
         self.manager._active_sse_callbacks[building_id] = _enrich_event
@@ -955,7 +985,15 @@ class RuntimeService(
             }, ensure_ascii=False) + "\n"
             return
 
-        target = self._find_building_message(building_id, message_id)
+        target, lookup = self._find_building_message(building_id, message_id)
+        if lookup == "unavailable":
+            yield json.dumps({
+                "type": "error",
+                "error_code": "history_unavailable",
+                "content": "履歴を読めなかったため、続きを起こせませんでした。"
+                           "少し置いてもう一度お試しください。",
+            }, ensure_ascii=False) + "\n"
+            return
         if target is None or target.get("role") != "assistant":
             yield json.dumps({
                 "type": "error",
@@ -980,14 +1018,23 @@ class RuntimeService(
             }, ensure_ascii=False) + "\n"
             return
 
+        spoke: Dict[str, bool] = {"value": False}
         yield from self._stream_persona_pulse(
-            building_id, persona, self.CONTINUE_INSTRUCTION,
+            building_id, persona, self.CONTINUE_INSTRUCTION, spoke=spoke,
         )
+
+        if not spoke["value"]:
+            # 続きが一言も生まれていない (LLM エラー等)。ここで印を降ろすと
+            # ボタンが消え、二度目は ``not_interrupted`` の関所に「この発言は
+            # 途中で終わっていないため、続きはありません」で拒まれる —
+            # 途中で終わっているのに、そう言うことになる。生まれなかった回は
+            # 印を残す (もう一度押せるだけで、害にならない)。
+            return
 
         # 続きが生まれたので、元の発言はもう「続きを待っている」状態ではない。
         # 印を降ろしてボタンを消す (中断があった事実は、続けて並ぶ 2 つの発言
-        # そのものが残す)。**失敗しても本体の結果は変えない** — 印が残った回は
-        # もう一度押せるだけで、害にならない。
+        # そのものが残す)。**印の書き込みに失敗しても本体の結果は変えない** —
+        # 印が残った回はもう一度押せるだけで、害にならない。
         try:
             persona.history_manager.update_building_message(
                 building_id, str(message_id),
@@ -1013,7 +1060,19 @@ class RuntimeService(
             }, ensure_ascii=False) + "\n"
             return
 
-        target = self._find_building_message(building_id, message_id)
+        target, lookup = self._find_building_message(building_id, message_id)
+        if lookup == "unavailable":
+            # 読めなかっただけで、発言は残っている可能性が高い。ここで
+            # 「もう一度送ってください」と言うと、送り直しで同じ発言が
+            # 二度載る — この口が防ごうとしているものそのもの。
+            yield json.dumps({
+                "type": "error",
+                "error_code": "history_unavailable",
+                "content": "履歴を読めなかったため、やり直せませんでした。"
+                           "同じ内容を送り直す前に、履歴に残っているかを"
+                           "確認してください。",
+            }, ensure_ascii=False) + "\n"
+            return
         if target is None or target.get("role") != "user":
             # 発言が残っていない = 出口 4。手元の文をそのまま送り直せばよいので、
             # フロントは入力欄への差し戻しへ倒す。

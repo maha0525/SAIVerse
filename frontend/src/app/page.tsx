@@ -136,6 +136,10 @@ interface Message {
     // この発言に返事が来なかった。立っている間だけ「再送」ボタンを出す。
     // 発言そのものは残っているので、押しても送り直しにはならない (応答だけ)。
     needsRetry?: boolean;
+    // 取り消しが「もう読まれている」で断られた印。断られても応答はまだ
+    // 生まれていないので needsRetry は残す — 消すと、応答を得る唯一の手段
+    // (再送) まで一緒に失われる。消えるのは「取り消す」だけ。
+    withdrawBlocked?: boolean;
     // Reasoning (thinking) from LLM
     reasoning?: string;
     // 自動想起 (記憶アーキv2 §4.5): この Pulse で末尾注入された「ふと浮かんだ記憶」ブロック。
@@ -2253,6 +2257,7 @@ export default function Home() {
                 ? { ...m, ...(endpoint === 'continue' ? { interrupted: false } : { needsRetry: false }) }
                 : m
         )));
+        let streamStarted = false;
         try {
             const res = await fetch(`/api/chat/${endpoint}`, {
                 method: 'POST',
@@ -2260,9 +2265,31 @@ export default function Home() {
                 body: JSON.stringify({ message_id: messageId }),
             });
             if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+            streamStarted = true;
             await consumeReplyStream(res, endpoint);
         } catch (error) {
             console.error(error);
+            if (!streamStarted) {
+                // 応答が始まる前に落ちた = 何も起きていない。押した瞬間に
+                // 下ろしたボタンを戻す。戻さないと「押した」が「済んだ」と
+                // 同じ扱いになり、この発言はセッション中ずっとやり直せなく
+                // なる (needsRetry はサーバー由来の印を持たないので、再読込
+                // でも戻らない)。
+                // ストリームが始まった後の失敗はここでは戻さない —
+                // 途中まで生まれている可能性があり、正は サーバー側にある
+                // (consumeReplyStream の catch が landedMessageId を見て
+                // 付け直す)。
+                setMessages(prev => prev.map(m => (
+                    m.id === messageId
+                        ? {
+                            ...m,
+                            ...(endpoint === 'continue'
+                                ? { interrupted: true }
+                                : { needsRetry: true }),
+                        }
+                        : m
+                )));
+            }
             setMessages(prev => [...prev, {
                 role: 'system',
                 content: endpoint === 'continue'
@@ -2296,8 +2323,12 @@ export default function Home() {
                 ));
                 requestAnimationFrame(() => adjustTextareaHeight());
             } else {
+                // 取り消せなかった = 何も起きていない。ここで needsRetry を
+                // 下ろすと「再送」まで消え、**まさに再送が要る場面**
+                // (読まれたが返事が生まれなかった発言) で復旧手段が無くなる。
+                // 二度と成功しない「取り消す」だけを引っ込める。
                 setMessages(prev => prev.map(m => (
-                    m.id === messageId ? { ...m, needsRetry: false } : m
+                    m.id === messageId ? { ...m, withdrawBlocked: true } : m
                 )));
                 setMessages(prev => [...prev, {
                     role: 'system',
@@ -3023,7 +3054,8 @@ export default function Home() {
                                     )}
                                     {/* 返事が来なかった発言は、なかったことにもできる。
                                         ただしペルソナがもう読んでいたら断られる。 */}
-                                    {msg.role === 'user' && msg.needsRetry && msg.id && (
+                                    {msg.role === 'user' && msg.needsRetry
+                                        && !msg.withdrawBlocked && msg.id && (
                                         <button
                                             className={`${styles.actionBtn} ${styles.withdrawBtn}`}
                                             onClick={() => handleWithdrawMessage(msg.id as string)}
