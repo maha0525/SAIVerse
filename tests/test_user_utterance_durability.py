@@ -461,12 +461,24 @@ def _continue_service(spoke_value: bool):
     return service, history
 
 
-def test_continue_clears_the_mark_even_if_the_client_disconnects() -> None:
-    """続きが生まれた後にブラウザを閉じられても、印は降りる。
+def test_continue_clears_the_mark_when_the_stream_finishes() -> None:
+    """最後まで配り終えた回は印を降ろし、ボタンを消す。"""
+    service, history = _continue_service(spoke_value=True)
 
-    印を降ろす処理を ``yield from`` の後ろに置くと、そこで generator が閉じられた
-    回は一行も走らない。続きは保存されているのに印だけが残り、次に開いたとき
-    またボタンが出て、押すと二つ目の続きが生まれる。
+    list(service.continue_persona_message_stream("room:1"))
+
+    history.update_building_message.assert_called_once()
+    _, kwargs = history.update_building_message.call_args
+    assert kwargs["metadata"]["_interrupted"] is False
+
+
+def test_continue_keeps_the_mark_when_the_client_disconnects() -> None:
+    """読み手が去った回は印を降ろさない。
+
+    ``spoke`` が立つのは最初の一片が画面へ流れた時点で、続きが保存し終えた時点
+    ではない。切断された回に降ろすと「保存されていないのにボタンが消える」が
+    起こり、続きを取る手段が消える。残した印はもう一度押せるだけなので、
+    そちらの害の方が小さい。
     """
     service, history = _continue_service(spoke_value=True)
 
@@ -474,9 +486,7 @@ def test_continue_clears_the_mark_even_if_the_client_disconnects() -> None:
     next(stream)      # 一行だけ受け取って
     stream.close()    # ブラウザを閉じる
 
-    history.update_building_message.assert_called_once()
-    _, kwargs = history.update_building_message.call_args
-    assert kwargs["metadata"]["_interrupted"] is False
+    history.update_building_message.assert_not_called()
 
 
 def test_continue_keeps_the_mark_when_nothing_was_generated() -> None:
@@ -562,3 +572,101 @@ def test_cleanup_leaves_a_newer_registration_alone() -> None:
 
     assert service.manager._active_stop_events.get("room") is newer_stop
     assert service.manager._active_sse_callbacks.get("room") is newer_callback
+
+
+def _stream_with(events_to_emit):
+    """指定のイベントだけを流して終わるストリームと、その土台を返す。"""
+    persona = SimpleNamespace(persona_id="p1")
+    service = _runtime([persona])
+
+    def _emit(**kwargs):
+        cb = service.manager._active_sse_callbacks["room"]
+        for event in events_to_emit:
+            cb(dict(event, persona_id="p1"))
+
+    service.manager.pulse_dispatcher.dispatch_user_utterance = MagicMock(
+        side_effect=_emit,
+    )
+    return service
+
+
+def _run(service):
+    with patch(
+        "database.building_messages.insert_building_message_with_location_guard",
+        return_value={"message_id": "room:1", "_was_inserted": True},
+    ):
+        return _events(
+            service.handle_user_input_stream(
+                "hello", building_id="room", client_message_id="cmd-1",
+            )
+        )
+
+
+def test_a_discarded_bubble_alone_is_still_silence() -> None:
+    """出した吹き出しを引っ込めて終わった回は、画面に何も残らない。
+
+    ``streaming_discard`` は「いま出した吹き出しを捨てて整形済みを後で出す」ための
+    合図だが、その後 ``say`` が来ない終わり方 (ツール呼び出しだけで終わった回など)
+    がある。断片で立てた印をそのままにすると、無言なのに「届いた」と数える。
+    """
+    service = _stream_with([
+        {"type": "streaming_chunk", "content": "途中まで"},
+        {"type": "streaming_discard"},
+    ])
+
+    assert len(_no_response(_run(service))) == 1
+
+
+def test_a_discarded_bubble_followed_by_a_say_is_an_answer() -> None:
+    """引っ込めた後に整形済みの発言が出れば、それは届いている。"""
+    service = _stream_with([
+        {"type": "streaming_chunk", "content": "途中まで"},
+        {"type": "streaming_discard"},
+        {"type": "say", "content": "整形済みの発言"},
+    ])
+
+    assert _no_response(_run(service)) == []
+
+
+def test_blank_chunks_alone_are_silence() -> None:
+    """空白だけの断片は、画面には何も出ていないのと同じ。"""
+    service = _stream_with([
+        {"type": "streaming_chunk", "content": "   "},
+        {"type": "streaming_chunk", "content": ""},
+    ])
+
+    assert len(_no_response(_run(service))) == 1
+
+
+def test_closing_the_stream_tells_the_worker_to_stop() -> None:
+    """読み手が去ったら生成を止める。
+
+    生成は別スレッドで走っているので、止めると言わない限り走り続ける — 誰も
+    受け取らない応答のために LLM を呼び、料金が発生し、ペルソナが喋って履歴に
+    残る。
+    """
+    persona = SimpleNamespace(persona_id="p1")
+    service = _runtime([persona])
+    captured: dict = {}
+
+    def _speak(**kwargs):
+        captured["stop_event"] = service.manager._active_stop_events["room"]
+        service.manager._active_sse_callbacks["room"]({
+            "type": "say", "content": "hello back", "persona_id": "p1",
+        })
+
+    service.manager.pulse_dispatcher.dispatch_user_utterance = MagicMock(
+        side_effect=_speak,
+    )
+
+    with patch(
+        "database.building_messages.insert_building_message_with_location_guard",
+        return_value={"message_id": "room:1", "_was_inserted": True},
+    ):
+        stream = service.handle_user_input_stream(
+            "hello", building_id="room", client_message_id="cmd-1",
+        )
+        next(stream)      # 一行だけ受け取って
+        stream.close()    # ブラウザを閉じる
+
+    assert captured["stop_event"].is_set()

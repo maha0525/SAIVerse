@@ -2279,6 +2279,13 @@ export default function Home() {
                 setInputValue(prev => (
                     prev.trim() ? `${prev}\n${userMsg.content}` : userMsg.content
                 ));
+                // 添付も一緒に戻す。本文だけ返しても、画像や音声や動画は消えた
+                // ままなので「同じものをもう一度送る」ができない。動画はサーバー側に
+                // 再送用のファイルが残るので、URI を手放すと参照できない置き土産に
+                // なる。
+                if (currentAttachments.length > 0) {
+                    setAttachments(currentAttachments);
+                }
                 requestAnimationFrame(() => adjustTextareaHeight());
                 setMessages(prev => [...prev, {
                     role: 'system',

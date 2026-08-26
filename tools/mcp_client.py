@@ -2775,7 +2775,17 @@ async def _apply_addon_toggle(
         try:
             if is_enabled:
                 if scope == "global":
-                    await manager.add_referrer_for_server(qualified_name, referrer)
+                    instance_key = await manager.add_referrer_for_server(
+                        qualified_name, referrer,
+                    )
+                    if instance_key is None:
+                        # 起動に失敗しても例外ではなく ``None`` が返る (中で捕捉して
+                        # いる)。**失敗の伝え方が二通りある**ので、例外だけを集めて
+                        # いると、接続も参照も無いのに「有効化済み」と画面に出る。
+                        raise RuntimeError(
+                            f"could not start or attach MCP server "
+                            f"'{qualified_name}'"
+                        )
                 elif scope == "per_persona":
                     # §I: 再有効化でも一括 discovery は行わない。ツールは各
                     # ペルソナの次の Pulse 頭で本人の鍵により取得される。

@@ -71,6 +71,41 @@ _OUTCOME_EVENT_TYPES = frozenset({
 #: 続きの生成のように「生まれたときだけ状態を進めたい」側はこちらを見る。
 _SPEECH_EVENT_TYPES = frozenset({"say", "streaming_chunk"})
 
+#: 本文を運ぶ型。中身が空なら画面には何も出ていないので、届いたとは数えない。
+_CONTENT_BEARING_TYPES = frozenset({"say", "streaming_chunk"})
+
+
+def _note_outcome(outcome_seen: Dict[str, Any], event: Any) -> None:
+    """「ユーザーに何かが届いたか」の判定を、イベント 1 件分だけ進める。
+
+    ストリームの断片は**引っ込められることがある**。``streaming_discard`` は
+    「いま出した吹き出しを捨てて、整形済みのものを後で出す」ための合図で、
+    その後 ``say`` が来ない終わり方 (ツール呼び出しだけで終わった回など) も
+    ある。断片で立てた印をそのままにすると、画面には何も残っていないのに
+    「届いた」と数えてしまい、無言のまま終わる。だから断片由来の印は
+    ``from_stream`` として区別し、discard で撤回できるようにする。
+
+    確定した発言やエラー通知は撤回されないので、区別せず立てたままにする。
+    """
+    if not isinstance(event, dict):
+        return
+    etype = event.get("type")
+    if etype == "streaming_discard":
+        if outcome_seen.get("from_stream"):
+            outcome_seen["value"] = False
+            outcome_seen["from_stream"] = False
+        return
+    if etype not in _OUTCOME_EVENT_TYPES:
+        return
+    if etype in _CONTENT_BEARING_TYPES:
+        if not str(event.get("content") or "").strip():
+            return
+        outcome_seen["value"] = True
+        outcome_seen["from_stream"] = (etype == "streaming_chunk")
+        return
+    outcome_seen["value"] = True
+    outcome_seen["from_stream"] = False
+
 class RuntimeService(
     VisitorMixin, GatewayMixin, SDSMixin, DatabasePollingMixin, PersonaMixin
 ):
@@ -638,7 +673,7 @@ class RuntimeService(
         # **結果を作る場所で一度だけ検査する** — 入口を数え切る守り方は必ず漏れる
         # (応答者ゼロ・握り潰された例外・早期 return が、どれも同じ「無言」に
         # 落ちていた)。設計: docs/issues/user_utterance_path_failure_inventory.md
-        outcome_seen = {"value": False}
+        outcome_seen: Dict[str, Any] = {"value": False, "from_stream": False}
 
         def _enrich_event(event):
             """Enrich streaming events with resolved persona name and avatar URL."""
@@ -653,8 +688,7 @@ class RuntimeService(
                             avatar_path_to_url(p.avatar_image)
                             or "/api/static/builtin_icons/host.png"
                         )
-            if isinstance(event, dict) and event.get("type") in _OUTCOME_EVENT_TYPES:
-                outcome_seen["value"] = True
+            _note_outcome(outcome_seen, event)
             response_queue.put(event)
 
         # Register the SSE callback so on_track_activated 経由で起動される
@@ -840,6 +874,12 @@ class RuntimeService(
                     # プロキシ等のタイムアウトを防ぐためのPing
                     yield json.dumps({"type": "ping"}, ensure_ascii=False) + "\n"
         finally:
+            # 読み手が去った回 (ブラウザを閉じた / 通信が切れた) も必ずここへ来る。
+            # 生成は別スレッドで走っているので、**止めると言わない限り走り続ける**
+            # — 誰も受け取らない応答のために LLM を呼び、料金が発生し、ペルソナが
+            # 喋って履歴に残る。正常に終わった回はワーカーがもう畳まれているので、
+            # ここで立てても何も起きない。
+            stop_event.set()
             # 片付けるのは**自分が置いたもの**だけ。この registry は建物ごとに
             # 一枠しかないので、同じ建物で次のストリームが始まると上書きされる。
             # 無条件に pop すると、先に終わった側が後から始まった側の停止イベント
@@ -917,7 +957,7 @@ class RuntimeService(
         stop_event = threading.Event()
         self.manager._active_stop_events[building_id] = stop_event
 
-        outcome_seen = {"value": False}
+        outcome_seen: Dict[str, Any] = {"value": False, "from_stream": False}
 
         def _enrich_event(event):
             if isinstance(event, dict) and event.get("persona_id"):
@@ -930,8 +970,7 @@ class RuntimeService(
                             avatar_path_to_url(p.avatar_image)
                             or "/api/static/builtin_icons/host.png"
                         )
-            if isinstance(event, dict) and event.get("type") in _OUTCOME_EVENT_TYPES:
-                outcome_seen["value"] = True
+            _note_outcome(outcome_seen, event)
             if (
                 spoke is not None
                 and isinstance(event, dict)
@@ -997,8 +1036,10 @@ class RuntimeService(
                 except queue.Empty:
                     yield json.dumps({"type": "ping"}, ensure_ascii=False) + "\n"
         finally:
-            # 片付けるのは自分が置いたものだけ (理由は handle_user_input_stream 側の
-            # 同じ節を参照)。
+            # 読み手が去っても生成は止まらない (理由は handle_user_input_stream 側の
+            # 同じ節を参照)。「続きの生成」と「再送」もここを通る。
+            stop_event.set()
+            # 片付けるのは自分が置いたものだけ (同上)。
             if self.manager._active_stop_events.get(building_id) is stop_event:
                 self.manager._active_stop_events.pop(building_id, None)
             if self.manager._active_sse_callbacks.get(building_id) is _enrich_event:
@@ -1049,17 +1090,25 @@ class RuntimeService(
             return
 
         spoke: Dict[str, bool] = {"value": False}
-        # 印を降ろす条件は「続きが生まれたか」であって「画面まで配り終えたか」では
-        # ない。``yield from`` の後ろに置くと、ブラウザを閉じられた回は generator が
-        # そこで閉じられ、以降が一行も走らない — 続きは保存されているのに印だけが
-        # 残り、次に開いたときまたボタンが出て、押すと二つ目の続きが生まれる。
-        # だから finally に置く。
+        disconnected = False
         try:
             yield from self._stream_persona_pulse(
                 building_id, persona, self.CONTINUE_INSTRUCTION, spoke=spoke,
             )
+        except GeneratorExit:
+            # 読み手が去った。**ここで印を降ろしてはいけない** — ``spoke`` が立つのは
+            # 最初の一片が画面へ流れた時点で、続きが保存し終えた時点ではない。降ろすと
+            # 「保存されていないのにボタンが消える」ことが起こり、続きを取る手段が
+            # 消える。残した印はもう一度押せるだけなので、そちらの害の方が小さい。
+            #
+            # 逆に「保存されたのに印が残る」回は残る (押すと二つ目の続きが生まれる)。
+            # これは**保存できたことを表す信号が無い**という根の症状で、そちらを
+            # 直さない限りどちらへ倒しても穴が開く。設計案件として切り出してある:
+            # docs/issues/user_utterance_path_failure_inventory.md
+            disconnected = True
+            raise
         finally:
-            if spoke["value"]:
+            if spoke["value"] and not disconnected:
                 # 続きが生まれたので、元の発言はもう「続きを待っている」状態では
                 # ない。印を降ろしてボタンを消す (中断があった事実は、続けて並ぶ
                 # 2 つの発言そのものが残す)。**印の書き込みに失敗しても本体の結果
