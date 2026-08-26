@@ -761,8 +761,6 @@ def withdraw_building_message_in_db(
             if obj.ingested_by:
                 try:
                     parsed = json.loads(obj.ingested_by)
-                    if isinstance(parsed, list):
-                        heard = [str(p) for p in parsed if p]
                 except json.JSONDecodeError:
                     # 読めない = 判断できない。消さない方へ倒す。
                     LOGGER.warning(
@@ -771,11 +769,39 @@ def withdraw_building_message_in_db(
                         building_id, message_id,
                     )
                     return (False, "already_heard", None)
+                if not isinstance(parsed, list):
+                    # JSON としては読めたが、配列ではない (``{}`` / ``null`` /
+                    # 数値など)。この列の意味が壊れている状態で、**「空の配列」と
+                    # 同じには扱えない** — 誰が読んだのかを判断できないのだから、
+                    # 読めなかったときと同じく消さない方へ倒す。
+                    LOGGER.warning(
+                        "withdraw_building_message: ingested_by is not a list "
+                        "(%r); refusing to withdraw bid=%s msg_id=%s",
+                        type(parsed).__name__, building_id, message_id,
+                    )
+                    return (False, "already_heard", None)
+                heard = [str(p) for p in parsed if p]
             if heard:
                 return (False, "already_heard", None)
             content = obj.content
-            db.delete(obj)
+            # 「誰も読んでいない」を確かめてから消すまでの間に、ペルソナの取り込みが
+            # 走ることがある。**確かめた時点の値を消す条件に入れて**、変わっていたら
+            # 0 行で終わらせる。そうしないと、読まれた発言を取り消せてしまい、
+            # ペルソナの記憶には残ったまま建物の記録だけが消える。
+            original_ingested = obj.ingested_by
+            deleted = db.query(BuildingMessage).filter(
+                BuildingMessage.building_id == building_id,
+                BuildingMessage.message_id == message_id,
+                BuildingMessage.ingested_by == original_ingested,
+            ).delete(synchronize_session=False)
             db.commit()
+            if not deleted:
+                LOGGER.info(
+                    "withdraw_building_message: someone read it while we were "
+                    "checking; leaving it in place bid=%s msg_id=%s",
+                    building_id, message_id,
+                )
+                return (False, "already_heard", None)
             LOGGER.info(
                 "withdraw_building_message: removed bid=%s msg_id=%s (nobody had read it)",
                 building_id, message_id,

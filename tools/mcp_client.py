@@ -2765,6 +2765,11 @@ async def _apply_addon_toggle(
         )
         return
 
+    # 個々のサーバーの失敗を集める。ここで握って正常終了すると、呼び出し元の
+    # Future は成功として解決し、API は「反映は確定した」と答える — 実際には
+    # 接続が残っているのに、画面の一覧はそれを最終形として表示する。
+    failures: list[tuple[str, Exception]] = []
+
     for qualified_name, meta in targets:
         scope = meta.get("scope", "global")
         try:
@@ -2791,18 +2796,40 @@ async def _apply_addon_toggle(
                 is_enabled,
                 exc,
             )
+            failures.append((qualified_name, exc))
+
+    failed_names = {name for name, _ in failures}
 
     if not is_enabled:
         # After shutdown, drop meta entries so the next enable re-reads
         # mcp_servers.json fresh (picks up edits since the last enable).
         for qualified_name, meta in list(manager._server_meta.items()):
-            if meta.get("addon_name") == addon_name:
-                manager._server_meta.pop(qualified_name, None)
-                LOGGER.debug(
-                    "MCP: removed meta entry '%s' after addon '%s' disabled",
+            if meta.get("addon_name") != addon_name:
+                continue
+            if qualified_name in failed_names:
+                # 畳めなかったサーバーの記録まで消すと、接続や subprocess が
+                # 残ったまま「知らないサーバー」になる。次に有効化したとき
+                # JSON から読み直して二重に起動しうるので、記録は残す。
+                LOGGER.warning(
+                    "MCP: keeping meta entry '%s' — its shutdown failed, so "
+                    "forgetting it would leave an untracked connection",
                     qualified_name,
-                    addon_name,
                 )
+                continue
+            manager._server_meta.pop(qualified_name, None)
+            LOGGER.debug(
+                "MCP: removed meta entry '%s' after addon '%s' disabled",
+                qualified_name,
+                addon_name,
+            )
+
+    if failures:
+        # 呼び出し元 (notify_addon_toggled_sync) の except 節がこれを拾い、
+        # mcp_settled=False を返す。画面は「まだ確定していない」を知る。
+        raise RuntimeError(
+            f"addon toggle failed for {len(failures)} of {len(targets)} "
+            f"server(s): " + ", ".join(sorted(failed_names))
+        )
 
 
 async def _shutdown_all_instances_of_server(

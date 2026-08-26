@@ -324,3 +324,37 @@ class TestWithdrawBuildingMessage(_PathMockMixin, unittest.TestCase):
         self.assertFalse(withdrawn)
         self.assertEqual(reason, "already_heard")
         self.assertEqual(len(fetch_building_messages(self.SessionLocal, self.BID)), 1)
+
+    def test_a_readable_but_non_list_ingested_by_also_refuses(self):
+        """JSON として読めても配列でない値は、「誰も読んでいない」とは数えない。
+
+        上の「壊れた JSON」は守られていたのに、``{}`` や ``null`` のように
+        **読めてしまう**値はそのまま素通りして削除まで進んでいた。分かれ目は
+        読めるかどうかではなく、「誰が読んだのかを言えるか」。
+        """
+        for broken in ("{}", "null", "123", '"p1"'):
+            with self.subTest(ingested_by=broken):
+                mid = self._insert()
+                db = self.SessionLocal()
+                try:
+                    row = db.query(BuildingMessage).filter_by(
+                        building_id=self.BID, message_id=mid,
+                    ).first()
+                    row.ingested_by = broken
+                    db.commit()
+                finally:
+                    db.close()
+
+                withdrawn, reason, _content = self._withdraw(mid)
+
+                self.assertFalse(withdrawn)
+                self.assertEqual(reason, "already_heard")
+
+                db = self.SessionLocal()
+                try:
+                    still_there = db.query(BuildingMessage).filter_by(
+                        building_id=self.BID, message_id=mid,
+                    ).first()
+                finally:
+                    db.close()
+                self.assertIsNotNone(still_there)

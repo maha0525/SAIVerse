@@ -324,6 +324,11 @@ export default function Home() {
     const [moveTrigger, setMoveTrigger] = useState(0); // To trigger RightSidebar refresh
     const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null); // Track which message was copied
     const [usageTooltipId, setUsageTooltipId] = useState<string | null>(null); // Track which message's usage tooltip is open
+    // 取り消しの進行中。ボタンを disabled にするための state と、連打を**同期的に**
+    // 弾くための ref を両方持つ。state だけだと、再描画が挟まる前の 2 発目が
+    // まだ null を見て通り抜け、/withdraw が 2 回飛ぶ。
+    const [withdrawingId, setWithdrawingId] = useState<string | null>(null);
+    const withdrawingRef = useRef<string | null>(null);
     // アドオン: 有効なバブルボタン定義
     const [addonBubbleButtons, setAddonBubbleButtons] = useState<BubbleButtonDef[]>([]);
     // アドオン: メッセージごとのメタデータ { message_id: { addon_name: { key: value } } }
@@ -1655,6 +1660,10 @@ export default function Home() {
         let replied = false;
         // 最後に届いたエラーの札。「やり直しても変わらない」かの判定に使う。
         let lastErrorCode: string | null = null;
+        // 読めなかった行の数。1 行でも読めなければ、そこに何が載っていたかは
+        // 分からない — 発言が届いた印かもしれないし、エラーの説明かもしれない。
+        // 黙って捨てると、何も起きなかったのと同じ顔でストリームが正常終了する。
+        let malformedLines = 0;
         try {
             if (!res.body) throw new Error("No response body");
             const reader = res.body.getReader();
@@ -1663,11 +1672,21 @@ export default function Home() {
 
             while (true) {
                 const { done, value } = await reader.read();
-                if (done) break;
 
-                buffer += decoder.decode(value, { stream: true });
-                const lines = buffer.split('\n');
-                buffer = lines.pop() || ''; // Keep the last partial line
+                let lines: string[];
+                if (done) {
+                    // 最後のチャンクが改行で終わっていない = 行が途中で切れている。
+                    // decoder を flush して残りを取り出し、1 行として通す。捨てると、
+                    // 最後のイベント (結果を運んでいることが多い) が消える。
+                    buffer += decoder.decode();
+                    lines = buffer ? [buffer] : [];
+                    buffer = '';
+                } else {
+                    buffer += decoder.decode(value, { stream: true });
+                    const parts = buffer.split('\n');
+                    buffer = parts.pop() || ''; // Keep the last partial line
+                    lines = parts;
+                }
 
                 for (const line of lines) {
                     if (!line.trim()) continue;
@@ -2078,9 +2097,20 @@ export default function Home() {
                         }
 
                     } catch (e) {
+                        malformedLines += 1;
                         console.error("Error parsing NDJSON line", e, line);
                     }
                 }
+
+                if (done) break;
+            }
+
+            if (malformedLines > 0) {
+                // 下の catch へ落とす。そこには既に「発言が届いた印を持っているか」で
+                // 復旧導線を分ける判断があるので、同じ道を通す。
+                throw new Error(
+                    `${malformedLines} NDJSON line(s) could not be parsed`,
+                );
             }
         } catch (error) {
             console.error(error);
@@ -2241,7 +2271,22 @@ export default function Home() {
                         updateServerBuildingId(data.detail.current_building_id);
                     }
                 } catch { /* ignore JSON parse */ }
-                alert(conflictMsg);
+                // この発言はサーバーに保存されていない。alert だけで済ませると、
+                // 閉じた瞬間に失敗の説明が消え、入力欄も空のままなので、本文を
+                // 手で打ち直すしか手が残らない。③ の「取り消す」と同じ形で
+                // 手元へ返す — 吹き出しを引っ込めて、本文を入力欄に戻す。
+                setMessages(prev => prev.filter(m => m.id !== tempId));
+                setInputValue(prev => (
+                    prev.trim() ? `${prev}\n${userMsg.content}` : userMsg.content
+                ));
+                requestAnimationFrame(() => adjustTextareaHeight());
+                setMessages(prev => [...prev, {
+                    role: 'system',
+                    content: conflictMsg,
+                    isError: true,
+                    errorCode: 'location_conflict',
+                    timestamp: new Date().toISOString(),
+                }]);
                 // status を再取得して UI と整合させる
                 try {
                     const statusRes = await fetch('/api/user/status');
@@ -2360,6 +2405,12 @@ export default function Home() {
     // 入力欄へ返す — ユーザーの発言はユーザーのものなので、手元に戻す形にする。
     const handleWithdrawMessage = async (messageId: string) => {
         if (loadingStatus) return;
+        // 押した瞬間に閉じる。取り消しは元に戻せない操作なので、2 発目が飛ぶと
+        // 「1 発目で消えた発言」を相手に、2 発目が別の結果 (not_found など) を
+        // 返して画面に出る。
+        if (withdrawingRef.current) return;
+        withdrawingRef.current = messageId;
+        setWithdrawingId(messageId);
         clearTransientNotices();
         try {
             const res = await fetch('/api/chat/withdraw', {
@@ -2399,6 +2450,9 @@ export default function Home() {
                 errorCode: 'action_failed',
                 timestamp: new Date().toISOString(),
             }]);
+        } finally {
+            withdrawingRef.current = null;
+            setWithdrawingId(null);
         }
     };
 
@@ -2922,7 +2976,7 @@ export default function Home() {
                                         <div className={styles.errorContent}>
                                             <div className={styles.errorHeader}>
                                                 <span className={styles.errorIcon}>
-                                                    {({rate_limit: '⏱️', timeout: '⏰', safety_filter: '🛡️', server_error: '🔧', empty_response: '📭', authentication: '🔑', payment: '💳', no_response: '💭', no_responder: '🚪', unknown_outcome: '❓', stream_broken: '🔌', send_failed: '🔌', message_not_found: '🔍'} as Record<string, string>)[msg.errorCode || ''] || '⚠️'}
+                                                    {({rate_limit: '⏱️', timeout: '⏰', safety_filter: '🛡️', server_error: '🔧', empty_response: '📭', authentication: '🔑', payment: '💳', no_response: '💭', no_responder: '🚪', unknown_outcome: '❓', stream_broken: '🔌', send_failed: '🔌', message_not_found: '🔍', location_conflict: '📍'} as Record<string, string>)[msg.errorCode || ''] || '⚠️'}
                                                 </span>
                                                 <span className={styles.errorMessage}>{msg.content}</span>
                                             </div>
@@ -2948,6 +3002,9 @@ export default function Home() {
                                                     stream_broken: '接続が途中で切れました。ここまでの内容は残っています。',
                                                     send_failed: 'サーバーに接続できませんでした。SAIVerse が起動しているかを確認してください。',
                                                     message_not_found: 'この発言は記録に残っていません。入力欄からもう一度送ってください。',
+                                                    // 他の画面が先に移動していた回。発言はサーバーに
+                                                    // 届いていないので、本文は入力欄へ返してある。
+                                                    location_conflict: '発言は保存されていません。本文は入力欄に戻したので、いまいる場所を確かめてから送り直してください。',
                                                     empty_message: '空のまま送信されました。内容を入れてから送ってください。',
                                                     no_current_building: 'いまいる場所が確定していません。画面を再読み込みするか、建物を選び直してください。',
                                                     action_failed: '操作をサーバーに届けられませんでした。接続を確認してもう一度お試しください。',
@@ -3117,7 +3174,7 @@ export default function Home() {
                                         <button
                                             className={`${styles.actionBtn} ${styles.withdrawBtn}`}
                                             onClick={() => handleWithdrawMessage(msg.id as string)}
-                                            disabled={!!loadingStatus}
+                                            disabled={!!loadingStatus || withdrawingId === msg.id}
                                             title="この発言を取り消して、入力欄に戻す（まだ誰も読んでいない場合のみ）"
                                         >
                                             <Undo2 size={14} />

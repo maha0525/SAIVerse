@@ -490,3 +490,75 @@ def test_continue_keeps_the_mark_when_nothing_was_generated() -> None:
     list(service.continue_persona_message_stream("room:1"))
 
     history.update_building_message.assert_not_called()
+
+
+def test_a_stream_that_closed_without_text_is_still_silence() -> None:
+    """本文が一文字も出ない回を、ストリームが閉じた合図だけで済ませない。
+
+    LLM が空を返すと ``streaming_chunk`` は一度も出ないので、画面には吹き出し
+    すら作られない。それでも ``streaming_complete`` は送られる — これを「届いた」
+    に数えると、発言は保存されているのに画面が無言のまま終わる。
+    """
+    persona = SimpleNamespace(persona_id="p1")
+    service = _runtime([persona])
+    saved = {"message_id": "room:1", "_was_inserted": True}
+
+    def _empty(**kwargs):
+        service.manager._active_sse_callbacks["room"]({
+            "type": "streaming_complete", "persona_id": "p1",
+        })
+
+    service.manager.pulse_dispatcher.dispatch_user_utterance = MagicMock(
+        side_effect=_empty,
+    )
+
+    with patch(
+        "database.building_messages.insert_building_message_with_location_guard",
+        return_value=saved,
+    ):
+        events = _events(
+            service.handle_user_input_stream(
+                "hello", building_id="room", client_message_id="cmd-1",
+            )
+        )
+
+    assert len(_no_response(events)) == 1
+
+
+def test_cleanup_leaves_a_newer_registration_alone() -> None:
+    """先に終わったストリームが、後から始まった側の停止イベントを消さない。
+
+    この registry は建物ごとに一枠しかないので、同じ建物で次のストリームが
+    始まると上書きされる。終わった側が無条件に片付けると、後から始まった側の
+    「停止」が効かなくなる。
+    """
+    persona = SimpleNamespace(persona_id="p1")
+    service = _runtime([persona])
+    saved = {"message_id": "room:1", "_was_inserted": True}
+    newer_stop = object()
+    newer_callback = object()
+
+    def _speak_then_get_replaced(**kwargs):
+        service.manager._active_sse_callbacks["room"]({
+            "type": "say", "content": "hello back", "persona_id": "p1",
+        })
+        # 後から始まったストリームが同じ建物の枠を取る
+        service.manager._active_stop_events["room"] = newer_stop
+        service.manager._active_sse_callbacks["room"] = newer_callback
+
+    service.manager.pulse_dispatcher.dispatch_user_utterance = MagicMock(
+        side_effect=_speak_then_get_replaced,
+    )
+
+    with patch(
+        "database.building_messages.insert_building_message_with_location_guard",
+        return_value=saved,
+    ):
+        _events(
+            service.handle_user_input_stream(
+                "hello", building_id="room", client_message_id="cmd-1",
+            )
+        )
+
+    assert service.manager._active_stop_events.get("room") is newer_stop
+    assert service.manager._active_sse_callbacks.get("room") is newer_callback

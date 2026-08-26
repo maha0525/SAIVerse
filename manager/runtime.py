@@ -43,11 +43,17 @@ except ImportError:
 #: 考えている様子だけ出して黙って終わるのは、ユーザーから見れば無言だから。
 #: 確認待ちのダイアログ (permission_request 等) は、ストリームが閉じても画面に
 #: 操作が残るので「届いた」に数える。
+#:
+#: ``streaming_complete`` は**数えない**。これは「ストリームが閉じた」の合図で
+#: あって、画面に何かが出た証拠ではない。LLM が空を返した回 (3 回の再試行後も
+#: 空だった回を含む) もこのイベントは送られるが、本文が一文字も無いので
+#: ``streaming_chunk`` は一度も出ておらず、画面には吹き出しすら作られていない。
+#: 数えてしまうと、発言は保存されているのに画面が無言のまま終わる。
+#: 本文が出た回は ``streaming_chunk`` が先に来ているので、取りこぼしはない。
 #: 設計: docs/issues/user_utterance_path_failure_inventory.md
 _OUTCOME_EVENT_TYPES = frozenset({
     "say",
     "streaming_chunk",
-    "streaming_complete",
     "error",
     "cancelled",
     "duplicate_command",
@@ -834,9 +840,14 @@ class RuntimeService(
                     # プロキシ等のタイムアウトを防ぐためのPing
                     yield json.dumps({"type": "ping"}, ensure_ascii=False) + "\n"
         finally:
-            # Clean up stop event
-            self.manager._active_stop_events.pop(building_id, None)
-            self.manager._active_sse_callbacks.pop(building_id, None)
+            # 片付けるのは**自分が置いたもの**だけ。この registry は建物ごとに
+            # 一枠しかないので、同じ建物で次のストリームが始まると上書きされる。
+            # 無条件に pop すると、先に終わった側が後から始まった側の停止イベント
+            # とコールバックまで巻き添えで消し、そちらの「停止」が効かなくなる。
+            if self.manager._active_stop_events.get(building_id) is stop_event:
+                self.manager._active_stop_events.pop(building_id, None)
+            if self.manager._active_sse_callbacks.get(building_id) is _enrich_event:
+                self.manager._active_sse_callbacks.pop(building_id, None)
 
     # ------------------------------------------------------------------
     # やり直しと続き — ユーザーの一押しから起こす生成
@@ -986,8 +997,12 @@ class RuntimeService(
                 except queue.Empty:
                     yield json.dumps({"type": "ping"}, ensure_ascii=False) + "\n"
         finally:
-            self.manager._active_stop_events.pop(building_id, None)
-            self.manager._active_sse_callbacks.pop(building_id, None)
+            # 片付けるのは自分が置いたものだけ (理由は handle_user_input_stream 側の
+            # 同じ節を参照)。
+            if self.manager._active_stop_events.get(building_id) is stop_event:
+                self.manager._active_stop_events.pop(building_id, None)
+            if self.manager._active_sse_callbacks.get(building_id) is _enrich_event:
+                self.manager._active_sse_callbacks.pop(building_id, None)
 
     def continue_persona_message_stream(self, message_id: str) -> Iterator[str]:
         """途中で終わったペルソナの発言の、続きだけを起こす。"""
