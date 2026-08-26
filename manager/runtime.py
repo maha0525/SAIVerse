@@ -636,32 +636,6 @@ class RuntimeService(
             persona._save_session_metadata()
         return replies
 
-    def _cancel_after_disconnect(
-        self, building_id: str, stop_event: threading.Event,
-    ) -> None:
-        """読み手が去ったあと、走っている生成を実際に止める。
-
-        停止イベントだけでは足りない。あれは worker が「次のペルソナへ進むか」を
-        見るためのもので、**いま走っている LLM / Spell / tool には届かない**。
-        止めるには実行中の要求が持つ取り消しの合図 (cancellation token) を立てる
-        必要があり、それは画面の「停止」ボタンと同じ経路
-        (``cancel_active_generation``) が持っている。
-
-        止めないと、誰も受け取らない応答のために料金が発生し、ペルソナが喋って
-        履歴に残る。
-
-        **正常に終わった回では呼ばない。** 後片付け (保存・音声の締め・記憶への
-        転記) の途中で取り消しが立つと、そちらが中断される。
-        """
-        stop_event.set()
-        try:
-            self.manager.cancel_active_generation()
-        except Exception:
-            logging.exception(
-                "[runtime] could not cancel the generation after the reader left "
-                "(building=%s)", building_id,
-            )
-
     def handle_user_input_stream(
         self, message: str, metadata: Optional[Dict[str, Any]] = None, meta_playbook: Optional[str] = None,
         args: Optional[Dict[str, Any]] = None, building_id: Optional[str] = None,
@@ -921,7 +895,6 @@ class RuntimeService(
 
         threading.Thread(target=backend_worker, daemon=True).start()
 
-        disconnected = False
         # メインスレッド: キューを監視してクライアントに送信
         try:
             while True:
@@ -942,12 +915,10 @@ class RuntimeService(
                 except queue.Empty:
                     # プロキシ等のタイムアウトを防ぐためのPing
                     yield json.dumps({"type": "ping"}, ensure_ascii=False) + "\n"
-        except GeneratorExit:
-            disconnected = True
-            raise
         finally:
-            if disconnected:
-                self._cancel_after_disconnect(building_id, stop_event)
+            # **読み手が去っても生成は止めない。** 詳しくは
+            # ``_stream_persona_pulse`` の同じ節を参照。
+            #
             # 片付けるのは**自分が置いたもの**だけ。この registry は建物ごとに
             # 一枠しかないので、同じ建物で次のストリームが始まると上書きされる。
             # 無条件に pop すると、先に終わった側が後から始まった側の停止イベント
@@ -1084,7 +1055,6 @@ class RuntimeService(
 
         threading.Thread(target=worker, daemon=True).start()
 
-        disconnected = False
         try:
             while True:
                 try:
@@ -1099,13 +1069,20 @@ class RuntimeService(
                         break
                 except queue.Empty:
                     yield json.dumps({"type": "ping"}, ensure_ascii=False) + "\n"
-        except GeneratorExit:
-            disconnected = True
-            raise
         finally:
-            if disconnected:
-                # 「続きの生成」と「再送」もここを通る。
-                self._cancel_after_disconnect(building_id, stop_event)
+            # **読み手が去っても生成は止めない。**
+            #
+            # ここは一度「画面が閉じたら止める」を入れて撤回した場所 (2026-08-26)。
+            # SAIVerse のペルソナはブラウザが開いているかどうかと無関係に生きて
+            # いる — 自律行動もするし、時刻から発言も起こす。画面を閉じたことを
+            # 理由に認知を打ち切ると、ユーザーの発言だけが残って返事が生まれない
+            # 状態を**こちらから作る**ことになる。この issue がずっと潰してきた
+            # 「無言で終わる」そのもの。
+            #
+            # さらに止める手段 (``cancel_active_generation``) は建物にいる全員の
+            # 実行中の要求を取り消すので、画面を閉じただけで、無関係な自律行動まで
+            # 巻き添えで止まる。しかも記録には「ユーザーが止めた」と残る。
+            #
             # 片付けるのは自分が置いたものだけ (同上)。
             if self.manager._active_stop_events.get(building_id) is stop_event:
                 self.manager._active_stop_events.pop(building_id, None)

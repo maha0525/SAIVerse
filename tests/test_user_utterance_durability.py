@@ -668,12 +668,20 @@ def test_one_personas_discard_does_not_erase_anothers_answer() -> None:
     assert _no_response(_run(service)) == []
 
 
-def test_closing_the_stream_cancels_the_running_generation() -> None:
-    """読み手が去ったら、走っている生成そのものを止める。
+def test_closing_the_stream_leaves_the_generation_running() -> None:
+    """読み手が去っても生成は止めない。
 
-    停止イベントだけでは worker が「次のペルソナへ進むか」を見るところで止まる
-    だけで、走っている LLM / Spell / tool には届かない。止めないと、誰も受け取ら
-    ない応答のために料金が発生し、ペルソナが喋って履歴に残る。
+    SAIVerse のペルソナはブラウザが開いているかどうかと無関係に生きている —
+    自律行動もするし、時刻から発言も起こす。画面を閉じたことを理由に認知を
+    打ち切ると、ユーザーの発言だけが残って返事が生まれない状態を**こちらから
+    作る**ことになる。この issue がずっと潰してきた「無言で終わる」そのもの。
+
+    しかも止める手段 (``cancel_active_generation``) は建物にいる全員の実行中の
+    要求を取り消すので、画面を閉じただけで無関係な自律行動まで巻き添えになり、
+    記録には「ユーザーが止めた」と残る。
+
+    2026-08-26 に一度「画面が閉じたら止める」を入れて撤回した。その規範をここで
+    固定する。
     """
     persona = SimpleNamespace(persona_id="p1")
     service = _runtime([persona])
@@ -699,18 +707,5 @@ def test_closing_the_stream_cancels_the_running_generation() -> None:
         next(stream)      # 一行だけ受け取って
         stream.close()    # ブラウザを閉じる
 
-    assert captured["stop_event"].is_set()
-    service.manager.cancel_active_generation.assert_called_once()
-
-
-def test_a_stream_that_finishes_normally_cancels_nothing() -> None:
-    """最後まで配り終えた回では取り消さない。
-
-    後片付け (保存・音声の締め・記憶への転記) の途中で取り消しが立つと、そちらが
-    中断される。
-    """
-    service = _stream_with([{"type": "say", "content": "hello back"}])
-
-    _run(service)
-
+    assert not captured["stop_event"].is_set()
     service.manager.cancel_active_generation.assert_not_called()
