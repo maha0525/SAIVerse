@@ -3632,6 +3632,12 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                             "downstream finalize will be skipped — placeholder leak risk",
                         )
                     pipeline_sub_seq = 0
+                    # 下書き行を「もう確定させた」かどうか。停止の後片付けで確定
+                    # させた回と、下書き行をそもそも作れなかった回は、下流にとって
+                    # 意味が正反対 (前者は何もしなくていい / 後者は救済が要る)。
+                    # ID を None に倒して兼用すると二つが同じ値になり、下流が救済の
+                    # つもりで同じ本文をもう一度 Building へ書き込む。
+                    pipeline_finalized = False
 
                     for stream_attempt in range(max_stream_retries):
                         stream_iter = llm_client.generate_stream(
@@ -3692,20 +3698,23 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                             max_stream_retries
                         )
 
+                    # 停止された発言も本人が言い終えたものではないので、ストリーム
+                    # 中断と同じ印を立てる (中断の主語は違うが、「言い切っていない」
+                    # という事実は同じ)。**下書き行を作れたかどうかとは無関係に立てる**
+                    # — 作れなかった回は下流の救済経路で保存されるので、ここで印を
+                    # 落とすと、停止された部分文が言い終えた発言の顔で履歴に残る。
+                    if cancelled_during_stream and (text or "").strip():
+                        state[INTERRUPTED_METADATA_KEY] = True
+
                     # Cancellation cleanup: placeholder を発番済みのまま
                     # cancellation で抜けた場合、 voice-tts 側 audio_stream が
                     # close されず、 building history の _streaming_placeholder
                     # も残り続ける。 ここで finalize して 「partial で確定 +
                     # voice-tts に is_final=True を送って stream close + wav
-                    # 保存」 を強制する。 下流の spell loop / emit 経路は二重
-                    # finalize しないよう pipeline_msg_id を倒しておく。
+                    # 保存」 を強制する。確定させた事実は pipeline_finalized で
+                    # 下流へ渡す (ID を倒すと「作れなかった」と区別がつかない)。
                     if cancelled_during_stream and pipeline_msg_id:
                         pipeline_sub_seq += 1
-                        # 停止された発言も本人が言い終えたものではないので、
-                        # ストリーム中断と同じ印を立てる (中断の主語は違うが、
-                        # 「言い切っていない」という事実は同じ)。
-                        if (text or "").strip():
-                            state[INTERRUPTED_METADATA_KEY] = True
                         try:
                             runtime._emit_speak_finalize(
                                 persona, pipeline_eff_bid, pipeline_msg_id, text or "",
@@ -3729,7 +3738,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                             "msg=%s seq=%d partial_len=%d",
                             pipeline_msg_id, pipeline_sub_seq, len(text or ""),
                         )
-                        pipeline_msg_id = None
+                        pipeline_finalized = True
 
                     # Record usage (even if cancelled — tokens were consumed)
                     llm_usage_metadata: Dict[str, Any] | None = _record_llm_usage(
@@ -3762,7 +3771,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                     # UI に流れつつ、 文区切りで sub-speak も発火する。 helper は
                     # state dict を in-place mutate して sub_seq を更新する。
                     _pipeline_spell_state: Optional[dict] = None
-                    if pipeline_msg_id:
+                    if pipeline_msg_id and not pipeline_finalized:
                         _pipeline_spell_state = {
                             "msg_id": pipeline_msg_id,
                             "sub_seq": pipeline_sub_seq,
@@ -3804,7 +3813,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                             # speak=false の場合でも placeholder を放置すると
                             # _streaming_placeholder=True で残り続けるので、
                             # voice-tts に空文字で finalize して close する。
-                            if pipeline_msg_id:
+                            if pipeline_msg_id and not pipeline_finalized:
                                 pipeline_sub_seq += 1
                                 runtime._emit_speak_finalize(
                                     persona,
@@ -3858,7 +3867,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                                     _say_event_ns["metadata"] = _spell_msg_meta_ns
                                 event_callback(_say_event_ns)
 
-                            if pipeline_msg_id:
+                            if pipeline_msg_id and not pipeline_finalized:
                                 pipeline_sub_seq += 1
                                 runtime._emit_speak_finalize(
                                     persona, pipeline_eff_bid, pipeline_msg_id, text,
@@ -3927,7 +3936,17 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                             msg_metadata[INTERRUPTED_METADATA_KEY] = True
                         eff_bid = runtime._effective_building_id(persona, building_id)
 
-                        if pipeline_msg_id:
+                        if pipeline_finalized:
+                            # 停止の後片付けで既に確定させた回。ここで書き足すと同じ
+                            # 本文が二度 Building に入る。下の救済経路は「下書き行を
+                            # 作れなかった」ときのためのもので、「確定済み」はそれに
+                            # 当たらない。
+                            LOGGER.info(
+                                "[sea][pipeline] already settled by cancellation cleanup "
+                                "(msg=%s) — skipping both the finalize and the fallback emit",
+                                pipeline_msg_id,
+                            )
+                        elif pipeline_msg_id:
                             # Pipeline Streaming: placeholder を text 全文で finalize。
                             # voice-tts は sub-speak 経由で全テキストを既に受け取って
                             # おり、 finalize hook では ``final_voice_text=""`` で

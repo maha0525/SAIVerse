@@ -434,3 +434,59 @@ def test_retry_uses_the_same_label_for_the_same_fact() -> None:
     events = _events(service.retry_user_message_stream("room:7"))
 
     assert [event.get("error_code") for event in events] == ["no_responder"]
+
+
+def _continue_service(spoke_value: bool):
+    """「続きの生成」を通せる最小の土台と、その履歴モックを返す。"""
+    history = MagicMock()
+    persona = SimpleNamespace(persona_id="p1", history_manager=history)
+    service = _runtime()
+    service.personas = {"p1": persona}
+    service._find_building_message = lambda building_id, message_id: (
+        {
+            "role": "assistant",
+            "persona_id": "p1",
+            "metadata": {"_interrupted": True},
+        },
+        "ok",
+    )
+
+    def _pulse(building_id, target_persona, instruction, spoke=None):
+        if spoke is not None:
+            spoke["value"] = spoke_value
+        yield "first\n"
+        yield "second\n"
+
+    service._stream_persona_pulse = _pulse
+    return service, history
+
+
+def test_continue_clears_the_mark_even_if_the_client_disconnects() -> None:
+    """続きが生まれた後にブラウザを閉じられても、印は降りる。
+
+    印を降ろす処理を ``yield from`` の後ろに置くと、そこで generator が閉じられた
+    回は一行も走らない。続きは保存されているのに印だけが残り、次に開いたとき
+    またボタンが出て、押すと二つ目の続きが生まれる。
+    """
+    service, history = _continue_service(spoke_value=True)
+
+    stream = service.continue_persona_message_stream("room:1")
+    next(stream)      # 一行だけ受け取って
+    stream.close()    # ブラウザを閉じる
+
+    history.update_building_message.assert_called_once()
+    _, kwargs = history.update_building_message.call_args
+    assert kwargs["metadata"]["_interrupted"] is False
+
+
+def test_continue_keeps_the_mark_when_nothing_was_generated() -> None:
+    """続きが一言も生まれなかった回は印を残す。
+
+    ここで降ろすとボタンが消え、二度目は「この発言は途中で終わっていないため、
+    続きはありません」で拒まれる — 途中で終わっているのに、そう言うことになる。
+    """
+    service, history = _continue_service(spoke_value=False)
+
+    list(service.continue_persona_message_stream("room:1"))
+
+    history.update_building_message.assert_not_called()

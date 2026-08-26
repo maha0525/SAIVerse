@@ -1034,31 +1034,35 @@ class RuntimeService(
             return
 
         spoke: Dict[str, bool] = {"value": False}
-        yield from self._stream_persona_pulse(
-            building_id, persona, self.CONTINUE_INSTRUCTION, spoke=spoke,
-        )
-
-        if not spoke["value"]:
-            # 続きが一言も生まれていない (LLM エラー等)。ここで印を降ろすと
-            # ボタンが消え、二度目は ``not_interrupted`` の関所に「この発言は
-            # 途中で終わっていないため、続きはありません」で拒まれる —
-            # 途中で終わっているのに、そう言うことになる。生まれなかった回は
-            # 印を残す (もう一度押せるだけで、害にならない)。
-            return
-
-        # 続きが生まれたので、元の発言はもう「続きを待っている」状態ではない。
-        # 印を降ろしてボタンを消す (中断があった事実は、続けて並ぶ 2 つの発言
-        # そのものが残す)。**印の書き込みに失敗しても本体の結果は変えない** —
-        # 印が残った回はもう一度押せるだけで、害にならない。
+        # 印を降ろす条件は「続きが生まれたか」であって「画面まで配り終えたか」では
+        # ない。``yield from`` の後ろに置くと、ブラウザを閉じられた回は generator が
+        # そこで閉じられ、以降が一行も走らない — 続きは保存されているのに印だけが
+        # 残り、次に開いたときまたボタンが出て、押すと二つ目の続きが生まれる。
+        # だから finally に置く。
         try:
-            persona.history_manager.update_building_message(
-                building_id, str(message_id),
-                metadata={**(target.get("metadata") or {}), "_interrupted": False},
+            yield from self._stream_persona_pulse(
+                building_id, persona, self.CONTINUE_INSTRUCTION, spoke=spoke,
             )
-        except Exception:
-            logging.exception(
-                "[runtime] failed to clear the interrupted mark (msg=%s)", message_id,
-            )
+        finally:
+            if spoke["value"]:
+                # 続きが生まれたので、元の発言はもう「続きを待っている」状態では
+                # ない。印を降ろしてボタンを消す (中断があった事実は、続けて並ぶ
+                # 2 つの発言そのものが残す)。**印の書き込みに失敗しても本体の結果
+                # は変えない** — 印が残った回はもう一度押せるだけで、害にならない。
+                try:
+                    persona.history_manager.update_building_message(
+                        building_id, str(message_id),
+                        metadata={**(target.get("metadata") or {}), "_interrupted": False},
+                    )
+                except Exception:
+                    logging.exception(
+                        "[runtime] failed to clear the interrupted mark (msg=%s)",
+                        message_id,
+                    )
+            # 続きが一言も生まれていない回 (LLM エラー等) は印を残す。ここで降ろすと
+            # ボタンが消え、二度目は ``not_interrupted`` の関所に「この発言は途中で
+            # 終わっていないため、続きはありません」で拒まれる — 途中で終わって
+            # いるのに、そう言うことになる。
 
     def retry_user_message_stream(self, message_id: str) -> Iterator[str]:
         """既にある自分の発言に対して、応答だけをやり直す。
