@@ -26,8 +26,11 @@ from sea.runtime_llm import INTERRUPTED_METADATA_KEY, _settle_interrupted_uttera
 # _settle_interrupted_utterance 単体 — 原因 (by_user) で変わるのは通告の文面だけ
 # ---------------------------------------------------------------------------
 
-def _settle(**overrides):
+def _settle(occupants=("1", "p1"), **overrides):
     runtime = MagicMock()
+    # 通告の heard_by は在室者から組む。MagicMock のままだと list() で落ちて
+    # 通告ごと握り潰される (それはそれでテストが赤くなるが、原因が読めない)。
+    runtime.manager.occupants = {"b1": list(occupants)}
     persona = SimpleNamespace(persona_id="p1", history_manager=MagicMock())
     state = {}
     events: list = []
@@ -55,6 +58,9 @@ def _notice_content(persona) -> str:
     building_id, message = call.args
     assert building_id == "b1"
     assert message["role"] == "host"
+    # heard_by 無しの通告は、取り込み (get_building_messages) が永遠にスキップ
+    # するので誰の記憶にも届かない (2026-08-27 実機検証で発覚)。在室者が必須。
+    assert call.kwargs.get("heard_by"), "通告に heard_by (在室者) が渡っていない"
     return message["content"]
 
 
@@ -86,6 +92,18 @@ def test_an_empty_body_settles_quietly():
     persona.history_manager.add_to_building_only.assert_not_called()
     assert events == []
     assert INTERRUPTED_METADATA_KEY not in state
+
+
+def test_the_notice_reaches_every_occupant_including_the_speaker():
+    """通告の heard_by は在室者全員。在室者リストに発話者本人が欠けていても
+    補う (emit_speak_start と同じ規律)。"""
+    _, persona, _, _, _ = _settle()
+    call = persona.history_manager.add_to_building_only.call_args
+    assert call.kwargs["heard_by"] == ["1", "p1"]
+
+    _, persona2, _, _, _ = _settle(occupants=("1",))
+    call2 = persona2.history_manager.add_to_building_only.call_args
+    assert call2.kwargs["heard_by"] == ["1", "p1"]
 
 
 def test_a_failing_ui_event_does_not_stop_memory_and_notice():
@@ -175,6 +193,7 @@ def _node_def():
 
 def _build_node(monkeypatch, *, client, spell_loop):
     runtime = MagicMock()
+    runtime.manager.occupants = {"b1": ["1"]}
     runtime._effective_building_id.return_value = "b1"
     runtime._emit_speak_start.return_value = "msg-1"
     runtime._default_temperature.return_value = 0.7

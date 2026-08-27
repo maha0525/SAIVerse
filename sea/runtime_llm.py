@@ -1892,7 +1892,9 @@ def _settle_interrupted_utterance(
        で変わる (ユーザーの操作を明記 / 原因を書かない一文)。役は ``host`` で、
        入退室の通知と同じ道を通る。取り込みの側が建物名を添えて
        ``user`` + ``<system>`` へ組み替えてから各ペルソナの記憶へ配るので、
-       **ここでその形を自分で作らない**。
+       **ここでその形を自分で作らない**。ただし取り込みが配るのは ``heard_by``
+       に載ったペルソナだけ — 在室者を渡さないと、通告は建物の記録に残るだけで
+       誰の記憶にも永遠に届かない (2026-08-27 の実機検証で発覚)。
 
     本人の発言そのものには一切手を入れない。機構が足した注記は、ペルソナが自分の
     文体として模倣し始めるため、独立した一行として後ろに置く。
@@ -1964,6 +1966,9 @@ def _settle_interrupted_utterance(
         )
 
     try:
+        heard_by = list(runtime.manager.occupants.get(building_id, []) or [])
+        if persona.persona_id and persona.persona_id not in heard_by:
+            heard_by.append(persona.persona_id)
         persona.history_manager.add_to_building_only(
             building_id,
             {
@@ -1978,6 +1983,7 @@ def _settle_interrupted_utterance(
                     else "(ここで発言が中断されました)"
                 ),
             },
+            heard_by=heard_by,
         )
     except Exception:
         LOGGER.warning(
