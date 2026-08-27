@@ -1,6 +1,6 @@
 # Intent: Track の撤廃 — 最後の住人たちの引っ越し計画
 
-**ステータス**: **完了（2026-08-22、まはー実機検証待ち）** — §9 で `TrackManager` への参照がゼロになり、モジュールごと削除した。`ActionTrack` テーブルと既存データは読み取り専用の残置（v3 §9-8 ①）。会話経路の Track なし化は §8（束 6 第三便）。**裁定 3 点（A 関心の器 / B alert / C 門との線引き）すべて決着済み**。**裁定 B の ②③（閾値ポーラ・Handler tick 拡張点の撤去）は 2026-08-11 に実装完了**（§5-B の実装欄）。**撤去順序①の範囲は §7 で確定（裁定 5 点すべて 2026-08-14 に決着）— 実装フェーズ**。まはーの作戦変更「Track の撤廃計画を完全に立ててからでないと、エピソードの単位の議論がまともにできない」を受けて起草。
+**ステータス**: **完了（2026-08-22 実装 / 2026-08-23〜24 実機検証）** — §9 で `TrackManager` への参照がゼロになり、モジュールごと削除した。`ActionTrack` テーブルと既存データは読み取り専用の残置（v3 §9-8 ①）。会話経路の Track なし化は §8（束 6 第三便）。**実機検証は [v3 実機検証ハンドオフ](../handoff/2026-08-24_v3_live_verification_handoff.md) §3 のチェックリストで合格した** — 起動時の機械写し（住人 1 の関心 → 手帳のアクティビティ、17 ペルソナに写り二回目で重複なし）・会話経路（住人 2・8）・運転 UI の撤去（住人 9）。**ただし仲裁の発火ゲート（住人 6・7、§8.2）だけは v0.3 の止め具（`autonomy_wiring.AUTONOMOUS_DRIVING_SHIPPED = False`）で判断点が発火せず検証が成立しないため、運転依存の 6 件と同じく v0.4 送り**（まはー裁定 2026-08-23、867d913e）。**裁定 3 点（A 関心の器 / B alert / C 門との線引き）すべて決着済み**。**裁定 B の ②③（閾値ポーラ・Handler tick 拡張点の撤去）は 2026-08-11 に実装完了**（§5-B の実装欄）。**撤去順序①の範囲は §7 で確定（裁定 5 点すべて 2026-08-14 に決着）— 実装済み**。まはーの作戦変更「Track の撤廃計画を完全に立ててからでないと、エピソードの単位の議論がまともにできない」を受けて起草。
 **親**: [`persona_cognition/recall_tags_and_track_reduction.md`](persona_cognition/recall_tags_and_track_reduction.md)（§3.2/§4.3 — 「役割縮小 → 溶解」の方向自体は 2026-07-24 に裁定済み）/ [`persona_cognition/life_concept_map.md`](persona_cognition/life_concept_map.md) §10（Track ＝複数概念の未分化な束）
 **関連**: [`episode.md`](episode.md)（Wave 1「器と縁」の設計 — 本計画の完成を待って再開する）/ [`../overview/v030_release_gate.md`](../overview/v030_release_gate.md) §2-2
 
@@ -160,7 +160,7 @@ v2 判断点側にも running Track の読みが **1 箇所だけ**残ってい�
 
 **追従**: シム基盤（day_scenario）の v1 互換スタブ、テスト（test_meta_layer の v1 部分・test_cache_keepalive の Fake・test_autonomy_wiring の social フォールバック）、ドキュメント（landscape §9・persona_cognition 各所・本 intent §2 住人 6/7）、tool catalog / api-endpoints の再生成。meta_judgment_* の DB playbooks 行は dispatch が消えるため無害な残骸 — 掃除は⑦の migration でテーブルごと。
 
-**実装（2026-08-14、完了 — まはー実機検証待ち）**: 上記の確定範囲どおり実装した。撤去 = `MetaLayer` を共有基盤（`_get_lock` / `_load_judgment_config` / `_record_judgment_log`）だけに刻み直し（`saiverse/meta_layer.py` 全面書き直し）、`TrackManager.set_alert`＋alert observer 機構削除、`meta_judgment*.json` 6 枚（NL 素体含む）と `meta_judgment_finalize.py` をファイル削除、debug API 2 本（fire-meta-judgment = 廃止 no-op / wrap-up-conversation = `handle_wait_response_timeout` 即時発火へ）、social timeout の else 枝 = WARNING 化。直結化 = `autonomy_wiring.handle_user_utterance_conflict` 新設（on_event 判断点流用、engage_now → activate、判断起動不能時は activate に倒す = 呼びかけを機構の不備で黙殺しない、indeterminate は二重応対回避で応答しない）、handler の衝突判定を running-Track 衝突から「開いている出来事 ≠ 会話」へ変更（案 Y の残留 running 誤検知も同時に解消）。付け替え = `build_on_event_situation_text` の「いまの活動」を開いている出来事（meta.title または kind 表示名）から導出。付随発見: 旧 v1 の is_participating ゲート（ゲーム参加中の定期判断抑止）は退役で完全消滅 — v2 判断点は元からこのゲートを通っておらず、ゲーム参加と自律駆動の相互作用は住人 12 と合わせて④で設計（`game_lifecycle.py` の NOTE に記録）。テスト: v1 専用 4 ファイル削除・`test_meta_layer` は共有基盤のみに書き直し・`test_stop_autonomy` 切り出し・handler/track_manager/judgment_points/autonomy_wiring の該当テストを新経路へ書き替え（alert 行互換の activate テスト追加）。
+**実装（2026-08-14、完了 — 実機検証は v0.4 送り、§8.2 の注記）**: 上記の確定範囲どおり実装した。撤去 = `MetaLayer` を共有基盤（`_get_lock` / `_load_judgment_config` / `_record_judgment_log`）だけに刻み直し（`saiverse/meta_layer.py` 全面書き直し）、`TrackManager.set_alert`＋alert observer 機構削除、`meta_judgment*.json` 6 枚（NL 素体含む）と `meta_judgment_finalize.py` をファイル削除、debug API 2 本（fire-meta-judgment = 廃止 no-op / wrap-up-conversation = `handle_wait_response_timeout` 即時発火へ）、social timeout の else 枝 = WARNING 化。直結化 = `autonomy_wiring.handle_user_utterance_conflict` 新設（on_event 判断点流用、engage_now → activate、判断起動不能時は activate に倒す = 呼びかけを機構の不備で黙殺しない、indeterminate は二重応対回避で応答しない）、handler の衝突判定を running-Track 衝突から「開いている出来事 ≠ 会話」へ変更（案 Y の残留 running 誤検知も同時に解消）。付け替え = `build_on_event_situation_text` の「いまの活動」を開いている出来事（meta.title または kind 表示名）から導出。付随発見: 旧 v1 の is_participating ゲート（ゲーム参加中の定期判断抑止）は退役で完全消滅 — v2 判断点は元からこのゲートを通っておらず、ゲーム参加と自律駆動の相互作用は住人 12 と合わせて④で設計（`game_lifecycle.py` の NOTE に記録）。テスト: v1 専用 4 ファイル削除・`test_meta_layer` は共有基盤のみに書き直し・`test_stop_autonomy` 切り出し・handler/track_manager/judgment_points/autonomy_wiring の該当テストを新経路へ書き替え（alert 行互換の activate テスト追加）。
 
 **レビュー消し込み（2026-08-14、Codex 1 巡の 6 件）**: F1（busy 判定が non-running 分岐でしか走らない）は**まはー裁定で却下 = 仕様どおり**（「別行動中でも会話を優先」の方針が直前に確定しており、残留 running 経由の即応答はそれに合致。仲裁経路そのものの存在意義は順序④で問い直す）。残り 5 件を消し込み:
 
@@ -198,6 +198,8 @@ v2 判断点側にも running Track の読みが **1 箇所だけ**残ってい�
 - 新: 「**会話の出来事が開いているか**」→ 開いていれば直接応答、閉じていて別の活動中なら仲裁
 
 これは §7.4 が設計として書いていた機械判定（「開いている出来事 ≠ 会話」）そのもので、F2 の注記にある「案 Y の残留 running 誤検知」を器ごと解消した形。**結果として仲裁は設計どおりの頻度で発火するようになる**（＝今より増える）。F1 の裁定（「別行動中でも会話を優先」）は残留 running という偶然の産物に乗っていたので、仲裁経路そのものの存在意義は予定どおり順序④で問い直す。
+
+**実機検証は v0.4 送り（2026-08-23）**: この意味論の変化は、当初「まはーが実機で確認する」ものとして台帳に載っていた（2026-08-22 に本 intent が完了へ移ったとき、行は v0.3.0 の門の row へ畳まれた）。その翌日 v0.3 の止め具（`autonomy_wiring.AUTONOMOUS_DRIVING_SHIPPED = False`、390f7e9d）が入って判断点が一切発火しなくなったため、**仲裁の発火そのものが v0.3 では起こらず、検証が成立しない**。運転依存の実機検証 6 件を凍結した裁定（867d913e）と同じ理由で、確認は v0.4 で運転を配線するときに行う。[実機検証ハンドオフ](../handoff/2026-08-24_v3_live_verification_handoff.md) §3 のチェックリストでは「3 仲裁 = 対象外」として記録されている。
 
 ### 8.3 撤去したもの
 
