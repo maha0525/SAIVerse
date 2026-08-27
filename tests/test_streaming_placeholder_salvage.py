@@ -702,3 +702,118 @@ def test_a_node_without_memorize_gets_no_backfill(monkeypatch):
         asyncio.run(node({"_messages": [], "_pulse_id": "pl-1"}))
 
     runtime._store_memory.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# 建物へ本文を書く口は下書き行の確定だけではない — `_emit_say_and_capture` の
+# 直接書き込み (非ストリーミング / fallback / tool streaming) の後に死んだ回も
+# 「建物には本文があるのに記憶が無い」形で、補填の対象 (2026-08-27 Codex 指摘)。
+# ---------------------------------------------------------------------------
+
+class _FakeSyncClient:
+    """generate だけを持つ最小の LLM クライアント (非ストリーミング経路用)。"""
+
+    config_key = None
+
+    def __init__(self, reply):
+        self._reply = reply
+
+    def generate(self, messages, tools=(), temperature=None,
+                 response_schema=None, **kwargs):
+        return self._reply
+
+    def consume_usage(self):
+        return None
+
+    def consume_thought_signature(self):
+        return None
+
+
+def test_a_death_after_a_non_streaming_say_backfills_the_memory(monkeypatch):
+    """非ストリーミング (同期) 経路 — say の後の例外死でも記憶が補填される。
+
+    この経路は下書き行を作らない (pipeline_finalized が立たない) ので、
+    say 直書きの印 (`beat_said`) が補填の発火条件に要る。"""
+    client = _FakeSyncClient("こんにちは。")
+
+    async def _no_spells(**kwargs):
+        return kwargs["text"], kwargs["text"], 0
+
+    runtime, persona, node, events = _build_node(
+        monkeypatch, client=client, spell_loop=_no_spells,
+        node_def=_memorize_node_def(),
+    )
+    monkeypatch.setattr(runtime_llm, "_is_llm_streaming_enabled", lambda: False)
+    # say (branch: 非ストリーミング) の後、_finalize_beat の手前で通る
+    # _dump_llm_io で落とす
+    runtime._dump_llm_io.side_effect = RuntimeError("boom after the sync say")
+
+    with pytest.raises(LLMError):
+        asyncio.run(node({"_messages": [], "_pulse_id": "pl-1"}))
+
+    # 下書き行は無いので、確定は呼ばれない
+    runtime._emit_speak_finalize.assert_not_called()
+    # 補填が say した本文で 1 回書く
+    runtime._store_memory.assert_called_once()
+    assert runtime._store_memory.call_args.args[1] == "こんにちは。"
+
+
+def test_a_death_after_the_fallback_say_backfills_the_memory(monkeypatch):
+    """下書き行の発番に失敗した回の fallback say — その後の例外死でも補填される。"""
+    client = _FakeStreamClient(chunks=["こんにちは。"])
+
+    async def _no_spells(**kwargs):
+        return kwargs["text"], kwargs["text"], 0
+
+    runtime, persona, node, events = _build_node(
+        monkeypatch, client=client, spell_loop=_no_spells,
+        node_def=_memorize_node_def(),
+    )
+    runtime._emit_speak_start.return_value = None
+    runtime._dump_llm_io.side_effect = RuntimeError("boom after the fallback say")
+
+    with pytest.raises(LLMError):
+        asyncio.run(node({"_messages": [], "_pulse_id": "pl-1"}))
+
+    # 下書き行を作れなかったので、確定は無い — 本文は fallback の _emit_say で
+    # 建物に入り、記憶は補填が埋める
+    runtime._emit_speak_finalize.assert_not_called()
+    runtime._store_memory.assert_called_once()
+    assert runtime._store_memory.call_args.args[1] == "こんにちは。"
+
+
+def test_an_important_only_backfill_writes_the_same_shape_as_the_dual_write(monkeypatch):
+    """important のみのノードの補填 — 通常の dual-write と同一の引数集合で書く。
+
+    `_store_beat_memory` 経由だと pulse_context / paired_action_text / scope /
+    line_role / spell_origin_id が付き、同じノードの発言が死に方で違う形になる
+    (2026-08-27 Codex 指摘の固定)。"""
+    client = _FakeStreamClient(chunks=["こんにちは。"])
+
+    async def _no_spells(**kwargs):
+        return kwargs["text"], kwargs["text"], 0
+
+    node_def = _node_def()
+    node_def.memorize = None
+    node_def.important = True
+    runtime, persona, node, events = _build_node(
+        monkeypatch, client=client, spell_loop=_no_spells, node_def=node_def,
+    )
+    # 確定 (branch 3) の後、_finalize_beat の手前で通る _dump_llm_io で落とす
+    runtime._dump_llm_io.side_effect = RuntimeError("boom before the dual-write")
+
+    state = {"_messages": [], "_pulse_id": "pl-1"}
+    with pytest.raises(LLMError):
+        asyncio.run(node(state))
+
+    runtime._store_memory.assert_called_once()
+    call = runtime._store_memory.call_args
+    assert call.args[1] == "こんにちは。"
+    assert call.kwargs["tags"] == ["conversation"]
+    assert call.kwargs["playbook_name"] == "pb"
+    # dual-write に無い引数は補填でも渡さない
+    for absent in ("paired_action_text", "spell_origin_id", "spell_seq",
+                   "scope", "line_role", "pulse_context"):
+        assert absent not in call.kwargs, absent
+    # 書けた回は「もう記憶に書かれた」の印が立つ
+    assert state["_beat_memorized"] is True

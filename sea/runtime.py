@@ -1720,7 +1720,21 @@ class SEARuntime:
             # ときは必ず両方を揃えること (2026-07-15 の写真→クリップ改名で、ここが
             # add_photos のまま残りクリップが 1 枚も保存されなくなった)。
             if mark_spans and inserted_id and hasattr(adapter, "add_clips"):
-                adapter.add_clips(inserted_id, mark_spans)
+                # クリップ保存だけを別 try で包む — 本文の行はもうコミット済み
+                # なので、ここで失敗しても「message lost」ではない。外側の
+                # except に落とすと呼び出し元へ「保存失敗」が返り、印
+                # (`_beat_memorized`) が立たず、Beat の出口の補填が同じ本文を
+                # 二重に書ける (2026-08-27 Codex 指摘)。
+                try:
+                    adapter.add_clips(inserted_id, mark_spans)
+                except Exception:
+                    LOGGER.warning(
+                        "[_store_memory] add_clips failed for persona=%s "
+                        "message_id=%s — the message row is committed; only "
+                        "the clips were lost",
+                        getattr(persona, "persona_id", None), inserted_id,
+                        exc_info=True,
+                    )
             if return_message_id:
                 return inserted_id or ""
             return True

@@ -3279,6 +3279,17 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
         # ストリーム消費中に例外が出ると返り値は届かないため、途中まで受けた
         # 本文と発火済みの sub-speak 連番は、この器からしか回収できない。
         _stream_progress: Dict[str, Any] = {}
+        # 「_emit_say_and_capture で建物へ本文を書いた」の印。建物へ本文を
+        # 書く口は下書き行の確定 (pipeline_finalized) だけではない — tool
+        # streaming の both / 通常本文、下書き行を作れなかった回の fallback、
+        # 非ストリーミング (同期) の 4 箇所が _emit_say_and_capture で直接
+        # 書く。これらの後に Beat が死んだ回も「建物には本文があるのに記憶が
+        # 無い」形なので、補填 (`_backfill_memory_on_beat_death`) の発火条件に
+        # 数える (2026-08-27 Codex 指摘)。beat_said_text は say した瞬間の
+        # 本文の写し — 同期経路では say の後に text が continuation へ
+        # 差し替わるため、閉包の text をそのまま読めない。
+        beat_said = False
+        beat_said_text = ""
 
         def _settle_placeholder_on_beat_death(exc: BaseException) -> None:
             """Beat がどんな形で死んでも、未確定の下書き行を残さない。
@@ -3352,22 +3363,24 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
         def _backfill_memory_on_beat_death(exc: BaseException) -> None:
             """確定は済んだのに、記憶へ書く前に Beat が死んだ回の補填。
 
-            通常の確定 (`_emit_speak_finalize`) の後、`_finalize_beat` の
-            memorize が走る前に例外が出ると、建物の記録には全文が確定済みなのに
-            本人の記憶 (SAIMemory) には何も書かれないまま Beat が死ぬ。下書き行の
-            後始末 (`_settle_placeholder_on_beat_death`) は「確定済み」で
-            スキップするので、そのままでは記憶だけが欠ける。ここで memorize と
-            同じ組み立て (`_store_beat_memory`) で一度だけ書く。
+            通常の確定 (`_emit_speak_finalize`) や直接の建物書き込み
+            (`_emit_say_and_capture`) の後、`_finalize_beat` の memorize が
+            走る前に例外が出ると、建物の記録には全文が確定済みなのに本人の記憶
+            (SAIMemory) には何も書かれないまま Beat が死ぬ。下書き行の後始末
+            (`_settle_placeholder_on_beat_death`) は「確定済み」でスキップする
+            (say 直書きの回はそもそも下書き行が無い) ので、そのままでは記憶
+            だけが欠ける。ここで memorize と同じ組み立てで一度だけ書く。
 
             書かない条件も同じ数だけ大事:
 
-            - **未確定の回** — 下書き行ごと settle 側が確定・記憶まで揃える。
+            - **建物に本文が無い回** — 下書き行ごと settle 側が確定・記憶まで
+              揃える (say 直書きの印 `beat_said` も立たない)。
             - **もう書かれた回** (`_beat_memorized`) — settle が記憶を書いた回や
               important dual-write 済みの回に重ねると、同じ発言が二重に残る。
             - **memorize / important 設定の無いノード** — 記憶に書かない設計の
               ノードの発言を補填で書くと「書かないはずのものを書く」誤りになる。
             """
-            if not pipeline_finalized:
+            if not (pipeline_finalized or beat_said):
                 return
             if state.get("_beat_memorized"):
                 return
@@ -3375,38 +3388,60 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
             important = getattr(node_def, "important", False)
             if not (memorize_config or important):
                 return
-            if not (isinstance(text, str) and text.strip()):
+            # pipeline 確定の回は閉包の text (spell 後は continuation に差し替え
+            # 済み — 通常の memorize と同じ本文)。say 直書きの回は say した瞬間の
+            # 写し (beat_said_text) — text はその後の処理で形が変わりうる。
+            backfill_text = text if pipeline_finalized else beat_said_text
+            if not (isinstance(backfill_text, str) and backfill_text.strip()):
                 return
             try:
-                if isinstance(memorize_config, dict):
-                    backfill_tags = memorize_config.get("tags", [])
-                    backfill_scope = memorize_config.get("scope")
-                    backfill_line_role = memorize_config.get("line_role")
-                elif memorize_config:
-                    backfill_tags = []
-                    backfill_scope = None
-                    backfill_line_role = None
+                if memorize_config:
+                    if isinstance(memorize_config, dict):
+                        backfill_tags = memorize_config.get("tags", [])
+                        backfill_scope = memorize_config.get("scope")
+                        backfill_line_role = memorize_config.get("line_role")
+                    else:
+                        backfill_tags = []
+                        backfill_scope = None
+                        backfill_line_role = None
+                    _store_beat_memory(
+                        runtime,
+                        persona,
+                        text=backfill_text,
+                        tags=backfill_tags,
+                        state=state,
+                        playbook_name=playbook.name,
+                        prompt=prompt,
+                        # 印は通常の確定 (`_finalize_beat`) と同じく必ず消費する —
+                        # 残すと次の Beat の言い終えた発言にまで印が漏れる。
+                        interrupted=bool(state.pop(INTERRUPTED_METADATA_KEY, None)),
+                        scope=backfill_scope,
+                        line_role=backfill_line_role,
+                        # reasoning は補填では省略する — 閉包から届かないローカルで、
+                        # 補填の目的は本文の連続性 (本人が自分の発言を覚えていること)。
+                    )
                 else:
-                    # important のみのノード — dual-write と同じ conversation タグ
-                    backfill_tags = ["conversation"]
-                    backfill_scope = None
-                    backfill_line_role = None
-                _store_beat_memory(
-                    runtime,
-                    persona,
-                    text=text,
-                    tags=backfill_tags,
-                    state=state,
-                    playbook_name=playbook.name,
-                    prompt=prompt,
-                    # 印は通常の確定 (`_finalize_beat`) と同じく必ず消費する —
-                    # 残すと次の Beat の言い終えた発言にまで印が漏れる。
-                    interrupted=bool(state.pop(INTERRUPTED_METADATA_KEY, None)),
-                    scope=backfill_scope,
-                    line_role=backfill_line_role,
-                    # reasoning は補填では省略する — 閉包から届かないローカルで、
-                    # 補填の目的は本文の連続性 (本人が自分の発言を覚えていること)。
-                )
+                    # important のみのノード — 通常経路 (`_finalize_beat` の
+                    # important dual-write) と**同一の引数集合**で書く。
+                    # `_store_beat_memory` を通すと pulse_context /
+                    # paired_action_text / scope / line_role / spell_origin_id
+                    # が付き、同じノードの発言が死に方で違う形になる
+                    # (2026-08-27 Codex 指摘)。
+                    interrupted = bool(state.pop(INTERRUPTED_METADATA_KEY, None))
+                    _backfill_stored = runtime._store_memory(
+                        persona, backfill_text,
+                        role="assistant",
+                        tags=["conversation"],
+                        pulse_id=state.get("_pulse_id"),
+                        metadata=(
+                            {INTERRUPTED_METADATA_KEY: True} if interrupted else None
+                        ),
+                        playbook_name=playbook.name,
+                        thought_signature=state.get("_last_thought_signature"),
+                        beat_state=state,
+                    )
+                    if _backfill_stored:
+                        state["_beat_memorized"] = True
             except Exception:
                 # 補填の失敗で元の例外をすり替えない。記録だけ残す。
                 LOGGER.exception(
@@ -3673,6 +3708,8 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                                 runtime, persona, eff_bid, text, state,
                                 pulse_id=pulse_id, metadata=msg_metadata,
                             )
+                            beat_said = True
+                            beat_said_text = text
                             LOGGER.info("[sea] 'both' response: text kept in UI and Building history (len=%d), tool call continues", len(text))
                         elif text_chunks:
                             # "tool_call" only — discard streamed text
@@ -3717,6 +3754,8 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                             runtime, persona, eff_bid, text, state,
                             pulse_id=pulse_id, metadata=msg_metadata,
                         )
+                        beat_said = True
+                        beat_said_text = text
 
                 else:
                     # ── Synchronous tool mode (original) ──
@@ -4353,6 +4392,8 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                                 runtime, persona, eff_bid, text, state,
                                 pulse_id=pulse_id, metadata=msg_metadata,
                             )
+                            beat_said = True
+                            beat_said_text = text
 
                         if _stream_err and text.strip():
                             LOGGER.warning(
@@ -4466,6 +4507,8 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                             runtime, persona, eff_bid, text, state,
                             pulse_id=pulse_id, metadata=msg_metadata,
                         )
+                        beat_said = True
+                        beat_said_text = text
                         if event_callback is not None:
                             LOGGER.info("[DEBUG] Sending 'say' event with content: %s", text[:100] if text else "(empty)")
                             say_event: Dict[str, Any] = {

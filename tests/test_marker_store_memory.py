@@ -129,6 +129,35 @@ class StoreMemoryMarkerTest(unittest.TestCase):
         with self.adapter._db_lock:
             self.assertEqual(list_clips(self.adapter.conn, message_id=mid), [])
 
+    def test_add_clips_failure_does_not_report_the_message_as_lost(self):
+        """add_clips が落ちても、本文の行はコミット済み — 返り値は成功のまま。
+
+        クリップ保存の失敗を外側の except に流すと「message lost」と誤報して
+        falsy が返り、呼び出し元で印 (`_beat_memorized`) が立たず、Beat の
+        出口の補填が同じ本文を二重に書ける (2026-08-27 Codex 指摘の固定)。
+        """
+        with patch.object(
+            self.adapter, "add_clips", side_effect=RuntimeError("clips db down")
+        ):
+            with self.assertLogs("sea.runtime", level="WARNING") as logs:
+                mid = self.runtime._store_memory(
+                    self.persona,
+                    "今日は==言葉の標本==(task:3)を見つけた。",
+                    role="assistant",
+                    return_message_id=True,
+                )
+
+        # 返り値は成功 (message_id) — 行は本当に残っている
+        self.assertTrue(mid)
+        self.assertEqual(self._stored_content(mid), "今日は言葉の標本を見つけた。")
+        # 警告は「クリップだけ失われた」であって「message lost」ではない
+        joined = "\n".join(logs.output)
+        self.assertIn("add_clips failed", joined)
+        self.assertNotIn("message lost", joined)
+        # クリップは保存されていない
+        with self.adapter._db_lock:
+            self.assertEqual(list_clips(self.adapter.conn, message_id=mid), [])
+
     def test_clips_table_initialized_by_adapter(self):
         # adapter __init__ が init_clips_tables を配線している (再オープンも冪等)
         with self.adapter._db_lock:
