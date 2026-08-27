@@ -544,7 +544,16 @@ def _finalize_beat(runtime, beat: BeatExecution) -> None:
     memorize_config = getattr(node_def, "memorize", None)
     LOGGER.debug("[_lg_llm_node] node=%s memorize_config=%s type=%s schema_consumed=%s",
                getattr(node_def, "id", "?"), memorize_config, type(memorize_config), schema_consumed)
-    if memorize_config:
+    if memorize_config and state.get("_beat_memorized"):
+        # 停止の後片付け (`_settle_interrupted_utterance`) がこの Beat の本文を
+        # もう記憶へ書いた回。スペル無効のペルソナでは、ストリーム途中で停止
+        # された Beat が例外を出さずに完走してここへ来る (spell loop が入り口で
+        # 即 return するため) — 印を見ないと同じ部分文が同 Beat で二重に残る。
+        LOGGER.debug(
+            "[sea][llm] memorize skipped: settle already stored this beat's "
+            "text (node=%s)", node_id,
+        )
+    elif memorize_config:
         # Parse memorize config - can be True or {"tags": [...], "scope": ..., "line_role": ...}
         if isinstance(memorize_config, dict):
             memorize_tags = memorize_config.get("tags", [])
@@ -630,32 +639,39 @@ def _finalize_beat(runtime, beat: BeatExecution) -> None:
         and text
         and text != "(error in llm node)"
     ):
-        pulse_id = state.get("_pulse_id")
-        content_to_save = text
-        if schema_consumed and isinstance(text, dict):
-            content_to_save = json.dumps(text, ensure_ascii=False, indent=2)
-        _important_stored = runtime._store_memory(
-            persona, content_to_save,
-            role="assistant",
-            tags=["conversation"],
-            pulse_id=pulse_id,
-            # memorize と同じ本文を書く経路なので、「言い切っていない」印も
-            # 同じように載せる — 片方だけだと important ノードの発言だけが
-            # 印無しで記憶に残る。
-            metadata=(
-                {INTERRUPTED_METADATA_KEY: True} if interrupted else None
-            ),
-            playbook_name=playbook.name,
-            # 2026-05-20: thought_signature 永続化 (important dual-write 経路)
-            thought_signature=state.get("_last_thought_signature"),
-            beat_state=state,
-        )
-        if _important_stored:
-            # memorize 節 (_store_beat_memory) と同じ印 — この Beat の本文は
-            # もう記憶に書かれた。Beat の出口の補填が二重に書かないための鍵。
-            state["_beat_memorized"] = True
+        if state.get("_beat_memorized"):
+            # memorize 節と同じ理由 — settle が書き込み済みの回に重ねて書かない。
+            LOGGER.debug(
+                "[sea][llm] important dual-write skipped: settle already "
+                "stored this beat's text (node=%s)", node_id,
+            )
         else:
-            LOGGER.warning("[sea][llm] Important dual-write failed for node %s", node_id)
+            pulse_id = state.get("_pulse_id")
+            content_to_save = text
+            if schema_consumed and isinstance(text, dict):
+                content_to_save = json.dumps(text, ensure_ascii=False, indent=2)
+            _important_stored = runtime._store_memory(
+                persona, content_to_save,
+                role="assistant",
+                tags=["conversation"],
+                pulse_id=pulse_id,
+                # memorize と同じ本文を書く経路なので、「言い切っていない」印も
+                # 同じように載せる — 片方だけだと important ノードの発言だけが
+                # 印無しで記憶に残る。
+                metadata=(
+                    {INTERRUPTED_METADATA_KEY: True} if interrupted else None
+                ),
+                playbook_name=playbook.name,
+                # 2026-05-20: thought_signature 永続化 (important dual-write 経路)
+                thought_signature=state.get("_last_thought_signature"),
+                beat_state=state,
+            )
+            if _important_stored:
+                # memorize 節 (_store_beat_memory) と同じ印 — この Beat の本文は
+                # もう記憶に書かれた。Beat の出口の補填が二重に書かないための鍵。
+                state["_beat_memorized"] = True
+            else:
+                LOGGER.warning("[sea][llm] Important dual-write failed for node %s", node_id)
 
     # Debug: log speak_content at end of LLM node
     speak_content = state.get("speak_content", "")
@@ -2009,7 +2025,9 @@ def _settle_interrupted_utterance(
         )
         if _settle_stored:
             # 「この Beat の本文はもう記憶に書かれた」の印。Beat の出口の補填
-            # (`_backfill_memory_on_beat_death`) がこの印を見て、同じ本文を
+            # (`_backfill_memory_on_beat_death`) と通常の確定 (`_finalize_beat`
+            # の memorize / important dual-write — スペル無効だと停止された
+            # Beat も例外なしで完走してそこへ届く) がこの印を見て、同じ本文を
             # 二重に書かない。
             state["_beat_memorized"] = True
     except Exception:

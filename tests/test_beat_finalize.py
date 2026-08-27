@@ -314,6 +314,31 @@ class ImportantDualWriteTest(FinalizeTestBase):
         self.runtime._store_memory.assert_not_called()
 
 
+class AlreadyMemorizedSkipTest(FinalizeTestBase):
+    """settle が記憶を書き込み済みの Beat (`_beat_memorized`) を確定が重ねない。
+
+    ストリーム途中の停止 + スペル無効では、settle が部分文を記憶へ書いた後に
+    Beat が例外なしで完走してここへ届く (Codex レビュー 2 巡目)。印を見ないと
+    同じ部分文が同 Beat で二重に保存される。
+    """
+
+    def test_memorize_is_skipped_when_settle_already_stored(self):
+        state = {"_beat_memorized": True, INTERRUPTED_METADATA_KEY: True}
+        _finalize_beat(self.runtime, _beat(
+            state=state, node_def=_node_def(memorize=True),
+        ))
+        self.runtime._store_memory.assert_not_called()
+        # 「言い切っていない」印の消費はスキップでも変わらない
+        self.assertNotIn(INTERRUPTED_METADATA_KEY, state)
+
+    def test_important_dual_write_is_skipped_when_settle_already_stored(self):
+        state = {"_beat_memorized": True}
+        _finalize_beat(self.runtime, _beat(
+            state=state, node_def=_node_def(important=True),
+        ))
+        self.runtime._store_memory.assert_not_called()
+
+
 class InterruptedMarkTest(FinalizeTestBase):
     """中断された発言は「言い切っていない」印を付けたまま記憶へ入る。
 
@@ -362,6 +387,10 @@ class InterruptedMarkTest(FinalizeTestBase):
         self.assertNotIn(INTERRUPTED_METADATA_KEY, state)
 
         self.runtime._store_memory.reset_mock()
+        # 次の Beat の入り口は「もう記憶に書かれた」の印を必ず倒す
+        # (lg_llm_node の Beat 入り口のリセットの写し)。倒さずに 2 回目を
+        # 呼ぶと、memorize が settle 済みと誤認してスキップする。
+        state.pop("_beat_memorized", None)
         _finalize_beat(self.runtime, _beat(
             state=state, node_def=_node_def(memorize=True),
         ))

@@ -686,6 +686,54 @@ def test_a_death_inside_finalize_beat_after_memorize_is_not_written_again(monkey
     runtime._store_memory.assert_not_called()
 
 
+def test_a_stop_with_spells_disabled_memorizes_the_partial_text_only_once(monkeypatch):
+    """ストリーム途中の停止 + スペル無効 — settle が書いた部分文を確定が重ねない。
+
+    スペル無効のペルソナでは `_run_spell_loop` が入り口で即 return するので、
+    停止された Beat は例外を出さずに完走し、`_finalize_beat` の memorize に
+    到達する (Codex レビュー 2 巡目)。memorize が settle の印 (`_beat_memorized`)
+    を見ないと、同じ部分文が同 Beat で二重に記憶へ入る。この 1 本だけは
+    `_run_spell_loop` も `_finalize_beat` も実物で通す。
+    """
+    client = _FakeStreamClient(chunks=["こんにちは。", "続きの文。"])
+
+    real_finalize_beat = runtime_llm._finalize_beat
+    runtime, persona, node, events = _build_node(
+        monkeypatch, client=client, spell_loop=runtime_llm._run_spell_loop,
+        node_def=_memorize_node_def(),
+    )
+    # fixture が patch した _finalize_beat を実物へ戻す — 確定の memorize 節が
+    # 印を読むところまで含めて本物の経路を固定する。
+    monkeypatch.setattr(runtime_llm, "_finalize_beat", real_finalize_beat)
+    # MagicMock の戻り値 (truthy) が structured output 扱いにならないように倒す。
+    runtime._process_structured_output.return_value = False
+
+    state = {
+        "_messages": [],
+        "_pulse_id": "pl-1",
+        "_cancellation_token": _CancelDuringStream(),
+        "_spell_enabled": False,
+    }
+    # 例外なしで完走する (spell loop はスペル無効の入り口で即 return し、
+    # round 頭の取り消し検査に到達しない)
+    result = asyncio.run(node(state))
+    assert result is state
+
+    # 確定は settle の 1 回だけ (通常確定は pipeline_finalized を見てスキップ)
+    runtime._emit_speak_finalize.assert_called_once()
+    call = runtime._emit_speak_finalize.call_args
+    assert call.args[3] == "こんにちは。"
+    assert call.kwargs["extra_metadata"] == {INTERRUPTED_METADATA_KEY: True}
+    # 記憶も settle の 1 回だけ、中断の印つき — ここが二重だった (二重保存の固定)
+    runtime._store_memory.assert_called_once()
+    assert runtime._store_memory.call_args.kwargs["metadata"] == {
+        INTERRUPTED_METADATA_KEY: True,
+    }
+    # 通告はユーザーの操作の文面で 1 回
+    persona.history_manager.add_to_building_only.assert_called_once()
+    assert "ユーザーの操作により" in persona.history_manager.add_to_building_only.call_args.args[1]["content"]
+
+
 def test_a_node_without_memorize_gets_no_backfill(monkeypatch):
     """memorize 設定の無いノード — 記憶に書かない設計の発言を補填で書かない。"""
     client = _FakeStreamClient(chunks=["こんにちは。"])

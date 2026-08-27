@@ -1602,7 +1602,10 @@ export default function Home() {
     // サーバーが「ユーザーに何かが届いた」と数えるイベントの型 —
     // manager/runtime.py の _OUTCOME_EVENT_TYPES の鏡。say / streaming_chunk は
     // 本文が空なら数えない規則 (同 _CONTENT_BEARING_TYPES) があるため、この
-    // Set には載せず読み手のループ内で本文の有無ごと判定する。
+    // Set には載せず読み手のループ内で本文の有無ごと判定する。鏡はサーバーの
+    // _note_outcome の撤回まで含む: streaming_chunk で立てた印は出どころ
+    // (persona_id + pulse_id = _stream_key) ごとに持ち、streaming_discard が
+    // 同じ出どころの印だけを消す。say やエラー通知は撤回されない。
     const SERVER_OUTCOME_EVENT_TYPES = new Set([
         'error', 'cancelled', 'duplicate_command', 'permission_request',
         'spell_confirmation', 'chronicle_confirm', 'warning', 'info',
@@ -1685,11 +1688,24 @@ export default function Home() {
         // 黙って捨てると、何も起きなかったのと同じ顔でストリームが正常終了する。
         let malformedLines = 0;
         // サーバーの「結果」イベント (発言・エラー・キャンセルなど、
-        // SERVER_OUTCOME_EVENT_TYPES の鏡が拾うもの) を一つでも見たか。
+        // SERVER_OUTCOME_EVENT_TYPES の鏡が拾うもの) を見たか。
         // サーバーの正常な形では backend_worker の finally (出口 3) が必ず
-        // 何らかの結果イベントを流すので、これが立たないまま done で抜けたら、
+        // 何らかの結果イベントを流すので、結果ゼロのまま done で抜けたら、
         // それは正常終了の顔をした切断。
-        let sawServerOutcome = false;
+        //
+        // 二層に分けるのは、サーバー側 (manager/runtime.py の _note_outcome) が
+        // streaming_chunk の結果を streaming_discard で**撤回**するから
+        // (ツール呼び出しだけの回など、途中本文を引っ込めた後に say もエラーも
+        // 来ない終わり方がある)。撤回まで写さないと、その回の切断を正常終了
+        // として受け入れてしまう。
+        // - sawFinalOutcome: 撤回されない結果 (say / エラー通知など)。
+        //   一度立てたら降ろさない (サーバーの value と同じ)。
+        let sawFinalOutcome = false;
+        // - chunkOutcomeKeys: streaming_chunk で立つ出どころごとの印
+        //   (サーバーの pending と同じ)。キーは _stream_key の写し
+        //   (`${persona_id}/${pulse_id}`) で、streaming_discard が同じ
+        //   出どころの印だけを消す。
+        const chunkOutcomeKeys = new Set<string>();
         try {
             if (!res.body) throw new Error("No response body");
             const reader = res.body.getReader();
@@ -1757,12 +1773,21 @@ export default function Home() {
                         // (SERVER_OUTCOME_EVENT_TYPES の定義コメントを参照)。
                         // 本文を運ぶ型は中身が空なら数えない — サーバー側と
                         // 同じ規則。event.response は旧形式の応答で、これも
-                        // 結果に数える。
-                        if (SERVER_OUTCOME_EVENT_TYPES.has(event.type)
-                            || ((event.type === 'say' || event.type === 'streaming_chunk')
+                        // 結果に数える。streaming_chunk だけは撤回されうるので
+                        // 出どころごとの印に置き、streaming_discard が同じ
+                        // 出どころの印を消す (サーバーの _note_outcome の写し)。
+                        if (event.type === 'streaming_discard') {
+                            chunkOutcomeKeys.delete(
+                                `${event.persona_id || ''}/${event.pulse_id || ''}`);
+                        } else if (SERVER_OUTCOME_EVENT_TYPES.has(event.type)
+                            || (event.type === 'say'
                                 && String(event.content || '').trim() !== '')
                             || event.response) {
-                            sawServerOutcome = true;
+                            sawFinalOutcome = true;
+                        } else if (event.type === 'streaming_chunk'
+                            && String(event.content || '').trim() !== '') {
+                            chunkOutcomeKeys.add(
+                                `${event.persona_id || ''}/${event.pulse_id || ''}`);
                         }
 
                         if (event.type === 'status') {
@@ -2199,7 +2224,10 @@ export default function Home() {
             // user_message_id だけ受けて終わるような「結果ゼロの正常終了」は
             // 切断と断定してよい。ユーザー停止 (cancelled) は正当な静かな
             // 終わりで、上の鏡が結果に数えるのでここには落ちない。
-            if (!sawServerOutcome) {
+            // 「結果ゼロ」の判定はサーバーの _outcome_reached の裏返し —
+            // 撤回されない結果が無く、撤回されずに残った断片も無いこと
+            // (途中本文が全部 discard で引っ込められた回は結果ゼロ)。
+            if (!sawFinalOutcome && chunkOutcomeKeys.size === 0) {
                 throw new Error('stream ended without any outcome event');
             }
         } catch (error) {
