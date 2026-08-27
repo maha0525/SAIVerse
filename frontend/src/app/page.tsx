@@ -2078,6 +2078,15 @@ export default function Home() {
                             setMessages(prev => {
                                 const last = prev[prev.length - 1];
                                 if (last && last._streaming) {
+                                    // 本文が一文字も出る前に停止された回。思考や活動の
+                                    // 表示だけのバブルは、サーバー履歴には存在しない
+                                    // (下書き行は空文字で確定され、履歴 API は content 空を
+                                    // 出さない) ので、再読込で黙って消える。見かけと実態を
+                                    // 揃えるため、その場で畳む (2026-08-27 まはー裁定)。
+                                    // 本文が一文字でも出ていれば従来どおり確定して残す。
+                                    if (!last.content) {
+                                        return prev.slice(0, -1);
+                                    }
                                     const { _streaming, _streamingThinking, _activities, ...rest } = last;
                                     return [...prev.slice(0, -1), {
                                         ...rest,
