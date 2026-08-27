@@ -117,6 +117,20 @@ def test_a_failing_ui_event_does_not_stop_memory_and_notice():
     persona.history_manager.add_to_building_only.assert_called_once()
 
 
+def test_the_settle_marks_the_beat_as_memorized_on_success():
+    """記憶へ書けた回は「この Beat の本文はもう記憶に書かれた」の印が立つ。
+    Beat の出口の補填 (`_backfill_memory_on_beat_death`) がこの印を見て、
+    同じ本文を二重に書かない。"""
+    _, _, state, _, _ = _settle(by_user=False)
+    assert state["_beat_memorized"] is True
+
+
+def test_an_empty_body_leaves_no_memorized_mark():
+    """一言も出ないうちに死んだ回は記憶に書かないので、印も立たない。"""
+    _, _, state, _, _ = _settle(text="", by_user=False)
+    assert "_beat_memorized" not in state
+
+
 # ---------------------------------------------------------------------------
 # node() 全体 — Beat の出口の不変条件
 # ---------------------------------------------------------------------------
@@ -191,7 +205,7 @@ def _node_def():
     )
 
 
-def _build_node(monkeypatch, *, client, spell_loop):
+def _build_node(monkeypatch, *, client, spell_loop, node_def=None):
     runtime = MagicMock()
     runtime.manager.occupants = {"b1": ["1"]}
     runtime._effective_building_id.return_value = "b1"
@@ -219,7 +233,7 @@ def _build_node(monkeypatch, *, client, spell_loop):
     )
     events: list = []
     node = runtime_llm.lg_llm_node(
-        runtime, _node_def(), persona, "b1", SimpleNamespace(name="pb"),
+        runtime, node_def or _node_def(), persona, "b1", SimpleNamespace(name="pb"),
         events.append,
     )
     return runtime, persona, node, events
@@ -530,4 +544,161 @@ def test_a_normal_completion_finalizes_exactly_once(monkeypatch):
     assert INTERRUPTED_METADATA_KEY not in extra
     # 中断の通告も記憶書き込みも走らない
     persona.history_manager.add_to_building_only.assert_not_called()
+    runtime._store_memory.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Beat の出口の記憶補填 (`_backfill_memory_on_beat_death`) — 確定は済んだのに
+# memorize (`_finalize_beat`) が走る前に Beat が死ぬと、建物の記録には全文が
+# あるのに本人の記憶には何も残らない。下書き行の後始末は「確定済み」でスキップ
+# するので、記憶の欠けは補填が塞ぐ。
+# ---------------------------------------------------------------------------
+
+def _memorize_node_def():
+    node_def = _node_def()
+    node_def.memorize = True
+    return node_def
+
+
+def test_a_death_after_finalize_but_before_memorize_backfills_the_memory(monkeypatch):
+    """確定後・memorize 前の例外死 — 本人の記憶が本文つきで補填される。"""
+    client = _FakeStreamClient(chunks=["こんにちは。"])
+
+    async def _no_spells(**kwargs):
+        return kwargs["text"], kwargs["text"], 0
+
+    runtime, persona, node, events = _build_node(
+        monkeypatch, client=client, spell_loop=_no_spells,
+        node_def=_memorize_node_def(),
+    )
+    # 確定 (branch 3) の後、_finalize_beat の手前で通る _dump_llm_io で落とす
+    runtime._dump_llm_io.side_effect = RuntimeError("boom before memorize")
+
+    with pytest.raises(LLMError):
+        asyncio.run(node({"_messages": [], "_pulse_id": "pl-1"}))
+
+    # 確定は通常経路の 1 回だけ (出口の後始末は確定済みの印を見て手を出さない)
+    runtime._emit_speak_finalize.assert_called_once()
+    # 記憶は補填の 1 回だけ、本文つき — memorize=True の組み立て (tags=[]) で書く
+    runtime._store_memory.assert_called_once()
+    call = runtime._store_memory.call_args
+    assert call.args[1] == "こんにちは。"
+    assert call.kwargs["tags"] == []
+    assert call.kwargs["playbook_name"] == "pb"
+    # 言い切った発言なので、中断の通告は書かれず、印も載らない
+    persona.history_manager.add_to_building_only.assert_not_called()
+    assert INTERRUPTED_METADATA_KEY not in (call.kwargs.get("metadata") or {})
+
+
+def test_a_beat_already_marked_memorized_is_not_written_again(monkeypatch):
+    """「もう記憶に書かれた」の印が立った後の死 — 補填は追加で書かない。"""
+    client = _FakeStreamClient(chunks=["こんにちは。"])
+
+    async def _no_spells(**kwargs):
+        return kwargs["text"], kwargs["text"], 0
+
+    runtime, persona, node, events = _build_node(
+        monkeypatch, client=client, spell_loop=_no_spells,
+        node_def=_memorize_node_def(),
+    )
+
+    def _mark_and_die(node_def_arg, text_arg, state_arg):
+        state_arg["_beat_memorized"] = True
+        raise RuntimeError("boom after the memory write")
+
+    runtime._process_structured_output.side_effect = _mark_and_die
+
+    with pytest.raises(LLMError):
+        asyncio.run(node({"_messages": [], "_pulse_id": "pl-1"}))
+
+    runtime._store_memory.assert_not_called()
+
+
+def test_a_settled_interruption_is_not_memorized_twice_by_the_backfill(monkeypatch):
+    """停止の後始末 (settle) が記憶を書いた回の死 — 補填が重ねて書かない。"""
+    client = _FakeStreamClient(chunks=["こんにちは。"])
+
+    async def _spell_loop(**kwargs):
+        raise RuntimeError("boom after generation")
+
+    runtime, persona, node, events = _build_node(
+        monkeypatch, client=client, spell_loop=_spell_loop,
+        node_def=_memorize_node_def(),
+    )
+    with pytest.raises(LLMError):
+        asyncio.run(node({"_messages": [], "_pulse_id": "pl-1"}))
+
+    # settle が中断の印つきで 1 回書き、補填は印を見て手を出さない
+    runtime._store_memory.assert_called_once()
+    assert runtime._store_memory.call_args.kwargs["metadata"] == {
+        INTERRUPTED_METADATA_KEY: True,
+    }
+
+
+def test_a_death_inside_finalize_beat_still_backfills_the_memory(monkeypatch):
+    """`_finalize_beat` は except 節の外で呼ばれる — その内部 (memorize の手前の
+    組み立て) で死んだ回も「確定後の隙間」で、補填が要る。呼び出しを包む
+    try が受け止めて補填してから、元の例外をそのまま通す。"""
+    client = _FakeStreamClient(chunks=["こんにちは。"])
+
+    async def _no_spells(**kwargs):
+        return kwargs["text"], kwargs["text"], 0
+
+    runtime, persona, node, events = _build_node(
+        monkeypatch, client=client, spell_loop=_no_spells,
+        node_def=_memorize_node_def(),
+    )
+
+    def _die_before_memorize(*args, **kwargs):
+        raise RuntimeError("boom inside finalize beat")
+
+    monkeypatch.setattr(runtime_llm, "_finalize_beat", _die_before_memorize)
+
+    with pytest.raises(RuntimeError):
+        asyncio.run(node({"_messages": [], "_pulse_id": "pl-1"}))
+
+    runtime._store_memory.assert_called_once()
+    assert runtime._store_memory.call_args.args[1] == "こんにちは。"
+
+
+def test_a_death_inside_finalize_beat_after_memorize_is_not_written_again(monkeypatch):
+    """`_finalize_beat` が memorize を終えてから死んだ回 — 印が立っているので
+    補填は黙り、同じ本文が二重に記憶へ入らない。"""
+    client = _FakeStreamClient(chunks=["こんにちは。"])
+
+    async def _no_spells(**kwargs):
+        return kwargs["text"], kwargs["text"], 0
+
+    runtime, persona, node, events = _build_node(
+        monkeypatch, client=client, spell_loop=_no_spells,
+        node_def=_memorize_node_def(),
+    )
+
+    def _memorize_then_die(runtime_arg, beat):
+        beat.state["_beat_memorized"] = True
+        raise RuntimeError("boom after the memorize inside finalize beat")
+
+    monkeypatch.setattr(runtime_llm, "_finalize_beat", _memorize_then_die)
+
+    with pytest.raises(RuntimeError):
+        asyncio.run(node({"_messages": [], "_pulse_id": "pl-1"}))
+
+    runtime._store_memory.assert_not_called()
+
+
+def test_a_node_without_memorize_gets_no_backfill(monkeypatch):
+    """memorize 設定の無いノード — 記憶に書かない設計の発言を補填で書かない。"""
+    client = _FakeStreamClient(chunks=["こんにちは。"])
+
+    async def _no_spells(**kwargs):
+        return kwargs["text"], kwargs["text"], 0
+
+    runtime, persona, node, events = _build_node(
+        monkeypatch, client=client, spell_loop=_no_spells,
+    )
+    runtime._dump_llm_io.side_effect = RuntimeError("boom before memorize")
+
+    with pytest.raises(LLMError):
+        asyncio.run(node({"_messages": [], "_pulse_id": "pl-1"}))
+
     runtime._store_memory.assert_not_called()

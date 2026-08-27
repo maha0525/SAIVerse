@@ -345,6 +345,81 @@ def _emit_say_and_capture(
     return bmsg
 
 
+def _store_beat_memory(
+    runtime,
+    persona,
+    *,
+    text: str,
+    tags: List[str],
+    state: Dict[str, Any],
+    playbook_name: str,
+    prompt: Optional[str],
+    interrupted: bool,
+    scope: Optional[str] = None,
+    line_role: Optional[str] = None,
+    reasoning_text: Optional[str] = None,
+    reasoning_details: Any = None,
+) -> Any:
+    """memorize の「``_store_memory`` 呼び出しの組み立て」を一箇所に持つ。
+
+    通る経路は二つ — 通常の確定 (``_finalize_beat`` の memorize 節) と、確定後・
+    memorize 前に Beat が死んだ回の補填 (``_backfill_memory_on_beat_death``)。
+    組み立てを二箇所に複製すると、片方だけが更新されて「同じ発言なのに、死に方で
+    記憶の形が変わる」乖離が育つ。
+
+    成功 (= 書けた message_id が truthy) したら ``state["_beat_memorized"]`` を
+    立てる — 「この Beat の本文はもう記憶に書かれた」の印で、Beat の出口の補填が
+    二重に書き込むのを止める鍵。返り値は書けた message_id (失敗は falsy)。
+    """
+    metadata: Dict[str, Any] = {}
+    if reasoning_text:
+        metadata["reasoning"] = reasoning_text
+    if reasoning_details is not None:
+        metadata["reasoning_details"] = reasoning_details
+    # 「言い切っていない」印は建物履歴とペルソナの記憶の両方に載せる。
+    # 記憶の側に無いと、本人が後で自分の言葉を読み返したときに、途中で
+    # 切れた発言を言い切ったものとして受け取る。
+    if interrupted:
+        metadata[INTERRUPTED_METADATA_KEY] = True
+
+    sig = state.get("_last_thought_signature")
+    LOGGER.debug(
+        "[sea][llm][sig-trace] memorize call: thought_signature = %s (%d bytes)",
+        "present" if sig else "None",
+        len(sig) if isinstance(sig, (bytes, str)) else 0,
+    )
+    spell_origin = state.get("_spell_loop_origin_id")
+    spell_lc = state.get("_spell_loop_count")
+    spell_final_seq = (spell_lc + 1) if spell_lc is not None else None
+    paired_action_text = None if spell_origin else prompt
+    stored_message_id = runtime._store_memory(
+        persona,
+        text,
+        role="assistant",
+        tags=list(tags),
+        pulse_id=state.get("_pulse_id"),
+        metadata=metadata if metadata else None,
+        playbook_name=playbook_name,
+        pulse_context=state.get("_pulse_context"),
+        paired_action_text=paired_action_text,
+        scope=scope,
+        line_role=line_role,
+        thought_signature=sig,
+        spell_origin_id=spell_origin,
+        spell_seq=spell_final_seq,
+        return_message_id=True,
+        beat_state=state,
+    )
+    if stored_message_id:
+        state["_beat_memorized"] = True
+        LOGGER.debug(
+            "[sea][llm] Memorized response (assistant) with paired_action_text len=%s scope=%s spell_origin=%s",
+            len(paired_action_text) if paired_action_text else 0, scope,
+            spell_origin,
+        )
+    return stored_message_id
+
+
 def _finalize_beat(runtime, beat: BeatExecution) -> None:
     """④確定 — 生成し終えた Beat を記録先へ配る。
 
@@ -470,8 +545,6 @@ def _finalize_beat(runtime, beat: BeatExecution) -> None:
     LOGGER.debug("[_lg_llm_node] node=%s memorize_config=%s type=%s schema_consumed=%s",
                getattr(node_def, "id", "?"), memorize_config, type(memorize_config), schema_consumed)
     if memorize_config:
-        pulse_id = state.get("_pulse_id")
-        pulse_context = state.get("_pulse_context")
         # Parse memorize config - can be True or {"tags": [...], "scope": ..., "line_role": ...}
         if isinstance(memorize_config, dict):
             memorize_tags = memorize_config.get("tags", [])
@@ -507,58 +580,28 @@ def _finalize_beat(runtime, beat: BeatExecution) -> None:
                 content_to_save = json.dumps(text, ensure_ascii=False, indent=2)
                 LOGGER.debug("[sea][llm] Structured output formatted as JSON for memory")
 
-            # Build metadata for memorize (reasoning text + reasoning_details for multi-turn)
-            _memorize_metadata: Dict[str, Any] = {}
-            if beat.reasoning_text:
-                _memorize_metadata["reasoning"] = beat.reasoning_text
-            if beat.reasoning_details is not None:
-                _memorize_metadata["reasoning_details"] = beat.reasoning_details
-            # 「言い切っていない」印は建物履歴とペルソナの記憶の両方に載せる。
-            # 記憶の側に無いと、本人が後で自分の言葉を読み返したときに、途中で
-            # 切れた発言を言い切ったものとして受け取る。
-            if interrupted:
-                _memorize_metadata[INTERRUPTED_METADATA_KEY] = True
-
-            _memorize_sig = state.get("_last_thought_signature")
-            LOGGER.debug(
-                "[sea][llm][sig-trace] memorize call: thought_signature = %s (%d bytes)",
-                "present" if _memorize_sig else "None",
-                len(_memorize_sig) if isinstance(_memorize_sig, (bytes, str)) else 0,
-            )
-            _spell_origin = state.get("_spell_loop_origin_id")
-            _spell_lc = state.get("_spell_loop_count")
-            _spell_final_seq = (_spell_lc + 1) if _spell_lc is not None else None
-            _memorize_pat = None if _spell_origin else prompt
-            stored_message_id = runtime._store_memory(
+            # 呼び出しの組み立ては ``_store_beat_memory`` に一本化してある
+            # (Beat の出口の補填と共有)。
+            stored_message_id = _store_beat_memory(
+                runtime,
                 persona,
-                content_to_save,
-                role="assistant",
-                tags=list(memorize_tags),
-                pulse_id=pulse_id,
-                metadata=_memorize_metadata if _memorize_metadata else None,
+                text=content_to_save,
+                tags=memorize_tags,
+                state=state,
                 playbook_name=playbook.name,
-                pulse_context=pulse_context,
-                paired_action_text=_memorize_pat,
+                prompt=prompt,
+                interrupted=interrupted,
                 scope=memorize_scope,
                 line_role=memorize_line_role,
-                thought_signature=_memorize_sig,
-                spell_origin_id=_spell_origin,
-                spell_seq=_spell_final_seq,
-                return_message_id=True,
-                beat_state=state,
+                reasoning_text=beat.reasoning_text,
+                reasoning_details=beat.reasoning_details,
             )
             if not stored_message_id:
                 _memorize_ok = False
-            else:
-                LOGGER.debug(
-                    "[sea][llm] Memorized response (assistant) with paired_action_text len=%s scope=%s spell_origin=%s",
-                    len(_memorize_pat) if _memorize_pat else 0, memorize_scope,
-                    _spell_origin,
-                )
-                # NOTE: 旧「メタ判断ターンの scope='discardable' → 'committed'
-                # 昇格」は Track 状態遷移 hook 経由だったが、発火元 (v1 メタ判断の
-                # Track 操作) の退役に続いて hook そのものも 2026-08-21 に撤去した。
-                # 判断ターンは scope='discardable' のまま残る。
+            # NOTE: 旧「メタ判断ターンの scope='discardable' → 'committed'
+            # 昇格」は Track 状態遷移 hook 経由だったが、発火元 (v1 メタ判断の
+            # Track 操作) の退役に続いて hook そのものも 2026-08-21 に撤去した。
+            # 判断ターンは scope='discardable' のまま残る。
 
         if not _memorize_ok and event_callback:
             event_callback({"type": "warning", "content": "記憶の保存に失敗しました。会話内容が記録されていない可能性があります。", "warning_code": "memorize_failed", "display": "toast"})
@@ -591,7 +634,7 @@ def _finalize_beat(runtime, beat: BeatExecution) -> None:
         content_to_save = text
         if schema_consumed and isinstance(text, dict):
             content_to_save = json.dumps(text, ensure_ascii=False, indent=2)
-        if not runtime._store_memory(
+        _important_stored = runtime._store_memory(
             persona, content_to_save,
             role="assistant",
             tags=["conversation"],
@@ -606,7 +649,12 @@ def _finalize_beat(runtime, beat: BeatExecution) -> None:
             # 2026-05-20: thought_signature 永続化 (important dual-write 経路)
             thought_signature=state.get("_last_thought_signature"),
             beat_state=state,
-        ):
+        )
+        if _important_stored:
+            # memorize 節 (_store_beat_memory) と同じ印 — この Beat の本文は
+            # もう記憶に書かれた。Beat の出口の補填が二重に書かないための鍵。
+            state["_beat_memorized"] = True
+        else:
             LOGGER.warning("[sea][llm] Important dual-write failed for node %s", node_id)
 
     # Debug: log speak_content at end of LLM node
@@ -1949,7 +1997,7 @@ def _settle_interrupted_utterance(
         return sub_seq
 
     try:
-        runtime._store_memory(
+        _settle_stored = runtime._store_memory(
             persona,
             text,
             role="assistant",
@@ -1959,6 +2007,11 @@ def _settle_interrupted_utterance(
             playbook_name=playbook.name,
             beat_state=state,
         )
+        if _settle_stored:
+            # 「この Beat の本文はもう記憶に書かれた」の印。Beat の出口の補填
+            # (`_backfill_memory_on_beat_death`) がこの印を見て、同じ本文を
+            # 二重に書かない。
+            state["_beat_memorized"] = True
     except Exception:
         LOGGER.warning(
             "[sea][pipeline] could not store the interrupted utterance to "
@@ -3205,6 +3258,12 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
         schema_consumed = False
         prompt = None  # Will store the expanded prompt for memorize
 
+        # 「この Beat の本文は記憶に書かれた」の印のリセット。state は pulse 内で
+        # 複数ノードに共有されるため、前のノードが立てた印を持ち越すと、この
+        # ノードの Beat が死んだときの補填 (`_backfill_memory_on_beat_death`) が
+        # 「もう書かれた」と誤認して黙る。Beat の入り口で必ず倒す。
+        state.pop("_beat_memorized", None)
+
         # ── Pipeline Streaming の下書き行 (placeholder) の追跡 ──
         # 発番するのは normal-mode streaming 経路 (下の use_streaming ブロック)
         # だけだが、except 節の後始末が参照するため Beat の入り口で初期化する。
@@ -3287,6 +3346,72 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                 LOGGER.exception(
                     "[sea][pipeline] placeholder settle on beat death failed "
                     "(msg=%s) — the draft row may remain unconfirmed",
+                    pipeline_msg_id,
+                )
+
+        def _backfill_memory_on_beat_death(exc: BaseException) -> None:
+            """確定は済んだのに、記憶へ書く前に Beat が死んだ回の補填。
+
+            通常の確定 (`_emit_speak_finalize`) の後、`_finalize_beat` の
+            memorize が走る前に例外が出ると、建物の記録には全文が確定済みなのに
+            本人の記憶 (SAIMemory) には何も書かれないまま Beat が死ぬ。下書き行の
+            後始末 (`_settle_placeholder_on_beat_death`) は「確定済み」で
+            スキップするので、そのままでは記憶だけが欠ける。ここで memorize と
+            同じ組み立て (`_store_beat_memory`) で一度だけ書く。
+
+            書かない条件も同じ数だけ大事:
+
+            - **未確定の回** — 下書き行ごと settle 側が確定・記憶まで揃える。
+            - **もう書かれた回** (`_beat_memorized`) — settle が記憶を書いた回や
+              important dual-write 済みの回に重ねると、同じ発言が二重に残る。
+            - **memorize / important 設定の無いノード** — 記憶に書かない設計の
+              ノードの発言を補填で書くと「書かないはずのものを書く」誤りになる。
+            """
+            if not pipeline_finalized:
+                return
+            if state.get("_beat_memorized"):
+                return
+            memorize_config = getattr(node_def, "memorize", None)
+            important = getattr(node_def, "important", False)
+            if not (memorize_config or important):
+                return
+            if not (isinstance(text, str) and text.strip()):
+                return
+            try:
+                if isinstance(memorize_config, dict):
+                    backfill_tags = memorize_config.get("tags", [])
+                    backfill_scope = memorize_config.get("scope")
+                    backfill_line_role = memorize_config.get("line_role")
+                elif memorize_config:
+                    backfill_tags = []
+                    backfill_scope = None
+                    backfill_line_role = None
+                else:
+                    # important のみのノード — dual-write と同じ conversation タグ
+                    backfill_tags = ["conversation"]
+                    backfill_scope = None
+                    backfill_line_role = None
+                _store_beat_memory(
+                    runtime,
+                    persona,
+                    text=text,
+                    tags=backfill_tags,
+                    state=state,
+                    playbook_name=playbook.name,
+                    prompt=prompt,
+                    # 印は通常の確定 (`_finalize_beat`) と同じく必ず消費する —
+                    # 残すと次の Beat の言い終えた発言にまで印が漏れる。
+                    interrupted=bool(state.pop(INTERRUPTED_METADATA_KEY, None)),
+                    scope=backfill_scope,
+                    line_role=backfill_line_role,
+                    # reasoning は補填では省略する — 閉包から届かないローカルで、
+                    # 補填の目的は本文の連続性 (本人が自分の発言を覚えていること)。
+                )
+            except Exception:
+                # 補填の失敗で元の例外をすり替えない。記録だけ残す。
+                LOGGER.exception(
+                    "[sea][pipeline] memory backfill on beat death failed "
+                    "(msg=%s) — the utterance stays in the building record only",
                     pipeline_msg_id,
                 )
 
@@ -4406,9 +4531,11 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
         except LLMError as exc:
             # Propagate LLM errors to the caller for proper handling
             _settle_placeholder_on_beat_death(exc)
+            _backfill_memory_on_beat_death(exc)
             raise
         except Exception as exc:
             _settle_placeholder_on_beat_death(exc)
+            _backfill_memory_on_beat_death(exc)
             LOGGER.error("SEA LangGraph LLM failed: %s: %s", type(exc).__name__, exc)
             # Convert to LLMError so it propagates to the frontend
             raise LLMError(
@@ -4422,6 +4549,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
             # まで広げない — インタープリタ終了の道筋に DB 書き込みの副作用を
             # 足さない (2026-08-27 Codex 指摘で絞った)。
             _settle_placeholder_on_beat_death(exc)
+            _backfill_memory_on_beat_death(exc)
             raise
         # ── ④確定: 生成し終えた Beat を記録先へ配る ──
         _beat = BeatExecution.from_node_locals(
@@ -4436,7 +4564,15 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
             continuation=text,
             schema_consumed=schema_consumed,
         )
-        _finalize_beat(runtime, _beat)
+        try:
+            _finalize_beat(runtime, _beat)
+        except (Exception, asyncio.CancelledError) as exc:
+            # ここは上の except 節の外 — `_finalize_beat` の内部 (memorize の
+            # 手前の組み立て) で死ぬと、建物には確定済みなのに記憶が書かれない
+            # 「確定後の隙間」がそのまま開く。memorize 済みなら印
+            # (`_beat_memorized`) が立っていて補填は黙るので、二重書きはない。
+            _backfill_memory_on_beat_death(exc)
+            raise
 
         # Note: output_mapping in node definition handles state variable assignment
         # No special handling needed here anymore
