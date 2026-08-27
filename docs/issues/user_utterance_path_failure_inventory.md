@@ -891,6 +891,11 @@ spell rounds`)。**印を載せた完了イベントは、その例外より下�
 pipeline 経路 (ログの `[sea][pipeline] Cancelled mid-stream` が証拠) なので、この回では
 主問題だけを直した。
 
+→ 2026-08-27 のまはー提起 (思考中の停止が完全な沈黙になる) を受けて、**中断のタイミング軸の
+全数棚卸し**を別文書に起こした:
+[beat_interruption_timing_inventory](beat_interruption_timing_inventory.md)。tool-streaming の
+件もそこで「停止フラグを立てた後、誰も読まない」ことまでコードで確認済み (穴 2)。
+
 ## 起票時の見立て (裁定前の記録)
 
 四つの型に畳める。並べ替えると、直す順番の候補にもなる。
