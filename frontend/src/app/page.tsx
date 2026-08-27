@@ -1588,6 +1588,26 @@ export default function Home() {
     // 出さない — 押しても同じ結果しか返らない操作を勧めることになるから。
     const RETRY_CHANGES_NOTHING = new Set(['no_responder']);
 
+    // 心拍の締切。サーバーのストリーム書き手 (manager/runtime.py の
+    // response_queue.get(timeout=2.0)) は、キューが空でも最大 2 秒間隔で
+    // {"type": "ping"} を必ず流す。つまりバックエンドが生きている限り、沈黙は
+    // 2 秒を超えない — 15 秒の沈黙を死の判定とするのは 7 倍の余裕がある。
+    // この締切が要るのは、Next の中継 (:3000 → :8000) がバックエンドの死を
+    // ブラウザへ伝えないから (2026-08-28 実測: バックエンド直結の読み手は
+    // 即座にエラーを受けるが、中継経由の読み手は done もエラーも受けず永遠に
+    // 待つ)。締切なしでは、生成中にバックエンドが落ちると Streaming... の
+    // スピナーのまま固まり、復旧の文言が一切出ない。
+    const STREAM_HEARTBEAT_TIMEOUT_MS = 15000;
+
+    // サーバーが「ユーザーに何かが届いた」と数えるイベントの型 —
+    // manager/runtime.py の _OUTCOME_EVENT_TYPES の鏡。say / streaming_chunk は
+    // 本文が空なら数えない規則 (同 _CONTENT_BEARING_TYPES) があるため、この
+    // Set には載せず読み手のループ内で本文の有無ごと判定する。
+    const SERVER_OUTCOME_EVENT_TYPES = new Set([
+        'error', 'cancelled', 'duplicate_command', 'permission_request',
+        'spell_confirmation', 'chronicle_confirm', 'warning', 'info',
+    ]);
+
     // 返事が来なかった発言に印を立てる。出口 3 / 7。
     //
     // ``useless`` は「やり直しても結果が変わらない」— 相手が居ない部屋など。
@@ -1664,6 +1684,12 @@ export default function Home() {
         // 分からない — 発言が届いた印かもしれないし、エラーの説明かもしれない。
         // 黙って捨てると、何も起きなかったのと同じ顔でストリームが正常終了する。
         let malformedLines = 0;
+        // サーバーの「結果」イベント (発言・エラー・キャンセルなど、
+        // SERVER_OUTCOME_EVENT_TYPES の鏡が拾うもの) を一つでも見たか。
+        // サーバーの正常な形では backend_worker の finally (出口 3) が必ず
+        // 何らかの結果イベントを流すので、これが立たないまま done で抜けたら、
+        // それは正常終了の顔をした切断。
+        let sawServerOutcome = false;
         try {
             if (!res.body) throw new Error("No response body");
             const reader = res.body.getReader();
@@ -1671,7 +1697,38 @@ export default function Home() {
             let buffer = '';
 
             while (true) {
-                const { done, value } = await reader.read();
+                // 心拍監視: read を STREAM_HEARTBEAT_TIMEOUT_MS の締切付きで
+                // 待つ (締切の根拠と、Next 中継が切断を伝えない実測事実は定数の
+                // コメントを参照)。締切に達したら読み手を畳んで下の catch へ
+                // 流す — 新しい文言や分岐は作らない。既存の stream_broken /
+                // unknown_outcome の出し分けがそのまま正しい。
+                const readPromise = reader.read();
+                let heartbeatTimer: ReturnType<typeof setTimeout> | null = null;
+                let readResult: Awaited<ReturnType<typeof reader.read>>;
+                try {
+                    readResult = await Promise.race([
+                        readPromise,
+                        new Promise<never>((_, reject) => {
+                            heartbeatTimer = setTimeout(() => reject(new Error(
+                                `no stream data for ${STREAM_HEARTBEAT_TIMEOUT_MS}ms; `
+                                + 'treating the connection as dead'
+                            )), STREAM_HEARTBEAT_TIMEOUT_MS);
+                        }),
+                    ]);
+                } catch (readError) {
+                    // race に負けた readPromise が後から reject しても
+                    // unhandled rejection にしない。
+                    readPromise.catch(() => {});
+                    // 読み手を畳む (best-effort — 失敗は握る)。
+                    try {
+                        reader.cancel().catch(() => {});
+                    } catch { /* ignore */ }
+                    throw readError;
+                } finally {
+                    // read が解決しても締切に達しても、タイマーは必ず消す。
+                    if (heartbeatTimer !== null) clearTimeout(heartbeatTimer);
+                }
+                const { done, value } = readResult;
 
                 let lines: string[];
                 if (done) {
@@ -1694,6 +1751,18 @@ export default function Home() {
                         const event = JSON.parse(line);
                         if (event.type !== 'ping') {
                             console.log('[SSE][diag]', event.type, 'persona=', event.persona_id, 'pulse=', event.pulse_id);
+                        }
+
+                        // サーバーが「届いた」と数えるものをこちらでも数える
+                        // (SERVER_OUTCOME_EVENT_TYPES の定義コメントを参照)。
+                        // 本文を運ぶ型は中身が空なら数えない — サーバー側と
+                        // 同じ規則。event.response は旧形式の応答で、これも
+                        // 結果に数える。
+                        if (SERVER_OUTCOME_EVENT_TYPES.has(event.type)
+                            || ((event.type === 'say' || event.type === 'streaming_chunk')
+                                && String(event.content || '').trim() !== '')
+                            || event.response) {
+                            sawServerOutcome = true;
                         }
 
                         if (event.type === 'status') {
@@ -2120,6 +2189,18 @@ export default function Home() {
                 throw new Error(
                     `${malformedLines} NDJSON line(s) could not be parsed`,
                 );
+            }
+
+            // 結果を見ないまま正常終了した回は異常。行儀のいい終了 (Next 中継の
+            // 再起動など) では接続が正常終了の顔で閉じることがあり、その場合
+            // ループは done で抜けて catch を通らず、何も表示されないまま
+            // スピナーだけが消える。サーバーの正常な形では backend_worker の
+            // finally (出口 3) が必ず何らかの結果イベントを流すので、
+            // user_message_id だけ受けて終わるような「結果ゼロの正常終了」は
+            // 切断と断定してよい。ユーザー停止 (cancelled) は正当な静かな
+            // 終わりで、上の鏡が結果に数えるのでここには落ちない。
+            if (!sawServerOutcome) {
+                throw new Error('stream ended without any outcome event');
             }
         } catch (error) {
             console.error(error);

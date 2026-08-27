@@ -51,6 +51,10 @@ except ImportError:
 #: 数えてしまうと、発言は保存されているのに画面が無言のまま終わる。
 #: 本文が出た回は ``streaming_chunk`` が先に来ているので、取りこぼしはない。
 #: 設計: docs/issues/user_utterance_path_failure_inventory.md
+#:
+#: ⚠️ フロントの読み手が同じ集合の鏡を持つ (frontend/src/app/page.tsx の
+#: ``SERVER_OUTCOME_EVENT_TYPES`` — 「結果ゼロの正常終了」を切断と判定する
+#: ため)。この集合を変えるときは、鏡も同じコミットで揃えること。
 _OUTCOME_EVENT_TYPES = frozenset({
     "say",
     "streaming_chunk",
