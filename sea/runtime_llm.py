@@ -3460,6 +3460,16 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                     )
                     if _backfill_stored:
                         state["_beat_memorized"] = True
+                # 成功の印を INFO で残す — 補填は狙って発火させられない (実地の
+                # エラーや停止のタイミング勝負) ので、後から「実地で発火したか・
+                # 救えたか」をログの grep 一発で数えられるようにする (2026-08-29
+                # まはー承認)。失敗は下の exception ログが担う。
+                if state.get("_beat_memorized"):
+                    LOGGER.info(
+                        "[sea][pipeline] memory backfill on beat death succeeded "
+                        "(msg=%s, chars=%d, cause=%s)",
+                        pipeline_msg_id, len(backfill_text), type(exc).__name__,
+                    )
             except Exception:
                 # 補填の失敗で元の例外をすり替えない。記録だけ残す。
                 LOGGER.exception(

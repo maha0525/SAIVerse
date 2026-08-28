@@ -11,6 +11,7 @@ docs/issues/orphaned_streaming_placeholder_cleanup.md 候補 1 (2026-08-27)。
 from __future__ import annotations
 
 import asyncio
+import logging
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -580,7 +581,9 @@ def _memorize_node_def():
     return node_def
 
 
-def test_a_death_after_finalize_but_before_memorize_backfills_the_memory(monkeypatch):
+def test_a_death_after_finalize_but_before_memorize_backfills_the_memory(
+    monkeypatch, caplog,
+):
     """確定後・memorize 前の例外死 — 本人の記憶が本文つきで補填される。"""
     client = _FakeStreamClient(chunks=["こんにちは。"])
 
@@ -594,8 +597,15 @@ def test_a_death_after_finalize_but_before_memorize_backfills_the_memory(monkeyp
     # 確定 (branch 3) の後、_finalize_beat の手前で通る _dump_llm_io で落とす
     runtime._dump_llm_io.side_effect = RuntimeError("boom before memorize")
 
-    with pytest.raises(LLMError):
+    with pytest.raises(LLMError), caplog.at_level(logging.INFO, logger="sea.runtime_llm"):
         asyncio.run(node({"_messages": [], "_pulse_id": "pl-1"}))
+
+    # 補填の成功は INFO の印を残す — 実地での発火をログの grep で数えるための
+    # 目印 (2026-08-29 まはー承認)。文言を変えるときは監視の grep も一緒に。
+    assert any(
+        "memory backfill on beat death succeeded" in rec.message
+        for rec in caplog.records
+    )
 
     # 確定は通常経路の 1 回だけ (出口の後始末は確定済みの印を見て手を出さない)
     runtime._emit_speak_finalize.assert_called_once()
