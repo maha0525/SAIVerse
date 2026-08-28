@@ -3,7 +3,7 @@
 **ステータス**: 🔲 未着手 — 設計から
 **優先度**: high — 続きの生成のボタンが実態とずれ、どちらへずれても永続データに残骸が出る
 **作成日**: 2026-08-28
-**出自**: [user_utterance_path_failure_inventory](user_utterance_path_failure_inventory.md) の
+**出自**: [user_utterance_path_failure_inventory](archive/user_utterance_path_failure_inventory.md) の
 Codex レビュー 1 巡目 (2026-08-26) が指摘し、補修では塞げないとして切り出した 4 件のうちの 1 つ。
 2 巡目で「私の修正が悪化させていた」件の根も、ここに行き着いた。
 
@@ -95,5 +95,5 @@ Codex レビュー 1 巡目 (2026-08-26) が指摘し、補修では塞げない
 - [orphaned_streaming_placeholder_cleanup](orphaned_streaming_placeholder_cleanup.md) の
   「採らなかった指摘」— Codex が同じ finalize の握り潰しを high で指摘し、「格に対して装備過剰」
   として見送った記録がある。**この issue がその見送りの引き取り先**になる。
-- [user_utterance_path_failure_inventory](user_utterance_path_failure_inventory.md) —
+- [user_utterance_path_failure_inventory](archive/user_utterance_path_failure_inventory.md) —
   出自と、レビュー 3 巡の経緯

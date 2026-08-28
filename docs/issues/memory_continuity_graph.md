@@ -45,7 +45,7 @@ thread（および message）に「前の thread / 前の message」という**�
 - **やり直し** = 応答が無い / 失敗した状態から応答を作る。元の応答が存在しないので**枝は増えない**。
   よって本グラフを必要としない。会話の出口の設計とセットで **v0.3 の門の内側へ引き上げた**
   ([`v030_release_gate.md`](../overview/v030_release_gate.md) §2-17 /
-  [`user_utterance_path_failure_inventory.md`](user_utterance_path_failure_inventory.md))。
+  [`user_utterance_path_failure_inventory.md`](archive/user_utterance_path_failure_inventory.md))。
 - **作り直し** = 気に入らない応答を別案に置き換える。元の応答が残るので**枝が増え**、どちらが本流かの
   記録が要る。**これが本節の対象**で、従来どおり本グラフの決着に従属する。
 

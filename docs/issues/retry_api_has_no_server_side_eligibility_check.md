@@ -4,7 +4,7 @@
 **優先度**: medium — 起きたときの傷は大きい (一つの発言に二つの応答が永続する) が、
 到達経路は古いタブや API の直接呼び出しに限られる
 **作成日**: 2026-08-28
-**出自**: [user_utterance_path_failure_inventory](user_utterance_path_failure_inventory.md) の
+**出自**: [user_utterance_path_failure_inventory](archive/user_utterance_path_failure_inventory.md) の
 Codex レビュー 1 巡目 (2026-08-26) が指摘し、補修では塞げないとして切り出した 4 件のうちの 1 つ。
 
 ---
@@ -82,5 +82,5 @@ Codex レビュー 1 巡目 (2026-08-26) が指摘し、補修では塞げない
 - `manager/runtime.py` `retry_user_message_stream` / `withdraw_user_message` /
   `database/building_messages.py` `withdraw_building_message_in_db` (条件付き削除の先例) /
   `sea/pulse_controller.py` の排他
-- [user_utterance_path_failure_inventory](user_utterance_path_failure_inventory.md) —
+- [user_utterance_path_failure_inventory](archive/user_utterance_path_failure_inventory.md) —
   「再送」の口を作った経緯と、ユーザーから見た操作の設計

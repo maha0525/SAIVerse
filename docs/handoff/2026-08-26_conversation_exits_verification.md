@@ -2,7 +2,7 @@
 
 **対象**: 2026-08-25〜26 に実装した「会話の七つの終わり方」一式
 (`7db486f2` / `716421c3` / `4d59918c` / `64d85bf0` / `2b78a126`)
-**設計**: [user_utterance_path_failure_inventory.md](../issues/user_utterance_path_failure_inventory.md)
+**設計**: [user_utterance_path_failure_inventory.md](../issues/archive/user_utterance_path_failure_inventory.md)
 
 ---
 

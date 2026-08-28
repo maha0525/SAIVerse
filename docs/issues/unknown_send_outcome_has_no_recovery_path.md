@@ -3,7 +3,7 @@
 **ステータス**: 🔲 未着手 — 設計から
 **優先度**: high — ユーザーが手で打ち直すと、同じ発言がペルソナの記憶に二度残る
 **作成日**: 2026-08-28
-**出自**: [user_utterance_path_failure_inventory](user_utterance_path_failure_inventory.md) の
+**出自**: [user_utterance_path_failure_inventory](archive/user_utterance_path_failure_inventory.md) の
 Codex レビュー 1 巡目 (2026-08-26) が指摘し、補修では塞げないとして切り出した 4 件のうちの 1 つ。
 出口 7 (顛末が確定していない) の実装で、通知までは作ったが復旧までは作れなかった部分。
 
@@ -86,5 +86,5 @@ Codex レビュー 1 巡目 (2026-08-26) が指摘し、補修では塞げない
   `api/routes/chat.py` の `client_message_id` 受け口
 - [`v030_release_gate.md`](../overview/v030_release_gate.md) §2-17 — 「要らない発言が永久に残る」を
   門の内の理由にした裁定
-- [user_utterance_path_failure_inventory](user_utterance_path_failure_inventory.md) —
+- [user_utterance_path_failure_inventory](archive/user_utterance_path_failure_inventory.md) —
   出口 7 の設計と実装の経緯

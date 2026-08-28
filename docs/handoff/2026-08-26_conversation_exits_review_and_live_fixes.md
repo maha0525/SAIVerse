@@ -37,7 +37,7 @@
 昨夜の実装 7 コミットは**レビューを一度も通っていなかった**ため、コード差分だけを
 3 束に割って NEBULA の `qwen3.8-review` へかけた。指摘 17 件を現物で裏取りし、成立した
 5 件を直した。詳細は
-[issue の「ローカルレビュー (2026-08-26)」節](../issues/user_utterance_path_failure_inventory.md)。
+[issue の「ローカルレビュー (2026-08-26)」節](../issues/archive/user_utterance_path_failure_inventory.md)。
 
 **芯は一つの型だった** — 「試みた」を「成功した」と同じ扱いにして、何も生まれなかった
 回にも状態だけを進める。バックエンドとフロントの両方に、別の顔で入っていた。
@@ -77,7 +77,7 @@
 
 ### 触っていない実在の欠陥 4 件
 
-いずれも [issue の「残したもの」節](../issues/user_utterance_path_failure_inventory.md)
+いずれも [issue の「残したもの」節](../issues/archive/user_utterance_path_failure_inventory.md)
 に記録済み。
 
 - 取り消しの検査と削除が非原子的 (`database/building_messages.py`)

@@ -1,8 +1,8 @@
 # ユーザー発話から応答完了までの停止点の棚卸し
 
 **ステータス**: 🟡 実装待ち — 洗い出し完了、設計は 2026-08-25 のまはー裁定で確定 (下の「設計の決着」)。
-やり直しは v0.3 の門の内側へ引き上げ済み ([v030_release_gate.md](../overview/v030_release_gate.md) §2-17)。
-**出自**: 2026-08-24 に NEBULA の provider を選んで話しかけたら無言だった件 ([user_lane_error_silent_in_ui](user_lane_error_silent_in_ui.md))。
+やり直しは v0.3 の門の内側へ引き上げ済み ([v030_release_gate.md](../../overview/v030_release_gate.md) §2-17)。
+**出自**: 2026-08-24 に NEBULA の provider を選んで話しかけたら無言だった件 ([user_lane_error_silent_in_ui](../user_lane_error_silent_in_ui.md))。
 まはー «今回は LLM サーバー側との接続失敗が原因だったと思うけど、ユーザーが話しかけてから
 ペルソナが応答完了するまでっていろんな障壁があるはずでしょ？どこで止まる可能性があって、
 そのうちユーザーに原因も対応も分からない形なのがどれか、っていうのの洗い出しからやりたい»
@@ -71,7 +71,7 @@
 | `get_llm_client` の接続検査 (`factory.py:178`) | 同上、素の `ValueError` | 🔤 / 🕳️ |
 | モデル定義が見つからない | 未調査 | ❓ |
 
-**issue [user_lane_error_silent_in_ui](user_lane_error_silent_in_ui.md) の主張③の訂正**:
+**issue [user_lane_error_silent_in_ui](../user_lane_error_silent_in_ui.md) の主張③の訂正**:
 「provider を UI で保存した時点では検査されない」は**現行コードと合わない**。
 `api/routes/providers.py:170` (作成) と `:207` (更新)、`api/routes/config.py:1073` (モデル保存) は
 いずれも保存前に検査し、400 とその文言を返す。残っている穴は **UI を通らない定義** —
@@ -184,13 +184,13 @@
 - **やり直し** = 応答が無い状態から応答を作る。**枝は増えない** (元の応答が存在しない)
 - **作り直し** = 気に入らない応答を別案に置き換える。**枝が増える** (どちらが本流かの記録が要る)
 
-[`memory_continuity_graph.md`](memory_continuity_graph.md) の「副産物 — 会話の分岐・再生成」が設計しているのは
+[`memory_continuity_graph.md`](../memory_continuity_graph.md) の「副産物 — 会話の分岐・再生成」が設計しているのは
 **作り直し**の方 (新しい thread を開いて分岐位置以前と繋ぐ)。**やり直しは枝を増やさないので、
 連続性グラフの決着を待たずに成立する** — これが門の線引きを動かせる根拠。
 
 ### 5. 門の線引きを変更 — やり直しを v0.3 の内側へ (まはー裁定)
 
-[`v030_release_gate.md`](../overview/v030_release_gate.md) §2-14 は「刻印は v0.3、消費は後続」と引いており、
+[`v030_release_gate.md`](../../overview/v030_release_gate.md) §2-14 は「刻印は v0.3、消費は後続」と引いており、
 再生成は消費側だった。**やり直しだけを門の内側へ引き上げ、作り直し (分岐) は後続のまま**とする。
 ③ の出口とやり直しは一つの工事。→ 門 §2-17 として登載。
 
@@ -403,7 +403,7 @@ CLAUDE.md の「例外処理・救済機構が本体を覆い始めたら止ま�
 - ✅ 派生: `respeak_split_message_unification` は**対象消滅で archive** — 二回目のコールが無く
   なったので、一つの発言が二つに分裂する経路が構造から消えた
 - ⏭ **空 placeholder の掃除は独立 issue へ切り出した**
-  ([orphaned_streaming_placeholder_cleanup](orphaned_streaming_placeholder_cleanup.md))。
+  ([orphaned_streaming_placeholder_cleanup](../orphaned_streaming_placeholder_cleanup.md))。
   残るのは「Beat が例外で丸ごと落ちた場合」だけで、中断と停止の経路は finalize を通るので印が付く
 
 **束 2 — 無言をなくす (バックエンド)** ✅ **ほぼ完了 (2026-08-25)**
@@ -465,7 +465,7 @@ CLAUDE.md の「例外処理・救済機構が本体を覆い始めたら止ま�
 **設計の決定 (実装中に確定したもの)**:
 
 - **続きは「新しい発言」として並ぶ**。世界の記録としては、中断された発言と続きの発言の 2 件。
-  archive した [respeak_split_message_unification](archive/respeak_split_message_unification.md) は
+  archive した [respeak_split_message_unification](respeak_split_message_unification.md) は
   「同一の発言として扱うべき」としていたが、**中断があった事実そのものを記録から消さない**方を
   採る (まはーのアイディア「記憶の修正来歴」と同じ理屈)。
   **表示も 2 つの吹き出しのままとする (2026-08-26 まはー裁定)** — 一つに繋げる案は採らない。
@@ -682,11 +682,11 @@ CLAUDE.md の「例外処理・救済機構が本体を覆い始めたら止ま�
 独立の issue へ移送。詳細と直し方の論点はそれぞれの issue にある)。
 
 - **ストリーム表示を永続化の成功として状態を進めている** →
-  [stream_completion_is_not_proof_of_persistence](stream_completion_is_not_proof_of_persistence.md)
+  [stream_completion_is_not_proof_of_persistence](../stream_completion_is_not_proof_of_persistence.md)
 - **未知の送信結果から復旧できない** →
-  [unknown_send_outcome_has_no_recovery_path](unknown_send_outcome_has_no_recovery_path.md)
+  [unknown_send_outcome_has_no_recovery_path](../unknown_send_outcome_has_no_recovery_path.md)
 - **retry API がサーバー側で再送可能性を検証していない** →
-  [retry_api_has_no_server_side_eligibility_check](retry_api_has_no_server_side_eligibility_check.md)
+  [retry_api_has_no_server_side_eligibility_check](../retry_api_has_no_server_side_eligibility_check.md)
 
 ### 自動テストの状況
 
@@ -777,7 +777,7 @@ SAIVerse では逆。ここは**見られていなくても住人が生きてい
 #### 直さなかった 1 件と、止める理由
 
 **フロントのストリーム表示にも識別子が無い** (`frontend/page.tsx`) →
-[streaming_events_have_no_identity_in_the_ui](streaming_events_have_no_identity_in_the_ui.md)
+[streaming_events_have_no_identity_in_the_ui](../streaming_events_have_no_identity_in_the_ui.md)
 (2026-08-28 に独立の issue へ移送)。
 
 **ここで補修を止める。** 3 巡目の指摘は、別々の顔をしているが**一つの構造欠陥**に収束して
@@ -792,15 +792,15 @@ SAIVerse では逆。ここは**見られていなくても住人が生きてい
 
 | 件 | 運べていないもの |
 |---|---|
-| [保存できたことを表す信号が無い](stream_completion_is_not_proof_of_persistence.md) | 段階 — 画面に出たところまでなのか、DB に残ったところまでなのか |
-| [未知の送信結果から復旧できない](unknown_send_outcome_has_no_recovery_path.md) | 段階 — 発言がサーバーに残ったのかどうか |
-| [retry のサーバー側検証が無い](retry_api_has_no_server_side_eligibility_check.md) | 段階 — その発言が既に応答を得たのかどうか |
-| [ストリームの表示に識別子が無い](streaming_events_have_no_identity_in_the_ui.md) | どの生成か — 断片がどのペルソナのどの Pulse のものか |
+| [保存できたことを表す信号が無い](../stream_completion_is_not_proof_of_persistence.md) | 段階 — 画面に出たところまでなのか、DB に残ったところまでなのか |
+| [未知の送信結果から復旧できない](../unknown_send_outcome_has_no_recovery_path.md) | 段階 — 発言がサーバーに残ったのかどうか |
+| [retry のサーバー側検証が無い](../retry_api_has_no_server_side_eligibility_check.md) | 段階 — その発言が既に応答を得たのかどうか |
+| [ストリームの表示に識別子が無い](../streaming_events_have_no_identity_in_the_ui.md) | どの生成か — 断片がどのペルソナのどの Pulse のものか |
 
 4 件を別々に補修すると、同じ判断が経路ごとに別の場所へ書き分けられる (このレビュー 3 巡で
 繰り返し出た型)。**設計は 4 件を一つの束として扱う**のが安全で、どれか 1 件だけを先に直す
 場合も、残り 3 件がその決めごとに乗れるかを見てから決める。
-4 件とも [`v030_release_gate.md`](../overview/v030_release_gate.md) §9 (仕分け待ち) へ
+4 件とも [`v030_release_gate.md`](../../overview/v030_release_gate.md) §9 (仕分け待ち) へ
 H〜K として登載した — 門の内か外かはまはーの裁定待ち。
 
 ### 棚上げしていた 4 件は、全部 high で出た
@@ -900,14 +900,14 @@ pipeline 経路 (ログの `[sea][pipeline] Cancelled mid-stream` が証拠) な
 
 → 2026-08-27 のまはー提起 (思考中の停止が完全な沈黙になる) を受けて、**中断のタイミング軸の
 全数棚卸し**を別文書に起こした:
-[beat_interruption_timing_inventory](archive/beat_interruption_timing_inventory.md)。tool-streaming の
+[beat_interruption_timing_inventory](beat_interruption_timing_inventory.md)。tool-streaming の
 件もそこで「停止フラグを立てた後、誰も読まない」ことまでコードで確認済み (穴 2)。
 
 ## 実機検証 ⑤ (2026-08-28 未明) — 切断に気づかず、無言のスピナーのまま固まる
 
 まはーが応答の生成中にバックエンドを Ctrl+C で停止 (行儀のいい終了で、生成は完走して
 世界と記憶には残った — その経緯は
-[beat_interruption_timing_inventory](archive/beat_interruption_timing_inventory.md) の「⑤の変種」)。
+[beat_interruption_timing_inventory](beat_interruption_timing_inventory.md) の「⑤の変種」)。
 **ブラウザ側は、閉じた数秒後も「Streaming...」のスピナーのまま何も出なかった。**
 
 出口 7 の実装が用意している二つの文言 (「接続が途中で切れました」/「発言が届いたか
@@ -946,3 +946,17 @@ pipeline 経路 (ログの `[sea][pipeline] Cancelled mid-stream` が証拠) な
 4. **文言が事実と違う** (段 6 の接続拒否＝タイムアウト表示)。分類を分けるか、文言を両にらみにするか。
 
 1 と 2 は既存の器に載せる工事で、3 は設計の話、4 は文言と分類の話。
+
+## 完了 (2026-08-29 未明) — 能動検証をすべて終了
+
+- **⑤ (切断の心拍監視)**: 生成中にバックエンドを停止 → 15 秒後に「通信が途中で
+  切れました。ここまでの内容は残っています。」が表示。二晩で二回確認。
+- **⑤-b**: 再送で応答が復帰し、建物の記録に発言が二重に載っていないことを確認。
+- **⑥**: 再送・続きの生成・取り消すボタンのライト/ダーク表示を確認 (両テーマの
+  定義が `page.module.css` にあり、実機の見た目も問題なし)。
+- 思考中の停止 (吹き出しの畳み + 改訂裁定の「再送」 + 応答復帰) と、サーバー終了
+  時の後始末 (途中本文・中断の通告・記憶が残る) も同夜に合格 — 経緯と裁定は
+  [beat_interruption_timing_inventory](beat_interruption_timing_inventory.md)。
+
+本 issue の能動検証はこれで完了。未決の設計 4 件 (上の切り出し) は独立 issue として
+リリース門 §9 H〜K の仕分け待ちに登載済みで、この器はここで閉じる。

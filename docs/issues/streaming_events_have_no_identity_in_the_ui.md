@@ -3,7 +3,7 @@
 **ステータス**: 🔲 未着手 — 設計から
 **優先度**: medium — サーバー側の記録は正しく、再読込で直る。ただしボタンの誤爆経路が未検証
 **作成日**: 2026-08-28
-**出自**: [user_utterance_path_failure_inventory](user_utterance_path_failure_inventory.md) の
+**出自**: [user_utterance_path_failure_inventory](archive/user_utterance_path_failure_inventory.md) の
 Codex レビュー 3 巡目 (2026-08-26) が指摘し、**ここで補修を止めると決めた**地点で切り出した
 4 件のうちの 1 つ。
 
@@ -86,5 +86,5 @@ Codex レビュー 3 巡目 (2026-08-26) が指摘し、**ここで補修を止�
 
 - `frontend/src/app/page.tsx` の `consumeReplyStream` (ストリームの読み手) と `Message` 型 /
   `manager/runtime.py` `_stream_key` `_note_outcome` `_note_speech`
-- [user_utterance_path_failure_inventory](user_utterance_path_failure_inventory.md) —
+- [user_utterance_path_failure_inventory](archive/user_utterance_path_failure_inventory.md) —
   補修を止めた判断と、その理由

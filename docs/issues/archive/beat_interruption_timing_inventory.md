@@ -55,7 +55,7 @@
 | A・B | 何も書かれていない。エラーはイベントで画面に届き、ダイアログ + ユーザーの吹き出しに「再送」 | ✅ (束 2 の出口 3) |
 | C 思考中 | 下書き行は空文字で確定 (静かに)。その後エラーイベントが届いて「再送」が出る。浮いた吹き出しの問題は停止と同じ | ✅ 再開手段はある (コード確認) |
 | D 本文中 | 途中経過の器から部分文を回収して確定 + 印 + 記憶 + 原因を書かない通告。エラーイベントも別に届く | ✅ (2026-08-27 実装。狙って踏めないため実機は未) |
-| E 完了処理の入り口 | D と同じ。ただし**スペルの retry 中の途中死**だけは、retry 分の部分文が spell loop の降格契約に吸われて記録に残らない (既知・[orphaned_streaming_placeholder_cleanup](orphaned_streaming_placeholder_cleanup.md) の 2 巡目見送り) | ⚠️ 既知の限定 |
+| E 完了処理の入り口 | D と同じ。ただし**スペルの retry 中の途中死**だけは、retry 分の部分文が spell loop の降格契約に吸われて記録に残らない (既知・[orphaned_streaming_placeholder_cleanup](../orphaned_streaming_placeholder_cleanup.md) の 2 巡目見送り) | ⚠️ 既知の限定 |
 | F 確定後の隙間 | **確定済みなので出口の後始末はスキップされ、memorize はまだ走っていない。建物の記録には全文が残るのに、本人の記憶には残らない** — 「世界には刻まれたのに本人だけが覚えていない」が、逆向きの窓でまだ開いている。窓は狭い (確定からの数十行: 完了イベント送出・メタデータ組み立て・`_finalize_beat` 冒頭) | 🕳️ **穴 3** (コード確認) |
 
 ---
@@ -211,7 +211,7 @@ Codex adversarial-review 2 巡目 (2026-08-28 未明) — 6 件、採用 2 / 見
 
 - **[high] プロセス強制終了では補填が走れない** — 事実。ただしプロセス内の後始末が
   プロセスの死に無力なのは構造的で、受け持ちは
-  [orphaned_streaming_placeholder_cleanup](orphaned_streaming_placeholder_cleanup.md)
+  [orphaned_streaming_placeholder_cleanup](../orphaned_streaming_placeholder_cleanup.md)
   の候補 3 (起動時の照合と掃除)。記憶との突き合わせもそこへ含める (未実装の設計案件)
 - **[medium] 心拍監視が中継のバッファリングで誤発火しうる** — 隔離再現で 1 秒間隔の
   行が中継を即時に通ることを実測済み。15 秒は保証 (2 秒) の 7 倍余裕で、誤発火の
@@ -240,7 +240,7 @@ Codex adversarial-review 2 巡目 (2026-08-28 未明) — 6 件、採用 2 / 見
 スレッドなので、生成があと 10 秒長ければ途中で殺されて発言は消えていた見込み。
 **強制終了 (taskkill /F) での事故死テストは未実施** — 予想は「下書き行が未確定で残り、
 発言は消える」。プロセス内の後始末はプロセスの死には無力で、この領域を受け持つのは
-[orphaned_streaming_placeholder_cleanup](orphaned_streaming_placeholder_cleanup.md) の
+[orphaned_streaming_placeholder_cleanup](../orphaned_streaming_placeholder_cleanup.md) の
 候補 3 (起動時に残った下書き行を掃いて通告を出す)、未実装。
 
 #### 追観察 (2026-08-28 夜) — 「同着」ではなく粘りの構造だった
@@ -354,4 +354,4 @@ Codex 2 巡目 (high 1): 「shutdown 中の schedule が受理扱いのまま実
 ---
 
 **関連**: [user_utterance_path_failure_inventory](user_utterance_path_failure_inventory.md) (終わり方の 7 出口) /
-[orphaned_streaming_placeholder_cleanup](orphaned_streaming_placeholder_cleanup.md) (下書き行の根治)
+[orphaned_streaming_placeholder_cleanup](../orphaned_streaming_placeholder_cleanup.md) (下書き行の根治)

@@ -53,7 +53,7 @@ spell loop の「内部エラーは partial へ降格して発言全体を失わ
 消える) とは別の損失。直すには spell loop のエラー降格契約の再設計 (降格 vs 中断確定)
 が要る。今回の diff はこの経路を変えておらず、retry 途中死の sub_seq 回収はむしろ
 改善している。残すなら別 issue の器 — 現時点では
-[user_utterance_path_failure_inventory.md](user_utterance_path_failure_inventory.md) の
+[user_utterance_path_failure_inventory.md](archive/user_utterance_path_failure_inventory.md) の
 「どの生成のどの段階かを運ぶものが無い」族に属する。
 
 ### 採らなかった指摘 (記録)
@@ -171,7 +171,7 @@ Pulse で通告がペルソナの記憶へ `<system>[ソフィーの部屋] (ユ
 ---
 **関連**: `sea/runtime_emitters.py` `emit_speak_start` / `emit_speak_finalize` ・
 `sea/runtime_llm.py` の pipeline streaming ・
-[user_utterance_path_failure_inventory.md](user_utterance_path_failure_inventory.md) 束 2
+[user_utterance_path_failure_inventory.md](archive/user_utterance_path_failure_inventory.md) 束 2
 
 ## 何が起きているか
 

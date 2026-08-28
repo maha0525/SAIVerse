@@ -128,7 +128,7 @@ doc: [`track_retirement.md`](../intent/track_retirement.md)
 
 **17. 会話の終わり方 (出口) と、応答のやり直し**
 現状: **設計確定 (2026-08-25、まはー裁定)・実装待ち**。8/24 の「話しかけても無言」を個別に潰す前に経路全体を
-棚卸しした結果 ([`user_utterance_path_failure_inventory.md`](../issues/user_utterance_path_failure_inventory.md))。
+棚卸しした結果 ([`user_utterance_path_failure_inventory.md`](../issues/archive/user_utterance_path_failure_inventory.md))。
 含むもの: ①残るべき終わり方 7 通りの明示 (無い 2 つ = 「応答が生まれなかった」「顛末が不明」) ②片付けの一段
 (未読なら差し戻し / 既読なら残すに固定 / 空 placeholder は掃除) ③**応答のやり直し** (追加のプロンプト無しで
 応答だけを起こす)。
@@ -140,7 +140,7 @@ doc: [`track_retirement.md`](../intent/track_retirement.md)
 前者は連続性グラフを必要としない。**やり直しのみ門の内へ引き上げ、作り直し (分岐) は後続のまま**。
 土台: 会話開始経路 `run_sea_user(persona, building_id, "")` (`saiverse/user_conversation.py:753-758`) が
 既に「発言は履歴にある前提で応答だけ起こす」形。新機構ではなく口を付ける工事。
-doc: [`user_utterance_path_failure_inventory.md`](../issues/user_utterance_path_failure_inventory.md)
+doc: [`user_utterance_path_failure_inventory.md`](../issues/archive/user_utterance_path_failure_inventory.md)
 
 ---
 
@@ -228,7 +228,7 @@ Wave 2 の設計議論 (就寝判断の棚卸し) で浮上した。F・G は 20
 切り出したもの。**4 件は根が一つ**で、「どの生成の、どの段階の話か」を運ぶものが無い —
 別々に補修すると同じ判断が経路ごとに書き分けられるため、**設計は 4 件を一つの束として
 扱う**のが安全 (経緯は
-[`user_utterance_path_failure_inventory.md`](../issues/user_utterance_path_failure_inventory.md)
+[`user_utterance_path_failure_inventory.md`](../issues/archive/user_utterance_path_failure_inventory.md)
 の「切り出した設計案件 4 件」)。
 
 ---
