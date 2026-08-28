@@ -900,14 +900,14 @@ pipeline 経路 (ログの `[sea][pipeline] Cancelled mid-stream` が証拠) な
 
 → 2026-08-27 のまはー提起 (思考中の停止が完全な沈黙になる) を受けて、**中断のタイミング軸の
 全数棚卸し**を別文書に起こした:
-[beat_interruption_timing_inventory](beat_interruption_timing_inventory.md)。tool-streaming の
+[beat_interruption_timing_inventory](archive/beat_interruption_timing_inventory.md)。tool-streaming の
 件もそこで「停止フラグを立てた後、誰も読まない」ことまでコードで確認済み (穴 2)。
 
 ## 実機検証 ⑤ (2026-08-28 未明) — 切断に気づかず、無言のスピナーのまま固まる
 
 まはーが応答の生成中にバックエンドを Ctrl+C で停止 (行儀のいい終了で、生成は完走して
 世界と記憶には残った — その経緯は
-[beat_interruption_timing_inventory](beat_interruption_timing_inventory.md) の「⑤の変種」)。
+[beat_interruption_timing_inventory](archive/beat_interruption_timing_inventory.md) の「⑤の変種」)。
 **ブラウザ側は、閉じた数秒後も「Streaming...」のスピナーのまま何も出なかった。**
 
 出口 7 の実装が用意している二つの文言 (「接続が途中で切れました」/「発言が届いたか
