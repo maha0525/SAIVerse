@@ -1322,6 +1322,41 @@ class SAIVerseManager(
 
         return cancelled
 
+    def stop_all_active_generations(self, timeout: float = 8.0) -> bool:
+        """サーバー終了 (Ctrl+C / SIGTERM) 用: 走行中の全生成を締めてから返る。
+
+        停止ボタン (``cancel_active_generation``) がユーザーの現在建物の
+        ペルソナだけを対象にするのに対し、こちらは全ペルソナ・全建物が対象。
+        全建物の stop_event を立てて backend_worker の建物内ペルソナループを
+        断ち (終了処理中に次のペルソナの生成が始まらないようにする)、
+        PulseController.shutdown に委譲して、走行中の Pulse の取り消しと
+        Beat の後始末 (途中本文の確定・記憶書き込み) の完了待ちを行う。
+
+        Returns:
+            全生成が締切内に締まったら True (詳細は PulseController.shutdown)。
+        """
+        # stop_event の設置に何が起きても、後始末 (pulse_controller.shutdown)
+        # の呼び出しには必ず到達する構造にする — イベント set の失敗で
+        # 下書き行の確定・記憶書き込みが飛ぶ方が実害が大きい。
+        try:
+            # list() は backend_worker の登録/削除と並行すると
+            # "dictionary changed size during iteration" (RuntimeError) に
+            # なり得る。3 回まで取り直し、それでも駄目なら空リストで進む。
+            stop_events: List[threading.Event] = []
+            for _attempt in range(3):
+                try:
+                    stop_events = list(self._active_stop_events.values())
+                    break
+                except RuntimeError:
+                    continue
+            for stop_event in stop_events:
+                stop_event.set()
+        except Exception:
+            logging.exception(
+                "[shutdown] failed to set stop events; proceeding to settle generations"
+            )
+        return self.pulse_controller.shutdown(timeout=timeout)
+
     def preview_context(
         self, message: str, building_id: Optional[str] = None,
         meta_playbook: Optional[str] = None,

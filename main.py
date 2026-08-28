@@ -558,6 +558,23 @@ def main():
             return
         shutdown_called = True
         logging.info("[shutdown] start")
+        # 走行中の発言生成を最初に締める — Beat の後始末 (途中本文の確定・
+        # 記憶書き込み) は生成スレッドの中で走るので、MCP や llama-server を
+        # 先に壊すと、後始末が壊れた道具の上で走ることになる。これを飛ばして
+        # プロセスが死ぬと、下書き行が未確定のまま残って発言が丸ごと消える。
+        if manager:
+            try:
+                if manager.stop_all_active_generations():
+                    logging.info("[shutdown] active generations settled")
+                else:
+                    # 締切内に締まらなかった — 下書き行が未確定のまま残り、
+                    # その発言は画面・記録・記憶から消え得る。
+                    logging.warning(
+                        "[shutdown] some active generations did not settle "
+                        "before teardown"
+                    )
+            except Exception:
+                logging.exception("[shutdown] failed to settle active generations")
         try:
             from tools.mcp_client import shutdown_mcp_sync
 

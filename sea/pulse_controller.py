@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 import uuid
 from dataclasses import dataclass, field
 from enum import IntEnum
@@ -161,6 +162,10 @@ class PulseController:
         # _current_meta は観測用の記帳として残す。
         self._current_meta: Dict[str, ExecutionRequest] = {}
 
+        # 終了処理中は新規 Pulse を受け付けない (shutdown() が立てる)。
+        # 立った後の submit は skipped、待機列の繰り上げも止まる。
+        self._shutting_down = False
+
         # Interrupt callbacks: called when auto execution is interrupted by user
         # Signature: callback(persona_id: str, interrupted_by: str) -> None
         self._on_interrupt_callbacks: List[Callable] = []
@@ -177,7 +182,94 @@ class PulseController:
     def register_on_user_complete(self, callback: Callable) -> None:
         """Register a callback for when user execution completes."""
         self._on_user_complete_callbacks.append(callback)
-    
+
+    def shutdown(self, timeout: float = 8.0) -> bool:
+        """サーバー終了時に、走行中の全 Pulse を締めてから返る。
+
+        後始末の形は停止ボタンと同じ (取り消し → Beat の出口の後始末) だが、
+        対象は停止ボタンが触らないメタ判断レーン (_current_meta) も含む —
+        終了時はすべて締める。
+
+        走行中の request の cancellation_token に "server_shutdown" を刻んで
+        取り消し、Beat の出口の後始末 (途中本文の確定・中断の通告・記憶書き込み。
+        ``sea/runtime_llm.py`` の ``_settle_placeholder_on_beat_death``) が
+        走り終えるのを待つ。これを呼ばずにプロセスが死ぬと、daemon の生成
+        スレッドが凍った瞬間に下書き行 (content="") が未確定のまま残り、
+        発言が画面・記録・記憶から丸ごと消える。
+
+        Returns:
+            全 Pulse が締切内に締まったら True。締切超過・待機の中断は False
+            (呼び出し側は残りの終了処理を続けてよい)。
+        """
+        # 最初に受付を閉じる — 取り消しで空いた席に新しい生成が座るのを防ぐ。
+        self._shutting_down = True
+
+        active = list(self._current.items()) + list(self._current_meta.items())
+        for persona_id, request in active:
+            request.cancellation_token.cancel(interrupted_by="server_shutdown")
+
+        if not active:
+            # 台帳が空なら即 True でよい: 全登録経路 (submit メインレーン /
+            # メタレーン / _process_queue) が publish-then-validate — 台帳へ
+            # 登録してから旗を再検査し、立っていたら自分で席を消す — を守る
+            # ので、この一覧に無い登録は必ず自分で席を立つ。
+            LOGGER.debug("[PulseController] Shutdown: no active executions")
+            return True
+
+        persona_ids = sorted({pid for pid, _ in active})
+        LOGGER.info(
+            "[PulseController] Shutdown: cancelling %d active execution(s) "
+            "(personas: %s), waiting up to %.1fs for cleanup",
+            len(active), ", ".join(persona_ids), timeout,
+        )
+
+        # 台帳 (_current / _current_meta) から消える = _execute_unlocked /
+        # _submit_meta_lane の finally を通過した = Beat の後始末 (途中本文の
+        # 確定・記憶書き込み) まで完了した、という関係に依存して待つ。
+        # 後始末は Beat のスレッド内で例外経路として走るので、ここは観測だけ。
+        deadline = time.monotonic() + timeout
+        try:
+            while time.monotonic() < deadline:
+                if not self._current and not self._current_meta:
+                    LOGGER.info(
+                        "[PulseController] Shutdown: all active executions settled"
+                    )
+                    return True
+                # 打ち直しの回収網 (保険): 一覧取得の後に台帳へ載った登録は
+                # publish-then-validate の登録後検査で自分で席を立つのが本線
+                # だが、万一それを外した登録が残っても、各周回で未取り消しの
+                # request に打ち直して最大 0.1 秒で回収する (cancel() は
+                # Event の再 set なので二度呼んで安全)。
+                late = list(self._current.values()) + list(self._current_meta.values())
+                for request in late:
+                    if not request.cancellation_token.is_cancelled():
+                        LOGGER.info(
+                            "[PulseController] Shutdown: cancelling late-registered "
+                            "%s request for persona %s",
+                            request.type, request.persona_id,
+                        )
+                        request.cancellation_token.cancel(
+                            interrupted_by="server_shutdown"
+                        )
+                time.sleep(0.1)
+        except KeyboardInterrupt:
+            # Ctrl+C 連打。後始末の完了は待てなかったが、残りの終了処理
+            # (llama-server 停止等) は止めない。
+            LOGGER.warning(
+                "[PulseController] Shutdown wait interrupted by user; "
+                "proceeding without waiting for cleanup"
+            )
+            return False
+
+        remaining = sorted(set(self._current) | set(self._current_meta))
+        LOGGER.warning(
+            "[PulseController] Shutdown: %d execution(s) did not settle within "
+            "%.1fs (personas: %s); their draft rows may remain unconfirmed",
+            len(remaining), timeout, ", ".join(remaining),
+        )
+        return False
+
+
     def _get_lock(self, persona_id: str) -> threading.RLock:
         """Get or create lock for persona."""
         if persona_id not in self._locks:
@@ -200,6 +292,17 @@ class PulseController:
         actual LLM execution. This allows higher priority requests to send
         cancellation signals immediately.
         """
+        # 終了処理中 (shutdown() 後) は新規 Pulse を受け付けない — 取り消しで
+        # 空いた席に新しい生成が座ると、締めたそばから次の下書き行が生まれる。
+        if self._shutting_down:
+            request.dispatch_action = "skipped"
+            LOGGER.info(
+                "[PulseController] Rejecting %s request for persona %s "
+                "(shutdown in progress)",
+                request.type, request.persona_id,
+            )
+            return None
+
         # pulse_dispatch.md §4.3 / §6: メタ判断は priority 体系外のレーンで
         # 処理する (中断しない / されない)。実際の実行タイミングは
         # run_meta_user 内の Beat ロックが直列化する (main の Beat 境界に挟まる)。
@@ -211,6 +314,19 @@ class PulseController:
         
         # Phase 1: Check state and determine action (with lock)
         with lock:
+            # 冒頭の速い経路のガードを通過した後、ここへ来るまでの間に
+            # shutdown() が始まっていることがある (check-then-act の窓)。
+            # 台帳へ載せる直前にロック内でもう一度検査して、shutdown() の
+            # 一覧取得に漏れた登録が取り消されずに走るのを防ぐ。
+            if self._shutting_down:
+                request.dispatch_action = "skipped"
+                LOGGER.info(
+                    "[PulseController] Rejecting %s request for persona %s "
+                    "(shutdown in progress)",
+                    request.type, persona_id,
+                )
+                return None
+
             current = self._current.get(persona_id)
             
             if current is None:
@@ -255,6 +371,22 @@ class PulseController:
                         request.type, persona_id, current.type
                     )
                     action = "skipped"
+
+            # publish-then-validate: 台帳へ登録した後に旗を再検査する。
+            # shutdown() は「旗を立てる → 台帳の一覧を取る」の順で動くので、
+            # 一覧取得より後に載った登録は、この時点で必ず旗が見える —
+            # 見えたら自分で席を消して skipped で返る。これで「取り消されずに
+            # 走る登録」の経路が消える。queued / skipped (登録していない)
+            # の場合は席が無いので触らない。
+            if self._shutting_down and self._current.get(persona_id) is request:
+                del self._current[persona_id]
+                request.dispatch_action = "skipped"
+                LOGGER.info(
+                    "[PulseController] Rejecting %s request for persona %s "
+                    "(shutdown in progress)",
+                    request.type, persona_id,
+                )
+                return None
 
         # W3 Chunk A: 受付の裁定を request に記入 (呼び出し側の観測用)
         request.dispatch_action = action
@@ -449,18 +581,35 @@ class PulseController:
         """Process the next item in the queue for a persona."""
         lock = self._get_lock(persona_id)
         queue = self._get_queue(persona_id)
-        
+
         with lock:
+            # 終了処理中は待機列を繰り上げない — 取り消しで空いた席に待機列の
+            # 次が座って、終了処理中に新しい生成が始まるのを防ぐ。
+            if self._shutting_down:
+                return
+
             if not queue:
                 return
-            
+
             if persona_id in self._current:
                 # Something else is already running
                 return
-            
+
             next_request = queue.pop(0)
             self._current[persona_id] = next_request
-        
+
+            # publish-then-validate: 台帳へ登録した後に旗を再検査する。
+            # shutdown() の一覧取得より後に載った登録は、この時点で必ず旗が
+            # 見える — 見えたら自分で席を消して繰り上げをやめる。
+            if self._shutting_down:
+                del self._current[persona_id]
+                LOGGER.info(
+                    "[PulseController] Discarding queued %s request for "
+                    "persona %s (shutdown in progress)",
+                    next_request.type, persona_id,
+                )
+                return
+
         LOGGER.info(
             "[PulseController] Processing queued %s request for persona %s",
             next_request.type, persona_id
@@ -504,6 +653,17 @@ class PulseController:
         観測用の記帳。
         """
         persona_id = request.persona_id
+        # submit() 冒頭のガードとここの間に shutdown() が始まっていることが
+        # ある (check-then-act の窓)。メインレーンと違いこちらはロック無しの
+        # 台帳書き込みなので、書き込む直前に再検査する (兄弟の塞ぎ忘れ防止)。
+        if self._shutting_down:
+            request.dispatch_action = "skipped"
+            LOGGER.info(
+                "[PulseController] Rejecting %s request for persona %s "
+                "(shutdown in progress)",
+                request.type, persona_id,
+            )
+            return None
         # 念のため簡易な多重防御 (MetaLayer Lock とは独立)。先行メタ判断が
         # 動いているのに重ねて submit が来たら警告を出す。
         if self._current_meta.get(persona_id) is not None:
@@ -513,6 +673,20 @@ class PulseController:
                 persona_id,
             )
         self._current_meta[persona_id] = request
+
+        # publish-then-validate: 台帳へ登録した後に旗を再検査する。shutdown()
+        # の一覧取得より後に載った登録は、この時点で必ず旗が見える — 見えたら
+        # 自分で席を消して skipped で返る (submit() メインレーンと同じ規律)。
+        if self._shutting_down:
+            if self._current_meta.get(persona_id) is request:
+                del self._current_meta[persona_id]
+            request.dispatch_action = "skipped"
+            LOGGER.info(
+                "[PulseController] Rejecting %s request for persona %s "
+                "(shutdown in progress)",
+                request.type, persona_id,
+            )
+            return None
 
         # A7 (W1 Chunk A): 例外は [] に変換せず再送出する — 呼び出し側
         # (judgment_points.run_judgment_point) が台帳の failed/unknown 分類に

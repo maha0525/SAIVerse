@@ -240,6 +240,65 @@ Codex adversarial-review 2 巡目 (2026-08-28 未明) — 6 件、採用 2 / 見
 [orphaned_streaming_placeholder_cleanup](orphaned_streaming_placeholder_cleanup.md) の
 候補 3 (起動時に残った下書き行を掃いて通告を出す)、未実装。
 
+#### 追観察 (2026-08-28 夜) — 「同着」ではなく粘りの構造だった
+
+より長い生成 (72K トークン文脈のローカルモデル) で再試行してもまた完走した。ログ
+(`20260828_224605/backend.log`) で構造が確定: Ctrl+C (23:04:39) → uvicorn が
+「Waiting for connections to close」で**進行中の接続を 5 秒待つ** (main.py の
+`timeout_graceful_shutdown=5`) → 猶予切れで HTTP の口だけ強制切断 (23:04:44、
+フロントの途中まで表示はこの瞬間の姿) → **生成は HTTP と別のワーカースレッドで
+走り続け**、全文完成・スペル実行・保存 (23:04:46) → 終了処理完了・プロセス消滅
+(23:04:48)。つまり Ctrl+C からプロセス消滅まで約 9 秒あり、そこに収まる生成は
+完走する。収まらない生成は従来どおり凍死して発言が丸ごと消える —
+`SAIVerseManager.shutdown` は背景マネージャ類だけ止めて走行中の Pulse に触れて
+いなかった (終了処理の片手落ち)。
+
+### 終了処理の片手落ちの修正 (2026-08-28 夜、まはー GO)
+
+Ctrl+C / SIGTERM の終了処理から、停止ボタンと同じ後始末を呼ぶ:
+
+- **`PulseController.shutdown(timeout=8.0)`** (新設): 受付を閉じ (`_shutting_down` —
+  submit は skipped、待機列の繰り上げも停止)、`_current` + `_current_meta` の全
+  request の取り消しトークンを `interrupted_by="server_shutdown"` で引き、台帳が
+  空になる (= 実行スレッドの finally 通過 = Beat の後始末完了) まで 0.1 秒間隔で
+  待つ。締切超過と Ctrl+C 連打は WARNING を出して False (残りの終了処理は続行)。
+- **`SAIVerseManager.stop_all_active_generations()`** (新設): 全建物の stop_event を
+  立てて backend_worker の建物内ペルソナループを断ってから上へ委譲。停止ボタン
+  (`cancel_active_generation` = 現在建物のみ) との対比を docstring に記載。
+- **main.py の終了手順の先頭** (MCP / llama-server を壊す前) に挿入 — 後始末は生成
+  スレッド内で走るので、道具を先に壊すと後始末が壊れた道具の上で走る。
+- 通告の文面は既存の非ユーザー形「(ここで発言が中断されました)」に乗る
+  (`server_shutdown` は `_is_user_interruption` の対象外 — テストで固定)。
+- テスト 6 本 (`tests/test_pulse_controller_shutdown.py` 5 本 + salvage 1 本)、
+  フルスイート 4724 本緑。
+- **実機検証 (未)**: 生成中に Ctrl+C → 途中までの本文 + 中断の印が残り、再起動後も
+  読めること。修正前の「丸ごと消える」との比較。
+
+#### レビュー記録 (2026-08-29 未明)
+
+ローカルレビュー 1 巡 (採用 3: main.py が戻り値を捨てて「settled」と嘘をログ /
+受付ガードすり抜けの窓 / docstring の不正確。テスト補強 2。不成立 1: メタレーンの
+迂回路は submit 経由しか無いことを実物で確認)。
+
+Codex 1 巡目 (high 4 + medium 1): 採用 4 — 空台帳の早期 return に回収網が効かない窓
+(全登録経路を publish-then-validate — 登録してから旗を再検査して自席を消す — に統一
+して閉鎖。旗立て→一覧取得の順と組むと、一覧に無い登録は必ず自分で席を立つ)、
+待機列繰り上げのガードをロック内へ、停止イベント一覧の並行変更 RuntimeError
+(リトライ + 例外でも shutdown 委譲へ必ず到達)、テスト補強。見送り 1 —
+「uvicorn より前に停止フックを」は signal 所有権を uvicorn と取り合う大工事で、
+受付ガードが新規 Pulse を止め、走行中はトークンで締まるため処方が前提過剰。
+
+Codex 2 巡目 (high 1): 「shutdown 中の schedule が受理扱いのまま実行されず消える」。
+裏取りの結果、大半は既存の形 — ①待機列 (queued → 台帳 accepted で前進) は元々
+メモリ上にしか無く、どんなプロセス死でも前から消える (台帳の「queue に残っていて
+消えないため accepted」(handoff D4) は再起動を跨ぐと元々偽)。②実行中 schedule の
+ユーザー停止 (cancelled → accepted) にも同じ形が既にある。**本件で新しく変わった
+薄い一枚**: 実行中 schedule を shutdown が締めると、旧来は「分類前にプロセス死 →
+台帳 prepared → 再起動の回復が再発火」だったのが「cancelled で完走 → accepted で
+封印 → 再発火なし」になる。発言の保全と引き換えに schedule 一回ぶんの再発火が
+消える。封印の分類を変えるか (cancelled の由来 = server_shutdown を台帳へ運ぶか)
+は schedule 台帳の設計判断なので、この配線には入れずまはーへ上げる。
+
 ## 穴の一覧 (裁定前の整理)
 
 1. **思考中の停止は、出口 5 の顔をした出口 3** — 「ユーザーが止めた」(出口 5) の扱いで

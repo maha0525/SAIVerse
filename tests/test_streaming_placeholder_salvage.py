@@ -331,6 +331,26 @@ def test_a_schedule_preemption_is_not_reported_as_a_user_stop(monkeypatch):
     assert "ユーザーの操作" not in notice
 
 
+def test_a_server_shutdown_is_not_reported_as_a_user_stop(monkeypatch):
+    """サーバー終了 (Ctrl+C / SIGTERM) で切られた回 — 取り消しには
+    "server_shutdown" が刻まれる (PulseController.shutdown)。ユーザー起点では
+    ないので、通告は原因を書かない非ユーザー形になる。"""
+    client = _FakeStreamClient(chunks=["こんにちは。"])
+
+    async def _spell_loop(**kwargs):
+        raise ExecutionCancelledException("shutdown", interrupted_by="server_shutdown")
+
+    runtime, persona, node, events = _build_node(
+        monkeypatch, client=client, spell_loop=_spell_loop,
+    )
+    with pytest.raises(LLMError):
+        asyncio.run(node({"_messages": [], "_pulse_id": "pl-1"}))
+
+    notice = persona.history_manager.add_to_building_only.call_args.args[1]["content"]
+    assert notice == "(ここで発言が中断されました)"
+    assert "ユーザーの操作" not in notice
+
+
 def test_a_keyboard_interrupt_propagates_without_salvage_side_effects(monkeypatch):
     """KeyboardInterrupt はインタープリタ終了の道筋 — DB 書き込みの副作用を
     足さず、そのまま伝播させる (捕捉を CancelledError に絞った境界の固定)。"""
