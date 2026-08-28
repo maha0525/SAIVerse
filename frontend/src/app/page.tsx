@@ -2195,6 +2195,20 @@ export default function Home() {
                                 metabolismStatusTimerRef.current = null;
                             }
                             setLoadingStatus(null);
+                            // 本文が生まれる前の停止も「返事が来なかった」(2026-08-28
+                            // まはー裁定)。思考中に止める動機はほぼ間違いの訂正 (モデル
+                            // 違い・途中送信) で、発言はもうペルソナに読まれていて
+                            // 取り消せない以上、ここで口を塞ぐと新しく話しかけるしか
+                            // なくなる。エラーで返事が生まれなかった回 (上の出口 3) と
+                            // 同じ印を立てる。停止そのものは尊重する — 勝手に再開は
+                            // せず、回復はユーザーの一押しの後ろに置く。本文が出て
+                            // からの停止は replied が立つのでここを通らない (そちらは
+                            // 発言側の「続きの生成」が既に出る)。continue / retry 経由の
+                            // 停止は呼び出し元の restoreAffordance が同じ線 (replied) で
+                            // ボタンを戻すので、ここでは send だけを見る。
+                            if (source === 'send' && !replied && landedMessageId) {
+                                markRetryable(landedMessageId);
+                            }
                         } else if (event.response) {
                             setMessages(prev => [...prev, { role: 'assistant', content: event.response }]);
                         }
