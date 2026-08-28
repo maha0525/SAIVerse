@@ -63,7 +63,11 @@ spell loop の「内部エラーは partial へ降格して発言全体を失わ
   ただし直すには finalize の成否通知と再試行の冪等化という契約の再設計が要り、この失敗が
   起きるのは DB 自体が壊れている場面 (実測 32 件はすべて「finalize が呼ばれなかった」形で、
   「呼んだが DB が失敗した」形は観測されていない)。格に対して装備過剰と判断して見送り。
-  起きたら backend.log に `emit_speak_finalize: failed to finalize placeholder` が残る
+  起きたら backend.log に `emit_speak_finalize: failed to finalize placeholder` が残る。
+  → **2026-08-28、この見送りの引き取り先ができた**:
+  [stream_completion_is_not_proof_of_persistence](stream_completion_is_not_proof_of_persistence.md)。
+  同じ握り潰しが「続きの生成のボタンが実態とずれる」という別の形でも出ており、そちらと
+  同じ設計 (保存できたことを表す信号) で解く
 - **実永続層を通す契約テスト** (medium) — emitter 側は今回の差分で無変更のため、
   モック境界のテスト (runtime._emit_speak_finalize の呼び出し回数と引数) で足りると判断
 
