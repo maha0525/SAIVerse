@@ -230,7 +230,25 @@ def migrate_database_in_place(db_path: str):
     backup_path = os.path.join(db_dir, f"{db_name}_{timestamp}.bak")
     
     logging.info(f"マイグレーションを開始します: {db_path}")
-    
+
+    # Windows では、開いている接続が一つでもあると下の shutil.move が WinError 32 で
+    # 失敗する。起動シーケンスでは import 時の副作用 (addon ツール登録が addon_config を
+    # 参照するなど) が共有エンジン (database/session.py のモジュールグローバル) の
+    # 接続プールに接続を残しており、v0.2.29 → v0.3 の実機アップグレード検証
+    # (2026-08-29) で「初回起動も再起動も必ず墜落する」を再現した。ファイルを動かす
+    # 当事者であるこの関数が、動かす前に既知の共有エンジンを手放す。dispose 後の
+    # エンジンは次の利用時に新しいファイルへ透過的に再接続するので、呼び出し元の
+    # 継続には影響しない。
+    try:
+        from database.session import engine as _shared_engine
+        _shared_engine.dispose()
+        logging.info("共有 DB エンジンの接続プールを解放しました (ファイル移動の前提)")
+    except Exception:
+        logging.warning(
+            "共有 DB エンジンの解放に失敗しました — ファイル移動が失敗する可能性があります",
+            exc_info=True,
+        )
+
     try:
         # 元のファイルをバックアップパスに移動
         shutil.move(db_path, backup_path)
