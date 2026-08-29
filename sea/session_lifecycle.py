@@ -1390,10 +1390,7 @@ class SessionLifecycle:
         などに対する Metabolism 時の最後の網。
         """
         from sea.session_window import SessionWindow
-        dead = [
-            f for f in window.folds
-            if self._resolve_fold_digest_status(persona, f)[1]
-        ]
+        dead = self._dead_folds_of(persona, window)
         if not dead:
             return window
         persona_id = getattr(persona, "persona_id", None)
@@ -1412,6 +1409,17 @@ class SessionLifecycle:
             presented=self._present_with_folds(persona, window.raw, kept),
             folds=kept,
         )
+
+    def _dead_folds_of(self, persona, window: "SessionWindow") -> List["FoldedRange"]:
+        """あらすじを恒久に失った圧縮区間 (読みだけ — 記録は触らない)。
+
+        本走行の :meth:`_drop_dead_folds` と、下見の
+        :meth:`preview_planning_window` が同じ判定を共有するための切り出し。
+        """
+        return [
+            f for f in window.folds
+            if self._resolve_fold_digest_status(persona, f)[1]
+        ]
 
     def _is_cache_hot(self, persona, model_key: Optional[str] = None) -> bool:
         """指定 model (既定: persona.model) の anchor 行が生存しているか (= 直前 prefix が温かい)。
@@ -1669,6 +1677,7 @@ class SessionLifecycle:
         chronicle_force: bool = False,
         stop_when_disabled: bool = False,
         cancellation_token: Optional[CancellationToken] = None,
+        close_undersized_tail: bool = False,
     ) -> str:
         """Execute history metabolism: Chronicle generation + anchor update.
 
@@ -1706,6 +1715,11 @@ class SessionLifecycle:
         False (自動・§14 経路) では従来どおり disabled でも前進する
         (編纂なしで忘れる設計合意)。
 
+        ``close_undersized_tail`` は非常畳み (§14-3) 専用 — U 判定が材料字数に
+        なった (2026-08-29 裁定) ため、「生は巨大だが材料が薄い」期間では通常の
+        計画が fold を閉じられない。高水位超過の回復措置に限り、材料 U 未満の
+        端数でも閉じて前進を保証する (plan_eviction の同名フラグへ渡すだけ)。
+
         Beat ロック (beat_execution_context.md §3.4): Metabolism は persona の
         記憶 (Chronicle / sluice の採取判断記録) に書くため、入口で
         beat_gate.hold(purpose="metabolism") を通す。Pulse 内 (run_meta_user
@@ -1726,6 +1740,7 @@ class SessionLifecycle:
                 model_key=model_key, chronicle_force=chronicle_force,
                 stop_when_disabled=stop_when_disabled,
                 cancellation_token=cancellation_token,
+                close_undersized_tail=close_undersized_tail,
             )
 
     def run_manual_compaction(
@@ -1863,9 +1878,14 @@ class SessionLifecycle:
                     # 「十分に過去」= 確実に冷えている温度で立てる
                     "updated_at": (datetime.now() - timedelta(days=3650)).isoformat(),
                 })
+        # close_undersized_tail: U 判定が材料字数になった (2026-08-29 裁定) ため、
+        # 「生は巨大だが材料が薄い」期間では通常計画が fold を閉じられず、高水位
+        # 超過が続く。回復措置であるここに限り、材料 U 未満の端数でも閉じて前進を
+        # 保証する (小粒のあらすじは最後の手段としてのみ許す)。
         return self.run_metabolism(
             persona, building_id, window, watermarks, event_callback,
             model_key=model_key, chronicle_force=True,
+            close_undersized_tail=True,
         )
 
     # ------------------------------------------------------------------
@@ -2314,6 +2334,37 @@ class SessionLifecycle:
         古い方から、提示が残す量に収まるまで戻す。戻したら提示を組み直した
         新しい SessionWindow を返す。戻すものが無ければ None。
         """
+        plan = self._refold_raw_view_plan(persona, window, watermarks)
+        if plan is None:
+            return None
+        current_presented, flipped = plan
+        persona_id = getattr(persona, "persona_id", None)
+        self.save_folded_ranges(persona_id, model_key, window.folds)
+        LOGGER.info(
+            "[metabolism] refolded %d raw-view range(s) back to digest "
+            "(persona=%s model=%s, LLM-free; %d chars presented)",
+            flipped, persona_id, model_key, message_chars(current_presented),
+        )
+        from sea.session_window import SessionWindow
+        return SessionWindow(
+            anchor_id=window.anchor_id,
+            raw=window.raw,
+            presented=current_presented,
+            folds=window.folds,
+        )
+
+    def _refold_raw_view_plan(
+        self, persona, window: "SessionWindow", watermarks: Watermarks,
+    ) -> Optional[Tuple[List[Dict[str, Any]], int]]:
+        """§15-3 印戻しの計画部 — ``window.folds`` の印を古い方から戻す。
+
+        永続化はしない (印の flip は渡された fold オブジェクトに対して行う —
+        本走行 :meth:`_refold_raw_view_folds` は行の fold を渡して保存し、
+        下見 :meth:`preview_planning_window` は写しを渡して保存しない)。
+
+        Returns:
+            戻すものが無ければ None。あれば ``(印戻し後の提示, 戻した区間数)``。
+        """
         raw_view = [f for f in window.folds if f.presented_raw]
         if not raw_view:
             return None
@@ -2340,20 +2391,59 @@ class SessionLifecycle:
             )
         if not flipped:
             return None
-        persona_id = getattr(persona, "persona_id", None)
-        self.save_folded_ranges(persona_id, model_key, window.folds)
-        LOGGER.info(
-            "[metabolism] refolded %d raw-view range(s) back to digest "
-            "(persona=%s model=%s, LLM-free; %d chars presented)",
-            flipped, persona_id, model_key, message_chars(current_presented),
-        )
+        return current_presented, flipped
+
+    def preview_planning_window(
+        self, persona, model_key: Optional[str], window: "SessionWindow",
+        watermarks: Watermarks,
+    ) -> Tuple["SessionWindow", int]:
+        """本走行が退場計画の前に行う窓の正規化を**書き込みなし**で再現する。
+
+        本走行 (:meth:`_run_metabolism_locked`) は plan_eviction の前に
+        ①恒久欠落 fold の記録破棄 (:meth:`_drop_dead_folds`) と
+        ②§15-3 印戻し (:meth:`_refold_raw_view_folds`) を通す。下見
+        (context-status の fold_ready) が素の窓を planner に渡すと、読み戻しで
+        生に開いた区間や死んだ fold のある窓で本走行と別の答えを出す —
+        「押せたのに何も起きない」(8/24 に潰した型) の再発口になる
+        (Codex 指摘 2026-08-29)。ここは同じ正規化を写しに適用して返す。
+        行 (save_folded_ranges / anchor / 温度) は一切書かない。
+
+        Returns:
+            ``(正規化後の窓, 印戻しで digest 表示へ戻る区間数)``。区間数が
+            1 以上なら、手動の畳みは退場計画が空でも印戻しだけで提示を
+            減らせる (= 実行する意味がある)。
+        """
+        import copy
+
         from sea.session_window import SessionWindow
-        return SessionWindow(
+
+        # ① 恒久欠落 fold — 判定は本走行と同じ、記録破棄はしない。恒久欠落の
+        # fold は提示でも生ログに倒れている (fail-open) ので、外しても提示の
+        # 姿は変わらない — planner へ渡す fold 一覧だけを本走行と揃える。
+        dead = self._dead_folds_of(persona, window)
+        kept = [f for f in window.folds if f not in dead]
+        # ② 印戻しは fold の presented_raw を書き換えるので、写しに対して行う
+        # (浅い copy で足りる — flip するのは bool 属性だけ)。
+        work_folds = [copy.copy(f) for f in kept]
+        work = SessionWindow(
             anchor_id=window.anchor_id,
             raw=window.raw,
-            presented=current_presented,
-            folds=window.folds,
+            presented=(
+                window.presented if not dead
+                else self._present_with_folds(persona, window.raw, work_folds)
+            ),
+            folds=work_folds,
         )
+        refolded = self._refold_raw_view_plan(persona, work, watermarks)
+        if refolded is None:
+            return work, 0
+        presented, flipped = refolded
+        return SessionWindow(
+            anchor_id=work.anchor_id,
+            raw=work.raw,
+            presented=presented,
+            folds=work.folds,
+        ), flipped
 
     def schedule_cold_window_sweep(self) -> None:
         """§14-4 の時計側見張りを EventScheduler に予約する。
@@ -2535,6 +2625,7 @@ class SessionLifecycle:
         chronicle_force: bool = False,
         stop_when_disabled: bool = False,
         cancellation_token: Optional[CancellationToken] = None,
+        close_undersized_tail: bool = False,
     ) -> str:
         """:meth:`run_metabolism` の本体 (Beat ロック保持下で実行される)。
 
@@ -2629,18 +2720,20 @@ class SessionLifecycle:
                 return "ok"
 
         # 退場計画 (arasuji_levels.md §3/§4): 残す量 (watermarks.target) より
-        # 古い側を、古い順に U ずつの範囲に刻んで全部畳む。エピソードに畳みを
-        # 止める権利は無い (開いているエピソードも畳む)。
+        # 古い側を、古い順に U (材料字数 — 2026-08-29 裁定) ずつの範囲に刻んで
+        # 全部畳む。エピソードに畳みを止める権利は無い (開いているエピソードも
+        # 畳む)。close_undersized_tail は非常畳み (§14-3) だけが True にする。
         plan = plan_eviction(
             current_messages, set(), watermarks, target_chars=band_budget,
+            close_undersized_tail=close_undersized_tail,
         )
         if plan.is_empty:
             LOGGER.warning(
                 "[metabolism] nothing foldable this round (persona=%s, %d chars, "
-                "target=%d, protected_from=%d); window stays large until a "
-                "foldable range reaches U=%d",
+                "target=%d, protected_from=%d); window stays large until the "
+                "foldable range reaches U=%d in material chars (currently %d)",
                 persona_id, plan.total_chars, watermarks.target,
-                plan.protected_from, band_budget,
+                plan.protected_from, band_budget, plan.pending_material_chars,
             )
             return "nothing"
 

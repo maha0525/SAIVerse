@@ -5,9 +5,16 @@ docs/intent/arasuji_levels.md §3 (一本規則) / §4 (レベル0 の特別さ)
 固定する仕様の骨子:
 
 - 保護 = 残す量 (watermarks.target)。最新から遡ってこの分は退場させない。
-  境界は pulse 関節へ古い側にスナップ。
+  境界は pulse 関節へ古い側にスナップ。**残す量は生の提示字数で数える**
+  (提示コスト経済の水位なので、材料判定の裁定後も生のまま)。
 - 保護より古い側は、古い順に U ずつの範囲に刻んで**全部**畳む。切り位置は
   pulse 関節に寄せる (U に達したら、いまの pulse を最後まで含めて切る)。
+- **U に達したかは材料字数で測る** (2026-08-29 まはー裁定)。機構名義タグ
+  (handy_tool / spell / event_message) の行は 500 字超なら材料では決定論の
+  一行に縮む — 生の字数で U を測ると、スペルを呼ぶ流れだけで圧縮の意義が
+  薄いあらすじ区間が量産される。
+- 非常経路 (close_undersized_tail=True) だけは、fold が一つも閉じられない
+  とき材料 U 未満の端数を閉じて前進を保証する (小粒は最後の手段のみ)。
 - エピソードに畳みを止める権利は無い — open episode も普通に畳まれる。
 - 末尾 (保護範囲の直前) の U 未満の端数は畳まず残す (次回、新しい生ログと
   地続きで畳まれる — 小さい一次あらすじを作らない)。
@@ -23,6 +30,7 @@ from __future__ import annotations
 
 import unittest
 
+from sai_memory.arasuji.generator import material_len
 from sea.eviction_plan import (
     Fold,
     Watermarks,
@@ -35,13 +43,15 @@ U = 2_000  # 一次あらすじの標準被覆 (テスト内での U)
 
 
 def msg(mid, at, *, chars=1_000, ep=None, pulse=None, folded=False,
-        spell_origin=None):
+        spell_origin=None, tags=None):
     """提示 payload 1 件。
 
     ``spell_origin`` は SAIMemory の ``spell_origin_id`` 列 (スペルの群の印)。
     **群の起点行 (最初の唱え) 自身は NULL** なので、起点は「自分の id が他行の
     spell_origin として現れる」ことでしか識別できない — テストの並びもその
     非対称のまま書く。
+
+    ``tags`` は metadata.tags (機構名義の印 — 材料の長さ規則が読む)。
     """
     payload = {"id": mid, "content": "x" * chars, "created_at": at}
     meta = {}
@@ -49,6 +59,8 @@ def msg(mid, at, *, chars=1_000, ep=None, pulse=None, folded=False,
         meta["origin_episode"] = ep
     if folded:
         meta[FOLDED_MARKER] = True
+    if tags:
+        meta["tags"] = list(tags)
     if meta:
         payload["metadata"] = meta
     if pulse:
@@ -58,12 +70,13 @@ def msg(mid, at, *, chars=1_000, ep=None, pulse=None, folded=False,
     return payload
 
 
-def plan(messages, *, keep=2_000, high=None):
+def plan(messages, *, keep=2_000, high=None, **kwargs):
     """新仕様の呼び出し: watermarks.target = 残す量。low は互換用 (未使用)。"""
     return plan_eviction(
         messages, set(),
         Watermarks(low=0, target=keep, high=high),
         target_chars=U,
+        **kwargs,
     )
 
 
@@ -224,6 +237,174 @@ class WallTest(unittest.TestCase):
         self.assertIn(["s0"], ids)
         self.assertIn(["m0", "m1"], ids)
         self.assertNotIn("w0", folded_ids(result))
+
+
+class MaterialMeasureTest(unittest.TestCase):
+    """U 判定の物差しは材料字数 (2026-08-29 まはー裁定)。
+
+    機構名義タグ (handy_tool / spell / event_message) の行は本文が 500 字
+    (generator.MECHANISM_TEXT_MAX_CHARS) を超えると、材料を組む時だけ決定論の
+    一行 (数十字) に縮む。あらすじを作る理由は圧縮なので、U に達したかも
+    その圧縮後 (材料) の字数で測る — 生の字数で測ると、スペルを呼ぶ一連の
+    流れだけで圧縮の意義が薄いあらすじ区間が量産される。
+    """
+
+    #: 生 10,000 字のスペル結果行が材料で何字に縮むか (共有関数で実測)。
+    SPELL_MATERIAL = material_len("x" * 10_000, ("spell",))
+
+    def test_raw_heavy_material_thin_run_does_not_close_a_fold(self):
+        """生では U 超でも、材料が U 未満なら fold は閉じない (端数持ち越し)。
+
+        旧基準 (生の字数) ではこの並びは fold になっていた — 材料判定を
+        無効化するとこのテストが落ちる。
+        """
+        self.assertLess(self.SPELL_MATERIAL, 100)  # 前提: 一行に縮んでいる
+        msgs = [
+            msg("s0", 100, chars=10_000, tags=["spell"]),
+            msg("m0", 101),
+            msg("k0", 200), msg("k1", 201),
+        ]
+        result = plan(msgs, keep=2_000)
+        self.assertTrue(result.is_empty)
+        self.assertEqual(
+            result.pending_material_chars, self.SPELL_MATERIAL + 1_000,
+        )
+
+    def test_fold_closes_when_material_reaches_u(self):
+        """材料が U に達したら閉じる。削減見込み (projected) は生のまま。"""
+        msgs = [
+            msg("s0", 100, chars=10_000, tags=["spell"]),
+            msg("m0", 101), msg("m1", 102),
+            msg("k0", 200), msg("k1", 201),
+        ]
+        # 材料 = 一行 (数十字) + 1,000 + 1,000 ≥ U=2,000 → m1 まで含めて閉じる。
+        result = plan(msgs, keep=2_000)
+        self.assertEqual(len(result.folds), 1)
+        self.assertEqual(result.folds[0].message_ids, ["s0", "m0", "m1"])
+        # 提示サイズの見積もりは生の字数のまま (提示コスト経済の水位):
+        # 総量 14,000 − (fold 生 12,000 − 置き換え見込み 1,200) = 3,200。
+        self.assertEqual(result.total_chars, 14_000)
+        self.assertEqual(result.projected_chars, 3_200)
+        self.assertEqual(result.pending_material_chars, 0)
+
+    def test_mechanism_row_at_threshold_counts_raw(self):
+        """閾値 (500 字) ちょうどの機構行は縮まない — 生の字数のまま数える。"""
+        msgs = [
+            msg(f"s{i}", 100 + i, chars=500, tags=["spell"]) for i in range(4)
+        ] + [msg("k0", 200), msg("k1", 201)]
+        # 材料 = 500 × 4 = 2,000 ≥ U → 閉じる。
+        result = plan(msgs, keep=2_000)
+        self.assertEqual(len(result.folds), 1)
+        self.assertEqual(
+            result.folds[0].message_ids, ["s0", "s1", "s2", "s3"],
+        )
+
+    def test_stranded_run_before_wall_logs_undersized_by_material(self):
+        """壁の手前の端数判定も材料字数 — 生 3,000 字でも材料が U 未満なら
+        「端数のまま畳んだ」の INFO が出る (生基準ならこのログは出ない)。"""
+        msgs = [
+            msg("s0", 100, chars=3_000, tags=["spell"]),
+            msg("w0", 101, folded=True),
+            msg("m0", 102), msg("m1", 103),
+            msg("k0", 200), msg("k1", 201),
+        ]
+        with self.assertLogs("sea.eviction_plan", "INFO") as logs:
+            result = plan(msgs, keep=2_000)
+        self.assertTrue(any("undersized" in line for line in logs.output))
+        ids = [f.message_ids for f in result.folds]
+        self.assertIn(["s0"], ids)
+        self.assertIn(["m0", "m1"], ids)
+
+    def test_undersized_tail_closes_only_on_the_emergency_flag(self):
+        """非常経路 (close_undersized_tail=True) は材料 U 未満の端数も閉じ、
+        INFO ログを残す。既定 (False) では閉じない。"""
+        msgs = [
+            msg("s0", 100, chars=10_000, tags=["spell"]),
+            msg("m0", 101),
+            msg("k0", 200), msg("k1", 201),
+        ]
+        self.assertTrue(plan(msgs, keep=2_000).is_empty)
+        with self.assertLogs("sea.eviction_plan", "INFO") as logs:
+            result = plan(msgs, keep=2_000, close_undersized_tail=True)
+        self.assertTrue(any("非常経路" in line for line in logs.output))
+        self.assertEqual(len(result.folds), 1)
+        self.assertEqual(result.folds[0].message_ids, ["s0", "m0"])
+        self.assertEqual(result.pending_material_chars, 0)
+
+    def test_emergency_flag_is_a_last_resort_when_normal_folds_exist(self):
+        """通常の fold が 1 つでも閉じた回は、非常フラグでも端数を閉じない —
+        前進は既に保証されており、小粒のあらすじは最後の手段にだけ許す。"""
+        msgs = [
+            msg("m0", 100), msg("m1", 101),
+            msg("s0", 102, chars=10_000, tags=["spell"]),
+            msg("k0", 200), msg("k1", 201),
+        ]
+        result = plan(msgs, keep=2_000, close_undersized_tail=True)
+        self.assertEqual(len(result.folds), 1)
+        self.assertEqual(result.folds[0].message_ids, ["m0", "m1"])
+        self.assertNotIn("s0", folded_ids(result))
+        self.assertEqual(result.pending_material_chars, self.SPELL_MATERIAL)
+
+
+class EmergencyCloseTest(unittest.TestCase):
+    """非常経路 (close_undersized_tail=True) の端数閉じの歯止めと観測。"""
+
+    def test_emergency_close_skips_when_nothing_would_shrink(self):
+        """端数の生字数が置き換えの見込み (1,200 字) 以下なら、非常経路でも
+        閉じない — LLM を呼んで entry を作るのに提示が 1 字も減らない無駄骨に
+        なる (Codex 指摘 2026-08-29)。端数は従来どおり次回へ持ち越す。"""
+        msgs = [
+            msg("m0", 100, chars=1_000),
+            msg("k0", 200), msg("k1", 201),
+        ]
+        with self.assertLogs("sea.eviction_plan", "INFO") as logs:
+            result = plan(msgs, keep=2_000, close_undersized_tail=True)
+        self.assertTrue(result.is_empty)
+        self.assertTrue(any("減量ゼロ" in line for line in logs.output))
+        # 持ち越しの報告値 (UI の「あと何字」) は生きている。
+        self.assertEqual(result.pending_material_chars, 1_000)
+
+    def test_emergency_close_does_not_warn_at_a_clean_joint(self):
+        """端数が関節単位の末尾まで含んで閉じる通常の非常畳みは WARNING を
+        出さない — 出すと本当に単位を割った回が埋もれる。"""
+        msgs = [
+            msg("s0", 100, chars=10_000, tags=["spell"]),
+            msg("m0", 101),
+            msg("k0", 200), msg("k1", 201),
+        ]
+        with self.assertLogs("sea.eviction_plan", "INFO") as logs:
+            result = plan(msgs, keep=2_000, close_undersized_tail=True)
+        self.assertEqual(len(result.folds), 1)
+        self.assertFalse(
+            any(r.levelno >= 30 for r in logs.records),  # 30 = WARNING
+            f"clean joint close should not warn: {logs.output}",
+        )
+
+    def test_emergency_close_warns_when_it_splits_the_whole_window_unit(self):
+        """窓全体が一つのスペル群 (= 一つの関節単位) + 非常経路の組み合わせ:
+        脱出弁例外が素の境界で単位を割り、端数閉じも群を割って閉じる。
+
+        Codex レビュー (2026-08-29) の「単位の途中なら defer せよ」は採らない
+        (割らないと畳めるものが永久に現れず、提示が痩せない手詰まりが再導入
+        される — 割ること自体は 2026-08-25 に設計として受け入れ済み)。代わりに
+        黙って通さない — 脱出弁と同じ格の WARNING を出したうえで fold は閉じる。
+        """
+        msgs = [
+            msg("s0", 100, chars=40_000, pulse="p1", tags=["spell"]),
+            msg("s1", 101, chars=40_000, pulse="p2", spell_origin="s0",
+                tags=["spell"]),
+            msg("s2", 102, chars=40_000, pulse="p3", spell_origin="s0",
+                tags=["spell"]),
+        ]
+        # 生 120,000 字だが材料は一行 × 3 — 通常計画は fold を閉じられない。
+        with self.assertLogs("sea.eviction_plan", "WARNING") as logs:
+            result = plan(msgs, keep=60_000, close_undersized_tail=True)
+        self.assertEqual(len(result.folds), 1)
+        self.assertEqual(result.folds[0].message_ids, ["s0"])
+        self.assertTrue(
+            any("割って端数の fold を閉じた" in line for line in logs.output),
+            f"expected the unit-split warning: {logs.output}",
+        )
 
 
 class SpellGroupIsNotSplitTest(unittest.TestCase):

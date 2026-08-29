@@ -12,6 +12,12 @@ docs/intent/arasuji_levels.md §3 / §4 の実装 (レベル0 の並び)。
   発言の切れ目 (関節) に寄せる — エピソードには**畳みを止める権利は無い**
   (開いているエピソードも畳む。守っていた需要の引受先は
   docs/issues/open_episode_context_after_veto_removal.md)。
+- **U に達したかは材料字数で測る** (2026-08-29 まはー裁定)。あらすじを作る理由は
+  圧縮にあり、長い機構名義の行 (スペル結果等) は材料を組む時に決定論の一行へ
+  縮む (sai_memory/arasuji/generator.py の長さ規則) — 生の字数で測ると、
+  スペルを呼ぶ流れだけで「圧縮の意義が薄いあらすじ区間」が量産される。
+  一方、**残す量 (保護境界) と削減見込み (projected_chars) は生の提示字数の
+  まま** — こちらは提示コスト経済の水位であって、材料の勘定ではない。
 - **スペルの群は退場の境目で割れない** — 「唱え → 結果 → 結果を読んだ発話」の
   ひとまとまり (``spell_origin_id`` の印) の内側に、保護境界も fold の切れ目も
   落とさない。割れると窓が ``<system>[Spell Result: ...]`` から始まり、唱えた
@@ -28,6 +34,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Set
 
+from sai_memory.arasuji.generator import material_len
 from sai_memory.memory.storage import spell_group_spans
 
 LOGGER = logging.getLogger(__name__)
@@ -100,6 +107,10 @@ class EvictionPlan:
     total_chars: int = 0
     #: 保護範囲 (残す量) の開始インデックス (この位置以降は退場させない)。
     protected_from: int = 0
+    #: 末尾に畳まず残した端数 (次回持ち越し分) の**材料字数**。fold が一つも
+    #: 閉じなかったとき、「あと材料何字たまれば畳めるか」を UI (context-status)
+    #: が出すための報告値。ここで算数を再実装させない。
+    pending_material_chars: int = 0
 
     @property
     def evicted_count(self) -> int:
@@ -121,6 +132,32 @@ ESTIMATED_FOLD_PLACEHOLDER_CHARS = 1_200
 def message_chars(messages: Sequence[Dict[str, Any]]) -> int:
     """提示文字数 (水位判定の一次データ)。"""
     return sum(len(str(m.get("content") or "")) for m in messages)
+
+
+def _payload_tags(msg: Dict[str, Any]) -> tuple:
+    """提示 payload の tags (metadata.tags)。無ければ空。
+
+    payload には SAIMemory 行の metadata が丸ごと乗る
+    (saiverse_memory/adapter.py::_payload_from_message_locked) ので、機構名義の
+    印はここから読める — 追加の配線は要らない。
+    """
+    meta = msg.get("metadata")
+    tags = meta.get("tags") if isinstance(meta, dict) else None
+    return tuple(tags) if isinstance(tags, (list, tuple)) else ()
+
+
+def material_message_chars(messages: Sequence[Dict[str, Any]]) -> int:
+    """材料としての字数 (U 判定の物差し — 2026-08-29 まはー裁定)。
+
+    長さ規則の実体は sai_memory/arasuji/generator.py の
+    :func:`~sai_memory.arasuji.generator.material_text_for` 一枚 — Message
+    オブジェクト用の material_chars と、この payload 用の勘定が同じ関数を呼ぶ
+    (閾値・縮んだ一行の長さを二重実装しない)。
+    """
+    return sum(
+        material_len(str(m.get("content") or ""), _payload_tags(m))
+        for m in messages
+    )
 
 
 def _net_reduction(messages: Sequence[Dict[str, Any]]) -> int:
@@ -333,6 +370,37 @@ def _is_folded_placeholder(msg: Dict[str, Any]) -> bool:
     return bool(isinstance(meta, dict) and meta.get("__folded_range__"))
 
 
+def _pending_tail_split_unit(
+    messages: Sequence[Dict[str, Any]],
+    units: Sequence[tuple],
+    pending: Sequence[Dict[str, Any]],
+) -> Optional[tuple]:
+    """端数 ``pending`` の末尾が関節単位の途中で切れているなら、その単位を返す。
+
+    非常畳み (close_undersized_tail) の観測用。単位 (:func:`_joint_units` —
+    pulse の run + スペルの群) の末尾まで含んで閉じるなら None。途中で切れて
+    いる = 単位の残り (保護範囲側) と別のあらすじに分かれる、のときだけ
+    その単位の閉区間 ``(開始, 終了)`` を返す。この切れ方が生まれるのは
+    :func:`_protection_boundary` の脱出弁例外 (窓全体が一つの単位) だけ。
+    """
+    if not pending:
+        return None
+    tail_id = str(pending[-1].get("id"))
+    tail_index = next(
+        (i for i, m in enumerate(messages) if str(m.get("id")) == tail_id),
+        None,
+    )
+    if tail_index is None:
+        return None
+    unit_index = _unit_index_of(units, tail_index)
+    if unit_index is None:
+        return None
+    unit_start, unit_end = units[unit_index]
+    if unit_end > tail_index:
+        return (unit_start, unit_end)
+    return None
+
+
 def _units_before(
     messages: Sequence[Dict[str, Any]],
     units: Sequence[tuple],
@@ -358,6 +426,7 @@ def plan_eviction(
     watermarks: Watermarks,
     *,
     target_chars: int,
+    close_undersized_tail: bool = False,
 ) -> EvictionPlan:
     """提示中の提示コンテキストから「今回退場させる範囲」を計画する。
 
@@ -369,8 +438,18 @@ def plan_eviction(
         watermarks: 水位。``target`` = 残す量だけを使う (発火判定 ``high`` は
             呼び出し側の責務、``low`` は旧設計互換で未使用)。
         target_chars: 一次あらすじの標準被覆 U。1 つの fold が目指す大きさ。
+            **達したかは材料字数で測る** (2026-08-29 まはー裁定 —
+            :func:`material_message_chars`)。
+        close_undersized_tail: 非常経路 (§14-3 の非常畳み) 専用。True なら、
+            fold が一つも閉じられなかったときに限り、末尾の端数 (材料 U 未満)
+            をそのまま 1 fold として閉じる — 「生は巨大だが材料が薄い」期間で
+            提示が痩せないまま高水位超過が続く併走を断つための最後の手段
+            (小粒のあらすじは非常時にのみ許す)。ただし閉じるのは**提示が実際に
+            減るとき** (端数の生字数が置き換えの見込みを上回るとき) だけ —
+            減らないのに閉じると、LLM を呼んで entry を作るのに提示が 1 字も
+            痩せない無駄骨になる (Codex 指摘 2026-08-29)。既定 False。
 
-    計画: 残す量より古い側を、古い順に U ずつの範囲に刻んで全部畳む。
+    計画: 残す量より古い側を、古い順に U (材料字数) ずつの範囲に刻んで全部畳む。
 
     - 切り位置は関節 (発言の切れ目) に寄せる — U に達したら、いまの関節の単位
       (:func:`_joint_units`: pulse の run + スペルの群) を最後まで含めてそこで
@@ -380,7 +459,7 @@ def plan_eviction(
       旧世代データでのみ起きる — 現設計の適用は畳んだ先頭を anchor が
       すぐ飲み込むので、新しい壁は候補範囲に現れない)。
     - 末尾 (保護範囲の直前) の U 未満の端数は畳まず残す — 次回、新しい生ログと
-      地続きのまま畳まれる。
+      地続きのまま畳まれる (例外は ``close_undersized_tail``)。
 
     Returns:
         EvictionPlan。
@@ -426,23 +505,66 @@ def plan_eviction(
             # 壁 (畳み済みの置き換え)。材料に入れない。手前の端数は、残すと
             # 壁に挟まれて永久に取り残されるので、端数のまま畳む。
             if pending:
-                if message_chars(pending) < target_chars:
+                if material_message_chars(pending) < target_chars:
                     LOGGER.info(
-                        "[eviction] folding an undersized run (%d chars < U=%d) "
-                        "stranded before an already-folded range (legacy wall)",
-                        message_chars(pending), target_chars,
+                        "[eviction] folding an undersized run (%d material chars "
+                        "< U=%d) stranded before an already-folded range "
+                        "(legacy wall)",
+                        material_message_chars(pending), target_chars,
                     )
                 _close(pending)
                 pending = []
             continue
         pending.extend(group)
-        if message_chars(pending) >= target_chars:
+        # U 到達の判定は材料字数 (2026-08-29 裁定) — 生の字数ではない。
+        if material_message_chars(pending) >= target_chars:
             _close(pending)
             pending = []
     # 末尾の端数は畳まない (次回、新しい生ログと地続きで畳まれる)。
+    # 例外: 非常経路 (close_undersized_tail=True) で fold が一つも閉じられ
+    # なかったときだけ、端数のまま閉じて前進を保証する — 「生は巨大だが材料が
+    # 薄い」期間で提示が痩せない併走を断つ最後の手段 (小粒は非常時のみ)。
+    # ただし提示が実際に減るときだけ (減らない閉じは LLM 代の無駄骨 —
+    # Codex 指摘 2026-08-29)。
+    if pending and close_undersized_tail and not folds:
+        if _net_reduction(pending) <= 0:
+            LOGGER.info(
+                "[eviction] 非常経路でも減量ゼロのため見送り: 端数の生 %d 字は"
+                "置き換えの見込み (%d 字) 以下で、閉じても提示が 1 字も減らない "
+                "(材料 %d 字, %d 件は従来どおり次回へ持ち越す)",
+                message_chars(pending), ESTIMATED_FOLD_PLACEHOLDER_CHARS,
+                material_message_chars(pending), len(pending),
+            )
+        else:
+            # 端数が関節単位 (pulse の run + スペルの群) の途中で切れている =
+            # 群を割って閉じることがある。Codex レビュー (2026-08-29) は
+            # 「単位の途中なら閉じずに defer せよ」と勧めたが**採らない** —
+            # 境界が単位の内側に落ちるのは「窓全体が一つの単位」の脱出弁例外
+            # (:func:`_protection_boundary`) だけで、そこで defer すると畳める
+            # ものが永久に現れず、提示が痩せない手詰まりが再導入される。
+            # 割ること自体は 2026-08-25 に設計として受け入れ済み。代わりに、
+            # 割った事実を脱出弁と同じ格の WARNING で観測できるようにする。
+            split = _pending_tail_split_unit(messages, units, pending)
+            if split is not None:
+                lo, hi = split
+                LOGGER.warning(
+                    "[eviction] 非常経路: スペル群/pulse 単位 (添字 %d..%d) を"
+                    "割って端数の fold を閉じた — 窓全体が一つの単位のときの"
+                    "脱出弁例外と同じ割れ方 (単位の残りは保護範囲側に生で残る)",
+                    lo, hi,
+                )
+            LOGGER.info(
+                "[eviction] 非常経路: 材料 U 未満の fold を閉じた "
+                "(材料 %d 字 < U=%d, 生 %d 字, %d 件)",
+                material_message_chars(pending), target_chars,
+                message_chars(pending), len(pending),
+            )
+            _close(pending)
+            pending = []
 
     plan.folds = folds
     plan.projected_chars = remaining
+    plan.pending_material_chars = material_message_chars(pending)
     return plan
 
 

@@ -11,9 +11,17 @@ export interface ContextStatus {
     target_chars: number | null;      // 残す量 (整理後にここへ揃える)
     high_chars: number | null;        // 上限 (超えたら整理)
     presented_chars: number | null;   // 現在の提示コンテキスト文字数 (読み戻し後)
-    // 一度に畳む単位 U (整理は残す量より古い側を U 文字ずつ刻んで畳む)。
-    // 古い backend は返さないので optional — 無いときは呼び出し側が旧判定に落とす。
+    // 一度に畳む単位 U (整理は残す量より古い側を U 文字ぶんずつ刻んで畳む)。
+    // U に達したかは「材料の字数」(スペル結果などの長い機構の行を圧縮した後の
+    // 字数) で測るので、生の文字数との比較には使えない (2026-08-29 裁定)。
     fold_unit_chars?: number | null;
+    // いま「記憶の整理」で実際に畳みが起きるか。backend が実行時と同じ計画
+    // (plan_eviction) を dry に呼んだ結果 — 画面側で算数を再実装しない。
+    // 送信量を測れないとき、および古い backend では null/undefined。
+    fold_ready?: boolean | null;
+    // 畳みが起きないとき、畳める範囲の材料があと何字たまれば畳めるか (畳める
+    // ときは 0)。
+    fold_shortfall_chars?: number | null;
     refill_applied: boolean;
     measurement_failed: boolean;      // 計測失敗 (null を「起点なし」と読ませない)
 }

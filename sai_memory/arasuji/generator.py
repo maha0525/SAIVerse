@@ -23,7 +23,7 @@ import sqlite3
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Sequence
 
 from sai_memory.memory.storage import MECHANISM_TAGS, Message
 from sai_memory.arasuji.storage import (
@@ -131,8 +131,29 @@ def is_mechanism_message(msg: Message) -> bool:
     判定はタグのみ — role では判定しない (システム通知は user role で
     書かれるため)。
     """
-    tags = _message_tags(msg)
-    return any(t in MECHANISM_TAGS for t in tags)
+    return any(t in MECHANISM_TAGS for t in _message_tags(msg))
+
+
+def material_text_for(content: str, tags: Sequence[str]) -> str:
+    """本文とタグだけから材料テキストを決める、長さ規則の純テキスト形。
+
+    Message オブジェクトを持たない呼び出し側 (退場計画 sea/eviction_plan.py の
+    提示 payload) と :func:`material_text` が**同じ一枚の規則**を共有するための
+    一点 — 閾値や縮め方をここ以外に二重実装しない (2026-08-29 まはー裁定:
+    U 判定の物差しは材料字数)。
+    """
+    content = content or ""
+    if (
+        any(t in MECHANISM_TAGS for t in tags)
+        and len(content) > MECHANISM_TEXT_MAX_CHARS
+    ):
+        return condense_mechanism_text(content)
+    return content
+
+
+def material_len(content: str, tags: Sequence[str]) -> int:
+    """:func:`material_text_for` の字数形 (payload 側の字数勘定用)。"""
+    return len(material_text_for(content, tags))
 
 
 def material_text(msg: Message) -> str:
@@ -140,10 +161,7 @@ def material_text(msg: Message) -> str:
 
     機構名義の行で閾値超えなら決定論の一行。それ以外は本文そのまま。
     """
-    content = msg.content or ""
-    if is_mechanism_message(msg) and len(content) > MECHANISM_TEXT_MAX_CHARS:
-        return condense_mechanism_text(content)
-    return content
+    return material_text_for(msg.content or "", _message_tags(msg))
 
 
 def material_chars(msg: Message) -> int:

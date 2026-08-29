@@ -60,9 +60,9 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
     // Generation state
     const [showGenerateModal, setShowGenerateModal] = useState(false);
     // 確認窓で見せる送信量 (GET /api/people/{id}/context-status)。手動の畳みは
-    // 「残す量を U (fold_unit_chars) 文字以上超えている」でなければ何もしない
+    // 畳める範囲の材料が U (fold_unit_chars) に達していなければ何もしない
     // (sea/session_lifecycle.py の run_manual_compaction が noop を返す) ので、
-    // 押す前に判断材料を出す。
+    // backend が計画を dry に呼んだ結果 (fold_ready) を押す前の判断材料に出す。
     const [contextStatus, setContextStatus] = useState<ContextStatus | null>(null);
     const [contextStatusError, setContextStatusError] = useState(false);
     const [generationJob, setGenerationJob] = useState<{
@@ -339,23 +339,32 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
         return () => { cancelled = true; };
     }, [showGenerateModal, personaId]);
 
-    // 畳めるか = 実際に畳みが起きる条件。整理 (sea/eviction_plan.py::plan_eviction)
-    // は「残す量より古い側」を U 文字 (fold_unit_chars) ずつの範囲に刻んで畳むので、
-    // 残す量を超えていても超過が U 未満なら何も畳まれない (backend は noop を返す)。
-    // 読めなかったとき・水位を持たないモデル・起点未確立は「畳めない」に倒す
-    // (空振りの実行をさせない)。
+    // 畳めるか = 実際に畳みが起きるか。整理 (sea/eviction_plan.py::plan_eviction)
+    // は「残す量より古い側」を U 文字ぶんずつの範囲に刻んで畳むが、U に達したかは
+    // 材料の字数 (スペル結果などの長い機構の行を圧縮した後の字数) で測る
+    // (2026-08-29 裁定) ので、生の超過と U の比較では判定できない。backend が
+    // 実行時と同じ計画を dry に呼んだ結果 (fold_ready / fold_shortfall_chars)
+    // をそのまま使う。読めなかったとき・水位を持たないモデル・起点未確立は
+    // 「畳めない」に倒す (空振りの実行をさせない)。
     const overflowChars = contextStatus
         && contextStatus.presented_chars != null && contextStatus.target_chars != null
         ? contextStatus.presented_chars - contextStatus.target_chars
         : null;
-    // fold_unit_chars を返さない古い backend では昨日の判定 (今の量 > 残す量) に落とす。
+    const foldReady = contextStatus?.fold_ready ?? null;
+    const foldShortfallChars = contextStatus?.fold_shortfall_chars ?? null;
     const foldUnitChars = contextStatus?.fold_unit_chars ?? null;
-    const foldUnitKnown = foldUnitChars != null && foldUnitChars > 0;
-    const shortfallChars = foldUnitKnown && overflowChars != null
-        ? foldUnitChars - overflowChars
-        : null;
-    const canFold = !!contextStatus && contextStatus.metabolism && overflowChars != null
-        && (foldUnitKnown ? overflowChars >= foldUnitChars : overflowChars > 0);
+    // fold_ready を返さない古い backend では、8/24 の「生の超過が U に達して
+    // いなければ押せない」判定 (生超過 >= fold_unit_chars) に戻す。U も無ければ
+    // 「畳めるか」を判定できないので無効化 (fail-closed — 空振りの実行を
+    // させない)。計測失敗 (measurement_failed) も常に無効化。
+    const legacyFoldReady = overflowChars != null && foldUnitChars != null && foldUnitChars > 0
+        ? overflowChars >= foldUnitChars
+        : false;
+    const effectiveFoldReady = foldReady != null ? foldReady : legacyFoldReady;
+    const canFold = !!contextStatus && contextStatus.metabolism
+        && !contextStatus.measurement_failed
+        && overflowChars != null
+        && effectiveFoldReady;
 
     // 実行できない理由 (ボタンの tooltip)。本文は確認窓の中に出しているので、
     // ここは同じ理由を短く言い直したものにする。
@@ -366,8 +375,16 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
         if (!contextStatus.metabolism) return 'このモデルは水位を持たない設定です';
         if (contextStatus.measurement_failed) return 'いまの送信量を測定できませんでした';
         if (contextStatus.presented_chars == null) return 'まだ会話の起点がありません';
-        if (foldUnitKnown && overflowChars != null && overflowChars > 0 && shortfallChars != null) {
-            return `整理は ${foldUnitChars.toLocaleString()} 文字ずつ畳むため、あと ${shortfallChars.toLocaleString()} 文字たまるまで畳めません`;
+        if (foldReady === false && overflowChars != null && overflowChars > 0) {
+            return foldShortfallChars != null && foldShortfallChars > 0
+                ? `あと約 ${foldShortfallChars.toLocaleString()} 文字の会話がたまれば畳めます`
+                : 'まだ畳める範囲がたまっていません';
+        }
+        if (foldReady == null && overflowChars != null && overflowChars > 0) {
+            // 古い backend (fold_ready なし): 生超過が U に達するまで押せない。
+            return foldUnitChars != null && foldUnitChars > 0
+                ? 'まだ畳める範囲がたまっていません'
+                : '畳めるかどうか判定できません';
         }
         return '畳むものがありません';
     };
@@ -401,14 +418,22 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
         let statusText: string;
         if (overflow <= 0) {
             statusText = 'いまの会話は残す量以下なので、畳むものがありません。';
-        } else if (!foldUnitKnown) {
-            // 古い backend (U を返さない) — 昨日までの言い方に落とす。
-            statusText = `いまの会話は ${presented.toLocaleString()} 文字で、残す量 ${target.toLocaleString()} 文字を超えているぶんが畳まれます。`;
-        } else if (overflow >= foldUnitChars) {
-            const rounds = Math.floor(overflow / foldUnitChars);
-            statusText = `いまの会話は残す量を ${overflow.toLocaleString()} 文字超えていて、古い側から ${foldUnitChars.toLocaleString()} 文字ずつ畳みます（今回は ${rounds.toLocaleString()} 回ぶん）。`;
+        } else if (foldReady == null) {
+            // 古い backend (fold_ready を返さない) — 8/24 の生比較 (超過が U に
+            // 達しているか) に落とす。U も無ければ判定できない = 実行できない。
+            if (foldUnitChars == null || foldUnitChars <= 0) {
+                statusText = '畳めるかどうかを判定できないため、実行できません。';
+            } else if (overflow >= foldUnitChars) {
+                statusText = `いまの会話は ${presented.toLocaleString()} 文字で、残す量 ${target.toLocaleString()} 文字を超えているぶんが畳まれます。`;
+            } else {
+                statusText = `いまの会話は残す量を ${overflow.toLocaleString()} 文字超えていますが、まだ畳める範囲がたまっていません。あと約 ${(foldUnitChars - overflow).toLocaleString()} 文字の会話がたまれば畳めます。`;
+            }
+        } else if (foldReady) {
+            statusText = `いまの会話は残す量を ${overflow.toLocaleString()} 文字超えていて、古い側からあらすじへ畳めます。`;
+        } else if (foldShortfallChars != null && foldShortfallChars > 0) {
+            statusText = `いまの会話は残す量を ${overflow.toLocaleString()} 文字超えていますが、まだ畳める範囲がたまっていません。あと約 ${foldShortfallChars.toLocaleString()} 文字の会話がたまれば畳めます。`;
         } else {
-            statusText = `いまの会話は残す量を ${overflow.toLocaleString()} 文字超えていますが、整理は ${foldUnitChars.toLocaleString()} 文字ずつ畳むため、あと ${(foldUnitChars - overflow).toLocaleString()} 文字たまるまで畳めません。`;
+            statusText = `いまの会話は残す量を ${overflow.toLocaleString()} 文字超えていますが、まだ畳める範囲がたまっていません。`;
         }
         return (
             <>

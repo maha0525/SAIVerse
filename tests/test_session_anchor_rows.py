@@ -474,6 +474,8 @@ def test_manual_compaction_runs_metabolism_with_force(session_factory):
         assert lc.run_manual_compaction(persona) == "ok"
     run.assert_called_once()
     assert run.call_args.kwargs.get("chronicle_force") is True
+    # 材料 U 未満の端数 fold (小粒) を許すのは非常経路だけ — 手動入口は不可。
+    assert not run.call_args.kwargs.get("close_undersized_tail")
     assert run.call_args.kwargs.get("stop_when_disabled") is True
     assert run.call_args.kwargs.get("model_key") == "model-a"
 
@@ -603,6 +605,43 @@ def test_run_metabolism_manual_stops_when_disabled_under_lock(session_factory):
             persona, "room", _window(None, []), wm, chronicle_force=True,
         )
     assert status == "nothing"
+
+
+def test_run_metabolism_forwards_close_undersized_tail_to_the_plan(session_factory):
+    """run_metabolism の close_undersized_tail が退場計画 (plan_eviction) まで届く。
+
+    U 判定が材料字数になった (2026-08-29 裁定) ため、「生は巨大だが材料が薄い」
+    期間は通常計画が fold を閉じられない。非常畳み (§14-3) だけがこのフラグで
+    材料 U 未満の端数を閉じて前進する — 配管が切れると非常畳みでも閉じられなく
+    なるので、フラグが計画まで届くことを固定する。
+    """
+    from sea.eviction_plan import EvictionPlan, Watermarks
+
+    lc = _make_lifecycle(session_factory)
+    persona = SimpleNamespace(
+        persona_id=PERSONA_ID, model="model-a", current_building_id="room",
+    )
+    wm = Watermarks(low=1000, target=2000, high=4000)
+    msgs = [{"id": f"m{i}", "content": "x" * 1000} for i in range(4)]
+
+    with patch.dict(os.environ, {"ENABLE_MEMORY_WEAVE_CONTEXT": ""}), \
+            patch.object(lc, "get_presented_window", return_value=_window("m0", msgs)), \
+            patch("sea.session_lifecycle.plan_eviction",
+                  return_value=EvictionPlan()) as plan:
+        status = lc._run_metabolism_locked(
+            persona, "room", _window("m0", msgs), wm,
+            chronicle_force=True, close_undersized_tail=True,
+        )
+    assert status == "nothing"  # 空計画で早期終了 — 配管の観測だけが目的
+    assert plan.call_args.kwargs.get("close_undersized_tail") is True
+
+    # 既定 (自動・手動・先回り経路) は False のまま計画へ渡る。
+    with patch.dict(os.environ, {"ENABLE_MEMORY_WEAVE_CONTEXT": ""}), \
+            patch.object(lc, "get_presented_window", return_value=_window("m0", msgs)), \
+            patch("sea.session_lifecycle.plan_eviction",
+                  return_value=EvictionPlan()) as plan:
+        lc._run_metabolism_locked(persona, "room", _window("m0", msgs), wm)
+    assert plan.call_args.kwargs.get("close_undersized_tail") is False
 
 
 # ---------------------------------------------------------------------------
@@ -1331,6 +1370,9 @@ def test_emergency_precompaction_folds_over_high_with_notice(session_factory):
     run.assert_called_once()
     assert run.call_args.kwargs.get("chronicle_force") is True
     assert run.call_args.kwargs.get("stop_when_disabled") is not True
+    # 非常経路だけは材料 U 未満の端数 fold を許す (2026-08-29 裁定 —
+    # 「生は巨大だが材料が薄い」期間でも前進を保証する)。
+    assert run.call_args.kwargs.get("close_undersized_tail") is True
     assert [e["type"] for e in events] == ["status"]
 
 

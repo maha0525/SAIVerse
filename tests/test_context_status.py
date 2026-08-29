@@ -34,7 +34,21 @@ def _lifecycle(
     refill_plan=None,
     anchor_id="m1",
     presented=None,
+    planning_presented=None,
+    refold_ranges=0,
 ):
+    """context-status が触る SessionLifecycle の顔だけの偽物。
+
+    ``planning_presented`` は preview_planning_window (本走行と同じ窓の正規化を
+    書き込みなしで再現する下見) が返す提示 — 省略時は素の窓をそのまま返す
+    (正規化で何も変わらない窓)。``refold_ranges`` は §15-3 印戻しで digest 表示
+    へ戻る区間数。
+    """
+    def _preview_planning_window(persona, model_key, window, wm):
+        if planning_presented is None:
+            return window, refold_ranges
+        return SimpleNamespace(presented=list(planning_presented)), refold_ranges
+
     return SimpleNamespace(
         get_metabolism_watermarks=lambda persona, model_key: watermarks,
         preview_refilled_history=lambda persona, model_key, **_kw: refill_plan,
@@ -44,6 +58,7 @@ def _lifecycle(
         get_presented_window=lambda persona, model_key, aid: SimpleNamespace(
             presented=list(presented or []),
         ),
+        preview_planning_window=_preview_planning_window,
     )
 
 
@@ -84,6 +99,9 @@ def test_refill_plan_measures_post_refill_presented():
     assert status["refill_applied"] is True
     assert status["target_chars"] == 2000
     assert status["high_chars"] == 4000
+    # 読み戻し経路でも「畳めるか」は測る (残す量以下なので畳めない)。
+    assert status["fold_ready"] is False
+    assert status["fold_shortfall_chars"] == status["fold_unit_chars"]
 
 
 def test_no_refill_measures_plain_window():
@@ -100,6 +118,9 @@ def test_bootstrap_without_anchor_returns_watermarks_only():
     status = get_context_status(PERSONA_ID, _manager(persona=persona, lifecycle=lc))
     assert status["metabolism"] is True
     assert status["presented_chars"] is None
+    # 提示を測れないときは「畳めるか」も測れない — None のまま。
+    assert status["fold_ready"] is None
+    assert status["fold_shortfall_chars"] is None
 
 
 def test_unloaded_persona_returns_watermarks_only():
@@ -157,6 +178,86 @@ def test_fold_unit_chars_is_reported_for_the_fold_decision():
     )
     assert no_watermarks["metabolism"] is False
     assert no_watermarks["fold_unit_chars"] == unit
+
+
+def test_fold_ready_comes_from_the_real_eviction_plan(monkeypatch):
+    """「いま畳めるか」は生の超過と U の比較ではなく、実行時と同じ退場計画
+    (plan_eviction の dry 呼び) から出す (2026-08-29 裁定: U 判定は材料字数)。
+
+    材料が U に達する並びでは fold_ready=True / shortfall=0。
+    """
+    monkeypatch.setenv("SAIVERSE_CHRONICLE_BAND_BUDGET", "4000")
+    persona = SimpleNamespace(persona_id=PERSONA_ID, model="model-a")
+    # 6 × 1,000 字: 残す量 2,000 → 保護は末尾 2 件、候補の材料 4,000 = U で閉じる。
+    lc = _lifecycle(presented=[_msg(f"m{i}", 1000) for i in range(6)])
+    status = get_context_status(PERSONA_ID, _manager(persona=persona, lifecycle=lc))
+    assert status["fold_unit_chars"] == 4000
+    assert status["fold_ready"] is True
+    assert status["fold_shortfall_chars"] == 0
+
+
+def test_fold_ready_false_when_material_is_thin(monkeypatch):
+    """生の超過が U を超えていても、材料 (機構行を圧縮した後の字数) が U 未満なら
+    fold_ready=False と「あと材料何字」を返す — 8/24 の「押せたのに何も起きない」
+    を材料判定の下で再発させないための欄。生比較の旧判定ではこの並びを
+    「畳める」と誤答する。
+    """
+    from sai_memory.arasuji.generator import material_len
+
+    monkeypatch.setenv("SAIVERSE_CHRONICLE_BAND_BUDGET", "4000")
+    persona = SimpleNamespace(persona_id=PERSONA_ID, model="model-a")
+    spell = {
+        "id": "s0",
+        "content": "x" * 20_000,
+        "metadata": {"tags": ["spell"]},
+    }
+    presented = [spell, _msg("m0", 1000), _msg("m1", 1000),
+                 _msg("k0", 1000), _msg("k1", 1000)]
+    lc = _lifecycle(presented=presented)
+    status = get_context_status(PERSONA_ID, _manager(persona=persona, lifecycle=lc))
+    # 生では残す量 2,000 を 22,000 字超えているが、候補の材料は一行 + 2,000 字。
+    assert status["presented_chars"] == 24_000
+    assert status["fold_ready"] is False
+    expected_material = material_len("x" * 20_000, ("spell",)) + 2_000
+    assert status["fold_shortfall_chars"] == 4000 - expected_material
+
+
+def test_fold_ready_is_measured_on_the_normalized_planning_window(monkeypatch):
+    """下見は本走行と同じ窓の正規化 (preview_planning_window — 恒久欠落 fold の
+    除外 → §15-3 印戻し) を通した提示で計画を立てる (Codex 指摘 2026-08-29)。
+
+    素の窓では畳める並びでも、正規化後 (印戻しで残す量以下) なら本走行は
+    退場計画を立てない — fold_ready も False でなければ、下見だけが「畳める」
+    と言う食い違い (8/24 の「押せたのに何も起きない」の再発口) になる。
+    """
+    monkeypatch.setenv("SAIVERSE_CHRONICLE_BAND_BUDGET", "4000")
+    persona = SimpleNamespace(persona_id=PERSONA_ID, model="model-a")
+    # 素の窓は 6,000 字 (畳める並び)、正規化後は 1,000 字 (残す量以下)。
+    lc = _lifecycle(
+        presented=[_msg(f"m{i}", 1000) for i in range(6)],
+        planning_presented=[_msg("m5", 1000)],
+    )
+    status = get_context_status(PERSONA_ID, _manager(persona=persona, lifecycle=lc))
+    # 表示する送信量は素の窓 (いま実際に送られる量) のまま。
+    assert status["presented_chars"] == 6000
+    # 「畳めるか」は正規化後の窓の答え。
+    assert status["fold_ready"] is False
+
+
+def test_fold_ready_true_when_refold_alone_reduces_the_window(monkeypatch):
+    """§15-3 印戻しだけで提示が減る窓 (raw-view fold あり) は、退場計画が空でも
+    fold_ready=True — 本走行 (run_manual_compaction) は印戻しを実行して "ok" を
+    返すので、押せないと嘘になる。"""
+    monkeypatch.setenv("SAIVERSE_CHRONICLE_BAND_BUDGET", "4000")
+    persona = SimpleNamespace(persona_id=PERSONA_ID, model="model-a")
+    lc = _lifecycle(
+        presented=[_msg(f"m{i}", 1000) for i in range(6)],
+        planning_presented=[_msg("m5", 1000)],   # 印戻し後は残す量以下
+        refold_ranges=2,
+    )
+    status = get_context_status(PERSONA_ID, _manager(persona=persona, lifecycle=lc))
+    assert status["fold_ready"] is True
+    assert status["fold_shortfall_chars"] == 0
 
 
 def test_watermark_resolution_failure_is_500():

@@ -768,6 +768,54 @@ def test_refold_flips_oldest_first_until_target(session_factory):
     assert flags == {"e1": False, "e2": True}
 
 
+def test_preview_planning_window_refolds_without_writing(session_factory):
+    """context-status の下見 (preview_planning_window) は、本走行と同じ正規化
+    (§15-3 印戻し) を**写しに**適用した窓を返し、行にも元の fold オブジェクト
+    にも書かない (Codex 指摘 2026-08-29: 下見と本走行が同じ形の窓を planner に
+    渡す)。"""
+    lc = _make_lifecycle(session_factory)
+    persona = SimpleNamespace(persona_id=PERSONA_ID, model="model-a", sai_memory=None)
+    lc.upsert_anchor_entry(PERSONA_ID, "model-a", {
+        "anchor_id": "m0", "updated_at": _now().isoformat(), "ttl_seconds": 3600,
+    })
+    raw = [_msg(f"m{i}", 100 + i, 5000) for i in range(4)]
+    old = FoldedRange(message_ids=["m0"], chronicle_entry_ids=["e1"], presented_raw=True)
+    new = FoldedRange(message_ids=["m1"], chronicle_entry_ids=["e2"], presented_raw=True)
+    window = _window("m0", raw, raw=raw, folds=[old, new])
+    wm = Watermarks(low=1000, target=17_000, high=19_000)
+    from sea.session_window import apply_folds
+    with patch.object(lc, "_present_with_folds",
+                      side_effect=lambda p, msgs, folds: apply_folds(
+                          msgs, folds, lambda f: "d" * 1200)):
+        normalized, refold_ranges = lc.preview_planning_window(
+            persona, "model-a", window, wm,
+        )
+    # 本走行の印戻しと同じ答え: 古い方 1 区間だけ digest 表示へ戻る。
+    assert refold_ranges == 1
+    assert [m["id"] for m in normalized.presented][0].startswith("folded:")
+    # 元の窓の fold は無傷 (写しに flip した)。
+    assert old.presented_raw is True
+    assert new.presented_raw is True
+    # 行も無傷 — 何も書かれていない。
+    entry = lc.load_anchor_entry(PERSONA_ID, "model-a")
+    assert not deserialize_folds(entry.get("folded_ranges"))
+
+
+def test_preview_planning_window_passthrough_without_raw_view(session_factory):
+    """正規化で何も変わらない窓 (印付き fold も恒久欠落も無い) はそのままの
+    提示を返し、refold_ranges=0。"""
+    lc = _make_lifecycle(session_factory)
+    persona = SimpleNamespace(persona_id=PERSONA_ID, model="model-a", sai_memory=None)
+    window = _window("m0", [_msg("m0", 100, 2500)],
+                     folds=[FoldedRange(message_ids=["m0"], chronicle_entry_ids=["e1"])])
+    wm = Watermarks(low=1000, target=2000, high=4000)
+    normalized, refold_ranges = lc.preview_planning_window(
+        persona, "model-a", window, wm,
+    )
+    assert refold_ranges == 0
+    assert [m["id"] for m in normalized.presented] == ["m0"]
+
+
 def test_refold_noop_when_no_raw_view(session_factory):
     lc = _make_lifecycle(session_factory)
     persona = SimpleNamespace(persona_id=PERSONA_ID, model="model-a")
