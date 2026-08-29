@@ -1,6 +1,6 @@
 # Issue: 発言が届いたか分からないまま終わったとき、復旧する手段が無い
 
-**ステータス**: 🔲 未着手 — 設計から
+**ステータス**: 🔲 未着手 — 設計から。**v0.3 の門の内 (2026-08-29 まはー裁定、gate §2-18)**
 **優先度**: high — ユーザーが手で打ち直すと、同じ発言がペルソナの記憶に二度残る
 **作成日**: 2026-08-28
 **出自**: [user_utterance_path_failure_inventory](archive/user_utterance_path_failure_inventory.md) の
