@@ -29,7 +29,7 @@ import hashlib
 import json
 import logging
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 LOGGER = logging.getLogger(__name__)
 
@@ -50,11 +50,21 @@ def _rel_path(path: Path) -> str:
         return str(path)
 
 
-def _collect_file_playbooks() -> Dict[str, Dict[str, Any]]:
+def _collect_file_playbooks(
+    collect_errors: Optional[List[Tuple[Path, str]]] = None,
+) -> Dict[str, Dict[str, Any]]:
     """ファイルベースのプレイブックを優先順に収集する。
 
     戻り値: {playbook_name: {"path": Path, "data": dict, "source_rel": str, "hash": str}}
     同名は最初に見つかったもの（= 高優先）のみ保持。
+
+    Args:
+        collect_errors: 渡されたリストに、読み込みに失敗したファイルの
+            ``(パス, 理由)`` を append する。省略時 (None) は従来どおり
+            WARNING ログを出してスキップするだけ (毎起動の sync は壊れた
+            ファイル 1 個で起動不能にならないよう寛容のまま)。全置き換え
+            (upgrade_handlers.replace_all_playbooks) のような破壊操作の
+            呼び出し元だけがこれを使って厳格に検査する。
     """
     from saiverse.data_paths import iter_project_subdirs, PLAYBOOKS_DIR
 
@@ -70,11 +80,15 @@ def _collect_file_playbooks() -> Dict[str, Dict[str, Any]]:
                 data = json.loads(json_path.read_text(encoding="utf-8"))
             except Exception as exc:
                 LOGGER.warning("playbook_sync: failed to read %s: %s", json_path, exc)
+                if collect_errors is not None:
+                    collect_errors.append((json_path, str(exc)))
                 continue
 
             name = data.get("name")
             if not name:
                 LOGGER.warning("playbook_sync: missing 'name' in %s, skipping", json_path)
+                if collect_errors is not None:
+                    collect_errors.append((json_path, "missing 'name' field"))
                 continue
 
             if name in result:

@@ -9,10 +9,12 @@ Phase 1 の機構（``current >= target`` で no-op）に頼っているため�
 """
 from __future__ import annotations
 
+import datetime as _datetime
 import json
 import logging
 import time
-from typing import TYPE_CHECKING, List
+from pathlib import Path
+from typing import TYPE_CHECKING, List, Optional, Set
 
 from saiverse.upgrade import UpgradeHandler
 
@@ -494,6 +496,185 @@ def _v0_3_0_dev5_conscious_log_cursor_import(*, session: "Session", ai: "AI") ->
     )
 
 
+# ---- v0.3.0.dev6: Playbook 全置き換え (v0.2 由来行の永久残留対策) ----
+
+
+def _no_op_ai_upgrade(*, session: "Session", ai: "AI") -> None:
+    """Explicit edge for releases that changed City/global state but not AI state."""
+    del session, ai
+
+
+def _serialize_playbook_row(row) -> dict:
+    """Playbook ORM 行の全カラムを JSON 化可能な dict に写す。"""
+    from database.models import Playbook
+
+    data = {}
+    for column in Playbook.__table__.columns:
+        value = getattr(row, column.name)
+        if isinstance(value, (_datetime.datetime, _datetime.date)):
+            value = value.isoformat()
+        data[column.name] = value
+    return data
+
+
+def _collect_current_playbook_names_strict() -> Set[str]:
+    """現行のファイル Playbook 名集合を、読み込み失敗ゼロを条件に取得する。
+
+    全置き換えは一回きりの破壊操作なので、壊れたファイルを黙ってスキップする
+    毎起動 sync の寛容さをここでは使わない — 一部のファイルが読めない状態で
+    名前集合を「現行の全量」として削除に使うと、壊れていた分の Playbook と
+    その permission 行が欠けたまま確定し、以後の sync でも復元されないため。
+    """
+    from saiverse.playbook_sync import _collect_file_playbooks
+
+    collect_errors: List = []
+    names = set(_collect_file_playbooks(collect_errors=collect_errors).keys())
+    if collect_errors:
+        details = "; ".join(f"{path}: {reason}" for path, reason in collect_errors)
+        raise RuntimeError(
+            "playbook wholesale replacement aborted: failed to read "
+            f"{len(collect_errors)} playbook file(s), so the collected name set "
+            f"is incomplete and cannot be used for deletion — {details}"
+        )
+    return names
+
+
+def replace_all_playbooks(
+    session: "Session",
+    *,
+    current_playbook_names: Optional[Set[str]] = None,
+    backup_dir: Optional[Path] = None,
+) -> None:
+    """playbooks テーブルをバックアップしてから全行削除する (v0.2 → v0.3 移行)。
+
+    背景: v0.2 時代の Playbook 取り込みは source_file / source_hash を記録しな
+    かったため、v0.3 の起動時同期 (saiverse.playbook_sync) がそれらを
+    「save_playbook 由来 = ユーザー作 = 保護対象」と誤認し、退役済み Playbook
+    (meta_user 等 37 本) がアップグレード後の DB に永久残留する。ペルソナが
+    Playbook を作る経路はリリース版にも現行にも存在しない (2026-08-29 まはー
+    確認済み) ため、DB の全 Playbook 行は機械取り込み由来とみなし、選別せず
+    全置き換えする (2026-08-29 まはー裁定)。
+
+    実行順序の前提: 本処理は main.py の run_startup_upgrade (main.py:458) の中で
+    走り、同じ起動の sync_playbooks_from_files (main.py:491) より必ず前に来る。
+    削除された現行 Playbook は直後の sync が再取り込みする。
+
+    手順 (fail-closed):
+    1. 全行読み出し。0 行のときは、playbook_permission にも行が無ければ完全
+       no-op (新規インストールでファイル収集を走らせない)。permission 行だけ
+       残っている DB では、現行ファイル名集合に無い退役名の行を掃除する
+       (playbooks の削除が無いのでバックアップは作らない)。
+    2. 現行のファイル Playbook 名を収集。読み込みに失敗したファイルが 1 件でも
+       あれば例外で止める (集合が不完全なまま削除すると、壊れていた分が欠けて
+       確定するため)。0 件でも例外で止める — sync が何も再取り込みできない
+       環境で全削除すると Playbook ゼロの世界になるため。
+    3. 全行の全カラムを JSON でバックアップし、読み戻して行数を検算。
+       書き込み失敗・検算失敗は例外で止め、削除には進まない。
+    4. playbooks 全行 DELETE。
+    5. playbook_permission から、現行ファイル名集合に無い playbook_name の行を
+       DELETE (退役名の許可行の掃除。現行名は名前参照なので再取り込み後も効く)。
+
+    commit はしない — 呼び出し元 (upgrade 枠組み) が LAST_KNOWN_VERSION の更新と
+    まとめて commit することで、削除とバージョン刻印が原子的になる。
+
+    Args:
+        session: upgrade 枠組みが渡す SQLAlchemy セッション
+        current_playbook_names: テスト注入用。None なら playbook_sync の
+            _collect_file_playbooks() から取得
+        backup_dir: テスト注入用。None なら <saiverse_home>/backups/playbooks
+    """
+    from database.models import Playbook, PlaybookPermission
+
+    rows = session.query(Playbook).all()
+    if not rows:
+        perm_rows_exist = session.query(PlaybookPermission).first() is not None
+        if not perm_rows_exist:
+            LOGGER.info(
+                "[playbook_replacement] playbooks and playbook_permission are "
+                "both empty — nothing to replace"
+            )
+            return
+        # playbooks は空だが permission に行が残っている DB (例: 過去の手動
+        # 削除)。退役名の孤児 permission 行だけ掃除する。
+        if current_playbook_names is None:
+            current_playbook_names = _collect_current_playbook_names_strict()
+        if not current_playbook_names:
+            # 本線 (下) と同じ検査。名前集合が空のまま ~IN () を流すと全許可行が
+            # 消える — ファイルが一つも見つからない環境では掃除も見送る。
+            raise RuntimeError(
+                "playbook wholesale replacement aborted: no file-based playbooks "
+                "found on disk; refusing to treat every playbook_permission row "
+                "as orphaned."
+            )
+        deleted_perms = (
+            session.query(PlaybookPermission)
+            .filter(~PlaybookPermission.playbook_name.in_(current_playbook_names))
+            .delete(synchronize_session=False)
+        )
+        LOGGER.info(
+            "[playbook_replacement] playbooks table is empty — deleted %d "
+            "orphan playbook_permission row(s) not matching any current file "
+            "playbook (current file playbooks: %d)",
+            deleted_perms, len(current_playbook_names),
+        )
+        return
+
+    if current_playbook_names is None:
+        current_playbook_names = _collect_current_playbook_names_strict()
+
+    if not current_playbook_names:
+        raise RuntimeError(
+            "playbook wholesale replacement aborted: no file-based playbooks found "
+            "on disk. Deleting all DB playbooks now would leave the world with zero "
+            "playbooks after startup sync."
+        )
+
+    if backup_dir is None:
+        from saiverse.data_paths import get_saiverse_home
+
+        backup_dir = get_saiverse_home() / "backups" / "playbooks"
+
+    serialized = [_serialize_playbook_row(row) for row in rows]
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    backup_path = Path(backup_dir) / f"playbooks_pre_v030_{timestamp}.json"
+    backup_path.parent.mkdir(parents=True, exist_ok=True)
+    backup_path.write_text(
+        json.dumps(serialized, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    # 読み戻し検算 — 破損したバックアップを頼りに削除へ進まない
+    restored = json.loads(backup_path.read_text(encoding="utf-8"))
+    if len(restored) != len(rows):
+        raise RuntimeError(
+            f"playbook backup verification failed: wrote {len(rows)} rows "
+            f"but read back {len(restored)} ({backup_path})"
+        )
+
+    deleted_playbooks = session.query(Playbook).delete(synchronize_session=False)
+    deleted_perms = (
+        session.query(PlaybookPermission)
+        .filter(~PlaybookPermission.playbook_name.in_(current_playbook_names))
+        .delete(synchronize_session=False)
+    )
+
+    LOGGER.info(
+        "[playbook_replacement] backed up %d playbook row(s) to %s; "
+        "deleted %d playbooks row(s) and %d retired playbook_permission row(s) "
+        "(current file playbooks: %d — re-imported by startup sync)",
+        len(serialized), backup_path, deleted_playbooks, deleted_perms,
+        len(current_playbook_names),
+    )
+
+
+def _v0_3_0_dev6_playbook_wholesale_replacement(*, session: "Session", city) -> None:
+    """v0.3.0.dev6 City エッジ: Playbook 全置き換え。
+
+    playbooks テーブルは City 単位でなく DB 全体 (public scope) のため、多 City
+    DB では 2 巡目以降が「0 行 no-op」に落ちる (冪等)。
+    """
+    del city
+    replace_all_playbooks(session)
+
+
 HANDLERS: List[UpgradeHandler] = [
     UpgradeHandler(
         name="city_noop_v0_3_0_dev0",
@@ -632,6 +813,33 @@ HANDLERS: List[UpgradeHandler] = [
             "(framework runs City handlers before AI handlers), because cursor "
             "remapping resolves through building_messages.legacy_seq. No-op when "
             "the persona already has live cursor rows."
+        ),
+    ),
+    UpgradeHandler(
+        name="v0_3_0_dev6_playbook_wholesale_replacement",
+        scope="city",
+        from_version="0.3.0.dev5",
+        to_version="0.3.0.dev6",
+        run=_v0_3_0_dev6_playbook_wholesale_replacement,
+        description=(
+            "Back up every playbooks row to <saiverse_home>/backups/playbooks/ "
+            "and delete them all, plus playbook_permission rows whose name no "
+            "longer matches a file-based playbook. v0.2 imports recorded no "
+            "source_file/source_hash, so the v0.3 startup sync would treat "
+            "retired playbooks (meta_user etc.) as user-created and keep them "
+            "forever. Runs before sync_playbooks_from_files (main.py runs "
+            "run_startup_upgrade first), which then re-imports the current set."
+        ),
+    ),
+    UpgradeHandler(
+        name="ai_noop_v0_3_0_dev6",
+        scope="ai",
+        from_version="0.3.0.dev5",
+        to_version="0.3.0.dev6",
+        run=_no_op_ai_upgrade,
+        description=(
+            "Explicit no-op AI edge for v0.3.0.dev6 (playbook replacement is "
+            "DB-global and runs on the City scope)."
         ),
     ),
 ]
