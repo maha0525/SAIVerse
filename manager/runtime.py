@@ -77,7 +77,7 @@ _OUTCOME_EVENT_TYPES = frozenset({
 #: 発火元は sea/runtime_emitters.py の ``notify_speak_persisted`` (唯一の
 #: 発火口) — 建物履歴の行に本文が入った後にだけ流れる。二つの問いを
 #: 混ぜないこと。
-#: 設計: docs/issues/stream_completion_is_not_proof_of_persistence.md
+#: 設計: docs/issues/archive/stream_completion_is_not_proof_of_persistence.md
 from sea.runtime_emitters import SPEAK_PERSISTED_EVENT_TYPE as _PERSISTED_EVENT_TYPE  # noqa: E402
 
 #: 本文を運ぶ型。中身が空なら画面には何も出ていないので、届いたとは数えない。
@@ -141,7 +141,7 @@ def _note_speech(spoke: Dict[str, Any], event: Any) -> None:
     されていないのにボタンが消える回と、保存されたのにボタンが残る回の両方が
     生まれた。保存完了イベントは finalize の成功後にだけ流れ、撤回されない
     ので、断片の取り消し (``streaming_discard``) の追跡も要らなくなった。
-    設計: docs/issues/stream_completion_is_not_proof_of_persistence.md
+    設計: docs/issues/archive/stream_completion_is_not_proof_of_persistence.md
     """
     if not isinstance(event, dict):
         return
@@ -1001,7 +1001,7 @@ class RuntimeService(
         ``on_saved`` を渡すと、Pulse が終わった時点で保存の信号を見ていた場合に
         **ワーカースレッドで** 1 回呼ぶ。読み手 (この generator の消費者) が
         切断していても呼ばれる — 「保存成功が確定した側」に権威を置くための口
-        (docs/issues/stream_completion_is_not_proof_of_persistence.md)。
+        (docs/issues/archive/stream_completion_is_not_proof_of_persistence.md)。
 
         ``pre_generation_check`` は生成の開始前に Beat ロックの内側で走る
         再検査 (sea/runtime.py の run_meta_user 参照)。

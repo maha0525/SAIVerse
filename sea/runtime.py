@@ -105,7 +105,7 @@ class SEARuntime:
         流して空で返る (None なら通す)。retry の門番が使う — 入口 (API route)
         の検査から生成の開始までの間に、別の生成が応答を保存し終えている
         競合の窓を、生成を直列化している既存の排他の内側で塞ぐ
-        (docs/issues/retry_api_has_no_server_side_eligibility_check.md)。
+        (docs/issues/archive/retry_api_has_no_server_side_eligibility_check.md)。
         """
         # Check for cancellation before starting
         if cancellation_token:
@@ -1835,7 +1835,7 @@ class SEARuntime:
         final_voice_text: Optional[str] = None,
     ) -> "SpeakFinalizeResult":
         # 戻り値は三値の結果 (保存成功 / 対象行なし / 保存失敗)。
-        # 設計: docs/issues/stream_completion_is_not_proof_of_persistence.md
+        # 設計: docs/issues/archive/stream_completion_is_not_proof_of_persistence.md
         return self._emitters.emit_speak_finalize(
             persona, building_id, message_id, text,
             pulse_id=pulse_id, extra_metadata=extra_metadata,

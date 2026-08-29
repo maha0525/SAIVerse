@@ -19,5 +19,5 @@ retry には 2026-08-29 の実装で「生成の開始が通る既存の排他 (
 
 ## 関連
 
-- [stream_completion_is_not_proof_of_persistence.md](stream_completion_is_not_proof_of_persistence.md) (実装済みの親設計)
-- [retry_api_has_no_server_side_eligibility_check.md](retry_api_has_no_server_side_eligibility_check.md) (同型の塞ぎ済み事例 — `sea/runtime.py` の `pre_generation_check`)
+- [stream_completion_is_not_proof_of_persistence.md](archive/stream_completion_is_not_proof_of_persistence.md) (実装済みの親設計)
+- [retry_api_has_no_server_side_eligibility_check.md](archive/retry_api_has_no_server_side_eligibility_check.md) (同型の塞ぎ済み事例 — `sea/runtime.py` の `pre_generation_check`)

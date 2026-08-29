@@ -852,7 +852,7 @@ def _run_chronicle_generation(
         elif status == "deferred_sluice_unseen":
             # スルース (採取) と編纂は確定済みで、退場だけが次回へ繰り越された。
             # claim 競合 (window_claimed) と混ぜると「別の整理が処理中」という
-            # 嘘になる (docs/issues/metabolism_deferral_mislabeled_as_window_claim.md 従)。
+            # 嘘になる (docs/issues/archive/metabolism_deferral_mislabeled_as_window_claim.md 従)。
             # 読めていない範囲は末尾の新着とは限らない (冷えた起点の前進で窓の
             # 頭側が漏れる並びもある) — 文面で「新しい会話」と断定しない。
             _update_job(

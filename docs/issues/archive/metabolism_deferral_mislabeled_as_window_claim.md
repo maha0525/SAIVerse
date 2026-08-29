@@ -1,6 +1,6 @@
 # 手動整理の保留が「別の整理が処理中」と誤表示され、案内表からも漏れて「予期しないエラー」に落ちる
 
-**状態**: 🟣 修正済み・実機検証待ち (2026-08-24 起票、同日修正)。
+**状態**: ✅ 解決済み (2026-08-24 起票・同日修正 → 2026-08-29 実機合格)。起点の凍結の修正後、まはーが Memory 窓の「生成」を一押しで再実行し、採取から畳みまで保留なしで通って一次あらすじ 1 本 (材料 10,685 字の被覆) が確定した。
 
 関連: [`sea/session_lifecycle.py`](../../sea/session_lifecycle.py) `run_metabolism` の戻り値 / [`api/routes/people/arasuji.py`](../../api/routes/people/arasuji.py) の deferred 写像 / [`frontend/src/components/memory/ArasujiViewer.tsx`](../../frontend/src/components/memory/ArasujiViewer.tsx) の案内表
 出自: 2026-08-24 実機検証 (v0.3 チェックリスト 5 番)。まはーが Memory 窓の「生成」を押したら「別の整理が同じ範囲を処理中または処理済みです」+「予期しないエラーが発生しました」。

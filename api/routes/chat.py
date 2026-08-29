@@ -1222,7 +1222,7 @@ def retry_message(req: MessageActionRequest, manager = Depends(get_manager)):
     この入口の検査には競合の窓がある (検査から生成の開始までの間に別の生成が
     応答を保存し終えうる) ので、同じ共有判定を生成の直前 — Beat ロックの
     内側 — でもう一度引く (manager/runtime.py の retry_user_message_stream)。
-    設計: docs/issues/retry_api_has_no_server_side_eligibility_check.md
+    設計: docs/issues/archive/retry_api_has_no_server_side_eligibility_check.md
     """
     building_id = manager.state.user_current_building_id
     if building_id:
@@ -1317,7 +1317,7 @@ def get_message_outcome(client_message_id: str, manager = Depends(get_manager)):
     通信が切れて顛末の分からない送信 (出口 7) の復旧用。読み取りのみで、
     LLM は使わない — だからフロントは自動で呼んでよい (2026-08-25 裁定の
     「追加の推論はボタンの後ろ」の対象外)。
-    設計: docs/issues/unknown_send_outcome_has_no_recovery_path.md
+    設計: docs/issues/archive/unknown_send_outcome_has_no_recovery_path.md
     """
     from database.building_messages import lookup_client_message_outcome
     result = lookup_client_message_outcome(

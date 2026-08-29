@@ -67,7 +67,7 @@ INTERRUPTED_METADATA_KEY = "_interrupted"
 #: 定義と発火条件は sea/runtime_emitters.py に一本化してある — 画面イベント
 #: (``say`` / ``streaming_chunk`` / ``streaming_complete``) は保存の証拠では
 #: なく、この信号だけが「建物履歴の行に本文が入った」を運ぶ。
-#: 設計: docs/issues/stream_completion_is_not_proof_of_persistence.md
+#: 設計: docs/issues/archive/stream_completion_is_not_proof_of_persistence.md
 from .runtime_emitters import SPEAK_PERSISTED_EVENT_TYPE, notify_speak_persisted  # noqa: E402,F401
 
 

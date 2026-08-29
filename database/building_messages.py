@@ -788,7 +788,7 @@ def lookup_client_message_outcome(
     付いたか」を後から尋ねるための口。応答は三値で、**「分からない」を
     潰さない** — 照会に失敗した回を「残っていない」と言うと、実は届いていた
     発言をユーザーが打ち直して二重に載る。
-    設計: docs/issues/unknown_send_outcome_has_no_recovery_path.md
+    設計: docs/issues/archive/unknown_send_outcome_has_no_recovery_path.md
 
     Returns:
         ``{"status": "found", "message_id": ..., "has_reply": ...}`` /

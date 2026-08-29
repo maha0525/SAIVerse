@@ -2917,7 +2917,7 @@ class SessionLifecycle:
                 # 退場だけを次回へ譲る。理由を戻り値で運ぶ — 手動入口
                 # (run_manual_compaction → arasuji.py / organize-memory) が
                 # 「別の整理が処理中」(claim 競合の文面) と混同して報告しない
-                # ため (docs/issues/metabolism_deferral_mislabeled_as_window_claim.md 従)。
+                # ため (docs/issues/archive/metabolism_deferral_mislabeled_as_window_claim.md 従)。
                 # 読めていない範囲は末尾の新着とは限らない (冷えた起点の前進で
                 # 窓の頭側が漏れる並びが実機の初出) — 文面で新着と断定しない。
                 message = "記憶の整理を見送りました（今回の採取で読めていない範囲があるため、次回に改めて整理します）"

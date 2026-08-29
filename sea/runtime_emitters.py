@@ -16,7 +16,7 @@ LOGGER = logging.getLogger(__name__)
 #: 行に本文が入った後にだけ流れ、保存された行の id を運ぶ。受け手
 #: (manager/runtime.py の続きの生成の印降ろし) は、この信号が来なかった回は
 #: 印を残す側へ倒れる。
-#: 設計: docs/issues/stream_completion_is_not_proof_of_persistence.md
+#: 設計: docs/issues/archive/stream_completion_is_not_proof_of_persistence.md
 SPEAK_PERSISTED_EVENT_TYPE = "speak_persisted"
 
 
@@ -74,7 +74,7 @@ class SpeakFinalizeResult:
     ペルソナ履歴・gateway 配信の失敗は ERROR ログに残るが saved を覆さない。
 
     例外は上へ投げない — 結果型で返し、処理は止めない。
-    設計: docs/issues/stream_completion_is_not_proof_of_persistence.md
+    設計: docs/issues/archive/stream_completion_is_not_proof_of_persistence.md
     """
 
     status: str

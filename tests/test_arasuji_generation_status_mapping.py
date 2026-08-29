@@ -1,4 +1,4 @@
-"""手動生成ジョブの保留理由の写像 (docs/issues/metabolism_deferral_mislabeled_as_window_claim.md 従)。
+"""手動生成ジョブの保留理由の写像 (docs/issues/archive/metabolism_deferral_mislabeled_as_window_claim.md 従)。
 
 run_manual_compaction の戻り値がユーザー向けの error_code / 文面へどう写るかを
 固定する。特に "deferred" (別入口との claim 競合) と "deferred_sluice_unseen"
