@@ -232,7 +232,7 @@ doc: [`user_utterance_path_failure_inventory.md`](../issues/archive/user_utteran
 | I | ✅ 2026-08-29 まはー裁定: **門の内** (§2-18 へ編入) | | | [issue](../issues/archive/unknown_send_outcome_has_no_recovery_path.md) |
 | J | ✅ 2026-08-29 まはー裁定: **門の内** (§2-18/19 の実装束に相乗り)。条文も再裁定 — 発言ごとの応答記録は作らず、「その発言以後にペルソナの発言があるか」で判定する (詳細は issue 冒頭) | | | [issue](../issues/archive/retry_api_has_no_server_side_eligibility_check.md) |
 | K | ✅ 2026-08-29 確認完了 → まはーの判定条件どおり**門の外** — ボタン (続きの生成/再送/取り消す) はすべて自分の吹き出しの id を渡す作りで、流れてる最中の吹き出しは id を持たないためボタン自体が出ない (表示条件に msg.id)。操作の誤爆経路は無く、混線は表示のみの欠陥 (再読込で直る)。確認の詳細は issue に記録 | | | [issue](../issues/streaming_events_have_no_identity_in_the_ui.md) |
-| L | ✅ 2026-08-29 深夜 まはー裁定: **門の内・全置き換えで解決** — 「バックアップだけ取って完全に新 Playbook に置き換えるマイグレーション」(ハッシュ照合の選別案は却下、ペルソナが Playbook を作る経路は両版に存在しないことを確認済み)。`feature/playbook-wholesale-replacement` に実装し、二つのテスト世界で実機合格 + Codex 一巡消し込み済み。残 = ブランチのマージ判断 | | | [issue](../issues/v02_playbook_rows_survive_as_unmanaged_zombies.md) |
+| L | ✅ 2026-08-29 深夜 まはー裁定: **門の内・全置き換えで解決** — 「バックアップだけ取って完全に新 Playbook に置き換えるマイグレーション」(ハッシュ照合の選別案は却下、ペルソナが Playbook を作る経路は両版に存在しないことを確認済み)。`feature/playbook-wholesale-replacement` に実装し、二つのテスト世界で実機合格 + Codex 一巡消し込み済み。2026-08-30 未明にまはー判断でリリースブランチへマージ済み (`87a2d2ab`) — **完了** | | | [issue](../issues/archive/v02_playbook_rows_survive_as_unmanaged_zombies.md) |
 
 **出自**: A〜D はいずれも v0.3.0 の門 Wave 0 (Building ID の文字種契約) のレビューで
 浮上した。**A・C・D は作業前から存在**し、B は既存部分が作業前から存在する。E は
