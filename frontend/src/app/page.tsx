@@ -1626,6 +1626,32 @@ export default function Home() {
         )));
     };
 
+    // 印の鮮度: サーバーの門番と同じ物差し (「その発言より後に本文のある
+    // ペルソナ発言があるか」 = database/building_messages.py の
+    // _has_assistant_reply_after の鏡) を表示にも適用する (2026-08-29 まはー裁定)。
+    // 後から応答が並んだ発言の「再送」「取り消す」は押しても門番に断られる
+    // だけなので、画面が判定できるようになった時点で降ろす。画面がまだ知らない
+    // 応答 (別タブで付いた分など) は降ろせないが、その回は門番が受け止める。
+    // 確定前のストリーミング吹き出し (_streaming) は数えない — 保存に失敗すると
+    // 空で確定して消える吹き出しで印を降ろすと、再送が要る場面で導線を失う。
+    useEffect(() => {
+        setMessages(prev => {
+            let changed = false;
+            let replyBehind = false;
+            const next = [...prev];
+            for (let i = next.length - 1; i >= 0; i--) {
+                const m = next[i];
+                if (m.role === 'assistant' && !m._streaming && m.content) {
+                    replyBehind = true;
+                } else if (m.role === 'user' && m.needsRetry && replyBehind) {
+                    next[i] = { ...m, needsRetry: false };
+                    changed = true;
+                }
+            }
+            return changed ? next : prev;
+        });
+    }, [messages]);
+
     // ストリームが閉じた後の後片付け。読み終わっても、途中で切れても、fetch が
     // 失敗しても必ず通す。
     const finishReplyCycle = async () => {
