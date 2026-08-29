@@ -433,7 +433,7 @@ class TestWiring:
         runtime = SEARuntime(manager)
         captured: Dict[str, Any] = {}
 
-        def _fake_speak(persona, building_id, text, pulse_id=None, extra_metadata=None):
+        def _fake_speak(persona, building_id, text, pulse_id=None, extra_metadata=None, event_callback=None):
             captured["metadata"] = extra_metadata
             return {"message_id": "bm-1"}
 
@@ -673,7 +673,7 @@ class TestSubPlaybookRelayIsNotStamped:
         runtime, persona, state = self._parent_after_subplay()
         captured: Dict[str, Any] = {}
 
-        def _fake_speak(p, building_id, text, pulse_id=None, extra_metadata=None):
+        def _fake_speak(p, building_id, text, pulse_id=None, extra_metadata=None, event_callback=None):
             captured["text"] = text
             captured["metadata"] = extra_metadata
             return {"message_id": "bm-1"}

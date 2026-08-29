@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -324,8 +326,10 @@ def test_continue_keeps_the_mark_when_nothing_was_spoken() -> None:
     service.personas = {"p1": persona}
     service.manager.get_building_history = lambda building_id: [_interrupted_message()]
 
-    def _silent_pulse(building_id, target, user_input, spoke=None):
-        # 何も喋らないまま error だけ出して終わる Pulse。
+    def _silent_pulse(building_id, target, user_input, spoke=None,
+                      on_saved=None, pre_generation_check=None):
+        # 何も喋らないまま error だけ出して終わる Pulse。保存の信号を見て
+        # いないので on_saved は呼ばない (実物のワーカーと同じ契約)。
         yield json.dumps({"type": "error", "error_code": "unknown"}) + "\n"
 
     service._stream_persona_pulse = _silent_pulse
@@ -343,10 +347,15 @@ def test_continue_clears_the_mark_once_the_persona_actually_spoke() -> None:
     service.personas = {"p1": persona}
     service.manager.get_building_history = lambda building_id: [_interrupted_message()]
 
-    def _speaking_pulse(building_id, target, user_input, spoke=None):
+    def _speaking_pulse(building_id, target, user_input, spoke=None,
+                        on_saved=None, pre_generation_check=None):
         if spoke is not None:
             spoke["value"] = True
         yield json.dumps({"type": "say", "content": "続きです"}) + "\n"
+        # 保存の信号を見た回は、ストリームの終端までに on_saved を呼ぶ
+        # (実物のワーカーと同じ契約)。
+        if on_saved is not None:
+            on_saved()
 
     service._stream_persona_pulse = _speaking_pulse
     _events(service.continue_persona_message_stream("room:7"))
@@ -438,7 +447,12 @@ def test_retry_uses_the_same_label_for_the_same_fact() -> None:
 
 
 def _continue_service(spoke_value: bool):
-    """「続きの生成」を通せる最小の土台と、その履歴モックを返す。"""
+    """「続きの生成」を通せる最小の土台と、その履歴モックを返す。
+
+    fake の ``_pulse`` は実物の ``_stream_persona_pulse`` の契約を写す:
+    保存の信号を見ていた回は、ストリームの終端までに ``on_saved`` を 1 回
+    呼ぶ (実物ではワーカースレッドが呼ぶ)。
+    """
     history = MagicMock()
     persona = SimpleNamespace(persona_id="p1", history_manager=history)
     service = _runtime()
@@ -452,40 +466,197 @@ def _continue_service(spoke_value: bool):
         "ok",
     )
 
-    def _pulse(building_id, target_persona, instruction, spoke=None):
+    def _pulse(building_id, target_persona, instruction, spoke=None,
+               on_saved=None, pre_generation_check=None):
         if spoke is not None:
             spoke["value"] = spoke_value
         yield "first\n"
         yield "second\n"
+        if spoke_value and on_saved is not None:
+            on_saved()
 
     service._stream_persona_pulse = _pulse
     return service, history
 
 
 def test_continue_clears_the_mark_when_the_stream_finishes() -> None:
-    """最後まで配り終えた回は印を降ろし、ボタンを消す。"""
+    """最後まで配り終えた回は印を降ろし、ボタンを消す。
+
+    降ろすのは continue が ``on_saved`` に渡した閉包 — 対象はこの閉包が
+    束縛した元の発言 (message_id) だけで、別の発言の印には触らない。
+    """
     service, history = _continue_service(spoke_value=True)
 
     list(service.continue_persona_message_stream("room:1"))
 
     history.update_building_message.assert_called_once()
-    _, kwargs = history.update_building_message.call_args
+    args, kwargs = history.update_building_message.call_args
+    assert args[1] == "room:1"
     assert kwargs["metadata"]["_interrupted"] is False
 
 
-def test_continue_keeps_the_mark_when_the_client_disconnects() -> None:
-    """読み手が去った回は印を降ろさない。
+def _continue_service_with_real_pulse(run_sea_user):
+    """実物の ``_stream_persona_pulse`` (= 実物の ``_note_speech`` と実物の
+    ワーカー) を通す土台。
 
-    ``spoke`` が立つのは最初の一片が画面へ流れた時点で、続きが保存し終えた時点
-    ではない。切断された回に降ろすと「保存されていないのにボタンが消える」が
-    起こり、続きを取る手段が消える。残した印はもう一度押せるだけなので、
-    そちらの害の方が小さい。
+    ``_continue_service`` は pulse を差し替えるので、印降ろしの判定材料が
+    どのイベントで立つか・誰が印を降ろすかまでは検査できない。こちらは
+    manager の受け口 (``run_sea_user``) だけを差し替え、イベントは本物の
+    配線を流れる。
     """
-    service, history = _continue_service(spoke_value=True)
+    history = MagicMock()
+    persona = SimpleNamespace(
+        persona_id="p1", history_manager=history,
+        persona_name="P1", avatar_image=None,
+    )
+    service = _runtime()
+    service.personas = {"p1": persona}
+    service._find_building_message = lambda building_id, message_id: (
+        {
+            "role": "assistant",
+            "persona_id": "p1",
+            "metadata": {"_interrupted": True},
+        },
+        "ok",
+    )
+    service.manager.run_sea_user = run_sea_user
+    return service, history
+
+
+def _emitting_run_sea_user(events_to_emit):
+    """渡されたイベントを Pulse の直通の口へ流すだけの run_sea_user。"""
+    def _run_sea_user(target, building_id, user_input,
+                      event_callback=None, **kwargs):
+        for event in events_to_emit:
+            event_callback(dict(event))
+    return _run_sea_user
+
+
+def _wait_until(condition, timeout=5.0) -> bool:
+    """ワーカースレッドの後処理を待つ (デッドライン付きポーリング)。"""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if condition():
+            return True
+        time.sleep(0.01)
+    return condition()
+
+
+def test_screen_events_alone_do_not_clear_the_interrupted_mark() -> None:
+    """画面イベント (say / streaming_chunk) は保存の証拠ではない。
+
+    画面へ流れただけの回に印を降ろすと、保存されていないのにボタンが消え、
+    続きを取る手段が失われる。印を動かせるのは保存完了イベントだけ。
+    設計: docs/issues/stream_completion_is_not_proof_of_persistence.md
+    """
+    service, history = _continue_service_with_real_pulse(_emitting_run_sea_user([
+        {"type": "streaming_chunk", "content": "続き", "persona_id": "p1", "pulse_id": "x"},
+        {"type": "say", "content": "続きです", "persona_id": "p1", "pulse_id": "x"},
+    ]))
+
+    list(service.continue_persona_message_stream("room:1"))
+
+    history.update_building_message.assert_not_called()
+
+
+def test_the_persistence_signal_clears_the_interrupted_mark() -> None:
+    """保存完了イベント (``speak_persisted``) を見た回だけ、印を降ろす。"""
+    service, history = _continue_service_with_real_pulse(_emitting_run_sea_user([
+        {"type": "streaming_chunk", "content": "続き", "persona_id": "p1", "pulse_id": "x"},
+        {"type": "speak_persisted", "message_id": "room:9",
+         "persona_id": "p1", "pulse_id": "x"},
+    ]))
+
+    list(service.continue_persona_message_stream("room:1"))
+
+    history.update_building_message.assert_called_once()
+    args, kwargs = history.update_building_message.call_args
+    assert args[1] == "room:1"
+    assert kwargs["metadata"]["_interrupted"] is False
+
+
+def test_the_mark_is_cleared_when_the_save_lands_after_the_reader_left() -> None:
+    """読み手が切断 → その後に保存の信号 → 印が降りている (Codex #4 の回帰)。
+
+    印を降ろす権威は Pulse を走らせたワーカースレッドにある。読み手側の
+    finally に権威を置いた旧配線では、切断の時点で信号がまだ来ていない回に
+    印が永久に残り、次の一押しで二つ目の続きが生まれた。
+    """
+    reader_left = threading.Event()
+
+    def _run_sea_user(target, building_id, user_input,
+                      event_callback=None, **kwargs):
+        event_callback({"type": "status", "content": "processing",
+                        "persona_id": "p1"})
+        # 読み手が去るまで生成を続け、去った後に保存が確定する回を模す。
+        assert reader_left.wait(timeout=5)
+        event_callback({"type": "speak_persisted", "message_id": "room:9",
+                        "persona_id": "p1", "pulse_id": "x"})
+
+    service, history = _continue_service_with_real_pulse(_run_sea_user)
 
     stream = service.continue_persona_message_stream("room:1")
     next(stream)      # 一行だけ受け取って
     stream.close()    # ブラウザを閉じる
+    reader_left.set()
+
+    assert _wait_until(lambda: history.update_building_message.called)
+    args, kwargs = history.update_building_message.call_args
+    assert args[1] == "room:1"
+    assert kwargs["metadata"]["_interrupted"] is False
+
+
+def test_the_mark_stays_when_the_reader_left_and_no_save_was_confirmed() -> None:
+    """読み手が去り、保存の信号が最後まで来なかった回は印を残す。
+
+    残した印はもう一度押せるだけで、降ろした印は戻らない — 分からないときは
+    ボタンが出続ける側へ倒す。
+    """
+    reader_left = threading.Event()
+    pulse_done = threading.Event()
+
+    def _run_sea_user(target, building_id, user_input,
+                      event_callback=None, **kwargs):
+        try:
+            event_callback({"type": "status", "content": "processing",
+                            "persona_id": "p1"})
+            assert reader_left.wait(timeout=5)
+            # 保存の信号は出さずに終わる (LLM エラー等)。
+        finally:
+            pulse_done.set()
+
+    service, history = _continue_service_with_real_pulse(_run_sea_user)
+
+    stream = service.continue_persona_message_stream("room:1")
+    next(stream)
+    stream.close()
+    reader_left.set()
+
+    assert pulse_done.wait(timeout=5)
+    time.sleep(0.05)  # ワーカーの finally が走り切る猶予
+    history.update_building_message.assert_not_called()
+
+
+def test_a_signal_from_another_pulse_does_not_clear_the_mark() -> None:
+    """別試行の信号では印を降ろさない (Codex #4 の照合)。
+
+    continue の ``_enrich_event`` は ``_active_sse_callbacks`` にも登録され、
+    そこには**別の Pulse** (会話開始の main_line 等) のイベントも流れ込む。
+    保存の信号をそちらで数えると、自分の続きは何も保存していないのに、
+    無関係な保存で印が降りてボタンが消える。
+    """
+    def _run_sea_user(target, building_id, user_input,
+                      event_callback=None, **kwargs):
+        # 自分の Pulse は信号を出さない。その間に、別の Pulse の保存完了が
+        # 建物の受け口 (_active_sse_callbacks) へ流れ込む。
+        service.manager._active_sse_callbacks["room"]({
+            "type": "speak_persisted", "message_id": "room:77",
+            "persona_id": "p1", "pulse_id": "other",
+        })
+
+    service, history = _continue_service_with_real_pulse(_run_sea_user)
+
+    list(service.continue_persona_message_stream("room:1"))
 
     history.update_building_message.assert_not_called()
 

@@ -82,9 +82,11 @@ class FakeRuntime:
     def _dump_llm_io(self, playbook_name, node_id, persona, messages, text):
         pass
 
-    def _emit_say(self, persona, building_id, text, pulse_id=None, metadata=None):
+    def _emit_say(self, persona, building_id, text, pulse_id=None, metadata=None,
+                  event_callback=None):
         self.emitted.append({
             "building_id": building_id, "text": text, "metadata": metadata,
+            "event_callback": event_callback,
         })
         return self.emit_result
 
@@ -170,6 +172,26 @@ def test_tell_user_composes_on_conversation_aspect_and_delivers():
     assert "記事の共有" in directive
     # ライン frame は後始末され、pulse ログは flush 済み
     assert runtime.flushed
+
+
+def test_tell_forwards_the_event_callback_for_the_persistence_signal():
+    """tell も assistant 発言を建物へ保存する経路の一つ (Codex #1)。
+
+    親 Beat の persona_context が contextvar で運ぶ event_callback を
+    ``_emit_say`` へ渡す — 保存が成功した回に保存完了イベント
+    (``speak_persisted``) を流すのは emit_say 内の共通の口で、ここで渡し
+    忘れるとこの経路だけ信号が欠ける。
+    """
+    from builtin_data.tools.tell import tell
+
+    manager, runtime, client = _make_env(["まはー、聞こえる？"])
+    events: List[Dict[str, Any]] = []
+    cb = events.append
+    with persona_context(PERSONA_ID, "/tmp/p1", manager=manager, event_callback=cb), \
+            _patched_resolve(runtime), _conversation_state(False):
+        tell(target="user")
+
+    assert runtime.emitted[0]["event_callback"] is cb
 
 
 def test_tell_persona_by_name_resolves_to_id():

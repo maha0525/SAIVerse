@@ -684,8 +684,12 @@ class SAIVerseManager(
         except Exception as exc:
             logging.exception("SEA auto run failed: %s", exc)
 
-    def run_sea_user(self, persona, building_id: str, user_input: str, metadata: Optional[Dict[str, Any]] = None, meta_playbook: Optional[str] = None, args: Optional[Dict[str, Any]] = None, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None, pre_spells: Optional[List[str]] = None) -> List[str]:
-        """Run user input via PulseController."""
+    def run_sea_user(self, persona, building_id: str, user_input: str, metadata: Optional[Dict[str, Any]] = None, meta_playbook: Optional[str] = None, args: Optional[Dict[str, Any]] = None, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None, pre_spells: Optional[List[str]] = None, pre_generation_check: Optional[Callable[[], Optional[Dict[str, Any]]]] = None) -> List[str]:
+        """Run user input via PulseController.
+
+        ``pre_generation_check``: 生成の開始前に Beat ロックの内側で走る再検査
+        (run_meta_user が実行)。イベント dict を返したら Pulse を開始しない。
+        """
         try:
             result = self.pulse_controller.submit_user(
                 persona_id=persona.persona_id,
@@ -696,6 +700,7 @@ class SAIVerseManager(
                 args=args,
                 event_callback=event_callback,
                 pre_spells=pre_spells,
+                pre_generation_check=pre_generation_check,
             )
             return result if result else []
         except LLMError:

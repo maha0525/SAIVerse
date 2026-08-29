@@ -211,6 +211,14 @@ def _build_node(monkeypatch, *, client, spell_loop, node_def=None):
     runtime.manager.occupants = {"b1": ["1"]}
     runtime._effective_building_id.return_value = "b1"
     runtime._emit_speak_start.return_value = "msg-1"
+    # 確定は三値の結果を返す (sea/runtime_emitters.py の SpeakFinalizeResult)。
+    # 素の MagicMock を返すと status が "saved" と一致せず、呼び出し元が
+    # 「確定できなかった」側 (= salvage 続行) に倒れてテストの前提が崩れる。
+    from sea.runtime_emitters import SpeakFinalizeResult
+    runtime._emit_speak_finalize.return_value = SpeakFinalizeResult(
+        status="saved",
+        building_msg={"message_id": "msg-1", "content": "こんにちは。"},
+    )
     runtime._default_temperature.return_value = 0.7
     runtime._get_cache_kwargs.return_value = {}
     runtime._store_memory.return_value = "mem-1"
@@ -503,6 +511,37 @@ def test_an_exception_after_the_finalize_does_not_settle_twice(monkeypatch):
     runtime._store_memory.assert_not_called()
 
 
+def test_a_failed_finalize_keeps_the_exit_cleanup_armed(monkeypatch):
+    """確定が「保存できなかった」を返した回は、確定済みの印を立てない (Codex #2)。
+
+    かつては確定を**呼んだだけ**で印を立てていた — 保存に失敗していても
+    Beat 死亡時の救済 (この出口の後始末) が「もう確定した」と誤認し、下書き行が
+    空のまま永久に残った。saved のときだけ印を立てれば、その後 Beat が死んだ
+    回に救済がもう一度確定を試みる。
+    """
+    from sea.runtime_emitters import SpeakFinalizeResult
+
+    client = _FakeStreamClient(chunks=["こんにちは。"])
+
+    async def _no_spells(**kwargs):
+        return kwargs["text"], kwargs["text"], 0
+
+    runtime, persona, node, events = _build_node(
+        monkeypatch, client=client, spell_loop=_no_spells,
+    )
+    runtime._emit_speak_finalize.return_value = SpeakFinalizeResult(
+        status="failed", error="db down",
+    )
+    # 確定 (失敗) の後に通る _dump_llm_io で Beat を落とす
+    runtime._dump_llm_io.side_effect = RuntimeError("boom after finalize")
+
+    with pytest.raises(LLMError):
+        asyncio.run(node({"_messages": [], "_pulse_id": "pl-1"}))
+
+    # 1 回目 = 通常確定 (失敗)、2 回目 = 出口の後始末による再試行。
+    assert runtime._emit_speak_finalize.call_count == 2
+
+
 def test_a_missing_draft_row_makes_the_exit_cleanup_a_no_op(monkeypatch):
     """下書き行をそもそも作れなかった回 — 出口の後始末は何もしない。"""
     client = _FakeStreamClient(call_exc=RuntimeError("api down"))
@@ -520,6 +559,31 @@ def test_a_missing_draft_row_makes_the_exit_cleanup_a_no_op(monkeypatch):
 
     runtime._emit_speak_finalize.assert_not_called()
     persona.history_manager.add_to_building_only.assert_not_called()
+
+
+def test_the_fallback_emit_carries_the_event_callback_for_the_signal(monkeypatch):
+    """下書き行を作れなかった回の fallback (_emit_say 直書き) も、保存完了
+    イベントの口 (event_callback) を運ぶ (Codex #1)。
+
+    信号の発火は emit_say 内の共通の口が行うので、ここで渡し忘れると
+    この救済経路で保存された発言だけ信号が欠ける。
+    """
+    client = _FakeStreamClient(chunks=["こんにちは。"])
+
+    async def _no_spells(**kwargs):
+        return kwargs["text"], kwargs["text"], 0
+
+    runtime, persona, node, events = _build_node(
+        monkeypatch, client=client, spell_loop=_no_spells,
+    )
+    # 下書き行の発番に失敗 → 正常完了時に _emit_say fallback が走る。
+    runtime._emit_speak_start.return_value = None
+
+    asyncio.run(node({"_messages": [], "_pulse_id": "pl-1"}))
+
+    runtime._emit_speak_finalize.assert_not_called()
+    runtime._emit_say.assert_called_once()
+    assert runtime._emit_say.call_args.kwargs["event_callback"] is not None
 
 
 def test_a_failing_cleanup_does_not_replace_the_original_exception(monkeypatch):

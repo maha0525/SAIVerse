@@ -282,6 +282,7 @@ class EmitSayAndCaptureTest(unittest.TestCase):
         self.assertEqual(state["_last_message_id"], "77")
         self.runtime._emit_say.assert_called_once_with(
             self.persona, "b1", "hello", pulse_id="pulse-1", metadata={"k": "v"},
+            event_callback=None,
         )
 
     def test_empty_metadata_becomes_none(self):

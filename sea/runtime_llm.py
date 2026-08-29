@@ -63,6 +63,64 @@ LOGGER = logging.getLogger(__name__)
 #: を出す。設計: docs/issues/user_utterance_path_failure_inventory.md
 INTERRUPTED_METADATA_KEY = "_interrupted"
 
+#: 「発言が世界に保存された」ことを運ぶイベントの型と、その唯一の発火口。
+#: 定義と発火条件は sea/runtime_emitters.py に一本化してある — 画面イベント
+#: (``say`` / ``streaming_chunk`` / ``streaming_complete``) は保存の証拠では
+#: なく、この信号だけが「建物履歴の行に本文が入った」を運ぶ。
+#: 設計: docs/issues/stream_completion_is_not_proof_of_persistence.md
+from .runtime_emitters import SPEAK_PERSISTED_EVENT_TYPE, notify_speak_persisted  # noqa: E402,F401
+
+
+def _finalize_speak_with_signal(
+    runtime: Any,
+    persona: Any,
+    building_id: str,
+    msg_id: str,
+    text: str,
+    *,
+    pulse_id: Optional[str],
+    extra_metadata: Optional[Dict[str, Any]],
+    final_sub_seq: Optional[int],
+    event_callback: Optional[Callable[[Dict[str, Any]], None]],
+) -> Any:
+    """placeholder を確定し、保存できた回だけ保存完了イベントを流す。
+
+    ``_emit_speak_finalize`` の三値の結果 (保存成功 / 対象行なし / 保存失敗) を
+    受け取り、「呼んだ = 保存できた」をやめる関門。保存に失敗した回と
+    対象行が無かった回は ERROR ログだけ残してイベントは流さない — 処理は
+    止めない (2026-08-29 設計裁定)。呼び出し元は戻り値の ``status`` を見て、
+    saved のときだけ「確定済み」(pipeline_finalized) に進める — missing /
+    failed で確定済みにすると、Beat 死亡時の救済 (placeholder salvage) が
+    「もう確定した」と誤認して二度と走らない (Codex #2)。
+
+    イベントの判定は**保存された本文** (正規化後に行へ入った content) の
+    非空で行う — 渡した ``text`` ではない (Codex #6)。マーカー・心内文の
+    除去後に空で確定した行は発言ではなく、共有判定 (retry の門番) も空行を
+    発言に数えない。ここで信号を流すと、発言が生まれていないのに続きの
+    生成の印が降り、続きを取る手段が消える。
+    """
+    result = runtime._emit_speak_finalize(
+        persona, building_id, msg_id, text,
+        pulse_id=pulse_id,
+        extra_metadata=extra_metadata,
+        final_sub_seq=final_sub_seq,
+        final_voice_text="",
+    )
+    status = getattr(result, "status", None)
+    if status == "saved":
+        # 発火条件 (行 id あり + 保存本文の非空) は共通の口が判定する。
+        notify_speak_persisted(
+            event_callback, getattr(result, "building_msg", None),
+            persona, pulse_id,
+        )
+    else:
+        LOGGER.error(
+            "[sea][pipeline] finalize did not persist the utterance "
+            "(msg=%s status=%s error=%s)",
+            msg_id, status, getattr(result, "error", None),
+        )
+    return result
+
 
 def _maybe_record_cache_storage(usage, persona_id: str | None, building_id: str | None) -> None:
     """UsageInfo に cache_storage 情報があれば独立レコードで計上する。"""
@@ -328,15 +386,20 @@ def _emit_say_and_capture(
     *,
     pulse_id: Optional[str],
     metadata: Optional[Dict[str, Any]] = None,
+    event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
 ):
     """``_emit_say`` して、書けた message_id を state に残す。
 
     後続ツールが新しい persona_context 配下に入っても最新の message_id を
     参照できるようにするため（``state["_last_message_id"]``）。
+
+    ``event_callback`` を渡すと、建物への保存が成功した回だけ保存完了
+    イベント (``speak_persisted``) が流れる (発火は emit_say 内の共通の口)。
     """
     bmsg = runtime._emit_say(
         persona, eff_bid, text, pulse_id=pulse_id,
         metadata=metadata if metadata else None,
+        event_callback=event_callback,
     )
     if isinstance(bmsg, dict):
         message_id = bmsg.get("message_id")
@@ -1725,7 +1788,10 @@ def _emit_bubble1_early(
             "pulse_id": pulse_id,
         })
     eff_bid = runtime._effective_building_id(persona, building_id)
-    runtime._emit_say(persona, eff_bid, text_before, pulse_id=pulse_id)
+    runtime._emit_say(
+        persona, eff_bid, text_before, pulse_id=pulse_id,
+        event_callback=event_callback,
+    )
     LOGGER.info(
         "[sea][spell] bubble1 emitted early (len=%d) — TTS will run in "
         "parallel with spell loop", len(text_before),
@@ -1970,16 +2036,21 @@ def _settle_interrupted_utterance(
     if msg_id:
         sub_seq += 1
         try:
-            runtime._emit_speak_finalize(
-                persona, building_id, msg_id, text or "",
+            _settle_result = _finalize_speak_with_signal(
+                runtime, persona, building_id, msg_id, text or "",
                 pulse_id=state.get("_pulse_id"),
                 extra_metadata=(
                     {INTERRUPTED_METADATA_KEY: True} if body else None
                 ),
                 final_sub_seq=sub_seq,
-                final_voice_text="",
+                event_callback=event_callback,
             )
-            state["_last_message_id"] = msg_id
+            # ここは救済の最終地点 — saved 以外でもこれ以上の再試行先は無い
+            # (失敗の記録は _finalize_speak_with_signal の ERROR ログ)。ただし
+            # 「最新の発言 id」だけは、保存できた回にしか進めない — 保存されて
+            # いない行を後続ツールに参照させない。
+            if getattr(_settle_result, "status", None) == "saved":
+                state["_last_message_id"] = msg_id
         except Exception:
             LOGGER.warning(
                 "[sea][pipeline] cancellation finalize raised; "
@@ -3735,6 +3806,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                             _emit_say_and_capture(
                                 runtime, persona, eff_bid, text, state,
                                 pulse_id=pulse_id, metadata=msg_metadata,
+                                event_callback=event_callback,
                             )
                             beat_said = True
                             beat_said_text = text
@@ -3781,6 +3853,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                         _emit_say_and_capture(
                             runtime, persona, eff_bid, text, state,
                             pulse_id=pulse_id, metadata=msg_metadata,
+                            event_callback=event_callback,
                         )
                         beat_said = True
                         beat_said_text = text
@@ -3912,7 +3985,8 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                             event_callback(_say_event)
 
                         runtime._emit_say(persona, eff_bid, _spell_emit_text, pulse_id=pulse_id,
-                                          metadata=_spell_msg_meta if _spell_msg_meta else None)
+                                          metadata=_spell_msg_meta if _spell_msg_meta else None,
+                                          event_callback=event_callback)
                         LOGGER.info(
                             "[sea][spell] Tool-mode: emitted merged spell text (len=%d, phase1_early=%s)",
                             len(_spell_emit_text), bool(_bubble1_emitted_early),
@@ -4253,16 +4327,21 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                             # voice-tts に空文字で finalize して close する。
                             if pipeline_msg_id and not pipeline_finalized:
                                 pipeline_sub_seq += 1
-                                runtime._emit_speak_finalize(
-                                    persona,
+                                _sf_result = _finalize_speak_with_signal(
+                                    runtime, persona,
                                     pipeline_eff_bid,
                                     pipeline_msg_id, text,
                                     pulse_id=state.get("_pulse_id"),
                                     extra_metadata=None,
                                     final_sub_seq=pipeline_sub_seq,
-                                    final_voice_text="",
+                                    event_callback=event_callback,
                                 )
-                                pipeline_finalized = True
+                                # saved のときだけ「確定済み」。missing / failed
+                                # で立てると、Beat 死亡時の救済 (placeholder
+                                # salvage) が誤認して二度と走らない (Codex #2)。
+                                pipeline_finalized = (
+                                    getattr(_sf_result, "status", None) == "saved"
+                                )
                         else:
                             pulse_id = state.get("_pulse_id")
 
@@ -4308,18 +4387,23 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
 
                             if pipeline_msg_id and not pipeline_finalized:
                                 pipeline_sub_seq += 1
-                                runtime._emit_speak_finalize(
-                                    persona, pipeline_eff_bid, pipeline_msg_id, text,
+                                _sf_result = _finalize_speak_with_signal(
+                                    runtime, persona, pipeline_eff_bid, pipeline_msg_id, text,
                                     pulse_id=pulse_id,
                                     extra_metadata=_spell_msg_meta_ns if _spell_msg_meta_ns else None,
                                     final_sub_seq=pipeline_sub_seq,
-                                    final_voice_text="",
+                                    event_callback=event_callback,
                                 )
-                                pipeline_finalized = True
-                                state["_last_message_id"] = pipeline_msg_id
+                                # saved のときだけ「確定済み」+ 最新 id を前進。
+                                # missing / failed で立てると Beat 死亡時の救済が
+                                # 誤認して走らない (Codex #2)。
+                                if getattr(_sf_result, "status", None) == "saved":
+                                    pipeline_finalized = True
+                                    state["_last_message_id"] = pipeline_msg_id
                                 LOGGER.info(
-                                    "[sea][pipeline] Normal-stream spell+finalize: msg=%s final_seq=%d",
+                                    "[sea][pipeline] Normal-stream spell+finalize: msg=%s final_seq=%d status=%s",
                                     pipeline_msg_id, pipeline_sub_seq,
+                                    getattr(_sf_result, "status", None),
                                 )
 
                         # state["last"] が後段の memorize ノードで SAIMemory に
@@ -4396,18 +4480,23 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                             # おり、 finalize hook では ``final_voice_text=""`` で
                             # 「stream close + wav 保存」 のみ依頼する。
                             pipeline_sub_seq += 1
-                            runtime._emit_speak_finalize(
-                                persona, pipeline_eff_bid, pipeline_msg_id, text,
+                            _sf_result = _finalize_speak_with_signal(
+                                runtime, persona, pipeline_eff_bid, pipeline_msg_id, text,
                                 pulse_id=pulse_id,
                                 extra_metadata=msg_metadata if msg_metadata else None,
                                 final_sub_seq=pipeline_sub_seq,
-                                final_voice_text="",
+                                event_callback=event_callback,
                             )
-                            pipeline_finalized = True
-                            state["_last_message_id"] = pipeline_msg_id
+                            # saved のときだけ「確定済み」+ 最新 id を前進。
+                            # missing / failed で立てると Beat 死亡時の救済
+                            # (placeholder salvage) が誤認して走らない (Codex #2)。
+                            if getattr(_sf_result, "status", None) == "saved":
+                                pipeline_finalized = True
+                                state["_last_message_id"] = pipeline_msg_id
                             LOGGER.info(
-                                "[sea][pipeline] Normal-stream finalize: msg=%s final_seq=%d",
+                                "[sea][pipeline] Normal-stream finalize: msg=%s final_seq=%d status=%s",
                                 pipeline_msg_id, pipeline_sub_seq,
+                                getattr(_sf_result, "status", None),
                             )
                         else:
                             # Defensive fallback: _emit_speak_start に失敗して
@@ -4419,6 +4508,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                             _emit_say_and_capture(
                                 runtime, persona, eff_bid, text, state,
                                 pulse_id=pulse_id, metadata=msg_metadata,
+                                event_callback=event_callback,
                             )
                             beat_said = True
                             beat_said_text = text
@@ -4534,6 +4624,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                         _emit_say_and_capture(
                             runtime, persona, eff_bid, text, state,
                             pulse_id=pulse_id, metadata=msg_metadata,
+                            event_callback=event_callback,
                         )
                         beat_said = True
                         beat_said_text = text

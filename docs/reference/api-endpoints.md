@@ -5,7 +5,7 @@
 
 REST API 全エンドポイントの一覧（自動生成）。すべて `/api` 配下にマウントされる。
 
-**エンドポイント数**: 349（tag グループ: 25）
+**エンドポイント数**: 350（tag グループ: 25）
 
 ## addon
 
@@ -81,6 +81,7 @@ REST API 全エンドポイントの一覧（自動生成）。すべて `/api` 
 |---|---|---|
 | POST | `/api/chat/continue` | 途中で終わったペルソナの発言の、続きだけを起こす。 |
 | GET | `/api/chat/history` |  |
+| GET | `/api/chat/message-outcome` | 発言がサーバーに残ったかを、送信時の ``client_message_id`` で尋ねる。 |
 | POST | `/api/chat/permission-response` | Respond to a playbook execution permission request. |
 | GET | `/api/chat/persona/{persona_id}/avatar` |  |
 | POST | `/api/chat/preview` | Preview the context that would be sent to the LLM, without executing. |

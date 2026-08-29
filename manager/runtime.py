@@ -68,12 +68,17 @@ _OUTCOME_EVENT_TYPES = frozenset({
     "info",
 })
 
-#: ペルソナが実際に言葉を出したと数えるイベントの型。
+#: 「ペルソナの発言が世界に保存された」ことを運ぶイベントの型。
 #:
-#: 上の ``_OUTCOME_EVENT_TYPES`` はエラー通知も含む — 「出口が塞がっていない」
-#: を見る側の判定としては正しいが、「新しい発言が生まれたか」には使えない。
-#: 続きの生成のように「生まれたときだけ状態を進めたい」側はこちらを見る。
-_SPEECH_EVENT_TYPES = frozenset({"say", "streaming_chunk"})
+#: 上の ``_OUTCOME_EVENT_TYPES`` は画面の問い (ユーザーに何かが届いたか) で、
+#: エラー通知も含む。こちらは保存の問い — 続きの生成のように「発言が本当に
+#: 保存されたときだけ状態を進めたい」側はこちらを見る。画面イベント
+#: (``say`` / ``streaming_chunk``) は保存の証拠ではないので、ここでは見ない。
+#: 発火元は sea/runtime_emitters.py の ``notify_speak_persisted`` (唯一の
+#: 発火口) — 建物履歴の行に本文が入った後にだけ流れる。二つの問いを
+#: 混ぜないこと。
+#: 設計: docs/issues/stream_completion_is_not_proof_of_persistence.md
+from sea.runtime_emitters import SPEAK_PERSISTED_EVENT_TYPE as _PERSISTED_EVENT_TYPE  # noqa: E402
 
 #: 本文を運ぶ型。中身が空なら画面には何も出ていないので、届いたとは数えない。
 _CONTENT_BEARING_TYPES = frozenset({"say", "streaming_chunk"})
@@ -128,28 +133,20 @@ def _outcome_reached(outcome_seen: Dict[str, Any]) -> bool:
 
 
 def _note_speech(spoke: Dict[str, Any], event: Any) -> None:
-    """「ペルソナが実際に言葉を出したか」を、イベント 1 件分だけ進める。
+    """「ペルソナの発言が保存されたか」を、イベント 1 件分だけ進める。
 
-    ``_note_outcome`` と同じ理由で断片は取り消されうる。ここを取り消さないと、
-    引っ込めた断片だけで「喋った」と数え、続きの生成の印を降ろしてしまう
-    (= 続きを取る手段が消える)。
+    見るのは保存完了イベントだけ。かつては画面イベント (``say`` /
+    ``streaming_chunk``) で立てていたが、それは「画面へ流れた」の証拠であって
+    「保存された」の証拠ではない — その材料で続きの生成の印を降ろすと、保存
+    されていないのにボタンが消える回と、保存されたのにボタンが残る回の両方が
+    生まれた。保存完了イベントは finalize の成功後にだけ流れ、撤回されない
+    ので、断片の取り消し (``streaming_discard``) の追跡も要らなくなった。
+    設計: docs/issues/stream_completion_is_not_proof_of_persistence.md
     """
     if not isinstance(event, dict):
         return
-    etype = event.get("type")
-    pending: Dict[str, bool] = spoke.setdefault("pending", {})
-    if etype == "streaming_discard":
-        pending.pop(_stream_key(event), None)
-        spoke["value"] = bool(spoke.get("said")) or bool(pending)
+    if event.get("type") != _PERSISTED_EVENT_TYPE:
         return
-    if etype not in _SPEECH_EVENT_TYPES:
-        return
-    if not str(event.get("content") or "").strip():
-        return
-    if etype == "streaming_chunk":
-        pending[_stream_key(event)] = True
-    else:
-        spoke["said"] = True
     spoke["value"] = True
 
 class RuntimeService(
@@ -983,6 +980,8 @@ class RuntimeService(
     def _stream_persona_pulse(
         self, building_id: str, persona: Any, user_input: str,
         spoke: Optional[Dict[str, bool]] = None,
+        on_saved: Optional[Any] = None,
+        pre_generation_check: Optional[Any] = None,
     ) -> Iterator[str]:
         """1 体のペルソナの Pulse を起こし、その NDJSON イベントを流す。
 
@@ -990,11 +989,22 @@ class RuntimeService(
         を使うが、**ユーザー発言の永続化は行わない** — 発言はもう履歴にあるので、
         ここでもう一度書くと同じ発言が二度載る。
 
-        ``spoke`` を渡すと、ペルソナが実際に言葉を出したときだけ
-        ``spoke["value"]`` が ``True`` になる。呼び出し元が「走らせた」と
-        「言葉が生まれた」を取り違えないための報告口で、``outcome_seen`` とは
-        別物 — あちらはエラー通知も「出口が塞がっていない」として数えるので、
-        「新しい発言ができたか」の判定には使えない。
+        ``spoke`` を渡すと、**この呼び出しが起こした Pulse** の発言が世界に
+        保存されたとき (保存完了イベントを見たとき) だけ ``spoke["value"]`` が
+        ``True`` になる。数えるのは Pulse へ直接渡した口に届いた信号だけ —
+        同じ関数は ``_active_sse_callbacks`` にも登録され、そちらには**別の
+        Pulse** (会話開始の main_line 等) のイベントも流れ込むので、そこで
+        数えると別試行の保存で状態が進む。呼び出し元が「走らせた」と「発言が
+        保存された」を取り違えないための報告口で、``outcome_seen`` とは別物 —
+        あちらは画面の問いで、エラー通知も「出口が塞がっていない」として数える。
+
+        ``on_saved`` を渡すと、Pulse が終わった時点で保存の信号を見ていた場合に
+        **ワーカースレッドで** 1 回呼ぶ。読み手 (この generator の消費者) が
+        切断していても呼ばれる — 「保存成功が確定した側」に権威を置くための口
+        (docs/issues/stream_completion_is_not_proof_of_persistence.md)。
+
+        ``pre_generation_check`` は生成の開始前に Beat ロックの内側で走る
+        再検査 (sea/runtime.py の run_meta_user 参照)。
         """
         response_queue: queue.Queue = queue.Queue()
         stop_event = threading.Event()
@@ -1014,9 +1024,14 @@ class RuntimeService(
                             or "/api/static/builtin_icons/host.png"
                         )
             _note_outcome(outcome_seen, event)
+            response_queue.put(event)
+
+        def _pulse_event(event):
+            # この Pulse へ直接渡す口。保存の信号 (spoke) はここでだけ数える —
+            # _active_sse_callbacks 経由 (= 別の Pulse のイベント) では数えない。
             if spoke is not None:
                 _note_speech(spoke, event)
-            response_queue.put(event)
+            _enrich_event(event)
 
         self.manager._active_sse_callbacks[building_id] = _enrich_event
 
@@ -1024,7 +1039,8 @@ class RuntimeService(
             try:
                 self.manager.run_sea_user(
                     persona, building_id, user_input,
-                    event_callback=_enrich_event,
+                    event_callback=_pulse_event,
+                    pre_generation_check=pre_generation_check,
                 )
             except LLMError as e:
                 logging.error("pulse worker LLM error: %s", e, exc_info=True)
@@ -1055,6 +1071,20 @@ class RuntimeService(
                         "error_code": "no_response",
                         "content": "返事が生まれませんでした。",
                     })
+                # 保存の信号を見た Pulse の後処理 (続きの生成の印降ろし等)。
+                # 読み手の生存とは無関係に、Pulse を走らせたこのスレッドが呼ぶ —
+                # 読み手側 (generator の finally) に置くと、切断後に保存が確定
+                # した回に永久に呼ばれない。ストリームを閉じる前に呼ぶことで、
+                # 読み手が終端を見た時点で状態は更新済みになる。
+                if spoke is not None and spoke.get("value") and on_saved is not None:
+                    try:
+                        on_saved()
+                    except Exception:
+                        logging.exception(
+                            "[runtime] the after-save hook failed "
+                            "(building=%s persona=%s)",
+                            building_id, getattr(persona, "persona_id", None),
+                        )
                 response_queue.put(None)
 
         threading.Thread(target=worker, daemon=True).start()
@@ -1137,44 +1167,35 @@ class RuntimeService(
             }, ensure_ascii=False) + "\n"
             return
 
-        spoke: Dict[str, bool] = {"value": False}
-        disconnected = False
-        try:
-            yield from self._stream_persona_pulse(
-                building_id, persona, self.CONTINUE_INSTRUCTION, spoke=spoke,
+        # 印を降ろす権威は**保存成功が確定した側** (Pulse を走らせたワーカー
+        # スレッド) に置く。読み手 (この generator の消費者 = ブラウザ) の
+        # finally に置くと、読み手が切断した後に保存の信号が届いた回に印が
+        # 永久に残り、次の一押しで二つ目の続きが生まれる (Codex #4 — この束が
+        # 塞ごうとした穴そのもの)。照合は二重: (1) 信号はこの呼び出しが起こした
+        # Pulse の直通の口でだけ数える (別試行の信号では降ろさない —
+        # _stream_persona_pulse の spoke 参照)、(2) 降ろす対象はこの閉包が
+        # 束縛した元の発言 (message_id) だけ。
+        def _clear_interrupted_mark():
+            # 続きの保存完了イベントを見た。元の発言はもう「続きを待っている」
+            # 状態ではないので、印を降ろしてボタンを消す (中断があった事実は、
+            # 続けて並ぶ 2 つの発言そのものが残す)。**印の書き込みに失敗しても
+            # 本体の結果は変えない** — 印が残った回はもう一度押せるだけで、
+            # 害にならない (失敗は _stream_persona_pulse 側が記録する)。
+            persona.history_manager.update_building_message(
+                building_id, str(message_id),
+                metadata={**(target.get("metadata") or {}), "_interrupted": False},
             )
-        except GeneratorExit:
-            # 読み手が去った。**ここで印を降ろしてはいけない** — ``spoke`` が立つのは
-            # 最初の一片が画面へ流れた時点で、続きが保存し終えた時点ではない。降ろすと
-            # 「保存されていないのにボタンが消える」ことが起こり、続きを取る手段が
-            # 消える。残した印はもう一度押せるだけなので、そちらの害の方が小さい。
-            #
-            # 逆に「保存されたのに印が残る」回は残る (押すと二つ目の続きが生まれる)。
-            # これは**保存できたことを表す信号が無い**という根の症状で、そちらを
-            # 直さない限りどちらへ倒しても穴が開く。設計案件として切り出してある:
-            # docs/issues/user_utterance_path_failure_inventory.md
-            disconnected = True
-            raise
-        finally:
-            if spoke["value"] and not disconnected:
-                # 続きが生まれたので、元の発言はもう「続きを待っている」状態では
-                # ない。印を降ろしてボタンを消す (中断があった事実は、続けて並ぶ
-                # 2 つの発言そのものが残す)。**印の書き込みに失敗しても本体の結果
-                # は変えない** — 印が残った回はもう一度押せるだけで、害にならない。
-                try:
-                    persona.history_manager.update_building_message(
-                        building_id, str(message_id),
-                        metadata={**(target.get("metadata") or {}), "_interrupted": False},
-                    )
-                except Exception:
-                    logging.exception(
-                        "[runtime] failed to clear the interrupted mark (msg=%s)",
-                        message_id,
-                    )
-            # 続きが一言も生まれていない回 (LLM エラー等) は印を残す。ここで降ろすと
-            # ボタンが消え、二度目は ``not_interrupted`` の関所に「この発言は途中で
-            # 終わっていないため、続きはありません」で拒まれる — 途中で終わって
-            # いるのに、そう言うことになる。
+
+        spoke: Dict[str, bool] = {"value": False}
+        yield from self._stream_persona_pulse(
+            building_id, persona, self.CONTINUE_INSTRUCTION, spoke=spoke,
+            on_saved=_clear_interrupted_mark,
+        )
+        # 保存の信号が来なかった回は印が残る (ボタンが出続ける側)。続きが
+        # 一言も生まれなかった回 (LLM エラー等) と、保存が失敗した回がそこに
+        # 落ちる。降ろしてしまうとボタンが消え、二度目は ``not_interrupted``
+        # の関所に「この発言は途中で終わっていないため、続きはありません」で
+        # 拒まれる — 途中で終わっているのに、そう言うことになる。
 
     def retry_user_message_stream(self, message_id: str) -> Iterator[str]:
         """既にある自分の発言に対して、応答だけをやり直す。
@@ -1225,10 +1246,47 @@ class RuntimeService(
             }, ensure_ascii=False) + "\n"
             return
 
+        # 生成の開始直前の再検査 (Codex #5a)。API route の門番から生成の開始
+        # までの間に、別の生成が応答を保存し終えている競合の窓がある。生成を
+        # 直列化している既存の排他 = Beat ロック (sea/beat_gate.py、persona 単位)
+        # の内側 — run_meta_user がロックを取った直後・副作用ゼロの地点 — で
+        # 同じ共有判定をもう一度引き、後続の assistant 発言が既に居たら Pulse を
+        # 開始せず正直なイベントを流す。新しい claim/lock は作らない。
+        # 判定不能 (unavailable) は通さない (fail-closed) — 共有判定の docstring
+        # のとおり、読めなかった回に「応答なし」と断定すると、既に答えた発言へ
+        # もう一度応答を起こす扉が開く。
+        def _refuse_if_already_replied() -> Optional[Dict[str, Any]]:
+            from database.building_messages import assistant_reply_exists_after
+            lookup, has_reply = assistant_reply_exists_after(
+                getattr(self, "SessionLocal", None), building_id, str(message_id),
+            )
+            if lookup == "found" and not has_reply:
+                return None
+            if lookup == "found":
+                return {
+                    "type": "error",
+                    "error_code": "already_replied",
+                    "content": "この発言の後に既にペルソナの発言があります。",
+                }
+            if lookup == "not_found":
+                # 門番を通った後に発言が消えた (取り下げ等)。無い発言への応答は
+                # 起こさない。
+                return {
+                    "type": "error",
+                    "error_code": "message_not_found",
+                    "content": "この発言は記録に残っていません。もう一度送ってください。",
+                }
+            return {
+                "type": "error",
+                "error_code": "history_unavailable",
+                "content": "応答の有無をいま確認できません。少し待ってもう一度お試しください。",
+            }
+
         # 応答は最初の 1 体に絞る。全員に振り直すと、既に答えた相手まで
         # もう一度喋ることになる。
         yield from self._stream_persona_pulse(
             building_id, responding_personas[0], "",
+            pre_generation_check=_refuse_if_already_replied,
         )
 
     def withdraw_user_message(self, message_id: str) -> Dict[str, Any]:

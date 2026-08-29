@@ -1586,7 +1586,9 @@ export default function Home() {
 
     // やり直しても結果が変わらない終わり方。ここに載る札のときは「再送」を
     // 出さない — 押しても同じ結果しか返らない操作を勧めることになるから。
-    const RETRY_CHANGES_NOTHING = new Set(['no_responder']);
+    // already_replied: サーバーの門番が「この発言には既に応答がある」と
+    // 判定した回。応答がある限り何度押しても同じ拒否が返る。
+    const RETRY_CHANGES_NOTHING = new Set(['no_responder', 'already_replied']);
 
     // 心拍の締切。サーバーのストリーム書き手 (manager/runtime.py の
     // response_queue.get(timeout=2.0)) は、キューが空でも最大 2 秒間隔で
@@ -1671,6 +1673,17 @@ export default function Home() {
     const consumeReplyStream = async (
         res: Response,
         source: 'send' | 'continue' | 'retry',
+        // 送信の入口だけが渡す復旧材料。通信が「届いたか分からない」形で切れた
+        // とき (出口 7)、client_message_id でサーバーに保存結果を問い合わせ、
+        // 分かった結果に応じて復旧導線 (再送 / 履歴再取得 / 入力欄への差し戻し)
+        // へ合流するのに使う。
+        // 設計: docs/issues/unknown_send_outcome_has_no_recovery_path.md
+        sendContext?: {
+            clientMessageId: string;
+            tempId: string;
+            content: string;
+            attachments: FileAttachment[];
+        },
     ) => {
         // 発言が届いたことをサーバーから聞けたか。通信が途中で切れたとき、
         // 「届いたか分からない」(出口 7) と「届いたが返事が無かった」(出口 3) を
@@ -2247,15 +2260,102 @@ export default function Home() {
         } catch (error) {
             console.error(error);
             if (source === 'send' && !landedMessageId) {
-                // 出口 7: サーバーに届いたかどうか、こちら側からは原理的に
-                // 分からない。分かった顔をせず、そのまま伝える。
-                setMessages(prev => [...prev, {
-                    role: 'system',
-                    content: '通信が途中で切れました。発言が届いたかどうかは分かりません。履歴を確認してください。',
-                    isError: true,
-                    errorCode: 'unknown_outcome',
-                    timestamp: new Date().toISOString(),
-                }]);
+                // 出口 7: ストリームからは届いたかどうか分からないまま切れた。
+                // まずサーバーに保存結果を自動で問い合わせる — 読み取りのみで
+                // LLM を使わないので自動でよい (2026-08-25 裁定「追加の推論は
+                // ボタンの後ろ」の対象外)。分かったことだけを言い、分からない
+                // まま (照会失敗・status unknown) なら従来の正直な文言に戻す。
+                let resolved = false;
+                if (sendContext) {
+                    try {
+                        const q = await fetch(
+                            `/api/chat/message-outcome?client_message_id=${encodeURIComponent(sendContext.clientMessageId)}`,
+                        );
+                        if (q.ok) {
+                            const outcome: {
+                                status: string;
+                                message_id?: string | null;
+                                has_reply?: boolean | null;
+                            } = await q.json();
+                            console.log('[unknown_outcome] server lookup:', outcome);
+                            if (outcome.status === 'found' && outcome.message_id) {
+                                const serverId = outcome.message_id;
+                                // 楽観表示の仮 id をサーバーの id に差し替える
+                                // (user_message_id イベントが来なかった回の代わり)。
+                                setMessages(prev => prev.map(m => (
+                                    m.id === sendContext.tempId ? { ...m, id: serverId } : m
+                                )));
+                                if (outcome.has_reply) {
+                                    // 発言は届いていて、応答も付いている。切れたのは
+                                    // 配信だけなので、履歴を読み直して応答を画面に出す。
+                                    await fetchHistory();
+                                    setMessages(prev => [...prev, {
+                                        role: 'system',
+                                        content: '通信は途中で切れましたが、発言は届いていて、応答も付いています。最新の履歴を読み込みました。',
+                                        isInfo: true,
+                                        timestamp: new Date().toISOString(),
+                                    }]);
+                                } else {
+                                    // 発言は届いているが、応答はまだ無い — 出口 3 と
+                                    // 同じ事実なので同じ導線 (「再送」) に合流する。
+                                    markRetryable(serverId);
+                                    setMessages(prev => [...prev, {
+                                        role: 'system',
+                                        content: '通信は途中で切れましたが、発言は届いています。返事はまだ生まれていません。',
+                                        isError: true,
+                                        errorCode: 'no_response',
+                                        timestamp: new Date().toISOString(),
+                                    }]);
+                                }
+                                resolved = true;
+                            } else if (outcome.status === 'not_found') {
+                                // 発言はサーバーに残っていない — 出口 4 と同じ形で
+                                // 手元へ返す (吹き出しを引っ込めて、本文を入力欄へ)。
+                                setMessages(prev => prev.filter(m => m.id !== sendContext.tempId));
+                                setInputValue(prev => (
+                                    prev.trim() ? `${prev}\n${sendContext.content}` : sendContext.content
+                                ));
+                                // 添付も一緒に戻す (出口 4 と同じ理由)。送っている間に
+                                // 足した下書きの添付と、戻ってきた元の添付は**両方残す**
+                                // — 片方を優先すると、もう片方が黙って消える (Codex #7)。
+                                // 同じ添付が両方に居る回は id (添付ごとに一意) で弾く。
+                                // 並びは本文と同じで、下書きが先・戻ってきたものが後。
+                                if (sendContext.attachments.length > 0) {
+                                    setAttachments(prev => {
+                                        const prevIds = new Set(prev.map(a => a.id));
+                                        const restored = sendContext.attachments.filter(a => !prevIds.has(a.id));
+                                        return [...prev, ...restored];
+                                    });
+                                }
+                                requestAnimationFrame(() => adjustTextareaHeight());
+                                setMessages(prev => [...prev, {
+                                    role: 'system',
+                                    content: 'この発言はサーバーに残っていません。本文は入力欄に戻したので、もう一度送ってください。',
+                                    isError: true,
+                                    errorCode: 'message_not_found',
+                                    timestamp: new Date().toISOString(),
+                                }]);
+                                resolved = true;
+                            }
+                            // status 'unknown' はここでは扱わない — 下の正直な
+                            // 文言に落とす。「分からない」を潰さない。
+                        }
+                    } catch (lookupError) {
+                        // 問い合わせ自体が失敗 = 分からないまま。下の文言に落とす。
+                        console.log('[unknown_outcome] server lookup failed:', lookupError);
+                    }
+                }
+                if (!resolved) {
+                    // サーバーに届いたかどうか、こちら側からは分からない。
+                    // 分かった顔をせず、そのまま伝える。
+                    setMessages(prev => [...prev, {
+                        role: 'system',
+                        content: '通信が途中で切れました。発言が届いたかどうかは分かりません。履歴を確認してください。',
+                        isError: true,
+                        errorCode: 'unknown_outcome',
+                        timestamp: new Date().toISOString(),
+                    }]);
+                }
             } else {
                 setMessages(prev => [...prev, {
                     role: 'system',
@@ -2466,7 +2566,12 @@ export default function Home() {
             // D-1 マーカーや滞在ユーザー表示をサーバの新しい現在地に追従させる。
             setMoveTrigger(prev => prev + 1);
 
-            await consumeReplyStream(res, 'send');
+            await consumeReplyStream(res, 'send', {
+                clientMessageId,
+                tempId,
+                content: userMsg.content,
+                attachments: currentAttachments,
+            });
         } catch (error) {
             console.error(error);
             setMessages(prev => [...prev, {
@@ -2519,7 +2624,47 @@ export default function Home() {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ message_id: messageId }),
             });
-            if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+            if (!res.ok) {
+                // サーバーの門番の拒否 (409 already_replied / 503 など) は
+                // 理由付きの JSON で届く。正直な文言をそのまま画面に出す —
+                // 一般化した「やり直せませんでした」に潰すと、待てば直る回と
+                // 押しても無駄な回の区別がユーザーに渡らない。
+                let detailCode: string | undefined;
+                let detailMessage: string | undefined;
+                try {
+                    const body = await res.json();
+                    if (body && typeof body.detail === 'object' && body.detail !== null) {
+                        detailCode = body.detail.code;
+                        detailMessage = body.detail.message;
+                    }
+                } catch { /* JSON でない本文は既定の文言に落とす */ }
+                if (detailCode === 'already_replied') {
+                    // 既に応答が付いている。やり直しは何度押しても拒否される
+                    // ので、ボタンは戻さない。その応答を画面がまだ持っていない
+                    // 可能性があるので履歴を読み直す。
+                    await fetchHistory();
+                    setMessages(prev => [...prev, {
+                        role: 'system',
+                        content: detailMessage || 'この発言には既にペルソナの応答があります。最新の履歴を読み込みました。',
+                        isInfo: true,
+                        timestamp: new Date().toISOString(),
+                    }]);
+                    await finishReplyCycle();
+                    return;
+                }
+                restoreAffordance();
+                setMessages(prev => [...prev, {
+                    role: 'system',
+                    content: detailMessage || (endpoint === 'continue'
+                        ? '続きを起こせませんでした。'
+                        : 'やり直せませんでした。'),
+                    isError: true,
+                    errorCode: detailCode || 'action_failed',
+                    timestamp: new Date().toISOString(),
+                }]);
+                await finishReplyCycle();
+                return;
+            }
             const outcome = await consumeReplyStream(res, endpoint);
             if (!outcome.replied) {
                 restoreAffordance(

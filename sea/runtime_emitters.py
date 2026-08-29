@@ -2,11 +2,97 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, Dict, Optional
+from dataclasses import dataclass
+from typing import Any, Callable, Dict, Optional
 
 from saiverse.marker_parser import strip_marks
 
 LOGGER = logging.getLogger(__name__)
+
+#: 「ペルソナの発言が世界に保存された」ことを運ぶイベントの型。
+#:
+#: 画面の完了 (``streaming_complete`` / ``say``) とは別の信号 — あちらは
+#: 「画面へ流れた」の合図で、保存の証拠ではない。このイベントは建物履歴の
+#: 行に本文が入った後にだけ流れ、保存された行の id を運ぶ。受け手
+#: (manager/runtime.py の続きの生成の印降ろし) は、この信号が来なかった回は
+#: 印を残す側へ倒れる。
+#: 設計: docs/issues/stream_completion_is_not_proof_of_persistence.md
+SPEAK_PERSISTED_EVENT_TYPE = "speak_persisted"
+
+
+def notify_speak_persisted(
+    event_callback: Optional[Callable[[Dict[str, Any]], None]],
+    building_msg: Optional[Dict[str, Any]],
+    persona: Any,
+    pulse_id: Optional[str],
+) -> None:
+    """保存が成功した assistant 発言の、保存完了イベントの唯一の発火口。
+
+    assistant の発言を建物履歴に保存する経路は複数ある (下書き行の確定 /
+    ``emit_say`` / ``emit_speak`` / tell ツール)。信号の条件を経路ごとに
+    書き分けると必ず漏れるので、判定はここに一本化する:
+
+    - ``building_msg`` に DB 採番の ``message_id`` が付いている
+      (= insert / update が実際に通った。``HistoryManager`` は失敗時に
+      id 無しの dict を返すことがあるため、dict の有無では判定しない)。
+    - **保存された本文** (正規化後に行へ入った content) が空でない。
+      正規化前のテキストで判定すると、除去後に空で確定した行 (発言では
+      ない) にまで「発言が保存された」の信号が流れる (Codex #6)。
+    """
+    if event_callback is None or not isinstance(building_msg, dict):
+        return
+    message_id = building_msg.get("message_id")
+    content = str(building_msg.get("content") or "")
+    if not message_id or not content.strip():
+        return
+    try:
+        event_callback({
+            "type": SPEAK_PERSISTED_EVENT_TYPE,
+            "message_id": str(message_id),
+            "persona_id": getattr(persona, "persona_id", None),
+            "pulse_id": pulse_id,
+        })
+    except Exception:
+        LOGGER.warning(
+            "notify_speak_persisted: could not deliver the persistence signal "
+            "(msg=%s)", message_id, exc_info=True,
+        )
+
+
+@dataclass
+class SpeakFinalizeResult:
+    """``emit_speak_finalize`` の三値の結果。
+
+    「呼んだ = 保存できた」をやめるための器 (2026-08-29 設計裁定)。呼び出し元は
+    ``status`` で三つを区別する:
+
+    - ``"saved"``: 建物履歴の行に本文が入った。``building_msg`` に確定後の行。
+    - ``"missing"``: 更新対象の placeholder 行が見つからなかった。
+    - ``"failed"``: 保存に失敗した。``error`` に例外を写す。
+
+    ``status`` は**建物履歴の行の永続化の成否だけ**で決まる (2026-08-29 裁定)。
+    ペルソナ履歴・gateway 配信の失敗は ERROR ログに残るが saved を覆さない。
+
+    例外は上へ投げない — 結果型で返し、処理は止めない。
+    設計: docs/issues/stream_completion_is_not_proof_of_persistence.md
+    """
+
+    status: str
+    building_msg: Optional[Dict[str, Any]] = None
+    error: Optional[str] = None
+
+    @property
+    def saved_message_id(self) -> Optional[str]:
+        """保存できた回の建物メッセージ id。保存できていなければ None。
+
+        保存された本文 (正規化後に行へ入った content) は ``building_msg``
+        が運ぶ — 保存完了イベントの発火判定 (:func:`notify_speak_persisted`)
+        はその非空を見る (Codex #6)。
+        """
+        if self.status == "saved" and isinstance(self.building_msg, dict):
+            mid = self.building_msg.get("message_id")
+            return str(mid) if mid else None
+        return None
 
 
 class RuntimeEmitters:
@@ -23,6 +109,7 @@ class RuntimeEmitters:
         pulse_id: Optional[str] = None,
         record_history: bool = True,
         extra_metadata: Optional[Dict[str, Any]] = None,
+        event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> Optional[Dict[str, Any]]:
         msg = {"role": "assistant", "content": text, "persona_id": persona.persona_id}
         # pulse_id は messages.pulse_id 専用カラムに直接書く (Phase 2.5, 2026-05-01)。
@@ -88,6 +175,9 @@ class RuntimeEmitters:
                 self.runtime.manager.gateway_handle_ai_replies(building_id, persona, [building_content])
             except Exception:
                 LOGGER.exception("Failed to emit speak message")
+        # 保存完了イベント: 建物の行に本文が入った回だけ流れる (判定は
+        # notify_speak_persisted に一本化。message_id 無し = insert 失敗)。
+        notify_speak_persisted(event_callback, building_msg, persona, pulse_id)
         self.notify_unity_speak(persona, text)
         # アドオン向けサーバー側 hook (persona_speak イベント) を発火する。
         # ThreadPoolExecutor で隔離実行されるため本関数は即座に return する。
@@ -124,6 +214,7 @@ class RuntimeEmitters:
         text: str,
         pulse_id: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
+        event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> Optional[Dict[str, Any]]:
         # 層1マーカー (==語句==) は表示系シンク (建物履歴 / gateway / Unity /
         # TTS hook) には流さない (life_concept_map.md §9.1 / P3)。mark の保存は
@@ -186,6 +277,9 @@ class RuntimeEmitters:
             self.runtime.manager.gateway_handle_ai_replies(building_id, persona, [building_content])
         except Exception:
             LOGGER.exception("Failed to emit say message")
+        # 保存完了イベント: 建物の行に本文が入った回だけ流れる (判定は
+        # notify_speak_persisted に一本化。message_id 無し = insert 失敗)。
+        notify_speak_persisted(event_callback, building_msg, persona, pulse_id)
         self.notify_unity_speak(persona, text)
         # アドオン向けサーバー側 hook (persona_speak イベント) を発火する。
         # emit_speak と同一イベントに統合し、source="say" で区別する。
@@ -333,8 +427,11 @@ class RuntimeEmitters:
         extra_metadata: Optional[Dict[str, Any]] = None,
         final_sub_seq: Optional[int] = None,
         final_voice_text: Optional[str] = None,
-    ) -> Optional[Dict[str, Any]]:
+    ) -> SpeakFinalizeResult:
         """emit_speak_start で発番した placeholder の content を確定する。
+
+        戻り値は :class:`SpeakFinalizeResult` の三値 — 保存成功 (行 id つき) /
+        対象行なし / 保存失敗 (例外を写す)。例外は上へ投げない。
 
         - building history: update_building_message で content + metadata を
           確定。 ``_streaming_placeholder`` フラグも False に倒す
@@ -386,8 +483,18 @@ class RuntimeEmitters:
             metadata["with"] = partners
 
         building_msg: Optional[Dict[str, Any]] = None
+        building_content: Optional[str] = None
         text_for_voice: Optional[str] = None
+        result_status = "failed"
+        result_error: Optional[str] = None
 
+        # ── 保存の本体: 建物履歴の行の確定。status はここだけで決まる ──
+        # 信号の契約は「建物履歴の行に本文が入った」(2026-08-29 まはー裁定)。
+        # 続きの生成の印降ろしも retry の門番も見るのは建物の行なので、
+        # 後続の副作用 (ペルソナ履歴・gateway) の失敗で saved を覆すと、
+        # 受け手の見ている場所と status の意味がずれる。
+        # Codex の outbox / 状態機械案は採らない — 建物の行を唯一の判定点に
+        # 据える最小の分離で、信号の受け手全員の契約が揃うため。
         try:
             from saiverse.content_tags import strip_in_heart, strip_user_only
             building_content = strip_in_heart(text)
@@ -401,12 +508,38 @@ class RuntimeEmitters:
                 metadata=update_metadata,
             )
             if building_msg is None:
+                result_status = "missing"
                 LOGGER.error(
                     "emit_speak_finalize: placeholder msg_id=%s not found "
                     "for building=%s — finalizing without history update",
                     message_id, building_id,
                 )
+            elif (building_msg.get("metadata") or {}).get(
+                "_streaming_placeholder"
+            ):
+                # update_building_message は DB エラーを内側で握って戻る。
+                # 更新後に読み直した行がまだ下書きの印を付けたままなら、
+                # 書き込みは載っていない — 「保存できた」と言ってはいけない。
+                result_status = "failed"
+                result_error = "placeholder row was not updated"
+                LOGGER.error(
+                    "emit_speak_finalize: placeholder msg_id=%s still marked "
+                    "as a draft after the update (building=%s) — the write "
+                    "did not land",
+                    message_id, building_id,
+                )
+            else:
+                result_status = "saved"
+        except Exception as exc:
+            result_status = "failed"
+            result_error = repr(exc)
+            LOGGER.exception("emit_speak_finalize: failed to finalize placeholder")
 
+        # ── 副作用: ペルソナ履歴 + gateway 配信 ──
+        # ここの失敗は ERROR ログに残すが status には触らない — 建物の行は
+        # もう入っており、「保存されていない」と報告すると受け手 (続きの印 /
+        # 門番) の見る事実と食い違う。欠けた側の記録は個別に追える。
+        try:
             persona_msg: Dict[str, Any] = {
                 "role": "assistant",
                 "content": text,
@@ -427,12 +560,23 @@ class RuntimeEmitters:
             persona.history_manager.add_to_persona_only(
                 persona_msg, sync_to_memory=False,
             )
-
-            self.runtime.manager.gateway_handle_ai_replies(
-                building_id, persona, [building_content],
-            )
         except Exception:
-            LOGGER.exception("emit_speak_finalize: failed to finalize placeholder")
+            LOGGER.exception(
+                "emit_speak_finalize: persona-history append failed "
+                "(building row status=%s msg=%s) — the building row stands",
+                result_status, message_id,
+            )
+        try:
+            if building_content is not None:
+                self.runtime.manager.gateway_handle_ai_replies(
+                    building_id, persona, [building_content],
+                )
+        except Exception:
+            LOGGER.exception(
+                "emit_speak_finalize: gateway delivery failed "
+                "(building row status=%s msg=%s) — the building row stands",
+                result_status, message_id,
+            )
 
         self.notify_unity_speak(persona, text)
 
@@ -469,7 +613,11 @@ class RuntimeEmitters:
                 "persona_speak (finalize) hook dispatch failed", exc_info=True,
             )
 
-        return building_msg
+        return SpeakFinalizeResult(
+            status=result_status,
+            building_msg=building_msg,
+            error=result_error,
+        )
 
     def emit_think(
         self,

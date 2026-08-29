@@ -27,7 +27,7 @@ import uuid
 from types import SimpleNamespace
 from typing import Any, Dict, Optional, Tuple
 
-from tools.context import get_active_manager, get_active_persona_id
+from tools.context import get_active_manager, get_active_persona_id, get_event_callback
 from tools.core import ToolSchema
 
 LOGGER = logging.getLogger(__name__)
@@ -216,8 +216,13 @@ def tell(target: str, gist: str = "") -> str:
         # したがって戻り値から分かるのは「届いたか」ではなく **「この場の記録に
         # 残ったか」**だけ。記録の成否によらず本人の記憶には残す — 自分が言った
         # ことを知らないまま次を喋ると、同じ話を二度することになる。
+        # event_callback: 親 Beat の persona_context が contextvar で運んで
+        # くる。渡しておくと、建物への保存が成功した回だけ保存完了イベント
+        # (speak_persisted) が流れる (発火は emit_say 内の共通の口 —
+        # この tell も assistant 発言を保存する経路の一つ)。
         emitted = runtime._emit_say(
             persona, building_id, text, pulse_id=pulse_id, metadata=dict(tell_meta),
+            event_callback=get_event_callback(),
         )
         delivered = True
         # 記録に残った印は **message_id の有無**。dict が返ったこと自体は証拠に

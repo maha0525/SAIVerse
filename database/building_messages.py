@@ -715,6 +715,110 @@ def update_building_message_in_db(
             db.close()
 
 
+def _has_assistant_reply_after(db: "Session", building_id: str, seq: int) -> bool:
+    """その発言より後に、同じ建物の会話にペルソナ (assistant) の発言行があるか。
+
+    まはー裁定 (2026-08-29): その発言以後に assistant ロールの発言があれば、
+    それはどう見てもその発言を見た上での発言 — 「応答が付いたか」はこの一比較で
+    決める。応答の内容になっているかは判定しないし、する必要も無い。発言ごとの
+    応答試行状態は作らない。
+
+    content が空の行は数えない — ストリーミングの下書き行 (placeholder) は
+    まだ発言ではないし、中断の後片付けが空のまま閉じた行も発言ではない。
+
+    「送信結果の問い合わせ口」(unknown_send_outcome_has_no_recovery_path) と
+    「retry の門番」(retry_api_has_no_server_side_eligibility_check) が共有する
+    唯一の判定。二箇所に書き分けないこと。
+    """
+    from database.models import BuildingMessage
+    row = (
+        db.query(BuildingMessage.id)
+        .filter(
+            BuildingMessage.building_id == building_id,
+            BuildingMessage.seq > seq,
+            BuildingMessage.role == "assistant",
+            BuildingMessage.content != "",
+        )
+        .first()
+    )
+    return row is not None
+
+
+def assistant_reply_exists_after(
+    session_factory: Optional[Callable[[], "Session"]],
+    building_id: str,
+    message_id: str,
+) -> Tuple[str, bool]:
+    """``message_id`` の発言より後に assistant の発言行があるかを引く。
+
+    Returns:
+        ``(理由コード, has_reply)``。理由コードは ``"found"`` /
+        ``"not_found"`` / ``"unavailable"``。**「記録に無い」と「読めなかった」を
+        同じ値に潰さない** — 読めなかった回に「応答なし」と断定すると、既に
+        答えた発言へもう一度応答を起こす扉が開く。
+    """
+    if session_factory is None:
+        return ("unavailable", False)
+    from database.models import BuildingMessage
+    db = session_factory()
+    try:
+        obj = db.query(BuildingMessage).filter_by(
+            building_id=building_id, message_id=message_id,
+        ).first()
+        if obj is None:
+            return ("not_found", False)
+        return ("found", _has_assistant_reply_after(db, building_id, obj.seq))
+    except Exception:
+        LOGGER.warning(
+            "assistant_reply_exists_after failed: bid=%s msg_id=%s",
+            building_id, message_id, exc_info=True,
+        )
+        return ("unavailable", False)
+    finally:
+        db.close()
+
+
+def lookup_client_message_outcome(
+    session_factory: Optional[Callable[[], "Session"]],
+    client_message_id: str,
+) -> Dict[str, Any]:
+    """``client_message_id`` で発言の保存結果を引く (読み取りのみ)。
+
+    通信が切れて顛末の分からない送信について、「残っているか」と「応答が
+    付いたか」を後から尋ねるための口。応答は三値で、**「分からない」を
+    潰さない** — 照会に失敗した回を「残っていない」と言うと、実は届いていた
+    発言をユーザーが打ち直して二重に載る。
+    設計: docs/issues/unknown_send_outcome_has_no_recovery_path.md
+
+    Returns:
+        ``{"status": "found", "message_id": ..., "has_reply": ...}`` /
+        ``{"status": "not_found"}`` / ``{"status": "unknown"}``。
+    """
+    if session_factory is None or not client_message_id:
+        return {"status": "unknown"}
+    from database.models import BuildingMessage
+    db = session_factory()
+    try:
+        obj = db.query(BuildingMessage).filter_by(
+            client_message_id=client_message_id,
+        ).first()
+        if obj is None:
+            return {"status": "not_found"}
+        return {
+            "status": "found",
+            "message_id": obj.message_id,
+            "has_reply": _has_assistant_reply_after(db, obj.building_id, obj.seq),
+        }
+    except Exception:
+        LOGGER.warning(
+            "lookup_client_message_outcome failed: cmid=%s",
+            client_message_id, exc_info=True,
+        )
+        return {"status": "unknown"}
+    finally:
+        db.close()
+
+
 def withdraw_building_message_in_db(
     session_factory: Optional[Callable[[], "Session"]],
     building_id: str,

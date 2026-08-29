@@ -102,6 +102,9 @@ class ExecutionRequest:
     # See docs/intent/persona_cognition/nested_subline_spell.md §13.
     pre_spells: Optional[List[str]] = None
     event_callback: Optional[Callable[[Dict[str, Any]], None]] = None
+    # 生成の開始前に Beat ロックの内側で走る再検査 (run_meta_user が実行)。
+    # イベント dict を返したら Pulse を開始しない。retry の門番が使う。
+    pre_generation_check: Optional[Callable[[], Optional[Dict[str, Any]]]] = None
     pulse_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     cancellation_token: CancellationToken = field(default_factory=CancellationToken)
     
@@ -444,6 +447,9 @@ class PulseController:
             meta_playbook=request.meta_playbook,
             args=request.args,
             event_callback=request.event_callback,
+            # 再検査は復帰時にも走らせる — 中断の間に別の生成が応答を保存
+            # し終えている可能性は、初回よりむしろ高い。
+            pre_generation_check=request.pre_generation_check,
             is_resumption=True,
             original_prompt=request.user_input,
         )
@@ -564,6 +570,7 @@ class PulseController:
             cancellation_token=request.cancellation_token,
             pulse_type=request.type,
             pre_spells=request.pre_spells,
+            pre_generation_check=request.pre_generation_check,
         )
     
     def _build_resumption_prompt(self, request: ExecutionRequest) -> str:
@@ -784,6 +791,7 @@ class PulseController:
         args: Optional[Dict[str, Any]] = None,
         event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
         pre_spells: Optional[List[str]] = None,
+        pre_generation_check: Optional[Callable[[], Optional[Dict[str, Any]]]] = None,
     ) -> Optional[List[str]]:
         """Submit a user input request."""
         request = ExecutionRequest(
@@ -796,6 +804,7 @@ class PulseController:
             args=args,
             pre_spells=pre_spells,
             event_callback=event_callback,
+            pre_generation_check=pre_generation_check,
         )
         return self.submit(request)
     

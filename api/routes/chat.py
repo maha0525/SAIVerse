@@ -1211,7 +1211,53 @@ def continue_message(req: MessageActionRequest, manager = Depends(get_manager)):
 
 @router.post("/retry")
 def retry_message(req: MessageActionRequest, manager = Depends(get_manager)):
-    """既にあるユーザー発言に対して、応答だけをやり直す。"""
+    """既にあるユーザー発言に対して、応答だけをやり直す。
+
+    門番 (2026-08-29 まはー裁定): 対象の発言より後に、同じ建物の会話に
+    ペルソナの発言行が既にあれば拒否する。その発言以後の assistant の発言は、
+    どう見てもその発言を見た上での発言 — もう一度応答を起こすと、一つの
+    発言に二つの応答が永続する。判定は問い合わせ口と同じ一比較を共有し、
+    発言ごとの応答試行状態は作らない。
+
+    この入口の検査には競合の窓がある (検査から生成の開始までの間に別の生成が
+    応答を保存し終えうる) ので、同じ共有判定を生成の直前 — Beat ロックの
+    内側 — でもう一度引く (manager/runtime.py の retry_user_message_stream)。
+    設計: docs/issues/retry_api_has_no_server_side_eligibility_check.md
+    """
+    building_id = manager.state.user_current_building_id
+    if building_id:
+        from database.building_messages import assistant_reply_exists_after
+        lookup, has_reply = assistant_reply_exists_after(
+            getattr(manager, "SessionLocal", None),
+            building_id, str(req.message_id),
+        )
+        if lookup == "found" and has_reply:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "already_replied",
+                    "message": "この発言の後に既にペルソナの発言があります。",
+                },
+            )
+        if lookup == "unavailable":
+            # 判定不能は**通さない** (fail-closed)。共有判定の docstring の
+            # とおり、読めなかった回に「応答なし」と断定すると、既に答えた
+            # 発言へもう一度応答を起こす扉が開く — この門番が塞ごうとして
+            # いるものそのもの。DB の一時不調で正当なやり直しが待たされる
+            # 側の害は「少し待ってもう一度」で回復できるが、二重応答は
+            # 永続してしまい取り消せない。
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "history_unavailable",
+                    "message": "応答の有無をいま確認できません。"
+                               "少し待ってもう一度お試しください。",
+                },
+            )
+    # building_id が無い回はここでは判定できないが、直後のストリーム側が
+    # no_current_building で必ず拒む (生成は始まらない) ので、門番の穴には
+    # ならない。
+
     def gen():
         try:
             yield json.dumps({"type": "status", "content": "processing"}, ensure_ascii=False) + " " * 2048 + "\n"
@@ -1247,6 +1293,41 @@ def withdraw_message(req: MessageActionRequest, manager = Depends(get_manager)):
     """
     result = manager.withdraw_user_message(req.message_id)
     return WithdrawResponse(**result)
+
+
+class MessageOutcomeResponse(BaseModel):
+    """``client_message_id`` で引いた、発言の保存結果。
+
+    三値 — ``found`` (残っている) / ``not_found`` (残っていない) /
+    ``unknown`` (照会失敗 = 分からない)。**「分からない」を潰さない** —
+    潰すと、出口 7 の正直な案内が嘘をつく側へ戻る。
+    """
+    status: str
+    # 残っている場合のサーバー側 message_id。「再送」の口はこの id で呼ぶ。
+    message_id: Optional[str] = None
+    # その発言より後に、同じ建物の会話にペルソナの発言行があるか。
+    # 判定は /chat/retry の門番と同じ一比較を共有する (2026-08-29 まはー裁定)。
+    has_reply: Optional[bool] = None
+
+
+@router.get("/message-outcome", response_model=MessageOutcomeResponse)
+def get_message_outcome(client_message_id: str, manager = Depends(get_manager)):
+    """発言がサーバーに残ったかを、送信時の ``client_message_id`` で尋ねる。
+
+    通信が切れて顛末の分からない送信 (出口 7) の復旧用。読み取りのみで、
+    LLM は使わない — だからフロントは自動で呼んでよい (2026-08-25 裁定の
+    「追加の推論はボタンの後ろ」の対象外)。
+    設計: docs/issues/unknown_send_outcome_has_no_recovery_path.md
+    """
+    from database.building_messages import lookup_client_message_outcome
+    result = lookup_client_message_outcome(
+        getattr(manager, "SessionLocal", None), client_message_id,
+    )
+    return MessageOutcomeResponse(
+        status=result.get("status", "unknown"),
+        message_id=result.get("message_id"),
+        has_reply=result.get("has_reply"),
+    )
 
 
 # ---- Utter: 発言契機入室 (C-2) ----

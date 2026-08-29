@@ -640,6 +640,7 @@ class SyncJudgmentDispatcher:
         args: Optional[Dict[str, Any]] = None,
         event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
         pre_spells: Optional[List[str]] = None,
+        pre_generation_check: Optional[Callable[[], Optional[Dict[str, Any]]]] = None,
     ) -> Optional[List[str]]:
         """ユーザー会話 Pulse を呼び出しスレッドで同期実行する。
 
@@ -659,6 +660,7 @@ class SyncJudgmentDispatcher:
             event_callback=event_callback,
             pre_spells=pre_spells,
             pulse_type="user",
+            pre_generation_check=pre_generation_check,
         )
 
 

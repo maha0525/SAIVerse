@@ -124,12 +124,12 @@ doc: [`track_retirement.md`](../intent/track_retirement.md)
 ### 2026-08-29 の編入 (まはー裁定 — §9 の仕分けから)
 
 **18. 発言が届いたか分からないとき、保存結果を尋ねて復旧する道 (§9-I の編入)**
-現状: 未着手・設計から。
+現状: **実装済み (2026-08-29 同日、Codex 1 巡 + 消し込み済み)・実機検証待ち**。`GET /api/chat/message-outcome` (三値、LLM ゼロ) + 出口 7 の自動問い合わせと三分岐。J の retry 門番 (route 検査 + Beat ロック内の再検査 + 判定不能は fail-closed) も同梱。起草時の記述:未着手・設計から。
 理由 (裁定): 「発言が届いたかは分かりません。履歴を確認してください」で終わると、ユーザーは手で打ち直し、実は届いていた場合に同じ発言がペルソナの記憶へ二度入る — §2-17 を門に入れた理由がそのまま当てはまる。必要なのは保存結果を尋ねる読み取りの口だけで、列も UNIQUE 制約も既にありマイグレーション不要。
 doc: [`unknown_send_outcome_has_no_recovery_path.md`](../issues/unknown_send_outcome_has_no_recovery_path.md)
 
 **19. 画面へ流したことと、保存できたことの区別 (§9-H の編入)**
-現状: 未着手・設計から。
+現状: **実装済み (2026-08-29 同日、Codex 1 巡 + 消し込み済み)・実機検証待ち**。emit 三関数に収束する全保存経路が保存完了イベント (speak_persisted) を流し、続きの生成の印を降ろす権威は読み手ではなくワーカー側 (切断後の保存でも降りる)。保存の成否は建物の行の永続化だけで決める。派生の隣 (continue の競合窓) は [issue 起票](../issues/continue_has_toctou_between_check_and_generation.md)。起草時の記述:未着手・設計から。
 理由 (裁定): 「保存完了を検知できるというのは基礎で、それが無いことで実際に記憶に乱れが出る経路が残っている。早めに作っておきたい」。
 補足: H・I は根が一つ (「どの生成の、どの段階の話か」を運ぶものが無い) なので設計は一体で行う。§9-J の retry 門番は、まはー裁定 (2026-08-29) で条文が変わった — 発言ごとの応答記録は作らず、「その発言より後にペルソナの発言があるか」で判定する。この基準なら永続状態が不要になり、同じ実装に安く相乗りできる (置き場の裁定は §9-J の行)。
 doc: [`stream_completion_is_not_proof_of_persistence.md`](../issues/stream_completion_is_not_proof_of_persistence.md)
@@ -228,7 +228,7 @@ doc: [`user_utterance_path_failure_inventory.md`](../issues/archive/user_utteran
 | H | ✅ 2026-08-29 まはー裁定: **門の内** (§2-19 へ編入) — 「保存完了を検知できるのは基礎。無いことで記憶に乱れが出る経路が残るなら早めに作る」 | | | [issue](../issues/stream_completion_is_not_proof_of_persistence.md) |
 | I | ✅ 2026-08-29 まはー裁定: **門の内** (§2-18 へ編入) | | | [issue](../issues/unknown_send_outcome_has_no_recovery_path.md) |
 | J | ✅ 2026-08-29 まはー裁定: **門の内** (§2-18/19 の実装束に相乗り)。条文も再裁定 — 発言ごとの応答記録は作らず、「その発言以後にペルソナの発言があるか」で判定する (詳細は issue 冒頭) | | | [issue](../issues/retry_api_has_no_server_side_eligibility_check.md) |
-| K | ストリームの断片が、どの生成のものかを画面側で照合していない | 部屋に応答できるペルソナが複数いる回で、片方の断片がもう片方の吹き出しへ繋がる / 片方の取り消しが両方を消す。サーバー側の記録は正しく、再読込で直る | **裁定 (2026-08-29 まはー): 「微妙に怖い、余裕があれば確認」** — 混線した画面からバブルのボタンを押したとき別の発言へ操作が飛ぶかの確認を、余裕があれば v0.3 中に行う。飛ぶなら再判定、飛ばないなら表示のみ = 外 | [issue](../issues/streaming_events_have_no_identity_in_the_ui.md) |
+| K | ✅ 2026-08-29 確認完了 → まはーの判定条件どおり**門の外** — ボタン (続きの生成/再送/取り消す) はすべて自分の吹き出しの id を渡す作りで、流れてる最中の吹き出しは id を持たないためボタン自体が出ない (表示条件に msg.id)。操作の誤爆経路は無く、混線は表示のみの欠陥 (再読込で直る)。確認の詳細は issue に記録 | | | [issue](../issues/streaming_events_have_no_identity_in_the_ui.md) |
 
 **出自**: A〜D はいずれも v0.3.0 の門 Wave 0 (Building ID の文字種契約) のレビューで
 浮上した。**A・C・D は作業前から存在**し、B は既存部分が作業前から存在する。E は

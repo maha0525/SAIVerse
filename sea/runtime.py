@@ -47,7 +47,7 @@ from sea.runtime_state import (
     store_structured_result,
 )
 
-from .runtime_emitters import RuntimeEmitters
+from .runtime_emitters import RuntimeEmitters, SpeakFinalizeResult
 from .session_lifecycle import SessionLifecycle
 from .runtime_utils import _format, _is_llm_streaming_enabled
 LOGGER = logging.getLogger(__name__)
@@ -96,8 +96,17 @@ class SEARuntime:
         cancellation_token: Optional[CancellationToken] = None,
         pulse_type: str = "user",
         pre_spells: Optional[List[str]] = None,
+        pre_generation_check: Optional[Callable[[], Optional[Dict[str, Any]]]] = None,
     ) -> List[str]:
-        """Router -> subgraph -> speak. Returns spoken strings for gateway/UI."""
+        """Router -> subgraph -> speak. Returns spoken strings for gateway/UI.
+
+        ``pre_generation_check``: 生成の開始前に **Beat ロックの内側**で走る
+        再検査。イベント dict を返したら Pulse を開始せず、そのイベントを
+        流して空で返る (None なら通す)。retry の門番が使う — 入口 (API route)
+        の検査から生成の開始までの間に、別の生成が応答を保存し終えている
+        競合の窓を、生成を直列化している既存の排他の内側で塞ぐ
+        (docs/issues/retry_api_has_no_server_side_eligibility_check.md)。
+        """
         # Check for cancellation before starting
         if cancellation_token:
             cancellation_token.raise_if_cancelled()
@@ -117,6 +126,21 @@ class SEARuntime:
             getattr(persona, "persona_id", None),
             purpose=pulse_type or "pulse",
         ):
+            # 生成開始前の再検査 (retry の門番など)。**ロックを取った後・
+            # いかなる副作用 (知覚の検知/消費・履歴書き込み) よりも前**に置く —
+            # ここで中止した Pulse は、走った痕跡を一切残さない。
+            if pre_generation_check is not None:
+                blocked_event = pre_generation_check()
+                if blocked_event is not None:
+                    LOGGER.info(
+                        "[sea] pre-generation check blocked the pulse "
+                        "(persona=%s type=%s code=%s)",
+                        getattr(persona, "persona_id", None), pulse_type,
+                        blocked_event.get("error_code"),
+                    )
+                    if event_callback:
+                        event_callback(blocked_event)
+                    return []
             return self._run_meta_user_locked(
                 persona,
                 user_input,
@@ -1132,7 +1156,7 @@ class SEARuntime:
                 msg_metadata["activity_trace"] = list(activity_trace)
 
             eff_bid = self._effective_building_id(persona, building_id)
-            building_msg = self._emit_say(persona, eff_bid, text, pulse_id=pulse_id, metadata=msg_metadata if msg_metadata else None)
+            building_msg = self._emit_say(persona, eff_bid, text, pulse_id=pulse_id, metadata=msg_metadata if msg_metadata else None, event_callback=event_callback)
             if outputs is not None:
                 outputs.append(text)
             if event_callback:
@@ -1783,11 +1807,13 @@ class SEARuntime:
                     return bid
         return fallback
 
-    def _emit_speak(self, persona: Any, building_id: str, text: str, pulse_id: Optional[str] = None, record_history: bool = True, extra_metadata: Optional[Dict[str, Any]] = None) -> None:
-        self._emitters.emit_speak(persona, building_id, text, pulse_id=pulse_id, record_history=record_history, extra_metadata=extra_metadata)
+    def _emit_speak(self, persona: Any, building_id: str, text: str, pulse_id: Optional[str] = None, record_history: bool = True, extra_metadata: Optional[Dict[str, Any]] = None, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None) -> Optional[Dict[str, Any]]:
+        # 戻り値は保存できた建物メッセージ (id 付き)。event_callback を渡すと、
+        # 保存が成功した回だけ保存完了イベント (speak_persisted) が流れる。
+        return self._emitters.emit_speak(persona, building_id, text, pulse_id=pulse_id, record_history=record_history, extra_metadata=extra_metadata, event_callback=event_callback)
 
-    def _emit_say(self, persona: Any, building_id: str, text: str, pulse_id: Optional[str] = None, metadata: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
-        return self._emitters.emit_say(persona, building_id, text, pulse_id=pulse_id, metadata=metadata)
+    def _emit_say(self, persona: Any, building_id: str, text: str, pulse_id: Optional[str] = None, metadata: Optional[Dict[str, Any]] = None, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None) -> Optional[Dict[str, Any]]:
+        return self._emitters.emit_say(persona, building_id, text, pulse_id=pulse_id, metadata=metadata, event_callback=event_callback)
 
     # Pipeline Streaming (Phase 2-β): emit_speak の 2 段階 API + sub-speak 発火。
     # 詳細: docs/intent/voice_tts_pipeline_streaming.md
@@ -1807,7 +1833,9 @@ class SEARuntime:
         extra_metadata: Optional[Dict[str, Any]] = None,
         final_sub_seq: Optional[int] = None,
         final_voice_text: Optional[str] = None,
-    ) -> Optional[Dict[str, Any]]:
+    ) -> "SpeakFinalizeResult":
+        # 戻り値は三値の結果 (保存成功 / 対象行なし / 保存失敗)。
+        # 設計: docs/issues/stream_completion_is_not_proof_of_persistence.md
         return self._emitters.emit_speak_finalize(
             persona, building_id, message_id, text,
             pulse_id=pulse_id, extra_metadata=extra_metadata,

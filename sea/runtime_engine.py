@@ -511,7 +511,7 @@ class RuntimeEngine:
         # add_to_persona_only 経由で memory.db にも 1 行残す = 生成メッセージの
         # 永続点なので、_store_memory 経路と同じ刻印を載せる。
         speak_metadata = stamp_generation_metadata(speak_metadata, state) or {}
-        building_msg = self.emitters["speak"](persona, eff_bid, text, pulse_id=pulse_id, extra_metadata=speak_metadata if speak_metadata else None)
+        building_msg = self.emitters["speak"](persona, eff_bid, text, pulse_id=pulse_id, extra_metadata=speak_metadata if speak_metadata else None, event_callback=event_callback)
         if outputs is not None:
             outputs.append(text)
         if event_callback:
