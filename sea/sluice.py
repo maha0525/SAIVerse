@@ -1324,8 +1324,9 @@ def _persist_record(
         # tz-aware UTC ISO 文字列必須 (naive だと adapter が system TZ 解釈で
         # created_at が ±9h ずれる)。
         "timestamp": datetime.now(timezone.utc).isoformat(),
-        # internal/event_message タグで General Chronicle / scene 切り出し /
-        # キーワード検索から自動除外させる (storage.CHRONICLE_EXCLUDED_TAGS 他)。
+        # internal/event_message タグは機構名義の印 (storage.MECHANISM_TAGS)。
+        # scene 切り出し・会話キーワード検索からは自動除外される。Chronicle
+        # 編纂には 2026-08-29 裁定から材料として入る (長文は決定論の一行に縮む)。
         "metadata": {"tags": ["internal", "event_message", "sluice"]},
         "line_role": "main_line",
         "scope": "committed" if applied_total > 0 else "discardable",

@@ -1,8 +1,10 @@
+import sqlite3
 import unittest
 
 from sai_memory.memory.recall import semantic_recall, semantic_recall_groups
 from sai_memory.memory.storage import (
     add_message,
+    filter_chronicle_eligible_ids,
     get_messages_for_chronicle,
     get_messages_from_id,
     get_messages_paginated,
@@ -109,6 +111,77 @@ class TestChronicleSelectCarriesLineMetadata(unittest.TestCase):
         # metadata フォールバックが主経路ではなくなった)。
         self.assertEqual(rows[0].pulse_id, "p1")
         self.assertEqual(rows[1].pulse_id, "p2")
+
+
+class TestChronicleScopeFilter(unittest.TestCase):
+    """編纂対象の scope 条件 — 提示に立たない行は材料にならない。
+
+    scope='discardable' (スルースの適用ゼロ記録・メタ判断の破棄分) と
+    scope='volatile' (作業セッションの生ログ) は提示 (required_scopes=
+    ['committed']) に乗らないので、2026-08-29 裁定「提示に立った行はすべて
+    材料」の対象外。scope の条件を落とすと、拒否・空振りの内部記録が
+    長期記憶へ入る。
+    """
+
+    def setUp(self):
+        self.conn = init_db(":memory:")
+        get_or_create_thread(self.conn, "thread-1", resource_id="resource-1")
+        self.addCleanup(self.conn.close)
+
+    def _add(self, content, **kwargs):
+        return add_message(
+            self.conn, thread_id="thread-1", role="user",
+            content=content, resource_id="resource-1", **kwargs,
+        )
+
+    def test_non_committed_scope_rows_are_not_chronicle_material(self):
+        committed = self._add("普通の発話", scope="committed")
+        default_scope = self._add("scope 引数なし (列 default = committed)")
+        # スルースの適用ゼロ記録の形: event_message タグ + discardable
+        discardable = self._add(
+            "<system>スルース: 適用対象はありませんでした</system>",
+            scope="discardable", metadata={"tags": ["event_message"]},
+        )
+        volatile = self._add("作業セッションの生ログ", scope="volatile")
+
+        ids = {m.id for m in get_messages_for_chronicle(self.conn)}
+        self.assertIn(committed, ids)
+        self.assertIn(default_scope, ids)
+        self.assertNotIn(discardable, ids)
+        self.assertNotIn(volatile, ids)
+
+        eligible = filter_chronicle_eligible_ids(
+            self.conn, [committed, default_scope, discardable, volatile],
+        )
+        self.assertEqual(eligible, {committed, default_scope})
+
+    def test_null_scope_rows_are_rescued(self):
+        """scope=NULL は旧世代行の救済として対象に入る。
+
+        現行 schema は NOT NULL DEFAULT 'committed' なので NULL 行は
+        add_message では作れない — pre-v0.11 の外部 DB の形をテーブル手組みで
+        再現し、共有 clause (filter_chronicle_eligible_ids 経由) を検算する。
+        """
+        legacy = sqlite3.connect(":memory:")
+        self.addCleanup(legacy.close)
+        legacy.execute(
+            "CREATE TABLE messages "
+            "(id TEXT PRIMARY KEY, thread_id TEXT, line_role TEXT, scope TEXT)"
+        )
+        legacy.execute("CREATE TABLE stelis_threads (thread_id TEXT)")
+        legacy.executemany(
+            "INSERT INTO messages (id, thread_id, line_role, scope) "
+            "VALUES (?, ?, ?, ?)",
+            [
+                ("null-scope", "main", None, None),
+                ("committed-scope", "main", None, "committed"),
+                ("discardable-scope", "main", None, "discardable"),
+            ],
+        )
+        eligible = filter_chronicle_eligible_ids(
+            legacy, ["null-scope", "committed-scope", "discardable-scope"],
+        )
+        self.assertEqual(eligible, {"null-scope", "committed-scope"})
 
 
 class DummyEmbedder:

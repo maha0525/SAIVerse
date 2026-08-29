@@ -1021,9 +1021,24 @@ def regenerate_entry(
     # Sort by created_at
     messages.sort(key=lambda m: m.created_at)
 
+    # 旧 entry の材料だった知覚バッチ (付記印 = この entry の材料として消費済み)
+    # は、再生成でも**材料**として LLM に渡す (2026-08-29 裁定 — digest 本文への
+    # 機械的な付記は廃止)。印の新 id への付け替えは swap 成立後 (下)。
+    from sai_memory.perception_buffer import (
+        list_batches_annexed_to,
+        reassign_batches_annexed,
+    )
+    old_batches = list_batches_annexed_to(conn, entry_id)
+    extra_items = [
+        {"at": int(b.consumed_at), "text": b.rendered_text} for b in old_batches
+    ]
+
     # 4. Generate the replacement first (LLM call — the old entry stays alive)
     from scripts.arasuji.build_arasuji_core import regenerate_entry_from_messages
-    new_entry = regenerate_entry_from_messages(conn, messages, model_name, persona_id=persona_id)
+    new_entry = regenerate_entry_from_messages(
+        conn, messages, model_name, persona_id=persona_id,
+        extra_items=extra_items,
+    )
 
     if not new_entry:
         # 生成失敗: 旧エントリは無傷のまま残る (削除していないので何も失わない)
@@ -1068,130 +1083,52 @@ def regenerate_entry(
         _withdraw_replacement()
         return None
 
-    # 旧付記の継承 (2026-08-19 Codex 第三巡 #3 / 第六巡 #3): 再生成は本文を
-    # 原本メッセージから作り直すため、旧 entry に付記されていた知覚バッチ**と
-    # legacy event_message の転写**を再収集して replacement 本文へ決定論転写し、
-    # バッチの印は**同一 tx** で新 id へ付け替える。これを飛ばすと、バッチは
-    # unmark で提示へ戻るまで digest から欠け、legacy (印を持たない) は再生成の
-    # たびに黙って消える。継承に失敗しても swap は止めない — バッチは下の削除
-    # (delete_entry_and_update_parent) の unmark が印を戻し、提示に残って次の
-    # 編纂の一括回収が引き取る (fail-open)。
-    try:
-        from sai_memory.arasuji.executor import (
-            collect_legacy_event_items_in_key_range,
-            format_perception_annex,
-            legacy_event_items_by_ids,
-        )
-        from sai_memory.perception_buffer import (
-            list_batches_annexed_to,
-            reassign_batches_annexed,
-        )
-        old_batches = list_batches_annexed_to(conn, entry_id)
-        # legacy の継承は二段 (第七巡 #2):
-        # 正 — 付記時に entry metadata へ構造化保存された annexed_legacy_ids を
-        # 読む (空リストも「付記済みで legacy ゼロ」の確定情報)。
-        # フォールバック — キーの無い旧 entry は source message 両端の正典順序
-        # キー (created_at, rowid) の閉区間で再収集する。epoch の end_time+1
-        # 区間は同秒の隣接 entry の legacy を誤収集する。
-        legacy_items: list = []
-        old_meta_row = conn.execute(
-            "SELECT metadata FROM memopedia_pages WHERE id = ? AND category = ?",
-            (entry_id, CATEGORY_CHRONICLE),
-        ).fetchone()
+    # 旧材料バッチの印の付け替え (2026-08-19 Codex 第三巡 #3 → 2026-08-29 裁定で
+    # 材料方式に改設計): 上で旧バッチを再生成 LLM の材料として渡したので、印
+    # (annexed_entry_id = 消費済みの証) を新 id へ付け替える。
+    #
+    # 付け替えに失敗したら swap を中止する — 続行すると下の旧 entry 削除の
+    # unmark で印が提示へ戻り、同じ知覚が二つの entry の材料になる (二重供給。
+    # 旧バッチの内容は新 entry の材料として既に LLM に渡っている)。印の宙吊り
+    # も作らない: 新 entry は取り下げ (unmark を通る削除経路)、旧状態はそのまま
+    # 維持して None を返す — 再生成は失敗として次回やり直せる。
+    if old_batches:
+        stamps_moved = False
+        stamp_error: Optional[BaseException] = None
         try:
-            old_meta = (
-                json.loads(old_meta_row[0])
-                if old_meta_row and old_meta_row[0] else {}
-            )
-        except (TypeError, ValueError):
-            old_meta = {}
-        stored_legacy_ids = (
-            old_meta.get("annexed_legacy_ids")
-            if isinstance(old_meta, dict) else None
-        )
-        if isinstance(stored_legacy_ids, list):
-            legacy_items = legacy_event_items_by_ids(
-                conn, [str(s) for s in stored_legacy_ids],
-            )
-        else:
-            boundary_rows = conn.execute(
-                "SELECT id, created_at, rowid FROM messages WHERE id IN (?, ?)",
-                (messages[0].id, messages[-1].id),
-            ).fetchall()
-            keys = {row[0]: (int(row[1]), int(row[2])) for row in boundary_rows}
-            lo_key = keys.get(messages[0].id)
-            hi_key = keys.get(messages[-1].id)
-            if lo_key is not None and hi_key is not None:
-                legacy_items = collect_legacy_event_items_in_key_range(
-                    conn, lo_key, hi_key,
-                    thread_id=getattr(messages[0], "thread_id", None),
-                )
-        # 新 entry へ継承する annexed_legacy_ids。stored が list なら**空でも
-        # 無条件に**引き継ぐ (2026-08-19 Codex 第八巡 #3 — 空を落とすと legacy
-        # ゼロ entry の二度目の再生成がフォールバックの時刻収集に落ち、隣接
-        # 期間の legacy を拾いうる)。フォールバック経路は今回収集した集合。
-        inherited_legacy_ids = (
-            [str(s) for s in stored_legacy_ids]
-            if isinstance(stored_legacy_ids, list)
-            else [d["id"] for d in legacy_items if d.get("id")]
-        )
-        annex_items = legacy_items + [
-            {
-                "kind": "perception",
-                "at": b.consumed_at,
-                "text": b.rendered_text,
-            }
-            for b in old_batches
-        ]
-        annex_items.sort(key=lambda d: d["at"])
-        annex_text = format_perception_annex(annex_items)
-        try:
-            if annex_text:
-                conn.execute(
-                    "UPDATE memopedia_pages SET content = content || ? "
-                    "WHERE id = ? AND category = ?",
-                    (f"\n\n{annex_text}", new_entry.id, CATEGORY_CHRONICLE),
-                )
-            # 継承した legacy id を新 entry の metadata にも刻む — 次の
-            # 再生成が正の経路 (構造化保存) を使えるように。転写の有無とは
-            # 独立に書く (空リストも確定情報)。
-            new_meta_row = conn.execute(
-                "SELECT metadata FROM memopedia_pages "
-                "WHERE id = ? AND category = ?",
-                (new_entry.id, CATEGORY_CHRONICLE),
-            ).fetchone()
+            moved = reassign_batches_annexed(conn, entry_id, new_entry.id)
+            # 件数不一致 = 並行操作が印を動かした / テーブル異常で 0 が
+            # 返った (reassign は OperationalError を 0 に潰す)。一部だけ
+            # 新 id へ移った状態で旧 entry の削除に進まない。
+            if moved == len(old_batches):
+                conn.commit()
+                stamps_moved = True
+        except Exception as exc:
+            stamp_error = exc
+        if not stamps_moved:
             try:
-                new_meta = (
-                    json.loads(new_meta_row[0])
-                    if new_meta_row and new_meta_row[0] else {}
-                )
-            except (TypeError, ValueError):
-                new_meta = {}
-            if isinstance(new_meta, dict):
-                new_meta["annexed_legacy_ids"] = inherited_legacy_ids
-                conn.execute(
-                    "UPDATE memopedia_pages SET metadata = ? "
-                    "WHERE id = ? AND category = ?",
-                    (
-                        json.dumps(new_meta, ensure_ascii=False),
-                        new_entry.id, CATEGORY_CHRONICLE,
-                    ),
-                )
-            if old_batches:
-                reassign_batches_annexed(conn, entry_id, new_entry.id)
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            raise
-        refreshed = get_entry(conn, new_entry.id)
-        if refreshed is not None:
-            new_entry = refreshed
-    except Exception:
-        logging.getLogger(__name__).warning(
-            "[arasuji] failed to inherit perception/legacy annex from %s to %s; "
-            "batches will return to presentation via the deletion unmark",
-            entry_id, new_entry.id, exc_info=True,
-        )
+                conn.rollback()
+            except Exception:
+                pass
+            # 保険: rollback が効かず一部の印が新 id を指したままの場合に
+            # 備え、逆向きに付け替えて旧 entry 宛てへ戻す (best-effort —
+            # 直後の取り下げの unmark 経路が最後の受け皿)。
+            try:
+                if reassign_batches_annexed(conn, new_entry.id, entry_id):
+                    conn.commit()
+            except Exception:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+            logging.getLogger(__name__).warning(
+                "[arasuji] failed to repoint perception stamps from %s to %s; "
+                "aborting the regeneration swap (old entry kept, replacement "
+                "withdrawn; regeneration can be retried)",
+                entry_id, new_entry.id, exc_info=stamp_error,
+            )
+            _withdraw_replacement()
+            return None
 
     try:
         success, _ = delete_entry_and_update_parent(conn, entry_id)

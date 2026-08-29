@@ -103,7 +103,8 @@ class RegenerateSwapTest(unittest.TestCase):
         )
         seen_during_generation = {}
 
-        def _fake_generate(conn, messages, model_name, persona_id=None):
+        def _fake_generate(conn, messages, model_name, persona_id=None,
+                           extra_items=None):
             # 生成中のスナップショット: 旧エントリはまだ存在するか
             seen_during_generation["old_alive"] = (
                 get_entry(conn, self.old_entry.id) is not None
@@ -143,7 +144,8 @@ class RegenerateSwapTest(unittest.TestCase):
             regenerate_entry,
         )
 
-        def _fake_generate(conn, messages, model_name, persona_id=None):
+        def _fake_generate(conn, messages, model_name, persona_id=None,
+                           extra_items=None):
             # LLM 実行中に、並行の削除 API が旧エントリを消した状況
             delete_entry(conn, self.old_entry.id)
             return create_entry(
@@ -165,6 +167,136 @@ class RegenerateSwapTest(unittest.TestCase):
             get_entries_covering_messages(self.adapter.conn, self.message_ids), [],
         )
 
+    def _annex_batch_to_old_entry(self, text="知覚テキスト", at=10):
+        """知覚バッチを 1 件作り、旧 entry の材料 (付記印) として消費済みにする。"""
+        from sai_memory.perception_buffer import (
+            create_consumption_batch,
+            init_perception_buffer_table,
+            mark_batches_annexed,
+            push_perception,
+        )
+        conn = self.adapter.conn
+        init_perception_buffer_table(conn)
+        item_id = push_perception(conn, "world_state", text)
+        batch_id = create_consumption_batch(
+            conn, [item_id], consumed_at=at, rendered_text=text,
+        )
+        mark_batches_annexed(conn, [batch_id], self.old_entry.id)
+        conn.commit()
+        return batch_id
+
+    def test_failed_stamp_repoint_aborts_the_swap(self):
+        """印の付け替えに失敗したら swap を中止する (fail-open の撤去)。
+
+        旧挙動は warning だけ出して旧 entry の削除へ進んでいた — 削除の
+        unmark で印が提示へ戻り、同じバッチの内容が新 entry の材料に居るのに
+        次の編纂へも供給される (二重供給)。中止後は (a) 旧 entry 生存
+        (b) 新 entry なし (c) 印は旧 entry 宛てのまま、で旧状態を維持する。
+        """
+        from sai_memory.arasuji.storage import (
+            create_entry,
+            get_entry,
+            regenerate_entry,
+        )
+        from sai_memory.perception_buffer import list_batches_annexed_to
+        conn = self.adapter.conn
+        batch_id = self._annex_batch_to_old_entry()
+
+        created_ids = []
+
+        def _fake_generate(conn, messages, model_name, persona_id=None,
+                           extra_items=None):
+            e = create_entry(
+                conn, level=1, content="新あらすじ",
+                source_ids=[m.id for m in messages],
+                start_time=1, end_time=2,
+                source_count=len(messages), message_count=len(messages),
+            )
+            created_ids.append(e.id)
+            return e
+
+        def _fail_reassign(conn, old_id, new_id):
+            raise RuntimeError("stamp repoint down")
+
+        with patch(
+            "scripts.arasuji.build_arasuji_core.regenerate_entry_from_messages",
+            _fake_generate,
+        ), patch(
+            "sai_memory.perception_buffer.reassign_batches_annexed",
+            _fail_reassign,
+        ):
+            result = regenerate_entry(conn, self.old_entry.id)
+
+        self.assertIsNone(result)
+        # (a) 旧 entry 生存
+        self.assertIsNotNone(get_entry(conn, self.old_entry.id))
+        # (b) 新 entry (replacement) は取り下げられて残っていない
+        self.assertEqual(len(created_ids), 1)
+        self.assertIsNone(get_entry(conn, created_ids[0]))
+        # (c) 印は旧 entry 宛てのまま (提示に戻っていない = 宙吊りも二重もない)
+        annexed = list_batches_annexed_to(conn, self.old_entry.id)
+        self.assertEqual([b.id for b in annexed], [batch_id])
+
+    def test_partially_repointed_stamps_are_returned_to_the_old_entry(self):
+        """部分成功 (一部の印だけ新 id へ移って commit 済み) でも印を宙に浮かせない。
+
+        中止経路の保険 (逆向きの付け替え) が、新 id を指してしまった印を
+        旧 entry 宛てへ戻すことを固定する。
+        """
+        from sai_memory.arasuji.storage import (
+            create_entry,
+            get_entry,
+            regenerate_entry,
+        )
+        from sai_memory.perception_buffer import (
+            list_batches_annexed_to,
+            reassign_batches_annexed as real_reassign,
+        )
+        conn = self.adapter.conn
+        batch_a = self._annex_batch_to_old_entry(text="知覚 A", at=10)
+        batch_b = self._annex_batch_to_old_entry(text="知覚 B", at=20)
+
+        def _fake_generate(conn, messages, model_name, persona_id=None,
+                           extra_items=None):
+            return create_entry(
+                conn, level=1, content="新あらすじ",
+                source_ids=[m.id for m in messages],
+                start_time=1, end_time=2,
+                source_count=len(messages), message_count=len(messages),
+            )
+
+        calls = []
+
+        def _partial_reassign(conn_, old_id, new_id):
+            calls.append((old_id, new_id))
+            if len(calls) == 1:
+                # 部分成功: 2 件中 1 件だけ新 id へ移し、即 commit して
+                # rollback で戻らない状態を作る (件数 1 != 2 で中止になる)
+                conn_.execute(
+                    "UPDATE perception_batches SET annexed_entry_id = ? "
+                    "WHERE id = ?",
+                    (new_id, batch_a),
+                )
+                conn_.commit()
+                return 1
+            # 2 回目以降 (保険の逆向き付け替え) は本物に委譲
+            return real_reassign(conn_, old_id, new_id)
+
+        with patch(
+            "scripts.arasuji.build_arasuji_core.regenerate_entry_from_messages",
+            _fake_generate,
+        ), patch(
+            "sai_memory.perception_buffer.reassign_batches_annexed",
+            _partial_reassign,
+        ):
+            result = regenerate_entry(conn, self.old_entry.id)
+
+        self.assertIsNone(result)
+        self.assertIsNotNone(get_entry(conn, self.old_entry.id))
+        # 印は 2 件とも旧 entry 宛てへ戻っている (宙吊り・新 id 残留なし)
+        annexed = list_batches_annexed_to(conn, self.old_entry.id)
+        self.assertEqual(sorted(b.id for b in annexed), sorted([batch_a, batch_b]))
+
     def test_concurrent_content_edit_during_generation_is_not_overwritten(self):
         """LLM 生成中にユーザーが本文を編集していたら、再生成は競合として失敗し、
         編集を LLM 出力で潰さない (Codex レビュー 2026-07-27)。"""
@@ -175,7 +307,8 @@ class RegenerateSwapTest(unittest.TestCase):
             update_entry_content,
         )
 
-        def _fake_generate(conn, messages, model_name, persona_id=None):
+        def _fake_generate(conn, messages, model_name, persona_id=None,
+                           extra_items=None):
             # LLM 実行中に、並行の編集 API が本文を更新した状況
             update_entry_content(conn, self.old_entry.id, "ユーザーが直した本文")
             return create_entry(
@@ -198,6 +331,66 @@ class RegenerateSwapTest(unittest.TestCase):
         from sai_memory.arasuji.storage import get_entries_covering_messages
         covering = get_entries_covering_messages(self.adapter.conn, self.message_ids)
         self.assertEqual([e.id for e in covering], [self.old_entry.id])
+
+
+class GeneratorCoverageCharsTest(unittest.TestCase):
+    """generate_level1_arasuji (再生成・CLI 経路) の coverage_chars 保存。
+
+    executor 経路は coverage_chars (材料としての字数 = 圧縮後) を
+    extra_metadata に保存するが、generator 経路は保存していなかった —
+    後から bands.backfill_coverage が生ログの素の字数で埋め、長さ規則
+    (material_chars: 500 字超の機構名義行は決定論の一行に縮む) と食い違う。
+    """
+
+    def test_entry_metadata_records_compressed_coverage_chars(self):
+        import json
+        import sqlite3
+
+        from sai_memory.arasuji.generator import (
+            MECHANISM_TEXT_MAX_CHARS,
+            generate_level1_arasuji,
+            material_chars,
+        )
+        from sai_memory.arasuji.storage import init_arasuji_tables
+        from sai_memory.memory.storage import Message
+
+        conn = sqlite3.connect(":memory:")
+        self.addCleanup(conn.close)
+        init_arasuji_tables(conn)
+
+        long_tool_text = "[Spell Result: web_search]\n" + "x" * (
+            MECHANISM_TEXT_MAX_CHARS + 100
+        )
+        messages = [
+            Message(
+                id="m1", thread_id="main", role="user", content="こんにちは",
+                resource_id=None, created_at=100, metadata=None,
+            ),
+            # 500 字超の機構名義行 — 材料としては決定論の一行に縮む
+            Message(
+                id="m2", thread_id="main", role="user", content=long_tool_text,
+                resource_id=None, created_at=200,
+                metadata={"tags": ["handy_tool"]},
+            ),
+        ]
+
+        class _Client:
+            def generate(self, messages, tools):
+                return "生成されたあらすじ。"
+
+        entry = generate_level1_arasuji(_Client(), conn, messages)
+        self.assertIsNotNone(entry)
+
+        row = conn.execute(
+            "SELECT metadata FROM memopedia_pages WHERE id = ?", (entry.id,)
+        ).fetchone()
+        meta = json.loads(row[0])
+
+        expected = sum(material_chars(m) for m in messages)
+        raw_total = sum(len(m.content or "") for m in messages)
+        # 圧縮後の合計であること (素の合計字数ではない)
+        self.assertEqual(meta["coverage_chars"], expected)
+        self.assertLess(expected, raw_total)
 
 
 if __name__ == "__main__":

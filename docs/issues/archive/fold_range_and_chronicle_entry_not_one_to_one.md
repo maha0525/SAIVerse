@@ -1,6 +1,20 @@
 # 退場する範囲と、それを覆うあらすじの範囲が一対一であることを誰も強制していない
 
-**ステータス**: 未解決 (2026-07-27 発見。`chronicle_run_boundary_lost_by_excluded_tag` の修正に対する Codex 攻撃レビュー 四巡目で発掘)
+**ステータス**: ✅ 解決 — 構造で保証済みと検分し、まはー裁定で閉鎖 (2026-08-29)。(2026-07-27 発見。`chronicle_run_boundary_lost_by_excluded_tag` の修正に対する Codex 攻撃レビュー 四巡目で発掘)
+
+> **検分の結果 (2026-08-29)**: 起票時に「無い」とされた強制は、その後の工事で二枚入っていた。
+> ①**入力側** — 編纂の対象は「今回退場させる範囲そのもの」を fold ごとに区切って渡す
+> (`compile_groups_from_folds` → `generate_chronicle`。離れた fold を一つのあらすじに束ねない。
+> 連続性の検算は `tests/test_eviction_plan.py` が固定)。範囲とあらすじが同じ型から作られるので、
+> 設計上ズレる口が無い。②**出力側** — `_apply_eviction_plan` が「あらすじを引き当てられなかった
+> fold は退場そのものを見送り、生ログのまま残す」を手続きとして強制 (下限の enforce)。あらすじが
+> 後から消えた場合も生ログが窓へ戻る。起票時の実穴 (スペル結果の行が fold 内に居ながら被覆されない)
+> は、2026-08-29 の編纂材料の一本化 (機構タグの除外解除) が閉じた。
+> **記録して受け入れる緩み二つ**: (a) 見送りの条件は「fold にあらすじが一枚でも引けたか」で、
+> 全行の被覆までは数えない — ただし除外解除後、提示に立つのに編纂対象でない行は旧メタ判断
+> (line_role) の legacy 行くらいで、新規には生まれない。(b) その legacy 行は提示に立つが編纂対象外の
+> まま。どちらも実害の経路は確認できていない。**吸収先だった「エピソードチャンク工事」は v3 で
+> 解体されたが、上記のとおり別の工事が同じ保証を先に実現していた。閉鎖 (archive) はまはーの裁定で。**
 **深刻度**: P2 — 現時点で発生させる経路は確認できていない (下の「到達性」参照)。ただし破れると提示層の時系列が壊れる
 **関連**: `sea/eviction_plan.py` の `compile_groups_from_folds` ・ `sea/session_lifecycle.py` の `_attach_chronicle_refs` / `_apply_eviction_plan` ・ [`../intent/experience_structure.md`](../intent/experience_structure.md) §4-5 ・ [`../intent/chronicle_eviction.md`](../intent/chronicle_eviction.md)
 

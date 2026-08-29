@@ -372,10 +372,11 @@ class ChronicleClaimTest(unittest.TestCase):
     def test_compile_groups_boundary_survives_excluded_head(self):
         """群の先頭が Chronicle 除外対象でも fold 境界は立つ (§4-5 回帰)。
 
-        除外タグ (handy_tool / spell / event_message / session_digest) や
-        除外 line_role のメッセージは編纂対象に現れない。境界を「fold の
-        先頭 id」で持っていたときは、先頭が落ちた fold の境界が一度も立たず、
-        離れた fold が一つのあらすじに束ねられていた
+        除外 line_role (sub_line / meta_judgment / nested) のメッセージは
+        編纂対象に現れない (2026-08-29 裁定でタグ除外は解除されたので、
+        除外の代表は line_role)。境界を「fold の先頭 id」で持っていたときは、
+        先頭が落ちた fold の境界が一度も立たず、離れた fold が一つの
+        あらすじに束ねられていた
         (docs/issues/archive/chronicle_run_boundary_lost_by_excluded_tag.md)。
 
         除外メッセージの時系列上の位置は問わない — フィルタで編纂対象から
@@ -386,12 +387,12 @@ class ChronicleClaimTest(unittest.TestCase):
 
         excluded_id = self.adapter.append_persona_message({
             "role": "assistant",
-            "content": "スペル実行ログ",
+            "content": "サブラインの作業ログ",
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            "metadata": {"tags": ["spell"]},
+            "line_role": "sub_line",
         })
         self.assertIsNotNone(excluded_id)
-        # 前提の確認: 除外タグは編纂対象から落ちている
+        # 前提の確認: 除外 line_role は編纂対象から落ちている
         self.assertNotIn(excluded_id, self._message_ids())
 
         with patch("saiverse.model_configs.find_model_config",
@@ -425,24 +426,34 @@ class ChronicleClaimTest(unittest.TestCase):
         """filter_chronicle_eligible_ids は編纂の入力フィルタと同じ集合を返す。
 
         退場適用側の「この fold にあらすじが生まれる可能性はあるか」判定
-        (顔その1) の土台。除外タグのメッセージは対象外、通常メッセージは対象。
+        (顔その1) の土台。除外 line_role のメッセージは対象外、通常
+        メッセージと機構名義の行 (spell タグ等) は対象 (2026-08-29 裁定 —
+        本人の提示に立った行はすべて編纂の材料に入る)。
         """
         from sai_memory.memory.storage import filter_chronicle_eligible_ids
         all_ids = self._message_ids()
 
         excluded_id = self.adapter.append_persona_message({
             "role": "assistant",
-            "content": "スペル実行ログ",
+            "content": "サブラインの作業ログ",
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            "metadata": {"tags": ["spell"]},
+            "line_role": "sub_line",
         })
         self.assertIsNotNone(excluded_id)
+        # 機構名義の行 (spell タグ) は 2026-08-29 裁定から編纂対象に**入る**。
+        spell_id = self.adapter.append_persona_message({
+            "role": "system",
+            "content": "[Spell Result: web_search]\n検索結果本文",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "metadata": {"tags": ["conversation", "spell"]},
+        })
+        self.assertIsNotNone(spell_id)
 
         eligible = filter_chronicle_eligible_ids(
-            self.adapter.conn, all_ids + [excluded_id],
+            self.adapter.conn, all_ids + [excluded_id, spell_id],
         )
-        self.assertEqual(eligible, set(all_ids))
-        # 全部が除外タグ = 空集合 (あらすじは永久に生まれない fold の形)
+        self.assertEqual(eligible, set(all_ids) | {spell_id})
+        # 全部が除外 line_role = 空集合 (あらすじは永久に生まれない fold の形)
         self.assertEqual(
             filter_chronicle_eligible_ids(self.adapter.conn, [excluded_id]), set(),
         )

@@ -2040,14 +2040,15 @@ def count_planned_groups(conn: sqlite3.Connection) -> int:
     return cur.fetchone()[0]
 
 
-# Tags excluded from Chronicle generation. Messages with any of these tags
-# are not the persona's own experiences and should not be summarized.
-# 'session_digest' (作業ダイジェスト行) は**除外しない** — 作業セッションの
-# 体験が長期記憶へ入る唯一の道は「ダイジェスト行が提示の並びに立ち、他の
-# メッセージと同じに畳まれる」こと (arasuji_levels.md §4-2 入口は一本。
-# 旧除外は転写機構が構造的に発火しない原因だった —
-# docs/issues/work_session_digest_never_reaches_chronicle.md)。
-CHRONICLE_EXCLUDED_TAGS = ('handy_tool', 'spell', 'event_message')
+# 機構名義の行の印 (handy_tool = ツール実行結果 / spell = スペル結果 /
+# event_message = システム通知)。
+# - Chronicle 編纂では**除外しない** (2026-08-29 まはー裁定): 本人の提示に
+#   立った行はすべて編纂の材料に入る。長い機構名義の行は材料を組む時だけ
+#   決定論の一行に縮む (sai_memory/arasuji/generator.py の長さ規則)。DB の
+#   行 (保存) は全文のまま。
+# - 実会話フィルタ (_conversation_exclusion: scene 切り出し・会話検索・想起)
+#   では従来どおり除外する — 口調のアンカーに機構の定型文を混ぜないため。
+MECHANISM_TAGS = ('handy_tool', 'spell', 'event_message')
 
 # line_role values excluded from General Chronicle.
 # sub_line = lightweight model step execution (work logs)
@@ -2061,26 +2062,36 @@ def chronicle_eligibility_filter() -> Tuple[str, Tuple[str, ...]]:
 
     「どのメッセージが Chronicle に入るか」の除外規則の一点管理:
     - Stelis スレッド (サブエージェント作業ログ) の除外
-    - ``CHRONICLE_EXCLUDED_TAGS`` タグの除外
     - ``CHRONICLE_EXCLUDED_LINE_ROLES`` の除外 (NULL line_role は旧世代
       メッセージなので許可)
+    - 非 committed scope の除外 (NULL scope は旧世代メッセージの救済)
+
+    scope の条件は提示と同じ規則 (required_scopes=['committed'] + NULL 救済)
+    — 提示に立たない行は材料にならない。scope='discardable' はスルースの
+    適用ゼロ記録やメタ判断の破棄分、scope='volatile' は作業セッションの
+    生ログで、どちらも本人の提示コンテキストに乗らないため、2026-08-29 裁定
+    「提示に立った行はすべて材料」の対象外。
+
+    タグでは除外しない (2026-08-29 まはー裁定): 機構名義の行
+    (``MECHANISM_TAGS`` = handy_tool / spell / event_message) も、本人の
+    提示に立った行として編纂の材料と被覆 (source_ids) に入る。長い機構名義の
+    行は材料を組む時だけ決定論の一行に縮む (sai_memory/arasuji/generator.py)。
+    'session_digest' (作業ダイジェスト行) も同様に材料に入る — 作業セッション
+    の体験が長期記憶へ入る唯一の道は「ダイジェスト行が提示の並びに立ち、他の
+    メッセージと同じに畳まれる」こと (arasuji_levels.md §4-2 入口は一本)。
 
     ``get_messages_for_chronicle`` (編纂の入力) と
     ``filter_chronicle_eligible_ids`` (退場適用側の編纂可能性判定) が共用する。
     """
-    tag_placeholders = ",".join("?" for _ in CHRONICLE_EXCLUDED_TAGS)
     role_placeholders = ",".join("?" for _ in CHRONICLE_EXCLUDED_LINE_ROLES)
     clause = f"""
         thread_id NOT IN (
             SELECT thread_id FROM stelis_threads
         )
-        AND NOT EXISTS (
-            SELECT 1 FROM json_each(metadata, '$.tags')
-            WHERE json_each.value IN ({tag_placeholders})
-        )
         AND (line_role IS NULL OR line_role NOT IN ({role_placeholders}))
+        AND (scope IS NULL OR scope = 'committed')
     """
-    return clause, CHRONICLE_EXCLUDED_TAGS + CHRONICLE_EXCLUDED_LINE_ROLES
+    return clause, CHRONICLE_EXCLUDED_LINE_ROLES
 
 
 def get_messages_for_chronicle(
@@ -2093,9 +2104,13 @@ def get_messages_for_chronicle(
 
     Applies standard exclusion filters:
     - Stelis threads (sub-agent work logs)
-    - Messages tagged with handy_tool / spell / event_message
     - Messages with line_role sub_line / meta_judgment / nested
       (NULL line_role is allowed for pre-cognition-model messages)
+    - Messages with non-committed scope (discardable / volatile —
+      NULL scope is allowed for pre-v0.11 rows)
+
+    機構名義の行 (handy_tool / spell / event_message タグ) は除外しない
+    (2026-08-29 まはー裁定 — 詳細は ``chronicle_eligibility_filter``)。
 
     This is the single source of truth for "which messages go into Chronicle."
     Both runtime.py (Metabolism) and build_arasuji_core.py (CLI/UI) should
@@ -2166,8 +2181,13 @@ def _conversation_exclusion() -> Tuple[str, Tuple[str, ...]]:
     ``get_conversation_window_around`` (コア記憶 scene) と
     ``get_conversation_messages_between`` (範囲クリップの読み出し) が共用する
     (同じ「実会話」定義を一点管理)。
+
+    機構名義の行 (``MECHANISM_TAGS``) はここでは**除外し続ける** — Chronicle
+    編纂 (``chronicle_eligibility_filter``) が 2026-08-29 裁定でタグ除外を
+    やめたのとは独立の境界で、口調のアンカー (scene) に機構の定型文を
+    混ぜない目的は変わらないため。
     """
-    tag_placeholders = ",".join("?" for _ in CHRONICLE_EXCLUDED_TAGS)
+    tag_placeholders = ",".join("?" for _ in MECHANISM_TAGS)
     role_placeholders = ",".join("?" for _ in CHRONICLE_EXCLUDED_LINE_ROLES)
     clause = f"""
         thread_id NOT IN (SELECT thread_id FROM stelis_threads)
@@ -2179,7 +2199,7 @@ def _conversation_exclusion() -> Tuple[str, Tuple[str, ...]]:
         AND (line_role IS NULL OR line_role NOT IN ({role_placeholders}))
         AND content NOT LIKE '<system>%'
     """
-    return clause, CHRONICLE_EXCLUDED_TAGS + CHRONICLE_EXCLUDED_LINE_ROLES
+    return clause, MECHANISM_TAGS + CHRONICLE_EXCLUDED_LINE_ROLES
 
 
 def real_conversation_filter() -> Tuple[str, Tuple[str, ...]]:
@@ -2283,11 +2303,12 @@ def get_conversation_window_around(
 ) -> Optional[List[Message]]:
     """アンカーメッセージを中心とした「実会話」の窓を切り出す (コア記憶 scene 用)。
 
-    「実会話」の定義は Chronicle 生成と同じ (``get_messages_for_chronicle`` と
-    同一の除外条件を再利用): Stelis サブエージェントのスレッド除外・
-    handy_tool/spell/event_message タグ除外・sub_line/meta_judgment/nested
-    line_role 除外。加えてここでは role を user/model (表示名 assistant) に限定する
-    (ツール応答や内部ロールを切り抜きに混ぜない)。
+    「実会話」の定義は ``_conversation_exclusion``: Stelis サブエージェントの
+    スレッド除外・handy_tool/spell/event_message (機構名義) タグ除外・
+    sub_line/meta_judgment/nested line_role 除外。加えてここでは role を
+    user/model (表示名 assistant) に限定する (ツール応答や内部ロールを
+    切り抜きに混ぜない)。Chronicle 編纂のフィルタとは 2026-08-29 裁定で
+    分岐した — 編纂は機構名義の行も材料に入れるが、scene は入れない。
 
     窓の大きさは前後 ``rounds`` 往復 ≒ ``rounds * 2`` 件ずつ (アンカー自身は含めた
     上で前後に最大 rounds*2 件)。会話の端では自然に短くなる (それ以上前/後が
@@ -2389,7 +2410,7 @@ def search_conversation_messages(
     - ``date_from_ts`` / ``date_to_ts``: created_at の範囲 (Unix 秒、両端含む)。
     - 戻り値は created_at 降順 (新しい順)、最大 ``limit`` 件。
     """
-    tag_placeholders = ",".join("?" for _ in CHRONICLE_EXCLUDED_TAGS)
+    tag_placeholders = ",".join("?" for _ in MECHANISM_TAGS)
     role_placeholders = ",".join("?" for _ in CHRONICLE_EXCLUDED_LINE_ROLES)
     exclusion_clause = f"""
         thread_id NOT IN (SELECT thread_id FROM stelis_threads)
@@ -2401,7 +2422,7 @@ def search_conversation_messages(
         AND (line_role IS NULL OR line_role NOT IN ({role_placeholders}))
         AND content NOT LIKE '<system>%'
     """
-    params: List[Any] = list(CHRONICLE_EXCLUDED_TAGS) + list(CHRONICLE_EXCLUDED_LINE_ROLES)
+    params: List[Any] = list(MECHANISM_TAGS) + list(CHRONICLE_EXCLUDED_LINE_ROLES)
 
     where_parts = [exclusion_clause]
     for kw in keywords:

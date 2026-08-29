@@ -36,77 +36,24 @@ class ChunkExecutionError(RuntimeError):
 
 
 # ---------------------------------------------------------------------------
-# 知覚・通知の退場付記 (W14 知覚レンダリング, perception_buffer.md §10.4)
+# 知覚の消費バッチの材料化 (W14 知覚レンダリング → 2026-08-29 まはー裁定で改設計)
 #
-# fold (退場) が範囲を畳むとき、その期間の**未付記の消費バッチ** (知覚台帳) と
-# legacy の event_message 行を、digest テキストへ**決定論で** (LLM なしで) 添え、
-# バッチには digest 確定と**同一トランザクション**で付記印 (annexed_entry_id) を
-# 打つ。提示 (runtime_context) はこの印だけを見てバッチを下ろす — 「付記済みか」
-# を時刻の区間演算から再構成しない。これで「退場したものは必ず編纂されている」
-# の下限 (experience_structure §4-1) が知覚に通る。編纂 LLM の材料には混ぜない —
-# LLM 応答を得た後に転写する。tx が rollback すれば印も戻り、バッチは未付記 =
-# 提示に残る (fail-open)。
+# fold (退場) が範囲を畳むとき、その期間の**未付記の消費バッチ** (知覚台帳) を
+# 【知覚】ラベルの材料として編纂 LLM のプロンプトへ時刻順に差し込み、バッチには
+# digest 確定と**同一トランザクション**で付記印 (annexed_entry_id =
+# 「このバッチはこの entry の材料として消費済み」) を打つ。提示
+# (runtime_context) はこの印だけを見てバッチを下ろす — 「付記済みか」を時刻の
+# 区間演算から再構成しない。これで「退場したものは必ず編纂されている」の下限
+# (experience_structure §4-1) が知覚に通る。tx が rollback すれば印も戻り、
+# バッチは未付記 = 提示に残る (fail-open)。
+#
+# 旧設計の「digest 本文への機械的な付記 (annex ブロック連結)」は廃止 —
+# あらすじ本文は次のレベルの畳みで LLM の手本になるため、機構の定型ブロックを
+# 埋め込むと LLM がその形式を模倣して偽の機械記録を書き始める危険がある。
+# legacy event_message 行の別収集も廃止 — 除外タグの解除 (storage.
+# chronicle_eligibility_filter) で event_message 行は普通の材料として入る。
+# 長さ規則 (500 字超は決定論の一行) は generator.MECHANISM_TEXT_MAX_CHARS。
 # ---------------------------------------------------------------------------
-
-#: 恒等転写の上限 (合計文字数)。これ以下なら全文をそのまま転写し (圧縮しない —
-#: 恒等圧縮の原則「小さいものは潰さない」。前例は Track Chronicle の 1000 字
-#: スキップ = experience_structure.md §4-3/§9)、超えたら kind 別の件数集約
-#: (day_report の「先頭数件 + ほか N 件」型) に落とす。
-ANNEX_IDENTITY_MAX_CHARS = 1000
-
-#: 集約時に kind ごとへ逐語で残す先頭件数と、1 件あたりの行数・行の冒頭字数。
-_ANNEX_HEAD_ITEMS = 3
-_ANNEX_HEAD_LINES = 3
-_ANNEX_HEAD_CHARS = 80
-
-
-def _known_kind_headers() -> set:
-    """flush 整形が本文に挿す機構見出しの正準集合。
-
-    perception_buffer._KIND_HEADERS (+ 既定見出し) が唯一の供給源 — 見出しの
-    判定をここで別リストに写すと、kind が増えた瞬間にズレる。
-    """
-    from sai_memory.perception_buffer import _DEFAULT_HEADER, _KIND_HEADERS
-    headers = {h for h in _KIND_HEADERS.values() if h}
-    headers.add(_DEFAULT_HEADER)
-    return headers
-
-
-def _annex_meaningful_lines(text: str) -> List[str]:
-    """転写対象の**意味のある行**を返す (集約時の冒頭抜粋用)。
-
-    機構見出し行 (flush 整形の kind 見出し — 正準は
-    perception_buffer._KIND_HEADERS) と空行は除く — 見出しだけを冒頭に採ると、
-    集約された digest に本文が一文字も残らない (2026-08-19 Codex 第三巡 #2)。
-    除外は**既知の機構見出しの完全一致に限定**する — 素の ``[...]`` 形の行は
-    本文でありうる (全行が角括弧形式のバッチが先頭 1 行に潰れる, 同 第四巡 #4)。
-    意味行がゼロ (全部が機構見出し) のときは元の非空行の先頭数行へ
-    フォールバックする。
-    """
-    known_headers = _known_kind_headers()
-    lines: List[str] = []
-    nonempty: List[str] = []
-    for line in (text or "").splitlines():
-        s = line.strip()
-        if not s:
-            continue
-        nonempty.append(s)
-        if s in known_headers:
-            continue  # 機構見出し ([フィード] / [システム通知] 等) のみ除外
-        lines.append(s)
-    if not lines:
-        return nonempty[:_ANNEX_HEAD_LINES]
-    return lines
-
-
-def _strip_system_wrap(text: str) -> str:
-    """legacy event_message 行の ``<system>…</system>`` 包みを剥がす (表示用)。"""
-    out = (text or "").strip()
-    if out.startswith("<system>"):
-        out = out[len("<system>"):]
-    if out.endswith("</system>"):
-        out = out[: -len("</system>")]
-    return out.strip()
 
 
 def _annex_time_spans(chunks) -> List[tuple]:
@@ -163,26 +110,19 @@ def collect_annex_items(
     lo: int,
     hi: int,
     *,
-    thread_id: Optional[str],
     recover_before: Optional[int] = None,
 ) -> tuple:
-    """[lo, hi) の期間の付記対象を時刻順で集める。
+    """[lo, hi) の期間の材料化対象 (未付記の消費バッチ) を時刻順で集める。
 
-    対象は二種 (perception_buffer.md §10.4):
+    対象は**未付記の消費バッチ** (``annexed_entry_id IS NULL`` で
+    ``consumed_at`` が期間内)。``recover_before`` 指定時 (計画の先頭チャンク)
+    は、それ以前に consumed_at を持つ未付記バッチも**一括で引き取る** —
+    チャンク skip・印付け失敗・fold 関節の取り残しの回収路。材料には発生時刻が
+    付くので、少し後の digest の材料に載っても時系列の嘘にはならない。
 
-    - **未付記の消費バッチ** (``annexed_entry_id IS NULL`` で ``consumed_at`` が
-      期間内)。``recover_before`` 指定時 (計画の先頭チャンク) は、それ以前に
-      consumed_at を持つ未付記バッチも**一括で引き取る** — チャンク skip・
-      付記失敗・fold 関節の取り残しの回収路。転写には発生時刻が付くので、
-      少し後の digest に載っても時系列の嘘にはならない。
-    - legacy の event_message 行 (``metadata.tags`` に event_message) — 直挿し
-      時代の行。行自体は削除しない。Chronicle 編纂対象からは除外されている
-      (get_messages_for_chronicle) ので、ここで拾わなければ従来どおり digest に
-      入らず退場する (付記印を持てないため、転写機会は期間一致の一度きり —
-      既知の残欠, §10.4)。
-
-    戻りは ``(items, batch_ids)``。items は ``{"kind", "at", "text"}`` の list
-    (at 昇順)、batch_ids は転写したバッチの id (digest 確定 tx で付記印を打つ)。
+    戻りは ``(items, batch_ids)``。items は ``{"at", "text"}`` の list
+    (at 昇順) — generator._format_messages_for_prompt の ``extra_items`` 形。
+    batch_ids は材料にしたバッチの id (digest 確定 tx で付記印を打つ)。
     """
     items: List[dict] = []
     batch_ids: List[int] = []
@@ -202,182 +142,11 @@ def collect_annex_items(
         batches = []  # 台帳の無い DB (旧テスト等)
     for batch in batches:
         items.append({
-            "kind": "perception",
             "at": int(batch.consumed_at),
             "text": batch.rendered_text,
         })
         batch_ids.append(batch.id)
-    items.extend(collect_legacy_event_items(conn, lo, hi, thread_id=thread_id))
-    items.sort(key=lambda d: d["at"])
     return items, batch_ids
-
-
-def _legacy_rows_to_items(rows) -> List[dict]:
-    """(id, content, created_at, metadata) 行列を付記 items 形へ (タグ検証込み)。
-
-    LIKE の粗い絞りを JSON parse で確定する共通部。items は ``id`` を運ぶ —
-    entry metadata への構造化保存 (annexed_legacy_ids) の材料。
-    """
-    import json as _json
-    items: List[dict] = []
-    for mid, content, at, metadata in rows:
-        try:
-            meta = _json.loads(metadata) if metadata else None
-        except (TypeError, ValueError):
-            continue
-        tags = meta.get("tags") if isinstance(meta, dict) else None
-        if not (isinstance(tags, list) and "event_message" in tags):
-            continue
-        items.append({
-            "kind": "event_message",
-            "at": int(at),
-            "text": _strip_system_wrap(str(content or "")),
-            "id": str(mid),
-        })
-    return items
-
-
-def collect_legacy_event_items(
-    conn: sqlite3.Connection,
-    lo: int,
-    hi: int,
-    *,
-    thread_id: Optional[str],
-) -> List[dict]:
-    """[lo, hi) の legacy event_message 行を付記 items 形で集める。
-
-    直挿し時代の行 (``metadata.tags`` に event_message)。編纂の付記
-    (:func:`collect_annex_items`) が使い、転写した行の id は entry metadata の
-    ``annexed_legacy_ids`` に保存される — 再生成の継承はその集合を読む
-    (2026-08-19 Codex 第六巡 #3 / 第七巡 #2)。
-    """
-    try:
-        params: list = [int(lo), int(hi)]
-        thread_clause = ""
-        if thread_id:
-            thread_clause = "AND thread_id = ? "
-            params.append(thread_id)
-        rows = conn.execute(
-            "SELECT id, content, created_at, metadata FROM messages "
-            "WHERE created_at >= ? AND created_at < ? "
-            f"{thread_clause}"
-            "AND metadata LIKE '%event_message%' "
-            "ORDER BY created_at ASC, id ASC",
-            tuple(params),
-        ).fetchall()
-    except sqlite3.OperationalError:
-        return []
-    return _legacy_rows_to_items(rows)
-
-
-def legacy_event_items_by_ids(
-    conn: sqlite3.Connection, message_ids: List[str],
-) -> List[dict]:
-    """entry metadata の ``annexed_legacy_ids`` から legacy items を復元する。
-
-    再生成の継承の**正**の経路 (第七巡 #2): 付記時に確定した id 集合を読むので、
-    時刻範囲の再収集と違い、同秒の隣接 entry の legacy を誤収集しない。
-    """
-    if not message_ids:
-        return []
-    placeholders = ",".join("?" for _ in message_ids)
-    try:
-        rows = conn.execute(
-            f"SELECT id, content, created_at, metadata FROM messages "
-            f"WHERE id IN ({placeholders}) "
-            "ORDER BY created_at ASC, id ASC",
-            tuple(str(m) for m in message_ids),
-        ).fetchall()
-    except sqlite3.OperationalError:
-        return []
-    return _legacy_rows_to_items(rows)
-
-
-def collect_legacy_event_items_in_key_range(
-    conn: sqlite3.Connection,
-    lo_key: tuple,
-    hi_key: tuple,
-    *,
-    thread_id: Optional[str],
-) -> List[dict]:
-    """正典順序キー (created_at, rowid) の閉区間で legacy を集める。
-
-    再生成の継承の**フォールバック** (metadata に ``annexed_legacy_ids`` を
-    持たない旧 entry 用)。epoch の ``end_time+1`` 区間は同秒の隣接 entry の
-    legacy を誤収集する (第七巡 #2) — source message 両端の (created_at, rowid)
-    で区切れば、隣接 entry の source は互いに素なので取り違えない。
-    """
-    lo_ca, lo_rid = int(lo_key[0]), int(lo_key[1])
-    hi_ca, hi_rid = int(hi_key[0]), int(hi_key[1])
-    try:
-        params: list = [lo_ca, lo_ca, lo_rid, hi_ca, hi_ca, hi_rid]
-        thread_clause = ""
-        if thread_id:
-            thread_clause = "AND thread_id = ? "
-            params.append(thread_id)
-        rows = conn.execute(
-            "SELECT id, content, created_at, metadata FROM messages "
-            "WHERE (created_at > ? OR (created_at = ? AND rowid >= ?)) "
-            "AND (created_at < ? OR (created_at = ? AND rowid <= ?)) "
-            f"{thread_clause}"
-            "AND metadata LIKE '%event_message%' "
-            "ORDER BY created_at ASC, rowid ASC",
-            tuple(params),
-        ).fetchall()
-    except sqlite3.OperationalError:
-        return []
-    return _legacy_rows_to_items(rows)
-
-
-def format_perception_annex(items: List[dict]) -> str:
-    """付記対象を決定論で本文化する (LLM なし)。空なら空文字列。
-
-    少量 (合計 ``ANNEX_IDENTITY_MAX_CHARS`` 以下) は恒等転写 — 全文をそのまま
-    置く。大量なら kind 別に「先頭数件の冒頭 + ほか N 件」(day_report の型,
-    saiverse/day_report.py) へ落とす。
-    """
-    if not items:
-        return ""
-    from datetime import datetime
-
-    def _stamp(epoch: int) -> str:
-        try:
-            return datetime.fromtimestamp(int(epoch)).strftime("%m-%d %H:%M")
-        except (OSError, OverflowError, ValueError):
-            return "?"
-
-    header = "（この期間に届いた通知・知覚の記録 — 機械的な転写）"
-    total = sum(len(d["text"]) for d in items)
-    lines: List[str] = [header]
-    if total <= ANNEX_IDENTITY_MAX_CHARS:
-        for d in items:
-            lines.append(f"- ({_stamp(d['at'])}) {d['text']}")
-        return "\n".join(lines)
-
-    # kind 別集約 (出現順)。
-    by_kind: dict = {}
-    kind_order: List[str] = []
-    for d in items:
-        if d["kind"] not in by_kind:
-            by_kind[d["kind"]] = []
-            kind_order.append(d["kind"])
-        by_kind[d["kind"]].append(d)
-    for kind in kind_order:
-        group = by_kind[kind]
-        lines.append(f"- {kind}: {len(group)} 件")
-        for d in group[:_ANNEX_HEAD_ITEMS]:
-            # 見出し行・空行を除いた「意味のある行」の先頭数行を残す —
-            # 大量の単一バッチでも中身の冒頭が必ず digest に残る。
-            heads = _annex_meaningful_lines(d["text"])[:_ANNEX_HEAD_LINES]
-            capped = [
-                (h[:_ANNEX_HEAD_CHARS] + "…") if len(h) > _ANNEX_HEAD_CHARS else h
-                for h in heads
-            ]
-            body = " / ".join(capped) if capped else ""
-            lines.append(f"  ・({_stamp(d['at'])}) {body}")
-        if len(group) > _ANNEX_HEAD_ITEMS:
-            lines.append(f"  ・ほか {len(group) - _ANNEX_HEAD_ITEMS} 件")
-    return "\n".join(lines)
 
 
 @dataclass
@@ -432,10 +201,20 @@ def _build_batch_prompt(
     *,
     include_timestamp: bool,
     memopedia_context: Optional[str],
+    perception_items: Optional[List[dict]] = None,
 ) -> str:
-    """llm_batch チャンクの圧縮プロンプト (現行 Lv1 General 版の後継)。"""
+    """llm_batch チャンクの圧縮プロンプト (現行 Lv1 General 版の後継)。
+
+    ``perception_items`` (知覚の消費バッチ、``{"at", "text"}`` の list) は
+    【知覚】/【想起 (過去の再提示)】ラベルの材料として時刻順の正しい位置に
+    差し込まれる (generator._format_messages_for_prompt)。
+    """
     from sai_memory.arasuji.context import get_episode_context_for_timerange
-    from sai_memory.arasuji.generator import _format_messages_for_prompt
+    from sai_memory.arasuji.generator import (
+        RECALL_PROMPT_NOTE,
+        _format_messages_for_prompt,
+        has_recall_material,
+    )
 
     start_time = min(m.created_at for m in chunk.messages)
     end_time = max(m.created_at for m in chunk.messages)
@@ -444,6 +223,7 @@ def _build_batch_prompt(
     )
     conversation = _format_messages_for_prompt(
         chunk.messages, include_timestamp=include_timestamp,
+        extra_items=perception_items,
     )
 
     parts = [
@@ -466,6 +246,10 @@ def _build_batch_prompt(
         "- 「〜について話した」のような抽象的な記述は避け、具体的に書く",
         "- [作業のまとめ] と印の付いた項目は、既に要約された作業の記録です。"
         "発言として引用せず、出来事の流れの一部として織り込む",
+    ])
+    if has_recall_material(chunk.messages, perception_items):
+        parts.append(RECALL_PROMPT_NOTE)
+    parts.extend([
         "- **日時情報（【2025-01-07 23:56 ~】など）は書かないでください**（自動で付与されます）",
         "- **「あらすじ」などの見出しは書かないでください**（本文のみ出力）",
         "",
@@ -482,12 +266,14 @@ def _chunk_content(
     persona_id: Optional[str],
     include_timestamp: bool,
     memopedia_context: Optional[str],
+    perception_items: Optional[List[dict]] = None,
 ) -> str:
     """チャンクの content を得る (常に LLM 圧縮 — 小さくても要約する)。"""
     prompt = _build_batch_prompt(
         chunk, conn,
         include_timestamp=include_timestamp,
         memopedia_context=memopedia_context,
+        perception_items=perception_items,
     )
     from llm_clients.exceptions import LLMError
     try:
@@ -598,27 +384,48 @@ def execute_plan(
             processed += len(chunk.messages)
             continue
 
-        # LLM (tx 外) → チャンク単一 tx で確定。
-        content = _chunk_content(
-            chunk, client, conn,
-            persona_id=persona_id,
-            include_timestamp=include_timestamp,
-            memopedia_context=memopedia_context,
-        )
+        # 知覚バッチは編纂 LLM の**材料**なので、収集は LLM 呼び出しの前
+        # (tx 外・決定論)。印は digest 確定と同一 tx で「収集した集合そのもの」
+        # に打つ — mark_batches_annexed は未付記の行にしか印を打たないので、
+        # 収集〜印付けの間に別の編纂が同じバッチを消費していれば行数が
+        # 食い違い、tx ごと破棄してチャンクをやり直す (材料が変わるので LLM も
+        # 呼び直し)。1 回目は再収集つきで再試行 — 新しい収集が競合相手の印を
+        # 見て除外する。2 回目も食い違うならバッチなしの材料で確定 — バッチは
+        # 未付記のまま提示に残り、次の編纂の一括回収が引き取る (fail-open)。
         skipped_in_tx = False
-        annex_conflict = False
-        # 付記の収集〜印付けは **BEGIN IMMEDIATE の内側** (2026-08-19 Codex
-        # 第二巡 #2): 収集を tx の外でやると、収集と印付けの間に別の編纂が
-        # 同じバッチを付記した場合、印は 0 行でも古い収集結果ごと commit され
-        # 同じ知覚が複数 entry に転写される。付記は決定論 (LLM なし) なので
-        # tx 内で組める。印の行数が収集数と食い違ったら rollback して
-        # チャンクごとやり直す (1 回目は付記ありで再試行 — 新しい tx 内の
-        # 再収集が競合相手の印を見て除外する。2 回目も食い違うなら付記なしで
-        # 確定 — バッチは未付記のまま提示に残り、一括回収が引き取る)。
-        # 「差分だけ本文から除いて組み直す」形にしなかったのは、除外→再整形が
-        # 再収集と同じ計算になるため — 同じコードパスを回す方が単純で等価。
-        for annex_mode in ("annex", "annex-retry", "no-annex"):
+        for material_mode in ("perception", "perception-retry", "no-perception"):
             annex_conflict = False
+            # 1. 材料化するバッチの収集 (tx 外・決定論)。失敗しても編纂は
+            # 止めない — バッチなしで進み、未付記のまま提示に残る (fail-open)。
+            perception_items: List[dict] = []
+            annex_batch_ids: List[int] = []
+            if material_mode != "no-perception":
+                try:
+                    lo, hi = annex_spans[chunk_index]
+                    perception_items, annex_batch_ids = collect_annex_items(
+                        conn, lo, hi,
+                        recover_before=(
+                            recover_before
+                            if chunk_index == recover_first_idx
+                            else None
+                        ),
+                    )
+                except Exception:
+                    perception_items, annex_batch_ids = [], []
+                    LOGGER.warning(
+                        "[executor] perception collection failed for chunk "
+                        "(kind=%s); compiling without perception material",
+                        chunk.kind, exc_info=True,
+                    )
+            # 2. LLM (tx 外)。
+            content = _chunk_content(
+                chunk, client, conn,
+                persona_id=persona_id,
+                include_timestamp=include_timestamp,
+                memopedia_context=memopedia_context,
+                perception_items=perception_items,
+            )
+            # 3. チャンク単一 tx で確定。
             try:
                 # tx 内再検査 (Codex W4 #1 / 二巡 #1 / 三巡 #1): BEGIN IMMEDIATE
                 # で write ロックを先に取ってから検査する — sqlite3 は SELECT
@@ -644,70 +451,25 @@ def execute_plan(
                         )
                         skipped_in_tx = True
                     else:
-                        # 退場付記 (W14 §10.4): この期間の未付記バッチ・legacy
-                        # event_message を決定論で転写して digest に添える。
-                        # 失敗しても編纂は止めない — 付記なしで確定し、バッチは
-                        # 未付記のまま提示に残る (fail-open)。
-                        annex_batch_ids: List[int] = []
-                        annex_legacy_ids: Optional[List[str]] = None
-                        chunk_content = content
-                        if annex_mode != "no-annex":
-                            try:
-                                lo, hi = annex_spans[chunk_index]
-                                annex_items, annex_batch_ids = collect_annex_items(
-                                    conn, lo, hi,
-                                    thread_id=getattr(
-                                        chunk.messages[0], "thread_id", None,
-                                    ),
-                                    recover_before=(
-                                        recover_before
-                                        if chunk_index == recover_first_idx
-                                        else None
-                                    ),
-                                )
-                                # 転写した legacy 行の id を構造化保存する
-                                # (空リストも「付記は走った」の確定情報)。
-                                # 再生成の継承がこの集合を読む — 時刻範囲の
-                                # 再収集より正確で、同秒の隣接 entry からの
-                                # 誤収集が構造的に起きない (第七巡 #2)。
-                                annex_legacy_ids = [
-                                    d["id"] for d in annex_items
-                                    if d.get("kind") == "event_message"
-                                    and d.get("id")
-                                ]
-                                annex_text = format_perception_annex(annex_items)
-                                if annex_text:
-                                    chunk_content = f"{content}\n\n{annex_text}"
-                            except Exception:
-                                annex_batch_ids = []
-                                annex_legacy_ids = None
-                                chunk_content = content
-                                LOGGER.warning(
-                                    "[executor] perception annex failed for "
-                                    "chunk (kind=%s); committing digest without "
-                                    "the annex", chunk.kind, exc_info=True,
-                                )
-                        entry_metadata: dict = {
-                            "digest_origin": chunk.kind,
-                            "coverage_chars": chunk.coverage_chars,
-                            "episode_refs": chunk.episode_refs,
-                        }
-                        if annex_legacy_ids is not None:
-                            entry_metadata["annexed_legacy_ids"] = annex_legacy_ids
                         entry = create_entry(
                             conn,
                             level=1,
-                            content=chunk_content,
+                            content=content,
                             source_ids=chunk.message_ids,
                             start_time=min(m.created_at for m in chunk.messages),
                             end_time=max(m.created_at for m in chunk.messages),
                             source_count=len(chunk.messages),
                             message_count=len(chunk.messages),
-                            extra_metadata=entry_metadata,
+                            extra_metadata={
+                                "digest_origin": chunk.kind,
+                                "coverage_chars": chunk.coverage_chars,
+                                "episode_refs": chunk.episode_refs,
+                            },
                             commit=False,
                         )
-                        # 付記印は digest 確定と同一 tx (§10.4)。rollback
-                        # すれば印も戻り、バッチは未付記 = 提示に残る。
+                        # 付記印 (「この entry の材料として消費済み」) は digest
+                        # 確定と同一 tx (§10.4)。rollback すれば印も戻り、
+                        # バッチは未付記 = 提示に残る。
                         if annex_batch_ids:
                             from sai_memory.perception_buffer import (
                                 mark_batches_annexed,
@@ -716,9 +478,10 @@ def execute_plan(
                                 conn, annex_batch_ids, entry.id,
                             )
                             if stamped != len(annex_batch_ids):
-                                # 収集と印の食い違い = 転写と印が別のバッチ
-                                # 集合になる。commit すると印の無い転写 (二重
-                                # 転写の口) が残るので、tx ごと破棄してやり直す。
+                                # 材料と印の食い違い = 材料に使ったバッチの一部が
+                                # 別 entry へ消費済み。commit すると同じ知覚が
+                                # 複数 entry の材料になるので、tx ごと破棄して
+                                # チャンクをやり直す。
                                 conn.rollback()
                                 annex_conflict = True
                         if not annex_conflict:
@@ -732,11 +495,11 @@ def execute_plan(
             if not annex_conflict:
                 break
             LOGGER.warning(
-                "[executor] annex stamp count mismatch for chunk (kind=%s, "
-                "mode=%s); rolling back and retrying %s",
-                chunk.kind, annex_mode,
-                "with a fresh collection" if annex_mode == "annex"
-                else "without the annex",
+                "[executor] perception stamp count mismatch for chunk (kind=%s, "
+                "mode=%s); rolling back and re-running the chunk %s",
+                chunk.kind, material_mode,
+                "with a fresh collection" if material_mode == "perception"
+                else "without perception material",
             )
 
         if skipped_in_tx:

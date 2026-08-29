@@ -5,8 +5,14 @@
   未付記バッチの確定文面 (rendered_text) をそのまま出す (再 reduce / 再 format
   しない)・提示から下ろす唯一の手段は付記印・legacy event_message 行との共存・
   Chronicle 無効ペルソナだけの窓例外。
-- 退場付記 (sai_memory/arasuji/executor): 恒等転写 / 件数集約の両分岐、群内
-  限定の敷き詰め、一括回収、digest 確定 tx と同乗する付記印。
+- 知覚バッチの材料化 (sai_memory/arasuji/executor, 2026-08-29 まはー裁定):
+  バッチは編纂 LLM の【知覚】材料として時刻順にプロンプトへ入り、digest 本文
+  への機械的な付記 (annex ブロック連結) はしない。付記印 (annexed_entry_id =
+  材料として消費済み) は digest 確定 tx と同乗し、群内限定の敷き詰めと
+  一括回収は従来どおり。
+- 機構名義の行の長さ規則 (generator.MECHANISM_TEXT_MAX_CHARS): 閾値以下は
+  全文が材料に、超えたら決定論の一行に縮む。チャンクの字数勘定 (alignment)
+  も圧縮後サイズで数える。
 - 直挿しの移送 (B4/B7): day_plan の移動失敗通知と upgrade_handlers の
   アップデート通知が push_perception 経由になったこと。
 """
@@ -322,187 +328,137 @@ class MergeConsumedPerceptionsTest(unittest.TestCase):
 
 
 class PerceptionAnnexTest(unittest.TestCase):
-    """退場付記 (executor の決定論転写 + 同一 tx の付記印, §10.4)。"""
+    """知覚バッチの材料化 (executor) と長さ規則 (2026-08-29 まはー裁定)。
+
+    バッチは digest 本文へ転写せず、編纂 LLM の材料としてプロンプトに入る。
+    付記印 (annexed_entry_id = 材料として消費済み) は digest 確定 tx と同乗。
+    """
 
     def setUp(self):
         self.conn = sqlite3.connect(":memory:")
         init_perception_buffer_table(self.conn)
-        # collect_annex_items が読む最小の messages テーブル。
-        self.conn.execute(
-            "CREATE TABLE messages (id TEXT PRIMARY KEY, thread_id TEXT, "
-            "role TEXT, content TEXT, created_at INTEGER, metadata TEXT)"
-        )
         self.addCleanup(self.conn.close)
 
-    def _add_legacy_event(self, mid, content, created_at, thread_id="t1"):
-        import json
-        self.conn.execute(
-            "INSERT INTO messages (id, thread_id, role, content, created_at, metadata) "
-            "VALUES (?, ?, 'user', ?, ?, ?)",
-            (
-                mid, thread_id, content, created_at,
-                json.dumps({"tags": ["internal", "event_message"]}),
-            ),
-        )
-        self.conn.commit()
-
-    def test_collect_includes_batches_and_legacy_in_order(self):
+    def test_collect_includes_batches_in_order(self):
         from sai_memory.arasuji.executor import collect_annex_items
         b1 = _batch(self.conn, "新着記事X", at=1200)
-        self._add_legacy_event(
-            "m1", "<system>[システム通知] legacy 通知</system>", 1100,
-        )
+        b2 = _batch(self.conn, "後の記事Y", at=1300)
         # 範囲外 (hi 以降) は入らない。
         _batch(self.conn, "範囲外の記事", at=2000)
-        items, batch_ids = collect_annex_items(
-            self.conn, 1000, 1500, thread_id="t1",
-        )
-        self.assertEqual(
-            [(d["kind"], d["at"]) for d in items],
-            [("event_message", 1100), ("perception", 1200)],
-        )
-        # <system> 包みは剥がして転写する。バッチ id は付記印用に返る。
-        self.assertEqual(items[0]["text"], "[システム通知] legacy 通知")
-        self.assertEqual(batch_ids, [b1])
+        items, batch_ids = collect_annex_items(self.conn, 1000, 1500)
+        self.assertEqual([d["at"] for d in items], [1200, 1300])
+        self.assertEqual([d["text"] for d in items], ["新着記事X", "後の記事Y"])
+        # バッチ id は付記印 (材料として消費済み) 用に返る。
+        self.assertEqual(batch_ids, [b1, b2])
 
     def test_collect_skips_annexed_batches(self):
         from sai_memory.arasuji.executor import collect_annex_items
         b1 = _batch(self.conn, "付記済み", at=1200)
         mark_batches_annexed(self.conn, [b1], "entry-x")
         self.conn.commit()
-        items, batch_ids = collect_annex_items(
-            self.conn, 1000, 1500, thread_id="t1",
-        )
+        items, batch_ids = collect_annex_items(self.conn, 1000, 1500)
         self.assertEqual(items, [])
         self.assertEqual(batch_ids, [])
 
     def test_collect_recovers_leftovers_before_compiled_end(self):
         # 一括回収: 既存の編纂被覆の末尾以前に consumed_at を持つ未付記バッチは
-        # スパン外でも引き取る (チャンク skip・付記失敗の回収路)。
+        # スパン外でも引き取る (チャンク skip・印付け失敗の回収路)。
         from sai_memory.arasuji.executor import collect_annex_items
         b_old = _batch(self.conn, "取り残された知覚", at=800)
         b_in = _batch(self.conn, "スパン内の知覚", at=1200)
         items, batch_ids = collect_annex_items(
-            self.conn, 1000, 1500, thread_id="t1", recover_before=900,
+            self.conn, 1000, 1500, recover_before=900,
         )
         self.assertEqual([d["at"] for d in items], [800, 1200])
         self.assertEqual(batch_ids, [b_old, b_in])
 
-    def test_collect_filters_by_thread(self):
-        from sai_memory.arasuji.executor import collect_annex_items
-        self._add_legacy_event("m1", "別スレッドの通知", 1100, thread_id="other")
-        items, batch_ids = collect_annex_items(
-            self.conn, 1000, 1500, thread_id="t1",
-        )
-        self.assertEqual(items, [])
-        self.assertEqual(batch_ids, [])
+    # ---- 長さ規則 (generator.MECHANISM_TEXT_MAX_CHARS) ----
 
-    def test_collect_requires_event_message_tag(self):
-        import json
-        from sai_memory.arasuji.executor import collect_annex_items
-        # LIKE には引っかかるがタグ配列に無い行は拾わない。
-        self.conn.execute(
-            "INSERT INTO messages VALUES ('m1', 't1', 'user', 'x', 1100, ?)",
-            (json.dumps({"note": "event_messageの話をしただけ"}),),
+    def test_short_mechanism_row_passes_verbatim(self):
+        # 回帰 (a): 閾値以下のスペル結果は全文がそのまま材料に入る。
+        from sai_memory.arasuji.generator import (
+            MECHANISM_TEXT_MAX_CHARS,
+            material_text,
         )
-        self.conn.commit()
-        items, _ = collect_annex_items(self.conn, 1000, 1500, thread_id="t1")
-        self.assertEqual(items, [])
-
-    def test_format_identity_when_small(self):
-        from sai_memory.arasuji.executor import format_perception_annex
-        items = [
-            {"kind": "perception", "at": 1200, "text": "新着記事Xが届いた"},
-            {"kind": "event_message", "at": 1300, "text": "誰かが入室した"},
-        ]
-        text = format_perception_annex(items)
-        # 恒等転写: 全文がそのまま入る (小さいものは潰さない)。
-        self.assertIn("新着記事Xが届いた", text)
-        self.assertIn("誰かが入室した", text)
-        self.assertIn("機械的な転写", text)
-
-    def test_format_aggregates_when_large(self):
-        from sai_memory.arasuji.executor import (
-            ANNEX_IDENTITY_MAX_CHARS,
-            format_perception_annex,
+        from sai_memory.memory.storage import Message
+        body = "[Spell Result: web_search]\n短い検索結果"
+        self.assertLessEqual(len(body), MECHANISM_TEXT_MAX_CHARS)
+        msg = Message(
+            id="s1", thread_id="t1", role="system", content=body,
+            resource_id="p1", created_at=1000,
+            metadata={"tags": ["conversation", "spell"]},
         )
-        long_text = "あ" * (ANNEX_IDENTITY_MAX_CHARS // 4)
-        items = [
-            {"kind": "perception", "at": 1000 + i, "text": f"{i}件目 {long_text}"}
-            for i in range(6)
-        ]
-        text = format_perception_annex(items)
-        # kind 別の件数 + 先頭数件の冒頭 + ほか N 件 (day_report 型)。
-        self.assertIn("perception: 6 件", text)
-        self.assertIn("ほか 3 件", text)
-        # 全文は転写されない (冒頭のみ)。
-        self.assertNotIn(f"5件目 {long_text}", text)
+        self.assertEqual(material_text(msg), body)
 
-    def test_format_empty(self):
-        from sai_memory.arasuji.executor import format_perception_annex
-        self.assertEqual(format_perception_annex([]), "")
+    def test_long_mechanism_row_condenses_to_one_line(self):
+        # 回帰 (b): 閾値超えのスペル結果は決定論の一行 (名前 + 字数) に縮む。
+        # DB の行は触らない — 縮むのは材料を組む時だけ。
+        from sai_memory.arasuji.generator import (
+            MECHANISM_TEXT_MAX_CHARS,
+            material_text,
+        )
+        from sai_memory.memory.storage import Message
+        body = "[Spell Result: web_search]\n" + "x" * (MECHANISM_TEXT_MAX_CHARS * 4)
+        msg = Message(
+            id="s1", thread_id="t1", role="system", content=body,
+            resource_id="p1", created_at=1000,
+            metadata={"tags": ["conversation", "spell"]},
+        )
+        line = material_text(msg)
+        self.assertIn("[Spell Result: web_search] を受け取った", line)
+        self.assertIn("字)", line)
+        self.assertLess(len(line), 120)
+        # 名前プレフィックスの無い長文は先頭行の冒頭 + 字数。
+        msg2 = Message(
+            id="s2", thread_id="t1", role="user",
+            content="通知の長い本文 " * 200, resource_id="p1", created_at=1001,
+            metadata={"tags": ["internal", "event_message"]},
+        )
+        line2 = material_text(msg2)
+        self.assertIn("通知の長い本文", line2)
+        self.assertIn("字)", line2)
+        self.assertLess(len(line2), 120)
 
-    def test_format_aggregation_keeps_all_bracket_lines(self):
-        # 全行が角括弧形式のバッチが閾値を超えても、機構見出し (正準リスト) 以外の
-        # ``[...]`` 行は本文として転写に残る (Codex 第四巡 #4)。
-        from sai_memory.arasuji.executor import (
-            ANNEX_IDENTITY_MAX_CHARS,
-            format_perception_annex,
+    def test_non_mechanism_long_row_is_not_condensed(self):
+        # 本人の長い発話は縮めない — 長さ規則は機構名義の行 (タグ判定) だけ。
+        from sai_memory.arasuji.generator import (
+            MECHANISM_TEXT_MAX_CHARS,
+            material_text,
         )
-        pad = "あ" * (ANNEX_IDENTITY_MAX_CHARS // 2)
-        text = "\n".join(
-            [f"[議題{i}] {pad}" for i in range(4)]
+        from sai_memory.memory.storage import Message
+        body = "長い独白 " * (MECHANISM_TEXT_MAX_CHARS // 2)
+        msg = Message(
+            id="u1", thread_id="t1", role="assistant", content=body,
+            resource_id="p1", created_at=1000,
+            metadata={"tags": ["conversation"]},
         )
-        annex = format_perception_annex([
-            {"kind": "perception", "at": 1200, "text": text},
-        ])
-        # 角括弧始まりでも本文行として先頭数行が残る (先頭 1 行だけに潰れない)。
-        self.assertIn("[議題0]", annex)
-        self.assertIn("[議題1]", annex)
-        self.assertIn("[議題2]", annex)
+        self.assertEqual(material_text(msg), body)
 
-    def test_format_aggregation_falls_back_when_only_headers(self):
-        # 全部が機構見出しでも、元の非空行の先頭数行が残る (空にならない)。
-        from sai_memory.arasuji.executor import (
-            ANNEX_IDENTITY_MAX_CHARS,
-            format_perception_annex,
-        )
-        header_only = "\n".join(["[フィード]", "[システム通知]"] * 2)
-        items = [
-            {"kind": "perception", "at": 1200 + i, "text": header_only}
-            for i in range(ANNEX_IDENTITY_MAX_CHARS // len(header_only) + 2)
-        ]
-        annex = format_perception_annex(items)
-        self.assertIn("[フィード]", annex)  # フォールバックで見出し行自体は残る
-
-    def test_format_aggregation_keeps_meaning_of_huge_single_batch(self):
-        # 大量の単一バッチ (実際の flush 整形 = kind 見出し付き) が集約に落ちても、
-        # 「[フィード]」のような見出しだけでなく**中身の冒頭**が digest に残る
-        # (2026-08-19 Codex 第三巡 #2)。
-        from sai_memory.arasuji.executor import format_perception_annex
-        from sai_memory.perception_buffer import (
-            format_perception_message,
-            list_pending,
-        )
-        # 実整形: フィード記事複数件を flush と同じ経路で 1 バッチ文面にする。
-        for i in range(8):
-            push_perception(
-                self.conn, "feed",
-                f"記事{i}「宇宙エレベーター建設計画その{i}」: " + ("本文" * 120),
+    def test_alignment_counts_condensed_size(self):
+        # 回帰 (b): チャンクの字数勘定 (U 計算) も圧縮後サイズで数える。
+        # 圧縮前サイズで数えると 10,000 字のスペル結果 2 行はそれぞれ単独で
+        # チャンクを閉じて 2 チャンクになるが、材料の実体は一行ずつなので
+        # 1 チャンクに束ねるのが正しい。
+        from sai_memory.arasuji.alignment import plan_alignment
+        from sai_memory.memory.storage import Message
+        big = "[Spell Result: big]\n" + "x" * 10_000
+        msgs = [
+            Message(
+                id=f"s{i}", thread_id="t1", role="system", content=big,
+                resource_id="p1", created_at=1000 + i * 100,
+                metadata={"tags": ["conversation", "spell"]},
             )
-        rendered = format_perception_message(list_pending(self.conn))
-        self.assertTrue(rendered.startswith("[フィード]"))  # 前提の確認
-        text = format_perception_annex([
-            {"kind": "perception", "at": 1200, "text": rendered},
-        ])
-        # 集約分岐に落ちている (全文転写ではない)。
-        self.assertLess(len(text), len(rendered))
-        # 見出しでなく中身の冒頭が残る。
-        self.assertIn("宇宙エレベーター建設計画", text)
-        # 見出しだけの行 (意味内容ゼロ) を冒頭として採っていない。
-        for line in text.splitlines():
-            if line.strip().startswith("・"):
-                self.assertNotIn(line.strip(), ("・[フィード]",))
+            for i in range(2)
+        ] + [
+            Message(
+                id="u1", thread_id="t1", role="user", content="続きの発言",
+                resource_id="p1", created_at=1300,
+            ),
+        ]
+        plan = plan_alignment(msgs, set(), target_chars=10_000)
+        self.assertEqual(len(plan.chunks), 1)
+        # 記録される被覆も材料字数 (圧縮後) — 勘定と材料の実体を一致させる。
+        self.assertLess(plan.chunks[0].coverage_chars, 300)
 
     def _chunk(self, times, group_key=None):
         return SimpleNamespace(
@@ -536,17 +492,33 @@ class PerceptionAnnexTest(unittest.TestCase):
         self.assertEqual(spans[0], (1000, 1101))
         self.assertEqual(spans[1], (5000, 5201))
 
-    def _make_plan_messages(self, times, prefix="m"):
+    def _make_plan_messages(self, times, prefix="m", extra=None):
         from sai_memory.memory.storage import Message
-        return [
+        msgs = [
             Message(
                 id=f"{prefix}{i}", thread_id="t1", role="user",
                 content=f"発言{i}", resource_id="p1", created_at=t,
             )
             for i, t in enumerate(times)
         ]
+        msgs.extend(extra or [])
+        msgs.sort(key=lambda m: m.created_at)
+        return msgs
 
-    def test_execute_plan_annexes_batch_and_stamps_in_tx(self):
+    def _capturing_client(self, response="LLM要約本文"):
+        """プロンプトを記録するフェイク LLM client。"""
+        prompts = []
+
+        def _generate(**kw):
+            prompts.append(kw["messages"][0]["content"])
+            return response
+
+        return SimpleNamespace(generate=_generate), prompts
+
+    def test_execute_plan_feeds_batch_as_material_and_stamps_in_tx(self):
+        # 回帰 (e): 知覚バッチは【知覚】材料として LLM プロンプトへ入り、印は
+        # digest 確定と同一 tx で付く。回帰 (c): digest 本文は LLM 出力のみ —
+        # 旧設計の機械的な付記ブロックは付かない。
         from sai_memory.arasuji import init_arasuji_tables
         from sai_memory.arasuji.alignment import plan_alignment
         from sai_memory.arasuji.executor import execute_plan
@@ -554,21 +526,22 @@ class PerceptionAnnexTest(unittest.TestCase):
         init_arasuji_tables(self.conn)
         # fold 期間 (メッセージ 1000..1400) の途中で消費されたバッチ。
         b1 = _batch(self.conn, "[フィード]\n編纂対象期間の知覚", at=1150)
-        self._add_legacy_event(
-            "ev1", "<system>[システム通知] 期間内の legacy 通知</system>", 1050,
-        )
         msgs = self._make_plan_messages([1000, 1100, 1200, 1300, 1400])
         plan = plan_alignment(msgs, set(), target_chars=10)
-        client = SimpleNamespace(generate=lambda **kw: "LLM要約本文")
+        client, prompts = self._capturing_client()
         result = execute_plan(plan, client, self.conn, persona_id="p1")
         self.assertGreaterEqual(result.created_count, 1)
-        joined = "\n".join(e.content for e in result.created)
-        self.assertIn("LLM要約本文", joined)
-        # 決定論の付記が digest テキストに添えられている。
-        self.assertIn("編纂対象期間の知覚", joined)
-        self.assertIn("期間内の legacy 通知", joined)
-        self.assertIn("機械的な転写", joined)
-        # 付記印が digest 確定と同じ tx で入り、提示対象から下りている。
+        joined_content = "\n".join(e.content for e in result.created)
+        self.assertIn("LLM要約本文", joined_content)
+        # (c) digest 本文は LLM 出力そのもの — 付記ブロックも知覚の生文も無い。
+        self.assertNotIn("この期間に届いた通知・知覚の記録", joined_content)
+        self.assertNotIn("編纂対象期間の知覚", joined_content)
+        # バッチ本文は材料として LLM プロンプトに【知覚】ラベル付きで入る。
+        joined_prompts = "\n".join(prompts)
+        self.assertIn("編纂対象期間の知覚", joined_prompts)
+        self.assertIn("【知覚】", joined_prompts)
+        # 付記印 (材料として消費済み) が digest 確定と同じ tx で入り、
+        # 提示対象から下りている。
         self.assertEqual(list_unannexed_batches(self.conn), [])
         row = self.conn.execute(
             "SELECT annexed_entry_id FROM perception_batches WHERE id = ?",
@@ -576,9 +549,100 @@ class PerceptionAnnexTest(unittest.TestCase):
         ).fetchone()
         self.assertIn(row[0], [e.id for e in result.created])
 
-    def test_execute_plan_annex_failure_leaves_batch_for_recovery(self):
-        # 付記の失敗は digest を止めず、バッチは未付記のまま提示に残る
-        # (fail-open, Codex #4)。次の編纂の一括回収が引き取る。
+    def test_execute_plan_event_message_row_is_material_with_label(self):
+        # 回帰 (d): event_message 行は編纂対象になり source_ids (被覆) に入る。
+        # 短い通知は全文が【通知】ラベル付きで材料に入る (回帰 a の同族)。
+        from sai_memory.arasuji import init_arasuji_tables
+        from sai_memory.arasuji.alignment import plan_alignment
+        from sai_memory.arasuji.executor import execute_plan
+        from sai_memory.memory.storage import Message
+
+        init_arasuji_tables(self.conn)
+        event_row = Message(
+            id="ev1", thread_id="t1", role="user",
+            content="<system>[システム通知] 誰かが入室した</system>",
+            resource_id="p1", created_at=1050,
+            metadata={"tags": ["internal", "event_message"]},
+        )
+        msgs = self._make_plan_messages([1000, 1100], extra=[event_row])
+        plan = plan_alignment(msgs, set(), target_chars=10)
+        client, prompts = self._capturing_client()
+        result = execute_plan(plan, client, self.conn, persona_id="p1")
+        self.assertEqual(result.created_count, 1)
+        # 被覆 (source_ids) に event_message 行が入る。
+        self.assertIn("ev1", result.created[0].source_ids)
+        # 材料には全文 + 【通知】ラベル。
+        joined_prompts = "\n".join(prompts)
+        self.assertIn("誰かが入室した", joined_prompts)
+        self.assertIn("【通知】", joined_prompts)
+
+    def test_execute_plan_long_spell_row_condensed_in_prompt(self):
+        # 回帰 (a)(b) の経路統合: 閾値以下のスペル結果は全文が
+        # 【スペル結果】ラベルで、閾値超えは決定論の一行だけが材料に入る。
+        from sai_memory.arasuji import init_arasuji_tables
+        from sai_memory.arasuji.alignment import plan_alignment
+        from sai_memory.arasuji.executor import execute_plan
+        from sai_memory.arasuji.generator import MECHANISM_TEXT_MAX_CHARS
+        from sai_memory.memory.storage import Message
+
+        init_arasuji_tables(self.conn)
+        short_spell = Message(
+            id="sp1", thread_id="t1", role="system",
+            content="[Spell Result: dice]\n出目は 6",
+            resource_id="p1", created_at=1050,
+            metadata={"tags": ["conversation", "spell"]},
+        )
+        long_body = "x" * (MECHANISM_TEXT_MAX_CHARS * 4)
+        long_spell = Message(
+            id="sp2", thread_id="t1", role="system",
+            content=f"[Spell Result: web_search]\n{long_body}",
+            resource_id="p1", created_at=1150,
+            metadata={"tags": ["conversation", "spell"]},
+        )
+        msgs = self._make_plan_messages(
+            [1000, 1100, 1200], extra=[short_spell, long_spell],
+        )
+        # target は材料合計より大きく取る — 全行が 1 チャンクに入る形で
+        # 「長文スペルが材料では一行に縮む」ことだけを見る。
+        plan = plan_alignment(msgs, set(), target_chars=10_000)
+        client, prompts = self._capturing_client()
+        result = execute_plan(plan, client, self.conn, persona_id="p1")
+        self.assertEqual(result.created_count, 1)
+        joined_prompts = "\n".join(prompts)
+        # (a) 閾値以下: 全文がそのまま。
+        self.assertIn("出目は 6", joined_prompts)
+        self.assertIn("【スペル結果】", joined_prompts)
+        # (b) 閾値超え: 全文は入らず、決定論の一行に縮む。
+        self.assertNotIn(long_body, joined_prompts)
+        self.assertIn("[Spell Result: web_search] を受け取った", joined_prompts)
+        # 被覆にはどちらも全文の行として入る (DB の行は縮めない)。
+        self.assertIn("sp1", result.created[0].source_ids)
+        self.assertIn("sp2", result.created[0].source_ids)
+
+    def test_execute_plan_recall_batch_labeled_and_noted(self):
+        # 入室想起の再提示 (本文が [想起: で始まるバッチ) は
+        # 【想起 (過去の再提示)】とラベルされ、プロンプトに注記が付く。
+        from sai_memory.arasuji import init_arasuji_tables
+        from sai_memory.arasuji.alignment import plan_alignment
+        from sai_memory.arasuji.executor import execute_plan
+
+        init_arasuji_tables(self.conn)
+        _batch(
+            self.conn,
+            "[想起: 誰かとの過去の会話]\n- [user] @ 2026-01-01 00:00: 昔の話",
+            at=1150,
+        )
+        msgs = self._make_plan_messages([1000, 1400])
+        plan = plan_alignment(msgs, set(), target_chars=10)
+        client, prompts = self._capturing_client()
+        execute_plan(plan, client, self.conn, persona_id="p1")
+        joined_prompts = "\n".join(prompts)
+        self.assertIn("【想起 (過去の再提示)】", joined_prompts)
+        self.assertIn("過去の出来事の再提示", joined_prompts)
+
+    def test_execute_plan_collection_failure_leaves_batch_for_recovery(self):
+        # 収集の失敗は digest を止めず、バッチは未付記のまま提示に残る
+        # (fail-open)。次の編纂の一括回収が材料として引き取る。
         from unittest.mock import patch
         from sai_memory.arasuji import init_arasuji_tables
         from sai_memory.arasuji.alignment import plan_alignment
@@ -588,7 +652,7 @@ class PerceptionAnnexTest(unittest.TestCase):
         b1 = _batch(self.conn, "落ちた回の知覚", at=1150)
         msgs = self._make_plan_messages([1000, 1400])
         plan = plan_alignment(msgs, set(), target_chars=10)
-        client = SimpleNamespace(generate=lambda **kw: "本文のみ")
+        client, prompts = self._capturing_client(response="本文のみ")
         with patch(
             "sai_memory.arasuji.executor.collect_annex_items",
             side_effect=RuntimeError("annex down"),
@@ -600,14 +664,17 @@ class PerceptionAnnexTest(unittest.TestCase):
         self.assertEqual(
             [b.id for b in list_unannexed_batches(self.conn)], [b1],
         )
+        self.assertNotIn("落ちた回の知覚", "\n".join(prompts))
 
         # 次の編纂 (後続期間のチャンク): 先頭チャンクの一括回収が、既存の
-        # 編纂被覆 (end_time=1400) 以前の未付記バッチを引き取る。
+        # 編纂被覆 (end_time=1400) 以前の未付記バッチを材料として引き取る。
         msgs2 = self._make_plan_messages([2000, 2400], prefix="n")
         plan2 = plan_alignment(msgs2, set(), target_chars=10)
-        result2 = execute_plan(plan2, client, self.conn, persona_id="p1")
+        client2, prompts2 = self._capturing_client(response="次の本文")
+        result2 = execute_plan(plan2, client2, self.conn, persona_id="p1")
         self.assertEqual(result2.created_count, 1)
-        self.assertIn("落ちた回の知覚", result2.created[0].content)
+        self.assertIn("落ちた回の知覚", "\n".join(prompts2))
+        self.assertNotIn("落ちた回の知覚", result2.created[0].content)
         self.assertEqual(list_unannexed_batches(self.conn), [])
 
 
@@ -681,7 +748,7 @@ class PerceptionRecallReadPortTest(unittest.TestCase):
         init_arasuji_tables(self.conn)
         entry = create_entry(
             self.conn, level=1,
-            content="あらすじ本文\n（この期間に届いた通知・知覚の記録 — 機械的な転写）\n- 紫の灯台の噂",
+            content="あらすじ本文。紫の灯台の噂を聞いた。",
             source_ids=["m1"], start_time=1000, end_time=1400,
             source_count=1, message_count=1,
         )
@@ -1056,7 +1123,15 @@ class AnnexStampLifecycleTest(unittest.TestCase):
         from sai_memory.arasuji import init_arasuji_tables
         init_arasuji_tables(self.conn)
         self.addCleanup(self.conn.close)
-        self.client = SimpleNamespace(generate=lambda **kw: "LLM要約")
+        # プロンプトを記録するフェイク client — 新設計ではバッチは digest 本文
+        # ではなく材料 (プロンプト) に入るので、検証はプロンプト側で行う。
+        self.prompts = []
+
+        def _generate(**kw):
+            self.prompts.append(kw["messages"][0]["content"])
+            return "LLM要約"
+
+        self.client = SimpleNamespace(generate=_generate)
 
     def _make_messages(self, times, prefix="m", insert_rows=False):
         from sai_memory.memory.storage import Message
@@ -1086,7 +1161,7 @@ class AnnexStampLifecycleTest(unittest.TestCase):
 
     def test_entry_deletion_returns_batch_then_later_compile_recovers(self):
         # entry 削除で付記印が戻り (= 提示に再登場)、後続の編纂の一括回収が
-        # 引き取って再付記する (Codex #1)。
+        # 材料として引き取って再付記する (Codex #1)。
         from sai_memory.arasuji.storage import delete_entry
         b1 = _batch(self.conn, "消される entry の知覚", at=1150)
         result1 = self._compile([1000, 1400])
@@ -1100,16 +1175,20 @@ class AnnexStampLifecycleTest(unittest.TestCase):
         )
 
         # 直後の編纂 (被覆の先端が無いので回収境界も無い) では拾われない。
-        result2 = self._compile([2000, 2400], prefix="n")
+        self.prompts.clear()
+        self._compile([2000, 2400], prefix="n")
         self.assertEqual(
             [b.id for b in list_unannexed_batches(self.conn)], [b1],
         )
-        self.assertNotIn("消される entry の知覚", result2.created[0].content)
+        self.assertNotIn("消される entry の知覚", "\n".join(self.prompts))
 
         # さらに次の編纂: 先頭チャンクの一括回収 (prev_end=2400 ≥ 1150) が
-        # 引き取り、再付記される。
+        # 材料として引き取り、再付記される。
+        self.prompts.clear()
         result3 = self._compile([3000, 3400], prefix="o")
-        self.assertIn("消される entry の知覚", result3.created[0].content)
+        self.assertIn("消される entry の知覚", "\n".join(self.prompts))
+        # digest 本文には知覚の生文は入らない (LLM 出力のみ)。
+        self.assertNotIn("消される entry の知覚", result3.created[0].content)
         self.assertEqual(list_unannexed_batches(self.conn), [])
         row = self.conn.execute(
             "SELECT annexed_entry_id FROM perception_batches WHERE id = ?",
@@ -1195,32 +1274,23 @@ class AnnexStampLifecycleTest(unittest.TestCase):
         from sai_memory.memopedia.storage import get_page
         self.assertEqual(get_page(self.conn, survivor.id).content, "本文")
 
-    def test_regenerate_inherits_annex_and_repoints_stamps(self):
-        # 再生成の swap は旧付記を replacement へ継承する: バッチと legacy の
-        # 転写本文が新 entry に残り、印は新 id へ付け替わり、未付記バッチは
-        # 増えない (Codex 第三巡 #3 / 第六巡 #3)。
-        import json
+    def test_regenerate_feeds_old_batches_as_material_and_repoints_stamps(self):
+        # 再生成の swap は旧 entry の材料バッチを継承する: バッチ本文が再生成
+        # LLM の材料 (extra_items) として渡り、印は新 id へ付け替わり、未付記
+        # バッチは増えない (Codex 第三巡 #3 → 2026-08-29 裁定で材料方式)。
         from unittest.mock import patch
         from sai_memory.arasuji.storage import create_entry, regenerate_entry
 
         b1 = _batch(self.conn, "再生成で引き継ぐ知覚", at=1150)
-        # 旧 entry の期間内の legacy event_message 行 (再生成は本文を作り直す
-        # ので、これも再収集しないと消える)。
-        self.conn.execute(
-            "INSERT INTO messages (id, thread_id, role, content, resource_id, "
-            "created_at, metadata) VALUES (?, 't1', 'user', ?, 'p1', 1100, ?)",
-            (
-                "legacy-ev",
-                "<system>[システム通知] 再生成で引き継ぐ legacy 通知</system>",
-                json.dumps({"tags": ["internal", "event_message"]}),
-            ),
-        )
-        self.conn.commit()
         result = self._compile([1000, 1400], insert_rows=True)
         old_entry = result.created[0]
         self.assertEqual(list_unannexed_batches(self.conn), [])
 
-        def _fake_regen(conn, messages, model_name, persona_id=None):
+        seen = {}
+
+        def _fake_regen(conn, messages, model_name, persona_id=None,
+                        extra_items=None):
+            seen["extra_items"] = extra_items
             return create_entry(
                 conn, level=1, content="再生成された本文",
                 source_ids=[m.id for m in messages],
@@ -1237,9 +1307,12 @@ class AnnexStampLifecycleTest(unittest.TestCase):
 
         self.assertIsNotNone(new_entry)
         self.assertIn("再生成された本文", new_entry.content)
-        # 旧付記の知覚と legacy 通知が新本文に決定論転写で残る。
-        self.assertIn("再生成で引き継ぐ知覚", new_entry.content)
-        self.assertIn("再生成で引き継ぐ legacy 通知", new_entry.content)
+        # 旧バッチが材料として再生成 LLM へ渡っている。
+        self.assertEqual(
+            [d["text"] for d in seen["extra_items"]], ["再生成で引き継ぐ知覚"],
+        )
+        # digest 本文への機械的な転写はしない (本文は LLM 出力のみ)。
+        self.assertNotIn("再生成で引き継ぐ知覚", new_entry.content)
         # 印は新 id へ付け替え済み — 再生成直後に未付記バッチは増えない。
         self.assertEqual(list_unannexed_batches(self.conn), [])
         stamp = self.conn.execute(
@@ -1346,100 +1419,6 @@ class AnnexStampLifecycleTest(unittest.TestCase):
         lv2_after = get_entry(self.conn, lv2.id)
         self.assertNotIn(entry.id, lv2_after.source_ids)
 
-    def test_regenerate_preserves_empty_legacy_ids(self):
-        # annexed_legacy_ids が空リストでも新 entry へ無条件継承する (Codex
-        # 第八巡 #3) — 落とすと legacy ゼロ entry の二度目の再生成がフォール
-        # バックの時刻収集に落ち、同秒の隣接 legacy を拾いうる。
-        import json
-        from unittest.mock import patch
-        from sai_memory.arasuji.storage import create_entry, regenerate_entry
-
-        result = self._compile([1000, 1400], insert_rows=True)  # legacy ゼロ
-        entry = result.created[0]
-        # 同秒 (1400)・最終 source 行より後の囮 legacy (フォールバックなら拾う)。
-        self.conn.execute(
-            "INSERT INTO messages (id, thread_id, role, content, resource_id, "
-            "created_at, metadata) VALUES (?, 't1', 'user', ?, 'p1', 1400, ?)",
-            ("decoy-ev", "<system>[システム通知] 囮の legacy</system>",
-             json.dumps({"tags": ["internal", "event_message"]})),
-        )
-        self.conn.commit()
-
-        def _fake_regen(conn, messages, model_name, persona_id=None):
-            return create_entry(
-                conn, level=1, content="再生成本文",
-                source_ids=[m.id for m in messages],
-                start_time=min(m.created_at for m in messages),
-                end_time=max(m.created_at for m in messages),
-                source_count=len(messages), message_count=len(messages),
-            )
-
-        with patch(
-            "scripts.arasuji.build_arasuji_core.regenerate_entry_from_messages",
-            side_effect=_fake_regen,
-        ):
-            gen1 = regenerate_entry(self.conn, entry.id)
-            self.assertNotIn("囮の legacy", gen1.content)
-            # 空リストが継承されている (= 二回目も正の経路)。
-            meta = json.loads(self.conn.execute(
-                "SELECT metadata FROM memopedia_pages WHERE id = ?",
-                (gen1.id,),
-            ).fetchone()[0])
-            self.assertEqual(meta.get("annexed_legacy_ids"), [])
-            gen2 = regenerate_entry(self.conn, gen1.id)
-            self.assertNotIn("囮の legacy", gen2.content)
-
-    def test_regenerate_fallback_ignores_adjacent_same_second_legacy(self):
-        # annexed_legacy_ids を持たない旧 entry の再生成フォールバックは
-        # (created_at, rowid) の区間で絞る — epoch の end_time+1 だと同秒の
-        # 隣接 entry の legacy を誤収集する (Codex 第七巡 #2)。
-        import json
-        from unittest.mock import patch
-        from sai_memory.arasuji.storage import create_entry, regenerate_entry
-
-        msgs = self._make_messages([1000, 1400], insert_rows=True)
-        # 自分の期間内の legacy (1100)。
-        self.conn.execute(
-            "INSERT INTO messages (id, thread_id, role, content, resource_id, "
-            "created_at, metadata) VALUES (?, 't1', 'user', ?, 'p1', 1100, ?)",
-            ("own-ev", "<system>[システム通知] 自分の legacy</system>",
-             json.dumps({"tags": ["internal", "event_message"]})),
-        )
-        # 隣接 entry の legacy — 同秒 (1400) だが、この entry の最終 source 行
-        # より後 (rowid が大きい)。end_time+1 の epoch 区間なら誤収集される。
-        self.conn.execute(
-            "INSERT INTO messages (id, thread_id, role, content, resource_id, "
-            "created_at, metadata) VALUES (?, 't1', 'user', ?, 'p1', 1400, ?)",
-            ("neighbor-ev", "<system>[システム通知] 隣の entry の legacy</system>",
-             json.dumps({"tags": ["internal", "event_message"]})),
-        )
-        self.conn.commit()
-        # 旧 entry (execute_plan を通らない手作り = annexed_legacy_ids なし)。
-        old_entry = create_entry(
-            self.conn, level=1, content="旧本文",
-            source_ids=[m.id for m in msgs],
-            start_time=1000, end_time=1400, source_count=2, message_count=2,
-        )
-
-        def _fake_regen(conn, messages, model_name, persona_id=None):
-            return create_entry(
-                conn, level=1, content="再生成本文",
-                source_ids=[m.id for m in messages],
-                start_time=min(m.created_at for m in messages),
-                end_time=max(m.created_at for m in messages),
-                source_count=len(messages), message_count=len(messages),
-            )
-
-        with patch(
-            "scripts.arasuji.build_arasuji_core.regenerate_entry_from_messages",
-            side_effect=_fake_regen,
-        ):
-            new_entry = regenerate_entry(self.conn, old_entry.id)
-
-        self.assertIsNotNone(new_entry)
-        self.assertIn("自分の legacy", new_entry.content)
-        self.assertNotIn("隣の entry の legacy", new_entry.content)
-
     def test_move_apis_refuse_chronicle(self):
         # 保護境界の外へ運び出す操作 (親付け替え) も拒否の族 (Codex 第六巡 #1)。
         from sai_memory.memopedia.storage import (
@@ -1466,10 +1445,11 @@ class AnnexStampLifecycleTest(unittest.TestCase):
         ).fetchone()
         self.assertEqual(row[0], "root_chronicle")
 
-    def test_stale_collection_conflict_does_not_double_transcribe(self):
+    def test_stale_collection_conflict_does_not_double_supply(self):
         # 収集結果が古く「既に別 entry へ付記済み」のバッチを含んでいた場合、
-        # 印の行数不一致で tx を破棄し、再収集でやり直す — 同じ知覚が複数
-        # entry に転写されない (Codex #2)。
+        # 印の行数不一致で tx を破棄し、再収集 + LLM 呼び直しでチャンクごと
+        # やり直す — 同じ知覚が複数 entry の材料にならない (Codex #2 の
+        # 材料方式版。材料が変わるのでプロンプトも作り直しになる)。
         from unittest.mock import patch
         import sai_memory.arasuji.executor as executor_mod
 
@@ -1487,8 +1467,7 @@ class AnnexStampLifecycleTest(unittest.TestCase):
             if calls["n"] == 1:
                 # 1 回目だけ「tx の外の古い収集」を装い、付記済みバッチを混ぜる。
                 items = (
-                    [{"kind": "perception", "at": 1100,
-                      "text": "他所へ付記済みの知覚"}] + items
+                    [{"at": 1100, "text": "他所へ付記済みの知覚"}] + items
                 )
                 ids = [b_stale] + ids
             return items, ids
@@ -1499,9 +1478,12 @@ class AnnexStampLifecycleTest(unittest.TestCase):
             result = self._compile([1000, 1400])
 
         self.assertEqual(calls["n"], 2)  # 不一致 → rollback → 再収集
+        # LLM もやり直している (1 回目の材料は stale 混入で無効)。
+        self.assertEqual(len(self.prompts), 2)
+        self.assertIn("他所へ付記済みの知覚", self.prompts[0])
+        self.assertNotIn("他所へ付記済みの知覚", self.prompts[1])
+        self.assertIn("未付記の知覚", self.prompts[1])
         entry = result.created[0]
-        self.assertIn("未付記の知覚", entry.content)
-        self.assertNotIn("他所へ付記済みの知覚", entry.content)
         # 印の整合: stale は他所の印のまま、live は今回の entry へ。
         rows = dict(self.conn.execute(
             "SELECT id, annexed_entry_id FROM perception_batches",

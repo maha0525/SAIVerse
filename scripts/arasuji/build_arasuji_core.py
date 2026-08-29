@@ -360,6 +360,7 @@ def regenerate_entry_from_messages(
     messages: List[Message],
     model_name: str = None,
     persona_id: str = None,
+    extra_items: Optional[List[dict]] = None,
 ) -> Optional[Any]:
     """Regenerate a Chronicle entry from messages.
 
@@ -372,6 +373,9 @@ def regenerate_entry_from_messages(
         messages: Messages to regenerate from
         model_name: Model to use (defaults to MEMORY_WEAVE_MODEL env var)
         persona_id: Optional persona ID for usage tracking
+        extra_items: メッセージ行ではない材料 (旧 entry の材料だった知覚
+            バッチ等、``{"at", "text"}`` の list)。generate_level1_arasuji へ
+            そのまま渡す
 
     Returns:
         New ArasujiEntry or None on failure
@@ -409,8 +413,9 @@ def regenerate_entry_from_messages(
         messages,
         dry_run=False,
         persona_id=persona_id,
+        extra_items=extra_items,
     )
-    
+
     return new_entry
 
 

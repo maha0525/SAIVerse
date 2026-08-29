@@ -2665,14 +2665,14 @@ class SessionLifecycle:
         # とは限らない (提示コンテキストの途中を畳むため) ので、fold ごとに区切って渡し、離れた
         # 範囲が一つのあらすじに束ねられること (§4-5 連続束ねのみ) を防ぐ。
         #
-        # 一致するのは**Chronicle 対象の集合に限っての話**。除外タグのうち
-        # event_message (legacy の直挿し通知) と消費済み知覚 (W14 で行を作らなく
-        # なった分) は、編纂時に executor の決定論付記 (perception_buffer.md
-        # §10.4) が fold 期間ぶんを digest へ転写する — この二種については下限
-        # 「退場したものは必ず編纂されている」が通った。残る既知の欠けは
-        # handy_tool / spell / session_digest のメッセージで、これらは fold に
-        # 入っていても編纂されずに退場する (短期→長期の入口選別 issue の領分)。
-        # 実際に圧縮区間が空いた範囲は `_apply_eviction_plan` が「あらすじを
+        # 編纂対象 (chronicle_eligibility_filter) と fold の集合はほぼ一致する
+        # (2026-08-29 裁定で機構タグ handy_tool / spell / event_message の除外を
+        # 解除。session_digest も 2026-07-28 から編纂対象)。残る除外は Stelis
+        # スレッド・除外 line_role (sub_line / meta_judgment / nested)・非
+        # committed scope (discardable / volatile) で、いずれも main_line の
+        # 提示に立たない行なので fold にもまず現れない (例外は committed へ
+        # 昇格したメタ判断 — 提示には立つが line_role で編纂対象外のまま)。
+        # あらすじが生まれなかった fold は `_apply_eviction_plan` が「あらすじを
         # 持たない fold は退場させない」で拾う (退場そのものを見送るので、
         # 消えるのではなく生ログのまま残る)。
         chronicle_status = "disabled"

@@ -28,6 +28,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence, Set
 
+from sai_memory.arasuji.generator import material_chars
 from sai_memory.memory.storage import Message, spell_group_spans
 
 LOGGER = logging.getLogger(__name__)
@@ -82,8 +83,14 @@ def message_episode_ref(msg: Message) -> Optional[str]:
 
 
 def coverage_chars(messages: Sequence[Message]) -> int:
-    """被覆生ログ文字数 (あらすじ→被覆元の錨・統計。digest 自身の長さではない)。"""
-    return sum(len(m.content or "") for m in messages)
+    """被覆材料字数 (あらすじ→被覆元の錨・統計。digest 自身の長さではない)。
+
+    行の勘定は**材料としての字数** (generator.material_chars) — 機構名義の行
+    (handy_tool / spell / event_message タグ) で閾値超えのものは、材料を組む時に
+    決定論の一行へ縮むので、その圧縮後サイズで数える (2026-08-29 裁定)。
+    勘定と材料の実体がズレると U (チャンク発火閾値) が狂うため。
+    """
+    return sum(material_chars(m) for m in messages)
 
 
 @dataclass
