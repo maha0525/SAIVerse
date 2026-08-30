@@ -32,23 +32,26 @@ pypdf>=4.0.0
 
 # RSS/Atom feed intake (saiverse/feed_fetch.py)
 feedparser>=6.0
-# HTML autodiscovery (<link rel="alternate"> の解析、discover_feed)。markdownify の
-# 従属でも入るが、直接 import する依存は直接宣言する
+# HTML autodiscovery (parsing <link rel="alternate">, discover_feed). Also pulled
+# in by markdownify, but dependencies we import directly are declared directly.
+# NOTE: this file must stay ASCII-only -- pip decodes it with the OS locale
+# (cp932 on Japanese Windows) when there is no BOM, and non-ASCII comments make
+# `pip install -r requirements.txt` crash with UnicodeDecodeError.
 beautifulsoup4>=4.12
 
 # xAI (Grok) native SDK
 xai-sdk>=1.6.0
 
 # MCP (Model Context Protocol) client
-# 上限固定は必須: mcp 2.x は client transport の綴りを変え、SAIVerse が使う
-# streamablehttp_client を削除している (公式 whats-new: 「The deprecated
-# streamablehttp_client spelling」を removed に列挙、pip install mcp は 2.x を
-# 入れる)。上限が無いと fresh install で 2.x が入り、remote MCP が import
-# 時点で壊れる。公式もライブラリ側には mcp>=1.28,<2 を推奨。v2 API への移行は
-# 別案件 (docs/intent/mcp_protocol_coverage.md)。
+# The upper bound is mandatory: mcp 2.x renamed the client transport spellings and
+# removed streamablehttp_client, which SAIVerse uses (the official whats-new lists
+# "The deprecated streamablehttp_client spelling" as removed; bare `pip install mcp`
+# installs 2.x). Without the bound a fresh install gets 2.x and remote MCP breaks
+# at import time. Upstream also recommends mcp>=1.28,<2 for libraries. Migrating to
+# the v2 API is a separate task (docs/intent/mcp_protocol_coverage.md).
 mcp>=1.10.0,<2
 
-# Codex 系クライアント (llm_clients/openai_codex.py が利用)
+# Codex-family client (used by llm_clients/openai_codex.py)
 curl-cffi>=0.10.0
 
 # Linting
