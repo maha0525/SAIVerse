@@ -107,6 +107,10 @@ ERROR_CATEGORY_PROCESS_CRASH = "process_crash"
 # 故障ではないので失敗記録 (_failed_instances) には載せない — backoff を焚くと
 # 「混み合っただけ」で次の Pulse まで使えなくなる。
 ERROR_CATEGORY_BUSY = "busy"
+# 接続先までは届いているが、向こうが「いま応答できない」と答えている (502/503/504)。
+# 利用者の設定は正しく、待つ以外にできることがない状態なので、ネットワーク不通とも
+# 認証失敗とも分ける — 混ぜると「自分の設定を疑う」方向へ誤って誘導する。
+ERROR_CATEGORY_SERVICE_UNAVAILABLE = "service_unavailable"
 ERROR_CATEGORY_UNKNOWN = "unknown"
 
 # --- Reconnect outcomes ---------------------------------------------------
@@ -129,6 +133,7 @@ _CATEGORY_JP = {
     ERROR_CATEGORY_NETWORK: "ネットワークエラー",
     ERROR_CATEGORY_PROCESS_CRASH: "サーバープロセスが異常終了しました",
     ERROR_CATEGORY_BUSY: "サーバーの起動・停止処理が進行中です",
+    ERROR_CATEGORY_SERVICE_UNAVAILABLE: "接続先のサービスが一時的に応答できない状態です",
     ERROR_CATEGORY_UNKNOWN: "不明なエラー",
 }
 
@@ -183,12 +188,35 @@ def _classify_error(exc: Exception) -> str:
         return ERROR_CATEGORY_MISSING_CONFIG
     if isinstance(exc, MCPInstanceBusyError):
         return ERROR_CATEGORY_BUSY
+
+    # anyio / TaskGroup は本当の失敗を ExceptionGroup に包んで投げ、包みの文字列は
+    # "unhandled errors in a TaskGroup (1 sub-exception)" しか名乗らない。剥がさずに
+    # 文字列を見ると**中身が何であれ必ず「不明」に落ちる** — 2026-08-30、接続先の
+    # 503 が「不明なエラー」として画面に出て、原因が利用者から見えなくなった。
+    if isinstance(exc, BaseExceptionGroup):
+        for inner in exc.exceptions:
+            if not isinstance(inner, Exception):
+                continue
+            category = _classify_error(inner)
+            if category != ERROR_CATEGORY_UNKNOWN:
+                return category
+        return ERROR_CATEGORY_UNKNOWN
+
     exc_str = str(exc).lower()
 
     if isinstance(exc, FileNotFoundError):
         return ERROR_CATEGORY_RUNTIME_MISSING
     if "command not found" in exc_str or "no such file" in exc_str:
         return ERROR_CATEGORY_RUNTIME_MISSING
+    # 502/503/504 は「向こうが今は応答できない」。認証やネットワークより先に見る —
+    # 後ろに置くと "connection" 等の一般語を含む文面に先に拾われる。
+    if (
+        "service unavailable" in exc_str
+        or "bad gateway" in exc_str
+        or "gateway timeout" in exc_str
+        or re.search(r"(?<![0-9])(502|503|504)(?![0-9])", exc_str)
+    ):
+        return ERROR_CATEGORY_SERVICE_UNAVAILABLE
     if "401" in exc_str or "unauthorized" in exc_str or "forbidden" in exc_str:
         return ERROR_CATEGORY_AUTH_FAILED
     if "403" in exc_str and "rate" not in exc_str:

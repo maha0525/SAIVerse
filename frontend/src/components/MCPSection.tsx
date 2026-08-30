@@ -69,6 +69,7 @@ const CATEGORY_LABELS: Record<string, string> = {
     network: 'ネットワークエラー',
     process_crash: 'プロセス異常終了',
     busy: '起動・停止処理が進行中',
+    service_unavailable: '接続先のサービスが応答できない状態 (一時的)',
     unknown: '不明なエラー',
 };
 
