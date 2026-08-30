@@ -270,4 +270,4 @@
 
 **実装済(2026-07-10、⑥P2c-3)**: 退役2/archive 4・upgrade handler dev4(PersonaSchedule+SELECTED_META_PLAYBOOK 巻き取り)・VERSION dev4・docs 追従(CLAUDE.md/autonomous-mode 等)。
 dry-run で prune 6件確認。
-残: **実機再起動で巻き取り+prune の本走行確認**(まはー)
+残: ~~実機再起動で巻き取り+prune の本走行確認(まはー)~~ → **✅ 完了 (2026-08-30 実機確認)**。巻き取り (dev4 handler) は過去の再起動で走行済み — 2026-08-30 22:37 の再起動で両都市が dev5 から開始しており、バージョン鎖の性質 (handler 完走と刻印が同一コミット) が dev4 の完了を保証する。最終状態も DB 読み取りで検算: 退役 Playbook 行 0 / persona_schedule の META_PLAYBOOK・PLAYBOOK_PARAMS に退役名の参照 0 / 旧 SELECTED_META_PLAYBOOK 列は消滅済み。個別 prune は Playbook 全置き換えマイグレーション (dev6、2026-08-30 本番走行) に上書きされ、退役名は構造的に残れない。
