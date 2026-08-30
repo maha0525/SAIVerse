@@ -33,6 +33,14 @@ LOGGER = logging.getLogger("saiverse.snapshot")
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
+# `python scripts/snapshot.py` として起動されると sys.path[0] は scripts/ になり、
+# saiverse パッケージ (is_saiverse_running が使う runtime_marker) が import できない。
+# update_engine がサブプロセスとして呼ぶ経路がまさにこれで、venv に editable install が
+# 無い素のユーザー環境では起動中検出が ModuleNotFoundError で必ず落ちる。
+# 他の scripts/*.py と同じくリポジトリルートを自分で通す。
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 # ~/.saiverse/ 直下で除外するディレクトリ
 EXCLUDED_TOP_DIRS = {"backups", "snapshots", ".runtime"}
 
