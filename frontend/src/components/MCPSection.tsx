@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
     Plug,
     ChevronDown,
@@ -108,6 +108,8 @@ export default function MCPSection({
     // これを error と同じ赤で出すと、正常な状態を異常として見せてしまう。
     const [notice, setNotice] = useState<string | null>(null);
     const [actionInProgress, setActionInProgress] = useState<string | null>(null);
+    // 一覧の取り直しの世代。最後に投げたものだけが状態を書き換える。
+    const fetchGenRef = useRef(0);
 
     /**
      * サーバー一覧と失敗一覧を取り直す。
@@ -117,6 +119,11 @@ export default function MCPSection({
      * すぐ後に取り直しが走るので、無条件に消すと結果が一瞬で消えてしまう。
      */
     const fetchState = useCallback(async (clearError = true) => {
+        // 取り直しには世代番号を振る。操作は複数同時に走れる (別サーバーの
+        // 停止と再接続など) ので、先に投げた取り直しが後から返ることがある。
+        // 世代を見ずに書き込むと、古い一覧が新しい状態を上書きし、止めたはずの
+        // 行が復活する (Codex 2026-08-30)。
+        const gen = ++fetchGenRef.current;
         setLoading(true);
         if (clearError) setError(null);
         try {
@@ -132,14 +139,16 @@ export default function MCPSection({
             }
             const serversData: MCPServerStatus[] = await serversResp.json();
             const failuresData: MCPFailure[] = await failuresResp.json();
+            if (gen !== fetchGenRef.current) return;   // 追い越された
             setServers(Array.isArray(serversData) ? serversData : []);
             setFailures(Array.isArray(failuresData) ? failuresData : []);
         } catch (err) {
+            if (gen !== fetchGenRef.current) return;
             const msg = err instanceof Error ? err.message : String(err);
             setError(msg);
             console.error('[MCPSection] fetch failed:', msg);
         } finally {
-            setLoading(false);
+            if (gen === fetchGenRef.current) setLoading(false);
         }
     }, []);
 

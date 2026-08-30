@@ -13,6 +13,7 @@ from tools.mcp_client import (
     ERROR_CATEGORY_MISSING_CONFIG,
     RECONNECT_FAILED,
     RECONNECT_NO_INSTANCES,
+    RECONNECT_RECONNECTED,
     MCPClientManager,
     MCPServerConnection,
     _make_instance_key,
@@ -1208,7 +1209,9 @@ class MCPConfigTestCase(unittest.TestCase):
         ):
             ok = asyncio.run(mgr.reconnect_server("srv"))
 
-        self.assertTrue(ok)
+        # 三値は全部が非空文字列なので、assertTrue では FAILED も NO_INSTANCES も
+        # 通ってしまう — 契約の追随漏れを検査が拾えない。完全一致で見る。
+        self.assertEqual(ok, RECONNECT_RECONNECTED)
         self.assertEqual(started, ["srv:persona:air_city_a"])
         # 立て直せたので失敗記録は消える (UI の失敗一覧から外れる)
         self.assertNotIn("srv:persona:air_city_a", mgr._failed_instances)

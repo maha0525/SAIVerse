@@ -92,6 +92,19 @@ class ServiceUnavailableTests(unittest.TestCase):
 
         self.assertNotEqual(_classify_error(exc), ERROR_CATEGORY_SERVICE_UNAVAILABLE)
 
+    def test_a_three_digit_port_is_not_a_status_code(self):
+        """ポート番号がちょうど 502/503/504 のときが本当の境目。
+
+        4 桁 (8503) だけを見ていると、数字そのものが状態コードと同じ 3 桁の
+        ケースを取りこぼす — Codex の指摘 (2026-08-30)。
+        """
+        for port in ("502", "503", "504"):
+            with self.subTest(port=port):
+                exc = RuntimeError(f"connection refused: http://127.0.0.1:{port}/mcp")
+                self.assertNotEqual(
+                    _classify_error(exc), ERROR_CATEGORY_SERVICE_UNAVAILABLE,
+                )
+
     def test_gateway_timeout_is_not_swallowed_by_the_timeout_rule(self):
         """"timeout" を含むが、これはネットワーク不通ではなく向こうの応答。"""
         exc = RuntimeError("Server error '504 Gateway Timeout' for url ...")

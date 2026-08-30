@@ -685,6 +685,20 @@ function ParamsSection({
     const hasPersonaSection = personaConfigurableSchemas.length > 0 || hasOAuthFlows;
     const [showAdvanced, setShowAdvanced] = useState(false);
 
+    // 保存は 1 本の鎖に並べて順番に流す。
+    //
+    // 入力のたびに await せず PUT を投げていたため、続けて編集すると**到着順が
+    // 逆転して古い body が後から着き、新しい編集を消す**ことがあった。グローバル
+    // 側は body 全体を保存する形なので影響が大きく、鍵の削除と別項目の編集が
+    // 前後すると、消したはずの鍵が古い実値で復活しうる (Codex 2026-08-30)。
+    const saveChainRef = useRef<Promise<unknown>>(Promise.resolve());
+    const enqueueSave = <T,>(task: () => Promise<T>): Promise<T> => {
+        const next = saveChainRef.current.then(task, task);
+        // 鎖は失敗で切らさない (1 回の失敗で以降の保存が止まらないように)
+        saveChainRef.current = next.then(() => undefined, () => undefined);
+        return next;
+    };
+
     // 保存（グローバル）。成功したかどうかを返す (削除操作の巻き戻し判定に使う)
     const saveGlobal = useCallback(async (params: Record<string, unknown>): Promise<boolean> => {
         setSaving(true);
@@ -710,7 +724,7 @@ function ParamsSection({
     const handleGlobalChange = (key: string, val: unknown) => {
         const next = { ...globalParams, [key]: val };
         setGlobalParams(next);
-        saveGlobal(next);
+        void enqueueSave(() => saveGlobal(next));
     };
 
     /**
@@ -723,11 +737,14 @@ function ParamsSection({
         const next = { ...globalParams, [key]: null };
         setGlobalParams(next);
         setGlobalSecretIsSet((prev) => ({ ...prev, [key]: false }));
-        const ok = await saveGlobal(next);
+        const ok = await enqueueSave(() => saveGlobal(next));
         if (!ok) {
-            // 戻すのは「この鍵だけ」。保存を待つ数秒の間に別の項目を編集して
-            // いると、丸ごと巻き戻す形ではその編集まで巻き添えで消える。
-            setGlobalParams((prev) => ({ ...prev, [key]: previousValue }));
+            // 戻すのは「この鍵だけ」、しかも**待つ間に誰も触っていなければ**。
+            // 丸ごと巻き戻すと他項目の編集を巻き添えにし、無条件に戻すと同じ鍵へ
+            // 打ち直した新しい入力を古い値で上書きする (Codex 2026-08-30)。
+            setGlobalParams((prev) => (
+                prev[key] === null ? { ...prev, [key]: previousValue } : prev
+            ));
             setGlobalSecretIsSet((prev) => ({ ...prev, [key]: true }));
         }
     };
@@ -789,8 +806,8 @@ function ParamsSection({
                 { persona_id: personaId, persona_name: personaName, params: { [key]: val }, secret_is_set: {} },
             ];
         });
-        // merge 保存: 変更したキーだけ送る
-        savePersona(personaId, { [key]: val });
+        // merge 保存: 変更したキーだけ送る (順序が逆転しないよう鎖に並べる)
+        void enqueueSave(() => savePersona(personaId, { [key]: val }));
     };
 
     /**
@@ -811,19 +828,20 @@ function ParamsSection({
                     : c
             )
         );
-        const ok = await savePersona(personaId, { [key]: null });
+        const ok = await enqueueSave(() => savePersona(personaId, { [key]: null }));
         if (!ok) {
-            // グローバル側と同じ理由で、戻すのはこの鍵だけにする。
+            // グローバル側と同じ理由で、戻すのはこの鍵だけ、かつ待つ間に
+            // 触られていないときだけ。
             setPersonaConfigs((cur) =>
-                cur.map((c) =>
-                    c.persona_id === personaId
-                        ? {
-                            ...c,
-                            params: { ...c.params, [key]: previousValue },
-                            secret_is_set: { ...c.secret_is_set, [key]: true },
-                        }
-                        : c
-                )
+                cur.map((c) => {
+                    if (c.persona_id !== personaId) return c;
+                    if (c.params[key] !== null) return c;   // 待つ間に編集された
+                    return {
+                        ...c,
+                        params: { ...c.params, [key]: previousValue },
+                        secret_is_set: { ...c.secret_is_set, [key]: true },
+                    };
+                })
             );
         }
     };

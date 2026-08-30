@@ -210,11 +210,15 @@ def _classify_error(exc: Exception) -> str:
         return ERROR_CATEGORY_RUNTIME_MISSING
     # 502/503/504 は「向こうが今は応答できない」。認証やネットワークより先に見る —
     # 後ろに置くと "connection" 等の一般語を含む文面に先に拾われる。
+    #
+    # 数字だけを拾うと **ポート番号を状態コードと読み違える** (`http://host:503/`)。
+    # 直前がコロンなら港の番号なので除く。文言側 (service unavailable 等) は
+    # 数字を伴わない表現も拾うために別途見る。
     if (
         "service unavailable" in exc_str
         or "bad gateway" in exc_str
         or "gateway timeout" in exc_str
-        or re.search(r"(?<![0-9])(502|503|504)(?![0-9])", exc_str)
+        or re.search(r"(?<![0-9:])(502|503|504)(?![0-9])", exc_str)
     ):
         return ERROR_CATEGORY_SERVICE_UNAVAILABLE
     if "401" in exc_str or "unauthorized" in exc_str or "forbidden" in exc_str:
