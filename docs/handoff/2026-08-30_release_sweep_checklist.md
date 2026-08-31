@@ -32,7 +32,7 @@
 
 ## 3. 管理 UI・単発の操作で消える行
 
-- [ ] **ID 文字種契約のペルソナ適用**: 日本語名で新規ペルソナを作成 → ID 欄に `persona_連番` が自動で入り、作成後の AIID と私室 ID が同じ連番。(合成ペルソナで OK、作って消してよい)
+- [x] **ID 文字種契約のペルソナ適用**: ✅ 2026-08-31 実機合格 — 「テラス」で `persona_1_city_a`、二体目のモーダルに `persona_2` プレフィル (まはー実機)。issue は archive 行き。
 - [x] **ComfyUI アドオン**: 2026-08-31 実機合格 (まはー)。初回試行は .env の COMFYUI_BASE_URL 末尾スラッシュ → `//prompt` 405 で失敗し、アドオン側の base URL 正規化で根治 (saiverse-comfyui-addon にコミット、push はまはー合図待ち)。再起動後の再試行で生成成功。
 - [ ] **OpenRouter 掲載**: OpenRouter 経由のモデルで一度会話 → 後日 openrouter.ai/apps の roleplay / general-chat に SAIVerse が現れるか。
 
