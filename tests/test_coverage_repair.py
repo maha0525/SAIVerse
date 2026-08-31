@@ -29,6 +29,7 @@ from sqlalchemy.pool import StaticPool
 
 from database.models import Base
 from sea.coverage_repair import (
+    CeilingResolutionError,
     coverage_marks_for_window,
     mark_covered_cold_windows,
     resolve_compile_ceiling,
@@ -167,17 +168,61 @@ class TestResolveCompileCeiling:
         _cold_row(lc, "model-a", ids[1])
         assert resolve_compile_ceiling(lc, PERSONA_ID, adapter.conn) is None
 
-    def test_warm_anchor_at_missing_message_does_not_constrain(
+    def test_warm_anchor_at_missing_message_fails_resolution(
         self, adapter, session_factory,
     ):
-        """温かい行の anchor が messages に無い (壊れた行) → 上端の材料から外す。"""
+        """温かい行の anchor が messages に無い → 解決失敗 (fail-closed)。
+
+        「制約なし」へ潰すと、位置の分からない温かい窓の下を全量計画が掘る
+        (Codex レビュー 2026-08-31 採用 1)。
+        """
         ids = _add_messages(adapter, 3)
         lc = _make_lifecycle(session_factory)
         _warm_row(lc, "model-a", "ghost-message")
         _warm_row(lc, "model-b", ids[2])
+        with pytest.raises(CeilingResolutionError):
+            resolve_compile_ceiling(lc, PERSONA_ID, adapter.conn)
+        # 全量計画 (generate_chronicle) も failed で止まる
+        executor = _CapturingExecutor()
+        assert _generate(lc, _persona(adapter), executor) == "failed"
+        assert executor.chunks == []  # 1 件も編纂していない
+
+    def test_anchor_row_read_failure_fails_resolution(
+        self, adapter, session_factory,
+    ):
+        """行の読み取り失敗は「上端なし」へ潰さない — 解決失敗 (fail-closed)。"""
+        _add_messages(adapter, 3)
+        lc = _make_lifecycle(session_factory)
+        with patch.object(
+            lc, "load_anchor_entries_strict",
+            side_effect=RuntimeError("db down"),
+        ):
+            with pytest.raises(CeilingResolutionError):
+                resolve_compile_ceiling(lc, PERSONA_ID, adapter.conn)
+            executor = _CapturingExecutor()
+            assert _generate(lc, _persona(adapter), executor) == "failed"
+            assert executor.chunks == []
+
+    def test_null_created_at_orders_before_all_real_timestamps(
+        self, adapter, session_factory,
+    ):
+        """created_at NULL の行は正典順で全ての実時刻 (0 含む) より前 —
+        rowid が後でも上端の比較は共有述語と同じ順序になる (採用 2)。"""
+        ids = _add_messages(adapter, 3)
+        # ids[0]=ts0 (rowid 小), ids[1]=NULL (rowid 大), ids[2]=ts100
+        adapter.conn.execute(
+            "UPDATE messages SET created_at = 0 WHERE id = ?", (ids[0],))
+        adapter.conn.execute(
+            "UPDATE messages SET created_at = NULL WHERE id = ?", (ids[1],))
+        adapter.conn.execute(
+            "UPDATE messages SET created_at = 100 WHERE id = ?", (ids[2],))
+        adapter.conn.commit()
+        lc = _make_lifecycle(session_factory)
+        _warm_row(lc, "model-a", ids[0])  # ts0
+        _warm_row(lc, "model-b", ids[1])  # NULL — 正典順ではこちらが最古
         ceiling = resolve_compile_ceiling(lc, PERSONA_ID, adapter.conn)
         assert ceiling is not None
-        assert ceiling.message_id == ids[2]
+        assert ceiling.message_id == ids[1]
 
 
 class TestClipMessagesBeforePosition:
@@ -214,6 +259,53 @@ class TestClipMessagesBeforePosition:
         pos = get_message_position(adapter.conn, ids[3])
         clipped = clip_messages_before_position(adapter.conn, msgs, *pos)
         assert [m.id for m in clipped] == ids[:1]
+
+    def test_null_and_zero_created_at_follow_canonical_order(self, adapter):
+        """NULL と 0 の created_at が混在しても、切断は共有述語の正典順に一致する。
+
+        NULL 行の rowid が 0 行より後でも、NULL は「全ての実時刻より前」。
+        COALESCE(created_at,0) だと rowid の後勝ちで 0 行の後ろに化ける
+        (Codex レビュー 2026-08-31 採用 2)。
+        """
+        from sai_memory.memory.storage import (
+            clip_messages_before_position,
+            get_message_position,
+            get_messages_for_chronicle,
+        )
+        ids = _add_messages(adapter, 3)
+        adapter.conn.execute(
+            "UPDATE messages SET created_at = 0 WHERE id = ?", (ids[0],))
+        adapter.conn.execute(
+            "UPDATE messages SET created_at = NULL WHERE id = ?", (ids[1],))
+        adapter.conn.execute(
+            "UPDATE messages SET created_at = 100 WHERE id = ?", (ids[2],))
+        adapter.conn.commit()
+        msgs = get_messages_for_chronicle(adapter.conn)
+        # 読み出し順も正典順: NULL → 0 → 100
+        assert [m.id for m in msgs] == [ids[1], ids[0], ids[2]]
+        # 止め線 = 0 の行 → 厳密に前は NULL 行だけ
+        pos = get_message_position(adapter.conn, ids[0])
+        assert pos == (0, 1)
+        clipped = clip_messages_before_position(adapter.conn, msgs, *pos)
+        assert [m.id for m in clipped] == [ids[1]]
+
+    def test_window_inclusion_follows_canonical_order_with_nulls(self, adapter):
+        """窓 (anchor 以降) の包含判定も同じ正典順 — NULL 行は 0 anchor の窓に
+        入らない (rowid が後でも)。"""
+        ids = _add_messages(adapter, 3)
+        adapter.conn.execute(
+            "UPDATE messages SET created_at = 0 WHERE id = ?", (ids[0],))
+        adapter.conn.execute(
+            "UPDATE messages SET created_at = NULL WHERE id = ?", (ids[1],))
+        adapter.conn.execute(
+            "UPDATE messages SET created_at = 100 WHERE id = ?", (ids[2],))
+        adapter.conn.commit()
+        # anchor = 0 の行。窓 = {ids[0], ids[2]} — NULL 行は窓の外 (手前)。
+        inside = _create_entry(adapter.conn, [ids[0], ids[2]])
+        _create_entry(adapter.conn, [ids[1]])  # 窓の外のみ → 印の対象外
+        marks = coverage_marks_for_window(adapter.conn, ids[0], [])
+        assert [f.chronicle_entry_ids for f in marks] == [[inside.id]]
+        assert marks[0].message_ids == [ids[0], ids[2]]
 
 
 # ---------------------------------------------------------------------------
@@ -350,7 +442,7 @@ class TestColdWindowMarks:
         _warm_row(lc, "model-b", ids[2])
         entry = _create_entry(adapter.conn, ids[2:4])
 
-        assert mark_covered_cold_windows(lc, _persona(adapter)) == 1
+        assert mark_covered_cold_windows(lc, _persona(adapter)) == (1, 0)
         saved = deserialize_folds(
             lc.load_anchor_entry(PERSONA_ID, "model-a").get("folded_ranges"),
         )
@@ -364,7 +456,7 @@ class TestColdWindowMarks:
         assert not warm.get("folded_ranges")
 
         # 冪等: もう一度走らせても重複追加しない
-        assert mark_covered_cold_windows(lc, _persona(adapter)) == 0
+        assert mark_covered_cold_windows(lc, _persona(adapter)) == (0, 0)
         saved = deserialize_folds(
             lc.load_anchor_entry(PERSONA_ID, "model-a").get("folded_ranges"),
         )
@@ -377,7 +469,8 @@ class TestColdWindowMarks:
         _cold_row(lc, "model-a", ids[2])
         _create_entry(adapter.conn, ids[1:4])  # ids[1] は窓の外
 
-        assert mark_covered_cold_windows(lc, _persona(adapter)) == 0
+        # 跨ぎの見送りは「失敗」ではない (次の畳みで正規の圧縮区間になる)
+        assert mark_covered_cold_windows(lc, _persona(adapter)) == (0, 0)
         entry = lc.load_anchor_entry(PERSONA_ID, "model-a")
         assert not entry.get("folded_ranges")
 
@@ -471,7 +564,7 @@ class TestRunCoverageRepair:
     def test_disabled_without_weave_env(self, adapter, session_factory, monkeypatch):
         monkeypatch.delenv("ENABLE_MEMORY_WEAVE_CONTEXT", raising=False)
         lc = _make_lifecycle(session_factory)
-        assert lc.run_coverage_repair(_persona(adapter)) == "disabled"
+        assert lc.run_coverage_repair(_persona(adapter)) == ("disabled", 0)
 
     def test_compiles_uncovered_past_and_marks_cold_window(
         self, adapter, session_factory, monkeypatch,
@@ -500,7 +593,7 @@ class TestRunCoverageRepair:
             "sai_memory.memory.entity_extractor.make_batch_callback",
             side_effect=RuntimeError("skip entity extraction"),
         ):
-            assert lc.run_coverage_repair(_persona(adapter)) == "ok"
+            assert lc.run_coverage_repair(_persona(adapter)) == ("ok", 0)
 
         # 未被覆だった ids[0:2] だけが編纂された (processed は自動で飛ぶ)
         compiled = [mid for chunk in executor.chunks[-1] for mid in chunk]
@@ -511,3 +604,83 @@ class TestRunCoverageRepair:
         )
         assert [f.chronicle_entry_ids for f in saved] == [[entry.id]]
         assert all(f.presented_raw for f in saved)
+
+
+# ---------------------------------------------------------------------------
+# 印の失敗の可視化 (Codex レビュー 2026-08-31 採用 4)
+# ---------------------------------------------------------------------------
+
+
+class TestMarkFailureVisibility:
+    def test_write_failure_is_counted(self, adapter, session_factory):
+        """書き込み失敗 (CAS 棄却 / DB 失敗) は失敗数として返る。"""
+        ids = _add_messages(adapter, 4)
+        lc = _make_lifecycle(session_factory)
+        _cold_row(lc, "model-a", ids[2])
+        _create_entry(adapter.conn, ids[2:4])
+        with patch.object(
+            lc, "write_folds_if_anchor_unchanged", return_value=False,
+        ):
+            assert mark_covered_cold_windows(lc, _persona(adapter)) == (0, 1)
+
+    def test_worker_reports_mark_failures_but_stays_completed(
+        self, adapter, session_factory,
+    ):
+        """編纂成功 + 印の失敗 → job は completed のまま、警告文言を出す。"""
+        from api.routes.people import arasuji as arasuji_api
+        from sea.cancellation import CancellationToken
+        lc = _make_lifecycle(session_factory)
+        job_id = arasuji_api._create_job(PERSONA_ID)
+        with patch.object(
+            lc, "run_coverage_repair", return_value=("ok", 2),
+        ), patch.object(lc, "ensure_recall_embeddings"):
+            arasuji_api._run_coverage_repair_job(
+                job_id, _persona(adapter), lc, CancellationToken(),
+            )
+        job = arasuji_api._get_job(job_id)
+        assert job["status"] == "completed"
+        assert "印は書けませんでした" in job["message"]
+        assert "次回の補修時に自動で再適用されます" in job["message"]
+
+
+# ---------------------------------------------------------------------------
+# 見積もりの時点ずれの歯止め (Codex レビュー 2026-08-31 採用 3)
+# ---------------------------------------------------------------------------
+
+
+class TestEstimateStaleGuard:
+    def test_increase_blocks_execution(self, adapter, session_factory):
+        """承認した件数より対象が増えていたら実行せず estimate_stale。"""
+        from api.routes.people import arasuji as arasuji_api
+        from sea.cancellation import CancellationToken
+        _add_messages(adapter, 4)  # 現在の対象 = 4 件
+        lc = _make_lifecycle(session_factory)
+        job_id = arasuji_api._create_job(PERSONA_ID)
+        with patch.object(lc, "run_coverage_repair") as run:
+            arasuji_api._run_coverage_repair_job(
+                job_id, _persona(adapter), lc, CancellationToken(),
+                confirmed_unprocessed=2,  # 見積もり時は 2 件だった
+            )
+            run.assert_not_called()
+        job = arasuji_api._get_job(job_id)
+        assert job["status"] == "failed"
+        assert job["error_code"] == "estimate_stale"
+
+    def test_equal_or_decrease_runs(self, adapter, session_factory):
+        """同数・減少 (表示より安くなる方向) は実行してよい。"""
+        from api.routes.people import arasuji as arasuji_api
+        from sea.cancellation import CancellationToken
+        _add_messages(adapter, 4)
+        lc = _make_lifecycle(session_factory)
+        with patch.object(
+            lc, "run_coverage_repair", return_value=("ok", 0),
+        ) as run, patch.object(lc, "ensure_recall_embeddings"):
+            for confirmed in (4, 10):  # 同数 / 減少 (承認 10 → 現在 4)
+                job_id = arasuji_api._create_job(PERSONA_ID)
+                arasuji_api._run_coverage_repair_job(
+                    job_id, _persona(adapter), lc, CancellationToken(),
+                    confirmed_unprocessed=confirmed,
+                )
+                job = arasuji_api._get_job(job_id)
+                assert job["status"] == "completed"
+            assert run.call_count == 2

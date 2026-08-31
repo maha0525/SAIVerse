@@ -521,9 +521,14 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
     };
 
     // 被覆補修 (§16): あらすじになっていない過去の会話を編纂する。
+    // confirmed_unprocessed_messages = いま画面で承認した件数。実行直前に対象が
+    // 増えていたら backend が estimate_stale で止める (時点ずれの歯止め)。
     const startRepair = async () => {
         setShowRepairModal(false);
-        await postGenerateJob({ mode: 'repair' });
+        await postGenerateJob({
+            mode: 'repair',
+            confirmed_unprocessed_messages: repairEstimate?.unprocessed_messages ?? null,
+        });
     };
 
     const startPolling = useCallback((jobId: string) => {
@@ -719,6 +724,8 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                         safety_filter: '🛡️',
                         window_claimed: '🔒',
                         sluice_unseen: '🔁',
+                        estimate_stale: '🔄',
+                        ceiling_unresolved: '🚧',
                     };
                     const guidanceMap: Record<string, string> = {
                         empty_response: 'しばらく時間を置いてから再実行してください。繰り返し発生する場合は、サーバーの障害情報を確認してください。',
@@ -730,6 +737,8 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                         server_error: 'LLMサーバーで障害が発生しています。しばらく時間を置いてから再実行してください。',
                         window_claimed: '別の整理が同じ範囲を処理中または処理済みです。しばらく待ってから再実行してください。',
                         sluice_unseen: '今回の採取（スルース）で読めていない範囲があったため、畳みを見送りました。採取の結果は保存されており、畳みは次回の整理で続きから進みます。',
+                        estimate_stale: 'あらすじにする対象が見積もり時より増えています。件数を確認し直してから、もう一度実行してください。',
+                        ceiling_unresolved: '会話中の窓の境界を確認できなかったため、何も編纂せずに止まりました。しばらくしてから再実行してください。',
                     };
                     const icon = (code && iconMap[code]) || '❌';
                     const guidance = (code && guidanceMap[code]) || '予期しないエラーが発生しました。Technical Detailsを確認し、問題が続く場合は管理者に連絡してください。';

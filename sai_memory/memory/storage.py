@@ -2169,26 +2169,41 @@ def filter_chronicle_eligible_ids(
 
 def get_message_position(
     conn: sqlite3.Connection, message_id: str,
-) -> Optional[Tuple[int, int]]:
-    """メッセージの正典順序キー ``(created_at, rowid)`` (W8 S7)。無ければ None。
+) -> Optional[Tuple[Optional[int], int]]:
+    """メッセージの正典順序キーの素材 ``(created_at, rowid)`` (W8 S7)。無ければ None。
 
-    created_at NULL は 0 に写す (``compare_message_positions`` と同じ規則 —
-    全ての実時刻より前)。
+    created_at は NULL のまま返す — 意味論は :func:`get_messages_before_id` と
+    同じで、「NULL は全ての実時刻より前・NULL 同士は rowid 順」。SQL の比較は
+    ``_canonical_before_clause`` / ``_canonical_after_clause``、Python 側の
+    比較は ``canonical_position_key`` を使う (0 への写像は ts=0 の実行と
+    区別できず順序が壊れる)。
     """
     cur = conn.execute(
-        "SELECT COALESCE(created_at, 0), rowid FROM messages WHERE id = ?",
+        "SELECT created_at, rowid FROM messages WHERE id = ?",
         (str(message_id),),
     )
     row = cur.fetchone()
     if row is None:
         return None
-    return (int(row[0]), int(row[1]))
+    return (int(row[0]) if row[0] is not None else None, int(row[1]))
+
+
+def canonical_position_key(
+    created_at: Optional[int], rowid: int,
+) -> Tuple[Tuple[int, int], int]:
+    """``(created_at, rowid)`` を Python 側で比較可能な正典キーに写す公開口。
+
+    実体は ``_canonical_key_of_row`` (NULL = 先頭側)。SQL 側の
+    ``_canonical_before_clause`` / ``_canonical_after_clause`` と同じ順序を
+    Python 比較で再現する消費者 (被覆補修の止め線など) 用。
+    """
+    return _canonical_key_of_row(created_at, rowid)
 
 
 def clip_messages_before_position(
     conn: sqlite3.Connection,
     messages: List[Message],
-    created_at: int,
+    created_at: Optional[int],
     rowid: int,
 ) -> List[Message]:
     """正典順の messages 列を、``(created_at, rowid)`` より厳密に古い先頭部分に切り詰める。
@@ -2198,21 +2213,24 @@ def clip_messages_before_position(
     (sea/session_lifecycle.generate_chronicle) が**この同じ関数**で絞る —
     表示と実走が違う数を言ってはならない。
 
+    「前」の判定は共有述語 ``_canonical_before_clause`` (NULL created_at は
+    全ての実時刻より前) — ``get_messages_before_id`` と同じ意味論。
+
     切り位置がスペルの群 (``spell_group_spans``) の内側に落ちる場合は、群の
     先頭まで下げる — 群の途中で編纂対象を切ると「唱え」だけが要約され、
     「結果」が出自を失う (§4-3 チャンクの切れ目は群を割らない、の同族)。
 
     Args:
         messages: 正典順 (created_at ASC, rowid ASC) のメッセージ列。
-        created_at / rowid: 上端の正典順序キー。
+        created_at / rowid: 上端の正典順序キーの素材 (created_at は NULL 可)。
     """
     if not messages:
         return []
+    before_sql, before_params = _canonical_before_clause(
+        created_at, int(rowid), inclusive=False,
+    )
     cur = conn.execute(
-        "SELECT id FROM messages "
-        "WHERE COALESCE(created_at, 0) < ? "
-        "   OR (COALESCE(created_at, 0) = ? AND rowid < ?)",
-        (created_at, created_at, rowid),
+        f"SELECT id FROM messages WHERE {before_sql}", before_params,
     )
     allowed = {str(row[0]) for row in cur.fetchall()}
     boundary = len(messages)

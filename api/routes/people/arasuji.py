@@ -114,11 +114,23 @@ def estimate_chronicle_cost(
 
     try:
         # 止め線 (§16-2)。lifecycle が無い環境 (部分構築のテスト等) は上端なし。
+        # 解決失敗は 500 で止める (fail-closed) — 「読めなかった」を「上端なし」
+        # へ潰すと、表示が全域の数を言い、実走 (repair) 側の fail-closed と
+        # 食い違う。
         compile_before = None
         lifecycle = getattr(getattr(manager, "sea_runtime", None), "session_lifecycle", None)
         if lifecycle is not None:
-            from sea.coverage_repair import resolve_compile_ceiling
-            ceiling = resolve_compile_ceiling(lifecycle, persona_id, conn)
+            from sea.coverage_repair import (
+                CeilingResolutionError,
+                resolve_compile_ceiling,
+            )
+            try:
+                ceiling = resolve_compile_ceiling(lifecycle, persona_id, conn)
+            except CeilingResolutionError as exc:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"編纂範囲の上端 (止め線) を解決できませんでした: {exc}",
+                )
             if ceiling is not None:
                 compile_before = (ceiling.created_at, ceiling.rowid)
 
@@ -788,6 +800,7 @@ def _run_chronicle_generation(
     include_timestamp: bool = True,
     manager=None,
     mode: str = "compaction",
+    confirmed_unprocessed: Optional[int] = None,
 ):
     """Background worker for manual Chronicle generation.
 
@@ -840,7 +853,10 @@ def _run_chronicle_generation(
         return
 
     if mode == "repair":
-        _run_coverage_repair_job(job_id, persona, lifecycle, token)
+        _run_coverage_repair_job(
+            job_id, persona, lifecycle, token,
+            confirmed_unprocessed=confirmed_unprocessed,
+        )
         return
 
     _update_job(job_id, status="running", message="記憶を畳んでいます...")
@@ -907,12 +923,50 @@ def _run_chronicle_generation(
         )
 
 
-def _run_coverage_repair_job(job_id: str, persona, lifecycle, token) -> None:
+def _count_repair_targets(persona, lifecycle) -> int:
+    """repair の対象件数を、見積もり API と同じ止め線・同じ計画で数え直す。
+
+    修正 3 (時点ずれの歯止め) 用 — 見積もり表示からユーザーが実行ボタンを
+    押すまでの間に対象が増えていないかの検算。解決失敗 (CeilingResolutionError
+    等) はそのまま送出する — 呼び出し側が fail-closed で止める。
+    """
+    from sai_memory.arasuji import init_arasuji_tables
+    from sai_memory.arasuji.estimate import estimate_chronicle_generation_cost
+    from sea.coverage_repair import resolve_compile_ceiling
+
+    adapter = getattr(persona, "sai_memory", None)
+    if adapter is None or not adapter.is_ready():
+        raise RuntimeError("SAIMemory is not available for the recount")
+    with adapter._db_lock:
+        init_arasuji_tables(adapter.conn)
+    ceiling = resolve_compile_ceiling(
+        lifecycle, getattr(persona, "persona_id", None), adapter.conn,
+    )
+    estimate = estimate_chronicle_generation_cost(
+        adapter.conn,
+        # 件数 (unprocessed_messages) はモデル名に依存しない — 料金部は捨てる。
+        model_name="__repair_recount__",
+        compile_before=(
+            (ceiling.created_at, ceiling.rowid) if ceiling is not None else None
+        ),
+        db_lock=adapter._db_lock,
+    )
+    return estimate.unprocessed_messages
+
+
+def _run_coverage_repair_job(
+    job_id: str, persona, lifecycle, token,
+    confirmed_unprocessed: Optional[int] = None,
+) -> None:
     """被覆補修 (mode="repair") のジョブ本体 (arasuji_levels.md §16-2)。
 
     止め線より古い未被覆の編纂対象を一次あらすじにする。提示窓は動かさない
     (退場なし)。事前確認 (件数・概算費用) は UI が同じ止め線の
     GET cost-estimate で済ませている前提なので、ここでは確認なしで実行する。
+
+    ``confirmed_unprocessed`` (修正 3): UI が見積もりで見せた件数。実行直前の
+    再計算がこれより増えていたら estimate_stale で止める — 承認した範囲より
+    広い課金を黙って実行しない。減る方向は表示より安くなるだけなので走る。
     """
     _update_job(
         job_id, status="running",
@@ -934,7 +988,17 @@ def _run_coverage_repair_job(job_id: str, persona, lifecycle, token) -> None:
             pass
 
     try:
-        status = lifecycle.run_coverage_repair(
+        if confirmed_unprocessed is not None:
+            current = _count_repair_targets(persona, lifecycle)
+            if current > confirmed_unprocessed:
+                _update_job(
+                    job_id, status="failed",
+                    error="対象が増えています。もう一度見積もりを確認してください。",
+                    error_code="estimate_stale",
+                )
+                return
+
+        status, mark_failures = lifecycle.run_coverage_repair(
             persona, event_callback=_progress, cancellation_token=token,
         )
         # 未埋め込みの Chronicle/ページ/Fragment を全件埋める (ローカル・無料、
@@ -945,10 +1009,16 @@ def _run_coverage_repair_job(job_id: str, persona, lifecycle, token) -> None:
             LOGGER.warning("[Chronicle Repair] embedding maintenance failed", exc_info=True)
 
         if status == "ok":
-            _update_job(
-                job_id, status="completed",
-                message="あらすじになっていなかった過去の会話を編纂しました",
-            )
+            message = "あらすじになっていなかった過去の会話を編纂しました"
+            if mark_failures:
+                # 編纂は確定済み。印だけの失敗は completed のまま可視化する
+                # (修正 4) — 次回の補修の mark_covered_cold_windows が冪等に
+                # 再適用する。
+                message += (
+                    "（一部のモデルの窓への印は書けませんでした。"
+                    "次回の補修時に自動で再適用されます）"
+                )
+            _update_job(job_id, status="completed", message=message)
         elif status == "deferred" and token.is_cancelled():
             _update_job(
                 job_id, status="cancelled",
@@ -973,6 +1043,17 @@ def _run_coverage_repair_job(job_id: str, persona, lifecycle, token) -> None:
                 error_code=status,
             )
     except Exception as e:
+        from sea.coverage_repair import CeilingResolutionError
+        if isinstance(e, CeilingResolutionError):
+            # 止め線の解決失敗 (fail-closed) — 何も編纂していない。
+            LOGGER.warning("[Chronicle Repair] ceiling unresolved: %s", e)
+            _update_job(
+                job_id, status="failed",
+                error="編纂範囲の上端 (会話中の窓の境界) を確認できなかったため、実行を見送りました。再実行で再試行できます。",
+                error_code="ceiling_unresolved",
+                error_detail=str(e),
+            )
+            return
         LOGGER.exception(f"Chronicle coverage repair failed: {e}")
         _update_job(
             job_id, status="failed",
@@ -1023,6 +1104,7 @@ async def start_arasuji_generation(
         include_timestamp=request.include_timestamp,
         manager=manager,
         mode=request.mode,
+        confirmed_unprocessed=request.confirmed_unprocessed_messages,
     )
 
     return {"job_id": job_id, "status": "started"}

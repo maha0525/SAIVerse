@@ -425,6 +425,11 @@ class GenerateArasujiRequest(BaseModel):
     """
     # "compaction" = 窓の畳み (従来) / "repair" = 被覆補修 (§16)
     mode: str = "compaction"
+    # repair モードの時点ずれの歯止め (任意): UI が見積もり (cost-estimate) で
+    # ユーザーに見せた unprocessed_messages。実行直前の再計算がこれより
+    # **増えて**いたら、承認した範囲より広い編纂 (課金) になるので実行せず
+    # estimate_stale で返す。減る方向 (安くなる) は嘘にならないので走ってよい。
+    confirmed_unprocessed_messages: Optional[int] = None
     max_messages: int = 500  # deprecated (§13: 範囲は残す量が決める)
     batch_size: int = 20  # deprecated (W4: チャンク分割は episode 境界とサイズ束ね)
     consolidation_size: int = 10  # deprecated (W4)

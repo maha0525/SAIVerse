@@ -39,23 +39,35 @@ LOGGER = logging.getLogger(__name__)
 _COVERING_QUERY_CHUNK = 400
 
 
+class CeilingResolutionError(RuntimeError):
+    """止め線を解決できなかった (行が読めない / 温かい行の anchor の位置が引けない)。
+
+    「温かい行がゼロ = 制約なし (None)」とは区別する — 解決失敗を「上端なし」へ
+    潰すと、全量計画が温かい提示窓の下を掘るリスクを黙って踏む。呼び出し側
+    (generate_chronicle / cost-estimate API / repair worker) は fail-closed で
+    止めること。
+    """
+
+
 @dataclass(frozen=True)
 class CompileCeiling:
     """編纂してよい上端 = 温かい anchor のうち正典順で最古の位置。
 
-    位置は正典順序キー ``(created_at, rowid)`` で表す (W8 S7 と同じ物差し)。
-    上端の**メッセージ自身は温かい窓の中**なので、編纂してよいのは
-    「このキーより厳密に古い」メッセージだけ。
+    位置は正典順序キーの素材 ``(created_at, rowid)`` で表す (W8 S7 と同じ
+    物差し。created_at NULL は「全ての実時刻より前」— 共有述語
+    ``_canonical_before_clause`` の族と同じ意味論)。上端の**メッセージ自身は
+    温かい窓の中**なので、編纂してよいのは「このキーより厳密に古い」
+    メッセージだけ。
     """
 
     message_id: str
-    created_at: int
+    created_at: Optional[int]
     rowid: int
     #: どの (persona, model) 行が上端を決めたか (ログ用)。
     model_key: str
 
     @property
-    def position(self) -> Tuple[int, int]:
+    def position(self) -> Tuple[Optional[int], int]:
         return (self.created_at, self.rowid)
 
 
@@ -67,15 +79,30 @@ def resolve_compile_ceiling(
     温度判定は ``SessionLifecycle._anchor_entry_is_hot`` の一枚だけを使う
     (arasuji_levels.md §14-6-3 — 判定式を二枚にしない)。
 
-    温かい行の anchor が messages に存在しない場合、その行の窓は提示を
-    定義できない壊れた状態なので、上端の材料から外して WARNING を残す
-    (壊れた行のために補修全体を止めない)。
-    """
-    if not persona_id or conn is None:
-        return None
-    from sai_memory.memory.storage import get_message_position
+    戻りは三状態:
 
-    entries: Dict[str, Any] = lifecycle.load_anchor_entries(persona_id) or {}
+    - ``CompileCeiling`` — 上端が立った。
+    - ``None`` — 温かい行が本当にゼロ (制約なし = 全域編纂可)。
+    - ``CeilingResolutionError`` 送出 — 解決失敗 (行の読み取り失敗 /
+      温かい行の anchor が messages に無い / 位置照会の失敗)。呼び出し側は
+      fail-closed で全量計画を止める。「読めなかった」を「制約なし」へ
+      潰さない (Codex レビュー 2026-08-31)。
+    """
+    if not persona_id:
+        return None
+    if conn is None:
+        raise CeilingResolutionError("memory.db connection is unavailable")
+    from sai_memory.memory.storage import (
+        canonical_position_key,
+        get_message_position,
+    )
+
+    try:
+        entries: Dict[str, Any] = lifecycle.load_anchor_entries_strict(persona_id)
+    except Exception as exc:
+        raise CeilingResolutionError(
+            f"session_anchor rows unreadable for {persona_id}: {exc}"
+        ) from exc
     best: Optional[CompileCeiling] = None
     for model_key, entry in entries.items():
         anchor_id = entry.get("anchor_id")
@@ -83,16 +110,24 @@ def resolve_compile_ceiling(
             continue
         if not lifecycle._anchor_entry_is_hot(entry, str(model_key), persona_id):
             continue
-        pos = get_message_position(conn, str(anchor_id))
+        try:
+            pos = get_message_position(conn, str(anchor_id))
+        except Exception as exc:
+            raise CeilingResolutionError(
+                f"position lookup failed for warm anchor {anchor_id} "
+                f"(model={model_key}): {exc}"
+            ) from exc
         if pos is None:
-            LOGGER.warning(
-                "[coverage-repair] warm anchor points at a missing message; "
-                "the row cannot define a window and does not constrain the "
-                "ceiling (persona=%s model=%s anchor=%s)",
-                persona_id, model_key, anchor_id,
+            # 温かい窓があるのにその位置が分からない — 上端を確定できないので
+            # 全域編纂可へは倒さない (窓の下を掘る側の失敗が重い)。
+            raise CeilingResolutionError(
+                f"warm anchor {anchor_id} (model={model_key}) is missing "
+                "from messages; the ceiling cannot be determined"
             )
-            continue
-        if best is None or pos < best.position:
+        if best is None or (
+            canonical_position_key(*pos)
+            < canonical_position_key(best.created_at, best.rowid)
+        ):
             best = CompileCeiling(
                 message_id=str(anchor_id),
                 created_at=pos[0],
@@ -123,19 +158,33 @@ def coverage_marks_for_window(
     import sqlite3 as _sqlite3
 
     from sai_memory.arasuji.storage import get_entries_covering_messages
-    from sai_memory.memory.storage import get_message_position
+    from sai_memory.memory.storage import (
+        _canonical_after_clause,
+        canonical_position_key,
+        get_message_position,
+    )
 
     pos = get_message_position(conn, str(anchor_id))
     if pos is None:
         return []
-    cur = conn.execute(
-        "SELECT id, COALESCE(created_at, 0), rowid FROM messages "
-        "WHERE COALESCE(created_at, 0) > ? "
-        "   OR (COALESCE(created_at, 0) = ? AND rowid >= ?)",
-        (pos[0], pos[0], pos[1]),
+    # 窓 = anchor 以降 (anchor 含む)。包含判定は共有述語 (_canonical_after_clause、
+    # NULL created_at は全ての実時刻より前) — 窓の読み出しと同じ正典順序。
+    after_sql, after_params = _canonical_after_clause(
+        pos[0], pos[1], inclusive=True,
     )
-    window_key: Dict[str, Tuple[int, int]] = {
-        str(row[0]): (int(row[1]), int(row[2])) for row in cur.fetchall()
+    cur = conn.execute(
+        f"SELECT id, created_at, rowid FROM messages WHERE {after_sql}",
+        after_params,
+    )
+    # 値は (正典ソートキー, 生の created_at)。
+    window_key: Dict[str, Tuple[Any, Optional[int]]] = {
+        str(row[0]): (
+            canonical_position_key(
+                int(row[1]) if row[1] is not None else None, int(row[2]),
+            ),
+            int(row[1]) if row[1] is not None else None,
+        )
+        for row in cur.fetchall()
     }
     if not window_key:
         return []
@@ -145,7 +194,7 @@ def coverage_marks_for_window(
     }
     claimed_messages = {str(mid) for f in existing_folds for mid in f.message_ids}
 
-    window_ids = sorted(window_key, key=lambda mid: window_key[mid])
+    window_ids = sorted(window_key, key=lambda mid: window_key[mid][0])
     entries_by_id: Dict[str, Any] = {}
     try:
         for i in range(0, len(window_ids), _COVERING_QUERY_CHUNK):
@@ -182,12 +231,12 @@ def coverage_marks_for_window(
                 "belong to two ranges)", entry.id,
             )
             continue
-        ordered = sorted(sources, key=lambda s: window_key[s])
+        ordered = sorted(sources, key=lambda s: window_key[s][0])
         short_id = getattr(entry, "short_id", None)
         marks.append(FoldedRange(
             message_ids=ordered,
-            start_at=window_key[ordered[0]][0] or None,
-            end_at=window_key[ordered[-1]][0] or None,
+            start_at=window_key[ordered[0]][1],
+            end_at=window_key[ordered[-1]][1],
             chronicle_entry_ids=[str(entry.id)],
             chronicle_short_ids=[int(short_id)] if short_id is not None else [],
             presented_raw=True,
@@ -196,7 +245,7 @@ def coverage_marks_for_window(
     return marks
 
 
-def mark_covered_cold_windows(lifecycle, persona) -> int:
+def mark_covered_cold_windows(lifecycle, persona) -> Tuple[int, int]:
     """persona の冷えた anchor 行それぞれへ、窓を覆うエントリの印を追記する。
 
     被覆補修 (run_coverage_repair) の完了時に呼ぶ。冪等 — 既に同じ entry_id を
@@ -206,16 +255,21 @@ def mark_covered_cold_windows(lifecycle, persona) -> int:
     間に anchor が動いた行は棄却され、次回の補修が再計算する。
 
     Returns:
-        印を書いた行の数。
+        ``(印を書いた行の数, 書けなかった行の数)``。書けなかった = 印の計算が
+        例外を出した行と、書き込みが適用されなかった行 (CAS 棄却 / DB 失敗)。
+        温かくてスキップした行と、追記すべき印が無かった行は数えない。
+        失敗した行は次回の補修が現況から冪等に再計算する — 呼び出し側は
+        失敗数をユーザーへ可視化するだけでよい (Codex レビュー 2026-08-31)。
     """
     from sea.session_window import deserialize_folds
 
     persona_id = getattr(persona, "persona_id", None)
     adapter = getattr(persona, "sai_memory", None)
     if not persona_id or adapter is None or not adapter.is_ready():
-        return 0
+        return (0, 0)
 
     updated = 0
+    failed = 0
     entries: Dict[str, Any] = lifecycle.load_anchor_entries(persona_id) or {}
     for model_key, entry in entries.items():
         anchor_id = entry.get("anchor_id")
@@ -229,6 +283,7 @@ def mark_covered_cold_windows(lifecycle, persona) -> int:
                 adapter.conn, str(anchor_id), existing,
             )
         except Exception:
+            failed += 1
             LOGGER.warning(
                 "[coverage-repair] failed to compute coverage marks "
                 "(persona=%s model=%s); the row keeps its current record",
@@ -246,4 +301,6 @@ def mark_covered_cold_windows(lifecycle, persona) -> int:
                 "(persona=%s model=%s anchor=%s)",
                 len(marks), persona_id, model_key, anchor_id,
             )
-    return updated
+        else:
+            failed += 1
+    return (updated, failed)

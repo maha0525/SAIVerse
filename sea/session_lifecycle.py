@@ -196,6 +196,28 @@ class SessionLifecycle:
             db.close()
         return {}
 
+    def load_anchor_entries_strict(self, persona_id: Optional[str]) -> Dict[str, Any]:
+        """:meth:`load_anchor_entries` の、読み取り失敗を握らない版 (§16 止め線用)。
+
+        通常版は DB 失敗を空 dict へ潰す (多数の read-only 消費者が縮退で
+        足りるため) が、被覆補修の止め線は「行が無い (温かい窓ゼロ = 全域
+        編纂可)」と「読めなかった (窓があるかも分からない)」を区別しないと
+        fail-open になる — こちらは失敗を例外のまま返す。manager 未接続の
+        部分構築環境は行という器ごと無いので空 dict (従来どおり)。
+        通常版の他の呼び出し元の挙動は変えない。
+        """
+        if not self.manager or not hasattr(self.manager, "SessionLocal"):
+            return {}
+        if not persona_id:
+            return {}
+        db = self.manager.SessionLocal()
+        try:
+            from database.models import SessionAnchor
+            rows = db.query(SessionAnchor).filter_by(PERSONA_ID=persona_id).all()
+            return {row.MODEL_KEY: self._row_to_entry(row) for row in rows}
+        finally:
+            db.close()
+
     def collect_folded_chronicle_entry_ids(
         self, persona_id: Optional[str],
     ) -> Optional[Set[str]]:
@@ -1857,7 +1879,7 @@ class SessionLifecycle:
         persona,
         event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
         cancellation_token: Optional[CancellationToken] = None,
-    ) -> str:
+    ) -> Tuple[str, int]:
         """被覆補修 (arasuji_levels.md §16-2 機構5) — 手動入口の実体。
 
         「編纂対象なのに、どの一次あらすじの source でもなく、止め線 (温かい
@@ -1873,24 +1895,30 @@ class SessionLifecycle:
         完了時、冷えた anchor 行の窓を覆うエントリへ §15 の印
         (:func:`sea.coverage_repair.mark_covered_cold_windows`) を書く —
         休眠モデルが目覚めても head のあらすじ枠と二重提示にならない。
-        印の失敗は補修の成否に畳み込まない (エントリは確定済みで、印は次回の
-        補修が冪等に追記し直せる)。
+        印の失敗は補修の成否 (status) に畳み込まない (エントリは確定済みで、
+        印は次回の補修が冪等に追記し直せる) が、**数として返して可視化する**
+        (Codex レビュー 2026-08-31 — 黙って落とすと次回補修まで head との
+        二重提示が続くことをユーザーが知れない)。
 
         Returns:
-            generate_chronicle の status ("ok" / "failed" / "deferred")、
-            または "disabled" (weave env OFF / persona トグル OFF — 手動入口の
-            同意文は「あらすじにする」なので、無効の persona では何もしない)。
+            ``(status, 印を書けなかった行の数)``。status は generate_chronicle
+            の status ("ok" / "failed" / "deferred")、または "disabled"
+            (weave env OFF / persona トグル OFF — 手動入口の同意文は
+            「あらすじにする」なので、無効の persona では何もしない)。
+            印の失敗数は status=="ok" のときだけ意味を持つ。行単位の失敗は
+            正確な数、印の工程ごと例外で落ちた場合は -1 (数不明の全滅)。
         """
         memory_weave_enabled = os.getenv(
             "ENABLE_MEMORY_WEAVE_CONTEXT", "",
         ).lower() in ("true", "1")
         if not memory_weave_enabled or not self.is_chronicle_enabled_for_persona(persona):
-            return "disabled"
+            return ("disabled", 0)
         persona_id = getattr(persona, "persona_id", None)
         from sea.beat_gate import hold_beat
         # Beat ロックで Metabolism / 手動整理と直列化する。補修は Beat (認知の
         # 一巡) ではなく保守書き込みなので、関所 (pending flush) は通さず
         # ロックだけ取る (remove_folds_referencing_entry と同じ型)。
+        mark_failures = 0
         with hold_beat(
             self.manager, persona_id, purpose="coverage_repair",
             check_gate=False,
@@ -1903,7 +1931,7 @@ class SessionLifecycle:
             if status == "ok":
                 try:
                     from sea.coverage_repair import mark_covered_cold_windows
-                    mark_covered_cold_windows(self, persona)
+                    _, mark_failures = mark_covered_cold_windows(self, persona)
                 except Exception:
                     LOGGER.warning(
                         "[coverage-repair] cold-window marking failed "
@@ -1911,7 +1939,8 @@ class SessionLifecycle:
                         "repair run re-marks idempotently",
                         persona_id, exc_info=True,
                     )
-        return status
+                    mark_failures = -1  # 数不明の全滅
+        return (status, mark_failures)
 
     # ------------------------------------------------------------------
     # 冷えたウィンドウの保守 (arasuji_levels.md §14)

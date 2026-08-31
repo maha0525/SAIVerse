@@ -79,10 +79,11 @@ def estimate_chronicle_generation_cost(
     # 生成経路 (generate_chronicle) と同じ計画を作る。
     all_messages = get_messages_for_chronicle(conn)
     if compile_before is not None:
-        # 止め線 (§16-2): 生成経路と同じ関数で同じ範囲に絞る。
+        # 止め線 (§16-2): 生成経路と同じ関数で同じ範囲に絞る。created_at は
+        # None (NULL = 全ての実時刻より前) がありうるので写像せずそのまま渡す。
         from sai_memory.memory.storage import clip_messages_before_position
         all_messages = clip_messages_before_position(
-            conn, all_messages, int(compile_before[0]), int(compile_before[1]),
+            conn, all_messages, compile_before[0], int(compile_before[1]),
         )
     cur = conn.execute(
         "SELECT DISTINCT json_each.value "
