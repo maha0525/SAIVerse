@@ -1,7 +1,10 @@
 """
-スケジュール追加ツール
+アラーム追加ツール
 
-ペルソナが自分のスケジュールを追加できる。
+ペルソナが自分のアラームを追加できる。
+
+ファイル名・関数名の ``schedule`` は互換のため残している (機能名としては
+「アラーム」に改名済み)。ユーザーと LLM に見える文言だけを「アラーム」に揃える。
 """
 
 import json
@@ -12,6 +15,9 @@ from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
 from database.models import PersonaSchedule, AI as AIModel, City as CityModel
+# 既定 Playbook の正典は ScheduleManager 側に一本化してある。UI からの REST 作成と
+# このスペルで別々の既定値を持たないよう、両方ここから引く。
+from saiverse.schedule_manager import DEFAULT_META_PLAYBOOK
 from tools.context import get_active_manager
 from tools.core import ToolSchema
 
@@ -20,7 +26,7 @@ LOGGER = logging.getLogger(__name__)
 
 def schedule_add(
     schedule_type: str,
-    meta_playbook: str,
+    meta_playbook: str = DEFAULT_META_PLAYBOOK,
     description: str = "",
     priority: int = 0,
     enabled: bool = True,
@@ -35,19 +41,20 @@ def schedule_add(
     args: Optional[Dict[str, Any]] = None,
 ) -> str:
     """
-    新しいスケジュールを追加する。
+    新しいアラームを追加する。
 
     Args:
-        schedule_type: スケジュールタイプ ("periodic", "oneshot", "interval")
-        meta_playbook: 実行するメタプレイブック名
-        description: スケジュールの説明
+        schedule_type: アラームの種別 ("periodic", "oneshot", "interval")
+        meta_playbook: 実行する Playbook 名。通常は省略してよい
+            （会話用の標準 Playbook が使われる）。
+        description: アラームの説明
         priority: 優先度（大きいほど優先）
         enabled: 有効にするかどうか
         days_of_week: 曜日リスト (periodic用、0=月曜日, 6=日曜日)。未指定なら毎日。
         time_of_day: 実行時刻 (periodic用、"HH:MM"形式、例: "09:00")
         scheduled_datetime: 実行日時 (oneshot用、"YYYY-MM-DD HH:MM"形式、ペルソナのタイムゾーンで指定)
         interval_seconds: 実行間隔（秒）(interval用)
-        args: Playbook引数（例: {"selected_playbook": "send_email_to_user"}）
+        args: Playbook引数
 
     Returns:
         str: 実行結果メッセージ
@@ -70,10 +77,12 @@ def schedule_add(
 
     # バリデーション
     if schedule_type not in ["periodic", "oneshot", "interval"]:
-        return f"エラー: 不正なスケジュールタイプです: {schedule_type}"
+        return f"エラー: 不正なアラームの種別です: {schedule_type}"
 
-    if not meta_playbook:
-        return "エラー: メタプレイブック名を指定してください。"
+    # LLM が None・空文字・空白のみを渡してきたときも既定の Playbook で
+    # 成立させる (Playbook 名の指定はもうペルソナに求めていない)。空白を
+    # 残したまま保存すると発火時に Playbook を引けず、鳴らないアラームになる。
+    meta_playbook = (meta_playbook or "").strip() or DEFAULT_META_PLAYBOOK
 
     session = manager.SessionLocal()
     try:
@@ -106,7 +115,7 @@ def schedule_add(
         # スケジュールタイプごとの設定
         if schedule_type == "periodic":
             if not time_of_day:
-                return "エラー: 定期スケジュールには時刻 (time_of_day) を指定してください。"
+                return "エラー: 定期アラームには時刻 (time_of_day) を指定してください。"
 
             new_schedule.TIME_OF_DAY = time_of_day
 
@@ -117,7 +126,7 @@ def schedule_add(
 
         elif schedule_type == "oneshot":
             if not scheduled_datetime:
-                return "エラー: 単発スケジュールには実行日時 (scheduled_datetime) を指定してください。"
+                return "エラー: 単発アラームには実行日時 (scheduled_datetime) を指定してください。"
 
             try:
                 # ペルソナのタイムゾーンで入力された日時を解釈
@@ -138,7 +147,7 @@ def schedule_add(
 
         elif schedule_type == "interval":
             if not interval_seconds or interval_seconds <= 0:
-                return "エラー: 恒常スケジュールには正の実行間隔 (interval_seconds) を指定してください。"
+                return "エラー: 繰り返しアラームには正の実行間隔 (interval_seconds) を指定してください。"
 
             new_schedule.INTERVAL_SECONDS = interval_seconds
 
@@ -158,11 +167,11 @@ def schedule_add(
 
         # 成功メッセージを生成
         status = "有効" if enabled else "無効"
-        return f"✓ スケジュールを追加しました (ID: {schedule_id}, タイプ: {schedule_type}, 状態: {status})"
+        return f"✓ アラームを追加しました (ID: {schedule_id}, 種別: {schedule_type}, 状態: {status})"
 
     except Exception as e:
         LOGGER.error("Failed to add schedule: %s", e, exc_info=True)
-        return f"エラー: スケジュールの追加に失敗しました。{e}"
+        return f"エラー: アラームの追加に失敗しました。{e}"
     finally:
         session.close()
 
@@ -170,22 +179,25 @@ def schedule_add(
 def schema() -> ToolSchema:
     return ToolSchema(
         name="schedule_add",
-        description="新しいスケジュールを追加する。定期実行、単発実行、一定間隔での実行ができる。",
+        description="新しいアラームを追加する。定期実行、単発実行、一定間隔での実行ができる。",
         parameters={
             "type": "object",
             "properties": {
                 "schedule_type": {
                     "type": "string",
                     "enum": ["periodic", "oneshot", "interval"],
-                    "description": "スケジュールタイプ。periodic=定期実行、oneshot=単発実行、interval=一定間隔実行",
+                    "description": "アラームの種別。periodic=定期実行、oneshot=単発実行、interval=一定間隔実行",
                 },
                 "meta_playbook": {
                     "type": "string",
-                    "description": "実行するメタプレイブック名（例: meta_user）",
+                    "description": (
+                        "実行する Playbook 名。通常は省略してよい"
+                        "（会話用の標準 Playbook が使われる）。"
+                    ),
                 },
                 "description": {
                     "type": "string",
-                    "description": "スケジュールの説明。実行時にAIに渡される。",
+                    "description": "アラームの説明。実行時にAIに渡される。",
                 },
                 "priority": {
                     "type": "integer",
@@ -214,10 +226,10 @@ def schema() -> ToolSchema:
                 },
                 "args": {
                     "type": "object",
-                    "description": "Playbook引数。meta_playbookがmeta_user_manualの場合、selected_playbookで実行するサブPlaybookを指定できる。例: {\"selected_playbook\": \"send_email_to_user\"}",
+                    "description": "Playbook引数。通常は省略してよい。",
                 },
             },
-            "required": ["schedule_type", "meta_playbook"],
+            "required": ["schedule_type"],
         },
         result_type="string",
     )

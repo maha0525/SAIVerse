@@ -44,6 +44,7 @@ from saiverse import clock
 from saiverse.event_scheduler import EventScheduler
 from saiverse.execution_ledger import ExecutionLedger
 from saiverse.schedule_manager import (
+    DEFAULT_META_PLAYBOOK,
     SCHEDULE_DISPATCH_LEDGER_KIND,
     SCHEDULE_DISPATCH_MAX_ATTEMPTS,
     ScheduleManager,
@@ -833,3 +834,31 @@ def test_periodic_midrun_reconfig_records_superseded(env):
     row = _ledger_row(env, old_key)
     assert row["status"] == "completed"
     assert (row.get("result") or {}).get("superseded_during_run") is True
+
+
+# ---------------------------------------------------------------------------
+# 空の META_PLAYBOOK は発火の場所で既定 Playbook へ落とす
+# ---------------------------------------------------------------------------
+
+
+def test_blank_meta_playbook_falls_back_to_the_default_at_fire_time(env, caplog):
+    """META_PLAYBOOK が空の行でも、鳴らないアラームにしない。
+
+    作る側の入口 (REST / schedule_add スペル) は既定値へ正規化するよう揃えたが、
+    それ以前に作られた行と、将来増える入口の取りこぼしが発火まで届く。空のまま
+    submit すると Playbook を引けないので、ここで既定へ落として WARNING を出す
+    (警告は「空値を書いている入口がまだある」ことに気づくための印)。
+    """
+    sid = _add_schedule(env.session_factory, META_PLAYBOOK="   ")
+    assert env.sm.register_schedule(sid) == "registered"
+
+    with caplog.at_level("WARNING", logger="saiverse.schedule_manager"):
+        _fire(env, sid)
+
+    assert len(env.stub.calls) == 1
+    assert env.stub.calls[0]["meta_playbook"] == DEFAULT_META_PLAYBOOK
+    assert _get_schedule(env, sid).COMPLETED is True
+    warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert any("empty META_PLAYBOOK" in m for m in warnings), warnings
+    # どのアラームがフォールバックしたか特定できること
+    assert any(f"schedule {sid} " in m for m in warnings), warnings

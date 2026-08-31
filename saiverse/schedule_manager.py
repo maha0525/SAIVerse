@@ -42,6 +42,14 @@ if TYPE_CHECKING:
 
 LOGGER = logging.getLogger(__name__)
 
+#: アラーム (PersonaSchedule) が発火したときに動かす既定の Playbook。
+#: どの Playbook で動くかはユーザーにもペルソナにも選ばせない (2026-09-01 裁定) —
+#: 判断点の Playbook はコードが決定論的に発火させ、生活リズムはライフ設定が
+#: 所有するので、アラームの作成者が選ぶ意味のある選択肢はこれ一つしかない。
+#: アラームを作る口が三つ (UI の REST 作成、ペルソナの schedule_add スペル、
+#: ライフ設定) あるので、既定値はここ一箇所に置いて各入口から参照する。
+DEFAULT_META_PLAYBOOK = "track_user_conversation"
+
 # 実行台帳の kind と冪等キー (handoff D1 + W3 Codex 第三陣):
 # key = f"{schedule_id}:{instance_token}:{occurrence_token}"
 SCHEDULE_DISPATCH_LEDGER_KIND = "schedule.dispatch"
@@ -1081,7 +1089,20 @@ class ScheduleManager:
             "unknown" (LLM が動いたか不明 — 自動再実行禁止)。
         """
         persona_id = schedule.PERSONA_ID
-        meta_playbook = schedule.META_PLAYBOOK
+        meta_playbook = (schedule.META_PLAYBOOK or "").strip()
+        if not meta_playbook:
+            # 発火の場所で一枚に守る。作る側の入口 (REST / schedule_add スペル /
+            # ライフ設定) は既定値へ正規化するよう揃えたが、それ以前に作られた行と、
+            # 将来増える入口の取りこぼしがここへ届く。空のまま進むと Playbook を
+            # 引けずに落ちる = 鳴らないアラームになるので、既定の Playbook で鳴らす。
+            # WARNING を出すのは、空値を書いている入口が残っているなら見つけたいため。
+            LOGGER.warning(
+                "[ScheduleManager] schedule %d (persona=%s) has an empty "
+                "META_PLAYBOOK; falling back to %s. Some creation path is "
+                "writing blank playbook names — find it.",
+                schedule.SCHEDULE_ID, persona_id, DEFAULT_META_PLAYBOOK,
+            )
+            meta_playbook = DEFAULT_META_PLAYBOOK
 
         schedule_args: Optional[Dict[str, Any]] = None
         pre_spells: Optional[List[str]] = None

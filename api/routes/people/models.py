@@ -322,7 +322,10 @@ class ScheduleItem(BaseModel):
 
 class CreateScheduleRequest(BaseModel):
     schedule_type: str # periodic, oneshot, interval
-    meta_playbook: str
+    # 省略可。未指定 / 空文字なら create_schedule が既定 Playbook
+    # (ScheduleManager.DEFAULT_META_PLAYBOOK) へ正規化する。どの Playbook で
+    # 動くかはアラームの作成者に選ばせない (2026-09-01 裁定) ので、UI は送らない。
+    meta_playbook: Optional[str] = None
     description: str = ""
     priority: int = 0
     enabled: bool = True
