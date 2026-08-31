@@ -93,6 +93,5 @@
 | 🟣 検証待ち | ID 文字種契約のペルソナ適用 (issue 論点 3) | ペルソナ ID (AIID) も manager/ids.py の契約に載り、日本語名は persona_連番、作成モーダルは ID 欄に初期値が入る形。配線テストは両経路 (作成・孵化) とも緑。次 = 実機検証 — 日本語名で新規作成し、ID 欄に空き連番が入るか、作成後の AIID と私室が同じ連番になるかを見る。 | まはー (実機検証) | [issue](../issues/building_id_no_charset_constraint.md) | 2026-08-16 |
 | 🔵 設計中 | 刺激 (イベント・ユーザー発話) の永続 ID | 同一性を要る機構が 4 つ揃って此処で止まっている (冪等キー / 回収の重複判定の粒度 / 回収 activate の競合 / claim 失敗時の黙殺)。いまの歯止めは会話区間単位の近似で、立て続けの 2 回目の呼びかけを黙殺しうる。次 = ID の発行元 (供給源ごと / 受信側で一括) と冪等の窓をまはーが裁定する。 | まはー (設計裁定) | [issue](../issues/on_event_judgment_has_no_idempotency_key.md) | 2026-08-14 |
 | 🟣 検証待ち | head 通知の既読基準 (last_notified) 握り潰し根治 | 撮り直し (TTL 切れ / Metabolism / 手動整理) が既読基準を上書きして入退室通知が消える欠陥は、「配送だけが基準を進める」形へ修正済み・回帰緑 (intent C8)。次 = バックエンド再起動後、まはーの入退室でエリスに [システム通知] が届くかを実機確認する。 | まはー (実機検証) | [cached_head_architecture.md](../intent/cached_head_architecture.md) §C8 | 2026-08-17 |
-| 🟣 検証待ち | Elyth Remote MCP 移行 (Local MCP は 8/31 終了) | 実機検証は完了 (手順 8 は確かめる相手が動いておらず v0.4 送り、手順 11 は異常系のためスキップ裁定)。検証中に出た欠陥 4 件も修正済み。次 = 修正はローカルレビューを通り、出た欠陥も消し込み済み。Codex 4 巡目を回すかのまはーの裁定を待つ (回さないなら完了として台帳から外す)。 | まはー (4 巡目の要否) | [handoff](../handoff/2026-08-10_elyth_remote_mcp_handoff.md) / [intent](../intent/mcp_addon_integration.md) §I | 2026-08-10 |
 
 <!-- 構想止まり(当分動かない)は台帳外。intent draft で管理: observer/Fixture, Social Track 入口(Phase 5) など -->
