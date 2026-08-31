@@ -53,7 +53,7 @@
 - [x] **段 3**: update.bat / self_update.py の経路検証 — 2026-08-30 深夜に完了。修正 2 件 (snapshot.py の sys.path / requirements.txt の ASCII 化) と issue 1 件 (v0.2.29 の update.bat は pull 直後に死ぬ) を出して、旧 bat → 新 engine → 起動移行 → health 200 まで実機合格。記録は [2026-08-29_v0229_upgrade_test.md](2026-08-29_v0229_upgrade_test.md) の段 3 節。
 - [ ] **タグを切るときの必須作業**: dev6 → 0.3.0 の空エッジ追加 (忘れると全ユーザーの起動が version chain エラーで止まる) / VERSION / リリースノート — **「v0.2.x からは update.bat を 2 回実行」の明記が必須** ([issue](../issues/v0229_update_bat_truncates_after_git_pull.md)) / develop → main の PR / `gen_reference_docs --check`。
 - [ ] **ZIP インストールの Git 自動導入**: クリーン Windows (git 未導入) での実機テスト — リリース ZIP ができた時に一緒に。
-- [ ] **単発作業 (タイミングまはー)**: aifi の再編纂 (汎用ツール整備済み)。
+- [ ] **単発作業 (タイミングまはー)**: aifi の豆粒後始末 — §16 補修は 8/31 実機済みだが、極小 run の捏造欠陥 ([隣人吸収 issue](../issues/arasuji_tiny_run_absorption.md)) を直してから豆粒削除→補修再実行。
 - (発生待ち: 記憶補填の実地発火 — ログの目印 `memory backfill on beat death succeeded` を私が掃き続ける)
 
 ---

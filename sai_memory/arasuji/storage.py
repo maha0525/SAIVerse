@@ -257,8 +257,16 @@ def init_arasuji_tables(conn: sqlite3.Connection) -> None:
     _ensure_root_chronicle(conn)
     _migrate_legacy_arasuji_table(conn)
 
-    conn.execute("DROP VIEW IF EXISTS arasuji_entries")
-    conn.execute(_COMPAT_VIEW_SQL)
+    # DROP→CREATE は 2 接続が並行で通ると片方の CREATE が "already exists" で
+    # 落ちる (API はリクエストごとに init を通る — 2026-08-31 に fragments GET の
+    # 並行取得で本番 500)。VIEW 定義の更新はデプロイ単位でしか変わらないので、
+    # 競合した側は「相手が作った同じ定義」として受容してよい。
+    try:
+        conn.execute("DROP VIEW IF EXISTS arasuji_entries")
+        conn.execute(_COMPAT_VIEW_SQL)
+    except sqlite3.OperationalError as exc:
+        if "already exists" not in str(exc):
+            raise
 
     conn.execute(
         """
