@@ -6,9 +6,23 @@ import styles from './ToolModeSelector.module.css';
 
 const ICON_SIZE = 14;
 
-// Popover は既定でボタンの左端に沿って開く (left: 0)。画面右端に近い
-// ボタンから開くと右へはみ出して切れるので、開いた直後に実測して
-// はみ出す場合だけ右揃え (right: 0) に反転する。
+// Popover は既定でボタンの左端に沿って開く (left: 0)。切り取り境界
+// (overflow が visible でない祖先、なければ画面) の右端からはみ出す
+// 場合だけ、開いた直後に実測して右揃え (right: 0) に反転する。
+// 画面の端だけを見るとチャット欄の overflow で切れるケースを見逃す。
+function clipRightEdge(el: HTMLElement): number {
+    let clipRight = window.innerWidth;
+    let node = el.parentElement;
+    while (node && node !== document.body) {
+        const style = window.getComputedStyle(node);
+        if (style.overflowX !== 'visible' || style.overflow !== 'visible') {
+            clipRight = Math.min(clipRight, node.getBoundingClientRect().right);
+        }
+        node = node.parentElement;
+    }
+    return clipRight;
+}
+
 function useFlipRightIfOverflow(open: boolean) {
     const ref = useRef<HTMLDivElement>(null);
     const [flip, setFlip] = useState(false);
@@ -18,7 +32,7 @@ function useFlipRightIfOverflow(open: boolean) {
             return;
         }
         const el = ref.current;
-        if (el && el.getBoundingClientRect().right > window.innerWidth - 8) {
+        if (el && el.getBoundingClientRect().right > clipRightEdge(el) - 8) {
             setFlip(true);
         }
     }, [open]);
