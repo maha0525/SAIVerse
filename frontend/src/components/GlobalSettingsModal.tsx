@@ -74,6 +74,12 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
     // Media recall (attached image/audio/video summaries feed auto-recall search)
     const [mediaRecallEnabled, setMediaRecallEnabled] = useState(false);
 
+    // Gemini auto cache (every Gemini call creates an explicit cache to get cached input pricing)
+    const [geminiAutoCacheEnabled, setGeminiAutoCacheEnabled] = useState(false);
+    const [geminiAutoCacheKeepSeconds, setGeminiAutoCacheKeepSeconds] = useState(0);
+    const [geminiAutoCacheKeepInput, setGeminiAutoCacheKeepInput] = useState('0');
+    const [geminiAutoCacheKeepMax, setGeminiAutoCacheKeepMax] = useState(3600);
+
     // Collapsible sections
     const [envSectionOpen, setEnvSectionOpen] = useState(false);
 
@@ -146,6 +152,7 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
             loadAnnouncementsState();
             loadImageDefaultQuality();
             loadMediaRecallState();
+            loadGeminiAutoCacheState();
             // Load theme from localStorage
             const saved = localStorage.getItem('saiverse-theme') as 'system' | 'light' | 'dark' | null;
             setTheme(saved || 'system');
@@ -266,6 +273,59 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
         } catch (e) {
             console.error("Failed to toggle media recall", e);
         }
+    };
+
+    const loadGeminiAutoCacheState = async () => {
+        try {
+            const res = await fetch('/api/config/gemini-auto-cache');
+            if (res.ok) {
+                const data = await res.json();
+                setGeminiAutoCacheEnabled(!!data.enabled);
+                const keep = typeof data.keep_seconds === 'number' ? data.keep_seconds : 0;
+                setGeminiAutoCacheKeepSeconds(keep);
+                setGeminiAutoCacheKeepInput(String(keep));
+                if (typeof data.keep_seconds_max === 'number') {
+                    setGeminiAutoCacheKeepMax(data.keep_seconds_max);
+                }
+            }
+        } catch (e) {
+            console.error("Failed to load Gemini auto cache state", e);
+        }
+    };
+
+    const saveGeminiAutoCache = async (enabled: boolean, keepSeconds: number) => {
+        try {
+            const res = await fetch('/api/config/gemini-auto-cache', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ enabled, keep_seconds: keepSeconds })
+            });
+            if (res.ok) {
+                const data = await res.json();
+                setGeminiAutoCacheEnabled(!!data.enabled);
+                setGeminiAutoCacheKeepSeconds(data.keep_seconds);
+                setGeminiAutoCacheKeepInput(String(data.keep_seconds));
+            }
+        } catch (e) {
+            console.error("Failed to update Gemini auto cache", e);
+        }
+    };
+
+    const toggleGeminiAutoCache = () => {
+        saveGeminiAutoCache(!geminiAutoCacheEnabled, geminiAutoCacheKeepSeconds);
+    };
+
+    // 数値欄は入力中に勝手に丸めると打ちにくいので、確定 (フォーカスが外れる / Enter) のときだけ保存する
+    const commitGeminiAutoCacheKeepSeconds = () => {
+        const parsed = Number.parseInt(geminiAutoCacheKeepInput, 10);
+        const next = Number.isNaN(parsed)
+            ? 0
+            : Math.min(Math.max(parsed, 0), geminiAutoCacheKeepMax);
+        if (next === geminiAutoCacheKeepSeconds) {
+            setGeminiAutoCacheKeepInput(String(next));
+            return;
+        }
+        saveGeminiAutoCache(geminiAutoCacheEnabled, next);
     };
 
     const loadDeveloperModeState = async () => {
@@ -701,6 +761,44 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                                     <div
                                         className={`${styles.toggle} ${mediaRecallEnabled ? styles.active : ''}`}
                                         onClick={toggleMediaRecall}
+                                    />
+                                </div>
+
+                                {/* Gemini Auto Cache Toggle */}
+                                <div className={styles.toggleContainer}>
+                                    <div>
+                                        <div className={styles.toggleLabel}>
+                                            Gemini 自動キャッシュ（実験的）
+                                        </div>
+                                        <div className={styles.toggleDescription}>
+                                            全ての Gemini 呼び出しでキャッシュを自動作成し、入力トークンをキャッシュ価格にします。保持秒数が 0 のときは応答後すぐ削除します。
+                                        </div>
+                                        {geminiAutoCacheEnabled && (
+                                            <div className={styles.subSetting}>
+                                                <label className={styles.subSettingLabel} htmlFor="gemini-auto-cache-keep">
+                                                    応答後の保持秒数
+                                                </label>
+                                                <input
+                                                    id="gemini-auto-cache-keep"
+                                                    type="number"
+                                                    min={0}
+                                                    max={geminiAutoCacheKeepMax}
+                                                    step={1}
+                                                    className={styles.subSettingInput}
+                                                    value={geminiAutoCacheKeepInput}
+                                                    onChange={e => setGeminiAutoCacheKeepInput(e.target.value)}
+                                                    onBlur={commitGeminiAutoCacheKeepSeconds}
+                                                    onKeyDown={e => { if (e.key === 'Enter') e.currentTarget.blur(); }}
+                                                />
+                                                <div className={styles.subSettingHint}>
+                                                    1 以上にすると、その秒数のあいだ Gemini 側にキャッシュを残します（最大 {geminiAutoCacheKeepMax} 秒）。残しているあいだは保存料金がかかりますが、残したキャッシュを次の呼び出しで使い回す仕組みはまだありません。いまは 0 のままをおすすめします。
+                                                </div>
+                                            </div>
+                                        )}
+                                    </div>
+                                    <div
+                                        className={`${styles.toggle} ${geminiAutoCacheEnabled ? styles.active : ''}`}
+                                        onClick={toggleGeminiAutoCache}
                                     />
                                 </div>
 

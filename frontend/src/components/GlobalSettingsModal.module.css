@@ -365,6 +365,43 @@
     margin-top: 0.25rem;
 }
 
+/* トグルの下にぶら下がる追加設定 (数値入力など) */
+.subSetting {
+    margin-top: 0.75rem;
+    padding-top: 0.75rem;
+    border-top: 1px solid #334155;
+}
+
+.subSettingLabel {
+    display: block;
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: #e2e8f0;
+    margin-bottom: 0.35rem;
+}
+
+.subSettingInput {
+    width: 8rem;
+    padding: 0.4rem 0.5rem;
+    border: 1px solid #475569;
+    border-radius: 6px;
+    background: #1e293b;
+    color: #f1f5f9;
+    transition: border-color 0.2s;
+}
+
+.subSettingInput:focus {
+    outline: none;
+    border-color: #3b82f6;
+    box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.2);
+}
+
+.subSettingHint {
+    font-size: 0.8rem;
+    color: #94a3b8;
+    margin-top: 0.35rem;
+}
+
 .toggle {
     position: relative;
     width: 56px;
@@ -628,6 +665,24 @@
 }
 
 :global([data-theme="light"]) .toggleDescription {
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .subSetting {
+    border-top-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .subSettingLabel {
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .subSettingInput {
+    background: #ffffff;
+    border-color: #cbd5e1;
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .subSettingHint {
     color: #64748b;
 }
 

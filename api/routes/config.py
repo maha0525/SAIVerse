@@ -793,6 +793,54 @@ def set_media_recall(req: MediaRecallRequest, manager=Depends(get_manager)):
     return {"success": True, "enabled": req.enabled}
 
 
+class GeminiAutoCacheRequest(BaseModel):
+    enabled: bool
+    keep_seconds: int = 0
+
+
+@router.get("/gemini-auto-cache")
+def get_gemini_auto_cache():
+    """Get the Gemini auto-cache switch and how long a cache is kept after the reply."""
+    from llm_clients.gemini import AUTO_CACHE_KEEP_SECONDS_MAX, GeminiClient
+
+    return {
+        "enabled": bool(GeminiClient._AUTO_CACHE_ENABLED),
+        "keep_seconds": GeminiClient.auto_cache_keep_seconds(),
+        "keep_seconds_max": AUTO_CACHE_KEEP_SECONDS_MAX,
+    }
+
+
+@router.post("/gemini-auto-cache")
+def set_gemini_auto_cache(req: GeminiAutoCacheRequest):
+    """Toggle Gemini auto-cache and persist to .env.
+
+    ON にすると全ての Gemini 呼び出しで explicit cache を自動作成し、入力トークンを
+    キャッシュ価格 (1/10) にする。keep_seconds が 0 なら応答直後にキャッシュを削除し
+    (従来挙動)、1 以上ならその秒数を TTL にして作成し、手動削除はせず Gemini 側の
+    失効に任せる。
+
+    クラス属性を書き換えるので、既に生きている GeminiClient インスタンスにも
+    即座に効く (再起動不要)。
+    """
+    from llm_clients.gemini import GeminiClient, clamp_auto_cache_keep_seconds
+
+    keep_seconds = clamp_auto_cache_keep_seconds(req.keep_seconds)
+
+    GeminiClient._AUTO_CACHE_ENABLED = bool(req.enabled)
+    GeminiClient._AUTO_CACHE_KEEP_SECONDS = keep_seconds
+
+    from api.routes.admin import write_env_updates
+    write_env_updates({
+        "SAIVERSE_GEMINI_AUTO_CACHE": "1" if req.enabled else "0",
+        "SAIVERSE_GEMINI_AUTO_CACHE_KEEP_SECONDS": str(keep_seconds),
+    })
+    _log.info(
+        "Gemini auto cache: enabled=%s keep_seconds=%s",
+        bool(req.enabled), keep_seconds,
+    )
+    return {"success": True, "enabled": bool(req.enabled), "keep_seconds": keep_seconds}
+
+
 class MaxImageEmbedsRequest(BaseModel):
     value: Optional[int] = None
 
