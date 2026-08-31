@@ -4,7 +4,7 @@ import json
 import logging
 import os
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Sequence
 
 from discord_gateway.integration import ensure_gateway_runtime
@@ -70,7 +70,7 @@ class GatewayMixin:
             "content": message.content,
             "speaker_name": message.author_name,
             "persona_id": message.persona_id,
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
         }
         self._append_gateway_history(message.context.building_id, entry)
         commands: List[GatewayCommand] = []
@@ -98,7 +98,7 @@ class GatewayMixin:
             "persona_id": message.persona_id,
             "speaker_name": visitor.persona_name,
             "avatar_image": visitor.metadata.get("avatar_image", self.default_avatar),
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
         }
         self._append_gateway_history(message.context.building_id, entry)
         self._gateway_send_message(
@@ -304,7 +304,7 @@ class GatewayMixin:
         mapping = getattr(self, "gateway_mapping", None)
         if not runtime or not mapping:
             return
-        history = self.building_histories.get(building_id, [])
+        history = self.get_building_history(building_id)
         persona_history = [
             entry for entry in history if entry.get("persona_id") == visitor.persona_id
         ]
@@ -390,6 +390,18 @@ class GatewayMixin:
         runtime.submit(enqueue())
 
     def _append_gateway_history(self, building_id: str, entry: Dict[str, Any]) -> None:
-        history = self.building_histories.setdefault(building_id, [])
-        history.append(entry)
-        self._save_building_histories()
+        if building_id in self.quarantined_buildings:
+            logging.warning(
+                "Gateway entry refused: building %s is quarantined", building_id,
+            )
+            return
+        # DB が source of truth (Phase 2+3)。 add_building_event 経由で seq / message_id
+        # を独立採番する。
+        try:
+            from database.building_messages import insert_building_message
+            insert_building_message(self.SessionLocal, building_id, entry)
+        except Exception:
+            logging.warning(
+                "_append_gateway_history: failed to insert (bid=%s)", building_id,
+                exc_info=True,
+            )

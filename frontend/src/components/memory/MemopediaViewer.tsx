@@ -9,17 +9,24 @@ interface MemopediaPage {
     title: string;
     summary: string;
     keywords: string[];
-    vividness: string;
+    // P4-c: vividness は廃止。フィールドを除去した。
     is_trunk: boolean;
     is_important: boolean;
+    updated_at?: number;
+    last_referenced_at?: number;
     children: MemopediaPage[];
 }
 
-interface TreeStructure {
-    people: MemopediaPage[];
-    terms: MemopediaPage[];
-    plans: MemopediaPage[];
+interface CategoryMeta {
+    key: string;
+    label: string;
+    label_en: string;
+    hide_when_empty: boolean;
+    can_generate: boolean;
+    writable: boolean;
 }
+
+type TreeStructure = Record<string, MemopediaPage[]>;
 
 interface EditHistoryEntry {
     id: string;
@@ -30,6 +37,14 @@ interface EditHistoryEntry {
     ref_end_message_id: string | null;
     edit_type: string;
     edit_source: string | null;
+}
+
+interface MemopediaFragment {
+    id: string;
+    content: string;
+    source_date: string | null;
+    chronicle_entry_id: string | null;
+    created_at: number;
 }
 
 interface MemopediaViewerProps {
@@ -49,15 +64,30 @@ function collectExpandableIds(pages: MemopediaPage[]): Set<string> {
     return ids;
 }
 
+// Default categories before API response arrives (matches CATEGORY_DEFS order)
+const DEFAULT_CATEGORIES: CategoryMeta[] = [
+    { key: "people", label: "人物", label_en: "People", hide_when_empty: false, can_generate: true, writable: true },
+    { key: "terms", label: "用語", label_en: "Terms", hide_when_empty: false, can_generate: true, writable: true },
+    { key: "plans", label: "計画", label_en: "Plans", hide_when_empty: false, can_generate: true, writable: true },
+    { key: "events", label: "出来事", label_en: "Events", hide_when_empty: false, can_generate: true, writable: true },
+    { key: "theme", label: "テーマ", label_en: "Themes", hide_when_empty: true, can_generate: false, writable: false },
+];
+
 export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
     const [tree, setTree] = useState<TreeStructure | null>(null);
+    const [categories, setCategories] = useState<CategoryMeta[]>(DEFAULT_CATEGORIES);
     const [selectedPageId, setSelectedPageId] = useState<string | null>(null);
     const [pageContent, setPageContent] = useState<string>("");
+    const [pageFragments, setPageFragments] = useState<MemopediaFragment[]>([]);
     const [isLoadingPage, setIsLoadingPage] = useState(false);
     const [showList, setShowList] = useState(true);
 
     // Expansion state: managed at parent level for persistence
     const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
+
+    // Sort state
+    type SortMode = 'tree' | 'updated';
+    const [sortMode, setSortMode] = useState<SortMode>('updated');
 
     // History state
     const [showHistory, setShowHistory] = useState(false);
@@ -71,7 +101,7 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
     const [editSummary, setEditSummary] = useState("");
     const [editContent, setEditContent] = useState("");
     const [editKeywords, setEditKeywords] = useState("");
-    const [editVividness, setEditVividness] = useState("rough");
+    // P4-c: editVividness は廃止。
     const [isSaving, setIsSaving] = useState(false);
 
     // Delete confirmation state
@@ -85,7 +115,7 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
     const [createSummary, setCreateSummary] = useState("");
     const [createContent, setCreateContent] = useState("");
     const [createKeywords, setCreateKeywords] = useState("");
-    const [createVividness, setCreateVividness] = useState("rough");
+    // P4-c: createVividness は廃止。
     const [createIsTrunk, setCreateIsTrunk] = useState(false);
     const [isCreating, setIsCreating] = useState(false);
 
@@ -110,8 +140,10 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
     useEffect(() => {
         if (tree) {
             const allExpandable = new Set<string>();
-            [tree.people, tree.terms, tree.plans].forEach(pages => {
-                collectExpandableIds(pages).forEach(id => allExpandable.add(id));
+            Object.values(tree).forEach(pages => {
+                if (Array.isArray(pages)) {
+                    collectExpandableIds(pages).forEach(id => allExpandable.add(id));
+                }
             });
             setExpandedIds(allExpandable);
         }
@@ -133,7 +165,17 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
             const res = await fetch(`/api/people/${personaId}/memopedia/tree`);
             if (res.ok) {
                 const data = await res.json();
-                setTree(data);
+                // Extract categories meta if present, else keep defaults
+                if (data.categories && Array.isArray(data.categories)) {
+                    setCategories(data.categories);
+                }
+                // Ensure all category arrays exist (backward compat for old personas)
+                const treeData: TreeStructure = {};
+                const cats: CategoryMeta[] = data.categories || DEFAULT_CATEGORIES;
+                for (const cat of cats) {
+                    treeData[cat.key] = data[cat.key] || [];
+                }
+                setTree(treeData);
             }
         } catch (error) {
             console.error("Failed to load memopedia tree", error);
@@ -147,10 +189,12 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
             if (res.ok) {
                 const data = await res.json();
                 setPageContent(data.content);
+                setPageFragments(data.fragments || []);
             }
         } catch (error) {
             console.error("Failed to load page content", error);
             setPageContent("*Failed to load content*");
+            setPageFragments([]);
         } finally {
             setIsLoadingPage(false);
         }
@@ -183,7 +227,7 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
     // Edit mode handlers
     const startEditing = () => {
         if (!selectedPageId || !tree) return;
-        const allPages = [...tree.people, ...tree.terms, ...tree.plans];
+        const allPages = Object.values(tree).flat() as MemopediaPage[];
         const findPage = (pages: MemopediaPage[]): MemopediaPage | null => {
             for (const p of pages) {
                 if (p.id === selectedPageId) return p;
@@ -237,7 +281,6 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
         setEditSummary(summary);
         setEditContent(content);
         setEditKeywords(page.keywords?.join(', ') || '');
-        setEditVividness(page.vividness || 'rough');
         setIsEditing(true);
         setShowHistory(false);
     };
@@ -246,24 +289,26 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
         setIsEditing(false);
     };
 
-    const handleVividnessChange = async (newVividness: string) => {
+    // P4-c: handleVividnessChange は廃止。代わりに机の開閉を管理する。
+    const handleDeskToggle = async (open: boolean) => {
         if (!selectedPageId) return;
         try {
-            const res = await fetch(`/api/people/${personaId}/memopedia/pages/${selectedPageId}`, {
-                method: 'PUT',
+            const res = await fetch(`/api/people/${personaId}/memopedia/pages/${selectedPageId}/desk`, {
+                method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ vividness: newVividness }),
+                body: JSON.stringify({ open }),
             });
 
             if (res.ok) {
-                await loadTree(); // Refresh tree to show updated vividness
+                const data = await res.json();
+                alert(data.message || (open ? '机に開きました' : '机から閉じました'));
             } else {
                 const err = await res.json();
-                alert(`鮮明度の更新に失敗しました: ${err.detail || 'Unknown error'}`);
+                alert(`操作に失敗しました: ${err.detail || 'Unknown error'}`);
             }
         } catch (error) {
-            console.error('Failed to update vividness', error);
-            alert('鮮明度の更新に失敗しました');
+            console.error('Failed to toggle desk', error);
+            alert('操作に失敗しました');
         }
     };
 
@@ -284,7 +329,7 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
                     summary: editSummary,
                     content: editContent,
                     keywords,
-                    vividness: editVividness,
+                    // P4-c: vividness は廃止。送信しない。
                 }),
             });
 
@@ -335,7 +380,7 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
         setCreateSummary("");
         setCreateContent("");
         setCreateKeywords("");
-        setCreateVividness("rough");
+        // P4-c: createVividness は廃止。
         setCreateIsTrunk(false);
         setShowCreateModal(true);
     };
@@ -362,7 +407,7 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
                     summary: createSummary,
                     content: createContent,
                     keywords,
-                    vividness: createVividness,
+                    // P4-c: vividness は廃止。送信しない。
                     is_trunk: createIsTrunk,
                 }),
             });
@@ -573,26 +618,12 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
             openCreateModal(page.id);
         };
 
-        // CSS class based on vividness
-        const getVividnessClass = () => {
-            switch (page.vividness) {
-                case 'vivid':
-                    return styles.pageVividVivid;
-                case 'rough':
-                    return styles.pageVividRough;
-                case 'faint':
-                    return styles.pageVividFaint;
-                case 'buried':
-                    return styles.pageVividBuried;
-                default:
-                    return '';
-            }
-        };
+        // P4-c: getVividnessClass は廃止。
 
         return (
             <div>
                 <div
-                    className={`${styles.pageItem} ${selectedPageId === page.id ? styles.active : ''} ${getVividnessClass()} ${page.is_trunk ? styles.trunkItem : ''}`}
+                    className={`${styles.pageItem} ${selectedPageId === page.id ? styles.active : ''} ${page.is_trunk ? styles.trunkItem : ''}`}
                     onClick={handlePageClick}
                 >
                     {hasChildren || page.is_trunk || isRoot ? (
@@ -630,7 +661,7 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
     // Helper to find selected page and get its keywords
     const getSelectedPageKeywords = (): string[] => {
         if (!tree || !selectedPageId) return [];
-        const allPages = [...tree.people, ...tree.terms, ...tree.plans];
+        const allPages = Object.values(tree).flat() as MemopediaPage[];
         const findPage = (pages: MemopediaPage[]): MemopediaPage | null => {
             for (const p of pages) {
                 if (p.id === selectedPageId) return p;
@@ -653,26 +684,12 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
         return Array.isArray(keywords) ? keywords : [];
     };
 
-    // Helper to find selected page and get its vividness
-    const getSelectedPageVividness = (): string => {
-        if (!tree || !selectedPageId) return 'rough';
-        const allPages = [...tree.people, ...tree.terms, ...tree.plans];
-        const findPage = (pages: MemopediaPage[]): MemopediaPage | null => {
-            for (const p of pages) {
-                if (p.id === selectedPageId) return p;
-                const found = findPage(p.children);
-                if (found) return found;
-            }
-            return null;
-        };
-        const page = findPage(allPages);
-        return page?.vividness || 'rough';
-    };
+    // P4-c: getSelectedPageVividness は廃止。
 
     // Helper to find selected page and get its is_trunk
     const getSelectedPageIsTrunk = (): boolean => {
         if (!tree || !selectedPageId) return false;
-        const allPages = [...tree.people, ...tree.terms, ...tree.plans];
+        const allPages = Object.values(tree).flat() as MemopediaPage[];
         const findPage = (pages: MemopediaPage[]): MemopediaPage | null => {
             for (const p of pages) {
                 if (p.id === selectedPageId) return p;
@@ -688,7 +705,7 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
     // Helper to find selected page and get its is_important
     const getSelectedPageIsImportant = (): boolean => {
         if (!tree || !selectedPageId) return false;
-        const allPages = [...tree.people, ...tree.terms, ...tree.plans];
+        const allPages = Object.values(tree).flat() as MemopediaPage[];
         const findPage = (pages: MemopediaPage[]): MemopediaPage | null => {
             for (const p of pages) {
                 if (p.id === selectedPageId) return p;
@@ -702,19 +719,42 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
     };
 
     const selectedKeywords = getSelectedPageKeywords();
-    const selectedVividness = getSelectedPageVividness();
+    // P4-c: selectedVividness は廃止。
     const selectedIsTrunk = getSelectedPageIsTrunk();
     const selectedIsImportant = getSelectedPageIsImportant();
+    // P4-c: getVividnessLabel は廃止。
 
-    const getVividnessLabel = (vividness: string) => {
-        switch (vividness) {
-            case 'vivid': return '鮮明（全内容）';
-            case 'rough': return '概要';
-            case 'faint': return '淡い（タイトルのみ）';
-            case 'buried': return '埋没（非表示）';
-            default: return vividness;
+    // Sort helper: most recently referenced/updated first
+    const pageFreshness = (p: MemopediaPage) => Math.max(p.last_referenced_at || 0, p.updated_at || 0);
+
+    // Sort pages within each category by freshness (for tree mode)
+    const sortedTree = useMemo((): TreeStructure | null => {
+        if (!tree) return null;
+        const sortPages = (pages: MemopediaPage[]) =>
+            [...pages].sort((a, b) => pageFreshness(b) - pageFreshness(a));
+        const result: TreeStructure = {};
+        for (const key of Object.keys(tree)) {
+            result[key] = sortPages(tree[key] || []);
         }
-    };
+        return result;
+    }, [tree]);
+
+    // Flatten all pages for "updated" sort mode
+    const flatPages = useMemo(() => {
+        if (!tree || sortMode !== 'updated') return [];
+        const pages: MemopediaPage[] = [];
+        const collect = (page: MemopediaPage) => {
+            if (!page.id.startsWith('root_')) {
+                pages.push(page);
+            }
+            page.children?.forEach(collect);
+        };
+        Object.values(tree).forEach(catPages => catPages.forEach(collect));
+        // Sort by most recently referenced/updated (newest first)
+        const freshness = (p: MemopediaPage) => Math.max(p.last_referenced_at || 0, p.updated_at || 0);
+        pages.sort((a, b) => freshness(b) - freshness(a));
+        return pages;
+    }, [tree, sortMode]);
 
     if (!tree) return <div className={styles.emptyState}>ナレッジベースを読み込み中...</div>;
 
@@ -723,31 +763,64 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
             <div className={`${styles.sidebar} ${!showList ? styles.mobileHidden : ''}`}>
                 <div className={styles.sidebarHeader}>
                     <span>ナレッジツリー</span>
-                    <button
-                        className={styles.generateButton}
-                        onClick={() => {
-                            setShowGenerateModal(true);
-                            setGenerateKeyword("");
-                            setGenerateDirections("");
-                            setGenerateCategory(null);
-                            setGenerateError(null);
-                            setGenerateResult(null);
-                        }}
-                        title="キーワードからページを生成"
-                    >
-                        <Sparkles size={14} />
-                        <span>生成</span>
-                    </button>
+                    <div className={styles.sidebarActions}>
+                        <button
+                            className={`${styles.sortButton} ${sortMode === 'updated' ? styles.active : ''}`}
+                            onClick={() => setSortMode(sortMode === 'tree' ? 'updated' : 'tree')}
+                            title={sortMode === 'tree' ? '更新日時順に並び替え' : 'ツリー表示に戻す'}
+                        >
+                            <Clock size={14} />
+                        </button>
+                        <button
+                            className={styles.generateButton}
+                            onClick={() => {
+                                setShowGenerateModal(true);
+                                setGenerateKeyword("");
+                                setGenerateDirections("");
+                                setGenerateCategory(null);
+                                setGenerateError(null);
+                                setGenerateResult(null);
+                            }}
+                            title="キーワードからページを生成"
+                        >
+                            <Sparkles size={14} />
+                            <span>生成</span>
+                        </button>
+                    </div>
                 </div>
                 <div className={styles.treeContainer}>
-                    <div className={styles.categoryTitle}>人物 / People</div>
-                    {tree.people.map(p => <TreeItem key={p.id} page={p} />)}
-
-                    <div className={styles.categoryTitle}>用語 / Terms</div>
-                    {tree.terms.map(p => <TreeItem key={p.id} page={p} />)}
-
-                    <div className={styles.categoryTitle}>計画 / Plans</div>
-                    {tree.plans.map(p => <TreeItem key={p.id} page={p} />)}
+                    {sortMode === 'tree' && sortedTree ? (
+                        <>
+                            {categories.map(cat => {
+                                const pages = sortedTree[cat.key] || [];
+                                if (cat.hide_when_empty && pages.length === 0) return null;
+                                return (
+                                    <React.Fragment key={cat.key}>
+                                        <div className={styles.categoryTitle}>{cat.label} / {cat.label_en}</div>
+                                        {pages.map(p => <TreeItem key={p.id} page={p} />)}
+                                    </React.Fragment>
+                                );
+                            })}
+                        </>
+                    ) : (
+                        <>
+                            <div className={styles.categoryTitle}>更新日時順</div>
+                            {flatPages.map(p => (
+                                <div
+                                    key={p.id}
+                                    className={`${styles.flatItem} ${selectedPageId === p.id ? styles.selected : ''}`}
+                                    onClick={() => { setSelectedPageId(p.id); setShowList(false); }}
+                                >
+                                    <div className={styles.flatItemTitle}>{p.title}</div>
+                                    <div className={styles.flatItemMeta}>
+                                        {pageFreshness(p) ? new Date(pageFreshness(p) * 1000).toLocaleString('ja-JP', {
+                                            month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
+                                        }) : ''}
+                                    </div>
+                                </div>
+                            ))}
+                        </>
+                    )}
                 </div>
             </div>
 
@@ -837,7 +910,38 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
                                         )}
                                         {selectedHistoryEntry?.id === entry.id && (
                                             <div className={styles.diffView}>
-                                                <div className={styles.diffHeader}>Diff</div>
+                                                <div className={styles.diffHeader}>
+                                                    <span>Diff</span>
+                                                    <button
+                                                        className={styles.rollbackButton}
+                                                        onClick={async (e) => {
+                                                            e.stopPropagation();
+                                                            if (!confirm(`この編集より前の状態に戻しますか？\n(${getEditTypeLabel(entry.edit_type)} - ${formatDate(entry.edited_at)})`)) return;
+                                                            try {
+                                                                const url = `/api/people/${personaId}/memopedia/pages/${entry.page_id}/rollback/${entry.id}`;
+                                                                console.log('[rollback] POST', url);
+                                                                const res = await fetch(url, { method: 'POST' });
+                                                                console.log('[rollback] response status:', res.status);
+                                                                if (res.ok) {
+                                                                    const data = await res.json();
+                                                                    setPageContent(data.page.content);
+                                                                    setShowHistory(false);
+                                                                    setSelectedHistoryEntry(null);
+                                                                    // Refresh tree (loadTree separates categories meta from page arrays)
+                                                                    await loadTree();
+                                                                } else {
+                                                                    const err = await res.json();
+                                                                    alert(`ロールバック失敗: ${err.detail || '不明なエラー'}`);
+                                                                }
+                                                            } catch (err) {
+                                                                alert(`ロールバック失敗: ${err}`);
+                                                            }
+                                                        }}
+                                                        title="この編集より前の状態に戻す"
+                                                    >
+                                                        ↩ 戻す
+                                                    </button>
+                                                </div>
                                                 <pre className={styles.diffContent}>{entry.diff_text || '(差分なし)'}</pre>
                                             </div>
                                         )}
@@ -877,22 +981,7 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
                                 placeholder="キーワード1, キーワード2, ..."
                             />
                         </div>
-                        <div className={styles.formGroup}>
-                            <label>鮮明度</label>
-                            <select
-                                value={editVividness}
-                                onChange={e => setEditVividness(e.target.value)}
-                                className={styles.formInput}
-                            >
-                                <option value="vivid">鮮明（全内容）</option>
-                                <option value="rough">概要（デフォルト）</option>
-                                <option value="faint">淡い（タイトルのみ）</option>
-                                <option value="buried">埋没（非表示）</option>
-                            </select>
-                            <small style={{ color: '#888', display: 'block', marginTop: '4px' }}>
-                                コンテキストに含める情報量を制御します
-                            </small>
-                        </div>
+                        {/* P4-c: 鮮明度 select 廃止 */}
                         <div className={styles.formGroup}>
                             <label>本文</label>
                             <textarea
@@ -938,29 +1027,28 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
                                         </div>
                                     </div>
                                 )}
-                                <div style={{ marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
-                                    <label style={{ fontSize: '0.9em', fontWeight: 'bold', color: '#666' }}>鮮明度:</label>
-                                    <select
-                                        value={selectedVividness}
-                                        onChange={e => handleVividnessChange(e.target.value)}
-                                        style={{
-                                            padding: '4px 8px',
-                                            fontSize: '0.9em',
-                                            borderRadius: '4px',
-                                            border: '1px solid #ccc',
-                                            backgroundColor: '#fff',
-                                            cursor: 'pointer'
-                                        }}
-                                    >
-                                        <option value="vivid">鮮明（全内容）</option>
-                                        <option value="rough">概要（デフォルト）</option>
-                                        <option value="faint">淡い（タイトルのみ）</option>
-                                        <option value="buried">埋没（非表示）</option>
-                                    </select>
-                                    <small style={{ color: '#888' }}>
-                                        コンテキストに含める情報量
-                                    </small>
-                                </div>
+                                {/* P4-c: 鮮明度 select の代わりに机ボタン */}
+                                {selectedPageId && !selectedPageId.startsWith('root_') && (
+                                    <div style={{ marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
+                                        <button
+                                            className={styles.editButton}
+                                            onClick={() => handleDeskToggle(true)}
+                                            title="このページを机に開く（常時ヘッドに表示）"
+                                        >
+                                            机に開く
+                                        </button>
+                                        <button
+                                            className={styles.historyButton}
+                                            onClick={() => handleDeskToggle(false)}
+                                            title="このページを机から閉じる"
+                                        >
+                                            机から閉じる
+                                        </button>
+                                        <small style={{ color: '#888' }}>
+                                            机に開くとコンテキストの先頭に常時表示されます
+                                        </small>
+                                    </div>
+                                )}
                                 {selectedPageId && !selectedPageId.startsWith('root_') && (
                                     <>
                                         <div style={{ marginBottom: '0.5rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
@@ -975,7 +1063,7 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
                                                 <span style={{ fontSize: '0.9em', fontWeight: 'bold', color: '#666' }}>重要</span>
                                             </label>
                                             <small style={{ color: '#888' }}>
-                                                鮮明度が概要以下に下がらなくなります
+                                                代謝でページが縮小されにくくなります
                                             </small>
                                         </div>
                                         <div style={{ marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
@@ -1003,6 +1091,31 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
                                         }}
                                     >{pageContent}</ReactMarkdown>
                                 </div>
+                                {pageFragments.length > 0 && (
+                                    <div className={styles.fragmentsSection}>
+                                        <h3 className={styles.fragmentsTitle}>Fragments ({pageFragments.length})</h3>
+                                        {(() => {
+                                            const grouped: Record<string, MemopediaFragment[]> = {};
+                                            for (const f of pageFragments) {
+                                                const key = f.source_date || "unknown";
+                                                if (!grouped[key]) grouped[key] = [];
+                                                grouped[key].push(f);
+                                            }
+                                            return Object.entries(grouped).map(([date, frags]) => (
+                                                <div key={date} className={styles.fragmentDateGroup}>
+                                                    <div className={styles.fragmentDate}>{date}</div>
+                                                    <ul className={styles.fragmentList}>
+                                                        {frags.map(f => (
+                                                            <li key={f.id} className={styles.fragmentItem}>
+                                                                {f.content}
+                                                            </li>
+                                                        ))}
+                                                    </ul>
+                                                </div>
+                                            ));
+                                        })()}
+                                    </div>
+                                )}
                             </div>
                         )
                     ) : (
@@ -1076,19 +1189,7 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
                                     placeholder="キーワード1, キーワード2, ..."
                                 />
                             </div>
-                            <div className={styles.formGroup}>
-                                <label>鮮明度</label>
-                                <select
-                                    value={createVividness}
-                                    onChange={e => setCreateVividness(e.target.value)}
-                                    className={styles.formInput}
-                                >
-                                    <option value="vivid">鮮明（全内容）</option>
-                                    <option value="rough">概要（デフォルト）</option>
-                                    <option value="faint">淡い（タイトルのみ）</option>
-                                    <option value="buried">埋没（非表示）</option>
-                                </select>
-                            </div>
+                            {/* P4-c: 鮮明度 select 廃止 */}
                             <div className={styles.formGroup}>
                                 <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
                                     <input
@@ -1171,9 +1272,9 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
                                             className={styles.formInput}
                                         >
                                             <option value="">自動判定</option>
-                                            <option value="people">People</option>
-                                            <option value="terms">Terms</option>
-                                            <option value="plans">Plans</option>
+                                            {categories.filter(c => c.can_generate).map(c => (
+                                                <option key={c.key} value={c.key}>{c.label_en}</option>
+                                            ))}
                                         </select>
                                     </div>
                                     {generateError && (

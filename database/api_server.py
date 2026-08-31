@@ -21,6 +21,20 @@ engine = None
 SessionLocal = None
 MY_CITY_ID = None
 
+# multi-city 凍結 (2026-07-16 まはー裁定):
+# City dispatch の確定処理が呼ばれず、RemotePersonaProxy の思考転送も本番経路に
+# 未接続で、inter-city 移動は実質機能していなかった (一次監査
+# docs/handoff/2026-07-15_persona_city_building_separation_audit.md)。
+# 修正ではなく機能凍結とし、入口は「封鎖されている」ことを明示するため
+# 404 ではなく 503 + このメッセージで応答する。環境変数等での再有効化の口は
+# 意図的に作らない。復活時は上記監査の修正方針 (dispatch state machine /
+# 署名付き handshake) を正典に git から再設計する。
+MULTI_CITY_FREEZE_DETAIL = (
+    "multi-city 機能は凍結中です (2026-07-16 裁定)。"
+    "この入口は封鎖されています。"
+    "復活時は persona_city_building 監査の修正方針を正典に再設計されます。"
+)
+
 class VisitingPersonaProfile(BaseModel):
     """Pydantic model for a visiting persona's profile."""
     persona_id: str = Field(..., description="The unique ID of the persona.")
@@ -29,6 +43,7 @@ class VisitingPersonaProfile(BaseModel):
     avatar_image: Optional[str] = Field(None, description="A base64 encoded avatar image or a URL.")
     emotion: Optional[Dict[str, Any]] = Field({}, description="The current emotional state of the persona.")
     source_city_id: Optional[str] = Field(None, description="The name of the city the persona is coming from.")
+    saiverse_version: str = Field(..., description="Exact SAIVerse protocol version.")
 
 class ThinkingRequestContext(BaseModel):
     """Context required for a remote persona to think."""
@@ -76,14 +91,20 @@ def create_inter_city_router() -> APIRouter:
 
     @router.post("/request-move-in", status_code=202)
     def request_move_in(profile: VisitingPersonaProfile, background_tasks: BackgroundTasks):
+        # multi-city 凍結: 封鎖済み。以下の凍結前実装は復活時の参考のため残置
+        # (到達しない)。
+        raise HTTPException(status_code=503, detail=MULTI_CITY_FREEZE_DETAIL)
         if not SessionLocal or not MY_CITY_ID:
             raise HTTPException(status_code=503, detail="Database or City ID not initialized.")
         background_tasks.add_task(_queue_visitor_in_db, profile, SessionLocal)
         return {"message": "Accepted. Visitor arrival is being processed."}
-    
+
     @router.get("/buildings", response_model=List[BuildingInfo])
     def get_buildings_list():
-        """Returns a list of all public buildings in this city."""
+        """Returns a list of all public buildings in this city. (凍結中: 封鎖済み)"""
+        # multi-city 凍結: 封鎖済み。以下の凍結前実装は復活時の参考のため残置
+        # (到達しない)。
+        raise HTTPException(status_code=503, detail=MULTI_CITY_FREEZE_DETAIL)
         if not SessionLocal or not MY_CITY_ID:
             raise HTTPException(status_code=503, detail="Database or City ID not initialized.")
         db = SessionLocal()
@@ -108,6 +129,9 @@ def create_proxy_router() -> APIRouter:
 
     @router.post("/{persona_id}/think")
     def think_proxy(persona_id: str, context: ThinkingRequestContext):
+        # multi-city 凍結: 封鎖済み (RemotePersonaProxy の思考転送経路)。
+        # 以下の凍結前実装は復活時の参考のため残置 (到達しない)。
+        raise HTTPException(status_code=503, detail=MULTI_CITY_FREEZE_DETAIL)
         if not SessionLocal:
             raise HTTPException(status_code=503, detail="Database not initialized.")
 
@@ -191,7 +215,7 @@ if __name__ == "__main__":
             raise RuntimeError(f"Could not find a city configured for API port {args.port} in the database.")
         
         MY_CITY_ID = city_config.CITYID
-        logging.info(f"API Server for City ID {MY_CITY_ID} ({city_config.CITYNAME}) is starting up.")
+        logging.info(f"API Server for City ID {MY_CITY_ID} ({city_config.CITY_SLUG}) is starting up.")
     finally:
         db.close()
 

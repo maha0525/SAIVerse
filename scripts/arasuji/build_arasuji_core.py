@@ -33,7 +33,10 @@ import os
 import sqlite3
 import sys
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, List, Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from sai_memory.arasuji.estimate import ChronicleCostEstimate
 
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -49,25 +52,18 @@ from sai_memory.memory.storage import init_db, get_messages_paginated, Message
 from sai_memory.arasuji import init_arasuji_tables
 from sai_memory.arasuji.storage import (
     ArasujiEntry,
-    count_entries_by_level,
-    count_unconsolidated_by_level,
     create_entry,
-    get_total_message_count,
     get_max_level,
     get_all_entries_ordered,
     clear_all_entries,
-    get_progress,
     update_progress,
     mark_consolidated,
 )
 from sai_memory.arasuji.generator import (
-    ArasujiGenerator,
     DEFAULT_BATCH_SIZE,
     DEFAULT_CONSOLIDATION_SIZE,
     generate_level1_arasuji,
-    maybe_consolidate,
 )
-from sai_memory.arasuji.storage import has_overlapping_entries
 from sai_memory.arasuji.context import (
     get_episode_context,
     format_episode_context,
@@ -84,12 +80,11 @@ from saiverse.model_defaults import BUILTIN_DEFAULT_LITE_MODEL
 ENV_MODEL = os.getenv("MEMORY_WEAVE_MODEL", BUILTIN_DEFAULT_LITE_MODEL)
 ENV_BATCH_SIZE = int(os.getenv("MEMORY_WEAVE_BATCH_SIZE", str(DEFAULT_BATCH_SIZE)))
 ENV_CONSOLIDATION_SIZE = int(os.getenv("MEMORY_WEAVE_CONSOLIDATION_SIZE", str(DEFAULT_CONSOLIDATION_SIZE)))
-ENV_MAINTAIN_INTERVAL = int(os.getenv("MEMORY_WEAVE_MAINTAIN_INTERVAL", "0"))
 
 
 def get_persona_db_path(persona_id: str) -> Path:
     """Get the path to a persona's memory.db file."""
-    return Path.home() / ".saiverse" / "personas" / persona_id / "memory.db"
+    return Path(os.getenv("SAIVERSE_HOME") or Path.home() / ".saiverse") / "personas" / persona_id / "memory.db"
 
 
 def fetch_messages(
@@ -126,35 +121,9 @@ def fetch_messages(
         conn.close()
         return all_messages[offset:offset + limit]
 
-    # All threads: fetch globally sorted by created_at
-    # Exclude Stelis threads — sub-agent work logs are not the persona's own experiences
-    cur = conn.execute("""
-        SELECT id, thread_id, role, content, resource_id, created_at, metadata
-        FROM messages
-        WHERE thread_id NOT IN (SELECT thread_id FROM stelis_threads)
-        ORDER BY created_at ASC
-        LIMIT ? OFFSET ?
-    """, (limit, offset))
-
-    messages: List[Message] = []
-    for row in cur.fetchall():
-        msg_id, tid, role, content, resource_id, created_at, metadata_raw = row
-        metadata = {}
-        if metadata_raw:
-            try:
-                import json
-                metadata = json.loads(metadata_raw)
-            except Exception:
-                LOGGER.warning("Failed to parse metadata JSON for message %s", msg_id, exc_info=True)
-        messages.append(Message(
-            id=msg_id,
-            thread_id=tid,
-            role=role,
-            content=content,
-            resource_id=resource_id,
-            created_at=created_at,
-            metadata=metadata,
-        ))
+    # All threads: use shared Chronicle message fetcher
+    from sai_memory.memory.storage import get_messages_for_chronicle
+    messages = get_messages_for_chronicle(conn, limit=limit, offset=offset)
 
     conn.close()
     return messages
@@ -180,6 +149,50 @@ def print_stats(conn, persona_id: str) -> None:
         print("\nNo chronicle entries yet.")
 
     print("=" * 60)
+
+
+def print_cost_estimate(
+    conn,
+    persona_id: str,
+    *,
+    model_name: str,
+    **estimate_kwargs,
+) -> "ChronicleCostEstimate":
+    """未処理メッセージから Chronicle を一括生成した場合の費用を見積もり表示する。
+
+    LLM は一切呼ばない。api/routes/people/arasuji.py の cost-estimate エンドポイント
+    (UI 用) と同じロジック (sai_memory.arasuji.estimate = episode 整列計画) を使う。
+    ``estimate_kwargs`` は estimate_chronicle_generation_cost へそのまま渡す —
+    CLI は messages_override / truncate_limit / skip_absorption で実行と同じ
+    計画から数字を出す (Codex 三巡 F4)。
+    """
+    from sai_memory.arasuji.estimate import estimate_chronicle_generation_cost
+
+    estimate = estimate_chronicle_generation_cost(
+        conn,
+        model_name=model_name,
+        **estimate_kwargs,
+    )
+
+    print("\n" + "=" * 60)
+    print(f"Chronicle 一括生成 費用見積もり: {persona_id}")
+    print("=" * 60)
+    print(f"総メッセージ数:         {estimate.total_messages}")
+    print(f"処理済みメッセージ数:   {estimate.processed_messages}")
+    print(f"未処理メッセージ数:     {estimate.unprocessed_messages}")
+    print(f"圧縮チャンク (LLM):     {estimate.level1_calls}")
+    print(f"統合コール数 (概算):    {estimate.consolidation_calls}")
+    if estimate.upper_regen_calls:
+        print(f"上位あらすじ再生成:     {estimate.upper_regen_calls}")
+    print(f"LLM コール数合計:       {estimate.estimated_llm_calls}")
+    print(f"使用モデル:             {estimate.model_name}")
+    if estimate.is_free_tier:
+        print("概算費用:               不明 (このモデルには pricing 情報がありません。コール数のみ参考にしてください)")
+    else:
+        print(f"概算費用:               {estimate.estimated_cost_usd:.4f} {estimate.currency} (目安。実際の入出力量により変動)")
+    print("=" * 60)
+
+    return estimate
 
 
 def print_context_preview(conn, max_entries: int = 100, debug: bool = False) -> None:
@@ -349,11 +362,18 @@ def list_available_models() -> None:
     print(f"合計: {len(MODEL_CONFIGS)} モデル\n")
 
 
+def absorption_allowed_for_limit(limit_arg: Optional[int]) -> bool:
+    """--limit の意味論 (Codex 三巡 F1): None / 0 = 全量実行 (吸収・引き戻し
+    検出あり)、N>0 = 切り詰め + 吸収見送り。run_cli と回帰テストが共有する一点。"""
+    return (limit_arg or 0) <= 0
+
+
 def regenerate_entry_from_messages(
     conn: sqlite3.Connection,
     messages: List[Message],
     model_name: str = None,
     persona_id: str = None,
+    extra_items: Optional[List[dict]] = None,
 ) -> Optional[Any]:
     """Regenerate a Chronicle entry from messages.
 
@@ -366,14 +386,15 @@ def regenerate_entry_from_messages(
         messages: Messages to regenerate from
         model_name: Model to use (defaults to MEMORY_WEAVE_MODEL env var)
         persona_id: Optional persona ID for usage tracking
+        extra_items: メッセージ行ではない材料 (旧 entry の材料だった知覚
+            バッチ等、``{"at", "text"}`` の list)。generate_level1_arasuji へ
+            そのまま渡す
 
     Returns:
         New ArasujiEntry or None on failure
     """
     import os
-    from saiverse.model_configs import find_model_config
     from llm_clients.factory import get_llm_client
-    from sai_memory.arasuji.generator import generate_level1_arasuji
     
     # Get model from env if not specified
     if model_name is None:
@@ -385,7 +406,6 @@ def regenerate_entry_from_messages(
     if not model_config:
         raise ValueError(f"Model '{model_name}' not found in config. Use --list-models to see available options.")
     
-    actual_model_id = model_config.get("model", model_name)
     auto_provider = model_config.get("provider")
     if not auto_provider:
         raise ValueError(f"Model '{model_name}' is missing 'provider' in config.")
@@ -394,7 +414,10 @@ def regenerate_entry_from_messages(
     context_length = model_config.get("context_length", 128000)
     
     # Get LLM client
-    client = get_llm_client(actual_model_id, provider, context_length, config=model_config)
+    # factory の第一引数は設定キー。API 名を渡すと client.config_key が API 名になり、
+    # 使用量が同名の従量課金版設定の単価で記録される (docs/intent/
+    # model_provider_management.md「使用量の帰属」)。API 名は config から解決される。
+    client = get_llm_client(model_id, provider, context_length, config=model_config)
     
     # Generate Chronicle entry
     new_entry = generate_level1_arasuji(
@@ -403,102 +426,14 @@ def regenerate_entry_from_messages(
         messages,
         dry_run=False,
         persona_id=persona_id,
+        extra_items=extra_items,
     )
-    
+
     return new_entry
 
 
 
 
-def split_message_batches(messages: List[Message], batch_size: int) -> List[List[Message]]:
-    """Split messages into full batches only."""
-    return [messages[i:i + batch_size] for i in range(0, len(messages), batch_size) if len(messages[i:i + batch_size]) == batch_size]
-
-
-def generate_level1_batches(
-    generator: ArasujiGenerator,
-    batches: List[List[Message]],
-    *,
-    total_messages: int,
-    dry_run: bool,
-    batch_callback: Any = None,
-) -> tuple[List[ArasujiEntry], dict[str, int]]:
-    """Generate level-1 chronicle entries per batch."""
-    level1_entries: List[ArasujiEntry] = []
-    stats = {"processed_batches": 0, "skipped_batches": 0, "failed_batches": 0}
-
-    for idx, batch in enumerate(batches):
-        start_no = (idx * generator.batch_size) + 1
-        end_no = start_no + len(batch) - 1
-        stats["processed_batches"] += 1
-        LOGGER.info("[Lv1] Processing batch messages %s-%s / %s", start_no, end_no, total_messages)
-
-        batch_start = min(msg.created_at for msg in batch) if batch else None
-        batch_end = max(msg.created_at for msg in batch) if batch else None
-        if batch_start and batch_end and has_overlapping_entries(generator.conn, batch_start, batch_end, level=1):
-            stats["skipped_batches"] += 1
-            LOGGER.info("[Lv1] Skip existing batch range=%s-%s messages=%s-%s", batch_start, batch_end, start_no, end_no)
-            if batch_callback:
-                batch_callback(batch)
-            continue
-
-        try:
-            entry = generate_level1_arasuji(
-                generator.client,
-                generator.conn,
-                batch,
-                dry_run=dry_run,
-                include_timestamp=generator.include_timestamp,
-                memopedia_context=generator.memopedia_context,
-                debug_log_path=generator.debug_log_path,
-                persona_id=generator.persona_id,
-            )
-            if entry:
-                level1_entries.append(entry)
-        except Exception:
-            stats["failed_batches"] += 1
-            LOGGER.exception("[Lv1] Failed batch messages=%s-%s", start_no, end_no)
-
-        if batch_callback:
-            batch_callback(batch)
-
-    return level1_entries, stats
-
-
-def consolidate_levels(generator: ArasujiGenerator, *, dry_run: bool) -> tuple[List[ArasujiEntry], dict[str, int]]:
-    """Consolidate unconsolidated entries from level 1 upward."""
-    consolidated_entries: List[ArasujiEntry] = []
-    stats = {"consolidated_entries": 0, "failed_levels": 0, "levels_processed": 0}
-    level = 1
-
-    while count_unconsolidated_by_level(generator.conn, level) >= generator.consolidation_size:
-        stats["levels_processed"] += 1
-        try:
-            entries = maybe_consolidate(
-                generator.client,
-                generator.conn,
-                level=level,
-                consolidation_size=generator.consolidation_size,
-                dry_run=dry_run,
-                include_timestamp=generator.include_timestamp,
-                persona_id=generator.persona_id,
-            )
-            consolidated_entries.extend(entries)
-            stats["consolidated_entries"] += len(entries)
-        except Exception:
-            stats["failed_levels"] += 1
-            LOGGER.exception("[Consolidation] Failed level=%s parent_id=<auto>", level)
-        level += 1
-
-    return consolidated_entries, stats
-
-
-def log_processing_summary(total_messages: int, level1_entries: List[ArasujiEntry], consolidated_entries: List[ArasujiEntry], lv1_stats: dict[str, int], consolidate_stats: dict[str, int]) -> None:
-    """Emit mandatory processing summary logs."""
-    LOGGER.info("[Summary] target_messages=%s", total_messages)
-    LOGGER.info("[Summary] generated_level1=%s consolidated_generated=%s", len(level1_entries), len(consolidated_entries))
-    LOGGER.info("[Summary] processed_batches=%s skipped_batches=%s failed_batches=%s", lv1_stats["processed_batches"], lv1_stats["skipped_batches"], lv1_stats["failed_batches"])
-    LOGGER.info("[Summary] consolidated_entries=%s levels_processed=%s failed_levels=%s", consolidate_stats["consolidated_entries"], consolidate_stats["levels_processed"], consolidate_stats["failed_levels"])
 
 def run_cli() -> None:
     parser = argparse.ArgumentParser(
@@ -530,9 +465,6 @@ def run_cli() -> None:
   # 両方をクリア (Memory Weave全体)
   python scripts/build_arasuji.py air_city_a --clear-chronicle --clear-memopedia
 
-  # バッチサイズと統合サイズを変更
-  python scripts/build_arasuji.py air_city_a --batch-size 30 --consolidation-size 5
-
   # 日時情報を省略（インポートしたログで日時が不正確な場合）
   python scripts/build_arasuji.py air_city_a --no-timestamp
 
@@ -554,12 +486,14 @@ def run_cli() -> None:
     )
     parser.add_argument("persona_id", nargs="?", help="Persona ID to process")
     parser.add_argument(
-        "--limit", type=int, default=100,
-        help="Maximum number of messages to process (default: 100)"
+        "--limit", type=int, default=None,
+        help="処理するメッセージ数の上限。省略時と 0 は全量実行 (極小 run の"
+             "吸収・引き戻し検出あり)。N>0 は先頭 N 件に切り詰め、その回は"
+             "極小 run の吸収を見送る (Codex 三巡 F1 の意味論)"
     )
     parser.add_argument(
         "--offset", type=int, default=0,
-        help="Number of messages to skip (for testing, e.g., --offset 100 to skip first 100)"
+        help="(deprecated — W4 で廃止。episode 整列は全量から計画するため受理するが無視)"
     )
     parser.add_argument(
         "--model", default=ENV_MODEL,
@@ -575,11 +509,11 @@ def run_cli() -> None:
     )
     parser.add_argument(
         "--batch-size", type=int, default=ENV_BATCH_SIZE,
-        help=f"Number of messages per level-1 Chronicle (default: {ENV_BATCH_SIZE}, env: MEMORY_WEAVE_BATCH_SIZE)"
+        help="(deprecated — W4 で廃止。episode 整列 + サイズ束ねが分割を決める。受理するが無視)"
     )
     parser.add_argument(
         "--consolidation-size", type=int, default=ENV_CONSOLIDATION_SIZE,
-        help=f"Number of entries per higher-level Chronicle (default: {ENV_CONSOLIDATION_SIZE}, env: MEMORY_WEAVE_CONSOLIDATION_SIZE)"
+        help="(deprecated — W4 で廃止。帯あふれ束ねが統合を決める。受理するが無視)"
     )
     parser.add_argument(
         "--list-models", action="store_true",
@@ -630,8 +564,12 @@ def run_cli() -> None:
         help="Output prompts and LLM responses to a log file for debugging"
     )
     parser.add_argument(
-        "--maintain-interval", type=int, metavar="N", default=ENV_MAINTAIN_INTERVAL,
-        help=f"Run maintain_memopedia every N messages processed (default: {ENV_MAINTAIN_INTERVAL}, env: MEMORY_WEAVE_MAINTAIN_INTERVAL)"
+        "--estimate", action="store_true",
+        help="Show cost estimate for unprocessed messages and exit (no LLM calls, no writes)"
+    )
+    parser.add_argument(
+        "--yes", "-y", action="store_true",
+        help="Skip the cost-estimate confirmation prompt before generation"
     )
 
     args = parser.parse_args()
@@ -658,6 +596,28 @@ def run_cli() -> None:
     # Handle --stats
     if args.stats:
         print_stats(conn, args.persona_id)
+        conn.close()
+        sys.exit(0)
+
+    # Handle --estimate (見積もりのみ、LLM 呼び出しなし・書き込みなし)。
+    # F4: 実行と同じ入力 (thread 絞り・--limit の切り詰め・吸収判定) で数える。
+    if args.estimate:
+        resolved_model_id, model_config = find_model_config(args.model)
+        # 価格は設定キーで引く。API 名を渡すと同名の従量課金版設定の単価が出る。
+        estimate_model_name = resolved_model_id or args.model
+        from sai_memory.memory.storage import get_messages_for_chronicle
+        est_messages = get_messages_for_chronicle(conn)
+        if args.thread:
+            est_messages = [m for m in est_messages if m.thread_id == args.thread]
+        est_limit = args.limit or 0
+        print_cost_estimate(
+            conn,
+            args.persona_id,
+            model_name=estimate_model_name,
+            messages_override=est_messages,
+            truncate_limit=est_limit,
+            skip_absorption=est_limit > 0,
+        )
         conn.close()
         sys.exit(0)
 
@@ -719,9 +679,10 @@ def run_cli() -> None:
 
     LOGGER.info(f"Building chronicle for persona: {args.persona_id}")
     LOGGER.info(f"Database: {db_path}")
-    LOGGER.info(f"Message range: offset={args.offset}, limit={args.limit}")
-    LOGGER.info(f"Batch size: {args.batch_size}")
-    LOGGER.info(f"Consolidation size: {args.consolidation_size}")
+    LOGGER.info(
+        "Message range: limit=%s",
+        args.limit if (args.limit or 0) > 0 else "全量 (吸収・引き戻し検出あり)",
+    )
     LOGGER.info(f"Dry run: {args.dry_run}")
     if args.no_timestamp:
         LOGGER.info("Timestamps will be omitted from prompts")
@@ -746,155 +707,225 @@ def run_cli() -> None:
     LOGGER.info(f"Using model: {actual_model_id}")
     LOGGER.info(f"Using provider: {provider}")
 
-    # Import factory directly to avoid circular import
-    from llm_clients.factory import get_llm_client
-
-    client = get_llm_client(actual_model_id, provider, context_length, config=model_config)
-
-    # Fetch messages
-    LOGGER.info(f"Fetching messages (offset={args.offset}, limit={args.limit}, thread={args.thread or 'all'})...")
-    messages = fetch_messages(db_path, limit=args.limit, offset=args.offset, thread_id=args.thread)
-    LOGGER.info(f"Fetched {len(messages)} messages")
+    # Fetch messages — 整列は全量から計画し、上限は truncate_plan で切る
+    # (fetch を limit で切ると episode の途中で分断され §4-2 に反する —
+    # Codex W4 #7。--offset は同じ理由で廃止・無視)。
+    from sai_memory.memory.storage import get_messages_for_chronicle
+    messages = get_messages_for_chronicle(conn)
+    if args.thread:
+        messages = [m for m in messages if m.thread_id == args.thread]
+    LOGGER.info(f"Fetched {len(messages)} messages (thread={args.thread or 'all'})")
 
     if not messages:
         LOGGER.warning("No messages found")
         conn.close()
         sys.exit(0)
 
-    # Get Memopedia context for semantic memory (Memory Weave)
-    memopedia_context = None
-    try:
-        from sai_memory.memopedia import Memopedia, init_memopedia_tables
-
-        init_memopedia_tables(conn)
-        memopedia = Memopedia(conn)
-        memopedia_context = memopedia.get_tree_markdown(include_keywords=False, show_markers=False)
-        if memopedia_context and memopedia_context != "(まだページはありません)":
-            LOGGER.info(f"Using Memopedia context for semantic memory ({len(memopedia_context)} chars)")
-        else:
-            memopedia_context = None
-    except ImportError as e:
-        LOGGER.debug(f"Memopedia modules not available: {e}")
-    except Exception as e:
-        LOGGER.warning(f"Failed to get Memopedia context: {e}")
-
-    # Generate chronicle
-    generator = ArasujiGenerator(
-        client,
-        conn,
-        batch_size=args.batch_size,
-        consolidation_size=args.consolidation_size,
-        include_timestamp=not args.no_timestamp,
-        memopedia_context=memopedia_context,
-        persona_id=args.persona_id,
+    # Episode 整列計画 (W4 — Metabolism / API と同じ一点管理)
+    from sai_memory.arasuji.alignment import (
+        chronicle_band_budget,
+        plan_alignment,
+        truncate_plan,
     )
+    cur = conn.execute(
+        "SELECT DISTINCT json_each.value "
+        "FROM arasuji_entries, json_each(source_ids_json) "
+        "WHERE level = 1"
+    )
+    processed_ids = {row[0] for row in cur.fetchall()}
+    plan = plan_alignment(
+        messages,
+        processed_ids,
+        target_chars=chronicle_band_budget(),
+    )
+    # --limit の意味論 (Codex 三巡 F1): 未指定 / 0 = 全量 (吸収あり)。
+    # N>0 = 切り詰め + 吸収見送り。
+    limit = args.limit or 0
+    plan = truncate_plan(plan, limit)
 
-    # Set debug log path if specified
-    if args.debug_log:
-        generator.debug_log_path = Path(args.debug_log)
-        LOGGER.info(f"Debug logging enabled: {args.debug_log}")
+    # 極小 run の隣人吸収 (arasuji_tiny_run_absorption、2026-08-31 裁定 5):
+    # 全量再編纂スクリプトは repair API と同じ吸収を通す。オフライン実行なので
+    # 提示中の fold という概念は無い (既存の run_band_overflow と同じ扱い) —
+    # 除外集合は空で計画する。
+    from sai_memory.arasuji.absorption import (
+        AbsorptionPlan,
+        plan_absorption,
+        split_plan_for_absorption,
+    )
+    plan, tiny_chunks = split_plan_for_absorption(
+        plan, target_chars=chronicle_band_budget(),
+    )
+    # --limit N>0 の回は吸収を丸ごと見送る (Codex 二巡 R4 裁定 — 切り詰めた
+    # 計画と全量前提の隣人探索の境界の複雑さを買わない)。極小 run の単独編纂は
+    # しない (裁定 2 は無条件) ので、極小 run はこの実行では未処理のまま残り、
+    # 全量実行 (--limit 省略 / 0) が処理する。
+    if not absorption_allowed_for_limit(args.limit):
+        absorption_plan = AbsorptionPlan()
+        if tiny_chunks:
+            LOGGER.warning(
+                "--limit 指定時は極小 run の吸収・引き戻しを行いません "
+                "(%d run が未処理のまま残ります)。--limit 省略 (全量実行) で"
+                "処理されます", len(tiny_chunks),
+            )
+    else:
+        absorption_plan = plan_absorption(
+            conn, tiny_chunks, messages, processed_ids,
+            target_chars=chronicle_band_budget(),
+        )
+
+    # 実行前の見積もり表示 (LLM 呼び出しなし)。位置はメッセージ取得・thread
+    # 絞り・truncate・吸収判定の**後** (Codex 三巡 F4) — 実行と同じ入力から
+    # 同じ計画で数字を出す。--dry-run は書き込みが起きないので確認プロンプトは
+    # 不要 (見積もりだけ表示して続行)。それ以外は --yes 無しなら確認する。
+    # 見積もりは保持する — 束ねの実行は承認済みの統合コール数を上限にする
+    # (実出力長のブレで連鎖が増えても、表示・承認した件数を超えない)。
+    estimate = print_cost_estimate(
+        conn,
+        args.persona_id,
+        # 価格は設定キーで引く (API 名だと同名の従量課金版設定の単価が出る)。
+        model_name=resolved_model_id,
+        messages_override=messages,
+        truncate_limit=limit,
+        skip_absorption=limit > 0,
+    )
+    if not args.dry_run and not args.yes:
+        answer = input("\nこの内容で Chronicle 生成を実行しますか？ [y/N]: ").strip().lower()
+        if answer not in ("y", "yes"):
+            LOGGER.info("ユーザーの選択により中止しました。")
+            conn.close()
+            sys.exit(0)
+
+    if args.dry_run:
+        # W4: dry-run は計画表示のみ (LLM を呼ばない。旧実装は LLM を呼んで
+        # 保存だけ抑止していた — 見積もりに費用が発生する矛盾を廃止)
+        print("\n[DRY RUN] 整列計画:")
+        for i, chunk in enumerate(plan.chunks, 1):
+            print(
+                f"  #{i} kind={chunk.kind} messages={len(chunk.messages)} "
+                f"coverage={chunk.coverage_chars}字 episodes={','.join(chunk.episode_refs) or '-'}"
+            )
+        print(f"  合計: {len(plan.chunks)} chunks (LLM {plan.llm_calls} 回)")
+        if absorption_plan.items or absorption_plan.rewind_run_ids:
+            print(
+                f"  極小 run の吸収: {len(absorption_plan.items)} 件 "
+                f"(上位の再生成 {len(absorption_plan.stale_upper_ids)} 件, "
+                f"未解決 {absorption_plan.unresolved_runs} run)"
+            )
+        if absorption_plan.rewind_run_ids:
+            # anchor 行は world DB にある — オフラインの本スクリプトでは引き
+            # 戻せない。サーバー経由の補修 (mode=repair) が実行時に扱う。
+            print(
+                f"  末尾の未被覆 {len(absorption_plan.rewind_run_ids)} 通は "
+                "anchor 引き戻しの対象 (サーバー経由の補修でのみ実行)"
+            )
+        conn.close()
+        LOGGER.info("Done (dry run)!")
+        return
+
+    # 仕事ゼロでも run_absorption までは必ず通す (Codex 十一巡 P2)。ここで
+    # 早期終了すると、通常チャンクも新規吸収も無い回 (--limit N>0 で吸収を
+    # 見送った回 / 全部被覆済みの回) に保守 — 壊れた親の sweep・前回の未完了
+    # (content_stale) の flush・repair_incomplete マーカーの解除 — が丸ごと
+    # 飛ぶ。帯の「前回の処理が完了していません。再実行してください」(裁定 6) が
+    # 再実行しても消えない状態になるため、終了は run_absorption の後に置く。
+
+    # Import factory directly to avoid circular import
+    from llm_clients.factory import get_llm_client
+
+    # 第一引数は設定キー (API 名を渡すと使用量が従量課金版の単価で記録される)。
+    client = get_llm_client(resolved_model_id, provider, context_length, config=model_config)
 
     def progress_callback(processed: int, total: int) -> None:
         if total > 0:
             pct = (processed / total) * 100
             LOGGER.info(f"Progress: {processed}/{total} ({pct:.1f}%)")
 
-    # Set up Memopedia batch callback if --with-memopedia is enabled (interleaved Memory Weave)
+    # Set up Memopedia batch callback if --with-memopedia is enabled
     batch_callback = None
-    memopedia_pages_total = 0
-    messages_since_maintain = 0
-
     if args.with_memopedia:
         try:
-            from sai_memory.memopedia import Memopedia, init_memopedia_tables
-            from scripts.build_memopedia import extract_knowledge
+            from sai_memory.memopedia import init_memopedia_tables
+            from sai_memory.memory.entity_extractor import make_batch_callback as make_entity_callback
 
-            # Initialize Memopedia tables
             init_memopedia_tables(conn)
-            memopedia = Memopedia(conn)
-            debug_log_path = Path(args.debug_log) if args.debug_log else None
-
-            def memopedia_batch_callback(batch_messages):
-                """Extract Memopedia pages for each batch (interleaved with Chronicle)."""
-                nonlocal memopedia_pages_total, messages_since_maintain
-
-                if not batch_messages:
-                    return
-
-                LOGGER.info(f"  [Memory Weave] Extracting Memopedia from batch ({len(batch_messages)} messages)...")
-
-                # Update Memopedia context for Generator (semantic memory gets updated per batch)
-                updated_memopedia_context = memopedia.get_tree_markdown(include_keywords=False, show_markers=False)
-                if updated_memopedia_context and updated_memopedia_context != "(まだページはありません)":
-                    generator.memopedia_context = updated_memopedia_context
-
-                try:
-                    pages = extract_knowledge(
-                        client,
-                        batch_messages,
-                        memopedia,
-                        batch_size=len(batch_messages),  # Process as single batch
-                        dry_run=args.dry_run,
-                        refine_writes=True,  # Use LLM to integrate content instead of simple append
-                        episode_context_conn=conn,
-                        debug_log_path=debug_log_path,
-                    )
-                    memopedia_pages_total += len(pages)
-                    LOGGER.info(f"  [Memory Weave] Extracted {len(pages)} pages (total: {memopedia_pages_total})")
-
-                    # Track messages for maintain_memopedia
-                    messages_since_maintain += len(batch_messages)
-
-                    # Run maintain_memopedia if interval is reached
-                    if args.maintain_interval > 0 and messages_since_maintain >= args.maintain_interval:
-                        LOGGER.info(f"  [Memory Weave] Running maintain_memopedia (interval: {args.maintain_interval})...")
-                        try:
-                            from scripts.maintain_memopedia import run_merge_similar, run_fix_markdown
-                            run_fix_markdown(memopedia, dry_run=args.dry_run)
-                            run_merge_similar(memopedia, client, dry_run=args.dry_run)
-                            messages_since_maintain = 0
-                            LOGGER.info("  [Memory Weave] Maintenance complete")
-                        except Exception as e:
-                            LOGGER.warning(f"  [Memory Weave] Maintenance failed: {e}")
-
-                except Exception as e:
-                    LOGGER.error(f"  [Memory Weave] Memopedia extraction failed: {e}")
-
-            batch_callback = memopedia_batch_callback
-            LOGGER.info("Memory Weave mode: Memopedia extraction will run per batch (interleaved)")
-
+            batch_callback = make_entity_callback(
+                client, conn,
+                persona_id=args.persona_id,
+            )
+            LOGGER.info("Memory Weave mode: entity extraction will run per batch (interleaved)")
         except ImportError as e:
-            LOGGER.error(f"Failed to import Memopedia modules: {e}")
-            LOGGER.error("Memopedia extraction disabled. Make sure sai_memory.memopedia is available.")
+            LOGGER.error(f"Failed to import entity extractor modules: {e}")
+            LOGGER.error("Memopedia extraction disabled.")
 
-    batches = split_message_batches(messages, args.batch_size)
-    level1_entries, lv1_stats = generate_level1_batches(
-        generator,
-        batches,
-        total_messages=len(messages),
-        dry_run=args.dry_run,
+    from sai_memory.arasuji.bands import backfill_coverage, run_band_overflow
+    from sai_memory.arasuji.executor import execute_plan
+
+    try:
+        backfill_coverage(conn)
+    except Exception:
+        LOGGER.exception("coverage backfill failed; continuing")
+
+    # 吸収の実行 (通常チャンクより先 — 上位を新しくしてから後続へ)。失敗は
+    # ここで止める: 確定済みの差し替えは残り、未完了の印 (repair_incomplete)
+    # が立つので、再実行が続きから直す。仕事ゼロでも呼ぶ — 冒頭の整合性検査
+    # (壊れた親の sweep) と、残った未完了の印の後始末は毎回やる (L1)。
+    from sai_memory.arasuji.absorption import run_absorption
+    absorption_result = run_absorption(
+        conn, client, absorption_plan,
+        persona_id=args.persona_id,
         batch_callback=batch_callback,
     )
-    consolidated_entries, consolidate_stats = consolidate_levels(generator, dry_run=args.dry_run)
+    LOGGER.info(
+        "[absorption] merged=%d reopened=%d upper_regenerated=%d unresolved=%d",
+        len(absorption_result.merged_entries),
+        len(absorption_result.reopened_entry_ids),
+        len(absorption_result.regenerated_upper_ids),
+        absorption_result.unresolved_runs,
+    )
 
-    LOGGER.info(f"Generated {len(level1_entries)} level-1 chronicle")
-    LOGGER.info(f"Generated {len(consolidated_entries)} consolidated chronicle")
-    log_processing_summary(len(messages), level1_entries, consolidated_entries, lv1_stats, consolidate_stats)
-    if args.with_memopedia:
-        LOGGER.info(f"Generated {memopedia_pages_total} Memopedia pages (interleaved)")
+    # 保守 (上の run_absorption) が済んだところで、編纂する仕事が本当に無ければ
+    # ここで終える。判定は従来と同じ条件 — 吸収 item / 上位再生成があった回は
+    # 従来どおり束ね (run_band_overflow) まで通す。
+    if not plan.chunks and absorption_plan.llm_calls == 0:
+        LOGGER.info("No unprocessed messages to compile")
+        conn.close()
+        sys.exit(0)
 
-    # Update progress tracking
-    if not args.dry_run and messages:
-        last_msg = messages[-1]
-        update_progress(conn, last_msg.id)
+    exec_result = execute_plan(
+        plan, client, conn,
+        persona_id=args.persona_id,
+        include_timestamp=not args.no_timestamp,
+        progress_callback=progress_callback,
+        batch_callback=batch_callback,
+    )
 
-    # Show final state
-    if not args.dry_run:
-        print_stats(conn, args.persona_id)
-        print("\n" + "-" * 60)
-        print("Episode Context Preview:")
-        print("-" * 60)
-        print_context_preview(conn)
+    consolidated_count = 0
+    try:
+        consolidated_count = run_band_overflow(
+            conn, client, persona_id=args.persona_id,
+            # 確認時に表示した統合コール数を実行の上限にする
+            max_folds=estimate.consolidation_calls,
+        )
+    except Exception:
+        LOGGER.exception("band overflow consolidation failed; continuing")
+
+    LOGGER.info(
+        "[Summary] target_messages=%s created_chunks=%s skipped=%s consolidated=%s",
+        len(messages), exec_result.created_count,
+        exec_result.skipped_duplicates, consolidated_count,
+    )
+
+    # Update progress tracking (実際に計画へ載った末尾のみ — 全量の末尾を
+    # 記録すると未処理分まで進捗済みに見える)
+    if plan.chunks:
+        update_progress(conn, plan.chunks[-1].messages[-1].id)
+
+    # Show final state (dry-run は計画表示で早期 return 済み)
+    print_stats(conn, args.persona_id)
+    print("\n" + "-" * 60)
+    print("Episode Context Preview:")
+    print("-" * 60)
+    print_context_preview(conn)
 
     conn.close()
     LOGGER.info("Done!")

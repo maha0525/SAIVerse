@@ -23,12 +23,12 @@ export default function StepCityName({ value, onChange, timezone, onTimezoneChan
                 <input
                     type="text"
                     value={value}
-                    onChange={(e) => onChange(e.target.value.replace(/[^a-zA-Z0-9_]/g, ''))}
-                    placeholder="例: my_city"
+                    onChange={(e) => onChange(e.target.value)}
+                    placeholder="例: 星降りの街"
                     autoFocus
                 />
                 <p className={styles.fieldHint}>
-                    英数字とアンダースコアのみ使用できます。スキップした場合は「city_a」になります
+                    日本語も記号も使えます。あとから街マップ画面で変更できます
                 </p>
             </div>
 

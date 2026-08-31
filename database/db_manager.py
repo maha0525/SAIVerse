@@ -143,6 +143,8 @@ def create_management_tab(model_class, session_factory: sessionmaker):
                         # --- Find a user-friendly display column ---
                         display_col = None
                         # List of preferred column names for display
+                        # 表示用の列を選ぶので City は表示名 (CITYNAME) を使う。
+                        # 内部の識別子 (CITY_SLUG) ではない。
                         preferred_names = ['USERNAME', 'AINAME', 'CITYNAME', 'BUILDINGNAME']
                         for name in preferred_names:
                             if hasattr(target_model, name):

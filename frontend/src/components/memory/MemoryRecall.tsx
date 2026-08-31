@@ -1,48 +1,223 @@
-import React, { useState } from 'react';
-import { Search, Loader2, AlertCircle, Brain, Bug, Trash2, FileDown, Activity, LifeBuoy } from 'lucide-react';
+import React, { useState, useRef, useEffect } from 'react';
+import { Search, Loader2, AlertCircle, Brain, Trash2, Plus, FileDown, FileUp, Activity, LifeBuoy, Download, Upload } from 'lucide-react';
 import styles from './MemoryRecall.module.css';
+import MemopediaConversion from './MemopediaConversion';
 
 interface MemoryRecallProps {
     personaId: string;
 }
 
-interface DebugHit {
-    rank: number;
-    score: number;
-    message_id: string;
-    thread_id: string;
-    role: string;
+
+interface UnifiedHit {
+    source_type: string;
+    source_id: string;
+    title: string;
     content: string;
-    created_at: number;
-    created_at_str: string;
+    score: number;
+    uri: string;
+    level: number | null;
+    category: string | null;
+    start_time: number | null;
+    end_time: number | null;
+    message_count: number | null;
+    entity_id: string | null;
+    chronicle_entry_id: string | null;
+    source_date: string | null;
 }
 
-interface DebugResult {
+interface UnifiedResult {
     query: string;
-    topk: number;
     total_hits: number;
-    hits: DebugHit[];
+    hits: UnifiedHit[];
 }
 
 export default function MemoryRecall({ personaId }: MemoryRecallProps) {
-    const [query, setQuery] = useState('');
-    const [keywords, setKeywords] = useState('');
-    const [topk, setTopk] = useState(4);
-    const [maxChars, setMaxChars] = useState(1200);
-    const [result, setResult] = useState<string | null>(null);
-    const [debugResult, setDebugResult] = useState<DebugResult | null>(null);
-    const [isLoading, setIsLoading] = useState(false);
-    const [error, setError] = useState<string | null>(null);
-    const [debugMode, setDebugMode] = useState(false);
-    const [useRrf, setUseRrf] = useState(false);
-    const [useHybrid, setUseHybrid] = useState(false);
-    const [startDate, setStartDate] = useState('');
-    const [endDate, setEndDate] = useState('');
     const [isDeletingChronicle, setIsDeletingChronicle] = useState(false);
     const [isDeletingMemopedia, setIsDeletingMemopedia] = useState(false);
     const [confirmChronicle, setConfirmChronicle] = useState(false);
     const [confirmMemopedia, setConfirmMemopedia] = useState(false);
     const [deleteResult, setDeleteResult] = useState<string | null>(null);
+
+    // Memopedia export/import state
+    const [isExporting, setIsExporting] = useState(false);
+    const [isImporting, setIsImporting] = useState(false);
+    const [importClear, setImportClear] = useState(false);
+    const [confirmImportClear, setConfirmImportClear] = useState(false);
+    const [exportImportResult, setExportImportResult] = useState<string | null>(null);
+    const [exportImportError, setExportImportError] = useState<string | null>(null);
+    const fileInputRef = useRef<HTMLInputElement>(null);
+
+    const handleExportMemopedia = async () => {
+        setIsExporting(true);
+        setExportImportResult(null);
+        setExportImportError(null);
+        try {
+            const res = await fetch(`/api/people/${personaId}/memopedia/export`);
+            if (!res.ok) {
+                const err = await res.json().catch(() => ({}));
+                throw new Error(err.detail || `HTTP ${res.status}`);
+            }
+            const data = await res.json();
+            const pageCount = data.pages?.length ?? 0;
+            const json = JSON.stringify(data, null, 2);
+            const blob = new Blob([json], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const timestamp = new Date().toISOString().replace(/[:.]/g, '').slice(0, 15);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `${personaId}_memopedia_${timestamp}.json`;
+            a.click();
+            URL.revokeObjectURL(url);
+            setExportImportResult(`${pageCount} ページをエクスポートしました`);
+        } catch (e: any) {
+            setExportImportError(e.message || 'エクスポートに失敗しました');
+        } finally {
+            setIsExporting(false);
+        }
+    };
+
+    const handleImportMemopedia = async (file: File) => {
+        setIsImporting(true);
+        setExportImportResult(null);
+        setExportImportError(null);
+        try {
+            const text = await file.text();
+            const data = JSON.parse(text);
+            if (!data.pages || !Array.isArray(data.pages)) {
+                throw new Error('無効なフォーマット: pages 配列が見つかりません');
+            }
+            const shouldClear = importClear && confirmImportClear;
+            const res = await fetch(
+                `/api/people/${personaId}/memopedia/import?clear=${shouldClear}`,
+                {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(data),
+                }
+            );
+            if (!res.ok) {
+                const err = await res.json().catch(() => ({}));
+                throw new Error(err.detail || `HTTP ${res.status}`);
+            }
+            const result = await res.json();
+            setExportImportResult(
+                `${result.imported_count} ページをインポートしました${shouldClear ? '（既存データを削除後）' : '（マージ）'}`
+            );
+            setConfirmImportClear(false);
+        } catch (e: any) {
+            setExportImportError(e.message || 'インポートに失敗しました');
+        } finally {
+            setIsImporting(false);
+            if (fileInputRef.current) fileInputRef.current.value = '';
+        }
+    };
+
+    // Working memory add state
+    const [addingToWm, setAddingToWm] = useState<string | null>(null);
+    const [wmAddResult, setWmAddResult] = useState<{ id: string; ok: boolean } | null>(null);
+
+    const handleAddToWorkingMemory = async (hit: UnifiedHit) => {
+        setAddingToWm(hit.source_id);
+        setWmAddResult(null);
+        try {
+            const res = await fetch(`/api/people/${personaId}/working-memory/recall`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    source_type: hit.source_type,
+                    source_id: hit.source_id,
+                    title: hit.title,
+                    uri: hit.uri,
+                }),
+            });
+            setWmAddResult({ id: hit.source_id, ok: res.ok });
+        } catch {
+            setWmAddResult({ id: hit.source_id, ok: false });
+        } finally {
+            setAddingToWm(null);
+        }
+    };
+
+    // Embedding generation state
+    const [isGeneratingEmbeddings, setIsGeneratingEmbeddings] = useState(false);
+    const [embeddingResult, setEmbeddingResult] = useState<string | null>(null);
+    const [embeddingError, setEmbeddingError] = useState<string | null>(null);
+
+    const handleGenerateEmbeddings = async () => {
+        setIsGeneratingEmbeddings(true);
+        setEmbeddingResult(null);
+        setEmbeddingError(null);
+        try {
+            const res = await fetch(`/api/people/${personaId}/debug/generate-embeddings`, {
+                method: 'POST',
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) {
+                throw new Error(data.detail || `HTTP ${res.status}`);
+            }
+            setEmbeddingResult(data.message || 'OK');
+        } catch (e: any) {
+            setEmbeddingError(e.message || 'Embedding生成に失敗しました');
+        } finally {
+            setIsGeneratingEmbeddings(false);
+        }
+    };
+
+    // Unified recall state
+    const [unifiedQuery, setUnifiedQuery] = useState('');
+    const [unifiedFocus, setUnifiedFocus] = useState('');
+    const [showPersonaPreview, setShowPersonaPreview] = useState(false);
+    const [unifiedSearchChronicle, setUnifiedSearchChronicle] = useState(true);
+    const [unifiedSearchMemopedia, setUnifiedSearchMemopedia] = useState(true);
+    const [unifiedSearchFragments, setUnifiedSearchFragments] = useState(true);
+    const [unifiedSearchMessages, setUnifiedSearchMessages] = useState(true);
+    // 消費済み知覚バッチ (W14 §10.5 の読み口)。退場付記で digest 側が集約に
+    // 落ちても、ここから全文へ到達できる。
+    const [unifiedSearchPerceptions, setUnifiedSearchPerceptions] = useState(true);
+    const [unifiedResult, setUnifiedResult] = useState<UnifiedResult | null>(null);
+    const [unifiedLoading, setUnifiedLoading] = useState(false);
+    const [unifiedError, setUnifiedError] = useState<string | null>(null);
+
+    const handleUnifiedRecall = async () => {
+        const q = unifiedQuery.trim();
+        if (!q) {
+            setUnifiedError('検索クエリを入力してね');
+            return;
+        }
+        setUnifiedLoading(true);
+        setUnifiedError(null);
+        setUnifiedResult(null);
+        try {
+            const res = await fetch(`/api/people/${personaId}/unified-recall`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    query: q,
+                    focus: unifiedFocus || null,
+                    search_chronicle: unifiedSearchChronicle,
+                    search_memopedia: unifiedSearchMemopedia,
+                    search_fragments: unifiedSearchFragments,
+                    search_messages: unifiedSearchMessages,
+                    search_perceptions: unifiedSearchPerceptions,
+                }),
+            });
+            if (!res.ok) {
+                const text = await res.text();
+                try {
+                    const data = JSON.parse(text);
+                    throw new Error(data.detail || 'Unified recall failed');
+                } catch {
+                    throw new Error(`Server error: ${text.substring(0, 200)}`);
+                }
+            }
+            const data = await res.json();
+            setUnifiedResult(data);
+        } catch (err: any) {
+            setUnifiedError(err.message || 'An error occurred');
+        } finally {
+            setUnifiedLoading(false);
+        }
+    };
 
     // Stelis thread rescue state
     const [isRescuing, setIsRescuing] = useState(false);
@@ -61,8 +236,7 @@ export default function MemoryRecall({ personaId }: MemoryRecallProps) {
         setRescueResult(null);
         setRescueError(null);
         try {
-            const backendUrl = 'http://127.0.0.1:8000';
-            const res = await fetch(`${backendUrl}/api/people/${personaId}/rescue-stelis-thread`, {
+            const res = await fetch(`/api/people/${personaId}/rescue-stelis-thread`, {
                 method: 'POST',
             });
             const data = await res.json();
@@ -76,6 +250,149 @@ export default function MemoryRecall({ personaId }: MemoryRecallProps) {
             setIsRescuing(false);
         }
     };
+
+    // Build Memopedia from logs state
+    const [isBuildingMemopedia, setIsBuildingMemopedia] = useState(false);
+    const [buildMemopediaJobId, setBuildMemopediaJobId] = useState<string | null>(null);
+    const [buildMemopediaProgress, setBuildMemopediaProgress] = useState<string | null>(null);
+    const [buildMemopediaResult, setBuildMemopediaResult] = useState<string | null>(null);
+    const [buildMemopediaError, setBuildMemopediaError] = useState<string | null>(null);
+    const buildMemopediaPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+    // 途中で終わった実行の続き位置。次の実行でここから再開する。持たずに毎回
+    // 先頭から流すと、成功済みの範囲まで LLM をもう一度通すことになる
+    const [buildMemopediaResume, setBuildMemopediaResume] = useState<
+        { ts: number; rowid: number } | null
+    >(null);
+    // 進行中の問い合わせが、切り替えた後のペルソナの画面へ結果を書き込まない
+    // ようにするための現在地
+    const currentPersonaRef = useRef(personaId);
+    currentPersonaRef.current = personaId;
+
+    const handleBuildMemopediaFromLogs = async (resume = false) => {
+        setIsBuildingMemopedia(true);
+        setBuildMemopediaProgress(null);
+        setBuildMemopediaResult(null);
+        setBuildMemopediaError(null);
+        const from = resume ? buildMemopediaResume : null;
+        try {
+            const res = await fetch(`/api/people/${personaId}/memopedia/build-from-logs`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    batch_size: 20,
+                    limit: 0,
+                    start_after: from?.ts ?? 0,
+                    start_after_rowid: from?.rowid ?? 0,
+                }),
+            });
+            if (!res.ok) {
+                const err = await res.json().catch(() => ({}));
+                throw new Error(err.detail || `HTTP ${res.status}`);
+            }
+            const data = await res.json();
+            // 開始の応答を待っている間にペルソナが替わっていたら、この実行は
+            // いま見えている画面のものではない。古い job の監視を新しい画面へ
+            // 登録しない
+            if (currentPersonaRef.current !== personaId) return;
+            const jobId = data.job_id;
+            setBuildMemopediaJobId(jobId);
+            setBuildMemopediaProgress('開始しました...');
+
+            // Poll for status
+            buildMemopediaPollRef.current = setInterval(async () => {
+                try {
+                    const statusRes = await fetch(`/api/people/${personaId}/memopedia/generate/${jobId}`);
+                    if (!statusRes.ok) return;
+                    // 応答を待っている間にペルソナが替わっていたら、この結果は
+                    // いま見えている画面のものではない
+                    if (currentPersonaRef.current !== personaId) return;
+                    const status = await statusRes.json();
+                    const progressText = status.total > 0
+                        ? `${status.progress}/${status.total} バッチ処理中: ${status.message || ''}`
+                        : (status.message || '処理中...');
+                    setBuildMemopediaProgress(progressText);
+
+                    // partial = 一部のバッチで抽出に失敗したが、残りは終わった状態。
+                    // ここに入れないとポーリングが終わらず、画面が回り続ける
+                    if (status.status === 'completed' || status.status === 'partial'
+                        || status.status === 'failed') {
+                        if (buildMemopediaPollRef.current) {
+                            clearInterval(buildMemopediaPollRef.current);
+                            buildMemopediaPollRef.current = null;
+                        }
+                        setIsBuildingMemopedia(false);
+                        if (status.status === 'failed') {
+                            // 失敗した回の続き位置は信用できない (どこまで
+                            // 反映されたか分からない)。持ち越さない
+                            setBuildMemopediaResume(null);
+                            setBuildMemopediaError(status.error || '失敗しました');
+                        } else {
+                            const r = status.result;
+                            // 途中で終わったときだけ「続きから」を持つ。全部
+                            // 終わっていれば続きは無い
+                            setBuildMemopediaResume(
+                                r && status.status === 'partial'
+                                    ? { ts: r.last_message_timestamp || 0, rowid: r.last_message_rowid || 0 }
+                                    : null
+                            );
+                            if (r) {
+                                // 取得した件数と処理した件数は違う（失敗した範囲と、
+                                // 小さすぎて次回に回した末尾がある）。処理した数だけ
+                                // 出すと、残りがあることが画面から消える
+                                const leftovers: string[] = [];
+                                if (r.failed_batches) {
+                                    leftovers.push(`${r.failed_batches} バッチは失敗しました。「続きから再構築」を押すと、最初の失敗の手前からやり直します`);
+                                }
+                                if (r.messages_skipped) {
+                                    leftovers.push(`${r.messages_skipped} メッセージは今回の分量に満たないため次回に回しました`);
+                                }
+                                if (r.deduped_notes) {
+                                    leftovers.push(`${r.deduped_notes} 件は同じ内容が記録済みのため新しくは作りませんでした`);
+                                }
+                                setBuildMemopediaResult(
+                                    `${r.total_entities} エンティティ抽出, ${r.new_pages} 新規, ${r.updated_pages} 更新`
+                                    + ` (${r.messages_fetched ?? r.messages_processed} メッセージ中 ${r.messages_processed} 件を ${r.batches_processed} バッチで処理)`
+                                    + (leftovers.length ? ` ／ ${leftovers.join('。')}。` : '')
+                                );
+                            } else {
+                                setBuildMemopediaResult(status.message || '完了');
+                            }
+                        }
+                    }
+                } catch {
+                    // polling error, ignore
+                }
+            }, 2000);
+        } catch (e: any) {
+            setIsBuildingMemopedia(false);
+            setBuildMemopediaError(e.message || '開始に失敗しました');
+        }
+    };
+
+    // Cleanup build-memopedia polling on unmount
+    useEffect(() => {
+        return () => {
+            if (buildMemopediaPollRef.current) {
+                clearInterval(buildMemopediaPollRef.current);
+            }
+        };
+    }, []);
+
+    // ペルソナが替わったら、前のペルソナの続き位置と実行状態を捨てる。
+    // 持ち越すと、別のペルソナの DB へ前のペルソナの位置を送って、その範囲を
+    // 丸ごと飛ばすことになる
+    useEffect(() => {
+        if (buildMemopediaPollRef.current) {
+            clearInterval(buildMemopediaPollRef.current);
+            buildMemopediaPollRef.current = null;
+        }
+        setBuildMemopediaResume(null);
+        setBuildMemopediaJobId(null);
+        setBuildMemopediaProgress(null);
+        setBuildMemopediaResult(null);
+        setBuildMemopediaError(null);
+        setIsBuildingMemopedia(false);
+    }, [personaId]);
 
     // Chronicle diagnosis state
     const [isDiagnosing, setIsDiagnosing] = useState(false);
@@ -186,8 +503,7 @@ export default function MemoryRecall({ personaId }: MemoryRecallProps) {
         setIsDiagnosing(true);
         setDiagnosisError(null);
         try {
-            const backendUrl = 'http://127.0.0.1:8000';
-            const res = await fetch(`${backendUrl}/api/people/${personaId}/arasuji/diagnosis`);
+            const res = await fetch(`/api/people/${personaId}/arasuji/diagnosis`);
             if (!res.ok) {
                 const text = await res.text();
                 try {
@@ -216,88 +532,7 @@ export default function MemoryRecall({ personaId }: MemoryRecallProps) {
         }
     };
 
-    const handleRecall = async () => {
-        const trimmedQuery = query.trim();
-        const keywordList = keywords.split(/[,\s]+/).filter(k => k.trim());
-
-        if (!trimmedQuery && keywordList.length === 0) {
-            setError('検索クエリまたはキーワードを入力してね');
-            return;
-        }
-
-        setIsLoading(true);
-        setError(null);
-        setResult(null);
-        setDebugResult(null);
-
-        try {
-            if (debugMode) {
-                // Debug mode: use recall-debug endpoint
-                // Call backend directly to avoid Next.js proxy timeout
-                const backendUrl = 'http://127.0.0.1:8000';
-                const res = await fetch(`${backendUrl}/api/people/${personaId}/recall-debug`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        query: trimmedQuery,
-                        keywords: keywordList,
-                        topk,
-                        use_rrf: useRrf,
-                        use_hybrid: useHybrid,
-                        start_date: startDate || null,
-                        end_date: endDate || null,
-                    }),
-                });
-
-                if (!res.ok) {
-                    // Try to parse as JSON, fall back to text
-                    const text = await res.text();
-                    try {
-                        const data = JSON.parse(text);
-                        throw new Error(data.detail || 'Memory recall debug failed');
-                    } catch {
-                        throw new Error(`Server error: ${text.substring(0, 200)}`);
-                    }
-                }
-
-                const data = await res.json();
-                setDebugResult(data);
-            } else {
-                // Normal mode: use regular recall endpoint
-                const res = await fetch(`/api/people/${personaId}/recall`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        query: query.trim(),
-                        topk,
-                        max_chars: maxChars,
-                    }),
-                });
-
-                if (!res.ok) {
-                    const data = await res.json();
-                    throw new Error(data.detail || 'Memory recall failed');
-                }
-
-                const data = await res.json();
-                setResult(data.result);
-            }
-        } catch (err: any) {
-            setError(err.message || 'An error occurred');
-        } finally {
-            setIsLoading(false);
-        }
-    };
-
-    const handleKeyPress = (e: React.KeyboardEvent) => {
-        if (e.key === 'Enter' && !e.shiftKey) {
-            e.preventDefault();
-            handleRecall();
-        }
-    };
-
     const getScoreColor = (score: number): string => {
-        // High score (>0.9): green, Medium (0.7-0.9): yellow, Low (<0.7): red
         if (score >= 0.9) return '#2b8a3e';
         if (score >= 0.8) return '#74b816';
         if (score >= 0.7) return '#fab005';
@@ -309,8 +544,7 @@ export default function MemoryRecall({ personaId }: MemoryRecallProps) {
         setIsDeletingChronicle(true);
         setDeleteResult(null);
         try {
-            const backendUrl = 'http://127.0.0.1:8000';
-            const res = await fetch(`${backendUrl}/api/people/${personaId}/arasuji`, {
+            const res = await fetch(`/api/people/${personaId}/arasuji`, {
                 method: 'DELETE',
             });
             if (!res.ok) {
@@ -331,8 +565,7 @@ export default function MemoryRecall({ personaId }: MemoryRecallProps) {
         setIsDeletingMemopedia(true);
         setDeleteResult(null);
         try {
-            const backendUrl = 'http://127.0.0.1:8000';
-            const res = await fetch(`${backendUrl}/api/people/${personaId}/memopedia/pages`, {
+            const res = await fetch(`/api/people/${personaId}/memopedia/pages`, {
                 method: 'DELETE',
             });
             if (!res.ok) {
@@ -349,252 +582,257 @@ export default function MemoryRecall({ personaId }: MemoryRecallProps) {
         }
     };
 
+    const formatPersonaPreview = (hits: UnifiedHit[]): string => {
+        const lines = [`記憶検索結果: ${hits.length}件\n`];
+        hits.forEach((hit, i) => {
+            const n = i + 1;
+            if (hit.source_type === 'chronicle') {
+                const start = hit.start_time ? new Date(hit.start_time * 1000).toISOString().slice(0, 16).replace('T', ' ') : '?';
+                const end = hit.end_time ? new Date(hit.end_time * 1000).toISOString().slice(0, 16).replace('T', ' ') : '?';
+                lines.push(`[${n}] Chronicle Lv${hit.level ?? 1} | ${start} ~ ${end} | ${hit.message_count ?? '?'}件`);
+                lines.push(`    URI: ${hit.uri}`);
+                lines.push(`    ${hit.content}`);
+            } else if (hit.source_type === 'fragment') {
+                const dateStr = hit.source_date ? ` (${hit.source_date})` : '';
+                lines.push(`[${n}] Fragment${dateStr}`);
+                lines.push(`    ${hit.title}: ${hit.content}`);
+                lines.push(`    URI: ${hit.uri}`);
+            } else if (hit.source_type === 'message') {
+                lines.push(`[${n}] Message: ${hit.title}`);
+                lines.push(`    URI: ${hit.uri}`);
+                lines.push(`    ${hit.content}`);
+            } else if (hit.source_type === 'perception') {
+                lines.push(`[${n}] 知覚: ${hit.title}`);
+                lines.push(`    ${hit.content}`);
+            } else {
+                lines.push(`[${n}] Memopedia: ${hit.title}`);
+                if (hit.category) lines.push(`    カテゴリ: ${hit.category}`);
+                lines.push(`    URI: ${hit.uri}`);
+                if (hit.content) lines.push(`    概要: ${hit.content}`);
+            }
+            lines.push('');
+        });
+        return lines.join('\n');
+    };
+
     return (
         <div className={styles.container}>
-            <div className={styles.header}>
-                <Brain size={24} className={styles.icon} />
+            {/* Unified Recall Test */}
+            <div className={styles.header} style={{ marginTop: '2rem' }}>
+                <Search size={24} className={styles.icon} />
                 <div>
-                    <h3 className={styles.title}>Memory Recall Test</h3>
+                    <h3 className={styles.title}>Unified Recall Test</h3>
                     <p className={styles.description}>
-                        memory_recall ツールと同じロジックでペルソナの長期記憶を検索できるよ。
-                        結果を確認してデバッグに使ってね。
+                        Chronicle（あらすじ）・Memopedia（知識ベース）・Fragment（断片知識）を横断してエンベディング検索します。
+                        未生成の Embedding があれば先に一括生成してください。
                     </p>
                 </div>
-            </div>
-
-            {/* Debug Mode Toggle */}
-            <div className={styles.modeToggle}>
-                <label className={styles.toggleLabel}>
-                    <input
-                        type="checkbox"
-                        checked={debugMode}
-                        onChange={(e) => {
-                            setDebugMode(e.target.checked);
-                            setResult(null);
-                            setDebugResult(null);
-                            // Reset topk to appropriate default
-                            if (e.target.checked) {
-                                setTopk(Math.min(topk, 100));
-                            }
-                        }}
-                    />
-                    <Bug size={16} />
-                    Debug Mode
-                    <span className={styles.toggleHint}>
-                        {debugMode
-                            ? '（生のスコア表示、周辺コンテキストなし）'
-                            : '（通常モード）'}
-                    </span>
-                </label>
-                {debugMode && (
-                    <>
-                        <label className={styles.toggleLabel} style={{ marginTop: '0.5rem' }}>
-                            <input
-                                type="checkbox"
-                                checked={useHybrid}
-                                onChange={(e) => {
-                                    setUseHybrid(e.target.checked);
-                                    if (e.target.checked) setUseRrf(false);
-                                    setDebugResult(null);
-                                }}
-                            />
-                            Hybrid Search
-                            <span className={styles.toggleHint}>
-                                （キーワード + セマンティック検索をRRFで統合）
-                            </span>
-                        </label>
-                        <label className={styles.toggleLabel} style={{ marginTop: '0.5rem' }}>
-                            <input
-                                type="checkbox"
-                                checked={useRrf}
-                                disabled={useHybrid}
-                                onChange={(e) => {
-                                    setUseRrf(e.target.checked);
-                                    setDebugResult(null);
-                                }}
-                            />
-                            RRF (Reciprocal Rank Fusion)
-                            <span className={styles.toggleHint}>
-                                （クエリをスペースで分割して検索、順位を統合）
-                            </span>
-                        </label>
-                    </>
-                )}
-            </div>
-
-            <div className={styles.inputSection}>
-                <label className={styles.label}>
-                    {debugMode && useHybrid ? 'セマンティッククエリ（意味で検索）' : '検索クエリ'}
-                </label>
-                <textarea
-                    className={styles.queryInput}
-                    value={query}
-                    onChange={(e) => setQuery(e.target.value)}
-                    onKeyDown={handleKeyPress}
-                    placeholder={debugMode && useHybrid
-                        ? "例: まはーの誕生日を祝った時の会話"
-                        : "検索したい内容を入力してね"}
-                    rows={2}
-                />
-            </div>
-
-            {debugMode && useHybrid && (
-                <div className={styles.inputSection}>
-                    <label className={styles.label}>キーワード（部分一致検索）</label>
-                    <input
-                        type="text"
-                        className={styles.queryInput}
-                        value={keywords}
-                        onChange={(e) => setKeywords(e.target.value)}
-                        placeholder="例: 誕生日, 1月14日, おめでとう"
-                        style={{ padding: '0.75rem' }}
-                    />
-                    <p className={styles.keywordHint}>
-                        カンマまたはスペースで区切って複数指定可能
-                    </p>
-                </div>
-            )}
-
-            {debugMode && (
-                <div className={styles.dateRangeSection}>
-                    <label className={styles.label}>日時範囲（オプション）</label>
-                    <div className={styles.dateInputs}>
-                        <input
-                            type="date"
-                            value={startDate}
-                            onChange={(e) => setStartDate(e.target.value)}
-                            className={styles.dateInput}
-                        />
-                        <span className={styles.dateSeparator}>〜</span>
-                        <input
-                            type="date"
-                            value={endDate}
-                            onChange={(e) => setEndDate(e.target.value)}
-                            className={styles.dateInput}
-                        />
-                        {(startDate || endDate) && (
-                            <button
-                                type="button"
-                                className={styles.clearDateBtn}
-                                onClick={() => { setStartDate(''); setEndDate(''); }}
-                            >
-                                クリア
-                            </button>
-                        )}
-                    </div>
-                </div>
-            )}
-
-            <div className={styles.paramsRow}>
-                <div className={styles.param}>
-                    <label className={styles.paramLabel}>
-                        topk (取得するシード数)
-                    </label>
-                    <input
-                        type="range"
-                        min={1}
-                        max={debugMode ? 100 : 20}
-                        value={topk}
-                        onChange={(e) => setTopk(Number(e.target.value))}
-                        className={styles.slider}
-                    />
-                    <span className={styles.paramValue}>{topk}</span>
-                </div>
-                {!debugMode && (
-                    <div className={styles.param}>
-                        <label className={styles.paramLabel}>max_chars (出力文字数上限)</label>
-                        <input
-                            type="range"
-                            min={100}
-                            max={10000}
-                            step={100}
-                            value={maxChars}
-                            onChange={(e) => setMaxChars(Number(e.target.value))}
-                            className={styles.slider}
-                        />
-                        <span className={styles.paramValue}>{maxChars}</span>
-                    </div>
-                )}
             </div>
 
             <button
                 className={styles.executeButton}
-                onClick={handleRecall}
-                disabled={isLoading || (!query.trim() && !keywords.trim())}
+                onClick={handleGenerateEmbeddings}
+                disabled={isGeneratingEmbeddings}
+                style={{ background: '#495057', marginBottom: '1rem' }}
             >
-                {isLoading ? (
-                    <>
-                        <Loader2 size={16} className={styles.loader} />
-                        実行中...
-                    </>
+                {isGeneratingEmbeddings ? (
+                    <><Loader2 size={16} className={styles.loader} /> 生成中...</>
                 ) : (
-                    <>
-                        <Search size={16} />
-                        Memory Recall を実行
-                    </>
+                    'Embedding 一括生成 (Chronicle / Memopedia / Fragment)'
                 )}
             </button>
 
-            {error && (
+            {embeddingResult && (
+                <div className={styles.deleteResult} style={{ color: '#69db7c', marginBottom: '1rem' }}>
+                    {embeddingResult}
+                </div>
+            )}
+
+            {embeddingError && (
+                <div className={styles.error} style={{ marginBottom: '1rem' }}>
+                    <AlertCircle size={16} />
+                    <span>{embeddingError}</span>
+                </div>
+            )}
+
+            <div className={styles.inputSection}>
+                <label className={styles.label}>検索クエリ</label>
+                <textarea
+                    className={styles.queryInput}
+                    value={unifiedQuery}
+                    onChange={(e) => setUnifiedQuery(e.target.value)}
+                    onKeyDown={(e) => {
+                        if (e.key === 'Enter' && !e.shiftKey) {
+                            e.preventDefault();
+                            handleUnifiedRecall();
+                        }
+                    }}
+                    placeholder="例: まはーの好きなもの"
+                    rows={2}
+                />
+            </div>
+
+            <div className={styles.paramsRow}>
+                <div className={styles.param}>
+                    <label className={styles.paramLabel}>Focus (4×深掘り)</label>
+                    <select
+                        value={unifiedFocus}
+                        onChange={(e) => setUnifiedFocus(e.target.value)}
+                        style={{
+                            padding: '4px 8px',
+                            borderRadius: '4px',
+                            border: '1px solid #444',
+                            background: 'transparent',
+                            color: 'inherit',
+                        }}
+                    >
+                        <option value="">なし (均等)</option>
+                        <option value="chronicle">Chronicle</option>
+                        <option value="memopedia">Memopedia</option>
+                        <option value="fragment">Fragment</option>
+                        <option value="message">Messages</option>
+                        <option value="perception">知覚 (通知の記録)</option>
+                    </select>
+                </div>
+            </div>
+
+            <div className={styles.modeToggle}>
+                <label className={styles.toggleLabel}>
+                    <input type="checkbox" checked={unifiedSearchChronicle}
+                           onChange={(e) => setUnifiedSearchChronicle(e.target.checked)} />
+                    Chronicle
+                </label>
+                <label className={styles.toggleLabel}>
+                    <input type="checkbox" checked={unifiedSearchMemopedia}
+                           onChange={(e) => setUnifiedSearchMemopedia(e.target.checked)} />
+                    Memopedia
+                </label>
+                <label className={styles.toggleLabel}>
+                    <input type="checkbox" checked={unifiedSearchFragments}
+                           onChange={(e) => setUnifiedSearchFragments(e.target.checked)} />
+                    Fragment
+                </label>
+                <label className={styles.toggleLabel}>
+                    <input type="checkbox" checked={unifiedSearchMessages}
+                           onChange={(e) => setUnifiedSearchMessages(e.target.checked)} />
+                    Messages
+                </label>
+                <label className={styles.toggleLabel}>
+                    <input type="checkbox" checked={unifiedSearchPerceptions}
+                           onChange={(e) => setUnifiedSearchPerceptions(e.target.checked)} />
+                    知覚
+                </label>
+            </div>
+
+            <button
+                className={styles.executeButton}
+                onClick={handleUnifiedRecall}
+                disabled={unifiedLoading || !unifiedQuery.trim()}
+            >
+                {unifiedLoading ? (
+                    <><Loader2 size={16} className={styles.loader} /> 実行中...</>
+                ) : (
+                    <><Search size={16} /> Unified Recall を実行</>
+                )}
+            </button>
+
+            {unifiedError && (
                 <div className={styles.error}>
                     <AlertCircle size={16} />
-                    <span>{error}</span>
+                    <span>{unifiedError}</span>
                 </div>
             )}
 
-            {/* Normal mode result */}
-            {result !== null && !debugMode && (
+            {unifiedResult && (
                 <div className={styles.resultSection}>
-                    <label className={styles.label}>実行結果</label>
-                    <pre className={styles.resultBox}>{result}</pre>
-                </div>
-            )}
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', marginBottom: '0.5rem' }}>
+                        <label className={styles.label} style={{ margin: 0 }}>
+                            検索結果 ({unifiedResult.total_hits} hits)
+                        </label>
+                        <label className={styles.toggleLabel}>
+                            <input type="checkbox" checked={showPersonaPreview}
+                                   onChange={(e) => setShowPersonaPreview(e.target.checked)} />
+                            ペルソナプレビュー
+                        </label>
+                    </div>
 
-            {/* Debug mode result */}
-            {debugResult !== null && debugMode && (
-                <div className={styles.resultSection}>
-                    <label className={styles.label}>
-                        検索結果 ({debugResult.total_hits} hits)
-                    </label>
+                    {showPersonaPreview ? (
+                        <pre className={styles.resultBox} style={{ whiteSpace: 'pre-wrap', fontSize: '0.82rem' }}>
+                            {formatPersonaPreview(unifiedResult.hits)}
+                        </pre>
+                    ) : (
                     <div className={styles.debugTable}>
                         <table>
                             <thead>
                                 <tr>
                                     <th className={styles.rankCol}>#</th>
                                     <th className={styles.scoreCol}>Score</th>
-                                    <th className={styles.roleCol}>Role</th>
-                                    <th className={styles.dateCol}>Date</th>
-                                    <th className={styles.contentCol}>Content</th>
+                                    <th className={styles.roleCol}>Source</th>
+                                    <th className={styles.contentCol}>Title / Content</th>
+                                    <th style={{ width: '3rem', textAlign: 'center' }}>WM</th>
                                 </tr>
                             </thead>
                             <tbody>
-                                {debugResult.hits.map((hit) => (
-                                    <tr key={hit.message_id}>
-                                        <td className={styles.rankCol}>{hit.rank}</td>
-                                        <td
-                                            className={styles.scoreCol}
-                                            style={{ color: getScoreColor(hit.score) }}
-                                        >
+                                {unifiedResult.hits.map((hit, i) => (
+                                    <tr key={hit.source_id}>
+                                        <td className={styles.rankCol}>{i + 1}</td>
+                                        <td className={styles.scoreCol}
+                                            style={{ color: getScoreColor(hit.score) }}>
                                             {hit.score.toFixed(4)}
                                         </td>
                                         <td className={styles.roleCol}>
-                                            {hit.role === 'assistant' || hit.role === 'model'
-                                                ? 'AI'
-                                                : hit.role}
-                                        </td>
-                                        <td className={styles.dateCol}>
-                                            {hit.created_at_str}
+                                            {hit.source_type === 'chronicle' ? 'Chronicle'
+                                                : hit.source_type === 'fragment' ? 'Fragment'
+                                                : hit.source_type === 'message' ? 'Message'
+                                                : hit.source_type === 'perception' ? '知覚'
+                                                : 'Memopedia'}
+                                            {hit.level != null && ` Lv${hit.level}`}
+                                            {hit.category && ` [${hit.category}]`}
                                         </td>
                                         <td className={styles.contentCol}>
                                             <div className={styles.contentPreview}>
-                                                {hit.content}
+                                                <strong>{hit.title}</strong>
+                                                {hit.content && <><br />{hit.content}</>}
+                                                {hit.uri && <>
+                                                    <br />
+                                                    <code style={{ fontSize: '0.7rem', color: '#666' }}>{hit.uri}</code>
+                                                </>}
                                             </div>
+                                        </td>
+                                        <td style={{ textAlign: 'center' }}>
+                                            <button
+                                                onClick={() => handleAddToWorkingMemory(hit)}
+                                                disabled={addingToWm === hit.source_id || !hit.uri}
+                                                title={hit.uri ? 'ワーキングメモリに追加'
+                                                    : '知覚バッチは URI を持たないため追加できません'}
+                                                style={{
+                                                    background: wmAddResult?.id === hit.source_id && wmAddResult.ok
+                                                        ? 'rgba(43, 138, 62, 0.2)' : 'none',
+                                                    border: '1px solid #444',
+                                                    borderRadius: '4px',
+                                                    padding: '2px 6px',
+                                                    cursor: addingToWm === hit.source_id ? 'wait' : 'pointer',
+                                                    color: wmAddResult?.id === hit.source_id && wmAddResult.ok
+                                                        ? '#69db7c' : '#aaa',
+                                                    display: 'inline-flex',
+                                                    alignItems: 'center',
+                                                }}
+                                            >
+                                                {addingToWm === hit.source_id ? (
+                                                    <Loader2 size={12} className={styles.loader} />
+                                                ) : wmAddResult?.id === hit.source_id && wmAddResult.ok ? (
+                                                    '✓'
+                                                ) : (
+                                                    <Plus size={12} />
+                                                )}
+                                            </button>
                                         </td>
                                     </tr>
                                 ))}
                             </tbody>
                         </table>
                     </div>
+                    )}
                 </div>
             )}
 
@@ -679,6 +917,150 @@ export default function MemoryRecall({ personaId }: MemoryRecallProps) {
                     <span>{diagnosisError}</span>
                 </div>
             )}
+
+            {/* Build Memopedia from Logs */}
+            <div className={styles.header} style={{ marginTop: '2rem' }}>
+                <Brain size={24} className={styles.icon} />
+                <div>
+                    <h3 className={styles.title}>Memopedia ログ構築</h3>
+                    <p className={styles.description}>
+                        チャットログからエンティティ（人物・用語・計画等）を抽出し、Memopediaページを自動生成・更新します。
+                        既存ページには新しい情報が追記されます。
+                    </p>
+                </div>
+            </div>
+
+            <button
+                className={styles.executeButton}
+                onClick={() => handleBuildMemopediaFromLogs(false)}
+                disabled={isBuildingMemopedia}
+                style={{ background: '#6b46c1' }}
+            >
+                {isBuildingMemopedia ? (
+                    <><Loader2 size={16} className={styles.loader} /> 処理中...</>
+                ) : (
+                    <><Brain size={16} /> ログからMemopediaを構築</>
+                )}
+            </button>
+
+            {/* 前回が途中で終わったときだけ出る。押さなければ先頭から流れる */}
+            {buildMemopediaResume && !isBuildingMemopedia && (
+                <button
+                    className={styles.executeButton}
+                    onClick={() => handleBuildMemopediaFromLogs(true)}
+                    style={{ background: '#4c1d95', marginLeft: '0.5rem' }}
+                >
+                    <Brain size={16} /> 続きから再構築
+                </button>
+            )}
+
+            {buildMemopediaProgress && isBuildingMemopedia && (
+                <div style={{ marginTop: '0.5rem', fontSize: '0.85rem', color: '#a78bfa' }}>
+                    {buildMemopediaProgress}
+                </div>
+            )}
+
+            {buildMemopediaError && (
+                <div className={styles.error}>
+                    <AlertCircle size={16} />
+                    <span>{buildMemopediaError}</span>
+                </div>
+            )}
+
+            {buildMemopediaResult && (
+                <div className={styles.deleteResult} style={{ color: '#69db7c' }}>
+                    {buildMemopediaResult}
+                </div>
+            )}
+
+            {/* Memopedia Export / Import */}
+            <div className={styles.header} style={{ marginTop: '2rem' }}>
+                <Download size={24} className={styles.icon} />
+                <div>
+                    <h3 className={styles.title}>Memopedia エクスポート / インポート</h3>
+                    <p className={styles.description}>
+                        Memopedia の全ページを JSON ファイルとしてエクスポート、またはインポートします。
+                    </p>
+                </div>
+            </div>
+
+            <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap', alignItems: 'center' }}>
+                <button
+                    className={styles.executeButton}
+                    onClick={handleExportMemopedia}
+                    disabled={isExporting}
+                    style={{ background: '#2b6cb0', flex: 'none' }}
+                >
+                    {isExporting ? (
+                        <><Loader2 size={16} className={styles.loader} /> エクスポート中...</>
+                    ) : (
+                        <><FileDown size={16} /> JSON エクスポート</>
+                    )}
+                </button>
+
+                <input
+                    type="file"
+                    ref={fileInputRef}
+                    accept=".json"
+                    style={{ display: 'none' }}
+                    onChange={(e) => {
+                        const file = e.target.files?.[0];
+                        if (file) handleImportMemopedia(file);
+                    }}
+                />
+                <button
+                    className={styles.executeButton}
+                    onClick={() => fileInputRef.current?.click()}
+                    disabled={isImporting}
+                    style={{ background: '#2f855a', flex: 'none' }}
+                >
+                    {isImporting ? (
+                        <><Loader2 size={16} className={styles.loader} /> インポート中...</>
+                    ) : (
+                        <><FileUp size={16} /> JSON インポート</>
+                    )}
+                </button>
+            </div>
+
+            <div style={{ marginTop: '0.5rem' }}>
+                <label className={styles.toggleLabel}>
+                    <input
+                        type="checkbox"
+                        checked={importClear}
+                        onChange={(e) => {
+                            setImportClear(e.target.checked);
+                            if (!e.target.checked) setConfirmImportClear(false);
+                        }}
+                    />
+                    インポート前に既存ページを削除
+                </label>
+                {importClear && (
+                    <label className={styles.toggleLabel} style={{ marginLeft: '1rem', color: '#e53e3e' }}>
+                        <input
+                            type="checkbox"
+                            checked={confirmImportClear}
+                            onChange={(e) => setConfirmImportClear(e.target.checked)}
+                        />
+                        削除を確認
+                    </label>
+                )}
+            </div>
+
+            {exportImportError && (
+                <div className={styles.error}>
+                    <AlertCircle size={16} />
+                    <span>{exportImportError}</span>
+                </div>
+            )}
+
+            {exportImportResult && (
+                <div className={styles.deleteResult} style={{ color: '#69db7c' }}>
+                    {exportImportResult}
+                </div>
+            )}
+
+            {/* v0.2.x Memopedia → v0.3.x 変換（本文 → Fragment） */}
+            <MemopediaConversion personaId={personaId} />
 
             {/* Danger Zone: Bulk Delete */}
             <div className={styles.dangerZone}>

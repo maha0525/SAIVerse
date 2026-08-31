@@ -36,7 +36,7 @@ def test_run_meta_user_returns_list_and_emits_status_callback() -> None:
         return ["assistant response"]
 
     runtime._compile_with_langgraph = Mock(side_effect=_compile)
-    runtime._maybe_run_metabolism = Mock()
+    runtime.session_lifecycle.maybe_run_metabolism = Mock()
 
     result = runtime.run_meta_user(
         persona=persona,
@@ -47,22 +47,6 @@ def test_run_meta_user_returns_list_and_emits_status_callback() -> None:
 
     assert result == ["assistant response"]
     assert events == [{"type": "status", "node": "exec", "content": "meta_user/exec / exec", "playbook_chain": "meta_user/exec"}]
-    persona.history_manager.add_message.assert_called_once()
-
-
-def test_run_meta_auto_returns_none() -> None:
-    runtime, persona = _runtime_and_persona()
-    playbook = SimpleNamespace(name="meta_auto/think", start_node="think", context_requirements=None)
-
-    runtime._choose_playbook = Mock(return_value=playbook)
-    runtime._prepare_context = Mock(return_value=[])
-    runtime._compile_with_langgraph = Mock(return_value=[])
-    runtime._maybe_run_metabolism = Mock()
-
-    result = runtime.run_meta_auto(persona=persona, building_id="b1", occupants=[])
-
-    assert result is None
-    assert getattr(persona, "_last_conscious_prompt_time_utc", None) is not None
 
 
 def test_preview_context_delegates_to_preview_context_impl(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -95,7 +79,7 @@ def test_run_meta_user_returns_error_when_meta_playbook_unresolved() -> None:
     runtime._load_playbook_for = Mock(return_value=None)
     runtime._choose_playbook = Mock()
     runtime._run_playbook = Mock()
-    runtime._maybe_run_metabolism = Mock()
+    runtime.session_lifecycle.maybe_run_metabolism = Mock()
 
     result = runtime.run_meta_user(persona, "hello", "b1", meta_playbook="not_found", event_callback=events.append)
 
@@ -126,7 +110,7 @@ def test_run_meta_user_propagates_runtime_identifiers_and_callback_payload() -> 
 
     runtime._prepare_context = Mock(side_effect=_prepare_context)
     runtime._compile_with_langgraph = Mock(side_effect=_compile)
-    runtime._maybe_run_metabolism = Mock()
+    runtime.session_lifecycle.maybe_run_metabolism = Mock()
 
     runtime.run_meta_user(persona, "hello", "b1", event_callback=events.append, cancellation_token=token)
 
@@ -134,34 +118,6 @@ def test_run_meta_user_propagates_runtime_identifiers_and_callback_payload() -> 
     assert captured["parent_state"]["_playbook_chain"] == "meta_user/exec"
     assert captured["parent_state"]["_cancellation_token"] is token
     assert events == [{"type": "status", "node": "exec", "content": "meta_user/exec / exec", "playbook_chain": "meta_user/exec"}]
-
-
-def test_run_meta_auto_propagates_runtime_identifiers() -> None:
-    runtime, persona = _runtime_and_persona()
-    playbook = SimpleNamespace(name="meta_auto/think", start_node="think", context_requirements=None)
-    captured: dict = {}
-    token = CancellationToken()
-
-    runtime._choose_playbook = Mock(return_value=playbook)
-
-    def _prepare_context(*args, **kwargs):
-        captured["prepare_pulse_id"] = kwargs["pulse_id"]
-        return []
-
-    def _compile(*args, **kwargs):
-        captured["compile_pulse_id"] = args[6]
-        captured["parent_state"] = kwargs["parent_state"]
-        return []
-
-    runtime._prepare_context = Mock(side_effect=_prepare_context)
-    runtime._compile_with_langgraph = Mock(side_effect=_compile)
-    runtime._maybe_run_metabolism = Mock()
-
-    runtime.run_meta_auto(persona, "b1", occupants=[], cancellation_token=token)
-
-    assert captured["prepare_pulse_id"] == captured["compile_pulse_id"]
-    assert captured["parent_state"]["_playbook_chain"] == "meta_auto/think"
-    assert captured["parent_state"]["_cancellation_token"] is token
 
 
 def test_run_meta_user_transitions_execution_state_running_to_idle() -> None:
@@ -180,30 +136,12 @@ def test_run_meta_user_transitions_execution_state_running_to_idle() -> None:
         return []
 
     runtime._compile_with_langgraph = Mock(side_effect=_compile)
-    runtime._maybe_run_metabolism = Mock()
+    runtime.session_lifecycle.maybe_run_metabolism = Mock()
 
     runtime.run_meta_user(persona, "hello", "b1")
 
     assert statuses == ["running"]
     assert persona.execution_state["status"] == "idle"
-
-
-def test_run_meta_user_logs_and_continues_on_history_record_exception(monkeypatch: pytest.MonkeyPatch) -> None:
-    runtime, persona = _runtime_and_persona()
-    selected = SimpleNamespace(name="meta_user/exec", start_node="exec", context_requirements=None)
-    logger_exception = Mock()
-
-    persona.history_manager.add_message.side_effect = RuntimeError("history failed")
-    runtime._choose_playbook = Mock(return_value=selected)
-    runtime._run_playbook = Mock(return_value=["ok"])
-    runtime._maybe_run_metabolism = Mock()
-    monkeypatch.setattr("sea.runtime.LOGGER.exception", logger_exception)
-
-    result = runtime.run_meta_user(persona, "hello", "b1")
-
-    assert result == ["ok"]
-    runtime._run_playbook.assert_called_once()
-    logger_exception.assert_called_once_with("Failed to record user input to history")
 
 
 def test_run_playbook_delegates_to_runtime_runner(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -233,6 +171,97 @@ def test_run_playbook_delegates_to_runtime_runner(monkeypatch: pytest.MonkeyPatc
     }
 
 
+def test_run_playbook_carries_auto_recall_text_into_parent_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    """記憶アーキv2 §4.5: _prepare_context (= _maybe_inject_auto_recall) が
+
+    persona._pending_auto_recall_text を立てたら、run_playbook がそれを
+    parent_state["_auto_recall_text"] へ転記し、_compile_with_langgraph の
+    parent_state kwarg まで運ぶこと (say/speak ノードが state.pop() で拾える
+    ようにする配線)。
+    """
+    from sea.runtime_runner import run_playbook
+
+    runtime, persona = _runtime_and_persona()
+    playbook = SimpleNamespace(name="meta_user/exec", start_node="exec", context_requirements=None)
+    captured: dict = {}
+
+    def _prepare_context(*args, **kwargs):
+        # _maybe_inject_auto_recall が注入したときの挙動を模倣。
+        persona._pending_auto_recall_text = "ふと浮かんだ記憶:\n- [Chronicle] テスト"
+        return []
+
+    def _compile(*args, **kwargs):
+        captured["parent_state"] = kwargs["parent_state"]
+        return []
+
+    runtime._prepare_context = Mock(side_effect=_prepare_context)
+    runtime._compile_with_langgraph = Mock(side_effect=_compile)
+
+    run_playbook(runtime, playbook, persona, "b1", "hello", auto_mode=False)
+
+    assert captured["parent_state"]["_auto_recall_text"] == "ふと浮かんだ記憶:\n- [Chronicle] テスト"
+
+
+def test_run_playbook_does_not_carry_stale_auto_recall_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    """前回 Pulse の persona._pending_auto_recall_text が残っていても、今回
+
+    _prepare_context が注入しなければ parent_state に auto_recall_text は
+    立たない (stale 値の混入防止)。
+    """
+    from sea.runtime_runner import run_playbook
+
+    runtime, persona = _runtime_and_persona()
+    persona._pending_auto_recall_text = "前回 Pulse の古い想起"
+    playbook = SimpleNamespace(name="meta_user/exec", start_node="exec", context_requirements=None)
+    captured: dict = {}
+
+    def _prepare_context(*args, **kwargs):
+        # 今回は注入なし (_maybe_inject_auto_recall がクリア済みの想定)。
+        return []
+
+    def _compile(*args, **kwargs):
+        captured["parent_state"] = kwargs["parent_state"]
+        return []
+
+    runtime._prepare_context = Mock(side_effect=_prepare_context)
+    runtime._compile_with_langgraph = Mock(side_effect=_compile)
+
+    run_playbook(runtime, playbook, persona, "b1", "hello", auto_mode=False)
+
+    assert "_auto_recall_text" not in captured["parent_state"]
+
+
+def test_lg_say_node_persists_auto_recall_into_metadata() -> None:
+    """記憶アーキv2 §4.5: state["_auto_recall_text"] は _lg_say_node が pop して
+
+    metadata["auto_recall"] に載る (reasoning と同じ運搬パターン)。次回以降の
+    ノード呼び出しでは再利用されない (pop 済み = 1 回だけ付与)。
+    """
+    runtime, persona = _runtime_and_persona()
+    persona.history_manager = SimpleNamespace(add_to_building_only=Mock())
+    manager = runtime.manager
+    manager.building_histories = {"b1": []}
+    manager.occupants = {"b1": ["pid"]}
+    manager.user_presence_status = "online"
+    manager.gateway_handle_ai_replies = Mock()
+    manager.unity_gateway = None
+
+    playbook = SimpleNamespace(name="pb")
+    node_def = SimpleNamespace(id="say", metadata_key=None)
+    node = runtime._lg_say_node(node_def, persona, "b1", playbook, outputs=[], event_callback=None)
+
+    state = {
+        "last": "こんにちは",
+        "_auto_recall_text": "ふと浮かんだ記憶:\n- [Chronicle] テスト",
+        "_pulse_id": "p-1",
+    }
+    asyncio.run(node(state))
+
+    payload = persona.history_manager.add_to_building_only.call_args.args[1]
+    assert payload["metadata"]["auto_recall"] == "ふと浮かんだ記憶:\n- [Chronicle] テスト"
+    assert "_auto_recall_text" not in state
+
+
 def test_emit_speak_payload_compatibility() -> None:
     manager = SimpleNamespace(
         building_histories={"b1": []},
@@ -240,15 +269,22 @@ def test_emit_speak_payload_compatibility() -> None:
         user_presence_status="online",
         gateway_handle_ai_replies=Mock(),
         unity_gateway=None,
+        item_service=None,
     )
     runtime = SEARuntime(manager)
-    persona = SimpleNamespace(persona_id="pid", history_manager=SimpleNamespace(add_message=Mock()))
+    history_manager = SimpleNamespace(
+        add_to_persona_only=Mock(),
+        add_to_building_only=Mock(return_value=None),
+    )
+    persona = SimpleNamespace(persona_id="pid", history_manager=history_manager)
 
     runtime._emit_speak(persona, "b1", "hello", pulse_id="p-1")
 
-    persona.history_manager.add_message.assert_called_once()
-    payload = persona.history_manager.add_message.call_args.args[0]
-    assert payload["metadata"] == {"tags": ["conversation", "pulse:p-1"], "with": ["npc-2", "user"]}
+    history_manager.add_to_persona_only.assert_called_once()
+    payload = history_manager.add_to_persona_only.call_args.args[0]
+    # Phase 3 段階 4-D (2026-05-09): pulse_id 専用カラム書き込み + タグ併行記録廃止
+    assert payload["metadata"] == {"tags": ["conversation"], "with": ["npc-2", "user"]}
+    assert payload["pulse_id"] == "p-1"
 
 
 def test_emit_say_payload_compatibility() -> None:
@@ -267,7 +303,9 @@ def test_emit_say_payload_compatibility() -> None:
 
     history_manager.add_to_building_only.assert_called_once()
     payload = history_manager.add_to_building_only.call_args.args[1]
-    assert payload["metadata"] == {"tags": ["pulse:p-1", "media"], "image": "x.png", "with": ["npc-2", "user"]}
+    # Phase 3 段階 4-D (2026-05-09): pulse_id 専用カラム書き込み + タグ併行記録廃止
+    assert payload["metadata"] == {"tags": ["media"], "image": "x.png", "with": ["npc-2", "user"]}
+    assert payload["pulse_id"] == "p-1"
 
 
 def test_lg_tool_call_node_reflects_result_in_state(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -321,3 +359,53 @@ def test_lg_stelis_nodes_manage_thread_state() -> None:
     assert state["stelis_chronicle"] == "summary"
     assert active_calls == ["child-thread", "parent-thread"]
 
+
+
+def test_non_user_pulse_without_meta_playbook_warns(caplog) -> None:
+    """自律系 (非 user) Pulse が meta_playbook 未指定で既定の会話 Playbook に
+    落ちるとき WARNING が出る (席違いフォールバックの機械検査、
+    autonomous_pulse_vehicle.md §D)。禁止はしない — 実行自体は続く。"""
+    import logging
+
+    runtime, persona = _runtime_and_persona()
+    persona.history_manager.add_to_persona_only = Mock()
+    playbook = SimpleNamespace(name="track_user_conversation", start_node="exec", context_requirements=None)
+    runtime._choose_playbook = Mock(return_value=playbook)
+    runtime._prepare_context = Mock(return_value=[])
+    runtime._compile_with_langgraph = Mock(return_value=["ok"])
+    runtime.session_lifecycle.maybe_run_metabolism = Mock()
+
+    with caplog.at_level(logging.WARNING, logger="sea.runtime"):
+        result = runtime.run_meta_user(
+            persona=persona, user_input="situation", building_id="b1",
+            pulse_type="schedule",
+        )
+
+    assert result == ["ok"]
+    assert any(
+        "fell back to the default conversation playbook" in rec.getMessage()
+        for rec in caplog.records
+    )
+
+
+def test_user_pulse_without_meta_playbook_does_not_warn(caplog) -> None:
+    """通常のユーザー会話 (pulse_type='user') の既定 Playbook 解決は正規経路 —
+    警告を出さない。"""
+    import logging
+
+    runtime, persona = _runtime_and_persona()
+    playbook = SimpleNamespace(name="track_user_conversation", start_node="exec", context_requirements=None)
+    runtime._choose_playbook = Mock(return_value=playbook)
+    runtime._prepare_context = Mock(return_value=[])
+    runtime._compile_with_langgraph = Mock(return_value=["ok"])
+    runtime.session_lifecycle.maybe_run_metabolism = Mock()
+
+    with caplog.at_level(logging.WARNING, logger="sea.runtime"):
+        runtime.run_meta_user(
+            persona=persona, user_input="hello", building_id="b1",
+        )
+
+    assert not any(
+        "fell back to the default conversation playbook" in rec.getMessage()
+        for rec in caplog.records
+    )

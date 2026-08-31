@@ -3,6 +3,7 @@
 import React, { useState } from 'react';
 import { X, ChevronDown, ChevronRight } from 'lucide-react';
 import ModalOverlay from '@/components/common/ModalOverlay';
+import { formatCost } from '@/lib/formatCost';
 import styles from './ContextPreviewModal.module.css';
 
 interface SectionInfo {
@@ -33,7 +34,7 @@ interface PersonaPreview {
     cache_enabled: boolean;
     cache_ttl: string | null;
     cache_type: string | null;
-    pricing: Record<string, number>;
+    pricing: { currency?: string; output_per_1m_tokens?: number; [key: string]: unknown };
     messages: AnnotatedMessage[];
 }
 
@@ -46,13 +47,6 @@ interface ContextPreviewModalProps {
     onClose: () => void;
     data: ContextPreviewData | null;
     isLoading: boolean;
-}
-
-function formatCost(cost: number): string {
-    if (cost === 0) return '$0';
-    if (cost < 0.001) return `~$${cost.toFixed(6)}`;
-    if (cost < 0.01) return `~$${cost.toFixed(4)}`;
-    return `~$${cost.toFixed(3)}`;
 }
 
 function formatTokens(tokens: number): string {
@@ -163,8 +157,8 @@ function PersonaPreviewView({ persona }: { persona: PersonaPreview }) {
                     <span className={styles.costLabel}>推定入力コスト</span>
                     <span className={styles.costValue}>
                         {persona.cache_enabled && persona.estimated_cost_best_usd !== persona.estimated_cost_worst_usd
-                            ? `${formatCost(persona.estimated_cost_best_usd)} ~ ${formatCost(persona.estimated_cost_worst_usd)}`
-                            : formatCost(persona.estimated_cost_worst_usd)}
+                            ? `${formatCost(persona.estimated_cost_best_usd, String(persona.pricing?.currency ?? 'USD'))} ~ ${formatCost(persona.estimated_cost_worst_usd, String(persona.pricing?.currency ?? 'USD'))}`
+                            : formatCost(persona.estimated_cost_worst_usd, String(persona.pricing?.currency ?? 'USD'))}
                     </span>
                 </div>
                 {persona.cache_enabled && (
@@ -176,7 +170,7 @@ function PersonaPreviewView({ persona }: { persona: PersonaPreview }) {
                 )}
                 {outputRate != null && outputRate > 0 && (
                     <div className={styles.costNote}>
-                        出力コストは応答長に依存 (${outputRate}/1Mトークン)
+                        出力コストは応答長に依存 ({formatCost(outputRate, String(persona.pricing?.currency ?? 'USD'))}/1Mトークン)
                     </div>
                 )}
             </div>

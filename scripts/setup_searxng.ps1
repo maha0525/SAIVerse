@@ -121,70 +121,11 @@ if ($needsInstall) {
     & $venvPython -m pip install --no-build-isolation -e "$SRC_DIR"
 }
 
-# --- Prepare Settings ---
-if (-not (Test-Path $SETTINGS_PATH)) {
-    Write-Host "[INFO] Preparing settings from $SRC_DIR\searx\settings.yml"
-    & $venvPython -m pip show PyYAML | Out-Null
-    if ($LASTEXITCODE -ne 0) { & $venvPython -m pip install pyyaml }
-    Copy-Item "$SRC_DIR\searx\settings.yml" -Destination "$SETTINGS_PATH"
-}
-
-$prepareSettingsScript = @"
-import sys
-import yaml
-from pathlib import Path
-import os
-import secrets
-import re
-
-path = Path(sys.argv[1])
-if not path.exists():
-    sys.exit(1)
-
-data = yaml.safe_load(path.read_text(encoding='utf-8'))
-
-# allow JSON output by default
-search = data.setdefault("search", {})
-formats = search.get("formats") or []
-if "json" not in formats:
-    formats.append("json")
-search["formats"] = formats
-search.setdefault("safe_search", 1)
-
-# bind on all interfaces for local network use
-server = data.setdefault("server", {})
-if server.get("bind_address") == "127.0.0.1":
-    server["bind_address"] = "0.0.0.0"
-
-default_secret = "ultrasecretkey"
-env_secret = os.getenv("SEARXNG_SECRET_KEY")
-if env_secret:
-    server["secret_key"] = env_secret
-elif not server.get("secret_key") or server.get("secret_key") == default_secret:
-    server["secret_key"] = secrets.token_hex(32)
-
-# disable engines that frequently fail without extra deps or network access.
-problematic_engines = {"ahmia", "torch", "wikidata", "radiobrowser"}
-
-def normalize(name: str) -> str:
-    return re.sub(r"[\s_-]+", "", name.lower())
-
-engines = []
-for engine in data.get("engines", []):
-    name = engine.get("name") or ""
-    if normalize(name) in problematic_engines:
-        continue
-    engines.append(engine)
-
-data["engines"] = engines
-
-path.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True), encoding='utf-8')
-"@
-
-$settingsScriptPath = Join-Path $ScriptRoot "prepare_settings_temp.py"
-Set-Content -Path $settingsScriptPath -Value $prepareSettingsScript -Encoding UTF8
-& $venvPython $settingsScriptPath "$SETTINGS_PATH"
-Remove-Item $settingsScriptPath
+# --- Merge Settings (3-layer: SearXNG base + SAIVerse defaults + user overrides) ---
+Write-Host "[INFO] Generating SearXNG settings..."
+$mergeScript = Join-Path $ScriptRoot "merge_searxng_settings.py"
+& $venvPython $mergeScript
+if ($LASTEXITCODE -ne 0) { throw "Failed to generate SearXNG settings" }
 
 # --- Patch for Windows Compatibility (pwd module) ---
 Write-Host "[INFO] Patching sources for Windows compatibility..."

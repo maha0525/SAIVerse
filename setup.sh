@@ -80,6 +80,15 @@ else
     echo "[OK] データベースは既に存在します"
 fi
 
+# --- 7b. Import/update playbooks ---
+echo ""
+echo "[SETUP] Playbook を更新中..."
+if python scripts/import_all_playbooks.py --force; then
+    echo "[OK] Playbook の更新完了"
+else
+    echo "[WARN] Playbook の更新に失敗しました。後で再実行できます: python scripts/import_all_playbooks.py --force"
+fi
+
 # --- 8. Create expansion_data directory ---
 if [ ! -d "expansion_data" ]; then
     mkdir expansion_data
@@ -103,6 +112,22 @@ if command -v git &>/dev/null; then
     else
         echo "[OK] Git リポジトリは既に存在します"
     fi
+else
+    echo ""
+    echo "[WARN] Git が見つかりません。自動更新には Git のインストールが必要です:"
+    if [[ "${OSTYPE:-}" == "darwin"* ]]; then
+        echo "  macOS:         xcode-select --install"
+        echo "                 (または brew install git)"
+    elif command -v apt-get &>/dev/null; then
+        echo "  Ubuntu/Debian: sudo apt install git"
+    elif command -v dnf &>/dev/null; then
+        echo "  Fedora/RHEL:   sudo dnf install git"
+    elif command -v pacman &>/dev/null; then
+        echo "  Arch Linux:    sudo pacman -S git"
+    else
+        echo "  https://git-scm.com/ からインストールしてください。"
+    fi
+    echo "  Git をインストール後、setup.sh を再実行してください。"
 fi
 
 # --- 10. Create .env from example if not exists ---

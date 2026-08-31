@@ -103,9 +103,15 @@ PROVIDER_CONFIG = [
 ]
 
 # Provider to env key mapping
+#
+# ⚠ ここに書いてよいのは、**LLM クライアントが実際に読む**環境変数だけ。合わない
+# 名前を並べると「設定済み」と表示されたあと実行時に鍵なしで落ちる — 案内の側が
+# 嘘をつく形になる。anthropic は 2026-08-22 に ``ANTHROPIC_API_KEY`` を外した:
+# builtin_data/providers/anthropic.json も llm_clients/anthropic.py も
+# ``CLAUDE_API_KEY`` しか見ていないため。
 PROVIDER_ENV_KEYS = {
     "openai": ["OPENAI_API_KEY"],
-    "anthropic": ["ANTHROPIC_API_KEY", "CLAUDE_API_KEY"],
+    "anthropic": ["CLAUDE_API_KEY"],
     "gemini": ["GEMINI_API_KEY", "GEMINI_FREE_API_KEY"],
     "ollama": [],  # Local, always available
     "llama_cpp": [],  # Local, always available
@@ -279,14 +285,21 @@ def get_env_key_mapping():
 
 # --- Model Role Presets ---
 
-# The 6 model roles that can be auto-configured
 MODEL_ROLES = {
     "default_model": "SAIVERSE_DEFAULT_MODEL",
     "lightweight_model": "SAIVERSE_DEFAULT_LIGHTWEIGHT_MODEL",
-    "agentic_model": "SAIVERSE_AGENTIC_MODEL",
     "memory_weave_model": "MEMORY_WEAVE_MODEL",
     "image_summary_model": "SAIVERSE_IMAGE_SUMMARY_MODEL",
-    "task_creation_model": "SAIVERSE_TASK_CREATION_MODEL",
+    "audio_summary_model": "SAIVERSE_AUDIO_SUMMARY_MODEL",
+    "video_summary_model": "SAIVERSE_VIDEO_SUMMARY_MODEL",
+}
+
+# Roles that fall back to a Gemini default when the active provider doesn't
+# support them natively (audio/video are currently Gemini-only).
+_GEMINI_FALLBACK_ROLES = {
+    "image_summary_model",
+    "audio_summary_model",
+    "video_summary_model",
 }
 
 MODEL_ROLE_DESCRIPTIONS = {
@@ -298,10 +311,6 @@ MODEL_ROLE_DESCRIPTIONS = {
         "label": "軽量モデル",
         "description": "ルーティングやツール判断に使用する高速・安価なモデル",
     },
-    "agentic_model": {
-        "label": "エージェントモデル",
-        "description": "構造化出力を使うエージェントタスク用モデル",
-    },
     "memory_weave_model": {
         "label": "Memory Weaveモデル",
         "description": "クロニクル・メモペディアの生成に使用するモデル",
@@ -310,9 +319,13 @@ MODEL_ROLE_DESCRIPTIONS = {
         "label": "画像要約モデル",
         "description": "画像・ドキュメント要約生成用モデル（Vision対応モデル推奨）",
     },
-    "task_creation_model": {
-        "label": "タスク生成モデル",
-        "description": "タスクの自動生成に使用するモデル",
+    "audio_summary_model": {
+        "label": "音声要約モデル",
+        "description": "ユーザー添付音声の要約生成用モデル（Gemini系のみ対応）",
+    },
+    "video_summary_model": {
+        "label": "動画要約モデル",
+        "description": "ユーザー添付動画の要約生成用モデル（Gemini系のみ対応）",
     },
 }
 
@@ -323,74 +336,74 @@ PROVIDER_PRESETS: Dict[str, Dict[str, Optional[str]]] = {
     "gemini_paid": {
         "default_model": "gemini-3-flash-preview-paid",
         "lightweight_model": "gemini-3.1-flash-lite-preview-paid",
-        "agentic_model": "gemini-3.1-flash-lite-preview-paid",
         "memory_weave_model": "gemini-3.1-flash-lite-preview-paid",
         "image_summary_model": "gemini-3.1-flash-lite-preview-paid",
-        "task_creation_model": "gemini-3-flash-preview-paid",
+        "audio_summary_model": "gemini-3.1-flash-lite-preview-paid",
+        "video_summary_model": "gemini-3.1-flash-lite-preview-paid",
     },
     "gemini_free": {
         "default_model": "gemini-3-flash-preview",
         "lightweight_model": "gemini-3.1-flash-lite-preview",
-        "agentic_model": "gemini-3.1-flash-lite-preview",
         "memory_weave_model": "gemini-3.1-flash-lite-preview",
         "image_summary_model": "gemini-3.1-flash-lite-preview",
-        "task_creation_model": "gemini-3-flash-preview",
+        "audio_summary_model": "gemini-3.1-flash-lite-preview",
+        "video_summary_model": "gemini-3.1-flash-lite-preview",
     },
     "anthropic": {
         "default_model": "claude-sonnet-4-5",
         "lightweight_model": "claude-haiku-4-5",
-        "agentic_model": "claude-haiku-4-5",
         "memory_weave_model": "claude-haiku-4-5",
         "image_summary_model": "claude-haiku-4-5",
-        "task_creation_model": "claude-haiku-4-5",
+        "audio_summary_model": None,  # Anthropic は音声入力非対応 → Gemini fallback
+        "video_summary_model": None,
     },
     "openai": {
         "default_model": "gpt-4o-2024-11-20",
         "lightweight_model": "gpt-5.4-nano",
-        "agentic_model": "gpt-5.4-mini",
         "memory_weave_model": "gpt-5.4-mini",
         "image_summary_model": "gpt-5.4-nano",
-        "task_creation_model": "gpt-5.4-mini",
+        "audio_summary_model": None,  # OpenAI 音声対応モデルは別系統 → Gemini fallback
+        "video_summary_model": None,
     },
     "grok": {
         "default_model": "grok-4-1-fast-reasoning",
         "lightweight_model": "grok-4-1-fast-reasoning",
-        "agentic_model": "grok-4-1-fast-reasoning",
         "memory_weave_model": "grok-4-1-fast-reasoning",
         "image_summary_model": "grok-4-1-fast-reasoning",
-        "task_creation_model": "grok-4-1-fast-reasoning",
+        "audio_summary_model": None,
+        "video_summary_model": None,
     },
     "openrouter": {
         "default_model": "openrouter-kimi-k2.5",
         "lightweight_model": "openrouter-qwen3-next-80b-a3b-instruct",
-        "agentic_model": "openrouter-qwen3-next-80b-a3b-instruct",
         "memory_weave_model": "openrouter-qwen3-next-80b-a3b-instruct",
         "image_summary_model": "openrouter-kimi-k2.5",
-        "task_creation_model": "openrouter-kimi-k2.5",
+        "audio_summary_model": None,
+        "video_summary_model": None,
     },
     "openrouter_free": {
         "default_model": "openrouter-qwen3-coder-480b-a35b-free",
         "lightweight_model": "openrouter-qwen3-next-80b-a3b-instruct-free",
-        "agentic_model": "openrouter-qwen3-next-80b-a3b-instruct-free",
         "memory_weave_model": "openrouter-qwen3-next-80b-a3b-instruct-free",
         "image_summary_model": None,
-        "task_creation_model": "openrouter-qwen3-coder-480b-a35b-free",
+        "audio_summary_model": None,
+        "video_summary_model": None,
     },
     "nvidia": {
         "default_model": "nim-qwen3.5-397b-a17b-instruct",
         "lightweight_model": "nim-qwen3-next-80b-a3b-instruct",
-        "agentic_model": "nim-qwen3-next-80b-a3b-instruct",
         "memory_weave_model": "nim-qwen3-next-80b-a3b-instruct",
         "image_summary_model": "nim-kimi-k2.6",
-        "task_creation_model": "nim-qwen3.5-397b-a17b-instruct",
+        "audio_summary_model": None,
+        "video_summary_model": None,
     },
     "ollama": {
         "default_model": "ollama-qwen3-next-80b",
         "lightweight_model": "ollama-gpt-oss-20b",
-        "agentic_model": "ollama-gpt-oss-20b",
         "memory_weave_model": "ollama-qwen3-next-80b",
         "image_summary_model": None,
-        "task_creation_model": "ollama-qwen3-next-80b",
+        "audio_summary_model": None,
+        "video_summary_model": None,
     },
 }
 
@@ -503,13 +516,17 @@ def auto_configure_models(
     for role, env_key in MODEL_ROLES.items():
         model_id = preset.get(role)
 
-        # Handle image_summary_model fallback for non-Gemini providers
-        if model_id is None and role == "image_summary_model":
+        # Handle image/audio/video summary fallback for non-Gemini providers.
+        # These roles require a vision/audio/video-capable model; only Gemini provides
+        # the full set, so we fall back to a Gemini default whenever the active provider
+        # presets None for the role.
+        if model_id is None and role in _GEMINI_FALLBACK_ROLES:
             if _has_any_gemini_key():
                 model_id = _GEMINI_IMAGE_SUMMARY_DEFAULT
             else:
+                role_label = MODEL_ROLE_DESCRIPTIONS.get(role, {}).get("label", role)
                 warnings.append(
-                    "画像要約モデルはGemini専用のため、Gemini APIキーがない場合は機能しません。"
+                    f"{role_label}はGemini系のみ対応のため、Gemini APIキーがない場合は機能しません。"
                 )
                 continue
 

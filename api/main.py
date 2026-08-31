@@ -1,14 +1,17 @@
 from fastapi import APIRouter
-from api.routes import chat, config, user, info, people
+from api.routes import chat, config, providers, user, info, people
+from api.owner_auth import router as owner_auth_router
 
 api_router = APIRouter()
+api_router.include_router(owner_auth_router, prefix="/auth", tags=["auth"])
 api_router.include_router(chat.router, prefix="/chat", tags=["chat"])
 api_router.include_router(config.router, prefix="/config", tags=["config"])
+api_router.include_router(providers.router, prefix="/providers", tags=["providers"])
 api_router.include_router(user.router, prefix="/user", tags=["user"])
 api_router.include_router(info.router, prefix="/info", tags=["info"])
 api_router.include_router(people.router, prefix="/people", tags=["people"])
 
-from api.routes import admin, db_manager, world, media, phenomena, usage, tutorial, uri, system
+from api.routes import admin, db_manager, world, media, phenomena, usage, tutorial, uri, system, mcp
 api_router.include_router(admin.router, prefix="/admin", tags=["admin"])
 api_router.include_router(db_manager.router, prefix="/db", tags=["db"])
 api_router.include_router(world.router, prefix="/world", tags=["world"])
@@ -18,7 +21,19 @@ api_router.include_router(usage.router, prefix="/usage", tags=["usage"])
 api_router.include_router(tutorial.router, prefix="/tutorial", tags=["tutorial"])
 api_router.include_router(uri.router, prefix="/uri", tags=["uri"])
 api_router.include_router(system.router, prefix="/system", tags=["system"])
+api_router.include_router(mcp.router, prefix="/mcp", tags=["mcp"])
 
-from api.routes.people.x_auth import callback_router as x_callback_router
-api_router.include_router(x_callback_router, prefix="/x", tags=["x"])
+from api.routes import observer, feeds
+api_router.include_router(observer.router, prefix="/observer", tags=["observer"])
+api_router.include_router(feeds.router, prefix="/feeds", tags=["feeds"])
 
+from api.routes import addon, addon_actions, addon_catalog, addon_events, codex_auth, oauth
+# addon_events(/events など固定パス)を addon(/{addon_name} キャッチオール)より
+# 先に登録する。逆順だと GET /api/addon/events が GET /api/addon/{addon_name} に
+# 飲まれて 404 "Addon not found" になる。
+api_router.include_router(addon_events.router, prefix="/addon", tags=["addon-events"])
+api_router.include_router(addon_actions.router, prefix="/addon", tags=["addon-actions"])
+api_router.include_router(addon.router, prefix="/addon", tags=["addon"])
+api_router.include_router(addon_catalog.router, prefix="/addon-catalog", tags=["addon-catalog"])
+api_router.include_router(oauth.router, prefix="/oauth", tags=["oauth"])
+api_router.include_router(codex_auth.router, prefix="/codex-auth", tags=["codex-auth"])

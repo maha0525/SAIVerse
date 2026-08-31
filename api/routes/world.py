@@ -28,6 +28,9 @@ def _check_result(result: str) -> dict:
 # --- Pydantic Models ---
 
 class CityCreate(BaseModel):
+    # slug = 内部の識別子 (英数字とアンダースコア)。作成時にしか決められない。
+    # name = 表示名 (自由な文字列)。docs/intent/city_identity.md §3
+    slug: str
     name: str
     description: str
     ui_port: int
@@ -35,6 +38,7 @@ class CityCreate(BaseModel):
     timezone: str
 
 class CityUpdate(BaseModel):
+    # 識別子 (slug) は受け取らない — City 作成後は変更できない (同 §4 不変条件 2)
     name: str
     description: str
     online_mode: bool
@@ -42,6 +46,7 @@ class CityUpdate(BaseModel):
     api_port: int
     timezone: str
     host_avatar_path: Optional[str] = None
+    map_background_image: Optional[str] = None
 
 class BuildingCreate(BaseModel):
     name: str
@@ -62,6 +67,56 @@ class BuildingUpdate(BaseModel):
     image_path: Optional[str] = None  # Building interior image for LLM visual context
     extra_prompt_files: Optional[List[str]] = None  # Additional prompt files for this building
 
+
+class RegionCreate(BaseModel):
+    name: str
+    description: str = ""
+    region_type: str = "generic"  # 'generic' | 'game'
+    city_id: int
+    parent_region_id: Optional[str] = None  # 指定すると SubRegion になる (入れ子は1段まで)
+    region_id: Optional[str] = None  # Custom ID (optional, auto-generated if not provided)
+    # 既存 Building を入口に使う場合に指定。省略時は「(名): 入口」を自動作成
+    # (game トップ Region は create_ruler の控室が入口になるため作成しない)
+    entrance_building_id: Optional[str] = None
+
+class RegionUpdate(BaseModel):
+    name: str
+    description: str = ""
+    region_type: str = "generic"
+    parent_region_id: Optional[str] = None
+
+class BuildingRegionAssign(BaseModel):
+    region_id: Optional[str] = None  # None で所属解除
+
+class RulerCreate(BaseModel):
+    name: str
+    system_prompt: str
+
+class GameStart(BaseModel):
+    participants: List[str]  # persona_id / user_id (str) のリスト。Ruler は含めない
+
+class GameEnd(BaseModel):
+    outcome: str = "clear"  # 'clear' | 'gameover' | 'aborted'
+
+
+class BuildingPosition(BaseModel):
+    building_id: str
+    x: float
+    y: float
+
+
+class BuildingPositionsUpdate(BaseModel):
+    positions: List[BuildingPosition]
+
+
+class CityMapBackgroundUpdate(BaseModel):
+    map_background_image: Optional[str] = None
+
+
+class CityDisplayNameUpdate(BaseModel):
+    """街マップ画面から表示名だけを変える軽量更新のリクエスト。"""
+    name: str
+
 class AICreate(BaseModel):
     name: str
     system_prompt: str
@@ -75,10 +130,14 @@ class AIUpdate(BaseModel):
     home_city_id: int
     default_model: Optional[str]
     lightweight_model: Optional[str]
-    interaction_mode: str
+    autonomy_enabled: bool
     avatar_path: Optional[str]
     appearance_image_path: Optional[str] = None  # Persona appearance image for LLM visual context
     chronicle_enabled: Optional[bool] = None
+    autonomous_chronicle_enabled: Optional[bool] = None
+    auto_recall_enabled: Optional[bool] = None
+    memopedia_index_enabled: Optional[bool] = None
+    spell_enabled: Optional[bool] = None
 
 class AIMove(BaseModel):
     target_building_name: str
@@ -102,9 +161,9 @@ class ToolCreate(BaseModel):
 
 class ItemCreate(BaseModel):
     name: str
-    item_type: str
+    item_type: str  # 'object', 'picture', 'document', 'bag'
     description: str = ""  # Optional - auto-generated if empty for picture/document
-    owner_kind: str
+    owner_kind: str  # 'world', 'building', 'persona', 'bag'
     owner_id: Optional[str] = None
     state_json: str = "{}"
     file_path: Optional[str] = None  # Relative path to file (for picture/document items)
@@ -125,17 +184,99 @@ class ItemUpdate(BaseModel):
 # City
 @router.post("/cities")
 def create_city(city: CityCreate, manager: SAIVerseManager = Depends(get_manager)):
-    return _check_result(manager.create_city(city.name, city.description, city.ui_port, city.api_port, city.timezone))
+    return _check_result(manager.create_city(city.slug, city.name, city.description, city.ui_port, city.api_port, city.timezone))
 
 @router.put("/cities/{city_id}")
 def update_city(city_id: int, city: CityUpdate, manager: SAIVerseManager = Depends(get_manager)):
-    return _check_result(manager.update_city(city_id, city.name, city.description, city.online_mode, city.ui_port, city.api_port, city.timezone, city.host_avatar_path, None))
+    return _check_result(manager.update_city(city_id, city.name, city.description, city.online_mode, city.ui_port, city.api_port, city.timezone, city.host_avatar_path, None, city.map_background_image))
+
+@router.patch("/cities/{city_id}/name")
+def update_city_display_name(city_id: int, req: CityDisplayNameUpdate, manager: SAIVerseManager = Depends(get_manager)):
+    """街マップ画面から City の表示名 (CITYNAME) だけを更新する PATCH。
+
+    背景画像の PATCH と対になる軽量経路 (PUT /cities/{id} は全フィールド要求)。
+    内部の識別子 (CITY_SLUG) はここでも変更できない — City 作成後は不変
+    (docs/intent/city_identity.md §4 不変条件 2)。表示名は自由な文字列なので
+    文字種の検証は行わないが、前後の空白は落とす。
+    """
+    from database.models import City as CityModel
+    session = manager.SessionLocal()
+    try:
+        city = session.query(CityModel).filter(CityModel.CITYID == city_id).first()
+        if not city:
+            raise HTTPException(status_code=404, detail="City not found")
+        city.CITYNAME = (req.name or "").strip()
+        session.commit()
+        # 表示名が空なら UI は識別子を代わりに見せる (不変条件 3)。応答でも
+        # 「実際に画面へ出る文字列」を返して、呼び出し側の再取得を不要にする。
+        return {"name": city.CITYNAME, "display_name": city.CITYNAME or city.CITY_SLUG}
+    except HTTPException:
+        raise
+    except Exception as e:
+        session.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        session.close()
+
+
+@router.patch("/cities/{city_id}/map-background")
+def update_city_map_background(city_id: int, req: CityMapBackgroundUpdate, manager: SAIVerseManager = Depends(get_manager)):
+    """街マップ画面から背景画像だけを軽量に更新する PATCH エンドポイント。
+
+    PUT /cities/{id} は全フィールド要求のため、UI 側で1項目だけ変更したい
+    用途には不便。マップ編集モードの即時反映に使う。
+    """
+    from database.models import City as CityModel
+    session = manager.SessionLocal()
+    try:
+        city = session.query(CityModel).filter(CityModel.CITYID == city_id).first()
+        if not city:
+            raise HTTPException(status_code=404, detail="City not found")
+        city.MAP_BACKGROUND_IMAGE = (req.map_background_image or "").strip() or None
+        session.commit()
+        return {"map_background_image": city.MAP_BACKGROUND_IMAGE}
+    except HTTPException:
+        raise
+    except Exception as e:
+        session.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        session.close()
+
 
 @router.delete("/cities/{city_id}")
 def delete_city(city_id: int, manager: SAIVerseManager = Depends(get_manager)):
     return _check_result(manager.delete_city(city_id))
 
 # Building
+
+@router.put("/buildings/positions")
+def update_building_positions(req: BuildingPositionsUpdate, manager: SAIVerseManager = Depends(get_manager)):
+    """街マップ編集モード用: 複数 Building の MAP_X/MAP_Y を一括更新する。
+
+    描画専用の座標カラムなので manager の in-memory state は触らず、
+    DB だけ更新すれば次回 city-map fetch で反映される。
+    """
+    from database.models import Building as BuildingModel
+    session = manager.SessionLocal()
+    try:
+        updated = 0
+        for p in req.positions:
+            building = session.query(BuildingModel).filter(BuildingModel.BUILDINGID == p.building_id).first()
+            if not building:
+                continue
+            building.MAP_X = p.x
+            building.MAP_Y = p.y
+            updated += 1
+        session.commit()
+        return {"updated": updated}
+    except Exception as e:
+        session.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        session.close()
+
+
 @router.post("/buildings")
 def create_building(b: BuildingCreate, manager: SAIVerseManager = Depends(get_manager)):
     return _check_result(manager.create_building(b.name, b.description, b.capacity, b.system_instruction, b.city_id, b.building_id))
@@ -147,6 +288,158 @@ def update_building(building_id: str, b: BuildingUpdate, manager: SAIVerseManage
 @router.delete("/buildings/{building_id}")
 def delete_building(building_id: str, manager: SAIVerseManager = Depends(get_manager)):
     return _check_result(manager.delete_building(building_id))
+
+
+# --- Regions ---
+
+@router.get("/regions")
+def list_regions(manager: SAIVerseManager = Depends(get_manager)):
+    """この City の Region 一覧 (所属 Building の ID 付き)。"""
+    regions = []
+    for r in manager.regions.values():
+        regions.append({
+            "region_id": r.region_id,
+            "city_id": r.city_id,
+            "parent_region_id": r.parent_region_id,
+            "name": r.name,
+            "description": r.description,
+            "region_type": r.region_type,
+            "ruler_id": r.ruler_id,
+            "entrance_building_id": r.entrance_building_id,
+            "map_background_image": r.map_background_image,
+            "building_ids": [
+                b.building_id for b in manager.buildings if b.region_id == r.region_id
+            ],
+        })
+    return {"regions": regions}
+
+@router.post("/regions")
+def create_region(req: RegionCreate, manager: SAIVerseManager = Depends(get_manager)):
+    return _check_result(manager.create_region(
+        req.name, req.description, req.region_type, req.city_id,
+        req.parent_region_id, req.region_id, req.entrance_building_id,
+    ))
+
+@router.put("/regions/{region_id}")
+def update_region(region_id: str, req: RegionUpdate, manager: SAIVerseManager = Depends(get_manager)):
+    return _check_result(manager.update_region(
+        region_id, req.name, req.description, req.region_type, req.parent_region_id,
+    ))
+
+@router.delete("/regions/{region_id}")
+def delete_region(region_id: str, manager: SAIVerseManager = Depends(get_manager)):
+    return _check_result(manager.delete_region(region_id))
+
+@router.put("/buildings/{building_id}/region")
+def set_building_region(building_id: str, req: BuildingRegionAssign, manager: SAIVerseManager = Depends(get_manager)):
+    return _check_result(manager.set_building_region(building_id, req.region_id))
+
+@router.patch("/regions/{region_id}/map-background")
+def update_region_map_background(region_id: str, req: CityMapBackgroundUpdate, manager: SAIVerseManager = Depends(get_manager)):
+    """Region 内マップの背景画像だけを軽量に更新する PATCH エンドポイント。
+
+    City の /cities/{id}/map-background と対になる (マップのスコープ化:
+    docs/intent/region.md §6-4)。
+    """
+    from database.models import Region as RegionModel
+    session = manager.SessionLocal()
+    try:
+        region = session.query(RegionModel).filter(RegionModel.REGION_ID == region_id).first()
+        if not region:
+            raise HTTPException(status_code=404, detail="Region not found")
+        region.MAP_BACKGROUND_IMAGE = (req.map_background_image or "").strip() or None
+        session.commit()
+        result = {"map_background_image": region.MAP_BACKGROUND_IMAGE}
+    except HTTPException:
+        raise
+    except Exception as e:
+        session.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        session.close()
+    manager._reload_regions()
+    return result
+
+@router.post("/regions/{region_id}/ruler")
+def create_ruler(region_id: str, req: RulerCreate, manager: SAIVerseManager = Depends(get_manager)):
+    """game Region に Ruler (GM ペルソナ) と控室を生成して紐づける。"""
+    return _check_result(manager.create_ruler(region_id, req.name, req.system_prompt))
+
+
+# --- Game lifecycle ---
+
+@router.get("/regions/{region_id}/game")
+def get_game_state(region_id: str, manager: SAIVerseManager = Depends(get_manager)):
+    region = manager.get_region(region_id)
+    if region is None:
+        raise HTTPException(status_code=404, detail="Region not found")
+    return {"region_id": region_id, "state": region.state}
+
+@router.post("/regions/{region_id}/game/start")
+def start_game(region_id: str, req: GameStart, manager: SAIVerseManager = Depends(get_manager)):
+    return _check_result(manager.game_lifecycle.start_game(region_id, req.participants))
+
+@router.post("/regions/{region_id}/game/pause")
+def pause_game(region_id: str, manager: SAIVerseManager = Depends(get_manager)):
+    return _check_result(manager.game_lifecycle.pause_game(region_id, reason="manual"))
+
+@router.post("/regions/{region_id}/game/resume")
+def resume_game(region_id: str, manager: SAIVerseManager = Depends(get_manager)):
+    return _check_result(manager.game_lifecycle.resume_game(region_id))
+
+@router.post("/regions/{region_id}/game/end")
+def end_game(region_id: str, req: GameEnd, manager: SAIVerseManager = Depends(get_manager)):
+    return _check_result(manager.game_lifecycle.end_game(region_id, req.outcome))
+
+@router.post("/regions/{region_id}/game/rejoin")
+def rejoin_game(region_id: str, manager: SAIVerseManager = Depends(get_manager)):
+    """ユーザーをパーティーの現在地へ復帰させる (入口の「復帰」ボタン)。
+
+    移動に伴いパーティー再集結 + 自動再開が発火する。
+    """
+    return _check_result(manager.game_lifecycle.rejoin_party(region_id))
+
+@router.get("/regions/{region_id}/game/log")
+def get_game_session_log(
+    region_id: str,
+    limit: int = 20,
+    before: Optional[str] = None,
+    after: Optional[str] = None,
+    manager: SAIVerseManager = Depends(get_manager),
+):
+    """進行中セッションのログビュー (Region 内全 Building の時系列 merge)。
+
+    書き込みは通常の building_messages 経路のまま、読み出しだけを合成する。
+    heard_by に閲覧者 (ユーザー) を含むメッセージのみ返す。
+    レスポンス形式は /api/chat/history と互換 (フロントの描画を共用するため)。
+    """
+    region = manager.get_region(region_id)
+    if region is None:
+        raise HTTPException(status_code=404, detail="Region not found")
+    state = region.state
+    if state.get("phase") not in ("playing", "paused"):
+        return {"history": [], "has_more": False}
+
+    building_ids = [
+        b.building_id for b in manager.get_region_buildings(region_id)
+    ]
+    from database.building_messages import fetch_game_session_log
+    msgs, has_more = fetch_game_session_log(
+        manager.SessionLocal,
+        building_ids,
+        viewer_id=str(manager.user_id),
+        since_ts=state.get("started_at"),
+        after_message_id=after,
+        before_message_id=before,
+        limit=limit,
+    )
+    from api.routes.chat import serialize_history_message
+    history = [
+        serialize_history_message(manager, m, str(m.get("message_id")))
+        for m in msgs
+        if m.get("content")
+    ]
+    return {"history": history, "has_more": has_more}
 
 @router.get("/prompts/available")
 def get_available_prompts():
@@ -167,7 +460,7 @@ def create_ai(ai: AICreate, manager: SAIVerseManager = Depends(get_manager)):
 
 @router.put("/ais/{ai_id}")
 def update_ai(ai_id: str, ai: AIUpdate, manager: SAIVerseManager = Depends(get_manager)):
-    return _check_result(manager.update_ai(ai_id, ai.name, ai.description, ai.system_prompt, ai.home_city_id, ai.default_model, ai.lightweight_model, ai.interaction_mode, ai.avatar_path, None, ai.appearance_image_path, chronicle_enabled=ai.chronicle_enabled))
+    return _check_result(manager.update_ai(ai_id, ai.name, ai.description, ai.system_prompt, ai.home_city_id, ai.default_model, ai.lightweight_model, ai.autonomy_enabled, ai.avatar_path, None, ai.appearance_image_path, chronicle_enabled=ai.chronicle_enabled, autonomous_chronicle_enabled=ai.autonomous_chronicle_enabled, auto_recall_enabled=ai.auto_recall_enabled, memopedia_index_enabled=ai.memopedia_index_enabled, spell_enabled=ai.spell_enabled))
 
 @router.delete("/ais/{ai_id}")
 def delete_ai(ai_id: str, manager: SAIVerseManager = Depends(get_manager)):
@@ -232,6 +525,10 @@ def delete_tool(tool_id: int, manager: SAIVerseManager = Depends(get_manager)):
 def create_item(i: ItemCreate, manager: SAIVerseManager = Depends(get_manager)):
     description = i.description
     file_path = i.file_path
+    if file_path:
+        from api.file_safety import resolve_allowed_path
+
+        resolve_allowed_path(file_path, home=manager.saiverse_home)
     
     # Auto-generate description if empty and file_path is provided
     if not description.strip() and file_path:
@@ -241,8 +538,12 @@ def create_item(i: ItemCreate, manager: SAIVerseManager = Depends(get_manager)):
             if saiverse_home:
                 full_path = saiverse_home / file_path
             else:
-                full_path = Path.home() / ".saiverse" / file_path
+                from saiverse.data_paths import get_saiverse_home
+                full_path = get_saiverse_home() / file_path
             
+            from api.file_safety import ensure_allowed_path
+
+            full_path = ensure_allowed_path(full_path, home=saiverse_home)
             if full_path.exists():
                 item_type = i.item_type.lower()
                 if item_type == "picture":
@@ -265,6 +566,10 @@ def create_item(i: ItemCreate, manager: SAIVerseManager = Depends(get_manager)):
 
 @router.put("/items/{item_id}")
 def update_item(item_id: str, i: ItemUpdate, manager: SAIVerseManager = Depends(get_manager)):
+    if i.file_path:
+        from api.file_safety import resolve_allowed_path
+
+        resolve_allowed_path(i.file_path, home=manager.saiverse_home)
     return _check_result(manager.update_item(item_id, i.name, i.item_type, i.description, i.owner_kind, i.owner_id, i.state_json, i.file_path))
 
 @router.get("/items/{item_id}")
@@ -517,3 +822,96 @@ def import_playbook(req: PlaybookImportRequest, db = Depends(get_db)):
         db.refresh(playbook)
         return {"success": True, "action": "created", "id": playbook.id, "name": name}
 
+
+# --- Building Realtime Spell Bindings ---
+
+class CreateBuildingRealtimeSpellRequest(BaseModel):
+    spell_name: str
+    spell_args_json: Optional[str] = None
+    label: Optional[str] = None
+    enabled: bool = True
+    priority: int = 0
+
+
+@router.get("/buildings/{building_id}/realtime-spell")
+def list_building_realtime_spells(building_id: str, manager: SAIVerseManager = Depends(get_manager)):
+    """Building に設定されたリアルタイムスペル一覧を取得する。"""
+    from database.models import RealtimeSpellBinding
+
+    db = manager.SessionLocal()
+    try:
+        bindings = (
+            db.query(RealtimeSpellBinding)
+            .filter(
+                RealtimeSpellBinding.OWNER_KIND == "building",
+                RealtimeSpellBinding.OWNER_ID == building_id,
+            )
+            .order_by(RealtimeSpellBinding.PRIORITY.desc())
+            .all()
+        )
+        return [
+            {
+                "binding_id": b.BINDING_ID,
+                "spell_name": b.SPELL_NAME,
+                "spell_args_json": b.SPELL_ARGS_JSON,
+                "label": b.LABEL,
+                "enabled": b.ENABLED,
+                "priority": b.PRIORITY,
+            }
+            for b in bindings
+        ]
+    finally:
+        db.close()
+
+
+@router.post("/buildings/{building_id}/realtime-spell")
+def create_building_realtime_spell(
+    building_id: str,
+    body: CreateBuildingRealtimeSpellRequest,
+    manager: SAIVerseManager = Depends(get_manager),
+):
+    """Building にリアルタイムスペル binding を追加する。"""
+    from database.models import RealtimeSpellBinding
+
+    db = manager.SessionLocal()
+    try:
+        binding = RealtimeSpellBinding(
+            OWNER_KIND="building",
+            OWNER_ID=building_id,
+            SPELL_NAME=body.spell_name,
+            SPELL_ARGS_JSON=body.spell_args_json,
+            LABEL=body.label,
+            ENABLED=body.enabled,
+            PRIORITY=body.priority,
+        )
+        db.add(binding)
+        db.commit()
+        db.refresh(binding)
+        return {"status": "ok", "binding_id": binding.BINDING_ID}
+    finally:
+        db.close()
+
+
+@router.delete("/buildings/{building_id}/realtime-spell/{binding_id}")
+def delete_building_realtime_spell(
+    building_id: str,
+    binding_id: int,
+    manager: SAIVerseManager = Depends(get_manager),
+):
+    """Building のリアルタイムスペル binding を削除する。"""
+    from database.models import RealtimeSpellBinding
+
+    db = manager.SessionLocal()
+    try:
+        binding = db.query(RealtimeSpellBinding).filter(
+            RealtimeSpellBinding.BINDING_ID == binding_id,
+            RealtimeSpellBinding.OWNER_KIND == "building",
+            RealtimeSpellBinding.OWNER_ID == building_id,
+        ).first()
+        if not binding:
+            raise HTTPException(status_code=404, detail="Binding not found")
+        db.delete(binding)
+        db.commit()
+        return {"status": "ok"}
+    finally:
+        db.close()

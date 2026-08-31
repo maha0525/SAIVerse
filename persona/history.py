@@ -1,5 +1,7 @@
-"""
-History and pulse tracking helpers for PersonaCore.
+"""History and pulse tracking helpers for PersonaCore.
+
+Phase 2+3 以降、 pulse_cursors / entry_markers は persona_pulse_cursor テーブルから
+ロードする (conscious_log.json は廃止)。
 """
 
 import logging
@@ -9,61 +11,45 @@ _log = logging.getLogger(__name__)
 
 
 def initialise_pulse_state(persona) -> None:
-    hist_map = persona.history_manager.building_histories
-    computed_cursors: Dict[str, int] = {}
-    max_seq_map: Dict[str, int] = {}
-    for b_id, hist in hist_map.items():
-        max_seq = 0
-        for msg in hist:
-            try:
-                seq_val = int(msg.get("seq", 0))
-            except (TypeError, ValueError):
-                _log.debug("Failed to parse seq value %r, defaulting to 0", msg.get("seq"))
-                seq_val = 0
-            max_seq = max(max_seq, seq_val)
-        max_seq_map[b_id] = max_seq
-        raw_value = persona._raw_pulse_cursor_data.get(b_id) if hasattr(persona, "_raw_pulse_cursor_data") else None
-        cursor = max_seq
-        if raw_value is not None:
-            if persona._raw_pulse_cursor_format == "seq":
-                try:
-                    cursor = int(raw_value)
-                except (TypeError, ValueError):
-                    _log.debug("Failed to parse cursor raw_value %r, defaulting to max_seq %d", raw_value, max_seq)
-                    cursor = max_seq
-                cursor = max(0, min(cursor, max_seq))
-            else:
-                try:
-                    count = int(raw_value)
-                except (TypeError, ValueError):
-                    _log.debug("Failed to parse count raw_value %r, defaulting to hist length %d", raw_value, len(hist))
-                    count = len(hist)
-                if count <= 0:
-                    cursor = 0
-                else:
-                    idx = min(count, len(hist))
-                    if idx == 0:
-                        cursor = 0
-                    else:
-                        ref = hist[idx - 1]
-                        try:
-                            cursor = int(ref.get("seq", idx))
-                        except (TypeError, ValueError):
-                            cursor = idx
-        computed_cursors[b_id] = max(0, cursor)
+    """ペルソナの pulse_cursors / entry_markers を persona_pulse_cursor から復元。
 
-    for b_id, hist in hist_map.items():
-        if b_id not in computed_cursors:
-            computed_cursors[b_id] = max_seq_map.get(b_id, 0)
+    DB に該当 (persona_id, building_id) 行がなければ 0 (= 全未読) で初期化する。
+    """
+    persona.pulse_cursors = {}
+    persona.entry_markers = {}
 
-    persona.pulse_cursors = computed_cursors
+    session_factory = getattr(persona, "SessionLocal", None)
+    if session_factory is None:
+        _log.info(
+            "[init_pulse] persona=%s no SessionLocal — cursors empty",
+            getattr(persona, "persona_id", "?"),
+        )
+        return
 
-    for b_id, hist in hist_map.items():
-        if b_id not in persona.entry_markers:
-            persona.entry_markers[b_id] = max_seq_map.get(b_id, 0)
+    from database.models import PersonaPulseCursor
+    persona_id = getattr(persona, "persona_id", None)
+    if not persona_id:
+        return
 
-    if persona.current_building_id in hist_map:
-        persona.entry_markers[persona.current_building_id] = persona.pulse_cursors.get(
-            persona.current_building_id,
-            persona.entry_markers.get(persona.current_building_id, 0),
+    try:
+        db = session_factory()
+        try:
+            rows = db.query(PersonaPulseCursor).filter_by(PERSONA_ID=persona_id).all()
+            cursors: Dict[str, int] = {}
+            markers: Dict[str, int] = {}
+            for row in rows:
+                cursors[row.BUILDING_ID] = int(row.CURSOR_SEQ or 0)
+                markers[row.BUILDING_ID] = int(row.ENTRY_MARKER_SEQ or 0)
+            persona.pulse_cursors = cursors
+            persona.entry_markers = markers
+            _log.info(
+                "[init_pulse] persona=%s loaded %d pulse_cursor rows",
+                persona_id, len(rows),
+            )
+        finally:
+            db.close()
+    except Exception:
+        _log.warning(
+            "[init_pulse] persona=%s failed to load pulse_cursors", persona_id,
+            exc_info=True,
         )

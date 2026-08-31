@@ -12,9 +12,10 @@ generate_image = _mod.generate_image
 
 
 class TestImageGenerator(unittest.TestCase):
+    @patch.object(_mod, '_is_image_model_available', return_value=True)
     @patch.object(_mod, 'store_image_bytes')
     @patch.object(_mod, '_generate_with_nano_banana_2')
-    def test_generate_image(self, mock_gen, mock_store):
+    def test_generate_image(self, mock_gen, mock_store, mock_avail):
         # Mock generation backend to return image bytes
         mock_gen.return_value = (b'imgdata', 'image/png')
 
@@ -28,7 +29,7 @@ class TestImageGenerator(unittest.TestCase):
              patch.object(_mod, 'get_active_manager', return_value=None, create=True), \
              patch('tools.context.get_active_persona_id', return_value=None), \
              patch('tools.context.get_active_manager', return_value=None):
-            text, info, path, metadata = generate_image('a cat')
+            text, info, path, metadata, item_id = generate_image('a cat')
 
         self.assertIsInstance(info, ToolResult)
         self.assertIn('a cat', text)
@@ -36,22 +37,27 @@ class TestImageGenerator(unittest.TestCase):
         self.assertEqual(Path(path), temp_path)
         self.assertIsInstance(metadata, dict)
         self.assertIn("media", metadata)
+        # persona_id/manager が None の場合 item は作成されないので item_id は None
+        self.assertIsNone(item_id)
         mock_gen.assert_called_once()
         temp_path.unlink(missing_ok=True)
 
+    @patch.object(_mod, '_is_image_model_available', return_value=True)
     @patch.object(_mod, '_generate_with_grok_imagine', side_effect=RuntimeError("No key"))
-    @patch.object(_mod, '_generate_with_gpt_image', side_effect=RuntimeError("No key"))
+    @patch.object(_mod, '_generate_with_gpt_image_1_5', side_effect=RuntimeError("No key"))
+    @patch.object(_mod, '_generate_with_gpt_image_2', side_effect=RuntimeError("No key"))
     @patch.object(_mod, '_generate_with_nano_banana_pro', side_effect=RuntimeError("No candidates"))
     @patch.object(_mod, '_generate_with_nano_banana_2', side_effect=RuntimeError("No candidates"))
-    def test_generate_image_error_returns_error_text(self, mock_nb2, mock_nbp, mock_gpt, mock_grok):
+    def test_generate_image_error_returns_error_text(self, mock_nb2, mock_nbp, mock_gpt2, mock_gpt15, mock_grok, mock_avail):
         # When all backends fail, should return error text without raising
         with patch('tools.context.get_active_persona_id', return_value=None), \
              patch('tools.context.get_active_manager', return_value=None):
-            text, info, path, metadata = generate_image('nothing')
+            text, info, path, metadata, item_id = generate_image('nothing')
 
         self.assertIn('失敗', text)
         self.assertIsNone(path)
         self.assertIsNone(metadata)
+        self.assertIsNone(item_id)
 
     def test_tool_registration(self):
         from tools import TOOL_REGISTRY

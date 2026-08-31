@@ -2,12 +2,20 @@
   "model": "gemini-2.5-flash",
   "system_prompt": "",
   "display_name": "Gemini 2.5 Flash(無料枠)",
-  "provider": "gemini",
+  "provider_ref": "gemini",
   "context_length": 250000,
-  "default_max_history_messages": 80,
-  "metabolism_keep_messages": 60,
   "supports_images": true,
+  "supports_audio": true,
+  "supports_video": true,
   "prefer_paid": false,
+  "cache": {
+    "supported": true,
+    "default_enabled": false,
+    "default_ttl": "5m",
+    "ttl_options": ["5m", "15m", "30m", "1h"],
+    "type": "gemini_explicit",
+    "min_tokens": 1024
+  },
   "rate_limit": {
     "rpd": 20,
     "reset_timezone": "America/Los_Angeles"
@@ -36,6 +44,13 @@
       "default": "24576",
       "label": "Thinking Budget",
       "description": "思考トークン予算。defaultで思考なし。数値で思考を有効化し予算を指定(512〜24576)。"
+    },
+    "thought_signature_echo": {
+      "type": "dropdown",
+      "options": ["on", "off"],
+      "default": "on",
+      "label": "思考署名の引き継ぎ",
+      "description": "モデルが返す思考署名 (thought signature) を次ターンに載せ直すか。onで関数呼び出しの連続性を維持。offでキャッシュ効率が上がる(3.x系では関数呼び出しパートの署名は常に引き継がれ、テキストパートの署名のみoffで止まる)。"
     },
     "safety_harassment": {
       "type": "dropdown",

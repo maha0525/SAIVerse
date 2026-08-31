@@ -1,0 +1,1014 @@
+# Issue: stackchan-mcp upstream への PR 投稿戦略 (Phase X')
+
+**ステータス**: 🟡 大半が review 中 (= PR-J/K #195/#196 + PR-H #186 が merged、 残 Series A/C/E/F/L/M が review 中 = #207〜#217、 **PR-B #216 は #119 と冗長と確認し 2026-05-23 クローズ**、 **PR-C #217 は in-PR request 全件対応済で ready-to-merge 待ち**、 **PR-E1 #210 は second-pass P2 2件 (matrix reject 実機検証済 + LVGL race lock) 対応済で Codex 再 review 待ち**、 PR-G coredump + PR-N (= false-stroke suppression、 dev/integration で実機検証中) が未送)
+**優先度**: medium
+**作成日**: 2026-05-13
+**最終更新**: 2026-05-25 (新統合ブランチ `integrate/all-fixes-2026-05-25` 作成 + addon mcp_servers.json 参照切替)
+**関連**: `docs/intent/stackchan_vessel.md` §「Phase X'」、`docs/intent/stackchan_avatar_pipeline.md` §E、`maha0525/stackchan-mcp` fork branches `feature/external-pcm-stream` / `feature/dynamic-avatar-set`
+
+## 背景
+
+Phase 1' 完了時点で、fork (= `maha0525/stackchan-mcp`) の `feature/external-pcm-stream` ブランチに **9 commit が直線的に重なった状態**になっている。Phase X' で upstream (`kisaragi-mochi/stackchan-mcp`) に PR 投稿するには、これを **論理単位で分割した個別 PR (= Stacked PR 含む)** に整理する必要がある。1 つの巨大 PR にすると reviewer 負担大、merge も all-or-nothing で動かなくなる。
+
+このドキュメントは「どの commit をどの PR にまとめ、どんな base 関係で出すか」「ブランチ分割の具体手順」を残す。
+
+## 現在の commit 配列 (= `feature/external-pcm-stream` HEAD → root 方向)
+
+| # | commit | 内容 | 論理 PR | 依存 |
+|---|---|---|---|---|
+| 9 | `5e1042a` | `client_max_size=0` で aiohttp streaming body cap 撤去 | **PR7** | PR3 (= `POST /pcm` を導入してる) |
+| 8 | `93435a6` | persistent WS connection — NVS flag `websocket.persistent` opt-in (起動時 OpenAudioChannel + 失敗時 ScheduleReconnect) | ~~**PR6b**~~ (upstream #169/#197 で代替、 2026-05-20 取り下げ) | PR6a (= `intentional_close_` bug fix) |
+| 7 | `f8927b8` | `intentional_close_` flag を OpenAudioChannelInternal 失敗パスでクリア | ~~**PR6a**~~ (upstream #197 で同等修正、 2026-05-20 取り下げ) | 独立 (pure bug fix) |
+| 6 | `e23fa57` | `_libs/` を `os.environ["PATH"]` にも prepend (= `ctypes.util.find_library` 経路救済) | **PR5b** | PR5a (= 同梱した DLL を見せる仕上げ) |
+| 5 | `c7536f2` | Windows 用 `_libs/opus.dll` 同梱 + `os.add_dll_directory()` + hatchling `force-include` | **PR5a** | 独立 |
+| 4 | `71dc11e` | xiaozhi-cloud OTA `CheckVersion()` の呼び出し撤去 (= NVS websocket.url が上書きされない) | **PR4** | 独立 |
+| 3 | `b841d32` | HTTP `POST /pcm` endpoint を `capture_server.py` に追加 | **PR3** | PR2 (= `send_pcm_stream` を内部呼び出し) |
+| 2 | `e5a83fa` | `send_pcm_stream(gateway, async iterator)` を追加 | **PR2** | PR1 (= `send_pcm_audio` を抽出してから差分が小さくなる) |
+| 1 | `5df0460` | `send_pcm_audio(gateway, pcm, *, source_rate, source_label)` を `synthesize_and_send` から抽出 | **PR1** | 独立 |
+
+CI/build 系の commit (`b0779e6` = `ci: trigger build on feature/** branches and via workflow_dispatch`) は fork-only の dev infrastructure 改善で、upstream PR には含めない。
+
+## PR 依存グラフ (= upstream に投げる順)
+
+```
+PR1 (send_pcm_audio 抽出)
+  └─ PR2 (send_pcm_stream)
+      └─ PR3 (POST /pcm endpoint)
+          └─ PR7 (client_max_size=0)
+
+PR4 (OTA skip)              ── 独立
+
+PR5a + PR5b → PR5 (libopus 同梱 + DLL search path) ── 独立、5a/5b は密接なので 1 PR に合体
+
+PR6a → PR6 (persistent connection + bug fix) ── 6a/6b は密接なので 1 PR に合体
+```
+
+つまり最終的な PR 数:
+
+| PR | 内容 | base | 依存 | 状態 |
+|---|---|---|---|---|
+| **PR #A1** = [#212](https://github.com/kisaragi-mochi/stackchan-mcp/pull/212) | refactor(tts): extract `send_pcm_audio` from `synthesize_and_send` | upstream `main` | — | 投稿済 (2026-05-21) |
+| **PR #A2** = [#213](https://github.com/kisaragi-mochi/stackchan-mcp/pull/213) | feat(tts): `send_pcm_stream` for incremental PCM push | PR #A1 | PR #A1 と stacked | 投稿済 (2026-05-21) |
+| **PR #A3** = [#214](https://github.com/kisaragi-mochi/stackchan-mcp/pull/214) | feat(capture_server): `POST /pcm` endpoint for external PCM input | PR #A2 | PR #A2 と stacked | 投稿済 (2026-05-21) |
+| **PR #A4** = [#215](https://github.com/kisaragi-mochi/stackchan-mcp/pull/215) | fix(capture_server): disable aiohttp `client_max_size` cap | PR #A3 | PR #A3 と stacked | 投稿済 (2026-05-21) |
+| ~~PR #B~~ = [#216](https://github.com/kisaragi-mochi/stackchan-mcp/pull/216) | ~~fix(firmware): skip xiaozhi-cloud OTA check (NVS websocket.url 保護)~~ | — | — | **クローズ (2026-05-23)** — #119 (`CONFIG_DISABLE_OTA_WEBSOCKET_CONFIG` default y) で URL 保護は解決済、 本 PR は冗長。 詳細は末尾「2026-05-23 続報」節 |
+| **PR #C** = [#217](https://github.com/kisaragi-mochi/stackchan-mcp/pull/217) | fix(gateway): bundle libopus.dll for Windows + DLL search path setup | upstream `main` | — | in-PR request 全件対応済、 ready-to-merge 待ち (2026-05-23) |
+| ~~PR #D~~ | ~~feat(firmware): opt-in persistent WS connection + reconnect bug fix~~ | — | — | **不要** (= upstream #169/#197 で吸収済、 dev/integration の `ab3423e` でも opt-in gate を撤去済) |
+
+= **計 6 PR** (Phase 1' 由来、 音声経路 + OTA + libopus)。Series A の 4 PR は stacked、 B/C は独立。 PR-D は upstream merge で目的達成済のため取り下げ、 **PR-B (#216) は #119 と冗長のため 2026-05-23 クローズ** (= 実質 5 PR が生存)。
+
+これに加え、Phase 4.5-e で **Series E (PR-E1 / PR-E2)** が動的 avatar セット転送機構として投稿予定。本書末尾「追補: Series E」節を参照。
+
+## ブランチ分割手順
+
+依存関係的に PR #A1 → A2 → A3 → A4 は **Stacked PR** にする必要がある (= 前段が merge される前に後段を出すならその branch を前段 PR の branch から派生)。upstream maintainer の好み次第で「全部 main 直結 PR + 順次 merge 待ち」「Stacked PR で先行 review」のどちらかを選ぶ。
+
+具体的なブランチ作成 (= 各 PR ごとに新 branch を fork に作る):
+
+```bash
+cd temp/stackchan-mcp
+
+# upstream main を最新化
+git fetch upstream
+git switch -c pr-a1-extract-send-pcm-audio upstream/main
+git cherry-pick 5df0460
+git push origin pr-a1-extract-send-pcm-audio
+# → fork から upstream/main へ PR を出す (= PR #A1)
+
+# PR #A1 base で A2 を積む (Stacked):
+git switch -c pr-a2-send-pcm-stream pr-a1-extract-send-pcm-audio
+git cherry-pick e5a83fa
+git push origin pr-a2-send-pcm-stream
+# → PR description で「Stacked on #A1」を明示
+
+# PR #A3:
+git switch -c pr-a3-pcm-endpoint pr-a2-send-pcm-stream
+git cherry-pick b841d32
+git push origin pr-a3-pcm-endpoint
+
+# PR #A4:
+git switch -c pr-a4-client-max-size-cap pr-a3-pcm-endpoint
+git cherry-pick 5e1042a
+git push origin pr-a4-client-max-size-cap
+
+# PR #B (独立):
+git switch -c pr-b-skip-xiaozhi-ota upstream/main
+git cherry-pick 71dc11e
+git push origin pr-b-skip-xiaozhi-ota
+
+# PR #C (PR5a + PR5b 合体):
+git switch -c pr-c-bundle-libopus-windows upstream/main
+git cherry-pick c7536f2
+git cherry-pick e23fa57
+git push origin pr-c-bundle-libopus-windows
+# (or git rebase -i で 1 commit に squash してもよい — レビューしやすさ次第)
+
+# PR #D (PR6a + PR6b 合体):
+git switch -c pr-d-persistent-ws-opt-in upstream/main
+git cherry-pick f8927b8
+git cherry-pick 93435a6
+git push origin pr-d-persistent-ws-opt-in
+```
+
+`feature/external-pcm-stream` 本体は手元検証用 (= addon の `mcp_servers.json` がここを指してる) に残す。upstream merge が進んだ段階で addon の `mcp_servers.json` を PyPI 公開版 (`uvx stackchan-mcp[tts]`) に切り替える。
+
+## PR ごとの注意点
+
+### PR #A1〜A4 (Series A — TTS / PCM 入力経路)
+
+- A1 は純粋 refactor、テストが既存のままパスするはず → review しやすい
+- A2 で `send_pcm_stream` を追加するときは新規 test を追加すると merge 確率上がる (= 既存 send_pcm_audio test と並列の async test)
+- A3 の `POST /pcm` endpoint は test 必須 (= aiohttp test client で 200/401/503 を網羅)
+- A4 の `client_max_size=0` は test しづらいが、PR description で「200-second long PCM upload で 1 MiB cap が阻む observed evidence」を Phase 1' のログから引用して根拠化
+
+### PR #B (xiaozhi OTA skip) — **クローズ済 (2026-05-23、 #119 と冗長)**
+
+- 当初の動機: 「stackchan-mcp は自前 gateway を持つ前提で、xiaozhi-cloud OTA endpoint への接続は NVS websocket.url を server 主導で書き換える副作用がある」「自前 gateway 設計と矛盾する」 = **NVS websocket.url の保護**
+- **クローズ理由**: maintainer が #119 (merged 2026-05-14、 `CONFIG_DISABLE_OTA_WEBSOCKET_CONFIG` default y) を提示。 #119 は `Ota::CheckVersion()` 内の websocket-section NVS write-back だけを gate し、 URL 保護という当 PR と同一の目的を既に達成していた。 本 PR の差分は「OTA round-trip 自体の撤去」 だが、 これは URL 保護の実装手段であって独立した目的ではなく、 かつ codex [P2] が指摘した「自前 OTA path も無効化する」 副作用を伴う。 → 当時の intent (= URL 保護) に照らし冗長と判断、 感謝コメント付きでクローズ
+- 学び: 投稿前に「同一問題の既存 upstream fix がないか」 を確認する。 #119 は #110 への fix として 5/14 に merged 済だった (= 本 PR 投稿 5/21 の 1 週間前)
+
+### PR #C (libopus bundle)
+
+- バイナリを git に commit する点が受け入れ可否の分かれ目
+- `_libs/SOURCES.md` で PyOgg 由来であることを明記してるが、レビュー時に「公式 xiph/opus source からの CI ビルドに置き換えたい」と要求される可能性大
+- 受け入れ条件として CI に「windows-latest runner で vcpkg build → wheel に同梱」の workflow 追加を併せて提案するのが筋。これがあれば「git commit するバイナリは provisional、CI が正規」と説明できる
+
+### PR #D (persistent WS connection)
+
+- NVS flag opt-in なので default 挙動は変わらない → upstream の voice-session-driven なユーザーには影響ゼロ
+- PR description で「stackchan-mcp の HTTP POST /pcm endpoint は既に外部 producer 受け入れの設計があるが、device が常時接続じゃないと届かない (= 503 を返す)」「server-driven push 用途で needed」を明示
+- `intentional_close_` bug fix 部分 (= PR6a 相当の修正) は単体でも merge 価値あるので、persistent connection の opt-in 機能とは別 commit のまま組まれる (= reviewer は bug fix 単独で merge 可能)
+
+## 投稿タイミング
+
+Phase X' の前提条件:
+
+- Phase 1' の動作実機検証完了 ✅ (= 2026-05-13 達成)
+- Phase 2'-4' の実機検証完了 (= ペアリング UX、STT、ネイティブツール群)
+- Phase 5' の実機検証 (= タッチ知覚)
+- Phase 6' の実機検証 (= Avatar 連動)
+
+これら全部終わってから PR 整形 + 投稿に着手。理由: 上流に投げた後で「実は別の修正が必要」と分かると PR 修正が大変、かつ「実機で本当に有用だった」を示せた状態で PR を出す方が受け入れ確率高い。
+
+PR ごとに maintainer とディスカッションが入る前提で、各 PR review-cycle に 1-2 週間想定、全 PR merge には 1-3 ヶ月かかる可能性がある。
+
+### 方針の例外 (2026-05-19 追記)
+
+「全 Phase 完了後にまとめて投稿」 は **当該 Phase 検証で副次的に発見した独立 bug** には適用しない。 具体例:
+
+- **PR-H** (= Wi-Fi captive portal 1 回目失敗 fix): Phase 2' (= ペアリング UX) の実機検証中に発見。 既存 Phase X' スコープ (= Series A〜G) と無関係、 修正は局所的、 検証も済んでいるため即時 PR 投稿が筋
+- 判断軸: (1) 既存 Series の commit と無関係 (= base が独立)、 (2) 修正範囲が局所、 (3) 実機 Before/After log が揃ってる、 の 3 つを満たすなら例外として即時投稿可
+
+「実機で本当に有用だった」 を示すための「Phase 全部終わってから」 制約は、 Series A〜G の **音声経路 / avatar / coredump 等の構造的変更** に対する制約で、 局所 bug fix を留め置く根拠にはならない。 後者は早く投稿するほど upstream ユーザー全員が恩恵を受ける。
+
+## 2026-05-21 レビュー対応ラウンド
+
+12 PR (#206〜#217) 一斉投稿後、 Codex auto-review と maintainer
+(kisaragi-mochi) review を同日中に対応した記録。 各 PR の詳細セクション
+は本書末尾の追補節に残してあるが、 ラウンド全体の見通しはこの節で確認できる。
+
+### Codex auto-review
+
+P1 (= ship-blocker) 12 件 + P2 (= 改善望ましい) 6 件 を identify。
+全件対応済 (push 後 PR 内の commit history で追跡可能)。
+
+| PR | P1 | P2 | 主な修正内容 |
+|---|---|---|---|
+| #207 PR-L | 0 | 1 | popup flag latch fix (`StartListening()` → `HandleStartListeningEvent()`) |
+| #208 PR-M | 1 | 0 | `kDeviceStateAudioTesting` → `ToggleChatState()` 経路復元 |
+| #209 PR-F | 1 | 1 | disconnect cleanup の session scoping、 Ogg lacing >255 byte 対応 |
+| #210 PR-E1 | 3 | 0 | `SetMouthShape` build break、 capture_server auth-before-pop、 error checksum correlation |
+| #211 PR-E2 | 1 | 1 | matrix mode 用 `DeferAvatarMouthIfFetching` (= PR-E1 fix リベース時に取り込み)、 fetch_in_progress checksum |
+| #212 PR-A1 | 0 | 1 | `send_pcm_audio` で `source_rate <= 0` を `RuntimeError` で reject |
+| #213 PR-A2 | 2 | 0 | per-chunk resample で odd-byte ValueError + 累積 duration error → source-rate buffering で両方解消 |
+| #214 PR-A3 | 1 | 1 | (A2 連鎖)、 `X-Sample-Rate <= 0` を 400 reject |
+| #215 PR-A4 | 1 | 1 | (A2 連鎖)、 `/capture` per-route 8 MiB cap (= client_max_size 撤去の補い) |
+| #216 PR-B | 1 | 0 | `ota_->MarkCurrentVersionValid()` を `ActivationTask` で呼ぶ (= OTA rollback 確認、 cloud probe は skip 維持) |
+
+### Maintainer (kisaragi-mochi) review
+
+PR-I #206 / PR-L #207 / PR-C #217 にレビュー受信。
+
+- **#206 PR-I**: rebase + `[Unreleased]` entries 復元 + cooldown-rising-edge ブランチでも `press_start_*` capture (= 「cooldown 中 press → cooldown 後 release」 シナリオで前 touch の signature を出してしまうバグ修正)
+- **#207 PR-L**: rebase + `play_popup_on_listening_ = true` を `StartListening()` から `HandleStartListeningEvent()` の listening-transition 確定 branch に移動 (= main task 内に write 収束、 thin event setter contract 維持)、 PR body の「PR-M not yet opened」 を「#208 として open 済」 に更新
+- **#217 PR-C**: 全面リワーク。 git committed binary → CI built binary に方針転換。
+  - `gateway/LICENSE-THIRD-PARTY` 新設 + `pyproject.toml` `license-files` 追加 (= license metadata drift 解消)
+  - `opus.dll` を git から削除 + gitignore 追加、 `publish.yml` に `build-windows-wheel` job (vcpkg + opus install → SHA256 ログ → smoke test → wheel rename to `win_amd64`)
+  - `build.yml` に `gateway-windows-smoke` job (= per-PR で bundle 検証)
+  - `__init__.py` に arch gate + `_dll_dir_handle` module-global 保持
+  - PR body も「Revised after review」 セクションで変更点明示
+
+### CI 追加失敗 + 対応
+
+PR-F #209 で `ruff F401` (`tests/test_audio_input_hook.py` の `import asyncio` 未使用) → Ogg lacing regression テスト追加時に asyncio 使用箇所が消えて顕在化。 削除 commit `1b479d9` で対応。
+
+### 備考 / 学び
+
+- **Codex review 取得手順**: `gh api repos/<owner>/<repo>/pulls/<num>/reviews` + `pulls/<num>/comments` (inline) を `chatgpt-codex-connector[bot]` で filter。 詳細は memory `reference_codex_pr_review_fetch.md` 参照
+- **hatchling `artifacts` field**: gitignored ファイルを wheel に含める用途。 ファイル存在しない build (= 別 OS の CI runner) では glob match 0 件で自然 skip → 同一 pyproject で両 wheel 対応可能
+- **`os.add_dll_directory()` の handle 保持**: 返り値 (`_dll_dir_handle`) を module-global で保持しないと GC される。 PATH 経由の `find_library` は handle 不要だが、 modern resolver (`ctypes.CDLL`) 直接利用なら必要
+- **Series A1〜A4 連鎖修正**: stacked PR で base に修正入れたら `git rebase` で各上位 branch を base にリベース + force push。 中身が同じ patch は cherry-pick で auto-skip される
+- **CI Windows runner で vcpkg + opus**: `git clone microsoft/vcpkg --depth 1 && bootstrap-vcpkg.bat && vcpkg install opus:x64-windows` → `installed/x64-windows/bin/opus.dll` をコピー、 SHA256 ログ。 standard pattern
+
+### 残作業 (このラウンド外)
+
+- **PR-G** coredump: 実機検証未完で未送、 別ラウンドで投稿予定
+- **CHANGELOG TBD ラベル更新**: PR-A2/A3/A4 等で残ってる `[PR #TBD-X]` placeholder を実 PR # に置換 (= 些末、 review request 時にまとめて修正可)
+- **dev/integration の最新 sync**: P1/P2 fix を dev/integration へ取り込んだ branch (`dev/integration-p1-fixes`) は作成済だが、 P2 fix は反映してない。 全部取り込んだ整理は後日
+
+## 2026-05-23 続報 (PR-B クローズ + PR-C second-pass review 対応確認)
+
+5/21 一斉投稿ラウンドの後、 各 PR の maintainer review / コメントを精査した記録。
+
+### PR-B #216 → クローズ
+
+詳細は § PR #B 節に記載。 maintainer が #119 を提示 → 当時の intent (= URL 保護) は #119 で解決済と確認 → 感謝コメント付きでクローズ。
+
+### PR-C #217 → in-PR request 全件対応済、 ready-to-merge 待ち
+
+5/21 の round 1 (ship-blocker 4 件) は全面リワークで対応済 (§「2026-05-21 レビュー対応ラウンド」参照)。 その後の経緯:
+
+- **5/21 18:32 maintainer second-pass review**: round 1 の 4 件は「綺麗に対応された」 と確認。 追加で 5 件の finding。 うち release path に関わる 2 件を in-PR request、 残り 3 件は follow-up issue (#221 / #222) に切り出し。
+  - **[high] 1**: `build-windows-wheel` の vcpkg が unpinned + opus.dll SHA256 が log されるだけで verify されてない (= tag rerun で別バイナリを silently publish しうる)
+  - **[high] 2**: publish workflow の smoke test が `tts` extra なしで `opuslib` import → `uv sync --frozen` は opuslib を入れず、 release path のみ `ModuleNotFoundError` で失敗しうる (PR CI `build.yml` は `--extra tts` で通るため検知できない)
+- **5/23 まはー対応 (commit `fab324eb9`)**: in-PR request 2 件を対応。 diff で確認済:
+  - `VCPKG_PIN: "2026.04.27"` で vcpkg を release tag に pin、 `git clone --branch` で固定
+  - 「Verify opus.dll SHA256」 step 新設、 `EXPECTED_OPUS_DLL_SHA256` と比較し mismatch / 空で `exit 1`
+  - `uv sync --frozen` → `uv sync --frozen --extra tts`
+- **5/23 12:56 maintainer**: CHANGELOG コンフリクト (#212 merge 由来) を maintainer 側で rebase 解決。 Codex を rebased HEAD に再 review、 clean になれば `needs-review` → `ready-to-merge`。 **まはー側の追加作業なし**
+
+**運用上の留意**: `EXPECTED_OPUS_DLL_SHA256` は意図的に空 (= 未設定なら fail させて silent ship を防ぐ設計)。 release を tag する際に `workflow_dispatch` で実 hash を取得 → commit する運用。 merge 自体はブロックしない (publish.yml は release trigger、 PR CI には無影響)。
+
+### follow-up issue #221 / #222 → 様子見
+
+maintainer (kisaragi-mochi) が #217 から切り出して起票 (= author 本人)。 ただし assignee 空・コメント 0 で **実装の担い手は未割り当て**。 「向こうでやる」 とは明言していない。 いずれも merge blocker ではない (maintainer 明言: "neither carved-out item blocks merge")。
+
+- **#221**: win_amd64 retag 時の内部 WHEEL `Tag:` 不整合 (filename は win_amd64 だが `.dist-info/WHEEL` は `py3-none-any` のまま)。 pip install は今日も通るが license scanner / 厳格な packaging tool が誤判定・reject しうる。 修正は platform wheel 直接 build か WHEEL メタ書き換え + rezip、 加えて publish smoke test を最終 wheel の clean venv install に変更
+- **#222**: license 文面の polish 2 件。 (1) `gateway/LICENSE` primary に「Windows wheel は opus.dll を別ライセンスで同梱、 詳細は LICENSE-THIRD-PARTY 参照」 の注記追加、 (2) `LICENSE-THIRD-PARTY` に Xiph patent grant を verbatim 収録 (= wheel を offline self-contained に) もしくは「外部参照」 と正確に書き直し
+- **判断 (2026-05-23)**: いったん様子見。 merge blocker でない + 担い手未定のため、 maintainer が拾うか community contribution を待つ。 着手するなら #222 (= 自分が持ち込んだ opus.dll の license 後始末で筋が通る) が先、 #221 (= CI 機構の作り込み、 maintainer の packaging 方針に踏み込む面あり) は委ねる選択もあり
+
+## 2026-05-24 続報 (PR-E1 #210 second-pass P2 2件対応)
+
+#210 が maintainer 側で rebase された (origin/pr-e1 が CHANGELOG merge 込みで force-push、 ローカルを reset --hard で同期) 後、 rebased main 基準の Codex review で P2 2件が出た。 両方このPR内で fix。
+
+### [P2] matrix loads accepted but never rendered → 明示 reject (`b2c2a6d`)
+
+- **問題**: `OnAvatarSetFetch` が `mode="matrix"` を受理し AdoptOwnedBuffer 成功まで進むが、 display lookup (`AvatarImageFor`, stackchan.cc:3762) は kLayered のみ dynamic set を消費 → matrix は static `avatar_images` にフォールスルー = gateway に偽の成功シグナル
+- **方針**: maintainer 提示の選択肢 (a) kLayered-only。 matrix render は元々 PR-E2 (#211) 担当 (intent doc E-2)。 #210 では matrix を `matrix_mode_unsupported` エラーで明示 reject、 #211 がこの guard を外して matrix lookup を wire する
+- **実機検証済** (2026-05-24): COM3 に flash → SAIVerse UI から matrix avatar 送信。 `backend.log` で before/after 確認:
+  - flash 前 (00:46, eris matrix): `{"ok": true}` (= silent fall-back、 旧挙動)
+  - flash 後 (13:11, mira matrix): `{"ok": false, "error": "matrix_mode_unsupported", "bytes_transferred": 0}` (= 明示 reject)
+  - addon avatar_loader も `not marking as loaded, will retry on next vessel entry` と正しくハンドリング
+
+### [P2] avatar buffer swap races the LVGL display task → DisplayLockGuard (`ed06207`)
+
+- **問題**: `avatar_set_fetcher.cc:118` の `AdoptOwnedBuffer` を worker task が display lock なしで呼ぶ。 前 PSRAM buffer の free + lv_image_dsc_t descriptor 書き換え中、 LVGL display task が現 source を読むと race → hard-fault / frame 破損。 `OnAvatarSetFetch` の timer quiesce は新規 set_src write を止めるだけで display task の read は止めない
+- **修正**: `AdoptOwnedBuffer` を `DisplayLockGuard(Board::GetInstance().GetDisplay())` で囲む (既存 LVGL boundary lock パターン踏襲、 headless board 用 nullptr ガード付き)
+- **build-verified のみ**: 繰り返しロードの race は不在証明が本質的に困難 (= 非決定的、 同一 generate スクリプト出力は同 checksum で skip されうる)。 lock の正しさは「firmware の他の LVGL write が取るのと同じ lock を取る」 という設計担保。 実機での race 再現検証はしない判断
+
+### build / push / PR コメント
+
+- ローカル ESP-IDF v5.5.4 で stackchan target build clean (exit 0、 変更 2 ファイルがコンパイル通過、 自コード起因 warning ゼロ)
+- origin/pr-e1 へ fast-forward push (`b4543a7..ed06207`)
+- PR #210 に対応コメント投稿済 ([issuecomment-4527371059](https://github.com/kisaragi-mochi/stackchan-mcp/pull/210#issuecomment-4527371059))。 matrix reject は on-device verified、 lock は build-verified + review 担保と明記
+
+### 検証フローの知見 (将来の参考)
+
+- 実在の完成済み avatar set データ (`~/.saiverse/user_data/addon_data/saiverse-stackchan-addon/avatar_sets/<persona>/default/`) は **全て matrix mode** (air/eris/mira/quon、 各 3,456,000 bytes)。 layered の完成データは無い
+- layered テストセットは `expansion_data/saiverse-stackchan-addon/scripts/generate_test_avatar_set.py --mode layered` で生成 (色分け + スロットラベル印字、 537,600 bytes)。 ただし決定的生成のため同一 checksum
+- gateway `load_avatar_set(archive_path, mode)` は size 検証 (layered 537,600 / matrix 3,456,000) 通過後 device に送信し reply を await (`gateway.py:134-187`)。 matrix reject は device 側で返る
+
+### #211 への波及
+
+- matrix reject を #210 に入れたため、 **#211 は reject branch を外して matrix lookup を wire する** (matrix render 実装は元々 #211 の役目、 純増は reject 解除のみ)
+- #210 push で #211 は cascade rebase が必要。 ただし #210 の Codex 再 review が片付く前にやると #210 が動くたび再 rebase になるため、 **#210 review 決着後に着手**するのが効率的。 PR コメントで「#210 が land したら #211 を rebase する」 と maintainer に伝達済
+
+## 残課題 (Phase X' 実施時に解決すべき)
+
+- **PR #C のバイナリ調達経路**: 現状の PyOgg 由来は暫定。CI ビルドへの切替 (= vcpkg + windows-latest workflow) を実装する PR を併走で提出する形が望ましい
+- **Stacked PR の運用**: GitHub の Stacked PR ツール (= `Graphite` 等) を使うか、PR description で base を明示するだけかは upstream maintainer の好み次第
+- **テスト追加の範囲**: A2/A3 で test を増やすコミットは別 commit にして PR に追加する (= 既存 commit のままだと test が無いのが目立つ)
+- **`SOURCES.md` の更新**: PR #C 提出前に「CI build に置き換え予定」を補強する記述を入れておくと merge しやすい
+
+## 追補: Series E — 動的 avatar セット転送機構 (Phase 4.5-e、 2026-05-21 投稿: [#210](https://github.com/kisaragi-mochi/stackchan-mcp/pull/210) / [#211](https://github.com/kisaragi-mochi/stackchan-mcp/pull/211))
+
+Phase 4.5 で新規に立てた intent doc (`docs/intent/stackchan_avatar_pipeline.md`) の作業ブランチ `feature/dynamic-avatar-set` から、upstream に **2 PR** を投稿する。Series A〜D とは別系統 (= avatar 描画基盤の拡張) で、依存関係も独立。
+
+### PR-E1 / PR-E2 概要
+
+| PR | 内容 | base | 依存 |
+|---|---|---|---|
+| **PR-E1** = [#210](https://github.com/kisaragi-mochi/stackchan-mcp/pull/210) | feat(avatar): dynamic avatar set transfer (layered mode) — firmware に `AvatarSet` クラス + HTTP fetcher、gateway に `load_avatar_set` MCP tool + capture_server endpoint を追加 | upstream `main` | — |
+| **PR-E2** = [#211](https://github.com/kisaragi-mochi/stackchan-mcp/pull/211) | feat(avatar): matrix mode (90 枚) support — mode 切替対応、matrix mode 描画ロジック | PR-E1 | PR-E1 merge 後または並行 |
+
+詳細な commit 構成は `feature/dynamic-avatar-set` の `git log upstream/main..feature/dynamic-avatar-set` を参照 (現状 9 commit、`scaffold` → `WS handler` → `MCP tool` → `unify face/eyes/mouth` → `defer expression during fetch` 等)。本書 Phase X' 投稿時に commit を論理単位で再整理する。
+
+### 非破壊保証 — 既存の `avatar_images.local.cc` 経路はそのまま動く
+
+upstream の既存 avatar 焼き込み機構 (`avatar_images.{cc,h}` placeholder + `avatar_images.local.{cc,h}` の CMake `STACKCHAN_LOCAL_AVATAR_CC` 差し替え + `firmware/scripts/avatar_convert/convert_avatars.py` の PNG → RGB565 変換、`7c084cd "Support gitignored local avatar overrides"`) は **PR-E1 / PR-E2 で一切変更しない**。
+
+確認済み事実 (2026-05-15):
+
+- `git diff upstream/main..feature/dynamic-avatar-set --stat` で `CMakeLists.txt` / `avatar_images.cc` / `avatar_images.h` / `convert_avatars.py` のいずれも変更なし
+- `firmware/main/boards/stackchan/stackchan.cc:1563-1605` の `FaceImageForIndex` / `EyesImageForIndex` / `MouthImageForIndex` は **AvatarSet がロード済み (= `is_loaded() && mode == kLayered`) かつ該当 face/eyes/mouth が AvatarSet 内にあるときだけ AvatarSet を返し、それ以外は `avatar_images.h` の static const table (`avatar_idle` 等) にフォールスルー**。ユーザーが `avatar_images.local.cc` で実 art を焼いていれば、リンク時に local 側が拾われて自動的に static 経路で実 art が描画される
+
+つまり upstream の現行ユーザー (= 静的 art 派、`~/.stackchan/avatar/` に PNG を置いて `convert_avatars.py` でビルド時焼き込み) は、PR-E1/E2 が merge されても **`load_avatar_set` MCP tool を呼ばなければ現状維持で動く**。動的 AvatarSet は「層 3」として上に被さる追加の選択肢で、既存の「層 1: placeholder」「層 2: local static override」を温存する。
+
+### PR description に貼るべき 3 層モデル表
+
+PR-E1 本文で reviewer の初手懸念 (= 既存 local override 機構との競合) を解消するため、`stackchan_avatar_pipeline.md` §B-0 の 3 層モデル表をそのまま転載する:
+
+| 層 | 何 | 何のため | 既存維持 |
+|---|---|---|---|
+| 1. placeholder | `avatar_images.cc` の 1×1 黒ピクセル | 起動時の保険、AvatarSet 未ロード時の表示 | はい |
+| 2. local static override | `avatar_images.local.{cc,h}` (CMake で差し替え) | 静的 art を焼きたいユーザー向け、firmware 焼き直し前提 | はい (本 PR で非破壊) |
+| 3. dynamic avatar set | 新規 `AvatarSet` クラス + HTTP fetcher | 動的にロードされる PSRAM 上の art セット、ペルソナ別 / multi-character 対応 | (本 PR で新規追加) |
+
+加えて以下の一文を入れると review コストが減る:
+
+> Existing users of the `avatar_images.local.cc` flow are unaffected: if `load_avatar_set` is never called, `FaceImageForIndex` / `EyesImageForIndex` / `MouthImageForIndex` fall through to the existing static const tables exactly as before.
+
+### デフォルト art は upstream メンテナへ依頼
+
+`avatar_images.cc` placeholder TODO (= `Replace with real 160×120 RGB565 art before shipping to production.`) の解決は **PR では送らない**。デフォルト ｽﾀｯｸﾁｬﾝキャラの art は stackchan-mcp の「顔」になるリソースで、デザイン判断は upstream メンテナ (如月もちさん) が握るべき領域。我々は形式 (layered mode の manifest schema) だけを PR-E1/E2 で整え、「PR-E1/E2 で導入される avatar セット形式に沿ったデフォルト art を作っていただければ placeholder TODO が解決します」と issue/discussion で伝える。
+
+### 投稿条件
+
+- Phase 4.5-a (firmware 拡張) / 4.5-b (gateway MCP tool) / 4.5-c (addon storage + 永続化) / 4.5-d (画像生成 UI) の実機検証完了後
+- Phase X' (= 既存 Series A〜D) と並行投稿可能。依存なし
+
+### Series E 用ブランチ分割手順 (Phase 4.5-e 着手時の参考)
+
+```bash
+cd temp/stackchan-mcp
+git fetch upstream
+
+# PR-E1 = layered mode のみで dynamic transfer 機構を切り出す
+git switch -c pr-e1-dynamic-avatar-set-layered upstream/main
+# feature/dynamic-avatar-set から layered mode に必要な commit を cherry-pick
+# (matrix mode 追加分 = f3a988b "unify face/eyes/mouth via AvatarSet, add matrix mode rendering" は除外)
+git cherry-pick 2dcfe5a    # scaffold AvatarSet + HTTP fetcher
+git cherry-pick 3bd241c    # wire avatar_set_fetch WS handler + completion notify
+git cherry-pick e6ff313    # gateway: load_avatar_set MCP tool + WS fetch protocol
+git cherry-pick d9a402c    # fix: expose Protocol::SendText as public for board-initiated WS notify
+git cherry-pick a42fe0b    # fix: replace %zu with %u in ESP_LOG (nano-printf compat)
+git cherry-pick 5cd11a6    # defer expression changes during avatar set fetch
+git cherry-pick 740d786    # refactor: AvatarSet ownership-transfer (PSRAM peak 9.9 → 3.3 MB)
+git push origin pr-e1-dynamic-avatar-set-layered
+
+# PR-E2 = matrix mode 追加 (PR-E1 base、Stacked)
+git switch -c pr-e2-matrix-mode pr-e1-dynamic-avatar-set-layered
+git cherry-pick f3a988b    # unify face/eyes/mouth via AvatarSet, add matrix mode rendering
+git push origin pr-e2-matrix-mode
+```
+
+CI/build 系の commit (`98f34b0 ci(fork): trigger Build on feature/** + dev/** + workflow_dispatch`、`b4bcdc3 chore(ci): trigger build with default branch updated`) は fork-only の dev infrastructure なので upstream PR には含めない (= Series A〜D と同じ扱い)。
+
+cherry-pick の順序や境界は Phase 4.5-e 着手時の実装状況で再点検する (= ここに書いた commit hash は 2026-05-15 時点)。
+
+### PR-E1 の注意点
+
+- avatar セット転送経路は **HTTP fetch** (既存 capture_server を流用)。既存音声 WS への影響をゼロにする設計判断は intent doc §C で根拠化済み
+- firmware は **raw RGB565 のみ** サポート (CONFIG_LV_USE_PNG が unset、OTA partition 圧迫回避)。PNG → RGB565 変換は addon 側で完了させ、gateway には Pillow 等の重い依存を持ち込まない
+- 不変条件 #6 (= avatar セット転送中の表情切替コマンドは転送完了まで defer) は実装済み (`5cd11a6 defer expression changes during avatar set fetch`)、PR description でこの設計判断を明示
+- 2026-05-18 追加 commit `740d786` で `AvatarSet::Load` (memcpy 版) を `AdoptOwnedBuffer` (所有権譲渡版) に置き換え。 Fetcher の staging buffer を AvatarSet に直接渡すことで内部 memcpy を廃止、 PSRAM peak が (旧 buffer + 新 staging) のみに収まる。 元の `avatar_set_fetcher.cc:73-81` の follow-up TODO 解消、 matrix mode (= PR-E2) で実機発覚した `Load: PSRAM allocation failed (size=3456000)` を解決 (詳細: `docs/issues/stackchan_avatar_psram_peak.md`)
+
+### PR-E2 の注意点
+
+- matrix mode (90 枚) は PSRAM 3.3 MB を消費。8 MB PSRAM の使用上限 5 MB 内で xiaozhi-esp32 base の他用途と共存可能、を実機ログで示す
+- mode 切替は avatar セット単位 (= ペルソナ憑依時にセットごと差し替え)、ロード中 mode 変更不可、を doc で明示
+
+## 追補: PR-F — device-driven listen audio capture forwarding (Phase 3' 対応、 2026-05-21 投稿: [#209](https://github.com/kisaragi-mochi/stackchan-mcp/pull/209))
+
+Phase 3' で実装した device-driven listen 音声経路 (詳細設計は `docs/intent/stackchan_vessel.md` v0.7 §C-2 / §G) の upstream PR。Series A〜E とは独立、依存なし。
+
+### PR-F 概要
+
+| PR | 内容 | base | 依存 |
+|---|---|---|---|
+| **PR-F** = [#209](https://github.com/kisaragi-mochi/stackchan-mcp/pull/209) | feat(audio): forward device-driven listen captures to an external HTTP hook | upstream `main` | — |
+
+ブランチ: `feature/device-driven-audio-capture-with-hook` (= 4 commit、2026-05-18 時点で fork に push 済み、`dev/integration` へ merge 済み)。
+
+### 投稿条件
+
+- Phase 3' の実機検証完了後 (= 「LCD タッチ起動 → Gemini ペルソナが固有名詞を含む発話を理解して返答」 が確認できた段階)
+- Series A〜E と並行投稿可能。 依存なし
+
+### PR description ドラフト
+
+reviewer (= kisaragi-mochi) 向け。 受け入れの分岐ポイント (= server-driven listening モデルとの哲学的整合) を明示する:
+
+> **What**
+>
+> Forward device-initiated listen captures (wake word, button press, LCD touch — any path that calls `Application::ToggleChatState` / `WakeWordInvoke` / `StartListening` on the firmware) to an externally configured HTTP hook as an Ogg/Opus payload.
+>
+> **Why**
+>
+> stackchan-mcp's primary listen model today is MCP-client-driven (the `listen()` tool): the LLM agent decides when to open the device's microphone and the gateway transcribes the resulting Opus stream through a registered STT engine. This works well for "AI agent initiates listening" workflows.
+>
+> The device-side firmware, inherited from xiaozhi-esp32, also has a reverse path: when a wake word fires, a button is pressed, or (board-dependent) the LCD is tapped, the firmware sends `{"type":"listen","state":"start"}` to the gateway and starts streaming Opus frames. The gateway currently ignores these inbound listen messages, so the frames are dropped at `audio_stream.handle_audio_frame`'s "no active recording slot" branch. The behaviour is documented in the existing comment:
+>
+> > the device may emit audio on its own (e.g. after an autonomous wake-word detection) and the gateway has no STT pipeline running for those frames yet.
+>
+> This PR fills that gap for the case where the gateway operator wants to forward those frames to a downstream service — a non-Whisper recognizer, a recorder, or (our use case) a Gemini-powered persona that consumes audio as `inline_data`. It does so without changing the MCP-driven default: the device-driven capture path is enabled only when `STACKCHAN_AUDIO_HOOK_URL` is set.
+>
+> **How**
+>
+> 1. **Inbound listen handler** (`esp32_client._handler`): when `STACKCHAN_AUDIO_HOOK_URL` is configured AND no MCP-driven `listen()` is already capturing, open the shared `audio_stream` recording slot on `state="start"` and close it on `state="stop"`. Without the hook URL, the device-driven branch logs at debug and returns immediately — current behaviour preserved.
+> 2. **Ogg/Opus packing** (`audio_input_hook.pack_opus_frames_to_ogg`): pure-Python RFC 7845 + RFC 3533. No new runtime dependencies — the existing `opuslib` is for codec, not container, and we intentionally avoid pulling in `pyogg` for a 200-line wrapper.
+> 3. **HTTP push** (`audio_input_hook.push_audio_capture`): aiohttp POST with `Content-Type: audio/ogg`, `Authorization: Bearer <STACKCHAN_AUDIO_HOOK_TOKEN>` (falls back to `STACKCHAN_TOKEN`), and `X-StackChan-Session: <gateway session id>`. Fire-and-forget; failures are logged at WARNING and do not propagate.
+> 4. **Disconnect cleanup**: connection close mid-capture drops the partial buffer (mirrors the existing session-mismatch discard logic in `audio_stream.handle_audio_frame`).
+>
+> **Compatibility**
+>
+> - **Default OFF / opt-in**: `STACKCHAN_AUDIO_HOOK_URL` unset → inbound listen messages are still logged at debug and discarded, matching today's behaviour.
+> - **No conflict with MCP-driven `listen()`**: if an MCP `listen()` has already opened the recording slot, the device-driven branch defers (existing slot is honoured). The shared `audio_stream` module-level singleton remains the single capture buffer.
+> - **No new runtime dependencies**.
+>
+> **Tests**
+>
+> - `tests/test_audio_input_hook.py` (new, 9 cases): Ogg page structure (BOS / OpusTags / EOS, granule monotonicity, multi-page layout), CRC round-trip (parse, zero, recompute, compare), HTTP push success / empty / 5xx.
+> - `tests/test_esp32_client.py` (extended, 3 new cases): device-driven listen → frame → stop → hook fire; hook URL absent → no recording slot; disconnect mid-capture → partial buffer discarded, no hook.
+> - All 264 pre-existing tests continue to pass.
+>
+> **Out of scope**
+>
+> - Audio recognition itself — this PR ships frames out the door; recognition is the receiver's responsibility.
+> - Multiple concurrent hooks / topic routing. One configured URL gets every device-driven capture.
+
+### PR-F の注意点
+
+- 設計範囲を **拡張する** タイプの PR (= 「stackchan-mcp は意図的に server-driven listening を採用」 という maintainer の方針への追加提案)。 PR-B (xiaozhi OTA skip) と同程度かそれ以上に description を厚めに書く必要あり
+- 既存 server-driven 経路を壊さないこと (= default OFF、 既存 `listen()` ツールとの排他は recording slot 共有で自然解決) を明示するのが受け入れの分岐ポイント
+- 受け入れ拒否の場合: 手元 fork で運用継続。 SAIVerse 側 addon の `mcp_servers.json` は `dev/integration` を指したまま (= Series A〜D / E と同じ運用)
+- 関連 Issue: #8 (Phase 4: Opus audio stream、 phase-4-audio + help wanted)、 #91 (= 既に Closed の MCP-driven listen() 実装)、 #169 (= persistent WS + logical audio state 分離、 我々の PR とは別軸だが将来 integration の余地あり)
+
+### Series F 用ブランチ分割手順
+
+PR-F は単一 PR で、 分割不要 (= 4 commit がすでに論理単位で整理済み):
+
+```bash
+cd temp/stackchan-mcp
+git fetch upstream
+
+git switch -c pr-f-device-driven-audio-capture upstream/main
+git cherry-pick 557c49f    # feat(audio): add audio_input_hook for device-driven listen capture push
+git cherry-pick 9a7dae5    # feat(esp32_client): handle inbound listen messages for device-driven capture
+git cherry-pick c7338a2    # feat(gateway): wire STACKCHAN_AUDIO_HOOK_URL/TOKEN env into ESP32Manager
+git cherry-pick 18f0562    # test(audio): cover device-driven listen capture path
+git push origin pr-f-device-driven-audio-capture
+```
+
+cherry-pick の hash は 2026-05-18 時点。 PR 投稿時に再確認する。
+
+## 追補: PR-G — coredump-to-flash for esp32s3 (Phase 3' デバッグ基盤、 2026-05-18 追記)
+
+stack-chan 系の reset 真因 (= watchdog / panic / stack overflow / brownout) を実機再現後に特定するため、 ESP-IDF の coredump partition を有効化した。 Series A〜F とは独立、 依存なし。
+
+### PR-G 概要
+
+| PR | 内容 | base | 依存 |
+|---|---|---|---|
+| **PR-G** | feat(firmware/esp32s3): enable coredump-to-flash for panic backtrace retention | upstream `main` | — |
+
+ブランチ: `feature/coredump-partition` (= 1 commit、 2026-05-18 時点で fork に push 済み、 `dev/integration` へ merge 済み)。
+
+### 投稿条件
+
+- Phase 3' の stroke 再現実験で coredump 機能が動作確認できた後 (= 任意の reset 後 `idf.py coredump-info -p <PORT>` で panic backtrace + register state が取れることを実機で確認)
+- Series A〜F と並行投稿可能。 依存なし
+
+### PR description ドラフト
+
+> **What**
+>
+> Add a 64KB `coredump` partition to the v2/16m.csv layout (16MB ESP32-S3 flash) and enable `CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH` in `sdkconfig.defaults.esp32s3`. After a watchdog / panic / stack overflow / brownout the firmware writes a backtrace + register dump to the new partition which survives reboot. `idf.py coredump-info -p <PORT>` retrieves the saved dump for offline analysis.
+>
+> **Why**
+>
+> The ESP32-S3 USB CDC peripheral re-enumerates on reset, which causes the host's serial-port reader to lose the boot sequence and any panic backtrace printed during the abort. Without a coredump partition, intermittent resets are hard to root-cause: the device reboots, the host loses sight of the `<panic>` output, and only the post-reboot logs remain. Persisting the dump to flash is the standard ESP-IDF workaround.
+>
+> **How**
+>
+> 1. `partitions/v2/16m.csv`: shrink the `assets` partition from 8M to 0x7F0000 (= 8M − 64K) and append `coredump,data,coredump,0xFF0000,0x10000,` at the end of flash. No existing partition offsets change.
+> 2. `sdkconfig.defaults.esp32s3`: enable `CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH` + ELF/CRC32 options. ESP32-C3 / ESP32-P4 etc. are unaffected because the configuration is chip-specific.
+> 3. `partitions/v2/README.md`: document the new partition under "16MB Flash Devices (Standard)" and add a "Coredump Retrieval" section.
+>
+> **Compatibility**
+>
+> - **No existing partition offsets change**: NVS, OTA partitions, and the app stay at the same flash addresses, so `idf.py partition-table-flash` + `idf.py app-flash` preserves WiFi credentials and previously-cached state across the partition table upgrade. Merged-binary flashing is **not** required.
+> - **Assets size reduction is negligible**: actual asset usage on stack-chan is ~1.5MB so the new 8128KB `assets` partition has ~6.5MB headroom.
+> - **Other chip families unaffected**: coredump sdkconfig entries are gated to esp32s3.
+>
+> **Tests**
+>
+> - Manual: trigger an abort on hardware, reboot, verify `idf.py coredump-info -p <PORT>` reproduces the backtrace + register state with source-line mappings.
+>
+> **Out of scope**
+>
+> - Higher-tier dumping (full task list, FreeRTOS state) — this PR covers the minimal ELF panic dump. Larger scopes require partition size > 64K and are deferred until the basic dump proves insufficient in practice.
+
+### PR-G の注意点
+
+- `assets` partition の縮小 (8M → 8M − 64K) を含むので、 reviewer に「実 asset 使用量 ~1.5MB」 という実測根拠を PR description で示すこと。 16MB v2 layout はディスク余裕が大きいので影響なし
+- 受け入れ拒否されたら、 16m.csv を別ファイル (= `16m_with_coredump.csv` 等) に分離して `sdkconfig.defaults.esp32s3` で上書きするバリアント PR に再構成する余地あり
+
+### Series G 用ブランチ分割手順
+
+PR-G は単一 PR で、 分割不要 (= 1 commit が論理単位として整理済み):
+
+```bash
+cd temp/stackchan-mcp
+git fetch upstream
+
+git switch -c pr-g-coredump-partition upstream/main
+git cherry-pick 079e0c2    # feat(firmware/esp32s3): enable coredump-to-flash for panic backtrace retention
+git push origin pr-g-coredump-partition
+```
+
+cherry-pick の hash は 2026-05-18 時点。 PR 投稿時に再確認する。
+
+## 追補: PR-H — Wi-Fi captive portal 1 回目失敗 fix (Phase 2' 派生、 2026-05-19 投稿済み)
+
+Phase 2' (= ペアリング UX) の実機検証中に発見した bug への即時 PR。 § 投稿タイミング §「方針の例外」 節に従い、 Series A〜G と独立して先行投稿した **本 doc 上初の実投稿 PR**。
+
+### PR-H 概要
+
+| PR | URL | 状態 | base | 依存 |
+|---|---|---|---|---|
+| **PR #186** ([upstream link](https://github.com/kisaragi-mochi/stackchan-mcp/pull/186)) | https://github.com/kisaragi-mochi/stackchan-mcp/pull/186 | review 1 round → follow-up 投稿、 再 review 待ち (2026-05-20) | upstream `main` (投稿時 `b0e258f`、 投稿後 maintainer 側で `aa01e50` / `37560e9` の 2 回 main merge) | — |
+
+ブランチ: `feature/fix-wifi-first-attempt-comeback-timer` (= 2 commit: 本体 `72fb370` + follow-up `47f09ac`、 fork に push 済み)。 対応 commit は dev/integration の `6b4fa53`。
+
+### 内容
+
+**Symptom**: captive portal の SSID/Password 入力 1 回目が必ず失敗、 同値で 2 回目入力で通る。
+
+**Root cause**: APSTA mode の CSA (Channel Switch Announcement) 直後の association 試行に対して AP が「Association Response status=30 (Refused Temporarily) + Comeback Time 1124 TUs (≈1.1s)」 を返す、 ESP-IDF wifi driver の `failure_retry_cnt` (= 即時 retry) は Comeback Time を尊重しないため全 refuse される。 2 回目試行 (8s 後) は AP state が settle して一発成功。
+
+**Fix**: `WifiConfigurationAp::ConnectToWifi` を上位層 retry loop で囲み、 失敗時に 3 秒 wait → 1 回 retry。 driver-internal `failure_retry_cnt` は default (1) のまま維持。
+
+### 投稿時の知見 (= 他 PR の参考に)
+
+PR description / commit message の構造で reviewer に効いた要素:
+
+- **Symptom** を先頭に置く: 「ユーザーが見える現象」 を最初に書く、 技術的詳細は後
+- **Root cause** に観測 log を引用: 「`Association refused temporarily, comeback time 1124 TUs`」 のような生 log を引用すると「推測じゃなく実測」 が伝わる
+- **Before/After log** を Code block で並置: 修正前と修正後の挙動を同じフォーマットで見せる、 reviewer が差分を 5 秒で把握できる
+- **Limitations** を明示: 「Buffalo router only で検証」 等の制約を隠さない、 受け入れ条件の交渉が楽になる
+- **Test plan の checkbox**: `[x]` で済んだ項目と `[ ]` で残った項目 (= 「他 router での検証は maintainer / community に委ねる」) を区別、 review コストが減る
+
+これらの構造は Series A〜G の PR description 作成時にも適用する。 特に PR-B (= xiaozhi OTA skip)、 PR-F (= device-driven audio capture)、 PR-G (= coredump-to-flash) のような「設計範囲を拡張する」 タイプの PR では Symptom / Root cause / Limitations の厚みが受け入れの分岐ポイント。
+
+### Series H 用ブランチ分割手順 (= 今回実施した手順、 他 PR でも踏襲)
+
+```bash
+cd temp/stackchan-mcp
+
+# 1. dev/integration に修正を commit (= 手元検証状態を保存)
+git switch dev/integration
+git add <修正ファイル>
+git commit -m "fix(...): ..."   # HEREDOC で詳細な本文も含める
+
+# 2. upstream/main を最新化
+git fetch upstream
+
+# 3. feature branch を upstream/main から派生
+git switch -c feature/fix-wifi-first-attempt-comeback-timer upstream/main
+
+# 4. dev/integration の commit を cherry-pick (= conflict 出たら手動 resolve)
+git cherry-pick 6b4fa53
+
+# 5. fork (origin) に push
+git push origin feature/fix-wifi-first-attempt-comeback-timer
+
+# 6. gh CLI で PR 作成 (= base は upstream main、 head は fork の feature branch)
+gh pr create --repo kisaragi-mochi/stackchan-mcp \
+  --base main \
+  --head maha0525:feature/fix-wifi-first-attempt-comeback-timer \
+  --title "..." \
+  --body "$(cat <<'EOF'
+... (Symptom / Root cause / Fix / Verification / Limitations / Test plan)
+EOF
+)"
+```
+
+cherry-pick で `Auto-merging firmware/components/78__esp-wifi-connect/wifi_configuration_ap.cc` が出ても conflict なしなら自動で merge される (= 今回はそのまま通った)。 conflict 出たら手動 resolve + `git cherry-pick --continue`。
+
+### Review 対応履歴
+
+**2026-05-20**: kisaragi-mochi さんから review 着信、 内容は 2 点。
+
+1. **Timeout 分岐で in-flight connect を cancel してない (要修正)**: `xEventGroupWaitBits` の戻り方は 3 経路ある — ① `WIFI_CONNECTED_BIT` (= success)、 ② `WIFI_FAIL_BIT` (= `WIFI_EVENT_STA_DISCONNECTED` 発火済み、 driver は disconnected state)、 ③ timeout (= `bits == 0`、 driver が `connecting` state のまま)。 ESP-IDF v5.5.4 `esp_wifi.h` attention 3 (`esp_wifi_connect()`) に「connecting/scanning state で呼ぶと `ESP_ERR_WIFI_STATE` を返す」 と明記されており、 ③ のままでは slow / event 落ち AP で retry が空振りする可能性。
+
+   → follow-up commit `47f09ac` で対応: `bits == 0` のときだけ `esp_wifi_disconnect()` を呼ぶ + `ESP_LOGW` を timeout / disconnect-fail で区別。 ローカル build (ESP-IDF v5.5.4, M5Stack CoreS3 / stackchan target) は通過 (`idf.py build` exit=0、 `xiaozhi.bin` 生成確認)。 実機 timeout 経路は手元 Buffalo AP では再現できない (常に `WIFI_FAIL_BIT` 経由で返る) ため未検証、 PR comment にその旨を明記した。
+
+2. **Upstream sync (78/esp-wifi-connect) の mirror オファー**: 該当 component `firmware/components/78__esp-wifi-connect/` は [78/esp-wifi-connect](https://github.com/78/esp-wifi-connect) (xiaozhi-esp32 ecosystem) の vendor copy (ESP Component Manager 経由、 `~3.1.3`)。 kisaragi-mochi さんから「PR #186 merge 後に upstream PR を mirror する、 authoring credit はまはー (`--author` 設定 + PR description に `Originally contributed by @maha0525 in kisaragi-mochi/stackchan-mcp#186` を明記)」 と申し出。
+
+   → オファー受諾、 PR comment で返信済み。 78/esp-wifi-connect 側の PR は #186 merge 後に kisaragi-mochi さん経由で出る、 まはー側の追加作業なし (新規 fork / branch も不要)。
+
+### 結果待ち
+
+PR #186 の merge を待ち、 merge されたら本セクションに結果を追記。 78/esp-wifi-connect 側の mirror PR も追跡対象 (= kisaragi-mochi さんから link 通知が来たらここに記録)。
+
+## 追補: PR-I — touch event log readability (= 元の false positive filter スコープから縮減、 2026-05-21 投稿: [#206](https://github.com/kisaragi-mochi/stackchan-mcp/pull/206))
+
+Phase 2' 検証中に副次発見した「触ってないのに STROKE event」 誤検知への対処。 詳細観測 + 仮説 + 解決案候補は `docs/issues/stackchan_touch_false_stroke_events.md` を参照。 Series A〜H と独立、 依存なし。
+
+### PR-I 概要
+
+| PR | 内容 | base | 依存 |
+|---|---|---|---|
+| **PR-I** | fix(firmware/touch): raw threshold filter for false-positive STROKE events + `duration=lums` format bug | upstream `main` | — |
+
+ブランチ: **未作成** (= 調査 TODO 完了後に派生予定)、 該当 issue (`stackchan_touch_false_stroke_events.md`) の 5 項目を消化してから着手。
+
+### 投稿条件
+
+- `stackchan_touch_false_stroke_events.md` の調査 TODO 全項目消化 (= 特に raw 値の意味 + zone 判定機構の確認)
+- 解決案 (1) の threshold をローカル fork で実装 + 24 時間 capture で誤検知 0 件確認
+- Phase 5' (= タッチ知覚の本格実装) 着手前に投稿しておくと、 Phase 5' 検証で「ペルソナが触られたと誤認」 のノイズを減らせる
+
+### PR スコープ
+
+issue doc の解決案候補のうち:
+
+- **(1) raw 値 threshold filter** + **(2) `duration=lums` format bug 修正** → 1 PR にまとめる (= 関連箇所が近い、 raw 値判定とログ format は同じ関数内)
+- **(3) zone 判定機構の調査** → 調査結果次第で別 PR、 もしくは PR-I に含める
+
+### PR description ドラフト (= 着手時の参考)
+
+issue doc の「観測」 「6 event の log」 「観測差分」 セクションをそのまま PR description に転載できる構造。 PR-H で得た「Symptom / Root cause / Fix / Verification / Limitations / Test plan」 の 6 ブロック構造を踏襲する:
+
+- **Symptom**: 触ってない時に STROKE event が間欠的 (= 約 24 分間隔) に発火する
+- **Root cause**: raw 値の threshold 判定が存在せず、 sensor ノイズ起因の高 raw 値が STROKE 判定を通る
+- **Fix**: raw 値 threshold filter (= 0x800 〜 0xC00) を touch event 判定前に挿入
+- **Verification**: 24 時間 capture で誤検知 0 件、 正常な撫で event は全て検出される
+- **Limitations**: 観測は単一個体での結果、 個体差で threshold 調整が必要な可能性 (= configurable に)
+- **Test plan**: ローカル flash 後 24 時間 capture / 撫で 10 回 / 触らず 1 時間 etc.
+
+## 追補: PR-J/K — kPropertyTypeArray + Port A I2C generic tools (拡張モジュール対応の第一弾、 2026-05-20 投稿 → 同日 merged)
+
+`docs/intent/stackchan_extension_modules.md` の C 案 (= 汎用口 + 個別 Unit プリセット + addon ドライバの 3 段階) のうち、 **汎用口の upstream PR** を 2 段に分けて投稿した。 stackchan-mcp 本家への fork からの PR で、 dev/integration で実機検証済 (= ENV III 経由)。
+
+### PR-J/K 概要
+
+| PR | URL | 状態 | base | 依存 |
+|---|---|---|---|---|
+| **PR #195** | <https://github.com/kisaragi-mochi/stackchan-mcp/pull/195> | **merged** (2026-05-20、 merge commit `c6f8a74`) | upstream `main` | — |
+| **PR #196** | <https://github.com/kisaragi-mochi/stackchan-mcp/pull/196> | **merged** (2026-05-20、 merge commit `3a3569f`) | upstream `main` | PR #195 |
+
+ブランチ:
+- `feature/mcp-property-array-type` (= PR #195) HEAD `7720940`
+- `feature/mcp-i2c-generic-tools` (= PR #196) HEAD `c808fa2`
+
+### 内容
+
+**PR #195**: `firmware/main/mcp_server.{h,cc}` に `kPropertyTypeArray` (`PropertyElementType` で Integer / String の要素型) を追加。 既存 Boolean / Integer / String 型と並列、 純粋追加で既存 tool へ影響ゼロ。 `maxItems` cap (= `set_max_items` setter で post-construct 設定) と template default-value constructor の `kPropertyTypeArray` reject も含む (= 後者は review fold-in、 future tool author trap 回避)。
+
+**PR #196**: `firmware/main/boards/stackchan/{config.h, stackchan.cc}` に Port A I2C bus init (= I2C controller 0、 GPIO 2 SDA / GPIO 1 SCL) を追加し、 4 つの MCP tool (`self.i2c.scan` / `read` / `write` / `write_read`) を expose。 internal-IC bus (= I2C controller 1、 GPIO 12/11) との物理 controller 分離で「security by construction」 (= PMU 等の internal IC は構造的に到達不可)。 review で指摘された addr range 0x08..0x77 制約 (= Recommended) と bytes / write_bytes の 256 cap (= Suggested) も fold-in。
+
+### 検証
+
+ENV III (SHT30 0x44 + QMP6988 0x70) を Port A 物理接続して動作確認 (詳細: `docs/issues/stackchan_mcp_i2c_generic_tools.md` §「検証シナリオ」)。
+
+- scan で 0x44 + 0x70 を検出、 internal IC は見えない
+- QMP6988 chip ID = 0x5C (= write_read pattern)
+- SHT30 温度 32.07°C / 湿度 46.58% (= write + 15 ms wait + read pattern。 single write_read だと measurement 中 0xFF sentinel)
+- QMP6988 気圧 1010.4 hPa (= calibration register parse + Q-format compensation 経路、 M5Unit-ENV C 実装の Python 移植 と同値)
+
+### Deferred items (= upstream issue 化)
+
+review で挙げられた `Suggested` 3 件のうち、 fold-in しなかった 2 件は upstream issue として記録 (= future contributor が拾える形に):
+
+| Issue | 内容 | 由来 | Defer 理由 |
+|---|---|---|---|
+| **#200** | integer-array Property が decimal JSON を `valueint` で int truncate | PR #195 review item 1 | 現状 I2C bytes 用途は整数のみ、 将来 angle / PWM / coord 系で発火 |
+| **#201** | `i2c.scan` が main MCP task を最大 ~22 s hold | PR #196 review item 2 | 設計改修 scope (timeout 調整 / partial result / off-task probe)、 correctness 修正 先行 |
+
+### Review への learning (= 今後の PR に活かす)
+
+kisaragi-mochi さん review が **Conventional Comments 形式** (`Suggested` / `Recommended for landing`) で、 fold-in vs defer の判断ラインが明確だった。 今後の Series A-G PR 投稿でも:
+
+- description / response で `Suggested` / `Recommended` の framing を使う (= reviewer / contributor の判断コスト低下)
+- defer する item は review への fold-in 返信で「intentionally deferred、 理由 X」 を明示
+- defer item は upstream issue 化して可視化 (= 「私が見落とした」 と「明示的に defer した」 を区別できる)
+
+を採用する。
+
+## 追補: PR-L/M — Stack-chan touch-driven listen UX (Phase 3' Vessel 駆動、 2026-05-21 投稿: [#207](https://github.com/kisaragi-mochi/stackchan-mcp/pull/207) / [#208](https://github.com/kisaragi-mochi/stackchan-mcp/pull/208))
+
+Phase 3' (= device-driven audio capture push) の実機検証で、 タッチ操作 → 発話 → タッチ送信の Vessel UX を成立させるために stack-chan board と `Application` 周辺に複数の改修を入れた。 元の xiaozhi-esp32 は「voice assistant 連続会話モデル」 (= 発話後自動で listening 復帰、 タッチは server-driven listen の trigger) を前提にしていたが、 SAIVerse Vessel では「ユーザがタッチして話す → タッチで終了」 を明示的な単発操作として扱うため、 listen 起動 / 終了 / フィードバックの経路を組み替える必要があった。
+
+### dev/integration に積んだ commit (2026-05-19〜21)
+
+| # | commit | 内容 | 想定 PR | 備考 |
+|---|---|---|---|---|
+| 1 | `759508b` | listening 中の LCD タップを `Application::CloseAudioChannel()` (= 既定 ToggleChatState) ではなく `Application::StopListening()` に分岐させ、 gateway の audio_input_hook 経路 (PR-F 系) で buffer を flush できるようにする | **PR-M** | stack-chan board 限定 |
+| 2 | `97cd6bd` | PollTouchpad + `Application::ToggleChatState` / `StartListening` / `StopListening` / `HandleStateChangedEvent` に ESP_LOGI、 板上 RGB LED で touch state visual feedback (= 緑点灯 / 消灯) | **PR-M に部分救出** | 観測 log は PR に入れない、 LED feedback と SetAllRgbLeds helper だけ救出 |
+| 3 | `397d3bc` | PollTouchpad の listen 起動を `ToggleChatState()` から `StartListening()` に変更。 前者は `SetListeningMode(AutoStop)` を使うため tts.stop 後に device が自動で Listening 再復帰してしまい、 「タッチ駆動」 が破綻 (= 次のタッチが listen.stop = 即送信)。 後者は `HandleStartListeningEvent` で `SetListeningMode(ManualStop)` を強制する経路に乗り、 tts.stop 後は Idle に留まる | **PR-M** | stack-chan board 限定 (PollTouchpad のみ) |
+| 4 | `e13a544` | タッチ瞬時の `Application::PlaySound(OGG_POPUP)` 直接呼び出し (= 後に撤回、 #5 参照) + デバウンス (前回 release から 300ms 以内の press を ignore) + listening タイムアウト (30 秒滞在で auto StopListening) + format bug fix (`%lld` → `%d` cast、 nano-printf 互換) | **PR-M** | デバウンス / タイムアウトは stack-chan board 内、 format fix は副次的改善 |
+| 5 | `e5f62d4` | `Application::StartListening()` 内で `play_popup_on_listening_ = true` を立て、 `HandleStateChangedEvent` の `kDeviceStateListening` 分岐内 ResetDecoder 後 PlaySound 経路 (line 980 付近) に乗せる。 既存実装は WakeWord 経路でしか flag 化されていなかったので、 タッチ / API 経由の StartListening では音が鳴らなかった。 同時に board 側の `app.PlaySound(...)` 直接呼びを削除 (= ResetDecoder で playback queue クリアされて消える呼び出し) + `#include "assets/lang_config.h"` 撤去 | **PR-L (Application 部) + PR-M (board 部)** | application.cc 修正は他 board / API 利用者にも有益 |
+
+### PR 分割案
+
+| PR | 内容 | base | 依存 |
+|---|---|---|---|
+| **PR-L** = [#207](https://github.com/kisaragi-mochi/stackchan-mcp/pull/207) | feat(application): trigger popup-on-listening flag from `StartListening()` so non-wake-word listen activations also get the OGG_POPUP cue | upstream `main` | — |
+| **PR-M** = [#208](https://github.com/kisaragi-mochi/stackchan-mcp/pull/208) | feat(firmware/stackchan): touch-driven listen UX (StopListening on listening-state tap, StartListening for activation, RGB LED feedback, debounce, listening timeout, nano-printf format fix) | upstream `main` | PR-L が merge されると board 側の音フィードバックが自動的に効く (= Stacked にしないが PR-L 先行が望ましい) |
+
+**PR-L (Application 単体修正)**:
+
+- 変更ファイル: `firmware/main/application.cc` 1 ファイル
+- 1 行追加 (`play_popup_on_listening_ = true;` を `StartListening()` の冒頭に)
+- 既存 WakeWord 経路で flag が立っていた仕組みを、 タッチ起動 / Server-driven listen / API 経由 `app.StartListening()` 等すべての activation source で共通に効くように拡張
+- xiaozhi-esp32 ecosystem 全体に有用 — 「音声 cue が WakeWord のときだけ鳴る」 は不必要な特殊化
+- description: 「StartListening は WakeWord 以外 (= server-driven listen, board-level button / touch) からも呼ばれる public API。 popup cue がそのうち WakeWord ルートでしか鳴らないのは意図しない非対称性で、 ユーザ体感的にも 'listen が始まった' のフィードバックが消える」 を主張
+
+**PR-M (Stack-chan board のタッチ UX 統合)**:
+
+- 変更ファイル: `firmware/main/boards/stackchan/stackchan.cc` 1 ファイル (= board 限定)
+- 含む変更:
+  - PollTouchpad の listening 中タップを `StopListening()` に分岐 (#1)
+  - PollTouchpad の listen 起動を `StartListening()` に (= ManualStop 強制、 自動 listening 復帰回避、 #3)
+  - SetAllRgbLeds helper (= set_all_leds MCP tool と同じ I2C 経路を board 内で再利用、 #2/#4)
+  - タッチフィードバック: ToggleChatState 分岐 (= listen 起動) で緑点灯、 StopListening 分岐で消灯 (#4)
+  - デバウンス: 直前 release から 300ms 以内の press を無視 (#4)
+  - listening タイムアウト: state machine listening 突入のエッジ検出 + 30秒経過で auto-StopListening (#4)
+  - format fix: `%lld + ms` 連結が nano-printf で format ずれ → `%d` + `(int)cast` (#4)
+- description: 「stack-chan は LCD タッチパネル (FT6336) を主操作面とする board で、 voice assistant 連続会話モデル (= 発話後自動 listening 復帰) より 'タッチで開始 / タッチで終了' の single-shot model に振った方が UX が成立する。 他 board の挙動は変えない (= 修正は stack-chan board のみ)」 を主張
+
+### 観測 ESP_LOGI の扱い (= PR には入れない)
+
+`97cd6bd` で入れた以下の ESP_LOGI 群は **PR-L/M に含めない**:
+
+- `Application::ToggleChatState` / `StartListening` / `StopListening` の入口 ESP_LOGI
+- `Application::HandleStateChangedEvent` の `State changed -> N` ESP_LOGI
+- `StackChanBoard::PollTouchpad` の `FT6336 press / release / short tap -> ...` ESP_LOGI
+
+これらは Phase 3' 切り分け期間の観測用 instrumentation で、 upstream 利用者にはノイズになる。 PR 投稿時の対応:
+
+- 最終的に **撤去** (= 観測完了で目的達成、 出ない方が default)
+- または `ESP_LOGD` に降格 (= sdkconfig 経由で開発時のみ visible)
+
+判断軸: 撤去 = upstream の clean さを優先 / LOGD = 将来同種 bug 再現時に sdkconfig 切替で復帰できる利便性。 私の好みは **撤去 + bug 再現時に必要なら別 PR で再投入**。 ただし `Application::HandleStateChangedEvent` の state 遷移 log は xiaozhi-esp32 標準でも `ESP_LOGD` / `ESP_LOGI` 級の有用情報なので、 これだけ LOGI 残しを提案する余地あり。
+
+### 投稿条件
+
+- 当面 dev/integration で運用継続 (= まはー判断 2026-05-21、 「ひとまずこのまましばらく運用してみる」)
+- PR-F (= Series F device-driven audio capture forwarding) が merge された後に PR-L/M を投稿するのが自然 (= PR-L/M は PR-F のユースケース下で動く UX を整える PR)。 ただし PR-F 投稿前でも独立 merge 可能 (= 音 cue の対称化 = PR-L、 stack-chan board UX = PR-M はそれ自体で価値)
+- Series A〜H と並行投稿可能。 依存なし (PR-L → PR-M の論理依存はあるが、 PR-L 不在でも PR-M 単独で動く = 音 cue が鳴らないだけ)
+
+### PR-L/M 用ブランチ分割手順 (= 投稿時に確認、 hash は 2026-05-21 時点)
+
+```bash
+cd temp/stackchan-mcp
+git fetch upstream
+
+# PR-L = application.cc 単体
+git switch -c pr-l-startlistening-popup-flag upstream/main
+# e5f62d4 の application.cc 部分だけ cherry-pick (= board 側の修正は除く)
+# 手作業: 該当 hunk を git checkout -p で適用、 もしくは別 commit に分解してから cherry-pick
+git push origin pr-l-startlistening-popup-flag
+
+# PR-M = stack-chan board のタッチ UX 統合 (= #1, #3, #4, #5 の board 部分 + LED feedback 救出)
+# 観測 ESP_LOGI は cherry-pick 後に追加 commit で撤去 or LOGD 化
+git switch -c pr-m-stackchan-touch-driven-listen-ux upstream/main
+git cherry-pick 759508b    # touch listening -> StopListening
+# 397d3bc の board 部分 (StartListening 経路) は cherry-pick 後 conflict 出る可能性 = e13a544 と境界調整必要
+git cherry-pick 397d3bc
+git cherry-pick e13a544    # debounce + timeout + LED feedback + format fix
+# e5f62d4 の board 部分 (= app.PlaySound 直接呼び削除 + include 整理) を手作業で抽出
+# 観測 ESP_LOGI を撤去 or LOGD 化する commit を追加
+git push origin pr-m-stackchan-touch-driven-listen-ux
+```
+
+cherry-pick の境界 (特に `97cd6bd` の LED feedback 部分の救出 + ESP_LOGI 撤去) は投稿時に再整理する。 1 PR を綺麗にするため、 dev/integration 上の commit を rebase -i で squash + drop した派生ブランチを作る方が clean。
+
+### PR-L/M の注意点
+
+- **PR-L**: 1 行修正だが、 「`StartListening()` を board / API 経由から呼ぶケースがどれだけあるか」 を maintainer が知らない場合は description で具体例を挙げる (= stack-chan の LCD tap、 atk-dnesp32s3-box0 のボタン等、 既存 board 実装で `StartListening()` を呼んでる箇所が複数ある)
+- **PR-M**: stack-chan board 限定の変更だが、 description で「voice-assistant model vs single-shot Vessel model」 の設計判断を明示。 受け入れ拒否されたら fork 運用継続 (= memory `feedback_user_experience_first.md`)
+- **format fix (`%lld` → `%d` cast)**: nano-printf 制約は他 board / Application でも踏みやすい罠 (= memory `feedback_esp_idf_nano_printf_no_zu.md`、 PR-E1 series `a42fe0b` でも同種修正済み)。 PR-M に含めるが、 description で「ESP-IDF nano-printf compat」 を明示
+
+## 追補: PR-N — touch event false-stroke suppression (Phase 5' 関連、 2026-05-22 dev/integration で実機検証中)
+
+PR-I (= #206) で touch event log の可読性を上げた後、 新フォーマットで 約 5 時間の log を取り直して false stroke の **3 軸シグネチャ** が判明。 これを使って firmware 側で抑止する filter を実装した。 PR-I の原スコープに含まれていた「false positive filter」 を、 独立 PR として切り出した形。
+
+### 観測データ (2026-05-21 23:35〜2026-05-22 進行中)
+
+| 区分 | start_raw | duration |
+|---|---|---|
+| 真正 TAP / STROKE | H (0x03) または L (0x01) | 0.4 - 1.7 秒 |
+| False STROKE | **ほぼ常に L (0x01)** | **常に 6 秒以上** |
+
+→ **`L only AND duration > 5 秒`** で false / 真正を確実に判別可能。
+
+### 実装方針 (= dev/integration commit 未予定、 WIP)
+
+`stackchan.cc` の falling-edge classifier に2つ加える:
+
+1. **抑止 filter**: 上記条件を満たす STROKE は `HandleStroke` を呼ばず `ESP_LOGI(TAG, "touch event: SUPPRESSED ...")` のみ出力。 cooldown は通常通り設定 (= 直後の再発火防止)
+2. **Si12T REF_RST trigger**: 抑止時に該当 ch (= press_start_zones_ から導出した bit mask) を `REG_REF_RST (0x0A)` に書き込んで chip 内 baseline を強制再キャリブ。 sustained drift の根本解消を attempt。 datasheet 確認済 (= AD Semiconductor TSM12 family、 Arduino lib `GPTechinno/TSM12-Arduino-Library` をリファレンス)
+
+### threshold 選定根拠
+
+- 真正最長 (= 撫で 1.7 秒) と false 最短 (= 6 秒) で **4 秒以上の gap**
+- `IMPLAUSIBLE_PRESS_MS = 5000` でマージンを真正側に多く取る (= 偽陰性 0 優先)
+- `L only` 判定は `(press_start_output1_raw_ & 0xAA) == 0` で実装 (= 各 2-bit pair の上位 bit が立ってない = 全 channel が L 以下)
+
+### 投稿条件
+
+- dev/integration 上で 24h 以上の実機運用 → false stroke 完全消失 (もしくは大幅減) 確認
+- 真正 touch の誤抑止ゼロ確認 (= H/M レベル の touch が `SUPPRESSED` ログに出ないこと)
+- 真正 L stroke (= soft stroke、 < 5 秒) が引き続き正常に発火することの確認
+
+### PR description ドラフト (= 投稿時の出発点)
+
+- **What**: Filter out sustained low-level pseudo-presses on the Si12T head touch + force baseline recalibration via REF_RST when the filter fires
+- **Why**: Observation-driven analysis of 8 captured false strokes over ~5 hours showed they are distinct from real touches on 3 axes (all-L level / sustained > 6 sec / always CH1 alone). The pattern matches Si12T CH1 baseline drift into the L threshold band. The chip's slow auto-recalibration eventually clears it, but the spurious strokes in the meantime fire the device's servo wobble — which in turn caused USB-CDC re-enumerate noise on the host
+- **Risk minimization**: H-level strokes pass unchanged (real long-press UX preserved). L-level short strokes pass unchanged (soft touches verified). Only the precise drift signature is suppressed
+- **REF_RST**: Documented in the AD Semiconductor TSM12 datasheet (the chip behind the M5Stack-marketed "Si12T"); we issue it on just the channel that signalled to avoid disturbing the others. The Arduino reference library (linked) maps the chip's register layout clearly
+
+### PR-N の注意点
+
+- chip vendor は AD Semiconductor (韓国)、 datasheet 公式サイト (touchsemi.com) は SSL 証明書 expired で WebFetch 不可だが、 PDF 自体は LCSC / sekorm / datasheet4u 経由で取得可能。 PR description 内で datasheet リンクを示す時は安定した二次情報を使う
+- M5Stack の「Si12T」 表記は TSM12 系 pin-compat 互換チップの marketing 名。 register map は TSM12 と同じ前提で書く (= 既存 driver の comment もそうなってる)
+- description で `IMPLAUSIBLE_PRESS_MS = 5000` の根拠 (= 観測データの gap 分析) を提示。 maintainer から「5000 は magic number」 と指摘される余地はあるので、 logs から導出した数値であることを明示
+- 既存 `feedback_user_experience_first.md` の方針通り「ユーザーが詰まらない」 軸での修正
+
+## 2026-05-25 続報 (新統合ブランチ `integrate/all-fixes-2026-05-25` 作成)
+
+Sonnet 4.6 セッションで作られた `integrate/all-fixes-2026-05-24` が **dev/integration-p1-fixes を基準にしていて、 dev/integration 側にしかなかった PR #225 (= keep idle after tts.stop) + Si12T align fix (`429b259`) を取りこぼしていた** ことが判明。 firmware 動作確認で「speaking モードが終わったら勝手に listening モードに戻る」 という巻き戻り症状が再発したのが発覚の契機。
+
+### 取り組み内容
+
+旧 integrate ブランチは捨てて、 **`upstream/main` (= d46e78b) 起点で fork-only 改修を順次 cherry-pick** する戦略で新ブランチを構築:
+
+```
+upstream/main (= 全 merged PR が入る: #225 / #210 / #217 / #212 / #223 / #207 / #206 / #219 / #205 / #186 / #196 / #195 / #203 / #202)
+  + Si12T align (= PR-N 候補、 `429b259` → `ecc0358`)
+  + touch 系 fork-only 4 commits (= PR-M #208 の素材、 stop-listening / poll instrumentation / StartListening tap / sound+debounce+timeout)
+  + keep ToggleChatState path (= PR-M #208 codex review fix)
+  + send_pcm_stream feature + fix + docs (= PR-A2 #213 の素材、 3 commits)
+  + PR-B 系 (= skip xiaozhi OTA + rollback preserve、 3 commits、 #216 CLOSED だが fork 側は維持必要)
+  + PR-F 系 8 commits (= #209 の素材、 audio_input_hook + esp32_client listen handler + gateway env wire + tests + docs + recording cleanup + opus lacing + asyncio import 削除)
+  + PR-A3 系 (= #214 の素材、 POST /pcm endpoint + X-Sample-Rate validation + docs、 3 commits)
+  + PR-A4 系 (= #215 の素材、 client_max_size cap + per-route 8 MiB cap + docs、 3 commits)
+  + coredump partition (= PR-G の素材、 `079e0c2` → `af29ed9`、 stroke 時 USB CDC re-enumerate panic 調査用)
+  + boot_session_id 追加 (= `36f5209` → `5a44af0`、 GetDeviceStatusJson に boot 毎の UUID v4 を載せ host 側 avatar_loader が device reboot を検知できるようにする。 取り込み漏れ事後発見、 addon avatar_loader の WARNING ログで判明: `_fetch_device_session_id: no boot_session_id field`)
+  + PR-E2 matrix mode rendering (= `2b4b359` → `11ae0cc` + `a0cf456` → `38d7180` PendingAvatarState 復活、 PR #211 OPEN 状態の本体 commit。 upstream `b2c2a6d` の "until PR #211" reject guard も解除する 独自 commit `3f64a24` を追加。 取り込み漏れ事後発見、 addon avatar_loader の `load FAILED ... matrix_mode_unsupported` で判明、 既存完成済み avatar set は全 matrix mode = layered だけだと動かない)
+  + opus.dll bundle fork-only (= `467641a` 独自 commit、 PR-C #217 が PyPI wheel に bundle する設計だが git URL 経由 uvx install では opus.dll が来ない問題回避、 vcpkg-built opus.dll を SHA256 verified で fork に commit。 ライセンス: BSD-3-clause、 LICENSE-THIRD-PARTY 同梱済。 send_pcm_stream の opuslib エラーで判明 = stack-chan から声が出ない症状)
+  = **計 32 commits**
+```
+
+`feature/fix-wifi-first-attempt-comeback-timer` の `47f09ac` (cancel in-flight connect on timeout) は cherry-pick 結果が空 = upstream #186 内で同等改修が入っているため skip。
+
+> **2026-08-25 追記 — この PR は不要になった。** upstream #357 (`23792aa`) が gateway の `get_status` に WS 接続ごとの `session_id` を載せる形で同じ問題を解決した。firmware を触らずに済む分そちらの方が軽く、しかも「再起動」だけでなく「切れて繋ぎ直した」場合にも値が変わるので、後から device が接続してきたケースも拾える。SAIVerse 側の `avatar_loader` は `get_device_info` ではなく `get_status` を見るよう改修済み。fork 側の `boot_session_id` は upstream に送らない。
+
+### conflict resolution の経験
+
+duplicate commit (= fork で先行 cherry-pick された PR が upstream に別 SHA で merge される) との conflict は 5 ファイルで発生:
+
+- `firmware/main/application.cc`: StartListening のコメント / ESP_LOGI を両方残す
+- `CHANGELOG.md`: HEAD (= upstream Unreleased entries) と各 PR-B / PR-F 側の追加 entry を両方残す
+- `gateway/stackchan_mcp/esp32_client.py`: HEAD の avatar_set_loaded 分岐と 39169a1 の listen 分岐を両方残す
+- `gateway/stackchan_mcp/capture_server.py`: avatar staging dataclass / handlers / create_capture_app の avatar route 追加と PR-A3 の /pcm handler + PR-A4 の CAPTURE_MAX_BYTES を統合
+- `gateway/stackchan_mcp/gateway.py`: audio_hook_url / audio_hook_token property と pcm_token property を両方残す + create_capture_app 呼び出しを統合
+
+戦略の学び: **dev/integration 全体を起点にして upstream merge する**経路は duplicate commit による 16 ファイル conflict を生むので不可。 **upstream/main 起点 + fork-only cherry-pick** の経路の方が conflict 数も少なく、 各 commit の責務もクリア。
+
+### addon 側更新
+
+`expansion_data/saiverse-stackchan-addon/mcp_servers.json` の `--from` URL を `@dev/integration` → `@integrate/all-fixes-2026-05-25` に変更し、 fork repo (`maha0525/saiverse-stackchan-addon`) に push 済 (commit `b72441f`)。 SAIVerse 起動時に uvx が新ブランチを自動 fetch + cache し直す。
+
+### 未送 PR の取り扱い
+
+新ブランチに取り込まれた未送系 fork-only 改修:
+
+| 候補 PR | commit (新ブランチ) | upstream 投稿条件 |
+|---|---|---|
+| **PR-N** Si12T false-stroke suppression | `ecc0358` | dev/integration で 24h+ 実機運用 → false stroke 完全消失確認後 |
+| **PR-G** coredump-to-flash | `af29ed9` | Phase 3' stroke 再現実験で coredump 機能の動作確認後 (新ブランチで動作確認可能になった) |
+
+### flash 手順
+
+partition table が `coredump` partition 追加で変わっているので、 初回 flash は partition-table-flash + app-flash の 2 段 (NVS 保持) または merged flash (NVS 消える、 Vessel 再ペアリング必要)。
+
+```powershell
+. C:\Espressif\frameworks\esp-idf-v5.5.4\export.ps1
+Set-Location C:\Users\shuhe\workspace\SAIVerse\temp\stackchan-mcp\firmware
+
+# 推奨: NVS / WiFi 認証 保持
+idf.py -p COM3 partition-table-flash
+idf.py -p COM3 app-flash
+
+# stroke 時 USB 切れ調査:
+# 1. stroke 再現 → 端末 reset 後 USB 再接続
+# 2. idf.py -p COM3 coredump-info で backtrace 取得
+# 3. coredump 空なら panic 由来ではない = 純粋 USB CDC re-enumerate / electrical 問題
+```
+
+## 参考
+
+- 手元 fork のブランチ:
+  - `feature/external-pcm-stream` (= 9 commit が直線、Phase 1' 検証経路として活用中、Series A〜D の出所)
+  - `feature/dynamic-avatar-set` (= 10 commit、Phase 4.5 検証経路として活用中、Series E の出所、 2026-05-18 に `740d786` PSRAM peak fix 追加)
+  - `feature/device-driven-audio-capture-with-hook` (= 4 commit、Phase 3' 検証経路、 Series F の出所)
+  - `feature/coredump-partition` (= 1 commit、Phase 3' デバッグ基盤、 Series G の出所、 2026-05-18 追加)
+  - `feature/fix-wifi-first-attempt-comeback-timer` (= 2 commit: 本体 + 2026-05-20 follow-up `47f09ac`、 Phase 2' 検証経路、 PR-H = #186 の出所)
+  - (= PR-I 用ブランチ未作成、 issue 調査完了後に派生)
+  - `feature/stackchan-touch-stop-listening` (= 1 commit、 listening 中タップを StopListening に分岐、 Phase 3' UX、 PR-M の commit 出所、 2026-05-19 派生)
+  - `debug/stackchan-touch-poll-instrumentation` (= 1 commit、 fork-only 観測ブランチ、 PR には出さない、 LED feedback 部分は PR-M に救出、 2026-05-21 派生)
+  - `fix/stackchan-touch-uses-startlistening-not-toggle` (= 1 commit、 listen 起動を StartListening に変更で自動 listening 復帰回避、 PR-M の commit 出所、 2026-05-21 派生)
+  - `feature/stackchan-touch-feedback-and-bounds` (= 1 commit、 デバウンス + タイムアウト + LED feedback + format fix、 PR-M の commit 出所、 2026-05-21 派生)
+  - `fix/stackchan-touch-popup-sound` (= 1 commit、 StartListening 経由で popup-on-listening flag を立てる、 PR-L + PR-M の commit 出所、 2026-05-21 派生)
+- addon 側で参照: `expansion_data/saiverse-stackchan-addon/mcp_servers.json` の `--from git+https://github.com/maha0525/stackchan-mcp.git@<branch>#subdirectory=gateway` (2026-05-25 〜 `integrate/all-fixes-2026-05-25`、 以前は `dev/integration`)
+- upstream: `https://github.com/kisaragi-mochi/stackchan-mcp`
+- `docs/intent/stackchan_vessel.md` §「Phase X'」(= 上位概念のスコープ定義)
+- `docs/intent/stackchan_avatar_pipeline.md` §B-0 (= 3 層モデル) / §E (= upstream PR ストーリー)
+
+## 追補: PR-O — ownership lock を per-WS_PORT に scope（複数機体対応、2026-07-01 実装・[#320](https://github.com/kisaragi-mochi/stackchan-mcp/pull/320) 投稿済み）
+
+**次セッションでの PR 化用ハンドオフ。** Stack-chan 複数機体（1 gateway = 1 device を機体数ぶん別ポートで同時起動、A-2 方式）を成立させる過程で必要になった gateway 側の唯一の改修。SAIVerse 側で実機検証済み（2 機体同時起動を確認）なので、投稿条件（Phase 検証後に出す）は満たしている。
+
+### 概要
+
+| PR | 内容 | base | 依存 | 状態 |
+|---|---|---|---|---|
+| **PR-O** = [#320](https://github.com/kisaragi-mochi/stackchan-mcp/pull/320) | fix(ownership): scope the gateway ownership lock per WS port | upstream `main` | 独立 | 投稿済み (2026-07-01)、review 待ち |
+
+### 動機・背景
+
+- gateway は `~/.stackchan-mcp/owner.lock` という **machine-global の単一 ownership lock** を持ち、`acquire_lock` が「生きた pid が既に握っていれば `OwnershipError`」で拒否する（`stackchan_mcp/ownership.py`: `LOCK_PATH = LOCK_DIR / "owner.lock"`）。
+- これは「同一 device を 2 つの gateway が奪い合わない」ための機構だが、**1 device = 1 gateway を機体数ぶん別ポートで同時に立てる構成**（各 gateway は別 WS ポートで別 device を所有）を、global lock が誤って弾く。実機で 2 台目 gateway が `unhandled errors in a TaskGroup`（= OwnershipError で subprocess 即死）になった。
+- lock の本来の不変条件は「**1 gateway = 1 device を所有**」であり、global lock はそれを「1 マシン 1 gateway」と過剰にエンコードしていた。**per-WS_PORT に scope するのが本来正しい**（バグ修正として説明可能）。
+
+### 変更内容（実装済み、`temp/stackchan-mcp/gateway/stackchan_mcp/cli.py`）
+
+- `_ws_port_lock_path()` ヘルパ追加: `LOCK_DIR / f"owner-{ws_port}.lock"`（WS_PORT 未解決時は従来 `owner.lock` にフォールバック）。`_resolve_ws_port()` で WS_PORT を解決。
+- `_acquire_startup_lock` の `acquire_lock(...)` に `path=_ws_port_lock_path()` を渡す（stdio / streamable-http 両モード）。
+- release も per-port に統一: `_run_stdio_gateway` / streamable-http daemon の `release_lock_if_owner(info, _ws_port_lock_path())`、atexit 登録も同 path。
+- `--check`（`_run_ownership_check`）を `read_lock(_ws_port_lock_path())` に変更（旧 global を読んで誤報告する既存ユーザー影響を解消）。
+- `ownership.py` は無改修（`acquire_lock` / `read_lock` / `release_lock_if_owner` は元々 `path` 引数を取る）。
+
+### 既存ユーザー（単一機体）への影響
+
+- **機能的にはほぼ同一**: デフォルト WS_PORT=8765 のユーザーは lock が `owner.lock` → `owner-8765.lock` になるだけ。単一運用・同一ポート二重起動拒否は従来通り。
+- `--check` も per-port を読むよう直したので誤報告なし。
+- 移行時、古い `owner.lock` が orphan として残る（`--check` 以外は誰も読まない、無害）。
+- 「device 奪い合い防止」の意味が machine → port に変わるが、device は単一 WS URL（1 ポート）にしか繋がないので実害は限定的（別ポートの余分な idle gateway が理論上できうる程度）。
+
+### PR 投稿前に詰めるべき点
+
+1. **移行**: 旧 `owner-.lock` の掃除 / 検出をどうするか（無害だが説明が要る）。
+2. **lock の括り**: port スコープで十分か、`Device-Id`（MAC）等の device identity で括る方が upstream 的に筋が良いか。port は「1 gateway = 1 endpoint」の proxy として妥当だが、reviewer 好み次第。
+3. **upstream の multi-device ロードマップ確認**: kisaragi-mochi / xiaozhi-esp32 が multi-device に向かっているか。向かっているなら本 PR はその布石として位置づけられる。単一 device 前提が固い場合は「per-port lock は単一運用も壊さない安全な一般化」として提案。
+4. **PR description**: 「lock の本来の不変条件は 1 gateway=1 device、global は過剰」を明示。単一機体ユーザー非破壊を強調。`--check` 追随も含める。
+
+### fork 状態 / ブランチ手順（実施済み）
+
+- fork `maha0525/stackchan-mcp`。cli.py の per-port lock は integration ブランチ `integrate/all-fixes-2026-06-24` に `daac8a7 fix(ownership): scope lock per WS_PORT for multi-device` として **コミット済み**（cli.py のみ、まはーの firmware WIP `stackchan.cc` には非接触）。
+- upstream/main から `pr-o-ownership-lock-per-port` を切って `daac8a7` を cherry-pick（→ `1c12de8`）、origin に push、`gh pr create` で #320 を投稿済み:
+  ```bash
+  cd temp/stackchan-mcp
+  git fetch upstream
+  git switch -c pr-o-ownership-lock-per-port upstream/main
+  git cherry-pick daac8a7
+  git push -u origin pr-o-ownership-lock-per-port
+  gh pr create --repo kisaragi-mochi/stackchan-mcp --base main --head maha0525:pr-o-ownership-lock-per-port ...
+  ```
+- SAIVerse addon 側 `mcp_servers.json` は fork branch を `--from git+...@integrate/all-fixes-2026-06-24` で参照。デプロイ時 uvx はブランチ ref をキャッシュするので、push 後は `uv cache clean` か `--refresh` で取り直させる（本セッションで確認済み: per-port lock を載せた版が uvx 経由でロードされ 2 機体同時起動に成功）。
+
+### 実機検証済み（2026-07-01）
+
+- 2 機体（stackchan_room=18765/8766, stackchan_2nd_room_city_a=8767/8768）を同時起動、各 gateway が `owner-18765.lock` / `owner-8767.lock` を個別取得（errlog の `acquired ownership lock (... lock=owner-XXXX.lock)` で確認）。別ペルソナが同時に首振り・発話・LED・複合アクションまで動作。→ 「実機で有用」を PR description で示せる。
+
+### 投稿後 CI / Codex 対応ラウンド（2026-07-02、pr-o コミット `5e61fd7` に amend 済み）
+
+初回投稿（cli.py のみ）で CI 2 件が赤 + Codex P2。全て pr-o 単一コミットに畳んで force-push で対応（CHANGELOG / Gateway test / Codex P2 いずれも同一 PR の一部として）。
+
+- **CHANGELOG check（赤→緑）**: gateway/ を触ったので `[Unreleased]` の `### Gateway` にエントリ追加が必須だった（`build.yml` の check が base↔head で [Unreleased] body の増分を要求）。#320 エントリを追記。
+- **Gateway test（赤→緑）**: upstream `tests/test_cli.py` が `release_lock_if_owner` / `read_lock` を旧 arity の lambda / `list.append` で monkeypatch していたため、per-port 化で `path` 引数が増えて 4 件 TypeError。モック 4 箇所を `path=None` 受けに更新（本番 `ownership.py` は元々 `path` 引数対応なので production は無改修で正しい。fork の integrate ブランチも同じ latent 破綻を持つが runtime 非影響）。
+- **Codex [P2] `.env` を check lock 選定前にロード**: `--check`（`_run_ownership_check`）が `_load_dotenv()` を通さず `_ws_port_lock_path()` を呼ぶため、WS_PORT が `.env` にしか無いと稼働機体が `owner-18765.lock` を持つ一方 `--check` は `owner-8765.lock` を見て別ポートを ready 誤報告。startup は `.env` ロード後にロックを取るので、`--check` も先頭で `_load_dotenv()` するよう修正（`--preflight` が `_run_preflight` 内で `.env` を読むのと同形）。回帰テスト `test_main_check_flag_inspects_per_ws_port_lock` を追加。
+- **integrate へ backport 済み（2026-07-02、`f87d76e`）**: fork `integrate/all-fixes-2026-06-24`（addon の uvx デプロイ元）に `.env`-before-check fix と test_cli.py モック修正 + 回帰テストを backport して push 済み（worktree で作業し、まはーの firmware WIP `stackchan.cc` には非接触）。CHANGELOG エントリは upstream PR 専用のため backport に含めない。**稼働中システムへの反映**: uvx はブランチ ref をキャッシュするので、次回再起動時に `uv cache clean` か `--refresh` で取り直しが要る。
+
+## 追補: PR-P — /capture の 413 (aiohttp>=3.14) + 非UTF-8 question 500 修正（2026-07-02 投稿: [#326](https://github.com/kisaragi-mochi/stackchan-mcp/pull/326)）
+
+「2号機だけカメラが作動しない」（`see`→`take_photo` が "Failed to upload photo"）の実機調査で判明した gateway バグ 2 件。P4（subprocess errlog の per-instance 化）で 2 号機 gateway のログが初めて見えるようになり特定できた。#320 とは無関係の別系統。
+
+| PR | 内容 | base | 状態 |
+|---|---|---|---|
+| **PR-P** = [#326](https://github.com/kisaragi-mochi/stackchan-mcp/pull/326) | fix(capture): don't 413 uploads on aiohttp>=3.14; tolerate non-UTF-8 question | upstream `main` | 投稿済み (2026-07-02)、CHANGELOG/Gateway test 緑 |
+
+### 真因（実測で確定）
+- `create_capture_app` は `/pcm` の長時間ストリーミングのため `web.Application(client_max_size=0)`。
+- aiohttp **>= 3.14** で multipart reader (`BodyPartReader.read()`) に `if len(data) > client_max_size: raise 413` が追加。`request.read()/.post()` の `if 0 < max_size` ガードが **multipart には無い**ため、`request.multipart()` に伝播した `client_max_size=0` が「上限0バイト」と解釈され、**非空の `question` フィールドを持つ全アップロードが 413**。空 question は file を `read_chunk` で読むので通り、バグがデバイス依存に見えていた。
+- 旧 aiohttp 3.13.5 には該当 check が無い → 依存が 3.14 に上がって顕在化（稼働 env 3.14.1、新規解決 3.13.5 と揺れる）。
+- 副次: `question` を `.decode("utf-8")` 厳格デコード → 非 UTF-8 で 500。
+
+### 修正
+- `client_max_size=sys.maxsize`（有限大）。read/multipart 実質無制限、`/pcm` 維持、`/capture` の実上限はハンドラ内 `CAPTURE_MAX_BYTES`。
+- `question` を `errors="replace"` でデコード。
+- 回帰テスト 2 件（TestClient 実経路、aiohttp 3.14.1 でバグ再現も反証確認）。fork `integrate/all-fixes-2026-06-24` に `978f6c5`/`9df458f` として backport 済み・実機で 2 号機カメラ復活を確認。

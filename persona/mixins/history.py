@@ -1,28 +1,22 @@
 """History bookkeeping helpers for PersonaCore."""
 from __future__ import annotations
 
-import json
 import logging
 from datetime import datetime, timedelta, timezone as dt_timezone
 from typing import Any, Dict, List, Optional
-
-from database.models import AI as AIModel
 
 
 class PersonaHistoryMixin:
     """Provide timeline utilities and persistence helpers."""
 
     SessionLocal: Any
-    auto_count: int
     conscious_log: List[Dict[str, Any]]
     conscious_log_path: Any
     current_building_id: str
     entry_markers: Dict[str, int]
-    emotion: Dict[str, Dict[str, float]]
     history_manager: Any
     id_to_name_map: Dict[str, str]
     is_visitor: bool
-    last_auto_prompt_times: Dict[str, float]
     occupants: Dict[str, List[str]]
     persona_id: str
     persona_name: str
@@ -139,31 +133,6 @@ class PersonaHistoryMixin:
             self._save_conscious_log()
             return
 
-        db = self.SessionLocal()
-        try:
-            update_data = {
-                "EMOTION": json.dumps(self.emotion, ensure_ascii=False),
-                "AUTO_COUNT": self.auto_count,
-                "LAST_AUTO_PROMPT_TIMES": json.dumps(
-                    self.last_auto_prompt_times, ensure_ascii=False
-                ),
-            }
-            db.query(AIModel).filter(AIModel.AIID == self.persona_id).update(
-                update_data
-            )
-            db.commit()
-            logging.info("Saved dynamic state to DB for %s.", self.persona_name)
-        except Exception as exc:
-            db.rollback()
-            logging.error(
-                "Failed to save session data to DB for %s: %s",
-                self.persona_name,
-                exc,
-                exc_info=True,
-            )
-        finally:
-            db.close()
-
         if getattr(self, "messages", None):
             self.history_manager.save_all()
         self._save_conscious_log()
@@ -171,37 +140,93 @@ class PersonaHistoryMixin:
     def get_building_history(
         self, building_id: str, raw: bool = False
     ) -> List[Dict[str, str]]:
-        return self.history_manager.building_histories.get(building_id, [])
+        return self.history_manager.get_building_history(building_id)
 
     def _save_conscious_log(self) -> None:
-        self.conscious_log_path.parent.mkdir(parents=True, exist_ok=True)
-        data_to_save = {
-            "log": self.conscious_log,
-            "pulse_cursors": self.pulse_cursors,
-            "pulse_cursor_format": "seq",
-            "pulse_indices": self.pulse_cursors,
-        }
-        self.conscious_log_path.write_text(
-            json.dumps(data_to_save, ensure_ascii=False), encoding="utf-8"
-        )
+        """Phase 2+3: pulse_cursors / entry_markers を persona_pulse_cursor テーブルへ保存。
+        旧 conscious_log.json への書き込みは廃止。
+        """
+        session_factory = getattr(self, "SessionLocal", None)
+        if session_factory is None:
+            return
+        from database.models import PersonaPulseCursor
+        try:
+            db = session_factory()
+            try:
+                # 全 building 一度に upsert (SQLite: REPLACE INTO 相当)
+                all_bids = set(self.pulse_cursors.keys()) | set(self.entry_markers.keys())
+                for bid in all_bids:
+                    row = db.query(PersonaPulseCursor).filter_by(
+                        PERSONA_ID=self.persona_id, BUILDING_ID=bid
+                    ).first()
+                    if row is None:
+                        row = PersonaPulseCursor(
+                            PERSONA_ID=self.persona_id,
+                            BUILDING_ID=bid,
+                            CURSOR_SEQ=int(self.pulse_cursors.get(bid, 0)),
+                            ENTRY_MARKER_SEQ=int(self.entry_markers.get(bid, 0)),
+                        )
+                        db.add(row)
+                    else:
+                        row.CURSOR_SEQ = int(self.pulse_cursors.get(bid, row.CURSOR_SEQ))
+                        row.ENTRY_MARKER_SEQ = int(self.entry_markers.get(bid, row.ENTRY_MARKER_SEQ))
+                db.commit()
+            finally:
+                db.close()
+        except Exception:
+            logging.warning(
+                "Failed to save pulse_cursor to DB for %s", self.persona_id, exc_info=True
+            )
 
     def _mark_entry(self, building_id: str) -> None:
         try:
-            hist = self.history_manager.building_histories.get(building_id, [])
+            hist = self.history_manager.get_building_history(building_id)
             last_seq = 0
             if hist:
                 try:
                     last_seq = int(hist[-1].get("seq", len(hist)))
                 except (TypeError, ValueError):
                     last_seq = len(hist)
-            self.entry_markers[building_id] = last_seq
             prior_cursor = self.pulse_cursors.get(building_id, 0)
-            self.pulse_cursors[building_id] = max(prior_cursor, last_seq)
+            if prior_cursor > 0:
+                # Re-entering a building visited before: preserve the cursor as the entry
+                # point so unseen messages (seq > prior_cursor) remain visible.
+                # Do not advance pulse_cursors here; auto_ingest will do that.
+                self.entry_markers[building_id] = prior_cursor
+            else:
+                # First visit: skip existing history to avoid flooding — BUT make
+                # this persona's own most-recent ENTER event visible. Without this
+                # exception, the entry event (added by OccupancyManager BEFORE
+                # _mark_entry runs) gets swallowed by the cursor snap-up to
+                # last_seq, so the persona has no episodic record of moving.
+                own_enter_seq = 0
+                for msg in reversed(hist):
+                    metadata = msg.get("metadata") or {}
+                    event = metadata.get("event") or {}
+                    if (
+                        event.get("type") == "occupancy"
+                        and event.get("action") == "enter"
+                        and event.get("entity_id") == self.persona_id
+                    ):
+                        try:
+                            own_enter_seq = int(msg.get("seq", 0))
+                        except (TypeError, ValueError):
+                            own_enter_seq = 0
+                        break
+                if own_enter_seq > 0:
+                    # Place marker just before our own enter event so it's visible.
+                    self.entry_markers[building_id] = own_enter_seq - 1
+                    self.pulse_cursors[building_id] = own_enter_seq - 1
+                else:
+                    # No own enter event found (e.g., persona was created here).
+                    self.entry_markers[building_id] = last_seq
+                    self.pulse_cursors[building_id] = last_seq
             logging.debug(
-                "[entry] entry marker set: %s -> %d (prev_cursor=%d)",
+                "[entry] entry marker set: %s -> %d (prev_cursor=%d last_seq=%d)",
                 building_id,
-                last_seq,
+                self.entry_markers[building_id],
                 prior_cursor,
+                last_seq,
             )
         except Exception:
             logging.warning("Failed to mark entry for building %s", building_id, exc_info=True)

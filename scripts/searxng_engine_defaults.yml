@@ -1,0 +1,23 @@
+# SAIVerse 推奨エンジン設定
+# SearXNG デフォルトから変更する項目のみ記載
+# true = 有効化, false = 無効化, 未記載 = SearXNG デフォルトに従う
+#
+# バージョンアップで更新される可能性があります。
+# ユーザー固有の設定は searxng_user_engines.yml に記載してください。
+
+# general: 汎用ウェブ検索の冗長性確保
+bing: true
+mojeek: true
+yahoo: true
+
+# general: 独立インデックス系
+wiby: true
+encyclosearch: true
+searchmysite: true
+crowdview: true
+
+# general: 計算・知識系
+wolframalpha: true
+
+# general: 分散検索
+yacy: true

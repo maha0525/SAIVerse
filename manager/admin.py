@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 import time
 import uuid
 from datetime import datetime
@@ -8,6 +9,9 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from zoneinfo import ZoneInfo
 
+from sqlalchemy import func
+
+from saiverse import task_book
 from saiverse.buildings import Building
 from database.models import (
     AI as AIModel,
@@ -19,13 +23,21 @@ from database.models import (
     Item as ItemModel,
     ItemLocation as ItemLocationModel,
     Playbook as PlaybookModel,
+    Region as RegionModel,
 )
 from manager.blueprints import BlueprintMixin
 from manager.history import HistoryMixin
 from manager.persona import PersonaMixin
+from manager.ids import (
+    build_identifier,
+    charset_error,
+    entrance_id_for,
+    is_valid_identifier,
+)
 from manager.state import CoreState
 from scripts.import_playbook import infer_scope_from_path
 from builtin_data.tools.save_playbook import save_playbook
+
 
 class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
     """Administrative operations for world editing and CRUD."""
@@ -74,7 +86,6 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
 
         # Hooks back to runtime methods
         self._move_persona = runtime._move_persona
-        self._explore_city = runtime.explore_city
         self.dispatch_persona = runtime.dispatch_persona
         self.summon_persona = runtime.summon_persona
         self.end_conversation = runtime.end_conversation
@@ -82,24 +93,39 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
         self.get_conversing_personas = runtime.get_conversing_personas
         self.get_persona_pending_events = manager.get_persona_pending_events
         self.archive_persona_events = manager.archive_persona_events
+        # --- ミックスインが self. で読むが、実体は SAIVerseManager 側にあるもの ---
+        # AdminService は PersonaMixin / BlueprintMixin / HistoryMixin を継承する
+        # 「もう一つの土台」なので、ミックスインのコードが触る状態はここで揃える。
+        # 欠けると commit 後に AttributeError になり、DB には作られたのに失敗を
+        # 返す形で壊れる (2026-08-09 に _on_persona_registered で実際に発生)。
+        # 欠落は tests/test_mixin_host_contract.py が機械的に検査する。
+        self._on_persona_registered = manager._on_persona_registered
+        self.quarantined_buildings = manager.quarantined_buildings
+        self.startup_warnings = manager.startup_warnings
         self.occupancy_manager = manager.occupancy_manager
         self.conversation_managers = manager.conversation_managers
         self._save_building_histories = manager._save_building_histories
+        self._save_modified_buildings = manager._save_modified_buildings
         self._update_timezone_cache = manager._update_timezone_cache
         self._load_cities_from_db = manager._load_cities_from_db
 
     # --- City management ---
 
     @staticmethod
-    def _validate_city_name(name: str) -> Optional[str]:
-        """Validate city name is ASCII alphanumeric + underscore only.
-        Returns an error message string if invalid, None if valid."""
-        import re
-        if not name or not name.strip():
-            return "Error: City name cannot be empty."
-        if not re.match(r'^[a-zA-Z0-9_]+$', name):
+    def _validate_city_slug(slug: str) -> Optional[str]:
+        """City の内部識別子 (CITY_SLUG) を検証する。
+
+        起動引数・user_room の BUILDINGID・ペルソナ ID・建物ログの保存先フォルダ名
+        がこの文字列から組み立てられるため、ファイル名と ID に安全な ASCII 英数字と
+        アンダースコアだけを許す。表示名 (CITYNAME) はこの制限を受けない。
+
+        Returns: 不正なら理由の文字列、正しければ None。
+        """
+        if not slug or not slug.strip():
+            return "Error: City slug cannot be empty."
+        if not re.match(r'^[a-zA-Z0-9_]+$', slug):
             return (
-                "Error: City name must contain only alphanumeric characters "
+                "Error: City slug must contain only alphanumeric characters "
                 "and underscores (a-z, A-Z, 0-9, _)."
             )
         return None
@@ -115,11 +141,14 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
         timezone_name: str,
         host_avatar_path: Optional[str] = None,
         host_avatar_upload: Optional[str] = None,
+        map_background_image: Optional[str] = None,
     ) -> str:
-        name_error = self._validate_city_name(name)
-        if name_error:
-            return name_error
+        """City の設定を更新する。``name`` は**表示名** (CITYNAME)。
 
+        内部の識別子 (CITY_SLUG) はここでは変更できない — 発行済みの Building ID・
+        ペルソナ ID・ディスク上のログ保存先が既にその文字列を含んでおり、後から
+        変えると食い違う (docs/intent/city_identity.md §4 不変条件 2)。
+        """
         db = self.SessionLocal()
         try:
             city = db.query(CityModel).filter(CityModel.CITYID == city_id).first()
@@ -135,7 +164,7 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                     "timezone name (e.g., Asia/Tokyo)."
                 )
 
-            city.CITYNAME = name
+            city.CITYNAME = (name or "").strip()
             city.DESCRIPTION = description
             city.START_IN_ONLINE_MODE = online_mode
             city.UI_PORT = ui_port
@@ -151,20 +180,22 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                     logging.error("Failed to process host avatar upload: %s", exc, exc_info=True)
                     return f"Error: Failed to process host avatar upload: {exc}"
             city.HOST_AVATAR_IMAGE = avatar_value
+            # 街マップ背景画像 (空文字は NULL として保存)
+            city.MAP_BACKGROUND_IMAGE = (map_background_image or "").strip() or None
             db.commit()
 
             if city.CITYID == self.state.city_id:
                 self.state.start_in_online_mode = online_mode
                 self.manager.start_in_online_mode = online_mode
-                self.state.city_name = name
-                self.manager.city_name = name
                 self.state.ui_port = ui_port
                 self.manager.ui_port = ui_port
                 self.state.api_port = api_port
                 self.manager.api_port = api_port
-                self.state.user_room_id = f"user_room_{self.state.city_name}"
-                self.manager.user_room_id = self.state.user_room_id
-                self.user_room_id = self.state.user_room_id
+                # 識別子 (CITY_SLUG) は不変なので、user_room_id / city_name /
+                # 建物ログの保存先は張り替えない。旧実装はここで user_room_id だけ
+                # メモリ上で書き換えており、DB の building 行とディスクのフォルダが
+                # 旧名のまま取り残されてユーザーの部屋が行方不明になっていた
+                # (docs/intent/city_identity.md §2-4 欠陥 A)。
                 self._update_timezone_cache(tz_candidate)
                 # _update_timezone_cache updates manager & state; sync admin's
                 # own cached copies so _create_persona / _load_single_persona
@@ -196,16 +227,32 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
             db.close()
 
     def create_city(
-        self, name: str, description: str, ui_port: int, api_port: int, timezone_name: str
+        self,
+        slug: str,
+        name: str,
+        description: str,
+        ui_port: int,
+        api_port: int,
+        timezone_name: str,
     ) -> str:
-        name_error = self._validate_city_name(name)
-        if name_error:
-            return name_error
+        """City を作る。``slug`` は内部の識別子、``name`` は表示名。
+
+        識別子は作成時にしか決められない (docs/intent/city_identity.md §4 不変条件 2)。
+        """
+        slug_error = self._validate_city_slug(slug)
+        if slug_error:
+            return slug_error
 
         db = self.SessionLocal()
         try:
-            if db.query(CityModel).filter_by(CITYNAME=name).first():
-                return f"Error: A city named '{name}' already exists."
+            # 大文字小文字を畳む: CITY_SLUG は ~/.saiverse/cities/<slug>/ の
+            # フォルダ名になるため (Windows は大文字小文字を区別しない)
+            if (
+                db.query(CityModel)
+                .filter(func.lower(CityModel.CITY_SLUG) == slug.lower())
+                .first()
+            ):
+                return f"Error: A city with slug '{slug}' already exists."
             if (
                 db.query(CityModel)
                 .filter(
@@ -228,7 +275,8 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
 
             new_city = CityModel(
                 USERID=self.state.user_id,
-                CITYNAME=name,
+                CITY_SLUG=slug,
+                CITYNAME=(name or "").strip(),
                 DESCRIPTION=description,
                 UI_PORT=ui_port,
                 API_PORT=api_port,
@@ -237,9 +285,9 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
             db.add(new_city)
             db.commit()
             self._load_cities_from_db()
-            logging.info("Created new city '%s'.", name)
+            logging.info("Created new city '%s' (slug: %s).", name or slug, slug)
             return (
-                f"City '{name}' created successfully. "
+                f"City '{name or slug}' created successfully. "
                 "Please restart the application to use it."
             )
         except Exception as exc:
@@ -315,20 +363,20 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
 
             if db.query(BuildingModel).filter_by(CITYID=city_id).first():
                 return (
-                    f"Error: Cannot delete city '{city.CITYNAME}' because it still "
+                    f"Error: Cannot delete city '{city.CITY_SLUG}' because it still "
                     "contains buildings."
                 )
 
             if db.query(BuildingOccupancyLog).filter_by(CITYID=city_id).first():
                 return (
-                    f"Error: Cannot delete city '{city.CITYNAME}' due to remaining "
+                    f"Error: Cannot delete city '{city.CITY_SLUG}' due to remaining "
                     "occupancy logs. Please clean up buildings first."
                 )
 
             db.delete(city)
             db.commit()
-            logging.info("Deleted city '%s'.", city.CITYNAME)
-            return f"City '{city.CITYNAME}' deleted successfully."
+            logging.info("Deleted city '%s'.", city.CITY_SLUG)
+            return f"City '{city.CITY_SLUG}' deleted successfully."
         except Exception as exc:
             db.rollback()
             return f"Error: {exc}"
@@ -354,17 +402,39 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                 return f"Error: A building named '{name}' already exists in that city."
 
             city = db.query(CityModel).filter_by(CITYID=city_id).first()
-            
-            # Use custom ID if provided, otherwise generate
+
+            # Use custom ID if provided, otherwise generate. Either way the ID
+            # must satisfy the charset contract (manager/ids.py) — it goes
+            # verbatim into log folder paths, saiverse:// URIs and API paths.
             if building_id and building_id.strip():
                 building_id = building_id.strip()
+                if not is_valid_identifier(building_id):
+                    return charset_error("Building ID", building_id)
             else:
-                building_id = f"{name.lower().replace(' ', '_')}_{city.CITYNAME}"
-            
-            if db.query(BuildingModel).filter_by(BUILDINGID=building_id).first():
+                # 日本語名など slug が空になる名前は building_<連番>_<city> へ
+                # フォールバック (issue 論点 1: 読み変換は導入せず、まず口を塞ぐ)
+                building_id = build_identifier(
+                    name,
+                    city.CITY_SLUG,
+                    stem="building",
+                    exists=lambda cid: db.query(BuildingModel)
+                    .filter_by(BUILDINGID=cid)
+                    .first()
+                    is not None,
+                )
+
+            # 大文字小文字を畳んで検査する: Building ID はフォルダ名
+            # (~/.saiverse/cities/<city>/buildings/<id>/) になり、Windows の
+            # ファイルシステムは大文字小文字を区別しないため、'Cafe' と 'cafe'
+            # を別 Building として通すとログの保存先が同じになる
+            if (
+                db.query(BuildingModel)
+                .filter(func.lower(BuildingModel.BUILDINGID) == building_id.lower())
+                .first()
+            ):
                 return (
                     f"Error: A building with the ID '{building_id}' "
-                    "already exists."
+                    "already exists (IDs are compared case-insensitively)."
                 )
 
             new_building = BuildingModel(
@@ -455,15 +525,16 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
             if not building:
                 return "Error: Building not found."
 
-            occupancy = (
-                db.query(BuildingOccupancyLog)
-                .filter_by(BUILDINGID=building_id, EXIT_TIMESTAMP=None)
-                .first()
-            )
-            if occupancy and building.CITYID != city_id:
+            # 分離監査 P1-7 (W7 柱5): City は通常更新では immutable。
+            # City 変更は User.CURRENT_BUILDINGID / Region 所属 / private room /
+            # tool・item link の全参照を検査・一括移送する専用 migration の領分で、
+            # multi-city 凍結中は提供しない (凍結解除時に監査の修正方針を正典と
+            # して設計する)。
+            if building.CITYID != city_id:
                 return (
-                    f"Error: Cannot change the city of '{building.BUILDINGNAME}' "
-                    "while it is occupied."
+                    f"Error: The city of '{building.BUILDINGNAME}' cannot be "
+                    "changed. (City transfer requires a dedicated migration, "
+                    "which is out of scope while multi-city is frozen.)"
                 )
 
             building.BUILDINGNAME = name
@@ -501,6 +572,357 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
             db.close()
 
 
+    # --- Region management ---
+    # Region は Building の上位グルーピング (PARENT_REGION_ID 自己参照で 1 段の
+    # SubRegion 入れ子)。設計意図: temp/region_rpg_intent.md §A (リポジトリ外管理)
+
+    VALID_REGION_TYPES = ("generic", "game")
+
+    def create_region(
+        self,
+        name: str,
+        description: str,
+        region_type: str,
+        city_id: int,
+        parent_region_id: Optional[str] = None,
+        region_id: Optional[str] = None,
+        entrance_building_id: Optional[str] = None,
+    ) -> str:
+        """Region / SubRegion を作成する。
+
+        入口必須の不変条件 (docs/intent/region.md §3) を作成フローで保証する:
+        entrance_building_id 指定時は既存 Building を入口として紐づけ、省略時は
+        「(名): 入口」Building を自動作成する。入口は親スコープに属する
+        (トップ Region の入口は REGION_ID なし、SubRegion の入口は親 Region 所属)。
+
+        例外: game タイプのトップ Region は create_ruler が控室 (= 入口) を
+        作成するため、ここでは自動作成しない (Ruler 不在の game Region は
+        どのみちゲームを開始できない setup 途中の状態)。
+        """
+        if region_type not in self.VALID_REGION_TYPES:
+            return f"Error: Invalid region_type '{region_type}'. Must be one of {self.VALID_REGION_TYPES}."
+        db = self.SessionLocal()
+        try:
+            city = db.query(CityModel).filter_by(CITYID=city_id).first()
+            if not city:
+                return "Error: Target city not found."
+
+            if parent_region_id:
+                parent = db.query(RegionModel).filter_by(REGION_ID=parent_region_id).first()
+                if not parent:
+                    return "Error: Parent region not found."
+                if parent.CITYID != city_id:
+                    return "Error: Parent region belongs to a different city."
+                if parent.PARENT_REGION_ID:
+                    # 入れ子は 1 段まで (モデル定義のコメント参照)。アプリ層で強制する
+                    return "Error: Nesting is limited to one level; the parent is already a SubRegion."
+
+            # 入口を自動作成する分岐に入るか (下の入口決定と同じ条件)。ID 候補を
+            # 選ぶ前に確定させる — 自動作成しないのに入口 ID を予約すると、
+            # 使える番号を無意味に飛ばす
+            will_auto_create_entrance = (
+                not (entrance_building_id and entrance_building_id.strip())
+                and not (region_type == "game" and not parent_region_id)
+            )
+
+            # Region ID も Building ID と同じ文字種契約に従う (manager/ids.py)。
+            # 入口 Building の ID は entrance_<region_id> なので、ここが素通しだと
+            # Building 側の契約ごと破れる — game_create_subregion (Ruler ペルソナが
+            # 自分で SubRegion を作る口) は日本語名をそのまま渡してくる。
+            if region_id and region_id.strip():
+                region_id = region_id.strip()
+                if not is_valid_identifier(region_id):
+                    return charset_error("Region ID", region_id)
+            else:
+                def _region_id_taken(rid: str) -> bool:
+                    if db.query(RegionModel).filter_by(REGION_ID=rid).first():
+                        return True
+                    if not will_auto_create_entrance:
+                        return False
+                    # 派生する入口 Building の ID も一緒に予約する。Region 側が
+                    # 空いていても entrance_<rid> が埋まっていると、下の入口自動
+                    # 作成がエラーで止まる — 連番を一つ進めれば避けられる衝突なので
+                    # 候補選びの段階で見る (Region を消しても入口 Building が残る
+                    # 経路があり、連番の若い番号ほど当たりやすい)。
+                    return db.query(BuildingModel).filter_by(
+                        BUILDINGID=entrance_id_for(rid)
+                    ).first() is not None
+
+                region_id = build_identifier(
+                    name,
+                    city.CITY_SLUG,
+                    prefix="region",
+                    exists=_region_id_taken,
+                )
+
+            if db.query(RegionModel).filter_by(REGION_ID=region_id).first():
+                return f"Error: A region with the ID '{region_id}' already exists."
+
+            # --- 入口の決定 (region 行と同一トランザクションで原子的に) ---
+            entrance_id: Optional[str] = None
+            entrance_note = ""
+            if entrance_building_id and entrance_building_id.strip():
+                entrance_building_id = entrance_building_id.strip()
+                # entrance_<region_id> は自動生成入口の予約名。delete_region は
+                # 「入口の ID がこの形か」だけで自動生成物かを判定して削除するので、
+                # ユーザー所有の Building にこの名前を持たせると Region 削除で
+                # 巻き添えに消える。判定へ provenance を持たせるのが本筋だが列の
+                # 追加が要るため、まず曖昧さの供給源 (同名を許すこと) を塞ぐ。
+                if entrance_building_id == entrance_id_for(region_id):
+                    return (
+                        f"Error: '{entrance_building_id}' is reserved for the "
+                        f"auto-created entrance of region '{region_id}'. Use a "
+                        "building with a different ID, or omit entrance_building_id "
+                        "to have the entrance created for you."
+                    )
+                entrance = db.query(BuildingModel).filter_by(
+                    BUILDINGID=entrance_building_id
+                ).first()
+                if not entrance:
+                    return "Error: Entrance building not found."
+                if entrance.CITYID != city_id:
+                    return "Error: Entrance building belongs to a different city."
+                # 入口所有は一意 (W7 柱5 / Codex 第二巡): 共有すると片方の
+                # 親変更が他方の「入口は親スコープ」不変条件を壊す
+                owner = db.query(RegionModel).filter_by(
+                    ENTRANCE_BUILDING_ID=entrance_building_id
+                ).first()
+                if owner is not None:
+                    return (
+                        f"Error: '{entrance.BUILDINGNAME}' is already the "
+                        f"entrance of region '{owner.NAME}'. An entrance "
+                        "building cannot be shared between regions."
+                    )
+                # 入口は親スコープに属する
+                entrance.REGION_ID = parent_region_id or None
+                entrance_id = entrance_building_id
+                entrance_note = f" Entrance: '{entrance.BUILDINGNAME}' (ID: {entrance_id})."
+            elif region_type == "game" and not parent_region_id:
+                # game トップ Region の入口は create_ruler の控室。ここでは作らない
+                pass
+            else:
+                entrance_name = f"{name}: 入口"
+                if db.query(BuildingModel).filter_by(
+                    CITYID=city_id, BUILDINGNAME=entrance_name
+                ).first():
+                    return (
+                        f"Error: A building named '{entrance_name}' already exists; "
+                        "cannot auto-create the entrance."
+                    )
+                entrance_id = entrance_id_for(region_id)
+                # ここへ来る衝突は「名前から導いた ID」か「カスタム ID」の場合。
+                # どちらもユーザーが選んだものなので、連番で黙って別 ID にせず
+                # エラーで返す (上の予約は、機械が選ぶ連番候補にだけ効く)。
+                # 大文字小文字を畳む理由は create_building の同じ検査と同じ
+                if (
+                    db.query(BuildingModel)
+                    .filter(func.lower(BuildingModel.BUILDINGID) == entrance_id.lower())
+                    .first()
+                ):
+                    return f"Error: A building with the ID '{entrance_id}' already exists."
+                db.add(BuildingModel(
+                    CITYID=city_id,
+                    BUILDINGID=entrance_id,
+                    BUILDINGNAME=entrance_name,
+                    DESCRIPTION=f"『{name}』への入口。",
+                    CAPACITY=10,
+                    SYSTEM_INSTRUCTION=(
+                        f"『{name}』の入口。ここから先が『{name}』の内部です。"
+                    ),
+                    REGION_ID=parent_region_id or None,
+                ))
+                entrance_note = f" Entrance '{entrance_name}' (ID: {entrance_id}) was auto-created."
+
+            db.add(RegionModel(
+                REGION_ID=region_id,
+                CITYID=city_id,
+                PARENT_REGION_ID=parent_region_id or None,
+                NAME=name,
+                DESCRIPTION=description,
+                REGION_TYPE=region_type,
+                ENTRANCE_BUILDING_ID=entrance_id,
+            ))
+            db.commit()
+            logging.info(
+                "Created new region '%s' (ID: %s) in city %s (entrance: %s).",
+                name, region_id, city_id, entrance_id or "(deferred to create_ruler)",
+            )
+            return f"Region '{name}' (ID: {region_id}) created successfully.{entrance_note}"
+        except Exception as exc:
+            db.rollback()
+            logging.error("Failed to create region '%s': %s", name, exc, exc_info=True)
+            return f"Error: {exc}"
+        finally:
+            db.close()
+
+    def update_region(
+        self,
+        region_id: str,
+        name: str,
+        description: str,
+        region_type: str,
+        parent_region_id: Optional[str] = None,
+    ) -> str:
+        if region_type not in self.VALID_REGION_TYPES:
+            return f"Error: Invalid region_type '{region_type}'. Must be one of {self.VALID_REGION_TYPES}."
+        db = self.SessionLocal()
+        try:
+            region = db.query(RegionModel).filter_by(REGION_ID=region_id).first()
+            if not region:
+                return "Error: Region not found."
+
+            if parent_region_id:
+                if parent_region_id == region_id:
+                    return "Error: A region cannot be its own parent."
+                parent = db.query(RegionModel).filter_by(REGION_ID=parent_region_id).first()
+                if not parent:
+                    return "Error: Parent region not found."
+                if parent.CITYID != region.CITYID:
+                    return "Error: Parent region belongs to a different city."
+                if parent.PARENT_REGION_ID:
+                    return "Error: Nesting is limited to one level; the parent is already a SubRegion."
+                has_children = db.query(RegionModel).filter_by(PARENT_REGION_ID=region_id).first()
+                if has_children:
+                    return "Error: Cannot make this region a SubRegion while it has SubRegions of its own."
+
+            # 分離監査 P1-6 (W7 柱5): 「入口は親スコープに属する」不変条件。
+            # parent 変更時は入口 Building の REGION_ID を同一 tx で新しい親
+            # スコープへ同期する (top 化なら City 直下 = None)。取り残すと
+            # 入口が旧スコープに残り、Region が通常移動で到達不能になる。
+            old_parent = region.PARENT_REGION_ID or None
+            new_parent = parent_region_id or None
+            if old_parent != new_parent and region.ENTRANCE_BUILDING_ID:
+                entrance = db.query(BuildingModel).filter_by(
+                    BUILDINGID=region.ENTRANCE_BUILDING_ID
+                ).first()
+                if not entrance:
+                    return (
+                        f"Error: Entrance building '{region.ENTRANCE_BUILDING_ID}' "
+                        "not found; cannot change the parent of this region."
+                    )
+                # レガシーデータで入口が共有されている場合、動かすと他 Region の
+                # 「入口は親スコープ」不変条件を壊すため拒否 (新規作成時は
+                # create_region が共有自体を拒否する)
+                other_owner = db.query(RegionModel).filter(
+                    RegionModel.ENTRANCE_BUILDING_ID == region.ENTRANCE_BUILDING_ID,
+                    RegionModel.REGION_ID != region_id,
+                ).first()
+                if other_owner is not None:
+                    return (
+                        f"Error: Entrance building '{entrance.BUILDINGNAME}' is "
+                        f"shared with region '{other_owner.NAME}'. Resolve the "
+                        "shared entrance before changing parents."
+                    )
+                entrance.REGION_ID = new_parent
+
+            region.NAME = name
+            region.DESCRIPTION = description
+            region.REGION_TYPE = region_type
+            region.PARENT_REGION_ID = new_parent
+            db.commit()
+            logging.info("Updated region '%s' (%s).", name, region_id)
+            return f"Region '{name}' updated successfully."
+        except Exception as exc:
+            db.rollback()
+            logging.error("Failed to update region '%s': %s", region_id, exc, exc_info=True)
+            return f"Error: {exc}"
+        finally:
+            db.close()
+
+    def delete_region(self, region_id: str) -> str:
+        db = self.SessionLocal()
+        try:
+            region = db.query(RegionModel).filter_by(REGION_ID=region_id).first()
+            if not region:
+                return "Error: Region not found."
+
+            child = db.query(RegionModel).filter_by(PARENT_REGION_ID=region_id).first()
+            if child:
+                return (
+                    f"Error: Cannot delete '{region.NAME}' because it has SubRegions. "
+                    "Delete or detach them first."
+                )
+            if region.RULER_ID:
+                return (
+                    f"Error: Cannot delete '{region.NAME}' because it has a Ruler "
+                    f"({region.RULER_ID}). Remove the Ruler first."
+                )
+            assigned = db.query(BuildingModel).filter_by(REGION_ID=region_id).first()
+            if assigned:
+                return (
+                    f"Error: Cannot delete '{region.NAME}' because buildings are assigned to it. "
+                    "Detach them first."
+                )
+
+            region_name = region.NAME
+            entrance_id = region.ENTRANCE_BUILDING_ID
+            db.delete(region)
+            db.commit()
+            logging.info("Deleted region '%s' (%s).", region_name, region_id)
+
+            # 自動生成された入口 (ID 規約 entrance_<region_id>) は Region と運命を
+            # 共にする。ユーザー指定の既存 Building が入口の場合は残す。
+            note = ""
+            if entrance_id == entrance_id_for(region_id):
+                entrance_result = self.delete_building(entrance_id)
+                if entrance_result.startswith("Error"):
+                    note = f" Note: auto-created entrance could not be removed: {entrance_result}"
+                else:
+                    note = " Auto-created entrance building was also removed."
+            return f"Region '{region_name}' deleted successfully.{note}"
+        except Exception as exc:
+            db.rollback()
+            logging.error("Failed to delete region '%s': %s", region_id, exc, exc_info=True)
+            return f"Error: {exc}"
+        finally:
+            db.close()
+
+    def set_building_region(self, building_id: str, region_id: Optional[str]) -> str:
+        """Building の Region 所属を設定/解除する (region_id=None で解除)。"""
+        db = self.SessionLocal()
+        try:
+            building = db.query(BuildingModel).filter_by(BUILDINGID=building_id).first()
+            if not building:
+                return "Error: Building not found."
+
+            # 分離監査 P1-6 (W7 柱5): 入口 Building の所属は「親スコープ」という
+            # 不変条件ごと Region service (create/update/delete_region) が管理する。
+            # ここで自由に付け替えられると、入口を Region 自身の内部へ入れて外から
+            # 見えなくしたり、detach で到達不能にできてしまう。
+            entrance_owner = db.query(RegionModel).filter_by(
+                ENTRANCE_BUILDING_ID=building_id
+            ).first()
+            if entrance_owner is not None:
+                return (
+                    f"Error: '{building.BUILDINGNAME}' is the entrance of region "
+                    f"'{entrance_owner.NAME}'. Its region assignment is managed by "
+                    "the region itself (change the region's parent instead)."
+                )
+
+            if region_id:
+                region = db.query(RegionModel).filter_by(REGION_ID=region_id).first()
+                if not region:
+                    return "Error: Region not found."
+                if region.CITYID != building.CITYID:
+                    return "Error: Region belongs to a different city."
+                building.REGION_ID = region_id
+            else:
+                building.REGION_ID = None
+
+            db.commit()
+            logging.info(
+                "Set region of building '%s' to %s.", building_id, region_id or "(none)"
+            )
+            return f"Building '{building.BUILDINGNAME}' region set to {region_id or '(none)'}."
+        except Exception as exc:
+            db.rollback()
+            logging.error(
+                "Failed to set region of building '%s': %s", building_id, exc, exc_info=True
+            )
+            return f"Error: {exc}"
+        finally:
+            db.close()
+
     # --- Item management ---
 
     def get_item_details(self, item_id: str) -> Optional[Dict[str, Any]]:
@@ -523,6 +945,7 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                 "STATE_JSON": item.STATE_JSON or "",
                 "CREATOR_ID": item.CREATOR_ID,
                 "SOURCE_CONTEXT": item.SOURCE_CONTEXT,
+                "CREATED_AT": item.CREATED_AT.isoformat() if item.CREATED_AT else None,
                 "OWNER_KIND": location.OWNER_KIND if location else "world",
                 "OWNER_ID": location.OWNER_ID if location else "",
             }
@@ -543,12 +966,18 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
     ) -> str:
         normalized_kind = (owner_kind or "world").strip().lower()
         owner_id = (owner_id or "").strip()
-        if normalized_kind in {"building", "persona"} and not owner_id:
-            return "Error: owner_id is required for building or persona ownership."
+        if normalized_kind in {"building", "persona", "bag"} and not owner_id:
+            return f"Error: owner_id is required for {normalized_kind} ownership."
         if normalized_kind == "building" and owner_id not in self.building_map:
             return f"Error: Building '{owner_id}' not found."
         if normalized_kind == "persona" and owner_id not in self.personas:
             return f"Error: Persona '{owner_id}' not found."
+        if normalized_kind == "bag":
+            bag_item = self.manager.item_service.items.get(owner_id)
+            if not bag_item:
+                return f"Error: Bag item '{owner_id}' not found."
+            if (bag_item.get("type") or "").lower() != "bag":
+                return f"Error: Item '{owner_id}' is not a bag."
         state_payload = (state_json or "").strip()
         if state_payload:
             try:
@@ -573,11 +1002,15 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
             )
             db.add(new_item)
             if normalized_kind != "world":
+                slot_num = self.manager.item_service._assign_slot(
+                    db, normalized_kind, owner_id
+                )
                 db.add(
                     ItemLocationModel(
                         ITEM_ID=item_id,
                         OWNER_KIND=normalized_kind,
                         OWNER_ID=owner_id,
+                        SLOT_NUMBER=slot_num,
                     )
                 )
             db.commit()
@@ -604,12 +1037,20 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
     ) -> str:
         normalized_kind = (owner_kind or "world").strip().lower()
         owner_id = (owner_id or "").strip()
-        if normalized_kind in {"building", "persona"} and not owner_id:
-            return "Error: owner_id is required for building or persona ownership."
+        if normalized_kind in {"building", "persona", "bag"} and not owner_id:
+            return f"Error: owner_id is required for {normalized_kind} ownership."
         if normalized_kind == "building" and owner_id not in self.building_map:
             return f"Error: Building '{owner_id}' not found."
         if normalized_kind == "persona" and owner_id not in self.personas:
             return f"Error: Persona '{owner_id}' not found."
+        if normalized_kind == "bag":
+            bag_item = self.manager.item_service.items.get(owner_id)
+            if not bag_item:
+                return f"Error: Bag item '{owner_id}' not found."
+            if (bag_item.get("type") or "").lower() != "bag":
+                return f"Error: Item '{owner_id}' is not a bag."
+            if owner_id == item_id:
+                return "Error: Cannot place an item inside itself."
         state_payload = (state_json or "").strip()
         if state_payload:
             try:
@@ -639,14 +1080,27 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                     db.delete(location)
             else:
                 if location:
-                    location.OWNER_KIND = normalized_kind
-                    location.OWNER_ID = owner_id
+                    owner_changed = (
+                        location.OWNER_KIND != normalized_kind
+                        or location.OWNER_ID != owner_id
+                    )
+                    if owner_changed:
+                        slot_num = self.manager.item_service._assign_slot(
+                            db, normalized_kind, owner_id
+                        )
+                        location.OWNER_KIND = normalized_kind
+                        location.OWNER_ID = owner_id
+                        location.SLOT_NUMBER = slot_num
                 else:
+                    slot_num = self.manager.item_service._assign_slot(
+                        db, normalized_kind, owner_id
+                    )
                     db.add(
                         ItemLocationModel(
                             ITEM_ID=item_id,
                             OWNER_KIND=normalized_kind,
                             OWNER_ID=owner_id,
+                            SLOT_NUMBER=slot_num,
                         )
                     )
             db.commit()
@@ -701,9 +1155,21 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                 "IS_DISPATCHED": ai.IS_DISPATCHED,
                 "DEFAULT_MODEL": ai.DEFAULT_MODEL,
                 "LIGHTWEIGHT_MODEL": ai.LIGHTWEIGHT_MODEL,
-                "INTERACTION_MODE": ai.INTERACTION_MODE,
+                "VISION_MODEL": ai.VISION_MODEL,
+                "AUDIO_MODEL": ai.AUDIO_MODEL,
+                "VIDEO_MODEL": ai.VIDEO_MODEL,
+                "MEMORY_WEAVE_MODEL": ai.MEMORY_WEAVE_MODEL,
+                "AUTONOMY_ENABLED": ai.AUTONOMY_ENABLED,
                 "CHRONICLE_ENABLED": ai.CHRONICLE_ENABLED,
+                "AUTONOMOUS_CHRONICLE_ENABLED": ai.AUTONOMOUS_CHRONICLE_ENABLED,
+                "AUTO_RECALL_ENABLED": ai.AUTO_RECALL_ENABLED,
                 "MEMORY_WEAVE_CONTEXT": ai.MEMORY_WEAVE_CONTEXT,
+                "MEMOPEDIA_INDEX_ENABLED": ai.MEMOPEDIA_INDEX_ENABLED,
+                "CORE_MEMORY_CHAR_BUDGET": ai.CORE_MEMORY_CHAR_BUDGET,
+                "SPELL_ENABLED": ai.SPELL_ENABLED,
+                "REALTIME_INFO_ENABLED": ai.REALTIME_INFO_ENABLED,
+                "META_JUDGMENT_CONFIG": ai.META_JUDGMENT_CONFIG,
+                "USER_CONV_TIMEOUT_MINUTES": ai.USER_CONV_TIMEOUT_MINUTES,
             }
         finally:
             db.close()
@@ -739,12 +1205,24 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
         home_city_id: int,
         default_model: Optional[str],
         lightweight_model: Optional[str],
-        interaction_mode: str,
+        autonomy_enabled: bool,
         avatar_path: Optional[str],
         avatar_upload: Optional[str],
         appearance_image_path: Optional[str] = None,
+        vision_model: Optional[str] = None,
+        audio_model: Optional[str] = None,
+        video_model: Optional[str] = None,
+        memory_weave_model: Optional[str] = None,
         chronicle_enabled: Optional[bool] = None,
+        autonomous_chronicle_enabled: Optional[bool] = None,
+        auto_recall_enabled: Optional[bool] = None,
         memory_weave_context: Optional[bool] = None,
+        memopedia_index_enabled: Optional[bool] = None,
+        core_memory_char_budget: Optional[int] = None,
+        spell_enabled: Optional[bool] = None,
+        realtime_info_enabled: Optional[bool] = None,
+        meta_judgment_config: Optional[Dict[str, Any]] = None,
+        user_conv_timeout_minutes: Optional[int] = None,
     ) -> str:
         db = self.SessionLocal()
         try:
@@ -772,66 +1250,11 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                     )
                     return f"Error: Failed to process avatar upload: {exc}"
 
-            original_mode = ai.INTERACTION_MODE
-            mode_changed = original_mode != interaction_mode
-            move_feedback = ""
+            original_autonomy = ai.AUTONOMY_ENABLED
+            state_changed = original_autonomy != autonomy_enabled
 
-            if mode_changed:
-                if interaction_mode == "sleep":
-                    ai.INTERACTION_MODE = "sleep"
-                    logging.info(
-                        "AI '%s' mode changed to 'sleep'. Attempting to move to private room.",
-                        name,
-                    )
-
-                    private_room_id = ai.PRIVATE_ROOM_ID
-                    if not private_room_id or private_room_id not in self.building_map:
-                        move_feedback = (
-                            " Note: Could not move to private room because it is not "
-                            "configured or invalid."
-                        )
-                        logging.warning(
-                            "Cannot move AI '%s' to sleep. Private room ID '%s' is invalid.",
-                            name,
-                            private_room_id,
-                        )
-                    else:
-                        current_building_id = self.personas[ai_id].current_building_id
-                        if current_building_id != private_room_id:
-                            success, reason = self._move_persona(
-                                ai_id,
-                                current_building_id,
-                                private_room_id,
-                                db_session=db,
-                            )
-                            if success:
-                                self.personas[ai_id].current_building_id = private_room_id
-                                move_feedback = (
-                                    " Moved to private room "
-                                    f"'{self.building_map[private_room_id].name}'."
-                                )
-                                logging.info(
-                                    "Successfully moved AI '%s' to their private room '%s'.",
-                                    name,
-                                    private_room_id,
-                                )
-                            else:
-                                move_feedback = (
-                                    f" Note: Failed to move to private room: {reason}."
-                                )
-                                logging.error(
-                                    "Failed to move AI '%s' to private room: %s",
-                                    name,
-                                    reason,
-                                )
-                elif interaction_mode in ("auto", "manual"):
-                    ai.INTERACTION_MODE = interaction_mode
-                else:
-                    logging.warning(
-                        "Invalid interaction mode '%s' requested for AI '%s'. No change made.",
-                        interaction_mode,
-                        name,
-                    )
+            if state_changed:
+                ai.AUTONOMY_ENABLED = autonomy_enabled
 
             ai.AINAME = name
             ai.DESCRIPTION = description
@@ -839,6 +1262,10 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
             ai.HOME_CITYID = home_city_id
             ai.DEFAULT_MODEL = default_model or None
             ai.LIGHTWEIGHT_MODEL = lightweight_model or None
+            ai.VISION_MODEL = vision_model or None
+            ai.AUDIO_MODEL = audio_model or None
+            ai.VIDEO_MODEL = video_model or None
+            ai.MEMORY_WEAVE_MODEL = memory_weave_model or None
             ai.AVATAR_IMAGE = avatar_value
             # Update appearance image path if provided
             if appearance_image_path is not None:
@@ -846,9 +1273,45 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
             # Update Chronicle auto-generation toggle
             if chronicle_enabled is not None:
                 ai.CHRONICLE_ENABLED = chronicle_enabled
+            # Update autonomous-Pulse Chronicle generation toggle (Phase 0, memory_architecture_v2 §6.3)
+            if autonomous_chronicle_enabled is not None:
+                ai.AUTONOMOUS_CHRONICLE_ENABLED = autonomous_chronicle_enabled
+            # Update auto-recall (記憶アーキv2 ゾーン C) per-persona toggle
+            if auto_recall_enabled is not None:
+                ai.AUTO_RECALL_ENABLED = auto_recall_enabled
             # Update Memory Weave context injection toggle
             if memory_weave_context is not None:
                 ai.MEMORY_WEAVE_CONTEXT = memory_weave_context
+            # Update Memopedia 索引の head 常時表示 (旧方式) 復活トグル
+            if memopedia_index_enabled is not None:
+                ai.MEMOPEDIA_INDEX_ENABLED = memopedia_index_enabled
+            # Update コア記憶の文字数目安 (記憶アーキv2 ゾーン A, §5)。
+            # 0 / 負値が渡されたら NULL に倒して既定値運用 (= 2000 字) に戻す。
+            if core_memory_char_budget is not None:
+                if core_memory_char_budget > 0:
+                    ai.CORE_MEMORY_CHAR_BUDGET = int(core_memory_char_budget)
+                else:
+                    ai.CORE_MEMORY_CHAR_BUDGET = None
+            # Update Spell system toggle
+            if spell_enabled is not None:
+                ai.SPELL_ENABLED = spell_enabled
+            # Update realtime info injection toggle
+            if realtime_info_enabled is not None:
+                ai.REALTIME_INFO_ENABLED = realtime_info_enabled
+            # Update Meta-Judgment Pulse configuration (Phase 4-e)
+            if meta_judgment_config is not None:
+                if isinstance(meta_judgment_config, dict) and meta_judgment_config:
+                    ai.META_JUDGMENT_CONFIG = json.dumps(meta_judgment_config, ensure_ascii=False)
+                else:
+                    # 空 dict / None / その他は NULL に倒して既定値運用に戻す
+                    ai.META_JUDGMENT_CONFIG = None
+            # 2026-05-09: wait_response Track の自動 pause タイマー閾値 (分)。
+            # 0 / 負値が渡されたら NULL に倒して既定値運用 (= 30 分) に戻す。
+            if user_conv_timeout_minutes is not None:
+                if user_conv_timeout_minutes > 0:
+                    ai.USER_CONV_TIMEOUT_MINUTES = int(user_conv_timeout_minutes)
+                else:
+                    ai.USER_CONV_TIMEOUT_MINUTES = None
             db.commit()
 
             llm_warnings = []
@@ -856,8 +1319,29 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                 persona = self.personas[ai_id]
                 persona.persona_name = name
                 persona.persona_system_instruction = system_prompt
-                persona.interaction_mode = ai.INTERACTION_MODE
+                persona.autonomy_enabled = ai.AUTONOMY_ENABLED
                 persona.lightweight_model = lightweight_model
+                persona.vision_model = vision_model
+                persona.audio_model = audio_model
+                persona.video_model = video_model
+                persona.memory_weave_model = memory_weave_model
+
+                # Phase C-2: AUTONOMY_ENABLED 変更を AutonomyManager に反映
+                # (True なら起動、False なら停止)。
+                # ``ensure_autonomy_for`` は SAIVerseManager のメソッドのため、
+                # AdminService からは ``self.manager`` 経由で呼び出す。
+                if state_changed:
+                    try:
+                        ensure_autonomy = getattr(
+                            self.manager, "ensure_autonomy_for", None
+                        )
+                        if callable(ensure_autonomy):
+                            ensure_autonomy(ai_id)
+                    except Exception:
+                        logging.warning(
+                            "Failed to sync AutonomyManager state for '%s'",
+                            ai_id, exc_info=True,
+                        )
 
                 # Update default model and recreate LLM client if model changed
                 # If a global chat-option override is active, preserve it;
@@ -924,11 +1408,11 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
             status_message = f"AI '{name}' updated successfully."
             if llm_warnings:
                 status_message += " [WARNING:LLM] " + "; ".join(llm_warnings)
-            if mode_changed:
+            if state_changed:
                 status_message += (
-                    f" Mode changed from '{original_mode}' to '{interaction_mode}'."
+                    f" Autonomy changed from {original_autonomy} to {autonomy_enabled}."
                 )
-            return status_message + move_feedback
+            return status_message
         except Exception as exc:
             db.rollback()
             logging.error("Failed to update AI '%s': %s", ai_id, exc, exc_info=True)
@@ -936,6 +1420,13 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
         finally:
             db.close()
     def delete_ai(self, ai_id: str) -> str:
+        """Deletes an AI after checking its state.
+
+        既存の流儀 (同一 transaction 内で関連テーブル → ai 行の順に処理し、
+        最後に一括 commit) に合わせて、タスク帳 (task_book) の当該ペルソナ行も
+        ここで**削除**する (残置ではなく削除 — FK は宣言のみで DB は強制しない
+        アプリ層検査の方針のため、消さないと孤児行が残る)。
+        """
         if self._is_seeded_entity(ai_id):
             return "Error: Seeded AIs cannot be deleted."
 
@@ -954,6 +1445,8 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                 BuildingOccupancyLog.AIID == ai_id,
                 BuildingOccupancyLog.EXIT_TIMESTAMP.is_(None),
             ).update({"EXIT_TIMESTAMP": datetime.now()})
+
+            task_book.purge_persona_entries(db, ai_id)
 
             db.delete(ai)
             db.commit()
@@ -1022,8 +1515,7 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
             ai_id, from_building_id, target_building_id
         )
         if success:
-            persona.current_building_id = target_building_id
-            persona.register_entry(target_building_id)
+            # 位置属性と cursor 儀式は move_entity が canonical sync 済み (W7 柱5)
             return (
                 f"Successfully moved '{persona.persona_name}' to "
                 f"'{self.building_map[target_building_id].name}'."
@@ -1045,10 +1537,15 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                 f"<b>{event_message}</b></div>"
             )
             for building_id in self.building_map.keys():
-                self.building_histories.setdefault(building_id, []).append(
-                    {"role": "host", "content": formatted_message}
+                # heard_by = current occupants so all present personas perceive
+                # the world event in their auto_ingest. add_building_event
+                # handles quarantine skip and modified_buildings marking.
+                self.add_building_event(
+                    building_id,
+                    {"role": "host", "content": formatted_message},
+                    heard_by=list(self.occupants.get(building_id, [])),
                 )
-            self._save_building_histories()
+            self._save_modified_buildings()
             logging.info("World event successfully broadcasted to all buildings.")
             return "World event triggered successfully."
         except Exception as exc:

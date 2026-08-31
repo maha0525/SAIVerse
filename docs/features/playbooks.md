@@ -1,157 +1,30 @@
-# Playbook/SEA
+# Playbook / SEA
 
-AIの行動パターンを定義する「Playbook」と、その実行エンジン「SEA」について説明します。
+ペルソナの行動パターンを定義する「Playbook」と、その実行エンジン「SEA」の概要。詳しい概念は [concepts/playbook.md](../concepts/playbook.md)、作り方（正確なノードスキーマ）は [開発者ガイド: Playbook 作成](../developer-guide/creating-playbooks.md) を参照。
 
 ## 概要
 
-SEA (Script Execution Agent) は、JSONベースのフロー定義「Playbook」を実行するエンジンです。複雑な行動パターンを宣言的に記述できます。
+**SEA (Self-Evolving Agent)** は LangGraph ベースの Playbook 実行ランタイム（`sea/runtime.py`）。**Playbook** は LLM / tool / speak ノードの有向グラフを JSON で宣言したもので、条件分岐・反復が組める。
 
-## Playbookの構造
+ペルソナの1回の [Pulse](../concepts/pulse.md)（認知サイクル）は Playbook を1つ実行する。入口となる**メタ Playbook**が2系統ある:
 
-```json
-{
-  "name": "meta_user",
-  "description": "ユーザー入力に対する応答",
-  "start_node": "start",
-  "nodes": [
-    {
-      "id": "start",
-      "type": "pass",
-      "next": "generate"
-    },
-    {
-      "id": "generate",
-      "type": "llm",
-      "prompt_template": "ユーザーの入力: {user_input}\n応答:",
-      "next": "end"
-    }
-  ]
-}
-```
+- `meta_user` 系（`track_user_conversation.json` 等）— ユーザー入力を捌く
+- `meta_auto` 系（[メタ判断](../concepts/meta-judgment.md) の `meta_judgment*.json`、時間割の判断点 `judgment_*.json` 等）— 自律 Pulse を捌く（v1 の `track_autonomous.json` は時間割移行で退役済み）
 
-### 必須フィールド
+## ノードと配置（要点）
 
-| フィールド | 説明 |
-|------------|------|
-| `name` | Playbook名（一意） |
-| `start_node` | 開始ノードのID |
-| `nodes` | ノードの配列 |
+- ノードは `llm` / `tool` / `memorize` / `speak` / `subplay` / `set` / `exec` / `pass` など。各ノードのフィールドの正は [`sea/playbook_models.py`](../../sea/playbook_models.py)
+- Playbook JSON は `builtin_data/playbooks/public/`（または `~/.saiverse/user_data/playbooks/`）に置き、**`python scripts/import_playbook.py --file <path>` で DB に取り込む**（置くだけでは反映されない）
+- LLM が発話中に `/spell run_playbook name='...'` と書くと、指定 Playbook が**サブライン**として動的起動される（→ [Spell](../concepts/spell.md)）
 
-## ノードタイプ
+> ⚠️ **function calling は使わない**（キャッシュを壊すため）。structured output + tool ノード固定実行が正道。詳細な設計哲学と正確なフィールド名は [開発者ガイド](../developer-guide/creating-playbooks.md) にまとめてある（このページでノードスキーマを二重管理しない）。
 
-### pass
+## 同梱 Playbook
 
-次のノードへ遷移（条件分岐可能）。
-
-```json
-{
-  "id": "check",
-  "type": "pass",
-  "next": "default_next",
-  "conditional_next": [
-    {"condition": "{should_speak} == true", "next": "speak"},
-    {"condition": "{should_wait} == true", "next": "wait"}
-  ]
-}
-```
-
-### llm
-
-LLMを呼び出して応答を生成。
-
-```json
-{
-  "id": "generate",
-  "type": "llm",
-  "prompt_template": "状況: {context}\n応答:",
-  "output_key": "response",
-  "model": "gemini-2.5-flash",
-  "next": "end"
-}
-```
-
-### memorize
-
-状態変数に値を保存。
-
-```json
-{
-  "id": "save",
-  "type": "memorize",
-  "key": "last_response",
-  "value": "{response}",
-  "next": "end"
-}
-```
-
-### tool_call
-
-ツールを実行。
-
-```json
-{
-  "id": "search",
-  "type": "tool_call",
-  "tool_name": "web_search",
-  "tool_args": {"query": "{search_term}"},
-  "output_key": "search_result",
-  "next": "process"
-}
-```
-
-### sub_playbook
-
-別のPlaybookを呼び出し。
-
-```json
-{
-  "id": "call_sub",
-  "type": "sub_playbook",
-  "playbook_name": "sub_speak",
-  "input_mapping": {"message": "{generated_text}"},
-  "next": "end"
-}
-```
-
-## 状態変数
-
-`{variable_name}` で参照。ノード間でデータを受け渡し。
-
-### 組み込み変数
-
-| 変数 | 説明 |
-|------|------|
-| `{user_input}` | ユーザーの入力 |
-| `{context}` | 現在のコンテキスト |
-| `{persona_name}` | ペルソナ名 |
-
-### 出力変数
-
-`output_key` で指定した変数に結果を保存。
-
-```json
-{
-  "type": "llm",
-  "output_key": "my_response",
-  "next": "use_response"
-}
-// 次のノードで {my_response} として参照可能
-```
-
-## ファイル配置
-
-Playbookは `sea/playbooks/` に配置：
-
-```
-sea/playbooks/
-├── meta_user.json       # ユーザー入力処理
-├── meta_auto.json       # 自律行動
-├── meta_auto_full.json  # フル自律行動
-├── sub_speak.json       # 発話サブPlaybook
-└── ...
-```
+29 本の一覧は [Playbook カタログ](../reference/playbook-catalog.md) を参照。
 
 ## 次のステップ
 
-- [Playbook作成](../developer-guide/creating-playbooks.md) - 独自Playbookの作り方
-- [ペルソナ](../concepts/persona.md) - AIの仕組み
+- [concepts/playbook.md](../concepts/playbook.md) - 概念と実装入口
+- [Playbook 作成](../developer-guide/creating-playbooks.md) - 独自 Playbook の作り方
+- [Playbook カタログ](../reference/playbook-catalog.md) - 同梱一覧

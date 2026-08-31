@@ -57,6 +57,43 @@ class TestConfigure(unittest.TestCase):
         tracker._session_factory = None
 
 
+class TestUnconfiguredNoWrite(unittest.TestCase):
+    """未 configure のプロセス (pytest 等) からは一切 DB に書かないことの回帰テスト。
+
+    かつて _flush_to_db は未 configure 時に database.session.SessionLocal
+    (= 本番 DB) へ黙ってフォールバックし、テストの架空モデル使用量が本番の
+    llm_usage_log に混入した (2026-08-16 発覚)。
+    """
+
+    def setUp(self):
+        self.tracker = get_usage_tracker()
+        self._orig_factory = self.tracker._session_factory
+        self._orig_warned = self.tracker._warned_unconfigured
+        self.tracker._session_factory = None
+        self.tracker._warned_unconfigured = False
+        with self.tracker._pending_lock:
+            self.tracker._pending_records.clear()
+
+    def tearDown(self):
+        self.tracker._session_factory = self._orig_factory
+        self.tracker._warned_unconfigured = self._orig_warned
+        with self.tracker._pending_lock:
+            self.tracker._pending_records.clear()
+
+    def test_record_usage_without_configure_drops_records(self):
+        with self.assertLogs("saiverse.usage_tracker", level="WARNING") as cm:
+            self.tracker.record_usage("fake-model", 100, 1, persona_id="tester")
+        self.assertEqual(len(self.tracker._pending_records), 0)
+        self.assertTrue(any("not configured" in msg for msg in cm.output))
+
+    def test_unconfigured_warning_fires_only_once(self):
+        with self.assertLogs("saiverse.usage_tracker", level="DEBUG") as cm:
+            self.tracker.record_usage("fake-model", 100, 1)
+            self.tracker.record_usage("fake-model", 100, 1)
+        warnings = [m for m in cm.output if m.startswith("WARNING")]
+        self.assertEqual(len(warnings), 1)
+
+
 class TestFlush(unittest.TestCase):
     def test_flush_clears_pending(self):
         tracker = get_usage_tracker()

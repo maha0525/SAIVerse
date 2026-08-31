@@ -1,5 +1,4 @@
 from .storage import (
-    TaskStorage,
     TaskConflictError,
     TaskNotFoundError,
     TaskHistoryEntry,
@@ -8,9 +7,10 @@ from .storage import (
     TaskStatus,
     TaskStepStatus,
 )
+from .store import PersonaTaskStore
 
 __all__ = [
-    "TaskStorage",
+    "PersonaTaskStore",
     "TaskConflictError",
     "TaskNotFoundError",
     "TaskHistoryEntry",

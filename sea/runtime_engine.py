@@ -6,8 +6,14 @@ import uuid
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from saiverse.logging_config import log_sea_trace
+from sea.message_stamp import stamp_generation_metadata
 from sea.playbook_models import PlaybookSchema
+from sea.runtime_state import effective_auto_mode, set_playbook_var
 from sea.runtime_utils import _format, _resolve_template_arg
+from tools import TOOL_REGISTRY, canonicalize_tool_name
+from tools.context import persona_context
+from tools.core import parse_tool_result
+from tools.mcp_client import maybe_await_tool_result
 
 LOGGER = logging.getLogger(__name__)
 
@@ -25,9 +31,6 @@ class RuntimeEngine:
     def lg_tool_node(self, node_def: Any, persona: Any, playbook: PlaybookSchema, event_callback: EventCallback = None, auto_mode: bool = False) -> StateNode:
         from pathlib import Path
 
-        from tools import TOOL_REGISTRY
-        from tools.context import persona_context
-
         tool_name = node_def.action
         args_input = getattr(node_def, "args_input", None)
         output_key = getattr(node_def, "output_key", None)
@@ -40,7 +43,10 @@ class RuntimeEngine:
             node_id = getattr(node_def, "id", "tool")
             if event_callback:
                 event_callback({"type": "status", "content": f"{playbook.name} / {node_id}", "playbook": playbook.name, "node": node_id})
-            tool_func = TOOL_REGISTRY.get(tool_name)
+            # アドオン由来のツールは <addon>__<name> キーで登録されるため、
+            # Playbook 内の素名参照を一意なら名前空間キーへ解決する。
+            tool_key = canonicalize_tool_name(tool_name)
+            tool_func = TOOL_REGISTRY.get(tool_key)
             persona_obj = state.get("_persona_obj") or persona
             persona_id = getattr(persona_obj, "persona_id", "unknown")
 
@@ -51,10 +57,15 @@ class RuntimeEngine:
 
                 # Build kwargs from args_input (None or {} = no args)
                 # Supports nested keys via dot notation (e.g., "tool_call.args.playbook_name")
+                # String values are resolved as state variable paths.
+                # To pass a literal string, use {"$literal": "value"} syntax.
                 kwargs: Dict[str, Any] = {}
                 if args_input:
                     for arg_name, source in args_input.items():
-                        if isinstance(source, str):
+                        if isinstance(source, dict) and "$literal" in source:
+                            value = source["$literal"]
+                            LOGGER.debug("[sea][tool] Using $literal arg '%s' = %s", arg_name, value)
+                        elif isinstance(source, str):
                             value = self.runtime._resolve_state_value(state, source)
                             LOGGER.debug("[sea][tool] Mapping arg '%s' <- state['%s'] = %s", arg_name, source, value)
                         else:
@@ -71,14 +82,32 @@ class RuntimeEngine:
                     LOGGER.info("[sea][tool] Tool function found: %s", tool_func)
 
                 # Execute tool with persona context
+                # 直前の LLM speak ノードが保存した message_id を後続ツールにも
+                # 引き継ぐ。persona_context は毎回 _MESSAGE_ID を強制的に書き換える
+                # ため、state 経由で明示的に渡さないとアドオン連携が切れる。
+                _current_msg_id = state.get("_last_message_id")
+                # PulseContext も同様に state 経由で受け渡す。track_* 系スペル等が
+                # 「Pulse 完了時に deferred 適用」するために必須 (Intent A v0.14)。
+                _pulse_ctx = state.get("_pulse_context")
+                # auto_mode は factory が capture した引数でなく state の実効値
+                # (親 Pulse からの継承込み) を読む。
+                _eff_auto_mode = effective_auto_mode(state, auto_mode)
                 if persona_id and persona_dir:
-                    with persona_context(persona_id, persona_dir, manager_ref, playbook_name=playbook.name, auto_mode=auto_mode, event_callback=event_callback):
-                        result = tool_func(**kwargs) if callable(tool_func) else None
+                    with persona_context(persona_id, persona_dir, manager_ref, playbook_name=playbook.name, auto_mode=_eff_auto_mode, event_callback=event_callback, message_id=_current_msg_id, pulse_context=_pulse_ctx):
+                        result = await maybe_await_tool_result(tool_func, **kwargs)
                 else:
-                    result = tool_func(**kwargs) if callable(tool_func) else None
+                    result = await maybe_await_tool_result(tool_func, **kwargs)
 
-                # Log tool result
-                result_str = str(result)
+                # A native tool returning a tuple ``(content, snippet, file_path,
+                # metadata)`` (or the 2-/3-tuple forms) must NOT leak its raw
+                # repr into the trace, PulseContext, SAIMemory, or the LLM
+                # message — only its text belongs there. Normalize tuples via the
+                # canonical parser (the raw ``result`` is still used below for
+                # output_keys / output_key, the explicit multi-value contract).
+                # Non-tuple returns (str / dict / ToolResult) keep str() so a
+                # bare dict is not lossily collapsed to "".
+                # See docs/issues/native_tool_return_4tuple_bug.md.
+                result_str = parse_tool_result(result)[0] if isinstance(result, tuple) else str(result)
                 result_preview = result_str[:200] + "..." if len(result_str) > 200 else result_str
                 LOGGER.info("[sea][tool] RESULT %s -> %s", tool_name, result_preview)
                 log_sea_trace(playbook.name, node_id, "TOOL", f"action={tool_name} → {result_str}")
@@ -95,6 +124,7 @@ class RuntimeEngine:
                             "playbook": pb_display, "status": "completed",
                             "persona_id": getattr(persona, "persona_id", None),
                             "persona_name": getattr(persona, "persona_name", None),
+                            "pulse_id": state.get("_pulse_id"),
                         })
 
                 # Handle tuple results with output_keys (for multi-value returns)
@@ -102,8 +132,8 @@ class RuntimeEngine:
                     # Expand tuple to multiple state variables
                     for i, key in enumerate(output_keys):
                         if i < len(result):
-                            state[key] = result[i]
-                            LOGGER.debug("[sea][LangGraph] Stored tuple[%d] in state[%s]: %s", i, key, str(result[i]))
+                            if set_playbook_var(state, key, result[i], where=f"node '{node_id}' output_keys[{i}]"):
+                                LOGGER.debug("[sea][LangGraph] Stored tuple[%d] in state[%s]: %s", i, key, str(result[i]))
                     # Set last to first element (primary result)
                     state["last"] = str(result[0]) if result else ""
                 elif isinstance(result, tuple):
@@ -114,7 +144,7 @@ class RuntimeEngine:
 
                 # Store result in state if output_key is specified (legacy single-value)
                 if output_key and not output_keys:
-                    state[output_key] = result
+                    set_playbook_var(state, output_key, result, where=f"node '{node_id}' output_key")
 
                 # Append to PulseContext
                 _pulse_ctx = state.get("_pulse_context")
@@ -125,8 +155,31 @@ class RuntimeEngine:
                         node_id=node_id, playbook_name=playbook.name,
                         tool_name=tool_name,
                         important=getattr(node_def, "important", False) or False))
+
+                # Append to in-memory messages so subsequent LLM nodes in the
+                # same Pulse can see the tool result. PulseContext alone is not
+                # enough because LLM nodes that read state["_messages"] directly
+                # (= the path that becomes the only path once context_profile is
+                # removed in Phase 3 段階 4-D) would otherwise miss the result.
+                # Pattern matches lg_subplay_node's report_to_parent fix
+                # (sea/runtime_nodes.py:229-263, まはー指摘 2026-04-28). Wrapped
+                # as user role + <system> tag for cross-provider compatibility
+                # (Gemini rejects mid-stream system role; see sea/runtime_llm.py
+                # の同一書式コメント).
+                formatted = f"<system>tool '{tool_name}' result:\n{result_str}</system>"
+                if state.get("_messages") is None:
+                    state["_messages"] = []
+                state["_messages"].append({"role": "user", "content": formatted})
             except Exception as exc:
-                state["last"] = f"Tool error: {exc}"
+                error_msg = f"Tool error: {exc}"
+                state["last"] = error_msg
+                # Populate output_keys so downstream nodes can resolve template variables
+                if output_keys:
+                    for i, key in enumerate(output_keys):
+                        set_playbook_var(state, key, None, where=f"node '{node_id}' output_keys[{i}]")
+                    set_playbook_var(state, output_keys[0], error_msg, where=f"node '{node_id}' output_keys[0]")
+                if output_key and not output_keys:
+                    set_playbook_var(state, output_key, error_msg, where=f"node '{node_id}' output_key")
                 LOGGER.exception("SEA LangGraph tool %s failed", tool_name)
                 # Append error to PulseContext
                 _pulse_ctx = state.get("_pulse_context")
@@ -136,6 +189,13 @@ class RuntimeEngine:
                         role="tool", content=f"Tool error: {exc}",
                         node_id=node_id, playbook_name=playbook.name,
                         tool_name=tool_name))
+                # Also surface the error to in-memory messages so subsequent
+                # LLM nodes can react (e.g. retry / abort / report). Same
+                # rationale as the success path.
+                formatted = f"<system>tool '{tool_name}' error:\n{error_msg}</system>"
+                if state.get("_messages") is None:
+                    state["_messages"] = []
+                state["_messages"].append({"role": "user", "content": formatted})
             return state
 
         return node
@@ -164,44 +224,23 @@ class RuntimeEngine:
             node_id = getattr(node_def, "id", "exec")
             if event_callback:
                 event_callback({"type": "status", "content": f"{playbook.name} / {node_id}", "playbook": playbook.name, "node": node_id})
+            # auto_mode は factory が capture した引数でなく state の実効値
+            # (親 Pulse からの継承込み) を読む。以降の許可判定と子 Playbook への
+            # 引き渡しは全てこの値を使う。
+            eff_auto_mode = effective_auto_mode(state, auto_mode)
             selected_playbook = state.get(playbook_source)
-            sub_name = selected_playbook or state.get("last") or "basic_chat"
+            sub_name = selected_playbook or state.get("last") or ""
             clean_name = str(sub_name).strip()
-            selected_playbook_missing = (
-                playbook.name == "meta_user_manual"
-                and playbook_source == "selected_playbook"
-                and bool(selected_playbook)
-            )
 
-            sub_pb = self.runtime._load_playbook_for(clean_name, persona, building_id)
+            sub_pb = self.runtime._load_playbook_for(clean_name, persona, building_id) if clean_name else None
             if sub_pb is None:
-                if selected_playbook_missing:
-                    error_msg = f"指定されたツールID '{clean_name}' は存在しません。"
-                    state["last"] = error_msg
-                    state["_exec_error"] = True
-                    state["_exec_error_detail"] = f"Selected playbook not found: {clean_name}"
-                    log_sea_trace(playbook.name, node_id, "EXEC", f"→ {state['_exec_error_detail']}")
-                    if event_callback:
-                        event_callback({
-                            "type": "warning",
-                            "content": error_msg,
-                            "playbook": playbook.name,
-                            "node": node_id,
-                        })
-                    if outputs is not None:
-                        outputs.append(error_msg)
-                    return state
-
-                if clean_name == "basic_chat":
-                    sub_pb = self.runtime._basic_chat_playbook()
-                else:
-                    error_msg = f"Sub-playbook not found: {clean_name}"
-                    state["last"] = error_msg
-                    state["_exec_error"] = True
-                    state["_exec_error_detail"] = error_msg
-                    if outputs is not None:
-                        outputs.append(error_msg)
-                    return state
+                error_msg = f"Sub-playbook not found: {clean_name or '<empty>'}"
+                state["last"] = error_msg
+                state["_exec_error"] = True
+                state["_exec_error_detail"] = error_msg
+                if outputs is not None:
+                    outputs.append(error_msg)
+                return state
 
             # Build child args: static args (template) + dynamic args_source (overrides)
             child_args = {}
@@ -230,52 +269,29 @@ class RuntimeEngine:
             eff_bid = self.runtime._effective_building_id(persona, building_id)
 
             # ── Playbook permission check ──
-            if clean_name != "basic_chat":
-                city_id = getattr(self.manager, "city_id", None)
-                if city_id is not None:
-                    perm = self.runtime._get_playbook_permission(city_id, clean_name)
-                    log_sea_trace(playbook.name, node_id, "PERM", f"{clean_name} → {perm}")
-
-                    if perm == "blocked":
-                        denial_msg = f"Playbook '{clean_name}' is not available (permission: {perm})"
-                        self.runtime._notify_persona_permission_result(state, persona, clean_name, denial_msg, event_callback)
-                        return state
-
-                    if perm == "ask_every_time":
-                        if auto_mode:
-                            denial_msg = f"Playbook '{clean_name}' requires user permission but running in auto mode. Skipped."
-                            self.runtime._notify_persona_permission_result(state, persona, clean_name, denial_msg, event_callback)
-                            return state
-
-                        # Schedule pulses (external events, timed schedules) have no
-                        # frontend connection for interactive dialogs.  The user's
-                        # act of configuring the automation serves as pre-approval.
-                        pulse_type = state.get("_pulse_type")
-                        if pulse_type == "schedule":
-                            log_sea_trace(playbook.name, node_id, "PERM", f"{clean_name}: auto-allow for schedule pulse")
-                            # Fall through to execution
-                        else:
-                            response = self.runtime._request_playbook_permission(clean_name, persona, event_callback)
-
-                            if response in ("deny", "timeout"):
-                                denial_msg = (
-                                    f"User denied execution of playbook '{clean_name}'. Please respond without using this tool."
-                                    if response == "deny"
-                                    else f"Permission request for playbook '{clean_name}' timed out. Please respond without using this tool."
-                                )
-                                self.runtime._notify_persona_permission_result(state, persona, clean_name, denial_msg, event_callback)
-                                return state
-
-                            if response == "always_allow":
-                                self.runtime._set_playbook_permission(city_id, clean_name, "auto_allow")
-
-                            if response == "never_use":
-                                denial_msg = f"User disabled playbook '{clean_name}'. This playbook will not be available in future. Please respond without using this tool."
-                                self.runtime._set_playbook_permission(city_id, clean_name, "user_only")
-                                self.runtime._notify_persona_permission_result(state, persona, clean_name, denial_msg, event_callback)
-                                return state
-
-                    # perm == "auto_allow" or allowed via dialog → continue
+            # 判定は runtime.decide_playbook_permission に集約 (同じ規則を
+            # /run_playbook スペル側と共有する)。ここが持つのは結果の見せ方だけ。
+            #
+            # ``user_configured=False`` 固定: EXEC が起こす Playbook 名は state の
+            # ``selected_playbook`` から来る (router LLM の選択か、呼び出し側が
+            # 積んだ値)。ユーザーが設定画面で名指しした起動は pre_spells 経路
+            # (``/run_playbook``) を通るので、そちらだけが事前承認を名乗る。
+            city_id = getattr(self.manager, "city_id", None)
+            allowed, denial_msg = self.runtime.decide_playbook_permission(
+                city_id, clean_name, persona,
+                user_configured=False,
+                auto_mode=eff_auto_mode,
+                event_callback=event_callback,
+            )
+            log_sea_trace(
+                playbook.name, node_id, "PERM",
+                f"{clean_name} → {'allow' if allowed else 'deny'}",
+            )
+            if not allowed:
+                self.runtime._notify_persona_permission_result(
+                    state, persona, clean_name, denial_msg, event_callback,
+                )
+                return state
 
             # Determine execution mode
             execution = getattr(node_def, "execution", "inline") or "inline"
@@ -284,7 +300,9 @@ class RuntimeEngine:
 
             if execution == "subagent":
                 label = f"Subagent: {sub_name}"
-                subagent_thread_id, subagent_parent_id = self.runtime._start_subagent_thread(persona, label=label)
+                subagent_thread_id, subagent_parent_id = self.runtime._start_subagent_thread(
+                    persona, label=label, pulse_context=state.get("_pulse_context"),
+                )
                 if not subagent_thread_id:
                     LOGGER.warning("[sea][exec] Failed to start subagent thread for '%s', falling back to inline", sub_name)
                     execution = "inline"  # Fallback
@@ -297,7 +315,7 @@ class RuntimeEngine:
             try:
                 cancellation_token = state.get("_cancellation_token")
                 sub_outputs = await asyncio.to_thread(
-                    self.runtime._run_playbook, sub_pb, persona, eff_bid, sub_input, auto_mode, True, state, event_callback,
+                    self.runtime._run_playbook, sub_pb, persona, eff_bid, sub_input, eff_auto_mode, True, state, event_callback,
                     cancellation_token=cancellation_token,
                     isolate_pulse_context=(execution == "subagent"),
                 )
@@ -305,7 +323,7 @@ class RuntimeEngine:
                 LOGGER.exception("SEA LangGraph exec sub-playbook failed")
                 # End subagent thread on error (no chronicle)
                 if execution == "subagent" and subagent_thread_id:
-                    self.runtime._end_subagent_thread(persona, subagent_thread_id, subagent_parent_id, generate_chronicle=False)
+                    self.runtime._end_subagent_thread(persona, subagent_thread_id, subagent_parent_id, generate_chronicle=False, pulse_context=state.get("_pulse_context"))
                 error_msg = f"Sub-playbook error: {type(exc).__name__}: {exc}"
                 state["last"] = error_msg
                 state["_exec_error"] = True
@@ -347,7 +365,7 @@ class RuntimeEngine:
             # End subagent thread on success
             if execution == "subagent" and subagent_thread_id:
                 gen_chronicle = getattr(node_def, "subagent_chronicle", True)
-                chronicle = self.runtime._end_subagent_thread(persona, subagent_thread_id, subagent_parent_id, generate_chronicle=gen_chronicle)
+                chronicle = self.runtime._end_subagent_thread(persona, subagent_thread_id, subagent_parent_id, generate_chronicle=gen_chronicle, pulse_context=state.get("_pulse_context"))
                 state["_subagent_chronicle"] = chronicle or ""
                 log_sea_trace(playbook.name, node_id, "EXEC", f"← {sub_name} [subagent ended, chronicle={'yes' if chronicle else 'no'}]")
 
@@ -400,10 +418,31 @@ class RuntimeEngine:
             LOGGER.debug("[memorize] memo_text=%s", memo_text)
             role = getattr(node_def, "role", "assistant") or "assistant"
             tags = getattr(node_def, "tags", None)
+            # Phase 3 段階 4-C: MemorizeNodeDef に line_role / scope フィールドが追加された。
+            # 未指定時は _store_memory が PulseContext の current_line_metadata() から
+            # 自動解決する (= 現在のライン階層に従う)。明示指定したい場合 (例: 親ラインに
+            # 明示記録、サブラインを volatile で揮発、メタ判断ターンを discardable で保存)
+            # のみ Playbook 側でフィールドを書く。
+            line_role = getattr(node_def, "line_role", None)
+            scope = getattr(node_def, "scope", None)
             pulse_id = state.get("_pulse_id")
+            pulse_context = state.get("_pulse_context")
             metadata_key = getattr(node_def, "metadata_key", None)
             metadata = state.get(metadata_key) if metadata_key else None
-            if not self.runtime._store_memory(persona, memo_text, role=role, tags=tags, pulse_id=pulse_id, metadata=metadata):
+            if not self.runtime._store_memory(
+                persona, memo_text,
+                role=role, tags=tags,
+                pulse_id=pulse_id, metadata=metadata,
+                line_role=line_role, scope=scope,
+                pulse_context=pulse_context,
+                playbook_name=playbook.name,
+                # 2026-05-20: thought_signature 永続化 (MEMORIZE node 経由 / assistant 役のみ意味あり)。
+                # role != "assistant" の場合は state 値に関わらず無害 (signature 解釈は Gemini text Part のみ)。
+                thought_signature=state.get("_last_thought_signature") if role == "assistant" else None,
+                # 書き込み時の機械刻印 (v3 §7.1)。role='assistant' の
+                # ときだけ効く (判定は _store_memory 側)。
+                beat_state=state,
+            ):
                 LOGGER.warning("Failed to store memory in MEMORIZE node %s", node_id)
                 if event_callback:
                     event_callback({
@@ -412,7 +451,10 @@ class RuntimeEngine:
                         "warning_code": "memorize_failed",
                         "display": "toast",
                     })
-            log_sea_trace(playbook.name, node_id, "MEMORIZE", f"role={role} tags={tags} text=\"{memo_text}\"")
+            log_sea_trace(
+                playbook.name, node_id, "MEMORIZE",
+                f"role={role} line_role={line_role} scope={scope} tags={tags} text=\"{memo_text}\"",
+            )
             state["last"] = memo_text
             if outputs is not None:
                 outputs.append(memo_text)
@@ -430,6 +472,7 @@ class RuntimeEngine:
                         "playbook": pb_display, "status": "completed",
                         "persona_id": getattr(persona, "persona_id", None),
                         "persona_name": getattr(persona, "persona_name", None),
+                        "pulse_id": state.get("_pulse_id"),
                     })
 
             # Debug: log speak_content at end of memorize node
@@ -451,6 +494,7 @@ class RuntimeEngine:
         text = state.get("last") or ""
         reasoning_text = state.pop("_reasoning_text", "")
         reasoning_details_val = state.pop("_reasoning_details", None)
+        auto_recall_text = state.pop("_auto_recall_text", None)
         activity_trace = state.get("_activity_trace")
         pulse_id = state.get("_pulse_id")
         eff_bid = self.runtime._effective_building_id(persona, building_id)
@@ -460,11 +504,22 @@ class RuntimeEngine:
             speak_metadata["reasoning"] = reasoning_text
         if reasoning_details_val is not None:
             speak_metadata["reasoning_details"] = reasoning_details_val
-        self.emitters["speak"](persona, eff_bid, text, pulse_id=pulse_id, extra_metadata=speak_metadata if speak_metadata else None)
+        if auto_recall_text:
+            # 記憶アーキv2 §4.5: reasoning と同じ流儀で「ふと浮かんだ記憶」を永続化。
+            speak_metadata["auto_recall"] = auto_recall_text
+        # 書き込み時の機械刻印 (v3 §7.1)。SPEAK ノードの emit_speak は
+        # add_to_persona_only 経由で memory.db にも 1 行残す = 生成メッセージの
+        # 永続点なので、_store_memory 経路と同じ刻印を載せる。
+        speak_metadata = stamp_generation_metadata(speak_metadata, state) or {}
+        building_msg = self.emitters["speak"](persona, eff_bid, text, pulse_id=pulse_id, extra_metadata=speak_metadata if speak_metadata else None, event_callback=event_callback)
         if outputs is not None:
             outputs.append(text)
         if event_callback:
             say_event: Dict[str, Any] = {"type": "say", "content": text, "persona_id": getattr(persona, "persona_id", None)}
+            if pulse_id:
+                say_event["pulse_id"] = pulse_id
+            if building_msg and building_msg.get("message_id"):
+                say_event["message_id"] = str(building_msg["message_id"])
             if reasoning_text:
                 say_event["reasoning"] = reasoning_text
             if reasoning_details_val is not None:

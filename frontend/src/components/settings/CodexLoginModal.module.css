@@ -1,0 +1,177 @@
+.modal {
+    background: #ffffff;
+    color: var(--text-primary, #222);
+    border-radius: 8px;
+    width: min(480px, 92vw);
+    max-height: 90vh;
+    display: flex;
+    flex-direction: column;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.25);
+}
+
+.header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 1rem 1.25rem;
+    border-bottom: 1px solid var(--border-color, #ddd);
+}
+
+.header h3 {
+    margin: 0;
+    font-size: 1.05rem;
+}
+
+.closeBtn {
+    background: none;
+    border: none;
+    cursor: pointer;
+    color: inherit;
+    padding: 4px;
+    border-radius: 4px;
+}
+
+.closeBtn:hover {
+    background: rgba(0, 0, 0, 0.06);
+}
+
+.content {
+    padding: 1rem 1.25rem 1.25rem;
+    overflow-y: auto;
+}
+
+.steps {
+    margin: 0 0 1rem;
+    padding-left: 1.4rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    font-size: 0.9rem;
+    line-height: 1.5;
+}
+
+.verifyLink {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    margin-top: 2px;
+    color: var(--primary, #4a7eb5);
+    word-break: break-all;
+}
+
+.codeRow {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-top: 4px;
+    flex-wrap: wrap;
+}
+
+.userCode {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 1.5rem;
+    font-weight: 600;
+    letter-spacing: 0.15em;
+    padding: 4px 10px;
+    border: 1px dashed var(--border-color, #bbb);
+    border-radius: 6px;
+    background: var(--bg-secondary, #fafafa);
+    user-select: all;
+}
+
+.copyBtn {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 4px 10px;
+    border: 1px solid var(--border-color, #ccc);
+    border-radius: 4px;
+    background: none;
+    color: inherit;
+    cursor: pointer;
+    font-size: 0.8rem;
+}
+
+.copyBtn:hover {
+    background: var(--bg-hover, rgba(0, 0, 0, 0.04));
+}
+
+.waitingRow {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 0.85rem;
+    color: var(--text-secondary, #777);
+}
+
+.spinner {
+    animation: codexSpin 1.2s linear infinite;
+    flex-shrink: 0;
+}
+
+@keyframes codexSpin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+}
+
+.successBox {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 12px;
+    border-radius: 6px;
+    background: #d1fae5;
+    color: #065f46;
+}
+
+.successTitle {
+    font-weight: 600;
+}
+
+.errorBox {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    padding: 12px;
+    border-radius: 6px;
+    background: #fee2e2;
+    color: #991b1b;
+    font-size: 0.88rem;
+    line-height: 1.5;
+}
+
+.retryBtn {
+    padding: 4px 10px;
+    border: 1px solid currentColor;
+    border-radius: 4px;
+    background: none;
+    color: inherit;
+    cursor: pointer;
+    font-size: 0.8rem;
+}
+
+.hint {
+    font-size: 0.8rem;
+    color: var(--text-secondary, #777);
+}
+
+/* Dark mode — hardcoded pastels flip to their deep variants */
+:global([data-theme="dark"]) .modal {
+    background: #1f1f1f;
+    border: 1px solid #333;
+}
+
+:global([data-theme="dark"]) .closeBtn:hover {
+    background: rgba(255, 255, 255, 0.08);
+}
+
+:global([data-theme="dark"]) .successBox {
+    background: #064e3b;
+    color: #a7f3d0;
+}
+
+:global([data-theme="dark"]) .errorBox {
+    background: #7f1d1d;
+    color: #fecaca;
+}

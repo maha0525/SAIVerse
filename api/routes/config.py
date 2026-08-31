@@ -1,6 +1,8 @@
 import logging
 import os
 import json
+import threading
+import time
 from pathlib import Path
 
 _log = logging.getLogger(__name__)
@@ -28,8 +30,9 @@ class ModelInfo(BaseModel):
     name: str
     provider: Optional[str] = None
     group: Optional[str] = None  # UI grouping label (falls back to provider)
-    input_price: Optional[float] = None   # USD per 1M input tokens
-    output_price: Optional[float] = None  # USD per 1M output tokens
+    input_price: Optional[float] = None
+    output_price: Optional[float] = None
+    currency: str = "USD"
     rate_limit: Optional[RateLimitInfo] = None
 
 class PlaybookParamInfo(BaseModel):
@@ -59,6 +62,13 @@ class PlaybookInfo(BaseModel):
 class UpdateModelRequest(BaseModel):
     model: str
     parameters: Optional[Dict[str, Any]] = None
+    # 選択世代 (単調増加) と、その世代の名前空間 (クライアント識別子)。abort された
+    # 古い要求の遅延完了が同じクライアントの新しい選択を上書きしないための順序
+    # トークン (Codex 指摘 2026-07-30)。世代は client_id ごとに独立 — サーバー全体で
+    # 一本にすると、カウンターがマウントごとに 0 へ戻るクライアントの再読込や別タブを
+    # 恒久的に 409 にしてしまう (Codex 指摘 5巡目)。両方揃った要求だけ検査する。
+    seq: Optional[int] = None
+    client_id: Optional[str] = None
 
 class UpdateParametersRequest(BaseModel):
     parameters: Dict[str, Any]
@@ -77,11 +87,6 @@ class ModelConfigResponse(BaseModel):
     current_model: Optional[str]
     parameters: Dict[str, ParameterSpec]
     current_values: Dict[str, Any]
-    max_history_messages: Optional[int] = None
-    max_history_messages_model_default: Optional[int] = None
-    metabolism_enabled: bool = True
-    metabolism_keep_messages: Optional[int] = None
-    metabolism_keep_messages_model_default: Optional[int] = None
     max_image_embeds: Optional[int] = None
     max_image_embeds_model_default: Optional[int] = None
 
@@ -110,9 +115,10 @@ def get_models():
             "id": mid,
             "name": name,
             "provider": cfg.get("provider"),
-            "group": cfg.get("group") or cfg.get("provider"),
+            "group": cfg.get("group") or cfg.get("provider_ref") or cfg.get("provider"),
             "input_price": pricing.get("input_per_1m_tokens"),
             "output_price": pricing.get("output_per_1m_tokens"),
+            "currency": pricing.get("currency", "USD"),
             "rate_limit": rate_limit,
         })
     return result
@@ -130,16 +136,64 @@ def reload_models():
         "models": [{"id": mid, "name": name} for mid, name in choices],
     }
 
+class SlotKindInfo(BaseModel):
+    """コマ種別カタログの 1 定義 (saiverse/slot_kind_catalog.py)。"""
+    id: str
+    name: str                       # 時間割の kind 値そのもの (日本語)
+    execution_type: str             # work_session / outing / stay_home / free_choice
+    description: str
+    builtin: bool = False
+
+
+@router.get("/slot-kinds", response_model=List[SlotKindInfo])
+def get_slot_kinds():
+    """コマ種別カタログの一覧 (timetable_redesign.md §5.5)。
+
+    3 層 (user_data > expansion > builtin) を畳んだ有効なカタログを、
+    カタログ順 (= 時間割 enum の提示順) で返す。習慣テンプレート編集 UI の
+    kind セレクトが選択肢として読む。
+    """
+    from saiverse.slot_kind_catalog import SLOT_KIND_CATALOG
+
+    return [
+        SlotKindInfo(
+            id=d["id"],
+            name=d["name"],
+            execution_type=d["execution_type"],
+            description=d.get("description") or "",
+            builtin=bool(d.get("builtin")),
+        )
+        for d in SLOT_KIND_CATALOG.values()
+    ]
+
+
 @router.get("/playbooks", response_model=List[PlaybookInfo])
-def get_playbooks(manager=Depends(get_manager)):
-    """List available user-selectable playbooks with input_schema."""
+def get_playbooks(
+    router_callable: Optional[bool] = None,
+    manager=Depends(get_manager),
+):
+    """List available user-selectable playbooks with input_schema.
+
+    Args:
+        router_callable: When set to True, returns only playbooks flagged as
+            router_callable (= invocable from a meta-line LLM via Spell or
+            from the UI's "ツール指定" mode). When None (default), the legacy
+            ``user_selectable`` filter applies. See
+            ``docs/intent/persona_cognition/nested_subline_spell.md`` §13.
+    """
     from database.session import SessionLocal
     from database.models import Playbook
 
     developer_mode = manager.state.developer_mode
     db = SessionLocal()
     try:
-        query = db.query(Playbook).filter(Playbook.user_selectable == True)
+        if router_callable is True:
+            # UI "ツール指定" mode: enumerate playbooks the user can ask the
+            # persona to run via pre_spells. Independent of user_selectable
+            # which is the legacy meta-playbook switch.
+            query = db.query(Playbook).filter(Playbook.router_callable == True)
+        else:
+            query = db.query(Playbook).filter(Playbook.user_selectable == True)
         if not developer_mode:
             query = query.filter(Playbook.dev_only == False)
         playbooks = query.all()
@@ -268,16 +322,10 @@ def get_current_config(manager = Depends(get_manager)):
     
     # If no model selected, return empty (but still include overrides)
     if not current_model:
-        override = getattr(manager, "max_history_messages_override", None)
         return {
             "current_model": None,
             "parameters": {},
             "current_values": {},
-            "max_history_messages": override,
-            "max_history_messages_model_default": None,
-            "metabolism_enabled": getattr(manager, "metabolism_enabled", True),
-            "metabolism_keep_messages": getattr(manager, "metabolism_keep_messages_override", None),
-            "metabolism_keep_messages_model_default": None,
             "max_image_embeds": getattr(manager, "max_image_embeds_override", None),
             "max_image_embeds_model_default": None,
         }
@@ -318,16 +366,9 @@ def get_current_config(manager = Depends(get_manager)):
     if manager.model_parameter_overrides:
         current_values.update(manager.model_parameter_overrides)
 
-    # Max history messages
-    from saiverse.model_configs import get_default_max_history_messages, get_metabolism_keep_messages, get_max_image_embeds
-    override = getattr(manager, "max_history_messages_override", None)
-    model_default = get_default_max_history_messages(current_model)
+    # 画像埋め込み上限
+    from saiverse.model_configs import get_max_image_embeds
 
-    # Metabolism settings
-    metab_override = getattr(manager, "metabolism_keep_messages_override", None)
-    metab_model_default = get_metabolism_keep_messages(current_model)
-
-    # Image embeds
     img_embeds_override = getattr(manager, "max_image_embeds_override", None)
     img_embeds_model_default = get_max_image_embeds(current_model)
 
@@ -335,20 +376,58 @@ def get_current_config(manager = Depends(get_manager)):
         "current_model": current_model,
         "parameters": specs,
         "current_values": current_values,
-        "max_history_messages": override if override is not None else model_default,
-        "max_history_messages_model_default": model_default,
-        "metabolism_enabled": getattr(manager, "metabolism_enabled", True),
-        "metabolism_keep_messages": metab_override if metab_override is not None else metab_model_default,
-        "metabolism_keep_messages_model_default": metab_model_default,
         "max_image_embeds": img_embeds_override if img_embeds_override is not None else img_embeds_model_default,
         "max_image_embeds_model_default": img_embeds_model_default,
     }
 
+#: モデル変更の直列化 + 世代ガード。FastAPI の同期 handler はスレッドプールで
+#: 並行実行されるため、ロック無しだと二つの set_model (全 persona の順次更新) が
+#: 交錯して manager と各 persona のモデルがばらける。世代 (client_id ごとの seq) は
+#: 同一クライアント内の選択順を保存する — abort された古い要求が遅れて到着しても
+#: 適用しない。クライアント間の順序は従来どおり到着順 (last-write-wins)。
+_MODEL_CHANGE_LOCK = threading.Lock()
+#: client_id → (最終 seq, 最終利用時刻 monotonic 秒)。
+_model_change_seqs: Dict[str, tuple[int, float]] = {}
+#: client_id 台帳の目安上限 (リロードごとに id が変わるため無限に増えないよう刈る)
+_MODEL_CHANGE_SEQS_MAX = 64
+#: 刈ってよいのは最終利用からこの秒数を過ぎた項目だけ。遅着しうるのは abort
+#: (10 秒期限) 直後の要求だけなので 10 分は桁で余裕がある — 全消しにすると
+#: 生きているクライアントの順序保証ごと消える (Codex 指摘 2026-07-30 7巡目)。
+_MODEL_CHANGE_SEQ_TTL_SECONDS = 600.0
+
+
 @router.post("/model")
 def set_model(req: UpdateModelRequest, manager = Depends(get_manager)):
-    """Set the global model override and return updated config."""
-    manager.set_model(req.model, req.parameters)
-    
+    """Set the global model override and return updated config.
+
+    ``client_id`` + ``seq`` 付きの要求は世代ガードを通す — 同じクライアントで
+    既に新しい世代が適用済みなら 409 (呼び出し側は現在状態を取り直す)。省略時は
+    従来どおり無条件適用 (他の呼び出し元との互換)。適用自体はロックで直列化する。
+    """
+    with _MODEL_CHANGE_LOCK:
+        if req.seq is not None and req.client_id:
+            now = time.monotonic()
+            last = _model_change_seqs.get(req.client_id, (0, now))[0]
+            if req.seq <= last:
+                raise HTTPException(
+                    status_code=409,
+                    detail="stale model change (a newer selection was applied)",
+                )
+            if req.client_id not in _model_change_seqs and (
+                len(_model_change_seqs) >= _MODEL_CHANGE_SEQS_MAX
+            ):
+                # 安全期間を過ぎた項目だけ刈る。全消しは生きているクライアントの
+                # 順序保証ごと失う。全項目が新しければ一時的に上限を超えて持つ —
+                # 実質、直近 10 分に操作したクライアント数でしか増えない。
+                cutoff = now - _MODEL_CHANGE_SEQ_TTL_SECONDS
+                for cid in [
+                    c for c, (_s, touched) in _model_change_seqs.items()
+                    if touched < cutoff
+                ]:
+                    del _model_change_seqs[cid]
+            _model_change_seqs[req.client_id] = (req.seq, now)
+        manager.set_model(req.model, req.parameters)
+
     # Return full config inline to avoid a separate /config fetch
     current_model = manager.model or None
     
@@ -396,16 +475,8 @@ def set_model(req: UpdateModelRequest, manager = Depends(get_manager)):
     if manager.model_parameter_overrides:
         current_values.update(manager.model_parameter_overrides)
 
-    # Max history messages (reset override on model change)
-    from saiverse.model_configs import get_default_max_history_messages, get_metabolism_keep_messages, get_max_image_embeds
-    manager.max_history_messages_override = None
-    model_default = get_default_max_history_messages(current_model)
-
-    # Metabolism (reset override on model change)
-    manager.metabolism_keep_messages_override = None
-    metab_model_default = get_metabolism_keep_messages(current_model)
-
     # Image embeds (reset override on model change)
+    from saiverse.model_configs import get_max_image_embeds
     manager.max_image_embeds_override = None
     img_embeds_model_default = get_max_image_embeds(current_model)
 
@@ -415,11 +486,6 @@ def set_model(req: UpdateModelRequest, manager = Depends(get_manager)):
         "current_model": current_model,
         "parameters": specs,
         "current_values": current_values,
-        "max_history_messages": model_default,
-        "max_history_messages_model_default": model_default,
-        "metabolism_enabled": getattr(manager, "metabolism_enabled", True),
-        "metabolism_keep_messages": metab_model_default,
-        "metabolism_keep_messages_model_default": metab_model_default,
         "max_image_embeds": img_embeds_model_default,
         "max_image_embeds_model_default": img_embeds_model_default,
     }
@@ -429,23 +495,6 @@ def set_parameters(req: UpdateParametersRequest, manager = Depends(get_manager))
     """Update global model parameter overrides."""
     manager.set_model_parameters(req.parameters)
     return {"success": True}
-
-
-class GlobalAutoRequest(BaseModel):
-    enabled: bool
-
-
-@router.get("/global-auto")
-def get_global_auto(manager = Depends(get_manager)):
-    """Get global autonomous mode status."""
-    return {"enabled": manager.state.global_auto_enabled}
-
-
-@router.post("/global-auto")
-def set_global_auto(req: GlobalAutoRequest, manager = Depends(get_manager)):
-    """Set global autonomous mode status."""
-    manager.state.global_auto_enabled = req.enabled
-    return {"success": True, "enabled": req.enabled}
 
 
 class DeveloperModeRequest(BaseModel):
@@ -462,51 +511,40 @@ def get_developer_mode(manager=Depends(get_manager)):
 def set_developer_mode(req: DeveloperModeRequest, manager=Depends(get_manager)):
     """Set developer mode status.
 
-    When turning OFF, also disables global auto mode and
-    sets all personas' interaction_mode to 'manual'.
+    When turning OFF, also disables all personas' AUTONOMY_ENABLED
+    (自発的な自律行動を停止)。
     """
     manager.state.developer_mode = req.enabled
 
     if not req.enabled:
-        # Disable global auto mode
-        manager.state.global_auto_enabled = False
-
-        # Set all personas to manual mode
+        # 全ペルソナの自律行動を OFF (自発的な自律行動を停止)
         from database.session import SessionLocal
         from database.models import AI
         db = SessionLocal()
         try:
-            db.query(AI).update({AI.INTERACTION_MODE: "manual"})
+            db.query(AI).update({AI.AUTONOMY_ENABLED: False})
             db.commit()
         except Exception:
-            _log.warning("Failed to reset interaction modes", exc_info=True)
+            _log.warning("Failed to reset autonomy states", exc_info=True)
             db.rollback()
         finally:
             db.close()
 
-        # Update in-memory persona objects
+        # Update in-memory persona objects + sync AutonomyManager (stop running ones)
         for persona in manager.state.personas.values():
-            if hasattr(persona, "interaction_mode"):
-                persona.interaction_mode = "manual"
+            if hasattr(persona, "autonomy_enabled"):
+                persona.autonomy_enabled = False
+        ensure_autonomy = getattr(manager, "ensure_autonomy_for", None)
+        if callable(ensure_autonomy):
+            for persona_id in list(manager.state.personas.keys()):
+                try:
+                    ensure_autonomy(persona_id)
+                except Exception:
+                    _log.warning(
+                        "Failed to sync AutonomyManager for '%s'",
+                        persona_id, exc_info=True,
+                    )
 
-    return {"success": True, "enabled": req.enabled}
-
-
-class XPollingRequest(BaseModel):
-    enabled: bool
-
-
-@router.get("/x-polling")
-def get_x_polling(manager=Depends(get_manager)):
-    """Get X mention polling status."""
-    return {"enabled": manager.state.x_polling_enabled}
-
-
-@router.post("/x-polling")
-def set_x_polling(req: XPollingRequest, manager=Depends(get_manager)):
-    """Toggle X mention polling on/off."""
-    manager.state.x_polling_enabled = req.enabled
-    _log.info("X polling set to %s", req.enabled)
     return {"success": True, "enabled": req.enabled}
 
 
@@ -543,7 +581,11 @@ def set_announcements_monitor(req: MonitoringToggleRequest, manager=Depends(get_
 
 
 def _validate_playbook_override(req: "PlaybookOverrideRequest", manager: Any) -> None:
-    if req.playbook != "meta_user_manual":
+    # Validate the chosen sub-Playbook for "ツール指定" mode (`tool_selected`
+    # sentinel). The user has picked a Playbook to run via pre_spells, and we
+    # want to confirm it exists and is router_callable before persisting the
+    # choice.
+    if req.playbook != "tool_selected":
         return
 
     selected_playbook = (req.args or {}).get("selected_playbook")
@@ -584,7 +626,7 @@ def get_current_playbook(manager = Depends(get_manager)):
 @router.post("/playbook")
 def set_playbook(req: PlaybookOverrideRequest, manager = Depends(get_manager)):
     """Set playbook override and args."""
-    if req.playbook == "meta_user_manual" and req.args and "selected_playbook" in req.args:
+    if req.playbook == "tool_selected" and req.args and "selected_playbook" in req.args:
         selected_playbook = req.args.get("selected_playbook")
         if selected_playbook:
             from database.session import SessionLocal
@@ -706,102 +748,49 @@ def set_cache_settings(req: CacheConfigRequest, manager = Depends(get_manager)):
     }
 
 
-class MaxHistoryMessagesRequest(BaseModel):
-    value: Optional[int] = None
+class ImageDefaultQualityRequest(BaseModel):
+    quality: str
 
 
-@router.get("/max-history-messages")
-def get_max_history_messages(manager=Depends(get_manager)):
-    """Get current max history messages setting.
+@router.get("/image-default-quality")
+def get_image_default_quality(manager=Depends(get_manager)):
+    """Get default image generation quality setting."""
+    return {"quality": manager.state.image_default_quality}
 
-    Returns the session override if set, otherwise the model default.
+
+@router.post("/image-default-quality")
+def set_image_default_quality(req: ImageDefaultQualityRequest, manager=Depends(get_manager)):
+    """Set default image generation quality and persist to .env."""
+    if req.quality not in ("low", "medium", "high"):
+        raise HTTPException(status_code=400, detail="Invalid quality. Must be 'low', 'medium', or 'high'")
+    manager.state.image_default_quality = req.quality
+    from api.routes.admin import write_env_updates
+    write_env_updates({"SAIVERSE_IMAGE_DEFAULT_QUALITY": req.quality})
+    return {"success": True, "quality": req.quality}
+
+
+class MediaRecallRequest(BaseModel):
+    enabled: bool
+
+
+@router.get("/media-recall")
+def get_media_recall(manager=Depends(get_manager)):
+    """Get whether attached media (image/audio/video) summaries feed the auto-recall query."""
+    return {"enabled": manager.state.media_recall_enabled}
+
+
+@router.post("/media-recall")
+def set_media_recall(req: MediaRecallRequest, manager=Depends(get_manager)):
+    """Toggle attached-media auto-recall and persist to .env.
+
+    ON にすると、添付 (画像/音声/動画) がある送信時に内容の読み取りを同期実行して
+    自動想起のクエリに使う (数秒待ちが発生する)。OFF (既定) では従来どおり
+    バックグラウンド生成のみで、クエリには反映しない。
     """
-    from saiverse.model_configs import get_default_max_history_messages
-
-    override = getattr(manager, "max_history_messages_override", None)
-    current_model = manager.model or None
-
-    model_default = None
-    if current_model:
-        model_default = get_default_max_history_messages(current_model)
-
-    return {
-        "value": override if override is not None else model_default,
-        "override": override,
-        "model_default": model_default,
-    }
-
-
-@router.post("/max-history-messages")
-def set_max_history_messages(req: MaxHistoryMessagesRequest, manager=Depends(get_manager)):
-    """Set session override for max history messages.
-
-    Send {"value": null} to clear the override and use the model default.
-    """
-    if req.value is not None and req.value < 1:
-        raise HTTPException(status_code=400, detail="value must be >= 1 or null")
-    manager.max_history_messages_override = req.value
-    return {"success": True, "value": req.value}
-
-
-class MetabolismConfigRequest(BaseModel):
-    enabled: Optional[bool] = None
-    keep_messages: Optional[int] = None
-
-
-@router.get("/metabolism")
-def get_metabolism_settings(manager=Depends(get_manager)):
-    """Get current metabolism settings."""
-    from saiverse.model_configs import get_metabolism_keep_messages, get_default_max_history_messages
-
-    current_model = manager.model or None
-    metab_override = getattr(manager, "metabolism_keep_messages_override", None)
-    metab_model_default = None
-    high_wm = None
-    if current_model:
-        metab_model_default = get_metabolism_keep_messages(current_model)
-        high_wm = get_default_max_history_messages(current_model)
-
-    return {
-        "enabled": getattr(manager, "metabolism_enabled", True),
-        "keep_messages": metab_override if metab_override is not None else metab_model_default,
-        "keep_messages_override": metab_override,
-        "keep_messages_model_default": metab_model_default,
-        "high_watermark": high_wm,
-    }
-
-
-@router.post("/metabolism")
-def set_metabolism_settings(req: MetabolismConfigRequest, manager=Depends(get_manager)):
-    """Set metabolism settings."""
-    if req.enabled is not None:
-        manager.metabolism_enabled = req.enabled
-
-    if req.keep_messages is not None:
-        if req.keep_messages < 1:
-            raise HTTPException(status_code=400, detail="keep_messages must be >= 1")
-        # Validate: high_wm - keep_messages >= 20
-        from saiverse.model_configs import get_default_max_history_messages
-        current_model = manager.model or None
-        high_wm_override = getattr(manager, "max_history_messages_override", None)
-        high_wm = high_wm_override
-        if high_wm is None and current_model:
-            high_wm = get_default_max_history_messages(current_model)
-        if high_wm is not None and high_wm - req.keep_messages < 20:
-            raise HTTPException(
-                status_code=400,
-                detail=f"keep_messages must be at most {high_wm - 20} (high watermark {high_wm} - 20)",
-            )
-        manager.metabolism_keep_messages_override = req.keep_messages
-    elif req.keep_messages is None and req.enabled is None:
-        # Clear override
-        manager.metabolism_keep_messages_override = None
-
-    return {
-        "success": True,
-        "enabled": getattr(manager, "metabolism_enabled", True),
-        "keep_messages": getattr(manager, "metabolism_keep_messages_override", None),
-    }
+    manager.state.media_recall_enabled = req.enabled
+    from api.routes.admin import write_env_updates
+    write_env_updates({"SAIVERSE_MEDIA_RECALL_ENABLED": "true" if req.enabled else "false"})
+    return {"success": True, "enabled": req.enabled}
 
 
 class MaxImageEmbedsRequest(BaseModel):
@@ -1015,3 +1004,371 @@ def set_favorite_models(req: FavoriteModelsRequest):
         raise HTTPException(status_code=500, detail="Failed to save favorite models")
     finally:
         db.close()
+
+
+# ── Model file CRUD (user_data overrides) ────────────────────────
+#
+# Editing a builtin model is implemented as "create a user_data file with the
+# same key". On next reload, the user_data version wins. Reset = delete the
+# user_data file. Builtin files are never modified.
+
+import re as _re
+
+_SAFE_MODEL_KEY = _re.compile(r"^[a-zA-Z0-9_.\-]+$")
+
+
+def _model_user_path(key: str) -> Path:
+    from saiverse.data_paths import USER_DATA_DIR, MODELS_DIR
+    return USER_DATA_DIR / MODELS_DIR / f"{key}.json"
+
+
+def _model_builtin_path(key: str) -> Path:
+    from saiverse.data_paths import BUILTIN_DATA_DIR, MODELS_DIR
+    return BUILTIN_DATA_DIR / MODELS_DIR / f"{key}.json"
+
+
+def _validate_model_key(key: str) -> None:
+    if not key or not _SAFE_MODEL_KEY.match(key):
+        raise HTTPException(status_code=400, detail=f"Invalid model key: {key!r}")
+
+
+def _strip_runtime_fields(config: Dict[str, Any]) -> Dict[str, Any]:
+    """Remove fields that are auto-injected at load time and shouldn't persist.
+
+    ``source`` records which of the three data directories a definition was
+    read from, so writing it into the file would let the file claim its own
+    origin on the next load. ``builtin`` was the older form of the same marker.
+    """
+    return {k: v for k, v in config.items() if k not in ("source", "builtin")}
+
+
+def _validate_model_connection(key: str, config: Dict[str, Any]) -> None:
+    from saiverse.provider_configs import SOURCE_USER_DATA
+    from saiverse.provider_security import validate_model_config_connection
+
+    try:
+        # Model files written from here always land in user_data, so judge the
+        # payload as that layer. Without it the config looks like it came from
+        # nowhere, and an unplaced definition is treated as untrusted.
+        validate_model_config_connection(key, {**config, "source": SOURCE_USER_DATA})
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+class ModelFileCreateRequest(BaseModel):
+    key: str  # filename stem (no extension)
+    config: Dict[str, Any]
+
+
+class ModelFileUpdateRequest(BaseModel):
+    config: Dict[str, Any]
+
+
+class ModelFileCloneRequest(BaseModel):
+    new_key: str
+    display_name: Optional[str] = None
+
+
+class SaveModelFromChatRequest(BaseModel):
+    """Save the current chat UI parameter values as a model JSON.
+
+    Behavior:
+      - target_key = source_model and overwrite=False: 409 if user_data file
+        exists; if only builtin exists, creates user_data override (no overwrite needed)
+      - target_key != source_model: always creates a new user_data file (saves as new model)
+      - overwrite=True: allowed to overwrite an existing user_data file with the same target_key
+    """
+    source_model: str  # model key whose config serves as the template
+    target_key: str    # destination filename stem (may equal source_model)
+    display_name: str
+    parameters: Dict[str, Any] = {}
+    cache_enabled: Optional[bool] = None
+    cache_ttl: Optional[str] = None
+    # Metabolism の三水位 (文字数)。未指定ならモデルファイルに書かない = 一律既定。
+    metabolism_low_chars: Optional[int] = None
+    metabolism_target_chars: Optional[int] = None
+    metabolism_high_chars: Optional[int] = None
+    max_image_embeds: Optional[int] = None
+    overwrite: bool = False
+
+
+def _read_raw_model_file(key: str) -> tuple[Dict[str, Any], str] | None:
+    """Read the original model JSON file without provider_ref resolution."""
+    import json as _json
+    from saiverse.data_paths import USER_DATA_DIR, BUILTIN_DATA_DIR, EXPANSION_DATA_DIR, MODELS_DIR
+
+    user_path = USER_DATA_DIR / MODELS_DIR / f"{key}.json"
+    if user_path.is_file():
+        return _json.loads(user_path.read_text(encoding="utf-8")), "user_data"
+
+    if EXPANSION_DATA_DIR.exists():
+        for project_dir in sorted(EXPANSION_DATA_DIR.iterdir()):
+            if not project_dir.is_dir() or project_dir.name.startswith(("_", ".")):
+                continue
+            exp_path = project_dir / MODELS_DIR / f"{key}.json"
+            if exp_path.is_file():
+                return _json.loads(exp_path.read_text(encoding="utf-8")), "expansion"
+
+    builtin_path = BUILTIN_DATA_DIR / MODELS_DIR / f"{key}.json"
+    if builtin_path.is_file():
+        return _json.loads(builtin_path.read_text(encoding="utf-8")), "builtin"
+
+    return None
+
+
+@router.get("/models/{key}")
+def get_model_file(key: str):
+    """Get the raw (unresolved) config for a model, as written in the JSON file."""
+    _validate_model_key(key)
+    result = _read_raw_model_file(key)
+    if result is None:
+        from saiverse.model_configs import MODEL_CONFIGS
+        if key not in MODEL_CONFIGS:
+            raise HTTPException(status_code=404, detail=f"Model not found: {key}")
+        return {"key": key, "config": dict(MODEL_CONFIGS[key]), "source": "unknown"}
+    cfg, source = result
+    return {"key": key, "config": cfg, "source": source}
+
+
+def _validate_metabolism_watermarks(config: Dict[str, Any]) -> None:
+    """水位の実効順序 (低 ≤ 目標 ≤ 高) をモデル保存の入口で検証する。
+
+    キー無しは実行時に組み込み既定へ解決される (saiverse/model_configs.py の
+    `_metabolism_chars`) ため、**実効値**で検証しないと「high=5万だけ指定 →
+    実効 target=既定10万 > high」の壊れた順序が保存できてしまう (Codex 指摘
+    2026-07-30)。明示 null / 0 以下は「その水位を持たない」= 順序制約の対象外
+    (実行時の解釈と同じ)。数値でも null でもない型はここで弾く。
+    """
+    from saiverse.model_configs import (
+        BUILTIN_METABOLISM_HIGH_CHARS,
+        BUILTIN_METABOLISM_LOW_CHARS,
+        BUILTIN_METABOLISM_TARGET_CHARS,
+    )
+
+    def _effective(key: str, builtin: int) -> Optional[int]:
+        if key not in config:
+            return builtin
+        value = config[key]
+        if value is None:
+            return None
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise HTTPException(
+                status_code=400, detail=f"{key} は数値か null で指定してください",
+            )
+        num = int(value)
+        return num if num > 0 else None
+
+    low = _effective("metabolism_low_chars", BUILTIN_METABOLISM_LOW_CHARS)
+    target = _effective("metabolism_target_chars", BUILTIN_METABOLISM_TARGET_CHARS)
+    high = _effective("metabolism_high_chars", BUILTIN_METABOLISM_HIGH_CHARS)
+    if low is not None and target is not None and low > target:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"最初に読み込む文字数 ({low:,}) は整理後に残す文字数 ({target:,}) "
+                "以下にしてください（空欄のキーは標準の既定値で数えます）"
+            ),
+        )
+    if target is not None and high is not None and target > high:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"整理後に残す文字数 ({target:,}) は整理をはじめる文字数 ({high:,}) "
+                "以下にしてください（空欄のキーは標準の既定値で数えます）"
+            ),
+        )
+
+
+@router.post("/models", status_code=201)
+def create_model_file(req: ModelFileCreateRequest):
+    """Create a new model JSON file in user_data."""
+    _validate_model_key(req.key)
+    if "model" not in req.config:
+        raise HTTPException(status_code=400, detail="config must include 'model' field")
+
+    from saiverse.model_configs import MODEL_CONFIGS, reload_configs
+
+    user_path = _model_user_path(req.key)
+    if req.key in MODEL_CONFIGS or user_path.exists():
+        raise HTTPException(
+            status_code=409,
+            detail=f"Model '{req.key}' already exists. Use PUT to update.",
+        )
+
+    payload = _strip_runtime_fields(req.config)
+    _validate_model_connection(req.key, payload)
+    _validate_metabolism_watermarks(payload)
+    user_path.parent.mkdir(parents=True, exist_ok=True)
+    user_path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    reload_configs()
+    return {"key": req.key, "path": str(user_path), "source": "user_data"}
+
+
+@router.put("/models/{key}")
+def update_model_file(key: str, req: ModelFileUpdateRequest):
+    """Update a model. Builtin/expansion models get an automatic user_data copy.
+
+    On reload the user_data file takes priority, so the builtin remains
+    untouched but is shadowed.
+    """
+    _validate_model_key(key)
+    if "model" not in req.config:
+        raise HTTPException(status_code=400, detail="config must include 'model' field")
+
+    from saiverse.model_configs import MODEL_CONFIGS, reload_configs
+
+    if key not in MODEL_CONFIGS:
+        raise HTTPException(status_code=404, detail=f"Model not found: {key}")
+
+    payload = _strip_runtime_fields(req.config)
+    _validate_model_connection(key, payload)
+    _validate_metabolism_watermarks(payload)
+    user_path = _model_user_path(key)
+    user_path.parent.mkdir(parents=True, exist_ok=True)
+    was_user_data = user_path.exists()
+    user_path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    reload_configs()
+    return {
+        "key": key,
+        "path": str(user_path),
+        "source": "user_data",
+        "created_override": not was_user_data,
+    }
+
+
+@router.delete("/models/{key}", status_code=204)
+def delete_model_file(key: str):
+    """Delete a user_data model file. Builtin models are read-only.
+
+    If a user_data override exists for a builtin, deletion restores the
+    builtin on next reload (the override is removed, not the builtin itself).
+    """
+    _validate_model_key(key)
+    user_path = _model_user_path(key)
+    if not user_path.exists():
+        if _model_builtin_path(key).exists():
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    f"Cannot delete builtin model {key!r}. "
+                    f"Builtin models are read-only. To override, edit instead."
+                ),
+            )
+        raise HTTPException(status_code=404, detail=f"Model not found: {key}")
+
+    user_path.unlink()
+    from saiverse.model_configs import reload_configs
+    reload_configs()
+    return None
+
+
+@router.post("/models/{key}/clone")
+def clone_model_file(key: str, req: ModelFileCloneRequest):
+    """Clone an existing model under a new key (always to user_data)."""
+    _validate_model_key(key)
+    _validate_model_key(req.new_key)
+
+    from saiverse.model_configs import MODEL_CONFIGS, reload_configs
+
+    if key not in MODEL_CONFIGS:
+        raise HTTPException(status_code=404, detail=f"Source model not found: {key}")
+    if req.new_key in MODEL_CONFIGS or _model_user_path(req.new_key).exists():
+        raise HTTPException(
+            status_code=409,
+            detail=f"Target model '{req.new_key}' already exists",
+        )
+
+    cloned = _strip_runtime_fields(MODEL_CONFIGS[key])
+    if req.display_name:
+        cloned["display_name"] = req.display_name
+
+    target = _model_user_path(req.new_key)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
+        json.dumps(cloned, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    reload_configs()
+    return {"key": req.new_key, "path": str(target), "source": "user_data"}
+
+
+@router.post("/models/save-from-chat")
+def save_model_from_chat(req: SaveModelFromChatRequest):
+    """Save current chat UI settings as a model JSON file.
+
+    Uses the source model as the base template, then overlays the user's
+    parameter values + cache settings + history settings, then writes to
+    user_data/models/<target_key>.json.
+    """
+    _validate_model_key(req.target_key)
+
+    from saiverse.model_configs import MODEL_CONFIGS, reload_configs
+
+    if req.source_model not in MODEL_CONFIGS:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Source model not found: {req.source_model}",
+        )
+
+    target_path = _model_user_path(req.target_key)
+    if target_path.exists() and not req.overwrite:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Target model '{req.target_key}' already exists in user_data. "
+                f"Set overwrite=true to replace it."
+            ),
+        )
+
+    new_config = _strip_runtime_fields(MODEL_CONFIGS[req.source_model])
+    new_config["display_name"] = req.display_name
+
+    # Inject parameter values into the parameters spec (each spec entry's "default")
+    if req.parameters and isinstance(new_config.get("parameters"), dict):
+        params_spec = new_config["parameters"]
+        updated_params = {}
+        for pname, spec in params_spec.items():
+            spec_copy = dict(spec) if isinstance(spec, dict) else spec
+            if pname in req.parameters and isinstance(spec_copy, dict):
+                spec_copy["default"] = req.parameters[pname]
+            updated_params[pname] = spec_copy
+        new_config["parameters"] = updated_params
+
+    # Cache settings
+    if req.cache_enabled is not None or req.cache_ttl is not None:
+        cache_cfg = dict(new_config.get("cache") or {})
+        if req.cache_enabled is not None:
+            cache_cfg["default_enabled"] = req.cache_enabled
+        if req.cache_ttl is not None:
+            cache_cfg["default_ttl"] = req.cache_ttl
+        new_config["cache"] = cache_cfg
+
+    # Metabolism 水位 / image embed settings as top-level fields
+    if req.metabolism_low_chars is not None:
+        new_config["metabolism_low_chars"] = req.metabolism_low_chars
+    if req.metabolism_target_chars is not None:
+        new_config["metabolism_target_chars"] = req.metabolism_target_chars
+    if req.metabolism_high_chars is not None:
+        new_config["metabolism_high_chars"] = req.metabolism_high_chars
+    if req.max_image_embeds is not None:
+        new_config["max_image_embeds"] = req.max_image_embeds
+
+    _validate_metabolism_watermarks(new_config)
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    target_path.write_text(
+        json.dumps(new_config, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    reload_configs()
+    return {
+        "key": req.target_key,
+        "path": str(target_path),
+        "source": "user_data",
+        "overwrote_existing": req.overwrite and target_path.exists(),
+    }

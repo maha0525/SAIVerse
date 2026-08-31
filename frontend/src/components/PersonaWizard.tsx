@@ -17,11 +17,29 @@ interface PersonaWizardProps {
 
 interface City {
     CITYID: number;
+    /** 内部の識別子。ペルソナ ID のサフィックスに使う */
+    CITY_SLUG: string;
+    /** 表示名。選択肢のラベルに使う */
     CITYNAME: string;
     DESCRIPTION?: string;
 }
 
 type Step = 1 | 2 | 3;
+
+/**
+ * manager/ids.py slugify_identifier のフロント写し。名前を ID 用の ASCII slug に
+ * 落とす (小文字化・空白→'_'・契約外文字は除去)。日本語名のように何も残らない
+ * 名前では空文字列を返し、呼び出し元が persona_<連番> へ切り替える。
+ */
+function slugifyIdentifier(text: string): string {
+    return text
+        .toLowerCase()
+        .trim()
+        .replace(/\s+/g, '_')
+        .replace(/[^a-z0-9_-]/g, '')
+        .replace(/_{2,}/g, '_')
+        .replace(/^[_-]+|[_-]+$/g, '');
+}
 
 export default function PersonaWizard({ isOpen, onClose, onComplete, embedded }: PersonaWizardProps) {
     const [step, setStep] = useState<Step>(1);
@@ -31,10 +49,18 @@ export default function PersonaWizard({ isOpen, onClose, onComplete, embedded }:
     // Step 1: Basic Info
     const [name, setName] = useState('');
     const [customId, setCustomId] = useState('');
+    // ID 欄をユーザーが手で触ったか。触るまでは名前に追随して自動で埋める
+    const [idTouched, setIdTouched] = useState(false);
+    // 連番 (persona_N) の空きを調べるための既存 ID 一覧。バックエンドの
+    // manager/ids.py と同じ席 (AIID と私室 Building の両方) を見る
+    const [takenAiIds, setTakenAiIds] = useState<Set<string>>(new Set());
+    const [takenBuildingIds, setTakenBuildingIds] = useState<Set<string>>(new Set());
     const [systemPrompt, setSystemPrompt] = useState('');
     const [cities, setCities] = useState<City[]>([]);
     const [selectedCityId, setSelectedCityId] = useState<number | null>(null);
-    const [cityName, setCityName] = useState('');
+    // ペルソナ ID のサフィックスは City の内部識別子 (CITY_SLUG)。表示名ではない
+    // — 表示名は日本語も取りうるため ID に混ぜられない (docs/intent/city_identity.md)
+    const [citySlug, setCitySlug] = useState('');
 
     // Created persona info
     const [createdPersonaId, setCreatedPersonaId] = useState<string | null>(null);
@@ -47,12 +73,14 @@ export default function PersonaWizard({ isOpen, onClose, onComplete, embedded }:
             setStep(1);
             setName('');
             setCustomId('');
+            setIdTouched(false);
             setSystemPrompt('');
             setError(null);
             setCreatedPersonaId(null);
             setCreatedRoomId(null);
             setShowSettings(false);
             loadCities();
+            loadTakenIds();
         }
     }, [isOpen]);
 
@@ -64,7 +92,7 @@ export default function PersonaWizard({ isOpen, onClose, onComplete, embedded }:
                 setCities(data);
                 if (data.length > 0) {
                     setSelectedCityId(data[0].CITYID);
-                    setCityName(data[0].CITYNAME.toLowerCase().replace(/\s+/g, '_'));
+                    setCitySlug(data[0].CITY_SLUG);
                 }
             }
         } catch (e) {
@@ -72,11 +100,54 @@ export default function PersonaWizard({ isOpen, onClose, onComplete, embedded }:
         }
     };
 
+    const loadTakenIds = async () => {
+        try {
+            const [aiRes, buildingRes] = await Promise.all([
+                fetch('/api/db/tables/ai?limit=100000'),
+                fetch('/api/db/tables/building?limit=100000'),
+            ]);
+            if (aiRes.ok) {
+                const ais = await aiRes.json();
+                setTakenAiIds(new Set(ais.map((a: { AIID: string }) => a.AIID)));
+            }
+            if (buildingRes.ok) {
+                const buildings = await buildingRes.json();
+                setTakenBuildingIds(new Set(buildings.map((b: { BUILDINGID: string }) => b.BUILDINGID)));
+            }
+        } catch (e) {
+            // 取れなくても致命ではない (初期値の提案が素朴になるだけで、
+            // 確定はバックエンドの契約が行う)
+            console.error('Failed to load existing ids', e);
+        }
+    };
+
+    // ID 欄の自動入力: 名前が英数字に落とせるならその slug、何も残らない名前
+    // (日本語など) では空いている persona_<連番>。ユーザーが手で触ったら追随を
+    // やめる。最終的な確定と検証はバックエンド (manager/ids.py の契約) が行い、
+    // ここは「送信前に実際の ID が見える」ための初期値
+    useEffect(() => {
+        if (!isOpen || idTouched) return;
+        const slug = slugifyIdentifier(name);
+        if (slug) {
+            setCustomId(slug);
+            return;
+        }
+        if (!citySlug) return;
+        let n = 1;
+        while (
+            takenAiIds.has(`persona_${n}_${citySlug}`) ||
+            takenBuildingIds.has(`persona_${n}_${citySlug}_room`)
+        ) {
+            n += 1;
+        }
+        setCustomId(`persona_${n}`);
+    }, [isOpen, idTouched, name, citySlug, takenAiIds, takenBuildingIds]);
+
     const handleCityChange = (cityId: number) => {
         setSelectedCityId(cityId);
         const city = cities.find(c => c.CITYID === cityId);
         if (city) {
-            setCityName(city.CITYNAME.toLowerCase().replace(/\s+/g, '_'));
+            setCitySlug(city.CITY_SLUG);
         }
     };
 
@@ -89,9 +160,9 @@ export default function PersonaWizard({ isOpen, onClose, onComplete, embedded }:
             setError('Cityを選択してください');
             return false;
         }
-        // Validate custom ID if provided
-        if (customId && !/^[a-zA-Z0-9_]+$/.test(customId)) {
-            setError('IDは英数字とアンダースコアのみ使用できます');
+        // Validate custom ID if provided (manager/ids.py の契約と同じ形)
+        if (customId && !/^[a-zA-Z0-9][a-zA-Z0-9_-]*$/.test(customId)) {
+            setError('IDは英数字で始まり、英数字・_・- のみ使用できます');
             return false;
         }
         setError(null);
@@ -112,7 +183,12 @@ export default function PersonaWizard({ isOpen, onClose, onComplete, embedded }:
                     name: name.trim(),
                     system_prompt: systemPrompt.trim() || `あなたは${name}です。`,
                     home_city_id: selectedCityId,
-                    ai_id: customId.trim() || null,
+                    // ID 欄をユーザーが触っていなければ null を送り、生成を
+                    // バックエンド (manager/ids.py の契約 + 連番予約) に任せる。
+                    // 自動入力値をそのまま custom ID として送ると、フロントの
+                    // 一覧スナップショット (取得失敗・件数上限・作成競合で
+                    // 不完全になりうる) が予約の根拠になってしまう
+                    ai_id: idTouched ? customId.trim() || null : null,
                 }),
             });
 
@@ -130,8 +206,8 @@ export default function PersonaWizard({ isOpen, onClose, onComplete, embedded }:
             if (!personaId || !roomId) {
                 // Fallback: reconstruct locally (should not happen with updated API)
                 const baseId = customId.trim() || name.trim().toLowerCase().replace(/\s+/g, '_');
-                setCreatedPersonaId(`${baseId}_${cityName}`);
-                setCreatedRoomId(`${baseId}_${cityName}_room`);
+                setCreatedPersonaId(`${baseId}_${citySlug}`);
+                setCreatedRoomId(`${baseId}_${citySlug}_room`);
             } else {
                 setCreatedPersonaId(personaId);
                 setCreatedRoomId(roomId);
@@ -196,13 +272,16 @@ export default function PersonaWizard({ isOpen, onClose, onComplete, embedded }:
                     <input
                         type="text"
                         value={customId}
-                        onChange={(e) => setCustomId(e.target.value.replace(/[^a-zA-Z0-9_]/g, ''))}
-                        placeholder={name ? name.toLowerCase().replace(/\s+/g, '_') : 'air'}
+                        onChange={(e) => {
+                            setIdTouched(true);
+                            setCustomId(e.target.value.replace(/[^a-zA-Z0-9_-]/g, ''));
+                        }}
+                        placeholder="persona_1"
                     />
-                    <span className={styles.idSuffix}>_{cityName}</span>
+                    <span className={styles.idSuffix}>_{citySlug}</span>
                 </div>
                 <p className={styles.hint}>
-                    空欄の場合は名前から自動生成されます
+                    名前から自動で入ります (日本語名は連番)。編集もできます
                 </p>
             </div>
 
@@ -214,7 +293,7 @@ export default function PersonaWizard({ isOpen, onClose, onComplete, embedded }:
                         onChange={(e) => handleCityChange(parseInt(e.target.value))}
                     >
                         {cities.map(c => (
-                            <option key={c.CITYID} value={c.CITYID}>{c.DESCRIPTION || c.CITYNAME}</option>
+                            <option key={c.CITYID} value={c.CITYID}>{c.CITYNAME || c.CITY_SLUG}</option>
                         ))}
                     </select>
                 </div>

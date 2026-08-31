@@ -1,7 +1,7 @@
 import logging
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional
 from datetime import datetime, timezone as dt_timezone, tzinfo, timedelta
 from zoneinfo import ZoneInfo
 
@@ -11,20 +11,18 @@ from saiverse.buildings import Building
 from saiverse_memory import SAIMemoryAdapter
 from llm_clients import get_llm_client
 from saiverse.model_configs import model_supports_images
-from saiverse.action_handler import ActionHandler
 from persona.history_manager import HistoryManager
 from persona.emotion_module import EmotionControlModule
 from database.models import AI as AIModel
 from persona.bootstrap import (
     initialise_memory_adapter,
-    load_action_priority,
     load_session_data,
 )
 from persona.constants import (
     RECALL_SNIPPET_PULSE_MAX_CHARS,
 )
 from persona.history import initialise_pulse_state
-from persona.tasks import TaskStorage
+from persona.tasks import PersonaTaskStore
 from persona.mixins import (
     PersonaGenerationMixin,
     PersonaHistoryMixin,
@@ -41,6 +39,10 @@ class PersonaCore(
     PersonaMovementMixin,
     PersonaEmotionMixin,
 ):
+    # 特殊ペルソナの役割 (AI.PERSONA_ROLE 由来)。None=通常ペルソナ、'ruler'=Region RPG の GM。
+    # 構築後に manager 側 (manager/persona.py) が設定する。設計: temp/region_rpg_intent.md §B
+    persona_role: Optional[str] = None
+
     def __init__(
         self,
         city_name: str,
@@ -53,20 +55,18 @@ class PersonaCore(
         session_factory: Callable,
         is_visitor: bool = False,
         home_city_id: Optional[str] = None, # ★ 故郷のCity ID
-        interaction_mode: str = "auto", # ★ 現在の対話モード
+        autonomy_enabled: bool = True, # ★ 自律行動の ON/OFF
         is_dispatched: bool = False, # ★ このペルソナが他のCityに派遣中かどうかのフラグ
-        emotion_prompt_path: Optional[Path] = None,
-        action_priority_path: Path = Path("builtin_data/action_priority.json"),
         building_histories: Optional[Dict[str, List[Dict[str, str]]]] = None,
         occupants: Optional[Dict[str, List[str]]] = None,
         id_to_name_map: Optional[Dict[str, str]] = None,
-        move_callback: Optional[Callable[[str, str, str], Tuple[bool, Optional[str]]]] = None,
-        dispatch_callback: Optional[Callable[[str, str, str], Tuple[bool, Optional[str]]]] = None,
-        explore_callback: Optional[Callable[[str, str], None]] = None, # New callback
-        create_persona_callback: Optional[Callable[[str, str], Tuple[bool, str]]] = None,
         start_building_id: str = "air_room",
         model: str = "gpt-4o",
         lightweight_model: Optional[str] = None,
+        vision_model: Optional[str] = None,
+        audio_model: Optional[str] = None,
+        video_model: Optional[str] = None,
+        memory_weave_model: Optional[str] = None,
         context_length: int = 120000,
         user_room_id: str = "user_room",
         provider: str = "ollama",
@@ -83,16 +83,12 @@ class PersonaCore(
         self.linked_user_name = linked_user_name
         self.is_visitor = is_visitor
         self.is_dispatched = is_dispatched
-        self.interaction_mode = interaction_mode
+        self.autonomy_enabled = autonomy_enabled
         self.home_city_id = home_city_id # ★ 故郷の情報を記憶
         self.SessionLocal = session_factory
         self.buildings: Dict[str, Building] = {b.building_id: b for b in buildings}
         self.user_room_id = user_room_id
         self.common_prompt_path = common_prompt_path  # ファイルパスを保持
-        if emotion_prompt_path is None:
-            from saiverse.data_paths import find_file, PROMPTS_DIR
-            emotion_prompt_path = find_file(PROMPTS_DIR, "emotion_parameter.txt") or Path("system_prompts/emotion_parameter.txt")
-        self.emotion_prompt = emotion_prompt_path.read_text(encoding="utf-8")
         self.persona_id = persona_id
         self.persona_name = persona_name
         self.persona_system_instruction = persona_system_instruction
@@ -105,21 +101,19 @@ class PersonaCore(
         self.conscious_log_path = (
             self.saiverse_home / "personas" / self.persona_id / "conscious_log.json"
         )
-        self.task_storage = TaskStorage(self.persona_id, base_dir=self.saiverse_home)
+        # Task は統合 persona_task テーブル (main DB) へ一本化された。PersonaTaskStore は
+        # 旧 TaskStorage 互換 API を持つアダプタ (unified_task_model.md §5 step 4b)。
+        self.task_storage = PersonaTaskStore(self.persona_id)
         self.building_memory_paths: Dict[str, Path] = {
             b_id: self.saiverse_home / "buildings" / b_id / "log.json"
             for b_id in self.buildings
         }
-        self.action_priority = load_action_priority(action_priority_path)
-        self.action_handler = ActionHandler(self.action_priority)
 
         self.occupants = occupants if occupants is not None else {}
         self.id_to_name_map = id_to_name_map if id_to_name_map is not None else {}
 
         # Initialize stateful attributes with defaults before loading session
         self.current_building_id = start_building_id
-        self.auto_count = 0
-        self.last_auto_prompt_times: Dict[str, float] = {b_id: time.time() for b_id in self.buildings}
         self.emotion = {"stability": {"mean": 0, "variance": 1}, "affect": {"mean": 0, "variance": 1}, "resonance": {"mean": 0, "variance": 1}, "attitude": {"mean": 0, "variance": 1}}
         self.pulse_cursors: Dict[str, int] = {}
         self.entry_markers: Dict[str, int] = {}
@@ -132,26 +126,31 @@ class PersonaCore(
         # Initialise SAIMemory bridge for long-term recall/summary
         self.sai_memory: Optional[SAIMemoryAdapter] = initialise_memory_adapter(self)
 
-        # Initialize managers that depend on loaded data
+        # Quarantine awareness (defense-in-depth)。
+        _quar_dict = getattr(manager_ref, "quarantined_buildings", None) if manager_ref else None
+        # Building Memory は DB が source of truth。 manager.SessionLocal を渡す。
+        _db_factory = getattr(manager_ref, "SessionLocal", None) if manager_ref else None
+
         self.history_manager = HistoryManager(
             persona_id=self.persona_id,
             persona_log_path=self.persona_log_path,
             building_memory_paths=self.building_memory_paths,
             initial_persona_history=self.messages,
-            initial_building_histories=building_histories,
             memory_adapter=self.sai_memory,
+            quarantined_buildings=_quar_dict,
+            db_session_factory=_db_factory,
         )
 
         # Configure pulse tracking based on loaded histories
         initialise_pulse_state(self)
 
         # Initialize remaining attributes
-        self.move_callback = move_callback
-        self.dispatch_callback = dispatch_callback
-        self.explore_callback = explore_callback
-        self.create_persona_callback = create_persona_callback
         self.model = model
         self.lightweight_model = lightweight_model
+        self.vision_model = vision_model
+        self.audio_model = audio_model
+        self.video_model = video_model
+        self.memory_weave_model = memory_weave_model
         self.provider = provider
         self.context_length = context_length
         self.model_supports_images = model_supports_images(model)
@@ -160,6 +159,10 @@ class PersonaCore(
         self._lightweight_llm_client = None
         self._lightweight_llm_client_initialized = False
         self._pending_parameter_overrides: Optional[Dict[str, Any]] = None
+
+        # Visual context cache は Cached Head Architecture (Phase 2-h) で
+        # head_pipeline 側 (LineHeadSnapshot + VisualContextSection) に統合済み。
+        # persona 属性としては保持しない。詳細: docs/intent/cached_head_architecture.md
 
         self.emotion_module = EmotionControlModule()
         tz_label = (timezone_name or "UTC").strip() or "UTC"

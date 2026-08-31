@@ -1,0 +1,552 @@
+"""アドオン拡張点の自動ロードモジュール。
+
+API ルーター（api_routes.py）、外部連携（integrations/*.py）、
+サーバー側 hook（addon.json の server_hooks セクション）を
+``expansion_data/<addon_name>/`` 配下から自動discoveryして登録する。
+
+main.py で呼ぶ:
+    from saiverse.addon_loader import (
+        load_addon_routers,
+        load_addon_integrations,
+        load_addon_server_hooks,
+    )
+    load_addon_routers(app)
+    load_addon_integrations(integration_manager)
+    load_addon_server_hooks()
+"""
+from __future__ import annotations
+
+import importlib.util
+import inspect
+import json
+import logging
+import sys
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Tuple, Type
+
+if TYPE_CHECKING:
+    from saiverse.integration_manager import IntegrationManager
+    from saiverse.integrations.base import BaseIntegration
+
+LOGGER = logging.getLogger(__name__)
+
+# addon_name -> 登録済みの integration.name のリスト。
+# アドオン無効化時にこのマップから unregister 対象を引く。
+_addon_integration_registry: Dict[str, List[str]] = {}
+
+# addon_name -> [(event_name, handler_callable), ...] のリスト。
+# アドオン無効化時にこのマップから unregister 対象を引く。
+_addon_server_hooks_registry: Dict[str, List[Tuple[str, Callable[..., Any]]]] = {}
+
+
+def _register_addon_externals() -> None:
+    """expansion_data/ 下の全アドオンの external/ を名前空間隔離下に登録する。
+
+    各アドオンの api_routes.py を読み込む**前**に呼ぶ必要がある(隔離機構の
+    __import__ パッチが整ってから上流ライブラリを import するため)。
+    """
+    from saiverse.addon_external_loader import register_addon_external
+    from saiverse.data_paths import EXPANSION_DATA_DIR
+
+    if not EXPANSION_DATA_DIR.exists():
+        return
+    for addon_dir in sorted(EXPANSION_DATA_DIR.iterdir()):
+        if not addon_dir.is_dir():
+            continue
+        external_dir = addon_dir / "external"
+        if not external_dir.exists():
+            continue
+        try:
+            register_addon_external(addon_dir.name, external_dir)
+        except Exception:
+            LOGGER.exception(
+                "addon_loader: failed to register external/ for addon %r",
+                addon_dir.name,
+            )
+
+
+def load_addon_routers(app) -> None:
+    """expansion_data/ 下の全アドオンの api_routes.py を自動ロードする。
+
+    api_routes.py に `router` 属性（FastAPI APIRouter）が定義されていれば
+    /api/addon/<addon_name>/ プレフィックスでマウントする。
+
+    本関数は同時に、各アドオンの ``external/`` ディレクトリを名前空間隔離
+    機構に登録する(本体側 ``tools`` 等とのトップレベル名前衝突を防ぐ)。
+
+    Args:
+        app: FastAPI アプリインスタンス
+    """
+    from saiverse.data_paths import EXPANSION_DATA_DIR
+
+    if not EXPANSION_DATA_DIR.exists():
+        LOGGER.debug("addon_loader: expansion_data/ not found, skipping")
+        return
+
+    # external/ の名前空間隔離は **api_routes.py 読み込みより先**に行う。
+    _register_addon_externals()
+
+    loaded_count = 0
+    for addon_dir in sorted(EXPANSION_DATA_DIR.iterdir()):
+        if not addon_dir.is_dir():
+            continue
+
+        routes_file = addon_dir / "api_routes.py"
+        if not routes_file.exists():
+            continue
+
+        addon_name = addon_dir.name
+        module_name = f"_addon_{addon_name.replace('-', '_')}_api_routes"
+
+        try:
+            spec = importlib.util.spec_from_file_location(module_name, routes_file)
+            if spec is None or spec.loader is None:
+                LOGGER.warning("addon_loader: failed to load spec for %s", routes_file)
+                continue
+
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+
+            if not hasattr(module, "router"):
+                LOGGER.warning(
+                    "addon_loader: %s has no 'router' attribute, skipping",
+                    routes_file,
+                )
+                continue
+
+            prefix = f"/api/addon/{addon_name}"
+            app.include_router(
+                module.router,
+                prefix=prefix,
+                tags=[f"addon-{addon_name}"],
+            )
+            LOGGER.info("addon_loader: mounted %s at %s", addon_name, prefix)
+            loaded_count += 1
+
+        except Exception:
+            LOGGER.exception(
+                "addon_loader: error loading api_routes.py for addon '%s'", addon_name
+            )
+
+    LOGGER.info("addon_loader: %d addon router(s) loaded", loaded_count)
+
+
+# ---------------------------------------------------------------------------
+# Integrations auto-discovery
+# ---------------------------------------------------------------------------
+
+def _import_integration_module(addon_name: str, py_file: Path):
+    """integrations/*.py を動的にロードする。"""
+    module_key = (
+        f"_addon_{addon_name.replace('-', '_')}_integration_{py_file.stem}"
+    )
+    spec = importlib.util.spec_from_file_location(module_key, py_file)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Failed to load spec for {py_file}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_key] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _find_base_integration_subclasses(module) -> List[Type["BaseIntegration"]]:
+    """モジュール内の BaseIntegration 継承クラスを列挙する（直接サブクラスのみ）。"""
+    from saiverse.integrations.base import BaseIntegration
+
+    found: List[Type[BaseIntegration]] = []
+    for _name, obj in inspect.getmembers(module, inspect.isclass):
+        # モジュール定義のクラスのみ対象（import で持ち込まれた BaseIntegration 自身は除外）
+        if obj is BaseIntegration:
+            continue
+        if not issubclass(obj, BaseIntegration):
+            continue
+        if obj.__module__ != module.__name__:
+            continue
+        found.append(obj)
+    return found
+
+
+def _register_addon_integrations_for(
+    integration_manager: "IntegrationManager",
+    addon_dir: Path,
+) -> int:
+    """単一アドオンの integrations/*.py を読んで register する。
+
+    Returns:
+        登録した integration の数
+    """
+    integrations_dir = addon_dir / "integrations"
+    if not integrations_dir.exists() or not integrations_dir.is_dir():
+        return 0
+
+    addon_name = addon_dir.name
+    registered_names: List[str] = []
+
+    for py_file in sorted(integrations_dir.glob("*.py")):
+        if py_file.name.startswith("_"):
+            continue
+        try:
+            module = _import_integration_module(addon_name, py_file)
+        except Exception:
+            LOGGER.exception(
+                "addon_loader: failed to import integration %s", py_file
+            )
+            continue
+
+        classes = _find_base_integration_subclasses(module)
+        if not classes:
+            LOGGER.debug(
+                "addon_loader: no BaseIntegration subclass in %s", py_file
+            )
+            continue
+
+        for cls in classes:
+            try:
+                instance = cls()
+            except Exception:
+                LOGGER.exception(
+                    "addon_loader: failed to instantiate %s.%s",
+                    py_file, cls.__name__,
+                )
+                continue
+
+            integration_manager.register(instance)
+            registered_names.append(instance.name)
+
+    if registered_names:
+        existing = _addon_integration_registry.setdefault(addon_name, [])
+        for name in registered_names:
+            if name not in existing:
+                existing.append(name)
+
+    return len(registered_names)
+
+
+def load_addon_integrations(integration_manager: "IntegrationManager") -> None:
+    """有効なアドオンの ``integrations/*.py`` をすべて自動 register する。
+
+    起動時に main.py から1回だけ呼ぶ想定。
+    アドオンが無効（AddonConfig.is_enabled == False）ならスキップする。
+
+    Args:
+        integration_manager: SAIVerseManager.integration_manager
+    """
+    from saiverse.addon_config import is_addon_enabled
+    from saiverse.data_paths import EXPANSION_DATA_DIR
+
+    if not EXPANSION_DATA_DIR.exists():
+        LOGGER.debug("addon_loader: expansion_data/ not found, skipping integrations")
+        return
+
+    total = 0
+    for addon_dir in sorted(EXPANSION_DATA_DIR.iterdir()):
+        if not addon_dir.is_dir():
+            continue
+        addon_name = addon_dir.name
+
+        if not is_addon_enabled(addon_name):
+            LOGGER.debug(
+                "addon_loader: skipping disabled addon '%s' for integrations",
+                addon_name,
+            )
+            continue
+
+        count = _register_addon_integrations_for(integration_manager, addon_dir)
+        total += count
+
+    LOGGER.info("addon_loader: %d addon integration(s) registered", total)
+
+
+def register_addon_integrations(
+    integration_manager: "IntegrationManager",
+    addon_name: str,
+) -> int:
+    """指定アドオンの integrations をランタイムで register する（有効化時用）。
+
+    Returns:
+        登録した integration の数
+    """
+    from saiverse.data_paths import EXPANSION_DATA_DIR
+
+    addon_dir = EXPANSION_DATA_DIR / addon_name
+    if not addon_dir.is_dir():
+        LOGGER.warning(
+            "addon_loader: addon '%s' not found for integration registration",
+            addon_name,
+        )
+        return 0
+    return _register_addon_integrations_for(integration_manager, addon_dir)
+
+
+def unregister_addon_integrations(
+    integration_manager: "IntegrationManager",
+    addon_name: str,
+) -> int:
+    """指定アドオンの integrations をランタイムで unregister する（無効化時用）。
+
+    Returns:
+        解除した integration の数
+    """
+    names = _addon_integration_registry.pop(addon_name, [])
+    for name in names:
+        try:
+            integration_manager.unregister(name)
+        except Exception:
+            LOGGER.exception(
+                "addon_loader: failed to unregister integration '%s' (addon=%s)",
+                name, addon_name,
+            )
+    if names:
+        LOGGER.info(
+            "addon_loader: %d integration(s) unregistered for addon '%s'",
+            len(names), addon_name,
+        )
+    return len(names)
+
+
+# ---------------------------------------------------------------------------
+# Server-side hooks auto-discovery
+# ---------------------------------------------------------------------------
+
+def _load_addon_manifest(addon_dir: Path) -> Dict[str, Any]:
+    """addon.json を読んで dict を返す (存在しない / 壊れていれば空 dict)。"""
+    manifest_path = addon_dir / "addon.json"
+    if not manifest_path.exists():
+        return {}
+    try:
+        with open(manifest_path, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        LOGGER.warning(
+            "addon_loader: failed to read manifest %s", manifest_path, exc_info=True,
+        )
+        return {}
+
+
+def _import_addon_module(addon_name: str, py_file: Path):
+    """expansion_data/<addon>/<module>.py を動的にロードする。"""
+    module_key = (
+        f"_addon_{addon_name.replace('-', '_')}_module_{py_file.stem}"
+    )
+    spec = importlib.util.spec_from_file_location(module_key, py_file)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Failed to load spec for {py_file}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_key] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _resolve_hook_handler(
+    addon_dir: Path,
+    handler_spec: str,
+) -> Callable[..., Any]:
+    """``"module:function"`` 形式のハンドラ仕様をコール可能オブジェクトに解決する。
+
+    Raises:
+        ValueError: 形式が不正
+        ImportError: モジュールがロードできない
+        AttributeError: 関数が見つからない
+    """
+    module_name, sep, fn_name = handler_spec.partition(":")
+    if not sep or not module_name or not fn_name:
+        raise ValueError(
+            f"invalid handler spec {handler_spec!r}; expected 'module:function'"
+        )
+    py_file = addon_dir / f"{module_name}.py"
+    if not py_file.exists():
+        raise ImportError(f"handler module not found: {py_file}")
+    module = _import_addon_module(addon_dir.name, py_file)
+    handler = getattr(module, fn_name, None)
+    if handler is None:
+        raise AttributeError(
+            f"function {fn_name!r} not found in {py_file}"
+        )
+    if not callable(handler):
+        raise TypeError(
+            f"{handler_spec!r} resolved to non-callable object"
+        )
+    return handler
+
+
+def _register_addon_server_hooks_for(addon_dir: Path) -> int:
+    """単一アドオンの addon.json から server_hooks を読んで register する。
+
+    Returns:
+        登録した hook の数
+    """
+    from saiverse.addon_hooks import register_hook
+
+    manifest = _load_addon_manifest(addon_dir)
+    hooks_spec = manifest.get("server_hooks") or []
+    if not isinstance(hooks_spec, list):
+        LOGGER.warning(
+            "addon_loader: server_hooks for addon '%s' is not a list, skipping",
+            addon_dir.name,
+        )
+        return 0
+
+    addon_name = addon_dir.name
+    registered: List[Tuple[str, Callable[..., Any]]] = []
+
+    for hook_def in hooks_spec:
+        if not isinstance(hook_def, dict):
+            LOGGER.warning(
+                "addon_loader: server_hooks entry is not an object (addon=%s): %r",
+                addon_name, hook_def,
+            )
+            continue
+        event = hook_def.get("event")
+        handler_spec = hook_def.get("handler")
+        if not event or not handler_spec:
+            LOGGER.warning(
+                "addon_loader: server_hooks entry missing 'event' or 'handler' "
+                "(addon=%s): %r",
+                addon_name, hook_def,
+            )
+            continue
+        try:
+            handler = _resolve_hook_handler(addon_dir, handler_spec)
+        except Exception:
+            LOGGER.exception(
+                "addon_loader: failed to resolve hook handler %r (addon=%s)",
+                handler_spec, addon_name,
+            )
+            continue
+
+        try:
+            register_hook(event, handler)
+        except Exception:
+            LOGGER.exception(
+                "addon_loader: failed to register hook %r → %s (addon=%s)",
+                event, handler_spec, addon_name,
+            )
+            continue
+
+        registered.append((event, handler))
+
+    if registered:
+        existing = _addon_server_hooks_registry.setdefault(addon_name, [])
+        existing.extend(registered)
+
+    return len(registered)
+
+
+def load_addon_server_hooks() -> None:
+    """有効なアドオンの ``addon.json`` から ``server_hooks`` をすべて自動 register する。
+
+    起動時に main.py から1回だけ呼ぶ想定。
+    アドオンが無効（AddonConfig.is_enabled == False）ならスキップする。
+    """
+    from saiverse.addon_config import is_addon_enabled
+    from saiverse.data_paths import EXPANSION_DATA_DIR
+
+    if not EXPANSION_DATA_DIR.exists():
+        LOGGER.debug("addon_loader: expansion_data/ not found, skipping server_hooks")
+        return
+
+    total = 0
+    for addon_dir in sorted(EXPANSION_DATA_DIR.iterdir()):
+        if not addon_dir.is_dir():
+            continue
+        addon_name = addon_dir.name
+        if not is_addon_enabled(addon_name):
+            LOGGER.debug(
+                "addon_loader: skipping disabled addon '%s' for server_hooks",
+                addon_name,
+            )
+            continue
+        total += _register_addon_server_hooks_for(addon_dir)
+
+    LOGGER.info("addon_loader: %d addon server_hook(s) registered", total)
+
+
+def get_addon_action_test_targets(addon_name: str) -> List[Dict[str, str]]:
+    """アドオンが宣言した「複合アクションのテスト実行先」候補一覧を返す。
+
+    複数機体アドオン (stackchan 等) は native tool を「今ペルソナが降りている
+    機体」へ振り分けるため、 persona 文脈を持たない addon 管理 UI のテスト実行
+    では対象機体を明示的に選ぶ必要がある。 addon.json の ``action_test_targets``
+    (``"module:function"`` 形式、 server_hooks と同形) が宣言されていれば、 その
+    関数を呼んで ``[{"value": <instance_id>, "label": <表示名>}]`` を得る。
+
+    宣言が無い / 解決や呼び出しに失敗した場合は空リスト (= 単一接続で足りる
+    従来型アドオン、 UI は機体プルダウンを出さず従来通りテストする)。 例外は
+    ここで握り潰す (テスト実行 UI が addon 実装ミスで 500 にならないように)。
+    """
+    from saiverse.data_paths import EXPANSION_DATA_DIR
+
+    addon_dir = EXPANSION_DATA_DIR / addon_name
+    if not addon_dir.is_dir():
+        return []
+    manifest = _load_addon_manifest(addon_dir)
+    spec = manifest.get("action_test_targets")
+    if not spec or not isinstance(spec, str):
+        return []
+    try:
+        provider = _resolve_hook_handler(addon_dir, spec)
+        raw = provider() or []
+    except Exception:
+        LOGGER.warning(
+            "addon_loader: action_test_targets provider %r failed (addon=%s)",
+            spec, addon_name, exc_info=True,
+        )
+        return []
+
+    targets: List[Dict[str, str]] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        value = entry.get("value")
+        if value is None:
+            continue
+        targets.append({
+            "value": str(value),
+            "label": str(entry.get("label", value)),
+        })
+    return targets
+
+
+def register_addon_server_hooks(addon_name: str) -> int:
+    """指定アドオンの server_hooks をランタイムで register する（有効化時用）。
+
+    Returns:
+        登録した hook の数
+    """
+    from saiverse.data_paths import EXPANSION_DATA_DIR
+
+    addon_dir = EXPANSION_DATA_DIR / addon_name
+    if not addon_dir.is_dir():
+        LOGGER.warning(
+            "addon_loader: addon '%s' not found for server_hook registration",
+            addon_name,
+        )
+        return 0
+    return _register_addon_server_hooks_for(addon_dir)
+
+
+def unregister_addon_server_hooks(addon_name: str) -> int:
+    """指定アドオンの server_hooks をランタイムで unregister する（無効化時用）。
+
+    Returns:
+        解除した hook の数
+    """
+    from saiverse.addon_hooks import unregister_hook
+
+    pairs = _addon_server_hooks_registry.pop(addon_name, [])
+    removed = 0
+    for event, handler in pairs:
+        try:
+            if unregister_hook(event, handler):
+                removed += 1
+        except Exception:
+            LOGGER.exception(
+                "addon_loader: failed to unregister hook %r (addon=%s)",
+                event, addon_name,
+            )
+    if removed:
+        LOGGER.info(
+            "addon_loader: %d server_hook(s) unregistered for addon '%s'",
+            removed, addon_name,
+        )
+    return removed

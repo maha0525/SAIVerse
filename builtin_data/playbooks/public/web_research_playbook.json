@@ -1,0 +1,692 @@
+{
+  "name": "web_research",
+  "display_name": "Webリサーチ",
+  "description": "Webを検索して目的に関連する重要情報を verbatim 引用で抽出する。1サイクルで最大3 URL × 3セクションを読み込み、findings の取捨選択を経て報告する。最終的に親ラインへは厳選した引用と出典のみを返す（取捨選択は子ラインで完結）",
+  "input_schema": [
+    {
+      "name": "input",
+      "description": "調査したいトピックや質問"
+    }
+  ],
+  "report_template": "## 調査結果: {research_topic}\n\n{final_overview}\n\n## 重要情報（原文引用）\n\n{final_quotes}\n\n## 出典\n\n{final_sources}",
+  "router_callable": true,
+  "can_run_as_child": true,
+  "nodes": [
+    {
+      "id": "init",
+      "type": "set",
+      "assignments": {
+        "iteration": 0,
+        "max_loops": 3,
+        "findings": "",
+        "research_topic": "",
+        "final_overview": "",
+        "final_quotes": "",
+        "final_sources": "",
+        "outline_1": "",
+        "outline_2": "",
+        "outline_3": "",
+        "section_1a": "",
+        "section_1b": "",
+        "section_1c": "",
+        "section_2a": "",
+        "section_2b": "",
+        "section_2c": "",
+        "section_3a": "",
+        "section_3b": "",
+        "section_3c": ""
+      },
+      "next": "decide_topic"
+    },
+    {
+      "id": "decide_topic",
+      "type": "llm",
+      "action": "これまでの会話文脈から、Web リサーチで調べるべきトピックを1文で決定してください。\n\n直近の会話の流れから「何を知りたがっているのか」「どんな観点で調べてほしいのか」を読み取り、検索クエリの土台になる簡潔なトピック文を出してください。曖昧な場合は、会話で最も新しく言及された問いを優先してください。",
+      "response_schema": {
+        "type": "object",
+        "properties": {
+          "research_topic": {
+            "type": "string",
+            "description": "調査トピック（1文、検索クエリの土台になる具体性）"
+          },
+          "intent": {
+            "type": "string",
+            "description": "なぜこれを調べるか / どんな成果が欲しいか（補足）"
+          }
+        },
+        "required": [
+          "research_topic"
+        ]
+      },
+      "output_key": "topic",
+      "memorize": {
+        "tags": [
+          "web_research",
+          "topic_decision"
+        ]
+      },
+      "next": "set_topic"
+    },
+    {
+      "id": "set_topic",
+      "type": "set",
+      "assignments": {
+        "research_topic": "{topic.research_topic}"
+      },
+      "next": "plan_query"
+    },
+    {
+      "id": "plan_query",
+      "type": "llm",
+      "action": "調査トピック「{research_topic}」について次の検索クエリを生成してください。\n\n## これまでに収集した重要情報\n{findings}\n\n## 現在のサイクル\n{iteration} / {max_loops}\n\n## 指示\n- 初回はトピックの核に当たる検索を行ってください\n- 既に情報がある場合は、不足している観点を補うクエリにしてください\n- 言語ヒント: トピックに応じて日本語/英語を使い分けてください\n- カテゴリ: 調べる対象に応じて検索カテゴリを選んでください（一般的な話題＝general、時事・速報＝news、学術論文＝science、技術・プログラミング＝it など）。サイクルごとに変えて横断的に調べてもよいです",
+      "response_schema": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "検索クエリ"
+          },
+          "max_results": {
+            "type": "integer",
+            "description": "取得件数（5-10推奨）"
+          },
+          "category": {
+            "type": "string",
+            "enum": [
+              "general",
+              "news",
+              "images",
+              "videos",
+              "it",
+              "science",
+              "music",
+              "files"
+            ],
+            "description": "検索カテゴリ。一般的な話題は general、時事・速報は news、学術は science、技術は it。調べる対象に応じて選ぶ"
+          },
+          "rationale": {
+            "type": "string",
+            "description": "このクエリを選んだ理由"
+          }
+        },
+        "required": [
+          "query",
+          "max_results",
+          "category"
+        ]
+      },
+      "output_key": "query_plan",
+      "memorize": {
+        "tags": [
+          "web_research"
+        ]
+      },
+      "next": "search"
+    },
+    {
+      "id": "search",
+      "type": "tool",
+      "action": "searxng_search",
+      "args_input": {
+        "query": "query_plan.query",
+        "max_results": "query_plan.max_results",
+        "category": "query_plan.category"
+      },
+      "output_key": "search_results",
+      "next": "select_urls"
+    },
+    {
+      "id": "select_urls",
+      "type": "llm",
+      "action": "直前の検索結果から、調査トピック「{research_topic}」に関連する有用なURLを最大3件、優先度順に選んでください。\n\n## 指示\n- 信頼できそうな情報源を優先\n- スニペットが直接トピックに答えていそうなものを優先\n- 既知情報源（前サイクルで採用した URL）と重複するものは避ける\n- 良いURLが3件未満なら、無理に3件選ばず2件や1件でもよい",
+      "response_schema": {
+        "type": "object",
+        "properties": {
+          "urls": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "選択したURL（最大3件、優先度順）"
+          },
+          "reason": {
+            "type": "string",
+            "description": "選択理由"
+          }
+        },
+        "required": [
+          "urls"
+        ]
+      },
+      "output_key": "url_choice",
+      "memorize": {
+        "tags": [
+          "web_research"
+        ]
+      },
+      "conditional_next": {
+        "field": "url_choice.urls.length",
+        "operator": "gte",
+        "cases": {
+          "1": "read_outline_1",
+          "default": "inc_iter"
+        }
+      }
+    },
+    {
+      "id": "read_outline_1",
+      "type": "tool",
+      "action": "read_url_outline",
+      "args_input": {
+        "url": "url_choice.urls.0"
+      },
+      "output_key": "outline_1",
+      "conditional_next": {
+        "field": "url_choice.urls.length",
+        "operator": "gte",
+        "cases": {
+          "2": "read_outline_2",
+          "default": "set_outline_2_empty"
+        }
+      }
+    },
+    {
+      "id": "read_outline_2",
+      "type": "tool",
+      "action": "read_url_outline",
+      "args_input": {
+        "url": "url_choice.urls.1"
+      },
+      "output_key": "outline_2",
+      "conditional_next": {
+        "field": "url_choice.urls.length",
+        "operator": "gte",
+        "cases": {
+          "3": "read_outline_3",
+          "default": "set_outline_3_empty"
+        }
+      }
+    },
+    {
+      "id": "read_outline_3",
+      "type": "tool",
+      "action": "read_url_outline",
+      "args_input": {
+        "url": "url_choice.urls.2"
+      },
+      "output_key": "outline_3",
+      "next": "choose_all"
+    },
+    {
+      "id": "set_outline_2_empty",
+      "type": "set",
+      "assignments": {
+        "outline_2": "(no URL)",
+        "outline_3": "(no URL)"
+      },
+      "next": "choose_all"
+    },
+    {
+      "id": "set_outline_3_empty",
+      "type": "set",
+      "assignments": {
+        "outline_3": "(no URL)"
+      },
+      "next": "choose_all"
+    },
+    {
+      "id": "choose_all",
+      "type": "llm",
+      "action": "直前に最大3つのURLについて outline を取得しました（短いページなら全文、長いページなら見出し階層が返ってきています）。それぞれを調査トピック「{research_topic}」のためにどう扱うか判断してください。\n\n## 判断基準\n各URLについて以下のいずれかを選択:\n- skip: このURLは調査トピックに関係ない / 既知情報の重複 → 何もしない\n- use_outline: 既に取得した outline 部分（短いページの全文 or 見出し階層）に十分な情報がある → そのまま引用抽出へ\n- read_sections: 長文ページで特定の節を深く読む必要がある → section_queries に読みたい見出し名/キーワードを最大3件指定\n\nURLが取得されていない / outline が空の場合 (URL が3件未満で 2,3 が無い場合など) は action=\"skip\" を指定してください。\n\nurl_decisions は必ず 3 要素（URL 1, 2, 3 の順）で返してください。",
+      "response_schema": {
+        "type": "object",
+        "properties": {
+          "url_decisions": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "action": {
+                  "type": "string",
+                  "enum": [
+                    "skip",
+                    "use_outline",
+                    "read_sections"
+                  ]
+                },
+                "section_queries": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "read_sections の場合のみ。最大3件の見出し名/キーワード"
+                },
+                "reason": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "action"
+              ]
+            },
+            "description": "URL 1, 2, 3 それぞれの扱い（必ず3要素）"
+          }
+        },
+        "required": [
+          "url_decisions"
+        ]
+      },
+      "output_key": "choose",
+      "memorize": {
+        "tags": [
+          "web_research"
+        ]
+      },
+      "next": "route_url_1"
+    },
+    {
+      "id": "route_url_1",
+      "type": "pass",
+      "conditional_next": {
+        "field": "choose.url_decisions.0.action",
+        "operator": "eq",
+        "cases": {
+          "read_sections": "check_u1_s1",
+          "default": "after_url_1"
+        }
+      }
+    },
+    {
+      "id": "check_u1_s1",
+      "type": "pass",
+      "conditional_next": {
+        "field": "choose.url_decisions.0.section_queries.length",
+        "operator": "gte",
+        "cases": {
+          "1": "read_section_1a",
+          "default": "after_url_1"
+        }
+      }
+    },
+    {
+      "id": "read_section_1a",
+      "type": "tool",
+      "action": "read_url_section",
+      "args_input": {
+        "url": "url_choice.urls.0",
+        "section_query": "choose.url_decisions.0.section_queries.0"
+      },
+      "output_key": "section_1a",
+      "conditional_next": {
+        "field": "choose.url_decisions.0.section_queries.length",
+        "operator": "gte",
+        "cases": {
+          "2": "read_section_1b",
+          "default": "after_url_1"
+        }
+      }
+    },
+    {
+      "id": "read_section_1b",
+      "type": "tool",
+      "action": "read_url_section",
+      "args_input": {
+        "url": "url_choice.urls.0",
+        "section_query": "choose.url_decisions.0.section_queries.1"
+      },
+      "output_key": "section_1b",
+      "conditional_next": {
+        "field": "choose.url_decisions.0.section_queries.length",
+        "operator": "gte",
+        "cases": {
+          "3": "read_section_1c",
+          "default": "after_url_1"
+        }
+      }
+    },
+    {
+      "id": "read_section_1c",
+      "type": "tool",
+      "action": "read_url_section",
+      "args_input": {
+        "url": "url_choice.urls.0",
+        "section_query": "choose.url_decisions.0.section_queries.2"
+      },
+      "output_key": "section_1c",
+      "next": "after_url_1"
+    },
+    {
+      "id": "after_url_1",
+      "type": "pass",
+      "conditional_next": {
+        "field": "url_choice.urls.length",
+        "operator": "gte",
+        "cases": {
+          "2": "route_url_2",
+          "default": "extract_quotes"
+        }
+      }
+    },
+    {
+      "id": "route_url_2",
+      "type": "pass",
+      "conditional_next": {
+        "field": "choose.url_decisions.1.action",
+        "operator": "eq",
+        "cases": {
+          "read_sections": "check_u2_s1",
+          "default": "after_url_2"
+        }
+      }
+    },
+    {
+      "id": "check_u2_s1",
+      "type": "pass",
+      "conditional_next": {
+        "field": "choose.url_decisions.1.section_queries.length",
+        "operator": "gte",
+        "cases": {
+          "1": "read_section_2a",
+          "default": "after_url_2"
+        }
+      }
+    },
+    {
+      "id": "read_section_2a",
+      "type": "tool",
+      "action": "read_url_section",
+      "args_input": {
+        "url": "url_choice.urls.1",
+        "section_query": "choose.url_decisions.1.section_queries.0"
+      },
+      "output_key": "section_2a",
+      "conditional_next": {
+        "field": "choose.url_decisions.1.section_queries.length",
+        "operator": "gte",
+        "cases": {
+          "2": "read_section_2b",
+          "default": "after_url_2"
+        }
+      }
+    },
+    {
+      "id": "read_section_2b",
+      "type": "tool",
+      "action": "read_url_section",
+      "args_input": {
+        "url": "url_choice.urls.1",
+        "section_query": "choose.url_decisions.1.section_queries.1"
+      },
+      "output_key": "section_2b",
+      "conditional_next": {
+        "field": "choose.url_decisions.1.section_queries.length",
+        "operator": "gte",
+        "cases": {
+          "3": "read_section_2c",
+          "default": "after_url_2"
+        }
+      }
+    },
+    {
+      "id": "read_section_2c",
+      "type": "tool",
+      "action": "read_url_section",
+      "args_input": {
+        "url": "url_choice.urls.1",
+        "section_query": "choose.url_decisions.1.section_queries.2"
+      },
+      "output_key": "section_2c",
+      "next": "after_url_2"
+    },
+    {
+      "id": "after_url_2",
+      "type": "pass",
+      "conditional_next": {
+        "field": "url_choice.urls.length",
+        "operator": "gte",
+        "cases": {
+          "3": "route_url_3",
+          "default": "extract_quotes"
+        }
+      }
+    },
+    {
+      "id": "route_url_3",
+      "type": "pass",
+      "conditional_next": {
+        "field": "choose.url_decisions.2.action",
+        "operator": "eq",
+        "cases": {
+          "read_sections": "check_u3_s1",
+          "default": "extract_quotes"
+        }
+      }
+    },
+    {
+      "id": "check_u3_s1",
+      "type": "pass",
+      "conditional_next": {
+        "field": "choose.url_decisions.2.section_queries.length",
+        "operator": "gte",
+        "cases": {
+          "1": "read_section_3a",
+          "default": "extract_quotes"
+        }
+      }
+    },
+    {
+      "id": "read_section_3a",
+      "type": "tool",
+      "action": "read_url_section",
+      "args_input": {
+        "url": "url_choice.urls.2",
+        "section_query": "choose.url_decisions.2.section_queries.0"
+      },
+      "output_key": "section_3a",
+      "conditional_next": {
+        "field": "choose.url_decisions.2.section_queries.length",
+        "operator": "gte",
+        "cases": {
+          "2": "read_section_3b",
+          "default": "extract_quotes"
+        }
+      }
+    },
+    {
+      "id": "read_section_3b",
+      "type": "tool",
+      "action": "read_url_section",
+      "args_input": {
+        "url": "url_choice.urls.2",
+        "section_query": "choose.url_decisions.2.section_queries.1"
+      },
+      "output_key": "section_3b",
+      "conditional_next": {
+        "field": "choose.url_decisions.2.section_queries.length",
+        "operator": "gte",
+        "cases": {
+          "3": "read_section_3c",
+          "default": "extract_quotes"
+        }
+      }
+    },
+    {
+      "id": "read_section_3c",
+      "type": "tool",
+      "action": "read_url_section",
+      "args_input": {
+        "url": "url_choice.urls.2",
+        "section_query": "choose.url_decisions.2.section_queries.2"
+      },
+      "output_key": "section_3c",
+      "next": "extract_quotes"
+    },
+    {
+      "id": "extract_quotes",
+      "type": "llm",
+      "action": "直前に取得した outline / section の内容（最大3 URL × 最大3 セクション）から、調査トピック「{research_topic}」に直接答える verbatim な引用だけを抽出してください。\n\n## 厳守ルール\n- 引用は **原文ママ** (verbatim)。要約・パラフレーズ・書き換え禁止\n- トピックに関係ない情報、脱線、宣伝文句、汎用的なテンプレ文は除外\n- 1ページから無理に拾わない。ハズレページは quotes=[] でスキップしてよい\n- excerpt は意味の通る単位で（1文〜数文）。文の途中で切らない\n- source_ref は必ず元のURLを指定（直前の取得結果に出ているもの）\n- relevance: high=トピックに直接答える / medium=補強情報 / low はそもそも採用しない（=入れない）",
+      "response_schema": {
+        "type": "object",
+        "properties": {
+          "quotes": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "source_ref": {
+                  "type": "string",
+                  "description": "出典URL"
+                },
+                "excerpt": {
+                  "type": "string",
+                  "description": "原文ママの引用"
+                },
+                "relevance": {
+                  "type": "string",
+                  "enum": [
+                    "high",
+                    "medium"
+                  ]
+                },
+                "why_relevant": {
+                  "type": "string",
+                  "description": "なぜ調査目的に関連するか（1行）"
+                }
+              },
+              "required": [
+                "source_ref",
+                "excerpt",
+                "relevance",
+                "why_relevant"
+              ]
+            },
+            "description": "このサイクルで抽出した重要引用（0件可）"
+          },
+          "cycle_note": {
+            "type": "string",
+            "description": "このサイクルで分かったことの簡潔なメモ（1-2文）"
+          }
+        },
+        "required": [
+          "quotes",
+          "cycle_note"
+        ]
+      },
+      "output_key": "cycle_extract",
+      "memorize": {
+        "tags": [
+          "web_research",
+          "extract"
+        ]
+      },
+      "next": "accumulate"
+    },
+    {
+      "id": "accumulate",
+      "type": "set",
+      "assignments": {
+        "findings": "{findings}\n\n--- サイクル {iteration} ({cycle_extract.cycle_note}) ---\n{cycle_extract.quotes}"
+      },
+      "next": "check_done"
+    },
+    {
+      "id": "check_done",
+      "type": "llm",
+      "action": "調査トピック「{research_topic}」について、ここまでに蓄積した findings を取捨選択し、十分かを判定してください。\n\n## 蓄積された findings\n{findings}\n\n## 現在のサイクル\n{iteration} / {max_loops}\n\n## やること\n1. **取捨選択**: 蓄積された全引用を見渡し、本当にトピックに直接答えているものだけ残す。脱線・重複・低信頼を drop\n2. **十分判定**: 残った引用で報告書としての答えが揃っているか判断\n3. **overview**: 1-2文で「何が分かって何が分からなかったか」のメタ行\n4. **kept_quotes_markdown**: 残した引用を Markdown 箇条書きで整形。各引用は\n   `- 「原文引用」 ([出典](URL))`\n   形式で書く。**引用本文は原文ママのまま**書き換えない\n5. **sources_markdown**: 採用した出典URLの箇条書きリスト\n6. **next_focus**: 不足時のみ、次サイクルで補うべき観点（十分なら空文字）",
+      "response_schema": {
+        "type": "object",
+        "properties": {
+          "is_sufficient": {
+            "type": "boolean"
+          },
+          "overview": {
+            "type": "string",
+            "description": "1-2文の見取り図"
+          },
+          "kept_quotes_markdown": {
+            "type": "string",
+            "description": "厳選した引用の Markdown 箇条書き（原文ママ）"
+          },
+          "sources_markdown": {
+            "type": "string",
+            "description": "採用した出典URL一覧の Markdown"
+          },
+          "next_focus": {
+            "type": "string",
+            "description": "不足時のみ次の検索観点"
+          }
+        },
+        "required": [
+          "is_sufficient",
+          "overview",
+          "kept_quotes_markdown",
+          "sources_markdown"
+        ]
+      },
+      "output_key": "verdict",
+      "memorize": {
+        "tags": [
+          "web_research",
+          "verdict"
+        ]
+      },
+      "next": "snapshot_verdict"
+    },
+    {
+      "id": "snapshot_verdict",
+      "type": "set",
+      "assignments": {
+        "final_overview": "{verdict.overview}",
+        "final_quotes": "{verdict.kept_quotes_markdown}",
+        "final_sources": "{verdict.sources_markdown}"
+      },
+      "conditional_next": {
+        "field": "verdict.is_sufficient",
+        "operator": "eq",
+        "cases": {
+          "true": "finalize",
+          "default": "inc_iter"
+        }
+      }
+    },
+    {
+      "id": "inc_iter",
+      "type": "set",
+      "assignments": {
+        "iteration": "={iteration} + 1",
+        "outline_1": "",
+        "outline_2": "",
+        "outline_3": "",
+        "section_1a": "",
+        "section_1b": "",
+        "section_1c": "",
+        "section_2a": "",
+        "section_2b": "",
+        "section_2c": "",
+        "section_3a": "",
+        "section_3b": "",
+        "section_3c": ""
+      },
+      "conditional_next": {
+        "field": "iteration",
+        "operator": "gte",
+        "cases": {
+          "3": "finalize",
+          "default": "plan_query"
+        }
+      }
+    },
+    {
+      "id": "finalize",
+      "type": "memorize",
+      "action": "Webリサーチ完了\n\nトピック: {research_topic}\n見取り図: {final_overview}",
+      "role": "assistant",
+      "tags": [
+        "web_research",
+        "completed"
+      ],
+      "next": null
+    }
+  ],
+  "start_node": "init"
+}

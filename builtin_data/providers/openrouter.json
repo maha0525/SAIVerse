@@ -1,0 +1,12 @@
+{
+  "id": "openrouter",
+  "display_name": "OpenRouter",
+  "protocol": "openai_compat",
+  "base_url": "https://openrouter.ai/api/v1",
+  "api_key_env": "OPENROUTER_API_KEY",
+  "default_headers": {
+    "HTTP-Referer": "https://saiverse.net",
+    "X-OpenRouter-Title": "SAIVerse",
+    "X-OpenRouter-Categories": "roleplay,general-chat"
+  }
+}

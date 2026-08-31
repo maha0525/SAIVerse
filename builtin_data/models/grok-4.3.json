@@ -2,11 +2,8 @@
   "model": "grok-4.3",
   "system_prompt": "",
   "display_name": "Grok 4.3",
-  "provider": "xai",
+  "provider_ref": "xai",
   "context_length": 1000000,
-  "default_max_history_messages": 100,
-  "metabolism_keep_messages": 40,
-  "api_key_env": "XAI_API_KEY",
   "supports_structured_output": true,
   "supports_images": true,
   "parameters": {

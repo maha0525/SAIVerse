@@ -1,18 +1,21 @@
-from .core import Memopedia
+from .core import ChronicleProtectedError, Memopedia
 from .storage import (
     init_memopedia_tables,
     CATEGORY_PEOPLE,
     CATEGORY_TERMS,
     CATEGORY_PLANS,
+    CATEGORY_EVENTS,
     PageEditHistory,
 )
 
 __all__ = [
+    "ChronicleProtectedError",
     "Memopedia",
     "init_memopedia_tables",
     "CATEGORY_PEOPLE",
     "CATEGORY_TERMS",
     "CATEGORY_PLANS",
+    "CATEGORY_EVENTS",
     "PageEditHistory",
 ]
 

@@ -1,0 +1,6 @@
+{
+  "id": "xai",
+  "display_name": "xAI",
+  "protocol": "xai_native",
+  "api_key_env": "XAI_API_KEY"
+}

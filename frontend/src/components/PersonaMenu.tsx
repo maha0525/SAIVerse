@@ -1,6 +1,6 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import styles from './PersonaMenu.module.css';
-import { Home, Brain, Calendar, CheckSquare, Settings, X, RefreshCw, Network, Package, Sparkles } from 'lucide-react';
+import { Home, Brain, AlarmClock, Settings, X, RefreshCw, Package, Sparkles } from 'lucide-react';
 import ModalOverlay from './common/ModalOverlay';
 
 interface PersonaMenuProps {
@@ -9,26 +9,24 @@ interface PersonaMenuProps {
     personaId: string;
     personaName: string;
     avatarUrl: string;
+    /** dismiss 操作で対象とする building (= この persona がいる部屋)。
+     * C-1 閲覧モード以降、 サーバ side の user_current_building_id だけに頼ると
+     * viewing 中の部屋で帰ってもらえなくなるため明示する。
+     */
+    buildingId?: string | null;
     onOpenMemory?: () => void;
     onOpenSchedule?: () => void;
-    onOpenTasks?: () => void;
     onOpenSettings?: () => void;
     onOpenInventory?: () => void;
+    /** dismiss 成功直後に呼ばれる。 親 (RightSidebar → ChatPage) が
+     * 滞在ペルソナ表示を即時更新するための callback。 省略すると
+     * 10 秒ポーリングか building 切替まで古い表示のままになる。 */
+    onDismissed?: () => void;
 }
 
-export default function PersonaMenu({ isOpen, onClose, personaId, personaName, avatarUrl, onOpenMemory, onOpenSchedule, onOpenTasks, onOpenSettings, onOpenInventory }: PersonaMenuProps) {
+export default function PersonaMenu({ isOpen, onClose, personaId, personaName, avatarUrl, buildingId, onOpenMemory, onOpenSchedule, onOpenSettings, onOpenInventory, onDismissed }: PersonaMenuProps) {
     const [loading, setLoading] = useState(false);
     const [organizing, setOrganizing] = useState(false);
-    const [developerMode, setDeveloperMode] = useState(false);
-
-    useEffect(() => {
-        if (isOpen) {
-            fetch('/api/config/developer-mode')
-                .then(res => res.ok ? res.json() : null)
-                .then(data => { if (data) setDeveloperMode(data.enabled); })
-                .catch(() => {});
-        }
-    }, [isOpen]);
 
     if (!isOpen) return null;
 
@@ -37,9 +35,13 @@ export default function PersonaMenu({ isOpen, onClose, personaId, personaName, a
 
         setLoading(true);
         try {
-            const res = await fetch(`/api/people/dismiss/${personaId}`, { method: 'POST' });
+            const url = buildingId
+                ? `/api/people/dismiss/${personaId}?building_id=${encodeURIComponent(buildingId)}`
+                : `/api/people/dismiss/${personaId}`;
+            const res = await fetch(url, { method: 'POST' });
             if (res.ok) {
                 const data = await res.json();
+                onDismissed?.();
                 // Close menu
                 onClose();
             } else {
@@ -55,17 +57,23 @@ export default function PersonaMenu({ isOpen, onClose, personaId, personaName, a
     };
 
     const handleOrganizeMemory = async () => {
-        if (!confirm(`${personaName}の記憶を整理しますか？\n会話履歴のキャッシュがリセットされ、Chronicleが生成されます。`)) return;
+        if (!confirm(`${personaName}の記憶を整理しますか？\n古い会話履歴があらすじ（Chronicle）に畳まれます。直近の会話はそのまま残ります。`)) return;
 
         setOrganizing(true);
         try {
             const res = await fetch(`/api/people/${personaId}/organize-memory`, { method: 'POST' });
             if (res.ok) {
                 const data = await res.json();
-                const msg = data.chronicle_generated
-                    ? '記憶の整理が完了しました（Chronicle生成済み）'
-                    : '記憶の整理が完了しました';
-                alert(msg);
+                const messages: Record<string, string> = {
+                    ok: '記憶の整理が完了しました',
+                    noop: '整理できる履歴がまだありません',
+                    failed: '記憶の整理に失敗しました（あらすじ生成が完了しませんでした）。もう一度実行すると再試行できます。',
+                    deferred: '別の整理が同じ範囲を処理中または処理済みです。しばらく待って再実行してください。',
+                    deferred_sluice_unseen: '記憶の整理を見送りました（今回の採取で読めていない範囲があったため、畳みは次回の整理で続きから進みます）。',
+                    disabled: 'Chronicle生成が無効のため整理できません（ペルソナ設定で「Chronicle 自動生成」を「有効」にしてください）',
+                    unavailable: '整理できる状態ではありません（会話履歴がまだ無い可能性があります）',
+                };
+                alert(messages[data.compaction] ?? '記憶の整理の結果が不明です');
             } else {
                 const err = await res.json();
                 alert(`失敗: ${err.detail}`);
@@ -142,30 +150,12 @@ export default function PersonaMenu({ isOpen, onClose, personaId, personaName, a
                             }
                         }}
                     >
-                        <Calendar size={20} />
+                        <AlarmClock size={20} />
                         <div className={styles.label}>
-                            <span>Schedule</span>
-                            <span className={styles.subtext}>スケジュール管理</span>
+                            <span>Alarm</span>
+                            <span className={styles.subtext}>アラーム管理</span>
                         </div>
                     </button>
-
-                    {developerMode && (
-                        <button
-                            className={`${styles.actionBtn} ${!onOpenTasks ? styles.disabled : ''}`}
-                            onClick={() => {
-                                if (onOpenTasks) {
-                                    onOpenTasks();
-                                    onClose();
-                                }
-                            }}
-                        >
-                            <Network size={20} />
-                            <div className={styles.label}>
-                                <span>Tasks</span>
-                                <span className={styles.subtext}>タスク管理</span>
-                            </div>
-                        </button>
-                    )}
 
                     <button className={styles.actionBtn} onClick={handleOrganizeMemory} disabled={organizing}>
                         {organizing ? <RefreshCw className={styles.spin} size={20} /> : <Sparkles size={20} />}

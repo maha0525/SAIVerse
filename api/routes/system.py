@@ -1,6 +1,7 @@
 """System-level API endpoints: version check, update trigger, announcements."""
 
 import json
+import hashlib
 import logging
 import os
 import shutil
@@ -14,6 +15,7 @@ from urllib.request import urlopen, Request
 from urllib.error import URLError
 
 from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
 
 from saiverse import app_state
 
@@ -89,6 +91,11 @@ def _fetch_latest_release() -> Optional[dict]:
 async def get_version():
     """Return current version and check for updates."""
     current = app_state.version
+    manager = app_state.manager
+    db_identity = None
+    if manager is not None:
+        resolved_db = str(Path(manager.db_path).resolve())
+        db_identity = hashlib.sha256(resolved_db.encode("utf-8")).hexdigest()
 
     release = _fetch_latest_release()
     if release:
@@ -96,6 +103,8 @@ async def get_version():
         update_available = _compare_versions(current, latest_tag)
         return {
             "version": current,
+            "city_name": app_state.city_name,
+            "db_identity": db_identity,
             "latest_version": latest_tag,
             "update_available": update_available,
             "latest_release_url": release["html_url"],
@@ -105,6 +114,8 @@ async def get_version():
 
     return {
         "version": current,
+        "city_name": app_state.city_name,
+        "db_identity": db_identity,
         "latest_version": None,
         "update_available": None,
         "latest_release_url": None,
@@ -148,6 +159,259 @@ async def get_announcements():
     return data
 
 
+@router.get("/alerts")
+async def get_system_alerts():
+    """Return system-level alerts populated during startup.
+
+    Includes critical events like corrupted log.json files that were rescued.
+    The frontend displays these as a prominent banner so the user is never
+    surprised by silent data loss.
+    """
+    manager = app_state.manager
+    if manager is None or not hasattr(manager, "startup_alerts"):
+        return {"alerts": []}
+    return {"alerts": list(manager.startup_alerts)}
+
+
+def _persist_persona_state(manager) -> None:
+    """Trigger save of conscious_log.json for each persona.
+
+    Called after restore/reset clamps in-memory pulse_cursors so the changes
+    survive a crash. If skipped, on crash the next startup would re-clamp
+    from disk anyway, but we want the saved state to immediately reflect
+    the user's explicit recovery action.
+    """
+    personas = getattr(manager, "personas", None) or {}
+    for persona in personas.values():
+        save = getattr(persona, "_save_conscious_log", None)
+        if callable(save):
+            try:
+                save()
+            except Exception:
+                LOGGER.warning(
+                    "Failed to persist conscious_log for persona=%s",
+                    getattr(persona, "persona_id", "?"),
+                    exc_info=True,
+                )
+
+
+@router.get("/quarantine")
+async def list_quarantined_buildings():
+    """Return all buildings currently quarantined due to log corruption.
+
+    Each entry includes restoration options (available backups, corrupted file
+    location). The UI uses this to populate the quarantine management modal.
+    """
+    manager = app_state.manager
+    if manager is None or not hasattr(manager, "quarantined_buildings"):
+        return {"quarantined": []}
+    items = []
+    for b_id, info in manager.quarantined_buildings.items():
+        building_name = b_id
+        if hasattr(manager, "building_map") and b_id in manager.building_map:
+            building_name = getattr(manager.building_map[b_id], "name", b_id)
+        items.append({**info, "building_name": building_name})
+    return {"quarantined": items}
+
+
+class _QuarantineRestoreBody(BaseModel):
+    backup_filename: str  # full path or just filename within building dir
+
+
+class _QuarantineActionResponse(BaseModel):
+    success: bool
+    message: str
+
+
+@router.post("/quarantine/{building_id}/restore", response_model=_QuarantineActionResponse)
+async def restore_quarantined_building(building_id: str, body: _QuarantineRestoreBody):
+    """Restore a quarantined building from a chosen backup file.
+
+    The selected backup is copied to ``log.json`` (replacing whatever is
+    there), the building is removed from quarantine, and its history is
+    re-loaded into memory.
+    """
+    manager = app_state.manager
+    if manager is None or not hasattr(manager, "quarantined_buildings"):
+        raise HTTPException(status_code=503, detail="Manager not ready")
+    if building_id not in manager.quarantined_buildings:
+        raise HTTPException(status_code=404, detail=f"Building {building_id} is not quarantined")
+
+    info = manager.quarantined_buildings[building_id]
+    available = set(info.get("available_backups", []))
+    backup_path = Path(body.backup_filename)
+    # Allow either full path (from list_log_backups) or just filename
+    if not backup_path.is_absolute():
+        original_path = Path(info["original_path"])
+        backup_path = original_path.parent / backup_path.name
+    if str(backup_path) not in available and backup_path.name not in {Path(p).name for p in available}:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Backup '{body.backup_filename}' is not in the available backup list",
+        )
+    if not backup_path.exists():
+        raise HTTPException(status_code=404, detail=f"Backup file does not exist: {backup_path}")
+
+    target_path = Path(info["original_path"])
+    try:
+        # Validate backup is parseable JSON before restoring
+        data = json.loads(backup_path.read_text(encoding="utf-8"))
+        if not isinstance(data, list):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Backup is not a valid history (expected list, got {type(data).__name__})",
+            )
+        # Atomic restore: copy backup to log.json
+        shutil.copy2(backup_path, target_path)
+        # Re-load into memory
+        manager.building_histories[building_id] = data
+        # Remove from quarantine
+        del manager.quarantined_buildings[building_id]
+        # Remove related startup alerts
+        manager.startup_alerts = [
+            a for a in manager.startup_alerts
+            if a.get("details", {}).get("building_id") != building_id
+        ]
+        # Clamp persona pulse_cursors so they don't skip new messages.
+        # The restored data may have a different (smaller) seq range than
+        # what personas remember from before.
+        max_seq = max((int(m.get("seq", 0)) for m in data), default=0)
+        manager.clamp_persona_cursors_for_building(building_id, max_seq)
+        # Reset seq counter so new messages get seq > max_seq (preventing
+        # collision with restored seqs and the "low seq < cursor → skip" bug).
+        manager.reset_persona_seq_counters_for_building(building_id, max_seq + 1)
+        _persist_persona_state(manager)
+        LOGGER.info(
+            "Restored quarantined building %s from backup %s (%d messages, max_seq=%d)",
+            building_id, backup_path, len(data), max_seq,
+        )
+        return {"success": True, "message": f"復元完了: {len(data)}件のメッセージを読み込みました"}
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail=f"Backup file is not valid JSON: {exc}")
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to restore backup: {exc}")
+
+
+@router.post("/quarantine/{building_id}/reset", response_model=_QuarantineActionResponse)
+async def reset_quarantined_building(building_id: str):
+    """Reset a quarantined building to empty history (fresh start).
+
+    The original corrupted file remains preserved at its ``.corrupted_*``
+    location for manual recovery later. A new empty ``log.json`` is created.
+    """
+    manager = app_state.manager
+    if manager is None or not hasattr(manager, "quarantined_buildings"):
+        raise HTTPException(status_code=503, detail="Manager not ready")
+    if building_id not in manager.quarantined_buildings:
+        raise HTTPException(status_code=404, detail=f"Building {building_id} is not quarantined")
+
+    info = manager.quarantined_buildings[building_id]
+    target_path = Path(info["original_path"])
+    try:
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        # Atomic write of empty list
+        tmp_path = target_path.with_suffix(target_path.suffix + ".tmp")
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            f.write("[]")
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, target_path)
+
+        manager.building_histories[building_id] = []
+        del manager.quarantined_buildings[building_id]
+        manager.startup_alerts = [
+            a for a in manager.startup_alerts
+            if a.get("details", {}).get("building_id") != building_id
+        ]
+        # Reset persona cursors to 0 since the building log is now empty.
+        # Without this, personas with cursor > 0 would skip the next messages.
+        manager.clamp_persona_cursors_for_building(building_id, 0)
+        # Counter back to 1 so new messages start fresh from seq=1.
+        manager.reset_persona_seq_counters_for_building(building_id, 1)
+        _persist_persona_state(manager)
+        LOGGER.info(
+            "Reset quarantined building %s to empty history (corrupted file preserved at %s)",
+            building_id, info.get("corrupted_path"),
+        )
+        return {
+            "success": True,
+            "message": (
+                f"リセット完了: 空履歴で再開。破損ファイルは {info.get('corrupted_path')} に保持。"
+            ),
+        }
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to reset: {exc}")
+
+
+@router.post("/legacy-log/{building_id}/archive", response_model=_QuarantineActionResponse)
+async def archive_unreadable_legacy_log(building_id: str):
+    """読めなくなった旧形式の履歴ファイルを脇へ退避し、警告を閉じる。
+
+    毎起動の検算は ``log.json`` という名前のファイルだけを見るので、名前を変えて
+    しまえば対象から外れ、警告は次の起動から出なくなる。**確認済みのフラグは
+    持たない** — ファイルが移っていること自体が「ユーザーが認識した」の記録に
+    なる (フラグを別に持つと、いつ消すか / いつ復活させるかの規則が増える)。
+
+    退避であって削除ではない。中身は同じフォルダに ``log.json.unreadable_<日時>``
+    として残るので、後から救う手が見つかれば使える。
+
+    対象は「今この瞬間、読めないと報告されている部屋」だけ。任意のパスを動かせる
+    口にはしない。
+    """
+    manager = app_state.manager
+    if manager is None or not hasattr(manager, "startup_alerts"):
+        raise HTTPException(status_code=503, detail="Manager not ready")
+
+    alert = next(
+        (
+            a for a in manager.startup_alerts
+            if (a.get("details") or {}).get("building_id") == building_id
+            and (a.get("details") or {}).get("kind") == "unreadable"
+        ),
+        None,
+    )
+    if alert is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Building {building_id} has no unreadable legacy log alert",
+        )
+
+    # alert に載っているパスは信用せず、サーバ側で組み直す。組み直したものが
+    # buildings の下にあり、名前が log.json であることまで確かめてから動かす
+    # (building_id に .. や絶対パスが混ざっていた場合に外へ出さないため)。
+    saiverse_home = getattr(manager, "saiverse_home", None)
+    city_name = getattr(manager, "city_name", None)
+    if saiverse_home is None or not city_name:
+        raise HTTPException(status_code=503, detail="Manager not ready")
+    buildings_root = (Path(saiverse_home) / "cities" / city_name / "buildings").resolve()
+    log_path = (buildings_root / building_id / "log.json").resolve()
+    if log_path.parent.parent != buildings_root or log_path.name != "log.json":
+        raise HTTPException(status_code=400, detail="Invalid building id")
+
+    if not log_path.is_file():
+        # 既に手で動かされている。警告だけ閉じる。
+        manager.startup_alerts = [a for a in manager.startup_alerts if a is not alert]
+        return {"success": True, "message": "ファイルは既にありませんでした。警告を閉じます。"}
+
+    archived = log_path.with_name(
+        f"{log_path.name}.unreadable_{time.strftime('%Y%m%d_%H%M%S')}"
+    )
+    try:
+        os.replace(log_path, archived)
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"退避に失敗しました: {exc}")
+
+    manager.startup_alerts = [a for a in manager.startup_alerts if a is not alert]
+    LOGGER.info(
+        "archived unreadable legacy log: building=%s %s -> %s",
+        building_id, log_path, archived,
+    )
+    return {
+        "success": True,
+        "message": f"脇へ移しました: {archived.name}",
+    }
+
+
 @router.post("/update")
 async def trigger_update():
     """Trigger a self-update: spawn detached updater, then shutdown."""
@@ -157,13 +421,20 @@ async def trigger_update():
 
     project_path = Path(project_dir)
     config_path = project_path / ".update_config.json"
-    updater_script = project_path / "scripts" / "self_update.py"
+    updater_script = project_path / "scripts" / "update_engine.py"
 
     if not updater_script.exists():
         raise HTTPException(status_code=500, detail="Update script not found")
 
-    # Detect environment
-    has_git = shutil.which("git") is not None and (project_path / ".git").is_dir()
+    # Refuse before shutdown if update cannot preserve local work. The engine
+    # repeats this check after shutdown to close the race.
+    try:
+        from scripts.update_engine import UpdateError, assert_git_update_ready
+
+        assert_git_update_ready(project_path)
+    except UpdateError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
     manager = app_state.manager
     backend_port = manager.ui_port if manager else 8000
 
@@ -173,22 +444,55 @@ async def trigger_update():
     else:
         venv_python = str(project_path / ".venv" / "bin" / "python")
 
-    # Write update config
+    try:
+        import psutil
+
+        main_process_created_at = float(psutil.Process(os.getpid()).create_time())
+    except Exception:
+        main_process_created_at = None
+
+    listen_host = os.getenv("SAIVERSE_API_HOST", "127.0.0.1")
+    if "--listen-host" in sys.argv:
+        index = sys.argv.index("--listen-host")
+        if index + 1 < len(sys.argv):
+            listen_host = sys.argv[index + 1]
+
+    child_processes = []
+    for process in app_state.child_processes:
+        try:
+            import psutil
+
+            created_at = float(psutil.Process(process.pid).create_time())
+        except Exception:
+            created_at = None
+        child_processes.append({"pid": process.pid, "process_created_at": created_at})
+
+    # Write an atomic, exact restart contract.
     config = {
+        "format_version": 2,
         "project_dir": str(project_path),
         "city_name": app_state.city_name,
         "backend_port": backend_port,
-        "frontend_port": 3000,
+        "listen_host": listen_host,
         "main_pid": os.getpid(),
+        "main_process_created_at": main_process_created_at,
+        "main_args": list(sys.argv[1:]),
+        "resolved_db_path": str(Path(manager.db_path).resolve()) if manager else None,
+        "db_identity": (
+            hashlib.sha256(str(Path(manager.db_path).resolve()).encode("utf-8")).hexdigest()
+            if manager
+            else None
+        ),
+        "child_processes": child_processes,
         "venv_python": venv_python,
-        "has_git": has_git,
-        "platform": sys.platform,
     }
-    config_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
+    config_tmp = config_path.with_suffix(config_path.suffix + ".tmp")
+    config_tmp.write_text(json.dumps(config, indent=2), encoding="utf-8")
+    os.replace(config_tmp, config_path)
     LOGGER.info("Written update config to %s", config_path)
 
     # Spawn detached updater
-    cmd = [venv_python, str(updater_script)]
+    cmd = [venv_python, str(updater_script), "--config", str(config_path)]
     LOGGER.info("Spawning detached updater: %s", cmd)
     if sys.platform == "win32":
         DETACHED_PROCESS = 0x00000008

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from tools.context import get_active_manager
+from tools.context import get_active_manager, get_active_persona_id
 from tools.core import ToolSchema
 
 
@@ -16,7 +16,7 @@ def document_read(
     """Read specific lines from a document item.
 
     Args:
-        item_id: Identifier of the document item.
+        item_id: Identifier of the document item (raw ID or ``item:N`` ref).
         start_line: Starting line number (1-based, inclusive). Default: 1
         end_line: Ending line number (inclusive). If None, reads `limit` lines from start.
         limit: Maximum number of lines to return if end_line is not specified. Default: 100
@@ -24,10 +24,19 @@ def document_read(
     Returns:
         The requested lines with line numbers prefixed.
     """
+    persona_id = get_active_persona_id()
+    if not persona_id:
+        raise RuntimeError("Active persona context is not set.")
+
     manager = get_active_manager()
 
     if manager is None:
         raise RuntimeError("Manager context is not available.")
+
+    # ``item:N`` (安定 short_id) / 生 ID のどちらで来ても item_id に解決する。
+    # ここを通さないと、世界がペルソナに見せている ``item:N`` 参照や
+    # document_create が返した ID をそのまま渡せない。
+    item_id = manager.resolve_item_ref_for_persona(persona_id, item_id)
 
     # Get item from ItemService
     item = manager.item_service.items.get(item_id)
@@ -102,7 +111,7 @@ def schema() -> ToolSchema:
             "properties": {
                 "item_id": {
                     "type": "string",
-                    "description": "Identifier of the document item.",
+                    "description": "Identifier of the document item (raw ID or 'item:N' ref).",
                 },
                 "start_line": {
                     "type": "integer",
@@ -122,4 +131,6 @@ def schema() -> ToolSchema:
             "required": ["item_id"],
         },
         result_type="string",
+        spell=True,
+        spell_display_name="ドキュメント読み取り",
     )

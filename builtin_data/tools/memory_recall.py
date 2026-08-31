@@ -2,8 +2,7 @@ from __future__ import annotations
 
 from typing import List, Optional
 
-from saiverse_memory import SAIMemoryAdapter
-from tools.context import get_active_persona_id, get_active_persona_path
+from tools.context import get_active_persona_id, open_persona_memory
 from tools.core import ToolSchema
 
 
@@ -29,49 +28,44 @@ def memory_recall(
     if not persona_id:
         raise RuntimeError("Active persona is not set (use tools.context.persona_context)")
 
-    persona_dir = get_active_persona_path()
-    adapter: Optional[SAIMemoryAdapter]
-    try:
-        adapter = SAIMemoryAdapter(persona_id, persona_dir=persona_dir, resource_id=persona_id)
-    except Exception as exc:
-        raise RuntimeError(f"Failed to init SAIMemory for {persona_id}: {exc}")
+    with open_persona_memory() as adapter:
+        if not adapter.can_embed():
+            raise RuntimeError(f"SAIMemory semantic search not available for {persona_id} (embedding model may be missing)")
 
-    if not adapter.can_embed():
-        raise RuntimeError(f"SAIMemory semantic search not available for {persona_id} (embedding model may be missing)")
+        # Parse date range to timestamps
+        start_ts = None
+        end_ts = None
+        if start_date:
+            try:
+                from datetime import datetime
+                start_ts = int(datetime.strptime(start_date, "%Y-%m-%d").timestamp())
+            except ValueError:
+                pass
+        if end_date:
+            try:
+                from datetime import datetime
+                end_ts = int(datetime.strptime(end_date, "%Y-%m-%d").timestamp()) + 86400 - 1
+            except ValueError:
+                pass
 
-    # Parse date range to timestamps
-    start_ts = None
-    end_ts = None
-    if start_date:
-        try:
-            from datetime import datetime
-            start_ts = int(datetime.strptime(start_date, "%Y-%m-%d").timestamp())
-        except ValueError:
-            pass
-    if end_date:
-        try:
-            from datetime import datetime
-            end_ts = int(datetime.strptime(end_date, "%Y-%m-%d").timestamp()) + 86400 - 1
-        except ValueError:
-            pass
-
-    # Use hybrid recall if keywords provided, otherwise fallback to standard recall
-    if keywords:
-        return adapter.recall_hybrid(
-            query_text=query,
-            keywords=keywords,
-            max_chars=max_chars,
-            topk=topk,
-            start_ts=start_ts,
-            end_ts=end_ts,
-        ) or "(no relevant memory)"
-    else:
-        return adapter.recall_snippet(
-            None,
-            query_text=query,
-            max_chars=max_chars,
-            topk=topk,
-        ) or "(no relevant memory)"
+        # recall_hybrid / recall_snippet は adapter 内部で _db_lock を取る
+        # Use hybrid recall if keywords provided, otherwise fallback to standard recall
+        if keywords:
+            return adapter.recall_hybrid(
+                query_text=query,
+                keywords=keywords,
+                max_chars=max_chars,
+                topk=topk,
+                start_ts=start_ts,
+                end_ts=end_ts,
+            ) or "(no relevant memory)"
+        else:
+            return adapter.recall_snippet(
+                None,
+                query_text=query,
+                max_chars=max_chars,
+                topk=topk,
+            ) or "(no relevant memory)"
 
 
 def schema() -> ToolSchema:

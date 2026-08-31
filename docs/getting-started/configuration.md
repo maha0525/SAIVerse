@@ -4,7 +4,7 @@ SAIVerseの設定オプションを説明します。
 
 ## 環境変数
 
-`.env` ファイルで設定します。
+`.env` ファイルで設定します。よく使うものを抜粋。完全な一覧は [reference/environment-vars.md](../reference/environment-vars.md) を参照。
 
 ### LLM APIキー
 
@@ -24,7 +24,7 @@ SAIVerseの設定オプションを説明します。
 |--------|-----------|------|
 | `SAIMEMORY_EMBED_MODEL` | `intfloat/multilingual-e5-small` | 埋め込みモデル |
 | `SAIMEMORY_EMBED_MODEL_PATH` | - | ローカルモデルのパス |
-| `SAIMEMORY_LAST_MESSAGES` | 20 | 想起時の最大メッセージ数 |
+| `SAIMEMORY_MEMORY_LAST_MESSAGES` | 40 | 文脈に載せる直近メッセージ数 |
 
 ### ネットワーク
 
@@ -56,10 +56,11 @@ python main.py <city_id> [オプション]
 
 | オプション | 説明 |
 |-----------|------|
+| `<city_id>` | 起動する City（位置引数、既定 `city_a`） |
 | `--db-file PATH` | データベースファイルのパス |
-| `--ui-port PORT` | フロントエンド用ポート |
-| `--api-port PORT` | APIサーバーのポート |
 | `--sds-url URL` | ディレクトリサービスのURL |
+
+> ポートは `cities.json` で City ごとに設定する（既定は `city_a`=8000 の1つ。別 City を使うには `cities.json` / DB に追加が必要）。個別ポート指定の起動引数はない。
 
 ## モデル設定
 
@@ -84,10 +85,16 @@ python main.py <city_id> [オプション]
 - `provider`: `openai` / `anthropic` / `gemini` / `ollama`
 - `context_length`: コンテキスト長
 - `supports_images`: 画像入力対応
+- `supports_sampling_parameters`: `temperature` / `top_p` / `top_k` の送信対応（Gemini 3.6 Flash / 3.5 Flash-Lite 以降の非対応モデルでは `false`）
+- `supports_model_prefill`: 非空のモデル発話で終わるコンテキストへの対応（同モデル以降では `false`）
 - `base_url`: カスタムエンドポイント（互換API用）
 - `api_key_env`: APIキーの環境変数名
 - `parameters`: 温度・top_pなどのパラメータ制約
 
+`supports_sampling_parameters: false` のモデルでは、`parameters` に sampling 項目を載せず、上位処理から値が渡された場合もプロバイダが API request から除外します。`supports_model_prefill: false` のモデルに対して末尾が非空の model role となった場合は、role や本文を自動改変せず、送信前に `invalid_request` として停止します。
+
+> 新しいモデルは、接続情報を `provider_ref` でプロバイダ定義から参照する形が推奨（→ [reference/providers.md](../reference/providers.md)）。追加・編集は グローバル設定 > モデル管理 タブからも行える（→ [グローバル設定](../user-guide/global-settings.md)）。
+
 ## 次のステップ
 
-- [アーキテクチャ](../concepts/architecture.md) - システムの仕組み
+- [基本概念](../concepts/README.md) - システムの仕組み

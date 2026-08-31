@@ -1,0 +1,301 @@
+/* 経験の台帳ビュー。配色は globals.css のセマンティック変数のみを使い、
+   ライト / ダーク両テーマに追従する (ハードコード色は置かない)。 */
+
+.container {
+    height: 100%;
+    width: 100%;
+    overflow-y: auto;
+    padding: 1rem 1.25rem;
+    color: var(--text-primary);
+    box-sizing: border-box;
+}
+
+.indexHeader {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 0.9rem;
+    color: var(--text-secondary);
+    padding-bottom: 0.75rem;
+    border-bottom: 1px solid var(--border-color);
+    margin-bottom: 0.75rem;
+}
+
+.notice {
+    padding: 1rem 0;
+    color: var(--text-secondary);
+    font-size: 0.9rem;
+}
+
+.error {
+    padding: 1rem 0;
+    color: #e5484d;
+    font-size: 0.9rem;
+}
+
+/* ---- 索引 ---- */
+
+.categorySection {
+    margin-bottom: 1.25rem;
+}
+
+.categoryTitle {
+    margin: 0 0 0.4rem;
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--text-secondary);
+    letter-spacing: 0.02em;
+}
+
+.rowList {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    text-align: left;
+    padding: 0.55rem 0.75rem;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    color: var(--text-primary);
+    cursor: pointer;
+    font: inherit;
+    box-sizing: border-box;
+}
+
+.row:hover {
+    background: var(--bg-hover);
+}
+
+/* クリック不可の行 (目的ノード)。ホバーで色を変えない。 */
+.rowStatic {
+    cursor: default;
+}
+
+.rowStatic:hover {
+    background: var(--bg-secondary);
+}
+
+/* 記録の薄い棚は視覚的にも薄く (関連判断の材料)。 */
+.rowThin {
+    opacity: 0.55;
+}
+
+.rowMain {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.rowTitle {
+    font-size: 0.92rem;
+    font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.rowSummary {
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.rowBadge {
+    flex-shrink: 0;
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border-color);
+    border-radius: 999px;
+    padding: 2px 10px;
+    white-space: nowrap;
+}
+
+.rowChevron {
+    flex-shrink: 0;
+    color: var(--text-secondary);
+}
+
+/* ---- 合成ページ ---- */
+
+.pageHeader {
+    margin-bottom: 0.75rem;
+}
+
+.backButton {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 0.35rem 0.7rem;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    color: var(--text-primary);
+    cursor: pointer;
+    font-size: 0.85rem;
+}
+
+.backButton:hover {
+    background: var(--bg-hover);
+}
+
+.pageBody {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+}
+
+.pageTitle {
+    margin: 0;
+    font-size: 1.15rem;
+    font-weight: 700;
+}
+
+.pageSummary {
+    margin: 0;
+    font-size: 0.9rem;
+    color: var(--text-secondary);
+}
+
+.statsBadge {
+    align-self: flex-start;
+    font-size: 0.78rem;
+    color: var(--text-secondary);
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border-color);
+    border-radius: 999px;
+    padding: 2px 10px;
+    margin-bottom: 0.5rem;
+}
+
+.section {
+    margin-top: 0.75rem;
+}
+
+.sectionTitle {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin: 0 0 0.5rem;
+    font-size: 0.88rem;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.emptyNote {
+    font-size: 0.82rem;
+    color: var(--text-secondary);
+    padding: 0.25rem 0;
+}
+
+.fragmentList,
+.involvementList,
+.relatedList {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.fragmentItem {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    padding: 0.55rem 0.75rem;
+    font-size: 0.88rem;
+    line-height: 1.55;
+}
+
+.fragmentDate {
+    display: inline-block;
+    margin-right: 8px;
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+}
+
+.fragmentContent {
+    white-space: pre-wrap;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+    max-width: 100%;
+}
+
+.involvementItem {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    padding: 0.3rem 0.25rem;
+    font-size: 0.85rem;
+    border-bottom: 1px dashed var(--border-color);
+}
+
+.involvementDate {
+    flex-shrink: 0;
+    font-size: 0.78rem;
+    color: var(--text-secondary);
+    font-variant-numeric: tabular-nums;
+}
+
+.involvementTitle {
+    min-width: 0;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+}
+
+.relatedItem {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    width: 100%;
+    text-align: left;
+    padding: 0.45rem 0.7rem;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    color: var(--text-primary);
+    cursor: pointer;
+    font: inherit;
+    box-sizing: border-box;
+}
+
+.relatedItem:hover {
+    background: var(--bg-hover);
+}
+
+.relatedTitle {
+    flex-shrink: 0;
+    font-weight: 600;
+    font-size: 0.87rem;
+}
+
+.relatedSummary {
+    flex: 1;
+    min-width: 0;
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.relatedShared {
+    flex-shrink: 0;
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+}

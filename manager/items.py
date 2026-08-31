@@ -13,11 +13,27 @@ from database.models import (
     Item as ItemModel,
     ItemLocation as ItemLocationModel,
 )
+from saiverse.references import parse_ref
+from saiverse.file_policy import enforce_allowed_file_path
 
 if TYPE_CHECKING:
     from manager.state import CoreState
 
 LOGGER = logging.getLogger(__name__)
+
+
+def item_db_filter(key):
+    """``short_id`` (数字) と UUID を判定して ``Item`` への WHERE 句を返す。
+
+    参照アドレッシング統一で、AI 可視のアドレスは short_id (``item:N``) を使い、
+    UUID は裏方 (DB 主キー・ファイル解決・frontend href) に留める。解決側は
+    short_id を主に受理しつつ、過去ログの UUID URI や frontend href が死なない
+    よう UUID もフォールバックで受ける。この判定を1箇所に集約する。
+    """
+    s = str(key).strip()
+    if s.isdigit():
+        return ItemModel.SHORT_ID == int(s)
+    return ItemModel.ITEM_ID == s
 
 
 class ItemService:
@@ -32,6 +48,7 @@ class ItemService:
         self.item_locations: Dict[str, Dict] = {}
         self.items_by_building: Dict[str, List[str]] = defaultdict(list)
         self.items_by_persona: Dict[str, List[str]] = defaultdict(list)
+        self.items_by_bag: Dict[str, List[str]] = defaultdict(list)
         self.world_items: List[str] = []
 
     def _resolve_file_path(self, file_path_str: str) -> Path:
@@ -45,17 +62,17 @@ class ItemService:
         """
         path = Path(file_path_str)
         
-        if path.exists():
-            return path
-        
         home = self.manager.saiverse_home
+        if path.exists():
+            return enforce_allowed_file_path(path, home=home)
+
         parts = path.parts
         
         # Strategy 0: Handle relative paths (new format)
         if not path.is_absolute():
             candidate = home / file_path_str
             if candidate.exists():
-                return candidate
+                return enforce_allowed_file_path(candidate, home=home)
         
         # Strategy 1a: strict 'documents' match (legacy WSL paths)
         if 'documents' in parts:
@@ -63,7 +80,7 @@ class ItemService:
             rel = Path(*parts[idx:])
             candidate = home / rel
             if candidate.exists():
-                return candidate
+                return enforce_allowed_file_path(candidate, home=home)
         
         # Strategy 1b: strict 'image' match (legacy WSL paths for picture items)
         if 'image' in parts:
@@ -71,20 +88,29 @@ class ItemService:
             rel = Path(*parts[idx:])
             candidate = home / rel
             if candidate.exists():
-                return candidate
-        
+                return enforce_allowed_file_path(candidate, home=home)
+
+        # Strategy 1c: audio/video subdirs (added for audio/video item support)
+        for sub in ('audio', 'video'):
+            if sub in parts:
+                idx = parts.index(sub)
+                rel = Path(*parts[idx:])
+                candidate = home / rel
+                if candidate.exists():
+                    return enforce_allowed_file_path(candidate, home=home)
+
         # Strategy 2a: just filename in documents (fallback)
         candidate = home / "documents" / path.name
         if candidate.exists():
-            return candidate
+            return enforce_allowed_file_path(candidate, home=home)
         
         # Strategy 2b: just filename in image (fallback for picture items)
         candidate = home / "image" / path.name
         if candidate.exists():
-            return candidate
+            return enforce_allowed_file_path(candidate, home=home)
         
         # Return original path if no recovery worked
-        return path
+        return enforce_allowed_file_path(path, home=home)
 
     def load_items_from_db(self) -> None:
         """Load items and their locations from the database into memory."""
@@ -103,6 +129,7 @@ class ItemService:
         self.item_locations.clear()
         self.items_by_building.clear()
         self.items_by_persona.clear()
+        self.items_by_bag.clear()
         self.world_items.clear()
 
         for row in item_rows:
@@ -116,6 +143,7 @@ class ItemService:
                 state_payload = {}
             self.items[row.ITEM_ID] = {
                 "item_id": row.ITEM_ID,
+                "short_id": row.SHORT_ID,
                 "name": row.NAME,
                 "type": row.TYPE,
                 "description": row.DESCRIPTION or "",
@@ -133,6 +161,7 @@ class ItemService:
                 "owner_id": (loc.OWNER_ID or "").strip(),
                 "updated_at": loc.UPDATED_AT,
                 "location_id": loc.LOCATION_ID,
+                "slot_number": loc.SLOT_NUMBER,
             }
             self.item_locations[loc.ITEM_ID] = payload
             owner_kind = payload["owner_kind"]
@@ -141,6 +170,8 @@ class ItemService:
                 self.items_by_building[owner_id].append(loc.ITEM_ID)
             elif owner_kind == "persona":
                 self.items_by_persona[owner_id].append(loc.ITEM_ID)
+            elif owner_kind == "bag":
+                self.items_by_bag[owner_id].append(loc.ITEM_ID)
             else:
                 self.world_items.append(loc.ITEM_ID)
 
@@ -174,6 +205,7 @@ class ItemService:
             self.state.item_locations = self.item_locations
             self.state.items_by_building = {k: list(v) for k, v in self.items_by_building.items()}
             self.state.items_by_persona = {k: list(v) for k, v in self.items_by_persona.items()}
+            self.state.items_by_bag = {k: list(v) for k, v in self.items_by_bag.items()}
             self.state.world_items = list(self.world_items)
 
     def refresh_building_system_instruction(self, building_id: str) -> None:
@@ -209,7 +241,8 @@ class ItemService:
             building.system_instruction = f"{base_text.rstrip()}\n\n{marker}\n{items_block}"
 
     def update_item_cache(
-        self, item_id: str, owner_kind: str, owner_id: Optional[str], updated_at: datetime
+        self, item_id: str, owner_kind: str, owner_id: Optional[str], updated_at: datetime,
+        slot_number: Optional[int] = None,
     ) -> None:
         """Update in-memory cache when item location changes."""
         prev = self.item_locations.get(item_id)
@@ -233,6 +266,12 @@ class ItemService:
             persona_obj = self.manager.personas.get(prev_owner)
             if persona_obj:
                 persona_obj.set_inventory(self.items_by_persona.get(prev_owner, []))
+        elif prev_kind == "bag" and prev_owner:
+            bag_contents = self.items_by_bag.get(prev_owner, [])
+            if bag_contents and item_id in bag_contents:
+                bag_contents[:] = [itm for itm in bag_contents if itm != item_id]
+            if not bag_contents:
+                self.items_by_bag.pop(prev_owner, None)
         else:
             if item_id in self.world_items:
                 self.world_items[:] = [itm for itm in self.world_items if itm != item_id]
@@ -250,6 +289,10 @@ class ItemService:
             persona_obj = self.manager.personas.get(owner_id)
             if persona_obj:
                 persona_obj.set_inventory(list(inventory))
+        elif owner_kind == "bag" and owner_id:
+            bag_contents = self.items_by_bag[owner_id]
+            if item_id not in bag_contents:
+                bag_contents.append(item_id)
         else:
             if item_id not in self.world_items:
                 self.world_items.append(item_id)
@@ -258,6 +301,7 @@ class ItemService:
             "owner_kind": owner_kind,
             "owner_id": owner_id,
             "updated_at": updated_at,
+            "slot_number": slot_number,
         }
 
     def broadcast_item_event(self, persona_ids: List[str], message: str) -> None:
@@ -288,8 +332,10 @@ class ItemService:
             row = db.query(ItemLocationModel).filter(ItemLocationModel.ITEM_ID == item_id).one_or_none()
             if row is None:
                 raise RuntimeError("アイテムの配置情報が見つかりませんでした。")
+            slot_num = self._assign_slot(db, "persona", persona_id)
             row.OWNER_KIND = "persona"
             row.OWNER_ID = persona_id
+            row.SLOT_NUMBER = slot_num
             row.UPDATED_AT = timestamp
             db.commit()
         except Exception as exc:
@@ -298,7 +344,7 @@ class ItemService:
         finally:
             db.close()
 
-        self.update_item_cache(item_id, "persona", persona_id, timestamp)
+        self.update_item_cache(item_id, "persona", persona_id, timestamp, slot_number=slot_num)
         item_name = item.get("name", item_id)
         actor_msg = f"「{item_name}」を拾った。"
         self.manager.record_persona_event(persona_id, actor_msg)
@@ -336,17 +382,20 @@ class ItemService:
         db = self.manager.SessionLocal()
         try:
             row = db.query(ItemLocationModel).filter(ItemLocationModel.ITEM_ID == item_id).one_or_none()
+            slot_num = self._assign_slot(db, "building", building_id)
             if row is None:
                 row = ItemLocationModel(
                     ITEM_ID=item_id,
                     OWNER_KIND="building",
                     OWNER_ID=building_id,
+                    SLOT_NUMBER=slot_num,
                     UPDATED_AT=timestamp,
                 )
                 db.add(row)
             else:
                 row.OWNER_KIND = "building"
                 row.OWNER_ID = building_id
+                row.SLOT_NUMBER = slot_num
                 row.UPDATED_AT = timestamp
             db.commit()
         except Exception as exc:
@@ -355,7 +404,7 @@ class ItemService:
         finally:
             db.close()
 
-        self.update_item_cache(item_id, "building", building_id, timestamp)
+        self.update_item_cache(item_id, "building", building_id, timestamp, slot_number=slot_num)
         building_name = self.manager.building_map.get(building_id).name if building_id in self.manager.building_map else building_id
         item_name = item.get("name", item_id)
         actor_msg = f"「{item_name}」を{building_name}に置いた。"
@@ -517,6 +566,126 @@ class ItemService:
         item_name = item.get("name", item_id)
         return f"「{item_name}」の内容を更新した。"
 
+    # ---- document content operations (spell-oriented) ----
+
+    def _validate_document_access(self, persona_id: str, item_id: str) -> tuple:
+        """Validate persona can access the document item. Returns (item, file_path, persona)."""
+        persona = self.manager.personas.get(persona_id)
+        if not persona or getattr(persona, "is_proxy", False):
+            raise RuntimeError("このペルソナではアイテムを扱えません。")
+
+        item = self.items.get(item_id)
+        if not item:
+            raise RuntimeError(f"アイテム '{item_id}' が見つかりません。")
+
+        if (item.get("type") or "").lower() != "document":
+            raise RuntimeError("この操作はdocumentタイプのアイテムにのみ使用できます。")
+
+        location = self.item_locations.get(item_id)
+        owner_kind = location.get("owner_kind") if location else None
+        owner_id = location.get("owner_id") if location else None
+        in_inventory = owner_kind == "persona" and owner_id == persona_id
+        in_current_building = owner_kind == "building" and owner_id == persona.current_building_id
+        if not location or not (in_inventory or in_current_building):
+            raise RuntimeError("このアイテムは現在あなたのインベントリまたは現在いる建物にありません。")
+
+        file_path_str = item.get("file_path")
+        if not file_path_str:
+            raise RuntimeError("このdocumentにはファイルパスが設定されていません。")
+        file_path = self._resolve_file_path(file_path_str)
+        if not file_path.exists():
+            raise RuntimeError(f"ファイルが見つかりません: {file_path}")
+
+        return item, file_path, persona
+
+    def _finalize_document_update(self, item_id: str, item: Dict, persona_id: str, file_path: Path) -> None:
+        """Update DB timestamp, refresh summary and caches after document content change."""
+        from saiverse.media_summary import ensure_document_summary
+        new_summary = ensure_document_summary(file_path)
+        timestamp = datetime.utcnow()
+
+        db = self.manager.SessionLocal()
+        try:
+            row = db.query(ItemModel).filter(ItemModel.ITEM_ID == item_id).one_or_none()
+            if row is None:
+                raise RuntimeError("アイテム本体が見つかりません。")
+            if new_summary:
+                row.DESCRIPTION = new_summary
+            row.UPDATED_AT = timestamp
+            db.commit()
+        except Exception as exc:
+            db.rollback()
+            raise RuntimeError(f"データベース更新に失敗しました: {exc}") from exc
+        finally:
+            db.close()
+
+        if new_summary:
+            item["description"] = new_summary
+        item["updated_at"] = timestamp
+
+        location_owner_kind = self.item_locations.get(item_id, {}).get("owner_kind")
+        location_owner_id = self.item_locations.get(item_id, {}).get("owner_id")
+        if location_owner_kind == "building" and location_owner_id:
+            self.refresh_building_system_instruction(location_owner_id)
+
+        inventory = self.items_by_persona.get(persona_id, [])
+        persona_obj = self.manager.personas.get(persona_id)
+        if persona_obj:
+            persona_obj.set_inventory(list(inventory))
+
+    def patch_document_content(self, persona_id: str, item_id: str, old_string: str, new_string: str) -> str:
+        """Replace a substring in a document's content."""
+        item, file_path, persona = self._validate_document_access(persona_id, item_id)
+
+        try:
+            content = file_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise RuntimeError(f"ファイルの読み込みに失敗しました: {exc}") from exc
+
+        if old_string not in content:
+            raise RuntimeError("指定された置換対象のテキストがドキュメント内に見つかりません。")
+
+        count = content.count(old_string)
+        if count > 1:
+            raise RuntimeError(f"置換対象のテキストが {count} 箇所見つかりました。一意になるよう、より長いテキストを指定してください。")
+
+        new_content = content.replace(old_string, new_string, 1)
+        try:
+            file_path.write_text(new_content, encoding="utf-8")
+        except OSError as exc:
+            raise RuntimeError(f"ファイルの更新に失敗しました: {exc}") from exc
+
+        self._finalize_document_update(item_id, item, persona_id, file_path)
+        item_name = item.get("name", item_id)
+        return f"「{item_name}」の内容を部分置換しました。"
+
+    def replace_document_content(self, persona_id: str, item_id: str, content: str) -> str:
+        """Replace the entire content of a document."""
+        item, file_path, persona = self._validate_document_access(persona_id, item_id)
+
+        try:
+            file_path.write_text(content, encoding="utf-8")
+        except OSError as exc:
+            raise RuntimeError(f"ファイルの更新に失敗しました: {exc}") from exc
+
+        self._finalize_document_update(item_id, item, persona_id, file_path)
+        item_name = item.get("name", item_id)
+        return f"「{item_name}」の内容を全置換しました。"
+
+    def append_document_content(self, persona_id: str, item_id: str, content: str) -> str:
+        """Append text to the end of a document."""
+        item, file_path, persona = self._validate_document_access(persona_id, item_id)
+
+        try:
+            current = file_path.read_text(encoding="utf-8")
+            file_path.write_text(current + "\n" + content, encoding="utf-8")
+        except OSError as exc:
+            raise RuntimeError(f"ファイルの更新に失敗しました: {exc}") from exc
+
+        self._finalize_document_update(item_id, item, persona_id, file_path)
+        item_name = item.get("name", item_id)
+        return f"「{item_name}」に内容を追記しました。"
+
     def view_item(self, persona_id: str, item_id: str) -> str:
         """View the full content of a picture or document item."""
         persona = self.manager.personas.get(persona_id)
@@ -613,21 +782,27 @@ class ItemService:
         return open_items
 
     def get_all_items_in_building(self, building_id: str) -> List[Dict]:
-        """Get all items in a building (regardless of open state)."""
+        """Get all items in a building (regardless of open state), sorted by slot number."""
         all_items = []
         for item_id in self.items_by_building.get(building_id, []):
             item = self.items.get(item_id)
             if item:
-                all_items.append(item)
+                entry = dict(item)
+                entry["slot_number"] = self.item_locations.get(item_id, {}).get("slot_number")
+                all_items.append(entry)
+        all_items.sort(key=lambda x: (x.get("slot_number") is None, x.get("slot_number") or 0))
         return all_items
 
     def get_all_items_for_persona(self, persona_id: str) -> List[Dict]:
-        """Get all items in a persona's inventory (regardless of open state)."""
+        """Get all items in a persona's inventory (regardless of open state), sorted by slot number."""
         all_items = []
         for item_id in self.items_by_persona.get(persona_id, []):
             item = self.items.get(item_id)
             if item:
-                all_items.append(item)
+                entry = dict(item)
+                entry["slot_number"] = self.item_locations.get(item_id, {}).get("slot_number")
+                all_items.append(entry)
+        all_items.sort(key=lambda x: (x.get("slot_number") is None, x.get("slot_number") or 0))
         return all_items
 
     def create_document_item(self, persona_id: str, name: str, description: str, content: str, source_context: Optional[str] = None) -> str:
@@ -672,10 +847,12 @@ class ItemService:
             )
             db.add(item_row)
 
+            slot_num = self._assign_slot(db, "building", building_id)
             location_row = ItemLocationModel(
                 ITEM_ID=item_id,
                 OWNER_KIND="building",
                 OWNER_ID=building_id,
+                SLOT_NUMBER=slot_num,
                 UPDATED_AT=timestamp,
             )
             db.add(location_row)
@@ -688,6 +865,7 @@ class ItemService:
 
         self.items[item_id] = {
             "item_id": item_id,
+            "short_id": self._short_id_of(item_id),
             "name": name,
             "type": "document",
             "description": summary,
@@ -703,6 +881,7 @@ class ItemService:
             "owner_id": building_id,
             "updated_at": timestamp,
             "location_id": None,
+            "slot_number": slot_num,
         }
         self.items_by_building[building_id].append(item_id)
         self.refresh_building_system_instruction(building_id)
@@ -717,7 +896,12 @@ class ItemService:
         )
         self.manager._append_building_history_note(building_id, note)
 
-        return f"文書「{name}」を作成しました。アイテムID: {item_id}"
+        # 返す参照は世界がペルソナに見せているのと同じ ``item:N`` 語彙に揃える。
+        # 生 UUID を返すと、ペルソナがそれを ``item:<uuid>`` の形で撃ち返して
+        # document_read / document_search が解決できない事故になる。
+        short_id = self.items[item_id].get("short_id")
+        item_ref = f"item:{short_id}" if short_id is not None else item_id
+        return f"文書「{name}」を作成しました。アイテムID: {item_ref}"
 
     def create_picture_item(
         self, persona_id: str, name: str, description: str, file_path: str,
@@ -760,10 +944,12 @@ class ItemService:
             )
             db.add(item_row)
 
+            slot_num = self._assign_slot(db, "building", building_id)
             location_row = ItemLocationModel(
                 ITEM_ID=item_id,
                 OWNER_KIND="building",
                 OWNER_ID=building_id,
+                SLOT_NUMBER=slot_num,
                 UPDATED_AT=timestamp,
             )
             db.add(location_row)
@@ -776,6 +962,7 @@ class ItemService:
 
         self.items[item_id] = {
             "item_id": item_id,
+            "short_id": self._short_id_of(item_id),
             "name": name,
             "type": "picture",
             "description": description,
@@ -791,6 +978,7 @@ class ItemService:
             "owner_id": building_id,
             "updated_at": timestamp,
             "location_id": None,
+            "slot_number": slot_num,
         }
         self.items_by_building[building_id].append(item_id)
         self.refresh_building_system_instruction(building_id)
@@ -805,7 +993,7 @@ class ItemService:
         )
         self.manager._append_building_history_note(building_id, note)
 
-        return item_id
+        return item_id, slot_num
 
     def create_picture_item_for_user(
         self, name: str, description: str, file_path: str, building_id: str,
@@ -842,10 +1030,12 @@ class ItemService:
             )
             db.add(item_row)
 
+            slot_num = self._assign_slot(db, "building", building_id)
             location_row = ItemLocationModel(
                 ITEM_ID=item_id,
                 OWNER_KIND="building",
                 OWNER_ID=building_id,
+                SLOT_NUMBER=slot_num,
                 UPDATED_AT=timestamp,
             )
             db.add(location_row)
@@ -858,6 +1048,7 @@ class ItemService:
 
         self.items[item_id] = {
             "item_id": item_id,
+            "short_id": self._short_id_of(item_id),
             "name": name,
             "type": "picture",
             "description": description,
@@ -873,6 +1064,7 @@ class ItemService:
             "owner_id": building_id,
             "updated_at": timestamp,
             "location_id": None,
+            "slot_number": slot_num,
         }
         self.items_by_building[building_id].append(item_id)
         self.refresh_building_system_instruction(building_id)
@@ -926,10 +1118,12 @@ class ItemService:
             )
             db.add(item_row)
 
+            slot_num = self._assign_slot(db, "building", building_id)
             location_row = ItemLocationModel(
                 ITEM_ID=item_id,
                 OWNER_KIND="building",
                 OWNER_ID=building_id,
+                SLOT_NUMBER=slot_num,
                 UPDATED_AT=timestamp,
             )
             db.add(location_row)
@@ -942,6 +1136,7 @@ class ItemService:
 
         self.items[item_id] = {
             "item_id": item_id,
+            "short_id": self._short_id_of(item_id),
             "name": name,
             "type": "document",
             "description": description,
@@ -957,6 +1152,7 @@ class ItemService:
             "owner_id": building_id,
             "updated_at": timestamp,
             "location_id": None,
+            "slot_number": slot_num,
         }
         self.items_by_building[building_id].append(item_id)
         self.refresh_building_system_instruction(building_id)
@@ -970,6 +1166,891 @@ class ItemService:
 
         LOGGER.info(f"Created document item {item_id} from user upload in {building_id}")
         return item_id
+
+    def _create_media_item_for_user(
+        self,
+        item_type: str,
+        emoji: str,
+        name: str,
+        description: str,
+        file_path: str,
+        building_id: str,
+        is_open: bool = True,
+        creator_id: Optional[str] = None,
+        source_context: Optional[str] = None,
+    ) -> str:
+        """Shared implementation for audio/video item creation from user upload.
+
+        Mirrors create_document_item_for_user (default is_open=True so the media
+        appears in visual_context immediately). item_type is "audio" or "video".
+        """
+        item_id = str(uuid.uuid4())
+        timestamp = datetime.utcnow()
+
+        file_path_obj = Path(file_path)
+        if file_path_obj.is_absolute():
+            try:
+                relative_path = str(file_path_obj.relative_to(self.manager.saiverse_home))
+            except ValueError:
+                relative_path = file_path
+        else:
+            relative_path = file_path
+
+        initial_state = {"is_open": is_open}
+
+        db = self.manager.SessionLocal()
+        try:
+            item_row = ItemModel(
+                ITEM_ID=item_id,
+                NAME=name,
+                TYPE=item_type,
+                DESCRIPTION=description,
+                FILE_PATH=relative_path,
+                STATE_JSON=json.dumps(initial_state),
+                CREATOR_ID=creator_id,
+                SOURCE_CONTEXT=source_context,
+                CREATED_AT=timestamp,
+                UPDATED_AT=timestamp,
+            )
+            db.add(item_row)
+
+            slot_num = self._assign_slot(db, "building", building_id)
+            location_row = ItemLocationModel(
+                ITEM_ID=item_id,
+                OWNER_KIND="building",
+                OWNER_ID=building_id,
+                SLOT_NUMBER=slot_num,
+                UPDATED_AT=timestamp,
+            )
+            db.add(location_row)
+            db.commit()
+        except Exception as exc:
+            db.rollback()
+            raise RuntimeError(f"Failed to create {item_type} item: {exc}") from exc
+        finally:
+            db.close()
+
+        self.items[item_id] = {
+            "item_id": item_id,
+            "short_id": self._short_id_of(item_id),
+            "name": name,
+            "type": item_type,
+            "description": description,
+            "file_path": relative_path,
+            "state": initial_state,
+            "creator_id": creator_id,
+            "source_context": source_context,
+            "created_at": timestamp,
+            "updated_at": timestamp,
+        }
+        self.item_locations[item_id] = {
+            "owner_kind": "building",
+            "owner_id": building_id,
+            "updated_at": timestamp,
+            "location_id": None,
+            "slot_number": slot_num,
+        }
+        self.items_by_building[building_id].append(item_id)
+        self.refresh_building_system_instruction(building_id)
+
+        building_name = (
+            self.manager.building_map.get(building_id).name
+            if building_id in self.manager.building_map else building_id
+        )
+        kind_label = "audio" if item_type == "audio" else "video"
+        note = (
+            f'<div class="note-box">{emoji} User Upload:<br>'
+            f'<b>User uploaded {kind_label} "{name}" to {building_name}.</b></div>'
+        )
+        self.manager._append_building_history_note(building_id, note)
+
+        LOGGER.info(f"Created {item_type} item {item_id} from user upload in {building_id}")
+        return item_id
+
+    def create_audio_item_for_user(
+        self, name: str, description: str, file_path: str, building_id: str,
+        is_open: bool = True, creator_id: Optional[str] = None, source_context: Optional[str] = None,
+    ) -> str:
+        """Create an audio item from user upload. Defaults to is_open=True so the audio
+        appears in visual_context for the current LLM call."""
+        return self._create_media_item_for_user(
+            "audio", "🎵", name, description, file_path, building_id,
+            is_open=is_open, creator_id=creator_id, source_context=source_context,
+        )
+
+    def create_video_item_for_user(
+        self, name: str, description: str, file_path: str, building_id: str,
+        is_open: bool = True, creator_id: Optional[str] = None, source_context: Optional[str] = None,
+    ) -> str:
+        """Create a video item from user upload. Defaults to is_open=True so the video
+        appears in visual_context for the current LLM call."""
+        return self._create_media_item_for_user(
+            "video", "🎬", name, description, file_path, building_id,
+            is_open=is_open, creator_id=creator_id, source_context=source_context,
+        )
+
+    # ========== Bag operations ==========
+
+    def get_items_in_bag(self, bag_item_id: str) -> List[Dict]:
+        """Get all items directly contained in a bag."""
+        items = []
+        for item_id in self.items_by_bag.get(bag_item_id, []):
+            item = self.items.get(item_id)
+            if item:
+                items.append(item)
+        return items
+
+    def get_bag_contents_recursive(
+        self, bag_item_id: str, max_depth: int = 10, _visited: Optional[set] = None,
+    ) -> List[Dict]:
+        """Get bag contents recursively, including nested bags.
+
+        Each returned dict includes a '_depth' key indicating nesting level
+        and '_children' for nested bag contents.
+        Returns a tree structure for display purposes.
+        """
+        if _visited is None:
+            _visited = set()
+        if bag_item_id in _visited or max_depth <= 0:
+            return []
+        _visited.add(bag_item_id)
+
+        result = []
+        for item_id in self.items_by_bag.get(bag_item_id, []):
+            item = self.items.get(item_id)
+            if not item:
+                continue
+            entry = dict(item)
+            entry["slot_number"] = self.item_locations.get(item_id, {}).get("slot_number")
+            item_type = (item.get("type") or "").lower()
+            if item_type == "bag":
+                entry["_children"] = self.get_bag_contents_recursive(
+                    item_id, max_depth - 1, _visited,
+                )
+            else:
+                entry["_children"] = []
+            result.append(entry)
+        result.sort(key=lambda x: (x.get("slot_number") is None, x.get("slot_number") or 0))
+        return result
+
+    def _assign_slot(self, db, owner_kind: str, owner_id: str) -> int:
+        """コンテナ内の最小空きスロット番号を返す（DB参照）。"""
+        rows = db.query(ItemLocationModel).filter(
+            ItemLocationModel.OWNER_KIND == owner_kind,
+            ItemLocationModel.OWNER_ID == owner_id,
+        ).all()
+        occupied = {row.SLOT_NUMBER for row in rows if row.SLOT_NUMBER is not None}
+        slot = 1
+        while slot in occupied:
+            slot += 1
+        return slot
+
+    def _short_id_of(self, item_id: str) -> Optional[int]:
+        """作成直後のアイテムの short_id を DB から引く。
+
+        SHORT_ID は before_insert リスナーが commit 時に採番する。生成メソッドが
+        インメモリキャッシュ (self.items) を組む際、この値を載せておかないと直後の
+        get_visual_context / URI 生成で ``item:?`` になる。セッションを跨ぐ detached
+        参照を避けるため、確定後に軽い SELECT で読み直す (item 生成は低頻度)。
+        """
+        db = self.manager.SessionLocal()
+        try:
+            row = db.query(ItemModel.SHORT_ID).filter(ItemModel.ITEM_ID == item_id).first()
+            return row[0] if row else None
+        finally:
+            db.close()
+
+    def _find_item_by_short_id(self, short_id: int) -> Optional[str]:
+        """世界全体の安定 short_id からアイテム UUID を引く。"""
+        for item_id, data in self.items.items():
+            if data.get("short_id") == short_id:
+                return item_id
+        return None
+
+    def item_dict_by_key(self, key) -> Optional[Dict[str, Any]]:
+        """short_id (数字) または UUID でインメモリ item dict を引く。
+
+        AI 可視のアドレスは short_id (``item:N`` / ``saiverse://item/N``) だが、
+        過去ログの UUID URI も裏方フォールバックで解決できるよう両対応する。
+        """
+        s = str(key).strip()
+        if s in self.items:
+            return self.items[s]
+        if s.isdigit():
+            item_id = self._find_item_by_short_id(int(s))
+            if item_id:
+                return self.items.get(item_id)
+        return None
+
+    def resolve_item_ref(self, ref: str, persona_id: str, building_id: Optional[str]) -> str:
+        """``item:N``（安定 short_id）または UUID をアイテム UUID に解決する。
+
+        参照は同一性（short_id）で行う。スロット（位置）は locator であって
+        同一性ではないため参照には使わない（intent reference_addressing I5）。
+        ``persona_id`` / ``building_id`` は呼び出し側の文脈保持のため残すが、
+        short_id は世界全体で一意なので解決には使わない。
+        UUID 形式はそのまま返す（後方互換）。
+        """
+        ref = ref.strip()
+        if len(ref) == 36 and ref.count("-") == 4:
+            return ref
+
+        try:
+            parsed = parse_ref(ref)
+        except ValueError as exc:
+            raise RuntimeError(f"無効なアイテム参照形式: '{ref}' (例: item:3)") from exc
+        if parsed.kind != "item":
+            raise RuntimeError(f"アイテム参照ではありません: '{ref}' (例: item:3)")
+        try:
+            short_id = int(parsed.key)
+        except ValueError:
+            raise RuntimeError(f"アイテム番号が無効: '{parsed.key}'")
+
+        item_id = self._find_item_by_short_id(short_id)
+        if not item_id:
+            raise RuntimeError(f"item:{short_id} に対応するアイテムが見つかりません。")
+        return item_id
+
+    def _is_ancestor_bag(self, item_id: str, potential_ancestor_id: str, max_depth: int = 50) -> bool:
+        """Check if potential_ancestor_id is an ancestor bag of item_id (circular reference check)."""
+        current = item_id
+        visited = set()
+        for _ in range(max_depth):
+            loc = self.item_locations.get(current)
+            if not loc or loc.get("owner_kind") != "bag":
+                return False
+            parent_bag_id = loc.get("owner_id")
+            if not parent_bag_id or parent_bag_id in visited:
+                return False
+            if parent_bag_id == potential_ancestor_id:
+                return True
+            visited.add(parent_bag_id)
+            current = parent_bag_id
+        return False
+
+    def _find_building_for_bag(self, bag_item_id: str, max_depth: int = 50) -> Optional[str]:
+        """Find the building that ultimately contains this bag (traversing parent bags)."""
+        current = bag_item_id
+        visited = set()
+        for _ in range(max_depth):
+            loc = self.item_locations.get(current)
+            if not loc:
+                return None
+            kind = loc.get("owner_kind")
+            owner = loc.get("owner_id")
+            if kind == "building":
+                return owner
+            if kind == "bag" and owner and owner not in visited:
+                visited.add(current)
+                current = owner
+                continue
+            return None
+        return None
+
+    def move_item(
+        self, persona_id: str, item_ids: List[str],
+        destination_kind: str, destination_id: str,
+    ) -> str:
+        """Move items to a destination (building, persona inventory, or bag).
+
+        Args:
+            persona_id: The persona performing the action.
+            item_ids: List of item IDs to move (max 100).
+            destination_kind: "building", "persona", or "bag".
+            destination_id: building_id, "self" (for persona), or bag item_id.
+        """
+        if len(item_ids) > 100:
+            raise RuntimeError("一度に移動できるアイテムは最大100個です。")
+
+        persona = self.manager.personas.get(persona_id)
+        if not persona or getattr(persona, "is_proxy", False):
+            raise RuntimeError("このペルソナではアイテムを扱えません。")
+
+        # Resolve destination
+        if destination_kind == "persona":
+            destination_id = persona_id
+        elif destination_kind == "building":
+            if not destination_id:
+                destination_id = persona.current_building_id
+            if not destination_id:
+                raise RuntimeError("移動先のBuildingが不明です。")
+            if destination_id not in self.manager.building_map:
+                raise RuntimeError(f"Building '{destination_id}' が見つかりません。")
+        elif destination_kind == "bag":
+            if not destination_id:
+                raise RuntimeError("移動先のBagアイテムIDが必要です。")
+            bag_item = self.items.get(destination_id)
+            if not bag_item:
+                raise RuntimeError(f"Bagアイテム '{destination_id}' が見つかりません。")
+            if (bag_item.get("type") or "").lower() != "bag":
+                raise RuntimeError(f"アイテム '{destination_id}' はBagタイプではありません。")
+        else:
+            raise RuntimeError(f"未対応の移動先タイプ: {destination_kind}")
+
+        # Validate all items exist and are accessible
+        validated_items = []
+        for item_id in item_ids:
+            item = self.items.get(item_id)
+            if not item:
+                raise RuntimeError(f"アイテム '{item_id}' が見つかりません。")
+
+            # Cannot move item into itself
+            if destination_kind == "bag" and item_id == destination_id:
+                raise RuntimeError(f"アイテム '{item_id}' を自分自身の中に入れることはできません。")
+
+            # Circular reference check for bags
+            if destination_kind == "bag":
+                if (item.get("type") or "").lower() == "bag":
+                    if self._is_ancestor_bag(destination_id, item_id):
+                        item_name = item.get("name", item_id)
+                        raise RuntimeError(
+                            f"循環参照: '{item_name}' は移動先Bagの祖先です。"
+                        )
+
+            # Check accessibility: item must be in persona's inventory, current building, or a bag in current building
+            location = self.item_locations.get(item_id)
+            if location:
+                loc_kind = location.get("owner_kind")
+                loc_owner = location.get("owner_id")
+                in_inventory = loc_kind == "persona" and loc_owner == persona_id
+                in_current_building = loc_kind == "building" and loc_owner == persona.current_building_id
+                in_bag = loc_kind == "bag"
+                if not (in_inventory or in_current_building or in_bag):
+                    raise RuntimeError(
+                        f"アイテム '{item.get('name', item_id)}' にアクセスできません。"
+                    )
+
+            validated_items.append((item_id, item))
+
+        # Execute moves
+        timestamp = datetime.utcnow()
+        moved_names = []
+        db = self.manager.SessionLocal()
+        try:
+            # Pre-compute slot assignments for all items moving to the same container
+            dest_rows = db.query(ItemLocationModel).filter(
+                ItemLocationModel.OWNER_KIND == destination_kind,
+                ItemLocationModel.OWNER_ID == destination_id,
+            ).all()
+            occupied_slots = {row.SLOT_NUMBER for row in dest_rows if row.SLOT_NUMBER is not None}
+            slot_assignments: Dict[str, int] = {}
+            for item_id, _item in validated_items:
+                slot = 1
+                while slot in occupied_slots:
+                    slot += 1
+                occupied_slots.add(slot)
+                slot_assignments[item_id] = slot
+
+            for item_id, item in validated_items:
+                row = db.query(ItemLocationModel).filter(
+                    ItemLocationModel.ITEM_ID == item_id
+                ).one_or_none()
+                slot_num = slot_assignments[item_id]
+                if row is None:
+                    row = ItemLocationModel(
+                        ITEM_ID=item_id,
+                        OWNER_KIND=destination_kind,
+                        OWNER_ID=destination_id,
+                        SLOT_NUMBER=slot_num,
+                        UPDATED_AT=timestamp,
+                    )
+                    db.add(row)
+                else:
+                    row.OWNER_KIND = destination_kind
+                    row.OWNER_ID = destination_id
+                    row.SLOT_NUMBER = slot_num
+                    row.UPDATED_AT = timestamp
+                moved_names.append(item.get("name", item_id))
+            db.commit()
+        except Exception as exc:
+            db.rollback()
+            raise RuntimeError(f"データベース更新に失敗しました: {exc}") from exc
+        finally:
+            db.close()
+
+        # Update in-memory cache
+        for item_id, _item in validated_items:
+            self.update_item_cache(item_id, destination_kind, destination_id, timestamp,
+                                   slot_number=slot_assignments[item_id])
+
+        self._sync_to_state()
+
+        # Build result message
+        if destination_kind == "building":
+            dest_name = (
+                self.manager.building_map[destination_id].name
+                if destination_id in self.manager.building_map
+                else destination_id
+            )
+            dest_label = f"Building「{dest_name}」"
+        elif destination_kind == "persona":
+            dest_label = "自分のインベントリ"
+        else:
+            bag_item = self.items.get(destination_id)
+            bag_name = bag_item.get("name", destination_id) if bag_item else destination_id
+            dest_label = f"Bag「{bag_name}」"
+
+        if len(moved_names) == 1:
+            actor_msg = f"「{moved_names[0]}」を{dest_label}に移動した。"
+        else:
+            actor_msg = f"{len(moved_names)}個のアイテムを{dest_label}に移動した。"
+
+        self.manager.record_persona_event(persona_id, actor_msg)
+
+        building_id = persona.current_building_id
+        if building_id:
+            other_ids = [
+                oid for oid in self.manager.occupants.get(building_id, [])
+                if oid and oid != persona_id
+            ]
+            if other_ids:
+                notice = f"{persona.persona_name}が{actor_msg}"
+                self.broadcast_item_event(other_ids, notice)
+
+            note = (
+                '<div class="note-box">📦 Item Move:<br>'
+                f'<b>{persona.persona_name}が{actor_msg}</b></div>'
+            )
+            self.manager._append_building_history_note(building_id, note)
+
+        return actor_msg
+
+    def _get_oldest_context_timestamp(self, persona_id: str) -> Optional[float]:
+        """Get the epoch timestamp of the oldest message in the persona's current context.
+
+        Returns None if the memory adapter is not available.
+        """
+        persona = self.manager.personas.get(persona_id)
+        if not persona:
+            return None
+        memory = getattr(persona, "sai_memory", None)
+        if not memory or not memory.is_ready():
+            return None
+        try:
+            recent = memory.recent_persona_messages_by_count(max_messages=100)
+            if not recent:
+                return None
+            return min(
+                (float(m["created_at"]) for m in recent if m.get("created_at") is not None),
+                default=None,
+            )
+        except Exception as exc:
+            LOGGER.debug("Failed to get oldest context timestamp for %s: %s", persona_id, exc)
+            return None
+
+    def _fetch_memory_recall_for_item(self, item: Dict, persona_id: str, count: int = 10) -> Optional[str]:
+        """Fetch surrounding log messages for an item based on its creation time.
+
+        Returns formatted log text if the item's creation time predates the current
+        context window, or None otherwise.
+        """
+        created_at = item.get("created_at")
+        if created_at is None:
+            return None
+
+        # Convert datetime to epoch
+        if isinstance(created_at, datetime):
+            from datetime import timezone
+            try:
+                created_at_epoch = float(created_at.replace(tzinfo=timezone.utc).timestamp())
+            except Exception:
+                return None
+        else:
+            try:
+                created_at_epoch = float(created_at)
+            except (TypeError, ValueError):
+                return None
+
+        oldest_ts = self._get_oldest_context_timestamp(persona_id)
+        if oldest_ts is None or created_at_epoch >= oldest_ts:
+            return None
+
+        # Fetch log messages around the creation time
+        persona = self.manager.personas.get(persona_id)
+        if not persona:
+            return None
+        memory = getattr(persona, "sai_memory", None)
+        if not memory or not memory.is_ready():
+            return None
+
+        try:
+            from sai_memory.memory.storage import get_messages_around_timestamp
+            messages = get_messages_around_timestamp(
+                memory.conn,
+                timestamp=int(created_at_epoch),
+                count=count,
+            )
+            if not messages:
+                return None
+            lines: List[str] = []
+            for msg in messages:
+                dt_str = datetime.utcfromtimestamp(msg.created_at).strftime("%Y-%m-%d %H:%M")
+                role = msg.role or "unknown"
+                lines.append(f"[{dt_str}] ({role})\n{msg.content}")
+            return "\n---\n".join(lines)
+        except Exception as exc:
+            LOGGER.debug("Failed to fetch memory recall for item %s: %s", item.get("item_id"), exc)
+            return None
+
+    def view_items(self, persona_id: str, item_ids: List[str]) -> str:
+        """View multiple items (up to 5). For bags, shows contents list."""
+        if len(item_ids) > 5:
+            raise RuntimeError("一度に閲覧できるアイテムは最大5個です。")
+
+        persona = self.manager.personas.get(persona_id)
+        if not persona or getattr(persona, "is_proxy", False):
+            raise RuntimeError("このペルソナではアイテムを扱えません。")
+
+        results = []
+        for item_id in item_ids:
+            item = self.items.get(item_id)
+            if not item:
+                results.append(f"[{item_id}] アイテムが見つかりません。")
+                continue
+
+            item_type = (item.get("type") or "").lower()
+            item_name = item.get("name", item_id)
+
+            # Format creation datetime for display
+            created_at = item.get("created_at")
+            if isinstance(created_at, datetime):
+                created_at_str = created_at.strftime("%Y-%m-%d %H:%M")
+            else:
+                created_at_str = str(created_at) if created_at else ""
+
+            if item_type == "bag":
+                contents = self.get_bag_contents_recursive(item_id)
+                results.append(self._format_bag_contents(item_name, item_id, item, contents))
+            elif item_type == "picture":
+                file_path_str = item.get("file_path")
+                if not file_path_str:
+                    results.append(f"[{item_name}] この画像にはファイルパスが設定されていません。")
+                    continue
+                file_path = self._resolve_file_path(file_path_str)
+                if not file_path.exists():
+                    results.append(f"[{item_name}] ファイルが見つかりません: {file_path}")
+                    continue
+                lines = [f"[{item_name}] 画像ファイル: {file_path}"]
+                if created_at_str:
+                    lines.append(f"作成日時: {created_at_str}")
+                description = (item.get("description") or "").strip()
+                if description:
+                    lines.append(f"概要: {description}")
+                recall = self._fetch_memory_recall_for_item(item, persona_id)
+                if recall:
+                    lines.append("\n--- あの時の思い出 ---")
+                    lines.append(recall)
+                results.append("\n".join(lines))
+            elif item_type == "document":
+                file_path_str = item.get("file_path")
+                if not file_path_str:
+                    results.append(f"[{item_name}] この文書にはファイルパスが設定されていません。")
+                    continue
+                file_path = self._resolve_file_path(file_path_str)
+                if not file_path.exists():
+                    results.append(f"[{item_name}] ファイルが見つかりません: {file_path}")
+                    continue
+                try:
+                    content = file_path.read_text(encoding="utf-8")
+                    header = f"[{item_name}]"
+                    if created_at_str:
+                        header += f" (作成日時: {created_at_str})"
+                    results.append(f"{header} 文書の内容:\n\n{content}")
+                except OSError as exc:
+                    results.append(f"[{item_name}] ファイル読み込みエラー: {exc}")
+            else:
+                description = (item.get("description") or "").strip() or "(説明なし)"
+                header = f"[{item_name}]"
+                if created_at_str:
+                    header += f" (作成日時: {created_at_str})"
+                results.append(f"{header} {description}")
+
+        return "\n\n---\n\n".join(results)
+
+    def _format_bag_contents(
+        self, bag_name: str, bag_id: str, bag_item: Dict, contents: List[Dict], indent: int = 0,
+    ) -> str:
+        """Format bag contents as readable text."""
+        prefix = "  " * indent
+        description = (bag_item.get("description") or "").strip() or "(説明なし)"
+        lines = [f"{prefix}[Bag] {bag_name} (id: {bag_id})"]
+        lines.append(f"{prefix}  {description}")
+
+        if not contents:
+            lines.append(f"{prefix}  (空)")
+        else:
+            lines.append(f"{prefix}  中身 ({len(contents)}個):")
+            for entry in contents:
+                child_id = entry.get("item_id", "")
+                child_name = entry.get("name", "不明")
+                child_type = (entry.get("type") or "").lower()
+                child_desc = (entry.get("description") or "").strip() or "(説明なし)"
+                if len(child_desc) > 100:
+                    child_desc = child_desc[:97] + "..."
+                type_label = {
+                    "picture": "Image", "document": "Document",
+                    "object": "Object", "bag": "Bag",
+                }.get(child_type, child_type.capitalize() or "Item")
+
+                lines.append(f"{prefix}  - [{type_label}] {child_name} (id: {child_id})")
+                lines.append(f"{prefix}    {child_desc}")
+
+                children = entry.get("_children", [])
+                if children and child_type == "bag":
+                    child_item = self.items.get(child_id, entry)
+                    sub_text = self._format_bag_contents(
+                        child_name, child_id, child_item, children, indent + 2,
+                    )
+                    # Skip the header line (already printed above)
+                    sub_lines = sub_text.split("\n")
+                    # Append only the content lines (skip first 2 that duplicate header)
+                    for sl in sub_lines[2:]:
+                        lines.append(sl)
+        return "\n".join(lines)
+
+    def get_bag_items_in_building(self, building_id: str) -> List[Dict]:
+        """Get all bag-type items in a building."""
+        bags = []
+        for item_id in self.items_by_building.get(building_id, []):
+            item = self.items.get(item_id)
+            if item and (item.get("type") or "").lower() == "bag":
+                bags.append(item)
+        return bags
+
+    def get_items_inside_bags_in_building(self, building_id: str) -> set:
+        """Get set of item IDs that are inside bags that are in a building.
+
+        Used to exclude bag-contained items from top-level building item lists.
+        """
+        bag_contained_ids: set = set()
+        bag_ids = [
+            item_id for item_id in self.items_by_building.get(building_id, [])
+            if self.items.get(item_id, {}).get("type", "").lower() == "bag"
+        ]
+        for bag_id in bag_ids:
+            self._collect_bag_contents_recursive(bag_id, bag_contained_ids)
+        return bag_contained_ids
+
+    def _collect_bag_contents_recursive(self, bag_id: str, collected: set, max_depth: int = 10) -> None:
+        """Recursively collect all item IDs inside a bag."""
+        if max_depth <= 0 or bag_id in collected:
+            return
+        for item_id in self.items_by_bag.get(bag_id, []):
+            collected.add(item_id)
+            item = self.items.get(item_id)
+            if item and (item.get("type") or "").lower() == "bag":
+                self._collect_bag_contents_recursive(item_id, collected, max_depth - 1)
+
+
+    def _extract_context_from_memory(self, memory: Any, timestamp_epoch: int):
+        """Extract (user_message, prev_ai_message) from SAIMemory around a timestamp."""
+        try:
+            from sai_memory.memory.storage import get_messages_around_timestamp
+            messages = get_messages_around_timestamp(memory.conn, timestamp=timestamp_epoch, count=10)
+            if not messages:
+                return "", ""
+            messages = sorted(messages, key=lambda m: m.created_at)
+            user_msg = ""
+            ai_msg = ""
+            for msg in messages:
+                if msg.role == "user" and abs(msg.created_at - timestamp_epoch) < 300:
+                    user_msg = (msg.content or "")[:400]
+                    break
+            for msg in reversed(messages):
+                if msg.role in ("assistant", "model"):
+                    ai_msg = (msg.content or "")[:400]
+                    break
+            return user_msg, ai_msg
+        except Exception as exc:
+            LOGGER.debug("Failed to extract context from memory: %s", exc)
+            return "", ""
+
+    def _find_best_context_for_timestamp(self, timestamp_epoch: int):
+        """Auto mode: search all personas' SAIMemory and pick the closest match."""
+        best_user_msg = ""
+        best_ai_msg = ""
+        min_diff: float = float("inf")
+        for persona in self.manager.personas.values():
+            if getattr(persona, "is_proxy", False):
+                continue
+            memory = getattr(persona, "sai_memory", None)
+            if not memory or not memory.is_ready():
+                continue
+            try:
+                from sai_memory.memory.storage import get_messages_around_timestamp
+                messages = get_messages_around_timestamp(memory.conn, timestamp=timestamp_epoch, count=10)
+                if not messages:
+                    continue
+                closest = min(abs(msg.created_at - timestamp_epoch) for msg in messages)
+                if closest < min_diff:
+                    min_diff = closest
+                    best_user_msg, best_ai_msg = self._extract_context_from_memory(memory, timestamp_epoch)
+            except Exception as exc:
+                LOGGER.debug("Auto context search failed for persona: %s", exc)
+        return best_user_msg, best_ai_msg
+
+    def backfill_item_descriptions(
+        self,
+        building_id: Optional[str] = None,
+        persona_id: Optional[str] = None,
+        dry_run: bool = False,
+    ) -> Dict[str, Any]:
+        """Batch-generate descriptions for picture items that only have placeholder text.
+
+        Args:
+            building_id: If given, process only items in this building.
+            persona_id: If given alongside building_id, use only this persona's SAIMemory.
+                        In auto mode (None), all personas are searched and the closest match wins.
+            dry_run: Preview what would be generated without writing to DB.
+        """
+        import mimetypes
+        from datetime import timezone
+        from saiverse.media_summary import generate_contextual_image_description
+
+        results: List[Dict] = []
+
+        # Collect target item IDs
+        if building_id:
+            candidate_ids = list(self.items_by_building.get(building_id, []))
+        else:
+            candidate_ids = list(self.items.keys())
+
+        # Filter to picture items with placeholder/empty descriptions
+        target_items = []
+        for item_id in candidate_ids:
+            item = self.items.get(item_id)
+            if not item:
+                continue
+            if (item.get("type") or "").lower() != "picture":
+                continue
+            desc = (item.get("description") or "").strip()
+            if desc and not desc.startswith("User uploaded image:"):
+                results.append({"item_id": item_id, "item_name": item.get("name", item_id),
+                                 "status": "skipped", "reason": "既に概要が設定されています", "description": None})
+                continue
+            if not item.get("file_path"):
+                results.append({"item_id": item_id, "item_name": item.get("name", item_id),
+                                 "status": "skipped", "reason": "ファイルパスが設定されていません", "description": None})
+                continue
+            target_items.append((item_id, item))
+
+        for item_id, item in target_items:
+            item_name = item.get("name", item_id)
+            try:
+                file_path = self._resolve_file_path(item["file_path"])
+                if not file_path.exists():
+                    results.append({"item_id": item_id, "item_name": item_name,
+                                     "status": "failed", "reason": f"ファイルが見つかりません: {file_path}", "description": None})
+                    continue
+
+                mime_type = mimetypes.guess_type(str(file_path))[0] or "image/jpeg"
+
+                # Convert creation time to epoch
+                created_at = item.get("created_at")
+                if isinstance(created_at, datetime):
+                    created_at_epoch = int(created_at.replace(tzinfo=timezone.utc).timestamp())
+                elif created_at is not None:
+                    created_at_epoch = int(created_at)
+                else:
+                    created_at_epoch = None
+
+                # Retrieve conversation context
+                user_message = ""
+                prev_ai_message = ""
+                if created_at_epoch:
+                    if persona_id:
+                        persona = self.manager.personas.get(persona_id)
+                        if persona:
+                            memory = getattr(persona, "sai_memory", None)
+                            if memory and memory.is_ready():
+                                user_message, prev_ai_message = self._extract_context_from_memory(
+                                    memory, created_at_epoch
+                                )
+                    else:
+                        user_message, prev_ai_message = self._find_best_context_for_timestamp(created_at_epoch)
+
+                description = generate_contextual_image_description(
+                    file_path, mime_type, user_message, prev_ai_message
+                )
+                if not description:
+                    results.append({"item_id": item_id, "item_name": item_name,
+                                     "status": "failed", "reason": "説明の生成に失敗しました", "description": None})
+                    continue
+
+                if not dry_run:
+                    self.update_item_description(item_id, description)
+
+                results.append({"item_id": item_id, "item_name": item_name,
+                                 "status": "dry_run" if dry_run else "updated",
+                                 "reason": None, "description": description})
+
+            except Exception as exc:
+                LOGGER.exception("Backfill failed for item %s: %s", item_id, exc)
+                results.append({"item_id": item_id, "item_name": item_name,
+                                 "status": "failed", "reason": str(exc), "description": None})
+
+        return {
+            "processed": sum(1 for r in results if r["status"] in ("updated", "dry_run")),
+            "skipped": sum(1 for r in results if r["status"] == "skipped"),
+            "failed": sum(1 for r in results if r["status"] == "failed"),
+            "results": results,
+        }
+
+    def update_item_description(self, item_id: str, description: str) -> None:
+        """Update an item's description in DB and in-memory cache."""
+        item = self.items.get(item_id)
+        if not item:
+            raise RuntimeError(f"アイテム '{item_id}' が見つかりません。")
+
+        timestamp = datetime.utcnow()
+        db = self.manager.SessionLocal()
+        try:
+            row = db.query(ItemModel).filter(ItemModel.ITEM_ID == item_id).one_or_none()
+            if row is None:
+                raise RuntimeError("アイテムがDBに見つかりません。")
+            row.DESCRIPTION = description
+            row.UPDATED_AT = timestamp
+            db.commit()
+        except Exception as exc:
+            db.rollback()
+            raise RuntimeError(f"データベース更新に失敗しました: {exc}") from exc
+        finally:
+            db.close()
+
+        item["description"] = description
+        item["updated_at"] = timestamp
+        location = self.item_locations.get(item_id, {})
+        if location.get("owner_kind") == "building" and location.get("owner_id"):
+            self.refresh_building_system_instruction(location["owner_id"])
+        LOGGER.info("Updated description for item %s", item_id)
+
+    def update_item_name(self, item_id: str, name: str) -> None:
+        """Update an item's name in DB and in-memory cache."""
+        item = self.items.get(item_id)
+        if not item:
+            raise RuntimeError(f"アイテム '{item_id}' が見つかりません。")
+
+        timestamp = datetime.utcnow()
+        db = self.manager.SessionLocal()
+        try:
+            row = db.query(ItemModel).filter(ItemModel.ITEM_ID == item_id).one_or_none()
+            if row is None:
+                raise RuntimeError("アイテムがDBに見つかりません。")
+            row.NAME = name
+            row.UPDATED_AT = timestamp
+            db.commit()
+        except Exception as exc:
+            db.rollback()
+            raise RuntimeError(f"データベース更新に失敗しました: {exc}") from exc
+        finally:
+            db.close()
+
+        item["name"] = name
+        item["updated_at"] = timestamp
+        location = self.item_locations.get(item_id, {})
+        if location.get("owner_kind") == "building" and location.get("owner_id"):
+            self.refresh_building_system_instruction(location["owner_id"])
+        LOGGER.info("Updated name for item %s to '%s'", item_id, name)
 
 
 __all__ = ["ItemService"]

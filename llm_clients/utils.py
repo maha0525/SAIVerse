@@ -160,3 +160,82 @@ def image_summary_note(
             path,
         )
     return f"[画像: {uri}]"
+
+
+def audio_summary_note(
+    path: str,
+    mime_type: str,
+    uri: str,
+    skip_summary: bool = False,
+) -> str:
+    """Build a text note for an audio file that will not be embedded as binary.
+
+    Used by LLM clients that do not support audio inline_data (Anthropic, OpenAI, etc.).
+    """
+    if not skip_summary:
+        try:
+            from pathlib import Path as _Path
+
+            from saiverse.media_summary import ensure_audio_summary
+
+            summary = ensure_audio_summary(_Path(path), mime_type)
+            if summary:
+                return f"[音声: {uri}] {summary}"
+        except Exception:
+            _log.exception("Audio summary generation error for %s", path)
+        _log.warning(
+            "Audio summary unavailable for %s; using URI-only reference", path,
+        )
+    return f"[音声: {uri}]"
+
+
+def video_summary_note(
+    path: str,
+    mime_type: str,
+    uri: str,
+    skip_summary: bool = False,
+) -> str:
+    """Build a text note for a video file that will not be embedded as binary."""
+    if not skip_summary:
+        try:
+            from pathlib import Path as _Path
+
+            from saiverse.media_summary import ensure_video_summary
+
+            summary = ensure_video_summary(_Path(path), mime_type)
+            if summary:
+                return f"[動画: {uri}] {summary}"
+        except Exception:
+            _log.exception("Video summary generation error for %s", path)
+        _log.warning(
+            "Video summary unavailable for %s; using URI-only reference", path,
+        )
+    return f"[動画: {uri}]"
+
+
+def inject_audio_video_summaries(
+    metadata: Any,
+    text: str,
+    skip_audio: bool = False,
+    skip_video: bool = False,
+) -> str:
+    """Append audio/video summary notes to a text string based on metadata.media[].
+
+    This is the common fallback path for LLM clients that do not natively support
+    audio or video inline data. Returns the original text with `[音声: ...] <summary>`
+    and `[動画: ...] <summary>` lines appended for each audio/video media descriptor.
+    """
+    from saiverse.media_utils import iter_audio_media, iter_video_media
+
+    result = text or ""
+    for att in iter_audio_media(metadata):
+        note = audio_summary_note(
+            str(att["path"]), att["mime_type"], att["uri"], skip_summary=skip_audio,
+        )
+        result = f"{result}\n{note}" if result else note
+    for att in iter_video_media(metadata):
+        note = video_summary_note(
+            str(att["path"]), att["mime_type"], att["uri"], skip_summary=skip_video,
+        )
+        result = f"{result}\n{note}" if result else note
+    return result

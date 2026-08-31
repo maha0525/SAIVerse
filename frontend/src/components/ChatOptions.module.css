@@ -200,9 +200,45 @@
     padding: 1rem 1.5rem;
     border-top: 1px solid rgba(0, 0, 0, 0.1);
     display: flex;
-    justify-content: flex-end;
+    justify-content: space-between;
+    align-items: center;
     gap: 0.8rem;
     background: rgba(0, 0, 0, 0.02);
+    flex-wrap: wrap;
+}
+
+.footerLeft {
+    display: flex;
+    gap: 0.6rem;
+    flex-wrap: wrap;
+}
+
+.footerRight {
+    display: flex;
+    gap: 0.6rem;
+    margin-left: auto;
+}
+
+.linkBtn {
+    background: none;
+    border: 1px solid transparent;
+    color: var(--primary, #4a7eb5);
+    padding: 0.45rem 0.7rem;
+    border-radius: 0.4rem;
+    cursor: pointer;
+    font-size: 0.85rem;
+    text-decoration: underline;
+}
+
+.linkBtn:hover:not(:disabled) {
+    background: rgba(74, 126, 181, 0.08);
+    text-decoration: none;
+}
+
+.linkBtn:disabled {
+    color: #999;
+    cursor: not-allowed;
+    text-decoration: none;
 }
 
 .saveBtn {
@@ -309,3 +345,79 @@
     background: #991b1b;
     color: white;
 }
+
+/* --- Cache Timer (Phase 1) --- */
+.cacheTimerTabs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-bottom: 10px;
+}
+.personaTab {
+    padding: 4px 10px;
+    border: 1px solid rgba(127, 127, 127, 0.4);
+    border-radius: 14px;
+    background: transparent;
+    color: inherit;
+    font-size: 0.8rem;
+    cursor: pointer;
+}
+.personaTab:hover { background: rgba(127, 127, 127, 0.12); }
+.personaTabActive {
+    background: #3b82f6;
+    border-color: #3b82f6;
+    color: white;
+}
+.timerRow {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+.timerStatusDot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex: 0 0 auto;
+}
+.timerActive { background: #34d399; box-shadow: 0 0 6px #34d399; }
+.timerInactive { background: #9ca3af; }
+.timerBar {
+    position: relative;
+    flex: 1 1 auto;
+    height: 16px;
+    border-radius: 8px;
+    background: rgba(127, 127, 127, 0.18);
+    overflow: hidden;
+}
+.timerBarFill {
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    border-radius: 8px;
+    transition: width 1s linear;
+}
+.timerText {
+    font-variant-numeric: tabular-nums;
+    font-size: 0.82rem;
+    min-width: 92px;
+    text-align: right;
+}
+.cacheTtlOverrideRow {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 10px;
+}
+.cacheTtlOverrideLabel {
+    font-size: 0.82rem;
+    white-space: nowrap;
+    opacity: 0.85;
+}
+.cacheTtlOverrideRow .select {
+    flex: 1 1 auto;
+}
+
+/* --- Context volume (データ送信量の状態表示) ---
+   横棒と数値行の CSS は common/ContextVolumeBar.module.css へ移した
+   (Chronicle 生成の確認窓と共有するため)。 */

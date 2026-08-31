@@ -1,0 +1,739 @@
+# 認知モデル: 動的な仕組み
+
+**親**: [README.md](README.md)
+**関連**: [01_concepts.md](01_concepts.md) (用語) / [03_data_model.md](03_data_model.md) (永続化)
+
+このファイルは認知モデルの**動的な振る舞い**を集約する。メタ判断の流れ、Pulse 階層、再開コンテキスト構築、ライン階層の管理。
+
+> ⚠ **メタ判断・alert (`set_alert`) の記述は歴史的記録 (2026-08-14)**: v1 メタ判断と alert 状態機械は Track 撤廃の順序① ([../track_retirement.md](../track_retirement.md) §7.4) で退役した。per-persona Lock とライン階層・Pulse 階層の記述は現役。
+
+---
+
+> **⚠️ メタ判断仕様は改訂中** (2026-05-10〜)
+>
+> 旧仕様 (構造化出力非使用、自然言語独白 + 行頭 `/spell` 埋め込み) で以下の機能不全が観測された:
+> - 過去メタ判断ログの Few-shot 汚染ループでペルソナが応答調を強化し続ける
+> - 自律時にユーザーへ話しかける構造的経路がないため、メタ判断ターン内で応答が漏れる
+> - LLM が独白だけで満足してスペルを書かず、Alert Track が放置される
+>
+> 新設計 (v2): 状況分類 (A〜E) → 状況別 Playbook (4 つ) → 構造化出力で Track 操作を強制 → メインキャッシュには整形済み独白 + Spell 行のみ昇格、というフロー。詳細は **[`meta_judgment_structured.md`](meta_judgment_structured.md)** を参照。
+>
+> 実装完了まで本節は旧仕様の記述として残置する。新設計確定後、本節は redirect stub に置き換える予定。
+
+## メタレイヤーの実行サイクル — A/B フロー
+
+メタ判断は **Track 内メインラインからの一瞬の分岐** として動く。専用モデルや独立キャッシュは持たない。メインキャッシュも Track 横断 1 本のまま (不変条件 7)。
+
+### 基本構造
+
+```
+[Track A のメインキャッシュ末尾]                          ← Track 横断 1 本のメインキャッシュ
+  │
+  │ メタ判断トリガ (定期 / alert / Pulse 完了等)
+  ↓
+[一瞬の分岐]
+  - 末尾に「メタ判断用プロンプト」を追加して LLM 呼び出し
+  - プロンプト構成:
+    * 末尾メッセージ (Track A の直近状態)
+    * pending / unstarted の Track 一覧
+    * 開いている Note 一覧
+    * 直近の外部イベント
+    * 過去のメタ判断ログから参考情報を動的注入 ([1] メタ判断ログ領域から)
+  ↓
+[メタ判断ターン]
+  - 重量級モデル (= メインモデル) で判断
+  - **構造化出力 (JSON / response_schema) は使わない**: メタ判断はメインキャッシュに乗る思考のため、JSON 形式が混入すると以後のメインライン発話も JSON 化する副作用が出る (不変条件 11)
+  - LLM は自然言語の独白で応答し、その流れの中に `/spell <name> ...` を埋め込んで Track 操作を発動する
+  ↓
+判断:
+
+  [A] 継続: 元の Track A 続行
+      → スペルを発動しない自然言語応答だけで終了
+      → 分岐ターンを Track A のメインキャッシュには **残さない** (`scope='discardable'` のまま)
+      → 次のメインライン応答は元のキャッシュ末尾から続行
+      → ただし [1] メタ判断ログ領域には保存 (次のメタ判断時の参考情報として参照される)
+
+  [B] 移動: 別 Track Y に切り替え
+      → 独白の中で `/spell track_pause`, `/spell track_activate`, `/spell track_create` 等を発動
+      → 分岐ターンを **そのまま残す** (Track 移動の来歴として、メインキャッシュに乗り続ける) — Pulse 完了時の Track 状態遷移 hook が `scope` を `'discardable'` → `'committed'` に昇格する仕掛け
+      → 続けて、`_promote_meta_judgment_in_pulse` の延長で Y の Track Chronicle (DB 既存分) を独立メッセージとして history 末尾近くに INSERT (Track Chronicle Intent doc 参照)
+      → 以降のメインライン応答は Track Y のものとして処理
+      → 分岐ターンは [1] メタ判断ログ領域にも保存
+      → A 側の必要情報維持は次回 Metabolism 時の Track Chronicle 生成で行われる (詳細は track_chronicle.md)
+```
+
+### scope=discardable の趣旨 (= Track 文脈純度の保護)
+
+メタ判断ターンを 「[A] 継続時は scope=discardable で次プロンプトに含めない / [B] 移動時は scope=committed に昇格して新 Track の冒頭来歴として残す」という二段構えにしている目的は **Track 文脈純度の保護**:
+
+- 継続 [A] 時にメタ判断ターンを Track A のメインキャッシュに残し続けると、Track A 本来の作業文脈に「アラート対象や別 Track の状況検討」のような **関係のない案件** が混入する
+- それが残ると、 Track A での以後の判断が「メタ判断時に検討した別案件」に引きずられる可能性がある
+- だから継続時はメタ判断ターンを Track A の流れから消す (= discardable)
+- 移動 [B] 時は、新しい Track Y にとって「なぜ Y に来たか」の来歴は必要 → committed に昇格して Y のメインキャッシュに残す
+
+実装上は `messages` テーブルの `scope` カラムで制御 (`discardable` → 続行時破棄、移動時 `committed` に昇格)。
+
+### メタ判断ログ領域の役割
+
+[A] 継続時もメタ判断ターンは **[1] メタ判断ログ領域には保存**される。理由: 別 Track からアラートが連続して来た時、毎回独立に判断すると「以前こう判断した」を踏まえられず判断が劣化する。
+
+ログ領域からの参考情報注入はメタ判断時のプロンプト構築の中で動的に行う。古いログは適宜要約 (Metabolism 機構の活用)、最新のログは詳細に。
+
+### メタ判断ログの実装 (Phase 2 / v0.16, 2026-04-30)
+
+データモデル: `meta_judgment_log` テーブル (`database/models.py`、v0.15 仕様に整合化済み)
+- `judgment_thought`: ペルソナの独白テキスト全体 (LLM 応答の生テキスト、複数ラウンドある場合は連結)
+- `spells_emitted`: JSON 配列 `[{name, args, result}, ...]`
+- `committed_to_main_cache`: Track 切替系 spell (track_activate) が発動したか (= [B] 移動)
+- `trigger_type` / `trigger_context` / `track_at_judgment_id` / `prompt_snapshot`
+
+書き込み経路 (Playbook path のみ。旧 legacy `_run_judgment` は 2026-07-24 撤去):
+- `_run_spell_loop` が `pulse_type == 'meta_judgment'` のとき `PulseContext.meta_judgment_buffer` に独白 + spell + 結果を蓄積。Pulse 完了時 (`runtime_graph.py`) に `MetaLayer._record_judgment_log` を呼んで永続化
+
+動的注入: `MetaLayer._build_recent_judgments_block(persona_id, n=5)` が新しい順 5 件を箇条書きにして返し、`meta_judgment.json` の `recent_judgments` 入力スキーマ経由で judge プロンプトに `{recent_judgments}` として展開される。
+
+これにより「過去にこう判断した」を踏まえた連続的な思考が可能になる + 古い snapshot 問題への対処 (前回操作の結果が今回の判断材料になる) を達成する。
+
+### 判断 LLM は構造化出力を使わない (重要)
+
+> **注 (2026-05-10)**: 本節の方針は v2 ([`meta_judgment_structured.md`](meta_judgment_structured.md)) で部分的に緩和される。具体的には「LLM 出力に構造化出力 (JSON) を使う」が、「メインキャッシュに残るのは整形済み独白 + Spell 行のみ」という後処理層を併設することで、不変条件 11 (メインキャッシュに JSON を混入させない) は維持される。下記の理由 1 (Track 文脈純度) は新設計でも守られ、理由 2 (マルチプロバイダ互換) は anyOf field-level discriminator パターン + プロバイダ別対応 ([issue](../../issues/llm_provider_anyof_support.md)) で解消する方針。
+
+メタ判断は **構造化出力 (JSON / response_schema) を使わない**。理由:
+
+1. **Track 文脈にメインライン外の形式 (JSON 等) を混入させない** (不変条件 11): メタ判断ターンは重量級モデルのメインキャッシュに乗りうる ([B] 移動時)。一度 JSON が混入したキャッシュ末尾を持つ会話は、以降のメインライン発話も JSON 化する副作用が出る (LLM が直前の応答形式を踏襲する性質) → Track 文脈の純度が壊れる。
+2. **マルチプロバイダ互換**: `anyOf` / `oneOf` 等の JSON Schema 機能はプロバイダ毎にサポート差が大きい (Gemini SDK は any_of のみ、OpenAI strict は anyOf 非対応、Anthropic は anyOf 制限付き)。構造化出力依存だとペルソナのモデル選択が制約される。
+3. **「判断 = 思考の流れ」**: メタ判断はペルソナ自身の独白であって、別人格の決定木ではない。自然言語応答 + スペル発動 (`/spell ...`) という形が「一段引いて自分を見る視点」(不変条件 11) に最も合致する。
+
+### 判断 LLM の応答形式
+
+LLM は重量級モデルで自然言語の独白を生成し、その中に Track 操作スペルを埋め込む:
+
+```
+ユーザーから話しかけられた。今やってる開発 Track は一旦置いて応答に切り替えよう。
+/spell track_pause track_id='abc12345-...'
+/spell track_activate track_id='def67890-...'
+…これでまはーとの会話に集中できる。
+```
+
+メインスペル一覧 (詳細は [03_data_model.md](03_data_model.md) §"メタレイヤーのトラック管理ツール群"):
+
+| 意図 | スペル例 |
+|------|---------|
+| 現在の Track を続ける ([A] 継続) | スペルを何も発動しない |
+| 別の既存 Track に切り替える ([B] 移動) | `/spell track_activate track_id='...'` (現 running は自動で pending) |
+| 新しい Track を作って始める | `/spell track_create title='...' track_type='...'` + `/spell track_activate track_id='...'` |
+| 現在の Track を一旦止めて待機状態へ | `/spell track_pause track_id='...'` (新規 activate しない = アクティブ Track なし状態) |
+| 現在の Track を完了 / 中止 | `/spell track_complete track_id='...'` / `/spell track_abort track_id='...'` |
+
+### scope 昇格機構 (committed/discardable の制御)
+
+LLM ノードはメタ判断ターンを **常に `scope='discardable'`** で保存する (line_role='meta_judgment')。保存ロジックは追加処理を持たない。
+
+昇格判定は **Track 状態遷移 hook 経由**:
+
+1. メタ判断 LLM 応答中に `/spell track_activate` 等が発動される
+2. spell loop 終了後、Pulse 完了時に `_apply_deferred_track_ops` が deferred queue を flush する
+3. flush 内で `TrackManager.activate(...)` 等が呼ばれ、内部の `_notify_status_change(persona_id, pulse_id)` が発火
+4. この hook を購読している `SAIVerseManager._promote_meta_judgment_in_pulse` が、当該 `pulse_id` 内の `line_role='meta_judgment' AND scope='discardable'` を SQL UPDATE で `'committed'` に昇格
+
+**通常会話 (Track の中) でペルソナが `/spell track_pause` を発動した場合**: その Pulse 内に `line_role='meta_judgment'` のメッセージは存在しない (発話メッセージのみ) → UPDATE が 0 件で何も起きない (= [A] 継続相当として正しい挙動)。
+
+`note_open` 等の Note 系スペルは TrackManager の状態遷移を起こさないため、 hook が発火せず昇格しない (= [A] 継続のまま discardable)。
+
+設計の責務分離:
+- 保存側 (`runtime_llm.py` の memorize 処理): line_role と scope を declarative に書くだけ。pulse_id / message_id 関連の特殊処理は持たない
+- TrackManager: 状態遷移時に observer に通知する責務のみ。SAIMemory には依存しない
+- SAIVerseManager: hook 登録 + 昇格 SQL の実行 (= 「メタ判断ログ領域」を知っている層)
+
+### 旧 4 値 enum (continue/switch/wait/close) の歴史
+
+v0.12〜v0.13 で構造化出力 + 4 値 enum (`continue`/`switch`/`wait`/`close`) を採用した時期があったが、(1) JSON 混入問題と (2) wait/close が switch のサブセットでしかない冗長性から、v0.14 で **構造化出力廃止 + 独白 + スペル方式に回帰** した。スペル方式での「アクティブなし状態に遷移」は `/spell track_pause` のみ発動 (新規 activate しない) で表現できる (旧 wait 相当)。完了は `/spell track_complete` (旧 close 相当)。
+
+---
+
+## メタレイヤーの起動タイミング
+
+判断間隔は **実時間ベース** で制御する (Pulse 数ではない)。重量級モデルのキャッシュ TTL に合わせる。
+
+### 入口
+
+| 入口 | トリガー |
+|------|---------|
+| `on_track_alert` | 外部イベント (ユーザー入力、ペルソナ間メッセージ、Kitchen 完了通知、占有変化等) で Track が alert 化したタイミング |
+| `on_track_alert` | 内部 alert (各 Track のパラメータ閾値超過、スケジュール時刻到来等で Track が自発的に alert 化) — Phase 5 |
+| `on_periodic_tick` | 重量級モデルのキャッシュ TTL を切らさない間隔 (Anthropic なら 1 時間以内、暫定 50 分) — Phase 4 |
+
+両入口は **同じ判断ループ**を共有する。違いは context のみ:
+- alert 入口: `context = {"trigger": "user_utterance", ...}` 等
+- 定期入口: `context = {"trigger": "periodic_tick", "interval_seconds": ...}`
+
+メタレイヤーのプロンプトは両ケースで「現状を見て判断する」共通形式。専用の判断ロジックを増やさない。
+
+### Pulse 完了直後は起動しない
+
+対ユーザー Track での発話完了直後をメタレイヤー判断のトリガにすると、ユーザーの返答を待たずに次の判断に走る不適切な挙動になる。「ユーザーの返答を待つ」のが基本姿勢。次に何をするかの判断はキャッシュ TTL 切れ直前まで待ち、これは結局**定期実行と同じタイミング**になるため、専用入口は設けない。
+
+### アイドル状態の判断は定期実行に統合
+
+「running Track が無い / 外部 alert が無い」状態でも、メタレイヤー定期実行が来た時に判断する。アイドル時の判断 (新規 Track 創設、pending Track 再開、何もしないで待つ) は専用入口を持たず、**通常の判断ロジックの中で「現状を見て決める」一部として扱う**。
+
+理由:
+- メタレイヤーの判断プロンプトには既に「現在 running / pending / unstarted の Track 一覧」が含まれる
+- running が無いという状況も普通に判断材料の 1 つ
+- 専用入口を増やすと責務分散が起き、状況に応じた重み付けが難しくなる
+
+### 自律先制と外部 alert のレース (Phase 2.6, v0.18)
+
+**問題**: ペルソナが自律メタ判断で「対 user1 会話を pending → running に上げよう」と先制起動した直後、ユーザーがその Track 宛に発話するとレースが発生する:
+
+1. 対 user1 Track が `pending → running` (自律先制)
+2. ユーザーが対 user1 Track 宛に発話 → `set_alert(対 user1)` が呼ばれる
+3. でも対 user1 はもう `running` なので状態遷移は no-op (これ自体は仕様通り)
+4. 旧実装は no-op パスで observer 通知も止めていたため、メタ判断が起動するも `alert_track_id=""` になる、または起動契機を見失う
+
+メタ判断者が「なぜ自分が起動したのか分からない」状態になり、Phase 2 で導入した動的注入も意味を持てなくなる。
+
+**解決方針 (A 案)**: `set_alert` の **状態遷移と observer 通知を分離する**。
+
+- 既 running の Track への `set_alert`: 状態遷移は no-op のまま (仕様通り) だが、observer 通知は走らせる。context に `target_already_running=True` フラグを乗せて、メタ判断者が「自律先制 + 外部イベントの衝突」を識別できるようにする
+- 既 alert の Track への `set_alert`: 重複通知を避けるため observer 通知しない (これは従来通り)
+- 通常の状態遷移 (`pending/unstarted → alert`): 従来通り通知。context に `target_track_title` / `target_track_type` も追加して、メタ判断者がトラック識別を JSON UUID 経由でなく自然言語で行えるようにする
+
+**メタ判断者の認識**:
+
+`meta_judgment.json` の judge prompt で `{trigger_context}` (JSON) を読み、`target_already_running=True` を識別する:
+
+```
+[ペルソナの独白]
+ユーザーから声を掛けられた。対 user1 会話 Track はちょうど直前に
+自分で起動済みだ。状態遷移は要らない、このままメインラインで応答に
+集中すればいい。
+```
+
+→ スペル発動なし (継続判断) → メインライン側で auto_ingest 経由のユーザー発話を読んで応答が走る。
+
+**実装**:
+- `saiverse/track_manager.py` の `set_alert`: no-op (running) パスで observer 通知 + context enrich
+- `saiverse/meta_layer.py` の `_build_state_message`: target_already_running フラグを自然言語化
+- `builtin_data/playbooks/public/meta_judgment.json` の judge prompt: 「target_already_running=true なら継続判断で OK」のガイダンス + 例を追加
+
+### メタ判断 Pulse は同時 1 本 (per-persona 直列化)
+
+不変条件 11 ("メタ判断はペルソナの自分の思考の流れ") を実装側で守るため、**同一ペルソナのメタ判断 Pulse は同時に 1 本しか走らない**。
+
+問題: alert observer (chat thread 経由) と定期 tick (AutonomyManager background thread) は別 thread から `on_track_alert` / `on_periodic_tick` を呼ぶ。直列化しないと両者が独立した snapshot を見て Track 操作を発動し、「pending と思って pause したら裏で alert になっていた」のような事故が起きる。
+
+実装: `MetaLayer` が persona_id ごとの `threading.Lock` を保持し、両入口 (`on_track_alert` / `on_periodic_tick`) で取得待ちする (`saiverse/meta_layer.py:__init__` + `_get_lock`)。
+
+競合時の挙動は **wait** で確定 (skip しない):
+- alert を skip すると即応すべき外部イベントを取りこぼす
+- 定期 tick を skip するとメインキャッシュ TTL 切れを誘発する
+- 結果として chat thread のブロックは一時的に許容する。最悪レイテンシは「定期 tick + alert 判断」両方の所要時間の和。将来「安全な中断機構」を作る意思は持つ
+
+別ペルソナ同士は Lock が独立しているため並列に判断できる。
+
+---
+
+## Pulse の階層構造
+
+Pulse は 2 種類: **メインライン Pulse** と **サブライン Pulse**。
+
+| Pulse 種別 | 主体 | 単位 | 頻度の決まり方 |
+|---|---|---|---|
+| **メインライン Pulse** | Track 横断、ペルソナ単位 | 「判断・検収」1 回 | メインモデルのキャッシュ TTL / 外部イベント / サブからの区切りシグナル |
+| **サブライン Pulse** | アクティブ Track 単位 | 「Playbook 実行」1 回 | サブモデルの特性 + メインラインから指示された連続回数上限 |
+
+メインライン Pulse 1 回の中で「サブラインで N 回連続実行する」と方針を決めれば、サブラインはメインを呼び戻さずに進める。
+
+**用語整理**: Pulse は「ライン 3 軸」の **「起点ライン」の起動**を指す。**入れ子ライン** (親から呼び出される子ライン) は Pulse ではなく Playbook 呼び出し階層の話で、頻度制御の対象外 (子は親の中で完結する)。
+
+### Pulse の流れ (典型例: 自律 Track)
+
+```
+[Track が running になる]
+  ↓
+[メインライン Pulse]
+  メインライン LLM (重量級モデル)
+  - Track 情報 + 現状 + 使用可能 Playbook + Pulse 完了後挙動 を見て判断
+  - 「サブラインで X 系作業を最大 N 回連続実行」と方針決定
+  - またはスペルで直接 Track 操作 (track_pause / track_activate / track_create 等)
+  ↓
+[サブライン Pulse 1] (上で決めた方針に従って軽量モデルで実行)
+[サブライン Pulse 2]
+...
+[サブライン Pulse N or 中断条件達成 or メインキャッシュ TTL 接近]
+  ↓
+[メインライン Pulse]
+  サマリ + 検収 → 続行 / 切替 / 完了の判断
+  ↓ ループ
+```
+
+### サブライン Pulse のみで進む期間
+
+メインライン Pulse 間の期間は、サブライン Pulse が以下のいずれかまで連続実行される:
+
+- メインラインが指定した連続回数上限に到達
+- ペルソナ自身が `/track_pause` 等で意思表示
+- メインモデルのキャッシュ TTL が切れる前 (TTL 接近で次のメインライン Pulse をトリガ)
+- 外部イベント (alert) 到来
+
+### Pulse サイクルの 7 つの制御点
+
+サイクルの「型」は決まっているが、頻度・回数等の具体値は環境やペルソナ設定で変わる:
+
+| # | 制御点 | 設定場所 | デフォルト想定 |
+|---|--------|---------|--------------|
+| (1) | Track 単位の Pulse 間隔 | `action_tracks.metadata.pulse_interval_seconds` | Handler の `default_pulse_interval` |
+| (2) | Track 単位の連続実行回数上限 | `action_tracks.metadata.max_consecutive_pulses` | Handler の `default_max_consecutive_pulses` |
+| (3) | メタレイヤー定期実行間隔 | `SAIVERSE_META_LAYER_INTERVAL_SECONDS` | 3000 (50 分、Anthropic TTL ベース) |
+| (4) | モデル別キャッシュ TTL 同期 | `model_configs.py` の `cache_ttl_seconds` | Anthropic: 240 秒 / ローカル: 制限なし |
+| (5) | メインライン Pulse のトリガ条件 | スケジューラのロジック | TTL 接近 + 外部イベント + サブからの区切りシグナル |
+| (6) | サブライン Pulse のメインライン 1 呼び出しあたり最大回数 | メインライン LLM 出力 (方針指示) | メインが指定、上限なしなら -1 |
+| (7) | サブライン Pulse の間隔 | Handler の `default_subline_pulse_interval` | ローカル: 0 秒 / Claude: 数秒 |
+
+これらの設定可能性により、環境の違い (ローカル / クラウド / 混在) を仕様の変更なしに吸収できる。
+
+### 環境別デフォルト値 (Phase 4 で導入)
+
+#### Pattern A: Claude メイン + ローカルサブ (まはー想定)
+```
+SAIVERSE_META_LAYER_INTERVAL_SECONDS = 3000  # 50 分
+Track.metadata.pulse_interval_seconds = 0    # サブライン連続実行
+Track.metadata.max_consecutive_pulses = -1   # メインキャッシュ TTL まで無制限
+default_subline_pulse_interval = 0           # 連続実行
+```
+
+#### Pattern B: 全 Claude (高コスト警戒)
+```
+SAIVERSE_META_LAYER_INTERVAL_SECONDS = 3000
+Track.metadata.pulse_interval_seconds = 60   # サブも 1 分間隔
+Track.metadata.max_consecutive_pulses = 10   # メイン 1 呼び出しあたり 10 回まで
+default_subline_pulse_interval = 5           # 5 秒待機
+```
+
+#### Pattern C: 全ローカル
+```
+SAIVERSE_META_LAYER_INTERVAL_SECONDS = 1800  # 30 分等、自由
+Track.metadata.pulse_interval_seconds = 0
+Track.metadata.max_consecutive_pulses = -1
+default_subline_pulse_interval = 0
+```
+
+これらはペルソナ作成時に DEFAULT_MODEL から自動推定して metadata に書き込む形が便利。手動で調整も可能。
+
+---
+
+## メインラインの Pulse 開始プロンプト構成
+
+メインラインへの入力プロンプトは、**キャッシュ親和性のため固定情報と動的情報を明確に分離**する。
+
+### 固定情報 (キャッシュ先頭、初回 Pulse でのみ追加)
+
+軽量モデル側のキャッシュが新規構築されるタイミング (= Track 切り替え or キャッシュ TTL 切れ後の最初の Pulse) でのみコンテキスト先頭に追加される情報:
+
+- **Track 識別**: id, title, type, intent
+- **使用可能 Playbook 候補と各説明**: この Track 種別で許可される Playbook 群
+- **Pulse 完了後挙動の通知**: この Track のリズム説明 (応答待ち / 連続実行)
+- **Track 種別固有の振る舞い指針**: Handler が定める指針 (例: 対ユーザー Track なら「相手の発話は審判ではなく対話の一部」等)
+
+これらは Track が変わらない限り再送しない。
+
+### 動的情報 (Pulse ごと、コンテキスト末尾に追加)
+
+毎 Pulse 末尾に追加する情報:
+
+- 直近のサマリ (前 Pulse の結果、開かれている Note の差分等)
+- 新着イベント (alert 通知、内部 alert、外部メッセージ)
+- このターンでペルソナが受け取った発話 (あれば)
+
+これらは履歴として自然に積み重なる。
+
+### 「初回 Pulse」の判定
+
+軽量モデル側キャッシュの初回構築タイミング:
+
+1. Track が unstarted → running になった最初の Pulse
+2. Track が pending → running に戻った Pulse (キャッシュが切れていた場合)
+3. キャッシュ TTL 経過後の最初の Pulse
+
+このタイミングでのみ固定情報をコンテキスト先頭に積む。それ以降は動的情報のみ末尾追加。Track の状態に「軽量キャッシュ最終構築時刻」(`action_tracks.metadata.cache_built_at`) を持たせる。
+
+### プロンプト構築の流れ
+
+```python
+def build_main_line_prompt(persona, track):
+    handler = get_handler_for_track_type(track.track_type)
+    is_first_pulse = _is_first_pulse(track)
+    
+    parts = []
+    
+    if is_first_pulse:
+        # 固定情報 (キャッシュ先頭)
+        parts.append(format_track_identity(track))
+        parts.append(format_available_playbooks(handler))
+        parts.append(handler.pulse_completion_notice)
+        parts.append(handler.track_specific_guidance)
+        track.metadata.cache_built_at = now()
+    
+    # 動的情報 (毎 Pulse 末尾)
+    parts.append(format_recent_summary(track))
+    parts.append(format_new_events(track))
+    parts.append(format_received_utterance(track))
+    
+    return "\n\n".join(parts)
+```
+
+固定情報は **Anthropic キャッシュ可能ブロック**としてマークすることでキャッシュヒットを最大化する (`cache_control` 等)。
+
+---
+
+## Pulse 完了後挙動と Track 種別の関係
+
+Track 種別ごとに「Pulse 完了後どう振る舞うか」のデフォルトがある。Handler が `pulse_completion_notice` 文字列と `post_complete_behavior` 列挙を保持する。
+
+### 軸 1: 完了後挙動
+
+| 種別 | 完了後挙動 | プロンプトでの説明例 |
+|------|-----------|-------------------|
+| **応答待ち型** (`wait_response`) | 相手の応答を待つ。勝手に次の判断に進まない | 「Pulse 完了後はユーザーの返答を待つ。次のイベントが来るまで他のことを考えなくて良い」 |
+| **連続実行型** (`meta_judge`) | 一段落 → メタレイヤーが続行 / 切り替え判断 | 「Pulse 完了後はメタレイヤーが次の判断をする。続行か別 Track 移行か任せて良い」 |
+
+応答待ち型: 対ユーザー会話 / 交流 / 外部通信 / MCP Elicitation 待ち
+連続実行型: 自律 / スケジュール起因 / 記憶整理
+
+### 軸 2: 起動経路
+
+| 起動経路 | 説明 |
+|---------|------|
+| 即時起動型 | 作成 = activate (or alert で即起動) |
+| イベント駆動型 | 既存だが非アクティブ (pending / unstarted) で待機、外部イベントで alert 化して起動 |
+
+メタレイヤー定期実行が来た時、現 running Track の Handler の `post_complete_behavior` を見て:
+
+- `wait_response`: 抑止 (ユーザー応答待ちなので発火しない)
+- `meta_judge`: 通常判断 (続行か切り替えか判断)
+
+「待ち」は Track 状態でなく行動の性質として扱う。結果到達はツール側からのイベントメッセージで処理する (Phase 5 の時間差ツール基盤)。詳細: [revisions.md](revisions.md) v0.31。
+
+---
+
+## Track の中断と再開
+
+Track 内必要情報の維持と再開時の文脈呼び戻しは、**Track Chronicle** (Track 内必要情報の維持機構) が担う。詳細仕様・キャッシュ挙動の具体例・実装計画はすべて [`track_chronicle.md`](track_chronicle.md) (Intent doc, v0.1, 2026-05-09 起草) に集約。本セクションは Track の中断・再開のメカニクスとして関連する範囲のみ要点をまとめる。
+
+### 概略
+
+書き込みと読み込みが分離していて、それぞれ次のように動く:
+
+- **書き込み**: Metabolism 時に押し出し対象を Track ごとに分けて Chronicle DB (`arasuji_entries` の `origin_track_id` 紐付き) に entry 追加。「中断時に専用サマリを作る」という挙動はない (= 旧 `pause_summary` 機構は廃止、Track Chronicle で置換)
+- **読み込み (head 配置)**: アクティブ Track の Chronicle を Memory Weave context として head に載せる。Metabolism のたびに head が新アクティブ Track のものに入れ替わる
+- **読み込み (history 末尾近く挿入)**: Track 切り替え時、メタ判断独白の committed 昇格直後に切り替え先 Track の Chronicle を独立メッセージ (role='user' + `<system>` ラップ) として history 末尾近くに INSERT
+- **時刻アンカー**: Metabolism 時、最古残存メッセージ直前に揮発で時刻メタを 1 件挿入
+
+### Note と再開フローの関係
+
+Track を再開する時、起源 Track の認識回復が**主**であり、他 Track からの情報を素のメッセージとして混ぜることはしない (家事 Track 中の SAIVerse 開発アイディアが家事 Track の作業履歴に混入するのを防ぐ)。
+
+その代わり:
+
+- **Track 開始 / 再開時に開いた Note の最新状態**を読み込む
+- 別 Track での発見・更新が、Note を開いている全 Track に自然に伝わる
+
+これにより:
+
+1. **会話の終了 vs 中断**が明確に分かれる:
+   - 中断: 戻ったときに Track Chronicle で文脈が呼び戻される
+   - 終了: Track は close、Note は残る → 「前にこんな話した」を覚えた状態で新規 Track 開始
+2. **複数 Track 間での情報共有**が Note 経由で自然に発生
+3. **3 人会話問題の解決**: 3 人会話のメッセージは「対 A Note」「対 B Note」両方に書き込まれる。後で 1 対 1 で話す時はその Note を開けばよい
+
+### 既存ペルソナ再会機能との対称性
+
+ペルソナ再会機能は「Track 観点では特殊形」として位置づけられる:
+
+| 状況 | 必要情報の供給源 | 再開時の動き |
+|------|---------------|-------------|
+| 通常の Track 中断・再開 | Track Chronicle (Metabolism 時に自動生成) | head 入れ替え + 切り替え時 history 末尾挿入で文脈復元 |
+| ペルソナ再会 (既存実装) | Track 紐付けなしの過去会話履歴のみ | 過去会話 + Memopedia から都度組み立て |
+
+新基盤では:
+
+- 過去にペルソナ X と話した記録があれば、X 専用の Track を暗黙的に存在するものとして扱う
+- 再会時はその Track の再アクティブ化として、既存の Memopedia / 過去会話取得ロジックが走る
+- 以降の会話は Track として管理され、Metabolism のたびに Track Chronicle が積まれていく
+
+Phase 5 でこの汎用化を実装する。
+
+#### v0.3.0 繋ぎ実装 (2026-06-07)
+
+Note システム完成前の繋ぎとして、head pipeline の `occupant_entered` 差分通知時に `recall_conversation_with()` を呼び、過去会話 + Memopedia ページを SAIMemory に注入する。詳細: `persona_action_tracks.md` 再会機能セクション。
+
+**重要な設計修正**: Person Note の自動開閉は **occupancy レイヤー（ペルソナ単位）** で行い、Track Handler には依存しない。`01_concepts.md` の「Note 開閉の 2 経路」を参照。
+
+---
+
+## ライン階層管理機構
+
+### ランタイム上の階層表現
+
+`PulseContext` を **階層化** して親子関係を持たせる:
+
+```
+PulseContext (Pulse 1)
+├── Line: 起点メインライン (line_id=L0, role=main, parent=None)
+│   ├── Line: 入れ子サブ (line_id=L1, role=sub, parent=L0)
+│   │   └── (子ライン完了で消滅、report_to_parent を L0 に append)
+│   └── Line: 入れ子メイン (line_id=L2, role=main, parent=L0) ← レア
+└── ...
+
+PulseContext (Pulse 2、別の自律 Track の Pulse)
+└── Line: 起点サブライン (line_id=L3, role=sub, parent=None) ← サブライン Pulse スケジューラ起動
+    ├── Line: 入れ子サブ (line_id=L4, role=sub, parent=L3)
+    └── Line: 入れ子メイン (line_id=L5, role=main, parent=L3) ← レア
+```
+
+`PulseContext._line_stack` で LIFO 管理。実装は `sea/pulse_context.py:56-224` にあり (Phase 1 完了済み)。
+
+### `line_id` の生成と付与
+
+ライン起動時に新規 UUID を発行し、以下に伝播:
+
+| 用途 | 場所 |
+|---|---|
+| メッセージ保存時のメタデータ | `messages.line_id` カラム |
+| ライン階層の追跡 | `PulseContext._line_stack` |
+| 起点ライン識別 | `meta_judgment_log` 等の参照経路 |
+
+ノード実行時に「自分がどの line_id で動いているか」を `current_line()` で取得し、メッセージ保存時に `line_id` メタデータとして渡す。
+
+### 親-子の寿命管理
+
+不変条件 12 を実装で守る:
+
+- 子ラインの起動時に親 `line_id` を記録
+- 子ライン完了時に `report_to_parent` を親の `state["_messages"]` へ append、子の `LineFrame` を pop
+- 親ラインが Track 切り替えで凍結された場合、子もその時点で凍結される (PulseContext ごと中断)
+- Track 完全消滅 (`track_abort`) 時、その PulseContext 全体が破棄される (子ラインは自動的に消滅)
+
+### 起点ライン複数並走
+
+1 Track 内に起点サブラインが複数並走するケース (例: 自律 Track 内で記憶整理サブと web リサーチサブが同時稼働) は、それぞれが独立した `PulseContext` を持つ:
+
+- SubLineScheduler が「同 Track の異なる起点サブライン」を別 Pulse として起動
+- 各 PulseContext が独立した `_line_stack` を持つ
+- メッセージ保存時の `track_id` は同じだが `line_id` が異なる → 7 層 [3] (Track 内サブキャッシュ群) では `line_id` で区別される
+
+---
+
+## `report_to_parent` 機構
+
+子ライン完了時、結果を親ラインに伝える唯一の経路。
+
+### output_schema での必須化
+
+子 Playbook の `output_schema` には **`report_to_parent` を必須**で含める。Playbook ロード時 / `save_playbook` ツール経由 / `import_playbook.py` 経由でバリデーション:
+
+```python
+def validate_child_playbook(playbook: PlaybookSchema) -> None:
+    """can_run_as_child=true の Playbook は report_to_parent を含む必要がある。"""
+    if "report_to_parent" not in (playbook.output_schema or []):
+        raise ValueError(
+            f"Playbook '{playbook.name}' lacks 'report_to_parent' in output_schema. "
+            f"Child playbooks must report back to their parent line."
+        )
+```
+
+判定方針: Playbook 定義に `can_run_as_child: bool` メタ属性を追加 (デフォルト false)。これが true の Playbook のみ `report_to_parent` 必須チェック対象とする。
+
+### サマリ生成ノードの推奨パターン
+
+子 Playbook の最後にサマリ生成専用ノードを置く:
+
+```json
+{
+  "id": "summarize_for_parent",
+  "type": "llm",
+  "action": "子ライン作業の結果を、親ライン側のあなた自身に伝える形で1〜3段落で要約してください。\n作業内容: {execution_log}\n結果: {final_result}",
+  "output_key": "report_to_parent"
+}
+```
+
+ペルソナにとっては「自分が一段下のレイヤーで考えた内容を、上のレイヤーに伝え直している」感覚 (不変条件 11)。
+
+### ランタイムでの append 処理
+
+子 Playbook 完了時:
+
+```python
+if final_state.get("report_to_parent"):
+    report = final_state["report_to_parent"]
+    formatted = f"<system>子 Playbook '{playbook.name}' の実行結果:\n{report}</system>"
+    parent_state["_messages"].append({
+        "role": "user",
+        "content": formatted,
+    })
+```
+
+system タグ付き user メッセージとする理由: 既存の `inject_persona_event` パターンと整合させるため。親モデル側からは「自分への通知」として認識される (不変条件 11)。
+
+### 子ラインの messages コピー仕様
+
+`line: "sub"` (および将来の `line: "main"` で別キャッシュ分岐パターン) で起動される子 Playbook の初期 messages 構築:
+
+```python
+parent_messages = parent_state["_messages"]  # = [..., A, B, C]
+
+# 子ライン起動時、コピーで分岐
+child_initial_state = {
+    "_messages": list(parent_messages),  # ← コピー (参照共有しない)
+    # ... その他の state は別途構築
+}
+```
+
+これにより:
+- 子ライン内では「親の会話履歴 + 自分の作業履歴」が見える (ペルソナの意識の連続性)
+- 子ライン内での messages 変更は親に影響しない (コピーなので)
+
+これは **親メイン → 子サブ** の典型例だけでなく、**親サブ → 子サブ** や **親サブ → 子メイン** (レア用途) でも同じ仕組みが適用される。
+
+---
+
+## メタレイヤーは Playbook 内 LLM ノードで実装する
+
+メタレイヤーの判断ロジック (Track の選択・切り替え判断) は **Playbook 内の LLM ノードとして実装**する (Phase 1.2 で確定)。メインライン Playbook の最初に「メタ判断ノード」を組み込み、その後にメインライン応答ノードへ進む。
+
+メタ判断ノードは **Track 内メインラインの一瞬の分岐**として動く:
+
+- 結果が「継続」なら分岐ターンは Track のメインキャッシュには残さない (commit/discard 機構)
+- 結果が「移動」なら分岐ターンはそのまま残し、新 Track の冒頭来歴になる
+- ノード自身は **メタ判断ログ領域 [1]** への書き出しを行う (Track 続行/移動に関わらず保存)
+
+`saiverse/meta_layer.py` の役割:
+
+- **判断ロジック本体**: `meta_judgment.json` Playbook へ移管
+- **alert ディスパッチ役**: TrackManager の alert observer として残し、適切な Playbook を起動するだけのディスパッチャに縮退
+
+---
+
+## Playbook 起動とラインの関係
+
+### Pulse 開始時の Playbook は必ず起点メインライン
+
+Pulse 開始時に起動される Playbook は**必ずメインライン**で動かす。これにより:
+
+- Pulse 開始時の判断 (どの Playbook を使うか、どんな方針で動くか) が確実に重量級モデルで行われる (不変条件 8/9)
+- メインキャッシュが Track 横断で連続的に積み重なる (不変条件 7)
+
+ただし**サブライン Pulse** (起点サブラインの Pulse) も存在する。これは「サブライン Pulse スケジューラから起点サブラインを直接起動する」場合で、自律 Track の継続実行等が該当する。この時のサブライン Pulse は最初から軽量モデルで動く。
+
+### Playbook 起動時のライン指定
+
+Playbook 内から別の Playbook を呼ぶ時、ライン指定を明示する。指定は概念的に **2 つの軸**:
+
+1. **継続 / 分岐**: 親と同じキャッシュを共有 (継続) するか、別建てで分岐するか
+2. **モデル種別** (分岐時): 重量級 (= メイン) か軽量 (= サブ) か
+
+`SubPlayNodeDef.line` フィールドが両方を兼ねる:
+
+| 親ラインの種別 | 子の `line:` 指定 | 結果 |
+|---|---|---|
+| 親メイン | `main` | メインキャッシュ継続、同じ重量級モデルで処理 |
+| 親メイン | `sub` | 別サブキャッシュへ分岐、軽量モデルで処理、完了時 `report_to_parent` |
+| 親サブ | `main` | 別メインキャッシュへ分岐、重量級モデルで処理 (部分処理に重量級必要時、レア) |
+| 親サブ | `sub` | 別サブキャッシュへ分岐 or 親サブキャッシュ継続 (実装段階で決定) |
+
+---
+
+## 多者会話と audience
+
+複数のペルソナ・ユーザーが同じ Building にいる時の会話処理。
+
+### output_target と audience の役割分担
+
+[01_concepts.md の output_target と audience の分離](01_concepts.md#output_target-と-audience-の分離) を参照。
+
+### audience による自動振り分け
+
+Building 内に居る全ペルソナ + ユーザーは output_target=`building:current` の発話を受信する。各受信者は audience に応じて反応する:
+
+| audience に含まれるか | 動作 |
+|------------------|------|
+| 含まれる | 該当 Track が `alert` 状態に → メインライン起動候補 |
+| 含まれない | 関連 Person Note に記録するが反応しない |
+
+### 多者会話のループ防止
+
+audience を厳格に解釈することで自然にループを防げる:
+
+- A が B に質問 (audience=[B]) → B のメインライン起動 → B が応答 (audience=[A]) → A のメインライン起動 → ...
+
+この場合は正当な対話だが、**メタレイヤーが「会話を続けるか切り上げるか」を判断**して終わらせる。技術的なループストッパー:
+
+- メタレイヤーが Track の発話数をカウント
+- 一定数 (暫定 20) 超過で `track_pause` を強く推奨 (自動停止ではなく判断材料として)
+- `SAIVERSE_TRACK_AUTO_PAUSE_HINT_TURNS` (暫定 20) で調整可能
+
+### 別 Building のペルソナへの呼びかけ
+
+`output_target=building:current` では別 Building には届かない。SAIVerse 内の別 Building / 外部 SAIVerse のペルソナへ発話するには:
+
+- 一時的な `external:saiverse:<persona_id>` 通信 Track を作る
+- 既存の SAIVerse 間ペルソナ通信機構を活用 (dispatch / visiting AI)
+
+---
+
+## 応答待ち (時間差ツール基盤)
+
+「待ち」は Track の特殊状態ではなく、**結果が時間差で返ってくる行動の性質**として扱う。整理経緯は [revisions.md](revisions.md) v0.31 (2026-05-09)、廃止作業は [phase_3_lines_playbooks.md の「待ち機構の整理」](phases/phase_3_lines_playbooks.md)、汎用基盤は [phase_5_autonomy.md の「時間差ツール基盤」](phases/phase_5_autonomy.md)。
+
+### 基本モデル
+
+行動者 (ペルソナ) は「これは時間差で結果が返る行動だ」と予定調和的に認識して呼ぶ。途中で突然待ちが入るわけではない。
+
+- **行動の実行**: ツール / Spell / Playbook ノードを通常通り起動。識別子 (call_id 等) が発行される
+- **Track の中断は別問題**: 「結果が時間差で来る」ことと「Track を中断する」ことは独立。3 つ同時に投げて Track を続けることもある。中断するかどうかはメタ判断者の領域
+- **結果到達はイベントメッセージ**: ツール側が結果を Track に対するイベントメッセージとして配送
+  - Track が active なら次 Pulse で通常の messages として参照される
+  - Track が inactive なら Alert として通知され、メタ判断者が Track 切り替えを判断する
+- **timeout も結果の一形態**: 「結果が来なかった」事象もイベントメッセージとして配送される。Track 状態としての特殊扱いはない
+
+### 応用範囲
+
+| 応用 | 扱い |
+|------|------|
+| ユーザーへの返答待ち (通常会話) | UI からの送信が Track にイベント配送、active なら次 Pulse で参照 |
+| 他ペルソナへの応答待ち | 相手ペルソナの発話が Track のイベントとして到達 |
+| MCP Elicitation | MCP サーバーの応答がツールの結果として返り、Track にイベント配送 |
+| Kitchen 長時間処理完了 | cooking_id ベースで完了がイベント配送 |
+| X / Mastodon リプライ待ち | 外部 API ポーリング結果がイベントとして到達 |
+| スケジュール時刻到来 | `ScheduledHandler` が時刻判定して alert (時間差ツール基盤と境界線整理は Phase 5) |
+
+すべて同じ「時間差で結果が返る行動」として扱われる。Track 種別ごとの特殊処理は不要、メタ判断者は Alert か Track 内メッセージの形で結果を受け取って判断する。
+
+### 多重起動
+
+「3 つ同時に重い仕事を投げる」のような並列起動が成立する。
+
+- 各起動が独立した call_id を持ち、結果は順不同で到達可能
+- Track は active のまま続けて良いし、別 Track に移っても良い (メタ判断)
+- 結果の解釈順序は Track 内に届いたメッセージ順 (= 到達時刻順) で自然に処理される
+
+---
+
+## 相手判定は「現在のコンテキストで判断する」
+
+外部チャネル (X mention、Discord 等) からの会話では、そのツールで取れる情報しかペルソナに渡らない。
+
+汎用機構としては「現在のコンテキストに見えている情報の中で判断する」を原則とする。それで足りない場合は、**個別チャネルの統合フロー側を組み直す話**になる (汎用機構の責任範囲外)。
+
+これにより、SAIVerse 内ペルソナとの会話、X リプライ、Discord メッセージ、ユーザー入力すべてが同じ流れで処理される。
+
+---
+
+## 関連ドキュメント
+
+- [01_concepts.md](01_concepts.md) — 用語と不変条件
+- [03_data_model.md](03_data_model.md) — テーブルスキーマ
+- [04_handlers.md](04_handlers.md) — Handler パターン
+- [phases/phase_3_lines_playbooks.md](phases/phase_3_lines_playbooks.md) — Playbook 整備の進捗
+- [phases/phase_4_pulse_scheduler.md](phases/phase_4_pulse_scheduler.md) — Scheduler 実装の進捗

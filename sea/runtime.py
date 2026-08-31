@@ -5,10 +5,10 @@ import json
 import logging
 import os
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from datetime import timezone as dt_timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from database.models import Playbook as PlaybookModel
 from llm_clients.exceptions import LLMError
@@ -17,7 +17,10 @@ from saiverse.model_configs import get_model_parameter_defaults
 from saiverse.usage_tracker import get_usage_tracker
 from sea.cancellation import CancellationToken, ExecutionCancelledException
 from sea.langgraph_runner import compile_playbook
+from sea.mcp_tool_refresh import refresh_mcp_tools_at_head
+from sea.message_stamp import build_generation_stamp, stamp_generation_metadata
 from sea.playbook_models import NodeType, PlaybookSchema, PlaybookValidationError, validate_playbook_graph
+from sea.pulse_context import ExecutionContext, default_lightweight_model, resolve_execution_context
 from sea.runtime_context import prepare_context as prepare_context_impl
 from sea.runtime_engine import RuntimeEngine
 from sea.runtime_context import preview_context as preview_context_impl
@@ -40,19 +43,24 @@ from sea.runtime_state import (
     resolve_nested_value,
     resolve_set_value,
     resolve_state_value,
+    set_playbook_var,
     store_structured_result,
-    update_router_selection,
 )
 
-from .runtime_emitters import RuntimeEmitters
+from .runtime_emitters import RuntimeEmitters, SpeakFinalizeResult
+from .session_lifecycle import SessionLifecycle
 from .runtime_utils import _format, _is_llm_streaming_enabled
 LOGGER = logging.getLogger(__name__)
 
 
 def _get_default_lightweight_model() -> str:
-    """Get the default lightweight model from environment or fallback."""
-    from saiverse.model_defaults import BUILTIN_DEFAULT_LITE_MODEL
-    return os.getenv("SAIVERSE_DEFAULT_LIGHTWEIGHT_MODEL", BUILTIN_DEFAULT_LITE_MODEL)
+    """Get the default lightweight model from environment or fallback.
+
+    実体は ``sea.pulse_context.default_lightweight_model`` に一本化
+    (resolve_execution_context と選択結果を一致させるため)。
+    """
+    return default_lightweight_model()
+
 
 
 
@@ -65,6 +73,7 @@ class SEARuntime:
         self._playbook_cache: Dict[str, PlaybookSchema] = {}
         self._trace = bool(os.getenv("SAIVERSE_SEA_TRACE"))
         self._emitters = RuntimeEmitters(runtime=self)
+        self.session_lifecycle = SessionLifecycle(runtime=self, manager_ref=manager_ref)
         self._runtime_engine = RuntimeEngine(
             runtime=self,
             manager_ref=manager_ref,
@@ -86,27 +95,154 @@ class SEARuntime:
         event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
         cancellation_token: Optional[CancellationToken] = None,
         pulse_type: str = "user",
+        pre_spells: Optional[List[str]] = None,
+        pre_generation_check: Optional[Callable[[], Optional[Dict[str, Any]]]] = None,
     ) -> List[str]:
-        """Router -> subgraph -> speak. Returns spoken strings for gateway/UI."""
+        """Router -> subgraph -> speak. Returns spoken strings for gateway/UI.
+
+        ``pre_generation_check``: 生成の開始前に **Beat ロックの内側**で走る
+        再検査。イベント dict を返したら Pulse を開始せず、そのイベントを
+        流して空で返る (None なら通す)。retry の門番が使う — 入口 (API route)
+        の検査から生成の開始までの間に、別の生成が応答を保存し終えている
+        競合の窓を、生成を直列化している既存の排他の内側で塞ぐ
+        (docs/issues/archive/retry_api_has_no_server_side_eligibility_check.md)。
+        """
         # Check for cancellation before starting
         if cancellation_token:
             cancellation_token.raise_if_cancelled()
 
+        # Beat ロック + 関所 (beat_execution_context.md §3.4 / execution_ledger.md
+        # §2.2-2.3): Pulse 本体 (playbook 実行 + 応答後 Metabolism まで) を
+        # persona 単位で直列化する。関所 (pending flush) が通らない場合は
+        # hold が BeatGateClosedError を投げ、そのまま呼び出し側
+        # (PulseController) へ伝播する — 実行は始まっておらず副作用ゼロ。
+        # spell → run_playbook の子ライン、Pulse 内の Metabolism / sluice
+        # は同一スレッド再入 (RLock) で親 Beat の直列域を継承する。
+        # manager に beat_gate が無い環境 (テストの SimpleNamespace 等) では
+        # hold_beat が nullcontext を返して no-op。
+        from sea.beat_gate import hold_beat
+        with hold_beat(
+            self.manager,
+            getattr(persona, "persona_id", None),
+            purpose=pulse_type or "pulse",
+        ):
+            # 生成開始前の再検査 (retry の門番など)。**ロックを取った後・
+            # いかなる副作用 (知覚の検知/消費・履歴書き込み) よりも前**に置く —
+            # ここで中止した Pulse は、走った痕跡を一切残さない。
+            if pre_generation_check is not None:
+                blocked_event = pre_generation_check()
+                if blocked_event is not None:
+                    LOGGER.info(
+                        "[sea] pre-generation check blocked the pulse "
+                        "(persona=%s type=%s code=%s)",
+                        getattr(persona, "persona_id", None), pulse_type,
+                        blocked_event.get("error_code"),
+                    )
+                    if event_callback:
+                        event_callback(blocked_event)
+                    return []
+            return self._run_meta_user_locked(
+                persona,
+                user_input,
+                building_id,
+                metadata=metadata,
+                meta_playbook=meta_playbook,
+                args=args,
+                event_callback=event_callback,
+                cancellation_token=cancellation_token,
+                pulse_type=pulse_type,
+                pre_spells=pre_spells,
+            )
+
+    def _run_meta_user_locked(
+        self,
+        persona,
+        user_input: str,
+        building_id: str,
+        metadata: Optional[Dict[str, Any]] = None,
+        meta_playbook: Optional[str] = None,
+        args: Optional[Dict[str, Any]] = None,
+        event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+        cancellation_token: Optional[CancellationToken] = None,
+        pulse_type: str = "user",
+        pre_spells: Optional[List[str]] = None,
+    ) -> List[str]:
+        """:meth:`run_meta_user` の本体 (Beat ロック保持下で実行される)。"""
         # Store pulse_type in persona for tools to access
         persona._current_pulse_type = pulse_type
 
-        # Record user input to history before processing
-        if user_input:
+        # 認知モデル v0.2 (§10.2): Pulse-root のアスペクトを pulse_type から導出する。
+        # auto→AUTONOMOUS / meta_judgment→META / それ以外→CONVERSATION。これが
+        # line_role / scope / model tier の唯一の供給源 (旧 Track の
+        # entry_line_role による出し分けは 2026-08-21 に撤去)。
+        from sea.pulse_context import aspect_from_pulse_type
+        _root_aspect = aspect_from_pulse_type(pulse_type)
+
+        # --- per_persona MCP ツール一覧の取得 (Pulse 頭) ---
+        # ツール一覧の真実はサーバー側にしか無く、証言できるのは本人の鍵で
+        # 張った生きた接続だけ (docs/intent/mcp_addon_integration.md §I)。
+        # ここで本人の接続を張って一覧を取得してから、下の検知が走る順序が肝 —
+        # 逆だと一覧の変動が知覚バッファに積まれず、次の Pulse まで届かない。
+        # notify=False: 直後の検知フェーズが無条件で全 Section を見るので、
+        # ここで検知器を呼ぶと同じ差分を二度検知することになる。
+        # per_persona サーバーが無い環境では has_per_persona_servers の
+        # 前置き判定だけで即戻る。
+        refresh_mcp_tools_at_head(
+            persona, self.manager, building_id, connect=True, notify=False,
+        )
+
+        # --- 知覚の「検知」フェーズ (バッファへ push、まだ消費しない) ---
+        # 世界状態の差分 (入退室・アイテム・スペル 等) と入室時想起を検知し、知覚
+        # バッファへ push する (SAIMemory へは直接入れない)。Phase 2 で
+        # inject_diff_notifications を「検知＝push」に変更した。詳細:
+        # docs/intent/perception_buffer.md §4.5 / §5.1。
+        try:
+            from saiverse.dynamic_state import DynamicStateManager
+            DynamicStateManager.maybe_inject_event_messages(persona, self.manager)
+        except Exception:
+            LOGGER.exception("[dynamic_state] Event detection failed in run_meta_user")
+
+        # 同Building内の他ペルソナ発言とユーザーメッセージを building_histories から時系列順に取り込む
+        # （ユーザーメッセージは manager が事前に building_histories へ追加済み）
+        # ※会話取り込みの知覚バッファ統合は Phase 2 (会話統合) で対応予定。現状は従来経路。
+        try:
+            from builtin_data.tools.get_building_messages import auto_ingest_building_messages
+            auto_ingest_building_messages(persona, self.manager)
+        except Exception:
+            LOGGER.exception("[auto_ingest] Failed in run_meta_user")
+
+        # --- 知覚の「消費」フェーズ (flush) ---
+        # 未消費の知覚 (REST 由来のメタ記憶訂正 + 上で検知した world_state/persona_recall)
+        # を型別 reduce して 1 メッセージで SAIMemory へ書き出す。主観時間は Pulse でのみ
+        # 進むので、ここが消費点。会話・schedule・auto の Pulse は全部 run_meta_user を
+        # 通る (pulse_controller.py) ため、この 1 箇所でそれらの消費が成立する。
+        # ⚠️ 「全ての Pulse がここを通る」ではない — 作業セッション
+        # (sea/work_session.py) は自分の PulseContext を作る別の Pulse root で、
+        # 頭の処理 (知覚消費・MCP ツール取得) を自前で持っている。頭に一手
+        # 増やすときは両方に入れる (片方だけ直して素通しを作った実績あり)。
+        # 検知 (上) → 消費 (ここ) の順序が重要 (同 Pulse 内で検知分も消費するため)。
+        try:
+            sai_mem = getattr(persona, "sai_memory", None)
+            if sai_mem is not None:
+                # pulse_id はこの時点ではまだ採番されていない (state["_pulse_id"]
+                # は run_playbook で立つ) ので NULL 記帳。manager は消費バッチの
+                # episode_id 照会用 (層0タグと同じ供給源)。
+                sai_mem.flush_perception_buffer(manager=self.manager)
+        except Exception:
+            LOGGER.exception("[perception_buffer] flush failed in run_meta_user")
+
+        # スケジュール実行時はプロンプトをペルソナ自身のhistoryに直接追加（他のペルソナには見せない）
+        if pulse_type == "schedule" and user_input:
             try:
-                user_msg: Dict[str, Any] = {"role": "user", "content": user_input}
-                # Build metadata with "with" field for user messages
-                msg_metadata: Dict[str, Any] = {"with": ["user"]}
-                if metadata:
-                    msg_metadata.update(metadata)
-                user_msg["metadata"] = msg_metadata
-                persona.history_manager.add_message(user_msg, building_id, heard_by=None)
+                schedule_msg: Dict[str, Any] = {
+                    "role": "user",
+                    "content": user_input,
+                    "metadata": {"with": ["system"], **(metadata or {})},
+                }
+                persona.history_manager.add_to_persona_only(schedule_msg)
+                LOGGER.debug("[schedule] Recorded schedule prompt to persona history for %s", getattr(persona, "persona_id", "?"))
             except Exception:
-                LOGGER.exception("Failed to record user input to history")
+                LOGGER.exception("[schedule] Failed to record schedule prompt to persona history")
 
         # Use user-selected meta playbook if specified, otherwise choose automatically
         if meta_playbook:
@@ -121,63 +257,104 @@ class SEARuntime:
                     })
                 return [f"指定されたプレイブック '{meta_playbook}' が見つかりません。プレイブックIDを確認してください。"]
         else:
+            if pulse_type != "user":
+                # 席違いフォールバックの機械検査 (autonomous_pulse_vehicle.md §D)。
+                # 「auto 系 Pulse は必ず meta_playbook 指定」という不変条件は従来
+                # docstring の散文にしか無く、破られても無音で会話の器に落ちて
+                # いた (2026-08-08 のコマ開始 Pulse がこれで発話化した)。禁止は
+                # しない — リマインド等、会話の器を意図して使う schedule があり
+                # 得るため、まず観測可能にする。
+                LOGGER.warning(
+                    "[sea] non-user pulse fell back to the default conversation "
+                    "playbook (type=%s persona=%s, meta_playbook unspecified) — "
+                    "自律系 Pulse は器を明示すること",
+                    pulse_type, getattr(persona, "persona_id", None),
+                )
             playbook = self._choose_playbook(kind="user", persona=persona, building_id=building_id)
         # Build effective args: auto-include user_input as "input" if not explicitly set
         effective_args = dict(args or {})
         if user_input and "input" not in effective_args:
             effective_args["input"] = user_input
+        # 非常畳み (arasuji_levels.md §14-3): 話しかけた時点で提示ウィンドウが
+        # 高水位を既に超過しているイレギュラー (休眠 model の復帰等) は、応答
+        # より先に畳んで呼び出し失敗の連鎖を断つ。通常は "skip" で素通り。
+        _pre_model_key: Optional[str] = None
+        try:
+            _pre_probe_state: Dict[str, Any] = {}
+            if pulse_type is not None:
+                _pre_probe_state["_pulse_type"] = pulse_type
+            _pre_model_key = resolve_execution_context(
+                persona, None, state=_pre_probe_state,
+            ).model_key
+            self.session_lifecycle.maybe_run_emergency_precompaction(
+                persona, building_id, event_callback, model_key=_pre_model_key,
+            )
+        except Exception:
+            LOGGER.exception("[metabolism] Emergency pre-compaction failed")
+        # 読み戻し (arasuji_levels.md §15): 非常畳みの対称。話しかけた時点で
+        # 提示ウィンドウが残す量を下回っていたら、応答より先に畳んだところを
+        # 開き直す (LLM なし・帳簿のみ)。通常は "skip" で素通り。
+        # run_meta_user は user / schedule / auto の共通入口なので、§15-4 の
+        # 「発火は user Pulse の会話開始時のみ」をここで絞る — 自律 Pulse の
+        # 軽量 model に会話用の厚い生ログを開かない。
+        if pulse_type in (None, "user"):
+            try:
+                self.session_lifecycle.maybe_run_window_refill(
+                    persona, building_id, model_key=_pre_model_key,
+                )
+            except Exception:
+                LOGGER.exception("[metabolism] window refill failed")
+
         result = self._run_playbook(
             playbook, persona, building_id, user_input,
-            auto_mode=False, record_history=True, event_callback=event_callback,
+            # auto_mode = 「応答ループにユーザーが居ない Pulse か」。run_meta_user は
+            # user / schedule / auto の共通入口なので pulse_type から導出する。
+            # None は PulseController を経ない直接呼び出し (レガシー) のみで、
+            # 確認ダイアログを黙って自動承認しない側 (=user 扱い) に倒す。
+            auto_mode=(pulse_type not in (None, "user")),
+            record_history=True, event_callback=event_callback,
             cancellation_token=cancellation_token, pulse_type=pulse_type,
             initial_params=effective_args if effective_args else None,
+            pulse_line_aspect=_root_aspect,
+            pre_spells=pre_spells,
         )
 
-        # Post-response metabolism check
-        bh_before = len(self.manager.building_histories.get(building_id, []))
+        # Post-response metabolism check (DB ベースで件数比較)。
+        # model_key = この Pulse の実行 model (beat_execution_context.md §3.2 —
+        # 閾値と退役は model ごと)。run_meta_user は ExecutionContext を保持しない
+        # (解決は _run_playbook 内で完結する) ため、runtime_runner の probe と同じ
+        # 導出 (pulse_type → legacy tier フォールバック) をここで行う。root aspect
+        # の tier (AUTONOMOUS=lightweight / CONVERSATION・META=standard) と一致する
+        # ことは §6-3b 検収で照合済み。
+        from database.building_messages import fetch_max_seq
+        bh_before = fetch_max_seq(getattr(self.manager, "SessionLocal", None), building_id)
         try:
-            self._maybe_run_metabolism(persona, building_id, event_callback)
+            _mk_probe_state: Dict[str, Any] = {}
+            if pulse_type is not None:
+                _mk_probe_state["_pulse_type"] = pulse_type
+            _metabolism_model_key = resolve_execution_context(
+                persona, None, state=_mk_probe_state,
+            ).model_key
+            self.session_lifecycle.maybe_run_metabolism(
+                persona, building_id, event_callback, model_key=_metabolism_model_key,
+            )
         except Exception:
             LOGGER.exception("[metabolism] Post-response metabolism failed")
-        bh_after = len(self.manager.building_histories.get(building_id, []))
+        bh_after = fetch_max_seq(getattr(self.manager, "SessionLocal", None), building_id)
         if bh_before != bh_after:
             LOGGER.warning(
-                "[metabolism] building_histories[%s] changed during metabolism: %d -> %d",
+                "[metabolism] building_messages[%s] max_seq changed during metabolism: %d -> %d",
                 building_id, bh_before, bh_after,
             )
 
         return result
 
-    def run_meta_auto(
-        self,
-        persona,
-        building_id: str,
-        occupants: List[str],
-        cancellation_token: Optional[CancellationToken] = None,
-        pulse_type: str = "auto",
-    ) -> None:
-        """Router -> subgraph -> think. For autonomous loop, no direct user output."""
-        # Check for cancellation before starting
-        if cancellation_token:
-            cancellation_token.raise_if_cancelled()
-
-        # Store pulse_type in persona for tools to access
-        persona._current_pulse_type = pulse_type
-
-        # Update last pulse time for get_situation_snapshot
-        persona._last_conscious_prompt_time_utc = datetime.now(dt_timezone.utc)
-        playbook = self._choose_playbook(kind="auto", persona=persona, building_id=building_id)
-        self._run_playbook(
-            playbook, persona, building_id, user_input=None,
-            auto_mode=True, record_history=True,
-            cancellation_token=cancellation_token, pulse_type=pulse_type,
-        )
-
-        # Post-auto metabolism check (no event_callback for auto pulses)
-        try:
-            self._maybe_run_metabolism(persona, building_id)
-        except Exception:
-            LOGGER.exception("[metabolism] Post-auto metabolism failed")
+    # NOTE: 旧 ``_resolve_pulse_root_line`` (running Track から
+    # (entry_line_role, track_id) を引いて Pulse-root ラインに刻む解決器) は
+    # 2026-08-21 に撤去した。line_role / scope / model tier の供給源は
+    # ``Aspect`` に一本化済みで (pulse_context.aspect_from_pulse_type)、
+    # ``origin_track_id`` の刻印は Track 撤廃で書き手ごと退役した
+    # (docs/intent/track_retirement.md §2 住人 3)。
 
     # ---------------- core runner -----------------
     def _run_playbook(
@@ -194,6 +371,9 @@ class SEARuntime:
         pulse_type: Optional[str] = None,
         initial_params: Optional[Dict[str, Any]] = None,
         isolate_pulse_context: bool = False,
+        line: str = "main",
+        pulse_line_aspect: Optional[Any] = None,  # sea.pulse_context.Aspect
+        pre_spells: Optional[List[str]] = None,
     ) -> List[str]:
         return run_playbook(
             self,
@@ -209,6 +389,9 @@ class SEARuntime:
             pulse_type=pulse_type,
             initial_params=initial_params,
             isolate_pulse_context=isolate_pulse_context,
+            line=line,
+            pulse_line_aspect=pulse_line_aspect,
+            pre_spells=pre_spells,
         )
 
     # LangGraph compile wrapper -----------------------------------------
@@ -226,6 +409,8 @@ class SEARuntime:
         cancellation_token: Optional[CancellationToken] = None,
         pulse_type: Optional[str] = None,
         isolate_pulse_context: bool = False,
+        pulse_line_aspect: Optional[Any] = None,  # sea.pulse_context.Aspect
+        line: str = "main",
     ) -> Optional[List[str]]:
         return compile_with_langgraph_impl(
             self,
@@ -241,6 +426,8 @@ class SEARuntime:
             cancellation_token=cancellation_token,
             pulse_type=pulse_type,
             isolate_pulse_context=isolate_pulse_context,
+            pulse_line_aspect=pulse_line_aspect,
+            line=line,
         )
 
     def _lg_llm_node(self, node_def: Any, persona: Any, building_id: str, playbook: PlaybookSchema, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None):
@@ -295,51 +482,134 @@ class SEARuntime:
         if model and model not in accumulator["models_used"]:
             accumulator["models_used"].append(model)
 
-    def _get_cache_kwargs(self) -> Dict[str, Any]:
-        """Get cache settings from manager state for LLM client calls.
+    def _resolve_cache_ttl_str(self, persona_id: Optional[str] = None) -> str:
+        """Resolve the active cache TTL string ("5m"/"1h") for a persona.
+
+        解決は ``manager.resolve_persona_cache`` に集約 (per-persona override →
+        global 既定)。これが per-persona TTL の単一の解決点
+        (docs/intent/cache_lifecycle_control.md §5.4 の付け替え先)。
+        ``persona_id=None`` (= 旧呼び出し) は global を返す。
+        """
+        if self.manager and hasattr(self.manager, "resolve_persona_cache"):
+            return self.manager.resolve_persona_cache(persona_id)[1]
+        if self.manager and hasattr(self.manager, "state"):
+            return getattr(self.manager.state, "cache_ttl", "5m")
+        return "5m"
+
+    def _resolve_cache_enabled(self, persona_id: Optional[str] = None) -> bool:
+        """Resolve whether cache is enabled for a persona (per-persona → global)。"""
+        if self.manager and hasattr(self.manager, "resolve_persona_cache"):
+            return self.manager.resolve_persona_cache(persona_id)[0]
+        if self.manager and hasattr(self.manager, "state"):
+            return getattr(self.manager.state, "cache_enabled", True)
+        return True
+
+    def _get_cache_kwargs(self, persona_id: Optional[str] = None) -> Dict[str, Any]:
+        """Get cache settings for LLM client calls.
 
         Returns:
             Dict with enable_cache and cache_ttl kwargs for Anthropic client.
             Non-Anthropic clients will ignore these kwargs.
+
+        ``persona_id`` を渡すと per-persona override (enabled/ttl、無ければ global) を使う。
         """
         if self.manager and hasattr(self.manager, "state"):
             return {
-                "enable_cache": getattr(self.manager.state, "cache_enabled", True),
-                "cache_ttl": getattr(self.manager.state, "cache_ttl", "5m"),
+                "enable_cache": self._resolve_cache_enabled(persona_id),
+                "cache_ttl": self._resolve_cache_ttl_str(persona_id),
             }
         return {"enable_cache": True, "cache_ttl": "5m"}
 
-    def _select_llm_client(self, node_def: Any, persona: Any, needs_structured_output: bool = False) -> Any:
-        """Select the appropriate LLM client based on node's model_type and structured output needs.
+    @staticmethod
+    def _ensure_llama_server(model_name: str) -> None:
+        """Re-launch llama.cpp server if it was stopped by idle timeout."""
+        try:
+            from saiverse.model_configs import get_model_config
+            config = get_model_config(model_name)
+            if not isinstance(config, dict) or not config.get("llama_server"):
+                return
+            from llm_clients.llama_server import get_server_manager
+            server_base = config.get("base_url", "http://127.0.0.1:8080/v1")
+            get_server_manager().ensure_running(server_base, config)
+        except Exception as exc:
+            LOGGER.debug("[sea] _ensure_llama_server check failed (non-fatal): %s", exc)
+
+    def select_llm_client(
+        self,
+        node_def: Any,
+        persona: Any,
+        execution_context: Optional[ExecutionContext] = None,
+        needs_structured_output: bool = False,
+        state: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[Any, str]:
+        """Select the LLM client for one Beat and return ``(client, model_key)``.
+
+        ExecutionContext 経由が主経路 (beat_execution_context §2.1): tier は
+        ``execution_context.aspect``、model は Beat 開始時に一度だけ解決した
+        ``execution_context.model_key`` を使い、persona の可変属性を再推測しない。
+        ``execution_context=None`` の legacy 経路では従来どおり state の
+        PulseContext / フラグから導出する (挙動は同一)。
+
+        戻り値の model は「実際に使う client の model」。structured-output
+        fallback 等で ``execution_context.model_key`` と異なる model になった
+        場合、呼び出し側は ``execution_context.with_model()`` で差し替える。
 
         Args:
             node_def: Node definition from playbook
             persona: Persona object
+            execution_context: Beat 開始点で解決した実行の身分証 (推奨経路)
             needs_structured_output: Whether this node requires structured output
+            state: Current execution state. legacy 経路の tier 導出
+                   (_force_lightweight_model / _pulse_type=='auto') に使う。
         """
-        # Determine model_type: context_profile takes precedence over explicit model_type
-        _profile_name = getattr(node_def, "context_profile", None)
-        if _profile_name:
-            from sea.playbook_models import CONTEXT_PROFILES
-            _profile = CONTEXT_PROFILES.get(_profile_name)
-            model_type = _profile["model_type"] if _profile else (getattr(node_def, "model_type", "normal") or "normal")
+        # 軽量モデル判定 (認知モデル v0.2 §10.3):
+        # ExecutionContext があればその aspect、無ければ active LineFrame の
+        # アスペクトから model tier を導出する。
+        # WORKER (run_playbook サブライン) / AUTONOMOUS (自律) → lightweight、
+        # CONVERSATION / META → standard。aspect の無い legacy frame では従来の
+        # _force_lightweight_model / pulse_type=='auto' フォールバックで判定する。
+        _aspect_tier: Optional[str] = None
+        if execution_context is not None:
+            if execution_context.aspect is not None:
+                _aspect_tier = execution_context.aspect.model_tier
+        elif state:
+            _pc = state.get("_pulse_context")
+            if _pc is not None:
+                try:
+                    _cur = _pc.current_line()
+                except Exception:
+                    _cur = None
+                if _cur is not None:
+                    _aspect_tier = getattr(_cur, "model_tier", None)
+        if _aspect_tier is not None:
+            force_lightweight = (_aspect_tier == "lightweight")
         else:
-            model_type = getattr(node_def, "model_type", "normal") or "normal"
-        LOGGER.info("[sea] Node model_type: %s (node_id=%s, profile=%s)", model_type, getattr(node_def, "id", "unknown"), _profile_name or "none")
+            force_lightweight = bool(state and (
+                state.get("_force_lightweight_model")
+                or state.get("_pulse_type") == "auto"
+            ))
+        model_type = "lightweight" if force_lightweight else "normal"
 
-        # First, select base client based on model_type
+        LOGGER.info("[sea] Node model_type: %s (node_id=%s, force_light=%s)", model_type, getattr(node_def, "id", "unknown"), force_lightweight)
+
+        # First, select base client based on model_type.
+        # model 名は ExecutionContext があればその解決値 (resolve_execution_context
+        # が同じチェーンで導出済み)、無ければ従来チェーンで導出する。
         if model_type == "lightweight":
             # Try persona's lightweight_llm_client first
             lightweight_client = getattr(persona, "lightweight_llm_client", None)
             LOGGER.info("[sea] lightweight_client exists: %s", lightweight_client is not None)
+            lightweight_model_name = (
+                execution_context.model_key if execution_context is not None
+                else getattr(persona, "lightweight_model", None) or _get_default_lightweight_model()
+            )
             if lightweight_client:
                 LOGGER.info("[sea] Using persona's lightweight_llm_client")
                 base_client = lightweight_client
-                base_model = getattr(persona, "lightweight_model", None) or _get_default_lightweight_model()
+                base_model = lightweight_model_name
             else:
                 # Fallback: create a temporary lightweight client
                 LOGGER.info("[sea] Persona has no lightweight_llm_client; creating temporary client with default model")
-                lightweight_model_name = getattr(persona, "lightweight_model", None) or _get_default_lightweight_model()
                 LOGGER.info("[sea] Using lightweight model: %s", lightweight_model_name)
                 try:
                     from llm_clients import get_llm_client
@@ -356,8 +626,14 @@ class SEARuntime:
             # Default: use normal client
             LOGGER.info("[sea] Using normal llm_client")
             base_client = persona.llm_client
-            base_model = getattr(persona, "model", "unknown")
+            base_model = (
+                execution_context.model_key if execution_context is not None
+                else getattr(persona, "model", "unknown")
+            )
             LOGGER.info("[sea] persona.model=%s, llm_client type=%s", base_model, type(base_client).__name__)
+
+        # Ensure llama.cpp server is running (may have been stopped by idle timeout)
+        self._ensure_llama_server(base_model)
 
         # Guard: if no client was resolved, raise a clear error
         if base_client is None:
@@ -369,31 +645,46 @@ class SEARuntime:
 
         # If structured output is needed, check if the selected model supports it
         if needs_structured_output:
-            from saiverse.model_configs import get_agentic_model, get_context_length, get_model_provider, supports_structured_output
+            from saiverse.model_configs import get_context_length, get_model_provider, supports_structured_output
             if not supports_structured_output(base_model):
-                # Model doesn't support structured output, switch to agentic model
-                agentic_model = get_agentic_model()
-                # Guard: if the agentic model itself doesn't support structured output,
-                # fall back to the built-in default instead
-                if not supports_structured_output(agentic_model):
-                    from saiverse.model_defaults import BUILTIN_DEFAULT_LITE_MODEL
-                    builtin_default = BUILTIN_DEFAULT_LITE_MODEL
-                    LOGGER.warning(
-                        "[sea] Agentic model '%s' also doesn't support structured output, "
-                        "falling back to built-in default: %s", agentic_model, builtin_default)
-                    agentic_model = builtin_default
-                LOGGER.info("[sea] Model '%s' doesn't support structured output, switching to agentic model: %s",
-                           base_model, agentic_model)
+                lw_model = getattr(persona, "lightweight_model", None) or _get_default_lightweight_model()
+                if not supports_structured_output(lw_model):
+                    persona_name = getattr(persona, "persona_name", "unknown")
+                    raise LLMError(
+                        f"Neither DEFAULT_MODEL '{base_model}' nor LIGHTWEIGHT_MODEL '{lw_model}' "
+                        f"supports structured output for persona '{persona_name}'",
+                        user_message=(
+                            f"現在選択されているモデル（{base_model}）も軽量モデル（{lw_model}）も"
+                            "構造化出力に対応していません。チャットオプションから対応モデルに変更してください。"
+                        ),
+                    )
+                LOGGER.info("[sea] Model '%s' doesn't support structured output, "
+                            "falling back to lightweight model: %s", base_model, lw_model)
                 try:
                     from llm_clients import get_llm_client
-                    ag_context = get_context_length(agentic_model)
-                    ag_provider = get_model_provider(agentic_model)
-                    return get_llm_client(agentic_model, ag_provider, ag_context)
+                    lw_context = get_context_length(lw_model)
+                    lw_provider = get_model_provider(lw_model)
+                    return get_llm_client(lw_model, lw_provider, lw_context), lw_model
                 except Exception as exc:
-                    LOGGER.warning("[sea] Failed to create agentic client: %s; using base client", exc)
-                    return base_client
+                    LOGGER.warning("[sea] Failed to create lightweight client for structured output: %s; "
+                                   "using base client", exc)
+                    return base_client, base_model
 
-        return base_client
+        return base_client, base_model
+
+    def _select_llm_client(self, node_def: Any, persona: Any, needs_structured_output: bool = False, state: Optional[Dict[str, Any]] = None, execution_context: Optional[ExecutionContext] = None) -> Any:
+        """後方互換ラッパー — client のみ返す。実体は ``select_llm_client``。
+
+        新しい呼び出しは Beat 開始点で ``resolve_execution_context`` した
+        ExecutionContext を ``select_llm_client`` へ渡し、実 model 名も受け取ること。
+        """
+        client, _model = self.select_llm_client(
+            node_def, persona,
+            execution_context=execution_context,
+            needs_structured_output=needs_structured_output,
+            state=state,
+        )
+        return client
 
     def _build_tools_spec(self, tool_names: List[str], llm_client: Any) -> List[Any]:
         """Build tools spec for LLM based on available tool names and llm_client type."""
@@ -405,7 +696,7 @@ class SEARuntime:
         client_class_name = type(llm_client).__name__
         LOGGER.info("[sea] LLM client class: %s", client_class_name)
 
-        if client_class_name in ("OpenAIClient", "AnthropicClient", "OllamaClient", "NvidiaNIMClient", "LlamaCppClient"):
+        if client_class_name in ("OpenAIClient", "AnthropicClient", "OllamaClient", "NvidiaNIMClient"):
             # Filter OpenAI tools spec (OpenAI-compatible)
             LOGGER.info("[sea] Using OpenAI-compatible tools format (client: %s)", client_class_name)
             LOGGER.info("[sea] Filtering from OPENAI_TOOLS_SPEC (total: %d)", len(OPENAI_TOOLS_SPEC))
@@ -460,7 +751,7 @@ class SEARuntime:
             log_llm_request(source, node_id, persona_id, persona_name, messages)
             log_llm_response(source, node_id, persona_id, persona_name, output_text)
         except Exception:
-            LOGGER.debug("failed to dump LLM io", exc_info=True)
+            LOGGER.warning("failed to dump LLM io", exc_info=True)
 
     def _debug_playbook(self, pb: PlaybookSchema, source: str) -> None:
         if not self._trace:
@@ -535,9 +826,6 @@ class SEARuntime:
     def _extract_structured_json(self, text: str) -> Optional[Dict[str, Any]]:
         return extract_structured_json(text)
 
-    def _update_router_selection(self, state: Dict[str, Any], text: str, parsed: Optional[Dict[str, Any]] = None) -> None:
-        update_router_selection(state, text, parsed)
-
     def _lg_tool_node(self, node_def: Any, persona: Any, playbook: PlaybookSchema, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None, auto_mode: bool = False):
         return self._runtime_engine.lg_tool_node(node_def, persona, playbook, event_callback, auto_mode=auto_mode)
 
@@ -597,6 +885,121 @@ class SEARuntime:
                 db.close()
         except Exception:
             LOGGER.warning("[sea][perm] Failed to set permission for %s", playbook_name, exc_info=True)
+
+    def decide_playbook_permission(
+        self,
+        city_id: Optional[int],
+        playbook_name: str,
+        persona: Any,
+        *,
+        user_configured: bool,
+        auto_mode: bool,
+        event_callback: Optional[Callable[[Dict[str, Any]], None]],
+    ) -> Tuple[bool, Optional[str]]:
+        """City スコープの Playbook 許可を判定する、ただ一つの場所。
+
+        Playbook を起こす口は 2 つある — Playbook の EXEC ノード
+        (``sea/runtime_engine.py``) と ``/run_playbook`` スペル
+        (``builtin_data/tools/run_playbook.py``)。同じ規則を二度書いた結果、
+        片方だけに事前承認の考慮があり、スケジュール UI が実際に使うスペル側
+        では設定済みの自動化が拒否されていた (2026-08-17 レビュー)。判定は
+        ここに集約し、呼び出し側は結果の見せ方だけを持つ。
+
+        判定順序そのものが仕様:
+
+        1. **``blocked`` は常に拒否** — 完全封印。ユーザー自身の指定でも通さない
+        2. **ユーザー自身が書いた起動なら許可** (``user_configured``) — チャット
+           UI の「ツール指定」やスケジュール設定画面で、ユーザーがその Playbook
+           を名指しした起動。指定した行為が承認にあたるので、確認し直さない。
+           ``user_only`` (設定画面の表示は「ユーザー指定時のみ」、確認ダイアログの
+           「ペルソナには使わせない」が書き込む値) もここで通る — 禁止の対象は
+           ペルソナであってユーザー本人ではない (まはー裁定 2026-08-17)。
+           **承認されているのは「その起動」であって Pulse ではない** — 同じ
+           Pulse の中でペルソナが別の Playbook を思いついて唱えた場合は、
+           下の通常の道を通る (Pulse 種別で許すと、設定画面で選んだ覚えのない
+           Playbook まで無確認で走る)
+        3. **``user_only`` はペルソナ起動なら拒否**
+        4. **``ask_every_time`` 以外 (= ``auto_allow``) は許可**
+        5. **応答ループにユーザーが居ない (auto) なら拒否** — 誰も見ていない
+           UI へ確認を出してブロックしない
+        6. **確認の宛先が無ければ拒否** — チャネル無しで黙って許可しない
+        7. それ以外は確認ダイアログ (``always_allow`` / ``never_use`` は
+           恒久設定として書き込む)
+
+        Args:
+            city_id: 判定対象の City。``None`` なら判定せず許可 (City 文脈の
+                無い CLI / テスト経路)。
+            user_configured: この起動をユーザー自身が指定したか。ペルソナの
+                認知が選んだ起動では必ず False。
+
+        Returns:
+            ``(allowed, denial_reason)``。拒否のとき ``denial_reason`` は
+            ペルソナへ見せる理由文。
+        """
+        if city_id is None:
+            return True, None
+
+        perm = self._get_playbook_permission(city_id, playbook_name)
+        LOGGER.info(
+            "[sea][perm] %s → %s (city=%s, user_configured=%s, auto_mode=%s)",
+            playbook_name, perm, city_id, user_configured, auto_mode,
+        )
+
+        if perm == "blocked":
+            return False, f"Playbook '{playbook_name}' is not available (permission: {perm})"
+
+        if user_configured:
+            # ユーザー本人が名指しした起動。user_only の禁止対象はペルソナで
+            # あってユーザーではない (設定画面の表示も「ユーザー指定時のみ」)。
+            return True, None
+
+        if perm == "user_only":
+            return False, (
+                f"Playbook '{playbook_name}' is user-only and cannot be started "
+                "by a persona or autonomous execution."
+            )
+
+        if perm != "ask_every_time":
+            return True, None  # auto_allow
+
+        if auto_mode:
+            return False, (
+                f"Playbook '{playbook_name}' requires user permission but running "
+                "in auto mode. Skipped."
+            )
+
+        if event_callback is None:
+            return False, (
+                f"Playbook '{playbook_name}' requires explicit user permission but "
+                "there is no channel to ask on. Skipped."
+            )
+
+        response = self._request_playbook_permission(playbook_name, persona, event_callback)
+
+        if response == "always_allow":
+            self._set_playbook_permission(city_id, playbook_name, "auto_allow")
+            return True, None
+
+        if response == "allow":
+            return True, None
+
+        if response == "never_use":
+            self._set_playbook_permission(city_id, playbook_name, "user_only")
+            return False, (
+                f"User disabled playbook '{playbook_name}'. This playbook will not "
+                "be available in future. Please respond without using this tool."
+            )
+
+        if response == "timeout":
+            return False, (
+                f"Permission request for playbook '{playbook_name}' timed out. "
+                "Please respond without using this tool."
+            )
+
+        return False, (
+            f"User denied execution of playbook '{playbook_name}'. "
+            "Please respond without using this tool."
+        )
 
     def _request_playbook_permission(
         self,
@@ -720,6 +1123,7 @@ class SEARuntime:
             text = state.get("last") or ""
             reasoning_text = state.pop("_reasoning_text", "")
             reasoning_details_val = state.pop("_reasoning_details", None)
+            auto_recall_text = state.pop("_auto_recall_text", None)
             pulse_id = state.get("_pulse_id")
             metadata_key = getattr(node_def, "metadata_key", None)
             base_metadata = state.get(metadata_key) if metadata_key else None
@@ -735,6 +1139,11 @@ class SEARuntime:
                 msg_metadata["reasoning"] = reasoning_text
             if reasoning_details_val is not None:
                 msg_metadata["reasoning_details"] = reasoning_details_val
+            if auto_recall_text:
+                # 記憶アーキv2 §4.5: この Pulse で末尾注入された「ふと浮かんだ記憶」を
+                # reasoning と同じ流儀で永続化する。LLM コンテキストには渡さない
+                # (state.pop 済みで再利用不可、metadata は llm_clients 側で読まれない)。
+                msg_metadata["auto_recall"] = auto_recall_text
 
             # Include pulse usage accumulator total for UI display
             accumulator = state.get("_pulse_usage_accumulator")
@@ -747,11 +1156,15 @@ class SEARuntime:
                 msg_metadata["activity_trace"] = list(activity_trace)
 
             eff_bid = self._effective_building_id(persona, building_id)
-            self._emit_say(persona, eff_bid, text, pulse_id=pulse_id, metadata=msg_metadata if msg_metadata else None)
+            building_msg = self._emit_say(persona, eff_bid, text, pulse_id=pulse_id, metadata=msg_metadata if msg_metadata else None, event_callback=event_callback)
             if outputs is not None:
                 outputs.append(text)
             if event_callback:
                 say_event: Dict[str, Any] = {"type": "say", "content": text, "persona_id": getattr(persona, "persona_id", None), "metadata": msg_metadata if msg_metadata else None}
+                if pulse_id:
+                    say_event["pulse_id"] = pulse_id
+                if building_msg and building_msg.get("message_id"):
+                    say_event["message_id"] = str(building_msg["message_id"])
                 if reasoning_text:
                     say_event["reasoning"] = reasoning_text
                 if activity_trace:
@@ -780,7 +1193,12 @@ class SEARuntime:
             event_callback({"type": "status", "content": f"{playbook.name} / think", "playbook": playbook.name, "node": "think"})
         text = state.get("last") or ""
         pulse_id = state.get("_pulse_id") or str(uuid.uuid4())
-        self._emit_think(persona, pulse_id, text)
+        # 書き込み時の機械刻印 (v3 §7.1)。独白も LLM が書いた本人の言葉で、
+        # memory.db に 1 行残る = 生成メッセージの永続点。
+        self._emit_think(
+            persona, pulse_id, text,
+            extra_metadata=stamp_generation_metadata(None, state),
+        )
         if outputs is not None:
             outputs.append(text)
         if event_callback:
@@ -812,7 +1230,13 @@ class SEARuntime:
             trace_parts = []
             for key, value_template in assignments.items():
                 resolved_value = self._resolve_set_value(value_template, state)
-                state[key] = resolved_value
+                # system namespace (_messages / _pulse_context 等) への代入は
+                # ロード時 validator が弾くが、値が効くのはここなので二重に防ぐ。
+                if not set_playbook_var(
+                    state, key, resolved_value,
+                    where=f"playbook '{playbook.name}' node '{node_id}' assignment",
+                ):
+                    continue
                 LOGGER.debug("[sea][set] %s = %s", key, resolved_value)
                 trace_parts.append(f"{key}={str(resolved_value)[:80]}")
             log_sea_trace(playbook.name, node_id, "SET", ", ".join(trace_parts))
@@ -831,11 +1255,15 @@ class SEARuntime:
     def _eval_arithmetic_expression(self, expr: str, state: Dict[str, Any]) -> Any:
         return eval_arithmetic_expression(expr, state)
 
-    def _start_subagent_thread(self, persona, label: Optional[str] = None):
+    def _start_subagent_thread(self, persona, label: Optional[str] = None, pulse_context: Optional[Any] = None):
         """Create a temporary Stelis thread and switch the active thread to it.
 
         Used by subplay/exec nodes with execution='subagent' to isolate
         sub-playbook execution in a temporary thread.
+
+        ``pulse_context``: 呼び出しノードの PulseContext (state["_pulse_context"])。
+        渡されると thread 切替は push_thread 経由になり、end 不達 (例外/cancel)
+        でも graph 実行の finally が親 thread を復元する (S4)。
 
         Returns:
             (thread_id, parent_thread_id) on success, (None, None) on failure.
@@ -867,8 +1295,12 @@ class SEARuntime:
             LOGGER.error("[subagent] Failed to create subagent thread for persona %s", persona.persona_id)
             return None, None
 
-        # Switch to the new thread
-        memory_adapter.set_active_thread(stelis.thread_id)
+        # Switch to the new thread (S4: pulse_context があれば push_thread 経由で
+        # 親を記録し、復元を graph finally に保証させる)
+        if pulse_context is not None and callable(getattr(pulse_context, "push_thread", None)):
+            pulse_context.push_thread(memory_adapter, stelis.thread_id, parent_thread_id=parent_thread_id)
+        else:
+            memory_adapter.set_active_thread(stelis.thread_id)
         LOGGER.info(
             "[subagent] Started subagent thread %s (parent=%s, label=%s)",
             stelis.thread_id, parent_thread_id, label,
@@ -881,11 +1313,14 @@ class SEARuntime:
         thread_id: str,
         parent_thread_id: str,
         generate_chronicle: bool = True,
+        pulse_context: Optional[Any] = None,
     ) -> Optional[str]:
         """End a subagent thread and switch back to the parent thread.
 
         Args:
             generate_chronicle: If True, generate a Chronicle summary before ending.
+            pulse_context: start 側で push_thread した PulseContext。渡されると
+                復元は pop_thread 経由になる (S4)。
 
         Returns:
             Chronicle summary string if generated, else None.
@@ -916,8 +1351,20 @@ class SEARuntime:
         if not success:
             LOGGER.error("[subagent] Failed to end subagent thread %s", thread_id)
 
-        # Switch back to parent thread
-        memory_adapter.set_active_thread(parent_thread_id)
+        # Switch back to parent thread (S4: push した親を pop で復元)
+        if (
+            pulse_context is not None
+            and callable(getattr(pulse_context, "pop_thread", None))
+            and pulse_context.thread_stack_depth() > 0
+        ):
+            restored = pulse_context.pop_thread(memory_adapter)
+            if restored and restored != parent_thread_id:
+                LOGGER.warning(
+                    "[subagent] Restored thread %s differs from recorded parent %s",
+                    restored, parent_thread_id,
+                )
+        else:
+            memory_adapter.set_active_thread(parent_thread_id)
         LOGGER.info(
             "[subagent] Ended subagent thread %s, returned to parent %s",
             thread_id, parent_thread_id,
@@ -1061,13 +1508,13 @@ class SEARuntime:
     # PulseContext management
     # ------------------------------------------------------------------
 
-    def _get_or_create_pulse_context(self, pulse_id: str, thread_id: str) -> Any:
+    def _get_or_create_pulse_context(self, pulse_id: str) -> Any:
         """Get an existing PulseContext or create a new one for this pulse_id."""
         from sea.pulse_context import PulseContext
         if pulse_id not in self._pulse_contexts:
-            ctx = PulseContext(pulse_id=pulse_id, thread_id=thread_id)
+            ctx = PulseContext(pulse_id=pulse_id)
             self._pulse_contexts[pulse_id] = ctx
-            LOGGER.debug("[sea] Created PulseContext for pulse_id=%s thread_id=%s", pulse_id, thread_id)
+            LOGGER.debug("[sea] Created PulseContext for pulse_id=%s", pulse_id)
         return self._pulse_contexts[pulse_id]
 
     def _cleanup_pulse_context(self, pulse_id: str) -> None:
@@ -1084,12 +1531,20 @@ class SEARuntime:
             LOGGER.warning("[sea] Cannot flush pulse_logs: SAIMemory adapter unavailable for persona=%s",
                            getattr(persona, "persona_id", None))
             return
+        # thread の記帳は flush 時点の adapter 現在値。旧 PulseContext.thread_id は
+        # 生成時に一度だけ解決され Stelis 切替を反映しない死に値だったため廃止
+        # (beat_execution_context.md §3.4)。
+        try:
+            flush_thread_id = adapter.get_current_thread()
+        except Exception:
+            LOGGER.debug("[sea] get_current_thread failed at pulse_log flush", exc_info=True)
+            flush_thread_id = None
         count = 0
         for entry in pulse_context.logs:
             tool_calls_json = _json.dumps(entry.tool_calls, ensure_ascii=False) if entry.tool_calls else None
             adapter.append_pulse_log(
                 pulse_id=pulse_context.pulse_id,
-                thread_id=pulse_context.thread_id,
+                thread_id=flush_thread_id,
                 role=entry.role,
                 content=entry.content,
                 node_id=entry.node_id,
@@ -1114,10 +1569,45 @@ class SEARuntime:
         pulse_id: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
         playbook_name: Optional[str] = None,
-    ) -> bool:
-        """Store a message to SAIMemory. Returns True on success, False on failure."""
+        pulse_context: Optional[Any] = None,
+        line_role: Optional[str] = None,
+        line_id: Optional[str] = None,
+        scope: Optional[str] = None,
+        paired_action_text: Optional[str] = None,
+        thought_signature: Optional[bytes] = None,
+        spell_origin_id: Optional[str] = None,
+        spell_seq: Optional[int] = None,
+        return_message_id: bool = False,
+        beat_state: Optional[Dict[str, Any]] = None,
+    ) -> Any:
+        """Store a message to SAIMemory. Returns True on success, False on failure.
+
+        7-layer storage metadata (Intent A v0.14, Intent B v0.11):
+
+        - ``pulse_context``: When supplied (and the explicit ``line_role`` /
+          ``line_id`` are not), the active line frame's metadata is read via
+          ``current_line_metadata()`` so callers in the ``sea/runtime_llm.py``
+          Spell loop and LLM-node memorize paths can omit boilerplate.
+        - Explicit overrides take precedence over the auto-resolved values
+          (used e.g. when a meta-judgment branch turn must be tagged
+          ``scope='discardable'`` regardless of the surrounding line).
+        - ``scope`` defaults to the SQL-level ``'committed'`` when ``None``.
+        - ``return_message_id``: When True, returns the inserted message id
+          (str) on success, or empty string on no-op / failure. Used by Phase
+          1.3 meta-judgment so the dispatch step can later promote the row
+          from ``scope='discardable'`` to ``'committed'`` when action='switch'.
+          Default False keeps the bool return so existing callers are
+          unchanged.
+        - ``beat_state``: 生成を回していた LangGraph / セッションの state。
+          渡された **かつ role が assistant のとき**だけ、書き込み時の機械刻印
+          (前駆刻印 + トークン三つ組) を metadata へ足す。刻印そのものの規則は
+          この一箇所だけが持ち、呼び出し元は材料の載った state を渡すだけ
+          (docs/intent/autonomous_behavior_v3.md §7.1 /
+          sea/message_stamp.py)。assistant 以外 (システム記録・スペル結果・
+          ツール応答) は「生成」ではないので刻まない。
+        """
         if not text:
-            return True
+            return "" if return_message_id else True
         adapter = getattr(persona, "sai_memory", None)
         if not adapter or not adapter.is_ready():
             LOGGER.warning(
@@ -1125,48 +1615,159 @@ class SEARuntime:
                 "Check embedding model setup.",
                 getattr(persona, "persona_id", None),
             )
-            return False
+            return "" if return_message_id else False
+        # -- 層1マーカー (==語句==) の抽出・剥離 (life_concept_map.md §9.1 / P3) --
+        # ペルソナ自身の生成テキスト (assistant) のみ対象。ここが SEA 経路の
+        # 「本文最終確定点」: SAIMemory に永続化される content からマーカーを
+        # 剥がし、抽出した観測点は insert 後に message_id 付きで marks へ保存
+        # する。マーカーが無ければ extract_marks は文字列走査 1 回の no-op。
+        mark_spans: List[Any] = []
+        if (role or "assistant") == "assistant":
+            from saiverse.marker_parser import extract_marks
+            text, mark_spans = extract_marks(text)
+
+        # -- message dict 構築 (try の外: ここでのバグは即座に上位に伝播させる) --
+        current_thread = adapter.get_current_thread()
+        LOGGER.debug("[_store_memory] Active thread: %s (persona_id=%s)", current_thread, getattr(persona, "persona_id", None))
+        if current_thread is None:
+            pid = getattr(persona, "persona_id", None) or "unknown"
+            default_thread = f"{pid}:{adapter._PERSONA_THREAD_SUFFIX}"
+            adapter.set_active_thread(default_thread)
+            current_thread = default_thread
+            LOGGER.info("[_store_memory] No active thread for %s — initialized default: %s", pid, default_thread)
+
+        # Resolve 7-layer metadata: explicit args win, otherwise read from
+        # the active LineFrame on the supplied PulseContext.
+        resolved_line_role = line_role
+        resolved_line_id = line_id
+        resolved_scope = scope
+        resolved_aspect: Optional[str] = None
+        if pulse_context is not None and (
+            resolved_line_role is None
+            or resolved_line_id is None
+            or resolved_scope is None
+        ):
+            try:
+                meta = pulse_context.current_line_metadata()
+            except AttributeError:
+                meta = {}
+            if resolved_line_role is None:
+                resolved_line_role = meta.get("line_role")
+            if resolved_line_id is None:
+                resolved_line_id = meta.get("line_id")
+            if resolved_scope is None:
+                resolved_scope = meta.get("scope")
+            resolved_aspect = meta.get("aspect")
+
+        message: Dict[str, Any] = {"role": role or "assistant", "content": text}
+        if resolved_line_role is not None:
+            message["line_role"] = resolved_line_role
+        if resolved_line_id is not None:
+            message["line_id"] = resolved_line_id
+        if resolved_scope is not None:
+            message["scope"] = resolved_scope
+        if paired_action_text is not None:
+            message["paired_action_text"] = paired_action_text
+        if pulse_id:
+            message["pulse_id"] = pulse_id
+        if thought_signature:
+            message["thought_signature"] = thought_signature
+            LOGGER.debug(
+                "[_store_memory] persona=%s role=%s thought_signature attached (%d bytes)",
+                getattr(persona, "persona_id", None), role, len(thought_signature),
+            )
+        if spell_origin_id is not None:
+            message["spell_origin_id"] = spell_origin_id
+        if spell_seq is not None:
+            message["spell_seq"] = spell_seq
+
+        clean_tags = [str(tag) for tag in (tags or []) if tag]
+        if playbook_name:
+            clean_tags.append(f"playbook:{playbook_name}")
+        msg_metadata: Dict[str, Any] = {}
+        if clean_tags:
+            msg_metadata["tags"] = clean_tags
+        if isinstance(metadata, dict):
+            for key, value in metadata.items():
+                if key == "tags":
+                    extra_tags = [str(t) for t in value if t] if isinstance(value, list) else []
+                    msg_metadata.setdefault("tags", []).extend(extra_tags)
+                else:
+                    msg_metadata[key] = value
+
+        if resolved_aspect:
+            msg_metadata["aspect"] = resolved_aspect
+
+        # -- 書き込み時の機械刻印 (v3 §7.1): 前駆刻印 + トークン三つ組 --
+        # 生成 (= LLM が書いたペルソナ本人の言葉) にだけ刻む。材料が無ければ
+        # 何も足さない — 提示ゼロの生成に前駆は無く、使用量を返さないコールに
+        # 三つ組は無い (欠落を 0 と偽らない)。
+        if (role or "assistant") == "assistant" and beat_state is not None:
+            for _stamp_key, _stamp_value in build_generation_stamp(beat_state).items():
+                msg_metadata.setdefault(_stamp_key, _stamp_value)
+
+        # audience: 同じ Building にいる他ペルソナ・ユーザーを記録
+        if role == "assistant" and "audience" not in msg_metadata:
+            persona_id = getattr(persona, "persona_id", None)
+            building_id = getattr(persona, "current_building_id", None)
+            if persona_id and building_id and self.manager:
+                occupants = getattr(self.manager, "occupants", {}).get(building_id, [])
+                audience_personas = [
+                    str(oid) for oid in occupants
+                    if str(oid) != persona_id and not str(oid).startswith("user_")
+                ]
+                if audience_personas:
+                    audience_users = [
+                        str(oid) for oid in occupants
+                        if str(oid).startswith("user_")
+                    ]
+                    msg_metadata["audience"] = {
+                        "personas": audience_personas,
+                        "users": audience_users,
+                    }
+
+        # -- 層0タグ (origin_episode) は束 6c (2026-08-22) で退役した --
+        # エピソードという専用の記録行を持たなくなったので (v3 §7)、新しい
+        # メッセージへ出来事参照を刻む手も消える。既存メッセージに付いた
+        # origin_episode は残置 (読み手が無視する — v3 §9-8 の裁定「書き換えない」)。
+
+        if msg_metadata:
+            message["metadata"] = msg_metadata
+
+        # -- DB 書き込み (ここだけ try で囲む: DB 障害は pulse を止めず WARNING) --
         try:
-            if adapter and adapter.is_ready():
-                current_thread = adapter.get_current_thread()
-                LOGGER.debug("[_store_memory] Active thread: %s (persona_id=%s)", current_thread, getattr(persona, "persona_id", None))
-                # If no active thread, initialize the default __persona__ thread
-                if current_thread is None:
-                    pid = getattr(persona, "persona_id", None) or "unknown"
-                    default_thread = f"{pid}:{adapter._PERSONA_THREAD_SUFFIX}"
-                    adapter.set_active_thread(default_thread)
-                    current_thread = default_thread
-                    LOGGER.info("[_store_memory] No active thread for %s — initialized default: %s", pid, default_thread)
-                message = {"role": role or "assistant", "content": text}
-                clean_tags = [str(tag) for tag in (tags or []) if tag]
-                # Add pulse:uuid tag
-                if pulse_id:
-                    clean_tags.append(f"pulse:{pulse_id}")
-                # Add playbook:name tag for automatic classification
-                if playbook_name:
-                    clean_tags.append(f"playbook:{playbook_name}")
-                # Build metadata dict
-                msg_metadata: Dict[str, Any] = {}
-                if clean_tags:
-                    msg_metadata["tags"] = clean_tags
-                # Merge additional metadata (e.g., media attachments)
-                if isinstance(metadata, dict):
-                    for key, value in metadata.items():
-                        if key == "tags":
-                            # Merge tags
-                            extra_tags = [str(t) for t in value if t] if isinstance(value, list) else []
-                            msg_metadata.setdefault("tags", []).extend(extra_tags)
-                        else:
-                            msg_metadata[key] = value
-                if msg_metadata:
-                    message["metadata"] = msg_metadata
-                # Pass thread_suffix to ensure message is saved to correct thread
-                thread_suffix = current_thread.split(":", 1)[1] if ":" in current_thread else current_thread
-                adapter.append_persona_message(message, thread_suffix=thread_suffix)
+            thread_suffix = current_thread.split(":", 1)[1] if ":" in current_thread else current_thread
+            inserted_id = adapter.append_persona_message(message, thread_suffix=thread_suffix)
+            # 層1マーカー由来の観測点を点クリップとして保存 (アンカー = 挿入されたメッセージ)。
+            # hasattr ガードはテストのスタブ adapter (add_clips 未実装) 対策。
+            # 注意: このガードは綴りが違えば黙って no-op になる — メソッド名を変える
+            # ときは必ず両方を揃えること (2026-07-15 の写真→クリップ改名で、ここが
+            # add_photos のまま残りクリップが 1 枚も保存されなくなった)。
+            if mark_spans and inserted_id and hasattr(adapter, "add_clips"):
+                # クリップ保存だけを別 try で包む — 本文の行はもうコミット済み
+                # なので、ここで失敗しても「message lost」ではない。外側の
+                # except に落とすと呼び出し元へ「保存失敗」が返り、印
+                # (`_beat_memorized`) が立たず、Beat の出口の補填が同じ本文を
+                # 二重に書ける (2026-08-27 Codex 指摘)。
+                try:
+                    adapter.add_clips(inserted_id, mark_spans)
+                except Exception:
+                    LOGGER.warning(
+                        "[_store_memory] add_clips failed for persona=%s "
+                        "message_id=%s — the message row is committed; only "
+                        "the clips were lost",
+                        getattr(persona, "persona_id", None), inserted_id,
+                        exc_info=True,
+                    )
+            if return_message_id:
+                return inserted_id or ""
             return True
         except Exception:
-            LOGGER.warning("memorize node not stored", exc_info=True)
-            return False
+            LOGGER.warning(
+                "[_store_memory] DB write failed for persona=%s role=%s — message lost",
+                getattr(persona, "persona_id", None), role, exc_info=True,
+            )
+            return "" if return_message_id else False
 
     def _append_tool_result_message(
         self,
@@ -1206,483 +1807,344 @@ class SEARuntime:
                     return bid
         return fallback
 
-    def _emit_speak(self, persona: Any, building_id: str, text: str, pulse_id: Optional[str] = None, record_history: bool = True, extra_metadata: Optional[Dict[str, Any]] = None) -> None:
-        self._emitters.emit_speak(persona, building_id, text, pulse_id=pulse_id, record_history=record_history, extra_metadata=extra_metadata)
+    def _emit_speak(self, persona: Any, building_id: str, text: str, pulse_id: Optional[str] = None, record_history: bool = True, extra_metadata: Optional[Dict[str, Any]] = None, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None) -> Optional[Dict[str, Any]]:
+        # 戻り値は保存できた建物メッセージ (id 付き)。event_callback を渡すと、
+        # 保存が成功した回だけ保存完了イベント (speak_persisted) が流れる。
+        return self._emitters.emit_speak(persona, building_id, text, pulse_id=pulse_id, record_history=record_history, extra_metadata=extra_metadata, event_callback=event_callback)
 
-    def _emit_say(self, persona: Any, building_id: str, text: str, pulse_id: Optional[str] = None, metadata: Optional[Dict[str, Any]] = None) -> None:
-        self._emitters.emit_say(persona, building_id, text, pulse_id=pulse_id, metadata=metadata)
+    def _emit_say(self, persona: Any, building_id: str, text: str, pulse_id: Optional[str] = None, metadata: Optional[Dict[str, Any]] = None, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None) -> Optional[Dict[str, Any]]:
+        return self._emitters.emit_say(persona, building_id, text, pulse_id=pulse_id, metadata=metadata, event_callback=event_callback)
 
-    def _emit_think(self, persona: Any, pulse_id: str, text: str, record_history: bool = True) -> None:
-        self._emitters.emit_think(persona, pulse_id, text, record_history=record_history)
+    # Pipeline Streaming (Phase 2-β): emit_speak の 2 段階 API + sub-speak 発火。
+    # 詳細: docs/intent/voice_tts_pipeline_streaming.md
+    def _emit_speak_start(self, persona: Any, building_id: str, pulse_id: Optional[str] = None) -> Optional[str]:
+        return self._emitters.emit_speak_start(persona, building_id, pulse_id=pulse_id)
+
+    def _emit_sub_speak(self, persona: Any, building_id: str, message_id: str, sub_text: str, sub_seq: int, pulse_id: Optional[str] = None) -> None:
+        self._emitters.emit_sub_speak(persona, building_id, message_id, sub_text, sub_seq, pulse_id=pulse_id)
+
+    def _emit_speak_finalize(
+        self,
+        persona: Any,
+        building_id: str,
+        message_id: str,
+        text: str,
+        pulse_id: Optional[str] = None,
+        extra_metadata: Optional[Dict[str, Any]] = None,
+        final_sub_seq: Optional[int] = None,
+        final_voice_text: Optional[str] = None,
+    ) -> "SpeakFinalizeResult":
+        # 戻り値は三値の結果 (保存成功 / 対象行なし / 保存失敗)。
+        # 設計: docs/issues/archive/stream_completion_is_not_proof_of_persistence.md
+        return self._emitters.emit_speak_finalize(
+            persona, building_id, message_id, text,
+            pulse_id=pulse_id, extra_metadata=extra_metadata,
+            final_sub_seq=final_sub_seq, final_voice_text=final_voice_text,
+        )
+
+    def _emit_think(self, persona: Any, pulse_id: str, text: str, record_history: bool = True, extra_metadata: Optional[Dict[str, Any]] = None) -> None:
+        self._emitters.emit_think(persona, pulse_id, text, record_history=record_history, extra_metadata=extra_metadata)
 
     def _notify_unity_speak(self, persona: Any, text: str) -> None:
         self._emitters.notify_unity_speak(persona, text)
 
     # ---------------- history metabolism -----------------
 
-    def _get_high_watermark(self, persona) -> Optional[int]:
-        """Get the high watermark (max history messages) for metabolism."""
-        override = getattr(self.manager, "max_history_messages_override", None) if self.manager else None
-        if override is not None:
-            return override
-        from saiverse.model_configs import get_default_max_history_messages
-        persona_model = getattr(persona, "model", None)
-        if persona_model:
-            return get_default_max_history_messages(persona_model)
-        return None
+    #: keep-alive の末尾メッセージ。意味的に不活性 (何のイベントでもない) で、
+    #: SAIMemory には保存されない — 次の本物の呼び出しのリクエストには現れず、
+    #: 共有 prefix (head + 履歴) だけがキャッシュ上で温め直される。
+    _KEEPALIVE_TAIL = (
+        "<system>（キャッシュ維持のための自動処理です。世界では何も起きていません。"
+        "「.」とだけ返答してください）</system>"
+    )
 
-    def _get_low_watermark(self, persona) -> Optional[int]:
-        """Get the low watermark (keep messages after metabolism) for metabolism."""
-        override = getattr(self.manager, "metabolism_keep_messages_override", None) if self.manager else None
-        if override is not None:
-            return override
-        from saiverse.model_configs import get_metabolism_keep_messages
-        persona_model = getattr(persona, "model", None)
-        if persona_model:
-            return get_metabolism_keep_messages(persona_model)
-        return None
+    def run_cache_keepalive(self, persona_id: str, model_key: Optional[str] = None) -> bool:
+        """メインキャッシュの keep-alive: 意味的に不活性な極小 LLM コール 1 回。
 
-    # ---- anchor persistence helpers ----
+        TTL 接近時 (:meth:`SessionLifecycle.schedule_cache_ttl_pulse` の予約) に呼ばれる。
+        予約は (persona, model) ごとに独立で (beat_execution_context.md §3.1)、
+        ``model_key`` は「どの model の Session を守るか」。None (レガシー呼び出し)
+        なら ``persona.model`` にフォールバックする。
+        メインラインと同じ context (head + 履歴) を組み、末尾に不活性な 1 文を
+        足して当該 model を 1 回だけ呼ぶ:
 
-    def _load_anchors(self, persona) -> Dict[str, Any]:
-        """Load per-model metabolism anchors from DB (AI.METABOLISM_ANCHORS)."""
-        if not self.manager or not hasattr(self.manager, "SessionLocal"):
-            return {}
-        persona_id = getattr(persona, "persona_id", None)
-        if not persona_id:
-            return {}
-        db = self.manager.SessionLocal()
-        try:
-            from database.models import AI
-            ai_row = db.query(AI).filter_by(AIID=persona_id).first()
-            if ai_row and ai_row.METABOLISM_ANCHORS:
-                return json.loads(ai_row.METABOLISM_ANCHORS)
-        except Exception as exc:
-            LOGGER.warning("[metabolism] Failed to load anchors for %s: %s", persona_id, exc)
-        finally:
-            db.close()
-        return {}
-
-    def _save_anchors(self, persona, anchors: Dict[str, Any]) -> None:
-        """Persist per-model metabolism anchors to DB."""
-        if not self.manager or not hasattr(self.manager, "SessionLocal"):
-            return
-        persona_id = getattr(persona, "persona_id", None)
-        if not persona_id:
-            return
-        db = self.manager.SessionLocal()
-        try:
-            from database.models import AI
-            ai_row = db.query(AI).filter_by(AIID=persona_id).first()
-            if ai_row:
-                ai_row.METABOLISM_ANCHORS = json.dumps(anchors, ensure_ascii=False)
-                db.commit()
-        except Exception as exc:
-            LOGGER.warning("[metabolism] Failed to save anchors for %s: %s", persona_id, exc)
-        finally:
-            db.close()
-
-    def _get_anchor_validity_seconds(self, model_key: str) -> int:
-        """Get anchor validity duration in seconds based on model cache config.
-
-        - Anthropic (explicit cache): current manager.state.cache_ttl (300s or 3600s)
-        - Others (implicit/no cache): 1200s (20 min)
-        """
-        try:
-            from saiverse.model_configs import get_cache_config
-            cache_config = get_cache_config(model_key)
-            cache_type = cache_config.get("type", "implicit")
-            if cache_type == "explicit":
-                current_ttl = "5m"
-                if self.manager and hasattr(self.manager, "state"):
-                    current_ttl = getattr(self.manager.state, "cache_ttl", "5m")
-                return 300 if current_ttl == "5m" else 3600
-        except Exception:
-            LOGGER.warning("Failed to resolve cache TTL for model %s", model_key, exc_info=True)
-        return 1200  # 20 minutes default
-
-    def _resolve_metabolism_anchor(self, persona) -> tuple:
-        """Resolve the best metabolism anchor using 3-level fallback.
+        - **判断はしない**: playbook もスペルも走らず、応答は破棄される
+        - **記憶に残らない**: SAIMemory へは一切書かない (discardable ですらない)
+        - **Beat ロック対象外**: 生成はするが記憶に書かない軽量 Beat のため、
+          beat_gate.hold は取らない (直列化の目的 = 記憶の一直線性に関与しない。
+          beat_execution_context.md §2.2 の工事で意図的に対象外とした)
+        - **キャッシュ経済**: 共有 prefix が cache read でヒットし、プロバイダ側の
+          TTL ウィンドウが更新される。成功時は ``SessionLifecycle.touch_anchor_after_llm_call``
+          が anchor を touch → 次回 keep-alive が再予約される (従来と同じ連鎖)
+        - **自然停止**: 失効済み (温め直しても意味がない) / 自律 OFF /
+          呼び出し失敗のときは touch しない → 連鎖は止まり、次の本物の呼び出し
+          まで keep-alive は走らない
 
         Returns:
-            (anchor_id, resolution_type) where resolution_type is
-            "self" | "other" | "minimal".
-            anchor_id is None for "minimal" (no valid anchor found).
+            LLM コールまで到達し成功したら True (テスト・観察用)。
         """
-        persona_model = getattr(persona, "model", None)
-        if not persona_model:
-            return (None, "minimal")
-
-        anchors = self._load_anchors(persona)
-        now = datetime.now()
-
-        # Case 1: self model's anchor exists and is valid
-        self_entry = anchors.get(persona_model)
-        if self_entry:
-            try:
-                updated_at = datetime.fromisoformat(self_entry["updated_at"])
-                validity = self._get_anchor_validity_seconds(persona_model)
-                age = (now - updated_at).total_seconds()
-                if age <= validity:
-                    LOGGER.debug(
-                        "[metabolism] Anchor resolved: self model '%s' (age=%.0fs, validity=%ds)",
-                        persona_model, age, validity,
-                    )
-                    return (self_entry["anchor_id"], "self")
-                else:
-                    LOGGER.debug(
-                        "[metabolism] Self model anchor expired: '%s' (age=%.0fs > validity=%ds)",
-                        persona_model, age, validity,
-                    )
-            except (KeyError, ValueError, TypeError) as exc:
-                LOGGER.debug("[metabolism] Invalid self anchor entry: %s", exc)
-
-        # Case 2: most recent valid anchor from any model
-        best_entry = None
-        best_updated = None
-        for model_key, entry in anchors.items():
-            if model_key == persona_model:
-                continue  # already checked
-            try:
-                updated_at = datetime.fromisoformat(entry["updated_at"])
-                validity = self._get_anchor_validity_seconds(model_key)
-                age = (now - updated_at).total_seconds()
-                if age <= validity:
-                    if best_updated is None or updated_at > best_updated:
-                        best_entry = entry
-                        best_updated = updated_at
-            except (KeyError, ValueError, TypeError):
-                continue
-
-        if best_entry:
+        manager = self.manager
+        persona = (getattr(manager, "personas", None) or {}).get(persona_id)
+        if persona is None:
+            LOGGER.debug("[keepalive] persona not found: %s", persona_id)
+            return False
+        # 自律行動が OFF のペルソナは温め直さない — keep-alive 連鎖はここで
+        # 自然に止まり、次の本物の呼び出しまで走らない。
+        if not bool(getattr(persona, "autonomy_enabled", False)):
             LOGGER.debug(
-                "[metabolism] Anchor resolved: other model (age=%.0fs)",
-                (now - best_updated).total_seconds(),
+                "[keepalive] skipped (persona=%s autonomy disabled)", persona_id,
             )
-            return (best_entry["anchor_id"], "other")
+            return False
 
-        # Case 3: no valid anchor
-        LOGGER.debug("[metabolism] No valid anchor found — will use minimal load")
-        return (None, "minimal")
+        # life.md §5.2: keep-alive 連鎖はライフに従属する。その日 lives が宣言
+        # されている場合、現在時刻がいずれかのライフ区間内でなければ (= 谷)
+        # touch せず連鎖を自然停止する — ここで return するため、この後の
+        # schedule_cache_ttl_pulse への再予約にも到達しない (二重管理を避ける
+        # 単一の集約点)。lives 未宣言の日 / ペルソナは常に許可 (完全後方互換)。
+        # 判定失敗時は許可側にフォールバックする (安全側は「温め続ける」— 谷
+        # 判定の誤りで温もりを止めてしまう方が実害が大きい)。
+        try:
+            from saiverse.day_plan import is_keepalive_allowed
+            if not is_keepalive_allowed(manager, persona_id):
+                LOGGER.debug(
+                    "[keepalive] skipped (persona=%s outside declared life; valley)",
+                    persona_id,
+                )
+                return False
+        except Exception:
+            LOGGER.warning(
+                "[keepalive] life gate check failed (persona=%s); defaulting to allow",
+                persona_id, exc_info=True,
+            )
 
-    def _update_anchor_for_model(self, persona, model_key: str, anchor_id: str) -> None:
-        """Update the anchor for a specific model and persist to DB."""
-        if not model_key or not anchor_id:
-            return
-        anchors = self._load_anchors(persona)
-        anchors[model_key] = {
-            "anchor_id": anchor_id,
-            "updated_at": datetime.now().isoformat(),
-        }
-        self._save_anchors(persona, anchors)
+        if not model_key:
+            model_key = getattr(persona, "model", None)
+        if not model_key:
+            return False
+        model_key = str(model_key)
 
-    def _maybe_run_metabolism(
-        self,
-        persona,
-        building_id: str,
-        event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
-    ) -> None:
-        """Check if metabolism is needed after response and run if so."""
-        if not getattr(self.manager, "metabolism_enabled", False):
-            return
+        # 非 explicit キャッシュ (gemini_explicit / implicit 等): keep-alive LLM は
+        # 呼ばない。予約は explicit のときだけ立つ
+        # (:meth:`SessionLifecycle.schedule_cache_ttl_pulse`) が、予約後に model の
+        # キャッシュ設定が非 explicit へ変わっていた場合はここへ来る — 何もせず
+        # 落とす (再予約もしない。次の本物の呼び出しが改めて予約する)。
+        try:
+            from saiverse.model_configs import get_cache_config
+            cache_type = (get_cache_config(model_key) or {}).get("type", "implicit")
+        except Exception:
+            cache_type = "implicit"
+        if cache_type != "explicit":
+            LOGGER.debug(
+                "[keepalive] non-explicit cache; skipping "
+                "(persona=%s model=%s type=%s)",
+                persona_id, model_key, cache_type,
+            )
+            return False
 
-        history_mgr = getattr(persona, "history_manager", None)
-        anchor = getattr(history_mgr, "metabolism_anchor_message_id", None)
-        if not history_mgr or not anchor:
-            return
+        # anchor の生存確認: 既に失効しているキャッシュは温め直さない
+        # (全額書き直しになるだけ。次の本物の呼び出しが自然に張り直す)。
+        try:
+            entry = self.session_lifecycle.load_anchor_entry(persona_id, model_key)
+            if not entry or not entry.get("updated_at"):
+                LOGGER.debug(
+                    "[keepalive] no anchor entry; skipping (persona=%s model=%s)",
+                    persona_id, model_key,
+                )
+                return False
+            updated_at = datetime.fromisoformat(entry["updated_at"])
+            ttl_seconds = self.session_lifecycle.anchor_entry_ttl_seconds(
+                entry, model_key, persona_id,
+            )
+            if datetime.now() >= updated_at + timedelta(seconds=ttl_seconds):
+                LOGGER.info(
+                    "[keepalive] cache already expired; not re-warming "
+                    "(persona=%s model=%s)", persona_id, model_key,
+                )
+                return False
+        except Exception:
+            LOGGER.warning(
+                "[keepalive] failed to read anchor state (persona=%s)",
+                persona_id, exc_info=True,
+            )
+            return False
 
-        high_wm = self._get_high_watermark(persona)
-        if high_wm is None:
-            return
+        building_id = getattr(persona, "current_building_id", None)
+        if not building_id:
+            LOGGER.debug(
+                "[keepalive] persona %s has no current_building_id; skipping",
+                persona_id,
+            )
+            return False
 
-        # Get current message count from anchor
-        current_messages = history_mgr.get_history_from_anchor(
-            anchor, required_tags=["conversation"],
+        from types import SimpleNamespace
+
+        try:
+            # メインラインと同じ既定 requirements で context を組む — 共有 prefix
+            # (head + main_line 履歴) が前回の本物の呼び出しと一致することが
+            # キャッシュヒットの条件。head は (persona, model) の Session ごとに
+            # 一つ (beat_execution_context.md §3.1) なので、見張り対象 model の
+            # head を明示で指定する (lightweight Session を default の head で
+            # 温めると別 prefix になりキャッシュを壊す)。
+            # persist_anchor_advance=False: keepalive は Beat ロックの外を走る
+            # ため、組成中に §14-2 の anchor 前進 (行書き込み) を発火させない —
+            # ロック外の書き込みは並走 Beat の前進・fold 更新と競合する
+            # (Codex 6巡目 2026-07-30)。keepalive は touch の CAS まで一貫して
+            # 読みだけで進む。
+            _ka_meta: Dict[str, Any] = {}
+            messages = list(
+                self._prepare_context(
+                    persona, building_id, None, model_key=model_key,
+                    context_meta=_ka_meta, persist_anchor_advance=False,
+                ) or []
+            )
+            composed_anchor = _ka_meta.get("prefix_anchor_id")
+            if composed_anchor != entry.get("anchor_id"):
+                # 生存確認から組成までの間に anchor が動いた (TTL 境界を跨いだ /
+                # 並走 Beat が前進した)。この prefix はもうキャッシュと一致しない
+                # ので温めても無駄 — LLM を呼ばず連鎖を自然停止する。
+                LOGGER.info(
+                    "[keepalive] prefix anchor diverged during composition "
+                    "(persona=%s model=%s row=%s composed=%s); skipping warm",
+                    persona_id, model_key, entry.get("anchor_id"), composed_anchor,
+                )
+                return False
+            messages.append({"role": "user", "content": self._KEEPALIVE_TAIL})
+            node_def = SimpleNamespace(id="cache_keepalive", memorize=None, speak=False)
+            # Beat 相当の開始点 — Pulse 外なので pulse_context=None (standard tier)。
+            execution_context = resolve_execution_context(persona, None)
+            if model_key == execution_context.model_key:
+                # 従来経路: persona.model の Session を守る keep-alive。
+                llm_client, _ka_model = self.select_llm_client(
+                    node_def, persona, execution_context=execution_context,
+                )
+                if _ka_model != execution_context.model_key:
+                    execution_context = execution_context.with_model(_ka_model)
+            else:
+                # (persona, model) 独立監視 (beat_execution_context.md §3.1):
+                # 見張り対象の Session が persona.model 以外 (自律 Pulse 等の
+                # lightweight main-line Session) の場合は、その model の client
+                # で温める。呼んでいない model の cache を触らない (不変条件 §4-2)。
+                execution_context = execution_context.with_model(model_key)
+                lightweight_model = (
+                    getattr(persona, "lightweight_model", None)
+                    or _get_default_lightweight_model()
+                )
+                if model_key == lightweight_model and getattr(persona, "lightweight_llm_client", None):
+                    llm_client = persona.lightweight_llm_client
+                else:
+                    from llm_clients import get_llm_client
+                    from saiverse.model_configs import get_context_length, get_model_provider
+                    llm_client = get_llm_client(
+                        model_key, get_model_provider(model_key), get_context_length(model_key),
+                    )
+                LOGGER.debug(
+                    "[keepalive] warming non-default model session (persona=%s model=%s)",
+                    persona_id, model_key,
+                )
+            llm_client.generate(
+                messages,
+                tools=[],
+                temperature=self._default_temperature(persona),
+                **self._get_cache_kwargs(persona_id),
+            )
+        except Exception:
+            # 失敗時は touch しない → 予約も更新されず連鎖は自然停止する。
+            LOGGER.warning(
+                "[keepalive] keep-alive LLM call failed (persona=%s model=%s)",
+                persona_id, model_key, exc_info=True,
+            )
+            return False
+
+        usage = (
+            llm_client.consume_usage()
+            if hasattr(llm_client, "consume_usage") else None
         )
-        if len(current_messages) <= high_wm:
-            return  # Haven't reached high watermark yet
-
-        low_wm = self._get_low_watermark(persona)
-        if low_wm is None or high_wm - low_wm < 20:
-            return  # Gap too small for a Chronicle batch
-
-        LOGGER.info(
-            "[metabolism] Triggering metabolism for %s: %d messages > high_wm=%d, will keep %d",
-            getattr(persona, "persona_id", "?"), len(current_messages), high_wm, low_wm,
-        )
-        self._run_metabolism(persona, building_id, current_messages, low_wm, event_callback)
-
-    def _run_metabolism(
-        self,
-        persona,
-        building_id: str,
-        current_messages: List[Dict[str, Any]],
-        keep_count: int,
-        event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
-    ) -> None:
-        """Execute history metabolism: Chronicle generation + anchor update."""
-        evict_count = len(current_messages) - keep_count
-
-        # 1. Notify start
-        if event_callback:
-            event_callback({
-                "type": "metabolism",
-                "status": "started",
-                "content": f"記憶を整理しています（{len(current_messages)}件 → {keep_count}件）...",
-            })
-
-        # 2. Chronicle generation (only if Memory Weave is enabled AND per-persona toggle is on)
-        memory_weave_enabled = os.getenv("ENABLE_MEMORY_WEAVE_CONTEXT", "").lower() in ("true", "1")
-        if memory_weave_enabled and self._is_chronicle_enabled_for_persona(persona):
+        if usage is not None:
             try:
-                self._generate_chronicle(persona, event_callback)
-            except Exception as exc:
-                LOGGER.warning("[metabolism] Chronicle generation failed: %s", exc)
-
-        # 3. Update anchor to new window start
-        new_anchor_id = current_messages[evict_count].get("id")
-        if new_anchor_id:
-            persona.history_manager.metabolism_anchor_message_id = new_anchor_id
-            persona_model = getattr(persona, "model", None)
-            if persona_model:
-                self._update_anchor_for_model(persona, persona_model, new_anchor_id)
-            LOGGER.info("[metabolism] Updated anchor to %s (evicted %d, kept %d)", new_anchor_id, evict_count, keep_count)
-
-        # 4. Notify completion
-        if event_callback:
-            event_callback({
-                "type": "metabolism",
-                "status": "completed",
-                "content": f"記憶の整理が完了しました（{evict_count}件の会話をChronicleに圧縮）",
-                "evicted": evict_count,
-                "kept": keep_count,
-            })
-
-    def _is_chronicle_enabled_for_persona(self, persona) -> bool:
-        """Check per-persona Chronicle auto-generation toggle from DB."""
-        persona_id = getattr(persona, "persona_id", None)
-        if not persona_id or not self.manager:
-            return True  # fallback: enabled
-        db = self.manager.SessionLocal()
-        try:
-            from database.models import AI as AIModel
-            ai = db.query(AIModel).filter_by(AIID=persona_id).first()
-            return ai.CHRONICLE_ENABLED if ai else True
-        finally:
-            db.close()
-
-    def _is_memory_weave_context_enabled(self, persona) -> bool:
-        """Check per-persona Memory Weave context injection toggle from DB."""
-        persona_id = getattr(persona, "persona_id", None)
-        if not persona_id or not self.manager:
-            return True  # fallback: enabled
-        db = self.manager.SessionLocal()
-        try:
-            from database.models import AI as AIModel
-            ai = db.query(AIModel).filter_by(AIID=persona_id).first()
-            return ai.MEMORY_WEAVE_CONTEXT if ai else True
-        finally:
-            db.close()
-
-    def _generate_chronicle(
-        self,
-        persona,
-        event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
-        cancellation_token: Optional[CancellationToken] = None,
-    ) -> None:
-        """Generate Chronicle entries from all unprocessed messages."""
-        from llm_clients.factory import get_llm_client
-        from sai_memory.arasuji import init_arasuji_tables
-        from sai_memory.arasuji.generator import DEFAULT_BATCH_SIZE, ArasujiGenerator
-        from sai_memory.memory.storage import Message, get_messages_paginated
-        from saiverse.model_configs import find_model_config
-
-        # Get LLM client using MEMORY_WEAVE_MODEL
-        from saiverse.model_defaults import BUILTIN_DEFAULT_LITE_MODEL
-        model_name = os.getenv("MEMORY_WEAVE_MODEL", BUILTIN_DEFAULT_LITE_MODEL)
-        model_id, model_config = find_model_config(model_name)
-        if not model_config:
-            LOGGER.warning("[metabolism] Model '%s' not found for Chronicle generation", model_name)
-            return
-
-        provider = model_config.get("provider")
-        context_length = model_config.get("context_length", 128000)
-        client = get_llm_client(model_id, provider, context_length, config=model_config)
-
-        # Initialize arasuji tables and fetch all messages
-        adapter = getattr(persona, "sai_memory", None)
-        if not adapter or not adapter.is_ready():
-            LOGGER.warning("[metabolism] SAIMemory not available for Chronicle generation")
-            return
-
-        init_arasuji_tables(adapter.conn)
-
-        # Fetch ALL messages across all threads (same as UI-triggered generation).
-        # Previously this only fetched from the default persona thread, missing
-        # messages logged on building-specific threads.
-        import json as _json
-        cur = adapter.conn.execute(
-            "SELECT id, thread_id, role, content, resource_id, created_at, metadata "
-            "FROM messages ORDER BY created_at ASC"
-        )
-        all_messages = []
-        for row in cur.fetchall():
-            msg_id, tid, role, content, resource_id, created_at, metadata_raw = row
-            metadata = None
-            if metadata_raw:
-                try:
-                    metadata = _json.loads(metadata_raw)
-                except Exception:
-                    pass
-            all_messages.append(Message(
-                id=msg_id, thread_id=tid, role=role, content=content,
-                resource_id=resource_id, created_at=int(created_at),
-                metadata=metadata,
-            ))
-
-        if not all_messages:
-            return
-
-        batch_size_for_estimate = int(os.getenv("MEMORY_WEAVE_BATCH_SIZE", str(DEFAULT_BATCH_SIZE)))
-
-        # Pre-check: replicate the same contiguous-run logic used by
-        # generate_unprocessed() so we can skip the confirmation dialog
-        # when no run is large enough to produce even one batch.
-        _cur = adapter.conn.execute(
-            "SELECT DISTINCT json_each.value "
-            "FROM arasuji_entries, json_each(source_ids_json) "
-            "WHERE level = 1"
-        )
-        _processed_ids = {row[0] for row in _cur.fetchall()}
-
-        _runs: list[list] = []
-        _current_run: list = []
-        for _msg in all_messages:
-            if _msg.id in _processed_ids:
-                if _current_run:
-                    _runs.append(_current_run)
-                    _current_run = []
-                continue
-            _current_run.append(_msg)
-        if _current_run:
-            _runs.append(_current_run)
-
-        # Count only full batches (trailing incomplete batches are skipped
-        # by generate_from_messages), matching the cost-estimate API logic.
-        qualifying_batches = sum(
-            len(r) // batch_size_for_estimate
-            for r in _runs if len(r) >= batch_size_for_estimate
-        )
-
-        if qualifying_batches == 0:
-            total_unprocessed = sum(len(r) for r in _runs)
-            LOGGER.info(
-                "[metabolism] No qualifying runs for Chronicle generation "
-                "(%d unprocessed messages in %d runs, all < batch_size %d)",
-                total_unprocessed, len(_runs), batch_size_for_estimate,
+                get_usage_tracker().record_usage(
+                    model_id=usage.model,
+                    input_tokens=usage.input_tokens,
+                    output_tokens=usage.output_tokens,
+                    cached_tokens=usage.cached_tokens,
+                    cache_write_tokens=usage.cache_write_tokens,
+                    cache_ttl=usage.cache_ttl,
+                    persona_id=persona_id,
+                    building_id=building_id,
+                    node_type="cache_keepalive",
+                    playbook_name="cache_keepalive",
+                    category="cache_keepalive",
+                )
+            except Exception:
+                LOGGER.warning(
+                    "[keepalive] usage tracking failed (persona=%s)",
+                    persona_id, exc_info=True,
+                )
+            # 成功 = anchor touch → 次の keep-alive が再予約される。
+            # anchor_id は生存確認で読んだ「見張り対象 model の行」の値 (call-local)。
+            # keepalive は Beat ロックの外を走る唯一の touch なので CAS で書く —
+            # LLM 呼び出し中に anchor 前進 (§14-2 / 退場) が起きていたら、この
+            # touch は捨てられた提示ウィンドウの主張であり棄却される
+            # (Codex 3〜4巡目 2026-07-30)。
+            self.session_lifecycle.touch_anchor_after_llm_call(
+                persona, usage, anchor_id=entry.get("anchor_id"),
+                only_if_anchor_unchanged=True,
             )
-            return
-
-        unprocessed_count = qualifying_batches * batch_size_for_estimate
-        estimated_llm_calls = qualifying_batches
-
-        # Request user confirmation before generating
-        if event_callback:
-            import threading as _threading
-
-            request_id = str(uuid.uuid4())
-            confirm_event = _threading.Event()
-            self.manager._pending_permission_requests[request_id] = confirm_event
-
-            persona_name = getattr(persona, "persona_name", None)
-            display_model = model_config.get("display_name", model_name)
-
-            event_callback({
-                "type": "chronicle_confirm",
-                "request_id": request_id,
-                "unprocessed_messages": unprocessed_count,
-                "total_messages": len(all_messages),
-                "estimated_llm_calls": estimated_llm_calls,
-                "model_name": display_model,
-                "persona_name": persona_name,
-            })
-            LOGGER.info(
-                "[metabolism] Sent chronicle_confirm: %d unprocessed messages, model=%s (id=%s)",
-                unprocessed_count, display_model, request_id,
-            )
-
-            # Block until user responds or timeout (60s)
-            responded = confirm_event.wait(timeout=60)
-            self.manager._pending_permission_requests.pop(request_id, None)
-            response = self.manager._permission_responses.pop(request_id, None)
-
-            if not responded or response != "allow":
-                reason = "timeout" if not responded else response
-                LOGGER.info("[metabolism] Chronicle generation skipped (user %s)", reason)
-                if event_callback:
-                    event_callback({
-                        "type": "warning",
-                        "content": "Chronicle生成をスキップしました。",
-                        "warning_code": "chronicle_skipped",
-                        "display": "toast",
-                    })
-                return
-            LOGGER.info("[metabolism] Chronicle generation approved by user")
-        else:
-            # No event_callback (e.g. auto pulse without UI) — skip generation
-            LOGGER.info("[metabolism] No event_callback — skipping Chronicle generation confirmation (%d unprocessed)", unprocessed_count)
-            return
-
-        # Notify frontend that generation is starting
-        if event_callback:
-            event_callback({
-                "type": "metabolism",
-                "status": "running",
-                "content": f"Chronicleを生成しています (0/{unprocessed_count})...",
-            })
-
-        # Build progress callback for streaming status to frontend
-        def progress_fn(processed, total):
-            if event_callback:
-                event_callback({
-                    "type": "metabolism",
-                    "status": "running",
-                    "content": f"Chronicleを生成しています ({processed}/{total})...",
-                })
-
-        # Build cancellation check from cancellation token
-        cancel_fn = None
-        if cancellation_token:
-            cancel_fn = lambda: cancellation_token.is_cancelled()
-
-        batch_size = int(os.getenv("MEMORY_WEAVE_BATCH_SIZE", str(DEFAULT_BATCH_SIZE)))
-        generator = ArasujiGenerator(
-            client, adapter.conn,
-            batch_size=batch_size,
-            consolidation_size=10,
-            persona_id=getattr(persona, "persona_id", None),
-        )
-        level1, consolidated = generator.generate_unprocessed(
-            all_messages,
-            progress_callback=progress_fn,
-            cancel_check=cancel_fn,
-        )
         LOGGER.info(
-            "[metabolism] Chronicle generation complete: %d level1, %d consolidated entries",
-            len(level1), len(consolidated),
+            "[keepalive] cache keep-alive completed (persona=%s model=%s "
+            "cache_read=%s cache_write=%s)",
+            persona_id, model_key,
+            getattr(usage, "cached_tokens", None),
+            getattr(usage, "cache_write_tokens", None),
         )
+        return True
 
-        # Notify frontend that generation is complete
-        if event_callback:
-            event_callback({
-                "type": "metabolism",
-                "status": "completed",
-                "content": f"Chronicle生成完了: {len(level1)}件のエントリを作成しました。",
-            })
+    def _is_auto_recall_enabled_for_persona(self, persona) -> bool:
+        """Check per-persona 自動想起 (記憶アーキv2 ゾーン C) トグルを DB から確認する。
+
+        False の場合、sea/runtime_context.py の _maybe_inject_auto_recall は
+        末尾注入を行わず、粘着台帳もリセットする。手動想起 (recall_entry /
+        recall_navigate スペル) には影響しない。デフォルト True。
+        """
+        persona_id = getattr(persona, "persona_id", None)
+        if not persona_id or not self.manager:
+            return True  # fallback: enabled
+        db = self.manager.SessionLocal()
+        try:
+            from database.models import AI as AIModel
+            ai = db.query(AIModel).filter_by(AIID=persona_id).first()
+            return ai.AUTO_RECALL_ENABLED if ai else True
+        finally:
+            db.close()
+
+    def _is_spell_enabled_for_persona(self, persona) -> bool:
+        """Check per-persona spell system toggle from DB."""
+        persona_id = getattr(persona, "persona_id", None)
+        if not persona_id or not self.manager:
+            return False  # fallback: disabled
+        db = self.manager.SessionLocal()
+        try:
+            from database.models import AI as AIModel
+            ai = db.query(AIModel).filter_by(AIID=persona_id).first()
+            return ai.SPELL_ENABLED if ai else False
+        finally:
+            db.close()
+
+    def _is_realtime_info_enabled_for_persona(self, persona) -> bool:
+        """Check per-persona realtime info injection toggle from DB."""
+        persona_id = getattr(persona, "persona_id", None)
+        if not persona_id or not self.manager:
+            return True  # fallback: enabled
+        db = self.manager.SessionLocal()
+        try:
+            from database.models import AI as AIModel
+            ai = db.query(AIModel).filter_by(AIID=persona_id).first()
+            return ai.REALTIME_INFO_ENABLED if ai else True
+        finally:
+            db.close()
 
     # ---------------- context preparation -----------------
 
-    def _prepare_context(self, persona: Any, building_id: str, user_input: Optional[str], requirements: Optional[Any] = None, pulse_id: Optional[str] = None, exclude_pulse_id: Optional[str] = None, warnings: Optional[List[Dict[str, Any]]] = None, preview_only: bool = False, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None, cancellation_token: Optional[Any] = None) -> List[Dict[str, Any]]:
+    def _prepare_context(self, persona: Any, building_id: str, user_input: Optional[str], requirements: Optional[Any] = None, pulse_id: Optional[str] = None, warnings: Optional[List[Dict[str, Any]]] = None, preview_only: bool = False, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None, cancellation_token: Optional[Any] = None, pulse_type: Optional[str] = None, model_key: Optional[str] = None, context_meta: Optional[Dict[str, Any]] = None, persona_voiced: bool = False, persist_anchor_advance: bool = True, pinned_anchor_id: Optional[str] = None) -> List[Dict[str, Any]]:
         return prepare_context_impl(
             self,
             persona,
@@ -1690,11 +2152,16 @@ class SEARuntime:
             user_input,
             requirements=requirements,
             pulse_id=pulse_id,
-            exclude_pulse_id=exclude_pulse_id,
             warnings=warnings,
             preview_only=preview_only,
             event_callback=event_callback,
             cancellation_token=cancellation_token,
+            pulse_type=pulse_type,
+            model_key=model_key,
+            context_meta=context_meta,
+            persona_voiced=persona_voiced,
+            persist_anchor_advance=persist_anchor_advance,
+            pinned_anchor_id=pinned_anchor_id,
         )
 
     # ---- Context Preview (read-only, no side effects) ----
@@ -1780,10 +2247,29 @@ class SEARuntime:
         """
         from datetime import datetime
 
+        # Per-persona toggle: ペルソナ設定で OFF なら、リアルタイム情報セクション
+        # 自体を一切組み立てず送らない (現在時刻・前回発言時刻・空間情報すべて含む)。
+        if not self._is_realtime_info_enabled_for_persona(persona):
+            LOGGER.debug(
+                "[sea][realtime-context] Skipped: REALTIME_INFO_ENABLED is off for persona %s",
+                getattr(persona, "persona_id", None),
+            )
+            return None
+
         sections: List[str] = []
 
         # 1. Current timestamp
-        now = datetime.now(persona.timezone)
+        # 仮想クロック (一日シミュレータ) 有効時は仮想時刻を見せる。実時刻を
+        # 注入すると、判断プロンプト側の仮想時刻 (saiverse.clock 経由) と head の
+        # 「現在時刻」が矛盾し、ペルソナの世界像が実時計に引っ張られる
+        # (2026-07-05 実 LLM シム 異常 #3: 09:00 起床なのに時間割が 15:00 始まり)。
+        # 実モードでは従来どおり persona.timezone の実時刻 (挙動不変)。
+        from saiverse import clock
+
+        if clock.is_virtual():
+            now = clock.now()  # naive ローカル (シナリオの仮想時刻)
+        else:
+            now = datetime.now(persona.timezone)
         weekday_names = ["月", "火", "水", "木", "金", "土", "日"]
         current_time_str = now.strftime(f"%Y年%m月%d日({weekday_names[now.weekday()]}) %H:%M")
         sections.append(f"現在時刻: {current_time_str}")
@@ -1842,7 +2328,11 @@ class SEARuntime:
         if not sections:
             return None
 
-        # Format as user message with <system> wrapper (compatible with all LLM providers)
+        # user role + <system> タグ統一形式 (詳細: sea/runtime_llm.py の同様の
+        # 自動ラップ箇所のコメント参照)。Gemini 等が messages 中途の system role
+        # を受け付けないため、role='user' + <system>...</system> で全プロバイダ
+        # 共通の「指示扱いブロック」として送る。system role に直すと Gemini
+        # 互換が壊れる — 「system っぽいから system role にしたい」直感は誤り。
         content = "<system>\n## リアルタイム情報\n" + "\n".join(f"- {s}" for s in sections) + "\n</system>"
         return {
             "role": "user",
@@ -1851,12 +2341,25 @@ class SEARuntime:
         }
 
     def _choose_playbook(self, kind: str, persona: Any, building_id: str) -> PlaybookSchema:
-        """Resolve playbook by kind with DB→disk→fallback."""
-        candidates = ["meta_user" if kind == "user" else "meta_auto", "basic_chat"]
-        for name in candidates:
-            pb = self._load_playbook_for(name, persona, building_id)
-            if pb:
-                return pb
+        """Resolve playbook by kind with DB→disk→fallback.
+
+        kind="user" のみサポート。auto 系 Pulse は meta_playbook 指定で走るのが
+        不変条件だが、未指定のままここへ落ちる呼び出しは**存在しうる** —
+        run_meta_user 側が pulse_type を見て WARNING を出す (散文の不変条件は
+        破られても無音だった実績あり、autonomous_pulse_vehicle.md §D)。
+
+        対ユーザー会話の Pulse は UserConversationTrackHandler が事前に
+        対ユーザー Track を running 化 + Track コンテキストを注入してから
+        メインラインを起動するため、Playbook は `track_user_conversation`
+        (Phase 3 の 1-LLM + Spell 構成) を使う。
+
+        最終フォールバックの `_basic_chat_playbook()` (in-memory) は、
+        `track_user_conversation` が DB / disk のどちらにも存在しない
+        異常系での保険として残置 (絶対にここに到達しないことを期待)。
+        """
+        pb = self._load_playbook_for("track_user_conversation", persona, building_id)
+        if pb:
+            return pb
         return self._basic_chat_playbook()
 
     def _basic_chat_playbook(self) -> PlaybookSchema:

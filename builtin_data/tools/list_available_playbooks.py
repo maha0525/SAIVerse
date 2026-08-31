@@ -12,15 +12,54 @@ from sqlalchemy.orm import sessionmaker
 
 from database.paths import default_db_path
 from database.models import Base, Playbook, PlaybookPermission
-from saiverse.data_paths import get_saiverse_home
 from tools.context import get_active_persona_id, get_active_manager, get_auto_mode
 from tools.core import ToolSchema
 
-# Credential type → file that must exist in persona directory
-_CREDENTIAL_FILES: dict[str, str] = {
-    "x": "x_credentials.json",
-    # "email": "email_config.json",  # future
+
+def _has_x_credentials(persona_id: str) -> bool:
+    """True iff the persona has an X account connected via saiverse-x-addon."""
+    try:
+        from saiverse.addon_config import get_params
+        params = get_params("saiverse-x-addon", persona_id=persona_id)
+        return bool(params.get("x_access_token") and params.get("x_user_id"))
+    except Exception:
+        _log.warning("Failed to check X credentials for persona %s", persona_id, exc_info=True)
+        return False
+
+
+# Credential type → checker(persona_id) -> bool
+_CREDENTIAL_CHECKERS: dict[str, "callable[[str], bool]"] = {
+    "x": _has_x_credentials,
 }
+
+
+def has_required_playbook_credentials(
+    required_credentials: object,
+    persona_id: Optional[str],
+) -> bool:
+    """Return whether every declared credential is available to the persona.
+
+    DB rows store JSON text while ``PlaybookSchema`` stores a list.  Keeping
+    both representations behind one helper prevents the prompt listing and
+    execute-time ``run_playbook`` gate from drifting apart.
+    """
+    if not required_credentials:
+        return True
+    try:
+        required = (
+            json.loads(required_credentials)
+            if isinstance(required_credentials, str)
+            else required_credentials
+        )
+    except (json.JSONDecodeError, TypeError):
+        return False
+    if not isinstance(required, list) or not persona_id:
+        return False
+    for credential_type in required:
+        checker = _CREDENTIAL_CHECKERS.get(str(credential_type))
+        if checker is None or not checker(persona_id):
+            return False
+    return True
 
 
 def list_available_playbooks(persona_id: Optional[str] = None, building_id: Optional[str] = None) -> str:
@@ -95,18 +134,11 @@ def list_available_playbooks(persona_id: Optional[str] = None, building_id: Opti
                 include = False
 
             # Check required credentials
-            if include and pb.required_credentials:
-                try:
-                    req_creds = json.loads(pb.required_credentials)
-                    if req_creds and persona_id:
-                        persona_dir = get_saiverse_home() / "personas" / persona_id
-                        for cred_type in req_creds:
-                            cred_file = _CREDENTIAL_FILES.get(cred_type)
-                            if not cred_file or not (persona_dir / cred_file).exists():
-                                include = False
-                                break
-                except (json.JSONDecodeError, TypeError):
-                    _log.warning("Invalid required_credentials JSON for playbook %s", pb.name)
+            if include and not has_required_playbook_credentials(
+                pb.required_credentials,
+                persona_id,
+            ):
+                include = False
 
             # Check city-scoped permission
             if include:

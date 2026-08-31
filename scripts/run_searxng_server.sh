@@ -21,6 +21,10 @@ fi
 
 python_bin="${VENV_DIR}/bin/python"
 
+# Re-merge settings (picks up SAIVerse default changes + user overrides)
+echo "[INFO] Merging SearXNG settings..." >&2
+"${python_bin}" "${SCRIPT_DIR}/merge_searxng_settings.py"
+
 export SEARXNG_SETTINGS_PATH="${SETTINGS_PATH}"
 export SEARXNG_PORT="${PORT}"
 export SEARXNG_BIND_ADDRESS="${BIND_ADDRESS}"

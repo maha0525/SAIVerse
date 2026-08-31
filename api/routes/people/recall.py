@@ -137,6 +137,7 @@ def _recall_single_query(adapter, query: str, topk: int, start_ts=None, end_ts=N
             scope=adapter.settings.scope,
             exclude_message_ids=set(),
             required_tags=["conversation"],
+            exclude_tags=["handy_tool", "spell"],
         )
 
     hits = []
@@ -287,6 +288,7 @@ def _recall_keywords_only(adapter, keywords: list, topk: int, start_ts=None, end
         messages = get_all_messages_for_search(
             adapter.conn,
             required_tags=["conversation"],
+            exclude_tags=["handy_tool", "spell"],
         )
 
     print(f"[KEYWORD DEBUG] Got {len(messages)} messages to search", flush=True)
@@ -445,3 +447,151 @@ def _recall_hybrid(adapter, query: str, keywords: list, topk: int, rrf_k: int, s
 
     print(f"[HYBRID DEBUG] Returning {len(hits)} hits", flush=True)
     return hits
+
+
+# ---------------------------------------------------------------------------
+# Unified Recall (Chronicle + Memopedia)
+# ---------------------------------------------------------------------------
+
+from pydantic import BaseModel
+from typing import List, Optional
+
+
+class UnifiedRecallRequest(BaseModel):
+    query: str
+    topk: Optional[int] = None
+    focus: Optional[str] = None
+    search_chronicle: bool = True
+    search_memopedia: bool = True
+    search_fragments: bool = True
+    search_messages: bool = True
+    # 消費済み知覚バッチ (W14 §10.5 の読み口)。unified_recall 本体の既定は
+    # False (opt-in) だが、ユーザー向けの Memory タブ検索は「退場付記の集約から
+    # 全文へ到達する」入口なので既定 ON。
+    search_perceptions: bool = True
+
+
+class UnifiedRecallHit(BaseModel):
+    source_type: str
+    source_id: str
+    title: str
+    content: str
+    score: float
+    uri: str
+    level: Optional[int] = None
+    category: Optional[str] = None
+    start_time: Optional[int] = None
+    end_time: Optional[int] = None
+    message_count: Optional[int] = None
+    entity_id: Optional[str] = None
+    chronicle_entry_id: Optional[str] = None
+    source_date: Optional[str] = None
+
+
+class UnifiedRecallResponse(BaseModel):
+    query: str
+    total_hits: int
+    hits: List[UnifiedRecallHit]
+
+
+@router.post("/{persona_id}/unified-recall", response_model=UnifiedRecallResponse)
+def unified_recall_endpoint(
+    persona_id: str,
+    request: UnifiedRecallRequest,
+    manager=Depends(get_manager),
+):
+    """Search across Chronicle and Memopedia using embeddings."""
+    import logging
+    logger = logging.getLogger(__name__)
+    query = request.query.strip()
+    if not query:
+        raise HTTPException(status_code=400, detail="Query is required")
+
+    with get_adapter(persona_id, manager) as adapter:
+        try:
+            if not adapter.can_embed():
+                raise HTTPException(status_code=400, detail="Embedding model not available")
+
+            from sai_memory.arasuji import init_arasuji_tables
+            from sai_memory.memopedia import init_memopedia_tables
+            init_arasuji_tables(adapter.conn)
+            init_memopedia_tables(adapter.conn)
+
+            from sai_memory.unified_recall import unified_recall
+            hits = unified_recall(
+                adapter.conn,
+                adapter.embedder,
+                query,
+                topk=request.topk,
+                focus=request.focus,
+                search_chronicle=request.search_chronicle,
+                search_memopedia=request.search_memopedia,
+                search_fragments=request.search_fragments,
+                search_messages=request.search_messages,
+                search_perceptions=request.search_perceptions,
+                persona_id=persona_id,
+            )
+
+            # Enrich hits with full content (same as the tool does)
+            from sai_memory.arasuji.storage import get_entry
+            from sai_memory.memopedia.storage import get_page
+            from sai_memory.memory.storage import get_message
+            for h in hits:
+                if h.source_type == "chronicle":
+                    entry = get_entry(adapter.conn, h.source_id)
+                    if entry:
+                        h.content = entry.content
+                elif h.source_type == "memopedia":
+                    page = get_page(adapter.conn, h.source_id)
+                    if page:
+                        h.content = page.summary or ""
+                elif h.source_type == "message":
+                    msg = get_message(adapter.conn, h.source_id)
+                    if msg:
+                        h.content = msg.content
+                elif h.source_type == "perception":
+                    # 全文への到達手段 (W14 §10.5): 抜粋でなくバッチの確定文面
+                    # (rendered_text) をそのまま返す。
+                    try:
+                        bid = int(str(h.source_id).split(":", 1)[1])
+                        row = adapter.conn.execute(
+                            "SELECT rendered_text FROM perception_batches "
+                            "WHERE id = ?",
+                            (bid,),
+                        ).fetchone()
+                        if row and row[0]:
+                            h.content = row[0]
+                    except Exception:
+                        logger.debug(
+                            "[unified-recall] perception full-text fetch failed",
+                            exc_info=True,
+                        )
+
+            return UnifiedRecallResponse(
+                query=query,
+                total_hits=len(hits),
+                hits=[
+                    UnifiedRecallHit(
+                        source_type=h.source_type,
+                        source_id=h.source_id,
+                        title=h.title,
+                        content=h.content,
+                        score=h.score,
+                        uri=h.uri,
+                        level=h.level,
+                        category=h.category,
+                        start_time=h.start_time,
+                        end_time=h.end_time,
+                        message_count=h.message_count,
+                        entity_id=h.entity_id,
+                        chronicle_entry_id=h.chronicle_entry_id,
+                        source_date=h.source_date,
+                    )
+                    for h in hits
+                ],
+            )
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception("Unified recall failed")
+            raise HTTPException(status_code=500, detail=f"Unified recall failed: {e}")

@@ -4,16 +4,69 @@ from __future__ import annotations
 
 import difflib
 import json
+import logging
+import re
 import sqlite3
 import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
-# Category constants
+LOGGER = logging.getLogger(__name__)
+
+# Category constants (後方互換のため残す — 新規コードは CATEGORY_DEFS を使うこと)
 CATEGORY_PEOPLE = "people"
 CATEGORY_TERMS = "terms"
 CATEGORY_PLANS = "plans"
+CATEGORY_EVENTS = "events"
+# テーマ (旧 Note の後継、P3c①)。entity_extractor の抽出対象4カテゴリには
+# 含めない — テーマは本人が立てるもので、抽出で自動生成しない
+# (新規テーマの命名は P4 代謝の領分。sai_memory/theme_pages.py 参照)。
+CATEGORY_THEME = "theme"
+
+
+@dataclass(frozen=True)
+class CategoryDef:
+    """カテゴリ定義。全フラグはここが唯一の真実の源。"""
+
+    key: str
+    label: str
+    label_en: str
+    order: int
+    in_tree: bool = True
+    hide_when_empty: bool = False
+    extractable: bool = False
+    writable: bool = False
+    metabolizable: bool = False
+
+
+CATEGORY_DEFS: Dict[str, CategoryDef] = {
+    "people": CategoryDef("people", "人物", "People", order=1, in_tree=True, extractable=True, writable=True, metabolizable=True),
+    "terms": CategoryDef("terms", "用語", "Terms", order=2, in_tree=True, extractable=True, writable=True, metabolizable=True),
+    "plans": CategoryDef("plans", "計画", "Plans", order=3, in_tree=True, extractable=True, writable=True, metabolizable=True),
+    "events": CategoryDef("events", "出来事", "Events", order=4, in_tree=True, extractable=True, writable=True, metabolizable=True),
+    "theme": CategoryDef("theme", "テーマ", "Themes", order=5, in_tree=True, hide_when_empty=True),
+    "core": CategoryDef("core", "コア記憶", "Core Memory", order=6, in_tree=False),
+    "chronicle": CategoryDef("chronicle", "クロニクル", "Chronicle", order=7, in_tree=False),
+}
+
+
+def category_keys(role: str) -> List[str]:
+    """role フラグが True のカテゴリキーを order 順で返す。
+
+    role: "in_tree" | "extractable" | "writable" | "metabolizable" | "hide_when_empty"
+    """
+    return [
+        d.key
+        for d in sorted(CATEGORY_DEFS.values(), key=lambda d: d.order)
+        if getattr(d, role, False)
+    ]
+
+
+def category_label(key: str) -> str:
+    """カテゴリキーに対応する日本語ラベルを返す。未知キーはキーそのものを返す。"""
+    return CATEGORY_DEFS[key].label if key in CATEGORY_DEFS else key
+
 
 INITIAL_ROOTS = [
     {
@@ -32,9 +85,16 @@ INITIAL_ROOTS = [
     },
     {
         "id": "root_plans",
-        "title": "予定",
+        "title": "計画",
         "category": CATEGORY_PLANS,
         "summary": "進行中や計画中のプロジェクト・予定",
+        "content": "",
+    },
+    {
+        "id": "root_events",
+        "title": "出来事",
+        "category": CATEGORY_EVENTS,
+        "summary": "出来事、体験、時事的な話題",
         "content": "",
     },
 ]
@@ -53,10 +113,15 @@ class MemopediaPage:
     created_at: int
     updated_at: int
     keywords: List[str] = field(default_factory=list)
-    vividness: str = "rough"  # vivid, rough, faint, buried
+    # P4-c (concept_consolidation.md): vividness は廃止済み (2026-07-11)。
+    # カラムは DB に死置き — 読み書き経路から除去済み。
+    # vivid→机移行: vivid_to_desk_migration.py が adapter init 時に一回きり実行済み。
+    vividness: str = "rough"  # DEAD: vivid, rough, faint, buried (廃止)
     is_trunk: bool = False  # True if this page is a trunk (category container)
     is_important: bool = False  # True if page should not decay below "rough"
-    last_referenced_at: Optional[int] = None  # Timestamp of last reference (for vividness decay)
+    last_referenced_at: Optional[int] = None  # Timestamp of last reference
+    metadata: Optional[Dict[str, Any]] = None  # Additional metadata (e.g., persona_id)
+    short_id: Optional[int] = None  # Per-DB sequential ID (m:1, m:2, ...)
     children: List["MemopediaPage"] = field(default_factory=list)
 
     def to_dict(self, include_children: bool = True) -> Dict[str, Any]:
@@ -74,6 +139,8 @@ class MemopediaPage:
             "is_trunk": self.is_trunk,
             "is_important": self.is_important,
             "last_referenced_at": self.last_referenced_at,
+            "metadata": self.metadata,
+            "short_id": self.short_id,
         }
         if include_children:
             result["children"] = [c.to_dict(include_children=True) for c in self.children]
@@ -102,6 +169,94 @@ class PageEditHistory:
     ref_end_message_id: Optional[str]
     edit_type: str  # 'create', 'update', 'append', 'delete'
     edit_source: Optional[str]  # 'ai_conversation', 'manual', 'api', etc.
+    # Snapshot of the page state BEFORE this edit was applied. Required for
+    # reliable rollback. NULL for legacy entries recorded before v0.3.0 — those
+    # cannot be rolled back (rollback_page returns an error for such entries).
+    before_title: Optional[str] = None
+    before_summary: Optional[str] = None
+    before_content: Optional[str] = None
+
+
+@dataclass
+class MemopediaFragment:
+    """A single fragment of knowledge linked to an entity and optionally to a Chronicle entry."""
+
+    id: str
+    content: str
+    entity_id: str
+    chronicle_entry_id: Optional[str] = None
+    vividness: str = "vivid"
+    source_date: Optional[str] = None
+    created_at: int = 0
+
+
+def _backfill_short_ids(conn: sqlite3.Connection) -> None:
+    """Assign short_id to existing pages that lack one (migration helper)."""
+    cur = conn.execute(
+        "SELECT id FROM memopedia_pages WHERE short_id IS NULL ORDER BY created_at"
+    )
+    rows = cur.fetchall()
+    max_cur = conn.execute(
+        "SELECT COALESCE(MAX(short_id), 0) FROM memopedia_pages"
+    )
+    next_id = max_cur.fetchone()[0] + 1
+    for (page_id,) in rows:
+        conn.execute(
+            "UPDATE memopedia_pages SET short_id = ? WHERE id = ?",
+            (next_id, page_id),
+        )
+        next_id += 1
+    if rows:
+        conn.commit()
+
+
+def _next_short_id(conn: sqlite3.Connection) -> int:
+    """Return the next short_id for a new page (MAX + 1, first is 1)."""
+    cur = conn.execute("SELECT COALESCE(MAX(short_id), 0) FROM memopedia_pages")
+    return cur.fetchone()[0] + 1
+
+
+_SHORT_ID_RE = re.compile(r"^memopedia:(\d+)$", re.IGNORECASE)
+# saiverse://self/memopedia/{key}  /  saiverse://{city}/{persona}/memopedia/{key}
+# 参照アドレッシング統一で page/ 階層は平坦化済み。key は short_id が主・UUID も可。
+_MEMOPEDIA_URI_KEY_RE = re.compile(
+    r"^saiverse://[^/]+(?:/[^/]+)?/memopedia/(?P<key>[^?/]+)"
+)
+
+
+def resolve_page_ref(conn: sqlite3.Connection, ref: str) -> Optional[str]:
+    """ページ参照を実 page_id (UUID) に解決する単一の入口。
+
+    参照アドレッシング統一の AI 可視キーは short_id (``memopedia:N``)。この関数が
+    全経路 (memopedia_note / list_fragments / get_page / open_page / uri_resolver 等)
+    の入力正規化を担う。受理する形:
+
+    - ``memopedia:N`` / 素の数字 ``N`` → short_id で page を引く (AI 可視の主形式)
+    - ``saiverse://.../memopedia/{key}`` URI → key を取り出して再解決
+    - UUID / prefix → そのまま (get_page 側の prefix フォールバックに委ねる)
+
+    見つからなければ None。
+    """
+    ref = ref.strip()
+    # URI ならキーを取り出して再帰的に解く。
+    m = _MEMOPEDIA_URI_KEY_RE.match(ref)
+    if m:
+        ref = m.group("key")
+    # memopedia:N か素の数字は short_id。
+    sm = _SHORT_ID_RE.match(ref)
+    if sm:
+        sid = int(sm.group(1))
+    elif ref.isdigit():
+        sid = int(ref)
+    else:
+        sid = None
+    if sid is not None:
+        cur = conn.execute(
+            "SELECT id FROM memopedia_pages WHERE short_id = ?", (sid,)
+        )
+        row = cur.fetchone()
+        return row[0] if row else None
+    return ref
 
 
 def init_memopedia_tables(conn: sqlite3.Connection) -> None:
@@ -135,6 +290,12 @@ def init_memopedia_tables(conn: sqlite3.Connection) -> None:
     except sqlite3.OperationalError:
         conn.execute("ALTER TABLE memopedia_pages ADD COLUMN keywords TEXT DEFAULT '[]'")
 
+    # Migration: add metadata column if it doesn't exist
+    try:
+        conn.execute("SELECT metadata FROM memopedia_pages LIMIT 1")
+    except sqlite3.OperationalError:
+        conn.execute("ALTER TABLE memopedia_pages ADD COLUMN metadata TEXT")
+
     # Migration: add is_deleted column for soft delete
     try:
         conn.execute("SELECT is_deleted FROM memopedia_pages LIMIT 1")
@@ -164,6 +325,13 @@ def init_memopedia_tables(conn: sqlite3.Connection) -> None:
         conn.execute("SELECT last_referenced_at FROM memopedia_pages LIMIT 1")
     except sqlite3.OperationalError:
         conn.execute("ALTER TABLE memopedia_pages ADD COLUMN last_referenced_at INTEGER")
+
+    # Migration: add short_id column (per-DB sequential ID for m:N references)
+    try:
+        conn.execute("SELECT short_id FROM memopedia_pages LIMIT 1")
+    except sqlite3.OperationalError:
+        conn.execute("ALTER TABLE memopedia_pages ADD COLUMN short_id INTEGER")
+        _backfill_short_ids(conn)
 
     conn.execute(
         """
@@ -208,6 +376,62 @@ def init_memopedia_tables(conn: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_memopedia_edit_history_page ON memopedia_page_edit_history(page_id)"
     )
 
+    # Migration: add before-snapshot columns for reliable rollback (v0.3.0+).
+    # Pre-existing rows have NULL in these columns and are not rollback-capable.
+    try:
+        conn.execute("SELECT before_title FROM memopedia_page_edit_history LIMIT 1")
+    except sqlite3.OperationalError:
+        conn.execute("ALTER TABLE memopedia_page_edit_history ADD COLUMN before_title TEXT")
+        conn.execute("ALTER TABLE memopedia_page_edit_history ADD COLUMN before_summary TEXT")
+        conn.execute("ALTER TABLE memopedia_page_edit_history ADD COLUMN before_content TEXT")
+
+    # Embeddings for Memopedia pages (used by unified recall)
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS memopedia_embeddings (
+            page_id TEXT PRIMARY KEY,
+            vector TEXT NOT NULL,
+            FOREIGN KEY (page_id) REFERENCES memopedia_pages(id)
+        )
+        """
+    )
+
+    # Fragment tables for fine-grained knowledge linked to entity pages
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS memopedia_fragments (
+            id TEXT PRIMARY KEY,
+            content TEXT NOT NULL,
+            entity_id TEXT NOT NULL,
+            chronicle_entry_id TEXT,
+            vividness TEXT DEFAULT 'vivid',
+            source_date TEXT,
+            created_at INTEGER NOT NULL,
+            FOREIGN KEY (entity_id) REFERENCES memopedia_pages(id)
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_fragments_entity ON memopedia_fragments(entity_id)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_fragments_chronicle ON memopedia_fragments(chronicle_entry_id)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_fragments_vividness ON memopedia_fragments(vividness)"
+    )
+
+    # Embeddings for Memopedia fragments (used by unified recall)
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS memopedia_fragment_embeddings (
+            fragment_id TEXT PRIMARY KEY,
+            vector TEXT NOT NULL,
+            FOREIGN KEY (fragment_id) REFERENCES memopedia_fragments(id)
+        )
+        """
+    )
+
     conn.commit()
 
     # Seed root pages if they don't exist
@@ -222,12 +446,37 @@ def _seed_root_pages(conn: sqlite3.Connection) -> None:
         if cur.fetchone() is None:
             conn.execute(
                 """
-                INSERT INTO memopedia_pages (id, parent_id, title, summary, content, category, created_at, updated_at)
-                VALUES (?, NULL, ?, ?, ?, ?, ?, ?)
+                INSERT INTO memopedia_pages (id, parent_id, title, summary, content, category, created_at, updated_at, is_trunk)
+                VALUES (?, NULL, ?, ?, ?, ?, ?, ?, 1)
                 """,
                 (root["id"], root["title"], root["summary"], root["content"], root["category"], now, now),
             )
+    # P4-0 ラベル統一 (予定→計画) の既存 DB 追従: trunk タイトルはデータなので
+    # INITIAL_ROOTS の変更だけでは新規 DB にしか効かない。既定名のまま
+    # (=ユーザーがリネームしていない) 場合のみ冪等に揃える。
+    conn.execute(
+        "UPDATE memopedia_pages SET title = '計画' WHERE id = 'root_plans' AND title = '予定'"
+    )
+    # カテゴリルートは trunk (カテゴリコンテナ)。旧 seed が is_trunk を立てて
+    # いなかったため既存 DB を冪等にバックフィルする (新しい root_core /
+    # root_theme と同じ扱いに揃える)。trunk 除外フィルタ (編纂検知・想起・
+    # 目次) がルートに効くための前提。updated_at は変えない — 編集来歴の
+    # 窓集計 (新聞) に「編集」として現れないように。
+    root_ids = [root["id"] for root in INITIAL_ROOTS]
+    placeholders = ",".join("?" for _ in root_ids)
+    conn.execute(
+        f"UPDATE memopedia_pages SET is_trunk = 1 "
+        f"WHERE id IN ({placeholders}) AND (is_trunk = 0 OR is_trunk IS NULL)",
+        root_ids,
+    )
     conn.commit()
+
+
+_PAGE_SELECT_COLS = (
+    "id, parent_id, title, summary, content, category, "
+    "created_at, updated_at, keywords, vividness, is_trunk, "
+    "is_important, last_referenced_at, metadata, short_id"
+)
 
 
 def _row_to_page(row: tuple) -> MemopediaPage:
@@ -251,6 +500,17 @@ def _row_to_page(row: tuple) -> MemopediaPage:
     # Get last_referenced_at (column index 12, defaults to None)
     last_referenced_at = int(row[12]) if len(row) > 12 and row[12] else None
 
+    # Parse metadata JSON (column index 13, defaults to None)
+    metadata_json = row[13] if len(row) > 13 else None
+    metadata = None
+    if metadata_json:
+        try:
+            metadata = json.loads(metadata_json)
+        except (json.JSONDecodeError, TypeError):
+            metadata = None
+
+    short_id = int(row[14]) if len(row) > 14 and row[14] is not None else None
+
     return MemopediaPage(
         id=row[0],
         parent_id=row[1],
@@ -265,6 +525,8 @@ def _row_to_page(row: tuple) -> MemopediaPage:
         is_trunk=is_trunk,
         is_important=is_important,
         last_referenced_at=last_referenced_at,
+        metadata=metadata,
+        short_id=short_id,
     )
 
 
@@ -282,20 +544,30 @@ def create_page(
     keywords: Optional[List[str]] = None,
     vividness: str = "rough",
     is_trunk: bool = False,
+    metadata: Optional[Dict[str, Any]] = None,
     page_id: Optional[str] = None,
+    commit: bool = True,
 ) -> MemopediaPage:
-    """Create a new page."""
+    """Create a new page.
+
+    ``commit=False`` は呼び出し側が複数書き込みを単一トランザクションに
+    束ねるとき用 (Chronicle のチャンク単位 tx / 親子束ね — W4 D4/D6)。
+    その場合、呼び出し側が conn.commit() / rollback() の責任を持つ。
+    """
     pid = page_id or str(uuid.uuid4())
     now = int(time.time())
     kw_list = keywords or []
+    metadata_json = json.dumps(metadata) if metadata else None
+    sid = _next_short_id(conn)
     conn.execute(
         """
-        INSERT INTO memopedia_pages (id, parent_id, title, summary, content, category, created_at, updated_at, keywords, vividness, is_trunk, is_important, last_referenced_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO memopedia_pages (id, parent_id, title, summary, content, category, created_at, updated_at, keywords, vividness, is_trunk, is_important, last_referenced_at, metadata, short_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (pid, parent_id, title, summary, content, category, now, now, json.dumps(kw_list), vividness, int(is_trunk), 0, now),
+        (pid, parent_id, title, summary, content, category, now, now, json.dumps(kw_list), vividness, int(is_trunk), 0, now, metadata_json, sid),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
     return MemopediaPage(
         id=pid,
         parent_id=parent_id,
@@ -309,13 +581,19 @@ def create_page(
         vividness=vividness,
         is_trunk=is_trunk,
         last_referenced_at=now,
+        metadata=metadata,
+        short_id=sid,
     )
 
 
 def get_page(conn: sqlite3.Connection, page_id: str) -> Optional[MemopediaPage]:
-    """Get a page by ID (exact match, with prefix fallback)."""
+    """Get a page by ID, short ref (m:N), or prefix fallback."""
+    resolved = resolve_page_ref(conn, page_id)
+    if resolved is None:
+        return None
+    page_id = resolved
     cur = conn.execute(
-        "SELECT id, parent_id, title, summary, content, category, created_at, updated_at, keywords, vividness, is_trunk, is_important, last_referenced_at FROM memopedia_pages WHERE id = ?",
+        f"SELECT {_PAGE_SELECT_COLS} FROM memopedia_pages WHERE id = ?",
         (page_id,),
     )
     row = cur.fetchone()
@@ -325,7 +603,7 @@ def get_page(conn: sqlite3.Connection, page_id: str) -> Optional[MemopediaPage]:
     # Fallback: prefix match for truncated IDs (e.g. first 8 chars)
     if len(page_id) < 36:
         cur = conn.execute(
-            "SELECT id, parent_id, title, summary, content, category, created_at, updated_at, keywords, vividness, is_trunk, is_important, last_referenced_at FROM memopedia_pages WHERE id LIKE ? LIMIT 1",
+            f"SELECT {_PAGE_SELECT_COLS} FROM memopedia_pages WHERE id LIKE ? LIMIT 1",
             (f"{page_id}%",),
         )
         row = cur.fetchone()
@@ -345,11 +623,32 @@ def update_page(
     vividness: Optional[str] = None,
     is_trunk: Optional[bool] = None,
     is_important: Optional[bool] = None,
+    metadata: Optional[Dict[str, Any]] = None,
     parent_id: Optional[str] = ...,  # Use ... as sentinel for "not provided"
+    commit: bool = True,
 ) -> Optional[MemopediaPage]:
-    """Update a page's fields. Only provided fields are updated."""
+    """Update a page's fields. Only provided fields are updated.
+
+    ``commit=False`` は呼び出し側が複数書き込みを単一トランザクションに束ねる
+    とき用 (``create_page`` と同じ流儀)。その場合、呼び出し側が
+    ``conn.commit()`` / ``rollback()`` の責任を持つ。
+    """
     page = get_page(conn, page_id)
     if page is None:
+        return None
+
+    # Chronicle エントリの親替えはこの汎用 API では行わない (move_pages_to_parent
+    # と同じ保護境界 — 現行の呼び出し元に parent_id を渡すものは無い)。
+    if (
+        parent_id is not ...
+        and page.category == "chronicle"
+        and parent_id != page.parent_id
+    ):
+        import logging
+        logging.getLogger(__name__).warning(
+            "[memopedia] refusing to reparent chronicle page %s via update_page "
+            "(boundary guard)", page_id,
+        )
         return None
 
     new_title = title if title is not None else page.title
@@ -359,30 +658,163 @@ def update_page(
     new_vividness = vividness if vividness is not None else page.vividness
     new_is_trunk = is_trunk if is_trunk is not None else page.is_trunk
     new_is_important = is_important if is_important is not None else page.is_important
+    new_metadata = metadata if metadata is not None else page.metadata
     new_parent_id = parent_id if parent_id is not ... else page.parent_id
     now = int(time.time())
 
     conn.execute(
         """
         UPDATE memopedia_pages
-        SET title = ?, summary = ?, content = ?, keywords = ?, vividness = ?, is_trunk = ?, is_important = ?, parent_id = ?, updated_at = ?
+        SET title = ?, summary = ?, content = ?, keywords = ?, vividness = ?, is_trunk = ?, is_important = ?, parent_id = ?, updated_at = ?, metadata = ?
         WHERE id = ?
         """,
-        (new_title, new_summary, new_content, json.dumps(new_keywords), new_vividness, int(new_is_trunk), int(new_is_important), new_parent_id, now, page_id),
+        (new_title, new_summary, new_content, json.dumps(new_keywords), new_vividness, int(new_is_trunk), int(new_is_important), new_parent_id, now, json.dumps(new_metadata), page_id),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
     return get_page(conn, page_id)
 
 
-def delete_page(conn: sqlite3.Connection, page_id: str) -> bool:
-    """Delete a page and all its descendants."""
+def _detach_chronicle_page(conn: sqlite3.Connection, page: "MemopediaPage") -> None:
+    """異常配置の chronicle ページを正規の「未統合」状態へ退避する。
+
+    delete_page の境界ガードが、通常ページ配下へ移動された chronicle 行を
+    見つけたときの修復。単なる親替えでは足りない (2026-08-19 Codex 第七巡 #1):
+
+    1. root_chronicle の存在保証 (無い DB で親替えすると宙づり参照になる)。
+    2. parent_id='root_chronicle' と **metadata.is_consolidated=0 の同時更新** —
+       統合済み (is_consolidated=1) のまま root 直下に置くと、束ね (bands) の
+       「未統合だけを数える」勘定から漏れ続ける半端な状態になる。
+    3. 旧親 Chronicle (Lv2+) が生きていれば、その source_ids から退避した子への
+       参照を外す — 残すと「source に居るのに子として繋がっていない」宙づり参照
+       が解体・再編纂の照合を混乱させる。
+    """
+    import logging
+    _logger = logging.getLogger(__name__)
+
+    # 1. root_chronicle の存在保証 (arasuji 側の冪等ヘルパーを使う)。
+    try:
+        from sai_memory.arasuji.storage import _ensure_root_chronicle
+        _ensure_root_chronicle(conn)
+    except Exception:
+        _logger.warning(
+            "[memopedia] could not ensure root_chronicle before detaching %s",
+            page.id, exc_info=True,
+        )
+
+    # 2. 親替え + is_consolidated=0 の同時更新。
+    meta = dict(page.metadata or {})
+    meta["is_consolidated"] = 0
+    conn.execute(
+        "UPDATE memopedia_pages SET parent_id = 'root_chronicle', "
+        "metadata = ?, updated_at = ? WHERE id = ?",
+        (json.dumps(meta, ensure_ascii=False), int(time.time()), page.id),
+    )
+
+    # 3. 旧親 Chronicle の source_ids 整合: 退避した子を参照している生きた
+    #    chronicle ページから外す (LIKE で絞って JSON parse で確定)。
+    try:
+        rows = conn.execute(
+            "SELECT id, metadata FROM memopedia_pages "
+            "WHERE category = 'chronicle' AND id != ? AND metadata LIKE ?",
+            (page.id, f"%{page.id}%"),
+        ).fetchall()
+        for parent_id_, meta_json in rows:
+            try:
+                pmeta = json.loads(meta_json) if meta_json else None
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(pmeta, dict):
+                continue
+            source_ids = pmeta.get("source_ids")
+            if not (isinstance(source_ids, list) and page.id in source_ids):
+                continue
+            pmeta["source_ids"] = [s for s in source_ids if s != page.id]
+            if "source_count" in pmeta:
+                pmeta["source_count"] = len(pmeta["source_ids"])
+            conn.execute(
+                "UPDATE memopedia_pages SET metadata = ? WHERE id = ?",
+                (json.dumps(pmeta, ensure_ascii=False), parent_id_),
+            )
+            _logger.info(
+                "[memopedia] removed detached chronicle child %s from parent "
+                "%s source_ids", page.id, parent_id_,
+            )
+    except Exception:
+        _logger.warning(
+            "[memopedia] old-parent source_ids cleanup failed while detaching %s",
+            page.id, exc_info=True,
+        )
+    conn.commit()
+
+
+def delete_page(
+    conn: sqlite3.Connection, page_id: str, *, allow_chronicle: bool = False,
+) -> bool:
+    """Delete a page and all its descendants, including fragments.
+
+    **Chronicle 境界 (2026-08-19 Codex 第六巡 #1)**: chronicle カテゴリのページは
+    ``allow_chronicle=True`` を明示した呼び出しだけが消せる。入口 (Memopedia
+    core の拒否・import/clear の除外) の検査は境界の保証ではない — 「Chronicle を
+    通常ページ配下へ移動 → 一括 clear」の並びで、この関数の**子孫再帰**が
+    カテゴリを見ずに物理削除する迂回路が実在した。守りたい結果 (Chronicle 行が
+    消えない) はここ = 実際に DELETE を発行する場所で検査する。Chronicle の
+    正規削除 (arasuji storage の delete_entry 系 / clear_all_entries / cleanup
+    スクリプト) は本関数を通らず自前の SQL + 付記印返却で行うため、現行の
+    本番コードに ``allow_chronicle=True`` を渡す呼び出しは存在しない。
+
+    拒否の単位は**該当 chronicle サブツリーの skip** (削除全体は継続):
+    既存セマンティクスは再帰の各行が個別 commit する非原子設計で、「全体を
+    失敗させる」形は後付けできない (拒否に気づいた時点で子は消えている)。
+    かつ全体失敗型は、異常配置の chronicle 1 行が通常ページの削除を恒久に
+    人質に取る。skip した chronicle は root_chronicle 直下へ退避する —
+    親が直後に消えても宙づり参照にならない (view は parent を見ないので
+    可視性は変わらず、退避は「未統合」状態として正規の形)。
+    """
+    page = get_page(conn, page_id)
+    if (
+        page is not None
+        and page.category == "chronicle"
+        and not allow_chronicle
+    ):
+        import logging
+        logging.getLogger(__name__).warning(
+            "[memopedia] refusing to hard-delete chronicle page %s "
+            "(boundary guard); detaching it back under root_chronicle", page_id,
+        )
+        if page.parent_id != "root_chronicle" and page.id != "root_chronicle":
+            parent = get_page(conn, page.parent_id) if page.parent_id else None
+            if parent is None or parent.category != "chronicle":
+                # 異常配置 (通常ページ配下) の修復: 正規の未統合位置へ戻す。
+                _detach_chronicle_page(conn, page)
+        return False
+
     # First, recursively delete children
     children = get_children(conn, page_id)
     for child in children:
-        delete_page(conn, child.id)
+        delete_page(conn, child.id, allow_chronicle=allow_chronicle)
 
+    # Delete fragment embeddings, then fragments
+    conn.execute(
+        "DELETE FROM memopedia_fragment_embeddings WHERE fragment_id IN "
+        "(SELECT id FROM memopedia_fragments WHERE entity_id = ?)",
+        (page_id,),
+    )
+    conn.execute("DELETE FROM memopedia_fragments WHERE entity_id = ?", (page_id,))
     # Delete page states
     conn.execute("DELETE FROM memopedia_page_states WHERE page_id = ?", (page_id,))
+    # Chronicle ページ (arasuji entry) が消える場合は知覚バッチの付記印を
+    # 同一 tx で返す — カテゴリを問わず呼んで無害 (chronicle 以外のページを
+    # 指す印は存在しない)。詳細は perception_buffer.unmark_batches_annexed。
+    from sai_memory.perception_buffer import unmark_batches_annexed
+    unmark_batches_annexed(conn, [page_id])
+    # 想起用タグの辺 (chunk_page_edges) も同一 tx で落とす。ここは**実体ページ
+    # 側**の物理削除経路 (Memopedia.clear_all_pages /
+    # import_json(clear_existing=True)) —— 辺に外部キーは無いので、残すと
+    # 「このチャンクに居合わせた実体」が存在しないページを指す。両向き消える
+    # 関数なので、chronicle を allow_chronicle=True で消す場合もここで片付く。
+    from sai_memory.memory.recall_edges import delete_chunk_page_edges
+    delete_chunk_page_edges(conn, [page_id])
     # Delete the page itself
     conn.execute("DELETE FROM memopedia_pages WHERE id = ?", (page_id,))
     conn.commit()
@@ -391,18 +823,18 @@ def delete_page(conn: sqlite3.Connection, page_id: str) -> bool:
 
 def get_children(conn: sqlite3.Connection, parent_id: Optional[str]) -> List[MemopediaPage]:
     """Get all non-deleted direct children of a page."""
+    # 列は _PAGE_SELECT_COLS に揃える。旧: 独自の短い列リストで metadata /
+    # short_id が欠け、get_children 経由のページだけ short_id=None になっていた
     if parent_id is None:
         cur = conn.execute(
-            """SELECT id, parent_id, title, summary, content, category, created_at, updated_at,
-                      keywords, vividness, is_trunk, is_important, last_referenced_at
+            f"""SELECT {_PAGE_SELECT_COLS}
                FROM memopedia_pages
                WHERE parent_id IS NULL AND (is_deleted = 0 OR is_deleted IS NULL)
                ORDER BY title""",
         )
     else:
         cur = conn.execute(
-            """SELECT id, parent_id, title, summary, content, category, created_at, updated_at,
-                      keywords, vividness, is_trunk, is_important, last_referenced_at
+            f"""SELECT {_PAGE_SELECT_COLS}
                FROM memopedia_pages
                WHERE parent_id = ? AND (is_deleted = 0 OR is_deleted IS NULL)
                ORDER BY title""",
@@ -414,7 +846,7 @@ def get_children(conn: sqlite3.Connection, parent_id: Optional[str]) -> List[Mem
 def get_all_pages(conn: sqlite3.Connection) -> List[MemopediaPage]:
     """Get all non-deleted pages."""
     cur = conn.execute(
-        "SELECT id, parent_id, title, summary, content, category, created_at, updated_at, keywords, vividness, is_trunk, is_important, last_referenced_at FROM memopedia_pages WHERE is_deleted = 0 OR is_deleted IS NULL ORDER BY category, title"
+        f"SELECT {_PAGE_SELECT_COLS} FROM memopedia_pages WHERE is_deleted = 0 OR is_deleted IS NULL ORDER BY category, title"
     )
     return [_row_to_page(row) for row in cur.fetchall()]
 
@@ -423,13 +855,82 @@ def get_pages_by_category(conn: sqlite3.Connection, category: str) -> List[Memop
     """Get all non-deleted pages in a category."""
     cur = conn.execute(
         """SELECT id, parent_id, title, summary, content, category, created_at, updated_at,
-                  keywords, vividness, is_trunk, is_important, last_referenced_at
+                  keywords, vividness, is_trunk, is_important, last_referenced_at, metadata
            FROM memopedia_pages
            WHERE category = ? AND (is_deleted = 0 OR is_deleted IS NULL)
            ORDER BY title""",
         (category,),
     )
     return [_row_to_page(row) for row in cur.fetchall()]
+
+
+def get_page_by_title(
+    conn: sqlite3.Connection,
+    title: str,
+    *,
+    category: Optional[str] = None,
+) -> Optional[MemopediaPage]:
+    """Get a page by exact title match.
+
+    Args:
+        conn: Database connection
+        title: Page title to search for
+        category: Optional category filter
+
+    Returns:
+        MemopediaPage if found, None otherwise
+    """
+    if category:
+        cur = conn.execute(
+            """SELECT id, parent_id, title, summary, content, category, created_at, updated_at,
+                      keywords, vividness, is_trunk, is_important, last_referenced_at, metadata
+               FROM memopedia_pages
+               WHERE title = ? AND category = ? AND (is_deleted = 0 OR is_deleted IS NULL)
+               LIMIT 1""",
+            (title, category),
+        )
+    else:
+        cur = conn.execute(
+            """SELECT id, parent_id, title, summary, content, category, created_at, updated_at,
+                      keywords, vividness, is_trunk, is_important, last_referenced_at, metadata
+               FROM memopedia_pages
+               WHERE title = ? AND (is_deleted = 0 OR is_deleted IS NULL)
+               LIMIT 1""",
+            (title,),
+        )
+    row = cur.fetchone()
+    if row:
+        return _row_to_page(row)
+    return None
+
+
+def get_page_by_persona_id(
+    conn: sqlite3.Connection,
+    persona_id: str,
+) -> Optional[MemopediaPage]:
+    """Get a page by persona_id in metadata.
+
+    Args:
+        conn: Database connection
+        persona_id: Persona ID to search for in metadata
+
+    Returns:
+        MemopediaPage if found, None otherwise
+    """
+    cur = conn.execute(
+        """SELECT id, parent_id, title, summary, content, category, created_at, updated_at,
+                  keywords, vividness, is_trunk, is_important, last_referenced_at, metadata
+           FROM memopedia_pages
+           WHERE metadata IS NOT NULL
+           AND json_extract(metadata, '$.persona_id') = ?
+           AND (is_deleted = 0 OR is_deleted IS NULL)
+           LIMIT 1""",
+        (persona_id,),
+    )
+    row = cur.fetchone()
+    if row:
+        return _row_to_page(row)
+    return None
 
 
 def build_tree(conn: sqlite3.Connection) -> Dict[str, List[MemopediaPage]]:
@@ -456,14 +957,20 @@ def build_tree(conn: sqlite3.Connection) -> Dict[str, List[MemopediaPage]]:
         _attach_children(root)
 
     # Organize by category
-    result: Dict[str, List[MemopediaPage]] = {
-        CATEGORY_PEOPLE: [],
-        CATEGORY_TERMS: [],
-        CATEGORY_PLANS: [],
-    }
+    # (core / chronicle カテゴリの trunk は意図的に含めない — コア記憶は
+    #  常時開の head 常設、Chronicle は時間の地図として別導線を持つ)
+    result: Dict[str, List[MemopediaPage]] = {k: [] for k in category_keys("in_tree")}
+    unknown_cats: set = set()
     for root in roots:
         if root.category in result:
             result[root.category].append(root)
+        elif root.category not in CATEGORY_DEFS:
+            unknown_cats.add(root.category)
+    if unknown_cats:
+        LOGGER.warning(
+            "build_tree: unknown categories skipped (not in CATEGORY_DEFS): %s",
+            sorted(unknown_cats),
+        )
 
     return result
 
@@ -568,18 +1075,18 @@ def record_update_log(
 
 def find_page_by_title(conn: sqlite3.Connection, title: str, category: Optional[str] = None) -> Optional[MemopediaPage]:
     """Find a non-deleted page by exact title match, optionally filtered by category."""
+    # _PAGE_SELECT_COLS を使う (旧・手書き列リストは short_id / metadata を
+    # 落としていた — search_pages と同族の欠落。P2c-2 でついで修正)
     if category:
         cur = conn.execute(
-            """SELECT id, parent_id, title, summary, content, category, created_at, updated_at,
-                      keywords, vividness, is_trunk, is_important, last_referenced_at
+            f"""SELECT {_PAGE_SELECT_COLS}
                FROM memopedia_pages
                WHERE title = ? AND category = ? AND (is_deleted = 0 OR is_deleted IS NULL)""",
             (title, category),
         )
     else:
         cur = conn.execute(
-            """SELECT id, parent_id, title, summary, content, category, created_at, updated_at,
-                      keywords, vividness, is_trunk, is_important, last_referenced_at
+            f"""SELECT {_PAGE_SELECT_COLS}
                FROM memopedia_pages
                WHERE title = ? AND (is_deleted = 0 OR is_deleted IS NULL)""",
             (title,),
@@ -594,9 +1101,8 @@ def search_pages(conn: sqlite3.Connection, query: str, limit: int = 10) -> List[
     """Search non-deleted pages by title or content (simple LIKE search)."""
     pattern = f"%{query}%"
     cur = conn.execute(
-        """
-        SELECT id, parent_id, title, summary, content, category, created_at, updated_at,
-               keywords, vividness, is_trunk, is_important, last_referenced_at
+        f"""
+        SELECT {_PAGE_SELECT_COLS}
         FROM memopedia_pages
         WHERE (title LIKE ? OR summary LIKE ? OR content LIKE ?)
           AND (is_deleted = 0 OR is_deleted IS NULL)
@@ -620,7 +1126,7 @@ def search_pages_filtered(
     Args:
         conn: Database connection
         query: Search keyword (LIKE match on title, summary, content)
-        category: Optional category filter ("people", "terms", "plans")
+        category: Optional category filter (CATEGORY_DEFS のキー, e.g. "people")
         limit: Maximum results
 
     Returns:
@@ -657,7 +1163,7 @@ def search_pages_filtered(
     cur = conn.execute(
         f"""
         SELECT id, parent_id, title, summary, content, category, created_at, updated_at,
-               keywords, vividness, is_trunk, is_important, last_referenced_at
+               keywords, vividness, is_trunk, is_important, last_referenced_at, metadata
         FROM memopedia_pages
         WHERE {where_clause}
         ORDER BY updated_at DESC
@@ -675,6 +1181,11 @@ def generate_diff(old_content: str, new_content: str, context_lines: int = 3) ->
     """Generate a unified diff between old and new content."""
     old_lines = old_content.splitlines(keepends=True)
     new_lines = new_content.splitlines(keepends=True)
+    # Ensure last line ends with \n to prevent concatenation in "".join()
+    if old_lines and not old_lines[-1].endswith('\n'):
+        old_lines[-1] += '\n'
+    if new_lines and not new_lines[-1].endswith('\n'):
+        new_lines[-1] += '\n'
     diff = difflib.unified_diff(
         old_lines,
         new_lines,
@@ -695,66 +1206,48 @@ def record_page_edit(
     ref_start_message_id: Optional[str] = None,
     ref_end_message_id: Optional[str] = None,
     edit_source: Optional[str] = None,
+    before_title: Optional[str] = None,
+    before_summary: Optional[str] = None,
+    before_content: Optional[str] = None,
+    commit: bool = True,
 ) -> str:
-    """Record an edit history entry for a page."""
+    """Record an edit history entry for a page.
+
+    The before_* arguments capture the page state immediately before this
+    edit. They are used by rollback_page to restore the page reliably. For
+    'create' edits the before state is empty strings (the page didn't exist).
+
+    ``commit=False`` は呼び出し側が複数ページの書き込みを単一トランザクションへ
+    束ねるとき用 (``create_page`` と同じ流儀)。その場合、呼び出し側が
+    ``conn.commit()`` / ``rollback()`` の責任を持つ。一括変換のように途中失敗で
+    部分適用が残ると困る経路では必ず ``False`` にすること。
+    """
     edit_id = str(uuid.uuid4())
     now = int(time.time())
     conn.execute(
         """
         INSERT INTO memopedia_page_edit_history
-        (id, page_id, edited_at, diff_text, ref_start_message_id, ref_end_message_id, edit_type, edit_source)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        (id, page_id, edited_at, diff_text, ref_start_message_id, ref_end_message_id,
+         edit_type, edit_source, before_title, before_summary, before_content)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (edit_id, page_id, now, diff_text, ref_start_message_id, ref_end_message_id, edit_type, edit_source),
+        (
+            edit_id, page_id, now, diff_text, ref_start_message_id, ref_end_message_id,
+            edit_type, edit_source, before_title, before_summary, before_content,
+        ),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
     return edit_id
 
 
-def get_page_edit_history(
-    conn: sqlite3.Connection,
-    page_id: str,
-    limit: int = 50,
-) -> List[PageEditHistory]:
-    """Get the edit history for a page, ordered by most recent first."""
-    cur = conn.execute(
-        """
-        SELECT id, page_id, edited_at, diff_text, ref_start_message_id, ref_end_message_id, edit_type, edit_source
-        FROM memopedia_page_edit_history
-        WHERE page_id = ?
-        ORDER BY edited_at DESC
-        LIMIT ?
-        """,
-        (page_id, limit),
-    )
-    return [
-        PageEditHistory(
-            id=row[0],
-            page_id=row[1],
-            edited_at=row[2],
-            diff_text=row[3],
-            ref_start_message_id=row[4],
-            ref_end_message_id=row[5],
-            edit_type=row[6],
-            edit_source=row[7],
-        )
-        for row in cur.fetchall()
-    ]
+_EDIT_HISTORY_COLUMNS = (
+    "id, page_id, edited_at, diff_text, ref_start_message_id, ref_end_message_id, "
+    "edit_type, edit_source, before_title, before_summary, before_content"
+)
 
 
-def get_edit_by_id(conn: sqlite3.Connection, edit_id: str) -> Optional[PageEditHistory]:
-    """Get a single edit history entry by ID."""
-    cur = conn.execute(
-        """
-        SELECT id, page_id, edited_at, diff_text, ref_start_message_id, ref_end_message_id, edit_type, edit_source
-        FROM memopedia_page_edit_history
-        WHERE id = ?
-        """,
-        (edit_id,),
-    )
-    row = cur.fetchone()
-    if row is None:
-        return None
+def _row_to_edit_history(row) -> PageEditHistory:
     return PageEditHistory(
         id=row[0],
         page_id=row[1],
@@ -764,7 +1257,45 @@ def get_edit_by_id(conn: sqlite3.Connection, edit_id: str) -> Optional[PageEditH
         ref_end_message_id=row[5],
         edit_type=row[6],
         edit_source=row[7],
+        before_title=row[8],
+        before_summary=row[9],
+        before_content=row[10],
     )
+
+
+def get_page_edit_history(
+    conn: sqlite3.Connection,
+    page_id: str,
+    limit: int = 50,
+) -> List[PageEditHistory]:
+    """Get the edit history for a page, ordered by most recent first."""
+    cur = conn.execute(
+        f"""
+        SELECT {_EDIT_HISTORY_COLUMNS}
+        FROM memopedia_page_edit_history
+        WHERE page_id = ?
+        ORDER BY edited_at DESC
+        LIMIT ?
+        """,
+        (page_id, limit),
+    )
+    return [_row_to_edit_history(row) for row in cur.fetchall()]
+
+
+def get_edit_by_id(conn: sqlite3.Connection, edit_id: str) -> Optional[PageEditHistory]:
+    """Get a single edit history entry by ID."""
+    cur = conn.execute(
+        f"""
+        SELECT {_EDIT_HISTORY_COLUMNS}
+        FROM memopedia_page_edit_history
+        WHERE id = ?
+        """,
+        (edit_id,),
+    )
+    row = cur.fetchone()
+    if row is None:
+        return None
+    return _row_to_edit_history(row)
 
 
 # ----- Trunk operations -----
@@ -850,6 +1381,18 @@ def move_pages_to_parent(
         if page is None:
             continue
 
+        # Chronicle エントリは動かさない — 保護境界 (delete_page の chronicle
+        # ガード) の外 (通常ページ配下) へ運び出す操作は可視性破壊の族
+        # (2026-08-19 Codex 第六巡 #1)。Chronicle 内部の親替え (束ね/解体) は
+        # arasuji storage が自前の UPDATE で行い、この API を通らない。
+        if page.category == "chronicle":
+            import logging
+            logging.getLogger(__name__).warning(
+                "[memopedia] refusing to move chronicle page %s (boundary guard)",
+                page_id,
+            )
+            continue
+
         # Check for circular reference (don't allow moving a page under its own descendant)
         if _is_descendant_of(conn, new_parent_id, page_id):
             continue
@@ -903,4 +1446,110 @@ def get_unorganized_pages(conn: sqlite3.Connection, category: str) -> List[Memop
         (root_id,),
     )
     return [_row_to_page(row) for row in cur.fetchall()]
+
+
+# ----- Fragment operations -----
+
+
+def create_fragment(
+    conn: sqlite3.Connection,
+    *,
+    entity_id: str,
+    content: str,
+    chronicle_entry_id: Optional[str] = None,
+    source_date: Optional[str] = None,
+    commit: bool = True,
+) -> MemopediaFragment:
+    """Create a new fragment linked to an entity page.
+
+    ``commit=False`` は呼び出し側が複数書き込みを単一トランザクションに束ねる
+    とき用 (``create_page`` と同じ流儀)。
+    """
+    frag_id = str(uuid.uuid4())
+    now = int(time.time())
+    conn.execute(
+        """
+        INSERT INTO memopedia_fragments (id, content, entity_id, chronicle_entry_id, vividness, source_date, created_at)
+        VALUES (?, ?, ?, ?, 'vivid', ?, ?)
+        """,
+        (frag_id, content, entity_id, chronicle_entry_id, source_date, now),
+    )
+    if commit:
+        conn.commit()
+    return MemopediaFragment(
+        id=frag_id,
+        content=content,
+        entity_id=entity_id,
+        chronicle_entry_id=chronicle_entry_id,
+        vividness="vivid",
+        source_date=source_date,
+        created_at=now,
+    )
+
+
+def fragment_exists(
+    conn: sqlite3.Connection,
+    *,
+    entity_id: str,
+    content: str,
+    chronicle_entry_id: Optional[str],
+    source_date: Optional[str] = None,
+) -> bool:
+    """同じ出所 (Chronicle entry) から同じ文の Fragment が既にあるか。
+
+    拾い直し (``entity_extraction_backlog``) が同じチャンクをもう一度抽出した
+    とき、同じ知識を新しい UUID で二重に挿さないための検査。
+
+    出所を持たない抽出 (ログからの一括再構築 —— Chronicle エントリを経由しない)
+    は、**出所なしの Fragment の中で**同じページ・同じ文・**同じ日付**があるかを
+    見る。再構築を二度走らせても同じ知識が二重にならない。日付まで見るのは、
+    同じ文が別の日に出てきたら「別の日に同じことが分かった」記録であって、重複
+    ではないから (日付は Fragment に保存され、表示にも使われる)。出所のある
+    Fragment とは突き合わせない —— 同じ理由で、出所が違えば別の記録。
+    """
+    if chronicle_entry_id is None:
+        row = conn.execute(
+            "SELECT 1 FROM memopedia_fragments "
+            "WHERE entity_id = ? AND chronicle_entry_id IS NULL AND content = ? "
+            "AND source_date IS ? LIMIT 1",
+            (entity_id, content, source_date),
+        ).fetchone()
+    else:
+        row = conn.execute(
+            "SELECT 1 FROM memopedia_fragments "
+            "WHERE entity_id = ? AND chronicle_entry_id = ? AND content = ? LIMIT 1",
+            (entity_id, chronicle_entry_id, content),
+        ).fetchone()
+    return row is not None
+
+
+def get_fragments_for_entity(
+    conn: sqlite3.Connection,
+    entity_id: str,
+    *,
+    vividness_filter: Optional[List[str]] = None,
+) -> List[MemopediaFragment]:
+    """Get all fragments for an entity, optionally filtered by vividness."""
+    if vividness_filter:
+        placeholders = ",".join("?" for _ in vividness_filter)
+        rows = conn.execute(
+            f"SELECT id, content, entity_id, chronicle_entry_id, vividness, source_date, created_at "
+            f"FROM memopedia_fragments WHERE entity_id = ? AND vividness IN ({placeholders}) "
+            f"ORDER BY created_at",
+            [entity_id] + vividness_filter,
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT id, content, entity_id, chronicle_entry_id, vividness, source_date, created_at "
+            "FROM memopedia_fragments WHERE entity_id = ? ORDER BY created_at",
+            (entity_id,),
+        ).fetchall()
+    return [
+        MemopediaFragment(
+            id=r[0], content=r[1], entity_id=r[2],
+            chronicle_entry_id=r[3], vividness=r[4],
+            source_date=r[5], created_at=r[6],
+        )
+        for r in rows
+    ]
 

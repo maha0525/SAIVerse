@@ -10,6 +10,83 @@ LOGGER = logging.getLogger(__name__)
 LEGACY_MODELS_DIR = Path("models")
 
 
+# Map provider protocol to the legacy 'provider' field name used by factory.py.
+# This lets provider_ref resolution emit a config that the existing factory
+# code can consume without changes.
+_PROTOCOL_TO_LEGACY_PROVIDER = {
+    "openai_compat": "openai",
+    "ollama_compat": "ollama",
+    "anthropic_native": "anthropic",
+    "gemini_native": "gemini",
+    "xai_native": "xai",
+    "nvidia_nim": "nvidia_nim",
+    "openai_codex": "openai_codex",
+}
+
+# Fields on the model config that can be inherited from the provider when
+# unset on the model. Tuple is (model_field, provider_field).
+_INHERITABLE_FIELDS = [
+    ("base_url", "base_url"),
+    ("api_key_env", "api_key_env"),
+    ("api_key_env_alternates", "api_key_env_alternates"),
+    ("api_key_required", "api_key_required"),
+    ("convert_system_to_user", "default_convert_system_to_user"),
+    ("max_image_bytes", "default_max_image_bytes"),
+    ("supports_images", "default_supports_images"),
+    ("request_kwargs", "default_request_kwargs"),
+    ("default_headers", "default_headers"),
+    ("llama_server_binary", "llama_server_binary"),
+]
+
+
+def _resolve_provider_ref(config: Dict) -> Dict:
+    """If config has provider_ref, inherit fields from the referenced provider.
+
+    Direct fields on the model config always take priority. Provider fields
+    are used only when the corresponding model field is missing or None.
+
+    If provider_ref points to an unknown provider, logs a warning and returns
+    the original config (factory.py will fail later if required fields are
+    missing — this surfaces broken refs at runtime rather than hiding them).
+
+    Returns:
+        Resolved config dict (a shallow copy if changes were made, otherwise
+        the original dict).
+    """
+    provider_ref = config.get("provider_ref")
+    if not provider_ref:
+        return config
+
+    # Lazy import to avoid circular dependency with provider_configs
+    from .provider_configs import get_provider
+
+    provider = get_provider(provider_ref)
+    if provider is None:
+        LOGGER.warning(
+            "Model references unknown provider_ref=%r; "
+            "config will be used as-is (factory may fail if required fields are missing)",
+            provider_ref,
+        )
+        return config
+
+    resolved = dict(config)
+
+    # Map protocol -> legacy provider field for factory.py compatibility
+    protocol = provider.get("protocol")
+    if protocol:
+        if "protocol" not in resolved:
+            resolved["protocol"] = protocol
+        if "provider" not in resolved:
+            resolved["provider"] = _PROTOCOL_TO_LEGACY_PROVIDER.get(protocol, protocol)
+
+    # Inherit provider defaults for fields not set on the model
+    for model_field, provider_field in _INHERITABLE_FIELDS:
+        if resolved.get(model_field) is None and provider_field in provider:
+            resolved[model_field] = provider[provider_field]
+
+    return resolved
+
+
 def load_configs() -> Dict[str, Dict]:
     """Load model configurations from user_data and builtin_data directories.
     
@@ -18,31 +95,40 @@ def load_configs() -> Dict[str, Dict]:
     2. builtin_data/models/
     3. models/ (legacy, for backwards compatibility)
     """
-    from .data_paths import iter_files, MODELS_DIR
-    
+    from .data_paths import iter_files_with_layer, LAYER_USER_DATA, MODELS_DIR
+
     configs: Dict[str, Dict] = {}
     seen_keys: set[str] = set()
-    
-    # Load from user_data and builtin_data (iter_files handles priority)
-    for config_file in iter_files(MODELS_DIR, "*.json"):
+
+    # Load from user_data and builtin_data (the iterator handles priority and
+    # reports which root each file came from)
+    for config_file, layer in iter_files_with_layer(MODELS_DIR, "*.json"):
         try:
             config_data = json.loads(config_file.read_text(encoding="utf-8"))
-            
+
             # Extract model ID from config (required field for API calls)
             model_id = config_data.get("model")
             if not model_id:
                 LOGGER.warning("Model config %s missing 'model' field, skipping", config_file.name)
                 continue
-            
+
+            # Which layer declared this model decides what credentials it may
+            # name (see saiverse/provider_security.py). Taken from the root the
+            # loader walked and written unconditionally, so a definition cannot
+            # claim a layer it was not loaded from.
+            config_data.pop("source", None)
+
             # Use filename (without extension) as config key
             config_key = config_file.stem
             if config_key not in seen_keys:
-                configs[config_key] = config_data
+                resolved = _resolve_provider_ref(config_data)
+                resolved["source"] = layer
+                configs[config_key] = resolved
                 seen_keys.add(config_key)
                 LOGGER.debug("Loaded model config: %s (model=%s) from %s", config_key, model_id, config_file)
         except Exception as exc:
             LOGGER.warning("Failed to load model config from %s: %s", config_file.name, exc)
-    
+
     # Fallback to legacy models/ directory if no configs loaded yet
     if not configs and LEGACY_MODELS_DIR.exists() and LEGACY_MODELS_DIR.is_dir():
         for config_file in sorted(LEGACY_MODELS_DIR.glob("*.json")):
@@ -53,7 +139,12 @@ def load_configs() -> Dict[str, Dict]:
                     continue
                 config_key = config_file.stem
                 if config_key not in seen_keys:
-                    configs[config_key] = config_data
+                    config_data.pop("source", None)
+                    resolved = _resolve_provider_ref(config_data)
+                    # The legacy in-repo models/ directory predates the three
+                    # layers; it is the owner's own checkout, so treat it as such.
+                    resolved["source"] = LAYER_USER_DATA
+                    configs[config_key] = resolved
                     seen_keys.add(config_key)
             except Exception as exc:
                 LOGGER.warning("Failed to load model config from %s: %s", config_file.name, exc)
@@ -87,6 +178,17 @@ def get_model_provider(model: str) -> str:
     return config.get("provider", "ollama")
 
 
+def get_provider_for_model(model: str) -> str | None:
+    """Get the effective provider id for a model.
+
+    Returns provider_ref if set, otherwise the legacy 'provider' field value.
+    Returns None if neither is configured. Used by the UI to display which
+    provider a model belongs to.
+    """
+    config = MODEL_CONFIGS.get(model, {})
+    return config.get("provider_ref") or config.get("provider")
+
+
 def get_context_length(model: str) -> int:
     config = MODEL_CONFIGS.get(model)
     if config is None:
@@ -97,25 +199,70 @@ def get_context_length(model: str) -> int:
     return int(config.get("context_length", 120000))
 
 
-def get_default_max_history_messages(model: str) -> int | None:
-    """Get the default maximum number of history messages for a model.
+#: Metabolism の三水位 (文字数) の組み込み既定。
+#: docs/intent/chronicle_eviction.md §4 — 全モデル一律。旧「モデルごとに
+#: バラバラなメッセージ数」は切り分けの混乱の元だったため単位ごと統一した。
+#:
+#: - low (低水位): 直近保護帯。最新から遡ってこの文字数は退場させない。
+#: - target (目標水位): Metabolism で軽くする到達点。
+#: - high (高水位): 提示コンテキストがこれを超えたら Metabolism 発火。
+#:
+#: 差分の意味: high - target = 一回で削る量、target - low = 退場候補帯に残して
+#: よいバッファ (U 未満で畳めない小 episode 等)。
+#:
+#: 2026-07-30 に high 12万 → 20万・target 6万 → 10万 (まはー裁定)。12万では実運用の
+#: 会話が早々に頭打ちになっていた。一回で削る量は 6万 → 10万字。
+BUILTIN_METABOLISM_LOW_CHARS = 40_000
+BUILTIN_METABOLISM_TARGET_CHARS = 100_000
+BUILTIN_METABOLISM_HIGH_CHARS = 200_000
 
-    Returns None if not configured (falls back to character-based limit).
+
+def _metabolism_chars(model: str, key: str, builtin_default: int) -> int | None:
+    """Metabolism 水位 (文字数) を model config から読む。
+
+    キーが**無い**なら組み込み既定 (一律)。キーが有って ``null`` / 0 以下なら
+    None = その水位を持たない。high が None のとき文字数による発火は起きず、
+    ``token_triggered`` だけが Metabolism を起こす (chronicle_eviction.md §4)。
     """
     config = MODEL_CONFIGS.get(model, {})
-    val = config.get("default_max_history_messages")
-    if val is not None:
-        return int(val)
-    return None
+    if key not in config:
+        return builtin_default
+    val = config.get(key)
+    if val is None:
+        return None
+    try:
+        num = int(val)
+    except (TypeError, ValueError):
+        return builtin_default
+    return num if num > 0 else None
 
 
-def get_metabolism_keep_messages(model: str) -> int | None:
-    """Get the number of messages to keep after metabolism (low watermark).
+def get_metabolism_low_chars(model: str) -> int | None:
+    """低水位 = 直近保護帯の文字数 (model config ``metabolism_low_chars``)。"""
+    return _metabolism_chars(model, "metabolism_low_chars", BUILTIN_METABOLISM_LOW_CHARS)
 
-    Returns None if not configured (metabolism disabled for this model).
+
+def get_metabolism_target_chars(model: str) -> int | None:
+    """目標水位 = Metabolism 後に到達したい文字数 (``metabolism_target_chars``)。"""
+    return _metabolism_chars(model, "metabolism_target_chars", BUILTIN_METABOLISM_TARGET_CHARS)
+
+
+def get_metabolism_high_chars(model: str) -> int | None:
+    """高水位 = Metabolism 発火の文字数 (``metabolism_high_chars``)。
+
+    None は「文字数では発火しない」(token_triggered のみ) を意味する。
+    """
+    return _metabolism_chars(model, "metabolism_high_chars", BUILTIN_METABOLISM_HIGH_CHARS)
+
+
+def get_metabolism_token_threshold(model: str) -> int | None:
+    """Get the token threshold that triggers metabolism.
+
+    When usage.input_tokens exceeds this value after a successful LLM call,
+    metabolism is triggered. Returns None if not configured (time-based fallback).
     """
     config = MODEL_CONFIGS.get(model, {})
-    val = config.get("metabolism_keep_messages")
+    val = config.get("metabolism_token_threshold")
     if val is not None:
         return int(val)
     return None
@@ -156,6 +303,16 @@ def get_model_config(model: str) -> Dict:
 def model_supports_images(model: str) -> bool:
     config = get_model_config(model)
     return bool(config.get("supports_images"))
+
+
+def model_supports_audio(model: str) -> bool:
+    config = get_model_config(model)
+    return bool(config.get("supports_audio"))
+
+
+def model_supports_video(model: str) -> bool:
+    config = get_model_config(model)
+    return bool(config.get("supports_video"))
 
 
 def get_model_parameters(model: str) -> Dict[str, Dict[str, Any]]:
@@ -249,17 +406,6 @@ def find_model_config(query: str) -> tuple[str, Dict]:
     return "", {}
 
 
-def get_agentic_model() -> str:
-    """Get the default model for agentic tasks requiring structured output.
-
-    Priority:
-    1. SAIVERSE_AGENTIC_MODEL environment variable
-    2. Built-in default: BUILTIN_DEFAULT_LITE_MODEL (from saiverse.model_defaults)
-    """
-    import os
-    from saiverse.model_defaults import BUILTIN_DEFAULT_LITE_MODEL
-    return os.environ.get("SAIVERSE_AGENTIC_MODEL", BUILTIN_DEFAULT_LITE_MODEL)
-
 
 def get_model_pricing(model: str) -> Dict[str, Any] | None:
     """Get pricing information for a model.
@@ -270,6 +416,9 @@ def get_model_pricing(model: str) -> Dict[str, Any] | None:
         Dict with keys:
             - input_per_1m_tokens: float (USD per 1M input tokens)
             - output_per_1m_tokens: float (USD per 1M output tokens)
+            - cached_input_per_1m_tokens: float (optional cache-read rate)
+            - long_context_threshold_tokens: int (optional, exclusive threshold)
+            - long_context_*_per_1m_tokens: float (optional rates above threshold)
             - currency: str (e.g., "USD")
         Or None if pricing not configured.
     """
@@ -326,15 +475,35 @@ def calculate_cost(
         LOGGER.debug("[DEBUG] No pricing found for model: %s", model)
         return 0.0
 
-    input_rate = pricing.get("input_per_1m_tokens", 0.0)
-    output_rate = pricing.get("output_per_1m_tokens", 0.0)
+    long_context_threshold = pricing.get("long_context_threshold_tokens")
+    use_long_context_rates = (
+        isinstance(long_context_threshold, int)
+        and not isinstance(long_context_threshold, bool)
+        and input_tokens > long_context_threshold
+    )
+    rate_prefix = "long_context_" if use_long_context_rates else ""
+
+    input_rate = pricing.get(
+        f"{rate_prefix}input_per_1m_tokens",
+        pricing.get("input_per_1m_tokens", 0.0),
+    )
+    output_rate = pricing.get(
+        f"{rate_prefix}output_per_1m_tokens",
+        pricing.get("output_per_1m_tokens", 0.0),
+    )
     # Cached tokens (read): use explicit cached rate if configured, otherwise same as input rate
-    cached_rate = pricing.get("cached_input_per_1m_tokens", input_rate)
+    cached_rate = pricing.get(
+        f"{rate_prefix}cached_input_per_1m_tokens",
+        pricing.get("cached_input_per_1m_tokens", input_rate),
+    )
     # Cache write tokens: use TTL-specific rate if available
     if cache_ttl == "1h" and "cache_write_1h_per_1m_tokens" in pricing:
         cache_write_rate = pricing["cache_write_1h_per_1m_tokens"]
     else:
-        cache_write_rate = pricing.get("cache_write_per_1m_tokens", input_rate)
+        cache_write_rate = pricing.get(
+            f"{rate_prefix}cache_write_per_1m_tokens",
+            pricing.get("cache_write_per_1m_tokens", input_rate),
+        )
 
     # Non-cached input tokens (input_tokens includes cached + cache_write, so subtract both)
     non_cached_input = max(0, input_tokens - cached_tokens - cache_write_tokens)
@@ -345,11 +514,35 @@ def calculate_cost(
     output_cost = (output_tokens / 1_000_000) * output_rate
 
     total = non_cached_cost + cached_cost + cache_write_cost + output_cost
+    currency = pricing.get("currency", "USD")
     LOGGER.debug(
-        "[DEBUG] Cost calculated: $%.6f (non_cached_in=%d @ $%.4f, cached=%d @ $%.4f, cache_write=%d @ $%.4f, out=%d @ $%.4f)",
-        total, non_cached_input, input_rate, cached_tokens, cached_rate, cache_write_tokens, cache_write_rate, output_tokens, output_rate
+        "[DEBUG] Cost calculated: %.6f %s (tier=%s, non_cached_in=%d @ %.4f, cached=%d @ %.4f, cache_write=%d @ %.4f, out=%d @ %.4f)",
+        total, currency, "long" if use_long_context_rates else "standard",
+        non_cached_input, input_rate, cached_tokens, cached_rate,
+        cache_write_tokens, cache_write_rate, output_tokens, output_rate,
     )
     return total
+
+
+def calculate_cache_storage_cost(model: str, cached_tokens: int, ttl_seconds: int) -> float:
+    """Calculate explicit-cache storage cost in USD.
+
+    Gemini explicit cache bills storage as an hourly rate per 1M cached tokens,
+    prorated. We adopt a "reserved seat" model: at create time we charge the
+    FULL TTL window up front (cached_tokens x rate x ttl_hours). If a delete
+    mechanism later frees the cache early, the unused remainder is refunded as a
+    negative record. Returns 0.0 when pricing or the storage rate is absent
+    (e.g. free-tier models without a pricing block).
+
+    See docs/intent/cache_lifecycle_control.md (storage accounting).
+    """
+    pricing = get_model_pricing(model)
+    if not pricing:
+        return 0.0
+    rate = pricing.get("cache_storage_per_1m_tokens_per_hour", 0.0)
+    if rate <= 0 or cached_tokens <= 0 or ttl_seconds <= 0:
+        return 0.0
+    return (cached_tokens / 1_000_000) * rate * (ttl_seconds / 3600.0)
 
 
 def _get_required_env_vars(model: str) -> list[str]:
@@ -362,14 +555,29 @@ def _get_required_env_vars(model: str) -> list[str]:
     config = MODEL_CONFIGS.get(model, {})
     provider = config.get("provider", "")
 
+    # Providers that declare no authentication (local servers such as LM Studio
+    # or llama.cpp, which speak the OpenAI protocol but accept any key).
+    if config.get("api_key_required") is False:
+        return []
+
     # Local models need no API key
     if provider in ("ollama", "llama_cpp"):
         return []
 
-    # Explicit api_key_env in config takes priority
+    # Explicit api_key_env in config takes priority. Alternates (inherited from
+    # the provider via provider_ref, e.g. Gemini's free-tier key) are additional
+    # accepted names — the model is available if ANY of them is set, so they
+    # must be returned alongside the primary name rather than replaced by it.
     api_key_env = config.get("api_key_env")
     if api_key_env:
-        return [api_key_env]
+        names = [api_key_env]
+        alternates = config.get("api_key_env_alternates")
+        if isinstance(alternates, list):
+            names.extend(
+                alt for alt in alternates
+                if isinstance(alt, str) and alt and alt not in names
+            )
+        return names
 
     # Provider defaults
     if provider == "anthropic":

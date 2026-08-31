@@ -6,6 +6,8 @@
 
 SAIVerseでは、複数のCityを独立したインスタンスとして起動し、ネットワーク経由で連携させることができます。ペルソナは他のCityに「訪問」し、そこで活動することが可能です。
 
+> 🧊 **凍結中（2026-07-16 裁定）・入口封鎖済み**: multi-city 機能は凍結が確定し、入口は明示的に封鎖されている — `/inter-city/*` と `/persona-proxy/{id}/think` API は 503 + 凍結メッセージを返し、`VisitingAI` / `ThinkingRequest` の DB polling は起動しない。dispatch 確定処理が未実装のまま二 City 同時 presence を作る欠陥が一次監査で判明したため（→ [landscape §8](../overview/landscape.md) / [SDS](../concepts/sds.md)）。復活時は監査の修正方針を正典に再設計する。以下は凍結前の仕様の記録。
+
 ## アーキテクチャ
 
 ```
@@ -93,4 +95,5 @@ UIから切り替え可能：
 
 ## 次のステップ
 
-- [アーキテクチャ](../concepts/architecture.md) - システム全体像
+- [俯瞰地図 landscape.md](../overview/landscape.md) - システム全体像（SDS は §8）
+- [SDS](../concepts/sds.md) - ディレクトリサービスの概念

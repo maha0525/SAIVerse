@@ -6,10 +6,69 @@ import logging
 import re
 from typing import Any, Dict, Optional
 
+from .playbook_models import RESERVED_STATE_PREFIX
 from .runtime_utils import _format
 
 
 LOGGER = logging.getLogger(__name__)
+
+
+def effective_auto_mode(state: Dict[str, Any], fallback: bool = False) -> bool:
+    """「この Pulse の応答ループにユーザーが居ないか」を state から読む。
+
+    ノードを組み立てる factory は compile 時の生の ``auto_mode`` 引数を capture
+    できるが、実効値は state の ``_auto_mode`` 側にある (親 Pulse からの単調 OR
+    継承が入るのはそちらだけ)。真実の置き場を一つにするため、ノードの実行時は
+    必ずこちらを読む。
+
+    ``fallback`` は state に ``_auto_mode`` が無いとき (LangGraph を経ない直接
+    呼び出し・テスト) の値で、呼び出し側が capture した引数を渡す。
+    """
+    value = state.get("_auto_mode")
+    if value is None:
+        return bool(fallback)
+    return bool(value)
+
+
+def playbook_write_key(name: Any, where: str) -> Optional[str]:
+    """Playbook 宣言由来の名前を state の書き込み先として検査する。
+
+    ``_`` で始まる名前は runtime のシステム変数 (``_messages`` /
+    ``_pulse_context`` / ``_spell_enabled`` / ``_cancellation_token`` …) の
+    領域で、Playbook 側の宣言から書けてはならない。ロード時の
+    ``PlaybookSchema`` validator が fail-closed で弾くが、不変条件を「全ての
+    ロード経路が validator を通ること」だけに預けないため、値が実際に効く
+    書き込み点でも同じ判定を通す。
+
+    ``{key}.{sub}`` のような派生キーを組む場合も、基点の名前をここで通して
+    から組み立てること (基点が安全なら派生も安全になる)。
+
+    Returns:
+        書いてよい名前。禁止なら ``None`` (WARNING を残す)。
+    """
+    if not isinstance(name, str) or not name:
+        return None
+    if name.startswith(RESERVED_STATE_PREFIX):
+        LOGGER.warning(
+            "[sea][state] Refusing playbook write to reserved '_' namespace: "
+            "%s = '%s'", where, name,
+        )
+        return None
+    return name
+
+
+def set_playbook_var(state: Dict[str, Any], name: Any, value: Any, where: str) -> bool:
+    """Playbook が宣言した名前で state へ書く唯一の口 (判定は
+    :func:`playbook_write_key` 一箇所)。
+
+    Returns:
+        書いたら True、拒否したら False。
+    """
+    key = playbook_write_key(name, where)
+    if key is None:
+        return False
+    state[key] = value
+    return True
 
 
 def process_structured_output(node_def: Any, text: Any, state: Dict[str, Any]) -> bool:
@@ -18,7 +77,7 @@ def process_structured_output(node_def: Any, text: Any, state: Dict[str, Any]) -
         return False
 
     node_id = getattr(node_def, "id", "?")
-    LOGGER.debug("[sea] _process_structured_output: node=%s, text type=%s", node_id, type(text).__name__)
+    LOGGER.debug("[sea] _process_structured_output: node=%s, text type=%s, len=%s, repr=%r", node_id, type(text).__name__, len(text) if isinstance(text, str) else "(not str)", text if isinstance(text, str) and len(text) < 200 else "(truncated)" if isinstance(text, str) else text)
 
     parsed: Optional[Dict[str, Any]]
     if isinstance(text, dict):
@@ -71,8 +130,8 @@ def apply_output_mapping(state: Dict[str, Any], output_key: str, mapping: Dict[s
             value = resolve_nested_value(output_data, source_path)
 
         if value is not None:
-            state[target_key] = value
-            LOGGER.debug("[sea] output_mapping: %s -> %s = %s", source_path, target_key, str(value))
+            if set_playbook_var(state, target_key, value, where="output_mapping target"):
+                LOGGER.debug("[sea] output_mapping: %s -> %s = %s", source_path, target_key, str(value))
         else:
             LOGGER.warning(
                 "[sea] output_mapping: failed to resolve %s from %s (keys: %s)",
@@ -104,9 +163,13 @@ def resolve_nested_value(data: Any, path: str) -> Any:
 
 
 def store_structured_result(state: Dict[str, Any], key: str, data: Any) -> None:
-    state[key] = data
+    # 基点の名前だけ検査すれば、派生する "{key}.{path}" も同じ判定に乗る。
+    safe_key = playbook_write_key(key, where="structured output key")
+    if safe_key is None:
+        return
+    state[safe_key] = data
     for path, value in flatten_dict(data).items():
-        state[f"{key}.{path}"] = value
+        state[f"{safe_key}.{path}"] = value
 
 
 def flatten_dict(value: Any, prefix: str = "") -> Dict[str, Any]:
@@ -158,8 +221,10 @@ def resolve_state_value(state: Dict[str, Any], key: str) -> Any:
 
 
 def extract_structured_json(text: str) -> Optional[Dict[str, Any]]:
+    LOGGER.debug("[sea] extract_structured_json: CALLED with text type=%s, len=%d", type(text).__name__, len(text))
     candidate = text.strip()
     if not candidate:
+        LOGGER.debug("[sea] extract_structured_json: candidate is empty after strip")
         return None
     if candidate.startswith("```"):
         for seg in candidate.split("```"):
@@ -171,41 +236,18 @@ def extract_structured_json(text: str) -> Optional[Dict[str, Any]]:
         match = re.search(r"\{.*\}", candidate, re.DOTALL)
         if match:
             candidate = match.group(0)
+    LOGGER.debug("[sea] extract_structured_json: attempting to parse JSON, candidate (first 200 chars): %s", candidate[:200])
     try:
         parsed = json.loads(candidate)
-    except Exception:
+        LOGGER.debug("[sea] extract_structured_json: json.loads succeeded, type(parsed)=%s", type(parsed).__name__)
+    except Exception as e:
+        LOGGER.warning("[sea] extract_structured_json: JSON parse failed: %s", e, exc_info=True)
+        LOGGER.debug("[sea] extract_structured_json: candidate text (first 500 chars): %s", candidate[:500])
         return None
-    return parsed if isinstance(parsed, dict) else None
-
-
-def update_router_selection(state: Dict[str, Any], text: str, parsed: Optional[Dict[str, Any]] = None) -> None:
-    selection = parsed or {}
-    playbook_value = selection.get("playbook") if isinstance(selection, dict) else None
-    if not playbook_value:
-        playbook_value = selection.get("playbook_name") if isinstance(selection, dict) else None
-
-    available_names: list[str] = []
-    try:
-        avail_raw = state.get("available_playbooks")
-        avail_list = json.loads(avail_raw) if isinstance(avail_raw, str) else avail_raw
-        if isinstance(avail_list, list):
-            for pb in avail_list:
-                pb_name = pb.get("name") if isinstance(pb, dict) else None
-                if isinstance(pb_name, str) and pb_name:
-                    available_names.append(pb_name)
-    except Exception:
-        LOGGER.warning("Failed to parse available_playbooks from state", exc_info=True)
-
-    if not playbook_value:
-        stripped = str(text).strip()
-        playbook_value = stripped.split()[0] if stripped else "basic_chat"
-
-    if available_names and playbook_value not in available_names:
-        playbook_value = "basic_chat"
-
-    state["selected_playbook"] = playbook_value or "basic_chat"
-    args_obj = selection.get("args") if isinstance(selection, dict) else None
-    state["selected_args"] = args_obj if isinstance(args_obj, dict) else {"input": state.get("input")}
+    if not isinstance(parsed, dict):
+        LOGGER.warning("[sea] extract_structured_json: parsed is not a dict, type=%s, value=%s", type(parsed).__name__, str(parsed)[:200])
+        return None
+    return parsed
 
 
 def resolve_set_value(value_template: Any, state: Dict[str, Any]) -> Any:

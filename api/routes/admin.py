@@ -1,6 +1,7 @@
-from fastapi import APIRouter, HTTPException, BackgroundTasks
+from fastapi import APIRouter, HTTPException, BackgroundTasks, Depends
 from pydantic import BaseModel
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Any
+from api.deps import get_manager
 import os
 import sys
 import re
@@ -61,11 +62,7 @@ def get_env_vars():
         if key and key not in seen_keys:
             vars_list.append(EnvVar(
                 key=key,
-                value=value, # Frontend should mask if sensitive, or we mask here? 
-                             # Strategy: Send real value but flag it. 
-                             # Security risk? Usually admin needs to see value to edit.
-                             # But `ui/env_settings.py` masked it.
-                             # Let's mask it here for safety, and only support overwriting logic.
+                value="********" if is_sensitive(key) and value else value,
                 is_sensitive=is_sensitive(key)
             ))
             seen_keys.add(key)
@@ -186,3 +183,24 @@ def restart_server(background_tasks: BackgroundTasks):
 
     background_tasks.add_task(_restart)
     return {"success": True, "message": "Server restarting..."}
+
+
+class BackfillRequest(BaseModel):
+    building_id: Optional[str] = None
+    persona_id: Optional[str] = None
+    dry_run: bool = False
+
+
+@router.post("/backfill-item-descriptions")
+def backfill_item_descriptions(req: BackfillRequest, manager=Depends(get_manager)) -> Dict[str, Any]:
+    """Batch-generate descriptions for picture items with placeholder text."""
+    try:
+        result = manager.backfill_item_descriptions(
+            building_id=req.building_id or None,
+            persona_id=req.persona_id or None,
+            dry_run=req.dry_run,
+        )
+        return result
+    except Exception as exc:
+        LOGGER.error("Backfill failed: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(exc))

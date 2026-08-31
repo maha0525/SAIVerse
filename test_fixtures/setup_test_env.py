@@ -110,7 +110,7 @@ def seed_database(definitions: dict):
         city_data = definitions["city"]
         city = City(USERID=user_data["USERID"], **city_data)
         session.add(city)
-        LOGGER.info(f"Added city: {city_data['CITYNAME']}")
+        LOGGER.info(f"Added city: {city_data['CITY_SLUG']}")
 
         # Add buildings
         for bldg_data in definitions["buildings"]:
@@ -155,7 +155,7 @@ def import_playbooks(definitions: dict):
         LOGGER.info("No playbooks to import.")
         return
 
-    playbooks_dir = PROJECT_ROOT / "sea" / "playbooks" / "public"
+    playbooks_dir = PROJECT_ROOT / "builtin_data" / "playbooks" / "public"
     if not playbooks_dir.exists():
         LOGGER.warning(f"Playbooks directory not found: {playbooks_dir}")
         return

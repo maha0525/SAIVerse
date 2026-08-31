@@ -13,8 +13,20 @@ def _default_developer_mode() -> bool:
     return os.environ.get("SAIVERSE_DEVELOPER_MODE", "").lower() in ("1", "true", "yes")
 
 
-def _default_x_polling_enabled() -> bool:
-    return os.environ.get("SAIVERSE_X_POLLING_ENABLED", "").lower() in ("1", "true", "yes")
+def _default_image_quality() -> str:
+    val = os.environ.get("SAIVERSE_IMAGE_DEFAULT_QUALITY", "high").lower()
+    if val in ("low", "medium", "high"):
+        return val
+    return "high"
+
+
+def _default_media_recall_enabled() -> bool:
+    """添付メディア (画像/音声/動画) の概要を自動想起クエリに使うかの既定値。
+
+    既定 OFF (概要生成を待つのはオプション扱い)。ON にすると添付があるとき
+    数秒待って内容を読み取ってから応答を生成する (sea/auto_recall.py 参照)。
+    """
+    return os.environ.get("SAIVERSE_MEDIA_RECALL_ENABLED", "").strip().lower() in ("1", "true", "yes")
 
 
 @dataclass
@@ -41,6 +53,7 @@ class CoreState:
     item_locations: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     items_by_building: Dict[str, List[str]] = field(default_factory=dict)
     items_by_persona: Dict[str, List[str]] = field(default_factory=dict)
+    items_by_bag: Dict[str, List[str]] = field(default_factory=dict)
     world_items: List[str] = field(default_factory=list)
     persona_pending_events: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
 
@@ -68,9 +81,7 @@ class CoreState:
     ui_port: int = 0
     api_port: int = 0
     autonomous_conversation_running: bool = False
-    global_auto_enabled: bool = False  # Global ON/OFF for ConversationManager
     developer_mode: bool = field(default_factory=_default_developer_mode)  # Developer mode: shows Task, Phenomena, dev_only playbooks
-    x_polling_enabled: bool = field(default_factory=_default_x_polling_enabled)  # X mention polling (default OFF)
     current_playbook: Optional[str] = None  # Selected playbook override for Chat Options
     playbook_args: Dict[str, Any] = field(default_factory=dict)  # Arguments for the selected playbook
 
@@ -81,3 +92,9 @@ class CoreState:
     # Cache settings for Anthropic prompt caching
     cache_enabled: bool = True  # Whether prompt caching is enabled
     cache_ttl: str = "5m"  # Cache TTL ("5m" or "1h" for Anthropic)
+
+    # Image generation defaults
+    image_default_quality: str = field(default_factory=_default_image_quality)
+
+    # 添付メディア (画像/音声/動画) の概要を自動想起の検索クエリに使うか (既定 OFF)。
+    media_recall_enabled: bool = field(default_factory=_default_media_recall_enabled)

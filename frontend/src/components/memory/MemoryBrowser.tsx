@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { Loader2, ChevronLeft, ChevronRight, MessageSquare, Trash2, AlertTriangle, ChevronsLeft, ChevronsRight, Edit2, Save, X, CheckSquare, Square, Trash, Tag, Plus, Upload, ChevronDown, ChevronUp } from 'lucide-react';
+import { Loader2, ChevronLeft, ChevronRight, MessageSquare, Trash2, AlertTriangle, ChevronsLeft, ChevronsRight, Edit2, Save, X, CheckSquare, Square, Trash, Tag, Plus, Upload, ChevronDown, ChevronUp, Sparkles } from 'lucide-react';
 import styles from './MemoryBrowser.module.css';
 
 interface ThreadSummary {
@@ -21,10 +21,67 @@ interface MessageItem {
     content: string;
     created_at: number;
     metadata?: { tags?: string[]; reasoning?: string };
+    // Gemini 3.x の thoughtSignature が永続化されているか (bool フラグのみ、中身は非公開)
+    has_thought_signature?: boolean;
 }
 
 interface MemoryBrowserProps {
     personaId: string;
+}
+
+/** ペルソナがメッセージ中で気に留めた言葉 = 点クリップ (GET /api/people/{id}/clips) */
+interface ClipItem {
+    clip_id: string;
+    message_id: string;
+    quote: string;
+    purpose_ref: string | null;
+    created_at: number;
+}
+
+/** clips API のバッチ上限 (api/routes/people/life.py CLIPS_BATCH_LIMIT と同値) */
+const CLIPS_BATCH_LIMIT = 100;
+
+/**
+ * 本文中の quote の最初の出現を蛍光ペン風の <mark> で強調して描画する。
+ * quote が本文に見つからない場合は無視 (エラーにしない)。
+ * clips が空なら本文文字列をそのまま返す (DOM 加工なし)。
+ */
+function renderContentWithClips(content: string, clips: ClipItem[] | undefined): React.ReactNode {
+    if (!clips || clips.length === 0) return content;
+
+    // 各 quote の最初の出現位置を集め、重複・重なりは先勝ちで除外する
+    const ranges: { start: number; end: number; clip: ClipItem }[] = [];
+    for (const clip of clips) {
+        const quote = clip.quote;
+        if (!quote) continue;
+        const idx = content.indexOf(quote);
+        if (idx < 0) continue;
+        const end = idx + quote.length;
+        if (ranges.some(r => idx < r.end && end > r.start)) continue; // 重なりはスキップ
+        ranges.push({ start: idx, end, clip });
+    }
+    if (ranges.length === 0) return content;
+    ranges.sort((a, b) => a.start - b.start);
+
+    const parts: React.ReactNode[] = [];
+    let cursor = 0;
+    for (const r of ranges) {
+        if (r.start > cursor) parts.push(content.slice(cursor, r.start));
+        parts.push(
+            <mark
+                key={r.clip.clip_id}
+                className={styles.markHighlight}
+                title={r.clip.purpose_ref
+                    ? `ペルソナが気に留めた言葉 (${r.clip.purpose_ref})`
+                    : 'ペルソナが気に留めた言葉'}
+            >
+                {content.slice(r.start, r.end)}
+            </mark>
+        );
+        cursor = r.end;
+    }
+    if (cursor < content.length) parts.push(content.slice(cursor));
+    return parts;
 }
 
 export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
@@ -86,6 +143,9 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
         });
     };
 
+    // ペルソナが気に留めた言葉 = 点クリップ (message_id → clips)。表示中ページの分だけ保持
+    const [clipsByMessage, setClipsByMessage] = useState<Record<string, ClipItem[]>>({});
+
     // Add message state
     const [showAddForm, setShowAddForm] = useState(false);
     const [newMsgRole, setNewMsgRole] = useState<string>("user");
@@ -97,6 +157,37 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
     useEffect(() => {
         loadThreads();
     }, [personaId]);
+
+    // 表示中メッセージの点クリップ (気に留めた言葉) をバッチ取得する。
+    // clips はあくまで装飾 — 取得失敗は無視し、本文表示には影響させない。
+    useEffect(() => {
+        const ids = messages.map(m => m.id).filter(Boolean);
+        if (ids.length === 0) {
+            setClipsByMessage({});
+            return;
+        }
+        let cancelled = false;
+        (async () => {
+            const collected: Record<string, ClipItem[]> = {};
+            for (let i = 0; i < ids.length; i += CLIPS_BATCH_LIMIT) {
+                const chunk = ids.slice(i, i + CLIPS_BATCH_LIMIT);
+                try {
+                    const res = await fetch(
+                        `/api/people/${personaId}/clips?message_ids=${encodeURIComponent(chunk.join(','))}`
+                    );
+                    if (!res.ok) continue;
+                    const data = await res.json();
+                    for (const clip of (data.clips ?? []) as ClipItem[]) {
+                        (collected[clip.message_id] = collected[clip.message_id] || []).push(clip);
+                    }
+                } catch {
+                    // clips が取れなくても閲覧は続行
+                }
+            }
+            if (!cancelled) setClipsByMessage(collected);
+        })();
+        return () => { cancelled = true; };
+    }, [messages, personaId]);
 
     // Load messages when thread or page changes
     useEffect(() => {
@@ -680,6 +771,16 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
                                     <span className={`${styles.role} ${styles[msg.role.toLowerCase()] || ''}`}>
                                         {msg.role}
                                     </span>
+                                    {msg.has_thought_signature && (
+                                        <span
+                                            className={styles.thoughtSignatureIcon}
+                                            title="Thought signature あり"
+                                            role="img"
+                                            aria-label="Thought signature あり"
+                                        >
+                                            <Sparkles size={12} />
+                                        </span>
+                                    )}
                                     {msg.metadata?.tags && msg.metadata.tags.length > 0 && (
                                         <div className={styles.tagsContainer}>
                                             <Tag size={12} className={styles.tagIcon} />
@@ -745,7 +846,7 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
                                         </div>
                                     ) : (
                                         <>
-                                            {msg.content}
+                                            {renderContentWithClips(msg.content, clipsByMessage[msg.id])}
                                             {overflowingMsgs.has(msg.id) && !expandedMsgs.has(msg.id) && (
                                                 <div className={styles.contentFade} />
                                             )}

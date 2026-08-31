@@ -109,12 +109,14 @@ def get_since_last_user_conversation(
         raw_messages = messages_since[-max_raw_messages:]
         output_parts.append("")
         output_parts.append(f"【直近のログ】(最新{len(raw_messages)}件)")
+        output_parts.append("```")
         for msg in raw_messages:
             role = msg.get("role", "unknown")
             content = msg.get("content", "")[:200]  # Truncate long messages
             if len(msg.get("content", "")) > 200:
                 content += "..."
             output_parts.append(f"- [{role}] {content}")
+        output_parts.append("```")
 
     return "\n".join(output_parts)
 
@@ -123,7 +125,7 @@ def _generate_summary(persona: Any, messages: List[Dict], summary_uuid: str) -> 
     """Generate a summary of messages using LLM."""
     try:
         from llm_clients import get_llm_client
-        from saiverse.model_configs import get_model_config
+        from saiverse.model_configs import find_model_config, get_context_length, get_model_provider
 
         # Use lightweight model for summary
         model_name = getattr(persona, "lightweight_model", None)
@@ -132,8 +134,21 @@ def _generate_summary(persona: Any, messages: List[Dict], summary_uuid: str) -> 
             from saiverse.model_defaults import BUILTIN_DEFAULT_LITE_MODEL
             model_name = os.getenv("SAIVERSE_DEFAULT_LIGHTWEIGHT_MODEL", BUILTIN_DEFAULT_LITE_MODEL)
 
-        config = get_model_config(model_name)
-        client = get_llm_client(model_name, config)
+        # get_llm_client は (model, provider, context_length, config) を取る。
+        # 第一引数はそのまま config_key になるので設定キーを渡す — API 名を渡すと
+        # 同名の別設定の単価で使用量が記録される
+        # (docs/intent/model_provider_management.md「使用量の帰属」)。
+        config_key, config = find_model_config(model_name)
+        if not config_key or not config:
+            # 未登録のキーで getter を呼ぶと解決できず、後段が読みにくい失敗になる。
+            # ここで打ち切って呼び出し元のフォールバックに渡す。
+            raise ValueError(f"model config not found for {model_name!r}")
+        client = get_llm_client(
+            config_key,
+            get_model_provider(config_key),
+            get_context_length(config_key),
+            config=config,
+        )
 
         # Build prompt
         messages_text = []
@@ -161,9 +176,12 @@ def _generate_summary(persona: Any, messages: List[Dict], summary_uuid: str) -> 
 
 要約:"""
 
+        # LLMClient の公開 API は generate / generate_stream。chat は存在しない。
         llm_messages = [{"role": "user", "content": prompt}]
-        response = client.chat(llm_messages, model=model_name)
-        return response.strip()
+        response = client.generate(llm_messages)
+        if isinstance(response, dict):
+            response = response.get("text") or response.get("content") or ""
+        return str(response).strip()
 
     except Exception as exc:
         LOGGER.warning("Failed to generate summary: %s", exc)

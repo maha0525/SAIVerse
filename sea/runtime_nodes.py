@@ -6,13 +6,17 @@ from typing import Any, Callable, Dict, List, Optional
 
 from llm_clients.exceptions import LLMError
 from saiverse.logging_config import log_sea_trace
+from sea.message_stamp import clear_call_tokens, clear_presented_message_ids
+from sea.runtime_state import effective_auto_mode, set_playbook_var
 
 LOGGER = logging.getLogger(__name__)
 
 
 def lg_tool_call_node(runtime: Any, node_def: Any, persona: Any, playbook: Any, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None, auto_mode: bool = False):
-    from tools import TOOL_REGISTRY
+    from tools import TOOL_REGISTRY, canonicalize_tool_name
     from tools.context import persona_context
+    from tools.core import parse_tool_result
+    from tools.mcp_client import maybe_await_tool_result
 
     call_source = getattr(node_def, "call_source", "fc") or "fc"
     output_key = getattr(node_def, "output_key", None)
@@ -35,18 +39,20 @@ def lg_tool_call_node(runtime: Any, node_def: Any, persona: Any, playbook: Any, 
             LOGGER.error(error_msg)
             state["last"] = error_msg
             if output_key:
-                state[output_key] = error_msg
+                set_playbook_var(state, output_key, error_msg, where=f"node '{node_id}' output_key")
             return state
         if not isinstance(tool_args, dict):
             LOGGER.warning("[sea][tool_call] tool_args is not a dict (%s), using empty args", type(tool_args).__name__)
             tool_args = {}
-        tool_func = TOOL_REGISTRY.get(tool_name)
+        # アドオン由来のツールは <addon>__<name> キーで登録されるため、
+        # 素名参照を一意なら名前空間キーへ解決する。
+        tool_func = TOOL_REGISTRY.get(canonicalize_tool_name(tool_name))
         if tool_func is None:
             error_msg = f"[sea][tool_call] Tool '{tool_name}' not found in registry"
             LOGGER.error(error_msg)
             state["last"] = error_msg
             if output_key:
-                state[output_key] = error_msg
+                set_playbook_var(state, output_key, error_msg, where=f"node '{node_id}' output_key")
             return state
 
         persona_obj = state.get("_persona_obj") or persona
@@ -56,12 +62,26 @@ def lg_tool_call_node(runtime: Any, node_def: Any, persona: Any, playbook: Any, 
             persona_dir = persona_dir.parent if persona_dir else Path.cwd()
             manager_ref = getattr(persona_obj, "manager_ref", None)
             LOGGER.info("[sea][tool_call] CALL %s (persona=%s) args=%s", tool_name, persona_id, tool_args)
+            # 直前の LLM speak ノードが保存した message_id を後続ツールに引き継ぐ。
+            _current_msg_id = state.get("_last_message_id")
+            # PulseContext も state 経由で受け渡す (Intent A v0.14 deferred Track ops)。
+            _pulse_ctx = state.get("_pulse_context")
+            # auto_mode は factory の capture 値でなく state の実効値を読む。
+            _eff_auto_mode = effective_auto_mode(state, auto_mode)
             if persona_id and persona_dir:
-                with persona_context(persona_id, persona_dir, manager_ref, playbook_name=playbook.name, auto_mode=auto_mode, event_callback=event_callback):
-                    result = tool_func(**tool_args)
+                with persona_context(persona_id, persona_dir, manager_ref, playbook_name=playbook.name, auto_mode=_eff_auto_mode, event_callback=event_callback, message_id=_current_msg_id, pulse_context=_pulse_ctx):
+                    result = await maybe_await_tool_result(tool_func, **tool_args)
             else:
-                result = tool_func(**tool_args)
-            result_str = str(result)
+                result = await maybe_await_tool_result(tool_func, **tool_args)
+            # A native tool returning a tuple ``(content, snippet, file_path,
+            # metadata)`` (or the 2-/3-tuple forms) must NOT leak its raw repr
+            # into state["last"] (→ MEMORIZE / SAIMemory), the tool_result
+            # message, or PulseContext — only its text belongs there. Normalize
+            # tuples via the canonical parser; the raw ``result`` is still stored
+            # under output_key below. Non-tuple returns (str / dict / ToolResult)
+            # keep str() so a bare dict is not lossily collapsed to "".
+            # See docs/issues/native_tool_return_4tuple_bug.md.
+            result_str = parse_tool_result(result)[0] if isinstance(result, tuple) else str(result)
             result_preview = result_str[:500] + "..." if len(result_str) > 500 else result_str
             LOGGER.info("[sea][tool_call] RESULT %s -> %s", tool_name, result_preview)
             log_sea_trace(playbook.name, node_id, "TOOL_CALL", f"action={tool_name} args={tool_args} → {result_str}")
@@ -71,10 +91,10 @@ def lg_tool_call_node(runtime: Any, node_def: Any, persona: Any, playbook: Any, 
                 if isinstance(_at, list):
                     _at.append({"action": "tool_call", "name": tool_name, "playbook": pb_display})
                 if event_callback:
-                    event_callback({"type": "activity", "action": "tool_call", "name": tool_name, "playbook": pb_display, "status": "completed", "persona_id": getattr(persona, "persona_id", None), "persona_name": getattr(persona, "persona_name", None)})
+                    event_callback({"type": "activity", "action": "tool_call", "name": tool_name, "playbook": pb_display, "status": "completed", "persona_id": getattr(persona, "persona_id", None), "persona_name": getattr(persona, "persona_name", None), "pulse_id": state.get("_pulse_id")})
             state["last"] = result_str
             if output_key:
-                state[output_key] = result
+                set_playbook_var(state, output_key, result, where=f"node '{node_id}' output_key")
 
             # Save tool call ID before _append_tool_result_message clears it
             _tc_id_for_im = state.get("_last_tool_call_id")
@@ -95,7 +115,7 @@ def lg_tool_call_node(runtime: Any, node_def: Any, persona: Any, playbook: Any, 
             error_msg = f"Tool error ({tool_name}): {exc}"
             state["last"] = error_msg
             if output_key:
-                state[output_key] = error_msg
+                set_playbook_var(state, output_key, error_msg, where=f"node '{node_id}' output_key")
             LOGGER.exception("[sea][tool_call] %s failed", tool_name)
 
             # Save tool call ID before _append_tool_result_message clears it
@@ -159,44 +179,177 @@ def lg_subplay_node(runtime: Any, node_def: Any, persona: Any, building_id: str,
 
         eff_bid = runtime._effective_building_id(persona, building_id)
         execution = getattr(node_def, "execution", "inline") or "inline"
+        # ライン指定 (Phase C-2a, Intent B v0.9)
+        sub_line = getattr(node_def, "line", "main") or "main"
         subagent_thread_id = None
         subagent_parent_id = None
         if execution == "subagent":
-            subagent_thread_id, subagent_parent_id = runtime._start_subagent_thread(persona, label=f"Subagent: {sub_name}")
+            subagent_thread_id, subagent_parent_id = runtime._start_subagent_thread(
+                persona, label=f"Subagent: {sub_name}", pulse_context=state.get("_pulse_context"),
+            )
             if not subagent_thread_id:
                 LOGGER.warning("[sea][subplay] Failed to start subagent thread for '%s', falling back to inline", sub_name)
                 execution = "inline"
             else:
                 log_sea_trace(playbook.name, node_id, "SUBPLAY", f"→ {sub_name} [subagent thread={subagent_thread_id}] (input=\"{str(sub_input)}\")")
         if execution == "inline":
-            log_sea_trace(playbook.name, node_id, "SUBPLAY", f"→ {sub_name} (input=\"{str(sub_input)}\")")
+            log_sea_trace(playbook.name, node_id, "SUBPLAY", f"→ {sub_name} (line={sub_line}, input=\"{str(sub_input)}\")")
+        # サブライン分岐時は親 _force_lightweight_model フラグの状態を保存・復元するため記録
+        had_force_lightweight = "_force_lightweight_model" in state
+        prev_force_lightweight = state.get("_force_lightweight_model")
         try:
-            isolate = (execution == "subagent") or getattr(node_def, "isolate_pulse_context", False)
+            # ライン分岐時は PulseContext も分離する (line='sub')。
+            # 共有のままだとサブラインの LLM I/O (検索 prompt や空の summarize 応答) が
+            # 親メインライン側で context_profile 経由 (_pulse_ctx.get_protocol_messages())
+            # で取得されメインラインの messages に流入してしまう。
+            # サブラインに渡したい情報は report_to_parent に集約させる設計のため、
+            # PulseContext は分離するのが正しい (Phase C-2a 修正、まはー指摘 2026-04-28)。
+            isolate = (
+                (execution == "subagent")
+                or getattr(node_def, "isolate_pulse_context", False)
+                or sub_line == "sub"
+            )
             sub_outputs = runtime._run_playbook(
-                sub_pb, persona, eff_bid, sub_input, auto_mode, True, state, event_callback,
+                # auto_mode は factory の capture 値でなく state の実効値を渡す
+                # (親 Pulse が auto なら子も auto)。
+                sub_pb, persona, eff_bid, sub_input, effective_auto_mode(state, auto_mode),
+                True, state, event_callback,
                 cancellation_token=cancellation_token,
                 isolate_pulse_context=isolate,
+                line=sub_line,
             )
         except LLMError:
             LOGGER.exception("[sea][subplay] LLM error in subplaybook '%s'", sub_name)
             if execution == "subagent" and subagent_thread_id:
-                runtime._end_subagent_thread(persona, subagent_thread_id, subagent_parent_id, generate_chronicle=False)
+                runtime._end_subagent_thread(persona, subagent_thread_id, subagent_parent_id, generate_chronicle=False, pulse_context=state.get("_pulse_context"))
             raise
         except Exception as exc:
             LOGGER.exception("[sea][subplay] Failed to execute subplaybook '%s'", sub_name)
             if execution == "subagent" and subagent_thread_id:
-                runtime._end_subagent_thread(persona, subagent_thread_id, subagent_parent_id, generate_chronicle=False)
+                runtime._end_subagent_thread(persona, subagent_thread_id, subagent_parent_id, generate_chronicle=False, pulse_context=state.get("_pulse_context"))
             state["last"] = f"Sub-playbook error: {exc}"
+            # 途中まで走った子が LLM を呼んでいる可能性がある上、この本文は
+            # そもそも生成ではなく機構の文字列。親の三つ組も前駆も載せない。
+            clear_call_tokens(state)
+            clear_presented_message_ids(state)
             return state
+        finally:
+            # サブライン実行で立てた _force_lightweight_model フラグを親スコープに残さない
+            if sub_line == "sub":
+                if had_force_lightweight:
+                    state["_force_lightweight_model"] = prev_force_lightweight
+                else:
+                    state.pop("_force_lightweight_model", None)
         if execution == "subagent" and subagent_thread_id:
             gen_chronicle = getattr(node_def, "subagent_chronicle", True)
-            chronicle = runtime._end_subagent_thread(persona, subagent_thread_id, subagent_parent_id, generate_chronicle=gen_chronicle)
+            chronicle = runtime._end_subagent_thread(persona, subagent_thread_id, subagent_parent_id, generate_chronicle=gen_chronicle, pulse_context=state.get("_pulse_context"))
             state["_subagent_chronicle"] = chronicle or ""
             log_sea_trace(playbook.name, node_id, "SUBPLAY", f"← {sub_name} [subagent ended, chronicle={'yes' if chronicle else 'no'}]")
         last_text = sub_outputs[-1] if sub_outputs else ""
         state["last"] = last_text
+        # 書き込み時の機械刻印 (sea/message_stamp.py): ここで親の state["last"]
+        # に入ったのは **子 Playbook の LLM が書いた本文**。子のコールの三つ組は
+        # 子 state に閉じていて親へは戻らないので、親 state には親の直前コールの
+        # 三つ組が残ったままになる。この後で親の SPEAK / MEMORIZE がこの本文を
+        # 刻むと、他人のコールの数字がその本文の事実として記録される。
+        #
+        # 子の三つ組を親へ引き継ぐ案 (帰属を正しくする) は採らなかった:
+        # last_text は子の出力列の末尾 (= 任意のノードの出力) で、子の最後の
+        # LLM コールがその本文を書いたとは限らない。しかも _run_playbook は
+        # 子の出力リストしか返さず、子の final_state は親へ届かない
+        # (system キーの書き戻しは playbook_write_key が禁じている)。帰属を
+        # 確定できない以上、刻印なしに倒す。親が次に自前の LLM ノードを回せば
+        # _record_llm_usage が三つ組を載せ直す。
+        #
+        # **前駆も同じ理由で落とす。** 親 state に残っているのは親が見せた列の
+        # 末尾で、この本文を書いた子の LLM は一度も見ていない。残すと「見ていない
+        # メッセージを前駆として刻む」= 欠落ではなく捏造になる
+        # (2026-08-22 掃討フェーズ 束 5 指摘 1)。
+        clear_call_tokens(state)
+        clear_presented_message_ids(state)
         if getattr(node_def, "propagate_output", False) and sub_outputs and outputs is not None:
             outputs.extend(sub_outputs)
+
+        # サブライン → 親ラインへの結果報告 (Intent B v0.9, Phase 3 段階 4-B)
+        # output_schema 経由で伝播された report_to_parent を親ラインに渡す。
+        # 親ラインの LLM ノードが messages を組み立てる経路は 2 通り:
+        #   (1) context_profile 不使用 → state["_messages"] を直接使う
+        #   (2) context_profile 使用 → _profile_base + _pulse_ctx.get_protocol_messages()
+        #                              つまり state["_messages"] への append は無視される
+        # 両方の経路に届かせるため、_messages と親 PulseContext の両方に append する。
+        # (Phase C-2a の最初の実装では state["_messages"] のみで context_profile 経由は
+        # 届かない不具合だった。まはー指摘 2026-04-28 で修正。)
+        if sub_line == "sub":
+            report = state.get("report_to_parent")
+            if report:
+                report_text = str(report).strip()
+                if report_text:
+                    # user role + <system> タグ統一形式 (詳細: sea/runtime_llm.py
+                    # の同様の自動ラップ箇所のコメント参照)。Gemini 等が messages
+                    # 中途の system role を受け付けないため、user role でラップする。
+                    formatted = (
+                        f"<system>サブ Playbook '{sub_name}' の実行結果:\n{report_text}</system>"
+                    )
+                    # (1) state["_messages"] への append (context_profile 不使用ノード向け)
+                    if state.get("_messages") is None:
+                        state["_messages"] = []
+                    state["_messages"].append({"role": "user", "content": formatted})
+
+                    # (2) 親 PulseContext への明示的 append (context_profile 使用ノード向け)
+                    parent_pulse_ctx = state.get("_pulse_context")
+                    if parent_pulse_ctx is not None:
+                        from sea.pulse_context import PulseLogEntry
+                        parent_pulse_ctx.append(PulseLogEntry(
+                            role="user",
+                            content=formatted,
+                            node_id=node_id,
+                            playbook_name=playbook.name,
+                        ))
+
+                    # (3) SAIMemory に親ラインの会話の一部として記録 (次の Pulse 以降の参照用)
+                    # Phase 3 段階 4-B (2026-05-01): 旧 `tags=["conversation"]` ハード
+                    # コードを廃止し、line メタデータで親ラインへの所属を表現する。
+                    # `line_role="main_line"` + `scope="committed"` により、4-A 後の
+                    # context 構築 (required_line_roles=['main_line'] + required_scopes=
+                    # ['committed']) で次の Pulse から自動的に親ラインのプロンプトに載る。
+                    # 意味分類タグは渡さず (`tags=None`)、`_store_memory` が自動付与する
+                    # `playbook:{name}` のみが metadata.tags に残る。
+                    # まはー指摘 2026-04-28 (旧経緯): サブラインの応答が internal タグで
+                    # 埋もれてメインライン記憶に残らない問題への対処。line ベースで
+                    # 同じ目的を達成する。
+                    pulse_id_for_memory = state.get("_pulse_id")
+                    runtime._store_memory(
+                        persona,
+                        formatted,
+                        role="user",
+                        line_role="main_line",
+                        scope="committed",
+                        pulse_id=pulse_id_for_memory,
+                        playbook_name=playbook.name,
+                    )
+
+                    LOGGER.info(
+                        "[sea][subplay] line='sub': appended report_to_parent (%d chars) "
+                        "from '%s' to parent _messages + parent PulseContext + SAIMemory "
+                        "(line_role=main_line, scope=committed)",
+                        len(report_text), sub_name,
+                    )
+                # 親 state に残ると次のサブ Playbook 呼び出しでも誤解されるためクリア
+                state.pop("report_to_parent", None)
+            else:
+                # Load-time PlaybookSchema validator (can_run_as_child check) already
+                # rejects sub Playbooks that have no report_to_parent path, so reaching
+                # this branch means the contract was satisfied statically but the LLM /
+                # tool nodes failed to populate state['report_to_parent'] at runtime
+                # (e.g. the LLM ignored response_schema, report_template referenced
+                # variables that never got set). The parent line continues without a
+                # sub-report; the warning is left in place as a runtime backstop.
+                LOGGER.warning(
+                    "[sea][subplay] line='sub' for '%s' completed without "
+                    "state['report_to_parent'] despite a static contract. Likely cause: "
+                    "an LLM/tool node failed to populate the expected field at runtime.",
+                    sub_name,
+                )
         return state
 
     return node
@@ -241,7 +394,15 @@ def lg_stelis_start_node(runtime: Any, node_def: Any, persona: Any, playbook: An
             return state
         anchor_message = {"role": "system", "content": "", "metadata": {"type": "stelis_anchor", "stelis_thread_id": stelis.thread_id, "stelis_label": label, "created_at": int(time.time())}, "embedding_chunks": 0}
         memory_adapter.append_persona_message(anchor_message, thread_suffix=parent_thread_id.split(":")[-1] if ":" in parent_thread_id else parent_thread_id)
-        memory_adapter.set_active_thread(stelis.thread_id)
+        # S4 (thread push/pop): 親 thread は PulseContext のスタック +
+        # active_state.json の pulse_scoped_parent に記録され、end ノード不達
+        # (例外/cancel) でも graph 実行の finally (unwind_threads) が復元する。
+        pulse_ctx = state.get("_pulse_context")
+        if pulse_ctx is not None and callable(getattr(pulse_ctx, "push_thread", None)):
+            pulse_ctx.push_thread(memory_adapter, stelis.thread_id, parent_thread_id=parent_thread_id)
+        else:
+            # pulse_ctx の無い legacy/テスト経路: 従来どおり直接切替 (復元保証なし)
+            memory_adapter.set_active_thread(stelis.thread_id)
         log_sea_trace(playbook.name, node_id, "STELIS_START", f"thread={stelis.thread_id} label=\"{label}\"")
         state.update({"stelis_thread_id": stelis.thread_id, "stelis_parent_thread_id": parent_thread_id, "stelis_depth": stelis.depth, "stelis_window_ratio": window_ratio, "stelis_label": label, "stelis_available": True})
         if event_callback:
@@ -275,7 +436,23 @@ def lg_stelis_end_node(runtime: Any, node_def: Any, persona: Any, playbook: Any,
             return state
         chronicle_summary = runtime._generate_stelis_chronicle(persona, current_thread_id, stelis_info.chronicle_prompt) if generate_chronicle else None
         memory_adapter.end_stelis_thread(thread_id=current_thread_id, status="completed", chronicle_summary=chronicle_summary)
-        memory_adapter.set_active_thread(parent_thread_id)
+        # S4: start が push した親を pop で復元する。pop の記録値が state の
+        # 親と食い違ったら WARN (入れ子の pop 漏れの兆候)。push を経ていない
+        # legacy/テスト経路 (pulse_ctx なし or スタック空) は従来の直接復元。
+        pulse_ctx = state.get("_pulse_context")
+        if (
+            pulse_ctx is not None
+            and callable(getattr(pulse_ctx, "pop_thread", None))
+            and pulse_ctx.thread_stack_depth() > 0
+        ):
+            restored = pulse_ctx.pop_thread(memory_adapter)
+            if restored and restored != parent_thread_id:
+                LOGGER.warning(
+                    "[stelis] Restored thread %s differs from recorded stelis parent %s",
+                    restored, parent_thread_id,
+                )
+        else:
+            memory_adapter.set_active_thread(parent_thread_id)
         if chronicle_summary:
             state["stelis_chronicle"] = chronicle_summary
         state["stelis_thread_id"] = None

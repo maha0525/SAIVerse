@@ -34,7 +34,8 @@ URI_PREFIX = "saiverse://"
 GLOBAL_SCHEMES = {"image", "document", "item", "persona", "building", "web"}
 
 # ペルソナスコープのリソースタイプ
-PERSONA_RESOURCE_TYPES = {"messagelog", "memopedia", "chronicle"}
+# 参照アドレッシング統一: 単語 prefix に揃え、messagelog → message。
+PERSONA_RESOURCE_TYPES = {"message", "memopedia", "chronicle"}
 
 
 @dataclass
@@ -42,7 +43,7 @@ class SaiUri:
     """パース済みSAIVerse URI。"""
 
     raw: str
-    scheme: str  # "messagelog", "memopedia", "chronicle", "item", "building", "web", "image", "document", "persona"
+    scheme: str  # "message", "memopedia", "chronicle", "item", "building", "web", "image", "document", "persona"
     persona_id: Optional[str] = None  # 解決済み (selfは実IDに変換)
     city: Optional[str] = None
     persona_name: Optional[str] = None
@@ -313,7 +314,7 @@ class UriResolver:
         path = parsed.path_parts
         params = parsed.params
 
-        # saiverse://self/messagelog/msg/recent?depth=N
+        # saiverse://self/message/msg/recent?depth=N
         if len(path) >= 2 and path[0] == "msg" and path[1] == "recent":
             from sai_memory.memory.storage import get_messages_last
 
@@ -330,7 +331,7 @@ class UriResolver:
                 metadata={"depth": depth, "count": len(msgs)},
             )
 
-        # saiverse://self/messagelog/msg?contain=TEXT&window=N
+        # saiverse://self/message/msg?contain=TEXT&window=N
         if len(path) >= 1 and path[0] == "msg" and "contain" in params:
             from sai_memory.memory.storage import _row_to_message, get_messages_around
 
@@ -342,7 +343,7 @@ class UriResolver:
                 cursor = adapter.conn.execute(
                     "SELECT id, thread_id, role, content, resource_id, created_at, metadata "
                     "FROM messages WHERE thread_id = ? AND content LIKE ? "
-                    "ORDER BY created_at DESC LIMIT 1",
+                    "ORDER BY created_at DESC, rowid DESC LIMIT 1",
                     (thread_id, f"%{query_text}%"),
                 )
                 row = cursor.fetchone()
@@ -372,11 +373,14 @@ class UriResolver:
                 },
             )
 
-        # saiverse://self/messagelog/msg/{message_id}
-        if len(path) >= 2 and path[0] == "msg":
+        # saiverse://self/message/{message_id}  (平坦化した単一メッセージ)
+        # または saiverse://self/message/msg/{message_id} (旧クエリ面の単一形)。
+        if (len(path) >= 2 and path[0] == "msg") or (
+            len(path) == 1 and path[0] not in ("msg", "range", "thread", "summary")
+        ):
             from sai_memory.memory.storage import get_message, get_messages_around
 
-            message_id = path[1]
+            message_id = path[1] if path[0] == "msg" else path[0]
             window = int(params.get("window", 0))
 
             with adapter._db_lock:
@@ -410,7 +414,7 @@ class UriResolver:
                 metadata={"message_id": message_id, "window": window},
             )
 
-        # saiverse://self/messagelog/range?from={ts}&to={ts}
+        # saiverse://self/message/range?from={ts}&to={ts}
         if (len(path) == 0 or (len(path) >= 1 and path[0] == "range")) and "from" in params:
             from sai_memory.memory.storage import get_messages_last
 
@@ -422,7 +426,7 @@ class UriResolver:
                 cursor = adapter.conn.execute(
                     "SELECT id, thread_id, role, content, resource_id, created_at, metadata "
                     "FROM messages WHERE created_at >= ? AND created_at <= ? "
-                    "ORDER BY created_at ASC LIMIT 100",
+                    "ORDER BY created_at ASC, rowid ASC LIMIT 100",
                     (start_ts, end_ts),
                 )
                 from sai_memory.memory.storage import _row_to_message
@@ -437,7 +441,7 @@ class UriResolver:
                 metadata={"from": start_ts, "to": end_ts, "count": len(msgs)},
             )
 
-        # saiverse://self/messagelog/thread/{suffix}?last=N
+        # saiverse://self/message/thread/{suffix}?last=N
         if len(path) >= 2 and path[0] == "thread":
             from sai_memory.memory.storage import get_messages_last
 
@@ -456,7 +460,7 @@ class UriResolver:
                 metadata={"thread_id": thread_id, "count": len(msgs)},
             )
 
-        # saiverse://self/messagelog/summary/{uuid}
+        # saiverse://self/message/summary/{uuid}
         if len(path) >= 2 and path[0] == "summary":
             summary_uuid = path[1]
             # summary_uuid はメモリ内のsummaryメッセージのUUID prefix
@@ -478,7 +482,7 @@ class UriResolver:
                             )
             return self._error(parsed.raw, f"Summary not found: {summary_uuid}")
 
-        return self._error(parsed.raw, f"Unknown messagelog path: {'/'.join(path)}")
+        return self._error(parsed.raw, f"Unknown message path: {'/'.join(path)}")
 
     def _resolve_memopedia(self, parsed: SaiUri) -> ResolvedContent:
         """Memopediaページの解決。"""
@@ -498,31 +502,38 @@ class UriResolver:
                 content_type="memopedia_tree",
             )
 
-        # saiverse://self/memopedia/page/{page_id} or ?title=...
-        if len(path) >= 1 and path[0] == "page":
-            page = None
-            if len(path) >= 2:
-                page = memopedia.get_page(path[1])
-            elif "title" in params:
-                page = memopedia.find_by_title(unquote(params["title"]))
+        # saiverse://self/memopedia/{key}  (key = AI 可視の short_id が主、UUID も可)
+        # または ?title=... 。旧 page/ 階層は平坦化済み。
+        # ページ・本文・子一覧は page_snapshot で**同じロック区間**から撮る
+        # (ばらばらに読むと混成表示になる — Sol レビュー 2026-08-06 F8)。
+        snapshot = None
+        identifier = "?"
+        if len(path) >= 1:
+            # 平坦化した末尾セグメントがキー。旧 `page/{id}` も後方互換で拾う。
+            key = path[1] if path[0] == "page" and len(path) >= 2 else path[0]
+            identifier = key
+            if key.isdigit():
+                key = f"memopedia:{key}"
+            snapshot = memopedia.page_snapshot(page_ref=key)
+        elif "title" in params:
+            identifier = params.get("title", "?")
+            snapshot = memopedia.page_snapshot(title=unquote(params["title"]))
 
-            if not page:
-                identifier = path[1] if len(path) >= 2 else params.get("title", "?")
-                return self._error(parsed.raw, f"Memopedia page not found: {identifier}")
+        if not snapshot:
+            return self._error(parsed.raw, f"Memopedia page not found: {identifier}")
 
-            content = self._format_memopedia_page(page)
-            return ResolvedContent(
-                uri=parsed.raw,
-                content=content,
-                content_type="memopedia_page",
-                metadata={
-                    "page_id": page.id,
-                    "title": page.title,
-                    "category": page.category,
-                },
-            )
-
-        return self._error(parsed.raw, f"Unknown memopedia path: {'/'.join(path)}")
+        page = snapshot["page"]
+        content = self._format_memopedia_page(snapshot)
+        return ResolvedContent(
+            uri=parsed.raw,
+            content=content,
+            content_type="memopedia_page",
+            metadata={
+                "page_id": page.id,
+                "title": page.title,
+                "category": page.category,
+            },
+        )
 
     def _resolve_chronicle(self, parsed: SaiUri) -> ResolvedContent:
         """Chronicleエントリの解決。"""
@@ -535,8 +546,8 @@ class UriResolver:
         path = parsed.path_parts
         params = parsed.params
 
-        # saiverse://self/chronicle/entry?contain=TEXT
-        if len(path) >= 1 and path[0] == "entry" and "contain" in params:
+        # saiverse://self/chronicle?contain=TEXT  (旧 entry?contain も後方互換)
+        if (len(path) == 0 or path[0] == "entry") and "contain" in params:
             from sai_memory.arasuji.storage import search_entries
 
             query_text = params["contain"]
@@ -565,9 +576,11 @@ class UriResolver:
                 },
             )
 
-        # saiverse://self/chronicle/entry/{entry_id}
-        if len(path) >= 2 and path[0] == "entry":
-            entry_id = path[1]
+        # saiverse://self/chronicle/{entry_id}  (平坦化。旧 entry/{id} も後方互換)
+        if (len(path) >= 2 and path[0] == "entry") or (
+            len(path) == 1 and path[0] not in ("entry", "range", "recent")
+        ):
+            entry_id = path[1] if path[0] == "entry" else path[0]
             adapter = self._get_adapter(parsed.persona_id)
             if adapter:
                 with adapter._db_lock:
@@ -663,10 +676,13 @@ class UriResolver:
         if len(path) >= 2 and path[1] == "content":
             try:
                 # Read item content directly (no persona check needed for URI resolution)
+                # item_id は AI 可視の short_id が主。UUID も裏方フォールバックで受ける。
                 item_service = self.manager.item_service
-                item = item_service.items.get(item_id)
+                item = item_service.item_dict_by_key(item_id)
                 if not item:
                     return self._error(parsed.raw, f"Item not found: {item_id}")
+                # 以降の href/metadata は裏方の UUID を使う。
+                item_id = item.get("item_id", item_id)
 
                 item_type = (item.get("type") or "").lower()
                 file_path_str = item.get("file_path")
@@ -706,11 +722,14 @@ class UriResolver:
         try:
             from database.models import Item, ItemLocation
             from database.session import get_session
+            from manager.items import item_db_filter
 
             with get_session() as session:
-                item = session.query(Item).filter(Item.ITEM_ID == item_id).first()
+                # short_id 主・UUID フォールバックの両対応。
+                item = session.query(Item).filter(item_db_filter(item_id)).first()
                 if not item:
                     return self._error(parsed.raw, f"Item not found: {item_id}")
+                item_id = item.ITEM_ID  # 以降は裏方の UUID で引く
 
                 loc = session.query(ItemLocation).filter(
                     ItemLocation.ITEM_ID == item_id
@@ -875,7 +894,7 @@ class UriResolver:
 
     # Handler dispatch table
     _handlers = {
-        "messagelog": _resolve_messagelog,
+        "message": _resolve_messagelog,
         "memopedia": _resolve_memopedia,
         "chronicle": _resolve_chronicle,
         "item": _resolve_item,
@@ -968,8 +987,18 @@ class UriResolver:
             lines.append(f"[{role}] {ts}: {content}{marker}")
         return "\n\n".join(lines) if lines else "(no messages)"
 
-    def _format_memopedia_page(self, page) -> str:
-        """Memopediaページをフォーマット。"""
+    def _format_memopedia_page(self, snapshot: dict) -> str:
+        """Memopediaページをフォーマット。
+
+        本文は ``render_page_body`` で描く——v0.3.x はページの知識が Fragment
+        側にあり、``page.content`` を直に出すと変換済みページが全部 "(empty)"
+        に見える。子ページの一覧も親子関係からここで組み立てる（本文には
+        導線を書かない設計の表示側、memopedia_body_to_fragment.md §7 (a)）。
+
+        受け取るのは :meth:`Memopedia.page_snapshot` の戻り——ページ・本文・
+        子一覧が同じ時点の姿であることは、撮る側が保証している。
+        """
+        page = snapshot["page"]
         lines = [
             f"【Memopedia】{page.title}",
             f"ID: {page.id}",
@@ -981,7 +1010,14 @@ class UriResolver:
         if page.summary:
             lines.append(f"Summary: {page.summary}")
         lines.append("")
-        lines.append(page.content or "(empty)")
+        lines.append(snapshot["body"] or "(empty)")
+        children = snapshot["children"]
+        if children:
+            lines.append("")
+            lines.append("子ページ:")
+            for child in children:
+                ref = f"m:{child.short_id}" if getattr(child, "short_id", None) else child.id
+                lines.append(f"- {child.title} ({ref})")
         return "\n".join(lines)
 
     def _format_chronicle_entry(self, entry) -> str:

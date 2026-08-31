@@ -37,7 +37,8 @@ def _resolve_image_path(path_or_url: Optional[str]) -> Optional[str]:
     # Handle API URL format
     if path_or_url.startswith(API_MEDIA_PREFIX):
         filename = path_or_url[len(API_MEDIA_PREFIX):]
-        return str(Path.home() / ".saiverse" / "image" / filename)
+        from saiverse.data_paths import get_saiverse_home
+        return str(get_saiverse_home() / "image" / filename)
 
     # Handle saiverse:// URI format
     if path_or_url.startswith("saiverse://"):
@@ -72,7 +73,8 @@ def _resolve_item_file_path(manager, file_path_str: str) -> Optional[str]:
     # Try recovery strategies using saiverse_home
     home = getattr(manager, 'saiverse_home', None)
     if not home:
-        home = Path.home() / ".saiverse"
+        from saiverse.data_paths import get_saiverse_home
+        home = get_saiverse_home()
 
     # Strategy 0: Relative path (new format)
     if not path.is_absolute():
@@ -109,11 +111,151 @@ def _add_to_media_list(file_path: str, media_list: List[Dict[str, str]]) -> None
     })
 
 
+def _add_audio_to_media_list(file_path: str, media_list: List[Dict[str, str]]) -> None:
+    """Add an audio file to the media list with its MIME type."""
+    mime_type = mimetypes.guess_type(file_path)[0] or "audio/ogg"
+    media_list.append({
+        "path": file_path,
+        "mime_type": mime_type,
+        "type": "audio",
+    })
+
+
+def _add_video_to_media_list(file_path: str, media_list: List[Dict[str, str]]) -> None:
+    """Add a video file to the media list with its MIME type."""
+    mime_type = mimetypes.guess_type(file_path)[0] or "video/mp4"
+    media_list.append({
+        "path": file_path,
+        "mime_type": mime_type,
+        "type": "video",
+    })
+
+
+def _render_bag_contents(
+    contents: List[Dict[str, Any]],
+    text_parts: List[str],
+    media_list: List[Dict[str, str]],
+    manager: Any,
+    indent: int = 1,
+) -> None:
+    """Render bag contents as indented list (all items shown as closed)."""
+    prefix = "  " * indent
+    type_labels = {
+        "picture": "Image", "document": "Document",
+        "object": "Object", "bag": "Bag",
+    }
+    for entry in contents:
+        child_name = entry.get("name", "不明なアイテム")
+        child_type = (entry.get("type") or "").lower()
+        child_desc = (entry.get("description") or "").strip() or "(説明なし)"
+        if len(child_desc) > 160:
+            child_desc = child_desc[:157] + "..."
+        label = type_labels.get(child_type, child_type.capitalize() or "Item")
+
+        # 入れ子アイテムも自分の item:N (安定 short_id) を持つので、位置チェーン
+        # (旧 b:5>2) ではなく同一性で指す。
+        child_short_id = entry.get("short_id")
+        child_ref = f"item:{child_short_id}" if child_short_id is not None else "item:?"
+
+        text_parts.append(f"{prefix}- [{child_ref}] [{label}] {child_name}")
+        text_parts.append(f"{prefix}  {child_desc}")
+
+        # Recurse into nested bags
+        children = entry.get("_children", [])
+        if children and child_type == "bag":
+            _render_bag_contents(children, text_parts, media_list, manager, indent + 1)
+
+
+def _format_item_created_at(item: Dict[str, Any]) -> str:
+    """Format item creation datetime for display."""
+    from datetime import datetime
+    created_at = item.get("created_at")
+    if isinstance(created_at, datetime):
+        return created_at.strftime("%Y-%m-%d %H:%M")
+    if created_at is not None:
+        try:
+            return datetime.utcfromtimestamp(float(created_at)).strftime("%Y-%m-%d %H:%M")
+        except (TypeError, ValueError):
+            pass
+    return ""
+
+
+def _fetch_item_memory_recall(item: Dict[str, Any], persona_id: str, manager: Any, count: int = 10) -> Optional[str]:
+    """Return log text around the item's creation time if it predates the current context.
+
+    Only fetches when the item's creation timestamp is older than the oldest
+    message currently in the persona's context window.
+    """
+    if not persona_id or not manager:
+        return None
+
+    from datetime import datetime, timezone
+
+    created_at = item.get("created_at")
+    if created_at is None:
+        return None
+    if isinstance(created_at, datetime):
+        try:
+            created_at_epoch = float(created_at.replace(tzinfo=timezone.utc).timestamp())
+        except Exception:
+            return None
+    else:
+        try:
+            created_at_epoch = float(created_at)
+        except (TypeError, ValueError):
+            return None
+
+    # Resolve oldest context timestamp via ItemService helper if available
+    try:
+        if hasattr(manager, "item_service"):
+            oldest_ts = manager.item_service._get_oldest_context_timestamp(persona_id)
+        else:
+            return None
+    except Exception as exc:
+        LOGGER.debug("_fetch_item_memory_recall: failed to get oldest context ts: %s", exc)
+        return None
+
+    if oldest_ts is None or created_at_epoch >= oldest_ts:
+        return None
+
+    # Fetch surrounding messages
+    try:
+        persona = (
+            manager.all_personas.get(persona_id)
+            or (manager.personas.get(persona_id) if hasattr(manager, "personas") else None)
+        )
+        if not persona:
+            return None
+        memory = getattr(persona, "sai_memory", None)
+        if not memory or not memory.is_ready():
+            return None
+
+        from sai_memory.memory.storage import get_messages_around_timestamp
+        messages = get_messages_around_timestamp(
+            memory.conn,
+            timestamp=int(created_at_epoch),
+            count=count,
+        )
+        if not messages:
+            return None
+        lines: List[str] = []
+        for msg in messages:
+            dt_str = datetime.utcfromtimestamp(msg.created_at).strftime("%Y-%m-%d %H:%M")
+            role = msg.role or "unknown"
+            lines.append(f"[{dt_str}] ({role})\n{msg.content}")
+        return "\n---\n".join(lines)
+    except Exception as exc:
+        LOGGER.debug("_fetch_item_memory_recall: failed for item %s: %s", item.get("item_id"), exc)
+        return None
+
+
 def _render_item(
     item: Dict[str, Any],
     text_parts: List[str],
     media_list: List[Dict[str, str]],
     manager: Any,
+    persona_id: Optional[str] = None,
+    ref: Optional[str] = None,
 ) -> None:
     """Render a single item into the visual context text and media list."""
     item_id = item.get("item_id", "")
@@ -123,31 +265,50 @@ def _render_item(
     state = item.get("state", {})
     is_open = isinstance(state, dict) and state.get("is_open", False)
     file_path_str = item.get("file_path")
+    created_at_str = _format_item_created_at(item)
+
+    # AI 可視の item アドレスは安定 short_id (item:N)。メディア URI も short_id を
+    # 使い、UUID は裏方 (ファイル解決) に留める。
+    short_id = item.get("short_id")
+    item_uri_key = short_id if short_id is not None else item_id
+
+    ref_label = f"[{ref}] " if ref else ""
 
     type_label = {
         "picture": "Image",
         "document": "Document",
         "object": "Object",
+        "bag": "Bag",
     }.get(item_type, item_type.capitalize() or "Item")
 
     if item_type == "object":
         # Objects have no open/closed concept
-        text_parts.append(f"[{type_label}] {item_name}")
-        text_parts.append(f"id: {item_id}")
+        text_parts.append(f"{ref_label}[{type_label}] {item_name}")
+        if created_at_str:
+            text_parts.append(f"作成日時: {created_at_str}")
         text_parts.append(description)
         text_parts.append("")
 
     elif item_type == "picture":
-        open_label = "(Open) " if is_open else "(Closed) "
-        text_parts.append(f"[{type_label}] {item_name}")
-        text_parts.append(f"{open_label}id: {item_id}")
+        open_label = "(Open)" if is_open else "(Closed)"
+        text_parts.append(f"{ref_label}[{type_label}] {item_name}")
+        text_parts.append(open_label)
+        if created_at_str:
+            text_parts.append(f"作成日時: {created_at_str}")
 
         if is_open and file_path_str:
             resolved = _resolve_item_file_path(manager, file_path_str)
             if resolved and os.path.exists(resolved):
-                text_parts.append(f"saiverse://item/{item_id}/image")
+                text_parts.append(f"saiverse://item/{item_uri_key}/image")
                 _add_to_media_list(resolved, media_list)
                 LOGGER.debug("get_visual_context: Added open picture item: %s", item_name)
+                # Append description as caption when image is displayed
+                text_parts.append(description)
+                # Auto-recall: attach surrounding log if creation predates current context
+                recall = _fetch_item_memory_recall(item, persona_id, manager)
+                if recall:
+                    text_parts.append("--- あの時の思い出 ---")
+                    text_parts.append(recall)
             else:
                 text_parts.append(description)
         else:
@@ -155,9 +316,11 @@ def _render_item(
         text_parts.append("")
 
     elif item_type == "document":
-        open_label = "(Open) " if is_open else "(Closed) "
-        text_parts.append(f"[{type_label}] {item_name}")
-        text_parts.append(f"{open_label}id: {item_id}")
+        open_label = "(Open)" if is_open else "(Closed)"
+        text_parts.append(f"{ref_label}[{type_label}] {item_name}")
+        text_parts.append(open_label)
+        if created_at_str:
+            text_parts.append(f"作成日時: {created_at_str}")
 
         if is_open and file_path_str:
             resolved = _resolve_item_file_path(manager, file_path_str)
@@ -179,10 +342,68 @@ def _render_item(
             text_parts.append(description)
         text_parts.append("")
 
+    elif item_type == "audio":
+        open_label = "(Open)" if is_open else "(Closed)"
+        text_parts.append(f"{ref_label}[Audio] {item_name}")
+        text_parts.append(open_label)
+        if created_at_str:
+            text_parts.append(f"作成日時: {created_at_str}")
+
+        if is_open and file_path_str:
+            resolved = _resolve_item_file_path(manager, file_path_str)
+            if resolved and os.path.exists(resolved):
+                text_parts.append(f"saiverse://item/{item_uri_key}/audio")
+                _add_audio_to_media_list(resolved, media_list)
+                LOGGER.debug("get_visual_context: Added open audio item: %s", item_name)
+                text_parts.append(description)
+            else:
+                text_parts.append(description)
+        else:
+            text_parts.append(description)
+        text_parts.append("")
+
+    elif item_type == "video":
+        open_label = "(Open)" if is_open else "(Closed)"
+        text_parts.append(f"{ref_label}[Video] {item_name}")
+        text_parts.append(open_label)
+        if created_at_str:
+            text_parts.append(f"作成日時: {created_at_str}")
+
+        if is_open and file_path_str:
+            resolved = _resolve_item_file_path(manager, file_path_str)
+            if resolved and os.path.exists(resolved):
+                text_parts.append(f"saiverse://item/{item_uri_key}/video")
+                _add_video_to_media_list(resolved, media_list)
+                LOGGER.debug("get_visual_context: Added open video item: %s", item_name)
+                text_parts.append(description)
+            else:
+                text_parts.append(description)
+        else:
+            text_parts.append(description)
+        text_parts.append("")
+
+    elif item_type == "bag":
+        open_label = "(Open)" if is_open else "(Closed)"
+        text_parts.append(f"{ref_label}[{type_label}] {item_name}")
+        text_parts.append(open_label)
+        if created_at_str:
+            text_parts.append(f"作成日時: {created_at_str}")
+        text_parts.append(description)
+
+        if is_open and manager and hasattr(manager, 'get_bag_contents_recursive'):
+            contents = manager.get_bag_contents_recursive(item_id)
+            if contents:
+                text_parts.append("")
+                _render_bag_contents(contents, text_parts, media_list, manager, indent=1)
+            else:
+                text_parts.append("  (空)")
+        text_parts.append("")
+
     else:
         # Unknown type — show as generic item
-        text_parts.append(f"[{type_label}] {item_name}")
-        text_parts.append(f"id: {item_id}")
+        text_parts.append(f"{ref_label}[{type_label}] {item_name}")
+        if created_at_str:
+            text_parts.append(f"作成日時: {created_at_str}")
         text_parts.append(description)
         text_parts.append("")
 
@@ -192,6 +413,7 @@ def get_visual_context(
     include_self: bool = True,
     include_building: bool = True,
     include_other_personas: bool = True,
+    for_perception: bool = False,
 ) -> List[Dict[str, Any]]:
     """Build structured visual context message for LLM.
 
@@ -203,6 +425,11 @@ def get_visual_context(
         include_self: Include the active persona's appearance image.
         include_building: Include the current building's interior image.
         include_other_personas: Include appearance images of other personas in the building.
+        for_perception: 知覚バッファ (移動時の「移動先の様子」) 向けの記法で出力する。
+            head 常駐用と違い、複数通知が時系列で並ぶ前提なので: (1) 「現在いる」断定を
+            避け Building 名を明示、(2) インベントリ (移動で変わらない) を除外し Building
+            内アイテムのみ、(3) 「### Building内」見出しを省略、(4) <system> で包まない
+            (flush 側が包む)。詳細: docs/intent/perception_buffer.md §5.4。
 
     Returns:
         List of message dicts with 'role', 'content', and 'metadata' keys.
@@ -232,22 +459,43 @@ def get_visual_context(
     text_parts: List[str] = []
     media_list: List[Dict[str, str]] = []
 
-    text_parts.append("<system>")
-    text_parts.append("# ビジュアルコンテキスト")
-    text_parts.append("以下は現在の状況を視覚的に示す情報です。")
-    text_parts.append("")
-    text_parts.append("---")
-    text_parts.append("")
+    # Building 名 (見出しの明示に使う)。
+    _building_obj_for_name = getattr(persona, "buildings", {}).get(building_id)
+    building_name = _building_obj_for_name.name if _building_obj_for_name else building_id
+
+    if not for_perception:
+        text_parts.append("<system>")
+        text_parts.append("# ビジュアルコンテキスト")
+        # NOTE: かつて「常にリアルタイム状態を反映」と書いていたが、head の
+        # visual_context は Metabolism まで凍結されるため嘘だった (2026-07-09 削除)。
+        text_parts.append("以下は現在の状況を視覚的に示す情報です。")
+        text_parts.append("")
+        text_parts.append("---")
+        text_parts.append("")
+    else:
+        # 知覚バッファ用: どの Building の様子かを見出しで明示 (複数通知が並ぶため)。
+        text_parts.append(f"# 「{building_name}」の様子")
+        text_parts.append("")
 
     # ========== Section 1: ペルソナ ==========
-    text_parts.append("## ペルソナ")
-    occupants = manager.occupants.get(building_id, [])
+    all_occupants = manager.occupants.get(building_id, [])
+    # ユーザーIDはall_personasに存在しないのでフィルタしてAIペルソナのみに絞る
+    occupants = [oid for oid in all_occupants if manager.all_personas.get(oid)]
     persona_count = len(occupants)
-    if persona_count <= 1:
-        text_parts.append("現在、このBuildingにはあなただけがいます。")
+    if for_perception:
+        # 「一緒にいる他ペルソナ」だけを述べる (self は include_self=False で除外済み)。
+        others = [oid for oid in occupants if oid != persona_id]
+        text_parts.append("## 一緒にいるペルソナ")
+        if not others:
+            text_parts.append("他のペルソナはいません。")
+        text_parts.append("")
     else:
-        text_parts.append(f"現在、このBuildingにはあなた含め{persona_count}人のペルソナがいます。")
-    text_parts.append("")
+        text_parts.append("## ペルソナ")
+        if persona_count <= 1:
+            text_parts.append("現在、このBuildingにはあなただけがいます。")
+        else:
+            text_parts.append(f"現在、このBuildingにはあなた含め{persona_count}人のペルソナがいます。")
+        text_parts.append("")
 
     # Self appearance
     if include_self:
@@ -279,15 +527,39 @@ def get_visual_context(
                 LOGGER.debug("get_visual_context: Added other persona image: %s (%s)", other_id, other_image_path)
             text_parts.append("")
 
+    # ========== Section 1b: ユーザー ==========
+    user_occupants = [oid for oid in all_occupants if not manager.all_personas.get(oid)]
+    if user_occupants:
+        text_parts.append("## ユーザー")
+        text_parts.append(f"現在、このBuildingには{len(user_occupants)}人のユーザーがいます。")
+        try:
+            from database.session import SessionLocal as _SessionLocal
+            from database.models import User as UserModel
+            db = _SessionLocal()
+            try:
+                for uid in user_occupants:
+                    user = db.query(UserModel).filter(UserModel.USERID == int(uid)).first()
+                    uname = user.USERNAME if user else uid
+                    text_parts.append(f"- {uname} (ID:{uid})")
+            finally:
+                db.close()
+        except Exception as exc:
+            LOGGER.debug("get_visual_context: Failed to fetch user names: %s", exc)
+            for uid in user_occupants:
+                text_parts.append(f"- (ID:{uid})")
+        text_parts.append("")
+
     # ========== Section 2: Building ==========
     text_parts.append("---")
     text_parts.append("")
     text_parts.append("## Building")
 
-    building_obj = getattr(persona, "buildings", {}).get(building_id)
-    building_name = building_obj.name if building_obj else building_id
-    text_parts.append(f"現在、「{building_name}」にいます。")
-    text_parts.append("")
+    building_obj = _building_obj_for_name
+    if not for_perception:
+        text_parts.append(f"現在、「{building_name}」にいます。")
+        text_parts.append("")
+    # for_perception では「現在いる」と断定しない (通知が出た後さらに移動しうるため)。
+    # Building 名は冒頭見出し「「X」の様子」で既に明示している。
 
     # Building interior image
     if include_building:
@@ -317,15 +589,19 @@ def get_visual_context(
     persona_name = getattr(persona, "persona_name", persona_id)
 
     # 3a. Persona inventory items
+    # for_perception では除外: インベントリは移動で変わらない (持ち物は付いてくる) ので、
+    # 「移動先の様子」に載せると毎回重複する。Building 内アイテムだけを見せる。
     inventory_items = (
         manager.get_all_items_for_persona(persona_id)
-        if hasattr(manager, 'get_all_items_for_persona') else []
+        if (not for_perception and hasattr(manager, 'get_all_items_for_persona')) else []
     )
     if inventory_items:
         text_parts.append(f"### あなた自身（{persona_name}）のインベントリ内")
         text_parts.append("")
         for item in inventory_items:
-            _render_item(item, text_parts, media_list, manager)
+            short_id = item.get("short_id")
+            ref = f"item:{short_id}" if short_id is not None else None
+            _render_item(item, text_parts, media_list, manager, persona_id=persona_id, ref=ref)
 
     # 3b. Building items
     building_items = (
@@ -333,16 +609,68 @@ def get_visual_context(
         if hasattr(manager, 'get_all_items_in_building') else []
     )
     if building_items:
-        text_parts.append("### Building内")
-        text_parts.append("")
+        # for_perception ではインベントリと分ける必要がないので「### Building内」見出しは省く。
+        if not for_perception:
+            text_parts.append("### Building内")
+            text_parts.append("")
         for item in building_items:
-            _render_item(item, text_parts, media_list, manager)
+            short_id = item.get("short_id")
+            ref = f"item:{short_id}" if short_id is not None else None
+            _render_item(item, text_parts, media_list, manager, persona_id=persona_id, ref=ref)
 
     if not inventory_items and not building_items:
         text_parts.append("アイテムはありません。")
         text_parts.append("")
 
-    text_parts.append("</system>")
+    # ========== Section 4: Fixture ==========
+    obs_mgr = getattr(manager, "observer_manager", None)
+    if obs_mgr:
+        fixtures = obs_mgr.get_building_fixtures(building_id)
+        if fixtures:
+            text_parts.append("---")
+            text_parts.append("")
+            text_parts.append("## 設置物 (Fixture)")
+            text_parts.append("")
+            for f in fixtures:
+                text_parts.append(f"- **{f.NAME}** (種別: {f.TYPE or 'object'}, ID: `{f.FIXTURE_ID}`)")
+                if f.DESCRIPTION:
+                    text_parts.append(f"  {f.DESCRIPTION}")
+                if f.STATE_JSON:
+                    import json as _json
+                    try:
+                        state = _json.loads(f.STATE_JSON)
+                        if isinstance(state, dict):
+                            # feed_stand キー (feed_manager.update_fixture_display が
+                            # 唯一の書き手) は観測値形式 (value_num/value_text) では
+                            # ないため専用に描画する。購読タイトルと直近見出しは
+                            # 書き手側で件数・文字数を制御済み (5 件 × 100 字)。
+                            feed_display = state.pop("feed_stand", None)
+                            if isinstance(feed_display, dict):
+                                subs_titles = feed_display.get("subscriptions")
+                                if isinstance(subs_titles, list) and subs_titles:
+                                    text_parts.append(
+                                        "  購読フィード: "
+                                        + " / ".join(str(s) for s in subs_titles)
+                                    )
+                                latest_titles = feed_display.get("latest")
+                                if isinstance(latest_titles, list) and latest_titles:
+                                    text_parts.append("  新着記事の見出し:")
+                                    for t in latest_titles:
+                                        text_parts.append(f"  - {t}")
+                        if state:
+                            state_parts = []
+                            for k, v in state.items():
+                                val = v.get("value_num") if isinstance(v, dict) and v.get("value_num") is not None else (v.get("value_text") if isinstance(v, dict) else v)
+                                if val is not None:
+                                    state_parts.append(f"{k}={val}")
+                            if state_parts:
+                                text_parts.append(f"  最新観測値: {', '.join(state_parts)}")
+                    except (TypeError, _json.JSONDecodeError):
+                        pass
+                text_parts.append("")
+
+    if not for_perception:
+        text_parts.append("</system>")
 
     # Build message
     messages: List[Dict[str, Any]] = [

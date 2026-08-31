@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException
 from typing import List, Optional
-from api.deps import get_manager
+from api.deps import get_manager, avatar_path_to_url
 from database.models import Playbook as PlaybookModel
 from .models import PersonaInfo, SummonRequest
 
@@ -26,7 +26,7 @@ def get_summonable_personas(building_id: Optional[str] = None, manager = Depends
             continue
             
         # Get avatar url
-        avatar_url = f"/api/chat/persona/{pid}/avatar"
+        avatar_url = avatar_path_to_url(persona.avatar_image)
         
         results.append(PersonaInfo(
             id=pid,
@@ -37,44 +37,127 @@ def get_summonable_personas(building_id: Optional[str] = None, manager = Depends
         
     return sorted(results, key=lambda x: x.name)
 
+@router.get("/spells")
+def list_available_spells(persona_id: Optional[str] = None, manager = Depends(get_manager)):
+    """List Spells available for schedule / pre_spells UI selection.
+
+    Returns a list of ``{name, display_name, description}`` for every Spell
+    registered in ``SPELL_TOOL_SCHEMAS`` with ``spell_visible=True``. When
+    ``persona_id`` is provided, applies per-persona availability filters
+    (``availability_check`` callable + MCP per-persona gating) so only Spells
+    actually invokable for that persona are returned.
+    """
+    from tools import SPELL_TOOL_SCHEMAS
+
+    try:
+        from tools.mcp_client import get_mcp_manager
+        mcp_mgr = get_mcp_manager()
+    except Exception:
+        mcp_mgr = None
+
+    results = []
+    for name, schema in SPELL_TOOL_SCHEMAS.items():
+        if not getattr(schema, "spell_visible", True):
+            continue
+        if mcp_mgr is not None and persona_id is not None:
+            if not mcp_mgr.is_tool_available_for_persona(name, persona_id):
+                continue
+        availability_check = getattr(schema, "availability_check", None)
+        if availability_check is not None:
+            try:
+                if not availability_check(persona_id):
+                    continue
+            except Exception:
+                continue
+        results.append({
+            "name": name,
+            "display_name": getattr(schema, "spell_display_name", "") or name,
+            "description": schema.description or "",
+        })
+    results.sort(key=lambda x: x["name"])
+    return results
+
+
 @router.get("/meta_playbooks", response_model=List[str])
-def list_meta_playbooks(manager = Depends(get_manager)):
-    """List user-selectable meta playbooks."""
+def list_meta_playbooks(
+    include_day_rhythm: bool = False,
+    manager = Depends(get_manager),
+):
+    """List user-selectable meta playbooks for schedule / summon dialogs.
+
+    Phase 3 移行で Pulse-root として走る Playbook の主流が ``meta_*`` (旧
+    ``meta_user`` / ``meta_user_manual``) から ``track_*`` (``track_user_conversation``
+    等) に移ったため、name prefix での絞り込みは廃止。``user_selectable=true``
+    フラグのみを判定軸にする。
+
+    ``include_day_rhythm=true`` (スケジュールダイアログ用): 一日のリズムを
+    時刻駆動するのが正しい判断点 (起床=judgment_day_open / 就寝=
+    judgment_day_close) も選択肢に含める。これらは ``user_selectable=false``
+    (召喚ダイアログに出すのは誤りのため) だが、PersonaSchedule への登録は
+    自律行動 v2 の正規の儀式 (autonomy_wiring._SCHEDULABLE_KINDS)。
+    post_* / on_event は文脈必須なのでスケジュールからは撃てず、含めない。
+    """
     session = manager.SessionLocal()
     try:
         playbooks = (
             session.query(PlaybookModel)
-            .filter(
-                PlaybookModel.user_selectable == True,
-                PlaybookModel.name.like("meta_%"),
-            )
+            .filter(PlaybookModel.user_selectable == True)
             .all()
         )
-        return sorted([pb.name for pb in playbooks])
+        names = {pb.name for pb in playbooks}
+        if include_day_rhythm:
+            from saiverse.autonomy_wiring import _SCHEDULABLE_KINDS
+            from saiverse.judgment_points import JUDGMENT_PLAYBOOK_MAP
+
+            rhythm_names = [JUDGMENT_PLAYBOOK_MAP[k] for k in _SCHEDULABLE_KINDS]
+            imported = (
+                session.query(PlaybookModel)
+                .filter(PlaybookModel.name.in_(rhythm_names))
+                .all()
+            )
+            names.update(pb.name for pb in imported)
+        return sorted(names)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         session.close()
 
 @router.post("/summon/{persona_id}")
-def summon_persona(persona_id: str, manager = Depends(get_manager)):
-    """Summon a persona to the current location."""
-    if not manager.user_current_building_id:
-        raise HTTPException(status_code=400, detail="User location unknown")
-        
-    success, message = manager.summon_persona(persona_id)
+def summon_persona(
+    persona_id: str,
+    building_id: Optional[str] = None,
+    manager = Depends(get_manager),
+):
+    """Summon a persona to the target building.
+
+    C-1 閲覧モード以降、 frontend は viewing 中の building を ``building_id``
+    に渡す。 省略時はサーバ側の実滞在地 ``user_current_building_id`` にフォール
+    バックする。
+    """
+    target = building_id or manager.user_current_building_id
+    if not target:
+        raise HTTPException(status_code=400, detail="Target building unknown")
+
+    success, message = manager.summon_persona(persona_id, target)
     if not success:
         raise HTTPException(status_code=400, detail=message or "Summon failed")
-        
+
     return {"success": True, "message": f"Summoned {persona_id}"}
 
 @router.post("/dismiss/{persona_id}")
-def dismiss_persona(persona_id: str, manager = Depends(get_manager)):
-    """Dismiss a persona (send back to private room)."""
-    # RuntimeService.end_conversation returns a string message or starts with "Error:"
-    msg = manager.end_conversation(persona_id)
-    
+def dismiss_persona(
+    persona_id: str,
+    building_id: Optional[str] = None,
+    manager = Depends(get_manager),
+):
+    """Dismiss a persona (send back to private room).
+
+    C-1 閲覧モード以降、 frontend は viewing 中の building を ``building_id``
+    に渡す。 省略時はサーバ側の実滞在地にフォールバックする。
+    """
+    msg = manager.end_conversation(persona_id, building_id)
+
     if msg.startswith("Error"):
         raise HTTPException(status_code=400, detail=msg)
-    
+
     return {"success": True, "message": msg}

@@ -2,11 +2,11 @@
   "model": "gemini-3-flash-preview",
   "system_prompt": "",
   "display_name": "Gemini 3 Flash(無料枠)",
-  "provider": "gemini",
+  "provider_ref": "gemini",
   "context_length": 250000,
-  "default_max_history_messages": 80,
-  "metabolism_keep_messages": 60,
   "supports_images": true,
+  "supports_audio": true,
+  "supports_video": true,
   "prefer_paid": false,
   "rate_limit": {
     "rpd": 20,
@@ -33,6 +33,13 @@
       "default": "minimal",
       "label": "Thinking Level",
       "description": "思考の深さ。minimalで高速・安定、highで深い推論。空応答対策にはminimalを推奨。"
+    },
+    "thought_signature_echo": {
+      "type": "dropdown",
+      "options": ["on", "off"],
+      "default": "on",
+      "label": "思考署名の引き継ぎ",
+      "description": "モデルが返す思考署名 (thought signature) を次ターンに載せ直すか。onで関数呼び出しの連続性を維持。offでキャッシュ効率が上がる(3.x系では関数呼び出しパートの署名は常に引き継がれ、テキストパートの署名のみoffで止まる)。"
     },
     "safety_harassment": {
       "type": "dropdown",

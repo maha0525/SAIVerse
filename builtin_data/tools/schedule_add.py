@@ -6,6 +6,7 @@
 
 import json
 import logging
+import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
@@ -95,6 +96,11 @@ def schedule_add(
             PRIORITY=priority,
             ENABLED=enabled,
             PLAYBOOK_PARAMS=json.dumps(args) if args else None,
+            # W3 A12 (D2): 新規行は世代 1 から始める (設定変更ごとに +1)
+            SYNC_GENERATION=1,
+            # W3 Codex 第三陣: 行一生トークン (SCHEDULE_ID 再利用との分離)。
+            # 作成時に一度だけ採番し、更新では変えない。
+            INSTANCE_TOKEN=uuid.uuid4().hex[:12],
         )
 
         # スケジュールタイプごとの設定

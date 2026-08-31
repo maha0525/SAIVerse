@@ -46,6 +46,11 @@ if (-not (Test-Path "$SRC_DIR\requirements.txt") -or -not (Test-Path $venvPython
     & $setupScript
 }
 
+# Re-merge settings (picks up SAIVerse default changes + user overrides)
+Write-Host "[INFO] Merging SearXNG settings..."
+$mergeScript = Join-Path $ScriptRoot "merge_searxng_settings.py"
+& $venvPython $mergeScript
+
 # Start server
 $env:SEARXNG_SETTINGS_PATH = "$SETTINGS_PATH"
 $env:SEARXNG_PORT = "$PORT"

@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time as _time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -163,8 +164,10 @@ def _parse_datetime_flexible(value: Optional[str]) -> Optional[datetime]:
     for fmt in formats:
         try:
             dt = datetime.strptime(normalized, fmt)
-            # Assume local time, convert to UTC-aware
-            return dt.replace(tzinfo=timezone.utc)
+            # Exporter timestamps are in the PC's local timezone.
+            # mktime() interprets the tuple as local time and returns UTC epoch.
+            epoch = _time.mktime(dt.timetuple())
+            return datetime.fromtimestamp(epoch, tz=timezone.utc)
         except ValueError:
             continue
 
@@ -243,6 +246,13 @@ def _apply_timestamp_strategy(
     If every message already carries its own timestamp (newer ChatGPT/Claude
     exports), no synthesis is performed. Otherwise we fall back to the legacy
     behaviour: linear interpolation for ChatGPT, sequential offsets for Gemini.
+
+    When the source cannot be detected (e.g. the user stripped the
+    "Powered by ... Exporter" footer that source detection relies on) but the
+    header still carries Created/Updated dates, we apply the generic
+    interpolate-or-increment strategy rather than leaving timestamps unset.
+    Without this, missing timestamps would silently fall back to import time
+    (today) in SAIMemory.
     """
     if not messages:
         return
@@ -250,17 +260,14 @@ def _apply_timestamp_strategy(
     if all(m.timestamp is not None for m in messages):
         return
 
-    if source == "chatgpt":
-        if created_at and updated_at:
-            _interpolate_timestamps(messages, created_at, updated_at)
-        elif created_at:
-            _increment_timestamps(messages, created_at)
-    elif source == "gemini":
+    if source == "gemini":
         start = gemini_start_time or created_at or datetime.now(tz=timezone.utc)
         _increment_timestamps(messages, start)
-    elif source == "claude":
-        # Claude has always relied on per-message timestamps; if some are
-        # missing fall back to interpolation between the available endpoints.
+    else:
+        # chatgpt, claude, and unknown sources all share the same fallback:
+        # interpolate between the header endpoints when both are available,
+        # otherwise increment from the start. Claude has always relied on
+        # per-message timestamps; this only kicks in when some are missing.
         if created_at and updated_at:
             _interpolate_timestamps(messages, created_at, updated_at)
         elif created_at:

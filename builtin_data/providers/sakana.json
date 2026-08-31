@@ -1,0 +1,7 @@
+{
+  "id": "sakana",
+  "display_name": "Sakana AI",
+  "protocol": "openai_compat",
+  "base_url": "https://api.sakana.ai/v1",
+  "api_key_env": "SAKANA_API_KEY"
+}

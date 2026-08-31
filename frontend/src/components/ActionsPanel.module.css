@@ -1,0 +1,966 @@
+.container {
+    margin-top: 0.75rem;
+}
+
+/* MCPSection.module.css と同じ accordion ヘッダーパターン */
+.sectionHeader {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.75rem 1rem;
+    background: none;
+    border: none;
+    cursor: pointer;
+    color: #334155;
+    font-size: 0.9rem;
+    font-weight: 600;
+    text-align: left;
+}
+
+.sectionHeader:hover {
+    background: rgba(99, 102, 241, 0.04);
+}
+
+.headerLabel {
+    flex: 1;
+}
+
+.body {
+    padding: 0.5rem 1rem 0.75rem;
+}
+
+.actionList {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.actionCard {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.6rem 0.75rem;
+    background: #f8fafc;
+    border: 1px solid #e2e8f0;
+    border-radius: 0.5rem;
+}
+
+.actionInfo {
+    flex: 1;
+    min-width: 0;
+}
+
+.actionName {
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: #1e293b;
+}
+
+.actionDesc {
+    font-size: 0.75rem;
+    color: #64748b;
+    margin-top: 0.15rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.actionButtons {
+    display: flex;
+    gap: 0.35rem;
+    flex-shrink: 0;
+    margin-left: 0.5rem;
+}
+
+.iconBtn {
+    padding: 0.3rem 0.5rem;
+    border: 1px solid #e2e8f0;
+    border-radius: 0.35rem;
+    background: white;
+    color: #475569;
+    cursor: pointer;
+    font-size: 0.75rem;
+    transition: background 0.1s;
+}
+
+.iconBtn:hover {
+    background: #f1f5f9;
+}
+
+.iconBtn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+
+.iconBtnDanger {
+    composes: iconBtn;
+    color: #dc2626;
+}
+
+.iconBtnDanger:hover {
+    background: #fef2f2;
+}
+
+.addBtn {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0.4rem 0.75rem;
+    border: 1px dashed #cbd5e1;
+    border-radius: 0.5rem;
+    background: transparent;
+    color: #64748b;
+    cursor: pointer;
+    font-size: 0.8rem;
+    width: 100%;
+    justify-content: center;
+    transition: background 0.1s;
+    margin-top: 0.5rem;
+}
+
+.addBtn:hover {
+    background: #f8fafc;
+    border-color: #94a3b8;
+}
+
+/* Editor modal */
+.editorOverlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.4);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1200;
+}
+
+.editor {
+    background: white;
+    border-radius: 0.75rem;
+    width: 640px;
+    max-width: 95vw;
+    max-height: 80vh;
+    max-height: 80svh;
+    max-height: 80dvh;
+    display: flex;
+    flex-direction: column;
+    box-shadow: 0 8px 40px rgba(0, 0, 0, 0.2);
+}
+
+.editorHeader {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 1rem 1.25rem;
+    border-bottom: 1px solid rgba(0, 0, 0, 0.08);
+    flex-shrink: 0;
+}
+
+.editorHeader h3 {
+    margin: 0;
+    font-size: 1rem;
+    font-weight: 600;
+    color: #1e293b;
+}
+
+.editorBody {
+    flex: 1;
+    overflow-y: auto;
+    padding: 1rem 1.25rem;
+}
+
+.editorFooter {
+    display: flex;
+    justify-content: flex-end;
+    gap: 0.5rem;
+    padding: 0.75rem 1.25rem;
+    border-top: 1px solid rgba(0, 0, 0, 0.08);
+    flex-shrink: 0;
+}
+
+.fieldGroup {
+    margin-bottom: 0.75rem;
+}
+
+.fieldLabel {
+    display: block;
+    font-size: 0.8rem;
+    font-weight: 500;
+    color: #475569;
+    margin-bottom: 0.25rem;
+}
+
+.fieldInput {
+    width: 100%;
+    padding: 0.4rem 0.6rem;
+    border: 1px solid #e2e8f0;
+    border-radius: 0.35rem;
+    font-size: 0.85rem;
+    color: #1e293b;
+    background: white;
+    box-sizing: border-box;
+}
+
+.fieldInput:focus {
+    outline: none;
+    border-color: #3b82f6;
+    box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.15);
+}
+
+/* Steps editor */
+.stepsHeader {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 0.5rem;
+}
+
+.stepsTitle {
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: #475569;
+}
+
+.stepCard {
+    padding: 0.5rem 0.6rem;
+    margin-bottom: 0.4rem;
+    background: #f8fafc;
+    border: 1px solid #e2e8f0;
+    border-radius: 0.4rem;
+}
+
+.stepHeader {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 0.35rem;
+}
+
+.stepType {
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: #3b82f6;
+    text-transform: uppercase;
+}
+
+.stepActions {
+    display: flex;
+    gap: 0.25rem;
+}
+
+.stepSmallBtn {
+    padding: 0.15rem 0.35rem;
+    border: 1px solid #e2e8f0;
+    border-radius: 0.25rem;
+    background: white;
+    color: #64748b;
+    cursor: pointer;
+    font-size: 0.7rem;
+}
+
+.stepSmallBtn:hover {
+    background: #f1f5f9;
+}
+
+.callRow {
+    display: flex;
+    gap: 0.4rem;
+    align-items: flex-start;
+    margin-bottom: 0.3rem;
+}
+
+.callToolSelect {
+    width: 160px;
+    flex-shrink: 0;
+    padding: 0.3rem 0.4rem;
+    border: 1px solid #e2e8f0;
+    border-radius: 0.3rem;
+    font-size: 0.8rem;
+    background: white;
+    color: #1e293b;
+}
+
+.callToolSelect:focus {
+    outline: none;
+    border-color: #3b82f6;
+    box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.15);
+}
+
+.callArgsInput {
+    flex: 1;
+    padding: 0.3rem 0.4rem;
+    border: 1px solid #e2e8f0;
+    border-radius: 0.3rem;
+    font-size: 0.8rem;
+    font-family: 'Consolas', 'Monaco', monospace;
+    min-width: 0;
+    color: #1e293b;
+    background: white;
+}
+
+.callArgsInput:focus {
+    outline: none;
+    border-color: #3b82f6;
+    box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.15);
+}
+
+.argsInvalid,
+.argsInvalid:focus {
+    border-color: #dc2626;
+    box-shadow: 0 0 0 2px rgba(220, 38, 38, 0.15);
+}
+
+.waitInput {
+    width: 120px;
+    padding: 0.3rem 0.4rem;
+    border: 1px solid #e2e8f0;
+    border-radius: 0.3rem;
+    font-size: 0.8rem;
+    color: #1e293b;
+    background: white;
+}
+
+.waitInput:focus {
+    outline: none;
+    border-color: #3b82f6;
+    box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.15);
+}
+
+.addStepRow {
+    display: flex;
+    gap: 0.35rem;
+    margin-top: 0.4rem;
+}
+
+.addStepBtn {
+    padding: 0.3rem 0.6rem;
+    border: 1px dashed #cbd5e1;
+    border-radius: 0.3rem;
+    background: transparent;
+    color: #64748b;
+    cursor: pointer;
+    font-size: 0.75rem;
+}
+
+.addStepBtn:hover {
+    background: #f8fafc;
+}
+
+.addCallBtn {
+    composes: addStepBtn;
+    font-size: 0.7rem;
+    padding: 0.2rem 0.4rem;
+}
+
+/* Button styles for footer */
+.btnPrimary {
+    padding: 0.4rem 1rem;
+    border: none;
+    border-radius: 0.35rem;
+    background: #3b82f6;
+    color: white;
+    font-size: 0.85rem;
+    cursor: pointer;
+    font-weight: 500;
+}
+
+.btnPrimary:hover {
+    background: #2563eb;
+}
+
+.btnPrimary:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.btnSecondary {
+    padding: 0.4rem 1rem;
+    border: 1px solid #e2e8f0;
+    border-radius: 0.35rem;
+    background: white;
+    color: #475569;
+    font-size: 0.85rem;
+    cursor: pointer;
+}
+
+.btnSecondary:hover {
+    background: #f8fafc;
+}
+
+.testResult {
+    margin-top: 0.5rem;
+    padding: 0.5rem 0.75rem;
+    border-radius: 0.35rem;
+    font-size: 0.8rem;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.testResultOk {
+    composes: testResult;
+    background: #f0fdf4;
+    border: 1px solid #bbf7d0;
+    color: #166534;
+}
+
+.testResultError {
+    composes: testResult;
+    background: #fef2f2;
+    border: 1px solid #fecaca;
+    color: #991b1b;
+}
+
+.emptyMessage {
+    text-align: center;
+    color: #94a3b8;
+    font-size: 0.8rem;
+    padding: 0.75rem 0;
+}
+
+.removeCallBtn {
+    padding: 0.2rem 0.4rem;
+    border: 1px solid #e2e8f0;
+    border-radius: 0.25rem;
+    background: white;
+    color: #dc2626;
+    cursor: pointer;
+    font-size: 0.7rem;
+    flex-shrink: 0;
+}
+
+.removeCallBtn:hover {
+    background: #fef2f2;
+}
+
+/* Tool call args form */
+.callCard {
+    padding: 0.45rem 0.5rem;
+    margin-bottom: 0.4rem;
+    background: #ffffff;
+    border: 1px solid #e2e8f0;
+    border-radius: 0.4rem;
+}
+
+.callTopRow {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    margin-bottom: 0.4rem;
+}
+
+.callTopRow .callToolSelect {
+    width: auto;
+    flex: 1;
+    min-width: 0;
+}
+
+.argsForm,
+.argsFormRaw {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+}
+
+.argField {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+}
+
+.argFieldLabel {
+    font-size: 0.72rem;
+    color: #475569;
+    font-family: 'Consolas', 'Monaco', monospace;
+}
+
+.argFieldRequired {
+    color: #dc2626;
+    margin-left: 0.15rem;
+}
+
+.argFieldInput,
+.argFieldSelect {
+    padding: 0.3rem 0.4rem;
+    border: 1px solid #e2e8f0;
+    border-radius: 0.3rem;
+    font-size: 0.8rem;
+    color: #1e293b;
+    background: white;
+}
+
+.argFieldInput:focus,
+.argFieldSelect:focus {
+    outline: none;
+    border-color: #3b82f6;
+    box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.15);
+}
+
+.argModeBtn {
+    align-self: flex-start;
+    font-size: 0.68rem;
+    padding: 0.1rem 0.4rem;
+    border: 1px solid #e2e8f0;
+    border-radius: 0.3rem;
+    background: white;
+    color: #64748b;
+    cursor: pointer;
+}
+
+.argModeBtn:hover {
+    background: #f1f5f9;
+}
+
+/* Parameters (引数) */
+.actionParams {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.25rem;
+    margin-top: 0.3rem;
+}
+
+.paramChip {
+    font-size: 0.68rem;
+    padding: 0.05rem 0.35rem;
+    border-radius: 0.6rem;
+    background: #eef2ff;
+    color: #4338ca;
+    font-family: 'Consolas', 'Monaco', monospace;
+}
+
+.paramChipDefault {
+    color: #818cf8;
+    margin-left: 0.1rem;
+}
+
+.paramHint {
+    font-size: 0.72rem;
+    color: #64748b;
+    margin: 0 0 0.5rem;
+    line-height: 1.4;
+}
+
+.paramHint code {
+    font-family: 'Consolas', 'Monaco', monospace;
+    background: #f1f5f9;
+    padding: 0.05rem 0.25rem;
+    border-radius: 0.2rem;
+}
+
+.paramCard {
+    padding: 0.5rem 0.6rem;
+    margin-bottom: 0.4rem;
+    background: #f8fafc;
+    border: 1px solid #e2e8f0;
+    border-radius: 0.4rem;
+}
+
+.paramRow {
+    display: flex;
+    gap: 0.4rem;
+    align-items: center;
+    margin-bottom: 0.3rem;
+}
+
+.paramNameInput {
+    flex: 1;
+    min-width: 0;
+    padding: 0.3rem 0.4rem;
+    border: 1px solid #e2e8f0;
+    border-radius: 0.3rem;
+    font-size: 0.8rem;
+    font-family: 'Consolas', 'Monaco', monospace;
+    color: #1e293b;
+    background: white;
+}
+
+.paramTypeSelect {
+    width: 90px;
+    flex-shrink: 0;
+    padding: 0.3rem 0.4rem;
+    border: 1px solid #e2e8f0;
+    border-radius: 0.3rem;
+    font-size: 0.8rem;
+    background: white;
+    color: #1e293b;
+}
+
+.paramSmallInput {
+    width: 80px;
+    padding: 0.3rem 0.4rem;
+    border: 1px solid #e2e8f0;
+    border-radius: 0.3rem;
+    font-size: 0.8rem;
+    color: #1e293b;
+    background: white;
+}
+
+.paramDescInput {
+    width: 100%;
+    box-sizing: border-box;
+    padding: 0.3rem 0.4rem;
+    border: 1px solid #e2e8f0;
+    border-radius: 0.3rem;
+    font-size: 0.8rem;
+    color: #1e293b;
+    background: white;
+}
+
+.paramNameInput:focus,
+.paramTypeSelect:focus,
+.paramSmallInput:focus,
+.paramDescInput:focus {
+    outline: none;
+    border-color: #3b82f6;
+    box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.15);
+}
+
+.paramChipRow {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.25rem;
+    margin-top: 0.3rem;
+}
+
+.paramInsertChip {
+    font-size: 0.68rem;
+    padding: 0.1rem 0.4rem;
+    border-radius: 0.3rem;
+    border: 1px solid #c7d2fe;
+    background: #eef2ff;
+    color: #4338ca;
+    cursor: pointer;
+    font-family: 'Consolas', 'Monaco', monospace;
+}
+
+.paramInsertChip:hover {
+    background: #e0e7ff;
+}
+
+/* ===== Dark mode ===== */
+
+:global([data-theme="dark"]) .sectionHeader {
+    color: #e2e8f0;
+}
+
+:global([data-theme="dark"]) .sectionHeader:hover {
+    background: rgba(99, 102, 241, 0.12);
+}
+
+:global([data-theme="dark"]) .actionCard {
+    background: #0f172a;
+    border-color: rgba(255, 255, 255, 0.08);
+}
+
+:global([data-theme="dark"]) .actionName {
+    color: #e2e8f0;
+}
+
+:global([data-theme="dark"]) .actionDesc {
+    color: #94a3b8;
+}
+
+:global([data-theme="dark"]) .iconBtn {
+    background: #1e293b;
+    border-color: #334155;
+    color: #94a3b8;
+}
+
+:global([data-theme="dark"]) .iconBtn:hover {
+    background: rgba(255, 255, 255, 0.06);
+}
+
+:global([data-theme="dark"]) .iconBtnDanger {
+    color: #f87171;
+}
+
+:global([data-theme="dark"]) .iconBtnDanger:hover {
+    background: rgba(220, 38, 38, 0.15);
+}
+
+:global([data-theme="dark"]) .addBtn {
+    border-color: #334155;
+    color: #94a3b8;
+}
+
+:global([data-theme="dark"]) .addBtn:hover {
+    background: rgba(255, 255, 255, 0.04);
+    border-color: #6366f1;
+}
+
+:global([data-theme="dark"]) .editor {
+    background: #1e293b;
+    box-shadow: 0 8px 40px rgba(0, 0, 0, 0.5);
+}
+
+:global([data-theme="dark"]) .editorHeader {
+    border-bottom-color: rgba(255, 255, 255, 0.08);
+}
+
+:global([data-theme="dark"]) .editorHeader h3 {
+    color: #e2e8f0;
+}
+
+:global([data-theme="dark"]) .editorFooter {
+    border-top-color: rgba(255, 255, 255, 0.08);
+}
+
+:global([data-theme="dark"]) .fieldLabel {
+    color: #cbd5e1;
+}
+
+:global([data-theme="dark"]) .fieldInput {
+    background: #0f172a;
+    border-color: #334155;
+    color: #e2e8f0;
+}
+
+:global([data-theme="dark"]) .fieldInput:focus {
+    border-color: #6366f1;
+    box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.2);
+}
+
+:global([data-theme="dark"]) .stepsTitle {
+    color: #cbd5e1;
+}
+
+:global([data-theme="dark"]) .stepCard {
+    background: #0f172a;
+    border-color: rgba(255, 255, 255, 0.08);
+}
+
+:global([data-theme="dark"]) .stepType {
+    color: #818cf8;
+}
+
+:global([data-theme="dark"]) .stepSmallBtn {
+    background: #1e293b;
+    border-color: #334155;
+    color: #94a3b8;
+}
+
+:global([data-theme="dark"]) .stepSmallBtn:hover {
+    background: rgba(255, 255, 255, 0.06);
+}
+
+:global([data-theme="dark"]) .callToolSelect {
+    background: #0f172a;
+    border-color: #334155;
+    color: #e2e8f0;
+}
+
+:global([data-theme="dark"]) .callToolSelect:focus {
+    border-color: #6366f1;
+    box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.2);
+}
+
+:global([data-theme="dark"]) .callArgsInput {
+    background: #0f172a;
+    border-color: #334155;
+    color: #e2e8f0;
+}
+
+:global([data-theme="dark"]) .callArgsInput:focus {
+    border-color: #6366f1;
+    box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.2);
+}
+
+:global([data-theme="dark"]) .argsInvalid,
+:global([data-theme="dark"]) .argsInvalid:focus {
+    border-color: #f87171;
+    box-shadow: 0 0 0 2px rgba(248, 113, 113, 0.2);
+}
+
+:global([data-theme="dark"]) .waitInput {
+    background: #0f172a;
+    border-color: #334155;
+    color: #e2e8f0;
+}
+
+:global([data-theme="dark"]) .waitInput:focus {
+    border-color: #6366f1;
+    box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.2);
+}
+
+:global([data-theme="dark"]) .addStepBtn {
+    border-color: #334155;
+    color: #94a3b8;
+}
+
+:global([data-theme="dark"]) .addStepBtn:hover {
+    background: rgba(255, 255, 255, 0.04);
+    border-color: #6366f1;
+}
+
+:global([data-theme="dark"]) .btnSecondary {
+    background: #1e293b;
+    border-color: #334155;
+    color: #cbd5e1;
+}
+
+:global([data-theme="dark"]) .btnSecondary:hover {
+    background: rgba(255, 255, 255, 0.06);
+}
+
+:global([data-theme="dark"]) .testResultOk {
+    background: rgba(34, 197, 94, 0.1);
+    border-color: rgba(34, 197, 94, 0.3);
+    color: #4ade80;
+}
+
+:global([data-theme="dark"]) .testResultError {
+    background: rgba(220, 38, 38, 0.1);
+    border-color: rgba(220, 38, 38, 0.3);
+    color: #f87171;
+}
+
+:global([data-theme="dark"]) .emptyMessage {
+    color: #64748b;
+}
+
+:global([data-theme="dark"]) .removeCallBtn {
+    background: #1e293b;
+    border-color: #334155;
+    color: #f87171;
+}
+
+:global([data-theme="dark"]) .removeCallBtn:hover {
+    background: rgba(220, 38, 38, 0.15);
+}
+
+:global([data-theme="dark"]) .paramChip {
+    background: rgba(99, 102, 241, 0.15);
+    color: #a5b4fc;
+}
+
+:global([data-theme="dark"]) .paramChipDefault {
+    color: #818cf8;
+}
+
+:global([data-theme="dark"]) .paramHint {
+    color: #94a3b8;
+}
+
+:global([data-theme="dark"]) .paramHint code {
+    background: #0f172a;
+}
+
+:global([data-theme="dark"]) .paramCard {
+    background: #0f172a;
+    border-color: rgba(255, 255, 255, 0.08);
+}
+
+:global([data-theme="dark"]) .paramNameInput,
+:global([data-theme="dark"]) .paramTypeSelect,
+:global([data-theme="dark"]) .paramSmallInput,
+:global([data-theme="dark"]) .paramDescInput {
+    background: #1e293b;
+    border-color: #334155;
+    color: #e2e8f0;
+}
+
+:global([data-theme="dark"]) .paramNameInput:focus,
+:global([data-theme="dark"]) .paramTypeSelect:focus,
+:global([data-theme="dark"]) .paramSmallInput:focus,
+:global([data-theme="dark"]) .paramDescInput:focus {
+    border-color: #6366f1;
+    box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.2);
+}
+
+:global([data-theme="dark"]) .paramInsertChip {
+    background: rgba(99, 102, 241, 0.15);
+    border-color: #4338ca;
+    color: #a5b4fc;
+}
+
+:global([data-theme="dark"]) .paramInsertChip:hover {
+    background: rgba(99, 102, 241, 0.25);
+}
+
+:global([data-theme="dark"]) .callCard {
+    background: #0f172a;
+    border-color: rgba(255, 255, 255, 0.08);
+}
+
+:global([data-theme="dark"]) .argFieldLabel {
+    color: #cbd5e1;
+}
+
+:global([data-theme="dark"]) .argFieldInput,
+:global([data-theme="dark"]) .argFieldSelect {
+    background: #1e293b;
+    border-color: #334155;
+    color: #e2e8f0;
+}
+
+:global([data-theme="dark"]) .argFieldInput:focus,
+:global([data-theme="dark"]) .argFieldSelect:focus {
+    border-color: #6366f1;
+    box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.2);
+}
+
+:global([data-theme="dark"]) .argModeBtn {
+    background: #1e293b;
+    border-color: #334155;
+    color: #94a3b8;
+}
+
+:global([data-theme="dark"]) .argModeBtn:hover {
+    background: rgba(255, 255, 255, 0.06);
+}
+
+/* ----- テスト対象機体セレクタ (複数機体アドオン) ----- */
+.testTargetRow {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-bottom: 0.6rem;
+    padding: 0.5rem 0.6rem;
+    background: #f8fafc;
+    border: 1px solid #e2e8f0;
+    border-radius: 0.5rem;
+}
+
+.testTargetLabel {
+    font-size: 0.78rem;
+    font-weight: 600;
+    color: #475569;
+    flex-shrink: 0;
+}
+
+.testTargetSelect {
+    flex: 1;
+    min-width: 0;
+    padding: 0.3rem 0.4rem;
+    border: 1px solid #e2e8f0;
+    border-radius: 0.3rem;
+    font-size: 0.8rem;
+    background: white;
+    color: #1e293b;
+}
+
+.testTargetSelect:focus {
+    outline: none;
+    border-color: #3b82f6;
+    box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.15);
+}
+
+:global([data-theme="dark"]) .testTargetRow {
+    background: #0f172a;
+    border-color: rgba(255, 255, 255, 0.08);
+}
+
+:global([data-theme="dark"]) .testTargetLabel {
+    color: #cbd5e1;
+}
+
+:global([data-theme="dark"]) .testTargetSelect {
+    background: #1e293b;
+    border-color: #334155;
+    color: #e2e8f0;
+}
+
+:global([data-theme="dark"]) .testTargetSelect:focus {
+    border-color: #6366f1;
+    box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.2);
+}

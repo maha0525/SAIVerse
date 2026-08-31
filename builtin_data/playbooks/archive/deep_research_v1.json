@@ -1,347 +1,339 @@
 {
-    "name": "deep_research",
-    "display_name": "深い調査",
-    "description": "トピックについて深く調査し、複数の情報源から情報を収集してレポートドキュメントを作成する",
-    "input_schema": [
-        {
-            "name": "input",
-            "description": "調査したいトピックや質問"
-        }
-    ],
-    "context_requirements": {
-        "history_depth": "10messages",
-        "history_balanced": false,
-        "include_internal": false,
-        "system_prompt": true,
-        "memory_weave": true,
-        "working_memory": false,
-        "inventory": false,
-        "building_items": true,
-        "available_playbooks": false,
-        "visual_context": false,
-        "realtime_context": true
+  "name": "deep_research",
+  "display_name": "深い調査",
+  "description": "トピックについて深く調査し、複数の情報源から情報を収集してレポートドキュメントを作成する",
+  "input_schema": [
+    {
+      "name": "input",
+      "description": "調査したいトピックや質問"
+    }
+  ],
+  "context_requirements": {
+    "history_depth": "10messages",
+    "history_balanced": false,
+    "realtime_context": true
+  },
+  "router_callable": true,
+  "nodes": [
+    {
+      "id": "init",
+      "type": "set",
+      "assignments": {
+        "loop_count": 0,
+        "max_loops": 10,
+        "accumulated_info": "",
+        "sources": "",
+        "research_topic": "{input}"
+      },
+      "next": "build_query"
     },
-    "router_callable": true,
-    "nodes": [
-        {
-            "id": "init",
-            "type": "set",
-            "assignments": {
-                "loop_count": 0,
-                "max_loops": 10,
-                "accumulated_info": "",
-                "sources": "",
-                "research_topic": "{input}"
+    {
+      "id": "build_query",
+      "type": "llm",
+      "model_type": "lightweight",
+      "action": "<system>調査トピック「{research_topic}」について、これまでに収集した情報を踏まえて次の検索クエリを生成してください。\n\n収集済み情報:\n{accumulated_info}\n\n情報がまだない場合は基本的な検索から、既にある場合は不足している観点を補う検索を行ってください。</system>",
+      "response_schema": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "検索クエリ"
+          },
+          "max_results": {
+            "type": "integer",
+            "description": "取得件数（3-10）"
+          },
+          "rationale": {
+            "type": "string",
+            "description": "このクエリを選んだ理由"
+          }
+        },
+        "required": [
+          "query"
+        ]
+      },
+      "output_key": "search_args",
+      "next": "log_query"
+    },
+    {
+      "id": "log_query",
+      "type": "memorize",
+      "action": "🔍 検索クエリ: {search_args.query}",
+      "role": "assistant",
+      "tags": [
+        "tool",
+        "deep_research"
+      ],
+      "next": "search"
+    },
+    {
+      "id": "search",
+      "type": "tool",
+      "action": "searxng_search",
+      "args_input": {
+        "query": "search_args.query",
+        "max_results": "search_args.max_results"
+      },
+      "output_key": "search_results",
+      "next": "select_pages"
+    },
+    {
+      "id": "select_pages",
+      "type": "llm",
+      "model_type": "lightweight",
+      "action": "<system>検索結果から、調査トピック「{research_topic}」に関連する有用なページを最大3件選んでください。既に調べた情報源は避けてください。\n\n検索結果:\n{search_results}\n\n既に調べたソース:\n{sources}</system>",
+      "response_schema": {
+        "type": "object",
+        "properties": {
+          "selected_urls": {
+            "type": "array",
+            "items": {
+              "type": "string"
             },
-            "next": "build_query"
+            "description": "読み込むURLのリスト（最大3件）"
+          },
+          "skip_reason": {
+            "type": "string",
+            "description": "URLを選ばなかった場合の理由"
+          }
         },
-        {
-            "id": "build_query",
-            "type": "llm",
-            "model_type": "lightweight",
-            "action": "<system>調査トピック「{research_topic}」について、これまでに収集した情報を踏まえて次の検索クエリを生成してください。\n\n収集済み情報:\n{accumulated_info}\n\n情報がまだない場合は基本的な検索から、既にある場合は不足している観点を補う検索を行ってください。</system>",
-            "response_schema": {
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "検索クエリ"
-                    },
-                    "max_results": {
-                        "type": "integer",
-                        "description": "取得件数（3-10）"
-                    },
-                    "rationale": {
-                        "type": "string",
-                        "description": "このクエリを選んだ理由"
-                    }
-                },
-                "required": [
-                    "query"
-                ]
-            },
-            "output_key": "search_args",
-            "next": "log_query"
-        },
-        {
-            "id": "log_query",
-            "type": "memorize",
-            "action": "🔍 検索クエリ: {search_args.query}",
-            "role": "assistant",
-            "tags": [
-                "tool",
-                "deep_research"
-            ],
-            "next": "search"
-        },
-        {
-            "id": "search",
-            "type": "tool",
-            "action": "searxng_search",
-            "args_input": {
-                "query": "search_args.query",
-                "max_results": "search_args.max_results"
-            },
-            "output_key": "search_results",
-            "next": "select_pages"
-        },
-        {
-            "id": "select_pages",
-            "type": "llm",
-            "model_type": "lightweight",
-            "action": "<system>検索結果から、調査トピック「{research_topic}」に関連する有用なページを最大3件選んでください。既に調べた情報源は避けてください。\n\n検索結果:\n{search_results}\n\n既に調べたソース:\n{sources}</system>",
-            "response_schema": {
-                "type": "object",
-                "properties": {
-                    "selected_urls": {
-                        "type": "array",
-                        "items": {
-                            "type": "string"
-                        },
-                        "description": "読み込むURLのリスト（最大3件）"
-                    },
-                    "skip_reason": {
-                        "type": "string",
-                        "description": "URLを選ばなかった場合の理由"
-                    }
-                },
-                "required": [
-                    "selected_urls"
-                ]
-            },
-            "output_key": "page_selection",
-            "next": "check_selection"
-        },
-        {
-            "id": "check_selection",
-            "type": "pass",
-            "conditional_next": {
-                "field": "page_selection.selected_urls.length",
-                "operator": "gte",
-                "cases": {
-                    "1": "read_page_1",
-                    "default": "check_done"
-                }
-            }
-        },
-        {
-            "id": "read_page_1",
-            "type": "tool",
-            "action": "read_url_content",
-            "args_input": {
-                "url": "page_selection.selected_urls.0",
-                "max_chars": 6000
-            },
-            "output_key": "page_content_1",
-            "next": "summarize_1"
-        },
-        {
-            "id": "summarize_1",
-            "type": "llm",
-            "model_type": "lightweight",
-            "action": "<system>以下のページ内容から、調査トピック「{research_topic}」に関連する重要な情報を300-500文字で要約してください。事実と数字を優先的に抽出すること。\n\nページ内容:\n{page_content_1}</system>",
-            "response_schema": {
-                "type": "object",
-                "properties": {
-                    "summary": {
-                        "type": "string",
-                        "description": "ページの要約"
-                    },
-                    "key_facts": {
-                        "type": "array",
-                        "items": {
-                            "type": "string"
-                        },
-                        "description": "重要な事実のリスト"
-                    }
-                },
-                "required": [
-                    "summary"
-                ]
-            },
-            "output_key": "summary_1",
-            "next": "accumulate_1"
-        },
-        {
-            "id": "accumulate_1",
-            "type": "set",
-            "assignments": {
-                "accumulated_info": "{accumulated_info}\n\n---\n📄 {page_selection.selected_urls.0}\n{summary_1.summary}",
-                "sources": "{sources}\n{page_selection.selected_urls.0}"
-            },
-            "next": "check_more_pages"
-        },
-        {
-            "id": "check_more_pages",
-            "type": "pass",
-            "conditional_next": {
-                "field": "page_selection.selected_urls.length",
-                "operator": "gte",
-                "cases": {
-                    "2": "read_page_2",
-                    "default": "check_done"
-                }
-            }
-        },
-        {
-            "id": "read_page_2",
-            "type": "tool",
-            "action": "read_url_content",
-            "args_input": {
-                "url": "page_selection.selected_urls.1",
-                "max_chars": 6000
-            },
-            "output_key": "page_content_2",
-            "next": "summarize_2"
-        },
-        {
-            "id": "summarize_2",
-            "type": "llm",
-            "model_type": "lightweight",
-            "action": "<system>以下のページ内容から、調査トピック「{research_topic}」に関連する重要な情報を300-500文字で要約してください。\n\nページ内容:\n{page_content_2}</system>",
-            "response_schema": {
-                "type": "object",
-                "properties": {
-                    "summary": {
-                        "type": "string"
-                    },
-                    "key_facts": {
-                        "type": "array",
-                        "items": {
-                            "type": "string"
-                        }
-                    }
-                },
-                "required": [
-                    "summary"
-                ]
-            },
-            "output_key": "summary_2",
-            "next": "accumulate_2"
-        },
-        {
-            "id": "accumulate_2",
-            "type": "set",
-            "assignments": {
-                "accumulated_info": "{accumulated_info}\n\n---\n📄 {page_selection.selected_urls.1}\n{summary_2.summary}",
-                "sources": "{sources}\n{page_selection.selected_urls.1}"
-            },
-            "next": "check_done"
-        },
-        {
-            "id": "check_done",
-            "type": "llm",
-            "model_type": "lightweight",
-            "action": "<system>調査トピック「{research_topic}」について、収集した情報が十分かどうか判断してください。\n\n収集済み情報:\n{accumulated_info}\n\nループ回数: {loop_count}/{max_loops}\n\n以下を考慮して判断:\n- トピックの主要な側面がカバーされているか\n- 信頼できる情報源から情報が得られているか\n- レポートを書くのに十分な具体的情報があるか</system>",
-            "response_schema": {
-                "type": "object",
-                "properties": {
-                    "is_sufficient": {
-                        "type": "boolean",
-                        "description": "情報が十分かどうか"
-                    },
-                    "missing_aspects": {
-                        "type": "string",
-                        "description": "不足している観点（あれば）"
-                    },
-                    "next_search_suggestion": {
-                        "type": "string",
-                        "description": "次に検索すべきキーワード（不足している場合）"
-                    }
-                },
-                "required": [
-                    "is_sufficient"
-                ]
-            },
-            "output_key": "sufficiency_check",
-            "next": "decide_continue"
-        },
-        {
-            "id": "decide_continue",
-            "type": "pass",
-            "conditional_next": {
-                "field": "sufficiency_check.is_sufficient",
-                "operator": "eq",
-                "cases": {
-                    "true": "generate_report",
-                    "default": "inc_loop"
-                }
-            }
-        },
-        {
-            "id": "inc_loop",
-            "type": "set",
-            "assignments": {
-                "loop_count": "={loop_count} + 1"
-            },
-            "next": "check_loop_limit"
-        },
-        {
-            "id": "check_loop_limit",
-            "type": "pass",
-            "conditional_next": {
-                "field": "loop_count",
-                "operator": "gte",
-                "cases": {
-                    "5": "generate_report",
-                    "default": "build_query"
-                }
-            }
-        },
-        {
-            "id": "generate_report",
-            "type": "llm",
-            "model_type": "normal",
-            "action": "<system>調査トピック「{research_topic}」について、収集した情報を基に包括的なレポートを作成してください。\n\n収集済み情報:\n{accumulated_info}\n\nレポート要件:\n- 明確な構成（概要、本文、結論）\n- 情報源の明記\n- 事実に基づいた客観的な記述\n- 読みやすいMarkdown形式</system>",
-            "response_schema": {
-                "type": "object",
-                "properties": {
-                    "title": {
-                        "type": "string",
-                        "description": "レポートのタイトル"
-                    },
-                    "content": {
-                        "type": "string",
-                        "description": "レポート本文（Markdown形式）"
-                    },
-                    "summary": {
-                        "type": "string",
-                        "description": "レポートの要約（1-2文）"
-                    }
-                },
-                "required": [
-                    "title",
-                    "content",
-                    "summary"
-                ]
-            },
-            "output_key": "report",
-            "next": "create_document"
-        },
-        {
-            "id": "create_document",
-            "type": "tool",
-            "action": "document_create",
-            "args_input": {
-                "name": "report.title",
-                "description": "report.summary",
-                "content": "report.content"
-            },
-            "output_key": "doc_result",
-            "next": "notify_complete"
-        },
-        {
-            "id": "notify_complete",
-            "type": "memorize",
-            "action": "<system>📝 ディープリサーチ完了\n\nトピック: {research_topic}\nドキュメント: 「{report.title}」を作成しました。\n調査ループ: {loop_count}回\n情報源: {sources}\n\n結果: {doc_result}</system>",
-            "role": "user",
-            "tags": [
-                "tool",
-                "deep_research",
-                "complete"
-            ],
-            "next": null
+        "required": [
+          "selected_urls"
+        ]
+      },
+      "output_key": "page_selection",
+      "next": "check_selection"
+    },
+    {
+      "id": "check_selection",
+      "type": "pass",
+      "conditional_next": {
+        "field": "page_selection.selected_urls.length",
+        "operator": "gte",
+        "cases": {
+          "1": "read_page_1",
+          "default": "check_done"
         }
-    ],
-    "start_node": "init"
+      }
+    },
+    {
+      "id": "read_page_1",
+      "type": "tool",
+      "action": "read_url_content",
+      "args_input": {
+        "url": "page_selection.selected_urls.0",
+        "max_chars": 6000
+      },
+      "output_key": "page_content_1",
+      "next": "summarize_1"
+    },
+    {
+      "id": "summarize_1",
+      "type": "llm",
+      "model_type": "lightweight",
+      "action": "<system>以下のページ内容から、調査トピック「{research_topic}」に関連する重要な情報を300-500文字で要約してください。事実と数字を優先的に抽出すること。\n\nページ内容:\n{page_content_1}</system>",
+      "response_schema": {
+        "type": "object",
+        "properties": {
+          "summary": {
+            "type": "string",
+            "description": "ページの要約"
+          },
+          "key_facts": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "重要な事実のリスト"
+          }
+        },
+        "required": [
+          "summary"
+        ]
+      },
+      "output_key": "summary_1",
+      "next": "accumulate_1"
+    },
+    {
+      "id": "accumulate_1",
+      "type": "set",
+      "assignments": {
+        "accumulated_info": "{accumulated_info}\n\n---\n📄 {page_selection.selected_urls.0}\n{summary_1.summary}",
+        "sources": "{sources}\n{page_selection.selected_urls.0}"
+      },
+      "next": "check_more_pages"
+    },
+    {
+      "id": "check_more_pages",
+      "type": "pass",
+      "conditional_next": {
+        "field": "page_selection.selected_urls.length",
+        "operator": "gte",
+        "cases": {
+          "2": "read_page_2",
+          "default": "check_done"
+        }
+      }
+    },
+    {
+      "id": "read_page_2",
+      "type": "tool",
+      "action": "read_url_content",
+      "args_input": {
+        "url": "page_selection.selected_urls.1",
+        "max_chars": 6000
+      },
+      "output_key": "page_content_2",
+      "next": "summarize_2"
+    },
+    {
+      "id": "summarize_2",
+      "type": "llm",
+      "model_type": "lightweight",
+      "action": "<system>以下のページ内容から、調査トピック「{research_topic}」に関連する重要な情報を300-500文字で要約してください。\n\nページ内容:\n{page_content_2}</system>",
+      "response_schema": {
+        "type": "object",
+        "properties": {
+          "summary": {
+            "type": "string"
+          },
+          "key_facts": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "summary"
+        ]
+      },
+      "output_key": "summary_2",
+      "next": "accumulate_2"
+    },
+    {
+      "id": "accumulate_2",
+      "type": "set",
+      "assignments": {
+        "accumulated_info": "{accumulated_info}\n\n---\n📄 {page_selection.selected_urls.1}\n{summary_2.summary}",
+        "sources": "{sources}\n{page_selection.selected_urls.1}"
+      },
+      "next": "check_done"
+    },
+    {
+      "id": "check_done",
+      "type": "llm",
+      "model_type": "lightweight",
+      "action": "<system>調査トピック「{research_topic}」について、収集した情報が十分かどうか判断してください。\n\n収集済み情報:\n{accumulated_info}\n\nループ回数: {loop_count}/{max_loops}\n\n以下を考慮して判断:\n- トピックの主要な側面がカバーされているか\n- 信頼できる情報源から情報が得られているか\n- レポートを書くのに十分な具体的情報があるか</system>",
+      "response_schema": {
+        "type": "object",
+        "properties": {
+          "is_sufficient": {
+            "type": "boolean",
+            "description": "情報が十分かどうか"
+          },
+          "missing_aspects": {
+            "type": "string",
+            "description": "不足している観点（あれば）"
+          },
+          "next_search_suggestion": {
+            "type": "string",
+            "description": "次に検索すべきキーワード（不足している場合）"
+          }
+        },
+        "required": [
+          "is_sufficient"
+        ]
+      },
+      "output_key": "sufficiency_check",
+      "next": "decide_continue"
+    },
+    {
+      "id": "decide_continue",
+      "type": "pass",
+      "conditional_next": {
+        "field": "sufficiency_check.is_sufficient",
+        "operator": "eq",
+        "cases": {
+          "true": "generate_report",
+          "default": "inc_loop"
+        }
+      }
+    },
+    {
+      "id": "inc_loop",
+      "type": "set",
+      "assignments": {
+        "loop_count": "={loop_count} + 1"
+      },
+      "next": "check_loop_limit"
+    },
+    {
+      "id": "check_loop_limit",
+      "type": "pass",
+      "conditional_next": {
+        "field": "loop_count",
+        "operator": "gte",
+        "cases": {
+          "5": "generate_report",
+          "default": "build_query"
+        }
+      }
+    },
+    {
+      "id": "generate_report",
+      "type": "llm",
+      "model_type": "normal",
+      "action": "<system>調査トピック「{research_topic}」について、収集した情報を基に包括的なレポートを作成してください。\n\n収集済み情報:\n{accumulated_info}\n\nレポート要件:\n- 明確な構成（概要、本文、結論）\n- 情報源の明記\n- 事実に基づいた客観的な記述\n- 読みやすいMarkdown形式</system>",
+      "response_schema": {
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": "string",
+            "description": "レポートのタイトル"
+          },
+          "content": {
+            "type": "string",
+            "description": "レポート本文（Markdown形式）"
+          },
+          "summary": {
+            "type": "string",
+            "description": "レポートの要約（1-2文）"
+          }
+        },
+        "required": [
+          "title",
+          "content",
+          "summary"
+        ]
+      },
+      "output_key": "report",
+      "next": "create_document"
+    },
+    {
+      "id": "create_document",
+      "type": "tool",
+      "action": "document_create",
+      "args_input": {
+        "name": "report.title",
+        "description": "report.summary",
+        "content": "report.content"
+      },
+      "output_key": "doc_result",
+      "next": "notify_complete"
+    },
+    {
+      "id": "notify_complete",
+      "type": "memorize",
+      "action": "<system>📝 ディープリサーチ完了\n\nトピック: {research_topic}\nドキュメント: 「{report.title}」を作成しました。\n調査ループ: {loop_count}回\n情報源: {sources}\n\n結果: {doc_result}</system>",
+      "role": "user",
+      "tags": [
+        "tool",
+        "deep_research",
+        "complete"
+      ],
+      "next": null
+    }
+  ],
+  "start_node": "init"
 }

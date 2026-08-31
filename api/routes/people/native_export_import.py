@@ -16,10 +16,13 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from fastapi.responses import Response
 
 from api.deps import get_manager
+from api.file_safety import read_upload_bounded
 from .models import NativeImportStatusResponse
+from .utils import ensure_persona_exists
 
 LOGGER = logging.getLogger(__name__)
 router = APIRouter()
+NATIVE_IMPORT_MAX_BYTES = 256 * 1024 * 1024
 
 # Track import status per persona
 _native_import_status: Dict[str, Dict[str, Any]] = {}
@@ -77,6 +80,7 @@ def _run_native_import_task(
     persona_id: str,
     data: Dict[str, Any],
     skip_embedding: bool,
+    transplant: bool,
 ) -> None:
     """Background task to import native JSON."""
     from saiverse_memory.native_export import import_threads_native
@@ -105,6 +109,7 @@ def _run_native_import_task(
             replace=True,
             skip_embed=skip_embedding,
             progress_callback=progress_callback,
+            transplant=transplant,
         )
         with _native_import_lock:
             _native_import_status[persona_id] = {
@@ -136,13 +141,23 @@ async def import_native(
     persona_id: str,
     file: UploadFile = File(...),
     skip_embedding: bool = Form(False),
+    transplant: bool = Form(False),
     manager=Depends(get_manager),
 ):
     """Import native SAIVerse JSON.
 
     Replaces existing threads with the same thread_id.
     Runs as a background task with progress tracking.
+
+    - transplant=False (default): restore — the archive must belong to the
+      target persona. A mismatched persona_id is rejected with 400.
+    - transplant=True: explicitly transplant another persona's archive.
+      All identities are remapped to the target inside import_threads_native.
     """
+    # import_threads_native() mkdirs personas/<id>/ unconditionally, so gate
+    # unknown/malformed IDs here (no orphan personas/<id>/memory.db creation).
+    ensure_persona_exists(persona_id, manager)
+
     # Check if an import is already running
     with _native_import_lock:
         status = _native_import_status.get(persona_id, {})
@@ -151,7 +166,7 @@ async def import_native(
 
     # Read and parse the uploaded file
     try:
-        raw = await file.read()
+        raw = await read_upload_bounded(file, NATIVE_IMPORT_MAX_BYTES)
         data = json.loads(raw.decode("utf-8-sig"))
     except (json.JSONDecodeError, UnicodeDecodeError) as e:
         raise HTTPException(status_code=400, detail=f"Invalid JSON file: {e}")
@@ -164,13 +179,27 @@ async def import_native(
             detail=f"Unsupported format: {fmt!r} (expected 'saiverse_saimemory_v1')",
         )
 
+    # Fail fast before starting the background task: restoring (no transplant)
+    # another persona's archive is always rejected. Deep identity checks
+    # (thread prefixes etc.) run inside import_threads_native.
+    source_persona = data.get("persona_id")
+    if not transplant and source_persona and source_persona != persona_id:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Restore rejected: archive belongs to persona "
+                f"'{source_persona}', not '{persona_id}'. To move memories "
+                "to another persona, set transplant=true explicitly."
+            ),
+        )
+
     threads = data.get("threads", [])
     total_msgs = sum(len(t.get("messages", [])) for t in threads)
 
     # Start background task
     thread = threading.Thread(
         target=_run_native_import_task,
-        args=(persona_id, data, skip_embedding),
+        args=(persona_id, data, skip_embedding, transplant),
         daemon=True,
     )
     thread.start()
@@ -209,7 +238,7 @@ async def preview_native_import(
     Returns thread summaries and message counts without modifying the database.
     """
     try:
-        raw = await file.read()
+        raw = await read_upload_bounded(file, NATIVE_IMPORT_MAX_BYTES)
         data = json.loads(raw.decode("utf-8-sig"))
     except (json.JSONDecodeError, UnicodeDecodeError) as e:
         raise HTTPException(status_code=400, detail=f"Invalid JSON file: {e}")

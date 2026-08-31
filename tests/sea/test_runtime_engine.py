@@ -66,9 +66,8 @@ def test_lg_speak_node_delegates_to_engine() -> None:
     runtime._runtime_engine.lg_speak_node.assert_called_once_with({"last": "x"}, persona, "b1", playbook, outputs, None)
 
 
-def test_lg_exec_node_runs_selected_playbook_for_meta_user_manual() -> None:
+def test_lg_exec_node_runs_selected_playbook() -> None:
     runtime, persona, playbook = _make_runtime()
-    playbook.name = "meta_user_manual"
     node_def = SimpleNamespace(id="exec", playbook_source="selected_playbook", args_source="selected_args")
     sub_playbook = SimpleNamespace(name="deep_research")
     runtime._load_playbook_for = Mock(return_value=sub_playbook)
@@ -85,7 +84,7 @@ def test_lg_exec_node_runs_selected_playbook_for_meta_user_manual() -> None:
     assert runtime._run_playbook.call_args.args[0] is sub_playbook
 
 
-def test_lg_exec_node_invalid_selected_playbook_does_not_fallback_to_basic_chat() -> None:
+def test_lg_exec_node_invalid_selected_playbook_returns_error() -> None:
     runtime, persona, playbook = _make_runtime()
     node_def = SimpleNamespace(id="exec", playbook_source="selected_playbook", args_source="selected_args")
     runtime._load_playbook_for = Mock(return_value=None)
@@ -100,27 +99,8 @@ def test_lg_exec_node_invalid_selected_playbook_does_not_fallback_to_basic_chat(
     runtime._run_playbook.assert_not_called()
 
 
-def test_lg_exec_node_meta_user_manual_invalid_selected_playbook_emits_warning_for_user() -> None:
+def test_lg_exec_node_last_route_returns_not_found_when_sub_pb_missing() -> None:
     runtime, persona, playbook = _make_runtime()
-    playbook.name = "meta_user_manual"
-    node_def = SimpleNamespace(id="exec", playbook_source="selected_playbook", args_source="selected_args")
-    runtime._load_playbook_for = Mock(return_value=None)
-    runtime._run_playbook = Mock()
-    runtime._effective_building_id = Mock(return_value="b1")
-    events: list[dict[str, str]] = []
-
-    node = runtime._runtime_engine.lg_exec_node(node_def, playbook, persona, "b1", False, event_callback=events.append)
-    state = asyncio.run(node({"selected_playbook": "invalid_tool_id", "selected_args": {"input": "hi"}}))
-
-    assert state["_exec_error"] is True
-    assert state["last"] == "指定されたツールID 'invalid_tool_id' は存在しません。"
-    assert any(e.get("type") == "warning" for e in events)
-    runtime._run_playbook.assert_not_called()
-
-
-def test_lg_exec_node_last_route_keeps_existing_not_found_behavior() -> None:
-    runtime, persona, playbook = _make_runtime()
-    playbook.name = "meta_user_manual"
     node_def = SimpleNamespace(id="exec", playbook_source="selected_playbook", args_source="selected_args")
     runtime._load_playbook_for = Mock(return_value=None)
     runtime._run_playbook = Mock()
@@ -132,7 +112,6 @@ def test_lg_exec_node_last_route_keeps_existing_not_found_behavior() -> None:
 
     assert state["_exec_error"] is True
     assert state["last"] == "Sub-playbook not found: invalid_by_last"
-    assert not any(e.get("type") == "warning" for e in events)
     runtime._run_playbook.assert_not_called()
 
 
@@ -154,6 +133,7 @@ def test_lg_exec_node_uses_router_result_when_selected_playbook_unspecified() ->
 
 def test_set_playbook_returns_400_for_invalid_selected_playbook(monkeypatch) -> None:
     class _PlaybookModel:
+        name = object()
         router_callable = object()
         dev_only = object()
 
@@ -173,6 +153,9 @@ def test_set_playbook_returns_400_for_invalid_selected_playbook(monkeypatch) -> 
             return []
 
         def first(self) -> object:
+            if self.model is _PlaybookModel:
+                # 存在チェック (line 608) を通過させて _validate_playbook_override まで進める
+                return SimpleNamespace(name="もう一度試してみて")
             return None
 
     class _DB:
@@ -195,10 +178,10 @@ def test_set_playbook_returns_400_for_invalid_selected_playbook(monkeypatch) -> 
     monkeypatch.setattr("database.models.Playbook", _PlaybookModel)
     monkeypatch.setattr("database.models.UserSettings", _UserSettingsModel)
 
-    manager = SimpleNamespace(state=SimpleNamespace(current_playbook=None, playbook_params={}, developer_mode=False))
+    manager = SimpleNamespace(state=SimpleNamespace(current_playbook=None, playbook_args={}, developer_mode=False))
     req = config_route.PlaybookOverrideRequest(
-        playbook="meta_user_manual",
-        playbook_params={"selected_playbook": "もう一度試してみて"},
+        playbook="tool_selected",
+        args={"selected_playbook": "もう一度試してみて"},
     )
 
     try:

@@ -39,6 +39,10 @@ class MessageItem(BaseModel):
     content: str
     created_at: Optional[float] = None
     metadata: Optional[dict] = None
+    # 2026-05-20: Gemini 3.x の thoughtSignature が永続化されているかを示すフラグ。
+    # bytes 中身そのものは公開せず、フロントで「signature あり」アイコン表示に使う。
+    # 詳細は docs/intent/thought_signature_persistence.md
+    has_thought_signature: bool = False
 
 class MessagesResponse(BaseModel):
     items: List[MessageItem]
@@ -112,42 +116,84 @@ class MemoryRecallDebugResponse(BaseModel):
 # Configuration Models
 # -----------------------------------------------------------------------------
 
+class MetaJudgmentConfig(BaseModel):
+    """Phase 4-e: Per-persona meta-judgment Pulse parameters.
+
+    All fields optional — missing keys fall back to MetaLayer's built-in defaults.
+
+    ⚠ v1 メタ判断の退役 (track_retirement.md §7.4) で読み手を失った休眠キーが
+    混ざっている (max_retries / retry_backoff_seconds / force_fail)。既存行が
+    round-trip で消えないよう受け口は残すが、**編集 UI は 2026-08-14 に削除した**
+    — 新しい読み手を生やす前に、そのキーが何を意味するかを決め直すこと。
+    """
+    cache_threshold_ratio: Optional[float] = None    # 0.0–1.0, default 0.3
+    max_retries: Optional[int] = None                # (休眠) 旧 v1 リトライ回数
+    retry_backoff_seconds: Optional[int] = None      # (休眠) 旧 v1 リトライ待機秒数
+    periodic_interval_minutes: Optional[int] = None  # default 50 (watchdog の間隔)
+    keep_cache_alive: Optional[bool] = None          # default True (TTL 接近で温め直す)
+    # ライフビュー「作業のテンポ」: 自律 Track の Pulse 間隔 (秒) のペルソナ既定値。
+    # update_ai は META_JUDGMENT_CONFIG を丸ごと置換するため、ここに定義しないと
+    # SettingsModal 保存時にキーが消える (persona_activity_view.md §7)。
+    autonomous_pulse_interval_seconds: Optional[int] = None  # default 30
+    # (休眠) 旧 v1 開発者モードのデバッグフラグ。読み手は退役済み。
+    force_fail: Optional[bool] = None  # default False
+
+
 class AIConfigResponse(BaseModel):
     name: str
     description: str
     system_prompt: str
     default_model: Optional[str]
     lightweight_model: Optional[str] = None
-    interaction_mode: str
+    vision_model: Optional[str] = None
+    audio_model: Optional[str] = None
+    video_model: Optional[str] = None
+    memory_weave_model: Optional[str] = None
+    autonomy_enabled: bool = True
     chronicle_enabled: bool = True
+    autonomous_chronicle_enabled: bool = True
+    auto_recall_enabled: bool = True
     memory_weave_context: bool = True
+    memopedia_index_enabled: bool = False
+    core_memory_char_budget: Optional[int] = None  # 記憶アーキv2 ゾーンA 容量目安 (NULL → 既定 2000)
+    spell_enabled: bool = False
+    realtime_info_enabled: bool = True
     avatar_path: Optional[str] = None
     appearance_image_path: Optional[str] = None  # Visual context appearance image
     home_city_id: int
     linked_user_id: Optional[int] = None  # First linked user ID
+    meta_judgment_config: Optional[MetaJudgmentConfig] = None  # Phase 4-e
+    user_conv_timeout_minutes: Optional[int] = None  # 2026-05-09 wait_response auto-pause
 
 class UpdateAIConfigRequest(BaseModel):
     description: Optional[str] = None
     system_prompt: Optional[str] = None
     default_model: Optional[str] = None
     lightweight_model: Optional[str] = None
-    interaction_mode: Optional[str] = None
+    vision_model: Optional[str] = None
+    audio_model: Optional[str] = None
+    video_model: Optional[str] = None
+    memory_weave_model: Optional[str] = None
+    autonomy_enabled: Optional[bool] = None
     chronicle_enabled: Optional[bool] = None
+    autonomous_chronicle_enabled: Optional[bool] = None
+    auto_recall_enabled: Optional[bool] = None
     memory_weave_context: Optional[bool] = None
+    memopedia_index_enabled: Optional[bool] = None
+    # 記憶アーキv2 ゾーンA 容量目安 (文字数)。
+    #   None = no change, 0 (or any non-positive) = clear to default (= 2000),
+    #   positive int = override.
+    core_memory_char_budget: Optional[int] = None
+    spell_enabled: Optional[bool] = None
+    realtime_info_enabled: Optional[bool] = None
     avatar_path: Optional[str] = None
     appearance_image_path: Optional[str] = None  # Visual context appearance image
     linked_user_id: Optional[int] = None  # Set linked user (None = no change, 0 = clear)
-
-
-# -----------------------------------------------------------------------------
-# Autonomous Status Models
-# -----------------------------------------------------------------------------
-
-class AutonomousStatusResponse(BaseModel):
-    persona_id: str
-    interaction_mode: str
-    system_running: bool
-    is_active: bool  # True if actually doing autonomous conversation
+    meta_judgment_config: Optional[MetaJudgmentConfig] = None  # Phase 4-e
+    # 2026-05-09: wait_response Track auto-pause timeout (minutes).
+    #   None = no change, 0 (or any non-positive) = clear to default (= 30 min),
+    #   positive int = override.
+    user_conv_timeout_minutes: Optional[int] = None
 
 
 # -----------------------------------------------------------------------------
@@ -224,7 +270,7 @@ class UpdateMemopediaPageRequest(BaseModel):
     summary: Optional[str] = None
     content: Optional[str] = None
     keywords: Optional[List[str]] = None
-    vividness: Optional[str] = None
+    # P4-c: vividness は廃止。フィールドを除去した。
     is_trunk: Optional[bool] = None
 
 
@@ -234,7 +280,7 @@ class CreateMemopediaPageRequest(BaseModel):
     summary: str = ""
     content: str = ""
     keywords: Optional[List[str]] = None
-    vividness: str = "rough"
+    # P4-c: vividness は廃止。
     is_trunk: bool = False
 
 
@@ -244,6 +290,10 @@ class SetTrunkRequest(BaseModel):
 
 class SetImportantRequest(BaseModel):
     is_important: bool
+
+
+class DeskPageRequest(BaseModel):
+    open: bool  # True = 机に開く、False = 机から閉じる
 
 
 class MovePagesToTrunkRequest(BaseModel):
@@ -299,41 +349,12 @@ class UpdateScheduleRequest(BaseModel):
     args: Optional[dict] = None  # Playbook arguments (e.g., {"selected_playbook": "xxx"})
 
 
-# -----------------------------------------------------------------------------
-# Task Management Models
-# -----------------------------------------------------------------------------
-
-class TaskStep(BaseModel):
-    id: str
-    position: int
-    title: str
-    description: Optional[str]
-    status: str
-    notes: Optional[str]
-    updated_at: str
-
-class TaskRecordModel(BaseModel):
-    id: str
-    title: str
-    goal: str
-    summary: str
-    status: str
-    priority: str
-    active_step_id: Optional[str]
-    updated_at: str
-    steps: List[TaskStep]
-
-class CreateTaskRequest(BaseModel):
-    title: str
-    goal: str
-    summary: str
-    notes: Optional[str] = None
-    priority: str = "normal"
-    steps: List[dict] # {title, description, ...}
-
-class UpdateTaskStatusRequest(BaseModel):
-    status: str
-    reason: Optional[str] = None
+# タスク管理 API の直列化モデル (TaskStep / TaskRecordModel / CreateTaskRequest /
+# UpdateTaskStatusRequest) は、束 6c (2026-08-22) でタスク管理 UI とルート
+# (api/routes/people/tasks.py) を撤去したときに読み手ごと消えた
+# (autonomous_behavior_v3.md §11「運転 UI は隠す」)。「やること」の器は v3 で
+# ルーチン / タスク帳 / 手帳の三つに分かれ、タスク帳の読み書きは
+# saiverse/task_book.py が素の dict で行う。
 
 
 # -----------------------------------------------------------------------------
@@ -373,6 +394,8 @@ class ArasujiEntryItem(BaseModel):
     source_end_num: Optional[int] = None    # last message number
 
 class ArasujiListResponse(BaseModel):
+    # 一覧は常に全件を返す (2026-08-05, docs/issues/arasuji_modal_500_limit_truncation.md)。
+    # 件数上限とその通知フィールド (total_available / hidden_oldest) は撤去した。
     entries: List[ArasujiEntryItem]
     total: int
     level_filter: Optional[int] = None
@@ -389,13 +412,30 @@ class SourceMessageItem(BaseModel):
 # -----------------------------------------------------------------------------
 
 class GenerateArasujiRequest(BaseModel):
-    """Chronicle生成リクエスト"""
-    max_messages: int = 500  # 最大処理メッセージ数
-    batch_size: int = 20     # バッチサイズ（これ未満のメッセージは処理しない）
-    consolidation_size: int = 10  # 統合サイズ
-    model: Optional[str] = None  # デフォルトはMEMORY_WEAVE_MODEL
-    with_memopedia: bool = False  # Memopedia同時生成
-    include_timestamp: bool = True  # 日時情報をLLMに渡すか（インポートログ等で日時が不正確な場合はFalse）
+    """Chronicle生成リクエスト。
+
+    2026-07-29 (arasuji_levels.md §13 裁定4): 手動生成は run_manual_compaction
+    (残す量より古い側だけを畳む) へ合流し、範囲・モデル・出力に関わる全フィールドが
+    廃止された。現行 frontend は空 body を送る。旧 frontend からのリクエストを
+    422 にしないため、全フィールドを受理して無視する (deprecated)。
+
+    2026-08-31 (arasuji_levels.md §16): ``mode`` を追加。既定 "compaction" は
+    従来どおり窓の畳み (run_manual_compaction)。"repair" は被覆補修
+    (run_coverage_repair) — 止め線より古い未被覆の編纂対象を一次あらすじにする。
+    """
+    # "compaction" = 窓の畳み (従来) / "repair" = 被覆補修 (§16)
+    mode: str = "compaction"
+    # repair モードの時点ずれの歯止め (任意): UI が見積もり (cost-estimate) で
+    # ユーザーに見せた unprocessed_messages。実行直前の再計算がこれより
+    # **増えて**いたら、承認した範囲より広い編纂 (課金) になるので実行せず
+    # estimate_stale で返す。減る方向 (安くなる) は嘘にならないので走ってよい。
+    confirmed_unprocessed_messages: Optional[int] = None
+    max_messages: int = 500  # deprecated (§13: 範囲は残す量が決める)
+    batch_size: int = 20  # deprecated (W4: チャンク分割は episode 境界とサイズ束ね)
+    consolidation_size: int = 10  # deprecated (W4)
+    model: Optional[str] = None  # deprecated (§13: persona の MEMORY_WEAVE_MODEL 固定)
+    with_memopedia: bool = False  # deprecated (§13: Fragment 抽出は編纂に常時相乗り)
+    include_timestamp: bool = True  # deprecated (§13: executor 既定に従う)
 
 
 class GenerateMemopediaRequest(BaseModel):
@@ -409,6 +449,18 @@ class GenerateMemopediaRequest(BaseModel):
     model: Optional[str] = None  # デフォルトはMEMORY_WEAVE_MODEL
 
 
+class BuildMemopediaFromLogsRequest(BaseModel):
+    """ログからMemopediaを構築するリクエスト"""
+    batch_size: int = 20  # バッチサイズ
+    limit: int = 0  # 処理対象メッセージ上限 (0=全件)
+    # 再開位置。時刻だけだと同じ秒のメッセージの順序を表せないので、行番号
+    # (rowid) と対で持つ。前回の結果の last_message_timestamp /
+    # last_message_rowid をそのまま渡す
+    start_after: float = 0
+    start_after_rowid: int = 0
+    model: Optional[str] = None  # デフォルトはMEMORY_WEAVE_MODEL
+
+
 class ChronicleCostEstimate(BaseModel):
     """Chronicle生成のコスト推定"""
     total_messages: int
@@ -418,7 +470,14 @@ class ChronicleCostEstimate(BaseModel):
     estimated_cost_usd: float
     model_name: str
     is_free_tier: bool
-    batch_size: int
+    # W4: 固定バッチ廃止。旧 frontend 型互換のため 0 固定で残す (deprecated)。
+    batch_size: int = 0
+    currency: str = "USD"
+    # 極小 run 吸収 (arasuji_tiny_run_absorption 裁定 6): 前回の補修/再編纂
+    # ジョブが完了していない (上位あらすじの再生成が残っている)。frontend の
+    # Chronicle タブの帯が「前回の処理が完了していません。再実行してください」
+    # を併記するための印。
+    repair_incomplete: bool = False
 
 
 class GenerationJobStatus(BaseModel):
@@ -479,3 +538,61 @@ class PulseLogsResponse(BaseModel):
     items: List[PulseLogEntry]
     pulse_id: str
     total: int
+
+
+# -----------------------------------------------------------------------------
+# Storage Layers Models (Intent A v0.14, Intent B v0.11 — 7-layer storage view)
+# -----------------------------------------------------------------------------
+
+class StorageLayerStat(BaseModel):
+    """Per-layer summary: count + latest timestamp + freeform note."""
+    layer: str  # 'meta_judgment' / 'main_cache' / 'sub_cache' / 'nested_temp' / 'track_local' / 'saimemory_core' / 'archive'
+    layer_index: int  # 1..7
+    label: str  # human-readable name e.g. "[1] メタ判断ログ"
+    count: int
+    latest_at: Optional[float] = None  # unix epoch
+    note: Optional[str] = None  # e.g. "未実装", "揮発のため表示できません"
+
+
+class StorageLayerEntry(BaseModel):
+    """One row from any of the storage layers, normalized for the unified list view."""
+    layer: str  # same vocabulary as StorageLayerStat.layer
+    entry_id: str
+    created_at: Optional[float] = None  # unix epoch
+
+    # SAIMemory message fields (used when layer in {main_cache, sub_cache})
+    role: Optional[str] = None  # user / assistant / system / ...
+    content: Optional[str] = None
+    line_role: Optional[str] = None  # main_line / sub_line / meta_judgment / nested
+    line_id: Optional[str] = None
+    origin_track_id: Optional[str] = None
+    scope: Optional[str] = None  # committed / discardable / volatile
+    paired_action_text: Optional[str] = None
+
+    # meta_judgment_log fields (used when layer == meta_judgment)
+    # v0.15 独白 + /spell 方式に整合化済み (旧 judgment_action enum は廃止)
+    judgment_thought: Optional[str] = None
+    spells_emitted: Optional[str] = None  # JSON array of {name, args, result}
+    trigger_type: Optional[str] = None
+    trigger_context: Optional[str] = None
+    committed_to_main_cache: Optional[bool] = None
+    track_at_judgment_id: Optional[str] = None
+    prompt_snapshot: Optional[str] = None
+
+    # track_local_log fields (used when layer == track_local)
+    log_kind: Optional[str] = None
+    payload: Optional[str] = None
+    source_line_id: Optional[str] = None
+    track_id: Optional[str] = None  # track_local_log の track_id
+
+
+class StorageLayersResponse(BaseModel):
+    summary: List[StorageLayerStat]
+    items: List[StorageLayerEntry]
+    total_returned: int
+    truncated: bool  # true when limit was reached
+
+
+# NOTE: Tracks Viewer のモデル (TrackItem / TracksStatusCount / TracksResponse) は
+# 2026-08-21 に API ルートごと退役した (track_retirement.md §2 住人 9)。フロントの
+# 消費はゼロで、残っていた読み手は debug スクリプトだけだった。

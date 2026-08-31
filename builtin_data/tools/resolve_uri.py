@@ -78,4 +78,6 @@ def schema() -> ToolSchema:
             "required": ["uris"],
         },
         result_type="string",
+        spell=True,
+        spell_display_name="URI閲覧",
     )

@@ -2,10 +2,8 @@
   "model": "gpt-4.1",
   "system_prompt": "",
   "display_name": "GPT-4.1",
-  "provider": "openai",
+  "provider_ref": "openai",
   "context_length": 128000,
-  "default_max_history_messages": 40,
-  "metabolism_keep_messages": 20,
   "supports_images": true,
   "parameters": {
     "temperature": {

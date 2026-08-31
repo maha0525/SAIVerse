@@ -8,6 +8,7 @@
     padding: 1rem;
     gap: 1.5rem;
     height: 100%;
+    box-sizing: border-box;
     transition: transform 0.3s ease, margin-right 0.3s ease;
 }
 
@@ -147,6 +148,14 @@
     font-size: 0.95rem;
 }
 
+/* 名前 + 常在インジケータの縦並びコンテナ */
+.occupantInfo {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+    min-width: 0;
+}
+
 .empty {
     font-size: 0.9rem;
     color: #6b7280;
@@ -185,6 +194,23 @@
     font-size: 1.5rem;
 }
 
+/* Thumbnail for picture items */
+.cardThumb {
+    width: 100%;
+    height: 90px;
+    border-radius: 6px;
+    overflow: hidden;
+    background: #111827;
+    border: 1px solid #374151;
+}
+
+.cardThumb img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+}
+
 .cardInfo {
     display: flex;
     flex-direction: column;
@@ -216,6 +242,16 @@
 
 .card.document {
     border-left: 3px solid #60a5fa;
+}
+
+.card.bag {
+    border-left: 3px solid #a78bfa;
+}
+
+.bagCount {
+    font-size: 0.75rem;
+    color: #9ca3af;
+    font-weight: normal;
 }
 
 /* Item Open State */
@@ -404,6 +440,11 @@
 
 :global([data-theme="light"]) .cardIcon {
     color: #374151;
+}
+
+:global([data-theme="light"]) .cardThumb {
+    background: #e2e8f0;
+    border-color: #e2e8f0;
 }
 
 :global([data-theme="light"]) .toggleOpenBtn {

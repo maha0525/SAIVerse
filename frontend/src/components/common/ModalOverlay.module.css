@@ -7,14 +7,28 @@
     background: rgba(0, 0, 0, 0.6);
     backdrop-filter: blur(4px);
     display: flex;
-    align-items: center;
+    /* "safe center": 子がコンテナより大きい時は align-items: start にフォールバック
+       する CSS の安全モード。普通の center だとオーバーフロー時に上端が画面外に
+       はみ出してスクロールで戻れなくなる事象が起きるため必須。 */
+    align-items: safe center;
     justify-content: center;
     z-index: 1000;
     padding: 1rem;
+    /* オーバーレイ自体をスクロールコンテナにする。モーダル内部の nested
+       scroll は iOS Safari で効かないケースが頻発するため、一段上の
+       オーバーレイが縦スクロール可否を制御する方式。モーダル高さが
+       ビューポートに収まる時はスクロールしない (overflow:auto なので)。 */
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
 }
 
+/* モバイル: backdrop-filter を無効化 (iOS Safari で nested scroll を阻害
+   する事象回避) + モーダルを上詰めにしてスクロールで下まで見える構造に。
+   中央寄せだとモーダルが縦長時に上端が画面上に隠れてスクロールしにくい。 */
 @media (max-width: 768px) {
     .overlay {
-        padding: 0;
+        padding: 0.5rem 0;
+        backdrop-filter: none;
+        align-items: flex-start;
     }
 }

@@ -1,0 +1,302 @@
+.dialog {
+    background: white;
+    border-radius: 0.8rem;
+    width: 680px;
+    max-width: 95vw;
+    max-height: 85vh;
+    max-height: 85svh;
+    max-height: 85dvh;
+    display: flex;
+    flex-direction: column;
+    box-shadow: 0 8px 40px rgba(0, 0, 0, 0.18);
+    overflow: hidden;
+}
+
+.header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    padding: 0.9rem 1.25rem;
+    border-bottom: 1px solid rgba(0, 0, 0, 0.08);
+}
+
+.header h3 {
+    margin: 0;
+    font-size: 1.05rem;
+    color: #1e293b;
+}
+
+.subId {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.72rem;
+    color: var(--text-secondary, #888);
+    margin-top: 2px;
+}
+
+.closeBtn {
+    background: none;
+    border: none;
+    cursor: pointer;
+    color: #94a3b8;
+    padding: 0.2rem;
+    border-radius: 0.3rem;
+    display: flex;
+}
+
+.closeBtn:hover {
+    color: #475569;
+}
+
+.progressBar {
+    position: relative;
+    height: 6px;
+    background: var(--bg-secondary, #e5e7eb);
+    margin: 0 1.25rem 0.5rem 1.25rem;
+    border-radius: 3px;
+    overflow: hidden;
+}
+
+.progressFill {
+    height: 100%;
+    background: var(--primary, #4a7eb5);
+    transition: width 0.2s ease;
+}
+
+.progressText {
+    position: absolute;
+    right: 0;
+    top: 8px;
+    font-size: 0.72rem;
+    color: var(--text-secondary, #777);
+}
+
+.indeterminateBar {
+    height: 6px;
+    background: var(--bg-secondary, #e5e7eb);
+    margin: 0 1.25rem 0.5rem 1.25rem;
+    border-radius: 3px;
+    overflow: hidden;
+    position: relative;
+}
+
+.indeterminateFill {
+    position: absolute;
+    height: 100%;
+    width: 30%;
+    background: var(--primary, #4a7eb5);
+    animation: indeterminate 1.5s ease-in-out infinite;
+}
+
+@keyframes indeterminate {
+    0% { left: -30%; }
+    100% { left: 100%; }
+}
+
+.logArea {
+    flex: 1;
+    overflow-y: auto;
+    padding: 0.6rem 1.25rem;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.78rem;
+    line-height: 1.5;
+    background: #fafafa;
+    min-height: 200px;
+    max-height: 360px;
+}
+
+.logLine {
+    display: flex;
+    gap: 8px;
+    padding: 1px 0;
+}
+
+.logPhase {
+    flex-shrink: 0;
+    padding: 0 6px;
+    border-radius: 3px;
+    background: #e0e7ff;
+    color: #3730a3;
+    font-size: 0.72rem;
+    align-self: flex-start;
+    margin-top: 1px;
+}
+
+.phase_clone, .phase_manifest, .phase_started {
+    background: #dbeafe;
+    color: #1e40af;
+}
+
+.phase_step {
+    background: #f3f4f6;
+    color: #374151;
+}
+
+.phase_rollback {
+    background: #fee2e2;
+    color: #991b1b;
+}
+
+.phase_done {
+    background: #d1fae5;
+    color: #065f46;
+}
+
+.phase_error {
+    background: #fee2e2;
+    color: #991b1b;
+}
+
+.logStepIndex {
+    flex-shrink: 0;
+    color: var(--text-secondary, #888);
+    font-size: 0.72rem;
+}
+
+.logMessage {
+    flex: 1;
+    word-break: break-all;
+    color: #374151;
+}
+
+.resultBox {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 12px 16px;
+    margin: 0 1.25rem;
+}
+
+.resultBox + .resultBox {
+    margin-top: 6px;
+}
+
+.resultOk {
+    background: #d1fae5;
+    color: #065f46;
+    border-top: 1px solid #6ee7b7;
+}
+
+.resultErr {
+    background: #fee2e2;
+    color: #991b1b;
+    border-top: 1px solid #fca5a5;
+}
+
+.resultText {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    flex: 1;
+}
+
+.resultText strong {
+    font-size: 0.92rem;
+}
+
+.resultDetail {
+    font-size: 0.82rem;
+    word-break: break-word;
+}
+
+.restartNote {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 16px;
+    margin: 6px 1.25rem 0 1.25rem;
+    background: #fffbeb;
+    border: 1px solid #fde68a;
+    border-radius: 5px;
+    color: #92400e;
+    font-size: 0.85rem;
+}
+
+.footer {
+    display: flex;
+    justify-content: flex-end;
+    align-items: center;
+    padding: 0.9rem 1.25rem;
+    border-top: 1px solid rgba(0, 0, 0, 0.08);
+}
+
+.runningHint {
+    font-size: 0.85rem;
+    color: var(--text-secondary, #777);
+}
+
+.btnPrimary {
+    padding: 7px 16px;
+    background: var(--primary, #4a7eb5);
+    color: white;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 0.88rem;
+}
+
+.btnPrimary:hover {
+    opacity: 0.9;
+}
+
+:global([data-theme="dark"]) .dialog {
+    background: #1f2937;
+    color: #e5e7eb;
+}
+
+:global([data-theme="dark"]) .header h3 {
+    color: #e5e7eb;
+}
+
+:global([data-theme="dark"]) .logArea {
+    background: #111827;
+}
+
+:global([data-theme="dark"]) .logMessage {
+    color: #d1d5db;
+}
+
+:global([data-theme="dark"]) .logPhase {
+    background: #312e81;
+    color: #c7d2fe;
+}
+
+:global([data-theme="dark"]) .phase_clone,
+:global([data-theme="dark"]) .phase_manifest,
+:global([data-theme="dark"]) .phase_started {
+    background: #1e3a8a;
+    color: #bfdbfe;
+}
+
+:global([data-theme="dark"]) .phase_step {
+    background: #374151;
+    color: #d1d5db;
+}
+
+:global([data-theme="dark"]) .phase_rollback,
+:global([data-theme="dark"]) .phase_error {
+    background: #7f1d1d;
+    color: #fecaca;
+}
+
+:global([data-theme="dark"]) .phase_done {
+    background: #064e3b;
+    color: #a7f3d0;
+}
+
+:global([data-theme="dark"]) .resultOk {
+    background: #064e3b;
+    color: #a7f3d0;
+    border-color: #047857;
+}
+
+:global([data-theme="dark"]) .resultErr {
+    background: #7f1d1d;
+    color: #fecaca;
+    border-color: #991b1b;
+}
+
+:global([data-theme="dark"]) .restartNote {
+    background: #422006;
+    border-color: #78350f;
+    color: #fde68a;
+}

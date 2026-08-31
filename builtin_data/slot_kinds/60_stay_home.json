@@ -1,0 +1,6 @@
+{
+  "id": "stay_home",
+  "name": "自室で過ごす",
+  "execution_type": "stay_home",
+  "description": "自室でゆっくり過ごす (世界が流れ込んでくる前提の休息)"
+}

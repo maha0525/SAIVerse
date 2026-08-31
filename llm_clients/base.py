@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 import os
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Dict, Iterator, List, Optional
 
@@ -18,6 +19,8 @@ class UsageInfo:
     cached_tokens: int = 0  # Tokens served FROM cache (cache read)
     cache_write_tokens: int = 0  # Tokens written TO cache (Anthropic: 1.25x cost for 5m, 2x for 1h)
     cache_ttl: str = ""  # Cache TTL used for this request ("5m", "1h", or "" if no cache)
+    cache_storage_tokens: int = 0  # Gemini explicit cache: tokens stored (for storage cost)
+    cache_storage_ttl_seconds: int = 0  # Gemini explicit cache: TTL in seconds
 
 # LLM logging is now handled by logging_config module
 # Import convenience functions for backward compatibility
@@ -33,15 +36,96 @@ except ImportError:
 class LLMClient:
     """Base class for LLM clients."""
 
-    def __init__(self, supports_images: bool = False) -> None:
+    def __init__(
+        self,
+        supports_images: bool = False,
+        supports_audio: bool = False,
+        supports_video: bool = False,
+    ) -> None:
         self._latest_reasoning: List[Dict[str, str]] = []
         self._latest_reasoning_details: Any = None
         self._latest_attachments: List[Dict[str, Any]] = []
         self._latest_tool_detection: Dict[str, Any] | None = None
         self._latest_usage: Optional[UsageInfo] = None
+        # 2026-05-20: Gemini 3.x の thoughtSignature (opaque な思考連続性トークン)。
+        # Gemini クライアントが応答解析時に格納し、SEA runtime が次ターン送信用に
+        # 取り出す。他 Provider は None のまま。
+        # 詳細は docs/intent/thought_signature_persistence.md
+        self._latest_thought_signature: Optional[str] = None
         self.supports_images = supports_images
+        self.supports_audio = supports_audio
+        self.supports_video = supports_video
         self.model: str = ""  # Set by subclasses (API model name)
         self.config_key: str = ""  # Config file key for pricing lookup
+
+    def ensure_backend(self) -> None:
+        """リクエスト送信前にバックエンドの存在を保証するフック (既定は何もしない)。
+
+        llama-server 管理下の OpenAIClient が override する。ラッパー
+        (LlamaCachedClient 等) は、サーバーへ副リクエスト (slot restore 等) を
+        送る**前に**これを呼ぶこと — inner の送信時点まで待つと、停止済み
+        サーバーへ先に副リクエストが飛ぶ。
+        """
+
+    @contextmanager
+    def backend_lease(self):
+        """リクエスト実行中の貸出札フック (既定は何もしない no-op)。
+
+        llama-server 管理下の OpenAIClient が override し、札が出ている間は
+        idle 自動停止がそのサーバーを撃てなくなる。送信〜後処理 (slot save 等)
+        の全体をこの with で覆うこと。返却 (with 脱出) が完了時刻の申告を兼ねる。
+        """
+        yield
+
+    def _inject_unsupported_media_summaries(
+        self, messages: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """If this client lacks supports_audio / supports_video, append summary
+        text notes for any audio/video media in message metadata.
+
+        Returns a new message list with text content modified for affected messages.
+        For Gemini (which natively handles audio/video), this is a no-op.
+        """
+        if self.supports_audio and self.supports_video:
+            return messages
+
+        from .utils import inject_audio_video_summaries
+        from saiverse.media_utils import iter_audio_media, iter_video_media
+
+        new_msgs: List[Dict[str, Any]] = []
+        for msg in messages:
+            if not isinstance(msg, dict):
+                new_msgs.append(msg)
+                continue
+            metadata = msg.get("metadata")
+            if not isinstance(metadata, dict):
+                new_msgs.append(msg)
+                continue
+
+            audio_items = iter_audio_media(metadata) if not self.supports_audio else []
+            video_items = iter_video_media(metadata) if not self.supports_video else []
+            if not audio_items and not video_items:
+                new_msgs.append(msg)
+                continue
+
+            content = msg.get("content", "")
+            if not isinstance(content, str):
+                # Complex content (e.g. tool_calls); skip injection rather than risk
+                # breaking the structure.
+                new_msgs.append(msg)
+                continue
+
+            skip_audio = bool(metadata.get("__skip_audio_summary__"))
+            skip_video = bool(metadata.get("__skip_video_summary__"))
+            filtered_media = list(audio_items) + list(video_items)
+            new_text = inject_audio_video_summaries(
+                {"media": filtered_media}, content,
+                skip_audio=skip_audio, skip_video=skip_video,
+            )
+            new_msg = dict(msg)
+            new_msg["content"] = new_text
+            new_msgs.append(new_msg)
+        return new_msgs
 
     def generate(
         self,
@@ -96,6 +180,20 @@ class LLMClient:
         details = self._latest_reasoning_details
         self._latest_reasoning_details = None
         return details
+
+    def _store_thought_signature(self, value: Optional[str]) -> None:
+        """Store the thought signature from the latest response.
+
+        Currently used only by GeminiClient (Gemini 3.x). Other providers
+        leave this as None. See docs/intent/thought_signature_persistence.md
+        """
+        self._latest_thought_signature = value
+
+    def consume_thought_signature(self) -> Optional[str]:
+        """Retrieve and clear the latest thought signature."""
+        value = self._latest_thought_signature
+        self._latest_thought_signature = None
+        return value
 
     def _store_tool_detection(self, result: Dict[str, Any] | None) -> None:
         """Store tool detection result for later retrieval."""

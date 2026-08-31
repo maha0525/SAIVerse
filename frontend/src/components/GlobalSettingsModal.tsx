@@ -1,7 +1,10 @@
-import React, { useState, useEffect } from 'react';
-import { X, Settings, Database, Globe, Layers, Save, RefreshCw, Power, Play, Pause, Monitor, Sun, Moon, Cpu, ChevronDown, ChevronRight, Info, ExternalLink } from 'lucide-react';
+import React, { useState, useEffect, useCallback } from 'react';
+import { X, Settings, Globe, Layers, Save, RefreshCw, Power, Monitor, Sun, Moon, Cpu, ChevronDown, ChevronRight, Info, ExternalLink, Wrench, CheckCircle, XCircle, Loader, Boxes, Rss } from 'lucide-react';
 import styles from './GlobalSettingsModal.module.css';
 import WorldEditor from './settings/WorldEditor';
+import ProviderManagementPanel from './settings/ProviderManagementPanel';
+import ModelManagementPanel from './settings/ModelManagementPanel';
+import FeedManagementPanel from './settings/FeedManagementPanel';
 import ModalOverlay from './common/ModalOverlay';
 
 interface GlobalSettingsModalProps {
@@ -13,12 +16,6 @@ interface EnvVar {
     key: string;
     value: string;
     is_sensitive: boolean;
-}
-
-interface TableInfo {
-    name: string;
-    columns: string[];
-    pk_columns: string[];
 }
 
 interface ModelRoleInfo {
@@ -50,7 +47,8 @@ interface PlaybookPermEntry {
     permission_level: string;
 }
 
-type TabId = 'env' | 'world' | 'db' | 'models' | 'playbooks' | 'about';
+type TabId = 'env' | 'world' | 'feeds' | 'models' | 'modelMgmt' | 'playbooks' | 'about' | 'utilities';
+type ModelMgmtSubTab = 'providers' | 'models';
 
 export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsModalProps) {
     const [activeTab, setActiveTab] = useState<TabId>('env');
@@ -60,23 +58,21 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
     const [editedEnv, setEditedEnv] = useState<Record<string, string>>({});
 
     // DB State
-    const [tables, setTables] = useState<TableInfo[]>([]);
-    const [selectedTable, setSelectedTable] = useState<string | null>(null);
-    const [tableData, setTableData] = useState<any[]>([]);
-    const [dbLoading, setDbLoading] = useState(false);
 
     // Global Auto Mode
-    const [globalAutoEnabled, setGlobalAutoEnabled] = useState(true);
 
     // Developer Mode
     const [developerMode, setDeveloperMode] = useState(false);
 
-    // X Polling
-    const [xPollingEnabled, setXPollingEnabled] = useState(false);
-
     // Monitoring toggles
     const [updateCheckEnabled, setUpdateCheckEnabled] = useState(true);
     const [announcementsEnabled, setAnnouncementsEnabled] = useState(true);
+
+    // Image default quality
+    const [imageDefaultQuality, setImageDefaultQuality] = useState<'low' | 'medium' | 'high'>('high');
+
+    // Media recall (attached image/audio/video summaries feed auto-recall search)
+    const [mediaRecallEnabled, setMediaRecallEnabled] = useState(false);
 
     // Collapsible sections
     const [envSectionOpen, setEnvSectionOpen] = useState(false);
@@ -98,19 +94,61 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
     const [playbookPerms, setPlaybookPerms] = useState<PlaybookPermEntry[]>([]);
     const [playbookPermsLoading, setPlaybookPermsLoading] = useState(false);
 
+    // Model management subtab (providers / models)
+    const [modelMgmtSubTab, setModelMgmtSubTab] = useState<ModelMgmtSubTab>('providers');
+
+    // Utilities — backfill item descriptions
+    interface BackfillResult { item_id: string; item_name: string; status: string; reason?: string | null; description?: string | null; }
+    const [bfBuildings, setBfBuildings] = useState<{id: string; name: string}[]>([]);
+    const [bfPersonas, setBfPersonas] = useState<{persona_id: string; persona_name: string}[]>([]);
+    const [bfBuildingId, setBfBuildingId] = useState('');
+    const [bfPersonaId, setBfPersonaId] = useState('');
+    const [bfDryRun, setBfDryRun] = useState(true);
+    const [bfRunning, setBfRunning] = useState(false);
+    const [bfResults, setBfResults] = useState<{processed: number; skipped: number; failed: number; results: BackfillResult[]} | null>(null);
+
+    const loadBackfillOptions = useCallback(async () => {
+        if (bfBuildings.length > 0) return;
+        const [bRes, pRes] = await Promise.all([
+            fetch('/api/user/buildings'),
+            fetch('/api/usage/personas'),
+        ]);
+        if (bRes.ok) { const d = await bRes.json(); setBfBuildings(d.buildings || []); }
+        if (pRes.ok) { const d = await pRes.json(); setBfPersonas(d); }
+    }, [bfBuildings.length]);
+
+    const runBackfill = async () => {
+        setBfRunning(true);
+        setBfResults(null);
+        try {
+            const res = await fetch('/api/admin/backfill-item-descriptions', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    building_id: bfBuildingId || null,
+                    persona_id: bfPersonaId || null,
+                    dry_run: bfDryRun,
+                }),
+            });
+            if (!res.ok) throw new Error(await res.text());
+            setBfResults(await res.json());
+        } catch (e) {
+            console.error(e);
+        } finally {
+            setBfRunning(false);
+        }
+    };
+
     useEffect(() => {
         if (isOpen && activeTab === 'env') {
-            loadGlobalAutoState();
             loadDeveloperModeState();
-            loadXPollingState();
             loadUpdateCheckState();
             loadAnnouncementsState();
+            loadImageDefaultQuality();
+            loadMediaRecallState();
             // Load theme from localStorage
             const saved = localStorage.getItem('saiverse-theme') as 'system' | 'light' | 'dark' | null;
             setTheme(saved || 'system');
-        }
-        if (isOpen && activeTab === 'db') {
-            loadTables();
         }
         if (isOpen && activeTab === 'models') {
             loadModelRoles();
@@ -121,7 +159,10 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
         if (isOpen && activeTab === 'playbooks') {
             loadPlaybookPerms();
         }
-    }, [isOpen, activeTab]);
+        if (isOpen && activeTab === 'utilities') {
+            loadBackfillOptions();
+        }
+    }, [isOpen, activeTab, loadBackfillOptions]);
 
     // Load env vars when section is expanded
     useEffect(() => {
@@ -172,15 +213,58 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
         window.dispatchEvent(new Event('theme-change'));
     };
 
-    const loadGlobalAutoState = async () => {
+    const loadImageDefaultQuality = async () => {
         try {
-            const res = await fetch('/api/config/global-auto');
+            const res = await fetch('/api/config/image-default-quality');
             if (res.ok) {
                 const data = await res.json();
-                setGlobalAutoEnabled(data.enabled);
+                setImageDefaultQuality(data.quality);
             }
         } catch (e) {
-            console.error("Failed to load global auto state", e);
+            console.error("Failed to load image default quality", e);
+        }
+    };
+
+    const changeImageDefaultQuality = async (q: 'low' | 'medium' | 'high') => {
+        try {
+            const res = await fetch('/api/config/image-default-quality', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ quality: q })
+            });
+            if (res.ok) {
+                setImageDefaultQuality(q);
+            }
+        } catch (e) {
+            console.error("Failed to set image default quality", e);
+        }
+    };
+
+    const loadMediaRecallState = async () => {
+        try {
+            const res = await fetch('/api/config/media-recall');
+            if (res.ok) {
+                const data = await res.json();
+                setMediaRecallEnabled(data.enabled);
+            }
+        } catch (e) {
+            console.error("Failed to load media recall state", e);
+        }
+    };
+
+    const toggleMediaRecall = async () => {
+        const newState = !mediaRecallEnabled;
+        try {
+            const res = await fetch('/api/config/media-recall', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ enabled: newState })
+            });
+            if (res.ok) {
+                setMediaRecallEnabled(newState);
+            }
+        } catch (e) {
+            console.error("Failed to toggle media recall", e);
         }
     };
 
@@ -206,41 +290,9 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
             });
             if (res.ok) {
                 setDeveloperMode(newState);
-                // When turning OFF, backend also disables global auto
-                if (!newState) {
-                    setGlobalAutoEnabled(false);
-                }
             }
         } catch (e) {
             console.error("Failed to toggle developer mode", e);
-        }
-    };
-
-    const loadXPollingState = async () => {
-        try {
-            const res = await fetch('/api/config/x-polling');
-            if (res.ok) {
-                const data = await res.json();
-                setXPollingEnabled(data.enabled);
-            }
-        } catch (e) {
-            console.error("Failed to load X polling state", e);
-        }
-    };
-
-    const toggleXPolling = async () => {
-        const newState = !xPollingEnabled;
-        try {
-            const res = await fetch('/api/config/x-polling', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ enabled: newState })
-            });
-            if (res.ok) {
-                setXPollingEnabled(newState);
-            }
-        } catch (e) {
-            console.error("Failed to toggle X polling", e);
         }
     };
 
@@ -297,50 +349,6 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
             }
         } catch (e) {
             console.error("Failed to toggle announcements", e);
-        }
-    };
-
-    const toggleGlobalAuto = async () => {
-        const newState = !globalAutoEnabled;
-        try {
-            const res = await fetch('/api/config/global-auto', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ enabled: newState })
-            });
-            if (res.ok) {
-                setGlobalAutoEnabled(newState);
-            }
-        } catch (e) {
-            console.error("Failed to toggle global auto", e);
-        }
-    };
-
-    const loadTables = async () => {
-        try {
-            const res = await fetch('/api/db/tables');
-            if (res.ok) {
-                const data = await res.json();
-                setTables(data);
-            }
-        } catch (e) {
-            console.error("Failed to load tables", e);
-        }
-    };
-
-    const loadTableData = async (tableName: string) => {
-        setDbLoading(true);
-        setSelectedTable(tableName);
-        try {
-            const res = await fetch(`/api/db/tables/${tableName}`);
-            if (res.ok) {
-                const data = await res.json();
-                setTableData(data);
-            }
-        } catch (e) {
-            console.error(e);
-        } finally {
-            setDbLoading(false);
         }
     };
 
@@ -402,7 +410,7 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
     // --- About ---
     const loadVersionInfo = async () => {
         try {
-            const res = await fetch('/api/version');
+            const res = await fetch('/api/system/version');
             if (res.ok) {
                 setVersionInfo(await res.json());
             }
@@ -497,16 +505,22 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                             <Globe size={18} /> ワールドエディタ
                         </div>
                         <div
-                            className={`${styles.navItem} ${activeTab === 'db' ? styles.active : ''}`}
-                            onClick={() => setActiveTab('db')}
+                            className={`${styles.navItem} ${activeTab === 'feeds' ? styles.active : ''}`}
+                            onClick={() => setActiveTab('feeds')}
                         >
-                            <Database size={18} /> データベース管理
+                            <Rss size={18} /> フィード
                         </div>
                         <div
                             className={`${styles.navItem} ${activeTab === 'models' ? styles.active : ''}`}
                             onClick={() => setActiveTab('models')}
                         >
                             <Cpu size={18} /> モデルロール
+                        </div>
+                        <div
+                            className={`${styles.navItem} ${activeTab === 'modelMgmt' ? styles.active : ''}`}
+                            onClick={() => setActiveTab('modelMgmt')}
+                        >
+                            <Boxes size={18} /> モデル管理
                         </div>
                         <div
                             className={`${styles.navItem} ${activeTab === 'playbooks' ? styles.active : ''}`}
@@ -519,6 +533,12 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                             onClick={() => setActiveTab('about')}
                         >
                             <Info size={18} /> 情報
+                        </div>
+                        <div
+                            className={`${styles.navItem} ${activeTab === 'utilities' ? styles.active : ''}`}
+                            onClick={() => setActiveTab('utilities')}
+                        >
+                            <Wrench size={18} /> 便利機能
                         </div>
                     </div>
 
@@ -559,24 +579,38 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                                     </div>
                                 </div>
 
-                                {/* Global Auto Mode Toggle - only visible in developer mode */}
-                                {developerMode && (
-                                    <div className={styles.toggleContainer}>
-                                        <div>
-                                            <div className={styles.toggleLabel}>
-                                                {globalAutoEnabled ? <Play size={18} /> : <Pause size={18} />}
-                                                自律会話モード
-                                            </div>
-                                            <div className={styles.toggleDescription}>
-                                                OFFにするとConversationManagerのポーリングを停止し、ログ出力を抑制します
-                                            </div>
+                                {/* Image Default Quality Selector */}
+                                <div className={styles.themeContainer}>
+                                    <div>
+                                        <div className={styles.themeLabel}>
+                                            <Layers size={18} />
+                                            画像生成デフォルト品質
                                         </div>
-                                        <div
-                                            className={`${styles.toggle} ${globalAutoEnabled ? styles.active : ''}`}
-                                            onClick={toggleGlobalAuto}
-                                        />
+                                        <div className={styles.themeDescription}>
+                                            画像生成ツールでquality未指定時のデフォルト品質を設定します
+                                        </div>
                                     </div>
-                                )}
+                                    <div className={styles.themeSelector}>
+                                        <button
+                                            className={`${styles.themeOption} ${imageDefaultQuality === 'low' ? styles.active : ''}`}
+                                            onClick={() => changeImageDefaultQuality('low')}
+                                        >
+                                            Low
+                                        </button>
+                                        <button
+                                            className={`${styles.themeOption} ${imageDefaultQuality === 'medium' ? styles.active : ''}`}
+                                            onClick={() => changeImageDefaultQuality('medium')}
+                                        >
+                                            Medium
+                                        </button>
+                                        <button
+                                            className={`${styles.themeOption} ${imageDefaultQuality === 'high' ? styles.active : ''}`}
+                                            onClick={() => changeImageDefaultQuality('high')}
+                                        >
+                                            High
+                                        </button>
+                                    </div>
+                                </div>
 
                                 <div
                                     className={styles.sectionHeader}
@@ -654,6 +688,22 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                                     />
                                 </div>
 
+                                {/* Media Recall Toggle */}
+                                <div className={styles.toggleContainer}>
+                                    <div>
+                                        <div className={styles.toggleLabel}>
+                                            添付したメディアの内容を自動想起に使う
+                                        </div>
+                                        <div className={styles.toggleDescription}>
+                                            オンにすると、画像・音声・動画を添付したときに内容を読み取ってから思い出しに使います。読み取りの分だけ返信が数秒遅くなります。
+                                        </div>
+                                    </div>
+                                    <div
+                                        className={`${styles.toggle} ${mediaRecallEnabled ? styles.active : ''}`}
+                                        onClick={toggleMediaRecall}
+                                    />
+                                </div>
+
                                 {/* Developer Mode Toggle */}
                                 <div className={styles.toggleContainer}>
                                     <div>
@@ -671,81 +721,11 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                                     />
                                 </div>
 
-                                {/* X Mention Polling Toggle (developer mode only) */}
-                                {developerMode && (
-                                    <div className={styles.toggleContainer}>
-                                        <div>
-                                            <div className={styles.toggleLabel}>
-                                                Xメンション監視
-                                            </div>
-                                            <div className={styles.toggleDescription}>
-                                                ONにするとX連携済みペルソナのメンションを5分間隔で自動監視します
-                                            </div>
-                                        </div>
-                                        <div
-                                            className={`${styles.toggle} ${xPollingEnabled ? styles.active : ''}`}
-                                            onClick={toggleXPolling}
-                                        />
-                                    </div>
-                                )}
                             </div>
                         )}
 
                         {activeTab === 'world' && (
                             <WorldEditor />
-                        )}
-
-                        {activeTab === 'db' && (
-                            <div className={styles.dbContainer}>
-                                <div className={styles.sectionHeader}>
-                                    <h3>データベース管理</h3>
-                                    <div className={styles.selectWrapper}>
-                                        <select
-                                            className={styles.dbSelect}
-                                            onChange={(e) => loadTableData(e.target.value)}
-                                            value={selectedTable || ""}
-                                        >
-                                            <option value="" disabled>テーブルを選択...</option>
-                                            {tables.map(t => (
-                                                <option key={t.name} value={t.name}>{t.name}</option>
-                                            ))}
-                                        </select>
-                                    </div>
-                                </div>
-
-                                {dbLoading && <div>データ読み込み中...</div>}
-
-                                {!dbLoading && selectedTable && tableData.length === 0 && (
-                                    <div style={{ padding: '1rem', color: '#888' }}>レコードが見つかりません。</div>
-                                )}
-
-                                {!dbLoading && selectedTable && tableData.length > 0 && (
-                                    <div className={styles.tableWrapper}>
-                                        <table className={styles.dataTable}>
-                                            <thead>
-                                                <tr>
-                                                    {Object.keys(tableData[0] || {}).map(k => (
-                                                        <th key={k}>{k}</th>
-                                                    ))}
-                                                </tr>
-                                            </thead>
-                                            <tbody>
-                                                {tableData.map((row, idx) => (
-                                                    <tr key={idx}>
-                                                        {Object.values(row).map((val: any, cIdx) => (
-                                                            <td key={cIdx} title={String(val)}>
-                                                                {val === null ? <span style={{ color: '#ccc' }}>NULL</span> : (
-                                                                    String(val).length > 50 ? String(val).substring(0, 50) + '...' : String(val)
-                                                                )}
-                                                            </td>
-                                                        ))}
-                                                    </tr>
-                                                ))}
-                                            </tbody>
-                                        </table>
-                                    </div>
-                                )}
-                            </div>
                         )}
 
                         {activeTab === 'models' && (
@@ -804,7 +784,7 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                                                     {expandedModelRole === role && (
                                                         <div className={styles.roleDropdown}>
                                                             {modelsAvailable
-                                                                .filter(m => m.is_available && (role !== 'agentic_model' || m.supports_structured_output !== false))
+                                                                .filter(m => m.is_available)
                                                                 .map(model => (
                                                                     <div
                                                                         key={model.id}
@@ -825,6 +805,29 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                                 )}
                             </div>
                         )}
+
+                        {activeTab === 'modelMgmt' && (
+                            <div>
+                                <div className={styles.subTabRow}>
+                                    <button
+                                        className={`${styles.subTab} ${modelMgmtSubTab === 'providers' ? styles.subTabActive : ''}`}
+                                        onClick={() => setModelMgmtSubTab('providers')}
+                                    >
+                                        プロバイダ
+                                    </button>
+                                    <button
+                                        className={`${styles.subTab} ${modelMgmtSubTab === 'models' ? styles.subTabActive : ''}`}
+                                        onClick={() => setModelMgmtSubTab('models')}
+                                    >
+                                        モデル
+                                    </button>
+                                </div>
+                                {modelMgmtSubTab === 'providers' && <ProviderManagementPanel />}
+                                {modelMgmtSubTab === 'models' && <ModelManagementPanel />}
+                            </div>
+                        )}
+
+                        {activeTab === 'feeds' && <FeedManagementPanel />}
 
                         {activeTab === 'playbooks' && (
                             <div className={styles.envContainer}>
@@ -913,6 +916,14 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                                 <div className={styles.aboutCard}>
                                     <div className={styles.aboutCardTitle}>リンク</div>
                                     <div className={styles.aboutLinks}>
+                                        <a href="https://saiverse.net/" target="_blank" rel="noopener noreferrer" className={styles.aboutLinkItem}>
+                                            <span className={styles.aboutLinkIcon}>🌐</span>
+                                            <div>
+                                                <div className={styles.aboutLinkName}>公式サイト</div>
+                                                <div className={styles.aboutLinkDesc}>saiverse.net</div>
+                                            </div>
+                                            <ExternalLink size={14} className={styles.aboutLinkArrow} />
+                                        </a>
                                         <a href="https://discord.gg/qMcgEk83Ag" target="_blank" rel="noopener noreferrer" className={styles.aboutLinkItem}>
                                             <span className={styles.aboutLinkIcon}>💬</span>
                                             <div>
@@ -958,6 +969,90 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                                             <ExternalLink size={14} className={styles.aboutLinkArrow} />
                                         </a>
                                     </div>
+                                </div>
+                            </div>
+                        )}
+
+                        {activeTab === 'utilities' && (
+                            <div className={styles.utilitiesContainer}>
+                                <div className={styles.sectionHeader}>
+                                    <h3>便利機能</h3>
+                                </div>
+
+                                {/* アイテム概要の一括生成 */}
+                                <div className={styles.utilityCard}>
+                                    <h4 className={styles.utilityTitle}>アイテム概要の一括生成</h4>
+                                    <p className={styles.utilityDesc}>
+                                        概要が未設定（またはデフォルト）の画像アイテムに対して、作成当時の会話履歴を参照しながら概要を自動生成します。
+                                    </p>
+
+                                    <div className={styles.utilityForm}>
+                                        <div className={styles.utilityRow}>
+                                            <label>対象Building</label>
+                                            <select value={bfBuildingId} onChange={e => { setBfBuildingId(e.target.value); setBfPersonaId(''); }}>
+                                                <option value="">すべて（City全体）</option>
+                                                {bfBuildings.map(b => (
+                                                    <option key={b.id} value={b.id}>{b.name}</option>
+                                                ))}
+                                            </select>
+                                        </div>
+
+                                        {bfBuildingId && (
+                                            <div className={styles.utilityRow}>
+                                                <label>参照ペルソナ</label>
+                                                <select value={bfPersonaId} onChange={e => setBfPersonaId(e.target.value)}>
+                                                    <option value="">自動（全ペルソナから最近傍を選択）</option>
+                                                    {bfPersonas.map(p => (
+                                                        <option key={p.persona_id} value={p.persona_id}>{p.persona_name}</option>
+                                                    ))}
+                                                </select>
+                                            </div>
+                                        )}
+
+                                        <div className={styles.utilityRow}>
+                                            <label className={styles.checkboxLabel}>
+                                                <input type="checkbox" checked={bfDryRun} onChange={e => setBfDryRun(e.target.checked)} />
+                                                ドライラン（確認のみ・DBに書き込まない）
+                                            </label>
+                                        </div>
+
+                                        <button
+                                            className={styles.utilityRunBtn}
+                                            onClick={runBackfill}
+                                            disabled={bfRunning}
+                                        >
+                                            {bfRunning ? <><Loader size={14} className={styles.spin} /> 処理中...</> : '実行'}
+                                        </button>
+                                    </div>
+
+                                    {bfResults && (
+                                        <div className={styles.utilityResults}>
+                                            <div className={styles.utilityStats}>
+                                                <span className={styles.statUpdated}>更新: {bfResults.processed}</span>
+                                                <span className={styles.statSkipped}>スキップ: {bfResults.skipped}</span>
+                                                <span className={styles.statFailed}>失敗: {bfResults.failed}</span>
+                                                {bfDryRun && <span className={styles.dryRunBadge}>DRY RUN</span>}
+                                            </div>
+                                            <div className={styles.utilityResultList}>
+                                                {bfResults.results.map(r => (
+                                                    <div key={r.item_id} className={`${styles.utilityResultItem} ${styles[`result_${r.status}`]}`}>
+                                                        <span className={styles.resultIcon}>
+                                                            {r.status === 'updated' || r.status === 'dry_run'
+                                                                ? <CheckCircle size={14} />
+                                                                : r.status === 'failed'
+                                                                    ? <XCircle size={14} />
+                                                                    : <span>—</span>}
+                                                        </span>
+                                                        <div className={styles.resultBody}>
+                                                            <span className={styles.resultName}>{r.item_name}</span>
+                                                            {r.description && <span className={styles.resultDesc}>{r.description}</span>}
+                                                            {r.reason && <span className={styles.resultReason}>{r.reason}</span>}
+                                                        </div>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        </div>
+                                    )}
                                 </div>
                             </div>
                         )}

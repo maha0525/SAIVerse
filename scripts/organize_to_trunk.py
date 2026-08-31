@@ -36,6 +36,7 @@ os.environ["SAIVERSE_SKIP_TOOL_IMPORTS"] = "1"
 
 from saiverse_memory import SAIMemoryAdapter
 from sai_memory.memopedia import Memopedia
+from sai_memory.memopedia.storage import category_keys, category_label
 from saiverse.model_configs import find_model_config
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -100,7 +101,7 @@ def main():
     )
     parser.add_argument(
         "--category",
-        choices=["people", "terms", "plans"],
+        choices=category_keys("extractable"),
         help="Category to organize (auto-detected from trunk if not specified)"
     )
     parser.add_argument(
@@ -149,15 +150,14 @@ def main():
             print("No trunks found.")
         else:
             # Group by category
-            by_category = {"people": [], "terms": [], "plans": []}
+            by_category: dict = {k: [] for k in category_keys("extractable")}
             for t in trunks:
                 if t.category in by_category:
                     by_category[t.category].append(t)
 
-            category_names = {"people": "人物", "terms": "用語", "plans": "予定"}
             for cat, pages in by_category.items():
                 if pages:
-                    print(f"\n{category_names[cat]} ({cat}):")
+                    print(f"\n{category_label(cat)} ({cat}):")
                     for p in pages:
                         summary_preview = f" - {p.summary[:40]}..." if p.summary else ""
                         print(f"  - {p.title}{summary_preview}")
@@ -193,7 +193,7 @@ def main():
     # Get unorganized pages
     if args.all_categories:
         # Get pages from all categories
-        all_categories = ["people", "terms", "plans"]
+        all_categories = category_keys("extractable")
         unorganized = []
         for cat in all_categories:
             unorganized.extend(memopedia.get_unorganized_pages(cat))
@@ -293,7 +293,8 @@ JSON形式で回答してください。"""
     # Import factory directly to avoid circular import
     from llm_clients.factory import get_llm_client
 
-    client = get_llm_client(actual_model_id, provider, context_length, config=model_config)
+    # 第一引数は設定キー (API 名を渡すと使用量が従量課金版の単価で記録される)。
+    client = get_llm_client(resolved_model_id, provider, context_length, config=model_config)
 
     # Load context from Memopedia and Chronicle (like build_arasuji.py)
     memopedia_context = ""

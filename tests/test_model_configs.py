@@ -1,5 +1,7 @@
 """Tests for model_configs.py — provider resolution, cost calculation, config lookup."""
+import os
 import unittest
+from unittest.mock import patch
 
 from saiverse import model_configs
 
@@ -69,6 +71,88 @@ class TestCalculateCost(unittest.TestCase):
         cost = model_configs.calculate_cost("nonexistent-model-xyz", 1_000_000, 1_000_000)
         self.assertEqual(cost, 0.0)
 
+    def test_long_context_pricing_uses_standard_rates_at_threshold(self):
+        # Grok 4.6 stays on the short-context tier through exactly 200K input.
+        cost = model_configs.calculate_cost("grok-4.6", 200_000, 100_000)
+        self.assertAlmostEqual(cost, 1.0)  # 0.2M * $2 + 0.1M * $6
+
+    def test_long_context_pricing_switches_all_rates_above_threshold(self):
+        # Once the prompt exceeds 200K, xAI bills every token at the long tier.
+        cost = model_configs.calculate_cost(
+            "grok-4.6", 250_000, 100_000, cached_tokens=50_000,
+        )
+        # regular input: 0.2M * $4, cached input: 0.05M * $1, output: 0.1M * $12
+        self.assertAlmostEqual(cost, 2.05)
+
+    def test_long_context_rates_fall_back_field_by_field(self):
+        saved = model_configs.MODEL_CONFIGS
+        try:
+            model_configs.MODEL_CONFIGS = {
+                "tiered-probe": {
+                    "model": "tiered-probe",
+                    "pricing": {
+                        "input_per_1m_tokens": 1,
+                        "cached_input_per_1m_tokens": 0.1,
+                        "output_per_1m_tokens": 2,
+                        "long_context_threshold_tokens": 10,
+                        "long_context_input_per_1m_tokens": 3,
+                    },
+                }
+            }
+            cost = model_configs.calculate_cost(
+                "tiered-probe", 20, 10, cached_tokens=5,
+            )
+        finally:
+            model_configs.MODEL_CONFIGS = saved
+
+        expected = (15 / 1_000_000) * 3 + (5 / 1_000_000) * 0.1 + (10 / 1_000_000) * 2
+        self.assertAlmostEqual(cost, expected)
+
+    @staticmethod
+    def _codex_config_keys(configs):
+        """Codex 設定を列挙する。
+
+        provider_ref だけを見ると、legacy の provider フィールドしか持たない設定
+        (factory は今もこれを有効な protocol として扱う) と、provider_ref を落とした
+        user_data override を取りこぼす。
+        """
+        return [
+            key for key, config in configs.items()
+            if "openai_codex" in (config.get("provider_ref"), config.get("provider"))
+        ]
+
+    def test_subscription_backed_configs_are_unpriced(self):
+        """Codex はサブスク課金なので、単価を書くと使用画面に架空の金額が出る。
+
+        Codex 設定の API モデル名は従量課金版の設定キーと衝突するため、価格は
+        必ず設定キー側 (codex-*) で引かれ、そこが無価格である必要がある。
+        """
+        codex_keys = self._codex_config_keys(model_configs.MODEL_CONFIGS)
+        self.assertTrue(codex_keys, "no openai_codex models found — check the fixture set")
+        for key in codex_keys:
+            with self.subTest(model=key):
+                self.assertIsNone(model_configs.MODEL_CONFIGS[key].get("pricing"))
+                self.assertEqual(
+                    model_configs.calculate_cost(key, 1_000_000, 1_000_000), 0.0
+                )
+
+    def test_legacy_provider_form_is_enumerated(self):
+        """provider_ref を持たない Codex 設定も上の検査に入ること。
+
+        legacy 形式 (provider フィールドのみ) と provider_ref を落とした user_data
+        override はどちらも実在しうる。列挙が provider_ref だけを見ていると、
+        そこに価格が書かれていても検査をすり抜ける。
+        """
+        configs = {
+            "codex-legacy-form": {"model": "gpt-5.6-terra", "provider": "openai_codex"},
+            "codex-ref-form": {"model": "gpt-5.6-terra", "provider_ref": "openai_codex"},
+            "unrelated": {"model": "gpt-4.1", "provider": "openai"},
+        }
+        self.assertEqual(
+            sorted(self._codex_config_keys(configs)),
+            ["codex-legacy-form", "codex-ref-form"],
+        )
+
 
 class TestModelSupportsImages(unittest.TestCase):
     def test_vision_capable_model(self):
@@ -76,6 +160,58 @@ class TestModelSupportsImages(unittest.TestCase):
 
     def test_non_vision_model(self):
         self.assertFalse(model_configs.model_supports_images("nim-deepseek-v4-pro"))
+
+
+class TestAugust2026ModelCatalog(unittest.TestCase):
+    def test_new_model_ids_context_and_pricing(self):
+        expected = {
+            "claude-opus-5": ("claude-opus-5", 1_000_000, 5, 25),
+            "grok-4.6": ("grok-4.6", 500_000, 2, 6),
+            "sakana-namazu-v1.0": ("sakana-namazu-v1.0", 262_144, 0.95, 4),
+            "openrouter-deepseek-v4-pro-0813": (
+                "deepseek/deepseek-v4-pro-0813", 1_048_576, 0.435, 0.87,
+            ),
+            "openrouter-meta-muse-spark-1.2": (
+                "meta/muse-spark-1.2", 1_048_576, 1.25, 4.25,
+            ),
+            "openrouter-qwen3.8-max": (
+                "qwen/qwen3.8-max", 1_000_000, 2, 6,
+            ),
+            "openrouter-deepseek-v4-flash-latest": (
+                "~deepseek/deepseek-v4-flash-latest", 1_048_576, 0.079996, 0.252,
+            ),
+        }
+
+        for config_key, (api_model, context, input_rate, output_rate) in expected.items():
+            with self.subTest(model=config_key):
+                config = model_configs.get_model_config(config_key)
+                self.assertEqual(config.get("model"), api_model)
+                self.assertEqual(config.get("context_length"), context)
+                self.assertEqual(config.get("pricing", {}).get("input_per_1m_tokens"), input_rate)
+                self.assertEqual(config.get("pricing", {}).get("output_per_1m_tokens"), output_rate)
+
+    def test_sonnet_5_permanent_price_and_cache_rates(self):
+        pricing = model_configs.get_model_pricing("claude-sonnet-5")
+        self.assertIsNotNone(pricing)
+        self.assertEqual(
+            {
+                key: pricing[key]
+                for key in (
+                    "input_per_1m_tokens",
+                    "cached_input_per_1m_tokens",
+                    "cache_write_per_1m_tokens",
+                    "cache_write_1h_per_1m_tokens",
+                    "output_per_1m_tokens",
+                )
+            },
+            {
+                "input_per_1m_tokens": 2,
+                "cached_input_per_1m_tokens": 0.2,
+                "cache_write_per_1m_tokens": 2.5,
+                "cache_write_1h_per_1m_tokens": 4,
+                "output_per_1m_tokens": 10,
+            },
+        )
 
 
 class TestFindModelConfig(unittest.TestCase):
@@ -111,6 +247,98 @@ class TestSupportsStructuredOutput(unittest.TestCase):
 
     def test_explicit_false(self):
         self.assertFalse(model_configs.supports_structured_output("nim-step-3.5-flash"))
+
+
+class TestRequiredEnvVars(unittest.TestCase):
+    """The availability gate behind GET /models.
+
+    A model with several accepted key names must stay available when ANY of
+    them is set. Gemini is the live case: the provider declares
+    api_key_env=GEMINI_API_KEY plus api_key_env_alternates=[GEMINI_FREE_API_KEY],
+    and a free-tier-only setup must still see Gemini models.
+    """
+
+    def _gate(self, config):
+        saved = model_configs.MODEL_CONFIGS
+        try:
+            model_configs.MODEL_CONFIGS = {"probe-model": config}
+            return model_configs._get_required_env_vars("probe-model")
+        finally:
+            model_configs.MODEL_CONFIGS = saved
+
+    def test_alternates_are_returned_alongside_primary(self):
+        names = self._gate({
+            "provider": "gemini",
+            "api_key_env": "GEMINI_API_KEY",
+            "api_key_env_alternates": ["GEMINI_FREE_API_KEY"],
+        })
+        self.assertEqual(names, ["GEMINI_API_KEY", "GEMINI_FREE_API_KEY"])
+
+    def test_primary_alone_when_no_alternates(self):
+        names = self._gate({"provider": "openai", "api_key_env": "OPENAI_API_KEY"})
+        self.assertEqual(names, ["OPENAI_API_KEY"])
+
+    def test_alternates_deduplicated_and_type_checked(self):
+        names = self._gate({
+            "provider": "gemini",
+            "api_key_env": "GEMINI_API_KEY",
+            "api_key_env_alternates": ["GEMINI_API_KEY", "", None, "OTHER_KEY"],
+        })
+        self.assertEqual(names, ["GEMINI_API_KEY", "OTHER_KEY"])
+
+    def test_local_models_need_no_key(self):
+        self.assertEqual(self._gate({"provider": "ollama"}), [])
+
+    def test_builtin_gemini_model_accepts_either_key(self):
+        # Regression guard: migrating gemini models to provider_ref must not
+        # collapse the gate down to the paid key alone.
+        names = model_configs._get_required_env_vars("gemini-3.6-flash")
+        self.assertIn("GEMINI_API_KEY", names)
+        self.assertIn("GEMINI_FREE_API_KEY", names)
+
+    def test_free_key_alone_keeps_gemini_available(self):
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("GEMINI_API_KEY", "GEMINI_FREE_API_KEY")}
+        env["GEMINI_FREE_API_KEY"] = "test-free-key"
+        with patch.dict(os.environ, env, clear=True):
+            self.assertTrue(model_configs.is_model_available("gemini-3.6-flash"))
+
+
+class TestProviderRefInheritance(unittest.TestCase):
+    def test_alternates_inherited_from_provider(self):
+        resolved = model_configs._resolve_provider_ref({
+            "model": "probe", "provider_ref": "gemini",
+        })
+        self.assertEqual(resolved.get("api_key_env"), "GEMINI_API_KEY")
+        self.assertEqual(
+            resolved.get("api_key_env_alternates"), ["GEMINI_FREE_API_KEY"],
+        )
+
+    def test_model_fields_win_over_provider(self):
+        resolved = model_configs._resolve_provider_ref({
+            "model": "probe",
+            "provider_ref": "gemini",
+            "api_key_env": "CUSTOM_KEY",
+        })
+        self.assertEqual(resolved.get("api_key_env"), "CUSTOM_KEY")
+
+    def test_builtin_models_carry_no_connection_info(self):
+        """Connection details belong to the provider, not the model.
+
+        builtin models must not pin base_url/api_key_env themselves — that is
+        what lets an external catalog be refused those fields later.
+        """
+        from saiverse.data_paths import BUILTIN_DATA_DIR, MODELS_DIR
+        import json
+
+        offenders = []
+        for path in sorted((BUILTIN_DATA_DIR / MODELS_DIR).glob("*.json")):
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            if raw.get("llama_server") or raw.get("llama_slot_save_path"):
+                continue  # local llama.cpp templates legitimately pin a port
+            if raw.get("base_url") or raw.get("api_key_env"):
+                offenders.append(path.stem)
+        self.assertEqual(offenders, [])
 
 
 if __name__ == "__main__":

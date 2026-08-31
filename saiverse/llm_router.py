@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 
 from google import genai
 from google.genai import types as gtypes
-from llm_clients.gemini_utils import build_gemini_clients
+from saiverse.gemini_clients import build_gemini_clients
 from tools.core import ToolSchema
 
 load_dotenv()
@@ -39,13 +39,6 @@ def rebuild_clients():
         _CLIENT_LABELS[id(_paid_client)] = "paid"
     log.info("Router Gemini clients rebuilt with updated API keys")
 
-
-def _is_rate_limit_error(err: Exception) -> bool:
-    msg = str(err).lower()
-    for keyword in ("rate", "quota", "429", "503", "unavailable", "overload"):
-        if keyword in msg:
-            return True
-    return False
 
 SYS_TEMPLATE = """\
 You are a tool-router.
@@ -135,8 +128,6 @@ def extract_tool_names(tools_spec: list) -> set[str]:
 
 def route(user_message: str, tools_spec: List[Any]) -> Dict[str, Any]:
     """Return {"call":"yes/no","tool": name, "args": {...}}"""
-    global client
-
     if client is None:
         log.warning("Router unavailable: no Gemini API key configured. Skipping tool routing.")
         return {"call": "no", "tool": "", "args": {}}
@@ -169,43 +160,11 @@ def route(user_message: str, tools_spec: List[Any]) -> Dict[str, Any]:
     try:
         resp = _invoke(active_client)
     except Exception as exc:
-        if active_client is _free_client and _paid_client is not None and _is_rate_limit_error(exc):
-            log.info(
-                "Router retry due to rate limit",
-                extra={
-                    "client": _client_label(active_client),
-                    "retry_client": _client_label(_paid_client),
-                    "error": str(exc),
-                },
-            )
-            active_client = _paid_client
-            try:
-                resp = _invoke(active_client)
-            except Exception as exc_paid:
-                log.error(
-                    "Router Gemini retry failed",
-                    extra={
-                        "client": _client_label(active_client),
-                        "error": str(exc_paid),
-                    },
-                )
-                raise
-        else:
-            log.error(
-                "Router Gemini call failed",
-                extra={"client": _client_label(active_client), "error": str(exc)},
-            )
-            raise
-
-    if active_client is not client:
-        log.info(
-            "Router switched active Gemini client",
-            extra={
-                "previous": _client_label(client),
-                "current": _client_label(active_client),
-            },
+        log.error(
+            "Router Gemini call failed; implicit model fallback is disabled",
+            extra={"client": _client_label(active_client), "error": str(exc)},
         )
-        client = active_client
+        raise
     try:
         cand = resp.candidates[0]
         text = getattr(cand, "text", None)
@@ -223,5 +182,8 @@ def route(user_message: str, tools_spec: List[Any]) -> Dict[str, Any]:
         return {"call": call, "tool": tool, "args": decision.get("args", {})}
     except Exception:
         raw = text if 'text' in locals() else str(resp)
-        log.warning("Router JSON parse failed, fallback to auto. Raw: %s", raw)
+        log.warning(
+            "Router JSON parse failed, fallback to auto (response_chars=%d)",
+            len(raw),
+        )
         return {"call": "no", "tool": "", "args": {}}

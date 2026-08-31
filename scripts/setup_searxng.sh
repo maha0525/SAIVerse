@@ -63,59 +63,9 @@ PY
 }
 
 prepare_settings() {
-  if [[ ! -f "${SETTINGS_PATH}" ]]; then
-    echo "[INFO] Preparing settings from ${SRC_DIR}/searx/settings.yml" >&2
-    "${VENV_DIR}/bin/pip" show PyYAML >/dev/null 2>&1 || "${VENV_DIR}/bin/pip" install pyyaml
-    cp "${SRC_DIR}/searx/settings.yml" "${SETTINGS_PATH}"
-  fi
-  "$(python_bin)" - "${SETTINGS_PATH}" <<'PY'
-import sys
-import yaml
-from pathlib import Path
-import os
-import secrets
-import re
-
-path = Path(sys.argv[1])
-data = yaml.safe_load(path.read_text())
-
-# allow JSON output by default
-search = data.setdefault("search", {})
-formats = search.get("formats") or []
-if "json" not in formats:
-    formats.append("json")
-search["formats"] = formats
-search.setdefault("safe_search", 1)
-
-# bind on all interfaces for local network use
-server = data.setdefault("server", {})
-if server.get("bind_address") == "127.0.0.1":
-    server["bind_address"] = "0.0.0.0"
-
-default_secret = "ultrasecretkey"
-env_secret = os.getenv("SEARXNG_SECRET_KEY")
-if env_secret:
-    server["secret_key"] = env_secret
-elif not server.get("secret_key") or server.get("secret_key") == default_secret:
-    server["secret_key"] = secrets.token_hex(32)
-
-# disable engines that frequently fail without extra deps or network access.
-problematic_engines = {"ahmia", "torch", "wikidata", "radiobrowser"}
-
-def normalize(name: str) -> str:
-    return re.sub(r"[\s_-]+", "", name.lower())
-
-engines = []
-for engine in data.get("engines", []):
-    name = engine.get("name") or ""
-    if normalize(name) in problematic_engines:
-        continue
-    engines.append(engine)
-
-data["engines"] = engines
-
-path.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True))
-PY
+  # 3-layer merge: SearXNG base + SAIVerse defaults + user overrides
+  echo "[INFO] Generating SearXNG settings..." >&2
+  "$(python_bin)" "${SCRIPT_DIR}/merge_searxng_settings.py"
 }
 
 prepare_limiter() {
