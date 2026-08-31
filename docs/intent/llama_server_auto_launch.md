@@ -152,3 +152,14 @@ llama.cpp をサーバーモード (`openai_compat` プロトコル) で使う�
 - `saiverse/model_configs.py` — `_INHERITABLE_FIELDS` への追加
 - `main.py` — shutdown フック
 - `llm_clients/llama_cache.py` — KV スロットキャッシュ (自動起動と直交、併用可能)
+
+## 経緯: busy 判定修正の実機検証 (2026-08-31 合格)
+
+gemma4 E4B (Vulkan) を自動起動管理下で走らせて検証した。
+
+- **busy 中に殺さない**: 3 分 37 秒の生成 (prompt 処理 167 秒 + 生成 50 秒、実測ログ) が、60 秒級の idle 判定周期を複数回跨いで完走した。旧実装 (/health ベース) なら射殺されていた長さ。
+- **暇になったら止まる**: 完走の 620 秒後に `idle for 620s (timeout=600s), stopping` が発火し、正常停止した。
+- 検証中の学び: 外部が先に立てたサーバーは「externally managed」となり管理対象外 (idle 停止は適用されない) — 検証は必ず SAIVerse 自身に起動させること。
+- 副産物 issue 二つ: [設定スナップショットの鮮度](../issues/llama_server_config_snapshot_staleness.md) (idle_timeout の編集が作成済みクライアントの起動に反映されない — 検証時に設定した 60 が効かず既定 600 で動いた理由)、[LLM エラー時の再送ボタン欠落](../issues/llm_error_reply_offers_no_retry.md)。
+
+残 = 「受け入れた限界」8 項の裁定と、止血で各モデルに入れた `idle_timeout: 0` を戻すかの判断。
