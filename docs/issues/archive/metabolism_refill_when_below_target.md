@@ -1,6 +1,6 @@
 # Issue: 編纂は残す量まで「削る」だけで「戻す」がない (水位を上げても既存ペルソナに効かない)
 
-**ステータス**: 🟣 検証待ち (実装完了 2026-07-30、Codex 敵対レビュー 7 巡で approve。正典 = [`arasuji_levels.md`](../intent/arasuji_levels.md) §15)
+**ステータス**: ✅ **完了 (2026-08-31 実機初発火)** — テスタロッサとの会話で本番初発火を確認: `[metabolism] window refill: 28,232 字 → 94,643 字 (verified) toward target=100,000、編纂済みの段 80 通を引き戻し`。LLM ゼロの帳簿操作で提示が目標水位近くまで回復し、直後の context-status の実測 (94,971 字) とも一致。二例目 (aifi) は豆粒後始末 ([arasuji_tiny_run_absorption](arasuji_tiny_run_absorption.md)) の再編纂後にそちらの検証として見る。(実装完了 2026-07-30、Codex 敵対レビュー 7 巡で approve。正典 = [`arasuji_levels.md`](../intent/arasuji_levels.md) §15)
 **優先度**: high (アップデート移行で「生ログほぼ無し」のペルソナが発生するため medium から引き上げ)
 **作成日**: 2026-07-30
 **関連**: [`arasuji_levels.md`](../intent/arasuji_levels.md) §9 (予算の値) / §13 (編纂入口の一本化) / §14 (冷えたウィンドウの保守) / **§15 (本件の正典)**、[`metabolism.md`](../concepts/metabolism.md)

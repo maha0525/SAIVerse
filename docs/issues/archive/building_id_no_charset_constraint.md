@@ -1,6 +1,6 @@
 # Building ID に文字種の制約が無く、サイドバーの + からは日本語 ID が黙って生まれる
 
-**ステータス: 実装済み・レビュー/実機検証待ち** (2026-08-08 起票 → 2026-08-09 論点 1 を実装 (v0.3.0 の門 Wave 0)。契約と生成式を `manager/ids.py` 一枚に集約し、**Building を作る 4 経路すべて**に適用: `create_building` / `create_region` の入口自動作成 / ペルソナ個室 (`manager/persona.py`) / ブループリント個室 (`manager/blueprints.py`)。カスタム ID は `[A-Za-z0-9][A-Za-z0-9_-]*` 以外を拒否、自動生成は ASCII slug 化 + 日本語名は連番フォールバック。読み変換 (ローマ字化) は導入しない。Region ID も同じ契約に従う (入口 Building の ID `entrance_<region_id>` の材料のため)。**論点 2 (既存 3 件) は裁定どおり放置**。→ 2026-08-16 **論点 3 (ペルソナ ID) も同じ契約で実装済み** — 残っていた無検証の口は無くなり、City / Building / Region / ペルソナの全 ID が `manager/ids.py` の一枚の契約に揃った)
+**ステータス: ✅ 完了 (2026-08-31 実機合格)** — 日本語名「テラス」で新規作成 → ID 欄に `persona_1` が自動プレフィル → 作成後の AIID = `persona_1_city_a`、二体目の作成モーダルで `persona_2` がプレフィルされることまでまはー実機で確認。 (2026-08-08 起票 → 2026-08-09 論点 1 を実装 (v0.3.0 の門 Wave 0)。契約と生成式を `manager/ids.py` 一枚に集約し、**Building を作る 4 経路すべて**に適用: `create_building` / `create_region` の入口自動作成 / ペルソナ個室 (`manager/persona.py`) / ブループリント個室 (`manager/blueprints.py`)。カスタム ID は `[A-Za-z0-9][A-Za-z0-9_-]*` 以外を拒否、自動生成は ASCII slug 化 + 日本語名は連番フォールバック。読み変換 (ローマ字化) は導入しない。Region ID も同じ契約に従う (入口 Building の ID `entrance_<region_id>` の材料のため)。**論点 2 (既存 3 件) は裁定どおり放置**。→ 2026-08-16 **論点 3 (ペルソナ ID) も同じ契約で実装済み** — 残っていた無検証の口は無くなり、City / Building / Region / ペルソナの全 ID が `manager/ids.py` の一枚の契約に揃った)
 
 ## 経緯
 
