@@ -107,7 +107,7 @@ export default function TutorialWizard({
         autoConfiguredProvider: '',
         autoConfiguredAssignments: [],
         autoConfigureWarnings: [],
-        chronicleEnabled: false,
+        chronicleEnabled: true,
     });
 
     const [availableModels, setAvailableModels] = useState<ModelInfo[]>([]);
@@ -129,7 +129,7 @@ export default function TutorialWizard({
                 autoConfiguredProvider: '',
                 autoConfiguredAssignments: [],
                 autoConfigureWarnings: [],
-                chronicleEnabled: false,
+                chronicleEnabled: true,
             });
             loadInitialData();
         }

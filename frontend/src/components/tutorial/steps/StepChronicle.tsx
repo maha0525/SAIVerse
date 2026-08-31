@@ -108,7 +108,7 @@ export default function StepChronicle({ enabled, onChange, personaId }: StepChro
 
             <p style={{ fontSize: '0.8rem', color: '#888' }}>
                 この設定はペルソナ設定からいつでも変更できます。
-                無効にしても、Memory Settings から手動でChronicleを生成することが可能です。
+                無効にしても、メモリー画面の「Chronicle」タブから手動で生成できます。
             </p>
         </div>
     );
