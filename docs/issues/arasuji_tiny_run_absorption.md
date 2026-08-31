@@ -49,8 +49,8 @@ aifi の被覆補修 (2026-08-31、236 通 / 129 コール) で、材料が極�
 | 圧縮区間の記録 (session_anchor の FOLDED_RANGES_JSON、§15/§16 の印) | fold が digest として entry id を参照 | API 削除ルートが `remove_folds_referencing_entry` で道連れ削除 (残すと再畳み拒否の半端が残るため) | 吸収後は新 entry を指す印を書き直すか、次回補修の冪等な再印字 (`mark_covered_cold_windows`) に任せるかを実装時に決める。放置すると冷えた窓で head との二重提示が一時再発する |
 | 想起用タグの辺 (recall_edges) | chunk↔page の辺に entry id | 両削除経路が `delete_chunk_page_edges` で同一 tx 削除。新規生成時に新しい辺が記帳される | 既存機構で足りる見込み |
 | 知覚バッチの付記印 (perception_buffer の annexed 印) | 「この entry の材料として消費済み」の印 | 削除で返却 (`unmark_batches_annexed`)、再生成で新 id へ付け替え (`reassign_batches_annexed`)。旧バッチは再生成の材料にも入る | `regenerate_entry` の型をそのまま踏襲すれば足りる |
-| **Memopedia Fragment (`memopedia_fragments.chronicle_entry_id`)** | 抽出元 Lv1 entry の id。UI の「抽出された知識」表示と、抽出の重複判定キーに使用 | **未処置** — 削除しても再生成しても付け替えられず、旧 id を指したまま宙に浮く (UI 表示から消える。知識自体は残る)。これは既存の再生成ボタンにも元からある欠陥 | 新 entry id への付け替えを入れる。重複判定キーが entry id を含むため、放置すると吸収後の再抽出で**同内容 Fragment の二重登録**も起きうる |
-| **あらすじ埋め込み (`arasuji_embeddings`)** | entry_id キーの埋め込み (unified recall が使用) | **未処置** — `delete_entry` は消さない (全量整理スクリプト `persona_chronicle_cleanup.py` だけが手で消している)。孤児埋め込みが想起に出る可能性 | 削除時の道連れを吸収経路に入れる (既存削除経路への横展開も検討) |
+| **Memopedia Fragment (`memopedia_fragments.chronicle_entry_id`)** | 抽出元 Lv1 entry の id。UI の「抽出された知識」表示と、抽出の重複判定キーに使用 | **未処置** — 削除しても再生成しても付け替えられず、旧 id を指したまま宙に浮く (UI 表示から消える。知識自体は残る)。これは既存の再生成ボタンにも元からある欠陥 | **裁定済み (2026-08-31 まはー)**: 元々あった Fragment は消さず**新しい entry へ付け替え**、新エントリからの新規抽出も普通に行う。二重登録は起きてよい — Fragment 抽出はそもそも既存 Fragment を考慮しない設計 (毎回全送は トークン浪費) で、重複は元々の割り切りの範囲 |
+| **あらすじ埋め込み (`arasuji_embeddings`)** | entry_id キーの埋め込み (unified recall が使用) | **未処置** — `delete_entry` は消さない (全量整理スクリプト `persona_chronicle_cleanup.py` だけが手で消している)。孤児埋め込みが想起に出る可能性 | **裁定済み (2026-08-31 まはー)**: 削除時の道連れ削除でよい (既存削除経路への横展開も実装時に検討) |
 
 ## aifi の後始末 (機構修正の後)
 
