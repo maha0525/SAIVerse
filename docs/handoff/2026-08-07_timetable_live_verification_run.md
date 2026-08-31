@@ -18,7 +18,7 @@
 | 起床設定変更×再起動の回復縁 | [issue](../issues/timetable_wake_change_recovery_edges.md) | Step 4 (別日) |
 
 **ついでに拾える相乗り** (時間割とは別系統だが、同じ画面・同じ走行で見える):
-Chronicle タブ全件表示 ([issue](../issues/arasuji_modal_500_limit_truncation.md)) / head に直近の記憶 ([issue](../issues/chronicle_presentation_gap.md)) / 会話開始で「1件」ダイアログが出ない ([arasuji_levels](../intent/arasuji_levels.md) §13) / 送信前プレビューと開き直しの一致 (同 §15) / データ送信量セクションの状態表示化 ([issue](../issues/chat_options_metabolism_section_redesign.md)) / Memopedia 整理の `extraction-backlog` ログ ([issue](../issues/memopedia_writers_bypass_adapter_lock.md)) / 編纂の同名ページ輪 ([issue](../issues/curation_duplicate_pages_loop.md) — **編纂を再開する判断をした場合のみ**、Step 3 夜の部で一緒に見える)
+Chronicle タブ全件表示 ([issue](../issues/arasuji_modal_500_limit_truncation.md)) / head に直近の記憶 ([issue](../issues/archive/chronicle_presentation_gap.md)) / 会話開始で「1件」ダイアログが出ない ([arasuji_levels](../intent/arasuji_levels.md) §13) / 送信前プレビューと開き直しの一致 (同 §15) / データ送信量セクションの状態表示化 ([issue](../issues/chat_options_metabolism_section_redesign.md)) / Memopedia 整理の `extraction-backlog` ログ ([issue](../issues/memopedia_writers_bypass_adapter_lock.md)) / 編纂の同名ページ輪 ([issue](../issues/curation_duplicate_pages_loop.md) — **編纂を再開する判断をした場合のみ**、Step 3 夜の部で一緒に見える)
 
 ---
 

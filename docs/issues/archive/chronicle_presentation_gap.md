@@ -1,6 +1,6 @@
 # Issue: Chronicle の提示が「途中の期間」を黙って落とす
 
-**ステータス**: 🟡 検証待ち — 実装 + 回帰テスト完了。残りは**まはーの実機確認**（head に直近の期間が戻っているか）。
+**ステータス**: ✅ 解決済み (2026-08-31 実機確認) — 本物の提示関数を読み取り専用で本番全ペルソナに走らせ、不変条件「提示に覆われない期間ゼロ」を機械検査で確認 (eris/air/sophie/aifi すべて time_holes=0)。エリスの実物は Chronicle 30 項 (2024-12〜08-19) + 生ログ 130 通 (08-19〜当日) で地続き。プレビュー正常はまはー確認。孤児 (範囲は被覆・血縁未提示) は eris 2 / air 6 / aifi 10 / **sophie 71** — sophie の増加 (修正時 1 件) は 12 月の小粒あらすじ密集帯で、[chronicle_undersized_lv1_chunks](chronicle_undersized_lv1_chunks.md) 系の管轄。
 **優先度**: 🔴 critical — 本番のユーザー環境で、ペルソナの記憶が予告なく消える。エラーもログも出ない
 **作成日**: 2026-07-25
 **関連**: [`../concepts/chronicle.md`](../concepts/chronicle.md) §head への読み込み ・ [`../intent/memory_architecture_v2.md`](../intent/memory_architecture_v2.md) §6.2 / §10-4 ・ [chronicle_undersized_lv1_chunks](chronicle_undersized_lv1_chunks.md)（小粒量産が本件の引き金）

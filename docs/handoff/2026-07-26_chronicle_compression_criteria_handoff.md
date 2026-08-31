@@ -23,7 +23,7 @@
 
 ### 提示が「途中の期間」を黙って落としていた
 
-詳細は [`../issues/chronicle_presentation_gap.md`](../issues/chronicle_presentation_gap.md)。要点:
+詳細は [`../issues/archive/chronicle_presentation_gap.md`](../issues/archive/chronicle_presentation_gap.md)。要点:
 
 - `get_episode_context` は予算 (既定2万字) を超えると「昇格閾値を下げて走査ごとやり直す」段を持っていた。2段目以降は粗いレベル優先で選ぶ
 - 粗いあらすじを掴むと走査位置が過去へ飛ぶ。**飛び越された範囲は以後どの周回でも候補にならず、警告もログも無しに消える**

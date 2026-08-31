@@ -8,7 +8,7 @@
 **ステータス**: 廃止 (2026-07-28、後継 = [arasuji_levels.md](arasuji_levels.md)) — v0.2 設計確定 (2026-07-27 まはーレビュー通過。連続性条件は承認、卒業条件は倍率 10→**5倍**で承認) → **同日実装完了**。Sol (Codex) レビュー5巡で P1×9 を消し込み (貪欲分割の窓見落とし / 境界秒の偽隣接→source 帰属 keyset 化 / dry と実行の乖離→実字数見込み+pending 除外 / 提示下限の切り捨て緩み / fold 照会失敗の黙殺→束ね見送り / 治療の窓ブロック2態→選抜の不動点化 / estimate 経路の同形化)、五巡目で「コミット可」判定。回帰 = bands 33件 + 関連スイート、全体 3,221+ passed。**残 = まはー実機検証** (§10 の実機項目)。骨子は 2026-07-26〜27 の設計対話 ([走行メモ](../handoff/2026-07-26_chronicle_compression_criteria_handoff.md) §5/§11 + 提示粒度ドライラン)。
 **位置づけ**: [chronicle_eviction.md](chronicle_eviction.md) が「生ログ → 一次あらすじの退場」(下段) の正典、本 doc が「一次あらすじ以降の束ねと提示」(上段) の正典。eviction §8 の 🔴「上段との接続が未設計」を本 doc が埋める。
 **実装対象**: `sai_memory/arasuji/bands.py` (発火・群選抜・治療) / `sai_memory/arasuji/context.py` (提示粒度) / `run_band_overflow` への Fragment 抽出コールバック追加
-**関連**: [experience_structure.md](experience_structure.md) §4 ・ issues: [chronicle_undersized_lv1_chunks](../issues/chronicle_undersized_lv1_chunks.md) / [chronicle_presentation_gap](../issues/chronicle_presentation_gap.md) ・ [concepts/chronicle.md](../concepts/chronicle.md)
+**関連**: [experience_structure.md](experience_structure.md) §4 ・ issues: [chronicle_undersized_lv1_chunks](../issues/chronicle_undersized_lv1_chunks.md) / [chronicle_presentation_gap](../issues/archive/chronicle_presentation_gap.md) ・ [concepts/chronicle.md](../concepts/chronicle.md)
 
 ---
 
@@ -41,7 +41,7 @@
 
 1. **提示の床は発火閾値で抑えられる** — 未束ねのあらすじ字数合計は X + (発火間の増分) を超えて溜まらない
 2. **圧縮回数は有限** — どの記憶も束ねを通るたび質量が大きく跳ねる (§4 卒業条件、最低5倍)。有限回で天井に着く
-3. **提示は全期間を覆う** — 穴を作らない ([chronicle_presentation_gap](../issues/chronicle_presentation_gap.md) の回帰 `TestNoPresentationGap` を維持)
+3. **提示は全期間を覆う** — 穴を作らない ([chronicle_presentation_gap](../issues/archive/chronicle_presentation_gap.md) の回帰 `TestNoPresentationGap` を維持)
 4. **束ねは時間的に連続した被覆のみ** — 偽の隣接 (experience_structure §4-5) を作らない
 5. **確定したあらすじ本文は書き換えない** — 束ねも治療も新ノードの追加のみ。子は `is_consolidated` で列から退くだけで残る
 
