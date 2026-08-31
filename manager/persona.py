@@ -551,7 +551,11 @@ class PersonaMixin:
                 AUTONOMY_ENABLED=True,
                 IS_DISPATCHED=False,
                 DEFAULT_MODEL=self.model,
-                CHRONICLE_ENABLED=False,
+                # 既定 ON (まはー裁定 2026-09-01)。旧 False は「ログインポート直後に
+                # 全量が自動編纂される事故」の防止だったが、その経路は §13 (編纂は
+                # 提示窓の中だけ) と §16 (窓の外の過去は明示ボタン + 費用確認のみ) で
+                # 構造的に消滅した。ON で起きるのは会話の営みに伴う窓の畳みだけ。
+                CHRONICLE_ENABLED=True,
                 PRIVATE_ROOM_ID=new_building_id,
                 PERSONA_ROLE=persona_role,
             )

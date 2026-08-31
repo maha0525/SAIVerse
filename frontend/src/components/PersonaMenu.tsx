@@ -70,7 +70,7 @@ export default function PersonaMenu({ isOpen, onClose, personaId, personaName, a
                     failed: '記憶の整理に失敗しました（あらすじ生成が完了しませんでした）。もう一度実行すると再試行できます。',
                     deferred: '別の整理が同じ範囲を処理中または処理済みです。しばらく待って再実行してください。',
                     deferred_sluice_unseen: '記憶の整理を見送りました（今回の採取で読めていない範囲があったため、畳みは次回の整理で続きから進みます）。',
-                    disabled: 'Chronicle生成が無効のため整理できません（メモリー設定でChronicleをONにしてください）',
+                    disabled: 'Chronicle生成が無効のため整理できません（ペルソナ設定で「Chronicle 自動生成」を「有効」にしてください）',
                     unavailable: '整理できる状態ではありません（会話履歴がまだ無い可能性があります）',
                 };
                 alert(messages[data.compaction] ?? '記憶の整理の結果が不明です');

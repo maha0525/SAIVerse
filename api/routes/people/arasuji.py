@@ -969,7 +969,7 @@ def _run_chronicle_generation(
         elif status == "disabled":
             _update_job(
                 job_id, status="failed",
-                error="Chronicle生成が無効のため整理できません（メモリー設定でChronicleをONにしてください）。",
+                error="Chronicle生成が無効のため整理できません（ペルソナ設定で「Chronicle 自動生成」を「有効」にしてください）。",
                 error_code="chronicle_disabled",
             )
         else:  # "failed" / "unavailable"
@@ -1098,7 +1098,7 @@ def _run_coverage_repair_job(
         elif status == "disabled":
             _update_job(
                 job_id, status="failed",
-                error="Chronicle生成が無効のため編纂できません（メモリー設定でChronicleをONにしてください）。",
+                error="Chronicle生成が無効のため編纂できません（ペルソナ設定で「Chronicle 自動生成」を「有効」にしてください）。",
                 error_code="chronicle_disabled",
             )
         else:  # "failed"
