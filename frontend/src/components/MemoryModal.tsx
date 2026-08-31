@@ -21,6 +21,22 @@ interface MemoryModalProps {
 
 type Tab = 'browser' | 'core_memory' | 'pocketbook' | 'arasuji' | 'memopedia' | 'experience' | 'pulse_timeline' | 'import' | 'debug';
 
+// v0.3.0 では画面に出さないタブ (2026-09-01 まはー裁定)。中身のコードは残して
+// あるので、条件が解けたらこの集合から名前を外すだけで戻る。
+//
+// - experience (経験): 台帳に「経験値ノート」を書くのはコマ締め
+//   (saiverse/slot_close.py) で、自律行動の止め具
+//   (saiverse/autonomy_wiring.py の AUTONOMOUS_DRIVING_SHIPPED = False) がある
+//   あいだコマは発火しない。書き手が動かないので、台帳は Memopedia の焼き直し
+//   しか映さない。復帰条件: 自律行動 (時間割のコマ) の出荷時。
+// - pulse_timeline (Pulse タイムライン): line_role や spell 由来 ID といった
+//   内部構造を並べる開発者向けの診断ビュー (docs/intent/persona_cognition/
+//   debug_controller.md)。ペルソナの記憶を見に来た人が読むものではない。
+//   復帰条件: 開発者向けの表示だけを出し分ける器ができたとき。
+const HIDDEN_TABS: ReadonlySet<Tab> = new Set<Tab>(['experience', 'pulse_timeline']);
+
+const isHidden = (tab: Tab) => HIDDEN_TABS.has(tab);
+
 export default function MemoryModal({ isOpen, onClose, personaId, personaName }: MemoryModalProps) {
     const [activeTab, setActiveTab] = useState<Tab>('browser');
 
@@ -78,20 +94,24 @@ export default function MemoryModal({ isOpen, onClose, personaId, personaName }:
                     {/* 経験の台帳 (experience_ledger.md §3)。コア記憶タブ拡張でなく
                         新タブ: コア記憶=常駐・編集可の実データ / 台帳=参照専用の
                         動的合成ビュー、という性質差を画面でも分ける。 */}
-                    <button
-                        className={`${styles.tab} ${activeTab === 'experience' ? styles.activeTab : ''}`}
-                        onClick={() => setActiveTab('experience')}
-                    >
-                        <Footprints size={16} style={{ display: 'inline', marginRight: 8, verticalAlign: 'text-bottom' }} />
-                        経験
-                    </button>
-                    <button
-                        className={`${styles.tab} ${activeTab === 'pulse_timeline' ? styles.activeTab : ''}`}
-                        onClick={() => setActiveTab('pulse_timeline')}
-                    >
-                        <Activity size={16} style={{ display: 'inline', marginRight: 8, verticalAlign: 'text-bottom' }} />
-                        Pulse タイムライン
-                    </button>
+                    {!isHidden('experience') && (
+                        <button
+                            className={`${styles.tab} ${activeTab === 'experience' ? styles.activeTab : ''}`}
+                            onClick={() => setActiveTab('experience')}
+                        >
+                            <Footprints size={16} style={{ display: 'inline', marginRight: 8, verticalAlign: 'text-bottom' }} />
+                            経験
+                        </button>
+                    )}
+                    {!isHidden('pulse_timeline') && (
+                        <button
+                            className={`${styles.tab} ${activeTab === 'pulse_timeline' ? styles.activeTab : ''}`}
+                            onClick={() => setActiveTab('pulse_timeline')}
+                        >
+                            <Activity size={16} style={{ display: 'inline', marginRight: 8, verticalAlign: 'text-bottom' }} />
+                            Pulse タイムライン
+                        </button>
+                    )}
                     <button
                         className={`${styles.tab} ${activeTab === 'import' ? styles.activeTab : ''}`}
                         onClick={() => setActiveTab('import')}
@@ -114,8 +134,8 @@ export default function MemoryModal({ isOpen, onClose, personaId, personaName }:
                     {activeTab === 'pocketbook' && <PocketbookViewer personaId={personaId} />}
                     {activeTab === 'arasuji' && <ArasujiViewer personaId={personaId} />}
                     {activeTab === 'memopedia' && <MemopediaViewer personaId={personaId} />}
-                    {activeTab === 'experience' && <ExperienceLedgerViewer personaId={personaId} />}
-                    {activeTab === 'pulse_timeline' && <PulseTimelineViewer personaId={personaId} />}
+                    {activeTab === 'experience' && !isHidden('experience') && <ExperienceLedgerViewer personaId={personaId} />}
+                    {activeTab === 'pulse_timeline' && !isHidden('pulse_timeline') && <PulseTimelineViewer personaId={personaId} />}
                     {activeTab === 'import' && <MemoryImport personaId={personaId} />}
                     {activeTab === 'debug' && <MemoryRecall personaId={personaId} />}
                 </div>
