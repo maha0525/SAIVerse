@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { X, Settings, Globe, Layers, Save, RefreshCw, Power, Play, Pause, Monitor, Sun, Moon, Cpu, ChevronDown, ChevronRight, Info, ExternalLink, Wrench, CheckCircle, XCircle, Loader, Boxes, Rss } from 'lucide-react';
+import { X, Settings, Globe, Layers, Save, RefreshCw, Power, Monitor, Sun, Moon, Cpu, ChevronDown, ChevronRight, Info, ExternalLink, Wrench, CheckCircle, XCircle, Loader, Boxes, Rss } from 'lucide-react';
 import styles from './GlobalSettingsModal.module.css';
 import WorldEditor from './settings/WorldEditor';
 import ProviderManagementPanel from './settings/ProviderManagementPanel';
@@ -60,7 +60,6 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
     // DB State
 
     // Global Auto Mode
-    const [globalAutoEnabled, setGlobalAutoEnabled] = useState(true);
 
     // Developer Mode
     const [developerMode, setDeveloperMode] = useState(false);
@@ -270,18 +269,6 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
         }
     };
 
-    const loadGlobalAutoState = async () => {
-        try {
-            const res = await fetch('/api/config/global-auto');
-            if (res.ok) {
-                const data = await res.json();
-                setGlobalAutoEnabled(data.enabled);
-            }
-        } catch (e) {
-            console.error("Failed to load global auto state", e);
-        }
-    };
-
     const loadDeveloperModeState = async () => {
         try {
             const res = await fetch('/api/config/developer-mode');
@@ -304,10 +291,6 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
             });
             if (res.ok) {
                 setDeveloperMode(newState);
-                // When turning OFF, backend also disables global auto
-                if (!newState) {
-                    setGlobalAutoEnabled(false);
-                }
             }
         } catch (e) {
             console.error("Failed to toggle developer mode", e);
@@ -367,22 +350,6 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
             }
         } catch (e) {
             console.error("Failed to toggle announcements", e);
-        }
-    };
-
-    const toggleGlobalAuto = async () => {
-        const newState = !globalAutoEnabled;
-        try {
-            const res = await fetch('/api/config/global-auto', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ enabled: newState })
-            });
-            if (res.ok) {
-                setGlobalAutoEnabled(newState);
-            }
-        } catch (e) {
-            console.error("Failed to toggle global auto", e);
         }
     };
 
@@ -645,25 +612,6 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                                         </button>
                                     </div>
                                 </div>
-
-                                {/* Global Auto Mode Toggle - only visible in developer mode */}
-                                {developerMode && (
-                                    <div className={styles.toggleContainer}>
-                                        <div>
-                                            <div className={styles.toggleLabel}>
-                                                {globalAutoEnabled ? <Play size={18} /> : <Pause size={18} />}
-                                                自律会話モード
-                                            </div>
-                                            <div className={styles.toggleDescription}>
-                                                OFFにするとConversationManagerのポーリングを停止し、ログ出力を抑制します
-                                            </div>
-                                        </div>
-                                        <div
-                                            className={`${styles.toggle} ${globalAutoEnabled ? styles.active : ''}`}
-                                            onClick={toggleGlobalAuto}
-                                        />
-                                    </div>
-                                )}
 
                                 <div
                                     className={styles.sectionHeader}

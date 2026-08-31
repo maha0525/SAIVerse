@@ -497,23 +497,6 @@ def set_parameters(req: UpdateParametersRequest, manager = Depends(get_manager))
     return {"success": True}
 
 
-class GlobalAutoRequest(BaseModel):
-    enabled: bool
-
-
-@router.get("/global-auto")
-def get_global_auto(manager = Depends(get_manager)):
-    """Get global autonomous mode status."""
-    return {"enabled": manager.state.global_auto_enabled}
-
-
-@router.post("/global-auto")
-def set_global_auto(req: GlobalAutoRequest, manager = Depends(get_manager)):
-    """Set global autonomous mode status."""
-    manager.state.global_auto_enabled = req.enabled
-    return {"success": True, "enabled": req.enabled}
-
-
 class DeveloperModeRequest(BaseModel):
     enabled: bool
 
@@ -528,15 +511,12 @@ def get_developer_mode(manager=Depends(get_manager)):
 def set_developer_mode(req: DeveloperModeRequest, manager=Depends(get_manager)):
     """Set developer mode status.
 
-    When turning OFF, also disables global auto mode and
-    disables all personas' AUTONOMY_ENABLED (自発的な自律行動を停止)。
+    When turning OFF, also disables all personas' AUTONOMY_ENABLED
+    (自発的な自律行動を停止)。
     """
     manager.state.developer_mode = req.enabled
 
     if not req.enabled:
-        # Disable global auto mode
-        manager.state.global_auto_enabled = False
-
         # 全ペルソナの自律行動を OFF (自発的な自律行動を停止)
         from database.session import SessionLocal
         from database.models import AI

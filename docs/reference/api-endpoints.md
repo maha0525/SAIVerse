@@ -5,7 +5,7 @@
 
 REST API 全エンドポイントの一覧（自動生成）。すべて `/api` 配下にマウントされる。
 
-**エンドポイント数**: 350（tag グループ: 25）
+**エンドポイント数**: 348（tag グループ: 25）
 
 ## addon
 
@@ -115,8 +115,6 @@ REST API 全エンドポイントの一覧（自動生成）。すべて `/api` 
 | POST | `/api/config/developer-mode` | Set developer mode status. |
 | GET | `/api/config/favorite-models` | Get user's favorite model IDs. |
 | POST | `/api/config/favorite-models` | Set user's favorite model IDs. |
-| GET | `/api/config/global-auto` | Get global autonomous mode status. |
-| POST | `/api/config/global-auto` | Set global autonomous mode status. |
 | GET | `/api/config/image-default-quality` | Get default image generation quality setting. |
 | POST | `/api/config/image-default-quality` | Set default image generation quality and persist to .env. |
 | GET | `/api/config/max-image-embeds` | Get current max image embeds setting. |
