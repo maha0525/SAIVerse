@@ -606,7 +606,7 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                                     </label>
                                 </div>
                                 <div className={styles.description}>
-                                    Metabolism（記憶の整理）時にChronicle（あらすじ）を自動生成します。LLM APIコストが発生します。
+                                    会話が一定量を超えたとき、古い部分を自動的にあらすじ（Chronicle）へ畳みます。生成の瞬間にLLM APIコストが発生します。無効にすると自動生成は止まり、メモリー画面の「Chronicle」タブからの手動生成もできなくなります。
                                 </div>
                                 {costEstimate && costEstimate.unprocessed_messages > 0 && (
                                     <div className={styles.description} style={{
@@ -618,9 +618,9 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                                         borderRadius: '4px',
                                         fontSize: '0.85rem',
                                     }}>
-                                        <div>未処理メッセージ: <strong>{costEstimate.unprocessed_messages.toLocaleString()}</strong>件</div>
+                                        <div>あらすじになっていない過去メッセージ: <strong>{costEstimate.unprocessed_messages.toLocaleString()}</strong>件（自動ではあらすじ化されません）</div>
                                         <div>
-                                            推定コスト: <strong>
+                                            まとめてあらすじ化した場合の推定コスト: <strong>
                                                 {costEstimate.is_free_tier
                                                     ? `${formatCost(0, costEstimate.currency)} (Free tier)`
                                                     : formatCost(costEstimate.estimated_cost_usd, costEstimate.currency)

@@ -43,8 +43,8 @@ export default function StepChronicle({ enabled, onChange, personaId }: StepChro
             </h3>
 
             <p style={{ marginBottom: '1rem', lineHeight: '1.6', fontSize: '0.9rem' }}>
-                Chronicleは、ペルソナとの会話履歴を自動的に要約・圧縮する機能です。
-                長期的な記憶を維持しつつ、コンテキストウィンドウを効率的に使用します。
+                Chronicleは、古くなった会話を自動的にあらすじへ畳んで、長期記憶として保ち続ける機能です。
+                ペルソナは直近の会話を全文のまま、それより前をあらすじとして思い出します。
             </p>
 
             <div style={{
@@ -59,8 +59,9 @@ export default function StepChronicle({ enabled, onChange, personaId }: StepChro
             }}>
                 <AlertTriangle size={18} style={{ flexShrink: 0, marginTop: '2px' }} />
                 <div>
-                    Chronicle生成時にLLM APIが呼び出され、<strong>APIコストが発生</strong>します。
-                    特に大量の会話履歴をインポートした場合、初回の生成コストが高くなる可能性があります。
+                    あらすじの生成にはLLM APIの呼び出し（<strong>APIコスト</strong>）が伴います。
+                    生成は会話が一定量を超えたときに少しずつ行われ、
+                    過去ログを取り込んでも自動でまとめて生成されることはありません。
                 </div>
             </div>
 
@@ -73,14 +74,17 @@ export default function StepChronicle({ enabled, onChange, personaId }: StepChro
                     fontSize: '0.85rem',
                     lineHeight: '1.6',
                 }}>
-                    <div>現在の未処理メッセージ: <strong>{costEstimate.unprocessed_messages.toLocaleString()}</strong>件</div>
+                    <div>あらすじになっていない過去メッセージ: <strong>{costEstimate.unprocessed_messages.toLocaleString()}</strong>件</div>
                     <div>
-                        推定コスト: <strong>
+                        まとめてあらすじ化した場合の推定コスト: <strong>
                             {costEstimate.is_free_tier ? `${formatCost(0, costEstimate.currency)} (Free tier)` : formatCost(costEstimate.estimated_cost_usd, costEstimate.currency)}
                         </strong>
                         {' '}({costEstimate.model_name})
                     </div>
                     <div>推定LLM呼び出し: {costEstimate.estimated_llm_calls}回</div>
+                    <div style={{ marginTop: '0.25rem' }}>
+                        まとめてのあらすじ化は自動では行われません。メモリー画面の「Chronicle」タブから実行したときだけ発生します。
+                    </div>
                 </div>
             )}
 
@@ -98,9 +102,9 @@ export default function StepChronicle({ enabled, onChange, personaId }: StepChro
                         style={{ width: '18px', height: '18px' }}
                     />
                     <div>
-                        <div style={{ fontWeight: 'bold' }}>Chronicle 自動生成を有効にする</div>
+                        <div style={{ fontWeight: 'bold' }}>Chronicle 自動生成を有効にする（推奨）</div>
                         <div style={{ fontSize: '0.85rem', color: '#888', marginTop: '0.25rem' }}>
-                            会話が一定量を超えると自動的にChronicleが生成されます
+                            会話が一定量を超えると、古い部分から自動的にあらすじ化されます
                         </div>
                     </div>
                 </label>
@@ -108,7 +112,7 @@ export default function StepChronicle({ enabled, onChange, personaId }: StepChro
 
             <p style={{ fontSize: '0.8rem', color: '#888' }}>
                 この設定はペルソナ設定からいつでも変更できます。
-                無効にしても、メモリー画面の「Chronicle」タブから手動で生成できます。
+                無効にすると自動生成は止まり、メモリー画面の「Chronicle」タブからの手動生成もできなくなります。
             </p>
         </div>
     );
