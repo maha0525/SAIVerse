@@ -312,10 +312,11 @@ class SessionLifecycle:
                         persona_id, model_key, require_current_anchor_id,
                     )
                 return bool(updated_count)
-            if row is None:
+            row_created = row is None
+            if row_created:
                 row = SessionAnchor(PERSONA_ID=persona_id, MODEL_KEY=str(model_key))
                 db.add(row)
-            if row.ANCHOR_MESSAGE_ID != new_anchor_id and row.FOLDED_RANGES_JSON:
+            if not row_created and row.ANCHOR_MESSAGE_ID != new_anchor_id and row.FOLDED_RANGES_JSON:
                 # 畳んだ範囲は「この anchor 以降の提示コンテキスト」に対する記録なので、anchor が
                 # 差し替わった時点で無効になる (chronicle_eviction.md §6)。退場経路
                 # 以外でも anchor は動く — TTL 失効後の最小ロードで新しい起点が立ち、
@@ -334,6 +335,31 @@ class SessionLifecycle:
             row.ANCHOR_MESSAGE_ID = new_anchor_id
             row.TTL_SECONDS = effective_ttl
             row.UPDATED_AT = int(effective_updated.timestamp())
+            if row_created and new_anchor_id:
+                # §16-3 窓の誕生時の護り: 新しい (persona, model) の窓が被覆済み
+                # 領域の上に開くなら、覆っているエントリを §15 の印として初期
+                # 圧縮区間に載せて生まれる — head のあらすじ枠との二重提示の口を
+                # 誕生時点で塞ぐ。読めない環境 (adapter 無し等) は印なしの従来形。
+                try:
+                    initial_folds = self._initial_coverage_folds(
+                        persona_id, str(new_anchor_id),
+                    )
+                except Exception:
+                    LOGGER.warning(
+                        "[coverage-repair] initial coverage folds failed for "
+                        "new anchor row %s/%s; the row is born without marks",
+                        persona_id, model_key, exc_info=True,
+                    )
+                    initial_folds = []
+                if initial_folds:
+                    from sea.session_window import serialize_folds
+                    row.FOLDED_RANGES_JSON = serialize_folds(initial_folds)
+                    LOGGER.info(
+                        "[coverage-repair] new anchor row %s/%s born with %d "
+                        "covered range mark(s) (window opens over compiled "
+                        "territory)",
+                        persona_id, model_key, len(initial_folds),
+                    )
             db.commit()
             return True
         except Exception as exc:
@@ -344,6 +370,26 @@ class SessionLifecycle:
             return False
         finally:
             db.close()
+
+    def _initial_coverage_folds(
+        self, persona_id: Optional[str], anchor_id: str,
+    ) -> List["FoldedRange"]:
+        """新規 anchor 行の初期圧縮区間 — 窓を覆う既存エントリの §15 の印 (§16-3)。
+
+        persona の memory.db が manager 経由で引けないとき (テスト環境 /
+        未ロード) は空 — 印なしで生まれる従来形に倒す (体験を消す方向の
+        失敗ではない: 印が無い場合に起きるのは head との二重提示だけで、
+        次の被覆補修の mark_covered_cold_windows が冪等に追記する)。
+        """
+        if not persona_id or not anchor_id:
+            return []
+        personas = getattr(self.manager, "personas", None) if self.manager else None
+        persona = personas.get(persona_id) if isinstance(personas, dict) else None
+        adapter = getattr(persona, "sai_memory", None)
+        if adapter is None or not adapter.is_ready():
+            return []
+        from sea.coverage_repair import coverage_marks_for_window
+        return coverage_marks_for_window(adapter.conn, anchor_id, [])
 
     def _advance_anchor_preserving_folds(
         self,
@@ -1806,6 +1852,67 @@ class SessionLifecycle:
         )
         return "noop" if status == "nothing" else status
 
+    def run_coverage_repair(
+        self,
+        persona,
+        event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+        cancellation_token: Optional[CancellationToken] = None,
+    ) -> str:
+        """被覆補修 (arasuji_levels.md §16-2 機構5) — 手動入口の実体。
+
+        「編纂対象なのに、どの一次あらすじの source でもなく、止め線 (温かい
+        anchor の最古位置) より古い」領域を、通常の編纂パイプライン
+        (:meth:`generate_chronicle` の全量計画 — W4 の plan_alignment) で
+        一次あらすじにする。止め線の絞りは generate_chronicle 側が行う
+        (見積もり API と同じ関数)。
+
+        補修は**提示から何も追い出さない** (被覆を足すだけ) — 退場も anchor
+        前進も伴わないので、退場の関所 (スルース) の対象外 (§16-2)。編纂済みは
+        processed_ids (source_ids 照会) で自動で飛ぶため冪等。
+
+        完了時、冷えた anchor 行の窓を覆うエントリへ §15 の印
+        (:func:`sea.coverage_repair.mark_covered_cold_windows`) を書く —
+        休眠モデルが目覚めても head のあらすじ枠と二重提示にならない。
+        印の失敗は補修の成否に畳み込まない (エントリは確定済みで、印は次回の
+        補修が冪等に追記し直せる)。
+
+        Returns:
+            generate_chronicle の status ("ok" / "failed" / "deferred")、
+            または "disabled" (weave env OFF / persona トグル OFF — 手動入口の
+            同意文は「あらすじにする」なので、無効の persona では何もしない)。
+        """
+        memory_weave_enabled = os.getenv(
+            "ENABLE_MEMORY_WEAVE_CONTEXT", "",
+        ).lower() in ("true", "1")
+        if not memory_weave_enabled or not self.is_chronicle_enabled_for_persona(persona):
+            return "disabled"
+        persona_id = getattr(persona, "persona_id", None)
+        from sea.beat_gate import hold_beat
+        # Beat ロックで Metabolism / 手動整理と直列化する。補修は Beat (認知の
+        # 一巡) ではなく保守書き込みなので、関所 (pending flush) は通さず
+        # ロックだけ取る (remove_folds_referencing_entry と同じ型)。
+        with hold_beat(
+            self.manager, persona_id, purpose="coverage_repair",
+            check_gate=False,
+        ):
+            status = self.generate_chronicle(
+                persona, event_callback,
+                force=True,
+                cancellation_token=cancellation_token,
+            )
+            if status == "ok":
+                try:
+                    from sea.coverage_repair import mark_covered_cold_windows
+                    mark_covered_cold_windows(self, persona)
+                except Exception:
+                    LOGGER.warning(
+                        "[coverage-repair] cold-window marking failed "
+                        "(persona=%s); entries are committed and the next "
+                        "repair run re-marks idempotently",
+                        persona_id, exc_info=True,
+                    )
+        return status
+
     # ------------------------------------------------------------------
     # 冷えたウィンドウの保守 (arasuji_levels.md §14)
     # ------------------------------------------------------------------
@@ -2314,6 +2421,58 @@ class SessionLifecycle:
         except Exception as exc:
             LOGGER.warning(
                 "[metabolism] failed to write refill for %s/%s: %s",
+                persona_id, model_key, exc,
+            )
+            return False
+        finally:
+            db.close()
+
+    def write_folds_if_anchor_unchanged(
+        self,
+        persona_id: str,
+        model_key: str,
+        expected_anchor_id: str,
+        folds: List["FoldedRange"],
+    ) -> bool:
+        """圧縮区間だけを CAS 付きで書く — anchor・温度は据え置き (§16-2 の印の書き込み)。
+
+        :meth:`_write_refill` と同じ CAS 規律 (行の現在の anchor が期待値と
+        一致するときだけ書く条件付き UPDATE 1 文) だが、こちらは anchor を
+        動かさず UPDATED_AT も書かない — 被覆補修の印はキャッシュの主張では
+        ないので、冷えた行を温かく偽装しない (§14-6-5 と同じ理由)。
+
+        Returns:
+            書けたら True。CAS 棄却 (anchor が動いていた)・DB 失敗は False —
+            呼び出し側 (mark_covered_cold_windows) は棄却された行を諦め、
+            次回の補修が現況から再計算する。
+        """
+        if not self.manager or not hasattr(self.manager, "SessionLocal"):
+            return False
+        if not persona_id or not model_key:
+            return False
+        from sea.session_window import serialize_folds
+        db = self.manager.SessionLocal()
+        try:
+            from database.models import SessionAnchor
+            updated = db.query(SessionAnchor).filter_by(
+                PERSONA_ID=persona_id,
+                MODEL_KEY=str(model_key),
+                ANCHOR_MESSAGE_ID=expected_anchor_id,
+            ).update({
+                SessionAnchor.FOLDED_RANGES_JSON: serialize_folds(folds),
+            }, synchronize_session=False)
+            db.commit()
+            if not updated:
+                LOGGER.info(
+                    "[coverage-repair] fold write skipped (CAS): anchor moved "
+                    "under us (persona=%s model=%s expected=%s)",
+                    persona_id, model_key, expected_anchor_id,
+                )
+                return False
+            return True
+        except Exception as exc:
+            LOGGER.warning(
+                "[coverage-repair] failed to write folds for %s/%s: %s",
                 persona_id, model_key, exc,
             )
             return False
@@ -3216,6 +3375,42 @@ class SessionLifecycle:
         # Fetch ALL messages suitable for Chronicle (shared filter logic).
         from sai_memory.memory.storage import get_messages_for_chronicle
         all_messages = get_messages_for_chronicle(adapter.conn)
+
+        # 止め線 (arasuji_levels.md §16-2): 全量計画 (compile_groups なし =
+        # 被覆補修 / 一括生成) は、温かい提示窓の下を掘らない — 掘ると head の
+        # あらすじ枠と生の提示の二重提示か、生きたキャッシュの破壊が起きる。
+        # 上端の解決と絞りは見積もり (estimate_chronicle_generation_cost) と
+        # 同じ関数の対 (resolve_compile_ceiling + clip_messages_before_position)
+        # を通す — 表示と実走が違う数を言ってはならない。退場時圧縮
+        # (compile_groups あり) は自分の温かい窓を意図して畳む経路なので対象外。
+        if compile_groups is None:
+            try:
+                from sea.coverage_repair import resolve_compile_ceiling
+                ceiling = resolve_compile_ceiling(
+                    self, getattr(persona, "persona_id", None), adapter.conn,
+                )
+            except Exception:
+                # 上端が分からないまま全量を編纂すると、温かい窓の下を掘る
+                # リスクを黙って踏む — fail-closed で止める (次回再試行)。
+                LOGGER.warning(
+                    "[metabolism] compile ceiling resolution failed; refusing "
+                    "the full-plan compile (persona=%s)",
+                    getattr(persona, "persona_id", "?"), exc_info=True,
+                )
+                return "failed"
+            if ceiling is not None:
+                from sai_memory.memory.storage import clip_messages_before_position
+                total_before = len(all_messages)
+                all_messages = clip_messages_before_position(
+                    adapter.conn, all_messages,
+                    ceiling.created_at, ceiling.rowid,
+                )
+                LOGGER.info(
+                    "[metabolism] compile ceiling at warm anchor %s (model=%s): "
+                    "%d -> %d candidate messages",
+                    ceiling.message_id, ceiling.model_key,
+                    total_before, len(all_messages),
+                )
 
         # 退場時圧縮 (§4-1): 編纂対象を「今回退場させる範囲そのもの」に絞る。
         # 退場する集合と編纂する集合が一致することが、下限「退場したものは必ず

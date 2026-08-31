@@ -775,6 +775,65 @@
     color: var(--foreground);
 }
 
+/* 被覆補修の案内 (§16): あらすじになっていない過去の会話があるときだけ出る帯 */
+.repairBanner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    padding: 0.6rem 1rem;
+    background-color: rgba(252, 196, 25, 0.08);
+    border-bottom: 1px solid rgba(252, 196, 25, 0.25);
+}
+
+.repairBannerText {
+    font-size: 0.85rem;
+    line-height: 1.5;
+    color: #fcc419;
+}
+
+.repairBannerBtn {
+    flex-shrink: 0;
+    background-color: rgba(252, 196, 25, 0.15);
+    border: 1px solid rgba(252, 196, 25, 0.4);
+    color: #fcc419;
+    padding: 5px 12px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 0.85rem;
+    transition: background-color 0.2s, border-color 0.2s;
+}
+
+.repairBannerBtn:hover:not(:disabled) {
+    background-color: rgba(252, 196, 25, 0.25);
+    border-color: rgba(252, 196, 25, 0.6);
+}
+
+.repairBannerBtn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+/* 被覆補修の確認窓: 見積もりの行 (件数 / 呼び出し回数 / 費用) */
+.repairEstimateRow {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 1rem;
+    padding: 4px 0;
+    font-size: 0.85rem;
+}
+
+.repairEstimateLabel {
+    color: #888;
+    flex-shrink: 0;
+}
+
+.repairEstimateValue {
+    color: #e0e0e0;
+    text-align: right;
+}
+
 .detailRegenerateBtn {
     display: flex;
     align-items: center;
@@ -1016,6 +1075,34 @@
 
 :global([data-theme="light"]) .loadingMessages {
     color: #64748b;
+}
+
+:global([data-theme="light"]) .repairBanner {
+    background-color: rgba(234, 179, 8, 0.08);
+    border-bottom-color: rgba(180, 83, 9, 0.25);
+}
+
+:global([data-theme="light"]) .repairBannerText {
+    color: #b45309;
+}
+
+:global([data-theme="light"]) .repairBannerBtn {
+    background-color: rgba(234, 179, 8, 0.12);
+    border-color: rgba(180, 83, 9, 0.35);
+    color: #b45309;
+}
+
+:global([data-theme="light"]) .repairBannerBtn:hover:not(:disabled) {
+    background-color: rgba(234, 179, 8, 0.2);
+    border-color: rgba(180, 83, 9, 0.5);
+}
+
+:global([data-theme="light"]) .repairEstimateLabel {
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .repairEstimateValue {
+    color: #1f2937;
 }
 
 :global([data-theme="light"]) .offsetHint {

@@ -38,6 +38,20 @@ interface ArasujiStats {
     total_count: number;
 }
 
+// GET /arasuji/cost-estimate の応答 (被覆補修 §16 の判断材料)。
+// unprocessed_messages は止め線 (会話中の窓) を除いた「あらすじになって
+// いない過去の会話」の件数で、mode=repair の実行が編纂する範囲と同じ数字。
+interface RepairEstimate {
+    total_messages: number;
+    processed_messages: number;
+    unprocessed_messages: number;
+    estimated_llm_calls: number;
+    estimated_cost_usd: number;
+    model_name: string;
+    is_free_tier: boolean;
+    currency: string;
+}
+
 interface ArasujiViewerProps {
     personaId: string;
 }
@@ -83,9 +97,30 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
     const [editContent, setEditContent] = useState("");
     const pollingRef = useRef<NodeJS.Timeout | null>(null);
 
+    // 被覆補修 (§16): あらすじになっていない過去の会話の検知と実行確認
+    const [repairEstimate, setRepairEstimate] = useState<RepairEstimate | null>(null);
+    const [showRepairModal, setShowRepairModal] = useState(false);
+
+    // 「あらすじになっていない過去」の量を取り直す。0 なら案内は出さない。
+    // 読めなかったときも出さない (誤った件数で実行へ誘導しない)。
+    const loadRepairEstimate = useCallback(async () => {
+        try {
+            const res = await fetch(`/api/people/${personaId}/arasuji/cost-estimate`);
+            if (res.ok) {
+                setRepairEstimate(await res.json());
+            } else {
+                setRepairEstimate(null);
+            }
+        } catch (e) {
+            console.error('Failed to load repair estimate', e);
+            setRepairEstimate(null);
+        }
+    }, [personaId]);
+
     useEffect(() => {
         loadStats();
         loadEntries(null);
+        loadRepairEstimate();
         fetch('/api/config/developer-mode')
             .then(res => res.ok ? res.json() : null)
             .then(data => { if (data) setDeveloperMode(data.enabled); })
@@ -260,6 +295,9 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                 }
                 // Reload stats
                 loadStats();
+                // 消した範囲は「あらすじになっていない過去」へ戻る (§16-2:
+                // 消して再編纂の運用) — 件数を数え直す。
+                loadRepairEstimate();
             } else {
                 alert("削除に失敗しました");
             }
@@ -443,13 +481,12 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
         );
     };
 
-    const startGeneration = async () => {
-        setShowGenerateModal(false);
+    const postGenerateJob = async (body: Record<string, unknown>) => {
         try {
             const res = await fetch(`/api/people/${personaId}/arasuji/generate`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({}),
+                body: JSON.stringify(body),
             });
             if (res.ok) {
                 const data = await res.json();
@@ -477,6 +514,18 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
         }
     };
 
+    // 生成 (窓の畳み — §13 の手動入口)。従来どおり空 body = mode 既定 (compaction)。
+    const startGeneration = async () => {
+        setShowGenerateModal(false);
+        await postGenerateJob({});
+    };
+
+    // 被覆補修 (§16): あらすじになっていない過去の会話を編纂する。
+    const startRepair = async () => {
+        setShowRepairModal(false);
+        await postGenerateJob({ mode: 'repair' });
+    };
+
     const startPolling = useCallback((jobId: string) => {
         if (pollingRef.current) clearInterval(pollingRef.current);
         pollingRef.current = setInterval(async () => {
@@ -501,13 +550,14 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                         // Refresh data
                         loadStats();
                         loadEntries(levelFilter);
+                        loadRepairEstimate();
                     }
                 }
             } catch (e) {
                 console.error('Polling error', e);
             }
         }, 2000);
-    }, [personaId, levelFilter]);
+    }, [personaId, levelFilter, loadRepairEstimate]);
 
     const cancelGeneration = async () => {
         if (!generationJob?.jobId) return;
@@ -762,6 +812,24 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                         </div>
                     );
                 })()}
+
+                {/* 被覆補修の案内 (§16-2: 押すタイミングが分かる可視化)。
+                    件数は cost-estimate (止め線適用後) — 0 なら何も出さない。 */}
+                {repairEstimate && repairEstimate.unprocessed_messages >= 1 && (
+                    <div className={styles.repairBanner}>
+                        <span className={styles.repairBannerText}>
+                            あらすじになっていない過去の会話が {repairEstimate.unprocessed_messages.toLocaleString()} 件あります
+                        </span>
+                        <button
+                            className={styles.repairBannerBtn}
+                            onClick={() => setShowRepairModal(true)}
+                            disabled={generationJob?.status === 'running' || generationJob?.status === 'started'}
+                            title="内容と費用を確認してからあらすじにできます"
+                        >
+                            確認する
+                        </button>
+                    </div>
+                )}
 
                 {/* Level Filter */}
                 {stats && stats.max_level > 0 && (
@@ -1072,6 +1140,56 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                     )}
                 </div>
             </div>
+
+            {/* 被覆補修の確認 (§16: 見積もり → 実行) */}
+            {showRepairModal && repairEstimate && (
+                <ModalOverlay onClose={() => setShowRepairModal(false)} className={styles.modalOverlay}>
+                    <div className={styles.modal} onClick={(e) => e.stopPropagation()}>
+                        <h3>過去の会話をあらすじにする</h3>
+                        <p className={styles.hint} style={{ display: 'block', margin: '0 0 1rem', lineHeight: 1.7 }}>
+                            あらすじになっていない過去の会話が残っています。実行すると、その会話をまとめたあらすじが作られ、
+                            本人が古い出来事を思い出せるようになります。いま進行中の会話には触りません。
+                        </p>
+                        <div className={styles.generateContextBox}>
+                            <div className={styles.repairEstimateRow}>
+                                <span className={styles.repairEstimateLabel}>対象の会話</span>
+                                <span className={styles.repairEstimateValue}>
+                                    {repairEstimate.unprocessed_messages.toLocaleString()} 件
+                                </span>
+                            </div>
+                            <div className={styles.repairEstimateRow}>
+                                <span className={styles.repairEstimateLabel}>AI の呼び出し</span>
+                                <span className={styles.repairEstimateValue}>
+                                    約 {repairEstimate.estimated_llm_calls.toLocaleString()} 回（{repairEstimate.model_name}）
+                                </span>
+                            </div>
+                            <div className={styles.repairEstimateRow}>
+                                <span className={styles.repairEstimateLabel}>概算費用</span>
+                                <span className={styles.repairEstimateValue}>
+                                    {repairEstimate.is_free_tier
+                                        ? '無料（このモデルには料金設定がありません）'
+                                        : `約 $${repairEstimate.estimated_cost_usd > 0 && repairEstimate.estimated_cost_usd < 0.01
+                                            ? repairEstimate.estimated_cost_usd.toFixed(4)
+                                            : repairEstimate.estimated_cost_usd.toFixed(2)} ${repairEstimate.currency}`}
+                                </span>
+                            </div>
+                        </div>
+                        <div className={styles.modalActions}>
+                            <button className={styles.cancelBtn} onClick={() => setShowRepairModal(false)}>
+                                キャンセル
+                            </button>
+                            <button
+                                className={styles.startBtn}
+                                onClick={startRepair}
+                                disabled={repairEstimate.unprocessed_messages < 1}
+                            >
+                                <Play size={14} />
+                                実行
+                            </button>
+                        </div>
+                    </div>
+                </ModalOverlay>
+            )}
 
             {/* Generation Confirm Modal (§13: 手動の畳み) */}
             {showGenerateModal && (

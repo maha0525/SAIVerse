@@ -38,6 +38,7 @@ def estimate_chronicle_generation_cost(
     model_name: str,
     excluded_entry_ids: Optional[frozenset] = frozenset(),
     db_lock=None,
+    compile_before: Optional[tuple] = None,
 ) -> ChronicleCostEstimate:
     """未処理メッセージから Chronicle を生成した場合の費用を見積もる。
 
@@ -54,6 +55,12 @@ def estimate_chronicle_generation_cost(
         db_lock: 同じ DB を書く adapter がいる場合、その ``_db_lock``。見積もり
             自体は読むだけだが、Memopedia の初期化はテーブル作成の書き込みを伴う
             (docs/issues/memopedia_writers_bypass_adapter_lock.md)
+        compile_before: 被覆補修の止め線 (arasuji_levels.md §16-2)。正典順序キー
+            ``(created_at, rowid)`` で、これより新しいメッセージは計画に入れない
+            — 温かい提示窓の下は編纂しない。絞りは生成経路
+            (sea/session_lifecycle.generate_chronicle) と同じ
+            ``clip_messages_before_position`` を通す (表示と実走が違う数を
+            言ってはならない)。None = 上端なし (全域。CLI / 修復スクリプト用)
     """
     from sai_memory.arasuji.alignment import (
         chronicle_band_budget,
@@ -71,6 +78,12 @@ def estimate_chronicle_generation_cost(
 
     # 生成経路 (generate_chronicle) と同じ計画を作る。
     all_messages = get_messages_for_chronicle(conn)
+    if compile_before is not None:
+        # 止め線 (§16-2): 生成経路と同じ関数で同じ範囲に絞る。
+        from sai_memory.memory.storage import clip_messages_before_position
+        all_messages = clip_messages_before_position(
+            conn, all_messages, int(compile_before[0]), int(compile_before[1]),
+        )
     cur = conn.execute(
         "SELECT DISTINCT json_each.value "
         "FROM arasuji_entries, json_each(source_ids_json) "

@@ -2167,6 +2167,71 @@ def filter_chronicle_eligible_ids(
     return out
 
 
+def get_message_position(
+    conn: sqlite3.Connection, message_id: str,
+) -> Optional[Tuple[int, int]]:
+    """メッセージの正典順序キー ``(created_at, rowid)`` (W8 S7)。無ければ None。
+
+    created_at NULL は 0 に写す (``compare_message_positions`` と同じ規則 —
+    全ての実時刻より前)。
+    """
+    cur = conn.execute(
+        "SELECT COALESCE(created_at, 0), rowid FROM messages WHERE id = ?",
+        (str(message_id),),
+    )
+    row = cur.fetchone()
+    if row is None:
+        return None
+    return (int(row[0]), int(row[1]))
+
+
+def clip_messages_before_position(
+    conn: sqlite3.Connection,
+    messages: List[Message],
+    created_at: int,
+    rowid: int,
+) -> List[Message]:
+    """正典順の messages 列を、``(created_at, rowid)`` より厳密に古い先頭部分に切り詰める。
+
+    被覆補修の止め線 (arasuji_levels.md §16-2): 全量の編纂計画は温かい提示窓の
+    下を掘らない。見積もり (sai_memory/arasuji/estimate.py) と生成
+    (sea/session_lifecycle.generate_chronicle) が**この同じ関数**で絞る —
+    表示と実走が違う数を言ってはならない。
+
+    切り位置がスペルの群 (``spell_group_spans``) の内側に落ちる場合は、群の
+    先頭まで下げる — 群の途中で編纂対象を切ると「唱え」だけが要約され、
+    「結果」が出自を失う (§4-3 チャンクの切れ目は群を割らない、の同族)。
+
+    Args:
+        messages: 正典順 (created_at ASC, rowid ASC) のメッセージ列。
+        created_at / rowid: 上端の正典順序キー。
+    """
+    if not messages:
+        return []
+    cur = conn.execute(
+        "SELECT id FROM messages "
+        "WHERE COALESCE(created_at, 0) < ? "
+        "   OR (COALESCE(created_at, 0) = ? AND rowid < ?)",
+        (created_at, created_at, rowid),
+    )
+    allowed = {str(row[0]) for row in cur.fetchall()}
+    boundary = len(messages)
+    for index, msg in enumerate(messages):
+        if str(msg.id) not in allowed:
+            boundary = index
+            break
+    if boundary >= len(messages):
+        return list(messages)
+    if boundary > 0:
+        for lo, hi in spell_group_spans(
+            [(m.id, getattr(m, "spell_origin_id", None)) for m in messages]
+        ):
+            if lo < boundary <= hi:
+                boundary = lo
+                break
+    return list(messages[:boundary])
+
+
 def _conversation_exclusion() -> Tuple[str, Tuple[str, ...]]:
     """「実会話」フィルタの共有 SQL 断片 ``(clause, params)`` を返す。
 

@@ -99,6 +99,11 @@ def estimate_chronicle_cost(
     W4: 見積もりは生成経路と同じ episode 整列計画 (plan_alignment) から数える。
     ``batch_size`` / ``consolidation_size`` クエリパラメータは廃止 — 受理して
     無視する (旧 frontend 互換)。
+
+    §16 (2026-08-31): 止め線 (温かい anchor の最古位置) より新しいメッセージは
+    数えない — 生成 (repair モード / generate_chronicle の全量計画) と同じ
+    関数 (resolve_compile_ceiling + clip_messages_before_position) で絞る。
+    unprocessed_messages はそのまま「あらすじになっていない過去」の件数になる。
     """
     import os
     from sai_memory.arasuji.estimate import estimate_chronicle_generation_cost
@@ -108,6 +113,15 @@ def estimate_chronicle_cost(
         raise HTTPException(status_code=404, detail=f"Memory database not found for {persona_id}")
 
     try:
+        # 止め線 (§16-2)。lifecycle が無い環境 (部分構築のテスト等) は上端なし。
+        compile_before = None
+        lifecycle = getattr(getattr(manager, "sea_runtime", None), "session_lifecycle", None)
+        if lifecycle is not None:
+            from sea.coverage_repair import resolve_compile_ceiling
+            ceiling = resolve_compile_ceiling(lifecycle, persona_id, conn)
+            if ceiling is not None:
+                compile_before = (ceiling.created_at, ceiling.rowid)
+
         from saiverse.model_defaults import BUILTIN_DEFAULT_LITE_MODEL
         persona = manager.personas.get(persona_id) if manager else None
         model_name = (getattr(persona, "memory_weave_model", None)
@@ -132,6 +146,7 @@ def estimate_chronicle_cost(
                 frozenset(folded_entry_ids) if folded_entry_ids is not None else None
             ),
             db_lock=_adapter._db_lock if _adapter is not None else None,
+            compile_before=compile_before,
         )
 
         return ChronicleCostEstimate(
@@ -772,6 +787,7 @@ def _run_chronicle_generation(
     with_memopedia: bool,
     include_timestamp: bool = True,
     manager=None,
+    mode: str = "compaction",
 ):
     """Background worker for manual Chronicle generation.
 
@@ -779,6 +795,11 @@ def _run_chronicle_generation(
     Metabolism) と揃える — 「発火 (予算超過) を待たずに今すぐ畳む」だけで、
     畳む範囲は残す量より古い側。実体は :meth:`SessionLifecycle.run_manual_compaction`
     への委譲で、③記憶の整理 (organize-memory API) と同じ一本の経路に合流する。
+
+    §16 (2026-08-31): ``mode="repair"`` は被覆補修 —
+    :meth:`SessionLifecycle.run_coverage_repair` へ委譲し、止め線より古い
+    未被覆の編纂対象を一次あらすじにする (提示窓は動かさない)。事前確認は
+    UI が GET cost-estimate (同じ止め線) で行う。
 
     旧実装 (全未編纂の一括編纂 + 進捗バー + キャンセル + max_messages / model /
     with_memopedia 指定) は「全量編纂」という仕事ごと撤去した — 全量再編纂は
@@ -816,6 +837,10 @@ def _run_chronicle_generation(
     # pending 中に既にキャンセルされていたら、LLM 処理へ進まず即終端する。
     if token.is_cancelled():
         _update_job(job_id, status="cancelled", message="開始前に中止されました")
+        return
+
+    if mode == "repair":
+        _run_coverage_repair_job(job_id, persona, lifecycle, token)
         return
 
     _update_job(job_id, status="running", message="記憶を畳んでいます...")
@@ -882,6 +907,81 @@ def _run_chronicle_generation(
         )
 
 
+def _run_coverage_repair_job(job_id: str, persona, lifecycle, token) -> None:
+    """被覆補修 (mode="repair") のジョブ本体 (arasuji_levels.md §16-2)。
+
+    止め線より古い未被覆の編纂対象を一次あらすじにする。提示窓は動かさない
+    (退場なし)。事前確認 (件数・概算費用) は UI が同じ止め線の
+    GET cost-estimate で済ませている前提なので、ここでは確認なしで実行する。
+    """
+    _update_job(
+        job_id, status="running",
+        message="あらすじになっていない過去の会話を編纂しています...",
+    )
+
+    def _progress(event):
+        # generate_chronicle の進捗イベント (type=metabolism) をジョブの
+        # メッセージへ写す。それ以外のイベント (warning 等) は捨ててよい —
+        # 終端の成否は status が運ぶ。
+        try:
+            if (
+                isinstance(event, dict)
+                and event.get("type") == "metabolism"
+                and event.get("content")
+            ):
+                _update_job(job_id, message=str(event["content"]))
+        except Exception:
+            pass
+
+    try:
+        status = lifecycle.run_coverage_repair(
+            persona, event_callback=_progress, cancellation_token=token,
+        )
+        # 未埋め込みの Chronicle/ページ/Fragment を全件埋める (ローカル・無料、
+        # compaction モードと同じ独立ステップ)。
+        try:
+            lifecycle.ensure_recall_embeddings(persona)
+        except Exception:
+            LOGGER.warning("[Chronicle Repair] embedding maintenance failed", exc_info=True)
+
+        if status == "ok":
+            _update_job(
+                job_id, status="completed",
+                message="あらすじになっていなかった過去の会話を編纂しました",
+            )
+        elif status == "deferred" and token.is_cancelled():
+            _update_job(
+                job_id, status="cancelled",
+                message="中止しました（編纂済みの分は確定しています）",
+            )
+        elif status == "deferred":
+            _update_job(
+                job_id, status="failed",
+                error="別の整理が同じ範囲を処理中または処理済みです。しばらく待って再実行してください。",
+                error_code="window_claimed",
+            )
+        elif status == "disabled":
+            _update_job(
+                job_id, status="failed",
+                error="Chronicle生成が無効のため編纂できません（メモリー設定でChronicleをONにしてください）。",
+                error_code="chronicle_disabled",
+            )
+        else:  # "failed"
+            _update_job(
+                job_id, status="failed",
+                error="あらすじの生成が完了しませんでした。編纂済みの分は保存されており、再実行で続きから進みます。",
+                error_code=status,
+            )
+    except Exception as e:
+        LOGGER.exception(f"Chronicle coverage repair failed: {e}")
+        _update_job(
+            job_id, status="failed",
+            error=str(e),
+            error_code="unknown",
+            error_detail=str(e),
+        )
+
+
 @router.post("/{persona_id}/arasuji/generate", tags=["Chronicle"])
 async def start_arasuji_generation(
     persona_id: str,
@@ -890,9 +990,17 @@ async def start_arasuji_generation(
     manager = Depends(get_manager),
 ):
     """Start Chronicle generation as a background job.
-    
+
+    ``mode`` (§16): "compaction" (既定 — 窓の畳み) / "repair" (被覆補修 —
+    止め線より古い未被覆の編纂対象を一次あらすじにする)。
     Returns a job_id that can be used to poll for status.
     """
+    if request.mode not in ("compaction", "repair"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown generation mode: {request.mode!r} "
+                   "(expected 'compaction' or 'repair')",
+        )
     # Verify persona exists
     from pathlib import Path
     db_path = get_persona_memory_db(persona_id)
@@ -914,6 +1022,7 @@ async def start_arasuji_generation(
         with_memopedia=request.with_memopedia,
         include_timestamp=request.include_timestamp,
         manager=manager,
+        mode=request.mode,
     )
 
     return {"job_id": job_id, "status": "started"}

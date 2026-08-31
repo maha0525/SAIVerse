@@ -418,7 +418,13 @@ class GenerateArasujiRequest(BaseModel):
     (残す量より古い側だけを畳む) へ合流し、範囲・モデル・出力に関わる全フィールドが
     廃止された。現行 frontend は空 body を送る。旧 frontend からのリクエストを
     422 にしないため、全フィールドを受理して無視する (deprecated)。
+
+    2026-08-31 (arasuji_levels.md §16): ``mode`` を追加。既定 "compaction" は
+    従来どおり窓の畳み (run_manual_compaction)。"repair" は被覆補修
+    (run_coverage_repair) — 止め線より古い未被覆の編纂対象を一次あらすじにする。
     """
+    # "compaction" = 窓の畳み (従来) / "repair" = 被覆補修 (§16)
+    mode: str = "compaction"
     max_messages: int = 500  # deprecated (§13: 範囲は残す量が決める)
     batch_size: int = 20  # deprecated (W4: チャンク分割は episode 境界とサイズ束ね)
     consolidation_size: int = 10  # deprecated (W4)
