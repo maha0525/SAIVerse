@@ -39,6 +39,10 @@ database/data/*
 # Self-update temporary files
 .update_config.json
 self_update.log
+# Per-checkout record of what the last completed update installed, plus the
+# temporary file it is written through (.update_complete.tmp<pid>).
+# Must stay ignored: the updater refuses to run on a dirty working tree.
+.update_complete*
 
 # Debug log dump script (local-only developer tool)
 debug-dump.ps1

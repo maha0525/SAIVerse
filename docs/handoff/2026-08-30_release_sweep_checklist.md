@@ -51,7 +51,7 @@
 ## 6. リリース工程そのもの (掃討とは別立て)
 
 - [x] **段 3**: update.bat / self_update.py の経路検証 — 2026-08-30 深夜に完了。修正 2 件 (snapshot.py の sys.path / requirements.txt の ASCII 化) と issue 1 件 (v0.2.29 の update.bat は pull 直後に死ぬ) を出して、旧 bat → 新 engine → 起動移行 → health 200 まで実機合格。記録は [2026-08-29_v0229_upgrade_test.md](2026-08-29_v0229_upgrade_test.md) の段 3 節。
-- [ ] **タグを切るときの必須作業**: dev6 → 0.3.0 の空エッジ追加 (忘れると全ユーザーの起動が version chain エラーで止まる) / VERSION / リリースノート — **「v0.2.x からは update.bat を 2 回実行」の明記が必須** ([issue](../issues/v0229_update_bat_truncates_after_git_pull.md)) / develop → main の PR / `gen_reference_docs --check`。
+- [ ] **タグを切るときの必須作業**: dev6 → 0.3.0 の空エッジ追加 (忘れると全ユーザーの起動が version chain エラーで止まる) / VERSION / リリースノート — **「update.bat の後、いつも通り start.bat を実行すれば残りは自動で完了します (途中の git stash の案内は無視してください)」の明記が必須** ([issue](../issues/v0229_update_bat_truncates_after_git_pull.md)。2026-09-01 に start.bat / start.sh へ自己回復を実装したので、旧文面の「update.bat を 2 回」は不要になった) / develop → main の PR / `gen_reference_docs --check`。
 - [ ] **ZIP インストールの Git 自動導入**: クリーン Windows (git 未導入) での実機テスト — リリース ZIP ができた時に一緒に。
 - [x] **単発作業**: ✅ aifi の再編纂、9/1 未明に完遂 — 捏造欠陥の根治 (隣人吸収 + 引き戻し、レビュー 14 巡) → バックアップ復元 → 再補修で Lv1 28 本 (豆粒ゼロ・捏造なし)。issue は archive、表示の小瑕疵 2 件のみ [別 issue](../issues/repair_ui_progress_and_modal_polish.md)。
 - (発生待ち: 記憶補填の実地発火 — ログの目印 `memory backfill on beat death succeeded` を私が掃き続ける)

@@ -7,36 +7,469 @@ running.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import os
+import re
 import shutil
-import socket
 import subprocess
 import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
+try:  # ``packaging`` ships with pip, so every SAIVerse venv has it.
+    from packaging.requirements import Requirement as _Requirement
+except Exception:  # pragma: no cover - exercised by the degraded-parser test
+    _Requirement = None  # type: ignore[assignment]
+
 LOGGER = logging.getLogger("saiverse.update")
+
+# Written next to the other self-update state files (``.update_config.json``,
+# ``self_update.log``) and gitignored with them. It records what the checkout
+# was *fully* updated to -- code, Python packages and frontend packages
+# together -- so a launcher can tell a finished update from one that died
+# half-way. See docs/issues/v0229_update_bat_truncates_after_git_pull.md.
+UPDATE_COMPLETE_MARKER = ".update_complete"
+
+# Exit codes of ``--check-complete``. The launchers branch on these, so they are
+# part of the contract with start.bat / start.sh.
+CHECK_READY = 0
+CHECK_NEEDS_FINISH = 10
+CHECK_INCONCLUSIVE = 11
 
 
 class UpdateError(RuntimeError):
     """A phase failed and no later mutating phase may run."""
 
 
-def setup_logging(project_dir: Path) -> None:
+def setup_logging(project_dir: Path, *, to_file: bool = True) -> None:
+    handlers: list[logging.Handler] = [logging.StreamHandler(sys.stdout)]
+    if to_file:
+        handlers.insert(0, logging.FileHandler(project_dir / "self_update.log", encoding="utf-8"))
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(message)s",
-        handlers=[
-            logging.FileHandler(project_dir / "self_update.log", encoding="utf-8"),
-            logging.StreamHandler(sys.stdout),
-        ],
+        handlers=handlers,
     )
+
+
+def read_version(project_dir: Path) -> str | None:
+    """The VERSION file contents, or None when it cannot be read."""
+    try:
+        text = (project_dir / "VERSION").read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return text or None
+
+
+def marker_path(project_dir: Path) -> Path:
+    return project_dir / UPDATE_COMPLETE_MARKER
+
+
+def _file_digest(path: Path) -> str | None:
+    """sha256 of a file, or None when it cannot be read."""
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+def completion_fingerprint(project_dir: Path) -> dict[str, Any] | None:
+    """What a completed update installs, as comparable values.
+
+    The VERSION alone is not enough: a pull can change ``requirements.txt`` or
+    ``frontend/package-lock.json`` while VERSION stays put (every commit between
+    two releases does), and the marker would then claim a finished update over
+    packages that were never installed. Hashing the two dependency lists closes
+    that. The commit SHA deliberately is *not* part of this -- on a development
+    checkout every pull would then demand a pip run that changes nothing.
+
+    Returns None when VERSION is unreadable, i.e. when nothing can be recorded.
+    """
+    version = read_version(project_dir)
+    if version is None:
+        return None
+    return {
+        "version": version,
+        "requirements_sha256": _file_digest(project_dir / "requirements.txt"),
+        "package_lock_sha256": _file_digest(project_dir / "frontend" / "package-lock.json"),
+    }
+
+
+def read_completion_marker(project_dir: Path) -> dict[str, Any] | None:
+    """The recorded completion state, or None when there is no marker at all.
+
+    A marker left by an older build (a bare VERSION string) or one whose
+    contents are damaged reads back as an empty dict: the file exists, so this
+    is not a pre-marker install, but nothing in it can match the current
+    fingerprint -- so one finishing pass runs and rewrites it in this format.
+    That pass is idempotent, so the cost of the format change is one extra
+    ``--manual`` run, once.
+    """
+    try:
+        text = marker_path(project_dir).read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    if not text:
+        return None
+    try:
+        recorded = json.loads(text)
+    except json.JSONDecodeError:
+        return {}
+    return recorded if isinstance(recorded, dict) else {}
+
+
+def write_completion_marker(project_dir: Path) -> None:
+    """Record what this checkout is fully updated to.
+
+    Called only after every mutating phase has succeeded. Its counterpart,
+    ``invalidate_completion_marker``, removes the marker as the mutating phases
+    begin, so an update that dies part-way leaves no marker at all and the next
+    start re-derives the state. Written through a temporary file and ``os.replace`` so a
+    crash mid-write cannot leave a half-written marker that later reads as a
+    mismatch of unknown origin.
+
+    A write failure is not fatal and must not be reported as a failed update:
+    the update itself already succeeded. The only consequence is that the next
+    start re-derives the state and may run one unnecessary finishing pass.
+    """
+    fingerprint = completion_fingerprint(project_dir)
+    if fingerprint is None:
+        LOGGER.warning("VERSION is unreadable; update completion was not recorded")
+        return
+    target = marker_path(project_dir)
+    # Same prefix as the marker so .gitignore's `.update_complete*` covers it:
+    # a leftover temp file must never make the working tree dirty, because the
+    # updater refuses to run on a dirty tree.
+    temporary = target.with_name(f"{target.name}.tmp{os.getpid()}")
+    try:
+        payload = json.dumps(fingerprint, indent=2, sort_keys=True) + "\n"
+        temporary.write_text(payload, encoding="utf-8")
+        os.replace(temporary, target)
+    except OSError:
+        LOGGER.warning(
+            "Could not write %s. The update itself succeeded; the next start will most "
+            "likely run an unnecessary finishing pass.",
+            target,
+            exc_info=True,
+        )
+        try:
+            temporary.unlink()
+        except OSError:
+            pass
+
+
+def invalidate_completion_marker(project_dir: Path) -> None:
+    """Drop the marker before anything but the code itself is mutated.
+
+    From this point until the final ``write_completion_marker`` the checkout is
+    in an intermediate state, and a marker left over from the *previous* update
+    would still describe a finished one. That matters when a phase fails and the
+    rollback fails too: the code can end up back at the old revision -- matching
+    the old marker's fingerprint exactly -- while the packages are half
+    installed, and the next start would read READY and skip every check.
+
+    Removing it first makes "died half-way => no marker" structural rather than
+    a property of which phases happen to fail, so the next start always
+    re-derives the state from what is actually installed.
+
+    A removal failure is not fatal and must not abort an update that can still
+    succeed; the next start then falls back to the fingerprint comparison.
+    """
+    target = marker_path(project_dir)
+    try:
+        target.unlink()
+    except FileNotFoundError:
+        return
+    except OSError:
+        LOGGER.warning(
+            "Could not remove %s before updating packages. If this update fails, the next "
+            "start may trust that stale marker.",
+            target,
+            exc_info=True,
+        )
+
+
+def _canonical_package_name(name: str) -> str:
+    return re.sub(r"[-_.]+", "-", name).strip().lower()
+
+
+class RequiredDist(NamedTuple):
+    """One distribution this environment must have, with its version bound."""
+
+    name: str
+    # packaging SpecifierSet, or None when the naive fallback parser produced
+    # this entry and no version bound could be extracted.
+    specifier: Any | None
+
+
+class RequirementScan(NamedTuple):
+    required: list[RequiredDist]
+    # Lines that could not be turned into a requirement. They are *not* silently
+    # dropped: an unchecked line means the answer "nothing is missing" is
+    # incomplete, so the caller must not record a completed update from it.
+    unparsed: list[str]
+    # True when ``packaging`` was unavailable and names were parsed by hand.
+    degraded: bool
+
+
+_INCLUDE_LINE = re.compile(r"(-r|--requirement)[\s=]+(.+)$")
+
+# pip options that only change where packages are fetched from or how they are
+# built. They add no distribution of their own, so skipping them leaves the
+# answer "nothing is missing" complete.
+#
+# Everything outside this set is reported as unparsed instead. ``-e`` /
+# ``--editable`` and ``-c`` / ``--constraint`` are the ones that matter: an
+# editable line installs a distribution that this scan would then never check,
+# and a constraint file changes which versions count as satisfying. An unknown
+# option is treated the same way, because whether it adds a distribution cannot
+# be decided here -- and a wrong "nothing is missing" would be recorded as a
+# completed update.
+_IGNORABLE_PIP_OPTIONS = frozenset(
+    {
+        "--index-url",
+        "-i",  # --index-url の短縮形 (2026-09-01 裁定: 長形と同義なので同格に扱う)
+        "--extra-index-url",
+        "--trusted-host",
+        "--find-links",
+        "-f",  # --find-links の短縮形
+        "--no-binary",
+        "--only-binary",
+        "--prefer-binary",
+        "--pre",
+        "--hash",
+        "--require-hashes",
+    }
+)
+
+
+def _pip_option_name(line: str) -> str:
+    """The option itself, without its value (``--index-url=x`` -> ``--index-url``)."""
+    return re.split(r"[\s=]", line, maxsplit=1)[0]
+
+
+def _naive_requirement_name(line: str) -> str | None:
+    head = line.split(";", 1)[0].strip()
+    match = re.match(r"[A-Za-z0-9][A-Za-z0-9._-]*", head)
+    return match.group(0) if match else None
+
+
+def scan_requirements(requirements: Path, *, depth: int = 1) -> RequirementScan | None:
+    """Parse a requirements file into what this interpreter must actually have.
+
+    Environment markers are evaluated here rather than skipped, so a line like
+    ``pywin32; sys_platform == "win32"`` is checked on Windows and ignored
+    elsewhere, and version bounds are carried through so an outdated pin is
+    caught as well as an absent package. ``-r`` includes are followed one level,
+    option lines known to add no distribution are skipped, and any other option
+    line is reported as unparsed rather than ignored.
+
+    Returns None when the file itself cannot be read.
+    """
+    try:
+        raw_lines = requirements.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    required: list[RequiredDist] = []
+    unparsed: list[str] = []
+    degraded = _Requirement is None
+    for raw in raw_lines:
+        # pip treats `#` as a comment only at the start of a line or after
+        # whitespace, so a URL fragment stays intact.
+        line = re.split(r"(?:^|\s)#", raw, maxsplit=1)[0].strip()
+        if not line:
+            continue
+        if line.startswith("-"):
+            include = _INCLUDE_LINE.match(line)
+            if include is None:
+                if _pip_option_name(line) not in _IGNORABLE_PIP_OPTIONS:
+                    # Not known to be harmless: the scan cannot claim to be
+                    # complete, so this counts as a line that was not checked.
+                    unparsed.append(line)
+                continue
+            nested = requirements.parent / include.group(2).strip().strip("\"'")
+            nested_scan = scan_requirements(nested, depth=depth - 1) if depth > 0 else None
+            if nested_scan is None:
+                unparsed.append(line)
+                continue
+            required.extend(nested_scan.required)
+            unparsed.extend(nested_scan.unparsed)
+            degraded = degraded or nested_scan.degraded
+            continue
+        if _Requirement is None:
+            name = _naive_requirement_name(line)
+            if name is None:
+                unparsed.append(line)
+            else:
+                required.append(RequiredDist(name, None))
+            continue
+        try:
+            requirement = _Requirement(line)
+            needed_here = requirement.marker is None or requirement.marker.evaluate()
+        except Exception:
+            unparsed.append(line)
+            continue
+        if not needed_here:
+            continue  # not required on this platform / interpreter
+        required.append(RequiredDist(requirement.name, requirement.specifier))
+    return RequirementScan(required, unparsed, degraded)
+
+
+class DependencyReport(NamedTuple):
+    # Absent, or present at a version the requirements file rules out.
+    missing: list[str]
+    # Requirement lines that could not be checked at all.
+    unchecked: list[str]
+    degraded: bool
+
+
+def _installed_versions() -> dict[str, str | None] | None:
+    try:
+        from importlib import metadata
+
+        installed: dict[str, str | None] = {}
+        for dist in metadata.distributions():
+            try:
+                name = dist.metadata["Name"]
+            except Exception:  # a broken dist-info must not hide the others
+                continue
+            if not name:
+                continue
+            try:
+                version = dist.version
+            except Exception:
+                version = None
+            installed[_canonical_package_name(name)] = version
+    except Exception:
+        LOGGER.warning("Could not inspect installed packages", exc_info=True)
+        return None
+    return installed or None
+
+
+def missing_dependencies(project_dir: Path) -> DependencyReport | None:
+    """Requirements this interpreter does not satisfy.
+
+    Returns None when the answer cannot be determined at all (unreadable
+    requirements file, unreadable package metadata) so callers can tell
+    "nothing missing" apart from "could not look".
+    """
+    scan = scan_requirements(project_dir / "requirements.txt")
+    if scan is None:
+        return None
+    installed = _installed_versions()
+    if installed is None:
+        return None
+    missing: list[str] = []
+    unchecked = list(scan.unparsed)
+    for dist in scan.required:
+        key = _canonical_package_name(dist.name)
+        if key not in installed:  # absent from the environment entirely
+            missing.append(dist.name)
+            continue
+        version = installed[key]
+        if dist.specifier is None or version is None:
+            continue  # name is present and no bound could be checked
+        try:
+            satisfied = dist.specifier.contains(version, prereleases=True)
+        except Exception:
+            unchecked.append(f"{dist.name}{dist.specifier}")
+            continue
+        if not satisfied:
+            missing.append(f"{dist.name} (installed {version}, required {dist.specifier})")
+    return DependencyReport(missing, unchecked, scan.degraded)
+
+
+def frontend_packages_installed(project_dir: Path) -> bool | None:
+    """Whether ``npm ci`` has populated the frontend.
+
+    Existence only. Verifying the tree against package-lock.json is npm's job
+    and would cost more than the question is worth here; the failure this
+    guards against is the interrupted update that never ran npm at all.
+
+    Returns None when there is no frontend directory to judge.
+    """
+    frontend = project_dir / "frontend"
+    if not frontend.is_dir():
+        return None
+    return (frontend / "node_modules").is_dir()
+
+
+def check_update_complete(project_dir: Path) -> int:
+    """Decide whether this checkout is safe to start.
+
+    Returns one of CHECK_READY / CHECK_NEEDS_FINISH / CHECK_INCONCLUSIVE. When
+    the checkout is verified complete the marker is (re)written, so the cheap
+    comparison answers every later start.
+    """
+    fingerprint = completion_fingerprint(project_dir)
+    if fingerprint is None:
+        LOGGER.warning("VERSION is unreadable; cannot verify that the update finished")
+        return CHECK_INCONCLUSIVE
+
+    recorded = read_completion_marker(project_dir)
+    if recorded is not None:
+        if recorded == fingerprint:
+            return CHECK_READY
+        if recorded.get("version") == fingerprint["version"]:
+            LOGGER.warning(
+                "Update was interrupted: the code is still %s, but its dependency lists "
+                "changed after the last completed update",
+                fingerprint["version"],
+            )
+        else:
+            LOGGER.warning(
+                "Update was interrupted: this checkout was last completed at %s but the "
+                "code is now %s",
+                recorded.get("version") or "an unrecorded state",
+                fingerprint["version"],
+            )
+        return CHECK_NEEDS_FINISH
+
+    # No marker. Either this install predates the marker (v0.2.x, whose broken
+    # update.bat stopped right after `git pull`) or someone removed it. Decide
+    # on the things that actually break a start: packages the new code needs.
+    frontend_ready = frontend_packages_installed(project_dir)
+    if frontend_ready is False:
+        LOGGER.warning("Update was interrupted: frontend/node_modules is not installed")
+        return CHECK_NEEDS_FINISH
+
+    report = missing_dependencies(project_dir)
+    if report is None:
+        LOGGER.warning("Could not verify installed packages; starting without recording a version")
+        return CHECK_READY
+    if report.missing:
+        LOGGER.warning(
+            "Update was interrupted: %d required package(s) are not installed as required (%s)",
+            len(report.missing),
+            ", ".join(report.missing[:5]),
+        )
+        return CHECK_NEEDS_FINISH
+    if report.unchecked or report.degraded:
+        # Nothing is known to be missing, but the check was not complete. Saying
+        # "ready" here would write a marker that claims more than was verified.
+        if report.unchecked:
+            LOGGER.warning(
+                "Could not check %d requirement line(s) (%s); starting without recording a version",
+                len(report.unchecked),
+                ", ".join(report.unchecked[:5]),
+            )
+        else:
+            LOGGER.warning(
+                "Requirements were parsed without the packaging library, so version bounds "
+                "were not checked; starting without recording a version"
+            )
+        return CHECK_INCONCLUSIVE
+    if frontend_ready is None:
+        LOGGER.warning("No frontend directory to verify; starting without recording a version")
+        return CHECK_INCONCLUSIVE
+    write_completion_marker(project_dir)
+    return CHECK_READY
 
 
 def _run(
@@ -331,6 +764,12 @@ def run_update(config: dict[str, Any] | None, project_dir: Path) -> None:
     try:
         update_code(project_dir)
         code_changed = True
+        # The code moved, so whatever the marker recorded no longer holds. Drop
+        # it here -- before the first phase that can leave packages half
+        # installed -- so no failure path can end with a stale marker claiming
+        # this checkout is finished. Both the manual and the detached run reach
+        # the final write below through this same block.
+        invalidate_completion_marker(project_dir)
         update_dependencies(project_dir, python)
     except UpdateError:
         if code_changed:
@@ -338,6 +777,7 @@ def run_update(config: dict[str, Any] | None, project_dir: Path) -> None:
         raise
 
     if not config:
+        write_completion_marker(project_dir)
         LOGGER.info("Update applied. Start SAIVerse normally to run startup migrations.")
         return
 
@@ -345,6 +785,7 @@ def run_update(config: dict[str, Any] | None, project_dir: Path) -> None:
     try:
         process = restart_application(config)
         payload = wait_for_healthy_restart(process, config)
+        write_completion_marker(project_dir)
         LOGGER.info(
             "Update complete: City=%s version=%s PID=%s",
             payload.get("city_name"),
@@ -380,9 +821,22 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Canonical SAIVerse updater")
     parser.add_argument("--manual", action="store_true", help="Update while SAIVerse is stopped")
     parser.add_argument("--config", type=Path, help="Detached updater config path")
+    parser.add_argument(
+        "--check-complete",
+        action="store_true",
+        help=(
+            "Report whether the last update finished, without changing code or packages. "
+            f"Exit {CHECK_READY}: ready to start. Exit {CHECK_NEEDS_FINISH}: run --manual first. "
+            f"Exit {CHECK_INCONCLUSIVE}: could not tell, start anyway."
+        ),
+    )
     args = parser.parse_args(argv)
 
     project_dir = Path(__file__).resolve().parent.parent
+    if args.check_complete:
+        setup_logging(project_dir, to_file=False)
+        return check_update_complete(project_dir)
+
     setup_logging(project_dir)
     config_path = args.config or project_dir / ".update_config.json"
     try:
