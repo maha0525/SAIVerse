@@ -22,10 +22,12 @@ None でも**常に関数オブジェクトとして定義され、そのまま�
   (`event_callback is not None`) — **sync 経路は実運用で到達不能**になり、
   唯一のスイッチは env `SAIVERSE_LLM_STREAMING=false` だけになっている。
   誰も受け取らない streaming chunk の生成・下書き行の管理が毎回走る。
-- `sea/runtime.py` の Playbook 許可確認 (`if event_callback is None: 「聞く窓口が
-  無いのでスキップ」`) — 窓口が無いのに「ある」と判定し、誰も見ていない画面へ
-  許可ダイアログのイベントを流して応答タイムアウトまで待つ形になり得る
-  (auto Pulse は `auto_mode` の判定が先に受けるが、schedule Pulse は素通り)。
+- `sea/runtime.py` の Playbook 許可確認の「聞く窓口が無いのでスキップ」判定
+  (`if event_callback is None:`) も同様に包み紙で常に偽になる。ただし実害は
+  限定的 — `auto_mode` (= pulse_type が user 以外、schedule も含む。runtime.py:314)
+  の判定が窓口検査より**先に**全自律系 Pulse を弾くため、この行に到達するのは
+  user Pulse で配信口が無い稀な形だけ (2026-08-31 検算。起票時の「schedule は
+  素通り」という記述は誤りだったので訂正)。
 
 ## 修正の方向
 
