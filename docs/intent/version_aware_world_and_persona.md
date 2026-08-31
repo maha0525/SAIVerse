@@ -235,7 +235,7 @@ python scripts/run_upgrade_handler.py <handler_name> --city <id> --dry-run
 - [ ] **第1号ハンドラ**: v0.3.0 用 `dynamic_state_captured_at_reset`（AI単位）
   - 各ペルソナの `PersonaBuildingState.LAST_NOTIFIED_JSON` の `captured_at` を現在時刻に書き換え
   - `memopedia_pages` を空配列に置換
-  - SAIMemory に「v0.2.x → v0.3.0 へのアップデートを検知。Memopedia の状態同期がリセットされました」通知を1件挿入
+  - SAIMemory に「SAIVerse v0.3.0 へのアップデートを検知しました。」通知を1件挿入 (2026-09-01 まはー裁定: 「Memopedia の状態同期がリセットされました」の一文は、受け取るペルソナに意味が取れず不安だけ与えるため削除。機構側の内部事情は通知文に書かない)
 
 ### フェーズ3: 必要に応じて拡張
 

@@ -126,8 +126,7 @@ def _insert_upgrade_notification(persona_id: str) -> None:
 
         adapter.push_perception(
             "world_state",
-            "SAIVerse v0.3.0 へのアップデートを検知しました。"
-            "Memopediaの状態同期がリセットされました",
+            "SAIVerse v0.3.0 へのアップデートを検知しました。",
             metadata=_json.dumps(
                 {"upgrade_id": upgrade_id, "system_event": "version_upgrade"},
                 ensure_ascii=False,
