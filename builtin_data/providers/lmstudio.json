@@ -1,0 +1,7 @@
+{
+  "id": "lmstudio",
+  "display_name": "LM Studio (local)",
+  "protocol": "openai_compat",
+  "base_url": "http://127.0.0.1:1234/v1",
+  "api_key_required": false
+}

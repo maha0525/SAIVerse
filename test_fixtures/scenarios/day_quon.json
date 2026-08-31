@@ -1,0 +1,22 @@
+{
+  "persona_id": "quon_city_a",
+  "plan_date": "2026-07-05",
+  "wake": "09:00",
+  "sleep": "22:00",
+  "daily_budget_rounds": 20,
+  "seed": {
+    "tasks": [
+      {
+        "title": "急性膵炎の情報をまとめる",
+        "goal": "document_create で下書きを実際に作成し、読み直して整えてあること"
+      }
+    ]
+  },
+  "user_events": [
+    { "at": "15:00", "type": "message", "text": "クオンー、つかれたー……" },
+    { "at": "15:30", "type": "leave" }
+  ],
+  "events": [
+    { "at": "18:00", "description": "掲示板の告知: アイフィが新しい絵画を展示した", "is_alert": false }
+  ]
+}

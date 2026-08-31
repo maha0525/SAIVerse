@@ -1,0 +1,65 @@
+{
+  "model": "minimax/minimax-m3",
+  "system_prompt": "",
+  "display_name": "MiniMax M3 (OpenRouter)",
+  "provider_ref": "openrouter",
+  "group": "openrouter",
+  "supports_structured_output": true,
+  "context_length": 524288,
+  "convert_system_to_user": true,
+  "supports_images": true,
+  "max_image_bytes": 7500000,
+  "max_image_embeds": 4,
+  "reasoning_passback_field": "reasoning_details",
+  "request_kwargs": {
+    "extra_body": {
+      "reasoning": {
+        "enabled": true
+      }
+    }
+  },
+  "parameters": {
+    "temperature": {
+      "type": "float",
+      "min": 0,
+      "max": 2,
+      "step": 0.1,
+      "default": 1.0,
+      "label": "Temperature",
+      "description": "Controls randomness."
+    },
+    "top_p": {
+      "type": "float",
+      "min": 0,
+      "max": 1,
+      "step": 0.05,
+      "default": 0.95,
+      "label": "Top P",
+      "description": "Nucleus sampling cutoff."
+    },
+    "top_k": {
+      "type": "int",
+      "min": 0,
+      "max": 100,
+      "step": 1,
+      "default": 40,
+      "label": "Top K",
+      "description": "Top K."
+    },
+    "max_tokens": {
+      "type": "int",
+      "min": 32,
+      "max": 65536,
+      "step": 1,
+      "default": 8192,
+      "label": "Max tokens",
+      "description": "Upper bound on generated tokens."
+    }
+  },
+  "pricing": {
+    "input_per_1m_tokens": 0.3,
+    "cached_input_per_1m_tokens": 0.06,
+    "output_per_1m_tokens": 1.2,
+    "currency": "USD"
+  }
+}

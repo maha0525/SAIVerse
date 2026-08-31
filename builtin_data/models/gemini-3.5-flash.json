@@ -2,11 +2,11 @@
   "model": "gemini-3.5-flash",
   "system_prompt": "",
   "display_name": "Gemini 3.5 Flash(無料枠)",
-  "provider": "gemini",
+  "provider_ref": "gemini",
   "context_length": 250000,
-  "default_max_history_messages": 80,
-  "metabolism_keep_messages": 60,
   "supports_images": true,
+  "supports_audio": true,
+  "supports_video": true,
   "prefer_paid": false,
   "rate_limit": {
     "rpd": 20,
@@ -30,9 +30,16 @@
         "medium",
         "high"
       ],
-      "default": "medium",
+      "default": "high",
       "label": "Thinking Level",
       "description": "思考の深さ。公式推奨はmedium。highで深い推論、minimalで高速・空応答対策。"
+    },
+    "multi_turn_thinking": {
+      "type": "dropdown",
+      "options": ["on", "off"],
+      "default": "off",
+      "label": "Multi-turn Thinking",
+      "description": "マルチターン推論。onで思考状態を次ターンに引き継ぐ。offでキャッシュ効率向上(各ターン独立思考)。"
     },
     "safety_harassment": {
       "type": "dropdown",

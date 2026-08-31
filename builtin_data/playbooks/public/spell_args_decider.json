@@ -1,0 +1,28 @@
+{
+  "name": "spell_args_decider",
+  "display_name": "Spell 引数決定",
+  "description": "指定された Spell の引数をペルソナ自身の認知から決定するための内部 Playbook。pre_spells 経路で引数指定なし (= /spell name='X' 形式) の Spell が指定されたとき、ランタイムがこの Playbook を sub_line として呼び出す。親ラインの会話履歴は v0.25 の snapshot 経路で継承されるので、ペルソナは自身の状況を読み取って引数を決める。",
+  "input_schema": [
+    {
+      "name": "spell_name",
+      "description": "引数を決めたい Spell の名前 (TOOL_REGISTRY に登録された Spell)"
+    }
+  ],
+  "output_schema": [
+    "args"
+  ],
+  "router_callable": false,
+  "user_selectable": false,
+  "nodes": [
+    {
+      "id": "decide",
+      "type": "llm",
+      "action": "Spell '{spell_name}' を呼ぶことになりました。引数を決めてください。",
+      "response_schema_source": "spell:{spell_name}",
+      "memorize": true,
+      "output_key": "args",
+      "next": null
+    }
+  ],
+  "start_node": "decide"
+}

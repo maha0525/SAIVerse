@@ -44,7 +44,20 @@ ignore = ["E501", "UP017"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-addopts = "-ra"
+# --ignore=temp: temp/ holds gitignored vendored third-party code (e.g. the
+# LVGL test suite under stackchan-mcp firmware) whose test files run real
+# build steps / call sys.exit() at import, which aborts the whole pytest
+# session with INTERNALERROR during collection. Never collect it.
+# --ignore=test_data: test_data/ is the isolated test environment's runtime
+# data (DBs, logs, caches), never test code. Collection walking it can abort
+# the whole session on an unreadable leftover directory (permission-locked
+# scratch dirs from crashed runs).
+# -n auto --dist worksteal: run tests in parallel via pytest-xdist (full suite
+# 11m44s -> 2m11s on 24 logical CPUs, measured 2026-08-16). worksteal rebalances
+# uneven test durations across workers. For a single-file / targeted run the
+# worker startup (each re-imports the app, ~15s) outweighs the gain — pass
+# `-n 0` to run in-process instead.
+addopts = "-ra --ignore=temp --ignore=test_data -n auto --dist worksteal"
 
 [tool.setuptools]
 packages = ["saiverse"]

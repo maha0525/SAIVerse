@@ -38,6 +38,32 @@ python test_fixtures/test_api.py         # フルテスト
 python test_fixtures/test_api.py --quick # クイックテスト（LLM除く）
 ```
 
+## 状態の検分 (inspect_world.py)
+
+本番・テスト環境どちらの状態も、読み取り専用の検分 CLI で確認できます
+（sqlite を直接叩く必要はありません。設計は `docs/intent/agent_inspection_cli.md`）：
+
+```bash
+python scripts/inspect_world.py personas --env test          # ペルソナ一覧
+python scripts/inspect_world.py memory <persona> --env test  # 記憶 (タグ/期間/grep フィルタ)
+python scripts/inspect_world.py tracks <persona> --env test  # Track 状態
+python scripts/inspect_world.py day-plan <persona> --env test # 時間割
+python scripts/inspect_world.py llm-io --env test            # LLM I/O ログ
+python scripts/inspect_world.py errors                       # WARNING 以上のダイジェスト
+# --env test を省略すると本番 (~/.saiverse)。すべて読み取り専用
+```
+
+## 会話テスト (run_conversation.py)
+
+台本 (複数ターンのユーザー発話) をテスト環境のペルソナへ実チャット経路で流し、
+transcript を得ます（実 LLM・実コスト。設計は `docs/intent/conversation_runner.md`）：
+
+```bash
+python scripts/run_conversation.py --persona <id> --message "おはよう" --message "昨日何してた？"
+python scripts/run_conversation.py --script <台本.json>
+# 環境変数未設定なら自動で test_data/ を指す。本番 DB を指すと起動拒否
+```
+
 ## コマンド詳細
 
 ### setup_test_env.py
@@ -111,7 +137,7 @@ python test_fixtures/test_api.py --base-url http://127.0.0.1:18000
   },
   "city": {
     "CITYID": 1,
-    "CITYNAME": "test_city",
+    "CITY_SLUG": "test_city",
     "UI_PORT": 18000,
     "API_PORT": 18001,
     ...

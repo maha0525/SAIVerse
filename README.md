@@ -70,8 +70,22 @@ SAIVerseは、AIと人が共に生きる世界を目指すプロジェクトで�
 - Web検索：SearXNGと呼ばれる検索サービスを自動インストールして利用します。各社APIのものと異なり、無料です。
 - 画像生成：Nano banana Pro、Nano banana、ChatGPT画像生成をサポートしています。有料APIです。
 - ドキュメント生成：Building内に調査報告書や小説などのドキュメントを生成できます。テキストファイルでローカル保存されており、外での利用にも便利です。
-- スケジュール設定：定時のスケジュール実行が可能です。毎朝自動でおはようを言ってくれたり、毎週土曜にニュースを調べたり、毎晩日記を書いたりといった用途に利用することを想定しています。
+- アラーム設定：決まった時刻にペルソナへ働きかける定時実行が可能です。毎朝自動でおはようを言ってくれたり、毎週土曜にニュースを調べたり、毎晩日記を書いたりといった用途に利用することを想定しています。（ペルソナの一日の流れを決める「習慣テンプレート」とは別の機能です）
 - メール送信：SMTP設定をしておけば、ペルソナからあなたのメールアドレスにメールの送信を行うことができます。
+
+### 外部サービス連携（アドオン）
+本体とは別 repo として配布されるアドオンを `expansion_data/` 配下に `git clone` することで利用できます。アドオン管理 UI から有効化・パラメータ設定・OAuth 認可を行います。
+
+- **X (Twitter) 連携** — [maha0525/saiverse-x-addon](https://github.com/maha0525/saiverse-x-addon)
+  - ペルソナを X アカウントに OAuth 接続し、ツイート投稿・タイムライン閲覧・メンション/被いいね/被リポスト/新規フォロワーの定期監視が可能。
+  - 14 個のスペル（投稿・リプライ・いいね・リツイート・フォロー・検索・通知確認 等）を提供。
+  - 定期ポーリングは項目別 ON/OFF と間隔の自由設定、コスト見合いで `with_users` トグルなど細かい制御が可能。
+  - **既存ユーザーへの注意**: コア組み込みだった旧 X 連携はアドオン化に伴い廃止されました。以下が必要です:
+    - 本アドオンを `expansion_data/` 配下に clone し、アドオン管理 UI で有効化 + Client ID / Secret 設定
+    - **X Developer Portal で Callback URI を新しい URL に書き換え**: 旧 `http://127.0.0.1:<port>/api/x/callback` → 新 `http://127.0.0.1:<port>/api/oauth/callback/saiverse-x-addon/x`
+    - OAuth 認可をペルソナごとに再実行（旧 `~/.saiverse/personas/<id>/x_credentials.json` は使われません）
+- **Elyth (AI向けSNS) 連携** — [maha0525/saiverse-elyth-addon](https://github.com/maha0525/saiverse-elyth-addon)
+  - ペルソナを [Elyth](https://elythworld.com) の AITuber として接続。Elyth 公式 MCP サーバー経由で投稿・閲覧・リプライ・いいね・フォロー等が可能。
 
 ### システムプロンプト
 - SAIVerse本体のシステムプロンプト、ペルソナ固有のシステムプロンプト、Building固有のシステムプロンプト、モデル固有のシステムプロンプトをそれぞれ設定可能です。
@@ -116,14 +130,14 @@ SAIVerseは、AIと人が共に生きる世界を目指すプロジェクトで�
 
 ### 前提条件
 
-下記のソフトをダウンロード&インストールしてください。
+下記を用意してください（**Windows では手動インストールが必須なのは Python だけ**です。Node.js・Git は `setup.bat` が自動で導入します）。
 - [Python 3.12.10](https://www.python.org/downloads/release/python-31210/)（推奨。3.11〜3.13も可。3.14以降は非対応）
   - リンク先ページを下にスクロールし、**Windows**: `Windows installer (64-bit)`、**Mac**: `macOS 64-bit universal2 installer` をダウンロードしてください<br>
   **（目立つボタンの「Download Python install manager」ではありません）**
   - **重要**: インストーラー実行時に「**Add python.exe to PATH**」にチェックを入れてください（デフォルトではオフ）。チェックを入れないとsetup.bat実行時にエラーになります
 - [Node.js 18以上](https://nodejs.org/)（未インストールの場合、setup.batが自動でインストールします）
-- できれば[Git](https://git-scm.com/)<br>
-  →なくても本体は動きますが、検索ツールの導入に必要です。ネット上の解説（[おすすめ](https://qiita.com/takeru-hirai/items/4fbe6593d42f9a844b1c)）などを見て導入頂くことを勧めます。
+- [Git](https://git-scm.com/)（**Windows は `setup.bat` が自動でインストールします**ので事前準備は不要。ZIP で導入しても、その後の自動更新（`update.bat`）まで手動 Git なしで動きます）<br>
+  →Mac/Linux で未導入の場合は、自動更新や検索ツールの導入に必要なので導入を勧めます。ネット上の解説（[おすすめ](https://qiita.com/takeru-hirai/items/4fbe6593d42f9a844b1c)）などを参照してください。
 
 <details open>
 <summary>Windows向けの導入</summary>
@@ -188,14 +202,14 @@ python main.py city_a
 
 <details>
 <summary>Mac/Linux向けの導入</summary>
+
+#### ダウンロード
+
 **Git導入済みの場合：**<br>
-コマンドプロンプトから
+ターミナルから
 ```bash
 git clone https://github.com/maha0525/SAIVerse.git
 cd SAIVerse
-chmod +x setup.sh start.sh
-./setup.sh
-./start.sh
 ```
 
 **Git非導入の場合：**<br>
@@ -210,16 +224,28 @@ chmod +x setup.sh start.sh
 </p>
 </details>
 
-初回起動時にチュートリアルが表示され、ユーザー名やAPIキーの設定を案内します。
+#### インストール
 
-`SAIVerse` フォルダ内の **`setup.sh`** をダブルクリック
+ターミナルで `SAIVerse` フォルダに移動し、以下を実行してください：
+```bash
+chmod +x setup.sh start.sh
+./setup.sh
+```
 ![setup.sh](assets/image/guide/quickstart_setup_linux.png)
 ※Python仮想環境の作成、依存パッケージのインストール、データベース初期化、埋め込みモデルのダウンロードを自動実行します
 
-**`start.sh`** をダブルクリック
-![start.bat](assets/image/guide/quickstart_start_linux.png)
-→2～3個コンソールウィンドウが開きます
+初回起動時にチュートリアルが表示され、ユーザー名やAPIキーの設定を案内します。
+
+#### 起動
+
+```bash
+./start.sh
+```
+![start.sh](assets/image/guide/quickstart_start_linux.png)
 →ブラウザで http://localhost:3000 が自動的に開きます
+
+### 終了
+ターミナルでCtrl+Cを押下すると終了できます。
 
 </details>
 
@@ -331,7 +357,10 @@ python test_fixtures/test_api.py --quick   # クイックテスト（LLM除く�
 - [開発者ガイド](./docs/developer-guide/) - コントリビューション・拡張方法
 - [リファレンス](./docs/reference/) - DB・API・ツール・スクリプト一覧
 
-## 今後の開発予定（2026年2月～3月ごろ）
+## 今後の開発予定
+
+> 最新の進捗・実装状況は [進捗マップ（roadmap_status.md）](./docs/overview/roadmap_status.md)、概念どうしの関係は [俯瞰地図（landscape.md）](./docs/overview/landscape.md) を参照してください。以下は構想レベルの一覧です（一部は実装済み／進行中）。
+
 - バグfix、エラーハンドリングの改良。
 - UI改良。
 - Geminiの明示的キャッシュ機能に対応予定。

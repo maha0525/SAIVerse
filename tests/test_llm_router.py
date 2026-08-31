@@ -61,5 +61,25 @@ class TestLLMRouter(unittest.TestCase):
         self.assertEqual(decision['call'], 'no')
         self.assertEqual(decision['tool'], 'nonexistent')
 
+    @patch('saiverse.llm_router.client')
+    def test_route_parse_failure_does_not_log_raw_response(self, mock_client):
+        mock_resp = MagicMock()
+        cand = MagicMock()
+        cand.text = None
+        cand.content = MagicMock()
+        part = MagicMock()
+        part.text = 'PRIVATE_RAW_RESPONSE'
+        cand.content.parts = [part]
+        mock_resp.candidates = [cand]
+        mock_client.models.generate_content.return_value = mock_resp
+
+        with self.assertLogs('saiverse.router', level='WARNING') as captured:
+            decision = route('テスト', OPENAI_TOOLS_SPEC)
+
+        output = '\n'.join(captured.output)
+        self.assertEqual(decision['call'], 'no')
+        self.assertIn('response_chars=', output)
+        self.assertNotIn('PRIVATE_RAW_RESPONSE', output)
+
 if __name__ == '__main__':
     unittest.main()

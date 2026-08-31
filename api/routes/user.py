@@ -16,21 +16,45 @@ class UserStatusResponse(BaseModel):
     avatar: Optional[str]
     display_name: str
     email: Optional[str] = None
+    # Region RPG: ユーザーが参加中 (playing/paused) のゲームがあれば現在地に
+    # 関わらず返るゲームモード情報 {region_id, region_name, phase, scene,
+    # party_location, inside, at_entrance}。それ以外は None。
+    # inside=False のとき UI はセッションログ閲覧トグル + 復帰ボタンを出す。
+    active_game: Optional[dict] = None
 
 class MoveRequest(BaseModel):
     target_building_id: str
+    # B-1 CAS: クライアントが知っている現在地。 サーバ側の current_building_id
+    # と一致しない場合は他クライアントが先に move 済みなので 409 を返す。
+    # 後方互換のため Optional (= 未指定なら CAS チェックなし、 旧挙動)。
+    # See: docs/intent/building_memory_unified.md §B-1
+    expected_from_building_id: Optional[str] = None
 
 class MoveResponse(BaseModel):
     success: bool
     message: Optional[str] = None
+    current_building_id: Optional[str] = None  # CAS 失敗時にサーバの真の現在地を返す
     
 class BuildingInfo(BaseModel):
     id: str
     name: str
+    # 所属スコープ (Region / SubRegion の ID)。None なら City 直属
+    region_id: Optional[str] = None
+    # この Building がいずれかの Region / SubRegion の入口なら、その region_id
+    entrance_of: Optional[str] = None
+
+class RegionInfo(BaseModel):
+    region_id: str
+    name: str
+    parent_region_id: Optional[str] = None
+    region_type: str = "generic"
+    entrance_building_id: Optional[str] = None
 
 class BuildingsResponse(BaseModel):
     buildings: List[BuildingInfo]
     city_id: Optional[int] = None
+    # サイドバーの Region 折り畳み用 (docs/intent/region.md §2.2)
+    regions: List[RegionInfo] = []
 
 @router.get("/status", response_model=UserStatusResponse)
 def get_user_status(manager = Depends(get_manager)):
@@ -49,37 +73,111 @@ def get_user_status(manager = Depends(get_manager)):
     presence_status = manager.state.user_presence_status
     is_online = presence_status != "offline"
 
+    active_game = None
+    lifecycle = getattr(manager, "game_lifecycle", None)
+    if lifecycle is not None:
+        try:
+            active_game = lifecycle.active_game_for_user()
+        except Exception:
+            _log.warning("Failed to resolve active game for user", exc_info=True)
+
     return {
         "is_online": is_online,
         "presence_status": presence_status,
         "current_building_id": manager.state.user_current_building_id,
         "avatar": manager.state.user_avatar_data,
         "display_name": manager.state.user_display_name,
-        "email": email
+        "email": email,
+        "active_game": active_game,
     }
 
 @router.post("/move", response_model=MoveResponse)
 def move_user(req: MoveRequest, manager = Depends(get_manager)):
     import logging
-    logging.debug("[USER_MOVE] Request to move to %s", req.target_building_id)
+    logging.debug(
+        "[USER_MOVE] Request to move to %s (expected_from=%s)",
+        req.target_building_id, req.expected_from_building_id,
+    )
+
+    # B-1 CAS: クライアントが思っている現在地とサーバの現在地が異なれば
+    # 他クライアントが先に move 済み。 409 で現在地を返して再同期させる。
+    current_bid = manager.state.user_current_building_id
+    if (
+        req.expected_from_building_id is not None
+        and req.expected_from_building_id != current_bid
+    ):
+        logging.info(
+            "[USER_MOVE] CAS conflict: expected_from=%s server_current=%s — refusing move",
+            req.expected_from_building_id, current_bid,
+        )
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "cas_conflict",
+                "message": "他のクライアントが先に移動したため、 この移動は受け付けませんでした。 最新状態に同期します。",
+                "current_building_id": current_bid,
+            },
+        )
 
     success, message = manager.move_user(req.target_building_id)
-    
-    logging.debug("[USER_MOVE] Result success=%s, msg=%s, current_bid=%s", 
+
+    logging.debug("[USER_MOVE] Result success=%s, msg=%s, current_bid=%s",
                  success, message, manager.user_current_building_id)
-        
-    return {"success": success, "message": message}
+
+    # サーバ側 CAS (move_entity の条件付き UPDATE) の競合も、クライアント CAS と
+    # 同じ 409 形式で返して再同期を起動する (W7 柱5 / 2026-07-21 Codex P2)
+    if not success and getattr(message, "code", None) == "cas_conflict":
+        # 仲裁負け直後は in-memory が勝者の移動をまだ映していないことがある。
+        # 拒否メッセージが運ぶ DB 確定現在地を優先する (Codex 第三巡 P2)
+        confirmed_bid = (
+            getattr(message, "current_building_id", None)
+            or manager.state.user_current_building_id
+        )
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "cas_conflict",
+                "message": str(message),
+                "current_building_id": confirmed_bid,
+            },
+        )
+
+    return {
+        "success": success,
+        "message": message,
+        "current_building_id": manager.state.user_current_building_id,
+    }
 
 @router.get("/buildings", response_model=BuildingsResponse)
 def get_buildings(manager = Depends(get_manager)):
     # Sort buildings by name for better UI experience
     sorted_buildings = sorted(manager.buildings, key=lambda b: b.name)
+    regions = list(getattr(manager, "regions", {}).values())
+    entrance_index = {
+        r.entrance_building_id: r.region_id
+        for r in regions if r.entrance_building_id
+    }
     return {
         "buildings": [
-            {"id": b.building_id, "name": b.name}
+            {
+                "id": b.building_id,
+                "name": b.name,
+                "region_id": getattr(b, "region_id", None),
+                "entrance_of": entrance_index.get(b.building_id),
+            }
             for b in sorted_buildings
         ],
-        "city_id": getattr(manager, 'city_id', None)
+        "city_id": getattr(manager, 'city_id', None),
+        "regions": [
+            {
+                "region_id": r.region_id,
+                "name": r.name,
+                "parent_region_id": r.parent_region_id,
+                "region_type": r.region_type,
+                "entrance_building_id": r.entrance_building_id,
+            }
+            for r in regions
+        ],
     }
 
 class _Unset:
@@ -133,7 +231,7 @@ def update_user_profile(req: UpdateProfileRequest, manager = Depends(get_manager
         new_room_name = f"{req.display_name}の部屋"
         all_cities = session.query(CityModel).all()
         for city in all_cities:
-            user_room_id = f"user_room_{city.CITYNAME}"
+            user_room_id = f"user_room_{city.CITY_SLUG}"
             user_room = session.query(BuildingModel).filter_by(
                 BUILDINGID=user_room_id
             ).first()

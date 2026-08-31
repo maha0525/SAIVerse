@@ -4,7 +4,9 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import time
+from contextlib import contextmanager
 from typing import Any, Dict, Iterator, List, Optional
 
 import openai
@@ -160,6 +162,96 @@ def _validate_required_schema_keys(payload: Dict[str, Any], schema: Dict[str, An
     return _validate(payload, schema)
 
 
+#: Header names configuration may never set, on any path into this client.
+#: The OpenAI SDK merges configured headers *after* the ones it builds itself
+#: — per-request ``extra_headers`` outranking client ``default_headers``, both
+#: outranking the credential derived from ``api_key`` — so anything left open
+#: here lets a config file decide what credential actually ships. That would
+#: slip past ``saiverse/provider_security.py``, which only inspects
+#: ``api_key_env`` and ``base_url``. The rest govern routing and body framing.
+#: ``openai-organization`` / ``openai-project`` are here because the SDK sets
+#: them from OPENAI_ORG_ID / OPENAI_PROJECT_ID: they decide which tenant gets
+#: billed, so letting configuration replace them is the same class of hole as
+#: replacing the credential itself.
+_RESERVED_HEADERS = frozenset({
+    "authorization", "proxy-authorization", "host", "content-length",
+    "content-type", "transfer-encoding",
+    "openai-organization", "openai-project",
+})
+
+
+#: RFC 7230 token — the only shape a header name may take. Verified against
+#: h11 0.16.0, which rejects anything else with "Illegal header name" at send
+#: time (not at request construction, so httpx's MockTransport won't show it).
+#: Matched with fullmatch(): with `$`, a trailing newline slips through.
+_HEADER_NAME_RE = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+")
+
+#: C0 controls except HTAB. Of these, h11 0.16.0 actually rejects only NUL, LF,
+#: VT, FF and CR (measured) — the rest are dropped as a deliberate safety
+#: margin: a control character in a header value has no legitimate use here,
+#: and the next transport in the chain (a proxy, a different HTTP stack) need
+#: not be as permissive. Erring wide costs a header; erring narrow costs a
+#: conversation.
+_FORBIDDEN_VALUE_CHARS = frozenset(chr(code) for code in range(0x20) if code != 0x09)
+
+
+def _strip_reserved_headers(headers: Any, where: str) -> Dict[str, str]:
+    """Drop entries this client owns, and anything a request cannot carry.
+
+    Warns rather than raises: these headers are supplementary (app attribution,
+    routing hints), so a bad entry must not take the LLM call down with it.
+    That promise is what makes the shape checks part of this gate rather than
+    a nicety: httpx encodes values as ASCII, and h11 refuses malformed names
+    and values that are or begin with whitespace — measured, and raised on the
+    way out, so they would surface to the user as a failed conversation rather
+    than a missing header. Control characters are cut wider than h11 strictly
+    requires; see _FORBIDDEN_VALUE_CHARS.
+    """
+    if not isinstance(headers, dict):
+        if headers:
+            logging.warning(
+                "[llm] ignoring %s: expected an object of string pairs, got %s",
+                where, type(headers).__name__,
+            )
+        return {}
+
+    kept: Dict[str, str] = {}
+    for key, value in headers.items():
+        if not (isinstance(key, str) and isinstance(value, str) and key):
+            logging.warning("[llm] dropping non-string %s entry %r", where, key)
+            continue
+        if key.strip().lower() in _RESERVED_HEADERS:
+            logging.warning(
+                "[llm] %s may not set %r; credentials, tenant attribution, "
+                "routing and body framing belong to the client. Dropping it.",
+                where, key,
+            )
+            continue
+        try:
+            key.encode("ascii")
+            value.encode("ascii")
+        except UnicodeEncodeError:
+            logging.warning(
+                "[llm] dropping %s entry %r: header values must be ASCII", where, key,
+            )
+            continue
+        if not _HEADER_NAME_RE.fullmatch(key):
+            logging.warning(
+                "[llm] dropping %s entry %r: not a valid header name", where, key,
+            )
+            continue
+        # Inner spaces and tabs are legal; leading/trailing ones are not, and a
+        # value that is only whitespace is rejected outright.
+        if value != value.strip(" \t") or _FORBIDDEN_VALUE_CHARS & set(value):
+            logging.warning(
+                "[llm] dropping %s entry %r: value is not a valid header value",
+                where, key,
+            )
+            continue
+        kept[key] = value
+    return kept
+
+
 class OpenAIClient(LLMClient):
     """Client for OpenAI-compatible chat completions API."""
 
@@ -178,6 +270,8 @@ class OpenAIClient(LLMClient):
         structured_output_backend: Optional[str] = None,
         structured_output_mode: Optional[str] = None,
         reasoning_passback_field: Optional[str] = None,
+        timeout: Optional[float] = None,
+        default_headers: Optional[Dict[str, str]] = None,
     ) -> None:
         super().__init__(supports_images=supports_images)
         key_env = api_key_env or "OPENAI_API_KEY"
@@ -188,22 +282,88 @@ class OpenAIClient(LLMClient):
                 user_message="OpenAI APIキーが設定されていません。管理者にお問い合わせください。"
             )
 
-        client_kwargs: Dict[str, str] = {"api_key": api_key}
+        client_kwargs: Dict[str, Any] = {"api_key": api_key}
         if base_url:
             client_kwargs["base_url"] = base_url
+        if timeout is not None:
+            client_kwargs["timeout"] = timeout
+        # Sent on every request to this backend. Used for provider-side app
+        # identification (OpenRouter attribution headers); belongs to the
+        # connection, not to individual request parameters.
+        self._default_headers = _strip_reserved_headers(
+            default_headers or {}, "default_headers",
+        )
+        self._request_kwargs: Dict[str, Any] = dict(request_kwargs or {})
+        # extra_headers is applied per request and outranks default_headers, so
+        # it is the same door onto the credential — it goes through the same gate.
+        if "extra_headers" in self._request_kwargs:
+            per_request = _strip_reserved_headers(
+                self._request_kwargs["extra_headers"], "request_kwargs.extra_headers",
+            )
+            self._request_kwargs["extra_headers"] = per_request
+            # Header names are case-insensitive, but the SDK merges the two
+            # dicts by exact key: "HTTP-Referer" here and "http-referer" there
+            # would both reach the wire instead of the per-request one
+            # replacing it. Drop the shadowed default so overriding works
+            # whatever spelling the config used. This has to happen before the
+            # client is built, since default_headers is fixed at construction.
+            shadowed = {name.lower() for name in per_request}
+            self._default_headers = {
+                name: value for name, value in self._default_headers.items()
+                if name.lower() not in shadowed
+            }
+
+        if self._default_headers:
+            client_kwargs["default_headers"] = dict(self._default_headers)
 
         self.client = OpenAI(**client_kwargs)
         self.model = model
-        self._request_kwargs: Dict[str, Any] = dict(request_kwargs or {})
         self.max_image_bytes = max_image_bytes
         self.max_image_embeds = max_image_embeds
         self.convert_system_to_user = convert_system_to_user
         self.structured_output_backend = structured_output_backend
         self.structured_output_mode = structured_output_mode or "native"
         self.reasoning_passback_field = reasoning_passback_field
+        self._llama_server_base: Optional[str] = None
+        self._llama_server_config: Optional[Dict[str, Any]] = None
+
+    def bind_llama_server(self, server_base: str, config: Dict[str, Any]) -> None:
+        """llama-server 管理下のモデルとして紐付ける。
+
+        以後、リクエスト送信のたびに ensure_running を通す。サーバーが idle
+        自動停止で消えていれば再起動し、生きていれば last_activity を更新して
+        idle checker に「使用中」を知らせる。activity 更新は停止判定と同じ
+        ロックの中で行われるため、先に名乗ったリクエストが停止に撃たれる
+        ことはない (キャッシュ済みクライアントが停止済みポートへ送信し続ける
+        2026-08-03 の欠陥への対処)。
+        """
+        self._llama_server_base = server_base
+        self._llama_server_config = config
+
+    def ensure_backend(self) -> None:
+        if self._llama_server_config is not None:
+            from .llama_server import get_server_manager
+            get_server_manager().ensure_running(
+                self._llama_server_base, self._llama_server_config
+            )
+
+    @contextmanager
+    def backend_lease(self):
+        if self._llama_server_config is None:
+            yield
+            return
+        from .llama_server import get_server_manager
+        with get_server_manager().request_lease(
+            self._llama_server_base, self._llama_server_config
+        ):
+            yield
 
     def _create_completion(self, **kwargs: Any):
-        return self.client.chat.completions.create(**kwargs)
+        self.ensure_backend()
+        # 貸出札を掛けて送信 — 札がある間は idle 自動停止に撃たれない。
+        # 返却 (with 脱出) が完了時刻の申告を兼ねる
+        with self.backend_lease():
+            return self.client.chat.completions.create(**kwargs)
 
     def _add_additional_properties(self, schema: Dict[str, Any]) -> Dict[str, Any]:
         """Recursively add additionalProperties: false and normalize schema for OpenAI strict mode."""
@@ -364,11 +524,19 @@ class OpenAIClient(LLMClient):
                         return parsed
                     logging.warning("[openai] Structured output missing required keys")
             except json.JSONDecodeError as e:
-                preview = candidate.replace("\n", "\\n")[:300]
-                logging.warning("[openai] Failed to parse structured output: %s (candidate=%r)", e, preview)
+                logging.warning(
+                    "[openai] Failed to parse structured output: %s "
+                    "(candidate_chars=%d)",
+                    e,
+                    len(candidate),
+                )
                 if not candidate:
                     message_dict = choice.message.model_dump() if hasattr(choice.message, "model_dump") else {}
-                    logging.warning("[openai] Structured output empty candidate. message=%s", message_dict)
+                    logging.warning(
+                        "[openai] Structured output empty candidate "
+                        "(message_fields=%s)",
+                        sorted(message_dict.keys()),
+                    )
                 raise InvalidRequestError(
                     "Failed to parse JSON response from structured output",
                     e,
@@ -491,6 +659,7 @@ class OpenAIClient(LLMClient):
                   - tool_name: Tool name (if type is "tool_call")
                   - tool_args: Tool arguments dict (if type is "tool_call")
         """
+        messages = self._inject_unsupported_media_summaries(messages)
         tools_spec = tools or []
         use_tools = bool(tools_spec)
         self._store_reasoning([])
@@ -666,6 +835,19 @@ class OpenAIClient(LLMClient):
                 self._store_reasoning_details(merge_streaming_reasoning_details(reasoning_details_raw))
             return
 
+        # response_schema があると generate_stream は stream=False で投げるため、
+        # 構造化出力はこの非ストリーム分岐を通る。ここで usage を保存しないと、
+        # judgment/router など構造化出力を使う呼び出しが使用量と費用から丸ごと
+        # 落ちる (docs/intent/model_provider_management.md「使用量の帰属」)。
+        #
+        # 保存は choices の取り出しと content_filter 判定より前に置く。応答が来た
+        # 時点で課金は成立しているので、その後の解釈が例外で終わっても使用量は
+        # 残さなければならない。
+        openai_runtime.store_usage_from_response(
+            resp,
+            lambda i, o, c: self._store_usage(input_tokens=i, output_tokens=o, cached_tokens=c),
+        )
+
         choice = resp.choices[0]
         if choice.finish_reason == "content_filter":
             logging.warning("[openai] Output blocked by content filter. finish_reason=%s", choice.finish_reason)
@@ -799,7 +981,20 @@ class OpenAIClient(LLMClient):
             self._store_reasoning_details(merge_streaming_reasoning_details(reasoning_details_raw))
         self._store_stream_tool_detection_from_buffer(call_buffer)
 
-    def generate_stream(
+    def generate_stream(self, *args: Any, **kwargs: Any) -> Iterator[str]:
+        """ストリーム版の外殻。生成の間ずっと貸出札を掛ける。
+
+        札より先に ensure — サーバーが idle 停止済みなら先に再起動しないと、
+        札が「不在のサーバー」に対して空発行され、実ストリームが無防備になる。
+        札の返却 (中断時も finally で確実) が完了時刻の申告を兼ねるため、
+        idle_timeout を超える長い生成の完走直後に idle 停止が発火しない
+        (実装本体は _generate_stream_impl)。
+        """
+        self.ensure_backend()
+        with self.backend_lease():
+            yield from self._generate_stream_impl(*args, **kwargs)
+
+    def _generate_stream_impl(
         self,
         messages: List[Dict[str, Any]],
         tools: Optional[list] | None = None,
@@ -815,6 +1010,7 @@ class OpenAIClient(LLMClient):
         - force_tool_choice: 初回のみ {"type":"function","function":{"name":..}} か "auto"
         - 再帰呼び出し時はデフォルト None → 自動で "auto"
         """
+        messages = self._inject_unsupported_media_summaries(messages)
         tools_spec = OPENAI_TOOLS_SPEC if tools is None else tools
         use_tools = bool(tools_spec)
         history_snippets = list(history_snippets or [])

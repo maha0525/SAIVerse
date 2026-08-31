@@ -21,8 +21,9 @@ SAIVerseを10分で動かすためのガイドです。
 ```
 
 オプション:
-- `./start.sh city_b` — 別のCityを起動
 - `SAIVERSE_SEARXNG=1 ./start.sh` — SearXNGサーバーも同時起動
+
+> 既定でセットアップされる City は `city_a` の1つ。別 City（例 city_b）を使うには先に `cities.json` / DB に追加が必要（未追加だと `main.py city_b` 起動はエラーになる）。
 
 停止するには `Ctrl+C` を押してください。
 
@@ -37,8 +38,8 @@ python main.py city_a
 ```
 
 起動すると以下が立ち上がります：
-- APIサーバー: `http://localhost:8001`
-- Cityマネージャー: メモリ上で世界を管理
+- バックエンド（UI + API）: `http://localhost:8000`（API は `http://localhost:8000/api`）
+- City マネージャー: メモリ上で世界を管理
 
 ### 2. フロントエンドの起動
 
@@ -58,26 +59,27 @@ http://localhost:3000 を開くと、SAIVerseのUIが表示されます。
 
 ## 最初にやること
 
+### チュートリアル
+
+初回起動時のチュートリアルで、**ユーザー名 → City 名 → ペルソナ作成 → API キー → モデル設定**を順に行う（後からやり直すこともできる）。
+
 ### ワールドビューを確認
 
-左サイドバーでBuilding（場所）を選択し、チャット欄からメッセージを送信するとAIが応答します。
+左サイドバーで Building（場所）を選ぶとその場所を**閲覧**でき、チャット欄からメッセージを送るとそこに**入室して** AI が応答する（→ [ワールドビュー](../user-guide/world-view.md)）。
 
-### 自律モードを試す
+### 自律行動を試す
 
-サイドバーから「自律モード」をONにすると、AIが定期的に自分から発言するようになります。
+ペルソナメニュー → **ライフビュー**の再生 / 停止で、そのペルソナの自律行動を制御できる（→ [自律行動モード](../features/autonomous-mode.md)）。
 
 ### ペルソナを召喚
 
-「ペルソナを召喚」機能で、別のBuildingにいるAIを現在地に呼び出せます。
+チャット領域ヘッダの **People 管理**から、別の Building にいるペルソナを現在地に召喚できる。
 
 ## トラブルシューティング
 
 ### ポートが使用中
 
-```bash
-# 別のポートで起動
-python main.py city_a --ui-port 8100 --api-port 8101
-```
+`main.py` に個別ポート指定の引数はない（`city_name` / `--db-file` / `--sds-url` のみ）。ポートを変えるには `cities.json` の設定を変更する（既定の City は `city_a`=8000 の1つ）。
 
 ### APIエラーが発生
 
@@ -86,5 +88,5 @@ python main.py city_a --ui-port 8100 --api-port 8101
 ## 次のステップ
 
 - [設定](./configuration.md) - 詳細な設定オプション
-- [基本概念](../concepts/architecture.md) - システムの仕組みを理解
+- [基本概念](../concepts/README.md) - システムの仕組みを理解
 - [ユーザーガイド](../user-guide/world-view.md) - UIの詳しい使い方

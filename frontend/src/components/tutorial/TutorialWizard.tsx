@@ -163,8 +163,8 @@ export default function TutorialWizard({
             if (citiesRes.ok) {
                 const cities = await citiesRes.json();
                 if (cities.length > 0) {
-                    // Use DESCRIPTION (display name) if available, else CITYNAME
-                    updates.cityName = cities[0].DESCRIPTION || cities[0].CITYNAME || '';
+                    // 表示名は CITYNAME。未設定なら識別子 (CITY_SLUG) を初期値にする
+                    updates.cityName = cities[0].CITYNAME || cities[0].CITY_SLUG || '';
                     // Auto-detect timezone from browser if city still has default 'UTC'
                     const browserTz = Intl.DateTimeFormat().resolvedOptions().timeZone;
                     const cityTz = cities[0].TIMEZONE || 'UTC';
@@ -289,16 +289,17 @@ export default function TutorialWizard({
         }
 
         const city = cities[0];
-        const name = state.cityName.trim() || city.DESCRIPTION || city.CITYNAME;
-        // PUT requires all fields. Keep CITYNAME (internal ID) unchanged,
-        // save user-entered display name to DESCRIPTION.
-        // Always send the timezone — even if city name was left empty.
+        const name = state.cityName.trim() || city.CITYNAME || city.CITY_SLUG;
+        // PUT は全フィールドを要求する。name = 表示名 (CITYNAME)。内部の識別子
+        // (CITY_SLUG) は City 作成後は変更できないので送らない。説明文は
+        // チュートリアルでは聞かないため既存値をそのまま返す。
+        // タイムゾーンは City 名が空でも必ず送る。
         const updateRes = await fetch(`/api/world/cities/${city.CITYID}`, {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-                name: city.CITYNAME,
-                description: name,
+                name,
+                description: city.DESCRIPTION ?? '',
                 online_mode: city.START_IN_ONLINE_MODE ?? false,
                 ui_port: city.UI_PORT ?? 8000,
                 api_port: city.API_PORT ?? 8001,

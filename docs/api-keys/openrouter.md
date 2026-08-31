@@ -67,6 +67,32 @@ OpenRouterでは200以上のモデルが利用可能です。SAIVerseに設定�
 - Qwen 3 Next 80B-A3B / Qwen 3 Coder 480B-A35B
 - GPT-OSS 120B・20B
 
+## 7. アプリ名の申告について
+
+SAIVerse は OpenRouter へのリクエストに「SAIVerse」というアプリ名を添えて送ります。これにより、SAIVerse 経由の利用量が [OpenRouter の公開アプリランキング](https://openrouter.ai/apps) に SAIVerse として合算されます。
+
+集計されるのは**利用したトークン量とモデル名だけ**で、会話の内容やペルソナの情報がランキングに出ることはありません。
+
+申告を止めたい場合は、次の2つを行ってください。
+
+**1.** `~/.saiverse/user_data/providers/openrouter.json` を以下の内容で作成する（このファイルが同梱設定より優先されます）。
+
+```json
+{
+  "id": "openrouter",
+  "display_name": "OpenRouter",
+  "protocol": "openai_compat",
+  "base_url": "https://openrouter.ai/api/v1",
+  "api_key_env": "OPENROUTER_API_KEY"
+}
+```
+
+**2.** SAIVerse を再起動する。稼働中のプロセスは起動時に読み込んだ設定で動き続けるため、**ファイルを置いただけでは申告は止まりません**。
+
+`.env` の API キーはそのままで構いません。接続情報を書き写す必要があるのは、ユーザー設定が同梱設定とのマージではなく**丸ごと差し替え**になるためです。アプリ名のヘッダーだけを書かないことで、申告が止まります。
+
+この編集は今のところファイルを置く形でしか行えません。グローバル設定 > モデル管理 > プロバイダの編集画面にはアプリ名ヘッダーの項目がなく、そこから保存すると同梱のヘッダーがそのまま引き継がれます。
+
 ## 環境変数
 
 SAIVerseでは以下の環境変数名を使用します：

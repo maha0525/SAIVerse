@@ -29,6 +29,30 @@ if [ -f ".venv/bin/activate" ]; then
     source .venv/bin/activate
 fi
 
+# 中断された更新を仕上げてから起動する (start.bat と同じ意味論)。
+#   update_engine.py --check-complete の終了コード:
+#     0  = コードと導入済みパッケージが一致。そのまま起動。
+#     10 = 更新が途中で死んでいる。--manual で仕上げてから起動。
+#     11 = 判定できなかった。警告だけ出して起動。
+# 仕上げに失敗したら起動しない (中途半端な状態で立ち上げない)。
+# docs/issues/v0229_update_bat_truncates_after_git_pull.md
+if [ -x ".venv/bin/python" ]; then
+    UPDATE_CHECK_RC=0
+    .venv/bin/python scripts/update_engine.py --check-complete || UPDATE_CHECK_RC=$?
+    if [ "$UPDATE_CHECK_RC" -eq 10 ]; then
+        echo "[INFO] Update was interrupted; finishing it now..."
+        if ! .venv/bin/python scripts/update_engine.py --manual; then
+            echo "[ERROR] The interrupted update could not be finished." >&2
+            echo "[ERROR] SAIVerse was NOT started, because the code and the installed" >&2
+            echo "[ERROR] packages do not match. See self_update.log for details." >&2
+            exit 1
+        fi
+        echo "[OK] Update finished."
+    elif [ "$UPDATE_CHECK_RC" -ne 0 ]; then
+        echo "[WARN] Could not verify the update state. Starting anyway."
+    fi
+fi
+
 # SearXNG (optional - set SAIVERSE_SEARXNG=1 to enable)
 if [ "${SAIVERSE_SEARXNG:-0}" = "1" ] && [ -f "./scripts/run_searxng_server.sh" ]; then
     echo "[INFO] Starting SearXNG server..."

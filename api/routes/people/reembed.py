@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from api.deps import get_manager
+from saiverse.data_paths import get_persona_memory_db
 from .models import ReembedRequest, ReembedStatusResponse
 import threading
 import logging
@@ -25,7 +26,7 @@ def _run_reembed_task(persona_id: str, force: bool):
         _reembed_status[persona_id] = {"running": True, "progress": 0, "total": 0, "message": "Starting..."}
     
     try:
-        db_path = Path.home() / ".saiverse" / "personas" / persona_id / "memory.db"
+        db_path = get_persona_memory_db(persona_id)
         if not db_path.exists():
             with _reembed_lock:
                 _reembed_status[persona_id] = {"running": False, "message": "Database not found"}
@@ -133,7 +134,7 @@ def reembed_persona_memory(
             return {"success": False, "message": "Re-embed already in progress.", "status": status}
     
     # Verify database exists
-    db_path = Path.home() / ".saiverse" / "personas" / persona_id / "memory.db"
+    db_path = get_persona_memory_db(persona_id)
     if not db_path.exists():
         raise HTTPException(status_code=404, detail=f"Memory database not found for {persona_id}")
     

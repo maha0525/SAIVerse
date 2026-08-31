@@ -102,6 +102,9 @@ def save_playbook(
             existing.nodes_json = nodes_json
             existing.router_callable = router_callable
             existing.user_selectable = user_selectable
+            # DB直接編集なのでファイルソース追跡をクリア（次回起動時にファイルで上書きされない）
+            existing.source_file = None
+            existing.source_hash = None
         else:
             record = Playbook(
                 name=name,
@@ -114,6 +117,8 @@ def save_playbook(
                 nodes_json=nodes_json,
                 router_callable=router_callable,
                 user_selectable=user_selectable,
+                source_file=None,
+                source_hash=None,
             )
             session.add(record)
         session.commit()

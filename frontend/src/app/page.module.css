@@ -252,6 +252,66 @@
     justify-content: flex-start;
 }
 
+/* System notices — world events (item/document/move), warnings, info.
+   These are NOT AI utterances, so they drop the avatar + author name + heavy
+   card chrome and render author-less, compact and centered. The slight
+   negative margin tightens the chatArea 1rem gap around these slim rows so
+   they don't float in a big empty band. */
+.systemNotice {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.15rem;
+    width: 100%;
+    margin: -0.35rem 0;
+}
+
+.systemNoticeInner {
+    max-width: 640px;
+    font-size: 0.85rem;
+    line-height: 1.45;
+    color: var(--text-secondary);
+    text-align: center;
+    word-break: break-word;
+}
+
+/* note-box content ships its own muted box styling (globals.css); just strip
+   its default margin and keep its text left-aligned inside the centered row. */
+.systemNoticeInner :global(.note-box) {
+    margin: 0;
+    text-align: left;
+}
+
+.systemNoticeWarning,
+.systemNoticeInfo {
+    display: inline-flex;
+    align-items: flex-start;
+    gap: 0.4rem;
+    padding: 0.35em 0.7em;
+    border-radius: 6px;
+    color: var(--foreground);
+    text-align: left;
+    white-space: pre-wrap;
+}
+
+.systemNoticeWarning {
+    background-color: rgba(240, 173, 78, 0.1);
+}
+
+.systemNoticeInfo {
+    background-color: rgba(91, 192, 222, 0.1);
+}
+
+.systemNoticeIcon {
+    flex-shrink: 0;
+}
+
+.systemNoticeTime {
+    font-size: 0.68rem;
+    color: var(--text-secondary);
+    opacity: 0.55;
+}
+
 .bubble {
     display: none;
 }
@@ -410,8 +470,60 @@
     align-items: center;
 }
 
-.cardFooter > span:not(.llmUsageWrap) {
+.cardFooter > span:not(.llmUsageWrap):not(.cacheDotWrap) {
     opacity: 0.6;
+}
+
+/* キャッシュヒットの点 (v0.3 「メッセージ刻印」③)。
+   その発言の生成が温まったコンテキストから生まれたときだけ常時出る印。
+   冷えの警告は出さない (2026-08-19 まはー裁定) ので、赤や警告色は使わず
+   アクセント色 1 つで「効いている」だけを示す。色はテーマ変数なので
+   ライト / ダークの両方でそのまま成立する。 */
+.cacheDotWrap {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    outline: none;
+}
+
+.cacheDot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--accent-primary, #06b6d4);
+    box-shadow: 0 0 4px var(--accent-primary, #06b6d4);
+    opacity: 0.7;
+    transition: opacity 0.15s ease;
+}
+
+.cacheDotWrap:hover .cacheDot,
+.cacheDotWrap:focus .cacheDot {
+    opacity: 1;
+}
+
+.cacheDotTooltip {
+    display: none;
+    position: absolute;
+    bottom: calc(100% + 6px);
+    /* 右端を点に合わせて本体は左へ伸ばす。フッターは右寄せなので、中央
+       揃えにすると狭い画面でカードの右へはみ出す。 */
+    right: 0;
+    background: var(--bg-tertiary, #111827);
+    border: 1px solid var(--border-color, #374151);
+    color: var(--text-primary, #f3f4f6);
+    border-radius: 6px;
+    padding: 0.35rem 0.55rem;
+    font-size: 0.65rem;
+    line-height: 1.5;
+    white-space: nowrap;
+    z-index: 100;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+}
+
+.cacheDotWrap:hover .cacheDotTooltip,
+.cacheDotWrap:focus .cacheDotTooltip,
+.cacheDotWrap:focus-within .cacheDotTooltip {
+    display: block;
 }
 
 .llmUsageWrap {
@@ -507,6 +619,22 @@
 
 .messageImage:hover {
     transform: scale(1.02);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+
+/* Inline image rendered from Markdown image syntax (![alt](saiverse://...)) */
+.markdownImage {
+    max-width: 100%;
+    max-height: 360px;
+    border-radius: 8px;
+    cursor: pointer;
+    margin: 0.5rem 0;
+    display: block;
+    transition: transform 0.2s, box-shadow 0.2s;
+}
+
+.markdownImage:hover {
+    transform: scale(1.01);
     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
 }
 
@@ -1151,6 +1279,31 @@
     line-height: 1.5;
 }
 
+.infoCard {
+    border-left: 4px solid #5bc0de;
+    background-color: rgba(91, 192, 222, 0.08);
+}
+
+.infoContent {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.5rem;
+    padding: 0.5rem 0;
+}
+
+.infoIcon {
+    flex-shrink: 0;
+    font-size: 0.95rem;
+    line-height: 1.5;
+}
+
+.infoMessage {
+    color: var(--foreground);
+    font-size: 0.9rem;
+    line-height: 1.5;
+    white-space: pre-wrap;
+}
+
 :global([data-theme="dark"]) .error_rate_limit {
     background-color: rgba(255, 193, 7, 0.1);
 }
@@ -1273,6 +1426,78 @@
     to { transform: rotate(360deg); }
 }
 
+/* Auto-recall Block (記憶アーキv2 §4.5: 「ふと浮かんだ記憶」) */
+.recallBlock {
+    margin-bottom: 8px;
+    border-radius: 8px;
+    background: linear-gradient(135deg, rgba(139, 92, 246, 0.06) 0%, rgba(168, 85, 247, 0.06) 100%);
+    border: 1px solid rgba(139, 92, 246, 0.15);
+    font-size: 0.85rem;
+    overflow: hidden;
+}
+
+:global([data-theme="dark"]) .recallBlock {
+    background: linear-gradient(135deg, rgba(139, 92, 246, 0.12) 0%, rgba(168, 85, 247, 0.1) 100%);
+    border-color: rgba(139, 92, 246, 0.25);
+}
+
+.recallSummary {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 12px;
+    cursor: pointer;
+    user-select: none;
+    color: rgba(139, 92, 246, 0.85);
+    font-weight: 500;
+    font-size: 0.8rem;
+    list-style: none;
+}
+
+.recallSummary::-webkit-details-marker {
+    display: none;
+}
+
+.recallSummary::after {
+    content: '';
+    margin-left: auto;
+    width: 0;
+    height: 0;
+    border-left: 4px solid transparent;
+    border-right: 4px solid transparent;
+    border-top: 5px solid currentColor;
+    opacity: 0.5;
+    transition: transform 0.2s;
+}
+
+.recallBlock[open] .recallSummary::after {
+    transform: rotate(180deg);
+}
+
+:global([data-theme="dark"]) .recallSummary {
+    color: rgba(196, 181, 253, 0.9);
+}
+
+.recallIcon {
+    display: flex;
+    align-items: center;
+    opacity: 0.75;
+}
+
+.recallContent {
+    padding: 0 12px 10px;
+    color: rgba(100, 100, 120, 0.85);
+    line-height: 1.5;
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 400px;
+    overflow-y: auto;
+}
+
+:global([data-theme="dark"]) .recallContent {
+    color: rgba(180, 180, 200, 0.8);
+}
+
 /* Activity Block */
 .activityBlock {
     margin-bottom: 8px;
@@ -1375,6 +1600,135 @@
     border-top-color: rgba(59, 130, 246, 0.8);
     border-radius: 50%;
     animation: thinkingSpin 0.8s linear infinite;
+}
+
+/* Spell blocks (rendered via raw HTML in ReactMarkdown, so use :global) */
+:global(.spellBlock) {
+    margin: 8px 0;
+    border-radius: 8px;
+    background: linear-gradient(135deg, rgba(168, 85, 247, 0.06) 0%, rgba(139, 92, 246, 0.06) 100%);
+    border: 1px solid rgba(168, 85, 247, 0.15);
+    font-size: 0.85rem;
+    overflow: hidden;
+}
+
+:global([data-theme="dark"] .spellBlock) {
+    background: linear-gradient(135deg, rgba(168, 85, 247, 0.1) 0%, rgba(139, 92, 246, 0.08) 100%);
+    border-color: rgba(168, 85, 247, 0.2);
+}
+
+:global(.spellSummary) {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 12px;
+    cursor: pointer;
+    user-select: none;
+    color: rgba(168, 85, 247, 0.8);
+    font-weight: 500;
+    font-size: 0.8rem;
+    list-style: none;
+}
+
+:global(.spellSummary::-webkit-details-marker) {
+    display: none;
+}
+
+:global(.spellSummary::after) {
+    content: '';
+    margin-left: auto;
+    width: 0;
+    height: 0;
+    border-left: 4px solid transparent;
+    border-right: 4px solid transparent;
+    border-top: 5px solid currentColor;
+    opacity: 0.5;
+    transition: transform 0.2s;
+}
+
+:global(.spellBlock[open] .spellSummary::after),
+:global(.spellResult[open] .spellSummary::after) {
+    transform: rotate(180deg);
+}
+
+:global(.spellIcon) {
+    display: flex;
+    align-items: center;
+    opacity: 0.7;
+}
+
+:global(.spellContent) {
+    padding: 0 12px 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+:global(.spellParams) {
+    font-size: 0.78rem;
+    color: rgba(100, 100, 120, 0.7);
+}
+
+:global([data-theme="dark"] .spellParams) {
+    color: rgba(160, 160, 180, 0.6);
+}
+
+:global(.spellParams code) {
+    background: rgba(168, 85, 247, 0.08);
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-size: 0.85em;
+}
+
+:global(.spellResultLabel) {
+    font-size: 0.72rem;
+    color: rgba(168, 85, 247, 0.6);
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-top: 2px;
+}
+
+:global(.spellResult) {
+    font-size: 0.78rem;
+    color: rgba(80, 80, 100, 0.85);
+    line-height: 1.5;
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 300px;
+    overflow-y: auto;
+    background: rgba(168, 85, 247, 0.04);
+    border-radius: 6px;
+    padding: 8px 10px;
+    border: 1px solid rgba(168, 85, 247, 0.08);
+}
+
+:global([data-theme="dark"] .spellResult) {
+    color: rgba(200, 200, 220, 0.8);
+    background: rgba(168, 85, 247, 0.06);
+    border-color: rgba(168, 85, 247, 0.12);
+}
+
+/* Failure (misfired spell) variant — red palette with the × icon picking up
+   the red summary color via currentColor. */
+:global(.spellResult.spellResultError) {
+    color: rgba(120, 50, 50, 0.9);
+    background: rgba(239, 68, 68, 0.05);
+    border-color: rgba(239, 68, 68, 0.2);
+}
+
+:global(.spellResultError .spellSummary) {
+    color: rgba(220, 38, 38, 0.85);
+}
+
+:global([data-theme="dark"] .spellResult.spellResultError) {
+    color: rgba(252, 165, 165, 0.85);
+    background: rgba(239, 68, 68, 0.08);
+    border-color: rgba(239, 68, 68, 0.25);
+}
+
+:global([data-theme="dark"] .spellResultError .spellSummary) {
+    color: rgba(248, 113, 113, 0.9);
 }
 
 /* Toast notifications */
@@ -1563,4 +1917,63 @@
     to {
         transform: rotate(360deg);
     }
+}
+
+
+/* ------------------------------------------------------------------
+   中断された発言の「続きの生成」と、返事が来なかった発言の「再送」。
+   追加の推論はこの二つのボタンの後ろにしか無い (2026-08-25 まはー裁定)。
+   設計: docs/issues/user_utterance_path_failure_inventory.md
+
+   通常の cardActions は hover まで opacity:0 だが、この二つは
+   「気づいてもらえないと機能そのものが無い」ので常に見せる。
+   ------------------------------------------------------------------ */
+
+.cardActionsPinned {
+    opacity: 1;
+}
+
+.continueBtn,
+.retryBtn,
+.withdrawBtn {
+    gap: 0.3rem;
+    padding: 0.3rem 0.6rem;
+    opacity: 1;
+    font-size: 0.78rem;
+    line-height: 1;
+    border: 1px solid rgba(255, 255, 255, 0.22);
+    background: rgba(255, 255, 255, 0.06);
+    color: inherit;
+}
+
+.continueBtn:hover:not(:disabled),
+.retryBtn:hover:not(:disabled),
+.withdrawBtn:hover:not(:disabled) {
+    background: rgba(255, 255, 255, 0.14);
+    border-color: rgba(255, 255, 255, 0.36);
+}
+
+.continueBtn:disabled,
+.retryBtn:disabled,
+.withdrawBtn:disabled {
+    opacity: 0.4;
+    cursor: default;
+}
+
+.actionBtnLabel {
+    white-space: nowrap;
+}
+
+:global([data-theme="light"]) .continueBtn,
+:global([data-theme="light"]) .retryBtn,
+:global([data-theme="light"]) .withdrawBtn {
+    border-color: rgba(0, 0, 0, 0.18);
+    background: rgba(0, 0, 0, 0.04);
+}
+
+:global([data-theme="light"]) .continueBtn:hover:not(:disabled),
+:global([data-theme="light"]) .retryBtn:hover:not(:disabled),
+:global([data-theme="light"]) .withdrawBtn:hover:not(:disabled) {
+    background: rgba(0, 0, 0, 0.09);
+    border-color: rgba(0, 0, 0, 0.3);
 }

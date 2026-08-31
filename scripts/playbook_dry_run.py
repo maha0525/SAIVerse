@@ -31,7 +31,6 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from sea.playbook_models import (  # noqa: E402
-    CONTEXT_PROFILES,
     ConditionalNext,
     ExecNodeDef,
     LLMNodeDef,
@@ -56,12 +55,6 @@ from sea.playbook_models import (  # noqa: E402
 # Data classes
 # ---------------------------------------------------------------------------
 
-# Full-context profile names (history_depth="full")
-_FULL_CONTEXT_PROFILES = frozenset(
-    name for name, prof in CONTEXT_PROFILES.items()
-    if prof["requirements"].history_depth == "full"
-)
-
 
 @dataclass
 class VarInfo:
@@ -85,20 +78,16 @@ class Diagnostic:
 
 @dataclass
 class ContextState:
-    """Tracks LLM context visibility within a single playbook execution."""
-    cached_profiles: Dict[str, str] = field(default_factory=dict)
-    intermediate_msg_sources: List[str] = field(default_factory=list)
-    # output_key set by each LLM node in _intermediate_msgs
-    intermediate_output_keys: Dict[str, str] = field(default_factory=dict)  # output_key -> node_id
-    memorize_since_cache: Dict[str, List[str]] = field(default_factory=dict)
+    """Tracks LLM context visibility within a single playbook execution.
+
+    Phase 3 段階 4-D (2026-05-09): context_profile / model_type 廃止に伴い、
+    旧フィールド (cached_profiles / intermediate_msg_sources / intermediate_output_keys /
+    memorize_since_cache) を削除した。最新仕様では state["_messages"] が単一の
+    base context source なので、Playbook 内で profile キャッシュを追跡する必要がない。
+    """
 
     def deep_copy(self) -> "ContextState":
-        return ContextState(
-            cached_profiles=dict(self.cached_profiles),
-            intermediate_msg_sources=list(self.intermediate_msg_sources),
-            intermediate_output_keys=dict(self.intermediate_output_keys),
-            memorize_since_cache={k: list(v) for k, v in self.memorize_since_cache.items()},
-        )
+        return ContextState()
 
 
 @dataclass
@@ -508,47 +497,14 @@ class PlaybookAnalyzer:
     def _sim_llm(self, node_def: LLMNodeDef, known: Dict[str, VarInfo],
                  ctx: ContextState, report: NodeReport, playbook: PlaybookSchema):
         node_id = node_def.id
-        profile = getattr(node_def, "context_profile", None)
         action = getattr(node_def, "action", None)
         response_schema = getattr(node_def, "response_schema", None)
         output_key = getattr(node_def, "output_key", None) or node_id
         memorize_cfg = getattr(node_def, "memorize", None)
-        model_type_field = getattr(node_def, "model_type", None)
 
-        # Context profile
-        if profile:
-            prof_info = CONTEXT_PROFILES.get(profile, {})
-            mt = prof_info.get("model_type", "normal") if prof_info else "normal"
-            if profile in ctx.cached_profiles:
-                report.details.append(f"Profile: {profile} (CACHED from {ctx.cached_profiles[profile]}), model={mt}")
-                report.diagnostics.append(Diagnostic(
-                    "INFO", "PROFILE_REUSE",
-                    f"Context profile '{profile}' reused from cache (built at '{ctx.cached_profiles[profile]}'). "
-                    f"_intermediate_msgs has {len(ctx.intermediate_msg_sources)} prior LLM output(s).",
-                    node_id, playbook.name,
-                ))
-                # Check STALE_MEMORIZE
-                stale = ctx.memorize_since_cache.get(profile, [])
-                if stale:
-                    report.diagnostics.append(Diagnostic(
-                        "WARN", "STALE_MEMORIZE",
-                        f"Standalone MEMORIZE node(s) {stale} occurred since profile '{profile}' was cached at "
-                        f"'{ctx.cached_profiles[profile]}'. Their content is NOT in base context or _intermediate_msgs.",
-                        node_id, playbook.name,
-                    ))
-            else:
-                report.details.append(f"Profile: {profile} (FRESH), model={mt}")
-                ctx.cached_profiles[profile] = node_id
-                ctx.memorize_since_cache[profile] = []
-        else:
-            report.details.append("Profile: (none) - uses state['messages']")
-            if model_type_field:
-                report.details.append(f"Model type: {model_type_field}")
-            report.diagnostics.append(Diagnostic(
-                "WARN", "NO_CONTEXT_PROFILE",
-                "LLM node has no context_profile. Uses playbook-level context_requirements or state['messages'].",
-                node_id, playbook.name,
-            ))
+        # Phase 3 段階 4-D (2026-05-09): context_profile / model_type 削除済み。
+        # base messages は state["_messages"] が単一の source of truth。
+        report.details.append("Context: state['_messages'] (line-based, set by run launcher)")
 
         # Action template
         if action:
@@ -567,28 +523,6 @@ class PlaybookAnalyzer:
                             node_id, playbook.name,
                         ))
                 report.details.append(f"  Template refs: {', '.join(ref_status)}")
-
-                # REDUNDANT_INPUT check
-                if profile in _FULL_CONTEXT_PROFILES and "input" in refs:
-                    report.diagnostics.append(Diagnostic(
-                        "WARN", "REDUNDANT_INPUT",
-                        f"Action uses '{{input}}' but profile '{profile}' already includes full conversation "
-                        f"history (user's input is already present as the latest message).",
-                        node_id, playbook.name,
-                    ))
-
-                # REDUNDANT_INTERMEDIATE check
-                if profile in _FULL_CONTEXT_PROFILES:
-                    for ref in refs:
-                        base_key = ref.split(".")[0]
-                        if base_key in ctx.intermediate_output_keys:
-                            source_node = ctx.intermediate_output_keys[base_key]
-                            report.diagnostics.append(Diagnostic(
-                                "INFO", "REDUNDANT_INTERMEDIATE",
-                                f"Action references '{{{ref}}}' (from {source_node}'s output_key). "
-                                f"That LLM's response is already in _intermediate_msgs.",
-                                node_id, playbook.name,
-                            ))
         else:
             report.details.append("Action: (none)")
 
@@ -623,11 +557,6 @@ class PlaybookAnalyzer:
         if output_mapping and isinstance(output_mapping, dict):
             for source_path, target_key in output_mapping.items():
                 known[target_key] = VarInfo(target_key, node_id, f"output_mapping({output_key}.{source_path})")
-
-        # _intermediate_msgs tracking
-        ctx.intermediate_msg_sources.append(node_id)
-        ctx.intermediate_output_keys[output_key] = node_id
-        report.details.append(f"_intermediate_msgs: [{', '.join(ctx.intermediate_msg_sources)}]")
 
         # Memorize
         if memorize_cfg:
@@ -725,12 +654,7 @@ class PlaybookAnalyzer:
             report.details.append(f"Action: \"{truncated}\"")
             report.details.append(f"  Template refs: {', '.join(ref_status)}")
 
-        report.details.append("-> SAIMemory (standalone MEMORIZE, NOT added to _intermediate_msgs)")
-
-        # Track standalone memorize for STALE_MEMORIZE detection
-        for profile_name in ctx.cached_profiles:
-            ctx.memorize_since_cache.setdefault(profile_name, []).append(node_id)
-
+        report.details.append("-> SAIMemory (standalone MEMORIZE)")
         known["last"] = VarInfo("last", node_id, "memorize")
 
     # -- SUBPLAY ------------------------------------------------------------

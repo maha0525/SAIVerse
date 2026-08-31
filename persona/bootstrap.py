@@ -4,22 +4,11 @@ Bootstrapping helpers for PersonaCore initialisation.
 
 import json
 import logging
-from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Optional
 
 from saiverse_memory import SAIMemoryAdapter
 from database.models import AI as AIModel
 from sqlalchemy.orm import Session
-
-
-def load_action_priority(path: Path) -> Dict[str, int]:
-    if path.exists():
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-            return {str(k): int(v) for k, v in data.items()}
-        except Exception:
-            logging.warning("Failed to load action priority from %s", path)
-    return {"think": 1, "emotion_shift": 2, "move": 3}
 
 
 def load_session_data(persona) -> None:
@@ -37,14 +26,6 @@ def load_session_data(persona) -> None:
     try:
         db_ai: Optional[AIModel] = session.query(AIModel).filter(AIModel.AIID == persona.persona_id).first()
         if db_ai:
-            persona.auto_count = db_ai.AUTO_COUNT or 0
-
-            if db_ai.LAST_AUTO_PROMPT_TIMES:
-                try:
-                    persona.last_auto_prompt_times.update(json.loads(db_ai.LAST_AUTO_PROMPT_TIMES))
-                except json.JSONDecodeError:
-                    logging.warning("Could not parse LAST_AUTO_PROMPT_TIMES from DB for %s.", persona.persona_name)
-
             if db_ai.EMOTION:
                 try:
                     persona.emotion = json.loads(db_ai.EMOTION)
@@ -66,25 +47,12 @@ def load_session_data(persona) -> None:
     else:
         persona.messages = []
 
-    if persona.conscious_log_path.exists():
-        try:
-            data = json.loads(persona.conscious_log_path.read_text(encoding="utf-8"))
-            persona.conscious_log = data.get("log", [])
-            raw_cursors = data.get("pulse_cursors")
-            if raw_cursors is None:
-                raw_cursors = data.get("pulse_indices", {})
-            persona._raw_pulse_cursor_data = raw_cursors if isinstance(raw_cursors, dict) else {}
-            fmt = data.get("pulse_cursor_format")
-            persona._raw_pulse_cursor_format = fmt if isinstance(fmt, str) else "count"
-        except json.JSONDecodeError:
-            logging.warning("Failed to load conscious log, starting empty")
-            persona.conscious_log = []
-            persona._raw_pulse_cursor_data = {}
-            persona._raw_pulse_cursor_format = "count"
-    else:
-        persona.conscious_log = []
-        persona._raw_pulse_cursor_data = {}
-        persona._raw_pulse_cursor_format = "count"
+    # Phase 2+3: conscious_log.json は廃止 (= log フィールドは事実上死んでいたため
+    # 移管せず、 pulse_cursors / entry_markers は persona_pulse_cursor テーブルから
+    # initialise_pulse_state が直接ロードする)。 旧 JSON が残っていても触らない。
+    persona.conscious_log = []
+    persona._raw_pulse_cursor_data = {}
+    persona._raw_pulse_cursor_format = "seq"
 
 
 def initialise_memory_adapter(persona) -> Optional[SAIMemoryAdapter]:
@@ -93,6 +61,13 @@ def initialise_memory_adapter(persona) -> Optional[SAIMemoryAdapter]:
             persona_id=persona.persona_id,
             persona_dir=persona.persona_log_path.parent,
             resource_id=persona.persona_id,
+            # ペルソナ登録経路 = 起動時自動バックアップを起こす正規の1点。
+            # ツール・API 経路の使い捨て adapter はデフォルト False のまま。
+            startup_backup=True,
+            # プロセス死で孤児化した Stelis/subagent thread の復旧も登録経路
+            # だけで行う (S4)。使い捨て adapter に許すと走行中の Stelis を
+            # 誤って巻き戻すため。
+            recover_orphaned_thread=True,
         )
         if adapter.is_ready():
             logging.info("SAIMemory ready for persona %s", persona.persona_id)

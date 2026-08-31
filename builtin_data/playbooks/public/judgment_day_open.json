@@ -1,0 +1,83 @@
+{
+  "name": "judgment_day_open",
+  "display_name": "起床判断 (day_open)",
+  "description": "自律行動 v2 の判断点: 起床。昨夜の自分からのメモと、head に常駐する一覧 (進行中のことと、行ける場所) を見て、今日の時間割を編成する。構造化出力 + judgment_finalize による検証・適用。詳細は docs/intent/persona_cognition/judgment_points.md §4。",
+  "input_schema": [
+    {
+      "name": "situation_text",
+      "description": "judgment_points が組み立てた状況テキスト (昨日の自分からのメモ / 今日の活動時間と現在時刻 / 予算 / 予定されたイベント / 習慣テンプレートの雛形と穴の位置 (テンプレ設定時))。静的な一覧 (バックログ・施設) は head に常駐するので含まれない。",
+      "required": false,
+      "default": ""
+    },
+    {
+      "name": "judgment_context",
+      "description": "finalize の検証・適用に使う文脈 (JSON 文字列: plan_date / daily_budget_rounds)。",
+      "required": false,
+      "default": "{}"
+    },
+    {
+      "name": "response_schema",
+      "param_type": "object",
+      "description": "judgment_points が動的に組み立てた JSON Schema (実在の ref / facility の enum 注入済み)。",
+      "required": false,
+      "default": null
+    },
+    {
+      "name": "daily_budget_rounds",
+      "description": "一日の作業予算（ラウンド数）。起床判断が時間割を編成するときの上限。空欄なら既定値。",
+      "param_type": "number",
+      "required": false,
+      "default": null,
+      "user_configurable": true
+    },
+    {
+      "name": "daily_budget_pulses",
+      "description": "今日のライフ（活動時間）の標準パルス予算。起床・就寝時刻から計算される最低値未満は自動的に切り上げられます。空欄なら最低値。",
+      "param_type": "number",
+      "required": false,
+      "default": null,
+      "user_configurable": true
+    },
+    {
+      "name": "life_mode_override",
+      "description": "ライフの駆動モードを手動で指定する場合の値。空欄なら使用モデルの提供元から自動判定します（ローカルモデル等、自動判定できない構成向けの上書き）。",
+      "param_type": "enum",
+      "enum_values": [
+        "even",
+        "free"
+      ],
+      "required": false,
+      "default": null,
+      "user_configurable": true
+    }
+  ],
+  "router_callable": false,
+  "user_selectable": false,
+  "nodes": [
+    {
+      "id": "judge",
+      "type": "llm",
+      "action": "このターンは『内的独白』です。ユーザーには届きません。\n相手に呼びかける文体（「〜ね」「〜だよ」「ありがとう」「お疲れさま」等）は使わず、\n自分自身に語る一人称（例: 「〜と判断する」「〜しよう」「〜の方が自然だな」）で書いてください。\n\n{situation_text}\n\n今日の時間割を組みます。時間割は「今日をどう過ごすか」の枠の並びです。枠の並びは、あなたとユーザーとで決めた習慣テンプレートがあればそれに従い、無ければこの朝のあなたが決めます。どちらの日も、それぞれの枠の中で何と出会い、何を拾うかは、その時のあなたと世界が決めます。毎日違う計画を発明する必要はありません — 人の暮らしがそうであるように、安定した習慣の並びには価値があります。日々の変化は、計画の工夫からではなく、施設に届くもの・そこで出会うものといった世界の側から流れ込んできます。\n\nコマの種類:\n- 調べる / 絵を描く / 日記を書く / 随筆を書く — 実際に手を動かす作業のコマ。実際にやったこと・作ったものだけが記録に残ります\n- 出かける — 行き先も何をするかも決めずに、世界と接触しに行くコマ\n- 自室で過ごす — 自室で休むコマ。流れてくるものを眺めるのも自由です\n- 自由時間 — その時の気分で、上のどれかをその場で選ぶコマ\n\n応答は構造化出力です:\n- monologue: この判断に至る素直な思考。起床時の気分や今日への向き合いを含めてかまいません\n- timetable: 今日の時間割 (コマの配列)。各コマは start (HH:MM) / kind / title / ref / facility / budget_rounds / note を持ちます\n  - コマは一日の流れの順 (起きてから寝るまでの順) に並べてください。就寝が深夜 0 時台になる日でも、それは一日の最後のコマです — 時刻の数字が小さいからといって先頭に置かないでください\n  - title には「○○をする」という短い表題を書いてください。一日の予定表にそのまま載る欄です\n  - ref はどのコマも 'none' にしてください\n  - budget_rounds の合計は日次予算の範囲内に収めてください\n  - 最低 1 コマは必要です",
+      "response_schema_source": "arg:response_schema",
+      "output_key": "judgment",
+      "memorize": null,
+      "speak": false,
+      "next": "finalize"
+    },
+    {
+      "id": "finalize",
+      "type": "tool",
+      "action": "judgment_finalize",
+      "args_input": {
+        "judgment_output": "judgment",
+        "kind": {
+          "$literal": "day_open"
+        },
+        "judgment_context": "judgment_context",
+        "situation_text": "situation_text"
+      },
+      "next": null
+    }
+  ],
+  "start_node": "judge"
+}

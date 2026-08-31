@@ -72,6 +72,7 @@ def _build_params(
     engines: str | None,
     language: str | None,
     safe: int | None,
+    category: str | None,
 ) -> Tuple[str, Dict[str, Any]]:
     base_url = (os.getenv("SEARXNG_URL") or os.getenv("SEARXNG_BASE_URL") or DEFAULT_BASE_URL).rstrip("/")
     if not base_url:
@@ -88,6 +89,8 @@ def _build_params(
         "safesearch": safe if safe is not None else DEFAULT_SAFESEARCH,
         "limit": limit,
     }
+    if category:
+        params["categories"] = category
     if engines:
         params["engines"] = engines
 
@@ -185,6 +188,7 @@ def searxng_search(
     engines: str | None = None,
     language: str | None = None,
     safe: int | None = None,
+    category: str | None = None,
 ) -> Tuple[str, ToolResult]:
     """Run a web search using a SearXNG instance and format the results.
 
@@ -205,6 +209,8 @@ def searxng_search(
         max_results = int(max_results)
     if engines == "":
         engines = None
+    if category == "":
+        category = None
     if language == "":
         language = None
     if safe == "" or safe is None:
@@ -219,7 +225,7 @@ def searxng_search(
         return msg, ToolResult(history_snippet=None)
 
     try:
-        url, params = _build_params(query, max_results, engines, language, safe)
+        url, params = _build_params(query, max_results, engines, language, safe, category)
         data = _execute_search(url, params)
     except _SearchError as exc:
         return str(exc), ToolResult(history_snippet=None)
@@ -258,6 +264,22 @@ def schema() -> ToolSchema:
                     "minimum": 1,
                     "maximum": 20,
                 },
+                "category": {
+                    "type": "string",
+                    "description": "検索カテゴリ。未指定なら general（汎用ウェブ）。調べる対象に応じて選ぶ",
+                    "enum": [
+                        "general",
+                        "news",
+                        "images",
+                        "videos",
+                        "it",
+                        "science",
+                        "music",
+                        "files",
+                        "map",
+                        "social media",
+                    ],
+                },
                 "engines": {
                     "type": "string",
                     "description": "使用するエンジン（カンマ区切り）。未指定ならデフォルト構成",
@@ -276,4 +298,5 @@ def schema() -> ToolSchema:
             "required": ["query"],
         },
         result_type="string",
+        spell=False,
     )

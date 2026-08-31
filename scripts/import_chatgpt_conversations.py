@@ -213,6 +213,38 @@ def handle_import(export: ChatGPTExport, args: argparse.Namespace) -> None:
 
             results.append(import_result)
 
+        # 埋め込みバックフィル (記憶アーキv2 Phase 4, §8): 書き込み時埋め込みは
+        # embedder 初期化失敗時などにスキップされうるため、インポート末尾で欠落分を
+        # ローカル embedder で埋める (LLM API は呼ばない)。自動想起 (ゾーンC) は
+        # 埋め込みが揃った時点から機能する。
+        if adapter is not None and not args.dry_run:
+            try:
+                stats = adapter.backfill_missing_message_embeddings()
+                backfilled = stats.get("embedded", 0)
+                still_missing = stats.get("total_missing", 0) - backfilled
+                total_imported = sum(
+                    int(item.get("messages_imported", 0)) for item in results
+                    if item.get("status") == "imported"
+                )
+                print()
+                print(f"インポート完了: {total_imported} 件のメッセージを取り込みました。")
+                if still_missing:
+                    print(
+                        f"注意: {still_missing} 件の埋め込みが未生成です (embedder 未初期化の可能性)。"
+                        f"`python scripts/embed_recall_sources.py {args.persona}` で後から生成できます。"
+                    )
+                else:
+                    if backfilled:
+                        print(f"埋め込みバックフィル: {backfilled} 件を追加生成しました。")
+                    print("自動想起はこの時点から機能します。")
+                print(
+                    "Chronicle（あらすじ）の生成は任意です。後から "
+                    "`python scripts/arasuji/build_arasuji_core.py --estimate` で費用を確認して実行するか、"
+                    "ふだんの会話（Metabolism）で少しずつ進みます。"
+                )
+            except Exception as exc:
+                print(f"埋め込みバックフィルに失敗しました (インポート自体は完了): {exc}")
+
     finally:
         if adapter is not None:
             adapter.close()

@@ -2,6 +2,7 @@
 
 import React, { useState, useEffect } from 'react';
 import { BookOpen, AlertTriangle } from 'lucide-react';
+import { formatCost } from '@/lib/formatCost';
 import styles from './Steps.module.css';
 
 interface ChronicleCostEstimate {
@@ -13,6 +14,7 @@ interface ChronicleCostEstimate {
     model_name: string;
     is_free_tier: boolean;
     batch_size: number;
+    currency?: string;
 }
 
 interface StepChronicleProps {
@@ -32,13 +34,6 @@ export default function StepChronicle({ enabled, onChange, personaId }: StepChro
                 .catch(() => {});
         }
     }, [personaId]);
-
-    const formatCost = (cost: number): string => {
-        if (cost === 0) return '$0.00';
-        if (cost < 0.001) return `~$${cost.toFixed(6)}`;
-        if (cost < 0.01) return `~$${cost.toFixed(4)}`;
-        return `~$${cost.toFixed(3)}`;
-    };
 
     return (
         <div>
@@ -81,7 +76,7 @@ export default function StepChronicle({ enabled, onChange, personaId }: StepChro
                     <div>現在の未処理メッセージ: <strong>{costEstimate.unprocessed_messages.toLocaleString()}</strong>件</div>
                     <div>
                         推定コスト: <strong>
-                            {costEstimate.is_free_tier ? '$0.00 (Free tier)' : formatCost(costEstimate.estimated_cost_usd)}
+                            {costEstimate.is_free_tier ? `${formatCost(0, costEstimate.currency)} (Free tier)` : formatCost(costEstimate.estimated_cost_usd, costEstimate.currency)}
                         </strong>
                         {' '}({costEstimate.model_name})
                     </div>

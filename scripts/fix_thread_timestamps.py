@@ -16,6 +16,7 @@ Examples:
     python scripts/fix_thread_timestamps.py nagi_city_a "nagi_city_a:main" "2024-03-15T14:30:00" "2024-03-15T22:00:00"
 """
 
+import os
 import argparse
 import sqlite3
 import sys
@@ -29,7 +30,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 def get_db_path(persona_id: str) -> Path:
     """ペルソナのメモリDBパスを取得"""
-    return Path.home() / ".saiverse" / "personas" / persona_id / "memory.db"
+    return Path(os.getenv("SAIVERSE_HOME") or Path.home() / ".saiverse") / "personas" / persona_id / "memory.db"
 
 
 def parse_datetime(dt_str: str) -> datetime:

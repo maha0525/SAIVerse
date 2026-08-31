@@ -36,6 +36,119 @@ try:
 except ImportError:
     TRIGGERS_AVAILABLE = False
 
+#: 「ユーザーに何かが届いた」と数える NDJSON イベントの型。
+#:
+#: 数えないのは進み具合の表示 (status / think / activity / auto_recall /
+#: streaming_thinking / streaming_discard / metabolism / user_message_id / ping)。
+#: 考えている様子だけ出して黙って終わるのは、ユーザーから見れば無言だから。
+#: 確認待ちのダイアログ (permission_request 等) は、ストリームが閉じても画面に
+#: 操作が残るので「届いた」に数える。
+#:
+#: ``streaming_complete`` は**数えない**。これは「ストリームが閉じた」の合図で
+#: あって、画面に何かが出た証拠ではない。LLM が空を返した回 (3 回の再試行後も
+#: 空だった回を含む) もこのイベントは送られるが、本文が一文字も無いので
+#: ``streaming_chunk`` は一度も出ておらず、画面には吹き出しすら作られていない。
+#: 数えてしまうと、発言は保存されているのに画面が無言のまま終わる。
+#: 本文が出た回は ``streaming_chunk`` が先に来ているので、取りこぼしはない。
+#: 設計: docs/issues/user_utterance_path_failure_inventory.md
+#:
+#: ⚠️ フロントの読み手が同じ集合の鏡を持つ (frontend/src/app/page.tsx の
+#: ``SERVER_OUTCOME_EVENT_TYPES`` — 「結果ゼロの正常終了」を切断と判定する
+#: ため)。この集合を変えるときは、鏡も同じコミットで揃えること。
+_OUTCOME_EVENT_TYPES = frozenset({
+    "say",
+    "streaming_chunk",
+    "error",
+    "cancelled",
+    "duplicate_command",
+    "permission_request",
+    "spell_confirmation",
+    "chronicle_confirm",
+    "warning",
+    "info",
+})
+
+#: 「ペルソナの発言が世界に保存された」ことを運ぶイベントの型。
+#:
+#: 上の ``_OUTCOME_EVENT_TYPES`` は画面の問い (ユーザーに何かが届いたか) で、
+#: エラー通知も含む。こちらは保存の問い — 続きの生成のように「発言が本当に
+#: 保存されたときだけ状態を進めたい」側はこちらを見る。画面イベント
+#: (``say`` / ``streaming_chunk``) は保存の証拠ではないので、ここでは見ない。
+#: 発火元は sea/runtime_emitters.py の ``notify_speak_persisted`` (唯一の
+#: 発火口) — 建物履歴の行に本文が入った後にだけ流れる。二つの問いを
+#: 混ぜないこと。
+#: 設計: docs/issues/archive/stream_completion_is_not_proof_of_persistence.md
+from sea.runtime_emitters import SPEAK_PERSISTED_EVENT_TYPE as _PERSISTED_EVENT_TYPE  # noqa: E402
+
+#: 本文を運ぶ型。中身が空なら画面には何も出ていないので、届いたとは数えない。
+_CONTENT_BEARING_TYPES = frozenset({"say", "streaming_chunk"})
+
+
+def _stream_key(event: Dict[str, Any]) -> str:
+    """撤回を照合するための、断片の出どころ。
+
+    一度の送信で複数のペルソナが並行して喋ることがある。断片の取り消しを
+    出どころで照合しないと、**あとから来た誰かの取り消しが、別の誰かの届いた
+    発言まで無かったことにする**。
+    """
+    return f"{event.get('persona_id') or ''}/{event.get('pulse_id') or ''}"
+
+
+def _note_outcome(outcome_seen: Dict[str, Any], event: Any) -> None:
+    """「ユーザーに何かが届いたか」の判定を、イベント 1 件分だけ進める。
+
+    ストリームの断片は**引っ込められることがある**。``streaming_discard`` は
+    「いま出した吹き出しを捨てて、整形済みのものを後で出す」ための合図で、
+    その後 ``say`` が来ない終わり方 (ツール呼び出しだけで終わった回など) も
+    ある。断片で立てた印をそのままにすると、画面には何も残っていないのに
+    「届いた」と数えてしまい、無言のまま終わる。
+
+    そこで断片は出どころごとに ``pending`` へ置き、取り消しは同じ出どころの
+    ものだけを消す。確定した発言やエラー通知は撤回されないので ``value`` に
+    立てる。
+    """
+    if not isinstance(event, dict):
+        return
+    etype = event.get("type")
+    pending: Dict[str, bool] = outcome_seen.setdefault("pending", {})
+    if etype == "streaming_discard":
+        pending.pop(_stream_key(event), None)
+        return
+    if etype not in _OUTCOME_EVENT_TYPES:
+        return
+    if etype in _CONTENT_BEARING_TYPES and not str(event.get("content") or "").strip():
+        return
+    if etype == "streaming_chunk":
+        pending[_stream_key(event)] = True
+        return
+    outcome_seen["value"] = True
+
+
+def _outcome_reached(outcome_seen: Dict[str, Any]) -> bool:
+    """「ユーザーに何かが届いた」と言えるか。
+
+    確定した結果が一つでもあるか、取り消されずに残っている断片があれば届いている。
+    """
+    return bool(outcome_seen.get("value")) or bool(outcome_seen.get("pending"))
+
+
+def _note_speech(spoke: Dict[str, Any], event: Any) -> None:
+    """「ペルソナの発言が保存されたか」を、イベント 1 件分だけ進める。
+
+    見るのは保存完了イベントだけ。かつては画面イベント (``say`` /
+    ``streaming_chunk``) で立てていたが、それは「画面へ流れた」の証拠であって
+    「保存された」の証拠ではない — その材料で続きの生成の印を降ろすと、保存
+    されていないのにボタンが消える回と、保存されたのにボタンが残る回の両方が
+    生まれた。保存完了イベントは finalize の成功後にだけ流れ、撤回されない
+    ので、断片の取り消し (``streaming_discard``) の追跡も要らなくなった。
+    設計: docs/issues/archive/stream_completion_is_not_proof_of_persistence.md
+    """
+    if not isinstance(event, dict):
+        return
+    if event.get("type") != _PERSISTED_EVENT_TYPE:
+        return
+    spoke["value"] = True
+
 class RuntimeService(
     VisitorMixin, GatewayMixin, SDSMixin, DatabasePollingMixin, PersonaMixin
 ):
@@ -78,6 +191,8 @@ class RuntimeService(
         # passthrough hooks
         self._handle_visitor_arrival = manager._handle_visitor_arrival
         self._save_building_histories = manager._save_building_histories
+        self._save_modified_buildings = manager._save_modified_buildings
+        self.add_building_event = manager.add_building_event
         self._register_with_sds = manager._register_with_sds
         self._update_cities_from_sds = manager._update_cities_from_sds
         self._load_cities_from_db = manager._load_cities_from_db
@@ -192,7 +307,8 @@ class RuntimeService(
             target_building_id,
         )
         if success:
-            self.state.user_current_building_id = target_building_id
+            # state.user_current_building_id は move_entity が canonical sync
+            # 済み (W7 柱5: 位置属性の更新は移動 service の責務)
             logging.debug("[runtime] move_user success: now %s", target_building_id)
             logging.debug("[MANAGER_MOVE] Move success. New state bid: %s", self.state.user_current_building_id)
             # Emit user_move trigger
@@ -218,14 +334,12 @@ class RuntimeService(
         persona_id: str,
         from_id: str,
         to_id: str,
-        db_session=None,
     ) -> Tuple[bool, Optional[str]]:
         result = self.occupancy_manager.move_entity(
             entity_id=persona_id,
             entity_type="ai",
             from_id=from_id,
             to_id=to_id,
-            db_session=db_session,
         )
         # Emit persona_move trigger on success
         if result[0] and TRIGGERS_AVAILABLE and hasattr(self.manager, "_emit_trigger"):
@@ -246,6 +360,8 @@ class RuntimeService(
             p.persona_name
             for p in self.personas.values()
             if not p.is_dispatched and p.current_building_id != here
+            # 特殊ペルソナ (Ruler 等) は通常世界の召喚対象にしない
+            and p.persona_role is None
         ]
         return sorted(summonable)
 
@@ -278,15 +394,21 @@ class RuntimeService(
                 return candidate
         return building_id
 
-    def summon_persona(self, persona_id: str) -> Tuple[bool, Optional[str]]:
+    def summon_persona(
+        self, persona_id: str, target_building_id: Optional[str] = None
+    ) -> Tuple[bool, Optional[str]]:
         persona = self.personas.get(persona_id)
         if not persona:
             return False, "Persona not found."
 
-        # Move to user's CURRENT building, not just user_room_id
-        target_building_id = self.state.user_current_building_id
+        # C-1 閲覧モード以降、 frontend が viewing 中の building を渡してくる場合は
+        # それを優先する (= 「閲覧中の部屋を管理対象にする」)。 fallback として
+        # サーバ側の実滞在地 user_current_building_id を使う。
+        target_building_id = (
+            target_building_id or self.state.user_current_building_id
+        )
         if not target_building_id:
-            return False, "User's current building is unknown."
+            return False, "Target building is unknown."
 
         target_history_building_id = self._canonical_building_id(target_building_id)
         prev = persona.current_building_id
@@ -310,30 +432,25 @@ class RuntimeService(
             persona._save_session_metadata()
             return False, reason
 
-        persona.current_building_id = target_building_id
-        persona.auto_count = 0
-        persona._mark_entry(target_building_id)
-        persona.history_manager.add_to_building_only(
-            target_history_building_id,
-            {
-                "role": "assistant",
-                "content": f'<div class="note-box">🏢 Building:<br><b>{persona.persona_name}が入室しました</b></div>',
-            },
-            heard_by=self._occupants_snapshot(target_building_id),
-        )
-        persona._save_session_metadata()
-        persona.run_auto_conversation(initial=True)
+        # persona.current_building_id / _mark_entry / _save_session_metadata は
+        # move_entity が canonical sync 済み (W7 柱5)
         return True, None
 
-    def end_conversation(self, persona_id: str) -> str:
+    def end_conversation(
+        self, persona_id: str, building_id: Optional[str] = None
+    ) -> str:
         persona = self.personas.get(persona_id)
         if not persona:
             return f"Error: Persona with ID '{persona_id}' not found."
 
-        # Check if persona is in the same building as the user (not just user_room_id)
-        current_user_building = self.state.user_current_building_id
+        # C-1 閲覧モード以降、 frontend が viewing 中の building を渡してくる場合は
+        # それを優先する (= 「閲覧中の部屋から persona を退室させる」)。 fallback と
+        # してサーバ側の実滞在地 user_current_building_id を使う。
+        current_user_building = (
+            building_id or self.state.user_current_building_id
+        )
         if not current_user_building:
-            return "Error: User's current building is unknown."
+            return "Error: Target building is unknown."
 
         if persona.current_building_id != current_user_building:
             return f"{persona.persona_name} is not in the current building."
@@ -350,20 +467,95 @@ class RuntimeService(
         if not success:
             return f"Error: Failed to move: {reason}"
 
-        persona.current_building_id = private_room_id
-        history_building_id = self._canonical_building_id(current_user_building)
-        persona.history_manager.add_to_building_only(
-            history_building_id,
-            {
-                "role": "assistant",
-                "content": f'<div class="note-box">🏢 Building:<br><b>{persona.persona_name}が退室しました</b></div>',
-            },
-            heard_by=self._occupants_snapshot(current_user_building),
-        )
-        persona._save_session_metadata()
+        # 位置属性と cursor 儀式は move_entity が canonical sync 済み (W7 柱5)
         return f"Conversation with '{persona.persona_name}' ended."
 
     # ----- Conversation handlers -----
+
+    def _build_responding_personas(self, building_id: str) -> List[Any]:
+        """Building 内発話に応答するペルソナのリストを構築する。
+
+        通常は building の occupants (派遣中を除く)。game Region 内の Building では
+        Ruler を**先頭**に注入する (ruler_first: Ruler が最初に裁定し、その後に
+        同行ペルソナが反応する)。Ruler は控室に常駐したまま Region 内全 Building の
+        発話を受ける。設計: temp/region_rpg_intent.md §B, §E-2
+        """
+        personas = [
+            self.personas[pid]
+            for pid in self.occupants.get(building_id, [])
+            if pid in self.personas and not self.personas[pid].is_dispatched
+        ]
+        try:
+            top_region = self.manager.get_top_region_of_building(building_id)
+        except Exception:
+            logging.exception(
+                "[runtime] Failed to resolve region of building %s; skipping ruler injection",
+                building_id,
+            )
+            return personas
+        if top_region and top_region.is_game_region and top_region.ruler_id:
+            ruler = self.personas.get(top_region.ruler_id)
+            if ruler is None:
+                logging.warning(
+                    "[runtime] Region '%s' has ruler_id '%s' but no such persona is loaded",
+                    top_region.region_id, top_region.ruler_id,
+                )
+            elif not ruler.is_dispatched:
+                personas = [ruler] + [p for p in personas if p.persona_id != ruler.persona_id]
+        return personas
+
+    def _persist_user_utterance(
+        self,
+        building_id: str,
+        message: str,
+        metadata: Optional[Dict[str, Any]],
+        responding_personas: Sequence[Any],
+        client_message_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Durably store a user command before any Pulse or side effect starts.
+
+        現在地検証は INSERT と同一トランザクション (W7 柱5 / Codex 第六巡 P1):
+        入口の in-memory 照合の後・永続化の前に別デバイスの移動が確定しても、
+        旧 Building へ発言が残らない。競合時は ``_location_conflict`` dict を
+        返す (何も書いていない)。
+        """
+        from database.building_messages import (
+            insert_building_message_with_location_guard,
+        )
+
+        canonical_bid = self._canonical_building_id(building_id)
+        heard = [
+            *[str(persona.persona_id) for persona in responding_personas],
+            str(self.state.user_id),
+        ]
+        entry: Dict[str, Any] = {
+            "role": "user",
+            "content": message,
+            "timestamp": datetime.now().astimezone().isoformat(),
+            "heard_by": sorted(set(heard)),
+            "ingested_by": [],
+        }
+        if metadata:
+            entry["metadata"] = dict(metadata)
+        if client_message_id:
+            entry["client_message_id"] = client_message_id
+
+        saved = insert_building_message_with_location_guard(
+            self.SessionLocal, canonical_bid, entry,
+            user_id=self.state.user_id,
+            expected_building_id=building_id,
+        )
+        if saved is not None and saved.get("_location_conflict"):
+            return saved
+        if saved is None or not saved.get("message_id"):
+            logging.error(
+                "[runtime] Refusing user dispatch because durable insert failed: "
+                "building=%s client_message_id=%s",
+                canonical_bid,
+                client_message_id,
+            )
+            return None
+        return saved
 
     def handle_user_input(
         self, message: str, metadata: Optional[Dict[str, Any]] = None
@@ -380,11 +572,7 @@ class RuntimeService(
 
         building_id = self.state.user_current_building_id
         logging.debug("[runtime] handle_user_input building_id=%s", building_id)
-        responding_personas = [
-            self.personas[pid]
-            for pid in self.occupants.get(building_id, [])
-            if pid in self.personas and not self.personas[pid].is_dispatched
-        ]
+        responding_personas = self._build_responding_personas(building_id)
         logging.debug(
             "[runtime] handle_user_input responding_personas=%s occupants=%s",
             [p.persona_id for p in responding_personas],
@@ -400,14 +588,51 @@ class RuntimeService(
                 "[runtime] received metadata with keys=%s", list(metadata.keys())
             )
 
-        # SEA runtime handles history recording internally
+        # Durable insert is a hard precondition for cognition and side effects.
+        # This also records the utterance in an empty room.
+        try:
+            saved_user_message = self._persist_user_utterance(
+                building_id,
+                message,
+                metadata,
+                responding_personas,
+            )
+        except Exception:
+            logging.exception("[runtime] Failed to persist user utterance")
+            saved_user_message = None
+        if saved_user_message is not None and saved_user_message.get(
+            "_location_conflict"
+        ):
+            return [
+                '<div class="note-box">送信処理中に現在地が変わったため、発言は受け付けられませんでした。</div>'
+            ]
+        if saved_user_message is None:
+            return [
+                '<div class="note-box">発言を保存できなかったため、処理を開始しませんでした。再送してください。</div>'
+            ]
+
+        # ユーザー発話イベントの受け口 (saiverse.user_conversation)。
+        # 会話が開いていれば直接応答を起動し、閉じていて別の活動中なら on_event
+        # 判断点で仲裁する (track_retirement.md §7.4 直結化)。
+        user_id_str = str(self.state.user_id)
         replies: List[str] = []
         for persona in responding_personas:
-            # SEA経由でユーザー入力を処理
-            self.manager.run_sea_user(persona, building_id, message)
+            captured_persona = persona
+
+            def _invoke_main_line(p=captured_persona):
+                self.manager.run_sea_user(p, building_id, message)
+
+            # pulse_dispatch.md §7: PulseDispatcher 経由で起動 (例外時の
+            # フォールバックは Dispatcher が担う)
+            self.manager.pulse_dispatcher.dispatch_user_utterance(
+                persona_id=captured_persona.persona_id,
+                user_id=user_id_str,
+                event=user_entry,
+                invoke_main_line=_invoke_main_line,
+            )
         logging.debug("[runtime] handle_user_input collected %d replies", len(replies))
 
-        self._save_building_histories()
+        self._save_modified_buildings()
         for persona in self.personas.values():
             persona._save_session_metadata()
         return replies
@@ -415,34 +640,65 @@ class RuntimeService(
     def handle_user_input_stream(
         self, message: str, metadata: Optional[Dict[str, Any]] = None, meta_playbook: Optional[str] = None,
         args: Optional[Dict[str, Any]] = None, building_id: Optional[str] = None,
+        pre_spells: Optional[List[str]] = None,
+        client_message_id: Optional[str] = None,
     ) -> Iterator[str]:
         logging.debug(
-            "[runtime] handle_user_input_stream called (metadata_present=%s, meta_playbook=%s, args=%s, building_id=%s)",
+            "[runtime] handle_user_input_stream called (metadata_present=%s, meta_playbook=%s, args=%s, building_id=%s, pre_spells=%s, client_message_id=%s)",
             bool(metadata),
             meta_playbook,
             bool(args),
             building_id,
+            pre_spells,
+            client_message_id,
         )
+        # 生 HTML を NDJSON へ流すと、フロントの JSON.parse が落ちて
+        # console.error だけになり、画面には何も出ない (下の not_in_building が
+        # 同じ理由で JSON へ直された 2026-07-21 の指摘が、この 2 箇所には
+        # 届いていなかった)。
         if not message or not str(message).strip():
             logging.error("[runtime] handle_user_input_stream got empty message; aborting to avoid corrupt routing")
-            yield '<div class="note-box">入力が空でした。再送してください。</div>'
+            yield json.dumps({
+                "type": "error",
+                "error_code": "empty_message",
+                "content": "入力が空でした。もう一度送ってください。",
+            }, ensure_ascii=False) + "\n"
             return
 
         building_id = building_id or self.state.user_current_building_id
         if not building_id:
-            yield '<div class="note-box">エラー: ユーザーの現在地が不明です。</div>'
+            yield json.dumps({
+                "type": "error",
+                "error_code": "no_current_building",
+                "content": "現在いる場所が分からないため、発言を届けられませんでした。",
+            }, ensure_ascii=False) + "\n"
+            return
+        # 分離監査 P1-3 (W7 柱5) の多層防御: HTTP 層 (/chat/send) と同じ現在地
+        # 照合。HTTP を通らない呼び出し元が別 Building へ発言を配送する経路も塞ぐ。
+        if building_id != self.state.user_current_building_id:
+            logging.warning(
+                "[runtime] refusing utterance to non-current building %s "
+                "(current=%s)", building_id, self.state.user_current_building_id,
+            )
+            # NDJSON ストリームの契約に合わせて JSON イベントで返す (生 HTML は
+            # フロントの JSON.parse で破棄され、エラーが表示されない —
+            # 2026-07-21 Codex 第五巡 P2)
+            yield json.dumps({
+                "type": "error",
+                "error_code": "not_in_building",
+                "content": "現在地ではない建物への発言はできません。",
+                "current_building_id": self.state.user_current_building_id,
+            }, ensure_ascii=False) + "\n"
             return
         logging.debug("[runtime] handle_user_input_stream building_id=%s", building_id)
-        responding_personas = [
-            self.personas[pid]
-            for pid in self.occupants.get(building_id, [])
-            if pid in self.personas and not self.personas[pid].is_dispatched
-        ]
+        responding_personas = self._build_responding_personas(building_id)
         logging.debug(
             "[runtime] handle_user_input_stream responding_personas=%s occupants=%s",
             [p.persona_id for p in responding_personas],
             self.occupants.get(building_id, []),
         )
+
+        user_id_str = str(self.state.user_id)
 
         user_entry = {"role": "user", "content": message}
         if metadata:
@@ -455,6 +711,12 @@ class RuntimeService(
         # Stop event for user-initiated cancellation
         stop_event = threading.Event()
         self.manager._active_stop_events[building_id] = stop_event
+
+        # 「ユーザーに何かが届いたか」の記録。失敗の入口を一つずつ塞ぐのではなく、
+        # **結果を作る場所で一度だけ検査する** — 入口を数え切る守り方は必ず漏れる
+        # (応答者ゼロ・握り潰された例外・早期 return が、どれも同じ「無言」に
+        # 落ちていた)。設計: docs/issues/user_utterance_path_failure_inventory.md
+        outcome_seen: Dict[str, Any] = {"value": False, "pending": {}}
 
         def _enrich_event(event):
             """Enrich streaming events with resolved persona name and avatar URL."""
@@ -469,22 +731,111 @@ class RuntimeService(
                             avatar_path_to_url(p.avatar_image)
                             or "/api/static/builtin_icons/host.png"
                         )
+            _note_outcome(outcome_seen, event)
             response_queue.put(event)
+
+        # Register the SSE callback so on_track_activated 経由で起動される
+        # main_line pulse もこの SSE response_queue に events を流せる。
+        # finally 節で必ず削除する。
+        self.manager._active_sse_callbacks[building_id] = _enrich_event
 
         def backend_worker():
             try:
+                try:
+                    saved_user_message = self._persist_user_utterance(
+                        building_id,
+                        message,
+                        metadata,
+                        responding_personas,
+                        client_message_id,
+                    )
+                except Exception:
+                    logging.exception("[runtime] Failed to persist user utterance")
+                    saved_user_message = None
+
+                if saved_user_message is not None and saved_user_message.get(
+                    "_location_conflict"
+                ):
+                    # 永続化 tx 内の現在地検証で競合検出 (W7 / Codex 第六巡 P1)
+                    _enrich_event({
+                        "type": "error",
+                        "error_code": "not_in_building",
+                        "content": (
+                            "送信処理中に現在地が変わったため、発言は受け付け"
+                            "られませんでした。最新状態に同期します。"
+                        ),
+                        "current_building_id": saved_user_message.get(
+                            "current_building_id"
+                        ),
+                    })
+                    return
+
+                if saved_user_message is None:
+                    _enrich_event({
+                        "type": "error",
+                        "error_code": "persistence_failed",
+                        "content": (
+                            "発言を保存できなかったため、応答処理を開始しませんでした。"
+                            "同じ内容を再送できます。"
+                        ),
+                    })
+                    return
+
+                user_msg_id = str(saved_user_message["message_id"])
+                _enrich_event({"type": "user_message_id", "message_id": user_msg_id})
+
+                # A duplicate idempotency key is the same utter command, not a
+                # new request.  Never restart LLM/tool side effects; clients can
+                # refresh history using the returned canonical message id.
+                if saved_user_message.get("_was_inserted") is False:
+                    _enrich_event({
+                        "type": "duplicate_command",
+                        "message_id": user_msg_id,
+                        "client_message_id": client_message_id,
+                        "content": "同じ送信IDの発言は既に受理されています。",
+                    })
+                    return
+
                 for persona in responding_personas:
                     if stop_event.is_set():
                         logging.info("[runtime] Stop event detected; breaking persona loop for building %s", building_id)
                         response_queue.put({"type": "cancelled", "content": "生成を中止しました。"})
                         break
-                    # SEA実行。イベントはコールバック経由でキューに送る
-                    self.manager.run_sea_user(
-                        persona, building_id, message,
-                        metadata=metadata,
-                        meta_playbook=meta_playbook,
-                        args=args,
-                        event_callback=_enrich_event
+
+                    # ユーザー発話イベントの受け口。pulse_dispatch.md §7 で
+                    # PulseDispatcher 経由に統一済。会話が開いているかの判定と、
+                    # 別の活動中の仲裁 (on_event 判断点直結) / 会話の開始は
+                    # saiverse.user_conversation 内部で行う。
+                    captured_persona = persona
+
+                    def _invoke_main_line(p=captured_persona):
+                        self.manager.run_sea_user(
+                            p, building_id, message,
+                            metadata=metadata,
+                            meta_playbook=meta_playbook,
+                            args=args,
+                            event_callback=_enrich_event,
+                            pre_spells=pre_spells,
+                        )
+
+                    # 会話開始経路 (user_input は空で auto_ingest が拾う) にも同じ
+                    # 起動オプションを届ける。渡さないと、新規会話の初回発話だけ
+                    # 選択 Playbook・引数・pre-spell・SSE 出力が落ちて、継続発話と
+                    # 挙動が変わる (2026-08-21 Codex 指摘 5)。
+                    pulse_options = {
+                        "metadata": metadata,
+                        "meta_playbook": meta_playbook,
+                        "args": args,
+                        "pre_spells": pre_spells,
+                        "event_callback": _enrich_event,
+                    }
+
+                    self.manager.pulse_dispatcher.dispatch_user_utterance(
+                        persona_id=captured_persona.persona_id,
+                        user_id=user_id_str,
+                        event=user_entry,
+                        invoke_main_line=_invoke_main_line,
+                        pulse_options=pulse_options,
                     )
                     # Check stop event after each persona completes
                     if stop_event.is_set():
@@ -494,21 +845,53 @@ class RuntimeService(
             except LLMError as e:
                 logging.error("SEA worker LLM error: %s", e, exc_info=True)
                 if stop_event.is_set():
-                    response_queue.put({"type": "cancelled", "content": "生成を中止しました。"})
+                    _enrich_event({"type": "cancelled", "content": "生成を中止しました。"})
                 else:
-                    response_queue.put(e.to_dict())
+                    _enrich_event(e.to_dict())
             except Exception as e:
                 logging.error("SEA worker error", exc_info=True)
                 if stop_event.is_set():
-                    response_queue.put({"type": "cancelled", "content": "生成を中止しました。"})
+                    _enrich_event({"type": "cancelled", "content": "生成を中止しました。"})
                 else:
-                    response_queue.put({
+                    _enrich_event({
                         "type": "error",
                         "error_code": "unknown",
                         "content": "予期せぬエラーが発生しました。",
                         "technical_detail": str(e),
                     })
             finally:
+                # 出口 3: 発言は受け取ったのに、何ひとつ画面へ出ないまま終わる回を
+                # ここで捕まえる。上のどの経路を通っても (応答者ゼロ / 早期 return /
+                # 握り潰された失敗 / 例外) 最後は必ずここへ来るので、検査は一箇所で
+                # 足りる。理由が言えないときも「起きたこと」だけは必ず伝える。
+                if not _outcome_reached(outcome_seen) and not stop_event.is_set():
+                    logging.warning(
+                        "[runtime] the utterance was accepted but nothing reached the "
+                        "user (building=%s, responding_personas=%d)",
+                        building_id, len(responding_personas),
+                    )
+                    # 「返事が生まれなかった」には二種類ある。応答できる相手が
+                    # そもそも居ない回は、やり直しても永久に結果が変わらない —
+                    # 同じ札で扱うと、画面が「再送から応答をもう一度求められ
+                    # ます」という**果たせない約束**を出す。ここは理由を知って
+                    # いる (数を数えてログにも出している) ので、知っていること
+                    # を言う。
+                    if not responding_personas:
+                        _enrich_event({
+                            "type": "error",
+                            "error_code": "no_responder",
+                            "content": (
+                                "この場所には、応答できる相手がいません。"
+                            ),
+                        })
+                    else:
+                        _enrich_event({
+                            "type": "error",
+                            "error_code": "no_response",
+                            "content": (
+                                "発言は受け取りましたが、返事が生まれませんでした。"
+                            ),
+                        })
                 response_queue.put(None)  # 番兵
 
         threading.Thread(target=backend_worker, daemon=True).start()
@@ -534,18 +917,427 @@ class RuntimeService(
                     # プロキシ等のタイムアウトを防ぐためのPing
                     yield json.dumps({"type": "ping"}, ensure_ascii=False) + "\n"
         finally:
-            # Clean up stop event
-            self.manager._active_stop_events.pop(building_id, None)
+            # **読み手が去っても生成は止めない。** 詳しくは
+            # ``_stream_persona_pulse`` の同じ節を参照。
+            #
+            # 片付けるのは**自分が置いたもの**だけ。この registry は建物ごとに
+            # 一枠しかないので、同じ建物で次のストリームが始まると上書きされる。
+            # 無条件に pop すると、先に終わった側が後から始まった側の停止イベント
+            # とコールバックまで巻き添えで消し、そちらの「停止」が効かなくなる。
+            if self.manager._active_stop_events.get(building_id) is stop_event:
+                self.manager._active_stop_events.pop(building_id, None)
+            if self.manager._active_sse_callbacks.get(building_id) is _enrich_event:
+                self.manager._active_sse_callbacks.pop(building_id, None)
 
-            # Persist building histories and session metadata.
-            # MUST be inside finally: this generator can be closed via
-            # GeneratorExit (e.g. HTTP disconnect after streaming completes),
-            # and code after try/finally would never execute in that case.
-            bh_sizes = {bid: len(h) for bid, h in self.building_histories.items() if h}
-            logging.debug("[runtime] pre-save building_histories sizes: %s", bh_sizes)
-            self._save_building_histories()
-            for persona in self.personas.values():
-                persona._save_session_metadata()
+    # ------------------------------------------------------------------
+    # やり直しと続き — ユーザーの一押しから起こす生成
+    #
+    # 追加の推論はすべてボタンの後ろに置く (2026-08-25 まはー裁定)。この二つの
+    # 口はどちらも「発言はもう履歴にある」前提で、**応答だけ**を起こす。だから
+    # ユーザーの発言を作り直したり、二重に保存したりしない。
+    # 設計: docs/issues/user_utterance_path_failure_inventory.md
+    # ------------------------------------------------------------------
+
+    #: 中断された発言の続きを頼むとき、プロンプトの入力欄に載せる文。
+    #:
+    #: ``<system>`` で包むのは「これは機構の言葉であって、ユーザーの発言では
+    #: ない」という印。ユーザー名義のテキストを機構が作らないことは SAIVerse の
+    #: 一線なので、入力欄の席を借りるときは必ずこの形にする (建物ログの取り込みが
+    #: システム通知に使っている包みと同じ)。この文は永続化されない — ユーザー
+    #: レーンの ``user_input`` はプロンプトへ渡るだけで、記憶には残らない。
+    CONTINUE_INSTRUCTION = (
+        "<system>あなたの直前の発言は、途中で途切れたまま終わっています。"
+        "その続きを、前の発言にそのままつながる形で話してください。"
+        "言い直しや要約はせず、続きだけを述べてください。</system>"
+    )
+
+    def _find_building_message(
+        self, building_id: str, message_id: str,
+    ) -> Tuple[Optional[Dict[str, Any]], str]:
+        """建物履歴から message_id の 1 件を引く。
+
+        戻り値は ``(件, 理由)`` で、理由は ``"found"`` / ``"not_found"`` /
+        ``"unavailable"`` の三択。**「記録に無い」と「履歴を読めなかった」を
+        同じ値に潰さない** — 読めなかった回に「記録に残っていません。もう一度
+        送ってください」と案内すると、ユーザーが送り直して同じ発言が二度載る。
+        それを防ぐのが「再送」の口の存在理由なので、潰すと裏口から破ることに
+        なる。兄弟の ``withdraw_building_message_in_db`` は最初からこの区別を
+        持っており (``"unavailable"``)、こちらだけが持っていなかった。
+        """
+        try:
+            history = self.manager.get_building_history(building_id)
+        except Exception:
+            logging.exception(
+                "[runtime] failed to read the building history (building=%s)",
+                building_id,
+            )
+            return None, "unavailable"
+        for msg in history or []:
+            if str(msg.get("message_id")) == str(message_id):
+                return msg, "found"
+        return None, "not_found"
+
+    def _stream_persona_pulse(
+        self, building_id: str, persona: Any, user_input: str,
+        spoke: Optional[Dict[str, bool]] = None,
+        on_saved: Optional[Any] = None,
+        pre_generation_check: Optional[Any] = None,
+    ) -> Iterator[str]:
+        """1 体のペルソナの Pulse を起こし、その NDJSON イベントを流す。
+
+        ``handle_user_input_stream`` と同じ器 (キュー + ワーカー + 出口 3 の検査)
+        を使うが、**ユーザー発言の永続化は行わない** — 発言はもう履歴にあるので、
+        ここでもう一度書くと同じ発言が二度載る。
+
+        ``spoke`` を渡すと、**この呼び出しが起こした Pulse** の発言が世界に
+        保存されたとき (保存完了イベントを見たとき) だけ ``spoke["value"]`` が
+        ``True`` になる。数えるのは Pulse へ直接渡した口に届いた信号だけ —
+        同じ関数は ``_active_sse_callbacks`` にも登録され、そちらには**別の
+        Pulse** (会話開始の main_line 等) のイベントも流れ込むので、そこで
+        数えると別試行の保存で状態が進む。呼び出し元が「走らせた」と「発言が
+        保存された」を取り違えないための報告口で、``outcome_seen`` とは別物 —
+        あちらは画面の問いで、エラー通知も「出口が塞がっていない」として数える。
+
+        ``on_saved`` を渡すと、Pulse が終わった時点で保存の信号を見ていた場合に
+        **ワーカースレッドで** 1 回呼ぶ。読み手 (この generator の消費者) が
+        切断していても呼ばれる — 「保存成功が確定した側」に権威を置くための口
+        (docs/issues/archive/stream_completion_is_not_proof_of_persistence.md)。
+
+        ``pre_generation_check`` は生成の開始前に Beat ロックの内側で走る
+        再検査 (sea/runtime.py の run_meta_user 参照)。
+        """
+        response_queue: queue.Queue = queue.Queue()
+        stop_event = threading.Event()
+        self.manager._active_stop_events[building_id] = stop_event
+
+        outcome_seen: Dict[str, Any] = {"value": False, "pending": {}}
+
+        def _enrich_event(event):
+            if isinstance(event, dict) and event.get("persona_id"):
+                p = self.personas.get(event["persona_id"])
+                if p:
+                    if not event.get("persona_name"):
+                        event["persona_name"] = p.persona_name
+                    if not event.get("persona_avatar"):
+                        event["persona_avatar"] = (
+                            avatar_path_to_url(p.avatar_image)
+                            or "/api/static/builtin_icons/host.png"
+                        )
+            _note_outcome(outcome_seen, event)
+            response_queue.put(event)
+
+        def _pulse_event(event):
+            # この Pulse へ直接渡す口。保存の信号 (spoke) はここでだけ数える —
+            # _active_sse_callbacks 経由 (= 別の Pulse のイベント) では数えない。
+            if spoke is not None:
+                _note_speech(spoke, event)
+            _enrich_event(event)
+
+        self.manager._active_sse_callbacks[building_id] = _enrich_event
+
+        def worker():
+            try:
+                self.manager.run_sea_user(
+                    persona, building_id, user_input,
+                    event_callback=_pulse_event,
+                    pre_generation_check=pre_generation_check,
+                )
+            except LLMError as e:
+                logging.error("pulse worker LLM error: %s", e, exc_info=True)
+                if stop_event.is_set():
+                    _enrich_event({"type": "cancelled", "content": "生成を中止しました。"})
+                else:
+                    _enrich_event(e.to_dict())
+            except Exception as e:
+                logging.error("pulse worker error", exc_info=True)
+                if stop_event.is_set():
+                    _enrich_event({"type": "cancelled", "content": "生成を中止しました。"})
+                else:
+                    _enrich_event({
+                        "type": "error",
+                        "error_code": "unknown",
+                        "content": "予期せぬエラーが発生しました。",
+                        "technical_detail": str(e),
+                    })
+            finally:
+                if not _outcome_reached(outcome_seen) and not stop_event.is_set():
+                    logging.warning(
+                        "[runtime] the pulse produced nothing for the user "
+                        "(building=%s persona=%s)",
+                        building_id, getattr(persona, "persona_id", None),
+                    )
+                    _enrich_event({
+                        "type": "error",
+                        "error_code": "no_response",
+                        "content": "返事が生まれませんでした。",
+                    })
+                # 保存の信号を見た Pulse の後処理 (続きの生成の印降ろし等)。
+                # 読み手の生存とは無関係に、Pulse を走らせたこのスレッドが呼ぶ —
+                # 読み手側 (generator の finally) に置くと、切断後に保存が確定
+                # した回に永久に呼ばれない。ストリームを閉じる前に呼ぶことで、
+                # 読み手が終端を見た時点で状態は更新済みになる。
+                if spoke is not None and spoke.get("value") and on_saved is not None:
+                    try:
+                        on_saved()
+                    except Exception:
+                        logging.exception(
+                            "[runtime] the after-save hook failed "
+                            "(building=%s persona=%s)",
+                            building_id, getattr(persona, "persona_id", None),
+                        )
+                response_queue.put(None)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+        try:
+            while True:
+                try:
+                    item = response_queue.get(timeout=2.0)
+                    if item is None:
+                        break
+                    yield json.dumps(item, ensure_ascii=False) + "\n"
+                    if isinstance(item, dict) and item.get("type") == "cancelled":
+                        while True:
+                            if response_queue.get(timeout=5.0) is None:
+                                break
+                        break
+                except queue.Empty:
+                    yield json.dumps({"type": "ping"}, ensure_ascii=False) + "\n"
+        finally:
+            # **読み手が去っても生成は止めない。**
+            #
+            # ここは一度「画面が閉じたら止める」を入れて撤回した場所 (2026-08-26)。
+            # SAIVerse のペルソナはブラウザが開いているかどうかと無関係に生きて
+            # いる — 自律行動もするし、時刻から発言も起こす。画面を閉じたことを
+            # 理由に認知を打ち切ると、ユーザーの発言だけが残って返事が生まれない
+            # 状態を**こちらから作る**ことになる。この issue がずっと潰してきた
+            # 「無言で終わる」そのもの。
+            #
+            # さらに止める手段 (``cancel_active_generation``) は建物にいる全員の
+            # 実行中の要求を取り消すので、画面を閉じただけで、無関係な自律行動まで
+            # 巻き添えで止まる。しかも記録には「ユーザーが止めた」と残る。
+            #
+            # 片付けるのは自分が置いたものだけ (同上)。
+            if self.manager._active_stop_events.get(building_id) is stop_event:
+                self.manager._active_stop_events.pop(building_id, None)
+            if self.manager._active_sse_callbacks.get(building_id) is _enrich_event:
+                self.manager._active_sse_callbacks.pop(building_id, None)
+
+    def continue_persona_message_stream(self, message_id: str) -> Iterator[str]:
+        """途中で終わったペルソナの発言の、続きだけを起こす。"""
+        building_id = self.state.user_current_building_id
+        if not building_id:
+            yield json.dumps({
+                "type": "error",
+                "error_code": "no_current_building",
+                "content": "現在いる場所が分からないため、続きを起こせませんでした。",
+            }, ensure_ascii=False) + "\n"
+            return
+
+        target, lookup = self._find_building_message(building_id, message_id)
+        if lookup == "unavailable":
+            yield json.dumps({
+                "type": "error",
+                "error_code": "history_unavailable",
+                "content": "履歴を読めなかったため、続きを起こせませんでした。"
+                           "少し置いてもう一度お試しください。",
+            }, ensure_ascii=False) + "\n"
+            return
+        if target is None or target.get("role") != "assistant":
+            yield json.dumps({
+                "type": "error",
+                "error_code": "message_not_found",
+                "content": "続きを起こす発言が見つかりませんでした。",
+            }, ensure_ascii=False) + "\n"
+            return
+        if not (target.get("metadata") or {}).get("_interrupted"):
+            yield json.dumps({
+                "type": "error",
+                "error_code": "not_interrupted",
+                "content": "この発言は途中で終わっていないため、続きはありません。",
+            }, ensure_ascii=False) + "\n"
+            return
+
+        persona = self.personas.get(target.get("persona_id"))
+        if persona is None:
+            yield json.dumps({
+                "type": "error",
+                "error_code": "persona_not_found",
+                "content": "発言したペルソナが見つかりませんでした。",
+            }, ensure_ascii=False) + "\n"
+            return
+
+        # 印を降ろす権威は**保存成功が確定した側** (Pulse を走らせたワーカー
+        # スレッド) に置く。読み手 (この generator の消費者 = ブラウザ) の
+        # finally に置くと、読み手が切断した後に保存の信号が届いた回に印が
+        # 永久に残り、次の一押しで二つ目の続きが生まれる (Codex #4 — この束が
+        # 塞ごうとした穴そのもの)。照合は二重: (1) 信号はこの呼び出しが起こした
+        # Pulse の直通の口でだけ数える (別試行の信号では降ろさない —
+        # _stream_persona_pulse の spoke 参照)、(2) 降ろす対象はこの閉包が
+        # 束縛した元の発言 (message_id) だけ。
+        def _clear_interrupted_mark():
+            # 続きの保存完了イベントを見た。元の発言はもう「続きを待っている」
+            # 状態ではないので、印を降ろしてボタンを消す (中断があった事実は、
+            # 続けて並ぶ 2 つの発言そのものが残す)。**印の書き込みに失敗しても
+            # 本体の結果は変えない** — 印が残った回はもう一度押せるだけで、
+            # 害にならない (失敗は _stream_persona_pulse 側が記録する)。
+            persona.history_manager.update_building_message(
+                building_id, str(message_id),
+                metadata={**(target.get("metadata") or {}), "_interrupted": False},
+            )
+
+        spoke: Dict[str, bool] = {"value": False}
+        yield from self._stream_persona_pulse(
+            building_id, persona, self.CONTINUE_INSTRUCTION, spoke=spoke,
+            on_saved=_clear_interrupted_mark,
+        )
+        # 保存の信号が来なかった回は印が残る (ボタンが出続ける側)。続きが
+        # 一言も生まれなかった回 (LLM エラー等) と、保存が失敗した回がそこに
+        # 落ちる。降ろしてしまうとボタンが消え、二度目は ``not_interrupted``
+        # の関所に「この発言は途中で終わっていないため、続きはありません」で
+        # 拒まれる — 途中で終わっているのに、そう言うことになる。
+
+    def retry_user_message_stream(self, message_id: str) -> Iterator[str]:
+        """既にある自分の発言に対して、応答だけをやり直す。
+
+        発言は履歴に残っているので、**送り直さない**。同じ発言が二度載るのを
+        防ぐのがこの口の存在理由で、ユーザーには「再送」の 1 ボタンに見える。
+        """
+        building_id = self.state.user_current_building_id
+        if not building_id:
+            yield json.dumps({
+                "type": "error",
+                "error_code": "no_current_building",
+                "content": "現在いる場所が分からないため、やり直せませんでした。",
+            }, ensure_ascii=False) + "\n"
+            return
+
+        target, lookup = self._find_building_message(building_id, message_id)
+        if lookup == "unavailable":
+            # 読めなかっただけで、発言は残っている可能性が高い。ここで
+            # 「もう一度送ってください」と言うと、送り直しで同じ発言が
+            # 二度載る — この口が防ごうとしているものそのもの。
+            yield json.dumps({
+                "type": "error",
+                "error_code": "history_unavailable",
+                "content": "履歴を読めなかったため、やり直せませんでした。"
+                           "同じ内容を送り直す前に、履歴に残っているかを"
+                           "確認してください。",
+            }, ensure_ascii=False) + "\n"
+            return
+        if target is None or target.get("role") != "user":
+            # 発言が残っていない = 出口 4。手元の文をそのまま送り直せばよいので、
+            # フロントは入力欄への差し戻しへ倒す。
+            yield json.dumps({
+                "type": "error",
+                "error_code": "message_not_found",
+                "content": "この発言は記録に残っていません。もう一度送ってください。",
+            }, ensure_ascii=False) + "\n"
+            return
+
+        responding_personas = self._build_responding_personas(building_id)
+        if not responding_personas:
+            # ① と同じ事実なので同じ札。別々の札で呼ぶと、画面の側が
+            # 「やり直しても無駄」を経路ごとに判断する羽目になる。
+            yield json.dumps({
+                "type": "error",
+                "error_code": "no_responder",
+                "content": "この場所には、応答できる相手がいません。",
+            }, ensure_ascii=False) + "\n"
+            return
+
+        # 生成の開始直前の再検査 (Codex #5a)。API route の門番から生成の開始
+        # までの間に、別の生成が応答を保存し終えている競合の窓がある。生成を
+        # 直列化している既存の排他 = Beat ロック (sea/beat_gate.py、persona 単位)
+        # の内側 — run_meta_user がロックを取った直後・副作用ゼロの地点 — で
+        # 同じ共有判定をもう一度引き、後続の assistant 発言が既に居たら Pulse を
+        # 開始せず正直なイベントを流す。新しい claim/lock は作らない。
+        # 判定不能 (unavailable) は通さない (fail-closed) — 共有判定の docstring
+        # のとおり、読めなかった回に「応答なし」と断定すると、既に答えた発言へ
+        # もう一度応答を起こす扉が開く。
+        def _refuse_if_already_replied() -> Optional[Dict[str, Any]]:
+            from database.building_messages import assistant_reply_exists_after
+            lookup, has_reply = assistant_reply_exists_after(
+                getattr(self, "SessionLocal", None), building_id, str(message_id),
+            )
+            if lookup == "found" and not has_reply:
+                return None
+            if lookup == "found":
+                return {
+                    "type": "error",
+                    "error_code": "already_replied",
+                    "content": "この発言の後に既にペルソナの発言があります。",
+                }
+            if lookup == "not_found":
+                # 門番を通った後に発言が消えた (取り下げ等)。無い発言への応答は
+                # 起こさない。
+                return {
+                    "type": "error",
+                    "error_code": "message_not_found",
+                    "content": "この発言は記録に残っていません。もう一度送ってください。",
+                }
+            return {
+                "type": "error",
+                "error_code": "history_unavailable",
+                "content": "応答の有無をいま確認できません。少し待ってもう一度お試しください。",
+            }
+
+        # 応答は最初の 1 体に絞る。全員に振り直すと、既に答えた相手まで
+        # もう一度喋ることになる。
+        yield from self._stream_persona_pulse(
+            building_id, responding_personas[0], "",
+            pre_generation_check=_refuse_if_already_replied,
+        )
+
+    def withdraw_user_message(self, message_id: str) -> Dict[str, Any]:
+        """まだ誰も読んでいない自分の発言を取り下げ、本文を手元へ返す。
+
+        取り消せるかどうかは好みでは決まらず、**ペルソナがもう読んだか**で決まる
+        (2026-08-25 まはー裁定)。読まれた後に消すと、ペルソナは「聞いた覚えが
+        あるのに記録が無い」状態になり、無言で消えるより悪い。
+        """
+        building_id = self.state.user_current_building_id
+        if not building_id:
+            return {
+                "withdrawn": False, "reason": "unavailable",
+                "message": "現在いる場所が分からないため、取り消せませんでした。",
+            }
+
+        from database.building_messages import withdraw_building_message_in_db
+
+        session_factory = getattr(self, "SessionLocal", None)
+        withdrawn, reason, content = withdraw_building_message_in_db(
+            session_factory, building_id, str(message_id),
+        )
+        if withdrawn:
+            # メモリ内の建物履歴からも落とす (DB だけ消すと、再読込まで画面に残る)。
+            try:
+                history = self.building_histories.get(building_id)
+                if isinstance(history, list):
+                    history[:] = [
+                        m for m in history
+                        if str(m.get("message_id")) != str(message_id)
+                    ]
+            except Exception:
+                logging.exception(
+                    "[runtime] failed to drop the withdrawn message from the "
+                    "in-memory history (msg=%s)", message_id,
+                )
+            return {"withdrawn": True, "reason": reason, "content": content or ""}
+
+        explain = {
+            "already_heard": (
+                "この発言はもうペルソナが聞いています。取り消すと、"
+                "聞いた覚えがあるのに記録が無い状態になるため、取り消せません。"
+            ),
+            "not_found": "この発言は記録に残っていません。",
+            "wrong_role": "取り消せるのは自分の発言だけです。",
+            "unavailable": "取り消しを実行できませんでした。",
+        }
+        return {
+            "withdrawn": False, "reason": reason,
+            "message": explain.get(reason, explain["unavailable"]),
+        }
 
     def preview_context(
         self, message: str, building_id: Optional[str] = None,
@@ -560,11 +1352,7 @@ class RuntimeService(
         if not building_id:
             return []
 
-        responding_personas = [
-            self.personas[pid]
-            for pid in self.occupants.get(building_id, [])
-            if pid in self.personas and not self.personas[pid].is_dispatched
-        ]
+        responding_personas = self._build_responding_personas(building_id)
 
         sea_runtime = self.manager.sea_runtime
         results = []
@@ -580,17 +1368,6 @@ class RuntimeService(
             except Exception:
                 logging.exception("preview_context failed for persona %s", persona.persona_id)
         return results
-
-    def run_scheduled_prompts(self) -> List[str]:
-        replies: List[str] = []
-        for persona in self.personas.values():
-            if getattr(persona, "interaction_mode", "auto") == "auto":
-                replies.extend(persona.run_scheduled_prompt())
-        if replies:
-            self._save_building_histories()
-            for persona in self.personas.values():
-                persona._save_session_metadata()
-        return replies
 
     def start_autonomous_conversations(self) -> None:
         if self.state.autonomous_conversation_running:
@@ -703,103 +1480,6 @@ class RuntimeService(
                 )
         finally:
             db.close()
-
-    # ----- Exploration -----
-
-    def explore_city(self, persona_id: str, target_city_id: str) -> None:
-        persona = self.personas.get(persona_id)
-        if not persona:
-            logging.error("Cannot explore: Persona %s not found.", persona_id)
-            return
-
-        feedback_message = ""
-        if target_city_id == self.state.city_name:
-            logging.info(
-                "Persona %s is exploring the current city: %s",
-                persona_id,
-                self.state.city_name,
-            )
-            building_list_str = "\n".join(
-                [
-                    f"- {b.name} ({b.building_id}): {b.description}"
-                    for b in self.buildings
-                ]
-            )
-            feedback_message = (
-                f"現在いるCity '{self.state.city_name}' を探索した結果、以下の建物が見つかりました。\n"
-                f"{building_list_str}"
-            )
-        else:
-            target_city_info = self.cities_config.get(target_city_id)
-            if not target_city_info:
-                feedback_message = (
-                    f"探索失敗: City '{target_city_id}' は見つかりませんでした。"
-                )
-                logging.warning(
-                    "Persona %s tried to explore non-existent city '%s'.",
-                    persona_id,
-                    target_city_id,
-                )
-            else:
-                target_api_url = (
-                    f"{target_city_info['api_base_url']}/inter-city/buildings"
-                )
-                try:
-                    logging.info(
-                        "Persona %s is exploring %s at %s",
-                        persona_id,
-                        target_city_id,
-                        target_api_url,
-                    )
-                    response = self.sds_session.get(target_api_url, timeout=10)
-                    response.raise_for_status()
-                    buildings_data = response.json()
-
-                    if not buildings_data:
-                        feedback_message = (
-                            f"City '{target_city_id}' を探索しましたが、公開されている建物は見つかりませんでした。"
-                        )
-                    else:
-                        building_list_str = "\n".join(
-                            [
-                                f"- {b['building_name']} ({b['building_id']}): {b['description']}"
-                                for b in buildings_data
-                            ]
-                        )
-                        feedback_message = (
-                            f"City '{target_city_id}' を探索した結果、以下の建物が見つかりました。\n"
-                            f"{building_list_str}"
-                        )
-                except requests.exceptions.RequestException as exc:
-                    feedback_message = (
-                        f"探索失敗: City '{target_city_id}' との通信中にエラーが発生しました。"
-                    )
-                    logging.error(
-                        "Failed to connect to target city '%s' for exploration: %s",
-                        target_city_id,
-                        exc,
-                    )
-                except json.JSONDecodeError:
-                    feedback_message = (
-                        f"探索失敗: City '{target_city_id}' からの応答が不正でした。"
-                    )
-                    logging.error(
-                        "Failed to parse JSON response from '%s' during exploration.",
-                        target_city_id,
-                    )
-
-        system_feedback = (
-            '<div class="note-box">🔎 探索結果:<br><b>'
-            f"{feedback_message.replace(chr(10), '<br>')}"
-            "</b></div>"
-        )
-
-        persona.history_manager.add_message(
-            {"role": "host", "content": system_feedback},
-            persona.current_building_id,
-            heard_by=list(self.occupants.get(persona.current_building_id, [])),
-        )
-        self._save_building_histories()
 
     # ---- Conversation helpers for mixins ----
 

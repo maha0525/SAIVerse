@@ -111,12 +111,18 @@ def delete_row(table_name: str, req: DeleteRequest, db: Session = Depends(get_db
         raise HTTPException(status_code=404, detail="Table not found")
     
     model = TABLE_MAP[table_name]
+    mapper = inspect(model)
+    required_pks = {column.key for column in mapper.primary_key}
+    supplied_pks = set(req.pks)
+    if not required_pks or supplied_pks != required_pks:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Exactly these primary keys are required: {sorted(required_pks)}",
+        )
     try:
         # Build filter from PKs
         query = db.query(model)
         for pk, val in req.pks.items():
-            if not hasattr(model, pk):
-                continue
             query = query.filter(getattr(model, pk) == val)
             
         instance = query.first()

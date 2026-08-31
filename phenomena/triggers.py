@@ -22,7 +22,7 @@ class TriggerType(str, Enum):
     USER_LOGOUT = "user_logout"         # ユーザーログアウト時
     SCHEDULE_FIRED = "schedule_fired"   # スケジュール発火時
     # 外部イベントトリガー
-    X_MENTION_RECEIVED = "x_mention_received"  # Xメンション受信時
+    X_POLL_DETECTED = "x_poll_detected"        # X定期ポーリングで何らか検出
     EXTERNAL_WEBHOOK = "external_webhook"      # 汎用Webhook受信時
 
 
@@ -62,12 +62,16 @@ TRIGGER_SCHEMAS: Dict[TriggerType, Dict[str, str]] = {
         "schedule_id": "発火したスケジュールID",
         "persona_id": "対象のペルソナID",
     },
-    TriggerType.X_MENTION_RECEIVED: {
+    TriggerType.X_POLL_DETECTED: {
         "persona_id": "対象のペルソナID",
-        "tweet_id": "メンション元のツイートID",
-        "author_username": "メンション送信者のユーザー名",
-        "author_name": "メンション送信者の表示名",
-        "mention_text": "メンション本文",
+        "summary": "検出内容のサマリ文字列 (人間可読)",
+        "mentions": "検出したメンションのリスト (各要素: tweet_id, author_username, author_name, text)。初回は直近24時間分",
+        "new_followers": "新規フォロワーのリスト (各要素: id, username, name)。初回は現在の全フォロワー",
+        "engagement_changes": "いいね/リポスト件数の差分リスト (各要素: tweet_id, text_preview, old_likes, new_likes, old_retweets, new_retweets)。初回は old=0 (現在数を初回スナップショット表示)",
+        "new_likes": "いいねした人の詳細リスト (各要素: tweet_id, liking_users) — poll_likes_detail 有効時のみ",
+        "new_retweets": "リツイートした人の詳細リスト (各要素: tweet_id, retweeted_by) — poll_retweets_detail 有効時のみ",
+        "initial_categories": "初回スナップショットだったカテゴリのリスト ('mentions'/'followers'/'engagement')。各カテゴリは「初回は前回からの差分ではない」旨をペルソナへアナウンスする目印",
+        "errors": "ポーリング中にエラーが起きたカテゴリ -> エラーメッセージの dict (空なら全カテゴリ正常)。空でなければペルソナへ必ず通知される (バックエンドログだけに留めない)。errors が空でない時は last_polled_at を更新せず、次の tick で即リトライする",
         "args_json": "Playbook実行引数（JSON文字列）",
     },
     TriggerType.EXTERNAL_WEBHOOK: {

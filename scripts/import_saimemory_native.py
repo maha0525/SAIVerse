@@ -17,8 +17,11 @@ Examples:
     # Skip embedding generation (faster)
     python scripts/import_saimemory_native.py air_city_a export.json --no-embed
 
-    # Import as new thread
+    # Import as new thread (rename within the SAME persona)
     python scripts/import_saimemory_native.py air_city_a export.json --new-thread edited_v2
+
+    # Transplant another persona's archive into this persona
+    python scripts/import_saimemory_native.py bob_city_a alice_export.json --transplant
 """
 from __future__ import annotations
 
@@ -46,7 +49,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("json_file", type=Path, help="Path to native JSON file")
     parser.add_argument(
         "--new-thread", dest="new_thread_suffix",
-        help="Import as a new thread with this suffix (instead of replacing original).",
+        help=(
+            "Import as a new thread with this suffix (instead of replacing "
+            "original). Same-persona rename only; cannot combine with "
+            "--transplant."
+        ),
+    )
+    parser.add_argument(
+        "--transplant", action="store_true",
+        help=(
+            "Explicitly transplant an archive from ANOTHER persona into the "
+            "target. All thread/resource identities are remapped to the "
+            "target; the original identity is kept in each message's "
+            "metadata.transplanted_from. Without this flag, a persona "
+            "mismatch is an error (restore is same-persona only)."
+        ),
     )
     parser.add_argument(
         "--no-embed", action="store_true",
@@ -110,17 +127,25 @@ def main() -> int:
     LOGGER.info("Source persona: %s", source_persona)
     LOGGER.info("Threads: %d, Messages: %d", len(threads), total_msgs)
 
-    # Warn if persona_id differs
-    if source_persona != args.persona_id:
-        LOGGER.warning(
-            "Source persona (%s) differs from target (%s).",
+    # Restore is same-persona only; moving to another persona requires
+    # an explicit --transplant (audit M4: no silent cross-persona writes).
+    if source_persona != args.persona_id and not args.transplant:
+        LOGGER.error(
+            "Source persona (%s) differs from target (%s). "
+            "Restore is same-persona only. To move these memories to "
+            "another persona, re-run with --transplant.",
             source_persona, args.persona_id,
         )
-        if not args.force:
-            answer = input("Continue anyway? [y/N] ").strip().lower()
-            if answer != "y":
-                LOGGER.info("Aborted.")
-                return 0
+        return 1
+
+    # --new-thread renames a thread within the SAME persona. Combining it
+    # with --transplant would bypass the transplant identity remapping.
+    if args.new_thread_suffix and args.transplant:
+        LOGGER.error(
+            "--new-thread cannot be combined with --transplant: "
+            "--new-thread is for renaming a thread within the same persona."
+        )
+        return 1
 
     # Remap thread_ids if --new-thread is specified
     if args.new_thread_suffix:
@@ -173,15 +198,17 @@ def main() -> int:
             replace=True,
             skip_embed=args.no_embed,
             progress_callback=progress,
+            transplant=args.transplant,
         )
     except Exception as e:
         LOGGER.exception("Import failed: %s", e)
         return 1
 
     LOGGER.info(
-        "Import complete: %d thread(s), %d message(s)",
+        "Import complete: %d thread(s), %d message(s), embeddings: %s",
         result["threads_imported"],
         result["messages_imported"],
+        result.get("embeddings", "unknown"),
     )
     return 0
 

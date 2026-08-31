@@ -2,7 +2,7 @@ discord.py>=2.4.0
 websockets>=12.0
 httpx>=0.27.0
 fastapi==0.116.1
-google-genai>=1.56.0
+google-genai>=1.75.0,<2.0
 langgraph==1.0.3
 openai==1.97.0
 anthropic>=0.42.0
@@ -13,6 +13,7 @@ requests==2.32.4
 SQLAlchemy==2.0.41
 uvicorn==0.35.0
 python-multipart>=0.0.9
+cryptography>=45.0.0
 tzdata
 
 # SAIMemory embeddings
@@ -23,14 +24,40 @@ numpy>=1.26.0
 Pillow>=11.0.0
 markdownify>=0.12.0
 
+# Audio/Video processing (bundles ffmpeg binary per-platform via pip wheels)
+imageio-ffmpeg>=0.6.0
+
 # PDF processing
 pypdf>=4.0.0
+
+# RSS/Atom feed intake (saiverse/feed_fetch.py)
+feedparser>=6.0
+# HTML autodiscovery (parsing <link rel="alternate">, discover_feed). Also pulled
+# in by markdownify, but dependencies we import directly are declared directly.
+# NOTE: this file must stay ASCII-only -- pip decodes it with the OS locale
+# (cp932 on Japanese Windows) when there is no BOM, and non-ASCII comments make
+# `pip install -r requirements.txt` crash with UnicodeDecodeError.
+beautifulsoup4>=4.12
 
 # xAI (Grok) native SDK
 xai-sdk>=1.6.0
 
-# ローカルLLM (llama.cpp) を使う場合:
-#   pip install -r requirements-local-llm.txt
+# MCP (Model Context Protocol) client
+# The upper bound is mandatory: mcp 2.x renamed the client transport spellings and
+# removed streamablehttp_client, which SAIVerse uses (the official whats-new lists
+# "The deprecated streamablehttp_client spelling" as removed; bare `pip install mcp`
+# installs 2.x). Without the bound a fresh install gets 2.x and remote MCP breaks
+# at import time. Upstream also recommends mcp>=1.28,<2 for libraries. Migrating to
+# the v2 API is a separate task (docs/intent/mcp_protocol_coverage.md).
+mcp>=1.10.0,<2
+
+# Codex-family client (used by llm_clients/openai_codex.py)
+curl-cffi>=0.10.0
 
 # Linting
 ruff>=0.9.0
+
+# Testing
+pytest>=9.0.0
+pytest-asyncio>=1.0.0
+pytest-xdist>=3.8.0

@@ -7,7 +7,7 @@ Supported models:
 
 Input image URI formats:
 - saiverse://image/<filename> - Generated image file
-- saiverse://item/<item_id>/image - Picture item's image
+- saiverse://item/<N>/image - Picture item's image
 - saiverse://persona/<persona_id>/image - Persona's avatar
 - saiverse://persona/self/image - Your own avatar
 - saiverse://building/<building_id>/image - Building's interior
@@ -30,19 +30,55 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 # Type definitions
-ModelType = Literal["nano_banana_2", "nano_banana_pro", "gpt_image_1_5", "grok_imagine"]
+ModelType = Literal["nano_banana_2", "nano_banana_pro", "gpt_image_1_5", "gpt_image_2", "grok_imagine"]
 AspectRatioType = Literal["1:1", "16:9", "9:16", "4:3", "3:4", "2:3", "3:2", "4:5", "5:4", "1:4", "4:1", "1:8", "8:1", "21:9"]
 QualityType = Literal["low", "medium", "high", "auto"]
+SizeType = Literal[
+    "auto",
+    "1024x1024",
+    "1536x1024",
+    "1024x1536",
+    "2048x2048",
+    "2048x1152",
+    "1152x2048",
+    "3840x2160",
+    "2160x3840",
+]
 
 
 def _aspect_ratio_to_openai_size(aspect_ratio: str) -> str:
-    """Convert aspect ratio to OpenAI size format."""
+    """Convert aspect ratio to OpenAI gpt-image size (fallback when size='auto').
+
+    All returned values satisfy gpt-image-2 / gpt-image-1.5 constraints:
+    - max edge <= 3840
+    - both edges multiples of 16
+    - aspect ratio <= 3:1
+    - total pixels 655,360 - 8,294,400
+
+    Aspect ratios exceeding 3:1 (1:4, 4:1, 1:8, 8:1) are clamped to the
+    nearest valid orientation (3:2 / 2:3) with a warning log.
+    """
+    extreme = {"1:4", "4:1", "1:8", "8:1"}
+    if aspect_ratio in extreme:
+        clamped = "1024x1536" if aspect_ratio.startswith("1:") else "1536x1024"
+        logger.warning(
+            "[image_generator] aspect_ratio=%s exceeds OpenAI 3:1 limit, "
+            "clamping to %s",
+            aspect_ratio, clamped,
+        )
+        return clamped
+
     mapping = {
         "1:1": "1024x1024",
-        "16:9": "1536x1024",
+        "16:9": "1536x1024",   # close to 16:9 within constraints (true 16:9 at 1536 is 864, below min pixels)
         "9:16": "1024x1536",
-        "4:3": "1536x1024",  # Use landscape for 4:3
-        "3:4": "1024x1536",  # Use portrait for 3:4
+        "4:3": "1536x1152",    # exact 4:3
+        "3:4": "1152x1536",    # exact 3:4
+        "2:3": "1024x1536",    # exact 2:3
+        "3:2": "1536x1024",    # exact 3:2
+        "4:5": "1024x1280",    # exact 4:5
+        "5:4": "1280x1024",    # exact 5:4
+        "21:9": "3072x1344",   # ~21:9 (2.286), within max edge 3840
     }
     return mapping.get(aspect_ratio, "1024x1024")
 
@@ -204,11 +240,12 @@ def _generate_with_nano_banana_pro(
     raise RuntimeError("No image data in response")
 
 
-def _generate_with_gpt_image(
+def _generate_with_gpt_image_1_5(
     prompt: str,
     aspect_ratio: str = "1:1",
     quality: str = "high",
     input_image_paths: Optional[List[Path]] = None,
+    size: str = "auto",
 ) -> Tuple[bytes, str]:
     """Generate image using OpenAI GPT Image 1.5."""
     from openai import OpenAI
@@ -218,14 +255,17 @@ def _generate_with_gpt_image(
         raise RuntimeError("OPENAI_API_KEY environment variable is not set.")
 
     client = OpenAI(api_key=api_key)
-    size = _aspect_ratio_to_openai_size(aspect_ratio)
+    if size and size != "auto":
+        effective_size = size
+    else:
+        effective_size = _aspect_ratio_to_openai_size(aspect_ratio)
     effective_quality = quality if quality != "auto" else "high"
 
     if input_image_paths:
         # Use images.edit for input image processing
         logger.info(
             f"[gpt_image] Editing with {len(input_image_paths)} input images, "
-            f"size={size}, quality={effective_quality}"
+            f"size={effective_size} (requested={size}), quality={effective_quality}"
         )
 
         # Prepare input images as file-like objects
@@ -239,7 +279,7 @@ def _generate_with_gpt_image(
                 model="gpt-image-1.5",
                 image=image_files if len(image_files) > 1 else image_files[0],
                 prompt=prompt,
-                size=size,
+                size=effective_size,
                 quality=effective_quality,
                 n=1,
             )
@@ -248,12 +288,15 @@ def _generate_with_gpt_image(
                 f.close()
     else:
         # Standard generation without input images
-        logger.info(f"[gpt_image] Generating with size={size}, quality={effective_quality}")
+        logger.info(
+            f"[gpt_image] Generating with size={effective_size} (requested={size}), "
+            f"quality={effective_quality}"
+        )
 
         result = client.images.generate(
             model="gpt-image-1.5",
             prompt=prompt,
-            size=size,
+            size=effective_size,
             quality=effective_quality,
             n=1,
         )
@@ -265,6 +308,73 @@ def _generate_with_gpt_image(
     # GPT Image returns PNG by default
     return image_bytes, "image/png"
 
+def _generate_with_gpt_image_2(
+    prompt: str,
+    aspect_ratio: str = "1:1",
+    quality: str = "high",
+    input_image_paths: Optional[List[Path]] = None,
+    size: str = "auto",
+) -> Tuple[bytes, str]:
+    """Generate image using OpenAI GPT Image 2."""
+    from openai import OpenAI
+
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise RuntimeError("OPENAI_API_KEY environment variable is not set.")
+
+    client = OpenAI(api_key=api_key)
+    if size and size != "auto":
+        effective_size = size
+    else:
+        effective_size = _aspect_ratio_to_openai_size(aspect_ratio)
+    effective_quality = quality if quality != "auto" else "high"
+
+    if input_image_paths:
+        # Use images.edit for input image processing
+        logger.info(
+            f"[gpt_image] Editing with {len(input_image_paths)} input images, "
+            f"size={effective_size} (requested={size}), quality={effective_quality}"
+        )
+
+        # Prepare input images as file-like objects
+        image_files = []
+        for img_path in input_image_paths:
+            image_files.append(open(img_path, "rb"))
+            logger.info(f"[gpt_image] Added input image: {img_path.name}")
+
+        try:
+            result = client.images.edit(
+                model="gpt-image-2",
+                image=image_files if len(image_files) > 1 else image_files[0],
+                prompt=prompt,
+                size=effective_size,
+                quality=effective_quality,
+                n=1,
+            )
+        finally:
+            for f in image_files:
+                f.close()
+    else:
+        # Standard generation without input images
+        logger.info(
+            f"[gpt_image] Generating with size={effective_size} (requested={size}), "
+            f"quality={effective_quality}"
+        )
+
+        result = client.images.generate(
+            model="gpt-image-2",
+            prompt=prompt,
+            size=effective_size,
+            quality=effective_quality,
+            n=1,
+        )
+
+    if not result.data or not result.data[0].b64_json:
+        raise RuntimeError("No image data returned from OpenAI")
+
+    image_bytes = base64.b64decode(result.data[0].b64_json)
+    # GPT Image returns PNG by default
+    return image_bytes, "image/png"
 
 def _generate_with_grok_imagine(
     prompt: str,
@@ -374,6 +484,7 @@ def _get_model_api_key_env(model: str) -> Optional[str]:
         "nano_banana_2": "GEMINI_API_KEY",
         "nano_banana_pro": "GEMINI_API_KEY",
         "gpt_image_1_5": "OPENAI_API_KEY",
+        "gpt_image_2": "OPENAI_API_KEY",
         "grok_imagine": "XAI_API_KEY",
     }
     return mapping.get(model)
@@ -389,19 +500,20 @@ def _is_image_model_available(model: str) -> bool:
 
 def get_available_image_models() -> List[str]:
     """Return list of image model names whose API keys are configured."""
-    all_models = ["nano_banana_2", "nano_banana_pro", "gpt_image_1_5", "grok_imagine"]
+    all_models = ["nano_banana_2", "nano_banana_pro", "gpt_image_1_5", "gpt_image_2", "grok_imagine"]
     return [m for m in all_models if _is_image_model_available(m)]
 
 
 # Fallback priority order (most commonly available first)
-_FALLBACK_ORDER = ["nano_banana_2", "nano_banana_pro", "gpt_image_1_5", "grok_imagine"]
+_FALLBACK_ORDER = ["nano_banana_2", "nano_banana_pro", "gpt_image_1_5", "gpt_image_2", "grok_imagine"]
 
 
 def generate_image(
     prompt: str,
     model: ModelType = "nano_banana_2",
     aspect_ratio: AspectRatioType = "1:1",
-    quality: QualityType = "high",
+    quality: QualityType = "auto",
+    size: SizeType = "auto",
     title: Optional[str] = None,
     input_images: Optional[List[str]] = None,
 ) -> Tuple[str, ToolResult, Optional[str], Optional[dict]]:
@@ -415,29 +527,39 @@ def generate_image(
             - gpt_image_1_5: State of the art quality (OpenAI GPT Image 1.5)
             - grok_imagine: High quality image generation (xAI Grok Imagine Pro)
         aspect_ratio: Image aspect ratio ("1:1", "16:9", "9:16", "4:3", "3:4")
-        quality: Image quality level ("low", "medium", "high", "auto")
+        quality: Image quality level ("low", "medium", "high", "auto").
+            "auto" uses the global default quality setting.
+        size: Output image size in pixels (gpt_image_* only). "auto" uses
+            aspect_ratio + quality to pick a size. Specific values like
+            "2048x2048" override aspect_ratio. Ignored for non-OpenAI models.
         title: Optional title for the generated image item
         input_images: Optional list of image URIs to use as reference/input.
             Supported URI formats:
             - saiverse://image/<filename>
-            - saiverse://item/<item_id>/image
+            - saiverse://item/<N>/image
             - saiverse://persona/<persona_id>/image
             - saiverse://persona/self/image
             - saiverse://building/<building_id>/image
             - saiverse://building/current/image
 
     Returns:
-        Tuple of (text, ToolResult, file_path, metadata)
+        Tuple of (text, ToolResult, file_path, metadata, item_id)
     """
     from tools.context import get_active_manager, get_active_persona_id, get_active_playbook_name
 
     # Normalize empty strings to defaults
     if not aspect_ratio:
         aspect_ratio = "1:1"
-    if not quality:
-        quality = "high"
+    if not quality or quality == "auto":
+        manager = get_active_manager()
+        if manager:
+            quality = manager.state.image_default_quality
+        else:
+            quality = os.getenv("SAIVERSE_IMAGE_DEFAULT_QUALITY", "high")
     if not model:
         model = "nano_banana_2"
+    if not size:
+        size = "auto"
 
     # Check model availability and fallback if needed
     fallback_note = ""
@@ -450,7 +572,7 @@ def generate_image(
                 "利用可能な画像生成モデルがありません。"
                 "GEMINI_API_KEY、OPENAI_API_KEY、XAI_API_KEY のいずれかを設定してください。"
             )
-            return error_text, ToolResult(None), None, None
+            return error_text, ToolResult(None), None, None, None
 
         # Pick the best available model from fallback order
         fallback_model = next(
@@ -494,9 +616,16 @@ def generate_image(
     for attempt_model in fallback_chain:
         logger.info(
             f"[image_generator] Trying model={attempt_model}, "
-            f"aspect_ratio={aspect_ratio}, quality={quality}, "
+            f"aspect_ratio={aspect_ratio}, quality={quality}, size={size}, "
             f"input_images={len(input_image_paths)}"
         )
+        # Warn if size override is set on a model that ignores it
+        if size != "auto" and attempt_model not in ("gpt_image_1_5", "gpt_image_2"):
+            logger.warning(
+                "[image_generator] size=%s is OpenAI-specific and will be "
+                "ignored by model=%s (using aspect_ratio instead)",
+                size, attempt_model,
+            )
         try:
             if attempt_model == "nano_banana_2":
                 image_data, mime = _generate_with_nano_banana_2(
@@ -506,9 +635,13 @@ def generate_image(
                 image_data, mime = _generate_with_nano_banana_pro(
                     prompt, aspect_ratio, quality, input_image_paths
                 )
+            elif attempt_model == "gpt_image_2":
+                image_data, mime = _generate_with_gpt_image_2(
+                    prompt, aspect_ratio, quality, input_image_paths, size=size
+                )
             elif attempt_model == "gpt_image_1_5":
-                image_data, mime = _generate_with_gpt_image(
-                    prompt, aspect_ratio, quality, input_image_paths
+                image_data, mime = _generate_with_gpt_image_1_5(
+                    prompt, aspect_ratio, quality, input_image_paths, size=size
                 )
             elif attempt_model == "grok_imagine":
                 image_data, mime = _generate_with_grok_imagine(
@@ -545,7 +678,7 @@ def generate_image(
             f"プロンプト:\n{prompt}\n\n"
             f"エラー: {last_error}"
         )
-        return error_text, ToolResult(None), None, None
+        return error_text, ToolResult(None), None, None, None
 
     # Store the generated image
     metadata_entry, stored_path = store_image_bytes(
@@ -555,27 +688,33 @@ def generate_image(
     metadata = {"media": [metadata_entry]}
 
     # Create picture item
+    item_id: Optional[str] = None
     try:
         persona_id = get_active_persona_id()
         manager = get_active_manager()
         item_text = ""
+        item_ref = None
 
         if persona_id and manager:
             import json as _json
             playbook_name = get_active_playbook_name()
             _source_context = _json.dumps({"playbook": playbook_name, "tool": "generate_image"})
             item_name = title if title else f"生成画像_{stored_path.stem}"
-            item_id = manager.create_picture_item(
+            item_id, slot_num = manager.create_picture_item(
                 persona_id=persona_id,
                 name=item_name,
                 description=prompt,
                 file_path=str(stored_path),
                 source_context=_source_context,
             )
-            item_text = f"\n\n画像をアイテムとして登録しました（アイテムID: {item_id}）。"
+            # AI 可視の参照は安定 short_id (item:N)。UUID は裏方 (ファイル解決) に留める。
+            short_id = manager.item_service.items.get(item_id, {}).get("short_id")
+            item_ref = short_id if short_id is not None else item_id
+            item_text = f"\n\n画像をアイテムとして登録しました（item:{item_ref}）。"
     except Exception as exc:
         logger.warning(f"Failed to create picture item: {exc}")
         item_text = ""
+        item_ref = None
 
     text = (
         f"画像が生成されました。\n\n"
@@ -585,7 +724,10 @@ def generate_image(
         f"{fallback_note}"
     )
 
-    return text, ToolResult(snippet), stored_path.as_posix(), metadata
+    # 5要素 tuple: text, snippet, file_path, metadata, item_ref
+    # item_ref は AI 可視の安定 short_id。report_template の {item_ref} 展開で
+    # persona 向け URI を組み立てる (saiverse://item/{item_ref}/content)。UUID は裏方。
+    return text, ToolResult(snippet), stored_path.as_posix(), metadata, item_ref
 
 
 def schema() -> ToolSchema:
@@ -606,7 +748,7 @@ def schema() -> ToolSchema:
             "- saiverse://persona/self/image - Your own avatar\n"
             "- saiverse://building/current/image - Current building's interior\n"
             "- saiverse://persona/<persona_id>/image - Another persona's avatar\n"
-            "- saiverse://item/<item_id>/image - A picture item\n"
+            "- saiverse://item/<N>/image - A picture item\n"
             "- saiverse://building/<building_id>/image - A building's interior"
         ),
         parameters={
@@ -618,12 +760,12 @@ def schema() -> ToolSchema:
                 },
                 "model": {
                     "type": "string",
-                    "enum": ["nano_banana_2", "nano_banana_pro", "gpt_image_1_5", "grok_imagine"],
+                    "enum": ["nano_banana_2", "nano_banana_pro", "gpt_image_1_5", "gpt_image_2", "grok_imagine"],
                     "description": (
                         "Image generation model: "
                         "nano_banana_2 (fast, high quality, Gemini 3.1 Flash), "
-                        "nano_banana_pro (highest quality, Gemini 3 Pro), "
-                        "gpt_image_1_5 (state of the art), grok_imagine (xAI Grok Imagine Pro)"
+                        "nano_banana_pro (a bit higher quality, Gemini 3 Pro), "
+                        "gpt_image_1_5 (legacy model), gpt_image_2 (state of the art), grok_imagine (this can also create slightly NSFW images)"
                     ),
                     "default": "nano_banana_2"
                 },
@@ -636,8 +778,29 @@ def schema() -> ToolSchema:
                 "quality": {
                     "type": "string",
                     "enum": ["low", "medium", "high", "auto"],
-                    "description": "Image quality level",
-                    "default": "high"
+                    "description": "Image quality level. 'auto' uses the global default quality setting.",
+                    "default": "auto"
+                },
+                "size": {
+                    "type": "string",
+                    "enum": [
+                        "auto",
+                        "1024x1024",
+                        "1536x1024",
+                        "1024x1536",
+                        "2048x2048",
+                        "2048x1152",
+                        "1152x2048",
+                        "3840x2160",
+                        "2160x3840"
+                    ],
+                    "description": (
+                        "Output pixel size for OpenAI gpt_image_* models only. "
+                        "'auto' picks a size from aspect_ratio. Specific values "
+                        "(e.g. '2048x2048') override aspect_ratio. Ignored for "
+                        "Gemini and Grok models."
+                    ),
+                    "default": "auto"
                 },
                 "title": {
                     "type": "string",

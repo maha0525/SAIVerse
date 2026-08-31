@@ -1,0 +1,120 @@
+{
+  "name": "fragment_organize",
+  "display_name": "フラグメント整理",
+  "description": "P4 庭仕事ワーカーへ転生予定 (docs/intent/concept_consolidation.md)。Memopediaページのフラグメント（断片知識）の重複削除・統合・修正を行います。",
+  "input_schema": [
+    {
+      "name": "page_id",
+      "description": "整理対象のページID または saiverse:// URI"
+    }
+  ],
+  "output_schema": null,
+  "router_callable": false,
+  "user_selectable": false,
+  "nodes": [
+    {
+      "id": "init",
+      "type": "set",
+      "assignments": {
+        "loop_count": 0
+      },
+      "next": "load_fragments"
+    },
+    {
+      "id": "load_fragments",
+      "type": "tool",
+      "action": "memopedia_list_fragments",
+      "args_input": {
+        "page_id": "page_id"
+      },
+      "output_key": "fragment_list",
+      "next": "analyze"
+    },
+    {
+      "id": "analyze",
+      "type": "llm",
+      "action": "以下はMemopediaページのフラグメント一覧です。整理してください。\n\n{fragment_list}\n\n## 整理の指針\n- **重複削除**: 同じ事実を述べている複数のフラグメントがあれば、最も正確・簡潔なものを残して他を削除\n- **統合**: 近い内容のフラグメントを1つにまとめる（片方を編集し、もう片方を削除）\n- **修正**: 古い情報や不正��な記述を修正\n- **不要削除**: 意味のない断片や、他のフラグメントに含まれる情報は削除\n\n## 利用可能なツール\n- **memopedia_delete_fragment**: フラグメントIDを指定して削除\n- **memopedia_edit_fragment**: フラグメントIDと新しい内容を指定して編集\n- **memopedia_list_fragments**: 最新のフラグメント一覧を再取得\n\n## 終了方法\nツールを使わずにテキストだけ返すと作業完了���す。\n\nまず一覧を確認し、必要な整理を��ってください。",
+      "available_tools": [
+        "memopedia_list_fragments",
+        "memopedia_delete_fragment",
+        "memopedia_edit_fragment"
+      ],
+      "output_keys": [
+        {"text": "response_text"},
+        {"function_call": "fc"}
+      ],
+      "next": "check_tool_call"
+    },
+    {
+      "id": "check_tool_call",
+      "type": "pass",
+      "conditional_next": {
+        "field": "tool_called",
+        "operator": "eq",
+        "cases": {
+          "True": "exec_tool",
+          "default": "finalize"
+        }
+      }
+    },
+    {
+      "id": "exec_tool",
+      "type": "tool_call",
+      "call_source": "fc",
+      "output_key": "tool_result",
+      "next": "record_result"
+    },
+    {
+      "id": "record_result",
+      "type": "memorize",
+      "action": "[{fc.name}] {tool_result}",
+      "role": "user",
+      "tags": ["fragment_organize", "tool_result"],
+      "next": "increment"
+    },
+    {
+      "id": "increment",
+      "type": "set",
+      "assignments": {
+        "loop_count": "={loop_count} + 1"
+      },
+      "next": "check_loop_limit"
+    },
+    {
+      "id": "check_loop_limit",
+      "type": "pass",
+      "conditional_next": {
+        "field": "loop_count",
+        "operator": "gte",
+        "cases": {
+          "20": "finalize",
+          "default": "continue_loop"
+        }
+      }
+    },
+    {
+      "id": "continue_loop",
+      "type": "llm",
+      "action": "結果を確認しました。続けて整理するか、テキストのみ返して完了してください。",
+      "available_tools": [
+        "memopedia_list_fragments",
+        "memopedia_delete_fragment",
+        "memopedia_edit_fragment"
+      ],
+      "output_keys": [
+        {"text": "response_text"},
+        {"function_call": "fc"}
+      ],
+      "next": "check_tool_call"
+    },
+    {
+      "id": "finalize",
+      "type": "memorize",
+      "action": "フラグメント整理完了",
+      "role": "assistant",
+      "tags": ["fragment_organize", "completed"],
+      "next": null
+    }
+  ],
+  "start_node": "init"
+}

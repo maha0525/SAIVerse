@@ -1,0 +1,5 @@
+{
+  "id": "openai_codex",
+  "display_name": "OpenAI Codex (ChatGPT OAuth)",
+  "protocol": "openai_codex"
+}

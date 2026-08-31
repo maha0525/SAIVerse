@@ -1,7 +1,8 @@
 "use client";
 
-import { useState, useRef, useEffect, KeyboardEvent, ChangeEvent, useCallback } from 'react';
-import ReactMarkdown, { defaultUrlTransform } from 'react-markdown';
+import { useState, useRef, useEffect, KeyboardEvent, ChangeEvent, useCallback, useMemo, ReactNode } from 'react';
+import ReactMarkdown, { defaultUrlTransform, Components } from 'react-markdown';
+import type { PluggableList } from 'unified';
 import remarkBreaks from 'remark-breaks';
 import remarkGfm from 'remark-gfm';
 import rehypeRaw from 'rehype-raw';
@@ -9,34 +10,78 @@ import rehypeSanitize, { defaultSchema } from 'rehype-sanitize';
 import styles from './page.module.css';
 import Sidebar from '@/components/Sidebar';
 import ChatOptions from '@/components/ChatOptions';
-import ToolModeSelector from '@/components/ToolModeSelector';
+import ToolModeSelector, { TOOL_MODE_SELECTED } from '@/components/ToolModeSelector';
+import { buildPreSpellsFromUI } from '@/lib/preSpells';
+import { formatCost } from '@/lib/formatCost';
+import { prepareMessageMarkdown } from '@/lib/messageMarkdown';
 import RightSidebar from '@/components/RightSidebar';
+import CityMap from '@/components/CityMap';
+import cityMapStyles from '@/components/CityMap.module.css';
 import PeopleModal from '@/components/PeopleModal';
 import TutorialWizard from '@/components/tutorial/TutorialWizard';
 import SaiverseLink from '@/components/SaiverseLink';
 import ItemModal from '@/components/ItemModal';
 import ContextPreviewModal, { ContextPreviewData } from '@/components/ContextPreviewModal';
 import PlaybookPermissionDialog, { PermissionRequestData } from '@/components/PlaybookPermissionDialog';
-import TweetConfirmDialog, { TweetConfirmData } from '@/components/TweetConfirmDialog';
+import SpellConfirmDialog, { SpellConfirmData } from '@/components/SpellConfirmDialog';
 import ChronicleConfirmDialog, { ChronicleConfirmData } from '@/components/ChronicleConfirmDialog';
 import ModalOverlay from '@/components/common/ModalOverlay';
-import { Send, Plus, Paperclip, Eye, X, Info, Users, Menu, Copy, Check, SlidersHorizontal, ChevronDown, AlertTriangle, ArrowUpCircle, Loader, RefreshCw, Square, Bell } from 'lucide-react';
+import { Send, Plus, Paperclip, Eye, X, Info, Users, Menu, Copy, Check, SlidersHorizontal, ChevronDown, AlertTriangle, ArrowUpCircle, Loader, RefreshCw, Square, Bell, Map as MapIcon, CornerDownRight, RotateCcw, Undo2 } from 'lucide-react';
 import { useActivityTracker } from '@/hooks/useActivityTracker';
+import { useAddonEvents } from '@/hooks/useAddonEvents';
+import { useActiveClientTab } from '@/hooks/useActiveClientTab';
+import { useClientActions } from '@/hooks/useClientActions';
+import { ActiveClientIndicator } from '@/components/ActiveClientIndicator';
+import AddonBubbleButtons, { BubbleButtonDef } from '@/components/AddonBubbleButtons';
+import SystemAlertBanner from '@/components/SystemAlertBanner';
 
 // Allow className on HTML elements used by thinking blocks (<details>, <div>, <summary>)
 const sanitizeSchema = {
     ...defaultSchema,
+    tagNames: [...(defaultSchema.tagNames || []), 'svg', 'path', 'polyline', 'circle'],
     attributes: {
         ...defaultSchema.attributes,
         details: [...(defaultSchema.attributes?.details || []), 'className'],
         div: [...(defaultSchema.attributes?.div || []), 'className'],
         summary: [...(defaultSchema.attributes?.summary || []), 'className'],
+        span: [...(defaultSchema.attributes?.span || []), 'className'],
+        code: [...(defaultSchema.attributes?.code || []), 'className'],
+        svg: ['width', 'height', 'viewBox', 'fill', 'stroke', 'strokeWidth', 'stroke-width', 'className'],
+        path: ['d', 'fill', 'stroke', 'strokeWidth', 'stroke-width'],
     },
     protocols: {
         ...defaultSchema.protocols,
         href: [...(defaultSchema.protocols?.href || []), 'saiverse'],
+        src: [...(defaultSchema.protocols?.src || []), 'saiverse'],
     },
 };
+
+/**
+ * Convert a saiverse:// URI to an actual API URL for <img src>.
+ * - saiverse://item/<id>/content → /api/info/item/<id>  (FileResponse for picture items)
+ * - saiverse://image/<filename>  → /api/static/uploads/<filename>
+ * - other (https://, etc.) → returned as-is
+ */
+function resolveSaiverseImageSrc(src: string): string {
+    if (!src) return src;
+    const itemMatch = src.match(/^saiverse:\/\/item\/([^/]+)/);
+    if (itemMatch) {
+        return `/api/info/item/${itemMatch[1]}`;
+    }
+    if (src.startsWith('saiverse://image/')) {
+        const remainder = src.replace('saiverse://image/', '');
+        const filename = remainder.split('/').pop() || remainder.split('\\').pop() || remainder;
+        return `/api/static/uploads/${filename}`;
+    }
+    return src;
+}
+
+// Stable module-level constants — passing fresh arrays/functions to ReactMarkdown each render
+// causes it to remount its rendered tree, which makes <img> tags re-fetch on every keystroke.
+const MARKDOWN_REMARK_PLUGINS: PluggableList = [remarkGfm, remarkBreaks];
+const MARKDOWN_REHYPE_PLUGINS: PluggableList = [rehypeRaw, [rehypeSanitize, sanitizeSchema]];
+const markdownUrlTransform = (url: string) =>
+    url.startsWith('saiverse://') ? url : defaultUrlTransform(url);
 
 interface MessageImage {
     url: string;
@@ -50,6 +95,7 @@ interface MessageLLMUsage {
     output_tokens: number;
     cached_tokens?: number;  // Tokens served from cache
     cost_usd?: number;
+    currency?: string;
 }
 
 interface MessageLLMUsageTotal {
@@ -59,16 +105,20 @@ interface MessageLLMUsageTotal {
     total_cost_usd: number;
     call_count: number;
     models_used: string[];
+    currency?: string;
 }
 
 interface Message {
     id?: string;
-    role: 'user' | 'assistant' | 'system';
+    role: 'user' | 'assistant' | 'system' | 'host';
     content: string;
     timestamp?: string; // ISO string
     avatar?: string;
     sender?: string;
+    persona_id?: string; // assistant メッセージで発話ペルソナを識別 (アドオン bubble button context 等で使用)
     images?: MessageImage[];
+    audios?: MessageImage[];   // 音声添付。MessageImage と同じ {url, mime_type} 形式を流用
+    videos?: MessageImage[];   // 動画添付
     llm_usage?: MessageLLMUsage;
     llm_usage_total?: MessageLLMUsageTotal;
     // Error information
@@ -78,14 +128,36 @@ interface Message {
     // Warning information
     isWarning?: boolean;
     warningCode?: string;
+    // Info notification (e.g. stream interrupted)
+    isInfo?: boolean;
+    // この発言は言い切っていない (生成が中断された)。立っている間だけ
+    // 「続きの生成」ボタンを出す。サーバーの metadata["_interrupted"] 由来。
+    interrupted?: boolean;
+    // この発言に返事が来なかった。立っている間だけ「再送」ボタンを出す。
+    // 発言そのものは残っているので、押しても送り直しにはならない (応答だけ)。
+    needsRetry?: boolean;
+    // 取り消しが「もう読まれている」で断られた印。断られても応答はまだ
+    // 生まれていないので needsRetry は残す — 消すと、応答を得る唯一の手段
+    // (再送) まで一緒に失われる。消えるのは「取り消す」だけ。
+    withdrawBlocked?: boolean;
+    // やり直しても結果が変わらない印 (応答できる相手がいない等)。
+    // needsRetry と混ぜない: 「返事が来ていない」と「やり直す余地がある」は
+    // 別の事実で、混ぜると相手が居ない部屋で**誰も読んでいない発言の
+    // 「取り消す」まで消える**。消えるのは「再送」だけ。
+    retryUseless?: boolean;
     // Reasoning (thinking) from LLM
     reasoning?: string;
+    // 自動想起 (記憶アーキv2 §4.5): この Pulse で末尾注入された「ふと浮かんだ記憶」ブロック。
+    // <system>...</system> を剥がした本文を保持し、スペル結果と同じ折りたたみで表示する。
+    auto_recall?: string;
     // Activity trace (exec/tool steps before final response)
     activity_trace?: ActivityEntry[];
     // Streaming state
     _streaming?: boolean;
     _streamingThinking?: string;
     _activities?: ActivityEntry[];
+    // Pulse identifier — groups say + activity events from the same pulse together
+    _pulse_id?: string;
 }
 
 interface ActivityEntry {
@@ -97,10 +169,20 @@ interface ActivityEntry {
 
 // File attachment types for upload
 interface FileAttachment {
-    base64: string;
+    id: string;             // unique key for React + async state replace
     name: string;
-    type: 'image' | 'document' | 'unknown';
+    type: 'image' | 'document' | 'audio' | 'video' | 'unknown';
     mimeType: string;
+    // Inline base64 (image/audio/document). Empty for video — see below.
+    base64?: string;
+    // Video flow uploads via multipart to /api/media/upload-video to avoid
+    // base64 ballooning browser memory, then references the saved file by
+    // saiverse:// URI. previewUrl is a blob URL used for the optimistic in-
+    // message preview (released by the browser on tab unload).
+    uri?: string;           // saiverse://video/<filename>
+    previewUrl?: string;    // blob URL for inline <video> preview
+    uploading?: boolean;    // video multipart upload still in flight
+    error?: string;         // upload failure message (chip turns red)
 }
 
 // File type detection
@@ -108,11 +190,19 @@ const TEXT_EXTENSIONS = new Set(['txt', 'md', 'py', 'js', 'ts', 'tsx', 'json', '
     'html', 'css', 'xml', 'log', 'sh', 'bat', 'sql', 'java', 'c', 'cpp',
     'h', 'hpp', 'go', 'rs', 'rb', 'swift', 'kt', 'scala', 'r', 'lua', 'pl', 'pdf']);
 const IMAGE_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp']);
+const AUDIO_EXTENSIONS = new Set(['wav', 'mp3', 'ogg', 'oga', 'opus', 'aac', 'flac', 'aiff', 'm4a']);
+const VIDEO_EXTENSIONS = new Set(['mp4', 'webm', 'mov', 'avi', 'mpeg', 'mpg', '3gp', 'mkv', 'flv', 'wmv']);
 
-function getFileType(filename: string, mimeType: string): 'image' | 'document' | 'unknown' {
+function getFileType(filename: string, mimeType: string): 'image' | 'document' | 'audio' | 'video' | 'unknown' {
     const ext = filename.split('.').pop()?.toLowerCase() || '';
     if (IMAGE_EXTENSIONS.has(ext) || mimeType.startsWith('image/')) {
         return 'image';
+    }
+    if (AUDIO_EXTENSIONS.has(ext) || mimeType.startsWith('audio/')) {
+        return 'audio';
+    }
+    if (VIDEO_EXTENSIONS.has(ext) || mimeType.startsWith('video/')) {
+        return 'video';
     }
     if (TEXT_EXTENSIONS.has(ext) || mimeType.startsWith('text/')) {
         return 'document';
@@ -120,15 +210,97 @@ function getFileType(filename: string, mimeType: string): 'image' | 'document' |
     return 'unknown';
 }
 
+/**
+ * キャッシュヒットの点。
+ *
+ * その発言を作った生成が「温まったコンテキスト」から生まれたときだけ、
+ * メッセージの足元に小さい点を常時出す。ホバー (キーボードなら focus) で
+ * トークンの三つ組 — 入力 / うちキャッシュ読み / 出力 — を実数で見せる。
+ *
+ * **冷えているときは何も出さない。** 冷えの警告を出しても受け手に打てる手が
+ * なく、サーバー側の一時的な不調でも冷えるため (2026-08-19 まはー裁定)。
+ * 見えるのは「効いている」だけ。
+ *
+ * 数字の出どころは既存の building message metadata (llm_usage /
+ * llm_usage_total) で、新しい API は要らない。
+ */
+function CacheHitDot({ usage, total }: {
+    usage?: MessageLLMUsage;
+    total?: MessageLLMUsageTotal;
+}) {
+    // 複数コールの Pulse は合算を、単発は単発の実数を見せる (足元の使用量
+    // チップと同じ選び方)。ライブの say イベントは合算しか運ばないので、
+    // 単発が無いときも合算へ落とす。
+    const useTotal = !!total && (!usage || total.call_count > 1);
+    const cached = useTotal ? (total?.total_cached_tokens ?? 0) : (usage?.cached_tokens ?? 0);
+    if (!cached) return null;
+    const input = useTotal ? (total?.total_input_tokens ?? 0) : (usage?.input_tokens ?? 0);
+    const output = useTotal ? (total?.total_output_tokens ?? 0) : (usage?.output_tokens ?? 0);
+    const label = `キャッシュヒット: 入力 ${input.toLocaleString()} トークンのうち ${cached.toLocaleString()} をキャッシュから読み込み / 出力 ${output.toLocaleString()} トークン`;
+    return (
+        <span className={styles.cacheDotWrap} tabIndex={0} role="img" aria-label={label}>
+            <span className={styles.cacheDot} />
+            <div className={styles.cacheDotTooltip}>
+                <div>入力 {input.toLocaleString()} tokens</div>
+                <div>うちキャッシュ読み {cached.toLocaleString()} tokens</div>
+                <div>出力 {output.toLocaleString()} tokens</div>
+            </div>
+        </span>
+    );
+}
+
 export default function Home() {
     // Enable user presence tracking (heartbeat + visibility)
     useActivityTracker();
 
+    // アクティブクライアントタブ (最後にユーザー操作があったタブ) 判定
+    const { isActive: isActiveClientTab } = useActiveClientTab();
+
+    // addon metadata lookup (client action executor に渡すため useClientActions から使われる)
+    const getAddonMetadata = useCallback(
+        (messageId: string | undefined, addonName: string) => {
+            if (!messageId) return {};
+            return addonMetadata[messageId]?.[addonName] ?? {};
+        },
+        // addonMetadata は下で useState 宣言されるため TDZ 回避用に closure 参照とする
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+        [],
+    );
+
+    // client_actions (addon.json の ui_extensions.client_actions) ディスパッチャ
+    const { dispatch: dispatchClientActions } = useClientActions({
+        isActiveTab: isActiveClientTab,
+        getAddonMetadata,
+    });
+
+    // アドオンSSEイベント購読：audio_ready など非同期完了イベントを受信してメタデータを更新
+    useAddonEvents(useCallback((event) => {
+        if (event.message_id && event.data) {
+            setAddonMetadata((prev) => ({
+                ...prev,
+                [event.message_id!]: {
+                    ...(prev[event.message_id!] ?? {}),
+                    [event.addon]: {
+                        ...(prev[event.message_id!]?.[event.addon] ?? {}),
+                        ...event.data,
+                    },
+                },
+            }));
+        }
+        // 同時に client_actions をディスパッチ (event.data 経由で URL 等を解決)
+        dispatchClientActions(event);
+    }, [dispatchClientActions]));
+
     const [messages, setMessages] = useState<Message[]>([]);
     const [inputValue, setInputValue] = useState('');
     const [loadingStatus, setLoadingStatus] = useState<string | null>(null);
+    // metabolism 完了メッセージを 2 秒見せてから 'Thinking...' に戻す遅延タイマー。
+    // ストリームが閉じる finally / cancelled でクリアしないと、後始末で
+    // loadingStatus=null にした後にこのタイマーが発火してスピナーが復活し、
+    // 二度と消えなくなる (記憶整理が応答の最後の処理だった場合に多発)。
+    const metabolismStatusTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const [permissionRequest, setPermissionRequest] = useState<PermissionRequestData | null>(null);
-    const [tweetConfirm, setTweetConfirm] = useState<TweetConfirmData | null>(null);
+    const [spellConfirm, setSpellConfirm] = useState<SpellConfirmData | null>(null);
     const [chronicleConfirm, setChronicleConfirm] = useState<ChronicleConfirmData | null>(null);
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const chatAreaRef = useRef<HTMLDivElement>(null); // Ref for the scrollable area
@@ -152,6 +324,15 @@ export default function Home() {
     const [moveTrigger, setMoveTrigger] = useState(0); // To trigger RightSidebar refresh
     const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null); // Track which message was copied
     const [usageTooltipId, setUsageTooltipId] = useState<string | null>(null); // Track which message's usage tooltip is open
+    // 取り消しの進行中。ボタンを disabled にするための state と、連打を**同期的に**
+    // 弾くための ref を両方持つ。state だけだと、再描画が挟まる前の 2 発目が
+    // まだ null を見て通り抜け、/withdraw が 2 回飛ぶ。
+    const [withdrawingId, setWithdrawingId] = useState<string | null>(null);
+    const withdrawingRef = useRef<string | null>(null);
+    // アドオン: 有効なバブルボタン定義
+    const [addonBubbleButtons, setAddonBubbleButtons] = useState<BubbleButtonDef[]>([]);
+    // アドオン: メッセージごとのメタデータ { message_id: { addon_name: { key: value } } }
+    const [addonMetadata, setAddonMetadata] = useState<Record<string, Record<string, Record<string, unknown>>>>({});
 
     // ItemModal for saiverse:// item links
     const [linkItemModalItem, setLinkItemModalItem] = useState<{ id: string; name: string; description?: string; type: string } | null>(null);
@@ -172,6 +353,26 @@ export default function Home() {
         }
     }, []);
 
+    // Stable components map for ReactMarkdown — reconstructing this on every render
+    // remounts <img> tags and re-fetches their src on every keystroke.
+    const markdownComponents = useMemo<Components>(() => ({
+        a: ({ href, children }) => (
+            <SaiverseLink href={href} onOpenItem={handleOpenItemFromLink}>{children as ReactNode}</SaiverseLink>
+        ),
+        img: ({ src, alt }) => {
+            const resolved = typeof src === 'string' ? resolveSaiverseImageSrc(src) : src;
+            return (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img
+                    src={resolved as string}
+                    alt={alt || ''}
+                    className={styles.markdownImage}
+                    onClick={() => typeof resolved === 'string' && window.open(resolved, '_blank')}
+                />
+            );
+        },
+    }), [handleOpenItemFromLink]);
+
     // Copy message content to clipboard
     const handleCopyMessage = useCallback(async (messageId: string, content: string) => {
         try {
@@ -182,6 +383,37 @@ export default function Home() {
         } catch (err) {
             console.error('Failed to copy:', err);
         }
+    }, []);
+
+    // アドオン一覧を取得してバブルボタン定義を構築する
+    useEffect(() => {
+        fetch('/api/addon/')
+            .then((r) => r.ok ? r.json() : [])
+            .then((addons: Array<{
+                addon_name: string;
+                is_enabled: boolean;
+                ui_extensions?: {
+                    bubble_buttons?: Array<{
+                        id: string;
+                        icon: string;
+                        label: string;
+                        action?: string;
+                        tool?: string;
+                        metadata_key?: string;
+                        show_when?: string;
+                    }>;
+                };
+            }>) => {
+                const buttons: BubbleButtonDef[] = [];
+                for (const addon of addons) {
+                    if (!addon.is_enabled) continue;
+                    for (const btn of addon.ui_extensions?.bubble_buttons ?? []) {
+                        buttons.push({ ...btn, addon_name: addon.addon_name });
+                    }
+                }
+                setAddonBubbleButtons(buttons);
+            })
+            .catch(() => {/* addon APIが無い環境では無視 */});
     }, []);
 
     useEffect(() => {
@@ -236,7 +468,7 @@ export default function Home() {
         adjustTextareaHeight();
     }, [inputValue, adjustTextareaHeight]);
     const [isPeopleModalOpen, setIsPeopleModalOpen] = useState(false);
-    const [selectedPlaybook, setSelectedPlaybook] = useState<string | null>('meta_user');
+    const [selectedPlaybook, setSelectedPlaybook] = useState<string | null>(null);
     const [playbookArgs, setPlaybookArgs] = useState<Record<string, any>>({});
     const [selectedModel, setSelectedModel] = useState<string>(''); // Model ID selected in Chat Options
     const [selectedModelDisplayName, setSelectedModelDisplayName] = useState<string>(''); // Model display name
@@ -255,6 +487,20 @@ export default function Home() {
     const [currentBuildingName, setCurrentBuildingName] = useState<string>('SAIVerse');
     const [currentBuildingId, setCurrentBuildingId] = useState<string | null>(null);
     const currentBuildingIdRef = useRef<string | null>(null);
+    // C-1 閲覧モード: currentBuildingId は 「UI 上で閲覧中の building」 になり、
+    // 「サーバ上の真の現在地」 とは乖離しうる (= サイドバークリックで viewing を
+    // 切り替えても、 サーバの CURRENT_BUILDINGID は発言時の /chat/utter まで
+    // 変わらない)。 expected_from CAS 用に server-side の現在地を ref で保持する。
+    const serverCurrentBuildingIdRef = useRef<string | null>(null);
+    // ref の state ミラー (描画用: ゲームモード表示の出し分けに使う)。
+    // 更新は必ず updateServerBuildingId() 経由で ref と同時に行うこと。
+    const [serverBuildingId, setServerBuildingId] = useState<string | null>(null);
+    const updateServerBuildingId = (bid: string | null) => {
+        serverCurrentBuildingIdRef.current = bid;
+        setServerBuildingId(bid);
+    };
+    // City Map: 街全体をシンボルマップで俯瞰するモーダル。展示用にデフォルト ON で起動。
+    const [isMapModalOpen, setIsMapModalOpen] = useState<boolean>(true);
 
     // Tutorial state
     const [showTutorial, setShowTutorial] = useState(false);
@@ -418,6 +664,33 @@ export default function Home() {
         error?: string;
     };
 
+    // Region RPG: ゲームモード (セッションログビュー表示) の状態。
+    // /api/user/status の active_game で判定し、ゲーム中はチャット表示を
+    // Building 単位ログからセッションログ (Region 横断 merge) に切り替える。
+    // 入力の投稿先は従来どおり現在 Building (配送・取り込みは不変)。
+    type ActiveGame = {
+        region_id: string;
+        region_name?: string;
+        phase: string;
+        scene?: string;
+        party_location?: string;
+        // 実在地がゲーム Region 内か。false なら (入口・ゲーム外を問わず)
+        // 通常チャット + セッションログの read-only 閲覧トグル + 「復帰」
+        // ボタンを出す (docs/intent/region.md §7)
+        inside?: boolean;
+        // 実在地が入口 (控室) か。表示文言の補足にのみ使う
+        at_entrance?: boolean;
+    };
+    const [activeGame, setActiveGame] = useState<ActiveGame | null>(null);
+    const activeGameRef = useRef<ActiveGame | null>(null);
+    // ゲーム外からセッションログを閲覧中か (トグル)。fetch 系 closure 用に ref を併用
+    const [sessionLogPeek, setSessionLogPeek] = useState(false);
+    const sessionLogPeekRef = useRef(false);
+    const updateSessionLogPeek = (v: boolean) => {
+        sessionLogPeekRef.current = v;
+        setSessionLogPeek(v);
+    };
+
     const resolveHasMore = (data: HistoryResponse, newMessages: Message[]) => {
         return data.has_more !== undefined ? data.has_more : newMessages.length >= 20;
     };
@@ -437,11 +710,27 @@ export default function Home() {
             const params = new URLSearchParams({ limit: '20' });
             if (beforeId) params.append('before', beforeId);
             const bid = overrideBuildingId || currentBuildingIdRef.current;
-            if (bid) params.append('building_id', bid);
 
-            console.log(`[DEBUG] Fetching history: before=${beforeId}, building_id=${bid}`);
+            // セッションログビューの条件:
+            // - Region 内 (inside): 閲覧中の建物 = 自分の実在地 のときだけ。
+            //   閲覧モードで他の建物を見ている間はその建物の通常ログ。
+            // - Region 外 (入口含む): トグル ON のときだけ read-only で出す。
+            //   閲覧場所は問わない (復帰前にどこからでも文脈を確認できる)
+            const game = activeGameRef.current;
+            const gameView = !!game && (game.inside
+                ? !!bid && bid === serverCurrentBuildingIdRef.current
+                : sessionLogPeekRef.current);
+            let url: string;
+            if (gameView) {
+                url = `/api/world/regions/${encodeURIComponent(game.region_id)}/game/log?${params.toString()}`;
+            } else {
+                if (bid) params.append('building_id', bid);
+                url = `/api/chat/history?${params.toString()}`;
+            }
 
-            const res = await fetch(`/api/chat/history?${params.toString()}`);
+            console.log(`[DEBUG] Fetching history: before=${beforeId}, building_id=${bid}, gameView=${gameView ? game.region_id : 'none'}`);
+
+            const res = await fetch(url);
             if (res.ok) {
                 setBackendConnected(true);
                 const data: HistoryResponse = await res.json();
@@ -465,6 +754,38 @@ export default function Home() {
                     setMessages(newMessages);
                     setTimeout(() => setIsHistoryLoaded(true), 150);
                 }
+
+                // アシスタントメッセージに紐付くアドオンメタデータを先読みする。
+                // SSE の audio_ready イベントは発生時に1回だけ配信されるため、
+                // ページリロード後に過去メッセージのバブルボタンを復元するには
+                // ここで明示的にフェッチする必要がある。
+                const assistantIds = newMessages
+                    .filter(m => m.role === 'assistant' && m.id)
+                    .map(m => m.id as string);
+                if (assistantIds.length > 0) {
+                    void Promise.all(
+                        assistantIds.map(async (mid) => {
+                            try {
+                                const r = await fetch(
+                                    `/api/addon/messages/${encodeURIComponent(mid)}/metadata`,
+                                );
+                                if (!r.ok) return;
+                                const body = await r.json() as {
+                                    metadata?: Record<string, Record<string, unknown>>;
+                                };
+                                const meta = body.metadata;
+                                if (meta && Object.keys(meta).length > 0) {
+                                    setAddonMetadata(prev => ({
+                                        ...prev,
+                                        [mid]: { ...(prev[mid] ?? {}), ...meta },
+                                    }));
+                                }
+                            } catch {
+                                // 個別失敗は無視(他メッセージは継続)
+                            }
+                        }),
+                    );
+                }
             } else {
                 const errorPayload: HistoryResponse | null = await res.json().catch(() => null);
                 console.error("[DEBUG] Fetch failed", {
@@ -487,6 +808,58 @@ export default function Home() {
             if (!beforeId) setIsHistoryLoaded(true);
         } finally {
             setIsLoadingMore(false);
+        }
+    };
+
+    // Region RPG: active_game の状態反映 (表示切替の判断は呼び出し側が行う)
+    const applyActiveGame = (game: ActiveGame | null) => {
+        activeGameRef.current = game;
+        setActiveGame(game);
+    };
+
+    // ゲーム外での「セッションログを見る ⇄ 通常チャットに戻る」トグル。
+    // 表示ソースが切り替わるので履歴をロードし直す
+    const toggleSessionLogPeek = () => {
+        updateSessionLogPeek(!sessionLogPeekRef.current);
+        setMessages([]);
+        setIsHistoryLoaded(false);
+        fetchHistory(undefined, currentBuildingIdRef.current ?? undefined);
+    };
+
+    // 「復帰」ボタン: パーティーの現在地へ移動してゲームに戻る。
+    // サーバー側で再集結 + 自動再開が発火する (lifecycle.rejoin_party)。
+    // LocationSync の次 tick を待たず即時に状態同期する
+    const handleRejoinGame = async () => {
+        const game = activeGameRef.current;
+        if (!game) return;
+        try {
+            const res = await fetch(
+                `/api/world/regions/${encodeURIComponent(game.region_id)}/game/rejoin`,
+                { method: 'POST' },
+            );
+            if (!res.ok) {
+                console.error('[Game] rejoin failed', res.status);
+                return;
+            }
+            updateSessionLogPeek(false);
+            const statusRes = await fetch('/api/user/status');
+            if (statusRes.ok) {
+                const data = await statusRes.json();
+                const serverBid: string | null = data.current_building_id ?? null;
+                applyActiveGame((data.active_game as ActiveGame | undefined) ?? null);
+                if (serverBid) {
+                    updateServerBuildingId(serverBid);
+                    setCurrentBuildingId(serverBid);
+                    currentBuildingIdRef.current = serverBid;
+                    fetchBuildingInfo(serverBid);
+                    setMoveTrigger(prev => prev + 1);
+                }
+            }
+            setMessages([]);
+            setIsHistoryLoaded(false);
+            fetchHistory(undefined, currentBuildingIdRef.current ?? undefined);
+        } catch (e) {
+            console.error('[Game] rejoin error', e);
         }
     };
 
@@ -530,6 +903,8 @@ export default function Home() {
                             avatar: entry.msg.avatar || local.avatar,
                             sender: entry.msg.sender || local.sender,
                             images: entry.msg.images || local.images,
+                            audios: entry.msg.audios || local.audios,
+                            videos: entry.msg.videos || local.videos,
                             llm_usage: entry.msg.llm_usage || local.llm_usage,
                             llm_usage_total: entry.msg.llm_usage_total || local.llm_usage_total,
                             timestamp: entry.msg.timestamp || local.timestamp,
@@ -542,6 +917,14 @@ export default function Home() {
                 console.log(`[syncAfterResponse] local=${prev.length} server=${serverMessages.length} matched=${matched} final=${result.length}`);
                 return result;
             });
+
+            // Force latestMessageIdRef to the newest server-known message ID.
+            // This prevents polling from using a stale ref and re-adding already-seen messages.
+            const newestServerId = serverMessages[serverMessages.length - 1]?.id;
+            if (newestServerId) {
+                latestMessageIdRef.current = newestServerId;
+                console.log(`[syncAfterResponse] latestMessageIdRef forced to ${newestServerId}`);
+            }
         } catch (err) {
             console.error("syncAfterResponse failed", err);
         }
@@ -581,8 +964,13 @@ export default function Home() {
     const fetchBuildingInfo = async (overrideBuildingId?: string) => {
         try {
             const bid = overrideBuildingId || currentBuildingIdRef.current;
-            const url = bid ? `/api/info/details?building_id=${bid}` : '/api/info/details';
-            const res = await fetch(url);
+            if (!bid) {
+                // 起動直後の /api/user/status 完了前に呼ばれた場合は何もしない。
+                // 引数なしで叩くと server-global の user_current_building_id に
+                // 汚染されうる (エリス上書き事故の遠因)。
+                return;
+            }
+            const res = await fetch(`/api/info/details?building_id=${encodeURIComponent(bid)}`);
             if (res.ok) {
                 const data = await res.json();
                 setCurrentBuildingName(data.name || 'SAIVerse');
@@ -591,6 +979,39 @@ export default function Home() {
             console.error('Failed to fetch building info', err);
         }
     };
+
+    // CityMap で家アイコンをクリックされたとき: 閲覧モードで建物を切り替える。
+    // C-1 (intent §C): サーバ側の CURRENT_BUILDINGID は据え置きのまま、 UI 上の
+    // 表示建物だけ切り替える (= 閲覧)。 実際の入室は発言時に /chat/utter が
+    // atomic に行う。
+    const handleSelectBuildingFromMap = (buildingId: string) => {
+        if (!buildingId) return;
+        if (currentBuildingId === buildingId) {
+            // 既に表示中の Building ならモーダルを閉じるだけ
+            setIsMapModalOpen(false);
+            return;
+        }
+        setCurrentBuildingId(buildingId);
+        currentBuildingIdRef.current = buildingId;
+        // 建物を選んだ = その建物のログを見たい。セッションログ閲覧は解除
+        updateSessionLogPeek(false);
+        setMessages([]);
+        setIsHistoryLoaded(false);
+        fetchHistory(undefined, buildingId);
+        fetchBuildingInfo(buildingId);
+        setMoveTrigger(prev => prev + 1);
+        setIsMapModalOpen(false);
+    };
+
+    // Esc キーでマップモーダルを閉じる
+    useEffect(() => {
+        if (!isMapModalOpen) return;
+        const handler = (e: globalThis.KeyboardEvent) => {
+            if (e.key === 'Escape') setIsMapModalOpen(false);
+        };
+        window.addEventListener('keydown', handler);
+        return () => window.removeEventListener('keydown', handler);
+    }, [isMapModalOpen]);
 
     useEffect(() => {
         // Fetch current building_id for multi-device safety
@@ -607,20 +1028,35 @@ export default function Home() {
                 if (data?.current_building_id) {
                     setCurrentBuildingId(data.current_building_id);
                     currentBuildingIdRef.current = data.current_building_id;
+                    updateServerBuildingId(data.current_building_id);
                 }
                 if (data?.display_name) userDisplayNameRef.current = data.display_name;
                 if (data?.avatar) userAvatarRef.current = data.avatar;
+                applyActiveGame(data?.active_game ?? null);
+                // 起動直後の fetchHistory() は status 取得とレースするため、
+                // ゲーム中 (Region 内) なら refs 確定後にセッションログで取り直す
+                if (data?.active_game?.inside && data?.current_building_id) {
+                    setMessages([]);
+                    setIsHistoryLoaded(false);
+                    fetchHistory(undefined, data.current_building_id);
+                }
             })
             .catch(() => setBackendConnected(false));
         fetchHistory();
         fetchBuildingInfo();
-        // Fetch saved playbook setting and params from server
+        // Fetch saved playbook setting and params from server.
+        // Legacy values from the pre-Phase 3 era (meta_user / meta_user_manual /
+        // meta_simple_speak, and the old track_user_conversation explicit
+        // selection) are collapsed to "auto" because the new 2-mode UI only
+        // recognises null and the TOOL_MODE_SELECTED sentinel.
         fetch('/api/config/playbook')
             .then(res => res.ok ? res.json() : null)
             .then(data => {
                 if (data) {
-                    if (data.playbook) {
-                        setSelectedPlaybook(data.playbook);
+                    if (data.playbook === TOOL_MODE_SELECTED) {
+                        setSelectedPlaybook(TOOL_MODE_SELECTED);
+                    } else {
+                        setSelectedPlaybook(null);
                     }
                     if (data.args && Object.keys(data.args).length > 0) {
                         setPlaybookArgs(data.args);
@@ -834,7 +1270,14 @@ export default function Home() {
             try {
                 const pollBid = currentBuildingIdRef.current;
                 const bidParam = pollBid ? `&building_id=${pollBid}` : '';
-                const res = await fetch(`/api/chat/history?after=${newestId}&limit=50${bidParam}`);
+                const game = activeGameRef.current;
+                const gameView = !!game && (game.inside
+                    ? !!pollBid && pollBid === serverCurrentBuildingIdRef.current
+                    : sessionLogPeekRef.current);
+                const pollUrl = gameView
+                    ? `/api/world/regions/${encodeURIComponent(game.region_id)}/game/log?after=${encodeURIComponent(newestId)}&limit=50`
+                    : `/api/chat/history?after=${newestId}&limit=50${bidParam}`;
+                const res = await fetch(pollUrl);
                 if (res.ok) {
                     const data = await res.json();
                     const newMessages: Message[] = data.history || [];
@@ -848,6 +1291,7 @@ export default function Home() {
                             if (filtered.length === 0) return prev;
                             return [...prev, ...filtered];
                         });
+                        setMoveTrigger(prev => prev + 1);
                     }
                 }
             } catch (err) {
@@ -856,6 +1300,69 @@ export default function Home() {
         }, 5000); // Poll every 5 seconds
 
         return () => clearInterval(pollInterval);
+    }, [isHistoryLoaded]);
+
+    // Server-driven user movement sync (game_move_party / end_game 控室帰還など):
+    // サーバー側の実在地 (serverCurrentBuildingIdRef との差分) が変わった時だけ
+    // 画面を追従させる。閲覧モード (currentBuildingIdRef ≠ 実在地) で他の建物を
+    // 見ている間は、サーバー位置が動かない限り何もしない。
+    useEffect(() => {
+        if (!isHistoryLoaded) return;
+
+        const syncInterval = setInterval(async () => {
+            if (isProcessingRef.current) return; // ストリーミング中は画面を奪わない
+            try {
+                const res = await fetch('/api/user/status');
+                if (!res.ok) return;
+                const data = await res.json();
+                const serverBid: string | null = data.current_building_id ?? null;
+                const oldServerBid = serverCurrentBuildingIdRef.current;
+                const game = (data.active_game as ActiveGame | undefined) ?? null;
+                const prevGame = activeGameRef.current;
+
+                const serverMoved = !!serverBid && !!oldServerBid && serverBid !== oldServerBid;
+                // 「いまセッションログを表示しているか」:
+                // Region 内 = 閲覧先 = 実在地のとき / Region 外 = トグル ON のとき
+                const wasShowingLog = !!prevGame && (prevGame.inside
+                    ? !!oldServerBid && currentBuildingIdRef.current === oldServerBid
+                    : sessionLogPeekRef.current);
+
+                if (serverBid) updateServerBuildingId(serverBid);
+                applyActiveGame(game);
+
+                // ログ閲覧トグルは「ゲーム外に居る」状態にのみ意味がある。
+                // ゲーム終了 / Region 内への移動でその状態が消えたらリセットする
+                if ((!game || game.inside) && sessionLogPeekRef.current) {
+                    updateSessionLogPeek(false);
+                }
+
+                if (serverMoved) {
+                    // サーバー発の移動 (= ゲームの物語が動いた)。画面を追従させる
+                    console.log(`[LocationSync] Server moved user: ${oldServerBid} -> ${serverBid}`);
+                    setCurrentBuildingId(serverBid);
+                    currentBuildingIdRef.current = serverBid;
+                    fetchBuildingInfo(serverBid);
+                    setMoveTrigger(prev => prev + 1);
+                }
+
+                const nowShowingLog = !!game && (game.inside
+                    ? currentBuildingIdRef.current === serverCurrentBuildingIdRef.current
+                    : sessionLogPeekRef.current);
+                // セッションログ → 同一セッションのログ なら表示は連続している
+                const logContinues = wasShowingLog && nowShowingLog
+                    && prevGame!.region_id === game!.region_id;
+                const viewSourceChanged = serverMoved || (wasShowingLog !== nowShowingLog);
+                if (viewSourceChanged && !logContinues) {
+                    setMessages([]);
+                    setIsHistoryLoaded(false);
+                    fetchHistory(undefined, currentBuildingIdRef.current ?? undefined);
+                }
+            } catch {
+                // backend 不達は再接続ポーリング側が面倒を見る
+            }
+        }, 5000);
+
+        return () => clearInterval(syncInterval);
     }, [isHistoryLoaded]);
 
     // Backend reconnection polling
@@ -1027,16 +1534,16 @@ export default function Home() {
         }
     }, []);
 
-    const handleTweetConfirmResponse = useCallback(async (requestId: string, decision: string, editedText?: string) => {
-        setTweetConfirm(null);
+    const handleSpellConfirmResponse = useCallback(async (requestId: string, decision: string, editedText?: string) => {
+        setSpellConfirm(null);
         try {
-            await fetch('/api/chat/tweet-confirmation-response', {
+            await fetch('/api/chat/spell-confirmation-response', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ request_id: requestId, decision, edited_text: editedText }),
             });
         } catch (e) {
-            console.error('Failed to send tweet confirmation response', e);
+            console.error('Failed to send spell confirmation response', e);
         }
     }, []);
 
@@ -1053,77 +1560,274 @@ export default function Home() {
         }
     }, []);
 
-    const handleSendMessage = async () => {
-        if ((!inputValue.trim() && attachments.length === 0) || loadingStatus) return;
-        isProcessingRef.current = true;
+    // ------------------------------------------------------------------
+    // 応答ストリームの読み手
+    //
+    // 送信・続きの生成・やり直しの三つの入口が同じ読み手を共有する。入口ごとに
+    // 書き分けると、片方だけ直った分岐がいずれ必ず生まれる。
+    // 設計: docs/issues/user_utterance_path_failure_inventory.md
+    // ------------------------------------------------------------------
 
-        // Optimistic update
-        // Temporary ID for key prop until refreshed
-        const tempId = `temp-${Date.now()}`;
-        const userMsg: Message = {
-            id: tempId, role: 'user', content: inputValue,
-            sender: userDisplayNameRef.current || undefined,
-            avatar: userAvatarRef.current || undefined,
-            images: attachments
-                .filter(a => a.type === 'image')
-                .map(a => ({ url: `data:${a.mimeType};base64,${a.base64}`, mime_type: a.mimeType })),
-        };
-        setMessages(prev => [...prev, userMsg]);
-        setInputValue('');
-        setLoadingStatus('Thinking...');
+    // 画面に出る案内 (エラー・お知らせ) は、いまの状態の表示であって履歴では
+    // ない。サーバーには保存されず、別の建物を見て戻ったりページを開き直すと
+    // 消える — その揮発性に合わせて、**次の操作を始めたら消す** (2026-08-26
+    // まはー裁定)。時間では消さない: 読んでいない可能性が普通にあるので、
+    // 消える引き金はユーザーの操作だけにする。
+    //
+    // isError / isWarning / isInfo が立つのは画面側で作った案内だけで、履歴から
+    // 復元した発言には付かない (履歴はサーバーの行をそのまま並べる)。だから
+    // この条件で本物の発言を巻き込むことはない。印を持たない system の
+    // お知らせ行はサーバー由来なので残す。
+    const clearTransientNotices = () => {
+        setMessages(prev => prev.filter(
+            m => !m.isError && !m.isWarning && !m.isInfo,
+        ));
+    };
 
-        const currentAttachments = attachments;
-        const currentPlaybook = selectedPlaybook;
-        const currentPlaybookArgs = playbookArgs;
+    // やり直しても結果が変わらない終わり方。ここに載る札のときは「再送」を
+    // 出さない — 押しても同じ結果しか返らない操作を勧めることになるから。
+    // already_replied: サーバーの門番が「この発言には既に応答がある」と
+    // 判定した回。応答がある限り何度押しても同じ拒否が返る。
+    const RETRY_CHANGES_NOTHING = new Set(['no_responder', 'already_replied']);
 
-        setAttachments([]);
-        // Reset playbook args after sending
-        setPlaybookArgs({});
+    // 心拍の締切。サーバーのストリーム書き手 (manager/runtime.py の
+    // response_queue.get(timeout=2.0)) は、キューが空でも最大 2 秒間隔で
+    // {"type": "ping"} を必ず流す。つまりバックエンドが生きている限り、沈黙は
+    // 2 秒を超えない — 15 秒の沈黙を死の判定とするのは 7 倍の余裕がある。
+    // この締切が要るのは、Next の中継 (:3000 → :8000) がバックエンドの死を
+    // ブラウザへ伝えないから (2026-08-28 実測: バックエンド直結の読み手は
+    // 即座にエラーを受けるが、中継経由の読み手は done もエラーも受けず永遠に
+    // 待つ)。締切なしでは、生成中にバックエンドが落ちると Streaming... の
+    // スピナーのまま固まり、復旧の文言が一切出ない。
+    const STREAM_HEARTBEAT_TIMEOUT_MS = 15000;
 
-        try {
-            const res = await fetch('/api/chat/send', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    message: userMsg.content,
-                    building_id: currentBuildingIdRef.current || undefined,
-                    attachments: currentAttachments.length > 0 ? currentAttachments.map(a => ({
-                        data: a.base64,
-                        filename: a.name,
-                        type: a.type,
-                        mime_type: a.mimeType
-                    })) : undefined,
-                    meta_playbook: currentPlaybook,
-                    args: Object.keys(currentPlaybookArgs).length > 0 ? currentPlaybookArgs : undefined
-                })
-            });
+    // サーバーが「ユーザーに何かが届いた」と数えるイベントの型 —
+    // manager/runtime.py の _OUTCOME_EVENT_TYPES の鏡。say / streaming_chunk は
+    // 本文が空なら数えない規則 (同 _CONTENT_BEARING_TYPES) があるため、この
+    // Set には載せず読み手のループ内で本文の有無ごと判定する。鏡はサーバーの
+    // _note_outcome の撤回まで含む: streaming_chunk で立てた印は出どころ
+    // (persona_id + pulse_id = _stream_key) ごとに持ち、streaming_discard が
+    // 同じ出どころの印だけを消す。say やエラー通知は撤回されない。
+    const SERVER_OUTCOME_EVENT_TYPES = new Set([
+        'error', 'cancelled', 'duplicate_command', 'permission_request',
+        'spell_confirmation', 'chronicle_confirm', 'warning', 'info',
+    ]);
 
-            if (!res.ok) {
-                let errorDetails = `Status: ${res.status} ${res.statusText}`;
-                try {
-                    const errorText = await res.text();
-                    errorDetails += ` - Body: ${errorText}`;
-                } catch (e) { console.error('Failed to read error response body:', e); }
-                throw new Error(`Failed to send message. ${errorDetails}`);
+    // 返事が来なかった発言に印を立てる。出口 3 / 7。
+    //
+    // ``useless`` は「やり直しても結果が変わらない」— 相手が居ない部屋など。
+    // その回も **needsRetry は立てる**: 返事が来ていないのは事実だし、誰にも
+    // 読まれていない以上「取り消す」は使えるべきだから。落とすのは「再送」だけ。
+    const markRetryable = (messageId: string, useless = false) => {
+        setMessages(prev => prev.map(m => (
+            m.id === messageId && m.role === 'user'
+                ? { ...m, needsRetry: true, retryUseless: useless }
+                : m
+        )));
+    };
+
+    // 印の鮮度: サーバーの門番と同じ物差し (「その発言より後に本文のある
+    // ペルソナ発言があるか」 = database/building_messages.py の
+    // _has_assistant_reply_after の鏡) を表示にも適用する (2026-08-29 まはー裁定)。
+    // 後から応答が並んだ発言の「再送」「取り消す」は押しても門番に断られる
+    // だけなので、画面が判定できるようになった時点で降ろす。画面がまだ知らない
+    // 応答 (別タブで付いた分など) は降ろせないが、その回は門番が受け止める。
+    // 確定前のストリーミング吹き出し (_streaming) は数えない — 保存に失敗すると
+    // 空で確定して消える吹き出しで印を降ろすと、再送が要る場面で導線を失う。
+    useEffect(() => {
+        setMessages(prev => {
+            let changed = false;
+            let replyBehind = false;
+            const next = [...prev];
+            for (let i = next.length - 1; i >= 0; i--) {
+                const m = next[i];
+                if (m.role === 'assistant' && !m._streaming && m.content) {
+                    replyBehind = true;
+                } else if (m.role === 'user' && m.needsRetry && replyBehind) {
+                    next[i] = { ...m, needsRetry: false };
+                    changed = true;
+                }
             }
+            return changed ? next : prev;
+        });
+    }, [messages]);
 
+    // ストリームが閉じた後の後片付け。読み終わっても、途中で切れても、fetch が
+    // 失敗しても必ず通す。
+    const finishReplyCycle = async () => {
+            // ストリームが閉じた後に metabolism の遅延タイマーが発火すると
+            // スピナーが復活して二度と消えなくなるため、必ずここで潰す。
+            if (metabolismStatusTimerRef.current) {
+                clearTimeout(metabolismStatusTimerRef.current);
+                metabolismStatusTimerRef.current = null;
+            }
+            setLoadingStatus(null);
+            // Finalize any orphaned _streaming messages left after the stream ends
+            // (e.g. activity events that arrived after the last streaming_complete)
+            setMessages(prev => {
+                const lastIdx = prev.length - 1;
+                if (lastIdx >= 0 && prev[lastIdx]._streaming) {
+                    const msg = prev[lastIdx];
+                    const { _streaming, _streamingThinking, _activities, ...rest } = msg;
+                    // Empty content + no activities → discard entirely
+                    if (!rest.content && (!_activities || _activities.length === 0)) {
+                        return prev.slice(0, -1);
+                    }
+                    // Has activities or content → finalize as completed message
+                    return [...prev.slice(0, -1), {
+                        ...rest,
+                        ...(_streamingThinking && { reasoning: _streamingThinking }),
+                        ...((_activities && _activities.length > 0) && { activity_trace: _activities }),
+                    }];
+                }
+                return prev;
+            });
+            await syncAfterResponse(); // Merge server state (IDs, avatars) without replacing messages
+            isProcessingRef.current = false; // Allow polling AFTER sync completes
+            setMoveTrigger(prev => prev + 1);
+            // Refresh RPD usage after message sent
+            if (selectedModelRateLimit && selectedModel) {
+                fetch(`/api/usage/rpd?model_id=${encodeURIComponent(selectedModel)}`)
+                    .then(res => res.ok ? res.json() : null)
+                    .then((data: { used: number; limit: number }[] | null) => {
+                        if (data && data.length > 0) setRpdUsage({ used: data[0].used, limit: data[0].limit });
+                    })
+                    .catch(() => {});
+            }
+    };
+
+    const consumeReplyStream = async (
+        res: Response,
+        source: 'send' | 'continue' | 'retry',
+        // 送信の入口だけが渡す復旧材料。通信が「届いたか分からない」形で切れた
+        // とき (出口 7)、client_message_id でサーバーに保存結果を問い合わせ、
+        // 分かった結果に応じて復旧導線 (再送 / 履歴再取得 / 入力欄への差し戻し)
+        // へ合流するのに使う。
+        // 設計: docs/issues/unknown_send_outcome_has_no_recovery_path.md
+        sendContext?: {
+            clientMessageId: string;
+            tempId: string;
+            content: string;
+            attachments: FileAttachment[];
+        },
+    ) => {
+        // 発言が届いたことをサーバーから聞けたか。通信が途中で切れたとき、
+        // 「届いたか分からない」(出口 7) と「届いたが返事が無かった」(出口 3) を
+        // 分けるのに使う。分からないときに分かった顔をしないための材料。
+        let landedMessageId: string | null = null;
+        // ペルソナが実際に言葉を出したか。呼び出し元が「走らせた」と「返事が
+        // 生まれた」を取り違えないための報告。バックエンドの続き生成も同じ線で
+        // 印を降ろすかを決めており、こちらだけ別の線 (ストリームが始まったか)
+        // を引くと、片方だけ正しい状態になる。
+        let replied = false;
+        // 最後に届いたエラーの札。「やり直しても変わらない」かの判定に使う。
+        let lastErrorCode: string | null = null;
+        // 読めなかった行の数。1 行でも読めなければ、そこに何が載っていたかは
+        // 分からない — 発言が届いた印かもしれないし、エラーの説明かもしれない。
+        // 黙って捨てると、何も起きなかったのと同じ顔でストリームが正常終了する。
+        let malformedLines = 0;
+        // サーバーの「結果」イベント (発言・エラー・キャンセルなど、
+        // SERVER_OUTCOME_EVENT_TYPES の鏡が拾うもの) を見たか。
+        // サーバーの正常な形では backend_worker の finally (出口 3) が必ず
+        // 何らかの結果イベントを流すので、結果ゼロのまま done で抜けたら、
+        // それは正常終了の顔をした切断。
+        //
+        // 二層に分けるのは、サーバー側 (manager/runtime.py の _note_outcome) が
+        // streaming_chunk の結果を streaming_discard で**撤回**するから
+        // (ツール呼び出しだけの回など、途中本文を引っ込めた後に say もエラーも
+        // 来ない終わり方がある)。撤回まで写さないと、その回の切断を正常終了
+        // として受け入れてしまう。
+        // - sawFinalOutcome: 撤回されない結果 (say / エラー通知など)。
+        //   一度立てたら降ろさない (サーバーの value と同じ)。
+        let sawFinalOutcome = false;
+        // - chunkOutcomeKeys: streaming_chunk で立つ出どころごとの印
+        //   (サーバーの pending と同じ)。キーは _stream_key の写し
+        //   (`${persona_id}/${pulse_id}`) で、streaming_discard が同じ
+        //   出どころの印だけを消す。
+        const chunkOutcomeKeys = new Set<string>();
+        try {
             if (!res.body) throw new Error("No response body");
             const reader = res.body.getReader();
             const decoder = new TextDecoder();
             let buffer = '';
 
             while (true) {
-                const { done, value } = await reader.read();
-                if (done) break;
+                // 心拍監視: read を STREAM_HEARTBEAT_TIMEOUT_MS の締切付きで
+                // 待つ (締切の根拠と、Next 中継が切断を伝えない実測事実は定数の
+                // コメントを参照)。締切に達したら読み手を畳んで下の catch へ
+                // 流す — 新しい文言や分岐は作らない。既存の stream_broken /
+                // unknown_outcome の出し分けがそのまま正しい。
+                const readPromise = reader.read();
+                let heartbeatTimer: ReturnType<typeof setTimeout> | null = null;
+                let readResult: Awaited<ReturnType<typeof reader.read>>;
+                try {
+                    readResult = await Promise.race([
+                        readPromise,
+                        new Promise<never>((_, reject) => {
+                            heartbeatTimer = setTimeout(() => reject(new Error(
+                                `no stream data for ${STREAM_HEARTBEAT_TIMEOUT_MS}ms; `
+                                + 'treating the connection as dead'
+                            )), STREAM_HEARTBEAT_TIMEOUT_MS);
+                        }),
+                    ]);
+                } catch (readError) {
+                    // race に負けた readPromise が後から reject しても
+                    // unhandled rejection にしない。
+                    readPromise.catch(() => {});
+                    // 読み手を畳む (best-effort — 失敗は握る)。
+                    try {
+                        reader.cancel().catch(() => {});
+                    } catch { /* ignore */ }
+                    throw readError;
+                } finally {
+                    // read が解決しても締切に達しても、タイマーは必ず消す。
+                    if (heartbeatTimer !== null) clearTimeout(heartbeatTimer);
+                }
+                const { done, value } = readResult;
 
-                buffer += decoder.decode(value, { stream: true });
-                const lines = buffer.split('\n');
-                buffer = lines.pop() || ''; // Keep the last partial line
+                let lines: string[];
+                if (done) {
+                    // 最後のチャンクが改行で終わっていない = 行が途中で切れている。
+                    // decoder を flush して残りを取り出し、1 行として通す。捨てると、
+                    // 最後のイベント (結果を運んでいることが多い) が消える。
+                    buffer += decoder.decode();
+                    lines = buffer ? [buffer] : [];
+                    buffer = '';
+                } else {
+                    buffer += decoder.decode(value, { stream: true });
+                    const parts = buffer.split('\n');
+                    buffer = parts.pop() || ''; // Keep the last partial line
+                    lines = parts;
+                }
 
                 for (const line of lines) {
                     if (!line.trim()) continue;
                     try {
                         const event = JSON.parse(line);
+                        if (event.type !== 'ping') {
+                            console.log('[SSE][diag]', event.type, 'persona=', event.persona_id, 'pulse=', event.pulse_id);
+                        }
+
+                        // サーバーが「届いた」と数えるものをこちらでも数える
+                        // (SERVER_OUTCOME_EVENT_TYPES の定義コメントを参照)。
+                        // 本文を運ぶ型は中身が空なら数えない — サーバー側と
+                        // 同じ規則。event.response は旧形式の応答で、これも
+                        // 結果に数える。streaming_chunk だけは撤回されうるので
+                        // 出どころごとの印に置き、streaming_discard が同じ
+                        // 出どころの印を消す (サーバーの _note_outcome の写し)。
+                        if (event.type === 'streaming_discard') {
+                            chunkOutcomeKeys.delete(
+                                `${event.persona_id || ''}/${event.pulse_id || ''}`);
+                        } else if (SERVER_OUTCOME_EVENT_TYPES.has(event.type)
+                            || (event.type === 'say'
+                                && String(event.content || '').trim() !== '')
+                            || event.response) {
+                            sawFinalOutcome = true;
+                        } else if (event.type === 'streaming_chunk'
+                            && String(event.content || '').trim() !== '') {
+                            chunkOutcomeKeys.add(
+                                `${event.persona_id || ''}/${event.pulse_id || ''}`);
+                        }
 
                         if (event.type === 'status') {
                             setLoadingStatus(event.content === 'processing' ? 'Processing...' : event.content);
@@ -1132,43 +1836,88 @@ export default function Home() {
                         } else if (event.type === 'activity') {
                             // Activity trace: accumulate tool/memorize steps
                             const entry: ActivityEntry = { action: event.action, name: event.name, ...(event.playbook && { playbook: event.playbook }), status: event.status };
-                            setMessages(prev => {
-                                const last = prev[prev.length - 1];
-                                if (last && last.role === 'assistant' && last._streaming) {
-                                    const activities = [...(last._activities || [])];
-                                    if (event.status === 'completed' || event.status === 'error') {
-                                        const idx = activities.findIndex(
-                                            a => a.action === entry.action && a.name === entry.name && a.status === 'started'
-                                        );
-                                        if (idx >= 0) {
-                                            activities[idx] = { ...activities[idx], status: event.status };
-                                        } else {
-                                            activities.push(entry);
-                                        }
+                            const evtPulseId: string | undefined = event.pulse_id || undefined;
+                            const mergeActivity = (existing: ActivityEntry[] | undefined): ActivityEntry[] => {
+                                const activities = [...(existing || [])];
+                                if (event.status === 'completed' || event.status === 'error') {
+                                    const idx = activities.findIndex(
+                                        a => a.action === entry.action && a.name === entry.name && a.status === 'started'
+                                    );
+                                    if (idx >= 0) {
+                                        activities[idx] = { ...activities[idx], status: event.status };
                                     } else {
                                         activities.push(entry);
                                     }
-                                    return [...prev.slice(0, -1), { ...last, _activities: activities }];
                                 } else {
-                                    const actAvatarUrl = event.persona_avatar || (event.persona_id ? `/api/chat/persona/${event.persona_id}/avatar` : undefined);
-                                    return [...prev, {
-                                        role: 'assistant' as const, content: '', _streaming: true,
-                                        sender: event.persona_name || undefined,
-                                        avatar: actAvatarUrl,
-                                        _activities: [entry], timestamp: new Date().toISOString()
-                                    }];
+                                    activities.push(entry);
                                 }
-                            });
-                            setLoadingStatus(event.status === 'started' ? `Running ${event.name}...` : event.name);
-                        } else if (event.type === 'streaming_thinking') {
-                            // Streaming thinking: accumulate into _streamingThinking
-                            const avatarUrl = event.persona_avatar || (event.persona_id ? `/api/chat/persona/${event.persona_id}/avatar` : undefined);
+                                return activities;
+                            };
                             setMessages(prev => {
                                 const last = prev[prev.length - 1];
                                 if (last && last.role === 'assistant' && last._streaming) {
                                     return [...prev.slice(0, -1), {
                                         ...last,
-                                        _streamingThinking: (last._streamingThinking || '') + event.content
+                                        _activities: mergeActivity(last._activities),
+                                        ...(evtPulseId && !last._pulse_id && { _pulse_id: evtPulseId }),
+                                    }];
+                                }
+                                // Finalized message with the same pulse_id: append to its activity_trace
+                                if (evtPulseId) {
+                                    for (let i = prev.length - 1; i >= 0; i--) {
+                                        const m = prev[i];
+                                        if (m.role !== 'assistant') continue;
+                                        if (m._pulse_id !== evtPulseId) continue;
+                                        const merged = mergeActivity(m.activity_trace || m._activities);
+                                        const updated = [...prev];
+                                        updated[i] = { ...m, activity_trace: merged, _activities: undefined };
+                                        return updated;
+                                    }
+                                }
+                                const actAvatarUrl = event.persona_avatar || (event.persona_id ? `/api/chat/persona/${event.persona_id}/avatar` : undefined);
+                                return [...prev, {
+                                    role: 'assistant' as const, content: '', _streaming: true,
+                                    sender: event.persona_name || undefined,
+                                    avatar: actAvatarUrl,
+                                    _activities: [entry], timestamp: new Date().toISOString(),
+                                    ...(evtPulseId && { _pulse_id: evtPulseId }),
+                                }];
+                            });
+                            setLoadingStatus(event.status === 'started' ? `Running ${event.name}...` : event.name);
+                        } else if (event.type === 'auto_recall') {
+                            // 自動想起 (記憶アーキv2 §4.5): 末尾注入された「ふと浮かんだ記憶」を
+                            // スペル結果と同じ折りたたみで表示する。<system> タグは剥がす。
+                            const rawContent: string = typeof event.content === 'string' ? event.content : '';
+                            const recallBody = rawContent
+                                .replace(/^\s*<system>/, '')
+                                .replace(/<\/system>\s*$/, '')
+                                .trim();
+                            if (recallBody) {
+                                const arAvatarUrl = event.persona_avatar || (event.persona_id ? `/api/chat/persona/${event.persona_id}/avatar` : undefined);
+                                setMessages(prev => {
+                                    const last = prev[prev.length - 1];
+                                    if (last && last.role === 'assistant' && last._streaming) {
+                                        return [...prev.slice(0, -1), { ...last, auto_recall: recallBody }];
+                                    }
+                                    return [...prev, {
+                                        role: 'assistant' as const, content: '', _streaming: true,
+                                        sender: event.persona_name || undefined,
+                                        avatar: arAvatarUrl,
+                                        auto_recall: recallBody, timestamp: new Date().toISOString(),
+                                    }];
+                                });
+                            }
+                        } else if (event.type === 'streaming_thinking') {
+                            // Streaming thinking: accumulate into _streamingThinking
+                            const avatarUrl = event.persona_avatar || (event.persona_id ? `/api/chat/persona/${event.persona_id}/avatar` : undefined);
+                            const evtPulseId: string | undefined = event.pulse_id || undefined;
+                            setMessages(prev => {
+                                const last = prev[prev.length - 1];
+                                if (last && last.role === 'assistant' && last._streaming) {
+                                    return [...prev.slice(0, -1), {
+                                        ...last,
+                                        _streamingThinking: (last._streamingThinking || '') + event.content,
+                                        ...(evtPulseId && !last._pulse_id && { _pulse_id: evtPulseId }),
                                     }];
                                 } else {
                                     return [...prev, {
@@ -1178,20 +1927,24 @@ export default function Home() {
                                         avatar: avatarUrl,
                                         timestamp: new Date().toISOString(),
                                         _streaming: true,
-                                        _streamingThinking: event.content
+                                        _streamingThinking: event.content,
+                                        ...(evtPulseId && { _pulse_id: evtPulseId }),
                                     }];
                                 }
                             });
                             setLoadingStatus('Thinking...');
                         } else if (event.type === 'streaming_chunk') {
+                            if (String(event.content || '').trim()) replied = true;
                             // Streaming: append chunk to last message or create new one
                             const avatarUrl = event.persona_avatar || (event.persona_id ? `/api/chat/persona/${event.persona_id}/avatar` : undefined);
+                            const evtPulseId: string | undefined = event.pulse_id || undefined;
                             setMessages(prev => {
                                 const last = prev[prev.length - 1];
                                 if (last && last.role === 'assistant' && last._streaming) {
                                     return [...prev.slice(0, -1), {
                                         ...last,
-                                        content: last.content + event.content
+                                        content: last.content + event.content,
+                                        ...(evtPulseId && !last._pulse_id && { _pulse_id: evtPulseId }),
                                     }];
                                 } else {
                                     return [...prev, {
@@ -1200,7 +1953,8 @@ export default function Home() {
                                         sender: event.persona_name || 'Assistant',
                                         avatar: avatarUrl,
                                         timestamp: new Date().toISOString(),
-                                        _streaming: true
+                                        _streaming: true,
+                                        ...(evtPulseId && { _pulse_id: evtPulseId })
                                     }];
                                 }
                             });
@@ -1251,12 +2005,16 @@ export default function Home() {
                                         reasoning,
                                         ...((_activities && _activities.length > 0) && { activity_trace: _activities }),
                                         ...(streamCompleteImages && { images: streamCompleteImages }),
+                                        // 途中で切れた発言。再読込を待たずに印を立て、
+                                        // その場で「続きの生成」を出せるようにする。
+                                        ...(event.interrupted && { interrupted: true }),
                                     }];
                                 }
                                 return prev;
                             });
                             setLoadingStatus('Thinking...');
                         } else if (event.type === 'say') {
+                            if (String(event.content || '').trim()) replied = true;
                             console.log('[DEBUG] Received say event:', event);
                             const avatarUrl = event.persona_avatar || (event.persona_id ? `/api/chat/persona/${event.persona_id}/avatar` : undefined);
 
@@ -1301,6 +2059,7 @@ export default function Home() {
 
                             const sayReasoning = event.reasoning || undefined;
                             const sayActivityTrace = event.activity_trace || undefined;
+                            const sayPulseId: string | undefined = event.pulse_id || undefined;
                             setMessages(prev => {
                                 // Check if last message already has this content (from streaming completion)
                                 const last = prev[prev.length - 1];
@@ -1315,10 +2074,12 @@ export default function Home() {
                                         ...(sayUsageTotal && { llm_usage_total: sayUsageTotal }),
                                         ...(sayReasoning && { reasoning: sayReasoning }),
                                         ...(sayActivityTrace && { activity_trace: sayActivityTrace }),
+                                        ...(sayPulseId && { _pulse_id: sayPulseId }),
                                     }];
                                 }
                                 return [...prev, {
                                     role: 'assistant',
+                                    id: event.message_id || undefined,
                                     content: event.content,
                                     sender: event.persona_name || 'Assistant',
                                     avatar: avatarUrl,
@@ -1327,10 +2088,17 @@ export default function Home() {
                                     ...(sayUsageTotal && { llm_usage_total: sayUsageTotal }),
                                     ...(sayReasoning && { reasoning: sayReasoning }),
                                     ...(sayActivityTrace && { activity_trace: sayActivityTrace }),
+                                    ...(sayPulseId && { _pulse_id: sayPulseId }),
                                 }];
                             });
                             setLoadingStatus('Thinking...');
                         } else if (event.type === 'error') {
+                            // W7: 位置競合エラー (not_in_building 等) はサーバの
+                            // 確定現在地を同期する — 放置すると次回発言の
+                            // expected_from が古いままで余分な CAS 競合になる
+                            if (event.current_building_id) {
+                                updateServerBuildingId(event.current_building_id);
+                            }
                             setMessages(prev => [...prev, {
                                 role: 'assistant',
                                 content: event.content || 'An error occurred',
@@ -1339,18 +2107,52 @@ export default function Home() {
                                 errorDetail: event.technical_detail,
                                 timestamp: new Date().toISOString()
                             }]);
+                            const errorCode: string = event.error_code || 'unknown';
+                            lastErrorCode = errorCode;
+                            // 発言は届いているのに返事が生まれなかった (出口 3)。
+                            // 送り直しではなく「もう一度応答を得る」を出す。
+                            // 応答できる相手が居ない回は「再送」だけを落とす —
+                            // 発言は誰にも読まれていないので「取り消す」は残る。
+                            if (landedMessageId) {
+                                markRetryable(
+                                    landedMessageId,
+                                    RETRY_CHANGES_NOTHING.has(errorCode),
+                                );
+                            }
                         } else if (event.type === 'metabolism') {
                             if (event.status === 'completed') {
                                 // Show completion message briefly, then transition
                                 if (event.content) {
                                     setLoadingStatus(event.content);
-                                    setTimeout(() => setLoadingStatus('Thinking...'), 2000);
+                                    if (metabolismStatusTimerRef.current) clearTimeout(metabolismStatusTimerRef.current);
+                                    metabolismStatusTimerRef.current = setTimeout(() => {
+                                        metabolismStatusTimerRef.current = null;
+                                        setLoadingStatus('Thinking...');
+                                    }, 2000);
                                 } else {
                                     setLoadingStatus('Thinking...');
                                 }
                             } else {
                                 // started, running, etc. — show content as loading status
                                 setLoadingStatus(event.content || '記憶を整理しています...');
+                            }
+                        } else if (event.type === 'user_message_id') {
+                            // Update the optimistic user message (temp id) with server-assigned id
+                            if (event.message_id) {
+                                // サーバーが発言を受け取った証拠。通信が後で切れても
+                                // 「届いたかどうか分からない」ではなくなる。
+                                landedMessageId = event.message_id;
+                                setMessages(prev => {
+                                    // Find the last user message with a temp id and update it
+                                    for (let i = prev.length - 1; i >= 0; i--) {
+                                        if (prev[i].role === 'user' && prev[i].id?.startsWith('temp-')) {
+                                            const updated = [...prev];
+                                            updated[i] = { ...prev[i], id: event.message_id };
+                                            return updated;
+                                        }
+                                    }
+                                    return prev;
+                                });
                             }
                         } else if (event.type === 'permission_request') {
                             setPermissionRequest({
@@ -1360,12 +2162,16 @@ export default function Home() {
                                 playbookDescription: event.playbook_description || '',
                                 personaName: event.persona_name || '',
                             });
-                        } else if (event.type === 'tweet_confirmation') {
-                            setTweetConfirm({
+                        } else if (event.type === 'spell_confirmation') {
+                            setSpellConfirm({
                                 requestId: event.request_id,
-                                tweetText: event.tweet_text,
-                                personaId: event.persona_id || '',
-                                xUsername: event.x_username || '',
+                                title: event.title || '確認',
+                                body: event.body || '',
+                                editable: !!event.editable,
+                                text: event.text,
+                                addon: event.addon || '',
+                                confirmText: event.confirm_text,
+                                maxChars: event.max_chars,
                             });
                         } else if (event.type === 'chronicle_confirm') {
                             setChronicleConfirm({
@@ -1392,11 +2198,28 @@ export default function Home() {
                                     timestamp: new Date().toISOString()
                                 }]);
                             }
+                        } else if (event.type === 'info') {
+                            // Info notification (e.g. 504 stream interruption)
+                            setMessages(prev => [...prev, {
+                                role: 'system',
+                                content: event.content || '',
+                                isInfo: true,
+                                timestamp: new Date().toISOString()
+                            }]);
                         } else if (event.type === 'cancelled') {
                             // Server-side cancellation: finalize streaming message
                             setMessages(prev => {
                                 const last = prev[prev.length - 1];
                                 if (last && last._streaming) {
+                                    // 本文が一文字も出る前に停止された回。思考や活動の
+                                    // 表示だけのバブルは、サーバー履歴には存在しない
+                                    // (下書き行は空文字で確定され、履歴 API は content 空を
+                                    // 出さない) ので、再読込で黙って消える。見かけと実態を
+                                    // 揃えるため、その場で畳む (2026-08-27 まはー裁定)。
+                                    // 本文が一文字でも出ていれば従来どおり確定して残す。
+                                    if (!last.content) {
+                                        return prev.slice(0, -1);
+                                    }
                                     const { _streaming, _streamingThinking, _activities, ...rest } = last;
                                     return [...prev.slice(0, -1), {
                                         ...rest,
@@ -1406,53 +2229,543 @@ export default function Home() {
                                 }
                                 return prev;
                             });
+                            if (metabolismStatusTimerRef.current) {
+                                clearTimeout(metabolismStatusTimerRef.current);
+                                metabolismStatusTimerRef.current = null;
+                            }
                             setLoadingStatus(null);
+                            // 本文が生まれる前の停止も「返事が来なかった」(2026-08-28
+                            // まはー裁定)。思考中に止める動機はほぼ間違いの訂正 (モデル
+                            // 違い・途中送信) で、発言はもうペルソナに読まれていて
+                            // 取り消せない以上、ここで口を塞ぐと新しく話しかけるしか
+                            // なくなる。エラーで返事が生まれなかった回 (上の出口 3) と
+                            // 同じ印を立てる。停止そのものは尊重する — 勝手に再開は
+                            // せず、回復はユーザーの一押しの後ろに置く。本文が出て
+                            // からの停止は replied が立つのでここを通らない (そちらは
+                            // 発言側の「続きの生成」が既に出る)。continue / retry 経由の
+                            // 停止は呼び出し元の restoreAffordance が同じ線 (replied) で
+                            // ボタンを戻すので、ここでは send だけを見る。
+                            if (source === 'send' && !replied && landedMessageId) {
+                                markRetryable(landedMessageId);
+                            }
                         } else if (event.response) {
                             setMessages(prev => [...prev, { role: 'assistant', content: event.response }]);
                         }
 
                     } catch (e) {
+                        malformedLines += 1;
                         console.error("Error parsing NDJSON line", e, line);
                     }
                 }
+
+                if (done) break;
             }
 
+            if (malformedLines > 0) {
+                // 下の catch へ落とす。そこには既に「発言が届いた印を持っているか」で
+                // 復旧導線を分ける判断があるので、同じ道を通す。
+                throw new Error(
+                    `${malformedLines} NDJSON line(s) could not be parsed`,
+                );
+            }
+
+            // 結果を見ないまま正常終了した回は異常。行儀のいい終了 (Next 中継の
+            // 再起動など) では接続が正常終了の顔で閉じることがあり、その場合
+            // ループは done で抜けて catch を通らず、何も表示されないまま
+            // スピナーだけが消える。サーバーの正常な形では backend_worker の
+            // finally (出口 3) が必ず何らかの結果イベントを流すので、
+            // user_message_id だけ受けて終わるような「結果ゼロの正常終了」は
+            // 切断と断定してよい。ユーザー停止 (cancelled) は正当な静かな
+            // 終わりで、上の鏡が結果に数えるのでここには落ちない。
+            // 「結果ゼロ」の判定はサーバーの _outcome_reached の裏返し —
+            // 撤回されない結果が無く、撤回されずに残った断片も無いこと
+            // (途中本文が全部 discard で引っ込められた回は結果ゼロ)。
+            if (!sawFinalOutcome && chunkOutcomeKeys.size === 0) {
+                throw new Error('stream ended without any outcome event');
+            }
         } catch (error) {
             console.error(error);
-            setMessages(prev => [...prev, { role: 'assistant', content: "Error: Failed to send message." }]);
-        } finally {
-            setLoadingStatus(null);
-            // Finalize any orphaned _streaming messages left after the stream ends
-            // (e.g. activity events that arrived after the last streaming_complete)
-            setMessages(prev => {
-                const lastIdx = prev.length - 1;
-                if (lastIdx >= 0 && prev[lastIdx]._streaming) {
-                    const msg = prev[lastIdx];
-                    const { _streaming, _streamingThinking, _activities, ...rest } = msg;
-                    // Empty content + no activities → discard entirely
-                    if (!rest.content && (!_activities || _activities.length === 0)) {
-                        return prev.slice(0, -1);
+            if (source === 'send' && !landedMessageId) {
+                // 出口 7: ストリームからは届いたかどうか分からないまま切れた。
+                // まずサーバーに保存結果を自動で問い合わせる — 読み取りのみで
+                // LLM を使わないので自動でよい (2026-08-25 裁定「追加の推論は
+                // ボタンの後ろ」の対象外)。分かったことだけを言い、分からない
+                // まま (照会失敗・status unknown) なら従来の正直な文言に戻す。
+                let resolved = false;
+                if (sendContext) {
+                    try {
+                        const q = await fetch(
+                            `/api/chat/message-outcome?client_message_id=${encodeURIComponent(sendContext.clientMessageId)}`,
+                        );
+                        if (q.ok) {
+                            const outcome: {
+                                status: string;
+                                message_id?: string | null;
+                                has_reply?: boolean | null;
+                            } = await q.json();
+                            console.log('[unknown_outcome] server lookup:', outcome);
+                            if (outcome.status === 'found' && outcome.message_id) {
+                                const serverId = outcome.message_id;
+                                // 楽観表示の仮 id をサーバーの id に差し替える
+                                // (user_message_id イベントが来なかった回の代わり)。
+                                setMessages(prev => prev.map(m => (
+                                    m.id === sendContext.tempId ? { ...m, id: serverId } : m
+                                )));
+                                if (outcome.has_reply) {
+                                    // 発言は届いていて、応答も付いている。切れたのは
+                                    // 配信だけなので、履歴を読み直して応答を画面に出す。
+                                    await fetchHistory();
+                                    setMessages(prev => [...prev, {
+                                        role: 'system',
+                                        content: '通信は途中で切れましたが、発言は届いていて、応答も付いています。最新の履歴を読み込みました。',
+                                        isInfo: true,
+                                        timestamp: new Date().toISOString(),
+                                    }]);
+                                } else {
+                                    // 発言は届いているが、応答はまだ無い — 出口 3 と
+                                    // 同じ事実なので同じ導線 (「再送」) に合流する。
+                                    markRetryable(serverId);
+                                    setMessages(prev => [...prev, {
+                                        role: 'system',
+                                        content: '通信は途中で切れましたが、発言は届いています。返事はまだ生まれていません。',
+                                        isError: true,
+                                        errorCode: 'no_response',
+                                        timestamp: new Date().toISOString(),
+                                    }]);
+                                }
+                                resolved = true;
+                            } else if (outcome.status === 'not_found') {
+                                // 発言はサーバーに残っていない — 出口 4 と同じ形で
+                                // 手元へ返す (吹き出しを引っ込めて、本文を入力欄へ)。
+                                setMessages(prev => prev.filter(m => m.id !== sendContext.tempId));
+                                setInputValue(prev => (
+                                    prev.trim() ? `${prev}\n${sendContext.content}` : sendContext.content
+                                ));
+                                // 添付も一緒に戻す (出口 4 と同じ理由)。送っている間に
+                                // 足した下書きの添付と、戻ってきた元の添付は**両方残す**
+                                // — 片方を優先すると、もう片方が黙って消える (Codex #7)。
+                                // 同じ添付が両方に居る回は id (添付ごとに一意) で弾く。
+                                // 並びは本文と同じで、下書きが先・戻ってきたものが後。
+                                if (sendContext.attachments.length > 0) {
+                                    setAttachments(prev => {
+                                        const prevIds = new Set(prev.map(a => a.id));
+                                        const restored = sendContext.attachments.filter(a => !prevIds.has(a.id));
+                                        return [...prev, ...restored];
+                                    });
+                                }
+                                requestAnimationFrame(() => adjustTextareaHeight());
+                                setMessages(prev => [...prev, {
+                                    role: 'system',
+                                    content: 'この発言はサーバーに残っていません。本文は入力欄に戻したので、もう一度送ってください。',
+                                    isError: true,
+                                    errorCode: 'message_not_found',
+                                    timestamp: new Date().toISOString(),
+                                }]);
+                                resolved = true;
+                            }
+                            // status 'unknown' はここでは扱わない — 下の正直な
+                            // 文言に落とす。「分からない」を潰さない。
+                        }
+                    } catch (lookupError) {
+                        // 問い合わせ自体が失敗 = 分からないまま。下の文言に落とす。
+                        console.log('[unknown_outcome] server lookup failed:', lookupError);
                     }
-                    // Has activities or content → finalize as completed message
-                    return [...prev.slice(0, -1), {
-                        ...rest,
-                        ...(_streamingThinking && { reasoning: _streamingThinking }),
-                        ...((_activities && _activities.length > 0) && { activity_trace: _activities }),
-                    }];
                 }
-                return prev;
-            });
-            await syncAfterResponse(); // Merge server state (IDs, avatars) without replacing messages
-            isProcessingRef.current = false; // Allow polling AFTER sync completes
-            // Refresh RPD usage after message sent
-            if (selectedModelRateLimit && selectedModel) {
-                fetch(`/api/usage/rpd?model_id=${encodeURIComponent(selectedModel)}`)
-                    .then(res => res.ok ? res.json() : null)
-                    .then((data: { used: number; limit: number }[] | null) => {
-                        if (data && data.length > 0) setRpdUsage({ used: data[0].used, limit: data[0].limit });
-                    })
-                    .catch(() => {});
+                if (!resolved) {
+                    // サーバーに届いたかどうか、こちら側からは分からない。
+                    // 分かった顔をせず、そのまま伝える。
+                    setMessages(prev => [...prev, {
+                        role: 'system',
+                        content: '通信が途中で切れました。発言が届いたかどうかは分かりません。履歴を確認してください。',
+                        isError: true,
+                        errorCode: 'unknown_outcome',
+                        timestamp: new Date().toISOString(),
+                    }]);
+                }
+            } else {
+                setMessages(prev => [...prev, {
+                    role: 'system',
+                    content: source === 'continue'
+                        ? '続きの生成が途中で切れました。'
+                        : '通信が途中で切れました。',
+                    isError: true,
+                    errorCode: 'stream_broken',
+                    timestamp: new Date().toISOString(),
+                }]);
+                if (landedMessageId) markRetryable(landedMessageId);
             }
+        } finally {
+            await finishReplyCycle();
+        }
+        return { replied, errorCode: lastErrorCode };
+    };
+
+    const handleSendMessage = async () => {
+        if ((!inputValue.trim() && attachments.length === 0) || loadingStatus) return;
+        clearTransientNotices();
+        // Block send while a video is still uploading, or if any attachment errored.
+        const pendingUpload = attachments.find(a => a.uploading);
+        if (pendingUpload) {
+            alert(`動画「${pendingUpload.name}」のアップロード中です。完了まで少し待って。`);
+            return;
+        }
+        const errored = attachments.find(a => a.error);
+        if (errored) {
+            alert(`添付「${errored.name}」のアップロードに失敗してる: ${errored.error}\n削除してから送って。`);
+            return;
+        }
+        isProcessingRef.current = true;
+
+        // Optimistic update
+        // Temporary ID for key prop until refreshed
+        const tempId = `temp-${Date.now()}`;
+        const userMsg: Message = {
+            id: tempId, role: 'user', content: inputValue,
+            sender: userDisplayNameRef.current || undefined,
+            avatar: userAvatarRef.current || undefined,
+            images: attachments
+                .filter(a => a.type === 'image' && a.base64)
+                .map(a => ({ url: `data:${a.mimeType};base64,${a.base64}`, mime_type: a.mimeType })),
+            audios: attachments
+                .filter(a => a.type === 'audio' && a.base64)
+                .map(a => ({ url: `data:${a.mimeType};base64,${a.base64}`, mime_type: a.mimeType })),
+            // Video preview uses the blob URL (no base64 copy); it's only valid for
+            // this session, but the next history fetch replaces it with a real
+            // /api/media/video/<name> URL from the server.
+            videos: attachments
+                .filter(a => a.type === 'video' && a.previewUrl)
+                .map(a => ({ url: a.previewUrl as string, mime_type: a.mimeType })),
+        };
+        setMessages(prev => [...prev, userMsg]);
+        setInputValue('');
+        setLoadingStatus('Thinking...');
+
+        const currentAttachments = attachments;
+        const currentPlaybook = selectedPlaybook;
+        const currentPlaybookArgs = playbookArgs;
+
+        setAttachments([]);
+        // Reset playbook args after sending
+        setPlaybookArgs({});
+
+        // ツール指定モードの場合は UI 状態 (Playbook 1 つ + Spell 複数) を
+        // pre_spells エントリ列に変換して送る。meta_playbook と args は送らない
+        // (UI センチネルはサーバー側に存在しない Playbook 名なので、そのまま渡すと
+        // "playbook not found" になる)。pre_spells のフォーマットは
+        // バックエンドの _SPELL_PATTERN / _SPELL_PATTERN_NO_ARGS と互換
+        // (sea/runtime_llm.py)。
+        const isToolSelectedMode = currentPlaybook === TOOL_MODE_SELECTED;
+        const selectedToolName = isToolSelectedMode
+            ? (currentPlaybookArgs?.selected_playbook || null)
+            : null;
+        const selectedSpellNames: string[] = isToolSelectedMode && Array.isArray(currentPlaybookArgs?.selected_spells)
+            ? (currentPlaybookArgs.selected_spells as string[])
+            : [];
+        const preSpellsBuilt = isToolSelectedMode
+            ? buildPreSpellsFromUI(selectedToolName, selectedSpellNames)
+            : [];
+        const preSpells = preSpellsBuilt.length > 0 ? preSpellsBuilt : undefined;
+        const sendMetaPlaybook = isToolSelectedMode ? undefined : (currentPlaybook || undefined);
+        const sendArgs = !isToolSelectedMode && Object.keys(currentPlaybookArgs).length > 0
+            ? currentPlaybookArgs
+            : undefined;
+
+        // B-2 idempotency: 送信操作 1 回につき 1 つの UUID を生成。
+        // fetch retry 等で同じ送信が複数回 backend に届いても、 backend は
+        // UNIQUE(client_message_id) で既存行を返すだけで二重 INSERT しない。
+        // See: docs/intent/building_memory_unified.md §B-2
+        //
+        // 注: crypto.randomUUID() は Secure Context 限定なので、 Tailscale
+        // 経由スマホ等 (http://100.x.x.x:3000) では throw する。 そのケース
+        // では非 secure context でも使える getRandomValues で UUID v4 を
+        // 手組みするフォールバックに落ちる。
+        const clientMessageId = (() => {
+            if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+                try { return crypto.randomUUID(); } catch { /* fall through */ }
+            }
+            const bytes = new Uint8Array(16);
+            crypto.getRandomValues(bytes);
+            bytes[6] = (bytes[6] & 0x0f) | 0x40; // version 4
+            bytes[8] = (bytes[8] & 0x3f) | 0x80; // variant
+            const hex = Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
+            return `${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${hex.slice(20)}`;
+        })();
+
+        try {
+            // C-2: /chat/utter は発言契機入室。 target_building_id (= UI 上で
+            // 表示中の建物) がサーバの真の現在地と異なれば、 backend が atomic
+            // に move を実行してから発言処理に入る。 同建物発言なら move skip。
+            const res = await fetch('/api/chat/utter', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    message: userMsg.content,
+                    target_building_id: currentBuildingIdRef.current,
+                    // B-1 CAS: クライアントが認識しているサーバの真の現在地。
+                    // サーバ側と一致しなければ 409 で他クライアントの先行 move
+                    // を検出できる。
+                    expected_from_building_id: serverCurrentBuildingIdRef.current,
+                    attachments: currentAttachments.length > 0 ? currentAttachments.map(a => (
+                        a.type === 'video' && a.uri
+                            ? { uri: a.uri, filename: a.name, type: a.type, mime_type: a.mimeType }
+                            : { data: a.base64, filename: a.name, type: a.type, mime_type: a.mimeType }
+                    )) : undefined,
+                    meta_playbook: sendMetaPlaybook,
+                    args: sendArgs,
+                    pre_spells: preSpells,
+                    client_message_id: clientMessageId,
+                })
+            });
+
+            if (res.status === 409) {
+                // CAS conflict (= B-1): 他クライアントが先に動いていた。
+                // ユーザーに通知し、 status を再取得して serverCurrentBuildingId
+                // を真の現在地に同期する。 メッセージ自体は再送が必要。
+                let conflictMsg = '他のクライアントが先に移動したため、 発言は受け付けられませんでした。 最新状態に同期します。';
+                try {
+                    const data = await res.json();
+                    if (data?.detail?.message) conflictMsg = data.detail.message;
+                    if (data?.detail?.current_building_id) {
+                        updateServerBuildingId(data.detail.current_building_id);
+                    }
+                } catch { /* ignore JSON parse */ }
+                // この発言はサーバーに保存されていない。alert だけで済ませると、
+                // 閉じた瞬間に失敗の説明が消え、入力欄も空のままなので、本文を
+                // 手で打ち直すしか手が残らない。③ の「取り消す」と同じ形で
+                // 手元へ返す — 吹き出しを引っ込めて、本文を入力欄に戻す。
+                setMessages(prev => prev.filter(m => m.id !== tempId));
+                setInputValue(prev => (
+                    prev.trim() ? `${prev}\n${userMsg.content}` : userMsg.content
+                ));
+                // 添付も一緒に戻す。本文だけ返しても、画像や音声や動画は消えた
+                // ままなので「同じものをもう一度送る」ができない。動画はサーバー側に
+                // 再送用のファイルが残るので、URI を手放すと参照できない置き土産に
+                // なる。
+                // 送っている間にも添付は足せる (ボタンは閉じていない)。丸ごと
+                // 置き換えると、その間に足したものとアップロード中の状態まで消える。
+                // 手が入っていないときだけ戻す。
+                if (currentAttachments.length > 0) {
+                    setAttachments(prev => (prev.length > 0 ? prev : currentAttachments));
+                }
+                requestAnimationFrame(() => adjustTextareaHeight());
+                setMessages(prev => [...prev, {
+                    role: 'system',
+                    content: conflictMsg,
+                    isError: true,
+                    errorCode: 'location_conflict',
+                    timestamp: new Date().toISOString(),
+                }]);
+                // status を再取得して UI と整合させる
+                try {
+                    const statusRes = await fetch('/api/user/status');
+                    if (statusRes.ok) {
+                        const statusData = await statusRes.json();
+                        if (statusData?.current_building_id) {
+                            updateServerBuildingId(statusData.current_building_id);
+                        }
+                    }
+                } catch (statusErr) {
+                    console.error('Failed to refetch status after CAS conflict', statusErr);
+                }
+                // 後片付けは必ず通す。読み手を切り出したことで、この早期 return は
+                // もう外側の finally に拾われない (isProcessingRef が立ったままだと
+                // 履歴の追従が止まる)。
+                await finishReplyCycle();
+                return;
+            }
+
+            if (!res.ok) {
+                let errorDetails = `Status: ${res.status} ${res.statusText}`;
+                try {
+                    const errorText = await res.text();
+                    errorDetails += ` - Body: ${errorText}`;
+                } catch (e) { console.error('Failed to read error response body:', e); }
+                throw new Error(`Failed to send message. ${errorDetails}`);
+            }
+
+            // 楽観的更新: utter が成功した時点で、 サーバ側の真の現在地は
+            // target_building_id に移動済 (= utter が atomic に auto-move
+            // した)。 次回発言時の expected_from が古い値だと 409 になるので
+            // ここで先に同期しておく。
+            updateServerBuildingId(currentBuildingIdRef.current);
+            // Sidebar / RightSidebar の status / details を再 fetch させて
+            // D-1 マーカーや滞在ユーザー表示をサーバの新しい現在地に追従させる。
+            setMoveTrigger(prev => prev + 1);
+
+            await consumeReplyStream(res, 'send', {
+                clientMessageId,
+                tempId,
+                content: userMsg.content,
+                attachments: currentAttachments,
+            });
+        } catch (error) {
+            console.error(error);
+            setMessages(prev => [...prev, {
+                role: 'system',
+                content: '送信できませんでした。接続を確認してもう一度お試しください。',
+                isError: true,
+                errorCode: 'send_failed',
+                timestamp: new Date().toISOString(),
+            }]);
+            await finishReplyCycle();
+        }
+    };
+
+    // 追加の推論は必ずこの二つのボタンの後ろにある (2026-08-25 まはー裁定)。
+    // どちらも発言を送り直さない — 起こすのは応答だけ。
+    const runMessageAction = async (
+        endpoint: 'continue' | 'retry',
+        messageId: string,
+    ) => {
+        if (loadingStatus) return;
+        clearTransientNotices();
+        isProcessingRef.current = true;
+        setLoadingStatus('Thinking...');
+        // 押した瞬間にボタンを下ろす。二度押しで二重に走らせない。
+        setMessages(prev => prev.map(m => (
+            m.id === messageId
+                ? { ...m, ...(endpoint === 'continue' ? { interrupted: false } : { needsRetry: false }) }
+                : m
+        )));
+        // 下ろしたボタンを戻す。**線は「応答が生まれたか」** — 「ストリームが
+        // 始まったか」ではない。始まっても中で「応答できる相手がいません」が
+        // 返るだけの回があり、そこで戻さないとボタンが消えたまま残る。
+        // ただし、やり直しても結果が変わらない終わり方 (相手が居ない) では
+        // 戻さない — 押しても同じ結果しか返らない操作を出し続けることになる。
+        const restoreAffordance = (retryUseless = false) => {
+            setMessages(prev => prev.map(m => (
+                m.id === messageId
+                    ? {
+                        ...m,
+                        ...(endpoint === 'continue'
+                            ? { interrupted: true }
+                            : { needsRetry: true, retryUseless }),
+                    }
+                    : m
+            )));
+        };
+        try {
+            const res = await fetch(`/api/chat/${endpoint}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ message_id: messageId }),
+            });
+            if (!res.ok) {
+                // サーバーの門番の拒否 (409 already_replied / 503 など) は
+                // 理由付きの JSON で届く。正直な文言をそのまま画面に出す —
+                // 一般化した「やり直せませんでした」に潰すと、待てば直る回と
+                // 押しても無駄な回の区別がユーザーに渡らない。
+                let detailCode: string | undefined;
+                let detailMessage: string | undefined;
+                try {
+                    const body = await res.json();
+                    if (body && typeof body.detail === 'object' && body.detail !== null) {
+                        detailCode = body.detail.code;
+                        detailMessage = body.detail.message;
+                    }
+                } catch { /* JSON でない本文は既定の文言に落とす */ }
+                if (detailCode === 'already_replied') {
+                    // 既に応答が付いている。やり直しは何度押しても拒否される
+                    // ので、ボタンは戻さない。その応答を画面がまだ持っていない
+                    // 可能性があるので履歴を読み直す。
+                    await fetchHistory();
+                    setMessages(prev => [...prev, {
+                        role: 'system',
+                        content: detailMessage || 'この発言には既にペルソナの応答があります。最新の履歴を読み込みました。',
+                        isInfo: true,
+                        timestamp: new Date().toISOString(),
+                    }]);
+                    await finishReplyCycle();
+                    return;
+                }
+                restoreAffordance();
+                setMessages(prev => [...prev, {
+                    role: 'system',
+                    content: detailMessage || (endpoint === 'continue'
+                        ? '続きを起こせませんでした。'
+                        : 'やり直せませんでした。'),
+                    isError: true,
+                    errorCode: detailCode || 'action_failed',
+                    timestamp: new Date().toISOString(),
+                }]);
+                await finishReplyCycle();
+                return;
+            }
+            const outcome = await consumeReplyStream(res, endpoint);
+            if (!outcome.replied) {
+                restoreAffordance(
+                    RETRY_CHANGES_NOTHING.has(outcome.errorCode || ''),
+                );
+            }
+        } catch (error) {
+            console.error(error);
+            restoreAffordance();
+            setMessages(prev => [...prev, {
+                role: 'system',
+                content: endpoint === 'continue'
+                    ? '続きを起こせませんでした。'
+                    : 'やり直せませんでした。',
+                isError: true,
+                errorCode: 'action_failed',
+                timestamp: new Date().toISOString(),
+            }]);
+            await finishReplyCycle();
+        }
+    };
+
+    // 発言を「なかったことにする」。取り消せるかどうかは好みでは決まらず、
+    // ペルソナがもう読んだかで決まる (読まれた後は取り消せない)。消すのではなく
+    // 入力欄へ返す — ユーザーの発言はユーザーのものなので、手元に戻す形にする。
+    const handleWithdrawMessage = async (messageId: string) => {
+        if (loadingStatus) return;
+        // 押した瞬間に閉じる。取り消しは元に戻せない操作なので、2 発目が飛ぶと
+        // 「1 発目で消えた発言」を相手に、2 発目が別の結果 (not_found など) を
+        // 返して画面に出る。
+        if (withdrawingRef.current) return;
+        withdrawingRef.current = messageId;
+        setWithdrawingId(messageId);
+        clearTransientNotices();
+        try {
+            const res = await fetch('/api/chat/withdraw', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ message_id: messageId }),
+            });
+            if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+            const data = await res.json();
+            if (data.withdrawn) {
+                setMessages(prev => prev.filter(m => m.id !== messageId));
+                setInputValue(prev => (
+                    prev.trim() ? `${prev}\n${data.content || ''}` : (data.content || '')
+                ));
+                requestAnimationFrame(() => adjustTextareaHeight());
+            } else {
+                // 取り消せなかった = 何も起きていない。ここで needsRetry を
+                // 下ろすと「再送」まで消え、**まさに再送が要る場面**
+                // (読まれたが返事が生まれなかった発言) で復旧手段が無くなる。
+                // 二度と成功しない「取り消す」だけを引っ込める。
+                setMessages(prev => prev.map(m => (
+                    m.id === messageId ? { ...m, withdrawBlocked: true } : m
+                )));
+                setMessages(prev => [...prev, {
+                    role: 'system',
+                    content: data.message || '取り消せませんでした。',
+                    isInfo: true,
+                    timestamp: new Date().toISOString(),
+                }]);
+            }
+        } catch (error) {
+            console.error(error);
+            setMessages(prev => [...prev, {
+                role: 'system',
+                content: '取り消しをサーバーに届けられませんでした。',
+                isError: true,
+                errorCode: 'action_failed',
+                timestamp: new Date().toISOString(),
+            }]);
+        } finally {
+            withdrawingRef.current = null;
+            setWithdrawingId(null);
         }
     };
 
@@ -1478,38 +2791,86 @@ export default function Home() {
         }
     };
 
+    // Video files are uploaded via multipart so we never base64-encode the
+    // whole file in the browser. The endpoint normalizes via ffmpeg
+    // (1FPS 480p, 90s cap) and returns a saiverse://video/<filename> reference
+    // we can hand off to /api/chat/send by URI instead of by inline data.
+    const uploadVideoToServer = async (file: File): Promise<{ uri: string }> => {
+        const fd = new FormData();
+        fd.append('file', file);
+        const res = await fetch('/api/media/upload-video', { method: 'POST', body: fd });
+        if (!res.ok) {
+            let detail = `HTTP ${res.status}`;
+            try {
+                const body = await res.json();
+                if (body?.detail) detail = body.detail;
+            } catch { /* response wasn't JSON */ }
+            throw new Error(detail);
+        }
+        const data = await res.json();
+        if (!data?.filename) throw new Error('Server did not return a video filename');
+        return { uri: `saiverse://video/${data.filename}` };
+    };
+
+    const addFile = (file: File) => {
+        const mimeType = file.type || 'application/octet-stream';
+        const fileType = getFileType(file.name, mimeType);
+        const id = `att-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+        if (fileType === 'video') {
+            // Inline preview uses a blob URL — keeps the file referenced by handle
+            // instead of duplicating bytes as base64 in memory.
+            const previewUrl = URL.createObjectURL(file);
+            setAttachments(prev => [...prev, {
+                id, name: file.name, type: fileType, mimeType,
+                previewUrl, uploading: true,
+            }]);
+            uploadVideoToServer(file).then(({ uri }) => {
+                setAttachments(prev => prev.map(a =>
+                    a.id === id ? { ...a, uri, uploading: false } : a
+                ));
+            }).catch(err => {
+                console.error('Video upload failed:', err);
+                setAttachments(prev => prev.map(a =>
+                    a.id === id ? { ...a, uploading: false, error: String(err?.message || err) } : a
+                ));
+            });
+            return;
+        }
+
+        // image / audio / document: keep the existing base64 path (small payloads)
+        const reader = new FileReader();
+        reader.onloadend = () => {
+            const base64 = reader.result as string;
+            setAttachments(prev => [...prev, {
+                id, name: file.name, type: fileType, mimeType, base64,
+            }]);
+        };
+        reader.readAsDataURL(file);
+    };
+
     const handleFileUpload = (e: ChangeEvent<HTMLInputElement>) => {
         if (e.target.files && e.target.files.length > 0) {
             const files = Array.from(e.target.files);
-
-            files.forEach(file => {
-                const reader = new FileReader();
-                reader.onloadend = () => {
-                    const base64 = reader.result as string;
-                    const mimeType = file.type || 'application/octet-stream';
-                    const fileType = getFileType(file.name, mimeType);
-
-                    setAttachments(prev => [...prev, {
-                        base64,
-                        name: file.name,
-                        type: fileType,
-                        mimeType
-                    }]);
-                };
-                reader.readAsDataURL(file);
-            });
-
+            files.forEach(addFile);
             // Reset input to allow selecting the same files again
             if (fileInputRef.current) fileInputRef.current.value = '';
         }
     };
 
     const removeAttachment = (index: number) => {
-        setAttachments(prev => prev.filter((_, i) => i !== index));
+        setAttachments(prev => {
+            const target = prev[index];
+            if (target?.previewUrl) URL.revokeObjectURL(target.previewUrl);
+            return prev.filter((_, i) => i !== index);
+        });
     };
 
     const clearAllAttachments = () => {
-        setAttachments([]);
+        setAttachments(prev => {
+            prev.forEach(a => { if (a.previewUrl) URL.revokeObjectURL(a.previewUrl); });
+            return [];
+        });
         if (fileInputRef.current) fileInputRef.current.value = '';
     };
 
@@ -1540,14 +2901,25 @@ export default function Home() {
         setContextPreviewData(null);
 
         try {
-            const attachmentTypes = attachments.map(a => a.type === 'image' ? 'image' : 'document');
+            const attachmentTypes = attachments.map(a => {
+                if (a.type === 'image') return 'image';
+                if (a.type === 'audio') return 'audio';
+                if (a.type === 'video') return 'video';
+                return 'document';
+            });
+            // ツール指定モードのセンチネルは meta_playbook として送らない
+            // (サーバー側に該当 Playbook はなく、preview のコンテキスト計算は
+            // どちらのモードでも default Playbook 基準で問題ない)。
+            const previewMetaPlaybook = selectedPlaybook === TOOL_MODE_SELECTED
+                ? undefined
+                : (selectedPlaybook || undefined);
             const res = await fetch('/api/chat/preview', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     message: inputValue || '(empty)',
                     building_id: currentBuildingIdRef.current,
-                    meta_playbook: selectedPlaybook || undefined,
+                    meta_playbook: previewMetaPlaybook,
                     attachment_count: attachments.length,
                     attachment_types: attachmentTypes,
                 }),
@@ -1599,24 +2971,11 @@ export default function Home() {
 
         const files = Array.from(e.dataTransfer.files);
         if (files.length === 0) return;
-
-        files.forEach(file => {
-            const reader = new FileReader();
-            reader.onloadend = () => {
-                const base64 = reader.result as string;
-                const mimeType = file.type || 'application/octet-stream';
-                const fileType = getFileType(file.name, mimeType);
-
-                setAttachments(prev => [...prev, {
-                    base64,
-                    name: file.name,
-                    type: fileType,
-                    mimeType
-                }]);
-            };
-            reader.readAsDataURL(file);
-        });
+        files.forEach(addFile);
     };
+
+    // ゲーム外からセッションログを閲覧中か (= 入力を read-only にする条件)
+    const sessionLogReadOnly = !!activeGame && !activeGame.inside && sessionLogPeek;
 
     return (
         <div
@@ -1624,17 +2983,27 @@ export default function Home() {
             onTouchStart={handleTouchStart}
             onTouchMove={handleTouchMove}
         >
+            <SystemAlertBanner />
             <Sidebar
                 refreshTrigger={backendConnected}
+                viewingBuildingId={currentBuildingId}
+                serverMoveTrigger={moveTrigger}
                 onMove={(buildingId?: string) => {
                     if (!buildingId) return;
+                    // C-1 閲覧モード: サーバ側の CURRENT_BUILDINGID は変えず、
+                    // UI 上の表示建物だけ切り替える。 サーバへの move は
+                    // 発言時に /chat/utter が atomic に行う (= C-2)。
                     setCurrentBuildingId(buildingId);
                     currentBuildingIdRef.current = buildingId;
+                    // 建物を選んだ = その建物のログを見たい。セッションログ閲覧は解除
+                    updateSessionLogPeek(false);
                     setMessages([]);
                     setIsHistoryLoaded(false);
                     fetchHistory(undefined, buildingId);
                     fetchBuildingInfo(buildingId);
                     setMoveTrigger(prev => prev + 1);
+                    // Sidebar からの遷移はチャット閲覧目的なのでマップは閉じる
+                    setIsMapModalOpen(false);
                 }}
                 isOpen={isLeftOpen}
                 onOpen={() => setIsLeftOpen(true)}
@@ -1652,8 +3021,61 @@ export default function Home() {
                             <Menu size={20} />
                         </button>
                         <h1>{currentBuildingName}</h1>
+                        {activeGame && (activeGame.inside ? (
+                            currentBuildingId === serverBuildingId ? (
+                                <span
+                                    title={`セッションログ表示中 (${activeGame.region_name ?? activeGame.region_id})${activeGame.scene ? ` / scene: ${activeGame.scene}` : ''}`}
+                                    style={{ fontSize: '0.8rem', opacity: 0.75, whiteSpace: 'nowrap' }}
+                                >
+                                    🎲 {activeGame.region_name ?? 'ゲーム'}{activeGame.phase === 'paused' ? ' (中断中)' : ''}
+                                </span>
+                            ) : (
+                                <span
+                                    title={`${activeGame.region_name ?? activeGame.region_id} でゲーム進行中。この画面は閲覧中の建物のログです (実在地に戻るとセッションログ表示)`}
+                                    style={{ fontSize: '0.8rem', opacity: 0.45, whiteSpace: 'nowrap' }}
+                                >
+                                    🎲 {activeGame.region_name ?? 'ゲーム'}で進行中
+                                </span>
+                            )
+                        ) : (
+                            // ゲーム外 (入口含む): どこに居てもログ閲覧 + 復帰を出す。
+                            // 復帰の認可は参加者資格 (場所要件なし、docs/intent/region.md §7)
+                            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: '0.8rem', whiteSpace: 'nowrap' }}>
+                                <span
+                                    title={`『${activeGame.region_name ?? activeGame.region_id}』${activeGame.at_entrance ? 'の入口に居ます' : 'から離脱中です'}${activeGame.phase === 'paused' ? ' (ゲームは中断中)' : ''}`}
+                                    style={{ opacity: 0.75 }}
+                                >
+                                    🎲 {activeGame.region_name ?? 'ゲーム'}{activeGame.phase === 'paused' ? ' (中断中)' : ''}
+                                </span>
+                                <button
+                                    onClick={toggleSessionLogPeek}
+                                    title={sessionLogPeek ? '通常のチャットに戻る' : 'セッションログを閲覧する (発言はできません)'}
+                                    style={{
+                                        background: 'rgba(120,180,255,0.12)',
+                                        border: '1px solid rgba(120,180,255,0.4)',
+                                        borderRadius: 6, color: 'inherit', cursor: 'pointer',
+                                        padding: '2px 8px', fontSize: '0.75rem', whiteSpace: 'nowrap',
+                                    }}
+                                >
+                                    {sessionLogPeek ? '💬 チャットに戻る' : '📜 セッションログ'}
+                                </button>
+                                <button
+                                    onClick={handleRejoinGame}
+                                    title="パーティーの現在地へ移動してゲームに戻る"
+                                    style={{
+                                        background: 'rgba(130,220,160,0.15)',
+                                        border: '1px solid rgba(130,220,160,0.5)',
+                                        borderRadius: 6, color: 'inherit', cursor: 'pointer',
+                                        padding: '2px 8px', fontSize: '0.75rem', whiteSpace: 'nowrap',
+                                    }}
+                                >
+                                    ▶ 復帰
+                                </button>
+                            </span>
+                        ))}
                     </div>
                     <div className={styles.headerRight}>
+                        <ActiveClientIndicator isActive={isActiveClientTab} />
                         {hasUnreadAnnouncements && (
                             <button
                                 className={styles.iconBtn}
@@ -1666,6 +3088,13 @@ export default function Home() {
                                 </span>
                             </button>
                         )}
+                        <button
+                            className={`${styles.iconBtn} ${isMapModalOpen ? styles.active : ''}`}
+                            onClick={() => setIsMapModalOpen(v => !v)}
+                            title={isMapModalOpen ? '街マップを閉じる' : '街マップを開く'}
+                        >
+                            <MapIcon size={20} />
+                        </button>
                         <button
                             className={styles.iconBtn}
                             onClick={() => setIsPeopleModalOpen(true)}
@@ -1767,9 +3196,43 @@ export default function Home() {
                     onScroll={handleScroll}
                 >
                     {isLoadingMore && <div style={{ textAlign: 'center', padding: '10px', color: '#666' }}>Loading history...</div>}
-                    {messages.map((msg, idx) => (
+                    {messages.map((msg, idx) => {
+                        // System notices (world events / warnings / info) are NOT AI utterances:
+                        // render them author-less and compact, distinct from user/assistant bubbles.
+                        // Errors stay as assistant cards (role 'assistant', has retry/detail affordances).
+                        const isSystemNotice = (msg.role === 'host' || msg.role === 'system') && !msg.isError;
+                        if (isSystemNotice) {
+                            return (
+                                <div key={msg.id || idx} className={styles.systemNotice}>
+                                    {msg.isWarning ? (
+                                        <div className={`${styles.systemNoticeInner} ${styles.systemNoticeWarning}`}>
+                                            <span className={styles.systemNoticeIcon}>⚠️</span>
+                                            <span>{msg.content}</span>
+                                        </div>
+                                    ) : msg.isInfo ? (
+                                        <div className={`${styles.systemNoticeInner} ${styles.systemNoticeInfo}`}>
+                                            <span className={styles.systemNoticeIcon}>ℹ️</span>
+                                            <span>{msg.content}</span>
+                                        </div>
+                                    ) : (
+                                        <div className={styles.systemNoticeInner}>
+                                            <ReactMarkdown
+                                                remarkPlugins={MARKDOWN_REMARK_PLUGINS}
+                                                rehypePlugins={MARKDOWN_REHYPE_PLUGINS}
+                                                urlTransform={markdownUrlTransform}
+                                                components={markdownComponents}
+                                            >{prepareMessageMarkdown(msg.content)}</ReactMarkdown>
+                                        </div>
+                                    )}
+                                    {msg.timestamp && (
+                                        <span className={styles.systemNoticeTime}>{new Date(msg.timestamp).toLocaleString()}</span>
+                                    )}
+                                </div>
+                            );
+                        }
+                        return (
                         <div key={msg.id || idx} className={`${styles.message} ${styles[msg.role]}`}>
-                            <div className={`${styles.card} ${msg.isError ? styles.errorCard : ''} ${msg.isWarning ? styles.warningCard : ''} ${msg.isError && msg.errorCode ? styles[`error_${msg.errorCode}`] : ''}`}>
+                            <div className={`${styles.card} ${msg.isError ? styles.errorCard : ''} ${msg.isError && msg.errorCode ? styles[`error_${msg.errorCode}`] : ''}`}>
                                 <div className={styles.cardHeader}>
                                     <img
                                         src={msg.avatar || (msg.role === 'user' ? '/api/static/builtin_icons/user.png' : '/api/static/builtin_icons/host.png')}
@@ -1792,11 +3255,41 @@ export default function Home() {
                                             ))}
                                         </div>
                                     )}
+                                    {msg.audios && msg.audios.length > 0 && (
+                                        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem', margin: '0.4rem 0' }}>
+                                            {msg.audios.map((a, idx) => (
+                                                <audio
+                                                    key={`a-${idx}`}
+                                                    controls
+                                                    preload="metadata"
+                                                    src={a.url}
+                                                    style={{ width: '100%', maxWidth: '420px' }}
+                                                >
+                                                    お使いのブラウザは audio タグをサポートしていません。
+                                                </audio>
+                                            ))}
+                                        </div>
+                                    )}
+                                    {msg.videos && msg.videos.length > 0 && (
+                                        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem', margin: '0.4rem 0' }}>
+                                            {msg.videos.map((v, idx) => (
+                                                <video
+                                                    key={`v-${idx}`}
+                                                    controls
+                                                    preload="metadata"
+                                                    src={v.url}
+                                                    style={{ width: '100%', maxWidth: '480px', borderRadius: '6px' }}
+                                                >
+                                                    お使いのブラウザは video タグをサポートしていません。
+                                                </video>
+                                            ))}
+                                        </div>
+                                    )}
                                     {msg.isError ? (
                                         <div className={styles.errorContent}>
                                             <div className={styles.errorHeader}>
                                                 <span className={styles.errorIcon}>
-                                                    {({rate_limit: '⏱️', timeout: '⏰', safety_filter: '🛡️', server_error: '🔧', empty_response: '📭', authentication: '🔑', payment: '💳'} as Record<string, string>)[msg.errorCode || ''] || '⚠️'}
+                                                    {({rate_limit: '⏱️', timeout: '⏰', safety_filter: '🛡️', server_error: '🔧', empty_response: '📭', authentication: '🔑', payment: '💳', no_response: '💭', no_responder: '🚪', unknown_outcome: '❓', stream_broken: '🔌', send_failed: '🔌', message_not_found: '🔍', location_conflict: '📍'} as Record<string, string>)[msg.errorCode || ''] || '⚠️'}
                                                 </span>
                                                 <span className={styles.errorMessage}>{msg.content}</span>
                                             </div>
@@ -1809,6 +3302,25 @@ export default function Home() {
                                                     payment: 'APIキーの残高や支払い設定を確認してください。',
                                                     authentication: 'APIキーの設定を確認してください。',
                                                     server_error: 'LLMサーバーで障害が発生しています。しばらく時間を置いてから再送信してください。',
+                                                    // 発言は届いている。だから送り直しではなく、
+                                                    // その発言の「再送」ボタンで応答だけを求める。
+                                                    no_response: 'あなたの発言は記録に残っています。返事だけが生まれなかったので、発言の「再送」から応答をもう一度求められます。',
+                                                    // 応答できる相手がいない回。ここで「再送」を勧めると、
+                                                    // 何度押しても結果の変わらない操作を勧めることになる。
+                                                    // できるのは場所を変えるか、誰かが来るのを待つこと。
+                                                    no_responder: 'あなたの発言は記録に残っています。ただし、この場所には応答できる相手がいないので、やり直しても結果は変わりません。別の場所へ移るか、誰かが来るのを待ってください。',
+                                                    // 出口 7: こちら側からは届いたかどうか分からない。
+                                                    // 分かった顔をせず、確認の手立てだけを示す。
+                                                    unknown_outcome: '発言が届いたかどうかは、この画面からは判断できません。同じ内容を送り直す前に、履歴に残っているかを確認してください。',
+                                                    stream_broken: '接続が途中で切れました。ここまでの内容は残っています。',
+                                                    send_failed: 'サーバーに接続できませんでした。SAIVerse が起動しているかを確認してください。',
+                                                    message_not_found: 'この発言は記録に残っていません。入力欄からもう一度送ってください。',
+                                                    // 他の画面が先に移動していた回。発言はサーバーに
+                                                    // 届いていないので、本文は入力欄へ返してある。
+                                                    location_conflict: '発言は保存されていません。本文は入力欄に戻したので、いまいる場所を確かめてから送り直してください。',
+                                                    empty_message: '空のまま送信されました。内容を入れてから送ってください。',
+                                                    no_current_building: 'いまいる場所が確定していません。画面を再読み込みするか、建物を選び直してください。',
+                                                    action_failed: '操作をサーバーに届けられませんでした。接続を確認してもう一度お試しください。',
                                                 } as Record<string, string>)[msg.errorCode || ''] || '予期しないエラーが発生しました。問題が続く場合は管理者に連絡してください。'}
                                             </div>
                                             {msg.errorDetail && (
@@ -1817,10 +3329,6 @@ export default function Home() {
                                                     <pre>{msg.errorDetail}</pre>
                                                 </details>
                                             )}
-                                        </div>
-                                    ) : msg.isWarning ? (
-                                        <div className={styles.warningContent}>
-                                            <span className={styles.warningMessage}>{msg.content}</span>
                                         </div>
                                     ) : (
                                         <>
@@ -1860,6 +3368,19 @@ export default function Home() {
                                                     </details>
                                                 );
                                             })()}
+                                            {msg.auto_recall && (
+                                                <details className={styles.recallBlock}>
+                                                    <summary className={styles.recallSummary}>
+                                                        <span className={styles.recallIcon}>
+                                                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96.44 2.5 2.5 0 0 1-2.96-3.08 3 3 0 0 1-.34-5.58 2.5 2.5 0 0 1 1.32-4.24 2.5 2.5 0 0 1 1.98-3A2.5 2.5 0 0 1 9.5 2Z"/><path d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96.44 2.5 2.5 0 0 0 2.96-3.08 3 3 0 0 0 .34-5.58 2.5 2.5 0 0 0-1.32-4.24 2.5 2.5 0 0 0-1.98-3A2.5 2.5 0 0 0 14.5 2Z"/></svg>
+                                                        </span>
+                                                        <span>ふと浮かんだ記憶</span>
+                                                    </summary>
+                                                    <div className={styles.recallContent}>
+                                                        {msg.auto_recall}
+                                                    </div>
+                                                </details>
+                                            )}
                                             {(msg.reasoning || msg._streamingThinking) && (
                                                 <details className={styles.thinkingBlock} open={!!msg._streaming}>
                                                     <summary className={styles.thinkingSummary}>
@@ -1878,24 +3399,23 @@ export default function Home() {
                                                 </details>
                                             )}
                                             <ReactMarkdown
-                                                remarkPlugins={[remarkGfm, remarkBreaks]}
-                                                rehypePlugins={[rehypeRaw, [rehypeSanitize, sanitizeSchema]]}
-                                                urlTransform={(url) => url.startsWith('saiverse://') ? url : defaultUrlTransform(url)}
-                                                components={{
-                                                    a: ({ href, children }) => <SaiverseLink href={href} children={children} onOpenItem={handleOpenItemFromLink} />,
-                                                }}
-                                            >{msg.content}</ReactMarkdown>
+                                                remarkPlugins={MARKDOWN_REMARK_PLUGINS}
+                                                rehypePlugins={MARKDOWN_REHYPE_PLUGINS}
+                                                urlTransform={markdownUrlTransform}
+                                                components={markdownComponents}
+                                            >{prepareMessageMarkdown(msg.content)}</ReactMarkdown>
                                         </>
                                     )}
                                 </div>
                                 {(msg.timestamp || msg.llm_usage || msg.llm_usage_total) && (
                                     <div className={styles.cardFooter}>
                                         {msg.timestamp && <span>{new Date(msg.timestamp).toLocaleString()}</span>}
+                                        <CacheHitDot usage={msg.llm_usage} total={msg.llm_usage_total} />
                                         {msg.llm_usage_total && msg.llm_usage_total.call_count > 1 ? (
                                             // Show total usage when multiple LLM calls were made
                                             <span className={styles.llmUsageWrap}>
                                                 <span className={styles.llmUsage} onClick={(e) => { e.stopPropagation(); setUsageTooltipId(prev => prev === (msg.id || `msg-${idx}`) ? null : (msg.id || `msg-${idx}`)); }}>
-                                                    {msg.llm_usage_total.call_count} calls · {(msg.llm_usage_total.total_input_tokens + msg.llm_usage_total.total_output_tokens).toLocaleString()} tokens · ${msg.llm_usage_total.total_cost_usd.toFixed(4)}
+                                                    {msg.llm_usage_total.call_count} calls · {(msg.llm_usage_total.total_input_tokens + msg.llm_usage_total.total_output_tokens).toLocaleString()} tokens · {formatCost(msg.llm_usage_total.total_cost_usd, msg.llm_usage_total.currency)}
                                                 </span>
                                                 {usageTooltipId === (msg.id || `msg-${idx}`) && (
                                                     <div className={styles.usageTooltip}>
@@ -1903,7 +3423,7 @@ export default function Home() {
                                                         <div>LLM Calls: {msg.llm_usage_total.call_count}</div>
                                                         <div>Total Input: {msg.llm_usage_total.total_input_tokens.toLocaleString()} tokens{msg.llm_usage_total.total_cached_tokens ? ` (${msg.llm_usage_total.total_cached_tokens.toLocaleString()} cached)` : ''}</div>
                                                         <div>Total Output: {msg.llm_usage_total.total_output_tokens.toLocaleString()} tokens</div>
-                                                        <div>Total Cost: ${msg.llm_usage_total.total_cost_usd.toFixed(4)}</div>
+                                                        <div>Total Cost: {formatCost(msg.llm_usage_total.total_cost_usd, msg.llm_usage_total.currency)}</div>
                                                     </div>
                                                 )}
                                             </span>
@@ -1918,14 +3438,14 @@ export default function Home() {
                                                         <div>Model: {msg.llm_usage.model}</div>
                                                         <div>Input: {msg.llm_usage.input_tokens.toLocaleString()} tokens{msg.llm_usage.cached_tokens ? ` (${msg.llm_usage.cached_tokens.toLocaleString()} cached)` : ''}</div>
                                                         <div>Output: {msg.llm_usage.output_tokens.toLocaleString()} tokens</div>
-                                                        <div>Cost: ${(msg.llm_usage.cost_usd || 0).toFixed(4)}</div>
+                                                        <div>Cost: {formatCost(msg.llm_usage.cost_usd || 0, msg.llm_usage.currency)}</div>
                                                     </div>
                                                 )}
                                             </span>
                                         )}
                                     </div>
                                 )}
-                                <div className={styles.cardActions}>
+                                <div className={`${styles.cardActions} ${(msg.interrupted || msg.needsRetry) ? styles.cardActionsPinned : ''}`}>
                                     <button
                                         className={`${styles.actionBtn} ${copiedMessageId === (msg.id || `msg-${idx}`) ? styles.copied : ''}`}
                                         onClick={() => handleCopyMessage(msg.id || `msg-${idx}`, msg.content)}
@@ -1933,10 +3453,62 @@ export default function Home() {
                                     >
                                         {copiedMessageId === (msg.id || `msg-${idx}`) ? <Check size={14} /> : <Copy size={14} />}
                                     </button>
+                                    {/* 途中で終わった発言にだけ「続きの生成」を出す。
+                                        追加の推論はユーザーの一押しの後ろに置く。 */}
+                                    {msg.role === 'assistant' && msg.interrupted && msg.id && (
+                                        <button
+                                            className={`${styles.actionBtn} ${styles.continueBtn}`}
+                                            onClick={() => runMessageAction('continue', msg.id as string)}
+                                            disabled={!!loadingStatus}
+                                            title="この発言は途中で終わっています。続きを話してもらう"
+                                        >
+                                            <CornerDownRight size={14} />
+                                            <span className={styles.actionBtnLabel}>続きの生成</span>
+                                        </button>
+                                    )}
+                                    {/* 返事が来なかった発言にだけ「再送」を出す。発言は
+                                        残っているので、押しても送り直しにはならない。 */}
+                                    {msg.role === 'user' && msg.needsRetry
+                                        && !msg.retryUseless && msg.id && (
+                                        <button
+                                            className={`${styles.actionBtn} ${styles.retryBtn}`}
+                                            onClick={() => runMessageAction('retry', msg.id as string)}
+                                            disabled={!!loadingStatus}
+                                            title="この発言に返事が来ていません。もう一度応答を求める"
+                                        >
+                                            <RotateCcw size={14} />
+                                            <span className={styles.actionBtnLabel}>再送</span>
+                                        </button>
+                                    )}
+                                    {/* 返事が来なかった発言は、なかったことにもできる。
+                                        ただしペルソナがもう読んでいたら断られる。 */}
+                                    {msg.role === 'user' && msg.needsRetry
+                                        && !msg.withdrawBlocked && msg.id && (
+                                        <button
+                                            className={`${styles.actionBtn} ${styles.withdrawBtn}`}
+                                            onClick={() => handleWithdrawMessage(msg.id as string)}
+                                            disabled={!!loadingStatus || withdrawingId === msg.id}
+                                            title="この発言を取り消して、入力欄に戻す（まだ誰も読んでいない場合のみ）"
+                                        >
+                                            <Undo2 size={14} />
+                                            <span className={styles.actionBtnLabel}>取り消す</span>
+                                        </button>
+                                    )}
+                                    {/* アドオンバブルボタン（assistantメッセージにのみ表示） */}
+                                    {msg.role === 'assistant' && addonBubbleButtons.length > 0 && (
+                                        <AddonBubbleButtons
+                                            messageId={msg.id || `msg-${idx}`}
+                                            messageText={msg.content}
+                                            personaId={msg.persona_id}
+                                            addonMetadata={addonMetadata[msg.id || `msg-${idx}`] ?? {}}
+                                            buttons={addonBubbleButtons}
+                                        />
+                                    )}
                                 </div>
                             </div>
                         </div>
-                    ))}
+                        );
+                    })}
                     {loadingStatus && (
                         <div className={styles.loading} role="status" aria-label={loadingStatus}>
                             <span className={styles.loadingSpinner} aria-hidden="true" />
@@ -1994,16 +3566,25 @@ export default function Home() {
                             pointerEvents: 'auto'
                         }}>
                             {attachments.map((att, idx) => (
-                                <div key={idx} style={{
+                                <div key={att.id} style={{
                                     padding: '0.25rem 0.5rem',
-                                    background: '#eee',
+                                    background: att.error ? '#fde2e2' : '#eee',
                                     borderRadius: '4px',
                                     display: 'inline-flex',
                                     alignItems: 'center',
                                     gap: '0.5rem',
-                                    color: '#333'
+                                    color: att.error ? '#b91c1c' : '#333'
                                 }}>
-                                    <span>{att.type === 'image' ? '🖼' : '📄'} {att.name}</span>
+                                    <span>{
+                                        att.type === 'image' ? '🖼'
+                                        : att.type === 'audio' ? '🎵'
+                                        : att.type === 'video' ? '🎬'
+                                        : '📄'
+                                    } {att.name}{
+                                        att.uploading ? ' (アップロード中…)'
+                                        : att.error ? ` (失敗: ${att.error})`
+                                        : ''
+                                    }</span>
                                     <button onClick={() => removeAttachment(idx)} style={{ border: 'none', background: 'none', cursor: 'pointer', padding: '0 4px' }}><X size={14} /></button>
                                 </div>
                             ))}
@@ -2063,14 +3644,19 @@ export default function Home() {
                             style={{ display: 'none' }}
                             onChange={handleFileUpload}
                             multiple
-                            accept="image/*,.txt,.md,.py,.js,.ts,.tsx,.json,.yaml,.yml,.csv,.html,.css,.xml,.log,.sh,.bat,.sql,.java,.c,.cpp,.h,.hpp,.go,.rs,.rb,.swift,.kt,.scala,.r,.lua,.pl,.pdf"
+                            accept="image/*,audio/*,video/*,.txt,.md,.py,.js,.ts,.tsx,.json,.yaml,.yml,.csv,.html,.css,.xml,.log,.sh,.bat,.sql,.java,.c,.cpp,.h,.hpp,.go,.rs,.rb,.swift,.kt,.scala,.r,.lua,.pl,.pdf"
                         />
                         <textarea
                             ref={textareaRef}
                             value={inputValue}
                             onChange={(e) => setInputValue(e.target.value)}
                             onKeyDown={handleKeyDown}
-                            placeholder="メッセージを入力..."
+                            // ゲーム外でのセッションログ閲覧は read-only (発言は通常
+                            // チャットか、復帰してゲーム内で行う)
+                            disabled={sessionLogReadOnly}
+                            placeholder={sessionLogReadOnly
+                                ? 'セッションログは閲覧専用です。発言するには「復帰」するかチャットに戻ってください。'
+                                : 'メッセージを入力...'}
                             rows={1}
                         />
                         {loadingStatus ? (
@@ -2085,7 +3671,7 @@ export default function Home() {
                             <button
                                 className={styles.sendBtn}
                                 onClick={handleSendMessage}
-                                disabled={!inputValue.trim() && attachments.length === 0}
+                                disabled={(!inputValue.trim() && attachments.length === 0) || sessionLogReadOnly}
                             >
                                 <Send size={20} />
                             </button>
@@ -2094,16 +3680,37 @@ export default function Home() {
                 </div>
             </main>
 
+            {/* チュートリアル表示中は街マップを開かない。初回起動では map (デフォルト ON) と
+                チュートリアルの表示条件が同時に成立するため、判定完了 (tutorialChecked) かつ
+                チュートリアル非表示のときだけ開く。これで初回のマップちらつきと、チュートリアル
+                裏でのマップ mount/ポーリングを防ぐ。チュートリアル完了時は reload が走るので、
+                現在地が設定された状態で改めてマップが現在地中心で開く。 */}
+            {isMapModalOpen && tutorialChecked && !showTutorial && (
+                <ModalOverlay onClose={() => setIsMapModalOpen(false)}>
+                    <div className={cityMapStyles.modalShell}>
+                        <CityMap
+                            currentBuildingId={currentBuildingId}
+                            onSelectBuilding={handleSelectBuildingFromMap}
+                            refreshTrigger={moveTrigger}
+                            onClose={() => setIsMapModalOpen(false)}
+                        />
+                    </div>
+                </ModalOverlay>
+            )}
+
             <RightSidebar
                 isOpen={isInfoOpen}
                 onClose={() => setIsInfoOpen(false)}
                 refreshTrigger={moveTrigger}
+                currentBuildingId={currentBuildingId}
+                onPersonaChanged={() => setMoveTrigger(prev => prev + 1)}
             />
 
             <ChatOptions
                 isOpen={isOptionsOpen}
                 onClose={() => setIsOptionsOpen(false)}
                 currentModel={selectedModel}
+                buildingId={currentBuildingId}
                 onModelChange={(id, displayName, rateLimit) => {
                     setSelectedModel(id);
                     setSelectedModelDisplayName(displayName);
@@ -2115,12 +3722,15 @@ export default function Home() {
             <PeopleModal
                 isOpen={isPeopleModalOpen}
                 onClose={() => setIsPeopleModalOpen(false)}
+                currentBuildingId={currentBuildingId}
+                onChanged={() => setMoveTrigger(prev => prev + 1)}
             />
 
             <ItemModal
                 isOpen={!!linkItemModalItem}
                 onClose={() => setLinkItemModalItem(null)}
                 item={linkItemModalItem}
+                currentBuildingId={currentBuildingId}
             />
 
             <ContextPreviewModal
@@ -2137,10 +3747,10 @@ export default function Home() {
                 />
             )}
 
-            {tweetConfirm && (
-                <TweetConfirmDialog
-                    request={tweetConfirm}
-                    onRespond={handleTweetConfirmResponse}
+            {spellConfirm && (
+                <SpellConfirmDialog
+                    request={spellConfirm}
+                    onRespond={handleSpellConfirmResponse}
                 />
             )}
 

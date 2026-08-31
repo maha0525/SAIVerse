@@ -47,7 +47,6 @@ SearXNG も **AGPL-3.0** ですが、独立したプロセスとして起動し 
 | パッケージ | ライセンス | 用途 | ファイル |
 |---|---|---|---|
 | onnxruntime-gpu | MIT | GPU 推論 (埋め込み高速化) | requirements-gpu.txt |
-| llama-cpp-python | MIT | ローカル LLM 実行 | requirements-local-llm.txt |
 
 ## Python 開発・テスト依存
 

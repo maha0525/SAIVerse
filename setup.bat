@@ -197,6 +197,16 @@ if "!NEED_SEED!"=="1" (
     echo [OK] Database already exists
 )
 
+REM --- 7b. Import/update playbooks ---
+echo.
+echo [SETUP] Updating playbooks...
+python scripts\import_all_playbooks.py --force
+if !errorlevel! neq 0 (
+    echo [WARN] Playbook update failed. You can retry later with: python scripts\import_all_playbooks.py --force
+) else (
+    echo [OK] Playbooks updated
+)
+
 REM --- 8. Create expansion_data directory ---
 if not exist "expansion_data" (
     mkdir expansion_data
@@ -205,23 +215,58 @@ if not exist "expansion_data" (
     echo [OK] expansion_data already exists
 )
 
-REM --- 9. Initialize git repository if git is available ---
+REM --- 9. Git check & auto-install ---
 where git >nul 2>nul
-if %errorlevel% equ 0 (
-    if not exist ".git" (
-        echo.
-        echo [SETUP] Git found. Initializing repository for automatic updates...
-        git init
-        git remote add origin https://github.com/maha0525/SAIVerse.git
-        git fetch origin
-        git branch -M main
-        git reset origin/main
-        git branch --set-upstream-to=origin/main
-        echo [OK] Git repository initialized
-    ) else (
-        echo [OK] Git repository already exists
-    )
+if %errorlevel% equ 0 goto :git_ready
+REM Check for portable install from previous setup
+if exist ".git-portable\cmd\git.exe" (
+    set "PATH=%CD%\.git-portable\cmd;%PATH%"
+    goto :git_ready
 )
+echo.
+echo [SETUP] Git not found. Attempting auto-install...
+where winget >nul 2>nul
+if %errorlevel% neq 0 goto :try_portable_git
+winget install --id Git.Git -e --accept-package-agreements --accept-source-agreements
+REM Add default install path to current session
+set "PATH=%PATH%;C:\Program Files\Git\cmd"
+where git >nul 2>nul
+if %errorlevel% equ 0 goto :git_ready
+goto :try_portable_git
+
+:try_portable_git
+echo [SETUP] Installing Git portable edition...
+powershell -ExecutionPolicy Bypass -File scripts\install_git_portable.ps1
+if not exist ".git-portable\cmd\git.exe" (
+    echo [WARN] Could not install Git automatically.
+    echo   Auto-update via update.bat will not be available.
+    echo   You can install Git manually from https://git-scm.com/ and run setup.bat again.
+    goto :git_skip
+)
+set "PATH=%CD%\.git-portable\cmd;%PATH%"
+
+:git_ready
+REM Restore working directory (winget may change CWD to System32)
+cd /d "%~dp0"
+for /f "tokens=*" %%v in ('git --version') do set GIT_VERSION=%%v
+echo [OK] %GIT_VERSION%
+
+REM --- 9b. Initialize git repository ---
+if not exist ".git" (
+    echo.
+    echo [SETUP] Initializing repository for automatic updates...
+    git init
+    git remote add origin https://github.com/maha0525/SAIVerse.git
+    git fetch origin
+    git branch -M main
+    git reset origin/main
+    git branch --set-upstream-to=origin/main
+    echo [OK] Git repository initialized
+) else (
+    echo [OK] Git repository already exists
+)
+
+:git_skip
 
 REM --- 10. Create .env from example if not exists ---
 if not exist ".env" (

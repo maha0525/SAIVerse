@@ -15,12 +15,16 @@ const Select = ({ children, ...props }: React.SelectHTMLAttributes<HTMLSelectEle
 
 interface City {
     CITYID: number;
+    /** 内部の識別子 (英数字・アンダースコア)。作成後は変更不可 */
+    CITY_SLUG: string;
+    /** 表示名 (自由な文字列)。空なら CITY_SLUG を代わりに表示する */
     CITYNAME: string;
     DESCRIPTION: string;
     UI_PORT: number;
     API_PORT: number;
     START_IN_ONLINE_MODE: boolean;
     TIMEZONE: string;
+    MAP_BACKGROUND_IMAGE?: string | null;
 }
 
 interface Building {
@@ -51,7 +55,7 @@ interface AI {
     HOME_CITYID: number;
     DEFAULT_MODEL: string;
     LIGHTWEIGHT_MODEL: string;
-    INTERACTION_MODE: string;
+    AUTONOMY_ENABLED: boolean;  // 自律行動 (自分から考えて動くこと) の ON/OFF
     AVATAR_IMAGE: string;
     APPEARANCE_IMAGE_PATH?: string;  // Persona appearance image for visual context
     IS_DISPATCHED: boolean;
@@ -104,7 +108,18 @@ async function apiCall(url: string, options?: RequestInit): Promise<boolean> {
         const res = await fetch(url, options);
         if (!res.ok) {
             const err = await res.json().catch(() => ({ detail: res.statusText }));
-            alert(`エラー: ${err.detail || '不明なエラー'}`);
+            let msg = '不明なエラー';
+            if (Array.isArray(err.detail)) {
+                msg = err.detail.map((e: any) => {
+                    const loc = e.loc?.slice(1).join('.') || '?';
+                    return `${loc}: ${e.msg}`;
+                }).join('\n');
+            } else if (typeof err.detail === 'string') {
+                msg = err.detail;
+            } else if (err.detail) {
+                msg = JSON.stringify(err.detail);
+            }
+            alert(`エラー:\n${msg}`);
             return false;
         }
         return true;
@@ -213,7 +228,7 @@ export default function WorldEditor() {
     // --- City Handlers ---
     const handleCitySelect = (city: City) => {
         setSelectedCity(city);
-        setFormData({ name: city.CITYNAME, description: city.DESCRIPTION, ui_port: city.UI_PORT, api_port: city.API_PORT, timezone: city.TIMEZONE, online_mode: city.START_IN_ONLINE_MODE });
+        setFormData({ name: city.CITYNAME, slug: city.CITY_SLUG, description: city.DESCRIPTION, ui_port: city.UI_PORT, api_port: city.API_PORT, timezone: city.TIMEZONE, online_mode: city.START_IN_ONLINE_MODE, map_background_image: city.MAP_BACKGROUND_IMAGE || '' });
     };
     const handleCreateCity = async () => { if (await apiCall('/api/world/cities', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(formData) })) { loadCities(); setFormData({}); } };
     const handleUpdateCity = async () => { if (await apiCall(`/api/world/cities/${selectedCity!.CITYID}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(formData) })) { loadCities(); } };
@@ -252,7 +267,7 @@ export default function WorldEditor() {
         setFormData({
             name: ai.AINAME, description: ai.DESCRIPTION, system_prompt: ai.SYSTEMPROMPT,
             home_city_id: ai.HOME_CITYID, default_model: ai.DEFAULT_MODEL, lightweight_model: ai.LIGHTWEIGHT_MODEL,
-            interaction_mode: ai.INTERACTION_MODE, avatar_path: ai.AVATAR_IMAGE,
+            autonomy_enabled: ai.AUTONOMY_ENABLED, avatar_path: ai.AVATAR_IMAGE,
             appearance_image_path: ai.APPEARANCE_IMAGE_PATH || ''
         });
     };
@@ -366,9 +381,9 @@ export default function WorldEditor() {
                 <button className={`${styles.tab} ${subTab === 'city' ? styles.active : ''}`} onClick={() => { setSubTab('city'); setSelectedCity(null); setFormData({}); }}><MapPin size={16} /> City</button>
                 <button className={`${styles.tab} ${subTab === 'building' ? styles.active : ''}`} onClick={() => { setSubTab('building'); setSelectedBuilding(null); setFormData({}); }}><Layers size={16} /> Building</button>
                 <button className={`${styles.tab} ${subTab === 'ai' ? styles.active : ''}`} onClick={() => { setSubTab('ai'); setSelectedAI(null); setFormData({}); }}><Cpu size={16} /> ペルソナ</button>
-                <button className={`${styles.tab} ${subTab === 'blueprint' ? styles.active : ''}`} onClick={() => { setSubTab('blueprint'); setSelectedBlueprint(null); setFormData({}); }}><FileText size={16} /> Blueprint</button>
+                <button className={`${styles.tab} ${subTab === 'blueprint' ? styles.active : ''}`} onClick={() => { setSubTab('blueprint'); setSelectedBlueprint(null); setFormData({ entity_type: 'ai' }); }}><FileText size={16} /> Blueprint</button>
                 <button className={`${styles.tab} ${subTab === 'tool' ? styles.active : ''}`} onClick={() => { setSubTab('tool'); setSelectedTool(null); setFormData({}); }}><Wrench size={16} /> ツール</button>
-                <button className={`${styles.tab} ${subTab === 'item' ? styles.active : ''}`} onClick={() => { setSubTab('item'); setSelectedItem(null); setFormData({}); }}><Box size={16} /> アイテム</button>
+                <button className={`${styles.tab} ${subTab === 'item' ? styles.active : ''}`} onClick={() => { setSubTab('item'); setSelectedItem(null); setFormData({ item_type: 'object', owner_kind: 'world' }); }}><Box size={16} /> アイテム</button>
                 <button className={`${styles.tab} ${subTab === 'playbook' ? styles.active : ''}`} onClick={() => { setSubTab('playbook'); setSelectedPlaybook(null); setFormData({}); }}><BookOpen size={16} /> Playbook</button>
             </div>
 
@@ -377,18 +392,34 @@ export default function WorldEditor() {
                     <div className={styles.pane}>
                         <div className={styles.list}>
                             <h3>City 一覧</h3>
-                            {cities.map(c => <div key={c.CITYID} className={`${styles.item} ${selectedCity?.CITYID === c.CITYID ? styles.selected : ''}`} onClick={() => handleCitySelect(c)}>{c.DESCRIPTION || c.CITYNAME}</div>)}
+                            {cities.map(c => <div key={c.CITYID} className={`${styles.item} ${selectedCity?.CITYID === c.CITYID ? styles.selected : ''}`} onClick={() => handleCitySelect(c)}>{c.CITYNAME || c.CITY_SLUG}</div>)}
                             <button className={styles.newBtn} onClick={() => { setSelectedCity(null); setFormData({}); }}>+ 新規作成</button>
                         </div>
                         <div className={styles.form}>
                             <h3>{selectedCity ? `City を編集` : '新しい City'}</h3>
-                            <Field label="ID（英数字・アンダースコアのみ）"><Input value={formData.name || ''} onChange={(e: any) => setFormData({ ...formData, name: e.target.value.replace(/[^a-zA-Z0-9_]/g, '') })} /></Field>
-                            <Field label="名前"><Input value={formData.description || ''} onChange={(e: any) => setFormData({ ...formData, description: e.target.value })} /></Field>
+                            <Field label="名前"><Input value={formData.name || ''} onChange={(e: any) => setFormData({ ...formData, name: e.target.value })} /></Field>
+                            {/* 内部の識別子は作成時にしか決められない。起動引数・部屋の
+                                BUILDINGID・ペルソナ ID・ログの保存先がこの文字列から
+                                作られるため、後から変えると食い違う
+                                (docs/intent/city_identity.md §4 不変条件 2)。 */}
+                            {selectedCity
+                                ? <Field label="内部ID（変更不可）"><Input value={selectedCity.CITY_SLUG} disabled style={{ opacity: 0.7, cursor: 'not-allowed' }} /></Field>
+                                : <Field label="内部ID（英数字・アンダースコアのみ）"><Input value={formData.slug || ''} onChange={(e: any) => setFormData({ ...formData, slug: e.target.value.replace(/[^a-zA-Z0-9_]/g, '') })} /></Field>
+                            }
+                            <Field label="説明"><TextArea value={formData.description || ''} onChange={(e: any) => setFormData({ ...formData, description: e.target.value })} /></Field>
                             <div className={styles.row}>
                                 <Field label="UI ポート"><NumInput value={formData.ui_port || ''} onChange={(e: any) => setFormData({ ...formData, ui_port: parseInt(e.target.value) })} /></Field>
                                 <Field label="API ポート"><NumInput value={formData.api_port || ''} onChange={(e: any) => setFormData({ ...formData, api_port: parseInt(e.target.value) })} /></Field>
                             </div>
                             <Field label="タイムゾーン"><Input value={formData.timezone || ''} onChange={(e: any) => setFormData({ ...formData, timezone: e.target.value })} /></Field>
+                            {selectedCity && <Field label="街マップの背景画像">
+                                <ImageUpload
+                                    value={formData.map_background_image || ''}
+                                    onChange={(url: string) => setFormData({ ...formData, map_background_image: url })}
+                                    uploadEndpoint="hires"
+                                />
+                                <small style={{ color: '#666', fontSize: '0.8rem' }}>City Map モーダルで全Buildingの背景に敷かれる1枚絵（解像度はそのまま、WebPに変換のみ）</small>
+                            </Field>}
                             {selectedCity && <label><input type="checkbox" checked={formData.online_mode || false} onChange={(e: any) => setFormData({ ...formData, online_mode: e.target.checked })} /> オンラインモードで起動</label>}
                             {renderFormActions(selectedCity, handleCreateCity, handleUpdateCity, handleDeleteCity)}
                         </div>
@@ -409,8 +440,10 @@ export default function WorldEditor() {
                                 ? <Field label="ID"><Input value={selectedBuilding.BUILDINGID} disabled style={{ opacity: 0.7, cursor: 'not-allowed' }} /></Field>
                                 : <Field label="ID（任意）"><Input value={formData.building_id || ''} placeholder="空欄で自動生成" onChange={(e: any) => setFormData({ ...formData, building_id: e.target.value })} /></Field>
                             }
-                            <Field label="都市"><Select value={formData.city_id || ''} onChange={(e: any) => setFormData({ ...formData, city_id: parseInt(e.target.value) })}>
-                                <option value="">City を選択...</option>{cities.map(c => <option key={c.CITYID} value={c.CITYID}>{c.DESCRIPTION || c.CITYNAME}</option>)}
+                            {/* 既存 Building の City 変更は不可 (W7 柱5: 参照 scope を跨ぐため
+                                サーバ側でも拒否する)。編集時は表示のみ。 */}
+                            <Field label="都市"><Select value={formData.city_id || ''} disabled={!!selectedBuilding} style={selectedBuilding ? { opacity: 0.7, cursor: 'not-allowed' } : undefined} onChange={(e: any) => setFormData({ ...formData, city_id: parseInt(e.target.value) })}>
+                                <option value="">City を選択...</option>{cities.map(c => <option key={c.CITYID} value={c.CITYID}>{c.CITYNAME || c.CITY_SLUG}</option>)}
                             </Select></Field>
                             <div className={styles.row}>
                                 <Field label="定員"><NumInput value={formData.capacity || 1} onChange={(e: any) => setFormData({ ...formData, capacity: parseInt(e.target.value) })} /></Field>
@@ -475,13 +508,13 @@ export default function WorldEditor() {
                         <div className={styles.list}>
                             <h3>ペルソナ一覧</h3>
                             {ais.map(a => <div key={a.AIID} className={`${styles.item} ${selectedAI?.AIID === a.AIID ? styles.selected : ''}`} onClick={() => handleAISelect(a)}>{a.AINAME}</div>)}
-                            <button className={styles.newBtn} onClick={() => { setSelectedAI(null); setFormData({ interaction_mode: 'auto' }); }}>+ 新規作成</button>
+                            <button className={styles.newBtn} onClick={() => { setSelectedAI(null); setFormData({ autonomy_enabled: true }); }}>+ 新規作成</button>
                         </div>
                         <div className={styles.form}>
                             <h3>{selectedAI ? `ペルソナを編集` : '新しいペルソナ'}</h3>
                             <Field label="名前"><Input value={formData.name || ''} onChange={(e: any) => setFormData({ ...formData, name: e.target.value })} /></Field>
                             <Field label="ホーム都市"><Select value={formData.home_city_id || ''} onChange={(e: any) => setFormData({ ...formData, home_city_id: parseInt(e.target.value) })}>
-                                <option value="">City を選択...</option>{cities.map(c => <option key={c.CITYID} value={c.CITYID}>{c.DESCRIPTION || c.CITYNAME}</option>)}
+                                <option value="">City を選択...</option>{cities.map(c => <option key={c.CITYID} value={c.CITYID}>{c.CITYNAME || c.CITY_SLUG}</option>)}
                             </Select></Field>
                             {selectedAI && <>
                                 <Field label="デフォルトモデル"><Select value={formData.default_model || ''} onChange={(e: any) => setFormData({ ...formData, default_model: e.target.value })}>
@@ -498,9 +531,16 @@ export default function WorldEditor() {
                                     )}
                                     {modelChoices.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
                                 </Select></Field>
-                                <Field label="インタラクションモード"><Select value={formData.interaction_mode || 'auto'} onChange={(e: any) => setFormData({ ...formData, interaction_mode: e.target.value })}>
-                                    <option value="auto">Auto</option><option value="manual">Manual</option><option value="sleep">Sleep</option>
-                                </Select></Field>
+                                <Field label="自律行動">
+                                    <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                                        <input
+                                            type="checkbox"
+                                            checked={formData.autonomy_enabled ?? true}
+                                            onChange={(e: any) => setFormData({ ...formData, autonomy_enabled: e.target.checked })}
+                                        />
+                                        {(formData.autonomy_enabled ?? true) ? '有効（自分から考えて動く）' : '無効（話しかけられるまで待機）'}
+                                    </label>
+                                </Field>
                                 <Field label="アバター">
                                     <ImageUpload
                                         value={formData.avatar_path || ''}
@@ -544,7 +584,7 @@ export default function WorldEditor() {
                             <Field label="名前"><Input value={formData.name || ''} onChange={(e: any) => setFormData({ ...formData, name: e.target.value })} /></Field>
                             <Field label="タイプ"><Input value={formData.entity_type || 'ai'} onChange={(e: any) => setFormData({ ...formData, entity_type: e.target.value })} /></Field>
                             <Field label="都市"><Select value={formData.city_id || ''} onChange={(e: any) => setFormData({ ...formData, city_id: parseInt(e.target.value) })}>
-                                <option value="">City を選択...</option>{cities.map(c => <option key={c.CITYID} value={c.CITYID}>{c.DESCRIPTION || c.CITYNAME}</option>)}
+                                <option value="">City を選択...</option>{cities.map(c => <option key={c.CITYID} value={c.CITYID}>{c.CITYNAME || c.CITY_SLUG}</option>)}
                             </Select></Field>
                             <Field label="システムプロンプト"><TextArea style={{ minHeight: 200 }} value={formData.system_prompt || ''} onChange={(e: any) => setFormData({ ...formData, system_prompt: e.target.value })} /></Field>
                             <Field label="説明"><TextArea value={formData.description || ''} onChange={(e: any) => setFormData({ ...formData, description: e.target.value })} /></Field>
@@ -595,6 +635,7 @@ export default function WorldEditor() {
                                 <option value="picture">画像</option>
                                 <option value="document">ドキュメント</option>
                                 <option value="object">オブジェクト（ファイルなし）</option>
+                                <option value="bag">バッグ（アイテム格納用）</option>
                             </Select></Field>
                             <div className={styles.row}>
                                 <Field label="所有者">
@@ -602,6 +643,7 @@ export default function WorldEditor() {
                                         <option value="world">ワールド（グローバル）</option>
                                         <option value="building">Building</option>
                                         <option value="persona">ペルソナ</option>
+                                        <option value="bag">Bag（バッグ内）</option>
                                     </Select>
                                 </Field>
                                 {formData.owner_kind === 'building' && (
@@ -617,6 +659,16 @@ export default function WorldEditor() {
                                         <Select value={formData.owner_id || ''} onChange={(e: any) => setFormData({ ...formData, owner_id: e.target.value })}>
                                             <option value="">ペルソナを選択...</option>
                                             {ais.map(a => <option key={a.AIID} value={a.AIID}>{a.AINAME}</option>)}
+                                        </Select>
+                                    </Field>
+                                )}
+                                {formData.owner_kind === 'bag' && (
+                                    <Field label="Bag">
+                                        <Select value={formData.owner_id || ''} onChange={(e: any) => setFormData({ ...formData, owner_id: e.target.value })}>
+                                            <option value="">Bagを選択...</option>
+                                            {items.filter(i => i.TYPE === 'bag' && i.ITEM_ID !== selectedItem?.ITEM_ID).map(i => (
+                                                <option key={i.ITEM_ID} value={i.ITEM_ID}>{i.NAME}</option>
+                                            ))}
                                         </Select>
                                     </Field>
                                 )}

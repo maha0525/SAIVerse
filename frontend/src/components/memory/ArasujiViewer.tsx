@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { Loader2, ChevronLeft, BookOpen, Layers, Trash2, Play, Settings, Square, Edit2, Save, X } from 'lucide-react';
 import styles from './ArasujiViewer.module.css';
 import ModalOverlay from '../common/ModalOverlay';
+import ContextVolumeBar, { ContextStatus, canDrawContextVolumeBar } from '../common/ContextVolumeBar';
 
 interface ArasujiEntry {
     id: string;
@@ -24,10 +25,34 @@ interface SourceMessage {
     created_at: number;
 }
 
+interface LinkedFragment {
+    id: string;
+    content: string;
+    source_date: string | null;
+    page_title: string;
+}
+
 interface ArasujiStats {
     max_level: number;
     counts_by_level: Record<string, number>;
     total_count: number;
+}
+
+// GET /arasuji/cost-estimate の応答 (被覆補修 §16 の判断材料)。
+// unprocessed_messages は止め線 (会話中の窓) を除いた「あらすじになって
+// いない過去の会話」の件数で、mode=repair の実行が編纂する範囲と同じ数字。
+interface RepairEstimate {
+    total_messages: number;
+    processed_messages: number;
+    unprocessed_messages: number;
+    estimated_llm_calls: number;
+    estimated_cost_usd: number;
+    model_name: string;
+    is_free_tier: boolean;
+    currency: string;
+    // 前回の補修/再編纂ジョブが完了していない (上位あらすじの再生成が残って
+    // いる)。帯に「再実行してください」を併記し、再実行で続きから直る。
+    repair_incomplete?: boolean;
 }
 
 interface ArasujiViewerProps {
@@ -45,27 +70,18 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
     const [showList, setShowList] = useState(true);
     const [sourceMessages, setSourceMessages] = useState<SourceMessage[]>([]);
     const [isLoadingMessages, setIsLoadingMessages] = useState(false);
+    const [linkedFragments, setLinkedFragments] = useState<LinkedFragment[]>([]);
+    const [isLoadingFragments, setIsLoadingFragments] = useState(false);
     const [developerMode, setDeveloperMode] = useState(false);
 
     // Generation state
     const [showGenerateModal, setShowGenerateModal] = useState(false);
-    const [costEstimate, setCostEstimate] = useState<{
-        total_messages: number;
-        processed_messages: number;
-        unprocessed_messages: number;
-        estimated_llm_calls: number;
-        estimated_cost_usd: number;
-        model_name: string;
-        is_free_tier: boolean;
-        batch_size: number;
-    } | null>(null);
-    const [generateSettings, setGenerateSettings] = useState({
-        maxMessages: 500,
-        batchSize: 20,
-        consolidationSize: 10,
-        withMemopedia: false,
-        includeTimestamp: true,
-    });
+    // 確認窓で見せる送信量 (GET /api/people/{id}/context-status)。手動の畳みは
+    // 畳める範囲の材料が U (fold_unit_chars) に達していなければ何もしない
+    // (sea/session_lifecycle.py の run_manual_compaction が noop を返す) ので、
+    // backend が計画を dry に呼んだ結果 (fold_ready) を押す前の判断材料に出す。
+    const [contextStatus, setContextStatus] = useState<ContextStatus | null>(null);
+    const [contextStatusError, setContextStatusError] = useState(false);
     const [generationJob, setGenerationJob] = useState<{
         jobId: string;
         status: string;
@@ -84,9 +100,30 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
     const [editContent, setEditContent] = useState("");
     const pollingRef = useRef<NodeJS.Timeout | null>(null);
 
+    // 被覆補修 (§16): あらすじになっていない過去の会話の検知と実行確認
+    const [repairEstimate, setRepairEstimate] = useState<RepairEstimate | null>(null);
+    const [showRepairModal, setShowRepairModal] = useState(false);
+
+    // 「あらすじになっていない過去」の量を取り直す。0 なら案内は出さない。
+    // 読めなかったときも出さない (誤った件数で実行へ誘導しない)。
+    const loadRepairEstimate = useCallback(async () => {
+        try {
+            const res = await fetch(`/api/people/${personaId}/arasuji/cost-estimate`);
+            if (res.ok) {
+                setRepairEstimate(await res.json());
+            } else {
+                setRepairEstimate(null);
+            }
+        } catch (e) {
+            console.error('Failed to load repair estimate', e);
+            setRepairEstimate(null);
+        }
+    }, [personaId]);
+
     useEffect(() => {
         loadStats();
         loadEntries(null);
+        loadRepairEstimate();
         fetch('/api/config/developer-mode')
             .then(res => res.ok ? res.json() : null)
             .then(data => { if (data) setDeveloperMode(data.enabled); })
@@ -182,12 +219,29 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
         }
     };
 
-    // Load source messages when a level-1 entry is selected
+    const fetchLinkedFragments = async (entryId: string) => {
+        setIsLoadingFragments(true);
+        try {
+            const res = await fetch(`/api/people/${personaId}/arasuji/${entryId}/fragments`);
+            if (res.ok) {
+                const data = await res.json();
+                setLinkedFragments(data.fragments || []);
+            }
+        } catch (e) {
+            console.error("Failed to fetch linked fragments", e);
+        } finally {
+            setIsLoadingFragments(false);
+        }
+    };
+
+    // Load source messages and linked fragments when a level-1 entry is selected
     useEffect(() => {
         if (selectedEntry && selectedEntry.level === 1 && selectedEntry.source_ids.length > 0) {
             fetchSourceMessages(selectedEntry.id);
+            fetchLinkedFragments(selectedEntry.id);
         } else {
             setSourceMessages([]);
+            setLinkedFragments([]);
         }
     }, [selectedEntry?.id]);
 
@@ -244,6 +298,9 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                 }
                 // Reload stats
                 loadStats();
+                // 消した範囲は「あらすじになっていない過去」へ戻る (§16-2:
+                // 消して再編纂の運用) — 件数を数え直す。
+                loadRepairEstimate();
             } else {
                 alert("削除に失敗しました");
             }
@@ -290,49 +347,149 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
         }
     };
 
-    // Chronicle Generation
-    const fetchCostEstimate = useCallback(async (batchSize?: number, consolidationSize?: number) => {
-        try {
-            const params = new URLSearchParams();
-            if (batchSize) params.set('batch_size', String(batchSize));
-            if (consolidationSize) params.set('consolidation_size', String(consolidationSize));
-            const qs = params.toString();
-            const res = await fetch(`/api/people/${personaId}/arasuji/cost-estimate${qs ? `?${qs}` : ''}`);
-            if (res.ok) {
-                setCostEstimate(await res.json());
-            }
-        } catch {
-            // Non-critical
-        }
-    }, [personaId]);
-
-    const openGenerateModal = async () => {
+    // Chronicle 生成 = 手動の畳み (arasuji_levels.md §13 裁定4)。
+    // 範囲は自動 Metabolism と同じ「残す量より古い側」に固定されたため、
+    // 旧設定 (最大件数 / 日時 / Memopedia) と全量前提のコスト見積もりは廃止。
+    const openGenerateModal = () => {
         setShowGenerateModal(true);
-        await fetchCostEstimate(generateSettings.batchSize, generateSettings.consolidationSize);
     };
 
-    // Re-fetch cost estimate when batch/consolidation size changes while modal is open
+    // 確認窓を開くたびに送信量を取り直す (水位はモデル依存で、会話でも動く)。
+    // ChatOptions の「データ送信量の管理」と同じ読み方 — 前の値は即座に消して、
+    // 取得に失敗したときに古い数字を出し続けないようにする。
     useEffect(() => {
-        if (!showGenerateModal) return;
-        const timer = setTimeout(() => {
-            fetchCostEstimate(generateSettings.batchSize, generateSettings.consolidationSize);
-        }, 300);  // debounce
-        return () => clearTimeout(timer);
-    }, [showGenerateModal, generateSettings.batchSize, generateSettings.consolidationSize, fetchCostEstimate]);
+        setContextStatus(null);
+        setContextStatusError(false);
+        if (!showGenerateModal || !personaId) return;
+        let cancelled = false;
+        (async () => {
+            try {
+                const res = await fetch(`/api/people/${encodeURIComponent(personaId)}/context-status`);
+                if (cancelled) return;
+                if (!res.ok) {
+                    setContextStatusError(true);
+                    return;
+                }
+                const data = await res.json();
+                if (!cancelled) setContextStatus(data);
+            } catch (e) {
+                console.error('Failed to fetch context status', e);
+                if (!cancelled) setContextStatusError(true);
+            }
+        })();
+        return () => { cancelled = true; };
+    }, [showGenerateModal, personaId]);
 
-    const startGeneration = async () => {
-        setShowGenerateModal(false);
+    // 畳めるか = 実際に畳みが起きるか。整理 (sea/eviction_plan.py::plan_eviction)
+    // は「残す量より古い側」を U 文字ぶんずつの範囲に刻んで畳むが、U に達したかは
+    // 材料の字数 (スペル結果などの長い機構の行を圧縮した後の字数) で測る
+    // (2026-08-29 裁定) ので、生の超過と U の比較では判定できない。backend が
+    // 実行時と同じ計画を dry に呼んだ結果 (fold_ready / fold_shortfall_chars)
+    // をそのまま使う。読めなかったとき・水位を持たないモデル・起点未確立は
+    // 「畳めない」に倒す (空振りの実行をさせない)。
+    const overflowChars = contextStatus
+        && contextStatus.presented_chars != null && contextStatus.target_chars != null
+        ? contextStatus.presented_chars - contextStatus.target_chars
+        : null;
+    const foldReady = contextStatus?.fold_ready ?? null;
+    const foldShortfallChars = contextStatus?.fold_shortfall_chars ?? null;
+    const foldUnitChars = contextStatus?.fold_unit_chars ?? null;
+    // fold_ready を返さない古い backend では、8/24 の「生の超過が U に達して
+    // いなければ押せない」判定 (生超過 >= fold_unit_chars) に戻す。U も無ければ
+    // 「畳めるか」を判定できないので無効化 (fail-closed — 空振りの実行を
+    // させない)。計測失敗 (measurement_failed) も常に無効化。
+    const legacyFoldReady = overflowChars != null && foldUnitChars != null && foldUnitChars > 0
+        ? overflowChars >= foldUnitChars
+        : false;
+    const effectiveFoldReady = foldReady != null ? foldReady : legacyFoldReady;
+    const canFold = !!contextStatus && contextStatus.metabolism
+        && !contextStatus.measurement_failed
+        && overflowChars != null
+        && effectiveFoldReady;
+
+    // 実行できない理由 (ボタンの tooltip)。本文は確認窓の中に出しているので、
+    // ここは同じ理由を短く言い直したものにする。
+    const generateDisabledReason = (): string | undefined => {
+        if (canFold) return undefined;
+        if (contextStatusError) return '送信量を読めませんでした';
+        if (!contextStatus) return '送信量を確認しています';
+        if (!contextStatus.metabolism) return 'このモデルは水位を持たない設定です';
+        if (contextStatus.measurement_failed) return 'いまの送信量を測定できませんでした';
+        if (contextStatus.presented_chars == null) return 'まだ会話の起点がありません';
+        if (foldReady === false && overflowChars != null && overflowChars > 0) {
+            return foldShortfallChars != null && foldShortfallChars > 0
+                ? `あと約 ${foldShortfallChars.toLocaleString()} 文字の会話がたまれば畳めます`
+                : 'まだ畳める範囲がたまっていません';
+        }
+        if (foldReady == null && overflowChars != null && overflowChars > 0) {
+            // 古い backend (fold_ready なし): 生超過が U に達するまで押せない。
+            return foldUnitChars != null && foldUnitChars > 0
+                ? 'まだ畳める範囲がたまっていません'
+                : '畳めるかどうか判定できません';
+        }
+        return '畳むものがありません';
+    };
+
+    // 確認窓の判断材料 (横棒 + いまの状況の一文)。文言は ChatOptions の
+    // 「データ送信量の管理」と揃える。
+    const renderGenerateContextBody = () => {
+        if (contextStatusError) {
+            return <p className={styles.generateStatusText}>送信量を読めませんでした。畳めるかどうか判断できないため、実行できません。</p>;
+        }
+        if (!contextStatus) {
+            return <p className={styles.generateStatusText}>送信量を確認しています...</p>;
+        }
+        if (!contextStatus.metabolism) {
+            return (
+                <p className={styles.generateStatusText}>
+                    このモデル（{contextStatus.model || '未設定'}）は水位を持たない設定のため、履歴の自動整理は行われません。
+                </p>
+            );
+        }
+        const presented = contextStatus.presented_chars;
+        const target = contextStatus.target_chars;
+        if (presented == null || target == null) {
+            return contextStatus.measurement_failed ? (
+                <p className={styles.generateStatusText}>いまの送信量を測定できませんでした。畳めるかどうか判断できないため、実行できません。</p>
+            ) : (
+                <p className={styles.generateStatusText}>まだ会話の起点がありません。最初の会話で確立されます。</p>
+            );
+        }
+        const overflow = presented - target;
+        let statusText: string;
+        if (overflow <= 0) {
+            statusText = 'いまの会話は残す量以下なので、畳むものがありません。';
+        } else if (foldReady == null) {
+            // 古い backend (fold_ready を返さない) — 8/24 の生比較 (超過が U に
+            // 達しているか) に落とす。U も無ければ判定できない = 実行できない。
+            if (foldUnitChars == null || foldUnitChars <= 0) {
+                statusText = '畳めるかどうかを判定できないため、実行できません。';
+            } else if (overflow >= foldUnitChars) {
+                statusText = `いまの会話は ${presented.toLocaleString()} 文字で、残す量 ${target.toLocaleString()} 文字を超えているぶんが畳まれます。`;
+            } else {
+                statusText = `いまの会話は残す量を ${overflow.toLocaleString()} 文字超えていますが、まだ畳める範囲がたまっていません。あと約 ${(foldUnitChars - overflow).toLocaleString()} 文字の会話がたまれば畳めます。`;
+            }
+        } else if (foldReady) {
+            statusText = `いまの会話は残す量を ${overflow.toLocaleString()} 文字超えていて、古い側からあらすじへ畳めます。`;
+        } else if (foldShortfallChars != null && foldShortfallChars > 0) {
+            statusText = `いまの会話は残す量を ${overflow.toLocaleString()} 文字超えていますが、まだ畳める範囲がたまっていません。あと約 ${foldShortfallChars.toLocaleString()} 文字の会話がたまれば畳めます。`;
+        } else {
+            statusText = `いまの会話は残す量を ${overflow.toLocaleString()} 文字超えていますが、まだ畳める範囲がたまっていません。`;
+        }
+        return (
+            <>
+                {canDrawContextVolumeBar(contextStatus) && <ContextVolumeBar status={contextStatus} />}
+                <p className={styles.generateStatusText}>{statusText}</p>
+            </>
+        );
+    };
+
+    const postGenerateJob = async (body: Record<string, unknown>) => {
         try {
             const res = await fetch(`/api/people/${personaId}/arasuji/generate`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    max_messages: generateSettings.maxMessages,
-                    batch_size: generateSettings.batchSize,
-                    consolidation_size: generateSettings.consolidationSize,
-                    with_memopedia: generateSettings.withMemopedia,
-                    include_timestamp: generateSettings.includeTimestamp,
-                }),
+                body: JSON.stringify(body),
             });
             if (res.ok) {
                 const data = await res.json();
@@ -360,6 +517,23 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
         }
     };
 
+    // 生成 (窓の畳み — §13 の手動入口)。従来どおり空 body = mode 既定 (compaction)。
+    const startGeneration = async () => {
+        setShowGenerateModal(false);
+        await postGenerateJob({});
+    };
+
+    // 被覆補修 (§16): あらすじになっていない過去の会話を編纂する。
+    // confirmed_unprocessed_messages = いま画面で承認した件数。実行直前に対象が
+    // 増えていたら backend が estimate_stale で止める (時点ずれの歯止め)。
+    const startRepair = async () => {
+        setShowRepairModal(false);
+        await postGenerateJob({
+            mode: 'repair',
+            confirmed_unprocessed_messages: repairEstimate?.unprocessed_messages ?? null,
+        });
+    };
+
     const startPolling = useCallback((jobId: string) => {
         if (pollingRef.current) clearInterval(pollingRef.current);
         pollingRef.current = setInterval(async () => {
@@ -384,13 +558,14 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                         // Refresh data
                         loadStats();
                         loadEntries(levelFilter);
+                        loadRepairEstimate();
                     }
                 }
             } catch (e) {
                 console.error('Polling error', e);
             }
         }, 2000);
-    }, [personaId, levelFilter]);
+    }, [personaId, levelFilter, loadRepairEstimate]);
 
     const cancelGeneration = async () => {
         if (!generationJob?.jobId) return;
@@ -550,6 +725,10 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                         server_error: '🔧',
                         empty_response: '📭',
                         safety_filter: '🛡️',
+                        window_claimed: '🔒',
+                        sluice_unseen: '🔁',
+                        estimate_stale: '🔄',
+                        ceiling_unresolved: '🚧',
                     };
                     const guidanceMap: Record<string, string> = {
                         empty_response: 'しばらく時間を置いてから再実行してください。繰り返し発生する場合は、サーバーの障害情報を確認してください。',
@@ -559,6 +738,10 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                         payment: 'APIキーの残高や支払い設定を確認してください。',
                         authentication: 'APIキーの設定を確認してください。',
                         server_error: 'LLMサーバーで障害が発生しています。しばらく時間を置いてから再実行してください。',
+                        window_claimed: '別の整理が同じ範囲を処理中または処理済みです。しばらく待ってから再実行してください。',
+                        sluice_unseen: '今回の採取（スルース）で読めていない範囲があったため、畳みを見送りました。採取の結果は保存されており、畳みは次回の整理で続きから進みます。',
+                        estimate_stale: 'あらすじにする対象が見積もり時より増えています。件数を確認し直してから、もう一度実行してください。',
+                        ceiling_unresolved: '会話中の窓の境界を確認できなかったため、何も編纂せずに止まりました。しばらくしてから再実行してください。',
                     };
                     const icon = (code && iconMap[code]) || '❌';
                     const guidance = (code && guidanceMap[code]) || '予期しないエラーが発生しました。Technical Detailsを確認し、問題が続く場合は管理者に連絡してください。';
@@ -641,6 +824,35 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                         </div>
                     );
                 })()}
+
+                {/* 被覆補修の案内 (§16-2: 押すタイミングが分かる可視化)。
+                    件数は cost-estimate (止め線適用後) — 0 なら何も出さない。 */}
+                {repairEstimate && (repairEstimate.unprocessed_messages >= 1 || repairEstimate.repair_incomplete) && (
+                    <div className={styles.repairBanner}>
+                        <span className={styles.repairBannerText}>
+                            {repairEstimate.unprocessed_messages >= 1 && (
+                                <>あらすじになっていない過去の会話が {repairEstimate.unprocessed_messages.toLocaleString()} 件あります</>
+                            )}
+                            {repairEstimate.repair_incomplete && (
+                                <>
+                                    {repairEstimate.unprocessed_messages >= 1 && <br />}
+                                    前回の処理が完了していません。再実行してください。
+                                </>
+                            )}
+                        </span>
+                        <button
+                            className={styles.repairBannerBtn}
+                            onClick={() => setShowRepairModal(true)}
+                            // pending (ポーリングが backend 状態を写す最大 2 秒) と
+                            // cancelling も塞ぐ — claim なしジョブの並走防御は
+                            // この無効化だけなので、進行中の状態を全部覆う。
+                            disabled={['running', 'started', 'pending', 'cancelling'].includes(generationJob?.status ?? '')}
+                            title="内容と費用を確認してからあらすじにできます"
+                        >
+                            確認する
+                        </button>
+                    </div>
+                )}
 
                 {/* Level Filter */}
                 {stats && stats.max_level > 0 && (
@@ -902,6 +1114,46 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                                     )}
                                 </div>
                             )}
+
+                            {/* Linked Fragments Section */}
+                            {selectedEntry.level === 1 && (
+                                <div className={styles.sourceSection}>
+                                    <h3 className={styles.sourceSectionTitle}>
+                                        抽出された知識 (Fragments)
+                                        {linkedFragments.length > 0 && ` — ${linkedFragments.length}件`}
+                                    </h3>
+                                    {isLoadingFragments ? (
+                                        <div className={styles.loadingMessages}>
+                                            <Loader2 className={styles.loader} size={16} />
+                                            <span>Fragment を読み込み中...</span>
+                                        </div>
+                                    ) : linkedFragments.length > 0 ? (
+                                        <div className={styles.fragmentsByPage}>
+                                            {(() => {
+                                                const grouped: Record<string, LinkedFragment[]> = {};
+                                                for (const f of linkedFragments) {
+                                                    if (!grouped[f.page_title]) grouped[f.page_title] = [];
+                                                    grouped[f.page_title].push(f);
+                                                }
+                                                return Object.entries(grouped).map(([title, frags]) => (
+                                                    <div key={title} className={styles.fragmentPageGroup}>
+                                                        <div className={styles.fragmentPageTitle}>{title}</div>
+                                                        <ul className={styles.fragmentItems}>
+                                                            {frags.map(f => (
+                                                                <li key={f.id} className={styles.fragmentContent}>{f.content}</li>
+                                                            ))}
+                                                        </ul>
+                                                    </div>
+                                                ));
+                                            })()}
+                                        </div>
+                                    ) : (
+                                        <span style={{ opacity: 0.5, fontSize: '0.9em' }}>
+                                            この Chronicle から抽出された Fragment はありません
+                                        </span>
+                                    )}
+                                </div>
+                            )}
                         </div>
                     ) : (
                         <div className={styles.emptyState}>
@@ -912,116 +1164,88 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                 </div>
             </div>
 
-            {/* Generation Settings Modal */}
+            {/* 被覆補修の確認 (§16: 見積もり → 実行) */}
+            {showRepairModal && repairEstimate && (
+                <ModalOverlay onClose={() => setShowRepairModal(false)} className={styles.modalOverlay}>
+                    <div className={styles.modal} onClick={(e) => e.stopPropagation()}>
+                        <h3>過去の会話をあらすじにする</h3>
+                        <p className={styles.hint} style={{ display: 'block', margin: '0 0 1rem', lineHeight: 1.7 }}>
+                            あらすじになっていない過去の会話が残っています。実行すると、その会話をまとめたあらすじが作られ、
+                            本人が古い出来事を思い出せるようになります。いま進行中の会話には触りません。
+                        </p>
+                        {repairEstimate.repair_incomplete && (
+                            <p className={styles.hint} style={{ display: 'block', margin: '0 0 1rem', lineHeight: 1.7 }}>
+                                前回の処理が完了していません。再実行すると、処理済みの部分は飛ばして続きから進みます。
+                            </p>
+                        )}
+                        <div className={styles.generateContextBox}>
+                            <div className={styles.repairEstimateRow}>
+                                <span className={styles.repairEstimateLabel}>対象の会話</span>
+                                <span className={styles.repairEstimateValue}>
+                                    {repairEstimate.unprocessed_messages.toLocaleString()} 件
+                                </span>
+                            </div>
+                            <div className={styles.repairEstimateRow}>
+                                <span className={styles.repairEstimateLabel}>AI の呼び出し</span>
+                                <span className={styles.repairEstimateValue}>
+                                    約 {repairEstimate.estimated_llm_calls.toLocaleString()} 回（{repairEstimate.model_name}）
+                                </span>
+                            </div>
+                            <div className={styles.repairEstimateRow}>
+                                <span className={styles.repairEstimateLabel}>概算費用</span>
+                                <span className={styles.repairEstimateValue}>
+                                    {repairEstimate.is_free_tier
+                                        ? '無料（このモデルには料金設定がありません）'
+                                        : `約 $${repairEstimate.estimated_cost_usd > 0 && repairEstimate.estimated_cost_usd < 0.01
+                                            ? repairEstimate.estimated_cost_usd.toFixed(4)
+                                            : repairEstimate.estimated_cost_usd.toFixed(2)} ${repairEstimate.currency}`}
+                                </span>
+                            </div>
+                        </div>
+                        <div className={styles.modalActions}>
+                            <button className={styles.cancelBtn} onClick={() => setShowRepairModal(false)}>
+                                キャンセル
+                            </button>
+                            <button
+                                className={styles.startBtn}
+                                onClick={startRepair}
+                                disabled={
+                                    (repairEstimate.unprocessed_messages < 1 && !repairEstimate.repair_incomplete)
+                                    || ['running', 'started', 'pending', 'cancelling'].includes(generationJob?.status ?? '')
+                                }
+                            >
+                                <Play size={14} />
+                                実行
+                            </button>
+                        </div>
+                    </div>
+                </ModalOverlay>
+            )}
+
+            {/* Generation Confirm Modal (§13: 手動の畳み) */}
             {showGenerateModal && (
                 <ModalOverlay onClose={() => setShowGenerateModal(false)} className={styles.modalOverlay}>
                     <div className={styles.modal} onClick={(e) => e.stopPropagation()}>
-                        <h3>Chronicle 生成設定</h3>
-                        {costEstimate && (
-                            <div style={{
-                                padding: '0.75rem',
-                                marginBottom: '1rem',
-                                background: costEstimate.unprocessed_messages === 0
-                                    ? 'rgba(100, 200, 100, 0.1)'
-                                    : costEstimate.unprocessed_messages > 500
-                                        ? 'rgba(255, 150, 0, 0.1)'
-                                        : 'rgba(100, 100, 100, 0.1)',
-                                borderRadius: '6px',
-                                fontSize: '0.85rem',
-                                lineHeight: '1.6',
-                            }}>
-                                {costEstimate.unprocessed_messages === 0 ? (
-                                    <div>生成するメッセージはありません（全て処理済み）</div>
-                                ) : (
-                                    <>
-                                        <div>未処理メッセージ: <strong>{costEstimate.unprocessed_messages.toLocaleString()}</strong>件 / 全{costEstimate.total_messages.toLocaleString()}件</div>
-                                        <div>推定LLM呼び出し: <strong>{costEstimate.estimated_llm_calls}</strong>回</div>
-                                        <div>
-                                            推定コスト: <strong>
-                                                {costEstimate.is_free_tier
-                                                    ? '$0.00 (Free tier)'
-                                                    : costEstimate.estimated_cost_usd < 0.001
-                                                        ? `~$${costEstimate.estimated_cost_usd.toFixed(6)}`
-                                                        : costEstimate.estimated_cost_usd < 0.01
-                                                            ? `~$${costEstimate.estimated_cost_usd.toFixed(4)}`
-                                                            : `~$${costEstimate.estimated_cost_usd.toFixed(3)}`
-                                                }
-                                            </strong>
-                                            {' '}({costEstimate.model_name})
-                                        </div>
-                                    </>
-                                )}
-                            </div>
-                        )}
-                        <div className={styles.formGroup}>
-                            <label>最大処理メッセージ数</label>
-                            <input
-                                type="number"
-                                value={generateSettings.maxMessages || ''}
-                                onChange={(e) => setGenerateSettings(s => ({ ...s, maxMessages: parseInt(e.target.value) || 0 }))}
-                                min={20}
-                                step={100}
-                                placeholder="500"
-                            />
-                            <span className={styles.hint}>未処理メッセージを古い順に最大この件数まで処理</span>
+                        <h3>記憶の整理（Chronicle 生成）</h3>
+                        <p className={styles.hint} style={{ display: 'block', margin: '0 0 1rem', lineHeight: 1.7 }}>
+                            古い会話履歴をあらすじ（Chronicle）に畳みます。直近の会話はそのまま残ります。
+                            畳む量に応じて軽量モデルの LLM 呼び出しが数回発生します。
+                        </p>
+                        <div className={styles.generateContextBox}>
+                            {renderGenerateContextBody()}
                         </div>
-                        <div className={styles.formGroup}>
-                            <label>バッチサイズ</label>
-                            <input
-                                type="number"
-                                value={generateSettings.batchSize || ''}
-                                onChange={(e) => setGenerateSettings(s => ({ ...s, batchSize: parseInt(e.target.value) || 0 }))}
-                                min={5}
-                                max={50}
-                                placeholder="20"
-                            />
-                            <span className={styles.hint}>1つのChronicleにまとめるメッセージ数（未処理がこれ未満なら処理しない）</span>
-                        </div>
-                        <div className={styles.formGroup}>
-                            <label>統合サイズ</label>
-                            <input
-                                type="number"
-                                value={generateSettings.consolidationSize || ''}
-                                onChange={(e) => setGenerateSettings(s => ({ ...s, consolidationSize: parseInt(e.target.value) || 0 }))}
-                                min={3}
-                                max={20}
-                                placeholder="10"
-                            />
-                            <span className={styles.hint}>上位レベルにまとめるエントリ数</span>
-                        </div>
-                        <div className={styles.formGroup}>
-                            <label className={styles.checkboxLabel}>
-                                <input
-                                    type="checkbox"
-                                    checked={generateSettings.includeTimestamp}
-                                    onChange={(e) => setGenerateSettings(s => ({ ...s, includeTimestamp: e.target.checked }))}
-                                />
-                                日時情報を含める
-                            </label>
-                            <span className={styles.hint}>インポートしたログ等でタイムスタンプが不正確な場合はOFFにすると、日時に基づく誤った記述を防げます</span>
-                        </div>
-                        {developerMode && (
-                            <div className={styles.formGroup}>
-                                <label className={styles.checkboxLabel}>
-                                    <input
-                                        type="checkbox"
-                                        checked={generateSettings.withMemopedia}
-                                        onChange={(e) => setGenerateSettings(s => ({ ...s, withMemopedia: e.target.checked }))}
-                                    />
-                                    Memopedia も同時生成
-                                </label>
-                                <span className={styles.hint} style={{ color: '#e8a838' }}>
-                                    （非推奨：生成コストが高く、大量のページが作られます。推定コストには反映されません）
-                                </span>
-                            </div>
-                        )}
                         <div className={styles.modalActions}>
                             <button className={styles.cancelBtn} onClick={() => setShowGenerateModal(false)}>
                                 キャンセル
                             </button>
-                            <button className={styles.startBtn} onClick={startGeneration}>
+                            <button
+                                className={styles.startBtn}
+                                onClick={startGeneration}
+                                disabled={!canFold}
+                                title={generateDisabledReason()}
+                            >
                                 <Play size={14} />
-                                生成開始
+                                実行
                             </button>
                         </div>
                     </div>

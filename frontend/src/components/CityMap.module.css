@@ -1,0 +1,1000 @@
+.modalShell {
+    width: min(95vw, 1600px);
+    height: min(90vh, 1100px);
+    border-radius: 16px;
+    overflow: hidden;
+    box-shadow:
+        0 24px 80px rgba(0, 0, 0, 0.75),
+        0 0 0 1px rgba(180, 200, 255, 0.18) inset;
+    display: flex;
+    flex-direction: column;
+    position: relative;
+    animation: mapPopIn 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes mapPopIn {
+    from { opacity: 0; transform: scale(0.96); }
+    to { opacity: 1; transform: scale(1); }
+}
+
+/* ── 右上ボタン群: 閉じる + 編集モード切替 ──
+   PC (default): container 内で絶対配置、右上に固定 (タイトルとは z-index で上に重なる)
+   スマホ (max-width: 768px): 通常フロー、タイトルバーの上の段に右寄せで並ぶ */
+.headerControls {
+    position: absolute;
+    top: 12px;
+    right: 14px;
+    z-index: 10;
+    display: flex;
+    gap: 8px;
+    /* ラッパー領域で touch を奪わないよう、ボタンだけ hit させる */
+    pointer-events: none;
+}
+
+.headerControls > * {
+    pointer-events: auto;
+}
+
+.closeBtn {
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    background: rgba(20, 24, 60, 0.7);
+    border: 1px solid rgba(180, 200, 255, 0.25);
+    color: #e6e8ff;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: background 0.15s ease, border-color 0.15s ease, transform 0.15s ease;
+}
+
+.closeBtn:hover {
+    background: rgba(60, 80, 160, 0.85);
+    border-color: rgba(255, 220, 140, 0.5);
+    transform: scale(1.05);
+}
+
+.editToggleBtn {
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    background: rgba(20, 24, 60, 0.7);
+    border: 1px solid rgba(180, 200, 255, 0.25);
+    color: #e6e8ff;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: background 0.15s ease, border-color 0.15s ease, transform 0.15s ease;
+}
+
+.editToggleBtn:hover {
+    background: rgba(80, 60, 120, 0.85);
+    border-color: rgba(220, 180, 255, 0.55);
+    transform: scale(1.05);
+}
+
+.editBar {
+    display: flex !important;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    padding: 0.75rem 1.5rem !important;
+    background: linear-gradient(180deg, rgba(70, 50, 110, 0.7) 0%, rgba(40, 30, 80, 0.5) 100%);
+    border-bottom: 1px solid rgba(220, 180, 255, 0.25);
+    text-align: left !important;
+}
+
+.editLabel {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    color: #e9d8ff;
+    font-size: 0.85rem;
+    letter-spacing: 0.05em;
+}
+
+.editActions {
+    display: flex;
+    gap: 0.5rem;
+}
+
+.editCancelBtn,
+.editSaveBtn {
+    padding: 0.4rem 0.9rem;
+    border-radius: 6px;
+    font-size: 0.8rem;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.editCancelBtn {
+    background: rgba(0, 0, 0, 0.25);
+    border: 1px solid rgba(180, 200, 255, 0.25);
+    color: #cfd2e8;
+}
+
+.editCancelBtn:hover:not(:disabled) {
+    background: rgba(60, 60, 80, 0.5);
+}
+
+.editSaveBtn {
+    background: linear-gradient(135deg, rgba(120, 80, 220, 0.8), rgba(80, 60, 200, 0.85));
+    border: 1px solid rgba(220, 200, 255, 0.5);
+    color: #ffffff;
+    font-weight: 500;
+}
+
+.editSaveBtn:hover:not(:disabled) {
+    background: linear-gradient(135deg, rgba(140, 100, 240, 0.9), rgba(100, 80, 220, 0.95));
+    border-color: rgba(255, 220, 255, 0.7);
+}
+
+.editCancelBtn:disabled,
+.editSaveBtn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+/* 背景画像変更ボタン (キャンセルと同系統) */
+.editBgBtn {
+    padding: 0.4rem 0.8rem;
+    border-radius: 6px;
+    font-size: 0.8rem;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    background: rgba(0, 0, 0, 0.25);
+    border: 1px solid rgba(180, 200, 255, 0.25);
+    color: #cfd2e8;
+    transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.editBgBtn:hover:not(:disabled) {
+    background: rgba(60, 60, 100, 0.55);
+    border-color: rgba(220, 200, 255, 0.45);
+}
+
+.editBgBtn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+/* 現在の背景サムネ */
+.bgThumbWrap {
+    position: relative;
+    width: 48px;
+    height: 28px;
+    border-radius: 4px;
+    overflow: visible;
+    border: 1px solid rgba(180, 200, 255, 0.3);
+    flex-shrink: 0;
+}
+
+.bgThumb {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    border-radius: 3px;
+    display: block;
+}
+
+.bgThumbClear {
+    position: absolute;
+    top: -6px;
+    right: -6px;
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: rgba(80, 30, 30, 0.92);
+    border: 1px solid rgba(255, 180, 180, 0.5);
+    color: #ffd0d0;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    padding: 0;
+}
+
+.bgThumbWrap:hover .bgThumbClear {
+    display: inline-flex;
+}
+
+.bgThumbClear:hover {
+    background: rgba(150, 50, 50, 1);
+    color: #ffffff;
+}
+
+.spin {
+    animation: cm-spin 1s linear infinite;
+}
+
+@keyframes cm-spin {
+    to { transform: rotate(360deg); }
+}
+
+.container {
+    position: relative;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    background:
+        radial-gradient(ellipse at 20% 10%, rgba(120, 80, 220, 0.25) 0%, transparent 50%),
+        radial-gradient(ellipse at 80% 30%, rgba(60, 120, 220, 0.20) 0%, transparent 55%),
+        radial-gradient(ellipse at 50% 90%, rgba(200, 120, 220, 0.18) 0%, transparent 60%),
+        linear-gradient(180deg, #0a0a1f 0%, #0d1130 50%, #050614 100%);
+    color: #e6e8ff;
+}
+
+.starfield {
+    position: absolute;
+    inset: 0;
+    background-image:
+        radial-gradient(1px 1px at 12% 18%, rgba(255, 255, 255, 0.85), transparent 60%),
+        radial-gradient(1px 1px at 28% 72%, rgba(255, 255, 255, 0.75), transparent 60%),
+        radial-gradient(1px 1px at 47% 38%, rgba(255, 255, 255, 0.85), transparent 60%),
+        radial-gradient(1px 1px at 63% 14%, rgba(255, 255, 255, 0.65), transparent 60%),
+        radial-gradient(1px 1px at 81% 52%, rgba(255, 255, 255, 0.85), transparent 60%),
+        radial-gradient(1px 1px at 92% 84%, rgba(255, 255, 255, 0.6), transparent 60%),
+        radial-gradient(1.5px 1.5px at 22% 82%, rgba(180, 200, 255, 0.7), transparent 60%),
+        radial-gradient(1.5px 1.5px at 75% 26%, rgba(180, 200, 255, 0.7), transparent 60%),
+        radial-gradient(1px 1px at 38% 60%, rgba(255, 255, 255, 0.55), transparent 60%),
+        radial-gradient(1px 1px at 55% 88%, rgba(255, 255, 255, 0.55), transparent 60%);
+    pointer-events: none;
+    animation: twinkle 6s ease-in-out infinite;
+}
+
+@keyframes twinkle {
+    0%, 100% { opacity: 0.85; }
+    50% { opacity: 0.55; }
+}
+
+.titleBar {
+    position: relative;
+    padding: 1.5rem 2rem 0.5rem;
+    text-align: center;
+    z-index: 2;
+}
+
+.title {
+    font-size: 1.4rem;
+    letter-spacing: 0.15em;
+    color: #d8dcff;
+    margin: 0;
+    font-weight: 500;
+    text-shadow: 0 0 18px rgba(140, 160, 255, 0.45);
+}
+
+/* 見出しと、その右に置く編集ボタン。見出し自体は中央揃えのままにしたいので
+   行全体を中央寄せし、ボタンは見出しの右隣に流し込む。 */
+.titleRow {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+}
+
+/* 街の名前を変える鉛筆ボタン / 保存・キャンセル。普段は控えめで、
+   ホバーで浮かび上がる (見出しの主役は名前そのもの)。 */
+.titleIconBtn {
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    border-radius: 6px;
+    color: #d8dcff;
+    cursor: pointer;
+    padding: 4px 6px;
+    display: inline-flex;
+    align-items: center;
+    opacity: 0.5;
+    transition: opacity 0.15s ease, background 0.15s ease;
+}
+
+.titleIconBtn:hover:not(:disabled) {
+    opacity: 1;
+    background: rgba(255, 255, 255, 0.14);
+}
+
+.titleIconBtn:disabled {
+    opacity: 0.25;
+    cursor: not-allowed;
+}
+
+.titleInput {
+    background: rgba(255, 255, 255, 0.08);
+    border: 1px solid rgba(140, 160, 255, 0.45);
+    border-radius: 6px;
+    color: #d8dcff;
+    font-size: 1.4rem;
+    font-weight: 500;
+    letter-spacing: 0.15em;
+    text-align: center;
+    padding: 0.1rem 0.5rem;
+    max-width: 100%;
+    min-width: 8rem;
+}
+
+.titleInput:focus {
+    outline: none;
+    border-color: rgba(160, 180, 255, 0.8);
+}
+
+.subtitle {
+    margin-top: 0.25rem;
+    font-size: 0.8rem;
+    opacity: 0.55;
+    letter-spacing: 0.08em;
+}
+
+/* ビューポート: モーダル内のスクロール領域。世界は overflow:hidden で切り抜かれる。
+   ドラッグでパン中は cursor:grabbing、静止時は cursor:grab。 */
+.viewport {
+    position: relative;
+    flex: 1 1 auto;
+    width: 100%;
+    overflow: hidden;
+    cursor: grab;
+    touch-action: none;
+    user-select: none;
+    z-index: 2;
+}
+
+.viewport.dragging {
+    cursor: grabbing;
+}
+
+/* ワールド層: transform で pan/zoom を適用される実体。サイズは固定で、内部に
+   建物セルが絶対配置される。transform-origin:0 0 でカーソル中心ズーム計算が単純化。 */
+.world {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 3200px;
+    height: 2200px;
+    transform-origin: 0 0;
+    will-change: transform;
+}
+
+/* 街マップ背景画像: world のフル領域に object-fit:cover で敷く。
+   セルや UI を引き立てるため opacity を落として彩度も少し下げる。
+   建物セルは絶対配置で自然に背景より上、worldBgOverlay は背景の上・セルの下に挟まる。 */
+.worldBg {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    pointer-events: none;
+    user-select: none;
+    z-index: 0;
+    opacity: 0.65;
+    filter: saturate(0.85);
+}
+
+.worldBgOverlay {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: linear-gradient(
+        180deg,
+        rgba(8, 10, 28, 0.35) 0%,
+        rgba(8, 10, 28, 0.5) 60%,
+        rgba(8, 10, 28, 0.65) 100%
+    );
+    pointer-events: none;
+    z-index: 0;
+}
+
+/* ── ベース定義: minimal/rich 共通 ──
+   pos.x/y で position:absolute 配置されるアンカー。中身のレイアウトはモードで分岐。 */
+.buildingCell {
+    position: absolute;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    cursor: pointer;
+    transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease, background 0.18s ease;
+}
+
+/* ── リッチモード: ズームインで詳細表示 ──
+   現状の枠+内装+description+ペルソナ集合 (200×180 のカード) */
+.buildingCell.rich {
+    width: 200px;
+    min-height: 180px;
+    padding: 1rem 0.75rem 0.75rem;
+    border-radius: 14px;
+    background: rgba(20, 24, 60, 0.45);
+    border: 1px solid rgba(120, 140, 220, 0.22);
+    backdrop-filter: blur(2px);
+}
+
+/* 内装画像があるセル: 画像をセル全面に敷き、テキストは前面に */
+.buildingCell.rich.withImage {
+    padding-top: 0.6rem;
+    justify-content: flex-end;
+}
+
+/* ── ミニマルモード: ズームアウト時のゲームマップ表示 ──
+   背景・枠なし。家アイコン中央、ラベルは右、ペルソナはアイコンの下に主役級サイズで並ぶ。
+   ペルソナが「街にいるキャラ」として見えるよう、家と同格のサイズ感にする。 */
+.buildingCell.minimal {
+    width: calc(200px * var(--inv-scale, 1));
+    min-height: calc(130px * var(--inv-scale, 1));
+    padding: 0.5rem;
+    background: none;
+    border: none;
+    backdrop-filter: none;
+}
+
+.cellBgWrapper {
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    overflow: hidden;
+    z-index: 0;
+    pointer-events: none;
+}
+
+.cellBg {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+    opacity: 0.55;
+    transition: opacity 0.25s ease, transform 0.4s ease;
+}
+
+.cellBgOverlay {
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(
+        180deg,
+        rgba(10, 14, 40, 0.25) 0%,
+        rgba(10, 14, 40, 0.45) 55%,
+        rgba(10, 14, 40, 0.88) 100%
+    );
+    pointer-events: none;
+}
+
+.buildingCell.withImage:hover .cellBg {
+    opacity: 0.72;
+    transform: scale(1.06);
+}
+
+/* 前面コンテンツが背景画像より上に来るよう z-index で保証 */
+.buildingCell > .buildingName,
+.buildingCell > .occupantStrip,
+.buildingCell > .empty,
+.buildingCell > .houseIcon {
+    position: relative;
+    z-index: 1;
+}
+
+/* 現在地バッジは最前面 */
+.buildingCell.current::after {
+    z-index: 2;
+}
+
+.buildingCell.rich:hover {
+    transform: translateY(-4px);
+    background: rgba(36, 42, 90, 0.55);
+    border-color: rgba(180, 200, 255, 0.55);
+    box-shadow: 0 10px 30px rgba(80, 100, 220, 0.35), 0 0 0 1px rgba(180, 200, 255, 0.15) inset;
+}
+
+.buildingCell.minimal:hover {
+    transform: translateY(-3px);
+}
+
+.buildingCell.minimal:hover .houseIcon {
+    box-shadow: inset 0 0 14px rgba(180, 200, 255, 0.4), 0 6px 24px rgba(80, 100, 220, 0.55);
+    transform: scale(1.08);
+}
+
+.buildingCell.minimal:hover .buildingName {
+    background: rgba(0, 0, 0, 0.7);
+    border-color: rgba(255, 220, 140, 0.55);
+}
+
+/* ── ミニマル時の名前ラベル: 家アイコンの中心高さに、家の右隣に配置 ──
+   家アイコンは flex column の align-items:center でセル横中央に置かれるので
+   `50% + 半径 + 余白` でラベル開始位置を決める。 */
+.buildingCell.minimal .buildingName {
+    position: absolute;
+    left: calc(50% + (64px * var(--inv-scale, 1)) / 2 + 8px);
+    top: calc(0.5rem + (64px * var(--inv-scale, 1)) / 2);
+    transform: translateY(-50%);
+    margin: 0;
+    background: rgba(0, 0, 0, 0.5);
+    border: 1px solid rgba(180, 200, 255, 0.18);
+    padding: 3px 8px;
+    border-radius: 4px;
+    font-size: calc(0.85rem * var(--inv-scale, 1));
+    text-shadow: 0 2px 6px rgba(0, 0, 0, 0.85);
+    white-space: nowrap;
+    pointer-events: none;
+    transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+/* ── ミニマル時のペルソナ列: 家の下に主役級サイズで横並び ──
+   ペルソナは「街の住人」として見えるよう家アイコンと同格のサイズ感。
+   多い場合は折り返し、超過は +N バッジで省略 (max 4 個まで表示)。 */
+.buildingCell.minimal .occupantStrip {
+    position: absolute;
+    left: 0.5rem;
+    right: 0.5rem;
+    top: calc(0.5rem + (64px * var(--inv-scale, 1)) + 6px);
+    width: auto;
+    min-height: 0;
+    margin: 0;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 4px;
+}
+
+.buildingCell.minimal .occupant {
+    width: calc(44px * var(--inv-scale, 1));
+    height: calc(44px * var(--inv-scale, 1));
+    border-width: 2px;
+    box-shadow: 0 3px 10px rgba(0, 0, 0, 0.7);
+}
+
+.buildingCell.minimal .occupantOverflow {
+    width: calc(44px * var(--inv-scale, 1));
+    height: calc(44px * var(--inv-scale, 1));
+    font-size: calc(0.75rem * var(--inv-scale, 1));
+    border-width: 2px;
+    box-shadow: 0 3px 10px rgba(0, 0, 0, 0.7);
+}
+
+/* 編集モード時: ドラッグ可能であることを cursor で示す。
+   hover アニメは抑制して位置感覚を邪魔しないようにする。 */
+.buildingCell.editing {
+    cursor: move;
+}
+
+.buildingCell.editing:hover {
+    transform: none;
+    box-shadow: 0 0 0 2px rgba(220, 180, 255, 0.55), 0 6px 20px rgba(120, 80, 220, 0.35);
+    border-color: rgba(220, 180, 255, 0.55);
+}
+
+/* 編集中に動かしたセルは色味を変えて変更分とわかるように */
+.buildingCell.moved {
+    box-shadow: 0 0 0 2px rgba(180, 240, 200, 0.7), 0 6px 20px rgba(80, 200, 140, 0.35);
+    border-color: rgba(180, 240, 200, 0.7);
+}
+
+/* リッチ時の current: セル全体を温色で縁取り */
+.buildingCell.rich.current {
+    border-color: rgba(255, 200, 120, 0.7);
+    box-shadow:
+        0 0 24px rgba(255, 180, 80, 0.35),
+        0 0 0 1px rgba(255, 200, 120, 0.45) inset;
+    background: rgba(50, 38, 70, 0.55);
+}
+
+.buildingCell.rich.current::after {
+    content: "現在地";
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    font-size: 0.65rem;
+    letter-spacing: 0.1em;
+    padding: 2px 6px;
+    border-radius: 4px;
+    background: rgba(255, 180, 80, 0.18);
+    color: #ffd49e;
+    border: 1px solid rgba(255, 180, 80, 0.55);
+}
+
+/* ミニマル時の current: 家アイコン自体を発光させる + 名前ラベルも温色化 */
+.buildingCell.minimal.current .houseIcon {
+    background: linear-gradient(135deg, rgba(255, 200, 120, 0.5), rgba(220, 130, 80, 0.5));
+    box-shadow: inset 0 0 14px rgba(255, 220, 180, 0.45), 0 0 24px rgba(255, 160, 80, 0.55);
+}
+
+.buildingCell.minimal.current .buildingName {
+    background: rgba(80, 50, 20, 0.7);
+    border-color: rgba(255, 200, 120, 0.55);
+    color: #ffe5b8;
+}
+
+.houseIcon {
+    /* --inv-scale はズームアウト時のみ >1。文字や枠のサイズを実寸で拡大して
+       セルが縮んでも見やすくする。HomeIcon (svg) は React 側で動的に size 指定。 */
+    width: calc(64px * var(--inv-scale, 1));
+    height: calc(64px * var(--inv-scale, 1));
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 14px;
+    background: linear-gradient(135deg, rgba(140, 160, 255, 0.25), rgba(60, 80, 200, 0.35));
+    color: #e8ecff;
+    box-shadow: inset 0 0 12px rgba(180, 200, 255, 0.25), 0 4px 16px rgba(80, 100, 220, 0.25);
+    margin-bottom: 0.5rem;
+    transition: transform 0.2s ease, box-shadow 0.2s ease;
+    overflow: hidden;
+}
+
+.buildingCell:hover .houseIcon {
+    transform: scale(1.05);
+    box-shadow: inset 0 0 14px rgba(180, 200, 255, 0.35), 0 6px 20px rgba(80, 100, 220, 0.35);
+}
+
+.buildingCell.current .houseIcon {
+    background: linear-gradient(135deg, rgba(255, 200, 120, 0.35), rgba(220, 130, 80, 0.35));
+    box-shadow: inset 0 0 14px rgba(255, 220, 180, 0.35), 0 4px 20px rgba(255, 160, 80, 0.35);
+}
+
+.buildingName {
+    font-size: calc(0.95rem * var(--inv-scale, 1));
+    font-weight: 500;
+    color: #f0f2ff;
+    text-align: center;
+    margin: 0 0 0.6rem;
+    line-height: 1.3;
+    word-break: break-word;
+}
+
+/* 内装画像背景の上では名前にテキストシャドウを付けて可読性確保 */
+.buildingCell.withImage .buildingName {
+    margin-top: auto;
+    text-shadow: 0 2px 6px rgba(0, 0, 0, 0.85), 0 0 4px rgba(0, 0, 0, 0.6);
+    font-weight: 600;
+}
+
+/* ── リッチモード: Building の説明文 ── */
+.buildingCell.rich .buildingDescription {
+    font-size: calc(0.7rem * var(--inv-scale, 1));
+    color: rgba(240, 242, 255, 0.7);
+    text-align: center;
+    margin: 0 0 0.6rem;
+    line-height: 1.3;
+    word-break: break-word;
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    line-clamp: 3;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    text-shadow: 0 2px 6px rgba(0, 0, 0, 0.7);
+}
+
+.buildingCell.rich.withImage .buildingDescription {
+    color: rgba(240, 242, 255, 0.85);
+    text-shadow: 0 2px 6px rgba(0, 0, 0, 0.95), 0 0 4px rgba(0, 0, 0, 0.7);
+}
+
+.occupantStrip {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: calc(6px * var(--inv-scale, 1));
+    margin-top: auto;
+    min-height: calc(44px * var(--inv-scale, 1));
+    align-items: flex-end;
+}
+
+.occupant {
+    position: relative;
+    width: calc(36px * var(--inv-scale, 1));
+    height: calc(36px * var(--inv-scale, 1));
+    border-radius: 50%;
+    overflow: hidden;
+    border: 2px solid rgba(180, 200, 255, 0.5);
+    background: rgba(0, 0, 0, 0.4);
+    cursor: pointer;
+    transition: transform 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.occupant:hover {
+    transform: scale(1.18);
+    border-color: rgba(255, 220, 140, 0.9);
+    box-shadow: 0 0 12px rgba(255, 200, 120, 0.6);
+    z-index: 3;
+}
+
+.occupant img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+}
+
+.occupantOverflow {
+    width: calc(36px * var(--inv-scale, 1));
+    height: calc(36px * var(--inv-scale, 1));
+    border-radius: 50%;
+    background: rgba(80, 100, 180, 0.55);
+    color: #e6e8ff;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: calc(0.75rem * var(--inv-scale, 1));
+    font-weight: 500;
+    border: 2px solid rgba(180, 200, 255, 0.5);
+}
+
+.empty {
+    font-size: calc(0.7rem * var(--inv-scale, 1));
+    opacity: 0.45;
+    margin-top: auto;
+    padding: 0.4rem 0;
+    letter-spacing: 0.05em;
+}
+
+.tooltip {
+    position: absolute;
+    bottom: calc(100% + 6px);
+    left: 50%;
+    transform: translateX(-50%);
+    background: rgba(20, 24, 60, 0.95);
+    color: #f0f2ff;
+    font-size: 0.7rem;
+    padding: 3px 8px;
+    border-radius: 4px;
+    white-space: nowrap;
+    pointer-events: none;
+    border: 1px solid rgba(180, 200, 255, 0.35);
+    z-index: 4;
+}
+
+.loading {
+    text-align: center;
+    padding: 3rem 1rem;
+    opacity: 0.6;
+    font-size: 0.85rem;
+}
+
+.errorMsg {
+    text-align: center;
+    padding: 2rem 1rem;
+    color: #ffb0b0;
+}
+
+/* ── スマホ向け: 右上ボタン群を絶対配置から外し、タイトルバー上の段に並べる ──
+   PC では headerControls がタイトル中央の上に absolute で重なるが、スマホでは
+   タイトルがボタンと被るので別段にしてレイアウトを分ける。 */
+@media (max-width: 768px) {
+    .headerControls {
+        position: static;
+        padding: 0.5rem 0.75rem 0;
+        justify-content: flex-end;
+        pointer-events: auto;
+    }
+}
+
+/* ============================================================
+   Light mode overrides
+   data-theme="light" のときだけ適用される。文字色・背景・オーバーレイを
+   明るい方向に振り直す。背景画像 (City BG) は白い半透明オーバーレイで
+   上から薄めて、暗い夜景写真でもセルが浮き上がるよう調整。
+   ============================================================ */
+
+/* 背景: 暗い宇宙グラデ → 朝霧/淡い空 */
+:global([data-theme="light"]) .container {
+    background:
+        radial-gradient(ellipse at 20% 10%, rgba(180, 200, 255, 0.45) 0%, transparent 55%),
+        radial-gradient(ellipse at 80% 30%, rgba(220, 200, 255, 0.4) 0%, transparent 55%),
+        radial-gradient(ellipse at 50% 90%, rgba(255, 220, 230, 0.35) 0%, transparent 60%),
+        linear-gradient(180deg, #f6f8ff 0%, #eef0fa 50%, #e2e6f2 100%);
+    color: #2a2d3a;
+}
+
+/* 星空はライトモードでは目立たないので非表示 */
+:global([data-theme="light"]) .starfield {
+    opacity: 0;
+}
+
+:global([data-theme="light"]) .title {
+    color: #2a2d3a;
+    text-shadow: 0 0 14px rgba(140, 160, 220, 0.45);
+}
+
+:global([data-theme="light"]) .subtitle {
+    color: rgba(40, 45, 60, 0.6);
+}
+
+:global([data-theme="light"]) .titleIconBtn {
+    background: rgba(40, 45, 60, 0.06);
+    border-color: rgba(60, 65, 90, 0.25);
+    color: #2a2d3a;
+}
+
+:global([data-theme="light"]) .titleIconBtn:hover:not(:disabled) {
+    background: rgba(40, 45, 60, 0.14);
+}
+
+:global([data-theme="light"]) .titleInput {
+    background: rgba(255, 255, 255, 0.75);
+    border-color: rgba(110, 120, 190, 0.55);
+    color: #2a2d3a;
+}
+
+:global([data-theme="light"]) .titleInput:focus {
+    border-color: rgba(90, 100, 180, 0.9);
+}
+
+/* タイトルバーの uppercase / 下線 */
+:global([data-theme="light"]) .editBar {
+    background: linear-gradient(180deg, rgba(220, 210, 250, 0.85) 0%, rgba(200, 195, 240, 0.7) 100%);
+    border-bottom: 1px solid rgba(140, 120, 200, 0.3);
+}
+
+:global([data-theme="light"]) .editLabel {
+    color: #4a3a70;
+}
+
+/* 街マップ背景画像: 白い半透明オーバーレイで明るく */
+:global([data-theme="light"]) .worldBg {
+    opacity: 0.7;
+    filter: saturate(0.8) brightness(1.05);
+}
+
+:global([data-theme="light"]) .worldBgOverlay {
+    background: linear-gradient(
+        180deg,
+        rgba(255, 255, 255, 0.25) 0%,
+        rgba(255, 255, 255, 0.4) 60%,
+        rgba(255, 255, 255, 0.55) 100%
+    );
+}
+
+/* 家アイコン: 薄い背景に埋もれないよう濃い青紫のソリッド気味マーカーへ。
+   svg は白のままでコントラストを取る。RPG マップピン風の見た目。 */
+:global([data-theme="light"]) .houseIcon {
+    background: linear-gradient(135deg, rgba(120, 130, 230, 0.92), rgba(70, 90, 200, 0.95));
+    color: #ffffff;
+    box-shadow:
+        inset 0 0 10px rgba(255, 255, 255, 0.25),
+        0 4px 14px rgba(60, 80, 180, 0.45),
+        0 0 0 1.5px rgba(255, 255, 255, 0.45);
+}
+
+/* current (現在地) はオレンジマーカーへ反転 */
+:global([data-theme="light"]) .buildingCell.current .houseIcon {
+    background: linear-gradient(135deg, rgba(255, 180, 100, 0.95), rgba(220, 130, 60, 0.95));
+    box-shadow:
+        inset 0 0 10px rgba(255, 255, 255, 0.3),
+        0 4px 16px rgba(255, 140, 60, 0.55),
+        0 0 0 1.5px rgba(255, 220, 180, 0.55);
+}
+
+/* hover 時の発光もライト用に調整 (rgba 青発光は薄水色背景で見えにくいため) */
+:global([data-theme="light"]) .buildingCell.minimal:hover .houseIcon {
+    box-shadow:
+        inset 0 0 10px rgba(255, 255, 255, 0.4),
+        0 6px 22px rgba(60, 80, 180, 0.6),
+        0 0 0 1.5px rgba(255, 255, 255, 0.55);
+}
+
+/* リッチセル: 白半透明背景、薄いグレー枠 */
+:global([data-theme="light"]) .buildingCell.rich {
+    background: rgba(255, 255, 255, 0.7);
+    border-color: rgba(120, 140, 200, 0.35);
+}
+
+:global([data-theme="light"]) .buildingCell.rich:hover {
+    background: rgba(255, 255, 255, 0.88);
+    border-color: rgba(80, 110, 200, 0.55);
+    box-shadow: 0 10px 30px rgba(80, 100, 220, 0.18), 0 0 0 1px rgba(180, 200, 255, 0.3) inset;
+}
+
+:global([data-theme="light"]) .buildingName {
+    color: #2a2d3a;
+    text-shadow: none;
+}
+
+:global([data-theme="light"]) .buildingCell.rich .buildingDescription {
+    color: rgba(40, 45, 60, 0.7);
+    text-shadow: none;
+}
+
+/* 内装画像があるリッチセル: 写真の上はテキスト白 + 強シャドウで可読性確保 */
+:global([data-theme="light"]) .buildingCell.rich.withImage .buildingName {
+    color: #ffffff;
+    text-shadow: 0 2px 6px rgba(0, 0, 0, 0.85), 0 0 4px rgba(0, 0, 0, 0.6);
+}
+
+:global([data-theme="light"]) .buildingCell.rich.withImage .buildingDescription {
+    color: rgba(255, 255, 255, 0.9);
+    text-shadow: 0 2px 6px rgba(0, 0, 0, 0.95), 0 0 4px rgba(0, 0, 0, 0.7);
+}
+
+/* ミニマル時の名前ラベル: 白半透明 + ダーク文字 */
+:global([data-theme="light"]) .buildingCell.minimal .buildingName {
+    background: rgba(255, 255, 255, 0.85);
+    border-color: rgba(120, 140, 200, 0.35);
+    color: #2a2d3a;
+    text-shadow: 0 1px 2px rgba(255, 255, 255, 0.6);
+}
+
+:global([data-theme="light"]) .buildingCell.minimal:hover .buildingName {
+    background: rgba(255, 255, 255, 0.95);
+    border-color: rgba(220, 150, 80, 0.55);
+}
+
+/* "現在地" バッジ・current 状態 */
+:global([data-theme="light"]) .buildingCell.rich.current {
+    border-color: rgba(220, 140, 60, 0.7);
+    background: rgba(255, 240, 220, 0.85);
+}
+
+:global([data-theme="light"]) .buildingCell.minimal.current .buildingName {
+    background: rgba(255, 230, 200, 0.95);
+    border-color: rgba(220, 140, 60, 0.6);
+    color: #5a3a10;
+}
+
+/* 占有者アイコン: ライトモードでは枠を少し濃いめに */
+:global([data-theme="light"]) .occupant {
+    border-color: rgba(120, 140, 200, 0.65);
+}
+
+:global([data-theme="light"]) .occupantOverflow {
+    background: rgba(180, 200, 240, 0.85);
+    color: #2a2d3a;
+    border-color: rgba(120, 140, 200, 0.65);
+}
+
+/* 「無人」表記 */
+:global([data-theme="light"]) .empty {
+    color: rgba(40, 45, 60, 0.55);
+}
+
+/* 右上ボタン: 白半透明地、ダーク文字 */
+:global([data-theme="light"]) .closeBtn,
+:global([data-theme="light"]) .editToggleBtn {
+    background: rgba(255, 255, 255, 0.85);
+    border-color: rgba(120, 140, 200, 0.35);
+    color: #2a2d3a;
+}
+
+:global([data-theme="light"]) .closeBtn:hover {
+    background: rgba(255, 255, 255, 1);
+    border-color: rgba(220, 140, 60, 0.6);
+}
+
+:global([data-theme="light"]) .editToggleBtn:hover {
+    background: rgba(255, 255, 255, 1);
+    border-color: rgba(140, 100, 200, 0.55);
+}
+
+/* 編集モードのバー内ボタン */
+:global([data-theme="light"]) .editCancelBtn,
+:global([data-theme="light"]) .editBgBtn {
+    background: rgba(255, 255, 255, 0.7);
+    border-color: rgba(120, 140, 200, 0.35);
+    color: #2a2d3a;
+}
+
+:global([data-theme="light"]) .editCancelBtn:hover:not(:disabled),
+:global([data-theme="light"]) .editBgBtn:hover:not(:disabled) {
+    background: rgba(255, 255, 255, 0.95);
+    border-color: rgba(140, 100, 200, 0.55);
+}
+
+/* editSaveBtn は紫グラデのままアクセント色として残す */
+
+/* 背景サムネ削除ボタン */
+:global([data-theme="light"]) .bgThumbWrap {
+    border-color: rgba(120, 140, 200, 0.5);
+}
+
+/* 読み込み中・エラーの文字 */
+:global([data-theme="light"]) .loading {
+    color: rgba(40, 45, 60, 0.55);
+}
+
+:global([data-theme="light"]) .errorMsg {
+    color: #b04040;
+}

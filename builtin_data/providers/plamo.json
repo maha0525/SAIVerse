@@ -1,0 +1,7 @@
+{
+  "id": "plamo",
+  "display_name": "PLaMo (Preferred Networks)",
+  "protocol": "openai_compat",
+  "base_url": "https://api.platform.preferredai.jp/v1",
+  "api_key_env": "PLAMO_API_KEY"
+}

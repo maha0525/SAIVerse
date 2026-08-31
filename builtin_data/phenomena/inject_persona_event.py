@@ -37,8 +37,10 @@ def inject_persona_event(
     Args:
         persona_id: Target persona ID.
         event_description: Human-readable description (becomes user_input).
-        meta_playbook: Meta playbook to use (default: "meta_user").
-        args_json: JSON string of playbook args (incl. selected_playbook).
+        meta_playbook: Meta playbook to use (default: "track_user_conversation").
+        args_json: JSON string of playbook args. ``selected_playbook`` 指定は
+            現在無効 (Phase 3 B 残件で pre_spells 経路に置き換え予定;
+            handoff_2026-05-08 作業 2)。
         event_type: Event type tag for persona_event_log.
         _manager: SAIVerseManager reference (injected by PhenomenonManager).
     """
@@ -67,13 +69,13 @@ def inject_persona_event(
             persona_id, exc_info=True,
         )
 
-    # --- 2. Submit to PulseController ---
-    pulse_controller = getattr(_manager, "pulse_controller", None)
-    if pulse_controller is None:
+    # --- 2. Submit via PulseDispatcher (pulse_dispatch.md §7) ---
+    dispatcher = getattr(_manager, "pulse_dispatcher", None)
+    if dispatcher is None:
         LOGGER.error(
-            "[inject_persona_event] No pulse_controller on manager — cannot trigger playbook"
+            "[inject_persona_event] No pulse_dispatcher on manager — cannot trigger playbook"
         )
-        return "error: no pulse_controller"
+        return "error: no pulse_dispatcher"
 
     # Resolve persona's current building
     persona = _manager.all_personas.get(persona_id)
@@ -128,21 +130,26 @@ def inject_persona_event(
 {event_description}
 </system>"""
 
-    # When playbook_args has selected_playbook, use meta_user_manual
-    # which skips the LLM router and goes directly to exec(selected_playbook).
-    # The trigger args (trigger_tweet_id, etc.) are forwarded to the sub-playbook
-    # via the _args mechanism in the runtime.
+    # selected_playbook 指定経路は Phase 3 移行に伴い一時無効化 (旧 meta_user_manual
+    # 経路を削除したため)。Phase 3 B 残件 (handoff_2026-05-08 作業 2) で
+    # pre_spells 経由に復活予定。それまではログ警告して通常経路で処理する。
     if playbook_args and "selected_playbook" in playbook_args:
-        effective_playbook = "meta_user_manual"
-        LOGGER.info(
-            "[inject_persona_event] Using meta_user_manual with selected_playbook='%s'",
+        LOGGER.warning(
+            "[inject_persona_event] selected_playbook in args is currently ignored "
+            "(meta_user_manual route removed; pre_spells restoration pending in "
+            "Phase 3 B). selected_playbook='%s'",
             playbook_args["selected_playbook"],
         )
-    else:
-        effective_playbook = meta_playbook or "meta_user"
+    effective_playbook = meta_playbook or "track_user_conversation"
 
-    try:
-        pulse_controller.submit_schedule(
+    # dispatch_phenomenon_event の型付き成否 (False = Pulse が起動していない —
+    # pulse_controller 不在 / Beat 関所閉鎖 / submit 例外)。一度も呼ばれなければ
+    # True のまま (判断が note_only 等を選び、応対しないのが正の顛末)。
+    dispatch_state = {"ok": True}
+
+    def _dispatch_direct() -> None:
+        """従来の応対経路: イベントを <system> プロンプト付き Pulse として submit。"""
+        ok = dispatcher.dispatch_phenomenon_event(
             persona_id=persona_id,
             building_id=building_id,
             user_input=user_input,
@@ -150,14 +157,56 @@ def inject_persona_event(
             meta_playbook=effective_playbook,
             args=playbook_args,
         )
-        LOGGER.info(
-            "[inject_persona_event] Submitted to PulseController: persona=%s, playbook=%s, args=%s",
-            persona_id, effective_playbook, playbook_args,
-        )
+        dispatch_state["ok"] = bool(ok)
+        if ok:
+            LOGGER.info(
+                "[inject_persona_event] Dispatched via PulseDispatcher: persona=%s, playbook=%s, args=%s",
+                persona_id, effective_playbook, playbook_args,
+            )
+        else:
+            LOGGER.warning(
+                "[inject_persona_event] dispatch did not start a pulse: "
+                "persona=%s, playbook=%s", persona_id, effective_playbook,
+            )
+
+    try:
+        if meta_playbook is None:
+            # 自律行動 v2: 既定経路のイベントはイベント到着判断 (on_event) を通す。
+            # Active かつユーザー会話中でないペルソナのみ判断が走り、engage_now を
+            # 選んだときだけ _dispatch_direct で応対する。非 Active ペルソナ・
+            # 会話中・判断が起動できない場合は従来どおり _dispatch_direct
+            # (経路の判断基準は saiverse/autonomy_wiring.py handle_external_event)。
+            # meta_playbook を明示指定した呼び出し (アドオンの専用経路) は
+            # 呼び出し側の意図を尊重して従来どおり直接 dispatch する。
+            from saiverse.autonomy_wiring import handle_external_event
+
+            event_text = "\n".join([event_description] + extra_lines)
+            route = handle_external_event(
+                _manager, persona_id, event_text,
+                dispatch_direct=_dispatch_direct,
+                # 応対の材料 (組み立て済みの実物) を判断の台帳 payload に凍結する
+                # ための envelope — 回復 tick の回収が engage_now の応対を
+                # _dispatch_direct と同じ入力で再構成できるようにする
+                dispatch_envelope={
+                    "user_input": user_input,
+                    "event_type": event_type,
+                    "meta_playbook": effective_playbook,
+                    "args": playbook_args,
+                },
+            )
+            LOGGER.info(
+                "[inject_persona_event] on_event route=%s (persona=%s, type=%s)",
+                route, persona_id, event_type,
+            )
+        else:
+            _dispatch_direct()
+        if not dispatch_state["ok"]:
+            # 応対経路が呼ばれたのに Pulse が起動していない — 成功と報告しない
+            return "error: pulse submission failed"
         return "ok"
     except Exception:
         LOGGER.error(
-            "[inject_persona_event] Failed to submit to PulseController",
+            "[inject_persona_event] Failed to dispatch phenomenon event",
             exc_info=True,
         )
         return "error: pulse submission failed"
@@ -181,7 +230,7 @@ def schema() -> PhenomenonSchema:
                 },
                 "meta_playbook": {
                     "type": "string",
-                    "description": "使用するメタPlaybook名（デフォルト: meta_user）",
+                    "description": "使用するメタPlaybook名（デフォルト: track_user_conversation）",
                 },
                 "args_json": {
                     "type": "string",

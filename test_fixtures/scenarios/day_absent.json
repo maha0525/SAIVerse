@@ -1,0 +1,14 @@
+{
+  "persona_id": "sim_persona",
+  "plan_date": "2026-07-05",
+  "wake": "09:00",
+  "sleep": "22:00",
+  "daily_budget_rounds": 10,
+  "seed": {
+    "tasks": []
+  },
+  "user_events": [
+    { "type": "absent_all_day" }
+  ],
+  "events": []
+}

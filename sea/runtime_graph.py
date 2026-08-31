@@ -7,9 +7,41 @@ from typing import Any, Callable, Dict, List, Optional
 from llm_clients.exceptions import LLMError
 from sea.cancellation import CancellationToken, ExecutionCancelledException
 from sea.langgraph_runner import compile_playbook
-from sea.playbook_models import PlaybookSchema
+from sea.playbook_models import (
+    ParamContractError,
+    PlaybookSchema,
+    coerce_param_value,
+)
+from sea.runtime_state import playbook_write_key
 
 LOGGER = logging.getLogger(__name__)
+
+
+def _validate_input_param(playbook_name: str, param: Any, value: Any) -> Any:
+    """Validate/coerce one provided input value against its InputParam declaration.
+
+    Spell 監査 P2 (入力 contract の実行時検証) の消し込み。判定そのものは
+    ``sea.playbook_models.coerce_param_value`` が持ち (ロード時の ``default``
+    検証と同じ関数)、ここはそれを実行時の失敗の形 = ``LLMError`` に着せ替える
+    だけ。
+    """
+    param_name = getattr(param, "name", "?")
+    try:
+        return coerce_param_value(
+            value,
+            getattr(param, "param_type", "string") or "string",
+            enum_values=getattr(param, "enum_values", None),
+            enum_source=getattr(param, "enum_source", None),
+        )
+    except ParamContractError as exc:
+        raise LLMError(
+            f"Playbook '{playbook_name}' input '{param_name}': {exc} (got {value!r})",
+            user_message=(
+                f"プレイブック '{playbook_name}' の入力 '{param_name}' が"
+                f"契約に合いません: {exc}"
+            ),
+        ) from exc
+
 
 def compile_with_langgraph(
     runtime,
@@ -25,9 +57,10 @@ def compile_with_langgraph(
     cancellation_token: Optional[CancellationToken] = None,
     pulse_type: Optional[str] = None,
     isolate_pulse_context: bool = False,
+    pulse_line_aspect: Optional[Any] = None,  # sea.pulse_context.Aspect
+    line: str = "main",
 ) -> Optional[List[str]]:
     _lg_outputs: List[str] = []
-    temperature = runtime._default_temperature(persona)
     parent = parent_state or {}
 
     # Update execution state: playbook started (LangGraph path)
@@ -69,11 +102,36 @@ def compile_with_langgraph(
     for param in playbook.input_schema:
         param_name = param.name
 
+        # PlaybookSchema の validator (_check_reserved_state_namespace) がロード時に
+        # 弾くが、値が効くのはこの merge なのでここでも同じ door を通す。
+        if playbook_write_key(
+            param_name, where=f"playbook '{playbook.name}' input param",
+        ) is None:
+            continue
+
         if param_name in args_dict:
-            value = args_dict[param_name]
+            value = _validate_input_param(playbook.name, param, args_dict[param_name])
             LOGGER.debug("[sea][LangGraph] Resolved %s from args: %s", param_name, str(value)[:120] if value else "(empty)")
         else:
-            value = param.default if param.default is not None else ""
+            default_value = getattr(param, "default", None)
+            if default_value is not None:
+                # 宣言された default も呼び出しが渡す値と同じ検査を通す。
+                # ロード時 (InputParam validator) で正規化済みだが、値が効くのは
+                # ここなので validator を経ていない schema オブジェクトにも
+                # 同じ契約を当てる。
+                value = _validate_input_param(playbook.name, param, default_value)
+            else:
+                if getattr(param, "required", False):
+                    # 契約上は欠落エラーだが、既存 playbook の 52/94 パラメータが
+                    # 「required かつ default なしで、呼び出しは値を渡さない」形に
+                    # 依存しているため、ここでの強制は warn-only に留める (2026-08-16
+                    # W10 裁定 — 完全強制は playbook データの required 棚卸しが前提)。
+                    LOGGER.warning(
+                        "[sea][LangGraph] Playbook '%s' required input '%s' missing; "
+                        "falling back to empty string (contract violation, warn-only)",
+                        playbook.name, param_name,
+                    )
+                value = ""
 
         inherited_vars[param_name] = value
 
@@ -115,14 +173,50 @@ def compile_with_langgraph(
         # Create a fresh, empty PulseContext (bypasses the cache so prior entries
         # such as router I/O are not visible to this sub-playbook).
         from sea.pulse_context import PulseContext
-        _adapter = getattr(persona, "sai_memory", None)
-        _thread_id = _adapter.get_current_thread() if _adapter else None
-        pulse_ctx = PulseContext(pulse_id=pulse_id, thread_id=_thread_id or "")
+        pulse_ctx = PulseContext(pulse_id=pulse_id)
     else:
         # Create new PulseContext for this pulse (or get existing one from cache)
-        _adapter = getattr(persona, "sai_memory", None)
-        _thread_id = _adapter.get_current_thread() if _adapter else None
-        pulse_ctx = runtime._get_or_create_pulse_context(pulse_id, _thread_id or "")
+        pulse_ctx = runtime._get_or_create_pulse_context(pulse_id)
+
+    # S4 (thread push/pop): この graph 実行の入口での thread スタック深さを記録。
+    # 実行中に push された Stelis/subagent 切替は正常系ではノード自身が pop する。
+    # 例外/cancel で pop 不達のときは finally で入口深さまで巻き戻し、「Beat が
+    # 終われば必ず親 thread へ戻る」(beat_execution_context.md 不変条件6) を保証
+    # する。入れ子 Playbook (pulse_ctx 共有) も各実行が自分の入口深さへ戻すだけ
+    # なので、親の push を巻き戻すことはない。
+    _thread_adapter = getattr(persona, "sai_memory", None)
+    _thread_depth_entry = pulse_ctx.thread_stack_depth()
+
+    # Pulse-root only: push the entry-line frame onto the line stack so messages
+    # produced during this Pulse get the right line_role / line_id in their
+    # SAIMemory metadata (Intent A v0.14, Intent B v0.11). The pop runs in the
+    # finally block alongside _flush_pulse_logs.
+    _pushed_root_line = False
+    _pushed_sub_line = False
+    if parent_pulse_ctx is None and pulse_line_aspect is not None:
+        # Pulse-root: アスペクト (v0.2 §10) を push。role / scope / model tier は
+        # すべてそこから導出される。
+        pulse_ctx.push_line(aspect=pulse_line_aspect)
+        _pushed_root_line = True
+        LOGGER.debug(
+            "[runtime_graph] Pushed Pulse-root line: aspect=%s pulse_id=%s",
+            pulse_line_aspect, pulse_id,
+        )
+    elif parent_pulse_ctx is not None and line == "sub":
+        # サブライン (run_playbook スペル / spell_args_decider 等, §10.4): WORKER
+        # アスペクトの frame を push する。これでサブ Playbook のノードは何も宣言
+        # しなくても sub_line / volatile / 軽量 になり、書き忘れによる main_line
+        # 汚染が原理的に起きない。pop は finally で行う。
+        from sea.pulse_context import Aspect
+        _sub_frame = pulse_ctx.push_line(aspect=Aspect.WORKER)
+        _pushed_sub_line = True
+        LOGGER.debug(
+            "[runtime_graph] Pushed sub-line (WORKER): line_id=%s parent=%s pulse_id=%s",
+            _sub_frame.line_id, _sub_frame.parent_id, pulse_id,
+        )
+
+    # Check spell toggle for this persona
+    _spell_enabled = runtime._is_spell_enabled_for_persona(persona)
 
     initial_state = {
         # System variables (_ prefix, auto-inherited, nodes don't touch)
@@ -136,6 +230,42 @@ def compile_with_langgraph(
         "_pulse_usage_accumulator": usage_accumulator,  # Inherit from parent or create new
         "_activity_trace": activity_trace,  # Shared trace of exec/tool activities
         "_pulse_context": pulse_ctx,  # Pulse-level log context (replaces _intermediate_msgs)
+        "_spell_enabled": _spell_enabled,  # Per-persona spell system toggle
+        # 「応答ループにユーザーが居ない Pulse か」。spell/tool 実行時の
+        # persona_context(auto_mode=) と確認ダイアログの自動承認・auto フィルタが
+        # 読む。auto の Pulse から生まれた子が user に戻ることはない (単調 OR)。
+        "_auto_mode": bool(auto_mode) or bool(parent.get("_auto_mode", False)),
+        # ライン強制フラグ (parent から継承、Phase C-2a)。
+        # サブライン子 Playbook は run_playbook で _force_lightweight_model を立てる。
+        # 子の中の LLM ノードがこれを見て軽量モデルを選ぶ。
+        "_force_lightweight_model": parent.get("_force_lightweight_model", False),
+        # 自動想起 (記憶アーキv2 §4.5): このメッセージ列に対して _prepare_context が
+        # 実際に注入した「ふと浮かんだ記憶」本文 (<system> タグ除去済み)。say/speak
+        # ノードが state.pop() で取り出し、応答メッセージの metadata["auto_recall"]
+        # に載せる (reasoning と同じ運搬パターン)。未注入なら None。
+        "_auto_recall_text": parent.get("_auto_recall_text"),
+        # call-local anchor (beat_execution_context.md §3.2): _prepare_context が
+        # 今回の prefix に採用した anchor の ID。LLM 成功後の anchor touch は
+        # この値だけを使う (persona 属性フォールバックは廃止)。サブライン
+        # (line='sub') は親の prefix をコピーするため親の値をそのまま継承する。
+        "_prefix_anchor_id": parent.get("_prefix_anchor_id"),
+        # 前駆刻印の材料 (sea/message_stamp.py): _prepare_context が実際に
+        # プロンプトへ組み込んだ履歴メッセージの ID 列。生成メッセージの
+        # metadata へ「見ていた最後のメッセージ」として刻む。サブライン
+        # (line='sub') は親の prefix をコピーする = 親と同じものを見ている
+        # ので、anchor と同じく親の値をそのまま継承する。
+        "_presented_message_ids": parent.get("_presented_message_ids"),
+        # UI-triggered pre-spells: executed once at the entry of the first LLM node.
+        # Only seeded for top-level Pulses; sub-pulses (sub_play / run_playbook)
+        # must not re-execute UI choices. Top-level is detected by absence of
+        # both a parent pulse context AND a parent pulse_id, so isolate_pulse_context
+        # sub-pulses (subagent / line='sub') still get None here.
+        # See nested_subline_spell.md §13.
+        "_pre_spells": (
+            parent.get("_pre_spells")
+            if parent_pulse_ctx is None and parent.get("_pulse_id") is None
+            else None
+        ),
         # Playbook variables (no prefix)
         "last": user_input or "",
         "input": user_input or "",
@@ -193,6 +323,27 @@ def compile_with_langgraph(
             user_message=f"プレイブックの実行中にエラーが発生しました: {exc}",
         ) from exc
     finally:
+        # S4: thread スタックを入口深さへ巻き戻す (正常終了では no-op)。
+        # 例外/cancel で Stelis end / subagent end が走らなかった場合の非常口。
+        try:
+            pulse_ctx.unwind_threads(_thread_adapter, _thread_depth_entry)
+        except Exception:
+            LOGGER.exception(
+                "[runtime_graph] Failed to unwind thread stack for pulse_id=%s", pulse_id,
+            )
+
+        # Pop the Pulse-root line frame we pushed before LangGraph execution.
+        # Done before flush so the books are settled on a clean stack
+        # ("the Pulse is done, the line is closed, then we settle the books").
+        if _pushed_root_line or _pushed_sub_line:
+            try:
+                pulse_ctx.pop_line()
+            except Exception:
+                LOGGER.exception(
+                    "[runtime_graph] Failed to pop %s line for pulse_id=%s",
+                    "Pulse-root" if _pushed_root_line else "sub", pulse_id,
+                )
+
         # Flush PulseContext to DB if this is the top-level playbook (not a sub-playbook).
         # Using finally ensures logs are preserved even when LLM errors or other
         # exceptions abort execution — otherwise all accumulated entries are lost.
@@ -204,9 +355,60 @@ def compile_with_langgraph(
             if _final_pulse_ctx:
                 runtime._flush_pulse_logs(persona, _final_pulse_ctx)
 
+                _meta_buffer = getattr(_final_pulse_ctx, "meta_judgment_buffer", None)
+                # 旧 committed_to_main_cache は「この Pulse で Track の activate op が
+                # 発動したか」の派生フラグだった。Track 操作スペルと deferred track ops
+                # の退役 (track_retirement.md §7.2 ④群) で発動源が消えたため、常に
+                # False になる。
+                _committed_for_meta_log = False
+
+                # Flush meta judgment buffer to meta_judgment_log table
+                # (Phase 2 / handoff Part 2). pulse_type == 'meta_judgment' の Pulse
+                # でのみ buffer が populate されている。MetaLayer 経由で書き込み、
+                # 次回メタ判断時の judge プロンプトに動的注入される。
+                # committed_to_main_cache は **上で apply 前に評価済み** の値を渡す。
+                if _meta_buffer is not None:
+                    try:
+                        meta_layer = getattr(runtime.manager, "meta_layer", None)
+                        if meta_layer is not None:
+                            # trigger_type / trigger_context / track_at_judgment_id を
+                            # state から抽出。MetaLayer の入口で initial_params 経由で
+                            # state に乗せている。trigger_type は trigger_context JSON
+                            # の "trigger" キーから取り出す。
+                            import json as _json
+                            _trigger_context_str = _source_state.get("trigger_context") or ""
+                            _trigger_type = "unknown"
+                            try:
+                                _ctx_obj = _json.loads(_trigger_context_str) if _trigger_context_str else {}
+                                if isinstance(_ctx_obj, dict):
+                                    _trigger_type = str(_ctx_obj.get("trigger") or "unknown")
+                            except (ValueError, TypeError):
+                                pass
+                            _alert_track_id = _source_state.get("alert_track_id") or None
+                            meta_layer._record_judgment_log(
+                                persona_id=getattr(persona, "persona_id", None),
+                                trigger_type=_trigger_type,
+                                trigger_context=_trigger_context_str or None,
+                                track_at_judgment_id=_alert_track_id,
+                                thought_parts=_meta_buffer.get("thought_parts") or [],
+                                spells=_meta_buffer.get("spells") or [],
+                                committed_to_main_cache=_committed_for_meta_log,
+                                prompt_snapshot=None,
+                            )
+                    except Exception:
+                        LOGGER.exception(
+                            "[runtime_graph] Failed to flush meta_judgment buffer to log"
+                        )
+
     # Write back state variables to parent_state based on output_schema
     if parent_state is not None and isinstance(final_state, dict) and playbook.output_schema:
         for key in playbook.output_schema:
+            # 親 state の system namespace への書き戻しは許可しない
+            # (ロード時 validator と対の実行時防御)。
+            if playbook_write_key(
+                key, where=f"playbook '{playbook.name}' output_schema key",
+            ) is None:
+                continue
             if key in final_state:
                 value = final_state[key]
                 # Use _store_structured_result to also create flattened dot-notation keys
@@ -216,6 +418,40 @@ def compile_with_langgraph(
                 else:
                     parent_state[key] = value
                 LOGGER.debug("[sea][LangGraph] Propagated %s to parent_state: %s", key, str(value))
+
+    # Phase C-2: Render report_template into parent_state['report_to_parent'].
+    # Lets mechanical sub-playbooks (image generation, tool wrappers, etc.) emit
+    # a deterministic report without spending an extra LLM call. Output_schema-based
+    # writes still take priority — if a node already set state['report_to_parent']
+    # explicitly, the template result overrides it (template is the playbook's
+    # author-declared canonical report shape).
+    if (
+        parent_state is not None
+        and isinstance(final_state, dict)
+        and getattr(playbook, "report_template", None)
+    ):
+        try:
+            from sea.runtime_utils import _format
+
+            template_vars: Dict[str, Any] = {}
+            for state_key, state_value in final_state.items():
+                if state_key.startswith("_"):
+                    continue
+                template_vars[state_key] = state_value
+                if isinstance(state_value, dict):
+                    for sub_k, sub_v in state_value.items():
+                        template_vars[f"{state_key}.{sub_k}"] = sub_v
+            rendered = _format(playbook.report_template, template_vars)
+            parent_state["report_to_parent"] = rendered
+            LOGGER.info(
+                "[sea][LangGraph] Rendered report_template -> parent_state['report_to_parent'] (%d chars)",
+                len(rendered),
+            )
+        except Exception:
+            LOGGER.exception(
+                "[sea][LangGraph] Failed to render report_template for playbook '%s'",
+                playbook.name,
+            )
 
     # Update execution state: playbook completed (LangGraph path)
     if hasattr(persona, "execution_state"):

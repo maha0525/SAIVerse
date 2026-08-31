@@ -33,6 +33,7 @@ class NvidiaNIMClient(OpenAIClient):
         max_image_bytes: Optional[int] = None,
         convert_system_to_user: bool = False,
         reasoning_passback_field: Optional[str] = None,
+        default_headers: Optional[Dict[str, str]] = None,
     ) -> None:
         # Nvidia NIM doesn't need structured_output_backend parameter
         super().__init__(
@@ -46,6 +47,7 @@ class NvidiaNIMClient(OpenAIClient):
             convert_system_to_user=convert_system_to_user,
             structured_output_backend=None,  # Not used for NIM
             reasoning_passback_field=reasoning_passback_field,
+            default_headers=default_headers,
         )
         self._nim_base_url = base_url or "https://integrate.api.nvidia.com/v1"
         self._nim_api_key = api_key
@@ -119,7 +121,16 @@ class NvidiaNIMClient(OpenAIClient):
         if "max_tokens" in self._request_kwargs:
             body["max_tokens"] = self._request_kwargs["max_tokens"]
 
+        # This path bypasses the SDK, so the client's default_headers have to be
+        # applied by hand or the backend sees different headers depending on
+        # whether structured output was requested. Credentials and framing are
+        # written last: they belong to the client, not to configuration.
+        per_request_headers = self._request_kwargs.get("extra_headers")
         headers = {
+            **self._default_headers,
+            # Already sanitized in __init__; kept here so this path sees the
+            # same headers the SDK path would send.
+            **(per_request_headers if isinstance(per_request_headers, dict) else {}),
             "Content-Type": "application/json",
             "Authorization": f"Bearer {self._nim_api_key}",
         }
@@ -168,6 +179,20 @@ class NvidiaNIMClient(OpenAIClient):
         from .base import get_llm_logger
         get_llm_logger().debug("Nvidia NIM raw:\n%s", json.dumps(resp_json, indent=2, ensure_ascii=False))
 
+        # この経路は生 HTTP なので親の usage 保存を通らない。ここで記録しないと NIM の
+        # 構造化出力が使用量と費用から丸ごと落ちる
+        # (docs/intent/model_provider_management.md「使用量の帰属」)。
+        # 以降の抽出は例外を投げうるが、API 呼び出しは既に成立して課金されているので、
+        # 抽出の成否より手前で一度だけ記録する。
+        usage_json = resp_json.get("usage") or {}
+        if usage_json:
+            prompt_details = usage_json.get("prompt_tokens_details") or {}
+            self._store_usage(
+                input_tokens=usage_json.get("prompt_tokens", 0) or 0,
+                output_tokens=usage_json.get("completion_tokens", 0) or 0,
+                cached_tokens=prompt_details.get("cached_tokens", 0) or 0,
+            )
+
         # Extract tool call arguments
         choices = resp_json.get("choices", [])
         if not choices:
@@ -209,6 +234,7 @@ class NvidiaNIMClient(OpenAIClient):
 
         For structured output, uses guided_json in extra_body instead of response_format.
         """
+        messages = self._inject_unsupported_media_summaries(messages)
         from tools import OPENAI_TOOLS_SPEC, TOOL_REGISTRY
         from tools.core import parse_tool_result
         from .openai_message_preparer import prepare_openai_messages

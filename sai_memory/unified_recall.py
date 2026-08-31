@@ -1,0 +1,1179 @@
+"""Unified recall: embedding-based search across Chronicle, Memopedia, and Fragments.
+
+Provides:
+- Embedding generation and storage for Chronicle Lv1, Memopedia pages, and Fragments
+- Unified search that returns ranked results from all sources
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import sqlite3
+from contextlib import nullcontext
+from dataclasses import dataclass
+from typing import Any, List, Optional
+
+import numpy as np
+
+from saiverse.references import to_uri
+
+LOGGER = logging.getLogger(__name__)
+
+
+@dataclass
+class RecallHit:
+    """A single hit from unified recall search."""
+    source_type: str  # "chronicle", "memopedia", or "fragment"
+    source_id: str    # entry_id, page_id, or fragment_id
+    title: str        # Chronicle: time range, Memopedia: page title, Fragment: entity title
+    content: str      # Chronicle: summary text, Memopedia: summary, Fragment: fragment text
+    score: float      # final fused (RRF) score after ranking; NOT raw cosine similarity
+    uri: str          # saiverse:// URI for navigation
+    # Raw cosine similarity from the embedding search (before RRF fusion overwrites
+    # ``score``). ``None`` for hits that surfaced via keyword match only (no embedding
+    # comparison was performed). Auto-recall (sea/auto_recall.py) needs this to apply a
+    # cosine threshold — the fused ``score`` is on a ~1/60 RRF scale and cannot be
+    # thresholded against a 0.78 cutoff.
+    embed_score: Optional[float] = None
+    # Extra metadata
+    level: Optional[int] = None       # Chronicle level
+    category: Optional[str] = None    # Memopedia category
+    start_time: Optional[int] = None
+    end_time: Optional[int] = None
+    message_count: Optional[int] = None
+    entity_id: Optional[str] = None             # Fragment: parent entity page ID
+    chronicle_entry_id: Optional[str] = None    # Fragment: linked Chronicle entry
+    source_date: Optional[str] = None           # Fragment: extraction date (YYYY-MM-DD)
+    # message ヒットのみ: 表示 content がどのチャンクから抜粋されたか (rev4)。
+    # None は「先頭200字フォールバック」(整合性ガード落ち、または非 message ヒット)。
+    chunk_index: Optional[int] = None
+
+
+# ---------------------------------------------------------------------------
+# Embedding storage: Chronicle
+# ---------------------------------------------------------------------------
+
+def store_chronicle_embedding(
+    conn: sqlite3.Connection,
+    entry_id: str,
+    vector: List[float],
+) -> None:
+    """Store or replace an embedding for a Chronicle entry."""
+    conn.execute(
+        "INSERT OR REPLACE INTO arasuji_embeddings (entry_id, vector) VALUES (?, ?)",
+        (entry_id, json.dumps(vector)),
+    )
+    conn.commit()
+
+
+def get_chronicle_embeddings(
+    conn: sqlite3.Connection,
+    level: Optional[int] = None,
+) -> List[tuple]:
+    """Get all Chronicle embeddings, optionally filtered by level.
+
+    Returns:
+        List of (entry_id, vector, level, content, start_time, end_time, message_count)
+    """
+    if level is not None:
+        cur = conn.execute(
+            """
+            SELECT e.entry_id, e.vector, a.level, a.content, a.start_time, a.end_time, a.message_count
+            FROM arasuji_embeddings e
+            JOIN arasuji_entries a ON e.entry_id = a.id
+            WHERE a.level = ?
+            """,
+            (level,),
+        )
+    else:
+        cur = conn.execute(
+            """
+            SELECT e.entry_id, e.vector, a.level, a.content, a.start_time, a.end_time, a.message_count
+            FROM arasuji_embeddings e
+            JOIN arasuji_entries a ON e.entry_id = a.id
+            """,
+        )
+    result = []
+    for row in cur.fetchall():
+        try:
+            vec = json.loads(row[1])
+        except (json.JSONDecodeError, TypeError):
+            continue
+        result.append((row[0], vec, row[2], row[3], row[4], row[5], row[6]))
+    return result
+
+
+def count_chronicle_embeddings(conn: sqlite3.Connection) -> int:
+    """Count Chronicle entries that have embeddings."""
+    cur = conn.execute("SELECT COUNT(*) FROM arasuji_embeddings")
+    return cur.fetchone()[0]
+
+
+def get_chronicle_entries_without_embeddings(
+    conn: sqlite3.Connection,
+    level: int = 1,
+) -> List[tuple]:
+    """Get Chronicle entries at given level that don't have embeddings yet.
+
+    Returns:
+        List of (entry_id, content)
+    """
+    cur = conn.execute(
+        """
+        SELECT a.id, a.content
+        FROM arasuji_entries a
+        LEFT JOIN arasuji_embeddings e ON a.id = e.entry_id
+        WHERE a.level = ? AND e.entry_id IS NULL
+        """,
+        (level,),
+    )
+    return cur.fetchall()
+
+
+# ---------------------------------------------------------------------------
+# Embedding storage: Memopedia
+# ---------------------------------------------------------------------------
+
+def store_memopedia_embedding(
+    conn: sqlite3.Connection,
+    page_id: str,
+    vector: List[float],
+) -> None:
+    """Store or replace an embedding for a Memopedia page."""
+    conn.execute(
+        "INSERT OR REPLACE INTO memopedia_embeddings (page_id, vector) VALUES (?, ?)",
+        (page_id, json.dumps(vector)),
+    )
+    conn.commit()
+
+
+def get_memopedia_embeddings(conn: sqlite3.Connection) -> List[tuple]:
+    """Get all Memopedia embeddings.
+
+    Chronicle エントリ (P3b の物理統合で memopedia_pages に同居) は除外する —
+    Chronicle は専用ソース (arasuji_embeddings / chronicle キーワード検索) が
+    持つ。同一行を memopedia ソースとしても拾うと、同 id のヒットが chronicle
+    ヒットを上書きし、W14 の perception→Chronicle 併合が成立しない (2026-08-19
+    Codex 第五巡 #3 — 二重拾い自体は物理統合以来の既存挙動)。
+
+    Returns:
+        List of (page_id, vector, title, summary, category, short_id)
+    """
+    cur = conn.execute(
+        """
+        SELECT e.page_id, e.vector, p.title, p.summary, p.category, p.short_id
+        FROM memopedia_embeddings e
+        JOIN memopedia_pages p ON e.page_id = p.id
+        WHERE (p.is_deleted = 0 OR p.is_deleted IS NULL)
+          AND (p.category IS NULL OR p.category != 'chronicle')
+        """,
+    )
+    result = []
+    for row in cur.fetchall():
+        try:
+            vec = json.loads(row[1])
+        except (json.JSONDecodeError, TypeError):
+            continue
+        result.append((row[0], vec, row[2], row[3], row[4], row[5]))
+    return result
+
+
+def count_memopedia_embeddings(conn: sqlite3.Connection) -> int:
+    """Count Memopedia pages that have embeddings."""
+    cur = conn.execute("SELECT COUNT(*) FROM memopedia_embeddings")
+    return cur.fetchone()[0]
+
+
+def get_memopedia_pages_without_embeddings(conn: sqlite3.Connection) -> List[tuple]:
+    """Get Memopedia pages that don't have embeddings yet (excluding root/trunk pages).
+
+    Chronicle エントリは除外 — memopedia_embeddings を作らない (Chronicle の
+    埋め込みは arasuji_embeddings が正準。get_memopedia_embeddings の docstring)。
+
+    Returns:
+        List of (page_id, title, summary)
+    """
+    cur = conn.execute(
+        """
+        SELECT p.id, p.title, p.summary
+        FROM memopedia_pages p
+        LEFT JOIN memopedia_embeddings e ON p.id = e.page_id
+        WHERE e.page_id IS NULL
+          AND p.id NOT LIKE 'root_%'
+          AND p.is_trunk = 0
+          AND (p.category IS NULL OR p.category != 'chronicle')
+        """,
+    )
+    return cur.fetchall()
+
+
+# ---------------------------------------------------------------------------
+# Embedding storage: Memopedia Fragments
+# ---------------------------------------------------------------------------
+
+# Fragment 可視性の共有 SQL 断片 (2026-07-12 監査 P1)。Fragment はページ削除
+# (soft-delete) 後も行として保存されるが、想起の可視性は親ページに従う:
+# - 親ページが is_deleted=1 (ごみ箱) の間は keyword / embedding どちらの検索
+#   からも出さない。復元 (is_deleted=0) すれば自然に再び検索対象になる。
+# - 孤児 Fragment (親ページ行そのものが無い) も通常想起から除外する (INNER JOIN)。
+# 検索経路 (unified_recall keyword / get_fragment_embeddings) が共通で使う。
+# embedding の生成・保存側 (embed_memopedia_fragments 等) は変更しない —
+# 削除中もベクトルは保持し、復元時に再計算なしで検索へ戻れるようにする。
+_FRAGMENT_VISIBILITY_JOIN = "JOIN memopedia_pages p ON f.entity_id = p.id"
+_FRAGMENT_VISIBILITY_WHERE = "COALESCE(p.is_deleted, 0) = 0"
+
+
+def store_fragment_embedding(
+    conn: sqlite3.Connection,
+    fragment_id: str,
+    vector: List[float],
+) -> None:
+    """Store or replace an embedding for a Memopedia fragment."""
+    conn.execute(
+        "INSERT OR REPLACE INTO memopedia_fragment_embeddings (fragment_id, vector) VALUES (?, ?)",
+        (fragment_id, json.dumps(vector)),
+    )
+    conn.commit()
+
+
+def get_fragment_embeddings(conn: sqlite3.Connection) -> List[tuple]:
+    """Get fragment embeddings with metadata for unified search.
+
+    可視性 (2026-07-12 監査 P1): 親ページが soft-delete 済み (ごみ箱) の Fragment
+    と、親ページ行が無い孤児 Fragment は返さない (``_FRAGMENT_VISIBILITY_*``)。
+    ごみ箱へ移した知識が自動想起でペルソナの tail へ再注入されるのを防ぐ。
+
+    Returns:
+        List of (fragment_id, vector, content, entity_id, chronicle_entry_id,
+                 source_date, entity_title, entity_category, entity_short_id)
+    """
+    cur = conn.execute(
+        f"""
+        SELECT e.fragment_id, e.vector, f.content, f.entity_id,
+               f.chronicle_entry_id, f.source_date, p.title, p.category, p.short_id
+        FROM memopedia_fragment_embeddings e
+        JOIN memopedia_fragments f ON e.fragment_id = f.id
+        {_FRAGMENT_VISIBILITY_JOIN}
+        WHERE {_FRAGMENT_VISIBILITY_WHERE}
+        """,
+    )
+    result = []
+    for row in cur.fetchall():
+        try:
+            vec = json.loads(row[1])
+        except (json.JSONDecodeError, TypeError):
+            continue
+        result.append((row[0], vec, row[2], row[3], row[4], row[5], row[6], row[7], row[8]))
+    return result
+
+
+def count_fragment_embeddings(conn: sqlite3.Connection) -> int:
+    """Count Memopedia fragments that have embeddings."""
+    cur = conn.execute("SELECT COUNT(*) FROM memopedia_fragment_embeddings")
+    return cur.fetchone()[0]
+
+
+def get_fragments_without_embeddings(conn: sqlite3.Connection) -> List[tuple]:
+    """Get Memopedia fragments that don't have embeddings yet.
+
+    Returns:
+        List of (fragment_id, content, entity_title)
+    """
+    cur = conn.execute(
+        """
+        SELECT f.id, f.content, p.title
+        FROM memopedia_fragments f
+        LEFT JOIN memopedia_fragment_embeddings e ON f.id = e.fragment_id
+        LEFT JOIN memopedia_pages p ON f.entity_id = p.id
+        WHERE e.fragment_id IS NULL
+        """,
+    )
+    return cur.fetchall()
+
+
+# ---------------------------------------------------------------------------
+# Embedding retrieval: Messages (read-only, embeddings created elsewhere)
+# ---------------------------------------------------------------------------
+
+def get_message_embeddings(conn: sqlite3.Connection) -> List[tuple]:
+    """Get message embeddings of real conversation rows for unified search.
+
+    取得時フィルタ (2026-07-12 監査 P1): 「実会話」のみ返す —
+    ``real_conversation_filter()`` (storage.py で一点管理。Stelis スレッド・
+    handy_tool/spell/event_message タグ・sub_line/meta_judgment/nested line_role・
+    scope='discardable'・'<system>' 始まり本文を除外し、role は
+    user/model/assistant に限定) を適用する。embedding の書き込み側は全行分
+    保持のまま (他用途) — 境界は取得時に引く。
+
+    Returns best-scoring chunk per message later; here we return all chunks.
+
+    Returns:
+        List of (message_id, vector, chunk_index, content, role, created_at)
+    """
+    from sai_memory.memory.storage import real_conversation_filter
+
+    clause, params = real_conversation_filter()
+    cur = conn.execute(
+        f"""
+        SELECT e.message_id, e.vector, e.chunk_index, m.content, m.role, m.created_at
+        FROM message_embeddings e
+        JOIN messages m ON e.message_id = m.id
+        WHERE {clause}
+        """,
+        params,
+    )
+    result = []
+    for row in cur.fetchall():
+        try:
+            vec = json.loads(row[1])
+            if isinstance(vec, list) and vec and isinstance(vec[0], list):
+                for idx, entry in enumerate(vec):
+                    result.append((row[0], [float(v) for v in entry], idx, row[3], row[4], row[5]))
+            else:
+                result.append((row[0], [float(v) for v in vec], int(row[2]), row[3], row[4], row[5]))
+        except (json.JSONDecodeError, TypeError):
+            continue
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Batch embedding generation
+# ---------------------------------------------------------------------------
+
+def embed_chronicle_entries(
+    conn: sqlite3.Connection,
+    embedder,
+    *,
+    level: int = 1,
+    batch_size: int = 64,
+    db_lock: Optional[Any] = None,
+) -> int:
+    """Generate and store embeddings for Chronicle entries that don't have them.
+
+    Args:
+        conn: Database connection.
+        embedder: Embedder instance with embed() method.
+        level: Chronicle level to embed (default: 1 = あらすじ).
+        batch_size: Batch size for embedding generation.
+
+    Returns:
+        Number of entries embedded.
+    """
+    entries = get_chronicle_entries_without_embeddings(conn, level=level)
+    if not entries:
+        LOGGER.info("No Chronicle Lv%d entries need embedding", level)
+        return 0
+
+    LOGGER.info("Embedding %d Chronicle Lv%d entries", len(entries), level)
+    total = 0
+
+    for i in range(0, len(entries), batch_size):
+        batch = entries[i:i + batch_size]
+        texts = [content for _, content in batch]
+        vectors = embedder.embed(texts, is_query=False)
+
+        # 埋め込みの計算は錠の外 (重い)。DB への書き込みと commit だけを
+        # adapter の錠前の内側で行う —— 共有接続なので、錠外の commit は
+        # 他所の開いたトランザクションを途中で確定させる (Codex 八巡 #1)
+        with (db_lock or nullcontext()):
+            for (entry_id, _), vec in zip(batch, vectors):
+                store_chronicle_embedding(conn, entry_id, list(vec))
+                total += 1
+
+    LOGGER.info("Embedded %d Chronicle entries", total)
+    return total
+
+
+def embed_memopedia_pages(
+    conn: sqlite3.Connection,
+    embedder,
+    *,
+    batch_size: int = 64,
+    db_lock: Optional[Any] = None,
+) -> int:
+    """Generate and store embeddings for Memopedia pages that don't have them.
+
+    Embeds "title: {title}. {summary}" for each page.
+
+    Args:
+        conn: Database connection.
+        embedder: Embedder instance with embed() method.
+        batch_size: Batch size for embedding generation.
+
+    Returns:
+        Number of pages embedded.
+    """
+    pages = get_memopedia_pages_without_embeddings(conn)
+    if not pages:
+        LOGGER.info("No Memopedia pages need embedding")
+        return 0
+
+    LOGGER.info("Embedding %d Memopedia pages", len(pages))
+    total = 0
+
+    for i in range(0, len(pages), batch_size):
+        batch = pages[i:i + batch_size]
+        texts = [f"{title}: {summary}" if summary else title
+                 for _, title, summary in batch]
+        vectors = embedder.embed(texts, is_query=False)
+
+        with (db_lock or nullcontext()):
+            for (page_id, _, _), vec in zip(batch, vectors):
+                store_memopedia_embedding(conn, page_id, list(vec))
+                total += 1
+
+    LOGGER.info("Embedded %d Memopedia pages", total)
+    return total
+
+
+def embed_memopedia_fragments(
+    conn: sqlite3.Connection,
+    embedder,
+    *,
+    batch_size: int = 64,
+    db_lock: Optional[Any] = None,
+) -> int:
+    """Generate and store embeddings for Memopedia fragments that don't have them.
+
+    Args:
+        conn: Database connection.
+        embedder: Embedder instance with embed() method.
+        batch_size: Batch size for embedding generation.
+
+    Returns:
+        Number of fragments embedded.
+    """
+    fragments = get_fragments_without_embeddings(conn)
+    if not fragments:
+        LOGGER.info("No Memopedia fragments need embedding")
+        return 0
+
+    LOGGER.info("Embedding %d Memopedia fragments", len(fragments))
+    total = 0
+
+    for i in range(0, len(fragments), batch_size):
+        batch = fragments[i:i + batch_size]
+        # entity_title は親ページ消失 (孤児 Fragment) で None になりうる。
+        # 孤児でも Fragment 本文単体で検索可能にする (LEFT JOIN 化, 2026-07-04)。
+        texts = [
+            f"{entity_title}: {content}" if entity_title else content
+            for _, content, entity_title in batch
+        ]
+        vectors = embedder.embed(texts, is_query=False)
+
+        with (db_lock or nullcontext()):
+            for (frag_id, _, _), vec in zip(batch, vectors):
+                store_fragment_embedding(conn, frag_id, list(vec))
+                total += 1
+
+    LOGGER.info("Embedded %d Memopedia fragments", total)
+    return total
+
+
+# ---------------------------------------------------------------------------
+# Unified search
+# ---------------------------------------------------------------------------
+
+def _cosine_sim(a: np.ndarray, b: np.ndarray) -> float:
+    denom = float(np.linalg.norm(a) * np.linalg.norm(b))
+    if denom == 0:
+        return 0.0
+    return float(np.dot(a, b) / denom)
+
+
+# ---------------------------------------------------------------------------
+# マッチ箇所抜粋 (rev4)
+#
+# メッセージ本文を先頭から機械的に切るのをやめ、実際にマッチしたチャンク/位置の
+# 周辺だけを抜粋する。書き込み時 (saiverse_memory/adapter.py) の chunk_text() 呼び
+# 出しと同じ min_chars/max_chars で再分割し、chunk_index で引く。パラメータが過去
+# に変わっていた等でチャンク数が食い違う場合は位置がズレるため、整合性ガードで
+# 検出しフォールバックする。
+# ---------------------------------------------------------------------------
+
+_EXCERPT_TRIM = 200  # 従来の先頭トリム長と揃える
+_KEYWORD_WINDOW = 100  # キーワードマッチ抜粋の前後窓幅
+
+
+def _get_chunk_params() -> tuple[int, int]:
+    """メッセージ書き込み時と同じチャンク分割パラメータを env から読む。
+
+    sai_memory.config.load_settings() はファイルシステム探索や無関係な設定
+    (LLM provider など) まで読み込み重いので、ここでは同じ2つの env 変数を
+    直接読む軽量版にする (ロジックは sai_memory/config.py の _get_int と同一)。
+    """
+    def _get_int(name: str, default: int) -> int:
+        v = __import__("os").environ.get(name)
+        try:
+            return int(v) if v is not None else default
+        except (TypeError, ValueError):
+            return default
+
+    min_chars = _get_int("SAIMEMORY_MEMORY_CHUNK_MIN_CHARS", 120)
+    max_chars = _get_int("SAIMEMORY_MEMORY_CHUNK_MAX_CHARS", 480)
+    if min_chars < 0:
+        min_chars = 0
+    if max_chars <= 0:
+        max_chars = 1
+    if min_chars > max_chars:
+        min_chars = max_chars
+    return min_chars, max_chars
+
+
+def _count_message_embedding_rows(conn: sqlite3.Connection, message_id: str) -> int:
+    cur = conn.execute(
+        "SELECT COUNT(*) FROM message_embeddings WHERE message_id = ?",
+        (message_id,),
+    )
+    row = cur.fetchone()
+    return int(row[0]) if row else 0
+
+
+def reconstruct_message_excerpt(
+    conn: sqlite3.Connection,
+    message_id: str,
+    chunk_index: int,
+    full_content: str,
+) -> tuple[str, Optional[int]]:
+    """メッセージ本文をベストマッチ chunk_index 周辺で抜粋する (200字トリム済み)。
+
+    書き込み時と同じパラメータで chunk_text() を再実行し、再分割したチャンク数と
+    その message_id の embedding 行数が一致する場合のみ chunk_index で引く
+    (整合性ガード: 過去にチャンク分割パラメータが変わっていた等で位置がズレる
+    可能性があるため)。不一致・チャンク取得失敗時は先頭200字にフォールバックする。
+
+    Returns:
+        (抜粋テキスト, 実際に使った chunk_index。フォールバック時は None)
+    """
+    chunk, used_chunk_index = reconstruct_message_chunk(conn, message_id, chunk_index, full_content)
+    if used_chunk_index is None:
+        # フォールバック: reconstruct_message_chunk は full_content をそのまま返す。
+        return chunk[:_EXCERPT_TRIM], None
+    excerpt = chunk[:_EXCERPT_TRIM] + ("…" if len(chunk) > _EXCERPT_TRIM else "")
+    return excerpt, used_chunk_index
+
+
+def reconstruct_message_chunk(
+    conn: sqlite3.Connection,
+    message_id: str,
+    chunk_index: int,
+    full_content: str,
+) -> tuple[str, Optional[int]]:
+    """メッセージ本文からベストマッチ chunk_index のチャンク全文 (トリムなし) を復元する。
+
+    reconstruct_message_excerpt() の下請け。呼び出し側がチャンク全文に対して独自の
+    ウィンドウ処理 (例: auto_recall のタイトル出現位置 ±60字トリム) をしたい場合は
+    こちらを直接使う。整合性ガードのロジックは reconstruct_message_excerpt と同一。
+
+    Returns:
+        (チャンク全文 or full_content, 実際に使った chunk_index。フォールバック時は
+        (full_content, None))。
+    """
+    if not full_content:
+        return "", None
+
+    try:
+        from sai_memory.memory.chunking import chunk_text
+        min_chars, max_chars = _get_chunk_params()
+        chunks = chunk_text(full_content.strip(), min_chars=min_chars, max_chars=max_chars)
+        chunks = [c for c in chunks if c and c.strip()]
+        expected_rows = _count_message_embedding_rows(conn, message_id)
+        if not chunks or len(chunks) != expected_rows:
+            LOGGER.debug(
+                "[unified_recall] chunk reconstruction mismatch for message_id=%s: "
+                "re-chunked=%d rows=%d; falling back to full content",
+                message_id, len(chunks), expected_rows,
+            )
+            return full_content, None
+        if chunk_index < 0 or chunk_index >= len(chunks):
+            LOGGER.debug(
+                "[unified_recall] chunk_index %d out of range (%d chunks) for message_id=%s; "
+                "falling back to full content",
+                chunk_index, len(chunks), message_id,
+            )
+            return full_content, None
+        return chunks[chunk_index].strip(), chunk_index
+    except Exception:
+        LOGGER.debug(
+            "[unified_recall] chunk reconstruction raised for message_id=%s; falling back",
+            message_id, exc_info=True,
+        )
+        return full_content, None
+
+
+def _keyword_excerpt(content: str, keywords: List[str]) -> str:
+    """最初にマッチしたキーワードの出現位置を中心に前後 ±100 字を抜粋する。
+
+    出現が見つからなければ先頭200字にフォールバックする。
+    """
+    if not content:
+        return ""
+    lowered = content.lower()
+    best_pos = -1
+    for kw in keywords:
+        kw_stripped = kw.strip()
+        if not kw_stripped:
+            continue
+        pos = lowered.find(kw_stripped.lower())
+        if pos != -1:
+            best_pos = pos
+            break
+    if best_pos == -1:
+        return content[:_EXCERPT_TRIM]
+    start = max(0, best_pos - _KEYWORD_WINDOW)
+    end = min(len(content), best_pos + _KEYWORD_WINDOW)
+    excerpt = content[start:end].strip()
+    prefix = "…" if start > 0 else ""
+    suffix = "…" if end < len(content) else ""
+    return f"{prefix}{excerpt}{suffix}"
+
+
+# Per-source base allocation weights.
+# These reflect the inherent characteristics of each source type:
+# - fragment: short texts, many available, high precision → most slots
+# - chronicle: medium-length summaries, moderate count → decent allocation
+# - memopedia: few pages, broader summaries → minimal to avoid irrelevant fills
+# - message: variable length, already covered by Chronicle → minimal
+# - perception: 消費バッチの確定文面 (W14 §10.5 の読み口)。退場付記で digest 側は
+#   集約に落ちても、ここから全文へ到達できる → minimal
+SOURCE_ALLOCATIONS = {
+    "chronicle": 3,
+    "memopedia": 1,
+    "fragment": 5,
+    "message": 1,
+    "perception": 1,
+}
+
+FOCUS_MULTIPLIER = 4
+
+
+def _format_timestamp(ts: Optional[int]) -> str:
+    if not ts:
+        return "?"
+    from datetime import datetime
+    return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
+
+
+def _format_time_range(start: Optional[int], end: Optional[int]) -> str:
+    from datetime import datetime
+    parts = []
+    if start:
+        parts.append(datetime.fromtimestamp(start).strftime("%Y-%m-%d %H:%M"))
+    if end:
+        parts.append(datetime.fromtimestamp(end).strftime("%Y-%m-%d %H:%M"))
+    return " ~ ".join(parts) if parts else "?"
+
+
+def unified_recall(
+    conn: sqlite3.Connection,
+    embedder,
+    query: str,
+    *,
+    topk: Optional[int] = None,
+    focus: Optional[str] = None,
+    search_chronicle: bool = True,
+    search_memopedia: bool = True,
+    search_fragments: bool = True,
+    search_messages: bool = True,
+    search_perceptions: bool = False,
+    chronicle_level: int = 1,
+    persona_id: Optional[str] = None,
+) -> List[RecallHit]:
+    """Search across Chronicle, Memopedia, Fragments, and Messages using hybrid search.
+
+    Per-source allocation determines how many results each source type contributes,
+    based on SOURCE_ALLOCATIONS weights. The ``focus`` parameter gives one source
+    type FOCUS_MULTIPLIER× its normal allocation for deeper search.
+
+    Args:
+        conn: Database connection (memory.db with arasuji + memopedia tables).
+        embedder: Embedder instance.
+        query: Search query text.
+        topk: Hard cap on total results (None = use sum of allocations).
+        focus: Source type to give FOCUS_MULTIPLIER× allocation (e.g., "fragment").
+        search_chronicle: Include Chronicle entries in search.
+        search_memopedia: Include Memopedia pages in search.
+        search_fragments: Include Memopedia fragments in search.
+        search_messages: Include raw chat messages in search (default: off).
+        search_perceptions: Include consumed perception batches (W14 §10.5 の
+            読み口 — 消費済みの知覚の確定文面。キーワード検索のみ・未消費は
+            含めない)。**既定 False (opt-in)** — 表示分岐 (source_type
+            "perception"・空 URI) と枠課金を扱える経路 (Memory タブ検索 API)
+            だけが明示 ON にする。付記済みバッチが転写先 Chronicle と両方
+            ヒットした場合は Chronicle 側へ寄せる (二重表示しない)。
+        chronicle_level: Chronicle level to search (default: 1).
+        persona_id: Persona ID for URI generation.
+
+    Returns:
+        List of RecallHit sorted by fused score descending.
+    """
+    # --- Compute per-source allocations ---
+    source_caps: dict[str, int] = {}
+    if search_chronicle:
+        base = SOURCE_ALLOCATIONS.get("chronicle", 3)
+        source_caps["chronicle"] = base * (FOCUS_MULTIPLIER if focus == "chronicle" else 1)
+    if search_memopedia:
+        base = SOURCE_ALLOCATIONS.get("memopedia", 1)
+        source_caps["memopedia"] = base * (FOCUS_MULTIPLIER if focus == "memopedia" else 1)
+    if search_fragments:
+        base = SOURCE_ALLOCATIONS.get("fragment", 5)
+        source_caps["fragment"] = base * (FOCUS_MULTIPLIER if focus == "fragment" else 1)
+    if search_messages:
+        base = SOURCE_ALLOCATIONS.get("message", 1)
+        source_caps["message"] = base * (FOCUS_MULTIPLIER if focus == "message" else 1)
+    if search_perceptions:
+        base = SOURCE_ALLOCATIONS.get("perception", 1)
+        source_caps["perception"] = base * (FOCUS_MULTIPLIER if focus == "perception" else 1)
+
+    total_cap = topk if topk is not None else sum(source_caps.values())
+
+    # --- Keyword search ---
+    # Search per-keyword and count matches per entry, avoiding OR+limit issues.
+    # キーは (source_type, source_id) で名前空間化する — Chronicle エントリは
+    # memopedia_pages に同居しており (P3b)、素の id をキーにすると別ソースの
+    # ヒットが同じ枠を上書きしうる (2026-08-19 Codex 第五巡 #3 の堅牢化)。
+    keyword_hits: dict[tuple, RecallHit] = {}  # (source_type, source_id) → hit
+    keyword_match_count: dict[tuple, int] = {}  # 同キー → number of keywords matched
+
+    query_keywords = query.split()
+
+    if search_chronicle:
+        # For each keyword, find matching Chronicle entry IDs
+        kw_id_sets: list[set[str]] = []
+        for kw in query_keywords:
+            cur = conn.execute(
+                "SELECT id FROM arasuji_entries WHERE content LIKE ? AND level = ?",
+                (f"%{kw}%", chronicle_level),
+            )
+            kw_id_sets.append({row[0] for row in cur.fetchall()})
+
+        # Collect all matched IDs and count per-entry matches
+        all_chronicle_ids: set[str] = set()
+        for ids in kw_id_sets:
+            all_chronicle_ids |= ids
+
+        for entry_id in all_chronicle_ids:
+            count = sum(1 for ids in kw_id_sets if entry_id in ids)
+            keyword_match_count[("chronicle", entry_id)] = count
+
+        # Fetch entry details only for matched IDs。候補化は id ソートの安定順 —
+        # set の反復順に依存すると RRF の順位 (= 同点の採否) が呼び出しごとに
+        # 揺れる (2026-08-19 Codex 第八巡 #2)。
+        if all_chronicle_ids:
+            from sai_memory.arasuji.storage import get_entry
+            for entry_id in sorted(all_chronicle_ids):
+                entry = get_entry(conn, entry_id)
+                if entry:
+                    time_range = _format_time_range(entry.start_time, entry.end_time)
+                    keyword_hits[("chronicle", entry.id)] = RecallHit(
+                        source_type="chronicle",
+                        source_id=entry.id,
+                        title=f"Chronicle Lv{entry.level}: {time_range}",
+                        content=entry.content[:200] if entry.content else "",
+                        score=0.0,
+                        uri=to_uri("chronicle", entry.id),
+                        level=entry.level,
+                        start_time=entry.start_time,
+                        end_time=entry.end_time,
+                        message_count=entry.message_count,
+                    )
+
+    if search_memopedia:
+        # For each keyword, find matching Memopedia page IDs。
+        # Chronicle エントリ (同居ページ) は除外 — 専用ソースが持つ
+        # (get_memopedia_embeddings の docstring)。
+        kw_id_sets = []
+        for kw in query_keywords:
+            cur = conn.execute(
+                "SELECT id FROM memopedia_pages WHERE "
+                "(title LIKE ? OR summary LIKE ? OR content LIKE ?) "
+                "AND id NOT LIKE 'root_%' "
+                "AND (is_deleted = 0 OR is_deleted IS NULL) "
+                "AND (category IS NULL OR category != 'chronicle')",
+                (f"%{kw}%", f"%{kw}%", f"%{kw}%"),
+            )
+            kw_id_sets.append({row[0] for row in cur.fetchall()})
+
+        all_memopedia_ids: set[str] = set()
+        for ids in kw_id_sets:
+            all_memopedia_ids |= ids
+
+        for page_id in all_memopedia_ids:
+            count = sum(1 for ids in kw_id_sets if page_id in ids)
+            keyword_match_count[("memopedia", page_id)] = count
+
+        if all_memopedia_ids:
+            from sai_memory.memopedia.storage import get_page
+            for page_id in sorted(all_memopedia_ids):  # 安定順 (第八巡 #2)
+                page = get_page(conn, page_id)
+                if page:
+                    keyword_hits[("memopedia", page.id)] = RecallHit(
+                        source_type="memopedia",
+                        source_id=page.id,
+                        title=page.title,
+                        content=page.summary[:200] if page.summary else "",
+                        score=0.0,
+                        uri=to_uri("memopedia", page.short_id if page.short_id is not None else page.id),
+                        category=page.category,
+                    )
+
+    if search_fragments:
+        kw_id_sets = []
+        for kw in query_keywords:
+            # 可視性は embedding 経路 (get_fragment_embeddings) と共通:
+            # 親ページがごみ箱 (is_deleted=1) / 孤児の Fragment は検索に出さない。
+            cur = conn.execute(
+                f"SELECT f.id FROM memopedia_fragments f "
+                f"{_FRAGMENT_VISIBILITY_JOIN} "
+                f"WHERE f.content LIKE ? AND {_FRAGMENT_VISIBILITY_WHERE}",
+                (f"%{kw}%",),
+            )
+            kw_id_sets.append({row[0] for row in cur.fetchall()})
+
+        all_fragment_ids: set[str] = set()
+        for ids in kw_id_sets:
+            all_fragment_ids |= ids
+
+        for frag_id in all_fragment_ids:
+            count = sum(1 for ids in kw_id_sets if frag_id in ids)
+            keyword_match_count[("fragment", frag_id)] = count
+
+        if all_fragment_ids:
+            placeholders = ",".join("?" for _ in all_fragment_ids)
+            cur = conn.execute(
+                f"SELECT f.id, f.content, f.entity_id, f.chronicle_entry_id, "
+                f"f.source_date, p.title, p.category, p.short_id "
+                f"FROM memopedia_fragments f "
+                f"LEFT JOIN memopedia_pages p ON f.entity_id = p.id "
+                f"WHERE f.id IN ({placeholders}) "
+                f"ORDER BY f.id",  # 安定順 (第八巡 #2)
+                sorted(all_fragment_ids),
+            )
+            for row in cur.fetchall():
+                fid, fcontent, eid, ceid, sdate, etitle, ecat, eshort = row
+                keyword_hits[("fragment", fid)] = RecallHit(
+                    source_type="fragment",
+                    source_id=fid,
+                    title=etitle,
+                    content=fcontent[:200] if fcontent else "",
+                    score=0.0,
+                    uri=to_uri("memopedia", eshort if eshort is not None else eid),
+                    category=ecat,
+                    entity_id=eid,
+                    chronicle_entry_id=ceid,
+                    source_date=sdate,
+                )
+
+    if search_messages:
+        # 「実会話」のみを対象にする (embedding 経路 get_message_embeddings と
+        # 同じ real_conversation_filter を共有。2026-07-12 監査 P1)。
+        from sai_memory.memory.storage import real_conversation_filter
+
+        msg_clause, msg_params = real_conversation_filter()
+        kw_id_sets = []
+        for kw in query_keywords:
+            cur = conn.execute(
+                f"SELECT id FROM messages WHERE content LIKE ? AND {msg_clause}",
+                (f"%{kw}%", *msg_params),
+            )
+            kw_id_sets.append({row[0] for row in cur.fetchall()})
+
+        all_message_ids: set[str] = set()
+        for ids in kw_id_sets:
+            all_message_ids |= ids
+
+        for mid in all_message_ids:
+            count = sum(1 for ids in kw_id_sets if mid in ids)
+            keyword_match_count[("message", mid)] = count
+
+        if all_message_ids:
+            placeholders = ",".join("?" for _ in all_message_ids)
+            cur = conn.execute(
+                f"SELECT id, content, role, created_at FROM messages "
+                f"WHERE id IN ({placeholders}) "
+                f"ORDER BY created_at, id",  # 安定順 (第八巡 #2)
+                sorted(all_message_ids),
+            )
+            for row in cur.fetchall():
+                mid, mcontent, mrole, mcreated = row
+                title = f"{mrole} @ {_format_timestamp(mcreated)}"
+                excerpt = _keyword_excerpt(mcontent, query_keywords) if mcontent else ""
+                keyword_hits[("message", mid)] = RecallHit(
+                    source_type="message",
+                    source_id=mid,
+                    title=title,
+                    content=excerpt,
+                    score=0.0,
+                    uri=to_uri("message", mid),
+                    start_time=mcreated,
+                )
+
+    if search_perceptions:
+        # 消費バッチの確定文面 (W14 §10.5 の読み口)。キーワード検索のみ —
+        # バッチは埋め込みを持たない (低頻度・短文の通知が主で、退場付記後の
+        # 全文到達手段を保証するのが目的)。未消費 (perception_buffer の pending)
+        # は含めない — まだペルソナが知覚していないものを想起で先に見せない。
+        # 付記済みバッチも含める: 付記は digest への転写 (集約されうる) で、
+        # ここが全文への到達路になる。
+        # ソース id は "perception:{id}" に接頭辞化する (バッチ id は小さい整数
+        # で、素のままだと参照として紛らわしい)。map キーの衝突自体は
+        # (source_type, source_id) の名前空間化が防ぐ。
+        kw_id_sets = []
+        try:
+            for kw in query_keywords:
+                cur = conn.execute(
+                    "SELECT id FROM perception_batches WHERE rendered_text LIKE ?",
+                    (f"%{kw}%",),
+                )
+                kw_id_sets.append({f"perception:{row[0]}" for row in cur.fetchall()})
+        except sqlite3.OperationalError:
+            kw_id_sets = []  # perception_batches の無い DB (旧世代)
+
+        all_batch_ids: set[str] = set()
+        for ids in kw_id_sets:
+            all_batch_ids |= ids
+
+        for bid in all_batch_ids:
+            count = sum(1 for ids in kw_id_sets if bid in ids)
+            keyword_match_count[("perception", bid)] = count
+
+        if all_batch_ids:
+            raw_ids = sorted(int(b.split(":", 1)[1]) for b in all_batch_ids)
+            placeholders = ",".join("?" for _ in raw_ids)
+            # 知覚は (consumed_at, id) の安定順で候補化する (第八巡 #2)。
+            cur = conn.execute(
+                f"SELECT id, consumed_at, rendered_text, annexed_entry_id "
+                f"FROM perception_batches WHERE id IN ({placeholders}) "
+                f"ORDER BY consumed_at, id",
+                raw_ids,
+            )
+            for row in cur.fetchall():
+                bid = f"perception:{row[0]}"
+                consumed_at, rendered_text = row[1], row[2] or ""
+                keyword_hits[("perception", bid)] = RecallHit(
+                    source_type="perception",
+                    source_id=bid,
+                    title=f"知覚 @ {_format_timestamp(consumed_at)}",
+                    content=_keyword_excerpt(rendered_text, query_keywords),
+                    score=0.0,
+                    # 知覚バッチには saiverse:// の kind が (まだ) 無い。URI は
+                    # 空で返し、参照は source_type + source_id が担う。
+                    uri="",
+                    start_time=consumed_at,
+                    # 付記先 Chronicle (None = 未付記)。下の併合で使う。
+                    chronicle_entry_id=row[3],
+                )
+
+    # --- Embedding search ---
+    # キーは keyword_hits と同じ (source_type, source_id) の名前空間。
+    embedding_hits: dict[tuple, RecallHit] = {}
+
+    vectors = embedder.embed([query], is_query=True)
+    q = np.array(vectors[0], dtype=np.float32)
+    vector_dim = q.shape[0]
+
+    if search_chronicle:
+        corpus = get_chronicle_embeddings(conn, level=chronicle_level)
+        scored: list[tuple[str, float, RecallHit]] = []
+        for entry_id, vec, level, content, start_time, end_time, msg_count in corpus:
+            if len(vec) != vector_dim:
+                continue
+            v = np.array(vec, dtype=np.float32)
+            score = _cosine_sim(q, v)
+            time_range = _format_time_range(start_time, end_time)
+            scored.append((entry_id, score, RecallHit(
+                source_type="chronicle",
+                source_id=entry_id,
+                title=f"Chronicle Lv{level}: {time_range}",
+                content=content[:200] if content else "",
+                score=score,
+                embed_score=score,
+                uri=to_uri("chronicle", entry_id),
+                level=level,
+                start_time=start_time,
+                end_time=end_time,
+                message_count=msg_count,
+            )))
+        scored.sort(key=lambda x: x[1], reverse=True)
+        for sid, _, hit in scored[:total_cap * 2]:
+            embedding_hits[("chronicle", sid)] = hit
+
+    if search_memopedia:
+        corpus = get_memopedia_embeddings(conn)
+        scored = []
+        for page_id, vec, title, summary, category, short_id in corpus:
+            if len(vec) != vector_dim:
+                continue
+            v = np.array(vec, dtype=np.float32)
+            score = _cosine_sim(q, v)
+            scored.append((page_id, score, RecallHit(
+                source_type="memopedia",
+                source_id=page_id,
+                title=title,
+                content=summary[:200] if summary else "",
+                score=score,
+                embed_score=score,
+                # AI 可視のキーは short_id。page_id (uuid) は裏方フォールバック。
+                uri=to_uri("memopedia", short_id if short_id is not None else page_id),
+                category=category,
+            )))
+        scored.sort(key=lambda x: x[1], reverse=True)
+        for sid, _, hit in scored[:total_cap * 2]:
+            embedding_hits[("memopedia", sid)] = hit
+
+    if search_fragments:
+        corpus = get_fragment_embeddings(conn)
+        scored = []
+        for frag_id, vec, content, entity_id, chronicle_entry_id, source_date, etitle, ecat, eshort in corpus:
+            if len(vec) != vector_dim:
+                continue
+            v = np.array(vec, dtype=np.float32)
+            score = _cosine_sim(q, v)
+            scored.append((frag_id, score, RecallHit(
+                source_type="fragment",
+                source_id=frag_id,
+                title=etitle,
+                content=content[:200] if content else "",
+                score=score,
+                embed_score=score,
+                uri=to_uri("memopedia", eshort if eshort is not None else entity_id),
+                category=ecat,
+                entity_id=entity_id,
+                chronicle_entry_id=chronicle_entry_id,
+                source_date=source_date,
+            )))
+        scored.sort(key=lambda x: x[1], reverse=True)
+        for sid, _, hit in scored[:total_cap * 2]:
+            embedding_hits[("fragment", sid)] = hit
+
+    if search_messages:
+        corpus = get_message_embeddings(conn)
+        # message_id ごとに best (score, chunk_index, full_content, role, created_at) を
+        # 保持する。表示 content は最後にまとめて再構築する (rev4: 先頭200字固定をやめ、
+        # ベストマッチ chunk_index の周辺を抜粋する)。
+        best_by_message: dict[str, tuple[float, int, str, str, int]] = {}
+        for msg_id, vec, chunk_index, content, role, created_at in corpus:
+            if len(vec) != vector_dim:
+                continue
+            v = np.array(vec, dtype=np.float32)
+            score = _cosine_sim(q, v)
+            prev = best_by_message.get(msg_id)
+            if prev is None or score > prev[0]:
+                best_by_message[msg_id] = (score, chunk_index, content, role, created_at)
+
+        scored_list = sorted(best_by_message.items(), key=lambda kv: kv[1][0], reverse=True)
+        for msg_id, (score, chunk_index, content, role, created_at) in scored_list[:total_cap * 2]:
+            title = f"{role} @ {_format_timestamp(created_at)}"
+            excerpt, used_chunk_index = reconstruct_message_excerpt(
+                conn, msg_id, chunk_index, content or "",
+            )
+            embedding_hits[("message", msg_id)] = RecallHit(
+                source_type="message",
+                source_id=msg_id,
+                title=title,
+                content=excerpt,
+                score=score,
+                embed_score=score,
+                uri=to_uri("message", msg_id),
+                start_time=created_at,
+                chunk_index=used_chunk_index,
+            )
+
+    # --- RRF fusion ---
+    RRF_K = 60  # Standard RRF constant
+
+    # Build rank maps (キーは (source_type, source_id))
+    keyword_rank: dict[tuple, int] = {}
+    for rank, sid in enumerate(keyword_hits.keys()):
+        keyword_rank[sid] = rank + 1
+
+    embedding_rank: dict[tuple, int] = {}
+    # Sort embedding hits by score for ranking
+    sorted_embed = sorted(embedding_hits.items(), key=lambda x: x[1].score, reverse=True)
+    for rank, (sid, _) in enumerate(sorted_embed):
+        embedding_rank[sid] = rank + 1
+
+    # Collect all source IDs
+    all_ids = set(keyword_rank.keys()) | set(embedding_rank.keys())
+
+    # Calculate RRF scores, layered by keyword match count.
+    # Entries matching more keywords always rank above those matching fewer,
+    # regardless of embedding similarity. Within the same match-count layer,
+    # RRF score determines the order.
+    rrf_scored: list[tuple] = []  # ((source_type, source_id), match_count, rrf_score)
+    for sid in all_ids:
+        score = 0.0
+        if sid in keyword_rank:
+            score += 1.0 / (RRF_K + keyword_rank[sid])
+        if sid in embedding_rank:
+            score += 1.0 / (RRF_K + embedding_rank[sid])
+        match_count = keyword_match_count.get(sid, 0)
+        rrf_scored.append((sid, match_count, score))
+
+    # Sort by match_count DESC first, then RRF score DESC。同点は
+    # (source_type, source_id) の辞書順で決定的にタイブレークする (第八巡 #2 —
+    # 同点の並びが揺れると採否 [topk/枠] と固定点併合の結果が呼び出しごとに変わる)。
+    rrf_scored.sort(key=lambda x: (-x[1], -x[2], x[0][0], x[0][1]))
+
+    # Build final result using per-source caps computed at the top.
+    def _select(excluded_perception_targets: set) -> List[RecallHit]:
+        source_counts: dict[str, int] = {}
+        selected: List[RecallHit] = []
+        for sid, match_count, rrf_score in rrf_scored:
+            if len(selected) >= total_cap:
+                break
+            hit = keyword_hits.get(sid) or embedding_hits.get(sid)
+            if not hit:
+                continue
+            # perception → Chronicle の併合: 転写先が採用結果に居る perception は
+            # 選ばない (digest 側が全文を持つ)。除外して空いた枠は、この選抜が
+            # RRF 順にそのまま次の候補で埋める = 再充填 (第七巡 #3 — 後段の
+            # 削除だけだと focus の枠を消費したまま件数が欠ける)。
+            if (
+                hit.source_type == "perception"
+                and hit.chronicle_entry_id
+                and hit.chronicle_entry_id in excluded_perception_targets
+            ):
+                continue
+            st = hit.source_type
+            cap = source_caps.get(st, 0)
+            if source_counts.get(st, 0) >= cap:
+                continue
+            hit.score = rrf_score
+            # Carry the raw cosine similarity onto the returned hit even when the
+            # keyword variant won the ``or`` above (keyword hits have embed_score=None).
+            # A hit present in both maps was compared against the query embedding, so
+            # its cosine lives on the embedding-map twin.
+            if hit.embed_score is None:
+                embed_twin = embedding_hits.get(sid)
+                if embed_twin is not None:
+                    hit.embed_score = embed_twin.embed_score
+            selected.append(hit)
+            source_counts[st] = source_counts.get(st, 0) + 1
+        return selected
+
+    # 併合の基準は「**最終採用結果に**転写先が居るか」(2026-08-19 Codex 第六巡
+    # #2 — 候補集合で判定すると、転写先が RRF/枠/topk で落選したとき perception
+    # ごと消える)。除外が選抜結果を変える (空いた枠に別の Chronicle が入る等)
+    # ので、除外集合 = 「現在の採用結果の Chronicle id」が安定するまで選び直す。
+    # 収束しない稀な振動はループ上限で打ち切り、最後の結果を採る。
+    excluded: set = set()
+    prev_excluded: Optional[set] = None
+    results = _select(excluded)
+    if search_perceptions:
+        for _ in range(10):
+            selected_chronicle_ids = {
+                h.source_id for h in results if h.source_type == "chronicle"
+            }
+            if selected_chronicle_ids == excluded:
+                break  # 固定点: 採用中の Chronicle を指す perception は既に除外済み
+            if prev_excluded is not None and selected_chronicle_ids == prev_excluded:
+                break  # 2 周期の振動 — 打ち切り (最後の結果を採る)
+            prev_excluded = excluded
+            excluded = selected_chronicle_ids
+            results = _select(excluded)
+
+    # 最終ソートも決定的タイブレーク付き (score 同点 → source_type → source_id)。
+    results.sort(key=lambda h: (-h.score, h.source_type, str(h.source_id)))
+    return results

@@ -1,0 +1,233 @@
+.container {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+}
+
+.header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding-bottom: 0.5rem;
+    border-bottom: 1px solid var(--border-color, #ddd);
+}
+
+.headerLeft {
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+}
+
+.headerLeft h3 {
+    margin: 0;
+}
+
+.updatedAt {
+    font-size: 0.75rem;
+    color: var(--text-secondary, #888);
+}
+
+.actions {
+    display: flex;
+    gap: 8px;
+}
+
+.btnPrimary {
+    padding: 6px 12px;
+    background: var(--primary, #4a7eb5);
+    color: var(--primary-foreground, #ffffff);
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 0.85rem;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.btnPrimary:hover {
+    opacity: 0.9;
+}
+
+.btnPrimary:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.btnSecondary {
+    padding: 6px 12px;
+    background: var(--bg-secondary, #fafafa);
+    color: inherit;
+    border: 1px solid var(--border-color, #ccc);
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 0.85rem;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.btnSecondary:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.row {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 12px 14px;
+    background: var(--bg-secondary, #fafafa);
+    border: 1px solid var(--border-color, #e0e0e0);
+    border-radius: 6px;
+}
+
+.rowLeft {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 0;
+    flex: 1;
+}
+
+.rowName {
+    font-weight: 500;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+}
+
+.rowDesc {
+    font-size: 0.82rem;
+    color: var(--text-secondary, #555);
+    line-height: 1.4;
+}
+
+.rowSub {
+    font-size: 0.72rem;
+    color: var(--text-secondary, #888);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.rowActions {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    flex-shrink: 0;
+}
+
+.badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-size: 0.7rem;
+    background: #e0e7ff;
+    color: #3730a3;
+}
+
+.badgeInstalled {
+    background: #d1fae5;
+    color: #065f46;
+}
+
+.badgeUpdate {
+    background: #fef3c7;
+    color: #92400e;
+}
+
+.badgeRequire {
+    background: #fde2e2;
+    color: #991b1b;
+}
+
+.iconBtn {
+    background: none;
+    border: 1px solid var(--border-color, #ccc);
+    cursor: pointer;
+    padding: 4px 8px;
+    border-radius: 4px;
+    color: inherit;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 0.8rem;
+}
+
+.iconBtn:hover {
+    background: var(--bg-hover, rgba(0, 0, 0, 0.04));
+}
+
+.iconBtn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+
+.deleteBtn {
+    color: #c53030;
+}
+
+.empty {
+    padding: 1.5rem;
+    text-align: center;
+    color: var(--text-secondary, #777);
+}
+
+.errorBox {
+    padding: 12px 14px;
+    background: #fef2f2;
+    border: 1px solid #fecaca;
+    border-radius: 6px;
+    color: #991b1b;
+}
+
+.errorBox p {
+    margin: 0;
+}
+
+.errorDetail {
+    font-size: 0.78rem;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    margin-top: 4px !important;
+    word-break: break-all;
+}
+
+/* Dark mode badge overrides — pastel light backgrounds become unreadable on dark */
+:global([data-theme="dark"]) .badge {
+    background: #312e81;
+    color: #c7d2fe;
+}
+
+:global([data-theme="dark"]) .badgeInstalled {
+    background: #064e3b;
+    color: #a7f3d0;
+}
+
+:global([data-theme="dark"]) .badgeUpdate {
+    background: #78350f;
+    color: #fde68a;
+}
+
+:global([data-theme="dark"]) .badgeRequire {
+    background: #7f1d1d;
+    color: #fecaca;
+}
+
+:global([data-theme="dark"]) .deleteBtn {
+    color: #fca5a5;
+}
+
+:global([data-theme="dark"]) .errorBox {
+    background: #450a0a;
+    border-color: #7f1d1d;
+    color: #fecaca;
+}

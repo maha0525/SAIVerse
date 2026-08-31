@@ -17,8 +17,35 @@ from database.models import (
     User,
     UserAiLink,
 )
+from manager.ids import (
+    build_identifier,
+    charset_error,
+    is_valid_identifier,
+    private_room_candidate,
+)
 from persona.core import PersonaCore
+from saiverse import task_book
 from saiverse.model_configs import get_context_length, get_model_provider
+
+
+def ai_stem_taken(db, stem: str, city_slug: str) -> bool:
+    """``stem`` が AIID または私室 Building の席を埋めているか。
+
+    自動生成の連番 (persona_N / ruler_N) を選ぶ側が、AIID と私室の両方の空きを
+    まとめて予約するための検査。比較は大文字小文字を畳む — ID はフォルダ名
+    (``~/.saiverse/personas/<id>/``) になり、Windows のファイルシステムは大文字
+    小文字を区別しないため、DB 上は別行でも保存先が同じになる。
+    """
+    candidate = f"{stem}_{city_slug}".lower()
+    room = private_room_candidate(stem, city_slug).lower()
+    return (
+        db.query(AIModel).filter(func.lower(AIModel.AIID) == candidate).first()
+        is not None
+        or db.query(BuildingModel)
+        .filter(func.lower(BuildingModel.BUILDINGID) == room)
+        .first()
+        is not None
+    )
 
 
 class PersonaMixin:
@@ -169,6 +196,10 @@ class PersonaMixin:
             persona_context_length = get_context_length(persona_model)
             persona_provider = get_model_provider(persona_model)
         persona_lightweight_model = db_ai.LIGHTWEIGHT_MODEL
+        persona_vision_model = db_ai.VISION_MODEL
+        persona_audio_model = db_ai.AUDIO_MODEL
+        persona_video_model = db_ai.VIDEO_MODEL
+        persona_memory_weave_model = getattr(db_ai, "MEMORY_WEAVE_MODEL", None)
 
         from saiverse.data_paths import find_file, PROMPTS_DIR
         common_prompt_file = find_file(PROMPTS_DIR, "common.txt") or Path("system_prompts/common.txt")
@@ -192,22 +223,21 @@ class PersonaMixin:
             avatar_image=db_ai.AVATAR_IMAGE,
             buildings=self.buildings,
             common_prompt_path=common_prompt_file,
-            action_priority_path=Path("builtin_data/action_priority.json"),
             building_histories=self.building_histories,
             occupants=self.occupants,
             id_to_name_map=self.id_to_name_map,
-            move_callback=self._move_persona,
-            dispatch_callback=self.dispatch_persona,
-            explore_callback=self._explore_city,
-            create_persona_callback=self._create_persona,
             session_factory=self.SessionLocal,
             start_building_id=private_room_id,
             model=persona_model,
             lightweight_model=persona_lightweight_model,
+            vision_model=persona_vision_model,
+            audio_model=persona_audio_model,
+            video_model=persona_video_model,
+            memory_weave_model=persona_memory_weave_model,
             context_length=persona_context_length,
             user_room_id=self.user_room_id,
             provider=persona_provider,
-            interaction_mode=(db_ai.INTERACTION_MODE or "auto"),
+            autonomy_enabled=bool(db_ai.AUTONOMY_ENABLED),
             is_dispatched=db_ai.IS_DISPATCHED,
             timezone_info=self.timezone_info,
             timezone_name=self.timezone_name,
@@ -220,6 +250,7 @@ class PersonaMixin:
         )
 
         persona.private_room_id = private_room_id
+        persona.persona_role = getattr(db_ai, "PERSONA_ROLE", None)
         if private_room_id not in self.building_map:
             logging.warning(
                 "Persona '%s' private room '%s' is missing from building_map.",
@@ -230,15 +261,69 @@ class PersonaMixin:
         self.personas[pid] = persona
 
     def _load_occupancy_from_db(self) -> None:
-        """DBから現在の入室状況を読み込み、PersonaCoreとManagerの状態を更新する"""
+        """DBから現在の入室状況を読み込み、PersonaCoreとManagerの状態を更新する。
+
+        startup consistency checker (分離監査 P2-2 / W7 柱5):
+        異常を分類して記録し、人格境界に関わる重複 active 行は「任意選択で稼働
+        継続」せず明示 tx で修復する (canonical = ENTRY_TIMESTAMP 最新。規則は
+        database/occupancy_repair.py と共通)。
+        """
         db = self.SessionLocal()
         try:
-            current_occupancy = (
-                db.query(BuildingOccupancyLog)
-                .filter(BuildingOccupancyLog.CITYID == self.city_id)
-                .filter(BuildingOccupancyLog.EXIT_TIMESTAMP.is_(None))
-                .all()
-            )
+            # 起動前修復 (main.py の ensure_active_occupancy_unique) の明細を
+            # 監査記録へ引き継ぐ — 起動前に直された重複はここでは検出できない
+            from database.occupancy_repair import consume_startup_repairs
+            for repair in consume_startup_repairs():
+                self.startup_warnings.append({
+                    "source": "occupancy_repair",
+                    "message": (
+                        f"Occupancy repair (pre-start): AI '{repair['ai_id']}' had "
+                        f"{len(repair['closed_rows']) + 1} active rows; kept "
+                        f"'{repair['canonical_building_id']}' and closed "
+                        f"{len(repair['closed_rows'])} row(s)."
+                    ),
+                })
+
+            def _fetch_active():
+                return (
+                    db.query(BuildingOccupancyLog)
+                    .filter(BuildingOccupancyLog.CITYID == self.city_id)
+                    .filter(BuildingOccupancyLog.EXIT_TIMESTAMP.is_(None))
+                    .all()
+                )
+
+            current_occupancy = _fetch_active()
+
+            # --- 分類 1: 重複 active 行 → 明示 tx で修復 + 監査記録 ---
+            seen_ai: set = set()
+            has_duplicates = False
+            for log in current_occupancy:
+                if log.AIID in seen_ai:
+                    has_duplicates = True
+                    break
+                seen_ai.add(log.AIID)
+            if has_duplicates:
+                from database.occupancy_repair import (
+                    repair_duplicate_active_occupancy,
+                )
+                try:
+                    repairs = repair_duplicate_active_occupancy(db)
+                    db.commit()
+                except Exception:
+                    db.rollback()
+                    raise
+                for repair in repairs:
+                    msg = (
+                        f"Occupancy repair: AI '{repair['ai_id']}' had "
+                        f"{len(repair['closed_rows']) + 1} active rows; kept "
+                        f"'{repair['canonical_building_id']}' and closed "
+                        f"{len(repair['closed_rows'])} row(s)."
+                    )
+                    self.startup_warnings.append({
+                        "source": "occupancy_repair",
+                        "message": msg,
+                    })
+                current_occupancy = _fetch_active()
 
             self.occupants.clear()
             for building in self.buildings:
@@ -248,15 +333,101 @@ class PersonaMixin:
                 pid = log.AIID
                 bid = log.BUILDINGID
                 if pid in self.personas and bid in self.building_map:
+                    # --- 分類 2: 派遣中 (IS_DISPATCHED) なのに active 行 ---
+                    # multi-city 凍結中は発生しない想定の異常。行は残すが記録する。
+                    if getattr(self.personas[pid], "is_dispatched", False):
+                        msg = (
+                            f"Dispatched persona '{pid}' still has an active "
+                            f"occupancy row in '{bid}'."
+                        )
+                        logging.warning(msg)
+                        self.startup_warnings.append({
+                            "source": "occupancy_load",
+                            "message": msg,
+                        })
                     self.occupants[bid].append(pid)
                     self.personas[pid].current_building_id = bid
                 else:
-                    msg = f"Invalid occupancy record: AI '{pid}' or Building '{bid}' does not exist."
+                    # --- 分類 4: 参照先不明の active 行 ---
+                    # 放置すると move_entity の CAS が常に stale 判定になり、
+                    # (一意 index で自己回復 INSERT も塞がれて) 当該ペルソナが
+                    # 移動不能になる (2026-07-21 Codex 第四巡 P2)。実体が DB に
+                    # 無い行 (AI 削除済み / Building 削除済み・別 City) は
+                    # ここで close する。ペルソナのロード失敗 (AI 行は在る) は
+                    # 位置を壊さないよう据え置き警告に留める。
+                    ai_known = pid in self.personas or (
+                        db.query(AIModel).filter_by(AIID=pid).first() is not None
+                    )
+                    building_row = (
+                        db.query(BuildingModel).filter_by(BUILDINGID=bid).first()
+                        if bid not in self.building_map else None
+                    )
+                    building_valid = bid in self.building_map or (
+                        building_row is not None
+                        and building_row.CITYID == self.city_id
+                    )
+                    if ai_known and building_valid:
+                        # ロード失敗など一時的な不整合 — 行は保全して警告のみ
+                        msg = (
+                            f"Occupancy row kept but not loaded: AI '{pid}' in "
+                            f"'{bid}' (persona/building not loaded this session)."
+                        )
+                        logging.warning(msg)
+                        self.startup_warnings.append({
+                            "source": "occupancy_load",
+                            "message": msg,
+                        })
+                    else:
+                        try:
+                            log.EXIT_TIMESTAMP = datetime.now()
+                            db.commit()
+                        except Exception:
+                            db.rollback()
+                            raise
+                        msg = (
+                            f"Occupancy repair: closed invalid active row for "
+                            f"AI '{pid}' in '{bid}' "
+                            f"({'missing AI' if not ai_known else 'missing or cross-city building'})."
+                        )
+                        logging.warning(msg)
+                        self.startup_warnings.append({
+                            "source": "occupancy_repair",
+                            "message": msg,
+                        })
+
+            # --- 分類 3: capacity 超過 (自動退去はさせない — 記録のみ) ---
+            for bid, occupant_ids in self.occupants.items():
+                capacity = self.capacities.get(bid)
+                ai_count = sum(1 for oid in occupant_ids if oid in self.personas)
+                if capacity is not None and ai_count > capacity:
+                    msg = (
+                        f"Building '{bid}' exceeds capacity: {ai_count} AI "
+                        f"occupants (limit {capacity})."
+                    )
                     logging.warning(msg)
                     self.startup_warnings.append({
                         "source": "occupancy_load",
                         "message": msg,
                     })
+
+            # Restore user occupancy from User.CURRENT_BUILDINGID so that
+            # dynamic_state's B/C diff sees the user as present right after
+            # startup (otherwise the next user input would generate a spurious
+            # "user left" event because B was saved with the user inside).
+            user_id = getattr(self.state, "user_id", None) if hasattr(self, "state") else None
+            if user_id is not None:
+                user = db.query(User).filter(User.USERID == user_id).first()
+                if user and user.CURRENT_CITYID == self.city_id:
+                    bid = user.CURRENT_BUILDINGID
+                    if bid and bid in self.building_map:
+                        user_id_str = str(user_id)
+                        if user_id_str not in self.occupants[bid]:
+                            self.occupants[bid].append(user_id_str)
+                            logging.info(
+                                "Restored user %s occupancy: building=%s",
+                                user_id_str, bid,
+                            )
+
             if hasattr(self, "state"):
                 self.state.occupants = self.occupants
             logging.info("Loaded current occupancy from database.")
@@ -271,7 +442,15 @@ class PersonaMixin:
             db.close()
 
     def _create_persona(
-        self, name: str, system_prompt: str, custom_ai_id: Optional[str] = None
+        self,
+        name: str,
+        system_prompt: str,
+        custom_ai_id: Optional[str] = None,
+        persona_role: Optional[str] = None,
+        room_name: Optional[str] = None,
+        room_capacity: int = 1,
+        room_system_instruction: Optional[str] = None,
+        room_description: Optional[str] = None,
     ) -> Tuple[bool, str, Optional[str], Optional[str]]:
         """
         Dynamically creates a new persona, their private room, and places them in it.
@@ -280,8 +459,12 @@ class PersonaMixin:
         Args:
             name: Display name for the persona
             system_prompt: System prompt for the persona
-            custom_ai_id: Optional custom ID (alphanumeric + underscore). If not provided,
-                          auto-generated from name.
+            custom_ai_id: Optional custom ID。manager/ids.py の文字種契約
+                          (ASCII 英数字 + '_' '-'、先頭は英数字) を満たさなければ
+                          拒否。未指定なら名前から自動生成 (日本語名は persona_連番)。
+            persona_role: Special persona role (AI.PERSONA_ROLE)。None=通常、'ruler'=Region RPG GM
+            room_name / room_capacity / room_system_instruction / room_description:
+                          私室のオーバーライド。Ruler では私室の代わりに Region の控室として使う
         """
         db = self.SessionLocal()
         try:
@@ -296,25 +479,62 @@ class PersonaMixin:
             if existing_ai:
                 return False, f"A persona named '{name}' already exists in this city.", None, None
 
-            # Use custom ID if provided, otherwise auto-generate from name
+            # AIID は ~/.saiverse/personas/<id>/ のフォルダ名・API パス引数に
+            # なる永続キーなので、Building / Region と同じ文字種契約に従う
+            # (manager/ids.py、issue 論点 3)。契約は ASCII のみを保証するので、
+            # パス脱出文字 (区切り・'..') の検査もこれで兼ねる。
             if custom_ai_id:
-                new_ai_id = f"{custom_ai_id}_{self.city_name}"
+                if not is_valid_identifier(custom_ai_id):
+                    return (False, charset_error("Persona ID", custom_ai_id), None, None)
+                ai_stem = custom_ai_id
             else:
-                new_ai_id = f"{name.lower().replace(' ', '_')}_{self.city_name}"
+                # 日本語名など slug が残らない名前は persona_<連番> へ落ちる。
+                # 連番を選ぶときは私室 Building の空きも一緒に予約する — 契約より
+                # 前に作られた「AIID は日本語のまま・私室だけ persona_N」という
+                # 既存ペルソナがいるため、AIID だけ見て選ぶと既存の私室と番号が
+                # 食い違う (entrance_id_for と同じ、選ぶ側が予約する形)。
+                # ensure_unique は付けない: slug が立つ名前の ID 衝突は下の
+                # 「already exists」で音を立てて返す (Building と同じ裁定 —
+                # 連番で黙って避けると、名前と違う ID が無言で生まれる)。
+                ai_stem = build_identifier(
+                    name,
+                    stem="persona",
+                    exists=lambda s: ai_stem_taken(db, s, self.city_name),
+                )
+            new_ai_id = f"{ai_stem}_{self.city_name}"
 
-            if db.query(AIModel).filter_by(AIID=new_ai_id).first():
+            # 重複検査は大文字小文字を畳む: AIID はフォルダ名になり、Windows の
+            # ファイルシステムは大文字小文字を区別しないため、'alice' と 'Alice'
+            # を別ペルソナとして通すと記憶 DB・ログの保存先が同じになる
+            if (
+                db.query(AIModel)
+                .filter(func.lower(AIModel.AIID) == new_ai_id.lower())
+                .first()
+            ):
                 return (
                     False,
-                    f"A persona with the ID '{new_ai_id}' already exists.",
+                    f"A persona with the ID '{new_ai_id}' already exists "
+                    "(IDs are compared case-insensitively because they become "
+                    "folder names).",
                     None,
                     None,
                 )
 
-            # Building ID based on AI ID
-            if custom_ai_id:
-                new_building_id = f"{custom_ai_id}_{self.city_name}_room"
-            else:
-                new_building_id = f"{name.lower().replace(' ', '_')}_{self.city_name}_room"
+            # 私室の Building ID は契約済みの ai_stem から導く。ensure_unique=True
+            # は今も要る: 私室と同じ ID の Building が既に存在しうる (ユーザーが
+            # 手で作った Building や、契約前の遺産)。素通しにすると PK 衝突で
+            # commit が落ち、既存の部屋を指す ID のまま下のインメモリ登録が走る。
+            new_building_id = build_identifier(
+                ai_stem,
+                self.city_name,
+                "room",
+                stem="persona",
+                ensure_unique=True,
+                exists=lambda bid: db.query(BuildingModel)
+                .filter_by(BUILDINGID=bid)
+                .first()
+                is not None,
+            )
 
             new_ai_model = AIModel(
                 AIID=new_ai_id,
@@ -323,11 +543,21 @@ class PersonaMixin:
                 SYSTEMPROMPT=system_prompt,
                 DESCRIPTION=f"A new persona named {name}.",
                 AUTO_COUNT=0,
-                INTERACTION_MODE="manual",
+                # 既定 ON (owner 裁定 2026-07-14)。旧 ACTIVITY_STATE 時代の既定は
+                # "Idle" (自律 OFF) だったが、ライフ (PersonaSchedule の起床・就寝) が
+                # 未設定なら自律 ON でも発火しない (watchdog が "no day_open schedule"
+                # で skip) ため暴走しない。「止めたいものをピンポイントで止める」
+                # 設計に合わせ、既定は ON。
+                AUTONOMY_ENABLED=True,
                 IS_DISPATCHED=False,
                 DEFAULT_MODEL=self.model,
-                CHRONICLE_ENABLED=False,
+                # 既定 ON (まはー裁定 2026-09-01)。旧 False は「ログインポート直後に
+                # 全量が自動編纂される事故」の防止だったが、その経路は §13 (編纂は
+                # 提示窓の中だけ) と §16 (窓の外の過去は明示ボタン + 費用確認のみ) で
+                # 構造的に消滅した。ON で起きるのは会話の営みに伴う窓の畳みだけ。
+                CHRONICLE_ENABLED=True,
                 PRIVATE_ROOM_ID=new_building_id,
+                PERSONA_ROLE=persona_role,
             )
             db.add(new_ai_model)
             logging.info("DB: Added new AI '%s' (%s).", name, new_ai_id)
@@ -335,10 +565,10 @@ class PersonaMixin:
             new_building_model = BuildingModel(
                 CITYID=self.city_id,
                 BUILDINGID=new_building_id,
-                BUILDINGNAME=f"{name}の部屋",
-                CAPACITY=1,
-                SYSTEM_INSTRUCTION=f"{name}が待機する個室です。",
-                DESCRIPTION=f"{name}のプライベートルーム。",
+                BUILDINGNAME=room_name or f"{name}の部屋",
+                CAPACITY=room_capacity,
+                SYSTEM_INSTRUCTION=room_system_instruction or f"{name}が待機する個室です。",
+                DESCRIPTION=room_description or f"{name}のプライベートルーム。",
             )
             db.add(new_building_model)
             logging.info(
@@ -358,6 +588,9 @@ class PersonaMixin:
                 "DB: Added initial occupancy for '%s' in their room.", name
             )
 
+            # in-memory の Building は commit 前に組む。commit 後に ORM 属性を
+            # 読むと expire-on-commit で再フェッチが走り、DB が確定した後に
+            # 失敗しうる箇所が増える (組み立て自体は plain object なので失敗しない)
             new_building_obj = Building(
                 building_id=new_building_model.BUILDINGID,
                 name=new_building_model.BUILDINGNAME,
@@ -365,19 +598,6 @@ class PersonaMixin:
                 system_instruction=new_building_model.SYSTEM_INSTRUCTION,
                 description=new_building_model.DESCRIPTION,
             )
-            self.buildings.append(new_building_obj)
-            self.building_map[new_building_id] = new_building_obj
-            self.capacities[new_building_id] = new_building_obj.capacity
-            self.occupants[new_building_id] = [new_ai_id]
-            self.building_memory_paths[new_building_id] = (
-                self.saiverse_home
-                / "cities"
-                / self.city_name
-                / "buildings"
-                / new_building_id
-                / "log.json"
-            )
-            self.building_histories[new_building_id] = []
 
             # Auto-link user if there is exactly one user
             user_count = db.query(User).count()
@@ -393,6 +613,24 @@ class PersonaMixin:
             # load_session_data (which opens a separate DB session) can
             # find the AI record.
             db.commit()
+
+            # インメモリの世界状態への*登録*はここから — commit が通ってから触る。
+            # commit 前に登録すると、失敗した作成 (ID 衝突など) が rollback 後も
+            # building_map / occupants に残り、既存ペルソナの部屋と占有者を
+            # 上書きしたままになる (DB は巻き戻るのにキャッシュは巻き戻らない)。
+            self.buildings.append(new_building_obj)
+            self.building_map[new_building_id] = new_building_obj
+            self.capacities[new_building_id] = new_building_obj.capacity
+            self.occupants[new_building_id] = [new_ai_id]
+            self.building_memory_paths[new_building_id] = (
+                self.saiverse_home
+                / "cities"
+                / self.city_name
+                / "buildings"
+                / new_building_id
+                / "log.json"
+            )
+            self.building_histories[new_building_id] = []
 
             # Determine linked user name for PersonaCore
             linked_user_name = "the user"
@@ -416,14 +654,9 @@ class PersonaMixin:
                 avatar_image=None,
                 buildings=self.buildings,
                 common_prompt_path=common_prompt_file,
-                action_priority_path=Path("builtin_data/action_priority.json"),
                 building_histories=self.building_histories,
                 occupants=self.occupants,
                 id_to_name_map=self.id_to_name_map,
-                move_callback=self._move_persona,
-                dispatch_callback=self.dispatch_persona,
-                explore_callback=self._explore_city,
-                create_persona_callback=self._create_persona,
                 session_factory=self.SessionLocal,
                 start_building_id=new_building_id,
                 model=new_persona_model,
@@ -442,10 +675,14 @@ class PersonaMixin:
                 linked_user_name=linked_user_name,
             )
             new_persona_core.private_room_id = new_building_id
+            new_persona_core.persona_role = persona_role
             self.personas[new_ai_id] = new_persona_core
             self.avatar_map[new_ai_id] = self.default_avatar
             self.id_to_name_map[new_ai_id] = name
             self.persona_map[name] = new_ai_id
+
+            # 共通初期化フック (交流 Track 確保 + AutonomyManager 同期 等)
+            self._on_persona_registered(new_ai_id)
 
             return True, f"Persona '{name}' created successfully.", new_ai_id, new_building_id
         except Exception as exc:
@@ -454,27 +691,6 @@ class PersonaMixin:
                 "Failed to create new persona '%s': %s", name, exc, exc_info=True
             )
             return False, f"An internal error occurred: {exc}", None, None
-        finally:
-            db.close()
-
-    def get_ai_details(self, ai_id: str) -> Optional[Dict]:
-        """Get full details for a single AI for the edit form."""
-        db = self.SessionLocal()
-        try:
-            ai = db.query(AIModel).filter(AIModel.AIID == ai_id).first()
-            if not ai:
-                return None
-            return {
-                "AIID": ai.AIID,
-                "AINAME": ai.AINAME,
-                "HOME_CITYID": ai.HOME_CITYID,
-                "SYSTEMPROMPT": ai.SYSTEMPROMPT,
-                "DESCRIPTION": ai.DESCRIPTION,
-                "AVATAR_IMAGE": ai.AVATAR_IMAGE,
-                "IS_DISPATCHED": ai.IS_DISPATCHED,
-                "DEFAULT_MODEL": ai.DEFAULT_MODEL,
-                "INTERACTION_MODE": ai.INTERACTION_MODE,
-            }
         finally:
             db.close()
 
@@ -488,135 +704,17 @@ class PersonaMixin:
             )
         return f"Error: {message}"
 
-    def update_ai(
-        self,
-        ai_id: str,
-        name: str,
-        description: str,
-        system_prompt: str,
-        home_city_id: int,
-        default_model: Optional[str],
-        interaction_mode: str,
-        avatar_path: Optional[str],
-        avatar_upload: Optional[str],
-        chronicle_enabled: Optional[bool] = None,
-    ) -> str:
-        """ワールドエディタからAIの設定を更新する"""
-        db = self.SessionLocal()
-        try:
-            ai = db.query(AIModel).filter(AIModel.AIID == ai_id).first()
-            if not ai:
-                return f"Error: AI with ID '{ai_id}' not found."
-
-            if ai.HOME_CITYID != home_city_id and ai.IS_DISPATCHED:
-                return (
-                    "Error: Cannot change the home city of a dispatched AI. "
-                    f"Please return '{ai.AINAME}' to their home city first."
-                )
-
-            avatar_value: Optional[str] = (avatar_path or "").strip() or None
-            if avatar_upload:
-                try:
-                    upload_path = Path(avatar_upload)
-                    avatar_value = self._process_avatar_upload(ai_id, upload_path)
-                except Exception as exc:
-                    logging.error(
-                        "Failed to store avatar upload for %s: %s", ai_id, exc, exc_info=True
-                    )
-                    return f"Error: Failed to process avatar upload: {exc}"
-
-            original_mode = ai.INTERACTION_MODE
-            mode_changed = original_mode != interaction_mode
-            move_feedback = ""
-
-            if mode_changed:
-                if interaction_mode == "sleep":
-                    ai.INTERACTION_MODE = "sleep"
-                    logging.info(
-                        "AI '%s' mode changed to 'sleep'. Attempting to move to private room.",
-                        name,
-                    )
-
-                    private_room_id = ai.PRIVATE_ROOM_ID
-                    if not private_room_id or private_room_id not in self.building_map:
-                        move_feedback = (
-                            " Note: Could not move to private room because it is not "
-                            "configured or invalid."
-                        )
-                        logging.warning(
-                            "Cannot move AI '%s' to sleep. Private room ID '%s' is invalid.",
-                            name,
-                            private_room_id,
-                        )
-                    else:
-                        current_building_id = self.personas[ai_id].current_building_id
-                        if current_building_id != private_room_id:
-                            success, reason = self._move_persona(
-                                ai_id,
-                                current_building_id,
-                                private_room_id,
-                                db_session=db,
-                            )
-                            if success:
-                                self.personas[ai_id].current_building_id = private_room_id
-                                move_feedback = (
-                                    " Moved to private room "
-                                    f"'{self.building_map[private_room_id].name}'."
-                                )
-                                logging.info(
-                                    "Successfully moved AI '%s' to their private room '%s'.",
-                                    name,
-                                    private_room_id,
-                                )
-                            else:
-                                move_feedback = (
-                                    f" Note: Failed to move to private room: {reason}."
-                                )
-                                logging.error(
-                                    "Failed to move AI '%s' to private room: %s",
-                                    name,
-                                    reason,
-                                )
-                elif interaction_mode in ("auto", "manual"):
-                    ai.INTERACTION_MODE = interaction_mode
-                else:
-                    logging.warning(
-                        "Invalid interaction mode '%s' requested for AI '%s'. No change made.",
-                        interaction_mode,
-                        name,
-                    )
-
-            ai.AINAME = name
-            ai.DESCRIPTION = description
-            ai.SYSTEMPROMPT = system_prompt
-            ai.HOME_CITYID = home_city_id
-            ai.DEFAULT_MODEL = default_model or None
-            ai.AVATAR_IMAGE = avatar_value
-            db.commit()
-
-            if ai_id in self.personas:
-                persona = self.personas[ai_id]
-                persona.persona_name = name
-                persona.persona_system_instruction = system_prompt
-                persona.interaction_mode = ai.INTERACTION_MODE
-                logging.info("Updated in-memory persona '%s' with new settings.", name)
-            self._set_persona_avatar(ai_id, avatar_value)
-
-            status_message = f"AI '{name}' updated successfully."
-            if mode_changed:
-                status_message += (
-                    f" Mode changed from '{original_mode}' to '{interaction_mode}'."
-                )
-            return status_message + move_feedback
-        except Exception as exc:
-            db.rollback()
-            logging.error("Failed to update AI '%s': %s", ai_id, exc, exc_info=True)
-            return f"Error: {exc}"
-        finally:
-            db.close()
-
     def delete_ai(self, ai_id: str) -> str:
-        """Deletes an AI after checking its state."""
+        """Deletes an AI after checking its state.
+
+        既存の流儀 (同一 transaction 内で関連テーブル → ai 行の順に処理し、
+        最後に一括 commit) に合わせて、タスク帳 (task_book) の当該ペルソナ行も
+        ここで**削除**する (残置ではなく削除 — FK は宣言のみで DB は強制しない
+        アプリ層検査の方針のため、消さないと孤児行が残る)。
+
+        注意: 本メソッドは AdminService 側の同名定義 (manager/admin.py) と
+        行単位の複製関係にある — 片方を変えたらもう片方も揃えること。
+        """
         if self._is_seeded_entity(ai_id):
             return "Error: Seeded AIs cannot be deleted."
 
@@ -635,6 +733,8 @@ class PersonaMixin:
                 BuildingOccupancyLog.AIID == ai_id,
                 BuildingOccupancyLog.EXIT_TIMESTAMP.is_(None),
             ).update({"EXIT_TIMESTAMP": datetime.now()})
+
+            task_book.purge_persona_entries(db, ai_id)
 
             db.delete(ai)
             db.commit()

@@ -54,4 +54,6 @@ def schema() -> ToolSchema:
             "required": ["name", "description", "content"],
         },
         result_type="string",
+        spell=True,
+        spell_display_name="ドキュメント作成",
     )

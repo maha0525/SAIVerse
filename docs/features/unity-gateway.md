@@ -2,6 +2,8 @@
 
 SAIVerseとUnityクライアントを連携させるための設計書。
 
+> ℹ️ **これは設計書**（feature の完成状態の説明ではない）。Phase 1 の一部は実装済み（`unity_gateway/server.py` / `protocol.py` が存在し、`main.py` に統合されている）。以下の Phase チェックボックスやモジュール構成（`handlers.py` / `state.py` 等）は当初計画で、実装と差がある。**コード例の一部は旧ツール API（`@register_tool` / `tools/defs/`）で書かれており現行と異なる**（現行のツール定義は [ツールの追加](../developer-guide/adding-tools.md) を参照）。WebSocket ポートは 8765。
+
 ## 概要
 
 ### 目的

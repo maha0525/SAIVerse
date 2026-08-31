@@ -1,0 +1,1136 @@
+"""PersonaTaskManager: 統合 Task のライフサイクル管理 (main DB 版)。
+
+旧 track_task (ActionTrack.tasks_json 軽量チェックリスト) と旧 standalone Task
+(per-persona tasks.db のリッチタスク) を 1 枚の ``persona_task`` テーブルに統合した
+上での CRUD + 状態遷移を担う純粋ロジックレイヤー。
+
+責務:
+- Task の作成 / 取得 / 一覧 (親バインドでフィルタ)
+- 状態遷移 (active/paused/completed/cancelled) + ステップ更新
+- 親バインド: Track 内小目標 (track_id) / 未所属。候補は親なし +
+  stage='candidate' (P3c-0 desire 正規化以降。note_id 経由の親バインドは撤去済み)
+
+2026-08-21 に Track 結合の書き込み面を退役させた (track_retirement.md §7.2 ④群):
+昇格 (``promote_to_track``) と旧 track_task 互換層 (``get_track_tasks`` /
+``add_track_task`` / ``complete_track_task`` / ``format_track_task_list``)。
+呼び手 (purpose_tree / track_create スペル / TrackManager のチェックリスト API)
+が全て消えたため。残っているのは素のタスク CRUD と状態遷移。
+
+責務外:
+- スペル登録 (builtin_data/tools 配下で別途)
+- Note (旧概念。P3c① でテーマノードページへ物理統合済み、head セクションでは
+  desk が扱う) との連携
+
+設計: docs/intent/persona_cognition/unified_task_model.md
+"""
+from __future__ import annotations
+
+import json
+import logging
+import re
+import uuid
+from datetime import datetime
+from typing import Any, Callable, Dict, List, Optional, Sequence
+
+from sqlalchemy import func as sa_func
+from sqlalchemy.orm import Session
+
+from database.models import PersonaTask, PersonaTaskHistory, PersonaTaskStep
+from saiverse import clock
+
+LOGGER = logging.getLogger(__name__)
+
+DEFAULT_PRIORITY = "normal"
+
+# task:N 短縮参照子 (Track の t:N と対称、名前空間のみ別)。
+_TASK_REF_RE = re.compile(r"^task:(\d+)$")
+
+# --- Task 状態定数 (standalone 踏襲) ---
+STATUS_PENDING = "pending"
+STATUS_ACTIVE = "active"
+STATUS_PAUSED = "paused"
+STATUS_COMPLETED = "completed"
+STATUS_CANCELLED = "cancelled"
+
+TERMINAL_TASK_STATUSES = frozenset({STATUS_COMPLETED, STATUS_CANCELLED})
+
+# --- 親バインド種別 ---
+PARENT_NOTE = "note"    # 候補 (desire ノート内のやりたいこと)
+PARENT_TRACK = "track"  # Track 内の実行小目標 (旧 track_task)
+
+# --- 欲求の帳簿: desire_state 値 (自律行動 v2 §5.3)。
+# 運用していた saiverse/desire_engine.py は 2026-08-21 に退役した。値は既存 DB 行の
+# 読み取りのために残っている (列の掃除は Track テーブル退役と同じ工程)。---
+DESIRE_STATE_FRESH = "fresh"      # 新鮮 (既定。NULL も fresh 扱い)
+DESIRE_STATE_FADING = "fading"    # 薄れつつある (放置 or 就寝レビューの fading 裁定)
+DESIRE_STATE_EXPIRED = "expired"  # 期限切れ (status=cancelled の論理アーカイブと対で付く)
+
+# --- 目的ノードの段階 (stage; life_concept_map.md §3.1「種・段階・位置」) ---
+# desire と task は同一実体の段階違い (採用の前後で呼び名が変わるだけ)。
+# 物理カラム persona_task.stage が NULL の既存行は derive_stage() で決定論導出する。
+STAGE_CANDIDATE = "candidate"  # 候補 (未採用 = 従来の desire)
+STAGE_ADOPTED = "adopted"      # 採用済 (木の中 = 従来の task)
+STAGE_DORMANT = "dormant"      # 休眠 (薄れても消滅でなく休眠 §5。欲求の期限切れが対応)
+STAGE_COMPLETED = "completed"  # 完了
+STAGE_ABORTED = "aborted"      # 中止
+
+# --- ノード種別 (nature; life_concept_map.md §3 の大枝二種。将来用・値は models.py 参照) ---
+NATURE_PRACTICE = "practice"  # 営み (終わらない)
+NATURE_VENTURE = "venture"    # 企て (全完了で終わる)
+
+
+def derive_stage(
+    status: Optional[str],
+    parent_kind: Optional[str],
+    desire_state: Optional[str],
+) -> str:
+    """stage 列の値を status/parent_kind/desire_state から決定論導出する。
+
+    **P3c-0 (desire 正規化) 以降、これは書き込み時刻印の仕様を移行 SQL 用に
+    写した参照実装としてのみ残る**——実行時の読み出しはもう本関数を経由しない
+    (``_task_to_dict`` は物理カラム ``task.stage`` を直接返す)。
+    ``database/migrate.py`` の一回きり移行ステップがこの規則と同じ CASE 文で
+    既存 NULL 行に物理刻印する。life_concept_map.md §3.1 / §10.1「desire の
+    実装 → 目的ノード stage=候補へ正規化」の仕様書:
+
+    - status=completed → completed
+    - status=cancelled かつ desire の期限切れ (desire_state='expired') → dormant
+      (§5「薄れても消滅でなく休眠」— desire_engine の論理アーカイブが対応)
+    - status=cancelled (その他) → aborted
+    - 生きている行: parent_kind='note' (旧 desire ノートの候補) → candidate、
+      それ以外 (track 内小目標・未所属) → adopted
+    """
+    if status == STATUS_COMPLETED:
+        return STAGE_COMPLETED
+    if status == STATUS_CANCELLED:
+        if parent_kind == PARENT_NOTE and desire_state == DESIRE_STATE_EXPIRED:
+            return STAGE_DORMANT
+        return STAGE_ABORTED
+    if parent_kind == PARENT_NOTE:
+        return STAGE_CANDIDATE
+    return STAGE_ADOPTED
+
+
+class TaskError(Exception):
+    """Base error for PersonaTaskManager."""
+
+
+class TaskNotFoundError(TaskError):
+    """Raised when a task or step cannot be located."""
+
+
+class TaskConflictError(TaskError):
+    """Raised when an optimistic-locking update conflicts."""
+
+
+def _now() -> datetime:
+    # naive datetime は main DB の他テーブル (ActionTrack 等) と同じ慣習。
+    # ``saiverse.clock.now()`` は実モードでは ``datetime.now()`` と同一で、
+    # 一日シミュレータの仮想時刻を尊重する (autonomous_behavior_v2.md §12 の不変条件)。
+    return clock.now()
+
+
+class PersonaTaskManager:
+    """``persona_task`` の永続化と状態遷移を担う。
+
+    全メソッドは 1 トランザクション内で完結する (内部で SessionLocal を開閉する)。
+    返り値は detached な dict (ORM オブジェクトを外に出さない — JSON 化しやすく、
+    セッションクローズ後の遅延ロード事故を防ぐ)。
+    """
+
+    def __init__(self, session_factory: Callable[[], Session]):
+        self.SessionLocal = session_factory
+
+    # ------------------------------------------------------------------
+    # 直列化ヘルパ
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _step_to_dict(step: PersonaTaskStep) -> Dict[str, Any]:
+        return {
+            "id": step.id,
+            "task_id": step.task_id,
+            "position": step.position,
+            "title": step.title,
+            "description": step.description,
+            "status": step.status,
+            "notes": step.notes,
+            "created_at": step.created_at.isoformat() if step.created_at else None,
+            "updated_at": step.updated_at.isoformat() if step.updated_at else None,
+            "completed_at": step.completed_at.isoformat() if step.completed_at else None,
+            "version": step.version,
+        }
+
+    @classmethod
+    def _task_to_dict(
+        cls, task: PersonaTask, steps: Sequence[PersonaTaskStep]
+    ) -> Dict[str, Any]:
+        return {
+            "id": task.id,
+            "short_id": task.short_id,
+            "task_ref": f"task:{task.short_id}" if task.short_id is not None else None,
+            "persona_id": task.persona_id,
+            "parent_kind": task.parent_kind,
+            "note_id": task.note_id,
+            "track_id": task.track_id,
+            "title": task.title,
+            "goal": task.goal,
+            "summary": task.summary,
+            "notes": task.notes,
+            "status": task.status,
+            "priority": task.priority,
+            "origin": task.origin,
+            "active_step_id": task.active_step_id,
+            "due_at": task.due_at.isoformat() if task.due_at else None,
+            "created_at": task.created_at.isoformat() if task.created_at else None,
+            "updated_at": task.updated_at.isoformat() if task.updated_at else None,
+            "completed_at": task.completed_at.isoformat() if task.completed_at else None,
+            "version": task.version,
+            "last_actor": task.last_actor,
+            # 欲求の帳簿 (desire ledger; parent_kind='note' の候補行でのみ意味を持つ)
+            "desire_type": task.desire_type,
+            "desire_source": task.desire_source,
+            "desire_state": task.desire_state,
+            "last_touched_at": task.last_touched_at.isoformat() if task.last_touched_at else None,
+            "touch_count": task.touch_count,
+            # 成果物参照 (judgment_points.md §6 の接地の証跡)。JSON 配列を list に展開。
+            "artifact_refs": cls._parse_artifact_refs(task.artifact_refs),
+            # 目的ノードの段階 (life_concept_map.md §3.1)。P3c-0 以降、stage は
+            # 全書き込み点 (create_task/update_task_status/promote_to_track) で
+            # 物理刻印される — 読み出し時導出 (derive_stage) はもう行わない。
+            "stage": task.stage,
+            "nature": task.nature,
+            # 昇格・命名の来歴 (JSON 配列を list に展開。artifact_refs と同形式)。
+            "promoted_from": cls._parse_artifact_refs(task.promoted_from),
+            "steps": [cls._step_to_dict(s) for s in steps],
+        }
+
+    @staticmethod
+    def _parse_artifact_refs(raw: Optional[str]) -> List[str]:
+        if not raw:
+            return []
+        try:
+            parsed = json.loads(raw)
+        except (TypeError, ValueError):
+            LOGGER.warning("[task] artifact_refs is not valid JSON: %r", raw)
+            return []
+        if not isinstance(parsed, list):
+            return []
+        return [str(r) for r in parsed]
+
+    # ------------------------------------------------------------------
+    # 内部: 取得
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _next_short_id(db: Session, persona_id: str) -> int:
+        """persona 内で次に使う short_id を返す (MAX + 1, 初回は 1)。
+
+        **不変条件**: タスク行は物理削除しない (掃除は status での論理削除) ため、
+        MAX(short_id) は単調増加し、番号は二度と再利用されない (Track と対称)。
+        """
+        current_max = (
+            db.query(sa_func.max(PersonaTask.short_id))
+            .filter(PersonaTask.persona_id == persona_id)
+            .scalar()
+        )
+        return (current_max or 0) + 1
+
+    def resolve_task_ref(self, persona_id: str, ref: str) -> str:
+        """短縮参照 (task:N) または UUID hex を task id に解決する。
+
+        - ``task:5`` → persona_id のタスクで short_id=5 の id を返す
+        - UUID hex (32 文字, ハイフンなし) → そのまま返す
+        - それ以外 → TaskNotFoundError
+        """
+        if not ref:
+            raise TaskNotFoundError("empty task reference")
+        m = _TASK_REF_RE.match(ref.strip())
+        if m:
+            short_id = int(m.group(1))
+            db = self.SessionLocal()
+            try:
+                row = (
+                    db.query(PersonaTask.id)
+                    .filter(
+                        PersonaTask.persona_id == persona_id,
+                        PersonaTask.short_id == short_id,
+                    )
+                    .first()
+                )
+                if row is None:
+                    raise TaskNotFoundError(
+                        f"task not found: task:{short_id} (persona={persona_id})"
+                    )
+                return row[0]
+            finally:
+                db.close()
+        ref_stripped = ref.strip()
+        if len(ref_stripped) == 32 and "-" not in ref_stripped:
+            return ref_stripped
+        raise TaskNotFoundError(
+            f"invalid task reference: {ref!r} (expected 'task:N' or UUID hex)"
+        )
+
+    @staticmethod
+    def _fetch_task_or_raise(db: Session, task_id: str, persona_id: Optional[str]) -> PersonaTask:
+        q = db.query(PersonaTask).filter(PersonaTask.id == task_id)
+        if persona_id is not None:
+            q = q.filter(PersonaTask.persona_id == persona_id)
+        task = q.first()
+        if task is None:
+            raise TaskNotFoundError(f"task not found: {task_id}")
+        return task
+
+    @staticmethod
+    def _fetch_steps(db: Session, task_id: str) -> List[PersonaTaskStep]:
+        return (
+            db.query(PersonaTaskStep)
+            .filter(PersonaTaskStep.task_id == task_id)
+            .order_by(PersonaTaskStep.position.asc())
+            .all()
+        )
+
+    def _insert_history(
+        self,
+        db: Session,
+        *,
+        task_id: str,
+        step_id: Optional[str],
+        event_type: str,
+        payload: Dict[str, Any],
+        actor: Optional[str],
+    ) -> None:
+        db.add(
+            PersonaTaskHistory(
+                id=uuid.uuid4().hex,
+                task_id=task_id,
+                step_id=step_id,
+                event_type=event_type,
+                payload=json.dumps(payload, ensure_ascii=False) if payload else None,
+                actor=actor,
+                created_at=_now(),
+            )
+        )
+
+    # ------------------------------------------------------------------
+    # CRUD
+    # ------------------------------------------------------------------
+
+    def create_task(
+        self,
+        *,
+        persona_id: str,
+        title: str,
+        goal: str = "",
+        summary: str = "",
+        notes: Optional[str] = None,
+        steps: Sequence[Dict[str, Any]] = (),
+        priority: str = DEFAULT_PRIORITY,
+        origin: str = "auto",
+        due_at: Optional[datetime] = None,
+        actor: Optional[str] = None,
+        parent_kind: Optional[str] = None,
+        note_id: Optional[str] = None,
+        track_id: Optional[str] = None,
+        auto_activate: bool = True,
+        desire_type: Optional[str] = None,
+        desire_source: Optional[str] = None,
+        stage: Optional[str] = None,
+        nature: Optional[str] = None,
+        promoted_from: Optional[Sequence[str]] = None,
+    ) -> Dict[str, Any]:
+        """新規 Task を作成する。
+
+        ``parent_kind`` / ``note_id`` / ``track_id`` で所属を決める:
+        - ``parent_kind='note'`` + ``note_id`` = 候補 (desire ノート内)
+        - ``parent_kind='track'`` + ``track_id`` = Track 内小目標
+        - いずれも省略 = 未所属
+
+        ``auto_activate=True`` のとき、そのペルソナに active な Task が無ければ
+        作成した Task を active にし最初の未完ステップを active_step にする。
+
+        ``desire_type`` / ``desire_source`` は欲求の六型と接地参照 (自律行動 v2 §5)。
+        候補 (実効 stage='candidate') では帳簿 (last_touched_at / touch_count /
+        desire_state) も初期化する。値の検証は呼び出し側の責務 — 本レイヤーは
+        priority / origin と同じく永続化のみ担う。
+
+        ``stage`` / ``nature`` / ``promoted_from`` は目的ノードの段階・種別・来歴
+        (life_concept_map.md §3.1)。**P3c-0 (desire 正規化) 以降、stage は常に
+        物理刻印する** — ``stage`` 引数が None なら
+        ``STAGE_CANDIDATE if kind == PARENT_NOTE else STAGE_ADOPTED``
+        (derive_stage() の「生きている行」規則と同じ導出) で確定して書き込む。
+        ``promoted_from`` は ref のシーケンスで、JSON 配列として永続化される
+        (artifact_refs と同形式)。
+        """
+        if not persona_id:
+            raise ValueError("persona_id is required")
+        if not title:
+            raise ValueError("title is required")
+        kind, n_id, t_id = self._normalize_parent(parent_kind, note_id, track_id)
+        effective_stage = stage if stage is not None else (
+            STAGE_CANDIDATE if kind == PARENT_NOTE else STAGE_ADOPTED
+        )
+
+        task_id = uuid.uuid4().hex
+        now = _now()
+        db = self.SessionLocal()
+        try:
+            activate_new = auto_activate and (
+                db.query(PersonaTask)
+                .filter(
+                    PersonaTask.persona_id == persona_id,
+                    PersonaTask.status == STATUS_ACTIVE,
+                )
+                .first()
+                is None
+            )
+
+            short_id = self._next_short_id(db, persona_id)
+            task = PersonaTask(
+                id=task_id,
+                persona_id=persona_id,
+                short_id=short_id,
+                parent_kind=kind,
+                note_id=n_id,
+                track_id=t_id,
+                title=title,
+                goal=goal or "",
+                summary=summary or "",
+                notes=notes,
+                status=STATUS_PENDING,
+                priority=priority,
+                origin=origin,
+                active_step_id=None,
+                due_at=due_at,
+                created_at=now,
+                updated_at=now,
+                completed_at=None,
+                version=0,
+                last_actor=actor,
+                desire_type=desire_type,
+                desire_source=desire_source,
+                # 帳簿の初期化は候補 (実効 stage='candidate') のみ。鮮度の起点 = 作成時刻。
+                # P3c-0: 判定条件を kind==PARENT_NOTE から実効 stage へ変更 — 親なしで
+                # 生まれる候補にも帳簿が正しく付くようにするため。候補を作る経路は
+                # 2026-08-21 に全て退役したので、現在この枝を通る新規行は無い。
+                desire_state=DESIRE_STATE_FRESH if effective_stage == STAGE_CANDIDATE else None,
+                last_touched_at=now if effective_stage == STAGE_CANDIDATE else None,
+                touch_count=0 if effective_stage == STAGE_CANDIDATE else None,
+                stage=effective_stage,
+                nature=nature,
+                promoted_from=(
+                    json.dumps([str(r) for r in promoted_from], ensure_ascii=False)
+                    if promoted_from else None
+                ),
+            )
+            db.add(task)
+
+            step_records: List[PersonaTaskStep] = []
+            for position, step in enumerate(steps, start=1):
+                step_id = uuid.uuid4().hex
+                step_title = step.get("title") or step.get("summary") or f"Step {position}"
+                rec = PersonaTaskStep(
+                    id=step_id,
+                    task_id=task_id,
+                    position=position,
+                    title=step_title,
+                    description=step.get("description"),
+                    status=step.get("status", "pending"),
+                    notes=step.get("notes"),
+                    created_at=now,
+                    updated_at=now,
+                    completed_at=None,
+                    version=0,
+                )
+                db.add(rec)
+                step_records.append(rec)
+
+            self._insert_history(
+                db,
+                task_id=task_id,
+                step_id=None,
+                event_type="create_task",
+                payload={
+                    "title": title,
+                    "goal": goal,
+                    "summary": summary,
+                    "priority": priority,
+                    "origin": origin,
+                    "parent_kind": kind,
+                    "note_id": n_id,
+                    "track_id": t_id,
+                    "desire_type": desire_type,
+                    "desire_source": desire_source,
+                    "steps": [
+                        {"title": s.title, "description": s.description, "status": s.status}
+                        for s in step_records
+                    ],
+                },
+                actor=actor,
+            )
+            db.commit()
+            LOGGER.info(
+                "[task] created %s persona=%s parent=%s/%s status=%s",
+                task_id, persona_id, kind, n_id or t_id, STATUS_PENDING,
+            )
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+
+        if activate_new:
+            try:
+                self.set_active_task(task_id, persona_id=persona_id, actor=actor)
+                created = self.get_task(task_id, persona_id=persona_id)
+                next_step = next(
+                    (s["id"] for s in created["steps"] if s["status"] not in {"completed", "skipped"}),
+                    None,
+                )
+                self.set_active_step(task_id, step_id=next_step, persona_id=persona_id, actor=actor)
+            except TaskConflictError:
+                pass
+
+        return self.get_task(task_id, persona_id=persona_id)
+
+    @staticmethod
+    def _normalize_parent(
+        parent_kind: Optional[str], note_id: Optional[str], track_id: Optional[str]
+    ) -> tuple[Optional[str], Optional[str], Optional[str]]:
+        """親バインドを正規化し排他性を検証する (note か track の一方のみ)。"""
+        if note_id and track_id:
+            raise ValueError("a task cannot bind to both a note and a track")
+        if parent_kind == PARENT_NOTE or (parent_kind is None and note_id):
+            if not note_id:
+                raise ValueError("parent_kind='note' requires note_id")
+            return PARENT_NOTE, note_id, None
+        if parent_kind == PARENT_TRACK or (parent_kind is None and track_id):
+            if not track_id:
+                raise ValueError("parent_kind='track' requires track_id")
+            return PARENT_TRACK, None, track_id
+        if parent_kind not in (None, PARENT_NOTE, PARENT_TRACK):
+            raise ValueError(f"invalid parent_kind: {parent_kind!r}")
+        return None, None, None
+
+    def get_task(self, task_id: str, *, persona_id: Optional[str] = None) -> Dict[str, Any]:
+        db = self.SessionLocal()
+        try:
+            task = self._fetch_task_or_raise(db, task_id, persona_id)
+            steps = self._fetch_steps(db, task_id)
+            return self._task_to_dict(task, steps)
+        finally:
+            db.close()
+
+    def list_tasks(
+        self,
+        persona_id: str,
+        *,
+        statuses: Optional[Sequence[str]] = None,
+        parent_kind: Optional[str] = None,
+        note_id: Optional[str] = None,
+        track_id: Optional[str] = None,
+        stage: Optional[str] = None,
+        desire_only: bool = False,
+        limit: Optional[int] = None,
+        include_steps: bool = True,
+    ) -> List[Dict[str, Any]]:
+        """persona のタスクを条件でフィルタして一覧する。
+
+        ``stage``: 物理刻印された段階 (life_concept_map.md §3.1) で絞る
+        (例: ``stage='candidate'`` = 生きている欲求候補一覧、P3c-0)。
+        ``desire_only``: 欲求の帳簿を持つ行 (``desire_state IS NOT NULL``、
+        = 欲求として生まれた行) だけに絞る。完了/失効/昇格後も帳簿は残るため、
+        stage を問わず「欲求として生まれた行すべて」を見たいとき (day_report の
+        一日新聞) に使う。
+        """
+        db = self.SessionLocal()
+        try:
+            q = db.query(PersonaTask).filter(PersonaTask.persona_id == persona_id)
+            if statuses:
+                q = q.filter(PersonaTask.status.in_(list(statuses)))
+            if parent_kind is not None:
+                q = q.filter(PersonaTask.parent_kind == parent_kind)
+            if note_id is not None:
+                q = q.filter(PersonaTask.note_id == note_id)
+            if track_id is not None:
+                q = q.filter(PersonaTask.track_id == track_id)
+            if stage is not None:
+                q = q.filter(PersonaTask.stage == stage)
+            if desire_only:
+                q = q.filter(PersonaTask.desire_state.isnot(None))
+            q = q.order_by(PersonaTask.updated_at.desc())
+            if limit:
+                q = q.limit(int(limit))
+            tasks = q.all()
+            result: List[Dict[str, Any]] = []
+            for task in tasks:
+                steps = self._fetch_steps(db, task.id) if include_steps else []
+                result.append(self._task_to_dict(task, steps))
+            return result
+        finally:
+            db.close()
+
+    # ------------------------------------------------------------------
+    # 状態遷移
+    # ------------------------------------------------------------------
+
+    def update_task_status(
+        self,
+        task_id: str,
+        *,
+        status: str,
+        actor: Optional[str],
+        persona_id: Optional[str] = None,
+        reason: Optional[str] = None,
+        expected_version: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Task の status を遷移し、stage も刻印規則に従って物理刻印する (P3c-0)。
+
+        刻印規則 (life_concept_map.md §3.1 / concept_consolidation.md P3c-0):
+
+        - status=completed → stage=completed
+        - status=cancelled かつ現在の desire_state が既に 'expired' → stage=dormant
+          (旧 desire_engine.decay_desires は先に desire_state=expired を書いてから
+          この遷移を呼んでいた。同エンジンは 2026-08-21 に退役したので、この枝は
+          既存 DB 行の再遷移でしか通らない)
+        - status=cancelled (その他) → stage=aborted
+        - 生存 status (pending/active/paused) への遷移 → stage は据え置き
+          (candidate は candidate のまま、adopted は adopted のまま)
+        """
+        now = _now()
+        db = self.SessionLocal()
+        try:
+            task = self._fetch_task_or_raise(db, task_id, persona_id)
+            if expected_version is not None and task.version != expected_version:
+                raise TaskConflictError(f"task {task_id} version conflict")
+            task.status = status
+            task.updated_at = now
+            task.completed_at = now if status in TERMINAL_TASK_STATUSES else None
+            task.last_actor = actor
+            task.version = task.version + 1
+            if status == STATUS_COMPLETED:
+                task.stage = STAGE_COMPLETED
+            elif status == STATUS_CANCELLED:
+                task.stage = (
+                    STAGE_DORMANT if task.desire_state == DESIRE_STATE_EXPIRED
+                    else STAGE_ABORTED
+                )
+            self._insert_history(
+                db,
+                task_id=task_id,
+                step_id=None,
+                event_type="update_task_status",
+                payload={"status": status, "reason": reason},
+                actor=actor,
+            )
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+        return self.get_task(task_id, persona_id=persona_id)
+
+    def set_active_task(
+        self, task_id: str, *, persona_id: str, actor: Optional[str]
+    ) -> Dict[str, Any]:
+        """指定 Task を active にし、同ペルソナの既存 active を paused に押し出す。"""
+        now = _now()
+        db = self.SessionLocal()
+        try:
+            task = self._fetch_task_or_raise(db, task_id, persona_id)
+            db.query(PersonaTask).filter(
+                PersonaTask.persona_id == persona_id,
+                PersonaTask.status == STATUS_ACTIVE,
+                PersonaTask.id != task_id,
+            ).update(
+                {
+                    PersonaTask.status: STATUS_PAUSED,
+                    PersonaTask.updated_at: now,
+                    PersonaTask.last_actor: actor,
+                    PersonaTask.version: PersonaTask.version + 1,
+                },
+                synchronize_session=False,
+            )
+            task.status = STATUS_ACTIVE
+            task.updated_at = now
+            task.last_actor = actor
+            task.version = task.version + 1
+            self._insert_history(
+                db,
+                task_id=task_id,
+                step_id=None,
+                event_type="set_active_task",
+                payload={},
+                actor=actor,
+            )
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+        return self.get_task(task_id, persona_id=persona_id)
+
+    def set_active_step(
+        self,
+        task_id: str,
+        *,
+        step_id: Optional[str],
+        persona_id: Optional[str] = None,
+        actor: Optional[str],
+    ) -> Dict[str, Any]:
+        now = _now()
+        db = self.SessionLocal()
+        try:
+            task = self._fetch_task_or_raise(db, task_id, persona_id)
+            task.active_step_id = step_id
+            task.updated_at = now
+            task.last_actor = actor
+            task.version = task.version + 1
+            self._insert_history(
+                db,
+                task_id=task_id,
+                step_id=step_id,
+                event_type="set_active_step",
+                payload={"active_step_id": step_id},
+                actor=actor,
+            )
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+        return self.get_task(task_id, persona_id=persona_id)
+
+    def update_step_status(
+        self,
+        step_id: str,
+        *,
+        status: str,
+        actor: Optional[str],
+        notes: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        now = _now()
+        db = self.SessionLocal()
+        try:
+            step = db.query(PersonaTaskStep).filter(PersonaTaskStep.id == step_id).first()
+            if step is None:
+                raise TaskNotFoundError(f"step not found: {step_id}")
+            task_id = step.task_id
+            step.status = status
+            if notes is not None:
+                step.notes = notes
+            step.updated_at = now
+            step.completed_at = now if status == "completed" else None
+            step.version = step.version + 1
+            task = db.query(PersonaTask).filter(PersonaTask.id == task_id).first()
+            if task is not None:
+                task.updated_at = now
+                task.last_actor = actor
+                task.version = task.version + 1
+            self._insert_history(
+                db,
+                task_id=task_id,
+                step_id=step_id,
+                event_type="update_step_status",
+                payload={"status": status, "notes": notes},
+                actor=actor,
+            )
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+        return self.get_task(task_id)
+
+    def set_steps(
+        self,
+        task_id: str,
+        steps: Sequence[Dict[str, Any]],
+        *,
+        persona_id: Optional[str] = None,
+        actor: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """タスクのステップ群を与えられた配列で**置換**する (= 分解 decompose)。
+
+        既存ステップを削除し ``steps`` (各要素 ``{title, description?, status?}``)
+        を position 1..N で作り直す。active_step は最初の未完ステップに合わせる。
+        分解の知性は呼び出し側 LLM (自律モノローグ) が担い、本メソッドは記録のみ。
+        """
+        now = _now()
+        db = self.SessionLocal()
+        try:
+            task = self._fetch_task_or_raise(db, task_id, persona_id)
+            # 既存ステップを削除して作り直す
+            db.query(PersonaTaskStep).filter(
+                PersonaTaskStep.task_id == task_id
+            ).delete(synchronize_session=False)
+            first_open_step_id: Optional[str] = None
+            for position, step in enumerate(steps, start=1):
+                step_id = uuid.uuid4().hex
+                status = step.get("status", "pending")
+                db.add(PersonaTaskStep(
+                    id=step_id,
+                    task_id=task_id,
+                    position=position,
+                    title=step.get("title") or step.get("summary") or f"Step {position}",
+                    description=step.get("description"),
+                    status=status,
+                    notes=step.get("notes"),
+                    created_at=now,
+                    updated_at=now,
+                    completed_at=now if status == "completed" else None,
+                    version=0,
+                ))
+                if first_open_step_id is None and status not in {"completed", "skipped"}:
+                    first_open_step_id = step_id
+            task.active_step_id = first_open_step_id
+            task.updated_at = now
+            task.last_actor = actor
+            task.version = task.version + 1
+            self._insert_history(
+                db,
+                task_id=task_id,
+                step_id=None,
+                event_type="decompose",
+                payload={"step_count": len(steps),
+                         "titles": [s.get("title") for s in steps]},
+                actor=actor,
+            )
+            db.commit()
+            LOGGER.info("[task] decomposed %s into %d steps", task_id, len(steps))
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+        return self.get_task(task_id, persona_id=persona_id)
+
+    def append_artifact_ref(
+        self,
+        task_id: str,
+        artifact_ref: str,
+        *,
+        persona_id: Optional[str] = None,
+        actor: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """タスクに成果物参照 (Item ID 等) を追記する (重複は無視、履歴つき)。
+
+        セッション終了判断 (judgment_points.md §6) の done 裁定が「このセッションが
+        実際に作った成果物」の ref を刻む接地の証跡。起床判断のバックログ提示
+        (§4「成果物参照の有無つき」) がここを読む。
+        """
+        if not artifact_ref:
+            raise ValueError("artifact_ref is required")
+        now = _now()
+        db = self.SessionLocal()
+        try:
+            task = self._fetch_task_or_raise(db, task_id, persona_id)
+            refs = self._parse_artifact_refs(task.artifact_refs)
+            if artifact_ref not in refs:
+                refs.append(artifact_ref)
+            task.artifact_refs = json.dumps(refs, ensure_ascii=False)
+            task.updated_at = now
+            task.last_actor = actor
+            task.version = task.version + 1
+            self._insert_history(
+                db,
+                task_id=task_id,
+                step_id=None,
+                event_type="append_artifact_ref",
+                payload={"artifact_ref": artifact_ref},
+                actor=actor,
+            )
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+        return self.get_task(task_id, persona_id=persona_id)
+
+    def complete_with_artifact(
+        self,
+        task_id: str,
+        artifact_ref: str,
+        *,
+        persona_id: Optional[str] = None,
+        actor: Optional[str] = None,
+        execution_id: Optional[str] = None,
+        reason: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """完了 status + completed_at + artifact_refs 追記 + 履歴 2 行を
+        **単一 Session/commit** で行う (A9/D7)。
+
+        旧 ``update_task_status`` → ``append_artifact_ref`` の 2 連 commit は
+        後段失敗で「証拠のない completed」(completed かつ成果物なし) を確定させ、
+        終了済みガードにより通常経路では補修不能だった (2026-07-14 監査 A9)。
+        本メソッドは全か無か — 失敗時はタスクは一切変更されない。
+
+        冪等/補修 (audit 修正方針):
+        - 既に completed で、履歴に**同一 execution_id** の complete_with_artifact
+          記録がある場合: artifact_ref が未記帳なら補修 (追記だけ) を行い、
+          記帳済みなら no-op 成功。
+        - 別 execution (または execution_id なし) からの completed への再完了、
+          および cancelled への適用は :class:`TaskConflictError` で棄却する。
+
+        履歴は既存様式 (update_task_status 相当 + append_artifact_ref 相当) の
+        2 行で、payload に ``execution_id`` と ``via='complete_with_artifact'``
+        マーカーを含める (補修判定の読み口)。
+        """
+        if not artifact_ref:
+            raise ValueError("artifact_ref is required")
+        now = _now()
+        db = self.SessionLocal()
+        try:
+            task = self._fetch_task_or_raise(db, task_id, persona_id)
+            if task.status in TERMINAL_TASK_STATUSES:
+                if task.status != STATUS_COMPLETED:
+                    raise TaskConflictError(
+                        f"task {task_id} is {task.status}; "
+                        "complete_with_artifact rejected"
+                    )
+                if not (execution_id and self._history_has_completion_by(
+                        db, task_id, execution_id)):
+                    raise TaskConflictError(
+                        f"task {task_id} is already completed by another "
+                        "execution; re-completion rejected"
+                    )
+                refs = self._parse_artifact_refs(task.artifact_refs)
+                if artifact_ref in refs:
+                    # 同一 execution で全部済み — no-op 成功 (冪等)
+                    LOGGER.info(
+                        "[task] complete_with_artifact no-op: %s already has "
+                        "artifact %r (execution=%s)",
+                        task_id, artifact_ref, execution_id,
+                    )
+                else:
+                    # 補修: 同一 execution が artifact 未記帳 → 追記だけを許可
+                    refs.append(artifact_ref)
+                    task.artifact_refs = json.dumps(refs, ensure_ascii=False)
+                    task.updated_at = now
+                    task.last_actor = actor
+                    task.version = task.version + 1
+                    self._insert_history(
+                        db,
+                        task_id=task_id,
+                        step_id=None,
+                        event_type="append_artifact_ref",
+                        payload={
+                            "artifact_ref": artifact_ref,
+                            "execution_id": execution_id,
+                            "via": "complete_with_artifact",
+                            "repair": True,
+                        },
+                        actor=actor,
+                    )
+                    db.commit()
+                    LOGGER.info(
+                        "[task] complete_with_artifact repaired %s: appended "
+                        "artifact %r (execution=%s)",
+                        task_id, artifact_ref, execution_id,
+                    )
+            else:
+                task.status = STATUS_COMPLETED
+                task.stage = STAGE_COMPLETED
+                task.completed_at = now
+                task.updated_at = now
+                task.last_actor = actor
+                task.version = task.version + 1
+                refs = self._parse_artifact_refs(task.artifact_refs)
+                if artifact_ref not in refs:
+                    refs.append(artifact_ref)
+                task.artifact_refs = json.dumps(refs, ensure_ascii=False)
+                self._insert_history(
+                    db,
+                    task_id=task_id,
+                    step_id=None,
+                    event_type="update_task_status",
+                    payload={
+                        "status": STATUS_COMPLETED,
+                        "reason": reason,
+                        "execution_id": execution_id,
+                        "via": "complete_with_artifact",
+                    },
+                    actor=actor,
+                )
+                self._insert_history(
+                    db,
+                    task_id=task_id,
+                    step_id=None,
+                    event_type="append_artifact_ref",
+                    payload={
+                        "artifact_ref": artifact_ref,
+                        "execution_id": execution_id,
+                        "via": "complete_with_artifact",
+                    },
+                    actor=actor,
+                )
+                db.commit()
+                LOGGER.info(
+                    "[task] complete_with_artifact %s: completed + artifact %r "
+                    "(execution=%s, single commit)",
+                    task_id, artifact_ref, execution_id,
+                )
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+        return self.get_task(task_id, persona_id=persona_id)
+
+    @staticmethod
+    def _history_has_completion_by(
+        db: Session, task_id: str, execution_id: str
+    ) -> bool:
+        """この task を complete_with_artifact で完了させた履歴に、指定の
+        execution_id が記録されているか (補修判定の読み口)。"""
+        rows = (
+            db.query(PersonaTaskHistory)
+            .filter(
+                PersonaTaskHistory.task_id == task_id,
+                PersonaTaskHistory.event_type == "update_task_status",
+            )
+            .all()
+        )
+        for row in rows:
+            try:
+                payload = json.loads(row.payload) if row.payload else {}
+            except (TypeError, ValueError):
+                continue
+            if (
+                isinstance(payload, dict)
+                and payload.get("via") == "complete_with_artifact"
+                and payload.get("execution_id") == execution_id
+            ):
+                return True
+        return False
+
+    # ------------------------------------------------------------------
+    # 親バインド: 昇格 (候補 → Track)
+    # ------------------------------------------------------------------
+
+    def detach_parent(
+        self, task_id: str, *, persona_id: Optional[str] = None, actor: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Task の親バインドを外して未所属にする (parent_kind/note_id/track_id を NULL)。
+
+        行をコピー/破棄せず親だけ変える (履歴つき)。
+        """
+        now = _now()
+        db = self.SessionLocal()
+        try:
+            task = self._fetch_task_or_raise(db, task_id, persona_id)
+            prev_kind, prev_note, prev_track = task.parent_kind, task.note_id, task.track_id
+            task.parent_kind = None
+            task.note_id = None
+            task.track_id = None
+            task.updated_at = now
+            task.last_actor = actor
+            task.version = task.version + 1
+            self._insert_history(
+                db,
+                task_id=task_id,
+                step_id=None,
+                event_type="detach_parent",
+                payload={
+                    "from_parent_kind": prev_kind,
+                    "from_note_id": prev_note,
+                    "from_track_id": prev_track,
+                },
+                actor=actor,
+            )
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+        return self.get_task(task_id, persona_id=persona_id)
+
+    def set_purpose_fields(
+        self,
+        task_id: str,
+        *,
+        persona_id: Optional[str] = None,
+        actor: Optional[str] = None,
+        stage: Optional[str] = None,
+        nature: Optional[str] = None,
+        promoted_from: Optional[Sequence[str]] = None,
+    ) -> Dict[str, Any]:
+        """目的ノードの段階・種別・来歴を更新する (life_concept_map.md §3.1)。
+
+        None の引数は据え置き (部分更新)。stage の遷移規則の検証は呼び出し側
+        (現在の唯一の呼び手は ``purpose_close`` スペルの休眠遷移) の責務 —
+        本レイヤーは priority / origin と同じく永続化のみ担う。
+        履歴 (set_purpose_fields) つき。
+        """
+        if stage is None and nature is None and promoted_from is None:
+            raise ValueError("at least one of stage/nature/promoted_from is required")
+        now = _now()
+        db = self.SessionLocal()
+        try:
+            task = self._fetch_task_or_raise(db, task_id, persona_id)
+            if stage is not None:
+                task.stage = stage
+            if nature is not None:
+                task.nature = nature
+            if promoted_from is not None:
+                task.promoted_from = json.dumps(
+                    [str(r) for r in promoted_from], ensure_ascii=False
+                )
+            task.updated_at = now
+            task.last_actor = actor
+            task.version = task.version + 1
+            self._insert_history(
+                db,
+                task_id=task_id,
+                step_id=None,
+                event_type="set_purpose_fields",
+                payload={
+                    "stage": stage,
+                    "nature": nature,
+                    "promoted_from": list(promoted_from) if promoted_from else None,
+                },
+                actor=actor,
+            )
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+        return self.get_task(task_id, persona_id=persona_id)
+
+    # ------------------------------------------------------------------
+    # 履歴
+    # ------------------------------------------------------------------
+
+    def fetch_history(self, task_id: str, *, limit: Optional[int] = None) -> List[Dict[str, Any]]:
+        db = self.SessionLocal()
+        try:
+            q = (
+                db.query(PersonaTaskHistory)
+                .filter(PersonaTaskHistory.task_id == task_id)
+                .order_by(PersonaTaskHistory.created_at.desc())
+            )
+            if limit:
+                q = q.limit(int(limit))
+            return [
+                {
+                    "id": h.id,
+                    "task_id": h.task_id,
+                    "step_id": h.step_id,
+                    "event_type": h.event_type,
+                    "payload": json.loads(h.payload) if h.payload else {},
+                    "actor": h.actor,
+                    "created_at": h.created_at.isoformat() if h.created_at else None,
+                }
+                for h in q.all()
+            ]
+        finally:
+            db.close()

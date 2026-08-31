@@ -1,0 +1,44 @@
+{
+  "model": "claude-opus-4-8",
+  "system_prompt": "現在の使用モデルはClaude Opus 4.8です。",
+  "display_name": "Claude Opus 4.8",
+  "provider_ref": "anthropic",
+  "context_length": 1000000,
+  "thinking_type": "adaptive",
+  "thinking_effort": "high",
+  "thinking_display": "summarized",
+  "supports_images": true,
+  "parameters": {
+    "thinking_effort": {
+      "type": "enum",
+      "options": [
+        "low",
+        "medium",
+        "high",
+        "max"
+      ],
+      "default": "high",
+      "label": "思考の深さ",
+      "description": "モデルが応答前に費やす思考の度合い。高いほど深く考えますが、コストと応答時間が増えます。"
+    }
+  },
+  "pricing": {
+    "input_per_1m_tokens": 5,
+    "output_per_1m_tokens": 25,
+    "cached_input_per_1m_tokens": 0.5,
+    "cache_write_per_1m_tokens": 6.25,
+    "cache_write_1h_per_1m_tokens": 10,
+    "currency": "USD"
+  },
+  "cache": {
+    "supported": true,
+    "default_enabled": true,
+    "default_ttl": "5m",
+    "ttl_options": [
+      "5m",
+      "1h"
+    ],
+    "type": "explicit",
+    "min_tokens": 4096
+  }
+}

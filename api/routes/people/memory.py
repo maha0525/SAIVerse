@@ -5,6 +5,7 @@ import time
 
 LOGGER = logging.getLogger(__name__)
 from api.deps import get_manager
+from saiverse.data_paths import get_persona_memory_db
 from .models import (
     ThreadSummary, MessageItem, MessagesResponse, UpdateMessageRequest, CreateMessageRequest
 )
@@ -69,7 +70,8 @@ def list_thread_messages(
                 role=m["role"],
                 content=m["content"],
                 created_at=m["created_at"],
-                metadata=m.get("metadata")
+                metadata=m.get("metadata"),
+                has_thought_signature=bool(m.get("thought_signature")),
             )
             for m in msgs
         ]
@@ -106,18 +108,7 @@ def create_message(
 ):
     """Add a new message to a thread."""
     with get_adapter(persona_id, manager) as adapter:
-        # Prepare message dict
         created_at = request.created_at if request.created_at is not None else time.time()
-
-        message = {
-            "role": request.role,
-            "content": request.content,
-            "timestamp": None,  # Will use created_at
-            "metadata": request.metadata,
-        }
-
-        # Extract suffix from thread_id (e.g., "persona:suffix" -> "suffix")
-        thread_suffix = thread_id.split(":", 1)[1] if ":" in thread_id else thread_id
 
         # Use internal method to append message
         # We need to manually create the message to get its ID back
@@ -243,7 +234,7 @@ def rescue_stelis_thread(persona_id: str, manager=Depends(get_manager)):
         )
 
     thread_id = active_summary["thread_id"]
-    db_path = Path.home() / ".saiverse" / "personas" / persona_id / "memory.db"
+    db_path = get_persona_memory_db(persona_id)
     if not db_path.exists():
         raise HTTPException(status_code=404, detail="Memory database not found")
 

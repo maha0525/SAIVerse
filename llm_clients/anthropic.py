@@ -8,6 +8,7 @@ import time
 from typing import Any, Dict, Iterator, List, Optional
 
 import anthropic
+import httpx
 from anthropic import Anthropic
 from anthropic.types import Message
 
@@ -40,12 +41,26 @@ from .exceptions import (
 MAX_RETRIES = 3
 INITIAL_BACKOFF = 1.0  # seconds
 
+# Anthropic client read timeout (seconds). Thinking-heavy models (Fable 5) can
+# spend many minutes thinking before producing output. The SDK default read
+# timeout is 600s (10min):
+#   - Streaming: read is a per-chunk timeout, reset by the API's periodic ping
+#     events, so it is not a wall-clock cap. 600s would already be fine.
+#   - Non-streaming (generate() -> messages.create(), used for structured-output
+#     / worker calls): the whole request must complete within read, so 600s is
+#     an effective wall-clock cap that deep thinking can hit.
+# Passing an explicit timeout also disables the SDK's non-streaming max_tokens
+# guard (anthropic messages.py only guards when client.timeout == DEFAULT_TIMEOUT),
+# so both paths can use the full configured max_tokens without a ValueError.
+# connect stays short so genuine connection failures still fail fast.
+DEFAULT_TIMEOUT_SECONDS = 1800.0  # 30 min; override via ANTHROPIC_TIMEOUT_SECONDS
+
 class AnthropicClient(LLMClient):
     """Native Anthropic Claude client with prompt caching support."""
 
     def __init__(
         self,
-        model: str = "claude-sonnet-4-5-20250514",
+        model: str = "claude-sonnet-5",
         config: Optional[Dict[str, Any]] = None,
         supports_images: bool = True,
     ) -> None:
@@ -58,7 +73,16 @@ class AnthropicClient(LLMClient):
                 user_message="Anthropic APIキーが設定されていません。管理者にお問い合わせください。"
             )
 
-        self.client = Anthropic(api_key=api_key)
+        try:
+            timeout_seconds = float(
+                os.getenv("ANTHROPIC_TIMEOUT_SECONDS", str(DEFAULT_TIMEOUT_SECONDS))
+            )
+        except (TypeError, ValueError):
+            timeout_seconds = DEFAULT_TIMEOUT_SECONDS
+        self.client = Anthropic(
+            api_key=api_key,
+            timeout=httpx.Timeout(timeout_seconds, connect=5.0),
+        )
         self.model = model
 
         cfg = config or {}
@@ -75,6 +99,7 @@ class AnthropicClient(LLMClient):
         thinking_type = cfg.get("thinking_type") or os.getenv("ANTHROPIC_THINKING_TYPE")
         thinking_budget = cfg.get("thinking_budget") or os.getenv("ANTHROPIC_THINKING_BUDGET")
         thinking_effort = cfg.get("thinking_effort") or os.getenv("ANTHROPIC_THINKING_EFFORT")
+        thinking_display = cfg.get("thinking_display") or os.getenv("ANTHROPIC_THINKING_DISPLAY")
 
         # Validate and store thinking_effort
         valid_efforts = ("low", "medium", "high", "max")
@@ -94,7 +119,12 @@ class AnthropicClient(LLMClient):
             # Adaptive thinking (Opus 4.6+): Claude decides when and how much to think
             # budget_tokens is not used with adaptive mode
             self._thinking_config = {"type": "adaptive"}
-            logging.debug("[anthropic] Using adaptive thinking mode (effort=%s)", self._thinking_effort or "default")
+            # Opus 4.7+ defaults display to "omitted" (thinking text is empty).
+            # Set "summarized" to restore visible thinking progress.
+            if thinking_display:
+                self._thinking_config["display"] = thinking_display
+            logging.debug("[anthropic] Using adaptive thinking mode (effort=%s, display=%s)",
+                          self._thinking_effort or "default", thinking_display or "default")
         elif thinking_type or thinking_budget:
             # Manual thinking (legacy): explicit budget_tokens
             self._thinking_config = {}
@@ -144,6 +174,24 @@ class AnthropicClient(LLMClient):
                     self._thinking_effort = value
                 elif value is None:
                     self._thinking_effort = None
+                continue
+            # Handle thinking_budget specially (manual/enabled thinking only;
+            # adaptive thinking ignores budget_tokens and must not be touched)
+            if key == "thinking_budget":
+                if isinstance(self._thinking_config, dict) and self._thinking_config.get("type") == "adaptive":
+                    continue
+                try:
+                    budget = int(value) if value is not None else 0
+                except (TypeError, ValueError):
+                    continue
+                if budget > 0:
+                    if not isinstance(self._thinking_config, dict):
+                        self._thinking_config = {}
+                    self._thinking_config.setdefault("type", "enabled")
+                    self._thinking_config["budget_tokens"] = budget
+                    # max_tokens must exceed the thinking budget (mirrors __init__)
+                    if self._max_tokens <= budget:
+                        self._max_tokens = budget + 4096
                 continue
             if key not in allowed_params:
                 continue
@@ -315,6 +363,7 @@ class AnthropicClient(LLMClient):
             Dict: Structured response or tool call result
         """
         self._store_reasoning([])
+        messages = self._inject_unsupported_media_summaries(messages)
 
         build_result = build_request_params(
             messages=messages,
@@ -391,6 +440,7 @@ class AnthropicClient(LLMClient):
             Text chunks as they are generated
         """
         self._store_reasoning([])
+        messages = self._inject_unsupported_media_summaries(messages)
 
         # For structured output, use non-streaming generate
         if response_schema:
@@ -434,8 +484,11 @@ class AnthropicClient(LLMClient):
 
         last_error: Optional[Exception] = None
         for attempt in range(MAX_RETRIES):
+            outward_chunk_yielded = False
             try:
-                yield from self._iter_stream(request_params, use_tools, cache_ttl)
+                for chunk in self._iter_stream(request_params, use_tools, cache_ttl):
+                    outward_chunk_yielded = True
+                    yield chunk
                 return
             except anthropic.BadRequestError as e:
                 logging.error("[anthropic] Bad request: %s", e)
@@ -448,6 +501,15 @@ class AnthropicClient(LLMClient):
                 raise InvalidRequestError(f"Anthropic streaming API call error: {e}", e)
             except Exception as e:
                 last_error = e
+                if outward_chunk_yielded:
+                    logging.error(
+                        "[anthropic] Streaming failed after output was committed; "
+                        "refusing automatic regeneration"
+                    )
+                    raise _convert_to_llm_error(
+                        e,
+                        "streaming API call after partial output",
+                    ) from e
                 if _should_retry(e) and attempt < MAX_RETRIES - 1:
                     backoff = INITIAL_BACKOFF * (2 ** attempt)
                     logging.warning(

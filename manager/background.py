@@ -1,23 +1,30 @@
 import json
 import logging
 
-from google.genai import errors
-
 from database.models import ThinkingRequest, VisitingAI
 
 
 class DatabasePollingMixin:
-    """Background database polling helpers for SAIVerseManager."""
+    """Background database polling helpers for SAIVerseManager.
 
-    def _db_polling_loop(self):
-        while not self.db_polling_stop_event.wait(3):
-            try:
-                self._check_for_visitors()
-                self._process_thinking_requests()
-                self._check_dispatch_status()
-                self.run_scheduled_prompts()
-            except Exception as exc:
-                logging.error("Error in DB polling loop: %s", exc, exc_info=True)
+    Phase 4-e: 旧 ``_db_polling_loop`` (固定 3 秒 sleep ループ) は廃止。
+    EventScheduler.schedule_periodic 経由で ``_db_polling_tick`` を呼ぶ設計だった。
+
+    ⚠️ multi-city 凍結 (2026-07-16 まはー裁定): 現在このポーリングは
+    EventScheduler に**登録されない** (SAIVerseManager.__init__ 参照)。
+    関数本体は復活時の参考のため残置している。復活時は
+    docs/handoff/2026-07-15_persona_city_building_separation_audit.md の
+    修正方針を正典に再設計する。
+    """
+
+    def _db_polling_tick(self):
+        """1 回分の DB ポーリング処理。EventScheduler.schedule_periodic から呼ばれる。"""
+        try:
+            self._check_for_visitors()
+            self._process_thinking_requests()
+            self._check_dispatch_status()
+        except Exception as exc:
+            logging.error("Error in DB polling tick: %s", exc, exc_info=True)
 
     def _process_thinking_requests(self):
         db = self.SessionLocal()
@@ -52,28 +59,16 @@ class DatabasePollingMixin:
                         info_text_parts.append(f"  - {msg.get('role')}: {msg.get('content')}")
                     info_text = "\n".join(info_text_parts)
 
-                    response_text, _, _ = persona._generate(
-                        user_message=None,
-                        system_prompt_extra=None,
-                        info_text=info_text,
-                        log_extra_prompt=False,
-                        log_user_message=False,
-                    )
+                    messages = [
+                        {"role": "system", "content": persona.persona_system_instruction},
+                        {"role": "user", "content": info_text},
+                    ]
+                    response_text = persona.llm_client.generate(messages, tools=[])
 
                     req.response_text = response_text
                     req.status = "processed"
                     logging.info("Processed thinking request %s for %s.", req.request_id, req.persona_id)
 
-                except errors.ServerError as exc:
-                    logging.warning("LLM Server Error on thinking request %s: %s. Marking as error.", req.request_id, exc)
-                    req.status = "error"
-                    if "503" in str(exc):
-                        req.response_text = (
-                            "[SAIVERSE_ERROR] LLMモデルが一時的に利用できませんでした (503 Server Error)。時間をおいて再度試行してください。詳細: "
-                            f"{exc}"
-                        )
-                    else:
-                        req.response_text = f"[SAIVERSE_ERROR] LLMサーバーで予期せぬエラーが発生しました。詳細: {exc}"
                 except Exception as exc:
                     logging.error("Error processing thinking request %s: %s", req.request_id, exc, exc_info=True)
                     req.status = "error"
@@ -138,17 +133,14 @@ class DatabasePollingMixin:
                     arrived_city_name = dispatch.target_city_name or "不明"
                     logging.info("Dispatch accepted for persona %s. Now in %s.", persona_id, arrived_city_name)
                     persona.is_dispatched = True
-                    persona.interaction_mode = "remote"
                     persona.current_building_id = dispatch.current_building_id
                 elif dispatch.status == "completed":
                     logging.info("Dispatch completed for persona %s. Returning to local state.", persona_id)
                     persona.is_dispatched = False
-                    persona.interaction_mode = "auto"
                     persona.current_building_id = dispatch.current_building_id or persona.current_building_id
                 elif dispatch.status in {"rejected", "failed"}:
                     logging.warning("Dispatch %s for persona %s failed: %s", dispatch.id, persona_id, dispatch.reason)
                     persona.is_dispatched = False
-                    persona.interaction_mode = "auto"
 
         except Exception as exc:
             logging.error("Error during dispatch status check: %s", exc, exc_info=True)

@@ -1,0 +1,56 @@
+{
+  "_comment": "llama.cpp サーバーモデルのテンプレート。コピーして ~/.saiverse/user_data/models/ に配置してください。",
+  "model": "my-local-model",
+  "system_prompt": "",
+  "display_name": "My Local Model (llama.cpp)",
+  "provider_ref": "llama_cpp_server",
+  "context_length": 80000,
+  "metabolism_token_threshold": 72000,
+  "supports_images": false,
+  "supports_structured_output": true,
+  "convert_system_to_user": true,
+  "timeout": 3600,
+  "llama_slot_save_path": "~/.saiverse/llama_cache",
+  "llama_parallel": 1,
+  "parameter_defaults": {
+    "temperature": 1.0,
+    "top_p": 0.95
+  },
+  "parameters": {
+    "temperature": {
+      "type": "float",
+      "min": 0,
+      "max": 2,
+      "step": 0.1,
+      "default": 1.0,
+      "label": "Temperature",
+      "description": "Controls randomness."
+    },
+    "top_p": {
+      "type": "float",
+      "min": 0,
+      "max": 1,
+      "step": 0.05,
+      "default": 0.95,
+      "label": "Top P",
+      "description": "Nucleus sampling cutoff."
+    },
+    "max_tokens": {
+      "type": "int",
+      "min": 32,
+      "max": 8192,
+      "step": 1,
+      "default": 8192,
+      "label": "Max tokens",
+      "description": "Upper bound on generated tokens."
+    }
+  },
+  "llama_server": {
+    "model_path": "~/models/my-model.gguf",
+    "n_gpu_layers": -1,
+    "parallel": 1,
+    "extra_args": [],
+    "_comment_idle_timeout": "任意項目 idle_timeout: 秒数。未使用時に自動停止するまでの時間。0 で無効（常時起動）。未指定ならデフォルト 600（10分）",
+    "_comment_command": "バッチファイル/シェルスクリプトで起動する場合は command にパスを指定。指定時は model_path, n_gpu_layers, extra_args 等は無視される。例: \"command\": \"C:/llama/start.bat\""
+  }
+}

@@ -1,0 +1,37 @@
+{
+  "name": "judgment_on_event",
+  "display_name": "イベント到着判断 (on_event)",
+  "description": "自律行動 v2 の判断点: イベント到着 (来訪・alert・システム通知)。反応を engage_now / insert_slot / note_only / ignore から選ぶ。alert イベントではスキーマが engage_now のみに縮退する (v1 状況 B の「強制」の継承)。ユーザー会話中は原則発火させない (呼び出し側の責務)。詳細は docs/intent/persona_cognition/judgment_points.md §7。",
+  "input_schema": [
+    {"name": "situation_text", "description": "judgment_points が組み立てた状況テキスト (イベント内容 / 現在の活動状態 / 残りの時間割)。", "required": false, "default": ""},
+    {"name": "judgment_context", "description": "finalize の検証・適用に使う文脈 (JSON 文字列: plan_date / is_alert / event_text)。", "required": false, "default": "{}"},
+    {"name": "response_schema", "param_type": "object", "description": "judgment_points が動的に組み立てた JSON Schema (alert 時は reaction が engage_now のみ。slot の ref / facility は実在 enum 注入済み)。", "required": false, "default": null}
+  ],
+  "router_callable": false,
+  "user_selectable": false,
+  "nodes": [
+    {
+      "id": "judge",
+      "type": "llm",
+      "action": "このターンは『内的独白』です。ユーザーには届きません。\n相手に呼びかける文体（「〜ね」「〜だよ」「ありがとう」「お疲れさま」等）は使わず、\n自分自身に語る一人称（例: 「〜と判断する」「〜しよう」「〜の方が自然だな」）で書いてください。\n\n{situation_text}\n\n応答は構造化出力です:\n- monologue: このイベントを受けての素直な思考\n- reaction: どう反応するか（選べる分岐はスキーマにあるものだけです）\n  - engage_now: 今すぐ応対する\n  - insert_slot: 後で取り組むコマを今日の時間割に挿入する。slot に start / kind / ref / facility / budget_rounds / note を書いてください。start は現在時刻より後にしてください（今すぐやるなら engage_now を選ぶこと）\n  - note_only: 応対はせず、覚え書き (memo) だけ残す\n  - ignore: 反応しない",
+      "response_schema_source": "arg:response_schema",
+      "output_key": "judgment",
+      "memorize": null,
+      "speak": false,
+      "next": "finalize"
+    },
+    {
+      "id": "finalize",
+      "type": "tool",
+      "action": "judgment_finalize",
+      "args_input": {
+        "judgment_output": "judgment",
+        "kind": {"$literal": "on_event"},
+        "judgment_context": "judgment_context",
+        "situation_text": "situation_text"
+      },
+      "next": null
+    }
+  ],
+  "start_node": "judge"
+}

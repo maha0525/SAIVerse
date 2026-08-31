@@ -195,7 +195,7 @@ SAIVerse 起動時のログを確認:
 
 ```
 # GPU使用時 - 警告なし
-2024-xx-xx [INFO] sai_memory.memory.recall: Using CUDA for embeddings
+[INFO] sai_memory.memory.recall: Embedder using CUDA for model '...'
 
 # CPU使用時 - 警告が出る（正常動作）
 2024-xx-xx [WARNING] sai_memory.memory.recall: CUDA initialization failed ...; falling back to CPU.

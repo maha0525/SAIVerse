@@ -1,6 +1,9 @@
-import React, { useEffect, useState, useMemo } from 'react';
+import React, { useEffect, useState, useMemo, useRef } from 'react';
 import styles from './ChatOptions.module.css';
 import { X, ChevronDown, Star } from 'lucide-react';
+import { formatCost } from '@/lib/formatCost';
+import ModelEditorModal from './settings/ModelEditorModal';
+import ContextVolumeBar, { ContextStatus, canDrawContextVolumeBar } from './common/ContextVolumeBar';
 
 interface RateLimitInfo {
     rpd: number;
@@ -12,8 +15,9 @@ interface ModelInfo {
     name: string;
     provider?: string | null;
     group?: string | null;  // UI grouping label (falls back to provider)
-    input_price?: number | null;   // USD per 1M input tokens
-    output_price?: number | null;  // USD per 1M output tokens
+    input_price?: number | null;
+    output_price?: number | null;
+    currency?: string;
     rate_limit?: RateLimitInfo | null;
 }
 
@@ -36,14 +40,32 @@ interface CacheConfig {
     cache_type: string | null;
 }
 
+// Phase 1: read-only キャッシュタイマーの status (GET /api/people/{id}/cache-status)
+interface CacheStatus {
+    persona_id: string;
+    model: string | null;
+    supported: boolean;       // Anthropic explicit のみ true
+    cache_type: string | null;
+    active: boolean;          // cache が現在生きているか
+    anchor_updated_at: number | null;  // epoch seconds
+    ttl_seconds: number | null;
+    expires_at: number | null;         // epoch seconds
+    remaining_seconds: number;
+    cache_setting: string;             // Phase 2: 実効 cache 設定 ("off" | "5m" | "1h")
+}
+
+// ContextStatus (GET /api/people/{id}/context-status) の型と横棒の描画は
+// common/ContextVolumeBar に置いてある — Chronicle 生成の確認窓と共有する。
+
 interface ChatOptionsProps {
     isOpen: boolean;
     onClose: () => void;
     currentModel: string;
     onModelChange: (model: string, displayName: string, rateLimit?: RateLimitInfo | null) => void;
+    buildingId?: string | null;  // キャッシュタイマーの persona switcher 用 (occupants 取得)
 }
 
-export default function ChatOptions({ isOpen, onClose, currentModel: propCurrentModel, onModelChange }: ChatOptionsProps) {
+export default function ChatOptions({ isOpen, onClose, currentModel: propCurrentModel, onModelChange, buildingId }: ChatOptionsProps) {
     const [models, setModels] = useState<ModelInfo[]>([]);
     const [currentModel, setCurrentModel] = useState<string>('');
     const [params, setParams] = useState<Record<string, any>>({});
@@ -56,17 +78,25 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
         ttl_options: [],
         cache_type: null
     });
-    const [maxHistoryMessages, setMaxHistoryMessages] = useState<number | null>(null);
-    const [maxHistoryMessagesDefault, setMaxHistoryMessagesDefault] = useState<number | null>(null);
-    const [metabolismEnabled, setMetabolismEnabled] = useState<boolean>(true);
-    const [metabolismKeepMessages, setMetabolismKeepMessages] = useState<number | null>(null);
-    const [metabolismKeepMessagesDefault, setMetabolismKeepMessagesDefault] = useState<number | null>(null);
+    // データ送信量セクションの読み取り専用表示 (設定はモデル定義側 — 2026-07-30
+    // グローバル上書き廃止、docs/issues/chat_options_metabolism_section_redesign.md)
+    const [contextStatus, setContextStatus] = useState<ContextStatus | null>(null);
+    const [contextStatusError, setContextStatusError] = useState(false);
+    // モデル変更後の再取得トリガー (水位はモデル依存なので旧モデルの表示が残る)
+    const [contextStatusReload, setContextStatusReload] = useState(0);
     const [maxImageEmbeds, setMaxImageEmbeds] = useState<number | null>(null);
     const [maxImageEmbedsDefault, setMaxImageEmbedsDefault] = useState<number | null>(null);
     const [historySettingsOpen, setHistorySettingsOpen] = useState(false);
     const [modelParamsOpen, setModelParamsOpen] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [favoriteModels, setFavoriteModels] = useState<string[]>([]);
+    const [editorOpen, setEditorOpen] = useState(false);
+    const [savingAs, setSavingAs] = useState(false);
+    // Cache timer (Phase 1): persona switcher + read-only status polling
+    const [cachePersonas, setCachePersonas] = useState<{ id: string; name: string }[]>([]);
+    const [selectedCachePersonaId, setSelectedCachePersonaId] = useState<string>('');
+    const [cacheStatus, setCacheStatus] = useState<CacheStatus | null>(null);
+    const [nowMs, setNowMs] = useState<number>(() => Date.now());
 
     useEffect(() => {
         if (isOpen) {
@@ -74,7 +104,102 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
         }
     }, [isOpen]);
 
-    const fetchData = async () => {
+    // Cache timer: load building occupants (persona switcher source) on open
+    useEffect(() => {
+        if (!isOpen || !buildingId) {
+            setCachePersonas([]);
+            return;
+        }
+        let cancelled = false;
+        (async () => {
+            try {
+                const res = await fetch(`/api/info/details?building_id=${encodeURIComponent(buildingId)}`);
+                if (!res.ok) return;
+                const data = await res.json();
+                const occ = (data.occupants || []).map((o: { id: string; name: string }) => ({ id: o.id, name: o.name }));
+                if (cancelled) return;
+                setCachePersonas(occ);
+                setSelectedCachePersonaId(prev =>
+                    prev && occ.some((o: { id: string }) => o.id === prev) ? prev : (occ[0]?.id || '')
+                );
+            } catch (e) {
+                console.error('Failed to fetch building occupants for cache timer', e);
+            }
+        })();
+        return () => { cancelled = true; };
+    }, [isOpen, buildingId]);
+
+    // Cache timer: poll cache-status for the selected persona every 2s
+    useEffect(() => {
+        if (!isOpen || !selectedCachePersonaId) {
+            setCacheStatus(null);
+            return;
+        }
+        let cancelled = false;
+        const poll = async () => {
+            try {
+                const res = await fetch(`/api/people/${encodeURIComponent(selectedCachePersonaId)}/cache-status`);
+                if (!res.ok) return;
+                const data = await res.json();
+                if (!cancelled) {
+                    // cacheStatus と nowMs を同時に同期。これをしないと、開いた瞬間は
+                    // マウント時の古い nowMs で残り時間が計算され、最初の 1s ティックまで
+                    // 変な値が表示される。poll は開いた直後に即実行されるので初回から正しくなる。
+                    setCacheStatus(data);
+                    setNowMs(Date.now());
+                }
+            } catch {
+                // network error: keep last known status, retry next tick
+            }
+        };
+        poll();
+        const id = setInterval(poll, 2000);
+        return () => { cancelled = true; clearInterval(id); };
+    }, [isOpen, selectedCachePersonaId]);
+
+    // Cache timer: 1s local ticker for smooth countdown between 2s polls
+    useEffect(() => {
+        if (!isOpen || !cacheStatus?.active || !cacheStatus.expires_at) return;
+        const id = setInterval(() => setNowMs(Date.now()), 1000);
+        return () => clearInterval(id);
+    }, [isOpen, cacheStatus?.active, cacheStatus?.expires_at]);
+
+    // データ送信量: 選択ペルソナの提示コンテキスト状態。開いた時・ペルソナ切替時・
+    // モデル変更後 (contextStatusReload) に取得する — 計測は読み戻しの読み取り専用
+    // 計画を再利用していて DB 読みを伴うため、cache-status のような 2 秒ポーリングは
+    // しない。切替時は前の値を即座に消す (取得失敗時に別ペルソナ/旧モデルの値を
+    // 出し続けない — Codex 指摘 2026-07-30)。
+    useEffect(() => {
+        setContextStatus(null);
+        setContextStatusError(false);
+        if (!isOpen || !selectedCachePersonaId) return;
+        let cancelled = false;
+        (async () => {
+            try {
+                const res = await fetch(`/api/people/${encodeURIComponent(selectedCachePersonaId)}/context-status`);
+                if (cancelled) return;
+                if (!res.ok) {
+                    setContextStatusError(true);
+                    return;
+                }
+                const data = await res.json();
+                if (!cancelled) setContextStatus(data);
+            } catch (e) {
+                console.error('Failed to fetch context status', e);
+                if (!cancelled) setContextStatusError(true);
+            }
+        })();
+        return () => { cancelled = true; };
+    }, [isOpen, selectedCachePersonaId, contextStatusReload]);
+
+    // stillValid: 応答の**適用直前**に呼ばれる有効性チェック (省略時は常に適用)。
+    // 遅延 resync が渡す — 開始済みの fetch は clearTimeout では止まらないので、
+    // 取得中に新しいモデル選択が入った場合は結果を捨てる (Codex 指摘 2026-07-30)。
+    // onClick ハンドラから直接呼ばれると第一引数に MouseEvent が入るため、関数で
+    // ないものは無視する。
+    const fetchData = async (stillValid?: unknown) => {
+        const isStillValid: () => boolean =
+            typeof stillValid === 'function' ? (stillValid as () => boolean) : () => true;
         setLoading(true);
         setError(null);
 
@@ -89,6 +214,7 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
                 fetch('/api/config/cache', { signal: controller.signal }),
                 fetch('/api/config/favorite-models', { signal: controller.signal })
             ]);
+            if (!isStillValid()) return; // 取得中に新しい選択が入った — 結果を捨てる
 
             const failures: string[] = [];
             let fetchedModels: ModelInfo[] = [];
@@ -97,6 +223,7 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
             if (results[0].status === 'fulfilled' && results[0].value.ok) {
                 try {
                     fetchedModels = await results[0].value.json();
+                    if (!isStillValid()) return; // json() の await 中の追い越しも捨てる
                     setModels(fetchedModels);
                 } catch (e) { console.error("Failed to parse models response", e); failures.push('models'); }
             } else {
@@ -109,17 +236,13 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
             if (results[1].status === 'fulfilled' && results[1].value.ok) {
                 try {
                     const config = await results[1].value.json();
+                    if (!isStillValid()) return;
                     const modelId = config.current_model || '';
                     setCurrentModel(modelId);
                     const modelInfo = fetchedModels.find(m => m.id === modelId);
                     onModelChange(modelId, modelInfo?.name || '', modelInfo?.rate_limit);
                     setParamSpecs(config.parameters || {});
                     setParams(config.current_values || {});
-                    setMaxHistoryMessages(config.max_history_messages ?? null);
-                    setMaxHistoryMessagesDefault(config.max_history_messages_model_default ?? null);
-                    setMetabolismEnabled(config.metabolism_enabled ?? true);
-                    setMetabolismKeepMessages(config.metabolism_keep_messages ?? null);
-                    setMetabolismKeepMessagesDefault(config.metabolism_keep_messages_model_default ?? null);
                     setMaxImageEmbeds(config.max_image_embeds ?? null);
                     setMaxImageEmbedsDefault(config.max_image_embeds_model_default ?? null);
                 } catch (e) { console.error("Failed to parse config response", e); failures.push('config'); }
@@ -131,7 +254,11 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
 
             // Cache
             if (results[2].status === 'fulfilled' && results[2].value.ok) {
-                try { setCacheConfig(await results[2].value.json()); }
+                try {
+                    const cacheData = await results[2].value.json();
+                    if (!isStillValid()) return;
+                    setCacheConfig(cacheData);
+                }
                 catch (e) { console.error("Failed to parse cache response", e); failures.push('cache'); }
             } else {
                 const reason = results[2].status === 'rejected' ? results[2].reason : `HTTP ${results[2].value.status}`;
@@ -143,6 +270,7 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
             if (results[3].status === 'fulfilled' && results[3].value.ok) {
                 try {
                     const favData = await results[3].value.json();
+                    if (!isStillValid()) return;
                     setFavoriteModels(favData.models || []);
                 } catch (e) { console.error("Failed to parse favorites response", e); }
             }
@@ -174,6 +302,8 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
         xai: 'xAI',
         ollama: 'Ollama',
         llama_cpp: 'llama.cpp',
+        plamo: 'PLaMo',
+        sakana: 'Sakana AI',
     };
 
     const groupLabel = (group: string): string => {
@@ -220,110 +350,119 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
         return { favorites, byGroup, sortedGroups };
     }, [models, favoriteModels]);
 
-    const handleModelChange = async (modelId: string) => {
+    // モデル変更は直列化する — 素早い A→B 切替で A の応答が後着すると、選択欄は B
+    // なのにパラメータ・水位表示が A に戻る (Codex 指摘 2026-07-30)。seq が最新で
+    // ない仕事は POST 自体を送らず、最後の選択だけをサーバーに確定させる。
+    // client_id はマウントごとの世代の名前空間 — サーバーの世代ガードはこの中で
+    // だけ効く (リロードや別タブを 409 にしない)。
+    const modelChangeSeqRef = useRef(0);
+    const modelChangeChainRef = useRef<Promise<void>>(Promise.resolve());
+    const modelChangeClientIdRef = useRef<string>(
+        `chat-options-${Math.random().toString(36).slice(2)}-${Date.now()}`,
+    );
+    const modelResyncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+    const handleModelChange = (modelId: string) => {
         setCurrentModel(modelId);
         // Find display name from models list
         const modelInfo = models.find(m => m.id === modelId);
         onModelChange(modelId, modelInfo?.name || '', modelInfo?.rate_limit); // Notify parent component
-        // Save immediately
+        const seq = ++modelChangeSeqRef.current;
+        // 前の選択が予約した遅延 resync は取り消す — 古い状態で表示を巻き戻すため
+        if (modelResyncTimerRef.current) {
+            clearTimeout(modelResyncTimerRef.current);
+            modelResyncTimerRef.current = null;
+        }
+        // .catch: applyModelChange は内部で全例外を握るが、万一 reject が漏れた
+        // 場合にチェーンが死んで以後の選択が送信されなくなるのを防ぐ保険。
+        modelChangeChainRef.current = modelChangeChainRef.current
+            .then(() => applyModelChange(modelId, seq))
+            .catch(() => {});
+    };
+
+    const applyModelChange = async (modelId: string, seq: number) => {
+        if (seq !== modelChangeSeqRef.current) return; // もっと新しい選択が控えている
+        // 期限なしの POST が pending のままだとチェーン全体が永久停止し、以後の
+        // 選択がサーバーへ届かなくなる (Codex 指摘 2026-07-30) — 10 秒で中断して
+        // 失敗扱いにする (fetchData と同じ期限)。
+        const controller = new AbortController();
+        let timedOut = false;
+        const timeoutId = setTimeout(() => { timedOut = true; controller.abort(); }, 10000);
         try {
             const res = await fetch('/api/config/model', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ model: modelId })
+                // client_id + seq: サーバー側の世代ガード — abort した古い要求が
+                // 遅れて完了しても、同一クライアントの新しい選択を上書きしない
+                // (Codex 指摘 2026-07-30)
+                body: JSON.stringify({
+                    model: modelId, seq, client_id: modelChangeClientIdRef.current,
+                }),
+                signal: controller.signal,
             });
-            if (res.ok) {
-                // Use inline parameters from response (no separate fetch needed)
-                const data = await res.json();
-                setParamSpecs(data.parameters || {});
-                setParams(data.current_values || {});
-                setMaxHistoryMessages(data.max_history_messages ?? null);
-                setMaxHistoryMessagesDefault(data.max_history_messages_model_default ?? null);
-                setMetabolismEnabled(data.metabolism_enabled ?? true);
-                setMetabolismKeepMessages(data.metabolism_keep_messages ?? null);
-                setMetabolismKeepMessagesDefault(data.metabolism_keep_messages_model_default ?? null);
-                setMaxImageEmbeds(data.max_image_embeds ?? null);
-                setMaxImageEmbedsDefault(data.max_image_embeds_model_default ?? null);
+            if (seq !== modelChangeSeqRef.current) return; // 古い応答は適用しない
+            if (res.status === 409) {
+                // 別の (より新しい) 選択が適用済み — エラーではなく実状態に合わせる
+                await fetchData();
+                return;
             }
+            if (!res.ok) {
+                // 失敗: サーバーの実状態へ表示を合わせ直した上でエラーを出す
+                await fetchData();
+                setError('モデルの変更に失敗しました');
+                return;
+            }
+            // Use inline parameters from response (no separate fetch needed)
+            const data = await res.json();
+            // サーバー正で選択を確定する — 途中で走った resync が表示を巻き戻して
+            // いても、最新選択の成功応答が上書きして最終状態を一致させる
+            if (data.current_model) {
+                setCurrentModel(data.current_model);
+                const appliedInfo = models.find(m => m.id === data.current_model);
+                onModelChange(data.current_model, appliedInfo?.name || '', appliedInfo?.rate_limit);
+            }
+            setParamSpecs(data.parameters || {});
+            setParams(data.current_values || {});
+            setMaxImageEmbeds(data.max_image_embeds ?? null);
+            setMaxImageEmbedsDefault(data.max_image_embeds_model_default ?? null);
+            // 水位はモデル依存 — モデルが変わったら状態表示を取り直す
+            setContextStatus(null);
+            setContextStatusReload(n => n + 1);
 
             // Refetch cache config since it depends on selected model
-            const cacheRes = await fetch('/api/config/cache');
+            const cacheRes = await fetch('/api/config/cache', { signal: controller.signal });
+            if (seq !== modelChangeSeqRef.current) return;
             if (cacheRes.ok) {
                 setCacheConfig(await cacheRes.json());
             }
         } catch (e) {
             console.error("Failed to set model", e);
+            if (seq === modelChangeSeqRef.current) {
+                await fetchData();
+                setError('モデルの変更に失敗しました');
+                if (timedOut) {
+                    // abort はサーバー側の適用を止めない — 遅れて確定した状態を
+                    // 拾い直す。ただし予約後に新しい選択が入ったら実行しない
+                    // (古い状態で新選択の表示を巻き戻すため — Codex 指摘 5巡目)。
+                    // 完全な保証はサーバーの世代ガードが持つ。
+                    modelResyncTimerRef.current = setTimeout(() => {
+                        modelResyncTimerRef.current = null;
+                        // 開始前 + 応答適用直前の両方で世代を確認 — 発火済みの
+                        // resync は clearTimeout では止まらないため、適用側でも
+                        // 最新世代でなければ結果を捨てる
+                        const stillValid = () => seq === modelChangeSeqRef.current;
+                        if (stillValid()) fetchData(stillValid);
+                    }, 3000);
+                }
+            }
+        } finally {
+            clearTimeout(timeoutId);
         }
     };
 
     const handleParamChange = (key: string, value: any) => {
         const newParams = { ...params, [key]: value };
         setParams(newParams);
-    };
-
-    const handleMaxHistoryMessagesInput = (value: string) => {
-        const numValue = value === '' ? null : parseInt(value, 10);
-        if (numValue !== null && (isNaN(numValue) || numValue < 1)) return;
-        setMaxHistoryMessages(numValue);
-    };
-
-    const handleMaxHistoryMessagesCommit = async () => {
-        try {
-            await fetch('/api/config/max-history-messages', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ value: maxHistoryMessages })
-            });
-        } catch (e) {
-            console.error("Failed to update max history messages", e);
-        }
-    };
-
-    const handleMetabolismEnabledChange = async (enabled: boolean) => {
-        setMetabolismEnabled(enabled);
-        try {
-            await fetch('/api/config/metabolism', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ enabled })
-            });
-        } catch (e) {
-            console.error("Failed to update metabolism settings", e);
-        }
-    };
-
-    const handleMetabolismKeepMessagesInput = (value: string) => {
-        // Local state only — API call deferred to onBlur to avoid
-        // intermediate values (e.g. "4" while typing "40") being rejected.
-        const numValue = value === '' ? null : parseInt(value, 10);
-        if (numValue !== null && (isNaN(numValue) || numValue < 1)) return;
-        setMetabolismKeepMessages(numValue);
-    };
-
-    const getMaxKeepMessages = (): number | null => {
-        const highWm = maxHistoryMessages ?? maxHistoryMessagesDefault;
-        return highWm != null ? Math.max(1, highWm - 20) : null;
-    };
-
-    const handleMetabolismKeepMessagesCommit = async () => {
-        let numValue = metabolismKeepMessages;
-
-        // Auto-clamp to max allowed value
-        const maxAllowed = getMaxKeepMessages();
-        if (numValue != null && maxAllowed != null && numValue > maxAllowed) {
-            numValue = maxAllowed;
-            setMetabolismKeepMessages(numValue);
-        }
-
-        try {
-            await fetch('/api/config/metabolism', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ keep_messages: numValue })
-            });
-        } catch (e) {
-            console.error("Failed to update metabolism keep_messages", e);
-        }
     };
 
     const handleMaxImageEmbedsInput = (value: string) => {
@@ -344,31 +483,19 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
         }
     };
 
-    const handleCacheEnabledChange = async (enabled: boolean) => {
-        const newConfig = { ...cacheConfig, enabled };
-        setCacheConfig(newConfig);
+    // Phase 2: per-persona cache 設定 ("off" | "5m" | "1h")
+    const handleCacheSettingChange = async (setting: string) => {
+        if (!selectedCachePersonaId) return;
+        // 楽観更新: セレクタを即反映。残り時間 (ttl_seconds/expires_at) は次の poll で更新される。
+        setCacheStatus(prev => (prev ? { ...prev, cache_setting: setting } : prev));
         try {
-            await fetch('/api/config/cache', {
+            await fetch(`/api/people/${encodeURIComponent(selectedCachePersonaId)}/cache-config`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ enabled })
+                body: JSON.stringify({ setting }),
             });
         } catch (e) {
-            console.error("Failed to update cache settings", e);
-        }
-    };
-
-    const handleCacheTtlChange = async (ttl: string) => {
-        const newConfig = { ...cacheConfig, ttl };
-        setCacheConfig(newConfig);
-        try {
-            await fetch('/api/config/cache', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ ttl })
-            });
-        } catch (e) {
-            console.error("Failed to update cache TTL", e);
+            console.error('Failed to set per-persona cache setting', e);
         }
     };
 
@@ -383,6 +510,155 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
         } catch (e) {
             console.error("Failed to save params", e);
         }
+    };
+
+    const buildSaveFromChatPayload = (targetKey: string, displayName: string, overwrite: boolean) => ({
+        source_model: currentModel,
+        target_key: targetKey,
+        display_name: displayName,
+        parameters: params,
+        cache_enabled: cacheConfig.supported ? cacheConfig.enabled : null,
+        cache_ttl: cacheConfig.supported ? cacheConfig.ttl : null,
+        max_image_embeds: maxImageEmbeds,
+        overwrite,
+    });
+
+    const handleSaveAs = async () => {
+        if (!currentModel) return;
+        const newKey = window.prompt('新しいモデルキー (ファイル名) を入力:', `${currentModel}-tweaked`);
+        if (!newKey) return;
+        const currentDisplay = models.find(m => m.id === currentModel)?.name || currentModel;
+        const newDisplay = window.prompt('表示名を入力:', `${currentDisplay} (custom)`);
+        if (!newDisplay) return;
+
+        setSavingAs(true);
+        try {
+            const res = await fetch('/api/config/models/save-from-chat', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(buildSaveFromChatPayload(newKey, newDisplay, false)),
+            });
+            if (!res.ok) {
+                alert(`保存に失敗しました: ${await res.text()}`);
+                return;
+            }
+            // Refresh model list so the new model appears in the dropdown
+            const modelsRes = await fetch('/api/config/models');
+            if (modelsRes.ok) setModels(await modelsRes.json());
+            alert('新しいモデルとして保存しました');
+        } catch (e) {
+            alert(`保存に失敗しました: ${e}`);
+        } finally {
+            setSavingAs(false);
+        }
+    };
+
+    const handleOverwrite = async () => {
+        if (!currentModel) return;
+        const modelInfo = models.find(m => m.id === currentModel);
+        const displayName = modelInfo?.name || currentModel;
+        if (!window.confirm(`現在の設定を「${displayName}」に上書き保存しますか？\n\n※ builtin/expansion モデルの場合は user_data に上書きコピーが作成されます (元のファイルは変更されません)。`)) return;
+
+        setSavingAs(true);
+        try {
+            const res = await fetch('/api/config/models/save-from-chat', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(buildSaveFromChatPayload(currentModel, displayName, true)),
+            });
+            if (!res.ok) {
+                alert(`上書き保存に失敗しました: ${await res.text()}`);
+                return;
+            }
+            alert('上書き保存しました');
+        } catch (e) {
+            alert(`上書き保存に失敗しました: ${e}`);
+        } finally {
+            setSavingAs(false);
+        }
+    };
+
+    const renderCacheTimerBody = () => {
+        if (!cacheStatus) {
+            return <span className={styles.hint}>読み込み中...</span>;
+        }
+        if (!cacheStatus.supported) {
+            return <span className={styles.hint}>このモデルは明示的キャッシュに非対応です（タイマー対象外）。</span>;
+        }
+        if (cacheStatus.cache_setting === 'off') {
+            return <span className={styles.hint}>このペルソナはキャッシュ無効です。</span>;
+        }
+        if (!cacheStatus.active || !cacheStatus.expires_at || !cacheStatus.ttl_seconds) {
+            return <span className={styles.hint}>キャッシュは現在効いていません（次の発話で作成されます）。</span>;
+        }
+        const remainingSec = Math.max(0, Math.round((cacheStatus.expires_at * 1000 - nowMs) / 1000));
+        const pct = Math.max(0, Math.min(100, (remainingSec / cacheStatus.ttl_seconds) * 100));
+        let color = '#34d399';
+        if (pct < 15) color = '#f87171';
+        else if (pct < 40) color = '#fbbf24';
+        const mm = Math.floor(remainingSec / 60);
+        const ss = remainingSec % 60;
+        const timeText = `${mm}:${String(ss).padStart(2, '0')}`;
+        const isLive = remainingSec > 0;
+        return (
+            <>
+                <div className={styles.timerRow}>
+                    <span className={`${styles.timerStatusDot} ${isLive ? styles.timerActive : styles.timerInactive}`} />
+                    <div className={styles.timerBar}>
+                        <div className={styles.timerBarFill} style={{ width: `${pct}%`, background: color }} />
+                    </div>
+                    <span className={styles.timerText}>残り {timeText}</span>
+                </div>
+                <span className={styles.hint}>
+                    キャッシュ有効中。残り時間内に発話すると cache hit（格安）になります。
+                </span>
+            </>
+        );
+    };
+
+    // データ送信量: 読み取り専用の状態表示。会話履歴は始点を固定したまま送られ、
+    // 上限を超えると古い順にあらすじへ畳まれる。設定はモデル定義側 (モデル編集画面)。
+    const renderContextStatusBody = () => {
+        if (!selectedCachePersonaId) {
+            return <span className={styles.hint}>ペルソナのいる建物で開くと、会話コンテキストの状態が表示されます。</span>;
+        }
+        if (contextStatusError) {
+            return <span className={styles.hint}>状態を取得できませんでした。開き直すか、ペルソナを切り替えると再試行します。</span>;
+        }
+        if (!contextStatus) {
+            return <span className={styles.hint}>読み込み中...</span>;
+        }
+        if (!contextStatus.metabolism) {
+            return (
+                <span className={styles.hint}>
+                    このモデル（{contextStatus.model || '未設定'}）は水位を持たない設定のため、履歴の自動整理は行われません。
+                </span>
+            );
+        }
+        return (
+            <>
+                {canDrawContextVolumeBar(contextStatus) ? (
+                    <ContextVolumeBar status={contextStatus} />
+                ) : contextStatus.measurement_failed ? (
+                    <span className={styles.hint}>現在量を測定できませんでした（水位のみ表示しています）。</span>
+                ) : (
+                    <span className={styles.hint}>まだ会話の起点がありません。最初の会話で確立されます。</span>
+                )}
+                {contextStatus.low_chars != null && (
+                    <span className={styles.hint}>
+                        最初に読み込む量（会話の起点がまだ無いとき）: {contextStatus.low_chars.toLocaleString()}字
+                    </span>
+                )}
+                <span className={styles.hint}>
+                    会話履歴は始点を固定したまま送られ、上限を超えると古い出来事から順にあらすじへ畳んで「残す量」まで整理します。
+                    {contextStatus.fold_unit_chars != null && contextStatus.fold_unit_chars > 0 && (
+                        `整理は古い側から約 ${contextStatus.fold_unit_chars.toLocaleString()} 文字ぶんずつまとめて畳みます（スペルの結果などの長い記録は、圧縮した後の字数で数えます）。`
+                    )}
+                    畳みすぎて残す量を下回ったときは、次の会話の前に畳んだ範囲を自動で開き直します。
+                    水位を変えたいときは、設定のモデル編集から（モデルごとの設定です）。
+                </span>
+            </>
+        );
     };
 
     if (!isOpen) return null;
@@ -444,17 +720,54 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
                                     {(() => {
                                         const sel = models.find(m => m.id === currentModel);
                                         if (!sel || (sel.input_price == null && sel.output_price == null)) return null;
-                                        const fmt = (v: number) => v < 1 ? `$${v}` : `$${v}`;
+                                        const cur = sel.currency ?? 'USD';
                                         return (
                                             <span className={styles.hint}>
-                                                {sel.input_price != null && `入力: ${fmt(sel.input_price)}/1M tokens`}
+                                                {sel.input_price != null && `入力: ${formatCost(sel.input_price, cur)}/1M tokens`}
                                                 {sel.input_price != null && sel.output_price != null && ' ・ '}
-                                                {sel.output_price != null && `出力: ${fmt(sel.output_price)}/1M tokens`}
+                                                {sel.output_price != null && `出力: ${formatCost(sel.output_price, cur)}/1M tokens`}
                                             </span>
                                         );
                                     })()}
                                 </div>
                             </div>
+
+                            {cachePersonas.length > 0 && (
+                                <div className={styles.section}>
+                                    <div className={styles.formGroup}>
+                                        <label>キャッシュ（このペルソナ）</label>
+                                        {cachePersonas.length > 1 && (
+                                            <div className={styles.cacheTimerTabs}>
+                                                {cachePersonas.map(p => (
+                                                    <button
+                                                        key={p.id}
+                                                        type="button"
+                                                        className={`${styles.personaTab} ${p.id === selectedCachePersonaId ? styles.personaTabActive : ''}`}
+                                                        onClick={() => setSelectedCachePersonaId(p.id)}
+                                                    >
+                                                        {p.name}
+                                                    </button>
+                                                ))}
+                                            </div>
+                                        )}
+                                        {cacheStatus?.supported && (
+                                            <div className={styles.cacheTtlOverrideRow}>
+                                                <span className={styles.cacheTtlOverrideLabel}>キャッシュ</span>
+                                                <select
+                                                    className={styles.select}
+                                                    value={cacheStatus.cache_setting}
+                                                    onChange={(e) => handleCacheSettingChange(e.target.value)}
+                                                >
+                                                    <option value="off">オフ</option>
+                                                    <option value="5m">5分</option>
+                                                    <option value="1h">1時間（連続対話向け）</option>
+                                                </select>
+                                            </div>
+                                        )}
+                                        {renderCacheTimerBody()}
+                                    </div>
+                                </div>
+                            )}
 
                             <div className={styles.section}>
                                 <div
@@ -470,66 +783,23 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
                                 {historySettingsOpen && (
                                     <>
                                         <div className={styles.formGroup}>
-                                            <label>
-                                                メッセージ数上限
-                                                {maxHistoryMessagesDefault != null && (
-                                                    <span className={styles.hint}> （モデルデフォルト: {maxHistoryMessagesDefault}）</span>
-                                                )}
-                                            </label>
-                                            <input
-                                                type="number"
-                                                className={styles.input}
-                                                min={1}
-                                                max={500}
-                                                value={maxHistoryMessages ?? ''}
-                                                placeholder={maxHistoryMessagesDefault ? `（自動: ${maxHistoryMessagesDefault}）` : '（自動）'}
-                                                onChange={(e) => handleMaxHistoryMessagesInput(e.target.value)}
-                                                onBlur={() => handleMaxHistoryMessagesCommit()}
-                                            />
-                                            <span className={styles.hint}>
-                                                LLMに送信する会話履歴の最大件数。コンテキスト超過エラーが発生する場合は値を下げてください。
-                                            </span>
+                                            <label>会話コンテキストの現在量</label>
+                                            {cachePersonas.length > 1 && (
+                                                <div className={styles.cacheTimerTabs}>
+                                                    {cachePersonas.map(p => (
+                                                        <button
+                                                            key={p.id}
+                                                            type="button"
+                                                            className={`${styles.personaTab} ${p.id === selectedCachePersonaId ? styles.personaTabActive : ''}`}
+                                                            onClick={() => setSelectedCachePersonaId(p.id)}
+                                                        >
+                                                            {p.name}
+                                                        </button>
+                                                    ))}
+                                                </div>
+                                            )}
+                                            {renderContextStatusBody()}
                                         </div>
-                                        <div className={styles.formGroup}>
-                                            <label className={styles.checkboxLabel}>
-                                                <input
-                                                    type="checkbox"
-                                                    checked={metabolismEnabled}
-                                                    onChange={(e) => handleMetabolismEnabledChange(e.target.checked)}
-                                                />
-                                                履歴の新陳代謝
-                                            </label>
-                                            <span className={styles.hint}>
-                                                ON: 会話履歴のウィンドウ始点を固定しキャッシュヒット率を向上。上限到達時にバルクトリミング+Chronicle生成。OFF: 従来のスライディングウィンドウ。
-                                            </span>
-                                        </div>
-                                        {metabolismEnabled && (
-                                            <div className={styles.formGroup}>
-                                                <label>
-                                                    代謝後の保持件数
-                                                    {metabolismKeepMessagesDefault != null && (
-                                                        <span className={styles.hint}> （モデルデフォルト: {metabolismKeepMessagesDefault}）</span>
-                                                    )}
-                                                </label>
-                                                <input
-                                                    type="number"
-                                                    className={styles.input}
-                                                    min={1}
-                                                    max={getMaxKeepMessages() ?? 500}
-                                                    value={metabolismKeepMessages ?? ''}
-                                                    placeholder={metabolismKeepMessagesDefault ? `（自動: ${metabolismKeepMessagesDefault}）` : '（自動）'}
-                                                    onChange={(e) => handleMetabolismKeepMessagesInput(e.target.value)}
-                                                    onBlur={() => handleMetabolismKeepMessagesCommit()}
-                                                />
-                                                <span className={styles.hint}>
-                                                    上限到達時にこの件数まで古い履歴を整理します。
-                                                    {getMaxKeepMessages() != null
-                                                        ? `設定可能範囲: 1〜${getMaxKeepMessages()}（上限${maxHistoryMessages ?? maxHistoryMessagesDefault} - 20）。超過時は自動調整されます。`
-                                                        : '上限との差は20以上必要です。'
-                                                    }
-                                                </span>
-                                            </div>
-                                        )}
                                         <div className={styles.formGroup}>
                                             <label>
                                                 画像埋め込み上限
@@ -551,39 +821,6 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
                                                 LLMに送信する画像の最大枚数。超過分はテキスト要約に置換されます。0で全画像をテキスト化。空欄でデフォルト値（4枚）を使用。
                                             </span>
                                         </div>
-                                        {cacheConfig.supported && (
-                                            <>
-                                                <div className={styles.formGroup}>
-                                                    <label className={styles.checkboxLabel}>
-                                                        <input
-                                                            type="checkbox"
-                                                            checked={cacheConfig.enabled}
-                                                            onChange={(e) => handleCacheEnabledChange(e.target.checked)}
-                                                        />
-                                                        プロンプトキャッシュを有効化 (Anthropic)
-                                                    </label>
-                                                    <span className={styles.hint}>
-                                                        ON: プロンプトをキャッシュしてコスト削減（読取 0.1倍、書込 1.25倍〜2倍）。OFF: キャッシュなし（Anthropic APIは読取専用モード非対応）。
-                                                    </span>
-                                                </div>
-                                                {cacheConfig.enabled && cacheConfig.ttl_options.length > 0 && (
-                                                    <div className={styles.formGroup}>
-                                                        <label>キャッシュ TTL</label>
-                                                        <select
-                                                            className={styles.select}
-                                                            value={cacheConfig.ttl}
-                                                            onChange={(e) => handleCacheTtlChange(e.target.value)}
-                                                        >
-                                                            {cacheConfig.ttl_options.map(ttl => (
-                                                                <option key={ttl} value={ttl}>
-                                                                    {ttl === '5m' ? '5分（書込コスト 1.25倍）' : '1時間（書込コスト 2倍）'}
-                                                                </option>
-                                                            ))}
-                                                        </select>
-                                                    </div>
-                                                )}
-                                            </>
-                                        )}
                                     </>
                                 )}
                             </div>
@@ -647,10 +884,52 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
                 </div>
 
                 <div className={styles.footer}>
-                    <button className={styles.cancelBtn} onClick={onClose}>閉じる</button>
-                    <button className={styles.saveBtn} onClick={saveParams}>設定を適用</button>
+                    <div className={styles.footerLeft}>
+                        <button
+                            className={styles.linkBtn}
+                            onClick={() => setEditorOpen(true)}
+                            disabled={!currentModel}
+                            title="モデルファイル全体を JSON で編集"
+                        >
+                            詳細編集...
+                        </button>
+                        <button
+                            className={styles.linkBtn}
+                            onClick={handleSaveAs}
+                            disabled={!currentModel || savingAs}
+                            title="現在の設定を新しいモデルとして保存"
+                        >
+                            別名で保存...
+                        </button>
+                        <button
+                            className={styles.linkBtn}
+                            onClick={handleOverwrite}
+                            disabled={!currentModel || savingAs}
+                            title="現在の設定をこのモデルに上書き保存"
+                        >
+                            上書き保存
+                        </button>
+                    </div>
+                    <div className={styles.footerRight}>
+                        <button className={styles.cancelBtn} onClick={onClose}>閉じる</button>
+                        <button className={styles.saveBtn} onClick={saveParams}>設定を適用</button>
+                    </div>
                 </div>
             </div>
+
+            <ModelEditorModal
+                isOpen={editorOpen}
+                mode="edit"
+                modelKey={currentModel || undefined}
+                onClose={() => setEditorOpen(false)}
+                onSaved={() => {
+                    // Reload everything since the model file changed
+                    fetchData();
+                    // 水位もモデル定義由来 — 編集直後の旧値を出し続けない
+                    setContextStatus(null);
+                    setContextStatusReload(n => n + 1);
+                }}
+            />
         </div>
     );
 }

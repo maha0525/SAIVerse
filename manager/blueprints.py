@@ -14,6 +14,8 @@ from database.models import (
     City as CityModel,
     Tool as ToolModel,
 )
+from manager.ids import build_identifier
+from manager.persona import ai_stem_taken
 from persona.core import PersonaCore
 from saiverse.buildings import Building
 from saiverse.model_configs import get_context_length, get_model_provider
@@ -111,7 +113,7 @@ class BlueprintMixin:
                         db.query(CityModel).filter_by(CITYID=city_id).first()
                     )
                     city_name_for_error = (
-                        target_city.CITYNAME if target_city else f"ID {city_id}"
+                        target_city.CITY_SLUG if target_city else f"ID {city_id}"
                     )
                     return (
                         "Error: A blueprint named "
@@ -185,14 +187,44 @@ class BlueprintMixin:
                 )
 
             home_city = db.query(CityModel).filter_by(CITYID=blueprint.CITYID).first()
-            new_ai_id = f"{entity_name.lower().replace(' ', '_')}_{home_city.CITYNAME}"
-            if db.query(AIModel).filter_by(AIID=new_ai_id).first():
+            # AIID は ~/.saiverse/personas/<id>/ のフォルダ名になる永続キーなので
+            # 文字種契約に従う (manager/persona.py の同じ生成と対)。entity_name は
+            # Blueprint 生成時にユーザー / ペルソナが決めるので日本語が来る —
+            # slug が残らなければ persona_<連番> へ落ち、連番を選ぶときは私室
+            # Building の空きも一緒に予約する (理由は manager/persona.py と同じ)。
+            city_slug = home_city.CITY_SLUG
+            ai_stem = build_identifier(
+                entity_name,
+                stem="persona",
+                exists=lambda s: ai_stem_taken(db, s, city_slug),
+            )
+            new_ai_id = f"{ai_stem}_{city_slug}"
+
+            # 大文字小文字を畳む理由は manager/persona.py の同じ検査と同じ
+            # (AIID はフォルダ名になる)
+            if (
+                db.query(AIModel)
+                .filter(func.lower(AIModel.AIID) == new_ai_id.lower())
+                .first()
+            ):
                 return (
                     False,
                     f"An entity with the generated ID '{new_ai_id}' already exists.",
                 )
 
-            private_room_id = f"{new_ai_id}_room"
+            # ensure_unique=True の理由は manager/persona.py の同じ箇所と同じ:
+            # 私室と同じ ID の Building が既に存在しうる。
+            private_room_id = build_identifier(
+                ai_stem,
+                city_slug,
+                "room",
+                stem="persona",
+                ensure_unique=True,
+                exists=lambda bid: db.query(BuildingModel)
+                .filter_by(BUILDINGID=bid)
+                .first()
+                is not None,
+            )
             private_room_model = BuildingModel(
                 CITYID=blueprint.CITYID,
                 BUILDINGID=private_room_id,
@@ -231,14 +263,30 @@ class BlueprintMixin:
             )
             db.add(new_occupancy_log)
 
-            if blueprint.CITYID == self.city_id:
-                new_building_obj = Building(
-                    building_id=private_room_model.BUILDINGID,
-                    name=private_room_model.BUILDINGNAME,
-                    capacity=private_room_model.CAPACITY,
-                    system_instruction=private_room_model.SYSTEM_INSTRUCTION,
-                    description=private_room_model.DESCRIPTION,
-                )
+            # in-memory の Building は commit 前に組む。commit 後に ORM 属性を
+            # 読むと expire-on-commit で再フェッチが走り、DB が確定した後に
+            # 失敗しうる箇所が増える
+            new_building_obj = Building(
+                building_id=private_room_model.BUILDINGID,
+                name=private_room_model.BUILDINGNAME,
+                capacity=private_room_model.CAPACITY,
+                system_instruction=private_room_model.SYSTEM_INSTRUCTION,
+                description=private_room_model.DESCRIPTION,
+            )
+            in_this_city = blueprint.CITYID == self.city_id
+            # commit 後に読む blueprint の値もここで取り出す (expire-on-commit で
+            # 再フェッチが走るのを避ける)
+            base_system_prompt = blueprint.BASE_SYSTEM_PROMPT
+            base_avatar = blueprint.BASE_AVATAR
+
+            # DB を先に確定させてから、インメモリの世界状態と PersonaCore に触る。
+            # 逆順だと、失敗した生成 (ID 衝突など) が rollback 後も building_map /
+            # occupants / personas に残り、既存の部屋と占有者を上書きしたままになる
+            # (DB は巻き戻るのにキャッシュは巻き戻らない)。PersonaCore が別セッションで
+            # AI 行を読める点も manager/persona.py の create_persona と揃う。
+            db.commit()
+
+            if in_this_city:
                 self.buildings.append(new_building_obj)
                 self.building_map[private_room_id] = new_building_obj
                 self.capacities[private_room_id] = new_building_obj.capacity
@@ -253,7 +301,7 @@ class BlueprintMixin:
                 )
                 self.building_histories[private_room_id] = []
 
-            if blueprint.CITYID == self.city_id:
+            if in_this_city:
                 blueprint_model = self.model
                 blueprint_provider = get_model_provider(blueprint_model)  # Get provider for model
                 blueprint_context_length = get_context_length(blueprint_model)
@@ -264,18 +312,13 @@ class BlueprintMixin:
                     city_name=self.city_name,
                     persona_id=new_ai_id,
                     persona_name=entity_name,
-                    persona_system_instruction=blueprint.BASE_SYSTEM_PROMPT,
-                    avatar_image=blueprint.BASE_AVATAR,
+                    persona_system_instruction=base_system_prompt,
+                    avatar_image=base_avatar,
                     buildings=self.buildings,
                     common_prompt_path=common_prompt_file,
-                    action_priority_path=Path("builtin_data/action_priority.json"),
                     building_histories=self.building_histories,
                     occupants=self.occupants,
                     id_to_name_map=self.id_to_name_map,
-                    move_callback=self._move_persona,
-                    dispatch_callback=self.dispatch_persona,
-                    explore_callback=self._explore_city,
-                    create_persona_callback=self._create_persona,
                 session_factory=self.SessionLocal,
                 start_building_id=target_building_id,
                 model=blueprint_model,
@@ -296,17 +339,21 @@ class BlueprintMixin:
                 self.id_to_name_map[new_ai_id] = entity_name
                 self.persona_map[entity_name] = new_ai_id
 
+                # 共通初期化フック (交流 Track 確保 + AutonomyManager 同期 等)
+                self._on_persona_registered(new_ai_id)
+
             self.occupants.setdefault(target_building_id, []).append(new_ai_id)
             arrival_message = (
                 "<div class=\"note-box\">✨ Blueprint Spawn:<br>"
                 f"<b>{entity_name}がこの世界に現れました</b></div>"
             )
-            self.building_histories.setdefault(target_building_id, []).append(
-                {"role": "host", "content": arrival_message}
+            self.add_building_event(
+                target_building_id,
+                {"role": "host", "content": arrival_message},
+                heard_by=list(self.occupants.get(target_building_id, [])),
             )
-            self._save_building_histories()
+            self._save_modified_buildings()
 
-            db.commit()
             return (
                 True,
                 f"Entity '{entity_name}' spawned successfully in "

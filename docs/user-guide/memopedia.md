@@ -10,17 +10,18 @@ Memopediaは、SAIMemoryに記録された会話ログから知識を抽出し�
 
 従来のSAIMemoryでは発言そのままの想起は可能ですが、トピックに関する体系的な知識が抜け落ちやすい問題がありました。Memopediaでは、重要なトピックの情報を1ページにまとめ、ペルソナがページ一覧から関連するものを選んで知識を取得できます。
 
-## 3つのルートカテゴリ
+## 4つのルートカテゴリ
 
 | カテゴリ | 説明 |
 |----------|------|
-| 人物 (people) | 関わりのある人物についての記録 |
-| 出来事 (events) | 過去に起きた出来事の記録 |
-| 予定 (plans) | 進行中や計画中のプロジェクト・予定 |
+| 人物 (People) | 関わりのある人物についての記録 |
+| 用語 (Terms) | 用語・概念の記録 |
+| 計画 (Plans) | 進行中や計画中のプロジェクト・予定 |
+| 出来事 (Events) | 過去に起きた出来事の記録 |
 
 ## UIでの使い方
 
-サイドバーから「Memory & Knowledge」→「Memopedia」タブを選択：
+ペルソナメニュー →「記憶」で[記憶モーダル](memory-view.md)を開き、「Memopedia」タブを選択（記憶モーダルには他に チャットログ / Chronicle / インポート 等のタブがある）：
 
 ### Knowledge Tree
 
@@ -44,45 +45,14 @@ Memopediaは、SAIMemoryに記録された会話ログから知識を抽出し�
 | ツール名 | 説明 |
 |----------|------|
 | `memopedia_get_tree` | ページツリーをMarkdown形式で取得 |
+| `memopedia_get_page` | タイトル/IDでページ本文を取得 |
 | `memopedia_open_page` | 指定したページを開き、内容を取得 |
 | `memopedia_close_page` | 指定したページを閉じる |
+| `memopedia_note` | 知識フラグメントをページに書き込む |
 
-## CLIでの構築
+> このほか `memopedia_manage` / `memopedia_health` / フラグメント系（`memopedia_list_fragments` / `_edit_fragment` / `_delete_fragment`）がある。全一覧は [ツールカタログ](../reference/tool-catalog.md)（`memopedia_*`）。
 
-既存の会話履歴からMemopediaを自動構築：
-
-```bash
-# 基本的な使い方
-python scripts/build_memopedia.py <persona_id> --limit 100
-
-# dry-runで確認
-python scripts/build_memopedia.py <persona_id> --limit 100 --dry-run
-
-# モデルを指定
-python scripts/build_memopedia.py <persona_id> --model gemini-2.5-pro
-```
-
-### エクスポート/インポート
-
-```bash
-# JSONエクスポート
-python scripts/build_memopedia.py <persona_id> --export backup.json
-
-# JSONインポート
-python scripts/build_memopedia.py <persona_id> --import backup.json
-```
-
-### メンテナンス
-
-```bash
-# 全自動メンテナンス
-python scripts/maintain_memopedia.py <persona_id> --auto
-
-# 個別実行
-python scripts/maintain_memopedia.py <persona_id> --fix-markdown
-python scripts/maintain_memopedia.py <persona_id> --split-large
-python scripts/maintain_memopedia.py <persona_id> --merge-similar
-```
+> Memopedia のフラグメント生成は Metabolism の中で自動的に行われる（`ArasujiGenerator` / `entity_extractor`、`sea/session_lifecycle.py`）。整理系 Playbook（`autonomy_memory_organization` / `fragment_organize`）は v1 自律系の退役（2026-07-10、時間割への完全移行）に伴い `builtin_data/playbooks/archive/` へ移された（P4 庭仕事ワーカーへの再設計待ち）。ユーザーが手動で構築・メンテナンスする通常の導線はない。
 
 ## 設計詳細
 
@@ -97,5 +67,5 @@ python scripts/maintain_memopedia.py <persona_id> --merge-similar
 
 ## 次のステップ
 
+- [concepts/memopedia.md](../concepts/memopedia.md) - Memopedia の仕組み（開発者向け）
 - [SAIMemory](../concepts/saimemory.md) - 記憶システムの詳細
-- [スクリプト一覧](../reference/scripts.md) - 保守スクリプト

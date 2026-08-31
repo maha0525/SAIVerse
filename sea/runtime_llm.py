@@ -1,19 +1,3288 @@
 from __future__ import annotations
 
+import ast
+import asyncio
+import inspect
+import io
 import json
 import logging
 import os
 import re
+import tokenize
 import uuid
-from typing import Any, Callable, Dict, Optional
+from dataclasses import dataclass, field
+from typing import Any, Callable, Dict, List, NamedTuple, Optional, Tuple
 
 from llm_clients.exceptions import LLMError
+from sea.beat_gate import BeatGateClosedError
+from sea.cancellation import ExecutionCancelledException
+from sea.mcp_tool_refresh import refresh_mcp_tools_at_head
+from sea.message_stamp import (
+    append_presented_message_id,
+    record_call_tokens,
+)
 from sea.runtime_utils import _format, _is_llm_streaming_enabled
 from saiverse.logging_config import log_sea_trace
 from sea.playbook_models import PlaybookSchema
+from sea.pulse_context import resolve_execution_context
+from sea.runtime_state import playbook_write_key, set_playbook_var
 from saiverse.usage_tracker import get_usage_tracker
+# Module-level imports for tools registry symbols.
+#
+# Rationale: we previously lazy-imported these inside functions, which worked
+# for the first call (sys.modules cache hit) but broke when certain addons
+# (notably saiverse-voice-tts via its GPT-SoVITS loader) temporarily remove
+# the ``tools`` package and its submodules from sys.modules. A parallel LLM
+# thread hitting a lazy ``from tools import ...`` / ``from tools.context
+# import ...`` during that window resolved to the wrong ``tools`` package
+# elsewhere on sys.path (GPT-SoVITS's own tools/) — or to ModuleNotFoundError
+# for submodules like ``tools.context`` that don't exist there at all. By
+# binding these names at module import time, we freeze the references to
+# the real SAIVerse ``tools`` package regardless of later sys.modules
+# manipulation. See memory/project_tts_import_pollution.md.
+from tools import (
+    SPELL_TOOL_NAMES,
+    SPELL_TOOL_SCHEMAS,
+    TOOL_REGISTRY,
+    canonicalize_spell_name,
+    canonicalize_tool_name,
+)
+from tools.core import parse_tool_result
+from tools.context import persona_context
+from tools.fuzzy import find_close_matches
+from sea.mode_spell_permissions import check_spell_permission
 
 LOGGER = logging.getLogger(__name__)
+
+#: 「この発言は言い切っていない」の印。中断された生成の部分文に立てる。
+#:
+#: 立つのは二つの経路 — サーバー側でストリームが切れたときと、ユーザーが停止した
+#: とき。どちらも本人が言い終えたのではないので、印が無いと「機構が本人に代わって
+#: ここで言い終わったと決めた」ことになる (= 切り詰めと同型の捏造)。印があれば、
+#: 残しても言い切ったとは記録しない。UI はこの印が立った発言にだけ「続きの生成」
+#: を出す。設計: docs/issues/user_utterance_path_failure_inventory.md
+INTERRUPTED_METADATA_KEY = "_interrupted"
+
+#: 「発言が世界に保存された」ことを運ぶイベントの型と、その唯一の発火口。
+#: 定義と発火条件は sea/runtime_emitters.py に一本化してある — 画面イベント
+#: (``say`` / ``streaming_chunk`` / ``streaming_complete``) は保存の証拠では
+#: なく、この信号だけが「建物履歴の行に本文が入った」を運ぶ。
+#: 設計: docs/issues/archive/stream_completion_is_not_proof_of_persistence.md
+from .runtime_emitters import SPEAK_PERSISTED_EVENT_TYPE, notify_speak_persisted  # noqa: E402,F401
+
+
+def _finalize_speak_with_signal(
+    runtime: Any,
+    persona: Any,
+    building_id: str,
+    msg_id: str,
+    text: str,
+    *,
+    pulse_id: Optional[str],
+    extra_metadata: Optional[Dict[str, Any]],
+    final_sub_seq: Optional[int],
+    event_callback: Optional[Callable[[Dict[str, Any]], None]],
+) -> Any:
+    """placeholder を確定し、保存できた回だけ保存完了イベントを流す。
+
+    ``_emit_speak_finalize`` の三値の結果 (保存成功 / 対象行なし / 保存失敗) を
+    受け取り、「呼んだ = 保存できた」をやめる関門。保存に失敗した回と
+    対象行が無かった回は ERROR ログだけ残してイベントは流さない — 処理は
+    止めない (2026-08-29 設計裁定)。呼び出し元は戻り値の ``status`` を見て、
+    saved のときだけ「確定済み」(pipeline_finalized) に進める — missing /
+    failed で確定済みにすると、Beat 死亡時の救済 (placeholder salvage) が
+    「もう確定した」と誤認して二度と走らない (Codex #2)。
+
+    イベントの判定は**保存された本文** (正規化後に行へ入った content) の
+    非空で行う — 渡した ``text`` ではない (Codex #6)。マーカー・心内文の
+    除去後に空で確定した行は発言ではなく、共有判定 (retry の門番) も空行を
+    発言に数えない。ここで信号を流すと、発言が生まれていないのに続きの
+    生成の印が降り、続きを取る手段が消える。
+    """
+    result = runtime._emit_speak_finalize(
+        persona, building_id, msg_id, text,
+        pulse_id=pulse_id,
+        extra_metadata=extra_metadata,
+        final_sub_seq=final_sub_seq,
+        final_voice_text="",
+    )
+    status = getattr(result, "status", None)
+    if status == "saved":
+        # 発火条件 (行 id あり + 保存本文の非空) は共通の口が判定する。
+        notify_speak_persisted(
+            event_callback, getattr(result, "building_msg", None),
+            persona, pulse_id,
+        )
+    else:
+        LOGGER.error(
+            "[sea][pipeline] finalize did not persist the utterance "
+            "(msg=%s status=%s error=%s)",
+            msg_id, status, getattr(result, "error", None),
+        )
+    return result
+
+
+def _maybe_record_cache_storage(usage, persona_id: str | None, building_id: str | None) -> None:
+    """UsageInfo に cache_storage 情報があれば独立レコードで計上する。"""
+    if not usage or not getattr(usage, "cache_storage_tokens", 0):
+        return
+    get_usage_tracker().record_cache_storage(
+        model_id=usage.model,
+        cached_tokens=usage.cache_storage_tokens,
+        ttl_seconds=usage.cache_storage_ttl_seconds,
+        persona_id=persona_id,
+        building_id=building_id,
+    )
+
+
+@dataclass
+class BeatExecution:
+    """1 Beat（= LLM ノード 1 回の生成と、その記録）の実行状態。
+
+    **Beat とは**: ペルソナの最小行動単位。Pulse（認知サイクル 1 回）より小さく、
+    SAIMemory の 1 レコードとも一致しない中間単位で、「喋る」「道具を使う」
+    「内省を表出する」がどれも 1 Beat。実装では長らく閉包のローカル変数に
+    埋まっていて型が無かった（`docs/issues/beat_concept_not_typed_in_implementation.md`）。
+
+    Beat には 3 つの面があり、本クラスが受け持つのは 3 番目だけ:
+
+    - **身分** = :class:`sea.pulse_context.ExecutionContext`（誰の・どの thread /
+      line / aspect / model / pulse の実行か）— 実装済み
+    - **直列性** = :class:`sea.beat_gate.BeatGate`（persona 単位ロック + 関所）— 実装済み
+    - **中身** = 生成されたテキストと、その記録先ごとの姿 ← ここ
+
+    ⚠️ Phase 1 時点では **④確定（記録）が読むフィールドだけ**を持つ。
+    分割設計書（`docs/issues/runtime_llm_node_split_design.md`）の Phase 2 で
+    4 つの生成経路が本オブジェクトを受け取って更新する形になったとき、
+    ``display_text``（Building / UI 行きの merged 全文）・``llm_usage_metadata``・
+    ``ctx``（ExecutionContext）が加わる。読み手のいないフィールドを先に生やすと
+    「どちらが正か分からない値」が増えるので、その時点で足す。
+    """
+
+    # ── 実行文脈（Beat 開始時に決まり、以後変わらない） ──
+    persona: Any
+    node_def: Any
+    node_id: str
+    playbook: PlaybookSchema
+    state: dict
+    event_callback: Optional[Callable[[Dict[str, Any]], None]] = None
+
+    # ── ①準備の成果物 ──
+    messages: List[Dict[str, Any]] = field(default_factory=list)
+    prompt: Optional[str] = None
+    """action テンプレートを展開したもの（``<system>`` タグ wrap 済み）。"""
+
+    # ── ②③生成・Spell の成果物 ──
+    continuation: Any = ""
+    """記録（SAIMemory / state["last"] / PulseContext）へ行く最終テキスト。
+
+    Spell が走った Beat では **最終発言のみ**（merged 全文は Building 履歴側へ
+    別途 emit 済み。全文を保存すると内容重複 + spellResult の HTML 混入になる —
+    `docs/issues/spell_html_leak_into_saimemory.md`）。Spell が無ければ応答そのもの。
+    structured output ノードでは ``dict`` が入る。
+    """
+    schema_consumed: bool = False
+    reasoning_text: str = ""
+    reasoning_details: Any = None
+
+    @classmethod
+    def from_node_locals(
+        cls,
+        *,
+        persona,
+        node_def,
+        node_id: str,
+        playbook: PlaybookSchema,
+        state: dict,
+        event_callback,
+        messages,
+        prompt,
+        continuation,
+        schema_consumed: bool,
+    ) -> "BeatExecution":
+        """``lg_llm_node`` の閉包ローカルから Beat を組む（Phase 1 の接合点）。
+
+        reasoning は 4 経路がいずれも state へ書いてから確定部に来るため、
+        ここで一度だけ読み取って器に移す。Phase 2 で生成経路が本オブジェクトへ
+        直接書くようになったら、この読み取りは消える。
+        """
+        return cls(
+            persona=persona,
+            node_def=node_def,
+            node_id=node_id,
+            playbook=playbook,
+            state=state,
+            event_callback=event_callback,
+            messages=messages,
+            prompt=prompt,
+            continuation=continuation,
+            schema_consumed=schema_consumed,
+            reasoning_text=state.get("_reasoning_text", ""),
+            reasoning_details=state.get("_reasoning_details"),
+        )
+
+
+def _record_llm_usage(
+    runtime,
+    llm_client,
+    persona,
+    building_id: Optional[str],
+    playbook_name: str,
+    node_type: str,
+    state: dict,
+    *,
+    debug_log: bool = False,
+) -> Optional[Dict[str, Any]]:
+    """LLM 呼び出し 1 回分の使用量記帳一式（生成 4 経路の共通処理）。
+
+    ``consume_usage`` → usage_tracker 記帳 → cache_storage 計上 → コスト計算 →
+    Pulse 累計への加算 → anchor touch まで。戻り値は message metadata に載せる
+    ``llm_usage`` 断片（usage が取れなければ ``None``）。
+
+    不変条件: **anchor touch は LLM 成功後**（Phase 4-e）。prepare_context 側の
+    先行 touch に戻さない。anchor は call-local な ``state["_prefix_anchor_id"]``
+    （docs/intent/beat_execution_context.md §3.2）。
+
+    ``debug_log`` は pipeline streaming 経路だけが出していた ``[DEBUG]`` 行を
+    再現するためのフラグ。経路ごとのログ差は Phase 0 では変えない。
+    """
+    usage = llm_client.consume_usage()
+    if debug_log:
+        LOGGER.info("[DEBUG] consume_usage returned: %s", usage)
+    # トークン三つ組の刻印材料 (sea/message_stamp.py)。usage の有無に関わらず
+    # 必ず通す — usage が無いときに前のコールの値が state に残ると、この生成の
+    # メッセージに別のコールの数字が乗る。
+    record_call_tokens(state, usage)
+    if not usage:
+        if debug_log:
+            LOGGER.warning("[DEBUG] No usage data from LLM client")
+        return None
+
+    persona_id = getattr(persona, "persona_id", None)
+    get_usage_tracker().record_usage(
+        model_id=usage.model,
+        input_tokens=usage.input_tokens,
+        output_tokens=usage.output_tokens,
+        cached_tokens=usage.cached_tokens,
+        cache_write_tokens=usage.cache_write_tokens,
+        cache_ttl=usage.cache_ttl,
+        persona_id=persona_id,
+        building_id=building_id,
+        node_type=node_type,
+        playbook_name=playbook_name,
+        category="persona_speak",
+    )
+    _maybe_record_cache_storage(usage, persona_id, building_id)
+    if debug_log:
+        LOGGER.info(
+            "[DEBUG] Usage recorded: model=%s in=%d out=%d cached=%d cache_write=%d",
+            usage.model, usage.input_tokens, usage.output_tokens,
+            usage.cached_tokens, usage.cache_write_tokens,
+        )
+
+    from saiverse.model_configs import calculate_cost, get_model_display_name
+    cost = calculate_cost(
+        usage.model, usage.input_tokens, usage.output_tokens,
+        usage.cached_tokens, usage.cache_write_tokens, cache_ttl=usage.cache_ttl,
+    )
+    llm_usage_metadata: Dict[str, Any] = {
+        "model": usage.model,
+        "model_display_name": get_model_display_name(usage.model),
+        "input_tokens": usage.input_tokens,
+        "output_tokens": usage.output_tokens,
+        "cached_tokens": usage.cached_tokens,
+        "cache_write_tokens": usage.cache_write_tokens,
+        "cost_usd": cost,
+    }
+    # Accumulate into pulse total
+    runtime._accumulate_usage(
+        state, usage.model, usage.input_tokens, usage.output_tokens,
+        cost, usage.cached_tokens, usage.cache_write_tokens,
+    )
+    runtime.session_lifecycle.touch_anchor_after_llm_call(
+        persona, usage, anchor_id=state.get("_prefix_anchor_id"),
+    )
+    return llm_usage_metadata
+
+
+def _store_reasoning_in_state(state: dict, reasoning_text: str, reasoning_details: Any) -> None:
+    """reasoning を後段の speak/say/memorize ノード向けに state へ残す。"""
+    if reasoning_text:
+        state["_reasoning_text"] = reasoning_text
+    if reasoning_details is not None:
+        state["_reasoning_details"] = reasoning_details
+
+
+def _consume_reasoning(llm_client, state: Optional[dict] = None) -> Tuple[str, Any]:
+    """LLM クライアントから reasoning（thinking）を回収する。
+
+    ``state`` を渡すと回収と同時に state へ格納する（tool モードの 2 経路）。
+    ツールなしモードは Spell ループ後にまとめて格納するため ``state=None`` で
+    呼び、後から :func:`_store_reasoning_in_state` を使う。
+
+    thought_signature の取得点は経路ごとに違う（stream は全 chunk 読了後）ため、
+    ここでは扱わない — docs/intent/thought_signature_persistence.md 参照。
+    """
+    entries = llm_client.consume_reasoning()
+    reasoning_text = "\n\n".join(
+        e.get("text", "") for e in entries if e.get("text")
+    ) if entries else ""
+    reasoning_details = llm_client.consume_reasoning_details()
+    if state is not None:
+        _store_reasoning_in_state(state, reasoning_text, reasoning_details)
+    return reasoning_text, reasoning_details
+
+
+def _build_say_metadata(
+    state: dict,
+    *,
+    base_metadata: Optional[Dict[str, Any]] = None,
+    llm_usage_metadata: Optional[Dict[str, Any]] = None,
+    reasoning_text: str = "",
+    reasoning_details: Any = None,
+    include_total: bool = True,
+) -> Dict[str, Any]:
+    """Building 履歴に載せる message metadata を組み立てる。
+
+    キーの挿入順は既存 6 コピーと同じ（base → llm_usage → reasoning →
+    reasoning_details → activity_trace → llm_usage_total → auto_recall）。
+
+    ⚠️ 呼び出し元ごとに含めるキーが不揃いだったため、Phase 0 では**現状構成を
+    引数で忠実に再現**している（llm_usage / reasoning を載せない経路は該当引数を
+    省略、``llm_usage_total`` を載せない経路は ``include_total=False``）。
+    統一するかどうかは別判断 — 挙動不変の原則を先に守る。
+
+    ``_auto_recall_text`` は pop（消費）である点に注意。同一ノード実行内で
+    複数回呼ばれた場合、2 回目以降は付かない（従来どおり）。
+    """
+    msg_metadata: Dict[str, Any] = {}
+    if base_metadata and isinstance(base_metadata, dict):
+        msg_metadata.update(base_metadata)
+    if llm_usage_metadata:
+        msg_metadata["llm_usage"] = llm_usage_metadata
+    if reasoning_text:
+        msg_metadata["reasoning"] = reasoning_text
+    if reasoning_details is not None:
+        msg_metadata["reasoning_details"] = reasoning_details
+    activity_trace = state.get("_activity_trace")
+    if activity_trace:
+        msg_metadata["activity_trace"] = list(activity_trace)
+    if include_total:
+        accumulator = state.get("_pulse_usage_accumulator")
+        if accumulator:
+            msg_metadata["llm_usage_total"] = dict(accumulator)
+    auto_recall = state.pop("_auto_recall_text", None)
+    if auto_recall:
+        msg_metadata["auto_recall"] = auto_recall
+    return msg_metadata
+
+
+def _emit_say_and_capture(
+    runtime,
+    persona,
+    eff_bid: Optional[str],
+    text: str,
+    state: dict,
+    *,
+    pulse_id: Optional[str],
+    metadata: Optional[Dict[str, Any]] = None,
+    event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+):
+    """``_emit_say`` して、書けた message_id を state に残す。
+
+    後続ツールが新しい persona_context 配下に入っても最新の message_id を
+    参照できるようにするため（``state["_last_message_id"]``）。
+
+    ``event_callback`` を渡すと、建物への保存が成功した回だけ保存完了
+    イベント (``speak_persisted``) が流れる (発火は emit_say 内の共通の口)。
+    """
+    bmsg = runtime._emit_say(
+        persona, eff_bid, text, pulse_id=pulse_id,
+        metadata=metadata if metadata else None,
+        event_callback=event_callback,
+    )
+    if isinstance(bmsg, dict):
+        message_id = bmsg.get("message_id")
+        if message_id:
+            state["_last_message_id"] = str(message_id)
+    return bmsg
+
+
+def _store_beat_memory(
+    runtime,
+    persona,
+    *,
+    text: str,
+    tags: List[str],
+    state: Dict[str, Any],
+    playbook_name: str,
+    prompt: Optional[str],
+    interrupted: bool,
+    scope: Optional[str] = None,
+    line_role: Optional[str] = None,
+    reasoning_text: Optional[str] = None,
+    reasoning_details: Any = None,
+) -> Any:
+    """memorize の「``_store_memory`` 呼び出しの組み立て」を一箇所に持つ。
+
+    通る経路は二つ — 通常の確定 (``_finalize_beat`` の memorize 節) と、確定後・
+    memorize 前に Beat が死んだ回の補填 (``_backfill_memory_on_beat_death``)。
+    組み立てを二箇所に複製すると、片方だけが更新されて「同じ発言なのに、死に方で
+    記憶の形が変わる」乖離が育つ。
+
+    成功 (= 書けた message_id が truthy) したら ``state["_beat_memorized"]`` を
+    立てる — 「この Beat の本文はもう記憶に書かれた」の印で、Beat の出口の補填が
+    二重に書き込むのを止める鍵。返り値は書けた message_id (失敗は falsy)。
+    """
+    metadata: Dict[str, Any] = {}
+    if reasoning_text:
+        metadata["reasoning"] = reasoning_text
+    if reasoning_details is not None:
+        metadata["reasoning_details"] = reasoning_details
+    # 「言い切っていない」印は建物履歴とペルソナの記憶の両方に載せる。
+    # 記憶の側に無いと、本人が後で自分の言葉を読み返したときに、途中で
+    # 切れた発言を言い切ったものとして受け取る。
+    if interrupted:
+        metadata[INTERRUPTED_METADATA_KEY] = True
+
+    sig = state.get("_last_thought_signature")
+    LOGGER.debug(
+        "[sea][llm][sig-trace] memorize call: thought_signature = %s (%d bytes)",
+        "present" if sig else "None",
+        len(sig) if isinstance(sig, (bytes, str)) else 0,
+    )
+    spell_origin = state.get("_spell_loop_origin_id")
+    spell_lc = state.get("_spell_loop_count")
+    spell_final_seq = (spell_lc + 1) if spell_lc is not None else None
+    paired_action_text = None if spell_origin else prompt
+    stored_message_id = runtime._store_memory(
+        persona,
+        text,
+        role="assistant",
+        tags=list(tags),
+        pulse_id=state.get("_pulse_id"),
+        metadata=metadata if metadata else None,
+        playbook_name=playbook_name,
+        pulse_context=state.get("_pulse_context"),
+        paired_action_text=paired_action_text,
+        scope=scope,
+        line_role=line_role,
+        thought_signature=sig,
+        spell_origin_id=spell_origin,
+        spell_seq=spell_final_seq,
+        return_message_id=True,
+        beat_state=state,
+    )
+    if stored_message_id:
+        state["_beat_memorized"] = True
+        LOGGER.debug(
+            "[sea][llm] Memorized response (assistant) with paired_action_text len=%s scope=%s spell_origin=%s",
+            len(paired_action_text) if paired_action_text else 0, scope,
+            spell_origin,
+        )
+    return stored_message_id
+
+
+def _finalize_beat(runtime, beat: BeatExecution) -> None:
+    """④確定 — 生成し終えた Beat を記録先へ配る。
+
+    state["last"] / assistant message（tool_calls + thought_signature 同梱）/
+    PulseContext 追記 / sea trace / memorize / important dual-write。
+    生成 4 経路（tools あり・なし × streaming・sync）はすべてここへ合流する。
+
+    不変条件:
+
+    - **記録へ行くのは continuation（最終発言）だけ**。Building 履歴・UI へ出す
+      merged 全文はこの関数に来る前に emit 済み
+      （`docs/issues/spell_html_leak_into_saimemory.md`）。
+    - **thought_signature は 3 箇所へ流れる**（assistant message / memorize /
+      important dual-write）。経路ごとに取得点が違うため、ここでは
+      ``state["_last_thought_signature"]`` に集約済みの値だけを読む
+      （`docs/intent/thought_signature_persistence.md`）。
+    """
+    persona = beat.persona
+    node_def = beat.node_def
+    node_id = beat.node_id
+    playbook = beat.playbook
+    state = beat.state
+    event_callback = beat.event_callback
+    messages = beat.messages
+    prompt = beat.prompt
+    text = beat.continuation
+    schema_consumed = beat.schema_consumed
+    # 「言い切っていない」印は**必ずここで消費する** — 残すと、次の Beat が
+    # 普通に言い終えた発言にまで印が漏れる (本文が空で memorize を通らない回が
+    # あるため、消費は保存の分岐の中ではなくこの位置に置く)。
+    interrupted = bool(state.pop(INTERRUPTED_METADATA_KEY, None))
+
+    state["last"] = text
+    # Structured output may return a dict; serialise to JSON string
+    # so that subsequent LLM calls receive valid message content.
+    _msg_content = json.dumps(text, ensure_ascii=False) if isinstance(text, dict) else text
+
+    # When tool call detected, create proper function-calling assistant message
+    if state.get("tool_called") and state.get("_last_tool_call_id"):
+        _tc_speak = _msg_content if state.get("has_speak_content") else ""
+        _tc_entry: Dict[str, Any] = {
+            "id": state["_last_tool_call_id"],
+            "type": "function",
+            "function": {
+                "name": state.get("_last_tool_name", ""),
+                "arguments": state.get("_last_tool_args_json", "{}"),
+            },
+        }
+        # Gemini thinking models require thought_signature echoed back
+        _thought_sig = state.get("_last_thought_signature")
+        if _thought_sig:
+            _tc_entry["thought_signature"] = _thought_sig
+        _assistant_msg: Dict[str, Any] = {
+            "role": "assistant",
+            "content": _tc_speak,
+            "tool_calls": [_tc_entry],
+        }
+        state["_messages"] = messages + [_assistant_msg]
+        LOGGER.info("[sea][llm] Appended assistant message with tool_calls (id=%s, tool=%s)",
+                   state["_last_tool_call_id"], state.get("_last_tool_name"))
+    else:
+        # 2026-05-20: text-only assistant message に thought_signature を乗せる。
+        # SAIMemory adapter._append_message が message.get("thought_signature")
+        # を読み取り、専用カラムへ永続化する。
+        _text_assistant_msg: Dict[str, Any] = {"role": "assistant", "content": _msg_content}
+        _text_thought_sig = state.get("_last_thought_signature")
+        if _text_thought_sig:
+            _text_assistant_msg["thought_signature"] = _text_thought_sig
+        state["_messages"] = messages + [_text_assistant_msg]
+
+    # Append LLM interaction to PulseContext (replaces _intermediate_msgs)
+    _pulse_ctx = state.get("_pulse_context")
+    if _pulse_ctx:
+        from sea.pulse_context import PulseLogEntry
+        # Record the prompt (user message)
+        if prompt:
+            _pulse_ctx.append(PulseLogEntry(
+                role="user", content=prompt,
+                node_id=node_id, playbook_name=playbook.name))
+        # Record the assistant response (with optional tool_calls)
+        _tc_list = None
+        if state.get("tool_called") and state.get("_last_tool_call_id"):
+            _tc_entry_pc: Dict[str, Any] = {
+                "id": state["_last_tool_call_id"],
+                "type": "function",
+                "function": {
+                    "name": state.get("_last_tool_name", ""),
+                    "arguments": state.get("_last_tool_args_json", "{}"),
+                },
+            }
+            _ts_pc = state.get("_last_thought_signature")
+            if _ts_pc:
+                _tc_entry_pc["thought_signature"] = _ts_pc
+            _tc_list = [_tc_entry_pc]
+        # speak: false ノード (要約ノード等) でも実際の応答テキストはあるので
+        # 空文字列ではなく実テキストを記録する。空にする旧挙動はおそらく過去の手癖で、
+        # 後段で "空 assistant" として messages に流入する原因になっていた
+        # (まはー指摘 2026-04-28)。
+        _pulse_ctx.append(PulseLogEntry(
+            role="assistant",
+            content=_msg_content,
+            node_id=node_id, playbook_name=playbook.name,
+            tool_calls=_tc_list,
+            important=getattr(node_def, "important", False) or False))
+
+    # Trace: log prompt→response (truncation handled by log_sea_trace)
+    _prompt_str = prompt or "(no prompt)"
+    if schema_consumed:
+        _output_key = getattr(node_def, "output_key", None) or node_id
+        _out_val = state.get(_output_key, text)
+        if isinstance(_out_val, dict):
+            import json as _json
+            _resp_str = _json.dumps(_out_val, ensure_ascii=False, default=str)
+        else:
+            _resp_str = str(_out_val)
+        log_sea_trace(playbook.name, node_id, "LLM", f"prompt=\"{_prompt_str}\" → {_resp_str}")
+    else:
+        _resp_str = str(text) if text else "(empty)"
+        log_sea_trace(playbook.name, node_id, "LLM", f"prompt=\"{_prompt_str}\" → \"{_resp_str}\"")
+
+    # Handle memorize option - save prompt and response to SAIMemory
+    memorize_config = getattr(node_def, "memorize", None)
+    LOGGER.debug("[_lg_llm_node] node=%s memorize_config=%s type=%s schema_consumed=%s",
+               getattr(node_def, "id", "?"), memorize_config, type(memorize_config), schema_consumed)
+    if memorize_config and state.get("_beat_memorized"):
+        # 停止の後片付け (`_settle_interrupted_utterance`) がこの Beat の本文を
+        # もう記憶へ書いた回。スペル無効のペルソナでは、ストリーム途中で停止
+        # された Beat が例外を出さずに完走してここへ来る (spell loop が入り口で
+        # 即 return するため) — 印を見ないと同じ部分文が同 Beat で二重に残る。
+        LOGGER.debug(
+            "[sea][llm] memorize skipped: settle already stored this beat's "
+            "text (node=%s)", node_id,
+        )
+    elif memorize_config:
+        # Parse memorize config - can be True or {"tags": [...], "scope": ..., "line_role": ...}
+        if isinstance(memorize_config, dict):
+            memorize_tags = memorize_config.get("tags", [])
+            # Phase 1.3: meta-judgment ノードが分岐ターンを scope='discardable' で
+            # 保存するための明示指定経路。memorize.scope を渡すと _store_memory に
+            # そのまま転送される (None なら DB の DEFAULT 'committed' に従う)。
+            memorize_scope = memorize_config.get("scope")
+            # 同じく line_role を上書きできるようにする (既定は LineFrame 由来)。
+            memorize_line_role = memorize_config.get("line_role")
+        else:
+            memorize_tags = []
+            memorize_scope = None
+            memorize_line_role = None
+
+        # Intent A v0.14 / Intent B v0.11 (handoff route C):
+        # Skip the legacy "save prompt as user role" path. The action template
+        # (`prompt`) used to be persisted as a standalone user message, which
+        # mixed it with real user utterances on the persona's timeline.
+        # Instead, attach it to the assistant response via the
+        # `paired_action_text` column so post-hoc inspection ("why did this
+        # assistant turn happen?") still works without polluting the
+        # conversation log.
+        _memorize_ok = True
+
+        # Save response (assistant role) — paired with the prompt that
+        # produced it, so the action template lives alongside the response
+        # rather than as a separate fake-user turn.
+        #
+        if text and text != "(error in llm node)":
+            # If structured output was consumed, format as JSON string for memory
+            content_to_save = text
+            if schema_consumed and isinstance(text, dict):
+                content_to_save = json.dumps(text, ensure_ascii=False, indent=2)
+                LOGGER.debug("[sea][llm] Structured output formatted as JSON for memory")
+
+            # 呼び出しの組み立ては ``_store_beat_memory`` に一本化してある
+            # (Beat の出口の補填と共有)。
+            stored_message_id = _store_beat_memory(
+                runtime,
+                persona,
+                text=content_to_save,
+                tags=memorize_tags,
+                state=state,
+                playbook_name=playbook.name,
+                prompt=prompt,
+                interrupted=interrupted,
+                scope=memorize_scope,
+                line_role=memorize_line_role,
+                reasoning_text=beat.reasoning_text,
+                reasoning_details=beat.reasoning_details,
+            )
+            if not stored_message_id:
+                _memorize_ok = False
+            # NOTE: 旧「メタ判断ターンの scope='discardable' → 'committed'
+            # 昇格」は Track 状態遷移 hook 経由だったが、発火元 (v1 メタ判断の
+            # Track 操作) の退役に続いて hook そのものも 2026-08-21 に撤去した。
+            # 判断ターンは scope='discardable' のまま残る。
+
+        if not _memorize_ok and event_callback:
+            event_callback({"type": "warning", "content": "記憶の保存に失敗しました。会話内容が記録されていない可能性があります。", "warning_code": "memorize_failed", "display": "toast"})
+
+        # Activity trace: record LLM memorize
+        if not playbook.name.startswith(("meta_", "sub_")):
+            pb_display = playbook.display_name or playbook.name
+            node_label = getattr(node_def, "label", None) or node_id
+            _at = state.get("_activity_trace")
+            if isinstance(_at, list):
+                _at.append({"action": "memorize", "name": node_label, "playbook": pb_display})
+            if event_callback:
+                event_callback({
+                    "type": "activity", "action": "memorize", "name": node_label,
+                    "playbook": pb_display, "status": "completed",
+                    "persona_id": getattr(persona, "persona_id", None),
+                    "persona_name": getattr(persona, "persona_name", None),
+                    "pulse_id": state.get("_pulse_id"),
+                })
+
+    # Important flag: dual-write to messages (long-term memory) if not already memorized
+    _is_important = getattr(node_def, "important", False)
+    if (
+        _is_important
+        and not memorize_config
+        and text
+        and text != "(error in llm node)"
+    ):
+        if state.get("_beat_memorized"):
+            # memorize 節と同じ理由 — settle が書き込み済みの回に重ねて書かない。
+            LOGGER.debug(
+                "[sea][llm] important dual-write skipped: settle already "
+                "stored this beat's text (node=%s)", node_id,
+            )
+        else:
+            pulse_id = state.get("_pulse_id")
+            content_to_save = text
+            if schema_consumed and isinstance(text, dict):
+                content_to_save = json.dumps(text, ensure_ascii=False, indent=2)
+            _important_stored = runtime._store_memory(
+                persona, content_to_save,
+                role="assistant",
+                tags=["conversation"],
+                pulse_id=pulse_id,
+                # memorize と同じ本文を書く経路なので、「言い切っていない」印も
+                # 同じように載せる — 片方だけだと important ノードの発言だけが
+                # 印無しで記憶に残る。
+                metadata=(
+                    {INTERRUPTED_METADATA_KEY: True} if interrupted else None
+                ),
+                playbook_name=playbook.name,
+                # 2026-05-20: thought_signature 永続化 (important dual-write 経路)
+                thought_signature=state.get("_last_thought_signature"),
+                beat_state=state,
+            )
+            if _important_stored:
+                # memorize 節 (_store_beat_memory) と同じ印 — この Beat の本文は
+                # もう記憶に書かれた。Beat の出口の補填が二重に書かないための鍵。
+                state["_beat_memorized"] = True
+            else:
+                LOGGER.warning("[sea][llm] Important dual-write failed for node %s", node_id)
+
+    # Debug: log speak_content at end of LLM node
+    speak_content = state.get("speak_content", "")
+    LOGGER.info("[DEBUG] LLM node end: state['speak_content'] = '%s'", speak_content)
+
+
+def _resolve_tool_call_id(result: Dict[str, Any]) -> str:
+    """Preserve a provider-issued function call ID or create a local fallback."""
+    provider_id = result.get("tool_call_id")
+    if isinstance(provider_id, str) and provider_id:
+        return provider_id
+    return f"tc_{uuid.uuid4().hex}"
+
+
+# ── Spell system (text-based tool invocation) ──
+
+_MAX_SPELL_LOOPS = int(os.getenv("SAIVERSE_SPELL_MAX_ROUNDS", "3"))
+
+# Canonical form: /spell name='tool' args={...}
+# /quick_spell (quick_spell.md): 同形の別動詞 = 「この発話で完了」の宣言。
+# (?:quick_)? は非捕獲 — 既存の group 番号 (1=name, 2=args) を保つため、
+# quick 判定は match.group(0) の動詞接頭辞で行う (_is_quick_match)。
+_SPELL_PATTERN = re.compile(
+    r"^/(?:quick_)?spell\s+name='([^']+)'\s+args=(.+)$",
+    re.MULTILINE,
+)
+# Args-omitted form (no explicit ``args=``): ``/spell name='X'``
+# Indicates "execute this Spell, but the args are not yet known". Used by the
+# pre_spells dynamic-args path: schedule_manager / inject_persona_event etc.
+# enqueue this form when the user (or schedule definition) only specified the
+# Spell name; _execute_pre_spells then routes through ``spell_args_decider``
+# Playbook to fill in the args at runtime.
+_SPELL_PATTERN_NO_ARGS = re.compile(
+    r"^/spell\s+name='([^']+)'\s*$",
+    re.MULTILINE,
+)
+# Fuzzy form: /spell tool_name key='value' key2='value2' ...
+_SPELL_PATTERN_FUZZY = re.compile(
+    r"^/(?:quick_)?spell\s+(\w+)\s+(.+)$",
+    re.MULTILINE,
+)
+
+
+def _is_quick_match(m: Any) -> bool:
+    """この spell マッチが /quick_spell 動詞で唱えられたか (quick_spell.md §3.1)。"""
+    try:
+        return m.group(0).startswith("/quick_")
+    except (AttributeError, IndexError):
+        return False
+# key=value pair within fuzzy args (value may be single/double-quoted, dict literal, or bare word)
+_KV_PATTERN = re.compile(
+    r"(\w+)="
+    r"(?:'([^']*)'|\"([^\"]*)\"|(\{[^}]*\})|([\w\-./]+))"
+)
+
+# Pipeline Streaming (Phase 2-C, voice_tts_pipeline_streaming intent doc):
+# 句読点 + 改行を sub-text の文区切りとして扱う。 GPT-SoVITS の cut5 と同様の
+# 基準。 「、」 「,」 で切ると短すぎる文があるが、 voice-tts 側で同 message_id
+# の audio_stream に連結合成されるので OK (= 各 sub-text は独立に合成され、
+# stream に push される)。
+_SENTENCE_BOUNDARY_CHARS = set("。！？．!?\n")
+# 弱い区切り (= 早く流したい時に追加で見る境界)。 強い区切りより優先度低い。
+_SENTENCE_BOUNDARY_SOFT_CHARS = set("、，,;:")
+# sub-text の中身が 「区切り文字 + 空白だけ」 のとき voice-tts (GPT-SoVITS) は
+# 「有効なテキストを入力してください」 で合成失敗する。 sub-speak emit 時に
+# 1 文字でも区切り・空白以外を含むかチェックして skip するために、 voice-able
+# でない文字集合を定義する。
+_SUB_TEXT_NON_VOICEABLE_CHARS = (
+    _SENTENCE_BOUNDARY_CHARS | _SENTENCE_BOUNDARY_SOFT_CHARS | set(" 　\t\r")
+)
+
+
+def _has_voiceable_content(text: str) -> bool:
+    """``text`` に句読点 + 空白以外の文字が 1 つでも含まれるかを返す。
+    voice-tts に渡しても合成可能な実体を持つかの判定に使う。
+    """
+    for ch in text:
+        if ch not in _SUB_TEXT_NON_VOICEABLE_CHARS:
+            return True
+    return False
+
+
+def _find_next_sentence_boundary(
+    buffer: str, start: int, use_soft: bool = True,
+) -> int:
+    """``buffer[start:]`` の中で最初に出てくる文区切り文字の **次** の index
+    を返す。 見つからなければ -1。
+
+    返り値は 「sub-text として切り出してよい範囲の終端 (exclusive)」 として
+    使う。 つまり ``buffer[start:returned_idx]`` が境界文字を含む 1 sub-text。
+
+    ``use_soft`` で 「、 ，」 等の弱い区切りも文区切りに含めるか制御する。
+    Pipeline Streaming では低遅延を優先するので default True (= 短い句でも
+    voice-tts に流す)。
+
+    Markdown リンク ``[text](url)`` 内部では文区切りを検出しない。 URL 中の
+    ``:`` や ``,`` で分断されると voice-tts 側の ``clean_text_for_tts`` が
+    リンク構文を認識できなくなり URI が読み上げられてしまうため。
+    """
+    if start >= len(buffer):
+        return -1
+    chars = (
+        _SENTENCE_BOUNDARY_CHARS | _SENTENCE_BOUNDARY_SOFT_CHARS
+        if use_soft else _SENTENCE_BOUNDARY_CHARS
+    )
+    buf_len = len(buffer)
+    in_bracket = False
+    in_md_link_url = False
+    for i in range(start, buf_len):
+        ch = buffer[i]
+        if in_md_link_url:
+            if ch == ')':
+                in_md_link_url = False
+            continue
+        if ch == '[':
+            in_bracket = True
+            continue
+        if in_bracket:
+            if ch == ']' and i + 1 < buf_len and buffer[i + 1] == '(':
+                in_md_link_url = True
+                in_bracket = False
+            elif ch == ']':
+                in_bracket = False
+            continue
+        if ch in chars:
+            if ch == '!' and i + 1 < buf_len and buffer[i + 1] == '[':
+                continue
+            return i + 1
+    return -1
+
+
+
+
+def _resolve_response_schema_source(
+    source: str, variables: Optional[Dict[str, Any]] = None
+) -> Optional[Dict[str, Any]]:
+    """Resolve a response_schema_source string into a JSON schema dict.
+
+    Supported forms:
+    - ``spell:<spell_name>`` — loads ``SPELL_TOOL_SCHEMAS[<spell_name>].parameters``
+      (the Spell's input JSON Schema). Used by spell_args_decider Playbook to
+      drive structured output for dynamic Spell argument generation.
+    - ``arg:<key>`` — reads ``variables[<key>]`` and uses it directly as the schema.
+      The value should be a JSON Schema dict (or a JSON string that parses to one).
+      Used by callers that need to inject *dynamic* enum lists or other
+      situation-specific schema details that cannot be expressed statically in
+      the Playbook JSON. Example: meta_judgment v2 builds the schema in
+      Python with the current alert / pending track IDs as enum values, then
+      passes it via Playbook input args.
+
+    Returns None if the source cannot be resolved.
+    """
+    if not isinstance(source, str) or not source.strip():
+        return None
+    if source.startswith("spell:"):
+        spell_name = source[len("spell:"):].strip()
+        if not spell_name:
+            return None
+        schema = SPELL_TOOL_SCHEMAS.get(spell_name)
+        if schema is None:
+            LOGGER.warning(
+                "[sea][llm] response_schema_source 'spell:%s' references unknown spell",
+                spell_name,
+            )
+            return None
+        params = getattr(schema, "parameters", None)
+        if not isinstance(params, dict):
+            LOGGER.warning(
+                "[sea][llm] Spell '%s' has no usable parameters schema (got %r)",
+                spell_name, type(params).__name__,
+            )
+            return None
+        return params
+    if source.startswith("arg:"):
+        key = source[len("arg:"):].strip()
+        if not key:
+            LOGGER.warning("[sea][llm] response_schema_source 'arg:' is missing key")
+            return None
+        if not isinstance(variables, dict):
+            LOGGER.warning(
+                "[sea][llm] response_schema_source 'arg:%s' but no variables provided",
+                key,
+            )
+            return None
+        value = variables.get(key)
+        if value is None:
+            LOGGER.warning(
+                "[sea][llm] response_schema_source 'arg:%s' resolved to None",
+                key,
+            )
+            return None
+        if isinstance(value, dict):
+            return value
+        if isinstance(value, str):
+            try:
+                parsed = json.loads(value)
+            except json.JSONDecodeError:
+                LOGGER.warning(
+                    "[sea][llm] response_schema_source 'arg:%s' value is a string but not valid JSON",
+                    key,
+                )
+                return None
+            if isinstance(parsed, dict):
+                return parsed
+            LOGGER.warning(
+                "[sea][llm] response_schema_source 'arg:%s' parsed JSON is not an object",
+                key,
+            )
+            return None
+        LOGGER.warning(
+            "[sea][llm] response_schema_source 'arg:%s' has unexpected type %r",
+            key, type(value).__name__,
+        )
+        return None
+    LOGGER.warning("[sea][llm] Unrecognized response_schema_source form: %r", source)
+    return None
+
+
+def _normalize_json_literals(args_raw: str) -> str:
+    """bare な ``true`` / ``false`` / ``null`` を Python の ``True`` / ``False`` /
+    ``None`` に置換する (文字列リテラル内は touch しない)。
+
+    LLM / ユーザーが JSON 脳でシングルクォート dict + 小文字 bool を混ぜて書く
+    頻出ケース (例: ``{'activate': true}``) を救うための正規化。tokenize で
+    NAME トークンだけを対象にするので、``{'title': 'this is true'}`` のような
+    文字列値内の ``true`` は STRING トークンのため変換されない。
+    """
+    mapping = {"true": "True", "false": "False", "null": "None"}
+    try:
+        toks = list(tokenize.generate_tokens(io.StringIO(args_raw).readline))
+    except (tokenize.TokenError, IndentationError, SyntaxError):
+        return args_raw
+    changed = False
+    out = []
+    for tok in toks:
+        if tok.type == tokenize.NAME and tok.string in mapping:
+            out.append((tok.type, mapping[tok.string]))
+            changed = True
+        else:
+            out.append((tok.type, tok.string))
+    if not changed:
+        return args_raw
+    try:
+        return tokenize.untokenize(out)
+    except Exception:
+        return args_raw
+
+
+def _parse_spell_args(
+    args_raw: str, *, silent: bool = False, mute: bool = False,
+) -> Optional[dict]:
+    """Parse spell args string (Python dict or JSON). Returns dict or None.
+
+    パース順: ``ast.literal_eval`` (Python リテラル) → ``json.loads`` (JSON)。
+    どちらも失敗した場合、bare な ``true`` / ``false`` / ``null`` を Python
+    リテラルに正規化してもう一度試す (``{'activate': true}`` のような Python
+    dict + JSON bool 混在を救う、_normalize_json_literals 参照)。
+
+    When ``silent=True``, parse failures are downgraded to DEBUG (used by the
+    fuzzy parser which routinely tries this strict path first and recovers via
+    the KV pattern). Without ``silent``, failures are logged at WARNING since
+    they indicate the LLM produced a canonical-form spell with malformed args.
+    ``mute=True`` suppresses the failure log entirely (read-only/display paths
+    that re-parse the same stored text on every poll — DEBUG would still spam).
+    """
+    def _log_fail(msg, *a):
+        if mute:
+            return
+        (LOGGER.debug if silent else LOGGER.warning)(msg, *a)
+
+    candidates = [args_raw]
+    normalized = _normalize_json_literals(args_raw)
+    if normalized != args_raw:
+        candidates.append(normalized)
+
+    for candidate in candidates:
+        try:
+            result = ast.literal_eval(candidate)
+        except (ValueError, SyntaxError):
+            try:
+                result = json.loads(candidate)
+            except json.JSONDecodeError:
+                continue
+        if isinstance(result, dict):
+            return result
+        _log_fail("[sea][spell] Args is not a dict: %s", type(result))
+        return None
+
+    _log_fail("[sea][spell] Failed to parse args: %s", args_raw)
+    return None
+
+
+def _parse_fuzzy_spell_args(args_raw: str, *, mute: bool = False) -> Optional[dict]:
+    """Parse informal key=value... spell args into a dict.
+
+    Handles single/double-quoted values, dict literals, and bare words.
+    Falls back to _parse_spell_args for standard dict/JSON forms. The strict
+    fallback is invoked with ``silent=True`` so its failure (the common case
+    when the LLM uses fuzzy syntax like ``track_id='...'``) does not pollute
+    the log — fuzzy KV parsing recovers without user-visible noise. ``mute``
+    fully suppresses that DEBUG too (display paths re-parsing stored text).
+    """
+    result = _parse_spell_args(args_raw, silent=True, mute=mute)
+    if result is not None:
+        return result
+    pairs = {}
+    for m in _KV_PATTERN.finditer(args_raw):
+        key = m.group(1)
+        # Groups 2-5 correspond to: single-quoted, double-quoted, dict-literal, bare-word
+        value_raw = next(v for v in m.groups()[1:] if v is not None)
+        # dict literals: try to parse as proper dict
+        if value_raw.startswith("{"):
+            parsed = _parse_spell_args(value_raw)
+            pairs[key] = parsed if parsed is not None else value_raw
+        else:
+            pairs[key] = value_raw
+    if pairs:
+        return pairs
+    return None
+
+
+def _coerce_arg_to_type(value: Any, json_type: str) -> Any:
+    """Coerce a single spell arg *value* toward its declared JSON Schema *json_type*.
+
+    LLM が spell 行を生成する際、``"index": "2"`` のように integer / number /
+    boolean を文字列でクオートしてしまうケースが頻出する。そのまま tool に渡すと
+    ``step_position`` のような整数比較が ``str < int`` で TypeError になる
+    (実例は退役した purpose_step スペルで観測された)。schema の宣言型に向けて
+    文字列値だけを変換する。
+
+    変換できない値はそのまま返し (tool 側のバリデーションに委ねる)、すでに正しい
+    型の値は touch しない。型の緩めではなく schema 宣言型への正規化。
+    """
+    if not isinstance(value, str):
+        return value
+    stripped = value.strip()
+    try:
+        if json_type == "integer":
+            return int(stripped)
+        if json_type == "number":
+            return float(stripped)
+        if json_type == "boolean":
+            low = stripped.lower()
+            if low in ("true", "1", "yes"):
+                return True
+            if low in ("false", "0", "no"):
+                return False
+            return value
+    except ValueError:
+        return value
+    return value
+
+
+def _coerce_spell_args(tool_name: str, tool_args: dict) -> dict:
+    """Coerce spell args toward the tool's declared JSON Schema types.
+
+    LLM がクオートした数値 / 真偽値 (``"2"`` / ``"true"``) を schema の宣言型に
+    合わせて正規化する。schema が無い / properties に無いキーは素通し。
+    """
+    schema = SPELL_TOOL_SCHEMAS.get(tool_name)
+    if schema is None:
+        return tool_args
+    props = (schema.parameters or {}).get("properties") or {}
+    if not props:
+        return tool_args
+    coerced = {}
+    for key, value in tool_args.items():
+        prop = props.get(key)
+        json_type = prop.get("type") if isinstance(prop, dict) else None
+        coerced[key] = _coerce_arg_to_type(value, json_type) if json_type else value
+    return coerced
+
+
+def _normalize_spell_line(tool_name: str, tool_args: dict, quick: bool = False) -> str:
+    """Produce the canonical /spell line for a given tool name and args dict.
+
+    ``quick=True`` は ``/quick_spell`` 動詞を保つ — SAIMemory に残る正規化行が
+    本人の宣言 (この発話で完了) を書き換えないため (quick_spell.md §3.1)。
+    """
+    verb = "/quick_spell" if quick else "/spell"
+    return f"{verb} name='{tool_name}' args={json.dumps(tool_args, ensure_ascii=False)}"
+
+
+class _SpellSpan:
+    """``re.Match`` 互換の最小スパン (複数行 args 救済用)。
+
+    ``_SPELL_PATTERN`` は行単位マッチのため、複数行にまたがる args を救済した
+    エントリには本物の Match が無い。呼び出し側 (text_before / text_after の
+    切り出し・位置ソート) が使うのは start/end/span だけなので、それだけを持つ。
+    """
+
+    __slots__ = ("_start", "_end")
+
+    def __init__(self, start: int, end: int) -> None:
+        self._start = start
+        self._end = end
+
+    def start(self) -> int:
+        return self._start
+
+    def end(self) -> int:
+        return self._end
+
+    def span(self) -> Tuple[int, int]:
+        return (self._start, self._end)
+
+
+def _rescue_multiline_args(text: str, m: Any) -> Optional[Tuple[dict, "_SpellSpan"]]:
+    """canonical /spell 行の args が 1 行で parse できなかったときの救済パース。
+
+    ``_SPELL_PATTERN`` は MULTILINE の行単位マッチ (``.`` は改行を跨がない) の
+    ため、LLM が args の JSON 文字列値に **生の改行** を書くと ``group(2)`` は
+    先頭行で千切れて必ず parse に失敗する (2026-07-05 実 LLM シム 異常 #2:
+    document_create の本文入り args が丸ごと握り潰された)。
+
+    ここでは args の開始 ``{`` から brace の対応を追い (文字列リテラル内は
+    数えない)、対応する閉じ ``}`` までを取り出した上で、文字列値の中の生改行を
+    ``\\n`` に正規化して再 parse する。これは決定論的な正規化であり、曖昧な
+    入力の推測修復はしない: brace が閉じない / 正規化後も parse できない場合は
+    None を返し、呼び出し側が差し戻しエラー (再試行の機会) にする。
+
+    Returns:
+        ``(tool_args, span)``。span は ``/spell`` 行頭から閉じ ``}`` まで。
+    """
+    pos = m.start(2)
+    end_limit = len(text)
+    while pos < end_limit and text[pos] in " \t":
+        pos += 1
+    if pos >= end_limit or text[pos] != "{":
+        return None
+
+    depth = 0
+    in_string = False
+    quote = ""
+    escaped = False
+    out: List[str] = []
+    i = pos
+    while i < end_limit:
+        ch = text[i]
+        if in_string:
+            if escaped:
+                out.append(ch)
+                escaped = False
+            elif ch == "\\":
+                out.append(ch)
+                escaped = True
+            elif ch == quote:
+                out.append(ch)
+                in_string = False
+            elif ch == "\n":
+                out.append("\\n")
+            elif ch == "\r":
+                # \r\n は次の \n 側で \\n になる。単独 \r も \\n に倒す
+                if i + 1 >= end_limit or text[i + 1] != "\n":
+                    out.append("\\n")
+            else:
+                out.append(ch)
+        else:
+            if ch in "\"'":
+                in_string = True
+                quote = ch
+                out.append(ch)
+            elif ch == "{":
+                depth += 1
+                out.append(ch)
+            elif ch == "}":
+                depth -= 1
+                out.append(ch)
+                if depth == 0:
+                    candidate = "".join(out)
+                    parsed = _parse_spell_args(candidate, silent=True, mute=True)
+                    if isinstance(parsed, dict):
+                        return parsed, _SpellSpan(m.start(), i + 1)
+                    return None
+            else:
+                out.append(ch)
+        i += 1
+    return None
+
+
+class ParsedSpell(NamedTuple):
+    """1 つの /spell (または /quick_spell) 呼び出しのパース結果。"""
+
+    name: str
+    args: dict
+    m: Any  # re.Match または _SpellSpan
+    norm: str
+    quick: bool
+
+
+def _parse_spell_lines(
+    text: str, *, quiet: bool = False,
+    malformed_out: Optional[List[Tuple[str, str, Any]]] = None,
+) -> List[ParsedSpell]:
+    """Parse ALL /spell invocations in *text*, including fuzzy (informal) syntax.
+
+    Returns list of :class:`ParsedSpell` ``(name, args, m, norm, quick)``.
+    - ``m`` points to the original text position (for text_before calculation).
+      複数行 args を救済したエントリは ``_SpellSpan`` (start/end/span のみ) になる。
+    - ``norm`` is the canonical ``/spell name='...' args={...}`` form,
+      which is used in SAIMemory storage so the persona learns correct syntax.
+    - ``quick`` = ``/quick_spell`` 動詞で唱えられた行 (quick_spell.md)。fuzzy
+      救済・複数行 args 救済を通っても保持される。
+    Unparseable entries are skipped from the return value; canonical-form
+    entries whose args failed to parse (after the multiline rescue) are
+    reported via ``malformed_out`` when the caller passes a list — the spell
+    loop uses this to feed a corrective error back to the persona instead of
+    silently dropping the invocation (2026-07-05 実 LLM シム 異常 #2).
+
+    ``quiet=True`` suppresses the canonical-parse-failure and fuzzy-recovery
+    logging. Use it on read-only/display paths (e.g. activity-view re-parses
+    stored meta-judgment messages on every poll) where the same historical text
+    is parsed repeatedly and the log noise is pure spam.
+    """
+    found: List[ParsedSpell] = []
+    matched_spans: List[Tuple[int, int]] = []
+
+    # Pass 1: canonical form
+    for m in _SPELL_PATTERN.finditer(text):
+        # 直前の複数行救済が飲み込んだ範囲内 (= args の本文中) の再マッチは無視
+        if any(s <= m.start() < e for s, e in matched_spans):
+            continue
+        quick = _is_quick_match(m)
+        args_raw = m.group(2).strip()
+        tool_args = _parse_spell_args(args_raw, silent=quiet, mute=quiet)
+        if tool_args is not None:
+            normalized = _normalize_spell_line(m.group(1), tool_args, quick=quick)
+            found.append(ParsedSpell(m.group(1), tool_args, m, normalized, quick))
+            matched_spans.append(m.span())
+            continue
+        # 1 行で読めない args: 文字列値に生改行を含む複数行 JSON/dict を救済
+        rescued = _rescue_multiline_args(text, m)
+        if rescued is not None:
+            tool_args, span = rescued
+            normalized = _normalize_spell_line(m.group(1), tool_args, quick=quick)
+            if not quiet:
+                LOGGER.info(
+                    "[sea][spell] Rescued multiline args for spell '%s' → %s",
+                    m.group(1), normalized[:200],
+                )
+            found.append(ParsedSpell(m.group(1), tool_args, span, normalized, quick))
+            matched_spans.append(span.span())
+            continue
+        if malformed_out is not None:
+            malformed_out.append((m.group(1), args_raw, m))
+
+    # Pass 2: fuzzy form — skip spans already matched by canonical pattern
+    for m in _SPELL_PATTERN_FUZZY.finditer(text):
+        span = m.span()
+        if any(s <= span[0] < e for s, e in matched_spans):
+            continue
+        tool_name = m.group(1)
+        quick = _is_quick_match(m)
+        tool_args = _parse_fuzzy_spell_args(m.group(2).strip(), mute=quiet)
+        if tool_args is not None:
+            normalized = _normalize_spell_line(tool_name, tool_args, quick=quick)
+            if not quiet:
+                LOGGER.info("[sea][spell] Fuzzy-parsed spell '%s' → %s", tool_name, normalized)
+            found.append(ParsedSpell(tool_name, tool_args, m, normalized, quick))
+            matched_spans.append(span)
+
+    # Sort by position in text so rounds process spells in order
+    found.sort(key=lambda x: x.m.start())
+    return found
+
+
+def _build_spell_user_only_block(
+    tool_name: str,
+    tool_args: dict,
+    display_name: str,
+    result_str: str = "",
+    success: bool = True,
+    spell_line: Optional[str] = None,
+) -> str:
+    """Build a ``<user_only>`` block carrying one spell invocation + result.
+
+    ``success=False`` renders the failure variant: the foldable disclosure
+    uses a cross (×) icon instead of the star and adds the
+    ``spellResultError`` class so the frontend can style misfired spells
+    (unknown spell name, bad invocation form, tool error) distinctly. The
+    ``result_str`` then carries the error / hint text shown to the user.
+
+    Structure (Phase 2-B-step3 / 2-E, voice_tts_pipeline_streaming intent doc):
+
+        <user_only alt="{display_name}">
+        /spell name='{tool_name}' args={...}
+        <details class="spellResult">
+          <summary class="spellSummary">
+            <span class="spellIcon"><svg ...>star</svg></span>
+            <span>{display_name}</span>
+          </summary>
+          {escaped_result}
+        </details>
+        </user_only>
+
+    - ``alt`` flows into other-persona ingestion (``strip_for_other_persona``)
+      as ``[{display_name}]`` placeholder so the spell call is perceived but
+      details are hidden.
+    - The ``/spell ...`` line is the canonical normalized form (matches the
+      assistant message persisted to context) — kept as raw text so the
+      persona who emitted it can see exactly what they invoked.
+    - Result is HTML-escaped and wrapped in ``<details class="spellResult">``
+      for the foldable UI display. The summary reuses the existing
+      ``.spellSummary`` / ``.spellIcon`` styling shared with legacy
+      ``<details class="spellBlock">`` records (= consistent purple disclosure
+      look between old and new records).
+    - The whole block is stripped from voice/external paths by
+      ``strip_user_only`` and replaced with placeholder by
+      ``strip_for_other_persona``.
+    - ``spell_line`` overrides the rendered ``/spell ...`` line. Args-parse
+      failures have no args dict to normalize from, so the caller passes the
+      raw invocation line instead of a misleading ``args={}``.
+    """
+    if spell_line is None:
+        spell_line = _normalize_spell_line(tool_name, tool_args)
+    result_escaped = (
+        result_str.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        if result_str else ""
+    )
+    alt_escaped = (
+        (display_name or tool_name)
+        .replace("&", "&amp;")
+        .replace('"', "&quot;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
+    display_name_escaped = (
+        (display_name or tool_name)
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
+    if success:
+        details_class = "spellResult"
+        icon_svg = (
+            '<path d="M12 2L15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 '
+            '5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2z"/>'
+        )
+    else:
+        details_class = "spellResult spellResultError"
+        icon_svg = '<path d="M18 6L6 18M6 6l12 12"/>'
+    # Failure blocks always render (the error/hint text must reach the user);
+    # success blocks only render when there is a result to show.
+    if result_escaped or not success:
+        result_section = (
+            f'<details class="{details_class}">'
+            f'<summary class="spellSummary">'
+            f'<span class="spellIcon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">'
+            f'{icon_svg}'
+            f'</svg></span>'
+            f'<span>{display_name_escaped}</span>'
+            f'</summary>\n\n'
+            f'{result_escaped}\n\n'
+            f'</details>\n'
+        )
+    else:
+        result_section = ""
+    return (
+        f'<user_only alt="{alt_escaped}">\n'
+        f'{spell_line}\n'
+        f'{result_section}'
+        f'</user_only>\n'
+    )
+
+
+def _list_router_callable_playbook_names(persona: Any, building_id: Optional[str]) -> List[str]:
+    """Enumerate router_callable Playbook names available to ``persona``.
+
+    Best-effort: invokes the ``list_available_playbooks`` tool directly
+    (outside persona_context, so persona_id / building_id are passed
+    explicitly) and returns the sorted name list. Degrades to ``[]`` on any
+    failure since this only feeds an error hint.
+    """
+    persona_id = getattr(persona, "persona_id", None)
+    try:
+        list_func = TOOL_REGISTRY.get("list_available_playbooks")
+        if list_func is None:
+            return []
+        raw = list_func(persona_id=persona_id, building_id=building_id)
+        payload = raw[0] if isinstance(raw, tuple) else raw
+        parsed = json.loads(payload) if isinstance(payload, str) else payload
+        if not isinstance(parsed, list):
+            return []
+        names = [
+            (item.get("name") or "").strip()
+            for item in parsed
+            if isinstance(item, dict) and (item.get("name") or "").strip()
+        ]
+        return sorted(names)
+    except Exception:
+        LOGGER.warning(
+            "[sea][spell] failed to enumerate playbooks for unknown-spell hint",
+            exc_info=True,
+        )
+        return []
+
+
+def _close_spell_names(spell_name: str, limit: int = 5) -> list:
+    """名前が近い登録済みスペルを近い順に返す。該当なしなら空。
+
+    スペル名は ``<アドオン名>__<ツール名>`` の形が多いため、フルネーム同士を
+    比べるとアドオン名の共通部分だけで似て見えてしまう (実測: 消えた Elyth の
+    スペル名に対して、閾値 0.6 では無関係な stackchan / X のスペルが 5 件並んだ)。
+    そこでフルネームの照合は閾値を高く取り、加えて**ツール名 (最後の ``__`` 以降)
+    同士**も突き合わせる。 後者はペルソナがアドオン名を落として素の名前で呼ぶ
+    間違いに効く — その形は :func:`canonicalize_spell_name` が候補一意のときだけ
+    救ってくれるので、複数アドオンが同名ツールを持つ場合はここまで落ちてくる。
+    """
+    available = sorted(SPELL_TOOL_NAMES)
+    if not available or not spell_name:
+        return []
+
+    def _tail(name: str) -> str:
+        return name.rsplit("__", 1)[-1]
+
+    by_tail: dict = {}
+    for name in available:
+        by_tail.setdefault(_tail(name), []).append(name)
+
+    hits = list(find_close_matches(spell_name, available, limit=limit, threshold=0.7))
+    for tail in find_close_matches(_tail(spell_name), list(by_tail), limit=limit, threshold=0.8):
+        hits.extend(by_tail[tail])
+
+    seen = set()
+    ordered = []
+    for name in hits:
+        if name not in seen:
+            seen.add(name)
+            ordered.append(name)
+    return ordered[:limit]
+
+
+def _build_unknown_spell_error(spell_name: str, persona: Any, building_id: Optional[str]) -> str:
+    """Build a corrective error message for an unknown (unregistered) spell.
+
+    Most common mistake: invoking a Playbook **name** directly as a spell
+    (e.g. ``/spell name='web_research'``) instead of going through the
+    ``run_playbook`` spell. When the unknown name matches a router_callable
+    Playbook, point the persona at the correct ``run_playbook`` form so it can
+    self-correct on the retry round.
+
+    Otherwise, offer only the *close* names. Listing every registered spell
+    (127 of them on the repo owner's world as of 2026-08-25) buries the actual
+    correction and burns the persona's context on every misfire — and the full
+    list is already in the persona's spell-list head section anyway.
+    """
+    playbook_names = _list_router_callable_playbook_names(persona, building_id)
+
+    if spell_name in playbook_names:
+        return (
+            f"「{spell_name}」は Playbook であり、スペルとして直接は呼び出せません。"
+            f"Playbook を実行するには run_playbook スペルを使ってください: "
+            f"/spell name='run_playbook' args={{\"name\": \"{spell_name}\"}}"
+        )
+
+    hint = f"「{spell_name}」というスペルは存在しません。"
+    close = _close_spell_names(spell_name)
+    if close:
+        hint += f"名前が近いスペル: {', '.join(close)}。"
+    hint += (
+        "使えるスペルの一覧はスペル一覧セクションにあります。"
+        "アドオンが提供する追加スペルは addon_spell_help で確認できます。"
+    )
+    if playbook_names:
+        hint += (
+            f" Playbook を実行したい場合は run_playbook を使ってください "
+            f"(利用可能な Playbook: {', '.join(playbook_names)})。"
+        )
+    return hint
+
+
+def _build_malformed_args_error(spell_name: str, args_raw: str) -> str:
+    """args の parse に失敗した既知スペルへの差し戻しエラーを組み立てる。
+
+    unknown spell と同じく [Spell Error] としてペルソナに返し、次のラウンドで
+    正しい書式で再発動できるようにする (何が悪いか + 正しい書式例)。
+    握り潰すとペルソナは失敗自体を知覚できず、書き上げた内容ごと平文として
+    消える (2026-07-05 実 LLM シム 異常 #2)。
+    """
+    preview = args_raw if len(args_raw) <= 120 else args_raw[:120] + "…"
+    example = f"/spell name='{spell_name}' args={{\"content\": \"1行目\\n2行目\"}}"
+    return (
+        f"スペル「{spell_name}」の args を JSON として読み取れなかったため、"
+        "実行されませんでした。\n"
+        f"読み取れなかった args (先頭部分): {preview}\n"
+        "args は 1 つの JSON オブジェクトとして書いてください。"
+        "文字列値の中の改行は \\n とエスケープしてください"
+        "（生の改行を含めると途中で途切れます）。\n"
+        f"書式例: {example}\n"
+        "同じ内容で args を書き直して、もう一度スペルを発動してください。"
+    )
+
+
+# ── Handy Tool inline execution (legacy, kept for non-spell tool_call path) ──
+
+_MAX_HANDY_TOOL_LOOPS = 3
+
+
+def _execute_handy_tool_inline(
+    tool_name: str,
+    tool_args: dict,
+    persona: Any,
+    building_id: str,
+    playbook_name: str,
+    state: dict,
+    messages: list,
+    runtime: Any,
+    event_callback: Optional[Callable] = None,
+    thought_signature: Optional[str] = None,
+) -> str:
+    """Execute a handy tool inline within the LLM node and append protocol messages.
+
+    Returns the tool result string. Modifies `messages` in place (appends
+    assistant tool_call + tool result messages).
+    """
+    from pathlib import Path
+    from sea.pulse_context import PulseLogEntry
+
+    tc_id = f"tc_{uuid.uuid4().hex}"
+
+    # Append assistant tool_call message to conversation
+    tc_entry: Dict[str, Any] = {
+        "id": tc_id,
+        "type": "function",
+        "function": {"name": tool_name, "arguments": json.dumps(tool_args, ensure_ascii=False)},
+    }
+    # Gemini thinking models require thought_signature echoed back on function call parts
+    if thought_signature:
+        tc_entry["thought_signature"] = thought_signature
+    tool_call_msg = {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [tc_entry],
+    }
+    messages.append(tool_call_msg)
+
+    # Execute the tool (素名参照は一意なら <addon>__<name> キーへ解決)
+    tool_func = TOOL_REGISTRY.get(canonicalize_tool_name(tool_name))
+    if not tool_func:
+        result_str = f"Tool '{tool_name}' not found in registry"
+        LOGGER.error("[sea][handy] %s", result_str)
+    else:
+        persona_obj = state.get("_persona_obj") or persona
+        persona_id = getattr(persona_obj, "persona_id", "unknown")
+        persona_dir = getattr(persona_obj, "persona_log_path", None)
+        persona_dir = persona_dir.parent if persona_dir else Path.cwd()
+        manager_ref = getattr(persona_obj, "manager_ref", None)
+        try:
+            # ``llm_messages=messages`` snapshot lets spells like ``run_playbook``
+            # fork their sub-line from the parent LLM node's actual messages.
+            with persona_context(persona_id, persona_dir, manager_ref, playbook_name=playbook_name, auto_mode=bool(state.get("_auto_mode", False)), event_callback=event_callback, llm_messages=messages):
+                raw_result = tool_func(**tool_args)
+            result_str = str(raw_result)
+            LOGGER.info("[sea][handy] Executed %s → %s", tool_name, result_str[:200])
+        except Exception as exc:
+            result_str = f"Handy tool error ({tool_name}): {exc}"
+            LOGGER.exception("[sea][handy] %s failed", tool_name)
+
+    # Append tool result message to conversation
+    tool_result_msg = {
+        "role": "tool",
+        "tool_call_id": tc_id,
+        "name": tool_name,
+        "content": result_str,
+    }
+    messages.append(tool_result_msg)
+
+    # Record to PulseContext
+    _pulse_ctx = state.get("_pulse_context")
+    if _pulse_ctx:
+        # Assistant tool_call entry
+        _pulse_ctx.append(PulseLogEntry(
+            role="assistant", content="",
+            node_id=f"handy_{tool_name}", playbook_name=playbook_name,
+            tool_calls=[{
+                "id": tc_id,
+                "type": "function",
+                "function": {"name": tool_name, "arguments": json.dumps(tool_args, ensure_ascii=False)},
+            }],
+        ))
+        # Tool result entry
+        _pulse_ctx.append(PulseLogEntry(
+            role="tool", content=result_str,
+            node_id=f"handy_{tool_name}", playbook_name=playbook_name,
+            tool_call_id=tc_id, tool_name=tool_name,
+        ))
+
+    # Store to SAIMemory with handy_tool tag
+    pulse_id = state.get("_pulse_id")
+    runtime._store_memory(
+        persona,
+        f"[Handy Tool: {tool_name}]\n{result_str}",
+        role="system",
+        tags=["conversation", "handy_tool"],
+        pulse_id=pulse_id,
+        playbook_name=playbook_name,
+    )
+
+    # Record to activity trace (merged into final say event, not a separate bubble)
+    _at = state.get("_activity_trace")
+    if isinstance(_at, list):
+        _at.append({"action": "handy_tool", "name": tool_name, "playbook": playbook_name})
+
+    return result_str
+
+
+async def _run_spell_tool_async(
+    tool_name: str,
+    tool_args: dict,
+    persona: Any,
+    state: dict,
+    playbook_name: str,
+    event_callback: Optional[Callable],
+    messages: Optional[list] = None,
+    user_configured: bool = False,
+) -> Tuple[str, Optional[Dict[str, Any]], bool]:
+    """Execute a single spell tool. Returns ``(result_string, metadata, ok)``.
+
+    ``user_configured=True`` はこの起動をユーザー自身が書いた場合 (UI の
+    「ツール指定」・スケジュール設定の pre_spells) だけに立てる。ペルソナが
+    発話中に唱えたスペルでは常に False。Playbook 許可ゲートが「毎回確認」を
+    確認なしで通してよいかの根拠に使う。
+
+    ``ok=False`` は機械的失敗 (実行中の例外 / レジストリ未登録) — quick_spell.md
+    §3.3 Phase 1。従来は例外が文字列に溶けて成功と区別できず、例外死が
+    ``[Spell Result]`` の顔をして注入されていた既存バグの修正を兼ねる。
+
+    Tool return values are normalized via ``tools.core.parse_tool_result``,
+    which accepts:
+    - ``str`` → ``(str, None, None, None)``
+    - ``(str, dict)`` → 2-tuple form, dict carries ``{"media": [...]}`` etc.
+    - ``(str, ToolResult|str|None, file_path)`` → 3-tuple form
+    - ``(str, ToolResult|str|None, file_path, dict)`` → 4-tuple form (see.py 等)
+    - ``ToolResult`` / ``dict`` → see ``parse_tool_result`` for details
+
+    spell 経路では現状 ``content`` と ``metadata`` のみ下流に渡す。 metadata
+    の ``media`` は spell-result message に attachment として乗り、 LLM が
+    画像 / ファイル等を multimodal で受け取る。 snippet と file_path は
+    受け取るだけで未使用 (別 Phase で SAIMemory 経路を設計予定)。
+
+    Errors become ``(error_message, None, False)`` so the spell loop can
+    continue and the persona's original utterance still reaches
+    Building/SAIMemory.
+    """
+    from pathlib import Path
+
+    tool_func = TOOL_REGISTRY.get(tool_name)
+    if not tool_func:
+        result_str = f"Spell '{tool_name}' not found in registry"
+        LOGGER.error("[sea][spell] %s", result_str)
+        return result_str, None, False
+
+    # LLM がクオートした数値 / 真偽値 (``"index": "2"``) を schema 宣言型へ正規化。
+    # これを怠ると ``index < 0`` が ``str < int`` で TypeError になる。
+    tool_args = _coerce_spell_args(tool_name, tool_args)
+
+    # Wide try: covers persona_context setup, executor dispatch, tool
+    # invocation. Any failure becomes a string result so the outer spell
+    # loop can still proceed and, more importantly, the persona's utterance
+    # survives to Building/SAIMemory even if the tool path is broken.
+    try:
+        persona_obj = state.get("_persona_obj") or persona
+        persona_id = getattr(persona_obj, "persona_id", "unknown")
+        persona_dir = getattr(persona_obj, "persona_log_path", None)
+        persona_dir = persona_dir.parent if persona_dir else Path.cwd()
+        manager_ref = getattr(persona_obj, "manager_ref", None)
+        # Forward the active PulseContext so spells can read the running Pulse
+        # (thread stack / logs / meta judgment buffer).
+        pulse_ctx = state.get("_pulse_context")
+        auto_mode = bool(state.get("_auto_mode", False))
+
+        def _run():
+            # ``llm_messages=messages`` snapshot lets spells like ``run_playbook``
+            # fork their sub-line from the parent LLM node's actual messages.
+            with persona_context(persona_id, persona_dir, manager_ref, playbook_name=playbook_name, auto_mode=auto_mode, event_callback=event_callback, pulse_context=pulse_ctx, llm_messages=messages, user_configured=user_configured):
+                return tool_func(**tool_args)
+
+        if inspect.iscoroutinefunction(tool_func):
+            with persona_context(persona_id, persona_dir, manager_ref, playbook_name=playbook_name, auto_mode=auto_mode, event_callback=event_callback, pulse_context=pulse_ctx, llm_messages=messages, user_configured=user_configured):
+                raw_result = await tool_func(**tool_args)
+        else:
+            raw_result = await asyncio.get_event_loop().run_in_executor(None, _run)
+            if inspect.isawaitable(raw_result):
+                raw_result = await raw_result
+
+        # Normalize via tools.core.parse_tool_result so 4-tuple returns
+        # ``(text, ToolResult, file_path, metadata)`` are unpacked correctly.
+        # spell 経路では現状 ``(content, metadata)`` のみ消費する。 snippet と
+        # file_path は受け取るだけで未使用 (chat 経路と同じ扱い)。
+        # SAIMemory への snippet 記録経路は別 Phase で設計予定。
+        # 詳細: docs/issues/native_tool_return_4tuple_bug.md
+        content, _snippet, _file_path, result_metadata = parse_tool_result(raw_result)
+        result_str = content
+        LOGGER.info("[sea][spell] Executed %s → %s", tool_name, result_str[:200])
+        return result_str, result_metadata, True
+    except Exception as exc:
+        result_str = f"Spell error ({tool_name}): {type(exc).__name__}: {exc}"
+        LOGGER.exception("[sea][spell] %s failed", tool_name)
+        return result_str, None, False
+
+
+def _emit_bubble1_early(
+    *,
+    runtime: Any,
+    persona: Any,
+    building_id: str,
+    text: str,
+    speak_flag: Any,
+    pulse_id: Optional[str],
+    event_callback: Optional[Callable],
+    node_id: str,
+    send_streaming_discard: bool,
+) -> str:
+    """Spell loop 開始前に bubble1 を早期 emit して、 voice-tts の TTS 合成を
+    Spell 実行と並行で走らせる (Phase 1)。
+
+    Spell が無い (= 通常応答)、 text_before が空、 ``speak`` が False の場合は
+    no-op で ``""`` を返す。 unknown spell しか無い場合は、 その手前の本文を
+    早期 emit する (unknown spell も spell loop で 1 ラウンド処理されるため、
+    valid spell ありの場合と同じ扱い)。 早期 emit した時はその text_before を
+    返し、 caller は後段の bubble1 emit を skip する判定に使う。
+
+    ``send_streaming_discard``: streaming mode のみ True にする (= UI に途中の
+    streaming chunk を破棄させて bubble1 を綺麗に再描画させるため)。 tool mode
+    と non-streaming mode は streaming chunk を出さないので False。
+
+    Why: ``<spell>`` を含む LLM 応答では、 bubble1 (= spell 前のテキスト)
+    の内容は LLM 出力時点で確定している。 これを ``_run_spell_loop`` の完了
+    後 (= spell 実行 数分後の可能性) まで待ってから emit していた旧設計だと、
+    persona_speak hook → voice-tts enqueue → TTS 合成 が全て spell 完了後に
+    なる。 早期 emit すれば spell 実行と TTS が並行し、 ユーザは spell 待ち
+    中も発言1 の音声を聞ける。
+    """
+    if speak_flag is False:
+        return ""
+    text_before = _extract_first_text_before(text)
+    if not text_before.strip():
+        return ""
+    if event_callback:
+        if send_streaming_discard:
+            event_callback({
+                "type": "streaming_discard",
+                "persona_id": getattr(persona, "persona_id", None),
+                "node_id": node_id,
+                "pulse_id": pulse_id,
+            })
+        event_callback({
+            "type": "say",
+            "content": text_before,
+            "persona_id": getattr(persona, "persona_id", None),
+            "pulse_id": pulse_id,
+        })
+    eff_bid = runtime._effective_building_id(persona, building_id)
+    runtime._emit_say(
+        persona, eff_bid, text_before, pulse_id=pulse_id,
+        event_callback=event_callback,
+    )
+    LOGGER.info(
+        "[sea][spell] bubble1 emitted early (len=%d) — TTS will run in "
+        "parallel with spell loop", len(text_before),
+    )
+    return text_before
+
+
+def _extract_first_text_before(text: str) -> str:
+    """``text`` の中から最初の spell 行 (有効 / unknown 問わず) までの本文を返す。
+
+    Spell が無い (= 通常応答) 場合は ``""`` を返す。 unknown spell しか無い
+    場合も、 その unknown 行の手前までの本文は正規の発言なので返す
+    (unknown spell も ``_run_spell_loop`` で 1 ラウンド処理される)。
+    ``_run_spell_loop`` の最初のラウンドで計算される ``text_before`` と同じ
+    値になるよう、 ``_parse_spell_lines`` の先頭エントリ位置を基準にする。
+    有効 spell より前に unknown spell がある場合に、 その生 ``/spell`` 行が
+    bubble1 へ漏れるのを防ぐためでもある。
+
+    Phase 1 (bubble1 早期 emit、 voice-tts Spell 待ち遅延対策) で caller が
+    spell loop 実行 **前** に bubble1 部分のテキストを取り出すために使う。
+    spell 実行は数分かかる場合があるため (= 画像生成等)、 spell 開始前に
+    bubble1 を emit すると persona_speak hook → voice-tts enqueue が即座に
+    走り、 ユーザは spell 待ち中も発言1 の音声を聞ける。
+    """
+    if not text:
+        return ""
+    malformed: List[Tuple[str, str, Any]] = []
+    all_parsed = _parse_spell_lines(text, malformed_out=malformed)
+    spans = [entry[2] for entry in all_parsed] + [m for _, _, m in malformed]
+    if not spans:
+        return ""
+    return text[:min(s.start() for s in spans)].rstrip()
+
+
+async def _consume_pipeline_stream(
+    stream_iter: Any,
+    *,
+    runtime: Any,
+    persona: Any,
+    building_id: str,
+    node_def: Any,
+    state: dict,
+    pipeline_msg_id: Optional[str],
+    sub_seq_start: int,
+    cancellation_token: Any,
+    event_callback: Optional[Callable],
+    progress: Optional[dict] = None,
+) -> Tuple[str, int, bool, bool]:
+    """1 つの LLM streaming call を消費し、 sub-speak 発火と UI への
+    ``streaming_chunk`` イベント送出を担う。
+
+    LLM 1 回目の応答にも、 spell 実行後の retry 応答にも、 同じロジックで
+    使い回せるよう関数化した。 各呼び出しは独立した stream を 1 つ消費
+    する。 spell_detected はローカル管理 (= round ごとにリセット相当)。
+
+    voice-tts に渡す音声テキストは **すべて sub-speak 経由** で送る。 stream
+    終端で文区切りに達してない residual も最後の sub-speak として flush する。
+    finalize 側は ``final_voice_text=""`` 固定で voice-tts に 「stream close
+    + wav 保存」 だけ依頼する設計 (= caller 側で全文 vs 既送 の差分比較を
+    しない、 残テキストの送信を最終処理に残さない)。
+
+    引数:
+    - ``stream_iter``: ``llm_client.generate_stream(...)`` の戻り値
+    - ``pipeline_msg_id``: ``_emit_speak_start`` で発番した placeholder ID。
+      None の場合は sub-speak emit を行わない (= UI streaming_chunk のみ)
+    - ``sub_seq_start``: 既に消費済の sub-speak 連番。 この値の次から発番
+    - ``progress``: 非 None なら、消費の**途中経過**をこの dict へ書き続ける
+      (``text_chunks``: 受信済み chunk のリストへの参照 / ``sub_seq``: 発火済みの
+      最新連番)。ストリーム消費中に例外が出ると返り値の tuple は呼び出し元へ
+      届かないため、途中まで受けた本文と進んだ連番はここからしか回収できない
+      (Beat の出口の後始末が読む。2026-08-27 Codex 指摘 — 無いと、途中死した回の
+      確定が空文字になり、final の連番が発火済みの sub-speak と衝突する)
+
+    返り値:
+    ``(text, next_sub_seq, spell_detected, cancelled)``
+
+    - ``text``: 受信した chunk を joined した完成 text
+    - ``next_sub_seq``: helper 内で発火した sub-speak の最終連番。 caller は
+      これを次の呼び出しの ``sub_seq_start`` にする
+    - ``spell_detected``: この stream 中に ``/spell`` 行を検出したか
+      (= 検出後は voice-tts emit を停止した)。 ログ用途
+    - ``cancelled``: ``cancellation_token`` が発火したか
+    """
+    text_chunks: List[str] = []
+    sub_seq = sub_seq_start
+    spell_detected = False
+    cancelled = False
+    last_emit_pos = 0
+    if progress is not None:
+        # リスト参照ごと渡す — 以後の append がそのまま呼び出し元から見える
+        progress["text_chunks"] = text_chunks
+        progress["sub_seq"] = sub_seq
+
+    def _emit_fragment(fragment: str) -> None:
+        """voice-able な fragment を 1 つ sub-speak として送出。"""
+        nonlocal sub_seq
+        if not _has_voiceable_content(fragment):
+            return
+        sub_seq += 1
+        if progress is not None:
+            progress["sub_seq"] = sub_seq
+        runtime._emit_sub_speak(
+            persona,
+            runtime._effective_building_id(persona, building_id),
+            pipeline_msg_id,
+            fragment,
+            sub_seq,
+            pulse_id=state.get("_pulse_id"),
+        )
+
+    try:
+        for chunk in stream_iter:
+            if cancellation_token and cancellation_token.is_cancelled():
+                cancelled = True
+                break
+
+            if isinstance(chunk, dict) and chunk.get("type") == "thinking":
+                if event_callback:
+                    event_callback({
+                        "type": "streaming_thinking",
+                        "content": chunk["content"],
+                        "persona_id": getattr(persona, "persona_id", None),
+                        "node_id": getattr(node_def, "id", "llm"),
+                        "pulse_id": state.get("_pulse_id"),
+                    })
+                continue
+
+            text_chunks.append(chunk)
+            if event_callback:
+                event_callback({
+                    "type": "streaming_chunk",
+                    "content": chunk,
+                    "persona_id": getattr(persona, "persona_id", None),
+                    "node_id": getattr(node_def, "id", "llm"),
+                    "pulse_id": state.get("_pulse_id"),
+                })
+
+            if pipeline_msg_id and not spell_detected:
+                _buf = "".join(text_chunks)
+                _tail = _buf[last_emit_pos:]
+                _spell_match = _SPELL_PATTERN.search(_tail)
+                if _spell_match:
+                    _pre_spell = _tail[: _spell_match.start()].rstrip()
+                    _emit_fragment(_pre_spell)
+                    last_emit_pos += len(_tail[: _spell_match.start()])
+                    spell_detected = True
+                else:
+                    while True:
+                        _boundary = _find_next_sentence_boundary(_buf, last_emit_pos)
+                        if _boundary < 0:
+                            break
+                        _emit_fragment(_buf[last_emit_pos:_boundary])
+                        last_emit_pos = _boundary
+    finally:
+        if hasattr(stream_iter, "close"):
+            stream_iter.close()
+
+    text = "".join(text_chunks)
+
+    # Stream 終端で last_emit_pos < len(text) の residual (= 文区切りに達して
+    # ない最後の chunk) を最後の sub-speak として flush。 spell 行検出後の
+    # 残り (= /spell 以降) は spell loop で <user_only> wrap される対象なので
+    # voice-tts に渡してはいけない、 ここでは flush しない。
+    if pipeline_msg_id and not spell_detected and last_emit_pos < len(text):
+        _emit_fragment(text[last_emit_pos:].rstrip())
+
+    return text, sub_seq, spell_detected, cancelled
+
+
+def _is_user_interruption(interrupted_by: Optional[str]) -> bool:
+    """取り消しの起点がユーザーかを、取り消しに刻まれた原因から判定する。
+
+    値の出どころは二系統: 停止ボタン (``saiverse_manager`` の "user_stop") と、
+    優先度の高い要求による割り込み (``PulseController`` が ``request.type`` を
+    そのまま刻む — "user" / "auto" / "schedule")。**例外の型では判定しない** —
+    schedule や auto の割り込みも同じ ``ExecutionCancelledException`` で届くので、
+    型だけ見ると機構起点の中断に「ユーザーの操作により」という誤った通告が
+    ペルソナの記憶に入る (2026-08-27 Codex 指摘)。原因が刻まれていない (None)
+    ときはユーザーと断定しない。
+    """
+    return interrupted_by in ("user", "user_stop")
+
+
+def _settle_interrupted_utterance(
+    *,
+    runtime: Any,
+    persona: Any,
+    state: Dict[str, Any],
+    node_def: Any,
+    playbook: Any,
+    event_callback: Optional[Callable[[Dict[str, Any]], None]],
+    building_id: str,
+    msg_id: Optional[str],
+    sub_seq: int,
+    text: str,
+    by_user: bool,
+) -> int:
+    """途中で終わった発言を、その場で確定させる。返すのは進めた後の ``sub_seq``。
+
+    **途中で終わった回は、この関数を通らないと発言が消える。** 下書き行 (placeholder)
+    は本文が空のまま作られ、確定して初めて中身が入る。確定しないと content が空の
+    ままデータベースに残り、画面はそれを描かないので、**本人が喋った内容がどこにも
+    無くなる** (2026-08-26 実機で発生。生成し終わった直後に停止ボタンが押された回が
+    当時どの呼び出し経路にも拾われず、本文が失われた)。
+
+    呼ぶ場所は二つ: ストリームの途中で止められた回 (``cancelled_during_stream``)
+    と、Beat が例外で抜けた回 (``_settle_placeholder_on_beat_death`` = Beat の
+    出口)。前者を通った回は確定済みの印が立つので、後者では二重に走らない。
+
+    ``by_user``: 発言を終わらせたのが誰か。ユーザーの停止 (True) か、Beat を
+    落とした例外 — LLM エラー等 (False) か。変わるのは中断の通告の文面だけで、
+    確定・印・記憶の三つは原因によらず同じに揃える。
+
+    ここで揃えるのは四つ:
+
+    1. **下書き行を本文で確定させる** — 消滅を防ぐ本体。同時に voice-tts の
+       ストリームも閉じる。
+    2. **「言い切っていない」印を画面へ渡す** — 止められた Beat はこの先で
+       例外を投げて抜けるので、通常の完了イベントは決して届かない。印が届かないと
+       画面は再読込するまで「続きの生成」を出せない。
+    3. **言いかけた本文を本人の記憶へ書く** — 記憶へ転記する ``memorize`` も同じ
+       理由で届かない。建物の記録には残るのに本人だけが覚えていない、という
+       食い違いを防ぐ。「言い切っていない」印を付けて書くので、後から想起しても
+       言い切ったものとは扱われない。
+    4. **中断があった事実を建物の記録へ置く** — 途中で切られた発言は他のペルソナ
+       から見ても不自然な場所で終わっている。それが本人の言い切りなのか外から
+       止められたのかを知れる方がよい (2026-08-26 まはー裁定)。文面は ``by_user``
+       で変わる (ユーザーの操作を明記 / 原因を書かない一文)。役は ``host`` で、
+       入退室の通知と同じ道を通る。取り込みの側が建物名を添えて
+       ``user`` + ``<system>`` へ組み替えてから各ペルソナの記憶へ配るので、
+       **ここでその形を自分で作らない**。ただし取り込みが配るのは ``heard_by``
+       に載ったペルソナだけ — 在室者を渡さないと、通告は建物の記録に残るだけで
+       誰の記憶にも永遠に届かない (2026-08-27 の実機検証で発覚)。
+
+    本人の発言そのものには一切手を入れない。機構が足した注記は、ペルソナが自分の
+    文体として模倣し始めるため、独立した一行として後ろに置く。
+    """
+    body = (text or "").strip()
+    if body:
+        state[INTERRUPTED_METADATA_KEY] = True
+
+    if msg_id:
+        sub_seq += 1
+        try:
+            _settle_result = _finalize_speak_with_signal(
+                runtime, persona, building_id, msg_id, text or "",
+                pulse_id=state.get("_pulse_id"),
+                extra_metadata=(
+                    {INTERRUPTED_METADATA_KEY: True} if body else None
+                ),
+                final_sub_seq=sub_seq,
+                event_callback=event_callback,
+            )
+            # ここは救済の最終地点 — saved 以外でもこれ以上の再試行先は無い
+            # (失敗の記録は _finalize_speak_with_signal の ERROR ログ)。ただし
+            # 「最新の発言 id」だけは、保存できた回にしか進めない — 保存されて
+            # いない行を後続ツールに参照させない。
+            if getattr(_settle_result, "status", None) == "saved":
+                state["_last_message_id"] = msg_id
+        except Exception:
+            LOGGER.warning(
+                "[sea][pipeline] cancellation finalize raised; "
+                "placeholder may remain unconfirmed",
+                exc_info=True,
+            )
+        LOGGER.info(
+            "[sea][pipeline] Interrupted (%s): finalized placeholder "
+            "msg=%s seq=%d partial_len=%d",
+            "user" if by_user else "error", msg_id, sub_seq, len(text or ""),
+        )
+
+    if event_callback and state.get(INTERRUPTED_METADATA_KEY):
+        # 印の配達に失敗しても、この後ろの記憶と通告は諦めない (他の三つの
+        # 書き込みは個別に握ってあるのに、ここだけ素通しだった)。
+        try:
+            event_callback({
+                "type": "streaming_complete",
+                "persona_id": getattr(persona, "persona_id", None),
+                "node_id": getattr(node_def, "id", "llm"),
+                "pulse_id": state.get("_pulse_id"),
+                "interrupted": True,
+            })
+        except Exception:
+            LOGGER.warning(
+                "[sea][pipeline] could not deliver the interrupted mark to the "
+                "UI (msg=%s)", msg_id, exc_info=True,
+            )
+
+    if not body:
+        return sub_seq
+
+    try:
+        _settle_stored = runtime._store_memory(
+            persona,
+            text,
+            role="assistant",
+            tags=["conversation"],
+            pulse_id=state.get("_pulse_id"),
+            metadata={INTERRUPTED_METADATA_KEY: True},
+            playbook_name=playbook.name,
+            beat_state=state,
+        )
+        if _settle_stored:
+            # 「この Beat の本文はもう記憶に書かれた」の印。Beat の出口の補填
+            # (`_backfill_memory_on_beat_death`) と通常の確定 (`_finalize_beat`
+            # の memorize / important dual-write — スペル無効だと停止された
+            # Beat も例外なしで完走してそこへ届く) がこの印を見て、同じ本文を
+            # 二重に書かない。
+            state["_beat_memorized"] = True
+    except Exception:
+        LOGGER.warning(
+            "[sea][pipeline] could not store the interrupted utterance to "
+            "memory (msg=%s)", msg_id, exc_info=True,
+        )
+
+    try:
+        heard_by = list(runtime.manager.occupants.get(building_id, []) or [])
+        if persona.persona_id and persona.persona_id not in heard_by:
+            heard_by.append(persona.persona_id)
+        persona.history_manager.add_to_building_only(
+            building_id,
+            {
+                "role": "host",
+                # 非ユーザー起点 (LLM エラー・schedule/auto の割り込み) は原因を
+                # 書かない — 「エラー」と括ると割り込みの回に嘘になる。通告の
+                # 目的は「本人の言い切りではなく外から切られた」を伝えることで、
+                # 原因の種別は必須ではない (2026-08-27 まはー委任で推奨案を採用)。
+                "content": (
+                    "(ユーザーの操作により、ここで発言が中断されました)"
+                    if by_user
+                    else "(ここで発言が中断されました)"
+                ),
+            },
+            heard_by=heard_by,
+        )
+    except Exception:
+        LOGGER.warning(
+            "[sea][pipeline] could not record the interruption notice to the "
+            "building (msg=%s)", msg_id, exc_info=True,
+        )
+
+    return sub_seq
+
+
+async def _run_spell_loop(
+    text: str,
+    spell_enabled: bool,
+    llm_client: Any,
+    runtime: Any,
+    persona: Any,
+    building_id: str,
+    state: dict,
+    messages: list,
+    playbook: Any,
+    event_callback: Optional[Callable],
+    node_def: Any = None,
+    pipeline_streaming_state: Optional[dict] = None,
+    action_text: Optional[str] = None,
+    max_rounds: Optional[int] = None,
+) -> Tuple[str, str, int]:
+    """Execute the spell loop, running each round's spells sequentially.
+
+    Each round: find ALL /spell lines → execute them sequentially in the order
+    they were cast → re-invoke LLM once. (Sequential because spells can mutate
+    shared/physical state that races under concurrency — see the execution
+    block below.) Sequential rounds handle dependency chains (result of round
+    N used in round N+1).
+
+    Returns ``(full_merged_text, final_continuation, loop_count)``:
+
+    - ``full_merged_text``: 各ラウンドの ``text_before`` + 各 spell の
+      ``<user_only>`` ブロック を順次連結し、 最終ラウンドの continuation を
+      末尾に append した 1 string。 caller は 「1 応答 = 1 record」 として
+      ペルソナ履歴 / 建物履歴 / UI バブルに記録する用途で使う。
+    - ``final_continuation``: 最終ラウンド (= spell が含まれない LLM 応答)
+      の text のみ。 旧コード時代の 「spell loop 戻り値の text」 と等価で、
+      caller は ``state["last"]`` (= 後段の memorize ノードが SAIMemory に
+      保存する値) に入れる用途で使う。 これにより SAIMemory には
+      「最終発言のみのレコード」 が単独で残り、 巨大な統合 record の重複
+      を避ける。
+    - ``loop_count``: 実行されたラウンド数。
+
+    When ``loop_count == 0`` (no spells parsed), ``full_merged_text`` と
+    ``final_continuation`` はどちらも入力の ``text`` をそのまま返す。
+
+    ``pipeline_streaming_state`` (= ストリーミング応答経路の Pipeline
+    Streaming 用): 非 None なら spell 実行後の LLM 再呼び出しを
+    ``generate_stream()`` で行い、 ``_consume_pipeline_stream`` 経由で
+    chunk を UI に流しつつ sub-speak を発火する。 dict の中身は
+    ``{"msg_id": str, "sub_seq": int, "cancellation_token": ...}``。
+    helper が dict を in-place mutate して sub_seq を更新する。 None の場合
+    は従来通り ``generate()`` 単発呼び出しで全文一括受信。
+
+    ``max_rounds`` (自律行動 v2 §4.3 作業セッション用): この呼び出しに限った
+    ラウンド予算。正の int を渡すと env グローバル ``_MAX_SPELL_LOOPS`` の
+    代わりに上限として使う。None (既定) では従来挙動のまま変わらない。
+    """
+    from sea.pulse_context import PulseLogEntry
+
+    if not spell_enabled or not text:
+        return text, text, 0
+
+    _effective_max_rounds = (
+        max_rounds if isinstance(max_rounds, int) and max_rounds > 0 else _MAX_SPELL_LOOPS
+    )
+    loop_count = 0
+    merged_parts: List[str] = []
+    _spell_origin_id: Optional[str] = None
+
+    # Beat 境界の材料 (beat_execution_context.md §2.2/§3.4)。取得 (hold) は
+    # 呼び出し元 (run_meta_user / run_work_session 等) で済んでいる前提で、
+    # このループは「周の切れ目でロックを手放して別 Beat を挟ませる + cancel
+    # 評価」だけを担う。gate が無い環境 (テスト) では boundary は skip され、
+    # 周間の cancel チェックだけが効く。
+    _beat_gate = getattr(getattr(runtime, "manager", None), "beat_gate", None)
+    _beat_persona_id = getattr(persona, "persona_id", None)
+    _beat_cancel_token = state.get("_cancellation_token")
+
+    # メタ判断 Pulse のとき、判断 LLM の独白 + 発動 spell + 結果を
+    # PulseContext.meta_judgment_buffer に蓄積する (Phase 2 / handoff Part 2)。
+    # Pulse 完了時に MetaLayer がここから meta_judgment_log を書く。
+    _is_meta_judgment_pulse = state.get("_pulse_type") == "meta_judgment"
+    if _is_meta_judgment_pulse:
+        _meta_pulse_ctx = state.get("_pulse_context")
+        if _meta_pulse_ctx is not None:
+            _meta_pulse_ctx.init_meta_judgment_buffer()
+            _meta_pulse_ctx.append_meta_judgment_thought(text)
+
+    # Wrap the entire loop so any failure (unknown import state, LLM retry
+    # failure, tool result serialization crash, etc.) is downgraded and the
+    # persona's original utterance ``text`` is preserved. The caller saves
+    # ``text`` to Building/SAIMemory — losing it just because the spell
+    # system hit an internal error is too aggressive.
+    try:
+        while loop_count < _effective_max_rounds:
+            # 周間の cancel 評価点 (beat_execution_context.md §3.4): 実行中の
+            # Beat は完了を待ち、cancel は Beat 境界で効かせる。非ストリーミング
+            # 経路には従来この評価点が無く、cancel された Pulse がラウンドを
+            # 走り切っていた。ExecutionCancelledException は下の包括 except で
+            # 握り潰さず re-raise される (caller = PulseController が中断記録を書く)。
+            if _beat_cancel_token is not None and _beat_cancel_token.is_cancelled():
+                raise ExecutionCancelledException(
+                    message="Execution interrupted between spell rounds",
+                    interrupted_by=_beat_cancel_token.interrupted_by,
+                )
+
+            # Parse all spells from current text (canonical + fuzzy), then split
+            # into registered (executable) and unknown (misfired) invocations.
+            # Canonical-form lines whose args failed to parse (even after the
+            # multiline rescue) land in malformed_spells — they are fed back as
+            # [Spell Error] like unknown spells, NOT silently dropped
+            # (2026-07-05 実 LLM シム 異常 #2).
+            malformed_spells: List[Tuple[str, str, Any]] = []
+            all_parsed = _parse_spell_lines(text, malformed_out=malformed_spells)
+            # Canonicalize each parsed name so a bare addon spell name (e.g.
+            # ``see``) resolves to its namespaced key (``stackchan__see``) when
+            # unambiguous. Ambiguous/unknown names are left unchanged and fall
+            # into unknown_spells below. The span (m) and normalized echo (norm)
+            # keep the persona's original text.
+            _classified = [
+                ParsedSpell(canonicalize_spell_name(p.name), p.args, p.m, p.norm, p.quick)
+                for p in all_parsed
+            ]
+            valid_spells = [
+                t for t in _classified if t.name in SPELL_TOOL_NAMES
+            ]
+            unknown_spells = [
+                t for t in _classified if t.name not in SPELL_TOOL_NAMES
+            ]
+
+            # Nothing spell-like at all → normal speech, exit the loop. Unknown
+            # or malformed spells are NOT a reason to break: they are fed back
+            # as errors below so the persona can retry with the correct
+            # invocation.
+            if not valid_spells and not unknown_spells and not malformed_spells:
+                break
+
+            loop_count += 1
+            LOGGER.info(
+                "[sea][spell] Round %d: %d valid spell(s) %s, %d unknown spell(s) %s, "
+                "%d malformed spell(s) %s",
+                loop_count,
+                len(valid_spells), [s[0] for s in valid_spells],
+                len(unknown_spells), [s[0] for s in unknown_spells],
+                len(malformed_spells), [s[0] for s in malformed_spells],
+            )
+
+            # Position-sorted spans of every spell-like line this round
+            # (valid + unknown + malformed) for text_before / text_after.
+            spell_spans = sorted(
+                [entry[2] for entry in all_parsed]
+                + [m for _, _, m in malformed_spells],
+                key=lambda s: s.start(),
+            )
+
+            # text_before = text preceding the FIRST spell of any kind, so a raw
+            # /spell line for an unknown/malformed spell does not leak into the
+            # bubble.
+            text_before = text[:spell_spans[0].start()].rstrip()
+
+            # text_after = text following the LAST spell line. The persona
+            # often writes a natural-language continuation after invoking a
+            # spell (e.g. explaining what it's about to do).  Dropping this
+            # text loses persona utterance from SAIMemory, Building history,
+            # and the retry-LLM context.
+            text_after = text[spell_spans[-1].end():].strip()
+
+            # Canonical assistant message: text_before + ALL spell lines
+            # (valid + unknown normalized, malformed raw, in textual order) +
+            # text_after so the persona's record shows exactly what it tried —
+            # including the misfired invocation, which the following
+            # [Spell Error: ...] user message corrects — and any surrounding
+            # prose.
+            _spell_line_entries = [
+                (entry[2].start(), entry[3]) for entry in all_parsed
+            ] + [
+                (m.start(), text[m.start():m.end()]) for _, _, m in malformed_spells
+            ]
+            _spell_line_entries.sort(key=lambda t: t[0])
+            all_spell_lines_normalized = "\n".join(line for _, line in _spell_line_entries)
+            assistant_content = (text_before + "\n" + all_spell_lines_normalized
+                                 + ("\n" + text_after if text_after else "")).strip()
+            messages.append({"role": "assistant", "content": assistant_content})
+
+            # judgment (起動の意思決定) を spell 実行の「前」に SAIMemory へ記録する。
+            # run_playbook 等の spell は子ラインを同期実行し、子ラインの各ノードが
+            # 先に _store_memory する。assistant_content を spell 実行後に記録すると、
+            # 起動判断が、それが起動した子ラインの出力より後の created_at になり、
+            # 因果と時系列が逆転する (docs/issues/spell_judgment_recorded_after_subline.md)。
+            # assistant_content は上で既に確定しているので先に記録し、spell 結果の
+            # combined_results だけを実行後にまとめて記録する。
+            pulse_id = state.get("_pulse_id")
+            pulse_context = state.get("_pulse_context")
+            memorize_cfg = getattr(node_def, "memorize", None) if node_def is not None else None
+            if isinstance(memorize_cfg, dict):
+                node_memorize_tags = list(memorize_cfg.get("tags") or [])
+            else:
+                node_memorize_tags = []
+            assistant_tags = node_memorize_tags or ["conversation"]
+            if assistant_content:
+                _is_first_round = (loop_count == 1)
+                _stored_id = runtime._store_memory(
+                    persona, assistant_content, role="assistant",
+                    tags=assistant_tags, pulse_id=pulse_id, playbook_name=playbook.name,
+                    pulse_context=pulse_context,
+                    paired_action_text=action_text if _is_first_round else None,
+                    spell_origin_id=_spell_origin_id,
+                    spell_seq=loop_count,
+                    return_message_id=True,
+                    beat_state=state,
+                )
+                if _is_first_round and _stored_id:
+                    _spell_origin_id = _stored_id
+                    state["_spell_loop_origin_id"] = _spell_origin_id
+                    state["_spell_loop_count"] = loop_count
+                # 前駆刻印の材料 (sea/message_stamp.py): この行は上で
+                # messages へ積んだので、次のラウンド (と最終継続) の
+                # プロンプトに実際に入る。足さないと次の生成の前駆刻印が
+                # _prepare_context 時点の履歴末尾を指し続け、「実際に見て
+                # いた最後のメッセージ」ではなくなる。スペル結果の注入行は
+                # 永続 ID を持たないので足さない。
+                if _stored_id:
+                    append_presented_message_id(state, _stored_id)
+
+            # Execute this round's spells SEQUENTIALLY, in the textual order they
+            # were cast. Spells frequently mutate state that is unsafe under
+            # concurrency: run_playbook sub-lines share one
+            # PulseContext._line_stack (a lock-free LIFO that assumes a single
+            # nested line of execution — concurrent siblings corrupt parent /
+            # track inference and pop each other's frames), device spells drive
+            # physical hardware (a photo taken while move_head is still moving
+            # blurs), Track ops mutate cognitive state. The previous design ran
+            # them in parallel via asyncio.gather on executor threads and raced
+            # on all of the above. Personas also implicitly assume "spells run
+            # in the order I cast them". Sequential-by-position honors that and
+            # removes the race; the added latency is acceptable (long-running
+            # work should not be fanned out from a single utterance anyway).
+            #
+            # ``messages`` is snapshotted into a contextvar via persona_context so
+            # spells like run_playbook can fork their sub-line from the parent
+            # LLM node's actual conversation context (intent A v0.14).
+            # Each entry is (text, optional metadata dict). Spells like
+            # run_playbook use the metadata to forward sub-playbook media
+            # (image generation results, etc.) up to the parent line so the
+            # next LLM round can attach them as multimodal content.
+            #
+            # Sort by match position so results stay aligned with textual order;
+            # the downstream zip()/round_records logic (which re-sorts by
+            # m.start()) is unaffected.
+            valid_spells.sort(key=lambda s: s.m.start())
+            # モード (aspect) 別スペル権限ゲート (mode_spell_permissions.md §6)。
+            # アクティブラインの aspect を引き、Track/Task 操作スペルが不許可なら
+            # 実行せずゲット文を結果に差し込む (executed=False で × ブロック表示)。
+            _active_aspect = None
+            if pulse_context is not None:
+                _active_line = pulse_context.current_line()
+                if _active_line is not None:
+                    _active_aspect = _active_line.aspect
+            # valid_results: (result_text, result_meta, executed)。executed=False は
+            # ゲートでブロックされた spell (round_records で success=False になる)。
+            valid_results: List[Tuple[str, Optional[Dict[str, Any]], bool]] = []
+            for _spell in valid_spells:
+                _block_msg = check_spell_permission(_spell.name, _active_aspect)
+                if _block_msg is not None:
+                    LOGGER.info(
+                        "[sea][spell] Spell '%s' blocked by mode gate (aspect=%s)",
+                        _spell.name, _active_aspect.value if _active_aspect else None,
+                    )
+                    valid_results.append((_block_msg, None, False))
+                    continue
+                # ok=False (実行中の例外 / レジストリ未登録) は success=False として
+                # round_records へ流れ、[Spell Error] + × ブロックになる (Phase 1)。
+                _rtext, _rmeta, _ok = await _run_spell_tool_async(
+                    _spell.name, _spell.args, persona, state, playbook.name,
+                    event_callback, messages=messages,
+                )
+                valid_results.append((_rtext, _rmeta, _ok))
+
+            # Unified, position-ordered record per spell line this round.
+            # Unknown spells are not executed — each gets a corrective error
+            # (``_build_unknown_spell_error``) that is fed back to the LLM and
+            # shown to the user as a failure (×) block, so the persona can retry.
+            round_records: List[Dict[str, Any]] = []
+            for spell, (result_text, result_meta, executed) in zip(valid_spells, valid_results):
+                round_records.append({
+                    "name": spell.name, "args": spell.args, "m": spell.m,
+                    "norm": spell.norm, "quick": spell.quick,
+                    "result": result_text, "meta": result_meta, "success": executed,
+                })
+            for spell in unknown_spells:
+                error_text = _build_unknown_spell_error(spell.name, persona, building_id)
+                LOGGER.warning(
+                    "[sea][spell] Unknown spell '%s' → returning error to persona for retry",
+                    spell.name,
+                )
+                round_records.append({
+                    "name": spell.name, "args": spell.args, "m": spell.m,
+                    "norm": spell.norm, "quick": spell.quick,
+                    "result": error_text, "meta": None, "success": False,
+                })
+            for name, args_raw, m in malformed_spells:
+                error_text = _build_malformed_args_error(name, args_raw)
+                LOGGER.warning(
+                    "[sea][spell] Malformed args for spell '%s' → returning error "
+                    "to persona for retry",
+                    name,
+                )
+                round_records.append({
+                    "name": name, "args": {}, "m": m,
+                    "norm": text[m.start():m.end()], "quick": _is_quick_match(m),
+                    "result": error_text, "meta": None, "success": False,
+                })
+            round_records.sort(key=lambda r: r["m"].start())
+
+            # ---- /quick_spell の終端・昇格判定の材料 (quick_spell.md §3.2-3.4) ----
+            # 全行 quick + 全成功 → 後段で LLM 再呼び出しをスキップして終端。
+            # 失敗 = 機械的 (success=False: 例外 / 未登録 / unknown / malformed /
+            # ゲート) または論理的 (metadata "error": true のツール宣言)。文字列
+            # ヒューリスティックは使わない (不変条件 4)。
+            _all_quick = all(rec["quick"] for rec in round_records)
+            _round_has_failure = any(
+                (not rec["success"])
+                or (isinstance(rec["meta"], dict) and rec["meta"].get("error") is True)
+                for rec in round_records
+            )
+
+            # メタ判断 Pulse の発動 spell + 結果をバッファに記録 (失敗も含む)
+            if _is_meta_judgment_pulse:
+                _meta_pulse_ctx = state.get("_pulse_context")
+                if _meta_pulse_ctx is not None:
+                    for rec in round_records:
+                        _meta_pulse_ctx.append_meta_judgment_spell(rec["name"], rec["args"], rec["result"])
+
+            # All spell results in one user message (reduces per-result message
+            # overhead). Successful spells use [Spell Result: ...]; misfires use
+            # [Spell Error: ...] so the LLM clearly sees what it must correct.
+            combined_results = "\n".join(
+                f"[Spell {'Result' if rec['success'] else 'Error'}: {rec['name']}]\n{rec['result']}"
+                for rec in round_records
+            )
+            # Aggregate media from successful spell results so the next LLM round
+            # can see images / files etc. as attachments. iter_image_media() in
+            # each LLM client picks this up via message["metadata"]["media"].
+            aggregated_media: List[Dict[str, Any]] = []
+            for rec in round_records:
+                result_meta = rec["meta"]
+                if isinstance(result_meta, dict):
+                    media_list = result_meta.get("media")
+                    if isinstance(media_list, list):
+                        aggregated_media.extend(media_list)
+            # quick 宣言に反して応答機会を返すときだけ、理由の事実文を注入の
+            # 先頭に付ける (§3.4)。注入のみで SAIMemory へ記録する
+            # combined_results には混ぜない (不変条件 5)。
+            _injected_results = combined_results
+            if _all_quick and _round_has_failure:
+                _injected_results = (
+                    "/quick_spell で唱えたスペルに失敗があったため、"
+                    "結果を確認できるよう応答機会を返しています。\n"
+                    + combined_results
+                )
+            spell_result_msg: Dict[str, Any] = {
+                "role": "user",
+                "content": f"<system>{_injected_results}</system>",
+            }
+            if aggregated_media:
+                spell_result_msg["metadata"] = {"media": aggregated_media}
+                LOGGER.info(
+                    "[sea][spell] Round %d: attached %d media item(s) from spell results",
+                    loop_count, len(aggregated_media),
+                )
+            messages.append(spell_result_msg)
+
+            # Record to PulseContext
+            pulse_ctx = state.get("_pulse_context")
+            if pulse_ctx:
+                pulse_ctx.append(PulseLogEntry(
+                    role="assistant", content=assistant_content,
+                    node_id=f"spell_round_{loop_count}", playbook_name=playbook.name,
+                ))
+                pulse_ctx.append(PulseLogEntry(
+                    role="system", content=combined_results,
+                    node_id=f"spell_round_{loop_count}", playbook_name=playbook.name,
+                ))
+
+            # Store to SAIMemory as single entries — spell lines (assistant) + all results
+            # combined (system). This avoids N separate result entries per round.
+            #
+            # 7-layer storage routing (Intent A v0.14, Intent B v0.11):
+            # - line_role / line_id come from the active LineFrame
+            #   on PulseContext. This makes the entry land in the layer that
+            #   matches the caller's line (e.g. main_line → [2], sub_line root →
+            #   [3], sub_line nested → [4] when scope='volatile').
+            # - Tags now respect the LLM node's `memorize.tags` config when set;
+            #   falling back to the legacy ["conversation"] default preserves
+            #   prior behavior for nodes that don't declare memorize.
+            # combined_results (spell 結果サマリ) は実行後でないと作れないので、
+            # judgment (上で spell 実行前に記録済み) の後に system role で記録する。
+            # pulse_id / pulse_context / node_memorize_tags は前倒しブロックで
+            # 定義済みのものを再利用する。
+            spell_tags = (node_memorize_tags + ["spell"]) if node_memorize_tags else ["conversation", "spell"]
+            if combined_results:
+                runtime._store_memory(
+                    persona, combined_results, role="system",
+                    tags=spell_tags, pulse_id=pulse_id, playbook_name=playbook.name,
+                    pulse_context=pulse_context,
+                    spell_origin_id=_spell_origin_id,
+                    spell_seq=loop_count,
+                )
+
+            # Record to activity trace (failures carry success=False)
+            _at = state.get("_activity_trace")
+            if isinstance(_at, list):
+                for rec in round_records:
+                    _at.append({
+                        "action": "spell", "name": rec["name"],
+                        "playbook": playbook.name, "success": rec["success"],
+                    })
+
+            # Accumulate this round's content into merged_parts: round-leading
+            # text_before (= raw text before the first /spell line of this round)
+            # followed by one ``<user_only>`` block per spell — a success (star)
+            # block for executed spells, a failure (×) block for misfires —
+            # then text_after (prose the persona wrote after the spell line).
+            # The final LLM continuation (= ``text`` after the retry below) is
+            # appended once the loop exits — see the return path.
+            if text_before:
+                merged_parts.append(text_before)
+            for rec in round_records:
+                if rec["success"]:
+                    schema = SPELL_TOOL_SCHEMAS.get(rec["name"])
+                    display = (schema.spell_display_name if schema else "") or rec["name"]
+                else:
+                    display = rec["name"]
+                merged_parts.append(
+                    _build_spell_user_only_block(
+                        rec["name"], rec["args"], display, rec["result"],
+                        success=rec["success"], spell_line=rec["norm"],
+                    )
+                )
+            if text_after:
+                merged_parts.append(text_after)
+
+            # ---- /quick_spell 終端 (quick_spell.md §3.2) ----
+            # ラウンドの全行が /quick_spell かつ失敗ゼロ = 「この発話で完了」の
+            # 宣言どおり LLM 再呼び出しをスキップして終端する。結果は上で記録
+            # 済みで、本人には次の Pulse で anchor 経由で見える (§3.5)。
+            # final_continuation は空文字 (空応答は既存機構で正規終端 —
+            # _store_memory は空文字を no-op で返す)。失敗があるラウンドは
+            # 従来フローへ昇格し、下の再呼び出しで結果を見せる (不変条件 2)。
+            if _all_quick and not _round_has_failure:
+                LOGGER.info(
+                    "[sea][spell] Round %d: all-quick round succeeded; "
+                    "skipping LLM re-invocation (declared complete)", loop_count,
+                )
+                text = ""
+                break
+
+            # ---- Beat 境界 (beat_execution_context.md §2.2 / §3.4) ----
+            # ここが Beat の切れ目: この周の生成と spell 結果の記録 (上の
+            # _store_memory) が完了し、次の生成 (= 次の Beat のコンテキスト
+            # 読み) はまだ始まっていない。ロックを一度手放して待機中の別 Beat
+            # (META 判断 / user 会話) を挟ませ、cancel を評価し、再取得時に
+            # 関所 (pending flush) を通す。boundary が投げる
+            # ExecutionCancelledException / BeatGateClosedError はそのまま伝播
+            # する (Pulse は中断、記録済み分は正)。
+            if _beat_gate is not None and _beat_persona_id:
+                _beat_gate.boundary(_beat_persona_id, _beat_cancel_token)
+
+            # ---- Beat 頭の per_persona ツール一覧取り直し (mcp_addon_integration.md §I) ----
+            # 生きている接続の上でだけ tools/list を聞き直す (新しい接続は
+            # 張らない — 接続を張るのは Pulse 頭の仕事)。一覧が変わっていたら
+            # spell_list の検知器 (inject_diff_notifications) で知覚バッファへ
+            # 積み、直後の flush が同じ周の生成に届ける。ツール呼び出し自体が
+            # 一覧を変えるサーバー (モードチェンジ型) の変動をここで拾う。
+            # 並びは「取得 → 検知 → flush → 生成」— 検知が flush より後だと
+            # 変動の知覚が次の Beat まで読まれない。
+            refresh_mcp_tools_at_head(
+                persona, getattr(runtime, "manager", None), building_id,
+                connect=False,
+            )
+
+            # ---- Beat 頭の知覚消費 (perception_buffer.md §4.2 2026-08-08 改訂) ----
+            # boundary の関所に知覚バッファの消費が同席する。この周のスペルが
+            # 世界を変えた帰結 (移動先の様子・入室配送など) を、次の生成が始まる
+            # 前に SAIMemory へ書き出し、同じ内容を作業中の messages にも append
+            # して「記憶に書いた内容」と「続きの生成が見る内容」を一致させる。
+            # 消費は最外周の認知 Beat のみ (子ラインは親 Beat の一部。gate の
+            # 保持深さ 1 = このスレッドが最外周保持者のときだけ。gate の無い
+            # テスト環境では無条件)。失敗は WARN で続行 — 知覚は永続バッファに
+            # 残り、次の Beat 頭で再試行される。
+            #
+            # ⚠️ 既知の縮退 (Codex レビュー #1 の裁定, 2026-08-08): held_depth は
+            # スレッドローカルなので、「呼び出し元に running loop がある」
+            # レガシー分岐 (runtime_graph.py の executor 退避) では深さ 0 =
+            # 消費が飛ぶ。直上の boundary も同じ条件で no-op になる分岐で、
+            # 「所有が確認できない Beat では動かない」保守則にこちらを揃えた
+            # 意図的な形 (beat_execution_context.md §3.4 末尾の実測帰結 —
+            # 主要経路は同一スレッド)。実害はその分岐で本改修が効かず旧挙動
+            # (次 Pulse の頭で消費) に戻ることだけで、直列性も知覚の生存も
+            # 壊れない。恒久解はロック所有をスレッドから実行トークンへ移す
+            # §6-6b (Beat ロックのトークン化) — そこへ合流させる。
+            try:
+                _sai_mem = getattr(persona, "sai_memory", None)
+                # 部分構築の persona (テストの SimpleNamespace 等) は消費なし —
+                # getattr で沈黙スキップ (毎周の WARN を撒かない)。
+                _flush_payload_fn = getattr(
+                    _sai_mem, "flush_perception_buffer_payload", None,
+                )
+                _is_outermost_beat = _beat_gate is None or (
+                    _beat_persona_id
+                    and _beat_gate.held_depth(_beat_persona_id) == 1
+                )
+                if _flush_payload_fn is not None and _is_outermost_beat:
+                    # pulse_id は前倒しブロックで定義済みのローカルを再利用。
+                    # manager は消費バッチの episode_id 照会用。
+                    _perception_payload = _flush_payload_fn(
+                        pulse_id=pulse_id,
+                        manager=getattr(runtime, "manager", None),
+                    )
+                    if _perception_payload:
+                        _perc_msg: Dict[str, Any] = {
+                            "role": "user",
+                            "content": _perception_payload["content"],
+                        }
+                        if _perception_payload.get("media"):
+                            _perc_msg["metadata"] = {
+                                "media": _perception_payload["media"],
+                            }
+                        messages.append(_perc_msg)
+                        LOGGER.info(
+                            "[sea][spell] Beat-head perception flush injected "
+                            "into context after round %d", loop_count,
+                        )
+            except Exception:
+                LOGGER.warning(
+                    "[sea][spell] Beat-head perception flush failed; continuing",
+                    exc_info=True,
+                )
+
+            # Re-invoke LLM once for the entire round.
+            # Pipeline Streaming で呼ばれた時 (= pipeline_streaming_state が
+            # 非 None) は generate_stream + helper 経由で chunk を流しながら
+            # sub-speak を発火する。 そうでない (= (2) Tool mode streaming や
+            # (4) 全文一括経路から呼ばれた時) は従来通り generate() 単発で
+            # 全文受信する。
+            #
+            # ``tools=[]`` を明示で渡す: Gemini の ``generate_stream`` は
+            # ``tools=None`` を 「デフォルト spell スキーマ集 (GEMINI_TOOLS_SPEC)
+            # を使う」 と解釈してしまい、 その中の 1 つに含まれる Gemini 未対応
+            # の type (例 "TUPLE") で 400 INVALID_ARGUMENT を起こす。 spell loop
+            # の retry は 「spell 結果を踏まえた継続発話」 なので tools 不要、
+            # 明示的に空リストで送る。
+            #
+            # retry 前に ``text = ""`` でリセット: helper / generate() で例外が
+            # 出ると ``retry_result`` の代入が走らず、 ``text`` は round 開始時
+            # の値 (= 初回応答全文、 spell 行込み) のまま except 節に流れる。
+            # その状態で except 節の ``if text: merged_parts.append(text)``
+            # が動くと、 spell 結果の後ろに初回応答全文がそのまま二重表示・二重
+            # 保存される。 ここで text を空にしておけば、 失敗時に空の append
+            # は skip される (= partial で停止)。
+            LOGGER.info("[sea][spell] Re-invoking LLM after round %d (%d spell(s))", loop_count, len(valid_spells))
+            text = ""
+            if pipeline_streaming_state is not None:
+                _retry_stream = llm_client.generate_stream(
+                    messages,
+                    tools=[],
+                    temperature=runtime._default_temperature(persona),
+                    **runtime._get_cache_kwargs(getattr(persona, "persona_id", None)),
+                )
+                # progress に spell 側の器そのものを渡す — retry ストリームの
+                # 途中で死んでも、発火済みの sub-speak 連番が器に残り、Beat の
+                # 出口の後始末が最新値で final を打てる (本文の回収は行わない:
+                # ここで死んだ回の確定本文は round 1 の text であって retry の
+                # 部分文ではない)。
+                _retry_text, _retry_sub_seq, _retry_spell_detected, _retry_cancelled = await _consume_pipeline_stream(
+                    _retry_stream,
+                    runtime=runtime,
+                    persona=persona,
+                    building_id=building_id,
+                    node_def=node_def,
+                    state=state,
+                    pipeline_msg_id=pipeline_streaming_state.get("msg_id"),
+                    sub_seq_start=int(pipeline_streaming_state.get("sub_seq", 0) or 0),
+                    cancellation_token=pipeline_streaming_state.get("cancellation_token"),
+                    event_callback=event_callback,
+                    progress=pipeline_streaming_state,
+                )
+                pipeline_streaming_state["sub_seq"] = _retry_sub_seq
+                retry_result = _retry_text
+                if _retry_cancelled:
+                    LOGGER.info(
+                        "[sea][spell] Round %d streaming retry cancelled mid-flight; "
+                        "breaking out of spell loop",
+                        loop_count,
+                    )
+            else:
+                retry_result = llm_client.generate(
+                    messages,
+                    tools=[],
+                    temperature=runtime._default_temperature(persona),
+                    **runtime._get_cache_kwargs(getattr(persona, "persona_id", None)),
+                )
+
+            retry_usage = llm_client.consume_usage()
+            # このラウンドの生成を作ったコールの三つ組 (sea/message_stamp.py)。
+            # 直後の _store_memory がラウンドの発言を刻むので、ここで更新する。
+            record_call_tokens(state, retry_usage)
+            if retry_usage:
+                get_usage_tracker().record_usage(
+                    model_id=retry_usage.model,
+                    input_tokens=retry_usage.input_tokens,
+                    output_tokens=retry_usage.output_tokens,
+                    cached_tokens=retry_usage.cached_tokens,
+                    cache_write_tokens=retry_usage.cache_write_tokens,
+                    cache_ttl=retry_usage.cache_ttl,
+                    persona_id=getattr(persona, "persona_id", None),
+                    building_id=building_id,
+                    node_type="llm_spell_retry",
+                    playbook_name=playbook.name,
+                    category="persona_speak",
+                )
+                _maybe_record_cache_storage(retry_usage, getattr(persona, "persona_id", None), building_id)
+                from saiverse.model_configs import calculate_cost
+                retry_cost = calculate_cost(
+                    retry_usage.model, retry_usage.input_tokens, retry_usage.output_tokens,
+                    retry_usage.cached_tokens, retry_usage.cache_write_tokens, cache_ttl=retry_usage.cache_ttl,
+                )
+                runtime._accumulate_usage(
+                    state, retry_usage.model, retry_usage.input_tokens,
+                    retry_usage.output_tokens, retry_cost,
+                    retry_usage.cached_tokens, retry_usage.cache_write_tokens,
+                )
+                # Phase 4-e: anchor touch を LLM 成功後に移動 (旧: prepare_context 内の先行 touch)。
+                # anchor は call-local (state["_prefix_anchor_id"]、§3.2)。
+                runtime.session_lifecycle.touch_anchor_after_llm_call(
+                    persona, retry_usage, anchor_id=state.get("_prefix_anchor_id"),
+                )
+
+            if isinstance(retry_result, dict):
+                text = retry_result.get("content", "")
+            elif isinstance(retry_result, str):
+                text = retry_result
+            else:
+                text = ""
+
+            # メタ判断 Pulse の retry text もバッファに追記
+            if _is_meta_judgment_pulse:
+                _meta_pulse_ctx = state.get("_pulse_context")
+                if _meta_pulse_ctx is not None:
+                    _meta_pulse_ctx.append_meta_judgment_thought(text)
+
+            # Spell-loop retry の I/O も llm_io.log に記録する。これがないと
+            # メタ判断や spell 入りの応答ラウンドの全数を観測できない (送信時の
+            # messages と応答 text のペアが、メインの _dump_llm_io 1 件分しか
+            # 残らないため、デバッグでログを追っても "retry が起きたかどうか"
+            # を確定できない)。round ごとに source は LLM ノードと同じものを
+            # 使い、node_id だけを spell_round_<N> に変える。
+            try:
+                runtime._dump_llm_io(
+                    playbook.name,
+                    f"spell_round_{loop_count}",
+                    persona,
+                    messages,
+                    text,
+                )
+            except Exception:
+                LOGGER.warning("[sea][spell] failed to dump spell-loop retry I/O", exc_info=True)
+
+            LOGGER.info("[sea][spell] After round %d: has_more_spells=%s",
+                        loop_count, bool(_SPELL_PATTERN.search(text)))
+
+        LOGGER.info("[sea][spell] Completed %d round(s)", loop_count)
+        final_continuation = text or ""
+        if loop_count == 0:
+            # No spells parsed — return the original text unchanged so the
+            # caller's normal (non-spell) emit path stays correct.
+            return text, text, 0
+        # Append the final LLM continuation (= text after the last retry).
+        if final_continuation:
+            merged_parts.append(final_continuation)
+        return "\n".join(merged_parts), final_continuation, loop_count
+    except (ExecutionCancelledException, BeatGateClosedError):
+        # Beat 境界の中断 / 関所 fail-closed は「spell 系の内部エラー」ではなく
+        # 実行制御の正規イベント。partial 保存へ降格せずそのまま伝播する
+        # (caller = PulseController / run_meta_user が型別に処理する)。
+        raise
+    except Exception as exc:
+        # Any unhandled error in the spell pipeline: log with traceback,
+        # inject a system-visible error note for the next LLM turn, and
+        # return what was assembled so far so the caller can still save it.
+        LOGGER.exception(
+            "[sea][spell] spell loop fatal error after %d round(s); "
+            "preserving partial message, skipping remaining spells",
+            loop_count,
+        )
+        error_note = (
+            f"[Spell System Error] スペル実行系で内部エラーが発生しました "
+            f"({type(exc).__name__}: {exc})。"
+            f"発言はそのまま保存され、以降のスペル呼び出しはスキップされました。"
+        )
+        try:
+            messages.append({"role": "user", "content": f"<system>{error_note}</system>"})
+        except Exception:
+            LOGGER.debug("[sea][spell] failed to append error note to messages", exc_info=True)
+        final_continuation = text or ""
+        if loop_count == 0:
+            return text, text, 0
+        if final_continuation:
+            merged_parts.append(final_continuation)
+        return "\n".join(merged_parts), final_continuation, loop_count
+
+
+async def _decide_spell_args_via_playbook(
+    spell_name: str,
+    runtime: Any,
+    persona: Any,
+    building_id: str,
+    outer_state: dict,
+    event_callback: Optional[Callable],
+) -> Optional[Dict[str, Any]]:
+    """Run ``spell_args_decider`` Playbook (sub_line) to obtain args for a Spell.
+
+    The Playbook reads parent line messages (via the snapshot pipeline added in
+    v0.25) so the persona's cognition includes the ongoing context. The Playbook
+    must include ``args`` in its ``output_schema`` and the inner LLM node should
+    use ``response_schema_source: "spell:{spell_name}"`` + ``output_key: "args"``
+    to surface the structured output through the sub-line → parent_state path.
+
+    Returns the args dict, or None if the Playbook is missing / produced no args.
+    """
+    pb = runtime._load_playbook_for("spell_args_decider", persona, building_id)
+    if pb is None:
+        LOGGER.warning(
+            "[sea][pre_spells] spell_args_decider Playbook not found; cannot decide "
+            "args for '%s'. Install builtin_data/playbooks/public/spell_args_decider.json.",
+            spell_name,
+        )
+        return None
+
+    # Build a fresh parent_state for the decider, snapshotting what the sub-line
+    # needs from the caller (mirrors run_playbook Spell pattern). The decider's
+    # output_schema entries (`args`) are written back into this dict on completion.
+    decider_parent_state: Dict[str, Any] = {
+        "_messages": list(outer_state.get("_messages") or []),
+        "_pulse_context": outer_state.get("_pulse_context"),
+        "_pulse_id": outer_state.get("_pulse_id"),
+    }
+
+    try:
+        await asyncio.to_thread(
+            runtime._run_playbook,
+            pb, persona, building_id,
+            None,  # user_input — decider reads spell_name via initial_params
+            bool(outer_state.get("_auto_mode", False)),  # auto_mode — 親 Pulse の実値を継承
+            record_history=True,
+            parent_state=decider_parent_state,
+            event_callback=event_callback,
+            initial_params={"spell_name": spell_name},
+            line="sub",
+            isolate_pulse_context=False,
+        )
+    except Exception:
+        LOGGER.exception(
+            "[sea][pre_spells] spell_args_decider raised for '%s'", spell_name,
+        )
+        return None
+
+    args = decider_parent_state.get("args")
+    if not isinstance(args, dict):
+        LOGGER.warning(
+            "[sea][pre_spells] spell_args_decider produced no 'args' dict for '%s' "
+            "(got %r). Ensure the Playbook's output_schema includes 'args' and the "
+            "inner LLM node uses output_key='args'.",
+            spell_name, type(args).__name__,
+        )
+        return None
+    return dict(args)
+
+
+async def _execute_pre_spells(
+    pre_spells: List[str],
+    runtime: Any,
+    persona: Any,
+    building_id: str,
+    state: dict,
+    playbook: Any,
+    event_callback: Optional[Callable],
+) -> None:
+    """Execute UI-requested spells before the first LLM call of a Pulse.
+
+    Triggered by the chat API when the user manually selects a Playbook in
+    the UI ("ツール指定" mode), and by schedule_manager when a schedule
+    specifies a Spell to run. Each entry in ``pre_spells`` is a Spell
+    invocation string in one of two forms:
+
+    - ``/spell name='X' args={...}`` — fully specified args (executed as-is)
+    - ``/spell name='X'`` — args omitted; resolved at runtime by invoking
+      the ``spell_args_decider`` Playbook so the persona's own cognition
+      decides the args (mirrors the Spell loop pattern where the persona
+      writes the args in their utterance).
+
+    Behavior:
+    - Parse each entry via ``_parse_spell_lines`` first; if that fails, try
+      the no-args form via ``_SPELL_PATTERN_NO_ARGS``. Unknown spells / un-
+      parseable entries log a warning and are skipped.
+    - For no-args entries, run ``spell_args_decider`` Playbook (sub_line)
+      to obtain the args. The Playbook reads parent line messages via the
+      snapshot pipeline (v0.25) so the persona can decide args from their
+      ongoing context.
+    - Execute valid spells sequentially via ``_run_spell_tool_async``, the
+      same path (and the same ordering guarantee) used by the regular spell loop.
+    - Append a single ``<system>``-tagged user message to
+      ``state["_messages"]`` containing the combined results, so the
+      first LLM round sees them as if the user had requested them.
+    - Forward any media (images, etc.) returned by spells via
+      ``message["metadata"]["media"]`` so the LLM gets attachments.
+
+    Idempotency is enforced by the caller via ``state["_pre_spells_executed"]``.
+    See: docs/intent/persona_cognition/nested_subline_spell.md §13 (v0.2)
+    """
+    from sea.pulse_context import PulseLogEntry
+
+    if not pre_spells:
+        return
+
+    messages = state.get("_messages")
+    if not isinstance(messages, list):
+        LOGGER.warning("[sea][pre_spells] state['_messages'] is missing; skipping")
+        return
+
+    # Phase 1: parse entries, splitting into "args known" and "args needed"
+    # buckets. The latter triggers spell_args_decider before execution.
+    fully_specified: List[Tuple[str, dict, str]] = []
+    needs_decision: List[str] = []  # spell names whose args must be decided
+    for entry in pre_spells:
+        if not isinstance(entry, str) or not entry.strip():
+            continue
+        parsed = _parse_spell_lines(entry)
+        if parsed:
+            for name, args, _, normalized, _quick in parsed:
+                # Bare addon spell names persisted before namespacing (or written
+                # without the prefix) resolve to their <addon>__<name> key here.
+                name = canonicalize_spell_name(name)
+                if name not in SPELL_TOOL_NAMES:
+                    LOGGER.warning("[sea][pre_spells] Unknown spell '%s', skipping", name)
+                    continue
+                fully_specified.append((name, args, normalized))
+            continue
+        # Try args-omitted form
+        m = _SPELL_PATTERN_NO_ARGS.search(entry)
+        if m:
+            spell_name = canonicalize_spell_name(m.group(1))
+            if spell_name not in SPELL_TOOL_NAMES:
+                LOGGER.warning("[sea][pre_spells] Unknown spell '%s' (no-args form), skipping", spell_name)
+                continue
+            needs_decision.append(spell_name)
+            continue
+        LOGGER.warning("[sea][pre_spells] Could not parse spell entry: %r", entry)
+
+    # Phase 2: resolve args for entries that need decision via spell_args_decider
+    decided: List[Tuple[str, dict, str]] = []
+    for spell_name in needs_decision:
+        try:
+            args = await _decide_spell_args_via_playbook(
+                spell_name, runtime, persona, building_id, state, event_callback,
+            )
+        except Exception:
+            LOGGER.exception(
+                "[sea][pre_spells] spell_args_decider failed for '%s'; skipping",
+                spell_name,
+            )
+            continue
+        if args is None:
+            LOGGER.warning(
+                "[sea][pre_spells] spell_args_decider returned no args for '%s'; skipping",
+                spell_name,
+            )
+            continue
+        normalized = _normalize_spell_line(spell_name, args)
+        decided.append((spell_name, args, normalized))
+
+    # 引数まで含めてユーザーが書いた起動 (fully_specified) と、名前だけ指定されて
+    # 引数はペルソナの認知が決めた起動 (decided) を区別して持つ。承認されている
+    # のは前者だけ — 例えば `/spell name='run_playbook'` (引数省略形) では
+    # **どの Playbook を起こすかを LLM が決める**ので、ユーザーが名指しした起動
+    # として扱ってはいけない。
+    valid_specs: List[Tuple[str, dict, str]] = fully_specified + decided
+    user_written = [True] * len(fully_specified) + [False] * len(decided)
+    if not valid_specs:
+        return
+
+    LOGGER.info(
+        "[sea][pre_spells] Executing %d UI-requested spell(s) before first LLM call: %s",
+        len(valid_specs), [s[0] for s in valid_specs],
+    )
+
+    # モード (aspect) 別スペル権限ゲート (mode_spell_permissions.md §6)。事前実行
+    # スペルは LLM 初回呼び出し前でラインが未 push のことがあるため、アクティブ
+    # ラインの aspect → 無ければ pulse_type から導出してフォールバックする。
+    from sea.pulse_context import aspect_from_pulse_type
+    _active_aspect = None
+    _pre_pulse_ctx = state.get("_pulse_context")
+    if _pre_pulse_ctx is not None:
+        _pre_line = _pre_pulse_ctx.current_line()
+        if _pre_line is not None:
+            _active_aspect = _pre_line.aspect
+    if _active_aspect is None:
+        _active_aspect = aspect_from_pulse_type(state.get("_pulse_type"))
+
+    # Execute UI-requested spells SEQUENTIALLY, in the order requested. Same
+    # rationale as the regular spell loop (_run_spell_loop): spells can mutate
+    # shared state (run_playbook's shared PulseContext line stack, physical
+    # devices, Track ops) and are not safe to run concurrently.
+    # results: (result_text, result_meta, executed)。executed=False はゲートで
+    # ブロックされた spell。
+    results: List[Tuple[str, Optional[Dict[str, Any]], bool]] = []
+    for (name, args, _), _user_written in zip(valid_specs, user_written):
+        _block_msg = check_spell_permission(name, _active_aspect)
+        if _block_msg is not None:
+            LOGGER.info(
+                "[sea][pre_spells] Spell '%s' blocked by mode gate (aspect=%s)",
+                name, _active_aspect.value if _active_aspect else None,
+            )
+            results.append((_block_msg, None, False))
+            continue
+        # ok=False (例外 / 未登録) は [Spell Error] として注入される (Phase 1)
+        # user_configured: ユーザーが引数まで書いた起動だけ True。「毎回確認」の
+        # Playbook をここで確認し直すと、ユーザーが今まさに指定した実行を問い返す
+        # ことになり、schedule では宛先の無い確認になって必ず失敗する。逆に引数を
+        # LLM が決めた起動は「ユーザーが名指しした」とは言えないので通常の道へ。
+        _rtext, _rmeta, _ok = await _run_spell_tool_async(
+            name, args, persona, state, playbook.name, event_callback,
+            messages=messages, user_configured=_user_written,
+        )
+        results.append((_rtext, _rmeta, _ok))
+
+    triggered_lines = [norm for _, _, norm in valid_specs]
+    result_lines = [
+        f"[Spell {'Result' if executed else 'Error'}: {name}]\n{result_text}"
+        for (name, _, _), (result_text, _, executed) in zip(valid_specs, results)
+    ]
+    system_body = (
+        "ユーザーの操作により以下のスペルを事前に実行しました。"
+        "結果を踏まえて応答してください。\n\n"
+        "[Triggered by user]\n"
+        + "\n".join(triggered_lines)
+        + "\n\n"
+        + "\n\n".join(result_lines)
+    )
+    spell_result_msg: Dict[str, Any] = {
+        "role": "user",
+        "content": f"<system>{system_body}</system>",
+    }
+
+    aggregated_media: List[Dict[str, Any]] = []
+    for _, result_meta, _executed in results:
+        if isinstance(result_meta, dict):
+            media_list = result_meta.get("media")
+            if isinstance(media_list, list):
+                aggregated_media.extend(media_list)
+    if aggregated_media:
+        spell_result_msg["metadata"] = {"media": aggregated_media}
+        LOGGER.info(
+            "[sea][pre_spells] Attached %d media item(s) from pre-spell results",
+            len(aggregated_media),
+        )
+
+    messages.append(spell_result_msg)
+
+    pulse_ctx = state.get("_pulse_context")
+    if pulse_ctx:
+        pulse_ctx.append(PulseLogEntry(
+            role="system", content=system_body,
+            node_id="pre_spells", playbook_name=playbook.name,
+        ))
+
+    pulse_id = state.get("_pulse_id")
+    try:
+        runtime._store_memory(
+            persona, system_body, role="system",
+            tags=["conversation", "spell", "pre_spell"],
+            pulse_id=pulse_id, playbook_name=playbook.name,
+            pulse_context=pulse_ctx,
+        )
+    except Exception:
+        LOGGER.exception("[sea][pre_spells] Failed to persist pre-spell results to SAIMemory")
+
+    _at = state.get("_activity_trace")
+    if isinstance(_at, list):
+        for name, _, _ in valid_specs:
+            _at.append({"action": "pre_spell", "name": name, "playbook": playbook.name})
+
+
+async def _execute_realtime_spells(
+    runtime: Any,
+    persona: Any,
+    building_id: str,
+    state: dict,
+    event_callback: Optional[Callable],
+) -> None:
+    """Execute bound realtime spells and inject results into the realtime context message.
+
+    Reads RealtimeSpellBinding entries for both the current persona and building,
+    executes each spell synchronously via _run_spell_tool_async, and appends
+    the results to the existing __realtime_context__ message in state["_messages"].
+
+    Unlike pre_spells, results are NOT stored in SAIMemory (they're volatile context).
+    """
+    messages = state.get("_messages")
+    if not isinstance(messages, list):
+        return
+
+    manager = getattr(runtime, "manager", None)
+    if not manager:
+        return
+
+    persona_id = getattr(persona, "persona_id", None)
+    if not persona_id:
+        return
+
+    # Load bindings from DB
+    session_factory = getattr(manager, "SessionLocal", None)
+    if not session_factory:
+        return
+
+    from database.models import RealtimeSpellBinding
+
+    db = session_factory()
+    try:
+        bindings = (
+            db.query(RealtimeSpellBinding)
+            .filter(
+                RealtimeSpellBinding.ENABLED == True,  # noqa: E712
+                (
+                    ((RealtimeSpellBinding.OWNER_KIND == "persona") & (RealtimeSpellBinding.OWNER_ID == persona_id))
+                    | ((RealtimeSpellBinding.OWNER_KIND == "building") & (RealtimeSpellBinding.OWNER_ID == building_id))
+                ),
+            )
+            .order_by(RealtimeSpellBinding.PRIORITY.desc())
+            .all()
+        )
+    finally:
+        db.close()
+
+    if not bindings:
+        return
+
+    LOGGER.info(
+        "[sea][realtime_spells] Executing %d realtime spell(s) for persona=%s, building=%s",
+        len(bindings), persona_id, building_id,
+    )
+
+    # Execute each spell and collect results
+    result_sections: List[str] = []
+    aggregated_media: List[Dict[str, Any]] = []
+    for binding in bindings:
+        # Bindings persist a bare SPELL_NAME; canonicalize so bindings saved
+        # before native addon tools were namespaced still resolve.
+        spell_name = canonicalize_spell_name(binding.SPELL_NAME)
+        if spell_name not in SPELL_TOOL_NAMES:
+            LOGGER.warning("[sea][realtime_spells] Unknown spell '%s', skipping", spell_name)
+            continue
+
+        try:
+            args = json.loads(binding.SPELL_ARGS_JSON) if binding.SPELL_ARGS_JSON else {}
+        except (json.JSONDecodeError, TypeError):
+            LOGGER.warning("[sea][realtime_spells] Invalid args JSON for binding %d", binding.BINDING_ID)
+            continue
+
+        try:
+            result_text, result_meta, _ok = await _run_spell_tool_async(
+                spell_name, args, persona, state, "__realtime__", event_callback,
+                messages=messages,
+            )
+        except Exception:
+            LOGGER.exception("[sea][realtime_spells] Spell '%s' failed", spell_name)
+            continue
+
+        if result_text:
+            label = binding.LABEL or spell_name
+            result_sections.append(f"{label}: {result_text}")
+        # Forward any media (images, etc.) the spell returned. Mirrors the
+        # normal spell loop / pre_spells paths; without this, a realtime spell
+        # like `see` only injects its text stub ("目の前の光景を見た。") and the
+        # persona never receives the captured image.
+        if isinstance(result_meta, dict):
+            media_list = result_meta.get("media")
+            if isinstance(media_list, list):
+                aggregated_media.extend(media_list)
+
+    if not result_sections and not aggregated_media:
+        return
+
+    # Find the existing __realtime_context__ message and append results
+    realtime_idx = None
+    for i, msg in enumerate(messages):
+        if msg.get("metadata", {}).get("__realtime_context__"):
+            realtime_idx = i
+            break
+
+    new_content = "\n".join(f"- {s}" for s in result_sections)
+
+    if realtime_idx is not None:
+        if new_content:
+            existing_content = messages[realtime_idx].get("content", "")
+            # Insert before closing </system> tag
+            if "</system>" in existing_content:
+                messages[realtime_idx]["content"] = existing_content.replace(
+                    "</system>",
+                    "\n" + new_content + "\n</system>",
+                )
+            else:
+                messages[realtime_idx]["content"] = existing_content + "\n" + new_content
+        target_msg = messages[realtime_idx]
+    else:
+        # No realtime context message exists; create one
+        realtime_msg = {
+            "role": "user",
+            "content": f"<system>\n## リアルタイム情報\n{new_content}\n</system>",
+            "metadata": {"__realtime_context__": True},
+        }
+        # Insert before last user message
+        last_user_idx = None
+        for i in range(len(messages) - 1, -1, -1):
+            if messages[i].get("role") == "user" and not messages[i].get("metadata", {}).get("__realtime_context__"):
+                last_user_idx = i
+                break
+        if last_user_idx is not None:
+            messages.insert(last_user_idx, realtime_msg)
+        else:
+            messages.append(realtime_msg)
+        target_msg = realtime_msg
+
+    # Attach media (images, etc.) onto the realtime context message so the LLM
+    # receives them as attachments. iter_image_media() in each LLM client picks
+    # these up via message["metadata"]["media"] across all messages, so the
+    # realtime context message's non-final position does not matter.
+    if aggregated_media:
+        meta = target_msg.setdefault("metadata", {})
+        existing_media = meta.get("media")
+        if isinstance(existing_media, list):
+            existing_media.extend(aggregated_media)
+        else:
+            meta["media"] = aggregated_media
+        LOGGER.info(
+            "[sea][realtime_spells] Attached %d media item(s) from realtime spell results",
+            len(aggregated_media),
+        )
+
+    LOGGER.debug("[sea][realtime_spells] Injected %d result(s) into realtime context", len(result_sections))
+
 
 def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook: PlaybookSchema, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None):
     async def node(state: dict):
@@ -22,17 +3291,39 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
         if cancellation_token:
             cancellation_token.raise_if_cancelled()
 
+        # ── Pre-spells: execute UI-requested spells before the first LLM call ──
+        # Set by the chat API for "ツール指定" mode. Runs at most once per Pulse,
+        # gated by state["_pre_spells_executed"]. Result messages flow into
+        # state["_messages"] via the normal spell-loop machinery, so the first
+        # LLM round sees them.
+        _pre_spells = state.get("_pre_spells")
+        if _pre_spells and not state.get("_pre_spells_executed"):
+            state["_pre_spells_executed"] = True
+            try:
+                await _execute_pre_spells(
+                    _pre_spells, runtime, persona, building_id, state, playbook, event_callback,
+                )
+            except Exception:
+                LOGGER.exception("[sea][pre_spells] Pre-spell execution failed; continuing without pre-spell results")
+
+        # ── Realtime spells: auto-execute bound spells and inject into realtime context ──
+        # Configured per-persona and per-building via realtime_spell_binding table.
+        # Runs at most once per Pulse (gated by _realtime_spells_executed), and only
+        # when the persona's spell system is enabled — SPELL_ENABLED=false must stop
+        # this auto-execution path too, not just LLM-invoked spells (Spell 監査 P1).
+        if state.get("_spell_enabled") and not state.get("_realtime_spells_executed"):
+            state["_realtime_spells_executed"] = True
+            try:
+                await _execute_realtime_spells(
+                    runtime, persona, building_id, state, event_callback,
+                )
+            except Exception:
+                LOGGER.exception("[sea][realtime_spells] Realtime spell execution failed; continuing")
+
         # Send status event for node execution
         node_id = getattr(node_def, "id", "llm")
         if event_callback:
             event_callback({"type": "status", "content": f"{playbook.name} / {node_id}", "playbook": playbook.name, "node": node_id})
-        # Merge state into variables for template formatting
-        if playbook.name == 'sub_router_user':
-            action_dbg = getattr(node_def, 'action', None)
-            LOGGER.debug('[sea][router-debug] action=%s model_type=%s avail_len=%s',
-                         (action_dbg[:120] + '...') if isinstance(action_dbg, str) and len(action_dbg) > 120 else action_dbg,
-                         getattr(node_def, 'model_type', None),
-                         len(str(state.get('available_playbooks'))) if state.get('available_playbooks') is not None else None)
 
         # Build variables for template formatting
         # System variables (_ prefix) are excluded — only playbook variables are exposed to templates
@@ -55,40 +3346,247 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
         text = ""
         schema_consumed = False
         prompt = None  # Will store the expanded prompt for memorize
-        try:
-            # Determine base messages: use context_profile if set, otherwise state["_messages"]
-            _profile_name = getattr(node_def, "context_profile", None)
-            if _profile_name:
-                from sea.playbook_models import CONTEXT_PROFILES
-                _profile = CONTEXT_PROFILES.get(_profile_name)
-                if _profile:
-                    _cache_key = f"_ctx_profile_{_profile_name}"
-                    if _cache_key not in state:
-                        # Exclude current pulse messages from SAIMemory — PulseContext
-                        # provides them instead, avoiding duplication of memorized messages.
-                        state[_cache_key] = runtime._prepare_context(
-                            persona, building_id,
-                            state.get("input") or None,
-                            _profile["requirements"],
-                            pulse_id=state.get("_pulse_id"),
-                            exclude_pulse_id=state.get("_pulse_id"),
-                            event_callback=event_callback,
-                        )
-                        LOGGER.info("[sea] Prepared context for profile '%s' (node=%s, %d messages, exclude_pulse=%s)",
-                                    _profile_name, node_id, len(state[_cache_key]), state.get("_pulse_id"))
-                    _profile_base = state[_cache_key]
-                    _pulse_ctx = state.get("_pulse_context")
-                    _intermediate = _pulse_ctx.get_protocol_messages() if _pulse_ctx else []
-                    base_msgs = list(_profile_base) + list(_intermediate)
+
+        # 「この Beat の本文は記憶に書かれた」の印のリセット。state は pulse 内で
+        # 複数ノードに共有されるため、前のノードが立てた印を持ち越すと、この
+        # ノードの Beat が死んだときの補填 (`_backfill_memory_on_beat_death`) が
+        # 「もう書かれた」と誤認して黙る。Beat の入り口で必ず倒す。
+        state.pop("_beat_memorized", None)
+
+        # ── Pipeline Streaming の下書き行 (placeholder) の追跡 ──
+        # 発番するのは normal-mode streaming 経路 (下の use_streaming ブロック)
+        # だけだが、except 節の後始末が参照するため Beat の入り口で初期化する。
+        # pipeline_finalized は「下書き行をもう確定させた」の印。ID を None に
+        # 倒して兼用すると「確定済み」と「そもそも作れなかった」が同じ値になり、
+        # 下流が救済のつもりで同じ本文をもう一度 Building へ書き込む。
+        pipeline_msg_id: Optional[str] = None
+        pipeline_eff_bid: str = ""
+        pipeline_sub_seq = 0
+        pipeline_finalized = False
+        _pipeline_spell_state: Optional[dict] = None
+        # 本文ストリームの途中経過 (_consume_pipeline_stream が書き続ける)。
+        # ストリーム消費中に例外が出ると返り値は届かないため、途中まで受けた
+        # 本文と発火済みの sub-speak 連番は、この器からしか回収できない。
+        _stream_progress: Dict[str, Any] = {}
+        # 「_emit_say_and_capture で建物へ本文を書いた」の印。建物へ本文を
+        # 書く口は下書き行の確定 (pipeline_finalized) だけではない — tool
+        # streaming の both / 通常本文、下書き行を作れなかった回の fallback、
+        # 非ストリーミング (同期) の 4 箇所が _emit_say_and_capture で直接
+        # 書く。これらの後に Beat が死んだ回も「建物には本文があるのに記憶が
+        # 無い」形なので、補填 (`_backfill_memory_on_beat_death`) の発火条件に
+        # 数える (2026-08-27 Codex 指摘)。beat_said_text は say した瞬間の
+        # 本文の写し — 同期経路では say の後に text が continuation へ
+        # 差し替わるため、閉包の text をそのまま読めない。
+        beat_said = False
+        beat_said_text = ""
+
+        def _settle_placeholder_on_beat_death(exc: BaseException) -> None:
+            """Beat がどんな形で死んでも、未確定の下書き行を残さない。
+
+            下書き行は本文の器で、確定して初めて中身が入る。確定しないまま Beat が
+            死ぬと、本文の入らない行がデータベースに残り、画面はそれを描かないので
+            **発言そのものが消える** (2026-05-19〜08-26 の 3 ヶ月で 32 件。経緯は
+            docs/issues/orphaned_streaming_placeholder_cleanup.md)。
+
+            発番から確定までの間に例外を投げうる箇所は一つずつ塞げる数ではない
+            (ストリーム呼び出し、spell loop、finalize 経路自身の失敗、
+            asyncio.CancelledError)。だから入口側で数え上げず、**Beat の出口で
+            「確定していない下書き行が残っていたら確定させる」**を一括で保証する。
+            通告の文面は、取り消しに刻まれた原因 (``interrupted_by``) がユーザー
+            起点のときだけ「ユーザーの操作により」になる (``_is_user_interruption``)
+            — 生成し終えた直後の停止のように、途中の後片付けを通らず例外だけが
+            届く形がある (2026-08-26 実機で発言消滅として発覚)。
+            """
+            nonlocal pipeline_sub_seq, pipeline_finalized
+            if not pipeline_msg_id or pipeline_finalized:
+                return
+            pipeline_finalized = True
+            try:
+                # sub_seq の最新値は、本文ストリームの途中経過と spell loop 側の
+                # 器のどちらかで進んでいることがある。古い値で final を打つと
+                # voice-tts の連番が既出の番号と衝突する。
+                pipeline_sub_seq = max(
+                    pipeline_sub_seq,
+                    int(_stream_progress.get("sub_seq", 0) or 0),
+                )
+                if _pipeline_spell_state is not None:
+                    pipeline_sub_seq = max(
+                        pipeline_sub_seq,
+                        int(_pipeline_spell_state.get("sub_seq", 0) or 0),
+                    )
+                # ストリーム消費の途中で死んだ回は、呼び出し元の text に本文が
+                # まだ届いていない。途中経過から受信済みの chunk を回収する
+                # (回収しないと、画面と音声には流れた言葉が空文字で確定する)。
+                salvage_text = text if isinstance(text, str) else ""
+                if not salvage_text.strip():
+                    _partial_chunks = _stream_progress.get("text_chunks")
+                    if _partial_chunks:
+                        _partial = "".join(_partial_chunks)
+                        if _partial.strip():
+                            salvage_text = _partial
+                pipeline_sub_seq = _settle_interrupted_utterance(
+                    runtime=runtime,
+                    persona=persona,
+                    state=state,
+                    node_def=node_def,
+                    playbook=playbook,
+                    event_callback=event_callback,
+                    building_id=pipeline_eff_bid,
+                    msg_id=pipeline_msg_id,
+                    sub_seq=pipeline_sub_seq,
+                    text=salvage_text,
+                    by_user=(
+                        isinstance(exc, ExecutionCancelledException)
+                        and _is_user_interruption(exc.interrupted_by)
+                    ),
+                )
+            except Exception:
+                # ここで新しい例外を立てると、Beat を落とした元の例外が
+                # すり替わる。後始末の失敗は記録だけして、元の例外を通す。
+                LOGGER.exception(
+                    "[sea][pipeline] placeholder settle on beat death failed "
+                    "(msg=%s) — the draft row may remain unconfirmed",
+                    pipeline_msg_id,
+                )
+
+        def _backfill_memory_on_beat_death(exc: BaseException) -> None:
+            """確定は済んだのに、記憶へ書く前に Beat が死んだ回の補填。
+
+            通常の確定 (`_emit_speak_finalize`) や直接の建物書き込み
+            (`_emit_say_and_capture`) の後、`_finalize_beat` の memorize が
+            走る前に例外が出ると、建物の記録には全文が確定済みなのに本人の記憶
+            (SAIMemory) には何も書かれないまま Beat が死ぬ。下書き行の後始末
+            (`_settle_placeholder_on_beat_death`) は「確定済み」でスキップする
+            (say 直書きの回はそもそも下書き行が無い) ので、そのままでは記憶
+            だけが欠ける。ここで memorize と同じ組み立てで一度だけ書く。
+
+            書かない条件も同じ数だけ大事:
+
+            - **建物に本文が無い回** — 下書き行ごと settle 側が確定・記憶まで
+              揃える (say 直書きの印 `beat_said` も立たない)。
+            - **もう書かれた回** (`_beat_memorized`) — settle が記憶を書いた回や
+              important dual-write 済みの回に重ねると、同じ発言が二重に残る。
+            - **memorize / important 設定の無いノード** — 記憶に書かない設計の
+              ノードの発言を補填で書くと「書かないはずのものを書く」誤りになる。
+            """
+            if not (pipeline_finalized or beat_said):
+                return
+            if state.get("_beat_memorized"):
+                return
+            memorize_config = getattr(node_def, "memorize", None)
+            important = getattr(node_def, "important", False)
+            if not (memorize_config or important):
+                return
+            # pipeline 確定の回は閉包の text (spell 後は continuation に差し替え
+            # 済み — 通常の memorize と同じ本文)。say 直書きの回は say した瞬間の
+            # 写し (beat_said_text) — text はその後の処理で形が変わりうる。
+            backfill_text = text if pipeline_finalized else beat_said_text
+            if not (isinstance(backfill_text, str) and backfill_text.strip()):
+                return
+            try:
+                if memorize_config:
+                    if isinstance(memorize_config, dict):
+                        backfill_tags = memorize_config.get("tags", [])
+                        backfill_scope = memorize_config.get("scope")
+                        backfill_line_role = memorize_config.get("line_role")
+                    else:
+                        backfill_tags = []
+                        backfill_scope = None
+                        backfill_line_role = None
+                    _store_beat_memory(
+                        runtime,
+                        persona,
+                        text=backfill_text,
+                        tags=backfill_tags,
+                        state=state,
+                        playbook_name=playbook.name,
+                        prompt=prompt,
+                        # 印は通常の確定 (`_finalize_beat`) と同じく必ず消費する —
+                        # 残すと次の Beat の言い終えた発言にまで印が漏れる。
+                        interrupted=bool(state.pop(INTERRUPTED_METADATA_KEY, None)),
+                        scope=backfill_scope,
+                        line_role=backfill_line_role,
+                        # reasoning は補填では省略する — 閉包から届かないローカルで、
+                        # 補填の目的は本文の連続性 (本人が自分の発言を覚えていること)。
+                    )
                 else:
-                    LOGGER.warning("[sea] Unknown context_profile '%s' on node '%s', falling back to state messages", _profile_name, node_id)
-                    base_msgs = state.get("_messages", [])
-            else:
-                base_msgs = state.get("_messages", [])
+                    # important のみのノード — 通常経路 (`_finalize_beat` の
+                    # important dual-write) と**同一の引数集合**で書く。
+                    # `_store_beat_memory` を通すと pulse_context /
+                    # paired_action_text / scope / line_role / spell_origin_id
+                    # が付き、同じノードの発言が死に方で違う形になる
+                    # (2026-08-27 Codex 指摘)。
+                    interrupted = bool(state.pop(INTERRUPTED_METADATA_KEY, None))
+                    _backfill_stored = runtime._store_memory(
+                        persona, backfill_text,
+                        role="assistant",
+                        tags=["conversation"],
+                        pulse_id=state.get("_pulse_id"),
+                        metadata=(
+                            {INTERRUPTED_METADATA_KEY: True} if interrupted else None
+                        ),
+                        playbook_name=playbook.name,
+                        thought_signature=state.get("_last_thought_signature"),
+                        beat_state=state,
+                    )
+                    if _backfill_stored:
+                        state["_beat_memorized"] = True
+                # 成功の印を INFO で残す — 補填は狙って発火させられない (実地の
+                # エラーや停止のタイミング勝負) ので、後から「実地で発火したか・
+                # 救えたか」をログの grep 一発で数えられるようにする (2026-08-29
+                # まはー承認)。失敗は下の exception ログが担う。
+                if state.get("_beat_memorized"):
+                    LOGGER.info(
+                        "[sea][pipeline] memory backfill on beat death succeeded "
+                        "(msg=%s, chars=%d, cause=%s)",
+                        pipeline_msg_id, len(backfill_text), type(exc).__name__,
+                    )
+            except Exception:
+                # 補填の失敗で元の例外をすり替えない。記録だけ残す。
+                LOGGER.exception(
+                    "[sea][pipeline] memory backfill on beat death failed "
+                    "(msg=%s) — the utterance stays in the building record only",
+                    pipeline_msg_id,
+                )
+
+        try:
+            # Phase 3 段階 4-D (2026-05-09): context_profile / CONTEXT_PROFILES 経路を削除。
+            # 最新仕様 (Intent A v0.14, Intent B v0.11) では line: 'main'/'sub' に集約されており、
+            # base messages は run 起動時に組み立てられた state["_messages"] が source of truth。
+            base_msgs = state.get("_messages", [])
             action_template = getattr(node_def, "action", None)
             if action_template:
                 prompt = _format(action_template, variables)
-                # Auto-wrap in <system> tags to distinguish from user messages
+                # ============================================================
+                # 設計上の重要判断 — user role + <system> タグの理由
+                # (変更を検討する前に必ず読むこと。「system っぽい指示なのに
+                #  role='system' じゃないのはおかしい」という直感だけで直すと
+                #  プロバイダ互換性が壊れる)
+                #
+                # Playbook の action テキストは LLM への指示で、本来なら
+                # role='system' で送りたい。が、各プロバイダの差異により
+                # 共通形式で system role を「途中に挿入」することができない:
+                #
+                #   - Gemini: system role は context 先頭でしか受け付けない。
+                #     messages の中途で role='system' を出すと無視されるか
+                #     エラーになる。
+                #   - Anthropic: system は messages の外側に別フィールドで
+                #     渡す仕様 (messages 配列の途中に role='system' を含め
+                #     ても効果が限定的)。
+                #   - OpenAI / NIM 等: 受け付けはするが、複数 system が並ぶ
+                #     と挙動が安定しない / 後段で吸い込まれることがある。
+                #
+                # 全プロバイダで共通の挙動を保つため、本プロジェクトでは
+                # 「指示系メッセージは user role + content を <system>...</system>
+                # で囲む」形式に統一している。llm_clients/* も <system>
+                # タグを「LLM が指示として認識すべき高優先度ブロック」として
+                # 扱うよう調整済み。
+                #
+                # 「直すべき」ではなく「対策済み」。 system role に変えると
+                # Gemini 互換が壊れる。同様の <system>…</system> 投入箇所が
+                # sea/runtime.py / sea/pulse_context.py / sea/runtime_nodes.py 等
+                # にもあるが、全て同じ理由でこの形になっている。
+                # ============================================================
                 if not prompt.lstrip().startswith("<system>"):
                     prompt = f"<system>{prompt}</system>"
                 messages = list(base_msgs) + [{"role": "user", "content": prompt}]
@@ -97,12 +3595,51 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
 
             # Dynamically add enum to response_schema if available_playbooks exists
             response_schema = getattr(node_def, "response_schema", None)
+
+            # Resolve response_schema_source if response_schema is not explicitly set.
+            # Supports 'spell:<name>' to load a registered Spell's input schema from
+            # SPELL_TOOL_SCHEMAS. Template variables ({state_var}) are expanded first.
+            if response_schema is None:
+                schema_source = getattr(node_def, "response_schema_source", None)
+                if schema_source:
+                    try:
+                        resolved_source = _format(schema_source, variables)
+                    except Exception:
+                        LOGGER.warning(
+                            "[sea][llm] Failed to expand response_schema_source template %r",
+                            schema_source, exc_info=True,
+                        )
+                        resolved_source = schema_source
+                    response_schema = _resolve_response_schema_source(
+                        resolved_source, variables=variables
+                    )
+                    if response_schema is None:
+                        LOGGER.warning(
+                            "[sea][llm] response_schema_source %r resolved to None; "
+                            "node %s will run without structured output",
+                            resolved_source, getattr(node_def, "id", "?"),
+                        )
+
             if response_schema and "available_playbooks" in state:
                 response_schema = runtime._add_playbook_enum(response_schema, state.get("available_playbooks"))
 
             # Select LLM client based on model_type and structured output needs
             needs_structured_output = response_schema is not None
-            llm_client = runtime._select_llm_client(node_def, persona, needs_structured_output=needs_structured_output)
+            # Beat 相当の開始点 (beat_execution_context §2.1): 実行の身分証を
+            # ここで一度だけ解決し、下流は state["_execution_context"] を読む
+            # (後続工事の結線点)。解決値は従来の暗黙推測と同一 (挙動不変)。
+            execution_context = resolve_execution_context(
+                persona, state.get("_pulse_context"), state=state,
+            )
+            state["_execution_context"] = execution_context
+            llm_client, _selected_model = runtime.select_llm_client(
+                node_def, persona, execution_context=execution_context,
+                needs_structured_output=needs_structured_output, state=state,
+            )
+            if _selected_model != execution_context.model_key:
+                # structured-output fallback 等で実 model が変わった → 差し替え
+                execution_context = execution_context.with_model(_selected_model)
+                state["_execution_context"] = execution_context
 
             # Inject model-specific system prompt if configured
             _model_config_key = getattr(llm_client, "config_key", None)
@@ -125,10 +3662,15 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
             available_tools = getattr(node_def, "available_tools", None)
             LOGGER.info("[DEBUG] available_tools = %s", available_tools)
 
-            if available_tools:
+            # Check if spells are enabled for this persona (spells replace handy tool injection)
+            _spell_enabled = state.get("_spell_enabled", False)
+
+            effective_tools: list[str] = list(available_tools or [])
+
+            if effective_tools:
                 LOGGER.info("[DEBUG] Entering tools mode (generate with tools)")
                 # Tool calling mode - use unified generate() with tools
-                tools_spec = runtime._build_tools_spec(available_tools, llm_client)
+                tools_spec = runtime._build_tools_spec(effective_tools, llm_client)
 
                 # Check if we should use streaming in tool mode
                 speak_flag = getattr(node_def, "speak", None)
@@ -157,7 +3699,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                             messages,
                             tools=tools_spec,
                             temperature=runtime._default_temperature(persona),
-                            **runtime._get_cache_kwargs(),
+                            **runtime._get_cache_kwargs(getattr(persona, "persona_id", None)),
                         )
                         try:
                             for chunk in stream_iter:
@@ -171,6 +3713,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                                         "content": chunk["content"],
                                         "persona_id": getattr(persona, "persona_id", None),
                                         "node_id": getattr(node_def, "id", "llm"),
+                                        "pulse_id": state.get("_pulse_id"),
                                     })
                                     continue
                                 text_chunks.append(chunk)
@@ -179,6 +3722,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                                     "content": chunk,
                                     "persona_id": getattr(persona, "persona_id", None),
                                     "node_id": getattr(node_def, "id", "llm"),
+                                    "pulse_id": state.get("_pulse_id"),
                                 })
                         finally:
                             if hasattr(stream_iter, 'close'):
@@ -211,45 +3755,15 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                         )
 
                     # Consume reasoning
-                    _tool_reasoning = llm_client.consume_reasoning()
-                    _tool_reasoning_text = "\n\n".join(
-                        e.get("text", "") for e in _tool_reasoning if e.get("text")
-                    ) if _tool_reasoning else ""
-                    if _tool_reasoning_text:
-                        state["_reasoning_text"] = _tool_reasoning_text
-                    _tool_reasoning_details = llm_client.consume_reasoning_details()
-                    if _tool_reasoning_details is not None:
-                        state["_reasoning_details"] = _tool_reasoning_details
+                    _tool_reasoning_text, _tool_reasoning_details = _consume_reasoning(
+                        llm_client, state,
+                    )
 
                     # Record usage
-                    usage = llm_client.consume_usage()
-                    llm_usage_metadata: Dict[str, Any] | None = None
-                    if usage:
-                        get_usage_tracker().record_usage(
-                            model_id=usage.model,
-                            input_tokens=usage.input_tokens,
-                            output_tokens=usage.output_tokens,
-                            cached_tokens=usage.cached_tokens,
-                            cache_write_tokens=usage.cache_write_tokens,
-                            cache_ttl=usage.cache_ttl,
-                            persona_id=getattr(persona, "persona_id", None),
-                            building_id=building_id,
-                            node_type="llm_tool_stream",
-                            playbook_name=playbook.name,
-                            category="persona_speak",
-                        )
-                        from saiverse.model_configs import calculate_cost, get_model_display_name
-                        cost = calculate_cost(usage.model, usage.input_tokens, usage.output_tokens, usage.cached_tokens, usage.cache_write_tokens, cache_ttl=usage.cache_ttl)
-                        llm_usage_metadata = {
-                            "model": usage.model,
-                            "model_display_name": get_model_display_name(usage.model),
-                            "input_tokens": usage.input_tokens,
-                            "output_tokens": usage.output_tokens,
-                            "cached_tokens": usage.cached_tokens,
-                            "cache_write_tokens": usage.cache_write_tokens,
-                            "cost_usd": cost,
-                        }
-                        runtime._accumulate_usage(state, usage.model, usage.input_tokens, usage.output_tokens, cost, usage.cached_tokens, usage.cache_write_tokens)
+                    llm_usage_metadata: Dict[str, Any] | None = _record_llm_usage(
+                        runtime, llm_client, persona, building_id,
+                        playbook.name, "llm_tool_stream", state,
+                    )
 
                     # Check tool detection — did LLM call a tool?
                     tool_detection = llm_client.consume_tool_detection()
@@ -269,6 +3783,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                                 "type": "streaming_complete",
                                 "persona_id": getattr(persona, "persona_id", None),
                                 "node_id": getattr(node_def, "id", "llm"),
+                                "pulse_id": state.get("_pulse_id"),
                             }
                             if _tool_reasoning_text:
                                 completion_event["reasoning"] = _tool_reasoning_text
@@ -277,21 +3792,24 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                             event_callback(completion_event)
 
                             # Record to Building history
+                            # (この経路だけ llm_usage_total を載せない — 既存挙動を維持)
                             pulse_id = state.get("_pulse_id")
-                            msg_metadata: Dict[str, Any] = {}
-                            if _speak_base_metadata and isinstance(_speak_base_metadata, dict):
-                                msg_metadata.update(_speak_base_metadata)
-                            if llm_usage_metadata:
-                                msg_metadata["llm_usage"] = llm_usage_metadata
-                            if _tool_reasoning_text:
-                                msg_metadata["reasoning"] = _tool_reasoning_text
-                            if _tool_reasoning_details is not None:
-                                msg_metadata["reasoning_details"] = _tool_reasoning_details
-                            _at_both = state.get("_activity_trace")
-                            if _at_both:
-                                msg_metadata["activity_trace"] = list(_at_both)
+                            msg_metadata = _build_say_metadata(
+                                state,
+                                base_metadata=_speak_base_metadata,
+                                llm_usage_metadata=llm_usage_metadata,
+                                reasoning_text=_tool_reasoning_text,
+                                reasoning_details=_tool_reasoning_details,
+                                include_total=False,
+                            )
                             eff_bid = runtime._effective_building_id(persona, building_id)
-                            runtime._emit_say(persona, eff_bid, text, pulse_id=pulse_id, metadata=msg_metadata if msg_metadata else None)
+                            _emit_say_and_capture(
+                                runtime, persona, eff_bid, text, state,
+                                pulse_id=pulse_id, metadata=msg_metadata,
+                                event_callback=event_callback,
+                            )
+                            beat_said = True
+                            beat_said_text = text
                             LOGGER.info("[sea] 'both' response: text kept in UI and Building history (len=%d), tool call continues", len(text))
                         elif text_chunks:
                             # "tool_call" only — discard streamed text
@@ -299,6 +3817,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                                 "type": "streaming_discard",
                                 "persona_id": getattr(persona, "persona_id", None),
                                 "node_id": getattr(node_def, "id", "llm"),
+                                "pulse_id": state.get("_pulse_id"),
                             })
                             LOGGER.info("[sea] Streaming text discarded — tool_call only (no speak content)")
                     else:
@@ -313,6 +3832,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                             "type": "streaming_complete",
                             "persona_id": getattr(persona, "persona_id", None),
                             "node_id": getattr(node_def, "id", "llm"),
+                            "pulse_id": state.get("_pulse_id"),
                         }
                         if _tool_reasoning_text:
                             completion_event["reasoning"] = _tool_reasoning_text
@@ -322,23 +3842,21 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
 
                         # Record to Building history
                         pulse_id = state.get("_pulse_id")
-                        msg_metadata: Dict[str, Any] = {}
-                        if _speak_base_metadata and isinstance(_speak_base_metadata, dict):
-                            msg_metadata.update(_speak_base_metadata)
-                        if llm_usage_metadata:
-                            msg_metadata["llm_usage"] = llm_usage_metadata
-                        if _tool_reasoning_text:
-                            msg_metadata["reasoning"] = _tool_reasoning_text
-                        if _tool_reasoning_details is not None:
-                            msg_metadata["reasoning_details"] = _tool_reasoning_details
-                        _at_stream = state.get("_activity_trace")
-                        if _at_stream:
-                            msg_metadata["activity_trace"] = list(_at_stream)
-                        accumulator = state.get("_pulse_usage_accumulator")
-                        if accumulator:
-                            msg_metadata["llm_usage_total"] = dict(accumulator)
+                        msg_metadata = _build_say_metadata(
+                            state,
+                            base_metadata=_speak_base_metadata,
+                            llm_usage_metadata=llm_usage_metadata,
+                            reasoning_text=_tool_reasoning_text,
+                            reasoning_details=_tool_reasoning_details,
+                        )
                         eff_bid = runtime._effective_building_id(persona, building_id)
-                        runtime._emit_say(persona, eff_bid, text, pulse_id=pulse_id, metadata=msg_metadata if msg_metadata else None)
+                        _emit_say_and_capture(
+                            runtime, persona, eff_bid, text, state,
+                            pulse_id=pulse_id, metadata=msg_metadata,
+                            event_callback=event_callback,
+                        )
+                        beat_said = True
+                        beat_said_text = text
 
                 else:
                     # ── Synchronous tool mode (original) ──
@@ -346,60 +3864,133 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                         messages,
                         tools=tools_spec,
                         temperature=runtime._default_temperature(persona),
-                        **runtime._get_cache_kwargs(),
+                        **runtime._get_cache_kwargs(getattr(persona, "persona_id", None)),
                     )
 
                     # Consume reasoning (thinking) from tool-mode LLM call
-                    _tool_reasoning = llm_client.consume_reasoning()
-                    _tool_reasoning_text = "\n\n".join(
-                        e.get("text", "") for e in _tool_reasoning if e.get("text")
-                    ) if _tool_reasoning else ""
-                    if _tool_reasoning_text:
-                        state["_reasoning_text"] = _tool_reasoning_text
-                    _tool_reasoning_details = llm_client.consume_reasoning_details()
-                    if _tool_reasoning_details is not None:
-                        state["_reasoning_details"] = _tool_reasoning_details
+                    _tool_reasoning_text, _tool_reasoning_details = _consume_reasoning(
+                        llm_client, state,
+                    )
 
                     # Record usage
-                    usage = llm_client.consume_usage()
-                    if usage:
-                        get_usage_tracker().record_usage(
-                            model_id=usage.model,
-                            input_tokens=usage.input_tokens,
-                            output_tokens=usage.output_tokens,
-                            cached_tokens=usage.cached_tokens,
-                            cache_write_tokens=usage.cache_write_tokens,
-                            cache_ttl=usage.cache_ttl,
-                            persona_id=getattr(persona, "persona_id", None),
-                            building_id=building_id,
-                            node_type="llm_tool",
-                            playbook_name=playbook.name,
-                            category="persona_speak",
-                        )
-                        # Accumulate into pulse total
-                        from saiverse.model_configs import calculate_cost
-                        cost = calculate_cost(usage.model, usage.input_tokens, usage.output_tokens, usage.cached_tokens, usage.cache_write_tokens, cache_ttl=usage.cache_ttl)
-                        runtime._accumulate_usage(state, usage.model, usage.input_tokens, usage.output_tokens, cost, usage.cached_tokens, usage.cache_write_tokens)
+                    # (この経路は llm_usage_metadata を使わない — 戻り値は捨てる)
+                    _record_llm_usage(
+                        runtime, llm_client, persona, building_id,
+                        playbook.name, "llm_tool", state,
+                    )
 
                 # ── Common tool result handling (shared by streaming & sync) ──
                 # Parse output_keys to determine where to store results
                 output_keys_spec = getattr(node_def, "output_keys", None)
                 text_key = None
                 function_call_key = None
-                thought_key = None
-
                 if output_keys_spec:
+                    # 基点の名前をここで一度検査しておけば、下流で組み立てる派生
+                    # キー ("{function_call_key}.args.{name}" 等) も同じ判定に乗る。
                     for mapping in output_keys_spec:
                         if "text" in mapping:
-                            text_key = mapping["text"]
+                            text_key = playbook_write_key(
+                                mapping["text"], where=f"node '{node_id}' output_keys.text",
+                            )
                         if "function_call" in mapping:
-                            function_call_key = mapping["function_call"]
-                        if "thought" in mapping:
-                            thought_key = mapping["thought"]
+                            function_call_key = playbook_write_key(
+                                mapping["function_call"],
+                                where=f"node '{node_id}' output_keys.function_call",
+                            )
 
                 # Debug: log result type and keys
                 LOGGER.info("[DEBUG] LLM result type='%s', has content=%s, has tool_name=%s",
                            result.get("type"), "content" in result, "tool_name" in result)
+
+                # ── Spell loop (parallel execution per round) ──
+                _pre_spell_text = result.get("content", "") if result.get("type") == "text" else ""
+                _bubble1_emitted_early = _emit_bubble1_early(
+                    runtime=runtime,
+                    persona=persona,
+                    building_id=building_id,
+                    text=_pre_spell_text,
+                    speak_flag=getattr(node_def, "speak", True),
+                    pulse_id=state.get("_pulse_id"),
+                    event_callback=event_callback,
+                    node_id=getattr(node_def, "id", "llm"),
+                    send_streaming_discard=False,
+                )
+                _spell_text, _spell_continuation, _spell_loop_count = await _run_spell_loop(
+                    text=_pre_spell_text,
+                    spell_enabled=_spell_enabled,
+                    llm_client=llm_client,
+                    runtime=runtime,
+                    persona=persona,
+                    building_id=building_id,
+                    state=state,
+                    messages=messages,
+                    playbook=playbook,
+                    event_callback=event_callback,
+                    node_def=node_def,
+                    action_text=prompt,
+                )
+                if _spell_loop_count > 0:
+                    # result.content は後段 (≈L2069/2076) で state[text_key]/text に
+                    # 入り SAIMemory に保存される。emit は下の _spell_emit_text
+                    # (merged HTML) を別途使うので、ここは plain な continuation を
+                    # 入れて <user_only>/spellResult の HTML タグ混入を防ぐ
+                    # (2413/2648 経路と対称、docs/issues/spell_html_leak_into_saimemory.md)。
+                    result = {"type": "text", "content": _spell_continuation}
+
+                    # Intent A v0.14 / Intent B v0.11 (handoff route B):
+                    # speak: false nodes are internal-processing nodes. They must
+                    # not flush spell-driven content to the UI or Building history
+                    # — the Spell loop already routed records to the active line's
+                    # storage layer ([2]/[3]/[4]) via PulseContext-aware
+                    # _store_memory in P0-4. Skip emission here.
+                    _node_speak_flag = getattr(node_def, "speak", True)
+                    if _node_speak_flag is False:
+                        LOGGER.info(
+                            "[sea][spell] speak=false node — skipping _emit_say "
+                            "(handoff route B); records remain in line storage layer only"
+                        )
+                    else:
+                        # Phase 2-B-step3 (voice_tts_pipeline_streaming): single
+                        # _emit_say with the full merged text (= round 1 text_before
+                        # + <user_only> spell blocks + further rounds + final
+                        # continuation). The old bubble1/bubble2 dual-emit is gone.
+                        #
+                        # If Phase 1 already emitted text_before early (= TTS warm-
+                        # up while spell loop ran), strip the duplicate leading
+                        # text_before from _spell_text so building history sees
+                        # the same record only once. Phase 2-C will remove the
+                        # Phase 1 path entirely (sub-speak handles the warm-up).
+                        pulse_id = state.get("_pulse_id")
+                        eff_bid = runtime._effective_building_id(persona, building_id)
+
+                        _spell_emit_text = _spell_text
+                        if _bubble1_emitted_early and _spell_emit_text.startswith(_bubble1_emitted_early):
+                            _spell_emit_text = _spell_emit_text[len(_bubble1_emitted_early):].lstrip("\n")
+
+                        # A-sync 経由でもここへ来るため llm_usage_metadata は参照
+                        # できない（tool streaming 側にしか無い）。reasoning も
+                        # 従来から載せていない — 既存挙動を維持。
+                        _spell_at = state.get("_activity_trace")
+                        _spell_msg_meta = _build_say_metadata(state, include_total=False)
+
+                        if event_callback:
+                            _say_event: Dict[str, Any] = {
+                                "type": "say",
+                                "content": _spell_emit_text,
+                                "persona_id": getattr(persona, "persona_id", None),
+                                "pulse_id": pulse_id,
+                            }
+                            if _spell_at:
+                                _say_event["activity_trace"] = list(_spell_at)
+                            event_callback(_say_event)
+
+                        runtime._emit_say(persona, eff_bid, _spell_emit_text, pulse_id=pulse_id,
+                                          metadata=_spell_msg_meta if _spell_msg_meta else None,
+                                          event_callback=event_callback)
+                        LOGGER.info(
+                            "[sea][spell] Tool-mode: emitted merged spell text (len=%d, phase1_early=%s)",
+                            len(_spell_emit_text), bool(_bubble1_emitted_early),
+                        )
 
                 if result["type"] == "tool_call":
                     LOGGER.info("[DEBUG] Entering tool_call branch")
@@ -430,7 +4021,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                                 LOGGER.debug("[sea] Expanded tool_arg_%s = %s", key, value)
 
                     # Record tool call info for message protocol (function calling)
-                    _tc_id = f"tc_{uuid.uuid4().hex}"
+                    _tc_id = _resolve_tool_call_id(result)
                     state["_last_tool_call_id"] = _tc_id
                     state["_last_tool_name"] = result["tool_name"]
                     state["_last_tool_args_json"] = json.dumps(
@@ -483,7 +4074,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                                 LOGGER.debug("[sea] Expanded tool_arg_%s = %s", key, value)
 
                     # Record tool call info for message protocol (function calling)
-                    _tc_id = f"tc_{uuid.uuid4().hex}"
+                    _tc_id = _resolve_tool_call_id(result)
                     state["_last_tool_call_id"] = _tc_id
                     state["_last_tool_name"] = result["tool_name"]
                     state["_last_tool_args_json"] = json.dumps(
@@ -511,6 +4102,11 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                         state["has_speak_content"] = True
 
                     text = result["content"]
+                    # 2026-05-20: Gemini 3.x の thoughtSignature を state に保存。
+                    # _assistant_msg 構築時に message トップレベルにセットされ、
+                    # SAIMemory permanence layer 経由で次ターンへ echo される。
+                    # 詳細は docs/intent/thought_signature_persistence.md
+                    state["_last_thought_signature"] = result.get("thought_signature")
 
                 runtime._dump_llm_io(playbook.name, getattr(node_def, "id", ""), persona, messages, text)
             else:
@@ -522,7 +4118,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                 speak_flag = getattr(node_def, "speak", None)
                 streaming_enabled = _is_llm_streaming_enabled()
                 LOGGER.info("[DEBUG] Streaming check: speak_flag=%s, response_schema=%s, streaming_enabled=%s, event_callback=%s",
-                           speak_flag, response_schema is None, streaming_enabled, event_callback is not None)
+                           speak_flag, response_schema is not None, streaming_enabled, event_callback is not None)
                 use_streaming = (
                     speak_flag is True
                     and response_schema is None
@@ -536,48 +4132,78 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                     max_stream_retries = 3
                     text = ""
                     cancelled_during_stream = False
+
+                    # Pipeline Streaming: LLM streaming と並行で voice-tts に
+                    # 文区切りごとに sub-speak を投げる経路。 ストリーミング応答
+                    # を返す経路では常にこの方式を使う (旧 Phase 1 bubble1 早期
+                    # emit は撤去済)。
+                    #
+                    # 仕組み:
+                    # - 開始時に _emit_speak_start で placeholder + msg_id 発番
+                    # - chunk 受信ごとに文区切り検出 → _emit_sub_speak (sub_seq=N)
+                    # - 最初の /spell 行を検出したら sub-speak emit を停止 (spell
+                    #   行は spell loop が <user_only> で wrap してから finalize
+                    #   経由で送るので、 単独で voice-tts に渡してはいけない)
+                    # - spell loop 完了後 (or 通常完了後) に _emit_speak_finalize
+                    #   で placeholder を確定 + final hook 発火。 final_voice_text
+                    #   は 「last sub-speak 以降の残テキスト」 を strip_user_only
+                    #   済の形で渡す (= 重複合成を回避)
+                    # placeholder の作成先 Building は固定で覚えておく。 Pulse 中に
+                    # ペルソナが移動しても (例: game_move_party spell)、 finalize は
+                    # placeholder が実在するこの Building に対して行う必要がある。
+                    # finalize 時に _effective_building_id で再解決すると移動後の
+                    # Building を見に行って update が空振りし、 content が空の
+                    # placeholder が永久に残る (2026-06-11 Region RPG 実機で発覚)。
+                    pipeline_eff_bid = runtime._effective_building_id(persona, building_id)
+                    pipeline_msg_id = runtime._emit_speak_start(
+                        persona,
+                        pipeline_eff_bid,
+                        pulse_id=state.get("_pulse_id"),
+                    )
+                    if not pipeline_msg_id:
+                        LOGGER.error(
+                            "[sea][pipeline] _emit_speak_start failed; "
+                            "downstream finalize will be skipped — placeholder leak risk",
+                        )
+
                     for stream_attempt in range(max_stream_retries):
-                        text_chunks = []
                         stream_iter = llm_client.generate_stream(
                             messages,
                             tools=[],
                             temperature=runtime._default_temperature(persona),
-                            **runtime._get_cache_kwargs(),
+                            **runtime._get_cache_kwargs(getattr(persona, "persona_id", None)),
                         )
-                        try:
-                            for chunk in stream_iter:
-                                # Check cancellation between chunks
-                                if cancellation_token and cancellation_token.is_cancelled():
-                                    LOGGER.info("[sea] Streaming cancelled by user during chunk loop")
-                                    cancelled_during_stream = True
-                                    break
-
-                                # Thinking chunks are dicts, text chunks are strings
-                                if isinstance(chunk, dict) and chunk.get("type") == "thinking":
-                                    event_callback({
-                                        "type": "streaming_thinking",
-                                        "content": chunk["content"],
-                                        "persona_id": getattr(persona, "persona_id", None),
-                                        "node_id": getattr(node_def, "id", "llm"),
-                                    })
-                                    continue
-                                text_chunks.append(chunk)
-                                # Send each text chunk to UI
-                                event_callback({
-                                    "type": "streaming_chunk",
-                                    "content": chunk,
-                                    "persona_id": getattr(persona, "persona_id", None),
-                                    "node_id": getattr(node_def, "id", "llm"),
-                                })
-                        finally:
-                            # Explicitly close to disconnect HTTP streaming from LLM API
-                            # This stops API-side token generation and billing
-                            if hasattr(stream_iter, 'close'):
-                                stream_iter.close()
-                        text = "".join(text_chunks)
-
-                        if cancelled_during_stream:
+                        _initial_text, pipeline_sub_seq, _initial_spell_detected, _initial_cancelled = await _consume_pipeline_stream(
+                            stream_iter,
+                            runtime=runtime,
+                            persona=persona,
+                            building_id=building_id,
+                            node_def=node_def,
+                            state=state,
+                            pipeline_msg_id=pipeline_msg_id,
+                            sub_seq_start=pipeline_sub_seq,
+                            cancellation_token=cancellation_token,
+                            event_callback=event_callback,
+                            progress=_stream_progress,
+                        )
+                        text = _initial_text
+                        if _initial_cancelled:
+                            cancelled_during_stream = True
                             break  # Don't retry on cancellation
+
+                        # Check for server-side stream interruption (e.g. 504 DEADLINE_EXCEEDED)
+                        _stream_error = (
+                            llm_client.consume_stream_error()
+                            if hasattr(llm_client, "consume_stream_error") else None
+                        )
+                        if _stream_error:
+                            LOGGER.warning(
+                                "[sea][llm] Stream interrupted by server: code=%s status=%s — "
+                                "will re-speak after storing partial response",
+                                _stream_error.get("code"), _stream_error.get("status", ""),
+                            )
+                            state["_stream_error"] = _stream_error
+                            break  # Don't retry; handle at speak level below
 
                         # Check for empty response
                         if text.strip():
@@ -600,139 +4226,383 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                             max_stream_retries
                         )
 
-                    # Record usage (even if cancelled — tokens were consumed)
-                    usage = llm_client.consume_usage()
-                    LOGGER.info("[DEBUG] consume_usage returned: %s", usage)
-                    llm_usage_metadata: Dict[str, Any] | None = None
-                    if usage:
-                        get_usage_tracker().record_usage(
-                            model_id=usage.model,
-                            input_tokens=usage.input_tokens,
-                            output_tokens=usage.output_tokens,
-                            cached_tokens=usage.cached_tokens,
-                            cache_write_tokens=usage.cache_write_tokens,
-                            cache_ttl=usage.cache_ttl,
-                            persona_id=getattr(persona, "persona_id", None),
-                            building_id=building_id,
-                            node_type="llm_stream",
-                            playbook_name=playbook.name,
-                            category="persona_speak",
+                    # ストリームの途中で止められた回。下書き行を本文で確定させ、
+                    # 印・記憶・記録を揃える (詳しくは
+                    # ``_settle_interrupted_utterance`` の docstring)。
+                    if cancelled_during_stream:
+                        pipeline_sub_seq = _settle_interrupted_utterance(
+                            runtime=runtime,
+                            persona=persona,
+                            state=state,
+                            node_def=node_def,
+                            playbook=playbook,
+                            event_callback=event_callback,
+                            building_id=pipeline_eff_bid,
+                            msg_id=pipeline_msg_id,
+                            sub_seq=pipeline_sub_seq,
+                            text=text,
+                            by_user=_is_user_interruption(
+                                getattr(cancellation_token, "interrupted_by", None)
+                            ),
                         )
-                        LOGGER.info("[DEBUG] Usage recorded: model=%s in=%d out=%d cached=%d cache_write=%d", usage.model, usage.input_tokens, usage.output_tokens, usage.cached_tokens, usage.cache_write_tokens)
-                        # Build llm_usage metadata for message
-                        from saiverse.model_configs import calculate_cost, get_model_display_name
-                        cost = calculate_cost(usage.model, usage.input_tokens, usage.output_tokens, usage.cached_tokens, usage.cache_write_tokens, cache_ttl=usage.cache_ttl)
-                        llm_usage_metadata = {
-                            "model": usage.model,
-                            "model_display_name": get_model_display_name(usage.model),
-                            "input_tokens": usage.input_tokens,
-                            "output_tokens": usage.output_tokens,
-                            "cached_tokens": usage.cached_tokens,
-                            "cache_write_tokens": usage.cache_write_tokens,
-                            "cost_usd": cost,
-                        }
-                        # Accumulate into pulse total
-                        runtime._accumulate_usage(state, usage.model, usage.input_tokens, usage.output_tokens, cost, usage.cached_tokens, usage.cache_write_tokens)
-                    else:
-                        LOGGER.warning("[DEBUG] No usage data from LLM client")
+                        pipeline_finalized = True
+
+                    # Record usage (even if cancelled — tokens were consumed)
+                    llm_usage_metadata: Dict[str, Any] | None = _record_llm_usage(
+                        runtime, llm_client, persona, building_id,
+                        playbook.name, "llm_stream", state, debug_log=True,
+                    )
 
                     # Consume reasoning (thinking) from LLM — store as metadata, not in content
-                    reasoning_entries = llm_client.consume_reasoning()
-                    reasoning_text = "\n\n".join(
-                        e.get("text", "") for e in reasoning_entries if e.get("text")
-                    ) if reasoning_entries else ""
-                    reasoning_details = llm_client.consume_reasoning_details()
+                    # （state への格納は Spell ループ後にまとめて行う）
+                    reasoning_text, reasoning_details = _consume_reasoning(llm_client)
 
-                    # Resolve metadata_key for speak (e.g., media attachments from tool execution)
-                    _speak_metadata_key = getattr(node_def, "metadata_key", None)
-                    _speak_base_metadata = state.get(_speak_metadata_key) if _speak_metadata_key else None
+                    # 2026-05-20: Gemini 3.x の thoughtSignature を stream 完了後に保持。
+                    # ストリーム経路は最後の chunk まで読まないと signature が確定しない
+                    # ため、_consume_pipeline_stream の後で consume する。
+                    # 詳細は docs/intent/thought_signature_persistence.md
+                    state["_last_thought_signature"] = llm_client.consume_thought_signature()
+                    LOGGER.debug(
+                        "[sea][llm][sig-trace] stream path: state['_last_thought_signature'] set = %s (%d bytes)",
+                        "present" if state["_last_thought_signature"] else "None",
+                        len(state["_last_thought_signature"]) if isinstance(state["_last_thought_signature"], (bytes, str)) else 0,
+                    )
 
-                    # Send completion event with reasoning and metadata
-                    completion_event: Dict[str, Any] = {
-                        "type": "streaming_complete",
-                        "persona_id": getattr(persona, "persona_id", None),
-                        "node_id": getattr(node_def, "id", "llm"),
-                    }
-                    if reasoning_text:
-                        completion_event["reasoning"] = reasoning_text
-                    if _speak_base_metadata and isinstance(_speak_base_metadata, dict):
-                        completion_event["metadata"] = _speak_base_metadata
-                    event_callback(completion_event)
+                    # ── Spell loop (parallel execution per round) ──
+                    # Pipeline Streaming で sub-speak が音声合成のウォームアップを
+                    # 担うので、 旧 Phase 1 (= spell loop 開始前の bubble1 早期
+                    # emit) は不要。 完全撤去済。
+                    #
+                    # pipeline_streaming_state を渡すことで spell loop 内の 2 回目
+                    # 以降の LLM 呼び出しも streaming 化される。 retry の chunk が
+                    # UI に流れつつ、 文区切りで sub-speak も発火する。 helper は
+                    # state dict を in-place mutate して sub_seq を更新する。
+                    if pipeline_msg_id and not pipeline_finalized:
+                        _pipeline_spell_state = {
+                            "msg_id": pipeline_msg_id,
+                            "sub_seq": pipeline_sub_seq,
+                            "cancellation_token": cancellation_token,
+                        }
 
-                    # Record to Building history with usage metadata (include pulse total)
-                    pulse_id = state.get("_pulse_id")
-                    msg_metadata: Dict[str, Any] = {}
-                    # Merge base metadata first (e.g., media from tool execution)
-                    if _speak_base_metadata and isinstance(_speak_base_metadata, dict):
-                        msg_metadata.update(_speak_base_metadata)
-                    if llm_usage_metadata:
-                        msg_metadata["llm_usage"] = llm_usage_metadata
-                    if reasoning_text:
-                        msg_metadata["reasoning"] = reasoning_text
-                    if reasoning_details is not None:
-                        msg_metadata["reasoning_details"] = reasoning_details
-                    _at_stream = state.get("_activity_trace")
-                    if _at_stream:
-                        msg_metadata["activity_trace"] = list(_at_stream)
-                    accumulator = state.get("_pulse_usage_accumulator")
-                    if accumulator:
-                        msg_metadata["llm_usage_total"] = dict(accumulator)
-                    eff_bid = runtime._effective_building_id(persona, building_id)
-                    runtime._emit_say(persona, eff_bid, text, pulse_id=pulse_id, metadata=msg_metadata if msg_metadata else None)
+                    # 生成し終えた直後に止められた回は、spell round の頭で
+                    # ExecutionCancelledException が出てここから例外で抜ける
+                    # (2026-08-26 実機で「発言そのものが消える」として発覚)。
+                    # 下書き行の後始末は Beat の出口
+                    # (``_settle_placeholder_on_beat_death``) が LLM エラー等と
+                    # まとめて一括で受け止める。
+                    text, _continuation_ns, _spell_loop_count_ns = await _run_spell_loop(
+                        text=text,
+                        spell_enabled=_spell_enabled,
+                        llm_client=llm_client,
+                        runtime=runtime,
+                        persona=persona,
+                        building_id=building_id,
+                        state=state,
+                        messages=messages,
+                        playbook=playbook,
+                        event_callback=event_callback,
+                        node_def=node_def,
+                        pipeline_streaming_state=_pipeline_spell_state,
+                        action_text=prompt,
+                    )
+
+                    if _pipeline_spell_state is not None:
+                        pipeline_sub_seq = int(_pipeline_spell_state.get("sub_seq", pipeline_sub_seq) or pipeline_sub_seq)
+
+                    if _spell_loop_count_ns > 0:
+                        # Intent A v0.14 / Intent B v0.11 (handoff route B):
+                        # speak: false nodes skip the _emit_say path entirely.
+                        # The Spell loop already routed records to the active
+                        # line's storage layer; emitting a "say" event would
+                        # surface internal-processing content as a persona
+                        # utterance.
+                        _node_speak_flag_ns = getattr(node_def, "speak", True)
+                        if _node_speak_flag_ns is False:
+                            LOGGER.info(
+                                "[sea][spell] speak=false node — skipping Normal-stream _emit_say "
+                                "(handoff route B); records remain in line storage layer only"
+                            )
+                            # speak=false の場合でも placeholder を放置すると
+                            # _streaming_placeholder=True で残り続けるので、
+                            # voice-tts に空文字で finalize して close する。
+                            if pipeline_msg_id and not pipeline_finalized:
+                                pipeline_sub_seq += 1
+                                _sf_result = _finalize_speak_with_signal(
+                                    runtime, persona,
+                                    pipeline_eff_bid,
+                                    pipeline_msg_id, text,
+                                    pulse_id=state.get("_pulse_id"),
+                                    extra_metadata=None,
+                                    final_sub_seq=pipeline_sub_seq,
+                                    event_callback=event_callback,
+                                )
+                                # saved のときだけ「確定済み」。missing / failed
+                                # で立てると、Beat 死亡時の救済 (placeholder
+                                # salvage) が誤認して二度と走らない (Codex #2)。
+                                pipeline_finalized = (
+                                    getattr(_sf_result, "status", None) == "saved"
+                                )
+                        else:
+                            pulse_id = state.get("_pulse_id")
+
+                            # spell 経路は従来から reasoning を載せていない
+                            # （＝ 既存挙動を維持）。
+                            _spell_at_ns = state.get("_activity_trace")
+                            _spell_msg_meta_ns = _build_say_metadata(
+                                state, llm_usage_metadata=llm_usage_metadata,
+                            )
+
+                            # Pipeline Streaming finalize: placeholder を全文 (= text、
+                            # merged form) で確定。 voice-tts は sub-speak 経由で
+                            # 全テキストを既に受け取っており、 finalize hook では
+                            # ``final_voice_text=""`` で 「stream close + wav 保存」
+                            # のみ依頼する (= 残テキストを最終処理で渡さない設計)。
+
+                            if event_callback:
+                                # spell 入り応答ではストリーミング中の表示
+                                # (= raw text + 生の /spell 行が積み上がった
+                                # bubble) と完了後の整形済み bubble (= merged
+                                # text、 <user_only> wrap 済) で content が
+                                # 完全一致しないため、 frontend が新規 bubble
+                                # を追加してしまい 2 つ並ぶ。 ``streaming_discard``
+                                # を先に送って streaming bubble を捨ててから
+                                # ``say`` で整形済み 1 件だけを残す。
+                                event_callback({
+                                    "type": "streaming_discard",
+                                    "persona_id": getattr(persona, "persona_id", None),
+                                    "node_id": getattr(node_def, "id", "llm"),
+                                    "pulse_id": pulse_id,
+                                })
+                                _say_event_ns: Dict[str, Any] = {
+                                    "type": "say",
+                                    "content": text,
+                                    "persona_id": getattr(persona, "persona_id", None),
+                                    "pulse_id": pulse_id,
+                                }
+                                if _spell_at_ns:
+                                    _say_event_ns["activity_trace"] = list(_spell_at_ns)
+                                if _spell_msg_meta_ns:
+                                    _say_event_ns["metadata"] = _spell_msg_meta_ns
+                                event_callback(_say_event_ns)
+
+                            if pipeline_msg_id and not pipeline_finalized:
+                                pipeline_sub_seq += 1
+                                _sf_result = _finalize_speak_with_signal(
+                                    runtime, persona, pipeline_eff_bid, pipeline_msg_id, text,
+                                    pulse_id=pulse_id,
+                                    extra_metadata=_spell_msg_meta_ns if _spell_msg_meta_ns else None,
+                                    final_sub_seq=pipeline_sub_seq,
+                                    event_callback=event_callback,
+                                )
+                                # saved のときだけ「確定済み」+ 最新 id を前進。
+                                # missing / failed で立てると Beat 死亡時の救済が
+                                # 誤認して走らない (Codex #2)。
+                                if getattr(_sf_result, "status", None) == "saved":
+                                    pipeline_finalized = True
+                                    state["_last_message_id"] = pipeline_msg_id
+                                LOGGER.info(
+                                    "[sea][pipeline] Normal-stream spell+finalize: msg=%s final_seq=%d status=%s",
+                                    pipeline_msg_id, pipeline_sub_seq,
+                                    getattr(_sf_result, "status", None),
+                                )
+
+                        # state["last"] が後段の memorize ノードで SAIMemory に
+                        # 保存される。 spell が走った時、 ここで text を merged
+                        # 全文のままにすると、 ペルソナ履歴経由で記録される 1
+                        # 件目と内容が完全一致する重複レコードが SAIMemory に
+                        # 残ってしまう。 最終発言部分だけ (= continuation) に
+                        # 置き換えて、 SAIMemory には 「最終発言のみのレコード」
+                        # が単独で残るようにする (= 旧コード相当)。
+                        text = _continuation_ns
+                    else:
+                        # No spells — normal completion path
+                        # Resolve metadata_key for speak (e.g., media attachments from tool execution)
+                        _speak_metadata_key = getattr(node_def, "metadata_key", None)
+                        _speak_base_metadata = state.get(_speak_metadata_key) if _speak_metadata_key else None
+
+                        # サーバー側でストリームが切れていたら、その本文は本人が
+                        # 言い終えたものではない。**続きは打たない** — 追加の推論は
+                        # ユーザーの一押しの後ろに置く (2026-08-25 まはー裁定)。
+                        # ここでやるのは印を立てることだけで、Beat はそのまま閉じる。
+                        # 判定は完了イベントより**前**に置く — 画面は再読込を待たずに
+                        # 「続きの生成」を出せなければならないので、印を同じイベントに
+                        # 載せて渡す。設計:
+                        # docs/issues/user_utterance_path_failure_inventory.md
+                        _stream_err = state.pop("_stream_error", None)
+                        if _stream_err and text.strip():
+                            state[INTERRUPTED_METADATA_KEY] = True
+
+                        # Send completion event with reasoning and metadata
+                        completion_event: Dict[str, Any] = {
+                            "type": "streaming_complete",
+                            "persona_id": getattr(persona, "persona_id", None),
+                            "node_id": getattr(node_def, "id", "llm"),
+                            "pulse_id": state.get("_pulse_id"),
+                        }
+                        if reasoning_text:
+                            completion_event["reasoning"] = reasoning_text
+                        if _speak_base_metadata and isinstance(_speak_base_metadata, dict):
+                            completion_event["metadata"] = _speak_base_metadata
+                        if state.get(INTERRUPTED_METADATA_KEY):
+                            completion_event["interrupted"] = True
+                        # 停止された回は、この上流で既に印つきの完了を送っている
+                        # (そこから先は例外で抜けるため、ここまで届かない)。二度
+                        # 送っても害は無いが、意味の重複は残さない。
+                        if not pipeline_finalized:
+                            event_callback(completion_event)
+
+                        # Record to Building history with usage metadata (include pulse total)
+                        pulse_id = state.get("_pulse_id")
+                        msg_metadata = _build_say_metadata(
+                            state,
+                            base_metadata=_speak_base_metadata,
+                            llm_usage_metadata=llm_usage_metadata,
+                            reasoning_text=reasoning_text,
+                            reasoning_details=reasoning_details,
+                        )
+                        if state.get(INTERRUPTED_METADATA_KEY):
+                            msg_metadata[INTERRUPTED_METADATA_KEY] = True
+                        eff_bid = runtime._effective_building_id(persona, building_id)
+
+                        if pipeline_finalized:
+                            # 停止の後片付けで既に確定させた回。ここで書き足すと同じ
+                            # 本文が二度 Building に入る。下の救済経路は「下書き行を
+                            # 作れなかった」ときのためのもので、「確定済み」はそれに
+                            # 当たらない。
+                            LOGGER.info(
+                                "[sea][pipeline] already settled by cancellation cleanup "
+                                "(msg=%s) — skipping both the finalize and the fallback emit",
+                                pipeline_msg_id,
+                            )
+                        elif pipeline_msg_id:
+                            # Pipeline Streaming: placeholder を text 全文で finalize。
+                            # voice-tts は sub-speak 経由で全テキストを既に受け取って
+                            # おり、 finalize hook では ``final_voice_text=""`` で
+                            # 「stream close + wav 保存」 のみ依頼する。
+                            pipeline_sub_seq += 1
+                            _sf_result = _finalize_speak_with_signal(
+                                runtime, persona, pipeline_eff_bid, pipeline_msg_id, text,
+                                pulse_id=pulse_id,
+                                extra_metadata=msg_metadata if msg_metadata else None,
+                                final_sub_seq=pipeline_sub_seq,
+                                event_callback=event_callback,
+                            )
+                            # saved のときだけ「確定済み」+ 最新 id を前進。
+                            # missing / failed で立てると Beat 死亡時の救済
+                            # (placeholder salvage) が誤認して走らない (Codex #2)。
+                            if getattr(_sf_result, "status", None) == "saved":
+                                pipeline_finalized = True
+                                state["_last_message_id"] = pipeline_msg_id
+                            LOGGER.info(
+                                "[sea][pipeline] Normal-stream finalize: msg=%s final_seq=%d status=%s",
+                                pipeline_msg_id, pipeline_sub_seq,
+                                getattr(_sf_result, "status", None),
+                            )
+                        else:
+                            # Defensive fallback: _emit_speak_start に失敗して
+                            # placeholder を作れなかったケース。 sub-speak は出てない
+                            # ので _emit_say で 1 回 emit し直す (= 履歴を失わない)。
+                            LOGGER.warning(
+                                "[sea][pipeline] no placeholder msg_id — falling back to _emit_say",
+                            )
+                            _emit_say_and_capture(
+                                runtime, persona, eff_bid, text, state,
+                                pulse_id=pulse_id, metadata=msg_metadata,
+                                event_callback=event_callback,
+                            )
+                            beat_said = True
+                            beat_said_text = text
+
+                        if _stream_err and text.strip():
+                            LOGGER.warning(
+                                "[sea][llm] Generation was cut short by the server "
+                                "(code=%s); keeping the partial utterance with the "
+                                "interrupted mark and closing the beat",
+                                _stream_err.get("code"),
+                            )
+                            if event_callback:
+                                event_callback({
+                                    "type": "info",
+                                    "content": (
+                                        "ℹ️ メッセージの生成が途中で終了しました。"
+                                        f"({_stream_err.get('code', 504)} "
+                                        f"{_stream_err.get('message', '')})".rstrip()
+                                        + "\nここまでの発言はそのまま残ります。"
+                                    ),
+                                    "persona_id": getattr(persona, "persona_id", None),
+                                })
 
                     # Store reasoning in state for downstream speak/say nodes
-                    if reasoning_text:
-                        state["_reasoning_text"] = reasoning_text
-                    if reasoning_details is not None:
-                        state["_reasoning_details"] = reasoning_details
+                    _store_reasoning_in_state(state, reasoning_text, reasoning_details)
                 else:
                     # Non-streaming mode
+                    LOGGER.debug("[sea][llm] Calling llm_client.generate() with response_schema=%s", response_schema is not None)
                     text = llm_client.generate(
                         messages,
                         tools=[],
                         temperature=runtime._default_temperature(persona),
                         response_schema=response_schema,
-                        **runtime._get_cache_kwargs(),
+                        **runtime._get_cache_kwargs(getattr(persona, "persona_id", None)),
                     )
+                    LOGGER.debug("[sea][llm] llm_client.generate() returned: type=%s, len=%s, repr=%s", type(text).__name__, len(text) if isinstance(text, str) else "(not str)", repr(text)[:200] if isinstance(text, str) else text)
 
                     # Record usage
-                    usage = llm_client.consume_usage()
-                    llm_usage_metadata: Dict[str, Any] | None = None
-                    if usage:
-                        get_usage_tracker().record_usage(
-                            model_id=usage.model,
-                            input_tokens=usage.input_tokens,
-                            output_tokens=usage.output_tokens,
-                            cached_tokens=usage.cached_tokens,
-                            cache_write_tokens=usage.cache_write_tokens,
-                            cache_ttl=usage.cache_ttl,
-                            persona_id=getattr(persona, "persona_id", None),
-                            building_id=building_id,
-                            node_type="llm",
-                            playbook_name=playbook.name,
-                            category="persona_speak",
-                        )
-                        # Build llm_usage metadata for message
-                        from saiverse.model_configs import calculate_cost, get_model_display_name
-                        cost = calculate_cost(usage.model, usage.input_tokens, usage.output_tokens, usage.cached_tokens, usage.cache_write_tokens, cache_ttl=usage.cache_ttl)
-                        llm_usage_metadata = {
-                            "model": usage.model,
-                            "model_display_name": get_model_display_name(usage.model),
-                            "input_tokens": usage.input_tokens,
-                            "output_tokens": usage.output_tokens,
-                            "cached_tokens": usage.cached_tokens,
-                            "cache_write_tokens": usage.cache_write_tokens,
-                            "cost_usd": cost,
-                        }
-                        # Accumulate into pulse total
-                        runtime._accumulate_usage(state, usage.model, usage.input_tokens, usage.output_tokens, cost, usage.cached_tokens, usage.cache_write_tokens)
+                    llm_usage_metadata: Dict[str, Any] | None = _record_llm_usage(
+                        runtime, llm_client, persona, building_id,
+                        playbook.name, "llm", state,
+                    )
 
                     # Consume reasoning (thinking) from LLM — store as metadata
-                    reasoning_entries = llm_client.consume_reasoning()
-                    reasoning_text = "\n\n".join(
-                        e.get("text", "") for e in reasoning_entries if e.get("text")
-                    ) if reasoning_entries else ""
-                    reasoning_details = llm_client.consume_reasoning_details()
+                    # （state への格納は Spell ループ後にまとめて行う）
+                    reasoning_text, reasoning_details = _consume_reasoning(llm_client)
+
+                    # ── Spell loop (parallel execution per round) ──
+                    _bubble1_emitted_early_sync = ""
+                    if isinstance(text, str):
+                        # Normal text mode - run spell processing
+                        _bubble1_emitted_early_sync = _emit_bubble1_early(
+                            runtime=runtime,
+                            persona=persona,
+                            building_id=building_id,
+                            text=text,
+                            speak_flag=speak_flag,
+                            pulse_id=state.get("_pulse_id"),
+                            event_callback=event_callback,
+                            node_id=getattr(node_def, "id", "llm"),
+                            send_streaming_discard=False,
+                        )
+                        text, _continuation_sync, _spell_loop_count_sync = await _run_spell_loop(
+                            text=text,
+                            spell_enabled=_spell_enabled,
+                            llm_client=llm_client,
+                            runtime=runtime,
+                            persona=persona,
+                            building_id=building_id,
+                            state=state,
+                            messages=messages,
+                            playbook=playbook,
+                            event_callback=event_callback,
+                            node_def=node_def,
+                            action_text=prompt,
+                        )
+                    else:
+                        # text is dict (from structured output) - skip spell processing
+                        LOGGER.debug("[sea][llm] text is dict (structured output), skipping spell processing")
+                        _continuation_sync = text if isinstance(text, str) else ""
+                        _spell_loop_count_sync = 0
+
+                    if _spell_loop_count_sync > 0 and isinstance(text, str):
+                        # Phase 2-B-step3 (voice_tts_pipeline_streaming): text now
+                        # holds the full merged spell output (round 1 text_before
+                        # + <user_only> blocks + further rounds + final
+                        # continuation). The downstream ``if speak_flag is True``
+                        # block emits it via a single _emit_say.
+                        #
+                        # If Phase 1 already emitted text_before early, slice it
+                        # off so the downstream emit doesn't write the same prefix
+                        # twice (Phase 2-C will remove this transitional split).
+                        if _bubble1_emitted_early_sync and text.startswith(_bubble1_emitted_early_sync):
+                            text = text[len(_bubble1_emitted_early_sync):].lstrip("\n")
 
                     # If speak=true but streaming disabled, send complete text and record to Building history
                     LOGGER.info("[DEBUG] speak_flag=%s, event_callback=%s, text_len=%d",
@@ -742,30 +4612,29 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                         # Resolve metadata_key for speak (e.g., media attachments from tool execution)
                         _speak_metadata_key2 = getattr(node_def, "metadata_key", None)
                         _speak_base_metadata2 = state.get(_speak_metadata_key2) if _speak_metadata_key2 else None
-                        msg_metadata: Dict[str, Any] = {}
-                        # Merge base metadata first (e.g., media from tool execution)
-                        if _speak_base_metadata2 and isinstance(_speak_base_metadata2, dict):
-                            msg_metadata.update(_speak_base_metadata2)
-                        if llm_usage_metadata:
-                            msg_metadata["llm_usage"] = llm_usage_metadata
-                        if reasoning_text:
-                            msg_metadata["reasoning"] = reasoning_text
-                        if reasoning_details is not None:
-                            msg_metadata["reasoning_details"] = reasoning_details
                         _at_speak = state.get("_activity_trace")
-                        if _at_speak:
-                            msg_metadata["activity_trace"] = list(_at_speak)
-                        accumulator = state.get("_pulse_usage_accumulator")
-                        if accumulator:
-                            msg_metadata["llm_usage_total"] = dict(accumulator)
+                        msg_metadata = _build_say_metadata(
+                            state,
+                            base_metadata=_speak_base_metadata2,
+                            llm_usage_metadata=llm_usage_metadata,
+                            reasoning_text=reasoning_text,
+                            reasoning_details=reasoning_details,
+                        )
                         eff_bid = runtime._effective_building_id(persona, building_id)
-                        runtime._emit_say(persona, eff_bid, text, pulse_id=pulse_id, metadata=msg_metadata if msg_metadata else None)
+                        _emit_say_and_capture(
+                            runtime, persona, eff_bid, text, state,
+                            pulse_id=pulse_id, metadata=msg_metadata,
+                            event_callback=event_callback,
+                        )
+                        beat_said = True
+                        beat_said_text = text
                         if event_callback is not None:
                             LOGGER.info("[DEBUG] Sending 'say' event with content: %s", text[:100] if text else "(empty)")
                             say_event: Dict[str, Any] = {
                                 "type": "say",
                                 "content": text,
                                 "persona_id": getattr(persona, "persona_id", None),
+                                "pulse_id": pulse_id,
                             }
                             if reasoning_text:
                                 say_event["reasoning"] = reasoning_text
@@ -775,11 +4644,18 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                                 say_event["metadata"] = msg_metadata
                             event_callback(say_event)
 
+                    # streaming 経路 (≈L2413) と対称化: spell が走ったら、後段の
+                    # memorize / output_key に渡る text を continuation (plain) に
+                    # 置換する。merged 全文 (<user_only> + spellResult HTML 含む) を
+                    # そのまま SAIMemory に保存すると、Building 履歴と内容重複 + HTML
+                    # タグ混入になる (docs/issues/spell_html_leak_into_saimemory.md)。
+                    # _emit_say / say event には merged 全文 (HTML) を使い、ここで
+                    # state 行きだけを plain に戻す。
+                    if _spell_loop_count_sync > 0 and isinstance(_continuation_sync, str):
+                        text = _continuation_sync
+
                     # Store remaining reasoning for say/speak node (non-speak path)
-                    if reasoning_text:
-                        state["_reasoning_text"] = reasoning_text
-                    if reasoning_details is not None:
-                        state["_reasoning_details"] = reasoning_details
+                    _store_reasoning_in_state(state, reasoning_text, reasoning_details)
 
                 runtime._dump_llm_io(playbook.name, getattr(node_def, "id", ""), persona, messages, text)
                 schema_consumed = runtime._process_structured_output(node_def, text, state)
@@ -795,8 +4671,9 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                 # If output_key is specified but no response_schema, store the raw text
                 if not schema_consumed:
                     output_key = getattr(node_def, "output_key", None)
-                    if output_key:
-                        state[output_key] = text
+                    if output_key and set_playbook_var(
+                        state, output_key, text, where=f"node '{node_id}' output_key",
+                    ):
                         LOGGER.info("[sea][llm] Stored plain text to state['%s'] = %s", output_key, text)
 
                 # Process output_keys even in normal mode (no tools)
@@ -804,195 +4681,85 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                 if output_keys_spec:
                     for mapping in output_keys_spec:
                         if "text" in mapping:
-                            text_key = mapping["text"]
+                            text_key = playbook_write_key(
+                                mapping["text"], where=f"node '{node_id}' output_keys.text",
+                            )
+                            if text_key is None:
+                                break
                             state[text_key] = text
                             LOGGER.info("[sea][llm] (normal mode) Stored state['%s'] = %s", text_key, text)
                             state["has_speak_content"] = True
                             break
-        except LLMError:
+        except LLMError as exc:
             # Propagate LLM errors to the caller for proper handling
+            _settle_placeholder_on_beat_death(exc)
+            _backfill_memory_on_beat_death(exc)
             raise
         except Exception as exc:
+            _settle_placeholder_on_beat_death(exc)
+            _backfill_memory_on_beat_death(exc)
             LOGGER.error("SEA LangGraph LLM failed: %s: %s", type(exc).__name__, exc)
             # Convert to LLMError so it propagates to the frontend
             raise LLMError(
                 f"LLM node failed: {type(exc).__name__}: {exc}",
                 original_error=exc,
             ) from exc
-        state["last"] = text
-        # Structured output may return a dict; serialise to JSON string
-        # so that subsequent LLM calls receive valid message content.
-        _msg_content = json.dumps(text, ensure_ascii=False) if isinstance(text, dict) else text
-
-        # When tool call detected, create proper function-calling assistant message
-        if state.get("tool_called") and state.get("_last_tool_call_id"):
-            _tc_speak = _msg_content if state.get("has_speak_content") else ""
-            _tc_entry: Dict[str, Any] = {
-                "id": state["_last_tool_call_id"],
-                "type": "function",
-                "function": {
-                    "name": state.get("_last_tool_name", ""),
-                    "arguments": state.get("_last_tool_args_json", "{}"),
-                },
-            }
-            # Gemini thinking models require thought_signature echoed back
-            _thought_sig = state.get("_last_thought_signature")
-            if _thought_sig:
-                _tc_entry["thought_signature"] = _thought_sig
-            _assistant_msg: Dict[str, Any] = {
-                "role": "assistant",
-                "content": _tc_speak,
-                "tool_calls": [_tc_entry],
-            }
-            state["_messages"] = messages + [_assistant_msg]
-            LOGGER.info("[sea][llm] Appended assistant message with tool_calls (id=%s, tool=%s)",
-                       state["_last_tool_call_id"], state.get("_last_tool_name"))
-        else:
-            state["_messages"] = messages + [{"role": "assistant", "content": _msg_content}]
-
-        # Append LLM interaction to PulseContext (replaces _intermediate_msgs)
-        _pulse_ctx = state.get("_pulse_context")
-        if _pulse_ctx:
-            from sea.pulse_context import PulseLogEntry
-            # Record the prompt (user message)
-            if prompt:
-                _pulse_ctx.append(PulseLogEntry(
-                    role="user", content=prompt,
-                    node_id=node_id, playbook_name=playbook.name))
-            # Record the assistant response (with optional tool_calls)
-            _tc_list = None
-            if state.get("tool_called") and state.get("_last_tool_call_id"):
-                _tc_entry_pc: Dict[str, Any] = {
-                    "id": state["_last_tool_call_id"],
-                    "type": "function",
-                    "function": {
-                        "name": state.get("_last_tool_name", ""),
-                        "arguments": state.get("_last_tool_args_json", "{}"),
-                    },
-                }
-                _ts_pc = state.get("_last_thought_signature")
-                if _ts_pc:
-                    _tc_entry_pc["thought_signature"] = _ts_pc
-                _tc_list = [_tc_entry_pc]
-            _pulse_ctx.append(PulseLogEntry(
-                role="assistant",
-                content=_msg_content if state.get("has_speak_content") else "",
-                node_id=node_id, playbook_name=playbook.name,
-                tool_calls=_tc_list,
-                important=getattr(node_def, "important", False) or False))
-
-        # Trace: log prompt→response (truncation handled by log_sea_trace)
-        _prompt_str = prompt or "(no prompt)"
-        if schema_consumed:
-            _output_key = getattr(node_def, "output_key", None) or node_id
-            _out_val = state.get(_output_key, text)
-            if isinstance(_out_val, dict):
-                import json as _json
-                _resp_str = _json.dumps(_out_val, ensure_ascii=False, default=str)
-            else:
-                _resp_str = str(_out_val)
-            log_sea_trace(playbook.name, node_id, "LLM", f"prompt=\"{_prompt_str}\" → {_resp_str}")
-        else:
-            _resp_str = str(text) if text else "(empty)"
-            log_sea_trace(playbook.name, node_id, "LLM", f"prompt=\"{_prompt_str}\" → \"{_resp_str}\"")
-
-        # Handle memorize option - save prompt and response to SAIMemory
-        memorize_config = getattr(node_def, "memorize", None)
-        LOGGER.debug("[_lg_llm_node] node=%s memorize_config=%s type=%s schema_consumed=%s",
-                   getattr(node_def, "id", "?"), memorize_config, type(memorize_config), schema_consumed)
-        if memorize_config:
-            pulse_id = state.get("_pulse_id")
-            # Parse memorize config - can be True or {"tags": [...]}
-            if isinstance(memorize_config, dict):
-                memorize_tags = memorize_config.get("tags", [])
-            else:
-                memorize_tags = []
-
-            # Save prompt (user role) - use the pre-expanded prompt variable
-            _memorize_ok = True
-            if prompt:
-                if not runtime._store_memory(
-                    persona,
-                    prompt,
-                    role="user",
-                    tags=list(memorize_tags),
-                    pulse_id=pulse_id,
-                    playbook_name=playbook.name,
-                ):
-                    _memorize_ok = False
-                else:
-                    LOGGER.debug("[sea][llm] Memorized prompt (user): %s", prompt)
-
-            # Save response (assistant role)
-            if text and text != "(error in llm node)":
-                # If structured output was consumed, format as JSON string for memory
-                content_to_save = text
-                if schema_consumed and isinstance(text, dict):
-                    content_to_save = json.dumps(text, ensure_ascii=False, indent=2)
-                    LOGGER.debug("[sea][llm] Structured output formatted as JSON for memory")
-
-                # Build metadata for memorize (reasoning text + reasoning_details for multi-turn)
-                _memorize_metadata: Dict[str, Any] = {}
-                _mem_reasoning = state.get("_reasoning_text", "")
-                if _mem_reasoning:
-                    _memorize_metadata["reasoning"] = _mem_reasoning
-                _mem_rd = state.get("_reasoning_details")
-                if _mem_rd is not None:
-                    _memorize_metadata["reasoning_details"] = _mem_rd
-
-                if not runtime._store_memory(
-                    persona,
-                    content_to_save,
-                    role="assistant",
-                    tags=list(memorize_tags),
-                    pulse_id=pulse_id,
-                    metadata=_memorize_metadata if _memorize_metadata else None,
-                    playbook_name=playbook.name,
-                ):
-                    _memorize_ok = False
-                else:
-                    LOGGER.debug("[sea][llm] Memorized response (assistant): %s", str(content_to_save))
-
-            if not _memorize_ok and event_callback:
-                event_callback({"type": "warning", "content": "記憶の保存に失敗しました。会話内容が記録されていない可能性があります。", "warning_code": "memorize_failed", "display": "toast"})
-
-            # Activity trace: record LLM memorize
-            if not playbook.name.startswith(("meta_", "sub_")):
-                pb_display = playbook.display_name or playbook.name
-                node_label = getattr(node_def, "label", None) or node_id
-                _at = state.get("_activity_trace")
-                if isinstance(_at, list):
-                    _at.append({"action": "memorize", "name": node_label, "playbook": pb_display})
-                if event_callback:
-                    event_callback({
-                        "type": "activity", "action": "memorize", "name": node_label,
-                        "playbook": pb_display, "status": "completed",
-                        "persona_id": getattr(persona, "persona_id", None),
-                        "persona_name": getattr(persona, "persona_name", None),
-                    })
-
-        # Important flag: dual-write to messages (long-term memory) if not already memorized
-        _is_important = getattr(node_def, "important", False)
-        if _is_important and not memorize_config and text and text != "(error in llm node)":
-            pulse_id = state.get("_pulse_id")
-            content_to_save = text
-            if schema_consumed and isinstance(text, dict):
-                content_to_save = json.dumps(text, ensure_ascii=False, indent=2)
-            if not runtime._store_memory(
-                persona, content_to_save,
-                role="assistant",
-                tags=["conversation"],
-                pulse_id=pulse_id,
-                playbook_name=playbook.name,
-            ):
-                LOGGER.warning("[sea][llm] Important dual-write failed for node %s", node_id)
-
-        # Debug: log speak_content at end of LLM node
-        speak_content = state.get("speak_content", "")
-        LOGGER.info("[DEBUG] LLM node end: state['speak_content'] = '%s'", speak_content)
+        except asyncio.CancelledError as exc:
+            # タスクの取り消し (サーバー停止等) は Exception では捕まらないだけで、
+            # 下書き行を孤児にする力は同じ。確定だけ済ませてそのまま伝播させる。
+            # BaseException 全部 (KeyboardInterrupt / SystemExit / GeneratorExit)
+            # まで広げない — インタープリタ終了の道筋に DB 書き込みの副作用を
+            # 足さない (2026-08-27 Codex 指摘で絞った)。
+            _settle_placeholder_on_beat_death(exc)
+            _backfill_memory_on_beat_death(exc)
+            raise
+        # ── ④確定: 生成し終えた Beat を記録先へ配る ──
+        _beat = BeatExecution.from_node_locals(
+            persona=persona,
+            node_def=node_def,
+            node_id=node_id,
+            playbook=playbook,
+            state=state,
+            event_callback=event_callback,
+            messages=messages,
+            prompt=prompt,
+            continuation=text,
+            schema_consumed=schema_consumed,
+        )
+        try:
+            _finalize_beat(runtime, _beat)
+        except (Exception, asyncio.CancelledError) as exc:
+            # ここは上の except 節の外 — `_finalize_beat` の内部 (memorize の
+            # 手前の組み立て) で死ぬと、建物には確定済みなのに記憶が書かれない
+            # 「確定後の隙間」がそのまま開く。memorize 済みなら印
+            # (`_beat_memorized`) が立っていて補填は黙るので、二重書きはない。
+            _backfill_memory_on_beat_death(exc)
+            raise
 
         # Note: output_mapping in node definition handles state variable assignment
         # No special handling needed here anymore
         return state
 
-    return node
+    # Wrap node in persona_context so LLM clients can read the active
+    # persona via tools.context.get_active_persona_id().
+    # Without this wrap, only spell/tool execution paths set the context
+    # (see _execute_handy_tool_inline / _run_spell_tool_async), and the
+    # LLM call itself runs with persona_id == None — which causes e.g.
+    # LlamaCachedClient to collapse every persona's slot cache into a
+    # single "unknown__<model>.bin" file.
+    async def node_with_persona_context(state: dict):
+        from pathlib import Path
+        persona_id = getattr(persona, "persona_id", None)
+        if not persona_id:
+            return await node(state)
+        persona_log_path = getattr(persona, "persona_log_path", None)
+        persona_dir = persona_log_path.parent if persona_log_path else Path.cwd()
+        manager_ref = getattr(persona, "manager_ref", None)
+        with persona_context(
+            persona_id, persona_dir, manager_ref,
+            playbook_name=playbook.name,
+            auto_mode=bool(state.get("_auto_mode", False)),
+        ):
+            return await node(state)
+
+    return node_with_persona_context

@@ -1,0 +1,12 @@
+{
+  "id": "science_board",
+  "name": "科学の掲示板",
+  "description": "科学・宇宙の話題が届く掲示板",
+  "fixture_name": "科学の掲示板",
+  "fixture_description": "科学と宇宙の新着トピックが貼り出される掲示板。気になった話題はリンク先で詳しく読める。",
+  "feeds": [
+    {"url": "https://scienceportal.jst.go.jp/feed/rss.xml", "title": "サイエンスポータル"},
+    {"url": "https://www.jaxa.jp/rss/press_j.rdf", "title": "JAXAプレスリリース"},
+    {"url": "https://sorae.info/feed", "title": "sorae"}
+  ]
+}

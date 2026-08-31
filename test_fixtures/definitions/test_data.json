@@ -10,7 +10,7 @@
   },
   "city": {
     "CITYID": 1,
-    "CITYNAME": "test_city",
+    "CITY_SLUG": "test_city",
     "DESCRIPTION": "Test city for automated testing",
     "TIMEZONE": "Asia/Tokyo",
     "UI_PORT": 18000,
@@ -45,7 +45,7 @@
       "AINAME": "Test Persona A",
       "DESCRIPTION": "Test persona for automated testing",
       "SYSTEMPROMPT": "You are a test persona named Test Persona A. You are helpful and respond concisely for testing purposes.",
-      "INTERACTION_MODE": "auto",
+      "AUTONOMY_ENABLED": true,
       "DEFAULT_MODEL": "gemini-2.5-flash-preview-09-2025",
       "LIGHTWEIGHT_MODEL": "gemini-3.1-flash-lite-preview",
       "start_building": "test_lobby"
@@ -55,19 +55,19 @@
       "AINAME": "Test Persona B",
       "DESCRIPTION": "Second test persona",
       "SYSTEMPROMPT": "You are a test persona named Test Persona B. You assist with testing.",
-      "INTERACTION_MODE": "manual",
+      "AUTONOMY_ENABLED": false,
       "DEFAULT_MODEL": "gemini-2.5-flash-preview-09-2025",
       "LIGHTWEIGHT_MODEL": "gemini-3.1-flash-lite-preview",
       "start_building": "test_room_a"
     }
   ],
   "playbooks": [
-    "basic_chat",
-    "meta_user",
-    "meta_auto",
-    "sub_router_user",
+    "track_user_conversation",
     "sub_speak",
     "meta_simple_speak",
-    "meta_exec_speak"
+    "judgment_day_open",
+    "judgment_post_session",
+    "judgment_on_event",
+    "judgment_day_close"
   ]
 }

@@ -1,32 +1,36 @@
-"""Arasuji generation logic using LLM."""
+"""Arasuji (Chronicle) 一次あらすじ生成の共有部品。
+
+W4 (体験の構造 工程(2)) で旧 20 件固定バッチ経路 (ArasujiGenerator /
+maybe_consolidate / gap-fill / dismantle) は撤去された — 生成経路の後継は
+sai_memory/arasuji/alignment.py (整列計画) + executor.py (チャンク実行) +
+bands.py (列のあふれ束ね)。
+
+本モジュールに残るのは:
+
+- :func:`generate_level1_arasuji` — 単一エントリの再生成
+  (UI の regenerate → scripts/arasuji/build_arasuji_core.regenerate_entry_from_messages)
+  が使う一次あらすじ生成の一回分。
+- プロンプト整形・usage 記録のユーティリティ (_format_* / _record_llm_usage)
+  — executor / bands / note_extractor / note_organizer と共有。
+"""
 
 from __future__ import annotations
 
-import json
 import logging
 import os
+import re
 import sqlite3
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import List, Optional, Sequence
 
-from sai_memory.memory.storage import Message
+from sai_memory.memory.storage import MECHANISM_TAGS, Message
 from sai_memory.arasuji.storage import (
     ArasujiEntry,
-    add_to_parent_source_ids,
     create_entry,
-    dismantle_entry,
-    find_covering_entry,
-    get_entry,
-    get_unconsolidated_entries,
     get_leaf_entries_by_level,
     get_max_level,
-    mark_consolidated,
-)
-from sai_memory.arasuji.context import (
-    get_episode_context,
-    format_episode_context,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -64,27 +68,215 @@ def _format_timestamp(ts: Optional[int]) -> str:
     return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
 
 
-def _format_messages_for_prompt(messages: List[Message], *, include_timestamp: bool = True) -> str:
-    """Format messages for the arasuji prompt.
+# ---------------------------------------------------------------------------
+# 機構名義の行の長さ規則 (2026-08-29 まはー裁定)
+#
+# 本人の提示に立った行はすべて編纂の材料に入る。ただし機構名義の行
+# (MECHANISM_TAGS = handy_tool / spell / event_message) と知覚バッチは、
+# 本文が閾値を超えたら**材料を組む時だけ**決定論の一行に縮む — DB の行
+# (保存) は全文のまま。出力 (digest 本文) への機械的な付記は行わない:
+# あらすじ本文は次のレベルの畳みで LLM の手本になるため、機構の定型ブロック
+# を埋め込むと LLM がその形式を模倣して偽の機械記録を書き始める危険がある。
+# ---------------------------------------------------------------------------
+
+#: 機構名義の行をそのまま材料に入れる本文の上限 (字数)。
+#: まはーが実機のチャット画面 1 画面分を実測した値。調整パラメータ。
+MECHANISM_TEXT_MAX_CHARS = 500
+
+#: 決定論の一行で、名前が取れなかったときに残す先頭行の冒頭字数。
+_CONDENSE_HEAD_CHARS = 40
+
+#: 先頭行の ``[Spell Result: ...]`` 等の機構プレフィックスの抽出。
+_CONDENSE_NAME_RE = re.compile(r"^\[([^\[\]\n]{1,120})\]")
+
+
+def _strip_system_wrap(text: str) -> str:
+    """``<system>…</system>`` 包み (システム通知の確立形式) を剥がす。"""
+    out = (text or "").strip()
+    if out.startswith("<system>"):
+        out = out[len("<system>"):]
+    if out.endswith("</system>"):
+        out = out[: -len("</system>")]
+    return out.strip()
+
+
+def condense_mechanism_text(text: str) -> str:
+    """閾値超えの機構名義テキストを決定論の一行に縮める (LLM 不使用)。
+
+    名前は本文の ``[Spell Result: ◯◯]`` 形のプレフィックスから機械抽出し、
+    取れなければ先頭行の冒頭 + 字数に落とす。字数は元の全文の長さ。
+    """
+    total = len(text or "")
+    first_line = next(
+        (ln.strip() for ln in _strip_system_wrap(text).splitlines() if ln.strip()),
+        "",
+    )
+    m = _CONDENSE_NAME_RE.match(first_line)
+    if m:
+        return f"[{m.group(1)}] を受け取った ({total:,} 字)"
+    head = first_line[:_CONDENSE_HEAD_CHARS]
+    ellipsis = "…" if len(first_line) > _CONDENSE_HEAD_CHARS else ""
+    return f"{head}{ellipsis} ({total:,} 字)"
+
+
+def _message_tags(msg: Message) -> tuple:
+    meta = getattr(msg, "metadata", None)
+    tags = meta.get("tags") if isinstance(meta, dict) else None
+    return tuple(tags) if isinstance(tags, (list, tuple)) else ()
+
+
+def is_mechanism_message(msg: Message) -> bool:
+    """機構名義の行か (tags に MECHANISM_TAGS のいずれかを持つか)。
+
+    判定はタグのみ — role では判定しない (システム通知は user role で
+    書かれるため)。
+    """
+    return any(t in MECHANISM_TAGS for t in _message_tags(msg))
+
+
+def material_text_for(content: str, tags: Sequence[str]) -> str:
+    """本文とタグだけから材料テキストを決める、長さ規則の純テキスト形。
+
+    Message オブジェクトを持たない呼び出し側 (退場計画 sea/eviction_plan.py の
+    提示 payload) と :func:`material_text` が**同じ一枚の規則**を共有するための
+    一点 — 閾値や縮め方をここ以外に二重実装しない (2026-08-29 まはー裁定:
+    U 判定の物差しは材料字数)。
+    """
+    content = content or ""
+    if (
+        any(t in MECHANISM_TAGS for t in tags)
+        and len(content) > MECHANISM_TEXT_MAX_CHARS
+    ):
+        return condense_mechanism_text(content)
+    return content
+
+
+def material_len(content: str, tags: Sequence[str]) -> int:
+    """:func:`material_text_for` の字数形 (payload 側の字数勘定用)。"""
+    return len(material_text_for(content, tags))
+
+
+def material_text(msg: Message) -> str:
+    """メッセージ 1 行の材料テキスト (長さ規則の適用点)。
+
+    機構名義の行で閾値超えなら決定論の一行。それ以外は本文そのまま。
+    """
+    return material_text_for(msg.content or "", _message_tags(msg))
+
+
+def material_chars(msg: Message) -> int:
+    """材料としての字数 (チャンクの字数勘定用)。
+
+    整列計画 (alignment) の U 計算はこれで数える — 勘定と材料の実体が
+    ズレると発火閾値が狂うため (材料が一行に縮む行を全文の字数で数えると、
+    LLM が実際に受け取る量よりはるかに早くチャンクが閉じる)。
+    """
+    return len(material_text(msg))
+
+
+def _is_recall_text(text: str) -> bool:
+    """入室時の想起の再提示か (本文が ``[想起:`` で始まる)。"""
+    s = _strip_system_wrap(text)
+    return s.startswith("[想起:")
+
+
+#: 材料の種別ラベル (プロンプトに出す表記)。
+_LABEL_RECALL = "【想起 (過去の再提示)】"
+_LABEL_SPELL = "【スペル結果】"
+_LABEL_NOTICE = "【通知】"
+_LABEL_PERCEPTION = "【知覚】"
+
+
+def _message_kind_label(msg: Message) -> str:
+    """材料の種別ラベル (arasuji_levels.md §3-4 — 材料には種別を明示する)。
+
+    - 作業セッションのダイジェスト行 (tag 'session_digest' =
+      sea.work_session.DIGEST_TAG。sai_memory は sea に依存できないため
+      リテラル) は「既に要約されたまとめ」であることを LLM に明示する —
+      生の会話と同じ扱いで再展開されたり、発言として引用されたりしないため。
+    - 機構名義の行 (2026-08-29 裁定で編纂材料に入った): スペル・ツール結果は
+      【スペル結果】、システム通知は【通知】。本文が ``[想起:`` で始まる行は
+      過去の再提示なので【想起 (過去の再提示)】が優先。
+    """
+    tags = _message_tags(msg)
+    if "session_digest" in tags:
+        return " [作業のまとめ]"
+    if _is_recall_text(msg.content or ""):
+        return f" {_LABEL_RECALL}"
+    if "spell" in tags or "handy_tool" in tags:
+        return f" {_LABEL_SPELL}"
+    if "event_message" in tags:
+        return f" {_LABEL_NOTICE}"
+    return ""
+
+
+def has_recall_material(
+    messages: List[Message],
+    extra_items: Optional[List[dict]] = None,
+) -> bool:
+    """材料に【想起 (過去の再提示)】ラベルの項目が含まれるか (プロンプト注記用)。"""
+    for msg in messages:
+        if _is_recall_text(msg.content or ""):
+            return True
+    for item in extra_items or []:
+        if _is_recall_text(str(item.get("text") or "")):
+            return True
+    return False
+
+
+#: 想起が材料に混ざるときにプロンプトへ足す一文
+#: (一次あらすじの両生成経路 — executor._build_batch_prompt と
+#: generate_level1_arasuji — で共通)。
+RECALL_PROMPT_NOTE = (
+    "- 【想起 (過去の再提示)】と印の付いた項目は、過去の出来事の再提示です。"
+    "この期間に新しく起きた出来事として語らないでください"
+)
+
+
+def _format_messages_for_prompt(
+    messages: List[Message],
+    *,
+    include_timestamp: bool = True,
+    extra_items: Optional[List[dict]] = None,
+) -> str:
+    """Format messages (+ 知覚バッチ等の追加材料) for the arasuji prompt.
 
     Args:
-        messages: Messages to format
+        messages: Messages to format (時系列順)
         include_timestamp: If False, omit timestamps from output
+        extra_items: メッセージ行ではない材料 (知覚の消費バッチ等)。
+            ``{"at": epoch, "text": str}`` の list。時刻順の正しい位置に
+            差し込む (同秒はメッセージが先 — 消費は書き込みの後に起きた事実)。
+            本文が ``[想起:`` で始まる項目は【想起 (過去の再提示)】、それ以外は
+            【知覚】とラベルし、長さ規則 (MECHANISM_TEXT_MAX_CHARS) を適用する。
     """
-    lines: List[str] = []
-    for msg in messages:
+    entries: List[tuple] = []  # (at, tie, seq, line)
+    for seq, msg in enumerate(messages):
         role = msg.role
         if role == "model":
             role = "assistant"
-        content = (msg.content or "").strip()
+        content = material_text(msg).strip()
         if not content:
             continue
-        if include_timestamp:
-            ts_str = _format_timestamp(msg.created_at)
-            lines.append(f"[{ts_str}] [{role}]: {content}")
-        else:
-            lines.append(f"[{role}]: {content}")
-    return "\n\n".join(lines)
+        kind = _message_kind_label(msg)
+        prefix = (
+            f"[{_format_timestamp(msg.created_at)}] " if include_timestamp else ""
+        )
+        entries.append(
+            (msg.created_at or 0, 0, seq, f"{prefix}[{role}]{kind}: {content}")
+        )
+    for seq, item in enumerate(extra_items or []):
+        text = str(item.get("text") or "").strip()
+        if not text:
+            continue
+        label = _LABEL_RECALL if _is_recall_text(text) else _LABEL_PERCEPTION
+        if len(text) > MECHANISM_TEXT_MAX_CHARS:
+            text = condense_mechanism_text(text)
+        at = int(item.get("at") or 0)
+        prefix = f"[{_format_timestamp(at)}] " if include_timestamp else ""
+        entries.append((at, 1, seq, f"{prefix}{label}: {text}"))
+    entries.sort(key=lambda e: (e[0], e[1], e[2]))
+    return "\n\n".join(e[3] for e in entries)
 
 
 def _format_entries_for_prompt(entries: List[ArasujiEntry], *, include_timestamp: bool = True) -> str:
@@ -139,6 +331,9 @@ def generate_level1_arasuji(
     memopedia_context: Optional[str] = None,
     debug_log_path: Optional[Path] = None,
     persona_id: Optional[str] = None,
+    thread_id: Optional[str] = None,
+    extra_items: Optional[List[dict]] = None,
+    db_lock=None,
 ) -> Optional[ArasujiEntry]:
     """Generate a level-1 arasuji from messages.
 
@@ -149,10 +344,21 @@ def generate_level1_arasuji(
         dry_run: If True, don't save to database
         include_timestamp: If False, omit timestamps from prompt (useful when dates are unreliable)
         memopedia_context: Optional semantic memory context (page titles, summaries, keywords)
+        extra_items: メッセージ行ではない材料 (知覚の消費バッチ等、
+            ``{"at", "text"}`` の list)。再生成の付記継承が旧 entry の
+            バッチを渡す (_format_messages_for_prompt 参照)。
+        db_lock: SAIMemoryAdapter の ``_db_lock`` (Codex 七巡 K1)。``conn`` が
+            adapter と共有のとき、文脈の読み取りと保存 (create/commit) を錠の
+            内側で行う — ロック外の commit は他所の開いたトランザクションを
+            途中で確定させる (memopedia_writers_bypass_adapter_lock と同族)。
+            LLM 呼び出しは錠の外のまま。None = 従来どおり (専用 conn の
+            CLI / API 再生成ルート)。
 
     Returns:
         Created ArasujiEntry or None on failure
     """
+    from contextlib import nullcontext
+
     if not messages:
         return None
 
@@ -164,21 +370,23 @@ def generate_level1_arasuji(
     # This ensures we only see past Chronicles, not future ones during regeneration
     if start_time and end_time:
         from sai_memory.arasuji.context import get_episode_context_for_timerange
-        context = get_episode_context_for_timerange(
-            conn, 
-            start_time=start_time, 
-            end_time=end_time,
-            max_entries=20
-        )
+        with (db_lock or nullcontext()):
+            context = get_episode_context_for_timerange(
+                conn,
+                start_time=start_time,
+                end_time=end_time,
+                max_entries=20
+            )
     else:
         context = ""
 
-    # Format messages
-    conversation = _format_messages_for_prompt(messages, include_timestamp=include_timestamp)
+    # Format messages (+ 追加材料)
+    conversation = _format_messages_for_prompt(
+        messages, include_timestamp=include_timestamp, extra_items=extra_items,
+    )
     if not conversation.strip():
         return None
 
-    # Build prompt
     prompt_parts = [
         "あなたは記憶の記録者です。以下の会話から、出来事のあらすじを書いてください。",
         "",
@@ -208,6 +416,10 @@ def generate_level1_arasuji(
         "- 固有名詞や重要な詳細は保持する",
         "- 感情や雰囲気も含める",
         "- 「〜について話した」のような抽象的な記述は避け、具体的に書く",
+    ])
+    if has_recall_material(messages, extra_items):
+        prompt_parts.append(RECALL_PROMPT_NOTE)
+    prompt_parts.extend([
         "- **日時情報（【2025-01-07 23:56 ~】など）は書かないでください**（自動で付与されます）",
         "- **「あらすじ」などの見出しは書かないでください**（本文のみ出力）",
         "",
@@ -276,27 +488,44 @@ def generate_level1_arasuji(
     max_db_retries = 3
     for attempt in range(max_db_retries):
         try:
-            entry = create_entry(
-                conn,
-                level=1,
-                content=content,
-                source_ids=source_ids,
-                start_time=start_time,
-                end_time=end_time,
-                source_count=len(messages),
-                message_count=len(messages),
-            )
-            LOGGER.info(f"Created level-1 arasuji: {content}")
+            # 保存は錠の内側 (K1)。リトライの sleep は錠の外 (下) — 錠を
+            # 持ったまま待たない。
+            with (db_lock or nullcontext()):
+                entry = create_entry(
+                    conn,
+                    level=1,
+                    content=content,
+                    source_ids=source_ids,
+                    start_time=start_time,
+                    end_time=end_time,
+                    source_count=len(messages),
+                    message_count=len(messages),
+                    thread_id=thread_id,
+                    # 被覆字数 (材料としての字数 = 圧縮後) — executor 経路と同じ
+                    # 勘定。ここで刻まないと bands.backfill_coverage が生ログの
+                    # 素の字数で埋め、長さ規則 (material_chars) と食い違う。
+                    # 知覚バッチ (extra_items) は executor 経路の coverage_chars
+                    # も勘定に入れていないので、ここでも入れない (一貫性優先)。
+                    extra_metadata={
+                        "coverage_chars": sum(
+                            material_chars(m) for m in messages
+                        ),
+                    },
+                )
+            LOGGER.info("Created level-1 arasuji: content=%s", content[:60])
             return entry
         except Exception as e:
             LOGGER.warning(
                 "DB save failed for level-1 arasuji (attempt %d/%d): %s",
                 attempt + 1, max_db_retries, e,
             )
-            try:
-                conn.rollback()
-            except Exception:
-                pass
+            # rollback も錠の内側 (Codex 八巡) — 錠外の rollback は他所の開いた
+            # トランザクションを巻き戻しうる。錠の外に残すのは sleep だけ。
+            with (db_lock or nullcontext()):
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
             if attempt < max_db_retries - 1:
                 time.sleep(2 ** attempt)
 
@@ -304,876 +533,3 @@ def generate_level1_arasuji(
     return None
 
 
-def generate_consolidated_arasuji(
-    client,
-    conn: sqlite3.Connection,
-    entries: List[ArasujiEntry],
-    target_level: int,
-    *,
-    dry_run: bool = False,
-    include_timestamp: bool = True,
-    persona_id: Optional[str] = None,
-) -> Optional[ArasujiEntry]:
-    """Generate a consolidated arasuji from lower-level entries.
-
-    Args:
-        client: LLM client with generate() method
-        conn: Database connection
-        entries: Entries to consolidate (should all be at target_level - 1)
-        target_level: The level of the new consolidated arasuji
-        dry_run: If True, don't save to database
-
-    Returns:
-        Created ArasujiEntry or None on failure
-    """
-    if not entries:
-        return None
-
-    # Validate all entries are at the correct level
-    expected_level = target_level - 1
-    for entry in entries:
-        if entry.level != expected_level:
-            LOGGER.error(f"Entry {entry.id} is at level {entry.level}, expected {expected_level}")
-            return None
-
-    # Calculate time range from entries for temporal isolation
-    start_time = min(e.start_time for e in entries if e.start_time) if any(e.start_time for e in entries) else None
-    end_time = max(e.end_time for e in entries if e.end_time) if any(e.end_time for e in entries) else None
-
-    # Get context from BEFORE this time range (temporal isolation)
-    # Uses same hierarchical algorithm as level-1 generation
-    if start_time and end_time:
-        from sai_memory.arasuji.context import get_episode_context_for_timerange
-        context = get_episode_context_for_timerange(
-            conn,
-            start_time=start_time,
-            end_time=end_time,
-            max_entries=10
-        )
-    else:
-        context = ""
-
-    # Format entries
-    entries_text = _format_entries_for_prompt(entries, include_timestamp=include_timestamp)
-
-    # Build prompt
-    level_desc = "あらすじ" + "のあらすじ" * (target_level - 1)
-    prompt_parts = [
-        f"以下の{len(entries)}個のあらすじを統合し、「{level_desc}」としてまとめてください。",
-        "",
-    ]
-
-    if context:
-        prompt_parts.extend([
-            "## さらに前の出来事（参考）",
-            context,
-            "",
-        ])
-
-    prompt_parts.extend([
-        "## 統合対象のあらすじ",
-        entries_text,
-        "",
-        "## 指示",
-        "- 5〜8文程度で、全体の流れを俯瞰できるようにまとめる",
-        "- 重要な転換点や印象的なエピソードを保持する",
-        "- 個々の詳細より「どんな時期だったか」を重視する",
-        "- 時系列順に書く",
-        "",
-        "統合されたあらすじを日本語で書いてください。",
-    ])
-
-    prompt = "\n".join(prompt_parts)
-
-    # LLM call (no retry here; provider handles retry internally)
-    try:
-        response = client.generate(
-            messages=[{"role": "user", "content": prompt}],
-            tools=[],
-        )
-        _record_llm_usage(client, persona_id, f"chronicle_level{target_level}")
-    except Exception as e:
-        LOGGER.error(f"LLM call failed for level-{target_level} arasuji: {e}")
-        from llm_clients.exceptions import LLMError
-        if isinstance(e, LLMError):
-            # Attach consolidation context so frontend can show which entries were involved
-            e.user_message = (
-                f"レベル{target_level}統合の処理中: {e.user_message}"
-            )
-            e.batch_meta = {
-                "source_entry_ids": [e_src.id for e_src in entries],
-                "source_level": expected_level,
-                "target_level": target_level,
-                "start_time": start_time,
-                "end_time": end_time,
-            }
-            raise
-        return None
-
-    if not response or not response.strip():
-        LOGGER.warning(f"Empty response from LLM for level-{target_level} arasuji")
-        return None
-
-    content = response.strip()
-
-    # Calculate aggregated values
-    source_ids = [e.id for e in entries]
-    start_time = min(e.start_time for e in entries if e.start_time) if any(e.start_time for e in entries) else None
-    end_time = max(e.end_time for e in entries if e.end_time) if any(e.end_time for e in entries) else None
-    total_messages = sum(e.message_count for e in entries)
-
-    if dry_run:
-        LOGGER.info(f"[DRY RUN] Would create level-{target_level} arasuji: {content}")
-        LOGGER.info(f"[DRY RUN] Would mark {len(entries)} entries as consolidated")
-        return ArasujiEntry(
-            id="dry-run",
-            level=target_level,
-            content=content,
-            source_ids=source_ids,
-            start_time=start_time,
-            end_time=end_time,
-            source_count=len(entries),
-            message_count=total_messages,
-            parent_id=None,
-            is_consolidated=False,
-            created_at=0,
-        )
-
-    # --- DB save with retry (LLM result is already obtained, no re-call) ---
-    max_db_retries = 3
-    entry = None
-    for attempt in range(max_db_retries):
-        try:
-            entry = create_entry(
-                conn,
-                level=target_level,
-                content=content,
-                source_ids=source_ids,
-                start_time=start_time,
-                end_time=end_time,
-                source_count=len(entries),
-                message_count=total_messages,
-            )
-            break
-        except Exception as e:
-            LOGGER.warning(
-                "DB save failed for level-%d arasuji (attempt %d/%d): %s",
-                target_level, attempt + 1, max_db_retries, e,
-            )
-            try:
-                conn.rollback()
-            except Exception:
-                pass
-            if attempt < max_db_retries - 1:
-                time.sleep(2 ** attempt)
-
-    if not entry:
-        LOGGER.error(
-            "DB save failed after %d attempts for level-%d arasuji",
-            max_db_retries, target_level,
-        )
-        return None
-
-    # Mark source entries as consolidated (retry separately)
-    for attempt in range(max_db_retries):
-        try:
-            mark_consolidated(conn, source_ids, entry.id)
-            break
-        except Exception as e:
-            LOGGER.warning(
-                "mark_consolidated failed for level-%d arasuji (attempt %d/%d): %s",
-                target_level, attempt + 1, max_db_retries, e,
-            )
-            try:
-                conn.rollback()
-            except Exception:
-                pass
-            if attempt < max_db_retries - 1:
-                time.sleep(2 ** attempt)
-    else:
-        LOGGER.error(
-            "mark_consolidated failed after %d attempts for level-%d arasuji "
-            "(entry %s created but children not marked)",
-            max_db_retries, target_level, entry.id,
-        )
-
-    LOGGER.info(f"Created level-{target_level} arasuji ({total_messages} messages): {content}")
-    return entry
-
-
-def maybe_consolidate(
-    client,
-    conn: sqlite3.Connection,
-    level: int,
-    consolidation_size: int = DEFAULT_CONSOLIDATION_SIZE,
-    *,
-    dry_run: bool = False,
-    include_timestamp: bool = True,
-    persona_id: Optional[str] = None,
-) -> List[ArasujiEntry]:
-    """Check if consolidation is needed at a level and perform it recursively.
-
-    Args:
-        client: LLM client
-        conn: Database connection
-        level: Level to check for consolidation
-        consolidation_size: Number of entries to consolidate
-        dry_run: If True, don't save to database
-
-    Returns:
-        List of newly created consolidated entries
-    """
-    created: List[ArasujiEntry] = []
-
-    # Get unconsolidated entries at this level
-    pending = get_unconsolidated_entries(conn, level)
-
-    while len(pending) >= consolidation_size:
-        # Take the first consolidation_size entries
-        batch = pending[:consolidation_size]
-        pending = pending[consolidation_size:]
-
-        # Generate consolidated arasuji
-        entry = generate_consolidated_arasuji(
-            client,
-            conn,
-            batch,
-            target_level=level + 1,
-            dry_run=dry_run,
-            include_timestamp=include_timestamp,
-            persona_id=persona_id,
-        )
-
-        if entry:
-            created.append(entry)
-
-            # Recursively check the next level
-            higher = maybe_consolidate(
-                client,
-                conn,
-                level + 1,
-                consolidation_size=consolidation_size,
-                dry_run=dry_run,
-                include_timestamp=include_timestamp,
-                persona_id=persona_id,
-            )
-            created.extend(higher)
-        else:
-            LOGGER.warning(
-                f"Consolidation at level {level + 1} failed, "
-                f"will retry on next generation"
-            )
-
-    return created
-
-
-def regenerate_consolidated_content(
-    client,
-    conn: sqlite3.Connection,
-    entry_id: str,
-    *,
-    include_timestamp: bool = True,
-    persona_id: Optional[str] = None,
-) -> Optional[ArasujiEntry]:
-    """Re-generate a consolidated entry's content from its current sources.
-
-    Unlike regenerate_entry() which deletes and recreates, this only
-    updates the content field in-place, preserving all relationships
-    (parent_id, is_consolidated, source_ids).
-
-    Used when gap-fill entries are integrated into existing hierarchy
-    and the parent's content needs to reflect the new sources.
-
-    Args:
-        client: LLM client with generate() method
-        conn: Database connection
-        entry_id: ID of the consolidated entry to regenerate
-        include_timestamp: If False, omit timestamps from prompt
-        persona_id: Optional persona ID for usage tracking
-
-    Returns:
-        Updated ArasujiEntry or None on failure
-    """
-    # 1. Get the entry
-    entry = get_entry(conn, entry_id)
-    if not entry:
-        LOGGER.error(f"Entry {entry_id} not found for content regeneration")
-        return None
-
-    if entry.level < 2:
-        LOGGER.error(f"Cannot regenerate content for level-{entry.level} entry {entry_id}")
-        return None
-
-    # 2. Get all source entries
-    source_entries: List[ArasujiEntry] = []
-    for sid in entry.source_ids:
-        src = get_entry(conn, sid)
-        if src:
-            source_entries.append(src)
-        else:
-            LOGGER.warning(f"Source entry {sid} not found for entry {entry_id[:8]}")
-
-    if not source_entries:
-        LOGGER.error(f"No source entries found for entry {entry_id[:8]}")
-        return None
-
-    # Sort by time
-    source_entries.sort(key=lambda e: e.start_time or 0)
-
-    # 3. Recalculate time range and message count
-    start_time = (
-        min(e.start_time for e in source_entries if e.start_time)
-        if any(e.start_time for e in source_entries)
-        else None
-    )
-    end_time = (
-        max(e.end_time for e in source_entries if e.end_time)
-        if any(e.end_time for e in source_entries)
-        else None
-    )
-    total_messages = sum(e.message_count for e in source_entries)
-
-    # 4. Build prompt (same structure as generate_consolidated_arasuji)
-    entries_text = _format_entries_for_prompt(source_entries, include_timestamp=include_timestamp)
-    level_desc = "あらすじ" + "のあらすじ" * (entry.level - 1)
-
-    # Get context from before time range (temporal isolation)
-    context = ""
-    if start_time and end_time:
-        from sai_memory.arasuji.context import get_episode_context_for_timerange
-        context = get_episode_context_for_timerange(
-            conn, start_time=start_time, end_time=end_time, max_entries=10
-        )
-
-    prompt_parts = [
-        f"以下の{len(source_entries)}個のあらすじを統合し、「{level_desc}」としてまとめてください。",
-        "",
-    ]
-    if context:
-        prompt_parts.extend([
-            "## さらに前の出来事（参考）",
-            context,
-            "",
-        ])
-    prompt_parts.extend([
-        "## 統合対象のあらすじ",
-        entries_text,
-        "",
-        "## 指示",
-        "- 5〜8文程度で、全体の流れを俯瞰できるようにまとめる",
-        "- 重要な転換点や印象的なエピソードを保持する",
-        "- 個々の詳細より「どんな時期だったか」を重視する",
-        "- 時系列順に書く",
-        "",
-        "統合されたあらすじを日本語で書いてください。",
-    ])
-    prompt = "\n".join(prompt_parts)
-
-    # 5. LLM call with retry
-    max_retries = 3
-    content = None
-    for attempt in range(max_retries):
-        try:
-            response = client.generate(
-                messages=[{"role": "user", "content": prompt}],
-                tools=[],
-            )
-            _record_llm_usage(client, persona_id, f"chronicle_level{entry.level}_regen")
-            if response and response.strip():
-                content = response.strip()
-                break
-            LOGGER.warning(
-                f"Empty response for entry {entry_id[:8]} regeneration "
-                f"(attempt {attempt + 1}/{max_retries})"
-            )
-        except Exception as e:
-            LOGGER.warning(
-                f"LLM error for entry {entry_id[:8]} regeneration "
-                f"(attempt {attempt + 1}/{max_retries}): {e}"
-            )
-        if attempt < max_retries - 1:
-            time.sleep(2 ** attempt)
-
-    if not content:
-        LOGGER.error(
-            f"Failed to regenerate content for entry {entry_id[:8]} "
-            f"after {max_retries} attempts"
-        )
-        return None
-
-    # 6. UPDATE in-place (preserve parent_id, is_consolidated, etc.)
-    conn.execute(
-        """
-        UPDATE arasuji_entries
-        SET content = ?, start_time = ?, end_time = ?,
-            message_count = ?, source_count = ?
-        WHERE id = ?
-        """,
-        (content, start_time, end_time, total_messages, len(source_entries), entry_id),
-    )
-    conn.commit()
-
-    LOGGER.info(
-        f"Regenerated content for level-{entry.level} entry {entry_id[:8]} "
-        f"({total_messages} messages)"
-    )
-
-    # Return updated entry
-    return get_entry(conn, entry_id)
-
-
-def integrate_gap_fill(
-    client,
-    conn: sqlite3.Connection,
-    new_entry: ArasujiEntry,
-    *,
-    include_timestamp: bool = True,
-    persona_id: Optional[str] = None,
-) -> List[ArasujiEntry]:
-    """Integrate a gap-fill level-1 entry into the existing hierarchy.
-
-    When a gap-fill generates a new level-1 entry that falls within an
-    existing level-2's time range, this function:
-    1. Adds the new entry to the level-2's source_ids
-    2. Re-generates the level-2 content with the new source
-    3. Cascades re-generation up through all parent levels
-
-    Args:
-        client: LLM client with generate() method
-        conn: Database connection
-        new_entry: The newly created gap-fill level-1 entry
-        include_timestamp: If False, omit timestamps from prompt
-        persona_id: Optional persona ID for usage tracking
-
-    Returns:
-        List of re-generated entries (level-2 and above)
-    """
-    regenerated: List[ArasujiEntry] = []
-
-    # 1. Find covering level-2 entry
-    if new_entry.start_time is None or new_entry.end_time is None:
-        LOGGER.warning(
-            f"Gap-fill entry {new_entry.id[:8]} has no time range, "
-            f"cannot integrate into hierarchy"
-        )
-        return []
-
-    covering_l2 = find_covering_entry(
-        conn, new_entry.start_time, new_entry.end_time, level=2
-    )
-
-    if not covering_l2:
-        # No covering level-2 found — let normal consolidation handle it
-        LOGGER.info(
-            f"No covering level-2 found for gap-fill entry {new_entry.id[:8]}, "
-            f"falling back to normal consolidation"
-        )
-        return []
-
-    # 2. Add new entry to level-2's source_ids and mark as consolidated
-    success = add_to_parent_source_ids(conn, new_entry.id, covering_l2.id)
-    if not success:
-        LOGGER.error(
-            f"Failed to add gap-fill entry {new_entry.id[:8]} "
-            f"to level-2 {covering_l2.id[:8]}"
-        )
-        return []
-
-    # Re-read covering entry to get updated source_ids count
-    updated_covering = get_entry(conn, covering_l2.id)
-    source_count = len(updated_covering.source_ids) if updated_covering else "?"
-    LOGGER.info(
-        f"Added gap-fill entry {new_entry.id[:8]} to level-2 {covering_l2.id[:8]} "
-        f"(sources: {covering_l2.source_count} -> {source_count})"
-    )
-
-    # 3. Re-generate covering level-2 content
-    regen_l2 = regenerate_consolidated_content(
-        client, conn, covering_l2.id,
-        include_timestamp=include_timestamp,
-        persona_id=persona_id,
-    )
-    if regen_l2:
-        regenerated.append(regen_l2)
-
-        # 4. Cascade: re-generate all parent levels
-        current = regen_l2
-        while current.parent_id:
-            LOGGER.info(
-                f"Cascade: propagating to level-{current.level + 1} "
-                f"parent {current.parent_id[:8]}..."
-            )
-            parent_regen = regenerate_consolidated_content(
-                client, conn, current.parent_id,
-                include_timestamp=include_timestamp,
-                persona_id=persona_id,
-            )
-            if parent_regen:
-                regenerated.append(parent_regen)
-                current = parent_regen
-            else:
-                LOGGER.warning(
-                    f"Failed to re-generate parent {current.parent_id[:8]} "
-                    f"during cascade, stopping propagation"
-                )
-                break
-    else:
-        LOGGER.warning(
-            f"Failed to re-generate level-2 {covering_l2.id[:8]} "
-            f"after gap-fill integration"
-        )
-
-    if regenerated:
-        LOGGER.info(
-            f"Gap-fill integration complete: re-generated {len(regenerated)} entries "
-            f"(levels: {', '.join(str(e.level) for e in regenerated)})"
-        )
-
-    return regenerated
-
-
-class ArasujiGenerator:
-    """High-level interface for arasuji generation."""
-
-    def __init__(
-        self,
-        client,
-        conn: sqlite3.Connection,
-        *,
-        batch_size: int = DEFAULT_BATCH_SIZE,
-        consolidation_size: int = DEFAULT_CONSOLIDATION_SIZE,
-        include_timestamp: bool = True,
-        memopedia_context: Optional[str] = None,
-        persona_id: Optional[str] = None,
-    ):
-        """Initialize the generator.
-
-        Args:
-            client: LLM client with generate() method
-            conn: Database connection
-            batch_size: Number of messages per level-1 arasuji
-            consolidation_size: Number of entries per higher-level arasuji
-            include_timestamp: If False, omit timestamps from prompts (useful when dates are unreliable)
-            memopedia_context: Optional semantic memory context (page titles, summaries, keywords)
-            persona_id: Optional persona ID for usage tracking
-        """
-        self.client = client
-        self.conn = conn
-        self.batch_size = batch_size
-        self.consolidation_size = consolidation_size
-        self.include_timestamp = include_timestamp
-        self.memopedia_context = memopedia_context
-        self.persona_id = persona_id
-        self.debug_log_path = None  # Can be set externally
-
-    def generate_from_messages(
-        self,
-        messages: List[Message],
-        *,
-        dry_run: bool = False,
-        progress_callback: Optional[Callable[[int, int], None]] = None,
-        batch_callback: Optional[Callable[[List[Message]], None]] = None,
-        cancel_check: Optional[Callable[[], bool]] = None,
-    ) -> Tuple[List[ArasujiEntry], List[ArasujiEntry]]:
-        """Generate arasuji entries from messages.
-
-        Args:
-            messages: Messages to process
-            dry_run: If True, don't save to database
-            progress_callback: Optional callback(processed, total) for progress updates
-            batch_callback: Optional callback(batch_messages) called after each batch's
-                            Chronicle generation and consolidation. Use this to run
-                            Memopedia extraction per-batch for interleaved Memory Weave.
-            cancel_check: Optional callback that returns True if generation should stop.
-                          Checked before each batch. On cancel, returns partial results.
-
-        Returns:
-            Tuple of (level1_entries, consolidated_entries)
-        """
-        from llm_clients.exceptions import LLMError
-
-        level1_entries: List[ArasujiEntry] = []
-        consolidated_entries: List[ArasujiEntry] = []
-        # Track Level-2 entries created during THIS run to exclude from
-        # gap-fill detection.  Gap-fill is meant for Level-2 entries from
-        # PREVIOUS runs — entries created in the current run are sequential
-        # consolidation results, not gap-fill targets.
-        created_l2_ids: set = set()
-
-        total = len(messages)
-
-        # Process messages in batches
-        for i in range(0, total, self.batch_size):
-            # Check for cancellation before processing each batch
-            if cancel_check and cancel_check():
-                LOGGER.info("Chronicle generation cancelled by user")
-                break
-
-            batch = messages[i:i + self.batch_size]
-
-            # Skip incomplete batches (less than batch_size messages)
-            if len(batch) < self.batch_size:
-                LOGGER.info(f"Skipping incomplete batch: {len(batch)} < {self.batch_size}")
-                continue
-
-            if progress_callback:
-                progress_callback(i, total)
-
-            LOGGER.info(f"Processing messages {i+1}-{i+len(batch)} of {total}")
-
-            # Generate level-1 arasuji (retries are handled inside each LLM client)
-            try:
-                entry = generate_level1_arasuji(
-                    self.client,
-                    self.conn,
-                    batch,
-                    dry_run=dry_run,
-                    include_timestamp=self.include_timestamp,
-                    memopedia_context=self.memopedia_context,
-                    debug_log_path=self.debug_log_path,
-                    persona_id=self.persona_id,
-                )
-            except LLMError as e:
-                # Add batch context to user_message and re-raise
-                e.user_message = (
-                    f"メッセージ {i+1}〜{i+len(batch)} の処理中: {e.user_message}"
-                )
-                # Attach batch metadata for frontend navigation
-                e.batch_meta = {
-                    "message_ids": [m.id for m in batch],
-                    "start_time": min(m.created_at for m in batch),
-                    "end_time": max(m.created_at for m in batch),
-                }
-                raise
-            if not entry:
-                raise RuntimeError(
-                    f"Level-1 generation failed for messages {i+1}-{i+len(batch)}"
-                )
-
-            level1_entries.append(entry)
-
-            # Check if this is a gap-fill (covered by existing level-2+)
-            if not dry_run and entry.start_time and entry.end_time:
-                covering = find_covering_entry(
-                    self.conn, entry.start_time, entry.end_time, level=2
-                )
-            else:
-                covering = None
-
-            # Exclude Level-2 entries created during this run — they are
-            # sequential consolidation results, not gap-fill targets.
-            if covering and covering.id in created_l2_ids:
-                LOGGER.info(
-                    "Skipping gap-fill for entry %s: covering level-2 %s "
-                    "was created in the current run",
-                    entry.id[:8], covering.id[:8],
-                )
-                covering = None
-
-            # Decide between gap-fill and dismantle.
-            # True gap = a few missed messages from a previous run's
-            # incomplete batch.  If many more unprocessed messages remain
-            # in the covering L2's time range, the L2's summary is no
-            # longer representative — dismantle it and let normal
-            # consolidation rebuild from scratch.
-            if covering:
-                remaining_in_range = sum(
-                    1 for m in messages[i + self.batch_size:]
-                    if (covering.start_time is not None
-                        and covering.end_time is not None
-                        and covering.start_time <= m.created_at <= covering.end_time)
-                )
-
-                if remaining_in_range >= self.batch_size:
-                    # Large gap — dismantle L2 and rebuild via consolidation
-                    LOGGER.info(
-                        "Dismantling level-2 %s: %d remaining messages in "
-                        "time range [%s, %s] (>= batch_size %d).  "
-                        "L2 summary is no longer representative.",
-                        covering.id[:8], remaining_in_range,
-                        covering.start_time, covering.end_time,
-                        self.batch_size,
-                    )
-                    success, freed_ids = dismantle_entry(self.conn, covering.id)
-                    if success:
-                        LOGGER.info(
-                            "Dismantled level-2 %s, freed %d source L1 entries",
-                            covering.id[:8], len(freed_ids),
-                        )
-                    else:
-                        LOGGER.warning(
-                            "Failed to dismantle level-2 %s", covering.id[:8],
-                        )
-                    covering = None  # fall through to maybe_consolidate
-                else:
-                    # Small gap — proceed with traditional gap-fill
-                    LOGGER.info(
-                        "Gap-fill detected: integrating entry %s "
-                        "(time %s-%s) into level-2 %s (time %s-%s), "
-                        "%d remaining messages in range",
-                        entry.id[:8], entry.start_time, entry.end_time,
-                        covering.id[:8], covering.start_time, covering.end_time,
-                        remaining_in_range,
-                    )
-                    regenerated = integrate_gap_fill(
-                        self.client,
-                        self.conn,
-                        entry,
-                        include_timestamp=self.include_timestamp,
-                        persona_id=self.persona_id,
-                    )
-                    consolidated_entries.extend(regenerated)
-            else:
-                # Normal: try regular consolidation
-                consolidated = maybe_consolidate(
-                    self.client,
-                    self.conn,
-                    level=1,
-                    consolidation_size=self.consolidation_size,
-                    dry_run=dry_run,
-                    include_timestamp=self.include_timestamp,
-                    persona_id=self.persona_id,
-                )
-                # Track Level-2 entries created in this run
-                for c in consolidated:
-                    if c.level == 2:
-                        created_l2_ids.add(c.id)
-                consolidated_entries.extend(consolidated)
-
-            # Call batch callback for Memopedia extraction (Memory Weave interleaved mode)
-            if batch_callback:
-                batch_callback(batch)
-
-        if progress_callback:
-            progress_callback(total, total)
-
-        return level1_entries, consolidated_entries
-
-    def generate_unprocessed(
-        self,
-        messages: List[Message],
-        *,
-        max_messages: Optional[int] = None,
-        dry_run: bool = False,
-        progress_callback: Optional[Callable[[int, int], None]] = None,
-        batch_callback: Optional[Callable[[List[Message]], None]] = None,
-        cancel_check: Optional[Callable[[], bool]] = None,
-    ) -> Tuple[List[ArasujiEntry], List[ArasujiEntry]]:
-        """Filter out already-processed messages, group into contiguous runs, and generate.
-
-        This is the main entry point for Chronicle generation. It handles:
-        1. Querying existing level-1 source_ids to find already-processed message IDs
-        2. Grouping unprocessed messages into contiguous runs (separated by processed messages)
-        3. Filtering out runs smaller than batch_size
-        4. Applying max_messages limit across all runs
-        5. Calling generate_from_messages() for each qualifying run
-
-        Args:
-            messages: All messages (chronologically ordered). Already-processed ones
-                      will be filtered out automatically.
-            max_messages: Maximum number of unprocessed messages to process.
-                          None or 0 means no limit.
-            dry_run: If True, don't save to database
-            progress_callback: Optional callback(processed, total) for progress updates.
-                               Reports global progress across all runs.
-            batch_callback: Optional callback(batch_messages) called after each batch
-            cancel_check: Optional callback that returns True if generation should stop
-
-        Returns:
-            Tuple of (level1_entries, consolidated_entries)
-        """
-        # 1. Determine already-processed message IDs from level-1 source_ids
-        cur = self.conn.execute(
-            "SELECT DISTINCT json_each.value "
-            "FROM arasuji_entries, json_each(source_ids_json) "
-            "WHERE level = 1"
-        )
-        processed_ids = {row[0] for row in cur.fetchall()}
-
-        # 2. Group unprocessed messages into contiguous runs
-        runs: List[List[Message]] = []
-        current_run: List[Message] = []
-        for msg in messages:
-            if msg.id in processed_ids:
-                if current_run:
-                    runs.append(current_run)
-                    current_run = []
-                continue
-            current_run.append(msg)
-        if current_run:
-            runs.append(current_run)
-
-        # 3. Filter qualifying runs (>= batch_size)
-        qualifying_runs = [r for r in runs if len(r) >= self.batch_size]
-        total_unprocessed = sum(len(r) for r in runs)
-        total_qualifying = sum(len(r) for r in qualifying_runs)
-        isolated_count = total_unprocessed - total_qualifying
-
-        LOGGER.info(
-            "Chronicle: %d processed, %d unprocessed in %d runs "
-            "(%d qualifying with %d msgs, %d isolated skipped)",
-            len(processed_ids), total_unprocessed, len(runs),
-            len(qualifying_runs), total_qualifying, isolated_count,
-        )
-
-        # 4. Apply max_messages limit
-        if max_messages and max_messages > 0:
-            limited_runs: List[List[Message]] = []
-            remaining = max_messages
-            for run in qualifying_runs:
-                if remaining <= 0:
-                    break
-                if len(run) <= remaining:
-                    limited_runs.append(run)
-                    remaining -= len(run)
-                else:
-                    limited_runs.append(run[:remaining])
-                    remaining = 0
-            qualifying_runs = limited_runs
-            total_qualifying = sum(len(r) for r in qualifying_runs)
-            LOGGER.info(
-                "Chronicle: max_messages=%d applied, %d msgs in %d runs after limit",
-                max_messages, total_qualifying, len(qualifying_runs),
-            )
-
-        if not qualifying_runs:
-            return [], []
-
-        # 5. Generate for each qualifying run with global progress tracking
-        level1_total: List[ArasujiEntry] = []
-        consolidated_total: List[ArasujiEntry] = []
-        global_offset = 0
-        for run_idx, run in enumerate(qualifying_runs):
-            if cancel_check and cancel_check():
-                LOGGER.info("Chronicle generation cancelled after %d runs", run_idx)
-                break
-            LOGGER.info(
-                "Processing run %d/%d (%d messages)",
-                run_idx + 1, len(qualifying_runs), len(run),
-            )
-
-            # Wrap progress_callback to report global progress across all runs
-            run_progress: Optional[Callable[[int, int], None]] = None
-            if progress_callback:
-                _offset = global_offset
-                _global_total = total_qualifying
-
-                def _make_progress(offset: int, global_total: int):
-                    def _progress(processed: int, _local_total: int):
-                        progress_callback(offset + processed, global_total)
-                    return _progress
-
-                run_progress = _make_progress(_offset, _global_total)
-
-            level1, consolidated = self.generate_from_messages(
-                run,
-                dry_run=dry_run,
-                progress_callback=run_progress,
-                batch_callback=batch_callback,
-                cancel_check=cancel_check,
-            )
-            level1_total.extend(level1)
-            consolidated_total.extend(consolidated)
-            global_offset += len(run)
-
-        return level1_total, consolidated_total

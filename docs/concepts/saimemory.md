@@ -1,125 +1,58 @@
-# SAIMemory
+# SAIMemory（長期記憶の容れ物）
 
-ペルソナの記憶システムについて説明します。
+> 開発者向け概念リファレンス。**全体の位置づけ**は [landscape §5](../overview/landscape.md)、**設計意図**は intent [`unified_memory_architecture.md`](../intent/unified_memory_architecture.md) を参照。旧版は [`legacy/saimemory.md`](legacy/saimemory.md)。
 
-## 概要
+## 一言で
 
-SAIMemoryは、ペルソナの長期記憶を管理するシステムです。会話履歴の保存、セマンティック検索による関連記憶の想起、構造化された知識管理を提供します。
+ペルソナの長期記憶をすべて格納する per-persona の SQLite DB（`memory.db`）。
 
-## データ構造
+## 役割
 
-各ペルソナは `~/.saiverse/personas/<persona_id>/` にデータを保存：
+> ⚠️ SAIMemory は **DB（容れ物）の名前**であって、生ログそのものではない。生ログ・[Chronicle](chronicle.md)・[Memopedia](memopedia.md)・pulse_logs・memory_notes などはすべて SAIMemory の中身。
 
-```
-~/.saiverse/personas/<persona_id>/
-├── memory.db        # SQLiteデータベース
-├── log.json         # 会話ログ（履歴用）
-├── tasks.db         # タスク管理
-└── attachments/     # 添付ファイル
-```
+短期記憶（[Session](session.md)）とは階層が異なり、蓄積された経験の全体をなす。必要に応じて短期記憶へ引き出される。
 
-## 主要機能
+## 仕組み
 
-### メッセージ保存
+### 生ログ（Thread / Message）
 
-会話の各メッセージを記録：
+ペルソナが経験したメッセージ・ツール結果・思考の時系列の連なり。
 
-```python
-storage.add_message(
-    thread_id="main",
-    role="assistant",
-    content="こんにちは！",
-    timestamp=...,
-    metadata={"emotion": "happy"}
-)
-```
+- 個々の発言が **Message**（`messages` テーブル）
+- それを束ねる会話単位が **Thread**（`thread_id` / `get_or_create_thread`）
+- タグ（`conversation` / `internal` / `task` / `summary` / `event_message` 等）で分類・検索される
+- [Pulse](pulse.md) 内の詳細は `pulse_logs` テーブルに記録され、重要なノード出力は両方に書く「二重書き込み」で確実に残す
 
-### セマンティック検索
+> **タグ注意**: 新種のシステム通知を挿入する時は `event_message` タグ必須（タグ漏れでペルソナのコンテキストに乗らない事故）。
 
-SBERTによる埋め込みを使用して関連記憶を検索：
+### 中身の3層
 
-```python
-results = storage.search_messages(
-    query="旅行の思い出",
-    limit=10,
-    thread_id=None  # 全スレッドから検索
-)
-```
+| 中身 | 何を | リファレンス |
+|---|---|---|
+| 生ログ（Thread ⊃ Message） | 経験の時系列そのもの | 本ページ |
+| Chronicle | 時系列を圧縮した「あらすじ」 | [chronicle.md](chronicle.md) |
+| Memopedia | 固有対象の知識グラフ | [memopedia.md](memopedia.md) |
 
-### スレッド管理
+### 外部ログのインポート
 
-会話を話題（スレッド）単位で整理：
+生ログへの入力は Pulse 記録だけではない。ChatGPT 公式エクスポートや Chrome 拡張のエクスポートを SAIMemory に取り込める（新規ユーザーが過去の対話履歴を持ち込む導線 → [`roadmap_status.md`](../overview/roadmap_status.md) §6）。
 
-- デフォルトスレッド: `main`
-- スレッド間のリンク機能
-- アクティブスレッドの切り替え
+## 実装
 
-## Memopedia
+- 実装本体: `sai_memory/`（`memory/` / `arasuji/` / `memopedia/`）
+- アダプタ: `saiverse_memory/adapter.py`（`SAIMemoryAdapter.append_building_message()` / `append_persona_message()` でタグ付き追記）
+- 保存先: `~/.saiverse/personas/<id>/memory.db`
+- バックアップ: rdiff-backup で `~/.saiverse/backups/saimemory_rdiff/<persona_id>/`（`SAIMEMORY_BACKUP_ON_START=true`）
+- 想起: `sai_memory/unified_recall.py`（意味/キーワード検索）。UI は記憶モーダルの「デバッグ」タブ（→ [user-guide/memory-view.md](../user-guide/memory-view.md)）
 
-構造化された知識ベース。詳細は [Memopedia](../user-guide/memopedia.md) を参照。
+## 関連概念
 
-### 3つのルートカテゴリ
+- [Chronicle](chronicle.md) — 生ログの時系列圧縮
+- [Memopedia](memopedia.md) — 生ログからの知識化
+- [Session](session.md) — 生ログの末尾を引き出す短期記憶
+- [Metabolism](metabolism.md) — 圧縮・知識化を発火する節目
 
-| カテゴリ | 説明 |
-|----------|------|
-| 人物 (people) | 関わりのある人物の情報 |
-| 出来事 (events) | 過去の出来事の記録 |
-| 予定 (plans) | 進行中のプロジェクト・計画 |
+## 参照
 
-### ページ操作
-
-```python
-from sai_memory.memopedia import Memopedia
-
-memopedia = Memopedia(conn)
-
-# ページ作成
-page = memopedia.create_page(
-    parent_id="root_people",
-    title="まはー",
-    summary="SAIVerseの開発者",
-    content="## 基本情報\n\n- 名前: まはー\n- 役割: 開発者"
-)
-
-# ツリー取得
-tree_md = memopedia.get_tree_markdown(thread_id="main")
-```
-
-## 埋め込みモデル
-
-デフォルトでは `intfloat/multilingual-e5-small` を使用（384次元、日本語を含む100言語対応）。
-
-### 設定
-
-```env
-SAIMEMORY_EMBED_MODEL=intfloat/multilingual-e5-small
-SAIMEMORY_EMBED_MODEL_PATH=/path/to/local/model
-```
-
-### オフライン利用
-
-`sbert/` ディレクトリにモデルを配置すると、ネットワーク接続なしで利用可能：
-
-```
-sbert/
-└── multilingual-e5-small/
-    ├── onnx/
-    │   └── model.onnx
-    ├── config.json
-    ├── tokenizer.json
-    └── ...
-```
-
-## 保守スクリプト
-
-| スクリプト | 説明 |
-|-----------|------|
-| `scripts/backup_saimemory.py` | rdiff-backupで差分バックアップ |
-| `scripts/export_saimemory_to_json.py` | JSON形式でエクスポート |
-| `scripts/import_persona_logs_to_saimemory.py` | JSONログをインポート |
-| `scripts/build_memopedia.py` | 会話からMemopediaを構築 |
-
-## 次のステップ
-
-- [Memopedia](../user-guide/memopedia.md) - ナレッジベースの使い方
-- [スクリプト一覧](../reference/scripts.md) - 保守スクリプトの詳細
+- intent: [`unified_memory_architecture.md`](../intent/unified_memory_architecture.md)
+- 地図: [`landscape.md`](../overview/landscape.md) §5

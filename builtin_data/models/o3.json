@@ -2,10 +2,8 @@
   "model": "o3",
   "system_prompt": "",
   "display_name": "o3",
-  "provider": "openai",
+  "provider_ref": "openai",
   "context_length": 200000,
-  "default_max_history_messages": 40,
-  "metabolism_keep_messages": 20,
   "supports_images": true,
   "parameters": {
     "temperature": {

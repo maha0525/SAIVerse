@@ -6,7 +6,7 @@ tools.core  ― ベンダー非依存ツール実装 + メタスキーマ
 * parse_tool_result: ツール結果のパース関数
 """
 from dataclasses import dataclass
-from typing import Any, Dict, Tuple, Optional
+from typing import Any, Callable, Dict, List, Tuple, Optional
 
 
 @dataclass
@@ -15,6 +15,27 @@ class ToolSchema:
     description: str
     parameters: Dict[str, Any]   # JSON Schema
     result_type: str             # "string" / "number" / ...
+    spell: bool = False          # If True, tool is available as a spell (invoked via /spell in LLM text output)
+    spell_display_name: str = ""  # Japanese display name for spell UI (e.g. "特定時刻のログ取得")
+    spell_visible: bool = True   # If False, spell is executable but hidden from system prompt (revealed via help spell)
+    # Optional per-persona gate. When set, the spell is hidden from a
+    # persona's system prompt and addon_spell_help unless the callable
+    # returns True for that persona_id. Mirrors the role MCP plays for
+    # MCP-backed spells (env placeholder resolution); use this for native
+    # Python tools whose availability depends on per-persona state such
+    # as OAuth connection status, license, etc. ``persona_id`` may be
+    # None when the runtime cannot identify the active persona — in that
+    # case, return False to keep the spell hidden conservatively.
+    availability_check: Optional[Callable[[Optional[str]], bool]] = None
+    # アドオン所属の識別子。`expansion_data/<addon_name>/tools/` 配下のネイティブ
+    # ツールはローダーが自動でセットする。MCP 由来のスペルは `<addon_name>__<spell>`
+    # 命名規則が別ルートで判定される。明示的に None なら built-in 扱い。
+    addon_name: Optional[str] = None
+    # 特定の Building 内でのみ visible にしたい時に Building ID を列挙する。
+    # 空 (None) なら全 Building で visible。MCP の ``spell_tools`` で
+    # ``building_ids: [...]`` を指定すると伝搬する (Phase 4' / A-3-c)。
+    # 詳細: docs/intent/stackchan_vessel.md A-3-c
+    building_ids: Optional[List[str]] = None
 
 
 @dataclass
@@ -40,10 +61,20 @@ def parse_tool_result(res: Any) -> Tuple[str, Optional[str], Optional[str], Opti
     if isinstance(res, tuple):
         if len(res) == 2:
             content = str(res[0])
-            snip = res[1]
-            if isinstance(snip, ToolResult):
-                snip = snip.history_snippet
-            return content, snip, None, metadata
+            second = res[1]
+            # 2-tuple は 2 通りの慣習がある:
+            # - (text, metadata_dict): spell 経路の (str, dict) 形式
+            #   (run_playbook の forwarded_metadata、 image_generator 簡易形)。
+            #   dict は ``{"media": [...]}`` 等を LLM の multimodal attachment に
+            #   乗せるためのもの。
+            # - (text, snippet): chat 経路で snippet (= SAIMemory 行追記用) を返す形。
+            #   ToolResult ラップも snippet 扱い。
+            # 型で振り分ける。
+            if isinstance(second, dict):
+                return content, None, None, second
+            if isinstance(second, ToolResult):
+                return content, second.history_snippet, None, None
+            return content, second, None, None
         if len(res) >= 3:
             content = str(res[0])
             snip = res[1]

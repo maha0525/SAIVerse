@@ -5,8 +5,25 @@ from typing import Tuple
 
 import requests
 
+from saiverse import __version__ as SAIVERSE_VERSION
+
 from database.models import AI as AIModel, BuildingOccupancyLog, VisitingAI
 from saiverse.remote_persona_proxy import RemotePersonaProxy
+
+# multi-city 凍結 (2026-07-16 まはー裁定):
+# City dispatch の確定処理 (_finalize_dispatch) が呼ばれず、RemotePersonaProxy の
+# 思考転送も本番経路に未接続で、inter-city 移動は実質機能していなかった
+# (docs/handoff/2026-07-15_persona_city_building_separation_audit.md)。
+# 修正ではなく機能凍結とし、City 間移動の入口 (dispatch_persona /
+# return_visiting_persona) は封鎖されている旨を明示的に返す。
+# place_visiting_persona は Discord gateway 等の内部 gateway 経路が共用するため
+# 封鎖しない (inter-city 側の呼び出し元は polling ごと停止済み)。
+# 環境変数等での再有効化の口は意図的に作らない — 復活時は上記監査の修正方針
+# (dispatch state machine / 署名付き handshake) を正典に git から再設計する。
+MULTI_CITY_FREEZE_MESSAGE = (
+    "multi-city 機能は凍結中です (2026-07-16 裁定)。"
+    "City 間移動の入口は封鎖されています。"
+)
 
 
 class VisitorMixin:
@@ -20,6 +37,9 @@ class VisitorMixin:
         1. Sends the persona's profile to the target city's API.
         2. If accepted, records the transaction for follow-up by the destination city.
         """
+        # multi-city 凍結: 封鎖済み。以下の凍結前実装は復活時の参考のため残置
+        # (到達しない)。
+        return False, MULTI_CITY_FREEZE_MESSAGE
         target_city_info = self.cities_config.get(target_city_id)
         if not target_city_info:
             logging.warning(
@@ -47,6 +67,7 @@ class VisitorMixin:
             "avatar_image": persona.avatar_image,
             "emotion": persona.emotion,
             "source_city_id": self.city_name,
+            "saiverse_version": SAIVERSE_VERSION,
         }
 
         db = self.SessionLocal()
@@ -125,6 +146,9 @@ class VisitorMixin:
         2. Sends the persona's profile to the home city's API.
         3. If successful, removes the visitor from the current city.
         """
+        # multi-city 凍結: 封鎖済み。以下の凍結前実装は復活時の参考のため残置
+        # (到達しない)。
+        return False, MULTI_CITY_FREEZE_MESSAGE
         visitor = self.visiting_personas.get(persona_id)
         if not visitor:
             return False, "You are not a visitor in this city."
@@ -153,6 +177,7 @@ class VisitorMixin:
             "avatar_image": visitor.avatar_image,
             "emotion": visitor.emotion,
             "source_city_id": self.city_name,
+            "saiverse_version": SAIVERSE_VERSION,
         }
 
         target_api_url = f"{target_city_info['api_base_url']}/inter-city/request-move-in"
@@ -195,6 +220,17 @@ class VisitorMixin:
         and places them in the target building.
         """
         try:
+            # Inter-City API profiles are schema-required to carry this field.
+            # Internal gateway profiles do not use the City movement protocol,
+            # so absence is accepted while an explicitly mismatched version is
+            # always rejected.
+            remote_version = profile.get("saiverse_version")
+            if remote_version is not None and remote_version != SAIVERSE_VERSION:
+                return (
+                    False,
+                    "City間移動のSAIVerse versionが一致しません "
+                    f"(source={remote_version!r}, destination={SAIVERSE_VERSION!r})。",
+                )
             pid = profile["persona_id"]
             pname = profile["persona_name"]
             target_bid = profile["target_building_id"]
@@ -246,10 +282,12 @@ class VisitorMixin:
                     "<div class=\"note-box\">🏢 City Transfer:<br>"
                     f"<b>{pname}が故郷に帰ってきました</b></div>"
                 )
-                self.building_histories.setdefault(target_bid, []).append(
-                    {"role": "host", "content": arrival_message}
+                self.add_building_event(
+                    target_bid,
+                    {"role": "host", "content": arrival_message},
+                    heard_by=list(self.occupants.get(target_bid, [])),
                 )
-                self._save_building_histories()
+                self._save_modified_buildings()
                 return True, f"Welcome home, {pname}!"
 
             if pid in self.personas or pid in self.visiting_personas:
@@ -307,10 +345,12 @@ class VisitorMixin:
                 "<div class=\"note-box\">🏢 City Transfer:<br>"
                 f"<b>{pname}が別のCityからやってきました</b></div>"
             )
-            self.building_histories.setdefault(target_bid, []).append(
-                {"role": "host", "content": arrival_message}
+            self.add_building_event(
+                target_bid,
+                {"role": "host", "content": arrival_message},
+                heard_by=list(self.occupants.get(target_bid, [])),
             )
-            self._save_building_histories()
+            self._save_modified_buildings()
             logging.info(
                 "Successfully placed visiting persona %s in %s",
                 pname,

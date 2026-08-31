@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 
 import requests
 
-from tests.conftest import load_builtin_tool
+from tool_loader import load_builtin_tool
 
 
 class TestRateLimiter(unittest.TestCase):

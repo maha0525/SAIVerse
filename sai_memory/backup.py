@@ -21,11 +21,29 @@ from pathlib import Path
 
 LOGGER = logging.getLogger(__name__)
 
-BACKUP_ROOT = Path.home() / ".saiverse" / "backups" / "saimemory_rdiff"
-BACKUP_ROOT.mkdir(parents=True, exist_ok=True)
-SIMPLE_BACKUP_ROOT = Path.home() / ".saiverse" / "backups" / "saimemory_simple"
-SIMPLE_BACKUP_ROOT.mkdir(parents=True, exist_ok=True)
-GLOBAL_LOCK_PATH = Path(os.getenv("SAIMEMORY_BACKUP_LOCK_PATH", BACKUP_ROOT / "saimemory_backup.lock"))
+def get_backup_root() -> Path:
+    """rdiff-backup repository root under SAIVERSE_HOME (created on demand)."""
+    from saiverse.data_paths import get_saiverse_home
+
+    root = get_saiverse_home() / "backups" / "saimemory_rdiff"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def get_simple_backup_root() -> Path:
+    """Simple-copy backup root under SAIVERSE_HOME (created on demand)."""
+    from saiverse.data_paths import get_saiverse_home
+
+    root = get_saiverse_home() / "backups" / "saimemory_simple"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def get_global_lock_path() -> Path:
+    env_path = os.getenv("SAIMEMORY_BACKUP_LOCK_PATH")
+    if env_path:
+        return Path(env_path)
+    return get_backup_root() / "saimemory_backup.lock"
 BACKUP_TIMEOUT_SEC = int(os.getenv("SAIMEMORY_BACKUP_TIMEOUT_SEC", "300"))
 LOCK_WAIT_SEC = int(os.getenv("SAIMEMORY_BACKUP_LOCK_WAIT_SEC", "10"))
 RETRY_ON_CORRUPT = os.getenv("SAIMEMORY_BACKUP_RETRY_ON_CORRUPT", "true").strip().lower() in {"1", "true", "yes", "on"}
@@ -69,7 +87,7 @@ def _sqlite_snapshot(db_path: Path) -> Path:
 
 
 def _persona_backup_dir(persona_id: str, root: Path | None = None) -> Path:
-    base = Path(root) if root else BACKUP_ROOT
+    base = Path(root) if root else get_backup_root()
     persona_root = base / persona_id
     persona_root.mkdir(parents=True, exist_ok=True)
     return persona_root
@@ -144,10 +162,11 @@ def _is_process_alive(pid: int) -> bool:
 
 def _check_stale_lock() -> bool:
     """Check if the lock file is stale (holder process is dead). Returns True if stale and cleaned up."""
-    if not GLOBAL_LOCK_PATH.exists():
+    lock_path = get_global_lock_path()
+    if not lock_path.exists():
         return False
     try:
-        content = GLOBAL_LOCK_PATH.read_text().strip()
+        content = lock_path.read_text().strip()
         # Parse pid=XXXXX from lock file
         for part in content.split():
             if part.startswith("pid="):
@@ -156,9 +175,9 @@ def _check_stale_lock() -> bool:
                     LOGGER.warning(
                         "Removing stale backup lock (holder pid=%d is dead): %s",
                         pid,
-                        GLOBAL_LOCK_PATH,
+                        lock_path,
                     )
-                    GLOBAL_LOCK_PATH.unlink(missing_ok=True)
+                    lock_path.unlink(missing_ok=True)
                     return True
                 break
     except Exception as exc:
@@ -179,8 +198,9 @@ def _global_backup_lock(timeout: int = LOCK_WAIT_SEC):
         yield
         return
 
-    GLOBAL_LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(GLOBAL_LOCK_PATH, os.O_CREAT | os.O_RDWR, 0o600)
+    lock_path = get_global_lock_path()
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
     start = time.monotonic()
     acquired = False
     try:
@@ -264,7 +284,7 @@ def latest_backup_path(persona_id: str, output_root: Path | None = None) -> Path
 
 def _simple_backup_dir(persona_id: str, root: Path | None = None) -> Path:
     """Get the simple backup directory for a persona."""
-    base = Path(root) if root else SIMPLE_BACKUP_ROOT
+    base = Path(root) if root else get_simple_backup_root()
     persona_dir = base / persona_id
     persona_dir.mkdir(parents=True, exist_ok=True)
     return persona_dir

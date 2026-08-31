@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import logging
+import os
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime
-from typing import List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 from sai_memory.memory.storage import Message, get_messages_paginated
 from sai_memory.arasuji.storage import (
@@ -13,6 +15,63 @@ from sai_memory.arasuji.storage import (
     get_entries_by_level,
     get_max_level,
 )
+
+LOGGER = logging.getLogger(__name__)
+
+# Minimum number of entries to read at a given level before allowing
+# promotion to the next level.  Legacy count-based traversal only —
+# 予算モード (head の General Chronicle) は累積質量ルール
+# (:func:`_traverse_episode_mass`) に世代交代した (2026-07-27、
+# docs/intent/chronicle_consolidation.md §6)。件数ベースは char_budget=None
+# の経路 (バッチ生成スクリプト等) と get_episode_context_for_timerange に残る。
+MIN_ENTRIES_PER_LEVEL: int = 10
+
+# 累積質量ルールの下限係数: 次に見せるノードに「ここまでに見せた質量の
+# 1/MASS_DIVISOR 以上」を要求する。質量の梯子の歩幅 (B=10) と同じ。
+# 件数でなく体験量で粗さが進むので、豆粒 (質量ほぼゼロ) を何件見ても
+# 粗さが進まない = ゴミ混入に免疫がある (eris 実測ドライラン 2026-07-26)。
+MASS_DIVISOR: int = 10
+
+# Chronicle 読み込みの文字数予算 (記憶アーキv2 §6.2, Phase 3, 不変条件 §10-4)。
+# 件数上限 (旧 max_entries=50) では超過時に最古が黙って落ちるため、文字数予算で
+# 制御する。予算に収める手段は :func:`_compress_within_budget` (親 entry への
+# 置き換え) が担う。
+#
+# 既定 20,000 字: 現行 max_entries=50 は実質 13〜20k 字相当なので、既定で既存
+# ユーザーの weave が急に痩せないようにする (エアの実 DB で 32 entries ≒ 13k 字)。
+# env SAIVERSE_CHRONICLE_CHAR_BUDGET で調整可。モデル context_length 連動は v1 では
+# しない (§12-2)。
+DEFAULT_CHRONICLE_CHAR_BUDGET: int = 20_000
+
+# 予算圧縮の反復上限 (安全弁)。1 回の置き換えで必ず 1 個以上の entry が親へ
+# 畳まれるので、正常なデータでは entry 数を超えて回ることはない。
+_MAX_COMPRESSION_ROUNDS: int = 1000
+
+# ``char_budget`` の sentinel。呼び出し側が「予算制で読みたい (具体値は env/既定に
+# 委ねる)」と表明するときに渡す。``char_budget=None`` (未指定) は旧来の件数上限
+# ベース (予算制を持ち込みたくない経路) を意味し、区別する。
+USE_DEFAULT_BUDGET: int = -1
+
+
+def _resolve_char_budget(char_budget: int) -> int:
+    """Resolve the effective char budget from a requested value.
+
+    Called only when budget mode is active (``char_budget is not None``).
+    ``USE_DEFAULT_BUDGET`` → env ``SAIVERSE_CHRONICLE_CHAR_BUDGET`` or the
+    built-in default. Any other value is used verbatim (0 = disable).
+    """
+    if char_budget != USE_DEFAULT_BUDGET:
+        return char_budget
+    env_val = os.getenv("SAIVERSE_CHRONICLE_CHAR_BUDGET")
+    if env_val:
+        try:
+            return int(env_val)
+        except ValueError:
+            LOGGER.warning(
+                "Invalid SAIVERSE_CHRONICLE_CHAR_BUDGET=%r, using default %d",
+                env_val, DEFAULT_CHRONICLE_CHAR_BUDGET,
+            )
+    return DEFAULT_CHRONICLE_CHAR_BUDGET
 
 
 @dataclass
@@ -35,13 +94,19 @@ def _format_timestamp(ts: Optional[int]) -> str:
 
 
 def _get_all_arasuji_sorted(conn: sqlite3.Connection) -> List[ArasujiEntry]:
-    """Get all arasuji entries sorted by end_time descending (newest first)."""
+    """Get all arasuji entries sorted by end_time descending (newest first).
+
+    ``origin_track_id`` が NULL の entry だけを対象にする。Track Chronicle
+    (v0.32) は退役したが (track_retirement.md 住人 5)、**既存 DB には Track 由来の
+    行がそのまま残っている** — このフィルタを外すと、当時 Track 単位の作業メモ
+    として書かれた文章が一般 Chronicle として読まれてしまう。書き手が消えても
+    フィルタは残す。
+    """
     max_level = get_max_level(conn)
     all_entries: List[ArasujiEntry] = []
-
     for level in range(1, max_level + 1):
         entries = get_entries_by_level(conn, level, order_by_time=True)
-        all_entries.extend(entries)
+        all_entries.extend([e for e in entries if e.origin_track_id is None])
 
     # Sort by end_time descending (newest first)
     all_entries.sort(key=lambda e: e.end_time or 0, reverse=True)
@@ -56,9 +121,25 @@ def _find_arasuji_at_position(
 ) -> Optional[ArasujiEntry]:
     """Find the best arasuji that ends at or before the position time.
 
-    Selection priority:
-    1. Closest end_time to position_time (most recent)
-    2. If same end_time, prefer higher level (more compression)
+    **記憶の穴を作らないことが第一制約** (最前線への固定)。走査は
+    ``position_time`` を選んだ entry の start_time の手前へ動かしながら過去へ
+    降りていくので、「未読の entry を飛び越えて、より古い entry を選ぶ」と、
+    飛び越えた範囲は二度と候補にならない — その体験は誰にも記録されないまま
+    提示から落ちる。よって選べるのは常に **読み残しの最前線** (position_time
+    以前で end_time が最大の未読 entry) と同じ end_time を持つ entry に限る。
+
+    最前線を確定したうえで、同じ end_time の候補 (= 同じ範囲をどの粒度で見るか
+    の選択肢。上位 entry は子と end_time が揃う) の中から粒度を選ぶ:
+
+    1. ``max_allowed_level`` 以下の候補があれば、その中で最も粗い (level 最大)
+       ものを採る。これが圧縮 — 同じ範囲をより少ない字数で覆う。
+    2. 一つも無ければ、昇格制限より穴回避を優先し、候補中で最も細かい
+       (level 最小) ものを採る。粒度の見た目より記憶の連続性が上位。
+
+    予算に収める圧縮はこの走査では**行わない**。読むときに飛ばす形の圧縮は、
+    飛ばした範囲が二度と拾われず記憶が黙って落ちるため、読み切ったあとの
+    :func:`_compress_within_budget` (親 entry への置き換え = 範囲を保存する
+    圧縮) に分離してある。
 
     Args:
         entries: List of arasuji entries sorted by end_time descending
@@ -66,24 +147,35 @@ def _find_arasuji_at_position(
         max_allowed_level: Maximum level allowed (current_level + 1)
         read_ids: Set of entry IDs that have already been read or covered
     """
-    best: Optional[ArasujiEntry] = None
+    # entries は end_time 降順。最初に見つかる未読・position_time 以前の entry が
+    # 読み残しの最前線。
+    frontier: Optional[int] = None
     for entry in entries:
-        if entry.level > max_allowed_level:
-            continue
         if entry.id in read_ids:
             continue
         if entry.end_time is None or entry.end_time > position_time:
             continue
-        # Found a candidate
-        if best is None:
+        frontier = entry.end_time
+        break
+    if frontier is None:
+        return None
+
+    best: Optional[ArasujiEntry] = None
+    fallback: Optional[ArasujiEntry] = None
+    for entry in entries:
+        if entry.id in read_ids:
+            continue
+        if entry.end_time is None or entry.end_time != frontier:
+            continue
+        if entry.level > max_allowed_level:
+            # 昇格制限の外。穴回避のための最後の受け皿として最も細かいものを控える。
+            if fallback is None or entry.level < fallback.level:
+                fallback = entry
+            continue
+        # 昇格制限の内側。同じ範囲を覆う候補なので、粗いほど字数が減る。
+        if best is None or entry.level > best.level:
             best = entry
-        elif entry.end_time > best.end_time:
-            # Closer to position_time
-            best = entry
-        elif entry.end_time == best.end_time and entry.level > best.level:
-            # Same end_time, prefer higher level
-            best = entry
-    return best
+    return best if best is not None else fallback
 
 
 def _check_overlap(
@@ -105,70 +197,45 @@ def _check_overlap(
     return False
 
 
-def get_episode_context(
-    conn: sqlite3.Connection,
+def _traverse_episode(
+    all_arasuji: List[ArasujiEntry],
     *,
-    max_entries: int = 100,
-    include_raw_messages: bool = True,
+    min_entries_per_level: int,
+    max_entries: int,
+    start_position_time: int,
 ) -> List[ContextEntry]:
-    """Get episode context using the reverse level promotion algorithm.
+    """Run one backward traversal of the reverse level promotion algorithm.
 
-    Algorithm:
-    1. Start from the most recent position and go backwards in time
-    2. Current level starts at 0 (raw messages)
-    3. Level can only increase by +1 at a time
-    4. No overlap with already-read content is allowed (tracked by ID, not time range)
-    5. Prefer higher levels (compression) when available within allowed range
+    走査は「読み残しの最前線」を飛び越えないので (:func:`_find_arasuji_at_position`)、
+    **提示に穴が空かない**。予算に収める圧縮は :func:`_compress_within_budget` の
+    仕事で、この走査は関与しない。
 
-    This ensures:
-    - Recent events are remembered in detail (low level)
-    - Distant past is compressed (high level)
-    - No information gaps or duplicates
+    The loop always runs to the beginning of history (or ``max_entries``); the
+    char budget never terminates it early — that is what guarantees the oldest
+    entry is reached (不変条件 §10-4).
 
-    Args:
-        conn: Database connection
-        max_entries: Maximum number of context entries to return
-        include_raw_messages: Whether to include raw messages for unprocessed content
-
-    Returns:
-        List of ContextEntry objects, ordered from oldest to newest
+    Returns entries in newest-to-oldest order (caller reverses).
     """
     result: List[ContextEntry] = []
     read_ids: Set[str] = set()  # IDs of entries that have been read or covered
     current_level = 0  # Start at level 0 (raw messages)
+    level_counts: Dict[int, int] = {}  # Track how many entries read per level
 
-    # Get all arasuji sorted by end_time descending
-    all_arasuji = _get_all_arasuji_sorted(conn)
-
-    if not all_arasuji:
-        # No arasuji yet, return empty
-        return result
-
-    # Find the latest end_time across all arasuji
-    latest_arasuji = all_arasuji[0] if all_arasuji else None
-    if latest_arasuji is None or latest_arasuji.end_time is None:
-        return result
-
-    # Start position: just after the latest arasuji
-    # (raw messages after this are "unprocessed")
-    position_time = latest_arasuji.end_time
+    position_time = start_position_time
 
     # Main loop: traverse backwards in time
     while len(result) < max_entries:
-        # Try to find an arasuji at the allowed level
-        # We can go up to current_level + 1
-        found_entry: Optional[ArasujiEntry] = None
-        found_level = 0
-
-        # Find the best arasuji: closest end_time, then higher level if tied
+        # Find the best arasuji. We can go up to current_level + 1.
         max_allowed_level = current_level + 1
-        found_entry = _find_arasuji_at_position(all_arasuji, position_time, max_allowed_level, read_ids)
-        if found_entry:
-            found_level = found_entry.level
+        found_entry = _find_arasuji_at_position(
+            all_arasuji, position_time, max_allowed_level, read_ids,
+        )
 
         if found_entry is None:
             # No suitable arasuji found, we've reached the beginning
             break
+
+        found_level = found_entry.level
 
         # Add to result
         result.append(ContextEntry(
@@ -186,18 +253,411 @@ def get_episode_context(
         for source_id in found_entry.source_ids:
             read_ids.add(source_id)
 
-        # Update current level and position
-        current_level = found_level
-        # Subtract 1 to move to the position just before this entry's coverage
-        position_time = (found_entry.start_time or 0) - 1
+        # Update level count and check promotion eligibility
+        level_counts[found_level] = level_counts.get(found_level, 0) + 1
+        if level_counts.get(found_level, 0) >= min_entries_per_level:
+            # Read enough entries at this level, allow promotion
+            current_level = found_level
+        # else: stay at current_level (don't promote yet)
+
+        # 次の走査位置は原則「選んだ entry の被覆の直前」。ただし被覆が部分的に
+        # 重なっている未読 entry をそれで飛び越すと、その体験は以後どの周回でも
+        # 候補にならず黙って落ちる (選んだ entry がそれを覆っていないので、
+        #  代弁もされない)。飛び越し範囲にそういう entry が居るなら、その
+        # end_time まで戻して次の周回で拾う。戻し先は必ず現在の position_time
+        # 以下なので、走査の単調降下と結果の時系列降順は保たれる。
+        #
+        # 包含関係にある entry には戻さない。選んだ entry の内側なら代弁済み、
+        # 外側 (= 選んだ entry の親) なら子を既に読んでいるので、後から親を読むと
+        # 同じ体験が二重に出る。親の他の子は走査が更に古い側へ降りる過程で拾う。
+        next_position = (found_entry.start_time or 0) - 1
+        cover_start = found_entry.start_time
+        cover_end = found_entry.end_time
+        for other in all_arasuji:
+            if other.id in read_ids:
+                continue
+            if other.end_time is None or other.end_time > position_time:
+                continue
+            if other.end_time <= next_position:
+                continue
+            nested = (
+                cover_start is not None
+                and cover_end is not None
+                and other.start_time is not None
+                and (
+                    (cover_start <= other.start_time and other.end_time <= cover_end)
+                    or (other.start_time <= cover_start and cover_end <= other.end_time)
+                )
+            )
+            if not nested:
+                next_position = other.end_time
+        position_time = next_position
 
         if position_time <= 0:
             break
 
-    # Reverse to get oldest-to-newest order
-    result.reverse()
-
     return result
+
+
+def _traverse_episode_mass(
+    all_arasuji: List[ArasujiEntry],
+    coverage: Dict[str, int],
+    *,
+    max_entries: int,
+    start_position_time: int,
+    divisor: int = MASS_DIVISOR,
+) -> Tuple[List[ContextEntry], int]:
+    """累積質量ルールの走査 (予算モードの粒度選択、intent §6)。
+
+    新しい側から遡りながら、ここまでに見せた質量の累計 M を数える。次に
+    見せるノードには質量 >= M/divisor を求め、**満たす中で最も細かいもの**
+    を採る。どの候補も満たさなければ最も粗い候補をそのまま見せる (穴回避 —
+    穴は開けない。粒度の見た目より記憶の連続性が上位)。
+
+    骨格 (最前線への固定・部分重なりの巻き戻し) は :func:`_traverse_episode`
+    と同一で、粒度の選択だけが「離散レベル + 件数」から「質量」に変わる。
+
+    Returns:
+        (entries 新しい→古い順, 穴回避で下限未満を見せた件数)。穴回避の件数は
+        「本当は粗くしたいのに親が無い」= 束ねが追いついていない度の観測
+        メトリクス。
+    """
+    result: List[ContextEntry] = []
+    read_ids: Set[str] = set()
+    hole_picks = 0
+    cumulative_mass = 0
+    position_time = start_position_time
+
+    while len(result) < max_entries:
+        # 読み残しの最前線 (position_time 以前で end_time 最大の未読)。
+        frontier: Optional[int] = None
+        for entry in all_arasuji:  # end_time 降順
+            if entry.id in read_ids:
+                continue
+            if entry.end_time is None or entry.end_time > position_time:
+                continue
+            frontier = entry.end_time
+            break
+        if frontier is None:
+            break
+
+        candidates = [
+            e for e in all_arasuji
+            if e.id not in read_ids and e.end_time == frontier
+        ]
+        # 下限は「質量 >= M/divisor」。切り捨て除算 (M // divisor) は境界を
+        # 緩める (M=101 で質量10が通る) ので、整数のまま掛け算で厳密に比較する
+        # (Codex レビュー P1-4)。
+        satisfying = [
+            e for e in candidates
+            if coverage.get(e.id, 0) * divisor >= cumulative_mass
+        ]
+        if satisfying:
+            pick = min(
+                satisfying, key=lambda e: (coverage.get(e.id, 0), e.level),
+            )
+        else:
+            pick = max(
+                candidates, key=lambda e: (coverage.get(e.id, 0), e.level),
+            )
+            hole_picks += 1
+
+        result.append(ContextEntry(
+            level=pick.level,
+            content=pick.content,
+            start_time=pick.start_time,
+            end_time=pick.end_time,
+            message_count=pick.message_count,
+            source_id=pick.id,
+        ))
+        read_ids.add(pick.id)
+        for source_id in pick.source_ids:
+            read_ids.add(source_id)
+        cumulative_mass += coverage.get(pick.id, 0)
+
+        # 次の走査位置 (部分重なりの未読を飛び越さない — _traverse_episode と同じ)。
+        next_position = (pick.start_time or 0) - 1
+        cover_start = pick.start_time
+        cover_end = pick.end_time
+        for other in all_arasuji:
+            if other.id in read_ids:
+                continue
+            if other.end_time is None or other.end_time > position_time:
+                continue
+            if other.end_time <= next_position:
+                continue
+            nested = (
+                cover_start is not None
+                and cover_end is not None
+                and other.start_time is not None
+                and (
+                    (cover_start <= other.start_time and other.end_time <= cover_end)
+                    or (other.start_time <= cover_start and cover_end <= other.end_time)
+                )
+            )
+            if not nested:
+                next_position = other.end_time
+        position_time = next_position
+
+        if position_time <= 0:
+            break
+
+    return result, hole_picks
+
+
+def _episode_char_count(result: List[ContextEntry]) -> int:
+    """Approximate the rendered char cost of a set of entries.
+
+    Uses raw content length as a stable, formatting-agnostic proxy for the
+    budget (the format wrappers add a small fixed per-entry overhead which we
+    ignore — the budget only needs to be monotone in content volume).
+    """
+    return sum(len(e.content) for e in result)
+
+
+def _compress_within_budget(
+    result: List[ContextEntry],
+    all_arasuji: List[ArasujiEntry],
+    budget: int,
+) -> List[ContextEntry]:
+    """予算に収まるまで、古い側から親 entry への置き換えで粗くする。
+
+    置き換えは**被覆範囲を保存する** (親は自分の子の全範囲を覆う) ので、粒度が
+    粗くなるだけで体験は落ちない。これが「読むときに飛ばす」形の圧縮 (旧
+    昇格 ladder) との決定的な違い — あちらは飛ばした範囲が二度と候補にならず、
+    記憶が黙って消えていた (提示の穴)。
+
+    古い側から潰すので「最近は細かく、過去は粗く」も保たれる。置き換えるのは
+    **親の子が全員、結果の中で連続して並んでいるとき**に限る。一部しか居ない
+    親で置き換えると、その親は結果に残る他の entry と範囲が重なり、同じ体験が
+    二重に出る。
+
+    Args:
+        result: 走査結果 (新しい → 古い順)
+        all_arasuji: 親を引くための全 entry
+        budget: 文字数予算
+
+    Returns:
+        置き換え後の結果 (新しい → 古い順)。予算に収めきれない場合
+        (これ以上畳める親が無い) は、収まらないまま返す — 記憶の連続性が
+        軽量化より上位なので、削って穴を作ることはしない。
+    """
+    if budget <= 0 or _episode_char_count(result) <= budget:
+        return result
+
+    # 親は source_ids の逆引きで持つ。``parent_id`` 列は束ね時にしか入らないが、
+    # 被覆の正は source_ids 側 (走査の read_ids も source_ids で潰している)。
+    parent_of: Dict[str, ArasujiEntry] = {}
+    for candidate in all_arasuji:
+        for child_id in candidate.source_ids:
+            parent_of[child_id] = candidate
+
+    for _ in range(_MAX_COMPRESSION_ROUNDS):
+        if _episode_char_count(result) <= budget:
+            break
+        replaced = False
+        # 末尾 = 最も古い側から、同じ親を持つ連続群を探す。
+        i = len(result) - 1
+        while i >= 0:
+            parent = parent_of.get(result[i].source_id)
+            if parent is None:
+                i -= 1
+                continue
+            j = i
+            while j >= 0:
+                if parent_of.get(result[j].source_id) is not parent:
+                    break
+                j -= 1
+            group_ids = {result[k].source_id for k in range(j + 1, i + 1)}
+            if set(parent.source_ids) <= group_ids:
+                result = result[:j + 1] + [ContextEntry(
+                    level=parent.level,
+                    content=parent.content,
+                    start_time=parent.start_time,
+                    end_time=parent.end_time,
+                    message_count=parent.message_count,
+                    source_id=parent.id,
+                )] + result[i + 1:]
+                replaced = True
+                break
+            i = j
+        if not replaced:
+            break
+    return result
+
+
+def _reached_oldest(result: List[ContextEntry], all_arasuji: List[ArasujiEntry]) -> bool:
+    """Whether the traversal reached the earliest point in history.
+
+    True when the oldest entry in ``result`` starts at or before the earliest
+    start_time present in ``all_arasuji`` (i.e. the beginning of the story is
+    covered — 不変条件 §10-4).
+    """
+    if not result:
+        return False
+    starts = [e.start_time for e in all_arasuji if e.start_time is not None]
+    if not starts:
+        return True  # can't determine; treat as covered
+    earliest = min(starts)
+    # result is newest-to-oldest; last element is the oldest covered entry
+    oldest = result[-1]
+    return oldest.start_time is not None and oldest.start_time <= earliest
+
+
+def get_episode_context(
+    conn: sqlite3.Connection,
+    *,
+    max_entries: int = 100,
+    include_raw_messages: bool = True,
+    char_budget: Optional[int] = None,
+    exclude_entry_ids: Optional[Set[str]] = None,
+) -> List[ContextEntry]:
+    """Get episode context using the reverse level promotion algorithm.
+
+    Algorithm:
+    1. Start from the most recent position and go backwards in time
+    2. Current level starts at 0 (raw messages)
+    3. Level can only increase by +1 at a time
+    4. No overlap with already-read content is allowed (tracked by ID, not time range)
+    5. Prefer higher levels (compression) when available within allowed range
+
+    This ensures:
+    - Recent events are remembered in detail (low level)
+    - Distant past is compressed (high level)
+    - No information gaps or duplicates
+
+    Budget control (記憶アーキv2 §6.2 / intent chronicle_consolidation §6):
+    When ``char_budget`` is given (or the ``SAIVERSE_CHRONICLE_CHAR_BUDGET`` env
+    is set — see :func:`_resolve_char_budget`), granularity is chosen by the
+    **cumulative-mass rule** (:func:`_traverse_episode_mass`): walking newest to
+    oldest, the next node must carry mass >= (mass shown so far) / 10; the
+    finest satisfying candidate wins, and when none satisfies, the coarsest
+    available is shown anyway (hole avoidance — no gaps, ever). The traversal
+    never terminates on budget — the oldest entry is always reached. After the
+    walk, :func:`_compress_within_budget` collapses old entries into parents
+    until the budget is met; if no parent remains to collapse into, the
+    overflow is accepted and a WARNING is logged.
+
+    Backward compatibility: ``char_budget=None`` (the default) keeps the legacy
+    pure count-based behavior. To opt into budget mode with the env/default
+    value, pass ``char_budget=USE_DEFAULT_BUDGET``; to pin an explicit budget,
+    pass an int.
+
+    Args:
+        conn: Database connection
+        max_entries: Maximum number of context entries to return. Retained for
+            backward compatibility. When ``char_budget`` is active, ``max_entries``
+            still bounds the traversal (safety valve) but the budget is the
+            primary control and takes precedence.
+        include_raw_messages: Whether to include raw messages for unprocessed content
+        char_budget: ``None`` → legacy count-based behavior (no budget).
+            ``USE_DEFAULT_BUDGET`` → resolve from env / default (§6.2).
+            Explicit int → use that budget (0 disables → count-based).
+        exclude_entry_ids: 掲示から外すエントリ id。**提示提示コンテキストの中で digest に
+            置き換えて見せている範囲**を head の Chronicle 枠から外すために使う
+            (docs/intent/chronicle_eviction.md §6)。同じあらすじが提示コンテキストの中と head
+            の両方に出ると、体験が二重化して時系列の錯覚を招くため。
+
+    Returns:
+        List of ContextEntry objects, ordered from oldest to newest
+    """
+    # Get all arasuji sorted by end_time descending
+    all_arasuji = _get_all_arasuji_sorted(conn)
+    if exclude_entry_ids:
+        all_arasuji = [e for e in all_arasuji if e.id not in exclude_entry_ids]
+
+    if not all_arasuji:
+        # No arasuji yet, return empty
+        return []
+
+    # Find the latest end_time across all arasuji
+    latest_arasuji = all_arasuji[0]
+    if latest_arasuji.end_time is None:
+        return []
+
+    # Start position: just after the latest arasuji
+    # (raw messages after this are "unprocessed")
+    start_position_time = latest_arasuji.end_time
+
+    # Budget mode is opt-in: char_budget=None means legacy count-based.
+    effective_budget = _resolve_char_budget(char_budget) if char_budget is not None else 0
+
+    # Budget disabled (None or explicit 0): legacy pure count-based behavior.
+    if effective_budget <= 0:
+        result = _traverse_episode(
+            all_arasuji,
+            min_entries_per_level=MIN_ENTRIES_PER_LEVEL,
+            max_entries=max_entries,
+            start_position_time=start_position_time,
+        )
+        result.reverse()
+        return result
+
+    # Budget-driven: 穴を作らずに累積質量ルールで読み切ってから、予算に収まる
+    # まで親へ置き換える。走査と圧縮を分けているのが要点 — 読む側で飛ばす形の
+    # 圧縮は、飛ばした範囲が二度と拾われず記憶が黙って落ちる (提示の穴)。
+    from sai_memory.arasuji.bands import _coverage_index
+
+    coverage = _coverage_index(conn)
+    result, hole_picks = _traverse_episode_mass(
+        all_arasuji,
+        coverage,
+        max_entries=max_entries,
+        start_position_time=start_position_time,
+    )
+    result = _compress_within_budget(result, all_arasuji, effective_budget)
+
+    chars = _episode_char_count(result)
+    reached_oldest = _reached_oldest(result, all_arasuji)
+
+    if chars > effective_budget:
+        # これ以上畳める親が無い (未束ねの一次あらすじが並んでいる等)。超過を
+        # 受け入れる — 削れば体験が落ちるので、記憶の連続性を優先する。束ねが
+        # 効いていないサインでもあるので WARNING で観測可能にする。
+        LOGGER.warning(
+            "Chronicle char budget exceeded after parent-collapse compression: "
+            "%d chars > budget %d (entries=%d, reached_oldest=%s). Nothing was "
+            "dropped; no further parent is available to collapse into. Check "
+            "band consolidation (unconsolidated Lv1 backlog) or raise "
+            "SAIVERSE_CHRONICLE_CHAR_BUDGET (§6.2).",
+            chars, effective_budget, len(result), reached_oldest,
+        )
+
+    _log_episode_run(result, effective_budget, reached_oldest, hole_picks)
+
+    result.reverse()
+    return result
+
+
+def _log_episode_run(
+    result: List[ContextEntry],
+    budget: int,
+    reached_oldest: bool,
+    hole_picks: int = 0,
+) -> None:
+    """DEBUG log of a budget-driven run for budget tuning (§6.2 note 6).
+
+    Emits the adopted level distribution, char count, whether the oldest entry
+    was reached, and the hole-avoidance count (``hole_picks`` = 「粗くしたい
+    のに親が無い」件数 = 束ねが追いついていない度の観測メトリクス)。
+    """
+    if not LOGGER.isEnabledFor(logging.DEBUG):
+        return
+    level_dist: Dict[int, int] = {}
+    for e in result:
+        level_dist[e.level] = level_dist.get(e.level, 0) + 1
+    chars = _episode_char_count(result)
+    span = "?"
+    if result:
+        oldest = result[-1]
+        newest = result[0]
+        span = f"{_format_timestamp(oldest.start_time)} ~ {_format_timestamp(newest.end_time)}"
+    LOGGER.debug(
+        "Chronicle budget run: entries=%d chars=%d/%d level_dist=%s "
+        "span=[%s] reached_oldest=%s hole_picks=%d",
+        len(result), chars, budget,
+        dict(sorted(level_dist.items())), span, reached_oldest, hole_picks,
+    )
 
 
 def format_episode_context(
@@ -282,6 +742,7 @@ def get_episode_context_for_timerange(
     result: List[ContextEntry] = []
     read_ids: Set[str] = set()
     current_level = 0  # Start at level 0
+    level_counts: Dict[int, int] = {}  # Track how many entries read per level
 
     # Start just before the batch start time
     position_time = start_time - 1
@@ -309,8 +770,11 @@ def get_episode_context_for_timerange(
         for source_id in found_entry.source_ids:
             read_ids.add(source_id)
 
-        # Update position and level
-        current_level = found_entry.level
+        # Update level count and check promotion eligibility
+        level_counts[found_entry.level] = level_counts.get(found_entry.level, 0) + 1
+        if level_counts.get(found_entry.level, 0) >= MIN_ENTRIES_PER_LEVEL:
+            current_level = found_entry.level
+
         position_time = (found_entry.start_time or 0) - 1
 
         if position_time <= 0:

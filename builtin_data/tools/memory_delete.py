@@ -1,0 +1,87 @@
+"""Memory Atlas: ページをごみ箱へ移すスペル (統一スペル動詞 ``memory_delete``)。
+
+concept_consolidation.md P2c-0 決定1: core + Memopedia の soft-delete を統一する
+動詞。どちらのストアも soft-delete (コア記憶 = ``deleted_at`` / Memopedia =
+``is_deleted``) なので「ごみ箱に移動 — 完全には消えない」が事実。ごみ箱を漁る
+動詞 (閲覧・復元) は後回し (同決定)。
+
+対応 ref: ``c:N`` (コア記憶) / ``m:N`` (Memopedia)。``ch:N`` (編纂はシステム側) /
+``p:N`` (クリップは歴史として残る) / ``core`` 全体 / ``task:N`` (退役した目的の木の
+読み取り専用の残置) は消せない。削除したページが机に開いていたら机からも即時下ろす。
+"""
+from __future__ import annotations
+
+from saiverse import memory_atlas
+from tools.context import get_active_persona_id, open_persona_memory
+from tools.core import ToolSchema
+
+
+def memory_delete(ref: str) -> str:
+    """記憶の地図帳のページをごみ箱へ移す (soft-delete)。"""
+    persona_id = get_active_persona_id()
+    if not persona_id:
+        raise RuntimeError("Active persona is not set")
+
+    with open_persona_memory() as adapter:
+        if not adapter.is_ready():
+            raise RuntimeError(f"SAIMemory not ready for {persona_id}")
+        try:
+            # delete_page は生 conn を部分的に無ロックで触るため外側でロック
+            with adapter._db_lock:
+                result = memory_atlas.delete_page(adapter, ref)
+        except memory_atlas.AtlasRefError as exc:
+            return f"Error: {exc}"
+
+    _notify_mutation(ref, result)
+    return result
+
+
+def _notify_mutation(ref: str, result: str) -> None:
+    """head 操作の内容型通知 (§6-4): 成功時に該当 section の render 断片を全 Session 提示コンテキストへ。
+
+    宛先 c:N → core_memory、m:N → memopedia_index。失敗 (Error 文字列) や
+    head 非対象の ref は通知しない。ヘルパー側は決して raise しない。
+    """
+    if (result or "").startswith("Error"):
+        return
+    from sea.head_pipeline.notify import notify_head_mutation_from_tool_context
+
+    try:
+        kind, _key = memory_atlas._parse_ref(ref or "")
+    except Exception:
+        return
+    if kind == "core_one":
+        notify_head_mutation_from_tool_context(
+            "core_memory",
+            operation_label=f"コア記憶をごみ箱へ移しました ({ref})",
+        )
+    elif kind == "memopedia":
+        notify_head_mutation_from_tool_context(
+            "memopedia_index",
+            operation_label=f"Memopedia ページをごみ箱へ移しました ({ref})",
+        )
+
+
+def schema() -> ToolSchema:
+    return ToolSchema(
+        name="memory_delete",
+        description=(
+            "記憶の地図帳（Memory Atlas）のページをごみ箱に移動します"
+            "（完全に消えるわけではありません）。"
+            "対象は core:N（コア記憶1件）と memopedia:N（Memopedia ページ）です。"
+            "Chronicle（chronicle:N）とクリップ（clip:N）は消せません。"
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "ref": {
+                    "type": "string",
+                    "description": "ごみ箱へ移すページの参照（例: c:3 / m:5）",
+                },
+            },
+            "required": ["ref"],
+        },
+        result_type="string",
+        spell=True,
+        spell_display_name="記憶のページをごみ箱へ",
+    )

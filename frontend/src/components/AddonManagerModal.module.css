@@ -1,0 +1,990 @@
+.modal {
+    background: white;
+    border-radius: 1rem;
+    width: 900px;
+    max-width: 95vw;
+    max-height: 85vh;
+    /* iOS Safari の 100vh はアドレスバー非表示時の値を含むため、アドレスバー
+       展開中はコンテンツが可視領域を超えてスクロール不能になる。段階的に
+       より安全な単位にフォールバック:
+         - svh: small viewport height (最小値、常に安全)
+         - dvh: dynamic viewport height (リサイズに追従)
+       未対応環境は vh にフォールバック。 */
+    max-height: 85svh;
+    max-height: 85dvh;
+    display: flex;
+    flex-direction: column;
+    box-shadow: 0 8px 40px rgba(0, 0, 0, 0.15);
+    overflow: hidden;
+}
+
+.header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 1.25rem 1.5rem;
+    border-bottom: 1px solid rgba(0, 0, 0, 0.08);
+    flex-shrink: 0;
+}
+
+.headerTitle {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    color: #1e293b;
+}
+
+.headerTitle h2 {
+    margin: 0;
+    font-size: 1.1rem;
+    font-weight: 600;
+}
+
+/* タブ切替 (GlobalSettingsModal の subTab デザインを踏襲) */
+.tabRow {
+    display: flex;
+    gap: 4px;
+    padding: 0 1.5rem;
+    border-bottom: 1px solid rgba(0, 0, 0, 0.08);
+    flex-shrink: 0;
+}
+
+.tab {
+    padding: 10px 16px;
+    background: none;
+    border: none;
+    cursor: pointer;
+    color: inherit;
+    border-bottom: 2px solid transparent;
+    font-size: 0.9rem;
+    font-weight: normal;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.tab:hover {
+    background: rgba(0, 0, 0, 0.04);
+}
+
+.tabActive {
+    border-bottom-color: var(--primary, #4a7eb5);
+    font-weight: 500;
+}
+
+:global([data-theme="dark"]) .tab:hover {
+    background: rgba(255, 255, 255, 0.06);
+}
+
+.closeButton {
+    background: none;
+    border: none;
+    cursor: pointer;
+    color: #94a3b8;
+    padding: 0.25rem;
+    border-radius: 0.4rem;
+    display: flex;
+    align-items: center;
+    transition: color 0.15s;
+}
+
+.closeButton:hover {
+    color: #475569;
+}
+
+.content {
+    flex: 1;
+    overflow-y: auto;
+    /* iOS Safari 等のブラウザで flex child の overflow-y が効かないケースを
+       回避するための明示 min-height:0。これが無いと子要素の intrinsic height
+       が flex container に継承されてスクロール不能になる。 */
+    min-height: 0;
+    /* iOS Safari の慣性スクロールを有効化 */
+    -webkit-overflow-scrolling: touch;
+    /* モバイル: 縦スクロールのみ許可。touch-action を明示することで、
+       ブラウザは「このエリアは縦スクロール対象」と判断して JS の touch
+       イベントより先にネイティブスクロールを走らせる (親の touchmove
+       ハンドラが誤って間に入っても native scroll が優先される)。 */
+    touch-action: pan-y;
+    padding: 1rem 1.25rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+}
+
+/* flex-direction: column 内で子の AddonCard はデフォルト flex-shrink:1 で
+   縮められる。AddonCard を展開した時に内部が高くても親の content height に
+   合わせて潰され、scrollHeight = clientHeight になり overflow が発生せず
+   スクロールできない事象が起きる。flex-shrink:0 で本来の高さを保たせる。 */
+.content > * {
+    flex-shrink: 0;
+}
+
+/* --- Loading / Empty --- */
+
+.loadingText {
+    color: #94a3b8;
+    text-align: center;
+    padding: 2rem 0;
+    font-size: 0.9rem;
+}
+
+.emptyState {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 2.5rem 1rem;
+    color: #94a3b8;
+    text-align: center;
+}
+
+.emptyIcon {
+    opacity: 0.3;
+    margin-bottom: 0.25rem;
+}
+
+.emptyHint {
+    font-size: 0.8rem;
+    line-height: 1.5;
+}
+
+.errorState {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 2rem 1rem;
+    color: #ef4444;
+    text-align: center;
+    font-size: 0.9rem;
+}
+
+.errorDetail {
+    font-size: 0.75rem;
+    color: #94a3b8;
+    word-break: break-all;
+    font-family: monospace;
+}
+
+/* --- Addon Card --- */
+
+.addonCard {
+    border: 1px solid rgba(0, 0, 0, 0.08);
+    border-radius: 0.75rem;
+    overflow: hidden;
+    transition: border-color 0.15s;
+}
+
+.addonCard:hover {
+    border-color: rgba(0, 0, 0, 0.14);
+}
+
+.addonCard.disabled {
+    opacity: 0.65;
+}
+
+.addonCardHeader {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.8rem 1rem;
+    cursor: default;
+    user-select: none;
+}
+
+.expandBtn {
+    background: none;
+    border: none;
+    cursor: pointer;
+    color: #94a3b8;
+    padding: 0.1rem;
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    border-radius: 0.25rem;
+    transition: color 0.15s;
+}
+
+.expandBtn:hover {
+    color: #475569;
+}
+
+.addonMeta {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+    min-width: 0;
+    cursor: pointer;
+}
+
+.addonMetaRow {
+    display: flex;
+    align-items: baseline;
+    gap: 0.5rem;
+    min-width: 0;
+}
+
+.addonName {
+    font-size: 0.95rem;
+    font-weight: 500;
+    color: #1e293b;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.addonVersion {
+    font-size: 0.75rem;
+    color: #94a3b8;
+    flex-shrink: 0;
+}
+
+.addonDesc {
+    font-size: 0.78rem;
+    color: #64748b;
+    line-height: 1.4;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+}
+
+.addonCardBody {
+    padding: 0 1rem 0.9rem 1rem;
+    border-top: 1px solid rgba(0, 0, 0, 0.06);
+}
+
+.disabledNote {
+    font-size: 0.85rem;
+    color: #94a3b8;
+    padding-top: 0.75rem;
+    margin: 0;
+}
+
+/* --- Toggle --- */
+
+.enabledToggle {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    cursor: pointer;
+    flex-shrink: 0;
+}
+
+.toggleInput {
+    opacity: 0;
+    width: 0;
+    height: 0;
+    position: absolute;
+}
+
+.toggleSlider {
+    display: inline-block;
+    width: 38px;
+    height: 22px;
+    background: #cbd5e1;
+    border-radius: 11px;
+    position: relative;
+    transition: background 0.2s;
+    flex-shrink: 0;
+}
+
+.toggleSlider::after {
+    content: '';
+    position: absolute;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: white;
+    top: 3px;
+    left: 3px;
+    transition: transform 0.2s;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+}
+
+.toggleInput:checked + .toggleSlider {
+    background: #6366f1;
+}
+
+.toggleInput:checked + .toggleSlider::after {
+    transform: translateX(16px);
+}
+
+/* --- ParamsSection --- */
+
+.paramsSection {
+    padding-top: 0.75rem;
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+}
+
+.noParams {
+    font-size: 0.85rem;
+    color: #94a3b8;
+    margin: 0.5rem 0 0;
+}
+
+.paramsGroup {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.paramsGroupLabel {
+    font-size: 0.78rem;
+    font-weight: 600;
+    color: #64748b;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: 0.25rem;
+}
+
+.paramRow {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    min-height: 2rem;
+}
+
+.paramLabel {
+    font-size: 0.88rem;
+    color: #374151;
+    flex: 1;
+}
+
+.savingHint {
+    font-size: 0.78rem;
+    color: #94a3b8;
+    margin-top: 0.25rem;
+}
+
+/* --- Advanced (詳細設定) folding section --- */
+
+.advancedSection {
+    margin-top: 0.5rem;
+    padding-top: 0.5rem;
+    border-top: 1px dashed var(--border-color);
+}
+
+.advancedToggle {
+    background: transparent;
+    border: none;
+    padding: 0.3rem 0;
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+    cursor: pointer;
+    text-align: left;
+    width: 100%;
+}
+
+.advancedToggle:hover {
+    color: var(--text-primary);
+}
+
+.advancedBody {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    margin-top: 0.5rem;
+    padding-left: 0.5rem;
+    border-left: 2px solid var(--border-color);
+}
+
+/* --- Dropdown / Select --- */
+
+.select {
+    font-size: 0.85rem;
+    padding: 0.3rem 0.5rem;
+    border: 1px solid #e2e8f0;
+    border-radius: 0.4rem;
+    background: white;
+    color: #374151;
+    cursor: pointer;
+    min-width: 120px;
+}
+
+/* --- Slider --- */
+
+.sliderRow {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.slider {
+    width: 120px;
+    cursor: pointer;
+    accent-color: #6366f1;
+}
+
+.sliderValue {
+    font-size: 0.82rem;
+    color: #64748b;
+    min-width: 2.5rem;
+    text-align: right;
+}
+
+/* --- File --- */
+
+.fileDropArea {
+    position: relative;
+    border: 1px dashed #cbd5e1;
+    border-radius: 0.5rem;
+    padding: 0.4rem 0.7rem;
+    font-size: 0.82rem;
+    color: #64748b;
+    cursor: pointer;
+    min-width: 140px;
+    text-align: center;
+    transition: border-color 0.15s;
+}
+
+.fileDropArea:hover {
+    border-color: #6366f1;
+}
+
+.fileDropText {
+    pointer-events: none;
+}
+
+.fileInput {
+    display: none;
+}
+
+/* --- Text / Number --- */
+
+.textInput,
+.numberInput {
+    padding: 0.3rem 0.5rem;
+    border: 1px solid #cbd5e1;
+    border-radius: 0.375rem;
+    font-size: 0.85rem;
+    background: transparent;
+    color: inherit;
+    min-width: 120px;
+    outline: none;
+    transition: border-color 0.15s;
+}
+
+.textInput:focus,
+.numberInput:focus {
+    border-color: #6366f1;
+}
+
+.numberInput {
+    min-width: 80px;
+    max-width: 120px;
+}
+
+/* --- Secret 項目 (API キー / トークン) の入力欄 + 削除ボタン ---
+   色は fileDeleteBtn と同じ中間グレー系で、明暗どちらのテーマでも読める
+   ため [data-theme="dark"] の上書きは置いていない。 */
+
+.secretInputRow {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+}
+
+.secretDeleteBtn {
+    background: none;
+    border: none;
+    color: #94a3b8;
+    cursor: pointer;
+    padding: 0.2rem;
+    border-radius: 0.25rem;
+    display: flex;
+    align-items: center;
+    flex-shrink: 0;
+}
+
+.secretDeleteBtn:hover {
+    color: #ef4444;
+    background: rgba(239, 68, 68, 0.1);
+}
+
+.unsupported {
+    font-size: 0.8rem;
+    color: #94a3b8;
+}
+
+/* --- Accordion paramRow (schema.collapsible) --- */
+
+.paramRowAccordion {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+    border: 1px solid rgba(0, 0, 0, 0.06);
+    border-radius: 0.5rem;
+    padding: 0.4rem 0.5rem;
+}
+
+.paramRowAccordionHeader {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    background: none;
+    border: none;
+    padding: 0.15rem 0.1rem;
+    cursor: pointer;
+    color: #475569;
+    width: 100%;
+    text-align: left;
+}
+
+.paramRowAccordionHeader:hover {
+    color: #1e293b;
+}
+
+.paramRowAccordionHeader .paramLabel {
+    flex: 1;
+    font-size: 0.88rem;
+    color: inherit;
+}
+
+.paramRowAccordionBody {
+    padding: 0.1rem 0.1rem 0.2rem 1.4rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+}
+
+/* --- Dict (key/value table) --- */
+
+/* dict 型は通常の行レイアウトでは横幅が足りないため、ラベルを上、コントロールを下の縦積みに切替える */
+.paramRowStacked {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0.4rem;
+}
+
+.dictControl {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+    width: 100%;
+}
+
+.dictHeader {
+    display: flex;
+    gap: 0.4rem;
+    font-size: 0.7rem;
+    color: #94a3b8;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    padding: 0 0.1rem;
+}
+
+.dictHeaderCell {
+    flex: 1;
+    min-width: 0;
+}
+
+.dictHeaderSpacer {
+    width: 1.6rem;
+    flex-shrink: 0;
+}
+
+.dictRow {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+}
+
+.dictKeyInput,
+.dictValueInput {
+    flex: 1;
+    min-width: 0;
+    padding: 0.3rem 0.5rem;
+    border: 1px solid #cbd5e1;
+    border-radius: 0.375rem;
+    font-size: 0.85rem;
+    background: transparent;
+    color: inherit;
+    outline: none;
+    transition: border-color 0.15s;
+}
+
+.dictKeyInput:focus,
+.dictValueInput:focus {
+    border-color: #6366f1;
+}
+
+.dictDeleteBtn {
+    background: none;
+    border: none;
+    color: #94a3b8;
+    cursor: pointer;
+    padding: 0.2rem;
+    border-radius: 0.25rem;
+    display: flex;
+    align-items: center;
+    flex-shrink: 0;
+}
+
+.dictDeleteBtn:hover {
+    color: #ef4444;
+    background: rgba(239, 68, 68, 0.1);
+}
+
+.dictAddBtn {
+    align-self: flex-start;
+    background: none;
+    border: 1px dashed #cbd5e1;
+    border-radius: 0.375rem;
+    padding: 0.3rem 0.6rem;
+    font-size: 0.78rem;
+    color: #64748b;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    transition: border-color 0.15s, color 0.15s;
+}
+
+.dictAddBtn:hover {
+    border-color: #6366f1;
+    color: #6366f1;
+}
+
+.dictEmpty {
+    font-size: 0.78rem;
+    color: #94a3b8;
+    padding: 0.2rem 0;
+}
+
+/* --- FileControl --- */
+
+.fileControl {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+    min-width: 200px;
+}
+
+.filePreviewRow {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.audioPreview {
+    max-width: 220px;
+    height: 32px;
+}
+
+.imagePreview {
+    max-width: 120px;
+    max-height: 80px;
+    border-radius: 0.375rem;
+    object-fit: contain;
+}
+
+.fileNameDisplay {
+    font-size: 0.8rem;
+    color: #64748b;
+    word-break: break-all;
+}
+
+.fileDeleteBtn {
+    background: none;
+    border: none;
+    color: #94a3b8;
+    cursor: pointer;
+    padding: 0.2rem;
+    border-radius: 0.25rem;
+    display: flex;
+    align-items: center;
+}
+
+.fileDeleteBtn:hover {
+    color: #ef4444;
+    background: rgba(239, 68, 68, 0.1);
+}
+
+.fileUploading {
+    opacity: 0.5;
+    pointer-events: none;
+}
+
+.fileError {
+    font-size: 0.75rem;
+    color: #ef4444;
+}
+
+.fileHint {
+    font-size: 0.72rem;
+    color: #94a3b8;
+    display: block;
+}
+
+/* --- Persona config --- */
+
+.personaSection {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.personaSectionHeader {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.personaSelector {
+    flex: 1;
+    padding: 0.4rem 0.6rem;
+    font-size: 0.88rem;
+    border: 1px solid #e2e8f0;
+    border-radius: 0.4rem;
+    background: #ffffff;
+    color: #374151;
+    cursor: pointer;
+    transition: border-color 0.15s;
+}
+
+.personaSelector:hover {
+    border-color: #6366f1;
+}
+
+.personaSelector:focus {
+    outline: none;
+    border-color: #6366f1;
+    box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.15);
+}
+
+.personaConfigBlock {
+    border: 1px solid #e2e8f0;
+    border-radius: 0.5rem;
+    padding: 0.6rem 0.75rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+}
+
+/* toggle used standalone (inside ParamsSection) */
+.toggleLabel {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    cursor: pointer;
+}
+
+/* ------------------------------------------------------------------ */
+/* Dark mode                                                            */
+/* ------------------------------------------------------------------ */
+
+:global([data-theme="dark"]) .modal {
+    background: #1e293b;
+    box-shadow: 0 8px 40px rgba(0, 0, 0, 0.5);
+}
+
+:global([data-theme="dark"]) .header {
+    border-bottom-color: rgba(255, 255, 255, 0.08);
+}
+
+:global([data-theme="dark"]) .headerTitle {
+    color: #e2e8f0;
+}
+
+:global([data-theme="dark"]) .closeButton {
+    color: #64748b;
+}
+
+:global([data-theme="dark"]) .closeButton:hover {
+    color: #94a3b8;
+}
+
+:global([data-theme="dark"]) .addonCard {
+    border-color: rgba(255, 255, 255, 0.08);
+}
+
+:global([data-theme="dark"]) .addonCard:hover {
+    border-color: rgba(255, 255, 255, 0.14);
+}
+
+:global([data-theme="dark"]) .addonCardBody {
+    border-top-color: rgba(255, 255, 255, 0.06);
+}
+
+:global([data-theme="dark"]) .addonName {
+    color: #e2e8f0;
+}
+
+:global([data-theme="dark"]) .addonVersion {
+    color: #64748b;
+}
+
+:global([data-theme="dark"]) .addonDesc {
+    color: #94a3b8;
+}
+
+:global([data-theme="dark"]) .expandBtn {
+    color: #64748b;
+}
+
+:global([data-theme="dark"]) .expandBtn:hover {
+    color: #94a3b8;
+}
+
+:global([data-theme="dark"]) .paramsGroupLabel {
+    color: #94a3b8;
+}
+
+:global([data-theme="dark"]) .paramLabel {
+    color: #cbd5e1;
+}
+
+:global([data-theme="dark"]) .savingHint,
+:global([data-theme="dark"]) .noParams,
+:global([data-theme="dark"]) .disabledNote {
+    color: #64748b;
+}
+
+:global([data-theme="dark"]) .select {
+    background: #0f172a;
+    border-color: #334155;
+    color: #e2e8f0;
+}
+
+:global([data-theme="dark"]) .textInput,
+:global([data-theme="dark"]) .numberInput {
+    border-color: #334155;
+    color: #e2e8f0;
+}
+
+:global([data-theme="dark"]) .textInput:focus,
+:global([data-theme="dark"]) .numberInput:focus {
+    border-color: #6366f1;
+}
+
+:global([data-theme="dark"]) .fileDropArea {
+    border-color: #334155;
+    color: #94a3b8;
+}
+
+:global([data-theme="dark"]) .fileDropArea:hover {
+    border-color: #6366f1;
+}
+
+:global([data-theme="dark"]) .fileNameDisplay {
+    color: #94a3b8;
+}
+
+:global([data-theme="dark"]) .personaSelector {
+    background: #0f172a;
+    border-color: #334155;
+    color: #e2e8f0;
+}
+
+:global([data-theme="dark"]) .personaSelector:hover {
+    border-color: #6366f1;
+}
+
+:global([data-theme="dark"]) .personaConfigBlock {
+    border-color: #334155;
+}
+
+:global([data-theme="dark"]) .toggleSlider {
+    background: #334155;
+}
+
+:global([data-theme="dark"]) .emptyState {
+    color: #64748b;
+}
+
+:global([data-theme="dark"]) .dictKeyInput,
+:global([data-theme="dark"]) .dictValueInput {
+    border-color: #334155;
+    color: #e2e8f0;
+}
+
+:global([data-theme="dark"]) .dictKeyInput:focus,
+:global([data-theme="dark"]) .dictValueInput:focus {
+    border-color: #6366f1;
+}
+
+:global([data-theme="dark"]) .dictAddBtn {
+    border-color: #334155;
+    color: #94a3b8;
+}
+
+:global([data-theme="dark"]) .dictAddBtn:hover {
+    border-color: #6366f1;
+    color: #6366f1;
+}
+
+:global([data-theme="dark"]) .paramRowAccordion {
+    border-color: rgba(255, 255, 255, 0.08);
+}
+
+:global([data-theme="dark"]) .paramRowAccordionHeader {
+    color: #94a3b8;
+}
+
+:global([data-theme="dark"]) .paramRowAccordionHeader:hover {
+    color: #e2e8f0;
+}
+
+/* --- Mobile (narrow viewport) --- */
+
+/* 狭いビューポートでは label + 入力を横並びにすると、長いラベル (例:
+   「出力オーディオデバイス」) が 1 文字ずつ縦積みに折り返される事象が発生する
+   (paramLabel の flex:1 が押し潰されて幅 < 1 字分になるため)。
+   縦並びに切り替えて、ラベル行 → 入力行の 2 段構成にする。 */
+@media (max-width: 600px) {
+    .paramRow {
+        flex-direction: column;
+        align-items: stretch;
+        gap: 0.35rem;
+    }
+    .paramLabel {
+        flex: initial;
+    }
+    .select,
+    .textInput,
+    .numberInput {
+        min-width: 0;
+        width: 100%;
+    }
+    .sliderRow {
+        width: 100%;
+    }
+    .slider {
+        flex: 1;
+    }
+    .secretInputRow {
+        width: 100%;
+    }
+    /* 上の .textInput { width: 100% } のままだと削除ボタンぶんが溢れるので、
+       flex-basis 側で幅を決めさせる */
+    .secretInputRow .textInput {
+        flex: 1;
+        min-width: 0;
+    }
+    .fileControl,
+    .fileDropArea {
+        width: 100%;
+    }
+}
+
+/* モバイル: モーダル内部 nested scroll は iOS Safari で効かないため、
+   オーバーレイ側のスクロールに委ねる構造に切替える。モーダル自体は
+   max-height を解除して自然な高さに、content の overflow-y:auto も外す。
+   こうすることでコンテンツ全体がドキュメントフローに乗り、オーバーレイの
+   overflow-y:auto で確実にスクロールできるようになる。 */
+@media (max-width: 768px) {
+    .modal {
+        max-height: none;
+        max-width: 100vw;
+        width: 100%;
+        border-radius: 0;
+    }
+    .content {
+        overflow-y: visible;
+        min-height: 0;
+    }
+}

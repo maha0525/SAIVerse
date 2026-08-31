@@ -2,13 +2,9 @@
   "model": "openai/gpt-oss-120b",
   "system_prompt": "",
   "display_name": "GPT-OSS 120B (NIM)",
-  "provider": "nvidia_nim",
+  "provider_ref": "nvidia_nim",
   "supports_structured_output": false,
   "context_length": 120000,
-  "default_max_history_messages": 50,
-  "metabolism_keep_messages": 30,
-  "base_url": "https://integrate.api.nvidia.com/v1",
-  "api_key_env": "NVIDIA_API_KEY",
   "convert_system_to_user": true,
   "parameters": {
     "temperature": {

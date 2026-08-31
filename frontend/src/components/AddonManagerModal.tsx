@@ -1,0 +1,1234 @@
+"use client";
+
+import React, { useState, useEffect, useCallback, useRef, Suspense } from 'react';
+import { X, Package, ChevronDown, ChevronRight, Trash2, Plus, Store } from 'lucide-react';
+import ModalOverlay from './common/ModalOverlay';
+import MCPSection from './MCPSection';
+import ActionsPanel from './ActionsPanel';
+import OAuthFlowSection, { OAuthFlow } from './OAuthFlowSection';
+import { ADDON_PANELS } from '../addon-panels.generated';
+import AddonCatalogPanel from './AddonCatalogPanel';
+import styles from './AddonManagerModal.module.css';
+
+// ---------------------------------------------------------------------------
+// Types (mirroring backend Pydantic models)
+// ---------------------------------------------------------------------------
+
+interface AddonParamSchema {
+    key: string;
+    label: string;
+    description?: string;
+    type: 'toggle' | 'text' | 'password' | 'number' | 'dropdown' | 'slider' | 'file' | 'dict';
+    default: unknown;
+    persona_configurable: boolean;
+    placeholder?: string;
+    options?: string[];
+    options_endpoint?: string;
+    min?: number;
+    max?: number;
+    step?: number;
+    value_type?: 'int' | 'float';
+    accept?: string;
+    max_size_mb?: number;
+    preview?: 'audio' | 'image';
+    // 任意: true でこの行をアコーディオン (折り畳み可能) として描画する。
+    // 大きな入力 UI (dict など) や上級者向け項目を普段は折り畳んでおきたい用途で使う。
+    collapsible?: boolean;
+    default_collapsed?: boolean;  // 初期状態 (collapsible=true 時のみ意味がある)。既定 true。
+    // 任意: true の項目は「詳細設定」 セクションにまとめて折り畳まれる。
+    // default や ${runtime.*} で自動解決される値、 通常触らない host/port/
+    // token などに付与する。 個別の collapsible とは別軸 (= グループ折り
+    // 畳み vs 個別行折り畳み)。
+    advanced?: boolean;
+}
+
+interface AddonInfo {
+    addon_name: string;
+    display_name: string;
+    description: string;
+    version: string;
+    is_enabled: boolean;
+    params_schema: AddonParamSchema[];
+    params: Record<string, unknown>;
+    // API キー・トークンなど伏せ字で返る項目の「値が入っているか」。
+    // サーバー側 (_secret_param_keys) が唯一の判定者なので、UI は
+    // キー名から推測せずこの辞書だけを見る。
+    secret_is_set?: Record<string, boolean>;
+    ui_extensions: {
+        bubble_buttons: unknown[];
+        input_buttons: unknown[];
+    };
+    oauth_flows?: OAuthFlow[];
+}
+
+interface PersonaPersonaConfig {
+    persona_id: string;
+    persona_name: string;
+    params: Record<string, unknown>;
+    secret_is_set: Record<string, boolean>;
+}
+
+interface AddonManagerModalProps {
+    isOpen: boolean;
+    onClose: () => void;
+}
+
+// ---------------------------------------------------------------------------
+// ParamControl — renders a single parameter according to its schema type
+// ---------------------------------------------------------------------------
+
+function ParamControl({
+    schema,
+    value,
+    onChange,
+    addonName,
+    personaId,
+    secretIsSet,
+    onDeleteSecret,
+}: {
+    schema: AddonParamSchema;
+    value: unknown;
+    onChange: (key: string, val: unknown) => void;
+    addonName?: string;
+    personaId?: string;
+    // この項目が「伏せ字で返る値」で、かつ実際に値が保存されているとき true。
+    // サーバーの secret_is_set をそのまま渡す。
+    secretIsSet?: boolean;
+    onDeleteSecret?: () => void;
+}) {
+    const current = value !== undefined ? value : schema.default;
+
+    switch (schema.type) {
+        case 'toggle':
+            return (
+                <label className={styles.toggleLabel}>
+                    <input
+                        type="checkbox"
+                        className={styles.toggleInput}
+                        checked={!!current}
+                        onChange={(e) => onChange(schema.key, e.target.checked)}
+                    />
+                    <span className={styles.toggleSlider} />
+                </label>
+            );
+
+        case 'text':
+        case 'password':
+            return (
+                <TextParamControl
+                    schema={schema}
+                    value={current}
+                    masked={schema.type === 'password'}
+                    onChange={onChange}
+                    secretIsSet={secretIsSet}
+                    onDeleteSecret={onDeleteSecret}
+                />
+            );
+
+        case 'number': {
+            const num = typeof current === 'number' ? current : Number(current ?? schema.min ?? 0);
+            return (
+                <input
+                    type="number"
+                    className={styles.numberInput}
+                    value={num}
+                    min={schema.min}
+                    max={schema.max}
+                    step={schema.step ?? 1}
+                    placeholder={schema.placeholder ?? ''}
+                    onChange={(e) => {
+                        const v = schema.value_type === 'int'
+                            ? parseInt(e.target.value, 10)
+                            : parseFloat(e.target.value);
+                        onChange(schema.key, isNaN(v) ? schema.default : v);
+                    }}
+                />
+            );
+        }
+
+        case 'dropdown':
+            return (
+                <DropdownParamControl
+                    schema={schema}
+                    value={current}
+                    onChange={onChange}
+                    addonName={addonName}
+                />
+            );
+
+        case 'slider': {
+            const min = schema.min ?? 0;
+            const max = schema.max ?? 100;
+            const step = schema.step ?? 1;
+            const snum = typeof current === 'number' ? current : Number(current ?? min);
+            return (
+                <div className={styles.sliderRow}>
+                    <input
+                        type="range"
+                        className={styles.slider}
+                        min={min}
+                        max={max}
+                        step={step}
+                        value={snum}
+                        onChange={(e) => {
+                            const v = schema.value_type === 'int'
+                                ? parseInt(e.target.value, 10)
+                                : parseFloat(e.target.value);
+                            onChange(schema.key, v);
+                        }}
+                    />
+                    <span className={styles.sliderValue}>{snum}</span>
+                </div>
+            );
+        }
+
+        case 'file':
+            return (
+                <FileParamControl
+                    schema={schema}
+                    value={current}
+                    onChange={onChange}
+                    addonName={addonName}
+                    personaId={personaId}
+                />
+            );
+
+        case 'dict':
+            return (
+                <DictParamControl
+                    schema={schema}
+                    value={current}
+                    onChange={onChange}
+                />
+            );
+
+        default:
+            return <span className={styles.unsupported}>（未対応の型: {schema.type}）</span>;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// TextParamControl — 1 行テキスト入力 (text / password 共通)
+//
+// API キーやトークンはサーバーが伏せ字 (********) にして返すので、欄に見えて
+// いる文字は本物の値ではない。 そのため欄を空にして保存しても、サーバーは
+// 「触っていない」と判断して元の値を書き戻す (= 消えない)。 削除の意思表示は
+// 値 null を送ることでしか行えないので、その口をこのボタンとして出す。
+// ---------------------------------------------------------------------------
+
+function TextParamControl({
+    schema,
+    value,
+    masked,
+    onChange,
+    secretIsSet,
+    onDeleteSecret,
+}: {
+    schema: AddonParamSchema;
+    value: unknown;
+    masked: boolean;
+    onChange: (key: string, val: unknown) => void;
+    secretIsSet?: boolean;
+    onDeleteSecret?: () => void;
+}) {
+    const input = (
+        <input
+            type={masked ? 'password' : 'text'}
+            className={styles.textInput}
+            value={String(value ?? '')}
+            placeholder={schema.placeholder ?? ''}
+            autoComplete={masked ? 'off' : undefined}
+            onChange={(e) => onChange(schema.key, e.target.value)}
+        />
+    );
+
+    // 値が保存されている secret 項目にだけ削除ボタンを出す
+    if (!secretIsSet || !onDeleteSecret) return input;
+
+    const handleDelete = () => {
+        const ok = window.confirm(
+            `保存されている「${schema.label}」を削除します。\n\n`
+            + '画面には伏せ字でしか表示されないため、ここから元の値を取り戻すことはできません。\n'
+            + '発行元から取得し直すことになります。よろしいですか？'
+        );
+        if (ok) onDeleteSecret();
+    };
+
+    return (
+        <div className={styles.secretInputRow}>
+            {input}
+            <button
+                type="button"
+                className={styles.secretDeleteBtn}
+                onClick={handleDelete}
+                title="保存されている値を削除する"
+                aria-label={`${schema.label} を削除`}
+            >
+                <Trash2 size={13} />
+            </button>
+        </div>
+    );
+}
+
+// ---------------------------------------------------------------------------
+// DropdownParamControl — static options or dynamically fetched from addon API
+// ---------------------------------------------------------------------------
+
+function DropdownParamControl({
+    schema,
+    value,
+    onChange,
+    addonName,
+}: {
+    schema: AddonParamSchema;
+    value: unknown;
+    onChange: (key: string, val: unknown) => void;
+    addonName?: string;
+}) {
+    const [dynamicOptions, setDynamicOptions] = useState<string[] | null>(null);
+    const [loading, setLoading] = useState(false);
+
+    useEffect(() => {
+        if (!schema.options_endpoint || !addonName) return;
+        const ep = schema.options_endpoint;
+        const url = ep.startsWith('/') ? ep : `/api/addon/${addonName}/${ep}`;
+        setLoading(true);
+        fetch(url)
+            .then((r) => r.json())
+            .then((data) => {
+                // 想定レスポンス: {"options": [...]} または [...]（プレーン配列）
+                const opts: unknown = Array.isArray(data) ? data : data?.options;
+                if (Array.isArray(opts)) {
+                    setDynamicOptions(opts.map((o) => String(o)));
+                }
+            })
+            .catch(() => setDynamicOptions([]))
+            .finally(() => setLoading(false));
+    }, [schema.options_endpoint, addonName]);
+
+    const options = dynamicOptions ?? schema.options ?? [];
+    const current = value !== undefined ? value : schema.default;
+
+    return (
+        <select
+            className={styles.select}
+            value={String(current ?? '')}
+            onChange={(e) => onChange(schema.key, e.target.value)}
+            disabled={loading}
+        >
+            {loading && <option value="">読み込み中...</option>}
+            {!loading && options.length === 0 && <option value="">（選択肢なし）</option>}
+            {!loading && options.map((opt) => (
+                <option key={opt} value={opt}>{opt}</option>
+            ))}
+        </select>
+    );
+}
+
+// ---------------------------------------------------------------------------
+// DictParamControl — editable key/value table for dict-type params
+//
+// addon.json で `type: "dict"` を指定したパラメータを編集するための UI。
+// 値は `Record<string, string>` として保存される (現バージョンは値型 string のみ)。
+// 既存値に非文字列が含まれていた場合は表示時に String() で文字列化される。
+// ---------------------------------------------------------------------------
+
+function DictParamControl({
+    schema,
+    value,
+    onChange,
+}: {
+    schema: AddonParamSchema;
+    value: unknown;
+    onChange: (key: string, val: unknown) => void;
+}) {
+    type Row = { id: number; k: string; v: string };
+
+    const nextIdRef = React.useRef<number>(0);
+    const [rows, setRows] = React.useState<Row[]>(() => {
+        const dict = (value && typeof value === 'object' && !Array.isArray(value))
+            ? (value as Record<string, unknown>)
+            : {};
+        const initial = Object.entries(dict).map(([k, v]) => ({
+            id: nextIdRef.current++,
+            k,
+            v: typeof v === 'string' ? v : String(v ?? ''),
+        }));
+        return initial;
+    });
+
+    const commit = (next: Row[]) => {
+        const dict: Record<string, string> = {};
+        for (const r of next) {
+            const k = r.k.trim();
+            if (!k) continue;
+            dict[k] = r.v;
+        }
+        onChange(schema.key, dict);
+    };
+
+    const updateRow = (id: number, patch: Partial<Pick<Row, 'k' | 'v'>>) => {
+        setRows((prev) => {
+            const next = prev.map((r) => r.id === id ? { ...r, ...patch } : r);
+            commit(next);
+            return next;
+        });
+    };
+
+    const addRow = () => {
+        setRows((prev) => [...prev, { id: nextIdRef.current++, k: '', v: '' }]);
+        // 新規空行は commit しない (空キーはサーバ送信時に除外されるため)
+    };
+
+    const deleteRow = (id: number) => {
+        setRows((prev) => {
+            const next = prev.filter((r) => r.id !== id);
+            commit(next);
+            return next;
+        });
+    };
+
+    return (
+        <div className={styles.dictControl}>
+            {rows.length > 0 && (
+                <div className={styles.dictHeader}>
+                    <span className={styles.dictHeaderCell}>キー（誤読される語）</span>
+                    <span className={styles.dictHeaderCell}>値（読ませたい表記）</span>
+                    <span className={styles.dictHeaderSpacer} />
+                </div>
+            )}
+            {rows.length === 0 && (
+                <span className={styles.dictEmpty}>(エントリなし)</span>
+            )}
+            {rows.map((row) => (
+                <div key={row.id} className={styles.dictRow}>
+                    <input
+                        type="text"
+                        className={styles.dictKeyInput}
+                        value={row.k}
+                        placeholder="key"
+                        onChange={(e) => updateRow(row.id, { k: e.target.value })}
+                    />
+                    <input
+                        type="text"
+                        className={styles.dictValueInput}
+                        value={row.v}
+                        placeholder="value"
+                        onChange={(e) => updateRow(row.id, { v: e.target.value })}
+                    />
+                    <button
+                        className={styles.dictDeleteBtn}
+                        onClick={() => deleteRow(row.id)}
+                        title="この行を削除"
+                        type="button"
+                    >
+                        <Trash2 size={13} />
+                    </button>
+                </div>
+            ))}
+            <button
+                className={styles.dictAddBtn}
+                onClick={addRow}
+                type="button"
+            >
+                <Plus size={13} /> 追加
+            </button>
+        </div>
+    );
+}
+
+// ---------------------------------------------------------------------------
+// FileParamControl — file upload / preview / delete
+// ---------------------------------------------------------------------------
+
+function FileParamControl({
+    schema,
+    value,
+    onChange,
+    addonName,
+    personaId,
+}: {
+    schema: AddonParamSchema;
+    value: unknown;
+    onChange: (key: string, val: unknown) => void;
+    addonName?: string;
+    personaId?: string;
+}) {
+    const [uploading, setUploading] = React.useState(false);
+    const [error, setError] = React.useState<string | null>(null);
+    const [previewUrl, setPreviewUrl] = React.useState<string | null>(null);
+    const fileInputRef = React.useRef<HTMLInputElement>(null);
+
+    const hasFile = !!value;
+    const canUpload = !!addonName && !!personaId;
+
+    // Build API URLs
+    const fileApiBase = canUpload
+        ? `/api/addon/${addonName}/config/persona/${encodeURIComponent(personaId!)}/file/${schema.key}`
+        : null;
+
+    // Set preview URL when file exists
+    React.useEffect(() => {
+        if (hasFile && fileApiBase) {
+            setPreviewUrl(fileApiBase);
+        } else {
+            setPreviewUrl(null);
+        }
+    }, [hasFile, fileApiBase]);
+
+    const handleUpload = async (file: File) => {
+        if (!fileApiBase) return;
+        setUploading(true);
+        setError(null);
+        try {
+            const formData = new FormData();
+            formData.append('file', file);
+            const res = await fetch(fileApiBase, {
+                method: 'POST',
+                body: formData,
+            });
+            if (!res.ok) {
+                const body = await res.json().catch(() => ({ detail: res.statusText }));
+                throw new Error(body.detail || `Upload failed: ${res.status}`);
+            }
+            const data = await res.json();
+            onChange(schema.key, data.path);
+        } catch (err) {
+            setError(err instanceof Error ? err.message : 'Upload failed');
+        } finally {
+            setUploading(false);
+        }
+    };
+
+    const handleDelete = async () => {
+        if (!fileApiBase) return;
+        setError(null);
+        try {
+            const res = await fetch(fileApiBase, { method: 'DELETE' });
+            if (!res.ok) {
+                const body = await res.json().catch(() => ({ detail: res.statusText }));
+                throw new Error(body.detail || `Delete failed: ${res.status}`);
+            }
+            onChange(schema.key, undefined);
+            setPreviewUrl(null);
+        } catch (err) {
+            setError(err instanceof Error ? err.message : 'Delete failed');
+        }
+    };
+
+    const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+        const f = e.target.files?.[0];
+        if (f) handleUpload(f);
+        if (e.target) e.target.value = '';
+    };
+
+    const handleDrop = (e: React.DragEvent) => {
+        e.preventDefault();
+        const f = e.dataTransfer.files[0];
+        if (f) handleUpload(f);
+    };
+
+    return (
+        <div className={styles.fileControl}>
+            {/* Current file info + preview */}
+            {hasFile && previewUrl && (
+                <div className={styles.filePreviewRow}>
+                    {schema.preview === 'audio' && (
+                        <audio controls src={previewUrl} className={styles.audioPreview}>
+                            <track kind="captions" />
+                        </audio>
+                    )}
+                    {schema.preview === 'image' && (
+                        <img src={previewUrl} alt={schema.label} className={styles.imagePreview} />
+                    )}
+                    {!schema.preview && (
+                        <span className={styles.fileNameDisplay}>
+                            {String(value).split(/[\\/]/).pop()}
+                        </span>
+                    )}
+                    <button
+                        className={styles.fileDeleteBtn}
+                        onClick={handleDelete}
+                        title="削除（デフォルトに戻す）"
+                    >
+                        <Trash2 size={13} />
+                    </button>
+                </div>
+            )}
+
+            {/* Upload area */}
+            <div
+                className={`${styles.fileDropArea} ${uploading ? styles.fileUploading : ''}`}
+                onDragOver={(e) => e.preventDefault()}
+                onDrop={handleDrop}
+                onClick={() => fileInputRef.current?.click()}
+            >
+                <span className={styles.fileDropText}>
+                    {uploading
+                        ? 'アップロード中...'
+                        : hasFile
+                            ? 'ファイルを差し替え'
+                            : 'ファイルをドロップ or クリック'}
+                </span>
+                {schema.description && !hasFile && (
+                    <span className={styles.fileHint}>{schema.description}</span>
+                )}
+                <input
+                    ref={fileInputRef}
+                    type="file"
+                    style={{ display: 'none' }}
+                    accept={schema.accept}
+                    onChange={handleFileSelect}
+                />
+            </div>
+
+            {/* Error display */}
+            {error && <span className={styles.fileError}>{error}</span>}
+
+            {/* Size limit hint */}
+            {!hasFile && schema.max_size_mb && (
+                <span className={styles.fileHint}>
+                    最大 {schema.max_size_mb >= 1024 ? `${(schema.max_size_mb / 1024).toFixed(1)} GB` : `${schema.max_size_mb} MB`}
+                    {schema.accept && ` / ${schema.accept.split(',').map(t => t.split('/')[1]).join(', ')}`}
+                </span>
+            )}
+        </div>
+    );
+}
+
+// ---------------------------------------------------------------------------
+// ParamRow — paramLabel + control の 1 行。schema.collapsible が true のとき
+// アコーディオン (折り畳み可能なヘッダ + ボディ) として描画する。
+// ---------------------------------------------------------------------------
+
+function ParamRow({
+    schema,
+    children,
+}: {
+    schema: AddonParamSchema;
+    children: React.ReactNode;
+}) {
+    const isCollapsible = !!schema.collapsible;
+    const [collapsed, setCollapsed] = useState<boolean>(
+        isCollapsible ? (schema.default_collapsed ?? true) : false
+    );
+
+    if (isCollapsible) {
+        return (
+            <div className={styles.paramRowAccordion}>
+                <button
+                    type="button"
+                    className={styles.paramRowAccordionHeader}
+                    onClick={() => setCollapsed((v) => !v)}
+                    aria-expanded={!collapsed}
+                >
+                    {collapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
+                    <span className={styles.paramLabel}>{schema.label}</span>
+                </button>
+                {!collapsed && (
+                    <div className={styles.paramRowAccordionBody}>
+                        {children}
+                    </div>
+                )}
+            </div>
+        );
+    }
+
+    return (
+        <div className={`${styles.paramRow} ${schema.type === 'dict' ? styles.paramRowStacked : ''}`}>
+            <span className={styles.paramLabel}>{schema.label}</span>
+            {children}
+        </div>
+    );
+}
+
+// ---------------------------------------------------------------------------
+// ParamsSection — list of parameters with global + per-persona sections
+// ---------------------------------------------------------------------------
+
+function ParamsSection({
+    addon,
+    personas,
+}: {
+    addon: AddonInfo;
+    personas: { id: string; name: string }[];
+}) {
+    const [globalParams, setGlobalParams] = useState<Record<string, unknown>>(addon.params ?? {});
+
+    // 外部から AddonConfig が更新された場合 (= addon panel 内で内部的に
+    // params を書き換えた、 例: stackchan-addon のペアリング操作で
+    // master_token を rotate) は、 親 (AddonManagerModal) が addon を再
+    // fetch して props.addon.params を新しい値で渡してくる。 ここで state
+    // を追従させないと UI 表示が古いまま (= まはー指摘の不整合)。
+    useEffect(() => {
+        setGlobalParams(addon.params ?? {});
+    }, [addon.params]);
+
+    // 「値が保存されている secret 項目」の一覧。削除ボタンの出し分けに使う。
+    const [globalSecretIsSet, setGlobalSecretIsSet] = useState<Record<string, boolean>>(
+        addon.secret_is_set ?? {},
+    );
+    useEffect(() => {
+        setGlobalSecretIsSet(addon.secret_is_set ?? {});
+    }, [addon.secret_is_set]);
+
+    const [personaConfigs, setPersonaConfigs] = useState<PersonaPersonaConfig[]>([]);
+    const [saving, setSaving] = useState(false);
+    const [selectedPersonaId, setSelectedPersonaId] = useState<string>('');
+
+    const configurableSchemas = addon.params_schema.filter((s) => !s.persona_configurable);
+    const basicSchemas = configurableSchemas.filter((s) => !s.advanced);
+    const advancedSchemas = configurableSchemas.filter((s) => s.advanced);
+    const personaConfigurableSchemas = addon.params_schema.filter((s) => s.persona_configurable);
+    const oauthFlows = addon.oauth_flows ?? [];
+    const hasOAuthFlows = oauthFlows.length > 0;
+    const hasPersonaSection = personaConfigurableSchemas.length > 0 || hasOAuthFlows;
+    const [showAdvanced, setShowAdvanced] = useState(false);
+
+    // 保存は 1 本の鎖に並べて順番に流す。
+    //
+    // 入力のたびに await せず PUT を投げていたため、続けて編集すると**到着順が
+    // 逆転して古い body が後から着き、新しい編集を消す**ことがあった。グローバル
+    // 側は body 全体を保存する形なので影響が大きく、鍵の削除と別項目の編集が
+    // 前後すると、消したはずの鍵が古い実値で復活しうる (Codex 2026-08-30)。
+    const saveChainRef = useRef<Promise<unknown>>(Promise.resolve());
+    const enqueueSave = <T,>(task: () => Promise<T>): Promise<T> => {
+        const next = saveChainRef.current.then(task, task);
+        // 鎖は失敗で切らさない (1 回の失敗で以降の保存が止まらないように)
+        saveChainRef.current = next.then(() => undefined, () => undefined);
+        return next;
+    };
+
+    // 保存（グローバル）。成功したかどうかを返す (削除操作の巻き戻し判定に使う)
+    const saveGlobal = useCallback(async (params: Record<string, unknown>): Promise<boolean> => {
+        setSaving(true);
+        try {
+            const res = await fetch(`/api/addon/${addon.addon_name}/config`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ params }),
+            });
+            if (!res.ok) {
+                const body = await res.json().catch(() => ({}));
+                throw new Error(body.detail || `Save failed: ${res.status}`);
+            }
+            return true;
+        } catch (err) {
+            alert(err instanceof Error ? err.message : 'Addon config save failed');
+            return false;
+        } finally {
+            setSaving(false);
+        }
+    }, [addon.addon_name]);
+
+    const handleGlobalChange = (key: string, val: unknown) => {
+        const next = { ...globalParams, [key]: val };
+        setGlobalParams(next);
+        void enqueueSave(() => saveGlobal(next));
+    };
+
+    /**
+     * secret 項目 (API キー等) の削除。値 null が「消す」の意思表示で、
+     * 空欄は「触っていない」と解釈されて元の値が書き戻される (サーバー側の
+     * update_addon_config を参照)。保存に失敗したら見た目を元に戻す。
+     */
+    const deleteGlobalSecret = async (key: string) => {
+        const previousValue = globalParams[key];
+        const next = { ...globalParams, [key]: null };
+        setGlobalParams(next);
+        setGlobalSecretIsSet((prev) => ({ ...prev, [key]: false }));
+        const ok = await enqueueSave(() => saveGlobal(next));
+        if (!ok) {
+            // 戻すのは「この鍵だけ」、しかも**待つ間に誰も触っていなければ**。
+            // 丸ごと巻き戻すと他項目の編集を巻き添えにし、無条件に戻すと同じ鍵へ
+            // 打ち直した新しい入力を古い値で上書きする (Codex 2026-08-30)。
+            setGlobalParams((prev) => (
+                prev[key] === null ? { ...prev, [key]: previousValue } : prev
+            ));
+            setGlobalSecretIsSet((prev) => ({ ...prev, [key]: true }));
+        }
+    };
+
+    // ペルソナ設定のロード（per-persona params がある時だけ取得）
+    useEffect(() => {
+        if (personaConfigurableSchemas.length === 0) return;
+        Promise.all(
+            personas.map((p) =>
+                fetch(`/api/addon/${addon.addon_name}/config/persona/${p.id}`)
+                    .then((r) => r.json())
+                    .then((data) => ({
+                        persona_id: p.id,
+                        persona_name: p.name,
+                        params: data.params ?? {},
+                        secret_is_set: data.secret_is_set ?? {},
+                    }))
+            )
+        ).then((configs) => {
+            // 全 persona 分を保持。空なら defaults でレンダーされるので filter しない
+            setPersonaConfigs(configs);
+        });
+    }, [addon.addon_name, personas, personaConfigurableSchemas.length]);
+
+    /**
+     * 1キー単位で merge 保存する。API 側は merge セマンティクスなので、
+     * 既存の他キー (OAuth トークン等) は破壊されない。
+     */
+    const savePersona = async (personaId: string, partial: Record<string, unknown>): Promise<boolean> => {
+        try {
+            const res = await fetch(`/api/addon/${addon.addon_name}/config/persona/${personaId}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ params: partial }),
+            });
+            if (!res.ok) {
+                const body = await res.json().catch(() => ({}));
+                throw new Error(body.detail || `Save failed: ${res.status}`);
+            }
+            return true;
+        } catch (err) {
+            alert(err instanceof Error ? err.message : 'Persona config save failed');
+            return false;
+        }
+    };
+
+    const handlePersonaChange = (personaId: string, key: string, val: unknown) => {
+        setPersonaConfigs((prev) => {
+            const idx = prev.findIndex((c) => c.persona_id === personaId);
+            if (idx >= 0) {
+                return prev.map((c) =>
+                    c.persona_id === personaId ? { ...c, params: { ...c.params, [key]: val } } : c
+                );
+            }
+            // まだ personaConfigs に居なければ新規エントリ
+            const personaName = personas.find((p) => p.id === personaId)?.name ?? personaId;
+            return [
+                ...prev,
+                { persona_id: personaId, persona_name: personaName, params: { [key]: val }, secret_is_set: {} },
+            ];
+        });
+        // merge 保存: 変更したキーだけ送る (順序が逆転しないよう鎖に並べる)
+        void enqueueSave(() => savePersona(personaId, { [key]: val }));
+    };
+
+    /**
+     * ペルソナ別 secret 項目の削除。グローバル側と同じく null が「消す」の
+     * 意思表示で、空欄では消えない。失敗したら見た目を元に戻す。
+     */
+    const deletePersonaSecret = async (personaId: string, key: string) => {
+        const previousValue = personaConfigs
+            .find((c) => c.persona_id === personaId)?.params[key];
+        setPersonaConfigs((cur) =>
+            cur.map((c) =>
+                c.persona_id === personaId
+                    ? {
+                        ...c,
+                        params: { ...c.params, [key]: null },
+                        secret_is_set: { ...c.secret_is_set, [key]: false },
+                    }
+                    : c
+            )
+        );
+        const ok = await enqueueSave(() => savePersona(personaId, { [key]: null }));
+        if (!ok) {
+            // グローバル側と同じ理由で、戻すのはこの鍵だけ、かつ待つ間に
+            // 触られていないときだけ。
+            setPersonaConfigs((cur) =>
+                cur.map((c) => {
+                    if (c.persona_id !== personaId) return c;
+                    if (c.params[key] !== null) return c;   // 待つ間に編集された
+                    return {
+                        ...c,
+                        params: { ...c.params, [key]: previousValue },
+                        secret_is_set: { ...c.secret_is_set, [key]: true },
+                    };
+                })
+            );
+        }
+    };
+
+    if (configurableSchemas.length === 0 && !hasPersonaSection) {
+        return <p className={styles.noParams}>設定項目はありません</p>;
+    }
+
+    // 選択中ペルソナの params。未保存ペルソナでは空 dict を使い、各 ParamControl が default にフォールバックする
+    const selectedPersonaConfig = personaConfigs.find((c) => c.persona_id === selectedPersonaId);
+    const selectedPersonaParams: Record<string, unknown> = selectedPersonaConfig?.params ?? {};
+    const selectedPersonaSecretIsSet: Record<string, boolean> = selectedPersonaConfig?.secret_is_set ?? {};
+
+    return (
+        <div className={styles.paramsSection}>
+            {/* Global params: 通常設定 + 詳細設定 (折りたたみ) */}
+            {configurableSchemas.length > 0 && (
+                <div className={styles.paramsGroup}>
+                    <div className={styles.paramsGroupLabel}>デフォルト（全ペルソナ共通）</div>
+                    {basicSchemas.map((schema) => (
+                        <ParamRow key={schema.key} schema={schema}>
+                            <ParamControl
+                                schema={schema}
+                                value={globalParams[schema.key]}
+                                onChange={handleGlobalChange}
+                                addonName={addon.addon_name}
+                                secretIsSet={globalSecretIsSet[schema.key]}
+                                onDeleteSecret={() => deleteGlobalSecret(schema.key)}
+                            />
+                        </ParamRow>
+                    ))}
+                    {advancedSchemas.length > 0 && (
+                        <div className={styles.advancedSection}>
+                            <button
+                                type="button"
+                                className={styles.advancedToggle}
+                                onClick={() => setShowAdvanced((v) => !v)}
+                                aria-expanded={showAdvanced}
+                            >
+                                {showAdvanced ? '▼' : '▶'} 詳細設定 ({advancedSchemas.length})
+                            </button>
+                            {showAdvanced && (
+                                <div className={styles.advancedBody}>
+                                    {advancedSchemas.map((schema) => (
+                                        <ParamRow key={schema.key} schema={schema}>
+                                            <ParamControl
+                                                schema={schema}
+                                                value={globalParams[schema.key]}
+                                                onChange={handleGlobalChange}
+                                                addonName={addon.addon_name}
+                                                secretIsSet={globalSecretIsSet[schema.key]}
+                                                onDeleteSecret={() => deleteGlobalSecret(schema.key)}
+                                            />
+                                        </ParamRow>
+                                    ))}
+                                </div>
+                            )}
+                        </div>
+                    )}
+                    {saving && <span className={styles.savingHint}>保存中...</span>}
+                </div>
+            )}
+
+            {/* Per-persona section: per-persona params + OAuth flows are aligned to the same selected persona */}
+            {hasPersonaSection && (
+                <div className={styles.personaSection}>
+                    <div className={styles.personaSectionHeader}>
+                        <span className={styles.paramsGroupLabel}>ペルソナ別設定</span>
+                    </div>
+
+                    <select
+                        className={styles.personaSelector}
+                        value={selectedPersonaId}
+                        onChange={(e) => setSelectedPersonaId(e.target.value)}
+                    >
+                        <option value="">-- ペルソナを選択 --</option>
+                        {personas.map((p) => (
+                            <option key={p.id} value={p.id}>{p.name}</option>
+                        ))}
+                    </select>
+
+                    {selectedPersonaId && (
+                        <>
+                            {/* Per-persona params: 未保存でも default 値で編集可能 */}
+                            {personaConfigurableSchemas.length > 0 && (
+                                <div className={styles.personaConfigBlock}>
+                                    {personaConfigurableSchemas.map((schema) => (
+                                        <ParamRow key={schema.key} schema={schema}>
+                                            <ParamControl
+                                                schema={schema}
+                                                value={selectedPersonaParams[schema.key]}
+                                                onChange={(key, val) => handlePersonaChange(selectedPersonaId, key, val)}
+                                                addonName={addon.addon_name}
+                                                personaId={selectedPersonaId}
+                                                secretIsSet={selectedPersonaSecretIsSet[schema.key]}
+                                                onDeleteSecret={() => deletePersonaSecret(selectedPersonaId, schema.key)}
+                                            />
+                                        </ParamRow>
+                                    ))}
+                                </div>
+                            )}
+
+                            {/* OAuth flows: 選択中ペルソナに紐付く外部サービス連携 */}
+                            {hasOAuthFlows && (
+                                <OAuthFlowSection
+                                    addonName={addon.addon_name}
+                                    flows={oauthFlows}
+                                    personaId={selectedPersonaId}
+                                />
+                            )}
+                        </>
+                    )}
+                </div>
+            )}
+        </div>
+    );
+}
+
+// ---------------------------------------------------------------------------
+// AddonCard — single addon row with expand/collapse
+// ---------------------------------------------------------------------------
+
+function AddonCard({
+    addon,
+    personas,
+    onToggleEnabled,
+    onConfigChanged,
+}: {
+    addon: AddonInfo;
+    personas: { id: string; name: string }[];
+    /** ``mcpSettled`` = 戻った時点で MCP 側の反映が終わっていたか。
+     *  false なら畳んでいる途中、null なら待っていない (有効化)。 */
+    onToggleEnabled: (addonName: string, enabled: boolean, mcpSettled?: boolean | null) => void;
+    onConfigChanged?: () => void | Promise<void>;
+}) {
+    const [expanded, setExpanded] = useState(false);
+
+    const handleToggle = async (e: React.ChangeEvent<HTMLInputElement>) => {
+        const enabled = e.target.checked;
+        try {
+            const res = await fetch(`/api/addon/${addon.addon_name}/enabled`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ is_enabled: enabled }),
+            });
+            if (!res.ok) {
+                const body = await res.json().catch(() => ({}));
+                throw new Error(body.detail || `Toggle failed: ${res.status}`);
+            }
+            const body = await res.json().catch(() => ({}));
+            onToggleEnabled(addon.addon_name, enabled, body.mcp_settled ?? null);
+        } catch (err) {
+            alert(err instanceof Error ? err.message : 'Addon toggle failed');
+        }
+    };
+
+    return (
+        <div className={`${styles.addonCard} ${!addon.is_enabled ? styles.disabled : ''}`}>
+            <div className={styles.addonCardHeader}>
+                <button
+                    className={styles.expandBtn}
+                    onClick={() => setExpanded((v) => !v)}
+                    aria-label={expanded ? '折りたたむ' : '展開する'}
+                >
+                    {expanded ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+                </button>
+                <div className={styles.addonMeta} onClick={() => setExpanded((v) => !v)}>
+                    <div className={styles.addonMetaRow}>
+                        <span className={styles.addonName}>{addon.display_name || addon.addon_name}</span>
+                        {addon.version && (
+                            <span className={styles.addonVersion}>v{addon.version}</span>
+                        )}
+                    </div>
+                    {addon.description && (
+                        <span className={styles.addonDesc}>{addon.description}</span>
+                    )}
+                </div>
+                <label className={styles.enabledToggle} onClick={(e) => e.stopPropagation()}>
+                    <input
+                        type="checkbox"
+                        className={styles.toggleInput}
+                        checked={addon.is_enabled}
+                        onChange={handleToggle}
+                    />
+                    <span className={styles.toggleSlider} />
+                </label>
+            </div>
+            {expanded && addon.is_enabled && (
+                <div className={styles.addonCardBody}>
+                    <ParamsSection addon={addon} personas={personas} />
+                    <MCPSection addonName={addon.addon_name} defaultCollapsed={true} />
+                    <ActionsPanel addonName={addon.addon_name} />
+                    {(() => {
+                        const AddonPanel = ADDON_PANELS[addon.addon_name];
+                        if (!AddonPanel) return null;
+                        return (
+                            <Suspense fallback={<p className={styles.loadingText}>Loading panel...</p>}>
+                                <AddonPanel
+                                    addon={{
+                                        addon_name: addon.addon_name,
+                                        display_name: addon.display_name,
+                                        version: addon.version,
+                                        description: addon.description,
+                                    }}
+                                    personas={personas}
+                                    addonApiBase={`/api/addon/${addon.addon_name}`}
+                                    onConfigChanged={onConfigChanged}
+                                />
+                            </Suspense>
+                        );
+                    })()}
+                </div>
+            )}
+            {expanded && !addon.is_enabled && (
+                <div className={styles.addonCardBody}>
+                    <p className={styles.disabledNote}>アドオンが無効です。有効にすると設定を変更できます。</p>
+                </div>
+            )}
+        </div>
+    );
+}
+
+// ---------------------------------------------------------------------------
+// AddonManagerModal — main modal
+// ---------------------------------------------------------------------------
+
+type AddonManagerTab = 'installed' | 'catalog';
+
+export default function AddonManagerModal({ isOpen, onClose }: AddonManagerModalProps) {
+    const [activeTab, setActiveTab] = useState<AddonManagerTab>('installed');
+    const [addons, setAddons] = useState<AddonInfo[]>([]);
+    const [personas, setPersonas] = useState<{ id: string; name: string }[]>([]);
+    const [loading, setLoading] = useState(false);
+    const [fetchError, setFetchError] = useState<string | null>(null);
+    // アドオンのトグルを MCP セクションへ伝えるための数。進めると取り直す。
+    const [mcpRefreshKey, setMcpRefreshKey] = useState(0);
+    // 畳み終わりを待ち切れなかったときの、遅れての取り直しタイマー。
+    // モーダルを閉じたら止める (閉じた後に状態を触らない)。
+    const settleTimerRef = useRef<number | null>(null);
+    useEffect(() => () => {
+        if (settleTimerRef.current !== null) {
+            window.clearTimeout(settleTimerRef.current);
+        }
+    }, []);
+
+    // addons のみ再 fetch。 addon panel 内で AddonConfig が内部的に書き
+    // 換わった (= stackchan-addon のペアリング操作で master_token rotate)
+    // 時に呼んで、 ParamsSection の表示を最新値に追従させる。
+    const refetchAddons = useCallback(async (): Promise<void> => {
+        try {
+            const r = await fetch('/api/addon/');
+            if (!r.ok) throw new Error(`/api/addon/ ${r.status} ${r.statusText}`);
+            const addonData = await r.json();
+            setAddons(Array.isArray(addonData) ? addonData : []);
+        } catch (err: unknown) {
+            const msg = err instanceof Error ? err.message : String(err);
+            console.error('[AddonManager] refetchAddons failed:', msg);
+        }
+    }, []);
+
+    useEffect(() => {
+        if (!isOpen) return;
+        setLoading(true);
+        setFetchError(null);
+        Promise.all([
+            fetch('/api/addon/').then((r) => {
+                if (!r.ok) throw new Error(`/api/addon/ ${r.status} ${r.statusText}`);
+                return r.json();
+            }),
+            fetch('/api/people/').then((r) => {
+                if (!r.ok) throw new Error(`/api/people/ ${r.status} ${r.statusText}`);
+                return r.json();
+            }),
+        ]).then(([addonData, peopleData]) => {
+            setAddons(Array.isArray(addonData) ? addonData : []);
+            const list = Array.isArray(peopleData)
+                ? peopleData.map((p: { id?: string; AIID?: string; name?: string; AINAME?: string }) => ({
+                    id: p.id ?? p.AIID ?? '',
+                    name: p.name ?? p.AINAME ?? p.id ?? '',
+                }))
+                : [];
+            setPersonas(list);
+        }).catch((err: unknown) => {
+            const msg = err instanceof Error ? err.message : String(err);
+            setFetchError(msg);
+            console.error('[AddonManager] fetch failed:', msg);
+        }).finally(() => setLoading(false));
+    }, [isOpen]);
+
+    const handleToggleEnabled = (
+        addonName: string,
+        enabled: boolean,
+        mcpSettled?: boolean | null,
+    ) => {
+        setAddons((prev) =>
+            prev.map((a) => a.addon_name === addonName ? { ...a, is_enabled: enabled } : a)
+        );
+        // MCP セクションはアドオンカードの外に居るので、自分ではトグルに
+        // 気づけない。ここで取り直しを促さないと、無効にしたアドオンの
+        // サーバー行がモーダルを開き直すまで残る。
+        setMcpRefreshKey((k) => k + 1);
+
+        // 反映が終わったと言い切れない回は、いま取り直したものが最終形とは
+        // 限らない。少し置いてもう一度取り直す。
+        //   false = 待ち切れなかった (畳んでいる途中)
+        //   null  = そもそも待っていない (有効化。サーバー登録との競合で
+        //           行がまだ出ていないことがある)
+        if (mcpSettled !== true) {
+            if (settleTimerRef.current !== null) {
+                window.clearTimeout(settleTimerRef.current);
+            }
+            settleTimerRef.current = window.setTimeout(() => {
+                settleTimerRef.current = null;
+                setMcpRefreshKey((k) => k + 1);
+            }, 3000);
+        }
+    };
+
+    if (!isOpen) return null;
+
+    return (
+        <ModalOverlay onClose={onClose}>
+            <div className={styles.modal} onClick={(e) => e.stopPropagation()}>
+                <div className={styles.header}>
+                    <div className={styles.headerTitle}>
+                        <Package size={22} />
+                        <h2>アドオン管理</h2>
+                    </div>
+                    <button className={styles.closeButton} onClick={onClose}>
+                        <X size={20} />
+                    </button>
+                </div>
+
+                <div className={styles.tabRow}>
+                    <button
+                        className={`${styles.tab} ${activeTab === 'installed' ? styles.tabActive : ''}`}
+                        onClick={() => setActiveTab('installed')}
+                    >
+                        <Package size={14} /> 導入済み
+                    </button>
+                    <button
+                        className={`${styles.tab} ${activeTab === 'catalog' ? styles.tabActive : ''}`}
+                        onClick={() => setActiveTab('catalog')}
+                    >
+                        <Store size={14} /> カタログ
+                    </button>
+                </div>
+
+                <div className={styles.content}>
+                    {activeTab === 'installed' && (
+                        <>
+                            {!loading && !fetchError && (
+                                <MCPSection defaultCollapsed={true} refreshKey={mcpRefreshKey} />
+                            )}
+                            {loading && <p className={styles.loadingText}>読み込み中...</p>}
+                            {!loading && fetchError && (
+                                <div className={styles.errorState}>
+                                    <p>読み込みに失敗しました</p>
+                                    <p className={styles.errorDetail}>{fetchError}</p>
+                                </div>
+                            )}
+                            {!loading && !fetchError && addons.length === 0 && (
+                                <div className={styles.emptyState}>
+                                    <Package size={40} className={styles.emptyIcon} />
+                                    <p>インストール済みのアドオンはありません</p>
+                                    <p className={styles.emptyHint}>
+                                        「カタログ」タブから導入できます
+                                    </p>
+                                </div>
+                            )}
+                            {!loading && addons.map((addon) => (
+                                <AddonCard
+                                    key={addon.addon_name}
+                                    addon={addon}
+                                    personas={personas}
+                                    onToggleEnabled={handleToggleEnabled}
+                                    onConfigChanged={refetchAddons}
+                                />
+                            ))}
+                        </>
+                    )}
+
+                    {activeTab === 'catalog' && (
+                        <AddonCatalogPanel onInstalledChanged={refetchAddons} />
+                    )}
+                </div>
+            </div>
+        </ModalOverlay>
+    );
+}

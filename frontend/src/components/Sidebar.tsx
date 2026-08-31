@@ -1,12 +1,13 @@
 "use client";
 
-import { useEffect, useState, useRef } from 'react';
+import { useEffect, useState, useRef, type ReactNode } from 'react';
 import styles from './Sidebar.module.css';
-import { Settings, Zap, BarChart2, UserPlus, Plus, X, HelpCircle, Navigation, Bell } from 'lucide-react';
+import { Settings, Zap, BarChart2, UserPlus, Plus, X, HelpCircle, User, Bell, Package, AlertTriangle, ChevronRight, ChevronDown } from 'lucide-react';
 import GlobalSettingsModal from './GlobalSettingsModal';
 import UserProfileModal from './UserProfileModal';
 import PersonaWizard from './PersonaWizard';
 import TutorialSelectModal from './tutorial/TutorialSelectModal';
+import AddonManagerModal from './AddonManagerModal';
 
 interface UserStatus {
     is_online: boolean;  // Backward compatibility
@@ -20,6 +21,18 @@ interface UserStatus {
 interface Building {
     id: string;
     name: string;
+    // 所属スコープ (Region / SubRegion の ID)。null なら City 直属
+    region_id?: string | null;
+    // この Building がいずれかの Region の入口なら、その region_id
+    entrance_of?: string | null;
+}
+
+interface RegionInfo {
+    region_id: string;
+    name: string;
+    parent_region_id?: string | null;
+    region_type?: string;
+    entrance_building_id?: string | null;
 }
 
 interface SidebarProps {
@@ -28,11 +41,22 @@ interface SidebarProps {
     onOpen: () => void;
     onClose: () => void;
     refreshTrigger?: boolean;
+    // C-1 閲覧モード: UI 上で閲覧中の building (= page.tsx の currentBuildingId)。
+    // status.current_building_id (= サーバの真の現在地) と分離して active hilight
+    // に使う。 両者が乖離している時が「閲覧モード」 (= 別建物を覗いている状態)。
+    viewingBuildingId?: string | null;
+    // サーバ側 CURRENT_BUILDINGID が変わったタイミングを通知するトリガー。
+    // /chat/utter の auto-move 成功時に page.tsx から increment される。
+    // 受け取った Sidebar は status を再 fetch して D-1 マーカー位置を更新する。
+    serverMoveTrigger?: number;
 }
 
-export default function Sidebar({ onMove, isOpen, onOpen, onClose, refreshTrigger }: SidebarProps) {
+export default function Sidebar({ onMove, isOpen, onOpen, onClose, refreshTrigger, viewingBuildingId, serverMoveTrigger }: SidebarProps) {
     const [status, setStatus] = useState<UserStatus | null>(null);
     const [buildings, setBuildings] = useState<Building[]>([]);
+    const [regions, setRegions] = useState<RegionInfo[]>([]);
+    // Region 折り畳み (docs/intent/region.md §2.2): 展開中の region_id 集合
+    const [expandedRegions, setExpandedRegions] = useState<Set<string>>(new Set());
     const [cityId, setCityId] = useState<number | null>(null);
     const [isSettingsOpen, setIsSettingsOpen] = useState(false);
     const [isProfileModalOpen, setIsProfileModalOpen] = useState(false);
@@ -41,7 +65,57 @@ export default function Sidebar({ onMove, isOpen, onOpen, onClose, refreshTrigge
     const [newBuildingName, setNewBuildingName] = useState('');
     const [isCreatingBuilding, setIsCreatingBuilding] = useState(false);
     const [isTutorialSelectOpen, setIsTutorialSelectOpen] = useState(false);
+    const [isAddonManagerOpen, setIsAddonManagerOpen] = useState(false);
+    // ⚠ 「できごと」とライフビューへの導線は v0.3 で隠した
+    // (autonomous_behavior_v3.md §11「運転 UI は隠す」)。
     const [developerMode, setDeveloperMode] = useState(false);
+    const [quarantinedIds, setQuarantinedIds] = useState<Set<string>>(new Set());
+    // システム欄の折り畳み。既定は閉 (低解像度端末で場所欄を圧迫しないため)。
+    // 初期値を localStorage から直接読むと SSR とのハイドレーション不一致になる
+    // ので、閉で描画してからマウント後の effect で復元する。
+    const [isSystemOpen, setIsSystemOpen] = useState(false);
+
+    useEffect(() => {
+        try {
+            if (localStorage.getItem('saiverse_sidebar_system_open') === '1') {
+                setIsSystemOpen(true);
+            }
+        } catch { /* 読めない環境では既定 (閉) のまま */ }
+    }, []);
+
+    const toggleSystemSection = () => {
+        const next = !isSystemOpen;
+        setIsSystemOpen(next);
+        try {
+            localStorage.setItem('saiverse_sidebar_system_open', next ? '1' : '0');
+        } catch { /* 保存に失敗しても開閉自体は動く */ }
+    };
+
+    useEffect(() => {
+        let cancelled = false;
+        async function fetchQuarantine() {
+            try {
+                const res = await fetch('/api/system/quarantine');
+                if (!res.ok || cancelled) return;
+                const data = await res.json();
+                const ids = new Set<string>(
+                    (data.quarantined || []).map((q: { building_id: string }) => q.building_id)
+                );
+                setQuarantinedIds(ids);
+            } catch {
+                // silent
+            }
+        }
+        fetchQuarantine();
+        // Listen for quarantine resolution events (restore/reset from modal)
+        // so the sidebar warning indicator clears immediately.
+        const handleResolved = () => fetchQuarantine();
+        window.addEventListener('quarantine-resolved', handleResolved);
+        return () => {
+            cancelled = true;
+            window.removeEventListener('quarantine-resolved', handleResolved);
+        };
+    }, [refreshTrigger]);
 
     // Swipe Logic for Control
     const startX = useRef<number | null>(null);
@@ -59,6 +133,7 @@ export default function Sidebar({ onMove, isOpen, onOpen, onClose, refreshTrigge
             if (buildingsRes.ok) {
                 const data = await buildingsRes.json();
                 setBuildings(data.buildings || []);
+                setRegions(data.regions || []);
                 if (data.city_id != null) setCityId(data.city_id);
             }
             if (devModeRes.ok) {
@@ -70,10 +145,45 @@ export default function Sidebar({ onMove, isOpen, onOpen, onClose, refreshTrigge
         }
     };
 
-    // Fetch data on mount and when refreshTrigger changes (e.g. backend reconnect)
+    // Fetch data on mount, refreshTrigger change (e.g. backend reconnect), and
+    // serverMoveTrigger change (= /chat/utter で auto-move 後の D-1 マーカー追従)
     useEffect(() => {
         refreshData();
-    }, [refreshTrigger]);
+    }, [refreshTrigger, serverMoveTrigger]);
+
+    // 閲覧中 / 現在地の Building が Region 内部にあるとき、その Region チェーンを
+    // 自動展開する (折り畳まれていて自分の居場所が見えない状態を防ぐ)
+    useEffect(() => {
+        const regionById = new Map(regions.map(r => [r.region_id, r]));
+        const buildingById = new Map(buildings.map(b => [b.id, b]));
+        const chain = (bid: string | null | undefined): string[] => {
+            const out: string[] = [];
+            let rid = bid ? buildingById.get(bid)?.region_id ?? null : null;
+            while (rid && !out.includes(rid)) {
+                out.push(rid);
+                rid = regionById.get(rid)?.parent_region_id ?? null;
+            }
+            return out;
+        };
+        const toExpand = [...chain(viewingBuildingId), ...chain(status?.current_building_id)];
+        if (toExpand.length === 0) return;
+        setExpandedRegions(prev => {
+            const next = new Set(prev);
+            let changed = false;
+            for (const rid of toExpand) {
+                if (!next.has(rid)) { next.add(rid); changed = true; }
+            }
+            return changed ? next : prev;
+        });
+    }, [buildings, regions, viewingBuildingId, status?.current_building_id]);
+
+    const toggleRegion = (regionId: string) => {
+        setExpandedRegions(prev => {
+            const next = new Set(prev);
+            if (next.has(regionId)) next.delete(regionId); else next.add(regionId);
+            return next;
+        });
+    };
 
     // Global Touch Handlers for swipe-to-open (separate effect to avoid re-fetching on onOpen change)
     useEffect(() => {
@@ -126,26 +236,20 @@ export default function Sidebar({ onMove, isOpen, onOpen, onClose, refreshTrigge
         };
     }, [onOpen]);
 
-    const handleMove = async (buildingId: string) => {
-        if (!status || status.current_building_id === buildingId) return;
-
-        try {
-            const res = await fetch('/api/user/move', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ target_building_id: buildingId })
-            });
-            if (res.ok) {
-                const data = await res.json();
-                if (data.success) {
-                    refreshData();
-                    if (onMove) onMove(buildingId);
-                    onClose(); // Close sidebar on nav
-                }
-            }
-        } catch (err) {
-            console.error("Move error", err);
+    const handleMove = (buildingId: string) => {
+        // C-1 閲覧モード: サイドバーで建物をクリックしても /api/user/move は
+        // 呼ばない。 サーバ側の CURRENT_BUILDINGID は据え置きのまま、 UI 上の
+        // ビュー (= history / occupants / chat 表示) だけ切り替える。 実際の
+        // 入室は発言時に /api/chat/utter が atomic に行う (= C-2)。
+        // See: docs/intent/building_memory_unified.md §C
+        if (!status || status.current_building_id === buildingId) {
+            // 同じ建物のクリックは noop だが、 onClose で sidebar 自体は閉じる
+            if (onMove) onMove(buildingId);
+            onClose();
+            return;
         }
+        if (onMove) onMove(buildingId);
+        onClose();
     };
 
     const handleCreateBuilding = async () => {
@@ -284,20 +388,99 @@ export default function Sidebar({ onMove, isOpen, onOpen, onClose, refreshTrigge
                     </div>
                 )}
                 <div className={styles.buildingList}>
-                    {buildings.map(b => (
-                        <div
-                            key={b.id}
-                            className={`${styles.buildingItem} ${status?.current_building_id === b.id ? styles.active : ''}`}
-                            onClick={() => handleMove(b.id)}
-                        >
-                            <span>{b.name}</span>
-                            {status?.current_building_id === b.id && <Navigation size={14} style={{ opacity: 0.8 }} />}
-                        </div>
-                    ))}
+                    {(() => {
+                        // Region 折り畳み (docs/intent/region.md §2.2):
+                        // トップレベル = City 直属の Building (トップ Region の入口を
+                        // 自然に含む)。入口 Building は展開トグル付きで描画し、展開時に
+                        // その Region 直属の Building (SubRegion の入口を含む) を再帰
+                        // 表示する。入口を持たない Region の内部は到達不能にならない
+                        // ようトップレベルへフォールバック表示する。
+                        const regionsWithEntrance = new Set(
+                            regions.filter(r => r.entrance_building_id).map(r => r.region_id)
+                        );
+                        const renderBuildingItem = (b: Building, depth: number): ReactNode => {
+                            const isQuarantined = quarantinedIds.has(b.id);
+                            const childRegionId = b.entrance_of ?? null;
+                            const isExpanded = !!childRegionId && expandedRegions.has(childRegionId);
+                            const children = (childRegionId && isExpanded)
+                                ? buildings.filter(cb => cb.region_id === childRegionId)
+                                : [];
+                            return (
+                                <div key={b.id}>
+                                    <div
+                                        // active hilight は 「閲覧中の building」 (= viewing)。
+                                        // 「サーバ上の真の現在地」 は別途 D-1 マーカー (User
+                                        // アイコン) で示す。 両者は閲覧モード中に乖離する。
+                                        className={`${styles.buildingItem} ${(viewingBuildingId ?? status?.current_building_id) === b.id ? styles.active : ''}`}
+                                        onClick={() => isQuarantined ? null : handleMove(b.id)}
+                                        style={{
+                                            ...(depth > 0 ? { marginLeft: `${depth * 14}px` } : {}),
+                                            ...(isQuarantined ? { opacity: 0.6, cursor: 'not-allowed' } : {}),
+                                        }}
+                                        title={isQuarantined ? 'このビルディングは会話履歴ファイルが破損しているため隔離中です。アラートバナーから対応してください。' : undefined}
+                                    >
+                                        {/* buildingItem は space-between なので子を「左=展開ボタン+名前 /
+                                            右=マーク類」の 2 グループに束ねる。バラで並べると入口行
+                                            (展開ボタンあり) だけ名前が右端へ押し出される。 */}
+                                        <span style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', minWidth: 0 }}>
+                                            {childRegionId && (
+                                                <button
+                                                    onClick={(e) => { e.stopPropagation(); toggleRegion(childRegionId); }}
+                                                    title={isExpanded ? '折り畳む' : '中を見る'}
+                                                    style={{
+                                                        background: 'none', border: 'none', padding: 0,
+                                                        cursor: 'pointer', color: 'inherit',
+                                                        display: 'flex', alignItems: 'center',
+                                                    }}
+                                                >
+                                                    {isExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                                                </button>
+                                            )}
+                                            <span>{b.name}</span>
+                                        </span>
+                                        <span style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                                            {isQuarantined && (
+                                                <AlertTriangle size={14} style={{ color: '#ff6666' }} />
+                                            )}
+                                            {/* D-1 現在地マーカー: サーバ上の真の現在地に常に表示。
+                                                閲覧モード中 (= viewing != server-current) は
+                                                active hilight と乖離して、 「自分は今そこではなく
+                                                別の場所に居る」 が一瞥で分かる。 */}
+                                            {status?.current_building_id === b.id && <User size={14} style={{ opacity: 0.8 }} />}
+                                        </span>
+                                    </div>
+                                    {children.map(cb => renderBuildingItem(cb, depth + 1))}
+                                </div>
+                            );
+                        };
+                        const topLevel = buildings.filter(
+                            b => !b.region_id || !regionsWithEntrance.has(b.region_id)
+                        );
+                        return topLevel.map(b => renderBuildingItem(b, 0));
+                    })()}
                 </div>
 
-                {/* System Section */}
-                <div className={styles.sectionTitle}>システム</div>
+                {/* System Section: 常用でない項目群なので既定で畳む (低解像度端末で
+                    場所欄を圧迫しないため)。開閉の手つきは場所欄の Region 折り畳みと
+                    同じ chevron。開閉状態は localStorage に記憶。 */}
+                <button
+                    className={styles.sectionTitle}
+                    onClick={toggleSystemSection}
+                    aria-expanded={isSystemOpen}
+                    style={{
+                        display: 'flex', alignItems: 'center', gap: '0.3rem',
+                        cursor: 'pointer', userSelect: 'none',
+                        padding: '0.3rem 0',
+                        marginBottom: isSystemOpen ? '0.3rem' : '1rem',
+                        // button の UA スタイルを打ち消して見出しの見た目を保つ
+                        background: 'none', border: 'none', fontFamily: 'inherit',
+                        textAlign: 'left', width: '100%',
+                    }}
+                >
+                    {isSystemOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                    システム
+                </button>
+                {isSystemOpen && (
                 <div className={styles.buildingList} style={{ flex: 'none', marginBottom: '1rem' }}>
                     {developerMode && (
                         <div
@@ -342,7 +525,16 @@ export default function Sidebar({ onMove, isOpen, onOpen, onClose, refreshTrigge
                             <HelpCircle size={16} /> チュートリアル
                         </span>
                     </div>
+                    <div
+                        className={styles.buildingItem}
+                        onClick={() => setIsAddonManagerOpen(true)}
+                    >
+                        <span style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                            <Package size={16} /> アドオン
+                        </span>
+                    </div>
                 </div>
+                )}
 
                 {/* Footer: Settings + Profile */}
                 <div className={styles.settingsFooter}>
@@ -399,6 +591,11 @@ export default function Sidebar({ onMove, isOpen, onOpen, onClose, refreshTrigge
                 <TutorialSelectModal
                     isOpen={isTutorialSelectOpen}
                     onClose={() => setIsTutorialSelectOpen(false)}
+                />
+
+                <AddonManagerModal
+                    isOpen={isAddonManagerOpen}
+                    onClose={() => setIsAddonManagerOpen(false)}
                 />
             </aside>
         </>

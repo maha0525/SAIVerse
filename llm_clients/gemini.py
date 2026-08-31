@@ -4,6 +4,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
+import threading
 import time
 from typing import Any, Dict, Iterator, List, Optional, Set, Tuple
 
@@ -14,6 +16,7 @@ from google.genai import types
 from .exceptions import (
     AuthenticationError,
     EmptyResponseError as LLMEmptyResponseError,
+    InvalidRequestError,
     LLMError,
     LLMTimeoutError,
     ModelNotFoundError,
@@ -27,6 +30,44 @@ try:  # pragma: no cover - optional defensive patching
     from google.genai import _api_client as _genai_api_client
 except Exception:  # pragma: no cover - absence is fine
     _genai_api_client = None
+
+
+# Thread-local storage for SSE error payload detected mid-stream (e.g. 504 DEADLINE_EXCEEDED).
+# The SSE patch and generate_stream/call run in the same thread, so thread-local works here.
+_sse_error_local: threading.local = threading.local()
+
+
+def _sdk_structured_parse_failure(exc: BaseException) -> Tuple[bool, Optional[str]]:
+    """Detect a structured-output parse failure raised *inside* the google-genai SDK.
+
+    With ``config.response_schema`` set to a dict/Schema, the SDK parses the
+    model's text itself in ``types.GenerateContentResponse._from_response``
+    (``result.parsed = json.loads(result_text)``) and only catches
+    ``json.decoder.JSONDecodeError`` (verified in google-genai 1.63.0). A body
+    that is valid JSON but exceeds CPython's integer-string conversion limit —
+    the digit loop of docs/issues/sluice_structured_output_digit_loop.md —
+    raises a bare ``ValueError`` that escapes, taking the whole response object
+    with it: the caller never sees the text, so the failure cannot be diagnosed.
+
+    This walks the traceback for that SDK frame and lifts its ``result_text``
+    local (the raw model output) so it can be logged. It reads SDK internals by
+    name, so it degrades instead of breaking: the first element says whether the
+    failure came from that frame, the second is the raw body when it could be
+    recovered and ``None`` when it could not.
+    """
+    tb = exc.__traceback__
+    matched = False
+    raw_text: Optional[str] = None
+    while tb is not None:
+        frame = tb.tb_frame
+        module = frame.f_globals.get("__name__", "")
+        if frame.f_code.co_name == "_from_response" and module.startswith("google.genai"):
+            matched = True
+            value = frame.f_locals.get("result_text")
+            if isinstance(value, str):
+                raw_text = value
+        tb = tb.tb_next
+    return matched, raw_text
 
 
 def _install_gemini_stream_patch() -> None:
@@ -56,10 +97,11 @@ def _install_gemini_stream_patch() -> None:
         return raw.rstrip("\r\n")
 
     class _SSEAccumulator:
-        __slots__ = ("_buffer",)
+        __slots__ = ("_buffer", "_error_buffer")
 
         def __init__(self) -> None:
             self._buffer: List[str] = []
+            self._error_buffer: List[str] = []
 
         def feed(self, line: str) -> Optional[str]:
             if not line:
@@ -67,6 +109,8 @@ def _install_gemini_stream_patch() -> None:
                     data = "".join(self._buffer)
                     self._buffer.clear()
                     return data
+                # Empty line may also delimit a bare JSON error block
+                self._flush_error_buffer()
                 return None
             if line.startswith("data:"):
                 value = line[5:]
@@ -76,8 +120,8 @@ def _install_gemini_stream_patch() -> None:
             elif line.startswith(":"):
                 return None
             else:
-                # Skip other SSE fields (event:, id:, retry:, etc.)
-                return None
+                # Bare lines (not SSE data:) — accumulate as potential JSON error payload
+                self._error_buffer.append(line)
             return None
 
         def flush(self) -> Optional[str]:
@@ -86,6 +130,31 @@ def _install_gemini_stream_patch() -> None:
                 self._buffer.clear()
                 return data
             return None
+
+        def flush_remaining(self) -> None:
+            """Call after stream iteration ends to detect any buffered SSE error."""
+            self._flush_error_buffer()
+
+        def _flush_error_buffer(self) -> None:
+            if not self._error_buffer:
+                return
+            raw = "\n".join(self._error_buffer)
+            self._error_buffer.clear()
+            try:
+                obj = json.loads(raw)
+                if isinstance(obj, dict) and "error" in obj:
+                    err = obj["error"]
+                    _sse_error_local.error = {
+                        "code": err.get("code"),
+                        "message": err.get("message", ""),
+                        "status": err.get("status", ""),
+                    }
+                    logging.warning(
+                        "[gemini_sse] Server error detected in SSE stream: code=%s status=%s message=%s",
+                        err.get("code"), err.get("status", ""), err.get("message", ""),
+                    )
+            except (json.JSONDecodeError, TypeError):
+                pass
 
     original_segments = HttpResponse.segments
     original_async_segments = HttpResponse.async_segments
@@ -104,6 +173,8 @@ def _install_gemini_stream_patch() -> None:
         if final:
             _sse_logger.debug("Gemini SSE final payload: %s", final)
             yield json.loads(final)
+        # After all lines consumed, check for any buffered error payload (e.g. 504 DEADLINE_EXCEEDED)
+        acc.flush_remaining()
 
     async def _yield_json_chunks_async(iterator: Any) -> Any:
         _sse_logger = logging.getLogger("saiverse.llm")
@@ -165,8 +236,19 @@ _install_gemini_stream_patch()
 
 from .gemini_utils import build_gemini_clients
 
-from saiverse.media_utils import iter_image_media, load_image_bytes_for_llm
-from saiverse.media_summary import ensure_image_summary
+from saiverse.media_utils import (
+    iter_image_media,
+    iter_audio_media,
+    iter_video_media,
+    load_image_bytes_for_llm,
+    load_audio_bytes_for_llm,
+    load_video_bytes_for_llm,
+)
+from saiverse.media_summary import (
+    ensure_image_summary,
+    ensure_audio_summary,
+    ensure_video_summary,
+)
 from tools import GEMINI_TOOLS_SPEC
 from saiverse.llm_router import route
 
@@ -174,13 +256,6 @@ from .base import EmptyResponseError, IncompleteStreamError, LLMClient, get_llm_
 from saiverse.logging_config import log_timeout_event
 from .utils import content_to_text, is_truthy_flag, merge_reasoning_strings
 
-
-class ChunkTimeoutError(RuntimeError):
-    """Raised when no chunks are received within the timeout period (socket stall)."""
-
-
-# Timeout for receiving chunks during streaming (detects socket stalls)
-CHUNK_TIMEOUT_SECONDS = int(os.getenv("GEMINI_CHUNK_TIMEOUT_SECONDS", "60"))
 
 # Default safety settings (can be overridden via configure_parameters)
 GEMINI_DEFAULT_SAFETY_SETTINGS = {
@@ -215,9 +290,21 @@ GEMINI_ALLOWED_REQUEST_PARAMS = {
     "temperature", "top_p", "top_k", "max_output_tokens", "stop_sequences",
 }
 
+GEMINI_SAMPLING_REQUEST_PARAMS = {"temperature", "top_p", "top_k"}
+
+_GEMINI_CONTENT_PAYLOAD_FIELDS = (
+    "code_execution_result",
+    "executable_code",
+    "file_data",
+    "function_call",
+    "function_response",
+    "inline_data",
+    "text",
+)
+
 # Special parameters that need custom handling (not passed directly to API)
 GEMINI_SPECIAL_PARAMS = {
-    "thinking_level", "thinking_budget",
+    "thinking_level", "thinking_budget", "multi_turn_thinking",
     "safety_harassment", "safety_hate_speech",
     "safety_sexually_explicit", "safety_dangerous_content",
 }
@@ -231,6 +318,36 @@ SAFETY_PARAM_TO_CATEGORY = {
 }
 
 GROUNDING_TOOL = types.Tool(google_search=types.GoogleSearch())
+
+
+def _uses_latest_generate_content_contract(model: str) -> bool:
+    """Return whether *model* uses the July 2026 GenerateContent restrictions.
+
+    Gemini 3.6 Flash and Gemini 3.5 Flash-Lite introduced the contract, and
+    Google documents it as applying to future Gemini releases as well.  Model
+    JSON capability flags can override this fallback for aliases or exceptions.
+    """
+    model_lower = (model or "").lower()
+    if model_lower.startswith("gemini-3.5-flash-lite"):
+        return True
+    match = re.match(r"^gemini-(\d+)(?:\.(\d+))?(?:-|$)", model_lower)
+    if not match:
+        return False
+    version = (int(match.group(1)), int(match.group(2) or 0))
+    return version >= (3, 6)
+
+
+def _content_has_payload(content: types.Content) -> bool:
+    """Whether a converted Gemini Content contains a non-empty API payload."""
+    for part in content.parts or []:
+        for field in _GEMINI_CONTENT_PAYLOAD_FIELDS:
+            value = getattr(part, field, None)
+            if isinstance(value, str):
+                if value.strip():
+                    return True
+            elif value is not None:
+                return True
+    return False
 
 
 def merge_tools_for_gemini(request_tools: Optional[List[types.Tool]]) -> List[types.Tool]:
@@ -250,18 +367,41 @@ class GeminiClient(LLMClient):
         model: str,
         config: Optional[Dict[str, Any]] | None = None,
         supports_images: bool = True,
+        supports_audio: Optional[bool] = None,
+        supports_video: Optional[bool] = None,
     ) -> None:
-        super().__init__(supports_images=supports_images)
         cfg = config or {}
+        # Resolve audio/video support from config (if not explicitly passed)
+        if supports_audio is None:
+            supports_audio = bool(cfg.get("supports_audio", False))
+        if supports_video is None:
+            supports_video = bool(cfg.get("supports_video", False))
+        super().__init__(
+            supports_images=supports_images,
+            supports_audio=supports_audio,
+            supports_video=supports_video,
+        )
         prefer_paid = cfg.get("prefer_paid", False)
         self.free_client, self.paid_client, self.client = build_gemini_clients(prefer_paid=prefer_paid)
         self.model = model
+
+        # Phase 3 / M1: explicit cache 設定 (cache.type == "gemini_explicit" のときだけ有効)。
+        # cfg はモデル設定 dict なので self.model の API 名 lookup を経ず直接持てる。
+        self._cache_config: Dict[str, Any] = cfg.get("cache") or {}
 
         # Image size limit (raw bytes, before base64 encoding)
         self.max_image_bytes: Optional[int] = cfg.get("max_image_bytes")
 
         # Request parameters (temperature, top_p, etc.)
         self._request_params: Dict[str, Any] = {}
+
+        latest_contract = _uses_latest_generate_content_contract(model)
+        self._supports_sampling_parameters: bool = bool(
+            cfg.get("supports_sampling_parameters", not latest_contract)
+        )
+        self._supports_model_prefill: bool = bool(
+            cfg.get("supports_model_prefill", not latest_contract)
+        )
 
         # Thinking configuration
         self._thinking_level: Optional[str] = None
@@ -271,9 +411,207 @@ class GeminiClient(LLMClient):
         if not self._include_thoughts:
             model_lower = (model or "").lower()
             self._include_thoughts = "2.5" in model_lower or "-3-" in model_lower or model_lower.startswith("gemini-3")
+        self._multi_turn_thinking: bool = cfg.get("multi_turn_thinking", True)
+        model_lower = (model or "").lower()
+        self._is_gemini_3x: bool = "-3-" in model_lower or model_lower.startswith("gemini-3")
 
         # Safety settings overrides
         self._safety_overrides: Dict[str, str] = {}
+
+        # Set by generate_stream when SSE stream was interrupted by a server error (e.g. 504)
+        self._last_stream_error: Optional[Dict[str, Any]] = None
+
+        # Pending cache storage info for usage tracking (set by _resolve_explicit_cache on create)
+        self._pending_cache_storage: Optional[Tuple[str, int, int]] = None  # (model, tokens, ttl_s)
+        # Auto cache mode: generate 完了後に delete する cache name
+        self._auto_cache_pending_cleanup: Optional[str] = None
+
+    def _store_usage(self, input_tokens, output_tokens, model=None, cached_tokens=0,
+                     cache_write_tokens=0, cache_ttl=""):
+        super()._store_usage(input_tokens, output_tokens, model=model,
+                             cached_tokens=cached_tokens, cache_write_tokens=cache_write_tokens,
+                             cache_ttl=cache_ttl)
+        pending = self._pending_cache_storage
+        if pending and self._latest_usage:
+            self._latest_usage.cache_storage_tokens = pending[1]
+            self._latest_usage.cache_storage_ttl_seconds = pending[2]
+            self._pending_cache_storage = None
+        # Auto cache mode: usage 記録完了後に cache を即削除
+        cleanup_name = getattr(self, "_auto_cache_pending_cleanup", None)
+        if cleanup_name:
+            self._auto_cache_pending_cleanup = None
+            self._auto_cache_cleanup(cleanup_name)
+
+    # ── Auto cache mode ──
+    # 環境変数 SAIVERSE_GEMINI_AUTO_CACHE=1 で有効。全 Gemini 呼び出しで
+    # create→use→delete を自動適用し、入力を 1/10 価格にする。
+    _AUTO_CACHE_ENABLED: bool = os.getenv(
+        "SAIVERSE_GEMINI_AUTO_CACHE", ""
+    ).lower() in ("1", "true", "yes", "on")
+    _AUTO_CACHE_MIN_TOKENS: int = 1024
+    _AUTO_CACHE_TTL: int = 300  # 保険 TTL (delete 失敗時の orphan 上限)
+
+    def _auto_cache_wrap(
+        self,
+        sys_msg: str,
+        contents: list,
+    ) -> Tuple[Optional[str], list, Optional[str]]:
+        """Auto cache mode: system + contents[:-1] を cache に焼き、tail だけ返す。
+
+        Returns (cache_name, send_contents, cache_name_for_cleanup).
+        cache_name_for_cleanup は finally で delete するために呼び出し元が保持する。
+        """
+        if not self._AUTO_CACHE_ENABLED:
+            return (None, contents, None)
+        if self._cache_unavailable_on_free_tier():
+            return (None, contents, None)
+        if not contents or len(contents) < 2:
+            return (None, contents, None)
+
+        from llm_clients.gemini_cache import (
+            get_gemini_cache_controller, parse_ttl_seconds, CacheEnsureResult,
+        )
+        controller = get_gemini_cache_controller()
+        cached_contents = contents[:-1]
+        tail = contents[-1:]
+
+        if controller._approx_chars(sys_msg, cached_contents) < self._AUTO_CACHE_MIN_TOKENS:
+            return (None, contents, None)
+
+        result = controller.ensure(
+            self.client, self.model, sys_msg, self._AUTO_CACHE_TTL,
+            contents=cached_contents, min_tokens=self._AUTO_CACHE_MIN_TOKENS,
+        )
+        if not result or not result.name:
+            return (None, contents, None)
+
+        if result.created:
+            self._pending_cache_storage = (
+                self.config_key or self.model,
+                result.cached_tokens,
+                self._AUTO_CACHE_TTL,
+            )
+
+        logging.info(
+            "[gemini][auto_cache] cache=%s prefix=%d msgs, tail=%d msgs",
+            result.name, len(cached_contents), len(tail),
+        )
+        return (result.name, tail, result.name)
+
+    def _auto_cache_cleanup(self, cache_name: Optional[str]) -> None:
+        """Auto cache mode: generate 完了後に cache を即 delete。"""
+        if not cache_name:
+            return
+        from llm_clients.gemini_cache import get_gemini_cache_controller
+        get_gemini_cache_controller().delete(self.client, cache_name)
+
+    def _cache_unavailable_on_free_tier(self) -> bool:
+        """いま使っているクライアントが無料枠 (free_client) かを判定する。
+
+        無料枠キーは explicit cache のストレージ上限が 0
+        (``TotalCachedContentStorageTokensPerModelFreeTier limit=0``) で、
+        ``caches.create`` が必ず 429 RESOURCE_EXHAUSTED になる。しかも SDK の
+        HttpRetryOptions が 429 を再試行対象に含むため、毎コール create が 5 回
+        リトライしてから失敗する (無駄な往復 + backoff)。そもそも無料枠は課金が
+        無くキャッシュの節約効果も無いので、free_client 使用時は create を試みない。
+
+        free / paid はモデル API 名 (free/paid 共通) では区別できないため、
+        クライアントオブジェクトの identity で厳密に判定する。
+        """
+        return self.free_client is not None and self.client is self.free_client
+
+    def consume_stream_error(self) -> Optional[Dict[str, Any]]:
+        """Return and clear the last SSE stream error (e.g. 504 DEADLINE_EXCEEDED).
+
+        Returns a dict with keys 'code', 'message', 'status', or None if no error occurred.
+        """
+        err = self._last_stream_error
+        self._last_stream_error = None
+        return err
+
+    def _resolve_explicit_cache(
+        self,
+        sys_msg: str,
+        contents: list,
+        enable_cache: bool,
+        cache_ttl: Any,
+    ) -> Tuple[Optional[str], list]:
+        """explicit cache (gemini_explicit) を解決し ``(cache_name, 送信すべき contents)``
+        を返す (Phase 3 / B 戦略)。
+
+        キャッシュ対象 = **system_instruction + contents の「最新入力を除く全部」**
+        (= contents[:-1])。リクエストは最新の1メッセージ (contents[-1:]) だけ送る。
+        毎ターン prefix が伸びるので毎回 create (Gemini の create は無料)、古い cache は
+        TTL / orphan cleanup (M2) で消える。
+
+        張れない (対象外モデル / env 未設定 / トークン不足 / API エラー) 場合は
+        ``(None, contents)`` を返し、system_instruction inline の通常コールにフォールバック。
+        """
+        if not enable_cache:
+            return (None, contents)
+        if (self._cache_config or {}).get("type") != "gemini_explicit":
+            return (None, contents)
+        # M1 安全ゲート: 実験段階 (orphan cleanup / pulse 終了 delete 未実装) のため、
+        # env で明示 opt-in したときだけ有効化する。M2-M4 完了後にこのゲートは外す。
+        if os.getenv("SAIVERSE_GEMINI_EXPLICIT_CACHE", "").lower() not in ("1", "true", "yes", "on"):
+            return (None, contents)
+        # 無料枠キーは cache storage 上限 0 で create が必ず 429 になるためスキップ。
+        if self._cache_unavailable_on_free_tier():
+            return (None, contents)
+        # 最新入力以外にキャッシュできる中身が無い (履歴ゼロ) ならスキップ。
+        if not contents or len(contents) < 2:
+            return (None, contents)
+
+        cached_contents = contents[:-1]
+        tail = contents[-1:]
+        try:
+            from llm_clients.gemini_cache import get_gemini_cache_controller, parse_ttl_seconds
+            min_tokens = int((self._cache_config or {}).get("min_tokens", 1024))
+            ttl_seconds = parse_ttl_seconds(cache_ttl, default=300)
+            result = get_gemini_cache_controller().ensure(
+                self.client, self.model, sys_msg, ttl_seconds,
+                contents=cached_contents, min_tokens=min_tokens,
+            )
+        except Exception:
+            logging.warning("[gemini] explicit cache resolve failed; inline fallback", exc_info=True)
+            return (None, contents)
+
+        name = result.name if result else None
+        if result and result.created:
+            self._pending_cache_storage = (
+                self.config_key or self.model,
+                result.cached_tokens,
+                result.ttl_seconds,
+            )
+        if name:
+            # backend.log に出す ([gemini_cache] created と同じ場所に揃える。
+            # get_llm_logger は llm_io.log 行きで created と別ファイルになり紛らわしいため)。
+            def _txt_chars(cs: list) -> int:
+                n = 0
+                for c in cs:
+                    for p in (getattr(c, "parts", None) or []):
+                        n += len(getattr(p, "text", "") or "")
+                return n
+
+            def _media_count(cs: list) -> int:
+                n = 0
+                for c in cs:
+                    for p in (getattr(c, "parts", None) or []):
+                        if getattr(p, "inline_data", None) is not None:
+                            n += 1
+                return n
+
+            # 計測ログ: 「キャッシュに入れる prefix」と「送る tail」のサイズを直接出す。
+            # response の cached_content_token_count / prompt_token_count と突き合わせれば、
+            # uncached の正体 (tail が大きい=正常 / cache が prefix を取りこぼし=partial) が分かる。
+            logging.info(
+                "[gemini] cache split: prefix=%d msgs (~%d text chars, %d media) | "
+                "tail=%d msgs (~%d text chars, %d media) | cache=%s ttl=%s",
+                len(cached_contents), _txt_chars(cached_contents), _media_count(cached_contents),
+                len(tail), _txt_chars(tail), _media_count(tail), name, cache_ttl,
+            )
+            return (name, tail)
+        return (None, contents)
 
     def _build_thinking_config(self) -> Optional[types.ThinkingConfig]:
         """Build ThinkingConfig from current settings."""
@@ -329,6 +667,15 @@ class GeminiClient(LLMClient):
             return
         for key, value in parameters.items():
             if key in GEMINI_ALLOWED_REQUEST_PARAMS:
+                if key in GEMINI_SAMPLING_REQUEST_PARAMS and not self._supports_sampling_parameters:
+                    self._request_params.pop(key, None)
+                    if value is not None:
+                        logging.debug(
+                            "[gemini] Ignoring deprecated sampling parameter %s for model=%s",
+                            key,
+                            self.model,
+                        )
+                    continue
                 if value is None:
                     self._request_params.pop(key, None)
                 else:
@@ -346,6 +693,13 @@ class GeminiClient(LLMClient):
                     except (ValueError, TypeError):
                         logging.warning("Invalid thinking_budget value: %s", value)
                         self._thinking_budget = None
+            elif key in ("multi_turn_thinking", "thought_signature_echo"):
+                # 3.5+ は "multi_turn_thinking" (全ターン推論の引き継ぎ。GenerateContent
+                # では 3.5 Flash から), 3.5 未満は "thought_signature_echo"
+                # (関数呼び出し連続性のための署名 echo) と UI 上の名前が異なるが,
+                # SAIVerse 側の制御対象はどちらも thought_signature の echo 可否のみ。
+                # 詳細は docs/intent/thought_signature_persistence.md
+                self._multi_turn_thinking = value != "off"
             elif key in SAFETY_PARAM_TO_CATEGORY:
                 if value:
                     self._safety_overrides[key] = value
@@ -455,7 +809,7 @@ class GeminiClient(LLMClient):
     @staticmethod
     def _is_timeout_error(err: Exception) -> bool:
         """Check if the error is a timeout that should be retried."""
-        return isinstance(err, (httpx.ReadTimeout, httpx.ConnectTimeout, httpx.WriteTimeout, ChunkTimeoutError))
+        return isinstance(err, (httpx.ReadTimeout, httpx.ConnectTimeout, httpx.WriteTimeout))
 
     @staticmethod
     def _is_server_error(err: Exception) -> bool:
@@ -479,8 +833,38 @@ class GeminiClient(LLMClient):
         return "404" in msg and ("not found" in msg or "not_found" in msg)
 
     @staticmethod
+    def _extract_retry_delay(err: Exception) -> Optional[float]:
+        """Extract retryDelay from a Gemini API 429 error response.
+
+        Returns seconds to wait, or None if not parseable.
+        """
+        from google.genai.errors import APIError as GenaiAPIError
+        if not isinstance(err, GenaiAPIError):
+            return None
+        details = getattr(err, "details", None)
+        if not isinstance(details, dict):
+            return None
+        error_block = details.get("error", details)
+        for detail in error_block.get("details", []):
+            if detail.get("@type", "").endswith("RetryInfo"):
+                delay_str = detail.get("retryDelay", "")
+                if isinstance(delay_str, str) and delay_str.endswith("s"):
+                    try:
+                        return float(delay_str[:-1])
+                    except ValueError:
+                        pass
+        return None
+
+    @staticmethod
     def _is_payment_error(err: Exception) -> bool:
-        """Check if the error is a payment/billing error (402) or quota exhaustion."""
+        """Check if the error is a payment/billing error (402), NOT a rate limit (429).
+
+        Gemini 429 RESOURCE_EXHAUSTED messages include "billing" in the text,
+        which would false-positive here. Use the HTTP status code to distinguish.
+        """
+        from google.genai.errors import APIError as GenaiAPIError
+        if isinstance(err, GenaiAPIError) and err.code == 429:
+            return False
         msg = str(err).lower()
         return (
             "402" in msg
@@ -525,24 +909,44 @@ class GeminiClient(LLMClient):
         )
 
         attachment_cache: Dict[int, List[Dict[str, Any]]] = {}
+        audio_cache: Dict[int, List[Dict[str, Any]]] = {}
+        video_cache: Dict[int, List[Dict[str, Any]]] = {}
         # Track messages that are exempt from attachment limits (visual context)
         exempt_message_indices: Set[int] = set()
-        # Track messages where image summary generation should be skipped
+        # Track messages where summary generation should be skipped per media type
         # (e.g. summary generation requests themselves, to prevent infinite recursion)
         skip_summary_indices: Set[int] = set()
-        if self.supports_images:
-            for idx, message in enumerate(msgs):
-                if isinstance(message, dict):
-                    metadata = message.get("metadata")
-                    # Check for visual context marker - these are exempt from limits
-                    if isinstance(metadata, dict) and metadata.get("__visual_context__"):
-                        exempt_message_indices.add(idx)
-                    # Check for skip-image-summary marker (set by media_summary module)
-                    if isinstance(metadata, dict) and metadata.get("__skip_image_summary__"):
-                        skip_summary_indices.add(idx)
-                    media_items = iter_image_media(metadata)
-                    if media_items:
-                        attachment_cache[idx] = media_items
+        skip_audio_summary_indices: Set[int] = set()
+        skip_video_summary_indices: Set[int] = set()
+        for idx, message in enumerate(msgs):
+            if not isinstance(message, dict):
+                continue
+            metadata = message.get("metadata")
+            if not isinstance(metadata, dict):
+                continue
+            # Check for visual context marker - these are exempt from limits
+            if metadata.get("__visual_context__"):
+                exempt_message_indices.add(idx)
+            # Per-media skip flags (set by media_summary module to avoid recursion)
+            if metadata.get("__skip_image_summary__"):
+                skip_summary_indices.add(idx)
+            if metadata.get("__skip_audio_summary__"):
+                skip_audio_summary_indices.add(idx)
+            if metadata.get("__skip_video_summary__"):
+                skip_video_summary_indices.add(idx)
+            # Image cache only populated when supports_images (existing behavior).
+            if self.supports_images:
+                media_items = iter_image_media(metadata)
+                if media_items:
+                    attachment_cache[idx] = media_items
+            # Audio / video are always cached; per-message loop decides whether to
+            # send inline_data (supports_*=True) or inject summary text (False).
+            audio_items = iter_audio_media(metadata)
+            if audio_items:
+                audio_cache[idx] = audio_items
+            video_items = iter_video_media(metadata)
+            if video_items:
+                video_cache[idx] = video_items
         allowed_attachment_keys: Optional[Set[Tuple[int, int]]] = None
         if max_image_embeds is not None and attachment_cache:
             ordered: List[Tuple[int, int]] = []
@@ -592,13 +996,14 @@ class GeminiClient(LLMClient):
                     fn_name = fn.get("name", "")
                     fn_args_raw = fn.get("arguments", "{}")
                     fn_args = json.loads(fn_args_raw) if isinstance(fn_args_raw, str) else fn_args_raw
+                    fn_id = tc.get("id") if isinstance(tc, dict) else None
                     fc_part = types.Part(
-                        function_call=types.FunctionCall(name=fn_name, args=fn_args)
+                        function_call=types.FunctionCall(id=fn_id or None, name=fn_name, args=fn_args)
                     )
-                    # Gemini thinking models require thought_signature echoed back
-                    _ts = tc.get("thought_signature") if isinstance(tc, dict) else None
-                    if _ts:
-                        fc_part.thought_signature = _ts
+                    if self._multi_turn_thinking or self._is_gemini_3x:
+                        _ts = tc.get("thought_signature") if isinstance(tc, dict) else None
+                        if _ts:
+                            fc_part.thought_signature = _ts
                     parts.append(fc_part)
                 if parts:
                     contents.append(types.Content(role="model", parts=parts))
@@ -607,6 +1012,7 @@ class GeminiClient(LLMClient):
             # Handle tool result messages (function response)
             if role == "tool":
                 fn_name = message.get("name", "")
+                fn_id = message.get("tool_call_id")
                 fn_content = message.get("content", "")
                 # Wrap content as a dict for FunctionResponse.response
                 try:
@@ -619,6 +1025,7 @@ class GeminiClient(LLMClient):
                     role="user",
                     parts=[types.Part(
                         function_response=types.FunctionResponse(
+                            id=fn_id or None,
                             name=fn_name,
                             response=response_data,
                         )
@@ -630,6 +1037,11 @@ class GeminiClient(LLMClient):
             text_content = text
             g_role = "user" if role == "user" else "model"
             attachments = attachment_cache.get(idx, []) if self.supports_images else []
+            audio_attachments = audio_cache.get(idx, [])
+            video_attachments = video_cache.get(idx, [])
+            media_parts: List[types.Part] = []
+
+            # === Image processing ===
             if attachments and self.supports_images:
                 selected_attachments: List[Dict[str, Any]] = []
                 skipped_attachments: List[Dict[str, Any]] = []
@@ -653,7 +1065,6 @@ class GeminiClient(LLMClient):
                     role,
                     len(skipped_attachments),
                 )
-                parts: List[types.Part] = []
                 if skipped_attachments:
                     for att_idx, attachment, summary_text in attachment_records:
                         if attachment not in skipped_attachments:
@@ -661,8 +1072,6 @@ class GeminiClient(LLMClient):
                         summary = summary_text or "(要約を取得できませんでした)"
                         note = f"[画像参照のみ: {attachment['uri']}] {summary}"
                         text_content = f"{text_content}\n{note}" if text_content else note
-                if text_content:
-                    parts.append(types.Part(text=text_content))
                 for attachment in selected_attachments:
                     data, effective_mime = load_image_bytes_for_llm(
                         attachment["path"], attachment["mime_type"],
@@ -682,27 +1091,157 @@ class GeminiClient(LLMClient):
                         len(data),
                         data[:8].hex(),
                     )
-                    parts.append(types.Part.from_bytes(data=data, mime_type=effective_mime))
-                if not parts:
-                    parts.append(types.Part(text=""))
-                contents.append(types.Content(parts=parts, role=g_role))
-            else:
-                if attachments:
-                    logging.debug(
-                        "[gemini] image attachments present but not embedded (supports_images=%s)",
-                        self.supports_images,
+                    media_parts.append(types.Part.from_bytes(data=data, mime_type=effective_mime))
+            elif attachments:
+                # supports_images=False: inject image summaries as text only
+                logging.debug(
+                    "[gemini] image attachments present but not embedded (supports_images=%s)",
+                    self.supports_images,
+                )
+                for attachment in attachments:
+                    if idx in skip_summary_indices:
+                        summary = None
+                    else:
+                        summary = ensure_image_summary(attachment["path"], attachment["mime_type"])
+                    summary_note = summary or "(要約を取得できませんでした)"
+                    note = f"[画像: {attachment['uri']}] {summary_note}"
+                    text_content = f"{text_content}\n{note}" if text_content else note
+
+            # === Audio processing ===
+            if audio_attachments and self.supports_audio:
+                logging.debug(
+                    "[gemini] embedding %d audio attachment(s) for role=%s",
+                    len(audio_attachments), role,
+                )
+                for attachment in audio_attachments:
+                    data, effective_mime = load_audio_bytes_for_llm(
+                        attachment["path"], attachment["mime_type"],
                     )
-                    for attachment in attachments:
-                        if idx in skip_summary_indices:
-                            summary = None
-                        else:
-                            summary = ensure_image_summary(attachment["path"], attachment["mime_type"])
-                        summary_note = summary or "(要約を取得できませんでした)"
-                        note = f"[画像: {attachment['uri']}] {summary_note}"
-                        text_content = f"{text_content}\n{note}" if text_content else note
-                contents.append(types.Content(parts=[types.Part(text=text_content)], role=g_role))
+                    if not data or not effective_mime:
+                        logging.warning(
+                            "Failed to load audio for Gemini payload: %s", attachment["uri"]
+                        )
+                        continue
+                    media_parts.append(types.Part.from_bytes(data=data, mime_type=effective_mime))
+            elif audio_attachments:
+                # supports_audio=False: inject audio summaries as text only
+                skip_audio_summary = idx in skip_audio_summary_indices
+                for attachment in audio_attachments:
+                    summary = (
+                        None if skip_audio_summary
+                        else ensure_audio_summary(attachment["path"], attachment["mime_type"])
+                    )
+                    summary_note = summary or "(要約を取得できませんでした)"
+                    note = f"[音声: {attachment['uri']}] {summary_note}"
+                    text_content = f"{text_content}\n{note}" if text_content else note
+
+            # === Video processing ===
+            if video_attachments and self.supports_video:
+                logging.debug(
+                    "[gemini] embedding %d video attachment(s) for role=%s",
+                    len(video_attachments), role,
+                )
+                for attachment in video_attachments:
+                    data, effective_mime = load_video_bytes_for_llm(
+                        attachment["path"], attachment["mime_type"],
+                    )
+                    if not data or not effective_mime:
+                        logging.warning(
+                            "Failed to load video for Gemini payload: %s", attachment["uri"]
+                        )
+                        continue
+                    media_parts.append(types.Part.from_bytes(data=data, mime_type=effective_mime))
+            elif video_attachments:
+                # supports_video=False: inject video summaries as text only
+                skip_video_summary = idx in skip_video_summary_indices
+                for attachment in video_attachments:
+                    summary = (
+                        None if skip_video_summary
+                        else ensure_video_summary(attachment["path"], attachment["mime_type"])
+                    )
+                    summary_note = summary or "(要約を取得できませんでした)"
+                    note = f"[動画: {attachment['uri']}] {summary_note}"
+                    text_content = f"{text_content}\n{note}" if text_content else note
+
+            # === Final assembly: text first, then media parts ===
+            final_parts: List[types.Part] = []
+            if text_content:
+                text_part = types.Part(text=text_content)
+                # 2026-05-20: assistant role の text-only message に thought_signature
+                # があれば最初の text Part に乗せて echo する (Gemini 3.x 公式仕様:
+                # 最初のパートまたは function_call パートに付与)。tool_calls 経路は
+                # 上記 line 682-684 で別途 echo 済み。
+                # 詳細は docs/intent/thought_signature_persistence.md
+                if g_role == "model" and self._multi_turn_thinking:
+                    _msg_thought_sig = message.get("thought_signature")
+                    if _msg_thought_sig:
+                        text_part.thought_signature = _msg_thought_sig
+                final_parts.append(text_part)
+            final_parts.extend(media_parts)
+            if not final_parts:
+                final_parts.append(types.Part(text=""))
+            contents.append(types.Content(parts=final_parts, role=g_role))
 
         return "\n".join(system_lines), contents
+
+    def _validate_contents(self, contents: List[types.Content]) -> None:
+        """Reject requests that the selected Gemini contract cannot accept."""
+        if self._supports_model_prefill:
+            return
+        for content in reversed(contents):
+            if not _content_has_payload(content):
+                continue
+            if content.role == "model":
+                logging.warning(
+                    "[gemini] Rejecting request ending in a non-empty model turn: model=%s",
+                    self.model,
+                )
+                raise InvalidRequestError(
+                    f"Gemini model {self.model} does not accept a prefilled model turn",
+                    user_message=(
+                        "このGeminiモデルでは、会話コンテキストの末尾をモデル発話にできません。"
+                        "呼び出し元のコンテキスト構築を確認してください。"
+                    ),
+                )
+            return
+
+    def _apply_generation_parameters(
+        self,
+        cfg_kwargs: Dict[str, Any],
+        temperature: float | None,
+        *,
+        max_output_tokens: int | None = None,
+    ) -> None:
+        """Apply request parameters while enforcing model capabilities.
+
+        ``max_output_tokens`` is a per-call override that wins over the model
+        config (``self._request_params``). Callers that must cap a single call
+        — e.g. the sluice, whose structured output must not run away into a
+        digit loop (docs/issues/sluice_structured_output_digit_loop.md) —
+        pass it as a keyword to :meth:`generate`; every other call is
+        unaffected.
+        """
+        if self._supports_sampling_parameters:
+            effective_temp = (
+                temperature if temperature is not None else self._request_params.get("temperature")
+            )
+            if effective_temp is not None:
+                cfg_kwargs["temperature"] = effective_temp
+            for param in ("top_p", "top_k"):
+                if param in self._request_params:
+                    cfg_kwargs[param] = self._request_params[param]
+        elif temperature is not None:
+            logging.debug(
+                "[gemini] Dropping deprecated temperature override for model=%s",
+                self.model,
+            )
+
+        for param in ("max_output_tokens", "stop_sequences"):
+            if param in self._request_params:
+                cfg_kwargs[param] = self._request_params[param]
+
+        if max_output_tokens is not None:
+            cfg_kwargs["max_output_tokens"] = max_output_tokens
 
     def _last_user(self, messages: List[Any]) -> str:
         for message in reversed(messages):
@@ -721,6 +1260,7 @@ class GeminiClient(LLMClient):
         tool_cfg: Optional[types.ToolConfig],
     ):
         sys_msg, contents = self._convert_messages(messages)
+        self._validate_contents(contents)
         cfg_kwargs: Dict[str, Any] = {
             "system_instruction": sys_msg,
             "safety_settings": self._build_safety_settings(),
@@ -747,10 +1287,13 @@ class GeminiClient(LLMClient):
         response_schema: Optional[Dict[str, Any]] = None,
         *,
         temperature: float | None = None,
+        enable_cache: bool = False,
+        cache_ttl: Any = None,
+        max_output_tokens: int | None = None,
         **_: Any,
     ) -> str | Dict[str, Any]:
         """Unified generate method.
-        
+
         Args:
             messages: Conversation messages
             tools: Tool specifications. If provided, returns Dict with tool detection.
@@ -758,7 +1301,9 @@ class GeminiClient(LLMClient):
             history_snippets: Optional history context
             response_schema: Optional JSON schema for structured output
             temperature: Optional temperature override
-            
+            max_output_tokens: Per-call output cap. Overrides the model config
+                for this call only; other calls are untouched.
+
         Returns:
             str: Text response when tools is None or empty
             Dict: Tool detection result when tools is provided, with keys:
@@ -771,24 +1316,21 @@ class GeminiClient(LLMClient):
         use_tools = bool(tools_spec)
         history_snippets = history_snippets or []
         self._store_reasoning([])
+        # 2026-05-20: 前回呼び出しの signature 残りを必ずクリア (retry や次ターン汚染防止)
+        self._store_thought_signature(None)
 
         active_client = self.client
         sys_msg, contents = self._convert_messages(messages)
+        self._validate_contents(contents)
         
         cfg_kwargs: Dict[str, Any] = {
             "system_instruction": sys_msg,
             "safety_settings": self._build_safety_settings(),
         }
 
-        # Temperature: argument > _request_params
-        effective_temp = temperature if temperature is not None else self._request_params.get("temperature")
-        if effective_temp is not None:
-            cfg_kwargs["temperature"] = effective_temp
-
-        # Apply other request params (top_p, top_k, max_output_tokens, etc.)
-        for param in ("top_p", "top_k", "max_output_tokens", "stop_sequences"):
-            if param in self._request_params:
-                cfg_kwargs[param] = self._request_params[param]
+        self._apply_generation_parameters(
+            cfg_kwargs, temperature, max_output_tokens=max_output_tokens,
+        )
 
         # Tool configuration
         if use_tools:
@@ -816,33 +1358,87 @@ class GeminiClient(LLMClient):
         if thinking_config is not None:
             cfg_kwargs["thinking_config"] = thinking_config
 
+        # Auto cache mode: 全呼び出しで create→use→delete を自動適用。
+        # ON なら B 戦略 (_resolve_explicit_cache) をバイパスする。
+        _auto_cleanup_name: Optional[str] = None
+        _cache_name: Optional[str] = None
+        if self._AUTO_CACHE_ENABLED:
+            _cache_name, contents, _auto_cleanup_name = self._auto_cache_wrap(sys_msg, contents)
+        else:
+            _cache_name, contents = self._resolve_explicit_cache(sys_msg, contents, enable_cache, cache_ttl)
+        if _cache_name:
+            cfg_kwargs["cached_content"] = _cache_name
+            cfg_kwargs.pop("system_instruction", None)
+
         get_llm_logger().debug(
             "Gemini generate config model=%s use_tools=%s cfg=%s",
             self.model, use_tools, cfg_kwargs,
         )
+        logging.debug(
+            "[gemini] SENDING %d contents msgs (~%d text chars) cached_content=%s",
+            len(contents),
+            sum(len(getattr(p, "text", "") or "") for c in contents for p in (getattr(c, "parts", None) or [])),
+            cfg_kwargs.get("cached_content"),
+        )
+
+        if _auto_cleanup_name:
+            self._auto_cache_pending_cleanup = _auto_cleanup_name
 
         max_retries = 3
         model_id = self.model
         last_retry_exc: Optional[Exception] = None
 
+        # Structured output (response_schema) is buffered server-side by Gemini
+        # — no chunks arrive until the full JSON is ready, so streaming offers
+        # no latency benefit and previously triggered spurious timeouts.
+        use_non_streaming = use_tools or response_schema is not None
         for attempt in range(max_retries):
             try:
-                if use_tools:
-                    # Non-streaming for tool detection
-                    resp = active_client.models.generate_content(
-                        model=model_id,
-                        contents=contents,
-                        config=types.GenerateContentConfig(**cfg_kwargs),
-                    )
+                if use_non_streaming:
+                    try:
+                        resp = active_client.models.generate_content(
+                            model=model_id,
+                            contents=contents,
+                            config=types.GenerateContentConfig(**cfg_kwargs),
+                        )
+                    except Exception as sdk_exc:
+                        # Structured-output parse failures happen inside the SDK
+                        # and would otherwise take the response body with them.
+                        from_sdk_parse, raw_text = _sdk_structured_parse_failure(sdk_exc)
+                        if not from_sdk_parse:
+                            raise
+                        if raw_text is not None:
+                            get_llm_logger().warning(
+                                "Gemini structured output failed to parse inside the SDK "
+                                "(model=%s, %s: %s). Raw body (%d chars) follows:\n%s",
+                                model_id, type(sdk_exc).__name__, sdk_exc,
+                                len(raw_text), raw_text,
+                            )
+                            logging.warning(
+                                "[gemini] schema 付き応答の解析に失敗 (model=%s, %s) — "
+                                "生の本文 %d 字を llm_io.log に残しました",
+                                model_id, type(sdk_exc).__name__, len(raw_text),
+                            )
+                            detail = f"raw body kept in llm_io.log ({len(raw_text)} chars)"
+                        else:
+                            logging.warning(
+                                "[gemini] schema 付き応答の解析に失敗 (model=%s, %s) — "
+                                "本文は SDK 内で失われた",
+                                model_id, type(sdk_exc).__name__,
+                            )
+                            detail = "本文は SDK 内で失われた"
+                        raise InvalidRequestError(
+                            f"schema 付き応答の解析に失敗 ({detail}): {sdk_exc}",
+                            sdk_exc,
+                            user_message="LLMからの応答を解析できませんでした。再度お試しください。",
+                        ) from sdk_exc
                 else:
-                    # Streaming with chunk timeout for text-only
                     stream = active_client.models.generate_content_stream(
                         model=model_id,
                         contents=contents,
                         config=types.GenerateContentConfig(**cfg_kwargs),
                     )
                     all_parts: List[Any] = []
-                    last_chunk_time = time.time()
                     saw_any_chunk = False
                     last_chunk = None
                     last_finish_reason = None
@@ -851,12 +1447,6 @@ class GeminiClient(LLMClient):
 
                     for chunk in stream:
                         last_chunk = chunk
-                        now = time.time()
-                        if now - last_chunk_time > CHUNK_TIMEOUT_SECONDS and not saw_any_chunk:
-                            raise ChunkTimeoutError(
-                                f"No response received within {CHUNK_TIMEOUT_SECONDS} seconds"
-                            )
-                        last_chunk_time = now
                         saw_any_chunk = True
                         get_llm_logger().debug("Gemini stream chunk:\n%s", chunk)
 
@@ -880,6 +1470,21 @@ class GeminiClient(LLMClient):
 
                     if not saw_any_chunk:
                         raise EmptyResponseError("No chunks received from stream")
+
+                    # Check for server error detected in SSE stream (e.g. 504 DEADLINE_EXCEEDED)
+                    # For call() / structured output, treat as timeout → retry
+                    _sse_err = getattr(_sse_error_local, "error", None)
+                    if _sse_err is not None:
+                        _sse_error_local.error = None
+                        logging.warning(
+                            "[gemini] SSE server error in call() path: code=%s status=%s — retrying",
+                            _sse_err.get("code"), _sse_err.get("status", ""),
+                        )
+                        from .exceptions import LLMTimeoutError as _LLMTimeoutError
+                        raise _LLMTimeoutError(
+                            f"Gemini stream interrupted by server: {_sse_err.get('status', '')} "
+                            f"({_sse_err.get('code', '')}): {_sse_err.get('message', '')}",
+                        )
 
                     # Prompt-level block: input rejected before generation
                     if prompt_block_reason:
@@ -954,8 +1559,11 @@ class GeminiClient(LLMClient):
                             [a for a in dir(part) if not a.startswith("_")]
                         )
 
-                    text, reasoning_entries = self._separate_parts(all_parts)
+                    text, reasoning_entries, text_thought_sig = self._separate_parts(all_parts)
                     self._store_reasoning(reasoning_entries)
+                    # 2026-05-20: text part の thought_signature を保持。
+                    # 次ターンで echo するために SEA runtime が consume する。
+                    self._store_thought_signature(text_thought_sig)
 
                     if response_schema:
                         logging.info("[gemini] Structured output: text=%r, len=%d", text if text else "(empty)", len(text))
@@ -1059,6 +1667,10 @@ class GeminiClient(LLMClient):
                 function_call_part = None
 
                 _sync_thought_sig: Optional[str] = None
+                # 2026-05-20: text part (function_call 以外) の thought_signature。
+                # 公式 doc は text 空でも signature だけ乗るケースを認めるため、
+                # text の有無に関わらず最後の非 None 値を採用する。
+                _text_thought_sig: Optional[str] = None
                 for part in candidate.content.parts:
                     part_fcall = getattr(part, "function_call", None)
                     if part_fcall:
@@ -1067,8 +1679,13 @@ class GeminiClient(LLMClient):
                         if _ts:
                             _sync_thought_sig = _ts
                         continue
-                    
+
                     is_thought = is_truthy_flag(getattr(part, "thought", None))
+                    # thought=True (思考ブロック) 以外の text part から signature を取得。
+                    if not is_thought:
+                        _ts_text = getattr(part, "thought_signature", None)
+                        if _ts_text:
+                            _text_thought_sig = _ts_text
                     part_text = getattr(part, "text", None)
                     if not part_text:
                         continue
@@ -1080,6 +1697,32 @@ class GeminiClient(LLMClient):
                 text = "".join(text_parts)
                 self._store_reasoning(reasoning_entries)
 
+                if response_schema:
+                    logging.info("[gemini] Structured output (non-stream): text=%r, len=%d", text if text else "(empty)", len(text))
+                    if not text.strip():
+                        logging.warning(
+                            "[gemini] Empty structured output response (attempt %d/%d). finish_reason=%s",
+                            attempt + 1, max_retries, finish_reason,
+                        )
+                        continue
+                    try:
+                        parsed = json.loads(text)
+                    except json.JSONDecodeError as e:
+                        logging.warning("[gemini] Failed to parse structured output: %s", e)
+                        from .exceptions import InvalidRequestError
+                        raise InvalidRequestError(
+                            "Failed to parse JSON response from structured output",
+                            e,
+                            user_message="LLMからの応答を解析できませんでした。再度お試しください。"
+                        ) from e
+                    if not isinstance(parsed, dict):
+                        from .exceptions import InvalidRequestError
+                        raise InvalidRequestError(
+                            f"Structured output returned non-dict JSON: {type(parsed).__name__}",
+                            user_message="LLMからの構造化出力が想定の形式ではありません。"
+                        )
+                    return parsed
+
                 # Check candidate-level function_call for backwards compatibility
                 if not function_call_part:
                     function_call_part = getattr(candidate, "function_call", None)
@@ -1088,11 +1731,14 @@ class GeminiClient(LLMClient):
                 if function_call_part:
                     fcall_name = getattr(function_call_part, "name", None)
                     fcall_args = getattr(function_call_part, "args", {}) or {}
+                    fcall_id = getattr(function_call_part, "id", None)
                     _fc_base: Dict[str, Any] = {
                         "tool_name": fcall_name,
                         "tool_args": dict(fcall_args),
                         "raw_function_call": function_call_part,
                     }
+                    if fcall_id:
+                        _fc_base["tool_call_id"] = fcall_id
                     if _sync_thought_sig:
                         _fc_base["thought_signature"] = _sync_thought_sig
 
@@ -1117,8 +1763,16 @@ class GeminiClient(LLMClient):
                     )
                     continue
 
+                # 2026-05-20: text-only 応答の thought_signature を保持。
+                # 次ターンで Gemini に echo するため SEA runtime が consume する。
+                # tool_call 経路と一貫させて result dict にも乗せる (SEA runtime は
+                # result.get("thought_signature") で取得して state に保存する)。
+                self._store_thought_signature(_text_thought_sig)
                 logging.info("[gemini] Returning text response")
-                return {"type": "text", "content": text}
+                _text_result: Dict[str, Any] = {"type": "text", "content": text}
+                if _text_thought_sig:
+                    _text_result["thought_signature"] = _text_thought_sig
+                return _text_result
 
             except EmptyResponseError as e:
                 logging.warning("Gemini empty response (attempt %d/%d): %s", attempt + 1, max_retries, e)
@@ -1167,11 +1821,24 @@ class GeminiClient(LLMClient):
                     continue
                 if self._is_payment_error(exc) or self._is_authentication_error(exc):
                     raise self._convert_to_llm_error(exc, "API call") from exc
-                if active_client is self.free_client and self.paid_client and self._is_rate_limit_error(exc):
-                    logging.info("Retrying with paid Gemini API key due to rate limit")
-                    active_client = self.paid_client
-                    last_retry_exc = exc
-                    continue
+                if self._is_rate_limit_error(exc):
+                    if active_client is self.free_client and self.paid_client:
+                        logging.info("Retrying with paid Gemini API key due to rate limit")
+                        active_client = self.paid_client
+                        last_retry_exc = exc
+                        continue
+                    retry_delay = self._extract_retry_delay(exc)
+                    if retry_delay and attempt < max_retries - 1:
+                        capped_delay = min(retry_delay, 60.0)
+                        logging.info(
+                            "Rate limited (model=%s), waiting %.1fs before retry (attempt %d/%d)",
+                            model_id, capped_delay, attempt + 1, max_retries,
+                        )
+                        time.sleep(capped_delay)
+                        last_retry_exc = exc
+                        continue
+                    logging.warning("Rate limit exceeded for model=%s, no retries left", model_id)
+                    raise self._convert_to_llm_error(exc, "API call") from exc
                 logging.exception("Gemini call failed")
                 raise self._convert_to_llm_error(exc, "API call") from exc
 
@@ -1185,14 +1852,28 @@ class GeminiClient(LLMClient):
             user_message="何度も空の応答が返されました。しばらく待ってから再度お試しください。"
         )
 
-    def _separate_parts(self, parts: List[Any]) -> Tuple[str, List[Dict[str, str]]]:
+    def _separate_parts(self, parts: List[Any]) -> Tuple[str, List[Dict[str, str]], Optional[str]]:
+        """Separate text / reasoning / thought_signature from response parts.
+
+        2026-05-20: 戻り値に thought_signature を追加。Gemini 公式 doc は
+        「最終チャンクの空 text part に signature だけ乗る」ケースを認めるため、
+        text が空でも signature だけ抽出する。複数現れた場合は最後の非 None 値を採用。
+        詳細は docs/intent/thought_signature_persistence.md
+        """
         reasoning_entries: List[Dict[str, str]] = []
         text_segments: List[str] = []
+        latest_signature: Optional[str] = None
         counter = 1
         for part in parts or []:
             if part is None:
                 continue
             is_thought = is_truthy_flag(getattr(part, "thought", None))
+            # thought=True (= 思考ブロック) の part に signature が乗っていても、
+            # ペルソナの発話用ではないため text part 由来のみを採用する。
+            if not is_thought:
+                sig = getattr(part, "thought_signature", None)
+                if sig:
+                    latest_signature = sig
             text = getattr(part, "text", None)
             if not text:
                 continue
@@ -1201,7 +1882,7 @@ class GeminiClient(LLMClient):
                 counter += 1
             else:
                 text_segments.append(text)
-        return "".join(text_segments), reasoning_entries
+        return "".join(text_segments), reasoning_entries, latest_signature
 
     def generate_stream(
         self,
@@ -1211,6 +1892,9 @@ class GeminiClient(LLMClient):
         response_schema: Optional[Dict[str, Any]] = None,
         *,
         temperature: float | None = None,
+        enable_cache: bool = False,
+        cache_ttl: Any = None,
+        max_output_tokens: int | None = None,
         **_: Any,
     ) -> Iterator[str]:
         disable_stream = os.getenv("SAIVERSE_DISABLE_GEMINI_STREAMING")
@@ -1222,6 +1906,9 @@ class GeminiClient(LLMClient):
                 history_snippets=history_snippets,
                 response_schema=response_schema,
                 temperature=temperature,
+                enable_cache=enable_cache,
+                cache_ttl=cache_ttl,
+                max_output_tokens=max_output_tokens,
             )
             yield result
             return
@@ -1230,7 +1917,13 @@ class GeminiClient(LLMClient):
         use_tools = bool(tools_spec)
         history_snippets = history_snippets or []
         self._store_reasoning([])
+        # 2026-05-20: 前回呼び出しの signature 残りを必ずクリア (retry や次ターン汚染防止)
+        self._store_thought_signature(None)
         reasoning_chunks: List[str] = []
+
+        # Clear any leftover SSE error from a previous call on this thread
+        _sse_error_local.error = None
+        self._last_stream_error = None
 
         if use_tools:
             if tools is not None:
@@ -1260,20 +1953,37 @@ class GeminiClient(LLMClient):
 
         active_client = self.client
         try:
-            stream = self._start_stream(active_client, messages, tools_spec, tool_cfg, use_tools, temperature, response_schema)
+            stream = self._start_stream(active_client, messages, tools_spec, tool_cfg, use_tools, temperature, response_schema, enable_cache=enable_cache, cache_ttl=cache_ttl, max_output_tokens=max_output_tokens)
         except Exception as exc:
             if self._is_payment_error(exc) or self._is_authentication_error(exc):
                 raise self._convert_to_llm_error(exc, "streaming")
-            if active_client is self.free_client and self.paid_client and self._is_rate_limit_error(exc):
-                logging.info("Retrying with paid Gemini API key due to rate limit")
-                active_client = self.paid_client
-                stream = self._start_stream(active_client, messages, tools_spec, tool_cfg, use_tools, temperature, response_schema)
+            if self._is_rate_limit_error(exc):
+                if active_client is self.free_client and self.paid_client:
+                    logging.info("Retrying with paid Gemini API key due to rate limit")
+                    active_client = self.paid_client
+                    stream = self._start_stream(active_client, messages, tools_spec, tool_cfg, use_tools, temperature, response_schema, enable_cache=enable_cache, cache_ttl=cache_ttl, max_output_tokens=max_output_tokens)
+                else:
+                    retry_delay = self._extract_retry_delay(exc)
+                    if retry_delay:
+                        capped_delay = min(retry_delay, 60.0)
+                        logging.info(
+                            "Rate limited (model=%s), waiting %.1fs before stream retry",
+                            self.model, capped_delay,
+                        )
+                        time.sleep(capped_delay)
+                        stream = self._start_stream(active_client, messages, tools_spec, tool_cfg, use_tools, temperature, response_schema, enable_cache=enable_cache, cache_ttl=cache_ttl, max_output_tokens=max_output_tokens)
+                    else:
+                        logging.warning("Rate limit exceeded for model=%s", self.model)
+                        raise self._convert_to_llm_error(exc, "streaming")
             else:
                 logging.exception("Gemini call failed")
                 raise self._convert_to_llm_error(exc, "streaming")
 
         fcall: Optional[types.FunctionCall] = None
         fcall_thought_signature: Optional[str] = None
+        # 2026-05-20: text part (function_call 以外) の thought_signature。
+        # ストリームに複数現れた場合は最後の非 None 値を採用。
+        text_thought_signature: Optional[str] = None
         prefix_yielded = False
         seen_stream_texts: Dict[int, str] = {}
         thought_seen: Dict[int, str] = {}
@@ -1355,6 +2065,18 @@ class GeminiClient(LLMClient):
                                 reasoning_chunks.append(text_val)
                                 thought_seen[candidate_index] = previous + text_val
                                 yield {"type": "thinking", "content": text_val}
+                    else:
+                        # 2026-05-20: text part (function_call なし thought なし) の signature 取得。
+                        # 公式 doc は「最終チャンクの空 text part に signature だけ乗る」
+                        # ケースを認めるため、text の有無に関わらず取得する。
+                        _ts_text = getattr(part, "thought_signature", None)
+                        if _ts_text:
+                            text_thought_signature = _ts_text
+                            logging.debug(
+                                "[gemini_stream][sig-trace] text part signature captured: %d bytes (chunk=%d)",
+                                len(_ts_text) if isinstance(_ts_text, (bytes, str)) else -1,
+                                chunk_count,
+                            )
 
                 combined_text = "".join(
                     getattr(part, "text", None) or ""
@@ -1411,9 +2133,19 @@ class GeminiClient(LLMClient):
             post_finish_chunk_count, post_finish_wait,
         )
 
-        if fcall is None and saw_chunks and not stream_completed:
-            # Log as warning but continue with received content
-            logging.warning("Gemini stream ended without completion signal, but content was received. Continuing with partial response.")
+        # Check if SSE patch detected a server error (e.g. 504 DEADLINE_EXCEEDED)
+        sse_error = getattr(_sse_error_local, "error", None)
+        if sse_error is not None:
+            _sse_error_local.error = None
+            self._last_stream_error = sse_error
+            logging.warning(
+                "[gemini_stream] Stream interrupted by server error: code=%s status=%s — partial content retained",
+                sse_error.get("code"), sse_error.get("status", ""),
+            )
+
+        if fcall is None and saw_chunks and not stream_completed and self._last_stream_error is None:
+            # finish_reason not received — known Gemini API quirk, not an error
+            logging.debug("Gemini stream ended without finish_reason (known Gemini API behavior).")
 
         # Store usage from last chunk (uses self.config_key for pricing)
         logging.info("[DEBUG] generate_stream last_chunk exists: %s", last_chunk is not None)
@@ -1436,6 +2168,20 @@ class GeminiClient(LLMClient):
 
         # Store reasoning
         self._store_reasoning(merge_reasoning_strings(reasoning_chunks))
+        # 2026-05-20: text part の thought_signature を保持。tool_call 経由の
+        # signature は _td_base 経由で SEA runtime に伝わるため、ここでは text 用のみ。
+        # 後段の "if fcall is not None" 分岐内で None に上書きする (function_call
+        # detected 時は text 用 signature を保存しない方針)。
+        if fcall is None:
+            self._store_thought_signature(text_thought_signature)
+            logging.debug(
+                "[gemini_stream][sig-trace] stored thought_signature on stream end: %s (%d bytes)",
+                "present" if text_thought_signature else "None",
+                len(text_thought_signature) if isinstance(text_thought_signature, (bytes, str)) else 0,
+            )
+        else:
+            self._store_thought_signature(None)
+            logging.debug("[gemini_stream][sig-trace] fcall path; cleared thought_signature")
 
         # Store tool detection result if function call was detected
         if fcall is not None:
@@ -1443,12 +2189,15 @@ class GeminiClient(LLMClient):
             all_text = "".join(seen_stream_texts.values())
             fcall_name = getattr(fcall, "name", None)
             fcall_args = getattr(fcall, "args", {}) or {}
+            fcall_id = getattr(fcall, "id", None)
 
             _td_base = {
                 "tool_name": fcall_name,
                 "tool_args": dict(fcall_args),
                 "raw_function_call": fcall,
             }
+            if fcall_id:
+                _td_base["tool_call_id"] = fcall_id
             if fcall_thought_signature:
                 _td_base["thought_signature"] = fcall_thought_signature
             if all_text.strip():
@@ -1480,8 +2229,13 @@ class GeminiClient(LLMClient):
         use_tools: bool,
         temperature: float | None,
         response_schema: Optional[Dict[str, Any]] = None,
+        *,
+        enable_cache: bool = False,
+        cache_ttl: Any = None,
+        max_output_tokens: int | None = None,
     ):
         sys_msg, contents = self._convert_messages(messages)
+        self._validate_contents(contents)
         cfg_kwargs: Dict[str, Any] = {
             "system_instruction": sys_msg,
             "safety_settings": self._build_safety_settings(),
@@ -1504,20 +2258,34 @@ class GeminiClient(LLMClient):
         if thinking_config is not None:
             cfg_kwargs["thinking_config"] = thinking_config
 
-        # Temperature: argument > _request_params
-        effective_temp = temperature if temperature is not None else self._request_params.get("temperature")
-        if effective_temp is not None:
-            cfg_kwargs["temperature"] = effective_temp
+        self._apply_generation_parameters(
+            cfg_kwargs, temperature, max_output_tokens=max_output_tokens,
+        )
 
-        # Apply other request params (top_p, top_k, max_output_tokens, etc.)
-        for param in ("top_p", "top_k", "max_output_tokens", "stop_sequences"):
-            if param in self._request_params:
-                cfg_kwargs[param] = self._request_params[param]
+        # Auto cache mode / B 戦略
+        _auto_cleanup_name: Optional[str] = None
+        _cache_name: Optional[str] = None
+        if self._AUTO_CACHE_ENABLED:
+            _cache_name, contents, _auto_cleanup_name = self._auto_cache_wrap(sys_msg, contents)
+        else:
+            _cache_name, contents = self._resolve_explicit_cache(sys_msg, contents, enable_cache, cache_ttl)
+        if _cache_name:
+            cfg_kwargs["cached_content"] = _cache_name
+            cfg_kwargs.pop("system_instruction", None)
+        if _auto_cleanup_name:
+            self._auto_cache_pending_cleanup = _auto_cleanup_name
+
         get_llm_logger().debug(
             "Gemini stream config model=%s use_tools=%s cfg=%s",
             self.model,
             use_tools,
             cfg_kwargs,
+        )
+        logging.debug(
+            "[gemini] SENDING %d contents msgs (~%d text chars) cached_content=%s",
+            len(contents),
+            sum(len(getattr(p, "text", "") or "") for c in contents for p in (getattr(c, "parts", None) or [])),
+            cfg_kwargs.get("cached_content"),
         )
         if use_tools:
             cfg_kwargs.setdefault("tool_config", tool_cfg)

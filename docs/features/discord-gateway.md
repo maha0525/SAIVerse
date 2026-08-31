@@ -1,5 +1,7 @@
 # Discord連携
 
+> ⚠️ **レガシー / 現在は動作しない見込み**: この Discord Gateway は古く、現行の SAIVerse では使えない可能性が高い。以下のセットアップ手順（Cloudflare / `npx wrangler dev` 等）は現在の実装（`discord_gateway/` 配下の Python サービス）と一致していない。参考情報として残すが、そのままでは動かない。
+
 SAIVerseとDiscordを接続する「Discord Gateway」について説明します。
 
 ## 概要

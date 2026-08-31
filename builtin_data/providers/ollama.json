@@ -1,0 +1,5 @@
+{
+  "id": "ollama",
+  "display_name": "Ollama (local)",
+  "protocol": "ollama_compat"
+}

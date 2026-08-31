@@ -1,4 +1,5 @@
 :root {
+  color-scheme: light;
   --background: #fdfdfd;
   --foreground: #171717;
   --primary: #06b6d4;
@@ -14,6 +15,7 @@
 }
 
 [data-theme="dark"] {
+  color-scheme: dark;
   --background: #0a0a0a;
   --foreground: #ededed;
   --bg-secondary: #1f2937;
@@ -34,4 +36,26 @@ body {
   height: 100dvh;
   width: 100vw;
   overflow: hidden;
+}
+
+/* note-box: backend が生成する移動 / item pickup / building event 等のメタ
+   メッセージ用。 通常の会話メッセージと視覚的に区別され、 ノイズになら
+   ないよう控えめな表示にする。 backend は <div class="note-box"> として
+   raw HTML で生成し、 react-markdown + rehypeRaw 経由でそのまま render
+   される。 設計意図: docs/intent/building_memory_unified.md §D-2 */
+.note-box {
+  background-color: var(--bg-tertiary);
+  color: var(--text-secondary);
+  padding: 0.35em 0.7em;
+  margin: 0.25em 0;
+  border-radius: 6px;
+  font-size: 0.85em;
+  line-height: 1.4;
+  border: 1px solid var(--border-color);
+  opacity: 0.85;
+}
+
+.note-box b {
+  font-weight: 500;
+  color: var(--text-primary);
 }

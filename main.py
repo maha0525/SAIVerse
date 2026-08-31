@@ -15,9 +15,35 @@ from pathlib import Path
 
 load_dotenv()
 
+# tqdm の TMonitor バックグラウンドスレッドを無効化する。
+# GPT-SoVITS など tqdm を使うアドオンが起動した状態で Python 終了時、
+# tqdm._monitor.exit() が内部ロックで MainThread と TMonitor の間に
+# デッドロックを起こし、atexit で登録した shutdown_everything に到達
+# できずプロセスが終了しなくなる既知問題の回避。
+from tqdm import tqdm as _tqdm_for_patch
+_tqdm_for_patch.monitor_interval = 0
+
 # Migrate legacy user_data/ to ~/.saiverse/user_data/ if needed
-from saiverse.data_paths import migrate_legacy_user_data
+from saiverse.data_paths import get_saiverse_home, migrate_legacy_user_data
 migrate_legacy_user_data()
+
+# Migrate legacy per-addon persistent data dirs to the new addon_data/ layout.
+# voice-tts is intentionally excluded until its v2 PR lands (its code still
+# references the legacy paths on the Nature109 shared repo); see
+# saiverse/addon_migrations.py ENABLED_ADDONS_FOR_STARTUP.
+from saiverse.addon_migrations import migrate_addon_data_dirs, ENABLED_ADDONS_FOR_STARTUP
+migrate_addon_data_dirs(addon_ids=ENABLED_ADDONS_FOR_STARTUP)
+
+# Configure logging EARLY — before importing modules whose import chains
+# trigger side-effects with their own logging (e.g. saiverse_manager →
+# tools.core → tools/__init__.py の autodiscover). Without this, those
+# INFO/DEBUG logs are dropped because the root logger still uses Python's
+# default WARNING level when those side-effects run.
+level_name = os.getenv("SAIVERSE_LOG_LEVEL", "INFO").upper()
+if level_name not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
+    level_name = "INFO"
+from saiverse.logging_config import configure_logging
+SESSION_LOG_DIR = configure_logging(level_name)
 
 try:
     import psutil  # type: ignore
@@ -42,12 +68,6 @@ except ImportError:
     UnityGatewayServer = None
     UNITY_GATEWAY_AVAILABLE = False
 
-level_name = os.getenv("SAIVERSE_LOG_LEVEL", "INFO").upper()
-if level_name not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
-    level_name = "INFO"
-# Configure logging with terminal mirroring and per-startup log files
-from saiverse.logging_config import configure_logging
-SESSION_LOG_DIR = configure_logging(level_name)
 try:
     _chat_limit_env = int(os.getenv("SAIVERSE_CHAT_HISTORY_LIMIT", "120"))
 except ValueError:
@@ -278,7 +298,24 @@ def main():
     )
     default_sds_url = os.getenv("SDS_URL", "http://127.0.0.1:8080")
     parser.add_argument("--sds-url", type=str, default=default_sds_url, help="URL of the SAIVerse Directory Service (or from .env).")
+    parser.add_argument(
+        "--listen-host",
+        default=os.getenv("SAIVERSE_API_HOST", "127.0.0.1"),
+        help=(
+            "Backend listen address (default: 127.0.0.1). Non-loopback values "
+            "require SAIVERSE_OWNER_TOKEN and SAIVERSE_ALLOWED_ORIGINS."
+        ),
+    )
     args = parser.parse_args()
+
+    listen_host = str(args.listen_host).strip()
+    loopback_hosts = {"127.0.0.1", "::1", "localhost"}
+    lan_mode = listen_host not in loopback_hosts
+    if lan_mode:
+        if not os.getenv("SAIVERSE_OWNER_TOKEN"):
+            parser.error("LAN公開には SAIVERSE_OWNER_TOKEN が必要です")
+        if not os.getenv("SAIVERSE_ALLOWED_ORIGINS"):
+            parser.error("LAN公開には SAIVERSE_ALLOWED_ORIGINS が必要です")
 
     if args.db_file:
         provided_path = Path(args.db_file)
@@ -293,12 +330,139 @@ def main():
     else:
         db_path = default_db_path()
 
-    # Auto-migrate database schema if needed (must run before backup to avoid file lock conflicts)
-    from database.migrate import needs_migration, migrate_database_in_place
+    from saiverse.runtime_marker import acquire_runtime_marker, release_runtime_marker
+
+    try:
+        runtime_marker_token = acquire_runtime_marker(
+            city_name=args.city_name,
+            db_path=db_path,
+            argv=list(sys.argv),
+        )
+    except RuntimeError as exc:
+        parser.error(str(exc))
+    atexit.register(release_runtime_marker, runtime_marker_token)
+
+    # Every startup mutation (schema, data backfill, version handler) is preceded
+    # by a synchronous, integrity-checked restore point. Failure is startup-fatal.
+    if db_path.exists():
+        from database.backup import backup_saiverse_db
+
+        backup_saiverse_db(db_path, kind="pre_upgrade")
+
+    # Auto-migrate database schema if needed (must run before backup to avoid file lock conflicts).
+    # 追加系 (新規テーブル / 新規列) は ALTER/CREATE で生きた DB に直接当てる軽量パスを優先する。
+    # 全書換 (ファイル move) は他コネクションがファイルを開いていると Windows で WinError 32 に
+    # なるため、 破壊的差分 (列削除/型変更) のときだけフォールバックする。
+    from database.migrate import needs_migration, migrate_database_in_place, try_additive_migration, backfill_track_short_ids, backfill_item_short_ids, backfill_city_display_names, backfill_day_plan_refs, backfill_desire_stage_normalization, drop_empty_legacy_note_tables, backfill_session_anchors, backfill_session_head_snapshots, backfill_schedule_instance_tokens, ensure_active_occupancy_unique, ensure_region_entrance_unique, ensure_episode_inheritance_table, ensure_feed_tables, ensure_task_book_table, migrate_deadline_tasks_to_task_book
     if needs_migration(str(db_path)):
         logging.info("Database schema change detected. Running auto-migration...")
-        migrate_database_in_place(str(db_path))
-        logging.info("Database migration completed.")
+        if try_additive_migration(str(db_path)):
+            logging.info("Additive schema migration completed (ALTER/CREATE, no file rewrite).")
+        else:
+            logging.info("Destructive schema change detected; falling back to full rewrite migration.")
+            migrate_database_in_place(str(db_path))
+            logging.info("Database migration completed.")
+        backfill_track_short_ids(str(db_path))
+        backfill_item_short_ids(str(db_path))
+
+    # 参照アドレッシング統一のデータ移行 (day_plan slots_json の desire:→task:) は
+    # schema 変更を伴わないため needs_migration では拾えない。冪等かつ desire: を含む
+    # 行だけを触るので、起動ごとに無条件で呼んで問題ない。
+    backfill_day_plan_refs(str(db_path))
+
+    # persona_schedule の行一生トークン採番 (W3 Codex 第三陣): INSTANCE_TOKEN 列
+    # 追加 (追加系 ALTER) 直後の既存行は NULL — 台帳冪等キーの SCHEDULE_ID 再利用
+    # 分離を効かせるため一括採番する。NULL 行が無ければ no-op の冪等ステップ
+    # なので起動ごとに無条件で呼んで問題ない。
+    backfill_schedule_instance_tokens(str(db_path))
+
+    # City の表示名 (CITYNAME) 復元 (docs/intent/city_identity.md §6): 旧スキーマは
+    # CITYNAME が内部の識別子で、表示名は DESCRIPTION に置かれていた。改名 ALTER で
+    # 識別子を CITY_SLUG へ退避した後、新設の CITYNAME を DESCRIPTION から埋める。
+    # 空の CITYNAME だけを対象にする冪等ステップなので毎起動で呼んで問題ない。
+    backfill_city_display_names(str(db_path))
+
+    # desire 正規化 (P3c-0): stage の物理刻印 + note 親バインドの撤去 + desire
+    # ノート削除。同じく schema 変更を伴わないデータ移行で、各ステップが実行後は
+    # 対象行を残さないため起動ごとに無条件で呼んで問題ない。
+    backfill_desire_stage_normalization(str(db_path))
+
+    # Session anchor の (persona, model) 行分離 (beat_execution_context.md §3.1):
+    # AI.METABOLISM_ANCHORS (単一 JSON) → session_anchor テーブルへの移行。冪等
+    # (変換後は旧列を NULL 化し、非 NULL 行が無ければ no-op) なので毎起動で呼ぶ。
+    backfill_session_anchors(str(db_path))
+
+    # head snapshot + last_notified の (persona, model) キー化 (同 §3.1、§6-3b):
+    # line_head_snapshot (キー=(persona, line)) → session_head_snapshot
+    # (PK=(persona, model)) への移行。INSERT OR IGNORE の冪等移行で、既存の
+    # 新テーブル行は上書きしない。旧テーブルの DROP は後続の掃除 wave。
+    backfill_session_head_snapshots(str(db_path))
+
+    # active occupancy の重複修復 + 部分一意 index (分離監査 P1-2 / W7 柱5):
+    # 「AIID ごとに EXIT_TIMESTAMP IS NULL は高々 1 行」。修復→CREATE INDEX の
+    # 順の冪等ステップで、index は全書換 migration 後もここが再作成する。
+    ensure_active_occupancy_unique(str(db_path))
+
+    # Region 入口所有の一意 index (同 W7 柱5): 共有入口があれば WARN のみ
+    # (自動修復しない — 所有の選択は人間の判断)。冪等。
+    ensure_region_entrance_unique(str(db_path))
+
+    # フィード取り込みテーブル (feed_subscription / feed_item / feed_read_cursor) を
+    # 軽量パスで揃える (docs/intent/rss_feed_intake.md)。テーブル追加のみで既存行に
+    # 触れない冪等ステップ。
+    ensure_feed_tables(str(db_path))
+
+    # 継承エッジ (episode_inheritance) の軽量シンク (experience_structure.md §3.3 /
+    # 完了計画書 W13): テーブル追加のみを素早く確実に適用する。既存 DB には
+    # エッジ 0 本で追加されるだけで既存行に触れない (無害)。冪等。
+    ensure_episode_inheritance_table(str(db_path))
+
+    # タスク帳 (task_book) の軽量シンク (autonomous_behavior_v3.md §4.1-2):
+    # テーブル追加のみを素早く確実に適用する。既存 DB には行 0 件で追加される
+    # だけで既存行に触れない (無害)。冪等。
+    ensure_task_book_table(str(db_path))
+
+    # 締め切りつきタスク → タスク帳の機械写し (autonomous_behavior_v3.md §9-8)。
+    # 期限のある生きた persona_task を IDEM_KEY 付きで写す。写し元は無傷で残り、
+    # 二周目は NOT EXISTS に弾かれて 0 件なので起動ごとに無条件で呼んで問題ない。
+    # ⚠ ensure_task_book_table の後に置くこと (書き込み先が要る)。
+    migrate_deadline_tasks_to_task_book(str(db_path))
+
+    # Note → テーマノード移行 (P3c①) の後始末: note テーブルが (ペルソナ単位の
+    # 扇形移行完了により) 空になったら note/note_page/note_message/track_open_note
+    # を DROP する。空でない間は無害な no-op なので起動ごとに無条件で呼ぶ。
+    drop_empty_legacy_note_tables(str(db_path))
+
+    # Building Memory 関連テーブル (Phase 2+3) を軽量パスで揃える。
+    # needs_migration が拾うのは「カラム差分」 のみで「テーブル追加」 は素早く確実に
+    # 適用したいため、 ALTER 系の軽量シンク経路を別途実行する。
+    # See docs/intent/building_memory_unified.md
+    try:
+        from database.session import engine as _bm_engine
+        from database.schema_sync import ensure_building_memory_tables
+        ensure_building_memory_tables(_bm_engine)
+    except Exception:
+        logging.warning("Building Memory schema sync failed (will rely on needs_migration path)", exc_info=True)
+
+    # Version-aware upgrade: run before SAIVerseManager initialization (= before personas
+    # are loaded). Each City and AI compares its LAST_KNOWN_VERSION against the current
+    # SAIVerse version and runs the necessary upgrade handlers. NULL version is treated
+    # as pre-v0.3.0. See docs/intent/version_aware_world_and_persona.md for details.
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from saiverse.upgrade import run_startup_upgrade
+    _upgrade_engine = create_engine(f"sqlite:///{db_path}")
+    _UpgradeSession = sessionmaker(autocommit=False, autoflush=False, bind=_upgrade_engine)
+    _upgrade_session = _UpgradeSession()
+    try:
+        if not run_startup_upgrade(_upgrade_session):
+            logging.error("Version-aware upgrade failed. Aborting startup. "
+                          "Inspect logs for the failing handler, fix it, and retry. "
+                          "Set SAIVERSE_SKIP_VERSION_CHECK=1 to bypass (dangerous).")
+            sys.exit(1)
+    finally:
+        _upgrade_session.close()
+        _upgrade_engine.dispose()
 
     # Start database backup in background thread
     threading.Thread(target=run_startup_backup, args=(db_path,), daemon=True).start()
@@ -319,9 +483,12 @@ def main():
     app_state.set_city_name(args.city_name)
     app_state.set_project_dir(str(Path(__file__).parent.resolve()))
 
-    # Sync builtin playbook flags from JSON definitions to DB.
-    # Fixes seed.py bug where user_selectable/dev_only/display_name were not set.
-    _sync_builtin_playbook_flags(manager.SessionLocal)
+    # Sync all file-based playbooks (builtin / expansion_data / user_data) to DB.
+    # Performs diff-based update: new files are imported, changed files are updated,
+    # unchanged files are skipped. DB-only playbooks (created via save_playbook tool)
+    # are left untouched.
+    from saiverse.playbook_sync import sync_playbooks_from_files
+    sync_playbooks_from_files(manager.SessionLocal)
 
     # Unity Gateway の起動（オプション）
     unity_gateway_port = int(os.getenv("UNITY_GATEWAY_PORT", "8765"))
@@ -341,6 +508,31 @@ def main():
     else:
         manager.unity_gateway = None
 
+    # Initialize MCP server connections and dynamic tools.
+    try:
+        from tools.mcp_client import initialize_mcp_sync
+
+        _mcp_manager = initialize_mcp_sync()
+        if _mcp_manager:
+            _mcp_tools = _mcp_manager.get_registered_tool_names()
+            logging.info(
+                "MCP: connected to %d server(s), registered %d tool(s)",
+                len(_mcp_manager.get_server_status()),
+                len(_mcp_tools),
+            )
+            for tool_name in _mcp_tools:
+                logging.info("  MCP tool: %s", tool_name)
+    except Exception:
+        logging.warning("MCP initialization failed (non-fatal)", exc_info=True)
+
+    try:
+        from saiverse.composite_actions import register_all_addon_action_spells
+        _action_count = register_all_addon_action_spells()
+        if _action_count:
+            logging.info("Composite actions: registered %d action spell(s)", _action_count)
+    except Exception:
+        logging.warning("Composite actions initialization failed (non-fatal)", exc_info=True)
+
     api_server_process = cleanup_and_start_server_with_args(
         manager.api_port,
         Path(__file__).parent / "database" / "api_server.py",
@@ -348,6 +540,14 @@ def main():
         str(db_path),
     )
     app_state.child_processes.append(api_server_process)
+
+    # --- Start manager background loops (LAST — after full world init) ---
+    # 構築 (__init__) と起動 (start) を分離: MCP 接続・addon 登録・API サーバまで
+    # 揃ってから初めて pulse / capture を生む背景ループを起動する。これより前に自律
+    # pulse が走ると、未初期化のサブシステム (例: MCP 未接続) 基準で head を capture
+    # し、初回 pulse で偽の差分通知が出る (2026-07-02 の vessel スペル 17 個誤通知)。
+    # 詳細は SAIVerseManager.start() の docstring 参照。
+    manager.start()
 
     # --- アプリケーション終了時のクリーンアップ ---
     shutdown_called = False
@@ -357,17 +557,51 @@ def main():
         if shutdown_called:
             return
         shutdown_called = True
+        logging.info("[shutdown] start")
+        # 走行中の発言生成を最初に締める — Beat の後始末 (途中本文の確定・
+        # 記憶書き込み) は生成スレッドの中で走るので、MCP や llama-server を
+        # 先に壊すと、後始末が壊れた道具の上で走ることになる。これを飛ばして
+        # プロセスが死ぬと、下書き行が未確定のまま残って発言が丸ごと消える。
+        if manager:
+            try:
+                if manager.stop_all_active_generations():
+                    logging.info("[shutdown] active generations settled")
+                else:
+                    # 締切内に締まらなかった — 下書き行が未確定のまま残り、
+                    # その発言は画面・記録・記憶から消え得る。
+                    logging.warning(
+                        "[shutdown] some active generations did not settle "
+                        "before teardown"
+                    )
+            except Exception:
+                logging.exception("[shutdown] failed to settle active generations")
+        try:
+            from tools.mcp_client import shutdown_mcp_sync
+
+            shutdown_mcp_sync()
+            logging.info("[shutdown] MCP stopped")
+        except Exception as e:
+            logging.debug(f"Error stopping MCP connections: {e}")
         # Unity Gatewayの停止
         if manager and manager.unity_gateway:
             import asyncio
             try:
                 loop = asyncio.new_event_loop()
                 loop.run_until_complete(manager.unity_gateway.stop())
+                logging.info("[shutdown] Unity Gateway stopped")
             except Exception as e:
                 logging.debug(f"Error stopping Unity Gateway: {e}")
+        try:
+            from llm_clients.llama_server import get_server_manager
+            get_server_manager().shutdown_all()
+            logging.info("[shutdown] llama-server processes stopped")
+        except Exception as e:
+            logging.debug("[shutdown] llama-server cleanup error: %s", e)
         shutdown_subprocess(api_server_process, "API Server")
+        logging.info("[shutdown] API Server subprocess stopped")
         if manager:
             manager.shutdown()
+        logging.info("[shutdown] complete")
 
     def handle_sigterm(signum, frame):
         """SIGTERMを受け取ったときにクリーンアップを実行してから終了"""
@@ -386,18 +620,33 @@ def main():
 
     app = FastAPI()
 
-    # CORS settings (Allow frontend access)
+    allowed_origins = [
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    ]
+    allowed_origins.extend(
+        origin.strip().rstrip("/")
+        for origin in os.getenv("SAIVERSE_ALLOWED_ORIGINS", "").split(",")
+        if origin.strip().startswith(("http://", "https://"))
+    )
+
+    # CORS settings (Allow the configured frontend origins only)
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],  # Development only: allow all
+        allow_origins=sorted(set(allowed_origins)),
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
     )
 
+    if lan_mode:
+        from api.owner_auth import OwnerAuthMiddleware
+
+        app.add_middleware(OwnerAuthMiddleware)
+
     # Mount uploads directory for user-attached images FIRST (more specific path)
     # Access via /api/static/uploads/filename.png
-    uploads_dir = Path.home() / ".saiverse" / "image"
+    uploads_dir = get_saiverse_home() / "image"
     uploads_dir.mkdir(parents=True, exist_ok=True)
     app.mount("/api/static/uploads", StaticFiles(directory=str(uploads_dir)), name="uploads")
 
@@ -425,18 +674,37 @@ def main():
     from api.main import api_router
     app.include_router(api_router, prefix="/api")
 
-    logging.info(f"Starting SAIVerse backend on http://0.0.0.0:{manager.ui_port}")
-    logging.info(f"API endpoints available at http://0.0.0.0:{manager.ui_port}/api")
+    # Load addon API routers from expansion_data/*/api_routes.py
+    from saiverse.addon_loader import load_addon_routers
+    load_addon_routers(app)
+
+    # Register event loop for addon_events (enables emit from background threads)
+    @app.on_event("startup")
+    async def _register_addon_event_loop():
+        import asyncio
+        from saiverse.addon_events import set_event_loop
+        set_event_loop(asyncio.get_event_loop())
+
+    logging.info(f"Starting SAIVerse backend on http://{listen_host}:{manager.ui_port}")
+    logging.info(f"API endpoints available at http://{listen_host}:{manager.ui_port}/api")
     logging.info("")
     logging.info("To use the UI, start the Next.js frontend:")
     logging.info("  cd frontend && npm run dev")
     logging.info("  Then open http://localhost:3000 in your browser")
 
+    # log_config=None: skip uvicorn's own logging setup so that the uvicorn /
+    # uvicorn.error / uvicorn.access loggers keep default propagation and flow
+    # into the root TeeHandler (console + backend.log). Without this, uvicorn
+    # attaches its own stderr-only handlers with propagate=False, and the
+    # "Exception in ASGI application" tracebacks for 500 errors never reach
+    # backend.log (see docs/issues/uvicorn_traceback_not_in_logs.md).
     uvicorn.run(
         app,
-        host="0.0.0.0",
+        host=listen_host,
         port=manager.ui_port,
-        log_level="info"
+        log_level="info",
+        log_config=None,
+        timeout_graceful_shutdown=5,
     )
 
 
