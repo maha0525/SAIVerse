@@ -50,8 +50,7 @@
     "n_gpu_layers": -1,
     "parallel": 1,
     "extra_args": [],
-    "idle_timeout": 600,
-    "_comment_idle_timeout": "秒数。未使用時に自動停止するまでの時間。0 で無効（常時起動）。デフォルト 600（10分）",
+    "_comment_idle_timeout": "任意項目 idle_timeout: 秒数。未使用時に自動停止するまでの時間。0 で無効（常時起動）。未指定ならデフォルト 600（10分）",
     "_comment_command": "バッチファイル/シェルスクリプトで起動する場合は command にパスを指定。指定時は model_path, n_gpu_layers, extra_args 等は無視される。例: \"command\": \"C:/llama/start.bat\""
   }
 }
