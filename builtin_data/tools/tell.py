@@ -340,5 +340,9 @@ def schema() -> ToolSchema:
         },
         result_type="string",
         spell=True,
+        # 自律行動が v0.3.0 で未出荷のため、通常会話での無駄撃ちを避けて UI と
+        # head のスペル一覧から隠す (2026-09-01 裁定)。ペルソナからの実行は可能。
+        # 復帰条件: 自律行動の出荷時に spell_visible=True へ戻す。
+        spell_visible=False,
         spell_display_name="声をかける",
     )
