@@ -739,6 +739,67 @@ def test_write_refill_cas_rejects_moved_anchor(session_factory):
     entry = lc.load_anchor_entry(PERSONA_ID, "model-a")
     assert entry["anchor_id"] == "moved"
     assert not deserialize_folds(entry.get("folded_ranges"))
+    # CAS 不一致は「意図した見送り」なので raise_on_error でも False のまま
+    # (例外にするのは書き込み自体が失敗したときだけ — Codex 十一巡 P1)。
+    assert lc._write_refill(
+        PERSONA_ID, "model-a", "m0", "b0",
+        [FoldedRange(message_ids=["b0"], presented_raw=True)],
+        raise_on_error=True,
+    ) is False
+
+
+def test_write_refill_separates_db_failure_from_cas_rejection(session_factory):
+    """[Codex 十一巡 P1] 書き込みの DB 失敗と CAS 不一致を分ける。
+
+    既定 (raise_on_error=False) は従来どおり両方 False — §15 読み戻しは
+    どちらも "skip" へ落とす fail-open のまま。補修の引き戻しだけが
+    raise_on_error=True で呼び、DB 失敗を "failed" へ写像する。
+    """
+    lc = _make_lifecycle(session_factory)
+    lc.upsert_anchor_entry(PERSONA_ID, "model-a", {
+        "anchor_id": "m0", "updated_at": _now().isoformat(), "ttl_seconds": 300,
+    })
+    real_factory = lc.manager.SessionLocal
+
+    class _Query:
+        def __init__(self, real):
+            self._real = real
+
+        def filter_by(self, **kwargs):
+            return _Query(self._real.filter_by(**kwargs))
+
+        def update(self, *args, **kwargs):
+            raise RuntimeError("db write down")
+
+        def __getattr__(self, name):
+            return getattr(self._real, name)
+
+    class _Session:
+        def __init__(self, real):
+            self._real = real
+
+        def query(self, *args, **kwargs):
+            return _Query(self._real.query(*args, **kwargs))
+
+        def __getattr__(self, name):
+            return getattr(self._real, name)
+
+    lc.manager.SessionLocal = lambda: _Session(real_factory())
+    folds = [FoldedRange(message_ids=["b0"], presented_raw=True)]
+    # 既定: 従来どおり False へ縮退 (§15 の呼び出し側の挙動は不変)
+    assert lc._write_refill(PERSONA_ID, "model-a", "m0", "b0", folds) is False
+    # 補修経路: 書き込みの失敗は例外で伝わる
+    with pytest.raises(RuntimeError):
+        lc._write_refill(
+            PERSONA_ID, "model-a", "m0", "b0", folds, raise_on_error=True,
+        )
+    # manager 未接続 (書き込みを試みられない状態) も同じ扱い
+    lc.manager = None
+    assert lc._write_refill(PERSONA_ID, "model-a", "m0", "b0", folds) is False
+    with pytest.raises(RuntimeError):
+        lc._write_refill(
+            PERSONA_ID, "model-a", "m0", "b0", folds, raise_on_error=True,
+        )
 
 
 def test_refold_flips_oldest_first_until_target(session_factory):

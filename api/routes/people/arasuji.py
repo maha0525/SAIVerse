@@ -151,6 +151,18 @@ def estimate_chronicle_cost(
         # Memopedia 初期化はテーブル作成の書き込みを伴うため、ロード済みなら
         # adapter のロックで直列化する (memopedia_writers_bypass_adapter_lock)
         _adapter = getattr(persona, "sai_memory", None)
+
+        # 末尾の未被覆帯の anchor 引き戻し (裁定 5 改訂) に伴う即時畳みの
+        # 見込み。実行 (run_tail_rewind) と同じ判定関数 (plan_tail_rewind) を
+        # 通す — 表示と実走が違う数を言ってはならない。
+        tail_fold_estimator = None
+        if lifecycle is not None and persona is not None:
+            from sea.coverage_repair import estimate_tail_rewind_fold
+
+            def tail_fold_estimator(first_id, _run_ids,
+                                    _lc=lifecycle, _p=persona, _c=conn):
+                return estimate_tail_rewind_fold(_lc, _p, _c, first_id)
+
         estimate = estimate_chronicle_generation_cost(
             conn,
             model_name=model_name,
@@ -159,7 +171,24 @@ def estimate_chronicle_cost(
             ),
             db_lock=_adapter._db_lock if _adapter is not None else None,
             compile_before=compile_before,
+            tail_fold_estimator=tail_fold_estimator,
         )
+
+        # 前回の吸収ジョブの未完了 (裁定 6): 再起動を跨いで残る印
+        # (arasuji_progress の repair_incomplete 行 + content_stale の残骸)
+        # を応答に載せ、frontend の帯が「再実行してください」を併記する。
+        from sai_memory.arasuji.absorption import is_repair_incomplete
+        try:
+            repair_incomplete = is_repair_incomplete(conn)
+        except Exception:
+            # 読めなかった = 未完了かもしれない。黙って「完了」の顔にしない —
+            # 帯の通知を維持する側へ倒す (Codex 三巡 F5。テーブル不在の縮退は
+            # is_repair_incomplete 自身が False で返す)。
+            LOGGER.warning(
+                "[cost-estimate] repair-incomplete check failed; reporting "
+                "incomplete to keep the banner visible", exc_info=True,
+            )
+            repair_incomplete = True
 
         return ChronicleCostEstimate(
             total_messages=estimate.total_messages,
@@ -170,6 +199,7 @@ def estimate_chronicle_cost(
             model_name=estimate.model_name,
             is_free_tier=estimate.is_free_tier,
             currency=estimate.currency,
+            repair_incomplete=repair_incomplete,
         )
     finally:
         conn.close()
@@ -549,17 +579,32 @@ def delete_arasuji_entry(persona_id: str, entry_id: str, manager = Depends(get_m
         raise HTTPException(status_code=404, detail=f"Memory database not found for {persona_id}")
 
     try:
-        # delete_entry handles child reset (is_consolidated=0, parent_id=NULL)
-        success = delete_entry(conn, entry_id)
-        if not success:
-            raise HTTPException(status_code=404, detail=f"Chronicle entry {entry_id} not found")
+        # Beat ロックで補修ジョブ / Metabolism と直列化する (Codex 六巡 J2) —
+        # 削除に伴う親帳簿の引き直し (refresh_ancestor_bookkeeping) は
+        # read-modify-write なので、錠なしだとジョブ側の帳簿更新と並走して
+        # 後勝ちで上書きし合う。保守書き込みなので関所は通さない
+        # (check_gate=False — run_coverage_repair / remove_folds と同じ型。
+        # remove_folds 内の hold_beat は同一スレッド RLock 再入で無害)。
+        from sea.beat_gate import hold_beat
+        with hold_beat(
+            manager, persona_id, purpose="arasuji_delete", check_gate=False,
+        ):
+            # delete_entry handles child reset (is_consolidated=0, parent_id=NULL)
+            success = delete_entry(conn, entry_id)
+            if not success:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Chronicle entry {entry_id} not found",
+                )
 
-        # 圧縮区間の記録の道連れ削除: このエントリを digest として提示している
-        # 範囲の記録を残すと、提示は生ログに倒れるのに再畳みだけが永久に拒否
-        # される半端な状態になる (issue chronicle_eviction_applier_veto_deadlock
-        # 顔その2)。エントリを消す操作が記録も同時に無効化する。
-        from sea.session_lifecycle import remove_folds_referencing_entry
-        folds_removed = remove_folds_referencing_entry(manager, persona_id, entry_id)
+            # 圧縮区間の記録の道連れ削除: このエントリを digest として提示して
+            # いる範囲の記録を残すと、提示は生ログに倒れるのに再畳みだけが永久に
+            # 拒否される半端な状態になる (issue chronicle_eviction_applier_veto_
+            # deadlock 顔その2)。エントリを消す操作が記録も同時に無効化する。
+            from sea.session_lifecycle import remove_folds_referencing_entry
+            folds_removed = remove_folds_referencing_entry(
+                manager, persona_id, entry_id,
+            )
 
         return {
             "success": True,
@@ -588,7 +633,14 @@ def update_arasuji_entry(
         raise HTTPException(status_code=404, detail=f"Memory database not found for {persona_id}")
 
     try:
-        success = update_entry_content(conn, entry_id, request.content)
+        # Beat ロックで補修ジョブ / Metabolism / 削除と直列化 (Codex 七巡 K3 —
+        # 吸収の CAS〜swap の間に編集が入ると、競合検出のどちらか一方が
+        # 黙って負ける。錠の内側なら並びが直列化されて CAS が正しく効く)。
+        from sea.beat_gate import hold_beat
+        with hold_beat(
+            manager, persona_id, purpose="arasuji_edit", check_gate=False,
+        ):
+            success = update_entry_content(conn, entry_id, request.content)
         if not success:
             raise HTTPException(status_code=404, detail=f"Chronicle entry {entry_id} not found")
         return {"success": True}
@@ -610,7 +662,13 @@ def delete_all_arasuji_entries(persona_id: str, manager=Depends(get_manager)):
         raise HTTPException(status_code=404, detail=f"Memory database not found for {persona_id}")
 
     try:
-        deleted_count = clear_all_entries(conn)
+        # Beat ロックで補修ジョブ / Metabolism と直列化 (Codex 六巡 J2 —
+        # 個別削除ルートと同じ型)。
+        from sea.beat_gate import hold_beat
+        with hold_beat(
+            manager, persona_id, purpose="arasuji_delete", check_gate=False,
+        ):
+            deleted_count = clear_all_entries(conn)
         return {
             "success": True,
             "deleted_count": deleted_count,
@@ -756,11 +814,18 @@ async def regenerate_arasuji_entry(
     4. Restoring parent relationship
     """
     from sai_memory.arasuji.storage import regenerate_entry
-    
+
     conn = _get_arasuji_db(persona_id)
-    
+
     try:
-        new_entry = regenerate_entry(conn, entry_id, persona_id=persona_id)
+        # Beat ロックで補修ジョブ / Metabolism / 削除・編集と直列化 (Codex
+        # 七巡 K3 の同族掃討 — 再生成は generate-then-swap の書き込み)。LLM を
+        # 錠の内側で待つのは補修ジョブ (run_coverage_repair) と同じ性質。
+        from sea.beat_gate import hold_beat
+        with hold_beat(
+            manager, persona_id, purpose="arasuji_regenerate", check_gate=False,
+        ):
+            new_entry = regenerate_entry(conn, entry_id, persona_id=persona_id)
         
         if not new_entry:
             raise HTTPException(

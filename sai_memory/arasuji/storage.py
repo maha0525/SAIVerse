@@ -717,19 +717,82 @@ def delete_entry(conn: sqlite3.Connection, entry_id: str) -> bool:
     # 想起用タグの辺も同一 tx で落とす (recall_edges.delete_chunk_page_edges)。
     from sai_memory.memory.recall_edges import delete_chunk_page_edges
     delete_chunk_page_edges(conn, [entry_id])
+    # あらすじ埋め込みの道連れ削除 (2026-08-31 裁定 — 孤児埋め込みが unified
+    # recall の想起に出る。従来は persona_chronicle_cleanup.py だけが手で消して
+    # いたのを、削除経路の本則にする)。
+    _delete_arasuji_embeddings(conn, [entry_id])
     conn.execute(
         "DELETE FROM memopedia_pages WHERE id = ? AND category = ?",
         (entry_id, CATEGORY_CHRONICLE),
     )
     conn.commit()
+
+    # 親を持つエントリの削除は、親の帳簿 (source_ids / span / counts) を現況の
+    # 子から引き直す (Codex 五巡 H1 — 死んだ子 id の供給源を断つ。UI の個別
+    # 削除がこの関数を使う)。content_stale は付けない — 手動削除を上位本文へ
+    # 自動で伝えない (手動編集と同族の裁定 R6)。子がゼロになった親は解体される。
+    #
+    # 引き直しが失敗しても True を返す (Codex 六巡 J1 受容、まはー裁定):
+    # 削除自体は確定済みなので True が正直。残る不整合は WARNING での可視化 +
+    # 補修ジョブ冒頭の sweep (保険) + API 削除ルートの Beat ロック直列化 (J2 —
+    # 並走上書きの族の根絶) の三枚で受ける。
+    if entry.parent_id:
+        try:
+            refresh_ancestor_bookkeeping(
+                conn, [entry.parent_id], mark_stale=False,
+            )
+        except Exception:
+            import logging
+            logging.getLogger(__name__).warning(
+                "[arasuji] parent bookkeeping refresh failed after deleting "
+                "%s; the repair sweep will catch the dead reference",
+                entry_id, exc_info=True,
+            )
     return True
+
+
+def is_missing_table_error(exc: BaseException) -> bool:
+    """OperationalError が「テーブル不在」か (旧 DB の縮退として許容できる唯一の形)。
+
+    DB ロック・スキーマ不整合など他の OperationalError を同じ except で握ると、
+    帳簿の付け替え失敗が黙って「成功」の顔をする (Codex 二巡 R3)。この判定を
+    通らない例外は呼び出し側で raise する。
+    """
+    return "no such table" in str(exc)
+
+
+def _delete_arasuji_embeddings(
+    conn: sqlite3.Connection, entry_ids: Sequence[str],
+) -> None:
+    """arasuji_embeddings の道連れ削除 (テーブルの無い旧 DB は黙って通す)。"""
+    ids = [str(e) for e in entry_ids if e]
+    if not ids:
+        return
+    try:
+        placeholders = ",".join("?" for _ in ids)
+        conn.execute(
+            f"DELETE FROM arasuji_embeddings WHERE entry_id IN ({placeholders})",
+            ids,
+        )
+    except sqlite3.OperationalError as exc:
+        if not is_missing_table_error(exc):
+            raise
 
 
 def delete_entry_and_update_parent(
     conn: sqlite3.Connection,
-    entry_id: str
+    entry_id: str,
+    *,
+    refresh_ancestors: bool = True,
 ) -> tuple[bool, Optional[str]]:
     """Delete entry and remove from parent's source_ids.
+
+    ``refresh_ancestors`` (Codex 六巡 J5): 既定で、親の帳簿 (span / counts) を
+    現況の子から引き直し、空になった親は解体する (delete_entry と同じ着地 —
+    取り下げ経路の帳簿がここ経由で自動的に揃う)。**差し替え (swap) の途中**
+    だけは False で呼ぶ — 旧を消してから新を親へ繋ぐまでの間に引き直すと、
+    一人っ子の親が空と誤認されて解体される (呼び出し側が繋いだ後に自分で
+    引き直す契約: regenerate_entry / absorption の phase 3)。
 
     Returns:
         (success, parent_id) - parent_id is None if no parent existed
@@ -763,11 +826,26 @@ def delete_entry_and_update_parent(
     # 旧 id を指す辺が孤児として残る (recall_edges.delete_chunk_page_edges)。
     from sai_memory.memory.recall_edges import delete_chunk_page_edges
     delete_chunk_page_edges(conn, [entry_id])
+    # あらすじ埋め込みの道連れ削除 (2026-08-31 裁定)。
+    _delete_arasuji_embeddings(conn, [entry_id])
     conn.execute(
         "DELETE FROM memopedia_pages WHERE id = ? AND category = ?",
         (entry_id, CATEGORY_CHRONICLE),
     )
     conn.commit()
+
+    # 親の帳簿の引き直し (Codex 六巡 J5 — delete_entry と同じ着地)。失敗は
+    # WARNING のみ — 削除自体は確定済みで、補修ジョブ冒頭の sweep が保険。
+    if refresh_ancestors and parent_id:
+        try:
+            refresh_ancestor_bookkeeping(conn, [parent_id], mark_stale=False)
+        except Exception:
+            import logging
+            logging.getLogger(__name__).warning(
+                "[arasuji] parent bookkeeping refresh failed after deleting "
+                "%s; the repair sweep will catch the inconsistency",
+                entry_id, exc_info=True,
+            )
 
     return True, parent_id
 
@@ -812,6 +890,99 @@ def add_to_parent_source_ids(
 
     conn.commit()
     return True
+
+
+def refresh_ancestor_bookkeeping(
+    conn: sqlite3.Connection, parent_ids: Sequence[str], *, mark_stale: bool,
+) -> List[str]:
+    """親 (と先祖) の帳簿を現況の子から引き直す。
+
+    source_ids は生存している子だけに、span (start/end)・source_count・
+    message_count・coverage_chars は生存子の合算に更新する。子が全部消えた
+    親は解体して、その親の親を同様に処理する。
+
+    ``mark_stale=True`` は吸収の連鎖再生成用 — 引き直した親に ``content_stale``
+    の印を付け、flush (absorption.regenerate_upper_entry) が本文を語り直す。
+    ``mark_stale=False`` は手動削除の追随 (Codex 五巡 H1) — 帳簿だけ引き直し、
+    上位本文へは自動で伝えない (手動編集と同族の裁定 R6。既に付いている印は
+    消さない)。
+
+    自前の UPDATE は積んでおいて**末尾の単一 commit** で確定する (ローカル
+    レビュー 2026-08-31 L3 — ノードごとの commit だと途中例外で引き直しが
+    混在する)。空の親の解体だけは delete_entry_and_update_parent の内部
+    commit を伴う (storage 層の 1 操作 1 commit 設計 — その時点までの積みも
+    一緒に確定するが、確定内容はどれも単体で正しいので混在の害はない)。
+
+    Returns:
+        帳簿を引き直した entry id (発見順・重複なし。解体した親は含まない)。
+    """
+    processed: List[str] = []
+    seen: set = set()
+    queue: List[str] = [str(p) for p in parent_ids if p]
+    try:
+        while queue:
+            pid = queue.pop(0)
+            if pid in seen:
+                continue
+            seen.add(pid)
+            row = _get_chronicle_page_row(conn, pid)
+            if row is None:
+                continue
+            meta = _parse_chronicle_meta(row[3])
+            source_ids = [str(s) for s in (meta.get("source_ids") or [])]
+            children = []
+            for sid in source_ids:
+                child = get_entry(conn, sid)
+                if child is not None:
+                    children.append(child)
+            grand_parent = get_entry(conn, pid)
+            gp_id = grand_parent.parent_id if grand_parent else None
+            if not children:
+                # 空の親 — 解体 (delete_entry_and_update_parent が親の親から外す)。
+                # 先祖の引き直しは本走査が queue で自分で面倒を見る (二重走査と
+                # 再帰を避けるため refresh_ancestors=False)。
+                delete_entry_and_update_parent(
+                    conn, pid, refresh_ancestors=False,
+                )
+                if gp_id:
+                    queue.append(str(gp_id))
+                continue
+            starts = [c.start_time for c in children if c.start_time is not None]
+            ends = [c.end_time for c in children if c.end_time is not None]
+            coverage = 0
+            for c in children:
+                crow = _get_chronicle_page_row(conn, c.id)
+                cmeta = _parse_chronicle_meta(crow[3]) if crow else {}
+                try:
+                    coverage += int(cmeta.get("coverage_chars") or 0)
+                except (TypeError, ValueError):
+                    pass
+            meta["source_ids"] = [c.id for c in children]
+            if starts:
+                meta["start_time"] = min(starts)
+            if ends:
+                meta["end_time"] = max(ends)
+            meta["source_count"] = len(children)
+            meta["message_count"] = sum(c.message_count for c in children)
+            if coverage:
+                meta["coverage_chars"] = coverage
+            if mark_stale:
+                meta["content_stale"] = 1
+            conn.execute(
+                "UPDATE memopedia_pages SET metadata = ? WHERE id = ?",
+                (json.dumps(meta, ensure_ascii=False), pid),
+            )
+            processed.append(pid)
+            if gp_id:
+                queue.append(str(gp_id))
+        conn.commit()
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
+    return processed
 
 
 def dismantle_entry(
@@ -893,6 +1064,8 @@ def dismantle_entry(
     # 想起用タグの辺も同一 tx で落とす (recall_edges.delete_chunk_page_edges)。
     from sai_memory.memory.recall_edges import delete_chunk_page_edges
     delete_chunk_page_edges(conn, [entry_id])
+    # あらすじ埋め込みの道連れ削除 (2026-08-31 裁定)。
+    _delete_arasuji_embeddings(conn, [entry_id])
     conn.execute(
         "DELETE FROM memopedia_pages WHERE id = ? AND category = ?",
         (entry_id, CATEGORY_CHRONICLE),
@@ -955,6 +1128,8 @@ def clear_all_entries(conn: sqlite3.Connection) -> int:
         )
     ]
     delete_chunk_page_edges(conn, doomed_ids)
+    # あらすじ埋め込みの道連れ削除 (2026-08-31 裁定)。
+    _delete_arasuji_embeddings(conn, doomed_ids)
     cur = conn.execute(
         "DELETE FROM memopedia_pages WHERE category = ? AND is_trunk = 0",
         (CATEGORY_CHRONICLE,),
@@ -1091,6 +1266,77 @@ def regenerate_entry(
         _withdraw_replacement()
         return None
 
+    # Fragment の付け替え (2026-08-31 裁定): 旧 entry から抽出済みの知識は
+    # 消さず新 entry へ付け替える (放置すると旧 id を指したまま宙に浮き、
+    # UI の「抽出された知識」から消える — 再生成ボタンに元からあった欠陥)。
+    # 新 entry からの新規抽出は既存機構のまま (重複登録は受容)。
+    #
+    # 位置は**旧削除より前の可逆フェーズ** (Codex 三巡 F3)、かつ**バッチの印
+    # より前** (Codex 四巡 G3): 失敗しうるものを、印を動かす前に済ませる。
+    # 逆順 (印 → Fragment) だと、Fragment 失敗時の取り下げ (unmark を通る削除)
+    # が新 entry へ移した印を NULL に落とし、旧 entry の帰属が消えて同じ知覚が
+    # 次回編纂で二重取り込みされる。
+    moved_fragment_ids: List[str] = []
+
+    def _revert_fragments() -> None:
+        if not moved_fragment_ids:
+            return
+        try:
+            ph = ",".join("?" for _ in moved_fragment_ids)
+            conn.execute(
+                f"UPDATE memopedia_fragments SET chronicle_entry_id = ? "
+                f"WHERE id IN ({ph})",
+                (entry_id, *moved_fragment_ids),
+            )
+            conn.commit()
+        except Exception:
+            logging.getLogger(__name__).warning(
+                "[arasuji] fragment repoint rollback failed; fragments may "
+                "keep pointing at a withdrawn entry", exc_info=True,
+            )
+
+    try:
+        _rows = conn.execute(
+            "SELECT id FROM memopedia_fragments WHERE chronicle_entry_id = ?",
+            (entry_id,),
+        ).fetchall()
+        moved_fragment_ids = [str(r[0]) for r in _rows]
+        if moved_fragment_ids:
+            conn.execute(
+                "UPDATE memopedia_fragments SET chronicle_entry_id = ? "
+                "WHERE chronicle_entry_id = ?",
+                (new_entry.id, entry_id),
+            )
+            conn.commit()
+    except sqlite3.DatabaseError as exc:
+        # 捕捉は DatabaseError の幅で (Codex 十二巡 Q2): OperationalError だけ
+        # だと IntegrityError 等が handler の外へ逃げ、取り下げが行われずに
+        # 旧と replacement の二重被覆が残る。
+        if not is_missing_table_error(exc):
+            # 未確定の UPDATE を**明示的に巻き戻してから**取り下げる。
+            # ``conn.commit()`` 自体が失敗した場合、付け替えはトランザクション
+            # に残ったままで、取り下げ (内部で commit する) に相乗りして確定
+            # する — Fragment が削除済みの replacement を指し、UI の「抽出
+            # された知識」から消える。
+            try:
+                conn.rollback()
+            except Exception:
+                logging.getLogger(__name__).warning(
+                    "[arasuji] rollback of the pending fragment repoint "
+                    "failed", exc_info=True,
+                )
+            # 保険: rollback が効かず一部が新 id を指したままの場合に備えて
+            # 旧 entry 宛てへ戻す (印の中止経路と同じ形)。
+            _revert_fragments()
+            logging.getLogger(__name__).warning(
+                "[arasuji] fragment repoint failed before the swap; aborting "
+                "the regeneration (old entry kept, replacement withdrawn)",
+                exc_info=True,
+            )
+            _withdraw_replacement()
+            return None
+        moved_fragment_ids = []  # Fragment テーブルの無い DB (旧テスト等)
+
     # 旧材料バッチの印の付け替え (2026-08-19 Codex 第三巡 #3 → 2026-08-29 裁定で
     # 材料方式に改設計): 上で旧バッチを再生成 LLM の材料として渡したので、印
     # (annexed_entry_id = 消費済みの証) を新 id へ付け替える。
@@ -1105,8 +1351,9 @@ def regenerate_entry(
         stamp_error: Optional[BaseException] = None
         try:
             moved = reassign_batches_annexed(conn, entry_id, new_entry.id)
-            # 件数不一致 = 並行操作が印を動かした / テーブル異常で 0 が
-            # 返った (reassign は OperationalError を 0 に潰す)。一部だけ
+            # 件数不一致 = 並行操作が印を動かした / 台帳テーブルの無い DB で
+            # 0 が返った (reassign はテーブル不在のみ 0 に縮退し、ロック等は
+            # raise する — Codex 三巡 F2)。一部だけ
             # 新 id へ移った状態で旧 entry の削除に進まない。
             if moved == len(old_batches):
                 conn.commit()
@@ -1135,23 +1382,73 @@ def regenerate_entry(
                 "withdrawn; regeneration can be retried)",
                 entry_id, new_entry.id, exc_info=stamp_error,
             )
+            _revert_fragments()
             _withdraw_replacement()
             return None
 
+    def _revert_stamps() -> None:
+        """印を新→旧へ明示的に戻す (Codex 四巡 G3)。
+
+        取り下げ (_withdraw_replacement) の削除経路は unmark = NULL 落ちしか
+        持たないため、印を動かした後の失敗ではこれを**取り下げより前に**呼ぶ
+        — 呼ばないと旧 entry の帰属が消え、同じ知覚が次回編纂で二重取り込み
+        される。id 明示 + 現帰属の条件付き UPDATE (absorption._repoint_batches
+        と同じ可逆形)。
+        """
+        ids = [int(b.id) for b in old_batches]
+        if not ids:
+            return
+        try:
+            ph = ",".join("?" for _ in ids)
+            conn.execute(
+                f"UPDATE perception_batches SET annexed_entry_id = ? "
+                f"WHERE id IN ({ph}) AND annexed_entry_id = ?",
+                (entry_id, *ids, new_entry.id),
+            )
+            conn.commit()
+        except Exception:
+            logging.getLogger(__name__).warning(
+                "[arasuji] perception stamp rollback failed; batches may "
+                "return to the presentation via the withdraw unmark",
+                exc_info=True,
+            )
+
     try:
-        success, _ = delete_entry_and_update_parent(conn, entry_id)
+        # 差し替えの途中では先祖を引き直さない (refresh_ancestors=False) —
+        # 旧を消した直後・新を繋ぐ前に引き直すと、一人っ子の親が空と誤認
+        # されて解体される。新を繋いだ後に自分で引き直す (Codex 六巡 J5)。
+        success, _ = delete_entry_and_update_parent(
+            conn, entry_id, refresh_ancestors=False,
+        )
         if not success:
+            _revert_stamps()
+            _revert_fragments()
             _withdraw_replacement()
             return None
         # 6. Restore parent relationship. 親が直前に消えていた場合 (False)、
         # 旧行の子たちは root 直下の未束ね行へ戻されているので、新行も
         # 親なし・未束ねのまま残すのが兄弟と整合する。
         if parent_id:
-            add_to_parent_source_ids(conn, new_entry.id, parent_id)
+            if add_to_parent_source_ids(conn, new_entry.id, parent_id):
+                # 帳簿 (span / counts) を最終形の子集合から引き直す (J5 —
+                # 失敗しても swap は確定済み。sweep が保険)。
+                try:
+                    refresh_ancestor_bookkeeping(
+                        conn, [parent_id], mark_stale=False,
+                    )
+                except Exception:
+                    logging.getLogger(__name__).warning(
+                        "[arasuji] parent bookkeeping refresh failed after "
+                        "the swap (parent=%s)", parent_id, exc_info=True,
+                    )
         return new_entry
     except Exception:
         # 差し替えの途中失敗で新行だけが残ると、旧新の二重被覆が永続化する。
-        # 新行を取り下げてから失敗として返す。
+        # 印と Fragment を旧へ戻してから新行を取り下げ、失敗として返す。
+        # 旧削除が成功済みの並びでは巻き戻し先の旧 entry は無い — revert は
+        # best-effort (宙に浮いた Fragment は改修前からの既存挙動への縮退)。
+        _revert_stamps()
+        _revert_fragments()
         _withdraw_replacement()
         raise
 

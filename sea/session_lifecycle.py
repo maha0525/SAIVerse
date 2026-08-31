@@ -1905,6 +1905,9 @@ class SessionLifecycle:
             の status ("ok" / "failed" / "deferred")、または "disabled"
             (weave env OFF / persona トグル OFF — 手動入口の同意文は
             「あらすじにする」なので、無効の persona では何もしない)。
+            編纂が "ok" でも**末尾の引き戻しが完了しなかった場合は "failed"**
+            (下の白名簿を参照 — 編纂済みエントリは確定しているので、意味は
+            「全部は終わらなかった」)。
             印の失敗数は status=="ok" のときだけ意味を持つ。行単位の失敗は
             正確な数、印の工程ごと例外で落ちた場合は -1 (数不明の全滅)。
         """
@@ -1929,6 +1932,48 @@ class SessionLifecycle:
                 cancellation_token=cancellation_token,
             )
             if status == "ok":
+                # 末尾の未被覆 run (後ろに隣人あらすじが居ない極小 run 群) は
+                # 編纂せず anchor を引き戻して提示窓へ戻す (arasuji_tiny_run_
+                # absorption 裁定 5 改訂 — LLM ゼロ。窓が上限を超えたら同関数が
+                # このジョブ内で即座に畳む)。
+                #
+                # 写像は**成功系の白名簿**で行う (Codex 十巡 N2)。成功と呼べる
+                # のは「やるべきことが全部終わった」か「意図した見送り」だけ:
+                #   none            — 帯が無かった (解決は成功している)
+                #   rewound         — 引き戻し完了 (畳みは不要だった)
+                #   rewound_folded  — 引き戻し + 畳みまで完了
+                #   skipped         — 行なし / 既に窓の中 / 位置不明 (見送り)
+                #   cas_rejected    — anchor が動いた (次回が再計画する見送り)
+                # それ以外は失敗側へ倒す — "failed" (帯の解決・計画の読み取り
+                # 失敗) と "rewound_fold_failed" (引き戻したが窓が上限超過の
+                # まま) に加え、**未知の状態語も**失敗に写像する (状態語が
+                # 増えたときに黙って成功の顔で通る穴を作らない)。
+                # 編纂済みエントリは確定しているので、失敗表示の意味は「全部は
+                # 終わらなかった」の正直な申告 (裁定 6 — 再実行が必要なことが
+                # 誰にも分からない状態を作らない)。
+                _rewind_ok = ("none", "rewound", "rewound_folded",
+                              "skipped", "cas_rejected")
+                _rewind_failed = False
+                try:
+                    from sea.coverage_repair import run_tail_rewind
+                    rewind_status = run_tail_rewind(
+                        self, persona,
+                        event_callback=event_callback,
+                        cancellation_token=cancellation_token,
+                    )
+                    if rewind_status not in _rewind_ok:
+                        _rewind_failed = True
+                    elif rewind_status in ("skipped", "cas_rejected"):
+                        LOGGER.info(
+                            "[coverage-repair] tail rewind status=%s "
+                            "(persona=%s)", rewind_status, persona_id,
+                        )
+                except Exception:
+                    LOGGER.warning(
+                        "[coverage-repair] tail rewind raised (persona=%s)",
+                        persona_id, exc_info=True,
+                    )
+                    _rewind_failed = True
                 try:
                     from sea.coverage_repair import mark_covered_cold_windows
                     _, mark_failures = mark_covered_cold_windows(self, persona)
@@ -1940,6 +1985,14 @@ class SessionLifecycle:
                         persona_id, exc_info=True,
                     )
                     mark_failures = -1  # 数不明の全滅
+                if _rewind_failed:
+                    # 引き戻しが完了しなかった — 帯の解決/計画が読めなかった
+                    # (M2) か、引き戻し後の畳みが未完 (N2)。印の再適用は上で
+                    # 済ませてある — 失敗として返し、ジョブ UI が再実行を促す。
+                    # 畳み未完の場合、再実行は畳みを再試行しない (帯はもう窓の
+                    # 中で未被覆ではない) — 窓は次の会話の非常畳み (§14-3) が
+                    # 回復する。失敗表示は「全部は終わらなかった」の申告。
+                    status = "failed"
         return (status, mark_failures)
 
     # ------------------------------------------------------------------
@@ -2402,6 +2455,8 @@ class SessionLifecycle:
         expected_anchor_id: str,
         new_anchor_id: str,
         folds: List["FoldedRange"],
+        *,
+        raise_on_error: bool = False,
     ) -> bool:
         """§15 読み戻しの書き込み — anchor 引き戻しと圧縮区間 (印含む) を同一コミットで。
 
@@ -2418,8 +2473,26 @@ class SessionLifecycle:
         される — 据え置きにすると、直後の context 構築の resolve が「冷えた行が
         最前線より後ろ」と見て §14-2 の前進で読み戻しを即座に飲み込み、同じ
         会話の中で開いた窓が閉じる。
+
+        ``raise_on_error=True`` は「書けなかった」の内訳を分ける
+        (:meth:`preview_refilled_history` と同じ型): 書き込み自体の失敗
+        (DB 例外) と、書き込みを試みられない状態 (manager 未接続) を例外で
+        伝え、False を「CAS 不一致 = 意図した見送り」だけの意味にする。
+        既定 (False) は §15 読み戻しの fail-open — どちらも False にして
+        呼び出し側が "skip" へ落とす従来の挙動をそのまま保つ。補修の
+        anchor 引き戻し (sea/coverage_repair.run_tail_rewind) だけが True を
+        使い、DB 失敗を "failed" に写像する (Codex 十一巡 P1)。
+
+        Returns:
+            書けたら True。CAS 不一致は False。DB 失敗・manager 未接続は
+            ``raise_on_error`` が False なら False、True なら例外。
         """
         if not self.manager or not hasattr(self.manager, "SessionLocal"):
+            if raise_on_error:
+                raise RuntimeError(
+                    "session store is unavailable; the refill write could not "
+                    "be attempted"
+                )
             return False
         from sea.session_window import serialize_folds
         db = self.manager.SessionLocal()
@@ -2452,6 +2525,8 @@ class SessionLifecycle:
                 "[metabolism] failed to write refill for %s/%s: %s",
                 persona_id, model_key, exc,
             )
+            if raise_on_error:
+                raise
             return False
         finally:
             db.close()
@@ -3499,6 +3574,95 @@ class SessionLifecycle:
             LOGGER.warning(
                 "[metabolism] folds unknown; skipping band consolidation this round",
             )
+
+        # 極小 run の隣人吸収 (arasuji_tiny_run_absorption、2026-08-31 裁定 5):
+        # 適用は**全量計画 (compile_groups=None = 被覆補修 / 一括生成) のみ**。
+        # 通常の Metabolism 畳み (退場範囲の編纂) には入れない。材料 0.5U 未満の
+        # run は単独で編纂せず、後ろの隣人 Lv1 を開き直して合体させる。
+        # 提示中の digest (folded_entry_ids) は開けないので、fold が不明
+        # (None) の回は吸収ごと見送る (束ねの見送りと同形 — 待つのは常に安全)。
+        absorption_plan = None
+        pending_stale_count = 0
+        _stale_marker = False
+        _full_plan_end_id = (
+            plan.chunks[-1].messages[-1].id if plan.chunks else None
+        )
+        if compile_groups is None:
+            from sai_memory.arasuji.absorption import (
+                list_stale_upper_ids,
+                plan_absorption,
+                split_plan_for_absorption,
+            )
+            normal_plan, _tiny_chunks = split_plan_for_absorption(
+                plan, target_chars=chronicle_band_budget(),
+            )
+            if _tiny_chunks and folded_entry_ids is None:
+                LOGGER.warning(
+                    "[metabolism] %d tiny run(s) deferred: folds unknown, "
+                    "neighbors cannot be safely reopened this round",
+                    len(_tiny_chunks),
+                )
+                plan = normal_plan
+            elif _tiny_chunks:
+                # 計画の例外は「見送り = ok」に潰さない (Codex 六巡 J3):
+                # 潰すと極小 run が黙って捨てられ、ジョブは成功の顔で閉じる。
+                # failed で返せばジョブ UI に失敗が出て再実行を促す。
+                # fold 不明 (上の分岐) は設計上の見送りであって失敗ではない —
+                # 従来どおり ok 側。
+                try:
+                    absorption_plan = plan_absorption(
+                        adapter.conn, _tiny_chunks, all_messages,
+                        _processed_ids,
+                        target_chars=chronicle_band_budget(),
+                        excluded_entry_ids=frozenset(folded_entry_ids),
+                    )
+                except Exception:
+                    LOGGER.exception(
+                        "[metabolism] absorption planning failed; refusing "
+                        "the full-plan compile (persona=%s)",
+                        getattr(persona, "persona_id", "?"),
+                    )
+                    return "failed"
+                plan = normal_plan
+            # 死んだ子 id を指す親の救済 (sweep) は tiny/stale の有無に関係
+            # なく回す (Codex 五巡 H1 — 仕事ゼロだと run_absorption 自体が
+            # 呼ばれず保険が眠る。検出は単一クエリで常時実行のコストは無視
+            # できる)。印が付けば下の pending_stale_count が仕事に数え、
+            # run_absorption の flush が本文を語り直す。
+            #
+            # sweep / stale 件数 / 未完了マーカーの照会例外は 0 / False へ
+            # 潰さない (Codex 六巡 J4 — 「常時実行して仕事量に数える」保証が
+            # 例外時に黙って消える)。テーブル不在の縮退は各関数の内側
+            # (is_missing_table_error) が持つので、ここまで届く例外は実失敗
+            # = failed で止めて再実行を促す。
+            try:
+                from sai_memory.arasuji.absorption import (
+                    _sweep_broken_parents,
+                    is_repair_incomplete,
+                )
+                _sweep_broken_parents(adapter.conn)
+                # 前回の未完了 (content_stale の残り) は items ゼロでも flush
+                # する。未完了の印だけが残った状態 (差し替え確定後の例外など)
+                # も仕事に数える — run_absorption が仕事ゼロを確認して印を
+                # 外す (ローカルレビュー 2026-08-31 L1: 印が残ると帯の
+                # 「前回の処理が完了していません」が永久表示になる)。
+                pending_stale_count = len(list_stale_upper_ids(adapter.conn))
+                _stale_marker = is_repair_incomplete(adapter.conn)
+            except Exception:
+                LOGGER.exception(
+                    "[metabolism] absorption maintenance checks failed; "
+                    "refusing the full-plan compile (persona=%s)",
+                    getattr(persona, "persona_id", "?"),
+                )
+                return "failed"
+        _absorption_calls = (
+            absorption_plan.llm_calls if absorption_plan is not None
+            else pending_stale_count
+        )
+        _absorption_work = (
+            _absorption_calls > 0 or pending_stale_count > 0 or _stale_marker
+        )
+
         try:
             from sai_memory.arasuji.bands import EST_PARENT_CHARS
             band_plan_count = 0 if folded_entry_ids is None else plan_band_overflow(
@@ -3518,7 +3682,7 @@ class SessionLifecycle:
             LOGGER.warning("[metabolism] band overflow dry-plan failed", exc_info=True)
             band_plan_count = 0
 
-        if not plan.chunks and band_plan_count == 0:
+        if not plan.chunks and band_plan_count == 0 and not _absorption_work:
             LOGGER.info(
                 "[metabolism] Nothing to compile or consolidate "
                 "(%d unprocessed messages)", plan.total_unprocessed,
@@ -3527,17 +3691,18 @@ class SessionLifecycle:
             return "ok"
 
         unprocessed_count = plan.total_unprocessed
-        estimated_llm_calls = plan.llm_calls + band_plan_count
+        estimated_llm_calls = plan.llm_calls + band_plan_count + _absorption_calls
 
         # 冪等 claim 用の提示コンテキストの同定: 提示コンテキスト末尾 ID = 編纂対象の時系列末尾の
-        # メッセージ ID (all_messages は created_at 昇順)。会話が進んで提示コンテキストが
-        # 伸びれば ID が変わり新しい claim になる — 失敗した提示コンテキストの再試行は
-        # この自然な鍵の更新で成立する (failed 行は終端で再 claim 不可)。
+        # メッセージ ID (all_messages は created_at 昇順)。失敗した提示コンテキストは
+        # 同じ鍵のままでも再試行できる (claim_execution は failed 行のキーを退避して
+        # 新規 prepared を作る — Codex W4 二巡 #6)。会話が進んで提示コンテキストが
+        # 伸びれば ID が変わり、それはそれで新しい claim になる。
         # plan 空 (列の束ねのみ) の実行は claim しない — 束ねの並走防御は
         # bands の tx 内再検査が担う (並走時の +1 LLM コールは許容)。
-        _window_end_id = (
-            plan.chunks[-1].messages[-1].id if plan.chunks else None
-        )
+        # 鍵は分割前の全量計画の末尾 (_full_plan_end_id) — 吸収へ回した極小
+        # チャンクも同じ提示コンテキストの一部なので、同定から外さない。
+        _window_end_id = _full_plan_end_id
 
         # Request user confirmation before generating.
         # Only valid when the current Pulse is a user-driven request — only
@@ -3756,6 +3921,59 @@ class SessionLifecycle:
 
         from sai_memory.arasuji.bands import run_band_overflow
         from sai_memory.arasuji.executor import execute_plan
+
+        # 吸収の実行 (全量計画のみ)。通常チャンクの編纂 (execute_plan) より先
+        # — 歯抜けの古い区間を先に治し、上位あらすじを新しくしてから後続の
+        # 生成に「これまでの流れ」を引かせる (裁定 4 の時系列たたみ込み)。
+        if _absorption_work:
+            from sai_memory.arasuji.absorption import run_absorption
+            try:
+                absorption_result = run_absorption(
+                    adapter.conn, client, absorption_plan,
+                    persona_id=persona_id_str,
+                    db_lock=adapter._db_lock,
+                    cancel_check=cancel_fn,
+                    batch_callback=note_callback,
+                )
+            except Exception as exc:
+                LOGGER.exception("[metabolism] tiny-run absorption failed")
+                if ledger is not None and execution_id:
+                    try:
+                        ledger.mark_failed(
+                            execution_id, str(exc) or type(exc).__name__,
+                        )
+                    except Exception:
+                        LOGGER.warning(
+                            "[metabolism] ledger mark_failed failed",
+                            exc_info=True,
+                        )
+                return "failed"
+            if absorption_result.cancelled:
+                if ledger is not None and execution_id:
+                    try:
+                        ledger.mark_failed(execution_id, "cancelled by user")
+                    except Exception:
+                        LOGGER.warning(
+                            "[metabolism] ledger mark_failed failed",
+                            exc_info=True,
+                        )
+                LOGGER.info(
+                    "[metabolism] absorption cancelled (%d merges committed)",
+                    len(absorption_result.merged_entries),
+                )
+                return "deferred"
+            if (
+                absorption_result.merged_entries
+                or absorption_result.regenerated_upper_ids
+            ):
+                LOGGER.info(
+                    "[metabolism] absorption done: %d merged, %d reopened, "
+                    "%d upper regenerated, %d unresolved run(s)",
+                    len(absorption_result.merged_entries),
+                    len(absorption_result.reopened_entry_ids),
+                    len(absorption_result.regenerated_upper_ids),
+                    absorption_result.unresolved_runs,
+                )
 
         try:
             exec_result = execute_plan(

@@ -297,6 +297,365 @@ class RegenerateSwapTest(unittest.TestCase):
         annexed = list_batches_annexed_to(conn, self.old_entry.id)
         self.assertEqual(sorted(b.id for b in annexed), sorted([batch_a, batch_b]))
 
+    def _insert_fragment(self, fragment_id, entry_id):
+        self.adapter.conn.execute(
+            "INSERT INTO memopedia_fragments "
+            "(id, content, entity_id, chronicle_entry_id, vividness, "
+            "source_date, created_at) "
+            "VALUES (?, '知識', 'root_chronicle', ?, 1.0, NULL, 1)",
+            (fragment_id, entry_id),
+        )
+        self.adapter.conn.commit()
+
+    def _fragment_owner(self, fragment_id):
+        row = self.adapter.conn.execute(
+            "SELECT chronicle_entry_id FROM memopedia_fragments WHERE id = ?",
+            (fragment_id,),
+        ).fetchone()
+        return row[0] if row else None
+
+    def test_fragments_are_repointed_on_successful_swap(self):
+        """[2026-08-31 裁定] 旧 entry の Fragment は消さず新 entry へ付け替える。"""
+        from sai_memory.arasuji.storage import create_entry, regenerate_entry
+        self._insert_fragment("frag-r", self.old_entry.id)
+
+        def _fake_generate(conn, messages, model_name, persona_id=None,
+                           extra_items=None):
+            return create_entry(
+                conn, level=1, content="新あらすじ",
+                source_ids=[m.id for m in messages],
+                start_time=1, end_time=2,
+                source_count=len(messages), message_count=len(messages),
+            )
+
+        with patch(
+            "scripts.arasuji.build_arasuji_core.regenerate_entry_from_messages",
+            _fake_generate,
+        ):
+            new_entry = regenerate_entry(self.adapter.conn, self.old_entry.id)
+        self.assertIsNotNone(new_entry)
+        self.assertEqual(self._fragment_owner("frag-r"), new_entry.id)
+
+    def test_fragment_repoint_lock_failure_keeps_old_entry(self):
+        """[Codex 三巡 F3] Fragment 付け替えは旧削除より前の可逆フェーズ —
+        ロック等で失敗したら旧 entry を無傷のまま新を取り下げる (旧削除後の
+        raise で旧新両方を失う並びを作らない)。"""
+        import sqlite3 as _sqlite3
+
+        from sai_memory.arasuji.storage import (
+            create_entry,
+            get_entry,
+            regenerate_entry,
+        )
+        self._insert_fragment("frag-l", self.old_entry.id)
+        created = []
+
+        def _fake_generate(conn_, messages, model_name, persona_id=None,
+                           extra_items=None):
+            e = create_entry(
+                conn_, level=1, content="新あらすじ",
+                source_ids=[m.id for m in messages],
+                start_time=1, end_time=2,
+                source_count=len(messages), message_count=len(messages),
+            )
+            created.append(e.id)
+            return e
+
+        class _LockOnFragments:
+            """memopedia_fragments に触る SQL だけロック例外を返す conn 代理。"""
+
+            def __init__(self, real):
+                self._real = real
+
+            def execute(self, sql, *a, **k):
+                if "memopedia_fragments" in sql:
+                    raise _sqlite3.OperationalError("database is locked")
+                return self._real.execute(sql, *a, **k)
+
+            def __getattr__(self, name):
+                return getattr(self._real, name)
+
+        with patch(
+            "scripts.arasuji.build_arasuji_core.regenerate_entry_from_messages",
+            _fake_generate,
+        ):
+            result = regenerate_entry(
+                _LockOnFragments(self.adapter.conn), self.old_entry.id,
+            )
+        self.assertIsNone(result)
+        # 旧 entry は無傷・新 (replacement) は取り下げ・Fragment は旧のまま
+        self.assertIsNotNone(get_entry(self.adapter.conn, self.old_entry.id))
+        self.assertEqual(len(created), 1)
+        self.assertIsNone(get_entry(self.adapter.conn, created[0]))
+        self.assertEqual(self._fragment_owner("frag-l"), self.old_entry.id)
+
+    def test_fragment_commit_failure_rolls_back_the_pending_repoint(self):
+        """[Codex 十二巡 Q2] Fragment 付け替えの ``commit()`` が失敗したら、
+        未確定の UPDATE を明示的に巻き戻してから取り下げる。
+
+        巻き戻さずに ``_withdraw_replacement`` (内部で commit する) へ進むと、
+        未確定だった付け替えが**取り下げの commit に相乗りして確定**し、
+        Fragment が削除済みの replacement を指したまま UI から消える。
+        """
+        import sqlite3 as _sqlite3
+
+        from sai_memory.arasuji.storage import (
+            create_entry,
+            get_entry,
+            regenerate_entry,
+        )
+        self._insert_fragment("frag-c", self.old_entry.id)
+        created = []
+
+        def _fake_generate(conn_, messages, model_name, persona_id=None,
+                           extra_items=None):
+            e = create_entry(
+                conn_, level=1, content="新あらすじ",
+                source_ids=[m.id for m in messages],
+                start_time=1, end_time=2,
+                source_count=len(messages), message_count=len(messages),
+            )
+            created.append(e.id)
+            return e
+
+        class _FailFragmentCommit:
+            """Fragment の付け替え UPDATE は通し、その commit だけ 1 回失敗させる。"""
+
+            def __init__(self, real):
+                self._real = real
+                self._armed = False
+                self.fired = False
+
+            def execute(self, sql, *a, **k):
+                if (
+                    "UPDATE memopedia_fragments" in sql
+                    and "WHERE chronicle_entry_id = ?" in sql
+                    and not self.fired
+                ):
+                    self._armed = True
+                return self._real.execute(sql, *a, **k)
+
+            def commit(self):
+                if self._armed:
+                    self._armed = False
+                    self.fired = True
+                    raise _sqlite3.OperationalError("database is locked")
+                return self._real.commit()
+
+            def __getattr__(self, name):
+                return getattr(self._real, name)
+
+        proxy = _FailFragmentCommit(self.adapter.conn)
+        with patch(
+            "scripts.arasuji.build_arasuji_core.regenerate_entry_from_messages",
+            _fake_generate,
+        ):
+            result = regenerate_entry(proxy, self.old_entry.id)
+
+        self.assertIsNone(result)
+        self.assertTrue(proxy.fired)
+        # 旧 entry は無傷・replacement は撤去済み・Fragment は旧 entry のまま
+        self.assertIsNotNone(get_entry(self.adapter.conn, self.old_entry.id))
+        self.assertEqual(len(created), 1)
+        self.assertIsNone(get_entry(self.adapter.conn, created[0]))
+        self.assertEqual(self._fragment_owner("frag-c"), self.old_entry.id)
+
+    def test_non_operational_db_error_on_fragments_still_withdraws(self):
+        """[Codex 十二巡 Q2] OperationalError 以外の DB 例外 (IntegrityError 等)
+        でも取り下げ経路を通る。
+
+        捕捉が OperationalError だけだと、他の ``sqlite3.DatabaseError`` は
+        handler の外へ逃げて撤去自体が行われず、旧と replacement の二重被覆が
+        残る。
+        """
+        import sqlite3 as _sqlite3
+
+        from sai_memory.arasuji.storage import (
+            create_entry,
+            get_entry,
+            regenerate_entry,
+        )
+        self._insert_fragment("frag-i", self.old_entry.id)
+        created = []
+
+        def _fake_generate(conn_, messages, model_name, persona_id=None,
+                           extra_items=None):
+            e = create_entry(
+                conn_, level=1, content="新あらすじ",
+                source_ids=[m.id for m in messages],
+                start_time=1, end_time=2,
+                source_count=len(messages), message_count=len(messages),
+            )
+            created.append(e.id)
+            return e
+
+        class _IntegrityOnFragmentRepoint:
+            def __init__(self, real):
+                self._real = real
+
+            def execute(self, sql, *a, **k):
+                if (
+                    "UPDATE memopedia_fragments" in sql
+                    and "WHERE chronicle_entry_id = ?" in sql
+                ):
+                    raise _sqlite3.IntegrityError("constraint failed")
+                return self._real.execute(sql, *a, **k)
+
+            def __getattr__(self, name):
+                return getattr(self._real, name)
+
+        with patch(
+            "scripts.arasuji.build_arasuji_core.regenerate_entry_from_messages",
+            _fake_generate,
+        ):
+            result = regenerate_entry(
+                _IntegrityOnFragmentRepoint(self.adapter.conn),
+                self.old_entry.id,
+            )
+
+        self.assertIsNone(result)
+        self.assertIsNotNone(get_entry(self.adapter.conn, self.old_entry.id))
+        self.assertEqual(len(created), 1)
+        self.assertIsNone(get_entry(self.adapter.conn, created[0]))
+        self.assertEqual(self._fragment_owner("frag-i"), self.old_entry.id)
+
+    def test_swap_keeps_single_child_parent_alive_and_consistent(self):
+        """[Codex 六巡 J5] 一人っ子の親を持つエントリの正常 swap で、親は
+        途中の引き直しに解体されず、帳簿が最終形 (新しい子) に揃う。"""
+        from sai_memory.arasuji.storage import (
+            create_entry,
+            get_entry,
+            mark_consolidated,
+            regenerate_entry,
+        )
+        conn = self.adapter.conn
+        p = create_entry(
+            conn, level=2, content="P", source_ids=[self.old_entry.id],
+            start_time=1, end_time=2, source_count=1,
+            message_count=self.old_entry.message_count,
+        )
+        mark_consolidated(conn, [self.old_entry.id], p.id)
+
+        def _fake_generate(conn_, messages, model_name, persona_id=None,
+                           extra_items=None):
+            return create_entry(
+                conn_, level=1, content="新あらすじ",
+                source_ids=[m.id for m in messages],
+                start_time=1, end_time=2,
+                source_count=len(messages), message_count=len(messages),
+            )
+
+        with patch(
+            "scripts.arasuji.build_arasuji_core.regenerate_entry_from_messages",
+            _fake_generate,
+        ):
+            new_entry = regenerate_entry(conn, self.old_entry.id)
+        self.assertIsNotNone(new_entry)
+        p_after = get_entry(conn, p.id)
+        self.assertIsNotNone(p_after)  # 一人っ子でも親は生きている
+        self.assertEqual(p_after.source_ids, [new_entry.id])
+        self.assertEqual(p_after.source_count, 1)
+        self.assertEqual(p_after.message_count, new_entry.message_count)
+        self.assertEqual(get_entry(conn, new_entry.id).parent_id, p.id)
+
+    def test_fragment_failure_preserves_batch_annexation(self):
+        """[Codex 四巡 G3-a] 順序は Fragment → バッチ。Fragment 更新の失敗で
+        取り下げても、バッチの旧帰属は一切動いていない (NULL 落ちしない)。"""
+        import sqlite3 as _sqlite3
+
+        from sai_memory.arasuji.storage import (
+            create_entry,
+            get_entry,
+            regenerate_entry,
+        )
+        from sai_memory.perception_buffer import list_batches_annexed_to
+        batch_id = self._annex_batch_to_old_entry()
+        self._insert_fragment("frag-b", self.old_entry.id)
+
+        def _fake_generate(conn_, messages, model_name, persona_id=None,
+                           extra_items=None):
+            return create_entry(
+                conn_, level=1, content="新あらすじ",
+                source_ids=[m.id for m in messages],
+                start_time=1, end_time=2,
+                source_count=len(messages), message_count=len(messages),
+            )
+
+        class _LockOnFragments:
+            def __init__(self, real):
+                self._real = real
+
+            def execute(self, sql, *a, **k):
+                if "memopedia_fragments" in sql:
+                    raise _sqlite3.OperationalError("database is locked")
+                return self._real.execute(sql, *a, **k)
+
+            def __getattr__(self, name):
+                return getattr(self._real, name)
+
+        with patch(
+            "scripts.arasuji.build_arasuji_core.regenerate_entry_from_messages",
+            _fake_generate,
+        ):
+            result = regenerate_entry(
+                _LockOnFragments(self.adapter.conn), self.old_entry.id,
+            )
+        self.assertIsNone(result)
+        self.assertIsNotNone(get_entry(self.adapter.conn, self.old_entry.id))
+        # バッチの帰属は旧 entry のまま (NULL 落ちも新 id 残留もない)
+        annexed = list_batches_annexed_to(self.adapter.conn, self.old_entry.id)
+        self.assertEqual([b.id for b in annexed], [batch_id])
+        self.assertEqual(self._fragment_owner("frag-b"), self.old_entry.id)
+
+    def test_delete_failure_reverts_stamps_and_fragments(self):
+        """[Codex 四巡 G3-b] 印と Fragment を動かした後の失敗 (旧削除の失敗) は、
+        取り下げの unmark (NULL 落ち) より前に両方を旧へ明示的に戻す。"""
+        from sai_memory.arasuji import storage as arasuji_storage
+        from sai_memory.arasuji.storage import (
+            create_entry,
+            get_entry,
+            regenerate_entry,
+        )
+        from sai_memory.perception_buffer import list_batches_annexed_to
+        batch_id = self._annex_batch_to_old_entry()
+        self._insert_fragment("frag-d", self.old_entry.id)
+        created = []
+
+        def _fake_generate(conn_, messages, model_name, persona_id=None,
+                           extra_items=None):
+            e = create_entry(
+                conn_, level=1, content="新あらすじ",
+                source_ids=[m.id for m in messages],
+                start_time=1, end_time=2,
+                source_count=len(messages), message_count=len(messages),
+            )
+            created.append(e.id)
+            return e
+
+        real_delete = arasuji_storage.delete_entry_and_update_parent
+
+        def _failing_delete(conn_, eid, *, refresh_ancestors=True):
+            if eid == self.old_entry.id:
+                raise RuntimeError("delete down")
+            return real_delete(conn_, eid, refresh_ancestors=refresh_ancestors)
+
+        with patch(
+            "scripts.arasuji.build_arasuji_core.regenerate_entry_from_messages",
+            _fake_generate,
+        ), patch(
+            "sai_memory.arasuji.storage.delete_entry_and_update_parent",
+            _failing_delete,
+        ):
+            with self.assertRaises(RuntimeError):
+                regenerate_entry(self.adapter.conn, self.old_entry.id)
+        # 旧 entry 無傷・新は取り下げ・バッチと Fragment は旧へ戻っている
+        self.assertIsNotNone(get_entry(self.adapter.conn, self.old_entry.id))
+        self.assertEqual(len(created), 1)
+        self.assertIsNone(get_entry(self.adapter.conn, created[0]))
+        annexed = list_batches_annexed_to(self.adapter.conn, self.old_entry.id)
+        self.assertEqual([b.id for b in annexed], [batch_id])
+        self.assertEqual(self._fragment_owner("frag-d"), self.old_entry.id)
+
     def test_concurrent_content_edit_during_generation_is_not_overwritten(self):
         """LLM 生成中にユーザーが本文を編集していたら、再生成は競合として失敗し、
         編集を LLM 出力で潰さない (Codex レビュー 2026-07-27)。"""

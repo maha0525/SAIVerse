@@ -473,6 +473,11 @@ class ChronicleCostEstimate(BaseModel):
     # W4: 固定バッチ廃止。旧 frontend 型互換のため 0 固定で残す (deprecated)。
     batch_size: int = 0
     currency: str = "USD"
+    # 極小 run 吸収 (arasuji_tiny_run_absorption 裁定 6): 前回の補修/再編纂
+    # ジョブが完了していない (上位あらすじの再生成が残っている)。frontend の
+    # Chronicle タブの帯が「前回の処理が完了していません。再実行してください」
+    # を併記するための印。
+    repair_incomplete: bool = False
 
 
 class GenerationJobStatus(BaseModel):

@@ -546,8 +546,11 @@ def list_batches_annexed_to(
             "WHERE annexed_entry_id = ? ORDER BY consumed_at ASC, id ASC",
             (str(entry_id),),
         ).fetchall()
-    except sqlite3.OperationalError:
-        return []
+    except sqlite3.OperationalError as exc:
+        from sai_memory.arasuji.storage import is_missing_table_error
+        if is_missing_table_error(exc):
+            return []  # 知覚台帳の無い DB (旧テスト等)
+        raise  # ロック等 — 「付記バッチなし」の顔をしない (Codex 三巡 F2)
     return [_row_to_batch(row) for row in rows]
 
 
@@ -567,8 +570,11 @@ def reassign_batches_annexed(
             "WHERE annexed_entry_id = ?",
             (str(new_entry_id), str(old_entry_id)),
         )
-    except sqlite3.OperationalError:
-        return 0
+    except sqlite3.OperationalError as exc:
+        from sai_memory.arasuji.storage import is_missing_table_error
+        if is_missing_table_error(exc):
+            return 0  # 知覚台帳の無い DB (旧テスト等)
+        raise  # ロック等 — 付け替え失敗を件数 0 の顔にしない (Codex 三巡 F2)
     return int(cur.rowcount)
 
 
@@ -596,8 +602,11 @@ def unmark_batches_annexed(
             f"WHERE annexed_entry_id IN ({placeholders})",
             tuple(str(e) for e in entry_ids),
         )
-    except sqlite3.OperationalError:
-        return 0  # perception_batches の無い DB
+    except sqlite3.OperationalError as exc:
+        from sai_memory.arasuji.storage import is_missing_table_error
+        if is_missing_table_error(exc):
+            return 0  # perception_batches の無い DB
+        raise  # ロック等 — 印を戻せていないのに削除へ進ませない (Codex 三巡 F2)
     return int(cur.rowcount)
 
 

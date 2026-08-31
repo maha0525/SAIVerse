@@ -41,6 +41,18 @@ PERSONA_ID = "tester"
 BASE_TIME = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
 
+@pytest.fixture(autouse=True)
+def _small_band_budget(monkeypatch):
+    """U をテストデータの規模に合わせる。
+
+    2026-08-31 の極小 run 吸収 (arasuji_tiny_run_absorption) で、全量計画の
+    材料 0.5U 未満の run は単独編纂されなくなった。本ファイルの関心は止め線と
+    印であって run の大きさではないので、U を小さくして従来どおり全 run が
+    通常編纂に乗る前提を保つ (メッセージ 1 通 ≈ 205 字 ≥ U=200)。
+    """
+    monkeypatch.setenv("SAIVERSE_CHRONICLE_BAND_BUDGET", "200")
+
+
 class DummyEmbedder:
     def __init__(self, model=None, **kwargs) -> None:
         self.model_name = model

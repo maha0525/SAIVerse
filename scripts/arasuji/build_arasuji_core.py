@@ -156,17 +156,22 @@ def print_cost_estimate(
     persona_id: str,
     *,
     model_name: str,
+    **estimate_kwargs,
 ) -> "ChronicleCostEstimate":
     """未処理メッセージから Chronicle を一括生成した場合の費用を見積もり表示する。
 
     LLM は一切呼ばない。api/routes/people/arasuji.py の cost-estimate エンドポイント
     (UI 用) と同じロジック (sai_memory.arasuji.estimate = episode 整列計画) を使う。
+    ``estimate_kwargs`` は estimate_chronicle_generation_cost へそのまま渡す —
+    CLI は messages_override / truncate_limit / skip_absorption で実行と同じ
+    計画から数字を出す (Codex 三巡 F4)。
     """
     from sai_memory.arasuji.estimate import estimate_chronicle_generation_cost
 
     estimate = estimate_chronicle_generation_cost(
         conn,
         model_name=model_name,
+        **estimate_kwargs,
     )
 
     print("\n" + "=" * 60)
@@ -177,6 +182,8 @@ def print_cost_estimate(
     print(f"未処理メッセージ数:     {estimate.unprocessed_messages}")
     print(f"圧縮チャンク (LLM):     {estimate.level1_calls}")
     print(f"統合コール数 (概算):    {estimate.consolidation_calls}")
+    if estimate.upper_regen_calls:
+        print(f"上位あらすじ再生成:     {estimate.upper_regen_calls}")
     print(f"LLM コール数合計:       {estimate.estimated_llm_calls}")
     print(f"使用モデル:             {estimate.model_name}")
     if estimate.is_free_tier:
@@ -355,6 +362,12 @@ def list_available_models() -> None:
     print(f"合計: {len(MODEL_CONFIGS)} モデル\n")
 
 
+def absorption_allowed_for_limit(limit_arg: Optional[int]) -> bool:
+    """--limit の意味論 (Codex 三巡 F1): None / 0 = 全量実行 (吸収・引き戻し
+    検出あり)、N>0 = 切り詰め + 吸収見送り。run_cli と回帰テストが共有する一点。"""
+    return (limit_arg or 0) <= 0
+
+
 def regenerate_entry_from_messages(
     conn: sqlite3.Connection,
     messages: List[Message],
@@ -473,8 +486,10 @@ def run_cli() -> None:
     )
     parser.add_argument("persona_id", nargs="?", help="Persona ID to process")
     parser.add_argument(
-        "--limit", type=int, default=100,
-        help="Maximum number of messages to process (default: 100)"
+        "--limit", type=int, default=None,
+        help="処理するメッセージ数の上限。省略時と 0 は全量実行 (極小 run の"
+             "吸収・引き戻し検出あり)。N>0 は先頭 N 件に切り詰め、その回は"
+             "極小 run の吸収を見送る (Codex 三巡 F1 の意味論)"
     )
     parser.add_argument(
         "--offset", type=int, default=0,
@@ -584,15 +599,24 @@ def run_cli() -> None:
         conn.close()
         sys.exit(0)
 
-    # Handle --estimate (見積もりのみ、LLM 呼び出しなし・書き込みなし)
+    # Handle --estimate (見積もりのみ、LLM 呼び出しなし・書き込みなし)。
+    # F4: 実行と同じ入力 (thread 絞り・--limit の切り詰め・吸収判定) で数える。
     if args.estimate:
         resolved_model_id, model_config = find_model_config(args.model)
         # 価格は設定キーで引く。API 名を渡すと同名の従量課金版設定の単価が出る。
         estimate_model_name = resolved_model_id or args.model
+        from sai_memory.memory.storage import get_messages_for_chronicle
+        est_messages = get_messages_for_chronicle(conn)
+        if args.thread:
+            est_messages = [m for m in est_messages if m.thread_id == args.thread]
+        est_limit = args.limit or 0
         print_cost_estimate(
             conn,
             args.persona_id,
             model_name=estimate_model_name,
+            messages_override=est_messages,
+            truncate_limit=est_limit,
+            skip_absorption=est_limit > 0,
         )
         conn.close()
         sys.exit(0)
@@ -655,7 +679,10 @@ def run_cli() -> None:
 
     LOGGER.info(f"Building chronicle for persona: {args.persona_id}")
     LOGGER.info(f"Database: {db_path}")
-    LOGGER.info(f"Message range: offset={args.offset}, limit={args.limit}")
+    LOGGER.info(
+        "Message range: limit=%s",
+        args.limit if (args.limit or 0) > 0 else "全量 (吸収・引き戻し検出あり)",
+    )
     LOGGER.info(f"Dry run: {args.dry_run}")
     if args.no_timestamp:
         LOGGER.info("Timestamps will be omitted from prompts")
@@ -679,23 +706,6 @@ def run_cli() -> None:
 
     LOGGER.info(f"Using model: {actual_model_id}")
     LOGGER.info(f"Using provider: {provider}")
-
-    # 実行前の見積もり表示 (LLM 呼び出しなし)。--dry-run は書き込みが起きないので
-    # 確認プロンプトは不要 (見積もりだけ表示して続行)。それ以外は --yes 無しなら確認する。
-    # 見積もりは保持する — 束ねの実行は承認済みの統合コール数を上限にする
-    # (実出力長のブレで連鎖が増えても、表示・承認した件数を超えない)。
-    estimate = print_cost_estimate(
-        conn,
-        args.persona_id,
-        # 価格は設定キーで引く (API 名だと同名の従量課金版設定の単価が出る)。
-        model_name=resolved_model_id,
-    )
-    if not args.dry_run and not args.yes:
-        answer = input("\nこの内容で Chronicle 生成を実行しますか？ [y/N]: ").strip().lower()
-        if answer not in ("y", "yes"):
-            LOGGER.info("ユーザーの選択により中止しました。")
-            conn.close()
-            sys.exit(0)
 
     # Fetch messages — 整列は全量から計画し、上限は truncate_plan で切る
     # (fetch を limit で切ると episode の途中で分断され §4-2 に反する —
@@ -728,7 +738,62 @@ def run_cli() -> None:
         processed_ids,
         target_chars=chronicle_band_budget(),
     )
-    plan = truncate_plan(plan, args.limit)
+    # --limit の意味論 (Codex 三巡 F1): 未指定 / 0 = 全量 (吸収あり)。
+    # N>0 = 切り詰め + 吸収見送り。
+    limit = args.limit or 0
+    plan = truncate_plan(plan, limit)
+
+    # 極小 run の隣人吸収 (arasuji_tiny_run_absorption、2026-08-31 裁定 5):
+    # 全量再編纂スクリプトは repair API と同じ吸収を通す。オフライン実行なので
+    # 提示中の fold という概念は無い (既存の run_band_overflow と同じ扱い) —
+    # 除外集合は空で計画する。
+    from sai_memory.arasuji.absorption import (
+        AbsorptionPlan,
+        plan_absorption,
+        split_plan_for_absorption,
+    )
+    plan, tiny_chunks = split_plan_for_absorption(
+        plan, target_chars=chronicle_band_budget(),
+    )
+    # --limit N>0 の回は吸収を丸ごと見送る (Codex 二巡 R4 裁定 — 切り詰めた
+    # 計画と全量前提の隣人探索の境界の複雑さを買わない)。極小 run の単独編纂は
+    # しない (裁定 2 は無条件) ので、極小 run はこの実行では未処理のまま残り、
+    # 全量実行 (--limit 省略 / 0) が処理する。
+    if not absorption_allowed_for_limit(args.limit):
+        absorption_plan = AbsorptionPlan()
+        if tiny_chunks:
+            LOGGER.warning(
+                "--limit 指定時は極小 run の吸収・引き戻しを行いません "
+                "(%d run が未処理のまま残ります)。--limit 省略 (全量実行) で"
+                "処理されます", len(tiny_chunks),
+            )
+    else:
+        absorption_plan = plan_absorption(
+            conn, tiny_chunks, messages, processed_ids,
+            target_chars=chronicle_band_budget(),
+        )
+
+    # 実行前の見積もり表示 (LLM 呼び出しなし)。位置はメッセージ取得・thread
+    # 絞り・truncate・吸収判定の**後** (Codex 三巡 F4) — 実行と同じ入力から
+    # 同じ計画で数字を出す。--dry-run は書き込みが起きないので確認プロンプトは
+    # 不要 (見積もりだけ表示して続行)。それ以外は --yes 無しなら確認する。
+    # 見積もりは保持する — 束ねの実行は承認済みの統合コール数を上限にする
+    # (実出力長のブレで連鎖が増えても、表示・承認した件数を超えない)。
+    estimate = print_cost_estimate(
+        conn,
+        args.persona_id,
+        # 価格は設定キーで引く (API 名だと同名の従量課金版設定の単価が出る)。
+        model_name=resolved_model_id,
+        messages_override=messages,
+        truncate_limit=limit,
+        skip_absorption=limit > 0,
+    )
+    if not args.dry_run and not args.yes:
+        answer = input("\nこの内容で Chronicle 生成を実行しますか？ [y/N]: ").strip().lower()
+        if answer not in ("y", "yes"):
+            LOGGER.info("ユーザーの選択により中止しました。")
+            conn.close()
+            sys.exit(0)
 
     if args.dry_run:
         # W4: dry-run は計画表示のみ (LLM を呼ばない。旧実装は LLM を呼んで
@@ -740,14 +805,29 @@ def run_cli() -> None:
                 f"coverage={chunk.coverage_chars}字 episodes={','.join(chunk.episode_refs) or '-'}"
             )
         print(f"  合計: {len(plan.chunks)} chunks (LLM {plan.llm_calls} 回)")
+        if absorption_plan.items or absorption_plan.rewind_run_ids:
+            print(
+                f"  極小 run の吸収: {len(absorption_plan.items)} 件 "
+                f"(上位の再生成 {len(absorption_plan.stale_upper_ids)} 件, "
+                f"未解決 {absorption_plan.unresolved_runs} run)"
+            )
+        if absorption_plan.rewind_run_ids:
+            # anchor 行は world DB にある — オフラインの本スクリプトでは引き
+            # 戻せない。サーバー経由の補修 (mode=repair) が実行時に扱う。
+            print(
+                f"  末尾の未被覆 {len(absorption_plan.rewind_run_ids)} 通は "
+                "anchor 引き戻しの対象 (サーバー経由の補修でのみ実行)"
+            )
         conn.close()
         LOGGER.info("Done (dry run)!")
         return
 
-    if not plan.chunks:
-        LOGGER.info("No unprocessed messages to compile")
-        conn.close()
-        sys.exit(0)
+    # 仕事ゼロでも run_absorption までは必ず通す (Codex 十一巡 P2)。ここで
+    # 早期終了すると、通常チャンクも新規吸収も無い回 (--limit N>0 で吸収を
+    # 見送った回 / 全部被覆済みの回) に保守 — 壊れた親の sweep・前回の未完了
+    # (content_stale) の flush・repair_incomplete マーカーの解除 — が丸ごと
+    # 飛ぶ。帯の「前回の処理が完了していません。再実行してください」(裁定 6) が
+    # 再実行しても消えない状態になるため、終了は run_absorption の後に置く。
 
     # Import factory directly to avoid circular import
     from llm_clients.factory import get_llm_client
@@ -784,6 +864,32 @@ def run_cli() -> None:
         backfill_coverage(conn)
     except Exception:
         LOGGER.exception("coverage backfill failed; continuing")
+
+    # 吸収の実行 (通常チャンクより先 — 上位を新しくしてから後続へ)。失敗は
+    # ここで止める: 確定済みの差し替えは残り、未完了の印 (repair_incomplete)
+    # が立つので、再実行が続きから直す。仕事ゼロでも呼ぶ — 冒頭の整合性検査
+    # (壊れた親の sweep) と、残った未完了の印の後始末は毎回やる (L1)。
+    from sai_memory.arasuji.absorption import run_absorption
+    absorption_result = run_absorption(
+        conn, client, absorption_plan,
+        persona_id=args.persona_id,
+        batch_callback=batch_callback,
+    )
+    LOGGER.info(
+        "[absorption] merged=%d reopened=%d upper_regenerated=%d unresolved=%d",
+        len(absorption_result.merged_entries),
+        len(absorption_result.reopened_entry_ids),
+        len(absorption_result.regenerated_upper_ids),
+        absorption_result.unresolved_runs,
+    )
+
+    # 保守 (上の run_absorption) が済んだところで、編纂する仕事が本当に無ければ
+    # ここで終える。判定は従来と同じ条件 — 吸収 item / 上位再生成があった回は
+    # 従来どおり束ね (run_band_overflow) まで通す。
+    if not plan.chunks and absorption_plan.llm_calls == 0:
+        LOGGER.info("No unprocessed messages to compile")
+        conn.close()
+        sys.exit(0)
 
     exec_result = execute_plan(
         plan, client, conn,

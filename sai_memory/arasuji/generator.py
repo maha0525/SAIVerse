@@ -333,6 +333,7 @@ def generate_level1_arasuji(
     persona_id: Optional[str] = None,
     thread_id: Optional[str] = None,
     extra_items: Optional[List[dict]] = None,
+    db_lock=None,
 ) -> Optional[ArasujiEntry]:
     """Generate a level-1 arasuji from messages.
 
@@ -346,10 +347,18 @@ def generate_level1_arasuji(
         extra_items: メッセージ行ではない材料 (知覚の消費バッチ等、
             ``{"at", "text"}`` の list)。再生成の付記継承が旧 entry の
             バッチを渡す (_format_messages_for_prompt 参照)。
+        db_lock: SAIMemoryAdapter の ``_db_lock`` (Codex 七巡 K1)。``conn`` が
+            adapter と共有のとき、文脈の読み取りと保存 (create/commit) を錠の
+            内側で行う — ロック外の commit は他所の開いたトランザクションを
+            途中で確定させる (memopedia_writers_bypass_adapter_lock と同族)。
+            LLM 呼び出しは錠の外のまま。None = 従来どおり (専用 conn の
+            CLI / API 再生成ルート)。
 
     Returns:
         Created ArasujiEntry or None on failure
     """
+    from contextlib import nullcontext
+
     if not messages:
         return None
 
@@ -361,12 +370,13 @@ def generate_level1_arasuji(
     # This ensures we only see past Chronicles, not future ones during regeneration
     if start_time and end_time:
         from sai_memory.arasuji.context import get_episode_context_for_timerange
-        context = get_episode_context_for_timerange(
-            conn,
-            start_time=start_time,
-            end_time=end_time,
-            max_entries=20
-        )
+        with (db_lock or nullcontext()):
+            context = get_episode_context_for_timerange(
+                conn,
+                start_time=start_time,
+                end_time=end_time,
+                max_entries=20
+            )
     else:
         context = ""
 
@@ -478,25 +488,30 @@ def generate_level1_arasuji(
     max_db_retries = 3
     for attempt in range(max_db_retries):
         try:
-            entry = create_entry(
-                conn,
-                level=1,
-                content=content,
-                source_ids=source_ids,
-                start_time=start_time,
-                end_time=end_time,
-                source_count=len(messages),
-                message_count=len(messages),
-                thread_id=thread_id,
-                # 被覆字数 (材料としての字数 = 圧縮後) — executor 経路と同じ
-                # 勘定。ここで刻まないと bands.backfill_coverage が生ログの
-                # 素の字数で埋め、長さ規則 (material_chars) と食い違う。
-                # 知覚バッチ (extra_items) は executor 経路の coverage_chars
-                # も勘定に入れていないので、ここでも入れない (一貫性優先)。
-                extra_metadata={
-                    "coverage_chars": sum(material_chars(m) for m in messages),
-                },
-            )
+            # 保存は錠の内側 (K1)。リトライの sleep は錠の外 (下) — 錠を
+            # 持ったまま待たない。
+            with (db_lock or nullcontext()):
+                entry = create_entry(
+                    conn,
+                    level=1,
+                    content=content,
+                    source_ids=source_ids,
+                    start_time=start_time,
+                    end_time=end_time,
+                    source_count=len(messages),
+                    message_count=len(messages),
+                    thread_id=thread_id,
+                    # 被覆字数 (材料としての字数 = 圧縮後) — executor 経路と同じ
+                    # 勘定。ここで刻まないと bands.backfill_coverage が生ログの
+                    # 素の字数で埋め、長さ規則 (material_chars) と食い違う。
+                    # 知覚バッチ (extra_items) は executor 経路の coverage_chars
+                    # も勘定に入れていないので、ここでも入れない (一貫性優先)。
+                    extra_metadata={
+                        "coverage_chars": sum(
+                            material_chars(m) for m in messages
+                        ),
+                    },
+                )
             LOGGER.info("Created level-1 arasuji: content=%s", content[:60])
             return entry
         except Exception as e:
@@ -504,10 +519,13 @@ def generate_level1_arasuji(
                 "DB save failed for level-1 arasuji (attempt %d/%d): %s",
                 attempt + 1, max_db_retries, e,
             )
-            try:
-                conn.rollback()
-            except Exception:
-                pass
+            # rollback も錠の内側 (Codex 八巡) — 錠外の rollback は他所の開いた
+            # トランザクションを巻き戻しうる。錠の外に残すのは sleep だけ。
+            with (db_lock or nullcontext()):
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
             if attempt < max_db_retries - 1:
                 time.sleep(2 ** attempt)
 

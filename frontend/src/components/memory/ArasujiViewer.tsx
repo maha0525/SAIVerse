@@ -50,6 +50,9 @@ interface RepairEstimate {
     model_name: string;
     is_free_tier: boolean;
     currency: string;
+    // 前回の補修/再編纂ジョブが完了していない (上位あらすじの再生成が残って
+    // いる)。帯に「再実行してください」を併記し、再実行で続きから直る。
+    repair_incomplete?: boolean;
 }
 
 interface ArasujiViewerProps {
@@ -824,15 +827,26 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
 
                 {/* 被覆補修の案内 (§16-2: 押すタイミングが分かる可視化)。
                     件数は cost-estimate (止め線適用後) — 0 なら何も出さない。 */}
-                {repairEstimate && repairEstimate.unprocessed_messages >= 1 && (
+                {repairEstimate && (repairEstimate.unprocessed_messages >= 1 || repairEstimate.repair_incomplete) && (
                     <div className={styles.repairBanner}>
                         <span className={styles.repairBannerText}>
-                            あらすじになっていない過去の会話が {repairEstimate.unprocessed_messages.toLocaleString()} 件あります
+                            {repairEstimate.unprocessed_messages >= 1 && (
+                                <>あらすじになっていない過去の会話が {repairEstimate.unprocessed_messages.toLocaleString()} 件あります</>
+                            )}
+                            {repairEstimate.repair_incomplete && (
+                                <>
+                                    {repairEstimate.unprocessed_messages >= 1 && <br />}
+                                    前回の処理が完了していません。再実行してください。
+                                </>
+                            )}
                         </span>
                         <button
                             className={styles.repairBannerBtn}
                             onClick={() => setShowRepairModal(true)}
-                            disabled={generationJob?.status === 'running' || generationJob?.status === 'started'}
+                            // pending (ポーリングが backend 状態を写す最大 2 秒) と
+                            // cancelling も塞ぐ — claim なしジョブの並走防御は
+                            // この無効化だけなので、進行中の状態を全部覆う。
+                            disabled={['running', 'started', 'pending', 'cancelling'].includes(generationJob?.status ?? '')}
                             title="内容と費用を確認してからあらすじにできます"
                         >
                             確認する
@@ -1159,6 +1173,11 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                             あらすじになっていない過去の会話が残っています。実行すると、その会話をまとめたあらすじが作られ、
                             本人が古い出来事を思い出せるようになります。いま進行中の会話には触りません。
                         </p>
+                        {repairEstimate.repair_incomplete && (
+                            <p className={styles.hint} style={{ display: 'block', margin: '0 0 1rem', lineHeight: 1.7 }}>
+                                前回の処理が完了していません。再実行すると、処理済みの部分は飛ばして続きから進みます。
+                            </p>
+                        )}
                         <div className={styles.generateContextBox}>
                             <div className={styles.repairEstimateRow}>
                                 <span className={styles.repairEstimateLabel}>対象の会話</span>
@@ -1190,7 +1209,10 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                             <button
                                 className={styles.startBtn}
                                 onClick={startRepair}
-                                disabled={repairEstimate.unprocessed_messages < 1}
+                                disabled={
+                                    (repairEstimate.unprocessed_messages < 1 && !repairEstimate.repair_incomplete)
+                                    || ['running', 'started', 'pending', 'cancelling'].includes(generationJob?.status ?? '')
+                                }
                             >
                                 <Play size={14} />
                                 実行

@@ -137,6 +137,10 @@ class ChronicleClaimTest(unittest.TestCase):
         persona_path.mkdir(parents=True, exist_ok=True)
         os.environ["SAIMEMORY_MEMORY"] = "1"
         os.environ["MEMORY_WEAVE_BATCH_SIZE"] = "3"
+        # 極小 run 吸収 (2026-08-31): 材料 0.5U 未満の run は全量計画で単独
+        # 編纂されない。本クラスの関心は claim であって run の大きさではない
+        # ので、U を小さくして 4 通の小さなメッセージが通常編纂に乗る前提を保つ。
+        os.environ["SAIVERSE_CHRONICLE_BAND_BUDGET"] = "10"
         self.addCleanup(self._cleanup_temp)
 
         patcher = patch("saiverse_memory.adapter.Embedder", DummyEmbedder)
@@ -174,6 +178,7 @@ class ChronicleClaimTest(unittest.TestCase):
         gc.collect()
         os.environ.pop("SAIMEMORY_MEMORY", None)
         os.environ.pop("MEMORY_WEAVE_BATCH_SIZE", None)
+        os.environ.pop("SAIVERSE_CHRONICLE_BAND_BUDGET", None)
         try:
             self._engine.dispose()
         except Exception:
