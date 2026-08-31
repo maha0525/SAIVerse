@@ -842,4 +842,24 @@ HANDLERS: List[UpgradeHandler] = [
             "DB-global and runs on the City scope)."
         ),
     ),
+    # ---- v0.3.0: リリースの空エッジ (2026-09-01) ----
+    # dev6 と 0.3.0 の間にデータ移行は無いが、鎖にエッジが無いと dev6 の世界が
+    # 0.3.0 起動時に version chain エラーで止まる (リリース必須作業 —
+    # docs/handoff/2026-08-30_release_sweep_checklist.md §6)。
+    UpgradeHandler(
+        name="city_noop_v0_3_0_release",
+        scope="city",
+        from_version="0.3.0.dev6",
+        to_version="0.3.0",
+        run=_no_op_city_upgrade,
+        description="Empty release edge dev6 -> 0.3.0 (no data migration).",
+    ),
+    UpgradeHandler(
+        name="ai_noop_v0_3_0_release",
+        scope="ai",
+        from_version="0.3.0.dev6",
+        to_version="0.3.0",
+        run=_no_op_ai_upgrade,
+        description="Empty release edge dev6 -> 0.3.0 (no data migration).",
+    ),
 ]
