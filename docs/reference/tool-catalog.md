@@ -68,7 +68,7 @@ SAIVerse に登録されている全ツールの一覧（自動生成）。概�
 | `memory_write` | 記憶の地図帳（Memory Atlas）のページに書きます。宛先 memopedia:N は Memopedia ページ本文への追記（編集来歴が残ります）。宛先 core は新しいコア記憶を刻みます — コア記憶は常時開の特殊ページで… | `ref`: string, `content*`: string, `title`: string, `category`: string | 記憶のページに書く |
 | `messagelog_get_around` | Retrieve chat messages around a specific timestamp. Accepts Unix epoch (integer) or ISO 8601 string (e.g. '2026-04-14… | `timestamp*`: string, `count`: integer, `thread_id`: string | 特定時刻のログ取得 |
 | `move_persona` | Move the active persona to another building. (When called in persona context, persona_id must match the active persona.) | `building_id*`: string, `persona_id`: string | — |
-| `observer_read` | Read the latest observation data from a building fixture's sensor/monitor. Returns cached values — does not trigger n… | `observer_id*`: string, `metric_name`: string | オブザーバー観測値取得 |
+| `observer_read` | Read the latest observation data from a building fixture's sensor/monitor. Returns cached values — does not trigger n… | `observer_id*`: string, `metric_name`: string | オブザーバー観測値取得（非表示） |
 | `pdf_read` | Extract and read text from a PDF document item. Specify page range to read specific pages. Requires pypdf to be insta… | `item_id*`: string, `pages`: string, `max_chars`: integer | — |
 | `pocketbook_open` | 自分の手帳を開いて読みます。手帳には「やりたい・やった」のメモ欄と、「約束」の欄があります。記憶の地図帳（memory_read など）は知っていること・あったことを引く場所で、手帳は自分のやりたいこと・やったこと・約束を書きとめる場… | `activity`: string, `before`: string, `limit`: integer | 手帳を開く |
 | `pocketbook_write` | 自分の手帳に一行書きます。やりたいこと・やったことはメモ欄へ、誰かとの約束や引き受けた頼まれごとは約束の欄へ入ります（kind で選ぶと、どちらの欄に入るかは自動で決まります）。どちらか迷ったら、相手がいるなら約束です。記憶の地図帳（… | `kind*`: string, `text*`: string, `activity`: string, `counterpart`: string, `due`: string | 手帳に書く |
@@ -79,13 +79,13 @@ SAIVerse に登録されている全ツールの一覧（自動生成）。概�
 | `resolve_uri` | Resolve SAIVerse URIs to retrieve their content. Supports messagelog, memopedia, chronicle, item, building, web, and … | `uris*`: array, `max_total_chars`: integer | URI閲覧 |
 | `run_playbook` | Run a Playbook as a sub-line and receive its report_to_parent (a string summary written by the sub-line). Use this wh… | `name*`: string | Playbook 起動 |
 | `save_playbook` | Save or update a playbook definition into the shared database. | `name*`: string, `description*`: string, `scope`: string, `created_by_persona_id`: string, `building_id`: string, `playbook_json*`: string, `router_callable`: boolean, `user_selectable`: boolean, `display_name`: string | — |
-| `schedule_add` | 新しいスケジュールを追加する。定期実行、単発実行、一定間隔での実行ができる。 | `schedule_type*`: string, `meta_playbook*`: string, `description`: string, `priority`: integer, `enabled`: boolean, `days_of_week`: array, `time_of_day`: string, `scheduled_datetime`: string, `interval_seconds`: integer, `args`: object | — |
-| `schedule_delete` | 指定されたIDのスケジュールを削除する。自分のスケジュールのみ削除できる。 | `schedule_id*`: integer | — |
-| `schedule_list` | 自分のスケジュール一覧を取得する。スケジュールIDや設定内容を確認したいときに使う。 | (なし) | — |
+| `schedule_add` | 新しいアラームを追加する。定期実行、単発実行、一定間隔での実行ができる。 | `schedule_type*`: string, `meta_playbook`: string, `description`: string, `priority`: integer, `enabled`: boolean, `days_of_week`: array, `time_of_day`: string, `scheduled_datetime`: string, `interval_seconds`: integer, `args`: object | — |
+| `schedule_delete` | 指定されたIDのアラームを削除する。自分のアラームのみ削除できる。 | `schedule_id*`: integer | — |
+| `schedule_list` | 自分のアラーム一覧を取得する。アラームIDや設定内容を確認したいときに使う。 | (なし) | — |
 | `searxng_search` | Search the web via SearXNG and return concise results. | `query*`: string, `max_results`: integer, `category`: string, `engines`: string, `language`: string, `safe`: integer | — |
 | `send_email_to_user` | Send an email to a user by USERID using SMTP settings from environment variables. Adds persona display name to From i… | `user_id*`: integer, `subject*`: string, `body*`: string | メール送信 |
 | `switch_active_thread` | Record a persona thread switch by inserting a system message that references messages from another thread, and update… | `target_thread*`: string, `summary`: string, `range_before`: integer | — |
-| `tell` | Speak out loud to someone here, in your own voice. Specify who it is for: 'user' (the user), 'all' (everyone in this … | `target*`: string, `gist`: string | 声をかける |
+| `tell` | Speak out loud to someone here, in your own voice. Specify who it is for: 'user' (the user), 'all' (everyone in this … | `target*`: string, `gist`: string | 声をかける（非表示） |
 | `update_working_memory` | Update a key in working memory. Working memory persists across pulses and server restarts. Use for short-term state l… | `key*`: string, `value*`: any | — |
 | `generate_image_local` | Generate an image using a local ComfyUI server. Supports customizable workflows with positive/negative prompts. The A… | `title*`: string, `positive_prompt*`: string, `negative_prompt`: string, `workflow_file`: string, `batch_count`: integer | — |
 | `body_gesture` | 仮想身体でその場の短いジェスチャーを実行する。action_instructionにはARDYへ渡す動作指示を英語で書く。未生成なら生成開始後すぐ戻り、完了は後から知覚する。空ならpresetのfriendly_waveを即時再生して… | `intent`: string, `action_instruction`: string, `expression_preset`: string, `expression_intensity`: number | 身体でジェスチャーする |

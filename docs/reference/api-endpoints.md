@@ -233,7 +233,7 @@ REST API 全エンドポイントの一覧（自動生成）。すべて `/api` 
 | GET | `/api/people` | Return all registered personas (AI rows). |
 | GET | `/api/people/` | Return all registered personas (AI rows). |
 | POST | `/api/people/dismiss/{persona_id}` | Dismiss a persona (send back to private room). |
-| GET | `/api/people/meta_playbooks` | List user-selectable meta playbooks for schedule / summon dialogs. |
+| GET | `/api/people/meta_playbooks` | List user-selectable meta playbooks for the summon dialog. |
 | GET | `/api/people/realtime-spell-catalog` | リアルタイムスペルとして設定可能なスペル一覧とスキーマを返す。 |
 | GET | `/api/people/spells` | List Spells available for schedule / pre_spells UI selection. |
 | POST | `/api/people/summon/{persona_id}` | Summon a persona to the target building. |
