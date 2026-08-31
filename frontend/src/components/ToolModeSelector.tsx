@@ -1,10 +1,32 @@
 "use client";
 
-import { useState, useRef, useEffect, useCallback, ReactNode } from 'react';
+import { useState, useRef, useEffect, useLayoutEffect, useCallback, ReactNode, CSSProperties } from 'react';
 import { ChevronDown, Wrench, Hammer } from 'lucide-react';
 import styles from './ToolModeSelector.module.css';
 
 const ICON_SIZE = 14;
+
+// Popover は既定でボタンの左端に沿って開く (left: 0)。画面右端に近い
+// ボタンから開くと右へはみ出して切れるので、開いた直後に実測して
+// はみ出す場合だけ右揃え (right: 0) に反転する。
+function useFlipRightIfOverflow(open: boolean) {
+    const ref = useRef<HTMLDivElement>(null);
+    const [flip, setFlip] = useState(false);
+    useLayoutEffect(() => {
+        if (!open) {
+            setFlip(false);
+            return;
+        }
+        const el = ref.current;
+        if (el && el.getBoundingClientRect().right > window.innerWidth - 8) {
+            setFlip(true);
+        }
+    }, [open]);
+    const style: CSSProperties | undefined = flip
+        ? { left: 'auto', right: 0 }
+        : undefined;
+    return { ref, style };
+}
 
 // Sentinel value for "ツール指定" mode. Real Playbook names are sent via
 // `pre_spells` in the chat payload; this string is only an internal UI mode
@@ -72,6 +94,10 @@ export default function ToolModeSelector({
     const containerRef = useRef<HTMLDivElement>(null);
     const subContainerRef = useRef<HTMLDivElement>(null);
     const spellsContainerRef = useRef<HTMLDivElement>(null);
+
+    const modePopover = useFlipRightIfOverflow(isOpen);
+    const subPopover = useFlipRightIfOverflow(isSubOpen);
+    const spellsPopover = useFlipRightIfOverflow(isSpellsOpen);
 
     // Treat anything other than the sentinel as "auto" — legacy pre-Phase 3
     // values (meta_user / meta_user_manual / meta_simple_speak) persisted on
@@ -231,7 +257,7 @@ export default function ToolModeSelector({
                 </button>
 
                 {isOpen && (
-                    <div className={styles.popover}>
+                    <div className={styles.popover} ref={modePopover.ref} style={modePopover.style}>
                         <div className={styles.popoverHeader}>
                             ツールの利用形式を選べます
                         </div>
@@ -269,7 +295,7 @@ export default function ToolModeSelector({
                     </button>
 
                     {isSubOpen && (
-                        <div className={styles.subPopover}>
+                        <div className={styles.subPopover} ref={subPopover.ref} style={subPopover.style}>
                             <button
                                 className={`${styles.subOption} ${styles.subNone} ${!selectedSubPlaybook ? styles.subOptionSelected : ''}`}
                                 onClick={() => handleSubPlaybookChange(null)}
@@ -306,7 +332,7 @@ export default function ToolModeSelector({
                     </button>
 
                     {isSpellsOpen && (
-                        <div className={styles.subPopover}>
+                        <div className={styles.subPopover} ref={spellsPopover.ref} style={spellsPopover.style}>
                             {availableSpells.length === 0 ? (
                                 <div className={styles.subOption} style={{ color: '#888', cursor: 'default' }}>
                                     （利用可能なスペルがありません）
