@@ -12,7 +12,7 @@
 
 ## 1. 普段の会話だけで消える行
 
-- [ ] **runtime_llm 分割のスモーク** (台帳: 巨大 node 分割): ①通常会話 ✅ ②スペル入り会話 ✅ (2026-08-31 09:00 エリスの定時発言、ログで streaming 経路を確認) ③TOOL ノード ✅ (2026-08-31 10:41 aifi の generate_image、sub-line 分岐→TOOL→MEMORIZE の全段をログで確認。全置換後の再取込 Playbook で走った点も含めて緑) ④sync (非ストリーミング) 経路 = まはーが (a) タブ全閉じ+定時発言で試行中 — ユーザー設定は存在せず、env `SAIVERSE_LLM_STREAMING` (既定 ON) だけが公式スイッチ。ただし**発言先の部屋をブラウザが開いていない定時発言は自然に sync に落ちる**設計 (配信口が無いため)。直近 2 セッションの本番ログでは sync 発火 0 回 (常に UI が開いていた)。検証法はまはー選択: (a) 全タブを閉じて定時発言を 1 回踏ませてログ確認 / (b) env OFF で再起動して一言会話。なお pytest は event_callback 無しで走るので単体の回帰は sync 経路が主に受けている。
+- [x] **runtime_llm 分割のスモーク** (台帳: 巨大 node 分割): ①通常会話 ✅ ②スペル入り会話 ✅ (2026-08-31 09:00 エリスの定時発言、ログで streaming 経路を確認) ③TOOL ノード ✅ (2026-08-31 10:41 aifi の generate_image、sub-line 分岐→TOOL→MEMORIZE の全段をログで確認。全置換後の再取込 Playbook で走った点も含めて緑) ④sync 経路 = **実機見送り (2026-08-31 まはー裁定)** — 実運用で到達する道が無く ([包み紙 issue](../issues/event_callback_wrapper_defeats_none_checks.md))、pytest (配信口なし実行) が最も厚く踏んでいる経路のため単体回帰を歯止めとする — ユーザー設定は存在せず、env `SAIVERSE_LLM_STREAMING` (既定 ON) だけが公式スイッチ。ただし**発言先の部屋をブラウザが開いていない定時発言は自然に sync に落ちる**設計 (配信口が無いため)。直近 2 セッションの本番ログでは sync 発火 0 回 (常に UI が開いていた)。検証法はまはー選択: (a) 全タブを閉じて定時発言を 1 回踏ませてログ確認 / (b) env OFF で再起動して一言会話。なお pytest は event_callback 無しで走るので単体の回帰は sync 経路が主に受けている。
 - [ ] **llama-server busy 判定** (台帳: 処理中サーバー射殺の根治): **現構成では経路が通らない** — NEBULA 到着以降は llama-swap 経由 (openai_compat) で、SAIVerse 側の llama.cpp 自動起動管理 (`llama_server.py`) は不使用。ローカル GPU も現在取り外し中でテスト環境が組めない。推奨 = §5 の llama-server 裁定 (8項 + idle_timeout) と束ねて「自動起動を再び使う日まで先送り、単体テストを歯止めとする」。
 - [ ] **W10 スペル許可まわり**: 自律 Pulse (定時の挨拶など) で許可の確認ダイアログが**出ない**こと。スケジュール指定の Playbook がちゃんと起動すること。
 - [ ] **知覚配送の重複なし** (台帳: 知覚消費点の Beat 頭化): Elyth 記事などが同じ内容で二度届いていないか、会話のついでに見る。
@@ -33,7 +33,7 @@
 ## 3. 管理 UI・単発の操作で消える行
 
 - [ ] **ID 文字種契約のペルソナ適用**: 日本語名で新規ペルソナを作成 → ID 欄に `persona_連番` が自動で入り、作成後の AIID と私室 ID が同じ連番。(合成ペルソナで OK、作って消してよい)
-- [ ] **ComfyUI アドオン**: ComfyUI を起動した状態で画像生成 Playbook (generate_image_local) を実行して画像が出る。※8/30 の Playbook 全置き換え後は行が作り直されるので、旧検証手順にあった「repointed のログ」はもう出ない — 動けば緑。
+- [x] **ComfyUI アドオン**: 2026-08-31 実機合格 (まはー)。初回試行は .env の COMFYUI_BASE_URL 末尾スラッシュ → `//prompt` 405 で失敗し、アドオン側の base URL 正規化で根治 (saiverse-comfyui-addon にコミット、push はまはー合図待ち)。再起動後の再試行で生成成功。
 - [ ] **OpenRouter 掲載**: OpenRouter 経由のモデルで一度会話 → 後日 openrouter.ai/apps の roleplay / general-chat に SAIVerse が現れるか。
 
 ## 4. v0.3 では走りようがない見立ての行 (同意したら台帳の次アクションを v0.4 へ書き換え)
