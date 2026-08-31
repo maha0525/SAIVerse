@@ -141,7 +141,6 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
 
     useEffect(() => {
         if (isOpen && activeTab === 'env') {
-            loadGlobalAutoState();
             loadDeveloperModeState();
             loadUpdateCheckState();
             loadAnnouncementsState();
@@ -411,7 +410,7 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
     // --- About ---
     const loadVersionInfo = async () => {
         try {
-            const res = await fetch('/api/version');
+            const res = await fetch('/api/system/version');
             if (res.ok) {
                 setVersionInfo(await res.json());
             }
@@ -917,6 +916,14 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                                 <div className={styles.aboutCard}>
                                     <div className={styles.aboutCardTitle}>リンク</div>
                                     <div className={styles.aboutLinks}>
+                                        <a href="https://saiverse.net/" target="_blank" rel="noopener noreferrer" className={styles.aboutLinkItem}>
+                                            <span className={styles.aboutLinkIcon}>🌐</span>
+                                            <div>
+                                                <div className={styles.aboutLinkName}>公式サイト</div>
+                                                <div className={styles.aboutLinkDesc}>saiverse.net</div>
+                                            </div>
+                                            <ExternalLink size={14} className={styles.aboutLinkArrow} />
+                                        </a>
                                         <a href="https://discord.gg/qMcgEk83Ag" target="_blank" rel="noopener noreferrer" className={styles.aboutLinkItem}>
                                             <span className={styles.aboutLinkIcon}>💬</span>
                                             <div>
