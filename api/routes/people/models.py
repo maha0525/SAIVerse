@@ -156,6 +156,8 @@ class AIConfigResponse(BaseModel):
     memory_weave_context: bool = True
     memopedia_index_enabled: bool = False
     core_memory_char_budget: Optional[int] = None  # 記憶アーキv2 ゾーンA 容量目安 (NULL → 既定 2000)
+    # Chronicle 帯の読み込み文字数 (NULL → env → 既定 20,000)
+    chronicle_char_budget: Optional[int] = None
     spell_enabled: bool = False
     realtime_info_enabled: bool = True
     avatar_path: Optional[str] = None
@@ -184,6 +186,10 @@ class UpdateAIConfigRequest(BaseModel):
     #   None = no change, 0 (or any non-positive) = clear to default (= 2000),
     #   positive int = override.
     core_memory_char_budget: Optional[int] = None
+    # Chronicle 帯の読み込み文字数。意味論はコア記憶と同じ:
+    #   None = no change, 0 (以下) = clear to default (= env → 20,000),
+    #   positive int = override.
+    chronicle_char_budget: Optional[int] = None
     spell_enabled: Optional[bool] = None
     realtime_info_enabled: Optional[bool] = None
     avatar_path: Optional[str] = None

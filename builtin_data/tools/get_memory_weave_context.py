@@ -92,6 +92,7 @@ def get_memory_weave_context(
             conn, max_entries=max_chronicle_entries,
             exclude_entry_ids=set(exclude_chronicle_entry_ids or ()),
             raise_on_error=raise_on_error,
+            persona_id=persona_id,
         )
 
         # 記憶アーキv2 §7.1: Memopedia 索引の head 常時掲示は既定で廃止 (自動想起 +
@@ -128,11 +129,61 @@ def get_memory_weave_context(
         return []
 
 
+def _resolve_persona_chronicle_budget(persona_id: Optional[str], fallback: int) -> int:
+    """Chronicle 帯予算の解決順のうち、**ペルソナ列の一段だけ**を解く。
+
+    解決順は「``AI.CHRONICLE_CHAR_BUDGET`` (非 NULL) > env
+    ``SAIVERSE_CHRONICLE_CHAR_BUDGET`` > 既定 20,000」。この関数は列が使えるとき
+    だけその値を返し、それ以外は ``fallback`` (= ``USE_DEFAULT_BUDGET`` の sentinel)
+    を返して、残り二段を ``sai_memory/arasuji/context.py`` の
+    ``_resolve_char_budget`` に委ねる — 解決順の全体を二箇所に書かない。
+
+    ここで解くのは、呼び出し元が 2 つある (head の weave section と §15 プレビュー
+    の weave 差し替え) ため。呼び出し側で解くと、片方だけ直したときにプレビューが
+    本番と違う予算を見せる。
+
+    0 以下は「未設定」に倒す — UI/manager 側で NULL へ正規化している
+    (CORE_MEMORY_CHAR_BUDGET と同じ流儀) が、手で書かれた値への保険。
+    予算制そのものを切る 0 の意味論は、この列からは表現できない。
+    """
+    if not persona_id:
+        return fallback
+    try:
+        from tools.context import get_active_manager
+        manager = get_active_manager()
+        if manager is None:
+            return fallback
+        db = manager.SessionLocal()
+        try:
+            from database.models import AI as AIModel
+            ai = db.query(AIModel).filter_by(AIID=persona_id).first()
+            raw = getattr(ai, "CHRONICLE_CHAR_BUDGET", None) if ai else None
+        finally:
+            db.close()
+    except Exception:
+        LOGGER.warning(
+            "Failed to read CHRONICLE_CHAR_BUDGET for %s; falling back to the "
+            "env/default budget", persona_id, exc_info=True,
+        )
+        return fallback
+    if raw is None:
+        return fallback
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        LOGGER.warning(
+            "Invalid CHRONICLE_CHAR_BUDGET=%r for %s; falling back", raw, persona_id,
+        )
+        return fallback
+    return value if value > 0 else fallback
+
+
 def _get_chronicle_context(
     conn: sqlite3.Connection,
     max_entries: int = 50,
     exclude_entry_ids: Optional[set] = None,
     raise_on_error: bool = False,
+    persona_id: Optional[str] = None,
 ) -> str:
     """Get Chronicle (Arasuji) context using hierarchical algorithm.
 
@@ -142,9 +193,10 @@ def _get_chronicle_context(
 
     記憶アーキv2 §6.2 (Phase 3, 2026-07-04): Chronicle の読み込みは件数上限から
     文字数予算制へ移行した。件数上限だと超過時に最古が黙って落ちる (不変条件
-    §10-4) ため、``char_budget=USE_DEFAULT_BUDGET`` を渡して予算制を有効化する。既定
-    予算は 20,000 字 / env ``SAIVERSE_CHRONICLE_CHAR_BUDGET`` で調整可。``max_entries``
-    は安全弁として残す (予算制側が主制御)。
+    §10-4) ため予算制を有効化する。予算は「ペルソナ設定
+    ``AI.CHRONICLE_CHAR_BUDGET`` > env ``SAIVERSE_CHRONICLE_CHAR_BUDGET`` >
+    既定 20,000 字」の順で解決する (2026-09-01 に per-persona 設定を追加)。
+    ``max_entries`` は安全弁として残す (予算制側が主制御)。
     """
     # import 文だけを ModuleNotFoundError で受ける — モジュール不在は
     # 「本当に無い」= 正当な空 (strict でも空のまま)。export 欠落や依存の
@@ -173,7 +225,9 @@ def _get_chronicle_context(
         context = get_episode_context(
             conn,
             max_entries=max(max_entries, 10_000),
-            char_budget=USE_DEFAULT_BUDGET,
+            char_budget=_resolve_persona_chronicle_budget(
+                persona_id, USE_DEFAULT_BUDGET,
+            ),
             exclude_entry_ids=exclude_entry_ids or None,
         )
         if not context:

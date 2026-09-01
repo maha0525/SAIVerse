@@ -112,6 +112,14 @@ class AI(Base):
     # 一切しない)。NULL → 既定 2000 字。コストと記憶量のトレードオフはユーザーに
     # よって異なるため per-persona で変更可能 (2026-07-04 決定)。
     CORE_MEMORY_CHAR_BUDGET = Column(Integer, nullable=True)
+    # Chronicle 帯 (会話時にコンテキストへ読み込む過去のあらすじ) の文字数予算。
+    # 解決順は「この列 (非 NULL) > env SAIVERSE_CHRONICLE_CHAR_BUDGET > 既定 20,000」
+    # (sai_memory/arasuji/context.py の DEFAULT_CHRONICLE_CHAR_BUDGET)。
+    # 増やすと過去の記憶が詳しくなり、減らすとトークン消費が減る — 好みと予算が
+    # ユーザーごとに違うので per-persona で変更可能にした (2026-09-01 裁定)。
+    # NULL → 既定に従う。0 以下は CORE_MEMORY_CHAR_BUDGET と同じ流儀で NULL に倒す
+    # (manager/admin.py)。
+    CHRONICLE_CHAR_BUDGET = Column(Integer, nullable=True)
     SPELL_ENABLED = Column(Boolean, default=True, nullable=False)  # Per-persona spell system toggle (基幹機能化に伴い v0.3.0.dev3 でデフォルト ON 化)
     # Per-persona toggle for the realtime info section (現在時刻 / 前回発言時刻 / 空間情報)
     # injected by sea/runtime.py:_build_realtime_context. OFF にすると、その動的

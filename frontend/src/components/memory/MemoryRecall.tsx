@@ -456,7 +456,55 @@ export default function MemoryRecall({ personaId }: MemoryRecallProps) {
             const total = data.counts_by_level[level] ?? 0;
             const unconsolidated = data.unconsolidated_by_level[level] ?? 0;
             const consolidated = total - unconsolidated;
-            lines.push(`  Level ${level}: 計 ${total} 件  (統合済み: ${consolidated}  未統合: ${unconsolidated})`);
+            const chars = data.content_chars_by_level?.[level];
+            const charsStr = chars
+                ? `  本文: 計 ${chars.total_chars} 字 (平均 ${chars.avg_chars} / 最大 ${chars.max_chars} / 最小 ${chars.min_chars})`
+                : '';
+            lines.push(`  Level ${level}: 計 ${total} 件  (統合済み: ${consolidated}  未統合: ${unconsolidated})${charsStr}`);
+        }
+        lines.push('');
+
+        // --- 帯の実寸 ---
+        // 帯が予算を超えて膨らむ容疑の切り分け材料。件数が多いのか、一件が長いのかを
+        // ここで読み分ける。可視エントリは省略せず全件出す (数百件出ること自体が証拠)。
+        lines.push('== 帯の実寸（現在コンテキストに載る Chronicle） ==');
+        const band = data.band_simulation;
+        if (!band) {
+            lines.push('  (この診断レポートには帯の実寸が含まれていません)');
+        } else if (band.error) {
+            lines.push(`  ※ 測定に失敗しました: ${band.error}`);
+        } else {
+            const sourceLabel: Record<string, string> = {
+                persona_column: 'ペルソナ設定',
+                env: '環境変数 SAIVERSE_CHRONICLE_CHAR_BUDGET',
+                env_budget_disabled: '環境変数 SAIVERSE_CHRONICLE_CHAR_BUDGET（0 以下 = 文字数予算を無効化）',
+                builtin_default: '既定値',
+            };
+            const countBased = band.budget_mode === 'count_based';
+            lines.push(`  予算: ${band.budget} 字  (出どころ: ${sourceLabel[band.budget_source] ?? band.budget_source})`);
+            if (countBased) {
+                lines.push('  ※ 文字数予算が無効なため、件数モード（上限件数で読む）で測定しています。');
+            }
+            lines.push(`  帯のエントリ数: ${band.total_entries} 件`);
+            const budgetNote = countBased ? '(件数モード)' : (band.over_budget ? '⚠️ 予算超過' : '(予算内)');
+            lines.push(`  本文の合計文字数: ${band.content_chars} 字  ${budgetNote}`);
+            lines.push(`  整形後の文字数 (実際にLLMへ渡る形): ${band.formatted_chars} 字`);
+            lines.push('  ※ 提示ウィンドウ内で digest 表示中のエントリは除外していません。');
+            lines.push('  ※ 実際の帯は、ここから提示中の digest の分だけ減ります。');
+            lines.push('  レベル別の内訳:');
+            Object.keys(band.by_level ?? {})
+                .map((k) => parseInt(k))
+                .sort((a, b) => a - b)
+                .forEach((level) => {
+                    const b = band.by_level[level];
+                    lines.push(`    Level ${level}: ${b.entries} 件  ${b.content_chars} 字`);
+                });
+            const visible: any[] = band.visible_entries ?? [];
+            lines.push(`  可視エントリ一覧 (${visible.length} 件):`);
+            visible.forEach((entry: any, idx: number) => {
+                lines.push(`    [${idx + 1}] Lv${entry.level}  ${entry.content_chars} 字  ID: ${entry.id}`);
+                lines.push(`         期間: ${formatTime(entry.start_time)}  〜  ${formatTime(entry.end_time)}`);
+            });
         }
         lines.push('');
 

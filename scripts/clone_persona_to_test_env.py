@@ -87,6 +87,7 @@ PERSISTENT_COLUMNS = [
     "MEMOPEDIA_INDEX_LIMIT",
     "MEMOPEDIA_INDEX_ENABLED",
     "CORE_MEMORY_CHAR_BUDGET",
+    "CHRONICLE_CHAR_BUDGET",
     "SPELL_ENABLED",
     "REALTIME_INFO_ENABLED",
     # ⚠️ legacy 列 (行分離後は常に NULL)。anchor 本体は session_anchor テーブル

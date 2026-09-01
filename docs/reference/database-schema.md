@@ -275,6 +275,7 @@ SAIVerse の全テーブル・カラム定義（自動生成）。SQLite。本�
 | `MEMOPEDIA_INDEX_LIMIT` | INTEGER | — |  |
 | `MEMOPEDIA_INDEX_ENABLED` | BOOLEAN | NOT NULL, default=True |  |
 | `CORE_MEMORY_CHAR_BUDGET` | INTEGER | — |  |
+| `CHRONICLE_CHAR_BUDGET` | INTEGER | — |  |
 | `SPELL_ENABLED` | BOOLEAN | NOT NULL, default=True |  |
 | `REALTIME_INFO_ENABLED` | BOOLEAN | NOT NULL, default=True |  |
 | `METABOLISM_ANCHORS` | TEXT | — |  |

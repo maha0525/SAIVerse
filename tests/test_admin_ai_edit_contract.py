@@ -110,6 +110,7 @@ class AdminAiEditContractTest(unittest.TestCase):
             memory_weave_context=False,
             memopedia_index_enabled=True,
             core_memory_char_budget=1234,
+            chronicle_char_budget=45000,
             spell_enabled=False,
             realtime_info_enabled=False,
             meta_judgment_config={"max_retries": 5},
@@ -136,6 +137,7 @@ class AdminAiEditContractTest(unittest.TestCase):
         self.assertFalse(details["MEMORY_WEAVE_CONTEXT"])
         self.assertTrue(details["MEMOPEDIA_INDEX_ENABLED"])
         self.assertEqual(details["CORE_MEMORY_CHAR_BUDGET"], 1234)
+        self.assertEqual(details["CHRONICLE_CHAR_BUDGET"], 45000)
         self.assertFalse(details["SPELL_ENABLED"])
         self.assertFalse(details["REALTIME_INFO_ENABLED"])
         self.assertEqual(json.loads(details["META_JUDGMENT_CONFIG"]), {"max_retries": 5})
@@ -197,11 +199,18 @@ class AdminAiEditContractTest(unittest.TestCase):
 
     def test_zero_values_fall_back_to_the_builtin_defaults(self):
         """0 / 負値は「既定値運用に戻す」の意味なので NULL に倒す。"""
-        self._update(core_memory_char_budget=1234, user_conv_timeout_minutes=45)
-        self._update(core_memory_char_budget=0, user_conv_timeout_minutes=-1)
+        self._update(
+            core_memory_char_budget=1234, chronicle_char_budget=45000,
+            user_conv_timeout_minutes=45,
+        )
+        self._update(
+            core_memory_char_budget=0, chronicle_char_budget=-1,
+            user_conv_timeout_minutes=-1,
+        )
 
         row = self._row()
         self.assertIsNone(row.CORE_MEMORY_CHAR_BUDGET)
+        self.assertIsNone(row.CHRONICLE_CHAR_BUDGET)
         self.assertIsNone(row.USER_CONV_TIMEOUT_MINUTES)
 
     def test_empty_meta_judgment_config_falls_back_to_the_builtin_defaults(self):
