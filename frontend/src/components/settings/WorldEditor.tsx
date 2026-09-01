@@ -1,8 +1,9 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import styles from './WorldEditor.module.css';
-import { Layers, MapPin, Cpu, Box, FileText, Wrench, ArrowRight, BookOpen, Upload } from 'lucide-react';
+import { Layers, MapPin, Cpu, Box, FileText, Wrench, ArrowRight, BookOpen, Upload, ChevronLeft, ChevronRight } from 'lucide-react';
 import ImageUpload from '../common/ImageUpload';
 import FileUpload from '../common/FileUpload';
+import { DB_TABLE_PAGE_SIZE, fetchAllTableRows, fetchTablePage } from '../../lib/dbTable';
 
 // Helper Form Components - defined outside component to prevent re-creation on each render
 const Field = ({ label, children }: { label: string; children: React.ReactNode }) => (
@@ -130,17 +131,131 @@ async function apiCall(url: string, options?: RequestInit): Promise<boolean> {
     }
 }
 
+/**
+ * 一覧タブ 1 つ分のページ送り状態。
+ *
+ * `/api/db/tables/{table}` は 1 回で 100 行までしか返さないので、一覧は
+ * ページ単位で読む。`total` (総件数) を持っておかないと「これで全部なのか、
+ * 続きがあるのか」が画面から分からない。
+ *
+ * ただし総件数は応答ヘッダ頼みで、古いバックエンドやキャッシュされた古い
+ * フロントとの組み合わせでは読めない (`null` になる)。**「次へ」を出すかは
+ * 総件数ではなく「ページが満杯だったか」で決める** — 総件数が無い状況で
+ * 「見えている件数 = 全件」と推定すると、続きがあるのに先頭ページで
+ * 「続きなし」になり、一覧が静かに切り捨てられる (lib/dbTable.ts 参照)。
+ */
+interface TableList<T> {
+    /** 今表示しているページの行 */
+    rows: T[];
+    /** テーブル全体の件数。応答ヘッダが読めなければ null */
+    total: number | null;
+    /** 今のページの先頭が何行目か (0 始まり) */
+    offset: number;
+    loading: boolean;
+    /** ページを読む。引数を省くと今のページを読み直す */
+    load: (nextOffset?: number) => Promise<void>;
+}
+
+function useTableList<T>(table: string): TableList<T> {
+    const [rows, setRows] = useState<T[]>([]);
+    const [total, setTotal] = useState<number | null>(0);
+    const [offset, setOffset] = useState(0);
+    const [loading, setLoading] = useState(false);
+    // load を毎回作り直さずに「今のページ」を参照するための控え
+    const offsetRef = useRef(0);
+
+    const load = useCallback(async (nextOffset?: number) => {
+        let target = nextOffset ?? offsetRef.current;
+        setLoading(true);
+        try {
+            let page = await fetchTablePage<T>(table, target, DB_TABLE_PAGE_SIZE);
+            // 末尾ページの行を消すと、そのページが空になって「101〜100 件目」の
+            // ような表示が残る。件数から最終ページを割り出して読み直す。
+            // 件数が取れない場合は 1 ページ手前へ下がる (最終ページを一発で
+            // 割り出せないだけで、空ページに留まるよりは正しい位置に近い)
+            if (page.rows.length === 0 && target > 0) {
+                const lastPage = page.total === null
+                    ? Math.max(0, target - DB_TABLE_PAGE_SIZE)
+                    : page.total > 0
+                        ? Math.floor((page.total - 1) / DB_TABLE_PAGE_SIZE) * DB_TABLE_PAGE_SIZE
+                        : 0;
+                if (lastPage !== target) {
+                    target = lastPage;
+                    page = await fetchTablePage<T>(table, target, DB_TABLE_PAGE_SIZE);
+                }
+            }
+            offsetRef.current = target;
+            setOffset(target);
+            setRows(page.rows);
+            setTotal(page.total);
+        } catch (e) {
+            console.error(`load ${table} failed:`, e);
+        } finally {
+            setLoading(false);
+        }
+    }, [table]);
+
+    return { rows, total, offset, loading, load };
+}
+
+/** 一覧の下に出すページ送り。1 ページに収まっていても件数は見せる */
+const Pagination = ({ list, onNavigate }: { list: TableList<any>; onNavigate: () => void }) => {
+    // 総件数が読めた上でゼロ、または件数不明で先頭ページが空 = 見せるものが無い
+    if (list.total === 0) return null;
+    if (list.total === null && list.offset === 0 && list.rows.length === 0) return null;
+    const first = list.rows.length === 0 ? 0 : list.offset + 1;
+    const last = list.offset + list.rows.length;
+    const hasPrev = list.offset > 0;
+    // 件数不明のときはページが満杯だったかで続きを判断する
+    const hasNext = list.total === null
+        ? list.rows.length === DB_TABLE_PAGE_SIZE
+        : list.offset + list.rows.length < list.total;
+    const go = (nextOffset: number) => {
+        onNavigate();
+        list.load(nextOffset);
+    };
+    return (
+        <div className={styles.pager}>
+            <button
+                type="button"
+                className={styles.pagerBtn}
+                disabled={!hasPrev || list.loading}
+                onClick={() => go(Math.max(0, list.offset - DB_TABLE_PAGE_SIZE))}
+                aria-label="前のページ"
+            ><ChevronLeft size={14} /> 前へ</button>
+            <span className={styles.pagerStatus}>
+                {first}〜{last} 件目{list.total === null ? '' : ` / 全 ${list.total} 件`}
+            </span>
+            <button
+                type="button"
+                className={styles.pagerBtn}
+                disabled={!hasNext || list.loading}
+                onClick={() => go(list.offset + DB_TABLE_PAGE_SIZE)}
+                aria-label="次のページ"
+            >次へ <ChevronRight size={14} /></button>
+        </div>
+    );
+};
+
 export default function WorldEditor() {
     const [subTab, setSubTab] = useState('city');
-    const [isLoading, setIsLoading] = useState(false);
 
-    // Data State
-    const [cities, setCities] = useState<City[]>([]);
-    const [buildings, setBuildings] = useState<Building[]>([]);
-    const [tools, setTools] = useState<Tool[]>([]);
-    const [ais, setAis] = useState<AI[]>([]);
-    const [items, setItems] = useState<Item[]>([]); // Note: pure items
-    const [blueprints, setBlueprints] = useState<Blueprint[]>([]);
+    // Data State — 各タブの一覧はページ送りで読む
+    const cityList = useTableList<City>('city');
+    const buildingList = useTableList<Building>('building');
+    const toolList = useTableList<Tool>('tool');
+    const aiList = useTableList<AI>('ai');
+    const itemList = useTableList<Item>('item');
+    const blueprintList = useTableList<Blueprint>('blueprint');
+
+    // フォームの選択肢用。こちらは「全部そろっていること」が前提なので全件読む
+    // (100 件で切れると、選べるはずの Building がリストから消える)
+    const [cityOptions, setCityOptions] = useState<City[]>([]);
+    const [buildingOptions, setBuildingOptions] = useState<Building[]>([]);
+    const [toolOptions, setToolOptions] = useState<Tool[]>([]);
+    const [aiOptions, setAiOptions] = useState<AI[]>([]);
+    const [bagOptions, setBagOptions] = useState<Item[]>([]);
+
     const [modelChoices, setModelChoices] = useState<ModelChoice[]>([]);
     const [playbooks, setPlaybooks] = useState<Playbook[]>([]);
     const [availablePrompts, setAvailablePrompts] = useState<string[]>([]);
@@ -206,21 +321,23 @@ export default function WorldEditor() {
 
     // Load Data
     useEffect(() => {
-        loadCities(); // Always load cities as they are needed for ID resolution
-        if (subTab === 'building') { loadBuildings(); loadTools(); loadAvailablePrompts(); }
-        if (subTab === 'ai') { loadBuildings(); loadAIs(); loadModels(); }
-        if (subTab === 'item') { loadItems(); loadBuildings(); loadAIs(); }
-        if (subTab === 'blueprint') { loadBlueprints(); loadBuildings(); } // Buildings for spawn
-        if (subTab === 'tool') { loadTools(); }
+        if (subTab === 'city') { cityList.load(0); }
+        if (subTab === 'building') { buildingList.load(0); loadCityOptions(); loadToolOptions(); loadAvailablePrompts(); }
+        if (subTab === 'ai') { aiList.load(0); loadCityOptions(); loadBuildingOptions(); loadModels(); }
+        if (subTab === 'item') { itemList.load(0); loadBuildingOptions(); loadAiOptions(); loadBagOptions(); }
+        if (subTab === 'blueprint') { blueprintList.load(0); loadCityOptions(); loadBuildingOptions(); } // Buildings for spawn
+        if (subTab === 'tool') { toolList.load(0); }
         if (subTab === 'playbook') { loadPlaybooks(); }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [subTab]);
 
-    const loadCities = async () => { try { const res = await fetch('/api/db/tables/city'); if (res.ok) setCities(await res.json()); } catch (e) { console.error('loadCities failed:', e); } };
-    const loadBuildings = async () => { try { const res = await fetch('/api/db/tables/building'); if (res.ok) setBuildings(await res.json()); } catch (e) { console.error('loadBuildings failed:', e); } };
-    const loadTools = async () => { try { const res = await fetch('/api/db/tables/tool'); if (res.ok) setTools(await res.json()); } catch (e) { console.error('loadTools failed:', e); } };
-    const loadAIs = async () => { try { const res = await fetch('/api/db/tables/ai'); if (res.ok) setAis(await res.json()); } catch (e) { console.error('loadAIs failed:', e); } };
-    const loadItems = async () => { try { const res = await fetch('/api/db/tables/item'); if (res.ok) setItems(await res.json()); } catch (e) { console.error('loadItems failed:', e); } };
-    const loadBlueprints = async () => { try { const res = await fetch('/api/db/tables/blueprint'); if (res.ok) setBlueprints(await res.json()); } catch (e) { console.error('loadBlueprints failed:', e); } };
+    const loadCityOptions = async () => { try { setCityOptions(await fetchAllTableRows<City>('city')); } catch (e) { console.error('loadCityOptions failed:', e); } };
+    const loadBuildingOptions = async () => { try { setBuildingOptions(await fetchAllTableRows<Building>('building')); } catch (e) { console.error('loadBuildingOptions failed:', e); } };
+    const loadToolOptions = async () => { try { setToolOptions(await fetchAllTableRows<Tool>('tool')); } catch (e) { console.error('loadToolOptions failed:', e); } };
+    const loadAiOptions = async () => { try { setAiOptions(await fetchAllTableRows<AI>('ai')); } catch (e) { console.error('loadAiOptions failed:', e); } };
+    // Bag は「アイテムの入れ物になっているアイテム」なので、選択肢を作るには
+    // 一覧の 1 ページではなく全アイテムから拾う必要がある
+    const loadBagOptions = async () => { try { const rows = await fetchAllTableRows<Item>('item'); setBagOptions(rows.filter(i => i.TYPE === 'bag')); } catch (e) { console.error('loadBagOptions failed:', e); } };
     const loadModels = async () => { try { const res = await fetch('/api/info/models'); if (res.ok) setModelChoices(await res.json()); } catch (e) { console.error('loadModels failed:', e); } };
     const loadPlaybooks = async () => { try { const res = await fetch('/api/world/playbooks'); if (res.ok) setPlaybooks(await res.json()); } catch (e) { console.error('loadPlaybooks failed:', e); } };
     const loadAvailablePrompts = async () => { try { const res = await fetch('/api/world/prompts/available'); if (res.ok) setAvailablePrompts(await res.json()); } catch (e) { console.error('loadAvailablePrompts failed:', e); } };
@@ -230,9 +347,9 @@ export default function WorldEditor() {
         setSelectedCity(city);
         setFormData({ name: city.CITYNAME, slug: city.CITY_SLUG, description: city.DESCRIPTION, ui_port: city.UI_PORT, api_port: city.API_PORT, timezone: city.TIMEZONE, online_mode: city.START_IN_ONLINE_MODE, map_background_image: city.MAP_BACKGROUND_IMAGE || '' });
     };
-    const handleCreateCity = async () => { if (await apiCall('/api/world/cities', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(formData) })) { loadCities(); setFormData({}); } };
-    const handleUpdateCity = async () => { if (await apiCall(`/api/world/cities/${selectedCity!.CITYID}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(formData) })) { loadCities(); } };
-    const handleDeleteCity = async () => { if (confirm("この City を削除しますか？") && await apiCall(`/api/world/cities/${selectedCity!.CITYID}`, { method: 'DELETE' })) { setSelectedCity(null); setFormData({}); loadCities(); } };
+    const handleCreateCity = async () => { if (await apiCall('/api/world/cities', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(formData) })) { cityList.load(); setFormData({}); } };
+    const handleUpdateCity = async () => { if (await apiCall(`/api/world/cities/${selectedCity!.CITYID}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(formData) })) { cityList.load(); } };
+    const handleDeleteCity = async () => { if (confirm("この City を削除しますか？") && await apiCall(`/api/world/cities/${selectedCity!.CITYID}`, { method: 'DELETE' })) { setSelectedCity(null); setFormData({}); cityList.load(); } };
 
     // --- Building Handlers ---
     const handleBuildingSelect = (b: Building) => {
@@ -242,20 +359,21 @@ export default function WorldEditor() {
         if (b.EXTRA_PROMPT_FILES) {
             try { extraPrompts = JSON.parse(b.EXTRA_PROMPT_FILES); } catch (e) { console.error('Failed to parse EXTRA_PROMPT_FILES:', e); extraPrompts = []; }
         }
-        // Fetch tools ... (simplified for now to empty list or need separate fetch)
-        fetch(`/api/db/tables/building_tool_link`).then(r => r.json()).then(links => {
+        // 紐付け表は全件そろっていないと「チェックが外れている」という嘘の
+        // 表示になるので、ページ送りではなく最後まで読み切る
+        fetchAllTableRows<any>('building_tool_link').then(links => {
             const ids = links.filter((l: any) => l.BUILDINGID === b.BUILDINGID).map((l: any) => l.TOOLID);
             setFormData({ name: b.BUILDINGNAME, description: b.DESCRIPTION, capacity: b.CAPACITY, system_instruction: b.SYSTEM_INSTRUCTION, city_id: b.CITYID, auto_interval: b.AUTO_INTERVAL_SEC, tool_ids: ids, image_path: b.IMAGE_PATH || '', extra_prompt_files: extraPrompts });
-        });
+        }).catch(e => console.error('load building_tool_link failed:', e));
     };
-    const handleCreateBuilding = async () => { if (await apiCall('/api/world/buildings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: formData.name, description: formData.description || "", capacity: formData.capacity || 1, system_instruction: formData.system_instruction || "", city_id: formData.city_id, building_id: formData.building_id || null }) })) { loadBuildings(); setFormData({}); } };
-    const handleUpdateBuilding = async () => { if (await apiCall(`/api/world/buildings/${selectedBuilding!.BUILDINGID}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...formData, tool_ids: formData.tool_ids || [] }) })) { loadBuildings(); } };
+    const handleCreateBuilding = async () => { if (await apiCall('/api/world/buildings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: formData.name, description: formData.description || "", capacity: formData.capacity || 1, system_instruction: formData.system_instruction || "", city_id: formData.city_id, building_id: formData.building_id || null }) })) { buildingList.load(); setFormData({}); } };
+    const handleUpdateBuilding = async () => { if (await apiCall(`/api/world/buildings/${selectedBuilding!.BUILDINGID}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...formData, tool_ids: formData.tool_ids || [] }) })) { buildingList.load(); } };
     const handleDeleteBuilding = async () => {
         const deletedId = selectedBuilding!.BUILDINGID;
         if (confirm("この Building を削除しますか？") && await apiCall(`/api/world/buildings/${deletedId}`, { method: 'DELETE' })) {
             setSelectedBuilding(null);
             setFormData({});
-            loadBuildings();
+            buildingList.load();
             // Notify main page so it can update if the deleted building was current
             window.dispatchEvent(new CustomEvent('building-deleted', { detail: { buildingId: deletedId } }));
         }
@@ -271,9 +389,9 @@ export default function WorldEditor() {
             appearance_image_path: ai.APPEARANCE_IMAGE_PATH || ''
         });
     };
-    const handleCreateAI = async () => { if (await apiCall('/api/world/ais', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: formData.name, system_prompt: formData.system_prompt, home_city_id: formData.home_city_id }) })) { loadAIs(); setFormData({}); } };
-    const handleUpdateAI = async () => { if (await apiCall(`/api/world/ais/${selectedAI!.AIID}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(formData) })) { loadAIs(); } };
-    const handleDeleteAI = async () => { if (confirm("このペルソナを削除しますか？") && await apiCall(`/api/world/ais/${selectedAI!.AIID}`, { method: 'DELETE' })) { setSelectedAI(null); setFormData({}); loadAIs(); } };
+    const handleCreateAI = async () => { if (await apiCall('/api/world/ais', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: formData.name, system_prompt: formData.system_prompt, home_city_id: formData.home_city_id }) })) { aiList.load(); setFormData({}); } };
+    const handleUpdateAI = async () => { if (await apiCall(`/api/world/ais/${selectedAI!.AIID}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(formData) })) { aiList.load(); } };
+    const handleDeleteAI = async () => { if (confirm("このペルソナを削除しますか？") && await apiCall(`/api/world/ais/${selectedAI!.AIID}`, { method: 'DELETE' })) { setSelectedAI(null); setFormData({}); aiList.load(); } };
     const handleMoveAI = async () => {
         if (!selectedAI || !formData.target_building_name) return;
         if (await apiCall(`/api/world/ais/${selectedAI.AIID}/move`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ target_building_name: formData.target_building_name }) })) {
@@ -286,9 +404,9 @@ export default function WorldEditor() {
         setSelectedBlueprint(bp);
         setFormData({ name: bp.NAME, description: bp.DESCRIPTION, city_id: bp.CITYID, entity_type: bp.ENTITY_TYPE, system_prompt: bp.BASE_SYSTEM_PROMPT });
     };
-    const handleCreateBlueprint = async () => { if (await apiCall('/api/world/blueprints', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(formData) })) { loadBlueprints(); setFormData({}); } };
-    const handleUpdateBlueprint = async () => { if (await apiCall(`/api/world/blueprints/${selectedBlueprint!.BLUEPRINT_ID}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(formData) })) { loadBlueprints(); } };
-    const handleDeleteBlueprint = async () => { if (confirm("この Blueprint を削除しますか？") && await apiCall(`/api/world/blueprints/${selectedBlueprint!.BLUEPRINT_ID}`, { method: 'DELETE' })) { setSelectedBlueprint(null); setFormData({}); loadBlueprints(); } };
+    const handleCreateBlueprint = async () => { if (await apiCall('/api/world/blueprints', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(formData) })) { blueprintList.load(); setFormData({}); } };
+    const handleUpdateBlueprint = async () => { if (await apiCall(`/api/world/blueprints/${selectedBlueprint!.BLUEPRINT_ID}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(formData) })) { blueprintList.load(); } };
+    const handleDeleteBlueprint = async () => { if (confirm("この Blueprint を削除しますか？") && await apiCall(`/api/world/blueprints/${selectedBlueprint!.BLUEPRINT_ID}`, { method: 'DELETE' })) { setSelectedBlueprint(null); setFormData({}); blueprintList.load(); } };
     const handleSpawnBlueprint = async () => {
         if (!selectedBlueprint || !formData.spawn_entity_name || !formData.spawn_building_name) return;
         if (await apiCall(`/api/world/blueprints/${selectedBlueprint.BLUEPRINT_ID}/spawn`, {
@@ -299,9 +417,9 @@ export default function WorldEditor() {
 
     // --- Tool Handlers ---
     const handleToolSelect = (t: Tool) => { setSelectedTool(t); setFormData({ name: t.TOOLNAME, description: t.DESCRIPTION, module_path: t.MODULE_PATH, function_name: t.FUNCTION_NAME }); };
-    const handleCreateTool = async () => { if (await apiCall('/api/world/tools', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(formData) })) { loadTools(); setFormData({}); } };
-    const handleUpdateTool = async () => { if (await apiCall(`/api/world/tools/${selectedTool!.TOOLID}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(formData) })) { loadTools(); } };
-    const handleDeleteTool = async () => { if (confirm("このツールを削除しますか？") && await apiCall(`/api/world/tools/${selectedTool!.TOOLID}`, { method: 'DELETE' })) { setSelectedTool(null); setFormData({}); loadTools(); } };
+    const handleCreateTool = async () => { if (await apiCall('/api/world/tools', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(formData) })) { toolList.load(); setFormData({}); } };
+    const handleUpdateTool = async () => { if (await apiCall(`/api/world/tools/${selectedTool!.TOOLID}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(formData) })) { toolList.load(); } };
+    const handleDeleteTool = async () => { if (confirm("このツールを削除しますか？") && await apiCall(`/api/world/tools/${selectedTool!.TOOLID}`, { method: 'DELETE' })) { setSelectedTool(null); setFormData({}); toolList.load(); } };
 
     // --- Item Handlers ---
     const handleItemSelect = async (i: Item) => {
@@ -329,9 +447,9 @@ export default function WorldEditor() {
             setFormData({ name: i.NAME, item_type: i.TYPE, description: i.DESCRIPTION, owner_kind: 'world', owner_id: '', state_json: i.STATE_JSON, file_path: i.FILE_PATH });
         }
     };
-    const handleCreateItem = async () => { if (await apiCall('/api/world/items', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(formData) })) { loadItems(); setFormData({}); } };
-    const handleUpdateItem = async () => { if (await apiCall(`/api/world/items/${selectedItem!.ITEM_ID}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(formData) })) { loadItems(); } };
-    const handleDeleteItem = async () => { if (confirm("このアイテムを削除しますか？") && await apiCall(`/api/world/items/${selectedItem!.ITEM_ID}`, { method: 'DELETE' })) { setSelectedItem(null); setFormData({}); loadItems(); } };
+    const handleCreateItem = async () => { if (await apiCall('/api/world/items', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(formData) })) { itemList.load(); loadBagOptions(); setFormData({}); } };
+    const handleUpdateItem = async () => { if (await apiCall(`/api/world/items/${selectedItem!.ITEM_ID}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(formData) })) { itemList.load(); loadBagOptions(); } };
+    const handleDeleteItem = async () => { if (confirm("このアイテムを削除しますか？") && await apiCall(`/api/world/items/${selectedItem!.ITEM_ID}`, { method: 'DELETE' })) { setSelectedItem(null); setFormData({}); itemList.load(); loadBagOptions(); } };
 
     // --- Playbook Handlers ---
     const handlePlaybookSelect = async (pb: Playbook) => {
@@ -392,7 +510,8 @@ export default function WorldEditor() {
                     <div className={styles.pane}>
                         <div className={styles.list}>
                             <h3>City 一覧</h3>
-                            {cities.map(c => <div key={c.CITYID} className={`${styles.item} ${selectedCity?.CITYID === c.CITYID ? styles.selected : ''}`} onClick={() => handleCitySelect(c)}>{c.CITYNAME || c.CITY_SLUG}</div>)}
+                            {cityList.rows.map(c => <div key={c.CITYID} className={`${styles.item} ${selectedCity?.CITYID === c.CITYID ? styles.selected : ''}`} onClick={() => handleCitySelect(c)}>{c.CITYNAME || c.CITY_SLUG}</div>)}
+                            <Pagination list={cityList} onNavigate={() => { setSelectedCity(null); setFormData({}); }} />
                             <button className={styles.newBtn} onClick={() => { setSelectedCity(null); setFormData({}); }}>+ 新規作成</button>
                         </div>
                         <div className={styles.form}>
@@ -430,7 +549,8 @@ export default function WorldEditor() {
                     <div className={styles.pane}>
                         <div className={styles.list}>
                             <h3>Building 一覧</h3>
-                            {buildings.map(b => <div key={b.BUILDINGID} className={`${styles.item} ${selectedBuilding?.BUILDINGID === b.BUILDINGID ? styles.selected : ''}`} onClick={() => handleBuildingSelect(b)}>{b.BUILDINGNAME}</div>)}
+                            {buildingList.rows.map(b => <div key={b.BUILDINGID} className={`${styles.item} ${selectedBuilding?.BUILDINGID === b.BUILDINGID ? styles.selected : ''}`} onClick={() => handleBuildingSelect(b)}>{b.BUILDINGNAME}</div>)}
+                            <Pagination list={buildingList} onNavigate={() => { setSelectedBuilding(null); setFormData({}); }} />
                             <button className={styles.newBtn} onClick={() => { setSelectedBuilding(null); setFormData({}); }}>+ 新規作成</button>
                         </div>
                         <div className={styles.form}>
@@ -443,7 +563,7 @@ export default function WorldEditor() {
                             {/* 既存 Building の City 変更は不可 (W7 柱5: 参照 scope を跨ぐため
                                 サーバ側でも拒否する)。編集時は表示のみ。 */}
                             <Field label="都市"><Select value={formData.city_id || ''} disabled={!!selectedBuilding} style={selectedBuilding ? { opacity: 0.7, cursor: 'not-allowed' } : undefined} onChange={(e: any) => setFormData({ ...formData, city_id: parseInt(e.target.value) })}>
-                                <option value="">City を選択...</option>{cities.map(c => <option key={c.CITYID} value={c.CITYID}>{c.CITYNAME || c.CITY_SLUG}</option>)}
+                                <option value="">City を選択...</option>{cityOptions.map(c => <option key={c.CITYID} value={c.CITYID}>{c.CITYNAME || c.CITY_SLUG}</option>)}
                             </Select></Field>
                             <div className={styles.row}>
                                 <Field label="定員"><NumInput value={formData.capacity || 1} onChange={(e: any) => setFormData({ ...formData, capacity: parseInt(e.target.value) })} /></Field>
@@ -497,7 +617,7 @@ export default function WorldEditor() {
                                 </div>
                                 <small style={{ color: '#666', fontSize: '0.8rem' }}>この Building 内のペルソナ用の追加システムプロンプト</small>
                             </div>}
-                            {selectedBuilding && <div className={styles.field}><label>ツール</label><div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem' }}>{tools.map(t => (<label key={t.TOOLID} style={{ background: '#f1f5f9', padding: '0.25rem' }}><input type="checkbox" checked={(formData.tool_ids || []).includes(t.TOOLID)} onChange={e => { const c = formData.tool_ids || []; if (e.target.checked) setFormData({ ...formData, tool_ids: [...c, t.TOOLID] }); else setFormData({ ...formData, tool_ids: c.filter((id: any) => id !== t.TOOLID) }); }} /> {t.TOOLNAME}</label>))}</div></div>}
+                            {selectedBuilding && <div className={styles.field}><label>ツール</label><div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem' }}>{toolOptions.map(t => (<label key={t.TOOLID} style={{ background: '#f1f5f9', padding: '0.25rem' }}><input type="checkbox" checked={(formData.tool_ids || []).includes(t.TOOLID)} onChange={e => { const c = formData.tool_ids || []; if (e.target.checked) setFormData({ ...formData, tool_ids: [...c, t.TOOLID] }); else setFormData({ ...formData, tool_ids: c.filter((id: any) => id !== t.TOOLID) }); }} /> {t.TOOLNAME}</label>))}</div></div>}
                             {renderFormActions(selectedBuilding, handleCreateBuilding, handleUpdateBuilding, handleDeleteBuilding)}
                         </div>
                     </div>
@@ -507,14 +627,15 @@ export default function WorldEditor() {
                     <div className={styles.pane}>
                         <div className={styles.list}>
                             <h3>ペルソナ一覧</h3>
-                            {ais.map(a => <div key={a.AIID} className={`${styles.item} ${selectedAI?.AIID === a.AIID ? styles.selected : ''}`} onClick={() => handleAISelect(a)}>{a.AINAME}</div>)}
+                            {aiList.rows.map(a => <div key={a.AIID} className={`${styles.item} ${selectedAI?.AIID === a.AIID ? styles.selected : ''}`} onClick={() => handleAISelect(a)}>{a.AINAME}</div>)}
+                            <Pagination list={aiList} onNavigate={() => { setSelectedAI(null); setFormData({}); }} />
                             <button className={styles.newBtn} onClick={() => { setSelectedAI(null); setFormData({ autonomy_enabled: true }); }}>+ 新規作成</button>
                         </div>
                         <div className={styles.form}>
                             <h3>{selectedAI ? `ペルソナを編集` : '新しいペルソナ'}</h3>
                             <Field label="名前"><Input value={formData.name || ''} onChange={(e: any) => setFormData({ ...formData, name: e.target.value })} /></Field>
                             <Field label="ホーム都市"><Select value={formData.home_city_id || ''} onChange={(e: any) => setFormData({ ...formData, home_city_id: parseInt(e.target.value) })}>
-                                <option value="">City を選択...</option>{cities.map(c => <option key={c.CITYID} value={c.CITYID}>{c.CITYNAME || c.CITY_SLUG}</option>)}
+                                <option value="">City を選択...</option>{cityOptions.map(c => <option key={c.CITYID} value={c.CITYID}>{c.CITYNAME || c.CITY_SLUG}</option>)}
                             </Select></Field>
                             {selectedAI && <>
                                 <Field label="デフォルトモデル"><Select value={formData.default_model || ''} onChange={(e: any) => setFormData({ ...formData, default_model: e.target.value })}>
@@ -563,7 +684,7 @@ export default function WorldEditor() {
                                 <h4>ペルソナを移動</h4>
                                 <div className={styles.row}>
                                     <Select value={formData.target_building_name || ''} onChange={(e: any) => setFormData({ ...formData, target_building_name: e.target.value })}>
-                                        <option value="">移動先を選択...</option>{buildings.map(b => <option key={b.BUILDINGID} value={b.BUILDINGNAME}>{b.BUILDINGNAME}</option>)}
+                                        <option value="">移動先を選択...</option>{buildingOptions.map(b => <option key={b.BUILDINGID} value={b.BUILDINGNAME}>{b.BUILDINGNAME}</option>)}
                                     </Select>
                                     <button className={styles.primaryBtn} onClick={handleMoveAI}>移動</button>
                                 </div>
@@ -576,7 +697,8 @@ export default function WorldEditor() {
                     <div className={styles.pane}>
                         <div className={styles.list}>
                             <h3>Blueprint 一覧</h3>
-                            {blueprints.map(b => <div key={b.BLUEPRINT_ID} className={`${styles.item} ${selectedBlueprint?.BLUEPRINT_ID === b.BLUEPRINT_ID ? styles.selected : ''}`} onClick={() => handleBlueprintSelect(b)}>{b.NAME}</div>)}
+                            {blueprintList.rows.map(b => <div key={b.BLUEPRINT_ID} className={`${styles.item} ${selectedBlueprint?.BLUEPRINT_ID === b.BLUEPRINT_ID ? styles.selected : ''}`} onClick={() => handleBlueprintSelect(b)}>{b.NAME}</div>)}
+                            <Pagination list={blueprintList} onNavigate={() => { setSelectedBlueprint(null); setFormData({ entity_type: 'ai' }); }} />
                             <button className={styles.newBtn} onClick={() => { setSelectedBlueprint(null); setFormData({ entity_type: 'ai' }); }}>+ 新規作成</button>
                         </div>
                         <div className={styles.form}>
@@ -584,7 +706,7 @@ export default function WorldEditor() {
                             <Field label="名前"><Input value={formData.name || ''} onChange={(e: any) => setFormData({ ...formData, name: e.target.value })} /></Field>
                             <Field label="タイプ"><Input value={formData.entity_type || 'ai'} onChange={(e: any) => setFormData({ ...formData, entity_type: e.target.value })} /></Field>
                             <Field label="都市"><Select value={formData.city_id || ''} onChange={(e: any) => setFormData({ ...formData, city_id: parseInt(e.target.value) })}>
-                                <option value="">City を選択...</option>{cities.map(c => <option key={c.CITYID} value={c.CITYID}>{c.CITYNAME || c.CITY_SLUG}</option>)}
+                                <option value="">City を選択...</option>{cityOptions.map(c => <option key={c.CITYID} value={c.CITYID}>{c.CITYNAME || c.CITY_SLUG}</option>)}
                             </Select></Field>
                             <Field label="システムプロンプト"><TextArea style={{ minHeight: 200 }} value={formData.system_prompt || ''} onChange={(e: any) => setFormData({ ...formData, system_prompt: e.target.value })} /></Field>
                             <Field label="説明"><TextArea value={formData.description || ''} onChange={(e: any) => setFormData({ ...formData, description: e.target.value })} /></Field>
@@ -594,7 +716,7 @@ export default function WorldEditor() {
                                 <Field label="新しいエンティティ名"><Input value={formData.spawn_entity_name || ''} onChange={(e: any) => setFormData({ ...formData, spawn_entity_name: e.target.value })} /></Field>
                                 <div className={styles.row}>
                                     <Select value={formData.spawn_building_name || ''} onChange={(e: any) => setFormData({ ...formData, spawn_building_name: e.target.value })}>
-                                        <option value="">Building を選択...</option>{buildings.map(b => <option key={b.BUILDINGID} value={b.BUILDINGNAME}>{b.BUILDINGNAME}</option>)}
+                                        <option value="">Building を選択...</option>{buildingOptions.map(b => <option key={b.BUILDINGID} value={b.BUILDINGNAME}>{b.BUILDINGNAME}</option>)}
                                     </Select>
                                     <button className={styles.primaryBtn} onClick={handleSpawnBlueprint}>生成</button>
                                 </div>
@@ -607,7 +729,8 @@ export default function WorldEditor() {
                     <div className={styles.pane}>
                         <div className={styles.list}>
                             <h3>ツール一覧</h3>
-                            {tools.map(t => <div key={t.TOOLID} className={`${styles.item} ${selectedTool?.TOOLID === t.TOOLID ? styles.selected : ''}`} onClick={() => handleToolSelect(t)}>{t.TOOLNAME}</div>)}
+                            {toolList.rows.map(t => <div key={t.TOOLID} className={`${styles.item} ${selectedTool?.TOOLID === t.TOOLID ? styles.selected : ''}`} onClick={() => handleToolSelect(t)}>{t.TOOLNAME}</div>)}
+                            <Pagination list={toolList} onNavigate={() => { setSelectedTool(null); setFormData({}); }} />
                             <button className={styles.newBtn} onClick={() => { setSelectedTool(null); setFormData({}); }}>+ 新規作成</button>
                         </div>
                         <div className={styles.form}>
@@ -625,7 +748,8 @@ export default function WorldEditor() {
                     <div className={styles.pane}>
                         <div className={styles.list}>
                             <h3>アイテム一覧</h3>
-                            {items.map(i => <div key={i.ITEM_ID} className={`${styles.item} ${selectedItem?.ITEM_ID === i.ITEM_ID ? styles.selected : ''}`} onClick={() => handleItemSelect(i)}>{i.NAME}</div>)}
+                            {itemList.rows.map(i => <div key={i.ITEM_ID} className={`${styles.item} ${selectedItem?.ITEM_ID === i.ITEM_ID ? styles.selected : ''}`} onClick={() => handleItemSelect(i)}>{i.NAME}</div>)}
+                            <Pagination list={itemList} onNavigate={() => { setSelectedItem(null); setFormData({ item_type: 'picture', owner_kind: 'world' }); }} />
                             <button className={styles.newBtn} onClick={() => { setSelectedItem(null); setFormData({ item_type: 'picture', owner_kind: 'world' }); }}>+ 新規作成</button>
                         </div>
                         <div className={styles.form}>
@@ -650,7 +774,7 @@ export default function WorldEditor() {
                                     <Field label="Building">
                                         <Select value={formData.owner_id || ''} onChange={(e: any) => setFormData({ ...formData, owner_id: e.target.value })}>
                                             <option value="">Building を選択...</option>
-                                            {buildings.map(b => <option key={b.BUILDINGID} value={b.BUILDINGID}>{b.BUILDINGNAME}</option>)}
+                                            {buildingOptions.map(b => <option key={b.BUILDINGID} value={b.BUILDINGID}>{b.BUILDINGNAME}</option>)}
                                         </Select>
                                     </Field>
                                 )}
@@ -658,7 +782,7 @@ export default function WorldEditor() {
                                     <Field label="ペルソナ">
                                         <Select value={formData.owner_id || ''} onChange={(e: any) => setFormData({ ...formData, owner_id: e.target.value })}>
                                             <option value="">ペルソナを選択...</option>
-                                            {ais.map(a => <option key={a.AIID} value={a.AIID}>{a.AINAME}</option>)}
+                                            {aiOptions.map(a => <option key={a.AIID} value={a.AIID}>{a.AINAME}</option>)}
                                         </Select>
                                     </Field>
                                 )}
@@ -666,7 +790,7 @@ export default function WorldEditor() {
                                     <Field label="Bag">
                                         <Select value={formData.owner_id || ''} onChange={(e: any) => setFormData({ ...formData, owner_id: e.target.value })}>
                                             <option value="">Bagを選択...</option>
-                                            {items.filter(i => i.TYPE === 'bag' && i.ITEM_ID !== selectedItem?.ITEM_ID).map(i => (
+                                            {bagOptions.filter(i => i.ITEM_ID !== selectedItem?.ITEM_ID).map(i => (
                                                 <option key={i.ITEM_ID} value={i.ITEM_ID}>{i.NAME}</option>
                                             ))}
                                         </Select>

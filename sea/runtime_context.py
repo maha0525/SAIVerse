@@ -705,22 +705,18 @@ def _payload_epoch(msg: Dict[str, Any]) -> Optional[int]:
 def _chronicle_enabled_for(runtime: Any, persona: Any) -> bool:
     """Chronicle 編纂が有効か — generate_chronicle の入口と同じフラグを読む。
 
-    _run_metabolism_locked が編纂可否に使う二段 (env ENABLE_MEMORY_WEAVE_CONTEXT
-    × ペルソナ単位トグル) をそのまま写す。判定できないときは True (= バッチを
+    _run_metabolism_locked が編纂可否に使う門 (ペルソナ単位トグル
+    AI.CHRONICLE_ENABLED) をそのまま写す。判定できないときは True (= バッチを
     隠さない側) に倒す — 「編纂なしで忘れる」は明示的な選択のときだけ。
+
+    かつては env ENABLE_MEMORY_WEAVE_CONTEXT との二段だったが、2026-09-01 に
+    撤去した (v0.2 からのアップグレード組で記憶の整理が全停止する実害)。
     """
-    import os
     try:
-        memory_weave_enabled = os.getenv(
-            "ENABLE_MEMORY_WEAVE_CONTEXT", "",
-        ).lower() in ("true", "1")
         lifecycle = getattr(runtime, "session_lifecycle", None)
         if lifecycle is None:
             return True
-        return bool(
-            memory_weave_enabled
-            and lifecycle.is_chronicle_enabled_for_persona(persona)
-        )
+        return bool(lifecycle.is_chronicle_enabled_for_persona(persona))
     except Exception:
         return True
 

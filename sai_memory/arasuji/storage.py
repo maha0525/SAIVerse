@@ -985,6 +985,114 @@ def refresh_ancestor_bookkeeping(
     return processed
 
 
+def list_dead_message_sources(
+    conn: sqlite3.Connection,
+) -> Dict[str, List[str]]:
+    """Lv1 の source_ids のうち、``messages`` に無い id (孤児参照) — **検出だけ**。
+
+    :func:`prune_dead_message_sources` (処置つき) との一点共有。存在の判定は
+    生の ``messages`` 行の有無で、あらすじの吸収が隣人を開き直せるかを決める
+    ``memory.storage.get_messages_by_ids`` (scope で絞らない素の
+    ``WHERE id IN (...)``) と同じ意味論にしてある — 検出と再開の基準が
+    食い違うと、掃いたのに開けない形が残る。
+
+    Returns:
+        ``{entry_id: [死んだ message id, ...]}`` (孤児が無ければ空 dict)。
+    """
+    try:
+        rows = conn.execute(
+            """
+            SELECT a.id, s.value
+            FROM arasuji_entries a, json_each(a.source_ids_json) s
+            WHERE a.level = 1
+              AND NOT EXISTS (
+                SELECT 1 FROM messages m WHERE m.id = s.value
+              )
+            """
+        ).fetchall()
+    except sqlite3.OperationalError as exc:
+        if is_missing_table_error(exc):
+            return {}  # Chronicle 実績ゼロの新規 DB
+        raise  # ロック等は握らない
+    dead: Dict[str, List[str]] = {}
+    for entry_id, source_id in rows:
+        dead.setdefault(str(entry_id), []).append(str(source_id))
+    return dead
+
+
+def prune_dead_message_sources(
+    conn: sqlite3.Connection,
+) -> Dict[str, List[str]]:
+    """Lv1 の source_ids から死んだ message id を落とし、counts を引き直す。
+
+    UI のメッセージ削除 (個別 / 一括 / スレッド) は生ログを消すだけで、その
+    メッセージを指す Lv1 あらすじの source_ids を直さない。残った孤児参照は
+    被覆計算には効かないが、吸収の再開検査 (absorption の
+    「missing source messages」) を落として隣の未被覆断片を永久に取り残す。
+    その受け皿 — :func:`refresh_ancestor_bookkeeping` が「上位 → 消えた下位
+    あらすじ」に対してやっていることの、「Lv1 → 消えたメッセージ」版。
+
+    ``source_ids`` から死んだ id を除き、``source_count`` / ``message_count``
+    を生存 id の実長へ引き直す。**content (本文) には触らない** — これは LLM
+    ゼロの帳簿補修で、編纂は本文を新規生成しない (保存則)。span
+    (start_time / end_time) も動かさない: 生存材料より広い範囲を主張したまま
+    でも害は無く、狭める側は被覆の境界を動かしてしまう。
+
+    材料が全滅した Lv1 (生ログが丸ごと消えた) は**手を付けず WARNING だけ**
+    残す。source ゼロへ落とすとどの範囲も被覆しない幽霊エントリになり、
+    本文を消せば持ち主の記憶を機構が捨てることになる。生ログが無い以上その
+    エントリは開き直せないので、吸収が再開を断るのはむしろ正しい。
+
+    自前の UPDATE は積んで**末尾の単一 commit** で確定する
+    (refresh_ancestor_bookkeeping と同じ流儀)。冪等 — 二度目は検出ゼロで
+    何も書かない。
+
+    Returns:
+        ``{entry_id: [除去した message id, ...]}`` (書き換えた分のみ)。
+    """
+    import logging
+
+    _logger = logging.getLogger(__name__)
+    dead = list_dead_message_sources(conn)
+    if not dead:
+        return {}
+
+    removed: Dict[str, List[str]] = {}
+    try:
+        for entry_id, dead_ids in dead.items():
+            row = _get_chronicle_page_row(conn, entry_id)
+            if row is None:
+                continue
+            meta = _parse_chronicle_meta(row[3])
+            source_ids = [str(s) for s in (meta.get("source_ids") or [])]
+            dead_set = set(dead_ids)
+            survivors = [s for s in source_ids if s not in dead_set]
+            if not survivors:
+                _logger.warning(
+                    "[arasuji] level-1 entry %s has no surviving source "
+                    "messages (%d dead); leaving it untouched — its raw log "
+                    "is gone, so it cannot be reopened anyway",
+                    entry_id[:8], len(dead_set),
+                )
+                continue
+            meta["source_ids"] = survivors
+            meta["source_count"] = len(survivors)
+            meta["message_count"] = len(survivors)
+            conn.execute(
+                "UPDATE memopedia_pages SET metadata = ? WHERE id = ?",
+                (json.dumps(meta, ensure_ascii=False), entry_id),
+            )
+            removed[entry_id] = sorted(dead_set)
+        conn.commit()
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
+    return removed
+
+
 def dismantle_entry(
     conn: sqlite3.Connection,
     entry_id: str,

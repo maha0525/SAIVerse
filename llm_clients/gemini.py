@@ -359,6 +359,28 @@ def merge_tools_for_gemini(request_tools: Optional[List[types.Tool]]) -> List[ty
     return [GROUNDING_TOOL] + request_tools
 
 
+# 自動キャッシュの「応答後の保持秒数」の上限 (秒)。Gemini API 自体は
+# cachedContents の ttl に下限も上限も定めていない (Firebase AI Logic の
+# context caching doc: "There are no minimum or maximum bounds on the TTL")。
+# 上限は「消し忘れたキャッシュの保存課金が際限なく伸びない」ための SAIVerse 側の歯止め。
+AUTO_CACHE_KEEP_SECONDS_MAX = 3600
+
+
+def clamp_auto_cache_keep_seconds(value: Any) -> int:
+    """自動キャッシュの保持秒数を実際に使える範囲へ丸める。
+
+    0 は「応答直後に手動で削除する」モードを意味する。負値や数値でない値は
+    0 として扱い、上限は ``AUTO_CACHE_KEEP_SECONDS_MAX`` で切る。
+    """
+    try:
+        seconds = int(value)
+    except (TypeError, ValueError):
+        return 0
+    if seconds <= 0:
+        return 0
+    return min(seconds, AUTO_CACHE_KEEP_SECONDS_MAX)
+
+
 class GeminiClient(LLMClient):
     """Client for Google Gemini API."""
 
@@ -443,13 +465,34 @@ class GeminiClient(LLMClient):
             self._auto_cache_cleanup(cleanup_name)
 
     # ── Auto cache mode ──
-    # 環境変数 SAIVERSE_GEMINI_AUTO_CACHE=1 で有効。全 Gemini 呼び出しで
-    # create→use→delete を自動適用し、入力を 1/10 価格にする。
+    # 環境変数 SAIVERSE_GEMINI_AUTO_CACHE=1 か、グローバル設定 UI (環境タブ) で有効。
+    # 全 Gemini 呼び出しで create→use→delete を自動適用し、入力を 1/10 価格にする。
+    # どちらもクラス属性なので、API から書き換えると全インスタンスに即座に効く。
     _AUTO_CACHE_ENABLED: bool = os.getenv(
         "SAIVERSE_GEMINI_AUTO_CACHE", ""
     ).lower() in ("1", "true", "yes", "on")
     _AUTO_CACHE_MIN_TOKENS: int = 1024
     _AUTO_CACHE_TTL: int = 300  # 保険 TTL (delete 失敗時の orphan 上限)
+    # 応答後の保持秒数。0 (既定) なら従来どおり保険 TTL で create して応答直後に手動 delete。
+    # 1 以上なら TTL をこの値にして create し、手動 delete はせず Gemini の TTL 失効に任せる。
+    _AUTO_CACHE_KEEP_SECONDS: int = clamp_auto_cache_keep_seconds(
+        os.getenv("SAIVERSE_GEMINI_AUTO_CACHE_KEEP_SECONDS", "0")
+    )
+
+    @classmethod
+    def auto_cache_keep_seconds(cls) -> int:
+        """現在の保持秒数 (丸め済み)。クラス属性を直接読むと未検証の値が混じるため。"""
+        return clamp_auto_cache_keep_seconds(cls._AUTO_CACHE_KEEP_SECONDS)
+
+    @classmethod
+    def auto_cache_create_ttl(cls) -> int:
+        """caches.create に渡す TTL 秒数。
+
+        保持秒数が 0 のときは「delete が失敗したときの孤児キャッシュの寿命上限」
+        としての保険 TTL、1 以上のときは保持秒数そのものが TTL になる。
+        """
+        keep = cls.auto_cache_keep_seconds()
+        return keep if keep > 0 else cls._AUTO_CACHE_TTL
 
     def _auto_cache_wrap(
         self,
@@ -460,6 +503,7 @@ class GeminiClient(LLMClient):
 
         Returns (cache_name, send_contents, cache_name_for_cleanup).
         cache_name_for_cleanup は finally で delete するために呼び出し元が保持する。
+        保持秒数が 1 以上のときは手動削除をしない (TTL 失効に任せる) ので None を返す。
         """
         if not self._AUTO_CACHE_ENABLED:
             return (None, contents, None)
@@ -478,8 +522,11 @@ class GeminiClient(LLMClient):
         if controller._approx_chars(sys_msg, cached_contents) < self._AUTO_CACHE_MIN_TOKENS:
             return (None, contents, None)
 
+        keep_seconds = self.auto_cache_keep_seconds()
+        ttl_seconds = self.auto_cache_create_ttl()
+
         result = controller.ensure(
-            self.client, self.model, sys_msg, self._AUTO_CACHE_TTL,
+            self.client, self.model, sys_msg, ttl_seconds,
             contents=cached_contents, min_tokens=self._AUTO_CACHE_MIN_TOKENS,
         )
         if not result or not result.name:
@@ -489,14 +536,16 @@ class GeminiClient(LLMClient):
             self._pending_cache_storage = (
                 self.config_key or self.model,
                 result.cached_tokens,
-                self._AUTO_CACHE_TTL,
+                ttl_seconds,
             )
 
         logging.info(
-            "[gemini][auto_cache] cache=%s prefix=%d msgs, tail=%d msgs",
-            result.name, len(cached_contents), len(tail),
+            "[gemini][auto_cache] cache=%s prefix=%d msgs, tail=%d msgs, ttl=%ds keep=%ds",
+            result.name, len(cached_contents), len(tail), ttl_seconds, keep_seconds,
         )
-        return (result.name, tail, result.name)
+        # keep_seconds > 0 のときは応答後に削除せず、Gemini 側の TTL 失効に任せる。
+        cleanup_name = result.name if keep_seconds <= 0 else None
+        return (result.name, tail, cleanup_name)
 
     def _auto_cache_cleanup(self, cache_name: Optional[str]) -> None:
         """Auto cache mode: generate 完了後に cache を即 delete。"""

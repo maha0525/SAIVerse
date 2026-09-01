@@ -80,22 +80,19 @@ def list_available_spells(persona_id: Optional[str] = None, manager = Depends(ge
 
 @router.get("/meta_playbooks", response_model=List[str])
 def list_meta_playbooks(
-    include_day_rhythm: bool = False,
     manager = Depends(get_manager),
 ):
-    """List user-selectable meta playbooks for schedule / summon dialogs.
+    """List user-selectable meta playbooks for the summon dialog.
 
     Phase 3 移行で Pulse-root として走る Playbook の主流が ``meta_*`` (旧
     ``meta_user`` / ``meta_user_manual``) から ``track_*`` (``track_user_conversation``
     等) に移ったため、name prefix での絞り込みは廃止。``user_selectable=true``
     フラグのみを判定軸にする。
 
-    ``include_day_rhythm=true`` (スケジュールダイアログ用): 一日のリズムを
-    時刻駆動するのが正しい判断点 (起床=judgment_day_open / 就寝=
-    judgment_day_close) も選択肢に含める。これらは ``user_selectable=false``
-    (召喚ダイアログに出すのは誤りのため) だが、PersonaSchedule への登録は
-    自律行動 v2 の正規の儀式 (autonomy_wiring._SCHEDULABLE_KINDS)。
-    post_* / on_event は文脈必須なのでスケジュールからは撃てず、含めない。
+    判断点の Playbook (起床=judgment_day_open / 就寝=judgment_day_close 等) は
+    ``user_selectable=false`` で、ここには出さない。一日のリズムはライフ設定が
+    所有し、判断点はコードが決定論的に発火させるため、ユーザーが一覧から選ぶ
+    対象ではない (2026-09-01 裁定でアラーム管理の Playbook 選択欄も撤去した)。
     """
     session = manager.SessionLocal()
     try:
@@ -104,19 +101,7 @@ def list_meta_playbooks(
             .filter(PlaybookModel.user_selectable == True)
             .all()
         )
-        names = {pb.name for pb in playbooks}
-        if include_day_rhythm:
-            from saiverse.autonomy_wiring import _SCHEDULABLE_KINDS
-            from saiverse.judgment_points import JUDGMENT_PLAYBOOK_MAP
-
-            rhythm_names = [JUDGMENT_PLAYBOOK_MAP[k] for k in _SCHEDULABLE_KINDS]
-            imported = (
-                session.query(PlaybookModel)
-                .filter(PlaybookModel.name.in_(rhythm_names))
-                .all()
-            )
-            names.update(pb.name for pb in imported)
-        return sorted(names)
+        return sorted({pb.name for pb in playbooks})
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     finally:

@@ -14,6 +14,7 @@ import ToolModeSelector, { TOOL_MODE_SELECTED } from '@/components/ToolModeSelec
 import { buildPreSpellsFromUI } from '@/lib/preSpells';
 import { formatCost } from '@/lib/formatCost';
 import { prepareMessageMarkdown } from '@/lib/messageMarkdown';
+import { fetchAllTableRows } from '@/lib/dbTable';
 import RightSidebar from '@/components/RightSidebar';
 import CityMap from '@/components/CityMap';
 import cityMapStyles from '@/components/CityMap.module.css';
@@ -1479,9 +1480,7 @@ export default function Home() {
         if (!tzMismatch) return;
         setTzUpdating(true);
         try {
-            const citiesRes = await fetch('/api/db/tables/city');
-            if (!citiesRes.ok) throw new Error('Failed to fetch city data');
-            const cities = await citiesRes.json();
+            const cities = await fetchAllTableRows<any>('city');
             const city = cities.find((c: any) => c.CITYID === tzMismatch.cityId);
             if (!city) throw new Error('City not found');
 
@@ -3321,7 +3320,7 @@ export default function Home() {
                                                     empty_message: '空のまま送信されました。内容を入れてから送ってください。',
                                                     no_current_building: 'いまいる場所が確定していません。画面を再読み込みするか、建物を選び直してください。',
                                                     action_failed: '操作をサーバーに届けられませんでした。接続を確認してもう一度お試しください。',
-                                                } as Record<string, string>)[msg.errorCode || ''] || '予期しないエラーが発生しました。問題が続く場合は管理者に連絡してください。'}
+                                                } as Record<string, string>)[msg.errorCode || ''] || '処理が完了しませんでした。少し待ってからもう一度お試しください。解決しない場合は、ログの内容とあわせて開発者へ報告してください。'}
                                             </div>
                                             {msg.errorDetail && (
                                                 <details className={styles.errorDetails}>

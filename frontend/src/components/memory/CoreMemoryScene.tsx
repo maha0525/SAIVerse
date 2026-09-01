@@ -326,13 +326,23 @@ export default function CoreMemoryScene({ personaId }: CoreMemorySceneProps) {
 
     return (
         <div className={styles.container}>
+            {/* タブ全体の説明。下の検索フォームはコア記憶を刻むための一機能で
+                あって、コア記憶そのものの説明ではない (2026-09-01 まはー指摘)。 */}
+            <div className={styles.tabIntro}>
+                <h3 className={styles.tabIntroTitle}>コア記憶</h3>
+                <p className={styles.tabIntroText}>
+                    コア記憶は、ペルソナが常に頭に置いている記憶です。会話のたびに毎回読み込まれ、
+                    口調や自己認識の土台になります。いま刻まれているコア記憶は、このタブで確認・編集・削除ができます。
+                </p>
+            </div>
+
             <div className={styles.header}>
                 <Anchor size={24} className={styles.icon} />
                 <div>
-                    <h3 className={styles.title}>会話を探してコア記憶に刻む</h3>
+                    <h3 className={styles.title}>会話を探して刻む</h3>
                     <p className={styles.description}>
-                        「そのペルソナらしさが最も出た会話」を探して、原文のままコア記憶（scene）として頭に常駐させます。
-                        口調が安定しないとき、記述指示より実際の会話例のほうが強く効きます。
+                        過去の会話から「そのペルソナらしさが出た場面」を探して、原文のままコア記憶に刻む道具です。
+                        口調が安定しないとき、言葉で説明するより実際の会話例のほうが強く効きます。
                     </p>
                 </div>
             </div>

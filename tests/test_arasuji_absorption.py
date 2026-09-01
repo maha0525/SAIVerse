@@ -793,6 +793,99 @@ class TestGenerateChronicleWiring:
         assert not _is_stale(conn, p.id)
         assert not is_repair_incomplete(conn)
 
+    # -- 前段 (吸収) の進捗表示 (2026-09-01 まはー実機報告) --------------------
+    #
+    # 症状: 補修ジョブが「Chronicleを生成しています (0/410)...」で凍って見える。
+    # 実際は前段の吸収が走っていて (run 一件ごとに LLM)、エリスの実機では前段
+    # だけで未被覆 410→258 まで進んでいた。進捗は本編 (execute_plan) にしか
+    # 配線されておらず、開始時に出した (0/410) が残り続けていた。
+
+    def _run_with_events(self, adapter, session_factory, monkeypatch):
+        """generate_chronicle を回して event_callback の content 列を返す。"""
+        from types import SimpleNamespace
+
+        from sea.session_lifecycle import SessionLifecycle
+
+        monkeypatch.setenv("SAIVERSE_CHRONICLE_BAND_BUDGET", str(TARGET))
+        manager = SimpleNamespace(SessionLocal=session_factory, personas={})
+        lifecycle = SessionLifecycle(SimpleNamespace(), manager)
+        persona = SimpleNamespace(
+            persona_id=PERSONA_ID, persona_name="テスター", model="claude-x",
+            sai_memory=adapter,
+        )
+        events = []
+
+        def _noop_executor(plan, *a, **k):
+            from sai_memory.arasuji.executor import ExecutionResult
+            return ExecutionResult()
+
+        with patch(
+            "saiverse.model_configs.find_model_config",
+            return_value=(
+                "mock-model", {"provider": "mock", "context_length": 1000},
+            ),
+        ), patch(
+            "llm_clients.factory.get_llm_client", return_value=_Client(),
+        ), patch(
+            "sai_memory.arasuji.executor.execute_plan", _noop_executor,
+        ), patch(
+            "sai_memory.arasuji.bands.backfill_coverage", lambda conn: 0,
+        ), patch(
+            "sai_memory.arasuji.bands.run_band_overflow", lambda *a, **k: 0,
+        ), patch(
+            "sai_memory.memory.entity_extractor.make_batch_callback",
+            side_effect=RuntimeError("skip entity extraction"),
+        ):
+            status = lifecycle.generate_chronicle(
+                persona, lambda ev: events.append(ev), force=True,
+            )
+        return status, [e.get("content", "") for e in events]
+
+    def test_absorption_phase_is_reported_before_the_compile_start(
+        self, adapter, session_factory, monkeypatch,
+    ):
+        """前段のフェーズと進行が流れ、本編の開始はその**後**に出る。
+
+        開始メッセージが先に出ると、吸収の数分〜数十分がまるごと「(0/N) のまま
+        凍った」画面になる。
+        """
+        conn = adapter.conn
+        _add_message(adapter, 0, 100)  # 極小 run → 吸収へ
+        n1 = _add_message(adapter, 10, 300)
+        n2 = _add_message(adapter, 11, 300)
+        _entry(conn, [n1, n2], start_min=10, end_min=11)
+
+        status, contents = self._run_with_events(
+            adapter, session_factory, monkeypatch,
+        )
+        assert status == "ok"
+
+        prep = [i for i, c in enumerate(contents) if "下ごしらえ" in c]
+        absorb = [i for i, c in enumerate(contents) if "断片を吸収しています" in c]
+        start = [i for i, c in enumerate(contents) if c.startswith("Chronicleを生成しています (0/")]
+        assert prep, f"前段のフェーズ表示が無い: {contents}"
+        assert absorb, f"吸収の進行表示が無い: {contents}"
+        assert start, f"本編の開始表示が無い: {contents}"
+        # 順序: 下ごしらえ → 吸収の進行 → 本編の開始
+        assert prep[0] < absorb[0] < start[0]
+        # 進行は「何件目 / 全件」の形
+        assert "(1/1)" in contents[absorb[0]]
+
+    def test_no_absorption_work_keeps_the_plain_start_message(
+        self, adapter, session_factory, monkeypatch,
+    ):
+        """吸収の仕事が無い回は前段の表示を出さない (常態を異常の顔で出さない)。"""
+        _add_message(adapter, 0, 600)
+        _add_message(adapter, 1, 600)
+
+        status, contents = self._run_with_events(
+            adapter, session_factory, monkeypatch,
+        )
+        assert status == "ok"
+        assert not [c for c in contents if "下ごしらえ" in c], contents
+        assert not [c for c in contents if "断片を吸収しています" in c], contents
+        assert [c for c in contents if c.startswith("Chronicleを生成しています (0/")]
+
 
 # ---------------------------------------------------------------------------
 # レビュー消し込み (Codex 敵対レビュー + ローカルレビュー 2026-08-31)
@@ -1973,7 +2066,6 @@ class TestTailRewind:
     ):
         """[Codex M2] run_coverage_repair は引き戻しの失敗を status="failed"
         に写像する (編纂は確定済み — 再実行が引き戻しだけやり直す)。"""
-        monkeypatch.setenv("ENABLE_MEMORY_WEAVE_CONTEXT", "true")
         lc = _make_lifecycle(session_factory)
         lc.generate_chronicle = lambda *a, **k: "ok"
         lc.is_chronicle_enabled_for_persona = lambda p: True
@@ -2080,7 +2172,6 @@ class TestTailRewind:
     ):
         """[Codex 十一巡 P1] 書き込み失敗は補修の status="failed" まで届く
         (実 run_tail_rewind / 実 _write_refill 経由で経路ごと固定する)。"""
-        monkeypatch.setenv("ENABLE_MEMORY_WEAVE_CONTEXT", "true")
         monkeypatch.setenv("SAIVERSE_CHRONICLE_BAND_BUDGET", str(TARGET))
         _gap, m_a = self._tail_fixture(adapter)
         lc = _make_lifecycle(session_factory)
@@ -2098,7 +2189,6 @@ class TestTailRewind:
 
     def _repair_status(self, adapter, session_factory, monkeypatch, **patches):
         """run_coverage_repair を編纂 "ok" 固定で回し、返る status を得る。"""
-        monkeypatch.setenv("ENABLE_MEMORY_WEAVE_CONTEXT", "true")
         lc = _make_lifecycle(session_factory)
         lc.generate_chronicle = lambda *a, **k: "ok"
         lc.is_chronicle_enabled_for_persona = lambda p: True
@@ -2114,7 +2204,6 @@ class TestTailRewind:
     ):
         """[Codex N1] 帯の解決失敗は補修の status="failed" まで届く
         (実 run_tail_rewind 経由 — 写像だけでなく経路ごと固定する)。"""
-        monkeypatch.setenv("ENABLE_MEMORY_WEAVE_CONTEXT", "true")
         monkeypatch.setenv("SAIVERSE_CHRONICLE_BAND_BUDGET", str(TARGET))
         _gap, m_a = self._tail_fixture(adapter)
         lc = _make_lifecycle(session_factory)
@@ -2401,3 +2490,157 @@ class TestEmbeddingCascade:
             "SELECT 1 FROM arasuji_embeddings WHERE entry_id = ?", (entry.id,)
         ).fetchone()
         assert row is None
+
+
+# ---------------------------------------------------------------------------
+# Lv1 → 消えたメッセージの掃除 (2026-09-01 まはー裁定)
+# ---------------------------------------------------------------------------
+
+
+def _meta_json(conn, entry_id):
+    row = conn.execute(
+        "SELECT metadata FROM memopedia_pages WHERE id = ?", (entry_id,)
+    ).fetchone()
+    return row[0]
+
+
+class TestSweepDeadMessageSources:
+    """UI のメッセージ削除が残した孤児 source_ids を掃く (_sweep_broken_parents
+    の Lv1 → メッセージ版)。掃かないと隣人の再開検査が落ち、その隣の未被覆
+    断片が永久に取り残される。"""
+
+    def test_dead_ids_are_dropped_and_counts_re_derived(self, adapter):
+        from sai_memory.arasuji.absorption import _sweep_dead_message_sources
+
+        conn = adapter.conn
+        n1 = _add_message(adapter, 0, 300)
+        n2 = _add_message(adapter, 1, 300)
+        entry = _entry(
+            conn, [n1, "dead-1", n2, "dead-2"], start_min=0, end_min=1,
+        )
+        assert entry.source_count == 4
+
+        removed = _sweep_dead_message_sources(conn)
+
+        assert removed == {entry.id: ["dead-1", "dead-2"]}
+        after = get_entry(conn, entry.id)
+        assert after.source_ids == [n1, n2]
+        assert after.source_count == 2
+        assert after.message_count == 2
+        # 本文と span は帳簿補修の対象外 (保存則 — 編纂は本文を作らない)
+        assert after.content == entry.content
+        assert (after.start_time, after.end_time) == (
+            entry.start_time, entry.end_time,
+        )
+
+    def test_healthy_entries_are_untouched(self, adapter):
+        from sai_memory.arasuji.absorption import _sweep_dead_message_sources
+
+        conn = adapter.conn
+        n1 = _add_message(adapter, 0, 300)
+        n2 = _add_message(adapter, 1, 300)
+        entry = _entry(conn, [n1, n2], start_min=0, end_min=1)
+        before = _meta_json(conn, entry.id)
+
+        assert _sweep_dead_message_sources(conn) == {}
+        assert _meta_json(conn, entry.id) == before
+
+    def test_is_idempotent(self, adapter):
+        from sai_memory.arasuji.absorption import _sweep_dead_message_sources
+
+        conn = adapter.conn
+        n1 = _add_message(adapter, 0, 300)
+        entry = _entry(conn, [n1, "dead-1"], start_min=0, end_min=0)
+
+        assert _sweep_dead_message_sources(conn) == {entry.id: ["dead-1"]}
+        first = _meta_json(conn, entry.id)
+        # 二度目は検出ゼロで何も書かない
+        assert _sweep_dead_message_sources(conn) == {}
+        assert _meta_json(conn, entry.id) == first
+
+    def test_entry_without_surviving_sources_is_left_alone(self, adapter):
+        """生ログが丸ごと消えた Lv1 は触らない — source ゼロにすると何も被覆
+        しない幽霊になり、本文を消せば持ち主の記憶を機構が捨てることになる。"""
+        from sai_memory.arasuji.absorption import _sweep_dead_message_sources
+
+        conn = adapter.conn
+        entry = _entry(conn, ["dead-1", "dead-2"], start_min=0, end_min=1)
+        before = _meta_json(conn, entry.id)
+
+        assert _sweep_dead_message_sources(conn) == {}
+        assert _meta_json(conn, entry.id) == before
+
+    def test_parent_bookkeeping_follows_without_marking_stale(self, adapter):
+        """子の counts が変わった親は引き直す (mark_stale=False — 本文の
+        語り直しは起こさないので見積もりの LLM 回数は動かない)。"""
+        from sai_memory.arasuji.absorption import _sweep_dead_message_sources
+
+        conn = adapter.conn
+        n1 = _add_message(adapter, 0, 300)
+        n2 = _add_message(adapter, 1, 300)
+        child = _entry(conn, [n1, "dead-1", n2], start_min=0, end_min=1)
+        parent = _entry(
+            conn, [child.id], start_min=0, end_min=1, level=2, content="P",
+        )
+        conn.execute(
+            "UPDATE memopedia_pages SET metadata = json_set("
+            "metadata, '$.message_count', 3) WHERE id = ?", (parent.id,),
+        )
+        conn.commit()
+        mark_consolidated(conn, [child.id], parent.id)
+
+        _sweep_dead_message_sources(conn)
+
+        parent_after = get_entry(conn, parent.id)
+        assert parent_after.message_count == 2
+        assert parent_after.content == "P"
+        assert not _is_stale(conn, parent.id)
+
+    def test_neighbor_with_orphans_becomes_absorbable_after_the_sweep(
+        self, adapter,
+    ):
+        """統合: 孤児参照を持つ隣人は開き直しを拒まれ、隣の未被覆断片が取り
+        残される。sweep 後は同じ計画で吸収され、断片が被覆に入る。"""
+        from sai_memory.arasuji.absorption import _sweep_dead_message_sources
+
+        conn = adapter.conn
+        gap = _add_message(adapter, 0, 100)               # 取り残される断片
+        n1 = _add_message(adapter, 10, 300)
+        n2 = _add_message(adapter, 11, 300)
+        entry = _entry(conn, [n1, "dead-1", n2], start_min=10, end_min=11)
+
+        messages, processed, _normal, tiny = _plan(adapter)
+        blocked = plan_absorption(
+            conn, tiny, messages, processed, target_chars=TARGET,
+        )
+        assert blocked.items == []
+        assert blocked.unresolved_runs == 1
+
+        assert _sweep_dead_message_sources(conn) == {entry.id: ["dead-1"]}
+
+        messages, processed, _normal, tiny = _plan(adapter)
+        plan = plan_absorption(
+            conn, tiny, messages, processed, target_chars=TARGET,
+        )
+        assert plan.unresolved_runs == 0
+        assert len(plan.items) == 1
+        assert plan.items[0].run_message_ids == [gap]
+        assert plan.items[0].absorbed_entry_ids == [entry.id]
+
+        result = run_absorption(conn, _Client(), plan)
+        assert len(result.merged_entries) == 1
+        covering = get_entries_covering_messages(conn, [gap, n1, n2])
+        assert [e.id for e in covering] == [result.merged_entries[0].id]
+        assert set(covering[0].source_ids) == {gap, n1, n2}
+
+    def test_run_absorption_sweeps_before_planning_work(self, adapter):
+        """run_absorption 冒頭の保守ブロックが (仕事ゼロの回でも) 掃く。"""
+        conn = adapter.conn
+        n1 = _add_message(adapter, 0, 300)
+        entry = _entry(conn, [n1, "dead-1"], start_min=0, end_min=0)
+
+        run_absorption(conn, _Client(), None)
+
+        after = get_entry(conn, entry.id)
+        assert after.source_ids == [n1]
+        assert after.source_count == 1

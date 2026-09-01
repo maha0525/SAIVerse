@@ -36,6 +36,9 @@ def _create_job(persona_id: str) -> str:
             "total": 0,
             "message": "Initializing...",
             "entries_created": 0,
+            # 畳み・補修そのものは成功したが、付随する処理が完了しなかったときの
+            # 添え書き (完了表示に併記する。失敗扱いにはしない)。
+            "warning": None,
             "error": None,
             "error_code": None,
             "error_detail": None,
@@ -228,6 +231,139 @@ def get_arasuji_stats(persona_id: str, manager = Depends(get_manager)):
     finally:
         conn.close()
 
+def _resolve_band_budget(persona_id: str, manager) -> tuple:
+    """帯予算の実効値と、それがどの段から来たかを返す。
+
+    解決順そのもの (ペルソナ列 > env > 既定) は実装を持っている 2 つの部品に
+    委ね、ここでは**ラベルを付けるためだけ**に段を判定する — 順序を三度目に
+    書き写すと、直したときに診断だけ嘘をつくようになる。
+
+    段の判定は**実際の解決と同じ規則**で行う — 文字列としての一致で見ると、
+    env="030000" や "+30000" のように書式が違うだけで実効値は同じ場合に、
+    ラベルだけが嘘をつく (Codex 指摘 2026-09-01)。``_resolve_char_budget`` が
+    env を採用する条件は「値が空でなく ``int()`` が通ること」なので、その条件を
+    そのまま再現する。
+
+    Returns:
+        ``(budget, source)``。source は "persona_column" / "env" /
+        "env_budget_disabled" (env が 0 以下 = 予算制を切って件数モードにして
+        いる) / "builtin_default"。
+    """
+    import os as _os
+
+    from builtin_data.tools.get_memory_weave_context import (
+        _resolve_persona_chronicle_budget,
+    )
+    from sai_memory.arasuji.context import USE_DEFAULT_BUDGET, _resolve_char_budget
+    from tools.context import persona_context
+
+    with persona_context(persona_id, None, manager):
+        from_column = _resolve_persona_chronicle_budget(
+            persona_id, USE_DEFAULT_BUDGET,
+        )
+    if from_column != USE_DEFAULT_BUDGET:
+        # 列は正値のときしか返らない (0 以下は未設定に倒す)。
+        return from_column, "persona_column"
+
+    budget = _resolve_char_budget(USE_DEFAULT_BUDGET)
+
+    # env が採用されたか = _resolve_char_budget の分岐条件そのもの。
+    env_raw = _os.getenv("SAIVERSE_CHRONICLE_CHAR_BUDGET")
+    env_used = False
+    if env_raw:
+        try:
+            int(env_raw)  # 空白・先頭ゼロ・符号は int() が吸収する
+            env_used = True
+        except ValueError:
+            env_used = False  # 解決側も既定へ落ちる (警告を出して)
+
+    if not env_used:
+        return budget, "builtin_default"
+    return budget, ("env" if budget > 0 else "env_budget_disabled")
+
+
+def _simulate_chronicle_band(conn, persona_id: str, manager) -> dict:
+    """いまコンテキストに載る Chronicle 帯を、本番と同じ組み立てで測る。
+
+    容疑の切り分け用 (2026-09-01)。健全なデータなら累積質量の規則で 30 件・
+    1.3 万字前後に収束するので、ここが予算 (既定 20,000 字) を大きく超えていれば
+    「一件が長い」か「件数が膨らんでいる」かのどちらかが、レベル別の内訳から
+    読み取れる。
+
+    ⚠️ ``exclude_entry_ids`` は**渡さない** — 本番の weave は提示ウィンドウ内で
+    digest 表示中のエントリを帯から外すが、それはサーバーの実行時状態に依存する。
+    診断を状態から独立させるため除外なしで流す。したがって
+    **実際の帯はここから「提示中の digest の分」だけ減る** (応答の
+    ``excludes_presented_digests`` が False なのはその意味)。
+
+    予算が 0 以下 (env で予算制を切っている構成) のときは、本番と同じく
+    **件数モード**で流れる。``budget_mode`` がどちらで測ったかを申告する。
+
+    可視エントリを**全件返すのは意図** (2026-09-01 裁定) — 丸めると膨張の証拠が
+    消える。件数が多いこと自体が読みたい事実で、ここはデバッグ専用の口。走査
+    コストも本番の weave 組み立てが Metabolism のたびに払っているものと同一なので、
+    ここが重いなら本番が先に破綻している。
+
+    読み取り専用・LLM ゼロ (SELECT と純ロジックだけ)。失敗はこの節だけに閉じ込め、
+    診断全体を巻き添えにしない (stelis_stats_error と同じ流儀)。
+    """
+    try:
+        from sai_memory.arasuji.context import (
+            format_episode_context,
+            get_episode_context,
+        )
+
+        budget, budget_source = _resolve_band_budget(persona_id, manager)
+        entries = get_episode_context(
+            conn,
+            max_entries=10_000,   # 予算が主制御。件数側は暴走防止の安全弁
+            char_budget=budget,
+            exclude_entry_ids=None,
+        )
+        formatted = format_episode_context(entries, include_level_info=True)
+
+        by_level: Dict[int, dict] = {}
+        for entry in entries:
+            bucket = by_level.setdefault(
+                int(entry.level), {"entries": 0, "content_chars": 0},
+            )
+            bucket["entries"] += 1
+            bucket["content_chars"] += len(entry.content or "")
+
+        content_chars = sum(len(e.content or "") for e in entries)
+        return {
+            "budget": budget,
+            "budget_source": budget_source,
+            # 予算 0 以下は予算制そのものが切れ、件数 (max_entries) が効く。
+            # 本番も同じ分岐なので、どちらで測ったかを申告する。
+            "budget_mode": "char_budget" if budget > 0 else "count_based",
+            "total_entries": len(entries),
+            "content_chars": content_chars,
+            "formatted_chars": len(formatted),
+            # 予算は本文字数に対して効く (整形の飾りは予算の外)。
+            "over_budget": bool(budget > 0 and content_chars > budget),
+            "by_level": by_level,
+            # 除外を渡していないことを応答自身が明言する (上の docstring 参照)。
+            "excludes_presented_digests": False,
+            "visible_entries": [
+                {
+                    "id": e.source_id,
+                    "level": int(e.level),
+                    "start_time": e.start_time,
+                    "end_time": e.end_time,
+                    "content_chars": len(e.content or ""),
+                }
+                for e in entries
+            ],
+            "error": None,
+        }
+    except Exception as exc:
+        LOGGER.warning(
+            "[diagnosis] band simulation failed for %s", persona_id, exc_info=True,
+        )
+        return {"error": str(exc)}
+
+
 @router.get("/{persona_id}/arasuji/diagnosis")
 def get_chronicle_diagnosis(persona_id: str, manager=Depends(get_manager)):
     """Get diagnostic information about Chronicle structure (no message content)."""
@@ -293,6 +429,27 @@ def get_chronicle_diagnosis(persona_id: str, manager=Depends(get_manager)):
             "WHERE level = 1 AND source_count != json_array_length(source_ids_json)"
         )
         lv1_mismatched_entries = cur.fetchone()[0] or 0
+
+        # --- レベル別の本文文字数 (2026-09-01) ---
+        # 帯 (weave の Chronicle 部分) が予算を超えて膨らむ容疑は 2 つ:
+        #   (1) 一件あたりのあらすじ本文が長い  → ここの avg/max が答える
+        #   (2) 重複 source_ids が走査の重なり管理を壊して件数が膨らむ
+        #       → lv1_duplicate_source_ids と下の帯シミュレーションの件数が答える
+        # どちらかを切り分けるための材料で、判断はしない (診断は読むだけ)。
+        content_chars_by_level: Dict[int, dict] = {}
+        cur = conn.execute(
+            "SELECT level, COUNT(*), SUM(LENGTH(content)), AVG(LENGTH(content)), "
+            "MAX(LENGTH(content)), MIN(LENGTH(content)) "
+            "FROM arasuji_entries GROUP BY level ORDER BY level"
+        )
+        for level, count, total_chars, avg_chars, max_chars, min_chars in cur.fetchall():
+            content_chars_by_level[int(level)] = {
+                "entries": int(count or 0),
+                "total_chars": int(total_chars or 0),
+                "avg_chars": round(float(avg_chars or 0), 1),
+                "max_chars": int(max_chars or 0),
+                "min_chars": int(min_chars or 0),
+            }
 
         # --- Stelis 除外後の統計 ---
         stelis_excluded: Optional[int] = None
@@ -393,6 +550,8 @@ def get_chronicle_diagnosis(persona_id: str, manager=Depends(get_manager)):
         # DB保存の message_count 合計（旧来の値）
         messages_covered_stored = sum(e.message_count for e in lv1_entries)
 
+        band = _simulate_chronicle_band(conn, persona_id, manager)
+
         return {
             "persona_id": persona_id,
             "generated_at": int(time.time()),
@@ -420,6 +579,10 @@ def get_chronicle_diagnosis(persona_id: str, manager=Depends(get_manager)):
             "non_stelis_total_messages": non_stelis_total,
             "non_stelis_after_last_chronicle": non_stelis_after_last,
             "stelis_stats_error": stelis_error,
+            # --- レベル別の本文文字数 (2026-09-01) ---
+            "content_chars_by_level": content_chars_by_level,
+            # --- 帯の実寸 (2026-09-01)。中身は _simulate_chronicle_band の docstring ---
+            "band_simulation": band,
             # --- 詳細 ---
             "level_details": level_details,
             "gaps": gaps,
@@ -856,6 +1019,15 @@ async def regenerate_arasuji_entry(
 # Chronicle Generation (Async Background Job)
 # -----------------------------------------------------------------------------
 
+# head (提示コンテキストの固定部) を組み直せなかったときの添え書き。畳み自体は
+# 成功しているので completed のまま併記する — 救済 (再試行) はしない裁定
+# (2026-09-01 まはー「無理に救済しなくていいが、失敗を知らせることは必要」)。
+_HEAD_REBUILD_WARNING = (
+    "設定の反映（コンテキストの組み直し）に失敗しました。"
+    "次の記憶の整理か、時間経過で自動回復します。"
+)
+
+
 def _run_chronicle_generation(
     job_id: str,
     persona_id: str,
@@ -872,7 +1044,9 @@ def _run_chronicle_generation(
     arasuji_levels.md §13 裁定4 (2026-07-29): 手動生成も範囲規則を自動 (応答後
     Metabolism) と揃える — 「発火 (予算超過) を待たずに今すぐ畳む」だけで、
     畳む範囲は残す量より古い側。実体は :meth:`SessionLifecycle.run_manual_compaction`
-    への委譲で、③記憶の整理 (organize-memory API) と同じ一本の経路に合流する。
+    への委譲。2026-09-01 に同期の organize-memory API を撤去し、ペルソナメニューの
+    「溜まった会話をあらすじにまとめる」もこの背景ジョブへ合流した (手動の畳みは
+    この経路が唯一の入口)。
 
     §16 (2026-08-31): ``mode="repair"`` は被覆補修 —
     :meth:`SessionLifecycle.run_coverage_repair` へ委譲し、止め線より古い
@@ -924,25 +1098,37 @@ def _run_chronicle_generation(
         )
         return
 
-    _update_job(job_id, status="running", message="記憶を畳んでいます...")
+    _update_job(job_id, status="running", message="溜まった会話をあらすじにまとめています...")
     try:
-        status = lifecycle.run_manual_compaction(persona, cancellation_token=token)
+        # head の再構築 (設定トグルの反映) の発火は run_manual_compaction が
+        # 出口で持つ。ここで受け取るのは「組み直せたか」だけ — 組み直せなかった
+        # 場合に画面へ知らせるのがジョブの仕事 (救済はしない)。
+        status, head_rebuilt = lifecycle.run_manual_compaction_checked(
+            persona, cancellation_token=token,
+        )
         # 未埋め込みの Chronicle/ページ/Fragment を全件埋める (ローカル・無料、
-        # organize-memory と同じ独立ステップ)。
+        # 補修モードと同じ独立ステップ)。
         try:
             lifecycle.ensure_recall_embeddings(persona)
         except Exception:
             LOGGER.warning("[Chronicle Gen] embedding maintenance failed", exc_info=True)
 
+        if not head_rebuilt:
+            LOGGER.warning(
+                "[Chronicle Gen] head rebuild not verified (persona=%s status=%s)",
+                persona_id, status,
+            )
+            _update_job(job_id, warning=_HEAD_REBUILD_WARNING)
+
         if status == "ok":
             _update_job(
                 job_id, status="completed",
-                message="整理が完了しました（残す量より古い側を畳みました）",
+                message="あらすじにまとめました（残す量より古い側を畳みました）",
             )
         elif status == "noop":
             _update_job(
                 job_id, status="completed",
-                message="整理できる履歴がまだありません",
+                message="まとめられる会話がまだ溜まっていません",
             )
         elif status == "deferred" and token.is_cancelled():
             _update_job(
@@ -952,24 +1138,24 @@ def _run_chronicle_generation(
         elif status == "deferred":
             _update_job(
                 job_id, status="failed",
-                error="別の整理が同じ範囲を処理中または処理済みです。しばらく待って再実行してください。",
+                error="別のあらすじ処理が同じ範囲を処理中または処理済みです。しばらく待って再実行してください。",
                 error_code="window_claimed",
             )
         elif status == "deferred_sluice_unseen":
             # スルース (採取) と編纂は確定済みで、退場だけが次回へ繰り越された。
-            # claim 競合 (window_claimed) と混ぜると「別の整理が処理中」という
+            # claim 競合 (window_claimed) と混ぜると「別のあらすじ処理が処理中」という
             # 嘘になる (docs/issues/archive/metabolism_deferral_mislabeled_as_window_claim.md 従)。
             # 読めていない範囲は末尾の新着とは限らない (冷えた起点の前進で窓の
             # 頭側が漏れる並びもある) — 文面で「新しい会話」と断定しない。
             _update_job(
                 job_id, status="failed",
-                error="記憶の整理を見送りました（今回の採取で読めていない範囲があったため、畳みは次回の整理で続きから進みます）。",
+                error="あらすじにまとめるのを見送りました（今回の採取で読めていない範囲があったため、畳みは次回のまとめで続きから進みます）。",
                 error_code="sluice_unseen",
             )
         elif status == "disabled":
             _update_job(
                 job_id, status="failed",
-                error="Chronicle生成が無効のため整理できません（ペルソナ設定で「Chronicle 自動生成」を「有効」にしてください）。",
+                error="Chronicle生成が無効のためまとめられません（ペルソナ設定で「Chronicle 自動生成」を「有効」にしてください）。",
                 error_code="chronicle_disabled",
             )
         else:  # "failed" / "unavailable"
@@ -1063,7 +1249,9 @@ def _run_coverage_repair_job(
                 )
                 return
 
-        status, mark_failures = lifecycle.run_coverage_repair(
+        # head の再構築の発火は run_coverage_repair が出口で持つ。ここで受け取る
+        # のは「組み直せたか」だけ (compaction 経路と同型)。
+        status, mark_failures, head_rebuilt = lifecycle.run_coverage_repair_checked(
             persona, event_callback=_progress, cancellation_token=token,
         )
         # 未埋め込みの Chronicle/ページ/Fragment を全件埋める (ローカル・無料、
@@ -1072,6 +1260,13 @@ def _run_coverage_repair_job(
             lifecycle.ensure_recall_embeddings(persona)
         except Exception:
             LOGGER.warning("[Chronicle Repair] embedding maintenance failed", exc_info=True)
+
+        if not head_rebuilt:
+            LOGGER.warning(
+                "[Chronicle Repair] head rebuild not verified (persona=%s status=%s)",
+                getattr(persona, "persona_id", "?"), status,
+            )
+            _update_job(job_id, warning=_HEAD_REBUILD_WARNING)
 
         if status == "ok":
             message = "あらすじになっていなかった過去の会話を編纂しました"
@@ -1092,7 +1287,7 @@ def _run_coverage_repair_job(
         elif status == "deferred":
             _update_job(
                 job_id, status="failed",
-                error="別の整理が同じ範囲を処理中または処理済みです。しばらく待って再実行してください。",
+                error="別のあらすじ処理が同じ範囲を処理中または処理済みです。しばらく待って再実行してください。",
                 error_code="window_claimed",
             )
         elif status == "disabled":
@@ -1201,6 +1396,58 @@ async def cancel_arasuji_generation(
     return {"cancelled": True}
 
 
+def _job_status_response(job_id: str, job: dict) -> GenerationJobStatus:
+    """ジョブ台帳の 1 行を API の応答形へ写す。"""
+    return GenerationJobStatus(
+        job_id=job_id,
+        status=job.get("status", "unknown"),
+        progress=job.get("progress"),
+        total=job.get("total"),
+        message=job.get("message"),
+        entries_created=job.get("entries_created"),
+        warning=job.get("warning"),
+        error=job.get("error"),
+        error_code=job.get("error_code"),
+        error_detail=job.get("error_detail"),
+        error_meta=job.get("error_meta"),
+    )
+
+
+# 「進捗はあらすじタブで確認できます」の案内を成立させるための再接続口。
+# ジョブ ID は開始した画面の state にしか無いので、モーダルを閉じたり、
+# ペルソナメニューから開始したりすると走行中ジョブへの手掛かりが消える
+# (画面に書いた案内は契約 — 案内先で必ず見えなければならない)。
+@router.get(
+    "/{persona_id}/arasuji/generate/latest",
+    response_model=Optional[GenerationJobStatus],
+    tags=["Chronicle"],
+)
+async def get_latest_arasuji_generation(persona_id: str):
+    """このペルソナの最新の生成ジョブ (走行中・終了済みを問わず) を返す。
+
+    ジョブが 1 件も無ければ 404 ではなく ``null`` を返す — 「まだ何も走らせて
+    いない」は正常な現況であって、引き当てられなかったエラーではない
+    (job_id 指定の取得と違う性質)。
+
+    台帳はプロセス内メモリなので、再起動を跨ぐと ``null`` に戻る。それでよい:
+    走行中だったジョブもプロセスと一緒に消えているので、「ジョブなし」が
+    その時点の正しい現況になる。
+
+    ⚠️ ルート登録順が意味を持つ — ``/{job_id}`` より**前**に置くこと。後に
+    置くと "latest" が job_id として食われる。
+    """
+    with _jobs_lock:
+        candidates = [
+            (job_id, job) for job_id, job in _generation_jobs.items()
+            if job.get("persona_id") == persona_id
+        ]
+        if not candidates:
+            return None
+        job_id, job = max(candidates, key=lambda item: item[1].get("created_at", 0))
+        job = job.copy()
+    return _job_status_response(job_id, job)
+
+
 @router.get("/{persona_id}/arasuji/generate/{job_id}", response_model=GenerationJobStatus, tags=["Chronicle"])
 async def get_arasuji_generation_status(
     persona_id: str,
@@ -1211,19 +1458,8 @@ async def get_arasuji_generation_status(
     job = _get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
-    
+
     if job.get("persona_id") != persona_id:
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found for persona {persona_id}")
-    
-    return GenerationJobStatus(
-        job_id=job_id,
-        status=job.get("status", "unknown"),
-        progress=job.get("progress"),
-        total=job.get("total"),
-        message=job.get("message"),
-        entries_created=job.get("entries_created"),
-        error=job.get("error"),
-        error_code=job.get("error_code"),
-        error_detail=job.get("error_detail"),
-        error_meta=job.get("error_meta"),
-    )
+
+    return _job_status_response(job_id, job)

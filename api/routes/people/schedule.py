@@ -8,6 +8,7 @@ from .models import ScheduleItem, CreateScheduleRequest, UpdateScheduleRequest
 from sqlalchemy import func
 
 from database.models import PersonaSchedule, AI as AIModel, City as CityModel
+from saiverse.schedule_manager import DEFAULT_META_PLAYBOOK
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
@@ -106,7 +107,10 @@ def create_schedule(
         new_schedule = PersonaSchedule(
             PERSONA_ID=persona_id,
             SCHEDULE_TYPE=req.schedule_type,
-            META_PLAYBOOK=req.meta_playbook,
+            # 未指定 / 空白のみは既定 Playbook へ。META_PLAYBOOK が空や "   " の
+            # まま入ると発火時に Playbook を引けず、作成は通ったのに鳴らない
+            # アラームになる。前後の空白も落としてから保存する。
+            META_PLAYBOOK=((req.meta_playbook or "").strip() or DEFAULT_META_PLAYBOOK),
             DESCRIPTION=req.description,
             PRIORITY=req.priority,
             ENABLED=req.enabled,
@@ -221,8 +225,13 @@ def update_schedule(
         # Update basic fields if provided
         if req.schedule_type is not None:
             schedule.SCHEDULE_TYPE = req.schedule_type
-        if req.meta_playbook is not None:
-            schedule.META_PLAYBOOK = req.meta_playbook
+        # 中身のある値が来たときだけ上書きする。送られてこなければ既存の
+        # Playbook をそのまま保つ — アラーム管理 UI はこれを使って、ライフ設定が
+        # 登録した起床・就寝のアラームを編集しても Playbook が化けないように
+        # している。空文字と空白のみも「指定なし」扱い (書き込むと鳴らなくなる)。
+        meta_playbook_in = (req.meta_playbook or "").strip()
+        if meta_playbook_in:
+            schedule.META_PLAYBOOK = meta_playbook_in
         if req.description is not None:
             schedule.DESCRIPTION = req.description
         if req.priority is not None:

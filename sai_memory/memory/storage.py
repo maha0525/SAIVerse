@@ -111,7 +111,15 @@ def init_db(db_path: str, *, check_same_thread: bool = True) -> sqlite3.Connecti
     #   * 'committed' = persisted, included in next prompt construction.
     #   * 'discardable' = meta-judgment branch turn; excluded on continue, promoted
     #     to 'committed' on switch (kept as the next Track's leading rationale).
-    #   * 'volatile' = Pulse-scoped temp; deleted at Pulse completion.
+    #   * 'volatile' = Pulse-scoped temp (work-session raw log). **Rows are
+    #     kept, not deleted** — nothing in the codebase deletes by scope, and
+    #     the only DELETE on messages is delete_thread (by thread_id). What
+    #     "volatile" buys is exclusion from the SELECTs: prompt construction
+    #     and Chronicle eligibility (chronicle_eligibility_filter) take
+    #     committed rows only, so these stay on disk and out of the persona's
+    #     context. (2026-09-01: this line used to say "deleted at Pulse
+    #     completion"; no deletion path matching that description exists in
+    #     the current tree — every DELETE on messages goes by id or thread_id.)
     # - paired_action_text: For assistant messages, holds the LLM node's action
     #   prompt (= action template). Replaces the v0.10 pattern of storing the
     #   action text as a standalone user message (handoff route C).

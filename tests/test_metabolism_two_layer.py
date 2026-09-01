@@ -504,8 +504,7 @@ class RetirementGateTest(unittest.TestCase):
         #   anchor が飲み込んで m3 へ進む。
         messages = [_msg(f"m{i}", 100 + i, chars=1_000) for i in range(5)]
         window = _window(messages)
-        with patch.dict(os.environ, {"ENABLE_MEMORY_WEAVE_CONTEXT": "true"}), \
-                patch.dict(os.environ, {"SAIVERSE_SLUICE_ENABLED": "0"}), \
+        with patch.dict(os.environ, {"SAIVERSE_SLUICE_ENABLED": "0"}), \
                 patch.dict(os.environ, {"SAIVERSE_CHRONICLE_BAND_BUDGET": "2500"}), \
                 patch("saiverse.dynamic_state.DynamicStateManager.on_metabolism",
                       lambda *a, **k: None):
@@ -626,8 +625,7 @@ class EpisodeUnitEvictionTest(unittest.TestCase):
 
     def _run(self, lifecycle, messages, watermarks, *, band_budget=2_000):
         window = _window(messages)
-        with patch.dict(os.environ, {"ENABLE_MEMORY_WEAVE_CONTEXT": "true"}), \
-                patch.dict(os.environ, {"SAIVERSE_SLUICE_ENABLED": "0"}), \
+        with patch.dict(os.environ, {"SAIVERSE_SLUICE_ENABLED": "0"}), \
                 patch.dict(os.environ,
                            {"SAIVERSE_CHRONICLE_BAND_BUDGET": str(band_budget)}), \
                 patch("saiverse.dynamic_state.DynamicStateManager.on_metabolism",
@@ -740,8 +738,7 @@ class EpisodeUnitEvictionTest(unittest.TestCase):
         lifecycle = self._make_lifecycle("ok")
         saved = []
         lifecycle.save_folded_ranges = lambda pid, mk, folds: saved.append(folds)
-        with patch.dict(os.environ, {"ENABLE_MEMORY_WEAVE_CONTEXT": "true"}), \
-                patch.dict(os.environ, {"SAIVERSE_SLUICE_ENABLED": "0"}), \
+        with patch.dict(os.environ, {"SAIVERSE_SLUICE_ENABLED": "0"}), \
                 patch.dict(os.environ, {"SAIVERSE_CHRONICLE_BAND_BUDGET": "2000"}), \
                 patch("saiverse.dynamic_state.DynamicStateManager.on_metabolism",
                       lambda *a, **k: None):
@@ -854,8 +851,7 @@ class ApplierVetoDeadlockTest(unittest.TestCase):
 
     def _run(self, lifecycle, messages, watermarks, *, window=None):
         window = window or _window(messages)
-        with patch.dict(os.environ, {"ENABLE_MEMORY_WEAVE_CONTEXT": "true"}), \
-                patch.dict(os.environ, {"SAIVERSE_SLUICE_ENABLED": "0"}), \
+        with patch.dict(os.environ, {"SAIVERSE_SLUICE_ENABLED": "0"}), \
                 patch.dict(os.environ, {"SAIVERSE_CHRONICLE_BAND_BUDGET": "2000"}), \
                 patch("saiverse.dynamic_state.DynamicStateManager.on_metabolism",
                       lambda *a, **k: None):
@@ -1205,7 +1201,6 @@ class MetabolismVisualizationDispatchTest(unittest.TestCase):
         with patch.dict(os.environ, {
             "SAIVERSE_SLUICE_ENABLED": "0",
             "SAIVERSE_CHRONICLE_BAND_BUDGET": "2500",
-            "ENABLE_MEMORY_WEAVE_CONTEXT": "true",
         }), patch("sea.session_lifecycle.compile_groups_from_folds", _spy), \
                 patch("saiverse.dynamic_state.DynamicStateManager.on_metabolism",
                       lambda p, m, model_key=None: None):
@@ -1336,9 +1331,8 @@ class ExtractionBacklogRecoveryPointTest(unittest.TestCase):
         lifecycle.ensure_recall_embeddings = lambda p: None
 
         seen = []
-        with patch.dict(os.environ, {"ENABLE_MEMORY_WEAVE_CONTEXT": "true"}), \
-                patch("saiverse.memory_weave_llm.resolve_memory_weave_config",
-                      return_value=("mock-model", {"provider": "mock"}, "test")), \
+        with patch("saiverse.memory_weave_llm.resolve_memory_weave_config",
+                   return_value=("mock-model", {"provider": "mock"}, "test")), \
                 patch("saiverse.memory_weave_llm.build_memory_weave_client",
                       return_value=SimpleNamespace()), \
                 patch("sai_memory.memory.entity_extractor.make_batch_callback",
@@ -1378,9 +1372,8 @@ class ExtractionBacklogRecoveryPointTest(unittest.TestCase):
         persona._current_pulse_type = "user"  # Pulse 外に残った値のつもり
 
         built = []
-        with patch.dict(os.environ, {"ENABLE_MEMORY_WEAVE_CONTEXT": "true"}), \
-                patch("saiverse.memory_weave_llm.build_memory_weave_client",
-                      side_effect=lambda *a, **k: built.append(a) or SimpleNamespace()):
+        with patch("saiverse.memory_weave_llm.build_memory_weave_client",
+                   side_effect=lambda *a, **k: built.append(a) or SimpleNamespace()):
             lifecycle.run_metabolism(
                 persona, "b", _window([]),
                 Watermarks(low=2_000, target=2_000, high=4_000), None,
@@ -1402,9 +1395,8 @@ class ExtractionBacklogRecoveryPointTest(unittest.TestCase):
         lifecycle.ensure_recall_embeddings = lambda p: None
 
         built = []
-        with patch.dict(os.environ, {"ENABLE_MEMORY_WEAVE_CONTEXT": "true"}), \
-                patch("saiverse.memory_weave_llm.build_memory_weave_client",
-                      side_effect=lambda *a, **k: built.append(a) or SimpleNamespace()):
+        with patch("saiverse.memory_weave_llm.build_memory_weave_client",
+                   side_effect=lambda *a, **k: built.append(a) or SimpleNamespace()):
             lifecycle.run_metabolism(
                 self._persona(), "b", _window([]),
                 Watermarks(low=2_000, target=2_000, high=4_000), None,

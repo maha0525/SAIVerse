@@ -174,11 +174,10 @@ class MergeConsumedPerceptionsTest(unittest.TestCase):
                 is_chronicle_enabled_for_persona=lambda p: False,
             ),
         )
-        with patch.dict(os.environ, {"ENABLE_MEMORY_WEAVE_CONTEXT": "true"}):
-            merged = self._merge(
-                [_row("窓の最古", 1000), _row("終了", 2000)],
-                runtime=disabled_runtime,
-            )
+        merged = self._merge(
+            [_row("窓の最古", 1000), _row("終了", 2000)],
+            runtime=disabled_runtime,
+        )
         joined = str(merged)
         self.assertNotIn("窓より古い知覚", joined)
         self.assertIn("窓の中の知覚", joined)
@@ -263,10 +262,9 @@ class MergeConsumedPerceptionsTest(unittest.TestCase):
                 is_chronicle_enabled_for_persona=lambda p: False,
             ),
         )
-        with patch.dict(os.environ, {"ENABLE_MEMORY_WEAVE_CONTEXT": "true"}):
-            merged = _merge_consumed_perceptions(
-                disabled_runtime, self.persona, [], anchor_id=anchor_id,
-            )
+        merged = _merge_consumed_perceptions(
+            disabled_runtime, self.persona, [], anchor_id=anchor_id,
+        )
         joined = str(merged)
         self.assertNotIn("anchor より古いバッチ", joined)
         self.assertIn("anchor より新しいバッチ", joined)
@@ -301,10 +299,9 @@ class MergeConsumedPerceptionsTest(unittest.TestCase):
                 is_chronicle_enabled_for_persona=lambda p: False,
             ),
         )
-        with patch.dict(os.environ, {"ENABLE_MEMORY_WEAVE_CONTEXT": "true"}):
-            merged = _merge_consumed_perceptions(
-                disabled_runtime, self.persona, [], anchor_id="m2",
-            )
+        merged = _merge_consumed_perceptions(
+            disabled_runtime, self.persona, [], anchor_id="m2",
+        )
         joined = str(merged)
         self.assertNotIn("anchor 直前のバッチ", joined)
         self.assertIn("anchor 直後のバッチ", joined)
@@ -320,10 +317,9 @@ class MergeConsumedPerceptionsTest(unittest.TestCase):
                 is_chronicle_enabled_for_persona=lambda p: False,
             ),
         )
-        with patch.dict(os.environ, {"ENABLE_MEMORY_WEAVE_CONTEXT": "true"}):
-            merged = _merge_consumed_perceptions(
-                disabled_runtime, self.persona, [], anchor_id=None,
-            )
+        merged = _merge_consumed_perceptions(
+            disabled_runtime, self.persona, [], anchor_id=None,
+        )
         self.assertIn("ブートストラップ期のバッチ", str(merged))
 
 

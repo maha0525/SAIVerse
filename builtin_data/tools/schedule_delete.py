@@ -1,7 +1,10 @@
 """
-スケジュール削除ツール
+アラーム削除ツール
 
-ペルソナが自分のスケジュールを削除できる。
+ペルソナが自分のアラームを削除できる。
+
+ファイル名・関数名の ``schedule`` は互換のため残している (機能名としては
+「アラーム」に改名済み)。ユーザーと LLM に見える文言だけを「アラーム」に揃える。
 """
 
 import logging
@@ -16,11 +19,11 @@ LOGGER = logging.getLogger(__name__)
 
 def schedule_delete(schedule_id: int) -> str:
     """
-    指定されたIDのスケジュールを削除する。
-    自分のスケジュールのみ削除可能。
+    指定されたIDのアラームを削除する。
+    自分のアラームのみ削除可能。
 
     Args:
-        schedule_id: 削除するスケジュールのID
+        schedule_id: 削除するアラームのID
 
     Returns:
         str: 実行結果メッセージ
@@ -48,9 +51,9 @@ def schedule_delete(schedule_id: int) -> str:
         )
 
         if not schedule:
-            return f"エラー: スケジュールID {schedule_id} が見つかりません。または、他のペルソナのスケジュールです。"
+            return f"エラー: アラームID {schedule_id} が見つかりません。または、他のペルソナのアラームです。"
 
-        # スケジュール情報を保存（削除前に）
+        # アラーム情報を保存（削除前に）
         schedule_type = schedule.SCHEDULE_TYPE
         description = schedule.DESCRIPTION or "(説明なし)"
 
@@ -65,11 +68,11 @@ def schedule_delete(schedule_id: int) -> str:
             schedule_type,
         )
 
-        return f"✓ スケジュールを削除しました (ID: {schedule_id}, タイプ: {schedule_type}, 説明: {description})"
+        return f"✓ アラームを削除しました (ID: {schedule_id}, 種別: {schedule_type}, 説明: {description})"
 
     except Exception as e:
         LOGGER.error("Failed to delete schedule: %s", e, exc_info=True)
-        return f"エラー: スケジュールの削除に失敗しました。{e}"
+        return f"エラー: アラームの削除に失敗しました。{e}"
     finally:
         session.close()
 
@@ -77,13 +80,13 @@ def schedule_delete(schedule_id: int) -> str:
 def schema() -> ToolSchema:
     return ToolSchema(
         name="schedule_delete",
-        description="指定されたIDのスケジュールを削除する。自分のスケジュールのみ削除できる。",
+        description="指定されたIDのアラームを削除する。自分のアラームのみ削除できる。",
         parameters={
             "type": "object",
             "properties": {
                 "schedule_id": {
                     "type": "integer",
-                    "description": "削除するスケジュールのID。schedule_listで確認できる。",
+                    "description": "削除するアラームのID。schedule_listで確認できる。",
                 },
             },
             "required": ["schedule_id"],

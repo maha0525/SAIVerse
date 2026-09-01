@@ -28,6 +28,10 @@
 head 常駐だが出番の稀な候補 — `life_purpose_set`（一生に一度）/ `observer_read`（Observer 建物限定）/
 `messagelog_get_around`（ニッチ）/ `send_email_to_user`（SMTP 前提）。
 
+なお `observer_read` は 2026-09-01 の裁定で `spell_visible=False` になっている（オブザーバー機能が
+未出荷のため、本 issue の頻度の話とは別の理由）。同じ裁定で `tell` も非表示にした。どちらも遅延開示の
+口はまだ無いので、本線の「遅延開示を builtin にも」は残ったまま。
+
 **関連の積み残し（別 issue 化候補）**: `document_read` / `document_search` は依然として系統A（アクセス制御なし・
 item ref 未解決）。読み取り専用で低リスクだが、`document_edit` と挙動が非対称。統合の完遂には要修正。
 

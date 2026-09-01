@@ -1166,6 +1166,7 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                 "MEMORY_WEAVE_CONTEXT": ai.MEMORY_WEAVE_CONTEXT,
                 "MEMOPEDIA_INDEX_ENABLED": ai.MEMOPEDIA_INDEX_ENABLED,
                 "CORE_MEMORY_CHAR_BUDGET": ai.CORE_MEMORY_CHAR_BUDGET,
+                "CHRONICLE_CHAR_BUDGET": ai.CHRONICLE_CHAR_BUDGET,
                 "SPELL_ENABLED": ai.SPELL_ENABLED,
                 "REALTIME_INFO_ENABLED": ai.REALTIME_INFO_ENABLED,
                 "META_JUDGMENT_CONFIG": ai.META_JUDGMENT_CONFIG,
@@ -1219,6 +1220,7 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
         memory_weave_context: Optional[bool] = None,
         memopedia_index_enabled: Optional[bool] = None,
         core_memory_char_budget: Optional[int] = None,
+        chronicle_char_budget: Optional[int] = None,
         spell_enabled: Optional[bool] = None,
         realtime_info_enabled: Optional[bool] = None,
         meta_judgment_config: Optional[Dict[str, Any]] = None,
@@ -1292,6 +1294,13 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                     ai.CORE_MEMORY_CHAR_BUDGET = int(core_memory_char_budget)
                 else:
                     ai.CORE_MEMORY_CHAR_BUDGET = None
+            # Update Chronicle 帯の読み込み文字数 (2026-09-01)。コア記憶と同じ流儀で
+            # 0 / 負値は NULL に倒し、既定 (env → 20,000 字) の運用へ戻す。
+            if chronicle_char_budget is not None:
+                if chronicle_char_budget > 0:
+                    ai.CHRONICLE_CHAR_BUDGET = int(chronicle_char_budget)
+                else:
+                    ai.CHRONICLE_CHAR_BUDGET = None
             # Update Spell system toggle
             if spell_enabled is not None:
                 ai.SPELL_ENABLED = spell_enabled

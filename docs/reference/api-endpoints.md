@@ -5,7 +5,7 @@
 
 REST API 全エンドポイントの一覧（自動生成）。すべて `/api` 配下にマウントされる。
 
-**エンドポイント数**: 348（tag グループ: 25）
+**エンドポイント数**: 350（tag グループ: 25）
 
 ## addon
 
@@ -115,6 +115,8 @@ REST API 全エンドポイントの一覧（自動生成）。すべて `/api` 
 | POST | `/api/config/developer-mode` | Set developer mode status. |
 | GET | `/api/config/favorite-models` | Get user's favorite model IDs. |
 | POST | `/api/config/favorite-models` | Set user's favorite model IDs. |
+| GET | `/api/config/gemini-auto-cache` | Get the Gemini auto-cache switch and how long a cache is kept after the reply. |
+| POST | `/api/config/gemini-auto-cache` | Toggle Gemini auto-cache and persist to .env. |
 | GET | `/api/config/image-default-quality` | Get default image generation quality setting. |
 | POST | `/api/config/image-default-quality` | Set default image generation quality and persist to .env. |
 | GET | `/api/config/max-image-embeds` | Get current max image embeds setting. |
@@ -231,7 +233,7 @@ REST API 全エンドポイントの一覧（自動生成）。すべて `/api` 
 | GET | `/api/people` | Return all registered personas (AI rows). |
 | GET | `/api/people/` | Return all registered personas (AI rows). |
 | POST | `/api/people/dismiss/{persona_id}` | Dismiss a persona (send back to private room). |
-| GET | `/api/people/meta_playbooks` | List user-selectable meta playbooks for schedule / summon dialogs. |
+| GET | `/api/people/meta_playbooks` | List user-selectable meta playbooks for the summon dialog. |
 | GET | `/api/people/realtime-spell-catalog` | リアルタイムスペルとして設定可能なスペル一覧とスキーマを返す。 |
 | GET | `/api/people/spells` | List Spells available for schedule / pre_spells UI selection. |
 | POST | `/api/people/summon/{persona_id}` | Summon a persona to the target building. |
@@ -241,6 +243,7 @@ REST API 全エンドポイントの一覧（自動生成）。すべて `/api` 
 | GET | `/api/people/{persona_id}/arasuji/cost-estimate` | Estimate the cost of generating Chronicle for unprocessed messages. |
 | GET | `/api/people/{persona_id}/arasuji/diagnosis` | Get diagnostic information about Chronicle structure (no message content). |
 | POST | `/api/people/{persona_id}/arasuji/generate` | Start Chronicle generation as a background job. |
+| GET | `/api/people/{persona_id}/arasuji/generate/latest` | このペルソナの最新の生成ジョブ (走行中・終了済みを問わず) を返す。 |
 | GET | `/api/people/{persona_id}/arasuji/generate/{job_id}` | Get the status of a Chronicle generation job. |
 | POST | `/api/people/{persona_id}/arasuji/generate/{job_id}/cancel` | Cancel a running Chronicle generation job. |
 | POST | `/api/people/{persona_id}/arasuji/messages-by-ids` | Get messages by their IDs (for error investigation). |
@@ -309,7 +312,6 @@ REST API 全エンドポイントの一覧（自動生成）。すべて `/api` 
 | DELETE | `/api/people/{persona_id}/messages/{message_id}` | Delete a message. |
 | POST | `/api/people/{persona_id}/meta-judgment/bulk-delete` | Delete multiple meta_judgment_log rows in one request. |
 | DELETE | `/api/people/{persona_id}/meta-judgment/{judgment_id}` | Delete a single meta_judgment_log row owned by ``persona_id``. |
-| POST | `/api/people/{persona_id}/organize-memory` | 手動の記憶整理 — 残す量より古い側を今すぐあらすじに畳む。 |
 | GET | `/api/people/{persona_id}/pocketbook` | 手帳を読む — アクティビティごとにメモを日付降順で束ねて返す。 |
 | GET | `/api/people/{persona_id}/pulse-logs` | List pulse_id summaries with pagination (newest first). |
 | GET | `/api/people/{persona_id}/pulse-logs/{pulse_id}` | Get all log entries for a specific pulse. |

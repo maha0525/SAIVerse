@@ -56,24 +56,24 @@ export default function PersonaMenu({ isOpen, onClose, personaId, personaName, a
         }
     };
 
+    // 「溜まった会話をあらすじにまとめる」— あらすじタブの生成ボタンと同じ背景
+    // ジョブ (mode 既定 = compaction) を開始する。旧 organize-memory API は同期で
+    // 畳み全体を待つ作りで、長走行するとフロントが先に切れて「通信に失敗」の誤報を
+    // 出していたため 2026-09-01 に撤去した。
+    // 結果はここでは追わない — ジョブの進捗・完了・エラー案内は記憶モーダルの
+    // 「あらすじ」タブ (ArasujiViewer) がポーリングして表示する。
     const handleOrganizeMemory = async () => {
-        if (!confirm(`${personaName}の記憶を整理しますか？\n古い会話履歴があらすじ（Chronicle）に畳まれます。直近の会話はそのまま残ります。`)) return;
+        if (!confirm(`${personaName}の溜まった会話をあらすじにまとめますか？\n古い側の会話があらすじ（Chronicle）に畳まれ、長期記憶になります。直近の会話はそのまま残ります。`)) return;
 
         setOrganizing(true);
         try {
-            const res = await fetch(`/api/people/${personaId}/organize-memory`, { method: 'POST' });
+            const res = await fetch(`/api/people/${personaId}/arasuji/generate`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({}),
+            });
             if (res.ok) {
-                const data = await res.json();
-                const messages: Record<string, string> = {
-                    ok: '記憶の整理が完了しました',
-                    noop: '整理できる履歴がまだありません',
-                    failed: '記憶の整理に失敗しました（あらすじ生成が完了しませんでした）。もう一度実行すると再試行できます。',
-                    deferred: '別の整理が同じ範囲を処理中または処理済みです。しばらく待って再実行してください。',
-                    deferred_sluice_unseen: '記憶の整理を見送りました（今回の採取で読めていない範囲があったため、畳みは次回の整理で続きから進みます）。',
-                    disabled: 'Chronicle生成が無効のため整理できません（ペルソナ設定で「Chronicle 自動生成」を「有効」にしてください）',
-                    unavailable: '整理できる状態ではありません（会話履歴がまだ無い可能性があります）',
-                };
-                alert(messages[data.compaction] ?? '記憶の整理の結果が不明です');
+                alert('溜まった会話をあらすじにまとめ始めました。進捗は記憶モーダルの「あらすじ」タブで確認できます。');
             } else {
                 const err = await res.json();
                 alert(`失敗: ${err.detail}`);
@@ -160,8 +160,7 @@ export default function PersonaMenu({ isOpen, onClose, personaId, personaName, a
                     <button className={styles.actionBtn} onClick={handleOrganizeMemory} disabled={organizing}>
                         {organizing ? <RefreshCw className={styles.spin} size={20} /> : <Sparkles size={20} />}
                         <div className={styles.label}>
-                            <span>Organize Memory</span>
-                            <span className={styles.subtext}>記憶を整理</span>
+                            <span>溜まった会話をあらすじにまとめる</span>
                         </div>
                     </button>
 

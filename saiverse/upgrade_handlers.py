@@ -674,6 +674,42 @@ def _v0_3_0_dev6_playbook_wholesale_replacement(*, session: "Session", city) -> 
     replace_all_playbooks(session)
 
 
+# ---- v0.3.1: MEMOPEDIA_INDEX_ENABLED デフォルト ON 化 ----
+
+
+def _v0_3_1_memopedia_index_default_on(*, session: "Session", ai: "AI") -> None:
+    """Memopedia 索引の常時表示 (``AI.MEMOPEDIA_INDEX_ENABLED``) を既存ペルソナで
+    ON に引き上げる。
+
+    背景: 記憶アーキv2 §7.1 で head への Memopedia 全ページ一覧の常時掲示を
+    廃止し、自動想起 (ゾーンC) + 深掘りスペルへ一本化した際、本トグルは
+    「メモ帳として Memopedia を能動的に使うユーザー向けの脱出経路」として
+    デフォルト OFF で置かれた。しかし自動想起はまだ索引の常時表示を置き換え
+    られる完成度に達していないため、2026-09-01 のまはー裁定でデフォルト ON へ
+    戻した。v0.3.1 でカラムデフォルトを True に変更したが、既存 DB の行には
+    既に False が保存済みで、スキーマ差分が出ないため ``database/migrate.py``
+    のどの経路でも書き換わらない。そこでバージョン認識アップグレードで既存
+    ペルソナを一括 ON にする (dev3 の SPELL_ENABLED と同じ状況・同じ対処)。
+
+    OFF を明示選択したペルソナと「触っていないだけの OFF」を DB 上で区別
+    できないため、本ハンドラは一律 True にする (= 移行時点の初期値を ON に
+    揃える)。OFF に戻したいユーザーは設定 UI から個別に戻せる。
+
+    冪等性: True を代入するだけなので何度走らせても同じ状態に収束する。
+    Phase 1 の機構により、通常は 0.3.0→0.3.1 の遷移で1度だけ走る。
+
+    副作用の局所化: ``ai`` 単体を触るだけで他ペルソナには影響しない。
+    """
+    persona_id = ai.AIID
+    old_value = bool(ai.MEMOPEDIA_INDEX_ENABLED)
+    ai.MEMOPEDIA_INDEX_ENABLED = True
+    LOGGER.info(
+        "[handler:v0_3_1_memopedia_index_default_on] persona=%s: "
+        "MEMOPEDIA_INDEX_ENABLED %s -> True",
+        persona_id, old_value,
+    )
+
+
 HANDLERS: List[UpgradeHandler] = [
     UpgradeHandler(
         name="city_noop_v0_3_0_dev0",
@@ -860,5 +896,28 @@ HANDLERS: List[UpgradeHandler] = [
         to_version="0.3.0",
         run=_no_op_ai_upgrade,
         description="Empty release edge dev6 -> 0.3.0 (no data migration).",
+    ),
+    # ---- v0.3.1: Memopedia 索引の常時表示をデフォルト ON へ (2026-09-01) ----
+    UpgradeHandler(
+        name="city_noop_v0_3_1",
+        scope="city",
+        from_version="0.3.0",
+        to_version="0.3.1",
+        run=_no_op_city_upgrade,
+        description="Explicit no-op City edge for v0.3.1 (persona-scope change only).",
+    ),
+    UpgradeHandler(
+        name="v0_3_1_memopedia_index_default_on",
+        scope="ai",
+        from_version="0.3.0",
+        to_version="0.3.1",
+        run=_v0_3_1_memopedia_index_default_on,
+        description=(
+            "Enable AI.MEMOPEDIA_INDEX_ENABLED for all existing personas. Auto "
+            "recall cannot yet replace the always-on Memopedia index, so the "
+            "column default flips to True in v0.3.1; existing rows already hold "
+            "False and produce no schema diff, so this handler brings migrated "
+            "personas up to the new ON default."
+        ),
     ),
 ]

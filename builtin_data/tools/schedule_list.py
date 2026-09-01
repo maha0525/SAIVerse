@@ -1,7 +1,10 @@
 """
-スケジュール一覧取得ツール
+アラーム一覧取得ツール
 
-ペルソナが自分のスケジュール一覧を取得できる。
+ペルソナが自分のアラーム一覧を取得できる。
+
+ファイル名・関数名の ``schedule`` は互換のため残している (機能名としては
+「アラーム」に改名済み)。ユーザーと LLM に見える文言だけを「アラーム」に揃える。
 """
 
 import json
@@ -19,10 +22,10 @@ LOGGER = logging.getLogger(__name__)
 
 def schedule_list() -> str:
     """
-    自分のスケジュール一覧を取得する。
+    自分のアラーム一覧を取得する。
 
     Returns:
-        str: スケジュール一覧を整形した文字列
+        str: アラーム一覧を整形した文字列
     """
     manager = get_active_manager()
     if not manager:
@@ -45,7 +48,7 @@ def schedule_list() -> str:
         )
 
         if not schedules:
-            return "現在、登録されているスケジュールはありません。"
+            return "現在、登録されているアラームはありません。"
 
         # ペルソナのタイムゾーンを取得
         persona_model = session.query(AIModel).filter(AIModel.AIID == persona_id).first()
@@ -59,7 +62,7 @@ def schedule_list() -> str:
                 persona_tz = ZoneInfo("UTC")
 
         # スケジュール情報を整形
-        result_lines = [f"【スケジュール一覧】 (全{len(schedules)}件)\n"]
+        result_lines = [f"【アラーム一覧】 (全{len(schedules)}件)\n"]
 
         for i, s in enumerate(schedules, 1):
             status = "✓有効" if s.ENABLED else "✗無効"
@@ -118,9 +121,9 @@ def schedule_list() -> str:
 
             result_lines.append(
                 f"{i}. [ID: {s.SCHEDULE_ID}] {status}{completed}\n"
-                f"   タイプ: {s.SCHEDULE_TYPE}\n"
+                f"   種別: {s.SCHEDULE_TYPE}\n"
                 f"   実行: {detail}\n"
-                f"   プレイブック: {s.META_PLAYBOOK}\n"
+                f"   Playbook: {s.META_PLAYBOOK}\n"
                 f"   パラメータ: {params_str}\n"
                 f"   優先度: {s.PRIORITY}\n"
                 f"   説明: {s.DESCRIPTION or '(なし)'}\n"
@@ -130,7 +133,7 @@ def schedule_list() -> str:
 
     except Exception as e:
         LOGGER.error("Failed to list schedules: %s", e, exc_info=True)
-        return f"エラー: スケジュール一覧の取得に失敗しました。{e}"
+        return f"エラー: アラーム一覧の取得に失敗しました。{e}"
     finally:
         session.close()
 
@@ -138,7 +141,7 @@ def schedule_list() -> str:
 def schema() -> ToolSchema:
     return ToolSchema(
         name="schedule_list",
-        description="自分のスケジュール一覧を取得する。スケジュールIDや設定内容を確認したいときに使う。",
+        description="自分のアラーム一覧を取得する。アラームIDや設定内容を確認したいときに使う。",
         parameters={
             "type": "object",
             "properties": {},

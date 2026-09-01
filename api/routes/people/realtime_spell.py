@@ -11,11 +11,18 @@ router = APIRouter()
 
 @router.get("/realtime-spell-catalog")
 def get_spell_catalog():
-    """リアルタイムスペルとして設定可能なスペル一覧とスキーマを返す。"""
+    """リアルタイムスペルとして設定可能なスペル一覧とスキーマを返す。
+
+    ``spell_visible=False`` のスペルは除外する。非表示のスペルは「実行はできるが
+    一覧には出さない」ものなので、ここに出すとユーザーが選べてしまい、非表示に
+    した判断が UI 側から素通しになる (``/api/people/spells`` と同じ規則)。
+    """
     from tools import SPELL_TOOL_SCHEMAS
 
     catalog = []
     for name, schema in SPELL_TOOL_SCHEMAS.items():
+        if not getattr(schema, "spell_visible", True):
+            continue
         params = schema.parameters or {}
         properties = params.get("properties", {})
         required = params.get("required", [])

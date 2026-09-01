@@ -77,6 +77,8 @@
 | `GEMINI_TIMEOUT_SECONDS` | Gemini タイムアウト（既定 180） |
 | `SAIVERSE_ATTACHMENT_LIMIT` | 添付上限（既定 4） |
 | `SAIVERSE_DISABLE_GEMINI_STREAMING` / `SAIVERSE_DISABLE_GEMINI_SSE_PATCH` | Gemini ストリーミング関連のフォールバック制御（`llm_clients/gemini.py`） |
+| `SAIVERSE_GEMINI_AUTO_CACHE` | Gemini 自動キャッシュ（実験的、既定 `0`）。`1` にすると全ての Gemini 呼び出しで explicit cache を自動作成し、入力トークンをキャッシュ価格にする。UI（グローバル設定 > 環境）からも切替可で、切替は再起動なしで反映される |
+| `SAIVERSE_GEMINI_AUTO_CACHE_KEEP_SECONDS` | 自動キャッシュを応答後に何秒残すか（既定 `0`、範囲 0〜3600）。`0` は応答直後に削除（従来挙動。保険 TTL 300 秒で作成し、削除に失敗しても 5 分で消える）。`1` 以上はその秒数を TTL にして作成し、手動削除せず Gemini 側の失効に任せる（残っているあいだキャッシュ保存料金がかかる）。⚠️ TTL 内でのキャッシュ再利用は未実装のため、現状 `1` 以上は保存料金を払うだけで得がない（[issue](../issues/gemini_auto_cache_no_reuse_within_ttl.md)） |
 
 ## ログ / デバッグ
 

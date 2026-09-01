@@ -156,6 +156,8 @@ class AIConfigResponse(BaseModel):
     memory_weave_context: bool = True
     memopedia_index_enabled: bool = False
     core_memory_char_budget: Optional[int] = None  # 記憶アーキv2 ゾーンA 容量目安 (NULL → 既定 2000)
+    # Chronicle 帯の読み込み文字数 (NULL → env → 既定 20,000)
+    chronicle_char_budget: Optional[int] = None
     spell_enabled: bool = False
     realtime_info_enabled: bool = True
     avatar_path: Optional[str] = None
@@ -184,6 +186,10 @@ class UpdateAIConfigRequest(BaseModel):
     #   None = no change, 0 (or any non-positive) = clear to default (= 2000),
     #   positive int = override.
     core_memory_char_budget: Optional[int] = None
+    # Chronicle 帯の読み込み文字数。意味論はコア記憶と同じ:
+    #   None = no change, 0 (以下) = clear to default (= env → 20,000),
+    #   positive int = override.
+    chronicle_char_budget: Optional[int] = None
     spell_enabled: Optional[bool] = None
     realtime_info_enabled: Optional[bool] = None
     avatar_path: Optional[str] = None
@@ -322,7 +328,10 @@ class ScheduleItem(BaseModel):
 
 class CreateScheduleRequest(BaseModel):
     schedule_type: str # periodic, oneshot, interval
-    meta_playbook: str
+    # 省略可。未指定 / 空文字なら create_schedule が既定 Playbook
+    # (ScheduleManager.DEFAULT_META_PLAYBOOK) へ正規化する。どの Playbook で
+    # 動くかはアラームの作成者に選ばせない (2026-09-01 裁定) ので、UI は送らない。
+    meta_playbook: Optional[str] = None
     description: str = ""
     priority: int = 0
     enabled: bool = True
@@ -488,6 +497,9 @@ class GenerationJobStatus(BaseModel):
     total: Optional[int] = None  # 総処理対象メッセージ数
     message: Optional[str] = None  # ステータスメッセージ
     entries_created: Optional[int] = None  # 作成されたエントリ数
+    # 本体は成功したが付随処理が完了しなかったときの添え書き（ユーザー向け）。
+    # 完了表示に併記する — error と違い、失敗扱いにはしない。
+    warning: Optional[str] = None
     error: Optional[str] = None  # エラーメッセージ（ユーザー向け）
     error_code: Optional[str] = None  # エラーコード (payment, authentication, rate_limit, etc.)
     error_detail: Optional[str] = None  # 技術的詳細（開発者向け）
