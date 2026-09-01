@@ -731,6 +731,49 @@ def _sweep_broken_parents(conn: sqlite3.Connection) -> List[str]:
     return broken
 
 
+def _sweep_dead_message_sources(conn: sqlite3.Connection) -> Dict[str, List[str]]:
+    """Lv1 の source_ids から、消えたメッセージを指す id を落とす。
+
+    :func:`_sweep_broken_parents` の **Lv1 → メッセージ版** (2026-09-01 まはー
+    裁定)。片側だけ受け皿があるのは非対称だった: UI の削除は「上位あらすじ →
+    消えた下位あらすじ」も「Lv1 → 消えたメッセージ」も同じように参照を直さ
+    ないのに、掃除は前者にしか無かった。
+
+    孤児参照そのものは被覆計算に効かないが、吸収の再開検査 (
+    :func:`plan_absorption` の「missing source messages」) を落とす。落ちると
+    その隣の未被覆断片は永久に取り残される (本番で実害)。掃いた後は source が
+    全生存になるので、同じ隣人が次の計画で開き直せる。
+
+    処置は storage.prune_dead_message_sources (LLM ゼロの帳簿補修 — 本文には
+    触らない)。書き換えた Lv1 の親は、子の counts が変わった分だけ帳簿が
+    ずれるので ``mark_stale=False`` で引き直す (手動削除の追随と同じ規則 —
+    本文の語り直しは起こさないので、見積もりの LLM 回数は変わらない)。
+    冪等 — 孤児が無ければ何も書かない。
+    """
+    from sai_memory.arasuji.storage import (
+        prune_dead_message_sources,
+        refresh_ancestor_bookkeeping,
+    )
+
+    removed = prune_dead_message_sources(conn)
+    if not removed:
+        return {}
+    for entry_id, dead_ids in removed.items():
+        LOGGER.info(
+            "[absorption] level-1 entry %s referenced %d deleted message(s); "
+            "dropped from its source_ids and counts re-derived: %s",
+            entry_id[:8], len(dead_ids), ",".join(dead_ids),
+        )
+    parent_ids = []
+    for entry_id in removed:
+        entry = get_entry(conn, entry_id)
+        if entry is not None and entry.parent_id:
+            parent_ids.append(str(entry.parent_id))
+    if parent_ids:
+        refresh_ancestor_bookkeeping(conn, parent_ids, mark_stale=False)
+    return removed
+
+
 # ---------------------------------------------------------------------------
 # 実行
 # ---------------------------------------------------------------------------
@@ -967,6 +1010,9 @@ def run_absorption(
         # crash 残骸や素の delete_entry が残した「死んだ子 id を指す親」を、
         # 走る前に冪等に引き直して flush の対象に載せる。
         _sweep_broken_parents(conn)
+        # 同じ理由 (素の削除が参照を直さない) の Lv1 側 — 消えたメッセージを
+        # 指す source_ids を落として、隣人が再び開けるようにする。
+        _sweep_dead_message_sources(conn)
         pending: Set[str] = set(list_stale_upper_ids(conn))
         no_work = not items and not pending
         if no_work:

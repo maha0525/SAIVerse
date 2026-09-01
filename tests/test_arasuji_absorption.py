@@ -2490,3 +2490,157 @@ class TestEmbeddingCascade:
             "SELECT 1 FROM arasuji_embeddings WHERE entry_id = ?", (entry.id,)
         ).fetchone()
         assert row is None
+
+
+# ---------------------------------------------------------------------------
+# Lv1 → 消えたメッセージの掃除 (2026-09-01 まはー裁定)
+# ---------------------------------------------------------------------------
+
+
+def _meta_json(conn, entry_id):
+    row = conn.execute(
+        "SELECT metadata FROM memopedia_pages WHERE id = ?", (entry_id,)
+    ).fetchone()
+    return row[0]
+
+
+class TestSweepDeadMessageSources:
+    """UI のメッセージ削除が残した孤児 source_ids を掃く (_sweep_broken_parents
+    の Lv1 → メッセージ版)。掃かないと隣人の再開検査が落ち、その隣の未被覆
+    断片が永久に取り残される。"""
+
+    def test_dead_ids_are_dropped_and_counts_re_derived(self, adapter):
+        from sai_memory.arasuji.absorption import _sweep_dead_message_sources
+
+        conn = adapter.conn
+        n1 = _add_message(adapter, 0, 300)
+        n2 = _add_message(adapter, 1, 300)
+        entry = _entry(
+            conn, [n1, "dead-1", n2, "dead-2"], start_min=0, end_min=1,
+        )
+        assert entry.source_count == 4
+
+        removed = _sweep_dead_message_sources(conn)
+
+        assert removed == {entry.id: ["dead-1", "dead-2"]}
+        after = get_entry(conn, entry.id)
+        assert after.source_ids == [n1, n2]
+        assert after.source_count == 2
+        assert after.message_count == 2
+        # 本文と span は帳簿補修の対象外 (保存則 — 編纂は本文を作らない)
+        assert after.content == entry.content
+        assert (after.start_time, after.end_time) == (
+            entry.start_time, entry.end_time,
+        )
+
+    def test_healthy_entries_are_untouched(self, adapter):
+        from sai_memory.arasuji.absorption import _sweep_dead_message_sources
+
+        conn = adapter.conn
+        n1 = _add_message(adapter, 0, 300)
+        n2 = _add_message(adapter, 1, 300)
+        entry = _entry(conn, [n1, n2], start_min=0, end_min=1)
+        before = _meta_json(conn, entry.id)
+
+        assert _sweep_dead_message_sources(conn) == {}
+        assert _meta_json(conn, entry.id) == before
+
+    def test_is_idempotent(self, adapter):
+        from sai_memory.arasuji.absorption import _sweep_dead_message_sources
+
+        conn = adapter.conn
+        n1 = _add_message(adapter, 0, 300)
+        entry = _entry(conn, [n1, "dead-1"], start_min=0, end_min=0)
+
+        assert _sweep_dead_message_sources(conn) == {entry.id: ["dead-1"]}
+        first = _meta_json(conn, entry.id)
+        # 二度目は検出ゼロで何も書かない
+        assert _sweep_dead_message_sources(conn) == {}
+        assert _meta_json(conn, entry.id) == first
+
+    def test_entry_without_surviving_sources_is_left_alone(self, adapter):
+        """生ログが丸ごと消えた Lv1 は触らない — source ゼロにすると何も被覆
+        しない幽霊になり、本文を消せば持ち主の記憶を機構が捨てることになる。"""
+        from sai_memory.arasuji.absorption import _sweep_dead_message_sources
+
+        conn = adapter.conn
+        entry = _entry(conn, ["dead-1", "dead-2"], start_min=0, end_min=1)
+        before = _meta_json(conn, entry.id)
+
+        assert _sweep_dead_message_sources(conn) == {}
+        assert _meta_json(conn, entry.id) == before
+
+    def test_parent_bookkeeping_follows_without_marking_stale(self, adapter):
+        """子の counts が変わった親は引き直す (mark_stale=False — 本文の
+        語り直しは起こさないので見積もりの LLM 回数は動かない)。"""
+        from sai_memory.arasuji.absorption import _sweep_dead_message_sources
+
+        conn = adapter.conn
+        n1 = _add_message(adapter, 0, 300)
+        n2 = _add_message(adapter, 1, 300)
+        child = _entry(conn, [n1, "dead-1", n2], start_min=0, end_min=1)
+        parent = _entry(
+            conn, [child.id], start_min=0, end_min=1, level=2, content="P",
+        )
+        conn.execute(
+            "UPDATE memopedia_pages SET metadata = json_set("
+            "metadata, '$.message_count', 3) WHERE id = ?", (parent.id,),
+        )
+        conn.commit()
+        mark_consolidated(conn, [child.id], parent.id)
+
+        _sweep_dead_message_sources(conn)
+
+        parent_after = get_entry(conn, parent.id)
+        assert parent_after.message_count == 2
+        assert parent_after.content == "P"
+        assert not _is_stale(conn, parent.id)
+
+    def test_neighbor_with_orphans_becomes_absorbable_after_the_sweep(
+        self, adapter,
+    ):
+        """統合: 孤児参照を持つ隣人は開き直しを拒まれ、隣の未被覆断片が取り
+        残される。sweep 後は同じ計画で吸収され、断片が被覆に入る。"""
+        from sai_memory.arasuji.absorption import _sweep_dead_message_sources
+
+        conn = adapter.conn
+        gap = _add_message(adapter, 0, 100)               # 取り残される断片
+        n1 = _add_message(adapter, 10, 300)
+        n2 = _add_message(adapter, 11, 300)
+        entry = _entry(conn, [n1, "dead-1", n2], start_min=10, end_min=11)
+
+        messages, processed, _normal, tiny = _plan(adapter)
+        blocked = plan_absorption(
+            conn, tiny, messages, processed, target_chars=TARGET,
+        )
+        assert blocked.items == []
+        assert blocked.unresolved_runs == 1
+
+        assert _sweep_dead_message_sources(conn) == {entry.id: ["dead-1"]}
+
+        messages, processed, _normal, tiny = _plan(adapter)
+        plan = plan_absorption(
+            conn, tiny, messages, processed, target_chars=TARGET,
+        )
+        assert plan.unresolved_runs == 0
+        assert len(plan.items) == 1
+        assert plan.items[0].run_message_ids == [gap]
+        assert plan.items[0].absorbed_entry_ids == [entry.id]
+
+        result = run_absorption(conn, _Client(), plan)
+        assert len(result.merged_entries) == 1
+        covering = get_entries_covering_messages(conn, [gap, n1, n2])
+        assert [e.id for e in covering] == [result.merged_entries[0].id]
+        assert set(covering[0].source_ids) == {gap, n1, n2}
+
+    def test_run_absorption_sweeps_before_planning_work(self, adapter):
+        """run_absorption 冒頭の保守ブロックが (仕事ゼロの回でも) 掃く。"""
+        conn = adapter.conn
+        n1 = _add_message(adapter, 0, 300)
+        entry = _entry(conn, [n1, "dead-1"], start_min=0, end_min=0)
+
+        run_absorption(conn, _Client(), None)
+
+        after = get_entry(conn, entry.id)
+        assert after.source_ids == [n1]
+        assert after.source_count == 1

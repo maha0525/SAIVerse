@@ -3792,6 +3792,59 @@ class SessionLifecycle:
                 plan_absorption,
                 split_plan_for_absorption,
             )
+            # 死んだ参照の掃除 (sweep) は tiny/stale の有無に関係なく回す
+            # (Codex 五巡 H1 — 仕事ゼロだと run_absorption 自体が呼ばれず
+            # 保険が眠る。検出は単一クエリで常時実行のコストは無視できる)。
+            # 印が付けば下の pending_stale_count が仕事に数え、run_absorption
+            # の flush が本文を語り直す。
+            #
+            # **計画より先** に置く (2026-09-01): 吸収の計画は隣人の
+            # source_ids が全生存かを検査して開き直しを決めるので、掃除が
+            # 後だと孤児参照を持つ隣人がその回は開けず、取り残しの解消が
+            # 毎回 1 巡遅れる。
+            #
+            # sweep / stale 件数 / 未完了マーカーの照会例外は 0 / False へ
+            # 潰さない (Codex 六巡 J4 — 「常時実行して仕事量に数える」保証が
+            # 例外時に黙って消える)。テーブル不在の縮退は各関数の内側
+            # (is_missing_table_error) が持つので、ここまで届く例外は実失敗
+            # = failed で止めて再実行を促す。
+            #
+            # 掃除と判定は adapter の錠前の内側で一息に行う (Codex 九巡):
+            # sweep は内部で commit する書き込みで、conn は adapter と共有な
+            # ので、ロック外の commit は他所の開いた トランザクションを途中で
+            # 確定させる (Codex 四巡 #2 — executor.execute_plan の db_lock と
+            # 同じ教義)。件数と印の照会も同じ錠の中に入れる — 掃除と判定の
+            # 間に他 writer が割り込むと、数えた世界と印を上げ下げする世界が
+            # ずれる (run_absorption 冒頭の保守ブロックと同形)。LLM は呼ば
+            # ないので、錠を持ったままでも他を待たせない。
+            try:
+                from sai_memory.arasuji.absorption import (
+                    _sweep_broken_parents,
+                    _sweep_dead_message_sources,
+                    is_repair_incomplete,
+                )
+                with adapter._db_lock:
+                    # 「上位あらすじ → 消えた下位あらすじ」の死んだ子 id。
+                    _sweep_broken_parents(adapter.conn)
+                    # 「Lv1 → 消えたメッセージ」も同じ理由 (UI の素の削除が
+                    # 参照を直さない) で掃く。孤児参照が残っていると吸収の
+                    # 再開検査が落ち、その隣の未被覆断片が永久に取り残される。
+                    _sweep_dead_message_sources(adapter.conn)
+                    # 前回の未完了 (content_stale の残り) は items ゼロでも
+                    # flush する。未完了の印だけが残った状態 (差し替え確定後の
+                    # 例外など) も仕事に数える — run_absorption が仕事ゼロを
+                    # 確認して印を外す (ローカルレビュー 2026-08-31 L1: 印が
+                    # 残ると帯の「前回の処理が完了していません」が永久表示に
+                    # なる)。
+                    pending_stale_count = len(list_stale_upper_ids(adapter.conn))
+                    _stale_marker = is_repair_incomplete(adapter.conn)
+            except Exception:
+                LOGGER.exception(
+                    "[metabolism] absorption maintenance checks failed; "
+                    "refusing the full-plan compile (persona=%s)",
+                    getattr(persona, "persona_id", "?"),
+                )
+                return "failed"
             normal_plan, _tiny_chunks = split_plan_for_absorption(
                 plan, target_chars=chronicle_band_budget(),
             )
@@ -3823,37 +3876,6 @@ class SessionLifecycle:
                     )
                     return "failed"
                 plan = normal_plan
-            # 死んだ子 id を指す親の救済 (sweep) は tiny/stale の有無に関係
-            # なく回す (Codex 五巡 H1 — 仕事ゼロだと run_absorption 自体が
-            # 呼ばれず保険が眠る。検出は単一クエリで常時実行のコストは無視
-            # できる)。印が付けば下の pending_stale_count が仕事に数え、
-            # run_absorption の flush が本文を語り直す。
-            #
-            # sweep / stale 件数 / 未完了マーカーの照会例外は 0 / False へ
-            # 潰さない (Codex 六巡 J4 — 「常時実行して仕事量に数える」保証が
-            # 例外時に黙って消える)。テーブル不在の縮退は各関数の内側
-            # (is_missing_table_error) が持つので、ここまで届く例外は実失敗
-            # = failed で止めて再実行を促す。
-            try:
-                from sai_memory.arasuji.absorption import (
-                    _sweep_broken_parents,
-                    is_repair_incomplete,
-                )
-                _sweep_broken_parents(adapter.conn)
-                # 前回の未完了 (content_stale の残り) は items ゼロでも flush
-                # する。未完了の印だけが残った状態 (差し替え確定後の例外など)
-                # も仕事に数える — run_absorption が仕事ゼロを確認して印を
-                # 外す (ローカルレビュー 2026-08-31 L1: 印が残ると帯の
-                # 「前回の処理が完了していません」が永久表示になる)。
-                pending_stale_count = len(list_stale_upper_ids(adapter.conn))
-                _stale_marker = is_repair_incomplete(adapter.conn)
-            except Exception:
-                LOGGER.exception(
-                    "[metabolism] absorption maintenance checks failed; "
-                    "refusing the full-plan compile (persona=%s)",
-                    getattr(persona, "persona_id", "?"),
-                )
-                return "failed"
         _absorption_calls = (
             absorption_plan.llm_calls if absorption_plan is not None
             else pending_stale_count
