@@ -793,6 +793,99 @@ class TestGenerateChronicleWiring:
         assert not _is_stale(conn, p.id)
         assert not is_repair_incomplete(conn)
 
+    # -- 前段 (吸収) の進捗表示 (2026-09-01 まはー実機報告) --------------------
+    #
+    # 症状: 補修ジョブが「Chronicleを生成しています (0/410)...」で凍って見える。
+    # 実際は前段の吸収が走っていて (run 一件ごとに LLM)、エリスの実機では前段
+    # だけで未被覆 410→258 まで進んでいた。進捗は本編 (execute_plan) にしか
+    # 配線されておらず、開始時に出した (0/410) が残り続けていた。
+
+    def _run_with_events(self, adapter, session_factory, monkeypatch):
+        """generate_chronicle を回して event_callback の content 列を返す。"""
+        from types import SimpleNamespace
+
+        from sea.session_lifecycle import SessionLifecycle
+
+        monkeypatch.setenv("SAIVERSE_CHRONICLE_BAND_BUDGET", str(TARGET))
+        manager = SimpleNamespace(SessionLocal=session_factory, personas={})
+        lifecycle = SessionLifecycle(SimpleNamespace(), manager)
+        persona = SimpleNamespace(
+            persona_id=PERSONA_ID, persona_name="テスター", model="claude-x",
+            sai_memory=adapter,
+        )
+        events = []
+
+        def _noop_executor(plan, *a, **k):
+            from sai_memory.arasuji.executor import ExecutionResult
+            return ExecutionResult()
+
+        with patch(
+            "saiverse.model_configs.find_model_config",
+            return_value=(
+                "mock-model", {"provider": "mock", "context_length": 1000},
+            ),
+        ), patch(
+            "llm_clients.factory.get_llm_client", return_value=_Client(),
+        ), patch(
+            "sai_memory.arasuji.executor.execute_plan", _noop_executor,
+        ), patch(
+            "sai_memory.arasuji.bands.backfill_coverage", lambda conn: 0,
+        ), patch(
+            "sai_memory.arasuji.bands.run_band_overflow", lambda *a, **k: 0,
+        ), patch(
+            "sai_memory.memory.entity_extractor.make_batch_callback",
+            side_effect=RuntimeError("skip entity extraction"),
+        ):
+            status = lifecycle.generate_chronicle(
+                persona, lambda ev: events.append(ev), force=True,
+            )
+        return status, [e.get("content", "") for e in events]
+
+    def test_absorption_phase_is_reported_before_the_compile_start(
+        self, adapter, session_factory, monkeypatch,
+    ):
+        """前段のフェーズと進行が流れ、本編の開始はその**後**に出る。
+
+        開始メッセージが先に出ると、吸収の数分〜数十分がまるごと「(0/N) のまま
+        凍った」画面になる。
+        """
+        conn = adapter.conn
+        _add_message(adapter, 0, 100)  # 極小 run → 吸収へ
+        n1 = _add_message(adapter, 10, 300)
+        n2 = _add_message(adapter, 11, 300)
+        _entry(conn, [n1, n2], start_min=10, end_min=11)
+
+        status, contents = self._run_with_events(
+            adapter, session_factory, monkeypatch,
+        )
+        assert status == "ok"
+
+        prep = [i for i, c in enumerate(contents) if "下ごしらえ" in c]
+        absorb = [i for i, c in enumerate(contents) if "断片を吸収しています" in c]
+        start = [i for i, c in enumerate(contents) if c.startswith("Chronicleを生成しています (0/")]
+        assert prep, f"前段のフェーズ表示が無い: {contents}"
+        assert absorb, f"吸収の進行表示が無い: {contents}"
+        assert start, f"本編の開始表示が無い: {contents}"
+        # 順序: 下ごしらえ → 吸収の進行 → 本編の開始
+        assert prep[0] < absorb[0] < start[0]
+        # 進行は「何件目 / 全件」の形
+        assert "(1/1)" in contents[absorb[0]]
+
+    def test_no_absorption_work_keeps_the_plain_start_message(
+        self, adapter, session_factory, monkeypatch,
+    ):
+        """吸収の仕事が無い回は前段の表示を出さない (常態を異常の顔で出さない)。"""
+        _add_message(adapter, 0, 600)
+        _add_message(adapter, 1, 600)
+
+        status, contents = self._run_with_events(
+            adapter, session_factory, monkeypatch,
+        )
+        assert status == "ok"
+        assert not [c for c in contents if "下ごしらえ" in c], contents
+        assert not [c for c in contents if "断片を吸収しています" in c], contents
+        assert [c for c in contents if c.startswith("Chronicleを生成しています (0/")]
+
 
 # ---------------------------------------------------------------------------
 # レビュー消し込み (Codex 敵対レビュー + ローカルレビュー 2026-08-31)

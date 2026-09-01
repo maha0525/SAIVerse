@@ -4037,13 +4037,19 @@ class SessionLifecycle:
                 )
                 execution_id = None
 
-        # Notify frontend that generation is starting
-        if event_callback:
-            event_callback({
-                "type": "metabolism",
-                "status": "running",
-                "content": f"Chronicleを生成しています (0/{unprocessed_count})...",
-            })
+        # 「Chronicleを生成しています (0/N)」はここでは出さない。前段の吸収
+        # (run_absorption) が先に走る回があり、そちらは run 一件ごとに LLM を
+        # 呼ぶので実機では数分〜数十分かかる。開始メッセージを先に出すと、その
+        # 間ずっと「(0/410)」のまま凍って見える (2026-09-01 まはー実機報告 —
+        # 実際は止まっておらず、前段だけで未被覆 410→258 まで進んでいた)。
+        # 本編 (execute_plan) の直前で出す。
+        def _emit_compile_start() -> None:
+            if event_callback:
+                event_callback({
+                    "type": "metabolism",
+                    "status": "running",
+                    "content": f"Chronicleを生成しています (0/{unprocessed_count})...",
+                })
 
         # Build progress callback for streaming status to frontend
         def progress_fn(processed, total):
@@ -4126,6 +4132,33 @@ class SessionLifecycle:
         # 生成に「これまでの流れ」を引かせる (裁定 4 の時系列たたみ込み)。
         if _absorption_work:
             from sai_memory.arasuji.absorption import run_absorption
+
+            # 前段は本編より長くなることがあるので、フェーズと進行を画面へ流す
+            # (2026-09-01)。ここが無言だと「Chronicleを生成しています (0/N)」で
+            # 凍って見え、ユーザーが止まったと判断して中止してしまう。
+            if event_callback:
+                event_callback({
+                    "type": "metabolism",
+                    "status": "running",
+                    "content": (
+                        "編纂の下ごしらえをしています"
+                        "（取り残された断片の吸収と、上位あらすじの語り直し）..."
+                    ),
+                })
+
+            def absorption_progress_fn(phase, done, total):
+                if not event_callback:
+                    return
+                if phase == "absorb":
+                    content = f"取り残された断片を吸収しています ({done}/{total})..."
+                else:
+                    content = f"上位のあらすじを語り直しています ({total} 件)..."
+                event_callback({
+                    "type": "metabolism",
+                    "status": "running",
+                    "content": content,
+                })
+
             try:
                 absorption_result = run_absorption(
                     adapter.conn, client, absorption_plan,
@@ -4133,6 +4166,7 @@ class SessionLifecycle:
                     db_lock=adapter._db_lock,
                     cancel_check=cancel_fn,
                     batch_callback=note_callback,
+                    progress_callback=absorption_progress_fn,
                 )
             except Exception as exc:
                 LOGGER.exception("[metabolism] tiny-run absorption failed")
@@ -4173,6 +4207,9 @@ class SessionLifecycle:
                     len(absorption_result.regenerated_upper_ids),
                     absorption_result.unresolved_runs,
                 )
+
+        # 本編の開始をここで報告する (前段の吸収を跨いだ後)。
+        _emit_compile_start()
 
         try:
             exec_result = execute_plan(

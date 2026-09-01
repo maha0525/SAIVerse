@@ -929,6 +929,7 @@ def run_absorption(
     db_lock: Optional[Any] = None,
     cancel_check: Optional[Callable[[], bool]] = None,
     batch_callback: Optional[Callable] = None,
+    progress_callback: Optional[Callable[[str, int, int], None]] = None,
 ) -> AbsorptionResult:
     """吸収の計画を実行する (LLM あり)。
 
@@ -938,6 +939,18 @@ def run_absorption(
 
     途中失敗は AbsorptionError / LLMError として上がる。確定済みの差し替えは
     残り、repair_incomplete の印が立ったままになる — 再実行が続きから直す。
+
+    ``progress_callback(phase, done, total)`` は画面へ進行を伝えるための任意の
+    フック (2026-09-01)。この関数は run 一件ごとに LLM を呼ぶので、実機では
+    ここだけで数分〜数十分かかる — 呼び出し側が何も報告しないと、本編
+    (execute_plan) の進捗だけを見ている画面が「(0/N) のまま凍った」ように
+    見える。粒度は粗く、``phase`` は:
+
+    - ``"absorb"`` ... 極小 run の合体 (done = 何件目 / total = 計画の件数)
+    - ``"regenerate"`` ... ジョブ末尾の上位あらすじ語り直し (total = 対象数)
+
+    フックの例外は呼び出し側の責任 — ここでは捕まえない (握り潰すと、報告が
+    壊れていることに誰も気づけない)。
     """
     from sai_memory.arasuji.generator import generate_level1_arasuji
     from sai_memory.perception_buffer import list_batches_annexed_to
@@ -975,6 +988,9 @@ def run_absorption(
         if cancel_check and cancel_check():
             result.cancelled = True
             return result  # 印は残す — 再実行が続きを拾う
+
+        if progress_callback:
+            progress_callback("absorb", index + 1, len(items))
 
         # flush: この item の開始時刻より手前で被覆範囲が閉じた上位を先に
         # 語り直す (裁定 4 — 後続の Lv1 生成の「これまでの流れ」を新しくする)。
@@ -1266,6 +1282,8 @@ def run_absorption(
                 )
 
     # ジョブ末尾: 未 flush の先祖を全部 flush する。
+    if progress_callback and pending:
+        progress_callback("regenerate", 0, len(pending))
     _flush_pending_uppers(
         conn, client, pending, result,
         before_start=None, persona_id=persona_id, db_lock=db_lock,
