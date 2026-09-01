@@ -930,7 +930,12 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                             {repairEstimate.repair_incomplete && (
                                 <>
                                     {repairEstimate.unprocessed_messages >= 1 && <br />}
-                                    前回の処理が完了していません。再実行してください。
+                                    {/* 未完了の印はジョブ開始時に置かれ完了時に外れるので、
+                                        走行中は「放置された未完了」ではない — 再実行を
+                                        促すのは止まっているときだけ (2026-09-01 実機指摘)。 */}
+                                    {['running', 'started', 'pending', 'cancelling'].includes(generationJob?.status ?? '')
+                                        ? '処理を実行中です。'
+                                        : '前回の処理が完了していません。再実行してください。'}
                                 </>
                             )}
                         </span>
