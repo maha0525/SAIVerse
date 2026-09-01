@@ -249,6 +249,39 @@ class AdminAiEditContractTest(unittest.TestCase):
 
     # --- 複製の再発防止 ---
 
+    def test_saiverse_manager_delegation_accepts_every_admin_parameter(self):
+        """API 経路は SAIVerseManager.update_ai (委譲) を経由する。
+
+        AdminService.update_ai に引数を足して委譲側を忘れると、テストは
+        AdminService 直呼びで緑のまま、実経路だけが TypeError → 500 になる
+        (2026-09-01 実害: chronicle_char_budget の追加漏れで v0.3.1 の
+        ペルソナ設定保存が全ユーザーで失敗した)。委譲は全引数を素通しする
+        契約なので、両者のシグネチャ一致を機械検査する。
+        """
+        import inspect
+
+        from saiverse.saiverse_manager import SAIVerseManager
+
+        admin_params = set(inspect.signature(AdminService.update_ai).parameters)
+        manager_params = set(inspect.signature(SAIVerseManager.update_ai).parameters)
+        missing = admin_params - manager_params
+        self.assertFalse(
+            missing,
+            "SAIVerseManager.update_ai (委譲側) に足りない引数があります: "
+            f"{sorted(missing)}。AdminService.update_ai に引数を足したら、"
+            "saiverse_manager.py の委譲メソッドにも同じ引数と受け渡しを足すこと。",
+        )
+        # 受け取るだけで admin へ渡し忘れるケースも捕まえる: 委譲本体のソースに
+        # 引数名が (仮引数以外で) 登場するかを検査する。
+        src = inspect.getsource(SAIVerseManager.update_ai)
+        body = src.split('"""ワールドエディタ', 1)[-1]  # docstring 以降 = 委譲呼び出し部
+        for name in admin_params - {"self"}:
+            self.assertIn(
+                name,
+                body,
+                f"SAIVerseManager.update_ai が引数 '{name}' を admin へ渡していません。",
+            )
+
     def test_persona_mixin_does_not_redefine_the_edit_methods(self):
         """`PersonaMixin` に同名メソッドが戻ると、`RuntimeService` 側だけ古い実装になる。
 
