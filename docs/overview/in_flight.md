@@ -89,5 +89,6 @@
 | 🔵 設計中 | 刺激 (イベント・ユーザー発話) の永続 ID | 同一性を要る機構が 4 つ揃って此処で止まっている (冪等キー / 回収の重複判定の粒度 / 回収 activate の競合 / claim 失敗時の黙殺)。いまの歯止めは会話区間単位の近似で、立て続けの 2 回目の呼びかけを黙殺しうる。次 = ID の発行元 (供給源ごと / 受信側で一括) と冪等の窓をまはーが裁定する。 | まはー (設計裁定) | [issue](../issues/on_event_judgment_has_no_idempotency_key.md) | 2026-08-14 |
 | 🟣 検証待ち | 起動時の「更新の仕上げ」自己回復 | 印 (`.update_complete`) と検査 (`update_engine.py --check-complete` の三値) を実装し、start.bat / start.sh が中途半端な更新を自分で仕上げるようにした。単体テスト緑。次 = v0.2.29 複製での実機確認 (update.bat → start.bat の 2 手で完全回復するか) と、リリースノート文面の差し替え。 | まはー (実機検証・リリースノート) | [issue](../issues/v0229_update_bat_truncates_after_git_pull.md) | 2026-09-01 |
 | 🟣 検証待ち | head 通知の既読基準 (last_notified) 握り潰し根治 | 撮り直し (TTL 切れ / Metabolism / 手動整理) が既読基準を上書きして入退室通知が消える欠陥は、「配送だけが基準を進める」形へ修正済み・回帰緑 (intent C8)。次 = バックエンド再起動後、まはーの入退室でエリスに [システム通知] が届くかを実機確認する。 | まはー (実機検証) | [cached_head_architecture.md](../intent/cached_head_architecture.md) §C8 | 2026-08-17 |
+| 🟣 検証待ち | v0.3.2 ホットフィックス (ペルソナ設定保存の 500) | 委譲側の引数欠落でペルソナ設定の保存 API が常に失敗する欠陥を修正し、隔離環境の実 API で保存の往復を確認済み (委譲と実体のシグネチャ一致の機械検査も追加)。次 = まはーの本番実機確認 → develop / main へ PR → タグでリリース発行。 | まはー (実機確認・リリース GO) | ブランチ hotfix/v0.3.2 | 2026-09-02 |
 
 <!-- 構想止まり(当分動かない)は台帳外。intent draft で管理: observer/Fixture, Social Track 入口(Phase 5) など -->
