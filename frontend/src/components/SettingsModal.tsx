@@ -104,7 +104,7 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
     const [autonomousChronicleEnabled, setAutonomousChronicleEnabled] = useState(true);
     const [autoRecallEnabled, setAutoRecallEnabled] = useState(true);
     const [memoryWeaveContext, setMemoryWeaveContext] = useState(true);
-    const [memopediaIndexEnabled, setMemopediaIndexEnabled] = useState(false);
+    const [memopediaIndexEnabled, setMemopediaIndexEnabled] = useState(true);
     const [coreMemoryCharBudget, setCoreMemoryCharBudget] = useState<string>('');
     const [spellEnabled, setSpellEnabled] = useState(false);
     const [realtimeInfoEnabled, setRealtimeInfoEnabled] = useState(true);
@@ -646,7 +646,7 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                                     </label>
                                 </div>
                                 <div className={styles.description}>
-                                    自律稼働中（ユーザーとの会話以外のタイミング）にMetabolismが走った際も、確認なしでChronicleを自動生成します。無効にすると、自律稼働中に溜まった会話はChronicle化されず、次にユーザーと会話するまで長期記憶に残りません。
+                                    自律稼働中（ユーザーとの会話以外のタイミング）に記憶の整理が起きた際も、確認なしでChronicleを自動生成します。無効にすると、自律稼働中に溜まった会話はChronicle化されず、次にユーザーと会話するまで長期記憶に残りません。
                                 </div>
                             </div>
 
@@ -685,7 +685,7 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                             </div>
 
                             <div className={styles.fieldGroup}>
-                                <label className={styles.label}>Memopedia索引の常時表示（旧方式）</label>
+                                <label className={styles.label}>Memopedia索引の常時表示</label>
                                 <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
                                     <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
                                         <input
@@ -697,7 +697,7 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                                     </label>
                                 </div>
                                 <div className={styles.description}>
-                                    Memopediaの全ページ一覧を、常にペルソナのコンテキストへ読み込みます（自動想起の導入前の方式）。Memopediaをメモ帳として能動的に使っている場合に有効にしてください。トークン消費が増えます。反映は次の記憶整理（Metabolism）からです。
+                                    Memopediaの全ページ一覧（タイトルと概要）を、常にペルソナのコンテキストへ読み込みます。ペルソナが自分の記憶の全体像を把握しやすくなる反面、トークン消費が増えます。当面は有効のままをおすすめします。設定の変更は、ペルソナメニューの「記憶を整理」を押すとすぐに反映されます（押さなくても、次に記憶の整理が起きたときに反映されます）。
                                 </div>
                             </div>
 

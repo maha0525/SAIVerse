@@ -101,8 +101,11 @@ class AI(Base):
     # 目次 (summary あり・深さ無制限・旧方式相当) を組み立て、head に含める。P4-d
     # (2026-07-11) で器を MemoryWeaveSection からこちらへ一本化、2026-07-14 に描画内容の
     # 回帰 (summary 欠落・深さ制限) を修正済み。メモ帳として能動的に Memopedia を使う
-    # ユーザー向けの脱出経路。デフォルト OFF (トークン消費増のため既定は新方式に従う)。
-    MEMOPEDIA_INDEX_ENABLED = Column(Boolean, default=False, nullable=False)
+    # ユーザー向けの脱出経路。当初はデフォルト OFF (トークン消費増のため既定は
+    # 新方式に従う) だったが、2026-09-01 にデフォルト ON へ変更 — 自動想起が
+    # 索引の常時表示を置き換えられる完成度にまだ達していないため (v0.3.1 で
+    # 既存ペルソナも upgrade handler で一括 ON)。
+    MEMOPEDIA_INDEX_ENABLED = Column(Boolean, default=True, nullable=False)
     # コア記憶 (記憶アーキv2 ゾーン A, docs/intent/memory_architecture_v2.md §5) の
     # 容量目安 (文字数)。ペルソナが自分で刻む恒常知識の合計文字数がこの値を超えると、
     # core_memory 系スペルの返り値に「整理を検討」の通知を添える (切り詰め・拒否は
