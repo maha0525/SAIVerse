@@ -715,7 +715,7 @@ export default function MemoryRecall({ personaId }: MemoryRecallProps) {
                             handleUnifiedRecall();
                         }
                     }}
-                    placeholder="例: まはーの好きなもの"
+                    placeholder="例: ロンドンへの旅行"
                     rows={2}
                 />
             </div>
