@@ -920,4 +920,21 @@ HANDLERS: List[UpgradeHandler] = [
             "personas up to the new ON default."
         ),
     ),
+    # ---- v0.3.2: コード修正のみ (ペルソナ設定保存の 500 根治)。データ移行なし ----
+    UpgradeHandler(
+        name="city_noop_v0_3_2",
+        scope="city",
+        from_version="0.3.1",
+        to_version="0.3.2",
+        run=_no_op_city_upgrade,
+        description="Empty release edge 0.3.1 -> 0.3.2 (code-only hotfix, no data migration).",
+    ),
+    UpgradeHandler(
+        name="ai_noop_v0_3_2",
+        scope="ai",
+        from_version="0.3.1",
+        to_version="0.3.2",
+        run=_no_op_ai_upgrade,
+        description="Empty release edge 0.3.1 -> 0.3.2 (code-only hotfix, no data migration).",
+    ),
 ]
