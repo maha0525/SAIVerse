@@ -92,4 +92,5 @@
 | 🟣 検証待ち | head 通知の既読基準 (last_notified) 握り潰し根治 | 撮り直し (TTL 切れ / Metabolism / 手動整理) が既読基準を上書きして入退室通知が消える欠陥は、「配送だけが基準を進める」形へ修正済み・回帰緑 (intent C8)。次 = バックエンド再起動後、まはーの入退室でエリスに [システム通知] が届くかを実機確認する。 | まはー (実機検証) | [cached_head_architecture.md](../intent/cached_head_architecture.md) §C8 | 2026-08-17 |
 | 🟣 検証待ち | macOS で過去ログの取り込みが空振りする | 検算はファイルを読めるのに取り込みが「対象 0 件」になる非対称を、探し方を検算側と同じパス直組みに揃えて解消済み・回帰緑。次 = 報告者の macOS 環境で、お知らせが消えて会話が画面に入ることの確認。 | まはー (報告者への配布と確認) | [issue](../issues/legacy_log_import_misses_decomposed_folder_names.md) | 2026-09-02 |
 | 🟣 検証待ち | macOS で OS の証明書が読めず HTTPS が全滅する | OS のストアが空のときだけ同梱の証明書束へ退避する形で実装済み。ローカル HTTPS で urlopen が実際に通るところまで確認済み。次 = 報告者の環境でカタログが開き、アドオン取得と更新通知も戻ることの確認。 | まはー (報告者への配布と確認) | [issue](../issues/urllib_https_fails_when_os_trust_store_empty.md) | 2026-09-02 |
+| 🟣 検証待ち | フィードタブのダークモード非対応 | 存在しない CSS 変数 (`--bg-primary`) を使っていて指定が無効化されていたのが根因で、実在の変数へ揃えて解消済み。静的プレビューでライト/ダーク両方を目視確認した。次 = 実アプリでプルダウンを開いた状態の確認と、同型の未定義変数が残る他画面の判断。 | まはー (実機確認) | [issue](../issues/feed_tab_dark_mode_pulldowns.md) | 2026-09-02 |
 <!-- 構想止まり(当分動かない)は台帳外。intent draft で管理: observer/Fixture, Social Track 入口(Phase 5) など -->

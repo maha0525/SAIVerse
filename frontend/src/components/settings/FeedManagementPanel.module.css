@@ -99,7 +99,7 @@
     padding: 6px 8px;
     border: 1px solid var(--border-color, #ccc);
     border-radius: 4px;
-    background: var(--bg-primary, #ffffff);
+    background: var(--background, #ffffff);
     color: inherit;
     font-size: 0.85rem;
     max-width: 100%;
@@ -199,7 +199,7 @@
     align-items: flex-start;
     gap: 8px;
     padding: 8px 10px;
-    background: var(--bg-primary, #ffffff);
+    background: var(--background, #ffffff);
     border: 1px solid var(--border-color, #e0e0e0);
     border-radius: 6px;
 }
@@ -292,7 +292,7 @@
     padding: 6px 8px;
     border: 1px solid var(--border-color, #ccc);
     border-radius: 4px;
-    background: var(--bg-primary, #ffffff);
+    background: var(--background, #ffffff);
     color: inherit;
     font-size: 0.85rem;
 }
@@ -306,7 +306,7 @@
     padding: 10px;
     border: 1px solid var(--primary, #4a7eb5);
     border-radius: 6px;
-    background: var(--bg-primary, #ffffff);
+    background: var(--background, #ffffff);
 }
 
 .candidateHeader {
@@ -363,7 +363,7 @@
     padding: 10px;
     border: 1px solid var(--border-color, #e0e0e0);
     border-radius: 6px;
-    background: var(--bg-primary, #ffffff);
+    background: var(--background, #ffffff);
 }
 
 .itemRow {
