@@ -568,6 +568,87 @@ def test_manual_compaction_disabled_does_not_fold(session_factory):
     run.assert_not_called()
 
 
+def _count_head_rebuilds():
+    """手動入口が発火した head 再構築 (on_metabolism) の回数を数える patch。"""
+    calls = []
+    return calls, patch(
+        "saiverse.dynamic_state.DynamicStateManager.on_metabolism",
+        lambda persona, manager, model_key=None: calls.append(model_key),
+    )
+
+
+def test_manual_compaction_rebuilds_head_when_nothing_was_folded(session_factory):
+    """畳めなかった結果でも head 再構築を 1 回だけ発火する。
+
+    手動入口の契約 (2026-09-01): ボタンを押した以上、畳みが起きなくても設定
+    トグル (Memopedia 索引の常時表示など) の変更がコンテキストへ反映される。
+    早期 return の全ての出口 (noop / unavailable / disabled) と run_metabolism
+    経由の失敗系が、どれも 1 回に揃うことを固定する。
+    """
+    from sea.eviction_plan import Watermarks
+    lc = _make_lifecycle(session_factory)
+    persona = SimpleNamespace(
+        persona_id=PERSONA_ID, model="model-a", current_building_id="room",
+    )
+    big = [{"id": f"m{i}", "content": "x" * 1000} for i in range(10)]
+    small = [{"id": "m0", "content": "x" * 100}]
+    marks = Watermarks(low=1000, target=2000, high=4000)
+
+    # (presented, run_metabolism の戻り値, 期待 status)
+    cases = [
+        (small, None, "noop"),                     # 残す量以下 (早期 return)
+        (None, None, "unavailable"),               # 起点行なし (早期 return)
+        (big, "failed", "failed"),                 # 編纂失敗
+        (big, "deferred", "deferred"),             # claim 競合 / キャンセル
+        (big, "nothing", "noop"),                  # 畳める範囲なし
+    ]
+    for presented, inner, expected in cases:
+        window = _window("m0", presented) if presented else _window(None, [])
+        calls, counting = _count_head_rebuilds()
+        with counting, _weave_on(), \
+                patch.object(lc, "get_metabolism_watermarks", return_value=marks), \
+                patch.object(lc, "get_presented_window", return_value=window), \
+                patch.object(lc, "run_metabolism", return_value=inner):
+            assert lc.run_manual_compaction(persona) == expected
+        assert len(calls) == 1, f"{expected}: {len(calls)} rebuild(s)"
+        # 再構築するのは畳みを試みた model の (persona, model) snapshot
+        assert calls[0] == "model-a"
+
+    # Chronicle 無効 (weave env OFF) も手動入口なので 1 回
+    calls, counting = _count_head_rebuilds()
+    with counting, patch.dict(os.environ, {"ENABLE_MEMORY_WEAVE_CONTEXT": ""}):
+        assert lc.run_manual_compaction(persona) == "disabled"
+    assert len(calls) == 1
+
+
+def test_manual_compaction_does_not_rebuild_head_twice_on_success(session_factory):
+    """"ok" では外側から発火しない — 畳み本体が既に発火しているため。
+
+    二重の capture_all (全セクション再構築 + スナップショット永続化) を避ける
+    (Codex 指摘 2026-09-01)。ここでは run_metabolism を stub しているので内部
+    発火も起きず、合計 0 回になる = 外側が上乗せしていないことの検査。
+
+    契約のもう半分「畳み本体は成功時に内部で 1 回発火する」は
+    tests/test_metabolism_two_layer.py の
+    test_run_metabolism_dispatches_with_advancing_model が実経路で固定して
+    いる — 本テストと対で「成功時は合計ちょうど 1 回」になる。
+    """
+    from sea.eviction_plan import Watermarks
+    lc = _make_lifecycle(session_factory)
+    persona = SimpleNamespace(
+        persona_id=PERSONA_ID, model="model-a", current_building_id="room",
+    )
+    msgs = [{"id": f"m{i}", "content": "x" * 1000} for i in range(10)]
+    calls, counting = _count_head_rebuilds()
+    with counting, _weave_on(), \
+            patch.object(lc, "get_metabolism_watermarks",
+                         return_value=Watermarks(low=1000, target=2000, high=4000)), \
+            patch.object(lc, "get_presented_window", return_value=_window("m0", msgs)), \
+            patch.object(lc, "run_metabolism", return_value="ok"):
+        assert lc.run_manual_compaction(persona) == "ok"
+    assert calls == []
+
+
 def test_run_metabolism_manual_stops_when_disabled_under_lock(session_factory):
     """ロック内の再判定 (TOCTOU, Codex 三巡 2026-07-29): 入口の事前判定の後に
     Chronicle が OFF へ反転しても、手動 (stop_when_disabled=True) は編纂なしの

@@ -934,6 +934,9 @@ def _run_chronicle_generation(
         except Exception:
             LOGGER.warning("[Chronicle Gen] embedding maintenance failed", exc_info=True)
 
+        # head の再構築 (設定トグルの反映) は run_manual_compaction が出口で持つ
+        # ので、ここでは何もしない (sea/session_lifecycle.py)。
+
         if status == "ok":
             _update_job(
                 job_id, status="completed",
@@ -1072,6 +1075,9 @@ def _run_coverage_repair_job(
             lifecycle.ensure_recall_embeddings(persona)
         except Exception:
             LOGGER.warning("[Chronicle Repair] embedding maintenance failed", exc_info=True)
+
+        # head の再構築 (設定トグルの反映) は run_coverage_repair が出口で持つ
+        # ので、ここでは何もしない (sea/session_lifecycle.py)。
 
         if status == "ok":
             message = "あらすじになっていなかった過去の会話を編纂しました"

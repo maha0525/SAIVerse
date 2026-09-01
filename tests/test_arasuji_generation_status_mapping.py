@@ -57,3 +57,25 @@ def test_ok_completes():
     job = _run_with_status("ok")
     assert job["status"] == "completed"
     assert job["error"] is None
+
+
+def test_noop_completes_without_dispatching_head_rebuild(monkeypatch):
+    """ルートは head 再構築を発火しない — 責務は run_manual_compaction 側。
+
+    「畳めなくても設定トグルを反映する」保証そのものは
+    tests/test_session_anchor_rows.py の
+    test_manual_compaction_rebuilds_head_when_nothing_was_folded が固定する。
+    ここで見るのは「ルートが上乗せしない」こと — 呼び出し元ごとに発火を
+    書くと、"ok" のとき畳み本体の発火と二重になる (Codex 指摘 2026-09-01)。
+    """
+    from saiverse.dynamic_state import DynamicStateManager
+
+    calls = []
+    monkeypatch.setattr(
+        DynamicStateManager, "on_metabolism",
+        staticmethod(lambda persona, manager, model_key=None: calls.append(persona)),
+    )
+
+    job = _run_with_status("noop")
+    assert job["status"] == "completed"
+    assert calls == []

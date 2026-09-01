@@ -1842,8 +1842,55 @@ class SessionLifecycle:
               対象外でそのまま
             - "unavailable": model / 水位 / 起点が解決できず、畳みを定義できない
               (ブートストラップ前の新規ペルソナ等)
+
+        head の再構築 (2026-09-01): **手動入口は結果によらず head 再構築を
+        保証する** — ボタンを押した以上、畳みが起きなくても設定トグル
+        (Memopedia 索引の常時表示など) の変更がコンテキストへ反映されなければ
+        ならない。"ok" だけは畳み本体 (:meth:`_run_metabolism_locked`) が
+        発火済みなので、ここでは発火しない (二重 capture の回避)。発火責務を
+        この関数が持つことで、呼び出し元 (organize-memory API / あらすじタブの
+        生成ジョブ) は何もしなくてよい。
         """
         resolved_model = str(model_key or getattr(persona, "model", "") or "") or None
+        status = self._manual_compaction_status(
+            persona, event_callback, resolved_model, cancellation_token,
+        )
+        if status != "ok":
+            self._dispatch_manual_head_rebuild(persona, resolved_model)
+        return status
+
+    def _dispatch_manual_head_rebuild(self, persona, model_key: Optional[str]) -> None:
+        """手動入口 (ボタン押下) の出口で head を再構築する。
+
+        畳み・補修が実際には何もしなかった場合 ("noop" / "disabled" /
+        "failed" 等) でも、ユーザーが押した以上は設定変更がコンテキストへ
+        反映されなければならない。畳みが成立した経路は
+        :meth:`_run_metabolism_locked` が既に発火しているので、呼び出し側が
+        重複しない条件で呼ぶ。
+
+        失敗しても手動操作そのものの成否には畳み込まない (head は次の節目で
+        再構築される)。
+        """
+        try:
+            from saiverse.dynamic_state import DynamicStateManager
+            DynamicStateManager.on_metabolism(
+                persona, self.manager, model_key=model_key,
+            )
+        except Exception:
+            LOGGER.exception("[dynamic_state] manual head rebuild failed")
+
+    def _manual_compaction_status(
+        self,
+        persona,
+        event_callback: Optional[Callable[[Dict[str, Any]], None]],
+        resolved_model: Optional[str],
+        cancellation_token: Optional[CancellationToken],
+    ) -> str:
+        """:meth:`run_manual_compaction` の判定本体 — 畳みの結果だけを返す。
+
+        head 再構築は呼び出し元 (run_manual_compaction) が単一の出口で持つ。
+        早期 return が多いので、発火をここに書くと必ずどれかで書き漏らす。
+        """
         if not resolved_model:
             return "unavailable"
         memory_weave_enabled = os.getenv("ENABLE_MEMORY_WEAVE_CONTEXT", "").lower() in ("true", "1")
@@ -1875,6 +1922,30 @@ class SessionLifecycle:
         return "noop" if status == "nothing" else status
 
     def run_coverage_repair(
+        self,
+        persona,
+        event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+        cancellation_token: Optional[CancellationToken] = None,
+    ) -> Tuple[str, int]:
+        """被覆補修の手動入口 — 実体は :meth:`_coverage_repair_status`。
+
+        run_manual_compaction と同じく、**結果によらず出口で head を再構築
+        する** (設定トグルの反映を保証する。2026-09-01)。補修の本体は
+        on_metabolism を一切発火しないので条件は付けない。
+
+        末尾の引き戻し (:func:`sea.coverage_repair.run_tail_rewind`) が窓の
+        畳みへ降りた場合だけ、その中の run_manual_compaction が先に 1 回
+        発火する。それでも出口の発火は重複ではない — 引き戻しの後に
+        ``mark_covered_cold_windows`` が §15 の印を書くので、途中の capture は
+        最終状態を写していない。
+        """
+        status, mark_failures = self._coverage_repair_status(
+            persona, event_callback, cancellation_token,
+        )
+        self._dispatch_manual_head_rebuild(persona, None)
+        return (status, mark_failures)
+
+    def _coverage_repair_status(
         self,
         persona,
         event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,

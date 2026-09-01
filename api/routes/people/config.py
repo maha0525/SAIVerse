@@ -54,7 +54,7 @@ def get_persona_config(persona_id: str, manager = Depends(get_manager)):
         autonomous_chronicle_enabled=details.get("AUTONOMOUS_CHRONICLE_ENABLED", True),
         auto_recall_enabled=details.get("AUTO_RECALL_ENABLED", True),
         memory_weave_context=details.get("MEMORY_WEAVE_CONTEXT", True),
-        memopedia_index_enabled=details.get("MEMOPEDIA_INDEX_ENABLED", False),
+        memopedia_index_enabled=details.get("MEMOPEDIA_INDEX_ENABLED", True),
         core_memory_char_budget=details.get("CORE_MEMORY_CHAR_BUDGET"),
         spell_enabled=details.get("SPELL_ENABLED", True),
         realtime_info_enabled=details.get("REALTIME_INFO_ENABLED", True),
@@ -214,12 +214,10 @@ def organize_persona_memory(persona_id: str, manager=Depends(get_manager)):
     except Exception:
         LOGGER.warning("[organize-memory] embedding maintenance failed", exc_info=True)
 
-    # Dispatch METABOLISM event to head_pipeline (snapshot refresh)
-    try:
-        from saiverse.dynamic_state import DynamicStateManager
-        DynamicStateManager.on_metabolism(persona, manager)
-    except Exception:
-        LOGGER.warning("[organize-memory] on_metabolism dispatch failed", exc_info=True)
+    # head の再構築 (snapshot refresh) は run_manual_compaction が出口で持つ
+    # (畳みが起きた "ok" は畳み本体が、それ以外は手動入口が発火する)。
+    # かつてここにも無条件発火があり、"ok" のとき capture_all が二重に走って
+    # いた (2026-09-01 に発火責務を session_lifecycle へ一本化して撤去)。
 
     # failed / deferred は「完了」ではない (Codex 2026-07-29 指摘: 失敗の成功偽装
     # の根治)。畳みは適用されておらず、再実行で再試行できる。

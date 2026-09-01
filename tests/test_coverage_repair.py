@@ -578,6 +578,25 @@ class TestRunCoverageRepair:
         lc = _make_lifecycle(session_factory)
         assert lc.run_coverage_repair(_persona(adapter)) == ("disabled", 0)
 
+    def test_rebuilds_head_even_when_disabled(
+        self, adapter, session_factory, monkeypatch,
+    ):
+        """補修が何もしなくても head 再構築を発火する (手動入口の契約)。
+
+        ボタンを押した以上、設定トグルの変更はコンテキストへ反映される
+        (2026-09-01。run_manual_compaction と同じ規律)。補修の本体は
+        on_metabolism を発火しないので、出口の 1 回だけになる。
+        """
+        monkeypatch.delenv("ENABLE_MEMORY_WEAVE_CONTEXT", raising=False)
+        lc = _make_lifecycle(session_factory)
+        calls = []
+        with patch(
+            "saiverse.dynamic_state.DynamicStateManager.on_metabolism",
+            lambda persona, manager, model_key=None: calls.append(model_key),
+        ):
+            assert lc.run_coverage_repair(_persona(adapter)) == ("disabled", 0)
+        assert len(calls) == 1
+
     def test_compiles_uncovered_past_and_marks_cold_window(
         self, adapter, session_factory, monkeypatch,
     ):
