@@ -14,6 +14,7 @@ import ToolModeSelector, { TOOL_MODE_SELECTED } from '@/components/ToolModeSelec
 import { buildPreSpellsFromUI } from '@/lib/preSpells';
 import { formatCost } from '@/lib/formatCost';
 import { prepareMessageMarkdown } from '@/lib/messageMarkdown';
+import { fetchAllTableRows } from '@/lib/dbTable';
 import RightSidebar from '@/components/RightSidebar';
 import CityMap from '@/components/CityMap';
 import cityMapStyles from '@/components/CityMap.module.css';
@@ -1479,9 +1480,7 @@ export default function Home() {
         if (!tzMismatch) return;
         setTzUpdating(true);
         try {
-            const citiesRes = await fetch('/api/db/tables/city');
-            if (!citiesRes.ok) throw new Error('Failed to fetch city data');
-            const cities = await citiesRes.json();
+            const cities = await fetchAllTableRows<any>('city');
             const city = cities.find((c: any) => c.CITYID === tzMismatch.cityId);
             if (!city) throw new Error('City not found');
 

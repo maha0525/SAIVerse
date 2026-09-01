@@ -6,6 +6,7 @@ import styles from './PersonaWizard.module.css';
 import MemoryImport from './memory/MemoryImport';
 import ModalOverlay from './common/ModalOverlay';
 import SettingsModal from './SettingsModal';
+import { fetchAllTableRows } from '../lib/dbTable';
 
 interface PersonaWizardProps {
     isOpen: boolean;
@@ -86,14 +87,11 @@ export default function PersonaWizard({ isOpen, onClose, onComplete, embedded }:
 
     const loadCities = async () => {
         try {
-            const res = await fetch('/api/db/tables/city');
-            if (res.ok) {
-                const data = await res.json();
-                setCities(data);
-                if (data.length > 0) {
-                    setSelectedCityId(data[0].CITYID);
-                    setCitySlug(data[0].CITY_SLUG);
-                }
+            const data = await fetchAllTableRows<any>('city');
+            setCities(data);
+            if (data.length > 0) {
+                setSelectedCityId(data[0].CITYID);
+                setCitySlug(data[0].CITY_SLUG);
             }
         } catch (e) {
             console.error('Failed to load cities', e);
@@ -102,18 +100,14 @@ export default function PersonaWizard({ isOpen, onClose, onComplete, embedded }:
 
     const loadTakenIds = async () => {
         try {
-            const [aiRes, buildingRes] = await Promise.all([
-                fetch('/api/db/tables/ai?limit=100000'),
-                fetch('/api/db/tables/building?limit=100000'),
+            // 使用済み ID の照合なので、1 ページ分では足りない (欠けた分は
+            // 「空いている」と誤って判定される)。全件読み切る
+            const [ais, buildings] = await Promise.all([
+                fetchAllTableRows<{ AIID: string }>('ai'),
+                fetchAllTableRows<{ BUILDINGID: string }>('building'),
             ]);
-            if (aiRes.ok) {
-                const ais = await aiRes.json();
-                setTakenAiIds(new Set(ais.map((a: { AIID: string }) => a.AIID)));
-            }
-            if (buildingRes.ok) {
-                const buildings = await buildingRes.json();
-                setTakenBuildingIds(new Set(buildings.map((b: { BUILDINGID: string }) => b.BUILDINGID)));
-            }
+            setTakenAiIds(new Set(ais.map(a => a.AIID)));
+            setTakenBuildingIds(new Set(buildings.map(b => b.BUILDINGID)));
         } catch (e) {
             // 取れなくても致命ではない (初期値の提案が素朴になるだけで、
             // 確定はバックエンドの契約が行う)

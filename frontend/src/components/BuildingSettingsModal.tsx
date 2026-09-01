@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import styles from './BuildingSettingsModal.module.css';
 import { X, Save, Loader2 } from 'lucide-react';
 import ImageUpload from './common/ImageUpload';
+import { fetchAllTableRows } from '../lib/dbTable';
 
 interface Tool {
     TOOLID: number;
@@ -74,13 +75,15 @@ export default function BuildingSettingsModal({ isOpen, onClose, buildingId, onS
         const isStale = () => targetBuildingId !== buildingIdRef.current;
 
         try {
-            // Load building data, tools, cities, and prompts in parallel
-            const [buildingsRes, toolsRes, citiesRes, promptsRes, linksRes] = await Promise.all([
-                fetch('/api/db/tables/building'),
-                fetch('/api/db/tables/tool'),
-                fetch('/api/db/tables/city'),
+            // Load building data, tools, cities, and prompts in parallel。
+            // テーブル系は「この Building を名前で探す」「ツールを全部並べる」の
+            // ように全件そろっている前提なので、1 ページ (100 行) では足りない
+            const [buildings, tools, cities, promptsRes, links] = await Promise.all([
+                fetchAllTableRows<any>('building'),
+                fetchAllTableRows<Tool>('tool'),
+                fetchAllTableRows<City>('city'),
                 fetch('/api/world/prompts/available'),
-                fetch('/api/db/tables/building_tool_link')
+                fetchAllTableRows<any>('building_tool_link')
             ]);
             if (isStale()) {
                 console.warn(
@@ -90,9 +93,7 @@ export default function BuildingSettingsModal({ isOpen, onClose, buildingId, onS
             }
 
             let buildingApplied = false;
-            if (buildingsRes.ok) {
-                const buildings = await buildingsRes.json();
-                if (isStale()) return;
+            {
                 const building = buildings.find((b: any) => b.BUILDINGID === targetBuildingId);
                 if (building) {
                     setName(building.BUILDINGNAME || '');
@@ -118,17 +119,8 @@ export default function BuildingSettingsModal({ isOpen, onClose, buildingId, onS
                 }
             }
 
-            if (toolsRes.ok) {
-                const t = await toolsRes.json();
-                if (isStale()) return;
-                setTools(t);
-            }
-
-            if (citiesRes.ok) {
-                const c = await citiesRes.json();
-                if (isStale()) return;
-                setCities(c);
-            }
+            setTools(tools);
+            setCities(cities);
 
             if (promptsRes.ok) {
                 const p = await promptsRes.json();
@@ -136,9 +128,7 @@ export default function BuildingSettingsModal({ isOpen, onClose, buildingId, onS
                 setAvailablePrompts(p);
             }
 
-            if (linksRes.ok) {
-                const links = await linksRes.json();
-                if (isStale()) return;
+            {
                 const ids = links
                     .filter((l: any) => l.BUILDINGID === targetBuildingId)
                     .map((l: any) => l.TOOLID);

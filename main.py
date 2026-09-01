@@ -637,6 +637,9 @@ def main():
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
+        # 一覧 API のページ送りで総件数を運ぶヘッダ。既定では JS から
+        # 読めるヘッダが数種類に限られるため、明示的に許可する
+        expose_headers=["X-Total-Count"],
     )
 
     if lan_mode:

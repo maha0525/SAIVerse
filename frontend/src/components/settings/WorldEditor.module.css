@@ -87,6 +87,49 @@
     font-weight: 500;
 }
 
+/* 一覧のページ送り (1 ページ 100 件) */
+.pager {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    padding: 0.5rem 0;
+    border-top: 1px solid #334155;
+    font-size: 0.8rem;
+    color: #94a3b8;
+}
+
+.pagerBtn {
+    display: flex;
+    align-items: center;
+    gap: 0.15rem;
+    padding: 0.25rem 0.5rem;
+    border: 1px solid #475569;
+    background: transparent;
+    color: #cbd5e1;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 0.8rem;
+    white-space: nowrap;
+    transition: all 0.2s;
+}
+
+.pagerBtn:hover:not(:disabled) {
+    background: #334155;
+    border-color: #64748b;
+    color: #f1f5f9;
+}
+
+.pagerBtn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+
+.pagerStatus {
+    text-align: center;
+    white-space: nowrap;
+}
+
 .newBtn {
     margin-top: auto;
     padding: 0.75rem;
@@ -253,6 +296,15 @@
         border-radius: 999px;
     }
 
+    /* 横スクロールの一覧では、ページ送りも 1 つのチップとして並ぶ */
+    .pager {
+        flex: none;
+        min-width: fit-content;
+        padding: 0;
+        border-top: none;
+        gap: 0.35rem;
+    }
+
     .form {
         max-width: none;
         padding-right: 0;
@@ -311,6 +363,22 @@
     background: #eff6ff;
     border-color: #3b82f6;
     color: #2563eb;
+}
+
+:global([data-theme="light"]) .pager {
+    border-top-color: #e2e8f0;
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .pagerBtn {
+    border-color: #cbd5e1;
+    color: #475569;
+}
+
+:global([data-theme="light"]) .pagerBtn:hover:not(:disabled) {
+    background: #f1f5f9;
+    border-color: #94a3b8;
+    color: #1f2937;
 }
 
 :global([data-theme="light"]) .newBtn {
