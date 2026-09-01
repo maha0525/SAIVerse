@@ -239,7 +239,6 @@ class _AdapterTestBase(unittest.TestCase):
         self.persona_path = Path(self._tmp.name) / "personas" / "tester"
         self.persona_path.mkdir(parents=True, exist_ok=True)
         os.environ["SAIMEMORY_MEMORY"] = "1"
-        os.environ.pop("ENABLE_MEMORY_WEAVE_CONTEXT", None)
         self.addCleanup(self._cleanup_temp)
 
         patcher = patch("saiverse_memory.adapter.Embedder", DummyEmbedder)
@@ -2791,8 +2790,7 @@ class SluiceGateTest(_AdapterTestBase):
 
         window = _metabolism_window(messages)
         dispatched = []
-        with patch.dict(os.environ, {"ENABLE_MEMORY_WEAVE_CONTEXT": "true"}), \
-                patch.dict(os.environ, {"SAIVERSE_CHRONICLE_BAND_BUDGET": "2500"}), \
+        with patch.dict(os.environ, {"SAIVERSE_CHRONICLE_BAND_BUDGET": "2500"}), \
                 patch("saiverse.dynamic_state.DynamicStateManager.on_metabolism",
                       lambda *a, **k: dispatched.append(k)):
             lifecycle.run_metabolism(persona, "b", window, _METABOLISM_WATERMARKS, None)
@@ -2815,8 +2813,7 @@ class SluiceGateTest(_AdapterTestBase):
 
         window = _metabolism_window(messages)
         dispatched = []
-        with patch.dict(os.environ, {"ENABLE_MEMORY_WEAVE_CONTEXT": "true"}), \
-                patch.dict(os.environ, {"SAIVERSE_CHRONICLE_BAND_BUDGET": "2500"}), \
+        with patch.dict(os.environ, {"SAIVERSE_CHRONICLE_BAND_BUDGET": "2500"}), \
                 patch("saiverse.dynamic_state.DynamicStateManager.on_metabolism",
                       lambda p, m, model_key=None: dispatched.append(model_key)):
             lifecycle.run_metabolism(

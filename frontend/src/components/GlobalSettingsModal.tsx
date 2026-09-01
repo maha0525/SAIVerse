@@ -765,41 +765,43 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                                 </div>
 
                                 {/* Gemini Auto Cache Toggle */}
-                                <div className={styles.toggleContainer}>
-                                    <div>
-                                        <div className={styles.toggleLabel}>
-                                            Gemini 自動キャッシュ（実験的）
-                                        </div>
-                                        <div className={styles.toggleDescription}>
-                                            全ての Gemini 呼び出しでキャッシュを自動作成し、入力トークンをキャッシュ価格にします。保持秒数が 0 のときは応答後すぐ削除します。
-                                        </div>
-                                        {geminiAutoCacheEnabled && (
-                                            <div className={styles.subSetting}>
-                                                <label className={styles.subSettingLabel} htmlFor="gemini-auto-cache-keep">
-                                                    応答後の保持秒数
-                                                </label>
-                                                <input
-                                                    id="gemini-auto-cache-keep"
-                                                    type="number"
-                                                    min={0}
-                                                    max={geminiAutoCacheKeepMax}
-                                                    step={1}
-                                                    className={styles.subSettingInput}
-                                                    value={geminiAutoCacheKeepInput}
-                                                    onChange={e => setGeminiAutoCacheKeepInput(e.target.value)}
-                                                    onBlur={commitGeminiAutoCacheKeepSeconds}
-                                                    onKeyDown={e => { if (e.key === 'Enter') e.currentTarget.blur(); }}
-                                                />
-                                                <div className={styles.subSettingHint}>
-                                                    1 以上にすると、その秒数のあいだ Gemini 側にキャッシュを残します（最大 {geminiAutoCacheKeepMax} 秒）。残しているあいだは保存料金がかかりますが、残したキャッシュを次の呼び出しで使い回す仕組みはまだありません。いまは 0 のままをおすすめします。
-                                                </div>
+                                <div className={`${styles.toggleContainer} ${styles.toggleContainerStacked}`}>
+                                    <div className={styles.toggleRow}>
+                                        <div>
+                                            <div className={styles.toggleLabel}>
+                                                Gemini 自動キャッシュ（実験的）
                                             </div>
-                                        )}
+                                            <div className={styles.toggleDescription}>
+                                                全ての Gemini 呼び出しでキャッシュを自動作成し、入力トークンをキャッシュ価格にします。保持秒数が 0 のときは応答後すぐ削除します。
+                                            </div>
+                                        </div>
+                                        <div
+                                            className={`${styles.toggle} ${geminiAutoCacheEnabled ? styles.active : ''}`}
+                                            onClick={toggleGeminiAutoCache}
+                                        />
                                     </div>
-                                    <div
-                                        className={`${styles.toggle} ${geminiAutoCacheEnabled ? styles.active : ''}`}
-                                        onClick={toggleGeminiAutoCache}
-                                    />
+                                    {geminiAutoCacheEnabled && (
+                                        <div className={styles.subSetting}>
+                                            <label className={styles.subSettingLabel} htmlFor="gemini-auto-cache-keep">
+                                                応答後の保持秒数
+                                            </label>
+                                            <input
+                                                id="gemini-auto-cache-keep"
+                                                type="number"
+                                                min={0}
+                                                max={geminiAutoCacheKeepMax}
+                                                step={1}
+                                                className={styles.subSettingInput}
+                                                value={geminiAutoCacheKeepInput}
+                                                onChange={e => setGeminiAutoCacheKeepInput(e.target.value)}
+                                                onBlur={commitGeminiAutoCacheKeepSeconds}
+                                                onKeyDown={e => { if (e.key === 'Enter') e.currentTarget.blur(); }}
+                                            />
+                                            <div className={styles.subSettingHint}>
+                                                1 以上にすると、その秒数のあいだ Gemini 側にキャッシュを残します（最大 {geminiAutoCacheKeepMax} 秒）。機能が不完全な部分があります。自己責任でご利用ください。
+                                            </div>
+                                        </div>
+                                    )}
                                 </div>
 
                                 {/* Developer Mode Toggle */}

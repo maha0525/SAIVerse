@@ -104,8 +104,9 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
     const [autonomousChronicleEnabled, setAutonomousChronicleEnabled] = useState(true);
     const [autoRecallEnabled, setAutoRecallEnabled] = useState(true);
     const [memoryWeaveContext, setMemoryWeaveContext] = useState(true);
-    const [memopediaIndexEnabled, setMemopediaIndexEnabled] = useState(false);
+    const [memopediaIndexEnabled, setMemopediaIndexEnabled] = useState(true);
     const [coreMemoryCharBudget, setCoreMemoryCharBudget] = useState<string>('');
+    const [chronicleCharBudget, setChronicleCharBudget] = useState<string>('');
     const [spellEnabled, setSpellEnabled] = useState(false);
     const [realtimeInfoEnabled, setRealtimeInfoEnabled] = useState(true);
     const [realtimeSpells, setRealtimeSpells] = useState<Array<{binding_id: number; spell_name: string; spell_args_json: string | null; label: string | null; enabled: boolean; priority: number}>>([]);
@@ -219,6 +220,11 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                 setAutoRecallEnabled(data.auto_recall_enabled ?? true);
                 setMemoryWeaveContext(data.memory_weave_context ?? true);
                 setMemopediaIndexEnabled(data.memopedia_index_enabled ?? false);
+                setChronicleCharBudget(
+                    data.chronicle_char_budget != null
+                        ? String(data.chronicle_char_budget)
+                        : ''
+                );
                 setCoreMemoryCharBudget(
                     data.core_memory_char_budget != null
                         ? String(data.core_memory_char_budget)
@@ -330,6 +336,14 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                     // それ以外は parseInt 結果。NaN は 0 扱いで既定値 (2000) 復帰。
                     core_memory_char_budget: (() => {
                         const trimmed = coreMemoryCharBudget.trim();
+                        if (!trimmed) return 0;
+                        const parsed = parseInt(trimmed);
+                        return Number.isNaN(parsed) ? 0 : parsed;
+                    })(),
+                    // Chronicle 帯の読み込み文字数: コア記憶と同じ流儀 (空 = 0 を
+                    // 送って NULL に倒し、既定 20,000 字の運用へ戻す)。
+                    chronicle_char_budget: (() => {
+                        const trimmed = chronicleCharBudget.trim();
                         if (!trimmed) return 0;
                         const parsed = parseInt(trimmed);
                         return Number.isNaN(parsed) ? 0 : parsed;
@@ -634,6 +648,28 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                             </div>
 
                             <div className={styles.fieldGroup}>
+                                <label className={styles.label}>Chronicle（あらすじ）の読み込み文字数</label>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                                    <input
+                                        type="number"
+                                        step="1000"
+                                        min="0"
+                                        placeholder="20000"
+                                        value={chronicleCharBudget}
+                                        onChange={(e) => setChronicleCharBudget(e.target.value)}
+                                        style={{ width: '7rem' }}
+                                    />
+                                    <span>字</span>
+                                    <span style={{ fontSize: '0.85em', color: '#888' }}>
+                                        (既定: 20000 字 / 空で既定に戻す)
+                                    </span>
+                                </div>
+                                <div className={styles.description}>
+                                    会話時にコンテキストへ読み込む、過去のあらすじの合計文字数の目安です。増やすと過去の記憶が詳しくなり、減らすとトークン消費を抑えられます。反映は次の記憶の整理からです。
+                                </div>
+                            </div>
+
+                            <div className={styles.fieldGroup}>
                                 <label className={styles.label}>自律行動中も記憶整理（Chronicle生成）を行う</label>
                                 <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
                                     <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
@@ -646,7 +682,7 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                                     </label>
                                 </div>
                                 <div className={styles.description}>
-                                    自律稼働中（ユーザーとの会話以外のタイミング）にMetabolismが走った際も、確認なしでChronicleを自動生成します。無効にすると、自律稼働中に溜まった会話はChronicle化されず、次にユーザーと会話するまで長期記憶に残りません。
+                                    自律稼働中（ユーザーとの会話以外のタイミング）に記憶の整理が起きた際も、確認なしでChronicleを自動生成します。無効にすると、自律稼働中に溜まった会話はChronicle化されず、次にユーザーと会話するまで長期記憶に残りません。
                                 </div>
                             </div>
 
@@ -685,7 +721,7 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                             </div>
 
                             <div className={styles.fieldGroup}>
-                                <label className={styles.label}>Memopedia索引の常時表示（旧方式）</label>
+                                <label className={styles.label}>Memopedia索引の常時表示</label>
                                 <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
                                     <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
                                         <input
@@ -697,7 +733,7 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                                     </label>
                                 </div>
                                 <div className={styles.description}>
-                                    Memopediaの全ページ一覧を、常にペルソナのコンテキストへ読み込みます（自動想起の導入前の方式）。Memopediaをメモ帳として能動的に使っている場合に有効にしてください。トークン消費が増えます。反映は次の記憶整理（Metabolism）からです。
+                                    Memopediaの全ページ一覧（タイトルと概要）を、常にペルソナのコンテキストへ読み込みます。ペルソナが自分の記憶の全体像を把握しやすくなる反面、トークン消費が増えます。当面は有効のままをおすすめします。設定の変更は、ペルソナメニューの「溜まった会話をあらすじにまとめる」を押すとすぐに反映されます（押さなくても、次に記憶の整理が起きたときに反映されます）。
                                 </div>
                             </div>
 

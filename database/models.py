@@ -101,14 +101,25 @@ class AI(Base):
     # 目次 (summary あり・深さ無制限・旧方式相当) を組み立て、head に含める。P4-d
     # (2026-07-11) で器を MemoryWeaveSection からこちらへ一本化、2026-07-14 に描画内容の
     # 回帰 (summary 欠落・深さ制限) を修正済み。メモ帳として能動的に Memopedia を使う
-    # ユーザー向けの脱出経路。デフォルト OFF (トークン消費増のため既定は新方式に従う)。
-    MEMOPEDIA_INDEX_ENABLED = Column(Boolean, default=False, nullable=False)
+    # ユーザー向けの脱出経路。当初はデフォルト OFF (トークン消費増のため既定は
+    # 新方式に従う) だったが、2026-09-01 にデフォルト ON へ変更 — 自動想起が
+    # 索引の常時表示を置き換えられる完成度にまだ達していないため (v0.3.1 で
+    # 既存ペルソナも upgrade handler で一括 ON)。
+    MEMOPEDIA_INDEX_ENABLED = Column(Boolean, default=True, nullable=False)
     # コア記憶 (記憶アーキv2 ゾーン A, docs/intent/memory_architecture_v2.md §5) の
     # 容量目安 (文字数)。ペルソナが自分で刻む恒常知識の合計文字数がこの値を超えると、
     # core_memory 系スペルの返り値に「整理を検討」の通知を添える (切り詰め・拒否は
     # 一切しない)。NULL → 既定 2000 字。コストと記憶量のトレードオフはユーザーに
     # よって異なるため per-persona で変更可能 (2026-07-04 決定)。
     CORE_MEMORY_CHAR_BUDGET = Column(Integer, nullable=True)
+    # Chronicle 帯 (会話時にコンテキストへ読み込む過去のあらすじ) の文字数予算。
+    # 解決順は「この列 (非 NULL) > env SAIVERSE_CHRONICLE_CHAR_BUDGET > 既定 20,000」
+    # (sai_memory/arasuji/context.py の DEFAULT_CHRONICLE_CHAR_BUDGET)。
+    # 増やすと過去の記憶が詳しくなり、減らすとトークン消費が減る — 好みと予算が
+    # ユーザーごとに違うので per-persona で変更可能にした (2026-09-01 裁定)。
+    # NULL → 既定に従う。0 以下は CORE_MEMORY_CHAR_BUDGET と同じ流儀で NULL に倒す
+    # (manager/admin.py)。
+    CHRONICLE_CHAR_BUDGET = Column(Integer, nullable=True)
     SPELL_ENABLED = Column(Boolean, default=True, nullable=False)  # Per-persona spell system toggle (基幹機能化に伴い v0.3.0.dev3 でデフォルト ON 化)
     # Per-persona toggle for the realtime info section (現在時刻 / 前回発言時刻 / 空間情報)
     # injected by sea/runtime.py:_build_realtime_context. OFF にすると、その動的

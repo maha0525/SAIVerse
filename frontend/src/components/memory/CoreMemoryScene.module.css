@@ -6,6 +6,27 @@
     overflow-x: hidden;
 }
 
+/* タブ全体の説明 (コア記憶とは何か)。下の .header は「刻む道具」の説明。 */
+.tabIntro {
+    margin-bottom: 1.25rem;
+}
+
+.tabIntroTitle {
+    font-size: 1.25rem;
+    font-weight: 700;
+    margin: 0 0 0.4rem 0;
+}
+
+.tabIntroText {
+    color: #aaa;
+    font-size: 0.9rem;
+    line-height: 1.6;
+    margin: 0;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+    max-width: 100%;
+}
+
 .header {
     display: flex;
     gap: 1rem;
@@ -19,6 +40,12 @@
     color: #ffc107;
     flex-shrink: 0;
     margin-top: 2px;
+}
+
+/* アイコンの隣の文章の列。min-width: 0 が無いと、flex の既定の
+   「中身より小さくならない」規則で説明文が枠からはみ出す。 */
+.header > div {
+    min-width: 0;
 }
 
 .title {
@@ -74,9 +101,15 @@
     border-top: none;
 }
 
+/* 本文 (.corePreview) が潰れないように「折り返せる行」にしてある。
+   字数と操作ボタンは縮まない (flex-shrink: 0 + nowrap) ので、狭い画面で
+   flex-wrap が無いと、縮めるところが本文しか残らず幅ゼロ近くまで絞られて
+   一文字ずつ縦に並ぶ。行を wrap させ、本文側に「これ以上は縮まない基準幅」
+   (flex-basis) を与えることで、収まらないときはボタン群が次の行へ落ちる。 */
 .coreItemRow {
     display: flex;
     align-items: flex-start;
+    flex-wrap: wrap;
     gap: 0.5rem;
     width: 100%;
     padding: 0.35rem 0;
@@ -85,8 +118,11 @@
 .coreToggle {
     display: flex;
     align-items: flex-start;
+    flex-wrap: wrap;
     gap: 0.5rem;
-    flex: 1;
+    /* basis 0 (flex: 1) だと「本文は幾らでも縮んでよい」の意味になるので、
+       読める幅を基準にして、入らないときは行を折る側に倒す。 */
+    flex: 1 1 12rem;
     min-width: 0;
     padding: 0;
     background: none;
@@ -131,6 +167,7 @@
 
 .coreActions {
     display: flex;
+    flex-wrap: wrap;
     gap: 0.3rem;
     flex-shrink: 0;
     align-items: center;
@@ -267,6 +304,9 @@
     overflow-wrap: anywhere;
     max-width: 100%;
     min-width: 0;
+    /* ごみ箱の行では .coreToggle を挟まず直接この行の子になるので、
+       ここにも伸び縮みの指定を置く (置かないと本文だけが絞られる)。 */
+    flex: 1 1 8rem;
 }
 
 .coreChars {
@@ -643,6 +683,10 @@
     color: #64748b;
 }
 
+:global([data-theme="light"]) .tabIntroText {
+    color: #475569;
+}
+
 :global([data-theme="light"]) .coreList {
     background: #f8fafc;
     border-color: #e2e8f0;
@@ -869,4 +913,28 @@
 
 :global([data-theme="light"]) .trashToggle:hover {
     color: #1f2937;
+}
+
+/* --- 狭い画面 (スマホ) --- */
+@media (max-width: 768px) {
+    /* 左右 2rem ずつの余白は 375px 幅では本文の 2 割近くを食う。
+       本文が読める幅を優先して詰める。 */
+    .container {
+        padding: 1rem;
+    }
+
+    /* 操作ボタン群は本文と同じ行に並べず、次の行へ落として全幅を本文に渡す。
+       落ちた行は [字数] ......... [確認/編集/削除] の並びになる。 */
+    .coreToggle {
+        flex: 1 1 100%;
+    }
+
+    .coreActions {
+        margin-left: auto;
+    }
+
+    .editArea,
+    .coreFull {
+        margin-left: 0;
+    }
 }

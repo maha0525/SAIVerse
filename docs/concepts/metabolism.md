@@ -31,7 +31,7 @@ Metabolism は短期記憶を区切り直す節目であり、同時に**短期�
 | 実行点 | 場所 | 発火条件 |
 |---|---|---|
 | **応答後（自動）** | `sea/runtime.py` run_meta_user 末尾 → `maybe_run_metabolism` → `run_metabolism` | watermark 超過 / トークン閾値（`_metabolism_token_triggered`） |
-| **手動** | `SessionLifecycle.run_manual_compaction`（記憶の整理ボタン / Chronicle タブの生成が合流） | ユーザーの明示操作。範囲規則は自動と同一（残す量より古い側だけ） |
+| **手動** | `SessionLifecycle.run_manual_compaction`（ペルソナメニューの「溜まった会話をあらすじにまとめる」/ Chronicle タブの生成が合流。2026-09-01 に両方とも背景ジョブ `POST /api/people/{id}/arasuji/generate` へ一本化） | ユーザーの明示操作。範囲規則は自動と同一（残す量より古い側だけ） |
 | **応答前の非常畳み**（§14-3） | `run_meta_user` 冒頭 → `maybe_run_emergency_precompaction` | 話しかけた時点で高水位を**既に**超過しているイレギュラー（休眠 model の復帰等）。原因不問の回復措置で、status イベントで通知（同意は求めない） |
 | **失効後の先回り畳み**（§14-4） | EventScheduler の定期見張り（10 分周期）→ `cold_precompaction_status` / `run_cold_precompaction` | 全 anchor 行が冷え切った + 提示ウィンドウが残す量と上限の**中間**を超過。編纂の総作業量は畳む時期によらず不変なので、前倒しで「冷えた再開時の定価読み」だけが消える。Chronicle 生成が有効（自律確認 ON）な persona のみ |
 | **応答前の読み戻し**（§15、2026-07-30） | `run_meta_user` 冒頭 → `maybe_run_window_refill`（非常畳みの直後） | 話しかけた時点で提示ウィンドウが**残す量を下回っている**（水位引き上げ後の既存ペルソナ / ほぼ全編纂済みでアップデートしたペルソナ）。畳んだところを開き直して残す量まで充填する — **編纂も LLM も無し**（圧縮区間に「生で見せる」印 `presented_raw` を付ける + 足りなければ一次あらすじの `source_ids` から記録を合成して anchor を引き戻す）。再畳みは印戻しだけで既存あらすじを再利用（`_refold_raw_view_folds` が退場計画より先に走る） |

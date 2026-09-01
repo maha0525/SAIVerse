@@ -56,7 +56,6 @@ interface ScheduleModalProps {
 
 export default function ScheduleModal({ isOpen, onClose, personaId }: ScheduleModalProps) {
     const [schedules, setSchedules] = useState<ScheduleItem[]>([]);
-    const [playbooks, setPlaybooks] = useState<string[]>([]);
     const [loading, setLoading] = useState(false);
 
     // Edit mode state
@@ -64,6 +63,9 @@ export default function ScheduleModal({ isOpen, onClose, personaId }: ScheduleMo
 
     // Form State
     const [formType, setFormType] = useState<'periodic' | 'oneshot' | 'interval'>('periodic');
+    // 画面には出さない。Playbook パラメータ欄をどの Playbook で引くかにだけ使う。
+    // 編集中は「そのアラームが元々持っている Playbook」が入り、新規作成では空
+    // （どの Playbook で動くかはサーバーが決めるので、こちらは名前を持たない）。
     const [formPlaybook, setFormPlaybook] = useState('');
     const [formDesc, setFormDesc] = useState('');
     const [formPriority, setFormPriority] = useState(0);
@@ -95,7 +97,6 @@ export default function ScheduleModal({ isOpen, onClose, personaId }: ScheduleMo
     useEffect(() => {
         if (isOpen) {
             loadSchedules();
-            loadPlaybooks();
             loadSpells();
             loadRouterCallablePlaybooks();
         }
@@ -122,22 +123,6 @@ export default function ScheduleModal({ isOpen, onClose, personaId }: ScheduleMo
             console.error(e);
         } finally {
             setLoading(false);
-        }
-    };
-
-    const loadPlaybooks = async () => {
-        try {
-            // include_day_rhythm: 起床 (judgment_day_open)・就寝 (judgment_day_close) は
-            // user_selectable=false (召喚に出すのは誤り) だが、スケジュール登録は
-            // 自律行動 v2 の正規の儀式なのでこのダイアログでは選択肢に含める
-            const res = await fetch(`/api/people/meta_playbooks?include_day_rhythm=true`);
-            if (res.ok) {
-                const data = await res.json();
-                setPlaybooks(data);
-                if (data.length > 0 && !formPlaybook) setFormPlaybook(data[0]);
-            }
-        } catch (e) {
-            console.error(e);
         }
     };
 
@@ -193,7 +178,7 @@ export default function ScheduleModal({ isOpen, onClose, personaId }: ScheduleMo
     const resetForm = () => {
         setEditingId(null);
         setFormType('periodic');
-        setFormPlaybook(playbooks.length > 0 ? playbooks[0] : '');
+        setFormPlaybook('');
         setFormDesc('');
         setFormPriority(0);
         setFormEnabled(true);
@@ -266,14 +251,22 @@ export default function ScheduleModal({ isOpen, onClose, personaId }: ScheduleMo
             combinedArgs.pre_spells = preSpellsBuilt;
         }
 
+        const isEdit = editingId !== null;
+
         const payload: any = {
             schedule_type: formType,
-            meta_playbook: formPlaybook,
             description: formDesc,
             priority: formPriority,
             enabled: formEnabled,
             args: Object.keys(combinedArgs).length > 0 ? combinedArgs : null
         };
+
+        // meta_playbook は新規・編集のどちらでも送らない。
+        // 新規: どの Playbook で動くかはサーバーが既定値を入れる (既定値の定義を
+        //   画面側にも置くと二重定義になり、片方だけ変わると食い違う)。
+        // 編集: update_schedule は「中身のある値が来たときだけ上書き」なので、
+        //   送らないことが「既存の Playbook をそのまま保つ」ことになる。ライフ設定が
+        //   登録した起床・就寝のアラームを編集しても会話用に化けないための担保。
 
         if (formType === 'periodic') {
             payload.days_of_week = formDays;
@@ -285,7 +278,6 @@ export default function ScheduleModal({ isOpen, onClose, personaId }: ScheduleMo
         }
 
         try {
-            const isEdit = editingId !== null;
             const url = isEdit
                 ? `/api/people/${personaId}/schedules/${editingId}`
                 : `/api/people/${personaId}/schedules`;
@@ -467,23 +459,6 @@ export default function ScheduleModal({ isOpen, onClose, personaId }: ScheduleMo
                                     <option value="periodic">定期（週次）</option>
                                     <option value="oneshot">単発（1回のみ）</option>
                                     <option value="interval">インターバル（繰り返し）</option>
-                                </select>
-                            </div>
-
-                            <div className={styles.formGroup}>
-                                <label className={styles.label}>Meta Playbook</label>
-                                <select
-                                    className={styles.select}
-                                    value={formPlaybook}
-                                    onChange={e => {
-                                        setFormPlaybook(e.target.value);
-                                        setFormPlaybookArgs({}); // Reset params when playbook changes
-                                    }}
-                                >
-                                    {playbooks.length === 0 && (
-                                        <option value="" disabled>（読み込み中...）</option>
-                                    )}
-                                    {playbooks.map(p => <option key={p} value={p}>{p}</option>)}
                                 </select>
                             </div>
 

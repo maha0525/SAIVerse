@@ -21,6 +21,12 @@ if TYPE_CHECKING:
 
 LOGGER = logging.getLogger(__name__)
 
+# head の weave section を覗く検査 (:meth:`SessionLifecycle._head_weave_snapshot`)
+# 自体が失敗したことを表す番人。「weave が正当に無い」(None) と区別するために
+# 要る — 両方 None に潰すと、検査が壊れている並びで stale な head が「組み直せ
+# ました」の顔で通り、知らせるための機構が黙る (Codex 指摘 2026-09-01)。
+_WEAVE_INSPECT_FAILED = object()
+
 
 class SessionLifecycle:
     """Anchor / Metabolism / Chronicle — Session (短期記憶) の節目管理。
@@ -1842,12 +1848,146 @@ class SessionLifecycle:
               対象外でそのまま
             - "unavailable": model / 水位 / 起点が解決できず、畳みを定義できない
               (ブートストラップ前の新規ペルソナ等)
+
+        head の再構築 (2026-09-01): **手動入口は結果によらず head 再構築を
+        保証する** — ボタンを押した以上、畳みが起きなくても設定トグル
+        (Memopedia 索引の常時表示など) の変更がコンテキストへ反映されなければ
+        ならない。"ok" だけは畳み本体 (:meth:`_run_metabolism_locked`) が
+        発火済みなので、ここでは発火しない (二重 capture の回避)。発火責務を
+        この関数が持つことで、呼び出し元 (あらすじタブの生成ジョブ) は何も
+        しなくてよい。head が組み直されたかまで知りたい呼び出し元は
+        :meth:`run_manual_compaction_checked` を使う。
+        """
+        status, _head_rebuilt = self.run_manual_compaction_checked(
+            persona, event_callback, model_key, cancellation_token,
+        )
+        return status
+
+    def run_manual_compaction_checked(
+        self,
+        persona,
+        event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+        model_key: Optional[str] = None,
+        cancellation_token: Optional[CancellationToken] = None,
+    ) -> Tuple[str, bool]:
+        """:meth:`run_manual_compaction` に head 再構築の成否を添えた形。
+
+        Returns:
+            ``(status, head_rebuilt)``。status は run_manual_compaction と同じ。
+            ``head_rebuilt`` が False なら、畳み自体は status のとおりでも
+            **設定変更のコンテキストへの反映は済んでいない** — 画面へ警告として
+            出すのは呼び出し元 (ジョブ) の仕事 (2026-09-01 まはー裁定「無理に
+            救済しなくていいが、失敗を知らせることは必要」)。
+
+        判定は §15 読み戻し (:meth:`maybe_run_window_refill`) と同じ指紋比較:
+        dispatch が成功しても weave が組み直された保証は無い (capture_all は
+        section の capture 例外で既存オブジェクトを使い回す stale-but-real)
+        ので、weave section の identity が変わったかで見る。weave が元々無い
+        環境 (head 未初期化 / weave 無効) は残りようが無いので成功扱い。
+
+        ``before`` は**判定本体より前**に撮る — status=="ok" の再構築は畳み
+        本体 (_run_metabolism_locked) の中で起きるため、畳みの後に撮ると
+        自分が撮った新品を「変わっていない」と誤判定する。
+
+        **別処理が同じ窓で組み直した場合も成功と数える** (排他はしない、
+        2026-09-01 裁定)。この検査が守るのは「設定がコンテキストへ届いたこと」
+        であって「組み直したのが自分か」ではない。before と after の間に別の
+        手動処理や自動 Metabolism が head を組み直したなら、その head は現在の
+        設定で capture されているので、ユーザーの目的は誰の手でも満たされて
+        いる。主体を見分けるためのロックは、目的が要求しない複雑化になる。
         """
         resolved_model = str(model_key or getattr(persona, "model", "") or "") or None
+        head_model = self._resolve_head_model_key(persona, resolved_model)
+        persona_id = getattr(persona, "persona_id", None)
+        before_weave = self._head_weave_snapshot(persona_id, head_model)
+
+        status = self._manual_compaction_status(
+            persona, event_callback, resolved_model, cancellation_token,
+        )
+        if status != "ok":
+            self._dispatch_manual_head_rebuild(persona, head_model)
+        return status, self._head_was_rebuilt(persona_id, head_model, before_weave)
+
+    def _resolve_head_model_key(
+        self, persona, model_key: Optional[str],
+    ) -> Optional[str]:
+        """head の同定キー (persona, model) の model 側を確定する。
+
+        ``on_metabolism(model_key=None)`` は head 側で persona の標準 model に
+        フォールバックする。指紋を撮る側も同じ鍵を見ないと別の snapshot を
+        比べてしまうので、フォールバックをここで先に済ませて、発火にも同じ値を
+        渡す。
+        """
+        if model_key:
+            return str(model_key)
+        try:
+            from sea.head_pipeline.integration import resolve_default_model_key
+            return resolve_default_model_key(persona)
+        except Exception:
+            return str(getattr(persona, "model", "") or "") or None
+
+    def _head_was_rebuilt(
+        self, persona_id: Optional[str], model_key: Optional[str], before_weave: Any,
+    ) -> bool:
+        """head の weave section が撮り直されたか。
+
+        三値 (:meth:`_head_weave_snapshot` 参照) の扱い:
+
+        - どちらかが :data:`_WEAVE_INSPECT_FAILED` → **False** (検証できて
+          いない)。知らせるための機構なので、分からないときは黙らず警告側へ
+          倒す
+        - before が ``None`` (weave が正当に無い環境) → True。残りようが
+          ないので失敗ではない
+        - それ以外 → identity が変わったか
+        """
+        if before_weave is _WEAVE_INSPECT_FAILED:
+            return False
+        if before_weave is None:
+            return True
+        after_weave = self._head_weave_snapshot(persona_id, model_key)
+        if after_weave is _WEAVE_INSPECT_FAILED:
+            return False
+        return after_weave is not before_weave
+
+    def _dispatch_manual_head_rebuild(self, persona, model_key: Optional[str]) -> None:
+        """手動入口 (ボタン押下) の出口で head を再構築する。
+
+        畳み・補修が実際には何もしなかった場合 ("noop" / "disabled" /
+        "failed" 等) でも、ユーザーが押した以上は設定変更がコンテキストへ
+        反映されなければならない。畳みが成立した経路は
+        :meth:`_run_metabolism_locked` が既に発火しているので、呼び出し側が
+        重複しない条件で呼ぶ。
+
+        失敗しても手動操作そのものの成否には畳み込まない (head は次の節目で
+        再構築される)。
+        """
+        try:
+            from saiverse.dynamic_state import DynamicStateManager
+            DynamicStateManager.on_metabolism(
+                persona, self.manager, model_key=model_key,
+            )
+        except Exception:
+            LOGGER.exception("[dynamic_state] manual head rebuild failed")
+
+    def _manual_compaction_status(
+        self,
+        persona,
+        event_callback: Optional[Callable[[Dict[str, Any]], None]],
+        resolved_model: Optional[str],
+        cancellation_token: Optional[CancellationToken],
+    ) -> str:
+        """:meth:`run_manual_compaction` の判定本体 — 畳みの結果だけを返す。
+
+        head 再構築は呼び出し元 (run_manual_compaction) が単一の出口で持つ。
+        早期 return が多いので、発火をここに書くと必ずどれかで書き漏らす。
+        """
         if not resolved_model:
             return "unavailable"
-        memory_weave_enabled = os.getenv("ENABLE_MEMORY_WEAVE_CONTEXT", "").lower() in ("true", "1")
-        if not memory_weave_enabled or not self.is_chronicle_enabled_for_persona(persona):
+        # 門はペルソナ設定 (AI.CHRONICLE_ENABLED) だけ。かつては env
+        # ENABLE_MEMORY_WEAVE_CONTEXT との二段だったが、.env.example が false 出荷で、
+        # v0.2 からのアップグレード組の .env には行自体が無く (= false 扱い)、
+        # 記憶の整理が全経路で止まる実害を出した (2026-09-01 撤去裁定)。
+        if not self.is_chronicle_enabled_for_persona(persona):
             return "disabled"
         watermarks = self.get_metabolism_watermarks(persona, resolved_model)
         if watermarks is None:
@@ -1875,6 +2015,59 @@ class SessionLifecycle:
         return "noop" if status == "nothing" else status
 
     def run_coverage_repair(
+        self,
+        persona,
+        event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+        cancellation_token: Optional[CancellationToken] = None,
+    ) -> Tuple[str, int]:
+        """被覆補修の手動入口 — 実体は :meth:`_coverage_repair_status`。
+
+        run_manual_compaction と同じく、**結果によらず出口で head を再構築
+        する** (設定トグルの反映を保証する。2026-09-01)。補修の本体は
+        on_metabolism を一切発火しないので条件は付けない。
+
+        末尾の引き戻し (:func:`sea.coverage_repair.run_tail_rewind`) が窓の
+        畳みへ降りた場合だけ、その中の run_manual_compaction が先に 1 回
+        発火する。それでも出口の発火は重複ではない — 引き戻しの後に
+        ``mark_covered_cold_windows`` が §15 の印を書くので、途中の capture は
+        最終状態を写していない。
+
+        head が組み直されたかまで知りたい呼び出し元は
+        :meth:`run_coverage_repair_checked` を使う。
+        """
+        status, mark_failures, _head_rebuilt = self.run_coverage_repair_checked(
+            persona, event_callback, cancellation_token,
+        )
+        return (status, mark_failures)
+
+    def run_coverage_repair_checked(
+        self,
+        persona,
+        event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+        cancellation_token: Optional[CancellationToken] = None,
+    ) -> Tuple[str, int, bool]:
+        """:meth:`run_coverage_repair` に head 再構築の成否を添えた形。
+
+        Returns:
+            ``(status, 印を書けなかった行の数, head_rebuilt)``。判定の規約は
+            :meth:`run_manual_compaction_checked` と同じ (weave section の
+            identity 比較。before は補修本体より前に撮る — 引き戻しが内側で
+            走らせる畳みの再構築も拾うため)。
+        """
+        head_model = self._resolve_head_model_key(persona, None)
+        persona_id = getattr(persona, "persona_id", None)
+        before_weave = self._head_weave_snapshot(persona_id, head_model)
+
+        status, mark_failures = self._coverage_repair_status(
+            persona, event_callback, cancellation_token,
+        )
+        self._dispatch_manual_head_rebuild(persona, head_model)
+        return (
+            status, mark_failures,
+            self._head_was_rebuilt(persona_id, head_model, before_weave),
+        )
+
+    def _coverage_repair_status(
         self,
         persona,
         event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
@@ -1911,10 +2104,8 @@ class SessionLifecycle:
             印の失敗数は status=="ok" のときだけ意味を持つ。行単位の失敗は
             正確な数、印の工程ごと例外で落ちた場合は -1 (数不明の全滅)。
         """
-        memory_weave_enabled = os.getenv(
-            "ENABLE_MEMORY_WEAVE_CONTEXT", "",
-        ).lower() in ("true", "1")
-        if not memory_weave_enabled or not self.is_chronicle_enabled_for_persona(persona):
+        # 門はペルソナ設定だけ (env ENABLE_MEMORY_WEAVE_CONTEXT は 2026-09-01 撤去)。
+        if not self.is_chronicle_enabled_for_persona(persona):
             return ("disabled", 0)
         persona_id = getattr(persona, "persona_id", None)
         from sea.beat_gate import hold_beat
@@ -2431,22 +2622,36 @@ class SessionLifecycle:
 
     def _head_weave_snapshot(
         self, persona_id: Optional[str], model_key: Optional[str],
-    ) -> Optional[Any]:
-        """(persona, model) の head snapshot が持つ weave section (無ければ None)。
+    ) -> Any:
+        """(persona, model) の head snapshot が持つ weave section。
 
-        §15 読み戻し後の再 capture 検証用 — capture は毎回新しい section
-        オブジェクトを作るので、identity が変わらなければ stale の使い回し。
+        §15 読み戻し後・手動入口の再 capture 検証用 — capture は毎回新しい
+        section オブジェクトを作るので、identity が変わらなければ stale の
+        使い回し。
+
+        返す値は**三値**で、呼び出し側は区別して扱う:
+
+        - section の実体 ... 比較の材料
+        - ``None`` ......... weave が正当に無い (head 未初期化 / weave 無効 /
+          snapshot 未作成)。「組み直されなかった」ではないので成功扱いでよい
+        - :data:`_WEAVE_INSPECT_FAILED` ... 検査自体が失敗した (pipeline の
+          import 失敗、get_snapshot の例外など)。**何も分かっていない**ので、
+          成功にも失敗にも数えず、判定側が「検証できなかった」に倒す
         """
         try:
             from sea.head_pipeline import get_default_pipeline
             snap = get_default_pipeline().get_snapshot(
                 str(persona_id), str(model_key),
             )
+            if snap is None:
+                return None
+            return getattr(snap, "sections", {}).get("memory_weave")
         except Exception:
-            return None
-        if snap is None:
-            return None
-        return getattr(snap, "sections", {}).get("memory_weave")
+            LOGGER.warning(
+                "[metabolism] head weave inspection failed (persona=%s model=%s)",
+                persona_id, model_key, exc_info=True,
+            )
+            return _WEAVE_INSPECT_FAILED
 
     def _write_refill(
         self,
@@ -2768,11 +2973,7 @@ class SessionLifecycle:
         model_key = str(getattr(persona, "model", "") or "") or None
         if not persona_id or not model_key:
             return "skip"
-        memory_weave_enabled = os.getenv(
-            "ENABLE_MEMORY_WEAVE_CONTEXT", "",
-        ).lower() in ("true", "1")
-        if not memory_weave_enabled:
-            return "skip"
+        # 門はペルソナ設定だけ (env ENABLE_MEMORY_WEAVE_CONTEXT は 2026-09-01 撤去)。
         if not self.is_chronicle_enabled_for_persona(persona):
             return "skip"
         if not self.is_autonomous_chronicle_enabled_for_persona(persona):
@@ -2908,10 +3109,8 @@ class SessionLifecycle:
         # Codex 三巡 2026-07-29)、編纂なしの退場へ進ませずここで止める。
         # 自動発火・§14 経路 (stop_when_disabled=False) は従来どおり disabled
         # でも前進する (編纂なしで忘れる設計合意)。
-        memory_weave_enabled = os.getenv("ENABLE_MEMORY_WEAVE_CONTEXT", "").lower() in ("true", "1")
-        chronicle_enabled = (
-            memory_weave_enabled and self.is_chronicle_enabled_for_persona(persona)
-        )
+        # 門はペルソナ設定だけ (env ENABLE_MEMORY_WEAVE_CONTEXT は 2026-09-01 撤去)。
+        chronicle_enabled = self.is_chronicle_enabled_for_persona(persona)
         # 前回までに失敗した抽出の拾い直し (付箋 backlog) は**この位置** —
         # 編纂の計画・確認・claim より手前で、手動入口の早期 return よりも手前。
         # 畳むものが無い回でも回収は走り、走らないときは「止まっている」ことを
@@ -3593,6 +3792,59 @@ class SessionLifecycle:
                 plan_absorption,
                 split_plan_for_absorption,
             )
+            # 死んだ参照の掃除 (sweep) は tiny/stale の有無に関係なく回す
+            # (Codex 五巡 H1 — 仕事ゼロだと run_absorption 自体が呼ばれず
+            # 保険が眠る。検出は単一クエリで常時実行のコストは無視できる)。
+            # 印が付けば下の pending_stale_count が仕事に数え、run_absorption
+            # の flush が本文を語り直す。
+            #
+            # **計画より先** に置く (2026-09-01): 吸収の計画は隣人の
+            # source_ids が全生存かを検査して開き直しを決めるので、掃除が
+            # 後だと孤児参照を持つ隣人がその回は開けず、取り残しの解消が
+            # 毎回 1 巡遅れる。
+            #
+            # sweep / stale 件数 / 未完了マーカーの照会例外は 0 / False へ
+            # 潰さない (Codex 六巡 J4 — 「常時実行して仕事量に数える」保証が
+            # 例外時に黙って消える)。テーブル不在の縮退は各関数の内側
+            # (is_missing_table_error) が持つので、ここまで届く例外は実失敗
+            # = failed で止めて再実行を促す。
+            #
+            # 掃除と判定は adapter の錠前の内側で一息に行う (Codex 九巡):
+            # sweep は内部で commit する書き込みで、conn は adapter と共有な
+            # ので、ロック外の commit は他所の開いた トランザクションを途中で
+            # 確定させる (Codex 四巡 #2 — executor.execute_plan の db_lock と
+            # 同じ教義)。件数と印の照会も同じ錠の中に入れる — 掃除と判定の
+            # 間に他 writer が割り込むと、数えた世界と印を上げ下げする世界が
+            # ずれる (run_absorption 冒頭の保守ブロックと同形)。LLM は呼ば
+            # ないので、錠を持ったままでも他を待たせない。
+            try:
+                from sai_memory.arasuji.absorption import (
+                    _sweep_broken_parents,
+                    _sweep_dead_message_sources,
+                    is_repair_incomplete,
+                )
+                with adapter._db_lock:
+                    # 「上位あらすじ → 消えた下位あらすじ」の死んだ子 id。
+                    _sweep_broken_parents(adapter.conn)
+                    # 「Lv1 → 消えたメッセージ」も同じ理由 (UI の素の削除が
+                    # 参照を直さない) で掃く。孤児参照が残っていると吸収の
+                    # 再開検査が落ち、その隣の未被覆断片が永久に取り残される。
+                    _sweep_dead_message_sources(adapter.conn)
+                    # 前回の未完了 (content_stale の残り) は items ゼロでも
+                    # flush する。未完了の印だけが残った状態 (差し替え確定後の
+                    # 例外など) も仕事に数える — run_absorption が仕事ゼロを
+                    # 確認して印を外す (ローカルレビュー 2026-08-31 L1: 印が
+                    # 残ると帯の「前回の処理が完了していません」が永久表示に
+                    # なる)。
+                    pending_stale_count = len(list_stale_upper_ids(adapter.conn))
+                    _stale_marker = is_repair_incomplete(adapter.conn)
+            except Exception:
+                LOGGER.exception(
+                    "[metabolism] absorption maintenance checks failed; "
+                    "refusing the full-plan compile (persona=%s)",
+                    getattr(persona, "persona_id", "?"),
+                )
+                return "failed"
             normal_plan, _tiny_chunks = split_plan_for_absorption(
                 plan, target_chars=chronicle_band_budget(),
             )
@@ -3624,37 +3876,6 @@ class SessionLifecycle:
                     )
                     return "failed"
                 plan = normal_plan
-            # 死んだ子 id を指す親の救済 (sweep) は tiny/stale の有無に関係
-            # なく回す (Codex 五巡 H1 — 仕事ゼロだと run_absorption 自体が
-            # 呼ばれず保険が眠る。検出は単一クエリで常時実行のコストは無視
-            # できる)。印が付けば下の pending_stale_count が仕事に数え、
-            # run_absorption の flush が本文を語り直す。
-            #
-            # sweep / stale 件数 / 未完了マーカーの照会例外は 0 / False へ
-            # 潰さない (Codex 六巡 J4 — 「常時実行して仕事量に数える」保証が
-            # 例外時に黙って消える)。テーブル不在の縮退は各関数の内側
-            # (is_missing_table_error) が持つので、ここまで届く例外は実失敗
-            # = failed で止めて再実行を促す。
-            try:
-                from sai_memory.arasuji.absorption import (
-                    _sweep_broken_parents,
-                    is_repair_incomplete,
-                )
-                _sweep_broken_parents(adapter.conn)
-                # 前回の未完了 (content_stale の残り) は items ゼロでも flush
-                # する。未完了の印だけが残った状態 (差し替え確定後の例外など)
-                # も仕事に数える — run_absorption が仕事ゼロを確認して印を
-                # 外す (ローカルレビュー 2026-08-31 L1: 印が残ると帯の
-                # 「前回の処理が完了していません」が永久表示になる)。
-                pending_stale_count = len(list_stale_upper_ids(adapter.conn))
-                _stale_marker = is_repair_incomplete(adapter.conn)
-            except Exception:
-                LOGGER.exception(
-                    "[metabolism] absorption maintenance checks failed; "
-                    "refusing the full-plan compile (persona=%s)",
-                    getattr(persona, "persona_id", "?"),
-                )
-                return "failed"
         _absorption_calls = (
             absorption_plan.llm_calls if absorption_plan is not None
             else pending_stale_count
@@ -3838,13 +4059,19 @@ class SessionLifecycle:
                 )
                 execution_id = None
 
-        # Notify frontend that generation is starting
-        if event_callback:
-            event_callback({
-                "type": "metabolism",
-                "status": "running",
-                "content": f"Chronicleを生成しています (0/{unprocessed_count})...",
-            })
+        # 「Chronicleを生成しています (0/N)」はここでは出さない。前段の吸収
+        # (run_absorption) が先に走る回があり、そちらは run 一件ごとに LLM を
+        # 呼ぶので実機では数分〜数十分かかる。開始メッセージを先に出すと、その
+        # 間ずっと「(0/410)」のまま凍って見える (2026-09-01 まはー実機報告 —
+        # 実際は止まっておらず、前段だけで未被覆 410→258 まで進んでいた)。
+        # 本編 (execute_plan) の直前で出す。
+        def _emit_compile_start() -> None:
+            if event_callback:
+                event_callback({
+                    "type": "metabolism",
+                    "status": "running",
+                    "content": f"Chronicleを生成しています (0/{unprocessed_count})...",
+                })
 
         # Build progress callback for streaming status to frontend
         def progress_fn(processed, total):
@@ -3927,6 +4154,33 @@ class SessionLifecycle:
         # 生成に「これまでの流れ」を引かせる (裁定 4 の時系列たたみ込み)。
         if _absorption_work:
             from sai_memory.arasuji.absorption import run_absorption
+
+            # 前段は本編より長くなることがあるので、フェーズと進行を画面へ流す
+            # (2026-09-01)。ここが無言だと「Chronicleを生成しています (0/N)」で
+            # 凍って見え、ユーザーが止まったと判断して中止してしまう。
+            if event_callback:
+                event_callback({
+                    "type": "metabolism",
+                    "status": "running",
+                    "content": (
+                        "編纂の下ごしらえをしています"
+                        "（取り残された断片の吸収と、上位あらすじの語り直し）..."
+                    ),
+                })
+
+            def absorption_progress_fn(phase, done, total):
+                if not event_callback:
+                    return
+                if phase == "absorb":
+                    content = f"取り残された断片を吸収しています ({done}/{total})..."
+                else:
+                    content = f"上位のあらすじを語り直しています ({total} 件)..."
+                event_callback({
+                    "type": "metabolism",
+                    "status": "running",
+                    "content": content,
+                })
+
             try:
                 absorption_result = run_absorption(
                     adapter.conn, client, absorption_plan,
@@ -3934,6 +4188,7 @@ class SessionLifecycle:
                     db_lock=adapter._db_lock,
                     cancel_check=cancel_fn,
                     batch_callback=note_callback,
+                    progress_callback=absorption_progress_fn,
                 )
             except Exception as exc:
                 LOGGER.exception("[metabolism] tiny-run absorption failed")
@@ -3974,6 +4229,9 @@ class SessionLifecycle:
                     len(absorption_result.regenerated_upper_ids),
                     absorption_result.unresolved_runs,
                 )
+
+        # 本編の開始をここで報告する (前段の吸収を跨いだ後)。
+        _emit_compile_start()
 
         try:
             exec_result = execute_plan(

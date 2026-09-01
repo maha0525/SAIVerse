@@ -78,9 +78,13 @@ BARK_TEXT = """\
 この一覧はあなたが書き換えるものではなく、世界との約束として与えられています。"""
 
 #: ==語句== 記法の教示 (§9.1 層1。記法の実装は saiverse/marker_parser.py)
+#: 2026-09-01 (v0.3.1): 旧文の「mark は『あとで思い出したい』という印です」は
+#: 誇張だった — 印から想起へ戻る経路はペルソナ側に配線されていない。実際に効いて
+#: いるのは保存と、記憶ブラウザ (UI) での強調表示だけなので、そこまでを書く。
+#: 想起へ繋いだら、この文も一緒に書き足すこと。
 MARK_NOTATION_TEXT = """\
 ## 言葉への印（mark）
-文章の中で ==語句== と書くと、その言葉に mark がつきます。mark は「あとで思い出したい」という印です。印の記号は保存時に外れ、語句だけが残ります。"""
+文章の中で ==語句== と書くと、その言葉に mark がつきます。印をつけた語句は保存され、記憶ブラウザで強調表示されます。印の記号は保存時に外れ、語句だけが残ります。"""
 
 
 @dataclass(frozen=True)
@@ -119,8 +123,15 @@ class SelfImageSection:
         return json.dumps(asdict(snapshot), ensure_ascii=False)
 
     def deserialize_snapshot(self, data: str) -> SelfImageSnapshot:
-        payload = json.loads(data)
-        # 保存済み行に居る旧フィールド (purpose_text / first_tier_titles ほか) は
-        # 黙って捨てる。TypeError にすると store の load が ERROR + traceback を
-        # 吐くだけで、結局 recapture に落ちる。
-        return SelfImageSnapshot(drive_text=payload.get("drive_text") or "")
+        """保存値の drive_text は**使わず**、現在の定数から組み直す。
+
+        文言の正本はコード (2026-09-01。理由は autonomy_modes.py の同メソッド)。
+        保存済み行に居る旧フィールド (purpose_text / first_tier_titles ほか) も
+        自然に落ちる — 参照しないため。
+
+        ``BARK_TEXT`` / ``MARK_NOTATION_TEXT`` は元から render 時に読むので
+        snapshot に凍らない。保存されるのは drive_text だけで、ここを現在値に
+        することで自己像の 3 部すべてが「常に現在のコード」に揃う。
+        """
+        del data
+        return SelfImageSnapshot(drive_text=DRIVE_TEXT)

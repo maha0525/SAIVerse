@@ -731,6 +731,49 @@ def _sweep_broken_parents(conn: sqlite3.Connection) -> List[str]:
     return broken
 
 
+def _sweep_dead_message_sources(conn: sqlite3.Connection) -> Dict[str, List[str]]:
+    """Lv1 の source_ids から、消えたメッセージを指す id を落とす。
+
+    :func:`_sweep_broken_parents` の **Lv1 → メッセージ版** (2026-09-01 まはー
+    裁定)。片側だけ受け皿があるのは非対称だった: UI の削除は「上位あらすじ →
+    消えた下位あらすじ」も「Lv1 → 消えたメッセージ」も同じように参照を直さ
+    ないのに、掃除は前者にしか無かった。
+
+    孤児参照そのものは被覆計算に効かないが、吸収の再開検査 (
+    :func:`plan_absorption` の「missing source messages」) を落とす。落ちると
+    その隣の未被覆断片は永久に取り残される (本番で実害)。掃いた後は source が
+    全生存になるので、同じ隣人が次の計画で開き直せる。
+
+    処置は storage.prune_dead_message_sources (LLM ゼロの帳簿補修 — 本文には
+    触らない)。書き換えた Lv1 の親は、子の counts が変わった分だけ帳簿が
+    ずれるので ``mark_stale=False`` で引き直す (手動削除の追随と同じ規則 —
+    本文の語り直しは起こさないので、見積もりの LLM 回数は変わらない)。
+    冪等 — 孤児が無ければ何も書かない。
+    """
+    from sai_memory.arasuji.storage import (
+        prune_dead_message_sources,
+        refresh_ancestor_bookkeeping,
+    )
+
+    removed = prune_dead_message_sources(conn)
+    if not removed:
+        return {}
+    for entry_id, dead_ids in removed.items():
+        LOGGER.info(
+            "[absorption] level-1 entry %s referenced %d deleted message(s); "
+            "dropped from its source_ids and counts re-derived: %s",
+            entry_id[:8], len(dead_ids), ",".join(dead_ids),
+        )
+    parent_ids = []
+    for entry_id in removed:
+        entry = get_entry(conn, entry_id)
+        if entry is not None and entry.parent_id:
+            parent_ids.append(str(entry.parent_id))
+    if parent_ids:
+        refresh_ancestor_bookkeeping(conn, parent_ids, mark_stale=False)
+    return removed
+
+
 # ---------------------------------------------------------------------------
 # 実行
 # ---------------------------------------------------------------------------
@@ -929,6 +972,7 @@ def run_absorption(
     db_lock: Optional[Any] = None,
     cancel_check: Optional[Callable[[], bool]] = None,
     batch_callback: Optional[Callable] = None,
+    progress_callback: Optional[Callable[[str, int, int], None]] = None,
 ) -> AbsorptionResult:
     """吸収の計画を実行する (LLM あり)。
 
@@ -938,6 +982,18 @@ def run_absorption(
 
     途中失敗は AbsorptionError / LLMError として上がる。確定済みの差し替えは
     残り、repair_incomplete の印が立ったままになる — 再実行が続きから直す。
+
+    ``progress_callback(phase, done, total)`` は画面へ進行を伝えるための任意の
+    フック (2026-09-01)。この関数は run 一件ごとに LLM を呼ぶので、実機では
+    ここだけで数分〜数十分かかる — 呼び出し側が何も報告しないと、本編
+    (execute_plan) の進捗だけを見ている画面が「(0/N) のまま凍った」ように
+    見える。粒度は粗く、``phase`` は:
+
+    - ``"absorb"`` ... 極小 run の合体 (done = 何件目 / total = 計画の件数)
+    - ``"regenerate"`` ... ジョブ末尾の上位あらすじ語り直し (total = 対象数)
+
+    フックの例外は呼び出し側の責任 — ここでは捕まえない (握り潰すと、報告が
+    壊れていることに誰も気づけない)。
     """
     from sai_memory.arasuji.generator import generate_level1_arasuji
     from sai_memory.perception_buffer import list_batches_annexed_to
@@ -954,6 +1010,9 @@ def run_absorption(
         # crash 残骸や素の delete_entry が残した「死んだ子 id を指す親」を、
         # 走る前に冪等に引き直して flush の対象に載せる。
         _sweep_broken_parents(conn)
+        # 同じ理由 (素の削除が参照を直さない) の Lv1 側 — 消えたメッセージを
+        # 指す source_ids を落として、隣人が再び開けるようにする。
+        _sweep_dead_message_sources(conn)
         pending: Set[str] = set(list_stale_upper_ids(conn))
         no_work = not items and not pending
         if no_work:
@@ -975,6 +1034,9 @@ def run_absorption(
         if cancel_check and cancel_check():
             result.cancelled = True
             return result  # 印は残す — 再実行が続きを拾う
+
+        if progress_callback:
+            progress_callback("absorb", index + 1, len(items))
 
         # flush: この item の開始時刻より手前で被覆範囲が閉じた上位を先に
         # 語り直す (裁定 4 — 後続の Lv1 生成の「これまでの流れ」を新しくする)。
@@ -1266,6 +1328,8 @@ def run_absorption(
                 )
 
     # ジョブ末尾: 未 flush の先祖を全部 flush する。
+    if progress_callback and pending:
+        progress_callback("regenerate", 0, len(pending))
     _flush_pending_uppers(
         conn, client, pending, result,
         before_start=None, persona_id=persona_id, db_lock=db_lock,

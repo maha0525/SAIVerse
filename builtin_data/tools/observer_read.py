@@ -83,5 +83,9 @@ def schema() -> ToolSchema:
         },
         result_type="string",
         spell=True,
+        # オブザーバー機能自体がまだ利用できないため、UI と head のスペル一覧から
+        # 隠す (2026-09-01 裁定)。ペルソナからの実行は可能。
+        # 復帰条件: オブザーバーの出荷時に spell_visible=True へ戻す。
+        spell_visible=False,
         spell_display_name="オブザーバー観測値取得",
     )

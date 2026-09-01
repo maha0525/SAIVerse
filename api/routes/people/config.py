@@ -54,8 +54,9 @@ def get_persona_config(persona_id: str, manager = Depends(get_manager)):
         autonomous_chronicle_enabled=details.get("AUTONOMOUS_CHRONICLE_ENABLED", True),
         auto_recall_enabled=details.get("AUTO_RECALL_ENABLED", True),
         memory_weave_context=details.get("MEMORY_WEAVE_CONTEXT", True),
-        memopedia_index_enabled=details.get("MEMOPEDIA_INDEX_ENABLED", False),
+        memopedia_index_enabled=details.get("MEMOPEDIA_INDEX_ENABLED", True),
         core_memory_char_budget=details.get("CORE_MEMORY_CHAR_BUDGET"),
+        chronicle_char_budget=details.get("CHRONICLE_CHAR_BUDGET"),
         spell_enabled=details.get("SPELL_ENABLED", True),
         realtime_info_enabled=details.get("REALTIME_INFO_ENABLED", True),
         avatar_path=avatar_path_to_url(details.get("AVATAR_IMAGE")),
@@ -126,6 +127,7 @@ def update_persona_config(
         memory_weave_context=req.memory_weave_context,
         memopedia_index_enabled=req.memopedia_index_enabled,
         core_memory_char_budget=req.core_memory_char_budget,
+        chronicle_char_budget=req.chronicle_char_budget,
         spell_enabled=req.spell_enabled,
         realtime_info_enabled=req.realtime_info_enabled,
         meta_judgment_config=meta_cfg_dict,
@@ -177,53 +179,8 @@ def update_persona_config(
     return response
 
 
-@router.post("/{persona_id}/organize-memory")
-def organize_persona_memory(persona_id: str, manager=Depends(get_manager)):
-    """手動の記憶整理 — 残す量より古い側を今すぐあらすじに畳む。
-
-    arasuji_levels.md §13 裁定4 (2026-07-29): 範囲規則は自動 (応答後 Metabolism)
-    と同一で、「発火 (予算超過) を待たずに今すぐ畳む」だけ。旧実装の「起点の
-    全消し + 全未編纂の一括編纂」は撤去した — 起点は畳みで前進するだけで
-    消えない。全量再編纂 (修復) は scripts/arasuji/ の領分。
-
-    編纂の要否 (ENABLE_MEMORY_WEAVE_CONTEXT / persona の CHRONICLE_ENABLED) は
-    畳み本体 (_run_metabolism_locked) が判定する。フロントの confirm() で同意
-    済みのため、編纂の確認ダイアログは chronicle_force で回避される。
-    """
-    persona = manager.personas.get(persona_id)
-    if not persona:
-        raise HTTPException(status_code=404, detail="Persona not loaded")
-
-    # NOTE: SEARuntime は manager.sea_runtime。manager.runtime は RuntimeService
-    # (別物) で、かつて誤参照して AttributeError を握り潰し「完了しました」を
-    # 返し続けていた (2026-07-04 修正)。
-    lifecycle = getattr(getattr(manager, "sea_runtime", None), "session_lifecycle", None)
-    if lifecycle is None:
-        raise HTTPException(status_code=503, detail="SEA runtime not available")
-
-    try:
-        compaction_status = lifecycle.run_manual_compaction(persona)
-    except Exception as exc:
-        LOGGER.warning("[organize-memory] manual compaction failed: %s", exc, exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Memory compaction failed: {exc}")
-
-    # Recall embedding maintenance — 畳みの有無・成否と独立に未埋め込みの
-    # Chronicle/ページ/Fragment を全件埋める (ローカル・無料)。
-    try:
-        lifecycle.ensure_recall_embeddings(persona)
-    except Exception:
-        LOGGER.warning("[organize-memory] embedding maintenance failed", exc_info=True)
-
-    # Dispatch METABOLISM event to head_pipeline (snapshot refresh)
-    try:
-        from saiverse.dynamic_state import DynamicStateManager
-        DynamicStateManager.on_metabolism(persona, manager)
-    except Exception:
-        LOGGER.warning("[organize-memory] on_metabolism dispatch failed", exc_info=True)
-
-    # failed / deferred は「完了」ではない (Codex 2026-07-29 指摘: 失敗の成功偽装
-    # の根治)。畳みは適用されておらず、再実行で再試行できる。
-    return {
-        "success": compaction_status in ("ok", "noop"),
-        "compaction": compaction_status,
-    }
+# 旧 POST /{persona_id}/organize-memory は 2026-09-01 に撤去した。同期で畳み全体
+# (LLM 呼び出し × N) を待つ作りで、フロントが先にタイムアウトして「通信に失敗」の
+# 誤報を出していた (docs/issues/archive/organize_memory_ui_timeout.md)。手動の畳みは
+# あらすじタブと同じ背景ジョブ POST /{persona_id}/arasuji/generate (mode=compaction)
+# へ一本化し、ペルソナメニューのボタンもそちらを叩く。
