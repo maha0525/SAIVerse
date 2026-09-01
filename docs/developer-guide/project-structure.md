@@ -88,6 +88,8 @@ saiverse/
 ├── model_defaults.py       # 組み込みデフォルトモデル
 ├── provider_security.py    # provider credentialと接続先URLの束縛・SSRF境界
 ├── file_policy.py          # persisted pathのmanaged root境界
+├── tls_trust.py            # HTTPS の信頼元を起動時に一度決める。OS の証明書ストアが空の環境
+│                           #   （macOS の Python）で同梱 certifi へ退避し、urllib 経由の通信を救う
 ├── runtime_marker.py       # City単位process identity marker（保守操作の停止判定）
 ├── meta_layer.py           # 判断 Pulse の共有基盤だけが残る（per-persona Lock / 判断ログ / 設定読み。
 │                           #   v1 メタ判断の状況分類は 2026-08-14 に退役）
