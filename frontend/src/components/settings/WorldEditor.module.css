@@ -87,9 +87,13 @@
     font-weight: 500;
 }
 
-/* 一覧のページ送り (1 ページ 100 件) */
+/* 一覧のページ送り (1 ページ 100 件)。
+   狭い一覧列 (250px) に収めるため、ボタン行と件数表示の二段組にする —
+   一行に詰めると nowrap の件数表示が列からはみ出し、一覧全体に横スクロール
+   バーを生やす (2026-09-01 実機で崩れ)。 */
 .pager {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     justify-content: space-between;
     gap: 0.5rem;
@@ -126,6 +130,9 @@
 }
 
 .pagerStatus {
+    /* order でボタン行の後ろへ回し、常に自分の行を占める (二段組の下段) */
+    order: 1;
+    flex: 1 1 100%;
     text-align: center;
     white-space: nowrap;
 }
@@ -296,13 +303,20 @@
         border-radius: 999px;
     }
 
-    /* 横スクロールの一覧では、ページ送りも 1 つのチップとして並ぶ */
+    /* 横スクロールの一覧では、ページ送りも 1 つのチップとして並ぶ
+       (二段組は解除して一列に戻す — 横スクロール帯なのではみ出しは問題にならない) */
     .pager {
         flex: none;
+        flex-wrap: nowrap;
         min-width: fit-content;
         padding: 0;
         border-top: none;
         gap: 0.35rem;
+    }
+
+    .pagerStatus {
+        order: 0;
+        flex: none;
     }
 
     .form {
