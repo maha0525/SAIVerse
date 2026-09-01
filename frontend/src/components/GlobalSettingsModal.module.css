@@ -365,6 +365,19 @@
     margin-top: 0.25rem;
 }
 
+/* 展開部を持つトグル用: 上段 (説明+トグル) と下段 (追加設定) を縦に積む */
+.toggleContainerStacked {
+    flex-direction: column;
+    align-items: stretch;
+}
+
+.toggleRow {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+}
+
 /* トグルの下にぶら下がる追加設定 (数値入力など) */
 .subSetting {
     margin-top: 0.75rem;
