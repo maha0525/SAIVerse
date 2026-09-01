@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Sequence
 
+from sea.eviction_plan import CONSUMED_PERCEPTION_KEY
 from saiverse.model_configs import (
     calculate_cost,
     get_context_length,
@@ -744,12 +745,20 @@ def _anchor_order_key(
         return None
 
 
-def _merge_consumed_perceptions(
-    runtime: Any, persona: Any, recent: List[Dict[str, Any]],
+def list_presented_perception_blocks(
+    runtime: Any, persona: Any, recent: Sequence[Dict[str, Any]],
     *,
     anchor_id: Optional[str] = None,
+    raise_on_error: bool = False,
 ) -> List[Dict[str, Any]]:
-    """提示履歴に未付記の消費バッチを時刻順マージする (W14, §10.3)。
+    """いま提示に差し込まれる知覚ブロックを組む (組成規則の一点管理)。
+
+    「どのバッチをどんな文面で出すか」はここだけに書く。送る側
+    (:func:`_merge_consumed_perceptions`) と**測る側**
+    (sea/session_lifecycle.py の文字数勘定・退場計画) が同じ関数を呼ぶ —
+    勘定が実送信より小さい数字を出していた欠陥
+    (docs/issues/context_accounting_excludes_injected_rows.md) の再発は、
+    組成規則の二枚目を作らないことでしか防げない。
 
     - バッチの ``rendered_text`` (消費時に確定したペルソナが見た文面) を
       ``<system>`` 包みでそのまま出す — 生の台帳項目からの再構成 (再 reduce /
@@ -764,18 +773,22 @@ def _merge_consumed_perceptions(
       同じように忘れる。**履歴が空でも** anchor が立っていれば絞る — 生ログ窓が
       空の瞬間に過去バッチを全部再提示しない (2026-08-19 Codex 第二巡 #3)。
       anchor も履歴も無い完全ブートストラップだけは全提示 (隠さない側)。
-    - 失敗はマージなし (元の履歴のまま) に倒して WARN — 履歴ゼロで走らせる
-      よりも知覚欠けの方が被害が小さい。
+    - 失敗は空リスト + WARN に倒す — 送る側は「マージなし (元の履歴のまま)」、
+      測る側は「知覚ぶん 0 (従来値)」へ縮退する。履歴ゼロで走らせるよりも
+      知覚欠けの方が被害が小さい。``raise_on_error=True`` は失敗を例外で
+      伝える — 透明性の画面 (context-status) が内部失敗を正常なゼロとして
+      表示しないための口 (preview_refilled_history の raise_on_error と同じ型。
+      Codex 指摘 2026-09-02)。門・発火・送信の各経路は従来どおり fail-open。
     """
     sai_mem = getattr(persona, "sai_memory", None)
     if sai_mem is None or not getattr(sai_mem, "is_ready", lambda: False)():
-        return recent
+        return []
     try:
         from sai_memory.perception_buffer import list_unannexed_batches
         with sai_mem._db_lock:
             batches = list_unannexed_batches(sai_mem.conn)
         if not batches:
-            return recent
+            return []
 
         if not _chronicle_enabled_for(runtime, persona):
             anchor_key = _anchor_order_key(sai_mem, anchor_id)
@@ -806,14 +819,14 @@ def _merge_consumed_perceptions(
                 if cutoff is not None:
                     batches = [b for b in batches if b.consumed_at >= cutoff]
             if not batches:
-                return recent
+                return []
 
         blocks: List[Dict[str, Any]] = []
         for batch in batches:
             metadata: Dict[str, Any] = {
                 # 旧 flush の event_message 行と同型のタグ + マージ由来の目印。
                 "tags": ["internal", "event_message", "perception"],
-                "__consumed_perception__": True,
+                CONSUMED_PERCEPTION_KEY: True,
                 "__perception_batch_id__": batch.id,
             }
             media = batch.media_list()
@@ -825,33 +838,64 @@ def _merge_consumed_perceptions(
                 "created_at": batch.consumed_at,
                 "metadata": metadata,
             })
-
-        # 二本の時系列マージ: ブロックは「自分の consumed_at 以下の生ログ」の
-        # 直後に入る (同時刻なら生ログが先 — 消費は書き込みの後に起きた事実)。
-        merged: List[Dict[str, Any]] = []
-        bi = 0
-        for msg in recent:
-            epoch = _payload_epoch(msg)
-            while (
-                bi < len(blocks)
-                and epoch is not None
-                and blocks[bi]["created_at"] < epoch
-            ):
-                merged.append(blocks[bi])
-                bi += 1
-            merged.append(msg)
-        merged.extend(blocks[bi:])
-        LOGGER.debug(
-            "[sea][prepare-context] merged %d perception batch block(s) "
-            "into history", len(blocks),
-        )
-        return merged
+        return blocks
     except Exception:
+        if raise_on_error:
+            raise
         LOGGER.warning(
-            "[sea][prepare-context] perception batch merge failed; "
-            "presenting history without perceptions", exc_info=True,
+            "[sea][prepare-context] perception batch listing failed; "
+            "presenting/counting history without perceptions", exc_info=True,
         )
+        return []
+
+
+def merge_perception_blocks(
+    recent: Sequence[Dict[str, Any]], blocks: Sequence[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """生ログと知覚ブロックを時刻順にマージした列を返す (純関数)。
+
+    ブロックは「自分の ``consumed_at`` 以下の生ログ」の直後に入る (同時刻なら
+    生ログが先 — 消費は書き込みの後に起きた事実)。送る側と測る側が**同じ並び**
+    を見るための一点。
+    """
+    merged: List[Dict[str, Any]] = []
+    bi = 0
+    for msg in recent:
+        epoch = _payload_epoch(msg)
+        while (
+            bi < len(blocks)
+            and epoch is not None
+            and blocks[bi]["created_at"] < epoch
+        ):
+            merged.append(blocks[bi])
+            bi += 1
+        merged.append(msg)
+    merged.extend(blocks[bi:])
+    return merged
+
+
+def _merge_consumed_perceptions(
+    runtime: Any, persona: Any, recent: List[Dict[str, Any]],
+    *,
+    anchor_id: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """提示履歴に未付記の消費バッチを時刻順マージする (W14, §10.3)。
+
+    組成は :func:`list_presented_perception_blocks`、並びは
+    :func:`merge_perception_blocks` — ここは送信経路の入口として二つを繋ぐ
+    だけで、規則そのものは持たない。
+    """
+    blocks = list_presented_perception_blocks(
+        runtime, persona, recent, anchor_id=anchor_id,
+    )
+    if not blocks:
         return recent
+    merged = merge_perception_blocks(recent, blocks)
+    LOGGER.debug(
+        "[sea][prepare-context] merged %d perception batch block(s) "
+        "into history", len(blocks),
+    )
+    return merged
 
 
 def _maybe_inject_auto_recall(

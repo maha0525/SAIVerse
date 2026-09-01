@@ -32,6 +32,7 @@ import unittest
 
 from sai_memory.arasuji.generator import material_len
 from sea.eviction_plan import (
+    CONSUMED_PERCEPTION_KEY,
     Fold,
     Watermarks,
     compile_groups_from_folds,
@@ -68,6 +69,22 @@ def msg(mid, at, *, chars=1_000, ep=None, pulse=None, folded=False,
     if spell_origin:
         payload["spell_origin_id"] = spell_origin
     return payload
+
+
+def perception(at, *, chars=1_000):
+    """送信直前に差し込まれる知覚ブロック (保存行ではないので ``id`` が無い)。
+
+    組成は sea/runtime_context.py::list_presented_perception_blocks。
+    """
+    return {
+        "role": "user",
+        "content": "p" * chars,
+        "created_at": at,
+        "metadata": {
+            "tags": ["internal", "event_message", "perception"],
+            CONSUMED_PERCEPTION_KEY: True,
+        },
+    }
 
 
 def plan(messages, *, keep=2_000, high=None, **kwargs):
@@ -581,6 +598,146 @@ class CompileGroupsTest(unittest.TestCase):
         groups = compile_groups_from_folds(folds, presented)
         self.assertIn(["ghost"], groups)
         self.assertIn(["m0", "m1"], groups)
+
+
+class InjectedPerceptionTest(unittest.TestCase):
+    """差し込みの知覚ブロックは**重さだけ**が計画に参加する。
+
+    docs/issues/context_accounting_excludes_injected_rows.md (2026-09-02 まはー
+    裁定): 勘定の単位は「実際に送る中身」。知覚バッチは保存行を作らず送信直前に
+    差し込まれるので、計画の入力にも時刻順マージして渡す。ただしブロックは
+    退場の対象ではない (id が無く、提示から下りるのは付記印の仕事) —
+    fold の中身にも、chunk の境目にもならない。
+    """
+
+    def test_blocks_add_weight_but_never_enter_a_fold(self):
+        msgs = [
+            msg("m0", 100), perception(101, chars=1_500), msg("m1", 102),
+            msg("k0", 200), msg("k1", 201),
+        ]
+        result = plan(msgs, keep=2_000)
+        self.assertEqual(len(result.folds), 1)
+        # 束ねの中身も境目 (start_at/end_at) も保存行のまま。
+        self.assertEqual(result.folds[0].message_ids, ["m0", "m1"])
+        self.assertEqual(result.folds[0].start_at, 100)
+        self.assertEqual(result.folds[0].end_at, 102)
+        # 合計は送る中身 (保存行 4,000 + 知覚 1,500)。
+        self.assertEqual(result.total_chars, 5_500)
+
+    def test_projected_chars_counts_the_folded_span_blocks_as_gone(self):
+        """畳んだ範囲の知覚も「消える側」に数える。
+
+        あらすじ確定と同一トランザクションで、その期間の知覚バッチに付記印が
+        付いて提示から下りる (sai_memory/arasuji/executor.py)。
+        """
+        blocks = [perception(101, chars=1_500)]
+        with_block = plan(
+            [msg("m0", 100), blocks[0], msg("m1", 102),
+             msg("k0", 200), msg("k1", 201)],
+            keep=2_000,
+        )
+        without = plan(
+            [msg("m0", 100), msg("m1", 102), msg("k0", 200), msg("k1", 201)],
+            keep=2_000,
+        )
+        # 保存行ぶんの削減は同じ。知覚 1,500 字がそのまま上乗せで消える。
+        self.assertEqual(
+            with_block.total_chars - with_block.projected_chars,
+            (without.total_chars - without.projected_chars) + 1_500,
+        )
+
+    def test_trailing_gap_blocks_are_not_counted_as_removed(self):
+        """束の最後の保存行より後のブロックは「消える側」に数えない。
+
+        付記の時刻範囲は群の末尾 + 1 まで (executor._annex_time_spans) なので、
+        fold 末尾と次の保存行の間に消費されたブロックは付記から漏れて提示に
+        残る (次回編纂の recover_before が拾うまで一巡残る)。消える側に数えると
+        削減見込みが過大になる (Codex 指摘 2026-09-02)。
+        """
+        with_gap_block = plan(
+            [msg("m0", 100), msg("m1", 101), perception(150, chars=1_500),
+             msg("k0", 200), msg("k1", 201)],
+            keep=2_000,
+        )
+        without = plan(
+            [msg("m0", 100), msg("m1", 101), msg("k0", 200), msg("k1", 201)],
+            keep=2_000,
+        )
+        # fold の中身は保存行のまま、削減見込みは素の計画と同じ (ブロックは
+        # 残る側)。合計にはブロックが乗る。
+        self.assertEqual(folded_ids(with_gap_block), ["m0", "m1"])
+        self.assertEqual(
+            with_gap_block.total_chars - with_gap_block.projected_chars,
+            without.total_chars - without.projected_chars,
+        )
+        self.assertEqual(
+            with_gap_block.total_chars, without.total_chars + 1_500,
+        )
+
+    def test_boundary_is_never_placed_between_a_row_and_its_block(self):
+        """ブロックは直前の保存行の単位へ接着する — 境目はその間に落ちない。
+
+        落ちると fold の端が id の無い行になり、編纂へ渡す範囲も圧縮区間の
+        記録も作れない。
+        """
+        msgs = [
+            msg("m0", 100), msg("m1", 101),
+            msg("k0", 200), perception(201, chars=2_000),
+        ]
+        # 素の境界は末尾の知覚ブロック (添字 3) に落ちるが、単位の先頭 (k0) へ
+        # 下がるので保護は k0 から。候補は m0/m1 = U ちょうど。
+        result = plan(msgs, keep=2_000)
+        self.assertEqual(result.protected_from, 2)
+        self.assertEqual(folded_ids(result), ["m0", "m1"])
+
+    def test_leading_blocks_are_absorbed_by_the_first_stored_unit(self):
+        """窓の先頭より古いバッチ (提示は先頭に出る) も単独の単位を作らない。
+
+        ただし削減見込みには数えない — 回収路 (recover_before) は前回編纂の
+        末尾以前しか拾わないので、先頭の保存行より前のブロックは今回の付記
+        から漏れて提示に残りうる (Codex 指摘 2026-09-02 四巡目)。次回編纂の
+        回収路が拾うまで一巡残る側に倒す。
+        """
+        msgs = [
+            perception(90, chars=800), msg("m0", 100), msg("m1", 101),
+            msg("k0", 200), msg("k1", 201),
+        ]
+        result = plan(msgs, keep=2_000)
+        self.assertEqual(len(result.folds), 1)
+        self.assertEqual(result.folds[0].message_ids, ["m0", "m1"])
+        # 先頭ブロックは m0 の単位に吸収される (境目にならない) が、削減は
+        # 保存行ぶんだけ。ブロック 800 字は残る側 (合計には乗る)。
+        self.assertEqual(
+            result.total_chars - result.projected_chars,
+            2_000 - 1_200,
+        )
+        self.assertEqual(result.total_chars, 4_800)
+
+    def test_trailing_blocks_do_not_push_a_thin_run_to_U(self):
+        """U 到達判定の母集合も _reduction_basis — 末尾の隙間ブロックは入れない。
+
+        入れると、保存行の材料が乏しいのにブロックの重みで U 到達と誤認し、
+        「畳んでも減らない fold」を発行して LLM 代だけ払う (Codex 指摘
+        2026-09-02 三巡目)。500 字以下のブロックは機構縮約を受けず全文が材料に
+        乗るので、その形で組む。
+        """
+        msgs = [msg("m0", 100, chars=500)] + [
+            perception(110 + i, chars=450) for i in range(4)
+        ] + [msg("k0", 200), msg("k1", 201)]
+        # 旧判定: 材料 500 + 450×4 = 2,300 ≥ U=2,000 で閉じてしまう。
+        # 新判定: 母集合 (m0 のみ) = 500 < 2,000 → 閉じない。
+        result = plan(msgs, keep=2_000)
+        self.assertTrue(result.is_empty)
+        # 「あと何字」の報告も同じ母集合。
+        self.assertEqual(result.pending_material_chars, 500)
+
+    def test_a_run_of_only_blocks_does_not_close_an_empty_fold(self):
+        """保存行を含まない束は畳まない (空の fold は退場も編纂もできない)。"""
+        msgs = [perception(100 + i, chars=3_000) for i in range(3)] + [
+            msg("k0", 200), msg("k1", 201),
+        ]
+        result = plan(msgs, keep=2_000)
+        self.assertTrue(result.is_empty)
 
 
 class GuardTest(unittest.TestCase):

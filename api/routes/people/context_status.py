@@ -31,6 +31,10 @@ def get_context_status(persona_id: str, manager=Depends(get_manager)) -> dict[st
     - ``presented_chars``: 次の user Pulse で実際に送られる提示コンテキストの
       文字数。§15 読み戻しが適用されるならその適用後 (プレビューと一致)。
       anchor 未確立 (まだ会話が始まっていない) や persona 未ロードでは None。
+      **保存済みの会話に加えて、送信直前に差し込まれる知覚 (部屋の様子) を
+      含む合計**で、内訳は ``stored_chars`` / ``injected_perception_chars``
+      (2026-09-02 まはー裁定 —
+      docs/issues/context_accounting_excludes_injected_rows.md)。
     - ``fold_unit_chars``: 一次あらすじの標準被覆 U。整理は残す量より古い側を
       U (材料字数 — 2026-08-29 裁定) ずつの範囲に刻んで畳む。
     - ``fold_ready`` / ``fold_shortfall_chars``: いま手動の畳みで実際に fold が
@@ -57,7 +61,9 @@ def get_context_status(persona_id: str, manager=Depends(get_manager)) -> dict[st
         "low_chars": None,            # 初期読み込み量 (anchor 未確立時に読む量)
         "target_chars": None,         # 残す量 (整理後にここへ揃える)
         "high_chars": None,           # 上限 (超えたら整理が走る)
-        "presented_chars": None,      # 現在の提示コンテキスト文字数 (読み戻し後)
+        "presented_chars": None,      # 実際に送られる合計文字数 (読み戻し後)
+        "stored_chars": None,         # うち保存済みの会話 (提示ウィンドウの行)
+        "injected_perception_chars": None,  # うち送信直前に差し込まれる知覚
         "fold_unit_chars": chronicle_band_budget(),  # 一度に畳む単位 U (env 由来の定数)
         "fold_ready": None,           # いま畳みで fold が実際に閉じるか (測れなければ None)
         "fold_shortfall_chars": None,  # 閉じないとき、あと材料何字で閉じるか (閉じるなら 0)
@@ -104,11 +110,19 @@ def get_context_status(persona_id: str, manager=Depends(get_manager)) -> dict[st
             persona, model_key, raise_on_error=True,
         )
         if refill_plan:
-            from sea.eviction_plan import message_chars
-
-            status["presented_chars"] = message_chars(refill_plan["presented"])
+            _record_presented_chars(
+                status, lifecycle, persona,
+                refill_plan["presented"], refill_plan.get("new_anchor_id"),
+            )
             status["refill_applied"] = True
-            _measure_fold_readiness(status, refill_plan["presented"], watermarks)
+            _measure_fold_readiness(
+                status,
+                lifecycle.presented_with_perceptions(
+                    persona, refill_plan["presented"],
+                    refill_plan.get("new_anchor_id"), raise_on_error=True,
+                ),
+                watermarks,
+            )
             return status
 
         anchor_id, _resolution = lifecycle.resolve_metabolism_anchor(
@@ -117,21 +131,27 @@ def get_context_status(persona_id: str, manager=Depends(get_manager)) -> dict[st
         if not anchor_id:
             return status  # 起点未確立 (ブートストラップ前)
         window = lifecycle.get_presented_window(persona, model_key, anchor_id)
-        from sea.eviction_plan import message_chars
 
         # 表示する送信量は「いまの提示そのまま」(読み戻しで生に開いた区間は
         # 生のまま送られる) — 正規化前の値。
-        status["presented_chars"] = message_chars(window.presented)
+        _record_presented_chars(
+            status, lifecycle, persona, window.presented, anchor_id,
+        )
         # 「畳めるか」の下見は、本走行 (run_metabolism) が退場計画の前に通す
         # 窓の正規化 (恒久欠落 fold の除外 → §15-3 印戻し) を書き込みなしで
         # 再現した窓で測る。素の窓で測ると、読み戻しで生に開いた区間のある
         # 窓で下見と本走行が別の答えを出す — 8/24 に潰した「押せたのに何も
         # 起きない」の再発口 (Codex 指摘 2026-08-29)。
         planning_window, refold_ranges = lifecycle.preview_planning_window(
-            persona, model_key, window, watermarks,
+            persona, model_key, window, watermarks, raise_on_error=True,
         )
         _measure_fold_readiness(
-            status, planning_window.presented, watermarks,
+            status,
+            lifecycle.presented_with_perceptions(
+                persona, planning_window.presented, anchor_id,
+                raise_on_error=True,
+            ),
+            watermarks,
             refold_ranges=refold_ranges,
         )
     except Exception:
@@ -143,6 +163,35 @@ def get_context_status(persona_id: str, manager=Depends(get_manager)) -> dict[st
         )
         status["measurement_failed"] = True
     return status
+
+
+def _record_presented_chars(
+    status: dict[str, Any], lifecycle: Any, persona: Any,
+    presented: list, anchor_id: Any,
+) -> None:
+    """送信量の内訳 (保存行 / 差し込みの知覚 / 合計) を status に載せる。
+
+    ``presented_chars`` は**合計** = 実際に送られる中身の字数。保存行だけを
+    数えていた頃は、本番エリスで勘定 149,856 字に対し実送信 209,031 字という
+    乖離が出ていた (docs/issues/context_accounting_excludes_injected_rows.md) —
+    「データ送信量の管理」は透明性の看板なので、合計を出す。内訳は
+    ``stored_chars`` (保存済みの会話) と ``injected_perception_chars``
+    (送信直前に差し込まれる部屋の様子) に分けて添える。
+    """
+    from sea.eviction_plan import message_chars
+
+    stored = message_chars(presented)
+    # raise_on_error: 知覚一覧の内部失敗を「知覚 0 (正常)」として表示しない —
+    # ここは透明性の画面なので、失敗は上の except → measurement_failed に落とす
+    # (preview_refilled_history の raise_on_error と同じ型。Codex 指摘 2026-09-02)。
+    total = message_chars(
+        lifecycle.presented_with_perceptions(
+            persona, presented, anchor_id, raise_on_error=True,
+        )
+    )
+    status["stored_chars"] = stored
+    status["injected_perception_chars"] = max(0, total - stored)
+    status["presented_chars"] = total
 
 
 def _measure_fold_readiness(
@@ -165,8 +214,10 @@ def _measure_fold_readiness(
       提示が残す量以下 (畳み候補ゼロ) のときも U がそのまま出るが、その場合の
       文言は overflow 側の分岐が受け持つ (frontend)。
 
-    ``presented`` は本走行と同じ正規化 (preview_planning_window) を通した窓で
-    渡すこと — 下見と本走行が同じ形の窓を planner に見せるための契約。
+    ``presented`` は本走行と同じ正規化 (preview_planning_window) を通した窓に、
+    本走行と同じく知覚ブロックを時刻順マージした列を渡すこと — 下見と本走行が
+    同じ形の窓を planner に見せるための契約 (組成が片方だけズレると「押せたのに
+    何も起きない」が戻る)。
     """
     from sea.eviction_plan import plan_eviction
 

@@ -5,7 +5,17 @@ import os
 import threading
 import uuid
 from datetime import datetime, timedelta
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set, Tuple
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Dict,
+    List,
+    Optional,
+    Sequence,
+    Set,
+    Tuple,
+)
 
 from sea.cancellation import CancellationToken
 from sea.eviction_plan import (
@@ -46,6 +56,83 @@ class SessionLifecycle:
         # §14-4 先回り畳みの実行中 persona (persona ごとに同時 1 本)
         self._cold_sweep_lock = threading.Lock()
         self._cold_sweep_inflight: Set[str] = set()
+
+    # ------------------------------------------------------------------
+    # 勘定の単位 — 「実際に送る中身」(2026-09-02 まはー裁定)
+    # ------------------------------------------------------------------
+
+    def perception_blocks_for(
+        self, persona, presented: Sequence[Dict[str, Any]],
+        anchor_id: Optional[str] = None,
+        *,
+        raise_on_error: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """この窓と一緒に送られる知覚ブロック (組成は組み立て側と同じ一枚)。
+
+        水位判定・整理・表示が数えるのは**実際に送る中身**であって、保存行だけ
+        ではない。ブロックを組む規則は
+        :func:`sea.runtime_context.list_presented_perception_blocks` にあり、
+        測る側もそれを呼ぶ (規則の二枚目を作らない —
+        docs/issues/context_accounting_excludes_injected_rows.md)。
+
+        取得できない環境・失敗時は空リスト = 知覚ぶん 0 (従来値へ縮退)。WARN は
+        組成側が出す。``raise_on_error=True`` は失敗を例外で伝える — 透明性の
+        画面 (context-status) が内部失敗を正常なゼロとして表示しないための口
+        (門・発火・送信は fail-open のまま。Codex 指摘 2026-09-02)。
+        """
+        try:
+            from sea.runtime_context import list_presented_perception_blocks
+            return list_presented_perception_blocks(
+                self.runtime, persona, list(presented), anchor_id=anchor_id,
+                raise_on_error=raise_on_error,
+            )
+        except Exception:
+            if raise_on_error:
+                raise
+            LOGGER.warning(
+                "[metabolism] perception block lookup failed; counting the "
+                "window without perceptions (persona=%s)",
+                getattr(persona, "persona_id", "?"), exc_info=True,
+            )
+            return []
+
+    def presented_with_perceptions(
+        self, persona, presented: Sequence[Dict[str, Any]],
+        anchor_id: Optional[str] = None,
+        *,
+        raise_on_error: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """保存行 + 知覚ブロックを時刻順にマージした「送る中身」の列。
+
+        水位の勘定 (:func:`~sea.eviction_plan.message_chars`) と退場計画
+        (:func:`~sea.eviction_plan.plan_eviction`) の入力はどちらもこれ。
+        """
+        blocks = self.perception_blocks_for(
+            persona, presented, anchor_id, raise_on_error=raise_on_error,
+        )
+        if not blocks:
+            return list(presented)
+        from sea.runtime_context import merge_perception_blocks
+        return merge_perception_blocks(list(presented), blocks)
+
+    def presented_chars(
+        self, persona, presented: Sequence[Dict[str, Any]],
+        anchor_id: Optional[str] = None,
+        *,
+        raise_on_error: bool = False,
+    ) -> int:
+        """この窓で実際に送られる文字数 (保存行 + 知覚ブロック)。
+
+        適用範囲は**履歴窓**: 時刻アンカー (49 字)・添付注記などの微小な整形と、
+        履歴の外のセクション (head / realtime) は含まない — 水位が束ねるのは
+        履歴窓で、逸脱は issue (context_accounting_excludes_injected_rows.md)
+        に既知として記録済み。
+        """
+        return message_chars(
+            self.presented_with_perceptions(
+                persona, presented, anchor_id, raise_on_error=raise_on_error,
+            )
+        )
 
     def get_metabolism_watermarks(
         self, persona, model_key: Optional[str] = None,
@@ -1188,9 +1275,13 @@ class SessionLifecycle:
         # 既に畳んだ範囲は digest に置き換わって提示されるので、生ログの合計では
         # なく置き換え後の量を数える — でないと「畳んだのに数字が減らない」で
         # 発火し続ける。
+        # 数えるのは**実際に送る中身** = 保存行 + 送信直前に差し込まれる知覚
+        # ブロック (2026-09-02 まはー裁定。issue
+        # context_accounting_excludes_injected_rows.md — 本番エリスで勘定 15 万字に
+        # 対し実送信 21 万字、差の大半が知覚ブロックだった)。
         window = self.get_presented_window(persona, model_key, anchor)
         current_messages = window.presented
-        current_chars = message_chars(current_messages)
+        current_chars = self.presented_chars(persona, current_messages, anchor)
 
         should_run = False
         if token_triggered:
@@ -1997,7 +2088,16 @@ class SessionLifecycle:
             # 起点行が無い = 提示ウィンドウが未定義 (新規ペルソナ / 修復直後)。
             # 畳む対象を決められないので何もしない。
             return "unavailable"
-        current_chars = message_chars(window.presented)
+        # 門の物差しも「実際に送る中身」= 保存行 + 送信直前に差し込まれる知覚
+        # ブロック (2026-09-02 まはー裁定。issue
+        # context_accounting_excludes_injected_rows.md)。保存行だけで測ると、
+        # 実送信が残す量を大きく超えていても保存行が軽い窓では「畳むものが無い」
+        # と門前払いになる — ユーザーが押したボタンが何も起こさない。走行側
+        # (_run_metabolism_locked の plan_eviction) は既に合計で測っているので、
+        # ここを据え置くと門と本走行が別の答えを出す。
+        current_chars = self.presented_chars(
+            persona, window.presented, window.anchor_id,
+        )
         if current_chars <= watermarks.target:
             LOGGER.info(
                 "[metabolism] manual compaction: window already at/below target "
@@ -2227,7 +2327,11 @@ class SessionLifecycle:
         if not anchor_id:
             return "skip"  # ブートストラップ前 — 提示ウィンドウが未定義
         window = self.get_presented_window(persona, model_key, anchor_id)
-        current_chars = message_chars(window.presented)
+        # 非常畳みの目的は「巨大なコンテキストを送らない」ことそのものなので、
+        # 判定は必ず**実際に送る中身**で測る (2026-09-02 まはー裁定)。保存行だけ
+        # で測ると、知覚ブロックを足した実送信が model の上限を突き抜けていても
+        # 「上限以下」と読んで応答へ進み、この機構の存在意義が壊れる。
+        current_chars = self.presented_chars(persona, window.presented, anchor_id)
         if current_chars <= watermarks.high:
             return "skip"
         persona_id = getattr(persona, "persona_id", None)
@@ -2423,8 +2527,12 @@ class SessionLifecycle:
             )
             if not anchor_id:
                 return None
+            # raise_on_error は内層 (知覚一覧の取得) まで貫通させる — 厳格モード
+            # の途中の読み出しだけが fail-open だと、知覚ゼロで計算した refill
+            # 判定が measurement_failed なしで返る (Codex 指摘 2026-09-02 三巡目)。
             plan = self._plan_window_refill(
                 persona, model_key, anchor_id, watermarks,
+                raise_on_error=raise_on_error,
             )
         except Exception:
             if raise_on_error:
@@ -2447,6 +2555,8 @@ class SessionLifecycle:
 
     def _plan_window_refill(
         self, persona, model_key: str, anchor_id: str, watermarks: Watermarks,
+        *,
+        raise_on_error: bool = False,
     ) -> Optional[Dict[str, Any]]:
         """§15 読み戻しの計画 + 最終検算 (読みだけ — 行は触らない)。
 
@@ -2467,7 +2577,16 @@ class SessionLifecycle:
                 }
         """
         window = self.get_presented_window(persona, model_key, anchor_id)
-        current_chars = message_chars(window.presented)
+        # 読み戻しの物差しも「実際に送る中身」— 知覚ブロックぶんを足した量で
+        # 不足を判定する。勘定 (発火側) と別の物差しで測ると、発火側が「多い」と
+        # 言っている窓へ読み戻しが更に足す (2026-09-02 裁定)。
+        perception_chars = message_chars(
+            self.perception_blocks_for(
+                persona, window.presented, anchor_id,
+                raise_on_error=raise_on_error,
+            )
+        )
+        current_chars = message_chars(window.presented) + perception_chars
         if current_chars >= watermarks.target:
             return None
         persona_id = getattr(persona, "persona_id", None)
@@ -2579,12 +2698,18 @@ class SessionLifecycle:
                 final_presented = self._present_with_folds(
                     persona, final_raw, new_folds + list(window.folds),
                 )
-                if message_chars(final_presented) > watermarks.target:
+                # 検算も送る中身で測る (引き戻し後の起点で数え直す — Chronicle
+                # 無効ペルソナはバッチの絞りが起点に依るため)。
+                final_chars = self.presented_chars(
+                    persona, final_presented, new_anchor_id,
+                    raise_on_error=raise_on_error,
+                )
+                if final_chars > watermarks.target:
                     LOGGER.warning(
                         "[metabolism] refill verification: rewound window "
                         "would be %d chars > target=%d; dropping the rewind "
                         "(persona=%s model=%s)",
-                        message_chars(final_presented), watermarks.target,
+                        final_chars, watermarks.target,
                         persona_id, model_key,
                     )
                     rewind = None
@@ -2598,12 +2723,13 @@ class SessionLifecycle:
             final_presented = self._present_with_folds(
                 persona, window.raw, list(window.folds),
             )
-            if message_chars(final_presented) > watermarks.target:
+            final_chars = message_chars(final_presented) + perception_chars
+            if final_chars > watermarks.target:
                 LOGGER.warning(
                     "[metabolism] refill verification: reopened window would "
                     "be %d chars > target=%d; skipping refill "
                     "(persona=%s model=%s)",
-                    message_chars(final_presented), watermarks.target,
+                    final_chars, watermarks.target,
                     persona_id, model_key,
                 )
                 return None
@@ -2613,7 +2739,7 @@ class SessionLifecycle:
             "folds": new_folds + list(window.folds),
             "presented": final_presented,
             "current_chars": current_chars,
-            "final_chars": message_chars(final_presented),
+            "final_chars": final_chars,
             "target": watermarks.target,
             "reopened": len(reopen),
             "rewound_messages": rewind.restored_message_count if rewind else 0,
@@ -2810,7 +2936,8 @@ class SessionLifecycle:
         self.save_folded_ranges(persona_id, model_key, window.folds)
         LOGGER.info(
             "[metabolism] refolded %d raw-view range(s) back to digest "
-            "(persona=%s model=%s, LLM-free; %d chars presented)",
+            "(persona=%s model=%s, LLM-free; %d stored chars presented — "
+            "injected perceptions add to what is actually sent)",
             flipped, persona_id, model_key, message_chars(current_presented),
         )
         from sea.session_window import SessionWindow
@@ -2823,6 +2950,8 @@ class SessionLifecycle:
 
     def _refold_raw_view_plan(
         self, persona, window: "SessionWindow", watermarks: Watermarks,
+        *,
+        raise_on_error: bool = False,
     ) -> Optional[Tuple[List[Dict[str, Any]], int]]:
         """§15-3 印戻しの計画部 — ``window.folds`` の印を古い方から戻す。
 
@@ -2847,10 +2976,22 @@ class SessionLifecycle:
         # 印付き区間が退場計画に入り、既編纂範囲が生ログとして再編纂されて
         # あらすじが二本立ちする (Codex 指摘 2026-07-30)。部分生存の印付き
         # 区間 (提示は既に digest) の削減量も、実測なら自然にゼロと数えられる。
+        # 知覚ブロックのぶんも足した「実際に送る中身」で止め時を決める
+        # (2026-09-02 まはー裁定)。印戻しは保存行しか動かさないので、ブロック
+        # 一覧は途中で変わらない — 起点 (window.anchor_id) 基準で一度だけ引いて
+        # 定数として足す (fold ごとに DB を引き直さない)。保存行だけで測ると、
+        # 実送信が残す量を超えたまま印戻しを止め、印付き区間が退場計画へ入って
+        # 既編纂範囲があらすじ二本立ちする (この判定が実測な理由そのもの)。
+        perception_chars = message_chars(
+            self.perception_blocks_for(
+                persona, window.presented, window.anchor_id,
+                raise_on_error=raise_on_error,
+            )
+        )
         current_presented = window.presented
         flipped = 0
         for fold in sorted(raw_view, key=_first_pos):  # 古い方から
-            if message_chars(current_presented) <= watermarks.target:
+            if message_chars(current_presented) + perception_chars <= watermarks.target:
                 break
             fold.presented_raw = False
             flipped += 1
@@ -2864,6 +3005,8 @@ class SessionLifecycle:
     def preview_planning_window(
         self, persona, model_key: Optional[str], window: "SessionWindow",
         watermarks: Watermarks,
+        *,
+        raise_on_error: bool = False,
     ) -> Tuple["SessionWindow", int]:
         """本走行が退場計画の前に行う窓の正規化を**書き込みなし**で再現する。
 
@@ -2902,7 +3045,9 @@ class SessionLifecycle:
             ),
             folds=work_folds,
         )
-        refolded = self._refold_raw_view_plan(persona, work, watermarks)
+        refolded = self._refold_raw_view_plan(
+            persona, work, watermarks, raise_on_error=raise_on_error,
+        )
         if refolded is None:
             return work, 0
         presented, flipped = refolded
@@ -2994,7 +3139,13 @@ class SessionLifecycle:
             # (§14-2) が最前線から立てるのを待つ。
             return "skip"
         window = self.get_presented_window(persona, model_key, self_entry["anchor_id"])
-        current_chars = message_chars(window.presented)
+        # 中間値との比較も「実際に送る中身」で測る (2026-09-02 まはー裁定)。
+        # 先回りが救おうとしているのは実送信の膨らみなので、保存行だけで測ると
+        # 知覚ブロックで既に中間値を越えている窓を "cool" と読み、次の会話の
+        # 非常畳み (§14-3) へ丸ごと送ってしまう。
+        current_chars = self.presented_chars(
+            persona, window.presented, self_entry["anchor_id"],
+        )
         midpoint = (watermarks.target + watermarks.high) / 2
         if current_chars <= midpoint:
             return "cool"
@@ -3058,7 +3209,12 @@ class SessionLifecycle:
                 window = self.get_presented_window(persona, model_key)
                 if watermarks is None or not window.anchor_id:
                     return "skip"
-                current_chars = message_chars(window.presented)
+                # 判定 (cold_precompaction_status) と同じ物差しで報告する —
+                # ログだけ保存行のままだと、「中間値超過」と言いながら中間値
+                # 未満の数字が並ぶ。
+                current_chars = self.presented_chars(
+                    persona, window.presented, window.anchor_id,
+                )
                 LOGGER.info(
                     "[metabolism] cold pre-compaction: all anchors cold and window "
                     "past midpoint (persona=%s model=%s %d chars, target=%d high=%s)",
@@ -3164,7 +3320,13 @@ class SessionLifecycle:
         if refolded is not None:
             window = refolded
             current_messages = window.presented
-            if message_chars(current_messages) <= watermarks.target:
+            # 「印戻しだけで残す量に収まったか」= 送信量の水位。ここも合計で
+            # 測る (2026-09-02 裁定) — 保存行だけで早期完了すると、実送信が
+            # 残す量を超えたまま「整理しました」を返し、次の Pulse の発火判定
+            # (合計で測る) が即座にまた発火する併走になる。
+            if self.presented_chars(
+                persona, current_messages, window.anchor_id,
+            ) <= watermarks.target:
                 self.ensure_recall_embeddings(persona)
                 try:
                     from saiverse.dynamic_state import DynamicStateManager
@@ -3185,8 +3347,16 @@ class SessionLifecycle:
         # 古い側を、古い順に U (材料字数 — 2026-08-29 裁定) ずつの範囲に刻んで
         # 全部畳む。エピソードに畳みを止める権利は無い (開いているエピソードも
         # 畳む)。close_undersized_tail は非常畳み (§14-3) だけが True にする。
+        # 計画の入力は「実際に送る中身」= 保存行 + 知覚ブロック (2026-09-02 裁定)。
+        # ブロックは重さだけが効き、fold の中身にも境目にもならない — 畳んだ範囲を
+        # 覆うあらすじが確定すると、その期間のブロックには付記印が付いて提示から
+        # 下りるので、削減見込みには数える。下見 (context-status の fold_ready) も
+        # 同じ組成で渡すこと (下見と本走行が別の答えを出す退行の再発防止)。
         plan = plan_eviction(
-            current_messages, set(), watermarks, target_chars=band_budget,
+            self.presented_with_perceptions(
+                persona, current_messages, window.anchor_id,
+            ),
+            set(), watermarks, target_chars=band_budget,
             close_undersized_tail=close_undersized_tail,
         )
         if plan.is_empty:

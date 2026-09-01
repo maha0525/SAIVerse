@@ -9,7 +9,7 @@ import pytest
 from fastapi import HTTPException
 
 from api.routes.people.context_status import get_context_status
-from sea.eviction_plan import Watermarks
+from sea.eviction_plan import CONSUMED_PERCEPTION_KEY, Watermarks
 
 PERSONA_ID = "tester"
 
@@ -28,6 +28,19 @@ def _manager(persona=None, lifecycle=None, details=None, default_model=None):
     )
 
 
+def _perception(chars, at=0):
+    """送信直前に差し込まれる知覚ブロック (保存行ではないので id を持たない)。"""
+    return {
+        "role": "user",
+        "content": "p" * chars,
+        "created_at": at,
+        "metadata": {
+            "tags": ["internal", "event_message", "perception"],
+            CONSUMED_PERCEPTION_KEY: True,
+        },
+    }
+
+
 def _lifecycle(
     *,
     watermarks=Watermarks(low=1000, target=2000, high=4000),
@@ -36,18 +49,23 @@ def _lifecycle(
     presented=None,
     planning_presented=None,
     refold_ranges=0,
+    perceptions=None,
 ):
     """context-status が触る SessionLifecycle の顔だけの偽物。
 
     ``planning_presented`` は preview_planning_window (本走行と同じ窓の正規化を
     書き込みなしで再現する下見) が返す提示 — 省略時は素の窓をそのまま返す
     (正規化で何も変わらない窓)。``refold_ranges`` は §15-3 印戻しで digest 表示
-    へ戻る区間数。
+    へ戻る区間数。``perceptions`` は送信直前に差し込まれる知覚ブロックの列
+    (本物の SessionLifecycle は runtime_context の組成関数から得る)。
     """
-    def _preview_planning_window(persona, model_key, window, wm):
+    def _preview_planning_window(persona, model_key, window, wm, **_kw):
         if planning_presented is None:
             return window, refold_ranges
         return SimpleNamespace(presented=list(planning_presented)), refold_ranges
+
+    def _presented_with_perceptions(persona, rows, aid=None, **_kw):
+        return list(rows) + list(perceptions or [])
 
     return SimpleNamespace(
         get_metabolism_watermarks=lambda persona, model_key: watermarks,
@@ -59,6 +77,7 @@ def _lifecycle(
             presented=list(presented or []),
         ),
         preview_planning_window=_preview_planning_window,
+        presented_with_perceptions=_presented_with_perceptions,
     )
 
 
@@ -258,6 +277,81 @@ def test_fold_ready_true_when_refold_alone_reduces_the_window(monkeypatch):
     status = get_context_status(PERSONA_ID, _manager(persona=persona, lifecycle=lc))
     assert status["fold_ready"] is True
     assert status["fold_shortfall_chars"] == 0
+
+
+def test_presented_chars_is_stored_plus_injected_perceptions():
+    """表示する送信量は「実際に送る中身」の合計 — 保存行だけではない。
+
+    2026-09-02 まはー裁定 (docs/issues/context_accounting_excludes_injected_rows.md):
+    送信直前に差し込まれる知覚 (部屋の様子) は勘定から漏れていて、本番エリスで
+    勘定 149,856 字に対し実送信 209,031 字という乖離を出していた。内訳も返す。
+    """
+    persona = SimpleNamespace(persona_id=PERSONA_ID, model="model-a")
+    lc = _lifecycle(
+        presented=[_msg("m1", 1000)],
+        perceptions=[_perception(4000)],
+    )
+    status = get_context_status(PERSONA_ID, _manager(persona=persona, lifecycle=lc))
+    assert status["stored_chars"] == 1000
+    assert status["injected_perception_chars"] == 4000
+    assert status["presented_chars"] == 5000
+
+
+def test_refill_path_also_counts_injected_perceptions():
+    """§15 読み戻し経路の表示も同じ物差し (合計) で出す。"""
+    persona = SimpleNamespace(persona_id=PERSONA_ID, model="model-a")
+    plan = {"presented": [_msg("m1", 700)], "new_anchor_id": "m1"}
+    lc = _lifecycle(refill_plan=plan, perceptions=[_perception(300)])
+    status = get_context_status(PERSONA_ID, _manager(persona=persona, lifecycle=lc))
+    assert status["refill_applied"] is True
+    assert status["stored_chars"] == 700
+    assert status["injected_perception_chars"] == 300
+    assert status["presented_chars"] == 1000
+
+
+def test_perception_lookup_failure_is_flagged_not_shown_as_zero():
+    """知覚一覧の内部失敗を「知覚 0 字 (正常)」として表示しない。
+
+    透明性の画面なので、失敗は measurement_failed に落とす (raise_on_error 経由。
+    Codex 指摘 2026-09-02)。門・発火・送信の各経路は fail-open のままで、
+    fail-closed にするのはこの表示だけ。
+    """
+    persona = SimpleNamespace(persona_id=PERSONA_ID, model="model-a")
+    lc = _lifecycle(presented=[_msg("m1", 1000)])
+
+    def _boom(persona, rows, aid=None, **_kw):
+        raise RuntimeError("perception listing failed")
+
+    lc.presented_with_perceptions = _boom
+    status = get_context_status(PERSONA_ID, _manager(persona=persona, lifecycle=lc))
+    assert status["measurement_failed"] is True
+    assert status["presented_chars"] is None
+    assert status["injected_perception_chars"] is None
+
+
+def test_fold_readiness_sees_the_perception_weight(monkeypatch):
+    """下見の退場計画にも知覚ブロックの重さを見せる (本走行と同じ組成)。
+
+    保存行だけを数えると、残す量 (2,000) の保護が古い側まで伸びて畳む材料が
+    U に届かない。末尾に乗る知覚ブロックの重さを見せると保護は末尾側で埋まり、
+    古い側の保存行が退場候補へ出る。下見と本走行が別の答えを出す退行を防ぐ。
+    """
+    monkeypatch.setenv("SAIVERSE_CHRONICLE_BAND_BUDGET", "2000")
+    persona = SimpleNamespace(persona_id=PERSONA_ID, model="model-a")
+    rows = [_msg(f"m{i}", 600) for i in range(6)]  # 保存行は合計 3,600 字
+
+    without = _lifecycle(presented=rows)
+    plain = get_context_status(
+        PERSONA_ID, _manager(persona=persona, lifecycle=without),
+    )
+    # 保存行だけの勘定では候補の材料が 1,200 字 < U=2,000 で閉じられない。
+    assert plain["presented_chars"] == 3600
+    assert plain["fold_ready"] is False
+
+    lc = _lifecycle(presented=rows, perceptions=[_perception(3000, at=10**10)])
+    status = get_context_status(PERSONA_ID, _manager(persona=persona, lifecycle=lc))
+    assert status["presented_chars"] == 6600
+    assert status["fold_ready"] is True
 
 
 def test_watermark_resolution_failure_is_500():
