@@ -21,6 +21,12 @@ if TYPE_CHECKING:
 
 LOGGER = logging.getLogger(__name__)
 
+# head の weave section を覗く検査 (:meth:`SessionLifecycle._head_weave_snapshot`)
+# 自体が失敗したことを表す番人。「weave が正当に無い」(None) と区別するために
+# 要る — 両方 None に潰すと、検査が壊れている並びで stale な head が「組み直せ
+# ました」の顔で通り、知らせるための機構が黙る (Codex 指摘 2026-09-01)。
+_WEAVE_INSPECT_FAILED = object()
+
 
 class SessionLifecycle:
     """Anchor / Metabolism / Chronicle — Session (短期記憶) の節目管理。
@@ -1848,16 +1854,100 @@ class SessionLifecycle:
         (Memopedia 索引の常時表示など) の変更がコンテキストへ反映されなければ
         ならない。"ok" だけは畳み本体 (:meth:`_run_metabolism_locked`) が
         発火済みなので、ここでは発火しない (二重 capture の回避)。発火責務を
-        この関数が持つことで、呼び出し元 (organize-memory API / あらすじタブの
-        生成ジョブ) は何もしなくてよい。
+        この関数が持つことで、呼び出し元 (あらすじタブの生成ジョブ) は何も
+        しなくてよい。head が組み直されたかまで知りたい呼び出し元は
+        :meth:`run_manual_compaction_checked` を使う。
+        """
+        status, _head_rebuilt = self.run_manual_compaction_checked(
+            persona, event_callback, model_key, cancellation_token,
+        )
+        return status
+
+    def run_manual_compaction_checked(
+        self,
+        persona,
+        event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+        model_key: Optional[str] = None,
+        cancellation_token: Optional[CancellationToken] = None,
+    ) -> Tuple[str, bool]:
+        """:meth:`run_manual_compaction` に head 再構築の成否を添えた形。
+
+        Returns:
+            ``(status, head_rebuilt)``。status は run_manual_compaction と同じ。
+            ``head_rebuilt`` が False なら、畳み自体は status のとおりでも
+            **設定変更のコンテキストへの反映は済んでいない** — 画面へ警告として
+            出すのは呼び出し元 (ジョブ) の仕事 (2026-09-01 まはー裁定「無理に
+            救済しなくていいが、失敗を知らせることは必要」)。
+
+        判定は §15 読み戻し (:meth:`maybe_run_window_refill`) と同じ指紋比較:
+        dispatch が成功しても weave が組み直された保証は無い (capture_all は
+        section の capture 例外で既存オブジェクトを使い回す stale-but-real)
+        ので、weave section の identity が変わったかで見る。weave が元々無い
+        環境 (head 未初期化 / weave 無効) は残りようが無いので成功扱い。
+
+        ``before`` は**判定本体より前**に撮る — status=="ok" の再構築は畳み
+        本体 (_run_metabolism_locked) の中で起きるため、畳みの後に撮ると
+        自分が撮った新品を「変わっていない」と誤判定する。
+
+        **別処理が同じ窓で組み直した場合も成功と数える** (排他はしない、
+        2026-09-01 裁定)。この検査が守るのは「設定がコンテキストへ届いたこと」
+        であって「組み直したのが自分か」ではない。before と after の間に別の
+        手動処理や自動 Metabolism が head を組み直したなら、その head は現在の
+        設定で capture されているので、ユーザーの目的は誰の手でも満たされて
+        いる。主体を見分けるためのロックは、目的が要求しない複雑化になる。
         """
         resolved_model = str(model_key or getattr(persona, "model", "") or "") or None
+        head_model = self._resolve_head_model_key(persona, resolved_model)
+        persona_id = getattr(persona, "persona_id", None)
+        before_weave = self._head_weave_snapshot(persona_id, head_model)
+
         status = self._manual_compaction_status(
             persona, event_callback, resolved_model, cancellation_token,
         )
         if status != "ok":
-            self._dispatch_manual_head_rebuild(persona, resolved_model)
-        return status
+            self._dispatch_manual_head_rebuild(persona, head_model)
+        return status, self._head_was_rebuilt(persona_id, head_model, before_weave)
+
+    def _resolve_head_model_key(
+        self, persona, model_key: Optional[str],
+    ) -> Optional[str]:
+        """head の同定キー (persona, model) の model 側を確定する。
+
+        ``on_metabolism(model_key=None)`` は head 側で persona の標準 model に
+        フォールバックする。指紋を撮る側も同じ鍵を見ないと別の snapshot を
+        比べてしまうので、フォールバックをここで先に済ませて、発火にも同じ値を
+        渡す。
+        """
+        if model_key:
+            return str(model_key)
+        try:
+            from sea.head_pipeline.integration import resolve_default_model_key
+            return resolve_default_model_key(persona)
+        except Exception:
+            return str(getattr(persona, "model", "") or "") or None
+
+    def _head_was_rebuilt(
+        self, persona_id: Optional[str], model_key: Optional[str], before_weave: Any,
+    ) -> bool:
+        """head の weave section が撮り直されたか。
+
+        三値 (:meth:`_head_weave_snapshot` 参照) の扱い:
+
+        - どちらかが :data:`_WEAVE_INSPECT_FAILED` → **False** (検証できて
+          いない)。知らせるための機構なので、分からないときは黙らず警告側へ
+          倒す
+        - before が ``None`` (weave が正当に無い環境) → True。残りようが
+          ないので失敗ではない
+        - それ以外 → identity が変わったか
+        """
+        if before_weave is _WEAVE_INSPECT_FAILED:
+            return False
+        if before_weave is None:
+            return True
+        after_weave = self._head_weave_snapshot(persona_id, model_key)
+        if after_weave is _WEAVE_INSPECT_FAILED:
+            return False
+        return after_weave is not before_weave
 
     def _dispatch_manual_head_rebuild(self, persona, model_key: Optional[str]) -> None:
         """手動入口 (ボタン押下) の出口で head を再構築する。
@@ -1938,12 +2028,41 @@ class SessionLifecycle:
         発火する。それでも出口の発火は重複ではない — 引き戻しの後に
         ``mark_covered_cold_windows`` が §15 の印を書くので、途中の capture は
         最終状態を写していない。
+
+        head が組み直されたかまで知りたい呼び出し元は
+        :meth:`run_coverage_repair_checked` を使う。
         """
+        status, mark_failures, _head_rebuilt = self.run_coverage_repair_checked(
+            persona, event_callback, cancellation_token,
+        )
+        return (status, mark_failures)
+
+    def run_coverage_repair_checked(
+        self,
+        persona,
+        event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+        cancellation_token: Optional[CancellationToken] = None,
+    ) -> Tuple[str, int, bool]:
+        """:meth:`run_coverage_repair` に head 再構築の成否を添えた形。
+
+        Returns:
+            ``(status, 印を書けなかった行の数, head_rebuilt)``。判定の規約は
+            :meth:`run_manual_compaction_checked` と同じ (weave section の
+            identity 比較。before は補修本体より前に撮る — 引き戻しが内側で
+            走らせる畳みの再構築も拾うため)。
+        """
+        head_model = self._resolve_head_model_key(persona, None)
+        persona_id = getattr(persona, "persona_id", None)
+        before_weave = self._head_weave_snapshot(persona_id, head_model)
+
         status, mark_failures = self._coverage_repair_status(
             persona, event_callback, cancellation_token,
         )
-        self._dispatch_manual_head_rebuild(persona, None)
-        return (status, mark_failures)
+        self._dispatch_manual_head_rebuild(persona, head_model)
+        return (
+            status, mark_failures,
+            self._head_was_rebuilt(persona_id, head_model, before_weave),
+        )
 
     def _coverage_repair_status(
         self,
@@ -2502,22 +2621,36 @@ class SessionLifecycle:
 
     def _head_weave_snapshot(
         self, persona_id: Optional[str], model_key: Optional[str],
-    ) -> Optional[Any]:
-        """(persona, model) の head snapshot が持つ weave section (無ければ None)。
+    ) -> Any:
+        """(persona, model) の head snapshot が持つ weave section。
 
-        §15 読み戻し後の再 capture 検証用 — capture は毎回新しい section
-        オブジェクトを作るので、identity が変わらなければ stale の使い回し。
+        §15 読み戻し後・手動入口の再 capture 検証用 — capture は毎回新しい
+        section オブジェクトを作るので、identity が変わらなければ stale の
+        使い回し。
+
+        返す値は**三値**で、呼び出し側は区別して扱う:
+
+        - section の実体 ... 比較の材料
+        - ``None`` ......... weave が正当に無い (head 未初期化 / weave 無効 /
+          snapshot 未作成)。「組み直されなかった」ではないので成功扱いでよい
+        - :data:`_WEAVE_INSPECT_FAILED` ... 検査自体が失敗した (pipeline の
+          import 失敗、get_snapshot の例外など)。**何も分かっていない**ので、
+          成功にも失敗にも数えず、判定側が「検証できなかった」に倒す
         """
         try:
             from sea.head_pipeline import get_default_pipeline
             snap = get_default_pipeline().get_snapshot(
                 str(persona_id), str(model_key),
             )
+            if snap is None:
+                return None
+            return getattr(snap, "sections", {}).get("memory_weave")
         except Exception:
-            return None
-        if snap is None:
-            return None
-        return getattr(snap, "sections", {}).get("memory_weave")
+            LOGGER.warning(
+                "[metabolism] head weave inspection failed (persona=%s model=%s)",
+                persona_id, model_key, exc_info=True,
+            )
+            return _WEAVE_INSPECT_FAILED
 
     def _write_refill(
         self,

@@ -491,6 +491,9 @@ class GenerationJobStatus(BaseModel):
     total: Optional[int] = None  # 総処理対象メッセージ数
     message: Optional[str] = None  # ステータスメッセージ
     entries_created: Optional[int] = None  # 作成されたエントリ数
+    # 本体は成功したが付随処理が完了しなかったときの添え書き（ユーザー向け）。
+    # 完了表示に併記する — error と違い、失敗扱いにはしない。
+    warning: Optional[str] = None
     error: Optional[str] = None  # エラーメッセージ（ユーザー向け）
     error_code: Optional[str] = None  # エラーコード (payment, authentication, rate_limit, etc.)
     error_detail: Optional[str] = None  # 技術的詳細（開発者向け）

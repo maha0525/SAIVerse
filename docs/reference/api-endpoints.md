@@ -243,6 +243,7 @@ REST API 全エンドポイントの一覧（自動生成）。すべて `/api` 
 | GET | `/api/people/{persona_id}/arasuji/cost-estimate` | Estimate the cost of generating Chronicle for unprocessed messages. |
 | GET | `/api/people/{persona_id}/arasuji/diagnosis` | Get diagnostic information about Chronicle structure (no message content). |
 | POST | `/api/people/{persona_id}/arasuji/generate` | Start Chronicle generation as a background job. |
+| GET | `/api/people/{persona_id}/arasuji/generate/latest` | このペルソナの最新の生成ジョブ (走行中・終了済みを問わず) を返す。 |
 | GET | `/api/people/{persona_id}/arasuji/generate/{job_id}` | Get the status of a Chronicle generation job. |
 | POST | `/api/people/{persona_id}/arasuji/generate/{job_id}/cancel` | Cancel a running Chronicle generation job. |
 | POST | `/api/people/{persona_id}/arasuji/messages-by-ids` | Get messages by their IDs (for error investigation). |
@@ -311,7 +312,6 @@ REST API 全エンドポイントの一覧（自動生成）。すべて `/api` 
 | DELETE | `/api/people/{persona_id}/messages/{message_id}` | Delete a message. |
 | POST | `/api/people/{persona_id}/meta-judgment/bulk-delete` | Delete multiple meta_judgment_log rows in one request. |
 | DELETE | `/api/people/{persona_id}/meta-judgment/{judgment_id}` | Delete a single meta_judgment_log row owned by ``persona_id``. |
-| POST | `/api/people/{persona_id}/organize-memory` | 手動の記憶整理 — 残す量より古い側を今すぐあらすじに畳む。 |
 | GET | `/api/people/{persona_id}/pocketbook` | 手帳を読む — アクティビティごとにメモを日付降順で束ねて返す。 |
 | GET | `/api/people/{persona_id}/pulse-logs` | List pulse_id summaries with pagination (newest first). |
 | GET | `/api/people/{persona_id}/pulse-logs/{pulse_id}` | Get all log entries for a specific pulse. |

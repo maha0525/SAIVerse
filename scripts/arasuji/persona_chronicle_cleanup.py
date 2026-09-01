@@ -383,8 +383,8 @@ def execute(
         raise
     finally:
         world.close()
-    print("完了。次: UI の記憶整理 (または CLI) で再編纂。完走確認はログで "
-          "(UI はタイムアウト誤報を出す — docs/issues/organize_memory_ui_timeout.md)")
+    print("完了。次: UI の「溜まった会話をあらすじにまとめる」(または CLI) で再編纂。"
+          "進捗と完了は記憶モーダルの「あらすじ」タブに出る")
     return 0
 
 

@@ -177,51 +177,8 @@ def update_persona_config(
     return response
 
 
-@router.post("/{persona_id}/organize-memory")
-def organize_persona_memory(persona_id: str, manager=Depends(get_manager)):
-    """手動の記憶整理 — 残す量より古い側を今すぐあらすじに畳む。
-
-    arasuji_levels.md §13 裁定4 (2026-07-29): 範囲規則は自動 (応答後 Metabolism)
-    と同一で、「発火 (予算超過) を待たずに今すぐ畳む」だけ。旧実装の「起点の
-    全消し + 全未編纂の一括編纂」は撤去した — 起点は畳みで前進するだけで
-    消えない。全量再編纂 (修復) は scripts/arasuji/ の領分。
-
-    編纂の要否 (ENABLE_MEMORY_WEAVE_CONTEXT / persona の CHRONICLE_ENABLED) は
-    畳み本体 (_run_metabolism_locked) が判定する。フロントの confirm() で同意
-    済みのため、編纂の確認ダイアログは chronicle_force で回避される。
-    """
-    persona = manager.personas.get(persona_id)
-    if not persona:
-        raise HTTPException(status_code=404, detail="Persona not loaded")
-
-    # NOTE: SEARuntime は manager.sea_runtime。manager.runtime は RuntimeService
-    # (別物) で、かつて誤参照して AttributeError を握り潰し「完了しました」を
-    # 返し続けていた (2026-07-04 修正)。
-    lifecycle = getattr(getattr(manager, "sea_runtime", None), "session_lifecycle", None)
-    if lifecycle is None:
-        raise HTTPException(status_code=503, detail="SEA runtime not available")
-
-    try:
-        compaction_status = lifecycle.run_manual_compaction(persona)
-    except Exception as exc:
-        LOGGER.warning("[organize-memory] manual compaction failed: %s", exc, exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Memory compaction failed: {exc}")
-
-    # Recall embedding maintenance — 畳みの有無・成否と独立に未埋め込みの
-    # Chronicle/ページ/Fragment を全件埋める (ローカル・無料)。
-    try:
-        lifecycle.ensure_recall_embeddings(persona)
-    except Exception:
-        LOGGER.warning("[organize-memory] embedding maintenance failed", exc_info=True)
-
-    # head の再構築 (snapshot refresh) は run_manual_compaction が出口で持つ
-    # (畳みが起きた "ok" は畳み本体が、それ以外は手動入口が発火する)。
-    # かつてここにも無条件発火があり、"ok" のとき capture_all が二重に走って
-    # いた (2026-09-01 に発火責務を session_lifecycle へ一本化して撤去)。
-
-    # failed / deferred は「完了」ではない (Codex 2026-07-29 指摘: 失敗の成功偽装
-    # の根治)。畳みは適用されておらず、再実行で再試行できる。
-    return {
-        "success": compaction_status in ("ok", "noop"),
-        "compaction": compaction_status,
-    }
+# 旧 POST /{persona_id}/organize-memory は 2026-09-01 に撤去した。同期で畳み全体
+# (LLM 呼び出し × N) を待つ作りで、フロントが先にタイムアウトして「通信に失敗」の
+# 誤報を出していた (docs/issues/archive/organize_memory_ui_timeout.md)。手動の畳みは
+# あらすじタブと同じ背景ジョブ POST /{persona_id}/arasuji/generate (mode=compaction)
+# へ一本化し、ペルソナメニューのボタンもそちらを叩く。

@@ -59,6 +59,14 @@ interface ArasujiViewerProps {
     personaId: string;
 }
 
+// × で閉じた「終了済みジョブ」の ID。モジュールスコープに置くのは、記憶モーダルを
+// 閉じて開き直す (= このコンポーネントが再マウントされる) のを跨いで覚えておく
+// 必要があるため — 覚えていないと、サーバーの最新ジョブ照会が同じ結果を毎回
+// 引き当てて、閉じたはずの表示が蘇る。
+// 揮発でよい: ページを再読み込みすると忘れて一度だけ再表示されるが、もう一度 ×
+// を押せば済む。サーバーに既読を持たせるほどの重さではない。
+const dismissedJobIds = new Set<string>();
+
 export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
     const [stats, setStats] = useState<ArasujiStats | null>(null);
     const [entries, setEntries] = useState<ArasujiEntry[]>([]);
@@ -89,6 +97,9 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
         total: number | null;
         message: string | null;
         entriesCreated: number | null;
+        // 本体は成功したが付随処理が完了しなかったときの添え書き。完了表示に
+        // 併記する (失敗扱いにはしない)。
+        warning: string | null;
         error: string | null;
         error_code: string | null;
         error_detail: string | null;
@@ -484,6 +495,16 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
         );
     };
 
+    // この画面がジョブを開始したか (走行中ジョブ照会との競合を切る印)。
+    const startedLocallyRef = useRef(false);
+
+    // 結果表示を × で閉じる。閉じた ID を覚えておかないと、再マウント後の照会が
+    // 同じ終了済みジョブを引き当てて表示が蘇る。
+    const dismissGenerationJob = useCallback(() => {
+        if (generationJob) dismissedJobIds.add(generationJob.jobId);
+        setGenerationJob(null);
+    }, [generationJob]);
+
     const postGenerateJob = async (body: Record<string, unknown>) => {
         try {
             const res = await fetch(`/api/people/${personaId}/arasuji/generate`, {
@@ -493,6 +514,10 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
             });
             if (res.ok) {
                 const data = await res.json();
+                // 走行中ジョブの照会が往復している最中に開始されたら、照会の
+                // 結果 (古いジョブ) は捨てさせる — 印を立てるのは開始が成立した
+                // ここだけ。POST が失敗した場合は再接続を塞がない。
+                startedLocallyRef.current = true;
                 setGenerationJob({
                     jobId: data.job_id,
                     status: 'started',
@@ -500,6 +525,7 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                     total: null,
                     message: '開始中...',
                     entriesCreated: null,
+                    warning: null,
                     error: null,
                     error_code: null,
                     error_detail: null,
@@ -548,6 +574,7 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                         total: data.total,
                         message: data.message,
                         entriesCreated: data.entries_created,
+                        warning: data.warning || null,
                         error: data.error,
                         error_code: data.error_code || null,
                         error_detail: data.error_detail || null,
@@ -584,6 +611,59 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
             if (pollingRef.current) clearInterval(pollingRef.current);
         };
     }, []);
+
+    // 走行中ジョブへの再接続 (マウント時・ペルソナ切り替え時)。
+    // ジョブ ID は開始した画面の state にしか無いので、モーダルを閉じたり、
+    // ペルソナメニューの「溜まった会話をあらすじにまとめる」から開始したりすると
+    // 手掛かりが消える。サーバーに最新ジョブを聞き直して、走行中なら既存の
+    // ポーリングへ繋ぎ直し、終了済みなら結果 (warning / エラー案内) をそのまま出す。
+    // 照会はペルソナごとに一度きり — startPolling は levelFilter で作り直される
+    // ので、deps の変化で再照会すると、ユーザーが × で閉じた結果表示が勝手に
+    // 戻ってくる。
+    const reconnectedForRef = useRef<string | null>(null);
+    useEffect(() => {
+        if (!personaId || reconnectedForRef.current === personaId) return;
+        reconnectedForRef.current = personaId;
+        // 別ペルソナで開始した印は持ち越さない (この照会は今の personaId のもの)。
+        startedLocallyRef.current = false;
+        let cancelled = false;
+        (async () => {
+            try {
+                const res = await fetch(`/api/people/${encodeURIComponent(personaId)}/arasuji/generate/latest`);
+                if (!res.ok || cancelled) return;
+                const data = await res.json();
+                // ジョブが 1 件も無ければ null (エラーではない)。
+                if (!data || cancelled) return;
+                // 往復の間にこの画面が新しいジョブを開始していたら、まるごと
+                // 捨てる。state だけ守ってポーリングを張ると、古いジョブの
+                // interval が新ジョブの interval を破棄して置き換わる
+                // (startPolling は既存の interval を無条件で clear する)。
+                // 表示と接続は同じ判定で束ねる。
+                if (startedLocallyRef.current) return;
+                const terminal = ['completed', 'failed', 'cancelled'].includes(data.status);
+                // 終わったジョブを × で閉じてあるなら蘇らせない。走行中ジョブは
+                // 閉じた記録と無関係に繋ぎ直す (進捗は見えていなければ困る)。
+                if (terminal && dismissedJobIds.has(data.job_id)) return;
+                setGenerationJob({
+                    jobId: data.job_id,
+                    status: data.status,
+                    progress: data.progress,
+                    total: data.total,
+                    message: data.message,
+                    entriesCreated: data.entries_created,
+                    warning: data.warning || null,
+                    error: data.error,
+                    error_code: data.error_code || null,
+                    error_detail: data.error_detail || null,
+                    error_meta: data.error_meta || null,
+                });
+                if (!terminal) startPolling(data.job_id);
+            } catch (e) {
+                console.error('Failed to look up the latest generation job', e);
+            }
+        })();
+        return () => { cancelled = true; };
+    }, [personaId, startPolling]);
 
 
     const formatMessageRange = (entry: ArasujiEntry): string => {
@@ -664,7 +744,7 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                             className={styles.generateBtn}
                             onClick={openGenerateModal}
                             disabled={generationJob?.status === 'running'}
-                            title="Chronicleを生成"
+                            title="溜まった会話をあらすじにまとめる"
                         >
                             <Play size={14} />
                             生成
@@ -705,14 +785,24 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                 {/* Generation Result */}
                 {generationJob && generationJob.status === 'completed' && (
                     <div className={styles.generationResult}>
-                        <span>✅ {generationJob.message}</span>
-                        <button onClick={() => setGenerationJob(null)}>×</button>
+                        {/* 畳み・補修は成功しているので completed のまま。付随処理
+                            (head の組み直し等) が終わらなかった場合だけ添え書きを
+                            併記する — 失敗扱いにはしない。 */}
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', flex: 1 }}>
+                            <span>✅ {generationJob.message}</span>
+                            {generationJob.warning && (
+                                <span style={{ fontSize: '0.85em', opacity: 0.75, lineHeight: 1.4 }}>
+                                    ⚠️ {generationJob.warning}
+                                </span>
+                            )}
+                        </div>
+                        <button onClick={dismissGenerationJob}>×</button>
                     </div>
                 )}
                 {generationJob && generationJob.status === 'cancelled' && (
                     <div className={styles.generationResult}>
                         <span>{generationJob.message || '生成が中止されました'}</span>
-                        <button onClick={() => setGenerationJob(null)}>×</button>
+                        <button onClick={dismissGenerationJob}>×</button>
                     </div>
                 )}
                 {generationJob && generationJob.status === 'failed' && (() => {
@@ -738,8 +828,8 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                         payment: 'APIキーの残高や支払い設定を確認してください。',
                         authentication: 'APIキーの設定を確認してください。',
                         server_error: 'LLMサーバーで障害が発生しています。しばらく時間を置いてから再実行してください。',
-                        window_claimed: '別の整理が同じ範囲を処理中または処理済みです。しばらく待ってから再実行してください。',
-                        sluice_unseen: '今回の採取（スルース）で読めていない範囲があったため、畳みを見送りました。採取の結果は保存されており、畳みは次回の整理で続きから進みます。',
+                        window_claimed: '別のあらすじ処理が同じ範囲を処理中または処理済みです。しばらく待ってから再実行してください。',
+                        sluice_unseen: '今回の採取（スルース）で読めていない範囲があったため、畳みを見送りました。採取の結果は保存されており、畳みは次回のまとめで続きから進みます。',
                         estimate_stale: 'あらすじにする対象が見積もり時より増えています。件数を確認し直してから、もう一度実行してください。',
                         ceiling_unresolved: '会話中の窓の境界を確認できなかったため、何も編纂せずに止まりました。しばらくしてから再実行してください。',
                     };
@@ -820,7 +910,7 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                                     </details>
                                 )}
                             </div>
-                            <button onClick={() => { setGenerationJob(null); setErrorBatchMessages([]); }}>×</button>
+                            <button onClick={() => { dismissGenerationJob(); setErrorBatchMessages([]); }}>×</button>
                         </div>
                     );
                 })()}
@@ -886,7 +976,7 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                                 onClick={openGenerateModal}
                             >
                                 <Play size={16} />
-                                Chronicle を生成
+                                溜まった会話をあらすじにまとめる
                             </button>
                         </div>
                     ) : (
@@ -1226,9 +1316,9 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
             {showGenerateModal && (
                 <ModalOverlay onClose={() => setShowGenerateModal(false)} className={styles.modalOverlay}>
                     <div className={styles.modal} onClick={(e) => e.stopPropagation()}>
-                        <h3>記憶の整理（Chronicle 生成）</h3>
+                        <h3>溜まった会話をあらすじにまとめる</h3>
                         <p className={styles.hint} style={{ display: 'block', margin: '0 0 1rem', lineHeight: 1.7 }}>
-                            古い会話履歴をあらすじ（Chronicle）に畳みます。直近の会話はそのまま残ります。
+                            古い側の会話をあらすじ（Chronicle）に畳み、長期記憶にします。直近の会話はそのまま残ります。
                             畳む量に応じて軽量モデルの LLM 呼び出しが数回発生します。
                         </p>
                         <div className={styles.generateContextBox}>

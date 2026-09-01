@@ -36,6 +36,9 @@ def _create_job(persona_id: str) -> str:
             "total": 0,
             "message": "Initializing...",
             "entries_created": 0,
+            # 畳み・補修そのものは成功したが、付随する処理が完了しなかったときの
+            # 添え書き (完了表示に併記する。失敗扱いにはしない)。
+            "warning": None,
             "error": None,
             "error_code": None,
             "error_detail": None,
@@ -856,6 +859,15 @@ async def regenerate_arasuji_entry(
 # Chronicle Generation (Async Background Job)
 # -----------------------------------------------------------------------------
 
+# head (提示コンテキストの固定部) を組み直せなかったときの添え書き。畳み自体は
+# 成功しているので completed のまま併記する — 救済 (再試行) はしない裁定
+# (2026-09-01 まはー「無理に救済しなくていいが、失敗を知らせることは必要」)。
+_HEAD_REBUILD_WARNING = (
+    "設定の反映（コンテキストの組み直し）に失敗しました。"
+    "次の記憶の整理か、時間経過で自動回復します。"
+)
+
+
 def _run_chronicle_generation(
     job_id: str,
     persona_id: str,
@@ -872,7 +884,9 @@ def _run_chronicle_generation(
     arasuji_levels.md §13 裁定4 (2026-07-29): 手動生成も範囲規則を自動 (応答後
     Metabolism) と揃える — 「発火 (予算超過) を待たずに今すぐ畳む」だけで、
     畳む範囲は残す量より古い側。実体は :meth:`SessionLifecycle.run_manual_compaction`
-    への委譲で、③記憶の整理 (organize-memory API) と同じ一本の経路に合流する。
+    への委譲。2026-09-01 に同期の organize-memory API を撤去し、ペルソナメニューの
+    「溜まった会話をあらすじにまとめる」もこの背景ジョブへ合流した (手動の畳みは
+    この経路が唯一の入口)。
 
     §16 (2026-08-31): ``mode="repair"`` は被覆補修 —
     :meth:`SessionLifecycle.run_coverage_repair` へ委譲し、止め線より古い
@@ -924,28 +938,37 @@ def _run_chronicle_generation(
         )
         return
 
-    _update_job(job_id, status="running", message="記憶を畳んでいます...")
+    _update_job(job_id, status="running", message="溜まった会話をあらすじにまとめています...")
     try:
-        status = lifecycle.run_manual_compaction(persona, cancellation_token=token)
+        # head の再構築 (設定トグルの反映) の発火は run_manual_compaction が
+        # 出口で持つ。ここで受け取るのは「組み直せたか」だけ — 組み直せなかった
+        # 場合に画面へ知らせるのがジョブの仕事 (救済はしない)。
+        status, head_rebuilt = lifecycle.run_manual_compaction_checked(
+            persona, cancellation_token=token,
+        )
         # 未埋め込みの Chronicle/ページ/Fragment を全件埋める (ローカル・無料、
-        # organize-memory と同じ独立ステップ)。
+        # 補修モードと同じ独立ステップ)。
         try:
             lifecycle.ensure_recall_embeddings(persona)
         except Exception:
             LOGGER.warning("[Chronicle Gen] embedding maintenance failed", exc_info=True)
 
-        # head の再構築 (設定トグルの反映) は run_manual_compaction が出口で持つ
-        # ので、ここでは何もしない (sea/session_lifecycle.py)。
+        if not head_rebuilt:
+            LOGGER.warning(
+                "[Chronicle Gen] head rebuild not verified (persona=%s status=%s)",
+                persona_id, status,
+            )
+            _update_job(job_id, warning=_HEAD_REBUILD_WARNING)
 
         if status == "ok":
             _update_job(
                 job_id, status="completed",
-                message="整理が完了しました（残す量より古い側を畳みました）",
+                message="あらすじにまとめました（残す量より古い側を畳みました）",
             )
         elif status == "noop":
             _update_job(
                 job_id, status="completed",
-                message="整理できる履歴がまだありません",
+                message="まとめられる会話がまだ溜まっていません",
             )
         elif status == "deferred" and token.is_cancelled():
             _update_job(
@@ -955,24 +978,24 @@ def _run_chronicle_generation(
         elif status == "deferred":
             _update_job(
                 job_id, status="failed",
-                error="別の整理が同じ範囲を処理中または処理済みです。しばらく待って再実行してください。",
+                error="別のあらすじ処理が同じ範囲を処理中または処理済みです。しばらく待って再実行してください。",
                 error_code="window_claimed",
             )
         elif status == "deferred_sluice_unseen":
             # スルース (採取) と編纂は確定済みで、退場だけが次回へ繰り越された。
-            # claim 競合 (window_claimed) と混ぜると「別の整理が処理中」という
+            # claim 競合 (window_claimed) と混ぜると「別のあらすじ処理が処理中」という
             # 嘘になる (docs/issues/archive/metabolism_deferral_mislabeled_as_window_claim.md 従)。
             # 読めていない範囲は末尾の新着とは限らない (冷えた起点の前進で窓の
             # 頭側が漏れる並びもある) — 文面で「新しい会話」と断定しない。
             _update_job(
                 job_id, status="failed",
-                error="記憶の整理を見送りました（今回の採取で読めていない範囲があったため、畳みは次回の整理で続きから進みます）。",
+                error="あらすじにまとめるのを見送りました（今回の採取で読めていない範囲があったため、畳みは次回のまとめで続きから進みます）。",
                 error_code="sluice_unseen",
             )
         elif status == "disabled":
             _update_job(
                 job_id, status="failed",
-                error="Chronicle生成が無効のため整理できません（ペルソナ設定で「Chronicle 自動生成」を「有効」にしてください）。",
+                error="Chronicle生成が無効のためまとめられません（ペルソナ設定で「Chronicle 自動生成」を「有効」にしてください）。",
                 error_code="chronicle_disabled",
             )
         else:  # "failed" / "unavailable"
@@ -1066,7 +1089,9 @@ def _run_coverage_repair_job(
                 )
                 return
 
-        status, mark_failures = lifecycle.run_coverage_repair(
+        # head の再構築の発火は run_coverage_repair が出口で持つ。ここで受け取る
+        # のは「組み直せたか」だけ (compaction 経路と同型)。
+        status, mark_failures, head_rebuilt = lifecycle.run_coverage_repair_checked(
             persona, event_callback=_progress, cancellation_token=token,
         )
         # 未埋め込みの Chronicle/ページ/Fragment を全件埋める (ローカル・無料、
@@ -1076,8 +1101,12 @@ def _run_coverage_repair_job(
         except Exception:
             LOGGER.warning("[Chronicle Repair] embedding maintenance failed", exc_info=True)
 
-        # head の再構築 (設定トグルの反映) は run_coverage_repair が出口で持つ
-        # ので、ここでは何もしない (sea/session_lifecycle.py)。
+        if not head_rebuilt:
+            LOGGER.warning(
+                "[Chronicle Repair] head rebuild not verified (persona=%s status=%s)",
+                getattr(persona, "persona_id", "?"), status,
+            )
+            _update_job(job_id, warning=_HEAD_REBUILD_WARNING)
 
         if status == "ok":
             message = "あらすじになっていなかった過去の会話を編纂しました"
@@ -1098,7 +1127,7 @@ def _run_coverage_repair_job(
         elif status == "deferred":
             _update_job(
                 job_id, status="failed",
-                error="別の整理が同じ範囲を処理中または処理済みです。しばらく待って再実行してください。",
+                error="別のあらすじ処理が同じ範囲を処理中または処理済みです。しばらく待って再実行してください。",
                 error_code="window_claimed",
             )
         elif status == "disabled":
@@ -1207,6 +1236,58 @@ async def cancel_arasuji_generation(
     return {"cancelled": True}
 
 
+def _job_status_response(job_id: str, job: dict) -> GenerationJobStatus:
+    """ジョブ台帳の 1 行を API の応答形へ写す。"""
+    return GenerationJobStatus(
+        job_id=job_id,
+        status=job.get("status", "unknown"),
+        progress=job.get("progress"),
+        total=job.get("total"),
+        message=job.get("message"),
+        entries_created=job.get("entries_created"),
+        warning=job.get("warning"),
+        error=job.get("error"),
+        error_code=job.get("error_code"),
+        error_detail=job.get("error_detail"),
+        error_meta=job.get("error_meta"),
+    )
+
+
+# 「進捗はあらすじタブで確認できます」の案内を成立させるための再接続口。
+# ジョブ ID は開始した画面の state にしか無いので、モーダルを閉じたり、
+# ペルソナメニューから開始したりすると走行中ジョブへの手掛かりが消える
+# (画面に書いた案内は契約 — 案内先で必ず見えなければならない)。
+@router.get(
+    "/{persona_id}/arasuji/generate/latest",
+    response_model=Optional[GenerationJobStatus],
+    tags=["Chronicle"],
+)
+async def get_latest_arasuji_generation(persona_id: str):
+    """このペルソナの最新の生成ジョブ (走行中・終了済みを問わず) を返す。
+
+    ジョブが 1 件も無ければ 404 ではなく ``null`` を返す — 「まだ何も走らせて
+    いない」は正常な現況であって、引き当てられなかったエラーではない
+    (job_id 指定の取得と違う性質)。
+
+    台帳はプロセス内メモリなので、再起動を跨ぐと ``null`` に戻る。それでよい:
+    走行中だったジョブもプロセスと一緒に消えているので、「ジョブなし」が
+    その時点の正しい現況になる。
+
+    ⚠️ ルート登録順が意味を持つ — ``/{job_id}`` より**前**に置くこと。後に
+    置くと "latest" が job_id として食われる。
+    """
+    with _jobs_lock:
+        candidates = [
+            (job_id, job) for job_id, job in _generation_jobs.items()
+            if job.get("persona_id") == persona_id
+        ]
+        if not candidates:
+            return None
+        job_id, job = max(candidates, key=lambda item: item[1].get("created_at", 0))
+        job = job.copy()
+    return _job_status_response(job_id, job)
+
+
 @router.get("/{persona_id}/arasuji/generate/{job_id}", response_model=GenerationJobStatus, tags=["Chronicle"])
 async def get_arasuji_generation_status(
     persona_id: str,
@@ -1217,19 +1298,8 @@ async def get_arasuji_generation_status(
     job = _get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
-    
+
     if job.get("persona_id") != persona_id:
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found for persona {persona_id}")
-    
-    return GenerationJobStatus(
-        job_id=job_id,
-        status=job.get("status", "unknown"),
-        progress=job.get("progress"),
-        total=job.get("total"),
-        message=job.get("message"),
-        entries_created=job.get("entries_created"),
-        error=job.get("error"),
-        error_code=job.get("error_code"),
-        error_detail=job.get("error_detail"),
-        error_meta=job.get("error_meta"),
-    )
+
+    return _job_status_response(job_id, job)

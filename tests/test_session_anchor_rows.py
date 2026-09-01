@@ -649,6 +649,125 @@ def test_manual_compaction_does_not_rebuild_head_twice_on_success(session_factor
     assert calls == []
 
 
+def test_manual_compaction_checked_reports_stale_head(session_factory):
+    """head の weave が撮り直されていなければ head_rebuilt=False で返す。
+
+    §15 読み戻しと同じ指紋比較 — dispatch が成功しても capture_all は section の
+    capture 例外で既存オブジェクトを使い回す (stale-but-real) ので、identity が
+    変わらなければ「組み直せていない」。畳み自体の status は巻き込まない。
+    """
+    from sea.eviction_plan import Watermarks
+    lc = _make_lifecycle(session_factory)
+    persona = SimpleNamespace(
+        persona_id=PERSONA_ID, model="model-a", current_building_id="room",
+    )
+    msgs = [{"id": f"m{i}", "content": "x" * 1000} for i in range(10)]
+    marks = Watermarks(low=1000, target=2000, high=4000)
+    stale_weave = object()
+
+    def _run(snapshots):
+        calls, counting = _count_head_rebuilds()
+        with counting, _weave_on(), \
+                patch.object(lc, "get_metabolism_watermarks", return_value=marks), \
+                patch.object(lc, "get_presented_window", return_value=_window("m0", msgs)), \
+                patch.object(lc, "run_metabolism", return_value="failed"), \
+                patch.object(lc, "_head_weave_snapshot", side_effect=snapshots):
+            return lc.run_manual_compaction_checked(persona)
+
+    # 前後で同じオブジェクト = 使い回し → 組み直せていない
+    status, head_rebuilt = _run([stale_weave, stale_weave])
+    assert status == "failed"
+    assert head_rebuilt is False
+
+    # 別オブジェクトに入れ替わっていれば組み直せている
+    status, head_rebuilt = _run([object(), object()])
+    assert status == "failed"
+    assert head_rebuilt is True
+
+    # weave が元々無い環境 (head 未初期化 / weave 無効) は失敗扱いにしない
+    status, head_rebuilt = _run([None, None])
+    assert head_rebuilt is True
+
+
+def _run_checked_with_pipeline(lc, persona, pipeline_factory):
+    """head pipeline を差し替えて run_manual_compaction_checked を回す。
+
+    指紋を撮る経路 (_head_weave_snapshot) を本物のまま通したいので、
+    パッチするのは pipeline の取得口だけ。畳みは noop で終わらせる。
+    """
+    from sea.eviction_plan import Watermarks
+    calls, counting = _count_head_rebuilds()
+    with counting, _weave_on(), \
+            patch("sea.head_pipeline.get_default_pipeline", pipeline_factory), \
+            patch.object(lc, "get_metabolism_watermarks",
+                         return_value=Watermarks(low=1000, target=2000, high=4000)), \
+            patch.object(lc, "get_presented_window", return_value=_window("m0", [])):
+        return lc.run_manual_compaction_checked(persona)
+
+
+def test_head_inspection_failure_is_reported_not_swallowed(session_factory):
+    """指紋の検査自体が失敗したら head_rebuilt=False (= 画面へ警告を出す側)。
+
+    検査の失敗を「weave が無い」と同じ None に潰すと、stale な head が
+    「組み直せました」の顔で通り、知らせるための機構が黙る (Codex 指摘
+    2026-09-01)。分からないときは黙らない。
+    """
+    lc = _make_lifecycle(session_factory)
+    persona = SimpleNamespace(
+        persona_id=PERSONA_ID, model="model-a", current_building_id="room",
+    )
+
+    def _boom():
+        raise RuntimeError("head pipeline unavailable")
+
+    status, head_rebuilt = _run_checked_with_pipeline(lc, persona, _boom)
+    assert status == "noop"
+    assert head_rebuilt is False
+
+
+def test_absent_weave_is_not_treated_as_failure(session_factory):
+    """weave が正当に無い環境 (head 未初期化 / weave 無効) は警告を出さない。
+
+    残りようが無いものを「組み直せていない」と数えると、常態が異常の顔で
+    画面に出る。検査失敗 (上のテスト) と区別できていることの対。
+    """
+    lc = _make_lifecycle(session_factory)
+    persona = SimpleNamespace(
+        persona_id=PERSONA_ID, model="model-a", current_building_id="room",
+    )
+    empty_pipeline = SimpleNamespace(get_snapshot=lambda persona_id, model_key: None)
+
+    status, head_rebuilt = _run_checked_with_pipeline(
+        lc, persona, lambda: empty_pipeline,
+    )
+    assert status == "noop"
+    assert head_rebuilt is True
+
+
+def test_manual_compaction_checked_survives_dispatch_exception(session_factory):
+    """発火が例外で落ちても、判定は head_rebuilt=False に倒れるだけで畳みは返る。"""
+    from sea.eviction_plan import Watermarks
+    lc = _make_lifecycle(session_factory)
+    persona = SimpleNamespace(
+        persona_id=PERSONA_ID, model="model-a", current_building_id="room",
+    )
+    stale_weave = object()
+
+    def _boom(persona, manager, model_key=None):
+        raise RuntimeError("head pipeline down")
+
+    with patch("saiverse.dynamic_state.DynamicStateManager.on_metabolism", _boom), \
+            _weave_on(), \
+            patch.object(lc, "get_metabolism_watermarks",
+                         return_value=Watermarks(low=1000, target=2000, high=4000)), \
+            patch.object(lc, "get_presented_window", return_value=_window("m0", [])), \
+            patch.object(lc, "_head_weave_snapshot", return_value=stale_weave):
+        status, head_rebuilt = lc.run_manual_compaction_checked(persona)
+
+    assert status == "noop"          # 畳みの結果は例外に巻き込まれない
+    assert head_rebuilt is False
+
+
 def test_run_metabolism_manual_stops_when_disabled_under_lock(session_factory):
     """ロック内の再判定 (TOCTOU, Codex 三巡 2026-07-29): 入口の事前判定の後に
     Chronicle が OFF へ反転しても、手動 (stop_when_disabled=True) は編纂なしの

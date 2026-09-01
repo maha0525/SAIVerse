@@ -663,7 +663,7 @@ class TestMarkFailureVisibility:
         lc = _make_lifecycle(session_factory)
         job_id = arasuji_api._create_job(PERSONA_ID)
         with patch.object(
-            lc, "run_coverage_repair", return_value=("ok", 2),
+            lc, "run_coverage_repair_checked", return_value=("ok", 2, True),
         ), patch.object(lc, "ensure_recall_embeddings"):
             arasuji_api._run_coverage_repair_job(
                 job_id, _persona(adapter), lc, CancellationToken(),
@@ -672,6 +672,27 @@ class TestMarkFailureVisibility:
         assert job["status"] == "completed"
         assert "印は書けませんでした" in job["message"]
         assert "次回の補修時に自動で再適用されます" in job["message"]
+        assert job["warning"] is None
+
+    def test_worker_warns_when_head_was_not_rebuilt(self, adapter, session_factory):
+        """head を組み直せなかったら completed のまま warning を添える。
+
+        畳み・補修は成功しているので失敗扱いにはしない。救済 (再試行) もしない —
+        「知らせることは必要」だけが裁定 (2026-09-01)。
+        """
+        from api.routes.people import arasuji as arasuji_api
+        from sea.cancellation import CancellationToken
+        lc = _make_lifecycle(session_factory)
+        job_id = arasuji_api._create_job(PERSONA_ID)
+        with patch.object(
+            lc, "run_coverage_repair_checked", return_value=("ok", 0, False),
+        ), patch.object(lc, "ensure_recall_embeddings"):
+            arasuji_api._run_coverage_repair_job(
+                job_id, _persona(adapter), lc, CancellationToken(),
+            )
+        job = arasuji_api._get_job(job_id)
+        assert job["status"] == "completed"
+        assert job["warning"] == arasuji_api._HEAD_REBUILD_WARNING
 
 
 # ---------------------------------------------------------------------------
@@ -687,7 +708,7 @@ class TestEstimateStaleGuard:
         _add_messages(adapter, 4)  # 現在の対象 = 4 件
         lc = _make_lifecycle(session_factory)
         job_id = arasuji_api._create_job(PERSONA_ID)
-        with patch.object(lc, "run_coverage_repair") as run:
+        with patch.object(lc, "run_coverage_repair_checked") as run:
             arasuji_api._run_coverage_repair_job(
                 job_id, _persona(adapter), lc, CancellationToken(),
                 confirmed_unprocessed=2,  # 見積もり時は 2 件だった
@@ -704,7 +725,7 @@ class TestEstimateStaleGuard:
         _add_messages(adapter, 4)
         lc = _make_lifecycle(session_factory)
         with patch.object(
-            lc, "run_coverage_repair", return_value=("ok", 0),
+            lc, "run_coverage_repair_checked", return_value=("ok", 0, True),
         ) as run, patch.object(lc, "ensure_recall_embeddings"):
             for confirmed in (4, 10):  # 同数 / 減少 (承認 10 → 現在 4)
                 job_id = arasuji_api._create_job(PERSONA_ID)
