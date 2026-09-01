@@ -1973,7 +1973,6 @@ class TestTailRewind:
     ):
         """[Codex M2] run_coverage_repair は引き戻しの失敗を status="failed"
         に写像する (編纂は確定済み — 再実行が引き戻しだけやり直す)。"""
-        monkeypatch.setenv("ENABLE_MEMORY_WEAVE_CONTEXT", "true")
         lc = _make_lifecycle(session_factory)
         lc.generate_chronicle = lambda *a, **k: "ok"
         lc.is_chronicle_enabled_for_persona = lambda p: True
@@ -2080,7 +2079,6 @@ class TestTailRewind:
     ):
         """[Codex 十一巡 P1] 書き込み失敗は補修の status="failed" まで届く
         (実 run_tail_rewind / 実 _write_refill 経由で経路ごと固定する)。"""
-        monkeypatch.setenv("ENABLE_MEMORY_WEAVE_CONTEXT", "true")
         monkeypatch.setenv("SAIVERSE_CHRONICLE_BAND_BUDGET", str(TARGET))
         _gap, m_a = self._tail_fixture(adapter)
         lc = _make_lifecycle(session_factory)
@@ -2098,7 +2096,6 @@ class TestTailRewind:
 
     def _repair_status(self, adapter, session_factory, monkeypatch, **patches):
         """run_coverage_repair を編纂 "ok" 固定で回し、返る status を得る。"""
-        monkeypatch.setenv("ENABLE_MEMORY_WEAVE_CONTEXT", "true")
         lc = _make_lifecycle(session_factory)
         lc.generate_chronicle = lambda *a, **k: "ok"
         lc.is_chronicle_enabled_for_persona = lambda p: True
@@ -2114,7 +2111,6 @@ class TestTailRewind:
     ):
         """[Codex N1] 帯の解決失敗は補修の status="failed" まで届く
         (実 run_tail_rewind 経由 — 写像だけでなく経路ごと固定する)。"""
-        monkeypatch.setenv("ENABLE_MEMORY_WEAVE_CONTEXT", "true")
         monkeypatch.setenv("SAIVERSE_CHRONICLE_BAND_BUDGET", str(TARGET))
         _gap, m_a = self._tail_fixture(adapter)
         lc = _make_lifecycle(session_factory)

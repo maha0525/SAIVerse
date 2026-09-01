@@ -573,13 +573,27 @@ class TestDeleteRestoresUncovered:
 
 
 class TestRunCoverageRepair:
-    def test_disabled_without_weave_env(self, adapter, session_factory, monkeypatch):
-        monkeypatch.delenv("ENABLE_MEMORY_WEAVE_CONTEXT", raising=False)
+    def test_disabled_when_the_persona_toggle_is_off(self, adapter, session_factory):
+        """門はペルソナ設定だけ (env ENABLE_MEMORY_WEAVE_CONTEXT は 2026-09-01 撤去)。"""
         lc = _make_lifecycle(session_factory)
-        assert lc.run_coverage_repair(_persona(adapter)) == ("disabled", 0)
+        with patch.object(lc, "is_chronicle_enabled_for_persona", return_value=False):
+            assert lc.run_coverage_repair(_persona(adapter)) == ("disabled", 0)
+
+    def test_runs_without_any_env_gate(self, adapter, session_factory):
+        """環境変数が一切無くても "disabled" に落ちない (撤去の回帰止め)。
+
+        .env に行が無いアップグレード組で記憶の整理が全停止した実害の再発防止。
+        ここでは編纂本体まで行かせず、門を通ったことだけを見る。
+        """
+        import os
+        lc = _make_lifecycle(session_factory)
+        with patch.dict(os.environ, {}, clear=True), \
+                patch.object(lc, "generate_chronicle", return_value="deferred"):
+            status, _marks = lc.run_coverage_repair(_persona(adapter))
+        assert status == "deferred"  # = 門は通った (disabled ではない)
 
     def test_rebuilds_head_even_when_disabled(
-        self, adapter, session_factory, monkeypatch,
+        self, adapter, session_factory,
     ):
         """補修が何もしなくても head 再構築を発火する (手動入口の契約)。
 
@@ -587,21 +601,20 @@ class TestRunCoverageRepair:
         (2026-09-01。run_manual_compaction と同じ規律)。補修の本体は
         on_metabolism を発火しないので、出口の 1 回だけになる。
         """
-        monkeypatch.delenv("ENABLE_MEMORY_WEAVE_CONTEXT", raising=False)
         lc = _make_lifecycle(session_factory)
         calls = []
-        with patch(
-            "saiverse.dynamic_state.DynamicStateManager.on_metabolism",
-            lambda persona, manager, model_key=None: calls.append(model_key),
-        ):
+        with patch.object(lc, "is_chronicle_enabled_for_persona", return_value=False), \
+                patch(
+                    "saiverse.dynamic_state.DynamicStateManager.on_metabolism",
+                    lambda persona, manager, model_key=None: calls.append(model_key),
+                ):
             assert lc.run_coverage_repair(_persona(adapter)) == ("disabled", 0)
         assert len(calls) == 1
 
     def test_compiles_uncovered_past_and_marks_cold_window(
-        self, adapter, session_factory, monkeypatch,
+        self, adapter, session_factory,
     ):
         """一巡: 止め線なし → 未被覆の過去を編纂し、冷えた窓に印が付く。"""
-        monkeypatch.setenv("ENABLE_MEMORY_WEAVE_CONTEXT", "true")
         ids = _add_messages(adapter, 4)
         lc = _make_lifecycle(session_factory)
         _cold_row(lc, "model-a", ids[2])

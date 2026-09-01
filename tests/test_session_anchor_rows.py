@@ -453,9 +453,20 @@ def _window(anchor_id, presented):
     )
 
 
-def _weave_on():
-    """手動畳みテスト用: Chronicle 生成の weave env ゲートを通す。"""
-    return patch.dict(os.environ, {"ENABLE_MEMORY_WEAVE_CONTEXT": "true"})
+def _chronicle_on(lc):
+    """手動畳みテスト用: Chronicle 生成の門 (ペルソナ設定) を開ける。
+
+    かつては env ENABLE_MEMORY_WEAVE_CONTEXT との二段だったが、2026-09-01 に
+    env 側を撤去した (.env に行が無いアップグレード組で記憶の整理が全停止した
+    実害)。門はペルソナ設定 AI.CHRONICLE_ENABLED だけ — テスト DB に AI 行が
+    無ければ既定 True になるが、前提を明示するために patch してから回す。
+    """
+    return patch.object(lc, "is_chronicle_enabled_for_persona", return_value=True)
+
+
+def _chronicle_off(lc):
+    """Chronicle 無効 (ペルソナ設定 OFF) — 唯一の「無効」の作り方。"""
+    return patch.object(lc, "is_chronicle_enabled_for_persona", return_value=False)
 
 
 def test_manual_compaction_runs_metabolism_with_force(session_factory):
@@ -466,7 +477,7 @@ def test_manual_compaction_runs_metabolism_with_force(session_factory):
         persona_id=PERSONA_ID, model="model-a", current_building_id="room",
     )
     msgs = [{"id": f"m{i}", "content": "x" * 1000} for i in range(10)]
-    with _weave_on(), \
+    with _chronicle_on(lc), \
             patch.object(lc, "get_metabolism_watermarks",
                          return_value=Watermarks(low=1000, target=2000, high=4000)), \
             patch.object(lc, "get_presented_window", return_value=_window("m0", msgs)), \
@@ -499,7 +510,7 @@ def test_manual_compaction_propagates_failure_and_cancel(session_factory):
         ("failed", "failed"), ("deferred", "deferred"),
         ("deferred_sluice_unseen", "deferred_sluice_unseen"), ("nothing", "noop"),
     ]:
-        with _weave_on(), \
+        with _chronicle_on(lc), \
                 patch.object(lc, "get_metabolism_watermarks",
                              return_value=Watermarks(low=1000, target=2000, high=4000)), \
                 patch.object(lc, "get_presented_window", return_value=_window("m0", msgs)), \
@@ -518,7 +529,7 @@ def test_manual_compaction_noop_at_or_below_target(session_factory):
         persona_id=PERSONA_ID, model="model-a", current_building_id="room",
     )
     msgs = [{"id": "m0", "content": "x" * 100}]
-    with _weave_on(), \
+    with _chronicle_on(lc), \
             patch.object(lc, "get_metabolism_watermarks",
                          return_value=Watermarks(low=1000, target=2000, high=4000)), \
             patch.object(lc, "get_presented_window", return_value=_window("m0", msgs)), \
@@ -534,7 +545,7 @@ def test_manual_compaction_unavailable_without_anchor(session_factory):
     persona = SimpleNamespace(
         persona_id=PERSONA_ID, model="model-a", current_building_id="room",
     )
-    with _weave_on(), \
+    with _chronicle_on(lc), \
             patch.object(lc, "get_metabolism_watermarks",
                          return_value=Watermarks(low=1000, target=2000, high=4000)), \
             patch.object(lc, "get_presented_window", return_value=_window(None, [])), \
@@ -544,10 +555,13 @@ def test_manual_compaction_unavailable_without_anchor(session_factory):
 
 
 def test_manual_compaction_disabled_does_not_fold(session_factory):
-    """Chronicle 無効 (weave env OFF / persona トグル OFF) は畳まず "disabled"。
+    """Chronicle 無効 (persona トグル OFF) は畳まず "disabled"。
 
     手動入口の同意文は「Chronicle に畳む」— 編纂なしの退場 (忘却) を黙って
     実行しない (Codex 再レビュー 2026-07-29)。
+
+    2026-09-01: 旧 (a) 「weave env が無い / OFF」の枝は消えた — env
+    ENABLE_MEMORY_WEAVE_CONTEXT を撤去し、門はペルソナ設定だけになったため。
     """
     from sea.eviction_plan import Watermarks
     lc = _make_lifecycle(session_factory)
@@ -556,16 +570,35 @@ def test_manual_compaction_disabled_does_not_fold(session_factory):
     )
     msgs = [{"id": f"m{i}", "content": "x" * 1000} for i in range(10)]
 
-    # (a) weave env が無い / OFF
-    with patch.dict(os.environ, {"ENABLE_MEMORY_WEAVE_CONTEXT": ""}),             patch.object(lc, "run_metabolism") as run:
+    with _chronicle_off(lc), \
+            patch.object(lc, "get_metabolism_watermarks",
+                         return_value=Watermarks(low=1000, target=2000, high=4000)), \
+            patch.object(lc, "get_presented_window", return_value=_window("m0", msgs)), \
+            patch.object(lc, "run_metabolism") as run:
         assert lc.run_manual_compaction(persona) == "disabled"
     run.assert_not_called()
 
-    # (b) env ON でも persona の Chronicle トグルが OFF
-    with _weave_on(),             patch.object(lc, "is_chronicle_enabled_for_persona", return_value=False),             patch.object(lc, "get_metabolism_watermarks",
-                         return_value=Watermarks(low=1000, target=2000, high=4000)),             patch.object(lc, "get_presented_window", return_value=_window("m0", msgs)),             patch.object(lc, "run_metabolism") as run:
-        assert lc.run_manual_compaction(persona) == "disabled"
-    run.assert_not_called()
+
+def test_manual_compaction_runs_without_any_env_gate(session_factory):
+    """env が一切設定されていなくても畳みは走る (2026-09-01 撤去の回帰止め)。
+
+    .env に ENABLE_MEMORY_WEAVE_CONTEXT の行が無いアップグレード組で記憶の整理が
+    全停止した実害の再発防止。環境を空にしても "disabled" に落ちない。
+    """
+    from sea.eviction_plan import Watermarks
+    lc = _make_lifecycle(session_factory)
+    persona = SimpleNamespace(
+        persona_id=PERSONA_ID, model="model-a", current_building_id="room",
+    )
+    msgs = [{"id": f"m{i}", "content": "x" * 1000} for i in range(10)]
+
+    with patch.dict(os.environ, {}, clear=True), \
+            patch.object(lc, "get_metabolism_watermarks",
+                         return_value=Watermarks(low=1000, target=2000, high=4000)), \
+            patch.object(lc, "get_presented_window", return_value=_window("m0", msgs)), \
+            patch.object(lc, "run_metabolism", return_value="ok") as run:
+        assert lc.run_manual_compaction(persona) == "ok"
+    run.assert_called_once()
 
 
 def _count_head_rebuilds():
@@ -605,7 +638,7 @@ def test_manual_compaction_rebuilds_head_when_nothing_was_folded(session_factory
     for presented, inner, expected in cases:
         window = _window("m0", presented) if presented else _window(None, [])
         calls, counting = _count_head_rebuilds()
-        with counting, _weave_on(), \
+        with counting, _chronicle_on(lc), \
                 patch.object(lc, "get_metabolism_watermarks", return_value=marks), \
                 patch.object(lc, "get_presented_window", return_value=window), \
                 patch.object(lc, "run_metabolism", return_value=inner):
@@ -614,9 +647,9 @@ def test_manual_compaction_rebuilds_head_when_nothing_was_folded(session_factory
         # 再構築するのは畳みを試みた model の (persona, model) snapshot
         assert calls[0] == "model-a"
 
-    # Chronicle 無効 (weave env OFF) も手動入口なので 1 回
+    # Chronicle 無効 (ペルソナ設定 OFF) も手動入口なので 1 回
     calls, counting = _count_head_rebuilds()
-    with counting, patch.dict(os.environ, {"ENABLE_MEMORY_WEAVE_CONTEXT": ""}):
+    with counting, _chronicle_off(lc):
         assert lc.run_manual_compaction(persona) == "disabled"
     assert len(calls) == 1
 
@@ -640,7 +673,7 @@ def test_manual_compaction_does_not_rebuild_head_twice_on_success(session_factor
     )
     msgs = [{"id": f"m{i}", "content": "x" * 1000} for i in range(10)]
     calls, counting = _count_head_rebuilds()
-    with counting, _weave_on(), \
+    with counting, _chronicle_on(lc), \
             patch.object(lc, "get_metabolism_watermarks",
                          return_value=Watermarks(low=1000, target=2000, high=4000)), \
             patch.object(lc, "get_presented_window", return_value=_window("m0", msgs)), \
@@ -667,7 +700,7 @@ def test_manual_compaction_checked_reports_stale_head(session_factory):
 
     def _run(snapshots):
         calls, counting = _count_head_rebuilds()
-        with counting, _weave_on(), \
+        with counting, _chronicle_on(lc), \
                 patch.object(lc, "get_metabolism_watermarks", return_value=marks), \
                 patch.object(lc, "get_presented_window", return_value=_window("m0", msgs)), \
                 patch.object(lc, "run_metabolism", return_value="failed"), \
@@ -697,7 +730,7 @@ def _run_checked_with_pipeline(lc, persona, pipeline_factory):
     """
     from sea.eviction_plan import Watermarks
     calls, counting = _count_head_rebuilds()
-    with counting, _weave_on(), \
+    with counting, _chronicle_on(lc), \
             patch("sea.head_pipeline.get_default_pipeline", pipeline_factory), \
             patch.object(lc, "get_metabolism_watermarks",
                          return_value=Watermarks(low=1000, target=2000, high=4000)), \
@@ -757,7 +790,7 @@ def test_manual_compaction_checked_survives_dispatch_exception(session_factory):
         raise RuntimeError("head pipeline down")
 
     with patch("saiverse.dynamic_state.DynamicStateManager.on_metabolism", _boom), \
-            _weave_on(), \
+            _chronicle_on(lc), \
             patch.object(lc, "get_metabolism_watermarks",
                          return_value=Watermarks(low=1000, target=2000, high=4000)), \
             patch.object(lc, "get_presented_window", return_value=_window("m0", [])), \
@@ -780,7 +813,7 @@ def test_run_metabolism_manual_stops_when_disabled_under_lock(session_factory):
     wm = Watermarks(low=1000, target=2000, high=4000)
 
     # 手動: disabled なら提示ウィンドウの取り直しにすら進まない
-    with patch.dict(os.environ, {"ENABLE_MEMORY_WEAVE_CONTEXT": ""}), \
+    with _chronicle_off(lc), \
             patch.object(lc, "get_presented_window") as gw:
         status = lc._run_metabolism_locked(
             persona, "room", _window("m0", []), wm,
@@ -790,7 +823,7 @@ def test_run_metabolism_manual_stops_when_disabled_under_lock(session_factory):
     gw.assert_not_called()
 
     # 自動: disabled でも早期 return しない (空ウィンドウまで進み "nothing")
-    with patch.dict(os.environ, {"ENABLE_MEMORY_WEAVE_CONTEXT": ""}), \
+    with _chronicle_off(lc), \
             patch.object(lc, "get_presented_window", return_value=_window(None, [])):
         status = lc._run_metabolism_locked(
             persona, "room", _window(None, []), wm, chronicle_force=False,
@@ -799,7 +832,7 @@ def test_run_metabolism_manual_stops_when_disabled_under_lock(session_factory):
 
     # §14 経路 (chronicle_force=True + stop_when_disabled=False): disabled でも
     # 止まらない — 非常畳み・先回り畳みは Chronicle 無効の persona も前進で救う。
-    with patch.dict(os.environ, {"ENABLE_MEMORY_WEAVE_CONTEXT": ""}), \
+    with _chronicle_off(lc), \
             patch.object(lc, "get_presented_window", return_value=_window(None, [])):
         status = lc._run_metabolism_locked(
             persona, "room", _window(None, []), wm, chronicle_force=True,
@@ -824,7 +857,7 @@ def test_run_metabolism_forwards_close_undersized_tail_to_the_plan(session_facto
     wm = Watermarks(low=1000, target=2000, high=4000)
     msgs = [{"id": f"m{i}", "content": "x" * 1000} for i in range(4)]
 
-    with patch.dict(os.environ, {"ENABLE_MEMORY_WEAVE_CONTEXT": ""}), \
+    with _chronicle_off(lc), \
             patch.object(lc, "get_presented_window", return_value=_window("m0", msgs)), \
             patch("sea.session_lifecycle.plan_eviction",
                   return_value=EvictionPlan()) as plan:
@@ -836,7 +869,7 @@ def test_run_metabolism_forwards_close_undersized_tail_to_the_plan(session_facto
     assert plan.call_args.kwargs.get("close_undersized_tail") is True
 
     # 既定 (自動・手動・先回り経路) は False のまま計画へ渡る。
-    with patch.dict(os.environ, {"ENABLE_MEMORY_WEAVE_CONTEXT": ""}), \
+    with _chronicle_off(lc), \
             patch.object(lc, "get_presented_window", return_value=_window("m0", msgs)), \
             patch("sea.session_lifecycle.plan_eviction",
                   return_value=EvictionPlan()) as plan:
@@ -1289,10 +1322,7 @@ def test_manual_compaction_with_failing_sluice_does_not_shrink_the_window(
     with patch.object(lc, "is_chronicle_enabled_for_persona", return_value=True), \
             patch.object(lc, "get_metabolism_watermarks",
                          return_value=Watermarks(low=2_000, target=2_000, high=4_000)), \
-            patch.dict(os.environ, {
-                "ENABLE_MEMORY_WEAVE_CONTEXT": "true",
-                "SAIVERSE_CHRONICLE_BAND_BUDGET": "2500",
-            }), \
+            patch.dict(os.environ, {"SAIVERSE_CHRONICLE_BAND_BUDGET": "2500"}), \
             patch("sea.sluice.run_sluice", _failing_sluice):
         status = lc.run_manual_compaction(persona)
 
@@ -1423,8 +1453,7 @@ def test_cold_precompaction_status_conditions(session_factory):
     big = [{"id": "m1", "content": "x" * 3500}]
     small = [{"id": "m1", "content": "x" * 2500}]
 
-    with _weave_on(), \
-            patch.object(lc, "is_chronicle_enabled_for_persona", return_value=True), \
+    with patch.object(lc, "is_chronicle_enabled_for_persona", return_value=True), \
             patch.object(lc, "is_autonomous_chronicle_enabled_for_persona", return_value=True), \
             patch.object(lc, "get_metabolism_watermarks", return_value=wm):
         with patch.object(lc, "get_presented_window", return_value=_window("m1", big)):
@@ -1440,8 +1469,7 @@ def test_cold_precompaction_status_conditions(session_factory):
             assert lc.cold_precompaction_status(persona) == "hot"
 
     # 自律確認 OFF の persona は先回りの対象外 (コスト最適化であって回復ではない)
-    with _weave_on(), \
-            patch.object(lc, "is_chronicle_enabled_for_persona", return_value=True), \
+    with patch.object(lc, "is_chronicle_enabled_for_persona", return_value=True), \
             patch.object(lc, "is_autonomous_chronicle_enabled_for_persona", return_value=False):
         assert lc.cold_precompaction_status(persona) == "skip"
 
@@ -1462,8 +1490,7 @@ def test_run_cold_precompaction_folds_with_force(session_factory):
     wm = Watermarks(low=1000, target=2000, high=4000)
     big = [{"id": "m1", "content": "x" * 3500}]
 
-    with _weave_on(), \
-            patch.object(lc, "is_chronicle_enabled_for_persona", return_value=True), \
+    with patch.object(lc, "is_chronicle_enabled_for_persona", return_value=True), \
             patch.object(lc, "is_autonomous_chronicle_enabled_for_persona", return_value=True), \
             patch.object(lc, "get_metabolism_watermarks", return_value=wm), \
             patch.object(lc, "get_presented_window", return_value=_window("m1", big)), \
@@ -1508,8 +1535,7 @@ def test_run_cold_precompaction_rechecks_under_beat_lock(session_factory):
 
     lc.manager.beat_gate = SimpleNamespace(hold=_hold)
 
-    with _weave_on(), \
-            patch.object(lc, "is_chronicle_enabled_for_persona", return_value=True), \
+    with patch.object(lc, "is_chronicle_enabled_for_persona", return_value=True), \
             patch.object(lc, "is_autonomous_chronicle_enabled_for_persona", return_value=True), \
             patch.object(lc, "get_metabolism_watermarks", return_value=wm), \
             patch.object(lc, "get_presented_window", return_value=_window("m1", big)), \

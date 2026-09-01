@@ -817,6 +817,7 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                         safety_filter: '🛡️',
                         window_claimed: '🔒',
                         sluice_unseen: '🔁',
+                        chronicle_disabled: '🚫',
                         estimate_stale: '🔄',
                         ceiling_unresolved: '🚧',
                     };
@@ -828,13 +829,16 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                         payment: 'APIキーの残高や支払い設定を確認してください。',
                         authentication: 'APIキーの設定を確認してください。',
                         server_error: 'LLMサーバーで障害が発生しています。しばらく時間を置いてから再実行してください。',
+                        // 2026-09-01 に env の門 (ENABLE_MEMORY_WEAVE_CONTEXT) を撤去した
+                        // ので、無効の原因はペルソナ設定だけ = この案内が常に正しい。
+                        chronicle_disabled: 'ペルソナ設定で「Chronicle 自動生成」が無効になっています。有効にすると実行できます。',
                         window_claimed: '別のあらすじ処理が同じ範囲を処理中または処理済みです。しばらく待ってから再実行してください。',
                         sluice_unseen: '今回の採取（スルース）で読めていない範囲があったため、畳みを見送りました。採取の結果は保存されており、畳みは次回のまとめで続きから進みます。',
                         estimate_stale: 'あらすじにする対象が見積もり時より増えています。件数を確認し直してから、もう一度実行してください。',
                         ceiling_unresolved: '会話中の窓の境界を確認できなかったため、何も編纂せずに止まりました。しばらくしてから再実行してください。',
                     };
                     const icon = (code && iconMap[code]) || '❌';
-                    const guidance = (code && guidanceMap[code]) || '予期しないエラーが発生しました。Technical Detailsを確認し、問題が続く場合は管理者に連絡してください。';
+                    const guidance = (code && guidanceMap[code]) || '処理が完了しませんでした。少し待ってからもう一度お試しください。解決しない場合は、ログの内容とあわせて開発者へ報告してください。';
                     const meta = generationJob.error_meta;
                     return (
                         <div className={styles.generationError}>

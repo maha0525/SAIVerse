@@ -1983,8 +1983,11 @@ class SessionLifecycle:
         """
         if not resolved_model:
             return "unavailable"
-        memory_weave_enabled = os.getenv("ENABLE_MEMORY_WEAVE_CONTEXT", "").lower() in ("true", "1")
-        if not memory_weave_enabled or not self.is_chronicle_enabled_for_persona(persona):
+        # 門はペルソナ設定 (AI.CHRONICLE_ENABLED) だけ。かつては env
+        # ENABLE_MEMORY_WEAVE_CONTEXT との二段だったが、.env.example が false 出荷で、
+        # v0.2 からのアップグレード組の .env には行自体が無く (= false 扱い)、
+        # 記憶の整理が全経路で止まる実害を出した (2026-09-01 撤去裁定)。
+        if not self.is_chronicle_enabled_for_persona(persona):
             return "disabled"
         watermarks = self.get_metabolism_watermarks(persona, resolved_model)
         if watermarks is None:
@@ -2101,10 +2104,8 @@ class SessionLifecycle:
             印の失敗数は status=="ok" のときだけ意味を持つ。行単位の失敗は
             正確な数、印の工程ごと例外で落ちた場合は -1 (数不明の全滅)。
         """
-        memory_weave_enabled = os.getenv(
-            "ENABLE_MEMORY_WEAVE_CONTEXT", "",
-        ).lower() in ("true", "1")
-        if not memory_weave_enabled or not self.is_chronicle_enabled_for_persona(persona):
+        # 門はペルソナ設定だけ (env ENABLE_MEMORY_WEAVE_CONTEXT は 2026-09-01 撤去)。
+        if not self.is_chronicle_enabled_for_persona(persona):
             return ("disabled", 0)
         persona_id = getattr(persona, "persona_id", None)
         from sea.beat_gate import hold_beat
@@ -2972,11 +2973,7 @@ class SessionLifecycle:
         model_key = str(getattr(persona, "model", "") or "") or None
         if not persona_id or not model_key:
             return "skip"
-        memory_weave_enabled = os.getenv(
-            "ENABLE_MEMORY_WEAVE_CONTEXT", "",
-        ).lower() in ("true", "1")
-        if not memory_weave_enabled:
-            return "skip"
+        # 門はペルソナ設定だけ (env ENABLE_MEMORY_WEAVE_CONTEXT は 2026-09-01 撤去)。
         if not self.is_chronicle_enabled_for_persona(persona):
             return "skip"
         if not self.is_autonomous_chronicle_enabled_for_persona(persona):
@@ -3112,10 +3109,8 @@ class SessionLifecycle:
         # Codex 三巡 2026-07-29)、編纂なしの退場へ進ませずここで止める。
         # 自動発火・§14 経路 (stop_when_disabled=False) は従来どおり disabled
         # でも前進する (編纂なしで忘れる設計合意)。
-        memory_weave_enabled = os.getenv("ENABLE_MEMORY_WEAVE_CONTEXT", "").lower() in ("true", "1")
-        chronicle_enabled = (
-            memory_weave_enabled and self.is_chronicle_enabled_for_persona(persona)
-        )
+        # 門はペルソナ設定だけ (env ENABLE_MEMORY_WEAVE_CONTEXT は 2026-09-01 撤去)。
+        chronicle_enabled = self.is_chronicle_enabled_for_persona(persona)
         # 前回までに失敗した抽出の拾い直し (付箋 backlog) は**この位置** —
         # 編纂の計画・確認・claim より手前で、手動入口の早期 return よりも手前。
         # 畳むものが無い回でも回収は走り、走らないときは「止まっている」ことを
