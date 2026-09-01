@@ -60,6 +60,10 @@
     flex-direction: column;
     gap: 0.5rem;
     overflow-y: auto;
+    /* overflow-y だけ指定すると overflow-x が auto に化けて、長い名前が
+       横スクロールバーを生やす。縦一覧では横は隠す (モバイルの横スクロール
+       帯はメディアクエリ側で auto に戻す)。 */
+    overflow-x: hidden;
 }
 
 .item {
@@ -71,6 +75,11 @@
     border: 1px solid #334155;
     transition: all 0.2s;
     color: #cbd5e1;
+    /* 区切りの無い長い名前 (ULID・ファイル名) を列幅で折り返す。
+       CLAUDE.md の落とし穴どおり、セットで指定しないと効かない。 */
+    max-width: 100%;
+    overflow-wrap: anywhere;
+    word-break: break-word;
 }
 
 .item:hover {
@@ -290,6 +299,8 @@
     .item {
         white-space: nowrap;
         min-width: fit-content;
+        /* チップは折り返さず横スクロール帯で流す (縦一覧用の折り返しを打ち消す) */
+        max-width: none;
         padding: 0.5rem 1rem;
         border-radius: 999px;
         /* Chip */
