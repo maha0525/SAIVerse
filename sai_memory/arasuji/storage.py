@@ -164,6 +164,25 @@ def _fallback_chronicle_title(rec: Dict[str, Any]) -> str:
 def _migrate_legacy_arasuji_table(conn: sqlite3.Connection) -> None:
     """旧 ``arasuji_entries`` テーブルが存在すれば、全行をページへ写して DROP する。
 
+    API はリクエストごとにここを通るので、二つの接続が同時に移行へ入ることがある。
+    負けた側は勝った側が commit した id で ``IntegrityError`` を踏むが、それは
+    「もう写されている」という答えなので、rollback して一度だけやり直す (やり直しは
+    既存ページを飛ばす)。それ以外の例外は rollback してそのまま投げ、開いた
+    トランザクションを接続に残さない。
+    """
+    try:
+        _migrate_legacy_arasuji_rows(conn)
+    except sqlite3.IntegrityError:
+        conn.rollback()
+        _migrate_legacy_arasuji_rows(conn)
+    except Exception:
+        conn.rollback()
+        raise
+
+
+def _migrate_legacy_arasuji_rows(conn: sqlite3.Connection) -> None:
+    """``_migrate_legacy_arasuji_table`` の本体 (一回分)。
+
     一回きり・冪等 (旧テーブルが無ければ即 return)。id → ページ id にそのまま流用し、
     level/content/source_ids/start_time/end_time/source_count/message_count/
     is_consolidated/origin_track_id/is_incomplete/thread_id/short_id を metadata に
@@ -189,17 +208,22 @@ def _migrate_legacy_arasuji_table(conn: sqlite3.Connection) -> None:
         sid_idx = col_names.index("short_id")
         existing_max = max((row[sid_idx] or 0) for row in rows)
         next_short_id = existing_max + 1
+    # 再開時: 前回の移行が short_id 無しの行に採番した値はページの metadata にしか
+    # 無い。旧テーブルの最大値だけから続きを採ると、その採番済みの番号を今回の行に
+    # 重ねてしまうので、既存ページ側の最大値も見る。
+    next_short_id = max(next_short_id, _next_chronicle_short_id(conn))
 
-    # 前回の移行が「ページの commit までは済んだが、その後の DROP TABLE で倒れた」
-    # (同じ DB を別の接続が読んでいると DROP が busy で落ちる) 状態から再開できる
-    # ように、既にページになっている行は飛ばす。ここを飛ばさないと、最初の 1 行で
+    # 前回の移行が途中で止まった状態 (以前は行ごとに commit していたので、途中の行で
+    # 倒れれば一部だけページになった。ページを全部 commit した後の DROP TABLE で
+    # 倒れることもある) から再開できるように、既にページになっている行は飛ばす。ここを飛ばさないと、最初の 1 行で
     # ``UNIQUE constraint failed: memopedia_pages.id`` になって毎回初手から倒れ、
     # 旧テーブルが永遠に残る (2026-09-02、macOS の報告者の環境で 1443 件が
     # この状態だった。Chronicle は空に見え、開くたびの失敗が Memopedia を待たせた)。
     already_pages = {
         r[0]
         for r in conn.execute(
-            "SELECT id FROM memopedia_pages WHERE category = ?", (CATEGORY_CHRONICLE,)
+            "SELECT id FROM memopedia_pages WHERE category = ? AND is_trunk = 0",
+            (CATEGORY_CHRONICLE,),
         ).fetchall()
     }
     skipped = 0
@@ -246,6 +270,10 @@ def _migrate_legacy_arasuji_table(conn: sqlite3.Connection) -> None:
             is_trunk=False,
             metadata=meta,
             page_id=old_id,
+            # 全行を一つのトランザクションで写す。行ごとに commit すると、途中で
+            # 倒れたときに「一部だけページになった」状態が残る (再開はできるが、
+            # 状態の種類を増やさない)。
+            commit=False,
         )
         conn.execute(
             "UPDATE memopedia_pages SET created_at = ? WHERE id = ?",

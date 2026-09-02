@@ -1574,22 +1574,28 @@ class ChronicleLegacyMigrationTest(unittest.TestCase):
         from sai_memory.memopedia.storage import create_page, init_memopedia_tables
 
         # 前回の途中経過を再現: 旧テーブルは残ったまま、一部の行だけがページになっている。
+        # lv1-b は旧テーブルでは short_id 無し → 前回の移行が 6 を採番してページに書いた。
         init_memopedia_tables(self.conn)
         _ensure_root_chronicle(self.conn)
-        create_page(
-            self.conn,
-            parent_id=ROOT_CHRONICLE_ID,
-            title="chronicle:5",
-            content="第一のあらすじ",
-            category=CATEGORY_CHRONICLE,
-            is_trunk=False,
-            metadata={
-                "level": 1, "source_ids": ["m1", "m2"], "start_time": 100, "end_time": 200,
-                "source_count": 2, "message_count": 2, "is_consolidated": 0,
-                "is_incomplete": 0, "origin_track_id": None, "thread_id": None, "short_id": 5,
-            },
-            page_id="lv1-a",
-        )
+        for page_id, title, content, sid in (
+            ("lv1-a", "chronicle:5", "第一のあらすじ", 5),
+            ("lv1-b", "chronicle:6", "第二のあらすじ", 6),
+        ):
+            create_page(
+                self.conn,
+                parent_id=ROOT_CHRONICLE_ID,
+                title=title,
+                content=content,
+                category=CATEGORY_CHRONICLE,
+                is_trunk=False,
+                metadata={
+                    "level": 1, "source_ids": ["m1"], "start_time": 100, "end_time": 200,
+                    "source_count": 1, "message_count": 1, "is_consolidated": 0,
+                    "is_incomplete": 0, "origin_track_id": None, "thread_id": None,
+                    "short_id": sid,
+                },
+                page_id=page_id,
+            )
         self.conn.commit()
 
         with self.assertLogs("sai_memory.arasuji.storage", level="WARNING") as logs:
@@ -1605,7 +1611,75 @@ class ChronicleLegacyMigrationTest(unittest.TestCase):
         self.assertEqual(ids, ["lv1-a", "lv1-b", "lv2-a", "trk-1"])
         self.assertEqual(get_entry(self.conn, "lv1-a").content, "第一のあらすじ")
         self.assertEqual(get_entry(self.conn, "lv2-a").content, "統合されたあらすじ")
+        # 今回移行した short_id 無しの行 (lv2-a / trk-1) は、前回ページ側で採番済みの
+        # 6 を再利用せず、その続きから番号を受け取る。
+        short_ids = [
+            self.conn.execute(
+                "SELECT short_id FROM arasuji_entries WHERE id = ?", (i,)
+            ).fetchone()[0]
+            for i in ("lv1-a", "lv1-b", "lv2-a", "trk-1")
+        ]
+        self.assertEqual(len(short_ids), len(set(short_ids)), short_ids)
+        self.assertEqual(short_ids[:2], [5, 6])
+        self.assertTrue(all(s > 6 for s in short_ids[2:]), short_ids)
 
+
+    def test_migration_retries_once_when_another_connection_wins_the_race(self):
+        """API はリクエストごとに移行へ入るので、二接続が同時に走ると負けた側は勝った側が
+        commit した id で IntegrityError を踏む。それは「もう写されている」という答えなので、
+        rollback して一度だけやり直し、既存ページを飛ばして DROP まで進む。"""
+        import sqlite3 as _sqlite3
+        from unittest import mock
+
+        from sai_memory.arasuji import storage as arasuji_storage
+        from sai_memory.arasuji.storage import (
+            CATEGORY_CHRONICLE,
+            ROOT_CHRONICLE_ID,
+            get_entries_by_level,
+            init_arasuji_tables,
+        )
+        from sai_memory.memopedia import storage as memopedia_storage
+
+        winner = _sqlite3.connect(self.db_path)
+        real_create_page = memopedia_storage.create_page
+        state = {"raced": False}
+
+        def racing_create_page(conn, **kwargs):
+            # 移行の最初の行 (lv1-a) の直前に「別の接続」が同じ id を commit してしまう
+            # (root_chronicle の用意など、移行以外の create_page は素通し)。
+            if not state["raced"] and kwargs.get("page_id") == "lv1-a":
+                state["raced"] = True
+                memopedia_storage.init_memopedia_tables(winner)
+                arasuji_storage._ensure_root_chronicle(winner)
+                real_create_page(
+                    winner,
+                    parent_id=ROOT_CHRONICLE_ID,
+                    title=kwargs["title"],
+                    content=kwargs["content"],
+                    category=CATEGORY_CHRONICLE,
+                    is_trunk=False,
+                    metadata=kwargs["metadata"],
+                    page_id=kwargs["page_id"],
+                )
+                winner.close()
+            return real_create_page(conn, **kwargs)
+
+        with mock.patch.object(memopedia_storage, "create_page", side_effect=racing_create_page):
+            init_arasuji_tables(self.conn)  # 一度 IntegrityError → rollback → 再試行で完走
+
+        self.assertTrue(state["raced"])
+        legacy = self.conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='arasuji_entries'"
+        ).fetchone()
+        self.assertIsNone(legacy)
+        ids = sorted(e.id for level in (1, 2) for e in get_entries_by_level(self.conn, level))
+        self.assertEqual(ids, ["lv1-a", "lv1-b", "lv2-a", "trk-1"])
+        # 同じ id のページが二重になっていない。
+        count = self.conn.execute(
+            "SELECT COUNT(*) FROM memopedia_pages WHERE category = ? AND is_trunk = 0",
+            (CATEGORY_CHRONICLE,),
+        ).fetchone()[0]
+        self.assertEqual(count, 4)  # root_chronicle (trunk) は数えない
 
 class RefGrammarAcceptanceTests(_AtlasTestBase):
     """A1「入口は広く、出口は一本」の恒久検査 (2026-07-15)。
