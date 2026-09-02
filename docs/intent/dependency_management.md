@@ -98,13 +98,15 @@ requirements.lock     ← 全部品の版を固定した一覧 (機械が作る�
 | mcp | `<2` | 2.x が `streamablehttp_client` を撤去。v2 API への移行は別案件 (`docs/intent/mcp_protocol_coverage.md`)。**既に書いてある、手本** |
 | onnxruntime | `<1.24` | 1.24 以降は macOS x86_64 (Intel Mac) と macOS 13 の wheel が無く sdist も無い。universal lock が 1.24+ を掴むと Intel Mac では `pip install -r requirements.lock` 自体が失敗する (2026-09-02 Codex レビューで発覚。fastembed 0.8 も Python 3.13 で 1.24.0/1.24.1 を除外)。外す条件 = onnxruntime が Intel Mac の wheel を再開する、または Intel Mac 対応を打ち切ると決める |
 
-**universal lock の盲点 (2026-09-02 に学んだこと)**: `uv pip compile --universal` は依存関係のメタデータだけで解決し、その版の wheel が各プラットフォーム向けに公開されているかは見ない。Windows で入って全スイートが緑でも、Intel Mac で入らない lock はできる。だから lock を作り直したら `python scripts/check_lock_platforms.py` (各 pin の wheel / sdist の有無を PyPI に問い、対象 4 プラットフォーム × Python 3.11〜3.13 で入らない組合せを exit 1 で返す) を回す。§5 の 1b。
+**universal lock の盲点 (2026-09-02 に学んだこと)**: `uv pip compile --universal` は依存関係のメタデータだけで解決し、その版の wheel が各プラットフォーム向けに公開されているかは見ない。Windows で入って全スイートが緑でも、Intel Mac で入らない lock はできる。だから lock を作り直したら `python scripts/check_lock_platforms.py` (各 pin の wheel / sdist の有無を PyPI に問い、対象 4 プラットフォーム × Python 3.11〜3.13 で入らない組合せを exit 1 で返す) を回す。判定は pip と同じ `packaging.tags` で行い、macOS の床は x86_64 が 13 (対応する Intel Mac の最低 OS 版)、arm64 が 14。pin の Requires-Python が対象の Python を除外していても FAIL。PyPI の照会に失敗した pin は「入る」と数えず FAIL にする (fail-closed。exit 0 は全 pin を取得して判定できたときだけ)。§5 の 1b。
 
 他に止めるべきものは実装時の compile と全スイートで判明する。**「なんとなく上げない」は禁止** — 上げないなら理由を書く。
 
 ### 3-3. 本体の責任ではない (アドオンの部品)
 
 torch / transformers / librosa / numba / gradio / funasr など、venv にある 269 個のうち本体の直接依存 (約 30 個) を除く大半は voice-tts が連れてきたもの。これらは本体の requirements には入っていない (現状で正しい)。本体がやることは **constraints で「本体の部品を動かすな」と言う**ことまで。numba の上限などアドオン自身の部品の整合はアドオン側の requirements の責任 (voice-tts に numba の固定を足すのはアドオンのリポジトリの宿題)。
+
+ただし本体の更新は、壊したことを**その場で見せる**義務は負う。`update_engine.update_dependencies` は lock を入れた直後に `pip check` を回し、lock の外にあるパッケージ (アドオンか手で入れたもの) との衝突を `[deps] pip check: ...` の WARNING として更新ログに残す (2026-09-02 の voice-tts の実害は、翌日まで誰も気づかなかったことが問題だった)。可視化だけで、更新は失敗にしないし巻き戻しもしない — 直すのはアドオン側。
 
 ### 3-4. SDK を上げる前に分かっていること (2026-09-02 の下調べ)
 
@@ -138,10 +140,10 @@ torch / transformers / librosa / numba / gradio / funasr など、venv にある
 ## 5. 検証 (境界を跨ぐ順に)
 
 1. **compile が通る** — requirements.txt から lock が生成でき、pip check で衝突ゼロ。
-   1b. **全プラットフォームで入る** — `python scripts/check_lock_platforms.py` が exit 0 (Windows / Linux / macOS arm64 / macOS x86_64 × Python 3.11〜3.13 の全組合せに wheel か sdist がある)。開発機では確かめられない環境の代理。
+   1b. **全プラットフォームで入る** — `python scripts/check_lock_platforms.py` が exit 0 (Windows / Linux / macOS arm64 / macOS x86_64 × Python 3.11〜3.13 の全組合せに wheel か sdist があり、Requires-Python にも除外されず、全 pin を PyPI から取得できた。wheel の適合は `packaging.tags` で判定し、macOS の床は x86_64=13 / arm64=14)。照会に失敗した pin があれば exit 1 (fail-closed)。開発機では確かめられない環境の代理。
 2. **素の venv に lock だけで入る** — 開発機の venv ではなく、新しい venv に `pip install -r requirements.lock` して全スイートが緑。これが「ユーザーの手元」の代理。
 3. **update 経路** — 隔離環境 (`docs/test_environment.md`) で `update_engine.py --manual` を通し、完了マーカーが lock の sha を持つこと。
-4. **アドオン導入** — 隔離環境で voice-tts を `pip_install` step から入れ、constraints が効くこと (本体の部品を動かそうとしたら失敗すること、を一つ作為的に確かめる)。
+4. **アドオン導入** — 隔離環境で voice-tts を `pip_install` step から入れ、constraints が効くこと (本体の部品を動かそうとしたら失敗すること、を一つ作為的に確かめる)。**pip の機構としては 2026-09-02 に確認済み**: lock venv で `pip install --dry-run -r <アドオン風の requirements> -c requirements.lock` を実行すると、マーカー付き行と `# via` コメントを含む lock をそのまま constraints として受け付け、`numpy<2` のような本体の pin と矛盾する要求は `ResolutionImpossible` で止まる。`addon_installer` が `-c` を渡す配線はテストで固定済み。voice-tts の実導入は本番 venv の同期のときに。
 5. **SDK の実 API 一回ずつ** — openai / anthropic / gemini / xai を各一回、隔離環境の合成ペルソナから呼ぶ。**課金が出るので、この段の直前にまはーの承認を取る** (対象・回数・見込み額を示して)。
 6. **本番の再起動** — まはーの手で。会話一往復、声、記憶タブ。
 

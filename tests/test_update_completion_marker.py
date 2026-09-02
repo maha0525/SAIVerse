@@ -663,7 +663,7 @@ def test_update_dependencies_installs_from_the_lock(tmp_path: Path) -> None:
     project = _make_project(tmp_path)
     commands: list[list[str]] = []
 
-    def recording_run(command, *, cwd, label, timeout=900):  # type: ignore[no-untyped-def]
+    def recording_run(command, *, cwd, label, timeout=900, check=True):  # type: ignore[no-untyped-def]
         commands.append(list(command))
         return MagicMock(returncode=0, stdout="", stderr="")
 
@@ -674,3 +674,65 @@ def test_update_dependencies_installs_from_the_lock(tmp_path: Path) -> None:
 
     assert commands[0] == ["python", "-m", "pip", "install", "-r", "requirements.lock"]
     assert not any("requirements.txt" in part for command in commands for part in command)
+
+
+# --- pip check after the lock is installed: visibility, not enforcement --------
+
+
+def _fake_run_with_pip_check(returncode: int, stdout: str):  # type: ignore[no-untyped-def]
+    """``_run`` that answers ``pip check`` with the given result and 0 to the rest."""
+    calls: list[dict] = []
+
+    def fake_run(command, *, cwd, label, timeout=900, check=True):  # type: ignore[no-untyped-def]
+        calls.append({"command": list(command), "check": check})
+        if command[-2:] == ["pip", "check"]:
+            if check and returncode != 0:
+                raise update_engine.UpdateError("pip check must be run with check=False")
+            return MagicMock(returncode=returncode, stdout=stdout, stderr="")
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    return fake_run, calls
+
+
+def test_update_dependencies_runs_pip_check_after_the_lock(tmp_path: Path, caplog) -> None:  # type: ignore[no-untyped-def]
+    """A clean environment: pip check runs right after the install and logs nothing."""
+    project = _make_project(tmp_path)
+    fake_run, calls = _fake_run_with_pip_check(0, "No broken requirements found.\n")
+
+    with caplog.at_level("WARNING", logger="saiverse.update"), patch.object(
+        update_engine, "_run", side_effect=fake_run
+    ), patch.object(update_engine.shutil, "which", return_value="npm"):
+        update_engine.update_dependencies(project, "python")
+
+    commands = [call["command"] for call in calls]
+    assert commands[0][-3:] == ["install", "-r", "requirements.lock"]
+    assert commands[1] == ["python", "-m", "pip", "check"]
+    assert not any("[deps]" in record.getMessage() for record in caplog.records)
+
+
+def test_update_dependencies_logs_addon_conflicts_without_failing(tmp_path: Path, caplog) -> None:  # type: ignore[no-untyped-def]
+    """The 2026-09-02 shape: the lock moved numpy, an addon's numba now conflicts.
+
+    pip check exits 1. The update must still complete (addon consistency is the
+    addon's job) and every conflict line must be in the log with the fixed prefix.
+    """
+    project = _make_project(tmp_path)
+    conflict_lines = [
+        "numba 0.61.0 has requirement numpy<2.5,>=1.24, but you have numpy 2.5.2.",
+        "librosa 0.10.2 has requirement soundfile>=0.12.1, but you have soundfile 0.11.0.",
+    ]
+    fake_run, calls = _fake_run_with_pip_check(1, "\n".join(conflict_lines) + "\n")
+
+    with caplog.at_level("WARNING", logger="saiverse.update"), patch.object(
+        update_engine, "_run", side_effect=fake_run
+    ), patch.object(update_engine.shutil, "which", return_value="npm"):
+        update_engine.update_dependencies(project, "python")  # must not raise
+
+    # npm still ran after the conflicts were reported: the update went on.
+    assert calls[-1]["command"][0] == "npm"
+    messages = [record.getMessage() for record in caplog.records if record.levelname == "WARNING"]
+    for line in conflict_lines:
+        assert f"[deps] pip check: {line}" in messages
+    summary = [m for m in messages if "アドオンを入れ直す" in m]
+    assert len(summary) == 1
+    assert "requirements.lock" in summary[0]

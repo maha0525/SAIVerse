@@ -507,7 +507,11 @@ def _run(
     cwd: Path,
     label: str,
     timeout: int = 900,
+    check: bool = True,
 ) -> subprocess.CompletedProcess[str]:
+    """Run one phase. A non-zero exit raises ``UpdateError`` unless ``check`` is
+    False, for commands whose non-zero exit is an answer rather than a failure
+    (``pip check`` exits 1 when it finds conflicts)."""
     LOGGER.info("Phase: %s", label)
     try:
         result = subprocess.run(
@@ -519,7 +523,7 @@ def _run(
         )
     except (OSError, subprocess.SubprocessError) as exc:
         raise UpdateError(f"{label} could not run: {exc}") from exc
-    if result.returncode != 0:
+    if check and result.returncode != 0:
         detail = (result.stderr or result.stdout).strip()[-2000:]
         raise UpdateError(f"{label} failed with exit {result.returncode}: {detail}")
     return result
@@ -710,12 +714,57 @@ def update_code(project_dir: Path) -> None:
     )
 
 
+_PIP_CHECK_CLEAN = "No broken requirements found."
+
+
+def _report_addon_conflicts(project_dir: Path, python: str) -> None:
+    """Make it visible, in this update's log, when the lock broke a package the
+    lock does not own.
+
+    The venv is shared with addons (voice-tts brings numba, torch, ...). ``pip
+    install -r requirements.lock`` moves the core's packages and exits 0 even
+    when an addon's package now has an unsatisfiable requirement (2026-09-02:
+    numpy moved past what numba allowed, and voice-tts broke a day later with
+    nothing in the update log). Addon consistency is the addon's responsibility
+    (docs/intent/dependency_management.md §3-3), so this neither fails the
+    update nor rolls back -- it only logs each conflict ``pip check`` reports.
+    """
+    try:
+        result = _run(
+            [python, "-m", "pip", "check"],
+            cwd=project_dir,
+            label="check installed packages for conflicts",
+            timeout=300,
+            check=False,
+        )
+    except UpdateError as exc:
+        LOGGER.warning("[deps] pip check could not run; addon conflicts were not checked: %s", exc)
+        return
+    if result.returncode == 0:
+        return
+    conflicts = [
+        line.strip()
+        for line in (result.stdout or "").splitlines()
+        if line.strip() and line.strip() != _PIP_CHECK_CLEAN
+    ]
+    if not conflicts:
+        conflicts = [(result.stderr or "").strip()[-2000:] or f"exit {result.returncode} with no output"]
+    for line in conflicts:
+        LOGGER.warning("[deps] pip check: %s", line)
+    LOGGER.warning(
+        "[deps] 上の %d 件は requirements.lock の外にあるパッケージ (アドオンか手で入れたもの) との衝突です。"
+        "本体の更新自体は完了しています。該当のアドオンは入れ直す (アドオンを入れ直す) 必要があるかもしれません。",
+        len(conflicts),
+    )
+
+
 def update_dependencies(project_dir: Path, python: str) -> None:
     _run(
         [python, "-m", "pip", "install", "-r", REQUIREMENTS_LOCK],
         cwd=project_dir,
         label="install Python dependencies",
     )
+    _report_addon_conflicts(project_dir, python)
     frontend = project_dir / "frontend"
     if not frontend.is_dir():
         raise UpdateError("frontend directory is missing after code update")
