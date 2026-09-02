@@ -121,7 +121,7 @@ torch / transformers / librosa / numba / gradio / funasr など、venv にある
 
 ### 3-5. ついでに片付けるもの
 
-- `google-adk 1.5.0` が開発機の venv に孤児で残っている (`docs/issues/starlette_google_adk_version_conflict.md`)。誰も使っていないので uninstall して issue を閉じる。**衝突自体は解消済み (2026-09-02)**: Web 一族の更新で starlette が 1.6.0 になり、google-adk が要求する `>=0.46.2` を満たす。開発機での uninstall は venv を lock に合わせ直すときに行い、それが済んだら issue を archive へ。
+- `google-adk 1.5.0` が開発機の venv に孤児で残っている (`docs/issues/archive/starlette_google_adk_version_conflict.md`)。誰も使っていないので uninstall して issue を閉じる。**衝突自体は解消済み (2026-09-02)**: Web 一族の更新で starlette が 1.6.0 になり、google-adk が要求する `>=0.46.2` を満たす。開発機での uninstall は venv を lock に合わせ直すときに行い、それが済んだら issue を archive へ。
 - README / installation.md / tailscale-runbook の Python 推奨を 3.13 へ (3.11〜3.13 動作の記述は維持。3.14 は `docs/issues/python_314_support_verification.md` の実機検証待ちのまま)。**済 (2026-09-02)**: README.md と `docs/getting-started/installation.md` のリンク先を 3.13.15 (この日の 3.13 系の最新で、Windows 用インストーラがある版) に、`docs/developer-guide/contributing.md` の「3.12 推奨」も 3.13 に。tailscale-runbook は「3.11-3.13」と幅しか書いておらず推奨版を名指ししていないので触っていない。
 - requirements.txt の `==` は 2026-09-02 に全廃した (最後まで残っていた langgraph / python-dotenv / requests / SQLAlchemy を下限化)。以後この file に `==` が現れたら、それは lock に書くべきものが漏れた印。
 - `discord_gateway.yml` の CI は Python 3.11 で回している。lock が 3.11〜3.13 を環境マーカーで覆うので、そのままでよい。

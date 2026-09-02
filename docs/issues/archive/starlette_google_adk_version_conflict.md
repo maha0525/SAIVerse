@@ -1,6 +1,6 @@
 # Issue: starlette バージョン競合 (google-adk が要求する範囲と SAIVerse が固定する範囲が衝突)
 
-**ステータス**: 🔲 未着手
+**ステータス**: ✅ 完了 (2026-09-03)
 **優先度**: low
 **作成日**: 2026-05-20
 **関連**: `requirements.txt`, インストール済み `google-adk 1.5.0`
@@ -67,3 +67,4 @@ fastapi 0.116.1 → 最新版 (starlette 0.46.2+ を含むバージョン) に�
 
 - 2026-05-20: issue 起票。`google-genai` を 1.56.0 → 1.75.0 にアップグレードした際の pip 警告から発覚。google-adk は Required-by が空で SAIVerse 本体からは未使用。推奨は案 A (uninstall) だが、別タスクで実施する。
 - 2026-09-02: 依存関係の整理 (`docs/intent/dependency_management.md` §3-1、Web 一族の更新) で starlette が 1.6.0 になり、google-adk 1.5.0 が要求する `>=0.46.2` を満たすようになったので、衝突自体は副作用で解消した。開発機の venv に孤児で残っている google-adk の uninstall (案 A) はまだで、開発機の venv を lock に合わせ直すときに一緒に行う。それが済んだらこの issue を archive へ移す。
+- 2026-09-03: 開発機の venv を requirements.lock に同期した際に確認したところ、google-adk は既に入っていなかった (`pip uninstall` が「not installed」)。starlette も 1.6.0 になっているので衝突の両側が消えた。完了として archive へ。
