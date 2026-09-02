@@ -516,10 +516,14 @@ def _run(
     label: str,
     timeout: int = 900,
     check: bool = True,
+    encoding: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run one phase. A non-zero exit raises ``UpdateError`` unless ``check`` is
     False, for commands whose non-zero exit is an answer rather than a failure
-    (``pip check`` exits 1 when it finds conflicts)."""
+    (``pip check`` exits 1 when it finds conflicts). ``encoding`` overrides the
+    locale default for commands whose output is known to be UTF-8 regardless of
+    the console code page (git with ``-z``); undecodable bytes are replaced
+    rather than crashing the phase."""
     LOGGER.info("Phase: %s", label)
     try:
         result = subprocess.run(
@@ -527,6 +531,8 @@ def _run(
             cwd=cwd,
             capture_output=True,
             text=True,
+            encoding=encoding,
+            errors="replace" if encoding else None,
             timeout=timeout,
         )
     except (OSError, subprocess.SubprocessError) as exc:
@@ -618,7 +624,66 @@ def _ensure_portable_git_on_path(project_dir: Path) -> None:
     LOGGER.info("Using setup-installed PortableGit at %s", portable_cmd)
 
 
+LOCAL_CHANGES_LIST_LIMIT = 20
+
+
+def _parse_porcelain_z(status: str) -> list[str]:
+    """Paths from ``git status --porcelain -z`` output, one entry per change.
+
+    ``-z`` is used instead of the line format because the line format quotes
+    any non-ASCII path as octal escapes (``"\\350\\250\\255..."``) unless
+    ``core.quotePath`` is off, which would make a Japanese file name unreadable
+    in the message meant to tell the user which file to deal with. With ``-z``
+    entries are ``XY <path>`` separated by NUL, and a rename / copy (``R`` or
+    ``C`` in either column: staged in ``X``, detected in the work tree in
+    ``Y``) is followed by one more NUL-terminated field holding the original
+    path; that pair is rendered as ``old -> new``.
+    """
+    fields = status.split("\0")
+    paths: list[str] = []
+    index = 0
+    while index < len(fields):
+        entry = fields[index]
+        index += 1
+        if not entry:
+            continue
+        code, path = entry[:2], entry[3:]
+        if ("R" in code or "C" in code) and index < len(fields):
+            original = fields[index]
+            index += 1
+            path = f"{original} -> {path}"
+        paths.append(path)
+    return paths
+
+
+def _format_local_changes(status: str) -> str:
+    """Turn ``git status --porcelain -z`` output into a readable path list.
+
+    At most ``LOCAL_CHANGES_LIST_LIMIT`` paths are listed so a huge diff does
+    not flood the UI toast / terminal; the remainder is summarised as a count.
+    """
+    paths = _parse_porcelain_z(status)
+    shown = paths[:LOCAL_CHANGES_LIST_LIMIT]
+    text = "\n".join(f"  {p}" for p in shown)
+    hidden = len(paths) - len(shown)
+    if hidden > 0:
+        text += f"\n  ... and {hidden} more"
+    return text
+
+
 def assert_git_update_ready(project_dir: Path) -> str:
+    """Refuse to update unless the checkout is a Git repo with no modified
+    tracked files, and return the current ``HEAD`` revision.
+
+    Only *tracked* files are inspected (``--untracked-files=no``). Untracked
+    files (macOS ``.DS_Store``, a diagnostics script dropped into the folder,
+    ...) do not interfere with a fast-forward; the one case where they would —
+    an untracked *or ignored* file at a path the new revision adds — is refused
+    by the merge in ``update_code`` (``--no-overwrite-ignore``), which names the
+    file and leaves the checkout untouched. Modified tracked files still refuse
+    because the updater never stashes or resets user work; the missing exit for
+    that situation is docs/issues/update_refuses_on_tracked_local_changes_without_exit.md.
+    """
     if not (project_dir / ".git").is_dir() or shutil.which("git") is None:
         raise UpdateError(
             "Automatic update requires a Git checkout. The former ZIP overlay path is "
@@ -626,15 +691,17 @@ def assert_git_update_ready(project_dir: Path) -> str:
             "unknown user files."
         )
     status = _run(
-        ["git", "status", "--porcelain", "--untracked-files=all"],
+        ["git", "status", "--porcelain", "-z", "--untracked-files=no"],
         cwd=project_dir,
         label="verify clean working tree",
         timeout=60,
+        encoding="utf-8",
     ).stdout
-    if status.strip():
+    if status.strip("\0 \r\n"):
         raise UpdateError(
             "Working tree has local changes. Update was not started; commit or otherwise "
-            "resolve them explicitly. The updater never stashes or resets user work."
+            "resolve them explicitly. The updater never stashes or resets user work.\n"
+            "Modified files:\n" + _format_local_changes(status)
         )
     return _run(
         ["git", "rev-parse", "HEAD"],
@@ -714,8 +781,27 @@ def create_pre_update_snapshot(project_dir: Path, python: str) -> str:
 
 
 def update_code(project_dir: Path) -> None:
+    """Fast-forward the checkout to its upstream without touching user files.
+
+    ``fetch`` + ``merge`` instead of ``pull`` because only ``merge`` accepts
+    ``--no-overwrite-ignore``. By default git silently overwrites an *ignored*
+    file when the new revision starts tracking that path (``git pull`` cannot
+    turn that off); ``assert_git_update_ready`` does not see ignored files
+    either, so without this flag an update could destroy e.g. a user's notes in
+    an ignored directory. With the flag the merge refuses and names the file,
+    leaving the checkout at the old revision, exactly like it already does for
+    plain untracked files. The flag is documented since Git 2.25 (2020); an
+    older git rejects it as an unknown option, which also stops the update
+    before anything is written.
+    """
     _run(
-        ["git", "pull", "--ff-only"],
+        ["git", "fetch"],
+        cwd=project_dir,
+        label="fetch code update",
+        timeout=300,
+    )
+    _run(
+        ["git", "merge", "--ff-only", "--no-overwrite-ignore", "@{upstream}"],
         cwd=project_dir,
         label="fast-forward code update",
         timeout=300,
