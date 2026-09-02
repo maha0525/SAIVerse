@@ -301,3 +301,32 @@ def test_pre_update_snapshot_cleanup_failure_does_not_hide_the_real_error(
     ):
         with pytest.raises(update_engine.UpdateError, match="timed out"):
             update_engine.create_pre_update_snapshot(tmp_path / "repo", "python")
+
+
+def test_pre_update_snapshot_gets_more_time_than_the_other_phases(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """スナップショットだけは長い制限時間で呼ばれること。
+
+    この処理だけが世界の大きさに比例して伸びる。実測 24GB の世界が既定の 900 秒に
+    収まらず start.bat が起動不能になった (2026-09-02)。値そのものより「他フェーズ
+    より長く取る」という意図を固定したいので、pip/npm の既定 900 秒との大小で見る。
+
+    固定値である以上いつか再び追い越される。恒久策は
+    docs/issues/snapshot_timeout_is_fixed_while_world_grows.md。
+    """
+    home = tmp_path / "home"
+    (home / "snapshots").mkdir(parents=True)
+    monkeypatch.setenv("SAIVERSE_HOME", str(home))
+
+    seen: dict[str, object] = {}
+
+    def _fake_run(command, *, cwd, label, timeout=900):
+        seen["timeout"] = timeout
+        return None
+
+    with patch.object(update_engine, "_run", side_effect=_fake_run):
+        update_engine.create_pre_update_snapshot(tmp_path / "repo", "python")
+
+    assert seen["timeout"] == update_engine.SNAPSHOT_TIMEOUT_SECONDS
+    assert seen["timeout"] > 900
