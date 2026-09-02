@@ -41,15 +41,94 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-# ~/.saiverse/ 直下で除外するディレクトリ
-EXCLUDED_TOP_DIRS = {"backups", "snapshots", ".runtime"}
+# --- 除外の集合は 2 つある。用途が違うので、混ぜてはいけない ---
+#
+# どちらも ~/.saiverse/ からの相対パスで書く。ディレクトリとファイルを区別せず、
+# 「相対パスの先頭がこの集合のいずれかに一致するか」だけで判定するので、階層が
+# 深くなっても判定規則は増えない（以前は「直下のディレクトリ」「直下のファイル」
+# 「user_data 直下」の 3 つの定数に分かれていた）。
 
-# ~/.saiverse/ 直下で除外するファイル
-EXCLUDED_TOP_FILES = {"log.txt", ".runtime.json"}
+# save でアーカイブに入れず、restore で home 側にそのまま残すもの。
+# collect_files_to_snapshot / clear_for_restore / _managed_swap_roots が使う。
+#
+# ここに足してよいのは「再生成できるキャッシュ」と「世界の状態ではない運用
+# ファイル」だけ。personas / cities / buildings / image 本体 /
+# user_data/database / user_data/addon_data / qdrant / documents / video /
+# audio は世界そのものなので、決して足さないこと。
+#
+# 足すときは容量だけで決めない。除外は復元時の入れ替え単位も分割する
+# （親ディレクトリが「まるごと」で扱えなくなり、os.rename の回数がその
+# ディレクトリの子の数まで増えて、部分失敗の窓が広がる）。実測 3MB の
+# image/.thumbnails は、この代償に見合わないので入れていない。
+EXCLUDED_FROM_SNAPSHOT = frozenset({
+    "backups",            # DB バックアップ（スナップショットとは別系統の保全）
+    "snapshots",          # スナップショット自身
+    ".runtime",           # 起動中マーカー
+    "log.txt",
+    ".runtime.json",
+    "user_data/logs",     # セッションログ
+    "llama_cache",        # llama.cpp の KV スロットキャッシュ（実測 15.8GB）。復元に
+                          # 失敗しても warning を出して fresh に続行する設計で、無くても
+                          # 動く。復元時も home 側の現物を残す（世界を過去へ戻しても
+                          # キャッシュは現在のものでよく、消すと再生成コストが大きい）
+})
 
-# ~/.saiverse/user_data/ 配下で除外するディレクトリ
-EXCLUDED_USER_DATA_DIRS = {"logs"}
+# 復元時、アーカイブのメンバーとして入っていたら危険として拒否するもの。
+# _safe_archive_member だけが使う。
+#
+# EXCLUDED_FROM_SNAPSHOT から llama_cache を引いただけ。llama_cache を含めないのは、
+# それを除外していなかった頃の format_version 2 アーカイブに llama_cache/... が正当な
+# メンバーとして入っており、拒否すると過去のスナップショットの復元が丸ごと失敗する
+# ため。展開先は一時的な stage で、_managed_swap_roots が llama_cache を入れ替え単位に
+# 含めないので、stage に展開されても home の llama_cache は入れ替わらない（stage ごと
+# 捨てられる）。
+#
+# 逆に、ここから何かを引くときは慎重に。この集合の中身は「アーカイブが home の運用
+# 領域を書き換えに来ていたら攻撃か破損」という判定そのもの。
+PROTECTED_FROM_ARCHIVE = EXCLUDED_FROM_SNAPSHOT - {"llama_cache"}
+
+
+def _as_parts(paths: frozenset[str]) -> frozenset[Tuple[str, ...]]:
+    """判定用に、相対パス文字列の集合を parts のタプルの集合へ落とす。"""
+    return frozenset(tuple(p.split("/")) for p in paths)
+
+
+_EXCLUDED_PARTS = _as_parts(EXCLUDED_FROM_SNAPSHOT)
+_PROTECTED_PARTS = _as_parts(PROTECTED_FROM_ARCHIVE)
+
 SNAPSHOT_FORMAT_VERSION = 2
+
+
+def _matches_any(rel: Path, parts_set: frozenset[Tuple[str, ...]]) -> bool:
+    """``rel`` の先頭からの部分列が ``parts_set`` のいずれかに一致するか。
+
+    一致したディレクトリの配下は、深さに関係なくすべて該当する。
+    """
+    parts = rel.parts
+    return any(parts[:i] in parts_set for i in range(1, len(parts) + 1))
+
+
+def is_excluded(rel: Path) -> bool:
+    """home からの相対パス ``rel`` が ``EXCLUDED_FROM_SNAPSHOT`` に該当するか。"""
+    return _matches_any(rel, _EXCLUDED_PARTS)
+
+
+def is_protected_from_archive(rel: Path) -> bool:
+    """アーカイブメンバー ``rel`` が ``PROTECTED_FROM_ARCHIVE`` に該当するか。"""
+    return _matches_any(rel, _PROTECTED_PARTS)
+
+
+def _contains_excluded(rel_parts: Tuple[str, ...]) -> bool:
+    """``rel_parts`` の *配下* に除外対象があるか（``rel_parts`` 自身は数えない）。
+
+    「まるごと入れ替えてよいディレクトリか、子まで降りて選り分ける必要があるか」
+    の判定に使う。見るのは ``EXCLUDED_FROM_SNAPSHOT`` 側だけ。
+    """
+    depth = len(rel_parts)
+    return any(
+        len(excluded) > depth and excluded[:depth] == rel_parts
+        for excluded in _EXCLUDED_PARTS
+    )
 
 
 def saiverse_home() -> Path:
@@ -175,10 +254,12 @@ class SnapshotEntry:
 def collect_files_to_snapshot() -> List[SnapshotEntry]:
     """スナップショットに含めるファイルを列挙。
 
-    除外ルール:
-    - ~/.saiverse/{backups,snapshots}/ 配下
-    - ~/.saiverse/log.txt
+    除外は ``EXCLUDED_FROM_SNAPSHOT``（home からの相対パス集合）で決まる。
+    現在の内訳:
+    - ~/.saiverse/{backups,snapshots,.runtime}/ 配下
+    - ~/.saiverse/{log.txt,.runtime.json}
     - ~/.saiverse/user_data/logs/ 配下
+    - ~/.saiverse/llama_cache/ 配下（llama.cpp の KV キャッシュ。再生成可能）
     """
     home = saiverse_home()
     if not home.exists():
@@ -190,24 +271,12 @@ def collect_files_to_snapshot() -> List[SnapshotEntry]:
         if not path.is_file():
             continue
 
-        # 直下の除外チェック
         try:
             rel = path.relative_to(home)
         except ValueError:
             continue
 
-        parts = rel.parts
-        if not parts:
-            continue
-
-        top = parts[0]
-        if top in EXCLUDED_TOP_DIRS:
-            continue
-        if len(parts) == 1 and top in EXCLUDED_TOP_FILES:
-            continue
-
-        # user_data/ 配下の除外チェック
-        if top == "user_data" and len(parts) >= 2 and parts[1] in EXCLUDED_USER_DATA_DIRS:
+        if not rel.parts or is_excluded(rel):
             continue
 
         entries.append(SnapshotEntry(
@@ -275,44 +344,30 @@ def remove_path(path: Path) -> None:
 
 
 def clear_for_restore(home: Path) -> None:
-    """復元前に ~/.saiverse/ の中身を削除（除外ディレクトリは残す）。"""
-    if not home.exists():
-        return
+    """復元前に ~/.saiverse/ の中身を削除（除外パスは残す）。
 
-    for child in list(home.iterdir()):
-        name = child.name
-        if name in EXCLUDED_TOP_DIRS:
-            LOGGER.debug("Preserving excluded top dir: %s", child)
-            continue
-        if name in EXCLUDED_TOP_FILES:
-            LOGGER.debug("Preserving excluded top file: %s", child)
-            continue
-
-        if name == "user_data" and child.is_dir():
-            # user_data 配下は logs だけ残して他は削除
-            for sub in list(child.iterdir()):
-                if sub.name in EXCLUDED_USER_DATA_DIRS:
-                    LOGGER.debug("Preserving excluded user_data subdir: %s", sub)
-                    continue
-                LOGGER.debug("Removing %s", sub)
-                remove_path(sub)
-        else:
-            LOGGER.debug("Removing %s", child)
-            remove_path(child)
+    「除外パスを含まない最も浅い単位」の列挙は ``_managed_swap_roots`` と
+    同じ問題なので、判定はそちらに一本化してある。
+    """
+    for rel in sorted(_managed_swap_roots(home), key=str):
+        LOGGER.debug("Removing %s", home / rel)
+        remove_path(home / rel)
 
 
 def _safe_archive_member(name: str) -> Path:
+    """アーカイブのメンバー名を検証して相対パスへ落とす。
+
+    拒否の基準は ``PROTECTED_FROM_ARCHIVE``（``EXCLUDED_FROM_SNAPSHOT`` ではない）。
+    収集の除外に入っただけのもの（llama_cache）は、それ以前に作られたアーカイブに
+    正当なメンバーとして入っているので、拒否してはいけない。
+    """
     if not name or "\\" in name or ":" in name:
         raise ValueError(f"Unsafe snapshot member: {name!r}")
     rel = Path(name)
-    if rel.is_absolute() or ".." in rel.parts or rel.parts[0] in EXCLUDED_TOP_DIRS:
+    if rel.is_absolute() or not rel.parts or ".." in rel.parts:
         raise ValueError(f"Unsafe snapshot member: {name!r}")
-    if (
-        rel.parts[0] == "user_data"
-        and len(rel.parts) > 1
-        and rel.parts[1] in EXCLUDED_USER_DATA_DIRS
-    ):
-        raise ValueError(f"Snapshot member targets a preserved directory: {name!r}")
+    if is_protected_from_archive(rel):
+        raise ValueError(f"Snapshot member targets a protected path: {name!r}")
     return rel
 
 
@@ -383,19 +438,27 @@ def validate_and_extract_snapshot(snap: Path, stage: Path) -> dict:
 
 
 def _managed_swap_roots(root: Path) -> set[Path]:
+    """まるごと入れ替えてよい相対パスの集合を、除外パスを避けながら列挙する。
+
+    除外パスを配下に持つディレクトリ（例: ``user_data`` は ``user_data/logs``
+    を持つ）はそれ自体を単位にできないので、子まで降りて選り分ける。
+    """
     paths: set[Path] = set()
-    if not root.exists():
-        return paths
-    for child in root.iterdir():
-        if child.name in EXCLUDED_TOP_DIRS or child.name in EXCLUDED_TOP_FILES:
-            continue
-        if child.name == "user_data" and child.is_dir():
-            for sub in child.iterdir():
-                if sub.name not in EXCLUDED_USER_DATA_DIRS:
-                    paths.add(Path("user_data") / sub.name)
-        else:
-            paths.add(Path(child.name))
+    _collect_swap_roots(root, (), paths)
     return paths
+
+
+def _collect_swap_roots(current: Path, prefix: Tuple[str, ...], out: set[Path]) -> None:
+    if current.is_symlink() or not current.is_dir():
+        return
+    for child in current.iterdir():
+        rel_parts = prefix + (child.name,)
+        if is_excluded(Path(*rel_parts)):
+            continue
+        if _contains_excluded(rel_parts) and child.is_dir() and not child.is_symlink():
+            _collect_swap_roots(child, rel_parts, out)
+        else:
+            out.add(Path(*rel_parts))
 
 
 def swap_staged_world(home: Path, stage: Path) -> None:
@@ -490,6 +553,18 @@ def cmd_save(args: argparse.Namespace) -> int:
     )
 
     tmp_path = snap_path.with_suffix(".zip.tmp")
+    # 前回の save が外部から強制終了された（親プロセスの subprocess timeout に
+    # よる kill など）場合、下の except 節は走らないので書きかけの .zip.tmp が
+    # そのまま残る。76GB の world で 20GB 級の残骸が居座った実例があるため、
+    # 自分がこれから使う名前のものだけをここで片付ける。
+    if tmp_path.exists():
+        LOGGER.warning("Removing leftover temporary archive from an interrupted run: %s", tmp_path)
+        try:
+            tmp_path.unlink()
+        except OSError as exc:
+            # 消せなくても ZIP を "w" で開けば切り詰められるので、続行してよい。
+            LOGGER.warning("Could not remove %s: %s", tmp_path, exc, exc_info=True)
+
     failed: List[Tuple[Path, str]] = []
     try:
         with zipfile.ZipFile(tmp_path, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:

@@ -603,20 +603,59 @@ def assert_git_update_ready(project_dir: Path) -> str:
     ).stdout.strip()
 
 
+def _saiverse_home() -> Path:
+    """SAIVerse ホームディレクトリ。``scripts/snapshot.py`` の ``saiverse_home()``
+    と同じ規則。
+
+    update_engine は動作中に作業ツリーが入れ替わりうるので他モジュールを import
+    しない方針（モジュール冒頭の注記）。そのため規則を二重に持つが、snapshot.py
+    側を変えたらここも必ず揃えること。
+    """
+    env = os.environ.get("SAIVERSE_HOME")
+    if env:
+        return Path(env).expanduser()
+    return Path.home() / ".saiverse"
+
+
+def _remove_partial_snapshot_archive(tmp_archive: Path) -> None:
+    """中断されたスナップショットの書きかけファイルを消す。
+
+    掃除の失敗で本来のエラーを隠さないよう、例外は握り潰してログに残すだけに
+    する。
+    """
+    try:
+        tmp_archive.unlink()
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        LOGGER.warning("Could not remove partial snapshot archive %s: %s", tmp_archive, exc)
+        return
+    LOGGER.warning("Removed the partial snapshot archive left behind: %s", tmp_archive)
+
+
 def create_pre_update_snapshot(project_dir: Path, python: str) -> str:
     name = datetime.now(timezone.utc).strftime("auto_before_update_%Y%m%d_%H%M%S_%f")
-    _run(
-        [
-            python,
-            str(project_dir / "scripts" / "snapshot.py"),
-            "save",
-            name,
-            "--note",
-            "Automatic restore point before code update",
-        ],
-        cwd=project_dir,
-        label="create and validate pre-update world snapshot",
-    )
+    # snapshot.py は書き上がった ZIP を .zip.tmp から os.replace で publish する。
+    # ここでタイムアウトすると _run が子プロセスを kill するので snapshot.py 側の
+    # except 節は走らず、書きかけの .zip.tmp が数十 GB のまま残る。子を殺した
+    # 側であるこちらが後始末する。パスの規則は snapshot.py と同じ。
+    tmp_archive = _saiverse_home() / "snapshots" / f"{name}.zip.tmp"
+    try:
+        _run(
+            [
+                python,
+                str(project_dir / "scripts" / "snapshot.py"),
+                "save",
+                name,
+                "--note",
+                "Automatic restore point before code update",
+            ],
+            cwd=project_dir,
+            label="create and validate pre-update world snapshot",
+        )
+    except Exception:
+        _remove_partial_snapshot_archive(tmp_archive)
+        raise
     return name
 
 
