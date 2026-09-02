@@ -78,8 +78,10 @@ source .venv/bin/activate
 
 ```bash
 pip install --upgrade pip
-pip install -r requirements.txt
+pip install -r requirements.lock
 ```
+
+`requirements.lock` は「動くと確かめた部品の版の一覧」で、全パッケージが版ごと固定されています。`setup.bat` / `setup.sh` / `update.bat` もこのファイルから入れるので、手で入れる場合も同じものを使ってください (`requirements.txt` は開発者が意図した範囲を書く側で、そこから直接は入れません)。
 
 ### 4. フロントエンドのセットアップ
 

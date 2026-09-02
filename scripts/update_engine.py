@@ -36,6 +36,14 @@ LOGGER = logging.getLogger("saiverse.update")
 # half-way. See docs/issues/v0229_update_bat_truncates_after_git_pull.md.
 UPDATE_COMPLETE_MARKER = ".update_complete"
 
+# The pinned, verified package set. Every install path (setup.bat / setup.sh,
+# this engine, addon installs as constraints) reads this file, never
+# requirements.txt, so all users get the same combination. It is universal:
+# lines carry environment markers (``pywin32==311 ; sys_platform == 'win32'``)
+# and ``scan_requirements`` evaluates them for the running interpreter.
+# See docs/intent/dependency_management.md.
+REQUIREMENTS_LOCK = "requirements.lock"
+
 # Exit codes of ``--check-complete``. The launchers branch on these, so they are
 # part of the contract with start.bat / start.sh.
 CHECK_READY = 0
@@ -82,11 +90,14 @@ def _file_digest(path: Path) -> str | None:
 def completion_fingerprint(project_dir: Path) -> dict[str, Any] | None:
     """What a completed update installs, as comparable values.
 
-    The VERSION alone is not enough: a pull can change ``requirements.txt`` or
-    ``frontend/package-lock.json`` while VERSION stays put (every commit between
-    two releases does), and the marker would then claim a finished update over
-    packages that were never installed. Hashing the two dependency lists closes
-    that. The commit SHA deliberately is *not* part of this -- on a development
+    The VERSION alone is not enough: a pull can change the dependency lists
+    while VERSION stays put (every commit between two releases does), and the
+    marker would then claim a finished update over packages that were never
+    installed. Hashing the lists closes that. ``requirements.lock`` is what pip
+    actually installs (see ``update_dependencies``); ``requirements.txt`` is
+    the intent it was generated from, and a change there without a regenerated
+    lock is still a reason to run the finishing pass rather than hide the gap.
+    The commit SHA deliberately is *not* part of this -- on a development
     checkout every pull would then demand a pip run that changes nothing.
 
     Returns None when VERSION is unreadable, i.e. when nothing can be recorded.
@@ -97,6 +108,7 @@ def completion_fingerprint(project_dir: Path) -> dict[str, Any] | None:
     return {
         "version": version,
         "requirements_sha256": _file_digest(project_dir / "requirements.txt"),
+        "requirements_lock_sha256": _file_digest(project_dir / REQUIREMENTS_LOCK),
         "package_lock_sha256": _file_digest(project_dir / "frontend" / "package-lock.json"),
     }
 
@@ -355,11 +367,15 @@ def _installed_versions() -> dict[str, str | None] | None:
 def missing_dependencies(project_dir: Path) -> DependencyReport | None:
     """Requirements this interpreter does not satisfy.
 
-    Returns None when the answer cannot be determined at all (unreadable
-    requirements file, unreadable package metadata) so callers can tell
-    "nothing missing" apart from "could not look".
+    Judged against ``requirements.lock`` -- the exact set an update installs --
+    so a package present at a version other than the pinned one counts as
+    missing, the same way an absent one does.
+
+    Returns None when the answer cannot be determined at all (unreadable lock
+    file, unreadable package metadata) so callers can tell "nothing missing"
+    apart from "could not look".
     """
-    scan = scan_requirements(project_dir / "requirements.txt")
+    scan = scan_requirements(project_dir / REQUIREMENTS_LOCK)
     if scan is None:
         return None
     installed = _installed_versions()
@@ -683,7 +699,7 @@ def update_code(project_dir: Path) -> None:
 
 def update_dependencies(project_dir: Path, python: str) -> None:
     _run(
-        [python, "-m", "pip", "install", "-r", "requirements.txt"],
+        [python, "-m", "pip", "install", "-r", REQUIREMENTS_LOCK],
         cwd=project_dir,
         label="install Python dependencies",
     )

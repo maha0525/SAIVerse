@@ -80,7 +80,7 @@ python scripts/migrate_to_user_data.py --dry-run   # 既存データを ~/.saive
 
 | スクリプト | 用途 |
 |---|---|
-| `update_engine.py` | 全update入口の正典。clean Git fast-forward、更新前world snapshot、phase fail-stop、同一条件restart、health確認、失敗時rollback。依存更新を始める前にリポジトリ直下の `.update_complete` を消し、全段が成功したときだけ「VERSION + requirements.txt と frontend/package-lock.json の sha256」を JSON で刻み直す (一時ファイル + `os.replace` で atomic)。途中で死ねば印は必ず無く、次回起動は実在照合を通る |
+| `update_engine.py` | 全update入口の正典。clean Git fast-forward、更新前world snapshot、phase fail-stop、同一条件restart、health確認、失敗時rollback。依存更新を始める前にリポジトリ直下の `.update_complete` を消し、全段が成功したときだけ「VERSION + requirements.txt / requirements.lock / frontend/package-lock.json の sha256」を JSON で刻み直す (一時ファイル + `os.replace` で atomic)。途中で死ねば印は必ず無く、次回起動は実在照合を通る |
 | `update_engine.py --check-complete` | 起動前の「更新が仕上がっているか」検査 (start.bat / start.sh が呼ぶ)。コードも依存も書き換えない。終了コード 0=起動可 / 10=`--manual` で仕上げが必要 / 11=判定できなかったので警告して起動続行。詳細は [issue](../issues/v0229_update_bat_truncates_after_git_pull.md) |
 | `self_update.py` | 旧セルフアップデート入口から `update_engine.py` への互換wrapper |
 | `set_version.py` | バージョン刻印 |

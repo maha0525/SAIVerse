@@ -1,3 +1,20 @@
+# requirements.txt -- the INTENT: which packages SAIVerse imports directly, as
+# lower bounds plus reasoned upper bounds. Nothing installs from this file.
+#
+# The verified set is requirements.lock (every package pinned with ==,
+# generated from this file with uv; regeneration commands are in its header).
+# setup.bat / setup.sh / update_engine.py install from the lock, and addon
+# installs use it as constraints, so every user gets the same combination.
+#
+# Rules for editing this file (docs/intent/dependency_management.md):
+#   - Write a lower bound, not ==; pinning is the lock's job. (The == entries
+#     still below predate the lock and are being converted family by family,
+#     see the intent doc section 3.)
+#   - Every upper bound MUST carry a one-line reason saying what breaks above
+#     it and where the follow-up lives (the `mcp>=1.10.0,<2` entry below is
+#     the model). "Not upgraded yet" is not a reason.
+#   - After any change here, regenerate requirements.lock and run the suite.
+#   - Keep this file ASCII-only (see the NOTE further down).
 discord.py>=2.4.0
 websockets>=12.0
 httpx>=0.27.0
