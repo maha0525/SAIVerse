@@ -23,6 +23,8 @@ aiohttp==3.13.3
     #   xai-sdk
 aiosignal==1.4.0
     # via aiohttp
+annotated-doc==0.0.5
+    # via fastapi
 annotated-types==0.7.0
     # via pydantic
 anthropic==0.79.0
@@ -85,7 +87,7 @@ docstring-parser==0.17.0
     # via anthropic
 execnet==2.1.2
     # via pytest-xdist
-fastapi==0.116.1
+fastapi==0.141.1
     # via -r requirements.txt
 fastembed==0.7.4
     # via -r requirements.txt
@@ -254,7 +256,7 @@ pyasn1-modules==0.4.2
     # via google-auth
 pycparser==3.0 ; implementation_name != 'PyPy'
     # via cffi
-pydantic==2.11.7
+pydantic==2.13.5
     # via
     #   -r requirements.txt
     #   anthropic
@@ -267,9 +269,9 @@ pydantic==2.11.7
     #   openai
     #   pydantic-settings
     #   xai-sdk
-pydantic-core==2.33.2
+pydantic-core==2.46.5
     # via pydantic
-pydantic-settings==2.5.2
+pydantic-settings==2.15.0
     # via
     #   -r requirements.txt
     #   mcp
@@ -341,7 +343,7 @@ sqlalchemy==2.0.41
     # via -r requirements.txt
 sse-starlette==3.0.3
     # via mcp
-starlette==0.47.3
+starlette==1.6.0
     # via
     #   fastapi
     #   mcp
@@ -383,8 +385,10 @@ typing-extensions==4.15.0
     #   typing-inspection
 typing-inspection==0.4.2
     # via
+    #   fastapi
     #   mcp
     #   pydantic
+    #   pydantic-settings
 tzdata==2025.3
     # via -r requirements.txt
 urllib3==2.6.3
@@ -393,7 +397,7 @@ uuid-utils==0.14.0
     # via
     #   langchain-core
     #   langsmith
-uvicorn==0.35.0
+uvicorn==0.52.4
     # via
     #   -r requirements.txt
     #   mcp

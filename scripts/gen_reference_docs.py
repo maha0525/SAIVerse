@@ -109,14 +109,20 @@ def generate_tool_catalog() -> str:
 
 def generate_api_endpoints() -> str:
     from api.main import api_router
+    from fastapi.routing import iter_route_contexts
     from starlette.routing import Route
 
+    # FastAPI 0.137 以降、`router.routes` は include_router した子ルーターを
+    # 中間オブジェクトのまま持つ木構造で、直接たどっても葉のルートは出てこない。
+    # FastAPI 自身が OpenAPI 生成に使う iter_route_contexts() で葉まで展開する。
+    # 返る RouteContext の path / methods / tags は prefix と include_router の
+    # tags を合成済みの値 (旧版で平坦化されたコピーが持っていたものと同じ)。
     # tag ごとにルートをまとめる
     grouped: dict[str, list[tuple[str, str, str]]] = {}
-    for route in api_router.routes:
-        if not isinstance(route, Route):
+    for route in iter_route_contexts(api_router.routes):
+        if not isinstance(route.original_route, Route):
             continue
-        path = "/api" + route.path
+        path = "/api" + (route.path or "")
         methods = sorted(m for m in (route.methods or set()) if m not in {"HEAD", "OPTIONS"})
         method_str = ", ".join(methods) or "—"
         tags = getattr(route, "tags", None) or ["(untagged)"]

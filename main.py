@@ -619,12 +619,35 @@ def main():
     atexit.register(shutdown_everything)
 
     # --- FastAPI Server Setup ---
+    from contextlib import asynccontextmanager
+
     from fastapi import FastAPI
     from fastapi.middleware.cors import CORSMiddleware
     from fastapi.staticfiles import StaticFiles
     import uvicorn
 
-    app = FastAPI()
+    @asynccontextmanager
+    async def _lifespan(_app):
+        # Register event loop for addon_events (enables emit from background threads).
+        # uvicorn がサーバのイベントループを起動した直後 (リクエスト受付前) に走る。
+        from saiverse.addon_events import set_event_loop
+
+        set_event_loop(asyncio.get_running_loop())
+        yield
+        # 終了処理はここに書かない。上の shutdown_everything (atexit / SIGTERM) が
+        # 唯一の終了経路で、二本目を作ると順序が絡む (発言生成の後始末 → MCP →
+        # llama-server → API Server → manager) を壊す。
+
+    app = FastAPI(
+        lifespan=_lifespan,
+        # FastAPI 0.132 から、JSON ボディに Content-Type: application/json が無い
+        # リクエストは既定で拒否される (CSRF 対策)。SAIVerse にはブラウザ以外の
+        # クライアント (Godot vessel アドオン、stackchan、Discord ゲートウェイ、
+        # test_fixtures) があり、全部がこのヘッダを送っているかまだ監査していない
+        # ので、監査が済むまで旧挙動を保つ。外す条件と対象一覧は
+        # docs/issues/fastapi_strict_content_type_disabled.md。
+        strict_content_type=False,
+    )
 
     allowed_origins = [
         "http://localhost:3000",
@@ -686,13 +709,6 @@ def main():
     # Load addon API routers from expansion_data/*/api_routes.py
     from saiverse.addon_loader import load_addon_routers
     load_addon_routers(app)
-
-    # Register event loop for addon_events (enables emit from background threads)
-    @app.on_event("startup")
-    async def _register_addon_event_loop():
-        import asyncio
-        from saiverse.addon_events import set_event_loop
-        set_event_loop(asyncio.get_event_loop())
 
     logging.info(f"Starting SAIVerse backend on http://{listen_host}:{manager.ui_port}")
     logging.info(f"API endpoints available at http://{listen_host}:{manager.ui_port}/api")
