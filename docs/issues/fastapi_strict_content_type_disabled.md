@@ -1,7 +1,7 @@
 # Issue: FastAPI の Content-Type 厳密検査を無効にしたまま (外部クライアント未監査)
 
 **ステータス**: 🔲 未着手
-**優先度**: low
+**優先度**: high (2026-09-02 Codex レビューで引き上げ。下記「何が問題か」の 3 点目)
 **作成日**: 2026-09-02
 **関連**: `main.py` (`FastAPI(strict_content_type=False)`), `docs/intent/dependency_management.md` §3-1 (Web 一族の更新)
 
@@ -15,6 +15,12 @@ FastAPI 0.132 から、リクエストボディを JSON として読むには `C
 
 - 厳密検査は CSRF 対策なので、無効のままだと LAN 公開 (`--lan` / `OwnerAuthMiddleware`) 時の防御が一段薄い。
 - 「監査が終わるまで」の暫定措置が、期限も対象一覧も無いと恒久化する。
+- **loopback モード (既定の起動) では `OwnerAuthMiddleware` が付かず、CORS は cross-origin の単純 POST 自体を止めない** (2026-09-02 Codex レビュー指摘)。つまりブラウザで開いた悪意あるページから `http://127.0.0.1:8000/api/...` へ Content-Type 無しの JSON を投げる CSRF に対して、この旗が唯一の防御になりうる。ただし **0.116 時代には検査そのものが無かった**ので、この旗で以前より弱くなったわけではなく、「新しく得られる防御を保留している」状態。だからこそ保留は短くする。
+
+## 監査対象に足すもの (2026-09-02 追記)
+
+- **フロントエンド (`frontend/`) 自身**: `fetch` に文字列ボディを渡すとき `Content-Type: application/json` は自動では付かない。API ヘルパーが全経路でヘッダを付けているかを先に確かめる — ここが漏れていると旗を外した瞬間に UI 全体が 422 になる。
+- 監査で判明した事実 (2026-09-02): stackchan `speak_hook.py:456` の POST は PCM 音声 (`data=` の iterator) で JSON ではないため対象外。Discord ゲートウェイ `auth.py:117` の POST は Discord のトークン URL 宛てで本体 API 宛てではないため対象外。残りは Godot アドオン・stackchan ファームウェア・test_fixtures・フロントエンド。
 
 ## 監査対象 (全部が `application/json` を送っていると確認できたら旗を外す)
 

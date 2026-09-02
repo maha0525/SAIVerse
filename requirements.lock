@@ -71,6 +71,8 @@ colorama==0.4.6 ; sys_platform == 'win32'
     #   loguru
     #   pytest
     #   tqdm
+coloredlogs==15.0.1
+    # via onnxruntime
 cryptography==46.0.5
     # via
     #   -r requirements.txt
@@ -148,6 +150,8 @@ huggingface-hub==0.36.2
     # via
     #   fastembed
     #   tokenizers
+humanfriendly==10.0
+    # via coloredlogs
 idna==3.19
     # via
     #   anyio
@@ -223,8 +227,10 @@ numpy==2.5.2 ; python_full_version >= '3.12'
     #   -r requirements.txt
     #   fastembed
     #   onnxruntime
-onnxruntime==1.24.1
-    # via fastembed
+onnxruntime==1.23.2
+    # via
+    #   -r requirements.txt
+    #   fastembed
 openai==3.7.0
     # via -r requirements.txt
 opentelemetry-api==1.39.1
@@ -299,6 +305,8 @@ pyjwt==2.12.1
     # via mcp
 pypdf==6.7.0
     # via -r requirements.txt
+pyreadline3==3.5.6 ; sys_platform == 'win32'
+    # via humanfriendly
 pytest==9.1.1
     # via
     #   -r requirements.txt

@@ -396,8 +396,14 @@ def missing_dependencies(project_dir: Path) -> DependencyReport | None:
             missing.append(dist.name)
             continue
         version = installed[key]
-        if dist.specifier is None or version is None:
-            continue  # name is present and no bound could be checked
+        if dist.specifier is None:
+            continue  # name is present and there is no bound to check
+        if version is None:
+            # The dist-info exists but carries no version (damaged metadata):
+            # the pin cannot be confirmed, so say "unchecked" instead of
+            # letting a broken install pass as satisfied.
+            unchecked.append(f"{dist.name} (installed version unreadable, required {dist.specifier})")
+            continue
         try:
             satisfied = dist.specifier.contains(version, prereleases=True)
         except Exception:

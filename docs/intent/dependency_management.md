@@ -96,6 +96,9 @@ requirements.lock     ← 全部品の版を固定した一覧 (機械が作る�
 | 部品 | 上限 | 理由 (requirements.txt に残す文) |
 |---|---|---|
 | mcp | `<2` | 2.x が `streamablehttp_client` を撤去。v2 API への移行は別案件 (`docs/intent/mcp_protocol_coverage.md`)。**既に書いてある、手本** |
+| onnxruntime | `<1.24` | 1.24 以降は macOS x86_64 (Intel Mac) と macOS 13 の wheel が無く sdist も無い。universal lock が 1.24+ を掴むと Intel Mac では `pip install -r requirements.lock` 自体が失敗する (2026-09-02 Codex レビューで発覚。fastembed 0.8 も Python 3.13 で 1.24.0/1.24.1 を除外)。外す条件 = onnxruntime が Intel Mac の wheel を再開する、または Intel Mac 対応を打ち切ると決める |
+
+**universal lock の盲点 (2026-09-02 に学んだこと)**: `uv pip compile --universal` は依存関係のメタデータだけで解決し、その版の wheel が各プラットフォーム向けに公開されているかは見ない。Windows で入って全スイートが緑でも、Intel Mac で入らない lock はできる。だから lock を作り直したら `python scripts/check_lock_platforms.py` (各 pin の wheel / sdist の有無を PyPI に問い、対象 4 プラットフォーム × Python 3.11〜3.13 で入らない組合せを exit 1 で返す) を回す。§5 の 1b。
 
 他に止めるべきものは実装時の compile と全スイートで判明する。**「なんとなく上げない」は禁止** — 上げないなら理由を書く。
 
@@ -135,6 +138,7 @@ torch / transformers / librosa / numba / gradio / funasr など、venv にある
 ## 5. 検証 (境界を跨ぐ順に)
 
 1. **compile が通る** — requirements.txt から lock が生成でき、pip check で衝突ゼロ。
+   1b. **全プラットフォームで入る** — `python scripts/check_lock_platforms.py` が exit 0 (Windows / Linux / macOS arm64 / macOS x86_64 × Python 3.11〜3.13 の全組合せに wheel か sdist がある)。開発機では確かめられない環境の代理。
 2. **素の venv に lock だけで入る** — 開発機の venv ではなく、新しい venv に `pip install -r requirements.lock` して全スイートが緑。これが「ユーザーの手元」の代理。
 3. **update 経路** — 隔離環境 (`docs/test_environment.md`) で `update_engine.py --manual` を通し、完了マーカーが lock の sha を持つこと。
 4. **アドオン導入** — 隔離環境で voice-tts を `pip_install` step から入れ、constraints が効くこと (本体の部品を動かそうとしたら失敗すること、を一つ作為的に確かめる)。
@@ -156,3 +160,4 @@ torch / transformers / librosa / numba / gradio / funasr など、venv にある
 ## 7. 経緯
 
 - 2026-09-02: voice-tts の無音事故 (numba × NumPy 2.5) を契機に起草。まはー「そろそろやらなきゃダメかな。依存関係全体を洗いたい、新しくするべきとこ新しくして、古いまま止めなきゃだめなやつはそう設定する整理が必要」。Python 推奨は 3.13 へ、feature ブランチで対応、と裁定。
+- 2026-09-02 深夜 (レビュー 1 巡目): ローカル LLM と Codex (ブランチ全体、develop 基点)。**採用**: ①lock の onnxruntime 1.24.1 は Intel Mac の wheel も sdist も無く、Intel Mac では lock が入らない (Codex high) → `onnxruntime<1.24` を理由つきで置き、`scripts/check_lock_platforms.py` を新設して同族を機械検査 (§3-2)。②packaging 無しの退化パーサーがマーカー付き行を「必要」と読み、macOS で Windows 限定の pin を未導入と判定して起動のたびに更新へ送る (ローカル low) → マーカー付き行は未検査扱いへ。③壊れた dist-info (版が読めない) を満たしている扱いにしていた (Codex medium) → 未検査へ。④requirements.txt の `==` 禁止を契約テストへ (ローカル low)。**採用せず**: lock が読めない・メタデータが列挙できないときに CHECK_READY を返す fail-open (Codex high) — 以前からの設計で、代案の INCONCLUSIVE も起動する点は同じ (印を書かない) なので挙動差が無い。`strict_content_type=False` は CSRF 防御の保留 (Codex high) — 0.116 には検査自体が無かったので退行ではないが、issue の優先度を high に上げてフロントエンドを監査対象に加えた。thinking と sampling の同時送信 (Codex medium) — この分岐は以前から同じ引数を top-level で送っており、`extra_body` への移動で挙動は変わっていない (別件)。

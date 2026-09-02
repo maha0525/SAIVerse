@@ -44,6 +44,13 @@ tzdata
 
 # SAIMemory embeddings
 fastembed>=0.7.3
+# onnxruntime is imported directly by sai_memory (deep recall) and pulled in by
+# fastembed. The upper bound is mandatory: from 1.24 onnxruntime ships no macOS
+# x86_64 (Intel Mac) wheel and no macOS 13 wheel, and publishes no sdist, so a
+# universal lock pinned to 1.24+ cannot be installed on an Intel Mac at all
+# (fastembed 0.8 also excludes 1.24.0/1.24.1 on Python 3.13). Lift it when
+# onnxruntime publishes Intel Mac wheels again or Intel Mac support is dropped.
+onnxruntime>=1.17,<1.24
 numpy>=1.26.0
 
 # Image processing

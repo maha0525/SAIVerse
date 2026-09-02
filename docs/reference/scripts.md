@@ -17,6 +17,12 @@
 |---|---|
 | `gen_reference_docs.py` | `docs/reference/` の自動生成 doc（tool-catalog / api-endpoints / database-schema）を再生成。`--check` でドリフト検査。ルートの [`gen_reference_docs.bat`](../../gen_reference_docs.bat) から叩く |
 
+## 依存関係
+
+| スクリプト | 用途 |
+|---|---|
+| `check_lock_platforms.py` | `requirements.lock` の各 pin が Windows / Linux / macOS arm64 / macOS x86_64 × Python 3.11〜3.13 で入るか (wheel か sdist があるか) を PyPI に問う。uv は wheel の有無を見ずに解決するので、lock を作り直したら一度回す。入らない組合せがあれば exit 1。背景は [`docs/intent/dependency_management.md`](../intent/dependency_management.md) §3-2 |
+
 ## SAIMemory / 記憶
 
 ```bash

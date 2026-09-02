@@ -638,6 +638,18 @@ def test_missing_dependencies_reports_an_installed_but_differently_pinned_distri
     assert report.missing[0].startswith("pytest (installed ")
 
 
+def test_missing_dependencies_reports_unreadable_installed_version_as_unchecked(
+    tmp_path: Path,
+) -> None:
+    """A dist-info whose version cannot be read must not pass as satisfying a pin."""
+    (tmp_path / "requirements.lock").write_text("pytest==9.0.0\n", encoding="utf-8")
+    with patch.object(update_engine, "_installed_versions", return_value={"pytest": None}):
+        report = update_engine.missing_dependencies(tmp_path)
+    assert report is not None
+    assert report.missing == []
+    assert report.unchecked == ["pytest (installed version unreadable, required ==9.0.0)"]
+
+
 def test_missing_dependencies_is_unknown_without_a_lock_file(tmp_path: Path) -> None:
     (tmp_path / "requirements.txt").write_text("pytest>=9.0.0\n", encoding="utf-8")
     assert update_engine.missing_dependencies(tmp_path) is None
