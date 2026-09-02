@@ -331,7 +331,8 @@ class TailRewindPlan:
     expected_anchor_id: str
     #: 引き戻し先 = 帯の正典順最古のメッセージ。
     new_anchor_id: str
-    #: 引き戻し後の窓の提示字数 (生 — §7-1「水位は生の字数」)。
+    #: 引き戻し後に**実際に送られる**字数 (保存行 + 送信直前に差し込まれる
+    #: 知覚ブロック。2026-09-02 裁定 — あらすじの材料字数ではなく、生の提示量)。
     window_chars_after: int
     #: 引き戻し後に窓が上限 (high) を超える = 補修ジョブ内で即座に畳む。
     fold_needed: bool
@@ -441,12 +442,21 @@ def plan_tail_rewind(
     model_key = min(pool, key=lambda mk: pool[mk][1])
     expected_anchor_id = pool[model_key][0]
 
-    # 引き戻し後の窓を実際に組んで水位 (生の字数) を測る。
+    # 引き戻し後の窓を実際に組んで水位を測る。物差しは「実際に送る中身」=
+    # 保存行 + 送信直前に差し込まれる知覚ブロック (2026-09-02 まはー裁定。issue
+    # context_accounting_excludes_injected_rows.md)。組成規則は lifecycle 経由で
+    # 一点管理のものを呼ぶ (ここに二枚目を書かない)。保存行だけで測ると、引き
+    # 戻した窓の実送信が上限を超えていても fold_needed=False になり、補修が
+    # 「上限超えを自分のジョブの中で畳む」約束 (費用の透明性) を破って、次の
+    # 会話の非常畳みへ黙って送ることになる。
     window_after = lifecycle.get_presented_window(
         persona, model_key, str(first_message_id),
     )
+    presented_after = lifecycle.presented_with_perceptions(
+        persona, window_after.presented, str(first_message_id),
+    )
     from sea.eviction_plan import message_chars
-    chars_after = message_chars(window_after.presented)
+    chars_after = message_chars(presented_after)
     watermarks = lifecycle.get_metabolism_watermarks(persona, model_key)
     high = getattr(watermarks, "high", None) if watermarks is not None else None
     target = (
@@ -464,8 +474,16 @@ def plan_tail_rewind(
             budget = chronicle_band_budget()
         except Exception:
             budget = _FALLBACK_BAND_BUDGET
+        # 走査する列も本走行 (plan_eviction) と同じマージ済みの列 —
+        # 「残す量に届くまでにどこまで退場するか」の境目が実送信で決まるため。
+        # 知覚ブロックは材料としては機構名義の一行へ縮む (material_len) ので、
+        # est_material への寄与は本走行の material_message_chars と同じ扱い。
+        # NOTE: 本走行の削減母集合 (_reduction_basis) は fold の先頭・末尾の
+        # 隙間ブロックを除くが、この概算はそこまで写さない — 誤差は縮約後の
+        # 一行ぶん × 数個で、方向は費用を多めに見せる安全側 (概算の器の内。
+        # Codex 指摘 2026-09-02 四巡目、却下の記録は issue)。
         remaining = chars_after
-        for msg in window_after.presented:
+        for msg in presented_after:
             if remaining <= target:
                 break
             content = str(msg.get("content") or "")

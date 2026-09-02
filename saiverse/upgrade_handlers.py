@@ -937,4 +937,21 @@ HANDLERS: List[UpgradeHandler] = [
         run=_no_op_ai_upgrade,
         description="Empty release edge 0.3.1 -> 0.3.2 (code-only hotfix, no data migration).",
     ),
+    # ---- v0.3.3: コード修正のみ (文字数勘定の統一・macOS 由来の欠陥・記憶DB接続・スナップショット除外)。データ移行なし ----
+    UpgradeHandler(
+        name="city_noop_v0_3_3",
+        scope="city",
+        from_version="0.3.2",
+        to_version="0.3.3",
+        run=_no_op_city_upgrade,
+        description="Empty release edge 0.3.2 -> 0.3.3 (code-only hotfix, no data migration).",
+    ),
+    UpgradeHandler(
+        name="ai_noop_v0_3_3",
+        scope="ai",
+        from_version="0.3.2",
+        to_version="0.3.3",
+        run=_no_op_ai_upgrade,
+        description="Empty release edge 0.3.2 -> 0.3.3 (code-only hotfix, no data migration).",
+    ),
 ]

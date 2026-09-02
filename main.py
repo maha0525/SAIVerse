@@ -45,6 +45,12 @@ if level_name not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
 from saiverse.logging_config import configure_logging
 SESSION_LOG_DIR = configure_logging(level_name)
 
+# HTTPS の信頼元をこの一度で決める。macOS の Python は OS のキーチェーンを
+# 読めず、証明書 0 枚のまま urllib 経由の通信 (アドオンカタログ / アドオン
+# 取得 / リリース確認 / お知らせ) が全滅する。詳細は saiverse/tls_trust.py。
+from saiverse.tls_trust import ensure_default_https_trust
+ensure_default_https_trust()
+
 try:
     import psutil  # type: ignore
 except ImportError:  # pragma: no cover - optional dependency

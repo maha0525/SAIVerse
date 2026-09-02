@@ -12,6 +12,7 @@
 """
 from __future__ import annotations
 
+import os
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -22,7 +23,11 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from database.models import Base
-from sea.eviction_plan import ESTIMATED_FOLD_PLACEHOLDER_CHARS, Watermarks
+from sea.eviction_plan import (
+    CONSUMED_PERCEPTION_KEY,
+    ESTIMATED_FOLD_PLACEHOLDER_CHARS,
+    Watermarks,
+)
 from sea.session_lifecycle import SessionLifecycle
 from sea.session_window import FoldedRange, SessionWindow, deserialize_folds
 from sea.window_refill import plan_reopen, plan_rewind
@@ -498,6 +503,76 @@ def test_refill_without_watermarks_never_touches_rows(session_factory):
     resolve.assert_not_called()
 
 
+def test_refill_counts_injected_perceptions_toward_target(session_factory):
+    """不足の判定も「実際に送る中身」で行う (2026-09-02 まはー裁定)。
+
+    保存行だけを数えると、送信直前に差し込まれる知覚 (部屋の様子) の量が
+    見えないまま「まだ薄い」と判断して更に読み戻してしまう
+    (docs/issues/context_accounting_excludes_injected_rows.md)。
+    """
+    lc = _make_lifecycle(session_factory)
+    before = [_msg(f"b{i}", 100 + i, 1000) for i in range(4)]
+    persona = SimpleNamespace(
+        persona_id=PERSONA_ID, model="model-a",
+        history_manager=SimpleNamespace(
+            get_history_before_anchor=lambda *a, **k: list(before),
+        ),
+        sai_memory=SimpleNamespace(conn=object(), is_ready=lambda: True),
+    )
+    lc.upsert_anchor_entry(PERSONA_ID, "model-a", {
+        "anchor_id": "m0", "updated_at": _now().isoformat(), "ttl_seconds": 3600,
+    })
+    wm = Watermarks(low=1000, target=5000, high=10_000)
+    window = _window("m0", [_msg("m0", 200, 1000)])  # 保存行は 1,000 字
+    entries = [_entry("e1", ["b0", "b1"]), _entry("e2", ["b2", "b3"])]
+    block = {
+        "role": "user", "content": "p" * 4000, "created_at": 199,
+        "metadata": {"tags": ["internal", "event_message", "perception"],
+                     CONSUMED_PERCEPTION_KEY: True},
+    }
+    with patch.object(lc, "get_metabolism_watermarks", return_value=wm), \
+            patch.object(lc, "resolve_metabolism_anchor", return_value=("m0", "self")), \
+            patch.object(lc, "get_presented_window", return_value=window), \
+            patch("sai_memory.arasuji.storage.get_entries_covering_messages",
+                  return_value=entries):
+        # 保存行だけなら 1,000 < 残す量 5,000 → 読み戻しが適用される。
+        assert lc.preview_refilled_history(persona, "model-a") is not None
+        # 差し込みの知覚 4,000 字を足すと 5,000 = 残す量 → 読み戻さない。
+        with patch.object(lc, "perception_blocks_for", return_value=[block]):
+            assert lc.preview_refilled_history(persona, "model-a") is None
+            assert lc.maybe_run_window_refill(persona, "room") == "skip"
+
+
+def test_strict_preview_propagates_perception_lookup_failure(session_factory):
+    """raise_on_error は内層 (知覚一覧) まで貫通する (Codex 指摘 2026-09-02)。
+
+    厳格モードの途中の読み出しだけが fail-open だと、知覚ゼロで計算した refill
+    判定が measurement_failed なしで返る。既定 (fail-open) は従来どおり素の窓へ
+    縮退する — 門・発火・送信の側は失敗で止めない。
+    """
+    lc = _make_lifecycle(session_factory)
+    persona = SimpleNamespace(persona_id=PERSONA_ID, model="model-a")
+    lc.upsert_anchor_entry(PERSONA_ID, "model-a", {
+        "anchor_id": "m0", "updated_at": _now().isoformat(), "ttl_seconds": 3600,
+    })
+    wm = Watermarks(low=1000, target=5000, high=8000)
+    window = _window("m0", [_msg("m0", 100, 1000)])
+    with patch.object(lc, "get_metabolism_watermarks", return_value=wm), \
+            patch.object(lc, "resolve_metabolism_anchor", return_value=("m0", "self")), \
+            patch.object(lc, "get_presented_window", return_value=window), \
+            patch(
+                "sea.runtime_context.list_presented_perception_blocks",
+                side_effect=RuntimeError("perception listing failed"),
+            ):
+        # 厳格モード: 内層の失敗が例外で届く (context-status が
+        # measurement_failed に落とすための口)。
+        with pytest.raises(RuntimeError):
+            lc.preview_refilled_history(persona, "model-a", raise_on_error=True)
+        # 既定 (fail-open): 例外にせず従来どおり縮退する (この fixture には
+        # 読み戻す材料が無いので結果は None — 大事なのは落ちないこと)。
+        assert lc.preview_refilled_history(persona, "model-a") is None
+
+
 def test_preview_refilled_history_none_when_at_target(session_factory):
     """不足が無ければ None — 呼び出し側は従来どおり素の窓を組む。"""
     lc = _make_lifecycle(session_factory)
@@ -827,6 +902,137 @@ def test_refold_flips_oldest_first_until_target(session_factory):
     saved = deserialize_folds(lc.load_anchor_entry(PERSONA_ID, "model-a").get("folded_ranges"))
     flags = {f.chronicle_entry_ids[0]: f.presented_raw for f in saved}
     assert flags == {"e1": False, "e2": True}
+
+
+def _perception_block(chars, at=99):
+    """送信直前に差し込まれる知覚ブロック (保存行ではないので id が無い)。"""
+    return {
+        "role": "user", "content": "p" * chars, "created_at": at,
+        "metadata": {"tags": ["internal", "event_message", "perception"],
+                     CONSUMED_PERCEPTION_KEY: True},
+    }
+
+
+def test_refold_continues_while_injected_perceptions_keep_it_over_target(
+    session_factory,
+):
+    """§15-3 印戻しの継続判定も「実際に送る中身」で測る (2026-09-02 裁定)。
+
+    保存行だけで早く止めると、実送信が残す量を超えたまま印付き区間が退場計画へ
+    入り、既編纂範囲が生ログとして再編纂されてあらすじが二本立ちする —
+    この判定が見積もりではなく実測である理由そのもの
+    (docs/issues/context_accounting_excludes_injected_rows.md)。
+    """
+    from sea.session_window import apply_folds
+
+    raw = [_msg(f"m{i}", 100 + i, 5000) for i in range(4)]  # 20,000 字
+    wm = Watermarks(low=1000, target=17_000, high=19_000)
+
+    def _run(blocks):
+        lc = _make_lifecycle(session_factory)
+        persona = SimpleNamespace(persona_id=PERSONA_ID, model="model-a")
+        lc.upsert_anchor_entry(PERSONA_ID, "model-a", {
+            "anchor_id": "m0", "updated_at": _now().isoformat(),
+            "ttl_seconds": 3600,
+        })
+        old = FoldedRange(
+            message_ids=["m0"], chronicle_entry_ids=["e1"], presented_raw=True,
+        )
+        new = FoldedRange(
+            message_ids=["m1"], chronicle_entry_ids=["e2"], presented_raw=True,
+        )
+        window = _window("m0", raw, raw=raw, folds=[old, new])
+        stack = [patch.object(
+            lc, "_present_with_folds",
+            side_effect=lambda p, msgs, folds: apply_folds(
+                msgs, folds, lambda f: "d" * 1200),
+        )]
+        if blocks is not None:
+            stack.append(
+                patch.object(lc, "perception_blocks_for", return_value=blocks)
+            )
+        for ctx in stack:
+            ctx.start()
+        try:
+            lc._refold_raw_view_folds(persona, "model-a", window, wm)
+        finally:
+            for ctx in reversed(stack):
+                ctx.stop()
+        return [old.presented_raw, new.presented_raw]
+
+    # 保存行だけ: 1 区間戻せば 1,200 + 15,000 = 16,200 <= 17,000 で止まる。
+    assert _run(None) == [False, True]
+    # 差し込みの知覚 1,500 字が乗ると 17,700 > 17,000 なので、もう 1 区間戻す。
+    assert _run([_perception_block(1500)]) == [False, False]
+
+
+def test_refold_early_completion_counts_injected_perceptions(session_factory):
+    """印戻し後の早期完了も「実際に送る中身」で判定する (2026-09-02 裁定)。
+
+    保存行だけで「残す量に収まった」と見て完了を返すと、実送信は超えたままなので
+    次の Pulse の発火判定 (合計で測る) が即座にまた発火する併走になり、しかも
+    ユーザーには「整理しました」とだけ見える。
+    """
+    from sea.session_window import apply_folds
+
+    raw = [_msg(f"m{i}", 100 + i, 5000) for i in range(4)]  # 20,000 字
+    wm = Watermarks(low=1000, target=17_000, high=19_000)
+
+    def _run(blocks):
+        lc = _make_lifecycle(session_factory)
+        lc.is_chronicle_enabled_for_persona = lambda p: True
+        lc.ensure_recall_embeddings = lambda p: None
+        lc._retry_extraction_backlog = lambda p, **kw: None
+        lc._drop_dead_folds = lambda p, mk, w: w
+        persona = SimpleNamespace(
+            persona_id=PERSONA_ID, model="model-a", sai_memory=None,
+            current_building_id="room",
+        )
+        lc.upsert_anchor_entry(PERSONA_ID, "model-a", {
+            "anchor_id": "m0", "updated_at": _now().isoformat(),
+            "ttl_seconds": 3600,
+        })
+        # 印戻しで digest へ戻せる区間は 1 つだけ (戻すと 16,200 字)。
+        window = _window("m0", raw, raw=raw, folds=[FoldedRange(
+            message_ids=["m0"], chronicle_entry_ids=["e1"], presented_raw=True,
+        )])
+        events = []
+        stack = [
+            patch.dict(os.environ, {"SAIVERSE_SLUICE_ENABLED": "0"}),
+            patch.object(
+                lc, "_present_with_folds",
+                side_effect=lambda p, msgs, folds: apply_folds(
+                    msgs, folds, lambda f: "d" * 1200),
+            ),
+            patch.object(lc, "get_presented_window", return_value=window),
+            patch("saiverse.dynamic_state.DynamicStateManager.on_metabolism",
+                  lambda *a, **k: None),
+        ]
+        if blocks is not None:
+            stack.append(
+                patch.object(lc, "perception_blocks_for", return_value=blocks)
+            )
+        for ctx in stack:
+            ctx.start()
+        try:
+            status = lc.run_metabolism(
+                persona, "room", window, wm, events.append, model_key="model-a",
+            )
+        finally:
+            for ctx in reversed(stack):
+                ctx.stop()
+        return status, [
+            e.get("content") for e in events
+            if e.get("status") == "completed"
+        ]
+
+    # 保存行だけ: 印戻し後 16,200 <= 17,000 → 編纂ゼロで完了を返す。
+    assert _run(None) == (
+        "ok", ["記憶を整理しました（開いていた範囲をあらすじ表示に戻しました）"],
+    )
+    # 知覚 1,500 字を足すと 17,700 > 17,000 → 早期完了せず退場計画へ進む。
+    # (退場計画は残す量の保護で空になり "nothing" — 早期完了の "ok" とは別物。)
+    assert _run([_perception_block(1500)]) == ("nothing", [])
 
 
 def test_preview_planning_window_refolds_without_writing(session_factory):

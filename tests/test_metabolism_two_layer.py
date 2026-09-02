@@ -807,6 +807,114 @@ class EpisodeUnitEvictionTest(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# ⑤c 勘定の単位は「実際に送る中身」
+#     (docs/issues/context_accounting_excludes_injected_rows.md)
+# ---------------------------------------------------------------------------
+
+
+def _perception_block(chars, at):
+    """送信直前に差し込まれる知覚ブロック (保存行ではないので id が無い)。"""
+    from sea.eviction_plan import CONSUMED_PERCEPTION_KEY
+    return {
+        "role": "user",
+        "content": "p" * chars,
+        "created_at": at,
+        "metadata": {
+            "tags": ["internal", "event_message", "perception"],
+            CONSUMED_PERCEPTION_KEY: True,
+        },
+    }
+
+
+class InjectedPerceptionAccountingTest(unittest.TestCase):
+    """水位判定と退場計画は「実際に送る中身」を数える (2026-09-02 まはー裁定)。
+
+    知覚バッチは保存行を作らず、送信直前に履歴へ差し込まれる
+    (sea/runtime_context.py)。数える場所が差し込みより手前にあったため、勘定は
+    実送信より小さい値を出していた — 本番エリスで勘定 149,856 字に対し実送信
+    209,031 字 (docs/issues/context_accounting_excludes_injected_rows.md)。
+    """
+
+    def setUp(self):
+        self.session_factory, self._engine = _make_session_factory()
+        self.addCleanup(self._engine.dispose)
+        self.manager = SimpleNamespace(SessionLocal=self.session_factory)
+
+    def _persona(self, messages):
+        return SimpleNamespace(
+            persona_id=PERSONA_ID, persona_name="エア", model="std-model",
+            sai_memory=None, history_manager=_history_manager(messages),
+        )
+
+    def test_high_watermark_counts_the_injected_perceptions(self):
+        """保存行だけでは上限未満でも、知覚ぶんを足して超えるなら発火する。"""
+        lifecycle = SessionLifecycle(SimpleNamespace(), self.manager)
+        msgs = [_msg(f"m{i}", 100 + i, chars=1_000) for i in range(3)]  # 3,000 字
+        persona = self._persona(msgs)
+        lifecycle.upsert_anchor_entry(PERSONA_ID, "std-model", {
+            "anchor_id": "m0",
+            "updated_at": datetime.now().replace(microsecond=0).isoformat(),
+        })
+        wm = Watermarks(low=0, target=2_000, high=4_000)
+        runs = []
+        lifecycle.run_metabolism = lambda *a, **k: runs.append(k.get("model_key"))
+
+        with patch.dict(os.environ, {"SAIVERSE_SLUICE_ENABLED": "0"}), \
+                patch.object(lifecycle, "get_metabolism_watermarks",
+                             return_value=wm):
+            # 保存行 3,000 字 < 上限 4,000 → 発火しない。
+            lifecycle.maybe_run_metabolism(
+                persona, "b", None, model_key="std-model",
+            )
+            self.assertEqual(runs, [])
+            # 差し込みの知覚 2,000 字を足すと 5,000 字 > 上限 → 発火する。
+            with patch.object(lifecycle, "perception_blocks_for",
+                              return_value=[_perception_block(2_000, 102)]):
+                lifecycle.maybe_run_metabolism(
+                    persona, "b", None, model_key="std-model",
+                )
+        self.assertEqual(runs, ["std-model"])
+
+    def test_eviction_plan_sees_the_perception_weight(self):
+        """退場計画にも知覚ブロックの重さを見せる (本走行)。
+
+        保存行だけを数えると保護 (残す量) が古い側まで伸びて材料が U に届かず、
+        畳みが一つも閉じない。知覚ブロックの重さが入ると保護は末尾側で埋まり、
+        古い側が退場候補に出て anchor が前進する。
+        """
+        msgs = [_msg(f"m{i}", 100 + i, chars=600) for i in range(6)]  # 3,600 字
+        wm = Watermarks(low=0, target=2_000, high=8_000)
+
+        def _run(blocks):
+            lifecycle = SessionLifecycle(SimpleNamespace(), self.manager)
+            lifecycle.is_chronicle_enabled_for_persona = lambda p: True
+            lifecycle.generate_chronicle = lambda p, cb=None, **kw: "ok"
+            lifecycle.ensure_recall_embeddings = lambda p: None
+            lifecycle._attach_chronicle_refs = _stub_chronicle_refs
+            if blocks is not None:
+                lifecycle.perception_blocks_for = (
+                    lambda persona, presented, anchor_id=None, **_kw: list(blocks)
+                )
+            with patch.dict(os.environ, {"SAIVERSE_SLUICE_ENABLED": "0"}), \
+                    patch.dict(os.environ,
+                               {"SAIVERSE_CHRONICLE_BAND_BUDGET": "2000"}), \
+                    patch("saiverse.dynamic_state.DynamicStateManager.on_metabolism",
+                          lambda *a, **k: None):
+                lifecycle.run_metabolism(
+                    self._persona(msgs), "b", _window(msgs), wm, None,
+                    model_key="std-model",
+                )
+            entry = lifecycle.load_anchor_entry(PERSONA_ID, "std-model")
+            return entry["anchor_id"] if entry else None
+
+        # 保存行だけ: 保護が m2 まで伸び、候補 m0/m1 の材料 1,200 < U=2,000。
+        self.assertIsNone(_run(None))
+        # 末尾に 3,000 字の知覚が乗ると保護は m5 だけ。候補 m0..m4 の材料
+        # 3,000 字が U を越え、[m0..m3] が畳まれて anchor は m4 へ。
+        self.assertEqual(_run([_perception_block(3_000, 200)]), "m4")
+
+
+# ---------------------------------------------------------------------------
 # ⑤b 適用側の拒否権と計画の恒久デッドロック
 #     (docs/issues/chronicle_eviction_applier_veto_deadlock.md)
 # ---------------------------------------------------------------------------
