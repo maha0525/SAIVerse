@@ -190,9 +190,25 @@ def _migrate_legacy_arasuji_table(conn: sqlite3.Connection) -> None:
         existing_max = max((row[sid_idx] or 0) for row in rows)
         next_short_id = existing_max + 1
 
+    # 前回の移行が「ページの commit までは済んだが、その後の DROP TABLE で倒れた」
+    # (同じ DB を別の接続が読んでいると DROP が busy で落ちる) 状態から再開できる
+    # ように、既にページになっている行は飛ばす。ここを飛ばさないと、最初の 1 行で
+    # ``UNIQUE constraint failed: memopedia_pages.id`` になって毎回初手から倒れ、
+    # 旧テーブルが永遠に残る (2026-09-02、macOS の報告者の環境で 1443 件が
+    # この状態だった。Chronicle は空に見え、開くたびの失敗が Memopedia を待たせた)。
+    already_pages = {
+        r[0]
+        for r in conn.execute(
+            "SELECT id FROM memopedia_pages WHERE category = ?", (CATEGORY_CHRONICLE,)
+        ).fetchall()
+    }
+    skipped = 0
     for row in rows:
         rec = dict(zip(col_names, row))
         old_id = rec["id"]
+        if old_id in already_pages:
+            skipped += 1
+            continue
         try:
             source_ids = json.loads(rec.get("source_ids_json") or "[]")
         except (json.JSONDecodeError, TypeError):
@@ -236,6 +252,15 @@ def _migrate_legacy_arasuji_table(conn: sqlite3.Connection) -> None:
             (int(rec["created_at"]), page.id),
         )
     conn.commit()
+    if skipped:
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "[arasuji] legacy migration resumed: %d of %d rows were already pages "
+            "(a previous run committed them but did not drop the table); migrated the rest",
+            skipped,
+            len(rows),
+        )
     conn.execute("DROP TABLE arasuji_entries")
     conn.commit()
 
