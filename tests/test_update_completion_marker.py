@@ -479,8 +479,12 @@ def test_scan_without_packaging_falls_back_and_says_so(tmp_path: Path) -> None:
         scan = update_engine.scan_requirements(requirements)
 
     assert scan is not None
-    assert [dist.name for dist in scan.required] == ["fastapi", "pywin32"]
+    # Without packaging the marker cannot be evaluated, so the line is reported
+    # as unchecked rather than required: otherwise a macOS start would see the
+    # Windows-only pin as missing and loop through finishing passes forever.
+    assert [dist.name for dist in scan.required] == ["fastapi"]
     assert all(dist.specifier is None for dist in scan.required)
+    assert scan.unparsed == ['pywin32; sys_platform == "win32"']
     assert scan.degraded is True
 
 

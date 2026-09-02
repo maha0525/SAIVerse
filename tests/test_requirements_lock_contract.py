@@ -72,6 +72,16 @@ def test_every_direct_requirement_is_pinned_within_its_range() -> None:
     )
 
 
+def test_intent_file_has_no_exact_pins() -> None:
+    """requirements.txt is the intent (lower bounds, reasoned upper bounds);
+    an ``==`` there would silently move the pinning job out of the lock."""
+    offenders = [line for line in _requirement_lines(REQUIREMENTS) if "==" in line]
+    assert not offenders, (
+        "requirements.txt must not pin with ==; the exact version belongs in "
+        "requirements.lock:\n" + "\n".join(offenders)
+    )
+
+
 # --- (b) the lock is pip-readable everywhere and contains only exact pins ----
 
 

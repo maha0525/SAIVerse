@@ -315,6 +315,13 @@ def scan_requirements(requirements: Path, *, depth: int = 1) -> RequirementScan 
             degraded = degraded or nested_scan.degraded
             continue
         if _Requirement is None:
+            if ";" in line:
+                # A marker cannot be evaluated without packaging. Treating the
+                # line as required would report Windows-only pins (pywin32,
+                # colorama) as missing on macOS / Linux and send every start
+                # through a finishing pass that can never satisfy them.
+                unparsed.append(line)
+                continue
             name = _naive_requirement_name(line)
             if name is None:
                 unparsed.append(line)
