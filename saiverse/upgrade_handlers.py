@@ -988,4 +988,21 @@ HANDLERS: List[UpgradeHandler] = [
         run=_no_op_ai_upgrade,
         description="Empty release edge 0.3.4 -> 0.3.5 (code-only hotfix, no data migration).",
     ),
+    # ---- v0.3.6: 更新前検査から未追跡ファイルを外す (コード修正のみ) ----
+    UpgradeHandler(
+        name="city_noop_v0_3_6",
+        scope="city",
+        from_version="0.3.5",
+        to_version="0.3.6",
+        run=_no_op_city_upgrade,
+        description="Empty release edge 0.3.5 -> 0.3.6 (code-only hotfix, no data migration).",
+    ),
+    UpgradeHandler(
+        name="ai_noop_v0_3_6",
+        scope="ai",
+        from_version="0.3.5",
+        to_version="0.3.6",
+        run=_no_op_ai_upgrade,
+        description="Empty release edge 0.3.5 -> 0.3.6 (code-only hotfix, no data migration).",
+    ),
 ]

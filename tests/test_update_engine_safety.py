@@ -42,18 +42,107 @@ def test_portable_git_prepend_is_idempotent(tmp_path: Path) -> None:
 def test_dirty_worktree_is_rejected_without_stash_or_reset(tmp_path: Path) -> None:
     (tmp_path / ".git").mkdir()
     results = [
-        SimpleNamespace(stdout=" M user_file.py\n", stderr="", returncode=0),
+        SimpleNamespace(stdout=" M user_file.py\0", stderr="", returncode=0),
     ]
     with patch.object(update_engine.shutil, "which", return_value="git"), patch.object(
         update_engine,
         "_run",
         side_effect=results,
     ) as run:
-        with pytest.raises(update_engine.UpdateError, match="local changes"):
+        with pytest.raises(update_engine.UpdateError, match="local changes") as excinfo:
             update_engine.assert_git_update_ready(tmp_path)
 
     assert run.call_count == 1
-    assert "status" in run.call_args.args[0]
+    command = run.call_args.args[0]
+    assert "status" in command
+    # Untracked files (.DS_Store, a dropped-in diagnostics script) must not
+    # block the update; only modified tracked files do.
+    assert "--untracked-files=no" in command
+    assert "--untracked-files=all" not in command
+    # NUL-separated output decoded as UTF-8, so non-ASCII names stay readable
+    # whatever the console code page is (see _parse_porcelain_z).
+    assert "-z" in command
+    assert run.call_args.kwargs.get("encoding") == "utf-8"
+    # The refusal names the offending file so a non-developer can act on it.
+    assert "user_file.py" in str(excinfo.value)
+
+
+def test_dirty_worktree_message_keeps_unicode_names_and_renames_readable(tmp_path: Path) -> None:
+    (tmp_path / ".git").mkdir()
+    # Staged rename (R in X) and work-tree rename (R in Y) both carry the
+    # original path in an extra NUL field.
+    status = " M 設定メモ.md\0R  new name.txt\0old.txt\0 R moved.txt\0was.txt\0"
+    results = [SimpleNamespace(stdout=status, stderr="", returncode=0)]
+    with patch.object(update_engine.shutil, "which", return_value="git"), patch.object(
+        update_engine,
+        "_run",
+        side_effect=results,
+    ):
+        with pytest.raises(update_engine.UpdateError) as excinfo:
+            update_engine.assert_git_update_ready(tmp_path)
+
+    message = str(excinfo.value)
+    assert "  設定メモ.md\n" in message
+    assert "  old.txt -> new name.txt" in message
+    assert "  was.txt -> moved.txt" in message
+    assert "\\3" not in message  # no octal escapes leak into the list
+    # The original path must not surface as a record of its own.
+    assert "\n  was.txt\n" not in message and "\n  old.txt\n" not in message
+
+
+def test_update_code_refuses_to_overwrite_ignored_files(tmp_path: Path) -> None:
+    """A fast-forward must not clobber an ignored file at a newly tracked path.
+
+    ``git pull`` cannot be told this (``--no-overwrite-ignore`` is a merge
+    option), so the update is fetch + merge with the flag.
+    """
+    with patch.object(update_engine, "_run") as run:
+        update_engine.update_code(tmp_path)
+
+    commands = [call.args[0] for call in run.call_args_list]
+    assert commands[0][:2] == ["git", "fetch"]
+    merge = commands[1]
+    assert merge[:2] == ["git", "merge"]
+    assert "--ff-only" in merge
+    assert "--no-overwrite-ignore" in merge
+    assert not any(cmd[:2] == ["git", "pull"] for cmd in commands)
+
+
+def test_clean_tracked_tree_returns_head_revision(tmp_path: Path) -> None:
+    (tmp_path / ".git").mkdir()
+    results = [
+        SimpleNamespace(stdout="", stderr="", returncode=0),
+        SimpleNamespace(stdout="abc123\n", stderr="", returncode=0),
+    ]
+    with patch.object(update_engine.shutil, "which", return_value="git"), patch.object(
+        update_engine,
+        "_run",
+        side_effect=results,
+    ) as run:
+        assert update_engine.assert_git_update_ready(tmp_path) == "abc123"
+
+    assert run.call_count == 2
+    assert run.call_args_list[1].args[0] == ["git", "rev-parse", "HEAD"]
+
+
+def test_dirty_worktree_message_lists_at_most_twenty_paths(tmp_path: Path) -> None:
+    (tmp_path / ".git").mkdir()
+    status = "".join(f" M file_{i:02d}.py\0" for i in range(25))
+    results = [SimpleNamespace(stdout=status, stderr="", returncode=0)]
+    with patch.object(update_engine.shutil, "which", return_value="git"), patch.object(
+        update_engine,
+        "_run",
+        side_effect=results,
+    ):
+        with pytest.raises(update_engine.UpdateError) as excinfo:
+            update_engine.assert_git_update_ready(tmp_path)
+
+    message = str(excinfo.value)
+    assert update_engine.LOCAL_CHANGES_LIST_LIMIT == 20
+    assert "file_00.py" in message
+    assert "file_19.py" in message
+    assert "file_20.py" not in message
+    assert "... and 5 more" in message
 
 
 def test_unverified_pid_is_never_signalled() -> None:
