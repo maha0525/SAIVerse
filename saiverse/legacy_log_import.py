@@ -115,30 +115,73 @@ def imported_row_filter():
     )
 
 
+def _child_by_name(parent: Path, name: str) -> Optional[Path]:
+    """``parent`` の直下にある ``name`` を指す Path。階層を跨ぐ名前なら None。
+
+    一覧との名前照合をやめてパスを直接組む以上、名前が親の外へ出ないことは
+    ここで確かめる (照合していた頃は、一覧に載っている名前しか通らないので
+    構造上ありえなかった)。
+    """
+    if not name or name in {".", ".."} or "/" in name or "\\" in name:
+        return None
+    child = parent / name
+    if child.parent != parent:
+        return None
+    return child
+
+
 def find_log_files(
     saiverse_home: Path,
     *,
     city_filter: Optional[str] = None,
     building_filter: Optional[str] = None,
 ) -> List[Path]:
+    """取り込み対象の log.json を集める。
+
+    **名前を指定された City / Building は、一覧して名前を突き合わせるのでは
+    なくパスとして組み立てて開く。** 同じ名前が違うコード列で書かれていると、
+    一覧が返す名前との文字列比較は一致しない — macOS はファイル名の濁点・
+    半濁点を「ヒ + 濁点」の 2 文字へ分解して保存する (NFD) 一方、DB の
+    BUILDINGID はアプリが受け取った合成済みの 1 文字 (NFC) なので、
+    「リビング」のような名前がここで落ちる。ファイルシステム自身はこの 2 つを
+    同じ名前として扱うため、パスで開けば見つかる。
+
+    検算側 (:func:`_scan_one_building`) は最初からパスを直接組んでいた。その
+    ずれのせいで、同じ部屋について「597 件が移せていない」と「対象 log.json:
+    0 件」が同時に成立し、取り込みが毎起動 0 件で空振りしながらアラートだけが
+    出続けた (2026-09-02、実ユーザーの macOS 環境で実測)。**同じ部屋を探す
+    規則は 1 つに揃える。**
+    """
     cities_root = saiverse_home / "cities"
     if not cities_root.exists():
         LOGGER.warning("cities ディレクトリが存在しません: %s", cities_root)
         return []
+
+    if city_filter:
+        city_dir = _child_by_name(cities_root, city_filter)
+        if city_dir is None:
+            LOGGER.warning("City の識別子が名前として使えません: %r", city_filter)
+            return []
+        city_dirs = [city_dir]
+    else:
+        city_dirs = sorted(p for p in cities_root.iterdir() if p.is_dir())
+
     found: List[Path] = []
-    for city_dir in sorted(cities_root.iterdir()):
-        if not city_dir.is_dir():
-            continue
-        if city_filter and city_dir.name != city_filter:
-            continue
+    for city_dir in city_dirs:
         buildings_root = city_dir / "buildings"
         if not buildings_root.exists():
             continue
-        for building_dir in sorted(buildings_root.iterdir()):
-            if not building_dir.is_dir():
+        if building_filter:
+            building_dir = _child_by_name(buildings_root, building_filter)
+            if building_dir is None:
+                LOGGER.warning(
+                    "Building の識別子が名前として使えません: %r", building_filter
+                )
                 continue
-            if building_filter and building_dir.name != building_filter:
-                continue
+            building_dirs = [building_dir]
+        else:
+            building_dirs = sorted(p for p in buildings_root.iterdir() if p.is_dir())
+        for building_dir in building_dirs:
             log_path = building_dir / "log.json"
             if log_path.exists():
                 found.append(log_path)

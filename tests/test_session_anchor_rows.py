@@ -453,6 +453,24 @@ def _window(anchor_id, presented):
     )
 
 
+def _perception_block(chars, at=100):
+    """送信直前に差し込まれる知覚ブロック (保存行ではないので id が無い)。
+
+    水位を測る側は保存行だけでなくこれも数える (2026-09-02 まはー裁定 —
+    docs/issues/context_accounting_excludes_injected_rows.md)。
+    """
+    from sea.eviction_plan import CONSUMED_PERCEPTION_KEY
+    return {
+        "role": "user",
+        "content": "p" * chars,
+        "created_at": at,
+        "metadata": {
+            "tags": ["internal", "event_message", "perception"],
+            CONSUMED_PERCEPTION_KEY: True,
+        },
+    }
+
+
 def _chronicle_on(lc):
     """手動畳みテスト用: Chronicle 生成の門 (ペルソナ設定) を開ける。
 
@@ -536,6 +554,37 @@ def test_manual_compaction_noop_at_or_below_target(session_factory):
             patch.object(lc, "run_metabolism") as run:
         assert lc.run_manual_compaction(persona) == "noop"
     run.assert_not_called()
+
+
+def test_manual_compaction_counts_injected_perceptions(session_factory):
+    """手動整理の門も「実際に送る中身」で測る (2026-09-02 まはー裁定)。
+
+    ユーザーが押すボタンの直撃点。保存行だけで測ると、実送信が残す量を大きく
+    超えていても保存行が軽い窓では "noop" (畳むものが無い) と門前払いになり、
+    押しても何も起きない — しかも走行側 (plan_eviction) は既に合計で測って
+    いるので、門と本走行が別の答えを出す
+    (docs/issues/context_accounting_excludes_injected_rows.md)。
+    """
+    from sea.eviction_plan import Watermarks
+    lc = _make_lifecycle(session_factory)
+    persona = SimpleNamespace(
+        persona_id=PERSONA_ID, model="model-a", current_building_id="room",
+    )
+    msgs = [{"id": "m0", "content": "x" * 1500}]
+    wm = Watermarks(low=1000, target=2000, high=4000)
+    with _chronicle_on(lc), \
+            patch.object(lc, "get_metabolism_watermarks", return_value=wm), \
+            patch.object(lc, "get_presented_window",
+                         return_value=_window("m0", msgs)), \
+            patch.object(lc, "run_metabolism", return_value="ok") as run:
+        # 保存行 1,500 字 <= 残す量 2,000 → 従来どおり門前払い。
+        assert lc.run_manual_compaction(persona) == "noop"
+        run.assert_not_called()
+        # 差し込みの知覚 1,000 字を足すと 2,500 字 > 残す量 → 畳みへ進む。
+        with patch.object(lc, "perception_blocks_for",
+                          return_value=[_perception_block(1000)]):
+            assert lc.run_manual_compaction(persona) == "ok"
+    run.assert_called_once()
 
 
 def test_manual_compaction_unavailable_without_anchor(session_factory):
@@ -1474,6 +1523,40 @@ def test_cold_precompaction_status_conditions(session_factory):
         assert lc.cold_precompaction_status(persona) == "skip"
 
 
+def test_cold_precompaction_counts_injected_perceptions(session_factory):
+    """先回り畳み (§14-4) の中間値判定も「実際に送る中身」で測る。
+
+    先回りが救おうとしているのは実送信の膨らみなので、保存行だけで測ると、
+    知覚ブロックで既に中間値を越えている窓を "cool" と読んで、次の会話の
+    非常畳み (§14-3) へ丸ごと送ってしまう (2026-09-02 まはー裁定)。
+    """
+    from sea.eviction_plan import Watermarks
+
+    lc = _cold_ready_lifecycle(session_factory)
+    persona = SimpleNamespace(
+        persona_id=PERSONA_ID, model="model-a", current_building_id="room",
+    )
+    stale = _now() - timedelta(days=3)
+    lc.upsert_anchor_entry(PERSONA_ID, "model-a", {
+        "anchor_id": "m1", "updated_at": stale.isoformat(), "ttl_seconds": 300,
+    })
+    wm = Watermarks(low=1000, target=2000, high=4000)  # 中間値 = 3000
+    small = [{"id": "m1", "content": "x" * 2500}]
+
+    with patch.object(lc, "is_chronicle_enabled_for_persona", return_value=True), \
+            patch.object(lc, "is_autonomous_chronicle_enabled_for_persona",
+                         return_value=True), \
+            patch.object(lc, "get_metabolism_watermarks", return_value=wm), \
+            patch.object(lc, "get_presented_window",
+                         return_value=_window("m1", small)):
+        # 保存行 2,500 字 <= 中間値 3,000 → 従来どおり "cool"。
+        assert lc.cold_precompaction_status(persona) == "cool"
+        # 差し込みの知覚 1,000 字を足すと 3,500 字 > 中間値 → "due"。
+        with patch.object(lc, "perception_blocks_for",
+                          return_value=[_perception_block(1000)]):
+            assert lc.cold_precompaction_status(persona) == "due"
+
+
 def test_run_cold_precompaction_folds_with_force(session_factory):
     """"due" なら run_metabolism を chronicle_force=True (確認ゲート迂回) で呼ぶ。
     stop_when_disabled は渡さない (既定 False) — 手動入口の契約と混ぜない。"""
@@ -1569,6 +1652,46 @@ def test_emergency_precompaction_skip_below_high(session_factory):
         ) == "skip"
     run.assert_not_called()
     assert events == []
+
+
+def test_emergency_precompaction_counts_injected_perceptions(session_factory):
+    """非常畳み (§14-3) の発火判定は「実際に送る中身」で測る。
+
+    この機構の目的は「巨大なコンテキストを送らない」ことそのものなので、
+    保存行だけで測ると、知覚ブロックを足した実送信が model の上限を突き抜けて
+    いても「上限以下」と読んで応答へ進み、存在意義が壊れる (2026-09-02 裁定)。
+    """
+    from sea.eviction_plan import Watermarks
+
+    lc = _cold_ready_lifecycle(session_factory)
+    persona = SimpleNamespace(
+        persona_id=PERSONA_ID, model="model-a", current_building_id="room",
+    )
+    lc.upsert_anchor_entry(PERSONA_ID, "model-a", {
+        "anchor_id": "m1", "updated_at": _now().isoformat(), "ttl_seconds": 3600,
+    })
+    wm = Watermarks(low=1000, target=2000, high=4000)
+    small = [{"id": "m1", "content": "x" * 3000}]
+    events = []
+
+    with patch.object(lc, "get_metabolism_watermarks", return_value=wm), \
+            patch.object(lc, "get_presented_window",
+                         return_value=_window("m1", small)), \
+            patch.object(lc, "run_metabolism", return_value="ok") as run:
+        # 保存行 3,000 字 <= 上限 4,000 → 従来どおり見送り。
+        assert lc.maybe_run_emergency_precompaction(
+            persona, "room", events.append,
+        ) == "skip"
+        run.assert_not_called()
+        assert events == []
+        # 差し込みの知覚 2,000 字を足すと 5,000 字 > 上限 → 応答前に畳む。
+        with patch.object(lc, "perception_blocks_for",
+                          return_value=[_perception_block(2000)]):
+            assert lc.maybe_run_emergency_precompaction(
+                persona, "room", events.append,
+            ) == "ok"
+    run.assert_called_once()
+    assert [e["type"] for e in events] == ["status"]
 
 
 def test_emergency_precompaction_folds_over_high_with_notice(session_factory):

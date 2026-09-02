@@ -26,6 +26,11 @@ docs/intent/arasuji_levels.md §3 / §4 の実装 (レベル0 の並び)。
 - 末尾の U に届かない端数は畳まず残す — 次の Metabolism で新しい生ログと
   地続きのまま次の畳みに入るので、小さい一次あらすじを作らない。
 - 発火判定 (上限) は呼び出し側の責務。ここは「残す量」だけを使う。
+- **勘定の単位は「実際に送る中身」** (2026-09-02 まはー裁定)。提示は保存行だけ
+  ではなく、送信直前に差し込まれる知覚ブロック
+  (sea/runtime_context.py::list_presented_perception_blocks) を含む。呼び出し側は
+  両者を時刻順にマージした列を渡し、ブロックは**重さだけ**が計画に効く
+  (fold の中身にも境目にもならない)。
 """
 
 from __future__ import annotations
@@ -129,8 +134,29 @@ class EvictionPlan:
 ESTIMATED_FOLD_PLACEHOLDER_CHARS = 1_200
 
 
+#: 送信直前に差し込まれる知覚ブロックの目印 (metadata のキー)。ブロックを組むのは
+#: :func:`sea.runtime_context.list_presented_perception_blocks` だが、キーの定義は
+#: 依存の下流にあたるこちら (純関数モジュール) に置く — 退場計画も勘定も、
+#: runtime_context を import せずにブロックを見分けられる必要がある。
+CONSUMED_PERCEPTION_KEY = "__consumed_perception__"
+
+
+def is_injected_perception(msg: Dict[str, Any]) -> bool:
+    """送信直前に差し込まれる知覚ブロックか (保存行ではない)。
+
+    保存行と違って ``id`` を持たない — 退場の対象にはならず、**重さだけ**が
+    勘定と計画に参加する (docs/issues/context_accounting_excludes_injected_rows.md)。
+    """
+    meta = msg.get("metadata")
+    return bool(isinstance(meta, dict) and meta.get(CONSUMED_PERCEPTION_KEY))
+
+
 def message_chars(messages: Sequence[Dict[str, Any]]) -> int:
-    """提示文字数 (水位判定の一次データ)。"""
+    """提示文字数 (水位判定の一次データ)。
+
+    知覚ブロックが混じった列を渡してよい — 実際に送る中身の合計を数えるのが
+    水位の定義なので、保存行と同じ 1 字として数える (2026-09-02 まはー裁定)。
+    """
     return sum(len(str(m.get("content") or "")) for m in messages)
 
 
@@ -163,6 +189,44 @@ def material_message_chars(messages: Sequence[Dict[str, Any]]) -> int:
 def _net_reduction(messages: Sequence[Dict[str, Any]]) -> int:
     """この範囲を畳んで**実際に減る**提示文字数。"""
     return max(0, message_chars(messages) - ESTIMATED_FOLD_PLACEHOLDER_CHARS)
+
+
+def _reduction_basis(pending: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """削減見込みの母集合 — 保存行 + 付記が実際に届く知覚ブロック。
+
+    付記の時刻範囲 (sai_memory/arasuji/executor.py::_annex_time_spans) は
+    「群内は隙間なく敷き詰め、群の最後は自分の末尾 + 1 まで」。計画の先頭
+    チャンクの回収路 (recover_before) は**前回編纂の末尾以前**しか拾わない。
+    よって束の中のブロックで確実に付記へ届くのは、**最初の保存行から最後の
+    保存行までの間**のものだけ — 先頭より前 (前回編纂末尾との隙間) と末尾
+    より後 (次の保存行との隙間) のブロックは今回の付記から漏れて提示に残る
+    (次回編纂の回収路が拾うまで一巡残る。Codex 指摘 2026-09-02 一巡目 =
+    末尾側・四巡目 = 先頭側)。それを「消える側」に数えると削減見込みが過大に
+    なり、畳んだのに実送信が見込みほど減らない。時刻の読めないブロックも
+    安全側 (残る側) に倒す。
+    """
+    row_epochs = [
+        e for e in (
+            _epoch(m) for m in pending if not is_injected_perception(m)
+        )
+        if e is not None
+    ]
+    rows_first_at = min(row_epochs, default=None)
+    rows_last_at = max(row_epochs, default=None)
+    basis: List[Dict[str, Any]] = []
+    for m in pending:
+        if is_injected_perception(m):
+            e = _epoch(m)
+            if (
+                e is None
+                or rows_first_at is None
+                or rows_last_at is None
+                or e < rows_first_at
+                or e > rows_last_at
+            ):
+                continue
+        basis.append(m)
+    return basis
 
 
 def _epoch(msg: Dict[str, Any]) -> Optional[int]:
@@ -229,16 +293,33 @@ def _joint_units(messages: Sequence[Dict[str, Any]]) -> List[tuple]:
        (唱えが退場済みなのに結果の行だけ窓に残る) 欠陥の発生源だった。
 
     単に隣り合っているだけの単位は併合しない (隣接する単位の境目は正当な境目)。
+
+    知覚ブロック (:func:`is_injected_perception`) は**単位を作らない** — 直前の
+    保存行の単位へ接着する (先頭に並ぶぶんは後続の最初の単位へ吸収)。ブロックは
+    保存行ではないので退場の境目になれない: 境目が落ちると fold の端が id の
+    無い行になり、編纂へ渡す範囲も圧縮区間の記録も作れない。
     """
     units: List[List[int]] = []
     current_pulse: Optional[str] = None
+    leading: Optional[int] = None  # 保存行より前に並んだ知覚ブロックの開始位置
     for index, msg in enumerate(messages):
+        if is_injected_perception(msg):
+            if units:
+                units[-1][1] = index  # 直前の単位へ接着
+            elif leading is None:
+                leading = index
+            continue
         pulse = _pulse_of(msg)
         if units and pulse is not None and pulse == current_pulse:
             units[-1][1] = index
             continue
-        units.append([index, index])
+        units.append([index if leading is None else leading, index])
+        leading = None
         current_pulse = pulse
+    if leading is not None:
+        # 保存行が 1 件も無い (知覚ブロックだけの列)。畳む対象は無いが、
+        # 単位が隙間なく並ぶ契約 (_unit_index_of) は保つ。
+        units.append([leading, len(messages) - 1])
 
     for lo, hi in _spell_spans(messages):
         first = _unit_index_of(units, lo)
@@ -385,10 +466,11 @@ def _pending_tail_split_unit(
     """
     if not pending:
         return None
-    tail_id = str(pending[-1].get("id"))
+    # 位置は同一オブジェクトで引く (pending は messages のスライス) — id 一致で
+    # 引くと、id を持たない知覚ブロックが末尾に来た回に別の行を指す。
+    tail = pending[-1]
     tail_index = next(
-        (i for i, m in enumerate(messages) if str(m.get("id")) == tail_id),
-        None,
+        (i for i, m in enumerate(messages) if m is tail), None,
     )
     if tail_index is None:
         return None
@@ -432,7 +514,10 @@ def plan_eviction(
 
     Args:
         messages: 提示中の提示コンテキスト (created_at 昇順、既に畳んだ圧縮区間は
-            digest に置換済み)。
+            digest に置換済み)。**送信直前に差し込まれる知覚ブロックを時刻順に
+            マージした列**を渡す — 水位も削減見込みも「実際に送る中身」で測る
+            (2026-09-02 まはー裁定)。ブロックは重さだけが効き、fold の中身には
+            入らない (:func:`is_injected_perception`)。
         open_episode_refs: 旧設計 (エピソード単独畳み) の名残り。現設計では
             使わない — エピソードに畳みを止める権利は無い (intent §4-1)。
         watermarks: 水位。``target`` = 残す量だけを使う (発火判定 ``high`` は
@@ -489,15 +574,29 @@ def plan_eviction(
     folds: List[Fold] = []
     remaining = total
 
-    def _close(pending: List[Dict[str, Any]]) -> None:
+    def _close(pending: List[Dict[str, Any]]) -> bool:
+        """束を fold にする。保存行が 1 件も無ければ閉じない (False)。
+
+        ``Fold`` に入れるのは**保存行だけ** — 知覚ブロックは退場の対象ではなく
+        (id を持たず、提示から下りるのは付記印の仕事)、重さだけが計画に効く。
+        削減見込みは :func:`_reduction_basis` (保存行 + 付記が届くブロック) で
+        数える: 畳んだ範囲を覆うあらすじが確定すると、その期間のブロックには
+        同一トランザクションで付記印が付き提示から下りる
+        (sai_memory/arasuji/executor.py)。最後の保存行より後のブロックだけは
+        付記範囲から漏れて残るので、消える側に数えない。
+        """
         nonlocal remaining
+        rows = [m for m in pending if not is_injected_perception(m)]
+        if not rows:
+            return False
         refs: List[str] = []
-        for m in pending:
+        for m in rows:
             ref = episode_ref_of(m)
             if ref and ref not in refs:
                 refs.append(ref)
-        folds.append(Fold(messages=list(pending), episode_refs=refs))
-        remaining -= _net_reduction(pending)
+        folds.append(Fold(messages=rows, episode_refs=refs))
+        remaining -= _net_reduction(_reduction_basis(pending))
+        return True
 
     pending: List[Dict[str, Any]] = []
     for group in _units_before(messages, units, boundary):
@@ -505,21 +604,27 @@ def plan_eviction(
             # 壁 (畳み済みの置き換え)。材料に入れない。手前の端数は、残すと
             # 壁に挟まれて永久に取り残されるので、端数のまま畳む。
             if pending:
-                if material_message_chars(pending) < target_chars:
+                if material_message_chars(_reduction_basis(pending)) < target_chars:
                     LOGGER.info(
                         "[eviction] folding an undersized run (%d material chars "
                         "< U=%d) stranded before an already-folded range "
                         "(legacy wall)",
-                        material_message_chars(pending), target_chars,
+                        material_message_chars(_reduction_basis(pending)),
+                        target_chars,
                     )
-                _close(pending)
-                pending = []
+                if _close(pending):
+                    pending = []
             continue
         pending.extend(group)
-        # U 到達の判定は材料字数 (2026-08-29 裁定) — 生の字数ではない。
-        if material_message_chars(pending) >= target_chars:
-            _close(pending)
-            pending = []
+        # U 到達の判定は材料字数 (2026-08-29 裁定) — 生の字数ではない。母集合は
+        # :func:`_reduction_basis` — この fold の編纂に実際に入る材料 (保存行 +
+        # 付記が届くブロック)。末尾の隙間ブロックを数えると、材料の乏しい束を
+        # U 到達と誤認して「畳んでも減らない fold」を発行しうる (Codex 指摘
+        # 2026-09-02 三巡目)。束が伸びて保存行がブロックを追い越せば、その
+        # ブロックは次の判定から自然に母集合へ入る。
+        if material_message_chars(_reduction_basis(pending)) >= target_chars:
+            if _close(pending):
+                pending = []
     # 末尾の端数は畳まない (次回、新しい生ログと地続きで畳まれる)。
     # 例外: 非常経路 (close_undersized_tail=True) で fold が一つも閉じられ
     # なかったときだけ、端数のまま閉じて前進を保証する — 「生は巨大だが材料が
@@ -527,7 +632,9 @@ def plan_eviction(
     # ただし提示が実際に減るときだけ (減らない閉じは LLM 代の無駄骨 —
     # Codex 指摘 2026-08-29)。
     if pending and close_undersized_tail and not folds:
-        if _net_reduction(pending) <= 0:
+        # 減量判定も削減見込みと同じ母集合 (_reduction_basis) — 付記が届かない
+        # 末尾のブロックを勘定に入れると「閉じても提示が減らない」回を閉じる。
+        if _net_reduction(_reduction_basis(pending)) <= 0:
             LOGGER.info(
                 "[eviction] 非常経路でも減量ゼロのため見送り: 端数の生 %d 字は"
                 "置き換えの見込み (%d 字) 以下で、閉じても提示が 1 字も減らない "
@@ -559,12 +666,14 @@ def plan_eviction(
                 material_message_chars(pending), target_chars,
                 message_chars(pending), len(pending),
             )
-            _close(pending)
-            pending = []
+            if _close(pending):
+                pending = []
 
     plan.folds = folds
     plan.projected_chars = remaining
-    plan.pending_material_chars = material_message_chars(pending)
+    # 「あと材料何字で畳めるか」の報告も U 判定と同じ母集合 — ずれると UI が
+    # 「畳める」と言うのに計画は閉じない (またはその逆) が出る。
+    plan.pending_material_chars = material_message_chars(_reduction_basis(pending))
     return plan
 
 

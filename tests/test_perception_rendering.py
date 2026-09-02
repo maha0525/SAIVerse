@@ -238,6 +238,34 @@ class MergeConsumedPerceptionsTest(unittest.TestCase):
         merged = self._merge(recent)
         self.assertEqual(merged, recent)
 
+    def test_counting_side_sees_exactly_what_the_sending_side_sends(self):
+        """測る側 (SessionLifecycle) と送る側が同じ組成関数を通る。
+
+        組成規則が二枚あると、勘定が実送信より小さい値を出す欠陥が戻る
+        (docs/issues/context_accounting_excludes_injected_rows.md)。
+        """
+        from sea.eviction_plan import message_chars
+        from sea.session_lifecycle import SessionLifecycle
+
+        _batch(self.conn, "部屋の様子" * 100, at=1500)
+        recent = [_row("開始", 1000), _row("終了", 2000)]
+        sent = self._merge(recent)
+
+        lifecycle = SessionLifecycle(SimpleNamespace(), None)
+        counted = lifecycle.presented_with_perceptions(self.persona, recent)
+        self.assertEqual(
+            [m["content"] for m in counted], [m["content"] for m in sent],
+        )
+        self.assertEqual(
+            lifecycle.presented_chars(self.persona, recent),
+            message_chars(sent),
+        )
+        # 保存行だけの勘定より確かに大きい (差が知覚ぶん)。
+        self.assertGreater(
+            lifecycle.presented_chars(self.persona, recent),
+            message_chars(recent),
+        )
+
     def test_chronicle_disabled_empty_history_uses_anchor_cutoff(self):
         # Chronicle 無効 + 生ログ窓が空でも、anchor 境界で絞る — 過去バッチの
         # 無制限な再提示をしない (2026-08-19 Codex 第二巡 #3)。

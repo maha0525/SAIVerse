@@ -40,8 +40,27 @@ def _configure_sqlite(conn: sqlite3.Connection) -> None:
 
 
 def init_db(db_path: str, *, check_same_thread: bool = True) -> sqlite3.Connection:
+    """接続を開き、スキーマを用意して返す。
+
+    **用意の途中で倒れたら、接続をここで閉じてから例外を投げる。** 開いたまま
+    投げると、呼び出し側には接続が渡っていないので誰も閉じられない。用意は
+    CREATE / ALTER を伴う書き込みなので、閉じられない接続が SQLite の書き込み
+    ロックを握ったままになり、**同じ memory.db を触る後続の処理が待たされる**
+    (2026-09-02、Chronicle を開いた後に Memopedia が返らなくなる報告の調査で
+    同型の欠陥を 3 箇所発見)。
+    """
     _ensure_dir(db_path)
     conn = sqlite3.connect(db_path, check_same_thread=check_same_thread)
+    try:
+        _init_schema(conn)
+    except BaseException:
+        conn.close()
+        raise
+    return conn
+
+
+def _init_schema(conn: sqlite3.Connection) -> None:
+    """テーブル・索引・移行を用意する。接続の後始末は呼び出し側が持つ。"""
     _configure_sqlite(conn)
     conn.execute(
         """
@@ -261,7 +280,6 @@ def init_db(db_path: str, *, check_same_thread: bool = True) -> sqlite3.Connecti
     init_chunk_page_edge_tables(conn)
 
     conn.commit()
-    return conn
 
 
 def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> bool:

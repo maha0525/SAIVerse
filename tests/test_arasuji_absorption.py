@@ -2029,6 +2029,42 @@ class TestTailRewind:
         assert _row_anchor(lc, "model-a") == gap
         lc.run_manual_compaction.assert_not_called()
 
+    def test_fold_judgment_counts_injected_perceptions(
+        self, adapter, session_factory, monkeypatch,
+    ):
+        """引き戻し後の水位も「実際に送る中身」で測る (2026-09-02 まはー裁定)。
+
+        保存行だけで測ると、引き戻した窓の実送信が上限を超えていても
+        fold_needed=False になり、補修が「上限超えは自分のジョブの中で畳む」
+        約束 (費用の透明性) を破って、次の会話の非常畳みへ黙って送ってしまう
+        (docs/issues/context_accounting_excludes_injected_rows.md)。
+        """
+        monkeypatch.setenv("SAIVERSE_CHRONICLE_BAND_BUDGET", str(TARGET))
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+
+        from sea.coverage_repair import run_tail_rewind
+        from sea.eviction_plan import CONSUMED_PERCEPTION_KEY
+        gap, m_a = self._tail_fixture(adapter)
+        lc = _make_lifecycle(session_factory)
+        _warm_row(lc, "model-a", m_a)
+        lc.get_presented_window = lambda p, mk, aid=None: self._patched_window(80)
+        lc.get_metabolism_watermarks = (
+            lambda p, mk=None: SimpleNamespace(high=100, target=50)
+        )
+        lc.run_manual_compaction = Mock(return_value="ok")
+        # 保存行 80 字は上限 100 未満だが、差し込みの知覚 40 字を足すと 120 字。
+        lc.perception_blocks_for = lambda p, presented, aid=None, **_kw: [{
+            "role": "user", "content": "p" * 40, "created_at": 0,
+            "metadata": {"tags": ["internal", "event_message", "perception"],
+                         CONSUMED_PERCEPTION_KEY: True},
+        }]
+
+        status = run_tail_rewind(lc, _persona(adapter))
+        assert status == "rewound_folded"
+        assert _row_anchor(lc, "model-a") == gap
+        lc.run_manual_compaction.assert_called_once()
+
     def test_strict_anchor_read_failure_propagates_from_plan(
         self, adapter, session_factory, monkeypatch,
     ):

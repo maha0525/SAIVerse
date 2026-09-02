@@ -145,9 +145,49 @@ SAIVerse 停止状態で動く独立スクリプト + bat/sh ラッパー。
 
 #### スナップショット対象
 
-`~/.saiverse/` 全体を対象とし、以下のみ除外:
-- `~/.saiverse/backups/` — 過去バックアップ
-- `~/.saiverse/user_data/logs/` — セッションログ
+`~/.saiverse/` 全体を対象とし、除外は `scripts/snapshot.py` の相対パス集合で決まる。
+ディレクトリとファイルを区別せず、「相対パスの先頭がこの集合のいずれかに一致するか」
+だけで判定するので、階層が深くなっても判定規則は増えない。
+
+集合は**用途が違う 2 つ**あり、混ぜてはいけない。
+
+**`EXCLUDED_FROM_SNAPSHOT`** — save でアーカイブに入れず、restore で home 側に
+そのまま残すもの（`collect_files_to_snapshot` / `clear_for_restore` /
+`_managed_swap_roots` が見る）:
+
+- `backups/` — 過去バックアップ（スナップショットとは別系統の保全）
+- `snapshots/` — スナップショット自身
+- `.runtime/`, `.runtime.json`, `log.txt` — 起動中マーカーと運用ログ
+- `user_data/logs/` — セッションログ
+- `llama_cache/` — llama.cpp の KV スロットキャッシュ
+
+**`PROTECTED_FROM_ARCHIVE`** — 復元時、アーカイブのメンバーとして入っていたら危険
+として拒否するもの（`_safe_archive_member` だけが見る）。中身は
+`EXCLUDED_FROM_SNAPSHOT` から `llama_cache` を引いたもの。
+
+`llama_cache` を拒否側に入れないのは、それを除外していなかった頃の format_version 2
+アーカイブに `llama_cache/...` が正当なメンバーとして入っているため。拒否すると過去の
+スナップショットの復元が丸ごと失敗する。展開先は一時的な stage で、
+`_managed_swap_roots` が `llama_cache` を入れ替え単位に含めないので、stage に展開されて
+も home の `llama_cache` は入れ替わらない（stage ごと捨てられる）。世界を過去へ戻しても
+キャッシュは現在のもので構わない、というのが復元時に残す側の理由でもある。
+
+**除外してよいのは「再生成できるキャッシュ」と「世界の状態ではない運用ファイル」
+だけ。** `personas/` `cities/` `buildings/` `image/` 本体 `user_data/database/`
+`user_data/addon_data/`（stackchan の `avatar_sets/` はペルソナのアバター素材で
+再生成できない）`qdrant/` `documents/` `video/` `audio/` は世界そのものなので、
+容量を理由に外してはならない。
+
+さらに、**除外は容量だけで決めない**。除外パスを抱えたディレクトリは復元時に
+「まるごと」の入れ替え単位でなくなり、`os.rename` の回数がその直下のエントリ数まで
+増える。`swap_staged_world` は失敗時に移動済みを巻き戻す作りなので、分割数がそのまま
+部分失敗の窓の広さになる。`image/.thumbnails/`（実測 3MB）を一度は除外へ入れたが、
+`image/` 直下 961 エントリの分割を招くため取り下げた。`user_data/logs/` のためにこの
+再帰自体は必要で、`user_data` だけが子へ降りる。
+
+`llama_cache/` を除外へ回したのは 2026-09-02 の実機障害を受けての判断。16GB あり、
+sha256 計算と ZIP 圧縮の対象に入っていたせいで `update_engine` の 900 秒タイムアウトに
+掛かり、SAIVerse が起動不能になった。実測では対象量が 24.4GB → 8.9GB（-63%）に落ちる。
 
 #### スナップショットメタ情報
 
