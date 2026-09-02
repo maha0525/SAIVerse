@@ -62,7 +62,16 @@ def _get_job(job_id: str) -> Optional[dict]:
 
 
 def _get_arasuji_db(persona_id: str):
-    """Get database connection for arasuji tables."""
+    """Get database connection for arasuji tables.
+
+    **テーブルの用意で倒れたら、接続をここで閉じてから例外を投げる。** 開いた
+    まま投げると呼び出し側に接続が渡らないので、各エンドポイントの
+    ``finally: conn.close()`` に到達せず誰も閉じられない。``init_arasuji_tables``
+    は VIEW の作り直しと旧 ``arasuji_entries`` からの移行を伴う書き込みなので、
+    閉じられない接続が書き込みロックを握ったままになり、**同じ memory.db を
+    触る Memopedia 側が待たされる** (2026-09-02、Chronicle を開いた後に
+    Memopedia が返らなくなる報告の調査で発見)。
+    """
     from pathlib import Path
     import sqlite3
     from sai_memory.arasuji.storage import init_arasuji_tables
@@ -71,7 +80,11 @@ def _get_arasuji_db(persona_id: str):
     if not db_path.exists():
         return None
     conn = sqlite3.connect(str(db_path), check_same_thread=False)
-    init_arasuji_tables(conn)
+    try:
+        init_arasuji_tables(conn)
+    except BaseException:
+        conn.close()
+        raise
     return conn
 
 def _get_message_number_map(conn: sqlite3.Connection) -> dict:

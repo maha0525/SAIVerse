@@ -1452,14 +1452,23 @@ def create_memory_settings_ui(manager) -> None:
         )
 
         def _get_arasuji_connection(persona_id: str):
-            """Get database connection for arasuji."""
+            """Get database connection for arasuji.
+
+            テーブルの用意で倒れたら接続をここで閉じる (理由は
+            ``api/routes/people/arasuji.py`` の同名処理と同じ — 開いたまま
+            投げると誰も閉じられず、書き込みロックが残る)。
+            """
             from pathlib import Path
             import sqlite3
             db_path = get_persona_memory_db(persona_id)
             if not db_path.exists():
                 return None
             conn = sqlite3.connect(str(db_path), check_same_thread=False)
-            init_arasuji_tables(conn)
+            try:
+                init_arasuji_tables(conn)
+            except BaseException:
+                conn.close()
+                raise
             return conn
 
         def _format_timestamp_range(start_time: Optional[int], end_time: Optional[int]) -> str:
