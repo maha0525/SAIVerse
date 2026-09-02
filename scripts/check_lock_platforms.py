@@ -12,13 +12,17 @@
 判定は pip と同じ `packaging.tags` で行う (文字列の部分一致ではない):
 - 対象ごとに互換タグの集合を作り、wheel のタグ集合と交わるかを見る
 - macOS の下限は x86_64 が 13.0 (対応する Intel Mac の床)、arm64 が 14.0
-- Linux は glibc 系ディストリビューションだけを対象にする (manylinux のみ、musllinux は見ない)
-- pin の Requires-Python が対象の Python を除外していたら、sdist があっても入らないので失敗
+- Linux は glibc 系ディストリビューションだけを対象にし (manylinux のみ、musllinux は見ない)、
+  glibc の床は 2.31 (Ubuntu 20.04 LTS / Debian 11 = 対応する最古の Linux)。床より新しい glibc
+  を要求する wheel (manylinux_2_35 など) は「無い」と数える
+- Requires-Python はファイル単位で見る (PyPI は wheel / sdist ごとに持つ)。その Python を
+  除外しているファイルは候補に数えない。yanked (取り下げ) されたファイルも候補に数えない
 
 結果の格:
-- FAIL (exit 1): wheel も sdist も無い / Requires-Python が除外 / PyPI の照会に失敗
-  (版が存在しないかネットワークが落ちている。判定できなかった pin を「入る」とは言わない)
-- WARN (exit 0 のまま): wheel は無いが sdist はある (ビルドすれば入る)
+- FAIL (exit 1): wheel も sdist も無い / どのファイルも Requires-Python で除外 / 全ファイル yanked /
+  PyPI の照会に失敗 (版が存在しないかネットワークが落ちている。判定できなかった pin を「入る」
+  とは言わない)
+- WARN (exit 0 のまま): wheel は無いが、その Python を許す sdist はある (ビルドすれば入る)
 exit 0 は「全 pin を取得して判定し、FAIL が無かった」ときだけ。
 
 使い方 (lock を作り直したら一度回す。ネットワーク必須、1〜2 分):
@@ -51,6 +55,16 @@ PLATFORMS = {
 # これより新しい OS しか受け付けない wheel (macosx_14_0_x86_64 など) は Intel Mac 向けには
 # 「無い」と数える。arm64 は 14.0。
 MACOS_FLOOR = {"macos_x86_64": (13, 0), "macos_arm64": (14, 0)}
+# Linux の床 = 対応すると言う最古の Linux の glibc。2.31 は Ubuntu 20.04 LTS / Debian 11。
+# pip は実行機の glibc 以下の manylinux タグしか受け付けないので、床より新しい glibc を
+# 要求する wheel しか無い pin は、その Linux では入らない。
+LINUX_GLIBC_FLOOR = (2, 31)
+# PEP 600 以前の別名と、それが意味する glibc。床以下のものだけ受け付ける。
+_LEGACY_MANYLINUX = {
+    "manylinux2014_x86_64": (2, 17),
+    "manylinux2010_x86_64": (2, 12),
+    "manylinux1_x86_64": (2, 5),
+}
 _PIN = re.compile(r"^([A-Za-z0-9_.-]+)==([^\s;]+)(?:\s*;\s*(.+))?$")
 
 
@@ -58,10 +72,11 @@ def _platform_tags(platform: str) -> list[str]:
     if platform == "win_amd64":
         return ["win_amd64"]
     if platform == "linux_x86_64":
-        # 現代の pip が glibc 系で受け付ける manylinux タグ。対象は glibc の
+        # 床の glibc を持つ機体の pip が受け付ける manylinux タグ。対象は glibc の
         # ディストリビューションだけなので musllinux (Alpine 系) は含めない。
-        modern = [f"manylinux_2_{minor}_x86_64" for minor in range(40, 4, -1)]
-        legacy = ["manylinux2014_x86_64", "manylinux2010_x86_64", "manylinux1_x86_64"]
+        major, floor_minor = LINUX_GLIBC_FLOOR
+        modern = [f"manylinux_{major}_{minor}_x86_64" for minor in range(floor_minor, 4, -1)]
+        legacy = [tag for tag, glibc in _LEGACY_MANYLINUX.items() if glibc <= LINUX_GLIBC_FLOOR]
         return modern + legacy + ["linux_x86_64"]
     arch = PLATFORMS[platform]["platform_machine"]
     return list(packaging_tags.mac_platforms(version=MACOS_FLOOR[platform], arch=arch))
@@ -106,22 +121,42 @@ def _marker_env(platform: str, py: str) -> dict[str, str]:
     return env
 
 
+class PyPIFile(NamedTuple):
+    filename: str
+    # そのファイル自身の Requires-Python。無ければ release の値を使う。
+    requires_python: str | None
+    yanked: bool
+
+
 class PyPIRelease(NamedTuple):
-    files: list[str]
+    files: list[PyPIFile]
+    # release 全体 (info.requires_python)。ファイルに値が無いときの既定。
     requires_python: str | None
 
 
 def _release_on_pypi(name: str, version: str) -> PyPIRelease | None:
-    """その版の配布ファイル名と Requires-Python。取れなければ None (呼び手が FAIL にする)。"""
+    """その版の配布ファイル (名前・Requires-Python・yanked) と release の Requires-Python。
+    取れなければ None (呼び手が FAIL にする)。"""
     try:
         with urllib.request.urlopen(f"https://pypi.org/pypi/{name}/{version}/json", timeout=30) as resp:
             payload = json.load(resp)
         return PyPIRelease(
-            [entry["filename"] for entry in payload["urls"]],
+            [
+                PyPIFile(
+                    entry["filename"],
+                    entry.get("requires_python") or None,
+                    bool(entry.get("yanked", False)),
+                )
+                for entry in payload["urls"]
+            ],
             payload.get("info", {}).get("requires_python") or None,
         )
     except Exception:
         return None
+
+
+def _is_sdist(filename: str) -> bool:
+    return filename.endswith((".tar.gz", ".zip"))
 
 
 def _python_excluded(requires_python: str | None, py: str) -> bool:
@@ -151,22 +186,31 @@ def main(argv: list[str]) -> int:
                 f"{name}=={version}: PyPI lookup failed (the version may not exist, or the network is down)"
             )
             continue
-        has_sdist = any(f.endswith((".tar.gz", ".zip")) for f in release.files)
+        # yanked (取り下げ) されたファイルは pip が新規解決で選ばないので、無いものとして数える。
+        files = [f for f in release.files if not f.yanked]
+        if not files:
+            failures.append(f"{name}=={version}: all files yanked (pip will not install a yanked-only release)")
+            continue
         for platform in PLATFORMS:
             for py in PYTHONS:
                 if marker and not Marker(marker).evaluate(_marker_env(platform, py)):
                     continue
-                if _python_excluded(release.requires_python, py):
+                # Requires-Python はファイル単位。ファイルに値が無ければ release の値で判定する。
+                allowed = [f for f in files if not _python_excluded(f.requires_python or release.requires_python, py)]
+                if not allowed:
+                    specs = sorted({f.requires_python or release.requires_python or "?" for f in files})
                     failures.append(
-                        f"{name}=={version}: Requires-Python {release.requires_python} excludes Python {py}"
-                        f" ({platform}; an sdist cannot rescue that)"
+                        f"{name}=={version}: Requires-Python {', '.join(specs)} excludes Python {py}"
+                        f" ({platform}; no file allows it, an sdist cannot rescue that)"
                     )
                     continue
-                if any(_wheel_fits(f, platform, py) for f in release.files):
+                if any(_wheel_fits(f.filename, platform, py) for f in allowed):
                     continue
                 msg = f"{name}=={version}: no wheel for {platform} / Python {py}"
-                if has_sdist:
+                if any(_is_sdist(f.filename) for f in allowed):
                     warnings.append(msg + " (sdist only: needs a build)")
+                elif any(_is_sdist(f.filename) for f in files):
+                    failures.append(msg + " (the sdist's Requires-Python excludes this Python: install fails)")
                 else:
                     failures.append(msg + " (no sdist either: install fails)")
     print(f"checked {len(lines)} pins in {lock}")

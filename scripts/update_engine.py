@@ -44,6 +44,14 @@ UPDATE_COMPLETE_MARKER = ".update_complete"
 # See docs/intent/dependency_management.md.
 REQUIREMENTS_LOCK = "requirements.lock"
 
+# The pre-lock install target. This constant exists *only* so that a rollback
+# to a revision older than the lock (v0.3.3 and earlier have no
+# requirements.lock) can still reinstall that revision's packages. It is never
+# the target of a normal update -- ``update_dependencies`` defaults to the lock
+# and does not fall back to this file when the lock is missing; the rollback
+# path is the single caller that picks it, explicitly, after ``git reset``.
+LEGACY_REQUIREMENTS = "requirements.txt"
+
 # Exit codes of ``--check-complete``. The launchers branch on these, so they are
 # part of the contract with start.bat / start.sh.
 CHECK_READY = 0
@@ -742,6 +750,18 @@ def _report_addon_conflicts(project_dir: Path, python: str) -> None:
         return
     if result.returncode == 0:
         return
+    if result.returncode != 1:
+        # Only exit 1 is pip's answer "conflicts found". 2 is a usage / internal
+        # error, a negative code is a signal: in both cases nothing was checked,
+        # and reporting the output as conflicts would put a pip crash in the log
+        # dressed up as an addon problem.
+        detail = (result.stderr or result.stdout or "").strip()[-2000:]
+        LOGGER.warning(
+            "[deps] pip check could not run (exit %s); addon conflicts were not checked%s",
+            result.returncode,
+            f": {detail}" if detail else "",
+        )
+        return
     conflicts = [
         line.strip()
         for line in (result.stdout or "").splitlines()
@@ -758,9 +778,21 @@ def _report_addon_conflicts(project_dir: Path, python: str) -> None:
     )
 
 
-def update_dependencies(project_dir: Path, python: str) -> None:
+def update_dependencies(
+    project_dir: Path,
+    python: str,
+    requirements_file: str | None = None,
+) -> None:
+    """Install the Python packages and the frontend packages.
+
+    ``requirements_file`` defaults to the lock and is *not* chosen by looking at
+    the working tree: a checkout that has no lock is a broken update target, and
+    pip failing loudly on the missing file is the correct outcome. The only
+    caller that passes something else is ``_rollback_code_and_dependencies``,
+    for revisions that predate the lock.
+    """
     _run(
-        [python, "-m", "pip", "install", "-r", REQUIREMENTS_LOCK],
+        [python, "-m", "pip", "install", "-r", requirements_file or REQUIREMENTS_LOCK],
         cwd=project_dir,
         label="install Python dependencies",
     )
@@ -795,8 +827,21 @@ def _rollback_code_and_dependencies(
         label="rollback code revision",
         timeout=120,
     )
+    requirements_file: str | None = None
+    if not (project_dir / REQUIREMENTS_LOCK).is_file():
+        # Updating *from* v0.3.3 or earlier *to* the first lock release: the
+        # reset just removed the lock together with the new code, so the old
+        # revision's own package list is the only thing that describes what it
+        # needs. This is the sole place that installs from that file.
+        LOGGER.warning(
+            "Revision %s predates %s; reinstalling its packages from %s instead",
+            old_revision,
+            REQUIREMENTS_LOCK,
+            LEGACY_REQUIREMENTS,
+        )
+        requirements_file = LEGACY_REQUIREMENTS
     try:
-        update_dependencies(project_dir, python)
+        update_dependencies(project_dir, python, requirements_file)
     except UpdateError:
         LOGGER.exception("Dependency repair for the previous revision also failed")
 

@@ -14,6 +14,8 @@ from importlib import metadata
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from scripts import update_engine
 
 # The lock pins exact versions, so a fixture lock that this interpreter
@@ -676,10 +678,33 @@ def test_update_dependencies_installs_from_the_lock(tmp_path: Path) -> None:
     assert not any("requirements.txt" in part for command in commands for part in command)
 
 
+def test_update_dependencies_never_falls_back_when_the_lock_is_missing(tmp_path: Path) -> None:
+    """A checkout without a lock is a broken update target. pip must still be
+    told to read the lock and fail loudly -- the legacy file is only for the
+    rollback path, which asks for it explicitly."""
+    project = _make_project(tmp_path)
+    (project / "requirements.lock").unlink()
+    commands: list[list[str]] = []
+
+    def recording_run(command, *, cwd, label, timeout=900, check=True):  # type: ignore[no-untyped-def]
+        commands.append(list(command))
+        if command[:5] == ["python", "-m", "pip", "install", "-r"]:
+            raise update_engine.UpdateError(f"{label} failed with exit 1: no such file {command[-1]}")
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    with patch.object(update_engine, "_run", side_effect=recording_run), patch.object(
+        update_engine.shutil, "which", return_value="npm"
+    ):
+        with pytest.raises(update_engine.UpdateError, match="requirements.lock"):
+            update_engine.update_dependencies(project, "python")
+
+    assert commands == [["python", "-m", "pip", "install", "-r", "requirements.lock"]]
+
+
 # --- pip check after the lock is installed: visibility, not enforcement --------
 
 
-def _fake_run_with_pip_check(returncode: int, stdout: str):  # type: ignore[no-untyped-def]
+def _fake_run_with_pip_check(returncode: int, stdout: str, stderr: str = ""):  # type: ignore[no-untyped-def]
     """``_run`` that answers ``pip check`` with the given result and 0 to the rest."""
     calls: list[dict] = []
 
@@ -688,7 +713,7 @@ def _fake_run_with_pip_check(returncode: int, stdout: str):  # type: ignore[no-u
         if command[-2:] == ["pip", "check"]:
             if check and returncode != 0:
                 raise update_engine.UpdateError("pip check must be run with check=False")
-            return MagicMock(returncode=returncode, stdout=stdout, stderr="")
+            return MagicMock(returncode=returncode, stdout=stdout, stderr=stderr)
         return MagicMock(returncode=0, stdout="", stderr="")
 
     return fake_run, calls
@@ -736,3 +761,27 @@ def test_update_dependencies_logs_addon_conflicts_without_failing(tmp_path: Path
     summary = [m for m in messages if "アドオンを入れ直す" in m]
     assert len(summary) == 1
     assert "requirements.lock" in summary[0]
+
+
+def test_pip_check_crash_is_not_reported_as_addon_conflicts(tmp_path: Path, caplog) -> None:  # type: ignore[no-untyped-def]
+    """Only exit 1 means "conflicts found". Exit 2 (usage / internal error) means
+    pip did not check anything: the log must say so and must not dress the
+    traceback up as an addon problem. The update still completes."""
+    project = _make_project(tmp_path)
+    fake_run, calls = _fake_run_with_pip_check(
+        2, "", stderr="Traceback (most recent call last):\n  ...\nKeyError: 'metadata'\n"
+    )
+
+    with caplog.at_level("WARNING", logger="saiverse.update"), patch.object(
+        update_engine, "_run", side_effect=fake_run
+    ), patch.object(update_engine.shutil, "which", return_value="npm"):
+        update_engine.update_dependencies(project, "python")  # must not raise
+
+    assert calls[-1]["command"][0] == "npm"
+    messages = [record.getMessage() for record in caplog.records if record.levelname == "WARNING"]
+    could_not_run = [m for m in messages if m.startswith("[deps] pip check could not run (exit 2)")]
+    assert len(could_not_run) == 1
+    assert "addon conflicts were not checked" in could_not_run[0]
+    assert "KeyError: 'metadata'" in could_not_run[0]
+    assert not any(m.startswith("[deps] pip check: ") for m in messages)
+    assert not any("アドオンを入れ直す" in m for m in messages)

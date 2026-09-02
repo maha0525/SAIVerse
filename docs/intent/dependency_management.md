@@ -73,6 +73,7 @@ requirements.lock     ← 全部品の版を固定した一覧 (機械が作る�
 
 - 既存ユーザー: 次の `update.bat` で lock どおりに入れ直される。上げる部品 (§3) があるので、入れ替えは起きる。requirements.txt の sha が変わるので更新完了マーカーは自然に「要更新」になる。
 - 開発機: 同じ。ただし voice-tts などアドオンの部品は lock の外にあるので、constraints と衝突するものがあれば導入し直しで判明する。
+- lock の無い版 (v0.3.3 以前) から最初の lock 版へ上げる途中で pip / npm が失敗したとき: 巻き戻しは古い版に `git reset` したあと、その版に lock が無いので、その版自身の `requirements.txt` から入れ直す (`update_engine._rollback_code_and_dependencies` だけがこの経路を選び、WARNING で記録する。通常の更新経路は lock が無ければそのまま失敗する)。
 
 ---
 
@@ -98,7 +99,7 @@ requirements.lock     ← 全部品の版を固定した一覧 (機械が作る�
 | mcp | `<2` | 2.x が `streamablehttp_client` を撤去。v2 API への移行は別案件 (`docs/intent/mcp_protocol_coverage.md`)。**既に書いてある、手本** |
 | onnxruntime | `<1.24` | 1.24 以降は macOS x86_64 (Intel Mac) と macOS 13 の wheel が無く sdist も無い。universal lock が 1.24+ を掴むと Intel Mac では `pip install -r requirements.lock` 自体が失敗する (2026-09-02 Codex レビューで発覚。fastembed 0.8 も Python 3.13 で 1.24.0/1.24.1 を除外)。外す条件 = onnxruntime が Intel Mac の wheel を再開する、または Intel Mac 対応を打ち切ると決める |
 
-**universal lock の盲点 (2026-09-02 に学んだこと)**: `uv pip compile --universal` は依存関係のメタデータだけで解決し、その版の wheel が各プラットフォーム向けに公開されているかは見ない。Windows で入って全スイートが緑でも、Intel Mac で入らない lock はできる。だから lock を作り直したら `python scripts/check_lock_platforms.py` (各 pin の wheel / sdist の有無を PyPI に問い、対象 4 プラットフォーム × Python 3.11〜3.13 で入らない組合せを exit 1 で返す) を回す。判定は pip と同じ `packaging.tags` で行い、macOS の床は x86_64 が 13 (対応する Intel Mac の最低 OS 版)、arm64 が 14。pin の Requires-Python が対象の Python を除外していても FAIL。PyPI の照会に失敗した pin は「入る」と数えず FAIL にする (fail-closed。exit 0 は全 pin を取得して判定できたときだけ)。§5 の 1b。
+**universal lock の盲点 (2026-09-02 に学んだこと)**: `uv pip compile --universal` は依存関係のメタデータだけで解決し、その版の wheel が各プラットフォーム向けに公開されているかは見ない。Windows で入って全スイートが緑でも、Intel Mac で入らない lock はできる。だから lock を作り直したら `python scripts/check_lock_platforms.py` (各 pin の wheel / sdist の有無を PyPI に問い、対象 4 プラットフォーム × Python 3.11〜3.13 で入らない組合せを exit 1 で返す) を回す。判定は pip と同じ `packaging.tags` で行い、macOS の床は x86_64 が 13 (対応する Intel Mac の最低 OS 版)、arm64 が 14、Linux の床は glibc 2.31 (Ubuntu 20.04 LTS / Debian 11 = 対応すると言う最古の Linux。これより新しい glibc を要求する wheel しか無い pin は Linux では「無い」と数える)。Requires-Python は PyPI が wheel / sdist ごとに持つのでファイル単位で見て、その Python を除外するファイルは候補に数えない (どのファイルも許さなければ FAIL)。yanked (取り下げ) されたファイルも候補に数えず、全ファイルが yanked の pin は FAIL。PyPI の照会に失敗した pin は「入る」と数えず FAIL にする (fail-closed。exit 0 は全 pin を取得して判定できたときだけ)。§5 の 1b。
 
 他に止めるべきものは実装時の compile と全スイートで判明する。**「なんとなく上げない」は禁止** — 上げないなら理由を書く。
 
@@ -106,7 +107,7 @@ requirements.lock     ← 全部品の版を固定した一覧 (機械が作る�
 
 torch / transformers / librosa / numba / gradio / funasr など、venv にある 269 個のうち本体の直接依存 (約 30 個) を除く大半は voice-tts が連れてきたもの。これらは本体の requirements には入っていない (現状で正しい)。本体がやることは **constraints で「本体の部品を動かすな」と言う**ことまで。numba の上限などアドオン自身の部品の整合はアドオン側の requirements の責任 (voice-tts に numba の固定を足すのはアドオンのリポジトリの宿題)。
 
-ただし本体の更新は、壊したことを**その場で見せる**義務は負う。`update_engine.update_dependencies` は lock を入れた直後に `pip check` を回し、lock の外にあるパッケージ (アドオンか手で入れたもの) との衝突を `[deps] pip check: ...` の WARNING として更新ログに残す (2026-09-02 の voice-tts の実害は、翌日まで誰も気づかなかったことが問題だった)。可視化だけで、更新は失敗にしないし巻き戻しもしない — 直すのはアドオン側。
+ただし本体の更新は、壊したことを**その場で見せる**義務は負う。`update_engine.update_dependencies` は lock を入れた直後に `pip check` を回し、lock の外にあるパッケージ (アドオンか手で入れたもの) との衝突を `[deps] pip check: ...` の WARNING として更新ログに残す (2026-09-02 の voice-tts の実害は、翌日まで誰も気づかなかったことが問題だった)。衝突と読むのは `pip check` の exit 1 だけで、それ以外の非ゼロ (2 = pip 自身の使い方の誤りや内部エラー、負数 = シグナル) は「pip check が走らず、衝突は検査できなかった」として stderr と一緒に別の WARNING で残す (pip の落ち方をアドオンの衝突に見せない)。可視化だけで、更新は失敗にしないし巻き戻しもしない — 直すのはアドオン側。
 
 ### 3-4. SDK を上げる前に分かっていること (2026-09-02 の下調べ)
 
@@ -163,3 +164,4 @@ torch / transformers / librosa / numba / gradio / funasr など、venv にある
 
 - 2026-09-02: voice-tts の無音事故 (numba × NumPy 2.5) を契機に起草。まはー「そろそろやらなきゃダメかな。依存関係全体を洗いたい、新しくするべきとこ新しくして、古いまま止めなきゃだめなやつはそう設定する整理が必要」。Python 推奨は 3.13 へ、feature ブランチで対応、と裁定。
 - 2026-09-02 深夜 (レビュー 1 巡目): ローカル LLM と Codex (ブランチ全体、develop 基点)。**採用**: ①lock の onnxruntime 1.24.1 は Intel Mac の wheel も sdist も無く、Intel Mac では lock が入らない (Codex high) → `onnxruntime<1.24` を理由つきで置き、`scripts/check_lock_platforms.py` を新設して同族を機械検査 (§3-2)。②packaging 無しの退化パーサーがマーカー付き行を「必要」と読み、macOS で Windows 限定の pin を未導入と判定して起動のたびに更新へ送る (ローカル low) → マーカー付き行は未検査扱いへ。③壊れた dist-info (版が読めない) を満たしている扱いにしていた (Codex medium) → 未検査へ。④requirements.txt の `==` 禁止を契約テストへ (ローカル low)。**採用せず**: lock が読めない・メタデータが列挙できないときに CHECK_READY を返す fail-open (Codex high) — 以前からの設計で、代案の INCONCLUSIVE も起動する点は同じ (印を書かない) なので挙動差が無い。`strict_content_type=False` は CSRF 防御の保留 (Codex high) — 0.116 には検査自体が無かったので退行ではないが、issue の優先度を high に上げてフロントエンドを監査対象に加えた。thinking と sampling の同時送信 (Codex medium) — この分岐は以前から同じ引数を top-level で送っており、`extra_body` への移動で挙動は変わっていない (別件)。
+- 2026-09-02 深夜 (レビュー 2〜3 巡目、Codex)。**2 巡目 3 件すべて採用**: `check_lock_platforms.py` が PyPI に問えなかった pin を通していた → fail-closed に / wheel の判定を文字列の部分一致から `packaging.tags` へ (macOS の床 13 / 14) / 本体の更新が同居アドオンの部品を壊しても気づけない → `update_dependencies` の直後に `pip check` を回して衝突を WARNING で更新ログに残す (止めない・戻さない、§3-3)。**3 巡目 4 件すべて採用**: lock の無い旧版 (v0.3.3 以前) からの更新が途中で失敗したとき、巻き戻しが旧版に無い lock を探して失敗する → 巻き戻し経路だけ旧版の requirements.txt を読む (§2-5) / manylinux の列挙を glibc の床 2.31 からの生成へ / Requires-Python と yanked をファイル単位で判定 / `pip check` は exit 1 だけを衝突として読み、他の非 0 は「検査できなかった」と書く。3 巡で採用した指摘の的は「lock の中身 (Intel Mac)」→「新設した検査の精度」→「移行の一回きりの経路」と外周へ移っており、私の見立てでは収束。4 巡目を投げるかはまはーの判断。
