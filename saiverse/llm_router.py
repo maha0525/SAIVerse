@@ -153,6 +153,10 @@ def route(user_message: str, tools_spec: List[Any]) -> Dict[str, Any]:
                 safety_settings=GEMINI_SAFETY_CONFIG,
                 response_mime_type="application/json",
                 temperature=0,
+                # SAIVerse never uses the SDK's automatic function calling
+                # (the router only asks for a JSON decision). Same rule as
+                # llm_clients/gemini.py; google-genai >= 2.18 warns otherwise.
+                automatic_function_calling=gtypes.AutomaticFunctionCallingConfig(disable=True),
             ),
         )
 

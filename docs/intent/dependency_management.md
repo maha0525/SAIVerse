@@ -84,7 +84,7 @@ requirements.lock     ← 全部品の版を固定した一覧 (機械が作る�
 |---|---|---|---|
 | openai | 1.97.0 | 3.7.0 | メジャー二段。`llm_clients/openai*.py` と Codex 経路の読み替えが要る |
 | anthropic | 0.79.0 | 1.3.0 | メジャー。`llm_clients/anthropic*.py` |
-| google-genai | 1.75.0 | 2.21.0 | メジャー。上限 `<2.0` を外す判断込み。`llm_clients/gemini*.py`、キャッシュ経路 |
+| google-genai | 1.75.0 | 2.21.0 | **完了 (2026-09-02、1.75.0 → 2.21.0)**。上限 `<2.0` は外した (§3-4)。SAIVerse が使う `types.*` / caches API / 私的 `_api_client.HttpResponse` (SSE パッチ) はすべて無変更。コード変更は AFC 明示無効化の 3 箇所だけ (§3-4) |
 | xai-sdk | 1.7.0 | 1.19.0 | マイナー |
 | fastapi / starlette / uvicorn | 0.116.1 / 0.47.3 / 0.35.0 | 0.141.1 / 1.6.0 / 0.52.4 | starlette がメジャー。三つ一緒に上げる |
 | pydantic / pydantic-settings | 2.11.7 / 2.5.2 | 2.13.5 / 2.15.0 | マイナー。Web 一族と同じ回で |
@@ -108,7 +108,7 @@ torch / transformers / librosa / numba / gradio / funasr など、venv にある
 - **HTTP の部品が世代交代している。** `httpx` は保守が止まり、Pydantic チームの互換フォーク **`httpx2`** に移った。anthropic 1.0 (2026-08-20) と openai 3.0 (2026-08-12) はどちらも「httpx2 へ移行」が唯一の破壊的変更で、`httpx` はもう自動では入らない。google-genai 2.x と mcp 1.x はまだ `httpx` (<1.0) を使う。**二つは別パッケージとして共存できる**ので、当面は両方が venv に入る。
 - SAIVerse 自身が `httpx` を直接使う箇所は 10 ファイル。SDK に渡しているのは `llm_clients/anthropic.py` の `httpx.Timeout(...)` だけで、anthropic 1.x では旧 httpx の型を渡すと構築時に `TypeError` になる (黙って壊れない)。`llm_clients/gemini.py` の `isinstance(err, httpx.ReadTimeout ...)` は google-genai が httpx のままなので変えない。方針: **自分のコードは SDK が使う方の型に合わせる** (anthropic / openai 向けは `httpx2`、genai 向けは `httpx`)。プロセス全体で `import httpx` を httpx2 に差し替える `httpx2.alias_httpx()` は使わない — 起動順に依存し、mcp / genai が期待する型を黙って変える。
 - **httpx2 は証明書の信頼元を OS のストアにする** (旧 httpx は certifi)。macOS の Python は OS のストアが空なので、そのままでは LLM 呼び出しが `CERTIFICATE_VERIFY_FAILED` になる — 2026-09-02 に urllib で踏んだのと同じ穴。`saiverse/tls_trust.py` が起動時に `SSL_CERT_FILE` を立てるので httpx2 (trust_env=True) もそれを読む。SDK を上げるコミットで tls_trust.py の docstring (「httpx は影響を受けない」の記述) を現状に合わせ、**macOS の実機で LLM 呼び出しが通ること**を報告者に確認してもらう項目を検証に足す。
-- **google-genai 2.0** の破壊的変更は Interactions API だけで、`GenerateContent` は無変更 (公式 CHANGELOG)。上限 `<2.0` は外せる見込み。
+- **google-genai 2.0** の破壊的変更は Interactions API だけで、`GenerateContent` は無変更 (公式 CHANGELOG)。SAIVerse は Interactions API を使っていない (`llm_clients/` / `saiverse/llm_router.py` / `persona/emotion_module.py` / `tools/adapters/gemini.py` に参照なし) ので、**上限 `<2.0` は 2026-09-02 に外した** (`google-genai>=2.21.0`)。2.21 への実際の差分で SAIVerse に効いたのは一つだけ: 2.18 から `generate_content` は `automatic_function_calling.disable=True` を明示しない限り「Direct use of AFC ... is not recommended」を WARNING でプロセスごとに一度ログする (tools を渡していなくても)。`llm_clients/gemini.py` は元から無効化していたが、`saiverse/llm_router.py` / `persona/emotion_module.py` / `builtin_data/tools/image_generator.py` の 3 箇所は未指定だったので同じ規則 (SAIVerse は SDK の AFC を使わない) に揃えた。挙動は変わらない (tools が無ければ AFC ループは 1 回で抜ける)。google-genai の HTTP 部品は 2.21 でも `httpx` (<1.0) のまま。
 - **anthropic 1.0** は httpx2 の他に、`messages.create()` から `temperature` / `top_p` / `top_k` を撤去 (渡すと `TypeError`。古いモデル向けに要るなら `extra_body`)、`output_format=` にスキーマ dict を渡す形を撤去、`.with_raw_response` の戻りが新クラスに。SAIVerse 側は **該当あり**: `llm_clients/anthropic_request_builder.py` (278〜283 行) が `temperature` / `top_p` / `top_k` を `messages.create()` の引数に積んでいる。1.x では `extra_body` へ移す (API 自体はまだ受け付ける)。
 - **openai 2.0** は Responses API の function call output の型が広がっただけ、**3.0** は httpx2 のみ。
 - lock の環境マーカーの癖: `hf-xet` の行のマーカーが `platform_machine == 'amd64'` (小文字) で書かれており、Windows (`AMD64`) では偽になって入らない。huggingface_hub は無くても通常のダウンロードに退避するので実害はないが、上流のマーカーをそのまま写した結果であることを記録しておく。

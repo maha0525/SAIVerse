@@ -107,7 +107,7 @@ fsspec==2026.2.0
     # via huggingface-hub
 google-auth==2.57.0
     # via google-genai
-google-genai==1.75.0
+google-genai==2.21.0
     # via -r requirements.txt
 googleapis-common-protos==1.72.0
     # via xai-sdk

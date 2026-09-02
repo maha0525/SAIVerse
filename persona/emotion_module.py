@@ -57,7 +57,14 @@ class EmotionControlModule:
             return client.models.generate_content(
                 model=self.model,
                 contents=[types.Content(parts=[types.Part(text=prompt)], role="user")],
-                config=types.GenerateContentConfig(response_mime_type="application/json"),
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    # SAIVerse never uses the SDK's automatic function calling.
+                    # google-genai >= 2.18 logs a "Direct use of AFC ... is not
+                    # recommended" warning once per process unless it is
+                    # explicitly disabled, even when no tools are passed.
+                    automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
+                ),
             )
 
         active_client = self.client
