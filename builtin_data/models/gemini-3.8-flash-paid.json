@@ -1,0 +1,68 @@
+{
+  "model": "gemini-3.8-flash",
+  "system_prompt": "",
+  "display_name": "Gemini 3.8 Flash(有料Tier)",
+  "provider_ref": "gemini",
+  "context_length": 1048576,
+  "supports_images": true,
+  "supports_audio": true,
+  "supports_video": true,
+  "supports_sampling_parameters": false,
+  "supports_model_prefill": false,
+  "prefer_paid": true,
+  "cache": {
+    "supported": true,
+    "default_enabled": false,
+    "default_ttl": "5m",
+    "ttl_options": ["5m", "15m", "30m", "1h"],
+    "type": "gemini_explicit",
+    "min_tokens": 1024
+  },
+  "pricing": {
+    "input_per_1m_tokens": 1.5,
+    "cached_input_per_1m_tokens": 0.15,
+    "output_per_1m_tokens": 7.5,
+    "cache_storage_per_1m_tokens_per_hour": 1.0,
+    "currency": "USD"
+  },
+  "parameters": {
+    "thinking_level": {
+      "type": "dropdown",
+      "options": ["low", "medium", "high"],
+      "default": "medium",
+      "label": "Thinking Level",
+      "description": "思考の深さ。mediumが公式既定。highで複雑な推論、lowで応答速度を優先。3.7ではminimalは廃止され、送るとエラーになる。"
+    },
+    "multi_turn_thinking": {
+      "type": "dropdown",
+      "options": ["on", "off"],
+      "default": "off",
+      "label": "Multi-turn Thinking",
+      "description": "マルチターン推論。onで思考状態を次ターンに引き継ぐ。offでキャッシュ効率を優先。"
+    },
+    "safety_harassment": {
+      "type": "dropdown",
+      "options": ["BLOCK_NONE", "BLOCK_ONLY_HIGH", "BLOCK_MEDIUM_AND_ABOVE", "BLOCK_LOW_AND_ABOVE"],
+      "default": "BLOCK_NONE",
+      "label": "Safety: Harassment"
+    },
+    "safety_hate_speech": {
+      "type": "dropdown",
+      "options": ["BLOCK_NONE", "BLOCK_ONLY_HIGH", "BLOCK_MEDIUM_AND_ABOVE", "BLOCK_LOW_AND_ABOVE"],
+      "default": "BLOCK_ONLY_HIGH",
+      "label": "Safety: Hate Speech"
+    },
+    "safety_sexually_explicit": {
+      "type": "dropdown",
+      "options": ["BLOCK_NONE", "BLOCK_ONLY_HIGH", "BLOCK_MEDIUM_AND_ABOVE", "BLOCK_LOW_AND_ABOVE"],
+      "default": "BLOCK_NONE",
+      "label": "Safety: Sexually Explicit"
+    },
+    "safety_dangerous_content": {
+      "type": "dropdown",
+      "options": ["BLOCK_NONE", "BLOCK_ONLY_HIGH", "BLOCK_MEDIUM_AND_ABOVE", "BLOCK_LOW_AND_ABOVE"],
+      "default": "BLOCK_ONLY_HIGH",
+      "label": "Safety: Dangerous Content"
+    }
+  }
+}
