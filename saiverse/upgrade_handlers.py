@@ -971,4 +971,21 @@ HANDLERS: List[UpgradeHandler] = [
         run=_no_op_ai_upgrade,
         description="Empty release edge 0.3.3 -> 0.3.4 (dependency lock + SDK upgrades, no data migration).",
     ),
+    # ---- v0.3.5: Chronicle 旧形式の引っ越しを再開可能に (コード修正のみ) ----
+    UpgradeHandler(
+        name="city_noop_v0_3_5",
+        scope="city",
+        from_version="0.3.4",
+        to_version="0.3.5",
+        run=_no_op_city_upgrade,
+        description="Empty release edge 0.3.4 -> 0.3.5 (code-only hotfix, no data migration).",
+    ),
+    UpgradeHandler(
+        name="ai_noop_v0_3_5",
+        scope="ai",
+        from_version="0.3.4",
+        to_version="0.3.5",
+        run=_no_op_ai_upgrade,
+        description="Empty release edge 0.3.4 -> 0.3.5 (code-only hotfix, no data migration).",
+    ),
 ]

@@ -1558,6 +1558,54 @@ class ChronicleLegacyMigrationTest(unittest.TestCase):
         existing_short_ids = {e.short_id for e in get_entries_by_level(self.conn, 1)}
         self.assertNotIn(new_entry.short_id, existing_short_ids - {new_entry.short_id})
 
+    def test_migration_resumes_after_a_run_that_committed_pages_but_not_the_drop(self):
+        """前回の移行が「ページの commit まで済んで DROP TABLE で倒れた」状態から
+        再開できる。2026-09-02 の報告 (macOS、旧形式 1443 件): この状態で毎回
+        ``UNIQUE constraint failed: memopedia_pages.id`` になり、Chronicle が空に
+        見え続け、開くたびの失敗が Memopedia の読み込みを待たせていた。"""
+        from sai_memory.arasuji.storage import (
+            CATEGORY_CHRONICLE,
+            ROOT_CHRONICLE_ID,
+            _ensure_root_chronicle,
+            get_entries_by_level,
+            get_entry,
+            init_arasuji_tables,
+        )
+        from sai_memory.memopedia.storage import create_page, init_memopedia_tables
+
+        # 前回の途中経過を再現: 旧テーブルは残ったまま、一部の行だけがページになっている。
+        init_memopedia_tables(self.conn)
+        _ensure_root_chronicle(self.conn)
+        create_page(
+            self.conn,
+            parent_id=ROOT_CHRONICLE_ID,
+            title="chronicle:5",
+            content="第一のあらすじ",
+            category=CATEGORY_CHRONICLE,
+            is_trunk=False,
+            metadata={
+                "level": 1, "source_ids": ["m1", "m2"], "start_time": 100, "end_time": 200,
+                "source_count": 2, "message_count": 2, "is_consolidated": 0,
+                "is_incomplete": 0, "origin_track_id": None, "thread_id": None, "short_id": 5,
+            },
+            page_id="lv1-a",
+        )
+        self.conn.commit()
+
+        with self.assertLogs("sai_memory.arasuji.storage", level="WARNING") as logs:
+            init_arasuji_tables(self.conn)  # 以前はここで IntegrityError
+        self.assertTrue(any("resumed" in line for line in logs.output))
+
+        legacy = self.conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='arasuji_entries'"
+        ).fetchone()
+        self.assertIsNone(legacy)
+        # 既にあったページは一つのまま、残りの行は今回ページになった。
+        ids = sorted(e.id for level in (1, 2) for e in get_entries_by_level(self.conn, level))
+        self.assertEqual(ids, ["lv1-a", "lv1-b", "lv2-a", "trk-1"])
+        self.assertEqual(get_entry(self.conn, "lv1-a").content, "第一のあらすじ")
+        self.assertEqual(get_entry(self.conn, "lv2-a").content, "統合されたあらすじ")
+
 
 class RefGrammarAcceptanceTests(_AtlasTestBase):
     """A1「入口は広く、出口は一本」の恒久検査 (2026-07-15)。

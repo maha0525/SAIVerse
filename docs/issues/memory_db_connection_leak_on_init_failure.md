@@ -1,6 +1,6 @@
 # 記憶データベースの用意に失敗すると接続が閉じられず、後続がロック待ちになる
 
-**状態**: 実装済み・検証待ち (2026-09-02。接続リークは修正済み。報告者の環境で引っ越しが失敗する理由は診断待ち)
+**状態**: 実装済み・検証待ち (2026-09-03。接続リークは v0.3.3 で修正済み。引っ越しが毎回失敗する根本原因を 2026-09-03 に特定して v0.3.5 で修正 — 報告者の環境での確認待ち)
 **起票**: 2026-09-02 (v0.3.1 利用者からの「ひとりだけ Chronicle が存在しないと出る / Chronicle の後に Memopedia の読み込みが終わらない」報告の調査)
 **関連**: `api/routes/people/arasuji.py` `_get_arasuji_db` / `sai_memory/memory/storage.py` `init_db` / `tools/utilities/memory_settings_ui.py` `_get_arasuji_connection`
 
@@ -72,6 +72,19 @@ Memopedia が終わらない」という順序依存はこれで説明がつく�
 ペルソナが 6 人いるが (エイド 0 件 / ルシア 31 件 / MIA 4 件 / 凪 16 件 ほか)、
 複製の上で引っ越しを試したところ**全員最後まで通った** — つまり、まはーの環境は
 単に画面をまだ開いていないだけで、データは健全。報告者の環境固有の何かが要る。
+
+## 根本原因 (2026-09-03 確定)
+
+報告者からの返答と診断ファイルで確定した。
+
+- 返答: ①再起動して Chronicle に触らなければ Memopedia は開ける (壊れた状態はプロセスの中にある = 接続リーク説の裏付け) ②5 分待ってもエラー表示は出ず読み込み中のまま ③Chronicle タブは「まだ生成されていません」、手動整理のダイアログは 55,567 字で畳むものなし。
+- 診断ファイル: 該当ペルソナの memory.db は 560 MB、**Chronicle は旧形式のまま 1443 件**、起動ログに `sqlite3.IntegrityError: UNIQUE constraint failed: memopedia_pages.id` が 10 回。
+
+`memopedia_pages.id` の UNIQUE 違反を起こせる書き手は、`create_page` に明示の id を渡す呼び出しだけで、その中で旧行の id をそのまま使うのは `_migrate_legacy_arasuji_table` (旧 `arasuji_entries` → ページ) だけ。旧テーブルの id は PRIMARY KEY なので表の中に重複は無い。つまり **旧行の id を持つページが、移行の前から既に存在していた** — 前回の移行が「全行をページにして commit」までは済み、直後の `DROP TABLE arasuji_entries` で倒れた (DROP は排他ロックが要るので、560 MB の DB を別の接続が読んでいる最中だと busy で落ちる) 状態。移行は「旧テーブルが在るか」だけで再開の可否を判断し、行ごとの既存確認をしていなかったので、次からは最初の 1 行で UNIQUE 違反 → 例外 → (v0.3.2 までは) 接続が閉じられず書き込みロックが残る → Memopedia の初期化が後ろで待つ、が毎回繰り返された。Chronicle が「まだ生成されていません」に見えるのは、一覧の API が初期化の時点で倒れて中身を返せないため。
+
+修正 (v0.3.5、`sai_memory/arasuji/storage.py`): 移行は既にページになっている id を飛ばし、残りだけ写して DROP まで進む。再開したことを WARNING で残す。`tests/test_memory_atlas.py::ChronicleLegacyMigrationTest::test_migration_resumes_after_a_run_that_committed_pages_but_not_the_drop` で固定。
+
+報告者の環境では、v0.3.5 に上げて Chronicle を一度開けば残りの引っ越しが走って旧テーブルが消え、以後は Chronicle も Memopedia も普通に開けるはず。**確認してもらうこと**: Chronicle タブに 1443 件前後が並ぶこと、その後 Memopedia が開くこと、起動ログに `legacy migration resumed` の警告が一度だけ出ること。
 
 ## 確定させる手段
 
