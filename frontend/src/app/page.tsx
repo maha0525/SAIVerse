@@ -1465,9 +1465,20 @@ export default function Home() {
                 sessionStorage.setItem('saiverse_updating', 'true');
                 setUpdateAvailable(null);
             } else {
+                // Surface the server's reason (e.g. the list of locally modified
+                // files behind a 409) instead of a generic message.
+                let detail = '';
+                try {
+                    const body = await res.json();
+                    if (body && typeof body.detail === 'string' && body.detail.trim()) {
+                        detail = body.detail.trim();
+                    }
+                } catch {
+                    // non-JSON body: fall back to the generic text
+                }
                 const toastId = `update-error-${Date.now()}`;
-                setToasts(prev => [...prev, { id: toastId, content: 'Failed to start update. Check backend logs.' }]);
-                setTimeout(() => setToasts(prev => prev.filter(t => t.id !== toastId)), 5000);
+                setToasts(prev => [...prev, { id: toastId, content: detail || 'Failed to start update. Check backend logs.' }]);
+                setTimeout(() => setToasts(prev => prev.filter(t => t.id !== toastId)), detail ? 15000 : 5000);
             }
         } catch {
             const toastId = `update-error-${Date.now()}`;
@@ -3812,7 +3823,7 @@ export default function Home() {
                     {toasts.map(toast => (
                         <div key={toast.id} className={styles.toast}>
                             <AlertTriangle size={16} />
-                            <span>{toast.content}</span>
+                            <span style={{ whiteSpace: 'pre-wrap' }}>{toast.content}</span>
                             <button
                                 className={styles.toastClose}
                                 onClick={() => setToasts(prev => prev.filter(t => t.id !== toast.id))}

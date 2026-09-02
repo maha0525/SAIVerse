@@ -16,6 +16,9 @@ sai_memory/__pycache__/
 .claude/
 .agent/
 
+# macOS Finder metadata
+.DS_Store
+
 # User data directory (legacy location, now at ~/.saiverse/user_data/)
 user_data/
 user_data.migrated/
@@ -41,7 +44,8 @@ database/data/*
 self_update.log
 # Per-checkout record of what the last completed update installed, plus the
 # temporary file it is written through (.update_complete.tmp<pid>).
-# Must stay ignored: the updater refuses to run on a dirty working tree.
+# Must stay ignored: the updater refuses to run when tracked files are modified,
+# and a marker that had ever been committed would trip that check.
 .update_complete*
 
 # Debug log dump script (local-only developer tool)
@@ -100,7 +104,6 @@ frontend/node_modules/
 frontend/.next/
 frontend/out/
 frontend/build/
-frontend/.DS_Store
 frontend/*.log
 *.tsbuildinfo
 
