@@ -3,6 +3,7 @@ from unittest.mock import patch, MagicMock
 import os
 import json
 import httpx
+import httpx2  # anthropic 1.x runs on httpx2; its exceptions carry httpx2 Request/Response
 from typing import List, Dict, Iterator
 from google.genai import types as genai_types
 
@@ -1175,6 +1176,26 @@ class TestLLMClients(unittest.TestCase):
         self.assertNotIn("budget_tokens", adaptive._thinking_config)
 
 
+    def test_anthropic_client_timeout_is_httpx2(self):
+        """anthropic 1.x runs on httpx2. The SDK does NOT reject an old
+        httpx.Timeout at construction (verified against 1.3.0): it is accepted
+        and each per-phase timeout handed to the transport becomes the whole
+        Timeout object instead of a number. So the type is pinned here, on the
+        real construction path (no SDK mock), because nothing else would fail
+        loudly if someone switched the import back to httpx."""
+        client = AnthropicClient("claude-sonnet-4-5")
+
+        self.assertIsInstance(client.client.timeout, httpx2.Timeout)
+        self.assertEqual(client.client.timeout.connect, 5.0)
+        self.assertEqual(client.client.timeout.read, anthropic_module.DEFAULT_TIMEOUT_SECONDS)
+
+    def test_anthropic_client_timeout_env_override(self):
+        with patch.dict(os.environ, {"ANTHROPIC_TIMEOUT_SECONDS": "120"}):
+            client = AnthropicClient("claude-sonnet-4-5")
+        self.assertIsInstance(client.client.timeout, httpx2.Timeout)
+        self.assertEqual(client.client.timeout.read, 120.0)
+        self.assertEqual(client.client.timeout.connect, 5.0)
+
     @patch('llm_clients.anthropic.time.sleep')
     @patch('llm_clients.anthropic.Anthropic')
     def test_anthropic_execute_with_retry_retries_rate_limit(self, mock_anthropic, mock_sleep):
@@ -1182,8 +1203,8 @@ class TestLLMClients(unittest.TestCase):
         mock_anthropic.return_value = mock_client_instance
         client = AnthropicClient("claude-sonnet-4-5")
 
-        request = httpx.Request("POST", "https://api.anthropic.test/v1/messages")
-        response = httpx.Response(429, request=request)
+        request = httpx2.Request("POST", "https://api.anthropic.test/v1/messages")
+        response = httpx2.Response(429, request=request)
         rate_limit_error = anthropic_module.anthropic.RateLimitError(
             "rate limit", response=response, body=None
         )
@@ -1208,8 +1229,8 @@ class TestLLMClients(unittest.TestCase):
         mock_anthropic.return_value = mock_client_instance
         client = AnthropicClient("claude-sonnet-4-5")
 
-        request = httpx.Request("POST", "https://api.anthropic.test/v1/messages")
-        response = httpx.Response(503, request=request)
+        request = httpx2.Request("POST", "https://api.anthropic.test/v1/messages")
+        response = httpx2.Response(503, request=request)
         server_error = anthropic_module.anthropic.APIStatusError(
             "server unavailable", response=response, body=None
         )
@@ -1226,7 +1247,7 @@ class TestLLMClients(unittest.TestCase):
         mock_anthropic.return_value = mock_client_instance
         client = AnthropicClient("claude-sonnet-4-5")
 
-        request = httpx.Request("POST", "https://api.anthropic.test/v1/messages")
+        request = httpx2.Request("POST", "https://api.anthropic.test/v1/messages")
         timeout_error = anthropic_module.anthropic.APITimeoutError(request)
 
         with self.assertRaises(anthropic_module.LLMTimeoutError):
@@ -1241,8 +1262,8 @@ class TestLLMClients(unittest.TestCase):
         mock_anthropic.return_value = mock_client_instance
         client = AnthropicClient("claude-sonnet-4-5")
 
-        request = httpx.Request("POST", "https://api.anthropic.test/v1/messages")
-        response = httpx.Response(400, request=request)
+        request = httpx2.Request("POST", "https://api.anthropic.test/v1/messages")
+        response = httpx2.Response(400, request=request)
         error = anthropic_module.anthropic.BadRequestError(
             "content policy violation", response=response, body=None
         )
@@ -1259,8 +1280,8 @@ class TestLLMClients(unittest.TestCase):
         mock_anthropic.return_value = mock_client_instance
         client = AnthropicClient("claude-sonnet-4-5")
 
-        request = httpx.Request("POST", "https://api.anthropic.test/v1/messages")
-        response = httpx.Response(400, request=request)
+        request = httpx2.Request("POST", "https://api.anthropic.test/v1/messages")
+        response = httpx2.Response(400, request=request)
         error = anthropic_module.anthropic.BadRequestError(
             "invalid request payload", response=response, body=None
         )

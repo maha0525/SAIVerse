@@ -27,13 +27,14 @@ annotated-doc==0.0.5
     # via fastapi
 annotated-types==0.7.0
     # via pydantic
-anthropic==0.79.0
+anthropic==1.3.0
     # via -r requirements.txt
 anyio==4.12.1
     # via
     #   anthropic
     #   google-genai
     #   httpx
+    #   httpx2
     #   mcp
     #   openai
     #   sse-starlette
@@ -80,7 +81,6 @@ discord-py==2.6.4
     # via -r requirements.txt
 distro==1.9.0
     # via
-    #   anthropic
     #   google-genai
     #   openai
 docstring-parser==0.17.0
@@ -118,15 +118,17 @@ grpcio==1.78.0
 h11==0.16.0
     # via
     #   httpcore
+    #   httpcore2
     #   uvicorn
 hf-xet==1.2.0 ; platform_machine == 'aarch64' or platform_machine == 'amd64' or platform_machine == 'arm64' or platform_machine == 'x86_64'
     # via huggingface-hub
 httpcore==1.0.9
     # via httpx
+httpcore2==2.12.0 ; sys_platform != 'emscripten'
+    # via httpx2
 httpx==0.28.1
     # via
     #   -r requirements.txt
-    #   anthropic
     #   google-genai
     #   langgraph-sdk
     #   langsmith
@@ -134,14 +136,21 @@ httpx==0.28.1
     #   openai
 httpx-sse==0.4.3
     # via mcp
+httpx2==2.12.0
+    # via
+    #   -r requirements.txt
+    #   anthropic
+httpx2-jsfetch==1.0 ; python_full_version >= '3.12' and sys_platform == 'emscripten'
+    # via httpx2
 huggingface-hub==0.36.2
     # via
     #   fastembed
     #   tokenizers
-idna==3.11
+idna==3.19
     # via
     #   anyio
     #   httpx
+    #   httpx2
     #   requests
     #   yarl
 imageio-ffmpeg==0.6.0
@@ -360,6 +369,10 @@ tqdm==4.67.3
     #   fastembed
     #   huggingface-hub
     #   openai
+truststore==0.10.4 ; sys_platform != 'emscripten'
+    # via
+    #   httpcore2
+    #   httpx2
 typing-extensions==4.15.0
     # via
     #   aiosignal
@@ -369,6 +382,7 @@ typing-extensions==4.15.0
     #   fastapi
     #   google-genai
     #   grpcio
+    #   httpx2
     #   huggingface-hub
     #   langchain-core
     #   mcp

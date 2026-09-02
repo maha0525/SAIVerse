@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import httpx
+import httpx2
 
 import anthropic
 
@@ -24,21 +24,21 @@ from llm_clients.exceptions import (
 
 
 def test_should_retry_rate_limit_and_not_authentication() -> None:
-    request = httpx.Request("POST", "https://api.anthropic.test/v1/messages")
-    response = httpx.Response(429, request=request)
+    request = httpx2.Request("POST", "https://api.anthropic.test/v1/messages")
+    response = httpx2.Response(429, request=request)
     err = anthropic.RateLimitError("rate limit", response=response, body=None)
 
     assert _is_rate_limit_error(err)
     assert _should_retry(err)
 
-    auth_err = anthropic.AuthenticationError("invalid key", response=httpx.Response(401, request=request), body=None)
+    auth_err = anthropic.AuthenticationError("invalid key", response=httpx2.Response(401, request=request), body=None)
     assert _is_authentication_error(auth_err)
     assert not _should_retry(auth_err)
 
 
 def test_server_timeout_payment_content_policy_detection() -> None:
-    request = httpx.Request("POST", "https://api.anthropic.test/v1/messages")
-    server_err = anthropic.APIStatusError("server unavailable", response=httpx.Response(503, request=request), body=None)
+    request = httpx2.Request("POST", "https://api.anthropic.test/v1/messages")
+    server_err = anthropic.APIStatusError("server unavailable", response=httpx2.Response(503, request=request), body=None)
 
     assert _is_server_error(server_err)
     assert _is_timeout_error(anthropic.APITimeoutError(request))
