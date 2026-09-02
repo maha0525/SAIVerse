@@ -1,6 +1,6 @@
 # Intent Document: 依存関係の管理 (lock ファイルと「上げる / 止める」の裁定簿)
 
-**ステータス**: 検証待ち (2026-09-02 起草、同日まはー GO。lock の導入と 7 経路の切り替え、§3-1 の全一族の更新、requirements.txt からの `==` 全廃まで実装済み。残るのは §5-5 の実 API 一回ずつ (課金が出るのでまはーの承認が要る) と §5-6 のまはーの手での本番再起動)
+**ステータス**: 完了 (2026-09-03。実装・レビュー 3 巡・lock だけの venv でのフルスイート・本番 venv の同期と再起動 (まはー、エリスと会話・声あり)・OpenAI / Anthropic / xAI の実 API 一回ずつ (隔離環境、下記 §5) まで済。残るのは develop へのマージとリリース発行、それと報告者の macOS で LLM 呼び出しが通ることの確認 (リリース後))
 
 ## 概要
 
@@ -145,8 +145,8 @@ torch / transformers / librosa / numba / gradio / funasr など、venv にある
 2. **素の venv に lock だけで入る** — 開発機の venv ではなく、新しい venv に `pip install -r requirements.lock` して全スイートが緑。これが「ユーザーの手元」の代理。
 3. **update 経路** — 隔離環境 (`docs/test_environment.md`) で `update_engine.py --manual` を通し、完了マーカーが lock の sha を持つこと。
 4. **アドオン導入** — 隔離環境で voice-tts を `pip_install` step から入れ、constraints が効くこと (本体の部品を動かそうとしたら失敗すること、を一つ作為的に確かめる)。**pip の機構としては 2026-09-02 に確認済み**: lock venv で `pip install --dry-run -r <アドオン風の requirements> -c requirements.lock` を実行すると、マーカー付き行と `# via` コメントを含む lock をそのまま constraints として受け付け、`numpy<2` のような本体の pin と矛盾する要求は `ResolutionImpossible` で止まる。`addon_installer` が `-c` を渡す配線はテストで固定済み。voice-tts の実導入は本番 venv の同期のときに。
-5. **SDK の実 API 一回ずつ** — openai / anthropic / gemini / xai を各一回、隔離環境の合成ペルソナから呼ぶ。**課金が出るので、この段の直前にまはーの承認を取る** (対象・回数・見込み額を示して)。
-6. **本番の再起動** — まはーの手で。会話一往復、声、記憶タブ。
+5. **SDK の実 API 一回ずつ** — openai / anthropic / gemini / xai を各一回、隔離環境から呼ぶ。**課金が出るので、この段の直前にまはーの承認を取る** (対象・回数・見込み額を示して)。**済 (2026-09-03、まはー承認)**: ペルソナは使わず SAIVerse のクライアントクラス (`get_llm_client` → `generate` / `generate_stream`) を隔離環境 (`SAIVERSE_HOME=test_data/.saiverse`) から直接叩いた。gpt-5.4-nano (generate 4.7s / stream 1.3s)、claude-haiku-4-5 (1.3s / 0.8s — extra_body 経路と messages.stream の両方)、grok-4-1-fast-reasoning (2.8s)、全部 'pong' が返った。Gemini はまはー本人のエリスとの会話 (本番、gemini-3.7-flash-paid、キャッシュ有効) で確認済み。
+6. **本番の再起動** — まはーの手で。会話一往復、声、記憶タブ。**済 (2026-09-03 00:11 起動)**: バージョン鎖 0.3.3 で完了、lifespan で addon_events のループ登録 → startup complete、TLS 退避の発火なし、エリスと会話 (LLM 成功・Gemini 明示キャッシュ)、voice-tts は 64 片を enqueue して import 失敗 0・合成失敗 0 (前日まで全滅していた経路)。Traceback は stackchan アドオンの Gemini 関数定義変換の既存 3 件のみ。
 
 「全スイート緑」は 2 と 3 の代理にならない (スイートは開発機の venv で走るため)。
 
