@@ -1,6 +1,6 @@
 # Intent Document: 依存関係の管理 (lock ファイルと「上げる / 止める」の裁定簿)
 
-**ステータス**: 設計中 (2026-09-02 起草。まはーの裁定待ち: §6 の未決事項)
+**ステータス**: 実装中 (2026-09-02 起草、同日まはー GO。lock の導入と 7 経路の切り替えは実装済み、次は SDK を一族ごとに上げる §3-1)
 
 ## 概要
 
@@ -103,7 +103,17 @@ requirements.lock     ← 全部品の版を固定した一覧 (機械が作る�
 
 torch / transformers / librosa / numba / gradio / funasr など、venv にある 269 個のうち本体の直接依存 (約 30 個) を除く大半は voice-tts が連れてきたもの。これらは本体の requirements には入っていない (現状で正しい)。本体がやることは **constraints で「本体の部品を動かすな」と言う**ことまで。numba の上限などアドオン自身の部品の整合はアドオン側の requirements の責任 (voice-tts に numba の固定を足すのはアドオンのリポジトリの宿題)。
 
-### 3-4. ついでに片付けるもの
+### 3-4. SDK を上げる前に分かっていること (2026-09-02 の下調べ)
+
+- **HTTP の部品が世代交代している。** `httpx` は保守が止まり、Pydantic チームの互換フォーク **`httpx2`** に移った。anthropic 1.0 (2026-08-20) と openai 3.0 (2026-08-12) はどちらも「httpx2 へ移行」が唯一の破壊的変更で、`httpx` はもう自動では入らない。google-genai 2.x と mcp 1.x はまだ `httpx` (<1.0) を使う。**二つは別パッケージとして共存できる**ので、当面は両方が venv に入る。
+- SAIVerse 自身が `httpx` を直接使う箇所は 10 ファイル。SDK に渡しているのは `llm_clients/anthropic.py` の `httpx.Timeout(...)` だけで、anthropic 1.x では旧 httpx の型を渡すと構築時に `TypeError` になる (黙って壊れない)。`llm_clients/gemini.py` の `isinstance(err, httpx.ReadTimeout ...)` は google-genai が httpx のままなので変えない。方針: **自分のコードは SDK が使う方の型に合わせる** (anthropic / openai 向けは `httpx2`、genai 向けは `httpx`)。プロセス全体で `import httpx` を httpx2 に差し替える `httpx2.alias_httpx()` は使わない — 起動順に依存し、mcp / genai が期待する型を黙って変える。
+- **httpx2 は証明書の信頼元を OS のストアにする** (旧 httpx は certifi)。macOS の Python は OS のストアが空なので、そのままでは LLM 呼び出しが `CERTIFICATE_VERIFY_FAILED` になる — 2026-09-02 に urllib で踏んだのと同じ穴。`saiverse/tls_trust.py` が起動時に `SSL_CERT_FILE` を立てるので httpx2 (trust_env=True) もそれを読む。SDK を上げるコミットで tls_trust.py の docstring (「httpx は影響を受けない」の記述) を現状に合わせ、**macOS の実機で LLM 呼び出しが通ること**を報告者に確認してもらう項目を検証に足す。
+- **google-genai 2.0** の破壊的変更は Interactions API だけで、`GenerateContent` は無変更 (公式 CHANGELOG)。上限 `<2.0` は外せる見込み。
+- **anthropic 1.0** は httpx2 の他に、`messages.create()` から `temperature` / `top_p` / `top_k` を撤去 (渡すと `TypeError`。古いモデル向けに要るなら `extra_body`)、`output_format=` にスキーマ dict を渡す形を撤去、`.with_raw_response` の戻りが新クラスに。SAIVerse 側は **該当あり**: `llm_clients/anthropic_request_builder.py` (278〜283 行) が `temperature` / `top_p` / `top_k` を `messages.create()` の引数に積んでいる。1.x では `extra_body` へ移す (API 自体はまだ受け付ける)。
+- **openai 2.0** は Responses API の function call output の型が広がっただけ、**3.0** は httpx2 のみ。
+- lock の環境マーカーの癖: `hf-xet` の行のマーカーが `platform_machine == 'amd64'` (小文字) で書かれており、Windows (`AMD64`) では偽になって入らない。huggingface_hub は無くても通常のダウンロードに退避するので実害はないが、上流のマーカーをそのまま写した結果であることを記録しておく。
+
+### 3-5. ついでに片付けるもの
 
 - `google-adk 1.5.0` が開発機の venv に孤児で残っている (`docs/issues/starlette_google_adk_version_conflict.md`)。誰も使っていないので uninstall して issue を閉じる。
 - README / installation.md / tailscale-runbook の Python 推奨を 3.13 へ (3.11〜3.13 動作の記述は維持。3.14 は `docs/issues/python_314_support_verification.md` の実機検証待ちのまま)。
