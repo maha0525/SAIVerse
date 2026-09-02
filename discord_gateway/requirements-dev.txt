@@ -1,4 +1,4 @@
--r ../requirements.txt
+-r ../requirements.lock
 pytest>=8.2.0
 pytest-asyncio>=0.23.0
 black>=24.3.0

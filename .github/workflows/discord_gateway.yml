@@ -5,6 +5,7 @@ on:
     paths:
       - "discord_gateway/**"
       - "requirements.txt"
+      - "requirements.lock"
       - "discord_gateway/requirements-dev.txt"
       - ".github/workflows/discord_gateway.yml"
       - "discord_gateway/pyproject.toml"
@@ -12,6 +13,7 @@ on:
     paths:
       - "discord_gateway/**"
       - "requirements.txt"
+      - "requirements.lock"
       - "discord_gateway/requirements-dev.txt"
       - "discord_gateway/pyproject.toml"
 

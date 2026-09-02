@@ -2,7 +2,7 @@ import unittest
 from unittest.mock import patch, MagicMock
 import os
 import json
-import httpx
+import httpx2  # anthropic 1.x / openai 3.x run on httpx2: their http_client, Timeout and exception Request/Response are httpx2 types
 from typing import List, Dict, Iterator
 from google.genai import types as genai_types
 
@@ -205,7 +205,7 @@ class TestLLMClients(unittest.TestCase):
 
         def handler(request):
             captured.append(dict(request.headers))
-            return httpx.Response(200, json={
+            return httpx2.Response(200, json={
                 "id": "x", "object": "chat.completion", "created": 0, "model": "m",
                 "choices": [{
                     "index": 0,
@@ -216,9 +216,14 @@ class TestLLMClients(unittest.TestCase):
 
         # Swap the mocked SDK for a real one built from the very kwargs factory
         # produced, so everything downstream of construction runs for real.
+        # openai 3.x runs on httpx2 (http_client is typed httpx2.Client), so
+        # the injected client is httpx2's. 3.7.0 happens not to reject an old
+        # httpx.Client (measured: a MockTransport round trip even succeeds),
+        # but that is duck-typing luck, not the contract -- stay on the SDK's
+        # own stack so the test exercises what production runs on.
         client.client = _RealOpenAI(
             **mock_openai.call_args.kwargs,
-            http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+            http_client=httpx2.Client(transport=httpx2.MockTransport(handler)),
         )
         client.generate([{"role": "user", "content": "hi"}], tools=[])
         return captured[-1]
@@ -1175,6 +1180,49 @@ class TestLLMClients(unittest.TestCase):
         self.assertNotIn("budget_tokens", adaptive._thinking_config)
 
 
+    def test_openai_client_http_stack_is_httpx2(self):
+        """openai 3.x runs on httpx2. SAIVerse hands the SDK only a plain float
+        timeout (factory: config["timeout"] -> OpenAIClient(timeout=float)),
+        which the SDK wraps itself, so unlike the anthropic client there is no
+        httpx-typed object of ours to pin. What this fixes instead, on the real
+        construction path (no SDK mock): the client the factory builds sits on
+        an httpx2.Client with our timeout applied, so a later "helpful"
+        http_client= or httpx.Timeout(...) addition on this path cannot land
+        on the old stack unnoticed."""
+        client = get_llm_client(
+            "gpt-4.1", "openai", 8192, config={"model": "gpt-4.1", "timeout": 123},
+        )
+
+        self.assertIsInstance(client, OpenAIClient)
+        self.assertIsInstance(client.client._client, httpx2.Client)
+        self.assertEqual(client.client.timeout, 123.0)
+        self.assertEqual(client.client._client.timeout, httpx2.Timeout(123.0))
+
+    def test_openai_client_default_timeout_is_httpx2_too(self):
+        client = OpenAIClient("gpt-4.1")
+        self.assertIsInstance(client.client._client, httpx2.Client)
+        self.assertIsInstance(client.client._client.timeout, httpx2.Timeout)
+
+    def test_anthropic_client_timeout_is_httpx2(self):
+        """anthropic 1.x runs on httpx2. The SDK does NOT reject an old
+        httpx.Timeout at construction (verified against 1.3.0): it is accepted
+        and each per-phase timeout handed to the transport becomes the whole
+        Timeout object instead of a number. So the type is pinned here, on the
+        real construction path (no SDK mock), because nothing else would fail
+        loudly if someone switched the import back to httpx."""
+        client = AnthropicClient("claude-sonnet-4-5")
+
+        self.assertIsInstance(client.client.timeout, httpx2.Timeout)
+        self.assertEqual(client.client.timeout.connect, 5.0)
+        self.assertEqual(client.client.timeout.read, anthropic_module.DEFAULT_TIMEOUT_SECONDS)
+
+    def test_anthropic_client_timeout_env_override(self):
+        with patch.dict(os.environ, {"ANTHROPIC_TIMEOUT_SECONDS": "120"}):
+            client = AnthropicClient("claude-sonnet-4-5")
+        self.assertIsInstance(client.client.timeout, httpx2.Timeout)
+        self.assertEqual(client.client.timeout.read, 120.0)
+        self.assertEqual(client.client.timeout.connect, 5.0)
+
     @patch('llm_clients.anthropic.time.sleep')
     @patch('llm_clients.anthropic.Anthropic')
     def test_anthropic_execute_with_retry_retries_rate_limit(self, mock_anthropic, mock_sleep):
@@ -1182,8 +1230,8 @@ class TestLLMClients(unittest.TestCase):
         mock_anthropic.return_value = mock_client_instance
         client = AnthropicClient("claude-sonnet-4-5")
 
-        request = httpx.Request("POST", "https://api.anthropic.test/v1/messages")
-        response = httpx.Response(429, request=request)
+        request = httpx2.Request("POST", "https://api.anthropic.test/v1/messages")
+        response = httpx2.Response(429, request=request)
         rate_limit_error = anthropic_module.anthropic.RateLimitError(
             "rate limit", response=response, body=None
         )
@@ -1208,8 +1256,8 @@ class TestLLMClients(unittest.TestCase):
         mock_anthropic.return_value = mock_client_instance
         client = AnthropicClient("claude-sonnet-4-5")
 
-        request = httpx.Request("POST", "https://api.anthropic.test/v1/messages")
-        response = httpx.Response(503, request=request)
+        request = httpx2.Request("POST", "https://api.anthropic.test/v1/messages")
+        response = httpx2.Response(503, request=request)
         server_error = anthropic_module.anthropic.APIStatusError(
             "server unavailable", response=response, body=None
         )
@@ -1226,7 +1274,7 @@ class TestLLMClients(unittest.TestCase):
         mock_anthropic.return_value = mock_client_instance
         client = AnthropicClient("claude-sonnet-4-5")
 
-        request = httpx.Request("POST", "https://api.anthropic.test/v1/messages")
+        request = httpx2.Request("POST", "https://api.anthropic.test/v1/messages")
         timeout_error = anthropic_module.anthropic.APITimeoutError(request)
 
         with self.assertRaises(anthropic_module.LLMTimeoutError):
@@ -1241,8 +1289,8 @@ class TestLLMClients(unittest.TestCase):
         mock_anthropic.return_value = mock_client_instance
         client = AnthropicClient("claude-sonnet-4-5")
 
-        request = httpx.Request("POST", "https://api.anthropic.test/v1/messages")
-        response = httpx.Response(400, request=request)
+        request = httpx2.Request("POST", "https://api.anthropic.test/v1/messages")
+        response = httpx2.Response(400, request=request)
         error = anthropic_module.anthropic.BadRequestError(
             "content policy violation", response=response, body=None
         )
@@ -1259,8 +1307,8 @@ class TestLLMClients(unittest.TestCase):
         mock_anthropic.return_value = mock_client_instance
         client = AnthropicClient("claude-sonnet-4-5")
 
-        request = httpx.Request("POST", "https://api.anthropic.test/v1/messages")
-        response = httpx.Response(400, request=request)
+        request = httpx2.Request("POST", "https://api.anthropic.test/v1/messages")
+        response = httpx2.Response(400, request=request)
         error = anthropic_module.anthropic.BadRequestError(
             "invalid request payload", response=response, body=None
         )

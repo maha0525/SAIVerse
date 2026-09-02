@@ -95,6 +95,49 @@ def test_dependency_failure_rolls_back_and_stops_before_restart(tmp_path: Path) 
     restart.assert_not_called()
 
 
+def _rollback_with_reset(project: Path, *, lock_after_reset: bool):  # type: ignore[no-untyped-def]
+    """Run the rollback with ``git reset`` faked to leave (or not leave) a lock
+    behind, and return the ``update_dependencies`` mock."""
+
+    def fake_run(command, *, cwd, label, timeout=900, check=True):  # type: ignore[no-untyped-def]
+        assert command[:3] == ["git", "reset", "--hard"]
+        lock = project / update_engine.REQUIREMENTS_LOCK
+        if lock_after_reset:
+            lock.write_text("pytest==9.0.0\n", encoding="utf-8")
+        elif lock.exists():
+            lock.unlink()
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    with patch.object(update_engine, "_run", side_effect=fake_run), patch.object(
+        update_engine, "update_dependencies"
+    ) as deps:
+        update_engine._rollback_code_and_dependencies(project, "python", "old-head")
+    return deps
+
+
+def test_rollback_to_a_lock_revision_reinstalls_from_the_lock(tmp_path: Path, caplog) -> None:  # type: ignore[no-untyped-def]
+    with caplog.at_level("WARNING", logger="saiverse.update"):
+        deps = _rollback_with_reset(tmp_path, lock_after_reset=True)
+
+    deps.assert_called_once_with(tmp_path, "python", None)
+    assert not any("predates" in record.getMessage() for record in caplog.records)
+
+
+def test_rollback_to_a_pre_lock_revision_reinstalls_from_its_requirements_txt(tmp_path: Path, caplog) -> None:  # type: ignore[no-untyped-def]
+    """Updating from v0.3.3 (no lock) to the first lock release and failing
+    mid-way: after ``git reset`` the old tree has only requirements.txt, so the
+    repair must install from that and say why."""
+    (tmp_path / update_engine.REQUIREMENTS_LOCK).write_text("new-lock\n", encoding="utf-8")
+    (tmp_path / "requirements.txt").write_text("pytest>=9.0.0\n", encoding="utf-8")
+    with caplog.at_level("WARNING", logger="saiverse.update"):
+        deps = _rollback_with_reset(tmp_path, lock_after_reset=False)
+
+    deps.assert_called_once_with(tmp_path, "python", update_engine.LEGACY_REQUIREMENTS)
+    assert update_engine.LEGACY_REQUIREMENTS == "requirements.txt"
+    warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert any("old-head predates requirements.lock" in m and "requirements.txt" in m for m in warnings)
+
+
 def test_health_check_rejects_wrong_city_without_waiting_for_timeout() -> None:
     process = MagicMock()
     process.poll.return_value = None

@@ -169,6 +169,9 @@ def _generate_with_nano_banana_2(
             http_options=types.HttpOptions(
                 retry_options=types.HttpRetryOptions(attempts=1),
             ),
+            # No tools here; disabled so google-genai >= 2.18 does not log its
+            # "Direct use of AFC ... is not recommended" warning.
+            automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
         )
     )
 
@@ -223,6 +226,9 @@ def _generate_with_nano_banana_pro(
             http_options=types.HttpOptions(
                 retry_options=types.HttpRetryOptions(attempts=1),
             ),
+            # No tools here; disabled so google-genai >= 2.18 does not log its
+            # "Direct use of AFC ... is not recommended" warning.
+            automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
         )
     )
 

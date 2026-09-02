@@ -275,14 +275,23 @@ def build_request_params(
     if system_blocks:
         request_params["system"] = system_blocks
 
+    # Sampling parameters. anthropic 1.x removed temperature / top_p / top_k
+    # from messages.create() / messages.stream() (passing them raises
+    # TypeError); models that still honour them take them via extra_body,
+    # which the SDK merges into the request JSON as top-level keys. Keep them
+    # out of request_params itself so the SDK boundary stays valid.
+    sampling: Dict[str, Any] = {}
     if temperature is not None:
-        request_params["temperature"] = temperature
+        sampling["temperature"] = temperature
     elif "temperature" in extra_params:
-        request_params["temperature"] = extra_params["temperature"]
+        sampling["temperature"] = extra_params["temperature"]
 
     for param in ("top_p", "top_k"):
         if param in extra_params:
-            request_params[param] = extra_params[param]
+            sampling[param] = extra_params[param]
+
+    if sampling:
+        request_params["extra_body"] = sampling
 
     if thinking_config:
         request_params["thinking"] = thinking_config

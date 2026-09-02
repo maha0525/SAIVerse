@@ -4,7 +4,7 @@ SAIVerseの環境構築手順を説明します。
 
 ## 前提条件
 
-- **Python 3.12 推奨**（3.11〜3.13 で動作。3.14 以降は非対応）([ダウンロード](https://www.python.org/downloads/release/python-31210/))
+- **Python 3.13 推奨**（3.11〜3.13 で動作。3.14 以降は非対応）([ダウンロード](https://www.python.org/downloads/release/python-31315/))
   - インストール時に「Add python.exe to PATH」にチェックを入れること
 - **Node.js 18以上** ([ダウンロード](https://nodejs.org/))（未導入の場合 `setup.bat` が自動導入）
 - **Git**
@@ -78,8 +78,10 @@ source .venv/bin/activate
 
 ```bash
 pip install --upgrade pip
-pip install -r requirements.txt
+pip install -r requirements.lock
 ```
+
+`requirements.lock` は「動くと確かめた部品の版の一覧」で、全パッケージが版ごと固定されています。`setup.bat` / `setup.sh` / `update.bat` もこのファイルから入れるので、手で入れる場合も同じものを使ってください (`requirements.txt` は開発者が意図した範囲を書く側で、そこから直接は入れません)。
 
 ### 4. フロントエンドのセットアップ
 

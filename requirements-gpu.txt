@@ -1,6 +1,6 @@
 # GPU (CUDA) support for SAIVerse
-# Install this AFTER requirements.txt:
-#   pip install -r requirements.txt
+# Install this AFTER requirements.lock:
+#   pip install -r requirements.lock
 #   pip install -r requirements-gpu.txt
 #
 # Prerequisites:

@@ -10,7 +10,7 @@ This manual walks through the end-to-end setup of the Discord Gateway/Bot integr
 - Python 3.11 or newer
 - `pip` or Poetry available
 - SAIVerse repository checked out
-- Dependencies from `requirements.txt` and `discord_gateway/requirements-dev.txt`
+- Dependencies from `requirements.lock` (pulled in by `discord_gateway/requirements-dev.txt`)
 
 ### 1.2 Discord application (Bot)
 1. Create a new application at the [Discord Developer Portal](https://discord.com/developers/applications).

@@ -11,7 +11,8 @@ SAIVerse/
 ├── setup.bat / setup.sh    # セットアップスクリプト
 ├── start.bat / start.sh    # 起動スクリプト
 ├── update.bat / update.sh  # アップデートスクリプト
-├── requirements.txt        # Python 依存
+├── requirements.txt        # Python 依存の意図 (下限と理由つきの上限。人が書く)
+├── requirements.lock       # 検証済みの版を全部固定した一覧 (機械生成。setup / update はこれを読む)
 ├── CLAUDE.md / AGENTS.md   # AI エージェント向け作業指示
 │
 ├── saiverse/               # コアパッケージ（マネージャ・設定・ユーティリティ）
