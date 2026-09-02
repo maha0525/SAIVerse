@@ -4,7 +4,7 @@ SAIVerseの環境構築手順を説明します。
 
 ## 前提条件
 
-- **Python 3.12 推奨**（3.11〜3.13 で動作。3.14 以降は非対応）([ダウンロード](https://www.python.org/downloads/release/python-31210/))
+- **Python 3.13 推奨**（3.11〜3.13 で動作。3.14 以降は非対応）([ダウンロード](https://www.python.org/downloads/release/python-31315/))
   - インストール時に「Add python.exe to PATH」にチェックを入れること
 - **Node.js 18以上** ([ダウンロード](https://nodejs.org/))（未導入の場合 `setup.bat` が自動導入）
 - **Git**

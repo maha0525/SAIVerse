@@ -25,7 +25,7 @@ git checkout -b feature/your-feature-name
 
 ### Python
 
-- Python 3.12 推奨（3.11〜3.13 で動作、3.14 以降は非対応）を対象
+- Python 3.13 推奨（3.11〜3.13 で動作、3.14 以降は非対応）を対象
 - 型ヒントを積極的に使用
 - docstring は日本語でOK
 

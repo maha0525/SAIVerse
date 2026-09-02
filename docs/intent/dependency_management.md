@@ -1,6 +1,6 @@
 # Intent Document: 依存関係の管理 (lock ファイルと「上げる / 止める」の裁定簿)
 
-**ステータス**: 実装中 (2026-09-02 起草、同日まはー GO。lock の導入と 7 経路の切り替えは実装済み、次は SDK を一族ごとに上げる §3-1)
+**ステータス**: 検証待ち (2026-09-02 起草、同日まはー GO。lock の導入と 7 経路の切り替え、§3-1 の全一族の更新、requirements.txt からの `==` 全廃まで実装済み。残るのは §5-5 の実 API 一回ずつ (課金が出るのでまはーの承認が要る) と §5-6 のまはーの手での本番再起動)
 
 ## 概要
 
@@ -85,11 +85,11 @@ requirements.lock     ← 全部品の版を固定した一覧 (機械が作る�
 | openai | 1.97.0 | 3.7.0 | **完了 (2026-09-02、1.97.0 → 3.7.0)**。SAIVerse のコード変更はゼロ — `llm_clients/openai.py` が SDK に渡すのは文字列と数値だけ (timeout は `float`、`llm_clients/factory.py:250-252`) で、httpx 型の物を渡している箇所が無かった。変えたのはテストの SDK 境界 (`tests/test_llm_clients.py` の `_wire_headers_for` が実 `OpenAI` に注入する `http_client` / `Response` を httpx2 に) と、構築経路の型を固定する 2 テストの追加 (§3-4)。Codex 経路 (`openai_codex*.py`) は SDK を使っておらず無関係 |
 | anthropic | 0.79.0 | 1.3.0 | **完了 (2026-09-02、0.79.0 → 1.3.0)**。コード変更は 2 箇所: `llm_clients/anthropic.py` の Timeout を `httpx2.Timeout` に、`llm_clients/anthropic_request_builder.py` の temperature / top_p / top_k を `extra_body` へ (§3-4)。httpx2 は直接依存として requirements.txt に載せた |
 | google-genai | 1.75.0 | 2.21.0 | **完了 (2026-09-02、1.75.0 → 2.21.0)**。上限 `<2.0` は外した (§3-4)。SAIVerse が使う `types.*` / caches API / 私的 `_api_client.HttpResponse` (SSE パッチ) はすべて無変更。コード変更は AFC 明示無効化の 3 箇所だけ (§3-4) |
-| xai-sdk | 1.7.0 | 1.19.0 | マイナー |
+| xai-sdk | 1.7.0 | 1.19.0 | **完了 (2026-09-02、1.7.0 → 1.19.0)**。1.8〜1.19 の破壊的変更は Files / Collections API だけで、SAIVerse が触る `xai_sdk.Client(api_key, timeout)` / `client.chat.create(model, tools, response_format, reasoning_effort, store_messages)` / `chat.append` / `chat.sample()` / `chat.stream()` / `chat.parse(Model)` / `xai_sdk.chat.{tool,assistant,image,system,user}` と、Response の `content` / `reasoning_content` / `tool_calls` / `usage` / `finish_reason` は 1.19.0 の実物 (inspect.signature と dir) で全部健在。コード変更ゼロ。同じ回で requests 2.32.4 → 2.34.2、python-dotenv 1.1.1 → 1.2.3 も下限化して上げた (どちらもパッチ相当、対象テスト緑、警告なし) |
 | fastapi / starlette / uvicorn | 0.116.1 / 0.47.3 / 0.35.0 | 0.141.1 / 1.6.0 / 0.52.4 | starlette がメジャー。三つ一緒に上げる |
 | pydantic / pydantic-settings | 2.11.7 / 2.5.2 | 2.13.5 / 2.15.0 | マイナー。Web 一族と同じ回で |
-| langgraph 一族 | 1.0.3 | 1.2.11 | マイナー。SEA の実行基盤なのでスイート全体が検証になる |
-| SQLAlchemy | 2.0.41 | 2.0.52 | パッチ |
+| langgraph 一族 | 1.0.3 | 1.2.11 | **完了 (2026-09-02、1.0.3 → 1.2.11。langgraph-checkpoint 3.0.1 → 4.2.0、langgraph-prebuilt 1.0.7 → 1.1.0、langgraph-sdk 0.2.15 → 0.4.4、langchain-core 1.2.12 → 1.6.1、langsmith 0.7.1 → 0.12.1、langsmith が新たに `langchain-protocol` 0.0.19 を連れてきた)**。1.1 で `invoke()` / `ainvoke()` に `version="v2"` が入り、そちらは dict ではなく `GraphOutput` を返す (dict 風アクセスは `LangGraphDeprecatedSinceV11` 警告)。SAIVerse の `sea/langgraph_runner.py` は `version` を渡さないので既定の `"v1"` のまま素の dict が返り、`sea/runtime_graph.py` が結果に対して行う `isinstance(final_state, dict)` 判定 (output_schema の親への書き戻しと PulseContext の flush の入口) は成立し続ける。SEA の既存テストは全部 `compile_playbook` を偽物に差し替えていて実物の langgraph を通っていなかったので、実物で compile → ainvoke して「返るのは素の dict で、langgraph の非推奨警告が出ない」を固定するテストを `tests/sea/test_langgraph_runner_boundary.py` に足した。コード変更ゼロ |
+| SQLAlchemy | 2.0.41 | 2.0.52 | **完了 (2026-09-02、2.0.41 → 2.0.52)**。パッチ。DB / migrate / admin 系の対象テストで `SAWarning` / `MovedIn20Warning` なし。コード変更ゼロ |
 
 ### 3-2. 理由を書いて止める
 
@@ -115,8 +115,9 @@ torch / transformers / librosa / numba / gradio / funasr など、venv にある
 
 ### 3-5. ついでに片付けるもの
 
-- `google-adk 1.5.0` が開発機の venv に孤児で残っている (`docs/issues/starlette_google_adk_version_conflict.md`)。誰も使っていないので uninstall して issue を閉じる。
-- README / installation.md / tailscale-runbook の Python 推奨を 3.13 へ (3.11〜3.13 動作の記述は維持。3.14 は `docs/issues/python_314_support_verification.md` の実機検証待ちのまま)。
+- `google-adk 1.5.0` が開発機の venv に孤児で残っている (`docs/issues/starlette_google_adk_version_conflict.md`)。誰も使っていないので uninstall して issue を閉じる。**衝突自体は解消済み (2026-09-02)**: Web 一族の更新で starlette が 1.6.0 になり、google-adk が要求する `>=0.46.2` を満たす。開発機での uninstall は venv を lock に合わせ直すときに行い、それが済んだら issue を archive へ。
+- README / installation.md / tailscale-runbook の Python 推奨を 3.13 へ (3.11〜3.13 動作の記述は維持。3.14 は `docs/issues/python_314_support_verification.md` の実機検証待ちのまま)。**済 (2026-09-02)**: README.md と `docs/getting-started/installation.md` のリンク先を 3.13.15 (この日の 3.13 系の最新で、Windows 用インストーラがある版) に、`docs/developer-guide/contributing.md` の「3.12 推奨」も 3.13 に。tailscale-runbook は「3.11-3.13」と幅しか書いておらず推奨版を名指ししていないので触っていない。
+- requirements.txt の `==` は 2026-09-02 に全廃した (最後まで残っていた langgraph / python-dotenv / requests / SQLAlchemy を下限化)。以後この file に `==` が現れたら、それは lock に書くべきものが漏れた印。
 - `discord_gateway.yml` の CI は Python 3.11 で回している。lock が 3.11〜3.13 を環境マーカーで覆うので、そのままでよい。
 
 ---
@@ -144,11 +145,11 @@ torch / transformers / librosa / numba / gradio / funasr など、venv にある
 
 ---
 
-## 6. 未決事項 (まはーの裁定待ち)
+## 6. 決定済み (2026-09-02 時点で未決事項はない)
 
-1. **lock を作る道具**: `uv pip compile --universal` を第一候補にしている (理由は §2-3)。pip-tools でも同じことはできるが、プラットフォーム横断の一枚を作るのは uv の方が素直。異論がなければ uv で進める。
-2. **SDK 更新の順番**: 私案は Web 一族 → google-genai → anthropic → openai (影響の小さい順、最後が一番読み替えの多い openai)。
-3. **google-genai の `<2.0` を外すか**: 2.x の変更点を読んでから決める。外せない理由が出たら §3-2 に理由を書いて止める。
+1. **lock を作る道具**: `uv pip compile --universal` で確定 (理由は §2-3。lock の冒頭コメントに再生成の手順を書いてある)。
+2. **SDK 更新の順番**: Web 一族 → google-genai → anthropic → openai の順で実施済み。残りの xai-sdk / langgraph / SQLAlchemy / requests / python-dotenv は最後にまとめて一回で上げた (§3-1)。
+3. **google-genai の `<2.0`**: 2.x の破壊的変更が Interactions API だけと確認して外した (§3-4)。
 
 ---
 

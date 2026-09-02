@@ -66,3 +66,4 @@ fastapi 0.116.1 → 最新版 (starlette 0.46.2+ を含むバージョン) に�
 ## ログ
 
 - 2026-05-20: issue 起票。`google-genai` を 1.56.0 → 1.75.0 にアップグレードした際の pip 警告から発覚。google-adk は Required-by が空で SAIVerse 本体からは未使用。推奨は案 A (uninstall) だが、別タスクで実施する。
+- 2026-09-02: 依存関係の整理 (`docs/intent/dependency_management.md` §3-1、Web 一族の更新) で starlette が 1.6.0 になり、google-adk 1.5.0 が要求する `>=0.46.2` を満たすようになったので、衝突自体は副作用で解消した。開発機の venv に孤児で残っている google-adk の uninstall (案 A) はまだで、開発機の venv を lock に合わせ直すときに一緒に行う。それが済んだらこの issue を archive へ移す。
