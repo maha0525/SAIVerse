@@ -17,6 +17,12 @@
 |---|---|
 | `gen_reference_docs.py` | `docs/reference/` の自動生成 doc（tool-catalog / api-endpoints / database-schema）を再生成。`--check` でドリフト検査。ルートの [`gen_reference_docs.bat`](../../gen_reference_docs.bat) から叩く |
 
+## 依存関係
+
+| スクリプト | 用途 |
+|---|---|
+| `check_lock_platforms.py` | `requirements.lock` の各 pin が Windows / Linux / macOS arm64 / macOS x86_64 × Python 3.11〜3.13 で入るか (wheel か sdist があるか) を PyPI に問う。uv は wheel の有無を見ずに解決するので、lock を作り直したら一度回す。入らない組合せがあれば exit 1。背景は [`docs/intent/dependency_management.md`](../intent/dependency_management.md) §3-2 |
+
 ## SAIMemory / 記憶
 
 ```bash
@@ -80,7 +86,7 @@ python scripts/migrate_to_user_data.py --dry-run   # 既存データを ~/.saive
 
 | スクリプト | 用途 |
 |---|---|
-| `update_engine.py` | 全update入口の正典。clean Git fast-forward、更新前world snapshot、phase fail-stop、同一条件restart、health確認、失敗時rollback。依存更新を始める前にリポジトリ直下の `.update_complete` を消し、全段が成功したときだけ「VERSION + requirements.txt と frontend/package-lock.json の sha256」を JSON で刻み直す (一時ファイル + `os.replace` で atomic)。途中で死ねば印は必ず無く、次回起動は実在照合を通る |
+| `update_engine.py` | 全update入口の正典。clean Git fast-forward、更新前world snapshot、phase fail-stop、同一条件restart、health確認、失敗時rollback。依存更新を始める前にリポジトリ直下の `.update_complete` を消し、全段が成功したときだけ「VERSION + requirements.txt / requirements.lock / frontend/package-lock.json の sha256」を JSON で刻み直す (一時ファイル + `os.replace` で atomic)。途中で死ねば印は必ず無く、次回起動は実在照合を通る |
 | `update_engine.py --check-complete` | 起動前の「更新が仕上がっているか」検査 (start.bat / start.sh が呼ぶ)。コードも依存も書き換えない。終了コード 0=起動可 / 10=`--manual` で仕上げが必要 / 11=判定できなかったので警告して起動続行。詳細は [issue](../issues/v0229_update_bat_truncates_after_git_pull.md) |
 | `self_update.py` | 旧セルフアップデート入口から `update_engine.py` への互換wrapper |
 | `set_version.py` | バージョン刻印 |

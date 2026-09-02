@@ -954,4 +954,21 @@ HANDLERS: List[UpgradeHandler] = [
         run=_no_op_ai_upgrade,
         description="Empty release edge 0.3.2 -> 0.3.3 (code-only hotfix, no data migration).",
     ),
+    # ---- v0.3.4: 依存関係の lock 導入と SDK 更新。世界のデータ移行なし ----
+    UpgradeHandler(
+        name="city_noop_v0_3_4",
+        scope="city",
+        from_version="0.3.3",
+        to_version="0.3.4",
+        run=_no_op_city_upgrade,
+        description="Empty release edge 0.3.3 -> 0.3.4 (dependency lock + SDK upgrades, no data migration).",
+    ),
+    UpgradeHandler(
+        name="ai_noop_v0_3_4",
+        scope="ai",
+        from_version="0.3.3",
+        to_version="0.3.4",
+        run=_no_op_ai_upgrade,
+        description="Empty release edge 0.3.3 -> 0.3.4 (dependency lock + SDK upgrades, no data migration).",
+    ),
 ]

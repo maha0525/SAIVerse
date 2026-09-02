@@ -36,6 +36,22 @@ LOGGER = logging.getLogger("saiverse.update")
 # half-way. See docs/issues/v0229_update_bat_truncates_after_git_pull.md.
 UPDATE_COMPLETE_MARKER = ".update_complete"
 
+# The pinned, verified package set. Every install path (setup.bat / setup.sh,
+# this engine, addon installs as constraints) reads this file, never
+# requirements.txt, so all users get the same combination. It is universal:
+# lines carry environment markers (``pywin32==311 ; sys_platform == 'win32'``)
+# and ``scan_requirements`` evaluates them for the running interpreter.
+# See docs/intent/dependency_management.md.
+REQUIREMENTS_LOCK = "requirements.lock"
+
+# The pre-lock install target. This constant exists *only* so that a rollback
+# to a revision older than the lock (v0.3.3 and earlier have no
+# requirements.lock) can still reinstall that revision's packages. It is never
+# the target of a normal update -- ``update_dependencies`` defaults to the lock
+# and does not fall back to this file when the lock is missing; the rollback
+# path is the single caller that picks it, explicitly, after ``git reset``.
+LEGACY_REQUIREMENTS = "requirements.txt"
+
 # Exit codes of ``--check-complete``. The launchers branch on these, so they are
 # part of the contract with start.bat / start.sh.
 CHECK_READY = 0
@@ -82,11 +98,14 @@ def _file_digest(path: Path) -> str | None:
 def completion_fingerprint(project_dir: Path) -> dict[str, Any] | None:
     """What a completed update installs, as comparable values.
 
-    The VERSION alone is not enough: a pull can change ``requirements.txt`` or
-    ``frontend/package-lock.json`` while VERSION stays put (every commit between
-    two releases does), and the marker would then claim a finished update over
-    packages that were never installed. Hashing the two dependency lists closes
-    that. The commit SHA deliberately is *not* part of this -- on a development
+    The VERSION alone is not enough: a pull can change the dependency lists
+    while VERSION stays put (every commit between two releases does), and the
+    marker would then claim a finished update over packages that were never
+    installed. Hashing the lists closes that. ``requirements.lock`` is what pip
+    actually installs (see ``update_dependencies``); ``requirements.txt`` is
+    the intent it was generated from, and a change there without a regenerated
+    lock is still a reason to run the finishing pass rather than hide the gap.
+    The commit SHA deliberately is *not* part of this -- on a development
     checkout every pull would then demand a pip run that changes nothing.
 
     Returns None when VERSION is unreadable, i.e. when nothing can be recorded.
@@ -97,6 +116,7 @@ def completion_fingerprint(project_dir: Path) -> dict[str, Any] | None:
     return {
         "version": version,
         "requirements_sha256": _file_digest(project_dir / "requirements.txt"),
+        "requirements_lock_sha256": _file_digest(project_dir / REQUIREMENTS_LOCK),
         "package_lock_sha256": _file_digest(project_dir / "frontend" / "package-lock.json"),
     }
 
@@ -303,6 +323,13 @@ def scan_requirements(requirements: Path, *, depth: int = 1) -> RequirementScan 
             degraded = degraded or nested_scan.degraded
             continue
         if _Requirement is None:
+            if ";" in line:
+                # A marker cannot be evaluated without packaging. Treating the
+                # line as required would report Windows-only pins (pywin32,
+                # colorama) as missing on macOS / Linux and send every start
+                # through a finishing pass that can never satisfy them.
+                unparsed.append(line)
+                continue
             name = _naive_requirement_name(line)
             if name is None:
                 unparsed.append(line)
@@ -355,11 +382,15 @@ def _installed_versions() -> dict[str, str | None] | None:
 def missing_dependencies(project_dir: Path) -> DependencyReport | None:
     """Requirements this interpreter does not satisfy.
 
-    Returns None when the answer cannot be determined at all (unreadable
-    requirements file, unreadable package metadata) so callers can tell
-    "nothing missing" apart from "could not look".
+    Judged against ``requirements.lock`` -- the exact set an update installs --
+    so a package present at a version other than the pinned one counts as
+    missing, the same way an absent one does.
+
+    Returns None when the answer cannot be determined at all (unreadable lock
+    file, unreadable package metadata) so callers can tell "nothing missing"
+    apart from "could not look".
     """
-    scan = scan_requirements(project_dir / "requirements.txt")
+    scan = scan_requirements(project_dir / REQUIREMENTS_LOCK)
     if scan is None:
         return None
     installed = _installed_versions()
@@ -373,8 +404,14 @@ def missing_dependencies(project_dir: Path) -> DependencyReport | None:
             missing.append(dist.name)
             continue
         version = installed[key]
-        if dist.specifier is None or version is None:
-            continue  # name is present and no bound could be checked
+        if dist.specifier is None:
+            continue  # name is present and there is no bound to check
+        if version is None:
+            # The dist-info exists but carries no version (damaged metadata):
+            # the pin cannot be confirmed, so say "unchecked" instead of
+            # letting a broken install pass as satisfied.
+            unchecked.append(f"{dist.name} (installed version unreadable, required {dist.specifier})")
+            continue
         try:
             satisfied = dist.specifier.contains(version, prereleases=True)
         except Exception:
@@ -478,7 +515,11 @@ def _run(
     cwd: Path,
     label: str,
     timeout: int = 900,
+    check: bool = True,
 ) -> subprocess.CompletedProcess[str]:
+    """Run one phase. A non-zero exit raises ``UpdateError`` unless ``check`` is
+    False, for commands whose non-zero exit is an answer rather than a failure
+    (``pip check`` exits 1 when it finds conflicts)."""
     LOGGER.info("Phase: %s", label)
     try:
         result = subprocess.run(
@@ -490,7 +531,7 @@ def _run(
         )
     except (OSError, subprocess.SubprocessError) as exc:
         raise UpdateError(f"{label} could not run: {exc}") from exc
-    if result.returncode != 0:
+    if check and result.returncode != 0:
         detail = (result.stderr or result.stdout).strip()[-2000:]
         raise UpdateError(f"{label} failed with exit {result.returncode}: {detail}")
     return result
@@ -681,12 +722,81 @@ def update_code(project_dir: Path) -> None:
     )
 
 
-def update_dependencies(project_dir: Path, python: str) -> None:
+_PIP_CHECK_CLEAN = "No broken requirements found."
+
+
+def _report_addon_conflicts(project_dir: Path, python: str) -> None:
+    """Make it visible, in this update's log, when the lock broke a package the
+    lock does not own.
+
+    The venv is shared with addons (voice-tts brings numba, torch, ...). ``pip
+    install -r requirements.lock`` moves the core's packages and exits 0 even
+    when an addon's package now has an unsatisfiable requirement (2026-09-02:
+    numpy moved past what numba allowed, and voice-tts broke a day later with
+    nothing in the update log). Addon consistency is the addon's responsibility
+    (docs/intent/dependency_management.md §3-3), so this neither fails the
+    update nor rolls back -- it only logs each conflict ``pip check`` reports.
+    """
+    try:
+        result = _run(
+            [python, "-m", "pip", "check"],
+            cwd=project_dir,
+            label="check installed packages for conflicts",
+            timeout=300,
+            check=False,
+        )
+    except UpdateError as exc:
+        LOGGER.warning("[deps] pip check could not run; addon conflicts were not checked: %s", exc)
+        return
+    if result.returncode == 0:
+        return
+    if result.returncode != 1:
+        # Only exit 1 is pip's answer "conflicts found". 2 is a usage / internal
+        # error, a negative code is a signal: in both cases nothing was checked,
+        # and reporting the output as conflicts would put a pip crash in the log
+        # dressed up as an addon problem.
+        detail = (result.stderr or result.stdout or "").strip()[-2000:]
+        LOGGER.warning(
+            "[deps] pip check could not run (exit %s); addon conflicts were not checked%s",
+            result.returncode,
+            f": {detail}" if detail else "",
+        )
+        return
+    conflicts = [
+        line.strip()
+        for line in (result.stdout or "").splitlines()
+        if line.strip() and line.strip() != _PIP_CHECK_CLEAN
+    ]
+    if not conflicts:
+        conflicts = [(result.stderr or "").strip()[-2000:] or f"exit {result.returncode} with no output"]
+    for line in conflicts:
+        LOGGER.warning("[deps] pip check: %s", line)
+    LOGGER.warning(
+        "[deps] 上の %d 件は requirements.lock の外にあるパッケージ (アドオンか手で入れたもの) との衝突です。"
+        "本体の更新自体は完了しています。該当のアドオンは入れ直す (アドオンを入れ直す) 必要があるかもしれません。",
+        len(conflicts),
+    )
+
+
+def update_dependencies(
+    project_dir: Path,
+    python: str,
+    requirements_file: str | None = None,
+) -> None:
+    """Install the Python packages and the frontend packages.
+
+    ``requirements_file`` defaults to the lock and is *not* chosen by looking at
+    the working tree: a checkout that has no lock is a broken update target, and
+    pip failing loudly on the missing file is the correct outcome. The only
+    caller that passes something else is ``_rollback_code_and_dependencies``,
+    for revisions that predate the lock.
+    """
     _run(
-        [python, "-m", "pip", "install", "-r", "requirements.txt"],
+        [python, "-m", "pip", "install", "-r", requirements_file or REQUIREMENTS_LOCK],
         cwd=project_dir,
         label="install Python dependencies",
     )
+    _report_addon_conflicts(project_dir, python)
     frontend = project_dir / "frontend"
     if not frontend.is_dir():
         raise UpdateError("frontend directory is missing after code update")
@@ -717,8 +827,21 @@ def _rollback_code_and_dependencies(
         label="rollback code revision",
         timeout=120,
     )
+    requirements_file: str | None = None
+    if not (project_dir / REQUIREMENTS_LOCK).is_file():
+        # Updating *from* v0.3.3 or earlier *to* the first lock release: the
+        # reset just removed the lock together with the new code, so the old
+        # revision's own package list is the only thing that describes what it
+        # needs. This is the sole place that installs from that file.
+        LOGGER.warning(
+            "Revision %s predates %s; reinstalling its packages from %s instead",
+            old_revision,
+            REQUIREMENTS_LOCK,
+            LEGACY_REQUIREMENTS,
+        )
+        requirements_file = LEGACY_REQUIREMENTS
     try:
-        update_dependencies(project_dir, python)
+        update_dependencies(project_dir, python, requirements_file)
     except UpdateError:
         LOGGER.exception("Dependency repair for the previous revision also failed")
 

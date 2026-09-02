@@ -8,7 +8,7 @@ import time
 from typing import Any, Dict, Iterator, List, Optional
 
 import anthropic
-import httpx
+import httpx2
 from anthropic import Anthropic
 from anthropic.types import Message
 
@@ -79,9 +79,15 @@ class AnthropicClient(LLMClient):
             )
         except (TypeError, ValueError):
             timeout_seconds = DEFAULT_TIMEOUT_SECONDS
+        # anthropic 1.x runs on httpx2 (the maintained fork of httpx), so the
+        # Timeout must be httpx2's. An old httpx.Timeout is NOT rejected at
+        # construction: it is accepted and then every per-phase timeout the
+        # transport receives is the whole Timeout object instead of a number
+        # (verified against 1.3.0 with a MockTransport, 2026-09-02). Tests pin
+        # the type so this cannot regress silently.
         self.client = Anthropic(
             api_key=api_key,
-            timeout=httpx.Timeout(timeout_seconds, connect=5.0),
+            timeout=httpx2.Timeout(timeout_seconds, connect=5.0),
         )
         self.model = model
 

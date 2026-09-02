@@ -10,16 +10,26 @@ finished update it did not actually verify.
 from __future__ import annotations
 
 import json
+from importlib import metadata
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from scripts import update_engine
+
+# The lock pins exact versions, so a fixture lock that this interpreter
+# satisfies has to name the version that is actually installed.
+_INSTALLED_PYTEST = metadata.version("pytest")
 
 
 def _make_project(tmp_path: Path, version: str = "0.3.0") -> Path:
     """A checkout that a completed update would leave behind."""
     (tmp_path / "VERSION").write_text(version + "\n", encoding="utf-8")
     (tmp_path / "requirements.txt").write_text("pytest>=9.0.0\n", encoding="utf-8")
+    (tmp_path / "requirements.lock").write_text(
+        f"pytest=={_INSTALLED_PYTEST}\n    # via -r requirements.txt\n", encoding="utf-8"
+    )
     frontend = tmp_path / "frontend"
     (frontend / "node_modules").mkdir(parents=True)
     (frontend / "package-lock.json").write_text('{"name": "saiverse"}\n', encoding="utf-8")
@@ -273,8 +283,32 @@ def test_stale_marker_demands_the_update_be_finished(tmp_path: Path) -> None:
     assert update_engine.check_update_complete(project) == update_engine.CHECK_NEEDS_FINISH
 
 
+def test_fingerprint_binds_the_marker_to_the_lock(tmp_path: Path) -> None:
+    """What pip installs is requirements.lock, so the marker must carry its digest."""
+    project = _make_project(tmp_path)
+    fingerprint = update_engine.completion_fingerprint(project)
+    assert fingerprint is not None
+    assert fingerprint["requirements_lock_sha256"] == update_engine._file_digest(
+        project / "requirements.lock"
+    )
+    assert fingerprint["requirements_lock_sha256"] is not None
+    # The intent file stays in too: it changing without a regenerated lock is a
+    # gap to surface, not to hide.
+    assert fingerprint["requirements_sha256"] is not None
+
+
+def test_changed_lock_demands_the_update_be_finished(tmp_path: Path) -> None:
+    """A pull between releases keeps VERSION but can move requirements.lock."""
+    project = _make_project(tmp_path)
+    update_engine.write_completion_marker(project)
+    (project / "requirements.lock").write_text(
+        f"pytest=={_INSTALLED_PYTEST}\nfeedparser==6.0.12\n", encoding="utf-8"
+    )
+    assert update_engine.check_update_complete(project) == update_engine.CHECK_NEEDS_FINISH
+
+
 def test_changed_requirements_demand_the_update_be_finished(tmp_path: Path) -> None:
-    """A pull between releases keeps VERSION but can move requirements.txt."""
+    """The intent file moving without its lock is still a reason to finish."""
     project = _make_project(tmp_path)
     update_engine.write_completion_marker(project)
     (project / "requirements.txt").write_text("pytest>=9.0.0\nfeedparser>=6.0\n", encoding="utf-8")
@@ -447,8 +481,12 @@ def test_scan_without_packaging_falls_back_and_says_so(tmp_path: Path) -> None:
         scan = update_engine.scan_requirements(requirements)
 
     assert scan is not None
-    assert [dist.name for dist in scan.required] == ["fastapi", "pywin32"]
+    # Without packaging the marker cannot be evaluated, so the line is reported
+    # as unchecked rather than required: otherwise a macOS start would see the
+    # Windows-only pin as missing and loop through finishing passes forever.
+    assert [dist.name for dist in scan.required] == ["fastapi"]
     assert all(dist.specifier is None for dist in scan.required)
+    assert scan.unparsed == ['pywin32; sys_platform == "win32"']
     assert scan.degraded is True
 
 
@@ -515,21 +553,21 @@ def test_scan_reports_an_unknown_option_as_unchecked(tmp_path: Path) -> None:
 def test_an_editable_line_makes_a_markerless_start_inconclusive(tmp_path: Path) -> None:
     """End to end: an unverifiable line must not be recorded as a finished update."""
     project = _make_project(tmp_path)
-    (project / "requirements.txt").write_text("pytest\n-e .\n", encoding="utf-8")
+    (project / "requirements.lock").write_text("pytest\n-e .\n", encoding="utf-8")
     assert update_engine.check_update_complete(project) == update_engine.CHECK_INCONCLUSIVE
     assert not update_engine.marker_path(project).exists()
 
 
 def test_a_constraints_line_makes_a_markerless_start_inconclusive(tmp_path: Path) -> None:
     project = _make_project(tmp_path)
-    (project / "requirements.txt").write_text("pytest\n-c constraints.txt\n", encoding="utf-8")
+    (project / "requirements.lock").write_text("pytest\n-c constraints.txt\n", encoding="utf-8")
     assert update_engine.check_update_complete(project) == update_engine.CHECK_INCONCLUSIVE
     assert not update_engine.marker_path(project).exists()
 
 
 def test_an_unknown_option_makes_a_markerless_start_inconclusive(tmp_path: Path) -> None:
     project = _make_project(tmp_path)
-    (project / "requirements.txt").write_text(
+    (project / "requirements.lock").write_text(
         "pytest\n--some-future-pip-option value\n", encoding="utf-8"
     )
     assert update_engine.check_update_complete(project) == update_engine.CHECK_INCONCLUSIVE
@@ -539,16 +577,51 @@ def test_an_unknown_option_makes_a_markerless_start_inconclusive(tmp_path: Path)
 def test_harmless_options_do_not_hold_back_a_markerless_start(tmp_path: Path) -> None:
     """The allowlist exists so a private index does not make every start inconclusive."""
     project = _make_project(tmp_path)
-    (project / "requirements.txt").write_text(
+    (project / "requirements.lock").write_text(
         "--index-url https://example.invalid/simple\npytest\n", encoding="utf-8"
     )
     assert update_engine.check_update_complete(project) == update_engine.CHECK_READY
     assert _recorded_version(project) == "0.3.0"
 
 
+def test_markerless_start_judges_packages_against_the_lock_not_the_intent(tmp_path: Path) -> None:
+    """requirements.txt may be satisfied while the lock is not; the lock decides."""
+    project = _make_project(tmp_path)
+    (project / "requirements.txt").write_text("pytest>=1.0\n", encoding="utf-8")
+    (project / "requirements.lock").write_text("pytest==0.0.1\n", encoding="utf-8")
+    assert update_engine.check_update_complete(project) == update_engine.CHECK_NEEDS_FINISH
+    assert not update_engine.marker_path(project).exists()
+
+
+def test_missing_dependencies_reads_the_lock_and_evaluates_its_markers(tmp_path: Path) -> None:
+    """A universal lock lists every platform; only the lines for this one apply.
+
+    Without marker evaluation a Windows machine would be told it lacks a
+    Linux-only package (and vice versa) and every start would demand an update.
+    """
+    (tmp_path / "requirements.lock").write_text(
+        "\n".join(
+            [
+                "# requirements.lock -- generated",
+                f"pytest=={_INSTALLED_PYTEST} ; python_version >= '3.0'",
+                "    # via -r requirements.txt",
+                "saiverse-other-platform-only==1.0 ; sys_platform == 'saiverse-nowhere'",
+                "    # via somepkg",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    report = update_engine.missing_dependencies(tmp_path)
+    assert report is not None
+    assert report.missing == []
+    assert report.unchecked == []
+    assert report.degraded is False
+
+
 def test_missing_dependencies_reports_absent_distributions(tmp_path: Path) -> None:
-    (tmp_path / "requirements.txt").write_text(
-        "pytest>=9.0.0\nsaiverse-not-a-real-package>=1.0\n", encoding="utf-8"
+    (tmp_path / "requirements.lock").write_text(
+        f"pytest=={_INSTALLED_PYTEST}\nsaiverse-not-a-real-package==1.0\n", encoding="utf-8"
     )
     report = update_engine.missing_dependencies(tmp_path)
     assert report is not None
@@ -556,14 +629,159 @@ def test_missing_dependencies_reports_absent_distributions(tmp_path: Path) -> No
     assert report.unchecked == []
 
 
-def test_missing_dependencies_reports_an_installed_but_too_old_distribution(tmp_path: Path) -> None:
-    """A name-only check would call this healthy; the version bound must apply."""
-    (tmp_path / "requirements.txt").write_text("pytest>=999.0.0\n", encoding="utf-8")
+def test_missing_dependencies_reports_an_installed_but_differently_pinned_distribution(
+    tmp_path: Path,
+) -> None:
+    """A name-only check would call this healthy; the pinned version must apply."""
+    (tmp_path / "requirements.lock").write_text("pytest==999.0.0\n", encoding="utf-8")
     report = update_engine.missing_dependencies(tmp_path)
     assert report is not None
     assert len(report.missing) == 1
     assert report.missing[0].startswith("pytest (installed ")
 
 
-def test_missing_dependencies_is_unknown_without_a_requirements_file(tmp_path: Path) -> None:
+def test_missing_dependencies_reports_unreadable_installed_version_as_unchecked(
+    tmp_path: Path,
+) -> None:
+    """A dist-info whose version cannot be read must not pass as satisfying a pin."""
+    (tmp_path / "requirements.lock").write_text("pytest==9.0.0\n", encoding="utf-8")
+    with patch.object(update_engine, "_installed_versions", return_value={"pytest": None}):
+        report = update_engine.missing_dependencies(tmp_path)
+    assert report is not None
+    assert report.missing == []
+    assert report.unchecked == ["pytest (installed version unreadable, required ==9.0.0)"]
+
+
+def test_missing_dependencies_is_unknown_without_a_lock_file(tmp_path: Path) -> None:
+    (tmp_path / "requirements.txt").write_text("pytest>=9.0.0\n", encoding="utf-8")
     assert update_engine.missing_dependencies(tmp_path) is None
+
+
+# --- what the update installs ------------------------------------------------
+
+
+def test_update_dependencies_installs_from_the_lock(tmp_path: Path) -> None:
+    """The lock is what makes every user's set identical; pip must read it."""
+    project = _make_project(tmp_path)
+    commands: list[list[str]] = []
+
+    def recording_run(command, *, cwd, label, timeout=900, check=True):  # type: ignore[no-untyped-def]
+        commands.append(list(command))
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    with patch.object(update_engine, "_run", side_effect=recording_run), patch.object(
+        update_engine.shutil, "which", return_value="npm"
+    ):
+        update_engine.update_dependencies(project, "python")
+
+    assert commands[0] == ["python", "-m", "pip", "install", "-r", "requirements.lock"]
+    assert not any("requirements.txt" in part for command in commands for part in command)
+
+
+def test_update_dependencies_never_falls_back_when_the_lock_is_missing(tmp_path: Path) -> None:
+    """A checkout without a lock is a broken update target. pip must still be
+    told to read the lock and fail loudly -- the legacy file is only for the
+    rollback path, which asks for it explicitly."""
+    project = _make_project(tmp_path)
+    (project / "requirements.lock").unlink()
+    commands: list[list[str]] = []
+
+    def recording_run(command, *, cwd, label, timeout=900, check=True):  # type: ignore[no-untyped-def]
+        commands.append(list(command))
+        if command[:5] == ["python", "-m", "pip", "install", "-r"]:
+            raise update_engine.UpdateError(f"{label} failed with exit 1: no such file {command[-1]}")
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    with patch.object(update_engine, "_run", side_effect=recording_run), patch.object(
+        update_engine.shutil, "which", return_value="npm"
+    ):
+        with pytest.raises(update_engine.UpdateError, match="requirements.lock"):
+            update_engine.update_dependencies(project, "python")
+
+    assert commands == [["python", "-m", "pip", "install", "-r", "requirements.lock"]]
+
+
+# --- pip check after the lock is installed: visibility, not enforcement --------
+
+
+def _fake_run_with_pip_check(returncode: int, stdout: str, stderr: str = ""):  # type: ignore[no-untyped-def]
+    """``_run`` that answers ``pip check`` with the given result and 0 to the rest."""
+    calls: list[dict] = []
+
+    def fake_run(command, *, cwd, label, timeout=900, check=True):  # type: ignore[no-untyped-def]
+        calls.append({"command": list(command), "check": check})
+        if command[-2:] == ["pip", "check"]:
+            if check and returncode != 0:
+                raise update_engine.UpdateError("pip check must be run with check=False")
+            return MagicMock(returncode=returncode, stdout=stdout, stderr=stderr)
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    return fake_run, calls
+
+
+def test_update_dependencies_runs_pip_check_after_the_lock(tmp_path: Path, caplog) -> None:  # type: ignore[no-untyped-def]
+    """A clean environment: pip check runs right after the install and logs nothing."""
+    project = _make_project(tmp_path)
+    fake_run, calls = _fake_run_with_pip_check(0, "No broken requirements found.\n")
+
+    with caplog.at_level("WARNING", logger="saiverse.update"), patch.object(
+        update_engine, "_run", side_effect=fake_run
+    ), patch.object(update_engine.shutil, "which", return_value="npm"):
+        update_engine.update_dependencies(project, "python")
+
+    commands = [call["command"] for call in calls]
+    assert commands[0][-3:] == ["install", "-r", "requirements.lock"]
+    assert commands[1] == ["python", "-m", "pip", "check"]
+    assert not any("[deps]" in record.getMessage() for record in caplog.records)
+
+
+def test_update_dependencies_logs_addon_conflicts_without_failing(tmp_path: Path, caplog) -> None:  # type: ignore[no-untyped-def]
+    """The 2026-09-02 shape: the lock moved numpy, an addon's numba now conflicts.
+
+    pip check exits 1. The update must still complete (addon consistency is the
+    addon's job) and every conflict line must be in the log with the fixed prefix.
+    """
+    project = _make_project(tmp_path)
+    conflict_lines = [
+        "numba 0.61.0 has requirement numpy<2.5,>=1.24, but you have numpy 2.5.2.",
+        "librosa 0.10.2 has requirement soundfile>=0.12.1, but you have soundfile 0.11.0.",
+    ]
+    fake_run, calls = _fake_run_with_pip_check(1, "\n".join(conflict_lines) + "\n")
+
+    with caplog.at_level("WARNING", logger="saiverse.update"), patch.object(
+        update_engine, "_run", side_effect=fake_run
+    ), patch.object(update_engine.shutil, "which", return_value="npm"):
+        update_engine.update_dependencies(project, "python")  # must not raise
+
+    # npm still ran after the conflicts were reported: the update went on.
+    assert calls[-1]["command"][0] == "npm"
+    messages = [record.getMessage() for record in caplog.records if record.levelname == "WARNING"]
+    for line in conflict_lines:
+        assert f"[deps] pip check: {line}" in messages
+    summary = [m for m in messages if "アドオンを入れ直す" in m]
+    assert len(summary) == 1
+    assert "requirements.lock" in summary[0]
+
+
+def test_pip_check_crash_is_not_reported_as_addon_conflicts(tmp_path: Path, caplog) -> None:  # type: ignore[no-untyped-def]
+    """Only exit 1 means "conflicts found". Exit 2 (usage / internal error) means
+    pip did not check anything: the log must say so and must not dress the
+    traceback up as an addon problem. The update still completes."""
+    project = _make_project(tmp_path)
+    fake_run, calls = _fake_run_with_pip_check(
+        2, "", stderr="Traceback (most recent call last):\n  ...\nKeyError: 'metadata'\n"
+    )
+
+    with caplog.at_level("WARNING", logger="saiverse.update"), patch.object(
+        update_engine, "_run", side_effect=fake_run
+    ), patch.object(update_engine.shutil, "which", return_value="npm"):
+        update_engine.update_dependencies(project, "python")  # must not raise
+
+    assert calls[-1]["command"][0] == "npm"
+    messages = [record.getMessage() for record in caplog.records if record.levelname == "WARNING"]
+    could_not_run = [m for m in messages if m.startswith("[deps] pip check could not run (exit 2)")]
+    assert len(could_not_run) == 1
+    assert "addon conflicts were not checked" in could_not_run[0]
+    assert "KeyError: 'metadata'" in could_not_run[0]
+    assert not any(m.startswith("[deps] pip check: ") for m in messages)
+    assert not any("アドオンを入れ直す" in m for m in messages)

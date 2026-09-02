@@ -131,7 +131,7 @@ SAIVerseは、AIと人が共に生きる世界を目指すプロジェクトで�
 ### 前提条件
 
 下記を用意してください（**Windows では手動インストールが必須なのは Python だけ**です。Node.js・Git は `setup.bat` が自動で導入します）。
-- [Python 3.12.10](https://www.python.org/downloads/release/python-31210/)（推奨。3.11〜3.13も可。3.14以降は非対応）
+- [Python 3.13.15](https://www.python.org/downloads/release/python-31315/)（推奨。3.11〜3.13も可。3.14以降は非対応）
   - リンク先ページを下にスクロールし、**Windows**: `Windows installer (64-bit)`、**Mac**: `macOS 64-bit universal2 installer` をダウンロードしてください<br>
   **（目立つボタンの「Download Python install manager」ではありません）**
   - **重要**: インストーラー実行時に「**Add python.exe to PATH**」にチェックを入れてください（デフォルトではオフ）。チェックを入れないとsetup.bat実行時にエラーになります

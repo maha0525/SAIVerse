@@ -1,23 +1,56 @@
+# requirements.txt -- the INTENT: which packages SAIVerse imports directly, as
+# lower bounds plus reasoned upper bounds. Nothing installs from this file.
+#
+# The verified set is requirements.lock (every package pinned with ==,
+# generated from this file with uv; regeneration commands are in its header).
+# setup.bat / setup.sh / update_engine.py install from the lock, and addon
+# installs use it as constraints, so every user gets the same combination.
+#
+# Rules for editing this file (docs/intent/dependency_management.md):
+#   - Write a lower bound, not ==; pinning is the lock's job. This file must
+#     contain no == at all -- the exact version lives in requirements.lock,
+#     and the lower bound here is "the oldest version we verified".
+#   - Every upper bound MUST carry a one-line reason saying what breaks above
+#     it and where the follow-up lives (the `mcp>=1.10.0,<2` entry below is
+#     the model). "Not upgraded yet" is not a reason.
+#   - After any change here, regenerate requirements.lock and run the suite.
+#   - Keep this file ASCII-only (see the NOTE further down).
 discord.py>=2.4.0
 websockets>=12.0
 httpx>=0.27.0
-fastapi==0.116.1
-google-genai>=1.75.0,<2.0
-langgraph==1.0.3
-openai==1.97.0
-anthropic>=0.42.0
-pydantic==2.11.7
-pydantic-settings==2.5.2
-python-dotenv==1.1.1
-requests==2.32.4
-SQLAlchemy==2.0.41
-uvicorn==0.35.0
+# httpx2 is the maintained successor of httpx (same API, separate package,
+# published by Pydantic). The anthropic SDK (1.x) and the openai SDK (3.x) are
+# built on it. SAIVerse code that hands objects to those SDKs (Timeout, Client,
+# Response in exception tests) must use httpx2 types -- an httpx Client is
+# rejected at construction, but an httpx Timeout is accepted and then breaks
+# silently at request time. httpx stays declared above because
+# google-genai and mcp 1.x still use it, and SAIVerse's own direct HTTP calls
+# (nvidia_nim, oauth, codex auth, llama_server) still import it.
+httpx2>=2.12.0
+fastapi>=0.141.1
+google-genai>=2.21.0
+langgraph>=1.2.11
+openai>=3.7.0
+anthropic>=1.3.0
+pydantic>=2.13.5
+pydantic-settings>=2.15.0
+python-dotenv>=1.1.1
+requests>=2.32.4
+SQLAlchemy>=2.0.41
+uvicorn>=0.52.4
 python-multipart>=0.0.9
 cryptography>=45.0.0
 tzdata
 
 # SAIMemory embeddings
 fastembed>=0.7.3
+# onnxruntime is imported directly by sai_memory (deep recall) and pulled in by
+# fastembed. The upper bound is mandatory: from 1.24 onnxruntime ships no macOS
+# x86_64 (Intel Mac) wheel and no macOS 13 wheel, and publishes no sdist, so a
+# universal lock pinned to 1.24+ cannot be installed on an Intel Mac at all
+# (fastembed 0.8 also excludes 1.24.0/1.24.1 on Python 3.13). Lift it when
+# onnxruntime publishes Intel Mac wheels again or Intel Mac support is dropped.
+onnxruntime>=1.17,<1.24
 numpy>=1.26.0
 
 # Image processing
@@ -40,7 +73,7 @@ feedparser>=6.0
 beautifulsoup4>=4.12
 
 # xAI (Grok) native SDK
-xai-sdk>=1.6.0
+xai-sdk>=1.19.0
 
 # MCP (Model Context Protocol) client
 # The upper bound is mandatory: mcp 2.x renamed the client transport spellings and

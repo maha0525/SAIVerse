@@ -44,7 +44,7 @@ from saiverse.addon_manifest import (
     load_manifest,
 )
 from saiverse.addon_paths import get_addon_data_dir
-from saiverse.data_paths import EXPANSION_DATA_DIR
+from saiverse.data_paths import EXPANSION_DATA_DIR, PROJECT_ROOT
 
 LOGGER = logging.getLogger(__name__)
 
@@ -229,14 +229,34 @@ def _step_should_skip(step: SetupStep, addon_dir: Path, progress: ProgressCallba
     return False
 
 
+# 本体が固定した部品の一覧 (docs/intent/dependency_management.md)。アドオンの
+# pip install にはこれを constraints (-c) として渡す。アドオンは本体の venv を
+# 共有するので、constraints が無いとアドオンの requirements が本体の部品を別の版へ
+# 動かせてしまう (逆向きの事故が 2026-09-02 の voice-tts 無音の原因)。
+CORE_REQUIREMENTS_LOCK = PROJECT_ROOT / "requirements.lock"
+
+
 def _exec_pip_install(step: PipInstallStep, addon_dir: Path, progress: ProgressCallback) -> None:
     req_path = _check_addon_dir_path(addon_dir, step.requirements, "requirements")
     if not req_path.exists():
         raise AddonInstallError(
             f"pip_install: requirements file not found: {req_path}"
         )
+    if not CORE_REQUIREMENTS_LOCK.exists():
+        # 本体の checkout に lock が無い = 配布物が壊れている。pip の
+        # "Could not open requirements file" より先に、何が無いのかを言う。
+        raise AddonInstallError(
+            f"pip_install: core lock file not found: {CORE_REQUIREMENTS_LOCK} "
+            "(the SAIVerse checkout is incomplete; update it first)"
+        )
     _run_subprocess(
-        [sys.executable, "-m", "pip", "install", "-r", str(req_path)],
+        [
+            sys.executable, "-m", "pip", "install",
+            "-r", str(req_path),
+            # 本体が固定した版を動かさせない。動かす必要があるアドオンはここで
+            # 失敗して理由が出る (入ってから黙って壊れる代わりに)。
+            "-c", str(CORE_REQUIREMENTS_LOCK),
+        ],
         cwd=addon_dir,
         progress=progress,
         label=step.name,

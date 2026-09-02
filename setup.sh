@@ -42,7 +42,7 @@ source .venv/bin/activate
 echo ""
 echo "[SETUP] Pythonパッケージをインストール中..."
 python -m pip install --upgrade pip >/dev/null 2>&1
-python -m pip install -r requirements.txt
+python -m pip install -r requirements.lock
 echo "[OK] Pythonパッケージのインストール完了"
 
 # --- 6. npm install ---
