@@ -17,15 +17,16 @@ macOS の Python (python.org 版・pyenv ビルド等) は、OpenSSL からキ�
 - ``saiverse/addon_installer.py``  アドオン本体のダウンロード
 - ``api/routes/system.py``         最新リリースの確認 / お知らせの取得
 
-二つ目は ``httpx2`` (httpx の後継) の上に立つ SDK — anthropic 1.x、次いで
-openai 3.x。httpx2 は certifi を同梱せず、``SSL_CERT_FILE`` が立っていれば
-その束で、無ければ truststore 経由で OS のストアを信頼元にする
+二つ目は ``httpx2`` (httpx の後継) の上に立つ SDK — anthropic 1.x と
+openai 3.x (どちらも 2026-09-02 に移行済み)。httpx2 は certifi を同梱せず、
+``SSL_CERT_FILE`` が立っていればその束で、無ければ truststore 経由で OS の
+ストアを信頼元にする
 (httpx2 2.12 の ``_config.create_ssl_context`` を読んで確認、2026-09-02)。
 この関数が ``SSL_CERT_FILE`` を立てるのは Python が OS のストアを読めなかった
 環境だけなので、その環境では httpx2 系 SDK の LLM 呼び出しも同じ証明書束で
 検証されるようになる。順序は ``main.py`` が保証している — この関数は
-``SAIVerseManager`` を import するより前に import 時に呼ばれるので、anthropic の
-クライアントが構築されるより先に環境変数が立つ。(macOS で truststore 単体が
+``SAIVerseManager`` を import するより前に import 時に呼ばれるので、anthropic /
+openai のクライアントが構築されるより先に環境変数が立つ。(macOS で truststore 単体が
 キーチェーンを読めるかは実機未確認。読めるなら、この環境変数は無くても
 通る方向の差なので害はない。)
 

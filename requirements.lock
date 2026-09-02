@@ -80,9 +80,7 @@ curl-cffi==0.15.0
 discord-py==2.6.4
     # via -r requirements.txt
 distro==1.9.0
-    # via
-    #   google-genai
-    #   openai
+    # via google-genai
 docstring-parser==0.17.0
     # via anthropic
 execnet==2.1.2
@@ -133,13 +131,13 @@ httpx==0.28.1
     #   langgraph-sdk
     #   langsmith
     #   mcp
-    #   openai
 httpx-sse==0.4.3
     # via mcp
 httpx2==2.12.0
     # via
     #   -r requirements.txt
     #   anthropic
+    #   openai
 httpx2-jsfetch==1.0 ; python_full_version >= '3.12' and sys_platform == 'emscripten'
     # via httpx2
 huggingface-hub==0.36.2
@@ -159,7 +157,7 @@ importlib-metadata==8.7.1
     # via opentelemetry-api
 iniconfig==2.3.0
     # via pytest
-jiter==0.13.0
+jiter==0.16.0
     # via
     #   anthropic
     #   openai
@@ -218,7 +216,7 @@ numpy==2.5.2 ; python_full_version >= '3.12'
     #   onnxruntime
 onnxruntime==1.24.1
     # via fastembed
-openai==1.97.0
+openai==3.7.0
     # via -r requirements.txt
 opentelemetry-api==1.39.1
     # via
@@ -368,7 +366,6 @@ tqdm==4.67.3
     # via
     #   fastembed
     #   huggingface-hub
-    #   openai
 truststore==0.10.4 ; sys_platform != 'emscripten'
     # via
     #   httpcore2
