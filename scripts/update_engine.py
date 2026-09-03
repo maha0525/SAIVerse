@@ -124,12 +124,15 @@ def completion_fingerprint(project_dir: Path) -> dict[str, Any] | None:
 def read_completion_marker(project_dir: Path) -> dict[str, Any] | None:
     """The recorded completion state, or None when there is no marker at all.
 
-    A marker left by an older build (a bare VERSION string) or one whose
-    contents are damaged reads back as an empty dict: the file exists, so this
-    is not a pre-marker install, but nothing in it can match the current
-    fingerprint -- so one finishing pass runs and rewrites it in this format.
-    That pass is idempotent, so the cost of the format change is one extra
-    ``--manual`` run, once.
+    A marker left by an older build (a bare VERSION string), one whose contents
+    are damaged, or one holding a JSON document that is not an object reads
+    back as an empty dict: a marker file exists but says nothing usable. The
+    caller (``check_update_complete``) must not read that as "a record that does
+    not match" -- it verifies the checkout directly, exactly as it does when
+    there is no marker, and rewrites the marker in this format once the
+    checkout is verified complete. Treating it as a mismatch used to send a
+    fully updated checkout into the full update, which a large world could not
+    finish (docs/issues/archive/update_marker_format_change_demands_full_update.md).
     """
     try:
         text = marker_path(project_dir).read_text(encoding="utf-8").strip()
@@ -450,7 +453,15 @@ def check_update_complete(project_dir: Path) -> int:
         return CHECK_INCONCLUSIVE
 
     recorded = read_completion_marker(project_dir)
-    if recorded is not None:
+    if recorded == {}:
+        # A marker file exists but is in the pre-JSON format (bare VERSION
+        # string) or is damaged. It records nothing to compare against, so it
+        # is judged exactly like a missing marker below: on what is installed.
+        LOGGER.info(
+            "Completion marker is in an old or unreadable format; verifying the "
+            "installed state directly"
+        )
+    if recorded:
         if recorded == fingerprint:
             return CHECK_READY
         if recorded.get("version") == fingerprint["version"]:
@@ -468,9 +479,11 @@ def check_update_complete(project_dir: Path) -> int:
             )
         return CHECK_NEEDS_FINISH
 
-    # No marker. Either this install predates the marker (v0.2.x, whose broken
-    # update.bat stopped right after `git pull`) or someone removed it. Decide
-    # on the things that actually break a start: packages the new code needs.
+    # No usable marker. Either this install predates the marker (v0.2.x, whose
+    # broken update.bat stopped right after `git pull`), someone removed it, or
+    # the file is in the old / unreadable format handled above. Decide on the
+    # things that actually break a start: packages the new code needs. When
+    # that verification passes, the marker is written in the current format.
     frontend_ready = frontend_packages_installed(project_dir)
     if frontend_ready is False:
         LOGGER.warning("Update was interrupted: frontend/node_modules is not installed")
