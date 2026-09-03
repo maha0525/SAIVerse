@@ -11,7 +11,7 @@ from pathlib import Path
 import threading
 import logging
 import uuid
-from typing import List
+from typing import List, Optional
 
 LOGGER = logging.getLogger(__name__)
 router = APIRouter()
@@ -26,6 +26,19 @@ _extension_import_lock = threading.Lock()
 
 _official_import_status: dict = {}
 _official_import_lock = threading.Lock()
+
+def _is_placeholder_title(title: Optional[str]) -> bool:
+    """取り込み元のパーサーが「題名なし」の印として入れる既定値か。
+
+    chatgpt_importer は ``"(untitled)"``、chatlog_exporter_importer は
+    ``"Untitled"`` を入れる。大文字小文字と括弧の有無は問わない — どちらも
+    人が付けた題名ではないので、スレッド名として保存しない。
+    """
+    if not title:
+        return True
+    normalized = str(title).strip().lower().strip("()")
+    return normalized in ("", "untitled")
+
 
 def _run_extension_import_task(
     persona_id: str,
@@ -69,7 +82,7 @@ def _run_extension_import_task(
                     payload["embedding_chunks"] = 0
                 adapter.append_persona_message(payload, thread_suffix=thread_suffix)
                 msg_count += 1
-                
+
                 # Update progress every 10 messages
                 if msg_count % 10 == 0:
                     with _extension_import_lock:
@@ -77,7 +90,13 @@ def _run_extension_import_task(
                             "running": True, "progress": msg_count, "total": total,
                             "message": f"Importing {msg_count}/{total} messages..."
                         }
-            
+
+            # 会話タイトルをスレッド名として保存 (スレッド選択 UI が suffix の
+            # UUID ではなく題名で選べるように)。パーサーの既定値は題名が無かった
+            # 印なので書かない。
+            if not _is_placeholder_title(conversation.title):
+                adapter.set_thread_title(thread_suffix, conversation.title)
+
             with _extension_import_lock:
                 _extension_import_status[persona_id] = {
                     "running": False, "progress": msg_count, "total": total,
@@ -177,7 +196,12 @@ def _run_official_import_task(
                     
                     adapter.append_persona_message(payload, thread_suffix=thread_suffix)
                     msg_count += 1
-                
+
+                # 会話タイトルをスレッド名として保存。パーサーの既定値 (題名の
+                # 無い会話の印) は書かない。
+                if not _is_placeholder_title(record.title):
+                    adapter.set_thread_title(thread_suffix, record.title)
+
                 imported_count += 1
                 
                 with _official_import_lock:

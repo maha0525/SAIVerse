@@ -16,6 +16,21 @@ export function formatImportDate(value: string | null | undefined): string {
   return d.toLocaleDateString();
 }
 
+/**
+ * スレッドの期間 (epoch 秒 → ローカル日付)。同じ日なら 1 日だけ、片方しか無ければ
+ * その日だけ、両方無ければ空文字。
+ */
+export function formatThreadDateRange(first?: number | null, last?: number | null): string {
+  const toDate = (v?: number | null) => {
+    if (typeof v !== 'number' || !Number.isFinite(v)) return '';
+    return new Date(v * 1000).toLocaleDateString();
+  };
+  const a = toDate(first);
+  const b = toDate(last);
+  if (a && b) return a === b ? a : `${a}〜${b}`;
+  return a || b;
+}
+
 export function formatProgress(message?: string, progress?: number, total?: number): string {
   if (message) return message;
   if (typeof progress === 'number' && typeof total === 'number') {

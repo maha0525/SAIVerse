@@ -537,6 +537,16 @@
     font-weight: 500;
 }
 
+.threadMetaLine {
+    font-size: 0.75rem;
+    color: #888;
+    margin-bottom: 0.2rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 100%;
+}
+
 .threadPreview {
     font-size: 0.85rem;
     color: #888;
@@ -712,7 +722,8 @@
     color: #1f2937;
 }
 
-:global([data-theme="light"]) .threadPreview {
+:global([data-theme="light"]) .threadPreview,
+:global([data-theme="light"]) .threadMetaLine {
     color: #64748b;
 }
 

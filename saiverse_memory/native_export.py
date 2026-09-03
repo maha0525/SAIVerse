@@ -77,14 +77,29 @@ def _export_thread(
 ) -> Dict[str, Any]:
     """Export a single thread with all metadata."""
     # Thread-level info
-    cur = conn.execute(
-        "SELECT resource_id, overview, overview_updated_at FROM threads WHERE id=?",
-        (thread_id,),
-    )
-    thread_row = cur.fetchone()
+    # export は init_db を通さず生の接続で読む (208/234 行目) ので、新しい
+    # init_db でまだ開かれていない DB には title 列が無いことがある。その場合は
+    # 列なしで読む。
+    try:
+        cur = conn.execute(
+            "SELECT resource_id, overview, overview_updated_at, title FROM threads WHERE id=?",
+            (thread_id,),
+        )
+        thread_row = cur.fetchone()
+    except sqlite3.OperationalError as exc:
+        # 列が無いときだけ縮退する。"database is locked" 等の一時的な失敗まで
+        # ここで拾うと、列がある DB から題名だけが静かに欠けたエクスポートになる。
+        if "no such column" not in str(exc):
+            raise
+        cur = conn.execute(
+            "SELECT resource_id, overview, overview_updated_at, NULL FROM threads WHERE id=?",
+            (thread_id,),
+        )
+        thread_row = cur.fetchone()
     resource_id = thread_row[0] if thread_row else None
     overview = thread_row[1] if thread_row else None
     overview_updated_at = thread_row[2] if thread_row else None
+    title = thread_row[3] if thread_row else None
 
     # Stelis info
     stelis_data = None
@@ -165,7 +180,7 @@ def _export_thread(
             msg["spell_seq"] = spell_seq
         messages.append(msg)
 
-    return {
+    result: Dict[str, Any] = {
         "thread_id": thread_id,
         "resource_id": resource_id,
         "overview": overview,
@@ -173,6 +188,11 @@ def _export_thread(
         "stelis": stelis_data,
         "messages": messages,
     }
+    # title は任意項目 (2026-09-03 追加)。旧形式の読み手は未知キーを無視し、
+    # 旧形式のファイルには無いだけなので、FORMAT_VERSION は上げない。
+    if title:
+        result["title"] = title
+    return result
 
 
 def export_threads_native(
@@ -474,6 +494,13 @@ def _write_thread_scaffold_in_txn(
         conn.execute(
             "UPDATE threads SET overview=?, overview_updated_at=? WHERE id=?",
             (overview, thread_data.get("overview_updated_at"), thread_id),
+        )
+
+    title = thread_data.get("title")
+    if isinstance(title, str) and title.strip():
+        conn.execute(
+            "UPDATE threads SET title=? WHERE id=?",
+            (title.strip(), thread_id),
         )
 
     stelis = thread_data.get("stelis")

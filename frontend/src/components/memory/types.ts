@@ -17,6 +17,12 @@ export interface ThreadSummary {
   suffix: string;
   preview: string;
   active: boolean;
+  /** 人が読むスレッド名 (取り込み元の会話タイトル)。無ければ suffix を表示する */
+  title?: string | null;
+  message_count?: number;
+  /** epoch 秒 */
+  first_created_at?: number | null;
+  last_created_at?: number | null;
 }
 
 export interface ConversationSummary {
