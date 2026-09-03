@@ -60,4 +60,4 @@
 - 除外対象の設計: `docs/intent/version_aware_world_and_persona.md` の「スナップショット対象」
 - 同じ障害から出たもう一件: 更新完了マーカーが旧形式だと、書き直すだけで済むはずの状態が
   フル更新 (git pull + 世界スナップショット + pip + npm) を要求する
-  (`docs/issues/update_marker_format_change_demands_full_update.md`)
+  (`docs/issues/archive/update_marker_format_change_demands_full_update.md`、2026-09-03 解決)
