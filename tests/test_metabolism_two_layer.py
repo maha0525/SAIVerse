@@ -1449,43 +1449,123 @@ class InjectedPerceptionAccountingTest(unittest.TestCase):
                 )
         self.assertEqual(runs, ["std-model"])
 
-    def test_eviction_plan_sees_the_perception_weight(self):
-        """退場計画にも知覚ブロックの重さを見せる (本走行)。
+    def _run_metabolism_with_blocks(self, msgs, wm, blocks, *, band="2000",
+                                    events=None):
+        """run_metabolism を本走行の形で回し、(anchor_id, 提示に残る行) を返す。
 
-        保存行だけを数えると保護 (残す量) が古い側まで伸びて材料が U に届かず、
-        畳みが一つも閉じない。知覚ブロックの重さが入ると保護は末尾側で埋まり、
-        古い側が退場候補に出て anchor が前進する。
+        history_manager は anchor から後ろを返す (本物の get_history_from_anchor
+        の形) — 畳んだ後の提示ウィンドウを get_presented_window で撮り直せる。
+        """
+        by_id = {m["id"]: i for i, m in enumerate(msgs)}
+
+        def _from_anchor(anchor, required_line_roles=None,
+                         required_scopes=None, pulse_id=None):
+            return list(msgs[by_id.get(anchor, 0):])
+
+        persona = SimpleNamespace(
+            persona_id=PERSONA_ID, persona_name="エア", model="std-model",
+            sai_memory=None,
+            history_manager=SimpleNamespace(get_history_from_anchor=_from_anchor),
+        )
+        lifecycle = SessionLifecycle(SimpleNamespace(), self.manager)
+        lifecycle.is_chronicle_enabled_for_persona = lambda p: True
+        lifecycle.generate_chronicle = lambda p, cb=None, **kw: "ok"
+        lifecycle.ensure_recall_embeddings = lambda p: None
+        lifecycle._attach_chronicle_refs = _stub_chronicle_refs
+        if blocks is not None:
+            lifecycle.perception_blocks_for = (
+                lambda persona, presented, anchor_id=None, **_kw: list(blocks)
+            )
+        with patch.dict(os.environ, {"SAIVERSE_SLUICE_ENABLED": "0"}), \
+                patch.dict(os.environ,
+                           {"SAIVERSE_CHRONICLE_BAND_BUDGET": band}), \
+                patch("saiverse.dynamic_state.DynamicStateManager.on_metabolism",
+                      lambda *a, **k: None):
+            status = lifecycle.run_metabolism(
+                persona, "b", _window(msgs), wm,
+                events.append if events is not None else None,
+                model_key="std-model",
+            )
+        entry = lifecycle.load_anchor_entry(PERSONA_ID, "std-model")
+        anchor = entry["anchor_id"] if entry else None
+        window = lifecycle.get_presented_window(persona, "std-model", anchor or msgs[0]["id"])
+        from sea.eviction_plan import message_chars
+        return status, anchor, message_chars(window.presented)
+
+    def test_protection_counts_rows_only_so_perception_cannot_shrink_it(self):
+        """退場計画の保護 (残す量) は**会話の行だけ**で測る (2026-09-03 裁定)。
+
+        末尾に巨大な知覚ブロックが乗っても保護範囲は縮まない — 候補 m0/m1 の
+        材料 1,200 < U=2,000 のまま、畳みは閉じず anchor も動かない。
+        (2026-09-02 の統一はここまで及んでいて、3,000 字のブロックで保護が
+        m5 だけに縮み [m0..m3] が畳まれていた。)
         """
         msgs = [_msg(f"m{i}", 100 + i, chars=600) for i in range(6)]  # 3,600 字
         wm = Watermarks(low=0, target=2_000, high=8_000)
+        _status, anchor, rows = self._run_metabolism_with_blocks(msgs, wm, None)
+        self.assertIsNone(anchor)
+        self.assertEqual(rows, 3_600)
+        _status, anchor, rows = self._run_metabolism_with_blocks(
+            msgs, wm, [_perception_block(3_000, 200)],
+        )
+        self.assertIsNone(anchor)
+        self.assertEqual(rows, 3_600)
 
-        def _run(blocks):
-            lifecycle = SessionLifecycle(SimpleNamespace(), self.manager)
-            lifecycle.is_chronicle_enabled_for_persona = lambda p: True
-            lifecycle.generate_chronicle = lambda p, cb=None, **kw: "ok"
-            lifecycle.ensure_recall_embeddings = lambda p: None
-            lifecycle._attach_chronicle_refs = _stub_chronicle_refs
-            if blocks is not None:
-                lifecycle.perception_blocks_for = (
-                    lambda persona, presented, anchor_id=None, **_kw: list(blocks)
-                )
-            with patch.dict(os.environ, {"SAIVERSE_SLUICE_ENABLED": "0"}), \
-                    patch.dict(os.environ,
-                               {"SAIVERSE_CHRONICLE_BAND_BUDGET": "2000"}), \
-                    patch("saiverse.dynamic_state.DynamicStateManager.on_metabolism",
-                          lambda *a, **k: None):
-                lifecycle.run_metabolism(
-                    self._persona(msgs), "b", _window(msgs), wm, None,
-                    model_key="std-model",
-                )
-            entry = lifecycle.load_anchor_entry(PERSONA_ID, "std-model")
-            return entry["anchor_id"] if entry else None
+    def test_incident_big_perception_block_keeps_target_rows_of_conversation(self):
+        """事故の再現 (docs/issues/protection_quota_consumed_by_perception_blocks.md)。
 
-        # 保存行だけ: 保護が m2 まで伸び、候補 m0/m1 の材料 1,200 < U=2,000。
-        self.assertIsNone(_run(None))
-        # 末尾に 3,000 字の知覚が乗ると保護は m5 だけ。候補 m0..m4 の材料
-        # 3,000 字が U を越え、[m0..m3] が畳まれて anchor は m4 へ。
-        self.assertEqual(_run([_perception_block(3_000, 200)]), "m4")
+        会話 20,000 字 + 末尾の部屋の様子 7,800 字 = 送る合計 27,800 字 > 上限
+        26,000 で発火。残す量 18,000 の契約は「畳んだ後も会話の行が 18,000 字
+        残る」— 畳まれるのは m0/m1 だけで anchor は m2、行は 18,000 字残る。
+        事故当時の勘定 (ブロックが残す量を食う) では保護が 10,200 字ぶんに
+        縮み、[m0..m9] が畳まれて会話は 10,000 字しか残らなかった。
+        """
+        msgs = [_msg(f"m{i}", 100 + i, chars=1_000) for i in range(20)]
+        wm = Watermarks(low=0, target=18_000, high=26_000)
+        status, anchor, rows = self._run_metabolism_with_blocks(
+            msgs, wm, [_perception_block(7_800, 200)],
+        )
+        self.assertEqual(status, "ok")
+        self.assertEqual(anchor, "m2")
+        self.assertGreaterEqual(rows, 18_000)
+
+    def test_perception_over_budget_is_a_logged_noop_without_llm(self):
+        """合計は上限超えだが会話の行が残す量以下 = 畳めるものが無い。
+
+        発火判定は run_metabolism (LLM を呼びうる本体) へ進まず、ペルソナごと
+        プロセスごとに 1 度だけ WARNING を出す — 毎ターン同じ警告で埋めない。
+        """
+        lifecycle = SessionLifecycle(SimpleNamespace(), self.manager)
+        msgs = [_msg(f"m{i}", 100 + i, chars=1_000) for i in range(10)]  # 10,000 字
+        persona = self._persona(msgs)
+        lifecycle.upsert_anchor_entry(PERSONA_ID, "std-model", {
+            "anchor_id": "m0",
+            "updated_at": datetime.now().replace(microsecond=0).isoformat(),
+        })
+        wm = Watermarks(low=0, target=18_000, high=26_000)
+        runs = []
+        lifecycle.run_metabolism = lambda *a, **k: runs.append(k.get("model_key"))
+        blocks = [_perception_block(30_000, 200)]  # 合計 40,000 > 上限
+        with patch.dict(os.environ, {"SAIVERSE_SLUICE_ENABLED": "0"}), \
+                patch.object(lifecycle, "get_metabolism_watermarks",
+                             return_value=wm), \
+                patch.object(lifecycle, "perception_blocks_for",
+                             return_value=blocks):
+            with self.assertLogs("sea.session_lifecycle", level="WARNING") as logs:
+                lifecycle.maybe_run_metabolism(
+                    persona, "b", None, model_key="std-model",
+                )
+                lifecycle.maybe_run_metabolism(
+                    persona, "b", None, model_key="std-model",
+                )
+        self.assertEqual(runs, [])
+        over_budget = [
+            line for line in logs.output if "perception blocks" in line
+        ]
+        self.assertEqual(len(over_budget), 1, logs.output)
+        self.assertIn("30000", over_budget[0])
+        self.assertIn("26000", over_budget[0])
+        self.assertIn("18000", over_budget[0])
 
 
 # ---------------------------------------------------------------------------

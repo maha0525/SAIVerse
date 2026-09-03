@@ -749,3 +749,93 @@ class TestEstimateStaleGuard:
                 job = arasuji_api._get_job(job_id)
                 assert job["status"] == "completed"
             assert run.call_count == 2
+
+
+# ---------------------------------------------------------------------------
+# 末尾の引き戻し (run_tail_rewind) — 引き戻し後の畳みの主語
+# ---------------------------------------------------------------------------
+
+
+class TestTailRewindPostFold:
+    """引き戻し後に「畳む」と言えるのは、会話の行が残す量を超えているときだけ。
+
+    上限 (fold_needed) の主語は合計だが、残す量の主語は会話の行 (2026-09-03
+    まはー裁定)。行が残す量以下なら退場計画は保護範囲で埋まって空になるので、
+    畳みを呼んでも門で "noop" — 「古い側を畳んでいます」の通知も
+    "rewound_folded" (畳み完了) の返り値も嘘になる。
+    """
+
+    def _run(self, session_factory, plan, events):
+        from unittest.mock import Mock
+
+        from sea.coverage_repair import run_tail_rewind
+        lc = _make_lifecycle(session_factory)
+        lc.run_manual_compaction = Mock(return_value="ok")
+        persona = SimpleNamespace(
+            persona_id=PERSONA_ID,
+            sai_memory=SimpleNamespace(is_ready=lambda: True, conn=object()),
+        )
+        with patch("sea.coverage_repair._resolve_uncovered_tail", return_value="gap"), \
+                patch("sea.coverage_repair.plan_tail_rewind", return_value=plan), \
+                patch.object(lc, "_write_refill", return_value=True):
+            status = run_tail_rewind(lc, persona, event_callback=events.append)
+        return status, lc.run_manual_compaction
+
+    def _plan(self, **overrides):
+        from sea.coverage_repair import TailRewindPlan
+        kwargs = dict(
+            model_key="model-a", expected_anchor_id="a1", new_anchor_id="gap",
+            window_chars_after=300, fold_needed=True,
+            window_rows_chars_after=200, target_chars=50,
+        )
+        kwargs.update(overrides)
+        return TailRewindPlan(**kwargs)
+
+    def test_perception_only_over_budget_does_not_fold(self, session_factory):
+        """合計 300 > 上限だが会話の行 40 <= 残す量 50 → 通知なし・"rewound"。"""
+        events = []
+        status, fold = self._run(
+            session_factory,
+            self._plan(window_chars_after=300, window_rows_chars_after=40),
+            events,
+        )
+        assert status == "rewound"
+        fold.assert_not_called()
+        assert [e["content"] for e in events] == [
+            "あらすじにできない少量の末尾を、提示窓へ戻しました。",
+        ]
+
+    def test_rows_over_target_still_notifies_and_folds(self, session_factory):
+        """会話の行 200 > 残す量 50 → 従来どおり通知して畳み、"rewound_folded"。"""
+        events = []
+        status, fold = self._run(session_factory, self._plan(), events)
+        assert status == "rewound_folded"
+        fold.assert_called_once()
+        assert fold.call_args.kwargs["model_key"] == "model-a"
+        assert any("古い側を畳んでいます" in e["content"] for e in events)
+
+    def test_compaction_noop_is_reported_as_rewound_not_folded(
+        self, session_factory,
+    ):
+        """畳みを呼んだが門で "noop" → 畳んでいないので "rewound" (成功系のまま)。"""
+        from unittest.mock import Mock
+
+        from sea.coverage_repair import run_tail_rewind
+        lc = _make_lifecycle(session_factory)
+        lc.run_manual_compaction = Mock(return_value="noop")
+        persona = SimpleNamespace(
+            persona_id=PERSONA_ID,
+            sai_memory=SimpleNamespace(is_ready=lambda: True, conn=object()),
+        )
+        with patch("sea.coverage_repair._resolve_uncovered_tail", return_value="gap"), \
+                patch("sea.coverage_repair.plan_tail_rewind", return_value=self._plan()), \
+                patch.object(lc, "_write_refill", return_value=True):
+            assert run_tail_rewind(lc, persona) == "rewound"
+        lc.run_manual_compaction.assert_called_once()
+
+    def test_fold_evictable_property(self):
+        """fold_evictable = 上限超え かつ 行 > 残す量 (残す量不明なら上限超えだけ)。"""
+        assert self._plan().fold_evictable is True
+        assert self._plan(window_rows_chars_after=50).fold_evictable is False
+        assert self._plan(fold_needed=False).fold_evictable is False
+        assert self._plan(target_chars=None, window_rows_chars_after=0).fold_evictable is True

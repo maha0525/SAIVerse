@@ -2120,6 +2120,52 @@ class TestTailRewind:
         assert _row_anchor(lc, "model-a") == gap
         lc.run_manual_compaction.assert_called_once()
 
+    def test_fold_skipped_when_only_perception_is_over_budget(
+        self, adapter, session_factory, monkeypatch,
+    ):
+        """合計は上限超えでも会話の行が残す量以下なら畳まない (2026-09-03 裁定)。
+
+        残す量の主語は会話の行。行 40 字 <= 残す量 50 字なら退場計画は保護
+        範囲で埋まって空なので、畳みを呼んでも門で "noop" — 通知も
+        "rewound_folded" も嘘になる。計画 (plan_tail_rewind) が行だけの量を
+        載せ、実行は "rewound" で引き返す。
+        """
+        monkeypatch.setenv("SAIVERSE_CHRONICLE_BAND_BUDGET", str(TARGET))
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+
+        from sea.coverage_repair import plan_tail_rewind, run_tail_rewind
+        from sea.eviction_plan import CONSUMED_PERCEPTION_KEY
+        gap, m_a = self._tail_fixture(adapter)
+        lc = _make_lifecycle(session_factory)
+        _warm_row(lc, "model-a", m_a)
+        lc.get_presented_window = lambda p, mk, aid=None: self._patched_window(40)
+        lc.get_metabolism_watermarks = (
+            lambda p, mk=None: SimpleNamespace(high=100, target=50)
+        )
+        lc.run_manual_compaction = Mock(return_value="ok")
+        # 保存行 40 字 + 知覚 100 字 = 合計 140 字 > 上限 100 (fold_needed)。
+        lc.perception_blocks_for = lambda p, presented, aid=None, **_kw: [{
+            "role": "user", "content": "p" * 100, "created_at": 0,
+            "metadata": {"tags": ["internal", "event_message", "perception"],
+                         CONSUMED_PERCEPTION_KEY: True},
+        }]
+
+        plan = plan_tail_rewind(lc, _persona(adapter), adapter.conn, gap)
+        assert plan.fold_needed is True
+        assert plan.window_chars_after == 140
+        assert plan.window_rows_chars_after == 40
+        assert plan.target_chars == 50
+        assert plan.fold_evictable is False
+        assert plan.est_fold_calls == 0  # 退場候補が無い = 畳みの LLM は走らない
+
+        events = []
+        status = run_tail_rewind(lc, _persona(adapter), event_callback=events.append)
+        assert status == "rewound"
+        assert _row_anchor(lc, "model-a") == gap
+        lc.run_manual_compaction.assert_not_called()
+        assert not any("畳んでいます" in e["content"] for e in events)
+
     def test_strict_anchor_read_failure_propagates_from_plan(
         self, adapter, session_factory, monkeypatch,
     ):

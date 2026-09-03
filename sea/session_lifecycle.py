@@ -66,6 +66,10 @@ class SessionLifecycle:
         # しないようにする (Codex 指摘 2026-09-03)。
         self._chronicle_failures_lock = threading.Lock()
         self._chronicle_failures: Dict[str, Dict[str, Any]] = {}
+        # 「合計は上限超えだが会話の行は残す量以下 = 畳めるものが無い」を
+        # ペルソナごとプロセスごとに 1 度だけ警告するための既出集合
+        # (:meth:`_note_perception_over_budget`)。毎ターン同じ警告を出さない。
+        self._perception_over_budget_warned: Set[str] = set()
 
     # ------------------------------------------------------------------
     # 勘定の単位 — 「実際に送る中身」(2026-09-02 まはー裁定)
@@ -143,6 +147,37 @@ class SessionLifecycle:
                 persona, presented, anchor_id, raise_on_error=raise_on_error,
             )
         )
+
+    def _note_perception_over_budget(
+        self, persona, rows_chars: int, total_chars: int, watermarks: Watermarks,
+    ) -> bool:
+        """「合計は上限超え・会話の行は残す量以下」なら 1 度だけ警告して True。
+
+        水位の主語は二つある (:class:`~sea.eviction_plan.Watermarks`): 上限は
+        実際に送る合計、残す量は会話の行の量。合計が上限を超えているのに行が
+        残す量以下なら、保護範囲が行を全部覆っていて退場できるものが無い —
+        超過の主は会話ではなく知覚の供給で、Metabolism を走らせても空振り
+        (LLM を呼ばない) にしかならない。呼び出し側はこの判定で本体へ進まず
+        引き返す。警告はペルソナごとプロセスごとに 1 度 (毎ターン同じ行で
+        ログを埋めない)。同じ事実は context-status の ``perception_over_budget``
+        にも出る (docs/issues/protection_quota_consumed_by_perception_blocks.md)。
+        """
+        if watermarks.high is None:
+            return False
+        if not (total_chars > watermarks.high and rows_chars <= watermarks.target):
+            return False
+        persona_id = str(getattr(persona, "persona_id", "?"))
+        if persona_id not in self._perception_over_budget_warned:
+            self._perception_over_budget_warned.add(persona_id)
+            LOGGER.warning(
+                "[metabolism] perception blocks (%d chars) exceed the room left "
+                "by the watermarks (high %d − target %d); nothing evictable — "
+                "the perception supply, not the conversation, is over budget "
+                "(persona=%s, rows=%d chars, total=%d chars)",
+                total_chars - rows_chars, watermarks.high, watermarks.target,
+                persona_id, rows_chars, total_chars,
+            )
+        return True
 
     def get_metabolism_watermarks(
         self, persona, model_key: Optional[str] = None,
@@ -1316,13 +1351,22 @@ class SessionLifecycle:
         if not should_run:
             return
 
-        if current_chars <= watermarks.target:
+        # 「削る先があるか」は**会話の行だけ**を残す量と比べる (2026-09-03 裁定:
+        # 残す量の主語は会話の行、上限の主語は合計)。退場計画の保護範囲も行
+        # だけで測るので、行が残す量以下なら計画は空 — 走らせても空振り。
+        rows_chars = message_chars(current_messages)
+        if rows_chars <= watermarks.target:
             # 既に目標水位より軽い。削る先が無いので走らせない (token 発火でも同じ)。
-            LOGGER.debug(
-                "[metabolism] skip: window already at/below target "
-                "(persona=%s, %d chars <= target=%d)",
-                getattr(persona, "persona_id", "?"), current_chars, watermarks.target,
-            )
+            # 合計が上限を超えている (= 知覚の供給が予算超過) なら 1 度だけ警告。
+            if not self._note_perception_over_budget(
+                persona, rows_chars, current_chars, watermarks,
+            ):
+                LOGGER.debug(
+                    "[metabolism] skip: window already at/below target "
+                    "(persona=%s, %d row chars <= target=%d, %d chars sent)",
+                    getattr(persona, "persona_id", "?"), rows_chars,
+                    watermarks.target, current_chars,
+                )
             persona._metabolism_pending = False
             return
 
@@ -2098,22 +2142,29 @@ class SessionLifecycle:
             # 起点行が無い = 提示ウィンドウが未定義 (新規ペルソナ / 修復直後)。
             # 畳む対象を決められないので何もしない。
             return "unavailable"
-        # 門の物差しも「実際に送る中身」= 保存行 + 送信直前に差し込まれる知覚
-        # ブロック (2026-09-02 まはー裁定。issue
-        # context_accounting_excludes_injected_rows.md)。保存行だけで測ると、
-        # 実送信が残す量を大きく超えていても保存行が軽い窓では「畳むものが無い」
-        # と門前払いになる — ユーザーが押したボタンが何も起こさない。走行側
-        # (_run_metabolism_locked の plan_eviction) は既に合計で測っているので、
-        # ここを据え置くと門と本走行が別の答えを出す。
-        current_chars = self.presented_chars(
-            persona, window.presented, window.anchor_id,
-        )
-        if current_chars <= watermarks.target:
-            LOGGER.info(
-                "[metabolism] manual compaction: window already at/below target "
-                "(persona=%s, %d chars <= target=%d); nothing to fold",
-                getattr(persona, "persona_id", "?"), current_chars, watermarks.target,
+        # 門の物差しは**会話の行だけ** vs 残す量 (2026-09-03 まはー裁定: 残す量の
+        # 主語は会話の行。issue protection_quota_consumed_by_perception_blocks.md)。
+        # 2026-09-02 に一度「合計」へ揃えたが、それは残す量が保護範囲でもある
+        # ことを見落としていた — 走行側 (plan_eviction) の保護範囲も行だけで
+        # 測るので、行が残す量以下の窓は門を通しても計画が空で "nothing" に
+        # 終わる。門も同じ主語で測るのが「門と本走行が別の答えを出さない」。
+        # 合計が上限を超えている (知覚の供給が予算超過) なら、その事実を 1 度
+        # だけ警告して引き返す (LLM は呼ばない)。
+        rows_chars = message_chars(window.presented)
+        if rows_chars <= watermarks.target:
+            total_chars = self.presented_chars(
+                persona, window.presented, window.anchor_id,
             )
+            if not self._note_perception_over_budget(
+                persona, rows_chars, total_chars, watermarks,
+            ):
+                LOGGER.info(
+                    "[metabolism] manual compaction: window already at/below "
+                    "target (persona=%s, %d row chars <= target=%d, %d chars "
+                    "sent); nothing to fold",
+                    getattr(persona, "persona_id", "?"), rows_chars,
+                    watermarks.target, total_chars,
+                )
             return "noop"
         building_id = getattr(persona, "current_building_id", None) or ""
         status = self.run_metabolism(
@@ -2319,8 +2370,13 @@ class SessionLifecycle:
         (回復措置に畳まない選択肢は無い。まはー裁定 2026-07-29)。Chronicle
         無効の persona でも前進で救う (stop_when_disabled=False)。
 
+        合計が上限を超えていても会話の行が残す量以下なら、畳めるものが無い
+        (超過の主は知覚の供給)。その回は通知も session_anchor 行の立ち上げも
+        run_metabolism もせず "skip" を返す (警告はペルソナごと 1 度、
+        :meth:`_note_perception_over_budget`)。
+
         Returns:
-            "skip" (条件外・超過なし) / run_metabolism の結果
+            "skip" (条件外・超過なし・知覚の供給だけが予算超過) / run_metabolism の結果
             ("ok"/"nothing"/"failed"/"deferred"/"deferred_sluice_unseen")。
         """
         model_key = str(model_key or getattr(persona, "model", "") or "") or None
@@ -2343,6 +2399,16 @@ class SessionLifecycle:
         # 「上限以下」と読んで応答へ進み、この機構の存在意義が壊れる。
         current_chars = self.presented_chars(persona, window.presented, anchor_id)
         if current_chars <= watermarks.high:
+            return "skip"
+        # 合計は上限超えでも、会話の行が残す量以下なら退場計画は保護範囲で
+        # 埋まって空になる (残す量の主語は会話の行、2026-09-03 裁定)。超過の主は
+        # 知覚の供給であり、ここで通知を出し・行を立て・本体へ進んでも毎ターン
+        # 「整理しています」だけ出て何も畳めない (Codex 指摘 2026-09-03)。1 度
+        # だけ警告して、通知・行の立ち上げ・run_metabolism のどれもせず引き返す。
+        rows_chars = message_chars(window.presented)
+        if self._note_perception_over_budget(
+            persona, rows_chars, current_chars, watermarks,
+        ):
             return "skip"
         persona_id = getattr(persona, "persona_id", None)
         LOGGER.warning(
@@ -2575,6 +2641,10 @@ class SessionLifecycle:
         リクエストローカルな fold オブジェクトに付けるだけで、永続化は
         呼び出し側の :meth:`_write_refill` が行う。
 
+        ``raise_on_error`` は呼び出し側の契約として受け取るが、いまは内部で
+        使わない — 不足判定が会話の行だけになり (2026-09-03 裁定)、失敗しうる
+        知覚一覧の取得をここでは行わなくなったため。
+
         Returns:
             適用できる読み戻しが無ければ None。あれば::
 
@@ -2587,16 +2657,15 @@ class SessionLifecycle:
                 }
         """
         window = self.get_presented_window(persona, model_key, anchor_id)
-        # 読み戻しの物差しも「実際に送る中身」— 知覚ブロックぶんを足した量で
-        # 不足を判定する。勘定 (発火側) と別の物差しで測ると、発火側が「多い」と
-        # 言っている窓へ読み戻しが更に足す (2026-09-02 裁定)。
-        perception_chars = message_chars(
-            self.perception_blocks_for(
-                persona, window.presented, anchor_id,
-                raise_on_error=raise_on_error,
-            )
-        )
-        current_chars = message_chars(window.presented) + perception_chars
+        # 読み戻しの物差しは**会話の行だけ** vs 残す量 (2026-09-03 まはー裁定:
+        # 残す量の主語は会話の行。上限の主語 = 合計とは別)。2026-09-02 に一度
+        # 合計へ揃えたが、巨大な部屋の様子が乗った窓では会話が 3 千字しか無く
+        # ても「足りている」と読まれ、畳みすぎた窓が二度と埋め戻らなかった
+        # (docs/issues/protection_quota_consumed_by_perception_blocks.md)。
+        # 発火側 (上限) が「多い」と言う窓へ読み戻しが足すことはある — 発火側は
+        # 会話の行が残す量以下なら畳めるものが無いと判定して引き返すので、
+        # 発振にはならない。予算 (残す量 − 現在) も行で数える。
+        current_chars = message_chars(window.presented)
         if current_chars >= watermarks.target:
             return None
         persona_id = getattr(persona, "persona_id", None)
@@ -2708,12 +2777,8 @@ class SessionLifecycle:
                 final_presented = self._present_with_folds(
                     persona, final_raw, new_folds + list(window.folds),
                 )
-                # 検算も送る中身で測る (引き戻し後の起点で数え直す — Chronicle
-                # 無効ペルソナはバッチの絞りが起点に依るため)。
-                final_chars = self.presented_chars(
-                    persona, final_presented, new_anchor_id,
-                    raise_on_error=raise_on_error,
-                )
+                # 検算も会話の行だけで測る (残す量の主語)。
+                final_chars = message_chars(final_presented)
                 if final_chars > watermarks.target:
                     LOGGER.warning(
                         "[metabolism] refill verification: rewound window "
@@ -2733,7 +2798,7 @@ class SessionLifecycle:
             final_presented = self._present_with_folds(
                 persona, window.raw, list(window.folds),
             )
-            final_chars = message_chars(final_presented) + perception_chars
+            final_chars = message_chars(final_presented)
             if final_chars > watermarks.target:
                 LOGGER.warning(
                     "[metabolism] refill verification: reopened window would "
@@ -2960,8 +3025,6 @@ class SessionLifecycle:
 
     def _refold_raw_view_plan(
         self, persona, window: "SessionWindow", watermarks: Watermarks,
-        *,
-        raise_on_error: bool = False,
     ) -> Optional[Tuple[List[Dict[str, Any]], int]]:
         """§15-3 印戻しの計画部 — ``window.folds`` の印を古い方から戻す。
 
@@ -2986,22 +3049,21 @@ class SessionLifecycle:
         # 印付き区間が退場計画に入り、既編纂範囲が生ログとして再編纂されて
         # あらすじが二本立ちする (Codex 指摘 2026-07-30)。部分生存の印付き
         # 区間 (提示は既に digest) の削減量も、実測なら自然にゼロと数えられる。
-        # 知覚ブロックのぶんも足した「実際に送る中身」で止め時を決める
-        # (2026-09-02 まはー裁定)。印戻しは保存行しか動かさないので、ブロック
-        # 一覧は途中で変わらない — 起点 (window.anchor_id) 基準で一度だけ引いて
-        # 定数として足す (fold ごとに DB を引き直さない)。保存行だけで測ると、
-        # 実送信が残す量を超えたまま印戻しを止め、印付き区間が退場計画へ入って
-        # 既編纂範囲があらすじ二本立ちする (この判定が実測な理由そのもの)。
-        perception_chars = message_chars(
-            self.perception_blocks_for(
-                persona, window.presented, window.anchor_id,
-                raise_on_error=raise_on_error,
-            )
-        )
+        #
+        # 止め時の主語は**会話の行だけ** (2026-09-03 まはー裁定。残す量の主語は
+        # 会話の行、上限の主語は合計)。2026-09-02 に一度「知覚ブロックを足した
+        # 合計」で止めるようにした — 根拠は「行だけで止めると、実送信が残す量を
+        # 超えたまま印付き区間が退場計画へ入り再編纂される」だった。だが退場
+        # 計画の保護範囲 (plan_eviction::_protection_boundary) も行だけで測る
+        # 以上、行が残す量以下になった時点で残る印付き区間は全て保護範囲の
+        # 内側にあり、計画には拾われない — 二本立ちは起きない。逆に合計で
+        # 止め続けると、巨大な部屋の様子が乗った回に印付き区間を全部 digest へ
+        # 戻して会話が痩せる (保護範囲をブロックが食った事故と同じ向き)。
+        # 行だけが一貫した規則で、知覚一覧を引く必要も無い。
         current_presented = window.presented
         flipped = 0
         for fold in sorted(raw_view, key=_first_pos):  # 古い方から
-            if message_chars(current_presented) + perception_chars <= watermarks.target:
+            if message_chars(current_presented) <= watermarks.target:
                 break
             fold.presented_raw = False
             flipped += 1
@@ -3055,9 +3117,9 @@ class SessionLifecycle:
             ),
             folds=work_folds,
         )
-        refolded = self._refold_raw_view_plan(
-            persona, work, watermarks, raise_on_error=raise_on_error,
-        )
+        # (raise_on_error は印戻しには効かない — 止め時が会話の行だけになり、
+        # 知覚一覧を引かなくなったため。引数は呼び出し側の契約として残す。)
+        refolded = self._refold_raw_view_plan(persona, work, watermarks)
         if refolded is None:
             return work, 0
         presented, flipped = refolded
@@ -3201,10 +3263,19 @@ class SessionLifecycle:
         条件「生きたキャッシュがあるうちは畳まない」、Codex 2巡目 2026-07-29)。
         内側の :meth:`run_metabolism` は同一スレッドの RLock 再入で無害。
 
+        合計が中間値を超えていても**会話の行が残す量以下**なら畳めるものが
+        無い (残す量の主語は会話の行、2026-09-03 裁定 — 退場計画は保護範囲で
+        埋まって空になる)。その回は run_metabolism を呼ばず "skip" を返す —
+        本体 (:meth:`_run_metabolism_locked`) は計画が空と分かる前に抽出の
+        滞留 (:meth:`_retry_extraction_backlog` — LLM 課金と記憶書き込み) を
+        流すので、空振りと分かっている回に入れない (Codex 指摘 2026-09-03)。
+        合計が上限も超えていれば知覚の供給が予算超過 — 警告はペルソナごと
+        1 度 (:meth:`_note_perception_over_budget`)。
+
         Returns:
-            :meth:`cold_precompaction_status` の値 (条件不成立時)、または
-            run_metabolism の結果 ("ok"/"nothing"/"failed"/"deferred"/
-            "deferred_sluice_unseen")。
+            :meth:`cold_precompaction_status` の値 (条件不成立時)、"skip"
+            (会話の行が残す量以下で畳めるものが無い)、または run_metabolism の
+            結果 ("ok"/"nothing"/"failed"/"deferred"/"deferred_sluice_unseen")。
             関所 (pending flush) が通らないときは "deferred" (次の tick に譲る)。
         """
         from sea.beat_gate import BeatGateClosedError, hold_beat
@@ -3225,6 +3296,23 @@ class SessionLifecycle:
                 current_chars = self.presented_chars(
                     persona, window.presented, window.anchor_id,
                 )
+                # 「削る先があるか」は会話の行だけを残す量と比べる (残す量の
+                # 主語は会話の行、2026-09-03 裁定)。行が残す量以下なら退場計画は
+                # 保護範囲で埋まって空 — 本体へ進むと、空と分かる前に抽出の
+                # 滞留 (LLM) を流し、10 分ごとに同じ空振りを繰り返す。
+                rows_chars = message_chars(window.presented)
+                if rows_chars <= watermarks.target:
+                    if not self._note_perception_over_budget(
+                        persona, rows_chars, current_chars, watermarks,
+                    ):
+                        LOGGER.debug(
+                            "[metabolism] cold pre-compaction skip: rows already "
+                            "at/below target (persona=%s model=%s %d row chars <= "
+                            "target=%d, %d chars sent)",
+                            persona_id, model_key, rows_chars,
+                            watermarks.target, current_chars,
+                        )
+                    return "skip"
                 LOGGER.info(
                     "[metabolism] cold pre-compaction: all anchors cold and window "
                     "past midpoint (persona=%s model=%s %d chars, target=%d high=%s)",
@@ -3330,13 +3418,13 @@ class SessionLifecycle:
         if refolded is not None:
             window = refolded
             current_messages = window.presented
-            # 「印戻しだけで残す量に収まったか」= 送信量の水位。ここも合計で
-            # 測る (2026-09-02 裁定) — 保存行だけで早期完了すると、実送信が
-            # 残す量を超えたまま「整理しました」を返し、次の Pulse の発火判定
-            # (合計で測る) が即座にまた発火する併走になる。
-            if self.presented_chars(
-                persona, current_messages, window.anchor_id,
-            ) <= watermarks.target:
+            # 「印戻しだけで残す量に収まったか」の主語も**会話の行だけ**
+            # (2026-09-03 裁定)。行が残す量以下なら退場計画は保護範囲で埋まって
+            # 空になる — 進んでも "nothing" で終わるだけなので、ここで完了を
+            # 返す。次の Pulse の発火判定 (合計 vs 上限) がまた発火しても、
+            # 行が残す量以下の窓は本体へ進まず引き返す (知覚の供給が予算超過
+            # の警告)。
+            if message_chars(current_messages) <= watermarks.target:
                 self.ensure_recall_embeddings(persona)
                 try:
                     from saiverse.dynamic_state import DynamicStateManager
@@ -3370,13 +3458,22 @@ class SessionLifecycle:
             close_undersized_tail=close_undersized_tail,
         )
         if plan.is_empty:
-            LOGGER.warning(
-                "[metabolism] nothing foldable this round (persona=%s, %d chars, "
-                "target=%d, protected_from=%d); window stays large until the "
-                "foldable range reaches U=%d in material chars (currently %d)",
-                persona_id, plan.total_chars, watermarks.target,
-                plan.protected_from, band_budget, plan.pending_material_chars,
-            )
+            # 会話の行が残す量以下で合計だけが上限超え = 知覚の供給が予算超過。
+            # 入口の門 (行 vs 残す量) で弾かれるのが普通だが、印戻し・恒久欠落
+            # fold の破棄でロック内の窓が痩せた回はここまで来る。LLM は呼ばずに
+            # 引き返す (警告はペルソナごと 1 度)。
+            if not self._note_perception_over_budget(
+                persona, plan.stored_chars, plan.total_chars, watermarks,
+            ):
+                LOGGER.warning(
+                    "[metabolism] nothing foldable this round (persona=%s, %d chars "
+                    "sent / %d row chars, target=%d, protected_from=%d); window "
+                    "stays large until the foldable range reaches U=%d in "
+                    "material chars (currently %d)",
+                    persona_id, plan.total_chars, plan.stored_chars,
+                    watermarks.target, plan.protected_from, band_budget,
+                    plan.pending_material_chars,
+                )
             return "nothing"
 
         evict_count = plan.evicted_count

@@ -334,8 +334,14 @@ class TailRewindPlan:
     #: 引き戻し後に**実際に送られる**字数 (保存行 + 送信直前に差し込まれる
     #: 知覚ブロック。2026-09-02 裁定 — あらすじの材料字数ではなく、生の提示量)。
     window_chars_after: int
-    #: 引き戻し後に窓が上限 (high) を超える = 補修ジョブ内で即座に畳む。
+    #: 引き戻し後に窓が上限 (high) を超える (合計 > high)。
     fold_needed: bool
+    #: 引き戻し後の窓の**会話の行だけ**の字数 (残す量の主語 — 2026-09-03
+    #: 裁定)。``fold_needed`` でもこれが残す量以下なら退場計画は保護範囲で
+    #: 埋まって空 = 畳めるものが無い (超過の主は知覚の供給)。
+    window_rows_chars_after: int = 0
+    #: 残す量 (watermarks.target)。水位が引けなければ None。
+    target_chars: Optional[int] = None
     #: 畳みの LLM コール見込み (fold_needed 時のみ > 0。概算 — 退場範囲の
     #: 材料字数 / U の切り上げ。束ねの連鎖は数えない)。
     est_fold_calls: int = 0
@@ -345,6 +351,17 @@ class TailRewindPlan:
     #: 書き込み直前の行再読みは「読めない」を「fold 無し」と同一視して既存
     #: 記録を空で上書きしうる (Codex 七巡 K2 — データ喪失級)。
     folded_ranges_payload: Optional[str] = None
+
+    @property
+    def fold_evictable(self) -> bool:
+        """上限超え (``fold_needed``) かつ会話の行が残す量を超えている =
+        畳みが実際に何かを退場させられる。行が残す量以下なら、畳みは
+        走らせても空振り (run_manual_compaction が門で "noop")。"""
+        if not self.fold_needed:
+            return False
+        if self.target_chars is None:
+            return True
+        return self.window_rows_chars_after > self.target_chars
 
 
 def _anchor_positions(
@@ -455,8 +472,10 @@ def plan_tail_rewind(
     presented_after = lifecycle.presented_with_perceptions(
         persona, window_after.presented, str(first_message_id),
     )
-    from sea.eviction_plan import message_chars
+    from sea.eviction_plan import message_chars, stored_message_chars
     chars_after = message_chars(presented_after)
+    # 残す量と比べる量は会話の行だけ (2026-09-03 裁定)。
+    rows_after = stored_message_chars(presented_after)
     watermarks = lifecycle.get_metabolism_watermarks(persona, model_key)
     high = getattr(watermarks, "high", None) if watermarks is not None else None
     target = (
@@ -474,20 +493,25 @@ def plan_tail_rewind(
             budget = chronicle_band_budget()
         except Exception:
             budget = _FALLBACK_BAND_BUDGET
-        # 走査する列も本走行 (plan_eviction) と同じマージ済みの列 —
-        # 「残す量に届くまでにどこまで退場するか」の境目が実送信で決まるため。
-        # 知覚ブロックは材料としては機構名義の一行へ縮む (material_len) ので、
-        # est_material への寄与は本走行の material_message_chars と同じ扱い。
+        # 走査する列は本走行 (plan_eviction) と同じマージ済みの列。「残す量に
+        # 届くまでにどこまで退場するか」の境目は**会話の行だけ**で決まる
+        # (2026-09-03 まはー裁定: 残す量の主語は会話の行。上限 = fold_needed の
+        # 判定は合計のまま)。知覚ブロックは残す量を消費しないので remaining を
+        # 減らさないが、退場する範囲に挟まったものは付記で編纂に入るため材料
+        # には寄与する (機構名義の一行へ縮む material_len — 本走行の
+        # material_message_chars と同じ扱い)。
         # NOTE: 本走行の削減母集合 (_reduction_basis) は fold の先頭・末尾の
         # 隙間ブロックを除くが、この概算はそこまで写さない — 誤差は縮約後の
         # 一行ぶん × 数個で、方向は費用を多めに見せる安全側 (概算の器の内。
         # Codex 指摘 2026-09-02 四巡目、却下の記録は issue)。
-        remaining = chars_after
+        from sea.eviction_plan import is_injected_perception
+        remaining = rows_after
         for msg in presented_after:
             if remaining <= target:
                 break
             content = str(msg.get("content") or "")
-            remaining -= len(content)
+            if not is_injected_perception(msg):
+                remaining -= len(content)
             meta = msg.get("metadata")
             tags = meta.get("tags") if isinstance(meta, dict) else None
             est_material += material_len(
@@ -503,6 +527,8 @@ def plan_tail_rewind(
         new_anchor_id=str(first_message_id),
         window_chars_after=chars_after,
         fold_needed=fold_needed,
+        window_rows_chars_after=rows_after,
+        target_chars=target,
         est_fold_calls=est_calls,
         est_fold_material_chars=est_material,
         # 圧縮区間の記録は計画時点で持ち越す (K2) — 書き込み直前に行を読み
@@ -602,7 +628,10 @@ def run_tail_rewind(
         Codex 九巡 M2 / 十巡 N1 / 十一巡 P1) /
         "cas_rejected" (anchor が動いた — 次回再計画。意図した見送り。書き込みが
         生きていて CAS だけが不一致だった場合に限る) /
-        "rewound" (引き戻しのみ) / "rewound_folded" (引き戻し + 畳み完了) /
+        "rewound" (引き戻しのみ — 畳みが不要、または合計は上限超えでも会話の
+        行が残す量以下で畳めるものが無い (知覚の供給が予算超過。2026-09-03
+        裁定)、または畳みを呼んだが門で "noop" だった) /
+        "rewound_folded" (引き戻し + 畳み完了 = 実際に畳んだ) /
         "rewound_fold_failed" (引き戻しは完了したが窓の畳みが未完 — 呼び出し側は
         status="failed" に写像する。Codex 十巡 N2)
     """
@@ -694,6 +723,21 @@ def run_tail_rewind(
 
     if not plan.fold_needed:
         return "rewound"
+    if not plan.fold_evictable:
+        # 合計は上限超えでも会話の行が残す量以下 — 退場計画は保護範囲で埋まって
+        # 空になる (残す量の主語は会話の行、2026-09-03 裁定)。畳みを呼んでも門で
+        # "noop" に終わるだけなので、「古い側を畳んでいます」と言わず、畳んだ
+        # 顔 ("rewound_folded") もしない。超過の主は知覚の供給 — 本走行の
+        # 発火側が同じ判定で警告する (SessionLifecycle._note_perception_over_budget)。
+        LOGGER.info(
+            "[tail-rewind] window over the high watermark (%d chars sent) but "
+            "the conversation rows (%d chars) are within the target (%s); "
+            "nothing evictable — the perception supply, not the conversation, "
+            "is over budget. Skipping the post-rewind fold (persona=%s)",
+            plan.window_chars_after, plan.window_rows_chars_after,
+            plan.target_chars, persona_id,
+        )
+        return "rewound"
 
     # 引き戻しで窓が上限を超えた — このジョブの中で即座に畳む (裁定 5 改訂の
     # 細部 2 点目)。範囲規則・claim・スルースは run_manual_compaction 経由で
@@ -723,8 +767,16 @@ def run_tail_rewind(
             persona_id, exc_info=True,
         )
         return "rewound_fold_failed"
-    if fold_status in ("ok", "noop"):
+    if fold_status == "ok":
         return "rewound_folded"
+    if fold_status == "noop":
+        # 門で「畳むものが無い」— 畳んではいないので "rewound_folded" (畳み完了)
+        # とは言わない。引き戻し自体は完了しており成功系 (_rewind_ok) のまま。
+        LOGGER.info(
+            "[tail-rewind] post-rewind compaction found nothing to fold "
+            "(persona=%s); the rewind is committed", persona_id,
+        )
+        return "rewound"
     LOGGER.warning(
         "[tail-rewind] post-rewind compaction did not complete "
         "(persona=%s status=%s); the rewind itself is committed (the tail is "

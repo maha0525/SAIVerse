@@ -682,10 +682,12 @@ class InjectedPerceptionTest(unittest.TestCase):
         """
         msgs = [
             msg("m0", 100), msg("m1", 101),
-            msg("k0", 200), perception(201, chars=2_000),
+            msg("k0", 200, chars=2_000), perception(201, chars=2_000),
         ]
-        # 素の境界は末尾の知覚ブロック (添字 3) に落ちるが、単位の先頭 (k0) へ
-        # 下がるので保護は k0 から。候補は m0/m1 = U ちょうど。
+        # 残す量 2,000 は保存行 k0 だけで満ちる (ブロックは残す量を消費しない —
+        # ProtectionSubjectTest)。末尾のブロックは k0 の単位に接着しているので
+        # 保護は k0 から、境目は k0 とブロックの間には落ちない。候補は
+        # m0/m1 = U ちょうど。
         result = plan(msgs, keep=2_000)
         self.assertEqual(result.protected_from, 2)
         self.assertEqual(folded_ids(result), ["m0", "m1"])
@@ -738,6 +740,54 @@ class InjectedPerceptionTest(unittest.TestCase):
         ]
         result = plan(msgs, keep=2_000)
         self.assertTrue(result.is_empty)
+
+
+class ProtectionSubjectTest(unittest.TestCase):
+    """残す量 (保護範囲) が数えるのは**保存行だけ** — 知覚ブロックは消費しない。
+
+    docs/issues/protection_quota_consumed_by_perception_blocks.md (2026-09-03
+    まはー裁定): 上限 (発火) の主語は「実際に送る合計」、残す量 (保護) の主語は
+    「会話の行の量」。ブロックが残す量を食うと、巨大な部屋の様子が末尾に
+    乗った回に会話の行がほぼ全部畳まれ、ペルソナが直近の記憶を失う (本番で
+    発生した事故)。契約: 畳んだ後も少なくとも残す量ぶんの会話の行が残る
+    (関節へのスナップは従来どおり)。
+    """
+
+    def _rows(self, n, *, chars=1_000, step=1):
+        return [msg(f"m{i}", 100 + i * step, chars=chars) for i in range(n)]
+
+    def test_newest_block_does_not_consume_the_keep_quota(self):
+        rows = self._rows(20)                      # 20,000 字の会話
+        block = perception(500, chars=15_000)      # 末尾に巨大な部屋の様子
+        result = plan(rows + [block], keep=18_000)
+        # 保護は m2 から (m2..m19 = 18,000 字の保存行)。ブロックの 15,000 字は
+        # 残す量を 1 字も消費しない。
+        self.assertEqual(result.protected_from, 2)
+        self.assertGreaterEqual(result.protected_rows_chars, 18_000)
+        self.assertEqual(result.stored_chars, 20_000)
+        self.assertEqual(result.total_chars, 35_000)
+        self.assertEqual(folded_ids(result), ["m0", "m1"])
+
+    def test_block_older_than_the_boundary_changes_nothing(self):
+        rows = self._rows(20, step=2)              # 100, 102, ..., 138
+        block = perception(103, chars=15_000)      # m1 と m2 の間 (境界より古い)
+        with_block = plan(rows[:2] + [block] + rows[2:], keep=18_000)
+        without = plan(rows, keep=18_000)
+        self.assertEqual(folded_ids(with_block), folded_ids(without))
+        self.assertEqual(
+            with_block.protected_rows_chars, without.protected_rows_chars,
+        )
+        self.assertGreaterEqual(with_block.protected_rows_chars, 18_000)
+
+    def test_rows_below_keep_are_all_protected_however_big_the_block(self):
+        rows = self._rows(10)                      # 10,000 字の会話
+        block = perception(500, chars=30_000)      # 合計 40,000 字
+        result = plan(rows + [block], keep=18_000)
+        # 会話の行は残す量に届かない = 全部が保護範囲。退場できるものは無い。
+        self.assertTrue(result.is_empty)
+        self.assertEqual(result.protected_from, 0)
+        self.assertEqual(result.protected_rows_chars, 10_000)
+        self.assertEqual(result.total_chars, 40_000)
 
 
 class GuardTest(unittest.TestCase):

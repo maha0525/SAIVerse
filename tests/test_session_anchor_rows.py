@@ -556,15 +556,17 @@ def test_manual_compaction_noop_at_or_below_target(session_factory):
     run.assert_not_called()
 
 
-def test_manual_compaction_counts_injected_perceptions(session_factory):
-    """手動整理の門も「実際に送る中身」で測る (2026-09-02 まはー裁定)。
+def test_manual_compaction_gate_counts_rows_only(session_factory, caplog):
+    """手動整理の門は**会話の行だけ**を残す量と比べる (2026-09-03 まはー裁定)。
 
-    ユーザーが押すボタンの直撃点。保存行だけで測ると、実送信が残す量を大きく
-    超えていても保存行が軽い窓では "noop" (畳むものが無い) と門前払いになり、
-    押しても何も起きない — しかも走行側 (plan_eviction) は既に合計で測って
-    いるので、門と本走行が別の答えを出す
-    (docs/issues/context_accounting_excludes_injected_rows.md)。
+    残す量の主語は「会話の行の量」。走行側 (plan_eviction) の保護範囲も行だけで
+    測るので、行が残す量以下の窓は門を通しても計画が空で "nothing" に終わる —
+    門で "noop" を返すのが一貫した答え (門と本走行が別の答えを出さない)。
+    知覚ぶんで合計が上限を超えている窓は、畳めるものが無い旨を 1 度だけ
+    WARNING に出す (docs/issues/protection_quota_consumed_by_perception_blocks.md)。
     """
+    import logging
+
     from sea.eviction_plan import Watermarks
     lc = _make_lifecycle(session_factory)
     persona = SimpleNamespace(
@@ -577,14 +579,24 @@ def test_manual_compaction_counts_injected_perceptions(session_factory):
             patch.object(lc, "get_presented_window",
                          return_value=_window("m0", msgs)), \
             patch.object(lc, "run_metabolism", return_value="ok") as run:
-        # 保存行 1,500 字 <= 残す量 2,000 → 従来どおり門前払い。
+        # 保存行 1,500 字 <= 残す量 2,000 → 門前払い。
         assert lc.run_manual_compaction(persona) == "noop"
-        run.assert_not_called()
-        # 差し込みの知覚 1,000 字を足すと 2,500 字 > 残す量 → 畳みへ進む。
-        with patch.object(lc, "perception_blocks_for",
-                          return_value=[_perception_block(1000)]):
-            assert lc.run_manual_compaction(persona) == "ok"
-    run.assert_called_once()
+        # 知覚 1,000 字を足しても行は 1,500 字のまま → やはり門前払い
+        # (合計 2,500 は上限 4,000 以下なので警告も出ない)。
+        with caplog.at_level(logging.WARNING, logger="sea.session_lifecycle"), \
+                patch.object(lc, "perception_blocks_for",
+                             return_value=[_perception_block(1000)]):
+            assert lc.run_manual_compaction(persona) == "noop"
+            assert not [r for r in caplog.records if "perception blocks" in r.getMessage()]
+        # 知覚 3,000 字で合計 4,500 > 上限 → 畳めるものが無い旨を 1 度だけ警告。
+        with caplog.at_level(logging.WARNING, logger="sea.session_lifecycle"), \
+                patch.object(lc, "perception_blocks_for",
+                             return_value=[_perception_block(3000)]):
+            assert lc.run_manual_compaction(persona) == "noop"
+            assert lc.run_manual_compaction(persona) == "noop"
+            warned = [r for r in caplog.records if "perception blocks" in r.getMessage()]
+            assert len(warned) == 1
+    run.assert_not_called()
 
 
 def test_manual_compaction_unavailable_without_anchor(session_factory):
@@ -1629,6 +1641,58 @@ def test_run_cold_precompaction_rechecks_under_beat_lock(session_factory):
     run.assert_not_called()
 
 
+def test_run_cold_precompaction_skips_when_only_perception_over_budget(
+    session_factory, caplog,
+):
+    """先回り畳みも「削る先があるか」は会話の行だけを残す量と比べる。
+
+    行 10,000 字 <= 残す量 18,000 字なら退場計画は保護範囲で埋まって空になる
+    (残す量の主語は会話の行、2026-09-03 裁定)。合計 40,000 字が中間値も上限
+    26,000 字も超えていても、run_metabolism へ進まない — 本体は計画が空と分かる
+    前に抽出の滞留 (_retry_extraction_backlog — LLM 課金) を流し、10 分ごとに
+    同じ空振りを繰り返す (Codex 指摘 2026-09-03)。"skip" で引き返し、知覚の
+    供給が予算超過の警告はペルソナごと 1 度だけ。
+    """
+    import logging as _logging
+
+    from sea.eviction_plan import Watermarks
+
+    lc = _cold_ready_lifecycle(session_factory)
+    persona = SimpleNamespace(
+        persona_id=PERSONA_ID, model="model-a", current_building_id="room",
+    )
+    stale = _now() - timedelta(days=3)
+    lc.upsert_anchor_entry(PERSONA_ID, "model-a", {
+        "anchor_id": "m1", "updated_at": stale.isoformat(), "ttl_seconds": 300,
+    })
+    wm = Watermarks(low=9000, target=18000, high=26000)  # 中間値 = 22,000
+    rows = [{"id": "m1", "content": "x" * 10000}]
+
+    with patch.object(lc, "is_chronicle_enabled_for_persona", return_value=True), \
+            patch.object(lc, "is_autonomous_chronicle_enabled_for_persona",
+                         return_value=True), \
+            patch.object(lc, "get_metabolism_watermarks", return_value=wm), \
+            patch.object(lc, "get_presented_window",
+                         return_value=_window("m1", rows)), \
+            patch.object(lc, "perception_blocks_for",
+                         return_value=[_perception_block(30000)]), \
+            patch.object(lc, "_retry_extraction_backlog") as backlog, \
+            patch.object(lc, "run_metabolism", return_value="ok") as run:
+        # 事前判定は合計 40,000 > 中間値 22,000 で "due" — 本体側で引き返す。
+        assert lc.cold_precompaction_status(persona) == "due"
+        with caplog.at_level(_logging.WARNING, logger="sea.session_lifecycle"):
+            assert lc.run_cold_precompaction(persona) == "skip"
+            assert lc.run_cold_precompaction(persona) == "skip"
+            warned = [
+                r for r in caplog.records
+                if r.levelno == _logging.WARNING
+                and "perception blocks" in r.getMessage()
+            ]
+            assert len(warned) == 1
+    run.assert_not_called()
+    backlog.assert_not_called()
+
+
 def test_emergency_precompaction_skip_below_high(session_factory):
     """高水位以下なら何もしない (通知も編纂も出ない)。"""
     from sea.eviction_plan import Watermarks
@@ -1692,6 +1756,65 @@ def test_emergency_precompaction_counts_injected_perceptions(session_factory):
             ) == "ok"
     run.assert_called_once()
     assert [e["type"] for e in events] == ["status"]
+
+
+def test_emergency_precompaction_noop_when_only_perception_over_budget(
+    session_factory, caplog,
+):
+    """知覚の供給だけが予算超過 (合計 > 上限、会話の行 <= 残す量) なら何もしない。
+
+    残す量の主語は会話の行 (2026-09-03 裁定) なので、行 10,000 字 <= 残す量
+    18,000 字の窓では退場計画が保護範囲で埋まって必ず空になる。合計 40,000 字
+    > 上限 26,000 字だからといって通知を出し・自行を立て・run_metabolism へ
+    進むと、毎ターン「整理しています」だけ出て何も畳めない (Codex 指摘
+    2026-09-03)。"skip" で引き返し、警告はペルソナごと 1 度だけ。
+    """
+    import logging as _logging
+
+    from sea.eviction_plan import Watermarks
+
+    lc = _cold_ready_lifecycle(session_factory)
+    persona = SimpleNamespace(
+        persona_id=PERSONA_ID, model="model-a", current_building_id="room",
+    )
+    # 自行なし (resolution が frontier/other になり、従来なら行を立てていた経路)
+    wm = Watermarks(low=9000, target=18000, high=26000)
+    rows = [{"id": "m1", "content": "x" * 10000}]
+    events = []
+
+    with patch.object(lc, "get_metabolism_watermarks", return_value=wm), \
+            patch.object(lc, "resolve_metabolism_anchor",
+                         return_value=("m1", "frontier")), \
+            patch.object(lc, "get_presented_window",
+                         return_value=_window("m1", rows)), \
+            patch.object(lc, "perception_blocks_for",
+                         return_value=[_perception_block(30000)]), \
+            patch.object(lc, "upsert_anchor_entry") as upsert, \
+            patch.object(lc, "run_metabolism", return_value="ok") as run:
+        with caplog.at_level(_logging.WARNING, logger="sea.session_lifecycle"):
+            assert lc.maybe_run_emergency_precompaction(
+                persona, "room", events.append,
+            ) == "skip"
+            first_warnings = [
+                r for r in caplog.records
+                if r.levelno == _logging.WARNING
+                and "perception blocks" in r.getMessage()
+            ]
+            assert len(first_warnings) == 1
+            caplog.clear()
+            # 2 回目 (次のユーザーターン) も "skip" で、警告は再発しない
+            assert lc.maybe_run_emergency_precompaction(
+                persona, "room", events.append,
+            ) == "skip"
+            assert not [
+                r for r in caplog.records
+                if r.levelno == _logging.WARNING
+                and "perception blocks" in r.getMessage()
+            ]
+    run.assert_not_called()
+    upsert.assert_not_called()
+    assert events == []
+    assert lc.load_anchor_entry(PERSONA_ID, "model-a") is None
 
 
 def test_emergency_precompaction_folds_over_high_with_notice(session_factory):

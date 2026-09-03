@@ -34,7 +34,18 @@ def get_context_status(persona_id: str, manager=Depends(get_manager)) -> dict[st
       **保存済みの会話に加えて、送信直前に差し込まれる知覚 (部屋の様子) を
       含む合計**で、内訳は ``stored_chars`` / ``injected_perception_chars``
       (2026-09-02 まはー裁定 —
-      docs/issues/context_accounting_excludes_injected_rows.md)。
+      docs/issues/context_accounting_excludes_injected_rows.md)。上限
+      (``high_chars``) と比べる量はこの合計。
+    - ``window_rows_chars``: 残す量 (``target_chars``) の契約が見ている量 =
+      整理が計画を立てる窓 (§15-3 印戻しなどの正規化後) の**会話の行だけ**の
+      文字数 (``EvictionPlan.stored_chars``)。残す量の主語は会話の行で、知覚は
+      消費しない (2026-09-03 裁定 —
+      docs/issues/protection_quota_consumed_by_perception_blocks.md)。
+      ``EvictionPlan.protected_rows_chars`` (保護範囲の**内側**の行の字数) とは
+      別の量なので、名前も分けてある。測れないときは None。
+    - ``perception_over_budget``: 合計は上限を超えているのに会話の行が残す量
+      以下 = 整理しても畳めるものが無い (超過の主は知覚の供給)。測れない
+      ときは None。
     - ``fold_unit_chars``: 一次あらすじの標準被覆 U。整理は残す量より古い側を
       U (材料字数 — 2026-08-29 裁定) ずつの範囲に刻んで畳む。
     - ``fold_ready`` / ``fold_shortfall_chars``: いま手動の畳みで実際に fold が
@@ -64,6 +75,8 @@ def get_context_status(persona_id: str, manager=Depends(get_manager)) -> dict[st
         "presented_chars": None,      # 実際に送られる合計文字数 (読み戻し後)
         "stored_chars": None,         # うち保存済みの会話 (提示ウィンドウの行)
         "injected_perception_chars": None,  # うち送信直前に差し込まれる知覚
+        "window_rows_chars": None,  # 残す量の契約が見る量 (計画窓の会話の行だけ)
+        "perception_over_budget": None,  # 合計は上限超えだが行は残す量以下 (畳めない)
         "fold_unit_chars": chronicle_band_budget(),  # 一度に畳む単位 U (env 由来の定数)
         "fold_ready": None,           # いま畳みで fold が実際に閉じるか (測れなければ None)
         "fold_shortfall_chars": None,  # 閉じないとき、あと材料何字で閉じるか (閉じるなら 0)
@@ -230,6 +243,17 @@ def _measure_fold_readiness(
     status["fold_shortfall_chars"] = (
         0 if ready
         else max(0, band - plan.pending_material_chars)
+    )
+    # 残す量の契約が見ている量 = 計画窓の会話の行だけ (知覚は残す量を消費
+    # しない — 2026-09-03 裁定)。合計 (presented_chars) が上限を超えているのに
+    # 行が残す量以下なら、整理は畳めるものを見つけられない — 超過の主は知覚の
+    # 供給で、画面はその事実を出す (本走行は同じ判定で LLM を呼ばず引き返す)。
+    status["window_rows_chars"] = plan.stored_chars
+    total = status.get("presented_chars")
+    high = getattr(watermarks, "high", None)
+    status["perception_over_budget"] = bool(
+        high is not None and total is not None
+        and total > high and plan.stored_chars <= watermarks.target
     )
 
 
