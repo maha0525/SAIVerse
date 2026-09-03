@@ -25,6 +25,11 @@ class ThreadSummary(BaseModel):
     suffix: str
     preview: str
     active: bool
+    # 人が読むスレッド名 (取り込み元の会話タイトル)。無ければ None で UI は suffix を出す
+    title: Optional[str] = None
+    message_count: int = 0
+    first_created_at: Optional[float] = None
+    last_created_at: Optional[float] = None
     # Stelis thread info
     is_stelis: bool = False
     stelis_parent_id: Optional[str] = None

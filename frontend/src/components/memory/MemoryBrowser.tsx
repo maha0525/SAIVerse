@@ -1,12 +1,18 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Loader2, ChevronLeft, ChevronRight, MessageSquare, Trash2, AlertTriangle, ChevronsLeft, ChevronsRight, Edit2, Save, X, CheckSquare, Square, Trash, Tag, Plus, Upload, ChevronDown, ChevronUp, Sparkles } from 'lucide-react';
 import styles from './MemoryBrowser.module.css';
+import { formatThreadDateRange } from './formatters';
 
 interface ThreadSummary {
     thread_id: string;
     suffix: string;
     preview: string;
     active: boolean;
+    // 人が読むスレッド名 (取り込み元の会話タイトル)。無ければ suffix を出す
+    title?: string | null;
+    message_count?: number;
+    first_created_at?: number | null;
+    last_created_at?: number | null;
     // Stelis thread info
     is_stelis?: boolean;
     stelis_parent_id?: string;
@@ -554,6 +560,9 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
             className={`${styles.threadItem} ${selectedThreadId === thread.thread_id ? styles.active : ''} ${thread.is_stelis ? styles.stelisThread : ''}`}
             onClick={() => handleThreadSelect(thread.thread_id)}
         >
+            {thread.title && (
+                <div className={styles.threadTitle} title={thread.title}>{thread.title}</div>
+            )}
             <div className={styles.threadMeta}>
                 <span className={styles.threadId}>
                     {thread.is_stelis && thread.stelis_depth !== undefined && (
@@ -576,6 +585,9 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
                     {thread.stelis_label || 'Stelis'}
                 </div>
             )}
+            <div className={styles.threadStats}>
+                {[`${thread.message_count ?? 0} 件`, formatThreadDateRange(thread.first_created_at, thread.last_created_at)].filter(Boolean).join(' · ')}
+            </div>
             <div className={styles.threadPreview}>
                 {thread.preview || "プレビューなし"}
             </div>

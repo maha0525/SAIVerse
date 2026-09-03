@@ -2,7 +2,7 @@ import { AlertCircle, CheckSquare, Download, Loader2, MessageSquare, Square } fr
 import React, { useState, useRef, useCallback } from 'react';
 
 import styles from './MemoryImport.module.css';
-import { formatImportDate } from './formatters';
+import { formatImportDate, formatThreadDateRange } from './formatters';
 import { ImportSubTab, MemoryImportStep, NativePreviewData, PreviewData, ThreadSummary } from './types';
 
 interface Props {
@@ -58,9 +58,17 @@ export function MemoryImportForm(props: Props) {
 
   const mainContent = () => {
     if (props.step === 'thread-select') {
-      return <div className={styles.threadSelectContainer}>{/* simplified */}
+      return <div className={styles.threadSelectContainer}>
         <div className={styles.threadSelectHeader}><MessageSquare size={24} /><h3>どのスレッドから会話を続けますか？</h3></div>
-        <div className={styles.threadList}>{props.threads.map((thread) => <div key={thread.thread_id} className={`${styles.threadItem} ${props.selectedThreadId === thread.thread_id ? styles.selected : ''}`} onClick={() => props.onSelectThread(thread.thread_id)}><div className={styles.threadContent}><div className={styles.threadName}>{thread.suffix || thread.thread_id}</div><div className={styles.threadPreview}>{thread.preview || '(プレビューなし)'}</div></div></div>)}</div>
+        <div className={styles.threadList}>{props.threads.map((thread) => {
+          // 1 行目 = 題名 (無ければ suffix)、2 行目 = 件数・期間 (題名があるときは suffix も)、3 行目 = 冒頭プレビュー
+          const meta = [
+            `${thread.message_count ?? 0} 件`,
+            formatThreadDateRange(thread.first_created_at, thread.last_created_at),
+            thread.title ? (thread.suffix || thread.thread_id) : '',
+          ].filter(Boolean).join(' · ');
+          return <div key={thread.thread_id} className={`${styles.threadItem} ${props.selectedThreadId === thread.thread_id ? styles.selected : ''}`} onClick={() => props.onSelectThread(thread.thread_id)}><div className={styles.threadContent}><div className={styles.threadName}>{thread.title || thread.suffix || thread.thread_id}</div><div className={styles.threadMetaLine}>{meta}</div><div className={styles.threadPreview}>{thread.preview || '(プレビューなし)'}</div></div></div>;
+        })}</div>
         <div className={styles.actions}><button className={styles.cancelButton} onClick={props.onSkipThread}>スキップ</button><button className={styles.importButton} onClick={props.onConfirmThread} disabled={!props.selectedThreadId || props.isLoading}>このスレッドを使用</button></div>
       </div>;
     }
