@@ -32,7 +32,11 @@ LOGGER = logging.getLogger(__name__)
 
 
 class ChunkExecutionError(RuntimeError):
-    """チャンク実行の失敗 (LLM 応答空・保存失敗など LLMError 以外の失敗)。"""
+    """チャンク実行の失敗 (保存失敗など LLMError 以外の失敗)。
+
+    LLM の空応答はここには来ない — generator.generate_text_with_empty_retry が
+    規定回数試し直し、それでも空なら EmptyResponseError (LLMError) で上がる。
+    """
 
 
 # ---------------------------------------------------------------------------
@@ -173,12 +177,6 @@ class ExecutionResult:
         return len(self.created)
 
 
-def _record_llm_usage(client, persona_id: Optional[str], node_type: str) -> None:
-    """LLM usage 記録 (generator._record_llm_usage を共用 — 失敗しても止めない)。"""
-    from sai_memory.arasuji.generator import _record_llm_usage as _impl
-    _impl(client, persona_id, node_type)
-
-
 def _is_already_compiled(conn: sqlite3.Connection, first_source_id: str) -> bool:
     """チャンク先頭 message が既に一次あらすじの source に含まれているか (重複再検査)。
 
@@ -276,12 +274,18 @@ def _chunk_content(
         perception_items=perception_items,
     )
     from llm_clients.exceptions import LLMError
+    from sai_memory.arasuji.generator import generate_text_with_empty_retry
     try:
-        response = client.generate(
-            messages=[{"role": "user", "content": prompt}],
-            tools=[],
+        # 空応答 (推論モデルが reasoning_content だけで閉じる) は helper が
+        # 規定回数まで試し直す。使い切ったら EmptyResponseError が上がってくる。
+        # usage は試行ごとに helper 側で記録する。
+        return generate_text_with_empty_retry(
+            client,
+            [{"role": "user", "content": prompt}],
+            purpose="chronicle_level1 chunk",
+            persona_id=persona_id,
+            usage_node_type="chronicle_level1",
         )
-        _record_llm_usage(client, persona_id, "chronicle_level1")
     except LLMError as exc:
         # 現行 generator と同じ契約: LLMError は文脈を付けて propagate
         # (frontend がバッチナビゲーションに使う)。
@@ -295,12 +299,6 @@ def _chunk_content(
             "end_time": max(m.created_at for m in chunk.messages),
         }
         raise
-    content = (response or "").strip()
-    if not content:
-        raise ChunkExecutionError(
-            f"empty LLM response for chunk ({len(chunk.messages)} messages)"
-        )
-    return content
 
 
 def execute_plan(
@@ -315,6 +313,7 @@ def execute_plan(
     batch_callback: Optional[Callable[[List, Optional[str]], None]] = None,
     cancel_check: Optional[Callable[[], bool]] = None,
     db_lock: Optional[Any] = None,
+    after_chunk: Optional[Callable[[int, int], None]] = None,
 ) -> ExecutionResult:
     """整列計画を実行して一次あらすじを確定する。
 
@@ -330,6 +329,15 @@ def execute_plan(
         db_lock: SAIMemoryAdapter の ``_db_lock``。抽出失敗の付箋を書くときに
             使う —— ``conn`` が adapter と共有なら、ロック外の commit は他所の
             開いたトランザクションを途中で確定させる (Codex 四巡 #2)。
+        after_chunk: callback(chunks_done, total_chunks)。チャンクが **確定
+            (commit) された直後**に呼ぶ (重複スキップでは呼ばない)。呼び出し元
+            (generate_chronicle) はここで上位あらすじの束ね (bands.
+            run_band_overflow) を挟む — 各チャンクのプロンプトに載る
+            「これまでの流れ」は確定済みあらすじを新しい側から辿り、近い過去は
+            レベル1、遠い過去はレベル2 以上で読む設計なので、束ねを走行の最後に
+            一度だけ行うと、大量編纂の後半チャンクは直前 20 件のレベル1 しか
+            見えず、それより前の流れを失う (2026-09-03)。callback の例外は
+            編纂を止めない (記録して続行)。
 
     Returns:
         ExecutionResult (created は確定順)。
@@ -545,6 +553,12 @@ def execute_plan(
                     "[executor] batch_callback failed (entry=%s); continuing",
                     entry.id[:8],
                 )
+
+        if after_chunk:
+            try:
+                after_chunk(len(result.created), len(plan.chunks))
+            except Exception:
+                LOGGER.exception("[executor] after_chunk hook failed; continuing")
 
     if progress_callback and not result.cancelled:
         progress_callback(processed, total)

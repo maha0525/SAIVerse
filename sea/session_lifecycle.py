@@ -56,6 +56,16 @@ class SessionLifecycle:
         # §14-4 先回り畳みの実行中 persona (persona ごとに同時 1 本)
         self._cold_sweep_lock = threading.Lock()
         self._cold_sweep_inflight: Set[str] = set()
+        # generate_chronicle が "failed" を返した直近の理由 (error_code /
+        # user_message / batch_meta)。戻り値の契約 (status 文字列) を変えずに、
+        # 手動生成のジョブ UI が empty_response 等の案内と「該当メッセージを
+        # 表示」を出せるようにする口。pop_last_chronicle_failure で取り出す。
+        # SessionLifecycle は runtime に 1 つで全ペルソナが共有し、Beat の錠は
+        # ペルソナごとなので、走行は重なる — persona_id をキーにして、A の
+        # ジョブが B の理由を受け取ったり、B の走行開始が A の理由を消したり
+        # しないようにする (Codex 指摘 2026-09-03)。
+        self._chronicle_failures_lock = threading.Lock()
+        self._chronicle_failures: Dict[str, Dict[str, Any]] = {}
 
     # ------------------------------------------------------------------
     # 勘定の単位 — 「実際に送る中身」(2026-09-02 まはー裁定)
@@ -3754,6 +3764,52 @@ class SessionLifecycle:
         finally:
             db.close()
 
+    #: persona_id が取れない persona オブジェクトの失敗理由を入れるキー。本番の
+    #: 呼び出し元は全て PersonaCore (persona/core.py で persona_id を必ず持つ)
+    #: なので実運用では使われない — テストの SimpleNamespace などの保険。
+    _CHRONICLE_FAILURE_UNKNOWN_KEY = "__unknown__"
+
+    @classmethod
+    def _chronicle_failure_key(cls, persona_id: Optional[str]) -> str:
+        return str(persona_id) if persona_id else cls._CHRONICLE_FAILURE_UNKNOWN_KEY
+
+    def _note_chronicle_failure(
+        self, persona_id: Optional[str], exc: BaseException,
+    ) -> None:
+        """generate_chronicle が "failed" を返す直前に、その理由を persona ごとに保持する。
+
+        LLMError (llm_clients/exceptions.py) は ``error_code`` / ``user_message``
+        を持ち、executor はチャンクの LLMError に ``batch_meta`` (落ちたチャンクの
+        message_ids / 時間範囲) を付けて propagate する。それ以外の例外は
+        error_code "unknown"、本文は str(exc)。
+        """
+        failure = {
+            "error_code": getattr(exc, "error_code", None) or "unknown",
+            "error": getattr(exc, "user_message", None) or str(exc),
+            "error_detail": str(exc),
+            "error_meta": getattr(exc, "batch_meta", None),
+        }
+        with self._chronicle_failures_lock:
+            self._chronicle_failures[self._chronicle_failure_key(persona_id)] = failure
+
+    def _reset_chronicle_failure(self, persona_id: Optional[str]) -> None:
+        """走行の頭で、その persona の前回の理由だけを捨てる (他 persona には触れない)。"""
+        with self._chronicle_failures_lock:
+            self._chronicle_failures.pop(self._chronicle_failure_key(persona_id), None)
+
+    def pop_last_chronicle_failure(
+        self, persona_id: Optional[str],
+    ) -> Optional[Dict[str, Any]]:
+        """その persona の直近の generate_chronicle の失敗理由を返して消す (無ければ None)。
+
+        手動生成のジョブ (api/routes/people/arasuji.py) が "failed" を受けた
+        ときに呼び、error_code / error_meta をジョブ台帳へ写す。
+        """
+        with self._chronicle_failures_lock:
+            return self._chronicle_failures.pop(
+                self._chronicle_failure_key(persona_id), None,
+            )
+
     def generate_chronicle(
         self,
         persona,
@@ -3812,12 +3868,19 @@ class SessionLifecycle:
             resolve_memory_weave_config,
         )
 
+        # 走行ごとに失敗理由を捨てる — 前回の理由が今回の "failed" に化けない。
+        # 捨てるのはこの persona のぶんだけ (別 persona の走行が重なっていても
+        # その理由には触れない)。
+        _failure_persona_id = getattr(persona, "persona_id", None)
+        self._reset_chronicle_failure(_failure_persona_id)
+
         try:
             model_id, model_config, _weave_source = resolve_memory_weave_config(
                 persona, purpose="chronicle"
             )
         except LookupError as exc:
             LOGGER.warning("[metabolism] %s (Chronicle generation)", exc)
+            self._note_chronicle_failure(_failure_persona_id, exc)
             return "failed"
         client = build_memory_weave_client(model_id, model_config)
 
@@ -3862,7 +3925,7 @@ class SessionLifecycle:
                 ceiling = resolve_compile_ceiling(
                     self, getattr(persona, "persona_id", None), adapter.conn,
                 )
-            except Exception:
+            except Exception as exc:
                 # 上端が分からないまま全量を編纂すると、温かい窓の下を掘る
                 # リスクを黙って踏む — fail-closed で止める (次回再試行)。
                 LOGGER.warning(
@@ -3870,6 +3933,7 @@ class SessionLifecycle:
                     "the full-plan compile (persona=%s)",
                     getattr(persona, "persona_id", "?"), exc_info=True,
                 )
+                self._note_chronicle_failure(_failure_persona_id, exc)
                 return "failed"
             if ceiling is not None:
                 from sai_memory.memory.storage import clip_messages_before_position
@@ -4008,12 +4072,13 @@ class SessionLifecycle:
                     # なる)。
                     pending_stale_count = len(list_stale_upper_ids(adapter.conn))
                     _stale_marker = is_repair_incomplete(adapter.conn)
-            except Exception:
+            except Exception as exc:
                 LOGGER.exception(
                     "[metabolism] absorption maintenance checks failed; "
                     "refusing the full-plan compile (persona=%s)",
                     getattr(persona, "persona_id", "?"),
                 )
+                self._note_chronicle_failure(_failure_persona_id, exc)
                 return "failed"
             normal_plan, _tiny_chunks = split_plan_for_absorption(
                 plan, target_chars=chronicle_band_budget(),
@@ -4038,12 +4103,13 @@ class SessionLifecycle:
                         target_chars=chronicle_band_budget(),
                         excluded_entry_ids=frozenset(folded_entry_ids),
                     )
-                except Exception:
+                except Exception as exc:
                     LOGGER.exception(
                         "[metabolism] absorption planning failed; refusing "
                         "the full-plan compile (persona=%s)",
                         getattr(persona, "persona_id", "?"),
                     )
+                    self._note_chronicle_failure(_failure_persona_id, exc)
                     return "failed"
                 plan = normal_plan
         _absorption_calls = (
@@ -4328,14 +4394,23 @@ class SessionLifecycle:
                 })
 
         # 束ね (run_band_overflow) の畳み 1 件ごと — LLM 1 コールずつ進むので、
-        # ここも画面と台帳に同じ信号を出す。
-        def band_progress_fn(done, total):
+        # ここも画面と台帳に同じ信号を出す。束ねはチャンク確定のたびに挟まる
+        # (下の _consolidate) ので、run_band_overflow が渡す「この呼び出し内の
+        # (done, limit)」ではなく、走行全体の累計 / 承認済みの総予算で数える —
+        # 呼び出しごとに (1/3) からやり直す表示にしない。
+        _consolidated = [0]  # 走行全体で確定した束ねの累計
+        _band_disabled = [False]  # LLM に届く前の失敗で、この走行の束ねを止めた印
+
+        def band_progress_fn(done, _total):
             _heartbeat()
             if event_callback:
                 event_callback({
                     "type": "metabolism",
                     "status": "running",
-                    "content": f"上位のあらすじを束ねています ({done}/{total})...",
+                    "content": (
+                        "上位のあらすじを束ねています "
+                        f"({_consolidated[0] + done}/{band_plan_count})..."
+                    ),
                 })
 
         # Build cancellation check from cancellation token
@@ -4450,6 +4525,7 @@ class SessionLifecycle:
                 )
             except Exception as exc:
                 LOGGER.exception("[metabolism] tiny-run absorption failed")
+                self._note_chronicle_failure(_failure_persona_id, exc)
                 if ledger is not None and execution_id:
                     try:
                         ledger.mark_failed(
@@ -4491,6 +4567,184 @@ class SessionLifecycle:
         # 本編の開始をここで報告する (前段の吸収を跨いだ後)。
         _emit_compile_start()
 
+        # 束ね (chronicle_consolidation): 未束ねの字数が発火閾値を超えたら、
+        # 古い側を 1 個の親に畳んで上のレベルへ送る (bands.run_band_overflow)。
+        #
+        # 順序 (2026-09-03 まはー裁定): 束ねは**チャンクが確定するたび**に挟み、
+        # 走行の最後にもう一度呼ぶ。各チャンクのプロンプトに載る「これまでの
+        # 流れ」(context.get_episode_context_for_timerange) は確定済みあらすじを
+        # 新しい側から 20 件辿り、近い過去はレベル1、遠い過去はレベル2 以上で
+        # 読む — 階層があって初めて 20 件で全史を覆える設計。束ねを最後に一度
+        # だけにすると、大量編纂 (数万通のインポート修復) の後半チャンクは
+        # 直前 20 件のレベル1 しか見えず、それより前の流れを失っていた。W4
+        # 移行前の generator はバッチごとに maybe_consolidate を呼んでいて、
+        # 移行 (2026-07-21) がこの挟み込みを落としていた (回帰)。
+        #
+        # 予算: 走行全体の畳み回数は確認ゲートに提示した dry 件数
+        # (band_plan_count) を超えない — 実出力長のブレで連鎖が増えても承認
+        # 回数を超えない。各呼び出しには残り予算だけを渡す。超過の無い回は
+        # run_band_overflow が 1 クエリの前検査で抜ける (LLM も並びの読み直しも
+        # 走らない)。
+        #
+        # 束ね失敗は編纂の成否に含めない (一次あらすじは確定済み = 情報の欠落は
+        # なく、次回の Metabolism の dry 予測が backlog を検出して自然に再試行
+        # する)。batch_callback は恒等圧縮の子が初めて要約に変わる瞬間の
+        # Fragment 抽出 (intent §7)。束ね側の抽出失敗は下の器に積み、
+        # execute_plan の結果へ合流させて executor 側とまとめて報告する
+        # (ERROR ログ / 台帳 / 画面通知)。
+        band_extraction_failures: List[str] = []
+        band_extraction_failures_unrecorded: List[str] = []
+
+        def _consolidate(reason: str) -> None:
+            # 台帳の心拍は成否に依らず 1 回打つ (finally)。失敗した畳みは進捗
+            # イベントを出さないので、progress 経由の心拍だけだとプロバイダ障害
+            # の間の走行が「観測途絶」に見える。
+            try:
+                if folded_entry_ids is None or _consolidated[0] >= band_plan_count:
+                    return
+                if _band_disabled[0]:
+                    return
+                # 予算は**試行回数**で消費する (Codex 指摘 2026-09-03 high):
+                # run_band_overflow の戻り値は確定数で、LLM 失敗・空応答・
+                # tx 内再検査の放棄は 0 で返る。成功数だけを累計すると超過が
+                # 残ったまま次の after_chunk が同じ残り予算で同じ畳みを再試行し、
+                # 障害の間の課金回数が承認件数で縛られない。stats は失敗の
+                # 途中でも書かれているので、例外で抜けた回も同じ規則で数える。
+                stats: Dict[str, int] = {"attempts": 0, "created": 0}
+                folded = 0
+                try:
+                    folded = run_band_overflow(
+                        adapter.conn, client,
+                        persona_id=persona_id_str,
+                        cancel_check=cancel_fn,
+                        excluded_entry_ids=folded_entry_ids or None,
+                        batch_callback=note_callback,
+                        max_folds=band_plan_count - _consolidated[0],
+                        extraction_failures=band_extraction_failures,
+                        db_lock=adapter._db_lock,
+                        extraction_failures_unrecorded=(
+                            band_extraction_failures_unrecorded
+                        ),
+                        progress_callback=band_progress_fn,
+                        stats=stats,
+                    )
+                except Exception:
+                    LOGGER.exception("[bands] consolidation failed; continuing")
+                    if not int(stats.get("attempts") or 0):
+                        # LLM に届く前 (前検査・並びの読み直し・計画) で転んだ =
+                        # 予算は減らないが、原因は次のチャンクでも同じなので、
+                        # この走行では束ねを止める。毎チャンク同じ例外を吐き
+                        # 続けない (ローカルレビュー 2026-09-03)。残りは次回の
+                        # 走行の dry 予測が数え直す。
+                        _band_disabled[0] = True
+                        LOGGER.warning(
+                            "[bands] consolidation disabled for the rest of this "
+                            "run after a failure before any LLM attempt (%s)",
+                            reason,
+                        )
+                created = max(int(folded or 0), int(stats.get("created") or 0))
+                attempts = int(stats.get("attempts") or 0)
+                consumed = max(attempts, created)
+                _consolidated[0] += consumed
+                if attempts > created:
+                    LOGGER.warning(
+                        "[bands] %d fold attempt(s) failed in this call (%s); "
+                        "budget consumed anyway (%d/%d)",
+                        attempts - created, reason,
+                        _consolidated[0], band_plan_count,
+                    )
+                if created:
+                    LOGGER.debug(
+                        "[bands] consolidated %d (%s, %d/%d in this run)",
+                        created, reason, _consolidated[0], band_plan_count,
+                    )
+            finally:
+                _heartbeat()
+
+        def _merge_band_failures(exec_result) -> None:
+            """束ね側の抽出失敗を execute_plan の結果へ移す (二重計上しない)。"""
+            if band_extraction_failures:
+                exec_result.extraction_failures.extend(band_extraction_failures)
+                band_extraction_failures.clear()
+            if band_extraction_failures_unrecorded:
+                exec_result.extraction_failures_unrecorded.extend(
+                    band_extraction_failures_unrecorded
+                )
+                band_extraction_failures_unrecorded.clear()
+
+        def _report_extraction_failures_early(
+            failures: List[str], unrecorded: List[str], what: str,
+        ) -> str:
+            """走行が正常終了しない経路 (execute_plan の raise / キャンセル) での
+            抽出失敗の報告。
+
+            正常終了なら下の報告ブロックが executor 側とまとめて拾うが、
+            それらの経路はそこへ届かない。確定済みの分の失敗は事実として
+            残っているので、ここで同じ言い回しの ERROR を出し、台帳の失敗理由
+            にも添える (戻り値はその接尾辞。無ければ空)。
+            """
+            recorded = [e for e in failures if e not in unrecorded]
+            unrecorded_ = list(unrecorded)
+            if recorded:
+                LOGGER.error(
+                    "[metabolism] entity extraction failed for %d %s "
+                    "(entries=%s) — 付箋 (backlog) に記録済み。"
+                    "次回の Metabolism の頭で拾い直す",
+                    len(recorded), what, ",".join(e[:8] for e in recorded),
+                )
+            if unrecorded_:
+                LOGGER.error(
+                    "[metabolism] entity extraction failed for %d %s "
+                    "(entries=%s) — **付箋にも残せなかった**。"
+                    "この範囲の知識は自動では拾い直されない (手動の再構築が要る)",
+                    len(unrecorded_), what,
+                    ",".join(e[:8] for e in sorted(unrecorded_)),
+                )
+            if not recorded and not unrecorded_:
+                return ""
+            label = what.split()[0]  # "band consolidations" -> "band", "entries" -> "entries"
+            return (
+                f" ({label} extraction failures: {len(recorded)} recorded, "
+                f"{len(unrecorded_)} unrecorded)"
+            )
+
+        def _report_band_failures_on_abort() -> str:
+            return _report_extraction_failures_early(
+                band_extraction_failures, band_extraction_failures_unrecorded,
+                "band consolidations",
+            )
+
+        def _finish_cancelled(exec_result) -> str:
+            """キャンセル終端 — 部分適用を completed で封印しない。
+
+            completed で封印すると同じ提示コンテキストが再実行不能になる
+            (冪等マーカーは適用の成功だけを封印する — W3 教訓③ / Codex W4
+            #8)。failed 終端で claim を退け、anchor は据え置く。
+            executor がチャンク境界で拾ったキャンセルも、最後のチャンクの後
+            (after_chunk の束ね・最後の束ねの最中) に押されたキャンセルも、
+            同じ終端に落とす — 後者を "ok" で閉じると、束ねの残りが無言で
+            切り捨てられたまま completed に封印される。
+            """
+            # キャンセルは正常終了の報告ブロックへ届かないので、確定済みの
+            # チャンクと挟み込み済みの束ねの抽出失敗 (_merge_band_failures 済み)
+            # をここで表へ出す (ローカルレビュー 2026-09-03: 付箋に残せなかった分
+            # の唯一の通知が消えていた)。
+            suffix = _report_extraction_failures_early(
+                list(exec_result.extraction_failures),
+                list(exec_result.extraction_failures_unrecorded),
+                "entries",
+            )
+            if ledger is not None and execution_id:
+                try:
+                    ledger.mark_failed(execution_id, "cancelled by user" + suffix)
+                except Exception:
+                    LOGGER.warning("[metabolism] ledger mark_failed failed", exc_info=True)
+            LOGGER.info(
+                "[metabolism] Chronicle generation cancelled (%d chunks committed)",
+                exec_result.created_count,
+            )
+            return "deferred"
+
         try:
             exec_result = execute_plan(
                 plan, client, adapter.conn,
@@ -4500,62 +4754,48 @@ class SessionLifecycle:
                 batch_callback=note_callback,
                 # 抽出失敗の付箋も adapter と同じ錠前で書く (Codex 四巡 #2)
                 db_lock=adapter._db_lock,
+                after_chunk=lambda done, total: _consolidate("after_chunk"),
             )
         except Exception as exc:
             LOGGER.exception("[metabolism] Chronicle generation raised")
+            # LLMError の error_code / user_message / batch_meta (落ちたチャンク
+            # のメッセージ id) を手動生成のジョブ UI へ届ける。
+            self._note_chronicle_failure(_failure_persona_id, exc)
+            # 途中のチャンクまでに挟んだ束ねの抽出失敗は、正常終了の報告
+            # ブロックへ届かないのでここで表へ出す。
+            band_suffix = _report_band_failures_on_abort()
             if ledger is not None and execution_id:
                 try:
                     # 部分生成 (途中チャンクまで確定済み) はあり得るが、確定済み
                     # チャンクは source_ids で冪等スキップされるため再試行は安全。
-                    ledger.mark_failed(execution_id, str(exc) or type(exc).__name__)
+                    ledger.mark_failed(
+                        execution_id,
+                        (str(exc) or type(exc).__name__) + band_suffix,
+                    )
                 except Exception:
                     LOGGER.warning("[metabolism] ledger mark_failed failed", exc_info=True)
             return "failed"
 
-        if exec_result.cancelled:
-            # キャンセル = 部分適用。completed で封印すると同じ提示コンテキストが再実行不能に
-            # なる (冪等マーカーは適用の成功だけを封印する — W3 教訓③ /
-            # Codex W4 #8)。failed 終端で claim を退け、anchor は据え置く。
-            if ledger is not None and execution_id:
-                try:
-                    ledger.mark_failed(execution_id, "cancelled by user")
-                except Exception:
-                    LOGGER.warning("[metabolism] ledger mark_failed failed", exc_info=True)
-            LOGGER.info(
-                "[metabolism] Chronicle generation cancelled (%d chunks committed)",
-                exec_result.created_count,
-            )
-            return "deferred"
+        # チャンクの合間に挟んだ束ねの抽出失敗を、この時点で結果へ合流させる
+        # (キャンセルで早期 return する経路でも、確定した束ねの失敗は結果に残す)。
+        _merge_band_failures(exec_result)
 
-        # 束ね (chronicle_consolidation): 未束ねの字数が発火閾値を超えたら、
-        # 質量選抜 (比率・連続性・卒業) で群を束ね、束ね不能ノードは治療する。
-        # 束ね失敗は編纂の成否に含めない (一次あらすじは確定済み = 情報の欠落は
-        # なく、次回の Metabolism の dry 予測が backlog を検出して自然に再試行
-        # する)。batch_callback は恒等圧縮の子が初めて要約に変わる瞬間の
-        # Fragment 抽出 (intent §7)。
-        consolidated_count = 0
-        if folded_entry_ids is not None:
-            try:
-                consolidated_count = run_band_overflow(
-                    adapter.conn, client,
-                    persona_id=persona_id_str,
-                    cancel_check=cancel_fn,
-                    excluded_entry_ids=folded_entry_ids or None,
-                    batch_callback=note_callback,
-                    # 確認ゲートに提示した dry 件数を実行の上限にする —
-                    # 実出力長のブレで連鎖が増えても承認回数を超えない。
-                    max_folds=band_plan_count,
-                    # 束ね側の抽出失敗も同じ器に積む — 下の報告 (ERROR ログ /
-                    # 台帳 / 画面通知) が executor 側とまとめて拾う。
-                    extraction_failures=exec_result.extraction_failures,
-                    db_lock=adapter._db_lock,
-                    extraction_failures_unrecorded=(
-                        exec_result.extraction_failures_unrecorded
-                    ),
-                    progress_callback=band_progress_fn,
-                )
-            except Exception:
-                LOGGER.exception("[bands] consolidation failed; continuing")
+        # executor はチャンクの頭でしかキャンセルを見ない。最後のチャンクが確定
+        # した後 (after_chunk の束ねの最中) に押されたキャンセルは
+        # exec_result.cancelled に乗らないので、ここでもう一度トークンを見る。
+        if exec_result.cancelled or (cancel_fn is not None and cancel_fn()):
+            return _finish_cancelled(exec_result)
+
+        # 最後の束ね — 末尾のチャンクぶんの超過を畳む。チャンクが無く束ねだけの
+        # 走行 (plan 空 + band backlog) もここで従来どおり実行される。
+        _consolidate("final")
+        _merge_band_failures(exec_result)
+        consolidated_count = _consolidated[0]
+
+        # 最後の束ねの最中に押されたキャンセル (run_band_overflow は畳みの合間で
+        # 抜けるだけで、キャンセルを戻り値に乗せない)。
+        if cancel_fn is not None and cancel_fn():
+            return _finish_cancelled(exec_result)
 
         LOGGER.info(
             "[metabolism] Chronicle generation complete: %d chunks created "

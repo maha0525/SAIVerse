@@ -14,16 +14,13 @@ content 生成は常に LLM (小さくても要約する)。
 import sqlite3
 import unittest
 
-from llm_clients.exceptions import LLMError
+from llm_clients.exceptions import EmptyResponseError, LLMError, RateLimitError
 from sai_memory.arasuji.alignment import (
     CHUNK_LLM_BATCH,
     AlignmentPlan,
     PlannedChunk,
 )
-from sai_memory.arasuji.executor import (
-    ChunkExecutionError,
-    execute_plan,
-)
+from sai_memory.arasuji.executor import execute_plan
 from sai_memory.arasuji.storage import get_entries_by_level, init_arasuji_tables
 from sai_memory.memory.storage import Message
 
@@ -79,6 +76,24 @@ class _CountingClient:
         return self.response
 
 
+class _SequenceClient:
+    """呼び出しごとに決まった応答 (文字列) か例外を順に返す mock LLM client。"""
+
+    def __init__(self, responses):
+        self.calls = 0
+        self.responses = list(responses)
+
+    def generate(self, messages, tools):
+        self.calls += 1
+        item = self.responses[self.calls - 1]
+        if isinstance(item, BaseException):
+            raise item
+        return item
+
+    def consume_usage(self):
+        return None
+
+
 class ExecutorTestBase(unittest.TestCase):
     def setUp(self):
         self.conn = sqlite3.connect(":memory:")
@@ -123,10 +138,49 @@ class TestChunkExecution(ExecutorTestBase):
         self.assertEqual(result.created_count, 1)
         self.assertEqual(self._lv1_entries()[0].content, "生成されたあらすじ。")
 
-    def test_llm_empty_response_raises(self):
-        client = _CountingClient(response="   ")
-        with self.assertRaises(ChunkExecutionError):
+    def test_llm_empty_response_retries_then_commits(self):
+        """空応答 (推論モデルが reasoning_content だけで閉じる) は既定 3 回まで
+        試し直す — 2 回空のあと本文が返ればチャンクは確定する (2026-09-03)。"""
+        client = _SequenceClient(["", "\n", "三度目のあらすじ。"])
+        with self.assertLogs("sai_memory.arasuji.generator", level="WARNING") as logs:
+            result = execute_plan(
+                _plan(_chunk([_msg("m1", "a" * 50)])), client, self.conn,
+            )
+        self.assertEqual(client.calls, 3)
+        self.assertEqual(result.created_count, 1)
+        self.assertEqual(self._lv1_entries()[0].content, "三度目のあらすじ。")
+        retry_lines = [m for m in logs.output if "empty LLM response" in m]
+        self.assertEqual(len(retry_lines), 2)
+        self.assertIn("attempt 1/3", retry_lines[0])
+        self.assertIn("attempt 2/3", retry_lines[1])
+
+    def test_llm_empty_response_exhausted_raises_empty_response_error(self):
+        """3 回とも空なら EmptyResponseError (error_code=empty_response) が
+        batch_meta 付きで propagate し、走行はそのチャンクで止まる (確定なし)。"""
+        client = _SequenceClient(["", "   ", ""])
+        with self.assertRaises(EmptyResponseError) as ctx:
             execute_plan(_plan(_chunk([_msg("m1", "a" * 50)])), client, self.conn)
+        exc = ctx.exception
+        self.assertEqual(client.calls, 3)
+        self.assertEqual(exc.error_code, "empty_response")
+        self.assertIn("チャンク処理中", exc.user_message)
+        self.assertEqual(exc.batch_meta["message_ids"], ["m1"])
+        self.assertEqual(self._lv1_entries(), [])
+
+    def test_empty_response_error_from_client_is_retried_too(self):
+        """クライアントが EmptyResponseError を投げる形 (openai.py の実装) も
+        空文字と同じく再試行の対象。"""
+        client = _SequenceClient([EmptyResponseError("empty"), "二度目で出た。"])
+        result = execute_plan(_plan(_chunk([_msg("m1", "a" * 50)])), client, self.conn)
+        self.assertEqual(client.calls, 2)
+        self.assertEqual(result.created_count, 1)
+
+    def test_other_llm_errors_are_not_retried(self):
+        """空応答以外の LLMError (rate limit 等) は 1 回目でそのまま上がる。"""
+        client = _SequenceClient([RateLimitError("429"), "来ないはず"])
+        with self.assertRaises(RateLimitError):
+            execute_plan(_plan(_chunk([_msg("m1", "a" * 50)])), client, self.conn)
+        self.assertEqual(client.calls, 1)
         self.assertEqual(self._lv1_entries(), [])
 
     def test_llm_error_propagates_with_batch_meta(self):
@@ -321,6 +375,59 @@ class TestBatchCallback(ExecutorTestBase):
         self.assertEqual(
             result.extraction_failures_unrecorded, result.extraction_failures,
         )
+
+
+class TestAfterChunkHook(ExecutorTestBase):
+    """after_chunk (2026-09-03): チャンク確定ごとに (done, total) で呼ぶ。
+    呼び出し元はここで上位あらすじの束ねを挟む (後続チャンクの「これまでの
+    流れ」が階層を見られるように)。"""
+
+    def test_called_once_per_committed_chunk(self):
+        seen = []
+        plan = _plan(
+            _chunk([_msg("m1", "a" * 50)]),
+            _chunk([_msg("m2", "b" * 50)]),
+            _chunk([_msg("m3", "c" * 50)]),
+        )
+        result = execute_plan(
+            plan, _CountingClient(), self.conn,
+            after_chunk=lambda done, total: seen.append((done, total)),
+        )
+        self.assertEqual(result.created_count, 3)
+        self.assertEqual(seen, [(1, 3), (2, 3), (3, 3)])
+
+    def test_not_called_for_skipped_duplicates(self):
+        seen = []
+        plan = _plan(
+            _chunk([_msg("m1", "a" * 50)]),
+            _chunk([_msg("m2", "b" * 50)]),
+        )
+        execute_plan(plan, _CountingClient(), self.conn)
+        # 同じ計画をもう一度 — 全チャンクが重複スキップされ、hook は鳴らない。
+        result = execute_plan(
+            plan, _CountingClient(), self.conn,
+            after_chunk=lambda done, total: seen.append((done, total)),
+        )
+        self.assertEqual(result.skipped_duplicates, 2)
+        self.assertEqual(seen, [])
+
+    def test_raising_hook_does_not_stop_the_compile(self):
+        calls = []
+
+        def bad_hook(done, total):
+            calls.append(done)
+            raise RuntimeError("bands down")
+
+        plan = _plan(
+            _chunk([_msg("m1", "a" * 50)]),
+            _chunk([_msg("m2", "b" * 50)]),
+        )
+        result = execute_plan(
+            plan, _CountingClient(), self.conn, after_chunk=bad_hook,
+        )
+        self.assertEqual(result.created_count, 2)
+        self.assertEqual(calls, [1, 2])
+        self.assertEqual(len(self._lv1_entries()), 2)
 
 
 if __name__ == "__main__":

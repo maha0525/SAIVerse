@@ -1134,6 +1134,61 @@ class TestReviewFixes:
         assert est.consolidation_calls == 0
         assert est.estimated_llm_calls == est.level1_calls + 1
 
+    def test_upper_regen_retries_empty_llm_response(self, adapter):
+        """上位再生成の LLM が空応答を 2 回返しても 3 回目の本文で語り直しが
+        確定する (generator.generate_text_with_empty_retry、2026-09-03)。"""
+        conn = adapter.conn
+        a1 = _add_message(adapter, 0, 600)
+        entry_a = _entry(conn, [a1], start_min=0, end_min=0, content="A")
+        b1 = _add_message(adapter, 10, 600)
+        entry_b = _entry(conn, [b1], start_min=10, end_min=10, content="B")
+        p = _entry(
+            conn, [entry_a.id, entry_b.id], start_min=0, end_min=10,
+            level=2, content="P (古い本文)",
+        )
+        mark_consolidated(conn, [entry_a.id, entry_b.id], p.id)
+        _set_stale(conn, p.id)
+
+        class _EmptyTwiceClient(_Client):
+            def generate(self, messages, tools):
+                self.prompts.append(messages[0]["content"])
+                return "" if len(self.prompts) <= 2 else self.UPPER
+
+        from sai_memory.arasuji.absorption import regenerate_upper_entry
+        client = _EmptyTwiceClient()
+        outcome = regenerate_upper_entry(conn, client, p.id)
+        assert outcome is True
+        assert len(client.prompts) == 3
+        assert get_entry(conn, p.id).content == _Client.UPPER
+        assert not _is_stale(conn, p.id)
+
+    def test_merge_retries_empty_llm_response(self, adapter):
+        """吸収の合体 (generate_level1_arasuji 経由) も空応答 2 回のあと本文が
+        返れば合体エントリが確定する。"""
+        conn = adapter.conn
+        gap = _add_message(adapter, 0, 100)
+        n1 = _add_message(adapter, 10, 300)
+        n2 = _add_message(adapter, 11, 300)
+        entry = _entry(conn, [n1, n2], start_min=10, end_min=11)
+        messages, processed, _normal, tiny = _plan(adapter)
+        plan = plan_absorption(
+            conn, tiny, messages, processed, target_chars=TARGET,
+        )
+
+        class _EmptyTwiceClient(_Client):
+            def generate(self, messages, tools):
+                self.prompts.append(messages[0]["content"])
+                return "" if len(self.prompts) <= 2 else self.MERGE
+
+        client = _EmptyTwiceClient()
+        result = run_absorption(conn, client, plan)
+        assert len(result.merged_entries) == 1
+        assert len(client.prompts) == 3
+        assert get_entry(conn, entry.id) is None
+        covering = get_entries_covering_messages(conn, [gap, n1, n2])
+        assert [e.id for e in covering] == [result.merged_entries[0].id]
+        assert covering[0].content == _Client.MERGE
+
     def test_upper_regen_conflict_keeps_stale(self, adapter):
         """[Codex 5] LLM の間に子集合が変わったら本文を上書きせず、stale の印を
         残して次の flush へ回す (raise しない)。"""

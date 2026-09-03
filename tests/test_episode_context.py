@@ -222,6 +222,84 @@ class TestLevelPromotionControl(unittest.TestCase):
         self.assertIn("あらすじ", result)
 
 
+class TestTimerangeContextHierarchyInvariant(unittest.TestCase):
+    """編纂中のチャンクが見る「これまでの流れ」の不変条件 (2026-09-03 まはー裁定)。
+
+    近い過去はレベル1 のまま細かく、遠い過去はレベル2 で粗く — 階層があって
+    初めて少ない件数で全史を覆える。束ねをチャンク確定のたびに挟む理由は
+    この形を走行の途中でも成立させるため (executor.execute_plan の after_chunk)。
+
+    昇格の規則 (context.MIN_ENTRIES_PER_LEVEL): あるレベルを MIN 件読むまで
+    一つ上のレベルへは上がれない。だから直近の一次あらすじは MIN 件並べる。
+    """
+
+    def setUp(self):
+        self.conn = sqlite3.connect(":memory:")
+        init_arasuji_tables(self.conn)
+
+    def tearDown(self):
+        self.conn.close()
+
+    @staticmethod
+    def _labels_in_order(text: str):
+        """整形済み文字列から (レベル名, 本文) を古い順に取り出す。"""
+        out = []
+        lines = text.split("\n")
+        for i, line in enumerate(lines):
+            if line.startswith("【") and ": " in line:
+                out.append((line[1:].split(":", 1)[0], lines[i + 1]))
+        return out
+
+    def test_near_past_stays_lv1_and_far_past_is_read_as_lv2(self):
+        # e1..eN (N = MIN + 4) を時刻順に。P (Lv2) は最古の 4 件 e1..e4 を覆う。
+        n_near = MIN_ENTRIES_PER_LEVEL
+        n_total = n_near + 4
+        lv1_ids = []
+        for i in range(1, n_total + 1):
+            lv1_ids.append(_create_lv1_entry(
+                self.conn, i * 100, i * 100 + 99, content=f"E{i}",
+            ))
+        _create_lv2_entry(
+            self.conn, start_time=100, end_time=499,
+            source_ids=lv1_ids[:4], content="P",
+        )
+
+        # eN の後ろから始まるチャンクの文脈。
+        text = get_episode_context_for_timerange(
+            self.conn,
+            start_time=(n_total + 1) * 100,
+            end_time=(n_total + 1) * 100 + 50,
+            max_entries=20,
+        )
+        seq = self._labels_in_order(text)
+
+        # 古い順: P (Lv2) が 1 件、続いて e5..eN が Lv1 で MIN 件。
+        expected = [("あらすじのあらすじ", "P")] + [
+            ("あらすじ", f"E{i}") for i in range(5, n_total + 1)
+        ]
+        self.assertEqual(seq, expected)
+        # e1..e4 は個別に載らない (P が代弁する)。
+        for i in range(1, 5):
+            self.assertNotIn(f"\nE{i}\n", text)
+
+    def test_without_lv2_the_walk_loses_the_far_past(self):
+        """階層が無いと 20 件で届く範囲は直近 20 件の Lv1 だけ — 束ねを
+        走行の最後まで遅らせた大量編纂の後半チャンクが見ていた形。"""
+        n_total = 25
+        for i in range(1, n_total + 1):
+            _create_lv1_entry(self.conn, i * 100, i * 100 + 99, content=f"E{i}")
+        text = get_episode_context_for_timerange(
+            self.conn,
+            start_time=(n_total + 1) * 100,
+            end_time=(n_total + 1) * 100 + 50,
+            max_entries=20,
+        )
+        seq = self._labels_in_order(text)
+        self.assertEqual(len(seq), 20)
+        self.assertEqual(seq[0][1], "E6", "最古の 5 件が文脈から落ちる")
+        self.assertNotIn("\nE1\n", text)
+
+
 class TestLevelPromotionEdgeCases(unittest.TestCase):
     """Edge cases for level promotion control."""
 

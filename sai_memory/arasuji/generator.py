@@ -25,6 +25,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Sequence
 
+from llm_clients.exceptions import EmptyResponseError
 from sai_memory.memory.storage import MECHANISM_TAGS, Message
 from sai_memory.arasuji.storage import (
     ArasujiEntry,
@@ -55,6 +56,91 @@ def _record_llm_usage(client, persona_id: Optional[str], node_type: str) -> None
             )
     except Exception as e:
         LOGGER.warning(f"Failed to record chronicle usage: {e}")
+
+
+# ---------------------------------------------------------------------------
+# 空応答の再試行 (2026-09-03 まはー裁定)
+#
+# 推論モデル (reasoning_content を持つ llama.cpp / OpenAI 互換の端点) は、
+# 出力を全部 reasoning_content に書いて content を空のまま finish_reason=stop で
+# 閉じることが確率的にある。クライアントはこれを EmptyResponseError にする。
+# 純生成 (チャンク / 束ね / 吸収) の LLM 呼び出しは副作用を持たない (結果を得て
+# から書く) ので、空応答だけは同じ呼び出しをやり直してよい — 結果が「空」と
+# 分かっている呼び出しの再実行であって、「結果不明の LLM を自動で再実行しない」
+# 規則には触れない。他の LLMError (rate limit / timeout / auth) はここでは
+# 再試行しない — それぞれの再試行方針はクライアント側にある。
+# ---------------------------------------------------------------------------
+
+#: 空応答の再試行を含めた総試行回数の既定値。
+DEFAULT_EMPTY_RESPONSE_ATTEMPTS = 3
+
+
+def empty_response_attempts() -> int:
+    """空応答に対する総試行回数 (env ``SAIVERSE_CHRONICLE_EMPTY_RESPONSE_RETRIES``)。
+
+    値は「再試行を含めた総試行回数」。1 = 再試行しない。不正な値・0 以下は既定値。
+    """
+    raw = os.getenv("SAIVERSE_CHRONICLE_EMPTY_RESPONSE_RETRIES")
+    if not raw:
+        return DEFAULT_EMPTY_RESPONSE_ATTEMPTS
+    try:
+        value = int(raw)
+    except ValueError:
+        return DEFAULT_EMPTY_RESPONSE_ATTEMPTS
+    return value if value >= 1 else DEFAULT_EMPTY_RESPONSE_ATTEMPTS
+
+
+def generate_text_with_empty_retry(
+    client,
+    messages,
+    *,
+    purpose: str,
+    max_attempts: Optional[int] = None,
+    persona_id: Optional[str] = None,
+    usage_node_type: Optional[str] = None,
+    **kwargs,
+) -> str:
+    """純生成の LLM 呼び出し。空応答だけを ``max_attempts`` 回まで試し直す。
+
+    ``client.generate(messages=messages, tools=[], **kwargs)`` を呼び、strip した
+    本文を返す。``EmptyResponseError`` または空文字 (空白のみ) の応答は再試行の
+    対象。最後の試行でも空なら、最後の ``EmptyResponseError`` をそのまま (無ければ
+    新しい ``EmptyResponseError`` を) 送出する — error_code は ``empty_response``
+    のまま。それ以外の例外は 1 回目でもそのまま propagate する。
+
+    ``usage_node_type`` を渡すと試行のたびに :func:`_record_llm_usage` を呼ぶ
+    (空応答でも実際の API 呼び出しなので勘定に入れる)。
+
+    ``max_attempts`` 未指定時は env ``SAIVERSE_CHRONICLE_EMPTY_RESPONSE_RETRIES``
+    (既定 3) を呼び出し時に読む。
+    """
+    attempts = max_attempts if max_attempts is not None else empty_response_attempts()
+    attempts = max(1, int(attempts))
+    last_error: Optional[EmptyResponseError] = None
+    for attempt in range(1, attempts + 1):
+        last_error = None
+        try:
+            response = client.generate(messages=messages, tools=[], **kwargs)
+        except EmptyResponseError as exc:
+            # 空応答も往復は済んでいる (usage が付く) — 勘定に入れる。
+            last_error = exc
+            response = None
+        if usage_node_type is not None:
+            _record_llm_usage(client, persona_id, usage_node_type)
+        content = (response or "").strip()
+        if content:
+            return content
+        if attempt < attempts:
+            LOGGER.warning(
+                "[arasuji] empty LLM response for %s (attempt %d/%d); retrying",
+                purpose, attempt, attempts,
+            )
+    if last_error is not None:
+        raise last_error
+    raise EmptyResponseError(
+        f"empty LLM response for {purpose} after {attempts} attempt(s)"
+    )
+
 
 # Default settings
 DEFAULT_BATCH_SIZE = 20  # messages per level-1 arasuji
@@ -438,13 +524,15 @@ def generate_level1_arasuji(
             f.write(prompt)
             f.write("\n")
 
-    # --- LLM call (no retry here; provider handles retry internally) ---
+    # --- LLM call (空応答だけ再試行。他の LLMError の再試行方針はクライアント側) ---
     try:
-        response = client.generate(
-            messages=[{"role": "user", "content": prompt}],
-            tools=[],
+        response = generate_text_with_empty_retry(
+            client,
+            [{"role": "user", "content": prompt}],
+            purpose="chronicle_level1 regenerate",
+            persona_id=persona_id,
+            usage_node_type="chronicle_level1",
         )
-        _record_llm_usage(client, persona_id, "chronicle_level1")
     except Exception as e:
         LOGGER.error(f"LLM call failed for level-1 arasuji: {e}")
         from llm_clients.exceptions import LLMError
@@ -456,14 +544,12 @@ def generate_level1_arasuji(
     if debug_log_path:
         with open(debug_log_path, "a", encoding="utf-8") as f:
             f.write("--- RESPONSE ---\n")
-            f.write(response or "(empty)")
+            f.write(response)
             f.write("\n")
 
-    if not response or not response.strip():
-        LOGGER.warning("Empty response from LLM for level-1 arasuji")
-        return None
-
-    content = response.strip()
+    # 空応答は generate_text_with_empty_retry が EmptyResponseError にして
+    # 上の except で propagate 済み — ここに来た response は非空。
+    content = response
 
     # Extract message IDs (time range already calculated at the beginning)
     source_ids = [msg.id for msg in messages]

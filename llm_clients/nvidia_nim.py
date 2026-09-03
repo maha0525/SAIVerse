@@ -5,6 +5,7 @@ import json
 import logging
 from typing import Any, Dict, List, Optional
 
+from .exceptions import EmptyResponseError
 from .openai import OpenAIClient
 
 
@@ -278,7 +279,7 @@ class NvidiaNIMClient(OpenAIClient):
                     "[nvidia_nim] Empty structured output response. "
                     "Model returned empty content."
                 )
-                raise RuntimeError("Nvidia NIM returned empty structured output response")
+                raise EmptyResponseError("Nvidia NIM returned empty structured output response")
             if snippets:
                 prefix = "\n".join(snippets)
                 return prefix + ("\n" if text_body and prefix else "") + text_body
