@@ -2570,9 +2570,12 @@ class SessionLifecycle:
         if watermarks is None or watermarks.high is None:
             return "skip"
         # 機構1 (§14-2) を先に適用した位置で測る — anchor 前進 (無料) で救える
-        # ケースに編纂 (有料) を撃たない。
+        # ケースに編纂 (有料) を撃たない。測るだけの段では前進を**永続化しない**
+        # (persist_advance=False): 上限以下 / 知覚だけの超過で何もしない回に
+        # 起点を書かない (f288f003 の Codex レビュー残 #1)。実際に畳む回だけ、
+        # 下で persist_advance=True の解決をやり直して前進を確定する。
         anchor_id, resolution = self.resolve_metabolism_anchor(
-            persona, model_key=model_key,
+            persona, model_key=model_key, persist_advance=False,
         )
         if not anchor_id:
             return "skip"  # ブートストラップ前 — 提示ウィンドウが未定義
@@ -2594,6 +2597,17 @@ class SessionLifecycle:
             persona, rows_chars, current_chars, watermarks,
         ):
             return "skip"
+        # ここから先は実際に畳む — 機構1 の前進をこの時点で永続化する (上の
+        # 解決は読みだけ)。位置が測った時と違えば (並走の書き込み) その位置で
+        # 窓を撮り直す。本体はロック内でさらに撮り直すので、ここは起点の確定が目的。
+        persisted_anchor, resolution = self.resolve_metabolism_anchor(
+            persona, model_key=model_key, persist_advance=True,
+        )
+        if not persisted_anchor:
+            return "skip"
+        if persisted_anchor != anchor_id:
+            anchor_id = persisted_anchor
+            window = self.get_presented_window(persona, model_key, anchor_id)
         persona_id = getattr(persona, "persona_id", None)
         LOGGER.warning(
             "[metabolism] emergency pre-compaction: window over high watermark "

@@ -443,3 +443,31 @@ def test_window_floor_applied_at_passes_through():
     lc.window_floor_applied_at = lambda persona_id, model_key: "2026-09-04T01:23:45"
     status = get_context_status(PERSONA_ID, _manager(persona=persona, lifecycle=lc))
     assert status["window_floor_applied_at"] == "2026-09-04T01:23:45"
+
+
+def test_perception_over_budget_uses_one_window_for_total_and_rows():
+    """f288f003 の Codex レビュー残 #2: 旗の合計と行は同じ窓 (計画窓 + 知覚)
+    から取る。いまの窓 (印戻し前) は上限超えでも、計画窓の合計が上限以下なら
+    旗は立たない — どちらの窓が数字を出したかで旗が裏返らない。"""
+    persona = SimpleNamespace(persona_id=PERSONA_ID, model="model-a")
+    wm = Watermarks(low=1000, target=2000, high=4000)
+    current = [_msg(f"m{i}", 1000) for i in range(5)]  # いまの窓: 行 5,000
+    planning = [_msg("folded:m0", 300), _msg("m4", 1000)]  # 印戻し後: 行 1,300
+
+    # いまの窓の合計 6,500 > 上限、計画窓の合計 2,800 ≤ 上限 → 旗なし
+    # (旧: いまの窓の合計 × 計画窓の行 で True になっていた)
+    lc = _lifecycle(watermarks=wm, presented=current, planning_presented=planning,
+                    refold_ranges=1, perceptions=[_perception(1500)])
+    status = get_context_status(PERSONA_ID, _manager(persona=persona, lifecycle=lc))
+    assert status["presented_chars"] == 6500  # 実際に送る合計 (透明性) はそのまま
+    assert status["stored_chars"] == 5000
+    assert status["window_rows_chars"] == 1300
+    assert status["perception_over_budget"] is False
+
+    # 計画窓の合計 4,300 > 上限、計画窓の行 1,300 ≤ 残す量 → 旗あり
+    # (いまの窓の行 5,000 で判定すると False になる = 窓を混ぜると裏返る)
+    lc = _lifecycle(watermarks=wm, presented=current, planning_presented=planning,
+                    refold_ranges=1, perceptions=[_perception(3000)])
+    status = get_context_status(PERSONA_ID, _manager(persona=persona, lifecycle=lc))
+    assert status["window_rows_chars"] == 1300
+    assert status["perception_over_budget"] is True

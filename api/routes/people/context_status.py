@@ -37,14 +37,18 @@ def get_context_status(persona_id: str, manager=Depends(get_manager)) -> dict[st
       docs/issues/context_accounting_excludes_injected_rows.md)。上限
       (``high_chars``) と比べる量はこの合計。
     - ``window_rows_chars``: 残す量 (``target_chars``) の契約が見ている量 =
-      整理が計画を立てる窓 (§15-3 印戻しなどの正規化後) の**会話の行だけ**の
-      文字数 (``EvictionPlan.stored_chars``)。残す量の主語は会話の行で、知覚は
-      消費しない (2026-09-03 裁定 —
+      整理が計画を立てる窓 (§15-3 印戻しなどの正規化後。読み戻しが適用される
+      なら読み戻し後の窓) の**会話の行だけ**の文字数 (``EvictionPlan.stored_chars``)。
+      残す量の主語は会話の行で、知覚は消費しない (2026-09-03 裁定 —
       docs/issues/protection_quota_consumed_by_perception_blocks.md)。
       ``EvictionPlan.protected_rows_chars`` (保護範囲の**内側**の行の字数) とは
       別の量なので、名前も分けてある。測れないときは None。
     - ``perception_over_budget``: 合計は上限を超えているのに会話の行が残す量
-      以下 = 整理しても畳めるものが無い (超過の主は知覚の供給)。測れない
+      以下 = 整理しても畳めるものが無い (超過の主は知覚の供給)。判定の合計と
+      行は**同じ窓** (``window_rows_chars`` と同じ計画窓に知覚を足した列) から
+      取る — 別の窓の合計と行を突き合わせると、窓の正規化の前後で旗が裏返る
+      (f288f003 の Codex レビュー残 #2)。``presented_chars`` は「いま実際に送る
+      合計」で、正規化前の窓の値なので、計画窓の合計とは違いうる。測れない
       ときは None。
     - ``fold_unit_chars``: 一次あらすじの標準被覆 U。整理は残す量より古い側を
       U (材料字数 — 2026-08-29 裁定) ずつの範囲に刻んで畳む。
@@ -252,15 +256,18 @@ def _measure_fold_readiness(
         else max(0, band - plan.pending_material_chars)
     )
     # 残す量の契約が見ている量 = 計画窓の会話の行だけ (知覚は残す量を消費
-    # しない — 2026-09-03 裁定)。合計 (presented_chars) が上限を超えているのに
-    # 行が残す量以下なら、整理は畳めるものを見つけられない — 超過の主は知覚の
-    # 供給で、画面はその事実を出す (本走行は同じ判定で LLM を呼ばず引き返す)。
+    # しない — 2026-09-03 裁定)。合計が上限を超えているのに行が残す量以下なら、
+    # 整理は畳めるものを見つけられない — 超過の主は知覚の供給で、画面はその
+    # 事実を出す (本走行は同じ判定で LLM を呼ばず引き返す)。判定の合計と行は
+    # **この同じ列** (計画窓 + 知覚) から取る — 正規化前の窓の合計 (presented_
+    # chars) と計画窓の行を突き合わせると、印戻しで窓が縮む回に旗が裏返る。
+    from sea.eviction_plan import message_chars
+
     status["window_rows_chars"] = plan.stored_chars
-    total = status.get("presented_chars")
+    total = message_chars(list(presented))
     high = getattr(watermarks, "high", None)
     status["perception_over_budget"] = bool(
-        high is not None and total is not None
-        and total > high and plan.stored_chars <= watermarks.target
+        high is not None and total > high and plan.stored_chars <= watermarks.target
     )
 
 
