@@ -202,6 +202,10 @@ class ChronicleClaimTest(unittest.TestCase):
         if with_ledger:
             manager.execution_ledger = self.ledger
         lifecycle = SessionLifecycle(SimpleNamespace(), manager)
+        # 要約してよい上限 (2026-09-04 ①): 記録の無いペルソナは現在モデルの残す量
+        # ぶんを要約しない。本クラスの関心は claim であって上限ではないので、
+        # 水位を持たない model (= 従来どおり全域が対象) にして前提を保つ。
+        lifecycle.get_metabolism_watermarks = lambda persona, model_key=None: None
         return lifecycle
 
     def _persona(self):

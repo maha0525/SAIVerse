@@ -570,6 +570,10 @@ class TestGenerateChronicleWiring:
 
         manager = SimpleNamespace(SessionLocal=session_factory, personas={})
         lifecycle = SessionLifecycle(SimpleNamespace(), manager)
+        # 要約してよい上限 (2026-09-04 ①): 記録の無いペルソナは現在モデルの残す量
+        # ぶんを要約しない。本テストの関心は吸収の配線なので、水位を持たない
+        # model (= 従来どおり全域が対象) にして前提を保つ。
+        lifecycle.get_metabolism_watermarks = lambda persona, model_key=None: None
         persona = SimpleNamespace(
             persona_id=PERSONA_ID, persona_name="テスター", model="claude-x",
             sai_memory=adapter,
@@ -627,6 +631,10 @@ class TestGenerateChronicleWiring:
         entry = _entry(conn, [n1], start_min=10, end_min=10)
         manager = SimpleNamespace(SessionLocal=session_factory, personas={})
         lifecycle = SessionLifecycle(SimpleNamespace(), manager)
+        # 要約してよい上限 (2026-09-04 ①): 記録の無いペルソナは現在モデルの残す量
+        # ぶんを要約しない。本テストの関心は吸収の配線なので、水位を持たない
+        # model (= 従来どおり全域が対象) にして前提を保つ。
+        lifecycle.get_metabolism_watermarks = lambda persona, model_key=None: None
         persona = SimpleNamespace(
             persona_id=PERSONA_ID, persona_name="テスター", model="claude-x",
             sai_memory=adapter,
@@ -809,6 +817,10 @@ class TestGenerateChronicleWiring:
         monkeypatch.setenv("SAIVERSE_CHRONICLE_BAND_BUDGET", str(TARGET))
         manager = SimpleNamespace(SessionLocal=session_factory, personas={})
         lifecycle = SessionLifecycle(SimpleNamespace(), manager)
+        # 要約してよい上限 (2026-09-04 ①): 記録の無いペルソナは現在モデルの残す量
+        # ぶんを要約しない。本テストの関心は吸収の配線なので、水位を持たない
+        # model (= 従来どおり全域が対象) にして前提を保つ。
+        lifecycle.get_metabolism_watermarks = lambda persona, model_key=None: None
         persona = SimpleNamespace(
             persona_id=PERSONA_ID, persona_name="テスター", model="claude-x",
             sai_memory=adapter,
@@ -1924,9 +1936,18 @@ def _make_lifecycle(session_factory):
 
 def _persona(adapter):
     from types import SimpleNamespace
+
+    from persona.history_manager import HistoryManager
+
+    # 引き戻し後の窓は厳格に読む (Codex 八巡目 #3) ので、本物の HistoryManager を
+    # adapter に結びつけて持たせる (無いと「履歴の読み手が無い」で失敗する)。
+    hm = HistoryManager.__new__(HistoryManager)
+    hm.persona_id = PERSONA_ID
+    hm.messages = []
+    hm.memory_adapter = adapter
     return SimpleNamespace(
         persona_id=PERSONA_ID, persona_name="テスター", model="claude-x",
-        sai_memory=adapter,
+        sai_memory=adapter, history_manager=hm,
     )
 
 
@@ -1977,6 +1998,10 @@ class TestTailRewind:
         from sea.coverage_repair import run_tail_rewind
         gap, m_a = self._tail_fixture(adapter)
         lc = _make_lifecycle(session_factory)
+        # 現在モデル (claude-x) に記録が無い形 — 要約してよい上限 (2026-09-04 ①③)
+        # は記録の無い model の残す量ぶんを候補にするので、水位を持たない model に
+        # して帯が数えられる前提を保つ (本テストの関心は引き戻しと書き込み)。
+        lc.get_metabolism_watermarks = lambda persona, model_key=None: None
         _warm_row(lc, "model-a", m_a)
 
         status = run_tail_rewind(lc, _persona(adapter))
@@ -1998,6 +2023,10 @@ class TestTailRewind:
         lc = _make_lifecycle(session_factory)
         _cold_row(lc, "model-a", m_a)
         _cold_row(lc, "model-b", m_b)
+        # 現在モデル (claude-x) に記録が無い形 — 水位を持たない model にして
+        # 帯が数えられる前提を保つ (test_zone_already_inside_a_window_is_skipped
+        # と同じ理由)。
+        lc.get_metabolism_watermarks = lambda persona, model_key=None: None
 
         status = run_tail_rewind(lc, _persona(adapter))
         assert status == "rewound"
@@ -2017,6 +2046,11 @@ class TestTailRewind:
         lc = _make_lifecycle(session_factory)
         # anchor が帯より古い冷えた行 — 帯は既にこの窓の中 (§16-1 成立済み)
         _cold_row(lc, "model-a", n1)
+        # 現在モデル (claude-x) に記録が無いと、要約してよい上限 (2026-09-04 ①)
+        # が残す量ぶんの新しい側を計画から外し、帯はそもそも数えられない
+        # ("none")。本テストの関心は「帯が窓の中なら見送る」なので、水位を
+        # 持たない model にして帯が数えられる前提を保つ。
+        lc.get_metabolism_watermarks = lambda persona, model_key=None: None
 
         status = run_tail_rewind(lc, _persona(adapter))
         assert status == "skipped"
@@ -2029,7 +2063,9 @@ class TestTailRewind:
         from sea.coverage_repair import run_tail_rewind
         self._tail_fixture(adapter)
         lc = _make_lifecycle(session_factory)
-        # 行ゼロ → 初会話の bootstrap (§16-3) に任せて何もしない
+        # 行ゼロ → 初会話の bootstrap (§16-3) に任せて何もしない。水位を持たない
+        # model にして帯が数えられる前提を保つ (上の test と同じ理由)。
+        lc.get_metabolism_watermarks = lambda persona, model_key=None: None
         assert run_tail_rewind(lc, _persona(adapter)) == "skipped"
 
     def _patched_window(self, chars):
@@ -2050,7 +2086,7 @@ class TestTailRewind:
         gap, m_a = self._tail_fixture(adapter)
         lc = _make_lifecycle(session_factory)
         _warm_row(lc, "model-a", m_a)
-        lc.get_presented_window = lambda p, mk, aid=None: self._patched_window(300)
+        lc.get_presented_window = lambda p, mk, aid=None, **_k: self._patched_window(300)
         lc.get_metabolism_watermarks = (
             lambda p, mk=None: SimpleNamespace(high=100, target=50)
         )
@@ -2073,7 +2109,7 @@ class TestTailRewind:
         gap, m_a = self._tail_fixture(adapter)
         lc = _make_lifecycle(session_factory)
         _warm_row(lc, "model-a", m_a)
-        lc.get_presented_window = lambda p, mk, aid=None: self._patched_window(80)
+        lc.get_presented_window = lambda p, mk, aid=None, **_k: self._patched_window(80)
         lc.get_metabolism_watermarks = (
             lambda p, mk=None: SimpleNamespace(high=100, target=50)
         )
@@ -2103,7 +2139,7 @@ class TestTailRewind:
         gap, m_a = self._tail_fixture(adapter)
         lc = _make_lifecycle(session_factory)
         _warm_row(lc, "model-a", m_a)
-        lc.get_presented_window = lambda p, mk, aid=None: self._patched_window(80)
+        lc.get_presented_window = lambda p, mk, aid=None, **_k: self._patched_window(80)
         lc.get_metabolism_watermarks = (
             lambda p, mk=None: SimpleNamespace(high=100, target=50)
         )
@@ -2139,7 +2175,7 @@ class TestTailRewind:
         gap, m_a = self._tail_fixture(adapter)
         lc = _make_lifecycle(session_factory)
         _warm_row(lc, "model-a", m_a)
-        lc.get_presented_window = lambda p, mk, aid=None: self._patched_window(40)
+        lc.get_presented_window = lambda p, mk, aid=None, **_k: self._patched_window(40)
         lc.get_metabolism_watermarks = (
             lambda p, mk=None: SimpleNamespace(high=100, target=50)
         )
@@ -2190,6 +2226,10 @@ class TestTailRewind:
         from sea.coverage_repair import run_tail_rewind
         _gap, m_a = self._tail_fixture(adapter)
         lc = _make_lifecycle(session_factory)
+        # 現在モデル (claude-x) に記録が無い形 — 要約してよい上限 (2026-09-04 ①③)
+        # は記録の無い model の残す量ぶんを候補にするので、水位を持たない model に
+        # して帯が数えられる前提を保つ (本テストの関心は引き戻しと書き込み)。
+        lc.get_metabolism_watermarks = lambda persona, model_key=None: None
         _warm_row(lc, "model-a", m_a)
         with patch(
             "sea.coverage_repair.plan_tail_rewind",
@@ -2276,6 +2316,10 @@ class TestTailRewind:
         from sea.coverage_repair import run_tail_rewind
         _gap, m_a = self._tail_fixture(adapter)
         lc = _make_lifecycle(session_factory)
+        # 現在モデル (claude-x) に記録が無い形 — 要約してよい上限 (2026-09-04 ①③)
+        # は記録の無い model の残す量ぶんを候補にするので、水位を持たない model に
+        # して帯が数えられる前提を保つ (本テストの関心は引き戻しと書き込み)。
+        lc.get_metabolism_watermarks = lambda persona, model_key=None: None
         _warm_row(lc, "model-a", m_a)
         self._break_row_updates(lc)
 
@@ -2293,6 +2337,10 @@ class TestTailRewind:
         from sea.coverage_repair import plan_tail_rewind, run_tail_rewind
         gap, m_a = self._tail_fixture(adapter)
         lc = _make_lifecycle(session_factory)
+        # 現在モデル (claude-x) に記録が無い形 — 要約してよい上限 (2026-09-04 ①③)
+        # は記録の無い model の残す量ぶんを候補にするので、水位を持たない model に
+        # して帯が数えられる前提を保つ (本テストの関心は引き戻しと書き込み)。
+        lc.get_metabolism_watermarks = lambda persona, model_key=None: None
         _warm_row(lc, "model-a", m_a)
         plan = plan_tail_rewind(lc, _persona(adapter), adapter.conn, gap)
         assert plan is not None
@@ -2312,6 +2360,10 @@ class TestTailRewind:
         monkeypatch.setenv("SAIVERSE_CHRONICLE_BAND_BUDGET", str(TARGET))
         _gap, m_a = self._tail_fixture(adapter)
         lc = _make_lifecycle(session_factory)
+        # 現在モデル (claude-x) に記録が無い形 — 要約してよい上限 (2026-09-04 ①③)
+        # は記録の無い model の残す量ぶんを候補にするので、水位を持たない model に
+        # して帯が数えられる前提を保つ (本テストの関心は引き戻しと書き込み)。
+        lc.get_metabolism_watermarks = lambda persona, model_key=None: None
         lc.generate_chronicle = lambda *a, **k: "ok"
         lc.is_chronicle_enabled_for_persona = lambda p: True
         _warm_row(lc, "model-a", m_a)
@@ -2406,6 +2458,10 @@ class TestTailRewind:
 
         gap, m_a = self._tail_fixture(adapter)
         lc = _make_lifecycle(session_factory)
+        # 現在モデル (claude-x) に記録が無い形 — 要約してよい上限 (2026-09-04 ①③)
+        # は記録の無い model の残す量ぶんを候補にするので、水位を持たない model に
+        # して帯が数えられる前提を保つ (本テストの関心は引き戻しと書き込み)。
+        lc.get_metabolism_watermarks = lambda persona, model_key=None: None
         _warm_row(lc, "model-a", m_a)
         fold = FoldedRange(
             message_ids=[m_a], start_at=None, end_at=None,
@@ -2781,3 +2837,72 @@ class TestSweepDeadMessageSources:
         after = get_entry(conn, entry.id)
         assert after.source_ids == [n1]
         assert after.source_count == 1
+
+
+def test_tail_rewind_refuses_to_write_over_unreadable_folds(
+    adapter, session_factory, monkeypatch,
+):
+    """Codex 七巡目 #3: 計画に同梱した圧縮区間の payload が壊れていたら、空と
+    見なして書かず "failed" — FOLDED_RANGES_JSON も起点もそのまま。"""
+    monkeypatch.setenv("SAIVERSE_CHRONICLE_BAND_BUDGET", str(TARGET))
+    from sea.coverage_repair import run_tail_rewind
+    gap, m_a = TestTailRewind()._tail_fixture(adapter)
+    lc = _make_lifecycle(session_factory)
+    _warm_row(lc, "model-a", m_a)
+    lc.get_metabolism_watermarks = lambda persona, model_key=None: None
+    from database.models import SessionAnchor
+    broken = '[{"message_ids": "abc"}]'
+    db = session_factory()
+    try:
+        db.query(SessionAnchor).filter_by(PERSONA_ID=PERSONA_ID, MODEL_KEY="model-a").update(
+            {SessionAnchor.FOLDED_RANGES_JSON: broken}, synchronize_session=False,
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    assert run_tail_rewind(lc, _persona(adapter)) == "failed"
+    assert _row_anchor(lc, "model-a") == m_a  # 引き戻していない
+    db = session_factory()
+    try:
+        row = db.query(SessionAnchor).filter_by(PERSONA_ID=PERSONA_ID, MODEL_KEY="model-a").first()
+        assert row.FOLDED_RANGES_JSON == broken
+    finally:
+        db.close()
+
+
+def test_tail_rewind_history_read_failure_is_failed_without_writing(
+    adapter, session_factory, monkeypatch,
+):
+    """Codex 八巡目 #3: 引き戻し後の窓の履歴読みが失敗したら "failed" で書かない。"""
+    monkeypatch.setenv("SAIVERSE_CHRONICLE_BAND_BUDGET", str(TARGET))
+    from types import SimpleNamespace
+
+    from sea.coverage_repair import run_tail_rewind
+    gap, m_a = TestTailRewind()._tail_fixture(adapter)
+    lc = _make_lifecycle(session_factory)
+    _warm_row(lc, "model-a", m_a)
+    lc.get_metabolism_watermarks = lambda persona, model_key=None: None
+    persona = _persona(adapter)
+
+    def _broken_read(anchor_id, **kwargs):
+        if kwargs.get("raise_on_error"):
+            raise RuntimeError("database is locked")
+        return []
+
+    persona.history_manager = SimpleNamespace(
+        get_history_from_anchor=_broken_read,
+        get_history_before_anchor=lambda *a, **k: [],
+    )
+    assert run_tail_rewind(lc, persona) == "failed"
+    assert _row_anchor(lc, "model-a") == m_a
+
+
+def test_cold_window_marks_report_a_row_read_failure(adapter, session_factory):
+    """Codex 八巡目 #4: 行の一覧が読めなければ (0, 0) の成功の顔ではなく失敗 1。"""
+    from unittest.mock import patch as _patch
+
+    from sea.coverage_repair import mark_covered_cold_windows
+    lc = _make_lifecycle(session_factory)
+    with _patch.object(lc, "load_anchor_entries_strict", side_effect=RuntimeError("db down")):
+        assert mark_covered_cold_windows(lc, _persona(adapter)) == (0, 1)

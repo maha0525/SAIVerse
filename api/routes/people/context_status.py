@@ -82,6 +82,10 @@ def get_context_status(persona_id: str, manager=Depends(get_manager)) -> dict[st
         "fold_shortfall_chars": None,  # 閉じないとき、あと材料何字で閉じるか (閉じるなら 0)
         "refill_applied": False,      # presented_chars が §15 読み戻し込みの値か
         "measurement_failed": False,  # 計測が失敗した (None を「起点なし」と読ませない)
+        # 最終防衛ライン (ensure_window_floor) がこのプロセスで最後に発火した
+        # 時刻 (ISO)。無ければ None。発火 = 上流 (読み戻し) の失敗の印
+        # (docs/issues/window_floor_and_refill_redesign.md 設計 0)。
+        "window_floor_applied_at": None,
     }
     if not model_key:
         return status
@@ -89,6 +93,9 @@ def get_context_status(persona_id: str, manager=Depends(get_manager)) -> dict[st
     lifecycle = _resolve_lifecycle(manager)
     if lifecycle is None:
         return status
+    status["window_floor_applied_at"] = lifecycle.window_floor_applied_at(
+        persona_id, model_key,
+    )
 
     try:
         watermarks = lifecycle.get_metabolism_watermarks(persona, model_key)

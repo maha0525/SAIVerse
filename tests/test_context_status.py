@@ -78,6 +78,7 @@ def _lifecycle(
         ),
         preview_planning_window=_preview_planning_window,
         presented_with_perceptions=_presented_with_perceptions,
+        window_floor_applied_at=lambda persona_id, model_key: None,
     )
 
 
@@ -429,3 +430,16 @@ def test_watermark_resolution_failure_is_500():
     with pytest.raises(HTTPException) as exc:
         get_context_status(PERSONA_ID, _manager(persona=persona, lifecycle=lc))
     assert exc.value.status_code == 500
+
+
+def test_window_floor_applied_at_passes_through():
+    """最終防衛ラインの最終発火時刻 (無ければ None) をそのまま返す
+    (docs/issues/window_floor_and_refill_redesign.md 設計 0 — 発火は上流の
+    読み戻しの失敗の印なので画面に出す)。"""
+    persona = SimpleNamespace(persona_id=PERSONA_ID, model="model-a")
+    lc = _lifecycle(presented=[_msg("m1", 2500)])
+    status = get_context_status(PERSONA_ID, _manager(persona=persona, lifecycle=lc))
+    assert status["window_floor_applied_at"] is None
+    lc.window_floor_applied_at = lambda persona_id, model_key: "2026-09-04T01:23:45"
+    status = get_context_status(PERSONA_ID, _manager(persona=persona, lifecycle=lc))
+    assert status["window_floor_applied_at"] == "2026-09-04T01:23:45"

@@ -134,6 +134,7 @@ def estimate_chronicle_cost(
         # へ潰すと、表示が全域の数を言い、実走 (repair) 側の fail-closed と
         # 食い違う。
         compile_before = None
+        persona = manager.personas.get(persona_id) if manager else None
         lifecycle = getattr(getattr(manager, "sea_runtime", None), "session_lifecycle", None)
         if lifecycle is not None:
             from sea.coverage_repair import (
@@ -141,17 +142,22 @@ def estimate_chronicle_cost(
                 resolve_compile_ceiling,
             )
             try:
-                ceiling = resolve_compile_ceiling(lifecycle, persona_id, conn)
+                # 見積もりは行を書かない (persist_advance=False)。候補は実走と
+                # 同じ (温かい記録 ∪ 現在モデルの記録) — 表示と実走が違う数を
+                # 言わない。
+                ceiling = resolve_compile_ceiling(
+                    lifecycle, persona_id, conn,
+                    persona=persona, persist_advance=False,
+                )
             except CeilingResolutionError as exc:
                 raise HTTPException(
                     status_code=500,
-                    detail=f"編纂範囲の上端 (止め線) を解決できませんでした: {exc}",
+                    detail=f"要約してよい上限を解決できませんでした: {exc}",
                 )
             if ceiling is not None:
                 compile_before = (ceiling.created_at, ceiling.rowid)
 
         from saiverse.model_defaults import BUILTIN_DEFAULT_LITE_MODEL
-        persona = manager.personas.get(persona_id) if manager else None
         model_name = (getattr(persona, "memory_weave_model", None)
                       or os.getenv("MEMORY_WEAVE_MODEL", BUILTIN_DEFAULT_LITE_MODEL))
 
@@ -1230,6 +1236,7 @@ def _count_repair_targets(persona, lifecycle) -> int:
         init_arasuji_tables(adapter.conn)
     ceiling = resolve_compile_ceiling(
         lifecycle, getattr(persona, "persona_id", None), adapter.conn,
+        persona=persona, persist_advance=False,
     )
     estimate = estimate_chronicle_generation_cost(
         adapter.conn,

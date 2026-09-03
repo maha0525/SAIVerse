@@ -71,22 +71,74 @@ class CompileCeiling:
         return (self.created_at, self.rowid)
 
 
+def current_model_key_of(persona) -> Optional[str]:
+    """ペルソナの現在モデル (会話の主線が使う model)。
+
+    導出は ``sea/runtime.py`` の非常畳みと同じ
+    (``resolve_execution_context(persona, None, state={}).model_key``) — 要約して
+    よい上限が守る窓は、次に話しかけたとき実際に使われる model の窓なので、
+    同じ式で求める。``persona`` が None なら None (現在モデル不明の呼び出し)。
+    persona があるのに導出できない (例外 / 空 / "unknown") ときは
+    :class:`CeilingResolutionError` — 「分からない」を「上限なし = 全域編纂可」
+    へ潰すと生きている会話窓を掘る (Codex 一巡目 #2、fail-closed)。
+    """
+    if persona is None:
+        return None
+    try:
+        from sea.pulse_context import resolve_execution_context
+        key = resolve_execution_context(persona, None, state={}).model_key
+    except Exception as exc:
+        raise CeilingResolutionError(
+            f"current model resolution failed for persona "
+            f"{getattr(persona, 'persona_id', '?')}: {exc}"
+        ) from exc
+    if not key or str(key) == "unknown":
+        raise CeilingResolutionError(
+            f"current model of persona {getattr(persona, 'persona_id', '?')} "
+            "is unknown; the ceiling cannot be determined"
+        )
+    return str(key)
+
+
 def resolve_compile_ceiling(
     lifecycle, persona_id: Optional[str], conn,
+    *,
+    persona=None,
+    persist_advance: bool = False,
 ) -> Optional[CompileCeiling]:
-    """persona の「編纂してよい上端」を返す。温かい行が無ければ None (全域編纂可)。
+    """persona の「要約してよい上限」(全量計画が掘ってよい上端) を返す。
+
+    候補 = **温かい記録** ∪ **ペルソナの現在モデルの記録 (温度不問)**、現在
+    モデルに記録が無ければ代わりに**現在モデルの残す量ぶんの位置** (編纂対象の
+    保存行を新しい側から数えた位置)。候補のうち正典順で最古の位置が上限で、
+    編纂してよいのはそれより厳密に古いメッセージだけ。温かい記録だけを候補に
+    していた頃は、最後の返答から TTL (既定 20 分) 黙ってメンテナンスのボタンを
+    押すと全行が冷えていて上限が無くなり、生きている会話窓を丸ごと一次あらすじ
+    にした (docs/issues/window_floor_and_refill_redesign.md ①、2026-09-03 実害)。
+
+    - 現在モデルは ``persona`` から :func:`current_model_key_of` で求める
+      (runtime の非常畳みと同じ導出。導出できなければ fail-closed)。その記録の
+      位置は ``lifecycle.resolve_metabolism_anchor(persona, model_key=現在モデル,
+      persist_advance=...)`` を通した位置 (§14-2 の冷えた起点の前進を済ませた
+      後の起点)。実走 (generate_chronicle) は ``persist_advance=True``、
+      見積もりは False — 表示と実走が違う数を言わない。
+    - 現在モデルの記録が無い場合の下限は他の候補と**並べて**比べる — 他 model
+      の温かい記録が新しい側にあっても、現在モデルの残す量ぶんは要約しない
+      (Codex 一巡目 #3)。水位も無ければ下限は立たない。
+    - ``persona`` が None (現在モデルが分からない呼び出し) は温かい記録だけを
+      候補にする (従来の挙動)。
 
     温度判定は ``SessionLifecycle._anchor_entry_is_hot`` の一枚だけを使う
     (arasuji_levels.md §14-6-3 — 判定式を二枚にしない)。
 
     戻りは三状態:
 
-    - ``CompileCeiling`` — 上端が立った。
-    - ``None`` — 温かい行が本当にゼロ (制約なし = 全域編纂可)。
+    - ``CompileCeiling`` — 上限が立った。
+    - ``None`` — 候補ゼロ (制約なし = 全域編纂可)。
     - ``CeilingResolutionError`` 送出 — 解決失敗 (行の読み取り失敗 /
-      温かい行の anchor が messages に無い / 位置照会の失敗)。呼び出し側は
-      fail-closed で全量計画を止める。「読めなかった」を「制約なし」へ
-      潰さない (Codex レビュー 2026-08-31)。
+      候補の anchor が messages に無い / 位置照会の失敗 / 現在モデルの導出
+      失敗)。呼び出し側は fail-closed で全量計画を止める。「読めなかった」を
+      「制約なし」へ潰さない (Codex レビュー 2026-08-31)。
     """
     if not persona_id:
         return None
@@ -103,38 +155,116 @@ def resolve_compile_ceiling(
         raise CeilingResolutionError(
             f"session_anchor rows unreadable for {persona_id}: {exc}"
         ) from exc
-    best: Optional[CompileCeiling] = None
+
+    def _at(anchor_id: str, model_key: str) -> CompileCeiling:
+        try:
+            pos = get_message_position(conn, anchor_id)
+        except Exception as exc:
+            raise CeilingResolutionError(
+                f"position lookup failed for anchor {anchor_id} "
+                f"(model={model_key}): {exc}"
+            ) from exc
+        if pos is None:
+            # 窓があるのにその位置が分からない — 上限を確定できないので
+            # 全域編纂可へは倒さない (窓の下を掘る側の失敗が重い)。
+            raise CeilingResolutionError(
+                f"anchor {anchor_id} (model={model_key}) is missing "
+                "from messages; the ceiling cannot be determined"
+            )
+        return CompileCeiling(
+            message_id=anchor_id, created_at=pos[0], rowid=pos[1],
+            model_key=model_key,
+        )
+
+    candidates: List[CompileCeiling] = []
     for model_key, entry in entries.items():
         anchor_id = entry.get("anchor_id")
         if not anchor_id:
             continue
         if not lifecycle._anchor_entry_is_hot(entry, str(model_key), persona_id):
             continue
+        candidates.append(_at(str(anchor_id), str(model_key)))
+
+    current_model = current_model_key_of(persona)
+    current_entry = entries.get(current_model) if current_model else None
+    if current_model and current_entry and current_entry.get("anchor_id"):
+        # 現在モデルの**記録** (session_anchor 行) は温度不問で候補。位置は
+        # 冷えた起点の前進を済ませた後の起点。
         try:
-            pos = get_message_position(conn, str(anchor_id))
+            # strict: 行の読み失敗を「行なし → 候補なし → 上限なし」に潰さない
+            # (Codex 七巡目 #1)。例外は下で CeilingResolutionError に包む。
+            current_anchor, _resolution = lifecycle.resolve_metabolism_anchor(
+                persona, model_key=current_model, persist_advance=persist_advance,
+                strict=True,
+            )
         except Exception as exc:
+            # 現在モデルの起点が分からないまま全量を編纂すると、生きている
+            # 会話窓を掘る — fail-closed (呼び出し側が全量計画を止める)。
             raise CeilingResolutionError(
-                f"position lookup failed for warm anchor {anchor_id} "
-                f"(model={model_key}): {exc}"
+                f"current-model anchor resolution failed (model={current_model}): "
+                f"{exc}"
             ) from exc
-        if pos is None:
-            # 温かい窓があるのにその位置が分からない — 上端を確定できないので
-            # 全域編纂可へは倒さない (窓の下を掘る側の失敗が重い)。
-            raise CeilingResolutionError(
-                f"warm anchor {anchor_id} (model={model_key}) is missing "
-                "from messages; the ceiling cannot be determined"
-            )
-        if best is None or (
-            canonical_position_key(*pos)
-            < canonical_position_key(best.created_at, best.rowid)
-        ):
-            best = CompileCeiling(
-                message_id=str(anchor_id),
-                created_at=pos[0],
-                rowid=pos[1],
-                model_key=str(model_key),
-            )
-    return best
+        if current_anchor:
+            candidates.append(_at(str(current_anchor), current_model))
+    elif current_model:
+        # 記録が無い model (この model で一度も話していない) の起点は resolve が
+        # 最前線 / 借用から仮に導くだけで記録ではない — 代わりに残す量ぶんの
+        # 下限を候補にする。
+        watermarks = lifecycle.get_metabolism_watermarks(persona, current_model)
+        if watermarks is not None:
+            floor = _target_floor_ceiling(conn, int(watermarks.target), current_model)
+            if floor is not None:
+                candidates.append(floor)
+
+    if not candidates:
+        return None
+    return min(
+        candidates,
+        key=lambda c: canonical_position_key(c.created_at, c.rowid),
+    )
+
+
+def _target_floor_ceiling(
+    conn, target_chars: int, model_key: str,
+) -> Optional[CompileCeiling]:
+    """編纂対象の保存行を新しい側から残す量ぶん数え、そこを上限にする。
+
+    記録 (session_anchor 行) が一つも無いペルソナ (ログインポート直後など) の
+    下限。届いた行が上限 = その行より厳密に古いものだけ編纂してよい。全体が
+    残す量に満たなければ最古の行が上限 (= 何も編纂しない)。編纂対象が無ければ
+    None。
+    """
+    from sai_memory.memory.storage import (
+        get_message_position,
+        get_messages_for_chronicle,
+    )
+
+    messages = get_messages_for_chronicle(conn)
+    if not messages:
+        return None
+    acc = 0
+    boundary = 0
+    for index in range(len(messages) - 1, -1, -1):
+        acc += len(str(messages[index].content or ""))
+        if acc >= target_chars:
+            boundary = index
+            break
+    ceiling_msg = messages[boundary]
+    try:
+        pos = get_message_position(conn, str(ceiling_msg.id))
+    except Exception as exc:
+        raise CeilingResolutionError(
+            f"position lookup failed for the target-floor message "
+            f"{ceiling_msg.id}: {exc}"
+        ) from exc
+    if pos is None:
+        raise CeilingResolutionError(
+            f"target-floor message {ceiling_msg.id} is missing from messages"
+        )
+    return CompileCeiling(
+        message_id=str(ceiling_msg.id), created_at=pos[0], rowid=pos[1],
+        model_key=model_key,
+    )
 
 
 def coverage_marks_for_window(
@@ -270,14 +400,34 @@ def mark_covered_cold_windows(lifecycle, persona) -> Tuple[int, int]:
 
     updated = 0
     failed = 0
-    entries: Dict[str, Any] = lifecycle.load_anchor_entries(persona_id) or {}
+    try:
+        # 厳格に読む — 読み失敗を「行なし = 印なし (0, 0)」の成功の顔にしない
+        # (Codex 八巡目 #4)。失敗は印の失敗数として補修の結果に載る。
+        entries: Dict[str, Any] = lifecycle.load_anchor_entries_strict(persona_id) or {}
+    except Exception:
+        LOGGER.warning(
+            "[coverage-repair] session_anchor rows are unreadable (persona=%s); "
+            "no cold-window marks were written", persona_id, exc_info=True,
+        )
+        return (0, 1)
     for model_key, entry in entries.items():
         anchor_id = entry.get("anchor_id")
         if not anchor_id:
             continue
         if lifecycle._anchor_entry_is_hot(entry, str(model_key), persona_id):
             continue
-        existing = deserialize_folds(entry.get("folded_ranges"))
+        try:
+            # 厳格に読む — 壊れた記録を空と見なして印を足すと、書き戻しで既存の
+            # 区間が消える (七巡目の掃討)。読めない行は失敗に数えて飛ばす。
+            existing = deserialize_folds(entry.get("folded_ranges"), strict=True)
+        except ValueError:
+            failed += 1
+            LOGGER.warning(
+                "[coverage-repair] folded ranges of persona=%s model=%s are "
+                "unreadable; leaving the row untouched", persona_id, model_key,
+                exc_info=True,
+            )
+            continue
         try:
             marks = coverage_marks_for_window(
                 adapter.conn, str(anchor_id), existing,
@@ -466,8 +616,10 @@ def plan_tail_rewind(
     # 戻した窓の実送信が上限を超えていても fold_needed=False になり、補修が
     # 「上限超えを自分のジョブの中で畳む」約束 (費用の透明性) を破って、次の
     # 会話の非常畳みへ黙って送ることになる。
+    # 起点・記録を厳格に読んだ後の窓も厳格に (Codex 八巡目 #3) — 履歴の読み
+    # 失敗は例外で run_tail_rewind が "failed" に写す (書かない)。
     window_after = lifecycle.get_presented_window(
-        persona, model_key, str(first_message_id),
+        persona, model_key, str(first_message_id), strict=True,
     )
     presented_after = lifecycle.presented_with_perceptions(
         persona, window_after.presented, str(first_message_id),
@@ -577,7 +729,11 @@ def _resolve_uncovered_tail(lifecycle, persona, conn) -> Optional[str]:
     )
 
     persona_id = getattr(persona, "persona_id", None)
-    ceiling = resolve_compile_ceiling(lifecycle, persona_id, conn)
+    # 読みだけの再計算なので前進は永続化しない (実走の generate_chronicle が
+    # 直前に persist_advance=True で済ませている)。
+    ceiling = resolve_compile_ceiling(
+        lifecycle, persona_id, conn, persona=persona, persist_advance=False,
+    )
     messages = get_messages_for_chronicle(conn)
     if ceiling is not None:
         messages = clip_messages_before_position(
@@ -683,7 +839,17 @@ def run_tail_rewind(
     # regenerate_entry と同じ「手動 UI 操作同士の ms 級競合」として受容する
     # (docs/issues/chronicle_eviction_applier_veto_deadlock.md に記録の型)。
     # 上書きされた側は _drop_dead_folds / 次の畳みの掃除が拾う。
-    existing_folds = deserialize_folds(plan.folded_ranges_payload)
+    try:
+        # 厳格に読む — 壊れた payload を空と見なして書くと既存の区間が消える
+        # (Codex 七巡目 #3)。読めなければ書かずに failed。
+        existing_folds = deserialize_folds(plan.folded_ranges_payload, strict=True)
+    except ValueError:
+        LOGGER.warning(
+            "[tail-rewind] folded ranges payload is unreadable (persona=%s "
+            "model=%s); the tail was not rewound and the record was left as is",
+            persona_id, plan.model_key, exc_info=True,
+        )
+        return "failed"
     # 書き込みは raise_on_error=True で呼ぶ (Codex 十一巡 P1): _write_refill の
     # False は既定では「CAS 不一致」と「DB 失敗」の両方を意味するので、そのまま
     # "cas_rejected" (成功系の白名簿) へ写すと、書けなかった末尾が残ったまま

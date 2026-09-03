@@ -165,6 +165,7 @@ class PulseDispatcher:
               "unavailable" (pulse_controller 不在) /
               "error_before_submit" (受付裁定前に例外)
             - runtime_outcome: "completed" / "gate_closed" / "cancelled" /
+              "floor_unmet" (最終防衛ライン未達 — Playbook 未起動・副作用ゼロ) /
               "error"。queued / skipped / unavailable では None。
             - error: 例外発生時のみ str(e)。
         """
