@@ -2,11 +2,13 @@
 
 固定する不変条件:
 
-- 止め線 = 温かい (TTL 内の) anchor のうち正典順で最古の位置。温かい行が無ければ
-  上端なし (全域が補修対象 — ログインポートで作った anchor 行ゼロのペルソナが
-  この形)。
+- 要約してよい上限 = 温かい (TTL 内の) anchor と**ペルソナの現在モデルの
+  anchor (温度不問)** のうち正典順で最古の位置 (2026-09-04、
+  docs/issues/window_floor_and_refill_redesign.md ①)。記録が一つも無ければ
+  現在モデルの残す量ぶん (新しい側) は要約しない。水位も無ければ上端なし
+  (全域が補修対象)。
 - 見積もり (estimate_chronicle_generation_cost) と生成 (generate_chronicle の
-  全量計画) は同じ止め線関数を通り、同じ数を言う。
+  全量計画) は同じ上限関数を通り、同じ数を言う。見積もりは行を書かない。
 - 止め線の切り位置はスペルの群を割らない (群ごと手前へ下げる)。
 - 補修の完了後、冷えた anchor 行の窓を覆うエントリは §15 の印 (presented_raw)
   として行へ追記される。冪等 (同じ entry_id は重複追加しない)。温かい行と、
@@ -34,6 +36,7 @@ from sea.coverage_repair import (
     mark_covered_cold_windows,
     resolve_compile_ceiling,
 )
+from sea.eviction_plan import Watermarks
 from sea.session_lifecycle import SessionLifecycle
 from sea.session_window import deserialize_folds
 
@@ -163,22 +166,153 @@ class TestResolveCompileCeiling:
         assert resolve_compile_ceiling(lc, PERSONA_ID, adapter.conn) is None
 
     def test_ceiling_is_the_oldest_warm_anchor(self, adapter, session_factory):
-        """複数 model: 温かい行のうち正典順で最古の anchor が上端。冷えた行は無視。"""
+        """複数 model: 温かい行のうち正典順で最古の anchor が上端。他 model の
+        冷えた行は無視 (現在モデルの行だけが温度不問)。"""
         ids = _add_messages(adapter, 4)
         lc = _make_lifecycle(session_factory)
         _warm_row(lc, "model-a", ids[2])
         _warm_row(lc, "model-b", ids[3])
-        _cold_row(lc, "model-c", ids[0])  # 冷えた行は上端に影響しない
-        ceiling = resolve_compile_ceiling(lc, PERSONA_ID, adapter.conn)
+        _cold_row(lc, "model-c", ids[0])  # 他 model の冷えた行は上端に影響しない
+        persona = _model_persona(adapter, "model-a")
+        ceiling = resolve_compile_ceiling(lc, PERSONA_ID, adapter.conn, persona=persona)
         assert ceiling is not None
         assert ceiling.message_id == ids[2]
         assert ceiling.model_key == "model-a"
+        # 現在モデルが model-c なら、その冷えた行が (温度不問で) 上端になる
+        persona_c = _model_persona(adapter, "model-c")
+        ceiling = resolve_compile_ceiling(lc, PERSONA_ID, adapter.conn, persona=persona_c)
+        assert ceiling is not None
+        assert ceiling.message_id == ids[0]
+        assert ceiling.model_key == "model-c"
 
-    def test_all_cold_means_no_ceiling(self, adapter, session_factory):
+    def test_all_cold_current_model_row_is_still_the_ceiling(
+        self, adapter, session_factory,
+    ):
+        """全行が冷えていても、現在モデルの起点が上端 (2026-09-04 ①)。
+
+        温かい記録だけを候補にしていた頃は「TTL (20 分) 黙ってからボタン」で
+        全行が冷えて上端が消え、生きている会話窓 51 件を丸ごと一次あらすじに
+        した (konoe さん、2026-09-03)。メンテナンスのボタンは会話を止めてから
+        押すのが普通なので、いちばん普通の使い方でちょうど破れていた。"""
         ids = _add_messages(adapter, 3)
         lc = _make_lifecycle(session_factory)
         _cold_row(lc, "model-a", ids[1])
+        persona = _model_persona(adapter, "model-a")
+        ceiling = resolve_compile_ceiling(lc, PERSONA_ID, adapter.conn, persona=persona)
+        assert ceiling is not None
+        assert ceiling.message_id == ids[1]
+        assert ceiling.model_key == "model-a"
+        # 現在モデルが分からない呼び出し (persona なし) は従来どおり温かい行だけ
         assert resolve_compile_ceiling(lc, PERSONA_ID, adapter.conn) is None
+
+    def test_no_rows_keeps_the_target_chars_of_the_newest_side(
+        self, adapter, session_factory,
+    ):
+        """記録が一つも無ければ、現在モデルの残す量ぶん (新しい側) は要約しない。
+
+        1 通 ≈ 205 字。残す量 450 は新しい側から 3 通目 (ids[1]) で届く →
+        上端 = ids[1]、編纂してよいのは ids[0] だけ。"""
+        ids = _add_messages(adapter, 4)
+        lc = _make_lifecycle(session_factory)
+        persona = _model_persona(adapter, "model-a")
+        with patch.object(
+            lc, "get_metabolism_watermarks",
+            return_value=Watermarks(low=100, target=450, high=1000),
+        ):
+            ceiling = resolve_compile_ceiling(
+                lc, PERSONA_ID, adapter.conn, persona=persona,
+            )
+        assert ceiling is not None
+        assert ceiling.message_id == ids[1]
+        assert ceiling.model_key == "model-a"
+        # 全体が残す量に満たなければ最古の行が上端 (= 何も編纂しない)
+        with patch.object(
+            lc, "get_metabolism_watermarks",
+            return_value=Watermarks(low=100, target=100_000, high=None),
+        ):
+            ceiling = resolve_compile_ceiling(
+                lc, PERSONA_ID, adapter.conn, persona=persona,
+            )
+        assert ceiling is not None and ceiling.message_id == ids[0]
+        # 水位も無ければ従来どおり全域
+        with patch.object(lc, "get_metabolism_watermarks", return_value=None):
+            assert resolve_compile_ceiling(
+                lc, PERSONA_ID, adapter.conn, persona=persona,
+            ) is None
+
+    def test_unresolvable_current_model_fails_closed(self, adapter, session_factory):
+        """persona があるのに現在モデルが導けない (属性なし = "unknown" / 導出の
+        例外) → CeilingResolutionError。見積もりも実走も止まる (Codex 一巡目 #2)。
+        「分からない」を「上限なし = 全域編纂可」へ潰さない。"""
+        _add_messages(adapter, 3)
+        lc = _make_lifecycle(session_factory)
+        no_model = SimpleNamespace(
+            persona_id=PERSONA_ID, persona_name="テスター", sai_memory=adapter,
+        )
+        with pytest.raises(CeilingResolutionError):
+            _estimate(lc, adapter, no_model)  # 見積もり経路
+        executor = _CapturingExecutor()
+        assert _generate(lc, no_model, executor) == "failed"  # 実走経路
+        assert executor.chunks == []
+        with patch(
+            "sea.pulse_context.resolve_execution_context",
+            side_effect=RuntimeError("boom"),
+        ):
+            with pytest.raises(CeilingResolutionError):
+                resolve_compile_ceiling(
+                    lc, PERSONA_ID, adapter.conn, persona=_persona(adapter),
+                )
+        # persona なし (現在モデル不明の呼び出し) は従来どおり温かい行だけ
+        assert resolve_compile_ceiling(lc, PERSONA_ID, adapter.conn) is None
+
+    def test_target_floor_competes_with_another_models_warm_anchor(
+        self, adapter, session_factory,
+    ):
+        """現在モデルに記録が無いとき、残す量ぶんの下限は他 model の温かい記録と
+        **並べて**比べる — 温かい記録が新しい側にあっても下限が上限になる
+        (Codex 一巡目 #3)。他 model の記録の方が古ければそちら。"""
+        ids = _add_messages(adapter, 4)
+        lc = _make_lifecycle(session_factory)
+        _warm_row(lc, "model-b", ids[3])  # 他 model の温かい行 (いちばん新しい)
+        persona = _model_persona(adapter, "model-a")  # 記録なし
+        wm = Watermarks(low=100, target=450, high=1000)  # 下限 = ids[1]
+        with patch.object(lc, "get_metabolism_watermarks", return_value=wm):
+            ceiling = resolve_compile_ceiling(
+                lc, PERSONA_ID, adapter.conn, persona=persona,
+            )
+        assert ceiling is not None
+        assert ceiling.message_id == ids[1]
+        assert ceiling.model_key == "model-a"
+        _warm_row(lc, "model-c", ids[0])  # 下限より古い温かい行
+        with patch.object(lc, "get_metabolism_watermarks", return_value=wm):
+            ceiling = resolve_compile_ceiling(
+                lc, PERSONA_ID, adapter.conn, persona=persona,
+            )
+        assert ceiling is not None and ceiling.message_id == ids[0]
+
+    def test_estimate_reads_only_and_generation_persists_the_advance(
+        self, adapter, session_factory,
+    ):
+        """現在モデルの起点は resolve_metabolism_anchor を通した位置を使う —
+        見積もりは persist_advance=False (行を書かない)、実走は True。"""
+        ids = _add_messages(adapter, 4)
+        lc = _make_lifecycle(session_factory)
+        persona = _persona(adapter)
+        _cold_row(lc, "claude-x", ids[2])  # 現在モデルの記録 (冷えていてよい)
+        seen = []
+        real = lc.resolve_metabolism_anchor
+
+        def _spy(p, model_key=None, persist_advance=True, strict=False):
+            assert strict is True  # 上限の解決は常に厳格 (Codex 七巡目 #1)
+            seen.append(persist_advance)
+            return real(p, model_key=model_key, persist_advance=persist_advance, strict=strict)
+
+        with patch.object(lc, "resolve_metabolism_anchor", side_effect=_spy):
+            _estimate(lc, adapter, persona)
+            assert seen == [False]
+            seen.clear()
+            _generate(lc, persona, _CapturingExecutor())
+            assert seen and seen[0] is True
 
     def test_warm_anchor_at_missing_message_fails_resolution(
         self, adapter, session_factory,
@@ -363,12 +497,15 @@ def _generate(lifecycle, persona, executor):
         return lifecycle.generate_chronicle(persona, force=True)
 
 
-def _estimate(lc, adapter):
-    """API ルート (cost-estimate) と同じ組み立て: 同じ止め線関数で絞って見積もる。"""
+def _estimate(lc, adapter, persona=None):
+    """API ルート (cost-estimate) と同じ組み立て: 同じ上限関数 (行を書かない
+    persist_advance=False) で絞って見積もる。"""
     from sai_memory.arasuji.estimate import estimate_chronicle_generation_cost
     from sai_memory.arasuji.storage import init_arasuji_tables
     init_arasuji_tables(adapter.conn)
-    ceiling = resolve_compile_ceiling(lc, PERSONA_ID, adapter.conn)
+    ceiling = resolve_compile_ceiling(
+        lc, PERSONA_ID, adapter.conn, persona=persona, persist_advance=False,
+    )
     return estimate_chronicle_generation_cost(
         adapter.conn,
         model_name="mock-model",
@@ -385,6 +522,14 @@ def _persona(adapter):
     )
 
 
+def _model_persona(adapter, model):
+    """現在モデルを指定したペルソナ (resolve_execution_context は persona.model を使う)。"""
+    return SimpleNamespace(
+        persona_id=PERSONA_ID, persona_name="テスター", model=model,
+        sai_memory=adapter,
+    )
+
+
 class TestEstimateGenerationParity:
     def test_warm_anchor_limits_both_estimate_and_generation(
         self, adapter, session_factory,
@@ -393,29 +538,50 @@ class TestEstimateGenerationParity:
         ids = _add_messages(adapter, 4)
         lc = _make_lifecycle(session_factory)
         _warm_row(lc, "model-a", ids[2])
+        persona = _model_persona(adapter, "model-a")  # 現在モデル = 温かい行の model
 
-        est = _estimate(lc, adapter)
+        est = _estimate(lc, adapter, persona)
         assert est.unprocessed_messages == 2
 
         executor = _CapturingExecutor()
-        persona = _persona(adapter)
         assert _generate(lc, persona, executor) == "ok"
         compiled = [mid for chunk in executor.chunks[-1] for mid in chunk]
         assert compiled == ids[:2]
         assert len(compiled) == est.unprocessed_messages
 
-    def test_no_anchor_rows_repairs_the_whole_history(
+    def test_no_anchor_rows_keeps_the_newest_target_chars(
         self, adapter, session_factory,
     ):
-        """anchor 行ゼロ (ログインポートの新規ペルソナ) → 全履歴が対象。"""
+        """anchor 行ゼロ (ログインポートの新規ペルソナ) → 現在モデルの残す量ぶん
+        (新しい側) は残し、それより古い分だけが対象。見積もりと実走が同じ数を
+        言う (2026-09-04 ①。旧「全履歴が対象」の反転)。"""
         ids = _add_messages(adapter, 4)
         lc = _make_lifecycle(session_factory)
+        persona = _persona(adapter)
+        wm = Watermarks(low=100, target=450, high=1000)  # 新しい側 3 通が残る
 
-        est = _estimate(lc, adapter)
-        assert est.unprocessed_messages == 4
+        with patch.object(lc, "get_metabolism_watermarks", return_value=wm):
+            est = _estimate(lc, adapter, persona)
+            assert est.unprocessed_messages == 1
+            executor = _CapturingExecutor()
+            assert _generate(lc, persona, executor) == "ok"
+        compiled = [mid for chunk in executor.chunks[-1] for mid in chunk]
+        assert compiled == ids[:1]
+        assert len(compiled) == est.unprocessed_messages
 
-        executor = _CapturingExecutor()
-        assert _generate(lc, _persona(adapter), executor) == "ok"
+    def test_no_anchor_rows_and_no_watermarks_repairs_the_whole_history(
+        self, adapter, session_factory,
+    ):
+        """anchor 行ゼロで水位も無い model → 従来どおり全履歴が対象。"""
+        ids = _add_messages(adapter, 4)
+        lc = _make_lifecycle(session_factory)
+        persona = _persona(adapter)
+
+        with patch.object(lc, "get_metabolism_watermarks", return_value=None):
+            est = _estimate(lc, adapter, persona)
+            assert est.unprocessed_messages == 4
+            executor = _CapturingExecutor()
+            assert _generate(lc, persona, executor) == "ok"
         compiled = [mid for chunk in executor.chunks[-1] for mid in chunk]
         assert compiled == ids
         assert len(compiled) == est.unprocessed_messages
@@ -431,11 +597,12 @@ class TestEstimateGenerationParity:
         # 後からのインポート (rowid は新しいが created_at は古い)
         imported = _add_messages(adapter, 3, start_minute=0, prefix="インポート")
 
-        est = _estimate(lc, adapter)
+        persona = _model_persona(adapter, "model-a")  # 現在モデル = 温かい行の model
+        est = _estimate(lc, adapter, persona)
         assert est.unprocessed_messages == 3
 
         executor = _CapturingExecutor()
-        assert _generate(lc, _persona(adapter), executor) == "ok"
+        assert _generate(lc, persona, executor) == "ok"
         compiled = [mid for chunk in executor.chunks[-1] for mid in chunk]
         assert compiled == imported
         assert len(compiled) == est.unprocessed_messages
@@ -614,12 +781,14 @@ class TestRunCoverageRepair:
     def test_compiles_uncovered_past_and_marks_cold_window(
         self, adapter, session_factory,
     ):
-        """一巡: 止め線なし → 未被覆の過去を編纂し、冷えた窓に印が付く。"""
+        """一巡: 上限 = 現在モデルの冷えた起点 → その手前の未被覆の過去を編纂し、
+        冷えた窓に印が付く。"""
         ids = _add_messages(adapter, 4)
         lc = _make_lifecycle(session_factory)
         _cold_row(lc, "model-a", ids[2])
         # 窓の中 (ids[2:4]) は被覆済み、ids[0:2] が未被覆の過去
         entry = _create_entry(adapter.conn, ids[2:4])
+        persona = _model_persona(adapter, "model-a")  # 現在モデル = 冷えた行の model
 
         executor = _CapturingExecutor(write_entries=True)
         with patch(
@@ -637,7 +806,7 @@ class TestRunCoverageRepair:
             "sai_memory.memory.entity_extractor.make_batch_callback",
             side_effect=RuntimeError("skip entity extraction"),
         ):
-            assert lc.run_coverage_repair(_persona(adapter)) == ("ok", 0)
+            assert lc.run_coverage_repair(persona) == ("ok", 0)
 
         # 未被覆だった ids[0:2] だけが編纂された (processed は自動で飛ぶ)
         compiled = [mid for chunk in executor.chunks[-1] for mid in chunk]
@@ -718,10 +887,11 @@ class TestEstimateStaleGuard:
         """承認した件数より対象が増えていたら実行せず estimate_stale。"""
         from api.routes.people import arasuji as arasuji_api
         from sea.cancellation import CancellationToken
-        _add_messages(adapter, 4)  # 現在の対象 = 4 件
+        _add_messages(adapter, 4)  # 現在の対象 = 4 件 (水位なし = 上限なし)
         lc = _make_lifecycle(session_factory)
         job_id = arasuji_api._create_job(PERSONA_ID)
-        with patch.object(lc, "run_coverage_repair_checked") as run:
+        with patch.object(lc, "run_coverage_repair_checked") as run, \
+                patch.object(lc, "get_metabolism_watermarks", return_value=None):
             arasuji_api._run_coverage_repair_job(
                 job_id, _persona(adapter), lc, CancellationToken(),
                 confirmed_unprocessed=2,  # 見積もり時は 2 件だった
@@ -749,3 +919,152 @@ class TestEstimateStaleGuard:
                 job = arasuji_api._get_job(job_id)
                 assert job["status"] == "completed"
             assert run.call_count == 2
+
+
+# ---------------------------------------------------------------------------
+# 末尾の引き戻し (run_tail_rewind) — 引き戻し後の畳みの主語
+# ---------------------------------------------------------------------------
+
+
+class TestTailRewindPostFold:
+    """引き戻し後に「畳む」と言えるのは、会話の行が残す量を超えているときだけ。
+
+    上限 (fold_needed) の主語は合計だが、残す量の主語は会話の行 (2026-09-03
+    まはー裁定)。行が残す量以下なら退場計画は保護範囲で埋まって空になるので、
+    畳みを呼んでも門で "noop" — 「古い側を畳んでいます」の通知も
+    "rewound_folded" (畳み完了) の返り値も嘘になる。
+    """
+
+    def _run(self, session_factory, plan, events):
+        from unittest.mock import Mock
+
+        from sea.coverage_repair import run_tail_rewind
+        lc = _make_lifecycle(session_factory)
+        lc.run_manual_compaction = Mock(return_value="ok")
+        persona = SimpleNamespace(
+            persona_id=PERSONA_ID,
+            sai_memory=SimpleNamespace(is_ready=lambda: True, conn=object()),
+        )
+        with patch("sea.coverage_repair._resolve_uncovered_tail", return_value="gap"), \
+                patch("sea.coverage_repair.plan_tail_rewind", return_value=plan), \
+                patch.object(lc, "_write_refill", return_value=True):
+            status = run_tail_rewind(lc, persona, event_callback=events.append)
+        return status, lc.run_manual_compaction
+
+    def _plan(self, **overrides):
+        from sea.coverage_repair import TailRewindPlan
+        kwargs = dict(
+            model_key="model-a", expected_anchor_id="a1", new_anchor_id="gap",
+            window_chars_after=300, fold_needed=True,
+            window_rows_chars_after=200, target_chars=50,
+        )
+        kwargs.update(overrides)
+        return TailRewindPlan(**kwargs)
+
+    def test_perception_only_over_budget_does_not_fold(self, session_factory):
+        """合計 300 > 上限だが会話の行 40 <= 残す量 50 → 通知なし・"rewound"。"""
+        events = []
+        status, fold = self._run(
+            session_factory,
+            self._plan(window_chars_after=300, window_rows_chars_after=40),
+            events,
+        )
+        assert status == "rewound"
+        fold.assert_not_called()
+        assert [e["content"] for e in events] == [
+            "あらすじにできない少量の末尾を、提示窓へ戻しました。",
+        ]
+
+    def test_rows_over_target_still_notifies_and_folds(self, session_factory):
+        """会話の行 200 > 残す量 50 → 従来どおり通知して畳み、"rewound_folded"。"""
+        events = []
+        status, fold = self._run(session_factory, self._plan(), events)
+        assert status == "rewound_folded"
+        fold.assert_called_once()
+        assert fold.call_args.kwargs["model_key"] == "model-a"
+        assert any("古い側を畳んでいます" in e["content"] for e in events)
+
+    def test_compaction_noop_is_reported_as_rewound_not_folded(
+        self, session_factory,
+    ):
+        """畳みを呼んだが門で "noop" → 畳んでいないので "rewound" (成功系のまま)。"""
+        from unittest.mock import Mock
+
+        from sea.coverage_repair import run_tail_rewind
+        lc = _make_lifecycle(session_factory)
+        lc.run_manual_compaction = Mock(return_value="noop")
+        persona = SimpleNamespace(
+            persona_id=PERSONA_ID,
+            sai_memory=SimpleNamespace(is_ready=lambda: True, conn=object()),
+        )
+        with patch("sea.coverage_repair._resolve_uncovered_tail", return_value="gap"), \
+                patch("sea.coverage_repair.plan_tail_rewind", return_value=self._plan()), \
+                patch.object(lc, "_write_refill", return_value=True):
+            assert run_tail_rewind(lc, persona) == "rewound"
+        lc.run_manual_compaction.assert_called_once()
+
+    def test_fold_evictable_property(self):
+        """fold_evictable = 上限超え かつ 行 > 残す量 (残す量不明なら上限超えだけ)。"""
+        assert self._plan().fold_evictable is True
+        assert self._plan(window_rows_chars_after=50).fold_evictable is False
+        assert self._plan(fold_needed=False).fold_evictable is False
+        assert self._plan(target_chars=None, window_rows_chars_after=0).fold_evictable is True
+
+
+class TestStrictAnchorReadsInRepair:
+    def test_anchor_read_failure_during_ceiling_resolution_fails_closed(
+        self, adapter, session_factory,
+    ):
+        """Codex 七巡目 #1: 上限の解決の中の起点の解決 (二度目の行の読み) が
+        失敗したら CeilingResolutionError — 見積もりも実走も止まる (「行なし →
+        候補なし → 上限なし → 生きている窓を全部編纂」にしない)。"""
+        ids = _add_messages(adapter, 4)
+        lc = _make_lifecycle(session_factory)
+        _cold_row(lc, "claude-x", ids[2])  # 現在モデルの記録
+        persona = _persona(adapter)
+        real = lc.load_anchor_entries_strict
+
+        def _flaky_reads():
+            calls = {"n": 0}
+
+            def _read(persona_id):
+                calls["n"] += 1
+                if calls["n"] == 2:
+                    raise RuntimeError("db down on the second read")
+                return real(persona_id)
+            return _read
+
+        with patch.object(lc, "load_anchor_entries_strict", side_effect=_flaky_reads()):
+            with pytest.raises(CeilingResolutionError):
+                _estimate(lc, adapter, persona)
+        with patch.object(lc, "load_anchor_entries_strict", side_effect=_flaky_reads()):
+            executor = _CapturingExecutor()
+            assert _generate(lc, persona, executor) == "failed"
+            assert executor.chunks == []
+
+    def test_cold_window_marks_skip_rows_with_unreadable_folds(
+        self, adapter, session_factory,
+    ):
+        """掃討: 冷えた窓への印は記録を厳格に読み、壊れた行は失敗に数えて触らない
+        (空と見なして印を足すと書き戻しで既存の区間が消える)。"""
+        ids = _add_messages(adapter, 4)
+        lc = _make_lifecycle(session_factory)
+        _cold_row(lc, "model-a", ids[2])
+        _create_entry(adapter.conn, ids[2:4])
+        from database.models import SessionAnchor
+        broken = '[{"message_ids": "abc"}]'
+        db = session_factory()
+        try:
+            db.query(SessionAnchor).filter_by(PERSONA_ID=PERSONA_ID, MODEL_KEY="model-a").update(
+                {SessionAnchor.FOLDED_RANGES_JSON: broken}, synchronize_session=False,
+            )
+            db.commit()
+        finally:
+            db.close()
+        assert mark_covered_cold_windows(lc, _persona(adapter)) == (0, 1)
+        db = session_factory()
+        try:
+            row = db.query(SessionAnchor).filter_by(PERSONA_ID=PERSONA_ID, MODEL_KEY="model-a").first()
+            assert row.FOLDED_RANGES_JSON == broken
+        finally:
+            db.close()

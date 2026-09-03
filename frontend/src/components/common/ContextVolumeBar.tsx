@@ -11,6 +11,18 @@ export interface ContextStatus {
     target_chars: number | null;      // 残す量 (整理後にここへ揃える)
     high_chars: number | null;        // 上限 (超えたら整理)
     presented_chars: number | null;   // 現在の提示コンテキスト文字数 (読み戻し後)
+    // presented_chars の内訳 (2026-09-02): 保存済みの会話 / 送信直前に差し込まれる
+    // 部屋の様子。古い backend では undefined。
+    stored_chars?: number | null;
+    injected_perception_chars?: number | null;
+    // 残す量 (target_chars) と比べる量 = 整理が計画を立てる窓の**会話の行だけ**
+    // (2026-09-03 裁定: 上限の主語は合計、残す量の主語は会話の行)。古い backend
+    // では undefined、新しい backend でも測れなければ null — どちらも色分けは
+    // presented_chars で代用するが、内訳の行は数値のときだけ出す。
+    window_rows_chars?: number | null;
+    // 合計は上限を超えているのに会話の行が残す量以下 = 整理しても畳めるものが
+    // 無い (超過の主は部屋の様子の供給)。測れないとき / 古い backend では null。
+    perception_over_budget?: boolean | null;
     // 一度に畳む単位 U (整理は残す量より古い側を U 文字ぶんずつ刻んで畳む)。
     // U に達したかは「材料の字数」(スペル結果などの長い機構の行を圧縮した後の
     // 字数) で測るので、生の文字数との比較には使えない (2026-08-29 裁定)。
@@ -58,6 +70,13 @@ export default function ContextVolumeBar({ status }: ContextVolumeBarProps) {
     const high = status.high_chars;
     const scaleMax = scaleMaxOf(status);
     if (presented == null || scaleMax == null) return null;
+    // 上限と比べるのは合計 (presented)、残す量と比べるのは会話の行だけ
+    // (2026-09-03 裁定)。行の量が無いとき (古い backend = undefined / 測れ
+    // なかった = null) は色分けだけ合計で代用し、内訳 (うち会話 …) は出さない —
+    // 代用値で「うち会話 = 合計」と書くと部屋の様子の字数と矛盾する。
+    const rowsField = status.window_rows_chars;
+    const rows = rowsField ?? presented;
+    const perceptionChars = status.injected_perception_chars ?? null;
 
     return (
         <>
@@ -67,7 +86,7 @@ export default function ContextVolumeBar({ status }: ContextVolumeBarProps) {
                     style={{
                         width: `${Math.min(100, (presented / scaleMax) * 100)}%`,
                         background: high != null && presented > high ? '#f87171'
-                            : target != null && presented > target ? '#fbbf24'
+                            : target != null && rows > target ? '#fbbf24'
                             : '#34d399',
                     }}
                 />
@@ -76,12 +95,24 @@ export default function ContextVolumeBar({ status }: ContextVolumeBarProps) {
                 )}
             </div>
             <div className={styles.contextStatRow}>
-                <span>現在 {presented.toLocaleString()}文字{status.refill_applied ? '（読み戻し後）' : ''}</span>
+                <span>
+                    現在 {presented.toLocaleString()}文字{status.refill_applied ? '（読み戻し後）' : ''}
+                    {typeof rowsField === 'number' && perceptionChars != null && perceptionChars > 0
+                        ? `（うち会話 ${rowsField.toLocaleString()}・部屋の様子 ${perceptionChars.toLocaleString()}）`
+                        : ''}
+                </span>
                 <span>
                     残す量 {target != null ? `${target.toLocaleString()}文字` : '—'} ／
                     上限 {high != null ? `${high.toLocaleString()}文字` : 'なし'}
                 </span>
             </div>
+            {status.perception_over_budget && (
+                <div className={styles.contextStatRow}>
+                    <span>
+                        部屋の様子だけで上限を超えています。会話は残す量以下なので、整理しても畳めるものはありません。
+                    </span>
+                </div>
+            )}
         </>
     );
 }
