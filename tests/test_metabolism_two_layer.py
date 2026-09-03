@@ -116,14 +116,22 @@ class FakeExecutor:
     """
 
     calls: list = []
+    chunk_counts: list = []
     raise_error: bool = False
     report_cancelled: bool = False
 
     @classmethod
     def execute_plan(cls, plan, client, conn, **kwargs):
         cls.calls.append(sum(len(c.messages) for c in plan.chunks))
+        cls.chunk_counts.append(len(plan.chunks))
         if cls.raise_error:
             raise RuntimeError("llm down")
+        # 実物と同じくチャンクごとに進捗を報告する (台帳の心拍はここに乗る)
+        progress = kwargs.get("progress_callback")
+        if progress:
+            total = sum(len(c.messages) for c in plan.chunks)
+            for i in range(len(plan.chunks)):
+                progress(i + 1, total)
         from sai_memory.arasuji.executor import ExecutionResult
         return ExecutionResult(cancelled=cls.report_cancelled)
 
@@ -164,6 +172,7 @@ class ChronicleClaimTest(unittest.TestCase):
         self.session_factory, self._engine = _make_session_factory()
         self.ledger = ExecutionLedger(self.session_factory)
         FakeExecutor.calls = []
+        FakeExecutor.chunk_counts = []
         FakeExecutor.raise_error = False
         FakeExecutor.report_cancelled = False
 
@@ -247,6 +256,100 @@ class ChronicleClaimTest(unittest.TestCase):
         # 完了後の同じ提示コンテキスト: completed 行がブロック → deferred (二重編纂なし)
         self.assertEqual(self._generate(lifecycle), "deferred")
         self.assertEqual(len(FakeExecutor.calls), 2)
+
+    def test_progress_heartbeats_the_ledger_row(self):
+        """進捗を画面へ流す場所が台帳の心拍 (touch_running) にもなる
+        (2026-09-03)。1 時間を超える一括編纂が生きたまま unknown へ落ちない。"""
+        lifecycle = self._make_lifecycle()
+        real_touch = self.ledger.touch_running
+        beats = []
+
+        def _recording_touch(execution_id):
+            touched = real_touch(execution_id)
+            beats.append((execution_id, touched))
+            return touched
+
+        with patch.object(self.ledger, "touch_running", side_effect=_recording_touch):
+            self.assertEqual(self._generate(lifecycle), "ok")
+        # 本編開始 (compile start) で 1 回 + チャンクごとに 1 回は必ず打つ
+        self.assertEqual(len(FakeExecutor.chunk_counts), 1)
+        chunks = FakeExecutor.chunk_counts[0]
+        self.assertGreaterEqual(chunks, 1)
+        self.assertGreaterEqual(len(beats), chunks + 1, beats)
+        # 心拍は running 行に当たっている (False ばかりなら宛先を間違えている)
+        self.assertTrue(all(touched for _eid, touched in beats), beats)
+        execution_ids = {eid for eid, _touched in beats}
+        self.assertEqual(len(execution_ids), 1)
+        (execution_id,) = execution_ids
+        self.assertEqual(
+            self.ledger.get_execution(execution_id)["status"], "completed",
+        )
+
+    def test_unknown_row_for_the_same_key_is_reconciled_not_blocking(self):
+        """unknown 行 (期限監視に落とされた前回の走行) は次の claim を止めない
+        (2026-09-03)。metabolism.run は冪等なので照合済みとして閉じ、キーを
+        退避して新しい走行を通す — 56,000 通インポートで永久 window_claimed に
+        なった罠の再現。"""
+        from saiverse.execution_ledger import (
+            STATUS_COMPLETED, STATUS_UNKNOWN,
+        )
+
+        key = f"{PERSONA_ID}:{self._message_ids()[-1]}"
+        stale_id, created = self.ledger.begin_execution(
+            "metabolism.run", idempotency_key=key, persona_id=PERSONA_ID,
+        )
+        self.assertTrue(created)
+        self.ledger.mark_running(stale_id)
+        self.ledger.mark_unknown(stale_id, "recovered: running exceeded 3600s deadline")
+        self.assertEqual(self.ledger.get_execution(stale_id)["status"], STATUS_UNKNOWN)
+
+        lifecycle = self._make_lifecycle()
+        self.assertEqual(self._generate(lifecycle), "ok")
+        self.assertEqual(len(FakeExecutor.calls), 1)
+
+        stale = self.ledger.get_execution(stale_id)
+        self.assertEqual(stale["status"], STATUS_COMPLETED)
+        self.assertEqual(stale["idempotency_key"], f"{key}#unknown-{stale_id[:8]}")
+        self.assertIn("reconciled", stale["result"])
+        self.assertEqual(self.ledger.list_unknown(), [])
+
+        fresh = self.ledger.find_execution("metabolism.run", key)
+        self.assertIsNotNone(fresh)
+        self.assertNotEqual(fresh["execution_id"], stale_id)
+        self.assertEqual(fresh["status"], STATUS_COMPLETED)
+
+        # 新しい行が completed で塞いだ後は従来どおり deferred (二重編纂なし)
+        self.assertEqual(self._generate(lifecycle), "deferred")
+        self.assertEqual(len(FakeExecutor.calls), 1)
+
+    def test_reconcile_failure_defers_instead_of_running_untracked(self):
+        """unknown の照合に失敗したら "deferred" で見送る — 追跡外 (claim なし)
+        で走らせない (レビュー F1)。行は unknown のまま、鍵も元のまま。"""
+        from saiverse.execution_ledger import (
+            STATUS_UNKNOWN, ExecutionLedgerError,
+        )
+
+        key = f"{PERSONA_ID}:{self._message_ids()[-1]}"
+        stale_id, _created = self.ledger.begin_execution(
+            "metabolism.run", idempotency_key=key, persona_id=PERSONA_ID,
+        )
+        self.ledger.mark_running(stale_id)
+        self.ledger.mark_unknown(stale_id, "recovered: deadline")
+
+        lifecycle = self._make_lifecycle()
+        with patch.object(
+            self.ledger, "reconcile_unknown",
+            side_effect=ExecutionLedgerError("undelivered outbox"),
+        ):
+            self.assertEqual(self._generate(lifecycle), "deferred")
+        self.assertEqual(FakeExecutor.calls, [])
+
+        stale = self.ledger.get_execution(stale_id)
+        self.assertEqual(stale["status"], STATUS_UNKNOWN)
+        self.assertEqual(stale["idempotency_key"], key)
+        self.assertEqual(
+            [u["execution_id"] for u in self.ledger.list_unknown()], [stale_id],
+        )
 
     def test_degrades_without_ledger(self):
         """⑦ 台帳が無い環境では claim なしで従来どおり実行される。"""

@@ -16,7 +16,8 @@ import gc
 import sys
 import tempfile
 import unittest
-from datetime import datetime
+import unittest.mock
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from sqlalchemy import create_engine, inspect
@@ -721,6 +722,204 @@ class RecoveryTests(ExecutionLedgerTestBase):
         self.assertEqual(recovered, [other_id])
         self.assertEqual(self._status(slot_id), XL.STATUS_RUNNING)
         self.assertEqual(self._status(other_id), XL.STATUS_UNKNOWN)
+
+
+class HeartbeatTests(ExecutionLedgerTestBase):
+    """touch_running (2026-09-03): 走行中の心拍が期限監視から実行を守る。"""
+
+    def _updated_at(self, execution_id):
+        return self.ledger.get_execution(execution_id)["updated_at"]
+
+    def test_touch_running_advances_updated_at(self):
+        clock.enable_virtual(datetime(2026, 9, 3, 9, 0, 0))
+        execution_id = self._begin_running("metabolism.run", persona_id="p1")
+        before = self._updated_at(execution_id)
+
+        clock.advance_to(datetime(2026, 9, 3, 9, 30, 0))
+        self.assertTrue(self.ledger.touch_running(execution_id))
+        self.assertEqual(self._updated_at(execution_id), before + 1800)
+        self.assertEqual(self._status(execution_id), XL.STATUS_RUNNING)
+
+    def test_touch_ignores_non_running_rows(self):
+        clock.enable_virtual(datetime(2026, 9, 3, 9, 0, 0))
+        prepared_id, _ = self.ledger.begin_execution("metabolism.run")
+        completed_id = self._begin_running("metabolism.run", persona_id="p1")
+        self.ledger.mark_applied(completed_id)
+        self.ledger.mark_completed(completed_id)
+        prepared_before = self._updated_at(prepared_id)
+        completed_before = self._updated_at(completed_id)
+
+        clock.advance_to(datetime(2026, 9, 3, 10, 0, 0))
+        self.assertFalse(self.ledger.touch_running(prepared_id))
+        self.assertFalse(self.ledger.touch_running(completed_id))
+        self.assertFalse(self.ledger.touch_running("no-such-execution"))
+        self.assertEqual(self._updated_at(prepared_id), prepared_before)
+        self.assertEqual(self._updated_at(completed_id), completed_before)
+        self.assertEqual(self._status(prepared_id), XL.STATUS_PREPARED)
+        self.assertEqual(self._status(completed_id), XL.STATUS_COMPLETED)
+
+    def test_heartbeat_keeps_long_run_out_of_the_stale_sweep(self):
+        # 二つとも 9:00 開始。片方だけ 30 分ごとに心拍を打つ。
+        clock.enable_virtual(datetime(2026, 9, 3, 9, 0, 0))
+        alive_id = self._begin_running("metabolism.run", persona_id="p1")
+        silent_id = self._begin_running("metabolism.run", persona_id="p2")
+
+        for minute in (30, 60, 90):
+            clock.advance_to(datetime(2026, 9, 3, 9, 0, 0) + timedelta(minutes=minute))
+            self.assertTrue(self.ledger.touch_running(alive_id))
+
+        # 10:40: 開始から 100 分。1 時間期限で無言の方だけ unknown へ。
+        clock.advance_to(datetime(2026, 9, 3, 10, 40, 0))
+        recovered = self.ledger.recover_stale_running(max_age_seconds=3600)
+        self.assertEqual(recovered, [silent_id])
+        self.assertEqual(self._status(alive_id), XL.STATUS_RUNNING)
+        self.assertEqual(self._status(silent_id), XL.STATUS_UNKNOWN)
+
+
+class ReconcileUnknownTests(ExecutionLedgerTestBase):
+    """reconcile_unknown (2026-09-03): kind 側が照合を済ませた unknown を閉じ、
+    キーを退避して同じキーの次の claim を通す。"""
+
+    def _make_unknown(self, key="p1:msg-99"):
+        execution_id = self._begin_running(
+            "metabolism.run", persona_id="p1", key=key,
+        )
+        self.ledger.mark_unknown(execution_id, "recovered: deadline")
+        return execution_id
+
+    def test_closes_row_and_retires_key(self):
+        execution_id = self._make_unknown()
+        self.assertTrue(self.ledger.reconcile_unknown(
+            execution_id, result={"reconciled": "test"},
+        ))
+        row = self.ledger.get_execution(execution_id)
+        self.assertEqual(row["status"], XL.STATUS_COMPLETED)
+        self.assertEqual(row["result"]["reconciled"], "test")
+        self.assertIn("reconciled_at", row["result"])  # 台帳が刻む
+        self.assertEqual(
+            row["idempotency_key"], f"p1:msg-99#unknown-{execution_id[:8]}",
+        )
+        self.assertEqual(self.ledger.list_unknown(), [])
+
+        # 元のキーは空いたので、次の claim は新しい prepared 行を作る
+        new_id, runnable, existing = self.ledger.claim_execution(
+            "metabolism.run", idempotency_key="p1:msg-99", persona_id="p1",
+        )
+        self.assertTrue(runnable)
+        self.assertIsNone(existing)
+        self.assertNotEqual(new_id, execution_id)
+
+    def test_returns_false_and_leaves_non_unknown_rows_alone(self):
+        running_id = self._begin_running("metabolism.run", persona_id="p1", key="k1")
+        self.assertFalse(self.ledger.reconcile_unknown(running_id))
+        row = self.ledger.get_execution(running_id)
+        self.assertEqual(row["status"], XL.STATUS_RUNNING)
+        self.assertEqual(row["idempotency_key"], "k1")
+
+    def test_unknown_id_raises(self):
+        with self.assertRaises(XL.ExecutionNotFoundError):
+            self.ledger.reconcile_unknown("no-such-execution")
+
+    def test_reconciled_at_comes_from_the_ledger_clock(self):
+        # 照合時刻は呼び出し元の壁時計ではなく台帳の仮想クロック。呼び出し元の
+        # dict は変更しない。
+        clock.enable_virtual(datetime(2026, 9, 3, 12, 0, 0))
+        execution_id = self._make_unknown()
+        caller_result = {"reconciled": "test"}
+        self.assertTrue(self.ledger.reconcile_unknown(execution_id, result=caller_result))
+        row = self.ledger.get_execution(execution_id)
+        self.assertEqual(
+            row["result"]["reconciled_at"],
+            int(datetime(2026, 9, 3, 12, 0, 0).timestamp()),
+        )
+        self.assertEqual(caller_result, {"reconciled": "test"})
+
+    def test_refuses_when_undelivered_outbox_remains(self):
+        # 合法遷移では unknown 行に outbox は付かないが、関所は mark_completed と
+        # 同じ形で守る (残骸行の直接混入を模す)。
+        execution_id = self._make_unknown(key="p1:msg-77")
+        db = self.SessionLocal()
+        try:
+            db.add(ExecutionOutboxItem(
+                EXECUTION_ID=execution_id,
+                TARGET="saimemory.append",
+                PERSONA_ID="p1",
+                PAYLOAD_JSON="{}",
+                STATUS=XL.OUTBOX_PENDING,
+                ATTEMPTS=0,
+                CREATED_AT=0,
+            ))
+            db.commit()
+        finally:
+            db.close()
+
+        with self.assertRaises(XL.ExecutionLedgerError):
+            self.ledger.reconcile_unknown(execution_id, result={"reconciled": "x"})
+        row = self.ledger.get_execution(execution_id)
+        self.assertEqual(row["status"], XL.STATUS_UNKNOWN)
+        self.assertEqual(row["idempotency_key"], "p1:msg-77")
+        self.assertEqual(
+            [u["execution_id"] for u in self.ledger.list_unknown()], [execution_id],
+        )
+
+    def test_unknown_row_flipped_mid_run_still_converges(self):
+        # 回復 tick が生きた走行を unknown に落とした後で、その走行が終わる経路:
+        # unknown → applied → completed は合法で、行は completed で閉じる。
+        execution_id = self._begin_running("metabolism.run", persona_id="p1", key="k9")
+        self.ledger.mark_unknown(execution_id, "recovered: deadline")
+        self.ledger.mark_applied(execution_id, result={"chunks": 3})
+        self.ledger.mark_completed(execution_id)
+        row = self.ledger.get_execution(execution_id)
+        self.assertEqual(row["status"], XL.STATUS_COMPLETED)
+        self.assertEqual(row["result"], {"chunks": 3})
+        self.assertEqual(self.ledger.list_unknown(), [])
+
+
+class StaleSweepRaceTests(ExecutionLedgerTestBase):
+    """recover_stale_running (2026-09-03): 書き換えは「いまも running」を条件に
+    した UPDATE で、読んだ後に終端へ進んだ行を上書きしない。"""
+
+    def test_row_completed_between_read_and_write_is_not_flipped(self):
+        clock.enable_virtual(datetime(2026, 9, 3, 9, 0, 0))
+        finishing_id = self._begin_running("metabolism.run", persona_id="p1", key="k1")
+        silent_id = self._begin_running("metabolism.run", persona_id="p2", key="k2")
+        clock.advance_to(datetime(2026, 9, 3, 11, 0, 0))
+
+        real_select = XL.ExecutionLedger._select_stale_running_ids
+        ledger = self.ledger
+
+        def _select_then_finish(self_, db, **kwargs):
+            ids = real_select(self_, db, **kwargs)
+            # 候補を読んだ直後、別 session がその走行を終える (WAL の隙間)
+            ledger.mark_applied(finishing_id, result={"done": True})
+            ledger.mark_completed(finishing_id)
+            return ids
+
+        with unittest.mock.patch.object(
+            XL.ExecutionLedger, "_select_stale_running_ids", _select_then_finish,
+        ):
+            recovered = self.ledger.recover_stale_running(max_age_seconds=3600)
+
+        self.assertEqual(recovered, [silent_id])
+        finishing = self.ledger.get_execution(finishing_id)
+        self.assertEqual(finishing["status"], XL.STATUS_COMPLETED)
+        self.assertEqual(finishing["result"], {"done": True})
+        self.assertEqual(finishing["idempotency_key"], "k1")
+        self.assertEqual(self._status(silent_id), XL.STATUS_UNKNOWN)
+
+    def test_old_terminal_rows_are_untouched(self):
+        clock.enable_virtual(datetime(2026, 9, 3, 9, 0, 0))
+        done_id = self._begin_running("metabolism.run", persona_id="p1")
+        self.ledger.mark_applied(done_id)
+        self.ledger.mark_completed(done_id)
+        failed_id = self._begin_running("metabolism.run", persona_id="p2")
+        self.ledger.mark_failed(failed_id, "rejected")
+        clock.advance_to(datetime(2026, 9, 3, 12, 0, 0))
+
+        self.assertEqual(self.ledger.recover_stale_running(max_age_seconds=60), [])
+        self.assertEqual(self.ledger.recover_stale_running(all_running=True), [])
+        self.assertEqual(self._status(done_id), XL.STATUS_COMPLETED)
+        self.assertEqual(self._status(failed_id), XL.STATUS_FAILED)
 
 
 class ListRunningTests(ExecutionLedgerTestBase):
