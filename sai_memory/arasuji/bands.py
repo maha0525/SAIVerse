@@ -887,6 +887,7 @@ def run_band_overflow(
     extraction_failures: Optional[List[str]] = None,
     db_lock: Optional[Any] = None,
     extraction_failures_unrecorded: Optional[List[str]] = None,
+    progress_callback: Optional[Callable[[int, int], None]] = None,
 ) -> int:
     """レベル別の並びを検査し、予算超過の畳みを実行する。
 
@@ -910,6 +911,10 @@ def run_band_overflow(
             ここへ積む (戻り値の契約を変えずに失敗を呼び出し元へ返す)。
         db_lock: SAIMemoryAdapter の ``_db_lock``。抽出失敗の付箋を書くときに
             使う (ロック外の commit は他所の開いた tx を途中で確定させる)。
+        progress_callback: 畳みが 1 件確定するごとに ``(done, total)`` で呼ぶ
+            (total = この呼び出しで畳む上限)。呼び出し元が画面への進捗と
+            実行台帳の心拍に使う — 1 畳み = LLM 1 コールで、無言のまま長く
+            走ると台帳の期限監視に「観測途絶」と誤認される。
 
     Returns:
         作った親ノード数。
@@ -947,4 +952,6 @@ def run_band_overflow(
         if parent is None:
             break
         created += 1
+        if progress_callback:
+            progress_callback(created, limit)
     return created

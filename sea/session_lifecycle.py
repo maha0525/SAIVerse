@@ -4191,19 +4191,74 @@ class SessionLifecycle:
         # 収束させる。台帳が無い環境 (旧テスト / 単体実行) は claim なしで従来
         # どおり実行する (degrade)。claim 自体の失敗も degrade (編纂を止めない —
         # arasuji の source_ids スキップが事後冪等の安全網として残る)。
+        #
+        # metabolism.run の期限と unknown の規則 (docs/intent/execution_ledger.md
+        # 「metabolism.run の期限と unknown の規則 (2026-09-03)」):
+        # - 心拍: 走行中は UI へ進捗を流すたびに ledger.touch_running を呼ぶ
+        #   (下の _heartbeat)。回復 tick の 1 時間期限は UPDATED_AT で測るので、
+        #   心拍が無いと 1 時間を超える一括編纂 (数万通のインポート) が生きた
+        #   まま unknown に落とされ、終了時の mark_failed が不正遷移で弾かれて
+        #   unknown のまま残る。
+        # - unknown の照合: この kind の成果物は arasuji テーブルで観測でき、
+        #   確定済みチャンクは source_ids で冪等スキップされる (再実行しても
+        #   LLM は再発火しない)。だから claim が unknown に当たったら、その行を
+        #   照合済み (completed、キーは #unknown- 付きで退避) として閉じ、新しい
+        #   claim で走る。閉じないと同じ鍵 (チャンクは古い順なので最新の未処理
+        #   ID は変わらない) が永久に window_claimed になる。
         ledger = self._get_ledger()
         execution_id: Optional[str] = None
         if ledger is not None and _window_end_id is not None:
             try:
+                from saiverse.execution_ledger import STATUS_UNKNOWN
+
+                claim_key = f"{getattr(persona, 'persona_id', None)}:{_window_end_id}"
                 # claim_execution: failed 行 (前回の失敗 / キャンセル) はキーを
                 # 退避して新規 prepared を作る — キャンセル直後の同提示コンテキスト再実行が
                 # 永久に deferred にならない (Codex W4 二巡 #6)。running /
-                # applied / completed / unknown はブロック。
+                # applied / completed はブロック。unknown は上の規則で一度だけ
+                # 照合して閉じ、再 claim する。
                 execution_id, runnable, existing_status = ledger.claim_execution(
                     kind="metabolism.run",
-                    idempotency_key=f"{getattr(persona, 'persona_id', None)}:{_window_end_id}",
+                    idempotency_key=claim_key,
                     persona_id=getattr(persona, "persona_id", None),
                 )
+                if not runnable and existing_status == STATUS_UNKNOWN:
+                    LOGGER.warning(
+                        "[metabolism] reconciling unknown execution %s for key %s: "
+                        "metabolism.run is idempotent (committed chunks are skipped "
+                        "by source_ids), treating the lost run as applied and "
+                        "starting a new one",
+                        execution_id, claim_key,
+                    )
+                    # 照合の失敗は degrade しない。ここで外側の except に落ちると
+                    # claim なし (追跡外) で走り、台帳上の unknown 行と追跡外の
+                    # 実走行が同じ鍵で並ぶ (追跡された別の走行と競合しうる)。
+                    # 照合できないなら見送る — unknown は次の claim でも同じ
+                    # 規則で再び照合を試みる (照合時刻は台帳が刻む、F3)。
+                    try:
+                        ledger.reconcile_unknown(
+                            execution_id,
+                            result={
+                                "reconciled": (
+                                    "metabolism.run superseded; chunks idempotent "
+                                    "by source_ids"
+                                ),
+                            },
+                        )
+                        execution_id, runnable, existing_status = (
+                            ledger.claim_execution(
+                                kind="metabolism.run",
+                                idempotency_key=claim_key,
+                                persona_id=getattr(persona, "persona_id", None),
+                            )
+                        )
+                    except Exception:
+                        LOGGER.warning(
+                            "[metabolism] unknown reconciliation failed for key %s; "
+                            "deferring (no untracked run)",
+                            claim_key, exc_info=True,
+                        )
+                        return "deferred"
                 if not runnable:
                     LOGGER.info(
                         "[metabolism] Chronicle generation skipped: window already "
@@ -4229,6 +4284,24 @@ class SessionLifecycle:
                 )
                 execution_id = None
 
+        # 台帳の心拍。UI へ進捗を流す場所すべてから呼ぶ (チャンク / 吸収 /
+        # 束ね / 本編開始)。台帳が壊れていても本体は止めず、警告は一度だけ。
+        _heartbeat_failed = [False]
+
+        def _heartbeat() -> None:
+            if ledger is None or not execution_id:
+                return
+            try:
+                ledger.touch_running(execution_id)
+            except Exception:
+                if not _heartbeat_failed[0]:
+                    _heartbeat_failed[0] = True
+                    LOGGER.warning(
+                        "[metabolism] ledger heartbeat failed (execution=%s); "
+                        "further failures are not logged",
+                        execution_id, exc_info=True,
+                    )
+
         # 「Chronicleを生成しています (0/N)」はここでは出さない。前段の吸収
         # (run_absorption) が先に走る回があり、そちらは run 一件ごとに LLM を
         # 呼ぶので実機では数分〜数十分かかる。開始メッセージを先に出すと、その
@@ -4236,6 +4309,7 @@ class SessionLifecycle:
         # 実際は止まっておらず、前段だけで未被覆 410→258 まで進んでいた)。
         # 本編 (execute_plan) の直前で出す。
         def _emit_compile_start() -> None:
+            _heartbeat()
             if event_callback:
                 event_callback({
                     "type": "metabolism",
@@ -4245,11 +4319,23 @@ class SessionLifecycle:
 
         # Build progress callback for streaming status to frontend
         def progress_fn(processed, total):
+            _heartbeat()
             if event_callback:
                 event_callback({
                     "type": "metabolism",
                     "status": "running",
                     "content": f"Chronicleを生成しています ({processed}/{total})...",
+                })
+
+        # 束ね (run_band_overflow) の畳み 1 件ごと — LLM 1 コールずつ進むので、
+        # ここも画面と台帳に同じ信号を出す。
+        def band_progress_fn(done, total):
+            _heartbeat()
+            if event_callback:
+                event_callback({
+                    "type": "metabolism",
+                    "status": "running",
+                    "content": f"上位のあらすじを束ねています ({done}/{total})...",
                 })
 
         # Build cancellation check from cancellation token
@@ -4328,6 +4414,7 @@ class SessionLifecycle:
             # 前段は本編より長くなることがあるので、フェーズと進行を画面へ流す
             # (2026-09-01)。ここが無言だと「Chronicleを生成しています (0/N)」で
             # 凍って見え、ユーザーが止まったと判断して中止してしまう。
+            _heartbeat()
             if event_callback:
                 event_callback({
                     "type": "metabolism",
@@ -4339,6 +4426,7 @@ class SessionLifecycle:
                 })
 
             def absorption_progress_fn(phase, done, total):
+                _heartbeat()
                 if not event_callback:
                     return
                 if phase == "absorb":
@@ -4464,6 +4552,7 @@ class SessionLifecycle:
                     extraction_failures_unrecorded=(
                         exec_result.extraction_failures_unrecorded
                     ),
+                    progress_callback=band_progress_fn,
                 )
             except Exception:
                 LOGGER.exception("[bands] consolidation failed; continuing")

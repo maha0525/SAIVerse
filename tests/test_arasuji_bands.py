@@ -345,6 +345,36 @@ class TestApprovedCallCap(BandTestBase):
         self.assertEqual(plan_band_overflow(self.conn), 1)
 
 
+class TestProgressCallback(BandTestBase):
+    """progress_callback (2026-09-03): 畳み 1 件ごとに (done, total) で呼ぶ。
+    呼び出し元が画面の進捗と実行台帳の心拍に使う。"""
+
+    def test_called_once_per_fold_with_done_and_total(self):
+        # レベル1・レベル2 がそれぞれ超過 → 2 畳み (上限 = 既定 3)。
+        for i in range(9):
+            _entry(self.conn, start=1000 + i * 100, coverage=10_000, level=1)
+        for i in range(9):
+            _entry(self.conn, start=100_000 + i * 100, coverage=100_000, level=2,
+                   origin="batch")
+        seen = []
+        created = run_band_overflow(
+            self.conn, _Client(), max_folds=3,
+            progress_callback=lambda done, total: seen.append((done, total)),
+        )
+        self.assertEqual(created, 2)
+        self.assertEqual(seen, [(1, 3), (2, 3)])
+
+    def test_not_called_when_nothing_folds(self):
+        for i in range(8):
+            _entry(self.conn, start=1000 + i * 100, coverage=10_000)
+        seen = []
+        self.assertEqual(run_band_overflow(
+            self.conn, _Client(),
+            progress_callback=lambda done, total: seen.append((done, total)),
+        ), 0)
+        self.assertEqual(seen, [])
+
+
 class TestAtomicity(BandTestBase):
     """原子性と並走防御。"""
 
