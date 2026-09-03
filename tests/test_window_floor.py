@@ -1513,3 +1513,43 @@ def test_remove_folds_referencing_entry_leaves_unreadable_rows_untouched(session
     ])
     assert remove_folds_referencing_entry(lc.manager, PERSONA_ID, "e1") == 1
     assert not lc.load_folded_ranges(PERSONA_ID, MODEL)
+
+
+def test_emergency_precompaction_persists_the_advance_only_when_it_folds(session_factory):
+    """f288f003 の Codex レビュー残 #1: 非常畳みは測る段で起点を書かない
+    (persist_advance=False)。上限以下で何もしない回は冷えた行の前進も書かれず、
+    実際に畳む回だけ前進が確定する。"""
+    lc = _bare_lifecycle(session_factory)
+    lc.upsert_anchor_entry(PERSONA_ID, MODEL, {
+        "anchor_id": "m0",
+        "updated_at": (datetime.now() - timedelta(days=3)).isoformat(),
+        "ttl_seconds": 300,  # 冷えた行 — 最前線 m3 の手前
+    })
+    persona = SimpleNamespace(
+        persona_id=PERSONA_ID, model=MODEL,
+        sai_memory=SimpleNamespace(conn=object(), is_ready=lambda: True),
+        history_manager=_persona(BEFORE).history_manager,
+    )
+    wm = Watermarks(low=1000, target=5000, high=8000)
+    with patch.object(lc, "get_metabolism_watermarks", return_value=wm), \
+            patch("sai_memory.arasuji.storage.get_frontier_anchor_id", return_value="m3"), \
+            patch("sai_memory.arasuji.storage.compare_message_positions", return_value=1), \
+            patch.object(lc, "_cap_advance_at_pan_marker", return_value="m3"), \
+            patch.object(lc, "perception_blocks_for", return_value=[]), \
+            patch.object(lc, "run_metabolism", return_value="ok") as run:
+        # 上限以下 → 何もしない回。前進は書かれない
+        with patch.object(lc, "get_presented_window",
+                          return_value=_window("m3", [_msg("m3", 200, 1000)])):
+            assert lc.maybe_run_emergency_precompaction(
+                persona, "room", None, model_key=MODEL,
+            ) == "skip"
+        assert lc.load_anchor_entry(PERSONA_ID, MODEL)["anchor_id"] == "m0"
+        run.assert_not_called()
+        # 上限超え・行も残す量超え → 畳む回。前進が確定してから本体へ
+        with patch.object(lc, "get_presented_window",
+                          return_value=_window("m3", [_msg("m3", 200, 9000)])):
+            assert lc.maybe_run_emergency_precompaction(
+                persona, "room", None, model_key=MODEL,
+            ) == "ok"
+        assert lc.load_anchor_entry(PERSONA_ID, MODEL)["anchor_id"] == "m3"
+        run.assert_called_once()
