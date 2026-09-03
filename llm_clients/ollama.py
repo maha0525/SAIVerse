@@ -11,6 +11,7 @@ from typing import Any, Dict, Iterator, List, Optional
 import requests
 
 from .base import LLMClient
+from .exceptions import EmptyResponseError
 
 
 # Retry configuration
@@ -375,7 +376,7 @@ class OllamaClient(LLMClient):
                         "[ollama] Empty text response without tool call. "
                         "Model returned empty content."
                     )
-                    raise RuntimeError("Ollama returned empty response without tool call")
+                    raise EmptyResponseError("Ollama returned empty response without tool call")
                 return {"type": "text", "content": content}
 
         # Non-tool mode: return str
@@ -467,7 +468,10 @@ class OllamaClient(LLMClient):
                         list(data.keys()),
                         preview if preview is not None else "(None)",
                     )
-                    raise RuntimeError("Ollama returned empty response")
+                    # EmptyResponseError (error_code=empty_response) — 呼び出し側の
+                    # 空応答再試行 (generator.generate_text_with_empty_retry) が
+                    # 他のクライアントと同じように効くようにする。
+                    raise EmptyResponseError("Ollama returned empty response")
                 logging.debug("Raw ollama v1 response: %s", content)
                 return content
             except Exception as e:
@@ -485,6 +489,10 @@ class OllamaClient(LLMClient):
 
         # Legacy fallback to /api/chat
         if not self.chat_url:
+            if isinstance(last_v1_error, EmptyResponseError):
+                # 空応答は RuntimeError に包み直さない — 種別 (empty_response) を
+                # 呼び出し側の再試行判定まで届ける。
+                raise last_v1_error
             raise RuntimeError(f"Ollama v1 endpoint failed and no fallback available: {_extract_ollama_error(last_v1_error)}")
 
         last_legacy_error: Optional[Exception] = None

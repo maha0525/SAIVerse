@@ -419,6 +419,477 @@ class ChronicleClaimTest(unittest.TestCase):
         if FakeExecutor.calls:
             self.assertEqual(FakeExecutor.calls[-1], 0)
 
+    # ------------------------------------------------------------------
+    # 束ねの挟み込み (2026-09-03): チャンク確定ごと + 最後に 1 回、走行全体で
+    # dry 件数 (band_plan_count) を超えない。
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _executor_with_chunks(n_chunks, *, raise_on_chunk=None, raise_with=None):
+        """after_chunk を n 回鳴らす実行器代替 (実物と同じ (done, total))。
+
+        ``raise_on_chunk`` (1 始まり) を指定すると、そのチャンクの LLM が落ちた
+        体で raise する — 手前のチャンクの after_chunk は鳴った後。投げる例外は
+        ``raise_with`` (既定 RuntimeError("llm down"))。
+        """
+        def _run(plan, client, conn, **kwargs):
+            hook = kwargs.get("after_chunk")
+            for i in range(n_chunks):
+                if raise_on_chunk is not None and i + 1 == raise_on_chunk:
+                    raise raise_with or RuntimeError("llm down")
+                if hook:
+                    hook(i + 1, n_chunks)
+            from sai_memory.arasuji.executor import ExecutionResult
+            return ExecutionResult()
+        return _run
+
+    def _generate_interleaved(self, *, band_plan_count, n_chunks=3,
+                              folds_per_call=1, band_failure=None,
+                              folds_unknown=False, with_ledger=False,
+                              cancellation_token=None, raise_on_chunk=None,
+                              raise_with=None, on_band_call=None,
+                              fail_band_calls=None, band_failure_calls=None,
+                              band_failure_unrecorded=None,
+                              raise_on_band_call=None,
+                              raise_band_after_attempt=False):
+        """run_band_overflow の呼び出し (max_folds) と画面の進捗文言を記録して走らせる。
+
+        ``on_band_call`` は束ねの呼び出しごとに (呼び出し番号 1 始まり) で
+        呼ばれる差し込み口 — 束ねの最中に中止が押された状況などを作る。
+        ``fail_band_calls`` (呼び出し番号の集合) に入る回は、実物の
+        run_band_overflow が LLM 失敗で 0 を返す形 — stats に attempts=1 /
+        created=0 を書き、進捗は鳴らさず、0 を返す — を模す。
+        ``band_failure`` は成功した回ごとに extraction_failures へ積む id
+        (``band_failure_calls`` で積む回を絞れる。既定は全回)。
+        ``band_failure_unrecorded`` は同じ回に extraction_failures と
+        extraction_failures_unrecorded の**両方**へ積む id (実物は付箋にも
+        残せなかった id を両方の器に入れる)。
+        ``raise_on_band_call`` の回は RuntimeError("db down") を投げる —
+        ``raise_band_after_attempt`` なら stats["attempts"]=1 を書いてから
+        (LLM に届いた後の失敗)、既定では stats に触れず (前検査での失敗)。
+        """
+        calls = []
+        events = []
+        failing = set(fail_band_calls or ())
+
+        def fake_band(conn, client, **kwargs):
+            calls.append(kwargs["max_folds"])
+            if on_band_call:
+                on_band_call(len(calls))
+            stats = kwargs.get("stats")
+            if raise_on_band_call is not None and len(calls) == raise_on_band_call:
+                if raise_band_after_attempt and stats is not None:
+                    stats["attempts"] = 1
+                    stats["created"] = 0
+                raise RuntimeError("db down")
+            if len(calls) in failing:
+                if stats is not None:
+                    stats["attempts"] = 1
+                    stats["created"] = 0
+                return 0
+            folded = min(folds_per_call, kwargs["max_folds"])
+            if stats is not None:
+                stats["attempts"] = folded
+                stats["created"] = folded
+            progress = kwargs.get("progress_callback")
+            for i in range(folded):
+                if progress:
+                    progress(i + 1, kwargs["max_folds"])
+            wants_failure = (
+                band_failure_calls is None or len(calls) in band_failure_calls
+            )
+            if wants_failure and kwargs.get("extraction_failures") is not None:
+                if band_failure:
+                    kwargs["extraction_failures"].append(band_failure)
+                if band_failure_unrecorded:
+                    kwargs["extraction_failures"].append(band_failure_unrecorded)
+                    kwargs["extraction_failures_unrecorded"].append(
+                        band_failure_unrecorded
+                    )
+            return folded
+
+        lifecycle = self._make_lifecycle(with_ledger=with_ledger)
+        self._last_lifecycle = lifecycle
+        patches = [
+            patch("saiverse.model_configs.find_model_config",
+                  return_value=("mock-model", {"provider": "mock", "context_length": 1000})),
+            patch("llm_clients.factory.get_llm_client", return_value=SimpleNamespace()),
+            patch("sai_memory.arasuji.executor.execute_plan",
+                  self._executor_with_chunks(
+                      n_chunks, raise_on_chunk=raise_on_chunk,
+                      raise_with=raise_with,
+                  )),
+            patch("sai_memory.arasuji.bands.backfill_coverage", lambda conn: 0),
+            patch("sai_memory.arasuji.bands.plan_band_overflow",
+                  lambda *a, **k: band_plan_count),
+            patch("sai_memory.arasuji.bands.run_band_overflow", fake_band),
+            patch("sai_memory.memory.entity_extractor.make_batch_callback",
+                  side_effect=RuntimeError("skip entity extraction")),
+        ]
+        if folds_unknown:
+            patches.append(patch.object(
+                lifecycle, "collect_folded_chronicle_entry_ids",
+                side_effect=RuntimeError("fold table unreadable"),
+            ))
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+        status = lifecycle.generate_chronicle(
+            self._persona(), force=True, event_callback=events.append,
+            cancellation_token=cancellation_token,
+        )
+        return status, calls, events
+
+    def test_consolidation_runs_after_each_chunk_and_once_at_the_end(self):
+        status, calls, events = self._generate_interleaved(band_plan_count=5)
+        self.assertEqual(status, "ok")
+        # 3 チャンク分 + 最後の 1 回。各呼び出しには残り予算だけを渡す。
+        self.assertEqual(calls, [5, 4, 3, 2])
+        # 画面の件数は走行全体の累計 / 承認済み総予算 (呼び出しごとに 1/N へ戻らない)。
+        band_msgs = [
+            e["content"] for e in events
+            if "上位のあらすじを束ねています" in e.get("content", "")
+        ]
+        self.assertEqual(
+            band_msgs,
+            [f"上位のあらすじを束ねています ({n}/5)..." for n in (1, 2, 3, 4)],
+        )
+
+    def test_total_folds_never_exceed_the_approved_budget(self):
+        status, calls, _ = self._generate_interleaved(
+            band_plan_count=2, n_chunks=3, folds_per_call=1,
+        )
+        self.assertEqual(status, "ok")
+        # 2 回で予算を使い切り、以後 (3 チャンク目・最後) は呼ばれない。
+        self.assertEqual(calls, [2, 1])
+
+    def test_zero_budget_never_calls_consolidation(self):
+        status, calls, _ = self._generate_interleaved(band_plan_count=0)
+        self.assertEqual(status, "ok")
+        self.assertEqual(calls, [])
+
+    def test_unknown_folds_never_call_consolidation(self):
+        # folded_entry_ids が None (提示中の圧縮区間が不明) の回は束ねを丸ごと見送る。
+        status, calls, _ = self._generate_interleaved(
+            band_plan_count=5, folds_unknown=True,
+        )
+        self.assertEqual(status, "ok")
+        self.assertEqual(calls, [])
+
+    def test_band_side_extraction_failures_reach_the_report(self):
+        """挟み込んだ束ねの抽出失敗も、従来どおり完了通知に載る。"""
+        status, calls, events = self._generate_interleaved(
+            band_plan_count=5, band_failure="band-entry",
+        )
+        self.assertEqual(status, "ok")
+        self.assertEqual(len(calls), 4)
+        done = [e for e in events if e.get("status") == "completed"
+                or "Chronicle生成完了" in e.get("content", "")]
+        self.assertTrue(done, f"completion event missing: {events}")
+        # 4 回の束ねがそれぞれ 1 件ずつ失敗を積んだ → 4 件として報告される。
+        self.assertIn("うち 4 件で知識の書き出しに失敗", done[-1]["content"])
+
+    def test_cancel_during_the_last_after_chunk_fold_ends_as_deferred(self):
+        """最後のチャンクが確定した後 (after_chunk の束ねの最中) に中止が押さ
+        れた走行は、executor の cancelled が立たなくても "deferred" で終わり、
+        台帳は failed (completed で封印しない)。"""
+        from sea.cancellation import CancellationToken
+        from saiverse.execution_ledger import STATUS_COMPLETED
+
+        token = CancellationToken()
+        n_chunks = 2
+
+        def cancel_in_last_fold(call_no):
+            # 束ねの呼び出しは after_chunk × n_chunks (+ 最後の 1 回)。
+            # 最後のチャンクの after_chunk (= n_chunks 回目) の最中に中止。
+            if call_no == n_chunks:
+                token.cancel(interrupted_by="user")
+
+        status, calls, _ = self._generate_interleaved(
+            band_plan_count=5, n_chunks=n_chunks, with_ledger=True,
+            cancellation_token=token, on_band_call=cancel_in_last_fold,
+        )
+        self.assertEqual(status, "deferred")
+        # 中止後の「最後の束ね」は走らない。
+        self.assertEqual(calls, [5, 4])
+        failed = self.ledger.list_failed("metabolism")
+        self.assertEqual(len(failed), 1)
+        self.assertEqual(failed[0]["error"], "cancelled by user")
+        self.assertNotEqual(
+            self.ledger.get_execution(failed[0]["execution_id"])["status"],
+            STATUS_COMPLETED,
+        )
+
+    def test_cancel_during_the_final_fold_ends_as_deferred(self):
+        """全チャンク確定後の「最後の束ね」の最中に押された中止も同じ終端。"""
+        from sea.cancellation import CancellationToken
+
+        token = CancellationToken()
+        n_chunks = 2
+
+        def cancel_in_final_fold(call_no):
+            if call_no == n_chunks + 1:
+                token.cancel(interrupted_by="user")
+
+        status, calls, _ = self._generate_interleaved(
+            band_plan_count=5, n_chunks=n_chunks, with_ledger=True,
+            cancellation_token=token, on_band_call=cancel_in_final_fold,
+        )
+        self.assertEqual(status, "deferred")
+        self.assertEqual(calls, [5, 4, 3])
+        failed = self.ledger.list_failed("metabolism")
+        self.assertEqual(len(failed), 1)
+        self.assertEqual(failed[0]["error"], "cancelled by user")
+
+    def test_band_failures_are_reported_when_a_later_chunk_aborts(self):
+        """チャンク 1 の後の束ねが抽出失敗を積み、チャンク 2 の LLM が落ちた
+        走行 — 正常終了の報告ブロックには届かないが、失敗は ERROR ログと
+        台帳の失敗理由に残る。"""
+        with self.assertLogs("sea.session_lifecycle", level="ERROR") as logs:
+            status, calls, _ = self._generate_interleaved(
+                band_plan_count=5, n_chunks=2, with_ledger=True,
+                raise_on_chunk=2, band_failure="band-entry",
+            )
+        self.assertEqual(status, "failed")
+        self.assertEqual(calls, [5])
+        self.assertTrue(any(
+            "付箋 (backlog) に記録済み" in m and "band" in m for m in logs.output
+        ), logs.output)
+        failed = self.ledger.list_failed("metabolism")
+        self.assertEqual(len(failed), 1)
+        self.assertIn("llm down", failed[0]["error"])
+        self.assertIn(
+            "band extraction failures: 1 recorded, 0 unrecorded",
+            failed[0]["error"],
+        )
+
+    def _cancel_in_last_after_chunk_fold(self, n_chunks, **kwargs):
+        """最後のチャンクの after_chunk の束ねの最中に中止を押して走らせる。"""
+        from sea.cancellation import CancellationToken
+
+        token = CancellationToken()
+
+        def cancel_in_last_fold(call_no):
+            if call_no == n_chunks:
+                token.cancel(interrupted_by="user")
+
+        return self._generate_interleaved(
+            band_plan_count=5, n_chunks=n_chunks, with_ledger=True,
+            cancellation_token=token, on_band_call=cancel_in_last_fold,
+            **kwargs,
+        )
+
+    def test_cancelled_run_reports_recorded_extraction_failures(self):
+        """チャンク 1 の後の束ねが抽出失敗 (付箋には記録済み) を積み、最後の
+        チャンクの after_chunk の束ねの最中に中止が押された走行 — 正常終了の
+        報告ブロックには届かないが、失敗は ERROR ログと台帳の失敗理由に残る。"""
+        with self.assertLogs("sea.session_lifecycle", level="ERROR") as logs:
+            status, calls, _ = self._cancel_in_last_after_chunk_fold(
+                2, band_failure="band-entry", band_failure_calls={1},
+            )
+        self.assertEqual(status, "deferred")
+        self.assertEqual(calls, [5, 4])
+        self.assertTrue(any(
+            "付箋 (backlog) に記録済み" in m and "entries" in m
+            for m in logs.output
+        ), logs.output)
+        self.assertFalse(any("付箋にも残せなかった" in m for m in logs.output),
+                         logs.output)
+        failed = self.ledger.list_failed("metabolism")
+        self.assertEqual(len(failed), 1)
+        self.assertEqual(
+            failed[0]["error"],
+            "cancelled by user (entries extraction failures: 1 recorded, 0 unrecorded)",
+        )
+
+    def test_cancelled_run_reports_unrecorded_extraction_failures(self):
+        """付箋にも残せなかった id (両方の器に入る) は unrecorded としてだけ
+        数え、recorded と二重に数えない。"""
+        with self.assertLogs("sea.session_lifecycle", level="ERROR") as logs:
+            status, calls, _ = self._cancel_in_last_after_chunk_fold(
+                2, band_failure="band-entry",
+                band_failure_unrecorded="band-entry-lost",
+                band_failure_calls={1},
+            )
+        self.assertEqual(status, "deferred")
+        self.assertEqual(calls, [5, 4])
+        self.assertTrue(any(
+            "付箋 (backlog) に記録済み" in m for m in logs.output
+        ), logs.output)
+        self.assertTrue(any(
+            "付箋にも残せなかった" in m for m in logs.output
+        ), logs.output)
+        failed = self.ledger.list_failed("metabolism")
+        self.assertEqual(len(failed), 1)
+        self.assertEqual(
+            failed[0]["error"],
+            "cancelled by user (entries extraction failures: 1 recorded, 1 unrecorded)",
+        )
+
+    # ------------------------------------------------------------------
+    # 予算は試行回数で消費する (Codex 指摘 2026-09-03 high): 失敗した畳みが
+    # 呼び出しのたびに同じ残り予算で再試行されない。
+    # ------------------------------------------------------------------
+
+    def test_failed_fold_attempts_consume_the_budget(self):
+        """毎回 LLM が落ちる (attempts=1 / created=0 / 戻り値 0) 束ねは、
+        after_chunk 5 回 + 最後の 1 回のうち予算 3 回までしか呼ばれない。
+        台帳の心拍は _consolidate のたび (6 回) に、成否に依らず打たれる。"""
+        real_touch = self.ledger.touch_running
+        beats = []
+
+        def _recording_touch(execution_id):
+            touched = real_touch(execution_id)
+            beats.append(touched)
+            return touched
+
+        with patch.object(self.ledger, "touch_running", side_effect=_recording_touch), \
+                self.assertLogs("sea.session_lifecycle", level="WARNING") as logs:
+            status, calls, events = self._generate_interleaved(
+                band_plan_count=3, n_chunks=5, with_ledger=True,
+                fail_band_calls=set(range(1, 100)),
+            )
+        self.assertEqual(status, "ok")
+        # 残り予算は試行ごとに 1 ずつ減り、3 回で尽きる (4 回目以降は呼ばれない)。
+        self.assertEqual(calls, [3, 2, 1])
+        self.assertTrue(any(
+            "fold attempt(s) failed in this call" in m
+            and "budget consumed anyway" in m for m in logs.output
+        ), logs.output)
+        # 心拍: 本編開始 1 回 + _consolidate 6 回 (after_chunk 5 + final 1) 以上。
+        # 失敗した畳みは進捗イベントを出さないので、ここが唯一の心拍。
+        self.assertGreaterEqual(len(beats), 1 + 6, beats)
+        self.assertTrue(all(beats), beats)
+        # 束ねは 1 件も確定していないので進捗文言は出ない。
+        self.assertEqual([
+            e["content"] for e in events
+            if "上位のあらすじを束ねています" in e.get("content", "")
+        ], [])
+
+    def test_band_progress_labels_stay_monotone_across_a_failed_call(self):
+        """成功 → 失敗 → 成功 → 成功 (最後) の並びで、画面の累計 (n/総予算)
+        が戻らず、失敗した回のぶん予算が飛ぶ (1/5, 3/5, 4/5)。"""
+        status, calls, events = self._generate_interleaved(
+            band_plan_count=5, n_chunks=3, fail_band_calls={2},
+        )
+        self.assertEqual(status, "ok")
+        # 2 回目 (失敗) も残り予算を 1 消費している。
+        self.assertEqual(calls, [5, 4, 3, 2])
+        band_msgs = [
+            e["content"] for e in events
+            if "上位のあらすじを束ねています" in e.get("content", "")
+        ]
+        self.assertEqual(
+            band_msgs,
+            [f"上位のあらすじを束ねています ({n}/5)..." for n in (1, 3, 4)],
+        )
+        shown = [int(m.split("(")[1].split("/")[0]) for m in band_msgs]
+        self.assertEqual(shown, sorted(shown))
+
+    # ------------------------------------------------------------------
+    # LLM に届く前 (前検査・並びの読み直し) で転んだ束ねは、原因が次のチャンク
+    # でも同じなので、この走行では以後の束ねを止める (ローカルレビュー
+    # 2026-09-03)。LLM に届いた後の失敗は予算を 1 消費して続行する。
+    # ------------------------------------------------------------------
+
+    def test_failure_before_any_llm_attempt_disables_consolidation_for_the_run(self):
+        with self.assertLogs("sea.session_lifecycle", level="WARNING") as logs:
+            status, calls, _ = self._generate_interleaved(
+                band_plan_count=5, n_chunks=4, with_ledger=True,
+                raise_on_band_call=1,
+            )
+        self.assertEqual(status, "ok")
+        # 1 回目 (attempts=0 のまま raise) で止まり、残りのチャンクと最後の
+        # 束ねは呼ばれない。
+        self.assertEqual(calls, [5])
+        self.assertTrue(any(
+            "consolidation disabled for the rest of this run" in m
+            for m in logs.output
+        ), logs.output)
+        # 編纂そのものは成功 — 台帳は completed で閉じる。
+        key = f"{PERSONA_ID}:{self._message_ids()[-1]}"
+        row = self.ledger.find_execution("metabolism.run", key)
+        self.assertIsNotNone(row)
+        self.assertEqual(row["status"], "completed")
+        self.assertEqual(self.ledger.list_failed("metabolism"), [])
+
+    def test_failure_after_an_llm_attempt_keeps_consolidation_enabled(self):
+        with self.assertLogs("sea.session_lifecycle", level="WARNING") as logs:
+            status, calls, _ = self._generate_interleaved(
+                band_plan_count=5, n_chunks=4, with_ledger=True,
+                raise_on_band_call=1, raise_band_after_attempt=True,
+            )
+        self.assertEqual(status, "ok")
+        # 1 回目は attempts=1 を書いてから raise → 予算を 1 消費して続行。
+        # 以後 3 チャンク + 最後の 1 回は残り予算で呼ばれる。
+        self.assertEqual(calls, [5, 4, 3, 2, 1])
+        self.assertFalse(any(
+            "consolidation disabled for the rest of this run" in m
+            for m in logs.output
+        ), logs.output)
+        self.assertTrue(any(
+            "fold attempt(s) failed in this call" in m for m in logs.output
+        ), logs.output)
+
+    # ------------------------------------------------------------------
+    # "failed" の実際の理由 (2026-09-03 まはー裁定): LLMError の error_code /
+    # user_message / batch_meta を pop_last_chronicle_failure で取り出せる。
+    # ------------------------------------------------------------------
+
+    def test_failed_run_exposes_the_llm_error_code_and_batch_meta(self):
+        from llm_clients.exceptions import EmptyResponseError
+
+        exc = EmptyResponseError(
+            "empty LLM response for chronicle_level1 chunk after 3 attempt(s)",
+        )
+        exc.user_message = "メッセージ 3 件のチャンク処理中: " + exc.user_message
+        exc.batch_meta = {"message_ids": ["m1"], "start_time": 1.0, "end_time": 2.0}
+
+        status, _calls, _events = self._generate_interleaved(
+            band_plan_count=0, n_chunks=2, raise_on_chunk=1, raise_with=exc,
+        )
+        self.assertEqual(status, "failed")
+        lifecycle = self._last_lifecycle
+        failure = lifecycle.pop_last_chronicle_failure(PERSONA_ID)
+        self.assertIsNotNone(failure)
+        self.assertEqual(failure["error_code"], "empty_response")
+        self.assertEqual(failure["error_meta"]["message_ids"], ["m1"])
+        self.assertIn("空の応答", failure["error"])
+        self.assertIn("after 3 attempt(s)", failure["error_detail"])
+        # 取り出したら消える (次の走行の "failed" に前回の理由が化けない)。
+        self.assertIsNone(lifecycle.pop_last_chronicle_failure(PERSONA_ID))
+
+    def test_successful_run_leaves_no_failure_behind(self):
+        status, _calls, _events = self._generate_interleaved(band_plan_count=1)
+        self.assertEqual(status, "ok")
+        self.assertIsNone(self._last_lifecycle.pop_last_chronicle_failure(PERSONA_ID))
+
+    def test_failures_are_kept_per_persona(self):
+        """SessionLifecycle は全ペルソナで 1 つ。A と B が続けて失敗しても、
+        各 pop は自分の理由だけを返し、A の pop は B の記録を崩さない。
+        B の走行開始 (reset) も A の理由を消さない。"""
+        from llm_clients.exceptions import EmptyResponseError, LLMTimeoutError
+
+        lifecycle = self._make_lifecycle(with_ledger=False)
+        exc_a = EmptyResponseError("a empty")
+        exc_b = LLMTimeoutError("b slow")
+        lifecycle._note_chronicle_failure("persona-a", exc_a)
+        # B の走行の頭 (reset) は A の理由に触れない。
+        lifecycle._reset_chronicle_failure("persona-b")
+        lifecycle._note_chronicle_failure("persona-b", exc_b)
+
+        failure_a = lifecycle.pop_last_chronicle_failure("persona-a")
+        self.assertIsNotNone(failure_a)
+        self.assertEqual(failure_a["error_code"], "empty_response")
+        # A を取り出しても B は残っている。
+        failure_b = lifecycle.pop_last_chronicle_failure("persona-b")
+        self.assertIsNotNone(failure_b)
+        self.assertEqual(failure_b["error_code"], "timeout")
+        self.assertEqual(failure_b["error_detail"], "b slow")
+        # 取り出したらどちらも空。
+        self.assertIsNone(lifecycle.pop_last_chronicle_failure("persona-a"))
+        self.assertIsNone(lifecycle.pop_last_chronicle_failure("persona-b"))
+
     def test_compile_groups_limit_compile_range(self):
         """⑧ 退場時圧縮 (chronicle_eviction.md §2): 編纂対象は「今回退場させる
         範囲そのもの」。退場しないメッセージは編纂に入らない。"""

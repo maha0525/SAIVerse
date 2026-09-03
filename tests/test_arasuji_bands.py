@@ -27,6 +27,7 @@ from sai_memory.arasuji.bands import (
     BAND_CHAR_KEEP,
     BAND_CHAR_LIMIT,
     EST_PARENT_CHARS,
+    _any_level_over_limit,
     _plan_folds,
     _RowItem,
     backfill_coverage,
@@ -140,6 +141,25 @@ class TestFiring(BandTestBase):
         self.assertEqual(meta["coverage_chars"], 50_000)
         # 残った並びは予算内。
         self.assertEqual(plan_band_overflow(self.conn), 0)
+
+    def test_empty_llm_response_is_retried_before_giving_up(self):
+        """束ねの LLM が空応答を 2 回返しても 3 回目の本文で親が確定する
+        (generator.generate_text_with_empty_retry、2026-09-03)。"""
+
+        class _EmptyTwiceClient(_Client):
+            def generate(inner, messages, tools):
+                inner.calls += 1
+                inner.prompts.append(messages[0]["content"])
+                return "" if inner.calls <= 2 else "三度目の統合まとめ。"
+
+        for i in range(9):
+            _entry(self.conn, start=1000 + i * 100, coverage=10_000)
+        client = _EmptyTwiceClient()
+        self.assertEqual(run_band_overflow(self.conn, client), 1)
+        self.assertEqual(client.calls, 3)
+        parents = _band_parents(self.conn)
+        self.assertEqual(len(parents), 1)
+        self.assertEqual(parents[0].content, "三度目の統合まとめ。")
 
     def test_coverage_does_not_affect_folding(self):
         """被覆がどれだけ極端に違っても判定に使われない (比率規則の廃止)。"""
@@ -374,6 +394,78 @@ class TestProgressCallback(BandTestBase):
         ), 0)
         self.assertEqual(seen, [])
 
+    def test_raising_callback_keeps_the_fold_count_and_continues(self):
+        """callback (画面へのイベント送出) が失敗しても、確定済みの畳みは
+        戻り値に数え、次の畳みへ進む。ここで例外が抜けると呼び出し元の累計
+        (承認済み予算の消化) がずれ、次の呼び出しに過大な max_folds が渡る。"""
+        for i in range(9):
+            _entry(self.conn, start=1000 + i * 100, coverage=10_000, level=1)
+        for i in range(9):
+            _entry(self.conn, start=100_000 + i * 100, coverage=100_000, level=2,
+                   origin="batch")
+        seen = []
+
+        def bad_progress(done, total):
+            seen.append((done, total))
+            raise RuntimeError("ui event emitter down")
+
+        client = _Client()
+        with self.assertLogs("sai_memory.arasuji.bands", level="WARNING") as logs:
+            created = run_band_overflow(
+                self.conn, client, max_folds=3, progress_callback=bad_progress,
+            )
+        # 2 畳みとも確定して数えられ、callback は畳みごとに呼ばれている。
+        self.assertEqual(created, 2)
+        self.assertEqual(client.calls, 2)
+        self.assertEqual(seen, [(1, 3), (2, 3)])
+        self.assertEqual(len(_band_parents(self.conn)), 2)
+        self.assertTrue(any("progress callback failed" in m for m in logs.output))
+
+
+class TestCheapPrecheck(BandTestBase):
+    """_any_level_over_limit (2026-09-03): チャンク確定ごとに呼ばれるように
+    なった run_band_overflow が、超過の無い回を 1 クエリで抜けるための門。
+    見落とし (False なのに畳みがある) が無いことが契約。"""
+
+    def test_under_limit_skips_the_full_scan(self):
+        from unittest.mock import patch
+        for i in range(8):
+            _entry(self.conn, start=1000 + i * 100, coverage=10_000)
+        with patch("sai_memory.arasuji.bands._load_rows",
+                   side_effect=AssertionError("full scan must not run")):
+            self.assertEqual(run_band_overflow(self.conn, _Client()), 0)
+
+    def test_over_limit_still_folds(self):
+        for i in range(9):
+            _entry(self.conn, start=1000 + i * 100, coverage=10_000)
+        self.assertTrue(_any_level_over_limit(self.conn))
+        self.assertEqual(run_band_overflow(self.conn, _Client()), 1)
+
+    def test_excluded_entries_do_not_count(self):
+        ids = [
+            _entry(self.conn, start=1000 + i * 100, coverage=10_000).id
+            for i in range(9)
+        ]
+        # 9 × 600 = 5,400 > 5,000 だが 1 件を提示中 (excluded) にすると 4,800。
+        self.assertTrue(_any_level_over_limit(self.conn))
+        self.assertFalse(_any_level_over_limit(self.conn, {ids[0]}))
+
+    def test_precheck_never_says_no_when_plan_would_fold(self):
+        """前検査の合計は計画の判定値以上 (孤児を除かない) — 計画が畳むなら
+        前検査も必ず True。ランダムな並びで検算する。"""
+        rng = random.Random(7)
+        for trial in range(20):
+            conn = init_db(":memory:")
+            init_arasuji_tables(conn)
+            n = rng.randint(1, 14)
+            for i in range(n):
+                _entry(conn, start=1000 + i * 100, coverage=1_000,
+                       chars=rng.randint(100, 900))
+            planned = plan_band_overflow(conn)
+            if planned > 0:
+                self.assertTrue(_any_level_over_limit(conn), f"trial {trial}")
+            conn.close()
+
 
 class TestAtomicity(BandTestBase):
     """原子性と並走防御。"""
@@ -389,6 +481,31 @@ class TestAtomicity(BandTestBase):
             "SELECT COUNT(*) FROM arasuji_entries WHERE is_consolidated = 1"
         ).fetchone()
         self.assertEqual(row[0], 0)
+
+    def test_stats_count_the_failed_attempt(self):
+        """stats (2026-09-03): LLM が落ちた畳みは created=0 でも attempts=1 —
+        呼び出し元 (generate_chronicle) は承認予算を試行回数で消費する。"""
+        for i in range(9):
+            _entry(self.conn, start=1000 + i * 100, coverage=10_000)
+        stats = {}
+        created = run_band_overflow(self.conn, _Client(fail=True), stats=stats)
+        self.assertEqual(created, 0)
+        self.assertEqual(stats, {"attempts": 1, "created": 0})
+
+    def test_stats_count_the_successful_attempt(self):
+        for i in range(9):
+            _entry(self.conn, start=1000 + i * 100, coverage=10_000)
+        stats = {}
+        created = run_band_overflow(self.conn, _Client(), stats=stats)
+        self.assertEqual(created, 1)
+        self.assertEqual(stats, {"attempts": 1, "created": 1})
+
+    def test_stats_are_zero_when_nothing_folds(self):
+        for i in range(8):
+            _entry(self.conn, start=1000 + i * 100, coverage=10_000)
+        stats = {}
+        self.assertEqual(run_band_overflow(self.conn, _Client(), stats=stats), 0)
+        self.assertEqual(stats, {"attempts": 0, "created": 0})
 
     def test_gap_inserted_during_llm_wait_abandons(self):
         """計画〜LLM 応答の間に畳み区間へ未統合の下位ノードが挿入されたら、

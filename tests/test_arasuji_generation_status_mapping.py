@@ -98,6 +98,92 @@ def test_noop_completes_without_dispatching_head_rebuild(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# "failed" の実際の理由 (2026-09-03): generate_chronicle が掴んだ LLMError の
+# error_code / user_message / batch_meta を pop_last_chronicle_failure で
+# 受け取り、ジョブへ写す — UI の empty_response 等の案内と「該当メッセージを
+# 表示」(error_meta.message_ids) が Chronicle ジョブでも効くように。
+# ---------------------------------------------------------------------------
+
+_EMPTY_FAILURE = {
+    "error_code": "empty_response",
+    "error": "メッセージ 3 件のチャンク処理中: LLMから空の応答が返されました。再度お試しください。",
+    "error_detail": "empty LLM response for chronicle_level1 chunk after 3 attempt(s)",
+    "error_meta": {"message_ids": ["m1"], "start_time": 1.0, "end_time": 2.0},
+}
+
+
+def _run_failed(mode: str, failure) -> dict:
+    """status="failed" を返す lifecycle で worker を回し job を返す。
+
+    ``failure`` は pop_last_chronicle_failure の戻り値 (None = 理由なし)。
+    """
+    job_id = arasuji._create_job("p_fail")
+    pops = []
+
+    def _pop(persona_id):
+        # 理由は persona ごとに保持されるので、runner は自分の persona_id で引く。
+        pops.append(persona_id)
+        return failure
+
+    lifecycle = SimpleNamespace(
+        run_manual_compaction_checked=(
+            lambda persona, cancellation_token=None: ("failed", True)
+        ),
+        run_coverage_repair_checked=(
+            lambda persona, event_callback=None, cancellation_token=None:
+                ("failed", 0, True)
+        ),
+        pop_last_chronicle_failure=_pop,
+        ensure_recall_embeddings=lambda persona: None,
+    )
+    manager = SimpleNamespace(
+        personas={"p_fail": SimpleNamespace(persona_id="p_fail")},
+        sea_runtime=SimpleNamespace(session_lifecycle=lifecycle),
+    )
+    arasuji._run_chronicle_generation(
+        job_id, "p_fail", max_messages=0, model_name=None, with_memopedia=False,
+        manager=manager, mode=mode,
+    )
+    job = arasuji._get_job(job_id)
+    assert job is not None
+    assert pops == ["p_fail"], "the runner must pop its own persona's failure exactly once"
+    return job
+
+
+def test_repair_failed_carries_the_real_error_code_and_message_ids():
+    job = _run_failed("repair", _EMPTY_FAILURE)
+    assert job["status"] == "failed"
+    assert job["error_code"] == "empty_response"
+    assert job["error_meta"]["message_ids"] == ["m1"]
+    assert job["error_detail"] == _EMPTY_FAILURE["error_detail"]
+    # 補修経路の「続きから進みます」は真なので残し、実際の理由を続ける。
+    assert "編纂済みの分は保存されており、再実行で続きから進みます" in job["error"]
+    assert "空の応答" in job["error"]
+
+
+def test_compaction_failed_carries_the_real_error_code_and_message_ids():
+    job = _run_failed("compaction", _EMPTY_FAILURE)
+    assert job["status"] == "failed"
+    assert job["error_code"] == "empty_response"
+    assert job["error_meta"]["message_ids"] == ["m1"]
+    assert "空の応答" in job["error"]
+
+
+def test_failed_without_a_recorded_reason_keeps_the_generic_mapping():
+    job = _run_failed("repair", None)
+    assert job["status"] == "failed"
+    assert job["error_code"] == "failed"
+    assert job["error_meta"] is None
+    assert job["error"] == "あらすじの生成が完了しませんでした。編纂済みの分は保存されており、再実行で続きから進みます。"
+
+    job = _run_failed("compaction", None)
+    assert job["status"] == "failed"
+    assert job["error_code"] == "failed"
+    assert job["error_meta"] is None
+    assert job["error"] == "Chronicle生成が完了しませんでした。畳みは適用されていないため、再実行で再試行できます。"
+
+
+# ---------------------------------------------------------------------------
 # 走行中ジョブへの再接続 (GET /arasuji/generate/latest)
 #
 # ジョブ ID は開始した画面の state にしか無いので、モーダルを閉じたり、ペルソナ

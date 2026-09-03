@@ -37,7 +37,8 @@
 | `MEMORY_WEAVE_BATCH_SIZE` | `20` | **本体では廃止 (W4)** — 生成は整列 + サイズ束ねに世代交代 (`SAIVERSE_CHRONICLE_BAND_BUDGET` 系へ)。本番経路では無視され、読むのは一括生成スクリプト `scripts/arasuji/build_arasuji_core.py` だけ |
 | `MEMORY_WEAVE_CONSOLIDATION_SIZE` | `10` | **本体では廃止 (W4)** — 統合は列のあふれ束ねに世代交代。読み手は上と同じくスクリプトのみ |
 | `SAIVERSE_CHRONICLE_BAND_BUDGET` | `10000` | 一次あらすじチャンクの標準被覆字数 U (体験の構造 §4-6・§11-8 のモック検証値)。整列計画・退場計画の基準単位 (`sai_memory/arasuji/alignment.py`)。**束ねの発火には使われない** (2026-07-27 世代交代 — 発火は `SAIVERSE_CHRONICLE_CHAR_BUDGET` の 1/4、[chronicle_consolidation](../intent/chronicle_consolidation.md) §3) |
-| `SAIVERSE_CHRONICLE_MAX_BAND_CONSOLIDATIONS_PER_RUN` | `3` | 1 回の Metabolism で実行する束ね+治療の LLM コール上限 (LLM コスト暴走防止の安全弁、`sai_memory/arasuji/bands.py`) |
+| `SAIVERSE_CHRONICLE_MAX_BAND_CONSOLIDATIONS_PER_RUN` | `3` | 束ね (`bands.run_band_overflow`) **1 回の呼び出し**あたりの LLM コール上限 (安全弁、`sai_memory/arasuji/bands.py`)。名前の `PER_RUN` は互換のために残した旧称で、単位は Metabolism の走行ではない — 2026-09-03 から編纂はチャンク確定のたびに束ねを呼ぶので、大量編纂 1 走行の束ねの総数は確認ゲートで承認した dry 予測件数まで届く (走行全体のコスト上限は確認ゲートが担う) |
+| `SAIVERSE_CHRONICLE_EMPTY_RESPONSE_RETRIES` | `3` | Chronicle の純生成 (一次あらすじのチャンク / 束ね / 吸収の語り直し) で LLM が**空応答**を返したときの総試行回数 (再試行を含む。`1` = 再試行しない)。推論モデルが出力を reasoning_content だけに書いて本文を空で閉じることが確率的にあるため (`sai_memory/arasuji/generator.py::generate_text_with_empty_retry`)。空応答以外の LLM エラー (rate limit / timeout / 認証) はここでは再試行しない。使い切ったら `empty_response` として失敗する |
 | `SAIVERSE_CHRONICLE_CHAR_BUDGET` | `20000` | weave の General Chronicle 読み込みの文字数予算。超過時は年表を粗いレベルへ畳んで全期間をカバーする（最古を落とさない）。**この 1/4 が束ねの発火閾値 X を兼ねる** ([chronicle_consolidation](../intent/chronicle_consolidation.md) §3 — 発火と提示を同じノブに連動させる)。記憶アーキv2 §6.2 |
 | `SAIVERSE_SLUICE_ENABLED` | `1` | スルース（Metabolism 時のコア記憶・手帳メモ・約束の採取。旧 gold_panning）の全体トグル。`0` で無効（defer-to-hot ごと従来挙動に戻る。無効時は採取なしで退場が進む）。intent `gold_panning.md`（旧名のまま）+ `autonomous_behavior_v3.md` §13 |
 | `SAIVERSE_SLUICE_PENDING_CAP` | `1.5` | defer-to-hot 圧力弁。ウィンドウが high watermark のこの倍率を超えたらキャッシュが冷たくても Metabolism を実行する |
