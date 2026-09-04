@@ -79,6 +79,31 @@ export default function ModelEditorModal({ isOpen, mode, modelKey, cloneSource, 
     const [saving, setSaving] = useState(false);
     const [parseError, setParseError] = useState<string | null>(null);
     const [saveError, setSaveError] = useState<string | null>(null);
+    // 空欄のモデルが実際に従う既定 (全体設定があればそれ、無ければ組み込み)。
+    // GET /api/config/metabolism-defaults の effective。取れないときは組み込みの数字。
+    const [effectiveDefaults, setEffectiveDefaults] = useState<Record<WatermarkField, number>>({
+        metabolism_high_chars: 200000,
+        metabolism_target_chars: 100000,
+        metabolism_low_chars: 40000,
+    });
+
+    const loadEffectiveDefaults = async () => {
+        try {
+            const res = await fetch('/api/config/metabolism-defaults');
+            if (!res.ok) return;
+            const data = await res.json();
+            const eff = data?.effective;
+            if (eff && typeof eff.high === 'number' && typeof eff.target === 'number' && typeof eff.low === 'number') {
+                setEffectiveDefaults({
+                    metabolism_high_chars: eff.high,
+                    metabolism_target_chars: eff.target,
+                    metabolism_low_chars: eff.low,
+                });
+            }
+        } catch (e) {
+            console.error('Failed to load metabolism defaults', e);
+        }
+    };
 
     const applyConfig = (k: string, cfg: Record<string, unknown>) => {
         setKey(k);
@@ -112,6 +137,7 @@ export default function ModelEditorModal({ isOpen, mode, modelKey, cloneSource, 
         if (!isOpen) return;
         setSaveError(null);
         loadProviderList();
+        loadEffectiveDefaults();
         if (mode === 'edit' && modelKey) {
             loadModel(modelKey);
         } else if (mode === 'create' && cloneSource) {
@@ -246,7 +272,7 @@ export default function ModelEditorModal({ isOpen, mode, modelKey, cloneSource, 
             }
             const value = parseInt(raw, 10);
             if (isNaN(value) || String(value) !== raw || value < 1) {
-                setSaveError(`${field} は 1 以上の整数か none を入力してください（空欄 = 標準の既定値）`);
+                setSaveError(`${field} は 1 以上の整数か none を入力してください（空欄 = 全体設定の既定）`);
                 return;
             }
             merged[field] = value;
@@ -395,9 +421,12 @@ export default function ModelEditorModal({ isOpen, mode, modelKey, cloneSource, 
                                             const v = e.target.value;
                                             setWatermarks(prev => ({ ...prev, [field]: v }));
                                         }}
-                                        placeholder="（空欄 = 標準の既定値 / none = 使わない）"
+                                        placeholder={`空欄 = 全体設定の既定 (${effectiveDefaults[field].toLocaleString()} 字) に従う / none = 使わない`}
                                     />
-                                    <span className={styles.hint}>{WATERMARK_LABELS[field].hint}</span>
+                                    <span className={styles.hint}>
+                                        {WATERMARK_LABELS[field].hint}
+                                        {' '}空欄のときは全体設定の既定 {effectiveDefaults[field].toLocaleString()} 字に従います（全体設定 → 環境タブ「記憶の整理の水位」）。
+                                    </span>
                                 </div>
                             ))}
 

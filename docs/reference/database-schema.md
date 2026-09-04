@@ -651,6 +651,9 @@ SAIVerse の全テーブル・カラム定義（自動生成）。SQLite。本�
 | `LAST_TUTORIAL_VERSION` | INTEGER | NOT NULL, default=1 |  |
 | `SELECTED_META_PLAYBOOK` | VARCHAR(255) | — |  |
 | `FAVORITE_MODELS` | TEXT | — |  |
+| `METABOLISM_LOW_CHARS` | INTEGER | — |  |
+| `METABOLISM_TARGET_CHARS` | INTEGER | — |  |
+| `METABOLISM_HIGH_CHARS` | INTEGER | — |  |
 
 ## feed_item
 
