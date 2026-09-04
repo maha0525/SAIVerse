@@ -567,6 +567,13 @@ class UserSettings(Base):
     LAST_TUTORIAL_VERSION = Column(Integer, default=1, nullable=False)
     SELECTED_META_PLAYBOOK = Column(String(255), nullable=True)  # User's preferred meta playbook
     FAVORITE_MODELS = Column(Text, nullable=True)  # JSON array of favorite model IDs
+    # Metabolism 三水位 (文字数) の全体既定 (2026-09-03)。NULL = 未設定 (組み込み既定に
+    # 従う)。優先順位は 組み込み既定 < この全体設定 < モデル定義 (metabolism_*_chars)。
+    # 起動時と PUT /api/config/metabolism-defaults 成功時に
+    # saiverse.model_configs.set_global_metabolism_defaults へ写される。
+    METABOLISM_LOW_CHARS = Column(Integer, nullable=True)
+    METABOLISM_TARGET_CHARS = Column(Integer, nullable=True)
+    METABOLISM_HIGH_CHARS = Column(Integer, nullable=True)
 
 
 class AddonConfig(Base):

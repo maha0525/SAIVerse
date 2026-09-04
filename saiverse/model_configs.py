@@ -2,7 +2,8 @@ import json
 import logging
 import os
 from pathlib import Path
-from typing import Any, Dict
+from types import MappingProxyType
+from typing import Any, Dict, Mapping
 
 LOGGER = logging.getLogger(__name__)
 
@@ -216,35 +217,153 @@ BUILTIN_METABOLISM_LOW_CHARS = 40_000
 BUILTIN_METABOLISM_TARGET_CHARS = 100_000
 BUILTIN_METABOLISM_HIGH_CHARS = 200_000
 
+#: 水位のキー名 → 組み込み既定。全体設定 / API / UI が同じ三つ組を回すための表。
+METABOLISM_WATERMARK_KEYS: tuple[str, str, str] = (
+    "metabolism_low_chars", "metabolism_target_chars", "metabolism_high_chars",
+)
+BUILTIN_METABOLISM_DEFAULTS: dict[str, int] = {
+    "metabolism_low_chars": BUILTIN_METABOLISM_LOW_CHARS,
+    "metabolism_target_chars": BUILTIN_METABOLISM_TARGET_CHARS,
+    "metabolism_high_chars": BUILTIN_METABOLISM_HIGH_CHARS,
+}
 
-def _metabolism_chars(model: str, key: str, builtin_default: int) -> int | None:
-    """Metabolism 水位 (文字数) を model config から読む。
+#: 全体設定の水位既定 (2026-09-03)。三層の真ん中: 組み込み既定 < **全体設定** <
+#: モデル定義。キー無し / None = 未設定 (組み込み既定に落ちる)。
+#:
+#: 真実の置き場は DB (user_settings.METABOLISM_*_CHARS)。このモジュールは DB を
+#: 触らない約束なので、起動時 (saiverse_manager) と API の保存成功時に
+#: ``set_global_metabolism_defaults`` で写してもらう。
+#:
+#: **不変の写像を丸ごと差し替える** (clear → 三回代入ではない)。読み手は
+#: ``_current_global_defaults()`` で一枚の写像を取り、その一枚から三水位を解く
+#: (``resolve_metabolism_watermarks``) ので、差し替えの途中で「low は新・target は
+#: 旧」の混ざった三つ組を観測しない (Codex 指摘 2026-09-03)。外から読むときは
+#: ``get_global_metabolism_defaults()`` を使う (この変数名は private)。
+#:
+#: 2026-07-30 に撤去した揮発性のグローバル上書き (会話ごとの画面に置かれ、効く範囲が
+#: 不明瞭だった) とは別物 — こちらは永続の**既定**で、モデル定義に数値があれば
+#: そちらが勝つ (docs/concepts/metabolism.md)。
+_GLOBAL_METABOLISM_DEFAULTS: Mapping[str, int | None] = MappingProxyType(
+    {key: None for key in METABOLISM_WATERMARK_KEYS}
+)
 
-    キーが**無い**なら組み込み既定 (一律)。キーが有って ``null`` / 0 以下なら
-    None = その水位を持たない。high が None のとき文字数による発火は起きず、
-    ``token_triggered`` だけが Metabolism を起こす (chronicle_eviction.md §4)。
+
+def _current_global_defaults() -> Mapping[str, int | None]:
+    """全体設定の水位既定の**現在の一枚** (不変)。読み手はこれを一度だけ取る。"""
+    return _GLOBAL_METABOLISM_DEFAULTS
+
+
+def _positive_int_or_none(value: Any) -> int | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        num = int(value)
+    except (TypeError, ValueError):
+        return None
+    return num if num > 0 else None
+
+
+def set_global_metabolism_defaults(values: Mapping[str, int | None]) -> None:
+    """全体設定の水位既定を差し替える (三キー以外は無視、正の整数以外は未設定扱い)。
+
+    新しい不変写像を作って一回の代入で差し替える — 読み手が持っている古い一枚は
+    変化しない。
     """
-    config = MODEL_CONFIGS.get(model, {})
+    global _GLOBAL_METABOLISM_DEFAULTS
+    _GLOBAL_METABOLISM_DEFAULTS = MappingProxyType({
+        key: _positive_int_or_none(values.get(key)) for key in METABOLISM_WATERMARK_KEYS
+    })
+
+
+def get_global_metabolism_defaults() -> dict[str, int | None]:
+    """全体設定の水位既定 (未設定は None) を三キーそろえて返す。"""
+    current = _current_global_defaults()
+    return {key: current.get(key) for key in METABOLISM_WATERMARK_KEYS}
+
+
+def _effective_defaults_from(global_defaults: Mapping[str, int | None]) -> dict[str, int]:
+    return {
+        key: global_defaults.get(key) or BUILTIN_METABOLISM_DEFAULTS[key]
+        for key in METABOLISM_WATERMARK_KEYS
+    }
+
+
+def get_effective_metabolism_defaults() -> dict[str, int]:
+    """キー無しのモデルが実際に従う既定 = 全体設定があればそれ、無ければ組み込み。
+
+    UI の空欄プレースホルダとモデル保存時の順序検証 (api/routes/config.py) が使う。
+    """
+    return _effective_defaults_from(_current_global_defaults())
+
+
+def compose_metabolism_watermark(
+    config: Mapping[str, Any], key: str, effective_default: int,
+) -> int | None:
+    """モデル定義一つと既定一つから、水位一つを実行時と同じ規則で決める。
+
+    キーが**無い**なら ``effective_default``。キーが有って ``null`` / 0 以下なら
+    None = その水位を持たない (モデル単位のオプトアウト)。数値に読めない値は
+    ``effective_default`` に落ちる。全体既定の保存時に「既存モデルの部分上書きと
+    矛盾しないか」を調べる側 (api/routes/config.py) もこの関数で組む — 実行時の
+    解決とそこが二本に分かれると、検証は通るのに実行時は壊れる事故が起きる。
+    """
     if key not in config:
-        return builtin_default
+        return effective_default
     val = config.get(key)
     if val is None:
         return None
     try:
         num = int(val)
     except (TypeError, ValueError):
-        return builtin_default
+        return effective_default
     return num if num > 0 else None
+
+
+def compose_metabolism_watermarks(
+    config: Mapping[str, Any], global_defaults: Mapping[str, int | None],
+) -> tuple[int | None, int | None, int | None]:
+    """モデル定義一つと全体既定の一枚から (low, target, high) を組む。"""
+    effective = _effective_defaults_from(global_defaults)
+    low, target, high = (
+        compose_metabolism_watermark(config, key, effective[key])
+        for key in METABOLISM_WATERMARK_KEYS
+    )
+    return low, target, high
+
+
+def resolve_metabolism_watermarks(model: str) -> tuple[int | None, int | None, int | None]:
+    """Metabolism の三水位 (low, target, high) を**一枚の全体既定**から解決する。
+
+    三層: モデル定義にキーが無いなら全体設定の既定、それも無ければ組み込み既定
+    (一律)。キーが有って ``null`` / 0 以下なら None = その水位を持たない (これは
+    モデル単位のオプトアウトで、全体設定では表せない)。high が None のとき
+    文字数による発火は起きず、``token_triggered`` だけが Metabolism を起こす
+    (chronicle_eviction.md §4)。
+
+    全体既定は ``_current_global_defaults()`` を**一度だけ**読む。三水位を別々の
+    getter で取ると、間に ``set_global_metabolism_defaults`` が挟まったとき
+    新旧の混ざった三つ組になる — 三つ組が要る呼び手 (sea/session_lifecycle.py)
+    はこちらを使う。
+    """
+    config = MODEL_CONFIGS.get(model, {})
+    return compose_metabolism_watermarks(config, _current_global_defaults())
+
+
+def _metabolism_chars(model: str, key: str) -> int | None:
+    """水位一つを解決する (単発の getter 用。三つ組が要るなら resolve_… を使う)。"""
+    config = MODEL_CONFIGS.get(model, {})
+    effective = _effective_defaults_from(_current_global_defaults())
+    return compose_metabolism_watermark(config, key, effective[key])
 
 
 def get_metabolism_low_chars(model: str) -> int | None:
     """低水位 = 直近保護帯の文字数 (model config ``metabolism_low_chars``)。"""
-    return _metabolism_chars(model, "metabolism_low_chars", BUILTIN_METABOLISM_LOW_CHARS)
+    return _metabolism_chars(model, "metabolism_low_chars")
 
 
 def get_metabolism_target_chars(model: str) -> int | None:
     """目標水位 = Metabolism 後に到達したい文字数 (``metabolism_target_chars``)。"""
-    return _metabolism_chars(model, "metabolism_target_chars", BUILTIN_METABOLISM_TARGET_CHARS)
+    return _metabolism_chars(model, "metabolism_target_chars")
 
 
 def get_metabolism_high_chars(model: str) -> int | None:
@@ -252,7 +371,7 @@ def get_metabolism_high_chars(model: str) -> int | None:
 
     None は「文字数では発火しない」(token_triggered のみ) を意味する。
     """
-    return _metabolism_chars(model, "metabolism_high_chars", BUILTIN_METABOLISM_HIGH_CHARS)
+    return _metabolism_chars(model, "metabolism_high_chars")
 
 
 def get_metabolism_token_threshold(model: str) -> int | None:

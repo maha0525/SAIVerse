@@ -48,6 +48,7 @@
 
 | 状態 | 案件 | 次アクション | 誰待ち | doc / issue | 更新 |
 |---|---|---|---|---|---|
+| 🟣 検証待ち | 記憶整理の三つの水位に全体設定の既定層を足す (コード既定 < 全体設定 < モデル設定) | 実装済み (DB 列・解決層・API・全体設定の水位バー・モデル編集の実効値表示・docs)。次はレビュー (ローカル LLM / Codex) の消し込みと、まはーの実機で全体設定の画面と保存の反映を確認する。 | まはー (実機確認) | [chronicle_eviction.md §4](../intent/chronicle_eviction.md) / [metabolism.md](../concepts/metabolism.md) | 2026-09-03 |
 | 🔵 設計中 | 知覚が多いと「残す量」と「整理を始める量」を両方満たせない状況への対応と、既定値の見直し | 案 (知覚の合計に上限を置き、保存時に「整理を始める量 − 残す量 > 知覚の上限」を検査) と既定値の叩き台 (20,000 / 40,000 / 120,000) を出した。次 = まはーの裁定を受けて 0.3.8 で実装する。 | まはー (裁定) | [issue](../issues/watermarks_unsatisfiable_when_perception_is_large.md) / [metabolism.md](../concepts/metabolism.md) | 2026-09-04 |
 | 🟣 検証待ち | 会話窓の最終防衛ラインと読み戻しの立て直し (konoe さんの窓が消えた事故) | v0.3.7 として配布済み。次 = なかみつさんの環境で更新後に一度話しかけ、会話が残す量まで戻ることを確認する。戻れば issue を archive へ移す。 | なかみつさん (更新と実機確認) | [issue](../issues/window_floor_and_refill_redesign.md) / [arasuji_levels.md](../intent/arasuji_levels.md) §15・§16-2 | 2026-09-04 |
 | 🟣 検証待ち | Chronicle 退場の適用側拒否権デッドロック根治 | 二つの顔 (編纂対象ゼロ fold の吸収限定退場 / あらすじ手動削除の道連れ) とも実装済み・回帰緑。次 = 実機で通常 Metabolism の退行がないことの確認。 | まはー (実機検証) | [issue](../issues/chronicle_eviction_applier_veto_deadlock.md) / [chronicle_eviction.md](../intent/chronicle_eviction.md) §2/§5-5/§6 | 2026-07-27 |

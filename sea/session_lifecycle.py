@@ -197,24 +197,22 @@ class SessionLifecycle:
         自分の提示コンテキストを管理する)。``model_key`` は実行 model。None なら従来どおり
         ``persona.model`` にフォールバックする。
 
-        水位の出所は model 定義一本 (2026-07-30、グローバル上書きは廃止 —
-        docs/issues/chat_options_metabolism_section_redesign.md)。model が
-        解決できない場合と、model 定義が水位を null にしている場合は None を
-        返す (= Metabolism を持たない。これが唯一のオプトアウト)。
+        水位は三層で決まる: 組み込み既定 < 全体設定 (user_settings、2026-09-03)
+        < model 定義。解決は saiverse.model_configs の
+        ``resolve_metabolism_watermarks`` に任せ、ここでは層を意識しない。三つを
+        別々の getter で取らないのは、間に全体設定の差し替えが挟まると新旧の
+        混ざった三つ組になるから (一枚の既定から三つまとめて解く)。2026-07-30 に
+        撤去した揮発性のグローバル上書きとは別物で、全体設定は「キー無しの model
+        が従う既定」にすぎない (docs/concepts/metabolism.md)。model が解決できない
+        場合と、model 定義が水位を null にしている場合は None を返す (= Metabolism
+        を持たない。これが唯一のオプトアウト — 全体設定では表せない)。
         """
         persona_model = model_key or getattr(persona, "model", None)
         if not persona_model:
             return None
-        from saiverse.model_configs import (
-            get_metabolism_high_chars,
-            get_metabolism_low_chars,
-            get_metabolism_target_chars,
-        )
-        model_name = str(persona_model)
+        from saiverse.model_configs import resolve_metabolism_watermarks
 
-        low = get_metabolism_low_chars(model_name)
-        target = get_metabolism_target_chars(model_name)
-        high = get_metabolism_high_chars(model_name)
+        low, target, high = resolve_metabolism_watermarks(str(persona_model))
 
         if low is None or target is None:
             # 低・目標が無い設定は退場の量を決められない = Metabolism を持たない。

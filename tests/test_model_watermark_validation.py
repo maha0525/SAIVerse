@@ -63,3 +63,44 @@ def test_bool_is_rejected():
     with pytest.raises(HTTPException) as exc:
         _validate_metabolism_watermarks({"metabolism_high_chars": True})
     assert exc.value.status_code == 400
+
+
+# ── 全体設定の既定で埋める (2026-09-03) ─────────────────────────
+#
+# キー無しは「組み込み定数」ではなく「実効既定 = 全体設定があればそれ」で埋める。
+# high だけ書いたモデルは、実行時に全体設定の target と組になるので、検証も
+# その組で行う: 全体で target=3万 に下げた環境なら high=5万 は正しい順序で通り、
+# 全体で target=15万 に上げた環境なら high=12万 は壊れた順序として弾く。
+
+
+@pytest.fixture
+def global_defaults():
+    from saiverse import model_configs
+
+    saved = model_configs.get_global_metabolism_defaults()
+    yield model_configs.set_global_metabolism_defaults
+    model_configs.set_global_metabolism_defaults(saved)
+
+
+def test_high_below_global_target_is_rejected(global_defaults):
+    """全体 target=15万 → high=12万 だけ書いたモデルは 400 (組み込み 10万 なら通っていた)。"""
+    _validate_metabolism_watermarks({"metabolism_high_chars": 120_000})  # 組み込み基準では OK
+    global_defaults({"metabolism_target_chars": 150_000})
+    with pytest.raises(HTTPException) as exc:
+        _validate_metabolism_watermarks({"metabolism_high_chars": 120_000})
+    assert exc.value.status_code == 400
+    assert "全体設定" in exc.value.detail
+
+
+def test_high_above_lowered_global_target_passes(global_defaults):
+    """全体 target=3万 → high=5万 だけ書いたモデルは通る (組み込み 10万 基準では 400 だった)。"""
+    with pytest.raises(HTTPException):
+        _validate_metabolism_watermarks({"metabolism_high_chars": 50_000})
+    global_defaults({"metabolism_low_chars": 10_000, "metabolism_target_chars": 30_000})
+    _validate_metabolism_watermarks({"metabolism_high_chars": 50_000})
+
+
+def test_unset_global_falls_back_to_builtin(global_defaults):
+    global_defaults({})
+    with pytest.raises(HTTPException):
+        _validate_metabolism_watermarks({"metabolism_high_chars": 50_000})
