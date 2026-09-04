@@ -1,13 +1,16 @@
 """読み戻し (arasuji_levels.md §15) のテスト — 編纂を「揃える」双方向の操作にする。
 
-固定する不変条件:
+固定する不変条件 (2026-09-05 まはー裁定 —
+docs/issues/refill_reads_by_budget_instead_of_arasuji_unit.md §裁定の確定):
 
 - 開き直しは帳簿の付け替えだけ (LLM なし)。圧縮区間の記録は消えず、
   「生で見せる」印 (presented_raw) が付くだけ — head の除外名簿は効き続ける。
-- 引き戻しの梯子はあらすじの段だけ。あらすじの無い過去 (編纂なしで忘れた
-  範囲) は掘り起こさない。段が壊れていたら (source が提示対象から消えていたら)
-  そこで止まる。
-- 天井は残す量。区間は丸ごと単位。
+- 会話文が目標量 (残す量) を下回っていたら、いちばん新しいあらすじから順に
+  **丸ごと**開く — 窓内 digest・起点をまたぐ区間・起点より古い側の別なく。
+  会話文が目標量に達したら終了。超過してよい (目標量は下限であって上限では
+  ない)。読む範囲を字数で切る「予算」は無い。
+- 材料に読めない行があるあらすじでも止まらない — 読める行だけで開く。
+- 合計が上限を超えても開いた結果は保つ (WARNING のみ)。
 - 再畳み (印戻し) は既存あらすじを再利用し、編纂を走らせない。
 """
 from __future__ import annotations
@@ -30,7 +33,7 @@ from sea.eviction_plan import (
 )
 from sea.session_lifecycle import SessionLifecycle
 from sea.session_window import FoldedRange, SessionWindow, deserialize_folds
-from sea.window_refill import plan_reopen, plan_rewind
+from sea.window_refill import merge_refill_fold, openable_folds_newest_first
 
 PERSONA_ID = "alice"
 
@@ -44,8 +47,15 @@ def _msg(mid, at, chars):
     return {"id": mid, "content": "x" * chars, "created_at": at}
 
 
-def _entry(eid, source_ids, short_id=None):
-    return SimpleNamespace(id=eid, source_ids=list(source_ids), short_id=short_id)
+def _entry(eid, source_ids, short_id=None, end_time=None):
+    """テスト用の一次あらすじ。``end_time`` は実物の同名列に相当する「覆う範囲の
+    終わりの時刻」。未指定 (None) なら照会の偽物 (_patch_storage) が材料の最後の
+    実在行の時刻で代用する — 実物でも end_time は材料の最後の行の時刻なので、
+    既定では材料の位置の順と一致し、既存テストの意味を変えない。"""
+    return SimpleNamespace(
+        id=eid, source_ids=list(source_ids), short_id=short_id,
+        end_time=end_time,
+    )
 
 
 def _ph(first_live_mid, chars=ESTIMATED_FOLD_PLACEHOLDER_CHARS, at=100):
@@ -56,326 +66,195 @@ def _ph(first_live_mid, chars=ESTIMATED_FOLD_PLACEHOLDER_CHARS, at=100):
     }
 
 
-class TestPlanReopen:
-    def test_opens_newest_first_up_to_target(self):
-        """digest 区間を新しい方から、残す量を超えない範囲で開く。"""
-        raw = [_msg(f"m{i}", 100 + i, 2000) for i in range(6)]
-        old = FoldedRange(message_ids=["m0", "m1"])   # 生 4000 字
-        new = FoldedRange(message_ids=["m2", "m3"])   # 生 4000 字
-        presented = [_ph("m0"), _ph("m2"), _msg("m4", 104, 2000), _msg("m5", 105, 2000)]
-        # 現提示 4000 字、残す量 8000 → 開けるのは 1 区間だけ
-        gain = 4000 - ESTIMATED_FOLD_PLACEHOLDER_CHARS
-        chosen, projected = plan_reopen(
-            [old, new], raw, presented, 4000, 4000 + gain + 100,
-        )
-        assert chosen == [new]  # 新しい方が先に選ばれる
-        assert projected == 4000 + gain
-
-    def test_opens_both_when_budget_allows(self):
-        raw = [_msg(f"m{i}", 100 + i, 2000) for i in range(6)]
+class TestOpenableFoldsNewestFirst:
+    def test_orders_digest_folds_newest_first(self):
+        """窓内の digest 区間は「覆う提示中いちばん新しい行」の新しい順に並ぶ。"""
+        raw = [_msg(f"m{i}", 100 + i, 1000) for i in range(6)]
         old = FoldedRange(message_ids=["m0", "m1"])
         new = FoldedRange(message_ids=["m2", "m3"])
-        presented = [_ph("m0"), _ph("m2"), _msg("m4", 104, 2000), _msg("m5", 105, 2000)]
-        chosen, _ = plan_reopen([old, new], raw, presented, 4000, 100_000)
-        assert chosen == [new, old]
+        presented = [_ph("m0"), _ph("m2"), _msg("m4", 104, 1000), _msg("m5", 105, 1000)]
+        assert openable_folds_newest_first([old, new], raw, presented) == [new, old]
 
-    def test_skips_oversized_but_tries_smaller_older(self):
-        """入らない区間は飛ばし、より小さい古い区間を試す。"""
-        raw = [
-            _msg("m0", 100, 1500),           # 古くて小さい区間の中身
-            _msg("m1", 101, 50_000),         # 新しくて大きい区間の中身
-            _msg("m2", 102, 1000),
-        ]
-        small_old = FoldedRange(message_ids=["m0"])
-        big_new = FoldedRange(message_ids=["m1"])
-        presented = [_ph("m0"), _ph("m1"), _msg("m2", 102, 1000)]
-        chosen, _ = plan_reopen([small_old, big_new], raw, presented, 1000, 3000)
-        assert chosen == [small_old]
+    def test_straddling_folds_are_openable_regardless_of_flags(self):
+        """起点をまたぐ区間は presented_raw でも対象 — 提示は digest に倒れて
+        いて (apply_folds は部分生存の印を尊重しない)、またいだ側の行は起点を
+        戻さないと提示に現れない。"""
+        raw = [_msg("m0", 100, 1000), _msg("m1", 101, 1000)]
+        straddling = FoldedRange(message_ids=["b9", "m0"], presented_raw=True)
+        presented = [_ph("m0"), _msg("m1", 101, 1000)]
+        assert openable_folds_newest_first([straddling], raw, presented) == [straddling]
 
-    def test_already_raw_and_tiny_folds_are_skipped(self):
-        raw = [_msg("m0", 100, 500), _msg("m1", 101, 2000)]
-        already = FoldedRange(message_ids=["m1"], presented_raw=True)
-        tiny = FoldedRange(message_ids=["m0"])  # 生 500 字 < 置き換えの実文字数
-        presented = [_ph("m0"), _msg("m1", 101, 2000)]
-        chosen, projected = plan_reopen([already, tiny], raw, presented, 1000, 100_000)
-        assert chosen == []
-        assert projected == 1000
+    def test_straddling_sorts_by_its_newest_window_row(self):
+        """またぐ区間も特別扱いせず、覆う提示中の行の新しさだけで並ぶ (裁定 2)。"""
+        raw = [_msg(f"m{i}", 100 + i, 1000) for i in range(4)]
+        straddling = FoldedRange(message_ids=["b9", "m0"])  # 窓側の最新 = m0
+        inner = FoldedRange(message_ids=["m2"])
+        presented = [_ph("m0"), _msg("m1", 101, 1000), _ph("m2"), _msg("m3", 103, 1000)]
+        assert openable_folds_newest_first(
+            [straddling, inner], raw, presented,
+        ) == [inner, straddling]
 
-    def test_partially_live_fold_is_never_opened(self):
-        """一部が anchor の手前に出ている区間は開けない (Codex 2026-07-30)。
+    def test_raw_view_and_fail_open_folds_are_not_openable(self):
+        """presented_raw の区間 (既に生) と、置き換えが提示に無い区間 (あらすじが
+        引けず fail-open で生提示) は、開いても提示が 1 字も増えない = 対象外。"""
+        raw = [_msg("m0", 100, 1000), _msg("m1", 101, 1000)]
+        raw_view = FoldedRange(message_ids=["m0"], presented_raw=True)
+        fail_open = FoldedRange(message_ids=["m1"])  # 置き換え無し = 生提示
+        presented = list(raw)
+        assert openable_folds_newest_first([raw_view, fail_open], raw, presented) == []
 
-        開くと digest が消えて head の除外も効き続けるため、手前に出ている
-        分の体験が提示からもあらすじからも消える。"""
-        raw = [_msg("m0", 100, 5000), _msg("m1", 101, 100)]
-        partial = FoldedRange(
-            message_ids=["gone0", "m0"], chronicle_entry_ids=["e1"],
+    def test_empty_fold_is_skipped(self):
+        assert openable_folds_newest_first(
+            [FoldedRange(message_ids=[])], [], [],
+        ) == []
+
+
+class TestMergeRefillFold:
+    def test_bundles_all_covering_entries_into_one_fold(self):
+        """開いた範囲に材料を持つあらすじは一枚の区間に束ねる — 同じ行が二つの
+        区間に属すると、印戻し後に digest が二重提示になる。"""
+        rows = [_msg(f"m{i}", 100 + i, 10) for i in range(4)]
+        fold, absorbed = merge_refill_fold(
+            [
+                _entry("e1", ["m0", "m1"], short_id=1),
+                _entry("e2", ["m1", "m2"], short_id=2),
+            ],
+            rows, [],
         )
-        presented = [_ph("m0"), _msg("m1", 101, 100)]
-        chosen, projected = plan_reopen([partial], raw, presented, 1000, 100_000)
-        assert chosen == []
-        assert projected == 1000
+        assert absorbed == []
+        assert fold.message_ids == ["m0", "m1", "m2"]  # 重複なしの正典順
+        assert fold.chronicle_entry_ids == ["e1", "e2"]
+        assert fold.chronicle_short_ids == [1, 2]
+        assert fold.presented_raw is True
+        assert fold.start_at == 100 and fold.end_at == 102
 
-    def test_fail_open_fold_without_placeholder_is_skipped(self):
-        """digest が引けず fail-open で既に生提示の区間は開かない (Codex
-        2026-07-30)。開いても提示は増えないのに架空の利得を計上すると、
-        引き戻しの予算が削られて窓が残す量未満のまま固定される。"""
-        raw = [_msg("m0", 100, 5000), _msg("m1", 101, 1000)]
-        fold = FoldedRange(message_ids=["m0"], chronicle_entry_ids=["e1"])
-        presented = list(raw)  # fail-open: 置き換え無し・生のまま
-        chosen, projected = plan_reopen([fold], raw, presented, 6000, 100_000)
-        assert chosen == []
-        assert projected == 6000
+    def test_unreadable_source_rows_are_left_out_of_the_fold(self):
+        """材料のうち提示対象に無い id は区間の行に載せない — 載せると部分生存の
+        区間と見なされ digest 提示に倒れて、開いたはずの行が縮む (裁定 5 の
+        「読める行だけで開く」の帳簿側)。あらすじ id は載る (head の除外名簿)。"""
+        rows = [_msg("m0", 100, 10)]
+        fold, _absorbed = merge_refill_fold([_entry("e1", ["ghost", "m0"])], rows, [])
+        assert fold.message_ids == ["m0"]
+        assert fold.chronicle_entry_ids == ["e1"]
 
-    def test_gain_uses_actual_placeholder_length(self):
-        """利得は提示中の置き換えの**実文字数**で数える (Codex 2026-07-30)。
-
-        実際の置き換えが固定見込み (1200) より短い区間で、見込みなら入るが
-        実測では天井を超える場合、開いてはいけない。"""
-        raw = [_msg("m0", 100, 3000), _msg("m1", 101, 1000)]
-        fold = FoldedRange(message_ids=["m0"], chronicle_entry_ids=["e1"])
-        placeholder = {
-            "id": "folded:m0", "content": "x" * 100, "created_at": 100,
-            "metadata": {"__folded_range__": True},
-        }
-        presented = [placeholder, _msg("m1", 101, 1000)]
-        # 現提示 1100。実利得 = 3000−100 = 2900 → 4000 > target 3000。
-        # 固定見込みなら 3000−1200 = 1800 → 2900 ≤ 3000 で通ってしまう値。
-        chosen, projected = plan_reopen([fold], raw, presented, 1100, 3000)
-        assert chosen == []
-        assert projected == 1100
-        # 天井が実利得ぶんあるなら開ける
-        chosen, projected = plan_reopen([fold], raw, presented, 1100, 4000)
-        assert chosen == [fold]
-        assert projected == 4000
-
-
-class TestPlanRewind:
-    def test_rewinds_to_entry_boundary_within_budget(self):
-        """段 (一次エントリの被覆) 単位で、予算内の最古の段まで引き戻す。"""
-        before = [_msg(f"m{i}", 100 + i, 1000) for i in range(6)]  # m0..m5
-        entries = [
-            _entry("e1", ["m0", "m1"], short_id=1),
-            _entry("e2", ["m2", "m3"], short_id=2),
-            _entry("e3", ["m4", "m5"], short_id=3),
-        ]
-        plan = plan_rewind(before, entries, [], set(), set(), set(), budget_chars=4500)
-        assert plan is not None
-        # 予算 4500 → e3 (2000) + e2 (2000) は入るが e1 まで戻ると 6000 で超過
-        assert plan.new_anchor_id == "m2"
-        assert plan.restored_chars == 4000
-        assert [f.chronicle_entry_ids for f in plan.folds] == [["e2"], ["e3"]]
-        assert all(f.presented_raw for f in plan.folds)
-        assert plan.folds[0].chronicle_short_ids == [2]
-
-    def test_no_entries_means_no_rewind(self):
-        """あらすじの無い過去は掘り起こさない (編纂なしで忘れる合意の尊重)。"""
-        before = [_msg(f"m{i}", 100 + i, 1000) for i in range(4)]
-        assert plan_rewind(before, [], [], set(), set(), set(), budget_chars=10_000) is None
-
-    def test_uncovered_messages_between_rungs_ride_along(self):
-        """段の間に挟まる編纂対象外メッセージは境界の内側なら一緒に生へ戻る。
-        境界そのものは常にエントリの被覆境界 (裸の未被覆メッセージでは止まらない)。"""
-        before = [
-            _msg("m0", 100, 1000),  # e1 被覆
-            _msg("m1", 101, 1000),  # 未被覆 (除外タグ等)
-            _msg("m2", 102, 1000),  # e2 被覆
-        ]
-        entries = [_entry("e1", ["m0"]), _entry("e2", ["m2"])]
-        plan = plan_rewind(
-            before, entries, [], set(), set(),
-            {"m0", "m2"},  # m1 は編纂対象外 → 同乗してよい
-            budget_chars=10_000,
-        )
-        assert plan.new_anchor_id == "m0"
-        assert plan.restored_chars == 3000  # m1 も勘定に入る
-        assert plan.restored_message_count == 3
-
-    def test_eligible_uncovered_gap_stops_the_ladder(self):
-        """編纂対象なのに被覆の無いメッセージ = 編纂なしで忘れた過去。
-        跨いで戻すと忘却済みの内容が復活するので、梯子はその手前で止まる
-        (Codex 2026-07-30 6巡目)。"""
-        before = [
-            _msg("m0", 100, 1000),  # e1 被覆
-            _msg("m1", 101, 1000),  # 編纂対象なのに未被覆 (忘却済み)
-            _msg("m2", 102, 1000),  # e2 被覆
-        ]
-        entries = [_entry("e1", ["m0"]), _entry("e2", ["m2"])]
-        plan = plan_rewind(
-            before, entries, [], set(), set(),
-            {"m0", "m1", "m2"},  # 全部編纂対象
-            budget_chars=10_000,
-        )
-        assert plan is not None
-        assert plan.new_anchor_id == "m2"  # m1 を跨がず e2 で止まる
-        assert [f.chronicle_entry_ids for f in plan.folds] == [["e2"]]
-
-    def test_eligible_uncovered_gap_before_first_rung_blocks_rewind(self):
-        """最初の段と anchor の間に忘却済みメッセージが居たら一段も戻れない。"""
-        before = [
-            _msg("m0", 100, 1000),  # e1 被覆
-            _msg("m1", 101, 1000),  # 編纂対象なのに未被覆・anchor 直前
-        ]
-        entries = [_entry("e1", ["m0"])]
-        assert plan_rewind(
-            before, entries, [], set(), set(), {"m0", "m1"},
-            budget_chars=10_000,
-        ) is None
-
-    def test_broken_rung_stops_the_ladder(self):
-        """source が提示対象から消えた段は開けない — 梯子はそこで終わる。
-        その先 (より古い健全な段) へ飛び越えない。"""
-        before = [
-            _msg("m0", 100, 1000),  # e1 被覆 (健全・古い)
-            _msg("m2", 102, 1000),  # e2 被覆だが e2 は m_gone も指す
-            _msg("m3", 103, 1000),  # e3 被覆 (健全・新しい)
-        ]
-        entries = [
-            _entry("e1", ["m0"]),
-            _entry("e2", ["m2", "m_gone"]),
-            _entry("e3", ["m3"]),
-        ]
-        plan = plan_rewind(before, entries, [], set(), set(), set(), budget_chars=10_000)
-        assert plan is not None
-        assert plan.new_anchor_id == "m3"  # e3 だけ。e2 で止まり e1 へ降りない
-        assert [f.chronicle_entry_ids for f in plan.folds] == [["e3"]]
-
-    def test_sources_spilling_into_window_join_the_fold(self):
-        """anchor 跨ぎのエントリ: 窓内側の source は欠けと数えず、合成する
-        区間の範囲に**含める** (Codex 2026-07-30)。
-
-        含めないと、印戻し後に digest がエントリ全体を要約する一方で窓側の
-        source が生ログのまま残り、同じ体験が二重提示になる。"""
-        before = [_msg("m0", 100, 1000)]
-        entries = [_entry("e1", ["m0", "w1"])]
-        plan = plan_rewind(before, entries, ["w1", "w2"], set(), set(), set(), budget_chars=5000)
-        assert plan is not None
-        assert plan.folds[0].message_ids == ["m0", "w1"]
-
-    def test_already_folded_entries_are_left_alone(self):
-        """既に窓内の圧縮区間が持つエントリ (anchor 跨ぎ) はここでは扱わない。"""
-        before = [_msg("m0", 100, 1000)]
-        entries = [_entry("e1", ["m0"])]
-        assert plan_rewind(before, entries, [], {"e1"}, set(), set(), budget_chars=5000) is None
-
-    def test_window_side_shared_source_merges_rungs(self):
-        """窓側の source を共有するエントリも一つの段 = 一枚の区間に束ねる
-        (Codex 2026-07-30)。before 側の位置だけで束ねると別段に分かれ、
-        印戻し後に共有メッセージが二つの digest に属する。"""
-        before = [_msg("b0", 100, 1000), _msg("b1", 101, 1000), _msg("b2", 102, 1000)]
-        entries = [_entry("e1", ["b0", "w1"]), _entry("e2", ["b2", "w1"])]
-        plan = plan_rewind(
-            before, entries, ["w1"], set(), set(), set(), budget_chars=10_000,
-        )
-        assert plan is not None
-        assert len(plan.folds) == 1
-        fold = plan.folds[0]
-        assert fold.message_ids == ["b0", "b2", "w1"]
-        assert sorted(fold.chronicle_entry_ids) == ["e1", "e2"]
-
-    def test_ladder_descends_past_existing_fold_territory(self):
-        """既存の圧縮区間に属するメッセージより古くへも降りる (2026-09-04、
-        docs/issues/window_floor_and_refill_redesign.md ②)。
-
-        旧規則「既存区間の領土には踏み込まない」は、起点をまたぐ区間の一歩目で
-        梯子を止め、畳みすぎた窓が二度と戻らなかった (konoe さん 2026-09-03)。
-        またぐ区間は呼び出し側の前段が予算に関係なく生へ戻すので、ここで
-        止める理由は無い。既存区間の行 (gone0) は「覆われている」側 — 編纂
-        対象であっても忘れた過去とは見なさない。"""
-        before = [
-            _msg("b0", 100, 1000),  # e1 被覆 (古い・健全)
-            _msg("gone0", 101, 1000),  # 既存の印付き区間 F の行
-            _msg("b2", 102, 1000),  # e2 被覆 (新しい)
-        ]
-        entries = [_entry("e1", ["b0"]), _entry("e2", ["b2"])]
-        plan = plan_rewind(
-            before, entries, [], set(), {"gone0"}, {"b0", "gone0", "b2"},
-            budget_chars=10_000,
-        )
-        assert plan is not None
-        assert plan.new_anchor_id == "b0"  # gone0 を越えて e1 まで降りる
-        assert [f.chronicle_entry_ids for f in plan.folds] == [["e1"], ["e2"]]
-
-    def test_rung_intersecting_existing_fold_is_opened(self):
-        """段の source が既存の圧縮区間のメッセージと交差しても開ける
-        (2026-09-04、同 ②)。旧規則はこの形 (起点をまたぐ区間 F と source を
-        共有する段) で梯子を止めていた。
-
-        開き方は**既存の区間への併合** (Codex 一巡目 #5): 新しい区間を別に
-        作らず、既存区間の行とあらすじ id を広げた一枚にする。行はどの区間にも
-        一つだけ属する。"""
-        before = [_msg("b0", 100, 1000)]
-        entries = [_entry("e_new", ["b0", "w1"])]
+    def test_absorbs_existing_folds_sharing_rows_or_entries(self):
+        """行かあらすじ id を共有する既存区間は併合して absorbed で返す —
+        呼び出し側は窓の記録からそれを外し、組んだ一枚に置き換える。既存区間の
+        あらすじ id が先 (記録の連続性)。"""
+        rows = [_msg("b0", 100, 10), _msg("w1", 101, 10)]
         existing = FoldedRange(
             message_ids=["w1"], chronicle_entry_ids=["e_old"],
             chronicle_short_ids=[7], presented_raw=True,
         )
-        plan = plan_rewind(
-            before, entries, ["w1"], {"e_old"}, {"w1"}, set(), budget_chars=10_000,
-            existing_folds=[existing],
+        unrelated = FoldedRange(message_ids=["z9"], chronicle_entry_ids=["e_z"])
+        fold, absorbed = merge_refill_fold(
+            [_entry("e_new", ["b0", "w1"], short_id=9)], rows,
+            [existing, unrelated],
         )
-        assert plan is not None
-        assert plan.new_anchor_id == "b0"
-        assert len(plan.folds) == 1  # 既存区間へ併合された一枚だけ
-        merged = plan.folds[0]
-        assert merged.message_ids == ["b0", "w1"]
-        assert merged.chronicle_entry_ids == ["e_old", "e_new"]
-        assert merged.chronicle_short_ids == [7]
-        assert merged.presented_raw is True
-        assert plan.absorbed_existing == [existing]
-        assert plan.steps[0].absorbed_existing == [existing]
-        # 併合後、行はどの区間にも一つだけ
-        remaining = [f for f in [existing] if f not in plan.absorbed_existing]
-        seen = [mid for f in plan.folds + remaining for mid in f.message_ids]
-        assert len(seen) == len(set(seen))
+        assert absorbed == [existing]
+        assert fold.message_ids == ["b0", "w1"]
+        assert fold.chronicle_entry_ids == ["e_old", "e_new"]
+        assert fold.chronicle_short_ids == [7, 9]
+        assert fold.presented_raw is True
 
-    def test_steps_list_accepted_rungs_newest_first(self):
-        """受理した段は ``steps`` に新しい順で並び、各段は「そこまで戻した
-        場合」の anchor と圧縮区間を持つ (docs/issues/window_floor_and_refill_
-        redesign.md ④ — 最終検算で超えたら古い段から一段ずつ外す材料)。"""
-        before = [_msg(f"m{i}", 100 + i, 1000) for i in range(4)]  # m0..m3
-        entries = [_entry("e1", ["m0", "m1"]), _entry("e2", ["m2", "m3"])]
-        plan = plan_rewind(before, entries, [], set(), set(), set(), budget_chars=10_000)
-        assert plan is not None
-        assert [s.new_anchor_id for s in plan.steps] == ["m2", "m0"]
-        assert [[f.chronicle_entry_ids for f in s.folds] for s in plan.steps] == [
-            [["e2"]], [["e1"], ["e2"]],
+    def test_returns_none_when_no_row_is_readable(self):
+        fold, absorbed = merge_refill_fold([_entry("e1", ["ghost"])], [], [])
+        assert fold is None
+        assert absorbed == []
+
+
+# ---------------------------------------------------------------------------
+# あらすじ照会の素朴なメモリ実装 (lifecycle 統合テスト用)
+# ---------------------------------------------------------------------------
+
+
+def _patch_storage(entries, universe):
+    """読み戻しが使う arasuji.storage の照会 4 つを、メモリ上の素朴な実装で差し替える。
+
+    ``entries`` は一次あらすじ (_entry のリスト)、``universe`` は提示対象の
+    全行 (時系列昇順) で正典順の位置の真実。「messages に実在する」は
+    「universe に居る」と読み替える。「いちばん新しい一次あらすじ」の選択は
+    実物の照会 (sai_memory/arasuji/storage.py の
+    get_latest_primary_entry_before_message) と同じ ``end_time`` の降順 —
+    材料の位置の順で選ぶと、両者が食い違う入力で実物と別のあらすじを返す。
+    """
+    pos = {str(m["id"]): i for i, m in enumerate(universe)}
+    at = {str(m["id"]): m["created_at"] for m in universe}
+
+    def _positions(e):
+        return [pos[str(s)] for s in e.source_ids if str(s) in pos]
+
+    def _end_time(e):
+        """実物の end_time 列に相当する新しさ。未指定 (None) のエントリは
+        材料の最後の実在行の時刻で代用する (_entry の docstring 参照)。"""
+        if e.end_time is not None:
+            return e.end_time
+        return max(at[str(s)] for s in e.source_ids if str(s) in at)
+
+    def _latest_before(conn, message_id, *, exclude_entry_ids=()):
+        if str(message_id) not in pos:
+            return None
+        boundary = pos[str(message_id)]
+        excluded = {str(x) for x in exclude_entry_ids}
+        best = None
+        for e in entries:
+            if str(e.id) in excluded:
+                continue
+            ps = _positions(e)
+            if not ps or not any(p < boundary for p in ps):
+                continue
+            if best is None or _end_time(e) > _end_time(best):
+                best = e
+        return best
+
+    def _oldest_present(conn, ids):
+        ps = sorted((pos[str(i)], str(i)) for i in ids if str(i) in pos)
+        return ps[0][1] if ps else None
+
+    def _covering(conn, ids):
+        wanted = {str(i) for i in ids}
+        hits = [
+            e for e in entries if {str(s) for s in e.source_ids} & wanted
         ]
-        assert [s.restored_chars for s in plan.steps] == [2000, 4000]
-        assert [s.restored_message_count for s in plan.steps] == [2, 4]
-        # 全段の姿は計画自身と同じ
-        assert plan.steps[-1].new_anchor_id == plan.new_anchor_id
-        assert plan.steps[-1].restored_chars == plan.restored_chars
+        hits.sort(key=lambda e: min(_positions(e)) if _positions(e) else 0)
+        return hits
 
-    def test_explained_reports_why_the_ladder_stopped(self):
-        """見送りの理由 (⑤ のログ用): 壊れた段はどの段で何 id 欠けたかを言う。"""
-        from sea.window_refill import plan_rewind_explained
-        before = [_msg("m0", 100, 1000), _msg("m1", 101, 1000)]
-        entries = [_entry("e1", ["m0"]), _entry("e2", ["m1", "lost-a", "lost-b"])]
-        plan, reason = plan_rewind_explained(
-            before, entries, [], set(), set(), set(), budget_chars=10_000,
-        )
-        assert plan is None
-        assert "rung 1" in reason and "2 source id(s) missing" in reason
-        plan, reason = plan_rewind_explained(
-            before, [], [], set(), set(), set(), budget_chars=10_000,
-        )
-        assert plan is None and reason == "no covering entries"
+    def _compare(conn, id_a, id_b):
+        if str(id_a) not in pos or str(id_b) not in pos:
+            return None
+        if pos[str(id_a)] == pos[str(id_b)]:
+            return 0
+        return 1 if pos[str(id_a)] > pos[str(id_b)] else -1
 
-    def test_overlapping_entries_form_one_rung_and_one_fold(self):
-        """被覆が重なるエントリは一つの段 = **一枚の圧縮区間** (Codex
-        2026-07-30)。別々の区間にすると、印戻し後に共有メッセージが二つの
-        digest に属して同じ体験が二重提示される。"""
-        before = [_msg(f"m{i}", 100 + i, 1000) for i in range(3)]
-        entries = [_entry("e1", ["m0", "m1"]), _entry("e2", ["m1", "m2"])]
-        # 予算が段全体 (3000) に足りない → 何も戻せない
-        assert plan_rewind(before, entries, [], set(), set(), set(), budget_chars=2500) is None
-        plan = plan_rewind(before, entries, [], set(), set(), set(), budget_chars=3000)
-        assert plan is not None
-        assert plan.new_anchor_id == "m0"
-        assert len(plan.folds) == 1
-        fold = plan.folds[0]
-        assert fold.message_ids == ["m0", "m1", "m2"]  # 重複なしの正典順
-        assert sorted(fold.chronicle_entry_ids) == ["e1", "e2"]
+    return [
+        patch(
+            "sai_memory.arasuji.storage.get_latest_primary_entry_before_message",
+            side_effect=_latest_before,
+        ),
+        patch(
+            "sai_memory.arasuji.storage.get_oldest_present_message_id",
+            side_effect=_oldest_present,
+        ),
+        patch(
+            "sai_memory.arasuji.storage.get_entries_covering_messages",
+            side_effect=_covering,
+        ),
+        patch(
+            "sai_memory.arasuji.storage.compare_message_positions",
+            side_effect=_compare,
+        ),
+    ]
+
+
+def _refill_history(universe):
+    """指定の行 (時系列昇順) を持つ履歴の読み手 — 読み戻しが読む形だけを実装。"""
+    def _from_anchor(start_id, **_k):
+        idx = next(
+            (i for i, m in enumerate(universe) if m["id"] == start_id), None,
+        )
+        return list(universe[idx:]) if idx is not None else []
+
+    return SimpleNamespace(get_history_from_anchor=_from_anchor)
 
 
 # ---------------------------------------------------------------------------
@@ -477,15 +356,15 @@ def test_refill_reopens_in_window_folds_and_stamps_warm(session_factory):
 
 
 def test_refill_rewinds_anchor_with_synthesized_folds(session_factory):
-    """アップデート組の型: 窓が薄く、anchor の手前があらすじ被覆済み →
-    anchor を段の境界まで引き戻し、印付きの圧縮区間を合成する。"""
+    """アップデート組の型: 窓が薄く、起点の手前があらすじ被覆済み → いちばん
+    新しいあらすじから順に丸ごと開き、起点を戻して印付きの圧縮区間を合成する。"""
+    from contextlib import ExitStack
     lc = _make_lifecycle(session_factory)
     before = [_msg(f"b{i}", 100 + i, 1000) for i in range(4)]  # b0..b3
+    universe = before + [_msg("m0", 200, 1000)]
     persona = SimpleNamespace(
         persona_id=PERSONA_ID, model="model-a",
-        history_manager=SimpleNamespace(
-            get_history_before_anchor=lambda *a, **k: list(before),
-        ),
+        history_manager=_refill_history(universe),
         sai_memory=SimpleNamespace(conn=object(), is_ready=lambda: True),
     )
     lc.upsert_anchor_entry(PERSONA_ID, "model-a", {
@@ -494,15 +373,19 @@ def test_refill_rewinds_anchor_with_synthesized_folds(session_factory):
     wm = Watermarks(target=5000, high=10_000)
     window = _window("m0", [_msg("m0", 200, 1000)])
     entries = [_entry("e1", ["b0", "b1"], short_id=1), _entry("e2", ["b2", "b3"], short_id=2)]
-    with patch.object(lc, "get_metabolism_watermarks", return_value=wm), \
-            patch.object(lc, "resolve_metabolism_anchor", return_value=("m0", "self")), \
-            patch.object(lc, "get_presented_window", return_value=window), \
-            patch("sai_memory.arasuji.storage.get_entries_covering_messages",
-                  return_value=entries):
+    with ExitStack() as stack:
+        stack.enter_context(
+            patch.object(lc, "get_metabolism_watermarks", return_value=wm))
+        stack.enter_context(
+            patch.object(lc, "resolve_metabolism_anchor", return_value=("m0", "self")))
+        stack.enter_context(
+            patch.object(lc, "get_presented_window", return_value=window))
+        for p in _patch_storage(entries, universe):
+            stack.enter_context(p)
         assert lc.maybe_run_window_refill(persona, "room") == "ok"
 
     entry = lc.load_anchor_entry(PERSONA_ID, "model-a")
-    # 予算 4000 (target 5000 − 現 1000) → e2 (2000) + e1 (2000) 両方戻る
+    # e2 (2000) を開いても 3000 < 5000 → e1 (2000) も開いて 5000 で終了
     assert entry["anchor_id"] == "b0"
     saved = deserialize_folds(entry.get("folded_ranges"))
     assert [f.chronicle_entry_ids for f in saved] == [["e1"], ["e2"]]
@@ -513,13 +396,13 @@ def test_preview_refilled_history_is_read_only(session_factory):
     """context preview 用の読み戻しシミュレーション (§15 追補): 返る内容は
     本番の読み戻しと同じ計算だが、anchor 行・圧縮区間・温度を一切書かない
     (§14-6-5 の「プレビューは行を触らない」)。"""
+    from contextlib import ExitStack
     lc = _make_lifecycle(session_factory)
     before = [_msg(f"b{i}", 100 + i, 1000) for i in range(4)]
+    universe = before + [_msg("m0", 200, 1000)]
     persona = SimpleNamespace(
         persona_id=PERSONA_ID, model="model-a",
-        history_manager=SimpleNamespace(
-            get_history_before_anchor=lambda *a, **k: list(before),
-        ),
+        history_manager=_refill_history(universe),
         sai_memory=SimpleNamespace(conn=object(), is_ready=lambda: True),
     )
     stale = _now() - timedelta(days=3)
@@ -529,12 +412,16 @@ def test_preview_refilled_history_is_read_only(session_factory):
     wm = Watermarks(target=5000, high=10_000)
     window = _window("m0", [_msg("m0", 200, 1000)])
     entries = [_entry("e1", ["b0", "b1"]), _entry("e2", ["b2", "b3"])]
-    with patch.object(lc, "get_metabolism_watermarks", return_value=wm), \
+    with ExitStack() as stack:
+        stack.enter_context(
+            patch.object(lc, "get_metabolism_watermarks", return_value=wm))
+        resolve = stack.enter_context(
             patch.object(lc, "resolve_metabolism_anchor",
-                         return_value=("m0", "self")) as resolve, \
-            patch.object(lc, "get_presented_window", return_value=window), \
-            patch("sai_memory.arasuji.storage.get_entries_covering_messages",
-                  return_value=entries):
+                         return_value=("m0", "self")))
+        stack.enter_context(
+            patch.object(lc, "get_presented_window", return_value=window))
+        for p in _patch_storage(entries, universe):
+            stack.enter_context(p)
         plan = lc.preview_refilled_history(persona, "model-a")
 
     # 提示は読み戻し後の姿 (b0..b3 が生で先頭に戻っている)
@@ -565,22 +452,26 @@ def test_refill_without_watermarks_never_touches_rows(session_factory):
     resolve.assert_not_called()
 
 
-def test_refill_measures_rows_only_against_target(session_factory):
-    """不足の判定は**会話の行だけ**を残す量と比べる (2026-09-03 まはー裁定)。
+def test_refill_measures_rows_only_against_target(session_factory, caplog):
+    """不足も終了も**会話の行だけ**を目標量と比べる (2026-09-03 / 09-05 裁定)。
 
     残す量の主語は「会話の行の量」。知覚ブロックを足した合計で測ると、巨大な
     部屋の様子が乗った窓は会話が 3,000 字しか無くても「足りている」と読まれ、
     畳みすぎた窓が二度と埋め戻らない — 本番でペルソナが直近の記憶を失った
     事故の後半 (docs/issues/protection_quota_consumed_by_perception_blocks.md)。
     旧判定 (合計) なら 3,000 + 15,000 ≥ 18,000 で None を返していた。
+
+    開いた結果が目標量を超えるのは問題ない (下限であって上限ではない)。知覚を
+    足した合計が上限を超えても、開いた結果は保って WARNING だけ出す (裁定 7)。
     """
+    import logging as _logging
+    from contextlib import ExitStack
     lc = _make_lifecycle(session_factory)
     before = [_msg(f"b{i}", 100 + i, 4000) for i in range(4)]  # 16,000 字
+    universe = before + [_msg("m0", 200, 3000)]
     persona = SimpleNamespace(
         persona_id=PERSONA_ID, model="model-a",
-        history_manager=SimpleNamespace(
-            get_history_before_anchor=lambda *a, **k: list(before),
-        ),
+        history_manager=_refill_history(universe),
         sai_memory=SimpleNamespace(conn=object(), is_ready=lambda: True),
     )
     lc.upsert_anchor_entry(PERSONA_ID, "model-a", {
@@ -594,23 +485,31 @@ def test_refill_measures_rows_only_against_target(session_factory):
         "metadata": {"tags": ["internal", "event_message", "perception"],
                      CONSUMED_PERCEPTION_KEY: True},
     }
-    with patch.object(lc, "get_metabolism_watermarks", return_value=wm), \
-            patch.object(lc, "resolve_metabolism_anchor", return_value=("m0", "self")), \
-            patch.object(lc, "get_presented_window", return_value=window), \
-            patch.object(lc, "perception_blocks_for", return_value=[block]), \
-            patch("sai_memory.arasuji.storage.get_entries_covering_messages",
-                  return_value=entries):
-        plan = lc.preview_refilled_history(persona, "model-a")
-        assert plan is not None
-        # 予算は会話の行で数える: 18,000 − 3,000 = 15,000。段 e2 (8,000) は
-        # 入り、e1 (もう 8,000) は天井を越えるので入らない。
-        assert plan["presented"] is not None
-        from sea.eviction_plan import message_chars
-        assert message_chars(plan["presented"]) == 11_000
-        assert message_chars(plan["presented"]) <= wm.target
-        assert lc.maybe_run_window_refill(persona, "room") == "ok"
+    with ExitStack() as stack:
+        stack.enter_context(
+            patch.object(lc, "get_metabolism_watermarks", return_value=wm))
+        stack.enter_context(
+            patch.object(lc, "resolve_metabolism_anchor", return_value=("m0", "self")))
+        stack.enter_context(
+            patch.object(lc, "get_presented_window", return_value=window))
+        stack.enter_context(
+            patch.object(lc, "perception_blocks_for", return_value=[block]))
+        for p in _patch_storage(entries, universe):
+            stack.enter_context(p)
+        with caplog.at_level(_logging.WARNING, logger="sea.session_lifecycle"):
+            plan = lc.preview_refilled_history(persona, "model-a")
+            assert plan is not None
+            # e2 (8,000) で 11,000 < 18,000 → e1 (8,000) も開いて 19,000 で終了。
+            # 会話文は目標量を超えてよい。
+            from sea.eviction_plan import message_chars
+            assert message_chars(plan["presented"]) == 19_000
+            assert lc.maybe_run_window_refill(persona, "room") == "ok"
     entry = lc.load_anchor_entry(PERSONA_ID, "model-a")
-    assert entry["anchor_id"] == "b2"
+    assert entry["anchor_id"] == "b0"
+    # 合計 19,000 + 知覚 15,000 = 34,000 > 上限 26,000 → WARNING だけで結果は保つ
+    assert any(
+        "exceeds the high watermark" in r.getMessage() for r in caplog.records
+    )
 
 
 def test_preview_refilled_history_none_when_at_target(session_factory):
@@ -1230,6 +1129,75 @@ def test_legacy_fold_fallback_requires_full_coverage(session_factory, tmp_path):
     conn.close()
 
 
+def test_covering_query_chunks_large_id_lists(tmp_path):
+    """覆いの照会 (get_entries_covering_messages) はチャンク境界をまたぐ id 列
+    でも、単発照会と同じエントリ集合を同じ並び (start_time 昇順) で返す。
+
+    読み戻しは「選んだあらすじの材料の最古の行から起点まで」を行数無制限で
+    読み、その全行 id をこの照会へ渡すため、SQLite の変数上限を超える長さで
+    壊れないことを固定する (docs/issues/refill_reads_by_budget_instead_of_
+    arasuji_unit.md の Codex 指摘 7)。"""
+    import sqlite3
+
+    from sai_memory.arasuji import init_arasuji_tables
+    from sai_memory.arasuji.storage import (
+        _ID_QUERY_CHUNK,
+        create_entry,
+        get_entries_covering_messages,
+    )
+    from sai_memory.memory.storage import init_db
+
+    conn = init_db(str(tmp_path / "memory.db"), check_same_thread=False)
+    init_arasuji_tables(conn)
+    # 実物のチャンク定数で境界を踏む: チャンク 2 つ + 端数 = 照会 3 回分。
+    n = _ID_QUERY_CHUNK * 2 + 200
+    ids = [f"dummy-{i:05d}" for i in range(n)]
+    # 実在の材料 id を散らす:
+    # - 先頭 (チャンク 1) = いちばん新しいエントリの材料。チャンク到達順の
+    #   まま返すと先頭に来てしまう = 最終ソートの検算。
+    # - チャンク 1/2 の境界の両側 = 同一エントリの材料が二つのチャンクに
+    #   またがって現れる = エントリ id での重複排除の検算。
+    # - チャンク 2 の途中 = start_time が NULL のエントリの材料。到達順では
+    #   3 番目だが、並びでは先頭に来なければならない (NULL 先頭の検算)。
+    # - 末尾 (チャンク 3) = いちばん古いエントリの材料。
+    ids[0] = "mat-late"
+    ids[_ID_QUERY_CHUNK - 1] = "mat-mid-a"
+    ids[_ID_QUERY_CHUNK] = "mat-mid-b"
+    ids[_ID_QUERY_CHUNK + 100] = "mat-null"
+    ids[n - 1] = "mat-early"
+    e_early = create_entry(
+        conn, level=1, content="early", source_ids=["mat-early"],
+        start_time=100, end_time=110, source_count=1, message_count=1,
+    )
+    e_mid = create_entry(
+        conn, level=1, content="mid", source_ids=["mat-mid-a", "mat-mid-b"],
+        start_time=200, end_time=210, source_count=2, message_count=2,
+    )
+    e_late = create_entry(
+        conn, level=1, content="late", source_ids=["mat-late"],
+        start_time=300, end_time=310, source_count=1, message_count=1,
+    )
+    # start_time 無し (NULL)。旧単発照会の ORDER BY start_time ASC は SQLite
+    # では NULL を先頭に置く — その契約をここで固定する。
+    e_null = create_entry(
+        conn, level=1, content="null-start", source_ids=["mat-null"],
+        source_count=1, message_count=1,
+    )
+    # 変数上限をチャンク幅ちょうどまで絞る: 分割しない実装 (id 全件を 1 回の
+    # SQL に載せる) は n 変数 > 上限で必ず "too many SQL variables" になる。
+    # 既定の上限 (この環境では 250,000) のままだと n=1,200 の単発照会が
+    # 通ってしまい、チャンク分割の回帰を検出できない。
+    conn.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, _ID_QUERY_CHUNK)
+    result = get_entries_covering_messages(conn, ids)
+    assert [e.id for e in result] == [
+        e_null.id, e_early.id, e_mid.id, e_late.id,
+    ]
+    assert result[0].start_time is None
+    # 重複排除の検算: e_mid は両チャンクで引き当たるが 1 件だけ返る。
+    assert len(result) == 4
+    conn.close()
+
+
 # ---------------------------------------------------------------------------
 # 提示 (apply_folds) と直列化の印対応
 # ---------------------------------------------------------------------------
@@ -1314,8 +1282,153 @@ def test_get_messages_before_id(tmp_path):
     conn.close()
 
 
+def test_latest_primary_entry_before_message_and_oldest_present_source(tmp_path):
+    """新設計の照会 (2026-09-05): 「起点より前に材料を持ついちばん新しい一次
+    あらすじ」と「材料の最古の実在行」。材料が全部消えたエントリと別スレッド
+    (Stelis) のエントリは候補にならない。"""
+    from sai_memory.arasuji import init_arasuji_tables
+    from sai_memory.arasuji.storage import (
+        create_entry,
+        get_latest_primary_entry_before_message,
+        get_oldest_present_message_id,
+    )
+    from sai_memory.memory.storage import init_db
+
+    conn = init_db(str(tmp_path / "memory.db"), check_same_thread=False)
+    init_arasuji_tables(conn)
+    for i in range(6):
+        conn.execute(
+            "INSERT INTO messages (id, thread_id, role, content, created_at, metadata) "
+            "VALUES (?, 't-main', 'user', 'hello', ?, NULL)",
+            (f"m{i}", 1000 + i),
+        )
+    conn.commit()
+    e_old = create_entry(
+        conn, level=1, content="old", source_ids=["m0", "m1"],
+        start_time=1000, end_time=1001, source_count=2, message_count=2,
+    )
+    e_new = create_entry(
+        conn, level=1, content="new", source_ids=["m2", "m3"],
+        start_time=1002, end_time=1003, source_count=2, message_count=2,
+    )
+    # 材料が全部消えたエントリは、end_time が最新でも候補にならない
+    # (開く位置を決められない)
+    create_entry(
+        conn, level=1, content="all-gone", source_ids=["gone-1", "gone-2"],
+        start_time=1004, end_time=1004, source_count=2, message_count=2,
+    )
+    # 別スレッド (Stelis) のエントリも候補にならない
+    create_entry(
+        conn, level=1, content="stelis", source_ids=["m4"],
+        start_time=1004, end_time=1004, source_count=1, message_count=1,
+        thread_id="th-stelis",
+    )
+
+    got = get_latest_primary_entry_before_message(conn, "m5")
+    assert got is not None and got.id == e_new.id
+    got = get_latest_primary_entry_before_message(
+        conn, "m5", exclude_entry_ids=[e_new.id],
+    )
+    assert got is not None and got.id == e_old.id
+    # 起点より前に材料が無い / 起点が実在しない → None
+    assert get_latest_primary_entry_before_message(conn, "m0") is None
+    assert get_latest_primary_entry_before_message(conn, "nope") is None
+    # 材料の一部だけが起点より前でも候補になる (m2 < m3 の間に起点を置く)
+    got = get_latest_primary_entry_before_message(
+        conn, "m3", exclude_entry_ids=[e_old.id],
+    )
+    assert got is not None and got.id == e_new.id
+
+    assert get_oldest_present_message_id(conn, ["gone", "m3", "m1"]) == "m1"
+    assert get_oldest_present_message_id(conn, ["gone"]) is None
+    assert get_oldest_present_message_id(conn, []) is None
+    conn.close()
+
+
+def test_latest_primary_entry_tiebreak_null_end_time_and_level(tmp_path):
+    """照会の絞り込みと順序の残りの条件 (隣のテストが固定していない側):
+
+    - ``end_time`` 同値の 2 エントリは ``created_at`` の降順で選ぶ
+      (挿入順と逆の created_at を与え、行の並びではなく列で選ぶことを固定)
+    - ``end_time`` が NULL のエントリは値持ちより後回し (SQLite の DESC で
+      NULL は最後)。候補外ではないので、値持ちを除外すれば選ばれる
+    - level=2 以上のエントリは ``end_time`` が最新でも選ばれない
+      (一次あらすじだけが読み戻しの対象)
+
+    別スレッド (thread_id 付き) が end_time 最新でも選ばれないことは隣の
+    テストが固定済み (stelis の end_time=1004 > e_new の 1003)。
+    """
+    from sai_memory.arasuji import init_arasuji_tables
+    from sai_memory.arasuji.storage import (
+        create_entry,
+        get_latest_primary_entry_before_message,
+    )
+    from sai_memory.memory.storage import init_db
+
+    conn = init_db(str(tmp_path / "memory.db"), check_same_thread=False)
+    init_arasuji_tables(conn)
+    for i in range(5):
+        conn.execute(
+            "INSERT INTO messages (id, thread_id, role, content, created_at, metadata) "
+            "VALUES (?, 't-main', 'user', 'hello', ?, NULL)",
+            (f"m{i}", 1000 + i),
+        )
+    conn.commit()
+
+    def _set_created_at(entry_id, value):
+        # arasuji_entries は memopedia_pages 上の互換 VIEW。created_at は
+        # ページの列 (create_entry は現在時刻を刻む) なので、物理側を直接
+        # 書き換えて挿入順と独立に制御する。
+        conn.execute(
+            "UPDATE memopedia_pages SET created_at = ? WHERE id = ?",
+            (value, entry_id),
+        )
+
+    # end_time 同値の 2 エントリ。先に挿入した方へ新しい created_at を与える —
+    # created_at DESC で選ばれていれば e_first、挿入順 (行の並び) で選ばれて
+    # いれば e_second が返るので、タイブレークの列を判別できる。
+    e_first = create_entry(
+        conn, level=1, content="tie-created-later", source_ids=["m0"],
+        start_time=1000, end_time=1001, source_count=1, message_count=1,
+    )
+    e_second = create_entry(
+        conn, level=1, content="tie-created-earlier", source_ids=["m1"],
+        start_time=1001, end_time=1001, source_count=1, message_count=1,
+    )
+    _set_created_at(e_first.id, 200)
+    _set_created_at(e_second.id, 100)
+    conn.commit()
+    got = get_latest_primary_entry_before_message(conn, "m4")
+    assert got is not None and got.id == e_first.id
+
+    # end_time NULL は created_at が最新でも値持ちの後回し
+    e_null = create_entry(
+        conn, level=1, content="null-end-time", source_ids=["m2"],
+        start_time=1002, end_time=None, source_count=1, message_count=1,
+    )
+    _set_created_at(e_null.id, 999_999)
+    conn.commit()
+    got = get_latest_primary_entry_before_message(conn, "m4")
+    assert got is not None and got.id == e_first.id
+    # 候補外ではない: 値持ちを除外すれば NULL のエントリが選ばれる
+    got = get_latest_primary_entry_before_message(
+        conn, "m4", exclude_entry_ids=[e_first.id, e_second.id],
+    )
+    assert got is not None and got.id == e_null.id
+
+    # level=2 のエントリは end_time が全エントリより新しくても選ばれない
+    create_entry(
+        conn, level=2, content="secondary", source_ids=["m3"],
+        start_time=1003, end_time=9999, source_count=1, message_count=1,
+    )
+    got = get_latest_primary_entry_before_message(conn, "m4")
+    assert got is not None and got.id == e_first.id
+    conn.close()
+
+
 # ---------------------------------------------------------------------------
-# 読み戻しの立て直し (docs/issues/window_floor_and_refill_redesign.md ②③④⑤)
+# 読み戻しの再設計 (2026-09-05 裁定 —
+# docs/issues/refill_reads_by_budget_instead_of_arasuji_unit.md)
 # ---------------------------------------------------------------------------
 
 
@@ -1324,23 +1437,15 @@ def _straddling_setup(session_factory, *, outside_chars, before_older=None,
     """起点 m0 をまたぐ圧縮区間 F (b1, b2 が起点より左) を持つ窓。
 
     F は digest 提示 (b1, b2 が窓の外なので apply_folds が digest に倒す)。
-    ``before_older`` は F の先頭 b1 よりさらに古い材料 (段の続きの検証用)。
+    ``before_older`` は F の先頭 b1 よりさらに古い行 (古い側のあらすじの検証用)。
     """
     lc = _make_lifecycle(session_factory)
     b1, b2 = _msg("b1", 90, outside_chars), _msg("b2", 91, outside_chars)
     m0, m1 = _msg("m0", 100, 1000), _msg("m1", 101, 1000)
-
-    def _from_anchor(start_id, **_k):
-        rows = list(before_older or []) + [b1, b2, m0, m1]
-        idx = next(i for i, m in enumerate(rows) if m["id"] == start_id)
-        return rows[idx:]
-
+    universe = list(before_older or []) + [b1, b2, m0, m1]
     persona = SimpleNamespace(
         persona_id=PERSONA_ID, model="model-a",
-        history_manager=SimpleNamespace(
-            get_history_from_anchor=_from_anchor,
-            get_history_before_anchor=lambda *a, **k: list(before_older or []),
-        ),
+        history_manager=_refill_history(universe),
         sai_memory=SimpleNamespace(conn=object(), is_ready=lambda: True),
     )
     lc.upsert_anchor_entry(PERSONA_ID, "model-a", {
@@ -1352,18 +1457,18 @@ def _straddling_setup(session_factory, *, outside_chars, before_older=None,
         patch.object(lc, "get_presented_window", return_value=window),
         patch.object(lc, "resolve_metabolism_anchor", return_value=("m0", "self")),
         patch.object(lc, "_resolve_fold_digest", lambda persona, f: "d" * 100),
-        patch("sai_memory.arasuji.storage.get_entries_covering_messages",
-              return_value=list(older_entries or [])),
+        *_patch_storage(list(older_entries or []), universe),
     ]
     return lc, persona, patches
 
 
-def test_refill_rewinds_across_a_straddling_fold_regardless_of_budget(
+def test_refill_opens_a_straddling_fold_whole_regardless_of_target(
     session_factory,
 ):
-    """② 起点をまたぐ圧縮区間: 起点を区間の先頭 (b1) へ戻し、区間を生で見せる。
-    予算に関係なく行う — 戻した後の行 (10,000) が残す量 (5,000) を超えても。
-    旧規則ではこの一歩目で梯子が止まり、窓が二度と埋まらなかった。"""
+    """起点をまたぐ圧縮区間も「いちばん新しいあらすじ」として丸ごと開く。
+    開いた結果 (10,000) が目標量 (5,000) を超えても問題ない — 途中で切らない
+    (目標量は下限であって上限ではない)。旧設計はこの一歩目で読み戻しが止まり、
+    窓が二度と埋まらなかった。"""
     lc, persona, patches = _straddling_setup(session_factory, outside_chars=4000)
     wm = Watermarks(target=5000, high=20_000)
     from contextlib import ExitStack
@@ -1374,7 +1479,7 @@ def test_refill_rewinds_across_a_straddling_fold_regardless_of_budget(
         assert plan is not None
         assert plan["new_anchor_id"] == "b1"
         from sea.eviction_plan import stored_message_chars
-        assert stored_message_chars(plan["presented"]) == 10_000  # 生で戻った
+        assert stored_message_chars(plan["presented"]) == 10_000  # 丸ごと生で戻った
         assert lc.maybe_run_window_refill(persona, "room") == "ok"
     entry = lc.load_anchor_entry(PERSONA_ID, "model-a")
     assert entry["anchor_id"] == "b1"
@@ -1383,16 +1488,17 @@ def test_refill_rewinds_across_a_straddling_fold_regardless_of_budget(
     assert saved[0].presented_raw is True
 
 
-def test_refill_continues_down_the_ladder_after_the_straddling_fold(
+def test_refill_continues_to_older_arasuji_after_the_straddling_fold(
     session_factory,
 ):
-    """② の後段: またぐ区間を戻したあと、残りの予算であらすじの段も戻る。"""
+    """またぐ区間を開いても目標量に届かなければ、起点より古い側のあらすじへ
+    続けて降りる (場所の区別なく新しい順)。"""
     older = [_msg("a0", 80, 1000), _msg("a1", 81, 1000)]
     lc, persona, patches = _straddling_setup(
         session_factory, outside_chars=500, before_older=older,
         older_entries=[_entry("e_a", ["a0", "a1"])],
     )
-    # またぐ区間で 500+500+1000+1000 = 3,000。残り 2,000 で段 e_a (2,000) が入る。
+    # またぐ区間で 500+500+1000+1000 = 3,000 < 5,000 → e_a (2,000) も開いて 5,000。
     wm = Watermarks(target=5000, high=20_000)
     from contextlib import ExitStack
     with ExitStack() as stack, patch.object(lc, "get_metabolism_watermarks", return_value=wm):
@@ -1406,15 +1512,16 @@ def test_refill_continues_down_the_ladder_after_the_straddling_fold(
     assert all(f.presented_raw for f in saved)
 
 
-def _ladder_setup(session_factory, *, perception_chars):
-    """段 e1 (b0,b1) / e2 (b2,b3) の梯子 + 知覚ブロック。窓の行は m0 (1,000)。"""
+def _older_arasuji_setup(session_factory, *, perception_chars):
+    """あらすじ e1 (b0,b1) / e2 (b2,b3) が起点の手前を覆う窓 + 知覚ブロック。
+
+    窓の行は m0 (1,000 字)。"""
     lc = _make_lifecycle(session_factory)
     before = [_msg(f"b{i}", 100 + i, 1000) for i in range(4)]
+    universe = before + [_msg("m0", 200, 1000)]
     persona = SimpleNamespace(
         persona_id=PERSONA_ID, model="model-a",
-        history_manager=SimpleNamespace(
-            get_history_before_anchor=lambda *a, **k: list(before),
-        ),
+        history_manager=_refill_history(universe),
         sai_memory=SimpleNamespace(conn=object(), is_ready=lambda: True),
     )
     lc.upsert_anchor_entry(PERSONA_ID, "model-a", {
@@ -1427,140 +1534,413 @@ def _ladder_setup(session_factory, *, perception_chars):
         patch.object(lc, "resolve_metabolism_anchor", return_value=("m0", "self")),
         patch.object(lc, "get_presented_window", return_value=window),
         patch.object(lc, "perception_blocks_for", return_value=blocks),
-        patch("sai_memory.arasuji.storage.get_entries_covering_messages",
-              return_value=entries),
+        *_patch_storage(entries, universe),
     ]
     return lc, persona, patches
 
 
-def test_refill_verification_drops_only_the_oldest_rung_when_over_high(
+def test_refill_keeps_the_opened_result_and_warns_when_over_high(
     session_factory, caplog,
 ):
-    """③④ 最終検算は上限 (合計・知覚込み) と比べ、超えたら最古の段だけ外す。
+    """⑤ 仕上げの検算は上限 (合計・知覚込み) と比べるが、超えても開いた結果は
+    保って WARNING を出すだけ (裁定 7)。「古いものから外して測り直す」は無い —
+    足りないから開いているのだから原理的に不要。
 
-    行 1,000 + 段二つ 4,000 = 5,000 (残す量ちょうど) に知覚 1,500 で合計
-    6,500 > 上限 6,000 → e1 を外して行 3,000 + 知覚 1,500 = 4,500 で収まる。
-    「全部やめる」ではない。"""
+    行 1,000 + あらすじ二つ 4,000 = 5,000 (目標量ちょうど) に知覚 1,500 で
+    合計 6,500 > 上限 6,000。旧設計はここで古い方のあらすじを外していた。"""
     import logging as _logging
-    lc, persona, patches = _ladder_setup(session_factory, perception_chars=1500)
-    wm = Watermarks(target=5000, high=6000)
     from contextlib import ExitStack
+    lc, persona, patches = _older_arasuji_setup(session_factory, perception_chars=1500)
+    wm = Watermarks(target=5000, high=6000)
     with ExitStack() as stack, patch.object(lc, "get_metabolism_watermarks", return_value=wm):
         for p in patches:
             stack.enter_context(p)
-        with caplog.at_level(_logging.INFO, logger="sea.session_lifecycle"):
+        with caplog.at_level(_logging.WARNING, logger="sea.session_lifecycle"):
             plan = lc.preview_refilled_history(persona, "model-a")
             assert plan is not None
-            assert plan["new_anchor_id"] == "b2"
+            assert plan["new_anchor_id"] == "b0"  # 何も外れていない
             assert lc.maybe_run_window_refill(persona, "room") == "ok"
-    assert lc.load_anchor_entry(PERSONA_ID, "model-a")["anchor_id"] == "b2"
-    assert any("dropping the oldest rung" in r.getMessage() for r in caplog.records)
+    assert lc.load_anchor_entry(PERSONA_ID, "model-a")["anchor_id"] == "b0"
+    assert any(
+        "exceeds the high watermark" in r.getMessage() for r in caplog.records
+    )
 
 
-def test_refill_verification_keeps_everything_at_or_below_high(session_factory):
-    """③ 上限以下なら全段残る — 合計が残す量を超えていても (残す量とは比べない)。
-
-    行 5,000 + 知覚 900 = 5,900 > 残す量 5,000 だが ≤ 上限 6,000 → 全部残す。
-    旧検算 (残す量と比較) の名残が無いことの検算。"""
-    lc, persona, patches = _ladder_setup(session_factory, perception_chars=900)
+def test_refill_does_not_warn_at_or_below_high(session_factory, caplog):
+    """合計が上限以下なら WARNING は出ない — 会話文が目標量ちょうどでも
+    (検算が比べる相手は上限だけ)。行 5,000 + 知覚 900 = 5,900 ≤ 上限 6,000。"""
+    import logging as _logging
+    from contextlib import ExitStack
+    lc, persona, patches = _older_arasuji_setup(session_factory, perception_chars=900)
     wm = Watermarks(target=5000, high=6000)
-    from contextlib import ExitStack
     with ExitStack() as stack, patch.object(lc, "get_metabolism_watermarks", return_value=wm):
         for p in patches:
             stack.enter_context(p)
-        assert lc.maybe_run_window_refill(persona, "room") == "ok"
+        with caplog.at_level(_logging.WARNING, logger="sea.session_lifecycle"):
+            assert lc.maybe_run_window_refill(persona, "room") == "ok"
     assert lc.load_anchor_entry(PERSONA_ID, "model-a")["anchor_id"] == "b0"
+    assert not any(
+        "exceeds the high watermark" in r.getMessage() for r in caplog.records
+    )
 
 
-def test_refill_verification_without_high_watermark_keeps_everything(session_factory):
-    """上限を持たない model (high=None) は最終検算で何も外さない。"""
-    lc, persona, patches = _ladder_setup(session_factory, perception_chars=50_000)
+def test_refill_without_high_watermark_never_warns(session_factory, caplog):
+    """上限を持たない model (high=None) は検算の比較相手が無い — 開くだけ。"""
+    import logging as _logging
+    from contextlib import ExitStack
+    lc, persona, patches = _older_arasuji_setup(
+        session_factory, perception_chars=50_000,
+    )
     wm = Watermarks(target=5000, high=None)
-    from contextlib import ExitStack
     with ExitStack() as stack, patch.object(lc, "get_metabolism_watermarks", return_value=wm):
         for p in patches:
             stack.enter_context(p)
-        assert lc.maybe_run_window_refill(persona, "room") == "ok"
+        with caplog.at_level(_logging.WARNING, logger="sea.session_lifecycle"):
+            assert lc.maybe_run_window_refill(persona, "room") == "ok"
     assert lc.load_anchor_entry(PERSONA_ID, "model-a")["anchor_id"] == "b0"
+    assert not any(
+        "exceeds the high watermark" in r.getMessage() for r in caplog.records
+    )
+
+
+def test_refill_opens_the_newest_arasuji_whole_and_stops_at_target(
+    session_factory,
+):
+    """①② いちばん新しいあらすじは途中で切らず丸ごと開き、会話文が目標量に
+    達したら次のあらすじへは進まない。不足は 1,000 字でもあらすじ全体
+    (4,000) が生に戻る — 超過してよい。"""
+    from contextlib import ExitStack
+    lc = _make_lifecycle(session_factory)
+    before = [_msg(f"b{i}", 100 + i, 2000) for i in range(4)]  # b0..b3
+    universe = before + [_msg("m0", 200, 1000)]
+    persona = SimpleNamespace(
+        persona_id=PERSONA_ID, model="model-a",
+        history_manager=_refill_history(universe),
+        sai_memory=SimpleNamespace(conn=object(), is_ready=lambda: True),
+    )
+    lc.upsert_anchor_entry(PERSONA_ID, "model-a", {
+        "anchor_id": "m0", "updated_at": _now().isoformat(), "ttl_seconds": 3600,
+    })
+    wm = Watermarks(target=2000, high=None)
+    window = _window("m0", [_msg("m0", 200, 1000)])
+    entries = [_entry("e_a", ["b0", "b1"]), _entry("e_b", ["b2", "b3"])]
+    with ExitStack() as stack:
+        stack.enter_context(
+            patch.object(lc, "get_metabolism_watermarks", return_value=wm))
+        stack.enter_context(
+            patch.object(lc, "resolve_metabolism_anchor", return_value=("m0", "self")))
+        stack.enter_context(
+            patch.object(lc, "get_presented_window", return_value=window))
+        for p in _patch_storage(entries, universe):
+            stack.enter_context(p)
+        plan = lc.preview_refilled_history(persona, "model-a")
+        assert plan is not None
+        assert lc.maybe_run_window_refill(persona, "room") == "ok"
+    entry = lc.load_anchor_entry(PERSONA_ID, "model-a")
+    assert entry["anchor_id"] == "b2"  # e_b の最古の行まで。e_a へは降りない
+    saved = deserialize_folds(entry.get("folded_ranges"))
+    assert [f.chronicle_entry_ids for f in saved] == [["e_b"]]
+    assert saved[0].presented_raw is True
+
+
+def test_refill_opens_older_arasuji_by_end_time_not_material_position(
+    session_factory,
+):
+    """古い側のあらすじの「いちばん新しい」は照会が返す end_time の降順であって、
+    材料の行の位置ではない (実物の get_latest_primary_entry_before_message の
+    ORDER BY end_time DESC と同じ物差し — 偽物の照会もこれに合わせてある)。
+
+    材料の位置の順と end_time の順を意図的に食い違わせる: A は材料 (a0, a1) が
+    古い位置だが end_time が新しく、B は材料 (b0, b1) が新しい位置だが
+    end_time が古い。end_time が新しい A が先に選ばれ、起点は A の最古の材料
+    a0 まで戻る (a0 から起点までの範囲読みなので B の材料も一緒に生へ戻り、
+    B は同じ一枚の区間に束ねられる)。照会一回で会話文が目標量に達して止まる。
+    材料の位置で選ぶと B だけが開いて起点は b0 で止まり、a0, a1 は生に
+    戻らない — 既存テストは位置順と end_time 順が一致する入力ばかりなので、
+    この食い違いを固定するのは本テストだけ。
+    """
+    from contextlib import ExitStack
+    lc = _make_lifecycle(session_factory)
+    a0, a1 = _msg("a0", 100, 1000), _msg("a1", 101, 1000)
+    b0, b1 = _msg("b0", 102, 1000), _msg("b1", 103, 1000)
+    universe = [a0, a1, b0, b1, _msg("m0", 200, 1000)]
+    persona = SimpleNamespace(
+        persona_id=PERSONA_ID, model="model-a",
+        history_manager=_refill_history(universe),
+        sai_memory=SimpleNamespace(conn=object(), is_ready=lambda: True),
+    )
+    lc.upsert_anchor_entry(PERSONA_ID, "model-a", {
+        "anchor_id": "m0", "updated_at": _now().isoformat(), "ttl_seconds": 3600,
+    })
+    wm = Watermarks(target=3000, high=None)
+    window = _window("m0", [_msg("m0", 200, 1000)])
+    entries = [
+        _entry("e_a", ["a0", "a1"], end_time=250),  # 材料は古い位置・end_time は新
+        _entry("e_b", ["b0", "b1"], end_time=150),  # 材料は新しい位置・end_time は旧
+    ]
+    with ExitStack() as stack:
+        stack.enter_context(
+            patch.object(lc, "get_metabolism_watermarks", return_value=wm))
+        stack.enter_context(
+            patch.object(lc, "resolve_metabolism_anchor", return_value=("m0", "self")))
+        stack.enter_context(
+            patch.object(lc, "get_presented_window", return_value=window))
+        for p in _patch_storage(entries, universe):
+            stack.enter_context(p)
+        plan = lc.preview_refilled_history(persona, "model-a")
+        assert plan is not None
+        # A が先: 起点は A の最古の材料 a0 まで戻り、範囲読みで B の材料も生に立つ
+        assert plan["new_anchor_id"] == "a0"
+        assert [m["id"] for m in plan["presented"]] == ["a0", "a1", "b0", "b1", "m0"]
+        # B は二つ目の選択ではなく、A の範囲読みに束ねられて記録に載る
+        assert sorted(plan["fold_entry_ids"]) == ["e_a", "e_b"]
+        assert lc.maybe_run_window_refill(persona, "room") == "ok"
+    entry = lc.load_anchor_entry(PERSONA_ID, "model-a")
+    assert entry["anchor_id"] == "a0"
+    saved = deserialize_folds(entry.get("folded_ranges"))
+    # 開いた範囲に材料を持つ B も一枚の区間に束ねて記録される
+    assert [f.chronicle_entry_ids for f in saved] == [["e_a", "e_b"]]
+    assert saved[0].presented_raw is True
+
+
+def test_refill_opens_an_arasuji_with_unreadable_rows_using_the_readable_ones(
+    session_factory,
+):
+    """③ 材料に読めない行があるあらすじでも止まらない — 読めない id は飛ばし、
+    読める行を全部生で戻して開く。旧設計はここで壊れていると判定して読み戻し
+    全体が止まり、本番の窓が二度と埋まらなかった (2026-09-04 エリスの実機)。"""
+    from contextlib import ExitStack
+    lc = _make_lifecycle(session_factory)
+    b0, b1 = _msg("b0", 100, 1000), _msg("b1", 101, 1000)
+    universe = [b0, b1, _msg("m0", 200, 1000)]  # ghost は実在しない
+    persona = SimpleNamespace(
+        persona_id=PERSONA_ID, model="model-a",
+        history_manager=_refill_history(universe),
+        sai_memory=SimpleNamespace(conn=object(), is_ready=lambda: True),
+    )
+    lc.upsert_anchor_entry(PERSONA_ID, "model-a", {
+        "anchor_id": "m0", "updated_at": _now().isoformat(), "ttl_seconds": 3600,
+    })
+    wm = Watermarks(target=2500, high=None)
+    window = _window("m0", [_msg("m0", 200, 1000)])
+    entries = [_entry("e1", ["ghost", "b0", "b1"])]
+    with ExitStack() as stack:
+        stack.enter_context(
+            patch.object(lc, "get_metabolism_watermarks", return_value=wm))
+        stack.enter_context(
+            patch.object(lc, "resolve_metabolism_anchor", return_value=("m0", "self")))
+        stack.enter_context(
+            patch.object(lc, "get_presented_window", return_value=window))
+        for p in _patch_storage(entries, universe):
+            stack.enter_context(p)
+        assert lc.maybe_run_window_refill(persona, "room") == "ok"
+    entry = lc.load_anchor_entry(PERSONA_ID, "model-a")
+    assert entry["anchor_id"] == "b0"
+    saved = deserialize_folds(entry.get("folded_ranges"))
+    assert saved[0].chronicle_entry_ids == ["e1"]
+    assert saved[0].message_ids == ["b0", "b1"]  # ghost は載らない
+    assert saved[0].presented_raw is True
+
+
+def test_refill_restores_uncovered_rows_between_arasuji_raw(session_factory):
+    """編纂対象なのにどのあらすじにも覆われていない行も、開く範囲に居れば
+    一緒に生で戻る (裁定 9)。旧設計は「編纂なしで忘れた過去」と判定してその
+    手前で止まっていた — なにも忘れないのが基本思想なので、読めないほうがバグ。"""
+    from contextlib import ExitStack
+    lc = _make_lifecycle(session_factory)
+    b0 = _msg("b0", 100, 1000)    # e1 被覆
+    gap = _msg("gap", 101, 1000)  # どのあらすじにも覆われていない
+    b2 = _msg("b2", 102, 1000)    # e2 被覆
+    universe = [b0, gap, b2, _msg("m0", 200, 1000)]
+    persona = SimpleNamespace(
+        persona_id=PERSONA_ID, model="model-a",
+        history_manager=_refill_history(universe),
+        sai_memory=SimpleNamespace(conn=object(), is_ready=lambda: True),
+    )
+    lc.upsert_anchor_entry(PERSONA_ID, "model-a", {
+        "anchor_id": "m0", "updated_at": _now().isoformat(), "ttl_seconds": 3600,
+    })
+    wm = Watermarks(target=4000, high=None)
+    window = _window("m0", [_msg("m0", 200, 1000)])
+    entries = [_entry("e1", ["b0"]), _entry("e2", ["b2"])]
+    with ExitStack() as stack:
+        stack.enter_context(
+            patch.object(lc, "get_metabolism_watermarks", return_value=wm))
+        stack.enter_context(
+            patch.object(lc, "resolve_metabolism_anchor", return_value=("m0", "self")))
+        stack.enter_context(
+            patch.object(lc, "get_presented_window", return_value=window))
+        for p in _patch_storage(entries, universe):
+            stack.enter_context(p)
+        plan = lc.preview_refilled_history(persona, "model-a")
+        assert plan is not None
+        # gap も生で提示に立つ (合計 4,000 に数えられて目標に届く)
+        assert [m["id"] for m in plan["presented"]] == ["b0", "gap", "b2", "m0"]
+        assert lc.maybe_run_window_refill(persona, "room") == "ok"
+    entry = lc.load_anchor_entry(PERSONA_ID, "model-a")
+    assert entry["anchor_id"] == "b0"
+    saved = deserialize_folds(entry.get("folded_ranges"))
+    assert [f.chronicle_entry_ids for f in saved] == [["e1"], ["e2"]]
+    # gap はどの区間にも属さない (覆いが無いのが正しい姿)
+    assert all("gap" not in f.message_ids for f in saved)
+
+
+def test_refill_opens_by_recency_regardless_of_location(session_factory):
+    """④ 窓内 digest・またぎ区間・古い側のあらすじは、場所ではなく新しさの順で
+    開く。目標量に達したらそこで終わり、残りは閉じたまま。"""
+    from contextlib import ExitStack
+    lc = _make_lifecycle(session_factory)
+    b9 = _msg("b9", 90, 3000)   # またぎ区間 F の外側の行
+    s1 = _msg("s1", 100, 1000)  # 窓の先頭 (F の窓側)
+    m1 = _msg("m1", 101, 1000)
+    m2 = _msg("m2", 102, 5000)  # 窓内 digest 区間 G の中身 (いちばん新しい)
+    universe = [b9, s1, m1, m2]
+    persona = SimpleNamespace(
+        persona_id=PERSONA_ID, model="model-a",
+        history_manager=_refill_history(universe),
+        sai_memory=SimpleNamespace(conn=object(), is_ready=lambda: True),
+    )
+    lc.upsert_anchor_entry(PERSONA_ID, "model-a", {
+        "anchor_id": "s1", "updated_at": _now().isoformat(), "ttl_seconds": 3600,
+    })
+    fold_f = FoldedRange(message_ids=["b9", "s1"], chronicle_entry_ids=["e_f"])
+    fold_g = FoldedRange(message_ids=["m2"], chronicle_entry_ids=["e_g"])
+    raw = [s1, m1, m2]
+    presented = [_ph("s1", chars=100), m1, _ph("m2", chars=100)]
+    window = _window("s1", presented, raw=raw, folds=[fold_f, fold_g])
+    lookups = []
+
+    def _lookup(conn, message_id, *, exclude_entry_ids=()):
+        lookups.append(str(message_id))
+        return None
+
+    def _run(target):
+        fold_f.presented_raw = False
+        fold_g.presented_raw = False
+        lookups.clear()
+        wm = Watermarks(target=target, high=None)
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(
+                lc, "resolve_metabolism_anchor", return_value=("s1", "self")))
+            stack.enter_context(patch.object(
+                lc, "get_presented_window", return_value=window))
+            stack.enter_context(patch.object(
+                lc, "_resolve_fold_digest", lambda persona, f: "d" * 100))
+            stack.enter_context(patch(
+                "sai_memory.arasuji.storage."
+                "get_latest_primary_entry_before_message",
+                side_effect=_lookup))
+            return lc._plan_window_refill(persona, "model-a", "s1", wm)
+
+    # 目標 5,500: いちばん新しい G (窓内 digest) だけで足りる — またぎ区間 F は
+    # 閉じたまま、起点も動かない。古い側のあらすじは照会すらされない。
+    plan = _run(5500)
+    assert plan is not None
+    assert plan["new_anchor_id"] == "s1"
+    assert fold_g.presented_raw is True
+    assert fold_f.presented_raw is False
+    assert plan["opened_in_window"] == 1
+    assert plan["opened_straddling"] == 0
+    assert lookups == []
+
+    # 目標 8,000: G の次に新しい F (またぎ区間) も開く — それで届くので
+    # 古い側のあらすじは照会すらされない。
+    plan = _run(8000)
+    assert plan is not None
+    assert plan["new_anchor_id"] == "b9"
+    assert fold_g.presented_raw is True
+    assert fold_f.presented_raw is True
+    assert plan["opened_straddling"] == 1
+    assert lookups == []
 
 
 def test_refill_logs_why_it_planned_nothing(session_factory, caplog):
-    """⑤ 見送りの各経路に INFO で理由が残る。"""
+    """見送りの各経路に INFO で理由が残る。"""
     import logging as _logging
+    from contextlib import ExitStack
     lc = _make_lifecycle(session_factory)
     wm = Watermarks(target=5000, high=10_000)
     lc.upsert_anchor_entry(PERSONA_ID, "model-a", {
         "anchor_id": "m0", "updated_at": _now().isoformat(), "ttl_seconds": 3600,
     })
 
-    def _persona(before, ready=True):
+    def _persona_for(universe, ready=True):
         return SimpleNamespace(
             persona_id=PERSONA_ID, model="model-a",
-            history_manager=SimpleNamespace(
-                get_history_before_anchor=lambda *a, **k: list(before),
-            ),
+            history_manager=_refill_history(universe),
             sai_memory=SimpleNamespace(conn=object(), is_ready=lambda: ready),
         )
 
-    def _messages(entries, before, presented_chars=1000):
+    def _messages(entries, universe, presented_chars=1000, ready=True,
+                  extra_patches=()):
         caplog.clear()
         window = _window("m0", [_msg("m0", 200, presented_chars)])
-        with patch.object(lc, "get_metabolism_watermarks", return_value=wm), \
-                patch.object(lc, "resolve_metabolism_anchor", return_value=("m0", "self")), \
-                patch.object(lc, "get_presented_window", return_value=window), \
-                patch("sai_memory.arasuji.storage.get_entries_covering_messages",
-                      return_value=entries), \
-                caplog.at_level(_logging.INFO, logger="sea.session_lifecycle"):
-            assert lc.preview_refilled_history(_persona(before), "model-a") is None
+        with ExitStack() as stack:
+            stack.enter_context(
+                patch.object(lc, "get_metabolism_watermarks", return_value=wm))
+            stack.enter_context(patch.object(
+                lc, "resolve_metabolism_anchor", return_value=("m0", "self")))
+            stack.enter_context(
+                patch.object(lc, "get_presented_window", return_value=window))
+            for p in _patch_storage(entries, universe):
+                stack.enter_context(p)
+            for p in extra_patches:
+                stack.enter_context(p)
+            with caplog.at_level(_logging.INFO, logger="sea.session_lifecycle"):
+                lc.preview_refilled_history(_persona_for(universe, ready), "model-a")
         return [r.getMessage() for r in caplog.records if r.levelno == _logging.INFO]
 
+    m0 = _msg("m0", 200, 1000)
     # 不足なし
-    msgs = _messages([], [], presented_chars=6000)
+    msgs = _messages([], [m0], presented_chars=6000)
     assert any("refill not needed" in m for m in msgs)
-    # 材料なし (before 空)
-    msgs = _messages([], [])
-    assert any("no material before the anchor" in m for m in msgs)
-    # 覆うあらすじなし
-    before = [_msg("b0", 100, 1000)]
-    msgs = _messages([], before)
-    assert any("no covering entries" in m for m in msgs)
-    # 段が壊れている (どの段・不足 id 数)
-    msgs = _messages([_entry("e1", ["b0", "lost"])], before)
-    assert any("rung 1 is broken (1 source id(s) missing" in m for m in msgs)
-    # 忘れた過去に当たった (最初の段と起点の間に、編纂対象なのに被覆の無い行)
-    before2 = [_msg("b0", 100, 1000), _msg("gap", 101, 1000)]
-    with patch("sai_memory.memory.storage.filter_chronicle_eligible_ids",
-               return_value=["b0", "gap"]):
-        msgs = _messages([_entry("e1", ["b0"])], before2)
-    assert any("forgotten past" in m for m in msgs)
-    # 予算超過 (段が予算に入らない)
-    big = [_msg("b0", 100, 9000)]
-    msgs = _messages([_entry("e1", ["b0"])], big)
-    assert any("exceeds the budget" in m for m in msgs)
+    # 起点より古い側に開けるあらすじが無い
+    msgs = _messages([], [_msg("b0", 100, 1000), m0])
+    assert any(
+        "planned nothing" in m and "no arasuji left to open" in m for m in msgs
+    )
+    # 器が無い (SAIMemory not ready)
+    msgs = _messages([], [m0], ready=False)
+    assert any("history or memory store unavailable" in m for m in msgs)
+    # 材料が一行も実在しないあらすじは飛ばして次へ (次が無ければ見送り)
+    ghost_entry = _entry("e1", ["ghost-a", "ghost-b"])
+
+    def _latest_ghost(conn, message_id, *, exclude_entry_ids=()):
+        if "e1" in {str(x) for x in exclude_entry_ids}:
+            return None
+        return ghost_entry
+
+    msgs = _messages(
+        [], [_msg("b0", 100, 1000), m0],
+        extra_patches=[patch(
+            "sai_memory.arasuji.storage."
+            "get_latest_primary_entry_before_message",
+            side_effect=_latest_ghost,
+        )],
+    )
+    assert any("no surviving material rows" in m for m in msgs)
+    assert any("planned nothing" in m for m in msgs)
+    # 一部だけ開いて目標量に届かない → その旨を INFO (開いた結果は保つ)
+    msgs = _messages([_entry("e1", ["b0"])], [_msg("b0", 100, 1000), m0])
+    assert any("refill stopped below target" in m for m in msgs)
 
 
 def test_refill_restores_a_straddling_fold_when_the_anchor_row_is_not_presentable(
     session_factory,
 ):
-    """② の前段は、起点の行自体が提示対象外 (scope=discardable 等) でも動く。
+    """またぐ区間の開きは、起点の行自体が提示対象外 (scope=discardable 等) でも動く。
 
     本番の事故 (2026-09-03) では起点の行が discardable で、区間の先頭から読んだ
-    列に起点が現れなかった。切る位置は「起点の行」または「窓の生の行」の
-    最初のもの — 起点だけを探すと、② が存在する理由そのものの形で見送る。"""
+    列に起点が現れなかった。切る位置は「起点の行」または「既に提示にある行」の
+    最初のもの — 起点だけを探すと、またぐ区間が存在する理由そのものの形で
+    見送ってしまう。"""
+    from contextlib import ExitStack
     lc = _make_lifecycle(session_factory)
     b1, b2, m1 = _msg("b1", 90, 2000), _msg("b2", 91, 2000), _msg("m1", 101, 1000)
-
-    def _from_anchor(start_id, **_k):
-        rows = [b1, b2, m1]  # 起点 m0 は提示対象外なので列に居ない
-        idx = next(i for i, m in enumerate(rows) if m["id"] == start_id)
-        return rows[idx:]
-
+    universe = [b1, b2, m1]  # 起点 m0 は提示対象外なので列に居ない
     persona = SimpleNamespace(
         persona_id=PERSONA_ID, model="model-a",
-        history_manager=SimpleNamespace(
-            get_history_from_anchor=_from_anchor,
-            get_history_before_anchor=lambda *a, **k: [],
-        ),
+        history_manager=_refill_history(universe),
         sai_memory=SimpleNamespace(conn=object(), is_ready=lambda: True),
     )
     lc.upsert_anchor_entry(PERSONA_ID, "model-a", {
@@ -1569,12 +1949,17 @@ def test_refill_restores_a_straddling_fold_when_the_anchor_row_is_not_presentabl
     fold = FoldedRange(message_ids=["b1", "b2", "m1"], chronicle_entry_ids=["e_f"])
     window = _window("m0", [_ph("m1", chars=100)], raw=[m1], folds=[fold])
     wm = Watermarks(target=6000, high=20_000)
-    with patch.object(lc, "get_metabolism_watermarks", return_value=wm), \
-            patch.object(lc, "get_presented_window", return_value=window), \
-            patch.object(lc, "resolve_metabolism_anchor", return_value=("m0", "self")), \
-            patch.object(lc, "_resolve_fold_digest", lambda persona, f: "d" * 100), \
-            patch("sai_memory.arasuji.storage.get_entries_covering_messages",
-                  return_value=[]):
+    with ExitStack() as stack:
+        stack.enter_context(
+            patch.object(lc, "get_metabolism_watermarks", return_value=wm))
+        stack.enter_context(
+            patch.object(lc, "get_presented_window", return_value=window))
+        stack.enter_context(patch.object(
+            lc, "resolve_metabolism_anchor", return_value=("m0", "self")))
+        stack.enter_context(patch.object(
+            lc, "_resolve_fold_digest", lambda persona, f: "d" * 100))
+        for p in _patch_storage([], universe):
+            stack.enter_context(p)
         plan = lc.preview_refilled_history(persona, "model-a")
         assert plan is not None
         assert plan["new_anchor_id"] == "b1"
@@ -1588,32 +1973,39 @@ def test_refill_restores_a_straddling_fold_when_the_anchor_row_is_not_presentabl
     assert saved[0].presented_raw is True
 
 
-def test_refill_merges_a_rung_into_the_intersecting_window_fold(session_factory):
-    """Codex 一巡目 #5 (lifecycle): 段の source が窓の既存区間と交差したら、
-    書かれる記録は併合済みの一枚で、行が二つの区間に属さない。"""
+def test_refill_merges_an_opened_arasuji_into_the_intersecting_window_fold(
+    session_factory,
+):
+    """開いたあらすじの材料が窓の既存区間と交差したら、書かれる記録は併合済みの
+    一枚で、行が二つの区間に属さない (印戻し後の digest の二重提示を防ぐ)。"""
+    from contextlib import ExitStack
     lc = _make_lifecycle(session_factory)
-    before = [_msg("b0", 100, 1000)]
+    b0 = _msg("b0", 100, 1000)
+    m0, w1 = _msg("m0", 200, 1000), _msg("w1", 201, 1000)
+    universe = [b0, m0, w1]
     persona = SimpleNamespace(
         persona_id=PERSONA_ID, model="model-a",
-        history_manager=SimpleNamespace(
-            get_history_before_anchor=lambda *a, **k: list(before),
-        ),
+        history_manager=_refill_history(universe),
         sai_memory=SimpleNamespace(conn=object(), is_ready=lambda: True),
     )
     lc.upsert_anchor_entry(PERSONA_ID, "model-a", {
         "anchor_id": "m0", "updated_at": _now().isoformat(), "ttl_seconds": 3600,
     })
-    raw = [_msg("m0", 200, 1000), _msg("w1", 201, 1000)]
+    raw = [m0, w1]
     existing = FoldedRange(
         message_ids=["w1"], chronicle_entry_ids=["e_old"], presented_raw=True,
     )
     window = _window("m0", raw, raw=raw, folds=[existing])
     wm = Watermarks(target=5000, high=10_000)
-    with patch.object(lc, "get_metabolism_watermarks", return_value=wm), \
-            patch.object(lc, "resolve_metabolism_anchor", return_value=("m0", "self")), \
-            patch.object(lc, "get_presented_window", return_value=window), \
-            patch("sai_memory.arasuji.storage.get_entries_covering_messages",
-                  return_value=[_entry("e_new", ["b0", "w1"])]):
+    with ExitStack() as stack:
+        stack.enter_context(
+            patch.object(lc, "get_metabolism_watermarks", return_value=wm))
+        stack.enter_context(patch.object(
+            lc, "resolve_metabolism_anchor", return_value=("m0", "self")))
+        stack.enter_context(
+            patch.object(lc, "get_presented_window", return_value=window))
+        for p in _patch_storage([_entry("e_new", ["b0", "w1"])], universe):
+            stack.enter_context(p)
         assert lc.maybe_run_window_refill(persona, "room") == "ok"
     entry = lc.load_anchor_entry(PERSONA_ID, "model-a")
     assert entry["anchor_id"] == "b0"

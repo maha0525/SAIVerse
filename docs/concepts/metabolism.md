@@ -45,10 +45,10 @@ Metabolism は短期記憶を区切り直す節目であり、同時に**短期�
 | **手動** | `SessionLifecycle.run_manual_compaction`（ペルソナメニューの「溜まった会話をあらすじにまとめる」/ Chronicle タブの生成が合流。2026-09-01 に両方とも背景ジョブ `POST /api/people/{id}/arasuji/generate` へ一本化） | ユーザーの明示操作。範囲規則は自動と同一（残す量より古い側だけ） |
 | **応答前の非常畳み**（§14-3） | `run_meta_user` 冒頭 → `maybe_run_emergency_precompaction` | 話しかけた時点で高水位を**既に**超過しているイレギュラー（休眠 model の復帰等）。原因不問の回復措置で、status イベントで通知（同意は求めない） |
 | **失効後の先回り畳み**（§14-4） | EventScheduler の定期見張り（10 分周期）→ `cold_precompaction_status` / `run_cold_precompaction` | 全 anchor 行が冷え切った + 提示ウィンドウが残す量と上限の**中間**を超過。編纂の総作業量は畳む時期によらず不変なので、前倒しで「冷えた再開時の定価読み」だけが消える。Chronicle 生成が有効（自律確認 ON）な persona のみ |
-| **応答前の読み戻し**（§15、2026-07-30） | `run_meta_user` 冒頭 → `maybe_run_window_refill`（非常畳みの直後） | 話しかけた時点で提示ウィンドウが**残す量を下回っている**（水位引き上げ後の既存ペルソナ / ほぼ全編纂済みでアップデートしたペルソナ）。畳んだところを開き直して残す量まで充填する — **編纂も LLM も無し**（圧縮区間に「生で見せる」印 `presented_raw` を付ける + 足りなければ一次あらすじの `source_ids` から記録を合成して anchor を引き戻す）。再畳みは印戻しだけで既存あらすじを再利用（`_refold_raw_view_folds` が退場計画より先に走る）。起点をまたぐ圧縮区間は予算に関係なく先に生へ戻し、書く前の最終検算は**上限**（合計）と比べて超えたら古い段から一段ずつ外す（2026-09-04、intent §15-5） |
+| **応答前の読み戻し**（§15、2026-07-30 / 再設計 2026-09-05） | `run_meta_user` 冒頭 → `maybe_run_window_refill`（**全 pulse_type**、最終防衛ラインの直前） | Pulse 開始時点で窓の**会話文が目標量（残す量）を下回っている**（水位引き上げ後の既存ペルソナ / ほぼ全編纂済みでアップデートしたペルソナ）。あらすじがどこにあるかを問わず**いちばん新しいあらすじから順に丸ごと開き**、会話文が目標量に達したら終了 — **編纂も LLM も無し**（圧縮区間に「生で見せる」印 `presented_raw` を付ける + 古い側は一次あらすじの `source_ids` から記録を合成して anchor を引き戻す）。読む範囲を字数で切る「予算」は無く、材料に読めない行があっても読める行だけで開く。実際に送る合計が上限を超えても開いた結果は保つ（WARNING のみ）。再畳みは印戻しだけで既存あらすじを再利用（`_refold_raw_view_folds` が退場計画より先に走る） |
 | **発話直前の最終防衛ライン**（§15-5、2026-09-04） | `run_meta_user` 冒頭 → `ensure_window_floor`（読み戻しの直後、**全 pulse_type**） | 窓の**会話の行**が残す量を下回ったまま発話させない不変条件。読み戻しがどんな理由で埋め切れなくても、起点より古い会話を不足分だけ**生で**読み足す（あらすじの段に関係なく。覆うあらすじがあれば `presented_raw` の圧縮区間として記録）。発火は上流の失敗の印 — WARNING と context-status の `window_floor_applied_at` に残る |
 
-範囲規則は削る側の 4 経路とも同一（残す量より古い側だけ）。読み戻しはその対称（残す量まで開き直す。計画の予算 = 残す量、引き戻しの梯子はあらすじの段だけ。書く前の最終検算は上限と比べる）。最終防衛ラインは梯子に依らず生で読み足す（材料があるかぎり会話の行は残す量を下回らない）。§14 の 2 経路は撤去した旧②④の復活ではない — 全量掃きせず・同意を求めず・会話開始を（非常時以外）ブロックしない（intent §14-5 の検算）。
+範囲規則は削る側の 4 経路とも同一（残す量より古い側だけ）。読み戻しはその対称（目標量 = 残す量まで開き直す。いちばん新しいあらすじから丸ごと、字数の予算は無し。仕上げに合計を上限と比べるが超えても開いた結果は保つ）。最終防衛ラインはあらすじに依らず生で読み足す（材料があるかぎり会話の行は残す量を下回らない）。§14 の 2 経路は撤去した旧②④の復活ではない — 全量掃きせず・同意を求めず・会話開始を（非常時以外）ブロックしない（intent §14-5 の検算）。
 
 **旧実行点2つは 2026-07-29（intent §13）で撤去された**: ①会話前（anchor TTL 失効時の `runtime_context.py` Case 3 での全量編纂 + 最小ロード）②セッションクローズ（gold_panning からの前倒し全量編纂）。どちらも予算超過と無関係に編纂を発火させ、「発火はたまに・まとめて」（intent §3-2）に反していた。過去に「会話前経路は grep で見落とされ続けた」経緯があるため記録しておく — 現在は `generate_chronicle` の直接呼び出しは自動経路には存在しない。
 
@@ -82,7 +82,7 @@ Metabolism の起点を指すマーカー。
 - 結晶化 (W4 で episode 整列に世代交代): `sai_memory/arasuji/alignment.py`（整列計画）+ `executor.py`（チャンク実行）+ `bands.py`（列のあふれ束ね）+ `entity_extractor` の相乗り。冪等 claim は実行台帳（`saiverse/execution_ledger.py`）。詳細は [Chronicle](chronicle.md)
 - 退場の計画: `sea/eviction_plan.py`（純関数 `plan_eviction` — 残す量より古い側を、古い順に U ずつ刻んで全部畳む。切り位置は pulse 関節に寄せる。**エピソードに畳みを止める権利は無く**、末尾の U 未満の端数は次回へ残す。旧 episode 単位・二段構えは 2026-07-28 世代交代 — intent [`arasuji_levels.md`](../intent/arasuji_levels.md) §4）
 - 提示コンテキストの圧縮区間と提示: `sea/session_window.py`（`SessionWindow` = anchor + 生ログ + 提示、`apply_folds` が digest 置き換え。`presented_raw` 印付きの区間は生のまま通す）。圧縮区間は `session_anchor.FOLDED_RANGES_JSON` に (persona, model) 単位で持つ
-- 読み戻しの計画: `sea/window_refill.py`（純関数 `plan_reopen` / `plan_rewind` — intent [`arasuji_levels.md`](../intent/arasuji_levels.md) §15）
+- 読み戻しの部品: `sea/window_refill.py`（純関数 `openable_folds_newest_first` / `merge_refill_fold`。開くループ本体は `sea/session_lifecycle.py` の `_plan_window_refill` — intent [`arasuji_levels.md`](../intent/arasuji_levels.md) §15）
 - 編纂範囲: 「今回退場させる範囲そのもの」（`generate_chronicle(compile_groups=...)`）。退場する集合と編纂する集合を一致させることが、下限「退場したものは必ず編纂されている」の手続き上の保証
 - Anchor 状態: `session_anchor` テーブル（1 行 = 1 (persona, model)）
 

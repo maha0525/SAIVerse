@@ -1863,6 +1863,12 @@ def find_covering_entry(
     return _row_to_entry(row) if row else None
 
 
+#: id 列を受ける照会 (get_entries_covering_messages / get_oldest_present_message_id)
+#: が 1 回の SQL に載せる id 数。SQLite の変数上限 (SQLITE_LIMIT_VARIABLE_NUMBER)
+#: を超える id 列でも照会が壊れないよう、この件数ずつに分けて実行する。
+_ID_QUERY_CHUNK = 500
+
+
 def get_entries_covering_messages(
     conn: sqlite3.Connection, message_ids: Sequence[str],
 ) -> List[ArasujiEntry]:
@@ -1871,24 +1877,144 @@ def get_entries_covering_messages(
     退場時に畳んだ範囲 (docs/intent/chronicle_eviction.md §6) から、その範囲を
     覆うあらすじを引き当てるための照会。範囲が複数エントリに分かれている場合も
     あるため List で返す (提示ではまとめて 1 つの圧縮マークに畳む)。
+    ``message_ids`` は ``_ID_QUERY_CHUNK`` 件ずつに分けて照会し、結果をエントリ
+    id で重複排除してから ``start_time`` の昇順に揃えて返す。
     """
     ids = [str(m) for m in message_ids if m]
     if not ids:
         return []
-    placeholders = ",".join("?" for _ in ids)
+    entries: Dict[str, ArasujiEntry] = {}
+    for i in range(0, len(ids), _ID_QUERY_CHUNK):
+        chunk = ids[i:i + _ID_QUERY_CHUNK]
+        placeholders = ",".join("?" for _ in chunk)
+        cur = conn.execute(
+            f"""
+            SELECT DISTINCT a.id, a.level, a.content, a.source_ids_json,
+                   a.start_time, a.end_time, a.source_count, a.message_count,
+                   a.parent_id, a.is_consolidated, a.created_at,
+                   a.origin_track_id, a.is_incomplete, a.short_id
+            FROM arasuji_entries a, json_each(a.source_ids_json)
+            WHERE a.level = 1 AND json_each.value IN ({placeholders})
+            """,
+            chunk,
+        )
+        for row in cur.fetchall():
+            entry = _row_to_entry(row)
+            entries.setdefault(str(entry.id), entry)
+    result = list(entries.values())
+    # 旧単発照会の ORDER BY a.start_time ASC と同じ並び (SQLite の ASC は
+    # NULL が先頭)。start_time が同値の順序は SQL でも未規定なので、安定
+    # ソートでチャンク到達順を保つ。
+    result.sort(
+        key=lambda e: (
+            e.start_time is not None,
+            e.start_time if e.start_time is not None else 0,
+        ),
+    )
+    return result
+
+
+def get_latest_primary_entry_before_message(
+    conn: sqlite3.Connection,
+    message_id: str,
+    *,
+    exclude_entry_ids: Sequence[str] = (),
+) -> Optional[ArasujiEntry]:
+    """正典順で ``message_id`` より前に材料を持つ、いちばん新しい一次あらすじを返す。
+
+    読み戻し (arasuji_levels.md §15) が「起点より古い側で次に開くあらすじ」を
+    選ぶための照会 (読み取り専用)。新しさは ``end_time`` の降順で、メイン
+    スレッドのエントリ (``thread_id IS NULL``) だけを対象にする。材料が
+    ``messages`` から全部消えているエントリは、開く位置を決められないので
+    対象にならない (材料の一部でも実在すれば候補になる — 読めない行は
+    呼び出し側が飛ばして、読める行だけで開く)。
+
+    Args:
+        message_id: 起点のメッセージ id。これより正典順 ((created_at, rowid))
+            で前に材料を持つエントリを探す。
+        exclude_entry_ids: 除外するエントリ id (窓の圧縮区間が既に持つもの・
+            この計画で開けないと分かったもの)。
+
+    Returns:
+        該当エントリ。無ければ None (``message_id`` 自体が ``messages`` に
+        無い場合も None — 位置の基準を決められない)。
+    """
+    from sai_memory.memory.storage import (
+        _canonical_before_clause,
+        get_message_position,
+    )
+
+    pos = get_message_position(conn, str(message_id))
+    if pos is None:
+        return None
+    before_sql, before_params = _canonical_before_clause(
+        pos[0], pos[1], inclusive=False,
+    )
+    exclude = [str(e) for e in exclude_entry_ids if e]
+    exclude_sql = ""
+    params: List[Any] = []
+    if exclude:
+        placeholders = ",".join("?" for _ in exclude)
+        exclude_sql = f" AND a.id NOT IN ({placeholders})"
+        params.extend(exclude)
+    params.extend(before_params)
     cur = conn.execute(
         f"""
-        SELECT DISTINCT a.id, a.level, a.content, a.source_ids_json, a.start_time,
+        SELECT a.id, a.level, a.content, a.source_ids_json, a.start_time,
                a.end_time, a.source_count, a.message_count, a.parent_id,
-               a.is_consolidated, a.created_at, a.origin_track_id, a.is_incomplete,
-               a.short_id
-        FROM arasuji_entries a, json_each(a.source_ids_json)
-        WHERE a.level = 1 AND json_each.value IN ({placeholders})
-        ORDER BY a.start_time ASC
+               a.is_consolidated, a.created_at, a.origin_track_id,
+               a.is_incomplete, a.short_id
+        FROM arasuji_entries a
+        WHERE a.level = 1 AND a.thread_id IS NULL{exclude_sql}
+          AND EXISTS (
+            SELECT 1 FROM messages
+            WHERE id IN (
+                SELECT je.value FROM json_each(a.source_ids_json) je
+            )
+              AND {before_sql}
+          )
+        ORDER BY a.end_time DESC, a.created_at DESC
+        LIMIT 1
         """,
-        ids,
+        params,
     )
-    return [_row_to_entry(row) for row in cur.fetchall()]
+    row = cur.fetchone()
+    return _row_to_entry(row) if row else None
+
+
+def get_oldest_present_message_id(
+    conn: sqlite3.Connection, message_ids: Sequence[str],
+) -> Optional[str]:
+    """``message_ids`` のうち ``messages`` に実在する行で、正典順で最古の id を返す。
+
+    読み戻し (§15) が「あらすじの材料の最古の読める行 = 開き始める位置」を
+    決めるための照会 (読み取り専用)。実在しない id は無視する — 材料に
+    読めない行があるあらすじでも、読める行から開く (2026-09-05 裁定)。
+    """
+    from sai_memory.memory.storage import canonical_position_key
+
+    ids = [str(m) for m in message_ids if m]
+    if not ids:
+        return None
+    best: Optional[Tuple[Any, str]] = None
+    for i in range(0, len(ids), _ID_QUERY_CHUNK):
+        chunk = ids[i:i + _ID_QUERY_CHUNK]
+        placeholders = ",".join("?" for _ in chunk)
+        row = conn.execute(
+            f"SELECT id, created_at, rowid FROM messages "
+            f"WHERE id IN ({placeholders}) "
+            "ORDER BY (created_at IS NULL) DESC, created_at ASC, rowid ASC "
+            "LIMIT 1",
+            chunk,
+        ).fetchone()
+        if row is None:
+            continue
+        key = canonical_position_key(
+            int(row[1]) if row[1] is not None else None, int(row[2]),
+        )
+        if best is None or key < best[0]:
+            best = (key, str(row[0]))
+    return best[1] if best else None
 
 
 def search_entries(

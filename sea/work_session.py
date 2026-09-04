@@ -286,6 +286,31 @@ def run_work_session(
         from sea.runtime_llm import _parse_spell_lines, _run_spell_loop
 
         with hold_beat(manager, persona_id, purpose="work_session"):
+            # ---- 応答前の読み戻し (arasuji_levels.md §15) ----
+            # 読み戻しは全種の Pulse で走らせる (2026-09-05 まはー裁定 —
+            # 会話かどうかで可否を変えない)。作業セッションは run_meta_user を
+            # 通らず自分で _prepare_context を組む Pulse root なので、ここに
+            # 配線しないと走らない。2026-07-23 以降セッションはメインの会話
+            # 履歴を文脈に含む (下の persona_voiced=True) ため、窓の会話文が
+            # 残す量を下回ったまま走ると薄い記憶のまま作業することになる。
+            # 位置も run_meta_user と同じ「いかなる永続化よりも前」= MCP
+            # 取得・知覚の消費・head 組成より先。model は上で解決済みの実行
+            # model — WORKER は軽量 tier なので、読み戻す窓と実際に喋る窓を
+            # 同じ model に揃える。書くのは帳簿 (session_anchor 行) だけで
+            # 冪等なので、失敗は記録して続行する。最終防衛ライン
+            # (ensure_window_floor = 床未達の Pulse を見送る関門) はここには
+            # 配線しない — 発話しない作業セッションに発話見送りの経路は
+            # 作らない (未達時の扱いは別途まはーの裁定待ち)。
+            try:
+                runtime.session_lifecycle.maybe_run_window_refill(
+                    persona, building_id, model_key=execution_context.model_key,
+                )
+            except Exception:
+                LOGGER.exception(
+                    "[work_session] window refill failed (persona=%s); continuing",
+                    persona_id,
+                )
+
             # ---- Pulse 頭の per_persona MCP ツール取得 (mcp_addon_integration.md §I) ----
             # 作業セッションは自分の PulseContext を作る Pulse root なので、
             # 会話 Pulse (run_meta_user) と同じく「本人の鍵で接続を張って一覧を

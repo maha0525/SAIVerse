@@ -455,9 +455,9 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
                         # Preview mode: use anchor for retrieval but don't persist or generate Chronicle
                         # (§14-2 機構1 の前進も永続化しない — 返る位置は本番と同じ)。
                         # §15 の読み戻しも同じ型で反映する — 実際の読み戻しは次の
-                        # user Pulse の応答前に走るため、素の窓のままだとプレビューが
+                        # Pulse の応答前に走るため、素の窓のままだとプレビューが
                         # 「話しかけた時に実際に見える窓」より薄い嘘になる。読みだけ
-                        # の計算 (最終検算まで本番と同一・行は触らない) で組む。
+                        # の計算 (仕上げの検算まで本番と同一・行は触らない) で組む。
                         # 適用は標準の会話窓 (main_line / committed) のときだけ —
                         # 読み戻しの文字勘定はその窓で定義されている。
                         if (

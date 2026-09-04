@@ -2714,18 +2714,21 @@ class SessionLifecycle:
         building_id: str,
         model_key: Optional[str] = None,
     ) -> str:
-        """会話応答より前の読み戻し (arasuji_levels.md §15) — 非常畳みの対称。
+        """Pulse の応答より前の読み戻し (arasuji_levels.md §15) — 非常畳みの対称。
 
-        話しかけられた時点で提示ウィンドウが残す量 (watermarks.target) を
-        下回っていたら、応答より先に畳んだところを開き直して残す量まで充填する。
-        水位引き上げ後の既存ペルソナと、旧水位でほぼ全編纂済みのままアップデート
-        したペルソナ (生ログほぼ無しで新バージョンの会話が始まる) の救済経路。
+        Pulse が始まった時点で窓の会話文が目標量 (watermarks.target) を
+        下回っていたら、応答より先に畳んだあらすじを新しい順に開き直して
+        目標量まで充填する。全種の Pulse で走る (2026-09-05 まはー裁定 —
+        自律→会話と連続したとき、自律側で窓が手当てされないと会話側で窓が
+        変わり、キャッシュヒットしなくなる)。水位引き上げ後の既存ペルソナと、
+        旧水位でほぼ全編纂済みのままアップデートしたペルソナ (生ログほぼ無しで
+        新バージョンの会話が始まる) の救済経路でもある。
 
         帳簿の付け替えだけで LLM は呼ばない。ユーザーへの通知もしない —
         §14-3 の注意書きの対象は「削る」側で、開き直しに失うものは無い。
 
         Returns:
-            "skip" (条件外・不足なし・開ける区間なし・競合で見送り) /
+            "skip" (条件外・不足なし・開けるあらすじなし・競合で見送り) /
             "ok" (開き直した)
         """
         model_key = str(model_key or getattr(persona, "model", "") or "") or None
@@ -2781,13 +2784,13 @@ class SessionLifecycle:
 
         LOGGER.info(
             "[metabolism] window refill (persona=%s model=%s): rows %d -> %d "
-            "chars toward target=%d, total %d chars (verified against high=%s; "
-            "straddling %d, reopened %d in-window range(s), rewound %d "
-            "message(s) across %d range(s), dropped %d rung(s), resolution=%s)",
+            "chars toward target=%d, total %d chars (high=%s; opened %d "
+            "in-window range(s), %d straddling range(s), %d older arasuji "
+            "group(s), restored %d message(s), resolution=%s)",
             persona_id, model_key, plan["current_chars"], plan["final_chars"],
             plan["target"], plan["final_total_chars"], plan["high"],
-            plan["straddled"], plan["reopened"], plan["rewound_messages"],
-            plan["rewound_folds"], plan["dropped_steps"], resolution,
+            plan["opened_in_window"], plan["opened_straddling"],
+            plan["opened_older"], plan["restored_messages"], resolution,
         )
         return "ok"
 
@@ -3079,7 +3082,7 @@ class SessionLifecycle:
         部分的な二重提示を残余として受容する。既存の圧縮区間が持つエントリと、
         既存区間の行に触れるエントリも扱わない (同じ行が二つの区間に属すると
         印戻し後に digest が二重になる)。source を共有する・位置が重なる
-        エントリは一枚の区間に束ねる (plan_rewind と同じ理由)。
+        エントリは一枚の区間に束ねる (読み戻しの併合と同じ理由)。
         """
         from sea.session_window import FoldedRange
 
@@ -3153,7 +3156,7 @@ class SessionLifecycle:
     ) -> Optional[Dict[str, Any]]:
         """§15 読み戻し後の提示を**読みだけ**で組む (context preview 用)。
 
-        実際の読み戻しは次の user Pulse の応答前に走るため、プレビューが素の
+        実際の読み戻しは次の Pulse の応答前に走るため、プレビューが素の
         窓を見せると「話しかけた時に実際に見える窓」より薄い嘘になる。§14-2
         の preview (persist_advance=False) と同じ型 — 内容は本番の読み戻しと
         同じ計算 (最終検算まで)、行は一切触らない (§14-6-5)。
@@ -3224,36 +3227,45 @@ class SessionLifecycle:
         raise_on_error: bool = False,
         strict: bool = False,
     ) -> Optional[Dict[str, Any]]:
-        """§15 読み戻しの計画 + 最終検算 (読みだけ — 行は触らない)。
+        """§15 読み戻しの計画 (読みだけ — 行は触らない)。
 
         :meth:`maybe_run_window_refill` (実書き込み) と
         :meth:`preview_refilled_history` (プレビュー) の共通部。開き直しの印は
         リクエストローカルな fold オブジェクトに付けるだけで、永続化は
         呼び出し側の :meth:`_write_refill` が行う。
 
-        段取り (docs/issues/window_floor_and_refill_redesign.md ②③④⑤):
+        段取り (2026-09-05 まはー裁定 —
+        docs/issues/refill_reads_by_budget_instead_of_arasuji_unit.md §裁定の確定):
 
-        0. 不足判定は**会話の行だけ** vs 残す量 (2026-09-03 裁定)。
-        1. **前段 — 起点をまたぐ圧縮区間**: 窓の圧縮区間のうち ``message_ids``
-           が起点より左へ及ぶものがあれば、予算に関係なく起点をその区間の
-           最古の行まで戻し、区間を ``presented_raw=True`` にする (開こうと
-           している時点で不足は確定している)。
-        2. 窓内の digest 区間を新しい方から開く (:func:`plan_reopen`)。
-        3. 残りの予算であらすじの段の単位で起点を引き戻す (:func:`plan_rewind`)。
-        4. **最終検算は上限 (``watermarks.high``、実際に送る合計 = 知覚込み)
-           と比べる** — 残す量とは比べない。超えたら引き戻しの段をいちばん
-           古いものから一段ずつ外して測り直す。「全部やめる」は無い。前段は
-           外さない (それでも超えるなら WARNING を出し、次の Pulse の非常畳みに
-           任せる)。
+        0. 不足判定は**会話文** (:func:`~sea.eviction_plan.stored_message_chars`)
+           vs 目標量 (``watermarks.target``)。目標量以上なら何もしない。
+        1. 開ける対象 = 窓の中で digest 表示中の圧縮区間 (起点をまたぐものを
+           含む) + 起点より古い側の一次あらすじ。これを新しい順に、一つずつ
+           **丸ごと**開く — 読む範囲を字数で切る「予算」は無い。「開く」の
+           中身は場所で違うが、それは実装の都合であって判断には使わない:
 
-        ``raise_on_error`` は最終検算の知覚一覧の取得まで貫通させる — 厳格
+           - 窓に収まる区間: ``presented_raw`` の印を付けるだけ。
+           - 起点をまたぐ区間: 区間の最古の読める行まで起点を戻し、印を付ける。
+           - 古い側のあらすじ: **あらすじを先に選んでから、その材料の行を読む**
+             (字数分読んでから覆いを探す旧設計の逆)。材料の最古の読める行から
+             起点までを読み、範囲に材料を持つ全あらすじを一枚の圧縮区間に
+             束ねて開く — 同じ行が二つの区間に属すると digest が二重提示になる。
+
+           材料に読めない行があるあらすじでも止まらない — 読めない行は飛ばし、
+           読める行を全部生で戻して開く。
+        2. 一つ開くたびに提示を組み直して会話文を測り、目標量に達したら終了。
+           目標量の**超過は問題ない** (目標量は下限であって上限ではない)。
+        3. 仕上げに一度だけ、実際に送る合計 (知覚込み) を上限
+           (``watermarks.high``) と比べ、超えていたら WARNING を出す — 開いた
+           結果は保つ (開いたものを外し直す検算は無い。足りないから開いて
+           いるのだから原理的に不要。超過の始末は次の Pulse の非常畳みの仕事)。
+
+        ``raise_on_error`` は仕上げの検算の知覚一覧の取得まで貫通させる — 厳格
         モード (context-status) の途中の読み出しだけが fail-open だと、知覚
         ゼロで測った検算が measurement_failed なしで返る。``raise_on_error`` は
-        器の読み (窓・またぐ区間・古い材料) も厳格にする (Codex 七巡目 #4:
-        読み失敗と「材料なし」を区別する)。``strict`` は器の読みだけを厳格に
-        する (本走行の読み戻し用 — 知覚は既定のまま fail-open)。
-
-        見送る各経路は INFO で理由を残す (⑤)。
+        器の読み (窓・履歴・あらすじの照会) も厳格にする (読み失敗と「材料
+        なし」を区別する)。``strict`` は器の読みだけを厳格にする (本走行の
+        読み戻し用 — 知覚は既定のまま fail-open)。
 
         Returns:
             適用できる読み戻しが無ければ None。あれば::
@@ -3261,12 +3273,12 @@ class SessionLifecycle:
                 {
                     "new_anchor_id": 引き戻し先 (引き戻し無しなら現 anchor),
                     "folds": 書き込むべき圧縮区間の全リスト,
-                    "presented": 検算済みの最終提示メッセージ列 (知覚なし),
-                    "current_chars" / "final_chars": 会話の行の字数 (前後),
-                    "final_total_chars": 検算で測った合計 (知覚込み),
+                    "presented": 開いた後の提示メッセージ列 (知覚なし),
+                    "current_chars" / "final_chars": 会話文の字数 (前後),
+                    "final_total_chars": 実際に送る合計 (知覚込み),
                     "target" / "high": 水位,
-                    "straddled" / "reopened" / "rewound_messages" /
-                    "rewound_folds" / "dropped_steps": 記録用,
+                    "opened_in_window" / "opened_straddling" / "opened_older" /
+                    "restored_messages": 記録用,
                 }
         """
         # 器の読みの厳格さ: context-status の厳格モード (raise_on_error) と
@@ -3277,9 +3289,9 @@ class SessionLifecycle:
             persona, model_key, anchor_id, strict=store_strict,
         )
         persona_id = getattr(persona, "persona_id", None)
-        # 読み戻しの物差しは**会話の行だけ** vs 残す量 (2026-09-03 まはー裁定:
-        # 残す量の主語は会話の行。上限の主語 = 合計とは別)。巨大な部屋の様子が
-        # 乗った窓でも会話が痩せていれば埋め戻す
+        # 物差しは**会話文だけ** vs 目標量 (2026-09-03 まはー裁定: 残す量の
+        # 主語は会話の行。上限の主語 = 合計とは別)。巨大な部屋の様子や
+        # スペル結果が乗った窓でも、会話が痩せていれば埋め戻す
         # (docs/issues/protection_quota_consumed_by_perception_blocks.md)。
         current_chars = stored_message_chars(window.presented)
         if current_chars >= watermarks.target:
@@ -3290,223 +3302,309 @@ class SessionLifecycle:
             )
             return None
 
-        from sea.window_refill import plan_reopen, plan_rewind_explained
+        from sea.window_refill import (
+            merge_refill_fold,
+            openable_folds_newest_first,
+        )
 
         history_mgr = getattr(persona, "history_manager", None)
         adapter = getattr(persona, "sai_memory", None)
 
-        # 1. 前段: 起点をまたぐ圧縮区間 (予算に関係なく必ず生へ戻す)。
+        folds: List["FoldedRange"] = list(window.folds)
         raw_ids = set(window.raw_ids)
-        straddling = [
-            f for f in window.folds
-            if any(mid not in raw_ids for mid in f.message_ids)
-        ]
-        pre_before: List[Dict[str, Any]] = []
-        if straddling and history_mgr is not None:
-            pre_before = self._history_back_to_folds(
-                history_mgr, straddling, anchor_id, raw_ids, persona_id,
+        pre_rows: List[Dict[str, Any]] = []  # 起点より古い側へ開いた行 (時系列昇順)
+        pre_ids: Set[str] = set()
+        base_anchor_id = anchor_id
+        presented = list(window.presented)
+        rows_chars = current_chars
+        opened_in_window = 0
+        opened_straddling = 0
+        opened_older = 0
+        stop_reason: Optional[str] = None
+
+        def _recompose() -> None:
+            """一つ開くたびに提示を組み直して会話文を測り直す (終了判定の物差し)。"""
+            nonlocal presented, rows_chars
+            presented = self._present_with_folds(
+                persona, list(pre_rows) + list(window.raw), folds,
+            )
+            rows_chars = stored_message_chars(presented)
+
+        # --- 1a. 窓の中で digest 表示中の圧縮区間 (起点をまたぐものを含む)。
+        # どの区間も、起点より古い側のあらすじより新しい内容を覆っている
+        # (窓の行は起点より新しい) ので、先に新しい順で開く。
+        for fold in openable_folds_newest_first(folds, window.raw, presented):
+            if rows_chars >= watermarks.target:
+                break
+            outside = [mid for mid in fold.message_ids if mid not in raw_ids]
+            if not outside:
+                # 窓に収まる区間 — 印を付けるだけで digest が生ログに戻る。
+                fold.presented_raw = True
+                opened_in_window += 1
+                _recompose()
+                continue
+            # 起点をまたぐ区間 — 最古の読める行まで起点を戻して丸ごと開く。
+            if history_mgr is None:
+                stop_reason = "history manager unavailable"
+                break
+            segment = self._read_segment_before(
+                history_mgr, outside,
+                {base_anchor_id} | raw_ids | pre_ids, persona_id,
                 raise_on_error=store_strict,
             )
-        if pre_before:
-            for fold in straddling:
-                fold.presented_raw = True
-        base_anchor_id = str(pre_before[0].get("id")) if pre_before else anchor_id
-        base_raw = list(pre_before) + list(window.raw)
-        base_presented = (
-            self._present_with_folds(persona, base_raw, list(window.folds))
-            if pre_before else list(window.presented)
-        )
-        base_chars = stored_message_chars(base_presented)
+            if segment:
+                pre_rows = list(segment) + pre_rows
+                pre_ids |= {str(m.get("id")) for m in segment}
+                base_anchor_id = str(segment[0].get("id"))
+            readable = [
+                mid for mid in fold.message_ids
+                if mid in raw_ids or mid in pre_ids
+            ]
+            if not readable:
+                LOGGER.warning(
+                    "[metabolism] refill: straddling range %s has no readable "
+                    "rows; leaving its digest as is (persona=%s)",
+                    fold.chronicle_entry_ids, persona_id,
+                )
+                continue
+            if len(readable) < len(fold.message_ids):
+                # 読めない行は区間の行から外す — 残したままだと apply_folds が
+                # 部分生存の区間と見て digest 提示に倒し、開いたはずの行が縮む。
+                # あらすじ id は残す (head の除外名簿・再畳みの再利用は無傷)。
+                LOGGER.info(
+                    "[metabolism] refill: %d of %d row(s) of a straddling "
+                    "range are not readable; opening the readable rows only "
+                    "(persona=%s)",
+                    len(fold.message_ids) - len(readable),
+                    len(fold.message_ids), persona_id,
+                )
+                fold.message_ids = readable
+            fold.presented_raw = True
+            opened_straddling += 1
+            _recompose()
 
-        # 2. 窓内の digest 圧縮区間を新しい方から開く。
-        reopen, projected_chars = plan_reopen(
-            window.folds, base_raw, base_presented, base_chars, watermarks.target,
-        )
+        # --- 1b. 起点より古い側の一次あらすじを、新しい順に一つずつ丸ごと開く。
+        skipped_entry_ids: Set[str] = set()
+        while rows_chars < watermarks.target:
+            if history_mgr is None or not adapter or not adapter.is_ready():
+                stop_reason = "history or memory store unavailable"
+                break
+            exclude = {
+                str(eid) for f in folds for eid in f.chronicle_entry_ids
+            } | skipped_entry_ids
+            try:
+                from sai_memory.arasuji.storage import (
+                    compare_message_positions,
+                    get_entries_covering_messages,
+                    get_latest_primary_entry_before_message,
+                    get_oldest_present_message_id,
+                )
+                entry = get_latest_primary_entry_before_message(
+                    adapter.conn, base_anchor_id, exclude_entry_ids=exclude,
+                )
+                if entry is None:
+                    stop_reason = "no arasuji left to open before the anchor"
+                    break
+                start_id = get_oldest_present_message_id(
+                    adapter.conn, entry.source_ids,
+                )
+                if start_id is None:
+                    # 材料が一行も実在しない — このあらすじは開けない。次へ。
+                    LOGGER.info(
+                        "[metabolism] refill: arasuji %s has no surviving "
+                        "material rows; trying the next one (persona=%s)",
+                        str(entry.id)[:8], persona_id,
+                    )
+                    skipped_entry_ids.add(str(entry.id))
+                    continue
+                segment = self._read_segment_before(
+                    history_mgr, [start_id],
+                    {base_anchor_id} | raw_ids | pre_ids, persona_id,
+                    raise_on_error=store_strict,
+                )
+                if not segment:
+                    LOGGER.info(
+                        "[metabolism] refill: arasuji %s has no readable rows "
+                        "before the anchor; trying the next one (persona=%s)",
+                        str(entry.id)[:8], persona_id,
+                    )
+                    skipped_entry_ids.add(str(entry.id))
+                    continue
+                # 開いた範囲に材料を持つ全あらすじを引く。材料がさらに古い行を
+                # 持つあらすじが混ざっていたら (範囲の重なり)、その最古の読める
+                # 行まで読み足す — 重なるあらすじはまとめて一枚で開くため。
+                seg_ids = {str(m.get("id")) for m in segment}
+                covering = get_entries_covering_messages(
+                    adapter.conn, [str(m.get("id")) for m in segment],
+                )
+                while True:
+                    known = seg_ids | raw_ids | pre_ids
+                    unknown = [
+                        str(s)
+                        for e in covering
+                        for s in e.source_ids
+                        if str(s) not in known
+                    ]
+                    cand = get_oldest_present_message_id(adapter.conn, unknown)
+                    if not cand:
+                        break
+                    if compare_message_positions(
+                        adapter.conn, cand, str(segment[0].get("id")),
+                    ) != -1:
+                        break  # 開いた範囲より古い材料ではない
+                    ext = self._read_segment_before(
+                        history_mgr, [cand],
+                        seg_ids | raw_ids | pre_ids | {base_anchor_id},
+                        persona_id, raise_on_error=store_strict,
+                    )
+                    if not ext:
+                        break
+                    segment = list(ext) + list(segment)
+                    seg_ids |= {str(m.get("id")) for m in ext}
+                    covering = get_entries_covering_messages(
+                        adapter.conn, sorted(seg_ids),
+                    )
+            except Exception:
+                if store_strict:
+                    raise
+                LOGGER.warning(
+                    "[metabolism] refill: opening an arasuji before the anchor "
+                    "failed (persona=%s); keeping what is already opened",
+                    persona_id, exc_info=True,
+                )
+                stop_reason = "arasuji lookup or history read failed"
+                break
+            # 選んだあらすじ自身は必ず区間の記録に載せる — 材料が提示対象外
+            # ばかりでも、載せないと次の周回で同じあらすじを選び続ける。
+            if all(str(e.id) != str(entry.id) for e in covering):
+                covering = list(covering) + [entry]
+            fold, absorbed = merge_refill_fold(
+                covering, list(segment) + list(pre_rows) + list(window.raw),
+                folds,
+            )
+            if fold is None:
+                skipped_entry_ids.add(str(entry.id))
+                continue
+            absorbed_ids = {id(f) for f in absorbed}
+            folds = [f for f in folds if id(f) not in absorbed_ids]
+            folds.insert(0, fold)  # いちばん古い区間なので先頭 (時系列順を保つ)
+            pre_rows = list(segment) + pre_rows
+            pre_ids |= seg_ids
+            base_anchor_id = str(segment[0].get("id"))
+            opened_older += 1
+            _recompose()
 
-        # 3. まだ足りなければ anchor をあらすじの段の単位で引き戻す。
-        rewind = None
-        rewind_reason: Optional[str] = None
-        before: List[Dict[str, Any]] = []
-        budget = watermarks.target - projected_chars
-        if budget <= 0:
-            rewind_reason = "no budget left after the straddling/reopen stage"
-        elif history_mgr is None or not adapter or not adapter.is_ready():
-            rewind_reason = "history or memory store unavailable"
-        else:
-            # raise_on_error は厳格なときだけ渡す (既定の呼び出し形を変えない)
-            read_kwargs: Dict[str, Any] = {"raise_on_error": True} if store_strict else {}
-            before = history_mgr.get_history_before_anchor(
-                base_anchor_id,
-                max_chars=budget,
+        if not (opened_in_window or opened_straddling or opened_older):
+            LOGGER.info(
+                "[metabolism] refill planned nothing (persona=%s model=%s "
+                "rows=%d target=%d): %s",
+                persona_id, model_key, current_chars, watermarks.target,
+                stop_reason or "nothing to open",
+            )
+            return None
+        if rows_chars < watermarks.target and stop_reason:
+            LOGGER.info(
+                "[metabolism] refill stopped below target (persona=%s model=%s "
+                "rows=%d target=%d): %s",
+                persona_id, model_key, rows_chars, watermarks.target,
+                stop_reason,
+            )
+
+        # 3. 仕上げの検算は一度だけ: 実際に送る合計 (知覚込み) を上限と比べ、
+        # 超えていても開いた結果は保つ (2026-09-05 裁定 — 記憶を開き直さない
+        # くらいなら超過を受け入れる。始末は次の Pulse の非常畳みの仕事)。
+        final_total = self.presented_chars(
+            persona, presented, base_anchor_id, raise_on_error=raise_on_error,
+        )
+        if watermarks.high is not None and final_total > watermarks.high:
+            LOGGER.warning(
+                "[metabolism] refill result exceeds the high watermark: "
+                "%d chars > high=%d (persona=%s model=%s); keeping the opened "
+                "result — the emergency pre-compaction of the next pulse "
+                "settles the overflow",
+                final_total, watermarks.high, persona_id, model_key,
+            )
+
+        return {
+            "new_anchor_id": base_anchor_id,
+            "folds": folds,
+            "presented": presented,
+            "current_chars": current_chars,
+            "final_chars": rows_chars,
+            "final_total_chars": final_total,
+            "target": watermarks.target,
+            "high": watermarks.high,
+            "opened_in_window": opened_in_window,
+            "opened_straddling": opened_straddling,
+            "opened_older": opened_older,
+            "restored_messages": len(pre_rows),
+        }
+
+    def _read_segment_before(
+        self, history_mgr, start_ids: Sequence[str], stop_ids: Set[str],
+        persona_id: Optional[str],
+        *,
+        raise_on_error: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """開始候補のうち読める最古の行から、既知の行の直前までの提示対象を読む。
+
+        読み戻し (§15) の「あらすじを丸ごと開く」の読み部分。``start_ids`` は
+        古い順の開始候補で、先頭が提示対象の履歴で読めなければ次の候補へ進む —
+        読めない行は飛ばし、読める行だけで開く (2026-09-05 裁定)。
+
+        Args:
+            start_ids: 読み始めるメッセージ id の候補 (古い順)。
+            stop_ids: 既に提示にある行 (起点・窓の生ログ・開き済みの行) の id。
+                読んだ列がここに最初に触れた位置で切る — 起点の行自体が提示
+                対象外 (scope=discardable 等) でも、提示済みの行で正しく切れる
+                (本番の事故 2026-09-03 がちょうどその形だった)。
+            raise_on_error: 履歴の読み失敗を例外にする (書き込みを伴う本走行と
+                厳格プレビュー用)。既定は空へ縮退 (fail-open)。
+
+        Returns:
+            時系列昇順の行列。どの候補からも読めなければ空。
+        """
+        read_kwargs: Dict[str, Any] = (
+            {"raise_on_error": True} if raise_on_error else {}
+        )
+        for start_id in start_ids:
+            if not start_id:
+                continue
+            rows = history_mgr.get_history_from_anchor(
+                str(start_id),
                 required_line_roles=["main_line"],
                 required_scopes=["committed"],
                 **read_kwargs,
             )
-            if not before:
-                rewind_reason = "no material before the anchor"
-            else:
-                try:
-                    from sai_memory.arasuji.storage import get_entries_covering_messages
-                    entries = get_entries_covering_messages(
-                        adapter.conn, [str(m.get("id")) for m in before],
-                    )
-                except Exception:
-                    LOGGER.warning(
-                        "[metabolism] refill: failed to resolve covering entries "
-                        "(persona=%s); skipping anchor rewind", persona_id,
-                        exc_info=True,
-                    )
-                    entries = []
-                if not entries:
-                    rewind_reason = "no covering entries"
-                else:
-                    before_ids = [str(m.get("id")) for m in before]
-                    try:
-                        from sai_memory.memory.storage import (
-                            filter_chronicle_eligible_ids,
-                        )
-                        eligible = {
-                            str(m) for m in filter_chronicle_eligible_ids(
-                                adapter.conn, before_ids,
-                            )
-                        }
-                    except Exception:
-                        # 判定できなければ全件を編纂対象とみなす — 被覆の無い
-                        # 領域を跨がない側 (忘却済みの内容を復活させない側)
-                        # に倒れる。
-                        LOGGER.warning(
-                            "[metabolism] refill: chronicle-eligibility check "
-                            "failed; treating all messages as eligible "
-                            "(persona=%s)", persona_id, exc_info=True,
-                        )
-                        eligible = set(before_ids)
-                    rewind, rewind_reason = plan_rewind_explained(
-                        before,
-                        entries,
-                        [str(m.get("id")) for m in base_raw],
-                        {
-                            eid
-                            for f in window.folds
-                            for eid in f.chronicle_entry_ids
-                        },
-                        {
-                            mid
-                            for f in window.folds
-                            for mid in f.message_ids
-                        },
-                        eligible,
-                        budget,
-                        existing_folds=list(window.folds),
-                    )
-
-        if not pre_before and not reopen and rewind is None:
-            LOGGER.info(
-                "[metabolism] refill planned nothing (persona=%s model=%s rows=%d "
-                "target=%d): %s",
-                persona_id, model_key, current_chars, watermarks.target,
-                rewind_reason or "nothing to reopen",
-            )
-            return None
-        if rewind is not None and rewind_reason:
-            LOGGER.info(
-                "[metabolism] refill ladder stopped after %d rung(s) (persona=%s "
-                "model=%s): %s",
-                len(rewind.steps), persona_id, model_key, rewind_reason,
-            )
-
-        for fold in reopen:
-            fold.presented_raw = True
-
-        # 4. 最終検算: 書く前に「書いた後の提示」を実際に組んで、実際に送る合計
-        # (知覚込み) を上限と比べる。計画側の勘定がモデル化していない増分が
-        # 混ざっても上限をここで守る。超えたら引き戻しの段を古い方から一段
-        # ずつ外して測り直す — 「全部やめる」は無い (④)。
-        steps = list(rewind.steps) if rewind is not None else []
-        n_before = len(before)
-        dropped = 0
-        final_presented: List[Dict[str, Any]] = []
-        final_total = 0
-        new_anchor_id = base_anchor_id
-        new_folds: List["FoldedRange"] = []
-        kept_existing: List["FoldedRange"] = list(window.folds)
-        while True:
-            if steps:
-                step = steps[-1]
-                new_anchor_id = step.new_anchor_id
-                new_folds = list(step.folds)
-                restored = list(before[n_before - step.restored_message_count:])
-                # 段に併合された既存区間は、併合済みの区間に置き換わる
-                absorbed = {id(f) for f in step.absorbed_existing}
-                kept_existing = [f for f in window.folds if id(f) not in absorbed]
-            else:
-                new_anchor_id = base_anchor_id
-                new_folds = []
-                restored = []
-                kept_existing = list(window.folds)
-            final_presented = self._present_with_folds(
-                persona, restored + base_raw, new_folds + kept_existing,
-            )
-            final_total = self.presented_chars(
-                persona, final_presented, new_anchor_id,
-                raise_on_error=raise_on_error,
-            )
-            if watermarks.high is None or final_total <= watermarks.high:
-                break
-            if steps:
-                LOGGER.info(
-                    "[metabolism] refill verification: %d chars > high=%d; "
-                    "dropping the oldest rung (anchor %s) (persona=%s model=%s)",
-                    final_total, watermarks.high, new_anchor_id,
-                    persona_id, model_key,
-                )
-                steps.pop()
-                dropped += 1
+            if not rows:
                 continue
-            # 段を全部外しても上限を超える。前段 (またぐ区間) は外さない —
-            # 開こうとしている時点で不足は確定していて、超過の始末は次の
-            # Pulse の非常畳みの仕事。前段が無ければ見送る (予算超過)。
-            if pre_before:
-                LOGGER.warning(
-                    "[metabolism] refill: the straddling range alone puts the "
-                    "window at %d chars > high=%d; keeping it (the emergency "
-                    "pre-compaction of the next pulse trims) (persona=%s model=%s)",
-                    final_total, watermarks.high, persona_id, model_key,
-                )
-                break
-            LOGGER.info(
-                "[metabolism] refill skipped: reopened window would be %d chars "
-                "> high=%d (persona=%s model=%s)",
-                final_total, watermarks.high, persona_id, model_key,
+            cut = next(
+                (
+                    i for i, m in enumerate(rows)
+                    if str(m.get("id")) in stop_ids
+                ),
+                None,
             )
-            return None
-
-        return {
-            "new_anchor_id": new_anchor_id,
-            "folds": new_folds + kept_existing,
-            "presented": final_presented,
-            "current_chars": current_chars,
-            "final_chars": stored_message_chars(final_presented),
-            "final_total_chars": final_total,
-            "target": watermarks.target,
-            "high": watermarks.high,
-            "straddled": len(straddling) if pre_before else 0,
-            "reopened": len(reopen),
-            "rewound_messages": (
-                len(pre_before)
-                + (steps[-1].restored_message_count if steps else 0)
-            ),
-            "rewound_folds": len(new_folds),
-            "dropped_steps": dropped,
-        }
-
+            if cut is None:
+                LOGGER.warning(
+                    "[metabolism] refill: rows read from %s do not reach the "
+                    "anchor or the window; trying the next start candidate "
+                    "(persona=%s)", start_id, persona_id,
+                )
+                continue
+            return list(rows[:cut])
+        return []
     def _history_back_to_folds(
         self, history_mgr, straddling: List["FoldedRange"], anchor_id: str,
         raw_ids: Set[str], persona_id: Optional[str],
         *,
         raise_on_error: bool = False,
     ) -> List[Dict[str, Any]]:
-        """起点をまたぐ圧縮区間の最古の行から起点の直前までの提示対象を読む (②の前段)。
+        """起点をまたぐ圧縮区間の最古の行から起点の直前までの提示対象を読む。
 
+        最終防衛ライン (:meth:`_apply_window_floor_once`) の手順 3 が使う。
+        読み戻し本体は :meth:`_read_segment_before` を使う (2026-09-05 再設計) —
+        こちらは区間の全行が読めることを要求する厳しい形のまま残している。
         ``raise_on_error`` は履歴の読み失敗を例外にする (最終防衛ラインが使う —
         読めなかったことを「材料なし」に潰さない)。
 
@@ -3683,7 +3781,7 @@ class SessionLifecycle:
         """書き込み前の最終検査 — 同じ行が二つの圧縮区間に属していたら併合する。
 
         同じ行が二つの区間に属すると、印戻し後に digest が二重に立つ。計画側
-        (plan_rewind の閉包、_floor_coverage_folds の見送り) が防ぐのが本筋で、
+        (読み戻しの併合、_floor_coverage_folds の見送り) が防ぐのが本筋で、
         ここは最後の網 — 見つけたら書き込みを拒まず、該当区間を一つに併合して
         WARNING を残す (Codex 一巡目 #5)。併合は最初に現れた区間へ寄せ、行と
         あらすじ id は出現順に足す。``presented_raw`` はどれか一つでも生なら生

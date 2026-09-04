@@ -241,8 +241,11 @@ def test_floor_skips_models_without_watermarks(session_factory):
 
 
 def test_run_meta_user_applies_the_floor_for_every_pulse_type():
-    """フックは非常畳み → 読み戻しの直後、全 pulse_type に置く。読み戻しは
-    user Pulse だけ (§15-4) だが、最終防衛ラインは自律の発話にも効く。"""
+    """フックは非常畳み → 読み戻し → 最終防衛ラインの順で全 pulse_type に置く。
+
+    読み戻しも全種の Pulse で走る (2026-09-05 まはー裁定): 自律→会話と連続した
+    とき、自律側で窓が手当てされないと会話側で窓が変わり、キャッシュヒット
+    しなくなる。"""
     from sea.runtime import SEARuntime
 
     manager = SimpleNamespace(building_histories={"b1": []})
@@ -271,8 +274,9 @@ def test_run_meta_user_applies_the_floor_for_every_pulse_type():
     runtime.run_meta_user(
         persona=persona, user_input="", building_id="b1", pulse_type="auto",
     )
-    runtime.session_lifecycle.maybe_run_window_refill.assert_not_called()
+    runtime.session_lifecycle.maybe_run_window_refill.assert_called_once()
     runtime.session_lifecycle.ensure_window_floor.assert_called_once()
+    assert runtime.session_lifecycle.maybe_run_window_refill.call_args.kwargs["model_key"]
     assert runtime.session_lifecycle.ensure_window_floor.call_args.kwargs["model_key"]
 
 
@@ -491,16 +495,15 @@ class _History:
         return list(reversed(out))
 
 
-def test_preflight_converges_when_a_straddling_fold_alone_exceeds_high(session_factory):
-    """Codex 一巡目 #4: またぐ区間だけで上限を超える窓から、応答前の三段
-    (非常畳み → 読み戻し → 最終防衛ライン) を三回続けて回しても、二回目と
-    三回目の起点・圧縮区間が同じ (fold → 生 → fold の往復にならない)。
+def test_preflight_cycle_is_stable_when_a_straddling_fold_alone_exceeds_high(session_factory):
+    """またぐ区間だけで上限を超える窓 (digest の行 < 残す量、生の行 > 上限 =
+    水位が両立しない形) から、応答前の三段 (読み戻し → 最終防衛ライン →
+    非常畳み) を三回続けて回しても、毎回同じ二状態を通る — ずれて壊れない。
 
-    一回目: 読み戻しの前段が区間を生に戻し (行 11,000 > 上限 8,000、WARNING)、
+    各回: 読み戻しが区間を丸ごと生に開き (行 1,000 台 < 残す量 5,000 が理由。
+    開いた結果 11,000 > 上限 8,000 は WARNING だけで保つ — 2026-09-05 裁定 3/7)、
     同じ Pulse の非常畳み (知覚の消費の後) の印戻し (§15-3) が区間を digest に
-    戻して編纂ゼロで完了。二回目: 区間は窓の中に全部入っているので、読み戻しは
-    開けず (開くと残す量超え)、床も材料なしで skip、非常畳みも発火しない。
-    三回目も同じ姿 — 収束する。"""
+    戻して編纂ゼロで完了する。LLM が見るのは常に印戻し後の窓。"""
     import os as _os
     lc = _make_lifecycle(session_factory)
     rows = [_msg(f"b{i}", 100 + i, 1000) for i in range(10)] + [_msg("m0", 200, 1000)]
@@ -551,12 +554,11 @@ def test_preflight_converges_when_a_straddling_fold_alone_exceeds_high(session_f
 
     raw_state = ("b0", [(tuple(straddling.message_ids), ("e_f",), True)])
     digest_state = ("b0", [(tuple(straddling.message_ids), ("e_f",), False)])
-    # 一回目: 読み戻しの前段がまたぐ区間を丸ごと生で戻し (行 11,000 > 上限 —
-    # 前段は外さない)、同じ Pulse の非常畳みが印戻しで digest に戻す。
+    # 毎回: 読み戻しがまたぐ区間 (二回目以降は窓内 digest 区間) を丸ごと生に
+    # 開き、同じ Pulse の非常畳みが印戻しで digest に戻す。起点と区間の記録は
+    # 一度も変質しない — 回を重ねても同じ二状態。
     assert first == (raw_state, digest_state)
-    # 二回目以降: 区間は窓の中に全部入っていて開けず (開くと残す量超え)、床も
-    # 材料なし、非常畳みも発火しない — そのまま安定 (往復しない)
-    assert second == (digest_state, digest_state)
+    assert second == first
     assert third == second
 
 
@@ -879,7 +881,8 @@ def test_emergency_precompaction_runs_after_the_flush_and_the_floor_before_it():
         persona=persona, user_input="<system>予定の時刻です</system>",
         building_id="b1", pulse_type="schedule",
     ) == ["ok"]
-    assert seq == ["floor", "flush", "schedule_prompt", "emergency", "playbook"]
+    # 読み戻しも全種の Pulse で走る (2026-09-05 裁定) — schedule でも先頭。
+    assert seq == ["refill", "floor", "flush", "schedule_prompt", "emergency", "playbook"]
 
 
 def _strict_history(rows, *, ready):
@@ -1383,30 +1386,26 @@ def test_floor_missing_history_manager_with_ready_store_is_unmet(session_factory
 def test_preview_refill_strict_distinguishes_read_failure_from_no_material(
     session_factory,
 ):
-    """Codex 七巡目 #4: context-status の厳格モードは、古い材料の読み失敗を
-    「材料なし (適用なし)」と読まず例外にする。既定は None。"""
+    """Codex 七巡目 #4 の族: context-status の厳格モードは、開くあらすじの照会の
+    失敗を「開けるあらすじなし (適用なし)」と読まず例外にする。既定は None。"""
     import threading
 
     lc = _make_lifecycle(session_factory)
     m0 = _msg("m0", 200, 1000)
-
-    def _before(anchor_id, **kwargs):
-        if kwargs.get("raise_on_error"):
-            raise RuntimeError("database is locked")
-        return []
-
     persona = SimpleNamespace(
         persona_id=PERSONA_ID, model=MODEL,
         history_manager=SimpleNamespace(
             get_history_from_anchor=lambda anchor_id, **k: [m0],
-            get_history_before_anchor=_before,
         ),
         sai_memory=SimpleNamespace(
             conn=object(), is_ready=lambda: True, _db_lock=threading.RLock(),
         ),
     )
     with patch.object(lc, "get_metabolism_watermarks", return_value=WM), \
-            patch.object(lc, "perception_blocks_for", return_value=[]):
+            patch.object(lc, "perception_blocks_for", return_value=[]), \
+            patch("sai_memory.arasuji.storage."
+                  "get_latest_primary_entry_before_message",
+                  side_effect=RuntimeError("database is locked")):
         assert lc.preview_refilled_history(persona, MODEL) is None
         with pytest.raises(RuntimeError):
             lc.preview_refilled_history(persona, MODEL, raise_on_error=True)
