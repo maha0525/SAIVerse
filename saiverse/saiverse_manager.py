@@ -313,12 +313,11 @@ class SAIVerseManager(
                 if settings and settings.SELECTED_META_PLAYBOOK:
                     self.state.current_playbook = settings.SELECTED_META_PLAYBOOK
                     logging.info("Loaded saved meta playbook: %s", settings.SELECTED_META_PLAYBOOK)
-                # Metabolism 三水位の全体既定 (user_settings → model_configs のモジュール
+                # Metabolism 二水位の全体既定 (user_settings → model_configs のモジュール
                 # 変数へ写す)。model_configs は DB を触らない約束なので写すのはここと
                 # PUT /api/config/metabolism-defaults の二箇所 (docs/concepts/metabolism.md)。
                 from saiverse.model_configs import set_global_metabolism_defaults
                 set_global_metabolism_defaults({
-                    "metabolism_low_chars": settings.METABOLISM_LOW_CHARS if settings else None,
                     "metabolism_target_chars": settings.METABOLISM_TARGET_CHARS if settings else None,
                     "metabolism_high_chars": settings.METABOLISM_HIGH_CHARS if settings else None,
                 })

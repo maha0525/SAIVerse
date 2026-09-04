@@ -200,29 +200,37 @@ def get_context_length(model: str) -> int:
     return int(config.get("context_length", 120000))
 
 
-#: Metabolism の三水位 (文字数) の組み込み既定。
+#: Metabolism の二水位 (文字数) の組み込み既定。
 #: docs/intent/chronicle_eviction.md §4 — 全モデル一律。旧「モデルごとに
 #: バラバラなメッセージ数」は切り分けの混乱の元だったため単位ごと統一した。
 #:
-#: - low (低水位): 直近保護帯。最新から遡ってこの文字数は退場させない。
-#: - target (目標水位): Metabolism で軽くする到達点。
-#: - high (高水位): 提示コンテキストがこれを超えたら Metabolism 発火。
+#: - target (残す量): Metabolism で軽くする到達点 = 保護範囲。anchor 未確立時の
+#:   初期読み込み量もこれを流用する。
+#: - high (上限): 提示コンテキストがこれを超えたら Metabolism 発火。
 #:
-#: 差分の意味: high - target = 一回で削る量、target - low = 退場候補帯に残して
-#: よいバッファ (U 未満で畳めない小 episode 等)。
+#: 差分の意味: high - target = 一回で削る量。
 #:
 #: 2026-07-30 に high 12万 → 20万・target 6万 → 10万 (まはー裁定)。12万では実運用の
 #: 会話が早々に頭打ちになっていた。一回で削る量は 6万 → 10万字。
-BUILTIN_METABOLISM_LOW_CHARS = 40_000
-BUILTIN_METABOLISM_TARGET_CHARS = 100_000
-BUILTIN_METABOLISM_HIGH_CHARS = 200_000
+#: 2026-09-04 に target 10万 → 4万・high 20万 → 12万 (まはー裁定)。残す量の主語が
+#: 会話の行だけになった (知覚ブロックを数えない) ため、旧既定は大きすぎた。
+#: 4万字は日本語の会話で百数十往復ほど。差 8万は、知覚の上限を差し引いても
+#: 畳みの発火を「たまに・まとめて」に保てる幅。
+#:
+#: 旧三水位の低水位 (``metabolism_low_chars``、組み込み既定 4万) は 2026-09-04 に
+#: 廃止 — 現役の役割が「anchor 未確立時の初期読み込み量」だけに縮んでおり、
+#: 発話直前の最終防衛ライン (arasuji_levels.md §15-5) が窓を残す量まで埋め直す
+#: ため効く場面が実質無かった (docs/issues/
+#: watermarks_unsatisfiable_when_perception_is_large.md 裁定 5)。モデル JSON や
+#: 全体設定に残っているキーは黙って無視される (エラーにしない)。
+BUILTIN_METABOLISM_TARGET_CHARS = 40_000
+BUILTIN_METABOLISM_HIGH_CHARS = 120_000
 
-#: 水位のキー名 → 組み込み既定。全体設定 / API / UI が同じ三つ組を回すための表。
-METABOLISM_WATERMARK_KEYS: tuple[str, str, str] = (
-    "metabolism_low_chars", "metabolism_target_chars", "metabolism_high_chars",
+#: 水位のキー名 → 組み込み既定。全体設定 / API / UI が同じ組を回すための表。
+METABOLISM_WATERMARK_KEYS: tuple[str, str] = (
+    "metabolism_target_chars", "metabolism_high_chars",
 )
 BUILTIN_METABOLISM_DEFAULTS: dict[str, int] = {
-    "metabolism_low_chars": BUILTIN_METABOLISM_LOW_CHARS,
     "metabolism_target_chars": BUILTIN_METABOLISM_TARGET_CHARS,
     "metabolism_high_chars": BUILTIN_METABOLISM_HIGH_CHARS,
 }
@@ -234,10 +242,10 @@ BUILTIN_METABOLISM_DEFAULTS: dict[str, int] = {
 #: 触らない約束なので、起動時 (saiverse_manager) と API の保存成功時に
 #: ``set_global_metabolism_defaults`` で写してもらう。
 #:
-#: **不変の写像を丸ごと差し替える** (clear → 三回代入ではない)。読み手は
-#: ``_current_global_defaults()`` で一枚の写像を取り、その一枚から三水位を解く
-#: (``resolve_metabolism_watermarks``) ので、差し替えの途中で「low は新・target は
-#: 旧」の混ざった三つ組を観測しない (Codex 指摘 2026-09-03)。外から読むときは
+#: **不変の写像を丸ごと差し替える** (clear → 逐次代入ではない)。読み手は
+#: ``_current_global_defaults()`` で一枚の写像を取り、その一枚から水位を解く
+#: (``resolve_metabolism_watermarks``) ので、差し替えの途中で「target は新・high は
+#: 旧」の混ざった組を観測しない (Codex 指摘 2026-09-03)。外から読むときは
 #: ``get_global_metabolism_defaults()`` を使う (この変数名は private)。
 #:
 #: 2026-07-30 に撤去した揮発性のグローバル上書き (会話ごとの画面に置かれ、効く範囲が
@@ -264,7 +272,10 @@ def _positive_int_or_none(value: Any) -> int | None:
 
 
 def set_global_metabolism_defaults(values: Mapping[str, int | None]) -> None:
-    """全体設定の水位既定を差し替える (三キー以外は無視、正の整数以外は未設定扱い)。
+    """全体設定の水位既定を差し替える (二キー以外は無視、正の整数以外は未設定扱い)。
+
+    廃止済みの ``metabolism_low_chars`` が混ざっていても黙って無視する
+    (旧 DB / 旧クライアントとのデータ互換)。
 
     新しい不変写像を作って一回の代入で差し替える — 読み手が持っている古い一枚は
     変化しない。
@@ -276,7 +287,7 @@ def set_global_metabolism_defaults(values: Mapping[str, int | None]) -> None:
 
 
 def get_global_metabolism_defaults() -> dict[str, int | None]:
-    """全体設定の水位既定 (未設定は None) を三キーそろえて返す。"""
+    """全体設定の水位既定 (未設定は None) を二キーそろえて返す。"""
     current = _current_global_defaults()
     return {key: current.get(key) for key in METABOLISM_WATERMARK_KEYS}
 
@@ -321,28 +332,29 @@ def compose_metabolism_watermark(
 
 def compose_metabolism_watermarks(
     config: Mapping[str, Any], global_defaults: Mapping[str, int | None],
-) -> tuple[int | None, int | None, int | None]:
-    """モデル定義一つと全体既定の一枚から (low, target, high) を組む。"""
+) -> tuple[int | None, int | None]:
+    """モデル定義一つと全体既定の一枚から (target, high) を組む。"""
     effective = _effective_defaults_from(global_defaults)
-    low, target, high = (
+    target, high = (
         compose_metabolism_watermark(config, key, effective[key])
         for key in METABOLISM_WATERMARK_KEYS
     )
-    return low, target, high
+    return target, high
 
 
-def resolve_metabolism_watermarks(model: str) -> tuple[int | None, int | None, int | None]:
-    """Metabolism の三水位 (low, target, high) を**一枚の全体既定**から解決する。
+def resolve_metabolism_watermarks(model: str) -> tuple[int | None, int | None]:
+    """Metabolism の二水位 (target, high) を**一枚の全体既定**から解決する。
 
     三層: モデル定義にキーが無いなら全体設定の既定、それも無ければ組み込み既定
     (一律)。キーが有って ``null`` / 0 以下なら None = その水位を持たない (これは
     モデル単位のオプトアウトで、全体設定では表せない)。high が None のとき
     文字数による発火は起きず、``token_triggered`` だけが Metabolism を起こす
-    (chronicle_eviction.md §4)。
+    (chronicle_eviction.md §4)。モデル定義に残っている廃止済みの
+    ``metabolism_low_chars`` キーは読まない = 黙って無視される。
 
-    全体既定は ``_current_global_defaults()`` を**一度だけ**読む。三水位を別々の
+    全体既定は ``_current_global_defaults()`` を**一度だけ**読む。水位を別々の
     getter で取ると、間に ``set_global_metabolism_defaults`` が挟まったとき
-    新旧の混ざった三つ組になる — 三つ組が要る呼び手 (sea/session_lifecycle.py)
+    新旧の混ざった組になる — 組で要る呼び手 (sea/session_lifecycle.py)
     はこちらを使う。
     """
     config = MODEL_CONFIGS.get(model, {})
@@ -350,15 +362,10 @@ def resolve_metabolism_watermarks(model: str) -> tuple[int | None, int | None, i
 
 
 def _metabolism_chars(model: str, key: str) -> int | None:
-    """水位一つを解決する (単発の getter 用。三つ組が要るなら resolve_… を使う)。"""
+    """水位一つを解決する (単発の getter 用。組で要るなら resolve_… を使う)。"""
     config = MODEL_CONFIGS.get(model, {})
     effective = _effective_defaults_from(_current_global_defaults())
     return compose_metabolism_watermark(config, key, effective[key])
-
-
-def get_metabolism_low_chars(model: str) -> int | None:
-    """低水位 = 直近保護帯の文字数 (model config ``metabolism_low_chars``)。"""
-    return _metabolism_chars(model, "metabolism_low_chars")
 
 
 def get_metabolism_target_chars(model: str) -> int | None:

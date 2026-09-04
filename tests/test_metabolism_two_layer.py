@@ -1077,7 +1077,7 @@ class RetirementGateTest(unittest.TestCase):
         )
 
     def _run(self, lifecycle, model_key=None):
-        # 低水位 2,000字 = 末尾 2 通を保護 / 目標 2,000字 / U=2,500字。
+        # 残す量 2,000字 = 末尾 2 通を保護 / U=2,500字。
         # → 退場候補範囲 m0..m2 が 1 束 (3,000字 ≥ U) になり、先頭から連続なので
         #   anchor が飲み込んで m3 へ進む。
         messages = [_msg(f"m{i}", 100 + i, chars=1_000) for i in range(5)]
@@ -1088,7 +1088,7 @@ class RetirementGateTest(unittest.TestCase):
                       lambda *a, **k: None):
             lifecycle.run_metabolism(
                 self._persona(messages), "b", window,
-                Watermarks(low=2_000, target=2_000, high=4_000), None,
+                Watermarks(target=2_000, high=4_000), None,
                 model_key=model_key,
             )
 
@@ -1230,7 +1230,7 @@ class EpisodeUnitEvictionTest(unittest.TestCase):
         lifecycle = self._make_lifecycle("ok")
         # 残す量 1,000字 → 保護は n2 のみ。候補 m0,m1,n0,n1 (3,000字) のうち
         # U=2,000 で [m0,m1,n0] が畳まれ、端数 n1 は次回へ残る。
-        self._run(lifecycle, msgs, Watermarks(low=0, target=1_000, high=5_000))
+        self._run(lifecycle, msgs, Watermarks(target=1_000, high=5_000))
         self.assertEqual(self._anchor(lifecycle), "n1")
 
     def test_fold_cuts_at_pulse_joint(self):
@@ -1250,7 +1250,7 @@ class EpisodeUnitEvictionTest(unittest.TestCase):
             _msg("a3", 103, chars=1_000, episode_ref=ref, pulse_id="p2"),
         ]
         lifecycle = self._make_lifecycle("ok")
-        self._run(lifecycle, msgs, Watermarks(low=0, target=2_000, high=3_000))
+        self._run(lifecycle, msgs, Watermarks(target=2_000, high=3_000))
         # p1 が丸ごと退場し、anchor は a2 へ。p2 は残す量の側なので残る。
         self.assertEqual(self._anchor(lifecycle), "a2")
 
@@ -1263,7 +1263,7 @@ class EpisodeUnitEvictionTest(unittest.TestCase):
             _msg("c3", 103, chars=1_000),
         ]
         lifecycle = self._make_lifecycle("ok")
-        self._run(lifecycle, msgs, Watermarks(low=2_000, target=2_000, high=3_000))
+        self._run(lifecycle, msgs, Watermarks(target=2_000, high=3_000))
         # c0 (ep1) + c1 (ep2) で U=2,000 到達 → 束ねて退場、anchor は c2。
         self.assertEqual(self._anchor(lifecycle), "c2")
 
@@ -1271,7 +1271,7 @@ class EpisodeUnitEvictionTest(unittest.TestCase):
         """残す量ぶんの直近は退場させない (作業の直近が守られる)。"""
         msgs = [_msg(f"m{i}", 100 + i, chars=1_000) for i in range(6)]
         lifecycle = self._make_lifecycle("ok")
-        self._run(lifecycle, msgs, Watermarks(low=0, target=4_000, high=5_000))
+        self._run(lifecycle, msgs, Watermarks(target=4_000, high=5_000))
         # 末尾 4,000字 (m2..m5) は残す量。候補は m0/m1 の 2,000字 = U ちょうど。
         self.assertEqual(self._anchor(lifecycle), "m2")
 
@@ -1286,7 +1286,7 @@ class EpisodeUnitEvictionTest(unittest.TestCase):
         lifecycle._attach_chronicle_refs = lambda p, folds: None  # 引き当て失敗
         saved = []
         lifecycle.save_folded_ranges = lambda pid, mk, folds: saved.append(folds)
-        self._run(lifecycle, msgs, Watermarks(low=2_000, target=1_000, high=5_000))
+        self._run(lifecycle, msgs, Watermarks(target=1_000, high=5_000))
         self.assertIsNone(self._anchor(lifecycle))
         self.assertEqual(saved, [[]])
 
@@ -1325,7 +1325,7 @@ class EpisodeUnitEvictionTest(unittest.TestCase):
                 # 残す量 2,000字 → 保護は k0/k1。候補 a0,m1..m4 のうち計画は
                 # [a0,m1,m2] と [m3,m4] を畳もうとするが、前者は既存の圧縮区間
                 # [m1,m2] と重なるので二重記録スキップされる。
-                Watermarks(low=0, target=2_000, high=8_000), None,
+                Watermarks(target=2_000, high=8_000), None,
                 model_key="std-model",
             )
         # m1/m2 は再度記録されず、新しく畳まれるのは m3/m4 だけ。先頭 a0 は
@@ -1433,7 +1433,7 @@ class InjectedPerceptionAccountingTest(unittest.TestCase):
             "anchor_id": "m0",
             "updated_at": datetime.now().replace(microsecond=0).isoformat(),
         })
-        wm = Watermarks(low=0, target=2_000, high=4_000)
+        wm = Watermarks(target=2_000, high=4_000)
         runs = []
         lifecycle.run_metabolism = lambda *a, **k: runs.append(k.get("model_key"))
 
@@ -1505,7 +1505,7 @@ class InjectedPerceptionAccountingTest(unittest.TestCase):
         m5 だけに縮み [m0..m3] が畳まれていた。)
         """
         msgs = [_msg(f"m{i}", 100 + i, chars=600) for i in range(6)]  # 3,600 字
-        wm = Watermarks(low=0, target=2_000, high=8_000)
+        wm = Watermarks(target=2_000, high=8_000)
         _status, anchor, rows = self._run_metabolism_with_blocks(msgs, wm, None)
         self.assertIsNone(anchor)
         self.assertEqual(rows, 3_600)
@@ -1525,7 +1525,7 @@ class InjectedPerceptionAccountingTest(unittest.TestCase):
         縮み、[m0..m9] が畳まれて会話は 10,000 字しか残らなかった。
         """
         msgs = [_msg(f"m{i}", 100 + i, chars=1_000) for i in range(20)]
-        wm = Watermarks(low=0, target=18_000, high=26_000)
+        wm = Watermarks(target=18_000, high=26_000)
         status, anchor, rows = self._run_metabolism_with_blocks(
             msgs, wm, [_perception_block(7_800, 200)],
         )
@@ -1546,7 +1546,7 @@ class InjectedPerceptionAccountingTest(unittest.TestCase):
             "anchor_id": "m0",
             "updated_at": datetime.now().replace(microsecond=0).isoformat(),
         })
-        wm = Watermarks(low=0, target=18_000, high=26_000)
+        wm = Watermarks(target=18_000, high=26_000)
         runs = []
         lifecycle.run_metabolism = lambda *a, **k: runs.append(k.get("model_key"))
         blocks = [_perception_block(30_000, 200)]  # 合計 40,000 > 上限
@@ -1660,7 +1660,7 @@ class ApplierVetoDeadlockTest(unittest.TestCase):
         saved = []
         lifecycle.save_folded_ranges = lambda pid, mk, folds: saved.append(folds)
 
-        self._run(lifecycle, msgs, Watermarks(low=0, target=2_000, high=5_000))
+        self._run(lifecycle, msgs, Watermarks(target=2_000, high=5_000))
 
         # 新計画は [e0] (U 到達で単独 fold) と [o0,c0,c1] を畳む。e0 の fold は
         # あらすじゼロだが吸収限定で退場し (旧実装: 見送りで永久停止)、後続の
@@ -1686,7 +1686,7 @@ class ApplierVetoDeadlockTest(unittest.TestCase):
         lifecycle._fold_has_chronicle_material = lambda p, f: True
         saved = []
         lifecycle.save_folded_ranges = lambda pid, mk, folds: saved.append(folds)
-        self._run(lifecycle, msgs, Watermarks(low=2_000, target=1_000, high=5_000))
+        self._run(lifecycle, msgs, Watermarks(target=1_000, high=5_000))
         self.assertIsNone(self._anchor(lifecycle))
         self.assertEqual(saved, [[]])
 
@@ -1720,7 +1720,7 @@ class ApplierVetoDeadlockTest(unittest.TestCase):
             else ("digest", False)
         )
 
-        self._run(lifecycle, msgs, Watermarks(low=2_000, target=1_000, high=5_000))
+        self._run(lifecycle, msgs, Watermarks(target=1_000, high=5_000))
 
         # [m0..m3] が一束で畳まれて anchor は保護範囲の先頭 k0 へ
         # (旧実装: 重なり拒否で m0 のまま永久停止)
@@ -1750,7 +1750,7 @@ class ApplierVetoDeadlockTest(unittest.TestCase):
         # 一時失敗: digest は引けないが恒久欠落とは判定されない
         lifecycle._resolve_fold_digest_status = lambda p, f: (None, False)
 
-        self._run(lifecycle, msgs, Watermarks(low=2_000, target=1_000, high=5_000))
+        self._run(lifecycle, msgs, Watermarks(target=1_000, high=5_000))
 
         # 記録は生きたまま (m2/m3 を含む束ねは従来どおり二重記録拒否で見送り)
         self.assertEqual(
@@ -1922,7 +1922,7 @@ class MetabolismVisualizationDispatchTest(unittest.TestCase):
                       lambda p, m, model_key=None: dispatched.append(model_key)):
             lifecycle.run_metabolism(
                 persona, "b", window,
-                Watermarks(low=2_000, target=2_000, high=4_000), None,
+                Watermarks(target=2_000, high=4_000), None,
                 model_key="light-model",
             )
         self.assertEqual(dispatched, ["light-model"])
@@ -1972,7 +1972,7 @@ class MetabolismVisualizationDispatchTest(unittest.TestCase):
                       lambda p, m, model_key=None: None):
             lifecycle.run_metabolism(
                 persona, "b", window,
-                Watermarks(low=2_000, target=2_000, high=4_000), None,
+                Watermarks(target=2_000, high=4_000), None,
                 model_key="light-model",
             )
 
@@ -2106,7 +2106,7 @@ class ExtractionBacklogRecoveryPointTest(unittest.TestCase):
             # 提示コンテキストが空 = 畳むものが無い夜
             status = lifecycle.run_metabolism(
                 self._persona(), "b", _window([]),
-                Watermarks(low=2_000, target=2_000, high=4_000), None,
+                Watermarks(target=2_000, high=4_000), None,
                 model_key="std-model",
             )
 
@@ -2142,7 +2142,7 @@ class ExtractionBacklogRecoveryPointTest(unittest.TestCase):
                    side_effect=lambda *a, **k: built.append(a) or SimpleNamespace()):
             lifecycle.run_metabolism(
                 persona, "b", _window([]),
-                Watermarks(low=2_000, target=2_000, high=4_000), None,
+                Watermarks(target=2_000, high=4_000), None,
                 model_key="std-model",
             )
 
@@ -2165,7 +2165,7 @@ class ExtractionBacklogRecoveryPointTest(unittest.TestCase):
                    side_effect=lambda *a, **k: built.append(a) or SimpleNamespace()):
             lifecycle.run_metabolism(
                 self._persona(), "b", _window([]),
-                Watermarks(low=2_000, target=2_000, high=4_000), None,
+                Watermarks(target=2_000, high=4_000), None,
                 model_key="std-model",
             )
 

@@ -7,8 +7,7 @@ export interface ContextStatus {
     persona_id: string;
     model: string | null;
     metabolism: boolean;              // 実効モデルが水位を持つか
-    low_chars: number | null;         // 最初に読み込む量
-    target_chars: number | null;      // 残す量 (整理後にここへ揃える)
+    target_chars: number | null;      // 残す量 (整理後にここへ揃える。会話の起点が無いときの初期読み込み量も兼ねる)
     high_chars: number | null;        // 上限 (超えたら整理)
     presented_chars: number | null;   // 現在の提示コンテキスト文字数 (読み戻し後)
     // presented_chars の内訳 (2026-09-02): 保存済みの会話 / 送信直前に差し込まれる

@@ -211,7 +211,7 @@ class _FakeHistoryManager:
         return []
 
     def get_recent_history(self, max_chars, **_kwargs):
-        # 上限は文字数で渡る (chronicle_eviction.md §4 — 低水位 = 直近保護帯)
+        # 上限は文字数で渡る (chronicle_eviction.md §4 — 初期読み込みは残す量を流用)
         self._captured["limit"] = max_chars
         return []
 
@@ -221,7 +221,8 @@ def _runtime_at_bootstrap():
 
     Metabolism は常時 ON になった (2026-07-30 OFF トグル撤去) ため、旧「無効時の
     スライディングウィンドウ」テストは「anchor 行が無いときの最小ロード」テストへ
-    改装した — 守りたい回帰は同じ (初期読み込み量は実行 model の低水位で選ぶ)。
+    改装した — 守りたい回帰は同じ (初期読み込み量は実行 model の残す量で選ぶ。
+    旧低水位は 2026-09-04 廃止)。
     """
     from sea.session_lifecycle import SessionLifecycle
 
@@ -242,15 +243,15 @@ def test_bootstrap_history_limit_uses_execution_model(monkeypatch):
     標準モデル分の履歴を軽量クライアントへ送り、context-length error になる
     (2026-07-24 Codex レビュー指摘、work_session が軽量モデルで走ることの実害)。
 
-    上限の実体は低水位 = 初期読み込み量の文字数。
+    上限の実体は残す量 (metabolism_target_chars) = 初期読み込み量の文字数。
     """
     monkeypatch.setattr(
         "sea.head_pipeline.render_head_messages", lambda *a, **k: []
     )
     from saiverse import model_configs
     monkeypatch.setattr(model_configs, "MODEL_CONFIGS", {
-        "fable-5": {"metabolism_low_chars": 100_000},
-        "ollama-20b": {"metabolism_low_chars": 20_000},
+        "fable-5": {"metabolism_target_chars": 100_000},
+        "ollama-20b": {"metabolism_target_chars": 20_000},
     })
 
     captured: dict = {}
@@ -284,7 +285,7 @@ def test_bootstrap_history_limit_falls_back_to_persona_model(monkeypatch):
     )
     from saiverse import model_configs
     monkeypatch.setattr(model_configs, "MODEL_CONFIGS", {
-        "fable-5": {"metabolism_low_chars": 100_000},
+        "fable-5": {"metabolism_target_chars": 100_000},
     })
 
     captured: dict = {}
@@ -322,7 +323,6 @@ def test_null_watermark_model_never_touches_anchor(monkeypatch):
     from saiverse import model_configs
     monkeypatch.setattr(model_configs, "MODEL_CONFIGS", {
         "no-metabolism": {
-            "metabolism_low_chars": None,
             "metabolism_target_chars": None,
             "metabolism_high_chars": None,
         },

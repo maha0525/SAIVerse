@@ -26,7 +26,6 @@ SAIVerse 側で固有に定義しているフィールドは、ユーザーが�
 | `supports_structured_output` | bool | チェックボックス |
 | `structured_output_backend` | enum | ドロップダウン (`xgrammar` / `outlines` / なし) |
 | `structured_output_mode` | enum | ドロップダウン (`native` / `json_object` / なし) |
-| `metabolism_low_chars` | number | 数値入力（直近保護帯の文字数） |
 | `metabolism_target_chars` | number | 数値入力（整理後の目標文字数） |
 | `metabolism_high_chars` | number | 数値入力（発火する文字数。null = token 閾値のみ） |
 | `max_image_embeds` | number | 数値入力 |

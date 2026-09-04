@@ -91,7 +91,7 @@ def plan(messages, *, keep=2_000, high=None, **kwargs):
     """新仕様の呼び出し: watermarks.target = 残す量。low は互換用 (未使用)。"""
     return plan_eviction(
         messages, set(),
-        Watermarks(low=0, target=keep, high=high),
+        Watermarks(target=keep, high=high),
         target_chars=U,
         **kwargs,
     )
@@ -798,7 +798,7 @@ class GuardTest(unittest.TestCase):
         退場を見送る (WARNING)。"""
         msgs = [msg(f"m{i}", 100 + i) for i in range(6)]
         result = plan_eviction(
-            msgs, set(), Watermarks(low=0, target=1_000, high=None),
+            msgs, set(), Watermarks(target=1_000, high=None),
             target_chars=500,
         )
         self.assertTrue(result.is_empty)

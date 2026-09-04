@@ -26,7 +26,7 @@ router = APIRouter()
 def get_context_status(persona_id: str, manager=Depends(get_manager)) -> dict[str, Any]:
     """指定ペルソナの提示コンテキスト状態 (水位 + 現在文字数) を read-only で返す。
 
-    - ``watermarks``: 実効 model の三水位 (model 定義から解決)。model が水位を
+    - ``watermarks``: 実効 model の二水位 (model 定義から解決)。model が水位を
       持たない (null 設定) 場合は None = Metabolism を持たない。
     - ``presented_chars``: 次の user Pulse で実際に送られる提示コンテキストの
       文字数。§15 読み戻しが適用されるならその適用後 (プレビューと一致)。
@@ -73,8 +73,7 @@ def get_context_status(persona_id: str, manager=Depends(get_manager)) -> dict[st
         "persona_id": persona_id,
         "model": model_key,
         "metabolism": False,          # 実効 model が水位を持つか
-        "low_chars": None,            # 初期読み込み量 (anchor 未確立時に読む量)
-        "target_chars": None,         # 残す量 (整理後にここへ揃える)
+        "target_chars": None,         # 残す量 (整理後にここへ揃える。anchor 未確立時の初期読み込み量も兼ねる)
         "high_chars": None,           # 上限 (超えたら整理が走る)
         "presented_chars": None,      # 実際に送られる合計文字数 (読み戻し後)
         "stored_chars": None,         # うち保存済みの会話 (提示ウィンドウの行)
@@ -102,7 +101,9 @@ def get_context_status(persona_id: str, manager=Depends(get_manager)) -> dict[st
     )
 
     try:
-        watermarks = lifecycle.get_metabolism_watermarks(persona, model_key)
+        watermarks = lifecycle.get_metabolism_watermarks(
+            persona, model_key, persona_id=persona_id,
+        )
     except Exception:
         # 解決失敗を「水位を持たないモデル」(正常な metabolism=false) に偽装
         # しない — 設定破損等の障害はエラーとして UI に届ける (Codex 指摘 2026-07-30)。
@@ -117,7 +118,6 @@ def get_context_status(persona_id: str, manager=Depends(get_manager)) -> dict[st
         return status
     status.update({
         "metabolism": True,
-        "low_chars": watermarks.low,
         "target_chars": watermarks.target,
         "high_chars": watermarks.high,
     })

@@ -1,16 +1,16 @@
 import React from 'react';
 import styles from './WatermarkBar.module.css';
 
-// 記憶の整理の三水位 (最初に読み込む量 / 整理後に残す量 / 整理をはじめる量) を
-// 一本の横棒に目印として並べる、表示専用の部品。値の編集は呼び出し側が数値欄で
-// 行い、ここは渡された値を描き直すだけ。
+// 記憶の整理の二水位 (整理後に残す量 / 整理をはじめる量) を一本の横棒に目印として
+// 並べる、表示専用の部品。値の編集は呼び出し側が数値欄で行い、ここは渡された値を
+// 描き直すだけ。(旧「最初に読み込む量」= 低水位は 2026-09-04 廃止 — 初期読み込みは
+// 残す量を流用する)
 //
 // ChatOptions の ContextVolumeBar (現在量 vs 残す量/上限) とは役目が違う —
-// あちらは「今どこまで溜まっているか」、こちらは「三つの水位が正しい順に並んで
+// あちらは「今どこまで溜まっているか」、こちらは「水位が正しい順に並んで
 // いるか」を見せる。共通化せず、見た目 (高さ・角丸・グレー地) だけ揃えてある。
 
 export interface WatermarkBarValues {
-    low: number | null;
     target: number | null;
     high: number | null;
 }
@@ -24,24 +24,21 @@ interface WatermarkBarProps {
 }
 
 export const WATERMARK_LABELS: Record<keyof WatermarkBarValues, string> = {
-    low: '最初に読み込む量',
     target: '整理後に残す量',
     high: '整理をはじめる量',
 };
 
-/** 低 ≤ 目標 ≤ 高 を破っている目印を返す (null は比較しない)。 */
+/** 目標 ≤ 高 を破っている目印を返す (null は比較しない)。 */
 export function findWatermarkOrderViolations(values: WatermarkBarValues): Set<keyof WatermarkBarValues> {
     const bad = new Set<keyof WatermarkBarValues>();
-    const { low, target, high } = values;
-    if (low != null && target != null && low > target) { bad.add('low'); bad.add('target'); }
+    const { target, high } = values;
     if (target != null && high != null && target > high) { bad.add('target'); bad.add('high'); }
-    if (low != null && high != null && low > high) { bad.add('low'); bad.add('high'); }
     return bad;
 }
 
-/** 目盛りの右端 = max(三水位, extraMax) × 1.1。全部 null なら描けない (null)。 */
+/** 目盛りの右端 = max(水位, extraMax) × 1.1。全部 null なら描けない (null)。 */
 export function watermarkScaleMax(values: WatermarkBarValues, extraMax?: number | null): number | null {
-    const candidates = [values.low, values.target, values.high, extraMax ?? null]
+    const candidates = [values.target, values.high, extraMax ?? null]
         .filter((v): v is number => v != null && v > 0);
     if (candidates.length === 0) return null;
     return Math.max(...candidates) * 1.1;
@@ -51,17 +48,14 @@ export default function WatermarkBar({ values, extraMax, invalidKeys }: Watermar
     const scaleMax = watermarkScaleMax(values, extraMax);
     if (scaleMax == null) return null;
     const bad = invalidKeys ?? findWatermarkOrderViolations(values);
-    const keys: Array<keyof WatermarkBarValues> = ['low', 'target', 'high'];
+    const keys: Array<keyof WatermarkBarValues> = ['target', 'high'];
 
     return (
         <div className={styles.wrapper}>
             <div className={styles.bar}>
-                {/* 低 → 目標 → 高 の帯を薄く塗り分ける (順序が正しいときだけ意味を持つ) */}
+                {/* 残す量までの帯を薄く塗る (順序が正しいときだけ意味を持つ) */}
                 {values.target != null && (
                     <div className={styles.bandTarget} style={{ width: `${(values.target / scaleMax) * 100}%` }} />
-                )}
-                {values.low != null && (
-                    <div className={styles.bandLow} style={{ width: `${(values.low / scaleMax) * 100}%` }} />
                 )}
                 {keys.map(key => {
                     const v = values[key];

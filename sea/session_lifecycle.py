@@ -67,10 +67,19 @@ class SessionLifecycle:
         # しないようにする (Codex 指摘 2026-09-03)。
         self._chronicle_failures_lock = threading.Lock()
         self._chronicle_failures: Dict[str, Dict[str, Any]] = {}
+        # 「一度だけ警告」の既出集合 2 つを守る錠。集合への「確認して追加」は
+        # 素のままだと原子的でなく、並行呼び出しで同じ警告が重複する。錠が
+        # 覆うのは判定+追加のごく短い区間だけで、警告本体 (LOGGER 呼び出し)
+        # や水位解決は覆わない。
+        self._warn_lock = threading.Lock()
         # 「合計は上限超えだが会話の行は残す量以下 = 畳めるものが無い」を
         # ペルソナごとプロセスごとに 1 度だけ警告するための既出集合
         # (:meth:`_note_perception_over_budget`)。毎ターン同じ警告を出さない。
         self._perception_over_budget_warned: Set[str] = set()
+        # 解決済み水位の逆転 (残す量 > 上限) を (persona, model) ごとプロセス
+        # ごとに 1 度だけ警告するための既出集合
+        # (:meth:`get_metabolism_watermarks`)。毎ターン同じ警告を出さない。
+        self._watermark_inversion_warned: Set[Tuple[str, str]] = set()
         # 最終防衛ライン (:meth:`ensure_window_floor`) が最後に発火した時刻
         # ((persona_id, model_key) → ISO 文字列)。発火は上流 (読み戻し) の
         # 失敗の印なので context-status に出す。プロセス内の記録で永続化しない。
@@ -175,8 +184,11 @@ class SessionLifecycle:
         if not (total_chars > watermarks.high and rows_chars <= watermarks.target):
             return False
         persona_id = str(getattr(persona, "persona_id", "?"))
-        if persona_id not in self._perception_over_budget_warned:
-            self._perception_over_budget_warned.add(persona_id)
+        with self._warn_lock:
+            first_time = persona_id not in self._perception_over_budget_warned
+            if first_time:
+                self._perception_over_budget_warned.add(persona_id)
+        if first_time:
             LOGGER.warning(
                 "[metabolism] perception blocks (%d chars) exceed the room left "
                 "by the watermarks (high %d − target %d); nothing evictable — "
@@ -189,35 +201,76 @@ class SessionLifecycle:
 
     def get_metabolism_watermarks(
         self, persona, model_key: Optional[str] = None,
+        persona_id: Optional[str] = None,
     ) -> Optional[Watermarks]:
-        """Metabolism の三水位 (文字数) を解決する。
+        """Metabolism の二水位 (残す量・上限、文字数) を解決する。
 
         docs/intent/chronicle_eviction.md §4。水位はモデル依存
         (beat_execution_context.md §3.2 — 各 Session は自分の model の閾値で
         自分の提示コンテキストを管理する)。``model_key`` は実行 model。None なら従来どおり
-        ``persona.model`` にフォールバックする。
+        ``persona.model`` にフォールバックする。``persona_id`` は警告の抑止キー用 —
+        persona 未ロード (None) で呼ぶ経路 (context-status) が明示する。
 
         水位は三層で決まる: 組み込み既定 < 全体設定 (user_settings、2026-09-03)
         < model 定義。解決は saiverse.model_configs の
-        ``resolve_metabolism_watermarks`` に任せ、ここでは層を意識しない。三つを
+        ``resolve_metabolism_watermarks`` に任せ、ここでは層を意識しない。二つを
         別々の getter で取らないのは、間に全体設定の差し替えが挟まると新旧の
-        混ざった三つ組になるから (一枚の既定から三つまとめて解く)。2026-07-30 に
+        混ざった組になるから (一枚の既定からまとめて解く)。2026-07-30 に
         撤去した揮発性のグローバル上書きとは別物で、全体設定は「キー無しの model
         が従う既定」にすぎない (docs/concepts/metabolism.md)。model が解決できない
         場合と、model 定義が水位を null にしている場合は None を返す (= Metabolism
         を持たない。これが唯一のオプトアウト — 全体設定では表せない)。
+
+        **逆転のクランプ (2026-09-04)**: 解決した組が「残す量 > 上限」なら、実効の
+        上限を残す量まで引き上げて返す (WARNING を (persona, model) ごと 1 度)。
+        既定値の変更 (残す量 4万・上限 12万) より前に保存されたデータ — 例えば
+        model JSON に metabolism_target_chars=150000 だけ書いた組 — は保存 API の
+        順序検証をすり抜けて逆転で合成されうる。逆転のまま走ると、上限超過で
+        発火しても会話の行が残す量以下なので退場計画が空になり、「知覚の供給
+        過多」という間違った旗が立つ。残す量は会話を守る約束、上限は予算の
+        約束で、守る約束を勝たせる (記憶を削るくらいなら予算超過を受け入れる)。
+        クランプを合成関数 (saiverse.model_configs の
+        ``compose_metabolism_watermarks`` / ``resolve_metabolism_watermarks``)
+        に入れないのは、保存 API の衝突検出
+        (api/routes/config.py ``_models_conflicting_with_defaults``) が「生の
+        合成」を見て不正な組を検出しており、合成の中で直すと検出が盲目になる
+        から。ここ (実行時の解決点) でだけ実効値を安全側に倒す。
         """
         persona_model = model_key or getattr(persona, "model", None)
         if not persona_model:
             return None
         from saiverse.model_configs import resolve_metabolism_watermarks
 
-        low, target, high = resolve_metabolism_watermarks(str(persona_model))
+        target, high = resolve_metabolism_watermarks(str(persona_model))
 
-        if low is None or target is None:
-            # 低・目標が無い設定は退場の量を決められない = Metabolism を持たない。
+        if target is None:
+            # 残す量が無い設定は退場の量を決められない = Metabolism を持たない。
             return None
-        return Watermarks(low=int(low), target=int(target), high=high)
+        target = int(target)
+        if high is not None and high < target:
+            # persona が None の呼び出し (context-status の未ロードペルソナ) は
+            # getattr が "?" に潰れて全員が同じ抑止キーを共有してしまう —
+            # 呼び出し側が persona_id を明示できる口を持つ (Codex 指摘 2026-09-04)。
+            warn_key = (
+                str(persona_id or getattr(persona, "persona_id", "?")),
+                str(persona_model),
+            )
+            with self._warn_lock:
+                first_time = warn_key not in self._watermark_inversion_warned
+                if first_time:
+                    self._watermark_inversion_warned.add(warn_key)
+            if first_time:
+                LOGGER.warning(
+                    "[metabolism] resolved watermarks are inverted for model %s: "
+                    "keep amount (target=%d chars) exceeds the limit (high=%d "
+                    "chars). Using high=%d at runtime so the conversation "
+                    "guarantee wins; please fix the model definition or the "
+                    "global metabolism defaults so that target <= high "
+                    "(persona=%s)",
+                    persona_model, target, high, target, warn_key[0],
+                )
+            high = target
+        return Watermarks(target=target, high=high)
 
     def _get_ledger(self):
         """実行台帳 (manager.execution_ledger)。無い環境 (旧テスト等) は None。"""

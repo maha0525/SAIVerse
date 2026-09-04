@@ -432,7 +432,7 @@ def test_refill_skips_at_or_above_target(session_factory):
     lc.upsert_anchor_entry(PERSONA_ID, "model-a", {
         "anchor_id": "m1", "updated_at": _now().isoformat(), "ttl_seconds": 3600,
     })
-    wm = Watermarks(low=1000, target=2000, high=4000)
+    wm = Watermarks(target=2000, high=4000)
     msgs = [_msg("m1", 100, 2500)]
     with patch.object(lc, "get_metabolism_watermarks", return_value=wm), \
             patch.object(lc, "get_presented_window", return_value=_window("m1", msgs)), \
@@ -459,7 +459,7 @@ def test_refill_reopens_in_window_folds_and_stamps_warm(session_factory):
     raw = [_msg("m0", 100, 3000), _msg("m1", 101, 3000), _msg("m2", 102, 3000)]
     fold = FoldedRange(message_ids=["m0", "m1"], chronicle_entry_ids=["e1"])
     presented = [_ph("m0", chars=500), _msg("m2", 102, 3000)]
-    wm = Watermarks(low=1000, target=20_000, high=40_000)
+    wm = Watermarks(target=20_000, high=40_000)
     with patch.object(lc, "get_metabolism_watermarks", return_value=wm), \
             patch.object(lc, "resolve_metabolism_anchor", return_value=("m0", "self")), \
             patch.object(lc, "get_presented_window",
@@ -491,7 +491,7 @@ def test_refill_rewinds_anchor_with_synthesized_folds(session_factory):
     lc.upsert_anchor_entry(PERSONA_ID, "model-a", {
         "anchor_id": "m0", "updated_at": _now().isoformat(), "ttl_seconds": 3600,
     })
-    wm = Watermarks(low=1000, target=5000, high=10_000)
+    wm = Watermarks(target=5000, high=10_000)
     window = _window("m0", [_msg("m0", 200, 1000)])
     entries = [_entry("e1", ["b0", "b1"], short_id=1), _entry("e2", ["b2", "b3"], short_id=2)]
     with patch.object(lc, "get_metabolism_watermarks", return_value=wm), \
@@ -526,7 +526,7 @@ def test_preview_refilled_history_is_read_only(session_factory):
     lc.upsert_anchor_entry(PERSONA_ID, "model-a", {
         "anchor_id": "m0", "updated_at": stale.isoformat(), "ttl_seconds": 300,
     })
-    wm = Watermarks(low=1000, target=5000, high=10_000)
+    wm = Watermarks(target=5000, high=10_000)
     window = _window("m0", [_msg("m0", 200, 1000)])
     entries = [_entry("e1", ["b0", "b1"]), _entry("e2", ["b2", "b3"])]
     with patch.object(lc, "get_metabolism_watermarks", return_value=wm), \
@@ -586,7 +586,7 @@ def test_refill_measures_rows_only_against_target(session_factory):
     lc.upsert_anchor_entry(PERSONA_ID, "model-a", {
         "anchor_id": "m0", "updated_at": _now().isoformat(), "ttl_seconds": 3600,
     })
-    wm = Watermarks(low=1000, target=18_000, high=26_000)
+    wm = Watermarks(target=18_000, high=26_000)
     window = _window("m0", [_msg("m0", 200, 3000)])  # 保存行は 3,000 字
     entries = [_entry("e1", ["b0", "b1"]), _entry("e2", ["b2", "b3"])]
     block = {
@@ -620,7 +620,7 @@ def test_preview_refilled_history_none_when_at_target(session_factory):
     lc.upsert_anchor_entry(PERSONA_ID, "model-a", {
         "anchor_id": "m0", "updated_at": _now().isoformat(), "ttl_seconds": 3600,
     })
-    wm = Watermarks(low=1000, target=2000, high=4000)
+    wm = Watermarks(target=2000, high=4000)
     window = _window("m0", [_msg("m0", 100, 2500)])
     with patch.object(lc, "get_metabolism_watermarks", return_value=wm), \
             patch.object(lc, "resolve_metabolism_anchor", return_value=("m0", "self")), \
@@ -639,7 +639,7 @@ def test_preview_refill_raise_on_error_distinguishes_failure(session_factory):
     lc.upsert_anchor_entry(PERSONA_ID, "model-a", {
         "anchor_id": "m0", "updated_at": _now().isoformat(), "ttl_seconds": 3600,
     })
-    wm = Watermarks(low=1000, target=2000, high=4000)
+    wm = Watermarks(target=2000, high=4000)
     with patch.object(lc, "get_metabolism_watermarks", return_value=wm), \
             patch.object(lc, "resolve_metabolism_anchor", return_value=("m0", "self")), \
             patch.object(lc, "_plan_window_refill", side_effect=RuntimeError("boom")):
@@ -665,7 +665,7 @@ def test_refill_head_recapture_failure_retries_and_warns(session_factory, caplog
     raw = [_msg("m0", 100, 3000), _msg("m1", 101, 3000), _msg("m2", 102, 3000)]
     fold = FoldedRange(message_ids=["m0", "m1"], chronicle_entry_ids=["e1"])
     presented = [_ph("m0", chars=500), _msg("m2", 102, 3000)]
-    wm = Watermarks(low=1000, target=20_000, high=40_000)
+    wm = Watermarks(target=20_000, high=40_000)
     with patch.object(lc, "get_metabolism_watermarks", return_value=wm), \
             patch.object(lc, "resolve_metabolism_anchor", return_value=("m0", "self")), \
             patch.object(lc, "get_presented_window",
@@ -697,7 +697,7 @@ def test_refill_detects_stale_weave_reuse(session_factory, caplog):
     raw = [_msg("m0", 100, 3000), _msg("m1", 101, 3000), _msg("m2", 102, 3000)]
     fold = FoldedRange(message_ids=["m0", "m1"], chronicle_entry_ids=["e1"])
     presented = [_ph("m0", chars=500), _msg("m2", 102, 3000)]
-    wm = Watermarks(low=1000, target=20_000, high=40_000)
+    wm = Watermarks(target=20_000, high=40_000)
     stale_weave = object()  # capture されない = 同一オブジェクトが返り続ける
     fake_snap = SimpleNamespace(sections={"memory_weave": stale_weave})
     fake_pipeline = SimpleNamespace(get_snapshot=lambda pid, mk: fake_snap)
@@ -930,7 +930,7 @@ def test_refold_flips_oldest_first_until_target(session_factory):
     window = _window("m0", raw, raw=raw, folds=[old, new])
     # 現 20000 字。1 区間戻すと m0 (5000) が置き換え (digest 1200 + 注釈) に
     # なって 17000 を下回る → 実測の継続判定で 1 区間だけ戻る
-    wm = Watermarks(low=1000, target=17_000, high=19_000)
+    wm = Watermarks(target=17_000, high=19_000)
     from sea.session_window import apply_folds
     with patch.object(lc, "_present_with_folds",
                       side_effect=lambda p, msgs, folds: apply_folds(
@@ -967,7 +967,7 @@ def test_refold_stops_on_rows_only_regardless_of_injected_perceptions(
     from sea.session_window import apply_folds
 
     raw = [_msg(f"m{i}", 100 + i, 5000) for i in range(4)]  # 20,000 字
-    wm = Watermarks(low=1000, target=17_000, high=19_000)
+    wm = Watermarks(target=17_000, high=19_000)
 
     def _run(blocks):
         lc = _make_lifecycle(session_factory)
@@ -1018,7 +1018,7 @@ def test_refold_early_completion_counts_rows_only(session_factory):
     from sea.session_window import apply_folds
 
     raw = [_msg(f"m{i}", 100 + i, 5000) for i in range(4)]  # 20,000 字
-    wm = Watermarks(low=1000, target=17_000, high=19_000)
+    wm = Watermarks(target=17_000, high=19_000)
 
     def _run(blocks):
         lc = _make_lifecycle(session_factory)
@@ -1091,7 +1091,7 @@ def test_preview_planning_window_refolds_without_writing(session_factory):
     old = FoldedRange(message_ids=["m0"], chronicle_entry_ids=["e1"], presented_raw=True)
     new = FoldedRange(message_ids=["m1"], chronicle_entry_ids=["e2"], presented_raw=True)
     window = _window("m0", raw, raw=raw, folds=[old, new])
-    wm = Watermarks(low=1000, target=17_000, high=19_000)
+    wm = Watermarks(target=17_000, high=19_000)
     from sea.session_window import apply_folds
     with patch.object(lc, "_present_with_folds",
                       side_effect=lambda p, msgs, folds: apply_folds(
@@ -1117,7 +1117,7 @@ def test_preview_planning_window_passthrough_without_raw_view(session_factory):
     persona = SimpleNamespace(persona_id=PERSONA_ID, model="model-a", sai_memory=None)
     window = _window("m0", [_msg("m0", 100, 2500)],
                      folds=[FoldedRange(message_ids=["m0"], chronicle_entry_ids=["e1"])])
-    wm = Watermarks(low=1000, target=2000, high=4000)
+    wm = Watermarks(target=2000, high=4000)
     normalized, refold_ranges = lc.preview_planning_window(
         persona, "model-a", window, wm,
     )
@@ -1130,7 +1130,7 @@ def test_refold_noop_when_no_raw_view(session_factory):
     persona = SimpleNamespace(persona_id=PERSONA_ID, model="model-a")
     window = _window("m0", [_msg("m0", 100, 100)],
                      folds=[FoldedRange(message_ids=["m0"])])
-    wm = Watermarks(low=1000, target=2000, high=4000)
+    wm = Watermarks(target=2000, high=4000)
     assert lc._refold_raw_view_folds(persona, "model-a", window, wm) is None
 
 
@@ -1365,7 +1365,7 @@ def test_refill_rewinds_across_a_straddling_fold_regardless_of_budget(
     予算に関係なく行う — 戻した後の行 (10,000) が残す量 (5,000) を超えても。
     旧規則ではこの一歩目で梯子が止まり、窓が二度と埋まらなかった。"""
     lc, persona, patches = _straddling_setup(session_factory, outside_chars=4000)
-    wm = Watermarks(low=1000, target=5000, high=20_000)
+    wm = Watermarks(target=5000, high=20_000)
     from contextlib import ExitStack
     with ExitStack() as stack, patch.object(lc, "get_metabolism_watermarks", return_value=wm):
         for p in patches:
@@ -1393,7 +1393,7 @@ def test_refill_continues_down_the_ladder_after_the_straddling_fold(
         older_entries=[_entry("e_a", ["a0", "a1"])],
     )
     # またぐ区間で 500+500+1000+1000 = 3,000。残り 2,000 で段 e_a (2,000) が入る。
-    wm = Watermarks(low=1000, target=5000, high=20_000)
+    wm = Watermarks(target=5000, high=20_000)
     from contextlib import ExitStack
     with ExitStack() as stack, patch.object(lc, "get_metabolism_watermarks", return_value=wm):
         for p in patches:
@@ -1443,7 +1443,7 @@ def test_refill_verification_drops_only_the_oldest_rung_when_over_high(
     「全部やめる」ではない。"""
     import logging as _logging
     lc, persona, patches = _ladder_setup(session_factory, perception_chars=1500)
-    wm = Watermarks(low=1000, target=5000, high=6000)
+    wm = Watermarks(target=5000, high=6000)
     from contextlib import ExitStack
     with ExitStack() as stack, patch.object(lc, "get_metabolism_watermarks", return_value=wm):
         for p in patches:
@@ -1463,7 +1463,7 @@ def test_refill_verification_keeps_everything_at_or_below_high(session_factory):
     行 5,000 + 知覚 900 = 5,900 > 残す量 5,000 だが ≤ 上限 6,000 → 全部残す。
     旧検算 (残す量と比較) の名残が無いことの検算。"""
     lc, persona, patches = _ladder_setup(session_factory, perception_chars=900)
-    wm = Watermarks(low=1000, target=5000, high=6000)
+    wm = Watermarks(target=5000, high=6000)
     from contextlib import ExitStack
     with ExitStack() as stack, patch.object(lc, "get_metabolism_watermarks", return_value=wm):
         for p in patches:
@@ -1475,7 +1475,7 @@ def test_refill_verification_keeps_everything_at_or_below_high(session_factory):
 def test_refill_verification_without_high_watermark_keeps_everything(session_factory):
     """上限を持たない model (high=None) は最終検算で何も外さない。"""
     lc, persona, patches = _ladder_setup(session_factory, perception_chars=50_000)
-    wm = Watermarks(low=1000, target=5000, high=None)
+    wm = Watermarks(target=5000, high=None)
     from contextlib import ExitStack
     with ExitStack() as stack, patch.object(lc, "get_metabolism_watermarks", return_value=wm):
         for p in patches:
@@ -1488,7 +1488,7 @@ def test_refill_logs_why_it_planned_nothing(session_factory, caplog):
     """⑤ 見送りの各経路に INFO で理由が残る。"""
     import logging as _logging
     lc = _make_lifecycle(session_factory)
-    wm = Watermarks(low=1000, target=5000, high=10_000)
+    wm = Watermarks(target=5000, high=10_000)
     lc.upsert_anchor_entry(PERSONA_ID, "model-a", {
         "anchor_id": "m0", "updated_at": _now().isoformat(), "ttl_seconds": 3600,
     })
@@ -1568,7 +1568,7 @@ def test_refill_restores_a_straddling_fold_when_the_anchor_row_is_not_presentabl
     })
     fold = FoldedRange(message_ids=["b1", "b2", "m1"], chronicle_entry_ids=["e_f"])
     window = _window("m0", [_ph("m1", chars=100)], raw=[m1], folds=[fold])
-    wm = Watermarks(low=1000, target=6000, high=20_000)
+    wm = Watermarks(target=6000, high=20_000)
     with patch.object(lc, "get_metabolism_watermarks", return_value=wm), \
             patch.object(lc, "get_presented_window", return_value=window), \
             patch.object(lc, "resolve_metabolism_anchor", return_value=("m0", "self")), \
@@ -1608,7 +1608,7 @@ def test_refill_merges_a_rung_into_the_intersecting_window_fold(session_factory)
         message_ids=["w1"], chronicle_entry_ids=["e_old"], presented_raw=True,
     )
     window = _window("m0", raw, raw=raw, folds=[existing])
-    wm = Watermarks(low=1000, target=5000, high=10_000)
+    wm = Watermarks(target=5000, high=10_000)
     with patch.object(lc, "get_metabolism_watermarks", return_value=wm), \
             patch.object(lc, "resolve_metabolism_anchor", return_value=("m0", "self")), \
             patch.object(lc, "get_presented_window", return_value=window), \

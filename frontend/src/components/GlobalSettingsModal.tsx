@@ -83,15 +83,15 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
 
     // 記憶の整理の水位 — 全体既定 (GET/PUT /api/config/metabolism-defaults)。
     // 三層 (組み込み既定 < 全体設定 < モデル定義) の真ん中。欄の文字列は編集中の
-    // 値で、'' = 未設定 (組み込み既定に従う)。保存は明示ボタンで三つまとめて送る。
+    // 値で、'' = 未設定 (組み込み既定に従う)。保存は明示ボタンでまとめて送る。
     type WatermarkKey = keyof WatermarkBarValues;
-    const WATERMARK_KEYS: WatermarkKey[] = ['low', 'target', 'high'];
+    const WATERMARK_KEYS: WatermarkKey[] = ['target', 'high'];
     const WATERMARK_API_KEYS: Record<WatermarkKey, string> = {
-        low: 'metabolism_low_chars', target: 'metabolism_target_chars', high: 'metabolism_high_chars',
+        target: 'metabolism_target_chars', high: 'metabolism_high_chars',
     };
-    const [wmGlobal, setWmGlobal] = useState<WatermarkBarValues>({ low: null, target: null, high: null });
-    const [wmBuiltin, setWmBuiltin] = useState<WatermarkBarValues>({ low: 40000, target: 100000, high: 200000 });
-    const [wmInputs, setWmInputs] = useState<Record<WatermarkKey, string>>({ low: '', target: '', high: '' });
+    const [wmGlobal, setWmGlobal] = useState<WatermarkBarValues>({ target: null, high: null });
+    const [wmBuiltin, setWmBuiltin] = useState<WatermarkBarValues>({ target: 40000, high: 120000 });
+    const [wmInputs, setWmInputs] = useState<Record<WatermarkKey, string>>({ target: '', high: '' });
     const [wmSaving, setWmSaving] = useState(false);
     const [wmError, setWmError] = useState<string | null>(null);
     const [wmSavedAt, setWmSavedAt] = useState<number | null>(null);
@@ -346,11 +346,10 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
     };
 
     const applyMetabolismDefaults = (data: { global?: WatermarkBarValues; builtin?: WatermarkBarValues }) => {
-        const g = data.global ?? { low: null, target: null, high: null };
+        const g = data.global ?? { target: null, high: null };
         setWmGlobal(g);
         if (data.builtin) setWmBuiltin(data.builtin);
         setWmInputs({
-            low: g.low != null ? String(g.low) : '',
             target: g.target != null ? String(g.target) : '',
             high: g.high != null ? String(g.high) : '',
         });
@@ -378,7 +377,6 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
 
     // 画面上の実効値 = 欄に数字があればそれ、空欄なら組み込み既定 (棒と順序検査に使う)
     const wmEdited: WatermarkBarValues = {
-        low: parseWatermarkInput(wmInputs.low),
         target: parseWatermarkInput(wmInputs.target),
         high: parseWatermarkInput(wmInputs.high),
     };
@@ -388,7 +386,6 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
     // 通してしまい、凡例が「NaN 字」になる。
     const wmNum = (v: number | null): number | null => (v == null || Number.isNaN(v) ? null : v);
     const wmEffective: WatermarkBarValues = {
-        low: wmNum(wmEdited.low) ?? wmBuiltin.low,
         target: wmNum(wmEdited.target) ?? wmBuiltin.target,
         high: wmNum(wmEdited.high) ?? wmBuiltin.high,
     };
@@ -973,7 +970,7 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                                     </div>
                                     {(wmViolations.size > 0) && (
                                         <div className={styles.wmMessageBad}>
-                                            最初に読み込む量 ≤ 整理後に残す量 ≤ 整理をはじめる量 の順にしてください
+                                            整理後に残す量 ≤ 整理をはじめる量 の順にしてください
                                         </div>
                                     )}
                                     {(wmHasNaN || wmHasZero) && (

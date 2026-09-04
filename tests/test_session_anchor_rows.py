@@ -497,7 +497,7 @@ def test_manual_compaction_runs_metabolism_with_force(session_factory):
     msgs = [{"id": f"m{i}", "content": "x" * 1000} for i in range(10)]
     with _chronicle_on(lc), \
             patch.object(lc, "get_metabolism_watermarks",
-                         return_value=Watermarks(low=1000, target=2000, high=4000)), \
+                         return_value=Watermarks(target=2000, high=4000)), \
             patch.object(lc, "get_presented_window", return_value=_window("m0", msgs)), \
             patch.object(lc, "run_metabolism", return_value="ok") as run:
         assert lc.run_manual_compaction(persona) == "ok"
@@ -530,7 +530,7 @@ def test_manual_compaction_propagates_failure_and_cancel(session_factory):
     ]:
         with _chronicle_on(lc), \
                 patch.object(lc, "get_metabolism_watermarks",
-                             return_value=Watermarks(low=1000, target=2000, high=4000)), \
+                             return_value=Watermarks(target=2000, high=4000)), \
                 patch.object(lc, "get_presented_window", return_value=_window("m0", msgs)), \
                 patch.object(lc, "run_metabolism", return_value=inner) as run:
             assert lc.run_manual_compaction(
@@ -549,7 +549,7 @@ def test_manual_compaction_noop_at_or_below_target(session_factory):
     msgs = [{"id": "m0", "content": "x" * 100}]
     with _chronicle_on(lc), \
             patch.object(lc, "get_metabolism_watermarks",
-                         return_value=Watermarks(low=1000, target=2000, high=4000)), \
+                         return_value=Watermarks(target=2000, high=4000)), \
             patch.object(lc, "get_presented_window", return_value=_window("m0", msgs)), \
             patch.object(lc, "run_metabolism") as run:
         assert lc.run_manual_compaction(persona) == "noop"
@@ -573,7 +573,7 @@ def test_manual_compaction_gate_counts_rows_only(session_factory, caplog):
         persona_id=PERSONA_ID, model="model-a", current_building_id="room",
     )
     msgs = [{"id": "m0", "content": "x" * 1500}]
-    wm = Watermarks(low=1000, target=2000, high=4000)
+    wm = Watermarks(target=2000, high=4000)
     with _chronicle_on(lc), \
             patch.object(lc, "get_metabolism_watermarks", return_value=wm), \
             patch.object(lc, "get_presented_window",
@@ -608,7 +608,7 @@ def test_manual_compaction_unavailable_without_anchor(session_factory):
     )
     with _chronicle_on(lc), \
             patch.object(lc, "get_metabolism_watermarks",
-                         return_value=Watermarks(low=1000, target=2000, high=4000)), \
+                         return_value=Watermarks(target=2000, high=4000)), \
             patch.object(lc, "get_presented_window", return_value=_window(None, [])), \
             patch.object(lc, "run_metabolism") as run:
         assert lc.run_manual_compaction(persona) == "unavailable"
@@ -633,7 +633,7 @@ def test_manual_compaction_disabled_does_not_fold(session_factory):
 
     with _chronicle_off(lc), \
             patch.object(lc, "get_metabolism_watermarks",
-                         return_value=Watermarks(low=1000, target=2000, high=4000)), \
+                         return_value=Watermarks(target=2000, high=4000)), \
             patch.object(lc, "get_presented_window", return_value=_window("m0", msgs)), \
             patch.object(lc, "run_metabolism") as run:
         assert lc.run_manual_compaction(persona) == "disabled"
@@ -655,7 +655,7 @@ def test_manual_compaction_runs_without_any_env_gate(session_factory):
 
     with patch.dict(os.environ, {}, clear=True), \
             patch.object(lc, "get_metabolism_watermarks",
-                         return_value=Watermarks(low=1000, target=2000, high=4000)), \
+                         return_value=Watermarks(target=2000, high=4000)), \
             patch.object(lc, "get_presented_window", return_value=_window("m0", msgs)), \
             patch.object(lc, "run_metabolism", return_value="ok") as run:
         assert lc.run_manual_compaction(persona) == "ok"
@@ -686,7 +686,7 @@ def test_manual_compaction_rebuilds_head_when_nothing_was_folded(session_factory
     )
     big = [{"id": f"m{i}", "content": "x" * 1000} for i in range(10)]
     small = [{"id": "m0", "content": "x" * 100}]
-    marks = Watermarks(low=1000, target=2000, high=4000)
+    marks = Watermarks(target=2000, high=4000)
 
     # (presented, run_metabolism の戻り値, 期待 status)
     cases = [
@@ -736,7 +736,7 @@ def test_manual_compaction_does_not_rebuild_head_twice_on_success(session_factor
     calls, counting = _count_head_rebuilds()
     with counting, _chronicle_on(lc), \
             patch.object(lc, "get_metabolism_watermarks",
-                         return_value=Watermarks(low=1000, target=2000, high=4000)), \
+                         return_value=Watermarks(target=2000, high=4000)), \
             patch.object(lc, "get_presented_window", return_value=_window("m0", msgs)), \
             patch.object(lc, "run_metabolism", return_value="ok"):
         assert lc.run_manual_compaction(persona) == "ok"
@@ -756,7 +756,7 @@ def test_manual_compaction_checked_reports_stale_head(session_factory):
         persona_id=PERSONA_ID, model="model-a", current_building_id="room",
     )
     msgs = [{"id": f"m{i}", "content": "x" * 1000} for i in range(10)]
-    marks = Watermarks(low=1000, target=2000, high=4000)
+    marks = Watermarks(target=2000, high=4000)
     stale_weave = object()
 
     def _run(snapshots):
@@ -794,7 +794,7 @@ def _run_checked_with_pipeline(lc, persona, pipeline_factory):
     with counting, _chronicle_on(lc), \
             patch("sea.head_pipeline.get_default_pipeline", pipeline_factory), \
             patch.object(lc, "get_metabolism_watermarks",
-                         return_value=Watermarks(low=1000, target=2000, high=4000)), \
+                         return_value=Watermarks(target=2000, high=4000)), \
             patch.object(lc, "get_presented_window", return_value=_window("m0", [])):
         return lc.run_manual_compaction_checked(persona)
 
@@ -853,7 +853,7 @@ def test_manual_compaction_checked_survives_dispatch_exception(session_factory):
     with patch("saiverse.dynamic_state.DynamicStateManager.on_metabolism", _boom), \
             _chronicle_on(lc), \
             patch.object(lc, "get_metabolism_watermarks",
-                         return_value=Watermarks(low=1000, target=2000, high=4000)), \
+                         return_value=Watermarks(target=2000, high=4000)), \
             patch.object(lc, "get_presented_window", return_value=_window("m0", [])), \
             patch.object(lc, "_head_weave_snapshot", return_value=stale_weave):
         status, head_rebuilt = lc.run_manual_compaction_checked(persona)
@@ -871,7 +871,7 @@ def test_run_metabolism_manual_stops_when_disabled_under_lock(session_factory):
     persona = SimpleNamespace(
         persona_id=PERSONA_ID, model="model-a", current_building_id="room",
     )
-    wm = Watermarks(low=1000, target=2000, high=4000)
+    wm = Watermarks(target=2000, high=4000)
 
     # 手動: disabled なら提示ウィンドウの取り直しにすら進まない
     with _chronicle_off(lc), \
@@ -915,7 +915,7 @@ def test_run_metabolism_forwards_close_undersized_tail_to_the_plan(session_facto
     persona = SimpleNamespace(
         persona_id=PERSONA_ID, model="model-a", current_building_id="room",
     )
-    wm = Watermarks(low=1000, target=2000, high=4000)
+    wm = Watermarks(target=2000, high=4000)
     msgs = [{"id": f"m{i}", "content": "x" * 1000} for i in range(4)]
 
     with _chronicle_off(lc), \
@@ -1382,7 +1382,7 @@ def test_manual_compaction_with_failing_sluice_does_not_shrink_the_window(
 
     with patch.object(lc, "is_chronicle_enabled_for_persona", return_value=True), \
             patch.object(lc, "get_metabolism_watermarks",
-                         return_value=Watermarks(low=2_000, target=2_000, high=4_000)), \
+                         return_value=Watermarks(target=2_000, high=4_000)), \
             patch.dict(os.environ, {"SAIVERSE_CHRONICLE_BAND_BUDGET": "2500"}), \
             patch("sea.sluice.run_sluice", _failing_sluice):
         status = lc.run_manual_compaction(persona)
@@ -1510,7 +1510,7 @@ def test_cold_precompaction_status_conditions(session_factory):
     lc.upsert_anchor_entry(PERSONA_ID, "model-a", {
         "anchor_id": "m1", "updated_at": stale.isoformat(), "ttl_seconds": 300,
     })
-    wm = Watermarks(low=1000, target=2000, high=4000)  # 中間値 = 3000
+    wm = Watermarks(target=2000, high=4000)  # 中間値 = 3000
     big = [{"id": "m1", "content": "x" * 3500}]
     small = [{"id": "m1", "content": "x" * 2500}]
 
@@ -1552,7 +1552,7 @@ def test_cold_precompaction_counts_injected_perceptions(session_factory):
     lc.upsert_anchor_entry(PERSONA_ID, "model-a", {
         "anchor_id": "m1", "updated_at": stale.isoformat(), "ttl_seconds": 300,
     })
-    wm = Watermarks(low=1000, target=2000, high=4000)  # 中間値 = 3000
+    wm = Watermarks(target=2000, high=4000)  # 中間値 = 3000
     small = [{"id": "m1", "content": "x" * 2500}]
 
     with patch.object(lc, "is_chronicle_enabled_for_persona", return_value=True), \
@@ -1582,7 +1582,7 @@ def test_run_cold_precompaction_folds_with_force(session_factory):
     lc.upsert_anchor_entry(PERSONA_ID, "model-a", {
         "anchor_id": "m1", "updated_at": stale.isoformat(), "ttl_seconds": 300,
     })
-    wm = Watermarks(low=1000, target=2000, high=4000)
+    wm = Watermarks(target=2000, high=4000)
     big = [{"id": "m1", "content": "x" * 3500}]
 
     with patch.object(lc, "is_chronicle_enabled_for_persona", return_value=True), \
@@ -1616,7 +1616,7 @@ def test_run_cold_precompaction_rechecks_under_beat_lock(session_factory):
     lc.upsert_anchor_entry(PERSONA_ID, "model-a", {
         "anchor_id": "m1", "updated_at": stale.isoformat(), "ttl_seconds": 300,
     })
-    wm = Watermarks(low=1000, target=2000, high=4000)
+    wm = Watermarks(target=2000, high=4000)
     big = [{"id": "m1", "content": "x" * 3500}]
 
     @_ctx.contextmanager
@@ -1665,7 +1665,7 @@ def test_run_cold_precompaction_skips_when_only_perception_over_budget(
     lc.upsert_anchor_entry(PERSONA_ID, "model-a", {
         "anchor_id": "m1", "updated_at": stale.isoformat(), "ttl_seconds": 300,
     })
-    wm = Watermarks(low=9000, target=18000, high=26000)  # 中間値 = 22,000
+    wm = Watermarks(target=18000, high=26000)  # 中間値 = 22,000
     rows = [{"id": "m1", "content": "x" * 10000}]
 
     with patch.object(lc, "is_chronicle_enabled_for_persona", return_value=True), \
@@ -1704,7 +1704,7 @@ def test_emergency_precompaction_skip_below_high(session_factory):
     lc.upsert_anchor_entry(PERSONA_ID, "model-a", {
         "anchor_id": "m1", "updated_at": _now().isoformat(), "ttl_seconds": 3600,
     })
-    wm = Watermarks(low=1000, target=2000, high=4000)
+    wm = Watermarks(target=2000, high=4000)
     small = [{"id": "m1", "content": "x" * 3000}]
     events = []
 
@@ -1734,7 +1734,7 @@ def test_emergency_precompaction_counts_injected_perceptions(session_factory):
     lc.upsert_anchor_entry(PERSONA_ID, "model-a", {
         "anchor_id": "m1", "updated_at": _now().isoformat(), "ttl_seconds": 3600,
     })
-    wm = Watermarks(low=1000, target=2000, high=4000)
+    wm = Watermarks(target=2000, high=4000)
     small = [{"id": "m1", "content": "x" * 3000}]
     events = []
 
@@ -1778,7 +1778,7 @@ def test_emergency_precompaction_noop_when_only_perception_over_budget(
         persona_id=PERSONA_ID, model="model-a", current_building_id="room",
     )
     # 自行なし (resolution が frontier/other になり、従来なら行を立てていた経路)
-    wm = Watermarks(low=9000, target=18000, high=26000)
+    wm = Watermarks(target=18000, high=26000)
     rows = [{"id": "m1", "content": "x" * 10000}]
     events = []
 
@@ -1829,7 +1829,7 @@ def test_emergency_precompaction_folds_over_high_with_notice(session_factory):
     lc.upsert_anchor_entry(PERSONA_ID, "model-a", {
         "anchor_id": "m1", "updated_at": _now().isoformat(), "ttl_seconds": 3600,
     })
-    wm = Watermarks(low=1000, target=2000, high=4000)
+    wm = Watermarks(target=2000, high=4000)
     big = [{"id": "m1", "content": "x" * 5000}]
     events = []
 
@@ -1863,7 +1863,7 @@ def test_emergency_precompaction_creates_row_for_rowless_model(session_factory, 
         persona_id=PERSONA_ID, model="model-a", current_building_id="room",
         sai_memory=_adapter(conn),
     )
-    wm = Watermarks(low=1000, target=2000, high=4000)
+    wm = Watermarks(target=2000, high=4000)
     big = [{"id": "m3", "content": "x" * 5000}]
 
     with patch.object(lc, "get_metabolism_watermarks", return_value=wm), \

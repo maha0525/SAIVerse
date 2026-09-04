@@ -117,7 +117,7 @@ def _persona(before, *, ready=False):
     )
 
 
-WM = Watermarks(low=1000, target=5000, high=10_000)
+WM = Watermarks(target=5000, high=10_000)
 BEFORE = [_msg(f"b{i}", 100 + i, 1000) for i in range(4)]  # b0..b3 = 4,000 字
 
 
@@ -317,7 +317,7 @@ def test_floor_restores_the_whole_straddling_fold_even_when_larger_than_the_shor
     window = _window(
         "m0", [_ph("m0", chars=100)], raw=[_msg("m0", 200, 1000)], folds=[straddling],
     )
-    wm = Watermarks(low=500, target=2000, high=10_000)
+    wm = Watermarks(target=2000, high=10_000)
     with patch.object(lc, "_resolve_fold_digest", lambda persona, f: "d" * 100):
         assert _run(lc, persona, window, wm=wm) == "ok"
     entry = lc.load_anchor_entry(PERSONA_ID, MODEL)
@@ -513,7 +513,7 @@ def test_preflight_converges_when_a_straddling_fold_alone_exceeds_high(session_f
         message_ids=[f"b{i}" for i in range(10)] + ["m0"], chronicle_entry_ids=["e_f"],
     )
     lc.save_folded_ranges(PERSONA_ID, MODEL, [straddling])
-    wm = Watermarks(low=1000, target=5000, high=8000)
+    wm = Watermarks(target=5000, high=8000)
     lc.is_chronicle_enabled_for_persona = lambda p: True
     lc.ensure_recall_embeddings = lambda p: None
     lc._retry_extraction_backlog = lambda p, **kw: None
@@ -1530,7 +1530,7 @@ def test_emergency_precompaction_persists_the_advance_only_when_it_folds(session
         sai_memory=SimpleNamespace(conn=object(), is_ready=lambda: True),
         history_manager=_persona(BEFORE).history_manager,
     )
-    wm = Watermarks(low=1000, target=5000, high=8000)
+    wm = Watermarks(target=5000, high=8000)
     with patch.object(lc, "get_metabolism_watermarks", return_value=wm), \
             patch("sai_memory.arasuji.storage.get_frontier_anchor_id", return_value="m3"), \
             patch("sai_memory.arasuji.storage.compare_message_positions", return_value=1), \

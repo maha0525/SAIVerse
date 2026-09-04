@@ -1,4 +1,4 @@
-/* --- 三水位の横棒 (記憶の整理の水位) ---
+/* --- 二水位の横棒 (記憶の整理の水位) ---
    ContextVolumeBar と同じ高さ・角丸・グレー地。色は両テーマで読めるものだけを
    使い、文字色は var(--foreground) に任せる。 */
 .wrapper {
@@ -14,22 +14,13 @@
     margin: 6px 0 4px;
 }
 
-/* 0 → 目標 の帯 (残る範囲) と 0 → 低 の帯 (最初に読み込む範囲) を重ねる */
+/* 0 → 残す量 の帯 (整理後に残る範囲) */
 .bandTarget {
     position: absolute;
     left: 0;
     top: 0;
     bottom: 0;
     background: rgba(52, 211, 153, 0.35);
-    transition: width 0.2s ease;
-}
-
-.bandLow {
-    position: absolute;
-    left: 0;
-    top: 0;
-    bottom: 0;
-    background: rgba(52, 211, 153, 0.55);
     transition: width 0.2s ease;
 }
 

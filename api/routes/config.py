@@ -1132,8 +1132,9 @@ class SaveModelFromChatRequest(BaseModel):
     parameters: Dict[str, Any] = {}
     cache_enabled: Optional[bool] = None
     cache_ttl: Optional[str] = None
-    # Metabolism の三水位 (文字数)。未指定ならモデルファイルに書かない = 一律既定。
-    metabolism_low_chars: Optional[int] = None
+    # Metabolism の二水位 (文字数)。未指定ならモデルファイルに書かない = 一律既定。
+    # (旧 metabolism_low_chars は 2026-09-04 廃止 — 旧クライアントが送ってきても
+    #  pydantic が黙って無視する)
     metabolism_target_chars: Optional[int] = None
     metabolism_high_chars: Optional[int] = None
     max_image_embeds: Optional[int] = None
@@ -1179,14 +1180,9 @@ def get_model_file(key: str):
 
 
 def _metabolism_order_error(
-    low: Optional[int], target: Optional[int], high: Optional[int], *, blank_note: str,
+    target: Optional[int], high: Optional[int], *, blank_note: str,
 ) -> Optional[str]:
-    """実効三つ組の順序 (低 ≤ 目標 ≤ 高、None は対象外) を調べ、壊れていれば理由を返す。"""
-    if low is not None and target is not None and low > target:
-        return (
-            f"最初に読み込む文字数 ({low:,}) は整理後に残す文字数 ({target:,}) "
-            f"以下にしてください（{blank_note}）"
-        )
+    """実効の組の順序 (残す量 ≤ 上限、None は対象外) を調べ、壊れていれば理由を返す。"""
     if target is not None and high is not None and target > high:
         return (
             f"整理後に残す文字数 ({target:,}) は整理をはじめる文字数 ({high:,}) "
@@ -1198,12 +1194,14 @@ def _metabolism_order_error(
 def _metabolism_watermark_order_error(
     config: Dict[str, Any], fill_defaults: Dict[str, int], *, blank_note: str,
 ) -> Optional[str]:
-    """水位の実効順序 (低 ≤ 目標 ≤ 高) を検証する共通部 (純粋関数、壊れていれば理由)。
+    """水位の実効順序 (残す量 ≤ 上限) を検証する共通部 (純粋関数、壊れていれば理由)。
 
     ``config`` に無いキーは ``fill_defaults`` で埋めて (= 実行時の解決と同じ
     実効値で) 比べる。明示 null / 0 以下は「その水位を持たない」= 順序制約の
     対象外 (実行時の解釈と同じ)。数値でも null でもない型は入力の誤りとして
     ここで弾く (実行時は既定へ黙って落ちるが、保存の入口では教える)。
+    廃止済みの ``metabolism_low_chars`` キーは検証しない = 残っていても黙って
+    通す (実行時に読まれないものを保存の入口で咎めない)。
     ``blank_note`` は「空欄を何で数えたか」をエラー文に添える文言。
 
     モデル保存 (`_validate_metabolism_watermarks`) と全体既定の保存
@@ -1211,7 +1209,7 @@ def _metabolism_watermark_order_error(
     直す事故が起きる。
     """
     effective: Dict[str, Optional[int]] = {}
-    for key in ("metabolism_low_chars", "metabolism_target_chars", "metabolism_high_chars"):
+    for key in ("metabolism_target_chars", "metabolism_high_chars"):
         if key not in config:
             effective[key] = fill_defaults[key]
             continue
@@ -1224,7 +1222,6 @@ def _metabolism_watermark_order_error(
         num = int(value)
         effective[key] = num if num > 0 else None
     return _metabolism_order_error(
-        effective["metabolism_low_chars"],
         effective["metabolism_target_chars"],
         effective["metabolism_high_chars"],
         blank_note=blank_note,
@@ -1241,11 +1238,11 @@ def _check_metabolism_watermark_order(
 
 
 def _validate_metabolism_watermarks(config: Dict[str, Any]) -> None:
-    """水位の実効順序 (低 ≤ 目標 ≤ 高) をモデル保存の入口で検証する。
+    """水位の実効順序 (残す量 ≤ 上限) をモデル保存の入口で検証する。
 
     キー無しは実行時に既定へ解決される (saiverse/model_configs.py の
-    `_metabolism_chars`) ため、**実効値**で検証しないと「high=5万だけ指定 →
-    実効 target=既定10万 > high」の壊れた順序が保存できてしまう (Codex 指摘
+    `_metabolism_chars`) ため、**実効値**で検証しないと「high=3万だけ指定 →
+    実効 target=既定4万 > high」の壊れた順序が保存できてしまう (Codex 指摘
     2026-07-30)。埋めるのは組み込み定数ではなく**実効既定** (全体設定があれば
     それ、2026-09-03) — high だけ書いたモデルは全体設定の target と比べる。
     """
@@ -1257,7 +1254,7 @@ def _validate_metabolism_watermarks(config: Dict[str, Any]) -> None:
     )
 
 
-# ── Metabolism 三水位の全体既定 (user_settings) ─────────────────
+# ── Metabolism 二水位の全体既定 (user_settings) ─────────────────
 #
 # 三層 (組み込み既定 < 全体設定 < モデル定義) の真ん中。真実は
 # user_settings.METABOLISM_*_CHARS (NULL = 未設定) で、保存成功のたびに
@@ -1265,14 +1262,16 @@ def _validate_metabolism_watermarks(config: Dict[str, Any]) -> None:
 # (起動時の読み込みは saiverse_manager)。docs/concepts/metabolism.md。
 
 class MetabolismDefaultsRequest(BaseModel):
-    """省略 = 触らない / null = 既定に戻す (未設定へ) / 正の整数 = その値。"""
-    metabolism_low_chars: Optional[int] = None
+    """省略 = 触らない / null = 既定に戻す (未設定へ) / 正の整数 = その値。
+
+    廃止済みの ``metabolism_low_chars`` は受け取らない (旧クライアントが
+    送ってきても pydantic が黙って無視する)。
+    """
     metabolism_target_chars: Optional[int] = None
     metabolism_high_chars: Optional[int] = None
 
 
 _METABOLISM_SETTING_COLUMNS = {
-    "metabolism_low_chars": "METABOLISM_LOW_CHARS",
     "metabolism_target_chars": "METABOLISM_TARGET_CHARS",
     "metabolism_high_chars": "METABOLISM_HIGH_CHARS",
 }
@@ -1289,9 +1288,9 @@ _METABOLISM_CONFLICT_NAMES_MAX = 5
 def _models_conflicting_with_defaults(proposed_global: Dict[str, Optional[int]]) -> List[str]:
     """全体既定を ``proposed_global`` にしたとき、実効三つ組の順序が壊れるモデルのキー。
 
-    モデル定義が一部の水位だけ数値で書いている場合 (例: low=15万 だけ)、残りは
-    全体既定で埋まる。全体の target を 16万 → 未設定 (組み込み 10万) に戻すと、
-    そのモデルは low 15万 > target 10万 になる — 全体の三つ組だけ検証しても
+    モデル定義が一部の水位だけ数値で書いている場合 (例: target=15万 だけ)、残りは
+    全体既定で埋まる。全体の high を 20万 → 未設定 (組み込み 12万) に戻すと、
+    そのモデルは target 15万 > high 12万 になる — 全体の組だけ検証しても
     見えない。組み方は実行時 (`resolve_metabolism_watermarks`) と同じ関数で行う。
     """
     from saiverse.model_configs import MODEL_CONFIGS, compose_metabolism_watermarks
@@ -1301,8 +1300,8 @@ def _models_conflicting_with_defaults(proposed_global: Dict[str, Optional[int]])
         config = MODEL_CONFIGS.get(model_key)
         if not isinstance(config, dict):
             continue
-        low, target, high = compose_metabolism_watermarks(config, proposed_global)
-        if _metabolism_order_error(low, target, high, blank_note="") is not None:
+        target, high = compose_metabolism_watermarks(config, proposed_global)
+        if _metabolism_order_error(target, high, blank_note="") is not None:
             conflicting.append(model_key)
     return conflicting
 
@@ -1316,7 +1315,6 @@ def _metabolism_defaults_payload() -> Dict[str, Any]:
 
     def _short(values: Dict[str, Any]) -> Dict[str, Any]:
         return {
-            "low": values["metabolism_low_chars"],
             "target": values["metabolism_target_chars"],
             "high": values["metabolism_high_chars"],
         }
@@ -1330,7 +1328,7 @@ def _metabolism_defaults_payload() -> Dict[str, Any]:
 
 @router.get("/metabolism-defaults")
 def get_metabolism_defaults():
-    """Metabolism 三水位の全体既定 — 設定値 (null = 未設定) / 実効値 / 組み込み既定。"""
+    """Metabolism 二水位の全体既定 — 設定値 (null = 未設定) / 実効値 / 組み込み既定。"""
     return _metabolism_defaults_payload()
 
 
@@ -1342,10 +1340,10 @@ def put_metabolism_defaults(req: MetabolismDefaultsRequest):
     **DB の行** (モジュール変数のキャッシュではない) で、読み → 検証 → 書き →
     公開を `_metabolism_defaults_lock` の中で一続きに行う。
 
-    検証は二段: (1) 全体の三つ組を、未設定分は組み込み既定で埋めた実効値で
+    検証は二段: (1) 全体の組を、未設定分は組み込み既定で埋めた実効値で
     順序検証 (モデル保存と同じ `_check_metabolism_watermark_order`)。(2) 既存の
     全モデル定義について、その部分上書きと新しい全体既定を実行時と同じ規則で
-    組んだ三つ組の順序検証 (`_models_conflicting_with_defaults`) — 壊れるモデルが
+    組んだ組の順序検証 (`_models_conflicting_with_defaults`) — 壊れるモデルが
     あれば名前を挙げて 400。
     """
     from database.session import SessionLocal
@@ -1523,6 +1521,11 @@ def clone_model_file(key: str, req: ModelFileCloneRequest):
     if req.display_name:
         cloned["display_name"] = req.display_name
 
+    # 複製も保存の入口なので、create/update/save-from-chat と同じ水位検証を通す。
+    # 元モデルに壊れた順序 (残す量 > 上限) が残っていても、実行時クランプは
+    # 安全側の縮退であって、入口で教える責務の代わりではない — ここで 400 にする。
+    _validate_metabolism_watermarks(cloned)
+
     target = _model_user_path(req.new_key)
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(
@@ -1585,8 +1588,6 @@ def save_model_from_chat(req: SaveModelFromChatRequest):
         new_config["cache"] = cache_cfg
 
     # Metabolism 水位 / image embed settings as top-level fields
-    if req.metabolism_low_chars is not None:
-        new_config["metabolism_low_chars"] = req.metabolism_low_chars
     if req.metabolism_target_chars is not None:
         new_config["metabolism_target_chars"] = req.metabolism_target_chars
     if req.metabolism_high_chars is not None:

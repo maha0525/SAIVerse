@@ -644,11 +644,6 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
                 ) : (
                     <span className={styles.hint}>まだ会話の起点がありません。最初の会話で確立されます。</span>
                 )}
-                {contextStatus.low_chars != null && (
-                    <span className={styles.hint}>
-                        最初に読み込む量（会話の起点がまだ無いとき）: {contextStatus.low_chars.toLocaleString()}字
-                    </span>
-                )}
                 <span className={styles.hint}>
                     会話履歴は始点を固定したまま送られ、上限を超えると古い出来事から順にあらすじへ畳んで「残す量」まで整理します。
                     {contextStatus.fold_unit_chars != null && contextStatus.fold_unit_chars > 0 && (

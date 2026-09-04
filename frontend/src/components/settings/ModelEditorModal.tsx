@@ -32,8 +32,11 @@ const DEFAULT_CONTEXT_LENGTH = 128000;
 // (= その水位を持たない = Metabolism なし) / 数値。専用欄が**単独所有**し、追加設定
 // JSON からは常に除外する (二重所有だと空欄にしても JSON 側の null が復活する —
 // Codex 指摘 2026-07-30)。欄の表記: 空欄 = キー無し / "none" = null / 数字 = 数値。
+// 旧 metabolism_low_chars (最初に読み込む文字数) は 2026-09-04 廃止 — 専用欄から
+// 外れたため、古いモデル JSON に残っているキーは追加設定 JSON 側に現れる
+// (backend は黙って無視する)。
 const WATERMARK_FIELDS = [
-    'metabolism_high_chars', 'metabolism_target_chars', 'metabolism_low_chars',
+    'metabolism_high_chars', 'metabolism_target_chars',
 ] as const;
 type WatermarkField = typeof WATERMARK_FIELDS[number];
 const WATERMARK_LABELS: Record<WatermarkField, { label: string; hint: string }> = {
@@ -43,11 +46,7 @@ const WATERMARK_LABELS: Record<WatermarkField, { label: string; hint: string }> 
     },
     metabolism_target_chars: {
         label: '整理後に残す文字数 (metabolism_target_chars)',
-        hint: '整理はこの文字数まで畳んだら止まります。少なすぎるときは畳んだ範囲をここまで開き直します。none にするとこのモデルは履歴の自動整理を行いません。',
-    },
-    metabolism_low_chars: {
-        label: '最初に読み込む文字数 (metabolism_low_chars)',
-        hint: '会話の起点がまだ無いとき（新規ペルソナ等）に読み込む履歴の量。',
+        hint: '整理はこの文字数まで畳んだら止まります。少なすぎるときは畳んだ範囲をここまで開き直します。会話の起点がまだ無いとき（新規ペルソナ等）に最初に読み込む量もこの値です。none にするとこのモデルは履歴の自動整理を行いません。',
     },
 };
 
@@ -69,7 +68,6 @@ export default function ModelEditorModal({ isOpen, mode, modelKey, cloneSource, 
     const [watermarks, setWatermarks] = useState<Record<WatermarkField, string>>({
         metabolism_high_chars: '',
         metabolism_target_chars: '',
-        metabolism_low_chars: '',
     });
     // Everything else (JSON editor)
     const [extraJson, setExtraJson] = useState('{}');
@@ -82,9 +80,8 @@ export default function ModelEditorModal({ isOpen, mode, modelKey, cloneSource, 
     // 空欄のモデルが実際に従う既定 (全体設定があればそれ、無ければ組み込み)。
     // GET /api/config/metabolism-defaults の effective。取れないときは組み込みの数字。
     const [effectiveDefaults, setEffectiveDefaults] = useState<Record<WatermarkField, number>>({
-        metabolism_high_chars: 200000,
-        metabolism_target_chars: 100000,
-        metabolism_low_chars: 40000,
+        metabolism_high_chars: 120000,
+        metabolism_target_chars: 40000,
     });
 
     const loadEffectiveDefaults = async () => {
@@ -93,11 +90,10 @@ export default function ModelEditorModal({ isOpen, mode, modelKey, cloneSource, 
             if (!res.ok) return;
             const data = await res.json();
             const eff = data?.effective;
-            if (eff && typeof eff.high === 'number' && typeof eff.target === 'number' && typeof eff.low === 'number') {
+            if (eff && typeof eff.high === 'number' && typeof eff.target === 'number') {
                 setEffectiveDefaults({
                     metabolism_high_chars: eff.high,
                     metabolism_target_chars: eff.target,
-                    metabolism_low_chars: eff.low,
                 });
             }
         } catch (e) {
@@ -116,7 +112,6 @@ export default function ModelEditorModal({ isOpen, mode, modelKey, cloneSource, 
         const wm: Record<WatermarkField, string> = {
             metabolism_high_chars: '',
             metabolism_target_chars: '',
-            metabolism_low_chars: '',
         };
         const extra: Record<string, unknown> = {};
         for (const [field, value] of Object.entries(cfg)) {
@@ -151,7 +146,6 @@ export default function ModelEditorModal({ isOpen, mode, modelKey, cloneSource, 
             setWatermarks({
                 metabolism_high_chars: '',
                 metabolism_target_chars: '',
-                metabolism_low_chars: '',
             });
             setExtraJson('{}');
             setSource('user_data');
@@ -260,7 +254,6 @@ export default function ModelEditorModal({ isOpen, mode, modelKey, cloneSource, 
         const wmNumbers: Record<WatermarkField, number | null> = {
             metabolism_high_chars: null,
             metabolism_target_chars: null,
-            metabolism_low_chars: null,
         };
         for (const field of WATERMARK_FIELDS) {
             const raw = watermarks[field].trim();
@@ -280,13 +273,8 @@ export default function ModelEditorModal({ isOpen, mode, modelKey, cloneSource, 
         }
         const wmHigh = wmNumbers.metabolism_high_chars;
         const wmTarget = wmNumbers.metabolism_target_chars;
-        const wmLow = wmNumbers.metabolism_low_chars;
         if (wmTarget != null && wmHigh != null && wmTarget > wmHigh) {
             setSaveError('整理後に残す文字数は、整理をはじめる文字数以下にしてください');
-            return;
-        }
-        if (wmLow != null && wmTarget != null && wmLow > wmTarget) {
-            setSaveError('最初に読み込む文字数は、整理後に残す文字数以下にしてください');
             return;
         }
 

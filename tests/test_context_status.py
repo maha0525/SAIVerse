@@ -43,7 +43,7 @@ def _perception(chars, at=0):
 
 def _lifecycle(
     *,
-    watermarks=Watermarks(low=1000, target=2000, high=4000),
+    watermarks=Watermarks(target=2000, high=4000),
     refill_plan=None,
     anchor_id="m1",
     presented=None,
@@ -68,7 +68,9 @@ def _lifecycle(
         return list(rows) + list(perceptions or [])
 
     return SimpleNamespace(
-        get_metabolism_watermarks=lambda persona, model_key: watermarks,
+        get_metabolism_watermarks=(
+            lambda persona, model_key, persona_id=None: watermarks
+        ),
         preview_refilled_history=lambda persona, model_key, **_kw: refill_plan,
         resolve_metabolism_anchor=(
             lambda persona, model_key=None, persist_advance=True: (anchor_id, "own")
@@ -365,7 +367,7 @@ def test_perception_over_budget_is_reported_when_nothing_is_evictable():
     と、残す量の契約が見ている量 ``window_rows_chars`` を返す。
     """
     persona = SimpleNamespace(persona_id=PERSONA_ID, model="model-a")
-    wm = Watermarks(low=1000, target=2000, high=4000)
+    wm = Watermarks(target=2000, high=4000)
 
     # 行 1,000 ≤ 残す量、合計 5,000 > 上限 → 知覚が予算超過。
     lc = _lifecycle(watermarks=wm, presented=[_msg("m1", 1000)],
@@ -392,7 +394,7 @@ def test_perception_over_budget_is_reported_when_nothing_is_evictable():
     assert status["perception_over_budget"] is False
 
     # 上限なし (文字数では発火しない model) では常に False。
-    lc = _lifecycle(watermarks=Watermarks(low=1000, target=2000, high=None),
+    lc = _lifecycle(watermarks=Watermarks(target=2000, high=None),
                     presented=[_msg("m1", 1000)], perceptions=[_perception(9000)])
     status = get_context_status(PERSONA_ID, _manager(persona=persona, lifecycle=lc))
     assert status["perception_over_budget"] is False
@@ -423,7 +425,7 @@ def test_watermark_resolution_failure_is_500():
     persona = SimpleNamespace(persona_id=PERSONA_ID, model="model-a")
     lc = _lifecycle()
 
-    def _boom(persona, model_key):
+    def _boom(persona, model_key, persona_id=None):
         raise RuntimeError("config broken")
 
     lc.get_metabolism_watermarks = _boom
@@ -450,7 +452,7 @@ def test_perception_over_budget_uses_one_window_for_total_and_rows():
     から取る。いまの窓 (印戻し前) は上限超えでも、計画窓の合計が上限以下なら
     旗は立たない — どちらの窓が数字を出したかで旗が裏返らない。"""
     persona = SimpleNamespace(persona_id=PERSONA_ID, model="model-a")
-    wm = Watermarks(low=1000, target=2000, high=4000)
+    wm = Watermarks(target=2000, high=4000)
     current = [_msg(f"m{i}", 1000) for i in range(5)]  # いまの窓: 行 5,000
     planning = [_msg("folded:m0", 300), _msg("m4", 1000)]  # 印戻し後: 行 1,300
 

@@ -55,8 +55,10 @@ LOGGER = logging.getLogger(__name__)
 class Watermarks:
     """Metabolism の水位 (文字数)。arasuji_levels.md §9。
 
-    **水位ごとに主語 (何を数えた量と比べるか) が違う** (2026-09-03 まはー裁定。
-    docs/issues/protection_quota_consumed_by_perception_blocks.md):
+    水位は二つ (旧三水位の低水位 = ``low`` は 2026-09-04 に廃止 — 初期読み込みは
+    残す量を流用する。docs/issues/watermarks_unsatisfiable_when_perception_is_large.md
+    裁定 5)。**水位ごとに主語 (何を数えた量と比べるか) が違う** (2026-09-03
+    まはー裁定。docs/issues/protection_quota_consumed_by_perception_blocks.md):
 
     - ``target``: **残す量** — 主語は**会話の行 (保存行) の量**
       (:func:`stored_message_chars`)。畳んだ後、少なくともこの字数ぶんの会話の
@@ -68,11 +70,8 @@ class Watermarks:
       :func:`message_chars`)。これを超えたら発火。None = 文字数では発火せず
       ``token_triggered`` のみ。合計が上限を超えているのに会話の行が残す量以下
       なら畳めるものは無く、超過の主は知覚の供給 (呼び出し側が警告する)。
-    - ``low``: 旧三水位の名残り (保護範囲)。現設計では**使わない** — 残す量が
-      保護を兼ねる。モデル設定との互換のため受け取るだけ。
     """
 
-    low: int
     target: int
     high: Optional[int] = None
 
@@ -565,7 +564,7 @@ def plan_eviction(
         open_episode_refs: 旧設計 (エピソード単独畳み) の名残り。現設計では
             使わない — エピソードに畳みを止める権利は無い (intent §4-1)。
         watermarks: 水位。``target`` = 残す量だけを使う (発火判定 ``high`` は
-            呼び出し側の責務、``low`` は旧設計互換で未使用)。
+            呼び出し側の責務)。
         target_chars: 一次あらすじの標準被覆 U。1 つの fold が目指す大きさ。
             **達したかは材料字数で測る** (2026-08-29 まはー裁定 —
             :func:`material_message_chars`)。
