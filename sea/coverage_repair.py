@@ -626,7 +626,8 @@ def plan_tail_rewind(
     )
     from sea.eviction_plan import message_chars, stored_message_chars
     chars_after = message_chars(presented_after)
-    # 残す量と比べる量は会話の行だけ (2026-09-03 裁定)。
+    # 残す量と比べる量は会話の行だけ (2026-09-03 裁定。機構名義の行も
+    # 数えない — 2026-09-04 裁定)。
     rows_after = stored_message_chars(presented_after)
     watermarks = lifecycle.get_metabolism_watermarks(persona, model_key)
     high = getattr(watermarks, "high", None) if watermarks is not None else None
@@ -648,21 +649,22 @@ def plan_tail_rewind(
         # 走査する列は本走行 (plan_eviction) と同じマージ済みの列。「残す量に
         # 届くまでにどこまで退場するか」の境目は**会話の行だけ**で決まる
         # (2026-09-03 まはー裁定: 残す量の主語は会話の行。上限 = fold_needed の
-        # 判定は合計のまま)。知覚ブロックは残す量を消費しないので remaining を
-        # 減らさないが、退場する範囲に挟まったものは付記で編纂に入るため材料
-        # には寄与する (機構名義の一行へ縮む material_len — 本走行の
+        # 判定は合計のまま。機構名義の行も数えない — 2026-09-04 裁定)。知覚
+        # ブロックと機構名義の行は残す量を消費しないので remaining を
+        # 減らさないが、退場する範囲に挟まったものは付記・fold で編纂に入るため
+        # 材料には寄与する (機構名義の一行へ縮む material_len — 本走行の
         # material_message_chars と同じ扱い)。
         # NOTE: 本走行の削減母集合 (_reduction_basis) は fold の先頭・末尾の
         # 隙間ブロックを除くが、この概算はそこまで写さない — 誤差は縮約後の
         # 一行ぶん × 数個で、方向は費用を多めに見せる安全側 (概算の器の内。
         # Codex 指摘 2026-09-02 四巡目、却下の記録は issue)。
-        from sea.eviction_plan import is_injected_perception
+        from sea.eviction_plan import is_injected_perception, is_mechanism_row
         remaining = rows_after
         for msg in presented_after:
             if remaining <= target:
                 break
             content = str(msg.get("content") or "")
-            if not is_injected_perception(msg):
+            if not is_injected_perception(msg) and not is_mechanism_row(msg):
                 remaining -= len(content)
             meta = msg.get("metadata")
             tags = meta.get("tags") if isinstance(meta, dict) else None

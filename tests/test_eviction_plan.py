@@ -5,8 +5,10 @@ docs/intent/arasuji_levels.md §3 (一本規則) / §4 (レベル0 の特別さ)
 固定する仕様の骨子:
 
 - 保護 = 残す量 (watermarks.target)。最新から遡ってこの分は退場させない。
-  境界は pulse 関節へ古い側にスナップ。**残す量は生の提示字数で数える**
-  (提示コスト経済の水位なので、材料判定の裁定後も生のまま)。
+  境界は pulse 関節へ古い側にスナップ。**残す量は会話の行の生字数で数える**
+  (提示コスト経済の水位なので、材料判定の裁定後も生のまま。ただし数える行は
+  会話だけ — 知覚ブロックは 2026-09-03 裁定、機構名義の行 = スペル結果・
+  ツール結果・通知は 2026-09-04 裁定で、どちらも残す量を消費しない)。
 - 保護より古い側は、古い順に U ずつの範囲に刻んで**全部**畳む。切り位置は
   pulse 関節に寄せる (U に達したら、いまの pulse を最後まで含めて切る)。
 - **U に達したかは材料字数で測る** (2026-08-29 まはー裁定)。機構名義タグ
@@ -406,14 +408,16 @@ class EmergencyCloseTest(unittest.TestCase):
         される — 割ること自体は 2026-08-25 に設計として受け入れ済み)。代わりに
         黙って通さない — 脱出弁と同じ格の WARNING を出したうえで fold は閉じる。
         """
+        # s0 = スペル結果 (機構名義。残す量は消費しない — 2026-09-04 裁定)、
+        # s1 / s2 = 結果を読んだ発話 (会話の行)。会話 80,000 字 > keep=60,000 で
+        # 素の境界は s1 (index 1) — 群 (s0..s2) の内側。
         msgs = [
             msg("s0", 100, chars=40_000, pulse="p1", tags=["spell"]),
-            msg("s1", 101, chars=40_000, pulse="p2", spell_origin="s0",
-                tags=["spell"]),
-            msg("s2", 102, chars=40_000, pulse="p3", spell_origin="s0",
-                tags=["spell"]),
+            msg("s1", 101, chars=40_000, pulse="p2", spell_origin="s0"),
+            msg("s2", 102, chars=40_000, pulse="p3", spell_origin="s0"),
         ]
-        # 生 120,000 字だが材料は一行 × 3 — 通常計画は fold を閉じられない。
+        # 候補は s0 (機構名義) だけ — 材料は一行に縮み、通常計画は fold を
+        # 閉じられない。
         with self.assertLogs("sea.eviction_plan", "WARNING") as logs:
             result = plan(msgs, keep=60_000, close_undersized_tail=True)
         self.assertEqual(len(result.folds), 1)
@@ -788,6 +792,67 @@ class ProtectionSubjectTest(unittest.TestCase):
         self.assertEqual(result.protected_from, 0)
         self.assertEqual(result.protected_rows_chars, 10_000)
         self.assertEqual(result.total_chars, 40_000)
+
+
+class MechanismRowSubjectTest(unittest.TestCase):
+    """残す量の勘定から機構名義の行 (スペル結果・通知) を外す (2026-09-04 まはー裁定)。
+
+    知覚ブロックを外した 2026-09-03 裁定 (ProtectionSubjectTest) の同族適用 —
+    残す量が守るのは会話の連続性で、スペル結果の大きさで会話が削られては
+    ならない (本番実測: 表示 44,006 字のうちスペル結果 3 件 18,010 字が残す量
+    4 万の保護枠の 4 割超を消費していた —
+    docs/issues/watermarks_unsatisfiable_when_perception_is_large.md 裁定 8)。
+    機構行は畳みの対象範囲には含まれたまま (数えないだけ)。上限の主語 (合計)
+    には従来どおり生で入る (裁定 9)。
+    """
+
+    def test_spell_result_does_not_consume_the_keep_quota(self):
+        rows = [msg(f"m{i}", 100 + i) for i in range(20)]      # 会話 20,000 字
+        spell = msg("s0", 130, chars=15_000, tags=["spell"])   # 末尾にスペル結果
+        result = plan(rows + [spell], keep=18_000)
+        # 保護は m2 から (m2..m19 = 18,000 字の会話)。スペル結果 15,000 字は
+        # 残す量を 1 字も消費しない。
+        self.assertEqual(result.protected_from, 2)
+        self.assertGreaterEqual(result.protected_rows_chars, 18_000)
+        # stored_chars (残す量の主語) はスペル結果を数えない。
+        self.assertEqual(result.stored_chars, 20_000)
+        # 上限の主語 (合計) には生で入る (2026-09-04 裁定 9)。
+        self.assertEqual(result.total_chars, 35_000)
+        self.assertEqual(folded_ids(result), ["m0", "m1"])
+
+    def test_conversation_below_keep_is_all_protected_despite_spell_bulk(self):
+        rows = [msg(f"m{i}", 100 + i) for i in range(10)]      # 会話 10,000 字
+        spells = [
+            msg(f"s{i}", 200 + i, chars=6_000, tags=["spell"]) for i in range(3)
+        ]
+        result = plan(rows + spells, keep=18_000)
+        # 会話は残す量に届かない = 全部が保護範囲。スペル結果 18,000 字が
+        # 乗っていても退場できるものは無い (超過の始末は供給側の仕事)。
+        self.assertTrue(result.is_empty)
+        self.assertEqual(result.protected_from, 0)
+        self.assertEqual(result.stored_chars, 10_000)
+        self.assertEqual(result.total_chars, 28_000)
+
+    def test_old_mechanism_rows_are_folded_with_their_period(self):
+        """機構行は対象範囲から外れない — 境界より古ければ一緒に畳まれる。"""
+        old_spell = msg("s0", 100, chars=5_000, tags=["spell"])
+        rows = [msg(f"m{i}", 101 + i) for i in range(6)]       # 会話 6,000 字
+        result = plan([old_spell] + rows, keep=3_000)
+        # 会話だけで数えて保護は m3 から。候補は s0 と m0..m2 — 材料 (s0 は
+        # 一行に縮む) が U に届いた fold に s0 も入る。
+        self.assertIn("s0", folded_ids(result))
+
+    def test_u_measure_is_still_material_chars(self):
+        """U 判定 (一度に畳む単位) の物差しは従来どおり材料字数 (2026-08-29 裁定)
+        — 残す量の主語変更で変わらない。"""
+        msgs = [
+            msg("s0", 100, chars=10_000, tags=["spell"]),
+            msg("m0", 101),
+            msg("k0", 200), msg("k1", 201),
+        ]
+        result = plan(msgs, keep=2_000)
+        # 候補 (s0, m0) の材料は一行 + 1,000 字 < U=2,000 → 閉じない。
+        self.assertTrue(result.is_empty)
 
 
 class GuardTest(unittest.TestCase):
