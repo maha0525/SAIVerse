@@ -1029,6 +1029,7 @@ class SAIMemoryAdapter:
         required_line_roles: Optional[List[str]] = None,
         required_scopes: Optional[List[str]] = None,
         pulse_id: Optional[str] = None,
+        raise_on_error: bool = False,
     ) -> List[dict]:
         """Get persona messages from anchor message onwards.
 
@@ -1046,6 +1047,8 @@ class SAIMemoryAdapter:
                 payloads = [self._payload_from_message_locked(msg, viewing_thread_id=thread_id) for msg in rows]
         except Exception as exc:
             LOGGER.warning("Failed to fetch persona messages from anchor %s: %s", anchor_message_id, exc)
+            if raise_on_error:
+                raise
             return []
 
         selected: List[dict] = []
@@ -1070,6 +1073,7 @@ class SAIMemoryAdapter:
         required_tags: Optional[List[str]] = None,
         required_line_roles: Optional[List[str]] = None,
         required_scopes: Optional[List[str]] = None,
+        raise_on_error: bool = False,
     ) -> List[dict]:
         """anchor より正典順で前のメッセージを遡って返す (読み戻し §15 の材料読み)。
 
@@ -1077,6 +1081,11 @@ class SAIMemoryAdapter:
         合計が ``max_chars`` に達するまで新しい側から遡り、時系列昇順で返す。
         フィルタは提示ウィンドウの読み (from_anchor) と同じ規則で適用する —
         でないと読み戻しの文字勘定が提示の勘定とズレる。
+
+        ``raise_on_error=True`` は DB の読み失敗を例外で伝える (既定は WARNING +
+        空)。最終防衛ライン (SessionLifecycle.ensure_window_floor) はこちらを
+        使う — 読めなかったことを「古い会話が無い」と読むと、ペルソナが残す量を
+        割ったまま喋る (Codex 二巡目 #1)。
         """
         if not self._ready or max_chars <= 0:
             return []
@@ -1115,6 +1124,8 @@ class SAIMemoryAdapter:
                 "Failed to fetch persona messages before anchor %s: %s",
                 anchor_message_id, exc,
             )
+            if raise_on_error:
+                raise
             return []
         selected.reverse()
         return selected

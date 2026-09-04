@@ -209,3 +209,61 @@ def test_dispatch_preserves_completed_when_post_completion_raises():
     assert outcome["action"] == "execute"
     assert outcome["runtime_outcome"] == "completed"
     assert "post-completion" in outcome["error"]
+
+
+# ---------------------------------------------------------------------------
+# 最終防衛ライン未達 (WindowFloorUnmetError) — Codex 二巡目 #2
+# ---------------------------------------------------------------------------
+
+
+def test_floor_unmet_records_floor_unmet_outcome_without_a_second_event():
+    """run_meta_user が WindowFloorUnmetError を送出したら PulseController は
+    "floor_unmet" と記帳して [] を返す (再送出しない)。user への通知は
+    run_meta_user が出した一度だけ — controller は二つ目の error を出さない。"""
+    from sea.runtime_context import WindowFloorUnmetError
+
+    events = []
+
+    def _behavior():
+        # run_meta_user は送出前に一度だけ通知している
+        events.append({"type": "error", "error_code": "window_floor_unmet", "content": "x"})
+        raise WindowFloorUnmetError("floor unmet")
+
+    pc = _make_controller(_behavior)
+    user = ExecutionRequest(
+        type="user", persona_id="p1", building_id="b1", user_input="hello",
+        event_callback=events.append,
+    )
+    assert pc.submit(user) == []
+    assert user.dispatch_action == "execute"
+    assert user.runtime_outcome == "floor_unmet"
+    assert len([e for e in events if e.get("type") == "error"]) == 1
+
+    sched = _schedule_request(event_callback=events.append)
+    events.clear()
+    assert pc.submit(sched) == []
+    assert sched.runtime_outcome == "floor_unmet"
+    assert len([e for e in events if e.get("type") == "error"]) == 1  # 送出前の分だけ
+
+
+def test_dispatch_returns_floor_unmet_and_schedule_classifies_it_failed():
+    """schedule 経路: dispatch は floor_unmet を型付きで返し、ScheduleManager は
+    failed (副作用ゼロ・再試行安全) に分類する — executed でも unknown でもない。"""
+    from sea.runtime_context import WindowFloorUnmetError
+    from saiverse.schedule_manager import ScheduleManager
+
+    pc = _make_controller(_raiser(WindowFloorUnmetError("floor unmet")))
+    dispatcher = PulseDispatcher(SimpleNamespace(pulse_controller=pc))
+    outcome = dispatcher.dispatch_schedule_fire(
+        persona_id="p1", building_id="b1", user_input="<system>x</system>",
+    )
+    assert outcome == {
+        "action": "execute", "runtime_outcome": "floor_unmet", "error": None,
+    }
+    assert ScheduleManager._classify_dispatch_outcome(outcome) == (
+        "failed", "window floor unmet",
+    )
+    # inject 系の bool 版も「起動していない」
+    assert dispatcher.dispatch_phenomenon_event(
+        persona_id="p1", building_id="b1", user_input="<system>x</system>",
+    ) is False

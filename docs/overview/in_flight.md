@@ -49,6 +49,7 @@
 | 状態 | 案件 | 次アクション | 誰待ち | doc / issue | 更新 |
 |---|---|---|---|---|---|
 | 🟣 検証待ち | 記憶整理の三つの水位に全体設定の既定層を足す (コード既定 < 全体設定 < モデル設定) | 実装済み (DB 列・解決層・API・全体設定の水位バー・モデル編集の実効値表示・docs)。次はレビュー (ローカル LLM / Codex) の消し込みと、まはーの実機で全体設定の画面と保存の反映を確認する。 | まはー (実機確認) | [chronicle_eviction.md §4](../intent/chronicle_eviction.md) / [metabolism.md](../concepts/metabolism.md) | 2026-09-03 |
+| 🟣 検証待ち | 会話窓の最終防衛ラインと読み戻しの立て直し (konoe さんの窓が消えた事故) | v0.3.7 として配布済み。次 = なかみつさんの環境で更新後に一度話しかけ、会話が残す量まで戻ることを確認する。戻れば issue を archive へ移す。 | なかみつさん (更新と実機確認) | [issue](../issues/window_floor_and_refill_redesign.md) / [arasuji_levels.md](../intent/arasuji_levels.md) §15・§16-2 | 2026-09-04 |
 | 🟣 検証待ち | Chronicle 退場の適用側拒否権デッドロック根治 | 二つの顔 (編纂対象ゼロ fold の吸収限定退場 / あらすじ手動削除の道連れ) とも実装済み・回帰緑。次 = 実機で通常 Metabolism の退行がないことの確認。 | まはー (実機検証) | [issue](../issues/chronicle_eviction_applier_veto_deadlock.md) / [chronicle_eviction.md](../intent/chronicle_eviction.md) §2/§5-5/§6 | 2026-07-27 |
 | 🟣 検証待ち | あらすじのレベル制 (記憶の川の一本化) | 実装完了。エリスは実機修復と初編纂まで成功、air は点検の結果修復不要。次 = aifi の再編纂 (未編纂期間の消化、汎用ツール整備済み) と LLM 束ね品質の本番初発火の観察。提示側の簡素化は presentation_gap 実機検証後へ先送り (intent §12-7)。 | まはー (aifi 実施のタイミング) | [intent](../intent/arasuji_levels.md) | 2026-07-29 |
 | 🟣 検証待ち | 編纂入口の一本化 (arasuji_levels §13) | §13 (入口一本化) と §14 (冷えた anchor の保守経路) とも実装済み・レビュー消し込み完了・全テスト緑。派生の新 issue (関所閉鎖の slot 消費) は裁定待ち・別件。次 = 実機検証 (会話開始で「1件」ダイアログが出ない / 整理ボタンが直近を残して畳む)。 | まはー (実機検証) | [intent](../intent/arasuji_levels.md) §13-§14 | 2026-07-29 |

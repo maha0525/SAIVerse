@@ -12,6 +12,40 @@ if TYPE_CHECKING:
 
 LOGGER = logging.getLogger(__name__)
 
+
+class HistoryStoreUnavailableError(RuntimeError):
+    """厳格モード (``raise_on_error=True``) の履歴読みで、SAIMemory が壊れている。
+
+    既定の読みはメモリ上の写しへ縮退するが、その写しは空でありうる — 最終防衛
+    ラインのように「読めなかった」と「本当に無い」を区別する呼び出し側には、
+    縮退ではなく例外で伝える (Codex 三巡目 #3)。送出するのは器が **broken**
+    (:func:`memory_store_state`) のときだけ — adapter を持たない / 設定で
+    SAIMemory を切っている従来のメモリ上モードは、厳格モードでも従来どおり
+    写しを読む (Codex 五巡目 #2)。
+    """
+
+
+def memory_store_state(adapter) -> str:
+    """SAIMemory の器の状態を三値で返す。
+
+    - ``"absent"``: adapter が無い、または設定で SAIMemory が無効
+      (``settings.memory_enabled`` が偽) = 従来のメモリ上モード。厳格モードでも
+      写しを読む。
+    - ``"ready"``: 接続がある。
+    - ``"broken"``: 有効なのに接続が無い (開けなかった / 閉じた)。厳格モードは
+      ここだけ例外にする — 記憶の器が壊れたまま喋らせない。
+
+    ``SAIMemoryAdapter.is_ready`` は ``conn is not None`` で、conn は ``__init__``
+    が同期的に張る (非同期の初期化は無い)。conn が None なのは、設定で無効か
+    ``init_db`` の失敗か close 後のどれか。
+    """
+    if adapter is None:
+        return "absent"
+    settings = getattr(adapter, "settings", None)
+    if settings is not None and not getattr(settings, "memory_enabled", True):
+        return "absent"
+    return "ready" if adapter.is_ready() else "broken"
+
 class HistoryManager:
     """ペルソナ視点の persona log (= self.messages / persona_log_path) と、
     Building 共有ログ (= ``building_messages`` テーブル) の操作 API。
@@ -409,8 +443,20 @@ class HistoryManager:
         required_line_roles: Optional[List[str]] = None,
         required_scopes: Optional[List[str]] = None,
         pulse_id: Optional[str] = None,
+        raise_on_error: bool = False,
     ) -> List[Dict[str, str]]:
-        """Retrieves messages from anchor onwards (for metabolism anchor-based retrieval)."""
+        """Retrieves messages from anchor onwards (for metabolism anchor-based retrieval).
+
+        ``raise_on_error=True`` は SAIMemory の読み失敗を例外で伝える (既定は空へ
+        縮退)。最終防衛ラインのように「読めなかった」と「無い」を区別する
+        呼び出し側が使う。
+        """
+        if raise_on_error and memory_store_state(self.memory_adapter) == "broken":
+            raise HistoryStoreUnavailableError(
+                f"SAIMemory is broken (enabled but no connection) for "
+                f"{self.persona_id}; the in-memory fallback cannot answer a "
+                "strict history read"
+            )
         if self.memory_adapter is not None:
             if not self.memory_adapter.is_ready():
                 LOGGER.debug("SAIMemory adapter not ready for %s; falling back to in-memory", self.persona_id)
@@ -426,6 +472,7 @@ class HistoryManager:
                     required_line_roles=required_line_roles,
                     required_scopes=required_scopes,
                     pulse_id=pulse_id,
+                    raise_on_error=raise_on_error,
                 )
                 LOGGER.debug(
                     "SAIMemory returned %d messages from anchor for %s",
@@ -454,11 +501,14 @@ class HistoryManager:
         required_tags: Optional[List[str]] = None,
         required_line_roles: Optional[List[str]] = None,
         required_scopes: Optional[List[str]] = None,
+        raise_on_error: bool = False,
     ) -> List[Dict[str, str]]:
         """anchor より前のメッセージを、合計 max_chars 分まで遡って返す (時系列昇順)。
 
         読み戻し (arasuji_levels.md §15) の anchor 引き戻し用。
-        :meth:`get_history_from_anchor` の対。
+        :meth:`get_history_from_anchor` の対。``raise_on_error=True`` は
+        SAIMemory の読み失敗を例外で伝える (既定は空へ縮退) —
+        最終防衛ラインは「読めなかった」を「古い会話が無い」と読まない。
         """
         if self.memory_adapter is not None and self.memory_adapter.is_ready():
             return self.memory_adapter.persona_messages_before_anchor(
@@ -467,6 +517,13 @@ class HistoryManager:
                 required_tags=required_tags,
                 required_line_roles=required_line_roles,
                 required_scopes=required_scopes,
+                raise_on_error=raise_on_error,
+            )
+        if raise_on_error and memory_store_state(self.memory_adapter) == "broken":
+            raise HistoryStoreUnavailableError(
+                f"SAIMemory is broken (enabled but no connection) for "
+                f"{self.persona_id}; the in-memory fallback cannot answer a "
+                "strict history read"
             )
 
         # Fallback: scan in-memory messages before the anchor, newest first

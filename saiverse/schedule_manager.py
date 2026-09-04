@@ -1060,6 +1060,10 @@ class ScheduleManager:
         if runtime_outcome == "gate_closed":
             # Beat 関所閉鎖 = 副作用ゼロ確定 → 再試行安全
             return "failed", "beat gate closed"
+        if runtime_outcome == "floor_unmet":
+            # 最終防衛ライン未達 (arasuji_levels.md §15-5) = Playbook 未起動・
+            # 副作用ゼロ確定 → 再試行安全。occurrence は消費しない。
+            return "failed", "window floor unmet"
         if action in ("unavailable", "error_before_submit", "skipped"):
             # 受付裁定前 / 受付されず — LLM は動いていない → 再試行安全
             return "failed", detail

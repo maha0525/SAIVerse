@@ -100,25 +100,69 @@ def serialize_folds(folds: Sequence[FoldedRange]) -> Optional[str]:
     return json.dumps([f.to_dict() for f in folds], ensure_ascii=False)
 
 
-def deserialize_folds(raw: Optional[str]) -> List[FoldedRange]:
-    """session_anchor 行の JSON を読む。壊れていたら空 (= 生ログ提示に縮退)。"""
+def deserialize_folds(raw: Optional[str], *, strict: bool = False) -> List[FoldedRange]:
+    """session_anchor 行の JSON を読む。壊れていたら空 (= 生ログ提示に縮退)。
+
+    ``strict=True`` は壊れた JSON / 不正な要素を例外 (ValueError) で伝える —
+    最終防衛ラインの読みは、読めなかった記録を空と見なして上書きしない
+    (書き戻しで既存の区間が消える。Codex 四巡目 #3)。
+    """
     if not raw:
         return []
     try:
         data = json.loads(raw)
     except (TypeError, ValueError):
+        if strict:
+            raise ValueError("folded ranges JSON is broken")
         LOGGER.warning("[window] folded ranges JSON is broken; falling back to raw log")
         return []
     if not isinstance(data, list):
+        if strict:
+            raise ValueError("folded ranges JSON is not a list")
         return []
     out: List[FoldedRange] = []
     for item in data:
         if isinstance(item, dict):
+            if strict:
+                _validate_fold_record(item)
             try:
                 out.append(FoldedRange.from_dict(item))
             except (TypeError, ValueError):
+                if strict:
+                    raise
                 LOGGER.warning("[window] skipping malformed folded range entry")
+        elif strict:
+            raise ValueError("folded ranges JSON has a non-object entry")
     return out
+
+
+def _validate_fold_record(item: Dict[str, Any]) -> None:
+    """厳格モードの 1 記録の形の検査 (Codex 五巡目 #4)。
+
+    ``from_dict`` は寛容 (``{}`` → 行なしの区間、文字列の ``message_ids`` → 1 字
+    ずつの id) なので、意味の壊れた記録を厳格モードでは例外にする —
+    最終防衛ラインが壊れた記録を「読めた」と見なして書き戻さないため。
+    """
+    mids = item.get("message_ids")
+    if (
+        not isinstance(mids, list) or not mids
+        or not all(isinstance(m, str) and m for m in mids)
+    ):
+        raise ValueError("folded range record: message_ids must be a non-empty list of ids")
+    eids = item.get("chronicle_entry_ids", [])
+    if eids is not None and (
+        not isinstance(eids, list) or not all(isinstance(e, str) for e in eids)
+    ):
+        raise ValueError("folded range record: chronicle_entry_ids must be a list of strings")
+    sids = item.get("chronicle_short_ids", [])
+    if sids is not None and (
+        not isinstance(sids, list)
+        or not all(isinstance(s, int) and not isinstance(s, bool) for s in sids)
+    ):
+        raise ValueError("folded range record: chronicle_short_ids must be a list of ints")
+    raw_flag = item.get("presented_raw", False)
+    if not isinstance(raw_flag, (bool, int)):
+        raise ValueError("folded range record: presented_raw must be bool-ish")
 
 
 def prune_folds(

@@ -34,7 +34,22 @@ def get_context_status(persona_id: str, manager=Depends(get_manager)) -> dict[st
       **保存済みの会話に加えて、送信直前に差し込まれる知覚 (部屋の様子) を
       含む合計**で、内訳は ``stored_chars`` / ``injected_perception_chars``
       (2026-09-02 まはー裁定 —
-      docs/issues/context_accounting_excludes_injected_rows.md)。
+      docs/issues/context_accounting_excludes_injected_rows.md)。上限
+      (``high_chars``) と比べる量はこの合計。
+    - ``window_rows_chars``: 残す量 (``target_chars``) の契約が見ている量 =
+      整理が計画を立てる窓 (§15-3 印戻しなどの正規化後。読み戻しが適用される
+      なら読み戻し後の窓) の**会話の行だけ**の文字数 (``EvictionPlan.stored_chars``)。
+      残す量の主語は会話の行で、知覚は消費しない (2026-09-03 裁定 —
+      docs/issues/protection_quota_consumed_by_perception_blocks.md)。
+      ``EvictionPlan.protected_rows_chars`` (保護範囲の**内側**の行の字数) とは
+      別の量なので、名前も分けてある。測れないときは None。
+    - ``perception_over_budget``: 合計は上限を超えているのに会話の行が残す量
+      以下 = 整理しても畳めるものが無い (超過の主は知覚の供給)。判定の合計と
+      行は**同じ窓** (``window_rows_chars`` と同じ計画窓に知覚を足した列) から
+      取る — 別の窓の合計と行を突き合わせると、窓の正規化の前後で旗が裏返る
+      (f288f003 の Codex レビュー残 #2)。``presented_chars`` は「いま実際に送る
+      合計」で、正規化前の窓の値なので、計画窓の合計とは違いうる。測れない
+      ときは None。
     - ``fold_unit_chars``: 一次あらすじの標準被覆 U。整理は残す量より古い側を
       U (材料字数 — 2026-08-29 裁定) ずつの範囲に刻んで畳む。
     - ``fold_ready`` / ``fold_shortfall_chars``: いま手動の畳みで実際に fold が
@@ -64,11 +79,17 @@ def get_context_status(persona_id: str, manager=Depends(get_manager)) -> dict[st
         "presented_chars": None,      # 実際に送られる合計文字数 (読み戻し後)
         "stored_chars": None,         # うち保存済みの会話 (提示ウィンドウの行)
         "injected_perception_chars": None,  # うち送信直前に差し込まれる知覚
+        "window_rows_chars": None,  # 残す量の契約が見る量 (計画窓の会話の行だけ)
+        "perception_over_budget": None,  # 合計は上限超えだが行は残す量以下 (畳めない)
         "fold_unit_chars": chronicle_band_budget(),  # 一度に畳む単位 U (env 由来の定数)
         "fold_ready": None,           # いま畳みで fold が実際に閉じるか (測れなければ None)
         "fold_shortfall_chars": None,  # 閉じないとき、あと材料何字で閉じるか (閉じるなら 0)
         "refill_applied": False,      # presented_chars が §15 読み戻し込みの値か
         "measurement_failed": False,  # 計測が失敗した (None を「起点なし」と読ませない)
+        # 最終防衛ライン (ensure_window_floor) がこのプロセスで最後に発火した
+        # 時刻 (ISO)。無ければ None。発火 = 上流 (読み戻し) の失敗の印
+        # (docs/issues/window_floor_and_refill_redesign.md 設計 0)。
+        "window_floor_applied_at": None,
     }
     if not model_key:
         return status
@@ -76,6 +97,9 @@ def get_context_status(persona_id: str, manager=Depends(get_manager)) -> dict[st
     lifecycle = _resolve_lifecycle(manager)
     if lifecycle is None:
         return status
+    status["window_floor_applied_at"] = lifecycle.window_floor_applied_at(
+        persona_id, model_key,
+    )
 
     try:
         watermarks = lifecycle.get_metabolism_watermarks(persona, model_key)
@@ -230,6 +254,20 @@ def _measure_fold_readiness(
     status["fold_shortfall_chars"] = (
         0 if ready
         else max(0, band - plan.pending_material_chars)
+    )
+    # 残す量の契約が見ている量 = 計画窓の会話の行だけ (知覚は残す量を消費
+    # しない — 2026-09-03 裁定)。合計が上限を超えているのに行が残す量以下なら、
+    # 整理は畳めるものを見つけられない — 超過の主は知覚の供給で、画面はその
+    # 事実を出す (本走行は同じ判定で LLM を呼ばず引き返す)。判定の合計と行は
+    # **この同じ列** (計画窓 + 知覚) から取る — 正規化前の窓の合計 (presented_
+    # chars) と計画窓の行を突き合わせると、印戻しで窓が縮む回に旗が裏返る。
+    from sea.eviction_plan import message_chars
+
+    status["window_rows_chars"] = plan.stored_chars
+    total = message_chars(list(presented))
+    high = getattr(watermarks, "high", None)
+    status["perception_over_budget"] = bool(
+        high is not None and total > high and plan.stored_chars <= watermarks.target
     )
 
 

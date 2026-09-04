@@ -31,6 +31,12 @@ docs/intent/arasuji_levels.md §3 / §4 の実装 (レベル0 の並び)。
   (sea/runtime_context.py::list_presented_perception_blocks) を含む。呼び出し側は
   両者を時刻順にマージした列を渡し、ブロックは**重さだけ**が計画に効く
   (fold の中身にも境目にもならない)。
+- **ただし残す量 (保護範囲) の主語は会話の行だけ** (2026-09-03 まはー裁定)。
+  上限 (発火) は「実際に送る合計」で測るが、残す量が守るのは会話の連続性 —
+  ブロックが残す量を消費すると、巨大な部屋の様子が末尾に乗った回に会話の
+  行がほぼ全部畳まれ、ペルソナが直近の記憶を失う (本番で発生。
+  docs/issues/protection_quota_consumed_by_perception_blocks.md)。ブロックの
+  重さが効くのは合計 (``total_chars``) と削減見込み (``projected_chars``) だけ。
 """
 
 from __future__ import annotations
@@ -49,10 +55,19 @@ LOGGER = logging.getLogger(__name__)
 class Watermarks:
     """Metabolism の水位 (文字数)。arasuji_levels.md §9。
 
-    - ``target``: **残す量** — 畳んだ後、提示コンテキストに残す直近の文字数。
-      退場はこの水準まで畳む (= 最新から遡ってこの分は退場させない)。
-    - ``high``: **上限** — 提示コンテキストがこれを超えたら発火。None = 文字数
-      では発火せず ``token_triggered`` のみ。
+    **水位ごとに主語 (何を数えた量と比べるか) が違う** (2026-09-03 まはー裁定。
+    docs/issues/protection_quota_consumed_by_perception_blocks.md):
+
+    - ``target``: **残す量** — 主語は**会話の行 (保存行) の量**
+      (:func:`stored_message_chars`)。畳んだ後、少なくともこの字数ぶんの会話の
+      行を提示に残す (= 最新から遡ってこの分は退場させない。関節へのスナップで
+      広がることはある)。知覚ブロックは残す量を消費しない — 守っているのは
+      会話の連続性で、部屋の様子の大きさで会話が削られてはならない。
+      §15 読み戻しの「足りているか」も同じ主語。
+    - ``high``: **上限** — 主語は**実際に送る合計** (保存行 + 知覚ブロック、
+      :func:`message_chars`)。これを超えたら発火。None = 文字数では発火せず
+      ``token_triggered`` のみ。合計が上限を超えているのに会話の行が残す量以下
+      なら畳めるものは無く、超過の主は知覚の供給 (呼び出し側が警告する)。
     - ``low``: 旧三水位の名残り (保護範囲)。現設計では**使わない** — 残す量が
       保護を兼ねる。モデル設定との互換のため受け取るだけ。
     """
@@ -106,12 +121,17 @@ class EvictionPlan:
     #: 旧設計 (二段構えの最後の手段) の名残り。現設計の計画は立てない —
     #: 常に False。観測ログの互換のため残す。
     used_last_resort_fold: bool = False
-    #: 計画適用後に残る提示文字数の見込み。
+    #: 計画適用後に残る提示文字数の見込み (合計 = 保存行 + 知覚ブロック)。
     projected_chars: int = 0
-    #: 適用前の提示文字数。
+    #: 適用前の提示文字数 (合計 = 実際に送る中身。上限の主語)。
     total_chars: int = 0
+    #: 適用前の**保存行だけ**の文字数 (残す量の主語)。
+    stored_chars: int = 0
     #: 保護範囲 (残す量) の開始インデックス (この位置以降は退場させない)。
     protected_from: int = 0
+    #: 保護範囲に入る**保存行**の文字数 = 畳んだ後に残る会話の行の量。残す量の
+    #: 契約 (``>= watermarks.target``、関節スナップの例外を除く) を検算する値。
+    protected_rows_chars: int = 0
     #: 末尾に畳まず残した端数 (次回持ち越し分) の**材料字数**。fold が一つも
     #: 閉じなかったとき、「あと材料何字たまれば畳めるか」を UI (context-status)
     #: が出すための報告値。ここで算数を再実装させない。
@@ -152,12 +172,27 @@ def is_injected_perception(msg: Dict[str, Any]) -> bool:
 
 
 def message_chars(messages: Sequence[Dict[str, Any]]) -> int:
-    """提示文字数 (水位判定の一次データ)。
+    """提示文字数 (**上限**の主語 = 実際に送る合計)。
 
     知覚ブロックが混じった列を渡してよい — 実際に送る中身の合計を数えるのが
-    水位の定義なので、保存行と同じ 1 字として数える (2026-09-02 まはー裁定)。
+    上限の定義なので、保存行と同じ 1 字として数える (2026-09-02 まはー裁定)。
+    残す量と比べる量は :func:`stored_message_chars` (主語が違う)。
     """
     return sum(len(str(m.get("content") or "")) for m in messages)
+
+
+def stored_message_chars(messages: Sequence[Dict[str, Any]]) -> int:
+    """保存行 (会話の行) だけの提示文字数 (**残す量**の主語)。
+
+    知覚ブロック (:func:`is_injected_perception`) は数えない — 残す量が守るのは
+    会話の連続性で、部屋の様子の大きさで会話が削られてはならない
+    (2026-09-03 まはー裁定)。保存行だけの列を渡せば :func:`message_chars` と
+    同じ値になる。
+    """
+    return sum(
+        len(str(m.get("content") or ""))
+        for m in messages if not is_injected_perception(m)
+    )
 
 
 def _payload_tags(msg: Dict[str, Any]) -> tuple:
@@ -346,11 +381,18 @@ def _protection_boundary(
 ) -> int:
     """残す量 (保護範囲) の開始インデックスを返す。
 
-    最新側から遡って ``keep_chars`` 分を保護する。境界が関節の単位
-    (:func:`_joint_units` — pulse の run にスペルの群を併合したもの) の途中に
-    落ちたら **古い側へ** 単位の先頭まで下げる — メッセージ単位でぶつ切りに
-    せず、保護範囲を広げる方向に倒す (「刻むときは pulse を丸ごと」
-    experience_structure.md §6)。
+    最新側から遡って ``keep_chars`` 分を保護する。**数えるのは保存行だけ** —
+    知覚ブロック (:func:`is_injected_perception`) は残す量を 1 字も消費しない
+    (2026-09-03 まはー裁定。残す量の主語は会話の行の量 — ブロックが食うと、
+    巨大な部屋の様子が末尾に乗った回に会話がほぼ全部畳まれる。
+    docs/issues/protection_quota_consumed_by_perception_blocks.md)。ブロックは
+    単位への接着 (:func:`_joint_units`) を通じて境界の位置に影響するだけで、
+    素の境界がブロックの上に落ちることは無い (加算が起きるのは保存行だけ)。
+
+    境界が関節の単位 (:func:`_joint_units` — pulse の run にスペルの群を併合
+    したもの) の途中に落ちたら **古い側へ** 単位の先頭まで下げる — メッセージ
+    単位でぶつ切りにせず、保護範囲を広げる方向に倒す (「刻むときは pulse を
+    丸ごと」experience_structure.md §6)。
 
     **脱出弁** — 古い側へ寄せると境界が消える (素の境界を含む単位が提示の先頭
     ``index 0`` から始まっている) 場合だけ、寄せる向きを変える:
@@ -374,12 +416,14 @@ def _protection_boundary(
     acc = 0
     boundary = 0
     for i in range(len(messages) - 1, -1, -1):
+        if is_injected_perception(messages[i]):
+            continue  # ブロックは残す量を消費しない (主語は会話の行)
         acc += len(str(messages[i].get("content") or ""))
         if acc >= keep_chars:
             boundary = i
             break
     else:
-        # 提示コンテキスト全体でも残す量に届かない = 全部が保護範囲。
+        # 会話の行を全部足しても残す量に届かない = 全部が保護範囲。
         return 0
     # 関節へスナップ (古い側 = 保護範囲を広げる向き)。
     raw_boundary = boundary
@@ -550,7 +594,12 @@ def plan_eviction(
         EvictionPlan。
     """
     total = message_chars(messages)
-    plan = EvictionPlan(total_chars=total, projected_chars=total)
+    stored = stored_message_chars(messages)
+    plan = EvictionPlan(
+        total_chars=total, projected_chars=total, stored_chars=stored,
+        # 境界が決まるまでは「全部が保護範囲」(早期 return もこの値で報告する)。
+        protected_rows_chars=stored,
+    )
     if not messages:
         return plan
     if target_chars <= ESTIMATED_FOLD_PLACEHOLDER_CHARS:
@@ -567,6 +616,7 @@ def plan_eviction(
     units = _joint_units(messages)
     boundary = _protection_boundary(messages, watermarks.target, units)
     plan.protected_from = boundary
+    plan.protected_rows_chars = stored_message_chars(messages[boundary:])
     if boundary <= 0:
         # 退場候補範囲が無い = 残す量だけで提示コンテキストが埋まっている。
         return plan
