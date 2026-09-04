@@ -48,6 +48,7 @@
 
 | 状態 | 案件 | 次アクション | 誰待ち | doc / issue | 更新 |
 |---|---|---|---|---|---|
+| 🟣 検証待ち | 会話窓の最終防衛ラインと読み戻しの立て直し (konoe さんの窓が消えた事故) | 実装とレビューの消し込みが済み、全テスト緑で v0.3.7 に入っている。次 = v0.3.7 を配布し、なかみつさんの環境で一度話しかけると会話が残す量まで戻ることを確認する。 | まはー (v0.3.7 の配布と実機確認) | [issue](../issues/window_floor_and_refill_redesign.md) / [arasuji_levels.md](../intent/arasuji_levels.md) §15・§16-2 | 2026-09-04 |
 | 🟣 検証待ち | Chronicle 退場の適用側拒否権デッドロック根治 | 二つの顔 (編纂対象ゼロ fold の吸収限定退場 / あらすじ手動削除の道連れ) とも実装済み・回帰緑。次 = 実機で通常 Metabolism の退行がないことの確認。 | まはー (実機検証) | [issue](../issues/chronicle_eviction_applier_veto_deadlock.md) / [chronicle_eviction.md](../intent/chronicle_eviction.md) §2/§5-5/§6 | 2026-07-27 |
 | 🟣 検証待ち | あらすじのレベル制 (記憶の川の一本化) | 実装完了。エリスは実機修復と初編纂まで成功、air は点検の結果修復不要。次 = aifi の再編纂 (未編纂期間の消化、汎用ツール整備済み) と LLM 束ね品質の本番初発火の観察。提示側の簡素化は presentation_gap 実機検証後へ先送り (intent §12-7)。 | まはー (aifi 実施のタイミング) | [intent](../intent/arasuji_levels.md) | 2026-07-29 |
 | 🟣 検証待ち | 編纂入口の一本化 (arasuji_levels §13) | §13 (入口一本化) と §14 (冷えた anchor の保守経路) とも実装済み・レビュー消し込み完了・全テスト緑。派生の新 issue (関所閉鎖の slot 消費) は裁定待ち・別件。次 = 実機検証 (会話開始で「1件」ダイアログが出ない / 整理ボタンが直近を残して畳む)。 | まはー (実機検証) | [intent](../intent/arasuji_levels.md) §13-§14 | 2026-07-29 |
@@ -91,7 +92,6 @@
 | 🟣 検証待ち | head 通知の既読基準 (last_notified) 握り潰し根治 | 撮り直し (TTL 切れ / Metabolism / 手動整理) が既読基準を上書きして入退室通知が消える欠陥は、「配送だけが基準を進める」形へ修正済み・回帰緑 (intent C8)。次 = バックエンド再起動後、まはーの入退室でエリスに [システム通知] が届くかを実機確認する。 | まはー (実機検証) | [cached_head_architecture.md](../intent/cached_head_architecture.md) §C8 | 2026-08-17 |
 | 🟣 検証待ち | macOS で過去ログの取り込みが空振りする | 検算はファイルを読めるのに取り込みが「対象 0 件」になる非対称を、探し方を検算側と同じパス直組みに揃えて解消済み・回帰緑。次 = 報告者の macOS 環境で、お知らせが消えて会話が画面に入ることの確認。 | まはー (報告者への配布と確認) | [issue](../issues/legacy_log_import_misses_decomposed_folder_names.md) | 2026-09-02 |
 | 🟣 検証待ち | macOS で OS の証明書が読めず HTTPS が全滅する | OS のストアが空のときだけ同梱の証明書束へ退避する形で実装済み。ローカル HTTPS で urlopen が実際に通るところまで確認済み。次 = 報告者の環境でカタログが開き、アドオン取得と更新通知も戻ることの確認。 | まはー (報告者への配布と確認) | [issue](../issues/urllib_https_fails_when_os_trust_store_empty.md) | 2026-09-02 |
-| 🟡 実装待ち | 更新完了マーカーの旧形式がフル更新を要求する | 旧形式のマーカーが「記録なし」ではなく「不一致」と判定され、書き直すだけで済む状態が git pull + 世界スナップショット + pip + npm を要求する。原因と対策は確定済み (壊れた記録を「記録なし」と同じ入口へ合流させるだけ)。次 = まはーの GO で実装。 | まはー(GO) → 私(実装) | [issue](../issues/update_marker_format_change_demands_full_update.md) | 2026-09-02 |
 | 🟣 検証待ち | 記憶DBの用意が失敗すると接続が残りロック待ちになる | 根本原因を特定して修正済み (旧形式 Chronicle の引っ越しが、commit 済み・DROP 未了の状態から再開できず毎回 UNIQUE 違反で倒れていた)。次 = v0.3.5 を報告者に当ててもらい、Chronicle 一覧に旧件数が並ぶこと・その後 Memopedia が開くこと・ログに resumed 警告が一度出ることを確認してもらう。 | まはー(報告者への連絡) → 報告者(確認) | [issue](../issues/memory_db_connection_leak_on_init_failure.md) | 2026-09-02 |
 | 🟡 実装待ち | 定義の無い CSS 変数でテーマ色が固定される (残り 6 種) | フィードタブの根因と同じ型が他画面に 6 種残っている。既定値が両テーマで許容できるかは画面を見ないと決まらないため、機械的な置換はしない。次 = 別セッションでダークモードに切り替えて該当画面を見て、直すか揃えるだけかを判断する。 | まはー (精査セッションの開始) | [issue](../issues/undefined_css_variables_freeze_theme_colors.md) | 2026-09-02 |
 <!-- 構想止まり(当分動かない)は台帳外。intent draft で管理: observer/Fixture, Social Track 入口(Phase 5) など -->

@@ -286,7 +286,9 @@ class ExecutionLedger:
         - 既存 running / applied / completed → runnable=False (既に走った /
           走っている)
         - 既存 unknown → runnable=False。**自動再実行禁止** (intent §2.5) —
-          裁定 (list_unknown → 照合) まで同キーの実行はブロックする
+          裁定 (list_unknown → 照合) まで同キーの実行はブロックする。kind 側が
+          照合を済ませられるなら :meth:`reconcile_unknown` で閉じてから再 claim
+          する (キーは ``#unknown-`` 付きで退避される)
 
         競合 (同時 INSERT) は :meth:`begin_execution` の IntegrityError 流儀に
         倣い、rollback → 再読で既存行へ収束させる。
@@ -532,6 +534,116 @@ class ExecutionLedger:
         else:
             LOGGER.info("[ledger] running seat lost: %s", execution_id)
         return won
+
+    def touch_running(self, execution_id: str) -> bool:
+        """走行中の実行の心拍 — UPDATED_AT を今に進める (status=running のときだけ)。
+
+        :meth:`recover_stale_running` の期限監視 (``max_age_seconds``) は
+        UPDATED_AT の古さで「観測途絶」を判定する。長時間走る実行 (例:
+        ``metabolism.run`` の一括編纂 — 数万通のインポートでは数時間) が台帳を
+        一度も更新しないと、生きているのに期限で unknown へ落とされる。呼び出し
+        元は **UI へ進捗を流すのと同じ場所** からこれを呼ぶ — 画面に進捗が出て
+        いる限り台帳も生存を知り、期限が効くのは本当に無言になった実行だけ。
+
+        running 以外 (prepared / applied / completed / failed / unknown) には
+        何もせず False を返す (例外にしない — 心拍で本体を止めない)。DB エラーは
+        そのまま伝播する。
+
+        Returns:
+            True = running 行を更新した。False = 該当行なし or running ではない。
+        """
+        db = self._session_factory()
+        try:
+            touched = (
+                db.query(ExecutionLedgerEntry)
+                .filter(
+                    ExecutionLedgerEntry.EXECUTION_ID == execution_id,
+                    ExecutionLedgerEntry.STATUS == STATUS_RUNNING,
+                )
+                .update(
+                    {ExecutionLedgerEntry.UPDATED_AT: _now_epoch()},
+                    synchronize_session=False,
+                )
+            )
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+        return touched > 0
+
+    def reconcile_unknown(
+        self,
+        execution_id: str,
+        *,
+        result: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        """unknown を照合済みとして閉じ、同じキーで新しい claim が取れるようにする。
+
+        intent §2.4 #5 の「unknown の照合」を kind 側が済ませた後の終端処理。
+        呼び出し元が「この kind の結果は外部証跡 (成果物テーブル等) で観測でき、
+        再実行は冪等 (確定済みの成果物は飛ばす) である」と判断した場合にだけ
+        呼ぶ — 台帳は kind の意味論を知らないので、その判断は呼び出し元の責務
+        (例: ``metabolism.run`` — arasuji の source_ids スキップ)。
+
+        1 トランザクションで行うこと:
+
+        - unknown → applied → completed (``result`` を RESULT_JSON に刻む。
+          ``reconciled_at`` = 照合時刻は台帳が仮想クロックで自分で刻む —
+          呼び出し元の壁時計を混ぜない。呼び出し元の dict は変更しない)
+        - IDEMPOTENCY_KEY を ``{key}#unknown-{id先頭8字}`` へ退避する
+          (:meth:`claim_execution` の failed 退避と同じ形)。退避しないと
+          UNIQUE (kind, key) の completed 行が次の claim を永久にブロックする
+
+        unknown 以外の行には何もせず False を返す (照合は unknown にだけ意味が
+        ある。同時に別経路が先に閉じていても壊さない)。未配送の outbox が残る行は
+        ExecutionLedgerError で拒否する (:meth:`mark_completed` と同じ関所)。
+
+        Returns:
+            True = 閉じてキーを退避した。False = 行が unknown ではなかった。
+        """
+        stamped: Dict[str, Any] = dict(result or {})
+        stamped["reconciled_at"] = _now_epoch()
+        db = self._session_factory()
+        try:
+            entry = self._get_entry(db, execution_id)
+            if entry.STATUS != STATUS_UNKNOWN:
+                LOGGER.info(
+                    "[ledger] reconcile skipped (not unknown): %s status=%s",
+                    execution_id, entry.STATUS,
+                )
+                return False
+            undelivered = (
+                db.query(ExecutionOutboxItem)
+                .filter(
+                    ExecutionOutboxItem.EXECUTION_ID == execution_id,
+                    ExecutionOutboxItem.STATUS != OUTBOX_DELIVERED,
+                )
+                .count()
+            )
+            if undelivered:
+                raise ExecutionLedgerError(
+                    f"cannot reconcile {execution_id}: "
+                    f"{undelivered} undelivered outbox item(s) remain"
+                )
+            self._transition(db, execution_id, STATUS_APPLIED, result=stamped)
+            self._transition(db, execution_id, STATUS_COMPLETED)
+            original_key = entry.IDEMPOTENCY_KEY
+            if original_key is not None:
+                entry.IDEMPOTENCY_KEY = f"{original_key}#unknown-{execution_id[:8]}"
+            db.commit()
+            LOGGER.warning(
+                "[ledger] reconciled unknown %s kind=%s (key %s -> %s): closed as "
+                "completed; the next claim on the original key starts a new run",
+                execution_id, entry.KIND, original_key, entry.IDEMPOTENCY_KEY,
+            )
+            return True
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
 
     def abandon_prepared(self, execution_id: str, error: str) -> bool:
         """prepared のまま**動いていない**実行だけを failed へ落とす条件付き遷移。
@@ -1019,46 +1131,95 @@ class ExecutionLedger:
                 守るため。除外された行は本メソッドが一切触らない。
 
         Returns:
-            unknown 化した execution_id のリスト。
+            unknown 化した execution_id のリスト (**実際に書き換えた行だけ**)。
+
+        競合について (2026-09-03): world DB は WAL なので、候補の SELECT と
+        UPDATE の間に別 session が同じ行を applied / completed へ進めうる
+        (長時間ジョブがちょうど終わった瞬間)。主キーだけの UPDATE だとその終端を
+        unknown で上書きし、キーは退避されず、同キーの次の claim が永久に
+        ブロックされる。だから書き換えは行ごとに「いまも running (かつ期限超過)
+        であること」を WHERE に含めた条件付き UPDATE で行い、rowcount が 1 の行
+        だけを回復済みとして返す。
         """
         if max_age_seconds is None and not all_running:
             raise ValueError("specify max_age_seconds and/or all_running")
         now = _now_epoch()
+        cutoff: Optional[int] = None if all_running else now - int(max_age_seconds)
+        error = (
+            "recovered: running at process startup (previous generation)"
+            if all_running
+            else f"recovered: running exceeded {int(max_age_seconds)}s deadline"
+        )
         db = self._session_factory()
         try:
-            query = db.query(ExecutionLedgerEntry).filter(
-                ExecutionLedgerEntry.STATUS == STATUS_RUNNING
+            candidate_ids = self._select_stale_running_ids(
+                db, cutoff=cutoff, exclude_kinds=exclude_kinds,
             )
-            if exclude_kinds:
-                query = query.filter(
-                    ~ExecutionLedgerEntry.KIND.in_(tuple(exclude_kinds))
-                )
-            if not all_running:
-                cutoff = now - int(max_age_seconds)
-                query = query.filter(ExecutionLedgerEntry.UPDATED_AT <= cutoff)
-            rows = query.all()
             recovered: List[str] = []
-            for entry in rows:
-                entry.STATUS = STATUS_UNKNOWN
-                entry.UPDATED_AT = now
-                entry.ERROR = (
-                    "recovered: running at process startup (previous generation)"
-                    if all_running
-                    else f"recovered: running exceeded {int(max_age_seconds)}s deadline"
+            for execution_id in candidate_ids:
+                guard = [
+                    ExecutionLedgerEntry.EXECUTION_ID == execution_id,
+                    ExecutionLedgerEntry.STATUS == STATUS_RUNNING,
+                ]
+                if cutoff is not None:
+                    guard.append(ExecutionLedgerEntry.UPDATED_AT <= cutoff)
+                flipped = (
+                    db.query(ExecutionLedgerEntry)
+                    .filter(*guard)
+                    .update(
+                        {
+                            ExecutionLedgerEntry.STATUS: STATUS_UNKNOWN,
+                            ExecutionLedgerEntry.UPDATED_AT: now,
+                            ExecutionLedgerEntry.ERROR: error,
+                        },
+                        synchronize_session=False,
+                    )
                 )
-                recovered.append(entry.EXECUTION_ID)
+                if flipped == 1:
+                    recovered.append(execution_id)
+                else:
+                    LOGGER.info(
+                        "[ledger] stale sweep skipped %s: no longer running at "
+                        "write time (concurrent terminal write)", execution_id,
+                    )
             if recovered:
                 db.commit()
                 LOGGER.warning(
                     "[ledger] recovered %d stale running execution(s) to unknown: %s",
                     len(recovered), recovered,
                 )
+            else:
+                db.rollback()
             return recovered
         except Exception:
             db.rollback()
             raise
         finally:
             db.close()
+
+    def _select_stale_running_ids(
+        self,
+        db: Session,
+        *,
+        cutoff: Optional[int],
+        exclude_kinds: Optional[Sequence[str]],
+    ) -> List[str]:
+        """:meth:`recover_stale_running` の候補 (running で期限超過) の id を読む。
+
+        読みと書きを分けてあるのは、書き側の条件付き UPDATE が「読んだ後に
+        終端へ進んだ行」を素通しすることをテストで観測できるようにするため。
+        ``cutoff`` None = 全 running (起動時 sweep)。
+        """
+        query = db.query(ExecutionLedgerEntry.EXECUTION_ID).filter(
+            ExecutionLedgerEntry.STATUS == STATUS_RUNNING
+        )
+        if exclude_kinds:
+            query = query.filter(
+                ~ExecutionLedgerEntry.KIND.in_(tuple(exclude_kinds))
+            )
+        if cutoff is not None:
+            query = query.filter(ExecutionLedgerEntry.UPDATED_AT <= cutoff)
+        return [row[0] for row in query.order_by(ExecutionLedgerEntry.UPDATED_AT.asc()).all()]
 
     # ------------------------------------------------------------------
     # 観測面

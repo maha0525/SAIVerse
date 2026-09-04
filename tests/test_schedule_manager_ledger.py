@@ -862,3 +862,36 @@ def test_blank_meta_playbook_falls_back_to_the_default_at_fire_time(env, caplog)
     assert any("empty META_PLAYBOOK" in m for m in warnings), warnings
     # どのアラームがフォールバックしたか特定できること
     assert any(f"schedule {sid} " in m for m in warnings), warnings
+
+
+# ---------------------------------------------------------------------------
+# 最終防衛ライン未達 → failed + backoff (occurrence は消費されない) — Codex 二巡目 #2
+# ---------------------------------------------------------------------------
+
+
+def test_floor_unmet_does_not_consume_the_occurrence(env):
+    """floor_unmet は failed (副作用ゼロ) — COMPLETED は立たず、backoff で再予約
+    され、再試行成功で一度だけ実行される。"""
+    sid = _add_schedule(env.session_factory)
+    env.stub.result = {"action": "execute", "runtime_outcome": "floor_unmet", "error": None}
+    assert env.sm.register_schedule(sid) == "registered"
+    first = _entry(env, sid)
+    key = _occurrence_key_of(env, first, sid)
+
+    _fire(env, sid)
+
+    assert len(env.stub.calls) == 1
+    assert _get_schedule(env, sid).COMPLETED is False  # 消費されていない
+    row = _ledger_row(env, key)
+    assert row is not None and row["status"] == "failed"
+    retry = _entry(env, sid)
+    assert retry is not None and retry is not first
+    assert 60 < retry.fire_at_ts - time.time() < 300  # backoff 再予約
+
+    env.stub.result = {"action": "execute", "runtime_outcome": "completed", "error": None}
+    _fire(env, sid)
+
+    assert len(env.stub.calls) == 2
+    assert _get_schedule(env, sid).COMPLETED is True
+    assert _ledger_row(env, key)["status"] == "completed"
+    assert _entry(env, sid) is None

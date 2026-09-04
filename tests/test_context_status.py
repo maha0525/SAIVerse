@@ -78,6 +78,7 @@ def _lifecycle(
         ),
         preview_planning_window=_preview_planning_window,
         presented_with_perceptions=_presented_with_perceptions,
+        window_floor_applied_at=lambda persona_id, model_key: None,
     )
 
 
@@ -329,12 +330,13 @@ def test_perception_lookup_failure_is_flagged_not_shown_as_zero():
     assert status["injected_perception_chars"] is None
 
 
-def test_fold_readiness_sees_the_perception_weight(monkeypatch):
-    """下見の退場計画にも知覚ブロックの重さを見せる (本走行と同じ組成)。
+def test_fold_readiness_protection_ignores_the_perception_weight(monkeypatch):
+    """下見の退場計画でも、残す量の保護は**会話の行だけ**で測る (2026-09-03 裁定)。
 
-    保存行だけを数えると、残す量 (2,000) の保護が古い側まで伸びて畳む材料が
-    U に届かない。末尾に乗る知覚ブロックの重さを見せると保護は末尾側で埋まり、
-    古い側の保存行が退場候補へ出る。下見と本走行が別の答えを出す退行を防ぐ。
+    末尾に巨大な知覚ブロックが乗っても保護範囲は縮まない — 縮むと本走行が
+    会話を畳みすぎる (docs/issues/protection_quota_consumed_by_perception_blocks.md)。
+    下見は本走行と同じ純関数を呼ぶので答えも同じ: 候補の材料 1,200 字 < U で
+    閉じない。合計はそのまま表示に出る (透明性)。
     """
     monkeypatch.setenv("SAIVERSE_CHRONICLE_BAND_BUDGET", "2000")
     persona = SimpleNamespace(persona_id=PERSONA_ID, model="model-a")
@@ -344,14 +346,76 @@ def test_fold_readiness_sees_the_perception_weight(monkeypatch):
     plain = get_context_status(
         PERSONA_ID, _manager(persona=persona, lifecycle=without),
     )
-    # 保存行だけの勘定では候補の材料が 1,200 字 < U=2,000 で閉じられない。
     assert plain["presented_chars"] == 3600
+    assert plain["window_rows_chars"] == 3600
     assert plain["fold_ready"] is False
 
     lc = _lifecycle(presented=rows, perceptions=[_perception(3000, at=10**10)])
     status = get_context_status(PERSONA_ID, _manager(persona=persona, lifecycle=lc))
     assert status["presented_chars"] == 6600
-    assert status["fold_ready"] is True
+    assert status["window_rows_chars"] == 3600
+    assert status["fold_ready"] is False
+
+
+def test_perception_over_budget_is_reported_when_nothing_is_evictable():
+    """合計が上限を超えているのに会話の行が残す量以下 = 畳めるものが無い。
+
+    この状態は会話ではなく知覚の供給が予算を超えている。整理は空振り
+    (LLM なし) で終わるので、画面にその事実を出す欄 ``perception_over_budget``
+    と、残す量の契約が見ている量 ``window_rows_chars`` を返す。
+    """
+    persona = SimpleNamespace(persona_id=PERSONA_ID, model="model-a")
+    wm = Watermarks(low=1000, target=2000, high=4000)
+
+    # 行 1,000 ≤ 残す量、合計 5,000 > 上限 → 知覚が予算超過。
+    lc = _lifecycle(watermarks=wm, presented=[_msg("m1", 1000)],
+                    perceptions=[_perception(4000)])
+    status = get_context_status(PERSONA_ID, _manager(persona=persona, lifecycle=lc))
+    assert status["stored_chars"] == 1000
+    assert status["window_rows_chars"] == 1000
+    assert status["presented_chars"] == 5000
+    assert status["perception_over_budget"] is True
+    assert status["fold_ready"] is False
+
+    # 行 3,000 > 残す量、合計 6,000 > 上限 → 畳めるものがある = 予算超過の主は会話。
+    lc = _lifecycle(watermarks=wm, presented=[_msg(f"m{i}", 1000) for i in range(3)],
+                    perceptions=[_perception(3000)])
+    status = get_context_status(PERSONA_ID, _manager(persona=persona, lifecycle=lc))
+    assert status["window_rows_chars"] == 3000
+    assert status["perception_over_budget"] is False
+
+    # 合計が上限以下なら、行が残す量以下でも予算超過ではない。
+    lc = _lifecycle(watermarks=wm, presented=[_msg("m1", 1000)],
+                    perceptions=[_perception(2000)])
+    status = get_context_status(PERSONA_ID, _manager(persona=persona, lifecycle=lc))
+    assert status["presented_chars"] == 3000
+    assert status["perception_over_budget"] is False
+
+    # 上限なし (文字数では発火しない model) では常に False。
+    lc = _lifecycle(watermarks=Watermarks(low=1000, target=2000, high=None),
+                    presented=[_msg("m1", 1000)], perceptions=[_perception(9000)])
+    status = get_context_status(PERSONA_ID, _manager(persona=persona, lifecycle=lc))
+    assert status["perception_over_budget"] is False
+
+
+def test_window_rows_chars_on_the_refill_path():
+    """§15 読み戻し経路でも、残す量の契約が見る量 (行だけ) を返す。"""
+    persona = SimpleNamespace(persona_id=PERSONA_ID, model="model-a")
+    plan = {"presented": [_msg("m1", 700)], "new_anchor_id": "m1"}
+    lc = _lifecycle(refill_plan=plan, perceptions=[_perception(300)])
+    status = get_context_status(PERSONA_ID, _manager(persona=persona, lifecycle=lc))
+    assert status["window_rows_chars"] == 700
+    assert status["presented_chars"] == 1000
+    assert status["perception_over_budget"] is False
+
+
+def test_unmeasured_status_leaves_the_new_fields_null():
+    """測れないとき (起点なし) は新しい欄も None のまま — 0 や False で偽らない。"""
+    persona = SimpleNamespace(persona_id=PERSONA_ID, model="model-a")
+    lc = _lifecycle(anchor_id=None)
+    status = get_context_status(PERSONA_ID, _manager(persona=persona, lifecycle=lc))
+    assert status["window_rows_chars"] is None
+    assert status["perception_over_budget"] is None
 
 
 def test_watermark_resolution_failure_is_500():
@@ -366,3 +430,44 @@ def test_watermark_resolution_failure_is_500():
     with pytest.raises(HTTPException) as exc:
         get_context_status(PERSONA_ID, _manager(persona=persona, lifecycle=lc))
     assert exc.value.status_code == 500
+
+
+def test_window_floor_applied_at_passes_through():
+    """最終防衛ラインの最終発火時刻 (無ければ None) をそのまま返す
+    (docs/issues/window_floor_and_refill_redesign.md 設計 0 — 発火は上流の
+    読み戻しの失敗の印なので画面に出す)。"""
+    persona = SimpleNamespace(persona_id=PERSONA_ID, model="model-a")
+    lc = _lifecycle(presented=[_msg("m1", 2500)])
+    status = get_context_status(PERSONA_ID, _manager(persona=persona, lifecycle=lc))
+    assert status["window_floor_applied_at"] is None
+    lc.window_floor_applied_at = lambda persona_id, model_key: "2026-09-04T01:23:45"
+    status = get_context_status(PERSONA_ID, _manager(persona=persona, lifecycle=lc))
+    assert status["window_floor_applied_at"] == "2026-09-04T01:23:45"
+
+
+def test_perception_over_budget_uses_one_window_for_total_and_rows():
+    """f288f003 の Codex レビュー残 #2: 旗の合計と行は同じ窓 (計画窓 + 知覚)
+    から取る。いまの窓 (印戻し前) は上限超えでも、計画窓の合計が上限以下なら
+    旗は立たない — どちらの窓が数字を出したかで旗が裏返らない。"""
+    persona = SimpleNamespace(persona_id=PERSONA_ID, model="model-a")
+    wm = Watermarks(low=1000, target=2000, high=4000)
+    current = [_msg(f"m{i}", 1000) for i in range(5)]  # いまの窓: 行 5,000
+    planning = [_msg("folded:m0", 300), _msg("m4", 1000)]  # 印戻し後: 行 1,300
+
+    # いまの窓の合計 6,500 > 上限、計画窓の合計 2,800 ≤ 上限 → 旗なし
+    # (旧: いまの窓の合計 × 計画窓の行 で True になっていた)
+    lc = _lifecycle(watermarks=wm, presented=current, planning_presented=planning,
+                    refold_ranges=1, perceptions=[_perception(1500)])
+    status = get_context_status(PERSONA_ID, _manager(persona=persona, lifecycle=lc))
+    assert status["presented_chars"] == 6500  # 実際に送る合計 (透明性) はそのまま
+    assert status["stored_chars"] == 5000
+    assert status["window_rows_chars"] == 1300
+    assert status["perception_over_budget"] is False
+
+    # 計画窓の合計 4,300 > 上限、計画窓の行 1,300 ≤ 残す量 → 旗あり
+    # (いまの窓の行 5,000 で判定すると False になる = 窓を混ぜると裏返る)
+    lc = _lifecycle(watermarks=wm, presented=current, planning_presented=planning,
+                    refold_ranges=1, perceptions=[_perception(3000)])
+    status = get_context_status(PERSONA_ID, _manager(persona=persona, lifecycle=lc))
+    assert status["window_rows_chars"] == 1300
+    assert status["perception_over_budget"] is True

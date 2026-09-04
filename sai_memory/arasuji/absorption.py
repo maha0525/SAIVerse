@@ -503,7 +503,7 @@ def regenerate_upper_entry(
         flush で現況から再試行する (Codex レビュー 2026-08-31 採用 5)。
     """
     from sai_memory.arasuji.bands import _build_consolidation_prompt, _digest_origins
-    from sai_memory.arasuji.generator import _record_llm_usage
+    from sai_memory.arasuji.generator import generate_text_with_empty_retry
 
     # 材料の読み取りとプロンプト組成は錠の内側 (Codex 七巡 K1 — 共有 conn の
     # 読みを他 writer と交錯させない)。LLM 呼び出しだけが錠の外。
@@ -562,21 +562,20 @@ def regenerate_upper_entry(
         origins = _digest_origins(conn, [c.id for c in children])
         prompt = _build_consolidation_prompt(children, origins, conn)
     try:
-        response = client.generate(
-            messages=[{"role": "user", "content": prompt}], tools=[],
+        # 空応答は helper が規定回数まで試し直す (usage も試行ごとに記録)。
+        # 使い切った EmptyResponseError も他の失敗と同じく False (印は残り、
+        # 次の flush が続きから直す)。
+        content = generate_text_with_empty_retry(
+            client,
+            [{"role": "user", "content": prompt}],
+            purpose="absorption",
+            persona_id=persona_id,
+            usage_node_type=f"chronicle_level{entry.level}",
         )
-        _record_llm_usage(client, persona_id, f"chronicle_level{entry.level}")
     except Exception:
         LOGGER.exception(
             "[absorption] upper regeneration LLM failed (entry=%s level=%d)",
             entry.id[:8], entry.level,
-        )
-        return False
-    content = (response or "").strip()
-    if not content:
-        LOGGER.warning(
-            "[absorption] empty upper regeneration response (entry=%s)",
-            entry.id[:8],
         )
         return False
 

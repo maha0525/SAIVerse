@@ -49,7 +49,9 @@ from sai_memory.arasuji.storage import (
 
 LOGGER = logging.getLogger(__name__)
 
-#: 1 回の run_band_overflow で走らせる LLM コール (束ね) の上限。
+#: run_band_overflow **1 回の呼び出し**で走らせる LLM コール (束ね) の上限。
+#: generate_chronicle はチャンク確定のたびに呼ぶので、大量編纂の走行全体では
+#: 確認ゲートで承認された dry 予測件数 (max_folds) まで束ねが積み上がる。
 DEFAULT_MAX_CONSOLIDATIONS_PER_RUN = 3
 
 #: レベル 1 以上の各並びの予算 — 上限 (これを超えたら発火)。intent §9。
@@ -73,6 +75,15 @@ def estimate_leaf_chars(kind: str, messages: Sequence, digest_text) -> int:
 
 
 def _max_consolidations_per_run() -> int:
+    """run_band_overflow **1 回の呼び出し**あたりの LLM コール上限 (安全弁)。
+
+    env 名の ``PER_RUN`` は互換のため残しているが、単位は Metabolism の走行
+    ではなく run_band_overflow の呼び出し。generate_chronicle は確定した
+    チャンクごとに呼ぶので、大量編纂 1 走行の束ねの総数は承認済みの dry
+    予測件数 (``max_folds`` の累計) まで届く (2026-09-03 まはー裁定 — 走行
+    全体を 3 回で切ると大量編纂で階層が育たず、挟み込みの目的が果たせない。
+    コストの上限は確認ゲートが担い、この env は 1 回の呼び出しだけを縛る)。
+    """
     import os
     raw = os.getenv("SAIVERSE_CHRONICLE_MAX_BAND_CONSOLIDATIONS_PER_RUN")
     if not raw:
@@ -739,8 +750,13 @@ def _consolidate_fold(
     extraction_failures: Optional[List[str]] = None,
     db_lock: Optional[Any] = None,
     extraction_failures_unrecorded: Optional[List[str]] = None,
+    stats: Optional[dict] = None,
 ) -> Optional[ArasujiEntry]:
-    """畳み 1 件を親ノードに確定する (親 + 子を単一 tx)。"""
+    """畳み 1 件を親ノードに確定する (親 + 子を単一 tx)。
+
+    ``stats`` を渡すと、LLM 呼び出しに到達した時点で ``stats["attempts"]`` を
+    1 進める (成否を問わない — 課金の試行回数を呼び出し元が予算に数えるため)。
+    """
     entries = [i.entry for i in fold.items if i.entry is not None]
     if len(entries) != len(fold.items) or len(entries) < 2:
         return None
@@ -748,22 +764,26 @@ def _consolidate_fold(
     child_ids = [e.id for e in entries]
     origins = _digest_origins(conn, child_ids)
     prompt = _build_consolidation_prompt(entries, origins, conn)
-    from sai_memory.arasuji.generator import _record_llm_usage
+    from sai_memory.arasuji.generator import generate_text_with_empty_retry
+    if stats is not None:
+        # LLM を叩く直前に数える — 失敗・空応答・tx 内再検査での放棄も
+        # 「1 回の試行」として呼び出し元の承認予算を消費する。
+        stats["attempts"] = int(stats.get("attempts", 0)) + 1
     try:
-        response = client.generate(
-            messages=[{"role": "user", "content": prompt}], tools=[],
+        # 空応答は helper が規定回数まで試し直す (usage も試行ごとに記録)。
+        # 使い切った EmptyResponseError も他の失敗と同じくここで None に落ちる
+        # (束ねは次の発火が再計画する)。
+        content = generate_text_with_empty_retry(
+            client,
+            [{"role": "user", "content": prompt}],
+            purpose="band consolidation",
+            persona_id=persona_id,
+            usage_node_type=f"chronicle_level{target_level}",
         )
-        _record_llm_usage(client, persona_id, f"chronicle_level{target_level}")
     except Exception:
         LOGGER.exception(
             "[bands] consolidation LLM failed (level=%d, %d entries)",
             fold.level, len(entries),
-        )
-        return None
-    content = (response or "").strip()
-    if not content:
-        LOGGER.warning(
-            "[bands] empty consolidation response (level=%d)", fold.level,
         )
         return None
 
@@ -875,6 +895,34 @@ def _consolidate_fold(
     return parent
 
 
+def _any_level_over_limit(
+    conn: sqlite3.Connection,
+    excluded_entry_ids: Optional[Set[str]] = None,
+) -> bool:
+    """どこかのレベルの並びが上限を超えている可能性があるか (安価な前検査)。
+
+    :func:`run_band_overflow` はチャンク確定のたびに呼ばれる (executor の
+    after_chunk) ので、何も畳まない回を 1 クエリで抜けるための門。
+    :func:`_load_rows` と同じ絞り込みで未束ねノードの字数をレベル別に合計する
+    が、孤児判定 (被覆範囲の照合) はしない — 孤児は並びから外れる側なので、
+    ここでの合計は実際の判定値 **以上**になる。よってこの検査が False なら
+    どのレベルも発火しない (連鎖は畳みが起きて初めて始まる) — 見落としは
+    無く、誤って True になった回は従来どおりの完全な計画が判定する。
+    """
+    rows = conn.execute(
+        "SELECT level, id, length(COALESCE(content, '')) FROM arasuji_entries "
+        "WHERE is_consolidated = 0 AND origin_track_id IS NULL "
+        "AND (is_incomplete IS NULL OR is_incomplete = 0)"
+    ).fetchall()
+    excluded = excluded_entry_ids or set()
+    totals: Dict[int, int] = {}
+    for level, entry_id, chars in rows:
+        if entry_id in excluded:
+            continue
+        totals[level] = totals.get(level, 0) + int(chars or 0)
+    return any(total > BAND_CHAR_LIMIT for total in totals.values())
+
+
 def run_band_overflow(
     conn: sqlite3.Connection,
     client,
@@ -887,13 +935,19 @@ def run_band_overflow(
     extraction_failures: Optional[List[str]] = None,
     db_lock: Optional[Any] = None,
     extraction_failures_unrecorded: Optional[List[str]] = None,
+    progress_callback: Optional[Callable[[int, int], None]] = None,
+    stats: Optional[dict] = None,
 ) -> int:
     """レベル別の並びを検査し、予算超過の畳みを実行する。
 
     計画は :func:`_plan_folds` — dry 予測 (:func:`plan_band_overflow`) と同じ
     決定論を共有する。実行は 1 畳みごとに DB から並びを読み直す (LLM の実際の
     出力長が見込みとズレても、次の畳みの判定は実際の値で行われる)。
-    1 回の呼び出しの LLM コールは安全弁 (既定 3) まで。
+    1 回の呼び出しの LLM コールは安全弁 (既定 3、
+    ``SAIVERSE_CHRONICLE_MAX_BAND_CONSOLIDATIONS_PER_RUN``) まで — これは
+    **呼び出しごと**の上限で、generate_chronicle は確定したチャンクごとに
+    この関数を呼ぶので、大量編纂の 1 走行では承認済みの dry 予測件数
+    (``max_folds`` の累計) まで束ねが積み上がる。
 
     Args:
         excluded_entry_ids: 圧縮区間として提示コンテキストに表示中の digest
@@ -910,16 +964,33 @@ def run_band_overflow(
             ここへ積む (戻り値の契約を変えずに失敗を呼び出し元へ返す)。
         db_lock: SAIMemoryAdapter の ``_db_lock``。抽出失敗の付箋を書くときに
             使う (ロック外の commit は他所の開いた tx を途中で確定させる)。
+        progress_callback: 畳みが 1 件確定するごとに ``(done, total)`` で呼ぶ
+            (total = この呼び出しで畳む上限)。呼び出し元が画面への進捗と
+            実行台帳の心拍に使う — 1 畳み = LLM 1 コールで、無言のまま長く
+            走ると台帳の期限監視に「観測途絶」と誤認される。
+        stats: 渡すと ``stats["attempts"]`` (LLM 呼び出しに到達した畳みの数 —
+            失敗・空応答・放棄も含む) と ``stats["created"]`` (確定した親の数 =
+            戻り値) を書く。呼び出し元 (generate_chronicle) は承認済み予算を
+            **試行回数**で消費する — 戻り値 (成功数) だけで数えると、失敗する
+            畳みが呼び出しのたびに同じ残り予算で再試行され、プロバイダ障害の
+            間の課金回数が承認件数で縛られない。戻り値の契約は変えない。
 
     Returns:
         作った親ノード数。
     """
     created = 0
+    if stats is not None:
+        stats["attempts"] = 0
+        stats["created"] = 0
     limit = _max_consolidations_per_run()
     if max_folds is not None:
         limit = min(limit, max(0, max_folds))
     while created < limit:
         if cancel_check and cancel_check():
+            break
+        # 安価な前検査 — 編纂の各チャンク確定後にも呼ばれるので、超過の無い
+        # 回は並びの完全な読み直し (隣接ごとの隙間検査) をしないで抜ける。
+        if not _any_level_over_limit(conn, excluded_entry_ids):
             break
         rows = _load_rows(conn, excluded_entry_ids=excluded_entry_ids)
         # 計画時に見えている未統合ノードの id 集合 — tx 内再検査の
@@ -943,8 +1014,22 @@ def run_band_overflow(
             known_ids=known_ids, extraction_failures=extraction_failures,
             db_lock=db_lock,
             extraction_failures_unrecorded=extraction_failures_unrecorded,
+            stats=stats,
         )
         if parent is None:
             break
         created += 1
+        if stats is not None:
+            stats["created"] = created
+        if progress_callback:
+            # 画面へのイベント送出などで失敗しても、確定済みの畳みの数を
+            # 呼び出し元から奪ってはいけない — ここで例外が抜けると戻り値が
+            # 届かず、呼び出し元の累計 (承認済み予算の消化) がずれて、次の
+            # 呼び出しに過大な max_folds が渡る (承認回数の超過)。
+            try:
+                progress_callback(created, limit)
+            except Exception:
+                LOGGER.warning(
+                    "[bands] progress callback failed; continuing", exc_info=True,
+                )
     return created

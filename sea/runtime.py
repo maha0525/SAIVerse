@@ -21,6 +21,7 @@ from sea.mcp_tool_refresh import refresh_mcp_tools_at_head
 from sea.message_stamp import build_generation_stamp, stamp_generation_metadata
 from sea.playbook_models import NodeType, PlaybookSchema, PlaybookValidationError, validate_playbook_graph
 from sea.pulse_context import ExecutionContext, default_lightweight_model, resolve_execution_context
+from sea.runtime_context import WindowFloorUnmetError
 from sea.runtime_context import prepare_context as prepare_context_impl
 from sea.runtime_engine import RuntimeEngine
 from sea.runtime_context import preview_context as preview_context_impl
@@ -178,6 +179,99 @@ class SEARuntime:
         from sea.pulse_context import aspect_from_pulse_type
         _root_aspect = aspect_from_pulse_type(pulse_type)
 
+        # --- 応答前の窓の手当て (読み戻し → 最終防衛ライン) ---
+        # **いかなる永続化よりも前**に置く (Codex 三巡目 #1): この後の MCP
+        # 取得・知覚の検知/消費・建物発言の取り込み・schedule プロンプトの
+        # 記録より先に走らせる。最終防衛ラインが見送った (WindowFloorUnmetError)
+        # Pulse は再試行されるので、その前に schedule プロンプトを書いたり知覚を
+        # 消費したりすると、再試行のたびに同じプロンプトが積まれ・知覚が Playbook
+        # 未実行のまま燃える。二段は帳簿 (session_anchor 行) しか書かず、その
+        # 書き込みは冪等 (次の Pulse が同じ計画を立て直す) なので、ここで走って
+        # よい。非常畳み (§14-3) はここではなく知覚の消費の**後**・LLM 呼び出しの
+        # 前 (下) — 上限との比較は「この Pulse で実際に送る合計」で行うため、
+        # この Pulse で差し込まれる知覚を含めて測る (Codex 四巡目 #4)。
+        def _refuse_pulse(reason: str) -> None:
+            """床を用意できない回の見送り (ERROR + ユーザー Pulse への通知 + 型付き例外)。"""
+            LOGGER.error(
+                "[metabolism] window floor unmet (%s); skipping this pulse without "
+                "running the playbook (persona=%s pulse_type=%s)",
+                reason, getattr(persona, "persona_id", None), pulse_type,
+            )
+            if pulse_type in (None, "user") and event_callback:
+                try:
+                    event_callback({
+                        "type": "error",
+                        "error_code": "window_floor_unmet",
+                        "content": "記憶の窓を用意できなかったため、この応答を見送りました。次に話しかけると再試行します。",
+                    })
+                except Exception:
+                    LOGGER.debug("[metabolism] floor notice emit failed", exc_info=True)
+            raise WindowFloorUnmetError(
+                f"window floor unmet ({reason}) for persona "
+                f"{getattr(persona, 'persona_id', None)} (pulse_type={pulse_type})"
+            )
+
+        # 実行 model の解決に失敗したら床未達として見送る (Codex 八巡目 #1):
+        # None のまま進むと読み戻し・床は persona.model の窓を検証し、Playbook は
+        # 別の model (auto → 軽量) で走りうる — 検証した窓と喋る窓が食い違う。
+        _pre_model_key: Optional[str] = None
+        try:
+            _pre_probe_state: Dict[str, Any] = {}
+            if pulse_type is not None:
+                _pre_probe_state["_pulse_type"] = pulse_type
+            _pre_model_key = resolve_execution_context(
+                persona, None, state=_pre_probe_state,
+            ).model_key
+        except Exception:
+            LOGGER.exception(
+                "[metabolism] execution model resolution failed before the pre-flight"
+            )
+            _refuse_pulse("execution model resolution failed")
+        # persona.model は読み込み時に DB の DEFAULT_MODEL → env SAIVERSE_DEFAULT_MODEL
+        # → 組み込み既定 の順で必ず埋まる (saiverse_manager の load 経路)。ここで
+        # 空・"unknown"・"None" (属性が None のまま文字列化された形) になるのは
+        # その契約が破れた場合だけなので、見送る (Codex 九巡目)。
+        if not _pre_model_key or _pre_model_key in ("unknown", "None"):
+            _refuse_pulse("no execution model")
+        # 読み戻し (arasuji_levels.md §15): 非常畳みの対称。話しかけた時点で
+        # 提示ウィンドウが残す量を下回っていたら、応答より先に畳んだところを
+        # 開き直す (LLM なし・帳簿のみ)。通常は "skip" で素通り。非常畳みより
+        # 先に走るが、非常畳みの退場は会話の行を残す量ぶん守る (f288f003) ので、
+        # ここで確保した行は非常畳みの後も残る (例外: 上限を超えるまたぐ区間
+        # は digest に戻る — 収束はテストで確認済み)。
+        # run_meta_user は user / schedule / auto の共通入口なので、§15-4 の
+        # 「発火は user Pulse の会話開始時のみ」をここで絞る — 自律 Pulse の
+        # 軽量 model に会話用の厚い生ログを開かない。
+        if pulse_type in (None, "user"):
+            try:
+                self.session_lifecycle.maybe_run_window_refill(
+                    persona, building_id, model_key=_pre_model_key,
+                )
+            except Exception:
+                LOGGER.exception("[metabolism] window refill failed")
+        # 最終防衛ライン (docs/issues/window_floor_and_refill_redesign.md): 窓の
+        # 会話の行が残す量を下回ったまま発話させない。読み戻しが何かの理由で
+        # 埋め切れなくても、起点より古い会話があるかぎり生のまま読み足す。
+        # 自律の発話も発話なので全 pulse_type に置く (軽量 model の窓は、その
+        # model に水位が無ければ従来どおり skip)。
+        # 不変条件は発話より優先 (Codex 一巡目 #1): 床を用意できなかった
+        # ("unmet" / 例外) 回は Playbook を走らせない。ユーザー Pulse には
+        # error イベントで**一度だけ**知らせ、自律 Pulse はログだけ。そのうえで
+        # 型付き例外を送出する — [] を返すと PulseController が "completed" と
+        # 記帳し、schedule の occurrence が実行なしで消費される (Codex 二巡目 #2)。
+        # PulseController はこの例外を floor_unmet として畳み (二つ目の error は
+        # 出さない)、ScheduleManager は failed (再試行安全) に分類する。
+        try:
+            floor_status = self.session_lifecycle.ensure_window_floor(
+                persona, building_id, model_key=_pre_model_key,
+            )
+        except Exception:
+            LOGGER.exception("[metabolism] window floor failed")
+            floor_status = "unmet"
+        if floor_status == "unmet":
+            _refuse_pulse("floor could not be established")
+
+
         # --- per_persona MCP ツール一覧の取得 (Pulse 頭) ---
         # ツール一覧の真実はサーバー側にしか無く、証言できるのは本人の鍵で
         # 張った生きた接続だけ (docs/intent/mcp_addon_integration.md §I)。
@@ -278,33 +372,16 @@ class SEARuntime:
         # 非常畳み (arasuji_levels.md §14-3): 話しかけた時点で提示ウィンドウが
         # 高水位を既に超過しているイレギュラー (休眠 model の復帰等) は、応答
         # より先に畳んで呼び出し失敗の連鎖を断つ。通常は "skip" で素通り。
-        _pre_model_key: Optional[str] = None
+        # 位置は知覚の消費の**後**・LLM 呼び出しの前 — 判定は「この Pulse で
+        # 実際に送る合計」(この Pulse で差し込まれる知覚を含む) で行う
+        # (Codex 四巡目 #4)。読み戻し・床 (上) が確保した会話の行は、退場計画の
+        # 保護範囲 (残す量、行だけで数える) の内側なので畳まれない。
         try:
-            _pre_probe_state: Dict[str, Any] = {}
-            if pulse_type is not None:
-                _pre_probe_state["_pulse_type"] = pulse_type
-            _pre_model_key = resolve_execution_context(
-                persona, None, state=_pre_probe_state,
-            ).model_key
             self.session_lifecycle.maybe_run_emergency_precompaction(
                 persona, building_id, event_callback, model_key=_pre_model_key,
             )
         except Exception:
             LOGGER.exception("[metabolism] Emergency pre-compaction failed")
-        # 読み戻し (arasuji_levels.md §15): 非常畳みの対称。話しかけた時点で
-        # 提示ウィンドウが残す量を下回っていたら、応答より先に畳んだところを
-        # 開き直す (LLM なし・帳簿のみ)。通常は "skip" で素通り。
-        # run_meta_user は user / schedule / auto の共通入口なので、§15-4 の
-        # 「発火は user Pulse の会話開始時のみ」をここで絞る — 自律 Pulse の
-        # 軽量 model に会話用の厚い生ログを開かない。
-        if pulse_type in (None, "user"):
-            try:
-                self.session_lifecycle.maybe_run_window_refill(
-                    persona, building_id, model_key=_pre_model_key,
-                )
-            except Exception:
-                LOGGER.exception("[metabolism] window refill failed")
-
         result = self._run_playbook(
             playbook, persona, building_id, user_input,
             # auto_mode = 「応答ループにユーザーが居ない Pulse か」。run_meta_user は

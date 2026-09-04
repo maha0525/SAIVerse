@@ -69,6 +69,12 @@
   | `plan_tail_rewind` の `est_material` | 編纂の LLM コール見込み = **材料の量** | 据え置き (計算式)。ただし走査する列が合計側に変わったぶん、ブロックも本走行の `material_message_chars` と同じ扱い (機構名義の一行へ縮む) で寄与する |
   | `plan_eviction` 内部の `material_message_chars` (U 到達判定) | 一次あらすじの標準被覆 U に達したか = **材料の量** | 据え置き (2026-08-29 裁定のまま) |
 
+## 追記 (2026-09-03): 統一が保護範囲にまで及んでいた — 訂正済み
+
+上の表で「置き換え」とした箇所のうち、**残す量 (target) と比べる箇所は行き過ぎ**だった。本 issue の裁定「水位 = 実際に送る中身」は上限 (発火) の意味では正しいが、残す量には「畳んだ後に会話の行を残す保護範囲」というもう一つの意味があり、そちらまで合計で測ったため、巨大な部屋の様子が末尾に乗った回に保護範囲がブロックで埋まり、会話の行がほぼ全部畳まれた (本番でペルソナが直近の記憶を失う事故)。読み戻しも合計で「足りている」と読んで埋め戻さなかった。
+
+訂正 (2026-09-03 まはー裁定): **上限 = 合計、残す量 = 会話の行だけ**。`_protection_boundary` / `_plan_window_refill` / `_refold_raw_view_plan` / 手動整理の門 / 印戻し後の早期完了 / 補修の退場境界は会話の行だけで測り直した。上の表の `_manual_compaction_status` と `_refold_raw_view_plan` と早期完了の行、`plan_tail_rewind` の退場境界 (`remaining`) は、この追記が上書きする。経緯・三つの原因・再発防止は [protection_quota_consumed_by_perception_blocks.md](../protection_quota_consumed_by_perception_blocks.md)。
+
 ## 範囲外 (別途扱う — 2026-09-02 まはー指示)
 
 供給側の太さは本 issue の範囲外として別途何とかする:

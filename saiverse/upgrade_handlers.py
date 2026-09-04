@@ -1005,4 +1005,21 @@ HANDLERS: List[UpgradeHandler] = [
         run=_no_op_ai_upgrade,
         description="Empty release edge 0.3.5 -> 0.3.6 (code-only hotfix, no data migration).",
     ),
+    # ---- v0.3.7: 編纂ジョブの台帳心拍と unknown の照合 (コード修正のみ) ----
+    UpgradeHandler(
+        name="city_noop_v0_3_7",
+        scope="city",
+        from_version="0.3.6",
+        to_version="0.3.7",
+        run=_no_op_city_upgrade,
+        description="Empty release edge 0.3.6 -> 0.3.7 (code-only hotfix, no data migration).",
+    ),
+    UpgradeHandler(
+        name="ai_noop_v0_3_7",
+        scope="ai",
+        from_version="0.3.6",
+        to_version="0.3.7",
+        run=_no_op_ai_upgrade,
+        description="Empty release edge 0.3.6 -> 0.3.7 (code-only hotfix, no data migration).",
+    ),
 ]

@@ -180,6 +180,19 @@ def _pinned_history_from_anchor(
     return recent
 
 
+class WindowFloorUnmetError(RuntimeError):
+    """発話直前の最終防衛ライン (会話の行 ≥ 残す量) を用意できなかった。
+
+    :meth:`~sea.session_lifecycle.SessionLifecycle.ensure_window_floor` が
+    "unmet" を返した回に ``run_meta_user`` が送出する — Playbook は走っておらず
+    副作用ゼロ。``[]`` を返すと PulseController が "completed" と記帳し、
+    schedule の occurrence が実行なしで消費されるため、型付き例外で失敗として
+    伝える (PulseController は ``runtime_outcome="floor_unmet"``、ScheduleManager
+    は failed = 再試行安全に分類する。Codex 二巡目 #2)。ユーザーへの通知は
+    ``run_meta_user`` が送出前に一度だけ出す。
+    """
+
+
 class PersonaVoiceWithoutHistoryError(RuntimeError):
     """ペルソナ名義の稼働なのに会話履歴が無い状態で LLM を走らせようとした。
 

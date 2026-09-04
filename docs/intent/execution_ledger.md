@@ -230,7 +230,17 @@ CREATE TABLE execution_outbox (
 1. ~~スキーマの列構成（特に RESULT_JSON に何を標準で入れるか）~~ → **確定 (2026-07-19、W1)**: RESULT_JSON 標準 = `{kind, committed, scope, spells:{attempted,succeeded,failed}, warnings}` + kind 固有 (`reaction` = on_event / `episode_ref` = post_session)。照合 (#5) と呼び出し側読み出しに足る最小。
 2. `unknown` の UI 表出（ライフビューに出すか、デバッグパネル止まりか） — 未確定 (観測面 `list_unknown` / `list_dead` は実装済み、UI 配置は保留)
 3. 保持期間の既定値（30 日仮置き） — 未確定 (prune 未実装)
-4. ~~`prepared` の回収規則・実行期限の既定値（kind ごと）~~ → **確定 (2026-07-19、W1)**: on_event / post_session = 120 秒経過で refire (`resume_execution_id`)、day_open / day_close / post_conversation = 1800 秒経過で `mark_failed("expired")`。running 期限は全 kind 共通 3600 秒仮置き。手動モード persona は「行動を生む」refire をスキップ (掃除は止めない)。実装 = `execution_ledger_wiring._collect_prepared_judgments`。
+4. ~~`prepared` の回収規則・実行期限の既定値（kind ごと）~~ → **確定 (2026-07-19、W1)**: on_event / post_session = 120 秒経過で refire (`resume_execution_id`)、day_open / day_close / post_conversation = 1800 秒経過で `mark_failed("expired")`。running 期限は全 kind 共通 3600 秒仮置き (ただし `metabolism.run` は心拍で期限を延ばす — 下の 11.1)。手動モード persona は「行動を生む」refire をスキップ (掃除は止めない)。実装 = `execution_ledger_wiring._collect_prepared_judgments`。
+
+### 11.1 metabolism.run の期限と unknown の規則 (2026-09-03)
+
+§9-4 の「unknown 時の安全側規則は kind ごとに一度ずつ設計判断する」を、編纂 (`metabolism.run`) について決めた。
+
+- **心拍 = UI に出している進捗そのもの**。編纂ジョブはチャンク 1 件 / 吸収 1 件 / 束ね 1 畳みごとに画面へ進捗イベントを流している。同じ場所から `touch_running` (UPDATED_AT を今に進める) を呼ぶ。回復 tick の 1 時間期限 (§2.4 #3) は UPDATED_AT で測るので、期限が効くのは**本当に無言になった実行だけ**になる。台帳が壊れていても心拍は本体を止めない (警告 1 回)。
+- **unknown は次の claim で照合して閉じる**。この kind の結果は arasuji テーブルで観測でき、確定済みチャンクは source_ids で冪等スキップされる — 再実行しても確定済みの分に LLM は再発火しない。だから `claim_execution` が unknown に当たったら `reconcile_unknown` で completed に閉じ (キーは `{key}#unknown-{id先頭8字}` に退避、failed の退避と同じ形。照合時刻 `reconciled_at` は台帳が仮想クロックで刻む)、同じキーで新しい claim を取って走る。§2.5「LLM を自動再実行しない」には反しない — 再実行されるのは未確定の残りだけで、それは前回も走っていない分である。照合そのものが失敗したら (DB エラー / 未配送 outbox の関所) その回は `deferred` で見送る — claim なしの追跡外で走らせない。
+- **照合が生きた走行と競合しない根拠**: `generate_chronicle` の本番入口は 2 つで、どちらも同一ペルソナの Beat ロック (`hold_beat`) の内側にある — 被覆補修 `_coverage_repair_status` (`purpose="coverage_repair"`) と、`run_metabolism` (`purpose="metabolism"`) を経由する `_run_metabolism_locked` (手動整理 `run_manual_compaction` → `_manual_compaction_status` → `run_metabolism`、自動 Metabolism、冷えた窓の先回りも全部ここを通る)。だから 1 プロセス内では同一ペルソナの編纂は直列で、claim が unknown を見た時点でその走行は同じプロセスに生きていない。プロセスを跨ぐ競合 (別プロセスが同じ DB で走る) は、起動時 sweep (§2.4 #4) が既に前提にしている「同一 DB を共有する他プロセスの不在」(runtime-marker) に乗る — 本節が新たに保証を足すものではない。
+- **回復 tick の書き換えは「いまも running」が条件**: `recover_stale_running` は候補を読んだ後、行ごとに `STATUS == running` (期限監視なら `UPDATED_AT <= 期限` も) を WHERE に含めた UPDATE で unknown へ落とし、実際に書き換えた行だけを返す。world DB は WAL なので読みと書きの間に走行が終わる (applied / completed) ことがあり、主キーだけの UPDATE だとその終端を unknown で上書きしてキーが退避されないまま残る — 上の罠がそのまま戻ってくる。候補の SELECT と条件付き UPDATE は同じ Session だが、pysqlite の既定 (SQLAlchemy の sqlite 方言もこれに乗る) は DML の直前まで BEGIN を発行しないので、SELECT は読みスナップショットを保持せず、WAL の snapshot 競合 (SQLITE_BUSY_SNAPSHOT) で tick 全体が転ぶ経路は無い (Codex レビュー 2026-09-03 の指摘を検算して却下)。
+- **塞いだ罠**: 56,000 通のログをインポートしたユーザーの一括編纂が 1 時間を超え、心拍が無いため生きたまま unknown に落とされた。終了時の `mark_failed` は unknown→failed が不正遷移で弾かれ、行は unknown のまま残る。チャンクは古い順に処理するので鍵 (最新の未処理メッセージ ID) は再試行しても変わらず、再起動を跨いでも `window_claimed` (「別のあらすじ処理が同じ範囲を処理中または処理済みです」) が永久に返り続けた。心拍が再発を防ぎ、照合が既にはまった環境を救う。
 
 解決済み（v0.3 後続）: ~~Beat ロックの実装点~~ → 柱 2（model 別 Session）・S4（Stelis）と合流した統合工事 intent [`beat_execution_context.md`](beat_execution_context.md) として起草（2026-07-16）。Beat ロックと関所の配置は同 intent §3.4。
 解決済み（v0.2）: ~~回復 tick の住処~~ → 独立の世界レベル定期ジョブ（§2.4。watchdog 相乗りは自律 OFF ペルソナへの配送が死ぬため不採用）。~~配送遅延の時系列~~ → Pulse 前 flush の必須関所化で構造的に消滅（§2.2 / 不変条件 8）。

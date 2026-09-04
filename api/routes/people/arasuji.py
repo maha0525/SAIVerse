@@ -134,6 +134,7 @@ def estimate_chronicle_cost(
         # へ潰すと、表示が全域の数を言い、実走 (repair) 側の fail-closed と
         # 食い違う。
         compile_before = None
+        persona = manager.personas.get(persona_id) if manager else None
         lifecycle = getattr(getattr(manager, "sea_runtime", None), "session_lifecycle", None)
         if lifecycle is not None:
             from sea.coverage_repair import (
@@ -141,17 +142,22 @@ def estimate_chronicle_cost(
                 resolve_compile_ceiling,
             )
             try:
-                ceiling = resolve_compile_ceiling(lifecycle, persona_id, conn)
+                # 見積もりは行を書かない (persist_advance=False)。候補は実走と
+                # 同じ (温かい記録 ∪ 現在モデルの記録) — 表示と実走が違う数を
+                # 言わない。
+                ceiling = resolve_compile_ceiling(
+                    lifecycle, persona_id, conn,
+                    persona=persona, persist_advance=False,
+                )
             except CeilingResolutionError as exc:
                 raise HTTPException(
                     status_code=500,
-                    detail=f"編纂範囲の上端 (止め線) を解決できませんでした: {exc}",
+                    detail=f"要約してよい上限を解決できませんでした: {exc}",
                 )
             if ceiling is not None:
                 compile_before = (ceiling.created_at, ceiling.rowid)
 
         from saiverse.model_defaults import BUILTIN_DEFAULT_LITE_MODEL
-        persona = manager.personas.get(persona_id) if manager else None
         model_name = (getattr(persona, "memory_weave_model", None)
                       or os.getenv("MEMORY_WEAVE_MODEL", BUILTIN_DEFAULT_LITE_MODEL))
 
@@ -1041,6 +1047,14 @@ _HEAD_REBUILD_WARNING = (
 )
 
 
+def _join_failure_text(generic: str, reason: Optional[str]) -> str:
+    """ジョブの失敗文面 = 従来の一文 + generate_chronicle が掴んだ実際の理由。"""
+    reason = (reason or "").strip()
+    if not reason:
+        return generic
+    return f"{generic} {reason}"
+
+
 def _run_chronicle_generation(
     job_id: str,
     persona_id: str,
@@ -1172,11 +1186,28 @@ def _run_chronicle_generation(
                 error_code="chronicle_disabled",
             )
         else:  # "failed" / "unavailable"
-            _update_job(
-                job_id, status="failed",
-                error="Chronicle生成が完了しませんでした。畳みは適用されていないため、再実行で再試行できます。",
-                error_code=status,
+            generic = "Chronicle生成が完了しませんでした。畳みは適用されていないため、再実行で再試行できます。"
+            failure = (
+                lifecycle.pop_last_chronicle_failure(persona_id)
+                if status == "failed" else None
             )
+            if failure:
+                # generate_chronicle が掴んだ実際の理由 (LLMError の error_code /
+                # user_message / 落ちたチャンクの message_ids) をジョブへ写す —
+                # UI の empty_response 等の案内と「該当メッセージを表示」が効く。
+                _update_job(
+                    job_id, status="failed",
+                    error=_join_failure_text(generic, failure.get("error")),
+                    error_code=failure.get("error_code") or status,
+                    error_detail=failure.get("error_detail"),
+                    error_meta=failure.get("error_meta"),
+                )
+            else:
+                _update_job(
+                    job_id, status="failed",
+                    error=generic,
+                    error_code=status,
+                )
     except Exception as e:
         LOGGER.exception(f"Chronicle generation failed: {e}")
         _update_job(
@@ -1205,6 +1236,7 @@ def _count_repair_targets(persona, lifecycle) -> int:
         init_arasuji_tables(adapter.conn)
     ceiling = resolve_compile_ceiling(
         lifecycle, getattr(persona, "persona_id", None), adapter.conn,
+        persona=persona, persist_advance=False,
     )
     estimate = estimate_chronicle_generation_cost(
         adapter.conn,
@@ -1310,11 +1342,30 @@ def _run_coverage_repair_job(
                 error_code="chronicle_disabled",
             )
         else:  # "failed"
-            _update_job(
-                job_id, status="failed",
-                error="あらすじの生成が完了しませんでした。編纂済みの分は保存されており、再実行で続きから進みます。",
-                error_code=status,
+            # 「編纂済みの分は保存されており、再実行で続きから進みます」は補修
+            # 経路では真 (確定済みチャンクは source_ids で冪等スキップ) なので、
+            # 実際の理由が取れても残す。
+            generic = "あらすじの生成が完了しませんでした。編纂済みの分は保存されており、再実行で続きから進みます。"
+            failure = (
+                lifecycle.pop_last_chronicle_failure(
+                    getattr(persona, "persona_id", None)
+                )
+                if status == "failed" else None
             )
+            if failure:
+                _update_job(
+                    job_id, status="failed",
+                    error=_join_failure_text(generic, failure.get("error")),
+                    error_code=failure.get("error_code") or status,
+                    error_detail=failure.get("error_detail"),
+                    error_meta=failure.get("error_meta"),
+                )
+            else:
+                _update_job(
+                    job_id, status="failed",
+                    error=generic,
+                    error_code=status,
+                )
     except Exception as e:
         from sea.coverage_repair import CeilingResolutionError
         if isinstance(e, CeilingResolutionError):

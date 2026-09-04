@@ -324,13 +324,6 @@ def test_changed_package_lock_demands_the_update_be_finished(tmp_path: Path) -> 
     assert update_engine.check_update_complete(project) == update_engine.CHECK_NEEDS_FINISH
 
 
-def test_legacy_bare_version_marker_demands_the_update_be_finished(tmp_path: Path) -> None:
-    """The first marker format recorded VERSION only; one finishing pass fixes it."""
-    project = _make_project(tmp_path)
-    update_engine.marker_path(project).write_text("0.3.0\n", encoding="utf-8")
-    assert update_engine.check_update_complete(project) == update_engine.CHECK_NEEDS_FINISH
-
-
 def test_no_marker_with_complete_packages_records_and_starts(tmp_path: Path) -> None:
     """A pre-marker install whose packages are fine must not be sent updating."""
     project = _make_project(tmp_path)
@@ -389,6 +382,149 @@ def test_no_marker_without_node_modules_demands_the_update_be_finished(tmp_path:
     ):
         assert update_engine.check_update_complete(project) == update_engine.CHECK_NEEDS_FINISH
     assert not update_engine.marker_path(project).exists()
+
+
+# --- a marker that says nothing usable is judged like no marker at all --------
+#
+# The first marker format was a bare VERSION string. Reading it as "a record that
+# does not match" sent a fully updated checkout into the full update (git pull +
+# world snapshot + pip + npm), which a 76 GB world could not finish
+# (docs/issues/archive/update_marker_format_change_demands_full_update.md). An
+# unreadable marker must instead fall through to the same direct verification a
+# missing marker gets, and be rewritten in the current format when that passes.
+
+
+_UNREADABLE_MARKERS = {
+    "legacy bare version": "0.3.0\n",
+    "damaged json": "{not json\n",
+    "json array": "[1, 2]\n",
+    "json string": '"0.3.2"\n',
+}
+
+
+def test_legacy_bare_version_marker_with_complete_packages_is_rewritten_and_starts(
+    tmp_path: Path,
+) -> None:
+    """The defect that stranded the owner's machine: the row that must be READY."""
+    project = _make_project(tmp_path)
+    update_engine.marker_path(project).write_text("0.3.0\n", encoding="utf-8")
+    with patch.object(
+        update_engine,
+        "missing_dependencies",
+        return_value=update_engine.DependencyReport([], [], False),
+    ):
+        assert update_engine.check_update_complete(project) == update_engine.CHECK_READY
+    # Rewritten in the current format: the next start takes the cheap comparison.
+    marker = update_engine.read_completion_marker(project)
+    assert marker == update_engine.completion_fingerprint(project)
+
+
+def test_legacy_bare_version_marker_with_missing_packages_demands_the_update_be_finished(
+    tmp_path: Path,
+) -> None:
+    """The safe side is kept: an old marker over missing packages still updates."""
+    project = _make_project(tmp_path)
+    update_engine.marker_path(project).write_text("0.3.0\n", encoding="utf-8")
+    with patch.object(
+        update_engine,
+        "missing_dependencies",
+        return_value=update_engine.DependencyReport(["mcp", "feedparser"], [], False),
+    ):
+        assert update_engine.check_update_complete(project) == update_engine.CHECK_NEEDS_FINISH
+    # Not rewritten: nothing was verified complete.
+    assert update_engine.marker_path(project).read_text(encoding="utf-8") == "0.3.0\n"
+
+
+def test_legacy_bare_version_marker_without_node_modules_demands_the_update_be_finished(
+    tmp_path: Path,
+) -> None:
+    project = _make_project(tmp_path)
+    update_engine.marker_path(project).write_text("0.3.0\n", encoding="utf-8")
+    (project / "frontend" / "node_modules").rmdir()
+    with patch.object(
+        update_engine,
+        "missing_dependencies",
+        return_value=update_engine.DependencyReport([], [], False),
+    ):
+        assert update_engine.check_update_complete(project) == update_engine.CHECK_NEEDS_FINISH
+    assert update_engine.marker_path(project).read_text(encoding="utf-8") == "0.3.0\n"
+
+
+@pytest.mark.parametrize("content", list(_UNREADABLE_MARKERS.values()), ids=list(_UNREADABLE_MARKERS))
+def test_unreadable_marker_reads_back_as_an_empty_record_not_as_no_marker(
+    tmp_path: Path, content: str
+) -> None:
+    """The reader keeps its contract: {} for a file that says nothing, None for no file."""
+    project = _make_project(tmp_path)
+    update_engine.marker_path(project).write_text(content, encoding="utf-8")
+    assert update_engine.read_completion_marker(project) == {}
+    update_engine.marker_path(project).unlink()
+    assert update_engine.read_completion_marker(project) is None
+
+
+@pytest.mark.parametrize("content", list(_UNREADABLE_MARKERS.values()), ids=list(_UNREADABLE_MARKERS))
+def test_unreadable_marker_with_complete_packages_is_rewritten_and_starts(
+    tmp_path: Path, content: str
+) -> None:
+    """Damaged JSON and non-object documents take the same road as the bare string."""
+    project = _make_project(tmp_path)
+    update_engine.marker_path(project).write_text(content, encoding="utf-8")
+    with patch.object(
+        update_engine,
+        "missing_dependencies",
+        return_value=update_engine.DependencyReport([], [], False),
+    ):
+        assert update_engine.check_update_complete(project) == update_engine.CHECK_READY
+    assert update_engine.read_completion_marker(project) == update_engine.completion_fingerprint(project)
+
+
+@pytest.mark.parametrize("content", list(_UNREADABLE_MARKERS.values()), ids=list(_UNREADABLE_MARKERS))
+def test_unreadable_marker_with_missing_packages_demands_the_update_be_finished(
+    tmp_path: Path, content: str
+) -> None:
+    project = _make_project(tmp_path)
+    update_engine.marker_path(project).write_text(content, encoding="utf-8")
+    with patch.object(
+        update_engine,
+        "missing_dependencies",
+        return_value=update_engine.DependencyReport(["mcp"], [], False),
+    ):
+        assert update_engine.check_update_complete(project) == update_engine.CHECK_NEEDS_FINISH
+    assert update_engine.marker_path(project).read_text(encoding="utf-8") == content
+
+
+def test_unreadable_marker_is_logged_before_the_direct_verification(tmp_path: Path, caplog) -> None:  # type: ignore[no-untyped-def]
+    """The log must say why a marker was ignored, so the next reader is not puzzled."""
+    project = _make_project(tmp_path)
+    update_engine.marker_path(project).write_text("0.3.0\n", encoding="utf-8")
+    with caplog.at_level("INFO", logger="saiverse.update"), patch.object(
+        update_engine,
+        "missing_dependencies",
+        return_value=update_engine.DependencyReport([], [], False),
+    ):
+        update_engine.check_update_complete(project)
+    assert any("old or unreadable format" in record.getMessage() for record in caplog.records)
+
+
+def test_a_valid_but_stale_json_marker_still_demands_the_update_be_finished(
+    tmp_path: Path, caplog
+) -> None:  # type: ignore[no-untyped-def]
+    """Only the unreadable marker changed roads; a real mismatch keeps its warning."""
+    project = _make_project(tmp_path)
+    update_engine.marker_path(project).write_text(
+        json.dumps({"version": "0.2.30"}), encoding="utf-8"
+    )
+    with caplog.at_level("WARNING", logger="saiverse.update"), patch.object(
+        update_engine,
+        "missing_dependencies",
+        return_value=update_engine.DependencyReport([], [], False),
+    ):
+        assert update_engine.check_update_complete(project) == update_engine.CHECK_NEEDS_FINISH
+    assert any(
+        "Update was interrupted" in record.getMessage() and "0.2.30" in record.getMessage()
+        for record in caplog.records
+    )
+    assert _recorded_version(project) == "0.2.30"
 
 
 def test_unverifiable_packages_start_without_recording_a_version(tmp_path: Path) -> None:

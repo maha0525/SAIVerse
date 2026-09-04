@@ -154,6 +154,25 @@
     background-color: rgba(250, 82, 82, 0.1);
 }
 
+.threadTitle {
+    font-size: 0.9rem;
+    font-weight: 500;
+    color: #e0e0e0;
+    margin-bottom: 2px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.threadStats {
+    font-size: 0.75rem;
+    color: #888;
+    margin-bottom: 2px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
 .threadPreview {
 
     font-size: 0.85rem;
@@ -936,8 +955,13 @@
     color: #2563eb;
 }
 
-:global([data-theme="light"]) .threadPreview {
+:global([data-theme="light"]) .threadPreview,
+:global([data-theme="light"]) .threadStats {
     color: #64748b;
+}
+
+:global([data-theme="light"]) .threadTitle {
+    color: #1f2937;
 }
 
 :global([data-theme="light"]) .deleteThreadBtn {

@@ -24,6 +24,9 @@ from sai_memory.memory.storage import (
     get_messages_last,
     get_messages_paginated,
     get_or_create_thread,
+    get_thread_stats,
+    get_thread_titles,
+    set_thread_title,
     init_db,
     compose_message_content,
     replace_message_embeddings,
@@ -1026,6 +1029,7 @@ class SAIMemoryAdapter:
         required_line_roles: Optional[List[str]] = None,
         required_scopes: Optional[List[str]] = None,
         pulse_id: Optional[str] = None,
+        raise_on_error: bool = False,
     ) -> List[dict]:
         """Get persona messages from anchor message onwards.
 
@@ -1043,6 +1047,8 @@ class SAIMemoryAdapter:
                 payloads = [self._payload_from_message_locked(msg, viewing_thread_id=thread_id) for msg in rows]
         except Exception as exc:
             LOGGER.warning("Failed to fetch persona messages from anchor %s: %s", anchor_message_id, exc)
+            if raise_on_error:
+                raise
             return []
 
         selected: List[dict] = []
@@ -1067,6 +1073,7 @@ class SAIMemoryAdapter:
         required_tags: Optional[List[str]] = None,
         required_line_roles: Optional[List[str]] = None,
         required_scopes: Optional[List[str]] = None,
+        raise_on_error: bool = False,
     ) -> List[dict]:
         """anchor より正典順で前のメッセージを遡って返す (読み戻し §15 の材料読み)。
 
@@ -1074,6 +1081,11 @@ class SAIMemoryAdapter:
         合計が ``max_chars`` に達するまで新しい側から遡り、時系列昇順で返す。
         フィルタは提示ウィンドウの読み (from_anchor) と同じ規則で適用する —
         でないと読み戻しの文字勘定が提示の勘定とズレる。
+
+        ``raise_on_error=True`` は DB の読み失敗を例外で伝える (既定は WARNING +
+        空)。最終防衛ライン (SessionLifecycle.ensure_window_floor) はこちらを
+        使う — 読めなかったことを「古い会話が無い」と読むと、ペルソナが残す量を
+        割ったまま喋る (Codex 二巡目 #1)。
         """
         if not self._ready or max_chars <= 0:
             return []
@@ -1112,6 +1124,8 @@ class SAIMemoryAdapter:
                 "Failed to fetch persona messages before anchor %s: %s",
                 anchor_message_id, exc,
             )
+            if raise_on_error:
+                raise
             return []
         selected.reverse()
         return selected
@@ -1215,11 +1229,16 @@ class SAIMemoryAdapter:
             return []
         try:
             with self._db_lock:
-                cur = self.conn.execute("SELECT id FROM threads ORDER BY id ASC")
-                rows = cur.fetchall()
+                titles = get_thread_titles(self.conn)
+                # 件数・期間は集計クエリ 1 回でまとめて取る (スレッド数に比例した
+                # COUNT を回さない)。メッセージ 0 件のスレッドは載らない。
+                stats = get_thread_stats(self.conn)
                 active_suffix = self._active_persona_suffix()
                 summaries: List[Dict[str, Any]] = []
-                for (thread_id,) in rows:
+                for thread_id, title in titles.items():
+                    message_count, first_created_at, last_created_at = stats.get(
+                        thread_id, (0, None, None)
+                    )
                     first_messages = get_messages_paginated(self.conn, thread_id, page=0, page_size=1)
                     preview = ""
                     first_id: Optional[str] = None
@@ -1238,8 +1257,12 @@ class SAIMemoryAdapter:
                     summary: Dict[str, Any] = {
                         "thread_id": thread_id,
                         "suffix": suffix,
+                        "title": title or None,
                         "preview": preview.strip(),
                         "first_message_id": first_id,
+                        "message_count": message_count,
+                        "first_created_at": first_created_at,
+                        "last_created_at": last_created_at,
                         "active": bool(active_suffix and suffix == active_suffix),
                         "is_stelis": is_stelis,
                     }
@@ -1255,6 +1278,24 @@ class SAIMemoryAdapter:
         except Exception as exc:
             LOGGER.warning("Failed to list threads for persona %s: %s", self.persona_id, exc)
             return []
+
+    def set_thread_title(self, thread_suffix: str, title: Optional[str]) -> None:
+        """スレッドの表示名を書く。
+
+        ``thread_suffix`` は :meth:`append_persona_message` の ``thread_suffix`` と
+        同じもので、完全な id への組み立ても同じ :meth:`_thread_id` を通す —
+        二つの入口で解決規則を変えない (片方だけが「もう prefix が付いている」を
+        特別扱いすると、同じ文字列を渡したのに別のスレッドへ書く)。空の title は
+        無視する (取り込み元に題名が無い会話は suffix 表示のまま)。
+        """
+        if not self._ready or not title or not str(title).strip():
+            return
+        thread_id = self._thread_id(thread_suffix=thread_suffix)
+        try:
+            with self._db_lock:
+                set_thread_title(self.conn, thread_id, title)
+        except Exception as exc:
+            LOGGER.warning("Failed to set title for thread %s: %s", thread_id, exc)
 
     def get_thread_messages(self, thread_id: str, page: int = 0, page_size: int = 100) -> List[dict]:
         if not self._ready:

@@ -116,6 +116,9 @@ def _init_schema(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_thread_created ON messages(thread_id, created_at)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_resource_created ON messages(resource_id, created_at)")
     _ensure_column(conn, "messages", "metadata", "TEXT")
+    # title: 人が読むためのスレッド名 (2026-09-03)。ChatGPT 等の取り込み元が
+    # 持つ会話タイトルを保存する。無ければ NULL のままで、UI は suffix を出す。
+    _ensure_column(conn, "threads", "title", "TEXT")
 
     # 7-layer storage model (Intent A v0.14, Intent B v0.11) — message metadata
     # for line/scope-based context construction.
@@ -395,6 +398,46 @@ def get_thread_overview(conn: sqlite3.Connection, thread_id: str) -> Optional[st
     cur = conn.execute("SELECT overview FROM threads WHERE id=?", (thread_id,))
     row = cur.fetchone()
     return row[0] if row and row[0] is not None else None
+
+
+def set_thread_title(conn: sqlite3.Connection, thread_id: str, title: Optional[str]) -> None:
+    """スレッドの表示名を書く。空文字・None なら何もしない (既存の名前も消さない)。"""
+    if not title or not str(title).strip():
+        return
+    conn.execute("UPDATE threads SET title=? WHERE id=?", (str(title).strip(), thread_id))
+    conn.commit()
+
+
+def get_thread_titles(conn: sqlite3.Connection) -> Dict[str, Optional[str]]:
+    """全スレッドの ``{thread_id: title}`` (title は無ければ None)。id 昇順。"""
+    cur = conn.execute("SELECT id, title FROM threads ORDER BY id ASC")
+    return {row[0]: row[1] for row in cur.fetchall()}
+
+
+def get_thread_stats(
+    conn: sqlite3.Connection,
+) -> Dict[str, Tuple[int, Optional[int], Optional[int]]]:
+    """全スレッドの ``{thread_id: (message_count, first_created_at, last_created_at)}``。
+
+    一覧表示用に集計クエリ 1 回で取る (スレッドごとに COUNT を回さない)。
+    メッセージが 1 件も無いスレッドは載らないので、呼び出し側は ``(0, None, None)``
+    を既定にして引く。数える行は ``SAIMemoryAdapter.count_thread_messages`` と
+    同じ (``scope='discardable'`` の行は除く) — 一覧の件数とメッセージ一覧の
+    総数が食い違わないようにするため。
+    """
+    cur = conn.execute(
+        "SELECT thread_id, COUNT(*), MIN(created_at), MAX(created_at) "
+        "FROM messages WHERE (scope IS NULL OR scope != 'discardable') "
+        "GROUP BY thread_id"
+    )
+    stats: Dict[str, Tuple[int, Optional[int], Optional[int]]] = {}
+    for thread_id, count, first, last in cur.fetchall():
+        stats[thread_id] = (
+            int(count or 0),
+            int(first) if first is not None else None,
+            int(last) if last is not None else None,
+        )
+    return stats
 
 
 @dataclass

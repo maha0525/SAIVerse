@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, List, Literal, Optional
 from llm_clients.exceptions import LLMError
 from sea.beat_gate import BeatGateClosedError
 from sea.cancellation import CancellationToken, ExecutionCancelledException
+from sea.runtime_context import WindowFloorUnmetError
 
 if TYPE_CHECKING:
     from sea.runtime import SEARuntime
@@ -118,6 +119,7 @@ class ExecutionRequest:
     # - dispatch_action: submit() が action 決定箇所で記入
     #   ("execute" / "queued" / "skipped")
     # - runtime_outcome: _execute_unlocked() が各経路で記入
+    #   ("completed" / "gate_closed" / "cancelled" / "floor_unmet" / "error")
     #   ("completed" / "gate_closed" / "cancelled" / "error")
     dispatch_action: Optional[str] = None
     runtime_outcome: Optional[str] = None
@@ -508,6 +510,19 @@ class PulseController:
             # 途中まで喋ってから止められた回は、言いかけた本文と中断の通告を
             # ``sea/runtime_llm.py`` の停止の後片付けで書いている (そちらは例外に
             # 包まれる前を通るので確実に届く)。
+            return []
+        except WindowFloorUnmetError as e:
+            # 最終防衛ライン未達 (arasuji_levels.md §15-5): Playbook は走って
+            # おらず副作用ゼロ。user への error イベントは run_meta_user が
+            # 送出前に一度だけ出しているので、ここで二つ目を出さない。
+            # "completed" と記帳しない — schedule の occurrence が実行なしで
+            # 消費される。ScheduleManager は floor_unmet を failed (再試行安全)
+            # に分類する (Codex 二巡目 #2)。
+            request.runtime_outcome = "floor_unmet"
+            LOGGER.error(
+                "[PulseController] window floor unmet; %s pulse for persona %s "
+                "did not run: %s", request.type, persona_id, e,
+            )
             return []
         except LLMError:
             # Propagate LLM errors to the caller for frontend display

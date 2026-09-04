@@ -500,6 +500,24 @@ class TestLLMClients(unittest.TestCase):
         )
 
     @patch('llm_clients.openai.OpenAI')
+    def test_nvidia_nim_structured_output_empty_raises_empty_response_error(self, mock_openai):
+        """NIM の構造化出力が空文字で返ったら EmptyResponseError (RuntimeError ではない)。"""
+        from llm_clients.exceptions import EmptyResponseError
+        from llm_clients.nvidia_nim import NvidiaNIMClient
+
+        mock_openai.return_value = MagicMock()
+        client = NvidiaNIMClient("nvidia/model")
+        client._create_nim_structured_output_via_tool = MagicMock(return_value="   ")
+
+        with self.assertRaises(EmptyResponseError) as ctx:
+            client.generate(
+                messages=[{"role": "user", "content": "hello"}],
+                tools=[],
+                response_schema={"type": "object", "properties": {}},
+            )
+        self.assertEqual(ctx.exception.error_code, "empty_response")
+
+    @patch('llm_clients.openai.OpenAI')
     def test_openai_client_generate(self, mock_openai):
         mock_client_instance = MagicMock()
         mock_openai.return_value = mock_client_instance
@@ -1518,6 +1536,55 @@ class TestLLMClients(unittest.TestCase):
         self.assertEqual(payload["options"], {"num_ctx": client.context_length})
         self.assertNotIn("response_format", payload)
         self.assertEqual(kwargs["timeout"], (3, 300))
+
+    @patch('llm_clients.ollama.OllamaClient._probe_base', return_value='http://ollama.test')
+    @patch('llm_clients.ollama.requests.post')
+    def test_ollama_client_generate_empty_content_raises_empty_response_error(self, mock_post, mock_probe):
+        """空 content は RuntimeError ではなく EmptyResponseError (error_code=empty_response)。
+
+        呼び出し側の空応答再試行 (generator.generate_text_with_empty_retry) は
+        EmptyResponseError か空文字だけを再試行の対象にするので、Ollama だけ
+        RuntimeError だと再試行が効かない。/api/chat の後段フォールバックが無い
+        構成 (chat_url なし) で、v1 の空応答がそのまま種別を保って上がることを見る。
+        """
+        from llm_clients.exceptions import EmptyResponseError
+
+        mock_response = MagicMock()
+        mock_response.raise_for_status.return_value = None
+        mock_response.text = '{"choices": [{"message": {"content": ""}}]}'
+        mock_response.json.return_value = {
+            "choices": [{"message": {"content": ""}}]
+        }
+        mock_post.return_value = mock_response
+
+        client = OllamaClient("hf.co/unsloth/gemma-3-1b-it-GGUF:BF16", 1000)
+        client.chat_url = None
+        with self.assertRaises(EmptyResponseError) as ctx:
+            client.generate([{"role": "user", "content": "Hello"}])
+        self.assertEqual(ctx.exception.error_code, "empty_response")
+        self.assertEqual(str(ctx.exception), "Ollama returned empty response")
+        # 空応答は再試行対象 (_should_retry) ではないので v1 は 1 回だけ叩かれる。
+        self.assertEqual(mock_post.call_count, 1)
+
+    @patch('llm_clients.ollama.OllamaClient._probe_base', return_value='http://ollama.test')
+    @patch('llm_clients.ollama.requests.post')
+    def test_ollama_client_tool_mode_empty_content_raises_empty_response_error(self, mock_post, mock_probe):
+        """tool モードで tool_calls も本文も無い応答も EmptyResponseError (OpenAI クライアントと同型)。"""
+        from llm_clients.exceptions import EmptyResponseError
+
+        mock_response = MagicMock()
+        mock_response.raise_for_status.return_value = None
+        mock_response.text = '{"choices": [{"message": {"content": ""}}]}'
+        mock_response.json.return_value = {
+            "choices": [{"message": {"content": "", "tool_calls": []}}]
+        }
+        mock_post.return_value = mock_response
+
+        client = OllamaClient("hf.co/unsloth/gemma-3-1b-it-GGUF:BF16", 1000)
+        tools = [{"type": "function", "function": {"name": "noop", "parameters": {"type": "object", "properties": {}}}}]
+        with self.assertRaises(EmptyResponseError) as ctx:
+            client.generate([{"role": "user", "content": "Hello"}], tools=tools)
+        self.assertEqual(ctx.exception.error_code, "empty_response")
 
     @patch('llm_clients.ollama.OllamaClient._probe_base', return_value='http://ollama.test')
     @patch('llm_clients.ollama.requests.post')

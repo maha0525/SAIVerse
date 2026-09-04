@@ -269,5 +269,111 @@ class OriginEpisodeColumnTest(unittest.TestCase):
                 adapter.close()
 
 
+class ThreadTitleAndStatsTest(unittest.TestCase):
+    """スレッド一覧の題名・件数・期間 (2026-09-03、スレッド選択 UI が UUID しか出せなかった件)。"""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.persona_dir = Path(self._tmp.name)
+        os.environ["SAIMEMORY_MEMORY"] = "1"
+        self.addCleanup(self._cleanup_temp)
+
+    def _cleanup_temp(self) -> None:
+        import gc
+        gc.collect()
+        try:
+            self._tmp.cleanup()
+        except PermissionError:
+            pass
+
+    def tearDown(self) -> None:
+        os.environ.pop("SAIMEMORY_MEMORY", None)
+
+    def test_list_thread_summaries_has_title_count_and_range(self) -> None:
+        class DummyEmbedder:
+            def __init__(self, model: str | None = None, **kwargs) -> None:
+                self.model_name = model
+
+            def embed(self, texts, **kwargs):
+                return [[0.0] * 3 for _ in texts]
+
+        with patch("saiverse_memory.adapter.Embedder", DummyEmbedder):
+            from saiverse_memory.adapter import SAIMemoryAdapter
+            adapter = SAIMemoryAdapter("tester", persona_dir=self.persona_dir)
+            try:
+                def _add(suffix, content, ts):
+                    adapter.append_persona_message(
+                        {"role": "user", "content": content, "timestamp": ts,
+                         "embedding_chunks": 0},
+                        thread_suffix=suffix,
+                    )
+
+                _add("conv-a", "最初", "2025-01-01T00:00:00+00:00")
+                _add("conv-a", "二つ目", "2025-01-03T00:00:00+00:00")
+                _add("conv-b", "別の会話", "2025-02-01T00:00:00+00:00")
+                # suffix で指定 → 完全な id "tester:conv-a" に解決される
+                adapter.set_thread_title("conv-a", "  猫ロボットの話  ")
+                # 空の題名は無視 (既存の題名も消さない)
+                adapter.set_thread_title("conv-a", "   ")
+
+                by_suffix = {s["suffix"]: s for s in adapter.list_thread_summaries()}
+                a = by_suffix["conv-a"]
+                self.assertEqual(a["thread_id"], "tester:conv-a")
+                self.assertEqual(a["title"], "猫ロボットの話")
+                self.assertEqual(a["message_count"], 2)
+                self.assertEqual(a["first_created_at"], 1735689600)
+                self.assertEqual(a["last_created_at"], 1735862400)
+
+                b = by_suffix["conv-b"]
+                self.assertIsNone(b["title"])
+                self.assertEqual(b["message_count"], 1)
+                self.assertEqual(b["first_created_at"], 1738368000)
+                self.assertEqual(b["last_created_at"], 1738368000)
+
+                # suffix の解決は append_persona_message と同じ規則 (常に
+                # persona_id を前置する)。「もう prefix が付いている」の特別扱いは
+                # しない — 片方だけが特別扱いすると同じ文字列が別のスレッドを指す。
+                adapter.set_thread_title("conv-b", "二番目")
+                by_suffix = {s["suffix"]: s for s in adapter.list_thread_summaries()}
+                self.assertEqual(by_suffix["conv-b"]["title"], "二番目")
+            finally:
+                adapter.close()
+
+    def test_init_db_adds_title_column_to_legacy_threads_table(self) -> None:
+        import sqlite3
+
+        path = str(self.persona_dir / "legacy.db")
+        legacy = sqlite3.connect(path)
+        try:
+            legacy.execute(
+                "CREATE TABLE threads (id TEXT PRIMARY KEY, resource_id TEXT, "
+                "overview TEXT, overview_updated_at INTEGER)"
+            )
+            legacy.execute(
+                "INSERT INTO threads VALUES (?, ?, ?, ?)", ("p:t1", "p", None, None)
+            )
+            legacy.commit()
+        finally:
+            legacy.close()
+
+        from sai_memory.memory.storage import (
+            get_thread_stats,
+            get_thread_titles,
+            init_db,
+            set_thread_title,
+        )
+        conn = init_db(path)
+        try:
+            cols = {row[1] for row in conn.execute("PRAGMA table_info(threads)").fetchall()}
+            self.assertIn("title", cols)
+            self.assertEqual(get_thread_titles(conn), {"p:t1": None})
+            set_thread_title(conn, "p:t1", "旧 DB の会話")
+            self.assertEqual(get_thread_titles(conn), {"p:t1": "旧 DB の会話"})
+            # メッセージが無いスレッドは stats に載らない
+            self.assertEqual(get_thread_stats(conn), {})
+        finally:
+            conn.close()
+
+
 if __name__ == "__main__":
     unittest.main()
