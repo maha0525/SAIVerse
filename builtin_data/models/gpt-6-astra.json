@@ -1,0 +1,53 @@
+{
+  "model": "gpt-6-astra",
+  "system_prompt": "",
+  "display_name": "GPT-6 Astra (< 272k)",
+  "provider_ref": "openai",
+  "context_length": 272000,
+  "supports_images": true,
+  "parameters": {
+    "reasoning_effort": {
+      "type": "enum",
+      "options": [
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "default": "high",
+      "label": "Reasoning Effort",
+      "description": "Controls how much thinking time the model spends."
+    },
+    "verbosity": {
+      "type": "enum",
+      "options": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "default": "high",
+      "label": "Verbosity",
+      "description": "Controls how long or detailed responses should be.",
+      "client_support": [
+        "responses"
+      ]
+    },
+    "max_completion_tokens": {
+      "type": "int",
+      "min": 32,
+      "max": 8192,
+      "step": 1,
+      "default": 8192,
+      "label": "Max completion tokens",
+      "description": "Upper bound on how many tokens the reply can use."
+    }
+  },
+  "pricing": {
+    "input_per_1m_tokens": 10.0,
+    "cached_input_per_1m_tokens": 1,
+    "output_per_1m_tokens": 50.0,
+    "currency": "USD"
+  }
+}
