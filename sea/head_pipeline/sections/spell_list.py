@@ -258,10 +258,23 @@ class SpellListSection:
         for name in sorted(new_visible.keys() - old_visible.keys()):
             entry = new_visible[name]
             display = entry.display_name or entry.name
+            # 付与通知はスキーマ込みで渡す (まはー裁定 2026-09-04)。head のスペル
+            # 一覧は次の Metabolism まで凍結されるので、移動直後のペルソナにとって
+            # この通知が新しいスペルの唯一の情報源になる — 名前だけでは引数が
+            # 分からず唱えられない。本文は _render_entry (= head 一覧と同じ描画)
+            # をそのまま同梱する: 別文面を書くとそこからドリフトが始まる
+            # (sea/head_pipeline/notify.py の「寸分たがわず」と同じ原則)。
+            detail_lines: list[str] = []
+            self._render_entry(detail_lines, entry)
             labels.append(NotificationLabel(
                 kind="spell_added",
-                label=f"スペル {display} ({name}) が使えるようになりました",
+                label="\n".join(
+                    [f"スペル {display} ({name}) が使えるようになりました"]
+                    + detail_lines
+                ),
             ))
+        # 剥奪通知は名前だけでよい — 「もう唱えられない」を伝えるのに引数の形は
+        # 要らないし、head からも消えている。
         for name in sorted(old_visible.keys() - new_visible.keys()):
             entry = old_visible[name]
             display = entry.display_name or entry.name

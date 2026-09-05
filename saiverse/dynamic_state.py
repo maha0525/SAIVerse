@@ -126,6 +126,10 @@ class DynamicStateManager:
         # 内装を正確に知れず、旧部屋のものと誤認しうる (まはー指摘 2026-07-09)。
         # get_visual_context(include_self=False) は他ペルソナ外見+内装+アイテム(無い時も
         # 明示)+Fixture を返す。self は head と重複するので除外。消費は本人の次 Pulse。
+        #
+        # 積むのは全文とは限らない: 同じ部屋の前回のエントリがまだ提示に見えて
+        # いれば差分だけになる (sai_memory/room_state.py)。行き来のたびに 1 万字
+        # 級の全文が積み上がるのを止めるため (2026-09-04 まはー裁定)。
         try:
             from builtin_data.tools.get_visual_context import get_visual_context
             from tools.context import persona_context
@@ -143,7 +147,10 @@ class DynamicStateManager:
                     content = (vc.get("content") or "").strip()
                     media = (vc.get("metadata") or {}).get("media") or []
                     if content:
-                        sai_mem.push_perception("surroundings", content, media=media)
+                        sai_mem.push_room_state(
+                            building_id, content, media=media,
+                            allow_diff=_chronicle_enabled(persona, manager),
+                        )
         except Exception:
             LOGGER.warning(
                 "[dynamic_state] surroundings push on entry failed -> %s",
@@ -191,6 +198,37 @@ class DynamicStateManager:
         return _dispatch_head_event(
             persona, manager, building_id, "metabolism", model_key=model_key,
         )
+
+
+def _chronicle_enabled(persona: Any, manager: Any) -> bool:
+    """このペルソナが Chronicle 編纂を有効にしているか (判定不能なら有効側)。
+
+    「部屋の様子」を差分に縮めてよいかの門。Chronicle 無効のペルソナは提示窓
+    (anchor) でバッチを忘れる — 付記が起きないので、差分の土台になった全文が
+    移管を経ずに提示から消えうる。そのため無効なら毎回全文を積む
+    (sai_memory/room_state.py の「既知の境界」)。判定不能なときに有効側へ倒す
+    のは、提示側の同じ門 (sea/runtime_context._chronicle_enabled_for) と揃える
+    ため — 二つが食い違うと、窓で忘れる側なのに差分を積む組み合わせができる。
+    """
+    try:
+        # runtime のたどり方は兄弟三箇所 (sea/head_pipeline/integration.py /
+        # sections/memory_weave.py / saiverse/day_plan.py) と同じ二段の別名
+        # 引き。sea_runtime だけを見ていると、runtime 側の名前しか持たない
+        # manager で lifecycle が引けず、無効のペルソナにも差分を積んでしまう。
+        runtime = (
+            getattr(manager, "sea_runtime", None)
+            or getattr(manager, "runtime", None)
+        )
+        lifecycle = getattr(runtime, "session_lifecycle", None)
+        if lifecycle is None:
+            return True
+        return bool(lifecycle.is_chronicle_enabled_for_persona(persona))
+    except Exception:
+        LOGGER.debug(
+            "[dynamic_state] chronicle toggle lookup failed; "
+            "treating the persona as chronicle-enabled", exc_info=True,
+        )
+        return True
 
 
 def _dispatch_head_event(

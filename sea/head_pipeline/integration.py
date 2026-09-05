@@ -333,10 +333,21 @@ def _inject_persona_recall_on_enter(
     Note システム完成までの繋ぎ実装。ペルソナが同じ Building に入室した際、過去の会話と
     Memopedia ページを想起する。以前は直接 SAIMemory へ append していたが、Phase 2 で
     知覚バッファ (kind='persona_recall') への push に変更 (消費は呼び出し元の flush)。
+
+    【再会の門 (2026-09-05, v0.3.9)】相手が直近の文脈に居るあいだは想起しない
+    (:meth:`HistoryManager.should_recall_persona`)。この繋ぎ実装は門を呼ばないまま
+    出荷されていたため、ずっと会話している相手にも移動のたびに「過去会話 6 件
+    (各 2,000 字) + 相手の Memopedia 個人ページ全文」が積まれ、本番で知覚
+    18 万字まで膨らんだ (docs/issues/persona_recall_perception_unbounded.md)。
+
+    見出しに書く相手の名前は ``persona.id_to_name_map`` (manager と参照を共有する
+    id→表示名の対応) で解決して渡す。解決できないときだけ ID のままになる。
     """
     history_manager = getattr(persona, "history_manager", None)
     if not history_manager:
         return
+
+    id_to_name = getattr(persona, "id_to_name_map", None) or {}
 
     for label in labels:
         if label.kind != "occupant_entered":
@@ -351,11 +362,19 @@ def _inject_persona_recall_on_enter(
         if not occupant_id or occupant_kind not in ("persona", "user"):
             continue
 
+        if not _should_recall_on_enter(history_manager, occupant_id):
+            LOGGER.debug(
+                "head_pipeline: skipped persona recall for %s "
+                "(already in recent context)", occupant_id,
+            )
+            continue
+
         try:
             recall_text = history_manager.recall_conversation_with(
                 occupant_id,
                 current_thread_only=False,
                 max_results=6,
+                display_name=id_to_name.get(str(occupant_id)) or None,
             )
         except Exception:
             LOGGER.exception(
@@ -375,6 +394,26 @@ def _inject_persona_recall_on_enter(
             LOGGER.exception(
                 "head_pipeline: failed to push persona recall for %s", occupant_id,
             )
+
+
+def _should_recall_on_enter(history_manager: Any, occupant_id: Any) -> bool:
+    """再会の門。直近の文脈に相手が居るなら想起しない。
+
+    判定の本体は :meth:`HistoryManager.should_recall_persona` (直近 20 メッセージに
+    相手の発言か audience があれば False)。ここは繋ぎ実装からその門へ配線するだけ。
+
+    判定自体が失敗したときは想起する側に倒す (= 従来挙動)。門は想起の量を抑える
+    最適化で、想起そのものが機能 — 判定の故障で再会の記憶を静かに失わせるより、
+    例外を記録したうえで従来どおり積む方が損失が小さい。
+    """
+    try:
+        return bool(history_manager.should_recall_persona(occupant_id))
+    except Exception:
+        LOGGER.exception(
+            "head_pipeline: should_recall_persona failed for %s "
+            "(falling back to recall)", occupant_id,
+        )
+        return True
 
 
 def _missing_section_names(pipeline: HeadPipeline, snapshot) -> set[str]:

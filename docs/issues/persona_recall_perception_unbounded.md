@@ -1,6 +1,6 @@
 # 再会の想起と部屋の様子が知覚を無限に堆積させる (本番実測 18 万字)
 
-**ステータス**: 🔲 未解決 (実装待ち) — v0.3.9 の主案件。**対処の裁定は 2026-09-04 に済んでいる** ([watermarks issue](watermarks_unsatisfiable_when_perception_is_large.md) §「2026-09-04 の議論」が正史)。本 issue はその供給側修理の本番実害の実測記録と、v0.3.9 実装対象の確定
+**ステータス**: 🔲 未解決 (検証待ち) — v0.3.9 の 6 件 (供給側 3 + 上限系 3) とレビュー 4 巡の消し込みまで実装済み、フルスイート 5,553 件緑。残 = まはーの実機検証と、数字の裁定 3 点 (知覚の既定 上 60,000/下 40,000・保存時検査の余裕 10,000・`perception_high_chars: null` のオプトアウトが保存時検査を素通しする穴)
 **深刻度**: 高 — 「部屋の様子」の送信量がユーザーの制御できない形で肥大し、上限を恒常的に超える。会話は守られるが送信量 (= API 費用) が膨らみ続ける
 **発見**: 2026-09-05 (のろけゆきさんの報告。まはーが「再会の機構が食いつぶしてない?」と機構を言い当てた)
 **関連**: [watermarks_unsatisfiable_when_perception_is_large.md](watermarks_unsatisfiable_when_perception_is_large.md) (裁定の正史) / `sea/head_pipeline/integration.py` `_inject_persona_recall_on_enter` / `persona/history_manager.py` `recall_conversation_with` / `should_recall_persona`

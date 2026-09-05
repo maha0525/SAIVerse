@@ -1065,9 +1065,9 @@ ALTER TABLE AI ADD COLUMN SLEEP_ON_CACHE_EXPIRE BOOLEAN NOT NULL DEFAULT TRUE;
 Note システムが未完成のため、v0.3.0 では **head pipeline の occupant_entered 差分通知** をフックして既存の `recall_conversation_with()` を呼ぶ繋ぎ実装で出荷する:
 
 - **トリガー**: `BuildingOccupantsSection.diff_to_notifications()` が `occupant_entered` を検出
-- **処理**: `integration.py:_inject_persona_recall_on_enter()` が `recall_conversation_with(target, current_thread_only=False)` を呼び、過去会話（最大 6 件）+ Memopedia ページ内容を `<system>` ラップで SAIMemory に注入
-- **タグ**: `["internal", "event_message"]`（通常のシステム通知と同じ）
-- **対象**: `occupant_kind == "persona"` のみ（ユーザーは対象外）
+- **門**: `integration.py:_should_recall_on_enter()` が `HistoryManager.should_recall_persona()` を呼び、直近 20 メッセージに相手（発言または audience）が居るなら想起しない。2026-09-05 (v0.3.9) に配線。それまで門は呼ばれておらず、ずっと会話している相手にも移動のたびに全文が積まれていた（`docs/issues/persona_recall_perception_unbounded.md`）
+- **処理**: `integration.py:_inject_persona_recall_on_enter()` が `recall_conversation_with(target, current_thread_only=False, display_name=...)` を呼び、過去会話（最大 6 件）+ Memopedia ページ内容を知覚バッファ（kind=`persona_recall`）へ push する。見出しの相手の名前は `persona.id_to_name_map` で表示名へ解決してから渡す（解決できないときだけ ID のまま）
+- **対象**: `occupant_kind` が `persona` または `user`（ユーザーもまはー裁定 2026-07-11 で対象に入った）
 
 この繋ぎは Note 完成時に `_inject_persona_recall_on_enter` を差し替えることで移行する。
 
