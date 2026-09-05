@@ -1047,6 +1047,7 @@ def _presented_chars_after_transfer(
 def _plan_perception_drop(
     persona: Any, presented: Sequence[Any], cutoff: int,
     *, model_key: Optional[str] = None, head_room_key: Optional[str] = None,
+    advance: bool = True,
 ) -> int:
     """知覚の合計が上の水位を超えていたら、下の水位まで下ろした境界を返す。
 
@@ -1111,11 +1112,17 @@ def _plan_perception_drop(
                 running, high, persona_id, model,
             )
     if dropped:
-        LOGGER.info(
+        # 実際に境界を書く組成だけ INFO。読み取り専用の測定 (画面のポーリング・
+        # 発火判定の下見) は同じ計画を毎回口にするので DEBUG に落とす —
+        # 「同じ dropping が何度も出る = 書けていない?」という誤読を防ぐ
+        # (2026-09-05 実機検証で紛らわしさを確認)。
+        LOGGER.log(
+            logging.INFO if advance else logging.DEBUG,
             "[sea][perception] presented perception total exceeded the cap "
             "(high=%d, target=%d); dropping %d older batch(es) through id %d "
-            "in one step (persona=%s, model=%s, remaining=%d chars)",
+            "in one step (persona=%s, model=%s, remaining=%d chars%s)",
             high, target, dropped, new_cutoff, persona_id, model, running,
+            "" if advance else ", measure-only",
         )
     return new_cutoff
 
@@ -1270,6 +1277,7 @@ def list_presented_perception_blocks(
                 dropped_through,
                 model_key=model_key,
                 head_room_key=head_room,
+                advance=advance_cutoff,
             )
             if planned > dropped_through and not advance_cutoff:
                 # 測るだけのモード: 進める判定はここまで同じで、書き込みだけを
