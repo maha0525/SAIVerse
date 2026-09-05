@@ -5,7 +5,7 @@
 
 REST API 全エンドポイントの一覧（自動生成）。すべて `/api` 配下にマウントされる。
 
-**エンドポイント数**: 350（tag グループ: 25）
+**エンドポイント数**: 352（tag グループ: 25）
 
 ## addon
 
@@ -123,6 +123,8 @@ REST API 全エンドポイントの一覧（自動生成）。すべて `/api` 
 | POST | `/api/config/max-image-embeds` | Set session override for max image embeds. |
 | GET | `/api/config/media-recall` | Get whether attached media (image/audio/video) summaries feed the auto-recall query. |
 | POST | `/api/config/media-recall` | Toggle attached-media auto-recall and persist to .env. |
+| GET | `/api/config/metabolism-defaults` | Metabolism 二水位の全体既定 — 設定値 (null = 未設定) / 実効値 / 組み込み既定。 |
+| PUT | `/api/config/metabolism-defaults` | 全体既定を保存する。 |
 | POST | `/api/config/model` | Set the global model override and return updated config. |
 | GET | `/api/config/models` | List available LLM models. |
 | POST | `/api/config/models` | Create a new model JSON file in user_data. |

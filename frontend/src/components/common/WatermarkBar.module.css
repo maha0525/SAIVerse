@@ -1,0 +1,72 @@
+/* --- 二水位の横棒 (記憶の整理の水位) ---
+   ContextVolumeBar と同じ高さ・角丸・グレー地。色は両テーマで読めるものだけを
+   使い、文字色は var(--foreground) に任せる。 */
+.wrapper {
+    width: 100%;
+}
+
+.bar {
+    position: relative;
+    height: 16px;
+    border-radius: 8px;
+    background: rgba(127, 127, 127, 0.18);
+    overflow: hidden;
+    margin: 6px 0 4px;
+}
+
+/* 0 → 残す量 の帯 (整理後に残る範囲) */
+.bandTarget {
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    background: rgba(52, 211, 153, 0.35);
+    transition: width 0.2s ease;
+}
+
+.marker {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 3px;
+    margin-left: -1.5px;
+    background: rgba(127, 127, 127, 0.95);
+    transition: left 0.2s ease;
+}
+
+.markerBad {
+    background: #f87171;
+    width: 4px;
+    margin-left: -2px;
+}
+
+.legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 14px;
+    font-size: 0.8rem;
+    font-variant-numeric: tabular-nums;
+    color: var(--foreground);
+    margin-bottom: 4px;
+}
+
+.legendItem {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+}
+
+.legendDot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: rgba(127, 127, 127, 0.95);
+}
+
+.legendBad {
+    color: #f87171;
+}
+
+.legendBad .legendDot {
+    background: #f87171;
+}

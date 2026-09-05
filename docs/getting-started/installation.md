@@ -40,12 +40,13 @@ Git でクローンする場合:
 ```bash
 git clone https://github.com/maha0525/SAIVerse.git
 cd SAIVerse
-chmod +x setup.sh start.sh
 ./setup.sh
 ./start.sh
 ```
 
-ZIP で入手した場合は、解凍したフォルダに `cd` してから `chmod +x setup.sh start.sh && ./setup.sh` を実行します（macOS / Linux は Git が自動導入されないので、自動更新を使うなら別途 Git を入れておくと便利です）。
+ZIP で入手した場合は、解凍したフォルダに `cd` してから `./setup.sh` を実行します（macOS / Linux は Git が自動導入されないので、自動更新を使うなら別途 Git を入れておくと便利です）。
+
+`permission denied` のような表示が出て実行できない場合は、`chmod +x setup.sh start.sh` を実行してから再度お試しください。解凍ソフトによっては実行権限が外れることがあります。
 
 初回起動時にチュートリアルが表示され、**ユーザー名 → City 名 → ペルソナ作成 → API キー → モデル設定**を順に案内します。
 

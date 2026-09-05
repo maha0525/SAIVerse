@@ -72,10 +72,11 @@ PERSONA_HEAD_SECTIONS: frozenset[str] = frozenset({
 def _minimal_load_chars(runtime, persona: Any, model_key: Optional[str]) -> int:
     """anchor が無い (ブートストラップ / 修復直後) ときに読む履歴の文字数。
 
-    低水位 (docs/intent/chronicle_eviction.md §4) をそのまま使う — 低水位の
-    唯一の現役の役割がこの初期読み込み量 (eviction では未使用、残す量 = 目標が
-    保護を兼ねる)。再開時に提示コンテキストの大きさが飛ぶと prefix が毎回
-    作り直しになるので、控えめな量から始める。
+    残す量 (``metabolism_target_chars``、docs/intent/chronicle_eviction.md §4)
+    を流用する — 会話窓が常に目指す量なので、初期読み込みも同じ量から始めれば
+    提示コンテキストの大きさが飛ばない。旧三水位の低水位が担っていた役割だが、
+    低水位は 2026-09-04 に廃止した (docs/issues/
+    watermarks_unsatisfiable_when_perception_is_large.md 裁定 5)。
     """
     lifecycle = getattr(runtime, "session_lifecycle", None)
     if lifecycle is not None:
@@ -89,8 +90,8 @@ def _minimal_load_chars(runtime, persona: Any, model_key: Optional[str]) -> int:
                 exc_info=True,
             )
             watermarks = None
-        if watermarks is not None and watermarks.low > 0:
-            return watermarks.low
+        if watermarks is not None and watermarks.target > 0:
+            return watermarks.target
     return int(getattr(persona, "context_length", 2000) or 2000)
 
 
@@ -324,7 +325,7 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
                 required_scopes = ["committed"]
 
                 # Parse history_depth format
-                # - "full": anchor 以降の提示コンテキスト (anchor 未確立時は低水位ぶんの文字数)
+                # - "full": anchor 以降の提示コンテキスト (anchor 未確立時は残す量ぶんの文字数)
                 # - "Nmessages" (e.g., "10messages"): message count limit
                 # - integer or numeric string: character limit
                 use_message_count = False
@@ -435,7 +436,7 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
                                 # 誤判定して次回も長大コンテキストを送る不整合になるため。
                         else:
                             # Case 3: 起点行が一つも無い (新規ペルソナ / 修復直後)
-                            # のブートストラップ。低水位ぶんだけ読み、下の
+                            # のブートストラップ。残す量ぶんだけ読み、下の
                             # count-based 経路が新しい起点候補を立てる。
                             #
                             # 旧実装はここ (anchor TTL 失効時) で会話前の全量
@@ -454,9 +455,9 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
                         # Preview mode: use anchor for retrieval but don't persist or generate Chronicle
                         # (§14-2 機構1 の前進も永続化しない — 返る位置は本番と同じ)。
                         # §15 の読み戻しも同じ型で反映する — 実際の読み戻しは次の
-                        # user Pulse の応答前に走るため、素の窓のままだとプレビューが
+                        # Pulse の応答前に走るため、素の窓のままだとプレビューが
                         # 「話しかけた時に実際に見える窓」より薄い嘘になる。読みだけ
-                        # の計算 (最終検算まで本番と同一・行は触らない) で組む。
+                        # の計算 (仕上げの検算まで本番と同一・行は触らない) で組む。
                         # 適用は標準の会話窓 (main_line / committed) のときだけ —
                         # 読み戻しの文字勘定はその窓で定義されている。
                         if (

@@ -84,6 +84,10 @@ class FakeRuntime:
         self._store_seq = 0
         self.session_lifecycle = SimpleNamespace(
             touch_anchor_after_llm_call=lambda persona, usage, anchor_id=None: None,
+            # 実 SEARuntime と同じ応答前の読み戻し (既定は「不足なし」の素通り)
+            maybe_run_window_refill=(
+                lambda persona, building_id, model_key=None: "skip"
+            ),
         )
 
     # --- context / client -------------------------------------------------
@@ -684,6 +688,86 @@ def test_session_head_fetches_mcp_tools_before_consuming(session_factory, person
         "connect": True,          # Pulse 頭 = 接続を張る回
         "manager_passed": True,   # 検知器へ渡す manager
     }]
+
+
+def test_session_start_runs_window_refill_before_context(session_factory, persona):
+    """作業セッションの開始でも応答前の読み戻しが走る (2026-09-05 まはー裁定:
+    読み戻しは全種の Pulse — 会話かどうかで可否を変えない)。
+
+    作業セッションは run_meta_user を通らず自分で _prepare_context を組む
+    Pulse root なので、配線が無いと窓が目標量未満のまま (= 会話文が痩せた
+    薄い記憶のまま) 作業が始まる。固定するのは:
+
+    - 呼ばれること (目標量未満かの判定は maybe_run_window_refill 側の責務 —
+      呼び出し点は無条件に通す)
+    - 並びが run_meta_user と同じ「いかなる永続化よりも前」= MCP 取得・知覚の
+      消費・head 組成より先であること
+    - model が解決済みの実行 model であること (WORKER は軽量 tier なので
+      lightweight_model — 読み戻す窓と実際に喋る窓を同じ model に揃える)
+    """
+    events: List[str] = []
+    persona.lightweight_model = "lite-model"
+    persona.sai_memory = SimpleNamespace(
+        get_current_thread=lambda: "p1:persona_main",
+        flush_perception_buffer=lambda **_kw: events.append("flush") or True,
+    )
+    manager, runtime, client = _make_env(session_factory, persona, ["調べ終えた。"])
+
+    refill_calls: List[Dict[str, Any]] = []
+
+    def _fake_refill(p, building_id, model_key=None):
+        events.append("refill")
+        refill_calls.append({
+            "persona_id": getattr(p, "persona_id", None),
+            "building_id": building_id,
+            "model_key": model_key,
+        })
+        return "ok"
+
+    runtime.session_lifecycle.maybe_run_window_refill = _fake_refill
+
+    def _fake_refresh(p, m, building_id, *, connect, notify=True):
+        events.append("mcp_refresh")
+        return False
+
+    orig_prepare = runtime._prepare_context
+
+    def _recording_prepare(*args, **kwargs):
+        events.append("prepare_context")
+        return orig_prepare(*args, **kwargs)
+
+    runtime._prepare_context = _recording_prepare
+
+    with patch("sea.work_session.refresh_mcp_tools_at_head", _fake_refresh):
+        result = _run(manager, budget=2)
+
+    assert result.ended_reason == ENDED_FINISHED
+    assert events == ["refill", "mcp_refresh", "flush", "prepare_context"]
+    assert refill_calls == [{
+        "persona_id": "p1",
+        "building_id": "b1",
+        "model_key": "lite-model",
+    }]
+
+
+def test_session_survives_window_refill_failure(session_factory, persona):
+    """読み戻しの失敗は記録して続行 — セッションの見送り (error 終了) にしない。
+
+    読み戻しが書くのは帳簿だけで冪等 (次の Pulse がやり直せる) なので、
+    失敗してもセッション自体は走り切る。最終防衛ライン (床未達の見送り) は
+    発話しない作業セッションには配線しない、の裏面。
+    """
+    manager, runtime, client = _make_env(session_factory, persona, ["終わった。"])
+
+    def _boom(p, building_id, model_key=None):
+        raise RuntimeError("refill boom")
+
+    runtime.session_lifecycle.maybe_run_window_refill = _boom
+
+    result = _run(manager, budget=2)
+
+    assert result.ended_reason == ENDED_FINISHED
+    assert result.error is None
 
 
 def test_beat_head_flush_skipped_when_not_outermost(session_factory, persona):

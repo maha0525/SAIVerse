@@ -63,8 +63,14 @@ def test_dirty_worktree_is_rejected_without_stash_or_reset(tmp_path: Path) -> No
     # whatever the console code page is (see _parse_porcelain_z).
     assert "-z" in command
     assert run.call_args.kwargs.get("encoding") == "utf-8"
-    # The refusal names the offending file so a non-developer can act on it.
-    assert "user_file.py" in str(excinfo.value)
+    # The refusal names the offending file so a non-developer can act on it,
+    # and offers both exits: a copy-pasteable discard command built from the
+    # listed files, and committing to keep the changes. It must still refuse —
+    # the updater itself never stashes or resets (asserted by raising above).
+    message = str(excinfo.value)
+    assert "user_file.py" in message
+    assert "git checkout -- user_file.py" in message
+    assert "commit" in message
 
 
 def test_dirty_worktree_message_keeps_unicode_names_and_renames_readable(tmp_path: Path) -> None:
@@ -88,6 +94,11 @@ def test_dirty_worktree_message_keeps_unicode_names_and_renames_readable(tmp_pat
     assert "\\3" not in message  # no octal escapes leak into the list
     # The original path must not surface as a record of its own.
     assert "\n  was.txt\n" not in message and "\n  old.txt\n" not in message
+    # A rename entry ("old -> new") is not a path, so the per-file discard
+    # command cannot express the full set; the catch-all is offered instead of
+    # a command that would discard only part and get refused again.
+    assert "git checkout -- ." in message
+    assert "git checkout -- 設定メモ.md" not in message
 
 
 def test_update_code_refuses_to_overwrite_ignored_files(tmp_path: Path) -> None:
@@ -143,6 +154,10 @@ def test_dirty_worktree_message_lists_at_most_twenty_paths(tmp_path: Path) -> No
     assert "file_19.py" in message
     assert "file_20.py" not in message
     assert "... and 5 more" in message
+    # With the list truncated, a per-file discard command would miss the hidden
+    # files and the update would refuse again; offer the catch-all instead.
+    assert "git checkout -- ." in message
+    assert "git checkout -- file_00.py" not in message
 
 
 def test_unverified_pid_is_never_signalled() -> None:

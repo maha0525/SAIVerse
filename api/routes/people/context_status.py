@@ -26,21 +26,24 @@ router = APIRouter()
 def get_context_status(persona_id: str, manager=Depends(get_manager)) -> dict[str, Any]:
     """指定ペルソナの提示コンテキスト状態 (水位 + 現在文字数) を read-only で返す。
 
-    - ``watermarks``: 実効 model の三水位 (model 定義から解決)。model が水位を
+    - ``watermarks``: 実効 model の二水位 (model 定義から解決)。model が水位を
       持たない (null 設定) 場合は None = Metabolism を持たない。
     - ``presented_chars``: 次の user Pulse で実際に送られる提示コンテキストの
       文字数。§15 読み戻しが適用されるならその適用後 (プレビューと一致)。
       anchor 未確立 (まだ会話が始まっていない) や persona 未ロードでは None。
-      **保存済みの会話に加えて、送信直前に差し込まれる知覚 (部屋の様子) を
-      含む合計**で、内訳は ``stored_chars`` / ``injected_perception_chars``
-      (2026-09-02 まはー裁定 —
-      docs/issues/context_accounting_excludes_injected_rows.md)。上限
+      **保存済みの行に加えて、送信直前に差し込まれる知覚 (部屋の様子) を
+      含む合計**で、内訳は ``stored_chars`` (会話) / ``mechanism_chars``
+      (スペル結果などの機構名義の行) / ``injected_perception_chars``
+      の三分割 (2026-09-02 / 2026-09-04 まはー裁定 —
+      docs/issues/context_accounting_excludes_injected_rows.md /
+      watermarks_unsatisfiable_when_perception_is_large.md 裁定 10)。上限
       (``high_chars``) と比べる量はこの合計。
     - ``window_rows_chars``: 残す量 (``target_chars``) の契約が見ている量 =
       整理が計画を立てる窓 (§15-3 印戻しなどの正規化後。読み戻しが適用される
       なら読み戻し後の窓) の**会話の行だけ**の文字数 (``EvictionPlan.stored_chars``)。
-      残す量の主語は会話の行で、知覚は消費しない (2026-09-03 裁定 —
-      docs/issues/protection_quota_consumed_by_perception_blocks.md)。
+      残す量の主語は会話の行で、知覚 (2026-09-03 裁定) も機構名義の行
+      (2026-09-04 裁定) も消費しない
+      (docs/issues/protection_quota_consumed_by_perception_blocks.md)。
       ``EvictionPlan.protected_rows_chars`` (保護範囲の**内側**の行の字数) とは
       別の量なので、名前も分けてある。測れないときは None。
     - ``perception_over_budget``: 合計は上限を超えているのに会話の行が残す量
@@ -73,11 +76,11 @@ def get_context_status(persona_id: str, manager=Depends(get_manager)) -> dict[st
         "persona_id": persona_id,
         "model": model_key,
         "metabolism": False,          # 実効 model が水位を持つか
-        "low_chars": None,            # 初期読み込み量 (anchor 未確立時に読む量)
-        "target_chars": None,         # 残す量 (整理後にここへ揃える)
+        "target_chars": None,         # 残す量 (整理後にここへ揃える。anchor 未確立時の初期読み込み量も兼ねる)
         "high_chars": None,           # 上限 (超えたら整理が走る)
         "presented_chars": None,      # 実際に送られる合計文字数 (読み戻し後)
-        "stored_chars": None,         # うち保存済みの会話 (提示ウィンドウの行)
+        "stored_chars": None,         # うち会話の行 (機構名義の行は含まない)
+        "mechanism_chars": None,      # うち機構名義の行 (スペル結果・通知、生)
         "injected_perception_chars": None,  # うち送信直前に差し込まれる知覚
         "window_rows_chars": None,  # 残す量の契約が見る量 (計画窓の会話の行だけ)
         "perception_over_budget": None,  # 合計は上限超えだが行は残す量以下 (畳めない)
@@ -102,7 +105,9 @@ def get_context_status(persona_id: str, manager=Depends(get_manager)) -> dict[st
     )
 
     try:
-        watermarks = lifecycle.get_metabolism_watermarks(persona, model_key)
+        watermarks = lifecycle.get_metabolism_watermarks(
+            persona, model_key, persona_id=persona_id,
+        )
     except Exception:
         # 解決失敗を「水位を持たないモデル」(正常な metabolism=false) に偽装
         # しない — 設定破損等の障害はエラーとして UI に届ける (Codex 指摘 2026-07-30)。
@@ -117,7 +122,6 @@ def get_context_status(persona_id: str, manager=Depends(get_manager)) -> dict[st
         return status
     status.update({
         "metabolism": True,
-        "low_chars": watermarks.low,
         "target_chars": watermarks.target,
         "high_chars": watermarks.high,
     })
@@ -193,18 +197,21 @@ def _record_presented_chars(
     status: dict[str, Any], lifecycle: Any, persona: Any,
     presented: list, anchor_id: Any,
 ) -> None:
-    """送信量の内訳 (保存行 / 差し込みの知覚 / 合計) を status に載せる。
+    """送信量の内訳 (会話 / 機構名義の行 / 差し込みの知覚 / 合計) を status に載せる。
 
     ``presented_chars`` は**合計** = 実際に送られる中身の字数。保存行だけを
     数えていた頃は、本番エリスで勘定 149,856 字に対し実送信 209,031 字という
     乖離が出ていた (docs/issues/context_accounting_excludes_injected_rows.md) —
-    「データ送信量の管理」は透明性の看板なので、合計を出す。内訳は
-    ``stored_chars`` (保存済みの会話) と ``injected_perception_chars``
-    (送信直前に差し込まれる部屋の様子) に分けて添える。
+    「データ送信量の管理」は透明性の看板なので、合計を出す。内訳は三分割
+    (2026-09-04 まはー裁定): ``stored_chars`` (会話の行、生) /
+    ``mechanism_chars`` (スペル結果・通知など機構名義の保存行、生 — 残す量の
+    勘定には入らないが合計には生で入る) / ``injected_perception_chars``
+    (送信直前に差し込まれる部屋の様子)。
     """
-    from sea.eviction_plan import message_chars
+    from sea.eviction_plan import message_chars, stored_message_chars
 
-    stored = message_chars(presented)
+    rows = stored_message_chars(presented)      # 会話の行だけ (残す量の主語)
+    stored_rows_total = message_chars(presented)  # 保存行の生の合計
     # raise_on_error: 知覚一覧の内部失敗を「知覚 0 (正常)」として表示しない —
     # ここは透明性の画面なので、失敗は上の except → measurement_failed に落とす
     # (preview_refilled_history の raise_on_error と同じ型。Codex 指摘 2026-09-02)。
@@ -213,8 +220,9 @@ def _record_presented_chars(
             persona, presented, anchor_id, raise_on_error=True,
         )
     )
-    status["stored_chars"] = stored
-    status["injected_perception_chars"] = max(0, total - stored)
+    status["stored_chars"] = rows
+    status["mechanism_chars"] = stored_rows_total - rows
+    status["injected_perception_chars"] = max(0, total - stored_rows_total)
     status["presented_chars"] = total
 
 
@@ -255,8 +263,9 @@ def _measure_fold_readiness(
         0 if ready
         else max(0, band - plan.pending_material_chars)
     )
-    # 残す量の契約が見ている量 = 計画窓の会話の行だけ (知覚は残す量を消費
-    # しない — 2026-09-03 裁定)。合計が上限を超えているのに行が残す量以下なら、
+    # 残す量の契約が見ている量 = 計画窓の会話の行だけ (知覚も機構名義の行も
+    # 残す量を消費しない — 2026-09-03 / 2026-09-04 裁定)。
+    # 合計が上限を超えているのに行が残す量以下なら、
     # 整理は畳めるものを見つけられない — 超過の主は知覚の供給で、画面はその
     # 事実を出す (本走行は同じ判定で LLM を呼ばず引き返す)。判定の合計と行は
     # **この同じ列** (計画窓 + 知覚) から取る — 正規化前の窓の合計 (presented_

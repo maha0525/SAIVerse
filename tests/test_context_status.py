@@ -43,7 +43,7 @@ def _perception(chars, at=0):
 
 def _lifecycle(
     *,
-    watermarks=Watermarks(low=1000, target=2000, high=4000),
+    watermarks=Watermarks(target=2000, high=4000),
     refill_plan=None,
     anchor_id="m1",
     presented=None,
@@ -68,7 +68,9 @@ def _lifecycle(
         return list(rows) + list(perceptions or [])
 
     return SimpleNamespace(
-        get_metabolism_watermarks=lambda persona, model_key: watermarks,
+        get_metabolism_watermarks=(
+            lambda persona, model_key, persona_id=None: watermarks
+        ),
         preview_refilled_history=lambda persona, model_key, **_kw: refill_plan,
         resolve_metabolism_anchor=(
             lambda persona, model_key=None, persist_advance=True: (anchor_id, "own")
@@ -310,6 +312,33 @@ def test_refill_path_also_counts_injected_perceptions():
     assert status["presented_chars"] == 1000
 
 
+def test_breakdown_splits_mechanism_rows_from_conversation():
+    """送信量の内訳は三分割 (2026-09-04 まはー裁定): 会話 (``stored_chars``) /
+    スペル結果などの機構名義の行 (``mechanism_chars``) / 部屋の様子
+    (``injected_perception_chars``)。合計 (``presented_chars``) は生のまま不変。
+
+    残す量の契約が見る量 (``window_rows_chars``) も機構行を数えない — 実測
+    (2026-09-04 エリス) では表示 44,006 字のうちスペル結果 18,010 字が生で
+    「会話」に含まれ、残す量 4 万の保護枠の 4 割超を消費していた。
+    """
+    persona = SimpleNamespace(persona_id=PERSONA_ID, model="model-a")
+    spell = {
+        "id": "s0",
+        "content": "x" * 3000,
+        "metadata": {"tags": ["conversation", "spell"]},
+    }
+    lc = _lifecycle(
+        presented=[_msg("m1", 1000), spell],
+        perceptions=[_perception(500)],
+    )
+    status = get_context_status(PERSONA_ID, _manager(persona=persona, lifecycle=lc))
+    assert status["stored_chars"] == 1000          # 会話の行だけ
+    assert status["mechanism_chars"] == 3000       # スペル結果 (生)
+    assert status["injected_perception_chars"] == 500
+    assert status["presented_chars"] == 4500       # 合計は生のまま
+    assert status["window_rows_chars"] == 1000     # 残す量の主語も会話だけ
+
+
 def test_perception_lookup_failure_is_flagged_not_shown_as_zero():
     """知覚一覧の内部失敗を「知覚 0 字 (正常)」として表示しない。
 
@@ -328,6 +357,7 @@ def test_perception_lookup_failure_is_flagged_not_shown_as_zero():
     assert status["measurement_failed"] is True
     assert status["presented_chars"] is None
     assert status["injected_perception_chars"] is None
+    assert status["mechanism_chars"] is None
 
 
 def test_fold_readiness_protection_ignores_the_perception_weight(monkeypatch):
@@ -365,7 +395,7 @@ def test_perception_over_budget_is_reported_when_nothing_is_evictable():
     と、残す量の契約が見ている量 ``window_rows_chars`` を返す。
     """
     persona = SimpleNamespace(persona_id=PERSONA_ID, model="model-a")
-    wm = Watermarks(low=1000, target=2000, high=4000)
+    wm = Watermarks(target=2000, high=4000)
 
     # 行 1,000 ≤ 残す量、合計 5,000 > 上限 → 知覚が予算超過。
     lc = _lifecycle(watermarks=wm, presented=[_msg("m1", 1000)],
@@ -392,7 +422,7 @@ def test_perception_over_budget_is_reported_when_nothing_is_evictable():
     assert status["perception_over_budget"] is False
 
     # 上限なし (文字数では発火しない model) では常に False。
-    lc = _lifecycle(watermarks=Watermarks(low=1000, target=2000, high=None),
+    lc = _lifecycle(watermarks=Watermarks(target=2000, high=None),
                     presented=[_msg("m1", 1000)], perceptions=[_perception(9000)])
     status = get_context_status(PERSONA_ID, _manager(persona=persona, lifecycle=lc))
     assert status["perception_over_budget"] is False
@@ -416,6 +446,7 @@ def test_unmeasured_status_leaves_the_new_fields_null():
     status = get_context_status(PERSONA_ID, _manager(persona=persona, lifecycle=lc))
     assert status["window_rows_chars"] is None
     assert status["perception_over_budget"] is None
+    assert status["mechanism_chars"] is None
 
 
 def test_watermark_resolution_failure_is_500():
@@ -423,7 +454,7 @@ def test_watermark_resolution_failure_is_500():
     persona = SimpleNamespace(persona_id=PERSONA_ID, model="model-a")
     lc = _lifecycle()
 
-    def _boom(persona, model_key):
+    def _boom(persona, model_key, persona_id=None):
         raise RuntimeError("config broken")
 
     lc.get_metabolism_watermarks = _boom
@@ -450,7 +481,7 @@ def test_perception_over_budget_uses_one_window_for_total_and_rows():
     から取る。いまの窓 (印戻し前) は上限超えでも、計画窓の合計が上限以下なら
     旗は立たない — どちらの窓が数字を出したかで旗が裏返らない。"""
     persona = SimpleNamespace(persona_id=PERSONA_ID, model="model-a")
-    wm = Watermarks(low=1000, target=2000, high=4000)
+    wm = Watermarks(target=2000, high=4000)
     current = [_msg(f"m{i}", 1000) for i in range(5)]  # いまの窓: 行 5,000
     planning = [_msg("folded:m0", 300), _msg("m4", 1000)]  # 印戻し後: 行 1,300
 

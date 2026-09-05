@@ -13,7 +13,7 @@
 **関連ドキュメント**:
 - `docs/intent/memory_architecture_v2.md`（v0.2）— 本 doc はゾーン A（コア記憶、§5）の**書き込み経路**を補完する。ゾーン A の器・スペル群・head セクションは前提として継承
 - `docs/intent/cached_head_architecture.md` / `docs/intent/cache_lifecycle_control.md` — キャッシュ経済の不変条件に従属する
-- `docs/concepts/metabolism.md` — Metabolism の実行点2つ（§3.1）は同 doc にも反映済み
+- `docs/concepts/metabolism.md` — Metabolism の実行点2つ（§3.1）は同 doc にも反映済み（→ 会話前経路は 2026-07-29 撤去。§3.1 の注記参照）
 - `docs/issues/session_lifecycle_extraction_design.md` — 実装の前提リファクタ（Phase 0）
 - `docs/intent/session.md`（起草中 v0.1）— セッションクローズ（§3.6）を Session 概念のライフサイクルフックとして実装する構想だった（2026-08-24 に §3.6 ごと撤去。この doc も未起草のまま）
 
@@ -71,8 +71,10 @@
 
 1. **応答後**: `sea/runtime.py` run_meta_user 末尾の `_maybe_run_metabolism` → `_run_metabolism`（L194 / L2076）。watermark 超過またはトークン閾値（`_metabolism_token_triggered`）で発火。アンカー更新を伴う正規の eviction はここだけ
 2. **会話前（pre-response）**: `sea/runtime_context.py` の履歴取得 Case 3（L158-209）。anchor（= プロバイダキャッシュの生存記録、TTL はキャッシュ書き込み時の provider cache TTL）が全モデル失効していると、コンテキスト構築中にその場で `_generate_chronicle` + `_generate_track_chronicle` + イベント注入を実行し、**low watermark の最小履歴で会話を開始**する。`_maybe_run_metabolism` を経由せず `_generate_chronicle` を直接呼ぶため、実行点を `_maybe_run_metabolism` の呼び出し元 grep で探すと漏れる
+   → **2026-07-29 撤去**（[arasuji_levels.md](arasuji_levels.md) §13）: 会話前の編纂経路は存在しない。Case 3 は編纂を伴わない初期読み込みだけになった。low watermark（低水位）も **2026-09-04 に廃止**され、初期読み込みは残す量（target）を流用する。以下の記述は撤去前の歴史として残す
 
 経路2は日常的なイベントである: keepalive 連鎖（`_schedule_cache_ttl_pulse` → `run_cache_keepalive`）は Active の間しか繋がらないため、Idle/Sleep 落ち・夜間・再起動を挟んだ最初の会話はほぼ確実に経路2を踏む。
+（→ 同上、**2026-07-29 に経路2ごと撤去済み**。「経路2を踏む」状況は現在は編纂なしの初期読み込みになる）
 
 **経路2の含意（本設計の急所）**: Case 3 の最小ロードは `_run_metabolism` を通らない**サイレント eviction**である。「大事な話をして、区切りがついて、会話が終わり、夜を跨ぐ」——状態の告知として最もありがちな形——は、応答後 Metabolism にだけ採取を付けても**一度も網を通らずに流れ去る**。
 

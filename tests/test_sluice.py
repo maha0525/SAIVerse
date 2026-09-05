@@ -31,7 +31,7 @@ from sea.session_window import SessionWindow
 
 #: run_metabolism 検証用の水位。1,000字 × 5 通の窓で、末尾 2,000字 (2 通) を
 #: 保護し、残り 3,000字を U=2,500字 で 1 束に畳む → anchor は m3 へ。
-_METABOLISM_WATERMARKS = Watermarks(low=2_000, target=2_000, high=4_000)
+_METABOLISM_WATERMARKS = Watermarks(target=2_000, high=4_000)
 
 
 def _metabolism_messages(count=5, chars=1_000):
@@ -2582,7 +2582,7 @@ class DeferToHotTest(unittest.TestCase):
         # (§6-5 で persona 属性は廃止)。
         lifecycle.load_anchor_entry = lambda pid, mk: {"anchor_id": "anchor"}
         lifecycle.get_metabolism_watermarks = lambda p, mk=None: Watermarks(
-            low=10_000, target=20_000, high=20_000,
+            target=20_000, high=20_000,
         )
         lifecycle._is_cache_hot = lambda p, mk=None: hot
         ran = []

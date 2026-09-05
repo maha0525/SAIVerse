@@ -233,22 +233,20 @@ class SEARuntime:
         # その契約が破れた場合だけなので、見送る (Codex 九巡目)。
         if not _pre_model_key or _pre_model_key in ("unknown", "None"):
             _refuse_pulse("no execution model")
-        # 読み戻し (arasuji_levels.md §15): 非常畳みの対称。話しかけた時点で
-        # 提示ウィンドウが残す量を下回っていたら、応答より先に畳んだところを
-        # 開き直す (LLM なし・帳簿のみ)。通常は "skip" で素通り。非常畳みより
-        # 先に走るが、非常畳みの退場は会話の行を残す量ぶん守る (f288f003) ので、
-        # ここで確保した行は非常畳みの後も残る (例外: 上限を超えるまたぐ区間
-        # は digest に戻る — 収束はテストで確認済み)。
-        # run_meta_user は user / schedule / auto の共通入口なので、§15-4 の
-        # 「発火は user Pulse の会話開始時のみ」をここで絞る — 自律 Pulse の
-        # 軽量 model に会話用の厚い生ログを開かない。
-        if pulse_type in (None, "user"):
-            try:
-                self.session_lifecycle.maybe_run_window_refill(
-                    persona, building_id, model_key=_pre_model_key,
-                )
-            except Exception:
-                LOGGER.exception("[metabolism] window refill failed")
+        # 読み戻し (arasuji_levels.md §15): 非常畳みの対称。Pulse が始まった
+        # 時点で窓の会話文が残す量を下回っていたら、応答より先に畳んだ
+        # あらすじを新しい順に開き直す (LLM なし・帳簿のみ)。通常は "skip" で
+        # 素通り。非常畳みより先に走るが、非常畳みの退場は会話の行を残す量
+        # ぶん守る (f288f003) ので、ここで確保した行は非常畳みの後も残る。
+        # 最終防衛ラインと同じく**全種の Pulse** で走らせる (2026-09-05
+        # まはー裁定): 自律→会話と連続したとき、自律側で窓が手当てされないと
+        # 会話側で窓が変わり、キャッシュヒットしなくなる。
+        try:
+            self.session_lifecycle.maybe_run_window_refill(
+                persona, building_id, model_key=_pre_model_key,
+            )
+        except Exception:
+            LOGGER.exception("[metabolism] window refill failed")
         # 最終防衛ライン (docs/issues/window_floor_and_refill_redesign.md): 窓の
         # 会話の行が残す量を下回ったまま発話させない。読み戻しが何かの理由で
         # 埋め切れなくても、起点より古い会話があるかぎり生のまま読み足す。

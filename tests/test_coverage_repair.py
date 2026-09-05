@@ -217,7 +217,7 @@ class TestResolveCompileCeiling:
         persona = _model_persona(adapter, "model-a")
         with patch.object(
             lc, "get_metabolism_watermarks",
-            return_value=Watermarks(low=100, target=450, high=1000),
+            return_value=Watermarks(target=450, high=1000),
         ):
             ceiling = resolve_compile_ceiling(
                 lc, PERSONA_ID, adapter.conn, persona=persona,
@@ -228,7 +228,7 @@ class TestResolveCompileCeiling:
         # 全体が残す量に満たなければ最古の行が上端 (= 何も編纂しない)
         with patch.object(
             lc, "get_metabolism_watermarks",
-            return_value=Watermarks(low=100, target=100_000, high=None),
+            return_value=Watermarks(target=100_000, high=None),
         ):
             ceiling = resolve_compile_ceiling(
                 lc, PERSONA_ID, adapter.conn, persona=persona,
@@ -275,7 +275,7 @@ class TestResolveCompileCeiling:
         lc = _make_lifecycle(session_factory)
         _warm_row(lc, "model-b", ids[3])  # 他 model の温かい行 (いちばん新しい)
         persona = _model_persona(adapter, "model-a")  # 記録なし
-        wm = Watermarks(low=100, target=450, high=1000)  # 下限 = ids[1]
+        wm = Watermarks(target=450, high=1000)  # 下限 = ids[1]
         with patch.object(lc, "get_metabolism_watermarks", return_value=wm):
             ceiling = resolve_compile_ceiling(
                 lc, PERSONA_ID, adapter.conn, persona=persona,
@@ -558,7 +558,7 @@ class TestEstimateGenerationParity:
         ids = _add_messages(adapter, 4)
         lc = _make_lifecycle(session_factory)
         persona = _persona(adapter)
-        wm = Watermarks(low=100, target=450, high=1000)  # 新しい側 3 通が残る
+        wm = Watermarks(target=450, high=1000)  # 新しい側 3 通が残る
 
         with patch.object(lc, "get_metabolism_watermarks", return_value=wm):
             est = _estimate(lc, adapter, persona)

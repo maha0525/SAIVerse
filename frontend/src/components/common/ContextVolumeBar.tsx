@@ -7,16 +7,18 @@ export interface ContextStatus {
     persona_id: string;
     model: string | null;
     metabolism: boolean;              // 実効モデルが水位を持つか
-    low_chars: number | null;         // 最初に読み込む量
-    target_chars: number | null;      // 残す量 (整理後にここへ揃える)
+    target_chars: number | null;      // 残す量 (整理後にここへ揃える。会話の起点が無いときの初期読み込み量も兼ねる)
     high_chars: number | null;        // 上限 (超えたら整理)
     presented_chars: number | null;   // 現在の提示コンテキスト文字数 (読み戻し後)
-    // presented_chars の内訳 (2026-09-02): 保存済みの会話 / 送信直前に差し込まれる
-    // 部屋の様子。古い backend では undefined。
+    // presented_chars の内訳の三分割 (2026-09-02 / 2026-09-04): 会話の行 /
+    // スペル結果などの機構名義の行 / 送信直前に差し込まれる部屋の様子。
+    // 古い backend では undefined。
     stored_chars?: number | null;
+    mechanism_chars?: number | null;
     injected_perception_chars?: number | null;
     // 残す量 (target_chars) と比べる量 = 整理が計画を立てる窓の**会話の行だけ**
-    // (2026-09-03 裁定: 上限の主語は合計、残す量の主語は会話の行)。古い backend
+    // (2026-09-03 / 2026-09-04 裁定: 上限の主語は合計、残す量の主語は会話の行 —
+    // スペル結果・部屋の様子は数えない)。古い backend
     // では undefined、新しい backend でも測れなければ null — どちらも色分けは
     // presented_chars で代用するが、内訳の行は数値のときだけ出す。
     window_rows_chars?: number | null;
@@ -77,6 +79,22 @@ export default function ContextVolumeBar({ status }: ContextVolumeBarProps) {
     const rowsField = status.window_rows_chars;
     const rows = rowsField ?? presented;
     const perceptionChars = status.injected_perception_chars ?? null;
+    const mechanismChars = status.mechanism_chars ?? null;
+    // 内訳 (うち会話 …) — 会話の量が測れているときだけ出し、0 の部分は省く
+    // (B=0 なら非表示の流儀)。「会話」は stored_chars (presented の分解) を使う —
+    // window_rows_chars は計画窓の量で、正規化で presented と食い違うと
+    // 「うち」の足し算が合計と合わなくなる (ローカルレビュー指摘 2026-09-04)。
+    const storedChars = status.stored_chars ?? null;
+    const breakdownParts: string[] = [];
+    if (typeof storedChars === 'number') {
+        breakdownParts.push(`会話 ${storedChars.toLocaleString()}`);
+        if (mechanismChars != null && mechanismChars > 0) {
+            breakdownParts.push(`スペル結果 ${mechanismChars.toLocaleString()}`);
+        }
+        if (perceptionChars != null && perceptionChars > 0) {
+            breakdownParts.push(`部屋の様子 ${perceptionChars.toLocaleString()}`);
+        }
+    }
 
     return (
         <>
@@ -97,8 +115,8 @@ export default function ContextVolumeBar({ status }: ContextVolumeBarProps) {
             <div className={styles.contextStatRow}>
                 <span>
                     現在 {presented.toLocaleString()}文字{status.refill_applied ? '（読み戻し後）' : ''}
-                    {typeof rowsField === 'number' && perceptionChars != null && perceptionChars > 0
-                        ? `（うち会話 ${rowsField.toLocaleString()}・部屋の様子 ${perceptionChars.toLocaleString()}）`
+                    {breakdownParts.length > 1
+                        ? `（うち${breakdownParts.join('・')}）`
                         : ''}
                 </span>
                 <span>
@@ -109,7 +127,7 @@ export default function ContextVolumeBar({ status }: ContextVolumeBarProps) {
             {status.perception_over_budget && (
                 <div className={styles.contextStatRow}>
                     <span>
-                        部屋の様子だけで上限を超えています。会話は残す量以下なので、整理しても畳めるものはありません。
+                        会話は残す量以下ですが、スペル結果や部屋の様子を足した合計が上限を超えています。整理しても畳めるものはありません。
                     </span>
                 </div>
             )}

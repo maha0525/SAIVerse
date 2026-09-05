@@ -6,6 +6,7 @@ import ProviderManagementPanel from './settings/ProviderManagementPanel';
 import ModelManagementPanel from './settings/ModelManagementPanel';
 import FeedManagementPanel from './settings/FeedManagementPanel';
 import ModalOverlay from './common/ModalOverlay';
+import WatermarkBar, { WATERMARK_LABELS, WatermarkBarValues, findWatermarkOrderViolations } from './common/WatermarkBar';
 
 interface GlobalSettingsModalProps {
     isOpen: boolean;
@@ -80,6 +81,21 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
     const [geminiAutoCacheKeepInput, setGeminiAutoCacheKeepInput] = useState('0');
     const [geminiAutoCacheKeepMax, setGeminiAutoCacheKeepMax] = useState(3600);
 
+    // 記憶の整理の水位 — 全体既定 (GET/PUT /api/config/metabolism-defaults)。
+    // 三層 (組み込み既定 < 全体設定 < モデル定義) の真ん中。欄の文字列は編集中の
+    // 値で、'' = 未設定 (組み込み既定に従う)。保存は明示ボタンでまとめて送る。
+    type WatermarkKey = keyof WatermarkBarValues;
+    const WATERMARK_KEYS: WatermarkKey[] = ['target', 'high'];
+    const WATERMARK_API_KEYS: Record<WatermarkKey, string> = {
+        target: 'metabolism_target_chars', high: 'metabolism_high_chars',
+    };
+    const [wmGlobal, setWmGlobal] = useState<WatermarkBarValues>({ target: null, high: null });
+    const [wmBuiltin, setWmBuiltin] = useState<WatermarkBarValues>({ target: 40000, high: 120000 });
+    const [wmInputs, setWmInputs] = useState<Record<WatermarkKey, string>>({ target: '', high: '' });
+    const [wmSaving, setWmSaving] = useState(false);
+    const [wmError, setWmError] = useState<string | null>(null);
+    const [wmSavedAt, setWmSavedAt] = useState<number | null>(null);
+
     // Collapsible sections
     const [envSectionOpen, setEnvSectionOpen] = useState(false);
 
@@ -153,6 +169,7 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
             loadImageDefaultQuality();
             loadMediaRecallState();
             loadGeminiAutoCacheState();
+            loadMetabolismDefaults();
             // Load theme from localStorage
             const saved = localStorage.getItem('saiverse-theme') as 'system' | 'light' | 'dark' | null;
             setTheme(saved || 'system');
@@ -326,6 +343,85 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
             return;
         }
         saveGeminiAutoCache(geminiAutoCacheEnabled, next);
+    };
+
+    const applyMetabolismDefaults = (data: { global?: WatermarkBarValues; builtin?: WatermarkBarValues }) => {
+        const g = data.global ?? { target: null, high: null };
+        setWmGlobal(g);
+        if (data.builtin) setWmBuiltin(data.builtin);
+        setWmInputs({
+            target: g.target != null ? String(g.target) : '',
+            high: g.high != null ? String(g.high) : '',
+        });
+    };
+
+    const loadMetabolismDefaults = async () => {
+        try {
+            const res = await fetch('/api/config/metabolism-defaults');
+            if (res.ok) {
+                applyMetabolismDefaults(await res.json());
+                setWmError(null);
+            }
+        } catch (e) {
+            console.error('Failed to load metabolism defaults', e);
+        }
+    };
+
+    // 欄の文字列 → 数値 (空欄 = null = 未設定)。整数でない文字は NaN で返して呼び出し側が弾く。
+    const parseWatermarkInput = (raw: string): number | null => {
+        const s = raw.trim();
+        if (s === '') return null;
+        if (!/^\d+$/.test(s)) return Number.NaN;
+        return parseInt(s, 10);
+    };
+
+    // 画面上の実効値 = 欄に数字があればそれ、空欄なら組み込み既定 (棒と順序検査に使う)
+    const wmEdited: WatermarkBarValues = {
+        target: parseWatermarkInput(wmInputs.target),
+        high: parseWatermarkInput(wmInputs.high),
+    };
+    const wmHasNaN = WATERMARK_KEYS.some(k => Number.isNaN(wmEdited[k]));
+    const wmHasZero = WATERMARK_KEYS.some(k => wmEdited[k] != null && (wmEdited[k] as number) < 1);
+    // 棒に渡す実効値。NaN (数字でない入力) は null 扱いで既定に落とす — `??` は NaN を
+    // 通してしまい、凡例が「NaN 字」になる。
+    const wmNum = (v: number | null): number | null => (v == null || Number.isNaN(v) ? null : v);
+    const wmEffective: WatermarkBarValues = {
+        target: wmNum(wmEdited.target) ?? wmBuiltin.target,
+        high: wmNum(wmEdited.high) ?? wmBuiltin.high,
+    };
+    const wmViolations = wmHasNaN || wmHasZero ? new Set<WatermarkKey>() : findWatermarkOrderViolations(wmEffective);
+    const wmDirty = WATERMARK_KEYS.some(k => (wmEdited[k] ?? null) !== (wmGlobal[k] ?? null));
+    const wmCanSave = !wmSaving && wmDirty && !wmHasNaN && !wmHasZero && wmViolations.size === 0;
+
+    const saveMetabolismDefaults = async () => {
+        if (!wmCanSave) return;
+        setWmSaving(true);
+        setWmError(null);
+        try {
+            // 変えた欄だけ送る (PUT は省略 = 触らない)。三つ全部を送ると、最初の読み込みに
+            // 失敗して欄が空のまま一欄だけ直したとき、残り二つを null で消してしまう。
+            const body: Record<string, number | null> = {};
+            for (const k of WATERMARK_KEYS) {
+                if ((wmEdited[k] ?? null) !== (wmGlobal[k] ?? null)) body[WATERMARK_API_KEYS[k]] = wmEdited[k] ?? null;
+            }
+            const res = await fetch('/api/config/metabolism-defaults', {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body),
+            });
+            if (!res.ok) {
+                let detail = `HTTP ${res.status}`;
+                try { const j = await res.json(); if (j?.detail) detail = String(j.detail); } catch { /* 本文なし */ }
+                setWmError(`保存できませんでした: ${detail}`);
+                return;
+            }
+            applyMetabolismDefaults(await res.json());
+            setWmSavedAt(Date.now());
+        } catch (e) {
+            setWmError(`保存できませんでした: ${e}`);
+        } finally {
+            setWmSaving(false);
+        }
     };
 
     const loadDeveloperModeState = async () => {
@@ -819,6 +915,83 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                                         className={`${styles.toggle} ${developerMode ? styles.active : ''}`}
                                         onClick={toggleDeveloperMode}
                                     />
+                                </div>
+
+                                {/* 記憶の整理の水位 (全体既定) */}
+                                <div className={`${styles.toggleContainer} ${styles.toggleContainerStacked}`}>
+                                    <div>
+                                        <div className={styles.toggleLabel}>
+                                            <Layers size={18} />
+                                            記憶の整理の水位
+                                        </div>
+                                        <div className={styles.toggleDescription}>
+                                            会話の履歴がどれだけ溜まったら古い部分をあらすじへ畳むか、その目安を文字数で決めます。ここは全モデル共通の既定値です。
+                                        </div>
+                                    </div>
+                                    <div className={styles.wmBarArea}>
+                                        <WatermarkBar values={wmEffective} invalidKeys={wmViolations} />
+                                    </div>
+                                    <div className={styles.wmFields}>
+                                        {WATERMARK_KEYS.map(k => {
+                                            const isUser = wmEdited[k] != null;
+                                            const bad = wmViolations.has(k) || Number.isNaN(wmEdited[k]) || (wmEdited[k] != null && (wmEdited[k] as number) < 1);
+                                            return (
+                                                <div key={k} className={styles.wmField}>
+                                                    <label className={styles.subSettingLabel} htmlFor={`wm-${k}`}>
+                                                        {WATERMARK_LABELS[k]}
+                                                        <span className={`${styles.wmBadge} ${isUser ? styles.wmBadgeUser : ''}`}>
+                                                            {isUser ? '設定した値' : `既定 ${(wmBuiltin[k] ?? 0).toLocaleString()} 字`}
+                                                        </span>
+                                                    </label>
+                                                    <div className={styles.wmInputRow}>
+                                                        <input
+                                                            id={`wm-${k}`}
+                                                            type="text"
+                                                            inputMode="numeric"
+                                                            className={`${styles.subSettingInput} ${bad ? styles.wmInputBad : ''}`}
+                                                            value={wmInputs[k]}
+                                                            placeholder={`${(wmBuiltin[k] ?? 0).toLocaleString()}`}
+                                                            onChange={e => { const v = e.target.value; setWmInputs(prev => ({ ...prev, [k]: v })); }}
+                                                            onKeyDown={e => { if (e.key === 'Enter') saveMetabolismDefaults(); }}
+                                                        />
+                                                        <span className={styles.wmUnit}>字</span>
+                                                        <button
+                                                            type="button"
+                                                            className={styles.wmResetBtn}
+                                                            disabled={wmInputs[k] === ''}
+                                                            onClick={() => setWmInputs(prev => ({ ...prev, [k]: '' }))}
+                                                        >
+                                                            既定に戻す
+                                                        </button>
+                                                    </div>
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+                                    {(wmViolations.size > 0) && (
+                                        <div className={styles.wmMessageBad}>
+                                            整理後に残す量 ≤ 整理をはじめる量 の順にしてください
+                                        </div>
+                                    )}
+                                    {(wmHasNaN || wmHasZero) && (
+                                        <div className={styles.wmMessageBad}>
+                                            1 以上の整数を入力してください（空欄 = 既定に戻す）
+                                        </div>
+                                    )}
+                                    {wmError && <div className={styles.wmMessageBad}>{wmError}</div>}
+                                    <div className={styles.wmFooter}>
+                                        <span className={styles.subSettingHint}>
+                                            モデル設定で数値を入れたモデルはそちらが優先されます。空欄のモデルはこの値に従います。
+                                        </span>
+                                        <button
+                                            type="button"
+                                            className={styles.saveBtn}
+                                            disabled={!wmCanSave}
+                                            onClick={saveMetabolismDefaults}
+                                        >
+                                            <Save size={16} /> {wmSaving ? '保存中...' : wmSavedAt && !wmDirty ? '保存しました' : '保存'}
+                                        </button>
+                                    </div>
                                 </div>
 
                             </div>

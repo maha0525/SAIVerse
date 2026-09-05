@@ -228,11 +228,11 @@ cd SAIVerse
 
 ターミナルで `SAIVerse` フォルダに移動し、以下を実行してください：
 ```bash
-chmod +x setup.sh start.sh
 ./setup.sh
 ```
 ![setup.sh](assets/image/guide/quickstart_setup_linux.png)
 ※Python仮想環境の作成、依存パッケージのインストール、データベース初期化、埋め込みモデルのダウンロードを自動実行します
+※`permission denied` のような表示が出て実行できない場合は、`chmod +x setup.sh start.sh` を実行してから再度お試しください（解凍ソフトによっては実行権限が外れることがあります）
 
 初回起動時にチュートリアルが表示され、ユーザー名やAPIキーの設定を案内します。
 

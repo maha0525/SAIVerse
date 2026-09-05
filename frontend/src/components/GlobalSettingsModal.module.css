@@ -1516,3 +1516,130 @@
 :global([data-theme="dark"]) .subTab:hover {
     background: rgba(255, 255, 255, 0.06);
 }
+
+/* --- 記憶の整理の水位 (全体既定) --- */
+.wmBarArea {
+    margin-top: 0.75rem;
+}
+
+.wmFields {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 0.75rem;
+    margin-top: 0.5rem;
+    padding-top: 0.75rem;
+    border-top: 1px solid #334155;
+}
+
+.wmField {
+    min-width: 0;
+}
+
+.wmBadge {
+    display: inline-block;
+    margin-left: 0.5rem;
+    padding: 0.05rem 0.45rem;
+    border-radius: 999px;
+    font-size: 0.72rem;
+    font-weight: 500;
+    background: #334155;
+    color: #cbd5e1;
+    vertical-align: middle;
+}
+
+.wmBadgeUser {
+    background: rgba(34, 197, 94, 0.2);
+    color: #4ade80;
+}
+
+.wmInputRow {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+}
+
+.wmInputRow .subSettingInput {
+    width: 7.5rem;
+    font-variant-numeric: tabular-nums;
+}
+
+.wmInputBad {
+    border-color: #f87171 !important;
+    box-shadow: 0 0 0 2px rgba(248, 113, 113, 0.2) !important;
+}
+
+.wmUnit {
+    font-size: 0.85rem;
+    color: #94a3b8;
+}
+
+.wmResetBtn {
+    padding: 0.3rem 0.6rem;
+    border: 1px solid #475569;
+    border-radius: 6px;
+    background: transparent;
+    color: #cbd5e1;
+    font-size: 0.78rem;
+    cursor: pointer;
+    white-space: nowrap;
+}
+
+.wmResetBtn:hover:not(:disabled) {
+    background: #334155;
+}
+
+.wmResetBtn:disabled {
+    opacity: 0.45;
+    cursor: default;
+}
+
+.wmMessageBad {
+    margin-top: 0.6rem;
+    font-size: 0.85rem;
+    color: #f87171;
+}
+
+.wmFooter {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    flex-wrap: wrap;
+    margin-top: 0.75rem;
+}
+
+.wmFooter .subSettingHint {
+    margin-top: 0;
+    flex: 1 1 16rem;
+}
+
+:global([data-theme="light"]) .wmFields {
+    border-top-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .wmBadge {
+    background: #e2e8f0;
+    color: #475569;
+}
+
+:global([data-theme="light"]) .wmBadgeUser {
+    background: rgba(34, 197, 94, 0.15);
+    color: #15803d;
+}
+
+:global([data-theme="light"]) .wmUnit {
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .wmResetBtn {
+    border-color: #cbd5e1;
+    color: #475569;
+}
+
+:global([data-theme="light"]) .wmResetBtn:hover:not(:disabled) {
+    background: #f1f5f9;
+}
+
+:global([data-theme="light"]) .wmMessageBad {
+    color: #dc2626;
+}

@@ -6,7 +6,7 @@
 
 ## 原因
 
-`ModelEditorModal.tsx` の設計 (2026-07-30): 水位 3 項目 (`metabolism_high_chars` / `metabolism_target_chars` / `metabolism_low_chars`) は専用欄が**単独所有**し、追加設定 JSON からは保存時に常に除外する。二重所有だと「欄を空にしても JSON 側の値が復活する」(当時の Codex 指摘) ため。その帰結として、JSON に書いた水位キーは**警告なしに剥ぎ取られる**。
+`ModelEditorModal.tsx` の設計 (2026-07-30): 水位項目 (`metabolism_high_chars` / `metabolism_target_chars`。発見当時は `metabolism_low_chars` も — 低水位は 2026-09-04 に廃止され専用欄から外れた) は専用欄が**単独所有**し、追加設定 JSON からは保存時に常に除外する。二重所有だと「欄を空にしても JSON 側の値が復活する」(当時の Codex 指摘) ため。その帰結として、JSON に書いた水位キーは**警告なしに剥ぎ取られる**。
 
 ## 修正方針 (2026-08-31 まはー案で確定)
 

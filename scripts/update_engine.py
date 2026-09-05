@@ -684,6 +684,24 @@ def _format_local_changes(status: str) -> str:
     return text
 
 
+def _discard_command(status: str) -> str:
+    """A copy-pasteable ``git checkout --`` command that discards the refused
+    changes, built from the same paths the message lists.
+
+    When every change can be named — the list was not truncated at
+    ``LOCAL_CHANGES_LIST_LIMIT`` and no entry is a rename (rendered
+    ``old -> new``, which is not a path) — the command names each file, so the
+    user can see exactly what it touches. Otherwise the per-file form would
+    discard only part of the changes and the update would refuse again, so the
+    catch-all ``git checkout -- .`` is offered instead.
+    """
+    paths = _parse_porcelain_z(status)
+    plain = [p for p in paths[:LOCAL_CHANGES_LIST_LIMIT] if " -> " not in p]
+    if plain and len(plain) == len(paths):
+        return "git checkout -- " + " ".join(f'"{p}"' if " " in p else p for p in plain)
+    return "git checkout -- ."
+
+
 def assert_git_update_ready(project_dir: Path) -> str:
     """Refuse to update unless the checkout is a Git repo with no modified
     tracked files, and return the current ``HEAD`` revision.
@@ -694,8 +712,10 @@ def assert_git_update_ready(project_dir: Path) -> str:
     an untracked *or ignored* file at a path the new revision adds — is refused
     by the merge in ``update_code`` (``--no-overwrite-ignore``), which names the
     file and leaves the checkout untouched. Modified tracked files still refuse
-    because the updater never stashes or resets user work; the missing exit for
-    that situation is docs/issues/update_refuses_on_tracked_local_changes_without_exit.md.
+    because the updater never stashes or resets user work; the refusal message
+    names the files and shows both exits — discard with ``git checkout --`` or
+    keep by committing — so a non-developer can act on it (history:
+    docs/issues/archive/update_refuses_on_tracked_local_changes_without_exit.md).
     """
     if not (project_dir / ".git").is_dir() or shutil.which("git") is None:
         raise UpdateError(
@@ -712,9 +732,14 @@ def assert_git_update_ready(project_dir: Path) -> str:
     ).stdout
     if status.strip("\0 \r\n"):
         raise UpdateError(
-            "Working tree has local changes. Update was not started; commit or otherwise "
-            "resolve them explicitly. The updater never stashes or resets user work.\n"
-            "Modified files:\n" + _format_local_changes(status)
+            "Working tree has local changes. Update was not started; the updater "
+            "never stashes or resets user work.\n"
+            "Modified files:\n" + _format_local_changes(status) + "\n"
+            "If you do not need these changes, discard them by running this "
+            "command in the SAIVerse folder, then run the update again:\n"
+            "  " + _discard_command(status) + "\n"
+            "If you want to keep the changes, commit them first, then run the "
+            "update again."
         )
     return _run(
         ["git", "rev-parse", "HEAD"],
