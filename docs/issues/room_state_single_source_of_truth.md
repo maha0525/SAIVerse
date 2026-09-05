@@ -1,6 +1,6 @@
 # 部屋の様子の一元化 — head の Visual Context を退役し、知覚 (tail) を唯一の置き場にする
 
-**ステータス**: 🔲 未解決 (設計待ち) — 2026-09-05 まはー発案。急がない (下記の有界性)。着手時は intent を起こして設計議論から
+**ステータス**: 🔲 未解決 (設計は [room_state_packages.md](../intent/room_state_packages.md) へ合流 — 2026-09-06 まはー裁定でパッケージ再設計と一緒に設計。実装完了までこの issue はここに置く)
 **深刻度**: 中〜低 — 二重は**同時に一部屋ぶんまでしか絶対に起きない** (head は一部屋しか見せず、知覚側の重複相手はその一部屋だけ — 2026-09-05 まはーの観察)。被害は有界で、v0.3.9 の知覚上限が総量の天井も張る
 **発見**: 2026-09-05 (v0.3.9 実機検証。head 照合の対処を入れた後も、恒常的に二重が発生する経路が残ると確認した)
 **関連**: [room_state_duplicates_head_inventory.md](room_state_duplicates_head_inventory.md) (今日の対処 = head 照合。本 issue が実現すればあの機構ごと退役できる) / [perception_buffer.md](../intent/perception_buffer.md) §10.8〜§10.8.1 / 「会話の畳みと知覚の省略で割れ時点が二つある」問題 (まはー考え中、[watermarks issue](watermarks_unsatisfiable_when_perception_is_large.md))

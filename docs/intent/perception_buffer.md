@@ -259,6 +259,8 @@ Cached Head が「Metabolism まで snapshot を凍結」、visual_context / mem
 
 ### 10.8 部屋の様子は再訪なら差分だけ + 土台の回復 (2026-09-04 まはー裁定、2026-09-05 実装)
 
+> ⚠️ **2026-09-06: 本節と §10.8.1 は再設計で置き換え予定。** 差分を描画済み文字列の解析で組む方式に出荷停止級の欠陥が見つかり ([issue](../issues/room_state_diff_built_on_string_parsing.md))、パッケージ単位の再設計が [room_state_packages.md](room_state_packages.md) で進行中 (head の Visual Context 退役 = 一元化も同時)。§10.9 (知覚の合計上限) は生きる。以下は当時の設計として残す。
+
 **問題**: §5.4 の「移動先の様子」は移動のたびに全アイテムの説明つき全文を積む。同じ部屋を行き来するだけで同じ 1 万字級の全文が提示に何枚も並び、知覚が「残す量」の保護枠を食い潰す原因の筆頭になっていた (issue `watermarks_unsatisfiable_when_perception_is_large.md`)。
 
 **採らなかった案**: 「同じ部屋は最新だけ残す」。提示の途中の行を消すことになり、プロンプトキャッシュの前方一致が割れる (知覚の上限を一個ずつ下ろす案と同型の欠陥)。
