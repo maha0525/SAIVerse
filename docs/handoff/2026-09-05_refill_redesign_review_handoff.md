@@ -9,14 +9,14 @@
 
 ## 正本の場所
 
-- **設計と裁定**: `docs/issues/refill_reads_by_budget_instead_of_arasuji_unit.md` — §裁定の確定 (9 点) が仕様のすべて。§レビューの残余が全指摘の処置記録 (採用 3 / 却下・受容 4、理由つき)。
+- **設計と裁定**: `docs/issues/archive/refill_reads_by_budget_instead_of_arasuji_unit.md` — §裁定の確定 (9 点) が仕様のすべて。§レビューの残余が全指摘の処置記録 (採用 3 / 却下・受容 4、理由つき)。
 - **intent**: `docs/intent/arasuji_levels.md` §15 (新設計へ書き換え済み・未コミット)。
 - **7/30 棚卸し** (実装後の宿題): `docs/issues/audit_20260730_review_guards.md` — まはー裁定でスコープは「当時のセッションが触ったコード全部の再検証」。
 
 ## コミット状況
 
 - コミット済み (未 push): `d3ae1c43` (裁定の確定 docs) / `f98a26f2` (棚卸しスコープ拡大)。その手前に 9/4 までの未 push 数件あり。push はまはーに言われてから。
-- **未コミット (= 検収対象の本体)**: `sea/window_refill.py` (全面書き換え 541→187 行) / `sea/session_lifecycle.py` (`_plan_window_refill` 一本化 + `_read_segment_before` 新設) / `sea/runtime.py` (全 Pulse 化) / `sea/work_session.py` (読み戻し配線) / `sea/runtime_context.py` (コメントのみ) / `sai_memory/arasuji/storage.py` (照会ヘルパ 2 本 + チャンク分割修正が入る予定) / `tests/test_window_refill.py` / `tests/test_work_session.py` / `tests/test_window_floor.py` / `docs/intent/arasuji_levels.md` / `docs/concepts/metabolism.md` / `docs/issues/refill_reads_by_budget_instead_of_arasuji_unit.md` / `docs/overview/in_flight.md`。
+- **未コミット (= 検収対象の本体)**: `sea/window_refill.py` (全面書き換え 541→187 行) / `sea/session_lifecycle.py` (`_plan_window_refill` 一本化 + `_read_segment_before` 新設) / `sea/runtime.py` (全 Pulse 化) / `sea/work_session.py` (読み戻し配線) / `sea/runtime_context.py` (コメントのみ) / `sai_memory/arasuji/storage.py` (照会ヘルパ 2 本 + チャンク分割修正が入る予定) / `tests/test_window_refill.py` / `tests/test_work_session.py` / `tests/test_window_floor.py` / `docs/intent/arasuji_levels.md` / `docs/concepts/metabolism.md` / `docs/issues/archive/refill_reads_by_budget_instead_of_arasuji_unit.md` / `docs/overview/in_flight.md`。
 
 ## 残りの手順 (この順で)
 

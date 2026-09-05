@@ -1,6 +1,6 @@
 # 読み戻しが「あらすじの途中まで」遡ろうとして、一歩も動かない
 
-**ステータス**: 検証待ち — 再実装・レビュー消し込み完了 (下の §レビューの残余)。まはーの実機でエリスの窓に読み戻しが入ることの確認待ち
+**ステータス**: 完了 (2026-09-05、まはーの実機で検証) — 残す量を 50,000 へ引き上げた次の Pulse で、新実装が一番新しいあらすじ 1 本を丸ごと開き、会話 44,473 → 50,093 字で目標到達により停止した (詳細は §経緯 末尾)
 **深刻度**: 高 — 会話が残す量を下回っても、畳んだ会話が二度と窓へ戻らない。最終防衛ライン (生のまま読み足す方) だけが毎回働く状態になる
 **発見**: 2026-09-04 (エリスの実機で、同日のスペル結果の裁定を入れた直後に露出)
 **関連**: [watermarks_unsatisfiable_when_perception_is_large.md](watermarks_unsatisfiable_when_perception_is_large.md) (露出のきっかけ) / [archive/window_floor_and_refill_redesign.md](archive/window_floor_and_refill_redesign.md) (9/4 未明の再設計。この判定を掃討し損ねた) / [arasuji_levels.md](../intent/arasuji_levels.md) §15
@@ -142,3 +142,4 @@ rows=24029 target=40000): rung 1 is broken (4 source id(s) missing from the pres
 - **9/4 未明の再設計** (`9e697a2a`) で、`broken` に足されていた二つの条件のうち「既存の圧縮区間との重なり」だけを外し、「材料が履歴に見つからない」を残した。同じ族の掃討を宣言しながら、隣を見落とした。
 - **2026-09-05**: 現状の全分岐を洗った資料のレビューで設計が確定 (§裁定の確定)。9/4 時点の「実装の当たり」節 (床の整合を未決の問いとして残していた) は §実装の方針 に差し替えた — 床は現状のままが裁定。
 - **2026-09-05 02:57、新実装でバックエンド再起動。エリスの窓は既に目標量を超えていたため、新しい読み戻しはまだ一度も開く動作をしていない。** 停止していた窓 (会話 24,029 字) を目標量まで戻したのは新実装ではなく、旧実装の下で**最終防衛ライン (床) が二回発動した**こと — 旧セッションのログに `window floor applied ... rows 24029 chars < target=40000; read 14 message(s) (8269 chars)` (02:06:28) と `rows 36274 chars < target=40000; read 5 message(s) (4048 chars)` (02:12:01) が残っている。どちらも `The refill upstream failed to keep the floor` 付き。間に旧読み戻しが 1 段だけ開いている (`rows 33888 -> 36274`, `rung 2 is broken` で停止)。再起動後の 5 回の Pulse はいずれも `refill not needed: rows 41922 >= target=40000` で、`rung ... is broken` 系の警告も床の警告も出ていない (直ったのではなく、走る条件に入っていない)。新実装の開く動作の実機確認は、編纂で会話が目標を割る回まで持ち越し。
+- **2026-09-05 10:40、まはーが残す量を 40,000 → 50,000 に引き上げて実機検証。新実装が本番で初めて開き、設計どおりに動いた。** ログ: `window refill (persona=eris_city_a model=gemini-3.8-flash-paid): rows 44473 -> 50093 chars toward target=50000, total 89696 chars (high=120000; opened 0 in-window range(s), 0 straddling range(s), 1 older arasuji group(s), restored 11 message(s), resolution=self)`。起点より古い側のあらすじ 1 本を丸ごと開いて 11 通 (5,620 字) が生に戻り、50,093 ≧ 50,000 で停止 (超過 +93 字は設計どおりの正常)。スキップログ (`no surviving material` / `no readable rows`) はゼロ = 開いたあらすじの材料は全行読めた。WARNING・床の発動もゼロ。同日 9:00:00 にはスケジュール起動 (periodic) の Pulse でも判定が走っており (`refill not needed: rows 42908`)、会話限定の撤廃も本番経路で確認。これをもって完了。
