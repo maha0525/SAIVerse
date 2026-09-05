@@ -48,6 +48,7 @@
 
 | 状態 | 案件 | 次アクション | 誰待ち | doc / issue | 更新 |
 |---|---|---|---|---|---|
+| 🔵 設計中 | 再会の想起が個人ページ全文を知覚に積み、編纂が止まると無限に堆積する (v0.3.9 主案件) | 機構は特定済みで、対処の選択肢 4 つ (重複の置き換え / 全文の上限 / 知覚の合計上限 / 恒久解へ前倒し) を issue に提示済み。次 = まはーが方向を裁定し、実装に入る。 | まはー (裁定) | [issue](../issues/persona_recall_perception_unbounded.md) | 2026-09-05 |
 | 🟣 検証待ち | 記憶整理の三つの水位に全体設定の既定層を足す (コード既定 < 全体設定 < モデル設定) | 実装済み (DB 列・解決層・API・全体設定の水位バー・モデル編集の実効値表示・docs)。マージ済みで、次はまはーの実機で全体設定の画面と保存の反映を確認する。 | まはー (実機確認) | [chronicle_eviction.md §4](../intent/chronicle_eviction.md) / [metabolism.md](../concepts/metabolism.md) | 2026-09-03 |
 | 🟠 実装中 | 知覚が多いと「残す量」と「整理を始める量」を両方満たせない状況への対応と、既定値の見直し | 低水位の廃止・既定値・逆転クランプに加え、スペル結果を残す量の勘定から外す同族適用と送信量内訳の三分割 (裁定 8〜10) まで実装済みで、検収とまはーの体感チェック待ち。次 = 並行して、知覚の二水位上限 + 省略の印 + 保存時検査と、供給側 (想起の門 / スペルのスキーマ同梱 / 部屋の差分+移管) を順に実装する。 | 私 (実装) | [issue](../issues/watermarks_unsatisfiable_when_perception_is_large.md) / [metabolism.md](../concepts/metabolism.md) | 2026-09-04 |
 | 🟣 検証待ち | Chronicle 退場の適用側拒否権デッドロック根治 | 二つの顔 (編纂対象ゼロ fold の吸収限定退場 / あらすじ手動削除の道連れ) とも実装済み・回帰緑。次 = 実機で通常 Metabolism の退行がないことの確認。 | まはー (実機検証) | [issue](../issues/chronicle_eviction_applier_veto_deadlock.md) / [chronicle_eviction.md](../intent/chronicle_eviction.md) §2/§5-5/§6 | 2026-07-27 |
