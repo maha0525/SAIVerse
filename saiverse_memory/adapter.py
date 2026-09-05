@@ -478,12 +478,17 @@ class SAIMemoryAdapter:
         *,
         media: Optional[list] = None,
         allow_diff: bool = True,
+        head_full_text: Optional[str] = None,
     ) -> None:
         """「移動先の様子」を知覚台帳へ積む (再訪で土台が見えていれば差分だけ)。
 
         全文をそのまま積むか差分に縮めるかの判定と、その記帳は
         sai_memory/room_state.py が持つ。``allow_diff=False`` は毎回全文
         (Chronicle 無効ペルソナ — 提示窓で土台が消えうるので差分にできない)。
+
+        ``head_full_text`` は「head が今まさに見せている**この部屋**の姿」
+        (知覚記法の全文)。台帳に土台が無いときの土台になる — 呼び出し側が
+        head の building を確かめてから渡す (saiverse/dynamic_state.py)。
         """
         if not self._ready or not building_id or not full_text:
             return
@@ -493,6 +498,7 @@ class SAIMemoryAdapter:
             payload = build_room_state_push(
                 self.conn, building_id, full_text,
                 media=media, allow_diff=allow_diff,
+                head_full_text=head_full_text,
             )
             push_perception(
                 self.conn, ROOM_STATE_KIND, payload["content"],

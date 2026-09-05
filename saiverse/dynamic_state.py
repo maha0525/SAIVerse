@@ -85,6 +85,18 @@ class DynamicStateManager:
         if not getattr(persona, "persona_id", None):
             return True
         ok = True
+
+        # 「移動先の様子」の土台になれる head の姿は、**入室処理を始める前**に
+        # 読んでおく。この直後の inject_diff_notifications は ensure_snapshot を
+        # 通るので、snapshot が未構築のときや anchor TTL が切れているときは
+        # そこで head を撮り直す — 撮り直しは引数の building_id (= 移動先) を
+        # 写すため、後から読むと「たった今この入室が作った head」を土台に選ぶ。
+        # 初訪問でも「前回見たときから変わっていません」の一行になり、ペルソナ
+        # が見たことのない部屋に「前回」があったことにされる (2026-09-05 Codex
+        # 指摘)。土台にしてよいのは入室の時点で既に見えていた head だけなので、
+        # ここで確定させる。読み口は撮り直さないので、この前倒しに副作用は無い。
+        head_full_text = _head_view_of(persona, building_id)
+
         try:
             from sea.head_pipeline import inject_diff_notifications
             inject_diff_notifications(persona, manager, building_id)
@@ -130,6 +142,12 @@ class DynamicStateManager:
         # 積むのは全文とは限らない: 同じ部屋の前回のエントリがまだ提示に見えて
         # いれば差分だけになる (sai_memory/room_state.py)。行き来のたびに 1 万字
         # 級の全文が積み上がるのを止めるため (2026-09-04 まはー裁定)。
+        #
+        # 台帳に土台が無くても、head の visual_context がこの部屋を見せている
+        # ことがある — 部屋 A → B → A の往復がその形で、head の一覧と一字も
+        # 違わない全文が知覚にも積まれていた (2026-09-05 まはー実測)。head が
+        # 見せている姿 (head_full_text — 入室処理の前に確定させた値) を土台に
+        # 渡し、変化だけ (無ければ一行) にする。
         try:
             from builtin_data.tools.get_visual_context import get_visual_context
             from tools.context import persona_context
@@ -150,6 +168,7 @@ class DynamicStateManager:
                         sai_mem.push_room_state(
                             building_id, content, media=media,
                             allow_diff=_chronicle_enabled(persona, manager),
+                            head_full_text=head_full_text,
                         )
         except Exception:
             LOGGER.warning(
@@ -229,6 +248,36 @@ def _chronicle_enabled(persona: Any, manager: Any) -> bool:
             "treating the persona as chronicle-enabled", exc_info=True,
         )
         return True
+
+
+def _head_view_of(persona: Any, building_id: str) -> Optional[str]:
+    """head がいま **この** Building を見せているなら、その姿 (知覚記法の全文)。
+
+    見せていなければ None = 「土台なし」。head の visual_context は移動では
+    撮り直されない (Metabolism / anchor TTL 切れのみ) ので、部屋 A → B → A の
+    往復の間ずっと A を見せている — 帰還時の「移動先の様子」がその全文と一字も
+    違わない二重になっていた (issue room_state_duplicates_head_inventory)。
+
+    **呼ぶ順番が意味を持つ**: :meth:`DynamicStateManager.on_building_entered` は
+    入室処理の**最初**にこれを呼ぶ。後段の ``inject_diff_notifications`` が
+    ensure_snapshot 経由で head を移動先の姿に撮り直すことがあり、その後で
+    読むと入室自身が作った head を土台に選んでしまう。
+
+    引けなかったら None に倒す (= 従来どおり全文を積む)。ここの失敗で入室の
+    知覚そのものを落とさないよう、呼び出し側の try とは別に包む。
+    """
+    try:
+        from sea.head_pipeline import current_head_room
+        head_building_id, head_room_text = current_head_room(persona)
+    except Exception:
+        LOGGER.warning(
+            "[dynamic_state] could not read the head's current room; "
+            "pushing the full room text instead", exc_info=True,
+        )
+        return None
+    if head_building_id != building_id or not head_room_text:
+        return None
+    return head_room_text
 
 
 def _dispatch_head_event(

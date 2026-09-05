@@ -3,7 +3,9 @@
 """
 from sea.head_pipeline.integration import (
     build_line_head_input,
+    current_head_room,
     ensure_snapshot,
+    head_room_of_snapshot,
     inject_diff_notifications,
     render_head_messages,
 )
@@ -39,9 +41,11 @@ __all__ = [
     "RenderedSection",
     "StoredLineState",
     "build_line_head_input",
+    "current_head_room",
     "ensure_snapshot",
     "get_default_pipeline",
     "get_default_registry",
+    "head_room_of_snapshot",
     "inject_diff_notifications",
     "notify_head_mutation",
     "notify_head_mutation_from_tool_context",

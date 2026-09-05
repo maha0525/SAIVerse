@@ -1,12 +1,16 @@
 """部屋の様子 (room state) の差分提示と移管のテスト (2026-09-04 まはー裁定)。
 
-対象は sai_memory/room_state.py と、その二つの結び目:
+対象は sai_memory/room_state.py と、その三つの結び目:
 
 - 積む側 (saiverse/dynamic_state.py → SAIMemoryAdapter.push_room_state):
   同じ部屋の前回エントリがまだ提示に見えているなら差分だけを積む。
 - 下ろす側 (sai_memory/perception_buffer.mark_batches_annexed): 全文が編纂の
   退場付記で提示から下りるとき、残った最古の同部屋エントリへ全文を移管する。
   書き換えは付記と同一トランザクションでだけ起きる。
+- head 側 (sea/head_pipeline の visual_context、2026-09-05 追加): 台帳に土台が
+  無くても head が同じ部屋を見せていれば、その姿を土台にする。head は
+  (ペルソナ, model) ごとに別々の時点で capture されるので、全文へ開き直すか
+  どうかの判定は提示時にだけ置く (issue room_state_duplicates_head_inventory)。
 
 契約 (裁定の文面そのもの):
 
@@ -17,6 +21,8 @@
 4. 初訪問・久しぶり (同部屋バッチが提示に無い) は従来どおり全文。
 5. 移管の読み取りが落ちた回は「移管対象なし」に化かさず、付記も境界前進も
    tx ごと rollback して見送る (付記だけが確定して差分が宙に浮く形を作らない)。
+6. head が同じ部屋を見せている間、その部屋の全文は知覚に二枚目として出ない。
+   head が別の部屋を見せたら、その回の提示だけが全文へ開き直される。
 """
 from __future__ import annotations
 
@@ -139,10 +145,13 @@ class RoomStateLedgerTestBase(unittest.TestCase):
         self.addCleanup(self.conn.close)
         self.clock = 1000
 
-    def _push(self, building_id, full_text, *, allow_diff=True, media=None):
+    def _push(
+        self, building_id, full_text, *,
+        allow_diff=True, media=None, head_full_text=None,
+    ):
         payload = build_room_state_push(
             self.conn, building_id, full_text,
-            media=media, allow_diff=allow_diff,
+            media=media, allow_diff=allow_diff, head_full_text=head_full_text,
         )
         push_perception(
             self.conn, ROOM_STATE_KIND, payload["content"],
@@ -788,6 +797,531 @@ class RoomStateChronicleToggleTest(RoomStateLedgerTestBase):
         blocks = self._blocks(_RUNTIME_NO_CHRONICLE, [{"created_at": 0}])
         self.assertEqual(len(blocks), 2)
         self.assertNotIn("使い込まれた定規。", blocks[1]["content"])
+
+
+class RoomStateHeadBasePushTest(RoomStateLedgerTestBase):
+    """head が同じ部屋を見せているときの積み方 (issue room_state_duplicates_head_inventory)。
+
+    まはーの再現経路: 部屋 A (アイテム 41 件) → 部屋 B → 部屋 A。戻ったとき、
+    台帳には A のエントリが一枚も見えていない (行きの一枚は B のもの) ので
+    「初訪問」として全文が積まれ、head の一覧と一字も違わない二重になっていた。
+    head の visual_context は移動では撮り直されないので、往復の間ずっと A を
+    見せている — その姿を土台にすれば変化だけで足りる。
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.full_a = _room_text("工房", [("5", "真鍮の定規", "使い込まれた定規。")])
+        self.full_a2 = _room_text("工房", [
+            ("5", "真鍮の定規", "使い込まれた定規。"),
+            ("7", "銅のノギス", "目盛りが細かいノギス。"),
+        ])
+        self.full_b = _room_text("書斎", [("9", "背の高い本棚", "本が詰まっている。")])
+
+    def _state(self, payload):
+        return json.loads(payload["metadata"])["room_state"]
+
+    def test_returning_to_an_unchanged_room_costs_one_line(self):
+        # 行き (B) → 帰り (A)。台帳に A のエントリは無く、head だけが見せている。
+        self._push("b2", self.full_b)
+        self._flush()
+        payload = self._push("b1", self.full_a, head_full_text=self.full_a)
+        self.assertEqual(
+            payload["content"], "# 「工房」の様子\n前回見たときから変わっていません。",
+        )
+        state = self._state(payload)
+        self.assertTrue(state["is_diff"])
+        self.assertEqual(state["base_source"], "head")
+        # 全体像は開き直しの受け皿として記帳に残る。
+        self.assertEqual(state["snapshot"], self.full_a)
+
+    def test_changes_since_the_head_capture_are_the_only_thing_pushed(self):
+        payload = self._push("b1", self.full_a2, head_full_text=self.full_a)
+        self.assertIn("増えた・変わったもの", payload["content"])
+        self.assertIn("目盛りが細かいノギス。", payload["content"])
+        self.assertNotIn("使い込まれた定規。", payload["content"])
+        self.assertEqual(self._state(payload)["base_source"], "head")
+
+    def test_no_head_view_of_this_room_still_pushes_the_full_text(self):
+        # head が別の部屋を見せている回は、呼び出し側が None を渡す。
+        payload = self._push("b1", self.full_a, head_full_text=None)
+        self.assertEqual(payload["content"], self.full_a)
+        self.assertFalse(self._state(payload)["is_diff"])
+
+    def test_the_ledger_base_wins_over_the_head(self):
+        """台帳に土台が見えているなら従来どおりそれを使う (連なりを保つ)。"""
+        self._push("b1", self.full_a)
+        self._flush()
+        payload = self._push("b1", self.full_a2, head_full_text=self.full_b)
+        self.assertIn("目盛りが細かいノギス。", payload["content"])
+        self.assertNotIn("base_source", self._state(payload))
+
+    def test_a_head_based_diff_carries_no_media(self):
+        media = [{"path": "/tmp/room.png", "mime_type": "image/png"}]
+        payload = self._push(
+            "b1", self.full_a2, media=media, head_full_text=self.full_a,
+        )
+        self.assertIsNone(payload["media"])
+
+    def test_the_chronicle_gate_does_not_stop_the_head_base(self):
+        """``allow_diff`` の理由 (窓絞りで台帳の土台が消える) は head には無い。"""
+        payload = self._push(
+            "b1", self.full_a, allow_diff=False, head_full_text=self.full_a,
+        )
+        self.assertIn("変わっていません", payload["content"])
+        self.assertEqual(self._state(payload)["base_source"], "head")
+
+    def test_a_pending_head_based_entry_is_not_a_base_for_the_next_push(self):
+        self._push("b1", self.full_a2, head_full_text=self.full_a)
+        self.assertIsNone(latest_visible_snapshot(self.conn, room_key("b1")))
+        payload = self._push("b1", self.full_a2)
+        self.assertEqual(payload["content"], self.full_a2)
+
+    def test_a_settled_head_based_entry_is_not_a_base_either(self):
+        self._push("b1", self.full_a2, head_full_text=self.full_a)
+        self._flush()
+        self.assertIsNone(latest_visible_snapshot(self.conn, room_key("b1")))
+        payload = self._push("b1", self.full_a2)
+        self.assertEqual(payload["content"], self.full_a2)
+
+    def test_a_pending_head_based_diff_is_not_reopened_on_consumption(self):
+        """土台が台帳の外なので、付記で土台が下りるという壊れ方が起きない。"""
+        self._push("b1", self.full_a2, head_full_text=self.full_a)
+        items = ensure_room_state_base(self.conn, reduce_perceptions(list_pending(self.conn)))
+        self.assertEqual(len(items), 1)
+        self.assertIn("増えた・変わったもの", items[0].content)
+        self.assertNotIn("使い込まれた定規。", items[0].content)
+
+
+class RoomStateHeadPresentationTest(RoomStateLedgerTestBase):
+    """head 土台の差分をいつ全文へ開き直すか (提示時・model ごと)。
+
+    head は (ペルソナ, model) ごとに別々の時点で capture されるので、「その差分の
+    部屋の全体像が今この Session に見えているか」は台帳へ書けない。Chronicle
+    無効の窓絞りと同じ扱いで、その回の提示文面だけを差し替える。
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.full_a = _room_text("工房", [("5", "真鍮の定規", "使い込まれた定規。")])
+        self.full_a2 = _room_text("工房", [
+            ("5", "真鍮の定規", "使い込まれた定規。"),
+            ("7", "銅のノギス", "目盛りが細かいノギス。"),
+        ])
+        self.batch_id = None
+        self._push("b1", self.full_a2, head_full_text=self.full_a)
+        self.batch_id = self._flush()
+        self.persona = SimpleNamespace(
+            persona_id="p1", model="test-model",
+            sai_memory=SimpleNamespace(
+                conn=self.conn, _db_lock=threading.RLock(), is_ready=lambda: True,
+            ),
+        )
+
+    def _blocks(self, head_building_id, head_text=""):
+        with patch(
+            "sea.head_pipeline.current_head_room",
+            return_value=(head_building_id, head_text),
+        ):
+            return list_presented_perception_blocks(
+                _RUNTIME, self.persona, [], raise_on_error=True,
+            )
+
+    def test_while_the_head_shows_the_room_the_diff_stays_a_diff(self):
+        content = self._blocks("b1", self.full_a)[0]["content"]
+        self.assertIn("目盛りが細かいノギス。", content)
+        self.assertNotIn("使い込まれた定規。", content)
+
+    def test_a_recaptured_head_of_the_same_room_does_not_reopen_it(self):
+        """head が撮り直されて中身が変わっても、同じ部屋なら差分のまま。
+
+        全体像は撮り直した head が最新の姿で見せている。ここで開き直すと、
+        同じ部屋の全文が head と知覚に二枚並ぶ (消そうとしている重複そのもの)。
+        """
+        content = self._blocks("b1", self.full_a2)[0]["content"]
+        self.assertNotIn("使い込まれた定規。", content)
+
+    def test_when_the_head_moves_to_another_room_the_full_text_comes_back(self):
+        content = self._blocks("b2", "…書斎の様子…")[0]["content"]
+        self.assertIn("使い込まれた定規。", content)
+        self.assertIn("目盛りが細かいノギス。", content)
+        self.assertNotIn("増えた・変わったもの", content)
+
+    def test_an_unreadable_head_falls_to_the_full_text(self):
+        content = self._blocks(None)[0]["content"]
+        self.assertIn("使い込まれた定規。", content)
+
+    def test_the_ledger_and_the_settled_text_are_not_rewritten(self):
+        self._blocks("b2")
+        row = self._batch(self.batch_id)
+        self.assertNotIn("使い込まれた定規。", row.rendered_text)
+        entry = json.loads(row.room_state_json)[0]
+        self.assertTrue(entry["is_diff"])
+        self.assertEqual(entry["base_source"], "head")
+
+    def test_the_ledger_side_recovery_never_touches_a_head_based_diff(self):
+        self.assertEqual(restore_room_state_bases(self.conn), 0)
+        self.assertNotIn(
+            "使い込まれた定規。", self._batch(self.batch_id).rendered_text,
+        )
+
+    def test_the_accounting_matches_what_is_actually_sent(self):
+        """下ろし量の見積もりと提示が同じ head の値を見る。"""
+        from sea.runtime_context import _presented_chars_after_transfer
+
+        presented = list_unannexed_batches(self.conn)
+        for building_id, head_text in (("b1", self.full_a), ("b2", "")):
+            with self.subTest(head=building_id):
+                blocks = self._blocks(building_id, head_text)
+                sent = sum(len(b["content"]) for b in blocks)
+                predicted = _presented_chars_after_transfer(
+                    presented, head_room_key=room_key(building_id),
+                )
+                self.assertEqual(predicted, sent)
+
+    def test_a_supplied_head_room_wins_over_reading_the_head_again(self):
+        """呼び出し側が渡した部屋が使われ、head は読み直されない。
+
+        prepare_context は head を先に描画して固定する。その後で head を読み
+        直すと、間に走った Metabolism / TTL の撮り直しで別の部屋を見てしまい、
+        「送った head には無い部屋」の差分をそのまま出す (逆に、送った head に
+        は載っている部屋を全文へ開き直して二枚並べる) — 2026-09-05 Codex 指摘。
+        """
+        from sea.runtime_context import _presented_chars_after_transfer
+
+        presented = list_unannexed_batches(self.conn)
+        # 読み直し側は「別の部屋 (b2)」を返す = 渡した値を無視すれば開き直る。
+        with patch(
+            "sea.head_pipeline.current_head_room", return_value=("b2", "…"),
+        ) as reread:
+            blocks = list_presented_perception_blocks(
+                _RUNTIME, self.persona, [], raise_on_error=True,
+                head_room_key=room_key("b1"),
+            )
+        reread.assert_not_called()
+        content = blocks[0]["content"]
+        self.assertNotIn("使い込まれた定規。", content)
+        self.assertIn("目盛りが細かいノギス。", content)
+        # 勘定も同じ値で走る (提示と一致する)。
+        self.assertEqual(
+            _presented_chars_after_transfer(presented, head_room_key=room_key("b1")),
+            sum(len(b["content"]) for b in blocks),
+        )
+
+    def test_a_supplied_none_means_the_head_shows_no_room(self):
+        """``None`` は「渡されていない」ではなく「どの部屋も見せていない」。"""
+        with patch(
+            "sea.head_pipeline.current_head_room", return_value=("b1", self.full_a),
+        ) as reread:
+            blocks = list_presented_perception_blocks(
+                _RUNTIME, self.persona, [], raise_on_error=True,
+                head_room_key=None,
+            )
+        reread.assert_not_called()
+        self.assertIn("使い込まれた定規。", blocks[0]["content"])
+
+
+class HeadRoomViewTest(unittest.TestCase):
+    """head 側の供給 — 「head が見せている部屋」をどこから取るか。
+
+    VisualContextSection は同じ capture の瞬間に、head 用の姿と**知覚記法の姿**
+    (``room_text``) の両方を焼く。書式が同じでないと差分の土台にできないため。
+    二つは **一度の世界の読み**から作る (`build_visual_contexts`) — 別々に読むと
+    間に世界が動いて、head の姿と差分の土台が別時点になる。
+    """
+
+    def _ctx(self, building_id="b1"):
+        from sea.head_pipeline.types import LineHeadInput
+        return LineHeadInput(
+            persona_id="p1", model_key="m1", current_building_id=building_id,
+            persona=SimpleNamespace(persona_id="p1", persona_dir="/tmp/p1"),
+            manager=SimpleNamespace(),
+        )
+
+    def _capture(self, head_text, room_text, *, reads=None):
+        from sea.head_pipeline.sections.visual_context import VisualContextSection
+
+        def _fake(building_id=None, views=()):
+            if reads is not None:
+                reads.append(building_id)
+            out = []
+            for view in views:
+                text = room_text if view.for_perception else head_text
+                out.append(
+                    [{"content": text, "metadata": {"media": []}}] if text else []
+                )
+            return out
+
+        with patch(
+            "builtin_data.tools.get_visual_context.build_visual_contexts", _fake,
+        ):
+            return VisualContextSection().capture(self._ctx())
+
+    def test_capture_keeps_both_shapes_of_the_same_moment(self):
+        reads = []
+        snapshot = self._capture(
+            "<system>…head…</system>", "# 「工房」の様子\n…", reads=reads,
+        )
+        self.assertEqual(snapshot.building_id, "b1")
+        self.assertEqual(snapshot.room_text, "# 「工房」の様子\n…")
+        self.assertIn("head", snapshot.text)
+        # 世界を読むのは一度だけ (二度読むと二つの姿が別時点になる)。
+        self.assertEqual(reads, ["b1"])
+
+    def test_the_room_text_is_not_rendered_into_the_head(self):
+        from sea.head_pipeline.sections.visual_context import VisualContextSection
+        snapshot = self._capture("<system>…head…</system>", "# 「工房」の様子\n…")
+        rendered = VisualContextSection().render(snapshot)
+        self.assertEqual(rendered.text, snapshot.text)
+
+    def test_an_empty_perception_shape_still_yields_a_head(self):
+        snapshot = self._capture("<system>…head…</system>", "")
+        self.assertIn("head", snapshot.text)
+        self.assertEqual(snapshot.room_text, "")
+
+    def test_a_failing_world_read_yields_no_head_at_all(self):
+        """読みが落ちたら head も空 (人格に属さない部屋を描かない、従来どおり)。"""
+        from sea.head_pipeline.sections.visual_context import VisualContextSection
+
+        def _boom(building_id=None, views=()):
+            raise RuntimeError("boom")
+
+        with patch(
+            "builtin_data.tools.get_visual_context.build_visual_contexts", _boom,
+        ):
+            snapshot = VisualContextSection().capture(self._ctx())
+        self.assertEqual(snapshot.text, "")
+        self.assertEqual(snapshot.room_text, "")
+        self.assertIsNone(snapshot.building_id)
+
+    def test_a_head_that_renders_nothing_is_not_showing_a_room(self):
+        """head 本文が空なら「見せている」に数えない (全体像がどこにも無くなる)。"""
+        from sea.head_pipeline import current_head_room
+        from sea.head_pipeline.sections.visual_context import VisualContextSnapshot
+        for snapshot in (
+            VisualContextSnapshot(
+                text="", media=(), building_id="b1", room_text="# 「工房」の様子",
+            ),
+            VisualContextSnapshot(
+                text="x", media=(), building_id="b1", room_text="",
+            ),
+        ):
+            with self.subTest(text=snapshot.text, room=snapshot.room_text):
+                pipeline = SimpleNamespace(
+                    get_snapshot=lambda p, m, s=snapshot: SimpleNamespace(
+                        sections={"visual_context": s},
+                    ),
+                )
+                self.assertEqual(
+                    current_head_room(
+                        SimpleNamespace(persona_id="p1", model="m1"),
+                        pipeline=pipeline,
+                    ),
+                    (None, ""),
+                )
+
+    def test_serialization_round_trips_and_old_rows_stay_readable(self):
+        from sea.head_pipeline.sections.visual_context import VisualContextSection
+        section = VisualContextSection()
+        snapshot = self._capture("<system>…head…</system>", "# 「工房」の様子\n…")
+        restored = section.deserialize_snapshot(section.serialize_snapshot(snapshot))
+        self.assertEqual(restored, snapshot)
+        legacy = section.deserialize_snapshot(json.dumps({"text": "x", "media": []}))
+        self.assertIsNone(legacy.building_id)
+        self.assertEqual(legacy.room_text, "")
+
+    def test_current_head_room_does_not_capture_when_there_is_no_snapshot(self):
+        from sea.head_pipeline import current_head_room
+        pipeline = SimpleNamespace(get_snapshot=lambda persona_id, model_key: None)
+        persona = SimpleNamespace(persona_id="p1", model="m1")
+        self.assertEqual(
+            current_head_room(persona, pipeline=pipeline), (None, ""),
+        )
+
+    def test_the_rendered_head_hands_back_the_room_it_actually_showed(self):
+        """描画で固定した head の部屋を out-param が持ち帰る (後の撮り直しに動かない)。
+
+        prepare_context は head を先に描画して固定し、知覚の提示はその後で
+        組む。判定用に head を読み直すと、間に走った Metabolism / TTL の
+        撮り直しで**送った head とは別の部屋**を見てしまう (2026-09-05 Codex
+        指摘)。描画の中で確定させた値を渡す形にして、二つを同じにする。
+        """
+        from sea.head_pipeline import (
+            HeadPipeline,
+            HeadSectionRegistry,
+            build_line_head_input,
+            current_head_room,
+        )
+        from sea.head_pipeline.integration import render_head_messages
+        from sea.head_pipeline.sections.visual_context import VisualContextSection
+
+        registry = HeadSectionRegistry()
+        registry.register(VisualContextSection())
+        pipeline = HeadPipeline(registry=registry)
+        persona = SimpleNamespace(persona_id="p1", persona_dir="/tmp/p1", model="m1")
+        manager = SimpleNamespace()
+
+        def _fake(building_id=None, views=()):
+            return [
+                [{
+                    "content": (
+                        f"# 「{building_id}」の様子 "
+                        f"({'room' if view.for_perception else 'head'})"
+                    ),
+                    "metadata": {"media": []},
+                }]
+                for view in views
+            ]
+
+        head_room_out = {}
+        with patch(
+            "builtin_data.tools.get_visual_context.build_visual_contexts", _fake,
+        ):
+            render_head_messages(
+                persona, manager, "b1",
+                enabled_sections={"visual_context"},
+                pipeline=pipeline, head_room_out=head_room_out,
+            )
+            # 描画のあとで別の部屋の capture が走る (Metabolism / TTL の撮り直し)。
+            pipeline.capture_all(
+                build_line_head_input(persona, manager, "b2", model_key="m1"),
+            )
+            reread = current_head_room(persona, model_key="m1", pipeline=pipeline)
+
+        # 読み直しは既に b2 を指している — が、送った head は b1 のまま。
+        self.assertEqual(reread[0], "b2")
+        self.assertEqual(head_room_out["building_id"], "b1")
+        self.assertEqual(head_room_out["room_text"], "# 「b1」の様子 (room)")
+
+    def test_a_head_without_the_visual_section_shows_no_room(self):
+        """visual_context を描画しない呼び出しは「どの部屋も見せていない」を返す。
+
+        enabled_sections が visual_context を外した prompt には部屋の全体像が
+        載らない。それでも pin した snapshot の部屋を書き戻すと、提示側が
+        「head が見せている」と判定して差分を圧縮したまま送る — 全体像なしの
+        差分という契約破れになる (2026-09-05 Codex 二巡)。書き戻しは
+        (None, "") = 差分は全文へ開き直される側に倒す。
+        """
+        from sea.head_pipeline import HeadPipeline, HeadSectionRegistry
+        from sea.head_pipeline.integration import render_head_messages
+        from sea.head_pipeline.sections.visual_context import VisualContextSection
+
+        registry = HeadSectionRegistry()
+        registry.register(VisualContextSection())
+        pipeline = HeadPipeline(registry=registry)
+        persona = SimpleNamespace(persona_id="p1", persona_dir="/tmp/p1", model="m1")
+        manager = SimpleNamespace()
+
+        def _fake(building_id=None, views=()):
+            return [
+                [{"content": f"# 「{building_id}」の様子", "metadata": {"media": []}}]
+                for _ in views
+            ]
+
+        head_room_out = {}
+        with patch(
+            "builtin_data.tools.get_visual_context.build_visual_contexts", _fake,
+        ):
+            render_head_messages(
+                persona, manager, "b1",
+                enabled_sections=set(),
+                pipeline=pipeline, head_room_out=head_room_out,
+            )
+        self.assertIsNone(head_room_out["building_id"])
+        self.assertEqual(head_room_out["room_text"], "")
+
+    def test_current_head_room_reads_the_visual_context_section(self):
+        from sea.head_pipeline import current_head_room
+        from sea.head_pipeline.sections.visual_context import VisualContextSnapshot
+        snapshot = SimpleNamespace(sections={
+            "visual_context": VisualContextSnapshot(
+                text="x", media=(), building_id="b1", room_text="# 「工房」の様子",
+            ),
+        })
+        pipeline = SimpleNamespace(get_snapshot=lambda persona_id, model_key: snapshot)
+        persona = SimpleNamespace(persona_id="p1", model="m1")
+        self.assertEqual(
+            current_head_room(persona, pipeline=pipeline),
+            ("b1", "# 「工房」の様子"),
+        )
+
+
+class RoomStateEntryHandoffTest(unittest.TestCase):
+    """入室の結び目 — head の姿を土台として渡すのは同じ部屋のときだけ。"""
+
+    def _run_entry(self, head_building_id):
+        from saiverse.dynamic_state import DynamicStateManager
+        calls = {}
+
+        def _push_room_state(building_id, content, **kwargs):
+            calls["building_id"] = building_id
+            calls["kwargs"] = kwargs
+
+        persona = SimpleNamespace(
+            persona_id="p1", persona_dir="/tmp/p1",
+            sai_memory=SimpleNamespace(push_room_state=_push_room_state),
+        )
+        manager = SimpleNamespace(personas={}, occupants={}, feed_manager=None)
+        with patch(
+            "builtin_data.tools.get_visual_context.get_visual_context",
+            lambda **kwargs: [{"content": "# 「工房」の様子", "metadata": {"media": []}}],
+        ), patch(
+            "sea.head_pipeline.current_head_room",
+            return_value=(head_building_id, "# 「工房」の様子 (head)"),
+        ):
+            DynamicStateManager.on_building_entered(persona, "b1", manager)
+        return calls
+
+    def test_the_head_view_is_handed_over_for_the_same_room(self):
+        calls = self._run_entry("b1")
+        self.assertEqual(calls["building_id"], "b1")
+        self.assertEqual(
+            calls["kwargs"]["head_full_text"], "# 「工房」の様子 (head)",
+        )
+
+    def test_a_head_showing_another_room_is_not_handed_over(self):
+        calls = self._run_entry("b2")
+        self.assertIsNone(calls["kwargs"]["head_full_text"])
+
+    def test_a_head_built_by_this_very_entry_is_not_a_base(self):
+        """入室処理が作った head を土台にしない (初訪問は従来どおり全文)。
+
+        ``inject_diff_notifications`` は ensure_snapshot を通るので、snapshot が
+        未構築のとき・anchor TTL が切れているときは移動先の姿で head を撮り直す。
+        その head を土台にすると、ペルソナが一度も見ていない部屋に「前回見た
+        ときから変わっていません」が付く (2026-09-05 Codex 指摘)。
+        """
+        from saiverse.dynamic_state import DynamicStateManager
+        calls = {}
+        head = {"building_id": None}
+
+        def _inject(persona, manager, building_id, **kwargs):
+            # ensure_snapshot が移動先で capture_all した状態を模す。
+            head["building_id"] = building_id
+            return False
+
+        def _push_room_state(building_id, content, **kwargs):
+            calls["kwargs"] = kwargs
+
+        persona = SimpleNamespace(
+            persona_id="p1", persona_dir="/tmp/p1",
+            sai_memory=SimpleNamespace(push_room_state=_push_room_state),
+        )
+        manager = SimpleNamespace(personas={}, occupants={}, feed_manager=None)
+        with patch(
+            "builtin_data.tools.get_visual_context.get_visual_context",
+            lambda **kwargs: [{"content": "# 「工房」の様子", "metadata": {"media": []}}],
+        ), patch(
+            "sea.head_pipeline.inject_diff_notifications", _inject,
+        ), patch(
+            "sea.head_pipeline.current_head_room",
+            side_effect=lambda *a, **kw: (head["building_id"], "# 「工房」の様子 (head)"),
+        ):
+            DynamicStateManager.on_building_entered(persona, "b1", manager)
+
+        # 入室が head を作った後でも、土台は「入室前に見えていた head」= 無し。
+        self.assertEqual(head["building_id"], "b1")
+        self.assertIsNone(calls["kwargs"]["head_full_text"])
 
 
 class RoomStateAdapterFlushTest(unittest.TestCase):

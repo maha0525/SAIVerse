@@ -8,6 +8,13 @@
 - **再訪は差分だけ**: 同じ部屋の直近のエントリがまだ提示に見えている
   (未消費の pending か、提示に出るバッチ) なら、今回積むのは前回全文との差分
   だけ。見えていなければ従来どおり全文を積む (初訪問・久しぶりの再訪)。
+- **head が同じ部屋を見せているなら、その姿との差分だけ**: 知覚のエントリが
+  一枚も見えていなくても、head (凍結された文脈の頭) の visual_context が今いる
+  部屋を見せていることがある — 部屋 A → B → A と往復するとこの形になり、
+  「知覚バッチ同士」の照合では初訪問と同じ扱いになって全文が積まれていた
+  (head の一覧と一字も違わない二重。issue
+  `room_state_duplicates_head_inventory.md`)。この場合は head が capture した
+  同部屋の姿を土台にする。変化がなければ一行に畳む。
 - **土台の回復**: 差分が土台にするのは「同部屋の**直前の**エントリの全文」で
   あって、提示に残っている最古の全文ではない。だから不変条件はこう書く —
   **提示に見えているどの差分も、自分が土台にした全文がその直前に見えている**。
@@ -33,6 +40,19 @@
      **提示時の開き直し** — 台帳も確定文面も触らず、その回の提示文面だけを
      差し替える。同じ並びからは必ず同じ文面になる決定論なので、提示が呼び
      出しごとに揺れることはない。
+  5. head が別の部屋を見せるようになったとき — 同じく
+     :func:`reopen_lost_bases`。head を土台にした差分 (``base_source="head"``)
+     は、その部屋の全体像を head 側に預けている。提示する model の head が
+     別の部屋を見せていたら (head は (ペルソナ, model) ごとに別々の時点で
+     capture される) 全体像がどこにも無くなるので、その回の提示文面だけを
+     全文へ開き直す。これも DB に書ける事実ではない — 台帳側の回復
+     (:func:`restore_room_state_bases`) はこの規則を**適用しない**。
+
+- **head を土台にした差分は「連なり」の外に置く**: 土台が台帳の中に無いので、
+  ``chain_is_intact`` の照合には出さないし、後続の差分の土台にもしない
+  (:func:`latest_visible_snapshot` は直近が head 土台なら None を返し、次は
+  全文を積む)。連なりは台帳だけで閉じたまま = model ごとに切れ方が変わるのは
+  提示の文面だけ、という切り分けを保つ。
 
 - **書き換えの時点を増やさない**: 回復は必ず上の書き込み点に相乗りする。提示が
   変わる瞬間は既にプロンプトキャッシュの前方一致が割れている場所なので、
@@ -48,7 +68,8 @@
     [{"key": "building:b1", "is_diff": true,
       "block": "<rendered_text 中のこのエントリの文面>",
       "snapshot": "<その時点の部屋の全文>",
-      "base_digest": "<土台にした全文の指紋 (差分エントリのみ)>"}]
+      "base_digest": "<土台にした全文の指紋 (差分エントリのみ)>",
+      "base_source": "head"}]   # ← head を土台にした差分だけ付く
 
 ``snapshot`` は差分エントリにも必ず入る (差分の土台であり、回復で差し込む本文)。
 ``base_digest`` は「この差分がどの全文の上に積まれたか」の指紋
@@ -77,6 +98,17 @@
   規則 (同部屋のエントリが手前に見えていれば土台ありとみなす) で扱う
   (:func:`chain_is_intact`)。中間の一枚だけが下りた形は旧データでは検出でき
   ないが、旧規則のままなので退行はしない。新しく積む差分には必ず指紋が入る。
+- **head を土台にした差分は、head が同じ部屋を見せている限りそのまま出る** —
+  head が撮り直されて中身が変わっても開き直さない。部屋の全体像は撮り直した
+  head が (最新の姿で) 見せているので不変条件は満たされ、差分の側は
+  「増えた・変わったもの = 全文のかたまり / 見当たらなくなったもの = 見出し」
+  という単体で読める記録だから。ここで開き直すと、head の全文と知覚の全文が
+  同じ部屋について二枚並ぶ (この機構が消そうとしている重複そのもの)。
+- **head を土台にした差分は、知覚の側だけを見ても土台が読めない**。同じ部屋を
+  見せている head が上にあることが前提で、その head は (ペルソナ, model) ごと
+  に別々の時点の姿を見せうる — model Y の head が同じ部屋の**別の時点**を
+  見せている回は、差分の「前回」が Y の見ている姿とずれる。全体像は Y の head
+  にあり、二重も無い (不変条件はどちらも満たす) ので、ずれは受容している。
 """
 from __future__ import annotations
 
@@ -96,6 +128,12 @@ ROOM_STATE_KIND = "surroundings"
 
 #: 知覚台帳の ``metadata`` に載せるキー。
 ROOM_STATE_META_KEY = "room_state"
+
+#: 記帳の ``base_source`` — 差分の土台が台帳の外 (head の visual_context) に
+#: あることの印。この値が付いたエントリは連なり (:func:`chain_is_intact`) の
+#: 検査にも土台にも出さず、提示時だけ head の見せている部屋で判定する。
+#: 印が無い差分は従来どおり台帳の中の直前エントリを土台にしている。
+HEAD_BASE_SOURCE = "head"
 
 _DIFF_TITLE_SUFFIX = " (前回見たときからの変化)"
 _NO_CHANGE_LINE = "前回見たときから変わっていません。"
@@ -236,6 +274,16 @@ def snapshot_digest(full_text: str) -> str:
     return hashlib.sha256(full_text.encode("utf-8")).hexdigest()
 
 
+def is_head_based(entry: Mapping[str, Any]) -> bool:
+    """このエントリの差分の土台が head (台帳の外) か。
+
+    True のエントリは台帳の連なりに参加しない — 検査もされず、後続の差分の
+    土台にもならない (モジュール docstring「head を土台にした差分は『連なり』の
+    外に置く」)。判定は提示時に別途行う (:func:`reopen_lost_bases`)。
+    """
+    return bool(entry.get("is_diff")) and entry.get("base_source") == HEAD_BASE_SOURCE
+
+
 def chain_is_intact(
     entry: Mapping[str, Any], previous: Optional[Mapping[str, Any]],
 ) -> bool:
@@ -288,6 +336,11 @@ def latest_visible_snapshot(conn: sqlite3.Connection, key: str) -> Optional[str]
     ものだけ (未付記かつ知覚の合計上限で下ろした境界より新しい) — 下ろされた
     バッチはもう見えないので、土台にすると差分が宙に浮く。
 
+    直近のエントリが **head を土台にした差分** (:func:`is_head_based`) だった
+    ときは None を返す — その文面は差分なので、``snapshot`` (全文) を土台にした
+    次の差分は「土台が提示に見えていない」形になる。head 土台の差分は台帳の
+    連なりの外に置く、という切り分けをここで守る (次は全文を積み直す)。
+
     読み取りに失敗したら None (= 全文を積む) に倒す。**pending の読み取りが
     落ちたらバッチ側へ進まない** — pending の方が新しいので、そこを空と見なして
     バッチ側の古いスナップショットを土台にすると、実際とは違う土台に対する
@@ -313,6 +366,8 @@ def latest_visible_snapshot(conn: sqlite3.Connection, key: str) -> Optional[str]
     for (metadata,) in rows:
         state = _parse_item_state(metadata)
         if state and state.get("key") == key:
+            if is_head_based(state):
+                return None
             snapshot = state.get("snapshot")
             return str(snapshot) if snapshot else None
 
@@ -328,6 +383,8 @@ def latest_visible_snapshot(conn: sqlite3.Connection, key: str) -> Optional[str]
     for batch in reversed(batches):
         for entry in reversed(batch_room_states(batch.room_state_json)):
             if entry.get("key") == key:
+                if is_head_based(entry):
+                    return None
                 snapshot = entry.get("snapshot")
                 return str(snapshot) if snapshot else None
     return None
@@ -344,8 +401,24 @@ def build_room_state_push(
     *,
     media: Optional[list] = None,
     allow_diff: bool = True,
+    head_full_text: Optional[str] = None,
 ) -> Dict[str, Any]:
     """入室時に積む「部屋の様子」の本文・メディア・記帳を決める。
+
+    土台の選び方は二段階:
+
+    1. **台帳の中の直近エントリ** (:func:`latest_visible_snapshot`)。従来の
+       再訪の差分で、連なりの不変条件が丸ごと効く。``allow_diff=False``
+       (Chronicle 無効のペルソナ) では使わない。
+    2. 台帳に土台が無く、``head_full_text`` が渡されていれば **head が見せて
+       いる同じ部屋の姿**。呼び出し側 (saiverse/dynamic_state.py) が
+       「head の visual_context が**この** building を見せている」ことを確かめ
+       てから、その知覚記法の全文を渡す。部屋 A → B → A の往復でここに入る。
+
+    ``head_full_text`` は ``allow_diff`` で止めない。``allow_diff`` の理由は
+    「窓絞りで台帳の土台が付記なしに消える」— head 土台の差分は台帳の連なりに
+    参加しないので、その理由が当てはまらない。全体像は head 側にあり、head が
+    別の部屋へ移ったら提示時に全文へ開き直される (:func:`reopen_lost_bases`)。
 
     Returns:
         ``{"content", "media", "metadata"}`` — そのまま
@@ -355,6 +428,10 @@ def build_room_state_push(
     """
     key = room_key(building_id)
     base = latest_visible_snapshot(conn, key) if allow_diff else None
+    base_source: Optional[str] = None
+    if base is None and head_full_text:
+        base = head_full_text
+        base_source = HEAD_BASE_SOURCE
     state: Dict[str, Any] = {"key": key, "is_diff": False, "snapshot": full_text}
     if base is None:
         content = full_text
@@ -363,8 +440,11 @@ def build_room_state_push(
         content = render_room_diff(base, full_text)
         state["is_diff"] = True
         # どの全文の上に積んだか (指紋)。土台がまだ直前に見えているかは、この
-        # 指紋と直前エントリの snapshot を突き合わせて判定する。
+        # 指紋と直前エントリの snapshot を突き合わせて判定する。head 土台の
+        # ときは照合には使わない (連なりの外) が、診断のために残す。
         state["base_digest"] = snapshot_digest(base)
+        if base_source:
+            state["base_source"] = base_source
         # 差分にメディアは載せない (モジュール docstring「既知の境界」)。
         out_media = None
     metadata = json.dumps({ROOM_STATE_META_KEY: state}, ensure_ascii=False)
@@ -401,6 +481,10 @@ def _visible_chain_tail(conn: sqlite3.Connection) -> Dict[str, Dict[str, Any]]:
     tail: Dict[str, Dict[str, Any]] = {}
     for batch in batches:
         for entry in batch_room_states(batch.room_state_json):
+            if is_head_based(entry):
+                # head 土台の差分は連なりの外 — 土台として差し出さない
+                # (文面は差分なので、その ``snapshot`` は提示に出ていない)。
+                continue
             tail[str(entry["key"])] = entry
     return tail
 
@@ -422,6 +506,10 @@ def ensure_room_state_base(
     エントリを順に土台として繋いでいく。同部屋のキーが見えているかどうかだけ
     を見ると、土台が中間で下りた形を「土台あり」と読んでしまう。
 
+    **head を土台にした差分はここでは触らない** — 土台が台帳の外にあるので
+    「付記で土台が下りる」壊れ方が起きない。その判定は提示時
+    (:func:`reopen_lost_bases`) にだけある。
+
     書き換えるのは**この消費でレンダリングに使う写しだけ** — 台帳の行
     (``perception_buffer``) は積んだときの差分のまま残る。返るのは ``items`` と
     同じ並び・同じ長さの list。
@@ -439,6 +527,10 @@ def ensure_room_state_base(
     out = list(items)
     for index, state in room_positions:
         key = str(state["key"])
+        if is_head_based(state):
+            # 土台は台帳の外 (head) なので、付記で土台が下りるという壊れ方が
+            # そもそも無い。連なりにも入れない (前後の差分の土台にしない)。
+            continue
         previous = previous_by_key.get(key)
         previous_by_key[key] = state
         if not state.get("is_diff"):
@@ -480,9 +572,10 @@ def collect_batch_room_states(
     この文字列の一致で行う。本文が確定文面に見つからない項目は記帳しない
     (差し替えられないものを記帳すると、回復が黙って空振りする)。
 
-    差分エントリには ``base_digest`` (どの全文の上に積んだかの指紋) も写す —
-    土台がまだ直前に見えているかの照合に要る。全文へ開き直したエントリには
-    載せない (もう誰かの上に積まれてはいない)。
+    差分エントリには ``base_digest`` (どの全文の上に積んだかの指紋) と、土台が
+    台帳の外にあるときは ``base_source`` も写す — 前者は連なりの照合に、後者は
+    提示時の判定に要る。全文へ開き直したエントリには載せない (もう誰かの上に
+    積まれてはいない)。
     """
     entries: List[Dict[str, Any]] = []
     for item in items:
@@ -506,6 +599,9 @@ def collect_batch_room_states(
         }
         if is_diff and state.get("base_digest"):
             entry["base_digest"] = str(state["base_digest"])
+        if is_diff and state.get("base_source"):
+            # 土台が台帳の外 (head) であることの印。提示時の判定に要る。
+            entry["base_source"] = str(state["base_source"])
         if state.get("reopened"):
             # 消費の直前に土台を失って全文へ開き直した印 (診断用)。
             entry["reopened"] = True
@@ -519,10 +615,15 @@ def collect_batch_room_states(
 # 土台の回復 (付記・境界前進と同一トランザクション)
 # ---------------------------------------------------------------------------
 
-def _reopen_lost_bases(batches: Sequence[Any]) -> Dict[int, tuple]:
+def _reopen_lost_bases(
+    batches: Sequence[Any],
+    *,
+    head_room_key: Optional[str] = None,
+    apply_head_rule: bool = False,
+) -> Dict[int, tuple]:
     """土台を失った差分を全文へ開き直した ``(文面, 記帳)`` をバッチ id ごとに返す。
 
-    **純関数** — DB を読み書きせず、``batches`` の並びだけから答えが決まる。
+    **純関数** — DB を読み書きせず、``batches`` の並びと引数だけから答えが決まる。
     同じ並びを二度渡せば必ず同じ結果になる (提示時の開き直しがこの決定論に
     寄りかかっている: 呼び出しのたびに提示文面が揺れると、プロンプトキャッシュ
     の前方一致が新着なしで割れる)。
@@ -532,6 +633,18 @@ def _reopen_lost_bases(batches: Sequence[Any]) -> Dict[int, tuple]:
     スナップショット (その時点の全文) へ差し替える。差し替えても
     ``snapshot`` は変わらないので、次のエントリの土台判定は同じエントリを
     そのまま指してよい。
+
+    **head を土台にした差分** (:func:`is_head_based`) は連なりの外なので、この
+    走査には出さない (検査もしないし、次のエントリの土台にもしない)。代わりの
+    判定が ``apply_head_rule``:
+
+    - ``False`` (台帳側の回復): head 土台の差分には一切触らない。head の見え方は
+      (ペルソナ, model) ごとに違うので、台帳へ書き戻せる事実ではない。
+    - ``True`` (提示時): ``head_room_key`` が**その回の提示先 model の head が
+      見せている部屋**。差分の部屋と違えば (head が別の部屋を見せている /
+      head の姿が引けない) 全体像がどこにも無くなるので全文へ開き直す。同じ
+      部屋なら、head が撮り直されて中身が変わっていても差分のまま出す — 全体像
+      は head 側にあり、開き直すと同じ部屋の全文が二枚並ぶ。
 
     返るのは**変わったバッチだけ**の ``{batch.id: (rendered_text, entries)}``。
     ``entries`` は差し替え済みの記帳 (``block`` が全文へ、``is_diff`` が False、
@@ -548,14 +661,19 @@ def _reopen_lost_bases(batches: Sequence[Any]) -> Dict[int, tuple]:
         changed = False
         for entry in entries:
             key = str(entry["key"])
-            previous = previous_by_key.get(key)
-            # 差し替えても snapshot は変わらないので、次のエントリの土台判定は
-            # この entry (同じ dict) をそのまま指してよい。
-            previous_by_key[key] = entry
-            if not entry.get("is_diff"):
-                continue  # 全文はそれ自体が土台 = 連なりはここから始め直す
-            if chain_is_intact(entry, previous):
-                continue
+            if is_head_based(entry):
+                # 連なりの外 (previous_by_key も更新しない)。判定は head 側。
+                if not apply_head_rule or key == head_room_key:
+                    continue
+            else:
+                previous = previous_by_key.get(key)
+                # 差し替えても snapshot は変わらないので、次のエントリの土台
+                # 判定は この entry (同じ dict) をそのまま指してよい。
+                previous_by_key[key] = entry
+                if not entry.get("is_diff"):
+                    continue  # 全文はそれ自体が土台 = 連なりはここから始め直す
+                if chain_is_intact(entry, previous):
+                    continue
             block = entry.get("block") or ""
             snapshot = entry.get("snapshot") or ""
             if not block or not snapshot or block not in rendered:
@@ -575,7 +693,9 @@ def _reopen_lost_bases(batches: Sequence[Any]) -> Dict[int, tuple]:
     return out
 
 
-def reopen_lost_bases(batches: Sequence[Any]) -> Dict[int, str]:
+def reopen_lost_bases(
+    batches: Sequence[Any], *, head_room_key: Optional[str] = None,
+) -> Dict[int, str]:
     """この並びを**そのまま提示する**ときの、開き直し後の文面 (変わった分だけ)。
 
     台帳も確定文面も書き換えない — 返るのは ``{batch.id: rendered_text}`` で、
@@ -597,10 +717,20 @@ def reopen_lost_bases(batches: Sequence[Any]) -> Dict[int, str]:
     安全網として同じ開き直しを提示にだけ効かせる — 下ろし量の見積もり
     (:func:`sea.runtime_context._perception_suffix_totals`) は元からその膨らみを
     織り込んでいるので、これで勘定と提示が揃う。
+
+    ``head_room_key`` は**その回の提示先 model の head が今見せている部屋**の
+    キー (:func:`room_key`、引けなければ None)。head を土台にした差分は、head が
+    別の部屋を見せていたら全体像がどこにも無くなるので、ここで全文へ開き直す。
+    これも「台帳へ書ける事実ではない可視性の変化」— head は (ペルソナ, model)
+    ごとに別々の時点で capture されるため。head の撮り直しはプロンプトの前置き
+    そのものが変わる瞬間なので、ここで提示文面が変わっても新しく壊す前方一致は
+    無い (キャッシュの壊れ時点への相乗り)。
     """
     return {
         batch_id: rendered
-        for batch_id, (rendered, _entries) in _reopen_lost_bases(batches).items()
+        for batch_id, (rendered, _entries) in _reopen_lost_bases(
+            batches, head_room_key=head_room_key, apply_head_rule=True,
+        ).items()
     }
 
 
@@ -626,6 +756,10 @@ def restore_room_state_bases(conn: sqlite3.Connection) -> int:
     - :func:`sai_memory.perception_buffer.advance_presentation_cutoff` — 知覚の
       合計上限で古い側をまとめて下ろした tx の中。境界が全文バッチを越えて
       進むと、残った差分が土台を失うため (§10.9)。
+
+    **head を土台にした差分はここでは触らない**: head の見せている部屋は
+    (ペルソナ, model) ごとに違うので、台帳へ書き戻せる事実ではない。判定は
+    提示時 (:func:`reopen_lost_bases`) にだけ置く。
 
     **読み取りに失敗したら例外をそのまま送出する** (「回復対象なし」に化かさない)。
     ここを 0 件で返すと、呼び出し側は回復が済んだ場合と区別できないまま付記や

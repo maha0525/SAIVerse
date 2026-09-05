@@ -265,6 +265,15 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
     # head の章立ては呼び出し側から選べない (PERSONA_HEAD_SECTIONS の docstring)。
     enabled_sections: set[str] = set(PERSONA_HEAD_SECTIONS)
 
+    # 実際に描画した head が見せている部屋 (out-param で受け取る)。知覚の
+    # 「部屋の様子」の差分をそのまま出すか全文へ開き直すかは、この prompt に
+    # 部屋の全体像が載っているかで決まる — 後段で head を読み直すと、その間に
+    # 走った Metabolism / TTL の撮り直しで別の head を見てしまい、全体像の無い
+    # 差分を送りうる (2026-09-05 Codex 指摘)。この呼び出しの中で確定させた値を
+    # 勘定と提示の両方へ渡す。head を組まない呼び出しは空のまま = 後段が自分で
+    # 読む (従来どおり)。
+    head_room_out: Dict[str, Any] = {}
+
     if enabled_sections:
         from sea.head_pipeline import render_head_messages
         from sea.head_pipeline.types import HeadNotReadyError
@@ -273,6 +282,7 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
                 persona, runtime.manager, building_id,
                 enabled_sections=enabled_sections,
                 model_key=model_key,
+                head_room_out=head_room_out,
             )
             if head_messages:
                 messages.extend(head_messages)
@@ -591,6 +601,7 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
                 recent = _merge_consumed_perceptions(
                     runtime, persona, recent, anchor_id=history_anchor_id,
                     model_key=model_key, advance_cutoff=not preview_only,
+                    head_room_key=_pinned_head_room_key(head_room_out),
                 )
 
                 # Enrich messages with attachment context
@@ -837,7 +848,70 @@ def _perception_omission_block(
     }
 
 
-def _perception_suffix_totals(presented: Sequence[Any]) -> List[int]:
+#: 「head の部屋は呼び出し側から渡されていない」ことの印。``None`` は
+#: 「head はどの部屋も見せていない」という**答え**なので、区別が要る。
+_HEAD_ROOM_UNSET = object()
+
+
+def _pinned_head_room_key(head_room_out: Dict[str, Any]) -> Any:
+    """描画済み head の out-param (:func:`render_head_messages`) を部屋のキーにする。
+
+    out-param が空 = この呼び出しは head を組んでいない (組成をスキップした /
+    テストで差し替えられている) ので、判定は後段の読み直しに委ねる
+    (:data:`_HEAD_ROOM_UNSET`)。値が入っていれば、たとえ ``None`` (どの部屋も
+    見せていない) でもそれが答え。
+    """
+    if "building_id" not in head_room_out:
+        return _HEAD_ROOM_UNSET
+    building_id = head_room_out.get("building_id")
+    if not building_id:
+        return None
+    try:
+        from sai_memory.room_state import room_key
+        return room_key(str(building_id))
+    except Exception:
+        LOGGER.warning(
+            "[sea][perception] could not build the head's room key from the "
+            "rendered head; reopening head-based room diffs to their full text",
+            exc_info=True,
+        )
+        return None
+
+
+def _head_room_key(persona: Any, model_key: Optional[str]) -> Optional[str]:
+    """その回の提示先 model の head が今見せている部屋のキー。引けなければ None。
+
+    「部屋の様子」の差分は、台帳に土台が無くても head が同じ部屋を見せていれば
+    head の姿を土台にする (sai_memory/room_state.py)。その差分を提示してよいか
+    は「**この** model の head が今もその部屋を見せているか」で決まる — head は
+    (ペルソナ, model) ごとに別々の時点で capture されるので、台帳には書けない。
+
+    撮り直しはしない読み口 (:func:`sea.head_pipeline.current_head_room`) なので、
+    まだ一度も head を組んでいない Session では None になる。None は「head は
+    その部屋を見せていない」と読まれ、差分は全文へ開き直される — 冗長な全文
+    一枚は無害だが、全体像を失った差分は復元不能 (回復側と同じ倒し方)。
+
+    **これを使うのは head を組まない呼び出しだけ** (勘定・退場計画・読み取り
+    専用の画面)。同じ呼び出しで head を送る prepare_context は
+    :func:`_pinned_head_room_key` で描画済みの値を渡す — 読み直すと、確定と
+    読みの間に走った撮り直しで別の head を見てしまう。
+    """
+    try:
+        from sai_memory.room_state import room_key
+        from sea.head_pipeline import current_head_room
+        building_id, _room_text = current_head_room(persona, model_key=model_key)
+        return room_key(building_id) if building_id else None
+    except Exception:
+        LOGGER.warning(
+            "[sea][perception] could not resolve the head's current room; "
+            "reopening head-based room diffs to their full text", exc_info=True,
+        )
+        return None
+
+
+def _perception_suffix_totals(
+    presented: Sequence[Any], *, head_room_key: Optional[str] = None,
+) -> List[int]:
     """``presented[i:]`` を提示したときの合計字数を ``i`` ごとに並べて返す。
 
     境界を進めると :func:`sai_memory.room_state.restore_room_state_bases` が
@@ -862,9 +936,18 @@ def _perception_suffix_totals(presented: Sequence[Any]) -> List[int]:
     二乗時間で回っていた。Codex の材料で 1,000 件 4.1 秒 / 2,000 件 28.7 秒、
     回帰テストの材料でも 2,000 件 4.8 秒 → 線形化後は同じ材料で 0.05 秒)。
 
+    **head を土台にした差分**は連なりの外なので、``i`` がどこであっても膨らむか
+    どうかは同じ — その回の head が同じ部屋を見せていなければ (``head_room_key``
+    と不一致) 必ず開き直され、見せていれば決して開き直されない。だから部屋ごと
+    の「最初に現れるエントリ」の繰り上げには入れず、``forced`` 側だけで数える。
+
     返るのは長さ ``len(presented) + 1`` の list で、末尾は 0 (全部下ろした形)。
     """
-    from sai_memory.room_state import batch_room_states, chain_is_intact
+    from sai_memory.room_state import (
+        batch_room_states,
+        chain_is_intact,
+        is_head_based,
+    )
 
     count = len(presented)
     raw: List[int] = [0] * count
@@ -883,8 +966,11 @@ def _perception_suffix_totals(presented: Sequence[Any]) -> List[int]:
             key = str(entry.get("key") or "")
             if not key:
                 continue
-            previous = previous_by_key.get(key)
-            previous_by_key[key] = entry
+            head_based = is_head_based(entry)
+            previous = None
+            if not head_based:
+                previous = previous_by_key.get(key)
+                previous_by_key[key] = entry
             block = entry.get("block") or ""
             snapshot = entry.get("snapshot") or ""
             # 回復側と同じ見送り条件 (差し替えられないものは膨らまない)。
@@ -894,6 +980,10 @@ def _perception_suffix_totals(presented: Sequence[Any]) -> List[int]:
             position = len(entry_batch)
             entry_batch.append(index)
             entry_delta.append(len(snapshot) - len(block) if expandable else 0)
+            if head_based:
+                # 連なりの外: head が同じ部屋を見せているかだけで決まる。
+                entry_forced.append(expandable and key != head_room_key)
+                continue  # 部屋ごとの繰り上げ (key_entries) にも入れない
             entry_forced.append(
                 expandable and not chain_is_intact(entry, previous)
             )
@@ -945,16 +1035,18 @@ def _perception_suffix_totals(presented: Sequence[Any]) -> List[int]:
     return totals
 
 
-def _presented_chars_after_transfer(presented: Sequence[Any]) -> int:
+def _presented_chars_after_transfer(
+    presented: Sequence[Any], *, head_room_key: Optional[str] = None,
+) -> int:
     """この並びを提示したときの合計字数 (部屋の様子の開き直しを織り込んだ値)。"""
     if not presented:
         return 0
-    return _perception_suffix_totals(presented)[0]
+    return _perception_suffix_totals(presented, head_room_key=head_room_key)[0]
 
 
 def _plan_perception_drop(
     persona: Any, presented: Sequence[Any], cutoff: int,
-    *, model_key: Optional[str] = None,
+    *, model_key: Optional[str] = None, head_room_key: Optional[str] = None,
 ) -> int:
     """知覚の合計が上の水位を超えていたら、下の水位まで下ろした境界を返す。
 
@@ -990,7 +1082,7 @@ def _plan_perception_drop(
     target, high = resolve_perception_watermarks(model)
     if high is None:
         return cutoff  # モデル単位のオプトアウト (下ろしを持たない)
-    totals = _perception_suffix_totals(presented)
+    totals = _perception_suffix_totals(presented, head_room_key=head_room_key)
     running = totals[0]
     if running <= high:
         return cutoff
@@ -1035,6 +1127,7 @@ def list_presented_perception_blocks(
     raise_on_error: bool = False,
     model_key: Optional[str] = None,
     advance_cutoff: bool = True,
+    head_room_key: Any = _HEAD_ROOM_UNSET,
 ) -> List[Dict[str, Any]]:
     """いま提示に差し込まれる知覚ブロックを組む (組成規則の一点管理)。
 
@@ -1073,6 +1166,17 @@ def list_presented_perception_blocks(
       無効へ切り替えると、有効な間に積んだ差分が土台なしで提示に残る
       (2026-09-05 四巡目 #1)。開き直しは純関数で、同じ並びからは必ず同じ文面に
       なるので、提示が呼び出しごとに揺れることはない。台帳も確定文面も触らない。
+    - **head を土台にした「部屋の様子」の差分も、head が別の部屋を見せていたら
+      提示時に全文へ開き直す**。台帳に土台が無くても head がその部屋を見せて
+      いれば差分だけを積む (`room_state.build_room_state_push`) が、head は
+      (ペルソナ, model) ごとに別々の時点で capture されるので、「その差分の
+      部屋の全体像が今この Session に見えているか」は台帳へ書けない。判定に使う
+      head は ``head_room_key`` で受け取る — 同じ prompt へ head を載せる
+      呼び出し (prepare_context) は**実際に描画した head** の部屋を渡し、head を
+      組まない呼び出し (勘定・退場計画・読み取り専用の画面) は省略して
+      `_head_room_key` の読み直しに委ねる。どちらの値も、下ろし量の見積もり
+      (`_plan_perception_drop`) と開き直しの**両方**へ同じものを渡す — 勘定と
+      実送信が別の head を見ると、開き直しで膨らむ量が勘定から漏れる。
     - ``advance_cutoff=False`` は**測るだけ**のモード: 下ろし境界を進める判定は
       同じように行い、進めた**つもり**の提示を返すが、``perception_presentation``
       へは書かない。読み取り専用の画面 (context-status)・仮定の窓の下見
@@ -1099,6 +1203,13 @@ def list_presented_perception_blocks(
         )
         from sai_memory.room_state import reopen_lost_bases
         chronicle_enabled = _chronicle_enabled_for(runtime, persona)
+        # 「head がどの部屋を見せているか」は錠前の外で一度だけ確定させる
+        # (head の読み口は知覚台帳を触らない)。下ろし量の見積もりと開き直しの
+        # 両方が**同じ値**を見るように、ここから両方へ渡す。
+        head_room = (
+            _head_room_key(persona, model_key)
+            if head_room_key is _HEAD_ROOM_UNSET else head_room_key
+        )
 
         def _visible_candidates_locked() -> List[Any]:
             """このペルソナに見える余地のある未付記バッチ (窓絞りまで)。
@@ -1158,6 +1269,7 @@ def list_presented_perception_blocks(
                 [b for b in candidates if b.id > dropped_through],
                 dropped_through,
                 model_key=model_key,
+                head_room_key=head_room,
             )
             if planned > dropped_through and not advance_cutoff:
                 # 測るだけのモード: 進める判定はここまで同じで、書き込みだけを
@@ -1206,7 +1318,7 @@ def list_presented_perception_blocks(
         # 窓絞り (Chronicle 無効) と「測るだけ」の境界は台帳へ書けないので、
         # そこで土台が抜けた差分はここで全文へ開き直す (純関数・決定論)。
         # Chronicle 有効で境界も進めた回は、台帳側の回復が済んでいるので空。
-        reopened = reopen_lost_bases(presented)
+        reopened = reopen_lost_bases(presented, head_room_key=head_room)
 
         blocks: List[Dict[str, Any]] = []
         if dropped:
@@ -1280,6 +1392,7 @@ def _merge_consumed_perceptions(
     anchor_id: Optional[str] = None,
     model_key: Optional[str] = None,
     advance_cutoff: bool = True,
+    head_room_key: Any = _HEAD_ROOM_UNSET,
 ) -> List[Dict[str, Any]]:
     """提示履歴に未付記の消費バッチを時刻順マージする (W14, §10.3)。
 
@@ -1291,10 +1404,13 @@ def _merge_consumed_perceptions(
     ``advance_cutoff=False`` は測るだけ (下ろし境界を書かない) — 組み立てが
     プレビュー (``preview_only``) の回に使う。プレビューの列は送られないので、
     一方向にしか進まない境界をそこで確定させない。返るブロックは同じ。
+
+    ``head_room_key`` は同じ prompt へ載せる head が見せている部屋のキー
+    (:func:`_pinned_head_room_key`)。省略すると組成側が自分で読み直す。
     """
     blocks = list_presented_perception_blocks(
         runtime, persona, recent, anchor_id=anchor_id, model_key=model_key,
-        advance_cutoff=advance_cutoff,
+        advance_cutoff=advance_cutoff, head_room_key=head_room_key,
     )
     if not blocks:
         return recent

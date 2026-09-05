@@ -4,8 +4,9 @@ from __future__ import annotations
 import logging
 import mimetypes
 import os
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 from tools.context import get_active_persona_id, get_active_manager
 from tools.core import ToolSchema
@@ -408,6 +409,57 @@ def _render_item(
         text_parts.append("")
 
 
+@dataclass(frozen=True)
+class VisualContextView:
+    """同じ世界の読みを、どの姿で描くかの指定。
+
+    ``for_perception`` の意味は :func:`get_visual_context` の引数と同じ。
+    """
+    include_self: bool = True
+    include_building: bool = True
+    include_other_personas: bool = True
+    for_perception: bool = False
+
+
+#: head 常駐用の姿 (自分の外見とインベントリ込み、``<system>`` 包み)。
+HEAD_VIEW = VisualContextView()
+#: 知覚バッファの「移動先の様子」用の姿 (自分抜き・簡潔記法)。
+PERCEPTION_VIEW = VisualContextView(include_self=False, for_perception=True)
+
+
+@dataclass
+class _RenderedItem:
+    """アイテム 1 件を描いた結果 (姿によらず同じなので一度だけ描く)。"""
+    lines: List[str] = field(default_factory=list)
+    media: List[Dict[str, str]] = field(default_factory=list)
+
+
+@dataclass
+class _WorldRead:
+    """一度の読みで取った、その瞬間の Building の姿。
+
+    ここから先は世界を読まない — 姿ごとの違い (見出し・自分を含めるか・
+    インベントリを載せるか) は、この同じ材料の組み替えだけで作る。
+    """
+    persona_id: str
+    persona_name: str
+    building_id: str
+    building_name: str
+    base_system_instruction: str = ""
+    persona_count: int = 0
+    has_others: bool = False
+    self_lines: List[str] = field(default_factory=list)
+    self_media: List[Dict[str, str]] = field(default_factory=list)
+    other_persona_lines: List[str] = field(default_factory=list)
+    other_persona_media: List[Dict[str, str]] = field(default_factory=list)
+    user_lines: List[str] = field(default_factory=list)
+    building_image_lines: List[str] = field(default_factory=list)
+    building_image_media: List[Dict[str, str]] = field(default_factory=list)
+    inventory: List[_RenderedItem] = field(default_factory=list)
+    building_items: List[_RenderedItem] = field(default_factory=list)
+    fixture_lines: List[str] = field(default_factory=list)
+
+
 def get_visual_context(
     building_id: Optional[str] = None,
     include_self: bool = True,
@@ -433,105 +485,134 @@ def get_visual_context(
 
     Returns:
         List of message dicts with 'role', 'content', and 'metadata' keys.
+
+    二つの姿が同じ瞬間のものでなければならない呼び出しは
+    :func:`build_visual_contexts` を使うこと (この関数を二度呼ぶと、二つの読みの
+    間に世界が動きうる)。
     """
+    view = VisualContextView(
+        include_self=include_self,
+        include_building=include_building,
+        include_other_personas=include_other_personas,
+        for_perception=for_perception,
+    )
+    return build_visual_contexts(building_id, (view,))[0]
+
+
+def build_visual_contexts(
+    building_id: Optional[str],
+    views: Sequence[VisualContextView],
+) -> List[List[Dict[str, Any]]]:
+    """**一度の世界の読み**から、指定された姿ぶんの message 列を組む。
+
+    head 常駐用の姿と知覚記法の姿を :func:`get_visual_context` で別々に呼ぶと、
+    二つの読みの間にアイテムが増えたり誰かが入退室したりして、head が見せて
+    いる部屋とその部屋の知覚記法の全文が別時点のものになる。後者は前者を土台
+    にした差分の照合に使われる (sai_memory/room_state.py) ので、ずれると
+    「head には無い変化」が差分に混ざる (2026-09-05 Codex 指摘)。
+
+    読むのは一度だけで、姿ごとに違うのは組み立てだけ。アイテムの描画
+    (ファイルの実体確認・開いている文書の読み込み・思い出の引き当て) も姿に
+    よらないので、1 件につき一度だけ行う。
+
+    返るのは ``views`` と同じ並び・同じ長さの list。ペルソナ / manager /
+    Building が引けない回は、各要素が空 list になる (従来の縮退と同じ)。
+    """
+    empty: List[List[Dict[str, Any]]] = [[] for _ in views]
+
     persona_id = get_active_persona_id()
     if not persona_id:
         LOGGER.debug("get_visual_context: No active persona")
-        return []
+        return empty
 
     manager = get_active_manager()
     if not manager:
         LOGGER.debug("get_visual_context: No manager available")
-        return []
+        return empty
 
     persona = manager.all_personas.get(persona_id)
     if not persona:
         LOGGER.debug("get_visual_context: Persona %s not found", persona_id)
-        return []
+        return empty
 
     # Use current building if not specified
     if not building_id:
         building_id = getattr(persona, "current_building_id", None)
     if not building_id:
         LOGGER.debug("get_visual_context: No building_id")
+        return empty
+
+    if not views:
         return []
 
-    text_parts: List[str] = []
-    media_list: List[Dict[str, str]] = []
+    world = _read_world(manager, persona, persona_id, building_id, views)
+    return [_render_view(world, view) for view in views]
 
-    # Building 名 (見出しの明示に使う)。
-    _building_obj_for_name = getattr(persona, "buildings", {}).get(building_id)
-    building_name = _building_obj_for_name.name if _building_obj_for_name else building_id
 
-    if not for_perception:
-        text_parts.append("<system>")
-        text_parts.append("# ビジュアルコンテキスト")
-        # NOTE: かつて「常にリアルタイム状態を反映」と書いていたが、head の
-        # visual_context は Metabolism まで凍結されるため嘘だった (2026-07-09 削除)。
-        text_parts.append("以下は現在の状況を視覚的に示す情報です。")
-        text_parts.append("")
-        text_parts.append("---")
-        text_parts.append("")
-    else:
-        # 知覚バッファ用: どの Building の様子かを見出しで明示 (複数通知が並ぶため)。
-        text_parts.append(f"# 「{building_name}」の様子")
-        text_parts.append("")
+def _read_world(
+    manager: Any,
+    persona: Any,
+    persona_id: str,
+    building_id: str,
+    views: Sequence[VisualContextView],
+) -> _WorldRead:
+    """その瞬間の Building を一度だけ読む (描き分けはここではしない)。
+
+    どの材料を取るかは ``views`` の和で決める — 誰も自分の外見を要らない回に
+    まで DB を引かない、という従来の節約をそのまま残すため。
+    """
+    building_obj = getattr(persona, "buildings", {}).get(building_id)
+    world = _WorldRead(
+        persona_id=persona_id,
+        persona_name=getattr(persona, "persona_name", persona_id),
+        building_id=building_id,
+        building_name=building_obj.name if building_obj else building_id,
+    )
+
+    if building_obj:
+        base_sys = getattr(building_obj, "base_system_instruction", "") or ""
+        world.base_system_instruction = base_sys.strip()
 
     # ========== Section 1: ペルソナ ==========
     all_occupants = manager.occupants.get(building_id, [])
     # ユーザーIDはall_personasに存在しないのでフィルタしてAIペルソナのみに絞る
     occupants = [oid for oid in all_occupants if manager.all_personas.get(oid)]
-    persona_count = len(occupants)
-    if for_perception:
-        # 「一緒にいる他ペルソナ」だけを述べる (self は include_self=False で除外済み)。
-        others = [oid for oid in occupants if oid != persona_id]
-        text_parts.append("## 一緒にいるペルソナ")
-        if not others:
-            text_parts.append("他のペルソナはいません。")
-        text_parts.append("")
-    else:
-        text_parts.append("## ペルソナ")
-        if persona_count <= 1:
-            text_parts.append("現在、このBuildingにはあなただけがいます。")
-        else:
-            text_parts.append(f"現在、このBuildingにはあなた含め{persona_count}人のペルソナがいます。")
-        text_parts.append("")
+    world.persona_count = len(occupants)
+    world.has_others = any(oid != persona_id for oid in occupants)
 
-    # Self appearance
-    if include_self:
-        persona_name = getattr(persona, "persona_name", persona_id)
-        text_parts.append(f"[あなた自身（{persona_name}）の外見]")
-        text_parts.append(f"saiverse://persona/{persona_id}/image")
-
-        self_image_url = _get_persona_appearance_path(manager, persona_id)
-        self_image_path = _resolve_image_path(self_image_url)
+    if any(v.include_self for v in views):
+        world.self_lines.append(f"[あなた自身（{world.persona_name}）の外見]")
+        world.self_lines.append(f"saiverse://persona/{persona_id}/image")
+        self_image_path = _resolve_image_path(
+            _get_persona_appearance_path(manager, persona_id),
+        )
         if self_image_path and os.path.exists(self_image_path):
-            _add_to_media_list(self_image_path, media_list)
+            _add_to_media_list(self_image_path, world.self_media)
             LOGGER.debug("get_visual_context: Added self image: %s", self_image_path)
-        text_parts.append("")
+        world.self_lines.append("")
 
-    # Other personas
-    if include_other_personas:
+    if any(v.include_other_personas for v in views):
         for other_id in occupants:
             if other_id == persona_id:
                 continue
             other_persona = manager.all_personas.get(other_id)
             other_name = getattr(other_persona, "persona_name", other_id) if other_persona else other_id
-            text_parts.append(f"[{other_name}の外見]")
-            text_parts.append(f"saiverse://persona/{other_id}/image")
+            world.other_persona_lines.append(f"[{other_name}の外見]")
+            world.other_persona_lines.append(f"saiverse://persona/{other_id}/image")
 
-            other_image_url = _get_persona_appearance_path(manager, other_id)
-            other_image_path = _resolve_image_path(other_image_url)
+            other_image_path = _resolve_image_path(
+                _get_persona_appearance_path(manager, other_id),
+            )
             if other_image_path and os.path.exists(other_image_path):
-                _add_to_media_list(other_image_path, media_list)
+                _add_to_media_list(other_image_path, world.other_persona_media)
                 LOGGER.debug("get_visual_context: Added other persona image: %s (%s)", other_id, other_image_path)
-            text_parts.append("")
+            world.other_persona_lines.append("")
 
     # ========== Section 1b: ユーザー ==========
     user_occupants = [oid for oid in all_occupants if not manager.all_personas.get(oid)]
     if user_occupants:
-        text_parts.append("## ユーザー")
-        text_parts.append(f"現在、このBuildingには{len(user_occupants)}人のユーザーがいます。")
+        world.user_lines.append("## ユーザー")
+        world.user_lines.append(f"現在、このBuildingには{len(user_occupants)}人のユーザーがいます。")
         try:
             from database.session import SessionLocal as _SessionLocal
             from database.models import User as UserModel
@@ -540,101 +621,59 @@ def get_visual_context(
                 for uid in user_occupants:
                     user = db.query(UserModel).filter(UserModel.USERID == int(uid)).first()
                     uname = user.USERNAME if user else uid
-                    text_parts.append(f"- {uname} (ID:{uid})")
+                    world.user_lines.append(f"- {uname} (ID:{uid})")
             finally:
                 db.close()
         except Exception as exc:
             LOGGER.debug("get_visual_context: Failed to fetch user names: %s", exc)
             for uid in user_occupants:
-                text_parts.append(f"- (ID:{uid})")
-        text_parts.append("")
+                world.user_lines.append(f"- (ID:{uid})")
+        world.user_lines.append("")
 
     # ========== Section 2: Building ==========
-    text_parts.append("---")
-    text_parts.append("")
-    text_parts.append("## Building")
-
-    building_obj = _building_obj_for_name
-    if not for_perception:
-        text_parts.append(f"現在、「{building_name}」にいます。")
-        text_parts.append("")
-    # for_perception では「現在いる」と断定しない (通知が出た後さらに移動しうるため)。
-    # Building 名は冒頭見出し「「X」の様子」で既に明示している。
-
-    # Building interior image
-    if include_building:
-        building_image_url = _get_building_image_path(manager, building_id)
-        building_image_path = _resolve_image_path(building_image_url)
+    if any(v.include_building for v in views):
+        building_image_path = _resolve_image_path(
+            _get_building_image_path(manager, building_id),
+        )
         if building_image_path and os.path.exists(building_image_path):
-            text_parts.append("[内装]")
-            text_parts.append(f"saiverse://building/{building_id}/image")
-            _add_to_media_list(building_image_path, media_list)
+            world.building_image_lines.append("[内装]")
+            world.building_image_lines.append(f"saiverse://building/{building_id}/image")
+            _add_to_media_list(building_image_path, world.building_image_media)
             LOGGER.debug("get_visual_context: Added building image: %s", building_image_path)
-            text_parts.append("")
-
-    # Building system instruction
-    if building_obj:
-        base_sys = getattr(building_obj, "base_system_instruction", "") or ""
-        if base_sys.strip():
-            text_parts.append("[システムプロンプト]")
-            text_parts.append(base_sys.strip())
-            text_parts.append("")
+            world.building_image_lines.append("")
 
     # ========== Section 3: Item ==========
-    text_parts.append("---")
-    text_parts.append("")
-    text_parts.append("## Item")
-    text_parts.append("")
+    # インベントリは移動で変わらない (持ち物は付いてくる) ので、知覚記法の姿
+    # では載せない。誰も要らない回は読みにも行かない。
+    if (
+        any(not v.for_perception for v in views)
+        and hasattr(manager, 'get_all_items_for_persona')
+    ):
+        world.inventory = [
+            _render_item_entry(item, manager, persona_id)
+            for item in manager.get_all_items_for_persona(persona_id)
+        ]
 
-    persona_name = getattr(persona, "persona_name", persona_id)
-
-    # 3a. Persona inventory items
-    # for_perception では除外: インベントリは移動で変わらない (持ち物は付いてくる) ので、
-    # 「移動先の様子」に載せると毎回重複する。Building 内アイテムだけを見せる。
-    inventory_items = (
-        manager.get_all_items_for_persona(persona_id)
-        if (not for_perception and hasattr(manager, 'get_all_items_for_persona')) else []
-    )
-    if inventory_items:
-        text_parts.append(f"### あなた自身（{persona_name}）のインベントリ内")
-        text_parts.append("")
-        for item in inventory_items:
-            short_id = item.get("short_id")
-            ref = f"item:{short_id}" if short_id is not None else None
-            _render_item(item, text_parts, media_list, manager, persona_id=persona_id, ref=ref)
-
-    # 3b. Building items
-    building_items = (
-        manager.get_all_items_in_building(building_id)
-        if hasattr(manager, 'get_all_items_in_building') else []
-    )
-    if building_items:
-        # for_perception ではインベントリと分ける必要がないので「### Building内」見出しは省く。
-        if not for_perception:
-            text_parts.append("### Building内")
-            text_parts.append("")
-        for item in building_items:
-            short_id = item.get("short_id")
-            ref = f"item:{short_id}" if short_id is not None else None
-            _render_item(item, text_parts, media_list, manager, persona_id=persona_id, ref=ref)
-
-    if not inventory_items and not building_items:
-        text_parts.append("アイテムはありません。")
-        text_parts.append("")
+    if hasattr(manager, 'get_all_items_in_building'):
+        world.building_items = [
+            _render_item_entry(item, manager, persona_id)
+            for item in manager.get_all_items_in_building(building_id)
+        ]
 
     # ========== Section 4: Fixture ==========
     obs_mgr = getattr(manager, "observer_manager", None)
     if obs_mgr:
         fixtures = obs_mgr.get_building_fixtures(building_id)
         if fixtures:
-            text_parts.append("---")
-            text_parts.append("")
-            text_parts.append("## 設置物 (Fixture)")
-            text_parts.append("")
+            lines = world.fixture_lines
+            lines.append("---")
+            lines.append("")
+            lines.append("## 設置物 (Fixture)")
+            lines.append("")
             for f in fixtures:
-                text_parts.append(f"- **{f.NAME}** (種別: {f.TYPE or 'object'}, ID: `{f.FIXTURE_ID}`)")
+                lines.append(f"- **{f.NAME}** (種別: {f.TYPE or 'object'}, ID: `{f.FIXTURE_ID}`)")
                 if f.DESCRIPTION:
-                    text_parts.append(f"  {f.DESCRIPTION}")
+                    lines.append(f"  {f.DESCRIPTION}")
                 if f.STATE_JSON:
                     import json as _json
                     try:
@@ -648,15 +687,15 @@ def get_visual_context(
                             if isinstance(feed_display, dict):
                                 subs_titles = feed_display.get("subscriptions")
                                 if isinstance(subs_titles, list) and subs_titles:
-                                    text_parts.append(
+                                    lines.append(
                                         "  購読フィード: "
                                         + " / ".join(str(s) for s in subs_titles)
                                     )
                                 latest_titles = feed_display.get("latest")
                                 if isinstance(latest_titles, list) and latest_titles:
-                                    text_parts.append("  新着記事の見出し:")
+                                    lines.append("  新着記事の見出し:")
                                     for t in latest_titles:
-                                        text_parts.append(f"  - {t}")
+                                        lines.append(f"  - {t}")
                         if state:
                             state_parts = []
                             for k, v in state.items():
@@ -664,12 +703,125 @@ def get_visual_context(
                                 if val is not None:
                                     state_parts.append(f"{k}={val}")
                             if state_parts:
-                                text_parts.append(f"  最新観測値: {', '.join(state_parts)}")
+                                lines.append(f"  最新観測値: {', '.join(state_parts)}")
                     except (TypeError, _json.JSONDecodeError):
                         pass
-                text_parts.append("")
+                lines.append("")
 
-    if not for_perception:
+    return world
+
+
+def _render_item_entry(
+    item: Dict[str, Any], manager: Any, persona_id: str,
+) -> _RenderedItem:
+    """アイテム 1 件を描く。姿によらず同じ文面なので、読みと同じく一度だけ。"""
+    entry = _RenderedItem()
+    short_id = item.get("short_id")
+    ref = f"item:{short_id}" if short_id is not None else None
+    _render_item(
+        item, entry.lines, entry.media, manager, persona_id=persona_id, ref=ref,
+    )
+    return entry
+
+
+def _render_view(
+    world: _WorldRead, view: VisualContextView,
+) -> List[Dict[str, Any]]:
+    """読み終えた材料から、一つの姿の message を組む (世界は読まない)。"""
+    text_parts: List[str] = []
+    media_list: List[Dict[str, str]] = []
+
+    if not view.for_perception:
+        text_parts.append("<system>")
+        text_parts.append("# ビジュアルコンテキスト")
+        # NOTE: かつて「常にリアルタイム状態を反映」と書いていたが、head の
+        # visual_context は Metabolism まで凍結されるため嘘だった (2026-07-09 削除)。
+        text_parts.append("以下は現在の状況を視覚的に示す情報です。")
+        text_parts.append("")
+        text_parts.append("---")
+        text_parts.append("")
+    else:
+        # 知覚バッファ用: どの Building の様子かを見出しで明示 (複数通知が並ぶため)。
+        text_parts.append(f"# 「{world.building_name}」の様子")
+        text_parts.append("")
+
+    # ========== Section 1: ペルソナ ==========
+    if view.for_perception:
+        # 「一緒にいる他ペルソナ」だけを述べる (self は include_self=False で除外済み)。
+        text_parts.append("## 一緒にいるペルソナ")
+        if not world.has_others:
+            text_parts.append("他のペルソナはいません。")
+        text_parts.append("")
+    else:
+        text_parts.append("## ペルソナ")
+        if world.persona_count <= 1:
+            text_parts.append("現在、このBuildingにはあなただけがいます。")
+        else:
+            text_parts.append(f"現在、このBuildingにはあなた含め{world.persona_count}人のペルソナがいます。")
+        text_parts.append("")
+
+    if view.include_self:
+        text_parts.extend(world.self_lines)
+        media_list.extend(world.self_media)
+
+    if view.include_other_personas:
+        text_parts.extend(world.other_persona_lines)
+        media_list.extend(world.other_persona_media)
+
+    # ========== Section 1b: ユーザー ==========
+    text_parts.extend(world.user_lines)
+
+    # ========== Section 2: Building ==========
+    text_parts.append("---")
+    text_parts.append("")
+    text_parts.append("## Building")
+
+    if not view.for_perception:
+        text_parts.append(f"現在、「{world.building_name}」にいます。")
+        text_parts.append("")
+    # for_perception では「現在いる」と断定しない (通知が出た後さらに移動しうるため)。
+    # Building 名は冒頭見出し「「X」の様子」で既に明示している。
+
+    if view.include_building:
+        text_parts.extend(world.building_image_lines)
+        media_list.extend(world.building_image_media)
+
+    if world.base_system_instruction:
+        text_parts.append("[システムプロンプト]")
+        text_parts.append(world.base_system_instruction)
+        text_parts.append("")
+
+    # ========== Section 3: Item ==========
+    text_parts.append("---")
+    text_parts.append("")
+    text_parts.append("## Item")
+    text_parts.append("")
+
+    inventory = [] if view.for_perception else world.inventory
+    if inventory:
+        text_parts.append(f"### あなた自身（{world.persona_name}）のインベントリ内")
+        text_parts.append("")
+        for entry in inventory:
+            text_parts.extend(entry.lines)
+            media_list.extend(entry.media)
+
+    if world.building_items:
+        # for_perception ではインベントリと分ける必要がないので「### Building内」見出しは省く。
+        if not view.for_perception:
+            text_parts.append("### Building内")
+            text_parts.append("")
+        for entry in world.building_items:
+            text_parts.extend(entry.lines)
+            media_list.extend(entry.media)
+
+    if not inventory and not world.building_items:
+        text_parts.append("アイテムはありません。")
+        text_parts.append("")
+
+    # ========== Section 4: Fixture ==========
+    text_parts.extend(world.fixture_lines)
+
+    if not view.for_perception:
         text_parts.append("</system>")
 
     # Build message
@@ -686,7 +838,7 @@ def get_visual_context(
 
     LOGGER.info(
         "get_visual_context: Generated visual context (%d images, %d inventory items, %d building items)",
-        len(media_list), len(inventory_items), len(building_items),
+        len(media_list), len(inventory), len(world.building_items),
     )
     return messages
 

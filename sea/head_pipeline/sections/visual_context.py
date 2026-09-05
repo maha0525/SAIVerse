@@ -1,8 +1,9 @@
 """VisualContextSection — visual context (Building / Persona images + Items) を head に。
 
 `get_visual_context` (`builtin_data/tools/get_visual_context.py`) のロジックを
-snapshot 化する thin wrapper。capture 時に 1 回 get_visual_context を呼び、
-text と media (画像 path / mime_type) を frozen snapshot として焼く。
+snapshot 化する thin wrapper。capture 時に世界を 1 回だけ読み
+(`build_visual_contexts`)、head 用の text と media (画像 path / mime_type)、
+および同じ瞬間の知覚記法の姿 (`room_text`) を frozen snapshot として焼く。
 
 旧 `sea/runtime_context.py` の visual_context cache (anchor キーの persona 属性
 ``_visual_context_cache`` / ``_visual_context_anchor``) を本 Section の snapshot
@@ -39,6 +40,15 @@ class VisualMediaEntry:
 class VisualContextSnapshot:
     text: str
     media: tuple[VisualMediaEntry, ...]
+    #: この snapshot が見せている Building。head は移動では撮り直さない (下の
+    #: refresh_on_events を参照) ので、ペルソナの現在地とは限らない。
+    building_id: Optional[str] = None
+    #: 同じ瞬間の同じ部屋を、**知覚バッファの記法**で書いたもの
+    #: (``for_perception=True`` / 自分の外見とインベントリ抜き)。入室時に積む
+    #: 「移動先の様子」と同じ書式なので、そのまま差分の土台にできる
+    #: (sai_memory/room_state.py — head の一覧と知覚の全文が二重になる問題)。
+    #: head の描画には**使わない** (render は text だけを出す)。
+    room_text: str = ""
 
 
 class VisualContextSection:
@@ -62,24 +72,46 @@ class VisualContextSection:
 
         try:
             from tools.context import persona_context
-            from builtin_data.tools.get_visual_context import get_visual_context
+            from builtin_data.tools.get_visual_context import (
+                HEAD_VIEW,
+                PERCEPTION_VIEW,
+                build_visual_contexts,
+            )
         except Exception:
             LOGGER.warning(
-                "visual_context: failed to import get_visual_context", exc_info=True,
+                "visual_context: failed to import build_visual_contexts",
+                exc_info=True,
             )
             return VisualContextSnapshot(text="", media=())
 
+        # head 用の姿と知覚記法の姿を **一度の読み**から作る。二回読むと、その
+        # 間にアイテムが増えたり誰かが出入りしたりして、head が見せている部屋と
+        # 差分の土台になる room_text が別時点のものになる (2026-09-05 Codex
+        # 指摘)。build_visual_contexts は読みを一度だけ行い、描き分けだけを姿
+        # ごとにする。
         try:
             with persona_context(persona_id, persona_dir, manager):
-                messages = get_visual_context(building_id=ctx.current_building_id)
+                messages, room_messages = build_visual_contexts(
+                    ctx.current_building_id, (HEAD_VIEW, PERCEPTION_VIEW),
+                )
         except Exception:
             LOGGER.warning(
-                "visual_context: get_visual_context raised persona=%s building=%s",
+                "visual_context: build_visual_contexts raised persona=%s building=%s",
                 persona_id, ctx.current_building_id, exc_info=True,
             )
             return VisualContextSnapshot(text="", media=())
 
+        # 知覚記法の姿。入室時に積む「移動先の様子」と同じ書式なので、head が
+        # 既に見せている姿とそのまま突き合わせられる (sai_memory/room_state.py
+        # の head 土台の差分)。head の描画には使わない。
+        room_text = ""
+        if room_messages and isinstance(room_messages[0], dict):
+            room_text = str(room_messages[0].get("content") or "").strip()
+
         if not messages:
+            # head に何も出ない = この部屋を「見せている」ことにはならない。
+            # building_id を記録すると、提示側が「head が見せているから差分の
+            # ままでよい」と読んでしまう (全体像がどこにも無い状態)。
             return VisualContextSnapshot(text="", media=())
 
         text_parts: list[str] = []
@@ -112,7 +144,10 @@ class VisualContextSection:
                 ))
 
         text = "\n\n".join(text_parts).strip()
-        return VisualContextSnapshot(text=text, media=tuple(media_entries))
+        return VisualContextSnapshot(
+            text=text, media=tuple(media_entries),
+            building_id=ctx.current_building_id, room_text=room_text,
+        )
 
     def render(self, snapshot: VisualContextSnapshot) -> Optional[RenderedSection]:
         if snapshot is None:
@@ -143,11 +178,20 @@ class VisualContextSection:
             {
                 "text": snapshot.text,
                 "media": [asdict(m) for m in snapshot.media],
+                "building_id": snapshot.building_id,
+                "room_text": snapshot.room_text,
             },
             ensure_ascii=False,
         )
 
     def deserialize_snapshot(self, data: str) -> VisualContextSnapshot:
+        # building_id / room_text を持たない旧行は None / "" で復元される
+        # (= head 土台の差分は使えず、従来どおり全文を積む)。次の capture で入る。
         payload = json.loads(data)
         media = tuple(VisualMediaEntry(**m) for m in payload.get("media", []))
-        return VisualContextSnapshot(text=payload.get("text", ""), media=media)
+        return VisualContextSnapshot(
+            text=payload.get("text", ""),
+            media=media,
+            building_id=payload.get("building_id"),
+            room_text=payload.get("room_text", "") or "",
+        )
