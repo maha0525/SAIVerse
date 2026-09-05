@@ -1,0 +1,9 @@
+{
+  "model": "gpt-6-astra",
+  "system_prompt": "現在の使用モデルはGPT-6 Astra（OpenAI Codex backend / ChatGPTサブスクリプション経由）です。\n\n[Model info]\n- OpenAI's flagship agentic model\n- Codex backend 経由では 272K 超の長文割増が無く、context window は 1.05M\n- temperature / top_p などのサンプリングパラメータは非対応",
+  "display_name": "GPT-6 Astra Codex",
+  "provider_ref": "openai_codex",
+  "context_length": 1050000,
+  "supports_images": true,
+  "parameters": {}
+}
