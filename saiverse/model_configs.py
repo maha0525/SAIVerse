@@ -247,7 +247,7 @@ BUILTIN_METABOLISM_HIGH_CHARS = 120_000
 #: 成り立つ幅。数字はまはーの製品判断で見直しうる。
 #:
 #: 読み経路は Metabolism の水位と同じ三層 (モデル定義 > 全体設定 > 組み込み既定)。
-BUILTIN_PERCEPTION_TARGET_CHARS = 40_000
+BUILTIN_PERCEPTION_TARGET_CHARS = 20_000  # 2026-09-05 まはー裁定: 幅 (high−target) が省略の頻度 = キャッシュの割れ頻度を決める。幅 2 万は会話の整理 (幅 8 万) の 4 倍の頻度で割るため 4 万へ広げた
 BUILTIN_PERCEPTION_HIGH_CHARS = 60_000
 
 #: 保存時検査「整理を始める量 − 残す量 > 知覚の上限 + 余裕」の**余裕**の分。

@@ -829,12 +829,12 @@ class PerceptionCapNorokeyukiShapeTest(PerceptionCapTestBase):
         }]
 
     def test_the_first_drop_lands_on_the_target(self):
-        blocks = self._blocks(recent=self.recent)  # 組み込み既定 (4万 / 6万)
+        blocks = self._blocks(recent=self.recent)  # 組み込み既定 (2万 / 6万)
         perception_chars = sum(
             len(b["content"]) for b in blocks
             if not b["metadata"].get("__perception_omitted__")
         )
-        self.assertLessEqual(perception_chars, 40_000)
+        self.assertLessEqual(perception_chars, 20_000)
         # 最新の知覚は残っている (下ろすのは古い側から)。
         self.assertEqual(
             blocks[-1]["metadata"]["__perception_batch_id__"], self.ids[-1],
