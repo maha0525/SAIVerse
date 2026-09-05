@@ -82,6 +82,75 @@ def resolve_default_model_key(persona: Any) -> str:
     return str(model_key)
 
 
+def current_head_room(
+    persona: Any,
+    *,
+    model_key: Optional[str] = None,
+    pipeline: HeadPipeline | None = None,
+) -> tuple[Optional[str], str]:
+    """いま head が見せている部屋を ``(building_id, 知覚記法の全文)`` で返す。
+
+    **撮り直さない読み口** — snapshot が無ければ ``(None, "")``。ここで
+    ``ensure_snapshot`` を呼ぶと、入室処理や勘定のついでに head を撮り直す
+    副作用が生まれる (「凍結された文脈の頭」の前提が崩れる)。
+
+    head の visual_context は移動では撮り直されない (Metabolism / anchor TTL
+    切れのみ) ので、返る building_id はペルソナの現在地とは限らない — **それが
+    この読み口の要点**で、呼び出し側は「head が今いる部屋を見せているか」を
+    この値で判定する:
+
+    - 積む側 (saiverse/dynamic_state.py): 見せていれば、その姿を土台にした差分
+      だけを積む (head と知覚が同じ部屋の全文を二枚見せない)。
+    - 提示側 (sea/runtime_context.py): 見せていなければ、head を土台にした
+      過去の差分を全文へ開き直す (部屋の全体像がどこにも無い状態を作らない)。
+
+    ``model_key`` を省略するとペルソナの標準 model の head を見る。
+
+    **今の snapshot を読む口**なので、「実際に送る head」を既に確定させている
+    呼び出し (prepare_context) はこれを使わない — :func:`head_room_of_snapshot`
+    にその確定済み snapshot を渡す (読み直すと、確定と読みの間に走った
+    Metabolism / TTL の撮り直しで別の head を見てしまう)。
+    """
+    persona_id = getattr(persona, "persona_id", "") or ""
+    if not persona_id:
+        return (None, "")
+    try:
+        pipeline = pipeline or get_default_pipeline()
+        key = str(model_key) if model_key else resolve_default_model_key(persona)
+        return head_room_of_snapshot(pipeline.get_snapshot(persona_id, key))
+    except Exception:
+        LOGGER.warning(
+            "head_pipeline: could not read the head's current room persona=%s",
+            persona_id, exc_info=True,
+        )
+        return (None, "")
+
+
+def head_room_of_snapshot(snapshot: Any) -> tuple[Optional[str], str]:
+    """**この** snapshot が見せている部屋を ``(building_id, 知覚記法の全文)`` で返す。
+
+    :func:`current_head_room` (今の snapshot を引いてくる口) と、render で
+    pin した snapshot を持っている呼び出し (:func:`render_head_messages` の
+    ``head_room_out``) が同じ規則を共有するための一点。判定を二枚書くと、
+    「送る head」と「判定に使う head」で規則がずれる。
+    """
+    section = (
+        snapshot.sections.get(VISUAL_CONTEXT_SECTION_NAME)
+        if snapshot is not None else None
+    )
+    if section is None:
+        return (None, "")
+    building_id = getattr(section, "building_id", None)
+    room_text = getattr(section, "room_text", "") or ""
+    # **両方揃って初めて「見せている」**。head の本文が空なら描画されない
+    # (= 部屋の全体像は head に無い) し、知覚記法の姿が無ければ土台にできる
+    # ものが無い。どちらか欠けたら「見せていない」に倒す — 積む側は全文を
+    # 積み、提示側は head 土台の差分を全文へ開き直す (どちらも安全側)。
+    if not building_id or not room_text or not getattr(section, "text", ""):
+        return (None, "")
+    return (str(building_id), str(room_text))
+
+
 def build_line_head_input(
     persona: Any,
     manager: Any,
@@ -333,10 +402,21 @@ def _inject_persona_recall_on_enter(
     Note システム完成までの繋ぎ実装。ペルソナが同じ Building に入室した際、過去の会話と
     Memopedia ページを想起する。以前は直接 SAIMemory へ append していたが、Phase 2 で
     知覚バッファ (kind='persona_recall') への push に変更 (消費は呼び出し元の flush)。
+
+    【再会の門 (2026-09-05, v0.3.9)】相手が直近の文脈に居るあいだは想起しない
+    (:meth:`HistoryManager.should_recall_persona`)。この繋ぎ実装は門を呼ばないまま
+    出荷されていたため、ずっと会話している相手にも移動のたびに「過去会話 6 件
+    (各 2,000 字) + 相手の Memopedia 個人ページ全文」が積まれ、本番で知覚
+    18 万字まで膨らんだ (docs/issues/persona_recall_perception_unbounded.md)。
+
+    見出しに書く相手の名前は ``persona.id_to_name_map`` (manager と参照を共有する
+    id→表示名の対応) で解決して渡す。解決できないときだけ ID のままになる。
     """
     history_manager = getattr(persona, "history_manager", None)
     if not history_manager:
         return
+
+    id_to_name = getattr(persona, "id_to_name_map", None) or {}
 
     for label in labels:
         if label.kind != "occupant_entered":
@@ -351,11 +431,19 @@ def _inject_persona_recall_on_enter(
         if not occupant_id or occupant_kind not in ("persona", "user"):
             continue
 
+        if not _should_recall_on_enter(history_manager, occupant_id):
+            LOGGER.debug(
+                "head_pipeline: skipped persona recall for %s "
+                "(already in recent context)", occupant_id,
+            )
+            continue
+
         try:
             recall_text = history_manager.recall_conversation_with(
                 occupant_id,
                 current_thread_only=False,
                 max_results=6,
+                display_name=id_to_name.get(str(occupant_id)) or None,
             )
         except Exception:
             LOGGER.exception(
@@ -375,6 +463,26 @@ def _inject_persona_recall_on_enter(
             LOGGER.exception(
                 "head_pipeline: failed to push persona recall for %s", occupant_id,
             )
+
+
+def _should_recall_on_enter(history_manager: Any, occupant_id: Any) -> bool:
+    """再会の門。直近の文脈に相手が居るなら想起しない。
+
+    判定の本体は :meth:`HistoryManager.should_recall_persona` (直近 20 メッセージに
+    相手の発言か audience があれば False)。ここは繋ぎ実装からその門へ配線するだけ。
+
+    判定自体が失敗したときは想起する側に倒す (= 従来挙動)。門は想起の量を抑える
+    最適化で、想起そのものが機能 — 判定の故障で再会の記憶を静かに失わせるより、
+    例外を記録したうえで従来どおり積む方が損失が小さい。
+    """
+    try:
+        return bool(history_manager.should_recall_persona(occupant_id))
+    except Exception:
+        LOGGER.exception(
+            "head_pipeline: should_recall_persona failed for %s "
+            "(falling back to recall)", occupant_id,
+        )
+        return True
 
 
 def _missing_section_names(pipeline: HeadPipeline, snapshot) -> set[str]:
@@ -466,6 +574,7 @@ def render_head_messages(
     enabled_sections: set[str] | None = None,
     pipeline: HeadPipeline | None = None,
     model_key: str | None = None,
+    head_room_out: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """pipeline 経由で head の message 列を組み立てる。
 
@@ -488,6 +597,15 @@ def render_head_messages(
     より、正直に失敗して次 Pulse の自己修復 (ensure_snapshot 再 capture /
     ensure_persisted 再保存) に委ねる。
 
+    ``head_room_out`` は呼び出し側が渡す out-param dict (``context_meta`` と同じ
+    型の受け皿)。**実際に描画した snapshot** が見せている部屋を
+    ``{"building_id": ..., "room_text": ...}`` で書き戻す。知覚の「部屋の様子」
+    の差分をそのまま出すか全文へ開き直すかは「今この prompt に部屋の全体像が
+    載っているか」で決まるので、判定は描画済みの head と同じ値を見なければ
+    ならない — 後から :func:`current_head_room` で読み直すと、その間に走った
+    Metabolism / TTL の撮り直しで別の部屋を見て、全体像の無い差分を送りうる
+    (2026-09-05 Codex 指摘)。渡さなければ書き戻さない。
+
     戻り値は ``[{"role": ..., "content": ..., "metadata": ...}, ...]`` の標準
     message dict 列。``prepare_context`` の system / memory_weave / visual_context
     部分の置き換えとして使う。
@@ -502,6 +620,24 @@ def render_head_messages(
     # に対して行う (Codex 二巡 P1): 検証と render の間に別スレッドが未保存の
     # 新版を公開しても、「検証した版」を描画するので fail-closed が崩れない。
     pinned = pipeline.get_snapshot(ctx.persona_id, ctx.model_key)
+
+    if head_room_out is not None:
+        # pin した版から読む。以降の readiness 検証・render はこの版に対して
+        # 行われるので、書き戻す値は「実際に送る head の部屋」と必ず一致する。
+        # ただし enabled_sections が visual_context を外す呼び出しでは、この
+        # prompt に部屋の全体像は載らない — 「どの部屋も見せていない」を書き、
+        # head 土台の差分を全文へ開き直す側に倒す (2026-09-05 Codex 二巡:
+        # 描画されないセクションの部屋を報告すると、全体像なしで差分だけを
+        # 送る契約破れになる)。
+        if (
+            enabled_sections is None
+            or VISUAL_CONTEXT_SECTION_NAME in enabled_sections
+        ):
+            building_id, room_text = head_room_of_snapshot(pinned)
+        else:
+            building_id, room_text = None, ""
+        head_room_out["building_id"] = building_id
+        head_room_out["room_text"] = room_text
 
     required_names = pipeline.registry.required_section_names()
     if enabled_sections is not None:

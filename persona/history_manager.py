@@ -777,6 +777,7 @@ class HistoryManager:
         *,
         current_thread_only: bool = True,
         max_results: int = 6,
+        display_name: Optional[str] = None,
     ) -> Optional[str]:
         """Recall past conversation with a specific persona from SAIMemory.
 
@@ -785,10 +786,16 @@ class HistoryManager:
         Args:
             target_persona_id: Persona to recall conversation with
             max_results: Maximum number of conversation snippets to return (default: 6)
+            display_name: 見出しに書く相手の表示名 (ペルソナ名 / ユーザー名)。
+                ID の生値は読み手にとって誰なのか分からない — 特にユーザーの ID は
+                "1" のような数字で、見出しが「[想起: 1との過去の会話]」になっていた。
+                表示名の対応表 (id_to_name_map) は manager 側にあるので、解決は
+                呼び出し側で行い、ここへは解決済みの名前を渡す。None なら ID のまま。
 
         Returns:
             Formatted recall message, or None if no conversations found
         """
+        label_name = display_name or target_persona_id
         if not self.memory_adapter or not self.memory_adapter.is_ready():
             LOGGER.debug("SAIMemory not ready for recall")
             return None
@@ -811,7 +818,7 @@ class HistoryManager:
 
             # Part 1: Past conversation snippets
             if messages:
-                lines = [f"[想起: {target_persona_id}との過去の会話]"]
+                lines = [f"[想起: {label_name}との過去の会話]"]
                 for msg in messages:
                     role = msg.get("role", "unknown")
                     content = msg.get("content", "").strip()
@@ -841,7 +848,7 @@ class HistoryManager:
                 from sai_memory.memopedia.storage import get_page_by_persona_id
                 page = get_page_by_persona_id(self.memory_adapter.conn, target_persona_id)
                 if page and page.content:
-                    memopedia_section = f"[想起: {target_persona_id}についてのMemopedia記録]\n{page.content}"
+                    memopedia_section = f"[想起: {label_name}についてのMemopedia記録]\n{page.content}"
                     recall_parts.append(memopedia_section)
                     LOGGER.debug(
                         "Added Memopedia content for persona=%s (%d chars)",

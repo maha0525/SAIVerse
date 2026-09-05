@@ -471,6 +471,40 @@ class SAIMemoryAdapter:
                 reduce_key=reduce_key, salient=salient, media=media, metadata=metadata,
             )
 
+    def push_room_state(
+        self,
+        building_id: str,
+        full_text: str,
+        *,
+        media: Optional[list] = None,
+        allow_diff: bool = True,
+        head_full_text: Optional[str] = None,
+    ) -> None:
+        """「移動先の様子」を知覚台帳へ積む (再訪で土台が見えていれば差分だけ)。
+
+        全文をそのまま積むか差分に縮めるかの判定と、その記帳は
+        sai_memory/room_state.py が持つ。``allow_diff=False`` は毎回全文
+        (Chronicle 無効ペルソナ — 提示窓で土台が消えうるので差分にできない)。
+
+        ``head_full_text`` は「head が今まさに見せている**この部屋**の姿」
+        (知覚記法の全文)。台帳に土台が無いときの土台になる — 呼び出し側が
+        head の building を確かめてから渡す (saiverse/dynamic_state.py)。
+        """
+        if not self._ready or not building_id or not full_text:
+            return
+        from sai_memory.perception_buffer import push_perception
+        from sai_memory.room_state import ROOM_STATE_KIND, build_room_state_push
+        with self._db_lock:
+            payload = build_room_state_push(
+                self.conn, building_id, full_text,
+                media=media, allow_diff=allow_diff,
+                head_full_text=head_full_text,
+            )
+            push_perception(
+                self.conn, ROOM_STATE_KIND, payload["content"],
+                media=payload["media"], metadata=payload["metadata"],
+            )
+
     def count_pending_perceptions(self, kind: str) -> Optional[int]:
         """未消費の知覚バッファにある指定 kind の件数。
 
@@ -596,7 +630,18 @@ class SAIMemoryAdapter:
                 if not items:
                     return None
                 reduced = reduce_perceptions(items)
+                # 「部屋の様子」: 積んでから今までの間に土台 (同部屋の全文) が
+                # 付記で提示から下りていたら、差分を全文へ開き直してから確定する
+                # (sai_memory/room_state.py の不変条件を消費の側で通す)。
+                from sai_memory.room_state import (
+                    collect_batch_room_states,
+                    ensure_room_state_base,
+                )
+                reduced = ensure_room_state_base(self.conn, reduced)
                 text = format_perception_message(reduced)
+                # 差分の土台と、確定文面のどこにその文面が居るかをバッチへ記帳
+                # する。付記で土台が下りたときの移管がこれを読む。
+                room_state_json = collect_batch_room_states(reduced, text)
                 # reduce 後の全知覚の添付メディアを集約して 1 ブロックに載せる。
                 # path で重複排除 (同じ画像を二重添付しない)。
                 media: list = []
@@ -640,6 +685,7 @@ class SAIMemoryAdapter:
                     media=media or None,
                     boundary_created_at=boundary_created_at,
                     boundary_rowid=boundary_rowid,
+                    room_state_json=room_state_json,
                 )
         except Exception:
             # tx 失敗 (rollback 済み) = 消費不成立。pending は無傷なので次の

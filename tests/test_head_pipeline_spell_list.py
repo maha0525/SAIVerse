@@ -229,6 +229,60 @@ def test_diff_detects_added_and_removed_visible_spells():
     assert any(k == "spell_removed" and "b" in v for k, v in kinds)
 
 
+def test_added_notification_carries_schema():
+    """付与通知はスキーマ込み (まはー裁定 2026-09-04)。
+
+    head のスペル一覧は次の Metabolism まで凍結されるので、移動直後のペルソナに
+    とってこの通知が新しいスペルの唯一の情報源になる。名前だけでは引数が分からず
+    唱えられない。
+    """
+    section = SpellListSection()
+    old = SpellListSnapshot(enabled=True, entries=(), addon_manifests=())
+    new = SpellListSnapshot(
+        enabled=True,
+        entries=(
+            SpellEntry(
+                name="post_message", display_name="投稿",
+                description="掲示板に書き込む",
+                parameters_json=(
+                    '{"type": "object", '
+                    '"properties": {"body": {"type": "string", "description": "本文"}, '
+                    '"draft": {"type": "boolean", "description": "下書きにする"}}, '
+                    '"required": ["body"]}'
+                ),
+                addon_key=None, visible=True,
+            ),
+        ),
+        addon_manifests=(),
+    )
+    labels = section.diff_to_notifications(old, new)
+    assert [label.kind for label in labels] == ["spell_added"]
+    text = labels[0].label
+    assert "スペル 投稿 (post_message) が使えるようになりました" in text
+    assert "掲示板に書き込む" in text
+    # 引数の形 (名前・型・必須か・説明) が載っていること
+    assert "body (string, 必須): 本文" in text
+    assert "draft (boolean, 省略可): 下書きにする" in text
+
+
+def test_removed_notification_is_name_only():
+    """剥奪通知は名前だけ — 唱えられなくなったものに引数の形は要らない。"""
+    section = SpellListSection()
+    entry = SpellEntry(
+        name="post_message", display_name="投稿", description="掲示板に書き込む",
+        parameters_json=(
+            '{"type": "object", '
+            '"properties": {"body": {"type": "string", "description": "本文"}}}'
+        ),
+        addon_key=None, visible=True,
+    )
+    old = SpellListSnapshot(enabled=True, entries=(entry,), addon_manifests=())
+    new = SpellListSnapshot(enabled=True, entries=(), addon_manifests=())
+    labels = section.diff_to_notifications(old, new)
+    assert [label.kind for label in labels] == ["spell_removed"]
+    assert labels[0].label == "スペル 投稿 (post_message) が使えなくなりました"
+
+
 def test_diff_notifies_when_spell_system_toggles():
     section = SpellListSection()
     old = SpellListSnapshot(enabled=False, entries=(), addon_manifests=())

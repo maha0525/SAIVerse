@@ -123,7 +123,7 @@ REST API 全エンドポイントの一覧（自動生成）。すべて `/api` 
 | POST | `/api/config/max-image-embeds` | Set session override for max image embeds. |
 | GET | `/api/config/media-recall` | Get whether attached media (image/audio/video) summaries feed the auto-recall query. |
 | POST | `/api/config/media-recall` | Toggle attached-media auto-recall and persist to .env. |
-| GET | `/api/config/metabolism-defaults` | Metabolism 二水位の全体既定 — 設定値 (null = 未設定) / 実効値 / 組み込み既定。 |
+| GET | `/api/config/metabolism-defaults` | 水位 (記憶の整理 + 知覚) の全体既定 — 設定値 (null = 未設定) / 実効値 / 組み込み既定。 |
 | PUT | `/api/config/metabolism-defaults` | 全体既定を保存する。 |
 | POST | `/api/config/model` | Set the global model override and return updated config. |
 | GET | `/api/config/models` | List available LLM models. |

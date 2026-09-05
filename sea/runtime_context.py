@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable, Dict, List, Optional, Sequence
+import threading
+from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 from sea.eviction_plan import CONSUMED_PERCEPTION_KEY
 from saiverse.model_configs import (
@@ -10,6 +11,7 @@ from saiverse.model_configs import (
     get_model_display_name,
     get_model_pricing,
     get_model_provider,
+    resolve_perception_watermarks,
 )
 from tools import SPELL_TOOL_SCHEMAS, TOOL_REGISTRY
 
@@ -263,6 +265,15 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
     # head の章立ては呼び出し側から選べない (PERSONA_HEAD_SECTIONS の docstring)。
     enabled_sections: set[str] = set(PERSONA_HEAD_SECTIONS)
 
+    # 実際に描画した head が見せている部屋 (out-param で受け取る)。知覚の
+    # 「部屋の様子」の差分をそのまま出すか全文へ開き直すかは、この prompt に
+    # 部屋の全体像が載っているかで決まる — 後段で head を読み直すと、その間に
+    # 走った Metabolism / TTL の撮り直しで別の head を見てしまい、全体像の無い
+    # 差分を送りうる (2026-09-05 Codex 指摘)。この呼び出しの中で確定させた値を
+    # 勘定と提示の両方へ渡す。head を組まない呼び出しは空のまま = 後段が自分で
+    # 読む (従来どおり)。
+    head_room_out: Dict[str, Any] = {}
+
     if enabled_sections:
         from sea.head_pipeline import render_head_messages
         from sea.head_pipeline.types import HeadNotReadyError
@@ -271,6 +282,7 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
                 persona, runtime.manager, building_id,
                 enabled_sections=enabled_sections,
                 model_key=model_key,
+                head_room_out=head_room_out,
             )
             if head_messages:
                 messages.extend(head_messages)
@@ -583,8 +595,13 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
                 # 唯一の手段は退場付記の印 (annexed_entry_id) — 付記されるまで
                 # 消えない。legacy の event_message 行は生ログ側にそのまま居るので、
                 # 混在期間も両方が自然に並ぶ。
+                # プレビューは送らない列なので、下ろし境界は進めない (測るだけ) —
+                # 一方向にしか進まない境界を、実際には送らない組み立てで確定
+                # させない (2026-09-05 四巡目 #6 と同じ理由の隣)。
                 recent = _merge_consumed_perceptions(
                     runtime, persona, recent, anchor_id=history_anchor_id,
+                    model_key=model_key, advance_cutoff=not preview_only,
+                    head_room_key=_pinned_head_room_key(head_room_out),
                 )
 
                 # Enrich messages with attachment context
@@ -736,22 +753,26 @@ def _chronicle_enabled_for(runtime: Any, persona: Any) -> bool:
         return True
 
 
-def _anchor_order_key(
+def _anchor_order_key_locked(
     sai_mem: Any, anchor_id: Optional[str],
 ) -> Optional[tuple]:
     """anchor 行の正典順序キー (created_at, rowid)。引けなければ None。
 
     messages の時系列は (created_at, rowid) の辞書式順が正典 (W8)。epoch だけの
     比較は anchor と同秒に確定したバッチの直前/直後を区別できない。
+
+    **呼び出し側が ``sai_mem._db_lock`` を保持している前提** — 提示の組成は
+    候補取得から境界前進までを一つのロック区間で完結させるので、ここで錠前を
+    取り直すと (非再入の ``threading.Lock`` を持つ環境で) 自分自身と噛み合う。
+    錠前を取る層は :func:`list_presented_perception_blocks` の一枚だけ。
     """
     if not anchor_id:
         return None
     try:
-        with sai_mem._db_lock:
-            row = sai_mem.conn.execute(
-                "SELECT created_at, rowid FROM messages WHERE id = ?",
-                (anchor_id,),
-            ).fetchone()
+        row = sai_mem.conn.execute(
+            "SELECT created_at, rowid FROM messages WHERE id = ?",
+            (anchor_id,),
+        ).fetchone()
         if row is None or row[0] is None:
             return None
         return (int(row[0]), int(row[1]))
@@ -759,11 +780,366 @@ def _anchor_order_key(
         return None
 
 
+def _perception_block_text(rendered_text: str) -> str:
+    """バッチの確定文面を提示ブロックの本文にする (組成の一点)。
+
+    勘定 (:func:`sea.eviction_plan.message_chars`) が数えるのはこの文字列なので、
+    合計上限の判定も同じ関数で測る — 「送る側と測る側が同じ一枚を見る」規則を
+    知覚の上限にも通す。
+    """
+    return f"<system>{rendered_text}</system>"
+
+
+#: 下ろした跡地に置く機構名義の一行の見出し。既存の知覚ブロックの見出し
+#: (``[システム通知]`` / ``[フィード]`` — sai_memory/perception_buffer の
+#: ``_KIND_HEADERS``) と同じ流儀に合わせる。
+_PERCEPTION_OMISSION_HEADER = "[省略された記録]"
+
+#: 「下ろしても上の水位を下回れない」を (ペルソナ, 実行 model) ごとプロセス
+#: ごとに 1 度だけ警告するための既出集合 (毎ターン同じ行でログを埋めない)。
+#: 水位は model ごとなので、抑止キーも model を含める (session_lifecycle の
+#: ``_watermark_inversion_warned`` と同じ形)。単独で上限を超える一個は下ろさずに
+#: 超過を許す — 旗を立てる正直な形
+#: (docs/issues/watermarks_unsatisfiable_when_perception_is_large.md 裁定 7)。
+_PERCEPTION_CAP_WARNED: Set[Tuple[str, str]] = set()
+_PERCEPTION_CAP_WARN_LOCK = threading.Lock()
+
+
+def _perception_omission_block(
+    dropped: Sequence[Any], created_at: int, *, chronicle_enabled: bool,
+    records: int,
+) -> Dict[str, Any]:
+    """下ろした区間の跡地に置く機構名義のブロック (連続区間を一つに束ねる)。
+
+    黙って消さない — 「そこに何も無かった」という記録の嘘をつかないため
+    (2026-09-04 まはー裁定 1)。あらすじの畳みが跡地に digest を置くのと同じ
+    原則で、文面の役目も同じ二つ: ①ここに記録があった ②消えたのではない。
+
+    ``records`` は下ろした区間に**実際に入っていた記録の件数**
+    (:func:`~sai_memory.perception_buffer.count_batch_records` の合計) で、
+    バッチ数ではない — 1 枚のバッチは Beat 頭に溜まっていた知覚を全部束ねるので、
+    バッチ数で書くと「部屋の様子 3 件 + 通知 5 件」の 1 枚が「1 件」になる。
+    台帳の行を引けなかったバッチは 1 と数えるので合計は**下限**であり、文面も
+    「N 件以上」と下限で書く (数えられた分より少なく言うことはない)。
+
+    Chronicle 無効のペルソナには②を書かない — 編纂が走らない設定なので、
+    あらすじで読み返せるという約束が嘘になる。有効なペルソナにも「もう入って
+    いる」とは書かない: この区間の編纂はまだ走っていないことがあり、断定すると
+    未成立の約束になる (2026-09-05 四巡目 #3)。
+    """
+    body = (
+        f"ここにあった {records} 件以上の記録 (部屋の様子・通知など) は、"
+        "古くなったため表示から外しました。"
+    )
+    if chronicle_enabled:
+        body += "消えたのではなく、記憶の整理の際にあらすじへ引き継がれます。"
+    return {
+        "role": "user",
+        "content": (
+            f"<system>{_PERCEPTION_OMISSION_HEADER}\n{body}</system>"
+        ),
+        "created_at": int(created_at),
+        "metadata": {
+            "tags": ["internal", "event_message", "perception"],
+            CONSUMED_PERCEPTION_KEY: True,
+            "__perception_omitted__": int(records),
+            "__perception_omitted_batches__": len(dropped),
+        },
+    }
+
+
+#: 「head の部屋は呼び出し側から渡されていない」ことの印。``None`` は
+#: 「head はどの部屋も見せていない」という**答え**なので、区別が要る。
+_HEAD_ROOM_UNSET = object()
+
+
+def _pinned_head_room_key(head_room_out: Dict[str, Any]) -> Any:
+    """描画済み head の out-param (:func:`render_head_messages`) を部屋のキーにする。
+
+    out-param が空 = この呼び出しは head を組んでいない (組成をスキップした /
+    テストで差し替えられている) ので、判定は後段の読み直しに委ねる
+    (:data:`_HEAD_ROOM_UNSET`)。値が入っていれば、たとえ ``None`` (どの部屋も
+    見せていない) でもそれが答え。
+    """
+    if "building_id" not in head_room_out:
+        return _HEAD_ROOM_UNSET
+    building_id = head_room_out.get("building_id")
+    if not building_id:
+        return None
+    try:
+        from sai_memory.room_state import room_key
+        return room_key(str(building_id))
+    except Exception:
+        LOGGER.warning(
+            "[sea][perception] could not build the head's room key from the "
+            "rendered head; reopening head-based room diffs to their full text",
+            exc_info=True,
+        )
+        return None
+
+
+def _head_room_key(persona: Any, model_key: Optional[str]) -> Optional[str]:
+    """その回の提示先 model の head が今見せている部屋のキー。引けなければ None。
+
+    「部屋の様子」の差分は、台帳に土台が無くても head が同じ部屋を見せていれば
+    head の姿を土台にする (sai_memory/room_state.py)。その差分を提示してよいか
+    は「**この** model の head が今もその部屋を見せているか」で決まる — head は
+    (ペルソナ, model) ごとに別々の時点で capture されるので、台帳には書けない。
+
+    撮り直しはしない読み口 (:func:`sea.head_pipeline.current_head_room`) なので、
+    まだ一度も head を組んでいない Session では None になる。None は「head は
+    その部屋を見せていない」と読まれ、差分は全文へ開き直される — 冗長な全文
+    一枚は無害だが、全体像を失った差分は復元不能 (回復側と同じ倒し方)。
+
+    **これを使うのは head を組まない呼び出しだけ** (勘定・退場計画・読み取り
+    専用の画面)。同じ呼び出しで head を送る prepare_context は
+    :func:`_pinned_head_room_key` で描画済みの値を渡す — 読み直すと、確定と
+    読みの間に走った撮り直しで別の head を見てしまう。
+    """
+    try:
+        from sai_memory.room_state import room_key
+        from sea.head_pipeline import current_head_room
+        building_id, _room_text = current_head_room(persona, model_key=model_key)
+        return room_key(building_id) if building_id else None
+    except Exception:
+        LOGGER.warning(
+            "[sea][perception] could not resolve the head's current room; "
+            "reopening head-based room diffs to their full text", exc_info=True,
+        )
+        return None
+
+
+def _perception_suffix_totals(
+    presented: Sequence[Any], *, head_room_key: Optional[str] = None,
+) -> List[int]:
+    """``presented[i:]`` を提示したときの合計字数を ``i`` ごとに並べて返す。
+
+    境界を進めると :func:`sai_memory.room_state.restore_room_state_bases` が
+    同じ tx で走り、土台を失った差分を全文へ差し替える — 差分の小さい文面が
+    全文に膨らむ。下ろす量を差し替え**前**の字数で決めると、下ろした直後に上の
+    水位を超えたままになり、新着が無いのに次の呼び出しで境界がまた進む (提示は
+    新着が無ければ変わらない、という約束が破れる)。だからここは開き直し**後**の
+    姿で数える。
+
+    数え方は回復側と同じ規則を、字数だけで辿り直したもの。バッチごとに JSON を
+    読み直すのは**一度きり**で、そこから
+
+    - ``suffix_raw[i]``     : 差し替え前の素の合計 (後ろからの累積)
+    - ``suffix_forced[i]``  : 提示列の中で既に土台が切れている差分の膨らみ
+      (どの ``i`` でも開き直すので、これも後ろからの累積で足りる)
+    - 部屋ごとの「``presented[i:]`` に最初に現れるエントリ」の膨らみ
+
+    の三つを合わせる。三つ目だけは ``i`` が進むと部屋ごとに一つずつ前へずれる
+    ので、落ちたバッチに載っていた部屋だけを繰り上げて差分更新する。全体で
+    バッチ数 + エントリ数に比例する手間で済む (2026-09-05 Codex 三巡 #3 —
+    以前は境界候補ごとに残り全部を数え直していて、``_db_lock`` を握ったまま
+    二乗時間で回っていた。Codex の材料で 1,000 件 4.1 秒 / 2,000 件 28.7 秒、
+    回帰テストの材料でも 2,000 件 4.8 秒 → 線形化後は同じ材料で 0.05 秒)。
+
+    **head を土台にした差分**は連なりの外なので、``i`` がどこであっても膨らむか
+    どうかは同じ — その回の head が同じ部屋を見せていなければ (``head_room_key``
+    と不一致) 必ず開き直され、見せていれば決して開き直されない。だから部屋ごと
+    の「最初に現れるエントリ」の繰り上げには入れず、``forced`` 側だけで数える。
+
+    返るのは長さ ``len(presented) + 1`` の list で、末尾は 0 (全部下ろした形)。
+    """
+    from sai_memory.room_state import (
+        batch_room_states,
+        chain_is_intact,
+        is_head_based,
+    )
+
+    count = len(presented)
+    raw: List[int] = [0] * count
+    # エントリを時刻順に平坦化する (batch_index / key / 膨らみ / 土台の状態)。
+    entry_batch: List[int] = []
+    entry_delta: List[int] = []
+    entry_forced: List[bool] = []
+    key_entries: Dict[str, List[int]] = {}
+    keys_in_batch: List[List[str]] = []
+    previous_by_key: Dict[str, Any] = {}
+    for index, batch in enumerate(presented):
+        rendered = batch.rendered_text or ""
+        raw[index] = len(_perception_block_text(rendered))
+        seen_here: List[str] = []
+        for entry in batch_room_states(batch.room_state_json):
+            key = str(entry.get("key") or "")
+            if not key:
+                continue
+            head_based = is_head_based(entry)
+            previous = None
+            if not head_based:
+                previous = previous_by_key.get(key)
+                previous_by_key[key] = entry
+            block = entry.get("block") or ""
+            snapshot = entry.get("snapshot") or ""
+            # 回復側と同じ見送り条件 (差し替えられないものは膨らまない)。
+            expandable = bool(
+                entry.get("is_diff") and block and snapshot and block in rendered
+            )
+            position = len(entry_batch)
+            entry_batch.append(index)
+            entry_delta.append(len(snapshot) - len(block) if expandable else 0)
+            if head_based:
+                # 連なりの外: head が同じ部屋を見せているかだけで決まる。
+                entry_forced.append(expandable and key != head_room_key)
+                continue  # 部屋ごとの繰り上げ (key_entries) にも入れない
+            entry_forced.append(
+                expandable and not chain_is_intact(entry, previous)
+            )
+            key_entries.setdefault(key, []).append(position)
+            seen_here.append(key)
+        keys_in_batch.append(seen_here)
+
+    forced_by_batch: List[int] = [0] * count
+    for position, index in enumerate(entry_batch):
+        if entry_forced[position]:
+            forced_by_batch[index] += entry_delta[position]
+    suffix_raw: List[int] = [0] * (count + 1)
+    suffix_forced: List[int] = [0] * (count + 1)
+    for index in range(count - 1, -1, -1):
+        suffix_raw[index] = suffix_raw[index + 1] + raw[index]
+        suffix_forced[index] = suffix_forced[index + 1] + forced_by_batch[index]
+
+    # 部屋ごとの「この suffix で最初に現れるエントリ」の膨らみ。土台が切れて
+    # いる (forced) ぶんは既に上で数えているので、ここでは足さない。
+    pointer: Dict[str, int] = {key: 0 for key in key_entries}
+    contribution: Dict[str, int] = {}
+    first_total = 0
+
+    def _refresh(key: str, start: int) -> None:
+        nonlocal first_total
+        positions = key_entries[key]
+        cursor = pointer[key]
+        while cursor < len(positions) and entry_batch[positions[cursor]] < start:
+            cursor += 1
+        pointer[key] = cursor
+        value = 0
+        if cursor < len(positions):
+            position = positions[cursor]
+            if not entry_forced[position]:
+                value = entry_delta[position]
+        previous_value = contribution.get(key, 0)
+        if value != previous_value:
+            first_total += value - previous_value
+            contribution[key] = value
+
+    for key in key_entries:
+        _refresh(key, 0)
+
+    totals: List[int] = [0] * (count + 1)
+    for index in range(count):
+        totals[index] = suffix_raw[index] + suffix_forced[index] + first_total
+        for key in keys_in_batch[index]:
+            _refresh(key, index + 1)
+    return totals
+
+
+def _presented_chars_after_transfer(
+    presented: Sequence[Any], *, head_room_key: Optional[str] = None,
+) -> int:
+    """この並びを提示したときの合計字数 (部屋の様子の開き直しを織り込んだ値)。"""
+    if not presented:
+        return 0
+    return _perception_suffix_totals(presented, head_room_key=head_room_key)[0]
+
+
+def _plan_perception_drop(
+    persona: Any, presented: Sequence[Any], cutoff: int,
+    *, model_key: Optional[str] = None, head_room_key: Optional[str] = None,
+    advance: bool = True,
+) -> int:
+    """知覚の合計が上の水位を超えていたら、下の水位まで下ろした境界を返す。
+
+    下ろすのは**古い側からまとめて**。一個ずつ下ろす形は、知覚が多い環境で
+    新着のたびに提示の前方が書き換わり、ほぼ毎ターン全文が定価の読み直しに
+    なる (「窓の並びが変わるのは Metabolism のとき、たまに・まとめて」の
+    不変条件 — intent cached_head_architecture)。
+
+    **水位はその回の実行モデルのもの** (``model_key``、beat_execution_context.md
+    §3.2 — 各 Session は自分の model の閾値で自分の提示コンテキストを管理する)。
+    None のときだけ従来どおり ``persona.model`` へ落ちる。下ろし境界
+    (``perception_presentation``) はペルソナ全体で一つのままで、**厳しい水位の
+    モデルの回に多く進むのは正常**: 境界は一方向にしか進まないので、緩い
+    モデルの回がそれを戻すことはなく、下ろした事実だけが共有される。model ごと
+    に境界を分けると、同じ台帳に対して二つの提示が並立し、部屋の様子の土台の
+    連なりもモデルごとに別々の切れ方をする (2026-09-05 Codex 三巡 #2)。
+
+    **最新の 1 件は下ろし対象に入れない**。この規則が挙動を変えるのは「古い側を
+    全部下ろしても、最新の一件だけで下の水位を超える」ときだけで、そのとき
+    下ろさない理由は水位で説明できる: 一件が上の水位以下ならそもそも超過して
+    いないし、上の水位すら超える一件 (巨大な再会想起など) は下ろしても次の
+    積みで再超過する — 機構が数字を合わせにいかず、正直に超過を見せて旗
+    (WARNING) を立てる (裁定 7 と同じ形。根本は供給側の身の丈)。
+    ※旧文の「一度も見ないまま失うのを防ぐ」という理由づけは 2026-09-05 に
+    まはーの指摘で撤回した — 効きどころの説明として不正確だった。
+
+    測るのは**開き直し後の字数** (:func:`_perception_suffix_totals`)。境界候補
+    ごとの残りをあらかじめ一度に組み立て、下の水位に届く (または最新 1 件だけ
+    が残る) 境界を確定してから返す。差し替え前の小さい字数で決めてしまうと、
+    下ろした直後に上の水位を超えたままになり、新着が無いのに次の呼び出しで
+    境界がまた進む。
+
+    Returns: 新しい境界 (下ろすものが無ければ ``cutoff`` のまま)。
+    """
+    if not presented:
+        return cutoff
+    model = str(model_key or getattr(persona, "model", "") or "")
+    target, high = resolve_perception_watermarks(model)
+    if high is None:
+        return cutoff  # モデル単位のオプトアウト (下ろしを持たない)
+    totals = _perception_suffix_totals(presented, head_room_key=head_room_key)
+    running = totals[0]
+    if running <= high:
+        return cutoff
+    new_cutoff = cutoff
+    dropped = 0
+    for index in range(len(presented) - 1):
+        if running <= target:
+            break
+        new_cutoff = max(new_cutoff, presented[index].id)
+        dropped += 1
+        running = totals[index + 1]
+    persona_id = str(getattr(persona, "persona_id", "?"))
+    if running > high:
+        warn_key = (persona_id, model)
+        with _PERCEPTION_CAP_WARN_LOCK:
+            first_time = warn_key not in _PERCEPTION_CAP_WARNED
+            if first_time:
+                _PERCEPTION_CAP_WARNED.add(warn_key)
+        if first_time:
+            LOGGER.warning(
+                "[sea][perception] the newest perception block alone is over "
+                "the presentation cap (%d chars > high %d) for persona=%s "
+                "model=%s; keeping it and letting the total run over — the "
+                "supply side (one huge block) is what needs fixing, not the "
+                "presentation",
+                running, high, persona_id, model,
+            )
+    if dropped:
+        # 実際に境界を書く組成だけ INFO。読み取り専用の測定 (画面のポーリング・
+        # 発火判定の下見) は同じ計画を毎回口にするので DEBUG に落とす —
+        # 「同じ dropping が何度も出る = 書けていない?」という誤読を防ぐ
+        # (2026-09-05 実機検証で紛らわしさを確認)。
+        LOGGER.log(
+            logging.INFO if advance else logging.DEBUG,
+            "[sea][perception] presented perception total exceeded the cap "
+            "(high=%d, target=%d); dropping %d older batch(es) through id %d "
+            "in one step (persona=%s, model=%s, remaining=%d chars%s)",
+            high, target, dropped, new_cutoff, persona_id, model, running,
+            "" if advance else ", measure-only",
+        )
+    return new_cutoff
+
+
 def list_presented_perception_blocks(
     runtime: Any, persona: Any, recent: Sequence[Dict[str, Any]],
     *,
     anchor_id: Optional[str] = None,
     raise_on_error: bool = False,
+    model_key: Optional[str] = None,
+    advance_cutoff: bool = True,
+    head_room_key: Any = _HEAD_ROOM_UNSET,
 ) -> List[Dict[str, Any]]:
     """いま提示に差し込まれる知覚ブロックを組む (組成規則の一点管理)。
 
@@ -778,15 +1154,48 @@ def list_presented_perception_blocks(
       ``<system>`` 包みでそのまま出す — 生の台帳項目からの再構成 (再 reduce /
       再 format) はしない (reduce で消えた中間状態の復活・秒精度の時刻衝突に
       よるグループ混線の根)。
-    - **提示から下ろす唯一の手段は退場付記の印** (``annexed_entry_id``)。窓や
-      fold スパンの計算は持たない — 付記されるまで消えないので、下限「退場した
-      ものは必ず編纂されている」が提示側でも常に成立する。履歴が空でも未付記
-      バッチは提示される。
+    - **付記の印** (``annexed_entry_id``) が付いたバッチは提示から下りる — 付記
+      されるまで消えないので、下限「退場したものは必ず編纂されている」が提示側
+      でも常に成立する。履歴が空でも未付記バッチは提示される。
+    - **知覚の合計にも上限がある** (§10.9、2026-09-04 まはー裁定)。提示中の
+      ブロックの合計が上の水位を超えたら、古い側を下の水位まで**まとめて**
+      下ろし、その境界を一方向に進める。下ろすのは提示だけで台帳は無傷なので、
+      その期間の編纂が来れば材料として引き取られる。跡地には省略の印
+      (機構名義の一行) を置く — 黙って消さない。判定に使う水位は
+      **その回の実行 model** (``model_key``) のもの — 送る側 (prepare_context) も
+      測る側 (Metabolism) も実行 model で動くので、ここだけ ``persona.model`` を
+      見ていると「実行モデルに保存した知覚の水位が効かない」(2026-09-05 Codex
+      三巡 #2)。``model_key`` が無い呼び出しだけ ``persona.model`` へ落ちる。
     - 例外は Chronicle 無効のペルソナ (「編纂なしで忘れる」を選んだ) のみ:
-      提示窓 (cutoff = anchor 境界、無ければ提示最古行) より古いバッチは会話と
+      提示窓 (anchor 境界、無ければ提示最古行) より古いバッチは会話と
       同じように忘れる。**履歴が空でも** anchor が立っていれば絞る — 生ログ窓が
       空の瞬間に過去バッチを全部再提示しない (2026-08-19 Codex 第二巡 #3)。
       anchor も履歴も無い完全ブートストラップだけは全提示 (隠さない側)。
+    - **窓絞りで底が抜けた「部屋の様子」の差分は、提示時に全文へ開き直す**
+      (:func:`sai_memory.room_state.reopen_lost_bases`)。Chronicle 無効の窓絞り
+      は台帳に書ける事実ではない (窓はペルソナと model ごとに動く) ので、台帳側
+      の回復 (付記・境界前進と同一 tx) はここまで届かない — トグルを有効から
+      無効へ切り替えると、有効な間に積んだ差分が土台なしで提示に残る
+      (2026-09-05 四巡目 #1)。開き直しは純関数で、同じ並びからは必ず同じ文面に
+      なるので、提示が呼び出しごとに揺れることはない。台帳も確定文面も触らない。
+    - **head を土台にした「部屋の様子」の差分も、head が別の部屋を見せていたら
+      提示時に全文へ開き直す**。台帳に土台が無くても head がその部屋を見せて
+      いれば差分だけを積む (`room_state.build_room_state_push`) が、head は
+      (ペルソナ, model) ごとに別々の時点で capture されるので、「その差分の
+      部屋の全体像が今この Session に見えているか」は台帳へ書けない。判定に使う
+      head は ``head_room_key`` で受け取る — 同じ prompt へ head を載せる
+      呼び出し (prepare_context) は**実際に描画した head** の部屋を渡し、head を
+      組まない呼び出し (勘定・退場計画・読み取り専用の画面) は省略して
+      `_head_room_key` の読み直しに委ねる。どちらの値も、下ろし量の見積もり
+      (`_plan_perception_drop`) と開き直しの**両方**へ同じものを渡す — 勘定と
+      実送信が別の head を見ると、開き直しで膨らむ量が勘定から漏れる。
+    - ``advance_cutoff=False`` は**測るだけ**のモード: 下ろし境界を進める判定は
+      同じように行い、進めた**つもり**の提示を返すが、``perception_presentation``
+      へは書かない。読み取り専用の画面 (context-status)・仮定の窓の下見
+      (読み戻し / 引き戻しのプレビュー)・コンテキストプレビューがこちらを使う —
+      境界は一方向で取り消せないので、実際には送らない列で確定させない
+      (2026-09-05 四巡目 #6)。返るブロックは進めるモードと同一 (上の開き直しが
+      台帳側の回復と同じ結果を与える) なので、勘定と実送信はズレない。
     - 失敗は空リスト + WARN に倒す — 送る側は「マージなし (元の履歴のまま)」、
       測る側は「知覚ぶん 0 (従来値)」へ縮退する。履歴ゼロで走らせるよりも
       知覚欠けの方が被害が小さい。``raise_on_error=True`` は失敗を例外で
@@ -798,14 +1207,35 @@ def list_presented_perception_blocks(
     if sai_mem is None or not getattr(sai_mem, "is_ready", lambda: False)():
         return []
     try:
-        from sai_memory.perception_buffer import list_unannexed_batches
-        with sai_mem._db_lock:
-            batches = list_unannexed_batches(sai_mem.conn)
-        if not batches:
-            return []
+        from sai_memory.perception_buffer import (
+            advance_presentation_cutoff,
+            count_batch_records,
+            get_presentation_cutoff,
+            list_unannexed_batches,
+        )
+        from sai_memory.room_state import reopen_lost_bases
+        chronicle_enabled = _chronicle_enabled_for(runtime, persona)
+        # 「head がどの部屋を見せているか」は錠前の外で一度だけ確定させる
+        # (head の読み口は知覚台帳を触らない)。下ろし量の見積もりと開き直しの
+        # 両方が**同じ値**を見るように、ここから両方へ渡す。
+        head_room = (
+            _head_room_key(persona, model_key)
+            if head_room_key is _HEAD_ROOM_UNSET else head_room_key
+        )
 
-        if not _chronicle_enabled_for(runtime, persona):
-            anchor_key = _anchor_order_key(sai_mem, anchor_id)
+        def _visible_candidates_locked() -> List[Any]:
+            """このペルソナに見える余地のある未付記バッチ (窓絞りまで)。
+
+            下ろした境界より古いものもここには入る — 省略の印の件数を数える
+            のに要るため。境界での振り分けは呼び出し側。
+
+            **呼び出し側が ``sai_mem._db_lock`` を保持している前提** (錠前を
+            取る層は下の一枚だけ)。
+            """
+            found = list_unannexed_batches(sai_mem.conn)
+            if not found or chronicle_enabled:
+                return found
+            anchor_key = _anchor_order_key_locked(sai_mem, anchor_id)
             if anchor_key is not None:
                 # 提示窓と同じ包含規則: 窓は正典順序キー (created_at, rowid) が
                 # anchor 以上の行。バッチは確定時点の境界キー (最後に保存済み
@@ -823,20 +1253,99 @@ def list_presented_perception_blocks(
                             >= anchor_key
                         )
                     return b.consumed_at >= anchor_key[0]
-                batches = [b for b in batches if _in_window(b)]
-            else:
-                cutoff: Optional[int] = None
-                for msg in recent:
-                    epoch = _payload_epoch(msg)
-                    if epoch is not None:
-                        cutoff = epoch if cutoff is None else min(cutoff, epoch)
-                if cutoff is not None:
-                    batches = [b for b in batches if b.consumed_at >= cutoff]
-            if not batches:
+                return [b for b in found if _in_window(b)]
+            oldest: Optional[int] = None
+            for msg in recent:
+                epoch = _payload_epoch(msg)
+                if epoch is not None:
+                    oldest = epoch if oldest is None else min(oldest, epoch)
+            if oldest is None:
+                return found
+            return [b for b in found if b.consumed_at >= oldest]
+
+        # 候補・境界・下ろし計画・前進・移管後の読み直し・省略件数の数え上げは
+        # **一つのロック区間**で完結させる (2026-09-05 Codex 第二巡 high)。
+        # ここを二区間に割ると、
+        # 別スレッドの組成 (Pulse と context-status の勘定など) が隙間で境界を
+        # 進めて全文を移管し、こちらは「自分では進めていない」ので古い文面の
+        # まま新しい境界で振り分ける — 土台 (全文) だけが提示から下り、土台の
+        # ない差分が送られる。区間を出たあとは、ここで確定した同一世代の
+        # candidates と dropped_through だけから組成する。
+        with sai_mem._db_lock:
+            candidates = _visible_candidates_locked()
+            if not candidates:
                 return []
+            dropped_through = get_presentation_cutoff(sai_mem.conn)
+            planned = _plan_perception_drop(
+                persona,
+                [b for b in candidates if b.id > dropped_through],
+                dropped_through,
+                model_key=model_key,
+                head_room_key=head_room,
+                advance=advance_cutoff,
+            )
+            if planned > dropped_through and not advance_cutoff:
+                # 測るだけのモード: 進める判定はここまで同じで、書き込みだけを
+                # しない。境界は一方向で取り消せないので、実際には送らない列
+                # (読み取り専用の画面・仮定の窓の下見) で確定させない。以降は
+                # 「進めたつもり」の境界で振り分ける — 実送信の側が同じ判定で
+                # 同じ境界へ進めるので、勘定と実送信は一致する。
+                dropped_through = planned
+            elif planned > dropped_through:
+                try:
+                    # 戻り値 = 進めた後の実境界。別プロセスが先へ進めていたら
+                    # planned より大きい値が返る (advance は一方向で no-op) —
+                    # planned を信じると「もう下ろされたバッチ」を一回だけ
+                    # 提示に復活させる (2026-09-05 ローカルレビュー #1)。
+                    planned = advance_presentation_cutoff(sai_mem.conn, planned)
+                    sai_mem.conn.commit()
+                except Exception:
+                    try:
+                        sai_mem.conn.rollback()
+                    except Exception:
+                        pass
+                    LOGGER.warning(
+                        "[sea][perception] could not advance the presentation "
+                        "cutoff; presenting every batch as before (persona=%s)",
+                        getattr(persona, "persona_id", "?"), exc_info=True,
+                    )
+                else:
+                    # 境界の前進は「部屋の様子」の移管を連れてくる (差分の
+                    # 土台が下りたとき、残った最古のエントリを全文へ差し替
+                    # える) ので、確定文面を読み直す (§10.8)。同じ区間の中で
+                    # 読み直すので、読み直した文面と境界は必ず同じ世代。
+                    # 読み直しが落ちたら関数ごと fail-open に倒す (境界だけ
+                    # 進んで古い文面を配るくらいなら、知覚ぶん 0 の方が軽い)。
+                    dropped_through = planned
+                    candidates = _visible_candidates_locked()
+
+            presented = [b for b in candidates if b.id > dropped_through]
+            dropped = [b for b in candidates if b.id <= dropped_through]
+            # 省略の印に出す件数は**記録の数**であってバッチ数ではない。台帳を
+            # 読むので、候補・境界と同じロック区間・同じ世代で数える。
+            record_counts = (
+                count_batch_records(sai_mem.conn, [b.id for b in dropped])
+                if dropped else {}
+            )
+
+        # 窓絞り (Chronicle 無効) と「測るだけ」の境界は台帳へ書けないので、
+        # そこで土台が抜けた差分はここで全文へ開き直す (純関数・決定論)。
+        # Chronicle 有効で境界も進めた回は、台帳側の回復が済んでいるので空。
+        reopened = reopen_lost_bases(presented, head_room_key=head_room)
 
         blocks: List[Dict[str, Any]] = []
-        for batch in batches:
+        if dropped:
+            # 印の位置は「下ろした区間の末尾」= 最後に下ろしたバッチの時刻。
+            # 提示に残る最古のブロックを追い越さないよう抑える (マージは
+            # 時刻昇順の並びを前提にする)。
+            mark_at = max(b.consumed_at for b in dropped)
+            if presented:
+                mark_at = min(mark_at, presented[0].consumed_at)
+            blocks.append(_perception_omission_block(
+                dropped, mark_at, chronicle_enabled=chronicle_enabled,
+                records=sum(record_counts.get(b.id, 1) for b in dropped),
+            ))
+        for batch in presented:
             metadata: Dict[str, Any] = {
                 # 旧 flush の event_message 行と同型のタグ + マージ由来の目印。
                 "tags": ["internal", "event_message", "perception"],
@@ -848,7 +1357,9 @@ def list_presented_perception_blocks(
                 metadata["media"] = media
             blocks.append({
                 "role": "user",
-                "content": f"<system>{batch.rendered_text}</system>",
+                "content": _perception_block_text(
+                    reopened.get(batch.id, batch.rendered_text)
+                ),
                 "created_at": batch.consumed_at,
                 "metadata": metadata,
             })
@@ -892,15 +1403,27 @@ def _merge_consumed_perceptions(
     runtime: Any, persona: Any, recent: List[Dict[str, Any]],
     *,
     anchor_id: Optional[str] = None,
+    model_key: Optional[str] = None,
+    advance_cutoff: bool = True,
+    head_room_key: Any = _HEAD_ROOM_UNSET,
 ) -> List[Dict[str, Any]]:
     """提示履歴に未付記の消費バッチを時刻順マージする (W14, §10.3)。
 
     組成は :func:`list_presented_perception_blocks`、並びは
     :func:`merge_perception_blocks` — ここは送信経路の入口として二つを繋ぐ
-    だけで、規則そのものは持たない。
+    だけで、規則そのものは持たない。``model_key`` はこの context を届ける
+    Session の実行 model (知覚の水位の主語)。
+
+    ``advance_cutoff=False`` は測るだけ (下ろし境界を書かない) — 組み立てが
+    プレビュー (``preview_only``) の回に使う。プレビューの列は送られないので、
+    一方向にしか進まない境界をそこで確定させない。返るブロックは同じ。
+
+    ``head_room_key`` は同じ prompt へ載せる head が見せている部屋のキー
+    (:func:`_pinned_head_room_key`)。省略すると組成側が自分で読み直す。
     """
     blocks = list_presented_perception_blocks(
-        runtime, persona, recent, anchor_id=anchor_id,
+        runtime, persona, recent, anchor_id=anchor_id, model_key=model_key,
+        advance_cutoff=advance_cutoff, head_room_key=head_room_key,
     )
     if not blocks:
         return recent
@@ -1301,10 +1824,17 @@ def preview_context(
                 list_pending,
                 reduce_perceptions,
             )
+            from sai_memory.room_state import ensure_room_state_base
             with sai_mem._db_lock:
                 pending = list_pending(sai_mem.conn)
-            if pending:
-                pb_text = format_perception_message(reduce_perceptions(pending))
+                # 実 flush と同じ順・同じ開き直し (reduce → 土台を失った部屋の
+                # 差分は全文へ)。読むだけ — 行は触らない。
+                reduced_pending = (
+                    ensure_room_state_base(sai_mem.conn, reduce_perceptions(pending))
+                    if pending else []
+                )
+            if reduced_pending:
+                pb_text = format_perception_message(reduced_pending)
                 pb_msg = {"role": "user", "content": f"<system>{pb_text}</system>"}
                 pb_tokens = estimate_messages_tokens([pb_msg], provider)
                 section_tokens["perception_buffer"] = pb_tokens

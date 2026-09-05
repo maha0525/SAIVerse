@@ -262,6 +262,10 @@ Section の登録は startup 時に集中させる (アドオン由来 Section �
 
 `_visual_context_cache` / `_visual_context_anchor` の persona 属性は廃止、snapshot に統合。
 
+**実装後の訂正 (2026-09-05 時点の実物)**: `refresh_on_events` は `{appearance_changed}` **だけ**。`building_entered` を含めると移動の瞬間に head が撮り直されて cache が壊れるため、実装時に外した (移動の事実は末尾通知で届き、visual_context は次の Metabolism まで前の Building を見せ続ける — 意図したトレードオフ。理由はコード側の NOTE にある)。この「移動しても撮り直さない」性質を、`sai_memory/room_state.py` が積極的に使っている: snapshot は head 用の姿に加えて `building_id` と `room_text` (同じ瞬間の同じ部屋を知覚バッファの記法で書いたもの) を持ち、入室時の「部屋の様子」がその姿との差分だけで済むようにする ([perception_buffer.md](perception_buffer.md) §10.8.1)。`room_text` は head には描画しない。二つの姿は `build_visual_contexts` で**一度の世界の読み**から作る (二度読むと、head の姿と差分の土台が別時点になる)。
+
+`render_head_messages` は描画のために snapshot を pin する。この pin から「head がどの部屋を見せているか」を持ち帰る口が `head_room_out` out-param で、知覚の提示判断がそれを使う — 後から読み直すと、間に走った Metabolism / TTL の撮り直しで**送った head とは別の**部屋を見てしまうため。
+
 ### 5.3. system prompt の各 section
 
 `runtime_context.py` の以下を Section 化:

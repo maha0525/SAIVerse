@@ -13,13 +13,22 @@
   ペルソナの memory.db に同居する (core_memory / Memopedia と同じ conn)。
 - 消費済み行も削除しない。台帳がそのまま「その瞬間に知覚した」証跡であり、
   退場 (Chronicle fold) 時の決定論付記 (§10.4) と読み口の実体になる。
+- 「部屋の様子」だけは再訪で差分に縮む — その記帳と、付記と同一 tx で走る
+  提示文面の移管は sai_memory/room_state.py が持つ。
+- 提示に出る知覚の**合計**には上限がある (§10.9)。超えたら古い側をまとめて
+  下ろし、その境界 (``perception_presentation`` の 1 行) は一方向にしか
+  進まない。下ろすのは提示だけ — 台帳の行も付記印も変えないので、その期間の
+  編纂が来れば材料として引き取られる。
 """
 from __future__ import annotations
 
+import logging
 import sqlite3
 import time
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import Dict, List, Optional, Sequence
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -87,6 +96,11 @@ class PerceptionBatch:
     ``boundary_created_at`` / ``boundary_rowid``: バッチ確定時点で最後に保存済み
     だった message の正典順序キー (無ければ NULL)。Chronicle 無効ペルソナの
     窓絞りで anchor 行と同じ包含規則の比較に使う。
+
+    ``room_state_json``: このバッチに含まれる「部屋の様子」エントリの記帳
+    (sai_memory/room_state.py)。再訪の差分がどの全文を土台にしているかと、
+    確定文面の中のどこにその文面が居るかを持つ。移管 (土台が付記で下りたとき
+    最古の差分を全文へ差し替える) がこの記帳を読み書きする。
     """
     id: int
     consumed_at: int
@@ -97,6 +111,7 @@ class PerceptionBatch:
     annexed_entry_id: Optional[str]
     boundary_created_at: Optional[int] = None
     boundary_rowid: Optional[int] = None
+    room_state_json: Optional[str] = None
 
     def media_list(self) -> list:
         return _decode_media(self.media)
@@ -148,6 +163,14 @@ def init_perception_buffer_table(
         "CREATE INDEX IF NOT EXISTS idx_perception_buffer_consumed_at "
         "ON perception_buffer(consumed_at)"
     )
+    # 省略の印の件数 (:func:`count_batch_records`) は、下ろされたバッチごとに
+    # 台帳の行を引き直して数える。これは提示を組むたびに走るので、索引が無いと
+    # 「知覚が堆積した環境」— つまりこの機構が救おうとしている形 — で毎回
+    # 台帳の全走査になる。
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_perception_buffer_consumed_batch "
+        "ON perception_buffer(consumed_batch_id)"
+    )
     # 台帳配送 (execution ledger outbox) の冪等キー専用列 (2026-08-19 Codex
     # 第八巡 #1)。metadata JSON の check-then-act 照合は同時配送の競合に破れ、
     # 全行 LIKE 走査は消費済み行の蓄積で線形悪化する — UNIQUE 索引で DB 側に
@@ -180,14 +203,17 @@ def init_perception_buffer_table(
             media TEXT,
             annexed_entry_id TEXT,
             boundary_created_at INTEGER,
-            boundary_rowid INTEGER
+            boundary_rowid INTEGER,
+            room_state_json TEXT
         )
         """
     )
-    # 本ワークツリー内の先行世代 (境界キー列なし) で作られた DB の追従。
+    # 既存 DB の追従 (境界キー列 = 本ワークツリー内の先行世代、
+    # room_state_json = 部屋の様子の差分+移管を入れた 2026-09-05 より前の世代)。
     for ddl in (
         "ALTER TABLE perception_batches ADD COLUMN boundary_created_at INTEGER",
         "ALTER TABLE perception_batches ADD COLUMN boundary_rowid INTEGER",
+        "ALTER TABLE perception_batches ADD COLUMN room_state_json TEXT",
     ):
         try:
             conn.execute(ddl)
@@ -200,6 +226,19 @@ def init_perception_buffer_table(
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_perception_batches_annexed "
         "ON perception_batches(annexed_entry_id)"
+    )
+    # 提示の状態 (1 行だけ): 知覚の合計が上の水位を超えて「まとめて下ろした」
+    # 境界。値は「この id までのバッチは提示に出さない」で、**一方向にしか
+    # 進まない** (advance_presentation_cutoff)。台帳の行も付記印も触らない —
+    # 下ろすのは提示だけで、その期間の編纂が来れば材料として引き取られる。
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS perception_presentation (
+            id TEXT PRIMARY KEY,
+            dropped_through_batch_id INTEGER NOT NULL DEFAULT 0,
+            updated_at INTEGER
+        )
+        """
     )
     if upgraded_from_two_phase:
         # 一度きりの清算 (2026-08-19 Codex 第七巡 #4): 旧二段 flush (event_message
@@ -238,7 +277,6 @@ def _reconcile_interrupted_two_phase_flush(
     窓の中にいる。行はカーソルで逐次読み、JSON 解析後にタグを検証する。
     """
     import json
-    import logging
     try:
         oldest = conn.execute(
             "SELECT MIN(created_at) FROM perception_buffer "
@@ -293,7 +331,7 @@ def _reconcile_interrupted_two_phase_flush(
         )
         deleted += int(cur.rowcount)
     if deleted:
-        logging.getLogger(__name__).info(
+        LOGGER.info(
             "[perception_buffer] one-time migration: removed %d pending item(s) "
             "already written as legacy event_message rows by an interrupted "
             "two-phase flush", deleted,
@@ -368,7 +406,7 @@ def _row_to_item(row) -> PerceptionItem:
 
 _BATCH_SELECT_COLUMNS = (
     "id, consumed_at, pulse_id, episode_id, rendered_text, media, "
-    "annexed_entry_id, boundary_created_at, boundary_rowid"
+    "annexed_entry_id, boundary_created_at, boundary_rowid, room_state_json"
 )
 
 
@@ -385,6 +423,9 @@ def _row_to_batch(row) -> PerceptionBatch:
             int(row[7]) if len(row) > 7 and row[7] is not None else None
         ),
         boundary_rowid=int(row[8]) if len(row) > 8 and row[8] is not None else None,
+        room_state_json=(
+            row[9] if len(row) > 9 and row[9] is not None else None
+        ),
     )
 
 
@@ -426,6 +467,7 @@ def create_consumption_batch(
     media: Optional[list] = None,
     boundary_created_at: Optional[int] = None,
     boundary_rowid: Optional[int] = None,
+    room_state_json: Optional[str] = None,
 ) -> int:
     """消費バッチを単一トランザクションで確定する (§10.2)。
 
@@ -437,6 +479,9 @@ def create_consumption_batch(
 
     未消費でない id が混ざっていたら (呼び出し側の並び違反) rollback して
     ValueError — 消費済みの再消費 (C2 違反) を部分成立させない。
+
+    ``room_state_json``: このバッチに含まれる「部屋の様子」の記帳
+    (:func:`sai_memory.room_state.collect_batch_room_states` が組む)。
 
     Returns: 確定したバッチ id。
     """
@@ -451,12 +496,14 @@ def create_consumption_batch(
         cur = conn.execute(
             "INSERT INTO perception_batches "
             "(consumed_at, pulse_id, episode_id, rendered_text, media, "
-            "annexed_entry_id, boundary_created_at, boundary_rowid) "
-            "VALUES (?, ?, ?, ?, ?, NULL, ?, ?)",
+            "annexed_entry_id, boundary_created_at, boundary_rowid, "
+            "room_state_json) "
+            "VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?)",
             (
                 int(consumed_at), pulse_id, episode_id, rendered_text, media_json,
                 int(boundary_created_at) if boundary_created_at is not None else None,
                 int(boundary_rowid) if boundary_rowid is not None else None,
+                room_state_json,
             ),
         )
         batch_id = int(cur.lastrowid)
@@ -488,8 +535,10 @@ def list_unannexed_batches(
 ) -> List[PerceptionBatch]:
     """付記印のない消費バッチを consumed_at → id 昇順で返す。
 
-    提示 (時刻順マージ, §10.3) と退場付記 (§10.4) の読み口。提示から下ろす
-    唯一の手段は付記印 (``annexed_entry_id``) なので、印が付くまでここに出続ける。
+    退場付記 (§10.4) の読み口 = 「まだ編纂に引き取られていない」全件。**提示は
+    こちらではなく** :func:`list_presented_batches` を読む — 知覚の合計上限で
+    下ろした境界より古いバッチは、未付記のまま提示にだけ出なくなるため
+    (§10.9)。台帳から消えるわけではないので、材料集めはここを読み続ける。
     ``since`` (以上) / ``before`` (未満) は付記スパンの絞り込み用。
     """
     sql = (
@@ -508,6 +557,180 @@ def list_unannexed_batches(
     return [_row_to_batch(row) for row in rows]
 
 
+#: 提示の状態を持つ 1 行のキー (テーブルは 1 ペルソナ 1 行)。
+_PRESENTATION_STATE_ID = "main"
+
+
+def get_presentation_cutoff(conn: sqlite3.Connection) -> int:
+    """知覚の合計上限で「まとめて下ろした」境界 (この id までは提示に出ない)。
+
+    まだ一度も下ろしていない / テーブルの無い DB なら 0 = 全部が提示に出る。
+    テーブル不在**以外**の失敗 (ロック等) は raise する — 0 を返すと「一度も
+    下ろしていない」と同じ顔になり、下ろしたはずのバッチが提示へ戻る
+    (§10.9 の一方向性が読み取り事故で破れる。Codex 三巡 F2 と同じ型)。
+    """
+    try:
+        row = conn.execute(
+            "SELECT dropped_through_batch_id FROM perception_presentation "
+            "WHERE id = ?", (_PRESENTATION_STATE_ID,),
+        ).fetchone()
+    except sqlite3.OperationalError as exc:
+        from sai_memory.arasuji.storage import is_missing_table_error
+        if is_missing_table_error(exc):
+            return 0  # 下ろす仕組みより古い DB = まだ一度も下ろしていない
+        raise
+    return int(row[0]) if row and row[0] is not None else 0
+
+
+def advance_presentation_cutoff(
+    conn: sqlite3.Connection, batch_id: int,
+) -> int:
+    """下ろした境界を ``batch_id`` まで進める。**commit しない**。
+
+    **一方向にしか進まない** — 既にそれ以上まで進んでいれば何もしない。この
+    片道性が設計の核 (docs/intent/perception_buffer.md §10.9): 下ろす瞬間に
+    プロンプトキャッシュの前方一致が割れるのは一回きりで、下ろしたバッチが
+    提示に戻ってまた割れる揺り戻しを構造的に禁じる。後退は DB 側の UPSERT の
+    条件でも弾く (同時に走った二本のうち小さい方が勝たない)。
+
+    境界が実際に進んだら、続けて「部屋の様子」の土台の回復
+    (:func:`sai_memory.room_state.restore_room_state_bases`) を
+    **この tx の中で**走らせる — 可視性が変わる瞬間の一つなので、不変条件
+    「提示に見えているどの差分も自分の土台が直前に見えている」をここで回復する
+    (付記で下りるときと同じ扱い。§10.8)。
+
+    回復が失敗したら**この tx を rollback して例外を送出する** — 境界だけが進んで
+    回復が消えると、土台の全文バッチが提示から下りたまま差分だけが残る。境界の
+    前進は一方向で取り消せないので、中途半端に進めるより「何もしなかった」へ
+    倒す (次の提示で全体をやり直す)。
+
+    Returns: 進めた後の境界 (呼び出し前より小さくはならない)。
+    """
+    current = get_presentation_cutoff(conn)
+    target = int(batch_id)
+    if target <= current:
+        return current
+    conn.execute(
+        "INSERT INTO perception_presentation "
+        "(id, dropped_through_batch_id, updated_at) VALUES (?, ?, ?) "
+        "ON CONFLICT(id) DO UPDATE SET "
+        "dropped_through_batch_id = excluded.dropped_through_batch_id, "
+        "updated_at = excluded.updated_at "
+        "WHERE excluded.dropped_through_batch_id > "
+        "perception_presentation.dropped_through_batch_id",
+        (_PRESENTATION_STATE_ID, target, int(time.time())),
+    )
+    from sai_memory.room_state import restore_room_state_bases
+    try:
+        restore_room_state_bases(conn)
+    except Exception:
+        conn.rollback()
+        LOGGER.error(
+            "[perception] the room-state base repair failed while advancing the "
+            "presentation cutoff to %s; rolled the whole step back so the "
+            "cutoff stays where it was", target, exc_info=True,
+        )
+        raise
+    return target
+
+
+def _list_batches_by_cutoff(
+    conn: sqlite3.Connection, *, above: bool, cutoff: Optional[int],
+) -> List[PerceptionBatch]:
+    if cutoff is None:
+        cutoff = get_presentation_cutoff(conn)
+    op = ">" if above else "<="
+    rows = conn.execute(
+        f"SELECT {_BATCH_SELECT_COLUMNS} FROM perception_batches "
+        f"WHERE annexed_entry_id IS NULL AND id {op} ? "
+        "ORDER BY consumed_at ASC, id ASC",
+        (int(cutoff),),
+    ).fetchall()
+    return [_row_to_batch(row) for row in rows]
+
+
+def list_presented_batches(
+    conn: sqlite3.Connection, *, cutoff: Optional[int] = None,
+) -> List[PerceptionBatch]:
+    """いま提示に出るバッチ = 未付記 **かつ** 下ろした境界より新しいもの。
+
+    提示 (§10.3) と、提示の可視性に依存する判定 (部屋の様子の土台 §10.8) の
+    読み口。編纂の材料集め (arasuji executor の
+    :func:`~sai_memory.arasuji.executor.collect_annex_items`) は**こちらを
+    使わない** — 下ろしたのは提示だけで、台帳の行も付記印もそのままなので、
+    その期間の編纂が来れば従来どおり材料として引き取られる。
+    """
+    return _list_batches_by_cutoff(conn, above=True, cutoff=cutoff)
+
+
+def list_dropped_batches(
+    conn: sqlite3.Connection, *, cutoff: Optional[int] = None,
+) -> List[PerceptionBatch]:
+    """下ろされたまま、まだ編纂に引き取られていないバッチ (境界以下・未付記)。
+
+    提示に置く省略の印 (「N 件を省略」) の件数と位置がここから決まる。付記が
+    済んだバッチは Chronicle の digest がその位置を語るので数から外れる。
+    """
+    return _list_batches_by_cutoff(conn, above=False, cutoff=cutoff)
+
+
+def count_batch_records(
+    conn: sqlite3.Connection, batch_ids: Sequence[int],
+) -> Dict[int, int]:
+    """バッチごとの「確定文面に出ていた記録の件数」(下限) を返す。
+
+    1 枚のバッチは複数の知覚記録を束ねる — Beat 頭の消費は、その時点で未消費
+    だったものを全部まとめて 1 つの文面にするため。だから省略の印の件数は
+    バッチ数ではなくここの合計で出す (バッチ数だけを数えると、部屋の様子 3 件
+    + 通知 5 件を束ねた 1 枚が「1 件」になる)。
+
+    数え方は**消費時と同じ規則**をもう一度かけたもの: そのバッチの台帳の行を
+    発生順 (created_at → id) で読み直し、:func:`reduce_perceptions` を通した
+    件数を数える。消費は「その時点の未消費全件」を ``item_ids`` に渡し、本文は
+    reduce 後の項目からだけ組まれるので、これが文面に出ていた記録の数と一致
+    する。本文は読まない (下ろされたバッチの本文は 10 万字規模になりうる) —
+    reduce に要るのは ``kind`` と ``reduce_key`` だけ。
+
+    行を引けないバッチ (台帳の行を消した / テーブルの無い DB) は **1** と数える。
+    「少なくとも 1 件はここにあった」は必ず真なので、合計は常に下限になる —
+    印の文面もそれに合わせて「N 件以上」と書く。
+    """
+    ids = [int(b) for b in batch_ids]
+    counts: Dict[int, int] = {}
+    if not ids:
+        return counts
+    for start in range(0, len(ids), 500):
+        chunk = ids[start:start + 500]
+        placeholders = ",".join("?" for _ in chunk)
+        try:
+            rows = conn.execute(
+                "SELECT consumed_batch_id, id, kind, reduce_key, created_at "
+                f"FROM perception_buffer WHERE consumed_batch_id IN ({placeholders}) "
+                "ORDER BY created_at ASC, id ASC",
+                tuple(chunk),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            LOGGER.warning(
+                "[perception_buffer] could not read the ledger rows behind the "
+                "dropped batches; counting one record per batch (the omission "
+                "mark stays a lower bound)", exc_info=True,
+            )
+            rows = []
+        grouped: Dict[int, List[PerceptionItem]] = {}
+        for batch_id, item_id, kind, reduce_key, created_at in rows:
+            if batch_id is None:
+                continue
+            grouped.setdefault(int(batch_id), []).append(PerceptionItem(
+                id=int(item_id), kind=str(kind), content="",
+                reduce_key=reduce_key, salient=0, media=None, metadata=None,
+                created_at=int(created_at or 0),
+            ))
+        for batch_id in chunk:
+            items = grouped.get(batch_id)
+            counts[batch_id] = len(reduce_perceptions(items)) if items else 1
+    return counts
+
+
 def mark_batches_annexed(
     conn: sqlite3.Connection, batch_ids: List[int], entry_id: str,
 ) -> int:
@@ -516,6 +739,18 @@ def mark_batches_annexed(
     Chronicle チャンクの digest 確定と同一トランザクションで呼ぶ契約 (§10.4) —
     呼び出し元 (arasuji executor) の tx が rollback すれば印も戻り、バッチは
     未付記 = 提示に残る (fail-open)。
+
+    印が 1 行でも立ったら、続けて「部屋の様子」の土台の回復
+    (:func:`sai_memory.room_state.restore_room_state_bases`) を
+    **この tx の中で**走らせる。全文のバッチが提示から下りる瞬間に、土台を失った
+    差分エントリを全文へ差し替える一点がここ — 提示の書き換えを編纂の発火に
+    相乗りさせ、プロンプトキャッシュの壊れ時点を増やさないための配置なので、
+    付記なしでこの回復だけを呼んではいけない。
+
+    回復が失敗したら**この tx を rollback して例外を送出する** — 付記だけが確定
+    して回復が消えると、土台の全文バッチが提示から下りたまま差分だけが残る
+    (差分は付記済みバッチを土台にできないので復元不能)。呼び出し元の digest
+    ごと巻き戻し、次の編纂でチャンクごとやり直す。
 
     Returns: 印を打てた行数 (未付記だった行のみ)。
     """
@@ -527,7 +762,21 @@ def mark_batches_annexed(
         f"WHERE id IN ({placeholders}) AND annexed_entry_id IS NULL",
         (str(entry_id), *batch_ids),
     )
-    return int(cur.rowcount)
+    stamped = int(cur.rowcount)
+    if stamped:
+        from sai_memory.room_state import restore_room_state_bases
+        try:
+            restore_room_state_bases(conn)
+        except Exception:
+            conn.rollback()
+            LOGGER.error(
+                "[perception] the room-state base repair failed while stamping "
+                "%d batch(es) for entry %s; rolled the whole transaction back "
+                "so the annexation is retried as a whole",
+                stamped, entry_id, exc_info=True,
+            )
+            raise
+    return stamped
 
 
 def list_batches_annexed_to(

@@ -273,6 +273,7 @@ Full list: `docs/reference/environment-vars.md`. Set in `.env` (see `.env.exampl
 - `docs/overview/landscape.md` — 概念の俯瞰地図（何があってどう繋がるか）
 - `docs/overview/roadmap_status.md` — 進捗マップ（何が予定され、いまどこにいるか）
 - `docs/overview/in_flight.md` — 進行中案件の台帳
+- `docs/overview/release_history.md` — リリース履歴と次の版に入れる範囲の正典 (リリース判定はここと突き合わせる)
 - `docs/overview/architecture_health.md` — サブシステム別の負債監査
 - `docs/concepts/` — 各概念の開発者向けリファレンス（索引は `concepts/README.md`）
 - `docs/reference/` — DB スキーマ、API、ツール、env var、スクリプト

@@ -37,6 +37,7 @@ const DEFAULT_CONTEXT_LENGTH = 128000;
 // (backend は黙って無視する)。
 const WATERMARK_FIELDS = [
     'metabolism_high_chars', 'metabolism_target_chars',
+    'perception_high_chars', 'perception_target_chars',
 ] as const;
 type WatermarkField = typeof WATERMARK_FIELDS[number];
 const WATERMARK_LABELS: Record<WatermarkField, { label: string; hint: string }> = {
@@ -48,7 +49,19 @@ const WATERMARK_LABELS: Record<WatermarkField, { label: string; hint: string }> 
         label: '整理後に残す文字数 (metabolism_target_chars)',
         hint: '整理はこの文字数まで畳んだら止まります。少なすぎるときは畳んだ範囲をここまで開き直します。会話の起点がまだ無いとき（新規ペルソナ等）に最初に読み込む量もこの値です。none にするとこのモデルは履歴の自動整理を行いません。',
     },
+    perception_high_chars: {
+        label: '部屋の様子などの記録の省略をはじめる文字数 (perception_high_chars)',
+        hint: '移動したときの部屋の様子や、使えるスペルが増えた・減ったといった記録の合計がこの文字数を超えたら、古いものからまとめて省略します（省略されるのは送る内容からだけで、記録そのものは消えません）。none にすると省略せず、合計は伸びるに任せます。',
+    },
+    perception_target_chars: {
+        label: '部屋の様子などの記録を省略した後に残す文字数 (perception_target_chars)',
+        hint: '一度の省略でここまでまとめて減らします。一個ずつ減らさないのは、送る内容の前の方が毎回書き換わるとキャッシュが効かなくなるためです。none にすると全体設定の既定に従います。',
+    },
 };
+
+/** 全欄が空 (= すべて既定に従う) の初期値。欄が増えたときに書き忘れないよう一箇所で作る。 */
+const emptyWatermarks = (): Record<WatermarkField, string> =>
+    Object.fromEntries(WATERMARK_FIELDS.map(f => [f, ''])) as Record<WatermarkField, string>;
 
 /** 水位欄の値: '' = キー無し (既定) / 'none' = null (持たない) / '数字' = 数値。 */
 const watermarkFieldFromConfig = (value: unknown): string => {
@@ -64,11 +77,8 @@ export default function ModelEditorModal({ isOpen, mode, modelKey, cloneSource, 
     const [displayName, setDisplayName] = useState('');
     const [providerRef, setProviderRef] = useState('');
     const [contextLength, setContextLength] = useState<number>(DEFAULT_CONTEXT_LENGTH);
-    // Metabolism 水位。'' = キー無し / 'none' = null / '数字' = 数値 (単独所有)
-    const [watermarks, setWatermarks] = useState<Record<WatermarkField, string>>({
-        metabolism_high_chars: '',
-        metabolism_target_chars: '',
-    });
+    // 水位。'' = キー無し / 'none' = null / '数字' = 数値 (単独所有)
+    const [watermarks, setWatermarks] = useState<Record<WatermarkField, string>>(emptyWatermarks);
     // Everything else (JSON editor)
     const [extraJson, setExtraJson] = useState('{}');
     const [providers, setProviders] = useState<ProviderChoice[]>([]);
@@ -82,7 +92,11 @@ export default function ModelEditorModal({ isOpen, mode, modelKey, cloneSource, 
     const [effectiveDefaults, setEffectiveDefaults] = useState<Record<WatermarkField, number>>({
         metabolism_high_chars: 120000,
         metabolism_target_chars: 40000,
+        perception_high_chars: 60000,
+        perception_target_chars: 40000,
     });
+    // 「整理をはじめる量 − 残す量 > 記録の上限 + 余裕」の余裕の分 (サーバーの値)。
+    const [headroom, setHeadroom] = useState(10000);
 
     const loadEffectiveDefaults = async () => {
         try {
@@ -91,13 +105,17 @@ export default function ModelEditorModal({ isOpen, mode, modelKey, cloneSource, 
             const data = await res.json();
             const eff = data?.effective;
             if (eff && typeof eff.high === 'number' && typeof eff.target === 'number') {
-                setEffectiveDefaults({
+                setEffectiveDefaults(prev => ({
+                    ...prev,
                     metabolism_high_chars: eff.high,
                     metabolism_target_chars: eff.target,
-                });
+                    ...(typeof eff.perception_high === 'number' ? { perception_high_chars: eff.perception_high } : {}),
+                    ...(typeof eff.perception_target === 'number' ? { perception_target_chars: eff.perception_target } : {}),
+                }));
             }
+            if (typeof data?.headroom === 'number') setHeadroom(data.headroom);
         } catch (e) {
-            console.error('Failed to load metabolism defaults', e);
+            console.error('Failed to load watermark defaults', e);
         }
     };
 
@@ -109,10 +127,7 @@ export default function ModelEditorModal({ isOpen, mode, modelKey, cloneSource, 
         setContextLength(
             typeof cfg.context_length === 'number' ? cfg.context_length : DEFAULT_CONTEXT_LENGTH,
         );
-        const wm: Record<WatermarkField, string> = {
-            metabolism_high_chars: '',
-            metabolism_target_chars: '',
-        };
+        const wm: Record<WatermarkField, string> = emptyWatermarks();
         const extra: Record<string, unknown> = {};
         for (const [field, value] of Object.entries(cfg)) {
             if ((BASIC_FIELDS as readonly string[]).includes(field)) continue;
@@ -143,10 +158,7 @@ export default function ModelEditorModal({ isOpen, mode, modelKey, cloneSource, 
             setDisplayName('');
             setProviderRef('');
             setContextLength(DEFAULT_CONTEXT_LENGTH);
-            setWatermarks({
-                metabolism_high_chars: '',
-                metabolism_target_chars: '',
-            });
+            setWatermarks(emptyWatermarks());
             setExtraJson('{}');
             setSource('user_data');
         }
@@ -251,16 +263,16 @@ export default function ModelEditorModal({ isOpen, mode, modelKey, cloneSource, 
         }
         // 水位: 専用欄が単独所有 — JSON に紛れた同名キーは欄の値で常に上書きする。
         // 空欄 = キーを書かない (一律既定) / "none" = null (持たない) / 数字 = 数値。
-        const wmNumbers: Record<WatermarkField, number | null> = {
-            metabolism_high_chars: null,
-            metabolism_target_chars: null,
-        };
+        // 検査は**実効値**で行う (空欄は全体設定の既定で埋める) — サーバー側
+        // (api/routes/config.py の _watermark_constraints_error) と同じ数え方。
+        const wmEffective: Record<WatermarkField, number | null> = { ...effectiveDefaults };
         for (const field of WATERMARK_FIELDS) {
             const raw = watermarks[field].trim();
             delete merged[field];
             if (raw === '') continue;
             if (raw.toLowerCase() === 'none') {
                 merged[field] = null;
+                wmEffective[field] = null;
                 continue;
             }
             const value = parseInt(raw, 10);
@@ -269,12 +281,27 @@ export default function ModelEditorModal({ isOpen, mode, modelKey, cloneSource, 
                 return;
             }
             merged[field] = value;
-            wmNumbers[field] = value;
+            wmEffective[field] = value;
         }
-        const wmHigh = wmNumbers.metabolism_high_chars;
-        const wmTarget = wmNumbers.metabolism_target_chars;
+        const wmHigh = wmEffective.metabolism_high_chars;
+        const wmTarget = wmEffective.metabolism_target_chars;
+        const pwHigh = wmEffective.perception_high_chars;
+        const pwTarget = wmEffective.perception_target_chars;
         if (wmTarget != null && wmHigh != null && wmTarget > wmHigh) {
             setSaveError('整理後に残す文字数は、整理をはじめる文字数以下にしてください');
+            return;
+        }
+        if (pwTarget != null && pwHigh != null && pwTarget > pwHigh) {
+            setSaveError('部屋の様子などの記録を省略した後に残す文字数は、省略をはじめる文字数以下にしてください');
+            return;
+        }
+        if (wmTarget != null && wmHigh != null && pwHigh != null && !(wmHigh - wmTarget > pwHigh + headroom)) {
+            setSaveError(
+                `整理をはじめる文字数 (${wmHigh.toLocaleString()}) と整理後に残す文字数 (${wmTarget.toLocaleString()}) の差 `
+                + `${(wmHigh - wmTarget).toLocaleString()} 字が、部屋の様子などの記録の上限 ${pwHigh.toLocaleString()} 字 + 余裕 `
+                + `${headroom.toLocaleString()} 字 を上回っていません。このままだと会話をどれだけ整理しても、`
+                + '送る量が上限を下回らないことがあります（空欄の欄は全体設定の既定で数えています）',
+            );
             return;
         }
 
@@ -413,7 +440,7 @@ export default function ModelEditorModal({ isOpen, mode, modelKey, cloneSource, 
                                     />
                                     <span className={styles.hint}>
                                         {WATERMARK_LABELS[field].hint}
-                                        {' '}空欄のときは全体設定の既定 {effectiveDefaults[field].toLocaleString()} 字に従います（全体設定 → 環境タブ「記憶の整理の水位」）。
+                                        {' '}空欄のときは全体設定の既定 {effectiveDefaults[field].toLocaleString()} 字に従います（全体設定 → 環境タブ「ペルソナに送る量の水位」）。
                                     </span>
                                 </div>
                             ))}

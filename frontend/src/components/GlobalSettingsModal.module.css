@@ -1518,6 +1518,30 @@
 }
 
 /* --- 記憶の整理の水位 (全体既定) --- */
+/* 水位の族ごとのまとまり (会話の整理 / 部屋の様子などの記録)。保存ボタンは共通で
+   一つなので、族の境目は見出しと区切り線だけで示す。 */
+.wmGroup {
+    margin-top: 1rem;
+}
+
+.wmGroup + .wmGroup {
+    padding-top: 1rem;
+    border-top: 1px solid #334155;
+}
+
+.wmGroupTitle {
+    font-size: 0.9rem;
+    font-weight: 600;
+    color: #e2e8f0;
+}
+
+.wmGroupDesc {
+    font-size: 0.8rem;
+    color: #94a3b8;
+    margin-top: 0.2rem;
+    line-height: 1.5;
+}
+
 .wmBarArea {
     margin-top: 0.75rem;
 }
@@ -1615,6 +1639,18 @@
 
 :global([data-theme="light"]) .wmFields {
     border-top-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .wmGroup + .wmGroup {
+    border-top-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .wmGroupTitle {
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .wmGroupDesc {
+    color: #64748b;
 }
 
 :global([data-theme="light"]) .wmBadge {
