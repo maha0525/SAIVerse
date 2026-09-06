@@ -10,8 +10,9 @@ docs/issues/room_state_diff_built_on_string_parsing.md — 差分を描画済み
 - **部屋はパッケージの束のまま運ぶ。** パッケージ = ``{key, family, label,
   lines, media, state}``。描画側 (``builtin_data/tools/get_visual_context.py``)
   がアイテムを一個ずつ組み立てた構造をそのまま受け取り、一枚の文字列に畳むのは
-  **送る直前の一回だけ** (:func:`render_room_full`)。逆方向 (文字列 → 構造) は
-  二度とやらない。
+  **消費の組成の一回だけ** (:func:`render_pending_room_states` — 積む側は束を
+  記帳するのみ。2026-09-06 まはー裁定、intent §11-2 規則 2)。逆方向
+  (文字列 → 構造) は二度とやらない。
 - **差分はキーの照合** (:func:`render_room_diff`)。新登場は全文 + その
   パッケージのメディア、Close→Open は「(開かれた)」の出来事行 + 開いて初めて
   見える行 + メディア (説明・作成日時は再掲しない — 2026-09-06 実機裁定)、
@@ -32,7 +33,7 @@ sha256 になっただけ。
 
 1. **今いる部屋の全体像が、提示のどこかに常に見えている。** 担い手は二段構え —
    生き残りが居る回は既存の移管・回復 (:func:`restore_room_state_bases` /
-   :func:`ensure_room_state_base` / :func:`reopen_lost_bases`)、最後の運搬役が
+   :func:`reopen_lost_bases`)、最後の運搬役が
    下りる回は :func:`reseat_current_room` (付記・境界前進と同一トランザクション
    で、最新の全文を提示の最古端へ置き直す)、それでも漏れた形は検知の瞬間の
    自己回復 (sea/head_pipeline/integration.py の部屋の照合) が拾う。
@@ -555,7 +556,8 @@ def reclaim_pending_perceptions(items: Sequence[Any]) -> List[Any]:
     :class:`~sai_memory.perception_buffer.PerceptionItem` の列) から新しい list
     を返す。実 flush (saiverse_memory/adapter.flush_perception_buffer_payload)
     とプレビュー (sea/runtime_context._compose_pending_preview) が **reduce の
-    後・:func:`ensure_room_state_base` の前**に同じこの一枚を通る。
+    後・消費時描画 (:func:`render_pending_room_states`) の前**に同じこの一枚を
+    通る。
 
     未消費の知覚は定義上どの Pulse もまだ読んでいない (§11-1) — ここで畳んでも
     提示済みの列には 1 バイトも触れず、前方一致が割れる場所は存在しない。
@@ -566,10 +568,11 @@ def reclaim_pending_perceptions(items: Sequence[Any]) -> List[Any]:
        の消費 (全 item id を渡す既存挙動) がそのまま付ける。
     2. **様子の畳み**: 有効な様子エントリが複数 pending なら**最後の一つだけ**
        残す (部屋が違っても最後の一つ — 2026-09-07 まはー裁定「最後にいる部屋
-       の様子だけ残せば良い」)。土台 (落とされた pending の束) を失った差分の
-       全文への開き直しは、後段の :func:`ensure_room_state_base` が既存機構で
-       行う (連なりが切れると自動で全文 + メディアに戻る)。入室配送の再試行に
-       よる様子の二重積みもこれが自己修復する。
+       の様子だけ残せば良い」)。残した束の描画 (差分か全文か + 文字列への畳み)
+       は後段の消費時描画 (:func:`render_pending_room_states`) が「提示に
+       見えている同部屋の末尾の束」を土台に行う — pending は土台にならない
+       ので、途中の pending を捨てても連なりは切れない (§11-2 規則 2)。入室
+       配送の再試行による様子の二重積みもこれが自己修復する。
     3. **移動群の畳み**: 型付きの移動通知 (:data:`LABEL_KIND_BUILDING_CHANGED`
        — 書き手は sea/head_pipeline/sections/building.py) が 2 件以上 pending
        なら、経路一行「この間に現在地が移動しました: 「A」 → 「B」 → 「A」」
@@ -750,9 +753,10 @@ def latest_visible_snapshot(
     提示と同じ窓を通る)。篩は :func:`reseat_current_room` の運搬役判定と同じ
     一枚 (:func:`sai_memory.perception_buffer.batch_in_window`) を呼び出し側が
     渡す。pending には篩をかけない — 次の消費は提示の末尾 (境界キー = 最新の
-    message) に立つので、どの窓からも見える。積む側の土台探し
-    (:func:`build_room_state_push`) は従来どおり窓なし — Chronicle 無効は毎回
-    全文 (``allow_diff=False``) でここを通らず、Chronicle 有効に窓は無い。
+    message) に立つので、どの窓からも見える。読み手は検知
+    (saiverse_memory/adapter.latest_room_snapshot) だけ — 積む側は描画も土台
+    探しもしない (束の記帳のみ、:func:`build_room_state_push`)。消費時描画の
+    土台は :func:`_visible_chain_tail` (pending を土台にしない別の読み)。
 
     直近のエントリが旧形式 (:func:`is_legacy_entry`) なら None — 旧形式は連なり
     に参加しないので、次は全文を積み直す (旧データの読者を書かない)。
@@ -801,42 +805,41 @@ def latest_visible_snapshot(
 # ---------------------------------------------------------------------------
 
 def build_room_state_push(
-    conn: sqlite3.Connection,
     building_id: str,
     bundle: Mapping[str, Any],
     *,
     allow_diff: bool = True,
 ) -> Dict[str, Any]:
-    """積む「部屋の様子」の本文・メディア・記帳を、束から決める。
+    """積む「部屋の様子」= 束の記帳だけ。描画の判定はしない。
 
-    土台 (:func:`latest_visible_snapshot`) が見えていれば差分だけ、いなければ
-    全文。``allow_diff=False`` (Chronicle 無効のペルソナ — 提示窓で土台が付記
-    なしに消えるので差分にできない) では常に全文。
+    **描画 (差分か全文かの判定 + 文字列への畳み) は消費の組成の一回だけ**
+    (:func:`render_pending_room_states` — 2026-09-06 まはー裁定、intent §11-2
+    規則 2)。回収 (§11-2) は途中の pending を必ず捨てるので、積む時に土台を
+    pending から選んで描画しても、その差分は構造的に提示へ届き得ない — 実機
+    では、提示済みの全文が生きているのに、土台を失った差分の開き直しがもう
+    一枚の全文を立てて保障 2 (同じ内容が二枚並ばない) を破った。
 
-    メディアは §5 の規則そのもの: 全文の回は束の全メディア、差分の回は
-    「その回に新しく見せるパッケージ」のメディアだけ (:func:`render_room_diff`
-    が選ぶ)。
+    記帳 (``metadata`` の :data:`ROOM_STATE_META_KEY`) は ``key`` / ``snapshot``
+    (束) / ``allow_diff`` (Chronicle 無効 = 毎回全文、の旗の凍結) のみ —
+    ``is_diff`` / ``base_digest`` は積む段階では確定しない。``content`` には
+    劣化時・生の点検用に全文の描画を入れておく (消費の組成はこれを使わず、
+    束から組み直す)。メディアも同じ扱いで束の全メディアを添える。
 
     Returns:
         ``{"content", "media", "metadata"}`` — そのまま
         :func:`sai_memory.perception_buffer.push_perception` に渡せる形。
-        ``metadata`` は :data:`ROOM_STATE_META_KEY` の記帳を含む JSON 文字列で、
-        消費時に :func:`collect_batch_room_states` がバッチ側へ写す。
     """
-    key = room_key(building_id)
-    base = latest_visible_snapshot(conn, key) if allow_diff else None
-    state: Dict[str, Any] = {"key": key, "is_diff": False, "snapshot": dict(bundle)}
-    if base is None:
-        content = render_room_full(bundle)
-        out_media: Optional[list] = bundle_media(bundle) or None
-    else:
-        diff = render_room_diff(base, bundle)
-        content = diff["content"]
-        out_media = diff["media"] or None
-        state["is_diff"] = True
-        state["base_digest"] = snapshot_digest(base)
+    state: Dict[str, Any] = {
+        "key": room_key(building_id),
+        "snapshot": dict(bundle),
+        "allow_diff": bool(allow_diff),
+    }
     metadata = json.dumps({ROOM_STATE_META_KEY: state}, ensure_ascii=False)
-    return {"content": content, "media": out_media, "metadata": metadata}
+    return {
+        "content": render_room_full(bundle),
+        "media": bundle_media(bundle) or None,
+        "metadata": metadata,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -844,15 +847,18 @@ def build_room_state_push(
 # ---------------------------------------------------------------------------
 
 def _visible_chain_tail(conn: sqlite3.Connection) -> Dict[str, Dict[str, Any]]:
-    """部屋ごとの「提示に出るバッチで最後に見えているエントリ」。
+    """部屋ごとの「提示に出るバッチの同部屋の末尾のエントリ」。
 
-    次に消費される差分の土台は、この末尾のエントリでなければならない
-    (:func:`chain_is_intact` が指紋で照合する)。旧形式のエントリは連なりの外
-    なので差し出さない。
+    消費時描画 (:func:`render_pending_room_states`) の土台はこの末尾のエントリ
+    でなければならない (次の消費の連なり :func:`chain_is_intact` がこの指紋で
+    照合するため)。**末尾が旧形式・不正束でもそのまま返す** — 読み手が
+    「末尾が束として読めない = 土台なし = 全文」と判定する
+    (:func:`first_room_bundle` と同じ止まり方: 最新の一致で確定し、さらに古い
+    構造化束へは遡らない — intent §9)。
 
-    読み取りに失敗したら「土台なし」(空 dict) に倒す — 呼び出し側
-    (:func:`ensure_room_state_base`) はこの消費の差分を全文へ開き直すので、
-    全文が二枚並ぶ冗長は出るが失われるものは無い。
+    読み取りに失敗したら「土台なし」(空 dict) に倒す — この消費は全文で描画
+    されるので、全文が二枚並ぶ冗長は出るが失われるものは無い (積む側の読み
+    失敗と同じ向き: 余分な全文は無害、間違った土台の差分は復元不能)。
     """
     from sai_memory.perception_buffer import list_presented_batches
 
@@ -860,36 +866,45 @@ def _visible_chain_tail(conn: sqlite3.Connection) -> Dict[str, Dict[str, Any]]:
         batches = list_presented_batches(conn)
     except sqlite3.OperationalError:
         LOGGER.warning(
-            "[room_state] could not read the presented batches while checking "
-            "for visible bases; reopening this consumption's diffs to their "
-            "full room text", exc_info=True,
+            "[room_state] could not read the presented batches while looking "
+            "for the visible tail; rendering this consumption's room states "
+            "as full text", exc_info=True,
         )
         return {}
     tail: Dict[str, Dict[str, Any]] = {}
     for batch in batches:
         for entry in batch_room_states(batch.room_state_json):
-            if is_legacy_entry(entry):
-                continue
             tail[str(entry["key"])] = entry
     return tail
 
 
-def ensure_room_state_base(
+def render_pending_room_states(
     conn: sqlite3.Connection, items: Sequence[Any],
 ) -> List[Any]:
-    """土台を失った差分を、提示が確定する前に全文へ開き直す (メディアも復元する)。
+    """消費の組成の一回だけの描画 — 束から差分か全文かを決めて文字列に畳む。
 
-    積んだ時点では土台 (同部屋の直前の束) が見えていても、消費されるまでの間に
-    編纂の付記でそれが提示から下りることがある — 移動でこの部屋の差分を積む →
-    その Pulse 末の Metabolism が古い方のバッチを付記する → 次の Beat 頭で
-    この差分が消費される、の順。ここでスナップショット (束) から全文を導出して
-    戻し、**束のメディアも項目へ載せ直す** (「絵がある」と読める全文に絵が付く
-    — intent §5 の復元)。
+    **描画はここが唯一の場所** (2026-09-06 まはー裁定 — intent §11-2 規則 2)。
+    積む側 (:func:`build_room_state_push`) は束を記帳するだけで、差分か全文かの
+    判定・文字列への畳み・メディアの選定は、回収
+    (:func:`reclaim_pending_perceptions`) が最後の様子を残した後のこの一枚で
+    行う。実 flush (saiverse_memory/adapter.flush_perception_buffer_payload) と
+    プレビュー (sea/runtime_context._compose_pending_preview) が同じここを通る。
 
-    判定はバッチ側と同じ :func:`chain_is_intact`。旧形式のエントリは触らない
-    (連なりの外)。書き換えるのは**この消費でレンダリングに使う写しだけ** —
-    台帳の行 (``perception_buffer``) は積んだときの差分のまま残る。返るのは
-    ``items`` と同じ並び・同じ長さの list。
+    土台は常に「提示に見えている同部屋の末尾の束」(:func:`_visible_chain_tail`)
+    — pending は土台にならない (回収が途中の pending を必ず捨てるので、pending
+    土台の差分は構造的に提示へ届き得ない)。全文になるのは: 末尾なし /
+    ``allow_diff`` が False (Chronicle 無効 = 毎回全文) / 末尾が旧形式・不正束
+    (連なりの外 — intent §9) / 記帳に ``allow_diff`` が無い旧世代の pending 行
+    (積む時に描画していた世代の移行 — 全文に倒す: 余分な全文は無害、間違った
+    土台の差分は復元不能)。それ以外は末尾との差分 (:func:`render_room_diff` —
+    変わっていなければ一行、は §4 の既存規則)。
+
+    書き換えるのは**この消費でレンダリングに使う写しだけ** — 台帳の行
+    (``perception_buffer``) は束の記帳のまま残る。写しの metadata には描画で
+    確定した ``is_diff`` / ``base_digest`` (末尾の指紋) を刻み、消費の記帳
+    (:func:`collect_batch_room_states`) がバッチへ写す — 以後の連なり・移管・
+    回復の読み手が正しい土台を見る。返るのは ``items`` と同じ並び・同じ長さの
+    list。
     """
     room_positions = [
         (index, state)
@@ -900,41 +915,45 @@ def ensure_room_state_base(
     if not room_positions:
         return list(items)
 
-    previous_by_key = _visible_chain_tail(conn)
+    tail_by_key = _visible_chain_tail(conn)
     out = list(items)
     for index, state in room_positions:
         key = str(state["key"])
         if is_legacy_entry(state):
-            continue  # 旧形式は連なりの外 (土台にもしない・開き直しもしない)
-        previous = previous_by_key.get(key)
-        previous_by_key[key] = state
-        if not state.get("is_diff"):
-            continue  # 全文はそれ自体が土台 = 連なりはここから始め直す
-        if chain_is_intact(state, previous):
-            continue
-        snapshot = state.get("snapshot")
-        if not bundle_is_valid(snapshot):
-            LOGGER.warning(
-                "[room_state] a diff lost its base before consumption and has "
-                "no snapshot to reopen (key=%s); presenting it as it is", key,
-            )
-            continue
-        reopened = dict(state)
-        reopened["is_diff"] = False
-        reopened["reopened"] = True
-        media = bundle_media(snapshot)
+            continue  # 旧形式は描けない (回収が落とす — 万一残っても触らない)
+        snapshot = state["snapshot"]
+        previous = tail_by_key.get(key)
+        base: Optional[Dict[str, Any]] = None
+        if state.get("allow_diff") is True and previous is not None:
+            prev_snapshot = previous.get("snapshot")
+            if bundle_is_valid(prev_snapshot):
+                base = prev_snapshot
+        composed = dict(state)
+        if base is None:
+            composed["is_diff"] = False
+            composed.pop("base_digest", None)
+            content = render_room_full(snapshot)
+            media = bundle_media(snapshot)
+        else:
+            composed["is_diff"] = True
+            composed["base_digest"] = snapshot_digest(base)
+            diff = render_room_diff(base, snapshot)
+            content = diff["content"]
+            media = diff["media"]
+        tail_by_key[key] = composed  # 万一の複数枚は前の写しに連なる
+        # 台帳配送の冪等キー等、room_state 以外の metadata は写しでも保つ。
+        try:
+            meta = json.loads(getattr(out[index], "metadata", None) or "{}")
+        except (TypeError, ValueError):
+            meta = {}
+        if not isinstance(meta, dict):
+            meta = {}
+        meta[ROOM_STATE_META_KEY] = composed
         out[index] = dataclasses.replace(
             out[index],
-            content=render_room_full(snapshot),
+            content=content,
             media=json.dumps(media, ensure_ascii=False) if media else None,
-            metadata=json.dumps(
-                {ROOM_STATE_META_KEY: reopened}, ensure_ascii=False,
-            ),
-        )
-        LOGGER.info(
-            "[room_state] the base of a pending room diff left the "
-            "presentation before consumption (key=%s); presenting the full "
-            "room text (with its media) instead", key,
+            metadata=json.dumps(meta, ensure_ascii=False),
         )
     return out
 
@@ -971,9 +990,6 @@ def collect_batch_room_states(
         }
         if is_diff and state.get("base_digest"):
             entry["base_digest"] = str(state["base_digest"])
-        if state.get("reopened"):
-            # 消費の直前に土台を失って全文へ開き直した印 (診断用)。
-            entry["reopened"] = True
         entries.append(entry)
     if not entries:
         return None
@@ -1332,8 +1348,8 @@ def reseat_current_room(
 
     発火しない条件 (運搬役が居る回):
 
-    - pending にこの部屋のエントリがある (次の消費が運ぶ — 差分でも、土台が
-      無ければ消費時の開き直し :func:`ensure_room_state_base` が全文にする)。
+    - pending にこの部屋のエントリがある (次の消費が運ぶ — 描画は消費時
+      :func:`render_pending_room_states` が行い、土台が無ければ全文になる)。
     - 提示に出るバッチのうち **``in_window`` の篩を通るもの** で、この部屋の
       **最新**の一致が valid な束を持つ (:func:`first_room_bundle` の一枚 —
       最新の一致が旧形式・不正束なら運搬役なし。2026-09-06 七巡目修正 2)。

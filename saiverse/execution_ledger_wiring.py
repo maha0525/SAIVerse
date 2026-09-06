@@ -978,8 +978,10 @@ def _make_perception_room_state_handler(
          "allow_diff": bool}
         束の building_id は外側 building_id と一致していること (部屋のキーは
         外側から、記帳される snapshot は束から作られるため)。
-    差分か全文かの判定は配達時 (adapter.push_ledger_room_state →
-    sai_memory/room_state.build_room_state_push)。冪等は perception.push と
+    配達は束の記帳のみ (adapter.push_ledger_room_state →
+    sai_memory/room_state.build_room_state_push) — 差分か全文かの判定・描画は
+    消費の組成の一回だけ (render_pending_room_states、room_state_packages.md
+    §11-2 規則 2)。冪等は perception.push と
     同じ ledger_outbox_id の UNIQUE 索引 (adapter 側) — 消費済み行も照合対象
     なので「配達成功 → 消費 → 台帳の delivered 記帳前に停止 → 再配達」でも
     二重にならない (未消費だけを見る回収 reclaim_pending_perceptions は

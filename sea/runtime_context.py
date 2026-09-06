@@ -1838,20 +1838,21 @@ def _compose_pending_preview(sai_mem: Any) -> List[Any]:
 
     実 flush (saiverse_memory/adapter.flush_perception_buffer_payload) と同じ
     reduce → 回収 (reclaim_pending_perceptions — room_state_packages.md §11-2)
-    → 開き直し (ensure_room_state_base) を通す。まはーがプレビューで見る文面と
-    次の Pulse が実際に知覚する文面を一致させるための同順で、DB の行は書き換え
-    ない (開き直しはこの組成で使う写しだけ)。
+    → 消費時描画 (render_pending_room_states — 部屋の様子の差分/全文は §11-2
+    規則 2 でこの一回だけ描く) を通す。まはーがプレビューで見る文面と次の
+    Pulse が実際に知覚する文面を一致させるための同順で、DB の行は書き換え
+    ない (描画はこの組成で使う写しだけ)。
     """
     from sai_memory.perception_buffer import list_pending, reduce_perceptions
     from sai_memory.room_state import (
-        ensure_room_state_base,
         reclaim_pending_perceptions,
+        render_pending_room_states,
     )
     with sai_mem._db_lock:
         pending = list_pending(sai_mem.conn)
         if not pending:
             return []
-        return ensure_room_state_base(
+        return render_pending_room_states(
             sai_mem.conn,
             reclaim_pending_perceptions(reduce_perceptions(pending)),
         )

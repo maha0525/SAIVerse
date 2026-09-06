@@ -594,7 +594,8 @@ def _detect_room_state_changes(
         )
         return
     if snapshot_digest(latest) != snapshot_digest(bundle):
-        # 変化は出来事 — 末尾へ diff (Chronicle 無効は毎回全文)。
+        # 変化は出来事 — 末尾へ束を積む。描画 (差分 / Chronicle 無効は毎回
+        # 全文) は消費の組成の一回だけ (room_state_packages.md §11-2 規則 2)。
         sai_mem.push_room_state(building_id, bundle, allow_diff=chronicle_on)
 
 

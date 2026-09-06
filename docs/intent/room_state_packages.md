@@ -44,6 +44,8 @@
 
 ## 4. 差分の規則 (裁定済み 7 点の写し)
 
+**描画 (差分か全文かの判定 + 文字列への畳み) は消費の組成の一回だけ — 積む側は束を記帳するのみ** (2026-09-06 まはー裁定、§11-2 規則 2)。土台は常に「提示に見えている同部屋の連なりの末尾の束」で、末尾が無い / allow_diff=False (Chronicle 無効) / 末尾が旧形式なら全文。
+
 キー照合の結果ごとに:
 
 | 変化 | 報告 |
@@ -87,6 +89,7 @@
 ## 8. 退役するもの
 
 - `render_room_diff` の文字列分割・見出し照合 (発端の欠陥の本体)
+- `ensure_room_state_base` (消費時の開き直し) — 描画を消費の組成の一回に一本化 (§11-2 規則 2) したことで「土台を失った差分」という状態自体が生まれなくなり退役 (2026-09-06)。提示済みバッチ間の連なりの読み手 (移管 `restore_room_state_bases`・回復 `reopen_lost_bases`・`chain_is_intact`) は生きている — 対象が「未消費の描画」だった機構だけが消えた
 - head の `VisualContextSection` (部屋の描画) と、§10.8.1 の head 照合機構ぜんぶ — head 土台の差分・`current_head_room`・pin の受け渡し・実行 model の照合・`base_source="head"`。「例外処理が本体を覆い始めたら供給源を塞いで機構ごと消す」の適用
 - `BuildingItemsSection` のアイテム差分ラベル (§6-2 に一本化)
 - 思い出 (`_fetch_item_memory_recall`) — 後継の約束は recall_tags intent 📌
@@ -120,10 +123,11 @@
 
 ### 11-2. 回収の規則 (一枚)
 
-消費の組成 (reduce の後、`ensure_room_state_base` の前) に回収を一枚差し込む。実 flush (`saiverse_memory/adapter.flush_perception_buffer_payload`) とプレビュー (`sea/runtime_context` の知覚バッファ節 — まはーが見るダンプの出所) が**同じ関数**を通る。動作は三つ:
+消費の組成 (reduce の後、消費時描画 `render_pending_room_states` の前) に回収を一枚差し込む。実 flush (`saiverse_memory/adapter.flush_perception_buffer_payload`) とプレビュー (`sea/runtime_context` の知覚バッファ節 — まはーが見るダンプの出所) が**同じ関数**を通る。動作は三つ:
 
 1. **移動群の畳み**: 移動通知 (metadata で型付けされたもの — §11-3) が 2 件以上 pending なら、通知の metadata (from/to) から経路一行「この間に現在地が移動しました: 「A」 → 「B」 → 「A」」(最初の通知の from の名前 + 各通知の to の名前を発生順に連結) を合成して最終の通知の位置に置き、それ以前の部屋グループ (通知・指示・様子) を落とす。残るのは経路一行 + 最終の部屋の指示 + 最終の部屋の様子。移動が 1 回だけなら何もしない。移動以外の知覚 (スペル・フィード等) は位置ごと触らない。
-2. **同部屋の重複の畳み**: 同じ部屋の様子エントリが複数 pending なら最新の一つだけ残す。土台 (落とされた pending の束) を失った差分は、既存の `ensure_room_state_base` がそのまま全文へ開き直す — 各エントリは metadata に自分の全文の束 (snapshot) を持っているので、開き直しは自己完結する (§実装メモ参照)。入室配送の再試行による様子の二重積み ([entry_delivery_retry_duplicates_room_perception.md](../issues/entry_delivery_retry_duplicates_room_perception.md)) もこれが自己修復する。
+2. **同部屋の重複の畳み**: 同じ部屋の様子エントリが複数 pending なら最新の一つだけ残す。入室配送の再試行による様子の二重積み ([entry_delivery_retry_duplicates_room_perception.md](../issues/entry_delivery_retry_duplicates_room_perception.md)) もこれが自己修復する。
+   - **描画は消費の直前に一回だけ (2026-09-06 まはー裁定 — §2 の芯「一枚の文字列に畳むのは送る直前の一回だけ」への実装の引き戻し)**: 積む時は部屋の記録 (束) だけを積み、差分か全文かの判定と文字列への畳みは、消費の組成が「残した最後の束」と「**提示に見えている同部屋の末尾の束**」の比較で行う。末尾が無ければ全文。回収は途中の pending を必ず捨てるので、「途中の pending を土台にした差分」は構造的に提示へ届き得ない = 積む時に描画して土台を pending から選ぶ操作は意味を持てない (実機で全文の重複を生んだ — 提示済みの全文の隣に、土台を失った差分の開き直しがもう一枚の全文を立てた。保障 2 違反)。この一本化で「連なりが切れた差分の開き直し」系の例外機構は不要になる。
 3. **旧形式の遺物の破棄**: kind=`surroundings` で `is_legacy_entry` (束として読めない旧文字列形式) の行は組成に載せない (消費済みの印は付く — 台帳の行は消さない、§7-4 のまま)。落とした後に部屋の眺めが無ければ、Pulse 頭の照合・自己回復 (§6-2) が新品の全文を最古端に置く — つまり**アイフィ級の汚染は、再起動後の次の Pulse で送る前に自動で掃除される。手動掃除は要らない**。配布済みユーザーの移行も同じ経路。
 
 実 flush では、落とした行も消費済みの印が付く (reduce で畳まれた行と同じ扱い — 「相殺は未消費の間だけ」の既存規則)。プレビューは読むだけで行を触らない (既存)。
@@ -134,7 +138,7 @@
 
 修正は三つで、いずれも「配送機構を一本にする」方向:
 
-1. **様子も outbox 経由にする**: 新 target `perception.room_state` (payload = building_id + 束 + allow_diff の凍結)。handler が `adapter.push_ledger_room_state` を呼ぶ (差分か全文かの判定は配達時)。配達は通知 (perception.push) と同じ `ledger_outbox_id` の UNIQUE 索引で冪等 — 知覚バッファと台帳の delivered 記帳は別 DB なので、その隙間の停止による再配達が起きうる。一枚目が消費済みだと §11-2 の回収 (未消費しか見ない) では畳めないため、冪等は消費を跨ぐ必要がある。冪等の判定は payload 組成 (build_room_state_push — DB 読み + 差分計算) の**前**に同じ lock 内の索引照合で行い、INSERT 側の UNIQUE は同時配送への安全網として残す — 判定が INSERT だけだと再配達のたびに組成が走り、読みが劣化して組成が例外を出す状態では「配達済みなのに配達失敗」→ 再試行 → dead へ進みうる (2026-09-06 二巡目修正 #1)。payload の門は handler が厳格に検める (building_id 非空 str / allow_diff bool / 束は `bundle_is_valid` / 束の building_id は外側 building_id と一致 — 部屋のキーは外側から、記帳される snapshot は束から作られるので、食い違いを通すと別の建物の中身が対象の部屋のキーへ記録される汚染になる。2026-09-06 二巡目修正 #2) — 壊れた束が delivered になると後段の回収が遺物として黙って捨て、再試行不能の静かな消失になるため、違反は配達失敗として pending に残す。台帳の無い環境は従来の直接 push に degrade (通知の direct 経路と同型。未 ready は WARN + 失敗扱いにして「全段成功」を偽装しない)。これで同一 FIFO に乗り、順序が構造的に決まる。
+1. **様子も outbox 経由にする**: 新 target `perception.room_state` (payload = building_id + 束 + allow_diff の凍結)。handler が `adapter.push_ledger_room_state` を呼ぶ (配達は束の記帳のみ — 差分か全文かの判定・描画は §11-2 規則 2 のとおり消費の組成)。配達は通知 (perception.push) と同じ `ledger_outbox_id` の UNIQUE 索引で冪等 — 知覚バッファと台帳の delivered 記帳は別 DB なので、その隙間の停止による再配達が起きうる。一枚目が消費済みだと §11-2 の回収 (未消費しか見ない) では畳めないため、冪等は消費を跨ぐ必要がある。冪等の判定は payload 組成 (build_room_state_push — DB 読み + 差分計算) の**前**に同じ lock 内の索引照合で行い、INSERT 側の UNIQUE は同時配送への安全網として残す — 判定が INSERT だけだと再配達のたびに組成が走り、読みが劣化して組成が例外を出す状態では「配達済みなのに配達失敗」→ 再試行 → dead へ進みうる (2026-09-06 二巡目修正 #1)。payload の門は handler が厳格に検める (building_id 非空 str / allow_diff bool / 束は `bundle_is_valid` / 束の building_id は外側 building_id と一致 — 部屋のキーは外側から、記帳される snapshot は束から作られるので、食い違いを通すと別の建物の中身が対象の部屋のキーへ記録される汚染になる。2026-09-06 二巡目修正 #2) — 壊れた束が delivered になると後段の回収が遺物として黙って捨て、再試行不能の静かな消失になるため、違反は配達失敗として pending に残す。台帳の無い環境は従来の直接 push に degrade (通知の direct 経路と同型。未 ready は WARN + 失敗扱いにして「全段成功」を偽装しない)。これで同一 FIFO に乗り、順序が構造的に決まる。
 2. **通知の分割と型付け**: `BuildingSection` の `building_changed` ラベル (現在は移動一行 + 役割・指示が一体) を「移動通知」と「役割・指示」の二枚に分け、`NotificationLabel` に metadata (label_kind / from / to の id と表示名) を持たせて知覚エントリの metadata へ写す。§11-2 の畳みはこの型付けで識別する (metadata の無い旧ラベルは畳まない — 小さいので実害なし)。
 3. **flush の配り直し**: `_flush_queue` は一覧を配り切った後に再問い合わせし、配送中に積まれた項目を同じ flush 内で配る (進捗がある限り、上限回数つき — 再入の deadlock 対策のスレッドローカル旗はそのまま)。移動の配送が終わった時点で通知・指示・様子が全部バッファに揃い、まはーがプレビューを開いた瞬間に正しい順で見える。
 
@@ -156,6 +160,8 @@
 
 加えて横串が一本: **判定の規則は必ず一枚** (窓の解決・包含・置き直しの発火条件は、提示側と検知側が同じ関数を通る。二枚書くと必ずずれる — 今日のレビュー六巡で見つかった欠陥の過半がこの型だった)。
 
+- **描画は消費時の一回 (積む側は束のみ — §11-2 規則 2)**: `build_room_state_push` は key / snapshot / allow_diff の記帳だけ (content 列は劣化時・生の点検用の全文で、消費の組成はこれを使わない)。差分か全文かの判定と文字列への畳みは、消費の組成 `render_pending_room_states` (実 flush とプレビューの共通経路、回収の後) が「提示に見えている同部屋の末尾の束」(`_visible_chain_tail` — 末尾が旧形式ならそのまま返し、読み手が土台なし = 全文と判定する。`first_room_bundle` と同じ止まり方) を土台に行い、バッチ記帳の is_diff / base_digest はその組成の値で刻む。allow_diff の旗が無い旧世代 (積む時に描画していた世代) の pending 行は全文に倒す (三原則 3)。
+
 - パッケージの組成は `builtin_data/tools/get_visual_context.build_room_bundle`。全文の導出 (`render_room_full`)・差分 (`render_room_diff`)・連なり・回復・置き直し (`reseat_current_room`) は `sai_memory/room_state.py`。滞在中の照合 + 自己回復は `sea/head_pipeline/integration._detect_room_state_changes` (Pulse 頭の検知に同乗)。
 - §6-4 の「置き直してから下ろす」は、付記 (`mark_batches_annexed`) / 境界前進 (`advance_presentation_cutoff`) と**同一トランザクション**の中で実現する (外からは順序の区別がつかない原子性で担保)。置き直しに失敗したら付記・境界前進ごと rollback して見送る (次の機会にやり直す) — 畳みだけが確定すると「部屋の全体像が提示に無い」まま送信が起きる経路が生まれるため (2026-09-06 レビュー修正 1)。置き直しのバッチは `consumed_at` を残る提示より古くして最古端に立て、id が新しいため下ろし境界 (id 一本) の候補からは外す。編纂の付記では印だけ受けて材料に載らない (機構の置き直しは出来事ではない)。
 - 下ろし計画 (`_plan_perception_drop`) は「最後の運搬役まで下ろすと置き直しの全文が戻る」ぶんも見積もりに足す — 新着が無いのに境界がまた進む形を作らないため (移管後の字数で見積もる、と同じ理由)。実物と同じ門も持つ: 同部屋の pending (未消費) があれば置き直しは発火しないので、見積もりにも足さない (2026-09-06 レビュー修正 3)。見積もりの現在地も実物と同じ一本 (`find_current_room_key` — pending 優先) で解決する — 提示列の最新エントリから推定すると、移動直後 (旧部屋の提示列 + 新部屋の pending) に起きない置き直しのコストで境界が必要以上に進み、まだ提示できた履歴まで下ろしてしまう (2026-09-06 二巡目修正 3)。
@@ -172,7 +178,7 @@
 - 束の検証 (`bundle_is_valid`) は利用側が読むフィールドの型まで検める — top-level の building_id / building_name (文字列) / packages (list、空は正当な空室) と、各パッケージの key・family・label・lines・media・state。浅い検査 (packages が list かだけ) だと型の壊れた記帳が `first_room_bundle` の停止規則を素通りし、壊れた土台への差分・壊れた束の置き直しが静かに確定する (2026-09-06 七巡目修正 1)。
 - 置き直しの運搬役判定 (`reseat_current_room` の「運搬役が生きているか」) も `first_room_bundle` の一枚 — 同部屋の**最新**の一致が valid なら運搬役あり、旧形式・不正束なら運搬役なし (in_window の篩はそのまま)。古い順の走査で valid を一つでも見つけたら止める形だと、「最新が旧形式・より古い valid が提示に残る」並びで検知の自己回復をこの門だけが覆す (2026-09-06 七巡目修正 2)。
 - 置き直しの INSERT は境界キーの読みの失敗 (`latest_message_boundary(strict=True)` — テーブル不在以外) を例外で見送る — キーなしの置き直しバッチは epoch フォールバックで窓の外に立ち、次の検知がまた置き直す重複を生む。通常 flush の境界キーは strict にしない (新規バッチは提示の末尾なので実害の形が違う) (2026-09-06 五巡目修正 3)。
-- **検知の読みは提示と同じ窓を通る** (`adapter.latest_room_snapshot` → `latest_visible_snapshot` の `in_window`) — 窓の外の最新束を「前回」に拾うと、窓の中に残る古い提示との差を「変化なし」と誤読して差分も置き直しも来ない。digest 比較と運搬役判定は同じ窓付きの読み一本 (None = 窓に束が無い = 運搬役なし) で、旧 `room_carrier_visible` はこの読みに畳んだ。積む側の土台探し (`build_room_state_push`) は窓なしのまま — Chronicle 無効は毎回全文でそこを通らない (2026-09-06 八巡目修正 1)。
+- **検知の読みは提示と同じ窓を通る** (`adapter.latest_room_snapshot` → `latest_visible_snapshot` の `in_window`) — 窓の外の最新束を「前回」に拾うと、窓の中に残る古い提示との差を「変化なし」と誤読して差分も置き直しも来ない。digest 比較と運搬役判定は同じ窓付きの読み一本 (None = 窓に束が無い = 運搬役なし) で、旧 `room_carrier_visible` はこの読みに畳んだ (2026-09-06 八巡目修正 1)。当時あった積む側の土台探しは、§11-2 規則 2 の一本化 (積む = 束の記帳のみ) で機構ごと消えた。
 - 束の検証の media は消費契約の型まで検める — path は非空文字列 (set への in 照合・ファイルパスとして読まれる)、mime_type は存在するなら文字列 (LLM クライアントがそのまま API へ渡す)。truthiness だけだと `{"path": ["x"]}` が有効束を名乗り、検証済みの束が `bundle_media` の TypeError で後段 (置き直しのメディア復元) を落とす (2026-09-06 八巡目修正 2)。
 - 束の検証はパッケージキーの**束内一意性**も検める — 差分の組成 (`render_room_diff`) はパッケージをキーで辞書化するので、重複キーの記帳破損束が検証を通ると片方が静かに上書きされ、全文 (走査順) と差分 (辞書) の整合が崩れる。組成側 (`build_room_bundle`) の先勝ち + WARN は組成時の弾きで、保存済みの束の検証はこちらの仕事 (2026-09-06 九巡目修正 2)。
 - 検知は束の組成 (world の読み — 時間がかかりうる) の後、積む直前に現在地を再確認する — 組成中に別スレッドの移動で現在地が変わった回は WARN で見送り、次の検知が現在地でやり直す。競合の窓は「再確認から DB 書き込みまで」に縮むがゼロにはならない (深い対処 = 移動の冪等キー・行き先照合は [entry_delivery_retry_duplicates_room_perception.md](../issues/entry_delivery_retry_duplicates_room_perception.md) の修正方向に合流。2026-09-06 十一巡目)。入室 push 側 (`on_building_entered`) は「配送の荷物の行き先へ積む」が現行契約なので変えない (同 issue の遅延の混入)。

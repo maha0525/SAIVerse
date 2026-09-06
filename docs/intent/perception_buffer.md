@@ -221,7 +221,7 @@ Cached Head が「Metabolism まで snapshot を凍結」、visual_context / mem
 
 ### 10.2 器 — 消費バッチ (2026-08-18 Codex レビューで改訂: 時刻からの再構成をやめる)
 
-消費 (flush) は**消費バッチ**を単一トランザクションで確定する: バッチ行 (一意 id / `consumed_at` / `pulse_id` / `episode_id` / **確定レンダリング済みテキスト** = reduce → 回収 (未消費バッファの回収 — [room_state_packages.md](room_state_packages.md) §11-2) → 開き直し (`ensure_room_state_base`) → format の結果 / メディア / 付記印 `annexed_entry_id` = NULL) を挿入し、消費した項目にバッチ id と `consumed_at` の印を打つ。「その瞬間に知覚した」証跡はこのバッチ行であり、**ペルソナが見た文面そのもの**が消費時に確定・永続化される (後から台帳の生の行を読み直して再構成しない — 再構成は reduce で消えた中間状態を復活させ、秒精度の時刻衝突でグループを混ぜる)。二段 commit の隙間を塞ぐためにあった C6 の照合機構は**機構ごと退役**。消費済み行・バッチ行は削除しない。
+消費 (flush) は**消費バッチ**を単一トランザクションで確定する: バッチ行 (一意 id / `consumed_at` / `pulse_id` / `episode_id` / **確定レンダリング済みテキスト** = reduce → 回収 (未消費バッファの回収 — [room_state_packages.md](room_state_packages.md) §11-2) → 部屋の様子の消費時描画 (`render_pending_room_states` — 描画はこの一回だけ、同 §11-2 規則 2) → format の結果 / メディア / 付記印 `annexed_entry_id` = NULL) を挿入し、消費した項目にバッチ id と `consumed_at` の印を打つ。「その瞬間に知覚した」証跡はこのバッチ行であり、**ペルソナが見た文面そのもの**が消費時に確定・永続化される (後から台帳の生の行を読み直して再構成しない — 再構成は reduce で消えた中間状態を復活させ、秒精度の時刻衝突でグループを混ぜる)。二段 commit の隙間を塞ぐためにあった C6 の照合機構は**機構ごと退役**。消費済み行・バッチ行は削除しない。
 
 ### 10.3 提示 — 未付記バッチの時刻順マージ
 

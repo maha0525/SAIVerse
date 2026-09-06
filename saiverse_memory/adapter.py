@@ -478,13 +478,14 @@ class SAIMemoryAdapter:
         *,
         allow_diff: bool = True,
     ) -> None:
-        """「部屋の様子」(パッケージの束) を知覚台帳へ積む。
+        """「部屋の様子」(パッケージの束) を知覚台帳へ積む — 束の記帳のみ。
 
-        土台 (同部屋の直近の束) が提示に見えていれば差分だけ、いなければ全文。
-        判定・差分の組成・メディアの選定と記帳は sai_memory/room_state.py が
-        持つ。``allow_diff=False`` は毎回全文 (Chronicle 無効ペルソナ — 提示窓で
-        土台が消えうるので差分にできない)。``bundle`` は
-        builtin_data/tools/get_visual_context.build_room_bundle が組む束。
+        描画 (差分か全文かの判定 + 文字列への畳み) はここではしない — 消費の
+        組成の一回だけ (sai_memory/room_state.render_pending_room_states、
+        room_state_packages.md §11-2 規則 2)。``allow_diff=False`` (Chronicle
+        無効ペルソナ = 毎回全文) は旗として記帳に凍結され、消費側が読む。
+        ``bundle`` は builtin_data/tools/get_visual_context.build_room_bundle
+        が組む束。
         """
         if not self._ready or not building_id or not bundle:
             return
@@ -492,7 +493,7 @@ class SAIMemoryAdapter:
         from sai_memory.room_state import ROOM_STATE_KIND, build_room_state_push
         with self._db_lock:
             payload = build_room_state_push(
-                self.conn, building_id, bundle, allow_diff=allow_diff,
+                building_id, bundle, allow_diff=allow_diff,
             )
             push_perception(
                 self.conn, ROOM_STATE_KIND, payload["content"],
@@ -737,8 +738,8 @@ class SAIMemoryAdapter:
                 reduced = reduce_perceptions(items)
                 from sai_memory.room_state import (
                     collect_batch_room_states,
-                    ensure_room_state_base,
                     reclaim_pending_perceptions,
+                    render_pending_room_states,
                 )
                 # 未消費バッファの回収 (room_state_packages.md §11-2): 旧形式の
                 # 遺物の破棄・様子は最後の一つだけ・往復の移動通知は経路一行に。
@@ -748,11 +749,11 @@ class SAIMemoryAdapter:
                 # だけ、の既存規則)。プレビュー (sea/runtime_context.
                 # _compose_pending_preview) も同じ一枚を通る。
                 reduced = reclaim_pending_perceptions(reduced)
-                # 「部屋の様子」: 積んでから今までの間に土台 (同部屋の全文) が
-                # 付記で提示から下りていたら (回収で pending の土台が外れた形も
-                # 同じ)、差分を全文へ開き直してから確定する
-                # (sai_memory/room_state.py の不変条件を消費の側で通す)。
-                reduced = ensure_room_state_base(self.conn, reduced)
+                # 「部屋の様子」の描画は消費の組成のこの一回だけ (§11-2 規則 2)
+                # — 回収が残した束を「提示に見えている同部屋の末尾の束」と
+                # 比較して、差分か全文かを決めて文字列に畳む (積む側は束の
+                # 記帳のみ)。
+                reduced = render_pending_room_states(self.conn, reduced)
                 text = format_perception_message(reduced)
                 # 差分の土台と、確定文面のどこにその文面が居るかをバッチへ記帳
                 # する。付記で土台が下りたときの移管がこれを読む。
@@ -1003,9 +1004,10 @@ class SAIMemoryAdapter:
     ) -> bool:
         """outbox 配送 (target='perception.room_state') 専用の厳格な書き込み口。
 
-        :meth:`push_room_state` の台帳配送版 — 差分か全文かの判定・組成
-        (sai_memory/room_state.build_room_state_push) は同じ一枚を通り、
-        違いは二つ:
+        :meth:`push_room_state` の台帳配送版 — 束の記帳
+        (sai_memory/room_state.build_room_state_push — 描画の判定はしない。
+        差分か全文かは消費の組成 render_pending_room_states の一回だけ、
+        room_state_packages.md §11-2 規則 2) は同じ一枚を通り、違いは二つ:
 
         - 冪等: :meth:`push_ledger_perception` と同じ ``ledger_outbox_id`` の
           UNIQUE 索引で DB 側が原子的に重複を弾く。消費済み行も台帳に残るので
@@ -1017,12 +1019,12 @@ class SAIMemoryAdapter:
           様子の読み手 (_parse_item_state) は room_state キーだけ、ラベルの
           読み手 (_parse_label_meta) は label_kind キーだけを読むので互いに
           影響しない。
-        - 冪等の判定は payload 組成 (build_room_state_push — DB 読み +
-          差分計算) の**前**に、同じ ``_db_lock`` 内の索引 SELECT で行う
+        - 冪等の判定は payload 組成 (build_room_state_push — 点検用の全文
+          描画を含む) の**前**に、同じ ``_db_lock`` 内の索引 SELECT で行う
           (2026-09-06 Codex 二巡目 #1)。判定が INSERT の UNIQUE だけだと、
-          再配達のたびに組成が走り、読みが劣化して組成が例外を出す状態では
-          「配達済みなのに配達失敗」→ 再試行 → dead へ進みうる。INSERT 側の
-          UNIQUE は同時配送の競合に対する安全網としてそのまま残す。
+          再配達のたびに組成が走り、組成が例外を出す状態では「配達済みなのに
+          配達失敗」→ 再試行 → dead へ進みうる。INSERT 側の UNIQUE は同時
+          配送の競合に対する安全網としてそのまま残す。
         - 失敗は例外 (push_room_state の「未 ready なら黙って return」を
           踏襲しない — 配送では成功の偽装になる)。
 
@@ -1053,7 +1055,7 @@ class SAIMemoryAdapter:
                 )
                 return False
             payload = build_room_state_push(
-                self.conn, building_id, bundle, allow_diff=allow_diff,
+                building_id, bundle, allow_diff=allow_diff,
             )
             meta = json.loads(payload["metadata"])
             meta[self.LEDGER_OUTBOX_META_KEY] = int(outbox_id)

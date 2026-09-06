@@ -54,12 +54,12 @@ from sai_memory.room_state import (
     canonical_bundle_json,
     chain_is_intact,
     collect_batch_room_states,
-    ensure_room_state_base,
     find_current_room_key,
     is_legacy_entry,
     latest_visible_snapshot,
     pending_has_room,
     reclaim_pending_perceptions,
+    render_pending_room_states,
     render_room_diff,
     render_room_full,
     reseat_current_room,
@@ -462,7 +462,7 @@ class RoomStateLedgerTestBase(_EnvTestBase):
 
     def _push(self, building_id, bundle, *, allow_diff=True):
         payload = build_room_state_push(
-            self.conn, building_id, bundle, allow_diff=allow_diff,
+            building_id, bundle, allow_diff=allow_diff,
         )
         push_perception(
             self.conn, ROOM_STATE_KIND, payload["content"],
@@ -475,7 +475,7 @@ class RoomStateLedgerTestBase(_EnvTestBase):
         items = list_pending(self.conn)
         if not items:
             return None
-        reduced = ensure_room_state_base(
+        reduced = render_pending_room_states(
             self.conn, reclaim_pending_perceptions(reduce_perceptions(items)),
         )
         text = format_perception_message(reduced)
@@ -531,7 +531,40 @@ class RoomStateLedgerTestBase(_EnvTestBase):
 
 
 class RoomStatePushTest(RoomStateLedgerTestBase):
-    """積む側の判定 (全文か差分か) とメディアの契約 (§5)。"""
+    """積む側は束の記帳だけ — 描画の判定は積む段階では確定しない (§11-2 規則 2)。"""
+
+    def setUp(self):
+        super().setUp()
+        self.bundle_a = self.env.bundle()
+
+    def test_the_push_records_the_bundle_without_a_rendering_decision(self):
+        payload = self._push("b1", self.bundle_a)
+        state = json.loads(payload["metadata"])["room_state"]
+        self.assertEqual(state["key"], room_key("b1"))
+        self.assertEqual(state["snapshot"], self.bundle_a)
+        self.assertIs(state["allow_diff"], True)
+        # is_diff / base_digest は積む段階では確定しない (描画は消費時)。
+        self.assertNotIn("is_diff", state)
+        self.assertNotIn("base_digest", state)
+
+    def test_the_pushed_content_is_the_full_text_for_inspection(self):
+        """content 列は劣化時・生の点検用の全文 — 消費の組成はこれを使わない。"""
+        payload = self._push("b1", self.bundle_a)
+        self.assertEqual(payload["content"], render_room_full(self.bundle_a))
+        self.assertEqual(payload["media"], bundle_media(self.bundle_a))
+
+    def test_the_allow_diff_flag_is_frozen_into_the_record(self):
+        payload = self._push("b1", self.bundle_a, allow_diff=False)
+        state = json.loads(payload["metadata"])["room_state"]
+        self.assertIs(state["allow_diff"], False)
+
+
+class RoomStateComposeTest(RoomStateLedgerTestBase):
+    """消費時描画の判定 (全文か差分か) とメディアの契約 (§4 / §5)。
+
+    土台は「提示に見えている同部屋の末尾の束」— 末尾なし / allow_diff=False /
+    末尾が旧形式は全文、それ以外は差分 (render_room_diff の既存規則)。
+    """
 
     def setUp(self):
         super().setUp()
@@ -542,43 +575,53 @@ class RoomStatePushTest(RoomStateLedgerTestBase):
         ))
         self.bundle_b = self.env.bundle()
 
-    def test_first_visit_pushes_the_full_text_with_all_media(self):
-        payload = self._push("b1", self.bundle_a)
-        self.assertEqual(payload["content"], render_room_full(self.bundle_a))
-        self.assertEqual(payload["media"], bundle_media(self.bundle_a))
-        state = json.loads(payload["metadata"])["room_state"]
-        self.assertFalse(state["is_diff"])
-        self.assertEqual(state["key"], room_key("b1"))
-        self.assertEqual(state["snapshot"], self.bundle_a)
+    def _room_entry(self, batch_id):
+        return json.loads(self._batch(batch_id).room_state_json)[0]
 
-    def test_revisit_while_base_is_still_pending_pushes_a_diff(self):
+    def test_first_visit_composes_the_full_text_with_all_media(self):
         self._push("b1", self.bundle_a)
-        payload = self._push("b1", self.bundle_b)
-        self.assertIn("新しい絵", payload["content"])
-        self.assertLess(
-            len(payload["content"]), len(render_room_full(self.bundle_b)),
-        )
-        state = json.loads(payload["metadata"])["room_state"]
-        self.assertTrue(state["is_diff"])
-        self.assertEqual(state["base_digest"], snapshot_digest(self.bundle_a))
+        batch_id = self._flush()
+        batch = self._batch(batch_id)
+        self.assertEqual(batch.rendered_text, render_room_full(self.bundle_a))
+        self.assertEqual(batch.media_list(), bundle_media(self.bundle_a))
+        entry = self._room_entry(batch_id)
+        self.assertFalse(entry["is_diff"])
+        self.assertEqual(entry["key"], room_key("b1"))
+        self.assertEqual(entry["snapshot"], self.bundle_a)
+
+    def test_a_revisit_composes_a_diff_against_the_presented_tail(self):
+        self._push("b1", self.bundle_a)
+        self._flush()
+        self._push("b1", self.bundle_b)
+        batch_id = self._flush()
+        text = self._batch(batch_id).rendered_text
+        self.assertIn("新しい絵", text)
+        self.assertLess(len(text), len(render_room_full(self.bundle_b)))
+        entry = self._room_entry(batch_id)
+        self.assertTrue(entry["is_diff"])
+        self.assertEqual(entry["base_digest"], snapshot_digest(self.bundle_a))
 
     def test_a_new_picture_in_the_diff_carries_its_media(self):
         """§5 契約 1: 差分で新しく見せるパッケージの絵は差分と一緒に届く。"""
         self._push("b1", self.bundle_a)
         self._flush()
-        payload = self._push("b1", self.bundle_b)
+        self._push("b1", self.bundle_b)
+        batch_id = self._flush()
         self.assertEqual(
-            [m["path"] for m in payload["media"]], [str(self.env.pic2_path)],
+            [m["path"] for m in self._batch(batch_id).media_list()],
+            [str(self.env.pic2_path)],
         )
 
     def test_an_unchanged_room_diff_carries_no_media(self):
         """§5 契約 3: 変わっていないパッケージのメディアは再添付しない。"""
         self._push("b1", self.bundle_a)
         self._flush()
-        payload = self._push("b1", self.bundle_a)
-        self.assertIn("前回見たときから変わっていません。", payload["content"])
-        self.assertIsNone(payload["media"])
-        self.assertTrue(json.loads(payload["metadata"])["room_state"]["is_diff"])
+        self._push("b1", self.bundle_a)
+        batch_id = self._flush()
+        batch = self._batch(batch_id)
+        self.assertIn("前回見たときから変わっていません。", batch.rendered_text)
+        self.assertEqual(batch.media_list(), [])
+        self.assertTrue(self._room_entry(batch_id)["is_diff"])
 
     def test_another_room_is_a_separate_base(self):
         self._push("b1", self.bundle_a)
@@ -586,35 +629,77 @@ class RoomStatePushTest(RoomStateLedgerTestBase):
         other = dict(self.bundle_a)
         other["building_id"] = "b2"
         other["building_name"] = "書斎"
-        payload = self._push("b2", other)
-        self.assertEqual(payload["content"], render_room_full(other))
+        self._push("b2", other)
+        batch_id = self._flush()
+        self.assertEqual(
+            self._batch(batch_id).rendered_text, render_room_full(other),
+        )
 
-    def test_after_the_base_is_annexed_the_next_visit_is_full_again(self):
+    def test_after_the_base_is_annexed_the_next_visit_is_a_diff_again(self):
         self._push("b1", self.bundle_a)
         batch_id = self._flush()
         mark_batches_annexed(self.conn, [batch_id], "entry-1")
         self.conn.commit()
         # 付記の tx が最後の運搬役の置き直し (§6-4) を伴うので、置き直しの
-        # 全文が新しい土台になる — 変化ぶんだけの差分が積める。
+        # 全文が新しい土台になる — 変化ぶんだけの差分が組める。
         reseated = latest_visible_snapshot(self.conn, room_key("b1"))
         self.assertEqual(reseated, self.bundle_a)
-        payload = self._push("b1", self.bundle_b)
-        self.assertTrue(json.loads(payload["metadata"])["room_state"]["is_diff"])
-        self.assertIn("新しい絵", payload["content"])
+        self._push("b1", self.bundle_b)
+        next_id = self._flush()
+        entry = self._room_entry(next_id)
+        self.assertTrue(entry["is_diff"])
+        self.assertEqual(entry["base_digest"], snapshot_digest(self.bundle_a))
+        self.assertIn("新しい絵", self._batch(next_id).rendered_text)
 
     def test_chronicle_disabled_persona_always_gets_the_full_text(self):
         self._push("b1", self.bundle_a, allow_diff=False)
         self._flush()
-        payload = self._push("b1", self.bundle_b, allow_diff=False)
-        self.assertEqual(payload["content"], render_room_full(self.bundle_b))
-        self.assertEqual(payload["media"], bundle_media(self.bundle_b))
+        self._push("b1", self.bundle_b, allow_diff=False)
+        batch_id = self._flush()
+        batch = self._batch(batch_id)
+        self.assertEqual(batch.rendered_text, render_room_full(self.bundle_b))
+        self.assertEqual(batch.media_list(), bundle_media(self.bundle_b))
+        self.assertFalse(self._room_entry(batch_id)["is_diff"])
+
+    def test_a_legacy_tail_composes_the_full_text(self):
+        """末尾が旧形式なら全文 — さらに古い有効束へは遡らない (§9 の止まり方)。"""
+        self._push("b1", self.bundle_a)
+        self._flush()  # 古い有効束 (遡ってはいけない土台)
+        self._write_old_generation_batch("旧世代の全文。", "旧世代の全文。")
+        self._push("b1", self.bundle_b)
+        batch_id = self._flush()
+        batch = self._batch(batch_id)
+        self.assertEqual(batch.rendered_text, render_room_full(self.bundle_b))
+        self.assertFalse(self._room_entry(batch_id)["is_diff"])
+
+    def test_an_old_generation_pending_row_composes_the_full_text(self):
+        """allow_diff の旗が無い旧世代 (積む時に描画) の pending 行は全文に倒す。
+
+        積む時に描いた文面 (差分かもしれない) は使わず、束から全文を組み直す —
+        余分な全文は無害、間違った土台の差分は復元不能 (実装メモの三原則 3)。
+        """
+        self._push("b1", self.bundle_a)
+        self._flush()
+        push_perception(
+            self.conn, ROOM_STATE_KIND, "旧世代が積む時に描いた差分の文面",
+            metadata=json.dumps({"room_state": {
+                "key": room_key("b1"), "is_diff": True,
+                "snapshot": self.bundle_b,
+                "base_digest": snapshot_digest(self.bundle_a),
+            }}, ensure_ascii=False),
+        )
+        batch_id = self._flush()
+        batch = self._batch(batch_id)
+        self.assertEqual(batch.rendered_text, render_room_full(self.bundle_b))
+        self.assertFalse(self._room_entry(batch_id)["is_diff"])
 
     def test_a_close_to_open_diff_still_records_the_full_snapshot(self):
         """描画が出来事 + open のみの行になっても、記帳は全文の束のまま。
 
-        連なり (chain_is_intact) と開き直し (ensure_room_state_base /
+        連なり (chain_is_intact) と移管・回復 (restore_room_state_bases /
         reopen_lost_bases) は snapshot の束から全文を導出する — Close→Open の
-        描画の変更 (2026-09-06 実機裁定) は記帳に波及しない、の検算。
+        描画の変更 (2026-09-06 実機裁定) は消費時描画でも記帳に波及しない、
+        の検算。
         """
         pic3_path = self.env.home / "image" / "pic3.png"
         pic3_path.write_bytes(b"\x89PNG fake3")
@@ -630,15 +715,17 @@ class RoomStatePushTest(RoomStateLedgerTestBase):
             is_open=True, file_path=pic3_path,
         )
         opened_bundle = self.env.bundle()
-        payload = self._push("b1", opened_bundle)
-        self.assertIn("(開かれた)", payload["content"])
-        self.assertNotIn("港の写生。", payload["content"])
-        state = json.loads(payload["metadata"])["room_state"]
-        self.assertTrue(state["is_diff"])
-        self.assertEqual(state["snapshot"], opened_bundle)
-        self.assertEqual(state["base_digest"], snapshot_digest(closed_bundle))
+        self._push("b1", opened_bundle)
+        batch_id = self._flush()
+        batch = self._batch(batch_id)
+        self.assertIn("(開かれた)", batch.rendered_text)
+        self.assertNotIn("港の写生。", batch.rendered_text)
+        entry = self._room_entry(batch_id)
+        self.assertTrue(entry["is_diff"])
+        self.assertEqual(entry["snapshot"], opened_bundle)
+        self.assertEqual(entry["base_digest"], snapshot_digest(closed_bundle))
         self.assertEqual(
-            [m["path"] for m in payload["media"]], [str(pic3_path)],
+            [m["path"] for m in batch.media_list()], [str(pic3_path)],
         )
 
 
@@ -696,11 +783,10 @@ class RoomStateRestoreTest(RoomStateLedgerTestBase):
         self.assertTrue(json.loads(survivor.room_state_json)[0]["is_diff"])
         self.assertIsNotNone(self._batch(self.base_id))
 
-    def test_a_pending_diff_whose_base_was_annexed_is_reopened_with_media(self):
-        """消費前の開き直し (ensure_room_state_base) — 全文 + メディアの復元。"""
+    def test_a_pending_room_whose_tail_was_annexed_composes_the_full_text(self):
+        """末尾が付記で下りた後の消費時描画 — 全文 + メディア (§5 の復元)。"""
         env2 = dict(self.bundle_b)
-        payload = self._push("b1", env2)  # pending の差分 (変化なしの一行)
-        self.assertIsNone(payload["media"])
+        self._push("b1", env2)  # pending の束 (描画はまだ確定しない)
         mark_batches_annexed(
             self.conn, [self.base_id, self.diff_id], "entry-1",
         )
@@ -712,7 +798,7 @@ class RoomStateRestoreTest(RoomStateLedgerTestBase):
                  if b.room_state_json), None,
             ),
         )
-        items = ensure_room_state_base(
+        items = render_pending_room_states(
             self.conn, reduce_perceptions(list_pending(self.conn)),
         )
         room_items = [
@@ -867,8 +953,12 @@ class RoomStateReseatTest(RoomStateLedgerTestBase):
         self.assertEqual(
             latest_visible_snapshot(self.conn, room_key("b1")), self.bundle_a,
         )
-        payload = self._push("b1", self.bundle_a)
-        self.assertIn("前回見たときから変わっていません。", payload["content"])
+        self._push("b1", self.bundle_a)
+        batch_id = self._flush()
+        self.assertIn(
+            "前回見たときから変わっていません。",
+            self._batch(batch_id).rendered_text,
+        )
 
     def test_the_reseat_is_stamped_but_not_annex_material(self):
         """置き直しは出来事ではない — 付記印は受けるが材料には載らない。"""
@@ -1972,8 +2062,11 @@ class RoomStateLegacyRecordTest(RoomStateLedgerTestBase):
 
     def test_a_legacy_record_is_not_a_base(self):
         self.assertIsNone(latest_visible_snapshot(self.conn, room_key("b1")))
-        payload = self._push("b1", self.bundle)
-        self.assertEqual(payload["content"], render_room_full(self.bundle))
+        self._push("b1", self.bundle)
+        batch_id = self._flush()
+        batch = self._batch(batch_id)
+        self.assertEqual(batch.rendered_text, render_room_full(self.bundle))
+        self.assertFalse(json.loads(batch.room_state_json)[0]["is_diff"])
 
     def test_a_legacy_record_is_never_repaired(self):
         """旧データの読者を書かない — 提示は積んだときの文面のまま。"""
@@ -1986,12 +2079,14 @@ class RoomStateLegacyRecordTest(RoomStateLedgerTestBase):
         )
 
     def test_a_new_diff_chains_over_the_legacy_record(self):
+        """旧形式より新しい有効束が提示に立てば、次の消費はそこへ連なる。"""
         self._push("b1", self.bundle)
         self._flush()
-        payload = self._push("b1", self.bundle)
-        state = json.loads(payload["metadata"])["room_state"]
-        self.assertTrue(state["is_diff"])
-        self.assertEqual(state["base_digest"], snapshot_digest(self.bundle))
+        self._push("b1", self.bundle)
+        batch_id = self._flush()
+        entry = json.loads(self._batch(batch_id).room_state_json)[0]
+        self.assertTrue(entry["is_diff"])
+        self.assertEqual(entry["base_digest"], snapshot_digest(self.bundle))
 
 
 class BundleValidationTest(_EnvTestBase):
@@ -2763,10 +2858,10 @@ class _RoundTripMixin:
             "# 「工房」の役割・指示\n工房の指示。",
             metadata=_typed_instruction_meta("b1", "工房"),
         )
-        # 最終の様子は pending の一枚目 (bundle_a) を土台にした差分になる —
-        # 回収で土台が落ちるので、開き直し (ensure_room_state_base) が働く形。
+        # 最終の様子も束の記帳のみ — 描画 (提示に末尾が無いので全文) は消費の
+        # 組成の一回だけ (§11-2 規則 2)。
         payload = self._push("b1", self.bundle_a2)
-        assert json.loads(payload["metadata"])["room_state"]["is_diff"]
+        assert "is_diff" not in json.loads(payload["metadata"])["room_state"]
 
 
 class PendingReclaimTest(_RoundTripMixin, RoomStateLedgerTestBase):
@@ -2786,7 +2881,7 @@ class PendingReclaimTest(_RoundTripMixin, RoomStateLedgerTestBase):
         self.assertNotIn("# 「書斎」の様子", text)
         # 最終の部屋の指示は残る。
         self.assertIn("工房の指示。", text)
-        # 最終の様子は土台 (落とされた pending) を失った差分 → 全文へ開き直し。
+        # 最終の様子は消費時描画 — 提示に同部屋の末尾が無いので全文になる。
         self.assertIn(render_room_full(self.bundle_a2), text)
         self.assertEqual(text.count("# 「工房」の様子"), 1)
         # 読み順: 経路 → 指示 → 様子。
@@ -2861,7 +2956,7 @@ class PendingReclaimTest(_RoundTripMixin, RoomStateLedgerTestBase):
         """入室配送の再試行による様子の二重積み (既知の形) は回収が自己修復する。
 
         issue: entry_delivery_retry_duplicates_room_perception — 同じ束の push が
-        二重に走ると、一枚目が全文・二枚目が pending を土台にした差分になる。
+        二重に走っても、回収が最後の一枚だけ残し、消費時描画が一枚の全文に組む。
         """
         bundle = self.env.bundle()
         self._push("b1", bundle)
@@ -2969,6 +3064,137 @@ class PendingPreviewParityTest(_RoundTripMixin, RoomStateLedgerTestBase):
         self.assertIn(self.ROUTE_LINE, preview_text)
         batch_id = self._flush()
         self.assertEqual(preview_text, self._batch(batch_id).rendered_text)
+
+
+class ConsumptionTimeRenderingTest(RoomStateLedgerTestBase):
+    """描画は消費の組成の一回だけ (2026-09-06 まはー裁定 — intent §11-2 規則 2)。
+
+    実機の再現 (red): 提示済みの置き直しバッチ (全文、束 A) が生きているのに、
+    未消費に [途中の様子 + 型付き移動通知 2 組 + 最後の様子] が積まれた形。
+    旧実装は積む時に描画して土台を pending から選ぶ (最後の様子の base_digest =
+    捨てられる途中の pending の指紋) が、回収 (§11-2) は途中の pending を必ず
+    捨てるので連なりが切れ、消費時の開き直しがもう一枚の全文を立てて保障 2
+    (同じ内容が二枚並ばない) を破った。
+
+    green: 描画が消費の組成の一回になると、土台は常に「提示に見えている同部屋の
+    末尾の束」(束 A) — 出力は A→最終の差分 (数行。同内容なら一行) になり、
+    全文は二枚並ばない。
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.key = room_key("b1")
+        self.bundle_a = self.env.bundle()
+        self.env.items.append(_make_item(
+            "uuid-new", 14, "picture", "新しい絵", "届いたばかりの絵。",
+            is_open=True, file_path=self.env.pic2_path,
+        ))
+        self.bundle_b = self.env.bundle()
+        # 提示済みの置き直しバッチ (全文、束 A): 入室の全文を付記で下ろすと
+        # §6-4 の置き直しが立つ — 実機と同じ作られ方。
+        self._push("b1", self.bundle_a)
+        entry_id = self._flush()
+        mark_batches_annexed(self.conn, [entry_id], "entry-1")
+        self.conn.commit()
+
+    def _stack_pendings(self, mid_bundle, final_bundle):
+        """未消費: 途中の様子 → 移動通知 2 組 → 最後の様子 (実機の並び)。"""
+        self._push("b1", mid_bundle)  # 滞在中の検知が積んだ途中の様子
+        push_perception(
+            self.conn, "world_state",
+            "現在地が「工房」から「書斎」に変わりました",
+            metadata=_typed_move_meta("b1", "工房", "b2", "書斎"),
+        )
+        push_perception(
+            self.conn, "world_state",
+            "# 「書斎」の役割・指示\n書斎では静かに。",
+            metadata=_typed_instruction_meta("b2", "書斎"),
+        )
+        push_perception(
+            self.conn, "world_state",
+            "現在地が「書斎」から「工房」に変わりました",
+            metadata=_typed_move_meta("b2", "書斎", "b1", "工房"),
+        )
+        push_perception(
+            self.conn, "world_state",
+            "# 「工房」の役割・指示\n工房の指示。",
+            metadata=_typed_instruction_meta("b1", "工房"),
+        )
+        self._push("b1", final_bundle)  # 最後の様子
+
+    def test_the_last_room_state_composes_a_diff_against_the_presented_tail(self):
+        self._stack_pendings(self.bundle_b, self.bundle_b)
+        batch_id = self._flush()
+        batch = self._batch(batch_id)
+        text = batch.rendered_text
+        # 提示済みの置き直し (束 A の全文) が生きているのに、もう一枚の全文が
+        # 立ってはならない (保障 2)。
+        self.assertNotIn(render_room_full(self.bundle_b), text)
+        self.assertNotIn("覚え書き", text)  # 変わっていないパッケージは再掲しない
+        # 出力は A→B の差分 — 新しく現れたパッケージだけ + そのメディア。
+        self.assertIn("(前回見たときからの変化)", text)
+        self.assertIn("新しい絵", text)
+        self.assertEqual(
+            [m["path"] for m in batch.media_list()], [str(self.env.pic2_path)],
+        )
+
+    def test_an_unchanged_return_condenses_to_the_no_change_line(self):
+        self._stack_pendings(self.bundle_b, self.bundle_a)
+        batch_id = self._flush()
+        batch = self._batch(batch_id)
+        text = batch.rendered_text
+        self.assertNotIn(render_room_full(self.bundle_a), text)
+        self.assertIn(_NO_CHANGE_LINE_TEST, text)
+        self.assertEqual(batch.media_list(), [])
+
+    def test_the_batch_records_the_tail_as_the_base(self):
+        """記帳の base_digest は末尾 (束 A) の指紋 — 次の消費の連なりが繋がる。"""
+        self._stack_pendings(self.bundle_b, self.bundle_b)
+        batch_id = self._flush()
+        entry = json.loads(self._batch(batch_id).room_state_json)[0]
+        self.assertTrue(entry["is_diff"])
+        self.assertEqual(entry["base_digest"], snapshot_digest(self.bundle_a))
+        self.assertEqual(entry["snapshot"], self.bundle_b)
+        # 連なりは切れていない — 提示側の回復は何も直さない。
+        self.assertEqual(restore_room_state_bases(self.conn), 0)
+
+    def test_the_preview_composes_the_same_diff_without_writing(self):
+        import threading
+
+        from sea.runtime_context import _compose_pending_preview
+
+        self._stack_pendings(self.bundle_b, self.bundle_b)
+        sai_mem = SimpleNamespace(conn=self.conn, _db_lock=threading.RLock())
+        select = (
+            "SELECT id, kind, content, media, metadata, consumed_at "
+            "FROM perception_buffer ORDER BY id"
+        )
+        before = self.conn.execute(select).fetchall()
+        preview_text = format_perception_message(
+            _compose_pending_preview(sai_mem),
+        )
+        after = self.conn.execute(select).fetchall()
+        self.assertEqual(before, after)  # 読むだけ — 行は触らない
+        self.assertNotIn(render_room_full(self.bundle_b), preview_text)
+        batch_id = self._flush()
+        self.assertEqual(preview_text, self._batch(batch_id).rendered_text)
+
+    def test_the_next_consumption_chains_on_the_recorded_base(self):
+        """検算: 消費時描画の記帳を土台に、次の消費の差分が正しく繋がる。"""
+        self._stack_pendings(self.bundle_b, self.bundle_b)
+        first_id = self._flush()
+        self.env.items.append(_make_item(
+            "uuid-next", 15, "object", "置物", "あとから増えた。",
+        ))
+        bundle_c = self.env.bundle()
+        self._push("b1", bundle_c)
+        second_id = self._flush()
+        entry = json.loads(self._batch(second_id).room_state_json)[0]
+        self.assertTrue(entry["is_diff"])
+        self.assertEqual(entry["base_digest"], snapshot_digest(self.bundle_b))
+        self.assertIn("置物", self._batch(second_id).rendered_text)
+        self.assertEqual(restore_room_state_bases(self.conn), 0)
+        self.assertIsNotNone(self._batch(first_id))
 
 
 class EntryDeliveryOrderTest(_EnvTestBase):
