@@ -735,13 +735,23 @@ class SAIMemoryAdapter:
                 if not items:
                     return None
                 reduced = reduce_perceptions(items)
-                # 「部屋の様子」: 積んでから今までの間に土台 (同部屋の全文) が
-                # 付記で提示から下りていたら、差分を全文へ開き直してから確定する
-                # (sai_memory/room_state.py の不変条件を消費の側で通す)。
                 from sai_memory.room_state import (
                     collect_batch_room_states,
                     ensure_room_state_base,
+                    reclaim_pending_perceptions,
                 )
+                # 未消費バッファの回収 (room_state_packages.md §11-2): 旧形式の
+                # 遺物の破棄・様子は最後の一つだけ・往復の移動通知は経路一行に。
+                # まだどの Pulse も読んでいない列なので、畳んでも提示済みには
+                # 触れない。外した行にも消費の印は付く (下の create_consumption_
+                # batch は reduce 前の全 item id を受ける — 相殺は未消費の間
+                # だけ、の既存規則)。プレビュー (sea/runtime_context.
+                # _compose_pending_preview) も同じ一枚を通る。
+                reduced = reclaim_pending_perceptions(reduced)
+                # 「部屋の様子」: 積んでから今までの間に土台 (同部屋の全文) が
+                # 付記で提示から下りていたら (回収で pending の土台が外れた形も
+                # 同じ)、差分を全文へ開き直してから確定する
+                # (sai_memory/room_state.py の不変条件を消費の側で通す)。
                 reduced = ensure_room_state_base(self.conn, reduced)
                 text = format_perception_message(reduced)
                 # 差分の土台と、確定文面のどこにその文面が居るかをバッチへ記帳
@@ -793,6 +803,12 @@ class SAIMemoryAdapter:
                 "[perception_buffer] flush could not record the consumption "
                 "batch; keeping items pending for retry", exc_info=True,
             )
+            return None
+        if not reduced:
+            # 回収で全項目が外れた (旧形式の遺物だけが pending だった、等)。
+            # 消費の印は付いたが提示する文面は無い — 空の <system></system> を
+            # 作業中の messages に足さない (提示側も空バッチは出さない —
+            # sea/runtime_context.list_presented_perception_blocks)。
             return None
         return {"content": f"<system>{text}</system>", "media": media}
 
@@ -971,6 +987,86 @@ class SAIMemoryAdapter:
         if item_id is None:
             LOGGER.info(
                 "[ledger-delivery] duplicate perception suppressed: outbox_id=%s",
+                outbox_id,
+            )
+            return False
+        return True
+
+    def push_ledger_room_state(
+        self,
+        *,
+        execution_id: str,
+        outbox_id: int,
+        building_id: str,
+        bundle: dict,
+        allow_diff: bool = True,
+    ) -> bool:
+        """outbox 配送 (target='perception.room_state') 専用の厳格な書き込み口。
+
+        :meth:`push_room_state` の台帳配送版 — 差分か全文かの判定・組成
+        (sai_memory/room_state.build_room_state_push) は同じ一枚を通り、
+        違いは二つ:
+
+        - 冪等: :meth:`push_ledger_perception` と同じ ``ledger_outbox_id`` の
+          UNIQUE 索引で DB 側が原子的に重複を弾く。消費済み行も台帳に残るので
+          消費を自然に跨ぐ — 「配達成功 → 消費 → 再配達」でも二重にならない
+          (消費済みの一枚目は未消費だけを見る回収
+          reclaim_pending_perceptions では畳めないため、配達自体が跨いで
+          冪等である必要がある)。冪等キーは metadata の room_state 記帳と
+          並置される (``{"room_state": {...}, "ledger_outbox_id": ...}``) —
+          様子の読み手 (_parse_item_state) は room_state キーだけ、ラベルの
+          読み手 (_parse_label_meta) は label_kind キーだけを読むので互いに
+          影響しない。
+        - 冪等の判定は payload 組成 (build_room_state_push — DB 読み +
+          差分計算) の**前**に、同じ ``_db_lock`` 内の索引 SELECT で行う
+          (2026-09-06 Codex 二巡目 #1)。判定が INSERT の UNIQUE だけだと、
+          再配達のたびに組成が走り、読みが劣化して組成が例外を出す状態では
+          「配達済みなのに配達失敗」→ 再試行 → dead へ進みうる。INSERT 側の
+          UNIQUE は同時配送の競合に対する安全網としてそのまま残す。
+        - 失敗は例外 (push_room_state の「未 ready なら黙って return」を
+          踏襲しない — 配送では成功の偽装になる)。
+
+        Returns:
+            新規に積んだら True、冪等スキップ (= 同じ outbox_id で配達済み)
+            なら False。実障害 (未 ready・壊れた引数・組成や書き込みの失敗)
+            は例外 — False と混同しない (False は配送成功扱いの no-op)。
+        """
+        if not self._ready:
+            raise RuntimeError(
+                f"SAIMemory adapter not ready (resource={self.settings.resource_id})"
+            )
+        if not building_id or not isinstance(bundle, dict) or not bundle:
+            raise ValueError(
+                "room_state delivery requires building_id and a bundle dict"
+            )
+        from sai_memory.perception_buffer import push_perception
+        from sai_memory.room_state import ROOM_STATE_KIND, build_room_state_push
+        with self._db_lock:
+            existing = self.conn.execute(
+                "SELECT 1 FROM perception_buffer WHERE ledger_outbox_id = ?",
+                (str(int(outbox_id)),),
+            ).fetchone()
+            if existing is not None:
+                LOGGER.info(
+                    "[ledger-delivery] duplicate room_state suppressed "
+                    "(pre-composition): outbox_id=%s", outbox_id,
+                )
+                return False
+            payload = build_room_state_push(
+                self.conn, building_id, bundle, allow_diff=allow_diff,
+            )
+            meta = json.loads(payload["metadata"])
+            meta[self.LEDGER_OUTBOX_META_KEY] = int(outbox_id)
+            meta["execution_id"] = str(execution_id)
+            item_id = push_perception(
+                self.conn, ROOM_STATE_KIND, payload["content"],
+                media=payload["media"],
+                metadata=json.dumps(meta, ensure_ascii=False),
+                ledger_outbox_id=str(int(outbox_id)),
+            )
+        if item_id is None:
+            LOGGER.info(
+                "[ledger-delivery] duplicate room_state suppressed: outbox_id=%s",
                 outbox_id,
             )
             return False

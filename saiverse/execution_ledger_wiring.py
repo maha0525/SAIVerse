@@ -66,6 +66,11 @@ SLOT_SETTLE_DEADLINE_SECONDS = 900.0
 # 送信トレイの TARGET 名 (intent §4 スキーマ例)。
 TARGET_SAIMEMORY_APPEND = "saimemory.append"
 TARGET_PERCEPTION_PUSH = "perception.push"
+#: 「部屋の様子」の配送 (room_state_packages.md §11-3-1)。入室処理
+#: (saiverse/dynamic_state.on_building_entered) が束を凍結して積み、配達時に
+#: 差分か全文かを判定して知覚バッファへ push する。通知 (perception.push) と
+#: 同じ FIFO に乗ることで、読み順 (通知 → 指示 → 様子) が構造的に決まる。
+TARGET_PERCEPTION_ROOM_STATE = "perception.room_state"
 #: W1 Chunk C (D9-5): 作業セッション digest の配送。saimemory.append の変種で、
 #: 冪等 append 後に episode の digest_ref (再訪の鍵) を後段確定する。
 TARGET_SAIMEMORY_APPEND_DIGEST = "saimemory.append_digest"
@@ -152,6 +157,10 @@ def build_execution_ledger(manager: "SAIVerseManager") -> ExecutionLedger:
     )
     ledger.register_outbox_handler(
         TARGET_PERCEPTION_PUSH, _make_perception_push_handler(manager)
+    )
+    ledger.register_outbox_handler(
+        TARGET_PERCEPTION_ROOM_STATE,
+        _make_perception_room_state_handler(manager),
     )
     ledger.register_outbox_handler(
         TARGET_SAIMEMORY_APPEND_DIGEST,
@@ -955,6 +964,77 @@ def _make_perception_push_handler(
             salient=bool(payload.get("salient", False)),
             media=payload.get("media"),
             metadata=payload.get("metadata"),
+        )
+    return handler
+
+
+def _make_perception_room_state_handler(
+    manager: "SAIVerseManager",
+) -> Callable[[Dict[str, Any]], None]:
+    """target='perception.room_state' — 「部屋の様子」の配送 (消費は次 Pulse)。
+
+    payload 契約 (積む側 = saiverse/dynamic_state.on_building_entered):
+        {"building_id": str, "bundle": dict (束 — queue 時に凍結),
+         "allow_diff": bool}
+        束の building_id は外側 building_id と一致していること (部屋のキーは
+        外側から、記帳される snapshot は束から作られるため)。
+    差分か全文かの判定は配達時 (adapter.push_ledger_room_state →
+    sai_memory/room_state.build_room_state_push)。冪等は perception.push と
+    同じ ledger_outbox_id の UNIQUE 索引 (adapter 側) — 消費済み行も照合対象
+    なので「配達成功 → 消費 → 台帳の delivered 記帳前に停止 → 再配達」でも
+    二重にならない (未消費だけを見る回収 reclaim_pending_perceptions は
+    消費済みの一枚目を跨げない)。既存行があれば配達成功扱いの no-op。
+
+    payload の門は厳格に検める — 壊れた束が delivered になると、後段の回収
+    (first_room_bundle の停止規則) が遺物として黙って捨て、再試行不能の
+    静かな消失になる。違反は例外 = 配達失敗として pending/dead に残す。
+    """
+    def handler(item: Dict[str, Any]) -> None:
+        payload = item.get("payload")
+        if not isinstance(payload, dict):
+            raise ValueError("perception.room_state payload must be a dict")
+        building_id = payload.get("building_id")
+        if not isinstance(building_id, str) or not building_id:
+            raise ValueError(
+                "perception.room_state payload requires a non-empty "
+                "'building_id' string"
+            )
+        allow_diff = payload.get("allow_diff", True)
+        if not isinstance(allow_diff, bool):
+            # bool("false") == True — 文字列を bool に化かして通さない。
+            raise ValueError(
+                "perception.room_state 'allow_diff' must be a bool"
+            )
+        from sai_memory.room_state import bundle_is_valid
+        bundle = payload.get("bundle")
+        if not bundle_is_valid(bundle):
+            raise ValueError(
+                "perception.room_state 'bundle' is not a valid room bundle"
+            )
+        if bundle["building_id"] != building_id:
+            # 部屋のキーは外側 building_id、記帳される snapshot は束 — 食い
+            # 違いを通すと別の建物の中身が対象の部屋のキーへ記録される汚染に
+            # なる。積む側 (on_building_entered) は常に一致させるので、違反は
+            # producer の欠陥 = 配達失敗として pending に表面化させる。
+            raise ValueError(
+                "perception.room_state bundle building_id "
+                f"{bundle['building_id']!r} does not match payload "
+                f"building_id {building_id!r}"
+            )
+        adapter = _resolve_adapter(manager, item.get("persona_id"))
+        if not adapter.is_ready():
+            # 未 ready の黙殺は「成功の偽装」になるため、例外で pending に残す
+            # (push_ledger_room_state も自前で検めるが、契約はこの門が示す)。
+            raise RuntimeError(
+                f"SAIMemory adapter not ready for persona "
+                f"{item.get('persona_id')}"
+            )
+        adapter.push_ledger_room_state(
+            execution_id=item["execution_id"],
+            outbox_id=item["outbox_id"],
+            building_id=building_id,
+            bundle=bundle,
+            allow_diff=allow_diff,
         )
     return handler
 

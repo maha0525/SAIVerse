@@ -145,17 +145,22 @@ class DynamicStateManager:
             ok = False
 
         # 部屋の様子 (居合わせる他ペルソナの外見・内装画像・アイテム・設置物) を
-        # パッケージの束のまま、移動した本人の知覚バッファへ push する。head は
+        # パッケージの束のまま、移動した本人の知覚バッファへ届ける。head は
         # もう部屋を描かない (VisualContextSection 退役、2026-09-06) ので、
         # 部屋の様子の置き場はこの知覚一つ。self は部屋の性質ではないので除外。
         # 消費は本人の次 Beat 頭。
         #
         # 積むのは全文とは限らない: 同じ部屋の前回のエントリがまだ提示に見えて
-        # いれば差分だけになる (sai_memory/room_state.py)。行き来のたびに 1 万字
-        # 級の全文が積み上がるのを止めるため (2026-09-04 まはー裁定)。入室は
-        # 「体験として新しく見た回」なので末尾 (出来事) — 機構の置き直し (全文を
-        # 提示の最古端へ) は検知の自己回復と付記・境界前進の相乗りが担う
-        # (docs/intent/room_state_packages.md §6)。
+        # いれば差分だけになる (sai_memory/room_state.py — 判定は配達時)。
+        # 行き来のたびに 1 万字級の全文が積み上がるのを止めるため (2026-09-04
+        # まはー裁定)。入室は「体験として新しく見た回」なので末尾 (出来事) —
+        # 機構の置き直し (全文を提示の最古端へ) は検知の自己回復と付記・境界
+        # 前進の相乗りが担う (docs/intent/room_state_packages.md §6)。
+        #
+        # 配送は台帳の outbox (target='perception.room_state'、§11-3-1) — 上の
+        # diff 通知 (perception.push) と同じ FIFO に乗せることで、読み順
+        # (通知 → 指示 → 様子) が構造的に決まる。台帳の無い環境は従来の直接
+        # push に degrade する (通知の direct 経路と同型)。束は queue 時に凍結。
         #
         # ここは滞在中の検知 (_detect_room_state_changes) と違い、組成中に本人が
         # さらに移動していても「配送の荷物の行き先 (building_id)」へ積むのが
@@ -172,10 +177,46 @@ class DynamicStateManager:
                 with persona_context(pid, pdir, manager):
                     bundle = build_room_bundle(building_id)
                 if bundle:
-                    sai_mem.push_room_state(
-                        building_id, bundle,
-                        allow_diff=_chronicle_enabled(persona, manager),
-                    )
+                    allow_diff = _chronicle_enabled(persona, manager)
+                    ledger = getattr(manager, "execution_ledger", None)
+                    if ledger is not None:
+                        from saiverse.execution_ledger_wiring import (
+                            TARGET_PERCEPTION_ROOM_STATE,
+                        )
+                        execution_id, _created = ledger.begin_execution(
+                            "room_state.entry_push",
+                            idempotency_key=None, persona_id=pid,
+                        )
+                        ledger.mark_running(execution_id)
+                        ledger.mark_applied(
+                            execution_id,
+                            result={"building_id": building_id},
+                            outbox_items=[{
+                                "target": TARGET_PERCEPTION_ROOM_STATE,
+                                "persona_id": pid,
+                                "payload": {
+                                    "building_id": building_id,
+                                    "bundle": bundle,
+                                    "allow_diff": allow_diff,
+                                },
+                            }],
+                            deliver=True,
+                        )
+                    elif not sai_mem.is_ready():
+                        # push_room_state は未 ready を黙って return する —
+                        # ここで検めないと ok=True のまま知覚が静かに失われる。
+                        # 台帳あり側 (perception.room_state handler) の
+                        # 「未 ready は例外で pending に残す」と対称の失敗扱い。
+                        LOGGER.warning(
+                            "[dynamic_state] surroundings push skipped: "
+                            "SAIMemory not ready for %s -> %s",
+                            pid, building_id,
+                        )
+                        ok = False
+                    else:
+                        sai_mem.push_room_state(
+                            building_id, bundle, allow_diff=allow_diff,
+                        )
         except Exception:
             LOGGER.warning(
                 "[dynamic_state] surroundings push on entry failed -> %s",

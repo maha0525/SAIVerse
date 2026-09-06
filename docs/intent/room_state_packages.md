@@ -1,6 +1,6 @@
 # Intent: 部屋の様子のパッケージ — 世界の眺めを構造のまま知覚へ運ぶ
 
-**ステータス**: 実装中 (2026-09-07 実機所見の第一弾 §11 — 回収・配送順・遺物の掃除)。§1〜§10 は実装済み・テスト緑
+**ステータス**: 実装済み・テスト緑 (§11 実機所見の第一弾まで、2026-09-07) — 実機検証待ち (完了の定義は §10 の旅 + 実機所見 ①②④ の解消確認)
 **発端**: [room_state_diff_built_on_string_parsing.md](../issues/room_state_diff_built_on_string_parsing.md) (v0.3.9 出荷停止 — 差分を描画済み文字列の解析で組んでいた) と、その洗い出し・設計の問い 7 点の裁定 (2026-09-06)
 **吸収**: [room_state_single_source_of_truth.md](../issues/room_state_single_source_of_truth.md) (一元化 — head の Visual Context 退役。まはー裁定で一緒に設計)
 **置き換え対象**: [perception_buffer.md](perception_buffer.md) §10.8〜§10.8.1 (文字列差分と head 照合)。§10.9 (知覚の合計上限) は生きる
@@ -121,7 +121,7 @@
 
 消費の組成 (reduce の後、`ensure_room_state_base` の前) に回収を一枚差し込む。実 flush (`saiverse_memory/adapter.flush_perception_buffer_payload`) とプレビュー (`sea/runtime_context` の知覚バッファ節 — まはーが見るダンプの出所) が**同じ関数**を通る。動作は三つ:
 
-1. **移動群の畳み**: 移動通知 (metadata で型付けされたもの — §11-3) が 2 件以上 pending なら、通知の metadata (from/to) から経路一行「(この間の移動: A → B → A → B)」を合成して最終の通知の位置に置き、それ以前の部屋グループ (通知・指示・様子) を落とす。残るのは経路一行 + 最終の部屋の指示 + 最終の部屋の様子。移動が 1 回だけなら何もしない。移動以外の知覚 (スペル・フィード等) は位置ごと触らない。
+1. **移動群の畳み**: 移動通知 (metadata で型付けされたもの — §11-3) が 2 件以上 pending なら、通知の metadata (from/to) から経路一行「この間に現在地が移動しました: 「A」 → 「B」 → 「A」」(最初の通知の from の名前 + 各通知の to の名前を発生順に連結) を合成して最終の通知の位置に置き、それ以前の部屋グループ (通知・指示・様子) を落とす。残るのは経路一行 + 最終の部屋の指示 + 最終の部屋の様子。移動が 1 回だけなら何もしない。移動以外の知覚 (スペル・フィード等) は位置ごと触らない。
 2. **同部屋の重複の畳み**: 同じ部屋の様子エントリが複数 pending なら最新の一つだけ残す。土台 (落とされた pending の束) を失った差分は、既存の `ensure_room_state_base` がそのまま全文へ開き直す — 各エントリは metadata に自分の全文の束 (snapshot) を持っているので、開き直しは自己完結する (§実装メモ参照)。入室配送の再試行による様子の二重積み ([entry_delivery_retry_duplicates_room_perception.md](../issues/entry_delivery_retry_duplicates_room_perception.md)) もこれが自己修復する。
 3. **旧形式の遺物の破棄**: kind=`surroundings` で `is_legacy_entry` (束として読めない旧文字列形式) の行は組成に載せない (消費済みの印は付く — 台帳の行は消さない、§7-4 のまま)。落とした後に部屋の眺めが無ければ、Pulse 頭の照合・自己回復 (§6-2) が新品の全文を最古端に置く — つまり**アイフィ級の汚染は、再起動後の次の Pulse で送る前に自動で掃除される。手動掃除は要らない**。配布済みユーザーの移行も同じ経路。
 
@@ -133,7 +133,7 @@
 
 修正は三つで、いずれも「配送機構を一本にする」方向:
 
-1. **様子も outbox 経由にする**: 新 target `perception.room_state` (payload = building_id + 束 + allow_diff の凍結)。handler が `adapter.push_room_state` を呼ぶ (差分か全文かの判定は配達時)。台帳の無い環境は従来の直接 push に degrade (通知の direct 経路と同型)。これで同一 FIFO に乗り、順序が構造的に決まる。
+1. **様子も outbox 経由にする**: 新 target `perception.room_state` (payload = building_id + 束 + allow_diff の凍結)。handler が `adapter.push_ledger_room_state` を呼ぶ (差分か全文かの判定は配達時)。配達は通知 (perception.push) と同じ `ledger_outbox_id` の UNIQUE 索引で冪等 — 知覚バッファと台帳の delivered 記帳は別 DB なので、その隙間の停止による再配達が起きうる。一枚目が消費済みだと §11-2 の回収 (未消費しか見ない) では畳めないため、冪等は消費を跨ぐ必要がある。冪等の判定は payload 組成 (build_room_state_push — DB 読み + 差分計算) の**前**に同じ lock 内の索引照合で行い、INSERT 側の UNIQUE は同時配送への安全網として残す — 判定が INSERT だけだと再配達のたびに組成が走り、読みが劣化して組成が例外を出す状態では「配達済みなのに配達失敗」→ 再試行 → dead へ進みうる (2026-09-06 二巡目修正 #1)。payload の門は handler が厳格に検める (building_id 非空 str / allow_diff bool / 束は `bundle_is_valid` / 束の building_id は外側 building_id と一致 — 部屋のキーは外側から、記帳される snapshot は束から作られるので、食い違いを通すと別の建物の中身が対象の部屋のキーへ記録される汚染になる。2026-09-06 二巡目修正 #2) — 壊れた束が delivered になると後段の回収が遺物として黙って捨て、再試行不能の静かな消失になるため、違反は配達失敗として pending に残す。台帳の無い環境は従来の直接 push に degrade (通知の direct 経路と同型。未 ready は WARN + 失敗扱いにして「全段成功」を偽装しない)。これで同一 FIFO に乗り、順序が構造的に決まる。
 2. **通知の分割と型付け**: `BuildingSection` の `building_changed` ラベル (現在は移動一行 + 役割・指示が一体) を「移動通知」と「役割・指示」の二枚に分け、`NotificationLabel` に metadata (label_kind / from / to の id と表示名) を持たせて知覚エントリの metadata へ写す。§11-2 の畳みはこの型付けで識別する (metadata の無い旧ラベルは畳まない — 小さいので実害なし)。
 3. **flush の配り直し**: `_flush_queue` は一覧を配り切った後に再問い合わせし、配送中に積まれた項目を同じ flush 内で配る (進捗がある限り、上限回数つき — 再入の deadlock 対策のスレッドローカル旗はそのまま)。移動の配送が終わった時点で通知・指示・様子が全部バッファに揃い、まはーがプレビューを開いた瞬間に正しい順で見える。
 
@@ -180,3 +180,4 @@
 - **2026-09-06**: 実装 (パッケージ組成・キー照合の差分・メディアの復元・供給の四点・head の VisualContextSection と BuildingItemsSection ラベルの退役・思い出の削除)。専用テストと知覚関連スイートを新契約へ書き換え。実機検証はこれから。
 - **2026-09-06 (台帳の旧行、移送)**: 「intent を起草済み (パッケージの定義・差分の規則・メディアはパッケージの属性・供給の三点・head の Visual Context とアイテム差分ラベルの退役・移行)。次 = まはーの設計レビュー → 実装。」— 設計レビューを経て同日実装まで進んだため、台帳の行を検証待ちへ差し替えた。
 - **2026-09-07**: まはーの実機確認で 5 点の所見 (①汚染バッファの掃除 ②積み順の逆転 ③出来事の区切り ④往復の堆積 ⑤アイテム過多) + テリスの入室知覚欠落。第一弾 (④②① = §11) の設計を裁定 (「方針完璧」) — ③⑤テリスは §11-4 の器へ。差分の基準について「見ていないものからの差分を語っていた」と報告したのは不正確だった — 土台の pending も同じ flush で一緒に見えるので連なりとしては読める。実害は堆積 (④) と読み順 (②) にある。
+- **2026-09-07 (§11 実装とレビュー収束)**: Fable サブエージェントで実装 (回収の一枚・通知の二枚分割と型付け・様子の outbox 配送・flush の配り直し) → Codex (Luna/high) 三巡で収束 (一巡目 3 件全採用 = 配達の冪等化・payload の門・degrade の未 ready / 二巡目 採用 2 却下 2 / 三巡目 approve 指摘ゼロ)。全修正 red 証明つき、フルスイート毎巡二重確認で最終 5,641 緑。同族走査で見つけた隣 4 点は [outbox_delivery_gate_siblings.md](../issues/outbox_delivery_gate_siblings.md) へ。却下の証拠は発端 issue の経緯。

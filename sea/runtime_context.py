@@ -1463,6 +1463,12 @@ def list_presented_perception_blocks(
                     media.append(dict(m))
             if media:
                 metadata["media"] = media
+            if not (content_text or "").strip() and not media:
+                # 回収 (room_state_packages.md §11-2) で全項目が外れた消費の
+                # 空バッチ — 見せるものが無いので空の <system></system> を
+                # 作らない。送る側と測る側は同じこの一枚を通るので勘定は
+                # ずれない。
+                continue
             blocks.append({
                 "role": "user",
                 "content": _perception_block_text(content_text),
@@ -1804,6 +1810,30 @@ def _swap_preview_weave_for_refill(
         return False
 
 
+def _compose_pending_preview(sai_mem: Any) -> List[Any]:
+    """未消費の知覚のプレビュー組成 — 実 flush と同じ並びの一枚 (読むだけ)。
+
+    実 flush (saiverse_memory/adapter.flush_perception_buffer_payload) と同じ
+    reduce → 回収 (reclaim_pending_perceptions — room_state_packages.md §11-2)
+    → 開き直し (ensure_room_state_base) を通す。まはーがプレビューで見る文面と
+    次の Pulse が実際に知覚する文面を一致させるための同順で、DB の行は書き換え
+    ない (開き直しはこの組成で使う写しだけ)。
+    """
+    from sai_memory.perception_buffer import list_pending, reduce_perceptions
+    from sai_memory.room_state import (
+        ensure_room_state_base,
+        reclaim_pending_perceptions,
+    )
+    with sai_mem._db_lock:
+        pending = list_pending(sai_mem.conn)
+        if not pending:
+            return []
+        return ensure_room_state_base(
+            sai_mem.conn,
+            reclaim_pending_perceptions(reduce_perceptions(pending)),
+        )
+
+
 def preview_context(
     runtime,
     persona: Any,
@@ -1921,20 +1951,8 @@ def preview_context(
     try:
         sai_mem = getattr(persona, "sai_memory", None)
         if sai_mem is not None and getattr(sai_mem, "is_ready", lambda: False)():
-            from sai_memory.perception_buffer import (
-                format_perception_message,
-                list_pending,
-                reduce_perceptions,
-            )
-            from sai_memory.room_state import ensure_room_state_base
-            with sai_mem._db_lock:
-                pending = list_pending(sai_mem.conn)
-                # 実 flush と同じ順・同じ開き直し (reduce → 土台を失った部屋の
-                # 差分は全文へ)。読むだけ — 行は触らない。
-                reduced_pending = (
-                    ensure_room_state_base(sai_mem.conn, reduce_perceptions(pending))
-                    if pending else []
-                )
+            from sai_memory.perception_buffer import format_perception_message
+            reduced_pending = _compose_pending_preview(sai_mem)
             if reduced_pending:
                 pb_text = format_perception_message(reduced_pending)
                 pb_msg = {"role": "user", "content": f"<system>{pb_text}</system>"}

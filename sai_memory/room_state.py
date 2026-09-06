@@ -81,6 +81,17 @@ ROOM_STATE_KIND = "surroundings"
 #: 知覚台帳の ``metadata`` に載せるキー。
 ROOM_STATE_META_KEY = "room_state"
 
+#: 通知ラベルの型付け (docs/intent/room_state_packages.md §11-3-2)。書き手は
+#: sea/head_pipeline/sections/building.py (NotificationLabel.metadata)、運び手は
+#: sea/head_pipeline/integration.py (label.metadata を知覚エントリの metadata へ
+#: 写す)、読み手は :func:`reclaim_pending_perceptions` (§11-2 の移動群の畳み)。
+LABEL_KIND_META_KEY = "label_kind"
+LABEL_KIND_BUILDING_CHANGED = "building_changed"
+LABEL_KIND_BUILDING_INSTRUCTION = "building_instruction"
+
+#: 経路一行 (§11-2 の移動群の畳みの合成文) の書き出し。
+_MOVE_TRAIL_PREFIX = "この間に現在地が移動しました: "
+
 _NO_CHANGE_LINE = "前回見たときから変わっていません。"
 _DIFF_TITLE_SUFFIX = " (前回見たときからの変化)"
 _ADDED_HEADING = "## 増えた・変わったもの"
@@ -455,6 +466,123 @@ def is_legacy_entry(entry: Mapping[str, Any]) -> bool:
     次の入室は土台なし扱いで全文を積み、以後は構造つきで運ぶ。
     """
     return not bundle_is_valid(entry.get("snapshot"))
+
+
+def _parse_label_meta(metadata: Optional[str]) -> Optional[Dict[str, Any]]:
+    """知覚台帳 1 行の ``metadata`` から型付きラベルの記帳を取り出す。
+
+    :data:`LABEL_KIND_META_KEY` を持つ dict-JSON だけが型付き。台帳配送の冪等
+    キー (ledger_outbox_id 等) が同じ dict にマージされていても、そのまま読める。
+    """
+    if not metadata:
+        return None
+    try:
+        meta = json.loads(metadata)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(meta, dict):
+        return None
+    kind = meta.get(LABEL_KIND_META_KEY)
+    if not isinstance(kind, str) or not kind:
+        return None
+    return meta
+
+
+def reclaim_pending_perceptions(items: Sequence[Any]) -> List[Any]:
+    """未消費の組成から、読まれる前に不要になった知覚を回収する (intent §11-2)。
+
+    **純関数** — DB を読み書きせず、``items`` (reduce 済みの
+    :class:`~sai_memory.perception_buffer.PerceptionItem` の列) から新しい list
+    を返す。実 flush (saiverse_memory/adapter.flush_perception_buffer_payload)
+    とプレビュー (sea/runtime_context._compose_pending_preview) が **reduce の
+    後・:func:`ensure_room_state_base` の前**に同じこの一枚を通る。
+
+    未消費の知覚は定義上どの Pulse もまだ読んでいない (§11-1) — ここで畳んでも
+    提示済みの列には 1 バイトも触れず、前方一致が割れる場所は存在しない。
+    動作は三つ:
+
+    1. **旧形式の破棄**: kind='surroundings' で :func:`is_legacy_entry` (束と
+       して読めない旧文字列形式) の行は組成から外す。消費済みの印は呼び出し側
+       の消費 (全 item id を渡す既存挙動) がそのまま付ける。
+    2. **様子の畳み**: 有効な様子エントリが複数 pending なら**最後の一つだけ**
+       残す (部屋が違っても最後の一つ — 2026-09-07 まはー裁定「最後にいる部屋
+       の様子だけ残せば良い」)。土台 (落とされた pending の束) を失った差分の
+       全文への開き直しは、後段の :func:`ensure_room_state_base` が既存機構で
+       行う (連なりが切れると自動で全文 + メディアに戻る)。入室配送の再試行に
+       よる様子の二重積みもこれが自己修復する。
+    3. **移動群の畳み**: 型付きの移動通知 (:data:`LABEL_KIND_BUILDING_CHANGED`
+       — 書き手は sea/head_pipeline/sections/building.py) が 2 件以上 pending
+       なら、経路一行「この間に現在地が移動しました: 「A」 → 「B」 → 「A」」
+       (最初の通知の from の名前 + 各通知の to の名前を発生順に連結) を合成して
+       **最後の移動通知の位置**に置き、それ以外の型付き移動通知と、最後の移動
+       通知より前の型付き指示エントリを外す (残るのは経路一行 + 最終の部屋の
+       指示)。1 件以下なら通知・指示は触らない。metadata の無い旧ラベルの通知
+       は畳まない (§11-3-2 — 小さいので実害なし)。
+
+    移動・指示・様子以外のエントリ (スペル・フィード等) は位置ごと一切触らない
+    (削除と差し替えだけで、並び替えはしない)。
+    """
+    keep = [True] * len(items)
+    replacements: Dict[int, Any] = {}
+
+    # 1 + 2: 様子 — 旧形式は破棄し、有効なものは最後の一つだけ残す。
+    valid_rooms: List[int] = []
+    for index, item in enumerate(items):
+        if getattr(item, "kind", None) != ROOM_STATE_KIND:
+            continue
+        state = _parse_item_state(getattr(item, "metadata", None)) or {}
+        if is_legacy_entry(state):
+            keep[index] = False
+            LOGGER.info(
+                "[room_state] reclaimed a legacy-format surroundings entry "
+                "from the unconsumed buffer (it is consumed but not presented)",
+            )
+            continue
+        valid_rooms.append(index)
+    for index in valid_rooms[:-1]:
+        keep[index] = False
+
+    # 3: 移動群 — 2 件以上なら経路一行に畳む。
+    moves: List[Tuple[int, Dict[str, Any]]] = []
+    instructions: List[int] = []
+    for index, item in enumerate(items):
+        meta = _parse_label_meta(getattr(item, "metadata", None))
+        if meta is None:
+            continue
+        kind = meta.get(LABEL_KIND_META_KEY)
+        if kind == LABEL_KIND_BUILDING_CHANGED:
+            moves.append((index, meta))
+        elif kind == LABEL_KIND_BUILDING_INSTRUCTION:
+            instructions.append(index)
+    if len(moves) >= 2:
+        first_meta = moves[0][1]
+        names = [
+            str(first_meta.get("from_name") or first_meta.get("from_id") or "?")
+        ]
+        names.extend(
+            str(meta.get("to_name") or meta.get("to_id") or "?")
+            for _index, meta in moves
+        )
+        trail = _MOVE_TRAIL_PREFIX + " → ".join(f"「{name}」" for name in names)
+        last_index = moves[-1][0]
+        replacements[last_index] = dataclasses.replace(
+            items[last_index], content=trail,
+        )
+        for index, _meta in moves[:-1]:
+            keep[index] = False
+        for index in instructions:
+            if index < last_index:
+                keep[index] = False
+        LOGGER.info(
+            "[room_state] reclaimed %d pending move notification(s) into one "
+            "trail line", len(moves),
+        )
+
+    return [
+        replacements.get(index, item)
+        for index, item in enumerate(items)
+        if keep[index]
+    ]
 
 
 def chain_is_intact(

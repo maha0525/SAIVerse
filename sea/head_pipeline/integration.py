@@ -17,6 +17,7 @@ Section 群と message role / metadata の対応はこの層で握る:
 """
 from __future__ import annotations
 
+import json
 import logging
 import time
 from functools import partial
@@ -264,7 +265,14 @@ def _push_section_diffs(
                     "reduce_key": None,
                     "salient": False,
                     "media": [],
-                    "metadata": None,
+                    # ラベルの型付け (label_kind 等) を知覚エントリへ写す —
+                    # 未消費バッファの回収 (room_state_packages.md §11-2) が
+                    # 移動通知をこの型で識別する。metadata の無いラベルは従来
+                    # どおり None。
+                    "metadata": (
+                        json.dumps(label.metadata, ensure_ascii=False)
+                        if label.metadata else None
+                    ),
                 },
             }
             for label in labels
@@ -332,7 +340,15 @@ def _inject_diff_notifications_direct(
     push_failed = False
     for label in labels:
         try:
-            sai_mem.push_perception("world_state", label.label)
+            # 台帳経路と同じく、ラベルの型付け (label_kind 等) を知覚エントリへ
+            # 写す (room_state_packages.md §11-3-2)。
+            sai_mem.push_perception(
+                "world_state", label.label,
+                metadata=(
+                    json.dumps(label.metadata, ensure_ascii=False)
+                    if label.metadata else None
+                ),
+            )
         except Exception:
             push_failed = True
             LOGGER.exception(

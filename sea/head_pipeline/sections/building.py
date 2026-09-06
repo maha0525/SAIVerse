@@ -13,6 +13,11 @@ import logging
 from dataclasses import asdict, dataclass
 from typing import Optional
 
+from sai_memory.room_state import (
+    LABEL_KIND_BUILDING_CHANGED,
+    LABEL_KIND_BUILDING_INSTRUCTION,
+    LABEL_KIND_META_KEY,
+)
 from sea.head_pipeline.types import (
     EventType,
     LineHeadInput,
@@ -89,26 +94,42 @@ class BuildingSection:
             return []
         labels: list[NotificationLabel] = []
         if old.building_id != new.building_id:
-            # 移動: 新 Building の system_prompt / vessel_id を multi-line で同梱
-            # する (= 旧 auto_ingest の _format_own_enter_with_building_info 経路を
-            # 引き継ぎ、通知を pipeline diff に統一する)。
+            # 移動: 「移動通知」と「役割・指示」の二枚に分け、metadata で型付け
+            # する (docs/intent/room_state_packages.md §11-3-2)。未消費バッファの
+            # 回収 (sai_memory/room_state.reclaim_pending_perceptions) が往復の
+            # 移動通知をこの型で識別して経路一行に畳む。ラベルの並びは
+            # 通知 → 指示 (読み順の正典: 通知 → 指示 → 部屋の様子)。
+            from_name = old.name or old.building_id
+            to_name = new.name or new.building_id
             lines: list[str] = [
-                f"現在地が「{old.name or old.building_id}」から"
-                f"「{new.name or new.building_id}」に変わりました",
+                f"現在地が「{from_name}」から「{to_name}」に変わりました",
             ]
             if new.physical_vessel_id:
                 lines.append(f"物理身体: あり (vessel_id={new.physical_vessel_id})")
-            system_prompt = (new.base_system_instruction or "").strip()
-            if system_prompt:
-                lines.append("")
-                lines.append(f"# 「{new.name or new.building_id}」の役割・指示")
-                lines.append(system_prompt)
             labels.append(NotificationLabel(
                 kind="building_changed",
                 label="\n".join(lines),
+                metadata={
+                    LABEL_KIND_META_KEY: LABEL_KIND_BUILDING_CHANGED,
+                    "from_id": old.building_id,
+                    "from_name": from_name,
+                    "to_id": new.building_id,
+                    "to_name": to_name,
+                },
             ))
+            system_prompt = (new.base_system_instruction or "").strip()
+            if system_prompt:
+                labels.append(NotificationLabel(
+                    kind="building_instruction",
+                    label=f"# 「{to_name}」の役割・指示\n{system_prompt}",
+                    metadata={
+                        LABEL_KIND_META_KEY: LABEL_KIND_BUILDING_INSTRUCTION,
+                        "building_id": new.building_id,
+                        "building_name": to_name,
+                    },
+                ))
             # Building が違うと name / system_instruction の比較は意味がないので
-            # 移動通知だけで打ち切る。
+            # 移動の二枚だけで打ち切る。
             return labels
         if old.name != new.name:
             labels.append(NotificationLabel(

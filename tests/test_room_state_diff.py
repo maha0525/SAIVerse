@@ -57,6 +57,7 @@ from sai_memory.room_state import (
     find_current_room_key,
     is_legacy_entry,
     latest_visible_snapshot,
+    reclaim_pending_perceptions,
     render_room_diff,
     render_room_full,
     reseat_current_room,
@@ -436,7 +437,9 @@ class RoomStateLedgerTestBase(_EnvTestBase):
         items = list_pending(self.conn)
         if not items:
             return None
-        reduced = ensure_room_state_base(self.conn, reduce_perceptions(items))
+        reduced = ensure_room_state_base(
+            self.conn, reclaim_pending_perceptions(reduce_perceptions(items)),
+        )
         text = format_perception_message(reduced)
         media = []
         seen = set()
@@ -459,6 +462,34 @@ class RoomStateLedgerTestBase(_EnvTestBase):
             if b.id == batch_id:
                 return b
         return None
+
+    def _write_old_generation_batch(self, text, snapshot, *, key=None,
+                                    is_diff=False):
+        """旧世代の flush が確定させた形のバッチを直接構築する。
+
+        §11-2 の回収以降、新しい消費は旧形式・不正束を文面に載せない — この形は
+        既存 DB の遺物 (回収前の世代が書いた記帳や記帳破損) としてだけ現れる。
+        §9 の停止契約 (連なりに参加しない・修復されない・材料にならない) は
+        その遺物に対して守られ続けるので、テストは遺物を直接書いて検査する。
+        """
+        room = key or room_key("b1")
+        item_id = push_perception(
+            self.conn, ROOM_STATE_KIND, text,
+            metadata=json.dumps(
+                {"room_state": {
+                    "key": room, "is_diff": is_diff, "snapshot": snapshot,
+                }},
+                ensure_ascii=False,
+            ),
+        )
+        self.clock += 10
+        return create_consumption_batch(
+            self.conn, [item_id], consumed_at=self.clock, rendered_text=text,
+            room_state_json=json.dumps([{
+                "key": room, "is_diff": is_diff,
+                "block": text, "snapshot": snapshot,
+            }], ensure_ascii=False),
+        )
 
 
 class RoomStatePushTest(RoomStateLedgerTestBase):
@@ -1768,14 +1799,13 @@ class RoomStateLegacyRecordTest(RoomStateLedgerTestBase):
         super().setUp()
         self.bundle = self.env.bundle()
         self.legacy_full = "# 「工房」の様子\n古い世代の全文。"
-        push_perception(
-            self.conn, ROOM_STATE_KIND, self.legacy_full,
-            metadata=json.dumps({"room_state": {
-                "key": room_key("b1"), "is_diff": False,
-                "snapshot": self.legacy_full,
-            }}, ensure_ascii=False),
+        # 旧世代の flush が確定させたバッチをそのまま構築する — §11-2 の回収
+        # 以降、新しい消費は旧形式を文面に載せないので、この形は既存 DB の
+        # 遺物としてだけ現れる。§9 の契約 (連なりに参加しない・修復されない)
+        # はその遺物に対して守られ続ける。
+        self.legacy_id = self._write_old_generation_batch(
+            self.legacy_full, self.legacy_full,
         )
-        self.legacy_id = self._flush()
 
     def test_a_legacy_record_is_detected_as_legacy(self):
         entry = json.loads(self._batch(self.legacy_id).room_state_json)[0]
@@ -1972,15 +2002,12 @@ class BrokenBundleRouteStopTest(RoomStateLedgerTestBase):
         }
 
     def _push_broken(self, bundle=None):
-        text = "# 「工房」の様子\n壊れた記帳の文面。"
-        push_perception(
-            self.conn, ROOM_STATE_KIND, text,
-            metadata=json.dumps({"room_state": {
-                "key": room_key("b1"), "is_diff": False,
-                "snapshot": bundle or self._broken_bundle(),
-            }}, ensure_ascii=False),
+        # 記帳破損は既存 DB の遺物としてだけ現れる (§11-2 の回収が新しい消費
+        # から旧形式・不正束を外すため) — 遺物を直接構築して停止契約を検査。
+        return self._write_old_generation_batch(
+            "# 「工房」の様子\n壊れた記帳の文面。",
+            bundle or self._broken_bundle(),
         )
-        return self._flush()
 
     def test_a_broken_bundle_is_not_a_diff_base(self):
         """土台探し (latest_visible_snapshot) — 壊れた束は土台にならない。"""
@@ -2133,16 +2160,11 @@ class LegacyNewestReseatTest(RoomStateLedgerTestBase):
         self.bundle_a = self.env.bundle()
         self._push("b1", self.bundle_a)
         self.structured_id = self._flush()
-        # 構造化束の後に旧形式 (文字列 snapshot) が積まれた台帳。
+        # 構造化束の後に旧形式 (文字列 snapshot) が記帳された台帳 (旧世代の遺物)。
         legacy_text = "# 「工房」の様子\n旧世代の全文。"
-        push_perception(
-            self.conn, ROOM_STATE_KIND, legacy_text,
-            metadata=json.dumps({"room_state": {
-                "key": room_key("b1"), "is_diff": False,
-                "snapshot": legacy_text,
-            }}, ensure_ascii=False),
+        self.legacy_id = self._write_old_generation_batch(
+            legacy_text, legacy_text,
         )
-        self.legacy_id = self._flush()
         push_perception(self.conn, "world_state", "ノイズ通知")
         self.noise_id = self._flush()
 
@@ -2191,16 +2213,11 @@ class StaleCarrierGateTest(RoomStateLedgerTestBase):
         self.bundle_a = self.env.bundle()
         self._push("b1", self.bundle_a)
         self.valid_id = self._flush()
-        # 古い valid 記録より**新しい**同部屋の旧形式 (文字列 snapshot)。
+        # 古い valid 記録より**新しい**同部屋の旧形式 (旧世代の遺物の記帳)。
         legacy_text = "# 「工房」の様子\n旧世代の全文。"
-        push_perception(
-            self.conn, ROOM_STATE_KIND, legacy_text,
-            metadata=json.dumps({"room_state": {
-                "key": room_key("b1"), "is_diff": False,
-                "snapshot": legacy_text,
-            }}, ensure_ascii=False),
+        self.legacy_id = self._write_old_generation_batch(
+            legacy_text, legacy_text,
         )
-        self.legacy_id = self._flush()
         push_perception(self.conn, "world_state", "ノイズ通知")
         self.noise_id = self._flush()
 
@@ -2299,6 +2316,7 @@ class EntryPushWiringTest(_EnvTestBase):
 
         pushed = []
         sai_mem = SimpleNamespace(
+            is_ready=lambda: True,
             push_room_state=lambda bid, bundle, allow_diff=True: pushed.append(
                 (bid, bundle, allow_diff),
             ),
@@ -2332,6 +2350,53 @@ class EntryPushWiringTest(_EnvTestBase):
         self.assertEqual(
             inject.call_args_list[0].kwargs.get("detect_room"), False,
         )
+
+
+class EntryPushDegradeReadinessTest(_EnvTestBase):
+    """台帳なし degrade は SAIMemory 未 ready を成功扱いしない。
+
+    push_room_state は未 ready を黙って return するので、degrade 分岐が
+    ready を検めずに呼ぶと ok=True のまま知覚が静かに失われる。台帳あり側
+    (perception.room_state handler) の「未 ready は例外で pending に残す」と
+    対称に、こちらは WARN + ok=False (全段成功の意味は変えない)。
+    """
+
+    def test_not_ready_memory_fails_the_entry_push_stage(self):
+        from saiverse.dynamic_state import DynamicStateManager
+
+        pushed = []
+        sai_mem = SimpleNamespace(
+            is_ready=lambda: False,
+            push_room_state=lambda bid, bundle, allow_diff=True: pushed.append(
+                bid,
+            ),
+        )
+        persona = SimpleNamespace(
+            persona_id="p1", persona_dir=None, sai_memory=sai_mem,
+            current_building_id="b1", buildings=self.env.persona.buildings,
+            persona_name="アイフィ",
+        )
+        self.env.manager.all_personas["p1"] = persona
+        self.env.manager.personas = {}
+        self.env.manager.feed_manager = None
+        with patch.object(gvc, "get_active_persona_id", return_value="p1"), \
+                patch.object(
+                    gvc, "get_active_manager", return_value=self.env.manager,
+                ), \
+                patch.object(
+                    gvc, "_get_persona_appearance_path", return_value=None,
+                ), \
+                patch.object(gvc, "_get_building_image_path", return_value=None), \
+                patch("sea.head_pipeline.inject_diff_notifications"), \
+                patch(
+                    "saiverse.dynamic_state._dispatch_head_event",
+                    return_value=True,
+                ):
+            ok = DynamicStateManager.on_building_entered(
+                persona, "b1", self.env.manager,
+            )
+        self.assertFalse(ok)
+        self.assertEqual(pushed, [])  # 未 ready なら push 自体を呼ばない
 
 
 class DetectionEntryModelKeyTest(unittest.TestCase):
@@ -2468,6 +2533,449 @@ class WindowedDetectionReadTest(RoomStateLedgerTestBase):
             )
         ]
         self.assertEqual([b.id for b in reseated], [self.reseat_id])
+
+
+# ---------------------------------------------------------------------------
+# §11: 未消費バッファの回収 (2026-09-07 実機所見の第一弾)
+# ---------------------------------------------------------------------------
+
+
+_NO_CHANGE_LINE_TEST = "前回見たときから変わっていません。"
+
+
+def _typed_move_meta(from_id, from_name, to_id, to_name):
+    """型付きの移動通知 metadata (書き手 = sea/head_pipeline/sections/building.py)。"""
+    return json.dumps({
+        "label_kind": "building_changed",
+        "from_id": from_id, "from_name": from_name,
+        "to_id": to_id, "to_name": to_name,
+    }, ensure_ascii=False)
+
+
+def _typed_instruction_meta(building_id, building_name):
+    """型付きの役割・指示 metadata (書き手 = 同上)。"""
+    return json.dumps({
+        "label_kind": "building_instruction",
+        "building_id": building_id, "building_name": building_name,
+    }, ensure_ascii=False)
+
+
+class _RoundTripMixin:
+    """往復 (b1 → b2 → b1) の未消費バッファを積む共通手順。
+
+    実機所見 ④ (2026-09-07、アイフィ) の再現: 部屋の全文が往復のたびに積み重なり、
+    移動通知・指示が間に挟まる。回収 (§11-2) 後は「経路一行 + 最終の指示 +
+    最終の様子 (全文)」だけが残るはずの並び。
+    """
+
+    ROUTE_LINE = "この間に現在地が移動しました: 「工房」 → 「書斎」 → 「工房」"
+
+    def _stack_round_trip(self):
+        self.bundle_a = self.env.bundle()
+        b2 = dict(self.bundle_a)
+        b2["building_id"] = "b2"
+        b2["building_name"] = "書斎"
+        self.bundle_b2 = b2
+        self.env.items.append(_make_item(
+            "uuid-new", 14, "picture", "新しい絵", "届いたばかりの絵。",
+            is_open=True, file_path=self.env.pic2_path,
+        ))
+        self.bundle_a2 = self.env.bundle()
+
+        self._push("b1", self.bundle_a)
+        push_perception(
+            self.conn, "world_state",
+            "現在地が「工房」から「書斎」に変わりました",
+            metadata=_typed_move_meta("b1", "工房", "b2", "書斎"),
+        )
+        push_perception(
+            self.conn, "world_state",
+            "# 「書斎」の役割・指示\n書斎では静かに。",
+            metadata=_typed_instruction_meta("b2", "書斎"),
+        )
+        self._push("b2", self.bundle_b2)
+        push_perception(
+            self.conn, "world_state",
+            "現在地が「書斎」から「工房」に変わりました",
+            metadata=_typed_move_meta("b2", "書斎", "b1", "工房"),
+        )
+        push_perception(
+            self.conn, "world_state",
+            "# 「工房」の役割・指示\n工房の指示。",
+            metadata=_typed_instruction_meta("b1", "工房"),
+        )
+        # 最終の様子は pending の一枚目 (bundle_a) を土台にした差分になる —
+        # 回収で土台が落ちるので、開き直し (ensure_room_state_base) が働く形。
+        payload = self._push("b1", self.bundle_a2)
+        assert json.loads(payload["metadata"])["room_state"]["is_diff"]
+
+
+class PendingReclaimTest(_RoundTripMixin, RoomStateLedgerTestBase):
+    """§11-2: 回収の一枚 — 往復の堆積・旧形式の遺物・配達重複の自己修復。"""
+
+    def test_a_round_trip_collapses_to_route_last_instruction_and_last_room(self):
+        self._stack_round_trip()
+        batch_id = self._flush()
+        text = self._batch(batch_id).rendered_text
+
+        # 経路一行が最後の移動通知の位置に立つ。
+        self.assertIn(self.ROUTE_LINE, text)
+        # 途中の部屋グループ (通知・指示・様子) は落ちる。
+        self.assertNotIn("現在地が「工房」から「書斎」に変わりました", text)
+        self.assertNotIn("現在地が「書斎」から「工房」に変わりました", text)
+        self.assertNotIn("書斎では静かに。", text)
+        self.assertNotIn("# 「書斎」の様子", text)
+        # 最終の部屋の指示は残る。
+        self.assertIn("工房の指示。", text)
+        # 最終の様子は土台 (落とされた pending) を失った差分 → 全文へ開き直し。
+        self.assertIn(render_room_full(self.bundle_a2), text)
+        self.assertEqual(text.count("# 「工房」の様子"), 1)
+        # 読み順: 経路 → 指示 → 様子。
+        self.assertLess(text.index(self.ROUTE_LINE), text.index("工房の指示。"))
+        self.assertLess(text.index("工房の指示。"), text.index("# 「工房」の様子"))
+        # 開き直しの全文にはそのメディアも付く (§5 の復元)。
+        self.assertEqual(
+            [m["path"] for m in self._batch(batch_id).media_list()],
+            [str(self.env.pic_path), str(self.env.pic2_path)],
+        )
+        # 外した行にも消費済みの印が付く (相殺は未消費の間だけ、の既存規則)。
+        self.assertEqual(list_pending(self.conn), [])
+
+    def test_legacy_junk_is_dropped_from_the_text_but_consumed(self):
+        legacy_text = (
+            "# 「工房」の様子\n古い世代の壊れた差分。\n"
+            "## 見当たらなくなったもの\n- 本文の段落"
+        )
+        push_perception(
+            self.conn, ROOM_STATE_KIND, legacy_text,
+            metadata=json.dumps({"room_state": {
+                "key": room_key("b1"), "is_diff": True,
+                "snapshot": legacy_text,
+            }}, ensure_ascii=False),
+        )
+        push_perception(self.conn, "world_state", "生きている通知")
+        batch_id = self._flush()
+        text = self._batch(batch_id).rendered_text
+        self.assertNotIn("古い世代の壊れた差分", text)
+        self.assertIn("生きている通知", text)
+        # 旧形式にも消費済みの印だけは付く (台帳の行は消さない)。
+        self.assertEqual(list_pending(self.conn), [])
+        consumed = self.conn.execute(
+            "SELECT consumed_at FROM perception_buffer WHERE kind = ?",
+            (ROOM_STATE_KIND,),
+        ).fetchall()
+        self.assertTrue(all(row[0] is not None for row in consumed))
+        # バッチの記帳にも旧形式は載らない。
+        self.assertIsNone(self._batch(batch_id).room_state_json)
+
+    def test_a_metadata_less_surroundings_row_is_also_legacy(self):
+        push_perception(self.conn, ROOM_STATE_KIND, "metadata の無い旧世代の様子")
+        push_perception(self.conn, "world_state", "生きている通知")
+        batch_id = self._flush()
+        text = self._batch(batch_id).rendered_text
+        self.assertNotIn("metadata の無い旧世代の様子", text)
+        self.assertIn("生きている通知", text)
+
+    def test_a_batch_emptied_by_reclaim_is_not_presented(self):
+        """旧形式の遺物だけの消費 = 空バッチ。提示に <system></system> を出さない。"""
+        import threading
+
+        from sea.runtime_context import list_presented_perception_blocks
+
+        push_perception(self.conn, ROOM_STATE_KIND, "metadata の無い旧世代の様子")
+        batch_id = self._flush()
+        self.assertEqual(self._batch(batch_id).rendered_text, "")
+        persona = SimpleNamespace(
+            persona_id="p1", model="test-model",
+            sai_memory=SimpleNamespace(
+                conn=self.conn, _db_lock=threading.RLock(),
+                is_ready=lambda: True,
+            ),
+        )
+        runtime = SimpleNamespace(session_lifecycle=None)
+        blocks = list_presented_perception_blocks(
+            runtime, persona, [], raise_on_error=True,
+        )
+        self.assertEqual(blocks, [])
+
+    def test_duplicated_entry_delivery_self_repairs_to_one_full_text(self):
+        """入室配送の再試行による様子の二重積み (既知の形) は回収が自己修復する。
+
+        issue: entry_delivery_retry_duplicates_room_perception — 同じ束の push が
+        二重に走ると、一枚目が全文・二枚目が pending を土台にした差分になる。
+        """
+        bundle = self.env.bundle()
+        self._push("b1", bundle)
+        self._push("b1", bundle)
+        batch_id = self._flush()
+        text = self._batch(batch_id).rendered_text
+        self.assertEqual(text, render_room_full(bundle))
+        self.assertEqual(text.count("# 「工房」の様子"), 1)
+        self.assertNotIn(_NO_CHANGE_LINE_TEST, text)
+        self.assertEqual(
+            [m["path"] for m in self._batch(batch_id).media_list()],
+            [m["path"] for m in bundle_media(bundle)],
+        )
+
+    def test_a_single_move_is_left_alone(self):
+        push_perception(
+            self.conn, "world_state",
+            "現在地が「工房」から「書斎」に変わりました",
+            metadata=_typed_move_meta("b1", "工房", "b2", "書斎"),
+        )
+        push_perception(
+            self.conn, "world_state",
+            "# 「書斎」の役割・指示\n書斎では静かに。",
+            metadata=_typed_instruction_meta("b2", "書斎"),
+        )
+        b2 = dict(self.env.bundle())
+        b2["building_id"] = "b2"
+        b2["building_name"] = "書斎"
+        self._push("b2", b2)
+        batch_id = self._flush()
+        text = self._batch(batch_id).rendered_text
+        self.assertIn("現在地が「工房」から「書斎」に変わりました", text)
+        self.assertIn("書斎では静かに。", text)
+        self.assertNotIn("この間に現在地が移動しました", text)
+
+    def test_untyped_move_notifications_are_not_collapsed(self):
+        """metadata の無い旧ラベルの通知は畳まない (§11-3-2 — 小さいので実害なし)。"""
+        push_perception(
+            self.conn, "world_state", "現在地が「工房」から「書斎」に変わりました",
+        )
+        push_perception(
+            self.conn, "world_state", "現在地が「書斎」から「工房」に変わりました",
+        )
+        batch_id = self._flush()
+        text = self._batch(batch_id).rendered_text
+        self.assertIn("現在地が「工房」から「書斎」に変わりました", text)
+        self.assertIn("現在地が「書斎」から「工房」に変わりました", text)
+        self.assertNotIn("この間に現在地が移動しました", text)
+
+    def test_other_perceptions_keep_their_positions(self):
+        """移動・指示・様子以外 (フィード・コア記憶等) は位置ごと一切触らない。"""
+        bundle_a = self.env.bundle()
+        self.env.items.append(_make_item(
+            "uuid-new", 14, "picture", "新しい絵", "届いたばかりの絵。",
+            is_open=True, file_path=self.env.pic2_path,
+        ))
+        bundle_a2 = self.env.bundle()
+        push_perception(self.conn, "feed", "フィード記事 その一")
+        self._push("b1", bundle_a)
+        push_perception(
+            self.conn, "world_state",
+            "現在地が「工房」から「書斎」に変わりました",
+            metadata=_typed_move_meta("b1", "工房", "b2", "書斎"),
+        )
+        push_perception(self.conn, "core_memory_correction", "コア記憶の修正")
+        push_perception(
+            self.conn, "world_state",
+            "現在地が「書斎」から「工房」に変わりました",
+            metadata=_typed_move_meta("b2", "書斎", "b1", "工房"),
+        )
+        self._push("b1", bundle_a2)
+        batch_id = self._flush()
+        text = self._batch(batch_id).rendered_text
+        self.assertIn("フィード記事 その一", text)
+        self.assertIn("コア記憶の修正", text)
+        # 経路一行は最後の移動通知の位置 = コア記憶の修正より後。
+        self.assertLess(
+            text.index("フィード記事 その一"), text.index("コア記憶の修正"),
+        )
+        self.assertLess(
+            text.index("コア記憶の修正"),
+            text.index("この間に現在地が移動しました"),
+        )
+
+
+class PendingPreviewParityTest(_RoundTripMixin, RoomStateLedgerTestBase):
+    """§11-2: プレビューは実 flush と同じ回収後の文面を出し、DB の行を書き換えない。"""
+
+    def test_preview_matches_flush_and_writes_nothing(self):
+        import threading
+
+        from sea.runtime_context import _compose_pending_preview
+
+        self._stack_round_trip()
+        sai_mem = SimpleNamespace(conn=self.conn, _db_lock=threading.RLock())
+        select = (
+            "SELECT id, kind, content, media, metadata, consumed_at "
+            "FROM perception_buffer ORDER BY id"
+        )
+        before = self.conn.execute(select).fetchall()
+        preview_items = _compose_pending_preview(sai_mem)
+        preview_text = format_perception_message(preview_items)
+        after = self.conn.execute(select).fetchall()
+        self.assertEqual(before, after)  # 読むだけ — 行は触らない
+        self.assertIn(self.ROUTE_LINE, preview_text)
+        batch_id = self._flush()
+        self.assertEqual(preview_text, self._batch(batch_id).rendered_text)
+
+
+class EntryDeliveryOrderTest(_EnvTestBase):
+    """§11-3: 入室配送は一回の flush で 通知 → 指示 → 様子 の順に揃って着地する。
+
+    逆順の正体 (2026-09-07 調査): 通知は outbox 経由・様子は直接 push という
+    配送機構の非対称 + 再入検知による通知の見送り + _flush_queue が配送中に
+    積まれた項目を配らないこと。修正後は様子も outbox に乗り、同一 FIFO の
+    配り直しで順序が構造的に決まる。
+    """
+
+    PID = "p1"
+
+    def setUp(self):
+        super().setUp()
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import sessionmaker
+        from sqlalchemy.pool import StaticPool
+
+        from database.models import Base
+        from saiverse import execution_ledger_wiring as wiring
+
+        engine = create_engine(
+            "sqlite:///:memory:",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        Base.metadata.create_all(engine)
+        self.addCleanup(engine.dispose)
+        self.SessionLocal = sessionmaker(bind=engine)
+
+        tmp = tempfile.TemporaryDirectory()
+        persona_dir = Path(tmp.name) / "personas" / self.PID
+        persona_dir.mkdir(parents=True)
+
+        class _DummyEmbedder:
+            def __init__(self, model=None, **kwargs):
+                self.model_name = model
+
+            def embed(self, texts, **kwargs):
+                return [[0.0] * 3 for _ in texts]
+
+        with patch("saiverse_memory.adapter.Embedder", _DummyEmbedder):
+            from saiverse_memory import SAIMemoryAdapter
+            self.adapter = SAIMemoryAdapter(
+                self.PID, persona_dir=persona_dir, resource_id=self.PID,
+            )
+        self.addCleanup(self.adapter.conn.close)
+        self.addCleanup(lambda: self._cleanup_tmp(tmp))
+
+        # 移動先 b2 を実世界 (RealWorldEnv) に足す — 実組成で束が組める部屋。
+        self.env.persona.buildings["b2"] = SimpleNamespace(
+            name="書斎",
+            base_system_instruction="ここは書斎。\n\n静かに使うこと。",
+        )
+        self.env.manager.occupants["b2"] = ["p1", "p2"]
+
+        self.persona = SimpleNamespace(
+            persona_id=self.PID, persona_dir=persona_dir,
+            sai_memory=self.adapter, current_building_id="b2",
+            buildings=self.env.persona.buildings, persona_name="アイフィ",
+        )
+        self.env.manager.all_personas[self.PID] = self.persona
+        mgr = self.env.manager
+        mgr.SessionLocal = self.SessionLocal
+        mgr.personas = {self.PID: self.persona}
+        mgr.feed_manager = None
+        mgr.execution_ledger = wiring.build_execution_ledger(mgr)
+        self.ledger = mgr.execution_ledger
+
+    @staticmethod
+    def _cleanup_tmp(tmp):
+        try:
+            tmp.cleanup()
+        except PermissionError:
+            pass
+
+    def _fake_inject(self, persona, manager, building_id, **kwargs):
+        """検知器の代役 — 実 BuildingSection のラベルを実 _push_section_diffs で積む。
+
+        head の snapshot 機構 (capture / ensure) だけを飛ばし、ラベルの組成と
+        台帳への積み方は本物を通す。
+        """
+        from sea.head_pipeline import integration as hp
+        from sea.head_pipeline.sections.building import (
+            BuildingSection,
+            BuildingSnapshot,
+        )
+        if getattr(persona, "persona_id", None) != self.PID:
+            return False
+        old = BuildingSnapshot(
+            building_id="b1", name="工房",
+            base_system_instruction="", physical_vessel_id=None,
+        )
+        new = BuildingSnapshot(
+            building_id="b2", name="書斎",
+            base_system_instruction="ここは書斎。\n\n静かに使うこと。",
+            physical_vessel_id=None,
+        )
+        labels = BuildingSection().diff_to_notifications(old, new)
+        pipeline = SimpleNamespace(
+            flush_diffs=lambda ctx, **kw: (labels, {}),
+            advance_last_notified=lambda *a, **k: None,
+        )
+        ctx = SimpleNamespace(persona_id=persona.persona_id)
+        return hp._push_section_diffs(persona, manager, pipeline, ctx, building_id)
+
+    def test_one_flush_lands_notification_instruction_then_room(self):
+        eid, created = self.ledger.begin_execution(
+            "move.entity", persona_id=self.PID,
+        )
+        self.assertTrue(created)
+        self.ledger.mark_running(eid)
+        self.ledger.mark_applied(eid, outbox_items=[{
+            "target": "move.post_dynamic_state", "persona_id": self.PID,
+            "payload": {
+                "entity_id": self.PID, "entity_type": "ai", "to_id": "b2",
+            },
+        }], deliver=False)
+
+        with patch.object(gvc, "get_active_persona_id", return_value=self.PID), \
+                patch.object(
+                    gvc, "get_active_manager", return_value=self.env.manager,
+                ), \
+                patch.object(
+                    gvc, "_get_persona_appearance_path", return_value=None,
+                ), \
+                patch.object(gvc, "_get_building_image_path", return_value=None), \
+                patch(
+                    "sea.head_pipeline.inject_diff_notifications",
+                    side_effect=self._fake_inject,
+                ), \
+                patch(
+                    "saiverse.dynamic_state._dispatch_head_event",
+                    return_value=True,
+                ):
+            done = self.ledger.flush_pending_for_persona(self.PID)
+            expected_bundle = gvc.build_room_bundle("b2")
+
+        # 一回の flush で全量配送 (通知・指示・様子が pending に残らない)。
+        self.assertTrue(done)
+        with self.adapter._db_lock:
+            rows = self.adapter.conn.execute(
+                "SELECT kind, content, metadata FROM perception_buffer "
+                "ORDER BY id ASC"
+            ).fetchall()
+        kinds = [r[0] for r in rows]
+        self.assertEqual(
+            kinds, ["world_state", "world_state", ROOM_STATE_KIND],
+        )
+        # (1) 移動通知 — 一行 + vessel 行のみ (役割・指示は含まない)。
+        self.assertIn("現在地が「工房」から「書斎」に変わりました", rows[0][1])
+        self.assertNotIn("役割・指示", rows[0][1])
+        meta0 = json.loads(rows[0][2])
+        self.assertEqual(meta0.get("label_kind"), "building_changed")
+        self.assertEqual(meta0.get("from_id"), "b1")
+        self.assertEqual(meta0.get("to_id"), "b2")
+        self.assertEqual(meta0.get("to_name"), "書斎")
+        # (2) 役割・指示。
+        self.assertTrue(rows[1][1].startswith("# 「書斎」の役割・指示"))
+        meta1 = json.loads(rows[1][2])
+        self.assertEqual(meta1.get("label_kind"), "building_instruction")
+        self.assertEqual(meta1.get("building_id"), "b2")
+        # (3) 部屋の様子 — 実組成の束の全文。
+        self.assertIsNotNone(expected_bundle)
+        self.assertEqual(rows[2][1], render_room_full(expected_bundle))
 
 
 if __name__ == "__main__":
