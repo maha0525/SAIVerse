@@ -725,21 +725,38 @@ class HistoryManager:
         self,
         target_persona_id: str,
         *,
+        target_kind: Optional[str] = None,
         building_id: Optional[str] = None,
         event_key: Optional[str] = None,
         check_messages: int = 20,
     ) -> bool:
-        """Check if we should recall past conversation with target persona.
+        """Check if we should recall past conversation with target persona/user.
 
-        Returns True if the target persona has no messages in recent context
-        AND the latest entrant event has not already been recalled.
+        Returns True if the target has no trace in recent context AND the
+        latest entrant event has not already been recalled.
+
+        直近の文脈に相手が居るかは、self.messages の**実形**で照合する
+        (2026-09-06 に本番 log で確認 — audience は全ペルソナ log で 0 件、
+        同席を運ぶのは metadata.with):
+
+        - ``metadata.with`` に相手の素の id が居る (自分の発言 = 同席者の id 列 /
+          取り込んだ相手の発言 = [相手 id])
+        - ユーザー相手 (``target_kind="user"``) のみ: 取り込んだユーザー発言
+          (role="user" かつ with に literal "user") — ユーザー発言は id を
+          持たない形で刻まれるため
+        - ``metadata.audience`` (add_message の heard_by 経路の形) の
+          personas / users に相手が居る
+        - ``persona_id`` が相手 (旧形式の保険)
 
         Args:
-            target_persona_id: Persona to check for
+            target_persona_id: Persona/user ID to check for (素の occupant id。
+                ユーザーは "1" のような素の USERID)
+            target_kind: "persona" | "user" | None。入室ラベルの occupant_kind。
+                None なら id 照合のみ (literal "user" の照合は行わない)
             check_messages: Number of recent messages to check (default: 20)
 
         Returns:
-            True if recall is needed (no messages from target in context,
+            True if recall is needed (no trace of target in context,
                                     and no previous recall message found)
         """
         if building_id and event_key:
@@ -756,18 +773,67 @@ class HistoryManager:
 
         recent = self.messages[-check_messages:] if len(self.messages) > check_messages else self.messages
 
-        for msg in recent:
-            metadata = msg.get("metadata")
-            if isinstance(metadata, dict):
-                audience = metadata.get("audience")
-                if isinstance(audience, dict):
-                    personas = audience.get("personas", [])
-                    if isinstance(personas, list) and target_persona_id in personas:
-                        return False
+        # ID の形の変換規則 (この門に閉じる — 2026-09-06 時点で共有の変換ヘルパは
+        # リポジトリに無く、"user_" 接頭辞は各所が f-string で付けている):
+        # 接頭辞つきの形が実在するのは audience.users だけ (add_message が
+        # f"user_{USERID}" で書く)。入室ラベルの occupant_id・metadata.with・
+        # audience.personas・persona_id は素の id なので生のまま比較し、剥がしは
+        # users の欄のエントリだけに当てる — 全欄に無差別に当てると、"user_1"
+        # という ID のペルソナとユーザー "1" が同一視される (2026-09-06 Codex
+        # 指摘。ID 空間上は作れる衝突で、素の欄への剥がしに意味論も無い)。
+        def _strip_user_prefix(entity_id: Any) -> str:
+            text = str(entity_id)
+            return text[len("user_"):] if text.startswith("user_") else text
+
+        target = str(target_persona_id)
+        target_is_user = target_kind == "user"
 
         for msg in recent:
+            # 相手の発言そのもの。実際の self.messages では相手の発言は取り込みで
+            # role="user" + metadata.with に変換され persona_id を持たない (下の
+            # with 照合が受ける) が、persona_id 付きの形も引き続き有効とする。
             if msg.get("persona_id") == target_persona_id:
                 return False
+            metadata = msg.get("metadata")
+            if not isinstance(metadata, dict):
+                continue
+            # metadata.with — 本番の self.messages で同席を運ぶ実形。
+            #   自分の発言:     with = 同席者の素の id 列 (+ ユーザーがオンライン
+            #                   なら literal "user" — sea/runtime_emitters.py)
+            #   取り込んだ発言: with = [相手ペルソナ id] / ユーザーは ["user"]
+            #                   (builtin_data/tools/get_building_messages.py)
+            with_list = metadata.get("with")
+            if isinstance(with_list, list):
+                if any(str(entry) == target for entry in with_list):
+                    return False
+                # ユーザー相手のみ: 取り込んだユーザー発言は id を持たず literal
+                # "user" で刻まれる。発言 (role="user") に限定する — 自分の
+                # assistant 発言に付く "user" は建物を見ない presence マーカー
+                # (ユーザーが別の部屋に居ても付く) で、同席の証拠にならない。
+                # ユーザーが複数居る世界では発言者をこのマーカーから特定できない
+                # が、取り違えの向きは「想起を抑える」側 (知覚の堆積を防ぐ側 —
+                # docs/issues/persona_recall_perception_unbounded.md) に倒れる。
+                if (
+                    target_is_user
+                    and msg.get("role") == "user"
+                    and any(str(entry) == "user" for entry in with_list)
+                ):
+                    return False
+            # audience — add_message (heard_by) 経路の形。personas は素の id
+            # (生のまま比較)、users は "user_" 接頭辞つき (エントリ側だけ
+            # 剥がして素の id と比較する)。
+            audience = metadata.get("audience")
+            if isinstance(audience, dict):
+                personas = audience.get("personas")
+                if isinstance(personas, list) and any(
+                    str(entry) == target for entry in personas
+                ):
+                    return False
+                users = audience.get("users")
+                if isinstance(users, list) and any(
+                    _strip_user_prefix(entry) == target for entry in users
+                ):
+                    return False
 
         return True
 

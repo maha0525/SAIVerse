@@ -410,7 +410,7 @@ def _inject_persona_recall_on_enter(
         if not occupant_id or occupant_kind not in ("persona", "user"):
             continue
 
-        if not _should_recall_on_enter(history_manager, occupant_id):
+        if not _should_recall_on_enter(history_manager, occupant_id, occupant_kind):
             LOGGER.debug(
                 "head_pipeline: skipped persona recall for %s "
                 "(already in recent context)", occupant_id,
@@ -444,18 +444,25 @@ def _inject_persona_recall_on_enter(
             )
 
 
-def _should_recall_on_enter(history_manager: Any, occupant_id: Any) -> bool:
+def _should_recall_on_enter(
+    history_manager: Any, occupant_id: Any, occupant_kind: Any = None
+) -> bool:
     """再会の門。直近の文脈に相手が居るなら想起しない。
 
     判定の本体は :meth:`HistoryManager.should_recall_persona` (直近 20 メッセージに
-    相手の発言か audience があれば False)。ここは繋ぎ実装からその門へ配線するだけ。
+    相手の痕跡 — metadata.with / audience / persona_id — があれば False)。ここは
+    繋ぎ実装からその門へ配線するだけ。``occupant_kind`` は入室ラベルの metadata が
+    運ぶ "persona" | "user" — ユーザー発言は id を持たない形 (with=["user"]) で
+    履歴に刻まれるため、ユーザー相手の照合には種別が要る (2026-09-06)。
 
     判定自体が失敗したときは想起する側に倒す (= 従来挙動)。門は想起の量を抑える
     最適化で、想起そのものが機能 — 判定の故障で再会の記憶を静かに失わせるより、
     例外を記録したうえで従来どおり積む方が損失が小さい。
     """
     try:
-        return bool(history_manager.should_recall_persona(occupant_id))
+        return bool(
+            history_manager.should_recall_persona(occupant_id, target_kind=occupant_kind)
+        )
     except Exception:
         LOGGER.exception(
             "head_pipeline: should_recall_persona failed for %s "
