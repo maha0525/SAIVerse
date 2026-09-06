@@ -37,7 +37,7 @@
 
 ## 残っている案件 (急ぎなし)
 
-1. **③ 出来事の区切り** ([issue](../issues/perception_event_boundaries_unclear.md)) — 上の並びの裁定が入ってから、残る区切り問題の実物を見て印の形を決める。
+1. **③ 出来事の区切り** ([issue](../issues/archive/perception_event_boundaries_unclear.md)) — 上の並びの裁定が入ってから、残る区切り問題の実物を見て印の形を決める。→ 一出来事一ラベルで解決し、2026-09-07 に実機確認済み (issue は archive へ)。
 2. **⑤ アイテム個数上限** ([issue](../issues/room_items_uncapped.md)) — 設計の問い 3 点を揃えてまはーの裁定へ。アイフィの部屋は 58 個・35,000 字。
 3. **テリスの入室知覚欠落** ([issue](../issues/entry_perception_missing_for_fresh_persona.md)) — 未 ready の黙殺を配達の門で塞いだので、症状が変わっている可能性。再現から。
 4. **入室通知の配達が数十秒遅れる** — 実測 38 秒。配達簿が人ごとの列で、他人の移動が積んだ分は次の回復 tick まで待つ。**issue 未起票** (次セッションで起票するか、④として直すかの判断が要る)。

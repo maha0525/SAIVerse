@@ -64,7 +64,7 @@ SAIVerse世界の各状態について、以下の3つを管理する。
 - アイテム「青いノート」(b:3) が追加されました
 ```
 
-複数の変化は1つのメッセージにまとめて挿入することでノイズを減らす。まとめるのは**メッセージ単位** (同一 Pulse で消費される知覚は 1 メッセージ) であって、見出しは出来事 1 件ごとに付く — 上の例のように複数の出来事を 1 つの `[システム通知]` の下へ箇条書きで並べる形は退役した (一出来事一ラベル、2026-09-07。[issues/perception_event_boundaries_unclear.md](../issues/perception_event_boundaries_unclear.md) の裁定)。
+複数の変化は1つのメッセージにまとめて挿入することでノイズを減らす。まとめるのは**メッセージ単位** (同一 Pulse で消費される知覚は 1 メッセージ) であって、見出しは出来事 1 件ごとに付く — 上の例のように複数の出来事を 1 つの `[システム通知]` の下へ箇条書きで並べる形は退役した (一出来事一ラベル、2026-09-07。[issues/archive/perception_event_boundaries_unclear.md](../issues/archive/perception_event_boundaries_unclear.md) の裁定)。
 
 ※ head 表示物 (コア記憶・机・生きる目的・Memopedia 目次) の変化は上記のようなラベルでなく、**render 断片を内容ごと**届ける (冒頭の改訂注記 1 / beat_execution_context.md §3.3)。ラベル型が残るのは Building の入退室・アイテム等の world イベントのみ。
 

@@ -73,7 +73,7 @@ class PerceptionBufferTest(unittest.TestCase):
         self.assertIn("アイフィが入室した", text)
 
     def test_adjacent_world_states_each_get_a_header(self):
-        # 一出来事一ラベル (issues/perception_event_boundaries_unclear.md 裁定):
+        # 一出来事一ラベル (issues/archive/perception_event_boundaries_unclear.md 裁定):
         # 連続する world_state も 1 件ごとに [システム通知] を付ける。
         # 旧・合流 (連続分を 1 見出しに畳む) は 2026-09-07 に退役した。
         push_perception(self.conn, "world_state", "エリス が入室しました")

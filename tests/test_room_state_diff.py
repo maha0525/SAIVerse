@@ -3050,7 +3050,7 @@ class PendingReclaimTest(_RoundTripMixin, RoomStateLedgerTestBase):
         self.assertIn("現在地が「工房」から「書斎」に変わりました", text)
         self.assertIn("現在地が「書斎」から「工房」に変わりました", text)
         self.assertNotIn("この間に現在地が移動しました", text)
-        # 一出来事一ラベル (issues/perception_event_boundaries_unclear.md 裁定):
+        # 一出来事一ラベル (issues/archive/perception_event_boundaries_unclear.md 裁定):
         # 連続する 2 件でも見出しは合流しない。
         self.assertEqual(text.count("[システム通知]"), 2)
 

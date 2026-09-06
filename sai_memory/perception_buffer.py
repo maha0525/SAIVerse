@@ -1283,7 +1283,7 @@ def format_perception_message(items: List[PerceptionItem]) -> str:
     は 2026-09-07 に退役 — 乱発の供給源 (移動通知の堆積) は回収
     (room_state_packages.md §11-2) が往復を経路一行に畳むようになり、行頭の
     ``[システム通知]`` が出来事の区切りの印になった
-    (issues/perception_event_boundaries_unclear.md の裁定)。
+    (issues/archive/perception_event_boundaries_unclear.md の裁定)。
 
     同一 Pulse で消費される全知覚を 1 メッセージにまとめる (C3)。
     """
