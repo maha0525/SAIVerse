@@ -11,9 +11,10 @@ docs/issues/room_state_diff_built_on_string_parsing.md — 差分を描画済み
 契約 (intent の写し):
 
 - §3: 部屋はパッケージの束のまま運ぶ。同じ部屋は何度読んでも同じ束 (決定論)。
-- §4: 差分はキー照合 — 新登場・Close→Open は全文 + メディア / 消えたは label の
-  一行 / Open→Close は「(閉じられた)」の一行 / open のままの本文変化は行単位
-  diff / 変化なしは一行。
+- §4: 差分はキー照合 — 新登場は全文 + メディア / Close→Open は「(開かれた)」+
+  開いて初めて見える行 + メディア (説明・作成日時は再掲しない) / 消えたは
+  label の一行 / Open→Close は「(閉じられた)」の一行 / open のままの本文変化は
+  行単位 diff / 変化なしは一行。
 - §5: メディアはパッケージの持ち物 — 新登場に絵が付く / 復元で絵が戻る /
   不変時に再添付しない。
 - §6: 供給の四点 — 入室 (末尾) / 滞在中の照合 + 自己回復 (先頭) /
@@ -299,16 +300,52 @@ class RenderRoomDiffContractTest(_EnvTestBase):
             [m["path"] for m in diff["media"]], [str(self.env.pic2_path)],
         )
 
-    def test_close_to_open_shows_the_full_text_and_media(self):
-        """Close→Open = 新しく見せる操作 = 全文 + メディア (§4 行 1)。"""
+    def test_close_to_open_is_an_event_with_only_the_newly_visible_lines(self):
+        """Close→Open = 「(開かれた)」+ 開いて初めて見える行 (2026-09-06 実機裁定)。
+
+        「(Open)」は現在の状態でしかなく、新登場のアイテムと見分けが付かない —
+        閉じる側の「(閉じられた)」と対の出来事として語る。説明・作成日時は
+        閉じている間も全文ビューに出続けていた (§3 の表) ので再掲しない
+        (保障 2「同じ内容が二枚並ぶことは構造的に無い」)。開いて初めて見える
+        もの (メディアリンクと絵の実体) だけを出す。
+        """
+        self.env.items.append(_make_item(
+            "uuid-shut-pic", 15, "picture", "しまわれた絵", "港の写生。",
+            is_open=False, file_path=self.env.pic2_path,
+        ))
+        before = self.env.bundle()
+        self.env.items[-1] = _make_item(
+            "uuid-shut-pic", 15, "picture", "しまわれた絵", "港の写生。",
+            is_open=True, file_path=self.env.pic2_path,
+        )
+        diff = render_room_diff(before, self.env.bundle())
+        self.assertIn(
+            "[item:15] [Image] しまわれた絵\n(開かれた)\n"
+            "saiverse://item/15/image",
+            diff["content"],
+        )
+        self.assertNotIn("港の写生。", diff["content"])   # 説明は再掲しない
+        self.assertNotIn("作成日時", diff["content"])     # 作成日時も再掲しない
+        self.assertNotIn("(Open)", diff["content"])       # 状態ではなく出来事
+        # 開いて初めて見える絵の実体は添付される (§5 の「新しく見せる瞬間」)。
+        self.assertEqual(
+            [m["path"] for m in diff["media"]], [str(self.env.pic2_path)],
+        )
+
+    def test_close_to_open_document_reveals_the_body_not_the_description(self):
+        """Document も同じ規則 — 開いて初めて見える本文は出し、説明は出さない。"""
         self.env.items[3] = _make_item(
             "uuid-closed", 13, "document", "閉じた手帳", "非公開のメモ。",
             is_open=True, file_path=self.env.doc_path,
         )
         diff = render_room_diff(self.before, self.env.bundle())
-        self.assertIn("[item:13] [Document] 閉じた手帳", diff["content"])
-        # 開いたので本文が全文で見える。
+        self.assertIn(
+            "[item:13] [Document] 閉じた手帳\n(開かれた)", diff["content"],
+        )
+        # 本文は開いたことで新しく見えるようになったもの — これは出す。
         self.assertIn("光の扱いはフェルメールに学ぶ。", diff["content"])
+        # 説明は閉じている間も提示に出ていた — 再掲は保障 2 への自己矛盾。
+        self.assertNotIn("非公開のメモ。", diff["content"])
 
     def test_a_gone_document_is_one_label_line_without_its_body(self):
         """消えた = label の一行だけ (§4 行 2) — v0.3.9 を止めた欠陥の再発防止。
@@ -571,6 +608,38 @@ class RoomStatePushTest(RoomStateLedgerTestBase):
         payload = self._push("b1", self.bundle_b, allow_diff=False)
         self.assertEqual(payload["content"], render_room_full(self.bundle_b))
         self.assertEqual(payload["media"], bundle_media(self.bundle_b))
+
+    def test_a_close_to_open_diff_still_records_the_full_snapshot(self):
+        """描画が出来事 + open のみの行になっても、記帳は全文の束のまま。
+
+        連なり (chain_is_intact) と開き直し (ensure_room_state_base /
+        reopen_lost_bases) は snapshot の束から全文を導出する — Close→Open の
+        描画の変更 (2026-09-06 実機裁定) は記帳に波及しない、の検算。
+        """
+        pic3_path = self.env.home / "image" / "pic3.png"
+        pic3_path.write_bytes(b"\x89PNG fake3")
+        self.env.items.append(_make_item(
+            "uuid-shut-pic", 15, "picture", "しまわれた絵", "港の写生。",
+            is_open=False, file_path=pic3_path,
+        ))
+        closed_bundle = self.env.bundle()
+        self._push("b1", closed_bundle)
+        self._flush()
+        self.env.items[-1] = _make_item(
+            "uuid-shut-pic", 15, "picture", "しまわれた絵", "港の写生。",
+            is_open=True, file_path=pic3_path,
+        )
+        opened_bundle = self.env.bundle()
+        payload = self._push("b1", opened_bundle)
+        self.assertIn("(開かれた)", payload["content"])
+        self.assertNotIn("港の写生。", payload["content"])
+        state = json.loads(payload["metadata"])["room_state"]
+        self.assertTrue(state["is_diff"])
+        self.assertEqual(state["snapshot"], opened_bundle)
+        self.assertEqual(state["base_digest"], snapshot_digest(closed_bundle))
+        self.assertEqual(
+            [m["path"] for m in payload["media"]], [str(pic3_path)],
+        )
 
 
 class RoomStateRestoreTest(RoomStateLedgerTestBase):

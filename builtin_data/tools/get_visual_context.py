@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from sai_memory.room_state import STATE_MARKER_CLOSED, STATE_MARKER_OPEN
 from tools.context import get_active_persona_id, get_active_manager
 from tools.core import ToolSchema
 
@@ -234,7 +235,7 @@ def _render_item(
         text_parts.append("")
 
     elif item_type == "picture":
-        open_label = "(Open)" if is_open else "(Closed)"
+        open_label = STATE_MARKER_OPEN if is_open else STATE_MARKER_CLOSED
         text_parts.append(f"{ref_label}[{type_label}] {item_name}")
         text_parts.append(open_label)
         if created_at_str:
@@ -255,7 +256,7 @@ def _render_item(
         text_parts.append("")
 
     elif item_type == "document":
-        open_label = "(Open)" if is_open else "(Closed)"
+        open_label = STATE_MARKER_OPEN if is_open else STATE_MARKER_CLOSED
         text_parts.append(f"{ref_label}[{type_label}] {item_name}")
         text_parts.append(open_label)
         if created_at_str:
@@ -282,7 +283,7 @@ def _render_item(
         text_parts.append("")
 
     elif item_type == "audio":
-        open_label = "(Open)" if is_open else "(Closed)"
+        open_label = STATE_MARKER_OPEN if is_open else STATE_MARKER_CLOSED
         text_parts.append(f"{ref_label}[Audio] {item_name}")
         text_parts.append(open_label)
         if created_at_str:
@@ -302,7 +303,7 @@ def _render_item(
         text_parts.append("")
 
     elif item_type == "video":
-        open_label = "(Open)" if is_open else "(Closed)"
+        open_label = STATE_MARKER_OPEN if is_open else STATE_MARKER_CLOSED
         text_parts.append(f"{ref_label}[Video] {item_name}")
         text_parts.append(open_label)
         if created_at_str:
@@ -322,7 +323,7 @@ def _render_item(
         text_parts.append("")
 
     elif item_type == "bag":
-        open_label = "(Open)" if is_open else "(Closed)"
+        open_label = STATE_MARKER_OPEN if is_open else STATE_MARKER_CLOSED
         text_parts.append(f"{ref_label}[{type_label}] {item_name}")
         text_parts.append(open_label)
         if created_at_str:

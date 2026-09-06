@@ -12,11 +12,13 @@ docs/issues/room_state_diff_built_on_string_parsing.md — 差分を描画済み
   がアイテムを一個ずつ組み立てた構造をそのまま受け取り、一枚の文字列に畳むのは
   **送る直前の一回だけ** (:func:`render_room_full`)。逆方向 (文字列 → 構造) は
   二度とやらない。
-- **差分はキーの照合** (:func:`render_room_diff`)。新登場 / Close→Open は全文 +
-  そのパッケージのメディア、消えたものは label の一行、Open→Close は
-  「(閉じられた)」の一行、open のままの本文変化は行単位の diff (全文より
-  大きければ全文)、部屋全体で変化が無ければ一行。
-- **メディアはパッケージの持ち物。** パッケージを全文で見せる瞬間 (新登場・
+- **差分はキーの照合** (:func:`render_room_diff`)。新登場は全文 + その
+  パッケージのメディア、Close→Open は「(開かれた)」の出来事行 + 開いて初めて
+  見える行 + メディア (説明・作成日時は再掲しない — 2026-09-06 実機裁定)、
+  消えたものは label の一行、Open→Close は「(閉じられた)」の一行、open の
+  ままの本文変化は行単位の diff (全文より大きければ全文)、部屋全体で変化が
+  無ければ一行。
+- **メディアはパッケージの持ち物。** パッケージを新しく見せる瞬間 (新登場・
   Close→Open・全文への開き直し・移管での復元) にそのメディアも一緒に運ぶ。
   変わっていないパッケージのメディアは再添付しない — その絵は土台のバッチに
   まだ付いている。
@@ -98,7 +100,16 @@ _ADDED_HEADING = "## 増えた・変わったもの"
 _GONE_HEADING = "## 見当たらなくなったもの"
 _TAIL_LINE = "これ以外は前回と同じです。"
 _CLOSED_SUFFIX = " (閉じられた)"
+_OPENED_LINE = "(開かれた)"
 _LINE_DIFF_SUFFIX = " (変わった行だけ)"
+
+#: アイテム描画の open/closed の状態マーカー行。書き手は
+#: builtin_data/tools/get_visual_context.py (_render_item) で、ここから import
+#: して使う (文字列の知識は一枚)。差分側で読むのは Close→Open の描画
+#: (:func:`_render_opened`) だけ — 状態は出来事行「(開かれた)」が語るので、
+#: 開いて初めて見える行からマーカーを除くのに使う。
+STATE_MARKER_OPEN = "(Open)"
+STATE_MARKER_CLOSED = "(Closed)"
 
 
 def room_key(building_id: str) -> str:
@@ -332,17 +343,30 @@ def render_room_full(bundle: Mapping[str, Any]) -> str:
     return "\n".join(parts)
 
 
+def _line_opcodes(
+    old_lines: Sequence[str], new_lines: Sequence[str],
+) -> List[Tuple[str, int, int, int, int]]:
+    """行単位 diff の機構の一枚。
+
+    §4 の「本文の変化」(:func:`_render_line_diff`) と Close→Open の「開いて
+    初めて見える行」(:func:`_render_opened`) が同じこの一枚を通る — 同じ
+    パッケージの lines 同士の比較なので、v0.3.9 を止めた「どこからどこまでが
+    誰の文章か」の推測が無い。
+    """
+    return difflib.SequenceMatcher(
+        a=old_lines, b=new_lines, autojunk=False,
+    ).get_opcodes()
+
+
 def _render_line_diff(old_pkg: Mapping[str, Any], new_pkg: Mapping[str, Any]) -> str:
     """open のままの本文変化を行単位の diff で描く。
 
-    同じパッケージの lines 同士の比較なので、v0.3.9 を止めた「どこからどこまでが
-    誰の文章か」の推測が無い。diff が全文より大きければ全文を返す (intent §4)。
+    diff が全文より大きければ全文を返す (intent §4)。
     """
     old_lines = _package_lines(old_pkg)
     new_lines = _package_lines(new_pkg)
-    matcher = difflib.SequenceMatcher(a=old_lines, b=new_lines, autojunk=False)
     diff_lines: List[str] = [str(new_pkg.get("label") or "") + _LINE_DIFF_SUFFIX]
-    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+    for tag, i1, i2, j1, j2 in _line_opcodes(old_lines, new_lines):
         if tag == "equal":
             continue
         if tag in ("delete", "replace"):
@@ -356,6 +380,33 @@ def _render_line_diff(old_pkg: Mapping[str, Any], new_pkg: Mapping[str, Any]) ->
     return diff_text
 
 
+def _render_opened(old_pkg: Mapping[str, Any], new_pkg: Mapping[str, Any]) -> str:
+    """Close→Open を出来事として描く (intent §4、2026-09-06 実機裁定)。
+
+    形は「label + (開かれた) + 開いて初めて見える行」。「開いて初めて見える行」
+    は、閉じた状態の描画 (old の lines) と開いた状態の描画 (new の lines) の
+    行差分の新側 (:func:`_line_opcodes` — §4 の「本文の変化」と同じ機構) で
+    求める。見出し・作成日時・説明は閉じている間も提示に出ていた (§3 の表 =
+    equal 側に落ちる) ので再掲されない — 保障 2「同じ内容が二枚並ぶことは
+    構造的に無い」。除くのは二種だけ: 状態マーカー行
+    (:data:`STATE_MARKER_OPEN` — 状態は出来事行が語る) と、label と同じ行
+    (先頭行が既に名乗っている — 閉じている間の改名で見出し行が差分の新側に
+    入る形の重複防止)。
+    """
+    old_lines = _package_lines(old_pkg)
+    new_lines = _package_lines(new_pkg)
+    label = str(new_pkg.get("label") or new_pkg.get("key") or "")
+    parts: List[str] = [label, _OPENED_LINE]
+    for tag, _i1, _i2, j1, j2 in _line_opcodes(old_lines, new_lines):
+        if tag not in ("insert", "replace"):
+            continue
+        parts.extend(
+            line for line in new_lines[j1:j2]
+            if line != STATE_MARKER_OPEN and line != label
+        )
+    return "\n".join(parts)
+
+
 def render_room_diff(
     old_bundle: Mapping[str, Any], new_bundle: Mapping[str, Any],
 ) -> Dict[str, Any]:
@@ -363,7 +414,11 @@ def render_room_diff(
 
     規則は intent §4 の表の写し:
 
-    - 新登場 / Close→Open — 全文 + そのパッケージのメディア。
+    - 新登場 — 全文 + そのパッケージのメディア。
+    - Close→Open — 「(開かれた)」の出来事行 + 開いて初めて見える行 (本文・
+      中身・メディアリンク) + そのパッケージのメディア (:func:`_render_opened`)。
+      説明・作成日時は閉じている間も提示に出ているので再掲しない
+      (2026-09-06 実機裁定)。
     - 消えた — label の一行だけ (理由は描き分けない)。
     - Open→Close — 「(閉じられた)」の一行 (本文・説明を再掲しない)。
     - open のままの本文変化 — 行単位 diff。diff が全文より大きければ全文。
@@ -395,9 +450,14 @@ def render_room_diff(
         old = old_pkgs.get(key)
         new_state = package.get("state")
         old_state = old.get("state") if old else None
-        if old is None or (old_state == "closed" and new_state == "open"):
-            # 新登場 / Close→Open = 全文 + メディア。
+        if old is None:
+            # 新登場 = 全文 + メディア。
             changed_blocks.append(_package_text(package))
+            _add_media(package)
+            continue
+        if old_state == "closed" and new_state == "open":
+            # Close→Open = 「(開かれた)」+ 開いて初めて見える行 + メディア。
+            changed_blocks.append(_render_opened(old, package))
             _add_media(package)
             continue
         if old_state == "open" and new_state == "closed":
@@ -754,7 +814,7 @@ def build_room_state_push(
     なしに消えるので差分にできない) では常に全文。
 
     メディアは §5 の規則そのもの: 全文の回は束の全メディア、差分の回は
-    「その回に全文で見せるパッケージ」のメディアだけ (:func:`render_room_diff`
+    「その回に新しく見せるパッケージ」のメディアだけ (:func:`render_room_diff`
     が選ぶ)。
 
     Returns:
