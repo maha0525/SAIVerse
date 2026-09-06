@@ -611,6 +611,73 @@ class OutboxDeliveryTests(ExecutionLedgerTestBase):
         self.assertEqual(self._status(execution_id), XL.STATUS_APPLIED)
 
 
+class FlushRedrainTests(ExecutionLedgerTestBase):
+    """§11-3-3 (room_state_packages.md): 配送中に積まれた項目を同じ flush で配る。
+
+    移動配送 (move.post_dynamic_state) の handler は配送の中で通知・部屋の様子を
+    outbox に積む。その即時配送は再入検知で見送られるので、外側の _flush_queue が
+    一覧を配り切った後に再問い合わせして配らないと、次の flush 回しまでバッファに
+    届かない (2026-09-07 実機所見 ② の逆順の一因)。
+    """
+
+    def test_items_queued_during_delivery_are_delivered_in_the_same_flush(self):
+        delivered = []
+
+        def child_handler(item):
+            delivered.append(("child", item["payload"]["n"]))
+
+        def parent_handler(item):
+            delivered.append(("parent", None))
+            eid, _ = self.ledger.begin_execution("test.child", persona_id="p1")
+            self.ledger.mark_running(eid)
+            # deliver=True の即時配送は再入検知で見送られる (これが実運用の形)。
+            self.ledger.mark_applied(eid, outbox_items=[
+                {"target": "t.child", "persona_id": "p1", "payload": {"n": 1}},
+                {"target": "t.child", "persona_id": "p1", "payload": {"n": 2}},
+            ], deliver=True)
+
+        self.ledger.register_outbox_handler("t.parent", parent_handler)
+        self.ledger.register_outbox_handler("t.child", child_handler)
+        eid, _ = self.ledger.begin_execution("test.parent", persona_id="p1")
+        self.ledger.mark_running(eid)
+        self.ledger.mark_applied(eid, outbox_items=[
+            {"target": "t.parent", "persona_id": "p1", "payload": {}},
+        ], deliver=False)
+
+        self.assertTrue(self.ledger.flush_pending_for_persona("p1"))
+        self.assertEqual(
+            delivered, [("parent", None), ("child", 1), ("child", 2)],
+        )
+        self.assertEqual(self._pending_count(), 0)
+
+    def test_redrain_stops_at_the_round_limit(self):
+        """毎配送が次を積み続けても、上限の周回数で打ち切って False を返す。"""
+        count = [0]
+
+        def gremlin(item):
+            count[0] += 1
+            eid, _ = self.ledger.begin_execution("test.gremlin", persona_id="p1")
+            self.ledger.mark_running(eid)
+            self.ledger.mark_applied(eid, outbox_items=[
+                {"target": "t.g", "persona_id": "p1", "payload": {}},
+            ], deliver=False)
+
+        self.ledger.register_outbox_handler("t.g", gremlin)
+        eid, _ = self.ledger.begin_execution("test.gremlin", persona_id="p1")
+        self.ledger.mark_running(eid)
+        self.ledger.mark_applied(eid, outbox_items=[
+            {"target": "t.g", "persona_id": "p1", "payload": {}},
+        ], deliver=False)
+
+        self.assertFalse(self.ledger.flush_pending_for_persona("p1"))
+        self.assertEqual(count[0], XL.FLUSH_REDRAIN_MAX_ROUNDS)
+
+    def _pending_count(self):
+        return len([
+            r for r in self._outbox_rows() if r["status"] == XL.OUTBOX_PENDING
+        ])
+
+
 class DeadLetterTests(ExecutionLedgerTestBase):
     def setUp(self):
         super().setUp()

@@ -657,7 +657,7 @@ def test_session_head_fetches_mcp_tools_before_consuming(session_factory, person
     )
     manager, runtime, client = _make_env(session_factory, persona, ["調べ終えた。"])
 
-    def _fake_refresh(p, m, building_id, *, connect, notify=True):
+    def _fake_refresh(p, m, building_id, *, connect, notify=True, model_key=None):
         events.append("mcp_refresh")
         calls.append({
             "persona_id": getattr(p, "persona_id", None),
@@ -726,7 +726,7 @@ def test_session_start_runs_window_refill_before_context(session_factory, person
 
     runtime.session_lifecycle.maybe_run_window_refill = _fake_refill
 
-    def _fake_refresh(p, m, building_id, *, connect, notify=True):
+    def _fake_refresh(p, m, building_id, *, connect, notify=True, model_key=None):
         events.append("mcp_refresh")
         return False
 

@@ -8,7 +8,7 @@ import time
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Optional, Union
 
 from sai_memory.config import Settings, load_settings
 from sai_memory.memory.chunking import chunk_text
@@ -471,6 +471,146 @@ class SAIMemoryAdapter:
                 reduce_key=reduce_key, salient=salient, media=media, metadata=metadata,
             )
 
+    def push_room_state(
+        self,
+        building_id: str,
+        bundle: dict,
+        *,
+        allow_diff: bool = True,
+    ) -> None:
+        """「部屋の様子」(パッケージの束) を知覚台帳へ積む — 束の記帳のみ。
+
+        描画 (差分か全文かの判定 + 文字列への畳み) はここではしない — 消費の
+        組成の一回だけ (sai_memory/room_state.render_pending_room_states、
+        room_state_packages.md §11-2 規則 2)。``allow_diff=False`` (Chronicle
+        無効ペルソナ = 毎回全文) は旗として記帳に凍結され、消費側が読む。
+        ``bundle`` は builtin_data/tools/get_visual_context.build_room_bundle
+        が組む束。
+        """
+        if not self._ready or not building_id or not bundle:
+            return
+        from sai_memory.perception_buffer import push_perception
+        from sai_memory.room_state import ROOM_STATE_KIND, build_room_state_push
+        with self._db_lock:
+            payload = build_room_state_push(
+                building_id, bundle, allow_diff=allow_diff,
+            )
+            push_perception(
+                self.conn, ROOM_STATE_KIND, payload["content"],
+                media=payload["media"], metadata=payload["metadata"],
+            )
+
+    def latest_room_snapshot(
+        self, key: str, *, anchor_id: Optional[str] = None,
+        floor_chars: Union[int, Callable[[], int], None] = None,
+    ) -> Optional[dict]:
+        """提示に見えている (or 次の消費で見える) この部屋の最新の束。無ければ None。
+
+        滞在中の照合 (sea/head_pipeline/integration.py の部屋の検知) が
+        「変わったか」を指紋で確かめるための読み口。検知の digest 比較の
+        「前回」と運搬役判定はこの一本 — None は「窓に見える束が一枚も無い =
+        運搬役なし」を同時に意味する (2026-09-06 八巡目修正 1 で旧
+        ``room_carrier_visible`` を畳んだ)。
+
+        ``anchor_id`` は Chronicle 無効ペルソナの提示窓の起点、``floor_chars``
+        は anchor の行が読めない劣化時の床の予算 (提示の最小ロードと同じ値を
+        検知が渡す — int のほか、呼ぶと int を返す遅延の口でもよく、床の枝に
+        入った回だけ解決される)。窓より古いバッチは付記なしで提示から下りる
+        ので、読みも窓の内側だけを見る — 窓の外の最新束を「前回」に拾うと、
+        窓の中に残る古い提示との差を「変化なし」と誤読して覆い隠す。起点キー
+        の解決は提示の組成と同じ一枚
+        (:func:`sai_memory.perception_buffer.resolve_window_key`)、包含も同じ
+        一枚 (:func:`sai_memory.perception_buffer.batch_in_window`)。
+
+        窓の解決に失敗した回は
+        :class:`~sai_memory.perception_buffer.WindowResolutionError` を送出する
+        (三値 — 窓なし / 窓キー / 解決失敗。2026-09-06 四巡目修正 2)。失敗を
+        「窓なし = 全部見える」に倒すと、床で隠れた束を「前回」と誤認して
+        自己回復が抑止される — 呼び出し側 (検知) はその回の判定を見送り、
+        次の検知でやり直す。
+        """
+        if not self._ready or not key:
+            return None
+        from sai_memory.perception_buffer import batch_in_window
+        from sai_memory.room_state import latest_visible_snapshot
+        with self._db_lock:
+            window_key = self._window_key_locked(anchor_id, floor_chars)
+            in_window = (
+                (lambda b: batch_in_window(b, window_key))
+                if window_key is not None else None
+            )
+            return latest_visible_snapshot(self.conn, key, in_window=in_window)
+
+    def _window_key_locked(
+        self, anchor_id: Optional[str],
+        floor_chars: Union[int, Callable[[], int], None],
+    ) -> Optional[tuple]:
+        """提示窓の起点キー。解決は resolve_window_key の一枚に委ねる。
+
+        Chronicle 無効ペルソナの提示窓の判定用。anchor 行 → 引けなければ床
+        (messages の末尾 ``floor_chars`` 文字ぶんの最古行) の順で、提示の組成
+        (sea/runtime_context._window_predicate_locked) と同じ関数を通る —
+        ここに解決の規則を書き足さない。**呼び出し側が ``self._db_lock`` を
+        保持している前提**。
+        """
+        from sai_memory.perception_buffer import resolve_window_key
+
+        return resolve_window_key(
+            self.conn, anchor_id, floor_chars=floor_chars,
+        )
+
+    def reseat_room_state(
+        self, bundle: dict, *, anchor_id: Optional[str] = None,
+        floor_chars: Union[int, Callable[[], int], None] = None,
+    ) -> Optional[int]:
+        """今いる部屋の全文を提示の最古端へ置き直す (自己回復 — intent §6-2/§6-3)。
+
+        検知の瞬間 (sea/head_pipeline/integration.py) が「部屋の様子が提示に
+        見えない」と判定した回だけ呼ぶ。運搬役が居れば何もしない (判定は
+        :func:`sai_memory.room_state.reseat_current_room` の中でもう一度行う)。
+
+        ``anchor_id`` / ``floor_chars`` は Chronicle 無効ペルソナの提示窓の
+        起点と、anchor が読めない劣化時の床の予算 (検知が
+        :meth:`latest_room_snapshot` に渡したのと同じもの)。渡されたら
+        「運搬役が生きているか」の走査を提示と同じ窓の篩 (起点の解決は
+        :func:`sai_memory.perception_buffer.resolve_window_key`、包含は
+        :func:`sai_memory.perception_buffer.batch_in_window`) で行う — 窓の
+        外の運搬役は提示に出ないので、生きているとは数えない。数えると、
+        窓絞りで部屋を見失ったという検知の判定を内側の門が覆し、自己回復が
+        その主目的の形で空振りする (2026-09-06 二巡目修正 1)。
+
+        失敗 (置き直しの読みの例外・窓の解決失敗) は rollback して None —
+        検知の次の回がやり直す。この見送りは
+        :meth:`latest_room_snapshot` の「判定不能」と同じ倒し方。
+        """
+        if not self._ready or not bundle:
+            return None
+        from sai_memory.perception_buffer import batch_in_window
+        from sai_memory.room_state import reseat_current_room
+        try:
+            with self._db_lock:
+                window_key = self._window_key_locked(anchor_id, floor_chars)
+                in_window = (
+                    (lambda b: batch_in_window(b, window_key))
+                    if window_key is not None else None
+                )
+                batch_id = reseat_current_room(
+                    self.conn, fresh_bundle=bundle, in_window=in_window,
+                )
+                if batch_id is not None:
+                    self.conn.commit()
+                return batch_id
+        except Exception:
+            try:
+                self.conn.rollback()
+            except Exception:
+                pass
+            LOGGER.warning(
+                "[room_state] could not reseat the current room; the next "
+                "detection will retry", exc_info=True,
+            )
+            return None
+
     def count_pending_perceptions(self, kind: str) -> Optional[int]:
         """未消費の知覚バッファにある指定 kind の件数。
 
@@ -596,7 +736,28 @@ class SAIMemoryAdapter:
                 if not items:
                     return None
                 reduced = reduce_perceptions(items)
+                from sai_memory.room_state import (
+                    collect_batch_room_states,
+                    reclaim_pending_perceptions,
+                    render_pending_room_states,
+                )
+                # 未消費バッファの回収 (room_state_packages.md §11-2): 旧形式の
+                # 遺物の破棄・様子は最後の一つだけ・往復の移動通知は経路一行に。
+                # まだどの Pulse も読んでいない列なので、畳んでも提示済みには
+                # 触れない。外した行にも消費の印は付く (下の create_consumption_
+                # batch は reduce 前の全 item id を受ける — 相殺は未消費の間
+                # だけ、の既存規則)。プレビュー (sea/runtime_context.
+                # _compose_pending_preview) も同じ一枚を通る。
+                reduced = reclaim_pending_perceptions(reduced)
+                # 「部屋の様子」の描画は消費の組成のこの一回だけ (§11-2 規則 2)
+                # — 回収が残した束を「提示に見えている同部屋の末尾の束」と
+                # 比較して、差分か全文かを決めて文字列に畳む (積む側は束の
+                # 記帳のみ)。
+                reduced = render_pending_room_states(self.conn, reduced)
                 text = format_perception_message(reduced)
+                # 差分の土台と、確定文面のどこにその文面が居るかをバッチへ記帳
+                # する。付記で土台が下りたときの移管がこれを読む。
+                room_state_json = collect_batch_room_states(reduced, text)
                 # reduce 後の全知覚の添付メディアを集約して 1 ブロックに載せる。
                 # path で重複排除 (同じ画像を二重添付しない)。
                 media: list = []
@@ -613,20 +774,13 @@ class SAIMemoryAdapter:
                 # 順序キー (created_at, rowid)。Chronicle 無効ペルソナの窓絞りが
                 # anchor 行と同秒のバッチを正典順どおりに判定するための記帳。
                 # 取れなければ NULL (旧世代と同じ epoch 比較へフォールバック)。
-                boundary_created_at = boundary_rowid = None
-                try:
-                    boundary = self.conn.execute(
-                        "SELECT created_at, rowid FROM messages "
-                        "ORDER BY created_at DESC, rowid DESC LIMIT 1"
-                    ).fetchone()
-                    if boundary is not None:
-                        boundary_created_at = int(boundary[0])
-                        boundary_rowid = int(boundary[1])
-                except Exception:
-                    LOGGER.debug(
-                        "[perception_buffer] boundary key lookup failed; "
-                        "recording batch without one", exc_info=True,
-                    )
+                # strict にしない: 新規バッチの consumed_at は現在時刻 (提示の
+                # 末尾) なので、キーなしの epoch フォールバックでも窓の外に
+                # 立たない — 置き直し (最古端) と実害の形が違う (五巡目修正 3)。
+                from sai_memory.perception_buffer import latest_message_boundary
+                boundary_created_at, boundary_rowid = (
+                    latest_message_boundary(self.conn)
+                )
                 # 消費バッチを単一 tx で確定 (バッチ INSERT + 項目への印)。
                 # reduce で畳まれて本文に出なかった分も消費済みになる
                 # (相殺は未消費の間だけ = C2)。
@@ -640,6 +794,7 @@ class SAIMemoryAdapter:
                     media=media or None,
                     boundary_created_at=boundary_created_at,
                     boundary_rowid=boundary_rowid,
+                    room_state_json=room_state_json,
                 )
         except Exception:
             # tx 失敗 (rollback 済み) = 消費不成立。pending は無傷なので次の
@@ -649,6 +804,12 @@ class SAIMemoryAdapter:
                 "[perception_buffer] flush could not record the consumption "
                 "batch; keeping items pending for retry", exc_info=True,
             )
+            return None
+        if not reduced:
+            # 回収で全項目が外れた (旧形式の遺物だけが pending だった、等)。
+            # 消費の印は付いたが提示する文面は無い — 空の <system></system> を
+            # 作業中の messages に足さない (提示側も空バッチは出さない —
+            # sea/runtime_context.list_presented_perception_blocks)。
             return None
         return {"content": f"<system>{text}</system>", "media": media}
 
@@ -827,6 +988,87 @@ class SAIMemoryAdapter:
         if item_id is None:
             LOGGER.info(
                 "[ledger-delivery] duplicate perception suppressed: outbox_id=%s",
+                outbox_id,
+            )
+            return False
+        return True
+
+    def push_ledger_room_state(
+        self,
+        *,
+        execution_id: str,
+        outbox_id: int,
+        building_id: str,
+        bundle: dict,
+        allow_diff: bool = True,
+    ) -> bool:
+        """outbox 配送 (target='perception.room_state') 専用の厳格な書き込み口。
+
+        :meth:`push_room_state` の台帳配送版 — 束の記帳
+        (sai_memory/room_state.build_room_state_push — 描画の判定はしない。
+        差分か全文かは消費の組成 render_pending_room_states の一回だけ、
+        room_state_packages.md §11-2 規則 2) は同じ一枚を通り、違いは二つ:
+
+        - 冪等: :meth:`push_ledger_perception` と同じ ``ledger_outbox_id`` の
+          UNIQUE 索引で DB 側が原子的に重複を弾く。消費済み行も台帳に残るので
+          消費を自然に跨ぐ — 「配達成功 → 消費 → 再配達」でも二重にならない
+          (消費済みの一枚目は未消費だけを見る回収
+          reclaim_pending_perceptions では畳めないため、配達自体が跨いで
+          冪等である必要がある)。冪等キーは metadata の room_state 記帳と
+          並置される (``{"room_state": {...}, "ledger_outbox_id": ...}``) —
+          様子の読み手 (_parse_item_state) は room_state キーだけ、ラベルの
+          読み手 (_parse_label_meta) は label_kind キーだけを読むので互いに
+          影響しない。
+        - 冪等の判定は payload 組成 (build_room_state_push — 点検用の全文
+          描画を含む) の**前**に、同じ ``_db_lock`` 内の索引 SELECT で行う
+          (2026-09-06 Codex 二巡目 #1)。判定が INSERT の UNIQUE だけだと、
+          再配達のたびに組成が走り、組成が例外を出す状態では「配達済みなのに
+          配達失敗」→ 再試行 → dead へ進みうる。INSERT 側の UNIQUE は同時
+          配送の競合に対する安全網としてそのまま残す。
+        - 失敗は例外 (push_room_state の「未 ready なら黙って return」を
+          踏襲しない — 配送では成功の偽装になる)。
+
+        Returns:
+            新規に積んだら True、冪等スキップ (= 同じ outbox_id で配達済み)
+            なら False。実障害 (未 ready・壊れた引数・組成や書き込みの失敗)
+            は例外 — False と混同しない (False は配送成功扱いの no-op)。
+        """
+        if not self._ready:
+            raise RuntimeError(
+                f"SAIMemory adapter not ready (resource={self.settings.resource_id})"
+            )
+        if not building_id or not isinstance(bundle, dict) or not bundle:
+            raise ValueError(
+                "room_state delivery requires building_id and a bundle dict"
+            )
+        from sai_memory.perception_buffer import push_perception
+        from sai_memory.room_state import ROOM_STATE_KIND, build_room_state_push
+        with self._db_lock:
+            existing = self.conn.execute(
+                "SELECT 1 FROM perception_buffer WHERE ledger_outbox_id = ?",
+                (str(int(outbox_id)),),
+            ).fetchone()
+            if existing is not None:
+                LOGGER.info(
+                    "[ledger-delivery] duplicate room_state suppressed "
+                    "(pre-composition): outbox_id=%s", outbox_id,
+                )
+                return False
+            payload = build_room_state_push(
+                building_id, bundle, allow_diff=allow_diff,
+            )
+            meta = json.loads(payload["metadata"])
+            meta[self.LEDGER_OUTBOX_META_KEY] = int(outbox_id)
+            meta["execution_id"] = str(execution_id)
+            item_id = push_perception(
+                self.conn, ROOM_STATE_KIND, payload["content"],
+                media=payload["media"],
+                metadata=json.dumps(meta, ensure_ascii=False),
+                ledger_outbox_id=str(int(outbox_id)),
+            )
+        if item_id is None:
+            LOGGER.info(
+                "[ledger-delivery] duplicate room_state suppressed: outbox_id=%s",
                 outbox_id,
             )
             return False

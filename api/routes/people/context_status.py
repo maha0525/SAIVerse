@@ -61,7 +61,13 @@ def get_context_status(persona_id: str, manager=Depends(get_manager)) -> dict[st
       言えない — 実際の計画 (``sea/eviction_plan.py::plan_eviction``、純関数)
       を dry に呼んで判定し、画面側に算数を再実装させない。presented を
       測れないときは None。
-    - 一切の行を書かない (resolve は persist_advance=False)。
+    - 一切の行を書かない (resolve は persist_advance=False、知覚の勘定は
+      ``advance_cutoff=False``)。この画面は GET なのに、知覚ブロックの組成が
+      「合計が上限を超えたら古い側を下ろす」判定を連れており、下ろし境界
+      (``perception_presentation``) を進めていた — しかも仮定の窓 (読み戻し /
+      計画窓の下見) の列で。境界は一方向で取り消せないので、実際には送らない列
+      で確定させない (2026-09-05 四巡目 #6)。判定は同じように行い、進めた
+      **つもり**の提示を返すので、画面の数字と実送信は従来どおり一致する。
     """
     from sai_memory.arasuji.alignment import chronicle_band_budget
 
@@ -141,6 +147,7 @@ def get_context_status(persona_id: str, manager=Depends(get_manager)) -> dict[st
             _record_presented_chars(
                 status, lifecycle, persona,
                 refill_plan["presented"], refill_plan.get("new_anchor_id"),
+                model_key,
             )
             status["refill_applied"] = True
             _measure_fold_readiness(
@@ -148,6 +155,7 @@ def get_context_status(persona_id: str, manager=Depends(get_manager)) -> dict[st
                 lifecycle.presented_with_perceptions(
                     persona, refill_plan["presented"],
                     refill_plan.get("new_anchor_id"), raise_on_error=True,
+                    model_key=model_key, advance_cutoff=False,
                 ),
                 watermarks,
             )
@@ -163,7 +171,7 @@ def get_context_status(persona_id: str, manager=Depends(get_manager)) -> dict[st
         # 表示する送信量は「いまの提示そのまま」(読み戻しで生に開いた区間は
         # 生のまま送られる) — 正規化前の値。
         _record_presented_chars(
-            status, lifecycle, persona, window.presented, anchor_id,
+            status, lifecycle, persona, window.presented, anchor_id, model_key,
         )
         # 「畳めるか」の下見は、本走行 (run_metabolism) が退場計画の前に通す
         # 窓の正規化 (恒久欠落 fold の除外 → §15-3 印戻し) を書き込みなしで
@@ -177,7 +185,8 @@ def get_context_status(persona_id: str, manager=Depends(get_manager)) -> dict[st
             status,
             lifecycle.presented_with_perceptions(
                 persona, planning_window.presented, anchor_id,
-                raise_on_error=True,
+                raise_on_error=True, model_key=model_key,
+                advance_cutoff=False,
             ),
             watermarks,
             refold_ranges=refold_ranges,
@@ -195,7 +204,7 @@ def get_context_status(persona_id: str, manager=Depends(get_manager)) -> dict[st
 
 def _record_presented_chars(
     status: dict[str, Any], lifecycle: Any, persona: Any,
-    presented: list, anchor_id: Any,
+    presented: list, anchor_id: Any, model_key: Any = None,
 ) -> None:
     """送信量の内訳 (会話 / 機構名義の行 / 差し込みの知覚 / 合計) を status に載せる。
 
@@ -207,6 +216,10 @@ def _record_presented_chars(
     ``mechanism_chars`` (スペル結果・通知など機構名義の保存行、生 — 残す量の
     勘定には入らないが合計には生で入る) / ``injected_perception_chars``
     (送信直前に差し込まれる部屋の様子)。
+
+    ``model_key`` は表示対象の実行 model。知覚の下ろし判定はその model の水位で
+    行う — ここだけ ``persona.model`` の水位で測ると、画面の数字と実際の送信が
+    別の水位で動く。
     """
     from sea.eviction_plan import message_chars, stored_message_chars
 
@@ -218,6 +231,7 @@ def _record_presented_chars(
     total = message_chars(
         lifecycle.presented_with_perceptions(
             persona, presented, anchor_id, raise_on_error=True,
+            model_key=model_key, advance_cutoff=False,
         )
     )
     status["stored_chars"] = rows

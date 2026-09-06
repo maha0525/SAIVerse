@@ -653,6 +653,8 @@ SAIVerse の全テーブル・カラム定義（自動生成）。SQLite。本�
 | `FAVORITE_MODELS` | TEXT | — |  |
 | `METABOLISM_TARGET_CHARS` | INTEGER | — |  |
 | `METABOLISM_HIGH_CHARS` | INTEGER | — |  |
+| `PERCEPTION_TARGET_CHARS` | INTEGER | — |  |
+| `PERCEPTION_HIGH_CHARS` | INTEGER | — |  |
 
 ## feed_item
 

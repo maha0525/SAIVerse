@@ -33,5 +33,5 @@
 
 - `docs/issues/window_floor_and_refill_redesign.md` (事故と最終防衛ラインの設計、検証待ち)
 - `docs/issues/protection_quota_consumed_by_perception_blocks.md` (残す量の主語を会話の行にした経緯)
-- `docs/overview/v030_release_gate.md` の 2026-09-04 の行 (v0.3.7 発行の記録)
+- `docs/overview/release_history.md` の 2026-09-04 の行 (v0.3.7 発行の記録。2026-09-05 に v030_release_gate.md から移送)
 - `docs/overview/in_flight.md` (台帳)

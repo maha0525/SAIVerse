@@ -2,11 +2,17 @@
 
 各 Section はこのパッケージ内に 1 ファイルずつ。``register_default_sections`` で
 プロセスの default registry に一括登録する想定。
+
+退役 (2026-09-06, docs/intent/room_state_packages.md):
+- ``VisualContextSection`` — head の部屋の描画。部屋の様子の置き場は知覚 (tail)
+  一つになった。
+- ``BuildingItemsSection`` — アイテム差分ラベル (「追加されました」)。滞在中の
+  パッケージ照合 (sea/head_pipeline/integration._detect_room_state_changes) に
+  一本化。
 """
 from sea.head_pipeline.sections.autonomy_modes import AutonomyModesSection
 from sea.head_pipeline.sections.available_playbooks import AvailablePlaybooksSection
 from sea.head_pipeline.sections.building import BuildingSection
-from sea.head_pipeline.sections.building_items import BuildingItemsSection
 from sea.head_pipeline.sections.building_occupants import BuildingOccupantsSection
 from sea.head_pipeline.sections.chronicle_index import ChronicleIndexSection
 from sea.head_pipeline.sections.common_prompt import CommonPromptSection
@@ -18,7 +24,6 @@ from sea.head_pipeline.sections.memory_weave import MemoryWeaveSection
 from sea.head_pipeline.sections.persona_self import PersonaSelfSection
 from sea.head_pipeline.sections.self_image import SelfImageSection
 from sea.head_pipeline.sections.spell_list import SpellListSection
-from sea.head_pipeline.sections.visual_context import VisualContextSection
 
 
 def register_default_sections(registry) -> None:
@@ -37,9 +42,7 @@ def register_default_sections(registry) -> None:
     registry.register(SpellListSection())
     registry.register(MemoryWeaveSection())
     registry.register(DeskSection())
-    registry.register(VisualContextSection())
-    # Phase 3: dynamic_state Section 群 (head 描画なし、差分通知のみ)
-    registry.register(BuildingItemsSection())
+    # dynamic_state Section 群 (head 描画なし、差分通知のみ)
     registry.register(BuildingOccupantsSection())
     registry.register(MemopediaIndexSection())
     registry.register(ChronicleIndexSection())
@@ -48,7 +51,6 @@ def register_default_sections(registry) -> None:
 __all__ = [
     "AutonomyModesSection",
     "AvailablePlaybooksSection",
-    "BuildingItemsSection",
     "BuildingOccupantsSection",
     "BuildingSection",
     "ChronicleIndexSection",
@@ -61,6 +63,5 @@ __all__ = [
     "PersonaSelfSection",
     "SelfImageSection",
     "SpellListSection",
-    "VisualContextSection",
     "register_default_sections",
 ]

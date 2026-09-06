@@ -71,6 +71,14 @@ OUTBOX_PENDING = "pending"
 OUTBOX_DELIVERED = "delivered"
 OUTBOX_DEAD = "dead"
 
+#: _flush_queue の配り直しの上限周回数 (room_state_packages.md §11-3-3)。
+#: handler が配送の中で新項目を積む (移動配送の中の通知・部屋の様子など) 場合、
+#: 一覧を配り切った後に再問い合わせして同じ flush で配る — 前の周回で 1 件以上
+#: delivered した間だけ繰り返す。上限は handler が積み続ける異常形 (自己増殖)
+#: での無限周回を打ち切るための安全弁で、打ち切った残りは次の関所 / 回復 tick
+#: が引き継ぐ (戻り値 False = pending 残存、の既存契約のまま)。
+FLUSH_REDRAIN_MAX_ROUNDS = 8
+
 #: 配送再試行の既定上限。超過で dead (人裁定に回す終端、黙って捨てない)。
 DEFAULT_MAX_ATTEMPTS = 20
 
@@ -941,24 +949,37 @@ class ExecutionLedger:
                 if persona_id is None
                 else ExecutionOutboxItem.PERSONA_ID == persona_id
             )
-            rows = (
-                db.query(ExecutionOutboxItem)
-                .filter(persona_filter, ExecutionOutboxItem.STATUS == OUTBOX_PENDING)
-                .order_by(ExecutionOutboxItem.OUTBOX_ID.asc())
-                .all()
-            )
-            delivered_executions: List[str] = []
-            for row in rows:
-                if self._deliver_one(db, row):
-                    delivered_executions.append(row.EXECUTION_ID)
-                    continue
-                if row.STATUS == OUTBOX_DEAD:
-                    # dead は先頭とみなさず飛ばす (後続をブロックしない)
-                    continue
-                # pending のままの失敗 = FIFO 先頭ブロック。後続は試行しない
-                break
-            for execution_id in dict.fromkeys(delivered_executions):
-                self._maybe_complete(db, execution_id)
+            # 配り直し (room_state_packages.md §11-3-3): handler が配送の中で
+            # 積んだ新項目 (移動配送の中の通知・部屋の様子など — 再入検知で
+            # 即時配送が見送られた分) を、同じ flush の次の周回で配る。前の
+            # 周回で 1 件以上 delivered した間だけ繰り返し、上限周回数で打ち
+            # 切る (残りは次の関所 / 回復 tick が引き継ぐ)。
+            blocked = False
+            for _round in range(FLUSH_REDRAIN_MAX_ROUNDS):
+                rows = (
+                    db.query(ExecutionOutboxItem)
+                    .filter(
+                        persona_filter,
+                        ExecutionOutboxItem.STATUS == OUTBOX_PENDING,
+                    )
+                    .order_by(ExecutionOutboxItem.OUTBOX_ID.asc())
+                    .all()
+                )
+                delivered_executions: List[str] = []
+                for row in rows:
+                    if self._deliver_one(db, row):
+                        delivered_executions.append(row.EXECUTION_ID)
+                        continue
+                    if row.STATUS == OUTBOX_DEAD:
+                        # dead は先頭とみなさず飛ばす (後続をブロックしない)
+                        continue
+                    # pending のままの失敗 = FIFO 先頭ブロック。後続は試行しない
+                    blocked = True
+                    break
+                for execution_id in dict.fromkeys(delivered_executions):
+                    self._maybe_complete(db, execution_id)
+                if blocked or not delivered_executions:
+                    break
             remaining = (
                 db.query(ExecutionOutboxItem)
                 .filter(persona_filter, ExecutionOutboxItem.STATUS == OUTBOX_PENDING)

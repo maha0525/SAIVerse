@@ -7,29 +7,33 @@
 docs/issues/chat_options_metabolism_section_redesign.md
 (旧三水位の低水位 `metabolism_low_chars` は 2026-09-04 廃止 — キーが残っていても
 検証は黙って通す)
+
+順序と一緒に掛かる「余裕」の検査 (整理を始める量 − 残す量 > 知覚の上限 + 余裕、
+2026-09-05) は test_watermark_headroom_validation.py。ここの数字はその検査も通る組
+(組み込みの知覚上限 6万 + 余裕 1万 = 7万 より差が大きい) を選んである。
 """
 import pytest
 from fastapi import HTTPException
 
-from api.routes.config import _validate_metabolism_watermarks
+from api.routes.config import _validate_watermarks
 
 
 def test_partial_high_below_default_target_is_rejected():
     """high=3万だけ指定 → 実効 target=既定4万 > high で 400。"""
     with pytest.raises(HTTPException) as exc:
-        _validate_metabolism_watermarks({"metabolism_high_chars": 30_000})
+        _validate_watermarks({"metabolism_high_chars": 30_000})
     assert exc.value.status_code == 400
 
 
 def test_consistent_partial_spec_passes():
-    _validate_metabolism_watermarks({
-        "metabolism_high_chars": 50_000,
+    _validate_watermarks({
+        "metabolism_high_chars": 150_000,
         "metabolism_target_chars": 40_000,
     })
 
 
 def test_defaults_only_passes():
-    _validate_metabolism_watermarks({})
+    _validate_watermarks({})
 
 
 def test_obsolete_low_key_is_silently_ignored():
@@ -38,24 +42,24 @@ def test_obsolete_low_key_is_silently_ignored():
     値がどれだけ大きくても順序制約に参加しない — 実行時に読まれないキーを
     保存の入口で咎めない。
     """
-    _validate_metabolism_watermarks({
+    _validate_watermarks({
         "metabolism_low_chars": 999_999_999,
         "metabolism_target_chars": 40_000,
-        "metabolism_high_chars": 50_000,
+        "metabolism_high_chars": 150_000,
     })
 
 
 def test_explicit_null_lifts_the_constraint():
     """null = その水位を持たない → 順序制約の対象外 (実行時の解釈と同じ)。"""
-    _validate_metabolism_watermarks({
+    _validate_watermarks({
         "metabolism_high_chars": 50_000,
         "metabolism_target_chars": None,
     })
 
 
 def test_zero_or_negative_means_disabled():
-    """0 以下は実行時に「持たない」扱い (_metabolism_chars) — 検証も同じ解釈。"""
-    _validate_metabolism_watermarks({
+    """0 以下は実行時に「持たない」扱い (compose_watermark) — 検証も同じ解釈。"""
+    _validate_watermarks({
         "metabolism_high_chars": 50_000,
         "metabolism_target_chars": 0,
     })
@@ -63,13 +67,33 @@ def test_zero_or_negative_means_disabled():
 
 def test_non_numeric_is_rejected():
     with pytest.raises(HTTPException) as exc:
-        _validate_metabolism_watermarks({"metabolism_target_chars": "abc"})
+        _validate_watermarks({"metabolism_target_chars": "abc"})
     assert exc.value.status_code == 400
 
 
 def test_bool_is_rejected():
     with pytest.raises(HTTPException) as exc:
-        _validate_metabolism_watermarks({"metabolism_high_chars": True})
+        _validate_watermarks({"metabolism_high_chars": True})
+    assert exc.value.status_code == 400
+
+
+def test_perception_order_is_checked_too():
+    """知覚の二水位にも同じ順序制約 (下の水位 ≤ 上の水位) が掛かる。
+
+    実行時は下を上まで寄せて受ける (`compose_perception_watermarks`) が、その
+    クランプは走らせるための縮退で、保存の入口で教える責務の代わりではない。
+    """
+    with pytest.raises(HTTPException) as exc:
+        _validate_watermarks({
+            "perception_target_chars": 30_000, "perception_high_chars": 20_000,
+        })
+    assert exc.value.status_code == 400
+    assert "部屋の様子" in exc.value.detail
+
+
+def test_perception_non_numeric_is_rejected():
+    with pytest.raises(HTTPException) as exc:
+        _validate_watermarks({"perception_high_chars": "abc"})
     assert exc.value.status_code == 400
 
 
@@ -85,33 +109,38 @@ def test_bool_is_rejected():
 def global_defaults():
     from saiverse import model_configs
 
-    saved = model_configs.get_global_metabolism_defaults()
-    yield model_configs.set_global_metabolism_defaults
-    model_configs.set_global_metabolism_defaults(saved)
+    saved = model_configs.get_global_watermark_defaults()
+    yield model_configs.set_global_watermark_defaults
+    model_configs.set_global_watermark_defaults(saved)
 
 
 def test_high_below_global_target_is_rejected(global_defaults):
     """全体 target=15万 → high=12万 だけ書いたモデルは 400 (組み込み 10万 なら通っていた)。"""
-    _validate_metabolism_watermarks({"metabolism_high_chars": 120_000})  # 組み込み基準では OK
+    _validate_watermarks({"metabolism_high_chars": 120_000})  # 組み込み基準では OK
     global_defaults({"metabolism_target_chars": 150_000})
     with pytest.raises(HTTPException) as exc:
-        _validate_metabolism_watermarks({"metabolism_high_chars": 120_000})
+        _validate_watermarks({"metabolism_high_chars": 120_000})
     assert exc.value.status_code == 400
     assert "全体設定" in exc.value.detail
 
 
 def test_high_above_lowered_global_target_passes(global_defaults):
-    """全体 target=2万 → high=3万 だけ書いたモデルは通る (組み込み 4万 基準では 400 だった)。"""
+    """全体 target=2万 → high=3万 だけ書いたモデルは通る (組み込み 4万 基準では 400 だった)。
+
+    知覚の上限は明示 null (= このモデルは下ろしを持たない) にして、余裕の検査を
+    外してある — ここで見たいのは順序の規則だけ。
+    """
+    config = {"metabolism_high_chars": 30_000, "perception_high_chars": None}
     with pytest.raises(HTTPException):
-        _validate_metabolism_watermarks({"metabolism_high_chars": 30_000})
+        _validate_watermarks(config)
     global_defaults({"metabolism_target_chars": 20_000})
-    _validate_metabolism_watermarks({"metabolism_high_chars": 30_000})
+    _validate_watermarks(config)
 
 
 def test_unset_global_falls_back_to_builtin(global_defaults):
     global_defaults({})
     with pytest.raises(HTTPException):
-        _validate_metabolism_watermarks({"metabolism_high_chars": 30_000})
+        _validate_watermarks({"metabolism_high_chars": 30_000})
 
 
 # ── clone も保存の入口 (2026-09-04) ─────────────────────────────

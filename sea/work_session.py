@@ -318,8 +318,11 @@ def run_work_session(
             # _run_spell_loop の Beat 境界にも到達しないため、ここが唯一の
             # 取得点になる (Codex レビュー 2026-08-10 で素通しが判明)。
             # 並びは「取得 → 検知 → 消費 (下の flush) → head 組成」。
+            # model_key = この Pulse root の実行 model (検知の窓判定用 —
+            # 2026-09-06 二巡目修正 2)。
             refresh_mcp_tools_at_head(
                 persona, manager, building_id, connect=True,
+                model_key=execution_context.model_key,
             )
 
             # ---- Beat 頭の知覚消費 (perception_buffer.md §4.2) ----

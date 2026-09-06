@@ -488,6 +488,200 @@ class TestPerceptionPushDelivery:
 
 
 # ---------------------------------------------------------------------------
+# perception.room_state (room_state_packages.md §11-3-1)
+# ---------------------------------------------------------------------------
+
+
+class TestPerceptionRoomStateDelivery:
+    """新 target のエラー契約。配送成功の実旅 (実組成の束が着地する形) は
+    tests/test_room_state_diff.py の EntryDeliveryOrderTest が持つ。"""
+
+    def _payload(self):
+        return {
+            "building_id": "b1",
+            "bundle": {
+                "building_id": "b1", "building_name": "工房", "packages": [],
+            },
+            "allow_diff": True,
+        }
+
+    def test_redelivery_after_consumption_does_not_duplicate(
+        self, manager, adapter, session_factory,
+    ):
+        """配達成功 → 消費 → 配達記帳前クラッシュを模した再配達で二重にならない。
+
+        知覚バッファ (memory.db) と台帳の delivered 記帳 (台帳 DB) は別 DB —
+        その隙間の停止で再配達が起きる。一枚目が消費済みだと回収
+        (reclaim_pending_perceptions — 未消費しか見ない) では畳めないので、
+        配達自体が消費を跨いで冪等でなければならない (perception.push と同じ
+        ledger_outbox_id の UNIQUE 索引)。
+        """
+        ledger = manager.execution_ledger
+        execution_id = _applied_with_outbox(
+            ledger, target=wiring.TARGET_PERCEPTION_ROOM_STATE,
+            payload=self._payload(),
+        )
+        assert ledger.flush_pending_for_persona(PERSONA_ID) is True
+        assert len(_perception_rows(adapter)) == 1
+        # 一枚目を消費する — 以後この配達の重複は未消費の回収では拾えない。
+        assert adapter.flush_perception_buffer_payload() is not None
+        # クラッシュ再現: 台帳 DB 側の配送記帳だけ巻き戻す (memory.db は配達済み)。
+        db = session_factory()
+        try:
+            db.query(ExecutionOutboxItem).filter(
+                ExecutionOutboxItem.EXECUTION_ID == execution_id
+            ).update({"STATUS": XL.OUTBOX_PENDING, "DELIVERED_AT": None})
+            db.query(ExecutionLedgerEntry).filter(
+                ExecutionLedgerEntry.EXECUTION_ID == execution_id
+            ).update({"STATUS": XL.STATUS_APPLIED})
+            db.commit()
+        finally:
+            db.close()
+        # 再配達は成功扱いの no-op — 同じ部屋の知覚がもう一枚積まれない。
+        assert ledger.flush_pending_for_persona(PERSONA_ID) is True
+        assert len(_perception_rows(adapter)) == 1
+
+    def test_duplicate_delivery_skips_composition(self, adapter):
+        """配達済み outbox_id の再配達は payload 組成の前に冪等 no-op で返る。
+
+        冪等判定が INSERT の UNIQUE (組成の後) だけだと、再配達のたびに
+        build_room_state_push (DB 読み + 差分計算) が走り、読みが劣化して
+        組成が例外を出す状態では「配達済みなのに配達失敗」→ 再試行 → dead
+        へ進みうる。判定は組成の前 (同じ _db_lock 内の索引 SELECT) に置く。
+        """
+        bundle = {"building_id": "b1", "building_name": "工房", "packages": []}
+        assert adapter.push_ledger_room_state(
+            execution_id="e1", outbox_id=77, building_id="b1", bundle=bundle,
+        ) is True
+        with patch(
+            "sai_memory.room_state.build_room_state_push",
+            side_effect=RuntimeError("read path degraded"),
+        ) as build:
+            assert adapter.push_ledger_room_state(
+                execution_id="e1", outbox_id=77, building_id="b1", bundle=bundle,
+            ) is False
+        build.assert_not_called()
+        assert len(_perception_rows(adapter)) == 1
+
+    def test_bundle_building_id_mismatch_is_delivery_failure(
+        self, manager, adapter, session_factory,
+    ):
+        """外側 building_id と束の building_id の食い違いは配達失敗として止める。
+
+        検めずに通すと、部屋のキーは外側 ID で作られ、記帳される snapshot は
+        束のまま — 別の建物の中身が対象の部屋のキーへ記録されるデータ汚染に
+        なる。違反は例外 = pending 残存 (積む側の欠陥として表面化させる)。
+        """
+        ledger = manager.execution_ledger
+        payload = self._payload()
+        payload["bundle"]["building_id"] = "b2"
+        payload["bundle"]["building_name"] = "別の建物"
+        execution_id = _applied_with_outbox(
+            ledger, target=wiring.TARGET_PERCEPTION_ROOM_STATE, payload=payload,
+        )
+        assert ledger.flush_pending_for_persona(PERSONA_ID) is False
+        row = _outbox_rows(session_factory, execution_id)[0]
+        assert row.STATUS == XL.OUTBOX_PENDING
+        assert _perception_rows(adapter) == []
+
+    def test_stamp_coexists_with_room_state_metadata(
+        self, manager, adapter, session_factory,
+    ):
+        """冪等キーは room_state 記帳と並置され、既存の読み手を壊さない。
+
+        _parse_item_state は room_state キーだけ、_parse_label_meta は
+        label_kind キーだけを読む — 並置された ledger_outbox_id /
+        execution_id は互いの読みに影響しない。
+        """
+        ledger = manager.execution_ledger
+        execution_id = _applied_with_outbox(
+            ledger, target=wiring.TARGET_PERCEPTION_ROOM_STATE,
+            payload=self._payload(),
+        )
+        assert ledger.flush_pending_for_persona(PERSONA_ID) is True
+        rows = _perception_rows(adapter)
+        assert len(rows) == 1
+        meta = json.loads(rows[0][2])
+        outbox = _outbox_rows(session_factory, execution_id)
+        assert meta[adapter.LEDGER_OUTBOX_META_KEY] == outbox[0].OUTBOX_ID
+        assert meta["execution_id"] == execution_id
+        from sai_memory.room_state import _parse_item_state, _parse_label_meta
+        state = _parse_item_state(rows[0][2])
+        assert state is not None
+        assert state["key"] == "building:b1"
+        assert _parse_label_meta(rows[0][2]) is None  # 型付きラベルではない
+
+    def test_malformed_payload_is_delivery_failure(self, manager):
+        ledger = manager.execution_ledger
+        _applied_with_outbox(
+            ledger, target=wiring.TARGET_PERCEPTION_ROOM_STATE,
+            payload={"building_id": "b1"},  # bundle が無い
+        )
+        assert ledger.flush_pending_for_persona(PERSONA_ID) is False
+
+    def test_invalid_bundle_is_delivery_failure(
+        self, manager, adapter, session_factory,
+    ):
+        """bundle_is_valid を通らない束は配達失敗として pending に残る。
+
+        非空 dict なだけの壊れた束が delivered になると、後段の回収
+        (first_room_bundle の停止規則) が遺物として黙って捨てる — 再試行
+        不能の静かな消失。門は handler が持つ (違反 = 例外 = pending 残存)。
+        """
+        ledger = manager.execution_ledger
+        execution_id = _applied_with_outbox(
+            ledger, target=wiring.TARGET_PERCEPTION_ROOM_STATE,
+            payload={"building_id": "b1", "bundle": {"building_id": "b1"}},
+        )
+        assert ledger.flush_pending_for_persona(PERSONA_ID) is False
+        row = _outbox_rows(session_factory, execution_id)[0]
+        assert row.STATUS == XL.OUTBOX_PENDING
+        assert _perception_rows(adapter) == []
+
+    def test_non_bool_allow_diff_is_delivery_failure(self, manager, adapter):
+        """allow_diff="false" が bool(...) で True に化ける事故を門で止める。"""
+        ledger = manager.execution_ledger
+        payload = self._payload()
+        payload["allow_diff"] = "false"
+        _applied_with_outbox(
+            ledger, target=wiring.TARGET_PERCEPTION_ROOM_STATE, payload=payload,
+        )
+        assert ledger.flush_pending_for_persona(PERSONA_ID) is False
+        assert _perception_rows(adapter) == []
+
+    def test_adapter_not_ready_is_delivery_failure(self, manager, adapter):
+        # push_room_state は未 ready を黙って no-op にするので、handler が
+        # ready を検めずに呼ぶと「配送成功の偽装」になる — pending に残ること。
+        ledger = manager.execution_ledger
+        _applied_with_outbox(
+            ledger, target=wiring.TARGET_PERCEPTION_ROOM_STATE,
+            payload={
+                "building_id": "b1",
+                "bundle": {
+                    "building_id": "b1", "building_name": "工房", "packages": [],
+                },
+                "allow_diff": True,
+            },
+        )
+        with patch.object(adapter, "is_ready", return_value=False):
+            assert ledger.flush_pending_for_persona(PERSONA_ID) is False
+        assert _perception_rows(adapter) == []
+
+
+class TestPerceptionFlushReclaim:
+    """§11-2: 回収で全項目が外れた flush は消費だけして None を返す。"""
+
+    def test_flush_of_only_legacy_junk_consumes_but_returns_none(self, adapter):
+        adapter.push_perception("surroundings", "metadata の無い旧世代の様子")
+        assert adapter.flush_perception_buffer_payload() is None
+        with adapter._db_lock:
+            rows = adapter.conn.execute(
+                "SELECT consumed_at FROM perception_buffer"
+            ).fetchall()
+        assert rows and all(row[0] is not None for row in rows)
+
+
+# ---------------------------------------------------------------------------
 # 起動時回復 + 定期掃除 tick
 # ---------------------------------------------------------------------------
 

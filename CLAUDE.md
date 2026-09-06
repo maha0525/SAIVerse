@@ -177,6 +177,8 @@ If unsure whether a doc references what you changed, grep `docs/` for the symbol
 
 ### Continuous Refactoring (Claude surfaces this proactively)
 
+**Review premise check** (2026-09-06 audit): A design document and tests authored in the same change are not independent evidence of user intent. Trace claimed agreements to the user's words and the earlier specification before enforcing them. Verify error-handling assumptions through the actual callee, not only a mock. For inverse operations (such as refill/refold), check the shared invariant across both directions; individually passing tests can preserve contradictory rules. Evidence: `docs/issues/audit_20260730_review_guards.md`.
+
 The repository owner cannot judge *when* refactoring is due — noticing the timing is Claude's job. Refactoring is narrow and frequent, never repo-wide.
 
 - **Boy-scout rule**: while working in an area, fix small obviously-safe debt you notice there (dead code, stale comments, trivial duplication) in the same branch, as a **separate commit** from the feature change. Propose anything larger instead of mixing it in.
@@ -273,6 +275,7 @@ Full list: `docs/reference/environment-vars.md`. Set in `.env` (see `.env.exampl
 - `docs/overview/landscape.md` — 概念の俯瞰地図（何があってどう繋がるか）
 - `docs/overview/roadmap_status.md` — 進捗マップ（何が予定され、いまどこにいるか）
 - `docs/overview/in_flight.md` — 進行中案件の台帳
+- `docs/overview/release_history.md` — リリース履歴と次の版に入れる範囲の正典 (リリース判定はここと突き合わせる)
 - `docs/overview/architecture_health.md` — サブシステム別の負債監査
 - `docs/concepts/` — 各概念の開発者向けリファレンス（索引は `concepts/README.md`）
 - `docs/reference/` — DB スキーマ、API、ツール、env var、スクリプト

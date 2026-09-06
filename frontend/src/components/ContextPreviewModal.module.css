@@ -356,6 +356,29 @@
     color: #6b7280;
 }
 
+/* 提示済みの知覚バッチのバッジ (履歴の中のその一通に印が付くだけ) */
+.perceptionBadge,
+.roomStateBadge {
+    font-size: 0.62rem;
+    font-weight: 600;
+    padding: 1px 6px;
+    border-radius: 4px;
+    white-space: nowrap;
+    flex-shrink: 0;
+}
+
+.perceptionBadge {
+    background: rgba(192, 132, 252, 0.15);
+    color: #c084fc;
+    border: 1px solid rgba(192, 132, 252, 0.35);
+}
+
+.roomStateBadge {
+    background: rgba(251, 191, 36, 0.12);
+    color: #fbbf24;
+    border: 1px solid rgba(251, 191, 36, 0.35);
+}
+
 .messageContent {
     font-size: 0.78rem;
     line-height: 1.5;
@@ -439,4 +462,16 @@
 
 :global([data-theme="light"]) .messageContent {
     color: #374151;
+}
+
+:global([data-theme="light"]) .perceptionBadge {
+    background: #f3e8ff;
+    color: #7e22ce;
+    border-color: #d8b4fe;
+}
+
+:global([data-theme="light"]) .roomStateBadge {
+    background: #fef3c7;
+    color: #b45309;
+    border-color: #fcd34d;
 }

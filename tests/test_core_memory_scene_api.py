@@ -457,7 +457,10 @@ class CoreMemorySceneApiTest(unittest.TestCase):
         # 消費した合成メッセージ本体と media が返り、作業中 messages への差し込みと
         # 以後の提示マージが同じ内容になる。
         media = [{"path": "/img/x.png", "mime_type": "image/png", "role": "image"}]
-        self.adapter.push_perception("surroundings", "移動先の様子テスト", media=media)
+        # kind は見出しなしで自己完結する persona_recall を使う。旧素材の
+        # surroundings は §11-2 (room_state_packages.md) の回収が「束 metadata の
+        # 無い行 = 旧形式の遺物」として組成から外すようになったため。
+        self.adapter.push_perception("persona_recall", "移動先の様子テスト", media=media)
         payload = self.adapter.flush_perception_buffer_payload()
         self.assertIsNotNone(payload)
         self.assertIn("移動先の様子テスト", payload["content"])

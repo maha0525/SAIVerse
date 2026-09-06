@@ -8,15 +8,19 @@ Section 群と message role / metadata の対応はこの層で握る:
 - ``common_prompt`` / ``persona_self`` / ``building`` / ``available_playbooks`` /
   ``spell_list``: text-only、まとめて 1 つの system message にする
 - ``memory_weave``: text-only、独立した user role message にする (旧 get_memory_weave_context 経路と互換)
-- ``visual_context``: text + media、独立した user role message + metadata.media +
-  ``__visual_context__`` marker を保持 (旧 get_visual_context 経路と互換)
+
+部屋の描画 (旧 ``visual_context`` Section) は 2026-09-06 に head から退役した —
+部屋の様子の置き場は知覚 (tail) 一つ (docs/intent/room_state_packages.md)。
+本層はその供給側の検知 (:func:`inject_diff_notifications` の部屋の照合) も持つ。
 
 詳細: docs/intent/cached_head_architecture.md §3.5 / §5
 """
 from __future__ import annotations
 
+import json
 import logging
 import time
+from functools import partial
 from typing import Any, Optional
 
 from sea.head_pipeline.pipeline import HeadPipeline, get_default_pipeline
@@ -27,7 +31,6 @@ from sea.head_pipeline.types import LineHeadInput, NotificationLabel, RenderedSe
 # section 識別ロジックがこれらを参照する: sea/runtime_context.py:618 周辺)。
 _MEMORY_WEAVE_CONTEXT_MARKER = "__memory_weave_context__"
 _MEMORY_WEAVE_TYPE_KEY = "__memory_weave_type__"
-_VISUAL_CONTEXT_MARKER = "__visual_context__"
 
 LOGGER = logging.getLogger(__name__)
 
@@ -59,7 +62,6 @@ SYSTEM_PROMPT_SECTION_NAMES: tuple[str, ...] = (
     "memopedia_index",
 )
 MEMORY_WEAVE_SECTION_NAME = "memory_weave"
-VISUAL_CONTEXT_SECTION_NAME = "visual_context"
 
 _DEFAULT_LINE_ROLE = "main_line"
 
@@ -172,8 +174,16 @@ def inject_diff_notifications(
     *,
     pipeline: HeadPipeline | None = None,
     model_key: str | None = None,
+    detect_room: bool = True,
 ) -> bool:
     """全 Section の diff を検知し、知覚バッファへ型付き項目として push する (消費はしない)。
+
+    ``detect_room`` — 「部屋の様子」のパッケージ照合 + 自己回復
+    (:func:`_detect_room_state_changes`、docs/intent/room_state_packages.md §6-2)
+    も併せて走らせるか。入室処理 (saiverse/dynamic_state.on_building_entered) の
+    本人向け呼び出しだけ False — 直後の入室 push が同じ部屋を積むので、ここでも
+    照合すると入室が二重に語られる。戻り値は従来どおり Section のラベルの
+    有無だけを見る (部屋の照合の push は数えない)。
 
     【知覚バッファ経由に変更 (2026-07-09, Phase 2)】以前は差分を直接 SAIMemory へ
     append していたが、これは「検知＝消費」を癒着させ、pulse 前のプレビューを不可能に
@@ -209,6 +219,29 @@ def inject_diff_notifications(
     ctx = build_line_head_input(persona, manager, building_id, model_key=model_key)
     ensure_snapshot(pipeline, ctx)
 
+    pushed = _push_section_diffs(persona, manager, pipeline, ctx, building_id)
+
+    if detect_room:
+        try:
+            _detect_room_state_changes(
+                persona, manager, building_id, model_key=model_key,
+            )
+        except Exception:
+            LOGGER.warning(
+                "head_pipeline: room-state detection failed persona=%s "
+                "building=%s", ctx.persona_id, building_id, exc_info=True,
+            )
+    return pushed
+
+
+def _push_section_diffs(
+    persona: Any,
+    manager: Any,
+    pipeline: HeadPipeline,
+    ctx: LineHeadInput,
+    building_id: str,
+) -> bool:
+    """Section 群の diff ラベルを検知して知覚バッファ (or outbox) へ push する。"""
     ledger = getattr(manager, "execution_ledger", None)
     if ledger is None:
         return _inject_diff_notifications_direct(persona, pipeline, ctx, building_id)
@@ -232,7 +265,14 @@ def inject_diff_notifications(
                     "reduce_key": None,
                     "salient": False,
                     "media": [],
-                    "metadata": None,
+                    # ラベルの型付け (label_kind 等) を知覚エントリへ写す —
+                    # 未消費バッファの回収 (room_state_packages.md §11-2) が
+                    # 移動通知をこの型で識別する。metadata の無いラベルは従来
+                    # どおり None。
+                    "metadata": (
+                        json.dumps(label.metadata, ensure_ascii=False)
+                        if label.metadata else None
+                    ),
                 },
             }
             for label in labels
@@ -300,7 +340,15 @@ def _inject_diff_notifications_direct(
     push_failed = False
     for label in labels:
         try:
-            sai_mem.push_perception("world_state", label.label)
+            # 台帳経路と同じく、ラベルの型付け (label_kind 等) を知覚エントリへ
+            # 写す (room_state_packages.md §11-3-2)。
+            sai_mem.push_perception(
+                "world_state", label.label,
+                metadata=(
+                    json.dumps(label.metadata, ensure_ascii=False)
+                    if label.metadata else None
+                ),
+            )
         except Exception:
             push_failed = True
             LOGGER.exception(
@@ -333,10 +381,21 @@ def _inject_persona_recall_on_enter(
     Note システム完成までの繋ぎ実装。ペルソナが同じ Building に入室した際、過去の会話と
     Memopedia ページを想起する。以前は直接 SAIMemory へ append していたが、Phase 2 で
     知覚バッファ (kind='persona_recall') への push に変更 (消費は呼び出し元の flush)。
+
+    【再会の門 (2026-09-05, v0.3.9)】相手が直近の文脈に居るあいだは想起しない
+    (:meth:`HistoryManager.should_recall_persona`)。この繋ぎ実装は門を呼ばないまま
+    出荷されていたため、ずっと会話している相手にも移動のたびに「過去会話 6 件
+    (各 2,000 字) + 相手の Memopedia 個人ページ全文」が積まれ、本番で知覚
+    18 万字まで膨らんだ (docs/issues/persona_recall_perception_unbounded.md)。
+
+    見出しに書く相手の名前は ``persona.id_to_name_map`` (manager と参照を共有する
+    id→表示名の対応) で解決して渡す。解決できないときだけ ID のままになる。
     """
     history_manager = getattr(persona, "history_manager", None)
     if not history_manager:
         return
+
+    id_to_name = getattr(persona, "id_to_name_map", None) or {}
 
     for label in labels:
         if label.kind != "occupant_entered":
@@ -351,11 +410,19 @@ def _inject_persona_recall_on_enter(
         if not occupant_id or occupant_kind not in ("persona", "user"):
             continue
 
+        if not _should_recall_on_enter(history_manager, occupant_id, occupant_kind):
+            LOGGER.debug(
+                "head_pipeline: skipped persona recall for %s "
+                "(already in recent context)", occupant_id,
+            )
+            continue
+
         try:
             recall_text = history_manager.recall_conversation_with(
                 occupant_id,
                 current_thread_only=False,
                 max_results=6,
+                display_name=id_to_name.get(str(occupant_id)) or None,
             )
         except Exception:
             LOGGER.exception(
@@ -375,6 +442,249 @@ def _inject_persona_recall_on_enter(
             LOGGER.exception(
                 "head_pipeline: failed to push persona recall for %s", occupant_id,
             )
+
+
+def _should_recall_on_enter(
+    history_manager: Any, occupant_id: Any, occupant_kind: Any = None
+) -> bool:
+    """再会の門。直近の文脈に相手が居るなら想起しない。
+
+    判定の本体は :meth:`HistoryManager.should_recall_persona` (直近 20 メッセージに
+    相手の痕跡 — metadata.with / audience / persona_id — があれば False)。ここは
+    繋ぎ実装からその門へ配線するだけ。``occupant_kind`` は入室ラベルの metadata が
+    運ぶ "persona" | "user" — ユーザー発言は id を持たない形 (with=["user"]) で
+    履歴に刻まれるため、ユーザー相手の照合には種別が要る (2026-09-06)。
+
+    判定自体が失敗したときは想起する側に倒す (= 従来挙動)。門は想起の量を抑える
+    最適化で、想起そのものが機能 — 判定の故障で再会の記憶を静かに失わせるより、
+    例外を記録したうえで従来どおり積む方が損失が小さい。
+    """
+    try:
+        return bool(
+            history_manager.should_recall_persona(occupant_id, target_kind=occupant_kind)
+        )
+    except Exception:
+        LOGGER.exception(
+            "head_pipeline: should_recall_persona failed for %s "
+            "(falling back to recall)", occupant_id,
+        )
+        return True
+
+
+def _detect_room_state_changes(
+    persona: Any, manager: Any, building_id: str,
+    *, model_key: Optional[str] = None,
+) -> None:
+    """滞在中の「部屋の様子」のパッケージ照合と自己回復 (room_state_packages.md §6-2/§6-3)。
+
+    検知の瞬間 (Pulse 開始・入室時の居合わせ側・Beat 頭の MCP 変動) に今の部屋の
+    パッケージの束を組み、**提示と同じ窓で見えている**最新の束と指紋で
+    突き合わせる (2026-09-06 八巡目修正 1 — 窓の外の束を「前回」に拾うと、
+    窓の中に残る古い提示との差を「変化なし」と誤読して覆い隠す):
+
+    - 変わっていれば diff を push (末尾 = 出来事)。これが旧 BuildingItemsSection
+      のアイテム差分ラベル (「追加されました」— 中身を運ばない) の後継で、
+      部屋の差分機構はこの照合一本 (アイテムの中身・絵ごと届く)。
+    - 部屋の様子が提示のどこにも見えなければ、全文を提示の最古端へ置き直す
+      (自己回復 — 先頭 = 背景)。head の部屋描画の退役後、起動直後の
+      ブートストラップ (§6-3) と Chronicle 無効ペルソナの窓絞り、想定外の穴
+      すべての受け皿がここ。
+
+    ``model_key`` は**その回の実行 model** — Chronicle 無効ペルソナの窓判定は
+    (ペルソナ, model) ごとの提示窓で行うので、提示側と同じ model の窓を見ない
+    と「提示では部屋が窓の外なのに自己回復が発火しない」がねじれる。None は
+    標準 model (``persona.model``) の窓。
+
+    world の読み (開いている文書の読み込み込み) を伴うので、失敗はすべて
+    WARN + 続行 (呼び出し側で包む)。ペルソナが ``building_id`` に居ない回
+    (照合対象の部屋が現在地でない) は何もしない。束の組成の間に別スレッド
+    (ユーザー操作の移動 API 等) が現在地を変えた回も、積む直前の再確認で
+    見送る (次の検知が現在地でやり直す) — 競合の窓は「再確認から DB 書き込み
+    まで」に縮むがゼロにはならない。深い対処 (移動の冪等キー・行き先照合) は
+    docs/issues/entry_delivery_retry_duplicates_room_perception.md の修正方向に
+    合流する。提示窓が解決できない回
+    (:class:`~sai_memory.perception_buffer.WindowResolutionError`) は部屋の
+    判定そのものを WARN つきで見送る — 窓の三値 (窓なし / 窓キー / 解決失敗)
+    の「解決失敗」で、抑止でもループでもない (2026-09-06 四巡目修正 2)。床の
+    予算 (:func:`_presentation_floor_chars`) は「anchor の行が読めないときの
+    代替」の材料なので、ここでは解決せず遅延の口で渡す — 床の一時失敗が
+    「解決失敗」になるのは、anchor が読めず床が実際に要る回だけ (2026-09-06
+    五巡目修正 2)。
+    """
+    if getattr(persona, "current_building_id", None) != building_id:
+        return
+    sai_mem = getattr(persona, "sai_memory", None)
+    if sai_mem is None or not getattr(sai_mem, "is_ready", lambda: False)():
+        return
+
+    from builtin_data.tools.get_visual_context import build_room_bundle
+    from tools.context import persona_context
+
+    persona_id = getattr(persona, "persona_id", None)
+    persona_dir = getattr(persona, "persona_dir", None)
+    if not persona_id:
+        return
+    with persona_context(persona_id, persona_dir, manager):
+        bundle = build_room_bundle(building_id)
+    if not bundle:
+        return
+
+    from sai_memory.perception_buffer import WindowResolutionError
+    from sai_memory.room_state import room_key, snapshot_digest
+
+    key = room_key(building_id)
+    chronicle_on = _room_chronicle_enabled(persona, manager)
+    # 提示窓 (anchor) を持つのは Chronicle 無効ペルソナだけ。検知の読み
+    # (latest_room_snapshot) と置き直し (reseat_room_state) の**両方**に同じ
+    # 篩を渡す — 検知の読みが窓を通らないと、窓の外の最新束を「前回」に拾って
+    # 「変化なし」と誤判定し、窓の中に残る古い提示を差分も置き直しも来ないまま
+    # 覆い隠す (2026-09-06 八巡目修正 1: digest 比較の「前回」と運搬役判定は
+    # 同じ窓付きの読み一本 — None = 窓に束が無い = 運搬役なし)。置き直しの
+    # 内側の門 (「運搬役が生きているか」) にも同じ篩 (2026-09-06 二巡目修正 1)。
+    # 床の予算 (floor_chars) は anchor の行が読めない劣化時のフォールバック
+    # 入力 — 提示の最小ロードと同じ値を渡し、起点の解決は resolve_window_key
+    # の一枚で提示側と揃える (2026-09-06 三巡目 #1: ここが無いと劣化時に検知
+    # だけ「全部見える」扱いで割れ、自己回復が抑止される)。床はここでは解決
+    # せず**遅延の口 (callable)** で渡す — resolve_window_key が anchor の行を
+    # 読めなかった回だけ呼ばれる (2026-09-06 五巡目修正 2: 先に無条件で解決
+    # すると、床の一時失敗が正当な anchor で判定できる回まで「窓の解決失敗」に
+    # 巻き込み、自己回復を不要にスキップしていた)。窓が解決できない回
+    # (WindowResolutionError) は部屋の判定そのものを見送る — 「全部見える」
+    # (抑止) にも「全部見えない」(毎検知の置き直しループ) にも倒さず、次の
+    # 検知でやり直す (2026-09-06 四巡目修正 2)。
+    anchor_id = None
+    floor_chars = None
+    if not chronicle_on:
+        anchor_id = _presentation_anchor_id(persona, manager, model_key)
+        floor_chars = partial(
+            _presentation_floor_chars, persona, manager, model_key,
+        )
+    try:
+        latest = sai_mem.latest_room_snapshot(
+            key, anchor_id=anchor_id, floor_chars=floor_chars,
+        )
+    except WindowResolutionError:
+        LOGGER.warning(
+            "head_pipeline: the presentation window could not be resolved "
+            "(room detection read); skipping the room judgment this round "
+            "persona=%s building=%s (the next detection will retry)",
+            persona_id, building_id, exc_info=True,
+        )
+        return
+    # 積む直前の現在地の再確認 — 冒頭の確認から束の組成 (world の読み) を
+    # 挟んで時間が経っており、その間に別スレッドの移動で現在地が変わって
+    # いたら、この束はもう「現在の知覚」ではない。見送れば次の検知が現在地で
+    # 正しくやり直す (docstring の競合の窓の注記を参照)。
+    if getattr(persona, "current_building_id", None) != building_id:
+        LOGGER.warning(
+            "head_pipeline: persona moved during room-bundle composition "
+            "(persona=%s composed_for=%s now_at=%s); skipping the room "
+            "push/reseat this round (the next detection redoes it at the "
+            "current location)",
+            persona_id, building_id,
+            getattr(persona, "current_building_id", None),
+        )
+        return
+    if latest is None:
+        # 窓に見える束が一枚も無い = 提示に部屋が無い (ブートストラップと、
+        # Chronicle 無効の窓絞りで運搬役が落ちた形を含む)。窓が解決できない
+        # 回は上の見送りで既に抜けている。
+        sai_mem.reseat_room_state(
+            bundle, anchor_id=anchor_id, floor_chars=floor_chars,
+        )
+        return
+    if snapshot_digest(latest) != snapshot_digest(bundle):
+        # 変化は出来事 — 末尾へ束を積む。描画 (差分 / Chronicle 無効は毎回
+        # 全文) は消費の組成の一回だけ (room_state_packages.md §11-2 規則 2)。
+        sai_mem.push_room_state(building_id, bundle, allow_diff=chronicle_on)
+
+
+def _room_chronicle_enabled(persona: Any, manager: Any) -> bool:
+    """Chronicle 編纂が有効か (積む側の門と同じ読み — 判定不能なら有効側)。"""
+    try:
+        from saiverse.dynamic_state import _chronicle_enabled
+        return _chronicle_enabled(persona, manager)
+    except Exception:
+        return True
+
+
+def _presentation_anchor_id(
+    persona: Any, manager: Any, model_key: Optional[str] = None,
+) -> Optional[str]:
+    """(ペルソナ, 実行 model) の提示窓の起点 (anchor)。読めなければ None。
+
+    Chronicle 無効ペルソナの窓絞りの判定に使う。窓は (ペルソナ, model) ごと
+    なので、``model_key`` にはその回の実行 model を渡す (None は標準 model =
+    ``persona.model`` の窓)。``persist_advance=False`` は読みだけの解決
+    (keepalive / preview と同じ口) — 行は触らない。
+    """
+    try:
+        runtime = (
+            getattr(manager, "sea_runtime", None)
+            or getattr(manager, "runtime", None)
+        )
+        lifecycle = getattr(runtime, "session_lifecycle", None)
+        if lifecycle is None:
+            return None
+        anchor_id, _resolution = lifecycle.resolve_metabolism_anchor(
+            persona, model_key=model_key, persist_advance=False,
+        )
+        return anchor_id
+    except Exception:
+        LOGGER.debug(
+            "head_pipeline: could not resolve the presentation anchor for the "
+            "room visibility check", exc_info=True,
+        )
+        return None
+
+
+def _presentation_floor_chars(
+    persona: Any, manager: Any, model_key: Optional[str] = None,
+) -> int:
+    """anchor が読めない劣化時に窓の床を近似する予算 (文字数)。
+
+    値は提示の最小ロード (sea/runtime_context._minimal_load_chars) と同じ —
+    anchor の行が引けないとき、提示の組成は recent (最小ロードで読んだ生ログ)
+    の最古行を床にする。検知は recent を持たないので、同じ予算を
+    :func:`sai_memory.perception_buffer.resolve_window_key` へ渡し、messages の
+    末尾から同じ量ぶんの最古行を床にする (窓の近似 — 提示より見えない側に
+    倒れる)。
+
+    検知はこれを**遅延の口 (partial) で渡し**、resolve_window_key が anchor の
+    行を読めなかった回だけ呼ばれる — 床は anchor の代替の材料なので、正当な
+    anchor で判定できる回をここの一時失敗に巻き込まない (2026-09-06 五巡目
+    修正 2)。
+
+    **解決に失敗したら**
+    :class:`~sai_memory.perception_buffer.WindowResolutionError` を送出する
+    (2026-09-06 四巡目修正 2)。旧実装の None (= 床なし = 窓なし・全件可視) は、
+    床が要る劣化の回に検知だけ「全部見える」へ倒れて自己回復を抑止した —
+    予算が分からない回は窓が解決できない回で、呼び出し側は自己回復の判定
+    そのものを見送る。
+    """
+    from sai_memory.perception_buffer import WindowResolutionError
+
+    try:
+        from sea.runtime_context import _minimal_load_chars
+
+        runtime = (
+            getattr(manager, "sea_runtime", None)
+            or getattr(manager, "runtime", None)
+        )
+        chars = (
+            int(_minimal_load_chars(runtime, persona, model_key))
+            if runtime is not None else None
+        )
+    except Exception as exc:
+        raise WindowResolutionError(
+            "could not resolve the window floor budget for the room "
+            "visibility check"
+        ) from exc
+    if chars is None:
+        raise WindowResolutionError(
+            "the manager has no runtime to resolve the window floor budget from"
+        )
+    return chars
 
 
 def _missing_section_names(pipeline: HeadPipeline, snapshot) -> set[str]:
@@ -489,8 +799,8 @@ def render_head_messages(
     ensure_persisted 再保存) に委ねる。
 
     戻り値は ``[{"role": ..., "content": ..., "metadata": ...}, ...]`` の標準
-    message dict 列。``prepare_context`` の system / memory_weave / visual_context
-    部分の置き換えとして使う。
+    message dict 列。``prepare_context`` の system / memory_weave 部分の
+    置き換えとして使う。
     """
     from sea.head_pipeline.types import HeadNotReadyError
 
@@ -593,19 +903,7 @@ def _compose_messages(
                 },
             })
 
-    vc = rendered_by_name.get(VISUAL_CONTEXT_SECTION_NAME)
-    if vc is not None and (vc.text or vc.media):
-        media_list = [
-            {"path": m.path, "mime_type": m.mime_type, "type": m.role}
-            for m in vc.media
-        ]
-        messages.append({
-            "role": "user",
-            "content": vc.text or "",
-            "metadata": {
-                "media": media_list,
-                _VISUAL_CONTEXT_MARKER: True,
-            },
-        })
+    # 部屋の描画 (旧 visual_context Section) は head から退役した (2026-09-06)。
+    # 部屋の様子は知覚 (tail) が運ぶ — docs/intent/room_state_packages.md §2。
 
     return messages

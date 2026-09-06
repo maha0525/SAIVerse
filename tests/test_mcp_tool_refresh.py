@@ -42,7 +42,7 @@ def test_change_is_handed_to_the_detector():
     injected = []
     with _patch(refresh_return=True), mock.patch(
         "sea.head_pipeline.inject_diff_notifications",
-        new=lambda p, m, b: injected.append((p, m, b)) or True,
+        new=lambda p, m, b, model_key=None: injected.append((p, m, b)) or True,
     ):
         changed = refresh_mcp_tools_at_head(
             _PERSONA, _MANAGER, "b1", connect=False,
@@ -50,6 +50,24 @@ def test_change_is_handed_to_the_detector():
 
     assert changed is True
     assert injected == [(_PERSONA, _MANAGER, "b1")]
+
+
+def test_the_execution_model_reaches_the_detector():
+    """Beat 頭の呼び出し元が知る実行 model が検知まで届く (2026-09-06 二巡目修正 2)。
+
+    検知の窓判定 (Chronicle 無効ペルソナの提示窓) は (ペルソナ, model) ごと。
+    この入口が model_key を落とすと、中の配管が通っていても常に標準 model の
+    窓で判定される。
+    """
+    seen = []
+    with _patch(refresh_return=True), mock.patch(
+        "sea.head_pipeline.inject_diff_notifications",
+        new=lambda p, m, b, model_key=None: seen.append(model_key) or True,
+    ):
+        assert refresh_mcp_tools_at_head(
+            _PERSONA, _MANAGER, "b1", connect=False, model_key="exec-model",
+        ) is True
+    assert seen == ["exec-model"]
 
 
 def test_notify_false_skips_the_detector():
@@ -61,7 +79,7 @@ def test_notify_false_skips_the_detector():
     injected = []
     with _patch(refresh_return=True), mock.patch(
         "sea.head_pipeline.inject_diff_notifications",
-        new=lambda p, m, b: injected.append(b) or True,
+        new=lambda p, m, b, model_key=None: injected.append(b) or True,
     ):
         changed = refresh_mcp_tools_at_head(
             _PERSONA, _MANAGER, "b1", connect=True, notify=False,
@@ -75,7 +93,7 @@ def test_no_change_skips_the_detector():
     injected = []
     with _patch(refresh_return=False), mock.patch(
         "sea.head_pipeline.inject_diff_notifications",
-        new=lambda p, m, b: injected.append(b) or True,
+        new=lambda p, m, b, model_key=None: injected.append(b) or True,
     ):
         assert refresh_mcp_tools_at_head(
             _PERSONA, _MANAGER, "b1", connect=False,
@@ -130,7 +148,7 @@ def test_building_unknown_skips_the_detector_but_still_fetches():
     injected = []
     with _patch(refresh_return=True, calls=calls), mock.patch(
         "sea.head_pipeline.inject_diff_notifications",
-        new=lambda p, m, b: injected.append(b) or True,
+        new=lambda p, m, b, model_key=None: injected.append(b) or True,
     ):
         assert refresh_mcp_tools_at_head(
             _PERSONA, _MANAGER, None, connect=True,

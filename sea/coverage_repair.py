@@ -621,8 +621,13 @@ def plan_tail_rewind(
     window_after = lifecycle.get_presented_window(
         persona, model_key, str(first_message_id), strict=True,
     )
+    # 「引き戻したら、の窓」= 仮定の列なので、知覚の下ろし境界は進めない
+    # (advance_cutoff=False)。引き戻しを見送る回もここを通るし、実際に送られる
+    # のは引き戻し後の Pulse の組み立てで、そちらが同じ判定で境界を進める
+    # (2026-09-05 四巡目 #6)。
     presented_after = lifecycle.presented_with_perceptions(
         persona, window_after.presented, str(first_message_id),
+        model_key=model_key, advance_cutoff=False,
     )
     from sea.eviction_plan import message_chars, stored_message_chars
     chars_after = message_chars(presented_after)

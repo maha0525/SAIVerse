@@ -21,11 +21,19 @@ interface WatermarkBarProps {
     extraMax?: number | null;
     /** 順序が崩れている目印のキー (赤く塗る)。 */
     invalidKeys?: ReadonlySet<keyof WatermarkBarValues>;
+    /** 目印の呼び名。省略すると会話の整理 (Metabolism) の言い方。 */
+    labels?: Record<keyof WatermarkBarValues, string>;
 }
 
 export const WATERMARK_LABELS: Record<keyof WatermarkBarValues, string> = {
     target: '整理後に残す量',
     high: '整理をはじめる量',
+};
+
+/** 知覚 (部屋の様子などの記録) の二水位の呼び名。同じ棒を別の量に使うときに渡す。 */
+export const PERCEPTION_WATERMARK_LABELS: Record<keyof WatermarkBarValues, string> = {
+    target: '省略した後に残す量',
+    high: '省略をはじめる量',
 };
 
 /** 目標 ≤ 高 を破っている目印を返す (null は比較しない)。 */
@@ -44,11 +52,12 @@ export function watermarkScaleMax(values: WatermarkBarValues, extraMax?: number 
     return Math.max(...candidates) * 1.1;
 }
 
-export default function WatermarkBar({ values, extraMax, invalidKeys }: WatermarkBarProps) {
+export default function WatermarkBar({ values, extraMax, invalidKeys, labels }: WatermarkBarProps) {
     const scaleMax = watermarkScaleMax(values, extraMax);
     if (scaleMax == null) return null;
     const bad = invalidKeys ?? findWatermarkOrderViolations(values);
     const keys: Array<keyof WatermarkBarValues> = ['target', 'high'];
+    const names = labels ?? WATERMARK_LABELS;
 
     return (
         <div className={styles.wrapper}>
@@ -65,7 +74,7 @@ export default function WatermarkBar({ values, extraMax, invalidKeys }: Watermar
                             key={key}
                             className={`${styles.marker} ${bad.has(key) ? styles.markerBad : ''}`}
                             style={{ left: `${Math.min(100, (v / scaleMax) * 100)}%` }}
-                            title={`${WATERMARK_LABELS[key]} ${v.toLocaleString()} 字`}
+                            title={`${names[key]} ${v.toLocaleString()} 字`}
                         />
                     );
                 })}
@@ -76,7 +85,7 @@ export default function WatermarkBar({ values, extraMax, invalidKeys }: Watermar
                     return (
                         <span key={key} className={`${styles.legendItem} ${bad.has(key) ? styles.legendBad : ''}`}>
                             <span className={styles.legendDot} />
-                            {WATERMARK_LABELS[key]} {v != null ? `${v.toLocaleString()} 字` : '—'}
+                            {names[key]} {v != null ? `${v.toLocaleString()} 字` : '—'}
                         </span>
                     );
                 })}

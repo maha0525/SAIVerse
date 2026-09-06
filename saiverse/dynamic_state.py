@@ -2,8 +2,9 @@
 
 このモジュールは旧 SAIVerse の `DynamicStateManager`。Building 内のアイテム/居住者/
 Memopedia/Chronicle の差分通知を担当していたが、Phase 3-e で実装本体が
-`sea.head_pipeline.sections` の 4 Section + `sea.head_pipeline.integration.inject_diff_notifications`
-に統合された。
+`sea.head_pipeline.sections` の Section 群 + `sea.head_pipeline.integration.inject_diff_notifications`
+に統合された (アイテム差分は 2026-09-06 に「部屋の様子」のパッケージ照合へ
+一本化 — docs/intent/room_state_packages.md §6-2)。
 
 本ファイルは互換のための **facade** を提供する:
   - `maybe_inject_event_messages` → head_pipeline 経由で diff 通知
@@ -29,11 +30,21 @@ class DynamicStateManager:
     """Building 状態同期の facade (= head_pipeline への薄い委譲)。"""
 
     @staticmethod
-    def maybe_inject_event_messages(persona: Any, manager: Any) -> bool:
+    def maybe_inject_event_messages(
+        persona: Any, manager: Any, model_key: Optional[str] = None,
+    ) -> bool:
         """world 状態の差分を末尾通知として SAIMemory に注入する。
 
         Phase 3-e で実装が ``sea.head_pipeline.integration.inject_diff_notifications``
         に統合された。本メソッドはその facade。
+
+        ``model_key`` は**その回の実行 model** — Pulse 開始の呼び出し元
+        (sea/runtime.py の ``_run_meta_user_locked``) が解決済みの実行 model を
+        渡す。検知の窓判定 (Chronicle 無効ペルソナの提示窓は (ペルソナ, model)
+        ごと) に使うので、ここが None のままだと常に標準 model の窓で判定され、
+        実行 model の窓では部屋が外れているのに自己回復が発火しない
+        (2026-09-06 二巡目修正 2)。実行の身分が無い呼び出しだけ None (= 標準
+        model の窓) でよい。
 
         Returns:
             True if a notification message was injected.
@@ -53,7 +64,9 @@ class DynamicStateManager:
             return False
 
         try:
-            return bool(inject_diff_notifications(persona, manager, building_id))
+            return bool(inject_diff_notifications(
+                persona, manager, building_id, model_key=model_key,
+            ))
         except Exception:
             LOGGER.exception(
                 "[dynamic_state] maybe_inject_event_messages (via head_pipeline) failed for %s/%s",
@@ -85,9 +98,18 @@ class DynamicStateManager:
         if not getattr(persona, "persona_id", None):
             return True
         ok = True
+
         try:
             from sea.head_pipeline import inject_diff_notifications
-            inject_diff_notifications(persona, manager, building_id)
+            # detect_room=False: この直後に入室の push (下) が同じ部屋を積む。
+            # 検知器の部屋の照合まで走らせると、入室が二重に語られる
+            # (docs/intent/room_state_packages.md §6-1 — 入室は末尾の出来事、
+            # 照合は滞在中の Pulse 頭の仕事)。
+            # model_key は渡さない (= 標準 model の窓): 入室は Pulse の外で
+            # 起きる出来事で、この時点に実行の身分 (ExecutionContext) は無い。
+            inject_diff_notifications(
+                persona, manager, building_id, detect_room=False,
+            )
         except Exception:
             LOGGER.warning(
                 "[dynamic_state] pre-dispatch diff inject failed for %s -> %s",
@@ -112,6 +134,8 @@ class DynamicStateManager:
                 other = personas_map.get(oid)
                 if other is None:
                     continue  # user 等・未ロードのペルソナは対象外
+                # model_key は渡さない (= 標準 model の窓): 居合わせる側の
+                # Pulse は走っておらず、その回の実行 model が存在しない。
                 inject_diff_notifications(other, manager, building_id)
         except Exception:
             LOGGER.warning(
@@ -120,30 +144,81 @@ class DynamicStateManager:
             )
             ok = False
 
-        # 移動先の様子 (アイテム一覧・内装画像・居合わせる他ペルソナの外見) を、移動した
-        # 本人の知覚バッファへ push する。head の visual_context は移動で refresh されない
-        # (cache 保護) ため、これが無いと本人は次の Metabolism まで新しい部屋のアイテム/
-        # 内装を正確に知れず、旧部屋のものと誤認しうる (まはー指摘 2026-07-09)。
-        # get_visual_context(include_self=False) は他ペルソナ外見+内装+アイテム(無い時も
-        # 明示)+Fixture を返す。self は head と重複するので除外。消費は本人の次 Pulse。
+        # 部屋の様子 (居合わせる他ペルソナの外見・内装画像・アイテム・設置物) を
+        # パッケージの束のまま、移動した本人の知覚バッファへ届ける。head は
+        # もう部屋を描かない (VisualContextSection 退役、2026-09-06) ので、
+        # 部屋の様子の置き場はこの知覚一つ。self は部屋の性質ではないので除外。
+        # 消費は本人の次 Beat 頭。
+        #
+        # 積むのは全文とは限らない: 同じ部屋の前回のエントリがまだ提示に見えて
+        # いれば差分だけになる (sai_memory/room_state.py — 判定は配達時)。
+        # 行き来のたびに 1 万字級の全文が積み上がるのを止めるため (2026-09-04
+        # まはー裁定)。入室は「体験として新しく見た回」なので末尾 (出来事) —
+        # 機構の置き直し (全文を提示の最古端へ) は検知の自己回復と付記・境界
+        # 前進の相乗りが担う (docs/intent/room_state_packages.md §6)。
+        #
+        # 配送は台帳の outbox (target='perception.room_state'、§11-3-1) — 上の
+        # diff 通知 (perception.push) と同じ FIFO に乗せることで、到着順が
+        # 構造的に決まる。読み順は「出来事は到着順・様子は組成の末尾」
+        # (§11-3 改訂 — 様子は回収 §11-2 が末尾へ寄せる)。台帳の無い環境は
+        # 従来の直接 push に degrade する (通知の direct 経路と同型)。束は
+        # queue 時に凍結。
+        #
+        # ここは滞在中の検知 (_detect_room_state_changes) と違い、組成中に本人が
+        # さらに移動していても「配送の荷物の行き先 (building_id)」へ積むのが
+        # 現行契約 — 遅延配送が古い部屋を積みうる性質は
+        # docs/issues/entry_delivery_retry_duplicates_room_perception.md
+        # (遅延の混入) として起票済みで、現在地の再確認はそこの裁定に合流する。
         try:
-            from builtin_data.tools.get_visual_context import get_visual_context
+            from builtin_data.tools.get_visual_context import build_room_bundle
             from tools.context import persona_context
             pid = getattr(persona, "persona_id", None)
             pdir = getattr(persona, "persona_dir", None)
             sai_mem = getattr(persona, "sai_memory", None)
             if pid and sai_mem is not None:
                 with persona_context(pid, pdir, manager):
-                    # for_perception=True: 知覚バッファ向けの簡潔記法・<system> 包みなし。
-                    vc_messages = get_visual_context(
-                        building_id=building_id, include_self=False, for_perception=True,
-                    )
-                if vc_messages:
-                    vc = vc_messages[0]
-                    content = (vc.get("content") or "").strip()
-                    media = (vc.get("metadata") or {}).get("media") or []
-                    if content:
-                        sai_mem.push_perception("surroundings", content, media=media)
+                    bundle = build_room_bundle(building_id)
+                if bundle:
+                    allow_diff = _chronicle_enabled(persona, manager)
+                    ledger = getattr(manager, "execution_ledger", None)
+                    if ledger is not None:
+                        from saiverse.execution_ledger_wiring import (
+                            TARGET_PERCEPTION_ROOM_STATE,
+                        )
+                        execution_id, _created = ledger.begin_execution(
+                            "room_state.entry_push",
+                            idempotency_key=None, persona_id=pid,
+                        )
+                        ledger.mark_running(execution_id)
+                        ledger.mark_applied(
+                            execution_id,
+                            result={"building_id": building_id},
+                            outbox_items=[{
+                                "target": TARGET_PERCEPTION_ROOM_STATE,
+                                "persona_id": pid,
+                                "payload": {
+                                    "building_id": building_id,
+                                    "bundle": bundle,
+                                    "allow_diff": allow_diff,
+                                },
+                            }],
+                            deliver=True,
+                        )
+                    elif not sai_mem.is_ready():
+                        # push_room_state は未 ready を黙って return する —
+                        # ここで検めないと ok=True のまま知覚が静かに失われる。
+                        # 台帳あり側 (perception.room_state handler) の
+                        # 「未 ready は例外で pending に残す」と対称の失敗扱い。
+                        LOGGER.warning(
+                            "[dynamic_state] surroundings push skipped: "
+                            "SAIMemory not ready for %s -> %s",
+                            pid, building_id,
+                        )
+                        ok = False
+                    else:
+                        sai_mem.push_room_state(
+                            building_id, bundle, allow_diff=allow_diff,
+                        )
         except Exception:
             LOGGER.warning(
                 "[dynamic_state] surroundings push on entry failed -> %s",
@@ -191,6 +266,37 @@ class DynamicStateManager:
         return _dispatch_head_event(
             persona, manager, building_id, "metabolism", model_key=model_key,
         )
+
+
+def _chronicle_enabled(persona: Any, manager: Any) -> bool:
+    """このペルソナが Chronicle 編纂を有効にしているか (判定不能なら有効側)。
+
+    「部屋の様子」を差分に縮めてよいかの門。Chronicle 無効のペルソナは提示窓
+    (anchor) でバッチを忘れる — 付記が起きないので、差分の土台になった全文が
+    移管を経ずに提示から消えうる。そのため無効なら毎回全文を積む
+    (sai_memory/room_state.py の「既知の境界」)。判定不能なときに有効側へ倒す
+    のは、提示側の同じ門 (sea/runtime_context._chronicle_enabled_for) と揃える
+    ため — 二つが食い違うと、窓で忘れる側なのに差分を積む組み合わせができる。
+    """
+    try:
+        # runtime のたどり方は兄弟三箇所 (sea/head_pipeline/integration.py /
+        # sections/memory_weave.py / saiverse/day_plan.py) と同じ二段の別名
+        # 引き。sea_runtime だけを見ていると、runtime 側の名前しか持たない
+        # manager で lifecycle が引けず、無効のペルソナにも差分を積んでしまう。
+        runtime = (
+            getattr(manager, "sea_runtime", None)
+            or getattr(manager, "runtime", None)
+        )
+        lifecycle = getattr(runtime, "session_lifecycle", None)
+        if lifecycle is None:
+            return True
+        return bool(lifecycle.is_chronicle_enabled_for_persona(persona))
+    except Exception:
+        LOGGER.debug(
+            "[dynamic_state] chronicle toggle lookup failed; "
+            "treating the persona as chronicle-enabled", exc_info=True,
+        )
+        return True
 
 
 def _dispatch_head_event(

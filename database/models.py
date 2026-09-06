@@ -570,11 +570,17 @@ class UserSettings(Base):
     # Metabolism 二水位 (文字数) の全体既定 (2026-09-03)。NULL = 未設定 (組み込み既定に
     # 従う)。優先順位は 組み込み既定 < この全体設定 < モデル定義 (metabolism_*_chars)。
     # 起動時と PUT /api/config/metabolism-defaults 成功時に
-    # saiverse.model_configs.set_global_metabolism_defaults へ写される。
+    # saiverse.model_configs.set_global_watermark_defaults へ写される。
     # 旧 METABOLISM_LOW_CHARS 列は低水位の廃止 (2026-09-04) で削除 — 既存 DB の列は
     # migrate.py の全書換 (extra 列を運ばない) が落とす。
     METABOLISM_TARGET_CHARS = Column(Integer, nullable=True)
     METABOLISM_HIGH_CHARS = Column(Integer, nullable=True)
+    # 知覚 (部屋の様子などの記録) の提示上限の二水位の全体既定 (2026-09-05)。
+    # 同じ三層・同じ NULL の意味で、モデル定義側のキーは perception_*_chars。
+    # docs/intent/perception_buffer.md §10.9。既存 DB には additive マイグレーションが
+    # 列を足す (既存行は NULL = 未設定)。
+    PERCEPTION_TARGET_CHARS = Column(Integer, nullable=True)
+    PERCEPTION_HIGH_CHARS = Column(Integer, nullable=True)
 
 
 class AddonConfig(Base):

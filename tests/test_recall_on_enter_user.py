@@ -33,7 +33,13 @@ class RecallOnEnterKindTests(unittest.TestCase):
             return f"recall:{occupant_id}"
 
         self.persona = SimpleNamespace(
-            history_manager=SimpleNamespace(recall_conversation_with=_recall),
+            history_manager=SimpleNamespace(
+                recall_conversation_with=_recall,
+                # 再会の門 (2026-09-05): 種別の判定を見るテストなので門は常に開く。
+                # 門そのものの契約は tests/test_recall_on_enter_gate.py。
+                should_recall_persona=lambda *args, **kwargs: True,
+            ),
+            id_to_name_map={},
         )
         self.sai_mem = SimpleNamespace(
             push_perception=lambda kind, text: self.pushed.append((kind, text)),

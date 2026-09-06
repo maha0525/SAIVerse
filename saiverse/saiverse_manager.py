@@ -313,13 +313,16 @@ class SAIVerseManager(
                 if settings and settings.SELECTED_META_PLAYBOOK:
                     self.state.current_playbook = settings.SELECTED_META_PLAYBOOK
                     logging.info("Loaded saved meta playbook: %s", settings.SELECTED_META_PLAYBOOK)
-                # Metabolism 二水位の全体既定 (user_settings → model_configs のモジュール
-                # 変数へ写す)。model_configs は DB を触らない約束なので写すのはここと
-                # PUT /api/config/metabolism-defaults の二箇所 (docs/concepts/metabolism.md)。
-                from saiverse.model_configs import set_global_metabolism_defaults
-                set_global_metabolism_defaults({
+                # 水位の全体既定 (user_settings → model_configs のモジュール変数へ写す)。
+                # Metabolism の二水位と知覚の二水位を一枚で持つ。model_configs は DB を
+                # 触らない約束なので写すのはここと PUT /api/config/metabolism-defaults の
+                # 二箇所 (docs/concepts/metabolism.md)。
+                from saiverse.model_configs import set_global_watermark_defaults
+                set_global_watermark_defaults({
                     "metabolism_target_chars": settings.METABOLISM_TARGET_CHARS if settings else None,
                     "metabolism_high_chars": settings.METABOLISM_HIGH_CHARS if settings else None,
+                    "perception_target_chars": settings.PERCEPTION_TARGET_CHARS if settings else None,
+                    "perception_high_chars": settings.PERCEPTION_HIGH_CHARS if settings else None,
                 })
             finally:
                 db.close()

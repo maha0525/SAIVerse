@@ -80,6 +80,36 @@ def test_diff_notifies_on_building_change():
     assert any(label.kind == "building_changed" for label in labels)
 
 
+def test_building_change_emits_only_the_move_notification():
+    """§11-3 改訂 (room_state_packages.md): 移動 diff は移動通知一枚だけ。
+
+    役割・指示の独立ラベルは 2026-09-07 に退役 — 指示は束の building:prompt
+    パッケージ (部屋の様子の全文の ## Building 節) が運ぶ。移動先に
+    base_system_instruction があってもラベルは増えない。移動通知は metadata で
+    型付けされる (回収の畳みがこの型で識別する — §11-3-2)。
+    """
+    section = BuildingSection()
+    old = BuildingSnapshot(
+        building_id="b1", name="One", base_system_instruction="a",
+        physical_vessel_id=None,
+    )
+    new = BuildingSnapshot(
+        building_id="b2", name="Two", base_system_instruction="b",
+        physical_vessel_id="stackchan-001",
+    )
+    labels = section.diff_to_notifications(old, new)
+    assert [label.kind for label in labels] == ["building_changed"]
+    # 移動一行 + vessel 行のみ — 役割・指示は含まない。
+    assert "現在地が「One」から「Two」に変わりました" in labels[0].label
+    assert "物理身体: あり (vessel_id=stackchan-001)" in labels[0].label
+    assert "役割・指示" not in labels[0].label
+    assert labels[0].metadata == {
+        "label_kind": "building_changed",
+        "from_id": "b1", "from_name": "One",
+        "to_id": "b2", "to_name": "Two",
+    }
+
+
 def test_diff_notifies_on_system_prompt_change():
     section = BuildingSection()
     old = BuildingSnapshot(
