@@ -705,12 +705,7 @@ def latest_visible_snapshot(
     from sai_memory.perception_buffer import list_presented_batches
 
     try:
-        rows = conn.execute(
-            "SELECT metadata FROM perception_buffer "
-            "WHERE consumed_at IS NULL AND kind = ? "
-            "ORDER BY created_at DESC, id DESC",
-            (ROOM_STATE_KIND,),
-        ).fetchall()
+        matched, bundle = pending_room_bundle(conn, key)
     except sqlite3.OperationalError:
         LOGGER.warning(
             "[room_state] could not read pending perceptions while looking for "
@@ -718,11 +713,6 @@ def latest_visible_snapshot(
             exc_info=True,
         )
         return None
-    matched, bundle = first_room_bundle(
-        (state for (metadata,) in rows
-         if (state := _parse_item_state(metadata)) is not None),
-        key,
-    )
     if matched:
         return bundle
 
@@ -1137,6 +1127,39 @@ def find_current_room_key(conn: sqlite3.Connection) -> Optional[str]:
     return None
 
 
+def pending_room_bundle(
+    conn: sqlite3.Connection, key: str,
+) -> Tuple[bool, Optional[Dict[str, Any]]]:
+    """pending (未消費) の同部屋の**最初の一致** (:func:`first_room_bundle` の一枚)。
+
+    材料探し (:func:`_latest_room_bundle`) の pending 段と、その見積もり
+    (sea/runtime_context._room_reseat_projection) が同じこの読みを通る。実物の
+    材料探しは pending を先に見て、最初の一致が旧形式の遺物なら材料なし =
+    fresh_bundle の無い hook 経路の置き直しは発火しない — pending を見ない
+    見積もりが提示列の有効束でコストを加算すると、起きない置き直しのぶん
+    境界が必要以上に進み、まだ提示できた履歴を不可逆に下ろす (2026-09-06
+    Codex 指摘。バッチ記録の遺物は六巡目で揃えたが、pending の遺物が漏れて
+    いた)。
+
+    **読み取りに失敗したら例外をそのまま送出する** —
+    :func:`find_current_room_key` と同じ契約 (2026-09-06 四巡目修正 1)。
+
+    Returns:
+        :func:`first_room_bundle` と同じ ``(matched, bundle)``。
+    """
+    rows = conn.execute(
+        "SELECT metadata FROM perception_buffer "
+        "WHERE consumed_at IS NULL AND kind = ? "
+        "ORDER BY created_at DESC, id DESC",
+        (ROOM_STATE_KIND,),
+    ).fetchall()
+    return first_room_bundle(
+        (state for (metadata,) in rows
+         if (state := _parse_item_state(metadata)) is not None),
+        key,
+    )
+
+
 def _latest_room_bundle(
     conn: sqlite3.Connection, key: str,
 ) -> Tuple[Optional[Dict[str, Any]], Optional[int]]:
@@ -1163,17 +1186,7 @@ def _latest_room_bundle(
     修正 1)。材料なしを装うと、hook は置き直しなしで付記・境界前進を commit
     してしまう。
     """
-    rows = conn.execute(
-        "SELECT metadata FROM perception_buffer "
-        "WHERE consumed_at IS NULL AND kind = ? "
-        "ORDER BY created_at DESC, id DESC",
-        (ROOM_STATE_KIND,),
-    ).fetchall()
-    matched, bundle = first_room_bundle(
-        (state for (metadata,) in rows
-         if (state := _parse_item_state(metadata)) is not None),
-        key,
-    )
+    matched, bundle = pending_room_bundle(conn, key)
     if matched:
         # bundle が None なら「最新が旧形式・不正束 — 古い束へは遡らない (§9)」。
         return bundle, None
@@ -1195,11 +1208,17 @@ def _latest_room_bundle(
 def pending_has_room(conn: sqlite3.Connection, key: str) -> bool:
     """pending (未消費) にこの部屋のエントリが居るか — 置き直しの発火の門。
 
-    True なら次の消費が部屋を運ぶので、置き直しは発火しない。**読み取りに
-    失敗したら例外をそのまま送出する** (「pending なし」の False に化かさない
-    — 2026-09-06 四巡目修正 1)。False を装うと、失敗しただけの回に不要な
-    置き直しが積まれ、下ろし計画 (sea/runtime_context) は起きない置き直しの
-    コストで境界を必要以上に進める。
+    True なら次の消費が部屋を運ぶので、置き直しは発火しない。数えるのは
+    **回収を生き残る有効なエントリだけ** — 旧形式の遺物 (:func:`is_legacy_entry`)
+    は直後の消費の回収 (:func:`reclaim_pending_perceptions` — intent §11-2) が
+    落とすので、「次の消費が運ぶ」の前提が成立しない (遺物をキー一致だけで
+    数えると、移行したペルソナの最初の Pulse が部屋なしで送信される —
+    2026-09-06 実機)。
+
+    **読み取りに失敗したら例外をそのまま送出する** (「pending なし」の False に
+    化かさない — 2026-09-06 四巡目修正 1)。False を装うと、失敗しただけの回に
+    不要な置き直しが積まれ、下ろし計画 (sea/runtime_context) は起きない
+    置き直しのコストで境界を必要以上に進める。
     """
     rows = conn.execute(
         "SELECT metadata FROM perception_buffer "
@@ -1208,7 +1227,7 @@ def pending_has_room(conn: sqlite3.Connection, key: str) -> bool:
     ).fetchall()
     for (metadata,) in rows:
         state = _parse_item_state(metadata)
-        if state and state.get("key") == key:
+        if state and state.get("key") == key and not is_legacy_entry(state):
             return True
     return False
 

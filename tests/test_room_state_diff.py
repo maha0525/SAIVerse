@@ -57,6 +57,7 @@ from sai_memory.room_state import (
     find_current_room_key,
     is_legacy_entry,
     latest_visible_snapshot,
+    pending_has_room,
     reclaim_pending_perceptions,
     render_room_diff,
     render_room_full,
@@ -918,6 +919,95 @@ class ReseatReadFailureTest(RoomStateLedgerTestBase):
         )
         with self.assertRaises(sqlite3.OperationalError):
             reseat_current_room(failing, fresh_bundle=self.bundle_a)
+
+
+class PendingRoomGateLegacyTest(RoomStateLedgerTestBase):
+    """発火の門 (pending_has_room) は遺物を数えない (2026-09-06 実機所見)。
+
+    移行したペルソナの最初の会話 Pulse: pending には旧形式の遺物 (文字列
+    snapshot) だけが居る。検知は「部屋が提示に見えない」と正しく判定して
+    自己回復 (:func:`reseat_current_room` + fresh_bundle) を呼ぶが、門が遺物を
+    キー一致だけで「次の消費が部屋を運ぶ」と数えると、その遺物は直後の消費の
+    回収 (:func:`reclaim_pending_perceptions` — intent §11-2) が落とす — 門の
+    前提が嘘になり、部屋なしで送信される。数えてよいのは回収を生き残る有効な
+    エントリだけ。
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.key = room_key("b1")
+        self.bundle_a = self.env.bundle()
+
+    def _push_legacy_pending(self):
+        """旧世代の push が積んだ形の未消費エントリ (snapshot が文字列)。"""
+        text = "# 「工房」の様子\n旧世代の全文。"
+        return push_perception(
+            self.conn, ROOM_STATE_KIND, text,
+            metadata=json.dumps(
+                {"room_state":
+                     {"key": self.key, "is_diff": False, "snapshot": text}},
+                ensure_ascii=False,
+            ),
+        )
+
+    def test_a_legacy_only_pending_does_not_count_as_a_carrier(self):
+        self._push_legacy_pending()
+        self.assertFalse(pending_has_room(self.conn, self.key))
+
+    def test_the_self_recovery_fires_over_a_legacy_only_pending(self):
+        """実機の形 (2026-09-06): 遺物だけの pending は置き直しを止めない。"""
+        self._push_legacy_pending()
+        batch_id = reseat_current_room(self.conn, fresh_bundle=self.bundle_a)
+        self.assertIsNotNone(batch_id)
+        batch = self._batch(batch_id)
+        self.assertEqual(batch.rendered_text, render_room_full(self.bundle_a))
+        entry = json.loads(batch.room_state_json)[0]
+        self.assertEqual(entry["key"], self.key)
+        self.assertTrue(entry.get("reseated"))
+
+    def test_the_next_consumption_reclaims_the_legacy_and_the_room_survives(self):
+        """門の前提「次の消費が運ぶ」は遺物では成立しない — 回収が落とす。
+
+        置き直しが立っていれば、消費バッチに部屋が載らなくても提示には
+        置き直しの全文が残る (実機では置き直しが抑止され、部屋なしで送信
+        された)。
+        """
+        self._push_legacy_pending()
+        push_perception(self.conn, "world_state", "ノイズ通知")
+        reseat_id = reseat_current_room(self.conn, fresh_bundle=self.bundle_a)
+        self.assertIsNotNone(reseat_id)
+        self.conn.commit()
+        flushed = self._flush()
+        # 回収が遺物を落とした — 消費バッチは部屋を運ばない。
+        self.assertIsNone(self._batch(flushed).room_state_json)
+        presented = {b.id: b for b in list_presented_batches(self.conn)}
+        self.assertIn(reseat_id, presented)
+        self.assertEqual(
+            presented[reseat_id].rendered_text,
+            render_room_full(self.bundle_a),
+        )
+
+    def test_a_valid_pending_still_suppresses_the_reseat(self):
+        """有効な pending (snapshot が束) は従来どおり門になる — 次の消費が運ぶ。"""
+        self._push("b1", self.bundle_a)
+        self.assertTrue(pending_has_room(self.conn, self.key))
+        self.assertIsNone(
+            reseat_current_room(self.conn, fresh_bundle=self.bundle_a),
+        )
+
+    def test_a_mixed_pending_still_suppresses_the_reseat(self):
+        """遺物 + 有効の混在も門になる — 有効な方が運ぶ。"""
+        self._push_legacy_pending()
+        self._push("b1", self.bundle_a)
+        self.assertTrue(pending_has_room(self.conn, self.key))
+        self.assertIsNone(
+            reseat_current_room(self.conn, fresh_bundle=self.bundle_a),
+        )
+
+    def test_the_exclusion_does_not_leak_into_the_current_room_key(self):
+        """現在地の解決 (find_current_room_key) は遺物も数えたまま — 波及しない。"""
+        self._push_legacy_pending()
+        self.assertEqual(find_current_room_key(self.conn), self.key)
 
 
 class RoomStateSelfRecoveryTest(RoomStateLedgerTestBase):

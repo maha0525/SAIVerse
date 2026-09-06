@@ -961,7 +961,11 @@ def _room_reseat_projection(
     (:func:`sai_memory.room_state.pending_has_room` の門 — 次の消費がその部屋を
     運ぶ)。見積もりにも同じ門を付ける: 現在地のキーの pending があれば
     ``(None, 0)`` — 起きない置き直しを残量に足すと、境界が必要より進む
-    (測る列と送る列の一致が破れる)。
+    (測る列と送る列の一致が破れる)。門は遺物 (旧形式) を数えないが、実物の
+    材料探し (room_state._latest_room_bundle) は pending を先に見て、同部屋の
+    最初の一致が遺物ならそこで材料なしに確定する — 見積もりも同じ読み
+    (:func:`sai_memory.room_state.pending_room_bundle`) を通す (2026-09-06
+    Codex 指摘: pending を見ずに提示列の有効束で加算していた)。
 
     **材料の判定も実物と同じ止まり方**
     (:func:`sai_memory.room_state.first_room_bundle` — 同部屋の最初の一致で
@@ -984,6 +988,7 @@ def _room_reseat_projection(
         find_current_room_key,
         first_room_bundle,
         pending_has_room,
+        pending_room_bundle,
         render_room_full,
     )
 
@@ -994,6 +999,15 @@ def _room_reseat_projection(
             return (None, 0)  # 台帳に部屋の記録が無い — 置き直しは起きない
         if pending_has_room(conn, current_key):
             return (None, 0)  # pending が運ぶ — 置き直しは発火しない
+        matched, _bundle = pending_room_bundle(conn, current_key)
+        if matched:
+            # 門 (有効な pending) を抜けてここで一致するのは旧形式・不正束の
+            # 遺物だけ。実物の材料探し (room_state._latest_room_bundle) は
+            # pending を先に見てこの一致で止まる — 材料なし = hook の置き直しは
+            # 発火しない。提示列の有効束でコストを加算すると、起きない
+            # 置き直しのぶん境界が必要以上に進む (2026-09-06 Codex 指摘 —
+            # バッチ記録の遺物は六巡目で揃えたが、pending の遺物が漏れていた)。
+            return (None, 0)
     else:
         # conn の無い呼び出し (直接のテスト経路) だけの近似: 実物の現在地解決
         # (find_current_room_key — 最新の記録のキー。旧形式も数える) と同じ

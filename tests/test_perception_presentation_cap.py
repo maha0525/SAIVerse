@@ -1258,7 +1258,10 @@ class PerceptionCapPendingRoomGateTest(PerceptionCapTestBase):
 
     実物の置き直し (:func:`sai_memory.room_state.reseat_current_room`) は
     同部屋の pending (未消費) があれば発火しない — 次の消費がその部屋を運ぶ
-    (:func:`sai_memory.room_state.pending_has_room` の門)。見積もり
+    (:func:`sai_memory.room_state.pending_has_room` の門)。有効な pending が
+    無くても、材料探し (:func:`sai_memory.room_state._latest_room_bundle`) は
+    pending を先に見る — 同部屋の最初の一致が旧形式の遺物なら材料なしで、
+    やはり発火しない。見積もり
     (:func:`sea.runtime_context._room_reseat_projection`) だけが提示列から
     全文一枚を加算すると、起きない置き直しのぶん境界が必要より進む
     (保守側だが、測る列と送る列の一致が破れる)。
@@ -1288,20 +1291,61 @@ class PerceptionCapPendingRoomGateTest(PerceptionCapTestBase):
         # 下の水位 = 運搬役 2 枚 (base + diff) を下ろした残り。置き直しの全文を
         # 加算しなければちょうど届く位置なので、加算の有無が境界に出る。
 
-    def _push_pending_room(self, key):
+    def _push_pending_room(self, key, *, snapshot):
+        """未消費の部屋の記録。``snapshot`` は呼び出し側が明示する —
+        本物の push (build_room_state_push) は必ず有効な束を載せるので、
+        文字列を渡した形は既存 DB の遺物 (回収 §11-2 が落とす) の再現。"""
         push_perception(
             self.conn, ROOM_STATE_KIND, "(未消費の部屋の記録)",
             metadata=json.dumps(
-                {"room_state": {"key": key, "is_diff": True}},
+                {"room_state":
+                     {"key": key, "is_diff": True, "snapshot": snapshot}},
                 ensure_ascii=False,
             ),
         )
 
     def test_a_pending_room_removes_the_reseat_cost_from_the_plan(self):
-        self._push_pending_room(self.key)
+        self._push_pending_room(self.key, snapshot=self.bundle_b)
         with self._watermarks(self.totals[2], self.totals[2]):
             planned = _plan_perception_drop(self.persona, self.presented, 0)
         # pending が運ぶので置き直しは起きない — 運搬役 2 枚で止まる。
+        self.assertEqual(planned, self.diff_id)
+
+    def test_a_legacy_pending_also_removes_the_reseat_cost(self):
+        """遺物の pending が同部屋の最新記録なら、置き直しコストは載せない。
+
+        門 (:func:`sai_memory.room_state.pending_has_room`) は遺物を数えない
+        (回収 §11-2 が落とすので「次の消費が運ぶ」が成立しない) が、実物には
+        もう一枚、材料探し (:func:`sai_memory.room_state._latest_room_bundle`)
+        の止まり方がある — pending を先に見て、同部屋の最初の一致 (この遺物)
+        が旧形式なら材料なし = hook の置き直しは発火しない (下の実測)。旧版の
+        このテストは「遺物は運ばれると数えないのでコストは載る」を仕様として
+        固定していたが、それは pending を見ずに提示列の有効束でコストを加算
+        する見積もりの誤りの写しだった — 起きない置き直しのぶん境界が必要以上
+        に進み、まだ提示できた履歴を不可逆に下ろす (2026-09-06 Codex 指摘で
+        確定。検証は下の hook との突き合わせ)。
+        """
+        self._push_pending_room(self.key, snapshot="旧世代の全文 (文字列)。")
+        # 見積もりと計画 — どちらも読みだけ (境界は書かない)。
+        projection = _room_reseat_projection(self.presented, self.conn)
+        with self._watermarks(self.totals[2], self.totals[2]):
+            planned = _plan_perception_drop(self.persona, self.presented, 0)
+        # 実物: 同じ状態で運搬役 2 枚 (base + diff) を実際に下ろす。境界前進と
+        # 同一 tx の hook (fresh_bundle なしの reseat_current_room) が走るが、
+        # 材料探しが pending の遺物で止まるので置き直しは立たない。
+        advance_presentation_cutoff(self.conn, self.diff_id)
+        self.conn.commit()
+        remaining = list_presented_batches(self.conn)
+        self.assertEqual(
+            [b.id for b in remaining], self.filler,
+            "hook は置き直しを作らないはず (材料探しが pending の遺物で止まる)",
+        )
+        self.assertNotIn(
+            render_room_full(self.bundle_b),
+            [b.rendered_text for b in remaining],
+        )
+        # 見積もりは実物に一致する: コストは載らず、計画は運搬役 2 枚で止まる。
+        self.assertEqual(projection, (None, 0))
         self.assertEqual(planned, self.diff_id)
 
     def test_a_pending_in_another_room_means_we_moved_and_no_cost_is_added(self):
@@ -1317,7 +1361,12 @@ class PerceptionCapPendingRoomGateTest(PerceptionCapTestBase):
         「別の部屋の pending は門にならない」を仕様として固定していたが、
         それは見積もりの現在地の誤りの写しだった。
         """
-        self._push_pending_room(room_key("b2"))
+        self._push_pending_room(
+            room_key("b2"),
+            snapshot=_room_bundle(
+                ["移動先の様子。"], building="b2", name="第二工房", key_id="2",
+            ),
+        )
         with self._watermarks(self.totals[2], self.totals[2]):
             planned = _plan_perception_drop(self.persona, self.presented, 0)
         # 現在地は b2 — b1 の置き直しコストは載らず、運搬役 2 枚で止まる。
