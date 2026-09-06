@@ -1620,6 +1620,30 @@ class PerceptionCapReseatCrossingTest(PerceptionCapTestBase):
             [b["created_at"] for b in measured], [b["created_at"] for b in sent],
         )
 
+    def test_room_state_mark_is_identical_between_measuring_and_sending(self):
+        """部屋の印 (``__room_state__``) も測る列と送る列で同一 (2026-09-06 バッジ裁定)。
+
+        プレビューのバッジは metadata の印から引く。幻のブロック (測るだけの
+        回の置き直しの下見) は room_state_json を持たない (実体化前) が、実
+        INSERT されれば記帳つきの置き直しバッチになる — 印まで同一でないと、
+        プレビューにだけ「部屋の様子」のバッジが出ない一枚が立つ。
+        """
+        with self.cap:
+            measured = self._blocks(advance_cutoff=False)
+            sent = self._blocks(advance_cutoff=True)
+        for label, blocks in (("measured", measured), ("sent", sent)):
+            room_blocks = [
+                b for b in blocks if b["metadata"].get("__room_state__")
+            ]
+            # 部屋の全文一枚 (幻 / 実物の置き直し) だけに部屋の印が付く。
+            self.assertEqual(len(room_blocks), 1, label)
+            self.assertIn(self.full, room_blocks[0]["content"], label)
+            # 印つきの行は提示済みの知覚でもある (バッジの親子関係)。
+            self.assertTrue(is_injected_perception(room_blocks[0]), label)
+            # ノイズのバッチには部屋の印は付かない。
+            noise = next(b for b in blocks if "E" * 1_000 in b["content"])
+            self.assertNotIn("__room_state__", noise["metadata"], label)
+
     def test_measuring_does_not_materialize_the_reseat(self):
         """下見は読むだけ — 台帳に新しいバッチ行も境界も書かない。"""
         before = self.conn.execute(

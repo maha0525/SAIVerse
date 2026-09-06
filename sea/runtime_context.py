@@ -1461,6 +1461,15 @@ def list_presented_perception_blocks(
                 # id を持たない — キーごと載せない。読者は .get() で読む
                 # (書き手はここ一枚、他の読み手は本目印を前提にしていない)。
                 metadata["__perception_batch_id__"] = batch.id
+            if batch.room_state_json or batch.id is None:
+                # 部屋の記帳 (room_state_json) を持つバッチは「部屋の様子」。
+                # 幻のブロック (id なし) は置き直しの下見そのもの — 実 INSERT
+                # されれば記帳つきの置き直しバッチになるので、印も実物と同一に
+                # する (測る列と送る列の同一性はバッジまで含めて保つ)。プレビュー
+                # のバッジ用の印で、content には触れない (提示の描画が変わると
+                # キャッシュの前方一致が割れる)。metadata は送信時に message
+                # preparer が落とすので LLM へは渡らない (2026-09-06 バッジ裁定)。
+                metadata["__room_state__"] = True
             media = batch.media_list()
             content_text = batch.rendered_text
             if batch.id in reopened:
@@ -1941,12 +1950,21 @@ def preview_context(
         section_tokens[section] += msg_tokens
         section_msg_counts[section] += 1
 
-        annotated_messages.append({
+        annotated: Dict[str, Any] = {
             "role": msg.get("role", "unknown"),
             "content": msg.get("content", ""),
             "section": section,
             "tokens": msg_tokens,
-        })
+        }
+        if meta.get(CONSUMED_PERCEPTION_KEY):
+            # 提示済みの知覚バッチ (と省略の印) のバッジ (2026-09-06 まはー裁定:
+            # 「単に見やすくなるだけ」に絞る)。節は history のまま動かさず、
+            # 新しい節も集計の行も作らない — 知覚の量の勘定は水位管理が既に
+            # 持っており、二冊目の帳簿を作らない。印のある行だけ真で載せる。
+            annotated["perception_batch"] = True
+            if meta.get("__room_state__"):
+                annotated["room_state"] = True
+        annotated_messages.append(annotated)
 
     # Add estimated attachment tokens
     attachment_tokens = 0

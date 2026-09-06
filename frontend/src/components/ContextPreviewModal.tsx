@@ -18,6 +18,10 @@ interface AnnotatedMessage {
     content: string;
     section: string;
     tokens: number;
+    // 提示済みの知覚バッチ (部屋の様子の置き直し全文など) のバッジ。
+    // 節の分類・集計は変えず、履歴の中のその一通に印が付くだけ (2026-09-06 裁定)。
+    perception_batch?: boolean;
+    room_state?: boolean;
 }
 
 interface PersonaPreview {
@@ -104,6 +108,12 @@ function SectionRow({ section, totalTokens, messages, isExpanded, onToggle }: {
                             <div className={styles.messageMeta}>
                                 <span className={styles.messageRole}>{msg.role}</span>
                                 <span className={styles.messageTokenCount}>{msg.tokens} トークン</span>
+                                {msg.perception_batch && (
+                                    <span className={styles.perceptionBadge}>提示済みの知覚</span>
+                                )}
+                                {msg.room_state && (
+                                    <span className={styles.roomStateBadge}>部屋の様子</span>
+                                )}
                             </div>
                             <pre className={styles.messageContent}>
                                 {msg.content}

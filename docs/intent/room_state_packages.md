@@ -143,6 +143,8 @@
 
 実機所見の残り: 出来事の区切りの印 (③ — [perception_event_boundaries_unclear.md](../issues/perception_event_boundaries_unclear.md))、アイテムの個数上限 (⑤ — [room_items_uncapped.md](../issues/room_items_uncapped.md))、テリスの入室知覚欠落 ([entry_perception_missing_for_fresh_persona.md](../issues/entry_perception_missing_for_fresh_persona.md))。
 
+コンテキストプレビューは提示済みの知覚バッチにその場でバッジを付ける (「単に見やすくなるだけ」の裁定 — 新しい節も集計の行も作らず、content にも触れない。知覚の量の勘定は水位管理が既に持っており、二冊目の帳簿を作らない。2026-09-06 実装: metadata の `__room_state__` と `preview_context` の `perception_batch` / `room_state` フィールド)。
+
 ## 実装メモ (2026-09-06)
 
 **劣化時 (DB の読みが失敗した時) の芯は三つ** — 以下の細目は全部この三原則をそれぞれの場所に適用した記録で、新しい概念は増えていない:
