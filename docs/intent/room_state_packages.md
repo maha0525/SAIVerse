@@ -166,7 +166,7 @@
 
 ### 11-4. スコープ外 (器は別)
 
-実機所見の残り: アイテムの個数上限 (⑤ — [room_items_uncapped.md](../issues/room_items_uncapped.md))、テリスの入室知覚欠落 ([entry_perception_missing_for_fresh_persona.md](../issues/entry_perception_missing_for_fresh_persona.md))。出来事の区切りの印 (③) は一出来事一ラベルで解決し、2026-09-07 に実機確認済み ([archive](../issues/archive/perception_event_boundaries_unclear.md))。
+実機所見の残り: アイテムの個数上限 (⑤ — [room_items_uncapped.md](../issues/room_items_uncapped.md))。出来事の区切りの印 (③) は一出来事一ラベルで解決し、テリスの入室知覚欠落は配達経路の修正群で解消 (原因は不特定のまま再試行で確認) — どちらも 2026-09-07 に実機確認済み ([③](../issues/archive/perception_event_boundaries_unclear.md) / [テリス](../issues/archive/entry_perception_missing_for_fresh_persona.md))。
 
 コンテキストプレビューは提示済みの知覚バッチにその場でバッジを付ける (「単に見やすくなるだけ」の裁定 — 新しい節も集計の行も作らず、content にも触れない。知覚の量の勘定は水位管理が既に持っており、二冊目の帳簿を作らない。2026-09-06 実装: metadata の `__room_state__` と `preview_context` の `perception_batch` / `room_state` フィールド)。
 
