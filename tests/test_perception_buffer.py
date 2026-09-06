@@ -56,7 +56,7 @@ class PerceptionBufferTest(unittest.TestCase):
         reduced = reduce_perceptions(list_pending(self.conn))
         self.assertEqual([it.content for it in reduced], ["a", "b"])
 
-    def test_format_groups_by_kind_with_headers(self):
+    def test_format_adds_headers_by_kind(self):
         push_perception(self.conn, "core_memory_correction", "訂正1")
         push_perception(self.conn, "unknown_kind", "なにか")
         text = format_perception_message(list_pending(self.conn))
@@ -71,6 +71,19 @@ class PerceptionBufferTest(unittest.TestCase):
         text = format_perception_message(list_pending(self.conn))
         self.assertIn("[システム通知]", text)
         self.assertIn("アイフィが入室した", text)
+
+    def test_adjacent_world_states_each_get_a_header(self):
+        # 一出来事一ラベル (issues/perception_event_boundaries_unclear.md 裁定):
+        # 連続する world_state も 1 件ごとに [システム通知] を付ける。
+        # 旧・合流 (連続分を 1 見出しに畳む) は 2026-09-07 に退役した。
+        push_perception(self.conn, "world_state", "エリス が入室しました")
+        push_perception(self.conn, "world_state", "アイフィ が退室しました")
+        text = format_perception_message(list_pending(self.conn))
+        self.assertEqual(text.count("[システム通知]"), 2)
+        # ブロックの並びは発生順のまま。
+        blocks = text.split("\n\n")
+        self.assertEqual(blocks[0], "[システム通知]\nエリス が入室しました")
+        self.assertEqual(blocks[1], "[システム通知]\nアイフィ が退室しました")
 
     def test_persona_recall_has_no_header(self):
         push_perception(self.conn, "persona_recall", "過去の会話: …")
@@ -104,7 +117,7 @@ class PerceptionBufferTest(unittest.TestCase):
         pos_a_return = text.index("B から A")
         self.assertLess(pos_b_arrive, pos_surround)
         self.assertLess(pos_surround, pos_a_return)
-        # world_state が連続してないので [システム通知] 見出しは 2 回出る。
+        # 一出来事一ラベル — world_state 2 件なので [システム通知] は 2 回出る。
         self.assertEqual(text.count("[システム通知]"), 2)
 
     def test_delete_removes_only_given_ids(self):

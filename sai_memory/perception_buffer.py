@@ -1276,27 +1276,19 @@ def format_perception_message(items: List[PerceptionItem]) -> str:
 
     **発生順 (list_pending の created_at→id 順) を保って出す**。型でグルーピングすると
     時系列が壊れ、複数 Building を移動した場合に「後から入室した相手が前の部屋にいた」
-    ように見えてしまう (実運用で発覚, 2026-07-09)。連続する ``world_state`` だけは
-    1 つの見出しにまとめ (通知の乱発を防ぐ)、それ以外の型 (surroundings / correction /
-    persona_recall 等) はその発生位置に独立ブロックとして差し込む。見出しが空文字列の
-    型は content だけを出す。同一 Pulse で消費される全知覚を 1 メッセージにまとめる (C3)。
+    ように見えてしまう (実運用で発覚, 2026-07-09)。
+
+    **一出来事一ラベル**: 出来事 1 件 = 1 ブロック (見出し + content。見出しが
+    空文字列の型は content のみ)。連続する ``world_state`` の合流 (通知の乱発対策)
+    は 2026-09-07 に退役 — 乱発の供給源 (移動通知の堆積) は回収
+    (room_state_packages.md §11-2) が往復を経路一行に畳むようになり、行頭の
+    ``[システム通知]`` が出来事の区切りの印になった
+    (issues/perception_event_boundaries_unclear.md の裁定)。
+
+    同一 Pulse で消費される全知覚を 1 メッセージにまとめる (C3)。
     """
     blocks: List[str] = []
-    i = 0
-    n = len(items)
-    while i < n:
-        kind = items[i].kind
-        if kind == "world_state":
-            # 連続する world_state を 1 見出しにまとめる。
-            group: List[str] = []
-            while i < n and items[i].kind == "world_state":
-                group.append(items[i].content)
-                i += 1
-            header = _KIND_HEADERS.get("world_state", _DEFAULT_HEADER)
-            blocks.append(f"{header}\n" + "\n\n".join(group))
-        else:
-            header = _KIND_HEADERS.get(kind, _DEFAULT_HEADER)
-            content = items[i].content
-            blocks.append(f"{header}\n{content}" if header else content)
-            i += 1
+    for item in items:
+        header = _KIND_HEADERS.get(item.kind, _DEFAULT_HEADER)
+        blocks.append(f"{header}\n{item.content}" if header else item.content)
     return "\n\n".join(blocks)

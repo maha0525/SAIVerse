@@ -158,7 +158,7 @@ Cached Head が「Metabolism まで snapshot を凍結」、visual_context / mem
 - **移動時 push**: `on_building_entered` で移動した本人へ `get_visual_context(include_self=False, for_perception=True)` の内容 (他ペルソナ外見画像 + 内装画像 + Building 内アイテム〔**無い時も明示**〕+ Fixture) を kind=`surroundings` で push。self は head と重複するので除外。消費は本人の次 Pulse。
 - **入室を既存者へ**: 併せて、`on_building_entered` は居合わせる既存ペルソナ全員にも occupant 検知を push する (新入りに自分の次 Pulse を待たず気づける)。
 - **知覚バッファ向けの整形** (2026-07-09): head 記法をそのまま入れるとごちゃつくため:
-  - flush の format は **kind グルーピングでなく発生順**。移動を跨いだとき「後から入室した相手が前の部屋にいた」ように見える崩れを防ぐ (連続する world_state だけ 1 見出しにまとめる)。
+  - flush の format は **kind グルーピングでなく発生順**。移動を跨いだとき「後から入室した相手が前の部屋にいた」ように見える崩れを防ぐ。**一出来事一ラベル** (2026-09-07): 出来事 1 件ごとに見出しを付ける。当初あった「連続する world_state だけ 1 見出しにまとめる」合流 (通知の乱発対策) は退役 — 乱発の供給源 (移動通知の堆積) は回収 ([room_state_packages.md](room_state_packages.md) §11-2) が往復を経路一行に畳むようになり、行頭の `[システム通知]` が出来事の区切りの印になった ([issues/perception_event_boundaries_unclear.md](../issues/perception_event_boundaries_unclear.md) の裁定)。
   - 中身ゼロの **「周囲の見え方が変わりました」フラグは廃止** (`visual_context.diff_to_notifications → []`)。移動時は surroundings が中身を届け、外見変化は head refresh で反映されるため。
   - **`get_visual_context(for_perception=True)`** = バッファ向け記法: 「リアルタイム反映」文言削除 (head は凍結され嘘だったので head 側からも削除) / Building 名を見出しで明示 / 「現在いる」断定回避 (通知後さらに移動しうる) / インベントリ除外 (移動で変わらない) / 「### Building内」見出し省略 / `<system>` 包みなし。head 用 (`for_perception=False`) と記法は分けるが収集ロジックは共通 (処理統一)。
 - **2026-09-05 追記**: 再訪では全文ではなく差分だけを積むようになった (同じ部屋の前回エントリがまだ提示に見えているとき)。組成と、土台が付記で下りたときの回復は §10.8。
