@@ -307,7 +307,7 @@ class RenderRoomDiffContractTest(_EnvTestBase):
         「(Open)」は現在の状態でしかなく、新登場のアイテムと見分けが付かない —
         閉じる側の「(閉じられた)」と対の出来事として語る。説明・作成日時は
         閉じている間も全文ビューに出続けていた (§3 の表) ので再掲しない
-        (保障 2「同じ内容が二枚並ぶことは構造的に無い」)。開いて初めて見える
+        (保証 2「同じ内容が二枚並ぶことは構造的に無い」)。開いて初めて見える
         もの (メディアリンクと絵の実体) だけを出す。
         """
         self.env.items.append(_make_item(
@@ -345,7 +345,7 @@ class RenderRoomDiffContractTest(_EnvTestBase):
         )
         # 本文は開いたことで新しく見えるようになったもの — これは出す。
         self.assertIn("光の扱いはフェルメールに学ぶ。", diff["content"])
-        # 説明は閉じている間も提示に出ていた — 再掲は保障 2 への自己矛盾。
+        # 説明は閉じている間も提示に出ていた — 再掲は保証 2 への自己矛盾。
         self.assertNotIn("非公開のメモ。", diff["content"])
 
     def test_a_gone_document_is_one_label_line_without_its_body(self):
@@ -3186,7 +3186,7 @@ class ConsumptionTimeRenderingTest(RoomStateLedgerTestBase):
     未消費に [途中の様子 + 型付き移動通知 2 組 + 最後の様子] が積まれた形。
     旧実装は積む時に描画して土台を pending から選ぶ (最後の様子の base_digest =
     捨てられる途中の pending の指紋) が、回収 (§11-2) は途中の pending を必ず
-    捨てるので連なりが切れ、消費時の開き直しがもう一枚の全文を立てて保障 2
+    捨てるので連なりが切れ、消費時の開き直しがもう一枚の全文を立てて保証 2
     (同じ内容が二枚並ばない) を破った。
 
     green: 描画が消費の組成の一回になると、土台は常に「提示に見えている同部屋の
@@ -3241,7 +3241,7 @@ class ConsumptionTimeRenderingTest(RoomStateLedgerTestBase):
         batch = self._batch(batch_id)
         text = batch.rendered_text
         # 提示済みの置き直し (束 A の全文) が生きているのに、もう一枚の全文が
-        # 立ってはならない (保障 2)。
+        # 立ってはならない (保証 2)。
         self.assertNotIn(render_room_full(self.bundle_b), text)
         self.assertNotIn("覚え書き", text)  # 変わっていないパッケージは再掲しない
         # 出力は A→B の差分 — 新しく現れたパッケージだけ + そのメディア。
