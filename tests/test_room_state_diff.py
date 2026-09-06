@@ -46,6 +46,7 @@ from sai_memory.perception_buffer import (
     push_perception,
     reduce_perceptions,
 )
+from sai_memory.perception_buffer import PerceptionItem
 from sai_memory.room_state import (
     ROOM_STATE_KIND,
     build_room_state_push,
@@ -2807,7 +2808,12 @@ def _typed_move_meta(from_id, from_name, to_id, to_name):
 
 
 def _typed_instruction_meta(building_id, building_name):
-    """型付きの役割・指示 metadata (書き手 = 同上)。"""
+    """型付きの役割・指示 metadata — 書き手は 2026-09-07 に退役 (§11-3 改訂)。
+
+    旧コードが積んだ遺物の再現材料。回収 (§11-2 規則 3) が無条件で破棄する
+    (指示は束の building:prompt パッケージが運ぶので、独立エントリは様子との
+    重複)。
+    """
     return json.dumps({
         "label_kind": "building_instruction",
         "building_id": building_id, "building_name": building_name,
@@ -2818,8 +2824,9 @@ class _RoundTripMixin:
     """往復 (b1 → b2 → b1) の未消費バッファを積む共通手順。
 
     実機所見 ④ (2026-09-07、アイフィ) の再現: 部屋の全文が往復のたびに積み重なり、
-    移動通知・指示が間に挟まる。回収 (§11-2) 後は「経路一行 + 最終の指示 +
-    最終の様子 (全文)」だけが残るはずの並び。
+    移動通知・指示 (指示の書き手は同日中に退役 — 旧コードの遺物) が間に挟まる。
+    回収 (§11-2) 後は「経路一行 + 最終の様子 (全文、組成の末尾)」だけが残る
+    はずの並び — 指示エントリは遺物として消える (§11-3 改訂)。
     """
 
     ROUTE_LINE = "この間に現在地が移動しました: 「工房」 → 「書斎」 → 「工房」"
@@ -2867,7 +2874,7 @@ class _RoundTripMixin:
 class PendingReclaimTest(_RoundTripMixin, RoomStateLedgerTestBase):
     """§11-2: 回収の一枚 — 往復の堆積・旧形式の遺物・配達重複の自己修復。"""
 
-    def test_a_round_trip_collapses_to_route_last_instruction_and_last_room(self):
+    def test_a_round_trip_collapses_to_route_and_last_room(self):
         self._stack_round_trip()
         batch_id = self._flush()
         text = self._batch(batch_id).rendered_text
@@ -2879,14 +2886,18 @@ class PendingReclaimTest(_RoundTripMixin, RoomStateLedgerTestBase):
         self.assertNotIn("現在地が「書斎」から「工房」に変わりました", text)
         self.assertNotIn("書斎では静かに。", text)
         self.assertNotIn("# 「書斎」の様子", text)
-        # 最終の部屋の指示は残る。
-        self.assertIn("工房の指示。", text)
-        # 最終の様子は消費時描画 — 提示に同部屋の末尾が無いので全文になる。
+        # 指示エントリは遺物として消える — 最終の部屋のものも残らない
+        # (§11-3 改訂。指示は束の building:prompt パッケージが運ぶ)。
+        self.assertNotIn("工房の指示。", text)
+        # 最終の様子は消費時描画 — 提示に同部屋の末尾が無いので全文になり、
+        # 建物の指示は全文の ## Building 節 (building:prompt) に出る。
         self.assertIn(render_room_full(self.bundle_a2), text)
         self.assertEqual(text.count("# 「工房」の様子"), 1)
-        # 読み順: 経路 → 指示 → 様子。
-        self.assertLess(text.index(self.ROUTE_LINE), text.index("工房の指示。"))
-        self.assertLess(text.index("工房の指示。"), text.index("# 「工房」の様子"))
+        self.assertIn("ここは創作の工房。", text)
+        # 読み順: 経路 (出来事) → 様子 (組成の末尾)。
+        self.assertLess(
+            text.index(self.ROUTE_LINE), text.index("# 「工房」の様子"),
+        )
         # 開き直しの全文にはそのメディアも付く (§5 の復元)。
         self.assertEqual(
             [m["path"] for m in self._batch(batch_id).media_list()],
@@ -2989,8 +3000,42 @@ class PendingReclaimTest(_RoundTripMixin, RoomStateLedgerTestBase):
         batch_id = self._flush()
         text = self._batch(batch_id).rendered_text
         self.assertIn("現在地が「工房」から「書斎」に変わりました", text)
-        self.assertIn("書斎では静かに。", text)
         self.assertNotIn("この間に現在地が移動しました", text)
+        # 指示エントリは移動 1 件でも遺物として破棄される (§11-2 規則 3)。
+        self.assertNotIn("書斎では静かに。", text)
+
+    def test_an_instruction_entry_is_dropped_even_without_moves(self):
+        """型付き指示エントリは移動 0 件でも破棄される (§11-2 規則 3 の遺物)。"""
+        push_perception(
+            self.conn, "world_state",
+            "# 「工房」の役割・指示\n工房の指示。",
+            metadata=_typed_instruction_meta("b1", "工房"),
+        )
+        push_perception(self.conn, "world_state", "生きている通知")
+        batch_id = self._flush()
+        text = self._batch(batch_id).rendered_text
+        self.assertNotIn("工房の指示。", text)
+        self.assertIn("生きている通知", text)
+        # 破棄した行にも消費済みの印は付く (台帳の行は消さない)。
+        self.assertEqual(list_pending(self.conn), [])
+
+    def test_the_room_state_moves_to_the_tail_after_events(self):
+        """様子は状態であって出来事ではない — 出来事より後 (組成の末尾) に出る。
+
+        実機 (2026-09-07): エリスの入室通知より先に部屋の差分 ([エリスの外見])
+        が出て、因果が逆に読めた。pending が [様子, 出来事] の順でも、回収が
+        様子一枚だけを末尾へ動かす (§11-2 規則 2 / §11-3 改訂)。
+        """
+        self._push("b1", self.env.bundle())
+        push_perception(self.conn, "world_state", "エリスがやって来ました")
+        batch_id = self._flush()
+        text = self._batch(batch_id).rendered_text
+        self.assertIn("エリスがやって来ました", text)
+        self.assertIn("# 「工房」の様子", text)
+        self.assertLess(
+            text.index("エリスがやって来ました"),
+            text.index("# 「工房」の様子"),
+        )
 
     def test_untyped_move_notifications_are_not_collapsed(self):
         """metadata の無い旧ラベルの通知は畳まない (§11-3-2 — 小さいので実害なし)。"""
@@ -3064,6 +3109,71 @@ class PendingPreviewParityTest(_RoundTripMixin, RoomStateLedgerTestBase):
         self.assertIn(self.ROUTE_LINE, preview_text)
         batch_id = self._flush()
         self.assertEqual(preview_text, self._batch(batch_id).rendered_text)
+
+
+class ReclaimReturnListTest(unittest.TestCase):
+    """§11-2: 回収 (純関数) の返却列の同一性と並びを直接ピン留めする。
+
+    文面レベルのテスト (PendingReclaimTest) と独立に、「エントリの重複・欠落・
+    順序破壊が起きない」を item の同一性 (id) で検証する — happy path の期待
+    文面だけでは、将来の実装変更でこの契約が崩れても検出できない
+    (2026-09-07 Codex 指摘の採用)。
+    """
+
+    def _item(self, item_id, kind="world_state", content="x", metadata=None):
+        return PerceptionItem(
+            id=item_id, kind=kind, content=content, reduce_key=None,
+            salient=0, media=None, metadata=metadata, created_at=item_id,
+        )
+
+    def _room(self, item_id, building_id="b1"):
+        state = {
+            "key": f"building:{building_id}",
+            "snapshot": {
+                "building_id": building_id, "building_name": "工房",
+                "packages": [],
+            },
+            "allow_diff": True,
+        }
+        return self._item(
+            item_id, kind=ROOM_STATE_KIND, content="(束)",
+            metadata=json.dumps({"room_state": state}, ensure_ascii=False),
+        )
+
+    def test_room_already_at_tail_is_untouched(self):
+        items = [self._item(1), self._room(2)]
+        out = reclaim_pending_perceptions(items)
+        self.assertEqual([i.id for i in out], [1, 2])
+        self.assertIs(out[0], items[0])
+        self.assertIs(out[1], items[1])
+
+    def test_no_room_state_keeps_order(self):
+        items = [self._item(1), self._item(2)]
+        out = reclaim_pending_perceptions(items)
+        self.assertEqual([i.id for i in out], [1, 2])
+
+    def test_all_entries_can_be_reclaimed_to_empty(self):
+        items = [
+            self._item(1, metadata=_typed_instruction_meta("b1", "工房")),
+        ]
+        self.assertEqual(reclaim_pending_perceptions(items), [])
+
+    def test_trail_replacement_and_tail_move_together(self):
+        """[様子, 移動1, 移動2] → [経路一行 (移動2 の行), 様子] — 重複も欠落もない。
+
+        畳みの差し替え (経路一行は最後の移動通知の位置) と末尾寄せ (様子は
+        組成の末尾) が同時に起きる合流ケース。
+        """
+        items = [
+            self._room(1),
+            self._item(2, metadata=_typed_move_meta("b1", "工房", "b2", "書斎")),
+            self._item(3, metadata=_typed_move_meta("b2", "書斎", "b1", "工房")),
+        ]
+        out = reclaim_pending_perceptions(items)
+        self.assertEqual([i.id for i in out], [3, 1])
+        self.assertTrue(out[0].content.startswith("この間に現在地が移動しました"))
+        self.assertIn("「工房」 → 「書斎」 → 「工房」", out[0].content)
+        self.assertIs(out[1], items[0])  # 様子は束の記帳のまま (描画は消費時)
 
 
 class ConsumptionTimeRenderingTest(RoomStateLedgerTestBase):
@@ -3198,12 +3308,13 @@ class ConsumptionTimeRenderingTest(RoomStateLedgerTestBase):
 
 
 class EntryDeliveryOrderTest(_EnvTestBase):
-    """§11-3: 入室配送は一回の flush で 通知 → 指示 → 様子 の順に揃って着地する。
+    """§11-3: 入室配送は一回の flush で 通知 → 様子 の順に揃って着地する。
 
     逆順の正体 (2026-09-07 調査): 通知は outbox 経由・様子は直接 push という
     配送機構の非対称 + 再入検知による通知の見送り + _flush_queue が配送中に
     積まれた項目を配らないこと。修正後は様子も outbox に乗り、同一 FIFO の
-    配り直しで順序が構造的に決まる。
+    配り直しで順序が構造的に決まる。役割・指示の独立ラベルは退役 (§11-3 改訂)
+    — 指示は様子の全文の ## Building 節 (束の building:prompt) が運ぶ。
     """
 
     PID = "p1"
@@ -3302,7 +3413,7 @@ class EntryDeliveryOrderTest(_EnvTestBase):
         ctx = SimpleNamespace(persona_id=persona.persona_id)
         return hp._push_section_diffs(persona, manager, pipeline, ctx, building_id)
 
-    def test_one_flush_lands_notification_instruction_then_room(self):
+    def test_one_flush_lands_notification_then_room(self):
         eid, created = self.ledger.begin_execution(
             "move.entity", persona_id=self.PID,
         )
@@ -3334,7 +3445,7 @@ class EntryDeliveryOrderTest(_EnvTestBase):
             done = self.ledger.flush_pending_for_persona(self.PID)
             expected_bundle = gvc.build_room_bundle("b2")
 
-        # 一回の flush で全量配送 (通知・指示・様子が pending に残らない)。
+        # 一回の flush で全量配送 (通知・様子が pending に残らない)。
         self.assertTrue(done)
         with self.adapter._db_lock:
             rows = self.adapter.conn.execute(
@@ -3342,10 +3453,8 @@ class EntryDeliveryOrderTest(_EnvTestBase):
                 "ORDER BY id ASC"
             ).fetchall()
         kinds = [r[0] for r in rows]
-        self.assertEqual(
-            kinds, ["world_state", "world_state", ROOM_STATE_KIND],
-        )
-        # (1) 移動通知 — 一行 + vessel 行のみ (役割・指示は含まない)。
+        self.assertEqual(kinds, ["world_state", ROOM_STATE_KIND])
+        # (1) 移動通知 — 一行のみ (役割・指示の独立ラベルは退役 — §11-3 改訂)。
         self.assertIn("現在地が「工房」から「書斎」に変わりました", rows[0][1])
         self.assertNotIn("役割・指示", rows[0][1])
         meta0 = json.loads(rows[0][2])
@@ -3353,14 +3462,13 @@ class EntryDeliveryOrderTest(_EnvTestBase):
         self.assertEqual(meta0.get("from_id"), "b1")
         self.assertEqual(meta0.get("to_id"), "b2")
         self.assertEqual(meta0.get("to_name"), "書斎")
-        # (2) 役割・指示。
-        self.assertTrue(rows[1][1].startswith("# 「書斎」の役割・指示"))
-        meta1 = json.loads(rows[1][2])
-        self.assertEqual(meta1.get("label_kind"), "building_instruction")
-        self.assertEqual(meta1.get("building_id"), "b2")
-        # (3) 部屋の様子 — 実組成の束の全文。
+        # (2) 部屋の様子 — 実組成の束の全文。指示 (システムプロンプト) は
+        # 全文の ## Building 節 (束の building:prompt パッケージ) が運ぶ。
         self.assertIsNotNone(expected_bundle)
-        self.assertEqual(rows[2][1], render_room_full(expected_bundle))
+        self.assertEqual(rows[1][1], render_room_full(expected_bundle))
+        self.assertIn("## Building", rows[1][1])
+        self.assertIn("ここは書斎。", rows[1][1])
+        self.assertIn("静かに使うこと。", rows[1][1])
 
 
 if __name__ == "__main__":

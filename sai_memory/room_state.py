@@ -90,6 +90,9 @@ ROOM_STATE_META_KEY = "room_state"
 #: 写す)、読み手は :func:`reclaim_pending_perceptions` (§11-2 の移動群の畳み)。
 LABEL_KIND_META_KEY = "label_kind"
 LABEL_KIND_BUILDING_CHANGED = "building_changed"
+#: 役割・指示エントリの型。書き手は 2026-09-07 に退役 (§11-3 改訂 — 指示は束の
+#: building:prompt パッケージが運ぶ) — 回収 (§11-2 規則 3) が旧コードの積んだ
+#: 遺物を識別するためだけに残る。
 LABEL_KIND_BUILDING_INSTRUCTION = "building_instruction"
 
 #: 経路一行 (§11-2 の移動群の畳みの合成文) の書き出し。
@@ -561,34 +564,40 @@ def reclaim_pending_perceptions(items: Sequence[Any]) -> List[Any]:
 
     未消費の知覚は定義上どの Pulse もまだ読んでいない (§11-1) — ここで畳んでも
     提示済みの列には 1 バイトも触れず、前方一致が割れる場所は存在しない。
-    動作は三つ:
+    動作は三つ (intent §11-2 の規則の番号):
 
-    1. **旧形式の破棄**: kind='surroundings' で :func:`is_legacy_entry` (束と
-       して読めない旧文字列形式) の行は組成から外す。消費済みの印は呼び出し側
-       の消費 (全 item id を渡す既存挙動) がそのまま付ける。
-    2. **様子の畳み**: 有効な様子エントリが複数 pending なら**最後の一つだけ**
-       残す (部屋が違っても最後の一つ — 2026-09-07 まはー裁定「最後にいる部屋
-       の様子だけ残せば良い」)。残した束の描画 (差分か全文か + 文字列への畳み)
-       は後段の消費時描画 (:func:`render_pending_room_states`) が「提示に
-       見えている同部屋の末尾の束」を土台に行う — pending は土台にならない
-       ので、途中の pending を捨てても連なりは切れない (§11-2 規則 2)。入室
-       配送の再試行による様子の二重積みもこれが自己修復する。
-    3. **移動群の畳み**: 型付きの移動通知 (:data:`LABEL_KIND_BUILDING_CHANGED`
+    1. **移動群の畳み**: 型付きの移動通知 (:data:`LABEL_KIND_BUILDING_CHANGED`
        — 書き手は sea/head_pipeline/sections/building.py) が 2 件以上 pending
        なら、経路一行「この間に現在地が移動しました: 「A」 → 「B」 → 「A」」
        (最初の通知の from の名前 + 各通知の to の名前を発生順に連結) を合成して
-       **最後の移動通知の位置**に置き、それ以外の型付き移動通知と、最後の移動
-       通知より前の型付き指示エントリを外す (残るのは経路一行 + 最終の部屋の
-       指示)。1 件以下なら通知・指示は触らない。metadata の無い旧ラベルの通知
-       は畳まない (§11-3-2 — 小さいので実害なし)。
+       **最後の移動通知の位置**に置き、それ以外の型付き移動通知を外す。1 件
+       以下なら通知は触らない。metadata の無い旧ラベルの通知は畳まない
+       (§11-3-2 — 小さいので実害なし)。
+    2. **様子の畳み + 末尾寄せ**: 有効な様子エントリが複数 pending なら**最後の
+       一つだけ**残す (部屋が違っても最後の一つ — 2026-09-07 まはー裁定「最後に
+       いる部屋の様子だけ残せば良い」)。残した一枚は**組成の末尾へ動かす**
+       (2026-09-07 まはー裁定 — 様子は「読む時点の部屋の状態」であって出来事
+       ではない。出来事より前に状態の差分が出ると因果が逆に読める)。残した束の
+       描画 (差分か全文か + 文字列への畳み) は後段の消費時描画
+       (:func:`render_pending_room_states`) が「提示に見えている同部屋の末尾の
+       束」を土台に行う — pending は土台にならないので、途中の pending を
+       捨てても連なりは切れない (§11-2 規則 2)。入室配送の再試行による様子の
+       二重積みもこれが自己修復する。
+    3. **遺物の破棄**: (a) kind='surroundings' で :func:`is_legacy_entry` (束と
+       して読めない旧文字列形式) の行、(b) 型付きの役割・指示エントリ
+       (:data:`LABEL_KIND_BUILDING_INSTRUCTION` — 書き手は 2026-09-07 に退役。
+       指示は束の building:prompt パッケージが運ぶので、独立エントリは様子との
+       重複 — §11-3 改訂) は、移動の件数に関係なく無条件で組成から外す。
+       消費済みの印は呼び出し側の消費 (全 item id を渡す既存挙動) がそのまま
+       付ける。
 
     移動・指示・様子以外のエントリ (スペル・フィード等) は位置ごと一切触らない
-    (削除と差し替えだけで、並び替えはしない)。
+    (削除と差し替えのほかは、様子一枚だけを末尾へ動かし、他は並び替えない)。
     """
     keep = [True] * len(items)
     replacements: Dict[int, Any] = {}
 
-    # 1 + 2: 様子 — 旧形式は破棄し、有効なものは最後の一つだけ残す。
+    # 規則 2 + 3(a): 様子 — 旧形式は破棄し、有効なものは最後の一つだけ残す。
     valid_rooms: List[int] = []
     for index, item in enumerate(items):
         if getattr(item, "kind", None) != ROOM_STATE_KIND:
@@ -605,9 +614,9 @@ def reclaim_pending_perceptions(items: Sequence[Any]) -> List[Any]:
     for index in valid_rooms[:-1]:
         keep[index] = False
 
-    # 3: 移動群 — 2 件以上なら経路一行に畳む。
+    # 規則 1: 移動群 — 2 件以上なら経路一行に畳む。
+    # 規則 3(b): 型付き指示エントリは無条件で破棄 (書き手は退役済みの遺物)。
     moves: List[Tuple[int, Dict[str, Any]]] = []
-    instructions: List[int] = []
     for index, item in enumerate(items):
         meta = _parse_label_meta(getattr(item, "metadata", None))
         if meta is None:
@@ -616,7 +625,12 @@ def reclaim_pending_perceptions(items: Sequence[Any]) -> List[Any]:
         if kind == LABEL_KIND_BUILDING_CHANGED:
             moves.append((index, meta))
         elif kind == LABEL_KIND_BUILDING_INSTRUCTION:
-            instructions.append(index)
+            keep[index] = False
+            LOGGER.info(
+                "[room_state] reclaimed a retired building-instruction entry "
+                "from the unconsumed buffer (the bundle's building:prompt "
+                "package carries the instruction now)",
+            )
     if len(moves) >= 2:
         first_meta = moves[0][1]
         names = [
@@ -633,19 +647,23 @@ def reclaim_pending_perceptions(items: Sequence[Any]) -> List[Any]:
         )
         for index, _meta in moves[:-1]:
             keep[index] = False
-        for index in instructions:
-            if index < last_index:
-                keep[index] = False
         LOGGER.info(
             "[room_state] reclaimed %d pending move notification(s) into one "
             "trail line", len(moves),
         )
 
-    return [
-        replacements.get(index, item)
-        for index, item in enumerate(items)
-        if keep[index]
-    ]
+    # 規則 2 の末尾寄せ: 残した様子一枚を組成の末尾へ (既に末尾なら何もしない)。
+    out: List[Any] = []
+    room_position: Optional[int] = None
+    for index, item in enumerate(items):
+        if not keep[index]:
+            continue
+        if valid_rooms and index == valid_rooms[-1]:
+            room_position = len(out)
+        out.append(replacements.get(index, item))
+    if room_position is not None and room_position != len(out) - 1:
+        out.append(out.pop(room_position))
+    return out
 
 
 def chain_is_intact(

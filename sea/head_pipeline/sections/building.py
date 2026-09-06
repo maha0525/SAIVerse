@@ -15,7 +15,6 @@ from typing import Optional
 
 from sai_memory.room_state import (
     LABEL_KIND_BUILDING_CHANGED,
-    LABEL_KIND_BUILDING_INSTRUCTION,
     LABEL_KIND_META_KEY,
 )
 from sea.head_pipeline.types import (
@@ -94,11 +93,13 @@ class BuildingSection:
             return []
         labels: list[NotificationLabel] = []
         if old.building_id != new.building_id:
-            # 移動: 「移動通知」と「役割・指示」の二枚に分け、metadata で型付け
-            # する (docs/intent/room_state_packages.md §11-3-2)。未消費バッファの
+            # 移動: 移動通知一枚だけを metadata で型付けして出す
+            # (docs/intent/room_state_packages.md §11-3-2)。未消費バッファの
             # 回収 (sai_memory/room_state.reclaim_pending_perceptions) が往復の
-            # 移動通知をこの型で識別して経路一行に畳む。ラベルの並びは
-            # 通知 → 指示 (読み順の正典: 通知 → 指示 → 部屋の様子)。
+            # 移動通知をこの型で識別して経路一行に畳む。読み順は「出来事は
+            # 到着順・様子は組成の末尾」(§11-3 改訂)。役割・指示は独立ラベル
+            # では運ばない — 束の building:prompt パッケージ (部屋の様子の
+            # 全文の ## Building 節) が運ぶ。
             from_name = old.name or old.building_id
             to_name = new.name or new.building_id
             lines: list[str] = [
@@ -117,19 +118,8 @@ class BuildingSection:
                     "to_name": to_name,
                 },
             ))
-            system_prompt = (new.base_system_instruction or "").strip()
-            if system_prompt:
-                labels.append(NotificationLabel(
-                    kind="building_instruction",
-                    label=f"# 「{to_name}」の役割・指示\n{system_prompt}",
-                    metadata={
-                        LABEL_KIND_META_KEY: LABEL_KIND_BUILDING_INSTRUCTION,
-                        "building_id": new.building_id,
-                        "building_name": to_name,
-                    },
-                ))
             # Building が違うと name / system_instruction の比較は意味がないので
-            # 移動の二枚だけで打ち切る。
+            # 移動の一枚だけで打ち切る。
             return labels
         if old.name != new.name:
             labels.append(NotificationLabel(

@@ -158,9 +158,11 @@ class DynamicStateManager:
         # 前進の相乗りが担う (docs/intent/room_state_packages.md §6)。
         #
         # 配送は台帳の outbox (target='perception.room_state'、§11-3-1) — 上の
-        # diff 通知 (perception.push) と同じ FIFO に乗せることで、読み順
-        # (通知 → 指示 → 様子) が構造的に決まる。台帳の無い環境は従来の直接
-        # push に degrade する (通知の direct 経路と同型)。束は queue 時に凍結。
+        # diff 通知 (perception.push) と同じ FIFO に乗せることで、到着順が
+        # 構造的に決まる。読み順は「出来事は到着順・様子は組成の末尾」
+        # (§11-3 改訂 — 様子は回収 §11-2 が末尾へ寄せる)。台帳の無い環境は
+        # 従来の直接 push に degrade する (通知の direct 経路と同型)。束は
+        # queue 時に凍結。
         #
         # ここは滞在中の検知 (_detect_room_state_changes) と違い、組成中に本人が
         # さらに移動していても「配送の荷物の行き先 (building_id)」へ積むのが

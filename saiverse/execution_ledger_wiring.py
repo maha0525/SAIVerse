@@ -67,9 +67,11 @@ SLOT_SETTLE_DEADLINE_SECONDS = 900.0
 TARGET_SAIMEMORY_APPEND = "saimemory.append"
 TARGET_PERCEPTION_PUSH = "perception.push"
 #: 「部屋の様子」の配送 (room_state_packages.md §11-3-1)。入室処理
-#: (saiverse/dynamic_state.on_building_entered) が束を凍結して積み、配達時に
-#: 差分か全文かを判定して知覚バッファへ push する。通知 (perception.push) と
-#: 同じ FIFO に乗ることで、読み順 (通知 → 指示 → 様子) が構造的に決まる。
+#: (saiverse/dynamic_state.on_building_entered) が束を凍結して積み、配達は束の
+#: 記帳のみ (差分か全文かの判定・描画は消費の組成 — §11-2 規則 2)。通知
+#: (perception.push) と同じ FIFO に乗ることで到着順が構造的に決まる。読み順は
+#: 「出来事は到着順・様子は組成の末尾」(§11-3 改訂 — 様子は回収 §11-2 が
+#: 末尾へ寄せる)。
 TARGET_PERCEPTION_ROOM_STATE = "perception.room_state"
 #: W1 Chunk C (D9-5): 作業セッション digest の配送。saimemory.append の変種で、
 #: 冪等 append 後に episode の digest_ref (再訪の鍵) を後段確定する。
