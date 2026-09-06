@@ -8,7 +8,7 @@ import time
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Optional, Union
 
 from sai_memory.config import Settings, load_settings
 from sai_memory.memory.chunking import chunk_text
@@ -474,36 +474,141 @@ class SAIMemoryAdapter:
     def push_room_state(
         self,
         building_id: str,
-        full_text: str,
+        bundle: dict,
         *,
-        media: Optional[list] = None,
         allow_diff: bool = True,
-        head_full_text: Optional[str] = None,
     ) -> None:
-        """「移動先の様子」を知覚台帳へ積む (再訪で土台が見えていれば差分だけ)。
+        """「部屋の様子」(パッケージの束) を知覚台帳へ積む。
 
-        全文をそのまま積むか差分に縮めるかの判定と、その記帳は
-        sai_memory/room_state.py が持つ。``allow_diff=False`` は毎回全文
-        (Chronicle 無効ペルソナ — 提示窓で土台が消えうるので差分にできない)。
-
-        ``head_full_text`` は「head が今まさに見せている**この部屋**の姿」
-        (知覚記法の全文)。台帳に土台が無いときの土台になる — 呼び出し側が
-        head の building を確かめてから渡す (saiverse/dynamic_state.py)。
+        土台 (同部屋の直近の束) が提示に見えていれば差分だけ、いなければ全文。
+        判定・差分の組成・メディアの選定と記帳は sai_memory/room_state.py が
+        持つ。``allow_diff=False`` は毎回全文 (Chronicle 無効ペルソナ — 提示窓で
+        土台が消えうるので差分にできない)。``bundle`` は
+        builtin_data/tools/get_visual_context.build_room_bundle が組む束。
         """
-        if not self._ready or not building_id or not full_text:
+        if not self._ready or not building_id or not bundle:
             return
         from sai_memory.perception_buffer import push_perception
         from sai_memory.room_state import ROOM_STATE_KIND, build_room_state_push
         with self._db_lock:
             payload = build_room_state_push(
-                self.conn, building_id, full_text,
-                media=media, allow_diff=allow_diff,
-                head_full_text=head_full_text,
+                self.conn, building_id, bundle, allow_diff=allow_diff,
             )
             push_perception(
                 self.conn, ROOM_STATE_KIND, payload["content"],
                 media=payload["media"], metadata=payload["metadata"],
             )
+
+    def latest_room_snapshot(
+        self, key: str, *, anchor_id: Optional[str] = None,
+        floor_chars: Union[int, Callable[[], int], None] = None,
+    ) -> Optional[dict]:
+        """提示に見えている (or 次の消費で見える) この部屋の最新の束。無ければ None。
+
+        滞在中の照合 (sea/head_pipeline/integration.py の部屋の検知) が
+        「変わったか」を指紋で確かめるための読み口。検知の digest 比較の
+        「前回」と運搬役判定はこの一本 — None は「窓に見える束が一枚も無い =
+        運搬役なし」を同時に意味する (2026-09-06 八巡目修正 1 で旧
+        ``room_carrier_visible`` を畳んだ)。
+
+        ``anchor_id`` は Chronicle 無効ペルソナの提示窓の起点、``floor_chars``
+        は anchor の行が読めない劣化時の床の予算 (提示の最小ロードと同じ値を
+        検知が渡す — int のほか、呼ぶと int を返す遅延の口でもよく、床の枝に
+        入った回だけ解決される)。窓より古いバッチは付記なしで提示から下りる
+        ので、読みも窓の内側だけを見る — 窓の外の最新束を「前回」に拾うと、
+        窓の中に残る古い提示との差を「変化なし」と誤読して覆い隠す。起点キー
+        の解決は提示の組成と同じ一枚
+        (:func:`sai_memory.perception_buffer.resolve_window_key`)、包含も同じ
+        一枚 (:func:`sai_memory.perception_buffer.batch_in_window`)。
+
+        窓の解決に失敗した回は
+        :class:`~sai_memory.perception_buffer.WindowResolutionError` を送出する
+        (三値 — 窓なし / 窓キー / 解決失敗。2026-09-06 四巡目修正 2)。失敗を
+        「窓なし = 全部見える」に倒すと、床で隠れた束を「前回」と誤認して
+        自己回復が抑止される — 呼び出し側 (検知) はその回の判定を見送り、
+        次の検知でやり直す。
+        """
+        if not self._ready or not key:
+            return None
+        from sai_memory.perception_buffer import batch_in_window
+        from sai_memory.room_state import latest_visible_snapshot
+        with self._db_lock:
+            window_key = self._window_key_locked(anchor_id, floor_chars)
+            in_window = (
+                (lambda b: batch_in_window(b, window_key))
+                if window_key is not None else None
+            )
+            return latest_visible_snapshot(self.conn, key, in_window=in_window)
+
+    def _window_key_locked(
+        self, anchor_id: Optional[str],
+        floor_chars: Union[int, Callable[[], int], None],
+    ) -> Optional[tuple]:
+        """提示窓の起点キー。解決は resolve_window_key の一枚に委ねる。
+
+        Chronicle 無効ペルソナの提示窓の判定用。anchor 行 → 引けなければ床
+        (messages の末尾 ``floor_chars`` 文字ぶんの最古行) の順で、提示の組成
+        (sea/runtime_context._window_predicate_locked) と同じ関数を通る —
+        ここに解決の規則を書き足さない。**呼び出し側が ``self._db_lock`` を
+        保持している前提**。
+        """
+        from sai_memory.perception_buffer import resolve_window_key
+
+        return resolve_window_key(
+            self.conn, anchor_id, floor_chars=floor_chars,
+        )
+
+    def reseat_room_state(
+        self, bundle: dict, *, anchor_id: Optional[str] = None,
+        floor_chars: Union[int, Callable[[], int], None] = None,
+    ) -> Optional[int]:
+        """今いる部屋の全文を提示の最古端へ置き直す (自己回復 — intent §6-2/§6-3)。
+
+        検知の瞬間 (sea/head_pipeline/integration.py) が「部屋の様子が提示に
+        見えない」と判定した回だけ呼ぶ。運搬役が居れば何もしない (判定は
+        :func:`sai_memory.room_state.reseat_current_room` の中でもう一度行う)。
+
+        ``anchor_id`` / ``floor_chars`` は Chronicle 無効ペルソナの提示窓の
+        起点と、anchor が読めない劣化時の床の予算 (検知が
+        :meth:`latest_room_snapshot` に渡したのと同じもの)。渡されたら
+        「運搬役が生きているか」の走査を提示と同じ窓の篩 (起点の解決は
+        :func:`sai_memory.perception_buffer.resolve_window_key`、包含は
+        :func:`sai_memory.perception_buffer.batch_in_window`) で行う — 窓の
+        外の運搬役は提示に出ないので、生きているとは数えない。数えると、
+        窓絞りで部屋を見失ったという検知の判定を内側の門が覆し、自己回復が
+        その主目的の形で空振りする (2026-09-06 二巡目修正 1)。
+
+        失敗 (置き直しの読みの例外・窓の解決失敗) は rollback して None —
+        検知の次の回がやり直す。この見送りは
+        :meth:`latest_room_snapshot` の「判定不能」と同じ倒し方。
+        """
+        if not self._ready or not bundle:
+            return None
+        from sai_memory.perception_buffer import batch_in_window
+        from sai_memory.room_state import reseat_current_room
+        try:
+            with self._db_lock:
+                window_key = self._window_key_locked(anchor_id, floor_chars)
+                in_window = (
+                    (lambda b: batch_in_window(b, window_key))
+                    if window_key is not None else None
+                )
+                batch_id = reseat_current_room(
+                    self.conn, fresh_bundle=bundle, in_window=in_window,
+                )
+                if batch_id is not None:
+                    self.conn.commit()
+                return batch_id
+        except Exception:
+            try:
+                self.conn.rollback()
+            except Exception:
+                pass
+            LOGGER.warning(
+                "[room_state] could not reseat the current room; the next "
+                "detection will retry", exc_info=True,
+            )
+            return None
 
     def count_pending_perceptions(self, kind: str) -> Optional[int]:
         """未消費の知覚バッファにある指定 kind の件数。
@@ -658,20 +763,13 @@ class SAIMemoryAdapter:
                 # 順序キー (created_at, rowid)。Chronicle 無効ペルソナの窓絞りが
                 # anchor 行と同秒のバッチを正典順どおりに判定するための記帳。
                 # 取れなければ NULL (旧世代と同じ epoch 比較へフォールバック)。
-                boundary_created_at = boundary_rowid = None
-                try:
-                    boundary = self.conn.execute(
-                        "SELECT created_at, rowid FROM messages "
-                        "ORDER BY created_at DESC, rowid DESC LIMIT 1"
-                    ).fetchone()
-                    if boundary is not None:
-                        boundary_created_at = int(boundary[0])
-                        boundary_rowid = int(boundary[1])
-                except Exception:
-                    LOGGER.debug(
-                        "[perception_buffer] boundary key lookup failed; "
-                        "recording batch without one", exc_info=True,
-                    )
+                # strict にしない: 新規バッチの consumed_at は現在時刻 (提示の
+                # 末尾) なので、キーなしの epoch フォールバックでも窓の外に
+                # 立たない — 置き直し (最古端) と実害の形が違う (五巡目修正 3)。
+                from sai_memory.perception_buffer import latest_message_boundary
+                boundary_created_at, boundary_rowid = (
+                    latest_message_boundary(self.conn)
+                )
                 # 消費バッチを単一 tx で確定 (バッチ INSERT + 項目への印)。
                 # reduce で畳まれて本文に出なかった分も消費済みになる
                 # (相殺は未消費の間だけ = C2)。

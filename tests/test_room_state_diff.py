@@ -1,41 +1,37 @@
-"""部屋の様子 (room state) の差分提示と移管のテスト (2026-09-04 まはー裁定)。
+"""部屋の様子のパッケージ (room state packages) の契約テスト。
 
-対象は sai_memory/room_state.py と、その三つの結び目:
+設計の正典は docs/intent/room_state_packages.md (2026-09-06)。発端は
+docs/issues/room_state_diff_built_on_string_parsing.md — 差分を描画済み文字列の
+解析で組んでいたため、開いたドキュメントの本文段落が「見当たらなくなったもの」
+に化けて v0.3.9 の出荷を止めた。合成の一行アイテムだけを食べたテストがこの欠陥を
+6 巡のレビューごと素通ししたので、**本物の描画 (build_room_bundle) をテストに
+食わせる** (intent §10) — 開いた複数段落のドキュメント / メディア付きの開いた
+画像 / 入れ子の Bag / 設置物 / システムプロンプト付きの建物。
 
-- 積む側 (saiverse/dynamic_state.py → SAIMemoryAdapter.push_room_state):
-  同じ部屋の前回エントリがまだ提示に見えているなら差分だけを積む。
-- 下ろす側 (sai_memory/perception_buffer.mark_batches_annexed): 全文が編纂の
-  退場付記で提示から下りるとき、残った最古の同部屋エントリへ全文を移管する。
-  書き換えは付記と同一トランザクションでだけ起きる。
-- head 側 (sea/head_pipeline の visual_context、2026-09-05 追加): 台帳に土台が
-  無くても head が同じ部屋を見せていれば、その姿を土台にする。head は
-  (ペルソナ, model) ごとに別々の時点で capture されるので、全文へ開き直すか
-  どうかの判定は提示時にだけ置く (issue room_state_duplicates_head_inventory)。
+契約 (intent の写し):
 
-契約 (裁定の文面そのもの):
-
-1. 再訪で全文が提示に見えている間は差分だけが積まれる。
-2. 前回全文が付記で下りるとき、最古の残存同部屋エントリへ内容が移管される
-   (移管後の提示で差分の土台が読める)。
-3. 移管が付記と同一 tx で行われる (付記無しの単独書き換えが起きない)。
-4. 初訪問・久しぶり (同部屋バッチが提示に無い) は従来どおり全文。
-5. 移管の読み取りが落ちた回は「移管対象なし」に化かさず、付記も境界前進も
-   tx ごと rollback して見送る (付記だけが確定して差分が宙に浮く形を作らない)。
-6. head が同じ部屋を見せている間、その部屋の全文は知覚に二枚目として出ない。
-   head が別の部屋を見せたら、その回の提示だけが全文へ開き直される。
+- §3: 部屋はパッケージの束のまま運ぶ。同じ部屋は何度読んでも同じ束 (決定論)。
+- §4: 差分はキー照合 — 新登場・Close→Open は全文 + メディア / 消えたは label の
+  一行 / Open→Close は「(閉じられた)」の一行 / open のままの本文変化は行単位
+  diff / 変化なしは一行。
+- §5: メディアはパッケージの持ち物 — 新登場に絵が付く / 復元で絵が戻る /
+  不変時に再添付しない。
+- §6: 供給の四点 — 入室 (末尾) / 滞在中の照合 + 自己回復 (先頭) /
+  ブートストラップ (先頭) / 最後の運搬役が下りる回の置き直し (先頭、付記・境界
+  前進と同一トランザクション)。
+- §9: 旧形式 (文字列 snapshot) は土台なし扱い — 連なりに参加しない。
 """
 from __future__ import annotations
 
 import json
-import os
 import sqlite3
 import tempfile
-import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from builtin_data.tools import get_visual_context as gvc
 from sai_memory.perception_buffer import (
     advance_presentation_cutoff,
     create_consumption_batch,
@@ -43,6 +39,7 @@ from sai_memory.perception_buffer import (
     get_presentation_cutoff,
     init_perception_buffer_table,
     list_pending,
+    list_presented_batches,
     list_unannexed_batches,
     mark_batches_annexed,
     push_perception,
@@ -51,107 +48,382 @@ from sai_memory.perception_buffer import (
 from sai_memory.room_state import (
     ROOM_STATE_KIND,
     build_room_state_push,
+    bundle_is_valid,
+    bundle_media,
+    canonical_bundle_json,
+    chain_is_intact,
     collect_batch_room_states,
     ensure_room_state_base,
+    find_current_room_key,
+    is_legacy_entry,
     latest_visible_snapshot,
     render_room_diff,
+    render_room_full,
+    reseat_current_room,
     restore_room_state_bases,
     room_key,
     snapshot_digest,
 )
-from sea.runtime_context import (
-    _merge_consumed_perceptions,
-    list_presented_perception_blocks,
+
+#: 開いたドキュメントの本文 — 空行 (段落の切れ目) と "## " 見出しを含む。
+#: 旧実装 (_split_blocks) は「空行 = アイテムの境目」と推測したため、この本文の
+#: 段落が独立した「アイテム」に化けた (v0.3.9 出荷停止の直接原因)。
+_DOC_BODY = (
+    "このドキュメントは、様々な名画の要素を調和させるためのアイデア・覚え書きです。\n"
+    "\n"
+    "## 1. 巨匠たちから吸収するエッセンス\n"
+    "光の扱いはフェルメールに学ぶ。\n"
+    "\n"
+    "## 2. 構図\n"
+    "対角線を意識する。\n"
 )
 
-#: Chronicle 有効相当 (lifecycle 無し = 判定不能 → バッチを隠さない側)。
-_RUNTIME = SimpleNamespace(session_lifecycle=None)
-#: Chronicle 無効のペルソナ (「編纂なしで忘れる」を選んだ = 提示窓で絞る)。
-_RUNTIME_NO_CHRONICLE = SimpleNamespace(
-    session_lifecycle=SimpleNamespace(
-        is_chronicle_enabled_for_persona=lambda persona: False,
-    ),
-)
+_DOC_BODY_EDITED = _DOC_BODY + "\n## 3. 色彩\n補色を一組だけ使う。\n"
 
 
-def _room_text(name: str, items) -> str:
-    """``get_visual_context(for_perception=True)`` と同じ形の全文を組む。"""
-    parts = [
-        f"# 「{name}」の様子", "",
-        "## 一緒にいるペルソナ", "他のペルソナはいません。", "",
-        "---", "",
-        "## Building", "",
-        "---", "",
-        "## Item", "",
-    ]
-    for ref, label, desc in items:
-        parts.append(f"[item:{ref}] [Object] {label}")
-        parts.append(desc)
-        parts.append("")
-    return "\n".join(parts)
+def _make_item(
+    item_id, short_id, item_type, name, description, *,
+    is_open=None, file_path=None,
+):
+    item = {
+        "item_id": item_id,
+        "short_id": short_id,
+        "type": item_type,
+        "name": name,
+        "description": description,
+        "created_at": 1_700_000_000.0,
+    }
+    if is_open is not None:
+        item["state"] = {"is_open": is_open}
+    if file_path is not None:
+        item["file_path"] = str(file_path)
+    return item
 
 
-class RenderRoomDiffTest(unittest.TestCase):
-    """差分本文の組み立て (決定論・かたまり単位)。"""
+class RealWorldEnv:
+    """本物の描画 (build_room_bundle) に食わせる世界 (intent §10 の最低限の fixture)。
+
+    - 開いたドキュメント (複数段落・空行・"## " 見出し入りの本文、``` 囲い)
+    - メディア付きの開いた画像 (実ファイル)
+    - 入れ子の Bag
+    - 設置物 (Fixture)
+    - システムプロンプト付きの建物 (空行を含む複数行)
+    - 他ペルソナ 1 人 + ユーザー 1 人
+    """
+
+    def __init__(self, home: Path):
+        self.home = home
+        (home / "documents").mkdir(parents=True, exist_ok=True)
+        (home / "image").mkdir(parents=True, exist_ok=True)
+        self.doc_path = home / "documents" / "notes.md"
+        self.doc_path.write_text(_DOC_BODY, encoding="utf-8")
+        self.pic_path = home / "image" / "pic.png"
+        self.pic_path.write_bytes(b"\x89PNG fake")
+        self.pic2_path = home / "image" / "pic2.png"
+        self.pic2_path.write_bytes(b"\x89PNG fake2")
+
+        self.items = [
+            _make_item(
+                "uuid-doc", 10, "document", "覚え書き", "創作のアイデア帳。",
+                is_open=True, file_path=self.doc_path,
+            ),
+            _make_item(
+                "uuid-pic", 11, "picture", "セピア色の写真", "古い写真。",
+                is_open=True, file_path=self.pic_path,
+            ),
+            _make_item(
+                "uuid-bag", 12, "bag", "道具袋", "工具の入った袋。",
+                is_open=True,
+            ),
+            _make_item(
+                "uuid-closed", 13, "document", "閉じた手帳", "非公開のメモ。",
+                is_open=False, file_path=self.doc_path,
+            ),
+        ]
+        self.bag_contents = [
+            {
+                "name": "真鍮の定規", "type": "object", "short_id": 21,
+                "description": "使い込まれた定規。", "_children": [],
+            },
+            {
+                "name": "小箱", "type": "bag", "short_id": 22,
+                "description": "さらに小さな箱。",
+                "_children": [{
+                    "name": "鍵", "type": "object", "short_id": 23,
+                    "description": "何の鍵かは分からない。", "_children": [],
+                }],
+            },
+        ]
+        self.fixture = SimpleNamespace(
+            NAME="観測儀", TYPE="observer", FIXTURE_ID="fx-1",
+            DESCRIPTION="室温を測る装置。",
+            STATE_JSON=json.dumps({"temperature": {"value_num": 21.5}}),
+        )
+        self.other_persona = SimpleNamespace(persona_name="エリス")
+        self.persona = SimpleNamespace(
+            persona_name="アイフィ",
+            current_building_id="b1",
+            buildings={
+                "b1": SimpleNamespace(
+                    name="工房",
+                    base_system_instruction=(
+                        "ここは創作の工房。\n\n静かに集中できる場所です。"
+                    ),
+                ),
+            },
+        )
+        self.manager = SimpleNamespace(
+            saiverse_home=home,
+            occupants={"b1": ["p1", "p2", "42"]},
+            all_personas={"p1": self.persona, "p2": self.other_persona},
+            get_all_items_in_building=lambda bid: list(self.items),
+            get_bag_contents_recursive=lambda item_id: (
+                list(self.bag_contents) if item_id == "uuid-bag" else []
+            ),
+            observer_manager=SimpleNamespace(
+                get_building_fixtures=lambda bid: [self.fixture],
+            ),
+        )
+
+    def bundle(self):
+        """本物の組成 (build_room_bundle) で束を組む。"""
+        with patch.object(gvc, "get_active_persona_id", return_value="p1"), \
+                patch.object(gvc, "get_active_manager", return_value=self.manager), \
+                patch.object(gvc, "_get_persona_appearance_path", return_value=None), \
+                patch.object(gvc, "_get_building_image_path", return_value=None):
+            built = gvc.build_room_bundle("b1")
+        assert built is not None
+        return built
+
+
+class _EnvTestBase(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.env = RealWorldEnv(Path(tmp.name))
+
+
+class RoomBundleCompositionTest(_EnvTestBase):
+    """本物の描画がパッケージの束 (intent §3) を組めていること。"""
+
+    def test_the_six_families_have_their_keys(self):
+        bundle = self.env.bundle()
+        by_key = {p["key"]: p for p in bundle["packages"]}
+        self.assertIn("persona:p2", by_key)        # 他ペルソナ = persona:<ID>
+        self.assertIn("user:42", by_key)           # ユーザー = user:<ID>
+        self.assertIn("building:prompt", by_key)   # システムプロンプト
+        self.assertIn("item:10", by_key)           # アイテム = item:N
+        self.assertIn("fixture:fx-1", by_key)      # 設置物 = fixture:<ID>
+        self.assertEqual(by_key["persona:p2"]["family"], "persona")
+        self.assertEqual(by_key["item:10"]["state"], "open")
+        self.assertEqual(by_key["item:13"]["state"], "closed")
+        self.assertIsNone(by_key["fixture:fx-1"]["state"])
+
+    def test_the_open_document_body_is_inside_its_package(self):
+        bundle = self.env.bundle()
+        doc = next(p for p in bundle["packages"] if p["key"] == "item:10")
+        text = "\n".join(doc["lines"])
+        self.assertIn("## 1. 巨匠たちから吸収するエッセンス", text)
+        self.assertIn("光の扱いはフェルメールに学ぶ。", text)
+        # 空行も構造 (lines) の中にそのまま居る — 文字列解析に戻らない土台。
+        self.assertIn("", doc["lines"])
+
+    def test_the_open_picture_carries_its_media(self):
+        bundle = self.env.bundle()
+        pic = next(p for p in bundle["packages"] if p["key"] == "item:11")
+        self.assertEqual(len(pic["media"]), 1)
+        self.assertEqual(pic["media"][0]["path"], str(self.env.pic_path))
+        self.assertIn(pic["media"][0], bundle_media(bundle))
+
+    def test_the_nested_bag_lists_its_children(self):
+        bundle = self.env.bundle()
+        bag = next(p for p in bundle["packages"] if p["key"] == "item:12")
+        text = "\n".join(bag["lines"])
+        self.assertIn("[item:21] [Object] 真鍮の定規", text)
+        self.assertIn("[item:23] [Object] 鍵", text)
+
+    def test_the_same_room_composes_the_same_bundle(self):
+        """決定論 (intent §3) — 指紋の照合と差分の前提。"""
+        first = self.env.bundle()
+        second = self.env.bundle()
+        self.assertEqual(
+            canonical_bundle_json(first), canonical_bundle_json(second),
+        )
+        self.assertEqual(snapshot_digest(first), snapshot_digest(second))
+
+    def test_the_full_text_is_derived_from_the_bundle(self):
+        bundle = self.env.bundle()
+        text = render_room_full(bundle)
+        self.assertIn("# 「工房」の様子", text)
+        self.assertIn("[エリスの外見]", text)
+        self.assertIn("[システムプロンプト]", text)
+        self.assertIn("静かに集中できる場所です。", text)
+        self.assertIn("## 1. 巨匠たちから吸収するエッセンス", text)
+        self.assertIn("観測儀", text)
+        self.assertIn("最新観測値: temperature=21.5", text)
+
+    def test_the_tool_view_still_works_without_the_recall(self):
+        """get_visual_context はツールとして残る。思い出は退役 (呼び出し側ごと削除)。"""
+        self.assertFalse(hasattr(gvc, "_fetch_item_memory_recall"))
+        with patch.object(gvc, "get_active_persona_id", return_value="p1"), \
+                patch.object(gvc, "get_active_manager", return_value=self.env.manager), \
+                patch.object(gvc, "_get_persona_appearance_path", return_value=None), \
+                patch.object(gvc, "_get_building_image_path", return_value=None):
+            msgs = gvc.get_visual_context(building_id="b1")
+        self.assertTrue(msgs)
+        self.assertIn("<system>", msgs[0]["content"])
+        self.assertNotIn("あの時の思い出", msgs[0]["content"])
+
+
+class RenderRoomDiffContractTest(_EnvTestBase):
+    """§4 の表の行ごとの契約 — 本物の描画同士のキー照合。"""
 
     def setUp(self):
-        self.before = _room_text("工房", [
-            ("5", "真鍮の定規", "使い込まれた定規。"),
-            ("6", "古い写真", "セピア色の写真。"),
-        ])
+        super().setUp()
+        self.before = self.env.bundle()
 
-    def test_added_item_is_shown_in_full(self):
-        after = _room_text("工房", [
-            ("5", "真鍮の定規", "使い込まれた定規。"),
-            ("6", "古い写真", "セピア色の写真。"),
-            ("7", "銅のノギス", "目盛りが細かいノギス。"),
-        ])
-        diff = render_room_diff(self.before, after)
-        self.assertIn("「工房」の様子", diff)
-        self.assertIn("増えた・変わったもの", diff)
-        self.assertIn("[item:7] [Object] 銅のノギス", diff)
-        self.assertIn("目盛りが細かいノギス。", diff)
-        # 変わっていないアイテムの説明は積み直さない。
-        self.assertNotIn("使い込まれた定規。", diff)
+    def test_a_new_open_picture_appears_in_full_with_its_media(self):
+        """新登場 = 全文 + そのパッケージのメディア (§4 行 1 + §5)。"""
+        self.env.items.append(_make_item(
+            "uuid-new", 14, "picture", "新しい絵", "届いたばかりの絵。",
+            is_open=True, file_path=self.env.pic2_path,
+        ))
+        diff = render_room_diff(self.before, self.env.bundle())
+        self.assertIn("## 増えた・変わったもの", diff["content"])
+        self.assertIn("[item:14] [Image] 新しい絵", diff["content"])
+        self.assertIn("届いたばかりの絵。", diff["content"])
+        # メディアは新登場のパッケージのものだけ (不変の写真は再添付しない)。
+        self.assertEqual(
+            [m["path"] for m in diff["media"]], [str(self.env.pic2_path)],
+        )
 
-    def test_removed_item_shows_only_its_heading(self):
-        after = _room_text("工房", [("5", "真鍮の定規", "使い込まれた定規。")])
-        diff = render_room_diff(self.before, after)
-        self.assertIn("見当たらなくなったもの", diff)
-        self.assertIn("- [item:6] [Object] 古い写真", diff)
-        self.assertNotIn("セピア色の写真。", diff)
+    def test_close_to_open_shows_the_full_text_and_media(self):
+        """Close→Open = 新しく見せる操作 = 全文 + メディア (§4 行 1)。"""
+        self.env.items[3] = _make_item(
+            "uuid-closed", 13, "document", "閉じた手帳", "非公開のメモ。",
+            is_open=True, file_path=self.env.doc_path,
+        )
+        diff = render_room_diff(self.before, self.env.bundle())
+        self.assertIn("[item:13] [Document] 閉じた手帳", diff["content"])
+        # 開いたので本文が全文で見える。
+        self.assertIn("光の扱いはフェルメールに学ぶ。", diff["content"])
 
-    def test_modified_item_appears_only_as_changed(self):
-        after = _room_text("工房", [
-            ("5", "真鍮の定規", "使い込まれた定規。"),
-            ("6", "古い写真", "色が褪せてきた写真。"),
-        ])
-        diff = render_room_diff(self.before, after)
-        self.assertIn("色が褪せてきた写真。", diff)
-        # 同じ見出しが「消えた」側にも出ると、同じ物が消えて増えたように読める。
-        self.assertNotIn("見当たらなくなったもの", diff)
+    def test_a_gone_document_is_one_label_line_without_its_body(self):
+        """消えた = label の一行だけ (§4 行 2) — v0.3.9 を止めた欠陥の再発防止。
+
+        旧実装は開いたドキュメントの本文段落 (空行区切り) を独立アイテムと誤認
+        し、「見当たらなくなったもの」に本文を晒した。
+        """
+        del self.env.items[0]  # 開いたドキュメントが部屋から消える
+        diff = render_room_diff(self.before, self.env.bundle())
+        self.assertIn("## 見当たらなくなったもの", diff["content"])
+        self.assertIn("- [item:10] [Document] 覚え書き", diff["content"])
+        # 本文・説明はもう積まない (絶対に重複にしかならない情報)。
+        self.assertNotIn("光の扱いはフェルメールに学ぶ。", diff["content"])
+        self.assertNotIn("## 1. 巨匠たちから吸収するエッセンス", diff["content"])
+        self.assertNotIn("創作のアイデア帳。", diff["content"])
+
+    def test_open_to_close_is_one_line_without_the_body(self):
+        """Open→Close = ユーザーの意思 = 「(閉じられた)」の一行 (§4 行 3)。"""
+        self.env.items[0] = _make_item(
+            "uuid-doc", 10, "document", "覚え書き", "創作のアイデア帳。",
+            is_open=False, file_path=self.env.doc_path,
+        )
+        diff = render_room_diff(self.before, self.env.bundle())
+        self.assertIn("[item:10] [Document] 覚え書き (閉じられた)", diff["content"])
+        self.assertNotIn("光の扱いはフェルメールに学ぶ。", diff["content"])
+        self.assertNotIn("(Closed)", diff["content"])
+
+    def test_an_edited_open_body_shows_only_the_changed_lines(self):
+        """open のままの本文変化 = 行単位の diff (§4 行 4)。"""
+        self.env.doc_path.write_text(_DOC_BODY_EDITED, encoding="utf-8")
+        diff = render_room_diff(self.before, self.env.bundle())
+        self.assertIn("(変わった行だけ)", diff["content"])
+        self.assertIn("+ ## 3. 色彩", diff["content"])
+        self.assertIn("+ 補色を一組だけ使う。", diff["content"])
+        # 変わっていない段落は再掲しない。
+        self.assertNotIn("光の扱いはフェルメールに学ぶ。", diff["content"])
+        self.assertEqual(diff["media"], [])
+
+    def test_a_rewritten_body_larger_than_the_full_text_falls_back_to_full(self):
+        """diff が全文より大きければ全文 (§4 行 4 の但し書き)。"""
+        self.env.doc_path.write_text(
+            "全部書き直した。\n新しい第一段落。\n\n新しい第二段落。\n",
+            encoding="utf-8",
+        )
+        diff = render_room_diff(self.before, self.env.bundle())
+        after_doc = next(
+            p for p in self.env.bundle()["packages"] if p["key"] == "item:10"
+        )
+        self.assertIn("\n".join(after_doc["lines"]), diff["content"])
 
     def test_no_change_condenses_to_one_line(self):
-        diff = render_room_diff(self.before, self.before)
-        self.assertEqual(diff, "# 「工房」の様子\n前回見たときから変わっていません。")
+        """部屋全体で変化なし = 一行 (§4 行 5)。"""
+        diff = render_room_diff(self.before, self.env.bundle())
+        self.assertEqual(
+            diff["content"],
+            "# 「工房」の様子\n前回見たときから変わっていません。",
+        )
+        self.assertEqual(diff["media"], [])
+
+    def test_a_left_persona_is_reported_by_label(self):
+        self.env.manager.occupants["b1"] = ["p1", "42"]
+        diff = render_room_diff(self.before, self.env.bundle())
+        self.assertIn("- [エリスの外見]", diff["content"])
 
 
-class RoomStateLedgerTestBase(unittest.TestCase):
-    """生の conn で「積む → 消費バッチ確定」を回す土台。"""
+class CrossFamilyKeyTest(_EnvTestBase):
+    """2026-09-06 四巡目修正 3: キーは族の接頭辞つき — 生 ID の族またぎ衝突を塞ぐ。
+
+    ペルソナ ID・ユーザー ID・設置物 ID は独立の名前空間。キーが生の文字列の
+    ままだと、同じ文字列を持つ別族が差分の辞書 (render_room_diff の key 照合)
+    で片方を上書きし、退出・消滅の報告が黙って消える。
+    """
+
+    def test_a_gone_fixture_sharing_a_persona_id_is_still_reported(self):
+        self.env.fixture.FIXTURE_ID = "p2"  # 他ペルソナ p2 と同じ生 ID
+        before = self.env.bundle()
+        self.env.manager.observer_manager = SimpleNamespace(
+            get_building_fixtures=lambda bid: [],
+        )
+        diff = render_room_diff(before, self.env.bundle())
+        self.assertIn("## 見当たらなくなったもの", diff["content"])
+        self.assertIn("観測儀 (ID: p2)", diff["content"])
+        # 残っているペルソナが、キー衝突で「変わったもの」に化けない。
+        self.assertNotIn("(変わった行だけ)", diff["content"])
+
+    def test_a_duplicate_key_in_the_bundle_warns_and_keeps_the_first(self):
+        """同一キーの重複は組成時に検出して WARN (先勝ち — 黙って上書きしない)。"""
+        twin = SimpleNamespace(
+            NAME="観測儀の複製", TYPE="observer", FIXTURE_ID="fx-1",
+            DESCRIPTION="同じ ID の二枚目。", STATE_JSON=None,
+        )
+        self.env.manager.observer_manager = SimpleNamespace(
+            get_building_fixtures=lambda bid: [self.env.fixture, twin],
+        )
+        with self.assertLogs(
+            "builtin_data.tools.get_visual_context", level="WARNING",
+        ):
+            bundle = self.env.bundle()
+        keys = [p["key"] for p in bundle["packages"]]
+        self.assertEqual(keys.count("fixture:fx-1"), 1)
+        kept = next(p for p in bundle["packages"] if p["key"] == "fixture:fx-1")
+        self.assertNotIn("複製", kept["label"])
+
+
+class RoomStateLedgerTestBase(_EnvTestBase):
+    """生の conn で「積む → 消費バッチ確定」を回す土台 (adapter の flush と同形)。"""
 
     def setUp(self):
+        super().setUp()
         self.conn = sqlite3.connect(":memory:")
         init_perception_buffer_table(self.conn)
         self.addCleanup(self.conn.close)
         self.clock = 1000
 
-    def _push(
-        self, building_id, full_text, *,
-        allow_diff=True, media=None, head_full_text=None,
-    ):
+    def _push(self, building_id, bundle, *, allow_diff=True):
         payload = build_room_state_push(
-            self.conn, building_id, full_text,
-            media=media, allow_diff=allow_diff, head_full_text=head_full_text,
+            self.conn, building_id, bundle, allow_diff=allow_diff,
         )
         push_perception(
             self.conn, ROOM_STATE_KIND, payload["content"],
@@ -166,10 +438,19 @@ class RoomStateLedgerTestBase(unittest.TestCase):
             return None
         reduced = ensure_room_state_base(self.conn, reduce_perceptions(items))
         text = format_perception_message(reduced)
+        media = []
+        seen = set()
+        for it in reduced:
+            for m in it.media_list():
+                if m.get("path") in seen:
+                    continue
+                seen.add(m.get("path"))
+                media.append(m)
         self.clock += 10
         return create_consumption_batch(
             self.conn, [it.id for it in items],
             consumed_at=self.clock, rendered_text=text,
+            media=media or None,
             room_state_json=collect_batch_room_states(reduced, text),
         )
 
@@ -181,1217 +462,2012 @@ class RoomStateLedgerTestBase(unittest.TestCase):
 
 
 class RoomStatePushTest(RoomStateLedgerTestBase):
-    """積む側の判定 (全文か差分か)。"""
+    """積む側の判定 (全文か差分か) とメディアの契約 (§5)。"""
 
     def setUp(self):
         super().setUp()
-        self.full_a = _room_text("工房", [("5", "真鍮の定規", "使い込まれた定規。")])
-        self.full_a2 = _room_text("工房", [
-            ("5", "真鍮の定規", "使い込まれた定規。"),
-            ("7", "銅のノギス", "目盛りが細かいノギス。"),
-        ])
+        self.bundle_a = self.env.bundle()
+        self.env.items.append(_make_item(
+            "uuid-new", 14, "picture", "新しい絵", "届いたばかりの絵。",
+            is_open=True, file_path=self.env.pic2_path,
+        ))
+        self.bundle_b = self.env.bundle()
 
-    def test_first_visit_pushes_the_full_text(self):
-        payload = self._push("b1", self.full_a)
-        self.assertEqual(payload["content"], self.full_a)
+    def test_first_visit_pushes_the_full_text_with_all_media(self):
+        payload = self._push("b1", self.bundle_a)
+        self.assertEqual(payload["content"], render_room_full(self.bundle_a))
+        self.assertEqual(payload["media"], bundle_media(self.bundle_a))
         state = json.loads(payload["metadata"])["room_state"]
         self.assertFalse(state["is_diff"])
         self.assertEqual(state["key"], room_key("b1"))
-        self.assertEqual(state["snapshot"], self.full_a)
+        self.assertEqual(state["snapshot"], self.bundle_a)
 
     def test_revisit_while_base_is_still_pending_pushes_a_diff(self):
-        self._push("b1", self.full_a)
-        payload = self._push("b1", self.full_a2)
-        self.assertNotEqual(payload["content"], self.full_a2)
-        self.assertIn("銅のノギス", payload["content"])
+        self._push("b1", self.bundle_a)
+        payload = self._push("b1", self.bundle_b)
+        self.assertIn("新しい絵", payload["content"])
+        self.assertLess(
+            len(payload["content"]), len(render_room_full(self.bundle_b)),
+        )
+        state = json.loads(payload["metadata"])["room_state"]
+        self.assertTrue(state["is_diff"])
+        self.assertEqual(state["base_digest"], snapshot_digest(self.bundle_a))
+
+    def test_a_new_picture_in_the_diff_carries_its_media(self):
+        """§5 契約 1: 差分で新しく見せるパッケージの絵は差分と一緒に届く。"""
+        self._push("b1", self.bundle_a)
+        self._flush()
+        payload = self._push("b1", self.bundle_b)
+        self.assertEqual(
+            [m["path"] for m in payload["media"]], [str(self.env.pic2_path)],
+        )
+
+    def test_an_unchanged_room_diff_carries_no_media(self):
+        """§5 契約 3: 変わっていないパッケージのメディアは再添付しない。"""
+        self._push("b1", self.bundle_a)
+        self._flush()
+        payload = self._push("b1", self.bundle_a)
+        self.assertIn("前回見たときから変わっていません。", payload["content"])
+        self.assertIsNone(payload["media"])
         self.assertTrue(json.loads(payload["metadata"])["room_state"]["is_diff"])
 
-    def test_revisit_while_base_batch_is_presented_pushes_a_diff(self):
-        self._push("b1", self.full_a)
-        self._flush()
-        payload = self._push("b1", self.full_a2)
-        self.assertIn("増えた・変わったもの", payload["content"])
-        self.assertLess(len(payload["content"]), len(self.full_a2))
-
-    def test_diff_carries_no_media(self):
-        media = [{"path": "/tmp/room.png", "mime_type": "image/png"}]
-        first = self._push("b1", self.full_a, media=media)
-        self.assertEqual(first["media"], media)
-        self._flush()
-        second = self._push("b1", self.full_a2, media=media)
-        self.assertIsNone(second["media"])
-
     def test_another_room_is_a_separate_base(self):
-        self._push("b1", self.full_a)
+        self._push("b1", self.bundle_a)
         self._flush()
-        full_b = _room_text("書斎", [("9", "背の高い本棚", "本が詰まっている。")])
-        payload = self._push("b2", full_b)
-        self.assertEqual(payload["content"], full_b)
+        other = dict(self.bundle_a)
+        other["building_id"] = "b2"
+        other["building_name"] = "書斎"
+        payload = self._push("b2", other)
+        self.assertEqual(payload["content"], render_room_full(other))
 
     def test_after_the_base_is_annexed_the_next_visit_is_full_again(self):
-        base = self._push("b1", self.full_a)
-        self.assertEqual(base["content"], self.full_a)
+        self._push("b1", self.bundle_a)
         batch_id = self._flush()
         mark_batches_annexed(self.conn, [batch_id], "entry-1")
         self.conn.commit()
-        self.assertIsNone(latest_visible_snapshot(self.conn, room_key("b1")))
-        payload = self._push("b1", self.full_a2)
-        self.assertEqual(payload["content"], self.full_a2)
+        # 付記の tx が最後の運搬役の置き直し (§6-4) を伴うので、置き直しの
+        # 全文が新しい土台になる — 変化ぶんだけの差分が積める。
+        reseated = latest_visible_snapshot(self.conn, room_key("b1"))
+        self.assertEqual(reseated, self.bundle_a)
+        payload = self._push("b1", self.bundle_b)
+        self.assertTrue(json.loads(payload["metadata"])["room_state"]["is_diff"])
+        self.assertIn("新しい絵", payload["content"])
 
     def test_chronicle_disabled_persona_always_gets_the_full_text(self):
-        self._push("b1", self.full_a, allow_diff=False)
+        self._push("b1", self.bundle_a, allow_diff=False)
         self._flush()
-        payload = self._push("b1", self.full_a2, allow_diff=False)
-        self.assertEqual(payload["content"], self.full_a2)
-
-    def test_no_change_revisit_still_records_a_transfer_target(self):
-        self._push("b1", self.full_a)
-        self._flush()
-        payload = self._push("b1", self.full_a)
-        self.assertIn("前回見たときから変わっていません。", payload["content"])
-        self.assertTrue(json.loads(payload["metadata"])["room_state"]["is_diff"])
+        payload = self._push("b1", self.bundle_b, allow_diff=False)
+        self.assertEqual(payload["content"], render_room_full(self.bundle_b))
+        self.assertEqual(payload["media"], bundle_media(self.bundle_b))
 
 
-class RoomStateTransferTest(RoomStateLedgerTestBase):
-    """下ろす側 (付記) に相乗りする移管。"""
+class RoomStateRestoreTest(RoomStateLedgerTestBase):
+    """土台の回復 (付記・境界前進と同一 tx) と、復元でのメディアの戻り (§5 契約 2)。"""
 
     def setUp(self):
         super().setUp()
-        self.full_a = _room_text("工房", [("5", "真鍮の定規", "使い込まれた定規。")])
-        self.full_a2 = _room_text("工房", [
-            ("5", "真鍮の定規", "使い込まれた定規。"),
-            ("7", "銅のノギス", "目盛りが細かいノギス。"),
-        ])
-        self.full_a3 = _room_text("工房", [
-            ("5", "真鍮の定規", "使い込まれた定規。"),
-            ("7", "銅のノギス", "目盛りが細かいノギス。"),
-            ("8", "使い古した鍵", "何を開けるか分からない鍵。"),
-        ])
-        self._push("b1", self.full_a)
+        self.bundle_a = self.env.bundle()
+        self.env.items.append(_make_item(
+            "uuid-new", 14, "picture", "新しい絵", "届いたばかりの絵。",
+            is_open=True, file_path=self.env.pic2_path,
+        ))
+        self.bundle_b = self.env.bundle()
+        self._push("b1", self.bundle_a)
         self.base_id = self._flush()
-        self._push("b1", self.full_a2)
+        self._push("b1", self.bundle_b)
         self.diff_id = self._flush()
+        # 付記後も部屋の運搬役 (diff) が生き残る形にする。
+        self._push_noise()
 
-    def test_annexing_the_base_moves_the_full_text_into_the_oldest_survivor(self):
-        before = self._batch(self.diff_id).rendered_text
-        self.assertNotIn("使い込まれた定規。", before)
+    def _push_noise(self):
+        push_perception(self.conn, "world_state", "ノイズ通知")
+        self.noise_id = self._flush()
 
+    def test_annexing_the_base_reopens_the_survivor_to_the_full_text(self):
         mark_batches_annexed(self.conn, [self.base_id], "entry-1")
         self.conn.commit()
-
         survivor = self._batch(self.diff_id)
-        self.assertIsNotNone(survivor)
-        # 移管後は「その時点の部屋の全文」が読める = 差分の土台を失っていない。
-        self.assertEqual(survivor.rendered_text, self.full_a2)
+        self.assertEqual(
+            survivor.rendered_text, render_room_full(self.bundle_b),
+        )
         entry = json.loads(survivor.room_state_json)[0]
         self.assertFalse(entry["is_diff"])
         self.assertTrue(entry["transferred"])
 
-    def test_transferred_text_is_what_the_presentation_shows(self):
+    def test_the_restored_full_text_brings_its_media_back(self):
+        """§5 契約 2: 開き直しで全文に戻るなら、束のメディアも戻る。"""
         mark_batches_annexed(self.conn, [self.base_id], "entry-1")
         self.conn.commit()
-        persona = SimpleNamespace(
-            persona_id="p1",
-            sai_memory=SimpleNamespace(
-                conn=self.conn, _db_lock=threading.RLock(), is_ready=lambda: True,
-            ),
-        )
-        merged = _merge_consumed_perceptions(_RUNTIME, persona, [])
-        self.assertEqual(len(merged), 1)
-        self.assertIn("使い込まれた定規。", merged[0]["content"])
-        self.assertIn("目盛りが細かいノギス。", merged[0]["content"])
-
-    def test_only_the_oldest_survivor_becomes_full(self):
-        self._push("b1", self.full_a3)
-        newest_id = self._flush()
-
-        mark_batches_annexed(self.conn, [self.base_id], "entry-1")
-        self.conn.commit()
-
-        self.assertEqual(self._batch(self.diff_id).rendered_text, self.full_a2)
-        newest = self._batch(newest_id)
-        self.assertIn("使い古した鍵", newest.rendered_text)
-        self.assertNotIn("使い込まれた定規。", newest.rendered_text)
-        self.assertTrue(json.loads(newest.room_state_json)[0]["is_diff"])
+        survivor = self._batch(self.diff_id)
+        paths = {m["path"] for m in survivor.media_list()}
+        self.assertIn(str(self.env.pic_path), paths)   # 土台と一緒に下りた絵
+        self.assertIn(str(self.env.pic2_path), paths)  # 差分が連れてきた絵
 
     def test_the_rewrite_is_rolled_back_with_the_stamp(self):
-        self.conn.execute("BEGIN IMMEDIATE")
-        mark_batches_annexed(self.conn, [self.base_id], "entry-1")
-        self.conn.rollback()
-
-        self.assertIsNotNone(self._batch(self.base_id))  # 付記は戻った
+        with patch(
+            "sai_memory.room_state.restore_room_state_bases",
+            side_effect=sqlite3.OperationalError("boom"),
+        ):
+            with self.assertRaises(sqlite3.OperationalError):
+                mark_batches_annexed(self.conn, [self.base_id], "entry-1")
+        # rollback 済み — 付記も書き換えも残っていない。
         survivor = self._batch(self.diff_id)
-        self.assertNotIn("使い込まれた定規。", survivor.rendered_text)
         self.assertTrue(json.loads(survivor.room_state_json)[0]["is_diff"])
+        self.assertIsNotNone(self._batch(self.base_id))
 
-    def _break_the_invariant(self):
-        """最古の可視エントリが差分、という壊れた形を移管を通さずに作る。
-
-        付記を直接 SQL で打つ (= mark_batches_annexed を通らない) ので、移管は
-        走っていない。残るのは差分だけになった提示。
-        """
-        self._push("b1", self.full_a3)
-        stale_id = self._flush()
-        self.conn.execute(
-            "UPDATE perception_batches SET annexed_entry_id = 'seed' "
-            "WHERE id IN (?, ?)",
-            (self.base_id, self.diff_id),
+    def test_a_pending_diff_whose_base_was_annexed_is_reopened_with_media(self):
+        """消費前の開き直し (ensure_room_state_base) — 全文 + メディアの復元。"""
+        env2 = dict(self.bundle_b)
+        payload = self._push("b1", env2)  # pending の差分 (変化なしの一行)
+        self.assertIsNone(payload["media"])
+        mark_batches_annexed(
+            self.conn, [self.base_id, self.diff_id], "entry-1",
         )
         self.conn.commit()
-        self.assertTrue(json.loads(self._batch(stale_id).room_state_json)[0]["is_diff"])
-        return stale_id
+        # 付記の置き直し (§6-4) は pending が運搬役なので発火しない。
+        self.assertIsNone(
+            next(
+                (b for b in list_presented_batches(self.conn)
+                 if b.room_state_json), None,
+            ),
+        )
+        items = ensure_room_state_base(
+            self.conn, reduce_perceptions(list_pending(self.conn)),
+        )
+        room_items = [
+            it for it in items
+            if json.loads(it.metadata or "{}").get("room_state")
+        ]
+        self.assertEqual(len(room_items), 1)
+        self.assertEqual(room_items[0].content, render_room_full(env2))
+        paths = {m["path"] for m in room_items[0].media_list()}
+        self.assertIn(str(self.env.pic2_path), paths)
 
-    def test_no_stamp_means_no_rewrite(self):
-        stale_id = self._break_the_invariant()
-        before = self._batch(stale_id).rendered_text
 
-        # 既に付記済みの id をもう一度渡す = 印は 1 行も立たない。
-        stamped = mark_batches_annexed(self.conn, [self.base_id], "entry-2")
+class RoomStateReseatTest(RoomStateLedgerTestBase):
+    """§6-4: 最後の運搬役が下りる回は、最新の全文が提示の最古端へ置き直される。"""
+
+    def setUp(self):
+        super().setUp()
+        self.bundle_a = self.env.bundle()
+        self._push("b1", self.bundle_a)
+        self.base_id = self._flush()
+        push_perception(self.conn, "world_state", "ノイズ通知")
+        self.noise_id = self._flush()
+
+    def _reseated_batches(self):
+        return [
+            b for b in list_presented_batches(self.conn)
+            if b.room_state_json and any(
+                e.get("reseated")
+                for e in json.loads(b.room_state_json)
+            )
+        ]
+
+    def test_annexing_the_last_carrier_reseats_the_room(self):
+        mark_batches_annexed(self.conn, [self.base_id], "entry-1")
         self.conn.commit()
+        reseated = self._reseated_batches()
+        self.assertEqual(len(reseated), 1)
+        self.assertEqual(
+            reseated[0].rendered_text, render_room_full(self.bundle_a),
+        )
+        # メディアも一緒に運ばれる (§5 の復元)。
+        self.assertIn(
+            str(self.env.pic_path),
+            {m["path"] for m in reseated[0].media_list()},
+        )
 
-        self.assertEqual(stamped, 0)
-        self.assertEqual(self._batch(stale_id).rendered_text, before)
-        self.assertTrue(json.loads(self._batch(stale_id).room_state_json)[0]["is_diff"])
-
-    def test_a_real_stamp_carries_the_transfer(self):
-        stale_id = self._break_the_invariant()
-        # 別の部屋のバッチを 1 件付記する = 印が 1 行立つ回。
-        self._push("b2", _room_text("書斎", [("9", "本棚", "本が詰まっている。")]))
-        other_id = self._flush()
-
-        stamped = mark_batches_annexed(self.conn, [other_id], "entry-2")
+    def test_the_reseat_stands_at_the_oldest_end(self):
+        """機構の置き直しは先頭 = 背景 (2026-09-06 まはー裁定の置き場所の原則)。"""
+        mark_batches_annexed(self.conn, [self.base_id], "entry-1")
         self.conn.commit()
+        presented = list_presented_batches(self.conn)
+        self.assertTrue(presented)
+        reseated = self._reseated_batches()[0]
+        self.assertEqual(presented[0].id, reseated.id)
+        self.assertLess(reseated.consumed_at, self._batch(self.noise_id).consumed_at)
 
-        self.assertEqual(stamped, 1)
-        self.assertEqual(self._batch(stale_id).rendered_text, self.full_a3)
+    def test_a_surviving_carrier_means_no_reseat(self):
+        self._push("b1", self.bundle_a)  # 二枚目 (変化なしの一行だが運搬役)
+        second_id = self._flush()
+        mark_batches_annexed(self.conn, [self.base_id], "entry-1")
+        self.conn.commit()
+        self.assertEqual(self._reseated_batches(), [])
+        self.assertIsNotNone(self._batch(second_id))
 
-    def test_transfer_walks_forward_as_each_base_is_annexed(self):
-        self._push("b1", self.full_a3)
-        newest_id = self._flush()
+    def test_the_cutoff_advance_also_reseats(self):
+        advance_presentation_cutoff(self.conn, self.base_id)
+        self.conn.commit()
+        reseated = self._reseated_batches()
+        self.assertEqual(len(reseated), 1)
+        # 置き直しは新しい id なので、進んだ境界 (id 基準) に下ろされない。
+        self.assertGreater(reseated[0].id, get_presentation_cutoff(self.conn))
+
+    def test_a_dry_run_previews_the_same_content_without_writing(self):
+        """下見 (dry_run) = 実 INSERT と同じ判定・同じ内容で、何も書かない。
+
+        測るだけの提示組成が「進めたつもり」の列に幻のブロックを合成する口。
+        発火条件・材料の選定・位置決めが実 INSERT と同じ一本を通ることを、
+        下見の返り値と実物 (境界前進と同一 tx の置き直し) の突き合わせで固定
+        する。
+        """
+        before = self.conn.execute(
+            "SELECT COUNT(*) FROM perception_batches",
+        ).fetchone()[0]
+        preview = reseat_current_room(
+            self.conn, dry_run=True, assume_cutoff=self.base_id,
+        )
+        after = self.conn.execute(
+            "SELECT COUNT(*) FROM perception_batches",
+        ).fetchone()[0]
+        self.assertEqual(after, before)  # 下見はバッチを積まない
+        self.assertEqual(get_presentation_cutoff(self.conn), 0)  # 境界も不動
+        self.assertIsNotNone(preview)
+        text, media, consumed_at = preview
+        advance_presentation_cutoff(self.conn, self.base_id)
+        self.conn.commit()
+        reseated = self._reseated_batches()[0]
+        self.assertEqual(reseated.rendered_text, text)
+        self.assertEqual(reseated.media_list(), media)
+        self.assertEqual(reseated.consumed_at, consumed_at)
+
+    def test_a_dry_run_with_a_surviving_carrier_returns_none(self):
+        """発火しない形も実物と同じ判定 — 運搬役が残る境界では None。"""
+        self.assertIsNone(
+            reseat_current_room(self.conn, dry_run=True, assume_cutoff=0),
+        )
+
+    def test_a_dry_run_respects_the_pending_gate(self):
+        """同部屋の pending が居れば下見も発火しない (実物と同じ門)。"""
+        self._push("b1", self.bundle_a)  # pending (未消費) の運搬役
+        self.assertIsNone(
+            reseat_current_room(
+                self.conn, dry_run=True, assume_cutoff=self.base_id,
+            ),
+        )
+
+    def test_a_failed_reseat_rolls_the_annexation_back(self):
+        """置き直しに失敗したら付記ごと見送る (§6-4「置き直してから下ろす」)。
+
+        付記だけが確定すると「今いる部屋の全体像が提示のどこにも無い」状態が
+        生まれ、次の検知の自己回復より先に送信が起きる経路では部屋なしで
+        送られる。restore_room_state_bases の失敗と同じ扱いで rollback する。
+        """
+        with patch(
+            "sai_memory.room_state.reseat_current_room",
+            side_effect=sqlite3.OperationalError("boom"),
+        ):
+            with self.assertRaises(sqlite3.OperationalError):
+                mark_batches_annexed(self.conn, [self.base_id], "entry-1")
+        # rollback 済み — 付記は残らず、部屋の運搬役は提示に残っている。
+        self.assertIsNotNone(self._batch(self.base_id))  # 未付記のまま
+        self.assertIn(
+            self.base_id, [b.id for b in list_presented_batches(self.conn)],
+        )
+
+    def test_a_failed_reseat_rolls_the_cutoff_advance_back(self):
+        """境界前進も同じ契約 — 置き直しに失敗したら前進ごと見送る。"""
+        with patch(
+            "sai_memory.room_state.reseat_current_room",
+            side_effect=sqlite3.OperationalError("boom"),
+        ):
+            with self.assertRaises(sqlite3.OperationalError):
+                advance_presentation_cutoff(self.conn, self.base_id)
+        # rollback 済み — 境界は動かず、部屋の運搬役は提示に残っている。
+        self.assertEqual(get_presentation_cutoff(self.conn), 0)
+        self.assertIn(
+            self.base_id, [b.id for b in list_presented_batches(self.conn)],
+        )
+
+    def test_the_reseat_becomes_the_base_for_the_next_diff(self):
+        mark_batches_annexed(self.conn, [self.base_id], "entry-1")
+        self.conn.commit()
+        self.assertEqual(
+            latest_visible_snapshot(self.conn, room_key("b1")), self.bundle_a,
+        )
+        payload = self._push("b1", self.bundle_a)
+        self.assertIn("前回見たときから変わっていません。", payload["content"])
+
+    def test_the_reseat_is_stamped_but_not_annex_material(self):
+        """置き直しは出来事ではない — 付記印は受けるが材料には載らない。"""
+        from sai_memory.arasuji.executor import collect_annex_items
 
         mark_batches_annexed(self.conn, [self.base_id], "entry-1")
         self.conn.commit()
-        mark_batches_annexed(self.conn, [self.diff_id], "entry-2")
-        self.conn.commit()
+        reseated = self._reseated_batches()[0]
+        items, batch_ids = collect_annex_items(self.conn, 0, 10_000_000)
+        self.assertIn(reseated.id, batch_ids)
+        self.assertNotIn(
+            render_room_full(self.bundle_a), [i["text"] for i in items],
+        )
 
-        self.assertEqual(self._batch(newest_id).rendered_text, self.full_a3)
+    def test_find_current_room_key_reads_the_newest_record(self):
+        self.assertEqual(find_current_room_key(self.conn), room_key("b1"))
+
+    def test_reseat_is_a_noop_without_any_room_record(self):
+        conn = sqlite3.connect(":memory:")
+        init_perception_buffer_table(conn)
+        self.addCleanup(conn.close)
+        self.assertIsNone(reseat_current_room(conn))
 
 
-class RoomStateMiddleBaseTest(RoomStateLedgerTestBase):
-    """中間の一枚だけが提示から下りた形 (2026-09-05 Codex 三巡 #1)。
+class _FailingConn:
+    """特定の SQL だけ OperationalError を出す接続の皮 (読み取り失敗の注入)。
 
-    差分の土台は「同部屋の**直前**のエントリ」であって、提示に残っている最古の
-    全文ではない。「A の全文 → B 追加 → C 追加」を積んで**中間の B だけ**を
-    付記すると、最古 (A) は全文のまま残るのに C の土台 (B 時点の全文) が消える。
-    最古だけを見る規則ではこの欠落を検出できず、C は土台のない差分のまま
-    プロンプトへ乗る (編纂の付記は期間指定なので中間区間だけを対象にできる)。
+    置き直しの発火判定・材料の読み (find_current_room_key / pending_has_room /
+    _latest_room_bundle) だけを狙って落とし、hook 自身の書き込み
+    (mark_batches_annexed の UPDATE / 境界の UPSERT) と回復の読み
+    (list_presented_batches) は素通しする — 「読み取りが失敗しただけの回」を
+    再現するため。
+    """
+
+    def __init__(self, conn, fail_when):
+        self._conn = conn
+        self._fail_when = fail_when
+
+    def execute(self, sql, *args, **kwargs):
+        if self._fail_when(sql):
+            raise sqlite3.OperationalError("injected read failure")
+        return self._conn.execute(sql, *args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+
+class ReseatReadFailureTest(RoomStateLedgerTestBase):
+    """2026-09-06 四巡目修正 1: 置き直しの読み取り失敗は「対象なし」に化けない。
+
+    find_current_room_key / pending_has_room / _latest_room_bundle が DB の
+    失敗を握って None / False を返すと、reseat_current_room は「置き直し不要」
+    と読み、hook (mark_batches_annexed / advance_presentation_cutoff) は付記・
+    境界前進を commit してしまう — 読み取りが失敗しただけなのに、最後の
+    運搬役が置き直しなしで下りる。失敗は例外で伝播し、hook が tx ごと
+    rollback して見送る (次の機会にやり直す)。
     """
 
     def setUp(self):
         super().setUp()
-        self.full_a = _room_text("工房", [("5", "真鍮の定規", "使い込まれた定規。")])
-        self.full_b = _room_text("工房", [
-            ("5", "真鍮の定規", "使い込まれた定規。"),
-            ("7", "銅のノギス", "目盛りが細かいノギス。"),
+        self.bundle_a = self.env.bundle()
+        self._push("b1", self.bundle_a)
+        self.base_id = self._flush()
+        push_perception(self.conn, "world_state", "ノイズ通知")
+        self.noise_id = self._flush()
+
+    def _conn_failing_room_reads(self):
+        """現在地の読み (部屋の記帳の SELECT) だけを落とす接続。"""
+        return _FailingConn(
+            self.conn,
+            lambda sql: (
+                ("FROM perception_buffer" in sql
+                 and sql.lstrip().startswith("SELECT"))
+                or "WHERE room_state_json IS NOT NULL" in sql
+            ),
+        )
+
+    def test_a_failed_room_key_read_rolls_the_annexation_back(self):
+        failing = self._conn_failing_room_reads()
+        with self.assertRaises(sqlite3.OperationalError):
+            mark_batches_annexed(failing, [self.base_id], "entry-1")
+        # rollback 済み — 付記は残らず、部屋の運搬役は提示に残っている。
+        self.assertIsNotNone(self._batch(self.base_id))
+        self.assertIn(
+            self.base_id, [b.id for b in list_presented_batches(self.conn)],
+        )
+
+    def test_a_failed_room_key_read_rolls_the_cutoff_advance_back(self):
+        failing = self._conn_failing_room_reads()
+        with self.assertRaises(sqlite3.OperationalError):
+            advance_presentation_cutoff(failing, self.base_id)
+        self.assertEqual(get_presentation_cutoff(self.conn), 0)
+        self.assertIn(
+            self.base_id, [b.id for b in list_presented_batches(self.conn)],
+        )
+
+    def test_a_failed_material_read_is_not_no_material(self):
+        """材料の読み (_latest_room_bundle) の失敗も「材料なし」に化けない。"""
+        failing = _FailingConn(
+            self.conn,
+            lambda sql: (
+                "room_state_json, consumed_at FROM perception_batches" in sql
+            ),
+        )
+        with self.assertRaises(sqlite3.OperationalError):
+            mark_batches_annexed(failing, [self.base_id], "entry-1")
+        self.assertIsNotNone(self._batch(self.base_id))
+
+    def test_a_failed_pending_read_in_the_self_recovery_raises(self):
+        """発火の門 (pending_has_room) の失敗も安全側の False に化けない。"""
+        failing = _FailingConn(
+            self.conn,
+            lambda sql: (
+                "FROM perception_buffer" in sql
+                and sql.lstrip().startswith("SELECT")
+            ),
+        )
+        with self.assertRaises(sqlite3.OperationalError):
+            reseat_current_room(failing, fresh_bundle=self.bundle_a)
+
+
+class RoomStateSelfRecoveryTest(RoomStateLedgerTestBase):
+    """§6-2 / §6-3: 検知の瞬間の自己回復 — 部屋が提示に無ければ全文を最古端へ。"""
+
+    def _sai_mem_stub(self):
+        """adapter の表面を持つスタブ (呼ばれた口を記録する)。"""
+        conn = self.conn
+
+        class Stub:
+            def __init__(self):
+                self.pushed = []
+                self.reseated = []
+
+            def is_ready(self):
+                return True
+
+            def latest_room_snapshot(self, key, *, anchor_id=None,
+                                     floor_chars=None):
+                return latest_visible_snapshot(conn, key)
+
+            def push_room_state(self, building_id, bundle, *, allow_diff=True):
+                self.pushed.append((building_id, bundle, allow_diff))
+
+            def reseat_room_state(self, bundle, *, anchor_id=None,
+                                  floor_chars=None):
+                self.reseated.append(bundle)
+                batch_id = reseat_current_room(conn, fresh_bundle=bundle)
+                if batch_id is not None:
+                    conn.commit()
+                return batch_id
+
+        return Stub()
+
+    def _detect(self, sai_mem, bundle, *, chronicle_on=True):
+        from sea.head_pipeline.integration import _detect_room_state_changes
+
+        persona = SimpleNamespace(
+            persona_id="p1", persona_dir=None,
+            current_building_id="b1", sai_memory=sai_mem,
+        )
+        with patch(
+            "builtin_data.tools.get_visual_context.build_room_bundle",
+            return_value=bundle,
+        ), patch(
+            "sea.head_pipeline.integration._room_chronicle_enabled",
+            return_value=chronicle_on,
+        ):
+            _detect_room_state_changes(persona, SimpleNamespace(), "b1")
+
+    def test_bootstrap_reseats_the_full_text_at_the_front(self):
+        """起動直後 (台帳が空) の最初の検知で、部屋の全文が背景として立つ。"""
+        bundle = self.env.bundle()
+        sai_mem = self._sai_mem_stub()
+        self._detect(sai_mem, bundle)
+        self.assertEqual(sai_mem.reseated, [bundle])
+        self.assertEqual(sai_mem.pushed, [])
+        presented = list_presented_batches(self.conn)
+        self.assertEqual(len(presented), 1)
+        self.assertEqual(presented[0].rendered_text, render_room_full(bundle))
+
+    def test_a_change_during_the_stay_is_pushed_as_a_diff_event(self):
+        """滞在中の変化は末尾の出来事 (push) — 置き直しではない。"""
+        bundle = self.env.bundle()
+        self._push("b1", bundle)
+        self._flush()
+        self.env.items.append(_make_item(
+            "uuid-new", 14, "picture", "新しい絵", "届いたばかりの絵。",
+            is_open=True, file_path=self.env.pic2_path,
+        ))
+        changed = self.env.bundle()
+        sai_mem = self._sai_mem_stub()
+        self._detect(sai_mem, changed)
+        self.assertEqual(sai_mem.pushed, [("b1", changed, True)])
+        self.assertEqual(sai_mem.reseated, [])
+
+    def test_an_unchanged_visible_room_does_nothing(self):
+        bundle = self.env.bundle()
+        self._push("b1", bundle)
+        self._flush()
+        sai_mem = self._sai_mem_stub()
+        self._detect(sai_mem, bundle)
+        self.assertEqual(sai_mem.pushed, [])
+        self.assertEqual(sai_mem.reseated, [])
+
+    def _detect_with_move_during_composition(self, sai_mem, bundle):
+        """組成 (build_room_bundle) の最中にペルソナが b2 へ移動する検知を回す。
+
+        検知の冒頭の「ペルソナが building_id に居るか」は通る (まだ b1 に居る)
+        が、束の組成 — world の読みで、開いたドキュメントのファイル読み込みを
+        含み時間がかかりうる — の間に別スレッド (ユーザー操作の移動 API 等) が
+        現在地を変える形の注入。
+        """
+        from sea.head_pipeline.integration import _detect_room_state_changes
+
+        persona = SimpleNamespace(
+            persona_id="p1", persona_dir=None,
+            current_building_id="b1", sai_memory=sai_mem,
+        )
+
+        def compose_and_move(building_id):
+            persona.current_building_id = "b2"
+            return bundle
+
+        with patch(
+            "builtin_data.tools.get_visual_context.build_room_bundle",
+            side_effect=compose_and_move,
+        ), patch(
+            "sea.head_pipeline.integration._room_chronicle_enabled",
+            return_value=True,
+        ):
+            _detect_room_state_changes(persona, SimpleNamespace(), "b1")
+
+    def test_a_move_during_composition_skips_the_reseat(self):
+        """組成中に移動したら、旧部屋の全文を「現在の知覚」に置き直さない。
+
+        2026-09-06 十一巡目: 冒頭の現在地確認の後、組成と積みの間に再確認が
+        無かった — 組成中の移動で旧部屋の全文・メディアが現在の知覚として
+        積まれる (次の検知が正すので実害は一拍の混入だが、混入自体を避ける)。
+        見送った回は次の検知が現在地でやり直す。
+        """
+        bundle = self.env.bundle()
+        sai_mem = self._sai_mem_stub()
+        self._detect_with_move_during_composition(sai_mem, bundle)
+        self.assertEqual(
+            sai_mem.reseated, [],
+            "組成中に移動したのに旧部屋の全文が置き直された — "
+            "積む直前の現在地の再確認が無い",
+        )
+        self.assertEqual(sai_mem.pushed, [])
+
+    def test_a_move_during_composition_skips_the_diff_push(self):
+        """組成中に移動したら、旧部屋の差分も末尾の出来事として積まない。"""
+        bundle = self.env.bundle()
+        self._push("b1", bundle)
+        self._flush()
+        self.env.items.append(_make_item(
+            "uuid-new", 14, "picture", "新しい絵", "届いたばかりの絵。",
+            is_open=True, file_path=self.env.pic2_path,
+        ))
+        changed = self.env.bundle()
+        sai_mem = self._sai_mem_stub()
+        self._detect_with_move_during_composition(sai_mem, changed)
+        self.assertEqual(
+            sai_mem.pushed, [],
+            "組成中に移動したのに旧部屋の差分が積まれた — "
+            "積む直前の現在地の再確認が無い",
+        )
+        self.assertEqual(sai_mem.reseated, [])
+
+    def test_chronicle_disabled_window_loss_reseats(self):
+        """窓絞りで運搬役が見えなくなった Chronicle 無効ペルソナの受け皿。
+
+        形は「運搬役が下ろし境界より新しい (= まだ提示に出る) が、実行 model
+        の提示窓 (anchor) より古い」。検知は正しく「窓に見えない」と判定して
+        ``reseat_room_state`` を呼ぶ — その中の門 (``reseat_current_room`` の
+        「運搬役が生きているか」) が窓の篩を通らず提示境界だけで数えると、
+        窓の外の運搬役を生きていると誤認して、自己回復がその主目的の形で
+        まさに空振りする (2026-09-06 二巡目修正 1)。ここは本物の adapter
+        (``SAIMemoryAdapter``) の門を通し、置き直しの全文バッチが実際に提示へ
+        立つところまでを固定する。
+
+        旧版のこのテストは、スタブの ``room_carrier_visible`` を False に固定
+        して検知に reseat を呼ばせ、検証も「adapter メソッドが呼ばれた記録」
+        止まりだった — 置き直しが実際に積まれたかを見ず、DB にも運搬役が窓の
+        外になる形が無かったため、この欠陥を素通しした。
+        """
+        import threading
+
+        from saiverse_memory.adapter import SAIMemoryAdapter
+        from sea.head_pipeline.integration import _detect_room_state_changes
+
+        bundle = self.env.bundle()
+        self._push("b1", bundle, allow_diff=False)
+        carrier_id = self._flush()
+        carrier = self._batch(carrier_id)
+        # anchor (実行 model の窓の起点) を運搬役より後に置く — 運搬役は
+        # 「下ろし境界より新しいが、窓より古い」になる。
+        self.conn.execute("CREATE TABLE messages (id TEXT, created_at INTEGER)")
+        self.conn.execute(
+            "INSERT INTO messages (id, created_at) VALUES (?, ?)",
+            ("anchor-1", carrier.consumed_at + 1_000),
+        )
+        self.conn.commit()
+
+        adapter = SAIMemoryAdapter.__new__(SAIMemoryAdapter)
+        adapter.conn = self.conn
+        adapter._db_lock = threading.RLock()
+
+        class Lifecycle:
+            def resolve_metabolism_anchor(
+                self, persona, model_key=None, persist_advance=True,
+            ):
+                return ("anchor-1", "self")
+
+        manager = SimpleNamespace(
+            sea_runtime=SimpleNamespace(session_lifecycle=Lifecycle()),
+        )
+        persona = SimpleNamespace(
+            persona_id="p1", persona_dir=None, model="standard-model",
+            current_building_id="b1", sai_memory=adapter,
+        )
+        with patch(
+            "builtin_data.tools.get_visual_context.build_room_bundle",
+            return_value=bundle,
+        ), patch(
+            "sea.head_pipeline.integration._room_chronicle_enabled",
+            return_value=False,
+        ):
+            _detect_room_state_changes(persona, manager, "b1")
+
+        reseated = [
+            b for b in list_presented_batches(self.conn)
+            if b.room_state_json and any(
+                e.get("reseated") for e in json.loads(b.room_state_json)
+            )
+        ]
+        self.assertEqual(
+            len(reseated), 1,
+            "運搬役が実行 model の窓の外なのに置き直しが積まれていない — "
+            "reseat_current_room の門が提示窓の篩を通っていない",
+        )
+        self.assertEqual(reseated[0].rendered_text, render_room_full(bundle))
+        # 変化は無いので diff の push は起きていない (pending は増えない)。
+        self.assertEqual(list_pending(self.conn), [])
+
+    def test_the_window_check_uses_the_execution_models_anchor(self):
+        """Chronicle 無効の窓判定は**その回の実行 model** の窓で行う。
+
+        提示窓 (anchor) は (ペルソナ, model) ごと。検知の読みが標準 model の
+        窓で「運搬役が見えている」と判定すると、実行 model が標準と違う
+        ペルソナでは、提示側では部屋が窓の外なのに自己回復が発火しない。
+        ``inject_diff_notifications`` が受けた ``model_key`` が
+        ``resolve_metabolism_anchor`` まで届くことを配線ごと確かめる。
+        """
+        from sea.head_pipeline import integration
+
+        bundle = self.env.bundle()
+        self._push("b1", bundle, allow_diff=False)
+        self._flush()
+        conn = self.conn
+        sai_mem = self._sai_mem_stub()
+        seen_anchors = []
+
+        def windowed_read(key, *, anchor_id=None, floor_chars=None):
+            seen_anchors.append(anchor_id)
+            # 標準 model の窓には見えているが、実行 model の窓では外れている。
+            if anchor_id == "anchor-exec":
+                return None
+            return latest_visible_snapshot(conn, key)
+
+        sai_mem.latest_room_snapshot = windowed_read
+
+        class Lifecycle:
+            def resolve_metabolism_anchor(
+                self, persona, model_key=None, persist_advance=True,
+                *, strict=False,
+            ):
+                if model_key == "exec-model":
+                    return ("anchor-exec", "self")
+                return ("anchor-standard", "self")  # None = 標準 model の窓
+
+        manager = SimpleNamespace(
+            sea_runtime=SimpleNamespace(session_lifecycle=Lifecycle()),
+        )
+        persona = SimpleNamespace(
+            persona_id="p1", persona_dir=None, model="standard-model",
+            current_building_id="b1", sai_memory=sai_mem,
+        )
+        with patch(
+            "builtin_data.tools.get_visual_context.build_room_bundle",
+            return_value=bundle,
+        ), patch(
+            "sea.head_pipeline.integration._room_chronicle_enabled",
+            return_value=False,
+        ), patch.object(
+            integration, "build_line_head_input",
+            return_value=SimpleNamespace(persona_id="p1", model_key="exec-model"),
+        ), patch.object(
+            integration, "ensure_snapshot",
+        ), patch.object(
+            integration, "_push_section_diffs", return_value=False,
+        ):
+            integration.inject_diff_notifications(
+                persona, manager, "b1",
+                pipeline=SimpleNamespace(), model_key="exec-model",
+            )
+        # 実行 model の窓で判定し、外れているので自己回復が発火する。
+        self.assertEqual(seen_anchors, ["anchor-exec"])
+        self.assertEqual(sai_mem.reseated, [bundle])
+
+    def _anchor_window_env(self):
+        """運搬役が anchor の窓の外にいる Chronicle 無効環境 (実 adapter)。
+
+        test_chronicle_disabled_window_loss_reseats と同じ形: anchor の行は
+        messages に実在して読める。運搬役 (毎回全文) は下ろし境界より新しいが
+        anchor より古い — 検知は「窓に見えない」と判定して自己回復を呼ぶ。
+        """
+        import threading
+
+        from saiverse_memory.adapter import SAIMemoryAdapter
+
+        bundle = self.env.bundle()
+        self._push("b1", bundle, allow_diff=False)
+        carrier_id = self._flush()
+        carrier = self._batch(carrier_id)
+        self.conn.execute("CREATE TABLE messages (id TEXT, created_at INTEGER)")
+        self.conn.execute(
+            "INSERT INTO messages (id, created_at) VALUES (?, ?)",
+            ("anchor-1", carrier.consumed_at + 1_000),
+        )
+        self.conn.commit()
+
+        adapter = SAIMemoryAdapter.__new__(SAIMemoryAdapter)
+        adapter.conn = self.conn
+        adapter._db_lock = threading.RLock()
+
+        class Lifecycle:
+            def resolve_metabolism_anchor(
+                self, persona, model_key=None, persist_advance=True,
+            ):
+                return ("anchor-1", "self")
+
+        manager = SimpleNamespace(
+            sea_runtime=SimpleNamespace(session_lifecycle=Lifecycle()),
+        )
+        persona = SimpleNamespace(
+            persona_id="p1", persona_dir=None, model="standard-model",
+            current_building_id="b1", sai_memory=adapter,
+        )
+        return bundle, adapter, persona, manager
+
+    def test_a_floor_failure_with_a_readable_anchor_still_recovers(self):
+        """床の予算の一時失敗は、正当な anchor で判定できる回を巻き込まない。
+
+        2026-09-06 五巡目修正 2: 床 (_presentation_floor_chars) は「anchor の
+        行が読めないときの代替」の材料なのに、旧実装は anchor の解決を試す前に
+        無条件で床を解決していた — 床の取得が一時失敗しただけで、正当な anchor
+        が使える回まで「窓の解決失敗 (判定不能)」へ落とし、自己回復を不要に
+        スキップする (部屋の欠落が床の取得成功まで直らない)。床の解決とその
+        失敗の見送りは、anchor が読めない回だけでよい。
+        """
+        bundle, _adapter, persona, manager = self._anchor_window_env()
+        with patch(
+            "sea.runtime_context._minimal_load_chars",
+            side_effect=RuntimeError("boom"),
+        ):
+            self._run_detection(persona, manager, bundle)
+        reseated = self._reseated_batches()
+        self.assertEqual(
+            len(reseated), 1,
+            "anchor が読めるのに、床の予算の失敗だけで自己回復が見送られた — "
+            "床が anchor より先に (無条件で) 解決されている",
+        )
+        self.assertEqual(reseated[0].rendered_text, render_room_full(bundle))
+        self.assertEqual(list_pending(self.conn), [])
+
+    def test_a_boundary_read_failure_does_not_duplicate_reseats(self):
+        """境界キーの単発失敗が、置き直しの全文バッチの重複を生まない。
+
+        2026-09-06 五巡目修正 3: 境界キーなしで積まれた置き直しバッチは、窓
+        判定 (batch_in_window) が consumed_at の epoch 比較へフォールバックし、
+        置き直しの consumed_at は意図的に最古なので**窓の外**と判定される。
+        一方、積む側の土台探し (latest_visible_snapshot) は窓を見ないので同じ
+        束を見つける — 次の検知が「見えない」と判定してまた置き直す。単発の
+        読み取り失敗が全文バッチの重複を生むので、境界キーが取れない回は
+        INSERT せず見送る (読み取り失敗の契約 = 四巡目修正 1 と同じ向き)。
+        """
+        bundle, adapter, persona, manager = self._anchor_window_env()
+        boundary_sql = "ORDER BY created_at DESC, rowid DESC LIMIT 1"
+        adapter.conn = _FailingConn(
+            self.conn, lambda sql: boundary_sql in sql,
+        )
+        self._run_detection(persona, manager, bundle)  # 失敗の回 — 見送り
+        adapter.conn = self.conn
+        self._run_detection(persona, manager, bundle)  # 直った回 — 置き直し
+        self._run_detection(persona, manager, bundle)  # 以後は運搬役が見えている
+        reseated = self._reseated_batches()
+        self.assertEqual(
+            len(reseated), 1,
+            "境界キーの単発失敗の後、置き直しの全文バッチが重複している — "
+            "キーなしの置き直しが窓の外に立って次の検知がまた置き直した",
+        )
+        self.assertEqual(reseated[0].rendered_text, render_room_full(bundle))
+        self.assertEqual(list_pending(self.conn), [])
+
+    def _degraded_window_env(self):
+        """anchor の行が読めない劣化窓 (2026-09-06 三巡目 #1 の形)。
+
+        - messages に anchor_id の行が無い (削除・修復などで消えた劣化)。
+        - 運搬役は「下ろし境界より新しい (提示候補) が、床の窓より古い」。
+        - 生ログの提示窓 (recent) は新しい会話 3 行 (合計 60 字 = 床の予算
+          ちょうど) — 提示側の床 (recent の最古 epoch=5000) と検知側の床
+          (messages 末尾 60 字ぶんの最古行 = m1) が同じ位置に立つ。
+        """
+        import threading
+
+        from saiverse_memory.adapter import SAIMemoryAdapter
+
+        bundle = self.env.bundle()
+        self.conn.execute(
+            "CREATE TABLE messages (id TEXT PRIMARY KEY, thread_id TEXT, "
+            "role TEXT, content TEXT, resource_id TEXT, created_at INTEGER, "
+            "metadata TEXT)"
+        )
+        # 運搬役の時代の古い行 — 床の走査では予算の外に落ちる。
+        self.conn.execute(
+            "INSERT INTO messages VALUES ('m-old', 't1', 'user', ?, 'p1', "
+            "900, NULL)",
+            ("昔の話" * 10,),
+        )
+        self._push("b1", bundle, allow_diff=False)
+        carrier_id = self._flush()  # consumed_at=1010、境界キーなし
+        # いまの会話 (提示の生ログ窓)。20 字 × 3 行 = 予算 60 字を使い切る。
+        for mid, at in (("m1", 5000), ("m2", 5010), ("m3", 5020)):
+            self.conn.execute(
+                "INSERT INTO messages VALUES (?, 't1', 'user', ?, 'p1', ?, "
+                "NULL)",
+                (mid, "あ" * 20, at),
+            )
+        self.conn.commit()
+
+        adapter = SAIMemoryAdapter.__new__(SAIMemoryAdapter)
+        adapter.conn = self.conn
+        adapter._db_lock = threading.RLock()
+
+        class Lifecycle:
+            def resolve_metabolism_anchor(
+                self, persona, model_key=None, persist_advance=True,
+            ):
+                return ("anchor-gone", "self")  # messages に行が無い anchor
+
+            def get_metabolism_watermarks(self, persona, model_key=None):
+                return None  # 床の予算は persona.context_length へ落ちる
+
+            def is_chronicle_enabled_for_persona(self, persona):
+                return False
+
+        lifecycle = Lifecycle()
+        manager = SimpleNamespace(
+            sea_runtime=SimpleNamespace(session_lifecycle=lifecycle),
+        )
+        persona = SimpleNamespace(
+            persona_id="p1", persona_dir=None, model="standard-model",
+            context_length=60, current_building_id="b1", sai_memory=adapter,
+        )
+        runtime = SimpleNamespace(session_lifecycle=lifecycle)
+        recent = [
+            {
+                "id": mid, "role": "user", "content": "あ" * 20,
+                "created_at": at, "metadata": {"tags": []},
+            }
+            for mid, at in (("m1", 5000), ("m2", 5010), ("m3", 5020))
+        ]
+        return bundle, carrier_id, persona, manager, runtime, recent
+
+    def _run_detection(self, persona, manager, bundle):
+        from sea.head_pipeline.integration import _detect_room_state_changes
+
+        with patch(
+            "builtin_data.tools.get_visual_context.build_room_bundle",
+            return_value=bundle,
+        ), patch(
+            "sea.head_pipeline.integration._room_chronicle_enabled",
+            return_value=False,
+        ):
+            _detect_room_state_changes(persona, manager, "b1")
+
+    def _presented_blocks(self, runtime, persona, recent):
+        from sea.runtime_context import list_presented_perception_blocks
+
+        return list_presented_perception_blocks(
+            runtime, persona, recent, anchor_id="anchor-gone",
+            raise_on_error=True,
+        )
+
+    def _reseated_batches(self):
+        return [
+            b for b in list_presented_batches(self.conn)
+            if b.room_state_json and any(
+                e.get("reseated") for e in json.loads(b.room_state_json)
+            )
+        ]
+
+    def test_a_dead_anchor_agrees_with_the_presentation_and_reseats(self):
+        """anchor が読めない劣化時も、提示と検知は同じ解決で窓を判定する。
+
+        提示は anchor が引けないと recent の最古 epoch を床にして古い運搬役を
+        窓の外に置く。検知が同じ失敗で「窓なし = 全部見える」へ落ちると、
+        提示では部屋が見えないのに検知は見えている扱いになり、自己回復が
+        抑止される (2026-09-06 三巡目 #1 — 窓の規則の二枚目が劣化経路に
+        残っていた)。両側とも resolve_window_key の一枚を通ることを、
+        「提示に出ない運搬役 → 置き直しが実際に積まれる」の形で固定する。
+        """
+        bundle, carrier_id, persona, manager, runtime, recent = (
+            self._degraded_window_env()
+        )
+        # 提示側: 運搬役は床の窓の外 — 提示ブロックに出ない。
+        shown = {
+            b["metadata"].get("__perception_batch_id__")
+            for b in self._presented_blocks(runtime, persona, recent)
+        }
+        self.assertNotIn(carrier_id, shown)
+        # 検知側: 同じ解決を通れば「見えない」→ 置き直しが提示に立つ。
+        self._run_detection(persona, manager, bundle)
+        reseated = self._reseated_batches()
+        self.assertEqual(
+            len(reseated), 1,
+            "anchor が読めない劣化時、提示は運搬役を窓の外に置くのに検知が"
+            "「全部見える」へ落ちて自己回復が抑止されている — 窓の解決が二枚",
+        )
+        self.assertEqual(reseated[0].rendered_text, render_room_full(bundle))
+        # 置き直しは提示側の床の窓でも見える側に立つ (境界キー = 最新の
+        # message を優先する包含が床にも効く)。consumed_at の素比較だと
+        # 最古端に置いた瞬間から床の外に落ち、提示と検知が逆向きに割れる。
+        contents = [
+            b["content"]
+            for b in self._presented_blocks(runtime, persona, recent)
+        ]
+        self.assertTrue(
+            any(render_room_full(bundle) in c for c in contents),
+            "置き直しの全文が提示の床の窓から落ちている",
+        )
+
+    def test_a_dead_anchor_does_not_reseat_on_every_detection(self):
+        """劣化が続いても、置き直しは検知のたびに繰り返されない。
+
+        置き直しバッチの境界キーは最新の message なので、床 (messages 末尾の
+        予算ぶん) が会話少々で追い越すことはない — 次の検知は生きている
+        運搬役を数えて何もしない。ここが崩れると、劣化中の毎 Pulse に全文
+        一枚が積まれ続ける。
+        """
+        bundle, _carrier_id, persona, manager, _runtime, _recent = (
+            self._degraded_window_env()
+        )
+        self._run_detection(persona, manager, bundle)
+        self.assertEqual(len(self._reseated_batches()), 1)
+        # 会話が少し進む (床が置き直しの境界キーを追い越さない範囲)。
+        self.conn.execute(
+            "INSERT INTO messages VALUES ('m4', 't1', 'user', ?, 'p1', "
+            "5030, NULL)",
+            ("え" * 5,),
+        )
+        self.conn.commit()
+        self._run_detection(persona, manager, bundle)
+        self.assertEqual(
+            len(self._reseated_batches()), 1,
+            "劣化が続くと検知のたびに置き直しが積まれる — ループ",
+        )
+        # 変化は無いので diff の push も起きていない。
+        self.assertEqual(list_pending(self.conn), [])
+
+    def test_a_failed_floor_budget_defers_the_judgment_with_a_warning(self):
+        """床予算の解決失敗は「全部見える」に倒さない — 見送り + WARN。
+
+        2026-09-06 四巡目修正 2: 旧実装は _presentation_floor_chars の例外を
+        None (= 床なし) に握り、anchor も読めない劣化の回に resolve_window_key
+        が None (= 窓なし・全件可視) になった — 提示は床で運搬役を隠している
+        のに、検知は「見えている」と誤判定して自己回復を抑止する (「検知は
+        見えない側にしか倒れない」契約の破れ)。単純に「見えない」へ倒すと
+        毎検知の置き直しループになるので、解決失敗の回は判定そのものを
+        見送って WARN を出す (抑止でもループでもない第三の形)。
+        """
+        bundle, _carrier_id, persona, manager, _runtime, _recent = (
+            self._degraded_window_env()
+        )
+        with patch(
+            "sea.runtime_context._minimal_load_chars",
+            side_effect=RuntimeError("boom"),
+        ):
+            with self.assertLogs(
+                "sea.head_pipeline.integration", level="WARNING",
+            ) as logs:
+                self._run_detection(persona, manager, bundle)
+        self.assertTrue(
+            any("window" in line for line in logs.output),
+            f"見送りの WARN が出ていない: {logs.output}",
+        )
+        # 見送り = 判定しない — 置き直しも push も起こさない。
+        self.assertEqual(self._reseated_batches(), [])
+        self.assertEqual(list_pending(self.conn), [])
+
+    def test_a_failed_floor_budget_does_not_loop_reseats(self):
+        """解決失敗が続いても、置き直しは一枚も積まれない (ループしない)。
+
+        「解決失敗 = 全部見えない」へ倒すと、置き直しで作った新しいバッチも
+        見えない扱いになり、失敗が続く限り毎検知で全文一枚が積もる。見送りは
+        そのループを作らず、失敗が直った次の検知が通常どおり自己回復する。
+        """
+        bundle, _carrier_id, persona, manager, _runtime, _recent = (
+            self._degraded_window_env()
+        )
+        with patch(
+            "sea.runtime_context._minimal_load_chars",
+            side_effect=RuntimeError("boom"),
+        ):
+            for _ in range(3):
+                self._run_detection(persona, manager, bundle)
+        self.assertEqual(self._reseated_batches(), [])
+        # 失敗が直った回は、見送っていた判定が通常どおり働く。
+        self._run_detection(persona, manager, bundle)
+        self.assertEqual(len(self._reseated_batches()), 1)
+
+    def test_an_unreadable_floor_makes_the_room_read_unjudgeable(self):
+        """床の読みの失敗も三値の「判定不能」— 「窓なし = 全部見える」に倒さない。
+
+        窓の三値は「窓なし (None)」「窓キー (tuple)」「解決失敗 (例外)」。
+        検知の読み (latest_room_snapshot) は解決失敗を例外で伝え、検知は
+        その回の部屋の判定を見送る。
+        """
+        import threading
+
+        from sai_memory.perception_buffer import WindowResolutionError
+        from saiverse_memory.adapter import SAIMemoryAdapter
+
+        bundle = self.env.bundle()
+        self._push("b1", bundle, allow_diff=False)
+        self._flush()  # 運搬役は提示に居る (窓が読めれば見えるかもしれない)
+        # messages テーブルが無い = anchor も床も読めない劣化。
+        adapter = SAIMemoryAdapter.__new__(SAIMemoryAdapter)
+        adapter.conn = self.conn
+        adapter._db_lock = threading.RLock()
+        with self.assertRaises(WindowResolutionError):
+            adapter.latest_room_snapshot(
+                room_key("b1"), anchor_id="anchor-gone", floor_chars=60,
+            )
+
+    def _oversize_newest_message(self):
+        """床の予算 (60 字) を一行で超える最新メッセージ (100 字) を積む。"""
+        self.conn.execute(
+            "INSERT INTO messages VALUES ('m-big', 't1', 'user', ?, 'p1', "
+            "5030, NULL)",
+            ("あ" * 100,),
+        )
+        self.conn.commit()
+
+    def test_an_oversized_newest_message_does_not_unbound_the_window(self):
+        """最新の一通が床の予算を超えても、窓は「無制限」に反転しない。
+
+        2026-09-06 十二巡目: 旧 _window_floor_key は予算に収まる行が一つも
+        無いと床キーを立てず None を返し、resolve_window_key の None は
+        「窓なし = 全件可視」— 巨大な最新メッセージがあるだけで、検知が床の
+        外の古い運搬役を「見えている」と誤認して自己回復を抑止する
+        (「検知は見えない側にしか倒れない」契約の破れ — 四巡目修正 2 と同じ
+        契約)。予算超過の一行は「最新一行だけの窓」(最新行そのものが床) へ
+        倒す — 履歴空 (正当な窓なし) だけが None。
+        """
+        bundle, carrier_id, persona, manager, _runtime, _recent = (
+            self._degraded_window_env()
+        )
+        self._oversize_newest_message()
+        self._run_detection(persona, manager, bundle)
+        reseated = self._reseated_batches()
+        self.assertEqual(
+            len(reseated), 1,
+            "最新一通が予算を超えると床キーが立たず「全部見える」へ落ち、"
+            "床の外の運搬役 (batch %s) への自己回復が抑止されている"
+            % carrier_id,
+        )
+        self.assertEqual(reseated[0].rendered_text, render_room_full(bundle))
+
+    def test_the_one_line_window_does_not_loop_reseats(self):
+        """予算超過の一行の保守的な窓でも、置き直しは繰り返されない。
+
+        置き直しバッチの境界キーは最新の message — 床が最新行そのものでも
+        ``>=`` の包含で窓の内に立つので、次の検知は置き直しを運搬役として
+        数えて何もしない。
+        """
+        bundle, _carrier_id, persona, manager, _runtime, _recent = (
+            self._degraded_window_env()
+        )
+        self._oversize_newest_message()
+        self._run_detection(persona, manager, bundle)
+        self.assertEqual(len(self._reseated_batches()), 1)
+        self._run_detection(persona, manager, bundle)
+        self.assertEqual(
+            len(self._reseated_batches()), 1,
+            "最新一行だけの窓で置き直しがループしている — 置き直しの境界"
+            "キー (最新 message) が窓の外に立っている",
+        )
+        # 変化は無いので diff の push も起きていない。
+        self.assertEqual(list_pending(self.conn), [])
+
+
+class WindowFloorFourStateTest(unittest.TestCase):
+    """床キーの四状態 — 通常 / 一行窓 / 窓なし / 判定不能 (2026-09-06 十三巡目)。
+
+    :func:`sai_memory.perception_buffer.resolve_window_key` の床フォール
+    バックの契約: 予算内に収まる最古行があればそれが床 (**通常**)。予算に
+    収まる行が一つも無い — 予算超過の一行・予算 0 以下・空内容の並び、
+    すべて — なら**最新行そのもの**が床 (**一行窓** = 最新一行だけの保守的な
+    窓 — 「検知は見えない側にしか倒れない」)。履歴が空のときだけ None
+    (**窓なし** — 正当)。履歴は有るのに正典キー (created_at, rowid) を
+    作れる行が一つも無ければ :class:`WindowResolutionError` (**判定不能** —
+    None の全件可視にも最古の広い窓にも倒さない)。
+    """
+
+    def setUp(self):
+        self.conn = sqlite3.connect(":memory:")
+        self.addCleanup(self.conn.close)
+        self.conn.execute(
+            "CREATE TABLE messages (id TEXT PRIMARY KEY, thread_id TEXT, "
+            "role TEXT, content TEXT, resource_id TEXT, created_at INTEGER, "
+            "metadata TEXT)"
+        )
+
+    def _resolve(self, floor_chars=60):
+        from sai_memory.perception_buffer import resolve_window_key
+
+        # anchor 行は無い — 床フォールバックの枝に必ず入る。
+        return resolve_window_key(
+            self.conn, "anchor-gone", floor_chars=floor_chars,
+        )
+
+    def _key_of(self, message_id):
+        return self.conn.execute(
+            "SELECT created_at, rowid FROM messages WHERE id = ?",
+            (message_id,),
+        ).fetchone()
+
+    def _insert(self, message_id, created_at, content):
+        self.conn.execute(
+            "INSERT INTO messages VALUES (?, 't1', 'user', ?, 'p1', ?, NULL)",
+            (message_id, content, created_at),
+        )
+
+    def test_an_empty_history_is_a_legitimate_no_window(self):
+        self.assertIsNone(self._resolve())
+
+    def test_the_normal_floor_is_the_oldest_row_within_the_budget(self):
+        for mid, at in (("m1", 5000), ("m2", 5010), ("m3", 5020)):
+            self._insert(mid, at, "あ" * 20)  # 20 字 × 3 行 = 予算 60 字ちょうど
+        created_at, rowid = self._key_of("m1")
+        self.assertEqual(self._resolve(), (created_at, rowid))
+
+    def test_an_oversized_newest_row_becomes_its_own_floor(self):
+        for mid, at in (("m1", 5000), ("m2", 5010), ("m3", 5020)):
+            self._insert(mid, at, "あ" * 20)
+        self._insert("m-big", 5030, "あ" * 100)  # 一行で予算 60 字を超える
+        created_at, rowid = self._key_of("m-big")
+        self.assertEqual(
+            self._resolve(), (created_at, rowid),
+            "予算に収まる行が一つも無いのに床が None (= 窓なし・全件可視) へ"
+            "落ちている — 履歴空と同じ状態に畳まれている",
+        )
+
+    def test_a_zero_budget_over_empty_rows_stays_a_one_line_window(self):
+        """予算 0 以下では、空内容の行が続いても床は最新行 — 最古へ反転しない。
+
+        2026-09-06 十三巡目: 旧実装は「予算を超えた行の手前で止まる」勘定
+        しか持たず、空内容の行は consumed を増やさないので走査が全行を舐め、
+        床が**最古行**に立った — 「予算に収まる行が無ければ最新行の一行窓」
+        (見えない側に倒れる) と逆向きの、最も広い窓への反転。
+        """
+        for mid, at in (("m1", 5000), ("m2", 5010), ("m3", 5020)):
+            self._insert(mid, at, "")  # 空内容 — 文字勘定を増やさない
+        created_at, rowid = self._key_of("m3")
+        self.assertEqual(
+            self._resolve(floor_chars=0), (created_at, rowid),
+            "予算 0 以下で床が最新行でなく最古側に立っている — 一行窓の"
+            "契約と逆向きの、実質全件可視の広い窓",
+        )
+
+    def test_a_history_without_canonical_keys_is_unjudgeable(self):
+        """NULL 時刻だけの非空履歴は「窓なし (全件可視)」でなく判定不能。
+
+        2026-09-06 十三巡目: スキーマ上 created_at は NULL を許す
+        (sai_memory/memory/storage.py の messages DDL)。正典キー
+        (created_at, rowid) を作れる行が一つも無い履歴では床の近似そのものが
+        成立しない — None に畳むと「履歴が有るのに全件可視」へ反転する
+        (「検知は見えない側にしか倒れない」契約の破れ — 四巡目修正 2 と同じ
+        三値の向きで、受け手の検知は WindowResolutionError でその回の判定を
+        見送る)。
+        """
+        from sai_memory.perception_buffer import WindowResolutionError
+
+        self._insert("m-null", None, "あ" * 20)
+        with self.assertRaises(WindowResolutionError):
+            self._resolve()
+
+    def test_unkeyed_rows_do_not_poison_a_keyed_history(self):
+        """正典キーを作れる行が一つでもあれば、NULL 時刻の行は素通しで通常判定。"""
+        self._insert("m-null", None, "あ" * 20)
+        for mid, at in (("m1", 5000), ("m2", 5010), ("m3", 5020)):
+            self._insert(mid, at, "あ" * 20)
+        created_at, rowid = self._key_of("m1")
+        self.assertEqual(self._resolve(), (created_at, rowid))
+
+
+class ChronicleWindowReopenTest(RoomStateLedgerTestBase):
+    """可視性が変わる瞬間 4 (Chronicle 無効の窓絞り) — 提示時の開き直し + 絵の復元。
+
+    トグルを有効から無効へ切り替えた後は、有効な間に積んだ差分が台帳に残る。
+    窓絞りは台帳へ書ける事実ではないので、提示の組成が文面を全文へ開き直し、
+    束のメディアをブロックへ添え直す (§5 の復元 — 台帳は書き換えない)。
+    """
+
+    def setUp(self):
+        super().setUp()
+        import threading
+
+        self.bundle_a = self.env.bundle()
+        self.env.items.append(_make_item(
+            "uuid-new", 14, "picture", "新しい絵", "届いたばかりの絵。",
+            is_open=True, file_path=self.env.pic2_path,
+        ))
+        self.bundle_b = self.env.bundle()
+        self._push("b1", self.bundle_a)
+        self.base_id = self._flush()
+        self._push("b1", self.bundle_b)
+        self.diff_id = self._flush()
+        self.persona = SimpleNamespace(
+            persona_id="p1", model="test-model",
+            sai_memory=SimpleNamespace(
+                conn=self.conn, _db_lock=threading.RLock(),
+                is_ready=lambda: True,
+            ),
+        )
+        self.enabled = SimpleNamespace(session_lifecycle=None)
+        self.disabled = SimpleNamespace(
+            session_lifecycle=SimpleNamespace(
+                is_chronicle_enabled_for_persona=lambda persona: False,
+            ),
+        )
+
+    def _blocks(self, runtime, recent=()):
+        from sea.runtime_context import list_presented_perception_blocks
+
+        return list_presented_perception_blocks(
+            runtime, self.persona, list(recent), raise_on_error=True,
+        )
+
+    def _window_after_base(self):
+        """土台のバッチだけが窓の外になる提示行。"""
+        base = next(
+            b for b in list_unannexed_batches(self.conn) if b.id == self.base_id
+        )
+        return [{
+            "id": "m1", "role": "user", "content": "こんにちは",
+            "created_at": base.consumed_at + 1, "metadata": {"tags": []},
+        }]
+
+    def test_while_chronicle_is_on_the_diff_stays_a_diff(self):
+        blocks = self._blocks(self.enabled)
+        diff_block = next(
+            b for b in blocks
+            if b["metadata"]["__perception_batch_id__"] == self.diff_id
+        )
+        self.assertIn("新しい絵", diff_block["content"])
+        self.assertNotIn("光の扱いはフェルメールに学ぶ。", diff_block["content"])
+
+    def test_the_window_loss_reopens_the_diff_with_its_media(self):
+        blocks = self._blocks(self.disabled, self._window_after_base())
+        self.assertEqual(len(blocks), 1)
+        self.assertIn(render_room_full(self.bundle_b), blocks[0]["content"])
+        # 開き直した全文には束のメディアが添え直される (§5: 復元で絵が戻る)。
+        paths = {m["path"] for m in blocks[0]["metadata"]["media"]}
+        self.assertIn(str(self.env.pic_path), paths)
+        self.assertIn(str(self.env.pic2_path), paths)
+
+    def test_the_ledger_is_not_rewritten_and_the_reopening_is_deterministic(self):
+        first = self._blocks(self.disabled, self._window_after_base())
+        second = self._blocks(self.disabled, self._window_after_base())
+        self.assertEqual(
+            [b["content"] for b in first], [b["content"] for b in second],
+        )
+        stored = next(
+            b for b in list_unannexed_batches(self.conn) if b.id == self.diff_id
+        )
+        self.assertNotIn(
+            render_room_full(self.bundle_b), stored.rendered_text,
+        )
+
+
+class RoomStateLegacyRecordTest(RoomStateLedgerTestBase):
+    """§9: 旧形式 (文字列 snapshot) は土台なし扱い — 連なりに参加しない。"""
+
+    def setUp(self):
+        super().setUp()
+        self.bundle = self.env.bundle()
+        self.legacy_full = "# 「工房」の様子\n古い世代の全文。"
+        push_perception(
+            self.conn, ROOM_STATE_KIND, self.legacy_full,
+            metadata=json.dumps({"room_state": {
+                "key": room_key("b1"), "is_diff": False,
+                "snapshot": self.legacy_full,
+            }}, ensure_ascii=False),
+        )
+        self.legacy_id = self._flush()
+
+    def test_a_legacy_record_is_detected_as_legacy(self):
+        entry = json.loads(self._batch(self.legacy_id).room_state_json)[0]
+        self.assertTrue(is_legacy_entry(entry))
+
+    def test_a_legacy_record_is_not_a_base(self):
+        self.assertIsNone(latest_visible_snapshot(self.conn, room_key("b1")))
+        payload = self._push("b1", self.bundle)
+        self.assertEqual(payload["content"], render_room_full(self.bundle))
+
+    def test_a_legacy_record_is_never_repaired(self):
+        """旧データの読者を書かない — 提示は積んだときの文面のまま。"""
+        self._push("b1", self.bundle)
+        new_id = self._flush()
+        mark_batches_annexed(self.conn, [new_id], "entry-1")
+        self.conn.commit()
+        self.assertEqual(
+            self._batch(self.legacy_id).rendered_text, self.legacy_full,
+        )
+
+    def test_a_new_diff_chains_over_the_legacy_record(self):
+        self._push("b1", self.bundle)
+        self._flush()
+        payload = self._push("b1", self.bundle)
+        state = json.loads(payload["metadata"])["room_state"]
+        self.assertTrue(state["is_diff"])
+        self.assertEqual(state["base_digest"], snapshot_digest(self.bundle))
+
+
+class BundleValidationTest(_EnvTestBase):
+    """2026-09-06 七巡目修正 1: 束の検証は利用側が読むフィールドの型まで行う。
+
+    浅い検査 (dict + packages が list) だけだと、building_id / building_name が
+    欠けた束や、key / family / label / lines / media / state の型が壊れた
+    パッケージを持つ束が「有効」扱いになり、first_room_bundle の停止規則
+    (旧形式・不正束 = 材料なし・土台なし) を素通りする — 壊れた土台への差分や
+    壊れた束の置き直しが静かに確定する。検査は読まれる実フィールドだけで、
+    読まれないフィールドの有無では落とさない (空の packages は正当な空室)。
+    """
+
+    @staticmethod
+    def _bundle_with_package(**overrides):
+        package = {
+            "key": "item:1", "family": "item", "label": "[item:1] 覚え書き",
+            "lines": ["[item:1] 覚え書き"], "media": [], "state": "open",
+        }
+        package.update(overrides)
+        return {
+            "building_id": "b1", "building_name": "工房",
+            "packages": [package],
+        }
+
+    def _broken_variants(self):
+        """浅い検査は通るが、利用側が読める形ではない束たち。"""
+        base = self._bundle_with_package()
+        return {
+            "building_id が無い": {
+                k: v for k, v in base.items() if k != "building_id"
+            },
+            "building_id が文字列でない": dict(base, building_id=1),
+            "building_name が無い": {
+                k: v for k, v in base.items() if k != "building_name"
+            },
+            "building_name が文字列でない": dict(base, building_name=None),
+            "パッケージが dict でない": dict(base, packages=["文字列"]),
+            "key が空": self._bundle_with_package(key=""),
+            "key が文字列でない": self._bundle_with_package(key=1),
+            "family が文字列でない": self._bundle_with_package(family=None),
+            "label が文字列でない": self._bundle_with_package(label=["リスト"]),
+            "lines が list でない": self._bundle_with_package(
+                lines="一枚の文字列",
+            ),
+            "lines の中身が文字列でない": self._bundle_with_package(
+                lines=["正当な行", None],
+            ),
+            "media が list でない": self._bundle_with_package(
+                media={"path": "x.png"},
+            ),
+            "media の中身が dict でない": self._bundle_with_package(
+                media=["x.png"],
+            ),
+            "media の dict に path が無い": self._bundle_with_package(
+                media=[{"mime_type": "image/png"}],
+            ),
+            "state が未知の値": self._bundle_with_package(state="opened"),
+        }
+
+    def test_a_real_bundle_and_an_empty_room_are_valid(self):
+        self.assertTrue(bundle_is_valid(self.env.bundle()))
+        self.assertTrue(bundle_is_valid({
+            "building_id": "b1", "building_name": "空き部屋", "packages": [],
+        }))
+
+    def test_a_legacy_string_snapshot_is_invalid(self):
+        self.assertFalse(bundle_is_valid("# 「工房」の様子\n旧世代の全文。"))
+        self.assertFalse(bundle_is_valid(None))
+
+    def test_broken_bundles_are_invalid(self):
+        for name, bundle in self._broken_variants().items():
+            with self.subTest(name):
+                self.assertFalse(bundle_is_valid(bundle), name)
+
+    def test_media_field_types_match_the_consumer_contract(self):
+        """2026-09-06 八巡目修正 2: media は path / mime_type の型まで検める。
+
+        消費契約は「path = 非空文字列 (set への in 照合・ファイルパスとして
+        使用)、mime_type = 存在するなら文字列 (LLM クライアントがそのまま
+        API へ渡す)」。truthiness だけの浅い検査だと ``{"path": ["x"],
+        "mime_type": []}`` が有効束を名乗り、:func:`bundle_media` の
+        ``path in seen`` (set への in) が TypeError で落ちる — 検証済みの束が
+        後段で例外化する。
+        """
+        variants = {
+            "path が文字列でない": [{"path": ["x.png"], "mime_type": []}],
+            "mime_type が文字列でない": [{"path": "x.png", "mime_type": 5}],
+        }
+        for name, media in variants.items():
+            with self.subTest(name):
+                self.assertFalse(
+                    bundle_is_valid(self._bundle_with_package(media=media)),
+                    name,
+                )
+        # 検証を通った束は bundle_media が例外なく読める (消費契約の裏面)。
+        ok = self._bundle_with_package(
+            media=[{"path": "x.png", "mime_type": "image/png"}],
+        )
+        self.assertTrue(bundle_is_valid(ok))
+        self.assertEqual(bundle_media(ok), [
+            {"path": "x.png", "mime_type": "image/png"},
         ])
-        self.full_c = _room_text("工房", [
-            ("5", "真鍮の定規", "使い込まれた定規。"),
-            ("7", "銅のノギス", "目盛りが細かいノギス。"),
-            ("8", "使い古した鍵", "何を開けるか分からない鍵。"),
-        ])
-        self._push("b1", self.full_a)
+
+    def test_duplicate_package_keys_are_invalid(self):
+        """2026-09-06 九巡目修正 2: 束の中のキー重複は不正束。
+
+        差分の組成 (render_room_diff) はパッケージをキーで辞書化するので、
+        重複キーを持つ記帳破損束が検証を通ると片方が静かに上書きされ、
+        全文 (走査順) と差分 (辞書) の整合が崩れる。組成側 (build_room_bundle)
+        は先勝ち + WARN で弾くが、それは組成時の弾き — 検証の存在理由は
+        「保存済みの束が読み手の前提を満たすか」なので、一意性もここで検める。
+        パッケージの型は全部正当なので、型検査だけでは通ってしまう。
+        """
+        first = {
+            "key": "item:1", "family": "item", "label": "[item:1] 一枚目",
+            "lines": ["[item:1] 一枚目"], "media": [], "state": "open",
+        }
+        second = dict(first, label="[item:1] 二枚目", lines=["[item:1] 二枚目"])
+        self.assertFalse(bundle_is_valid({
+            "building_id": "b1", "building_name": "工房",
+            "packages": [first, second],
+        }))
+
+
+class BrokenBundleRouteStopTest(RoomStateLedgerTestBase):
+    """七巡目修正 1 の経路検査: 壊れた記帳は「不正束 = 停止」に落ちる。
+
+    材料探し (_latest_room_bundle) と土台探し (latest_visible_snapshot) は
+    first_room_bundle の一枚を通るので、bundle_is_valid が浅いと両経路とも
+    壊れた束を素通しする (見積もり _room_reseat_projection の同型は
+    tests/test_perception_presentation_cap.py の
+    PerceptionCapLegacyNewestGateTest 側)。
+    """
+
+    @staticmethod
+    def _broken_bundle():
+        """浅い検査 (packages が list) は通るが、lines の型が壊れた束。"""
+        return {
+            "building_id": "b1", "building_name": "工房",
+            "packages": [{
+                "key": "item:1", "family": "item",
+                "label": "[item:1] 壊れた記帳",
+                "lines": "一枚の文字列 (list でない)", "media": [],
+                "state": "open",
+            }],
+        }
+
+    @staticmethod
+    def _media_broken_bundle():
+        """media の型が壊れた束 (2026-09-06 八巡目修正 2)。
+
+        lines は正当なので render_room_full は通ってしまうが、path が list
+        なので :func:`bundle_media` の ``path in seen`` (set への in) が
+        TypeError になる — truthiness だけの検査だと有効束を名乗ったまま
+        後段 (置き直しのメディア復元) で例外化する。
+        """
+        return {
+            "building_id": "b1", "building_name": "工房",
+            "packages": [{
+                "key": "item:1", "family": "item",
+                "label": "[item:1] 壊れた絵の記帳",
+                "lines": ["[item:1] 壊れた絵の記帳"],
+                "media": [{"path": ["x.png"], "mime_type": []}],
+                "state": "open",
+            }],
+        }
+
+    def _push_broken(self, bundle=None):
+        text = "# 「工房」の様子\n壊れた記帳の文面。"
+        push_perception(
+            self.conn, ROOM_STATE_KIND, text,
+            metadata=json.dumps({"room_state": {
+                "key": room_key("b1"), "is_diff": False,
+                "snapshot": bundle or self._broken_bundle(),
+            }}, ensure_ascii=False),
+        )
+        return self._flush()
+
+    def test_a_broken_bundle_is_not_a_diff_base(self):
+        """土台探し (latest_visible_snapshot) — 壊れた束は土台にならない。"""
+        self._push_broken()
+        self.assertIsNone(
+            latest_visible_snapshot(self.conn, room_key("b1")),
+            "型の壊れた束が差分の土台に立った — 壊れた土台への差分は復元不能",
+        )
+        bundle = self.env.bundle()
+        payload = self._push("b1", bundle)
+        self.assertEqual(payload["content"], render_room_full(bundle))
+
+    def test_the_reseat_material_search_stops_at_a_broken_bundle(self):
+        """材料探し (_latest_room_bundle) — 壊れた最新記録で止まり、遡らない。"""
+        bundle_a = self.env.bundle()
+        self._push("b1", bundle_a)
+        valid_id = self._flush()
+        broken_id = self._push_broken()
+        push_perception(self.conn, "world_state", "ノイズ通知")
+        self._flush()
+        mark_batches_annexed(self.conn, [valid_id, broken_id], "entry-1")
+        self.conn.commit()
+        reseated = [
+            b for b in list_presented_batches(self.conn)
+            if b.room_state_json and any(
+                e.get("reseated") for e in json.loads(b.room_state_json)
+            )
+        ]
+        self.assertEqual(
+            reseated, [],
+            "最新の同部屋記録が壊れた束なのに置き直しが立った — "
+            "bundle_is_valid が型の壊れた束を有効と数えている",
+        )
+        # より古い valid の束へも遡らない (五巡目修正 1 と同じ止まり方)。
+        texts = [b.rendered_text for b in list_presented_batches(self.conn)]
+        self.assertNotIn(render_room_full(bundle_a), texts)
+
+    def test_a_media_broken_bundle_is_not_a_diff_base(self):
+        """土台探し — media の型が壊れた束も不正束 (八巡目修正 2)。"""
+        self._push_broken(self._media_broken_bundle())
+        self.assertIsNone(
+            latest_visible_snapshot(self.conn, room_key("b1")),
+            "media の型が壊れた束が差分の土台に立った",
+        )
+        bundle = self.env.bundle()
+        payload = self._push("b1", bundle)
+        self.assertEqual(payload["content"], render_room_full(bundle))
+
+    @staticmethod
+    def _duplicate_key_bundle():
+        """キーの重複した束 (記帳破損) — 型は全部正当なので型検査だけでは通る。
+
+        差分の組成 (render_room_diff) はパッケージをキーで辞書化するので、
+        この束を有効と数えると片方が静かに上書きされる (九巡目修正 2)。
+        """
+        package = {
+            "key": "item:1", "family": "item", "label": "[item:1] 一枚目",
+            "lines": ["[item:1] 一枚目"], "media": [], "state": "open",
+        }
+        return {
+            "building_id": "b1", "building_name": "工房",
+            "packages": [
+                package,
+                dict(package, label="[item:1] 二枚目",
+                     lines=["[item:1] 二枚目"]),
+            ],
+        }
+
+    def test_a_duplicate_key_bundle_is_not_a_diff_base(self):
+        """土台探し — キーの重複した束は土台にならない (九巡目修正 2)。"""
+        self._push_broken(self._duplicate_key_bundle())
+        self.assertIsNone(
+            latest_visible_snapshot(self.conn, room_key("b1")),
+            "キーの重複した束が差分の土台に立った — 差分の辞書化で片方が"
+            "静かに上書きされる",
+        )
+        bundle = self.env.bundle()
+        payload = self._push("b1", bundle)
+        self.assertEqual(payload["content"], render_room_full(bundle))
+
+    def test_the_reseat_material_search_stops_at_a_duplicate_key_bundle(self):
+        """材料探し — キーの重複した最新記録で止まり、置き直しを立てない。"""
+        bundle_a = self.env.bundle()
+        self._push("b1", bundle_a)
+        valid_id = self._flush()
+        broken_id = self._push_broken(self._duplicate_key_bundle())
+        push_perception(self.conn, "world_state", "ノイズ通知")
+        self._flush()
+        mark_batches_annexed(self.conn, [valid_id, broken_id], "entry-1")
+        self.conn.commit()
+        reseated = [
+            b for b in list_presented_batches(self.conn)
+            if b.room_state_json and any(
+                e.get("reseated") for e in json.loads(b.room_state_json)
+            )
+        ]
+        self.assertEqual(
+            reseated, [],
+            "キーの重複した最新記録なのに置き直しが立った — bundle_is_valid "
+            "が重複キーの束を有効と数えている",
+        )
+        # より古い valid の束へも遡らない (五巡目修正 1 と同じ止まり方)。
+        texts = [b.rendered_text for b in list_presented_batches(self.conn)]
+        self.assertNotIn(render_room_full(bundle_a), texts)
+
+    def test_the_reseat_material_search_stops_at_a_media_broken_bundle(self):
+        """材料探し — 修正前は bundle_media の TypeError が付記ごと落とす形。
+
+        壊れた最新記録を材料に置き直しへ進むと、render_room_full は通るのに
+        :func:`bundle_media` (メディアの復元) が ``path in seen`` の TypeError
+        で落ち、付記のトランザクションごと巻き添えになる。検証が消費契約まで
+        検めれば、不正束 = 材料なしの停止に落ちて付記は普通に進む。
+        """
+        bundle_a = self.env.bundle()
+        self._push("b1", bundle_a)
+        valid_id = self._flush()
+        broken_id = self._push_broken(self._media_broken_bundle())
+        push_perception(self.conn, "world_state", "ノイズ通知")
+        self._flush()
+        mark_batches_annexed(self.conn, [valid_id, broken_id], "entry-1")
+        self.conn.commit()
+        reseated = [
+            b for b in list_presented_batches(self.conn)
+            if b.room_state_json and any(
+                e.get("reseated") for e in json.loads(b.room_state_json)
+            )
+        ]
+        self.assertEqual(
+            reseated, [],
+            "media の型が壊れた最新記録なのに置き直しが立った",
+        )
+        texts = [b.rendered_text for b in list_presented_batches(self.conn)]
+        self.assertNotIn(render_room_full(bundle_a), texts)
+
+
+class LegacyNewestReseatTest(RoomStateLedgerTestBase):
+    """2026-09-06 五巡目修正 1: 最新の同部屋記録が旧形式なら、置き直しは材料なし。
+
+    旧形式は連なりに参加しない (§9) — だが材料探し (_latest_room_bundle) が
+    旧形式を飛ばしてさらに古い構造化束を返すと、fresh_bundle の無い hook 経路
+    (付記・境界前進の置き直し) がその古い束を「今の部屋」として最古端に立てる。
+    「旧形式の読者を書かない・次の入室が全文を積み直す」という移行契約を材料
+    探しが裏口から破り、古い部屋の様子を提示する。同部屋の走査で最初に見つかる
+    のが旧形式なら、その時点で材料なし — 受け皿は旧形式の次の入室 push (全文)
+    と検知の自己回復。
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.bundle_a = self.env.bundle()
+        self._push("b1", self.bundle_a)
+        self.structured_id = self._flush()
+        # 構造化束の後に旧形式 (文字列 snapshot) が積まれた台帳。
+        legacy_text = "# 「工房」の様子\n旧世代の全文。"
+        push_perception(
+            self.conn, ROOM_STATE_KIND, legacy_text,
+            metadata=json.dumps({"room_state": {
+                "key": room_key("b1"), "is_diff": False,
+                "snapshot": legacy_text,
+            }}, ensure_ascii=False),
+        )
+        self.legacy_id = self._flush()
+        push_perception(self.conn, "world_state", "ノイズ通知")
+        self.noise_id = self._flush()
+
+    def _reseated_batches(self):
+        return [
+            b for b in list_presented_batches(self.conn)
+            if b.room_state_json and any(
+                e.get("reseated") for e in json.loads(b.room_state_json)
+            )
+        ]
+
+    def test_the_annexation_reseat_does_not_resurrect_an_older_bundle(self):
+        mark_batches_annexed(self.conn, [self.structured_id], "entry-1")
+        self.conn.commit()
+        self.assertEqual(
+            self._reseated_batches(), [],
+            "最新の同部屋記録が旧形式なのに、より古い構造化束が置き直しに"
+            "立った — 材料探しが旧形式で止まっていない",
+        )
+        # 古い束の全文が提示に再登場していない。
+        texts = [b.rendered_text for b in list_presented_batches(self.conn)]
+        self.assertNotIn(render_room_full(self.bundle_a), texts)
+
+    def test_the_cutoff_advance_reseat_stops_at_the_legacy_record_too(self):
+        advance_presentation_cutoff(self.conn, self.structured_id)
+        self.conn.commit()
+        self.assertEqual(self._reseated_batches(), [])
+        texts = [b.rendered_text for b in list_presented_batches(self.conn)]
+        self.assertNotIn(render_room_full(self.bundle_a), texts)
+
+
+class StaleCarrierGateTest(RoomStateLedgerTestBase):
+    """2026-09-06 七巡目修正 2: 運搬役の存在も「同部屋の最新の一致」で判定する。
+
+    「最新の同部屋記録が旧形式・不正束、より古い valid 記録が提示に残っている」
+    並びでは、検知 (latest_room_snapshot = None) が fresh_bundle つきの自己回復
+    を呼ぶ — そこで運搬役の走査だけが「古い順に valid を一つでも見つけたら
+    生きている」だと、六巡目で一枚化した first_room_bundle の停止規則をこの門
+    だけが迂回し、置き直しが抑止される。実際の移行の時系列ではほぼ作れない
+    並びだが (構造化形式は昇格後にしか書かれない)、規則の一枚化をここで
+    完成させる。
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.bundle_a = self.env.bundle()
+        self._push("b1", self.bundle_a)
+        self.valid_id = self._flush()
+        # 古い valid 記録より**新しい**同部屋の旧形式 (文字列 snapshot)。
+        legacy_text = "# 「工房」の様子\n旧世代の全文。"
+        push_perception(
+            self.conn, ROOM_STATE_KIND, legacy_text,
+            metadata=json.dumps({"room_state": {
+                "key": room_key("b1"), "is_diff": False,
+                "snapshot": legacy_text,
+            }}, ensure_ascii=False),
+        )
+        self.legacy_id = self._flush()
+        push_perception(self.conn, "world_state", "ノイズ通知")
+        self.noise_id = self._flush()
+
+    def _reseated_batches(self):
+        return [
+            b for b in list_presented_batches(self.conn)
+            if b.room_state_json and any(
+                e.get("reseated") for e in json.loads(b.room_state_json)
+            )
+        ]
+
+    def test_the_self_recovery_reseats_over_an_older_valid_carrier(self):
+        """検知が呼んだ fresh_bundle つきの自己回復は、置き直しを積む。"""
+        # 検知と同じ判定: 最新の同部屋記録が旧形式なので土台なし。
+        self.assertIsNone(latest_visible_snapshot(self.conn, room_key("b1")))
+        batch_id = reseat_current_room(self.conn, fresh_bundle=self.bundle_a)
+        self.assertIsNotNone(
+            batch_id,
+            "最新の同部屋記録が旧形式なのに、より古い valid 記録が運搬役扱い"
+            "されて置き直しが抑止された — 運搬役の判定が first_room_bundle "
+            "の一枚 (最新の一致で確定) を通っていない",
+        )
+        self.conn.commit()
+        reseated = self._reseated_batches()
+        self.assertEqual(len(reseated), 1)
+        self.assertEqual(
+            reseated[0].rendered_text, render_room_full(self.bundle_a),
+        )
+        # 機構の置き直しは先頭 = 背景 (置き場所の原則はそのまま)。
+        self.assertEqual(list_presented_batches(self.conn)[0].id, reseated[0].id)
+
+    def test_the_hook_path_still_stops_with_no_material(self):
+        """fresh_bundle の無い経路は従来どおり材料なしで停止 (五巡目修正 1)。"""
+        self.assertIsNone(reseat_current_room(self.conn))
+        self.assertEqual(self._reseated_batches(), [])
+
+
+class ChainIntegrityTest(RoomStateLedgerTestBase):
+    """連なりの照合 (指紋) — 中間の一枚だけが下りた形も捕まえる。"""
+
+    def setUp(self):
+        super().setUp()
+        self.bundle_a = self.env.bundle()
+        self.env.items.append(_make_item(
+            "uuid-n1", 14, "object", "置物その一", "ひとつめ。",
+        ))
+        self.bundle_b = self.env.bundle()
+        self.env.items.append(_make_item(
+            "uuid-n2", 15, "object", "置物その二", "ふたつめ。",
+        ))
+        self.bundle_c = self.env.bundle()
+        self._push("b1", self.bundle_a)
         self.a_id = self._flush()
-        self._push("b1", self.full_b)
+        self._push("b1", self.bundle_b)
         self.b_id = self._flush()
-        self._push("b1", self.full_c)
+        self._push("b1", self.bundle_c)
         self.c_id = self._flush()
 
     def _entry(self, batch_id):
         return json.loads(self._batch(batch_id).room_state_json)[0]
 
     def test_a_diff_records_the_fingerprint_of_its_base(self):
-        self.assertEqual(self._entry(self.b_id)["base_digest"], snapshot_digest(self.full_a))
-        self.assertEqual(self._entry(self.c_id)["base_digest"], snapshot_digest(self.full_b))
-        self.assertNotIn("base_digest", self._entry(self.a_id))
+        self.assertEqual(
+            self._entry(self.b_id)["base_digest"], snapshot_digest(self.bundle_a),
+        )
+        self.assertEqual(
+            self._entry(self.c_id)["base_digest"], snapshot_digest(self.bundle_b),
+        )
+
+    def test_an_intact_chain_is_left_alone(self):
+        self.assertEqual(restore_room_state_bases(self.conn), 0)
 
     def test_annexing_the_middle_reopens_the_orphaned_diff(self):
         mark_batches_annexed(self.conn, [self.b_id], "entry-1")
         self.conn.commit()
-
-        self.assertEqual(self._batch(self.c_id).rendered_text, self.full_c)
-        entry = self._entry(self.c_id)
-        self.assertFalse(entry["is_diff"])
-        self.assertTrue(entry["transferred"])
-
-    def test_the_oldest_full_text_is_left_where_it_is(self):
-        """最古 (A) は既に全文なので触らない — 開き直すのは切れた位置だけ。"""
-        mark_batches_annexed(self.conn, [self.b_id], "entry-1")
-        self.conn.commit()
-        self.assertEqual(self._batch(self.a_id).rendered_text, self.full_a)
-
-    def test_the_presentation_still_shows_the_whole_room(self):
-        mark_batches_annexed(self.conn, [self.b_id], "entry-1")
-        self.conn.commit()
-        persona = SimpleNamespace(
-            persona_id="p1",
-            sai_memory=SimpleNamespace(
-                conn=self.conn, _db_lock=threading.RLock(), is_ready=lambda: True,
-            ),
-        )
-        merged = _merge_consumed_perceptions(_RUNTIME, persona, [])
-        text = "\n".join(m["content"] for m in merged)
-        # B で増えたノギスも、C で増えた鍵も読める (C が全文へ戻ったため)。
-        self.assertIn("目盛りが細かいノギス。", text)
-        self.assertIn("何を開けるか分からない鍵。", text)
-
-    def test_an_intact_chain_is_left_as_a_diff(self):
-        """土台が直前に見えている差分は差分のまま (無駄に全文へ戻さない)。"""
-        self._push("b2", _room_text("書斎", [("9", "本棚", "本が詰まっている。")]))
-        other_id = self._flush()
-
-        self.assertEqual(mark_batches_annexed(self.conn, [other_id], "entry-2"), 1)
-        self.conn.commit()
-
-        self.assertTrue(self._entry(self.b_id)["is_diff"])
-        self.assertTrue(self._entry(self.c_id)["is_diff"])
-
-    def test_a_pending_diff_whose_middle_base_was_annexed_is_reopened(self):
-        """まだ台帳で待っている差分にも同じ検査を通す。
-
-        キーが見えているかどうかだけを見ていた頃は、最古の A がキーを覆って
-        いるので「土台あり」と読み、土台の無い差分がそのまま確定していた。
-        """
-        self._push("b1", _room_text("工房", [
-            ("5", "真鍮の定規", "使い込まれた定規。"),
-            ("7", "銅のノギス", "目盛りが細かいノギス。"),
-            ("8", "使い古した鍵", "何を開けるか分からない鍵。"),
-            ("9", "麻の前掛け", "道具を挿すポケットが並ぶ。"),
-        ]))
-        mark_batches_annexed(self.conn, [self.b_id, self.c_id], "entry-1")
-        self.conn.commit()
-
-        batch = self._batch(self._flush())
-        entry = json.loads(batch.room_state_json)[0]
-        self.assertFalse(entry["is_diff"])
-        self.assertTrue(entry["reopened"])
-        self.assertIn("道具を挿すポケットが並ぶ。", batch.rendered_text)
-        self.assertIn("目盛りが細かいノギス。", batch.rendered_text)
-
-
-class RoomStateLegacyRecordTest(RoomStateLedgerTestBase):
-    """``base_digest`` を持たない旧バッチは旧規則のまま扱う (退行させない)。
-
-    指紋は 2026-09-05 に足した記帳なので、それ以前に確定したバッチには無い。
-    照合できないぶん中間欠落は捕まえられないが、旧規則 (同部屋のエントリが
-    手前に見えていれば土台ありとみなす) をそのまま適用するので、旧データの
-    挙動が今日より悪くなることはない。
-    """
-
-    def setUp(self):
-        super().setUp()
-        self.full_a = _room_text("工房", [("5", "真鍮の定規", "使い込まれた定規。")])
-        self.full_b = _room_text("工房", [
-            ("5", "真鍮の定規", "使い込まれた定規。"),
-            ("7", "銅のノギス", "目盛りが細かいノギス。"),
-        ])
-        self.full_c = _room_text("工房", [
-            ("5", "真鍮の定規", "使い込まれた定規。"),
-            ("7", "銅のノギス", "目盛りが細かいノギス。"),
-            ("8", "使い古した鍵", "何を開けるか分からない鍵。"),
-        ])
-        self._push("b1", self.full_a)
-        self.a_id = self._flush()
-        self._push("b1", self.full_b)
-        self.b_id = self._flush()
-        self._push("b1", self.full_c)
-        self.c_id = self._flush()
-        self._strip_digests()
-
-    def _strip_digests(self):
-        """指紋を持たない世代の記帳へ落とす (旧 DB の再現)。"""
-        for batch in list_unannexed_batches(self.conn):
-            entries = json.loads(batch.room_state_json)
-            for entry in entries:
-                entry.pop("base_digest", None)
-            self.conn.execute(
-                "UPDATE perception_batches SET room_state_json = ? WHERE id = ?",
-                (json.dumps(entries, ensure_ascii=False), batch.id),
-            )
-        self.conn.commit()
-
-    def _entry(self, batch_id):
-        return json.loads(self._batch(batch_id).room_state_json)[0]
-
-    def test_the_oldest_rule_still_repairs_a_dropped_prefix(self):
-        mark_batches_annexed(self.conn, [self.a_id], "entry-1")
-        self.conn.commit()
-        self.assertEqual(self._batch(self.b_id).rendered_text, self.full_b)
-        self.assertFalse(self._entry(self.b_id)["is_diff"])
-
-    def test_a_middle_drop_stays_undetected_in_old_records(self):
-        """既知の境界: 指紋が無いので中間欠落は照合できない。"""
-        mark_batches_annexed(self.conn, [self.b_id], "entry-1")
-        self.conn.commit()
-        self.assertTrue(self._entry(self.c_id)["is_diff"])
-
-    def test_a_new_diff_on_top_of_an_old_record_carries_a_fingerprint(self):
-        """旧エントリを土台にした新しい差分には指紋が入る (以後は照合できる)。"""
-        payload = self._push("b1", _room_text("工房", [
-            ("5", "真鍮の定規", "使い込まれた定規。"),
-            ("7", "銅のノギス", "目盛りが細かいノギス。"),
-            ("8", "使い古した鍵", "何を開けるか分からない鍵。"),
-            ("9", "麻の前掛け", "道具を挿すポケットが並ぶ。"),
-        ]))
-        state = json.loads(payload["metadata"])["room_state"]
-        self.assertEqual(state["base_digest"], snapshot_digest(self.full_c))
-
-
-class RoomStateTransferReadFailureTest(RoomStateLedgerTestBase):
-    """移管の読み取りが落ちた回は、付記も境界前進も確定させない (Codex #1)。
-
-    読み取り失敗を「移管対象なし (0 件)」に化かすと、呼び出し側は移管が済んだ
-    回と区別できないまま commit する — 土台の全文バッチだけが提示から下り、
-    残った差分が土台の無いまま宙に浮く (付記済みバッチは土台にできないので
-    復元不能)。だから失敗は例外で伝え、両方の呼び出し点が tx ごと rollback して
-    「何もしなかった」へ倒す。次の機会に全体をやり直せばよい。
-    """
-
-    def setUp(self):
-        super().setUp()
-        self.full_a = _room_text("工房", [("5", "真鍮の定規", "使い込まれた定規。")])
-        self.full_a2 = _room_text("工房", [
-            ("5", "真鍮の定規", "使い込まれた定規。"),
-            ("7", "銅のノギス", "目盛りが細かいノギス。"),
-        ])
-        self._push("b1", self.full_a)
-        self.base_id = self._flush()
-        self._push("b1", self.full_a2)
-        self.diff_id = self._flush()
-
-    def _read_failure(self):
-        """移管が提示バッチを読む一点を落とす (locked / 表欠けの再現)。"""
-        return patch(
-            "sai_memory.perception_buffer.list_presented_batches",
-            side_effect=sqlite3.OperationalError("database is locked"),
-        )
-
-    def _assert_nothing_moved(self):
-        survivor = self._batch(self.diff_id)
-        self.assertNotIn("使い込まれた定規。", survivor.rendered_text)
-        self.assertTrue(json.loads(survivor.room_state_json)[0]["is_diff"])
-
-    def test_the_failure_is_not_reported_as_nothing_to_transfer(self):
-        with self._read_failure():
-            with self.assertRaises(sqlite3.OperationalError):
-                restore_room_state_bases(self.conn)
-
-    def test_the_annexation_is_rolled_back_with_it(self):
-        with self._read_failure():
-            with self.assertRaises(sqlite3.OperationalError):
-                mark_batches_annexed(self.conn, [self.base_id], "entry-1")
-        # 付記印は残らない = 土台は提示に残り、次の編纂でチャンクごとやり直せる。
-        self.assertIsNotNone(self._batch(self.base_id))
-        self._assert_nothing_moved()
-
-    def test_the_presentation_cutoff_does_not_advance_with_it(self):
-        with self._read_failure():
-            with self.assertRaises(sqlite3.OperationalError):
-                advance_presentation_cutoff(self.conn, self.base_id)
-        self.assertEqual(get_presentation_cutoff(self.conn), 0)
-        self._assert_nothing_moved()
-
-    def test_the_presentation_falls_open_to_showing_every_batch(self):
-        """境界前進の入口 (提示の組成) は失敗を飲んで従来どおり全部出す。"""
-        persona = SimpleNamespace(
-            persona_id="p1", model="test-model",
-            sai_memory=SimpleNamespace(
-                conn=self.conn, _db_lock=threading.RLock(), is_ready=lambda: True,
-            ),
-        )
-        with self._read_failure(), patch(
-            "sea.runtime_context.resolve_perception_watermarks",
-            return_value=(1, 1),  # 必ず下ろしたくなる水位
-        ):
-            blocks = list_presented_perception_blocks(_RUNTIME, persona, [])
-        self.assertEqual(get_presentation_cutoff(self.conn), 0)
+        survivor = self._batch(self.c_id)
+        self.assertEqual(survivor.rendered_text, render_room_full(self.bundle_c))
+        # 最古の全文 (A) はそのまま。
         self.assertEqual(
-            [b["metadata"]["__perception_batch_id__"] for b in blocks],
-            [self.base_id, self.diff_id],
-        )
-        self._assert_nothing_moved()
-
-
-class RoomStateBaseLostBeforeConsumptionTest(RoomStateLedgerTestBase):
-    """積んでから消費するまでの間に土台が付記で下りたとき (移管の受け皿が無い)。"""
-
-    def setUp(self):
-        super().setUp()
-        self.full_a = _room_text("工房", [("5", "真鍮の定規", "使い込まれた定規。")])
-        self.full_a2 = _room_text("工房", [
-            ("5", "真鍮の定規", "使い込まれた定規。"),
-            ("7", "銅のノギス", "目盛りが細かいノギス。"),
-        ])
-
-    def test_pending_diff_is_reopened_to_the_full_text(self):
-        self._push("b1", self.full_a)
-        base_id = self._flush()
-        self._push("b1", self.full_a2)  # まだ台帳で待っている差分
-
-        mark_batches_annexed(self.conn, [base_id], "entry-1")
-        self.conn.commit()
-
-        batch_id = self._flush()
-        batch = self._batch(batch_id)
-        self.assertEqual(batch.rendered_text, self.full_a2)
-        entry = json.loads(batch.room_state_json)[0]
-        self.assertFalse(entry["is_diff"])
-        self.assertTrue(entry["reopened"])
-
-    def test_two_pending_diffs_reopen_only_the_first(self):
-        self._push("b1", self.full_a)
-        base_id = self._flush()
-        self._push("b1", self.full_a2)
-        self._push("b1", self.full_a)  # 同じ部屋へ戻って中身も戻った
-        mark_batches_annexed(self.conn, [base_id], "entry-1")
-        self.conn.commit()
-
-        batch = self._batch(self._flush())
-        entries = json.loads(batch.room_state_json)
-        self.assertEqual([e["is_diff"] for e in entries], [False, True])
-        self.assertIn(self.full_a2, batch.rendered_text)
-
-    def test_pending_diff_keeps_its_shape_while_the_base_is_visible(self):
-        self._push("b1", self.full_a)
-        self._flush()
-        self._push("b1", self.full_a2)
-        batch = self._batch(self._flush())
-        self.assertNotEqual(batch.rendered_text, self.full_a2)
-        self.assertTrue(json.loads(batch.room_state_json)[0]["is_diff"])
-        self.assertNotIn("reopened", json.loads(batch.room_state_json)[0])
-
-    def test_non_room_items_pass_through_untouched(self):
-        push_perception(self.conn, "world_state", "誰かが入室した")
-        items = list_pending(self.conn)
-        self.assertEqual(ensure_room_state_base(self.conn, items), items)
-
-
-class RoomStateChronicleGateTest(unittest.TestCase):
-    """積む側の門 (``saiverse.dynamic_state._chronicle_enabled``) の runtime 引き。
-
-    兄弟三箇所 (head_pipeline/integration.py, sections/memory_weave.py,
-    day_plan.py) は manager から runtime を ``sea_runtime`` → ``runtime`` の
-    二段で引く。ここだけ ``sea_runtime`` しか見ていないと、``runtime`` の名前
-    しか持たない manager で lifecycle が引けず、Chronicle 無効のペルソナにも
-    差分を積んでしまう (無効のペルソナは窓で土台を忘れる = 差分が宙に浮く)。
-    """
-
-    @staticmethod
-    def _lifecycle(enabled):
-        return SimpleNamespace(
-            session_lifecycle=SimpleNamespace(
-                is_chronicle_enabled_for_persona=lambda persona: enabled,
-            ),
+            self._batch(self.a_id).rendered_text, render_room_full(self.bundle_a),
         )
 
-    def _gate(self, manager):
-        from saiverse.dynamic_state import _chronicle_enabled
-        return _chronicle_enabled(SimpleNamespace(persona_id="p1"), manager)
+    def test_chain_check_uses_the_fingerprint(self):
+        b_entry = self._entry(self.b_id)
+        a_entry = self._entry(self.a_id)
+        self.assertTrue(chain_is_intact(b_entry, a_entry))
+        self.assertFalse(chain_is_intact(b_entry, self._entry(self.c_id)))
+        self.assertFalse(chain_is_intact(b_entry, None))
 
-    def test_it_reads_the_lifecycle_through_sea_runtime(self):
-        self.assertFalse(self._gate(
-            SimpleNamespace(sea_runtime=self._lifecycle(False)),
-        ))
 
-    def test_it_also_reads_the_runtime_alias(self):
-        self.assertFalse(self._gate(
-            SimpleNamespace(runtime=self._lifecycle(False)),
-        ))
+class EntryPushWiringTest(_EnvTestBase):
+    """§6-1: 入室の push は束を組んで adapter へ渡す (末尾 = 出来事)。"""
 
-    def test_sea_runtime_wins_when_both_are_present(self):
-        self.assertTrue(self._gate(SimpleNamespace(
-            sea_runtime=self._lifecycle(True), runtime=self._lifecycle(False),
-        )))
-
-    def test_no_runtime_at_all_falls_to_enabled(self):
-        self.assertTrue(self._gate(SimpleNamespace()))
-
-
-class RoomStateChronicleToggleTest(RoomStateLedgerTestBase):
-    """Chronicle を有効から無効へ切り替えた後の窓絞り (2026-09-05 四巡目 #1)。
-
-    有効な間は差分が積まれる。その後トグルを無効にすると、提示は窓 (anchor)
-    より古いバッチを**付記なしで**落とすようになる — 台帳側の回復
-    (``restore_room_state_bases``) は絞られていない ``list_presented_batches``
-    を見るので「土台はまだ見えている」と読み、走らない。だから土台の全文だけが
-    消えて、差分が宙に浮いたままプロンプトへ乗っていた。
-
-    直しは提示時の開き直し (``reopen_lost_bases``): 絞った後の並びで連なりが
-    切れていたら、その位置をそのエントリ自身の snapshot で全文へ開く。台帳は
-    書き換えない (絞りはペルソナと model ごとに動くので、DB に書ける事実では
-    ない)。
-    """
-
-    def setUp(self):
-        super().setUp()
-        self.full_a = _room_text("工房", [("5", "真鍮の定規", "使い込まれた定規。")])
-        self.full_a2 = _room_text("工房", [
-            ("5", "真鍮の定規", "使い込まれた定規。"),
-            ("7", "銅のノギス", "目盛りが細かいノギス。"),
-        ])
-        # Chronicle 有効の間に「全文 → 差分」を積む。
-        self._push("b1", self.full_a)
-        self.base_id = self._flush()
-        self._push("b1", self.full_a2)
-        self.diff_id = self._flush()
-        self.assertTrue(json.loads(self._batch(self.diff_id).room_state_json)[0]["is_diff"])
-        self.persona = SimpleNamespace(
-            persona_id="p1", model="test-model",
-            sai_memory=SimpleNamespace(
-                conn=self.conn, _db_lock=threading.RLock(), is_ready=lambda: True,
-            ),
-        )
-        # 窓 = 「土台のバッチより後」— 生ログの最古行の時刻で絞らせる。
-        base_at = self._batch(self.base_id).consumed_at
-        self.window_after_base = [{"created_at": base_at + 1}]
-
-    def _blocks(self, runtime, recent=()):
-        return list_presented_perception_blocks(
-            runtime, self.persona, list(recent), raise_on_error=True,
-        )
-
-    def test_while_chronicle_is_on_the_diff_stays_a_diff(self):
-        blocks = self._blocks(_RUNTIME, self.window_after_base)
-        self.assertEqual(len(blocks), 2)
-        self.assertIn("使い込まれた定規。", blocks[0]["content"])
-        self.assertNotIn("使い込まれた定規。", blocks[1]["content"])
-
-    def test_after_the_toggle_the_window_drops_the_base(self):
-        blocks = self._blocks(_RUNTIME_NO_CHRONICLE, self.window_after_base)
-        self.assertEqual(len(blocks), 1)
-        self.assertEqual(
-            blocks[0]["metadata"]["__perception_batch_id__"], self.diff_id,
-        )
-
-    def test_the_orphaned_diff_is_presented_as_the_full_room(self):
-        blocks = self._blocks(_RUNTIME_NO_CHRONICLE, self.window_after_base)
-        content = blocks[0]["content"]
-        # 土台にしか無かった説明も、差分で増えたものも、両方読める。
-        self.assertIn("使い込まれた定規。", content)
-        self.assertIn("目盛りが細かいノギス。", content)
-        self.assertNotIn("前回見たときからの変化", content)
-
-    def test_the_ledger_and_the_settled_text_are_not_rewritten(self):
-        self._blocks(_RUNTIME_NO_CHRONICLE, self.window_after_base)
-        survivor = self._batch(self.diff_id)
-        self.assertNotIn("使い込まれた定規。", survivor.rendered_text)
-        self.assertTrue(json.loads(survivor.room_state_json)[0]["is_diff"])
-
-    def test_the_reopening_is_deterministic(self):
-        first = self._blocks(_RUNTIME_NO_CHRONICLE, self.window_after_base)
-        second = self._blocks(_RUNTIME_NO_CHRONICLE, self.window_after_base)
-        self.assertEqual(
-            [b["content"] for b in first], [b["content"] for b in second],
-        )
-
-    def test_a_base_still_inside_the_window_leaves_the_diff_alone(self):
-        blocks = self._blocks(_RUNTIME_NO_CHRONICLE, [{"created_at": 0}])
-        self.assertEqual(len(blocks), 2)
-        self.assertNotIn("使い込まれた定規。", blocks[1]["content"])
-
-
-class RoomStateHeadBasePushTest(RoomStateLedgerTestBase):
-    """head が同じ部屋を見せているときの積み方 (issue room_state_duplicates_head_inventory)。
-
-    まはーの再現経路: 部屋 A (アイテム 41 件) → 部屋 B → 部屋 A。戻ったとき、
-    台帳には A のエントリが一枚も見えていない (行きの一枚は B のもの) ので
-    「初訪問」として全文が積まれ、head の一覧と一字も違わない二重になっていた。
-    head の visual_context は移動では撮り直されないので、往復の間ずっと A を
-    見せている — その姿を土台にすれば変化だけで足りる。
-    """
-
-    def setUp(self):
-        super().setUp()
-        self.full_a = _room_text("工房", [("5", "真鍮の定規", "使い込まれた定規。")])
-        self.full_a2 = _room_text("工房", [
-            ("5", "真鍮の定規", "使い込まれた定規。"),
-            ("7", "銅のノギス", "目盛りが細かいノギス。"),
-        ])
-        self.full_b = _room_text("書斎", [("9", "背の高い本棚", "本が詰まっている。")])
-
-    def _state(self, payload):
-        return json.loads(payload["metadata"])["room_state"]
-
-    def test_returning_to_an_unchanged_room_costs_one_line(self):
-        # 行き (B) → 帰り (A)。台帳に A のエントリは無く、head だけが見せている。
-        self._push("b2", self.full_b)
-        self._flush()
-        payload = self._push("b1", self.full_a, head_full_text=self.full_a)
-        self.assertEqual(
-            payload["content"], "# 「工房」の様子\n前回見たときから変わっていません。",
-        )
-        state = self._state(payload)
-        self.assertTrue(state["is_diff"])
-        self.assertEqual(state["base_source"], "head")
-        # 全体像は開き直しの受け皿として記帳に残る。
-        self.assertEqual(state["snapshot"], self.full_a)
-
-    def test_changes_since_the_head_capture_are_the_only_thing_pushed(self):
-        payload = self._push("b1", self.full_a2, head_full_text=self.full_a)
-        self.assertIn("増えた・変わったもの", payload["content"])
-        self.assertIn("目盛りが細かいノギス。", payload["content"])
-        self.assertNotIn("使い込まれた定規。", payload["content"])
-        self.assertEqual(self._state(payload)["base_source"], "head")
-
-    def test_no_head_view_of_this_room_still_pushes_the_full_text(self):
-        # head が別の部屋を見せている回は、呼び出し側が None を渡す。
-        payload = self._push("b1", self.full_a, head_full_text=None)
-        self.assertEqual(payload["content"], self.full_a)
-        self.assertFalse(self._state(payload)["is_diff"])
-
-    def test_the_ledger_base_wins_over_the_head(self):
-        """台帳に土台が見えているなら従来どおりそれを使う (連なりを保つ)。"""
-        self._push("b1", self.full_a)
-        self._flush()
-        payload = self._push("b1", self.full_a2, head_full_text=self.full_b)
-        self.assertIn("目盛りが細かいノギス。", payload["content"])
-        self.assertNotIn("base_source", self._state(payload))
-
-    def test_a_head_based_diff_carries_no_media(self):
-        media = [{"path": "/tmp/room.png", "mime_type": "image/png"}]
-        payload = self._push(
-            "b1", self.full_a2, media=media, head_full_text=self.full_a,
-        )
-        self.assertIsNone(payload["media"])
-
-    def test_the_chronicle_gate_does_not_stop_the_head_base(self):
-        """``allow_diff`` の理由 (窓絞りで台帳の土台が消える) は head には無い。"""
-        payload = self._push(
-            "b1", self.full_a, allow_diff=False, head_full_text=self.full_a,
-        )
-        self.assertIn("変わっていません", payload["content"])
-        self.assertEqual(self._state(payload)["base_source"], "head")
-
-    def test_a_pending_head_based_entry_is_not_a_base_for_the_next_push(self):
-        self._push("b1", self.full_a2, head_full_text=self.full_a)
-        self.assertIsNone(latest_visible_snapshot(self.conn, room_key("b1")))
-        payload = self._push("b1", self.full_a2)
-        self.assertEqual(payload["content"], self.full_a2)
-
-    def test_a_settled_head_based_entry_is_not_a_base_either(self):
-        self._push("b1", self.full_a2, head_full_text=self.full_a)
-        self._flush()
-        self.assertIsNone(latest_visible_snapshot(self.conn, room_key("b1")))
-        payload = self._push("b1", self.full_a2)
-        self.assertEqual(payload["content"], self.full_a2)
-
-    def test_a_pending_head_based_diff_is_not_reopened_on_consumption(self):
-        """土台が台帳の外なので、付記で土台が下りるという壊れ方が起きない。"""
-        self._push("b1", self.full_a2, head_full_text=self.full_a)
-        items = ensure_room_state_base(self.conn, reduce_perceptions(list_pending(self.conn)))
-        self.assertEqual(len(items), 1)
-        self.assertIn("増えた・変わったもの", items[0].content)
-        self.assertNotIn("使い込まれた定規。", items[0].content)
-
-
-class RoomStateHeadPresentationTest(RoomStateLedgerTestBase):
-    """head 土台の差分をいつ全文へ開き直すか (提示時・model ごと)。
-
-    head は (ペルソナ, model) ごとに別々の時点で capture されるので、「その差分の
-    部屋の全体像が今この Session に見えているか」は台帳へ書けない。Chronicle
-    無効の窓絞りと同じ扱いで、その回の提示文面だけを差し替える。
-    """
-
-    def setUp(self):
-        super().setUp()
-        self.full_a = _room_text("工房", [("5", "真鍮の定規", "使い込まれた定規。")])
-        self.full_a2 = _room_text("工房", [
-            ("5", "真鍮の定規", "使い込まれた定規。"),
-            ("7", "銅のノギス", "目盛りが細かいノギス。"),
-        ])
-        self.batch_id = None
-        self._push("b1", self.full_a2, head_full_text=self.full_a)
-        self.batch_id = self._flush()
-        self.persona = SimpleNamespace(
-            persona_id="p1", model="test-model",
-            sai_memory=SimpleNamespace(
-                conn=self.conn, _db_lock=threading.RLock(), is_ready=lambda: True,
-            ),
-        )
-
-    def _blocks(self, head_building_id, head_text=""):
-        with patch(
-            "sea.head_pipeline.current_head_room",
-            return_value=(head_building_id, head_text),
-        ):
-            return list_presented_perception_blocks(
-                _RUNTIME, self.persona, [], raise_on_error=True,
-            )
-
-    def test_while_the_head_shows_the_room_the_diff_stays_a_diff(self):
-        content = self._blocks("b1", self.full_a)[0]["content"]
-        self.assertIn("目盛りが細かいノギス。", content)
-        self.assertNotIn("使い込まれた定規。", content)
-
-    def test_a_recaptured_head_of_the_same_room_does_not_reopen_it(self):
-        """head が撮り直されて中身が変わっても、同じ部屋なら差分のまま。
-
-        全体像は撮り直した head が最新の姿で見せている。ここで開き直すと、
-        同じ部屋の全文が head と知覚に二枚並ぶ (消そうとしている重複そのもの)。
-        """
-        content = self._blocks("b1", self.full_a2)[0]["content"]
-        self.assertNotIn("使い込まれた定規。", content)
-
-    def test_when_the_head_moves_to_another_room_the_full_text_comes_back(self):
-        content = self._blocks("b2", "…書斎の様子…")[0]["content"]
-        self.assertIn("使い込まれた定規。", content)
-        self.assertIn("目盛りが細かいノギス。", content)
-        self.assertNotIn("増えた・変わったもの", content)
-
-    def test_an_unreadable_head_falls_to_the_full_text(self):
-        content = self._blocks(None)[0]["content"]
-        self.assertIn("使い込まれた定規。", content)
-
-    def test_the_ledger_and_the_settled_text_are_not_rewritten(self):
-        self._blocks("b2")
-        row = self._batch(self.batch_id)
-        self.assertNotIn("使い込まれた定規。", row.rendered_text)
-        entry = json.loads(row.room_state_json)[0]
-        self.assertTrue(entry["is_diff"])
-        self.assertEqual(entry["base_source"], "head")
-
-    def test_the_ledger_side_recovery_never_touches_a_head_based_diff(self):
-        self.assertEqual(restore_room_state_bases(self.conn), 0)
-        self.assertNotIn(
-            "使い込まれた定規。", self._batch(self.batch_id).rendered_text,
-        )
-
-    def test_the_accounting_matches_what_is_actually_sent(self):
-        """下ろし量の見積もりと提示が同じ head の値を見る。"""
-        from sea.runtime_context import _presented_chars_after_transfer
-
-        presented = list_unannexed_batches(self.conn)
-        for building_id, head_text in (("b1", self.full_a), ("b2", "")):
-            with self.subTest(head=building_id):
-                blocks = self._blocks(building_id, head_text)
-                sent = sum(len(b["content"]) for b in blocks)
-                predicted = _presented_chars_after_transfer(
-                    presented, head_room_key=room_key(building_id),
-                )
-                self.assertEqual(predicted, sent)
-
-    def test_a_supplied_head_room_wins_over_reading_the_head_again(self):
-        """呼び出し側が渡した部屋が使われ、head は読み直されない。
-
-        prepare_context は head を先に描画して固定する。その後で head を読み
-        直すと、間に走った Metabolism / TTL の撮り直しで別の部屋を見てしまい、
-        「送った head には無い部屋」の差分をそのまま出す (逆に、送った head に
-        は載っている部屋を全文へ開き直して二枚並べる) — 2026-09-05 Codex 指摘。
-        """
-        from sea.runtime_context import _presented_chars_after_transfer
-
-        presented = list_unannexed_batches(self.conn)
-        # 読み直し側は「別の部屋 (b2)」を返す = 渡した値を無視すれば開き直る。
-        with patch(
-            "sea.head_pipeline.current_head_room", return_value=("b2", "…"),
-        ) as reread:
-            blocks = list_presented_perception_blocks(
-                _RUNTIME, self.persona, [], raise_on_error=True,
-                head_room_key=room_key("b1"),
-            )
-        reread.assert_not_called()
-        content = blocks[0]["content"]
-        self.assertNotIn("使い込まれた定規。", content)
-        self.assertIn("目盛りが細かいノギス。", content)
-        # 勘定も同じ値で走る (提示と一致する)。
-        self.assertEqual(
-            _presented_chars_after_transfer(presented, head_room_key=room_key("b1")),
-            sum(len(b["content"]) for b in blocks),
-        )
-
-    def test_a_supplied_none_means_the_head_shows_no_room(self):
-        """``None`` は「渡されていない」ではなく「どの部屋も見せていない」。"""
-        with patch(
-            "sea.head_pipeline.current_head_room", return_value=("b1", self.full_a),
-        ) as reread:
-            blocks = list_presented_perception_blocks(
-                _RUNTIME, self.persona, [], raise_on_error=True,
-                head_room_key=None,
-            )
-        reread.assert_not_called()
-        self.assertIn("使い込まれた定規。", blocks[0]["content"])
-
-
-class HeadRoomViewTest(unittest.TestCase):
-    """head 側の供給 — 「head が見せている部屋」をどこから取るか。
-
-    VisualContextSection は同じ capture の瞬間に、head 用の姿と**知覚記法の姿**
-    (``room_text``) の両方を焼く。書式が同じでないと差分の土台にできないため。
-    二つは **一度の世界の読み**から作る (`build_visual_contexts`) — 別々に読むと
-    間に世界が動いて、head の姿と差分の土台が別時点になる。
-    """
-
-    def _ctx(self, building_id="b1"):
-        from sea.head_pipeline.types import LineHeadInput
-        return LineHeadInput(
-            persona_id="p1", model_key="m1", current_building_id=building_id,
-            persona=SimpleNamespace(persona_id="p1", persona_dir="/tmp/p1"),
-            manager=SimpleNamespace(),
-        )
-
-    def _capture(self, head_text, room_text, *, reads=None):
-        from sea.head_pipeline.sections.visual_context import VisualContextSection
-
-        def _fake(building_id=None, views=()):
-            if reads is not None:
-                reads.append(building_id)
-            out = []
-            for view in views:
-                text = room_text if view.for_perception else head_text
-                out.append(
-                    [{"content": text, "metadata": {"media": []}}] if text else []
-                )
-            return out
-
-        with patch(
-            "builtin_data.tools.get_visual_context.build_visual_contexts", _fake,
-        ):
-            return VisualContextSection().capture(self._ctx())
-
-    def test_capture_keeps_both_shapes_of_the_same_moment(self):
-        reads = []
-        snapshot = self._capture(
-            "<system>…head…</system>", "# 「工房」の様子\n…", reads=reads,
-        )
-        self.assertEqual(snapshot.building_id, "b1")
-        self.assertEqual(snapshot.room_text, "# 「工房」の様子\n…")
-        self.assertIn("head", snapshot.text)
-        # 世界を読むのは一度だけ (二度読むと二つの姿が別時点になる)。
-        self.assertEqual(reads, ["b1"])
-
-    def test_the_room_text_is_not_rendered_into_the_head(self):
-        from sea.head_pipeline.sections.visual_context import VisualContextSection
-        snapshot = self._capture("<system>…head…</system>", "# 「工房」の様子\n…")
-        rendered = VisualContextSection().render(snapshot)
-        self.assertEqual(rendered.text, snapshot.text)
-
-    def test_an_empty_perception_shape_still_yields_a_head(self):
-        snapshot = self._capture("<system>…head…</system>", "")
-        self.assertIn("head", snapshot.text)
-        self.assertEqual(snapshot.room_text, "")
-
-    def test_a_failing_world_read_yields_no_head_at_all(self):
-        """読みが落ちたら head も空 (人格に属さない部屋を描かない、従来どおり)。"""
-        from sea.head_pipeline.sections.visual_context import VisualContextSection
-
-        def _boom(building_id=None, views=()):
-            raise RuntimeError("boom")
-
-        with patch(
-            "builtin_data.tools.get_visual_context.build_visual_contexts", _boom,
-        ):
-            snapshot = VisualContextSection().capture(self._ctx())
-        self.assertEqual(snapshot.text, "")
-        self.assertEqual(snapshot.room_text, "")
-        self.assertIsNone(snapshot.building_id)
-
-    def test_a_head_that_renders_nothing_is_not_showing_a_room(self):
-        """head 本文が空なら「見せている」に数えない (全体像がどこにも無くなる)。"""
-        from sea.head_pipeline import current_head_room
-        from sea.head_pipeline.sections.visual_context import VisualContextSnapshot
-        for snapshot in (
-            VisualContextSnapshot(
-                text="", media=(), building_id="b1", room_text="# 「工房」の様子",
-            ),
-            VisualContextSnapshot(
-                text="x", media=(), building_id="b1", room_text="",
-            ),
-        ):
-            with self.subTest(text=snapshot.text, room=snapshot.room_text):
-                pipeline = SimpleNamespace(
-                    get_snapshot=lambda p, m, s=snapshot: SimpleNamespace(
-                        sections={"visual_context": s},
-                    ),
-                )
-                self.assertEqual(
-                    current_head_room(
-                        SimpleNamespace(persona_id="p1", model="m1"),
-                        pipeline=pipeline,
-                    ),
-                    (None, ""),
-                )
-
-    def test_serialization_round_trips_and_old_rows_stay_readable(self):
-        from sea.head_pipeline.sections.visual_context import VisualContextSection
-        section = VisualContextSection()
-        snapshot = self._capture("<system>…head…</system>", "# 「工房」の様子\n…")
-        restored = section.deserialize_snapshot(section.serialize_snapshot(snapshot))
-        self.assertEqual(restored, snapshot)
-        legacy = section.deserialize_snapshot(json.dumps({"text": "x", "media": []}))
-        self.assertIsNone(legacy.building_id)
-        self.assertEqual(legacy.room_text, "")
-
-    def test_current_head_room_does_not_capture_when_there_is_no_snapshot(self):
-        from sea.head_pipeline import current_head_room
-        pipeline = SimpleNamespace(get_snapshot=lambda persona_id, model_key: None)
-        persona = SimpleNamespace(persona_id="p1", model="m1")
-        self.assertEqual(
-            current_head_room(persona, pipeline=pipeline), (None, ""),
-        )
-
-    def test_the_rendered_head_hands_back_the_room_it_actually_showed(self):
-        """描画で固定した head の部屋を out-param が持ち帰る (後の撮り直しに動かない)。
-
-        prepare_context は head を先に描画して固定し、知覚の提示はその後で
-        組む。判定用に head を読み直すと、間に走った Metabolism / TTL の
-        撮り直しで**送った head とは別の部屋**を見てしまう (2026-09-05 Codex
-        指摘)。描画の中で確定させた値を渡す形にして、二つを同じにする。
-        """
-        from sea.head_pipeline import (
-            HeadPipeline,
-            HeadSectionRegistry,
-            build_line_head_input,
-            current_head_room,
-        )
-        from sea.head_pipeline.integration import render_head_messages
-        from sea.head_pipeline.sections.visual_context import VisualContextSection
-
-        registry = HeadSectionRegistry()
-        registry.register(VisualContextSection())
-        pipeline = HeadPipeline(registry=registry)
-        persona = SimpleNamespace(persona_id="p1", persona_dir="/tmp/p1", model="m1")
-        manager = SimpleNamespace()
-
-        def _fake(building_id=None, views=()):
-            return [
-                [{
-                    "content": (
-                        f"# 「{building_id}」の様子 "
-                        f"({'room' if view.for_perception else 'head'})"
-                    ),
-                    "metadata": {"media": []},
-                }]
-                for view in views
-            ]
-
-        head_room_out = {}
-        with patch(
-            "builtin_data.tools.get_visual_context.build_visual_contexts", _fake,
-        ):
-            render_head_messages(
-                persona, manager, "b1",
-                enabled_sections={"visual_context"},
-                pipeline=pipeline, head_room_out=head_room_out,
-            )
-            # 描画のあとで別の部屋の capture が走る (Metabolism / TTL の撮り直し)。
-            pipeline.capture_all(
-                build_line_head_input(persona, manager, "b2", model_key="m1"),
-            )
-            reread = current_head_room(persona, model_key="m1", pipeline=pipeline)
-
-        # 読み直しは既に b2 を指している — が、送った head は b1 のまま。
-        self.assertEqual(reread[0], "b2")
-        self.assertEqual(head_room_out["building_id"], "b1")
-        self.assertEqual(head_room_out["room_text"], "# 「b1」の様子 (room)")
-
-    def test_a_head_without_the_visual_section_shows_no_room(self):
-        """visual_context を描画しない呼び出しは「どの部屋も見せていない」を返す。
-
-        enabled_sections が visual_context を外した prompt には部屋の全体像が
-        載らない。それでも pin した snapshot の部屋を書き戻すと、提示側が
-        「head が見せている」と判定して差分を圧縮したまま送る — 全体像なしの
-        差分という契約破れになる (2026-09-05 Codex 二巡)。書き戻しは
-        (None, "") = 差分は全文へ開き直される側に倒す。
-        """
-        from sea.head_pipeline import HeadPipeline, HeadSectionRegistry
-        from sea.head_pipeline.integration import render_head_messages
-        from sea.head_pipeline.sections.visual_context import VisualContextSection
-
-        registry = HeadSectionRegistry()
-        registry.register(VisualContextSection())
-        pipeline = HeadPipeline(registry=registry)
-        persona = SimpleNamespace(persona_id="p1", persona_dir="/tmp/p1", model="m1")
-        manager = SimpleNamespace()
-
-        def _fake(building_id=None, views=()):
-            return [
-                [{"content": f"# 「{building_id}」の様子", "metadata": {"media": []}}]
-                for _ in views
-            ]
-
-        head_room_out = {}
-        with patch(
-            "builtin_data.tools.get_visual_context.build_visual_contexts", _fake,
-        ):
-            render_head_messages(
-                persona, manager, "b1",
-                enabled_sections=set(),
-                pipeline=pipeline, head_room_out=head_room_out,
-            )
-        self.assertIsNone(head_room_out["building_id"])
-        self.assertEqual(head_room_out["room_text"], "")
-
-    def test_current_head_room_reads_the_visual_context_section(self):
-        from sea.head_pipeline import current_head_room
-        from sea.head_pipeline.sections.visual_context import VisualContextSnapshot
-        snapshot = SimpleNamespace(sections={
-            "visual_context": VisualContextSnapshot(
-                text="x", media=(), building_id="b1", room_text="# 「工房」の様子",
-            ),
-        })
-        pipeline = SimpleNamespace(get_snapshot=lambda persona_id, model_key: snapshot)
-        persona = SimpleNamespace(persona_id="p1", model="m1")
-        self.assertEqual(
-            current_head_room(persona, pipeline=pipeline),
-            ("b1", "# 「工房」の様子"),
-        )
-
-
-class RoomStateEntryHandoffTest(unittest.TestCase):
-    """入室の結び目 — head の姿を土台として渡すのは同じ部屋のときだけ。"""
-
-    def _run_entry(self, head_building_id):
+    def test_on_building_entered_pushes_the_bundle(self):
         from saiverse.dynamic_state import DynamicStateManager
-        calls = {}
 
-        def _push_room_state(building_id, content, **kwargs):
-            calls["building_id"] = building_id
-            calls["kwargs"] = kwargs
-
-        persona = SimpleNamespace(
-            persona_id="p1", persona_dir="/tmp/p1",
-            sai_memory=SimpleNamespace(push_room_state=_push_room_state),
+        pushed = []
+        sai_mem = SimpleNamespace(
+            push_room_state=lambda bid, bundle, allow_diff=True: pushed.append(
+                (bid, bundle, allow_diff),
+            ),
         )
-        manager = SimpleNamespace(personas={}, occupants={}, feed_manager=None)
-        with patch(
-            "builtin_data.tools.get_visual_context.get_visual_context",
-            lambda **kwargs: [{"content": "# 「工房」の様子", "metadata": {"media": []}}],
-        ), patch(
-            "sea.head_pipeline.current_head_room",
-            return_value=(head_building_id, "# 「工房」の様子 (head)"),
-        ):
-            DynamicStateManager.on_building_entered(persona, "b1", manager)
-        return calls
-
-    def test_the_head_view_is_handed_over_for_the_same_room(self):
-        calls = self._run_entry("b1")
-        self.assertEqual(calls["building_id"], "b1")
+        persona = SimpleNamespace(
+            persona_id="p1", persona_dir=None, sai_memory=sai_mem,
+            current_building_id="b1", buildings=self.env.persona.buildings,
+            persona_name="アイフィ",
+        )
+        self.env.manager.all_personas["p1"] = persona
+        self.env.manager.personas = {}
+        self.env.manager.feed_manager = None
+        bundle = self.env.bundle()
+        with patch.object(gvc, "get_active_persona_id", return_value="p1"), \
+                patch.object(gvc, "get_active_manager", return_value=self.env.manager), \
+                patch.object(gvc, "_get_persona_appearance_path", return_value=None), \
+                patch.object(gvc, "_get_building_image_path", return_value=None), \
+                patch(
+                    "sea.head_pipeline.inject_diff_notifications",
+                ) as inject:
+            DynamicStateManager.on_building_entered(
+                persona, "b1", self.env.manager,
+            )
+        self.assertEqual(len(pushed), 1)
+        self.assertEqual(pushed[0][0], "b1")
         self.assertEqual(
-            calls["kwargs"]["head_full_text"], "# 「工房」の様子 (head)",
+            canonical_bundle_json(pushed[0][1]), canonical_bundle_json(bundle),
+        )
+        # 本人向けの検知は detect_room=False (入室を二重に語らない)。
+        self.assertTrue(inject.call_args_list)
+        self.assertEqual(
+            inject.call_args_list[0].kwargs.get("detect_room"), False,
         )
 
-    def test_a_head_showing_another_room_is_not_handed_over(self):
-        calls = self._run_entry("b2")
-        self.assertIsNone(calls["kwargs"]["head_full_text"])
 
-    def test_a_head_built_by_this_very_entry_is_not_a_base(self):
-        """入室処理が作った head を土台にしない (初訪問は従来どおり全文)。
+class DetectionEntryModelKeyTest(unittest.TestCase):
+    """検知の呼び出し口が実行 model を配線していること (2026-09-06 二巡目修正 2)。
 
-        ``inject_diff_notifications`` は ensure_snapshot を通るので、snapshot が
-        未構築のとき・anchor TTL が切れているときは移動先の姿で head を撮り直す。
-        その head を土台にすると、ペルソナが一度も見ていない部屋に「前回見た
-        ときから変わっていません」が付く (2026-09-05 Codex 指摘)。
-        """
+    中の配管 (``inject_diff_notifications`` の ``model_key`` →
+    ``resolve_metabolism_anchor``) は
+    RoomStateSelfRecoveryTest.test_the_window_check_uses_the_execution_models_anchor
+    が固定済み。ここは入口 — Pulse の通常経路の facade
+    (``DynamicStateManager.maybe_inject_event_messages``) が model_key を受けて
+    検知まで渡すこと。入口が省略のままだと、配管が通っていても実運用では常に
+    標準 model の窓で判定される。
+    """
+
+    def test_the_pulse_facade_forwards_the_execution_model(self):
         from saiverse.dynamic_state import DynamicStateManager
-        calls = {}
-        head = {"building_id": None}
 
-        def _inject(persona, manager, building_id, **kwargs):
-            # ensure_snapshot が移動先で capture_all した状態を模す。
-            head["building_id"] = building_id
-            return False
-
-        def _push_room_state(building_id, content, **kwargs):
-            calls["kwargs"] = kwargs
-
-        persona = SimpleNamespace(
-            persona_id="p1", persona_dir="/tmp/p1",
-            sai_memory=SimpleNamespace(push_room_state=_push_room_state),
-        )
-        manager = SimpleNamespace(personas={}, occupants={}, feed_manager=None)
+        persona = SimpleNamespace(persona_id="p1", current_building_id="b1")
         with patch(
-            "builtin_data.tools.get_visual_context.get_visual_context",
-            lambda **kwargs: [{"content": "# 「工房」の様子", "metadata": {"media": []}}],
-        ), patch(
-            "sea.head_pipeline.inject_diff_notifications", _inject,
-        ), patch(
-            "sea.head_pipeline.current_head_room",
-            side_effect=lambda *a, **kw: (head["building_id"], "# 「工房」の様子 (head)"),
-        ):
-            DynamicStateManager.on_building_entered(persona, "b1", manager)
-
-        # 入室が head を作った後でも、土台は「入室前に見えていた head」= 無し。
-        self.assertEqual(head["building_id"], "b1")
-        self.assertIsNone(calls["kwargs"]["head_full_text"])
+            "sea.head_pipeline.inject_diff_notifications", return_value=True,
+        ) as inject:
+            ok = DynamicStateManager.maybe_inject_event_messages(
+                persona, SimpleNamespace(), model_key="exec-model",
+            )
+        self.assertTrue(ok)
+        self.assertEqual(
+            inject.call_args.kwargs.get("model_key"), "exec-model",
+        )
 
 
-class RoomStateAdapterFlushTest(unittest.TestCase):
-    """本物の adapter で「積む → 消費 → 付記 → 移管」を一周する。"""
+class WindowedDetectionReadTest(RoomStateLedgerTestBase):
+    """2026-09-06 八巡目修正 1: 検知の読み (digest 比較の「前回」) も提示と同じ窓を通る。
 
-    PERSONA_ID = "room-state-tester"
+    並びは「古い束 A が窓の内、最新の束 C が窓の外、今の部屋は C のまま」:
+
+    - A は置き直しバッチ (consumed_at は最古端、境界キーは最新の message) —
+      窓の包含は境界キー優先 (batch_in_window) なので窓の内。
+    - C は境界キーの無いバッチ (旧バッチ / 境界の読みが失敗した flush) —
+      epoch フォールバック (consumed_at 比較) で anchor より古く、窓の外。
+
+    検知の読み (latest_room_snapshot) が窓を通らないと、C を「前回」に拾って
+    「fresh と同じ = 変化なし」と誤判定し、運搬役判定は窓の中の A を発見して
+    置き直しも起きない — ペルソナに見えているのは古い A のままなのに、差分も
+    置き直しも来ない。読みが窓を通れば「前回」は窓の中の A になり、fresh (C)
+    との変化が積まれて (Chronicle 無効は全文) 見え方が現在に追いつく。
+    """
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        persona_path = Path(self._tmp.name) / "personas" / self.PERSONA_ID
-        persona_path.mkdir(parents=True, exist_ok=True)
-        os.environ["SAIMEMORY_MEMORY"] = "1"
-        self.addCleanup(self._cleanup)
-
-        class _DummyEmbedder:
-            def __init__(self, model=None, **kwargs):
-                self.model_name = model
-
-            def embed(self, texts, **kwargs):
-                return [[0.0] * 3 for _ in texts]
-
-        patcher = patch("saiverse_memory.adapter.Embedder", _DummyEmbedder)
-        self.addCleanup(patcher.stop)
-        patcher.start()
-
-        from saiverse_memory import SAIMemoryAdapter
-        self.adapter = SAIMemoryAdapter(
-            self.PERSONA_ID, persona_dir=persona_path, resource_id=self.PERSONA_ID,
+        super().setUp()
+        from sai_memory.perception_buffer import (
+            batch_in_window,
+            resolve_window_key,
         )
-        self.full_a = _room_text("工房", [("5", "真鍮の定規", "使い込まれた定規。")])
-        self.full_a2 = _room_text("工房", [
-            ("5", "真鍮の定規", "使い込まれた定規。"),
-            ("7", "銅のノギス", "目盛りが細かいノギス。"),
-        ])
 
-    def _cleanup(self):
-        import gc
-        try:
-            self.adapter.close()
-        except Exception:
-            pass
-        gc.collect()
-        os.environ.pop("SAIMEMORY_MEMORY", None)
-        try:
-            self._tmp.cleanup()
-        except PermissionError:
-            pass
+        self.bundle_a = self.env.bundle()
+        # 部屋が A だった時代の全文 — 境界キーなし (epoch 比較で窓の外)。
+        self._push("b1", self.bundle_a, allow_diff=False)
+        self._flush()
+        # anchor (提示窓の起点)。既存バッチは epoch 比較で全部窓の外になる。
+        self.conn.execute("CREATE TABLE messages (id TEXT, created_at INTEGER)")
+        self.conn.execute(
+            "INSERT INTO messages (id, created_at) VALUES (?, ?)",
+            ("anchor-1", 5000),
+        )
+        self.conn.commit()
+        # 検知の自己回復に相当する置き直し — A の全文が窓の内に立つ
+        # (境界キー = 最新の message ≥ anchor)。
+        window_key = resolve_window_key(self.conn, "anchor-1")
+        self.reseat_id = reseat_current_room(
+            self.conn, fresh_bundle=self.bundle_a,
+            in_window=lambda b: batch_in_window(b, window_key),
+        )
+        self.assertIsNotNone(self.reseat_id)
+        self.conn.commit()
+        # 部屋が C に変わり全文 C が積まれる — が、このバッチは境界キーを
+        # 持たない (旧バッチ / 境界の読みが失敗した flush) ので窓の外。
+        self.env.items.append(_make_item(
+            "uuid-new", 14, "picture", "新しい絵", "届いたばかりの絵。",
+            is_open=True, file_path=self.env.pic2_path,
+        ))
+        self.bundle_c = self.env.bundle()
+        self._push("b1", self.bundle_c, allow_diff=False)
+        self.newest_id = self._flush()
 
-    def test_full_cycle_through_the_adapter(self):
-        self.adapter.push_room_state("b1", self.full_a)
-        first = self.adapter.flush_perception_buffer_payload()
-        self.assertIsNotNone(first)
-        self.assertIn("使い込まれた定規。", first["content"])
+    def test_the_change_detection_uses_the_windowed_previous(self):
+        import threading
 
-        self.adapter.push_room_state("b1", self.full_a2)
-        second = self.adapter.flush_perception_buffer_payload()
-        self.assertIsNotNone(second)
-        self.assertIn("銅のノギス", second["content"])
-        self.assertNotIn("使い込まれた定規。", second["content"])
+        from saiverse_memory.adapter import SAIMemoryAdapter
+        from sea.head_pipeline.integration import _detect_room_state_changes
 
-        with self.adapter._db_lock:
-            batches = list_unannexed_batches(self.adapter.conn)
-            self.assertEqual(len(batches), 2)
-            self.assertTrue(all(b.room_state_json for b in batches))
-            mark_batches_annexed(self.adapter.conn, [batches[0].id], "entry-1")
-            self.adapter.conn.commit()
-            survivors = list_unannexed_batches(self.adapter.conn)
+        adapter = SAIMemoryAdapter.__new__(SAIMemoryAdapter)
+        adapter.conn = self.conn
+        adapter._db_lock = threading.RLock()
 
-        self.assertEqual(len(survivors), 1)
-        self.assertEqual(survivors[0].rendered_text, self.full_a2)
+        class Lifecycle:
+            def resolve_metabolism_anchor(
+                self, persona, model_key=None, persist_advance=True,
+            ):
+                return ("anchor-1", "self")
+
+        manager = SimpleNamespace(
+            sea_runtime=SimpleNamespace(session_lifecycle=Lifecycle()),
+        )
+        persona = SimpleNamespace(
+            persona_id="p1", persona_dir=None, model="standard-model",
+            current_building_id="b1", sai_memory=adapter,
+        )
+        with patch(
+            "builtin_data.tools.get_visual_context.build_room_bundle",
+            return_value=self.bundle_c,
+        ), patch(
+            "sea.head_pipeline.integration._room_chronicle_enabled",
+            return_value=False,
+        ):
+            _detect_room_state_changes(persona, manager, "b1")
+
+        room_pending = [
+            it for it in list_pending(self.conn) if it.kind == ROOM_STATE_KIND
+        ]
+        self.assertEqual(
+            len(room_pending), 1,
+            "窓の中の提示は古い A のままなのに、検知が窓の外の最新束 C を"
+            "「前回」に拾って「変化なし」と誤判定した — 検知の読みが提示の"
+            "窓を通っていない",
+        )
+        self.assertEqual(
+            room_pending[0].content, render_room_full(self.bundle_c),
+        )
+        # 追いつきは変化の push (末尾 = 出来事) — 置き直しは増えない。
+        reseated = [
+            b for b in list_presented_batches(self.conn)
+            if b.room_state_json and any(
+                e.get("reseated") for e in json.loads(b.room_state_json)
+            )
+        ]
+        self.assertEqual([b.id for b in reseated], [self.reseat_id])
 
 
 if __name__ == "__main__":

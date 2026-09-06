@@ -56,7 +56,7 @@ class DeskSnapshot:
 
 class DeskSection:
     name = "desk"
-    order = 730  # open_notes(720) の直後、visual_context(800) の前
+    order = 730  # open_notes(720) の直後 (旧 visual_context(800) は退役)
     # refresh_on_events 空 = Metabolism のみ。開閉スペルでは cache を切らない
     # (フェードアウトの実体。core_memory と同じ)。
     refresh_on_events = frozenset()

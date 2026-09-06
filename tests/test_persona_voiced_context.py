@@ -125,14 +125,18 @@ def test_persona_head_sections_are_fixed():
     (人格・コア記憶・生きる目的が落ちていないこと)。章を増やすときはここも
     同じコミットで更新する — 用途ごとに出し分けないこと自体が要件なので、
     集合が一つであることを固定するのがこのテストの主眼。
+
+    visual_context (部屋の描画) は 2026-09-06 に退役 — 部屋の様子の置き場は
+    知覚 (tail) 一つ (docs/intent/room_state_packages.md)。
     """
-    original_twelve = frozenset({
+    fixed_core = frozenset({
         "common_prompt", "persona_self", "core_memory", "building", "spell_list",
         "autonomy_modes", "self_image", "desk", "memopedia_index",
-        "available_playbooks", "memory_weave", "visual_context",
+        "available_playbooks", "memory_weave",
     })
-    assert original_twelve <= PERSONA_HEAD_SECTIONS, "既存の章が落ちている"
-    assert PERSONA_HEAD_SECTIONS == original_twelve | {
+    assert fixed_core <= PERSONA_HEAD_SECTIONS, "既存の章が落ちている"
+    assert "visual_context" not in PERSONA_HEAD_SECTIONS, "退役した部屋の描画が復活している"
+    assert PERSONA_HEAD_SECTIONS == fixed_core | {
         # 2026-07-30: 判断プロンプトが毎回貼り直していた静的な一覧の移設先
         # (docs/issues/judgment_static_lists_to_head.md)。同時に移設された
         # purpose_backlog は 2026-08-21 に節ごと退役した (中身の pickable

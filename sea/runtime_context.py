@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import threading
 from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
@@ -61,13 +62,15 @@ def _reframe_autonomous_messages(messages: List[Dict[str, Any]]) -> List[Dict[st
 PERSONA_HEAD_SECTIONS: frozenset[str] = frozenset({
     "common_prompt", "persona_self", "core_memory", "building", "spell_list",
     "autonomy_modes", "self_image", "desk", "memopedia_index",
-    "available_playbooks", "memory_weave", "visual_context",
+    "available_playbooks", "memory_weave",
     # 2026-07-30: 判断プロンプトが毎回貼り直していた静的な一覧の移設先
     # (docs/issues/judgment_static_lists_to_head.md)。用途で出し分けない —
     # 判断点だけに出すと同じ model の head が二種類になる。
     # (もう一つの移設先だった purpose_backlog は 2026-08-21 に節ごと退役した —
     #  中身の pickable tracks と欲求候補が供給源ごと消えたため)
     "facilities",
+    # 2026-09-06: visual_context (部屋の描画) は head から退役した — 部屋の様子の
+    # 置き場は知覚 (tail) 一つ (docs/intent/room_state_packages.md)。
 })
 
 
@@ -265,15 +268,6 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
     # head の章立ては呼び出し側から選べない (PERSONA_HEAD_SECTIONS の docstring)。
     enabled_sections: set[str] = set(PERSONA_HEAD_SECTIONS)
 
-    # 実際に描画した head が見せている部屋 (out-param で受け取る)。知覚の
-    # 「部屋の様子」の差分をそのまま出すか全文へ開き直すかは、この prompt に
-    # 部屋の全体像が載っているかで決まる — 後段で head を読み直すと、その間に
-    # 走った Metabolism / TTL の撮り直しで別の head を見てしまい、全体像の無い
-    # 差分を送りうる (2026-09-05 Codex 指摘)。この呼び出しの中で確定させた値を
-    # 勘定と提示の両方へ渡す。head を組まない呼び出しは空のまま = 後段が自分で
-    # 読む (従来どおり)。
-    head_room_out: Dict[str, Any] = {}
-
     if enabled_sections:
         from sea.head_pipeline import render_head_messages
         from sea.head_pipeline.types import HeadNotReadyError
@@ -282,7 +276,6 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
                 persona, runtime.manager, building_id,
                 enabled_sections=enabled_sections,
                 model_key=model_key,
-                head_room_out=head_room_out,
             )
             if head_messages:
                 messages.extend(head_messages)
@@ -601,7 +594,6 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
                 recent = _merge_consumed_perceptions(
                     runtime, persona, recent, anchor_id=history_anchor_id,
                     model_key=model_key, advance_cutoff=not preview_only,
-                    head_room_key=_pinned_head_room_key(head_room_out),
                 )
 
                 # Enrich messages with attachment context
@@ -753,33 +745,6 @@ def _chronicle_enabled_for(runtime: Any, persona: Any) -> bool:
         return True
 
 
-def _anchor_order_key_locked(
-    sai_mem: Any, anchor_id: Optional[str],
-) -> Optional[tuple]:
-    """anchor 行の正典順序キー (created_at, rowid)。引けなければ None。
-
-    messages の時系列は (created_at, rowid) の辞書式順が正典 (W8)。epoch だけの
-    比較は anchor と同秒に確定したバッチの直前/直後を区別できない。
-
-    **呼び出し側が ``sai_mem._db_lock`` を保持している前提** — 提示の組成は
-    候補取得から境界前進までを一つのロック区間で完結させるので、ここで錠前を
-    取り直すと (非再入の ``threading.Lock`` を持つ環境で) 自分自身と噛み合う。
-    錠前を取る層は :func:`list_presented_perception_blocks` の一枚だけ。
-    """
-    if not anchor_id:
-        return None
-    try:
-        row = sai_mem.conn.execute(
-            "SELECT created_at, rowid FROM messages WHERE id = ?",
-            (anchor_id,),
-        ).fetchone()
-        if row is None or row[0] is None:
-            return None
-        return (int(row[0]), int(row[1]))
-    except Exception:
-        return None
-
-
 def _perception_block_text(rendered_text: str) -> str:
     """バッチの確定文面を提示ブロックの本文にする (組成の一点)。
 
@@ -848,70 +813,7 @@ def _perception_omission_block(
     }
 
 
-#: 「head の部屋は呼び出し側から渡されていない」ことの印。``None`` は
-#: 「head はどの部屋も見せていない」という**答え**なので、区別が要る。
-_HEAD_ROOM_UNSET = object()
-
-
-def _pinned_head_room_key(head_room_out: Dict[str, Any]) -> Any:
-    """描画済み head の out-param (:func:`render_head_messages`) を部屋のキーにする。
-
-    out-param が空 = この呼び出しは head を組んでいない (組成をスキップした /
-    テストで差し替えられている) ので、判定は後段の読み直しに委ねる
-    (:data:`_HEAD_ROOM_UNSET`)。値が入っていれば、たとえ ``None`` (どの部屋も
-    見せていない) でもそれが答え。
-    """
-    if "building_id" not in head_room_out:
-        return _HEAD_ROOM_UNSET
-    building_id = head_room_out.get("building_id")
-    if not building_id:
-        return None
-    try:
-        from sai_memory.room_state import room_key
-        return room_key(str(building_id))
-    except Exception:
-        LOGGER.warning(
-            "[sea][perception] could not build the head's room key from the "
-            "rendered head; reopening head-based room diffs to their full text",
-            exc_info=True,
-        )
-        return None
-
-
-def _head_room_key(persona: Any, model_key: Optional[str]) -> Optional[str]:
-    """その回の提示先 model の head が今見せている部屋のキー。引けなければ None。
-
-    「部屋の様子」の差分は、台帳に土台が無くても head が同じ部屋を見せていれば
-    head の姿を土台にする (sai_memory/room_state.py)。その差分を提示してよいか
-    は「**この** model の head が今もその部屋を見せているか」で決まる — head は
-    (ペルソナ, model) ごとに別々の時点で capture されるので、台帳には書けない。
-
-    撮り直しはしない読み口 (:func:`sea.head_pipeline.current_head_room`) なので、
-    まだ一度も head を組んでいない Session では None になる。None は「head は
-    その部屋を見せていない」と読まれ、差分は全文へ開き直される — 冗長な全文
-    一枚は無害だが、全体像を失った差分は復元不能 (回復側と同じ倒し方)。
-
-    **これを使うのは head を組まない呼び出しだけ** (勘定・退場計画・読み取り
-    専用の画面)。同じ呼び出しで head を送る prepare_context は
-    :func:`_pinned_head_room_key` で描画済みの値を渡す — 読み直すと、確定と
-    読みの間に走った撮り直しで別の head を見てしまう。
-    """
-    try:
-        from sai_memory.room_state import room_key
-        from sea.head_pipeline import current_head_room
-        building_id, _room_text = current_head_room(persona, model_key=model_key)
-        return room_key(building_id) if building_id else None
-    except Exception:
-        LOGGER.warning(
-            "[sea][perception] could not resolve the head's current room; "
-            "reopening head-based room diffs to their full text", exc_info=True,
-        )
-        return None
-
-
-def _perception_suffix_totals(
-    presented: Sequence[Any], *, head_room_key: Optional[str] = None,
-) -> List[int]:
+def _perception_suffix_totals(presented: Sequence[Any]) -> List[int]:
     """``presented[i:]`` を提示したときの合計字数を ``i`` ごとに並べて返す。
 
     境界を進めると :func:`sai_memory.room_state.restore_room_state_bases` が
@@ -933,20 +835,21 @@ def _perception_suffix_totals(
     ので、落ちたバッチに載っていた部屋だけを繰り上げて差分更新する。全体で
     バッチ数 + エントリ数に比例する手間で済む (2026-09-05 Codex 三巡 #3 —
     以前は境界候補ごとに残り全部を数え直していて、``_db_lock`` を握ったまま
-    二乗時間で回っていた。Codex の材料で 1,000 件 4.1 秒 / 2,000 件 28.7 秒、
-    回帰テストの材料でも 2,000 件 4.8 秒 → 線形化後は同じ材料で 0.05 秒)。
+    二乗時間で回っていた)。
 
-    **head を土台にした差分**は連なりの外なので、``i`` がどこであっても膨らむか
-    どうかは同じ — その回の head が同じ部屋を見せていなければ (``head_room_key``
-    と不一致) 必ず開き直され、見せていれば決して開き直されない。だから部屋ごと
-    の「最初に現れるエントリ」の繰り上げには入れず、``forced`` 側だけで数える。
+    開き直し後の全文の字数は、束 (snapshot) からの導出
+    (:func:`sai_memory.room_state.render_room_full` — 決定論) で数える。
+    旧形式 (文字列 snapshot) のエントリは連なりの外 — 膨らみもせず、部屋ごとの
+    繰り上げにも入れない (旧データの読者を書かない)。
 
     返るのは長さ ``len(presented) + 1`` の list で、末尾は 0 (全部下ろした形)。
     """
     from sai_memory.room_state import (
         batch_room_states,
+        bundle_is_valid,
         chain_is_intact,
-        is_head_based,
+        is_legacy_entry,
+        render_room_full,
     )
 
     count = len(presented)
@@ -964,26 +867,22 @@ def _perception_suffix_totals(
         seen_here: List[str] = []
         for entry in batch_room_states(batch.room_state_json):
             key = str(entry.get("key") or "")
-            if not key:
-                continue
-            head_based = is_head_based(entry)
-            previous = None
-            if not head_based:
-                previous = previous_by_key.get(key)
-                previous_by_key[key] = entry
+            if not key or is_legacy_entry(entry):
+                continue  # 旧形式は連なりの外 (膨らまない・土台にもならない)
+            previous = previous_by_key.get(key)
+            previous_by_key[key] = entry
             block = entry.get("block") or ""
-            snapshot = entry.get("snapshot") or ""
+            snapshot = entry.get("snapshot")
             # 回復側と同じ見送り条件 (差し替えられないものは膨らまない)。
             expandable = bool(
-                entry.get("is_diff") and block and snapshot and block in rendered
+                entry.get("is_diff") and block
+                and bundle_is_valid(snapshot) and block in rendered
             )
             position = len(entry_batch)
             entry_batch.append(index)
-            entry_delta.append(len(snapshot) - len(block) if expandable else 0)
-            if head_based:
-                # 連なりの外: head が同じ部屋を見せているかだけで決まる。
-                entry_forced.append(expandable and key != head_room_key)
-                continue  # 部屋ごとの繰り上げ (key_entries) にも入れない
+            entry_delta.append(
+                len(render_room_full(snapshot)) - len(block) if expandable else 0
+            )
             entry_forced.append(
                 expandable and not chain_is_intact(entry, previous)
             )
@@ -1035,18 +934,107 @@ def _perception_suffix_totals(
     return totals
 
 
-def _presented_chars_after_transfer(
-    presented: Sequence[Any], *, head_room_key: Optional[str] = None,
-) -> int:
+def _room_reseat_projection(
+    presented: Sequence[Any], conn: Optional[Any] = None,
+) -> Tuple[Optional[int], int]:
+    """「最後の運搬役まで下ろしたら置き直しで何字戻るか」の見積もり。
+
+    返るのは ``(last_carrier_index, reseat_cost)``:
+
+    - ``last_carrier_index`` — 今いる部屋を運ぶ最後のバッチの位置。境界が
+      ここ以上まで進む計画は、置き直し
+      (:func:`sai_memory.room_state.reseat_current_room`) の全文一枚が提示へ
+      戻ることを織り込む。部屋のエントリが一枚も無ければ ``(None, 0)``。
+    - ``reseat_cost`` — その全文ブロックの提示字数 (束からの導出 + ``<system>``
+      包み)。
+
+    **現在地の解決は実物と同じ一本**
+    (:func:`sai_memory.room_state.find_current_room_key` — 台帳の最新の部屋の
+    記録、pending 優先)。提示列の最新エントリから推定すると、移動直後の形
+    (旧部屋の提示列 + 新部屋の pending) で旧部屋を現在地と誤認し、実処理では
+    起きない置き直しのコストを残量に足して境界が必要以上に進む — 下ろしは
+    一方向で取り消せないので、まだ提示できた履歴まで下りる (2026-09-06
+    二巡目修正 3)。``conn`` の無い呼び出し (直接のテスト経路) だけ、従来の
+    提示列の最新エントリによる近似に落ちる。
+
+    実物の置き直しは同部屋の pending (未消費) があれば発火しない
+    (:func:`sai_memory.room_state.pending_has_room` の門 — 次の消費がその部屋を
+    運ぶ)。見積もりにも同じ門を付ける: 現在地のキーの pending があれば
+    ``(None, 0)`` — 起きない置き直しを残量に足すと、境界が必要より進む
+    (測る列と送る列の一致が破れる)。
+
+    **材料の判定も実物と同じ止まり方**
+    (:func:`sai_memory.room_state.first_room_bundle` — 同部屋の最初の一致で
+    確定し、それが旧形式・不正束なら材料なし = ``(None, 0)``)。実物の材料探し
+    (room_state._latest_room_bundle) は最新の同部屋記録が旧形式なら置き直しを
+    発火しない (五巡目修正 1) — 見積もりだけが旧形式を飛ばして古い構造化束の
+    コストを加算すると、起きない置き直しのぶん境界が必要以上に進み、まだ
+    提示できた履歴を不可逆に下ろす (2026-09-06 六巡目修正)。
+
+    置き直しの実体は台帳全体 (pending・下りたバッチ込み) から最新の束を選ぶが、
+    コストの材料 (最新の束) はここでは提示列だけからの近似 — 台帳の最新と違う
+    回は一拍ずれるだけで、次の呼び出しが追いつく。
+
+    現在地・pending の読み (find_current_room_key / pending_has_room) は失敗を
+    例外で伝える (2026-09-06 四巡目修正 1) — 受け手は組成の外側の fail-open
+    (list_presented_perception_blocks の except: 知覚ぶん 0 へ縮退)。
+    """
+    from sai_memory.room_state import (
+        batch_room_states,
+        find_current_room_key,
+        first_room_bundle,
+        pending_has_room,
+        render_room_full,
+    )
+
+    current_key: Optional[str] = None
+    if conn is not None:
+        current_key = find_current_room_key(conn)
+        if not current_key:
+            return (None, 0)  # 台帳に部屋の記録が無い — 置き直しは起きない
+        if pending_has_room(conn, current_key):
+            return (None, 0)  # pending が運ぶ — 置き直しは発火しない
+    else:
+        # conn の無い呼び出し (直接のテスト経路) だけの近似: 実物の現在地解決
+        # (find_current_room_key — 最新の記録のキー。旧形式も数える) と同じ
+        # 規則を提示列で辿る (pending の門は掛けられない)。
+        for index in range(len(presented) - 1, -1, -1):
+            for entry in reversed(
+                batch_room_states(presented[index].room_state_json)
+            ):
+                if entry.get("key"):
+                    current_key = str(entry["key"])
+                    break
+            if current_key:
+                break
+        if not current_key:
+            return (None, 0)  # 提示列に部屋のエントリが無い
+    for index in range(len(presented) - 1, -1, -1):
+        matched, bundle = first_room_bundle(
+            reversed(batch_room_states(presented[index].room_state_json)),
+            current_key,
+        )
+        if not matched:
+            continue
+        if bundle is None:
+            return (None, 0)  # 最新の同部屋記録が旧形式・不正束 — 材料なし
+        return (
+            index,
+            len(_perception_block_text(render_room_full(bundle))),
+        )
+    return (None, 0)
+
+
+def _presented_chars_after_transfer(presented: Sequence[Any]) -> int:
     """この並びを提示したときの合計字数 (部屋の様子の開き直しを織り込んだ値)。"""
     if not presented:
         return 0
-    return _perception_suffix_totals(presented, head_room_key=head_room_key)[0]
+    return _perception_suffix_totals(presented)[0]
 
 
 def _plan_perception_drop(
     persona: Any, presented: Sequence[Any], cutoff: int,
-    *, model_key: Optional[str] = None, head_room_key: Optional[str] = None,
+    *, model_key: Optional[str] = None,
     advance: bool = True,
 ) -> int:
     """知覚の合計が上の水位を超えていたら、下の水位まで下ろした境界を返す。
@@ -1080,26 +1068,67 @@ def _plan_perception_drop(
     下ろした直後に上の水位を超えたままになり、新着が無いのに次の呼び出しで
     境界がまた進む。
 
+    **部屋の様子の置き直し (room_state_packages.md §6-4) も同じ理由で織り込む**:
+    今いる部屋の最後の運搬役を越えて下ろす境界は、境界前進と同一 tx の置き直し
+    が全文一枚を提示へ戻すので、そのぶん (:func:`_room_reseat_projection`) を
+    残量に足して数える。実物と同じ門も持つ — 同部屋の pending (未消費) が
+    あれば置き直しは発火しないので足さない。既にある置き直しバッチは下ろし
+    候補から外す (walk 内のコメント参照)。
+
     Returns: 新しい境界 (下ろすものが無ければ ``cutoff`` のまま)。
     """
     if not presented:
         return cutoff
+    from sai_memory.room_state import batch_is_room_reseat
+
     model = str(model_key or getattr(persona, "model", "") or "")
     target, high = resolve_perception_watermarks(model)
     if high is None:
         return cutoff  # モデル単位のオプトアウト (下ろしを持たない)
-    totals = _perception_suffix_totals(presented, head_room_key=head_room_key)
+    totals = _perception_suffix_totals(presented)
+    last_carrier_index, reseat_cost = _room_reseat_projection(
+        presented, getattr(getattr(persona, "sai_memory", None), "conn", None),
+    )
+    if last_carrier_index is not None and batch_is_room_reseat(
+        presented[last_carrier_index].room_state_json,
+    ):
+        # 最後の運搬役が既に機構の置き直しなら、二重に数えない — 下の walk は
+        # それを下ろさず (skip)、字数は retained として running に残り続ける。
+        # 境界がその id を跨いで下ろす回 (より新しい id のバッチを下ろす) は
+        # 置き直しバッチ自身も提示から外れて hook が新しい置き直しを作るが、
+        # retained がそのまま新しい全文一枚の勘定として立つので、ここで
+        # reseat_cost を足すと一枚を二重に数える
+        # (tests/test_perception_presentation_cap.py の
+        # PerceptionCapReseatCrossingTest がこの釣り合いを固定する)。
+        last_carrier_index, reseat_cost = None, 0
     running = totals[0]
     if running <= high:
         return cutoff
     new_cutoff = cutoff
     dropped = 0
+    retained = 0
     for index in range(len(presented) - 1):
         if running <= target:
             break
+        if batch_is_room_reseat(presented[index].room_state_json):
+            # 機構の置き直し (部屋の全文の再配置) は下ろし候補に入れない。
+            # 置き直しは提示の最古端に立つため consumed_at が古く id が新しい —
+            # その id を境界に取ると、より新しい consumed_at のバッチまで
+            # まとめて巻き添えになる (境界は id 一本)。残す分の字数 (retained)
+            # は合計に載せたまま進める。
+            retained += totals[index] - totals[index + 1]
+            continue
         new_cutoff = max(new_cutoff, presented[index].id)
         dropped += 1
-        running = totals[index + 1]
+        running = totals[index + 1] + retained
+        if last_carrier_index is not None and index >= last_carrier_index:
+            # 今いる部屋の最後の運搬役までこの境界で下りる — その瞬間、境界の
+            # 前進と同じ tx が最新の全文を提示の最古端へ置き直す
+            # (room_state_packages.md §6-4)。置き直しの全文もそのまま提示に
+            # 残るので、ここで数えておかないと「下ろした直後にまた上の水位を
+            # 超える → 新着が無いのに次の呼び出しで境界がまた進む」形が戻る
+            # (下ろす量は移管後の字数で見積もる、と同じ理由)。
+            running += reseat_cost
     persona_id = str(getattr(persona, "persona_id", "?"))
     if running > high:
         warn_key = (persona_id, model)
@@ -1139,7 +1168,6 @@ def list_presented_perception_blocks(
     raise_on_error: bool = False,
     model_key: Optional[str] = None,
     advance_cutoff: bool = True,
-    head_room_key: Any = _HEAD_ROOM_UNSET,
 ) -> List[Dict[str, Any]]:
     """いま提示に差し込まれる知覚ブロックを組む (組成規則の一点管理)。
 
@@ -1178,24 +1206,19 @@ def list_presented_perception_blocks(
       無効へ切り替えると、有効な間に積んだ差分が土台なしで提示に残る
       (2026-09-05 四巡目 #1)。開き直しは純関数で、同じ並びからは必ず同じ文面に
       なるので、提示が呼び出しごとに揺れることはない。台帳も確定文面も触らない。
-    - **head を土台にした「部屋の様子」の差分も、head が別の部屋を見せていたら
-      提示時に全文へ開き直す**。台帳に土台が無くても head がその部屋を見せて
-      いれば差分だけを積む (`room_state.build_room_state_push`) が、head は
-      (ペルソナ, model) ごとに別々の時点で capture されるので、「その差分の
-      部屋の全体像が今この Session に見えているか」は台帳へ書けない。判定に使う
-      head は ``head_room_key`` で受け取る — 同じ prompt へ head を載せる
-      呼び出し (prepare_context) は**実際に描画した head** の部屋を渡し、head を
-      組まない呼び出し (勘定・退場計画・読み取り専用の画面) は省略して
-      `_head_room_key` の読み直しに委ねる。どちらの値も、下ろし量の見積もり
-      (`_plan_perception_drop`) と開き直しの**両方**へ同じものを渡す — 勘定と
-      実送信が別の head を見ると、開き直しで膨らむ量が勘定から漏れる。
+      開き直した全文には束のメディアも添える (「絵がある」と読める全文に絵が
+      付く — room_state_packages.md §5)。
     - ``advance_cutoff=False`` は**測るだけ**のモード: 下ろし境界を進める判定は
       同じように行い、進めた**つもり**の提示を返すが、``perception_presentation``
       へは書かない。読み取り専用の画面 (context-status)・仮定の窓の下見
       (読み戻し / 引き戻しのプレビュー)・コンテキストプレビューがこちらを使う —
       境界は一方向で取り消せないので、実際には送らない列で確定させない
-      (2026-09-05 四巡目 #6)。返るブロックは進めるモードと同一 (上の開き直しが
-      台帳側の回復と同じ結果を与える) なので、勘定と実送信はズレない。
+      (2026-09-05 四巡目 #6)。返るブロックは進めるモードと同一 — 開き直しは
+      台帳側の回復と同じ結果を与え、境界の前進が部屋の置き直し
+      (room_state_packages.md §6-4) を連れてくる回は、その全文を下見
+      (:func:`sai_memory.room_state.reseat_current_room` の ``dry_run``) で
+      幻のブロックとして最古端に合成する (発火判定・内容は実 INSERT と同一
+      ロジックの一本を通す) — ので、勘定と実送信はズレない。
     - 失敗は空リスト + WARN に倒す — 送る側は「マージなし (元の履歴のまま)」、
       測る側は「知覚ぶん 0 (従来値)」へ縮退する。履歴ゼロで走らせるよりも
       知覚欠けの方が被害が小さい。``raise_on_error=True`` は失敗を例外で
@@ -1208,20 +1231,50 @@ def list_presented_perception_blocks(
         return []
     try:
         from sai_memory.perception_buffer import (
+            PerceptionBatch,
             advance_presentation_cutoff,
             count_batch_records,
             get_presentation_cutoff,
+            latest_message_boundary,
             list_unannexed_batches,
         )
-        from sai_memory.room_state import reopen_lost_bases
+        from sai_memory.perception_buffer import batch_in_window, resolve_window_key
+        from sai_memory.room_state import reopen_lost_bases, reseat_current_room
         chronicle_enabled = _chronicle_enabled_for(runtime, persona)
-        # 「head がどの部屋を見せているか」は錠前の外で一度だけ確定させる
-        # (head の読み口は知覚台帳を触らない)。下ろし量の見積もりと開き直しの
-        # 両方が**同じ値**を見るように、ここから両方へ渡す。
-        head_room = (
-            _head_room_key(persona, model_key)
-            if head_room_key is _HEAD_ROOM_UNSET else head_room_key
-        )
+
+        def _window_predicate_locked() -> Optional[Callable[[Any], bool]]:
+            """このペルソナの提示窓の篩 (None = 窓なし・全部見える)。
+
+            候補の一覧 (:func:`_visible_candidates_locked`) と、測るだけの回に
+            合成する置き直しの幻のブロックが**同じ規則**で可視性を判定する
+            ための一点 — 実 INSERT された置き直しバッチも読み直しでこの篩を
+            通るので、幻だけ別の規則で通すと測る列と送る列が割れる。
+
+            起点キーの解決 (anchor 行 → 引けなければ recent の最古 epoch の床)
+            は :func:`sai_memory.perception_buffer.resolve_window_key` の一枚 —
+            検知の読みと自己回復 (adapter.latest_room_snapshot /
+            reseat_room_state) と同じ関数を通る。包含も :func:`batch_in_window` の一枚なので、床への
+            フォールバック時も境界キー優先で判定される — 置き直しバッチ
+            (consumed_at は最古端・境界キーは最新の message) が床の窓でも
+            見える側に立つのはこの規則による (consumed_at の素比較だと、置き
+            直した先から床の外に落ちて提示と検知が逆向きに割れる)。
+
+            **呼び出し側が ``sai_mem._db_lock`` を保持している前提** (錠前を
+            取る層は :func:`list_presented_perception_blocks` の一枚だけ)。
+            """
+            if chronicle_enabled:
+                return None
+            oldest: Optional[int] = None
+            for msg in recent:
+                epoch = _payload_epoch(msg)
+                if epoch is not None:
+                    oldest = epoch if oldest is None else min(oldest, epoch)
+            window_key = resolve_window_key(
+                sai_mem.conn, anchor_id, floor_epoch=oldest,
+            )
+            if window_key is None:
+                return None
+            return lambda b: batch_in_window(b, window_key)
 
         def _visible_candidates_locked() -> List[Any]:
             """このペルソナに見える余地のある未付記バッチ (窓絞りまで)。
@@ -1233,35 +1286,12 @@ def list_presented_perception_blocks(
             取る層は下の一枚だけ)。
             """
             found = list_unannexed_batches(sai_mem.conn)
-            if not found or chronicle_enabled:
+            if not found:
                 return found
-            anchor_key = _anchor_order_key_locked(sai_mem, anchor_id)
-            if anchor_key is not None:
-                # 提示窓と同じ包含規則: 窓は正典順序キー (created_at, rowid) が
-                # anchor 以上の行。バッチは確定時点の境界キー (最後に保存済み
-                # だった行のキー) で同じ比較をする — anchor と同秒でも
-                # 「anchor 行より前に確定したバッチ」だけが窓の外になる。
-                # 境界キーの無い旧バッチは consumed_at の epoch 比較へ
-                # フォールバック。
-                def _in_window(b: Any) -> bool:
-                    if (
-                        b.boundary_created_at is not None
-                        and b.boundary_rowid is not None
-                    ):
-                        return (
-                            (b.boundary_created_at, b.boundary_rowid)
-                            >= anchor_key
-                        )
-                    return b.consumed_at >= anchor_key[0]
-                return [b for b in found if _in_window(b)]
-            oldest: Optional[int] = None
-            for msg in recent:
-                epoch = _payload_epoch(msg)
-                if epoch is not None:
-                    oldest = epoch if oldest is None else min(oldest, epoch)
-            if oldest is None:
+            predicate = _window_predicate_locked()
+            if predicate is None:
                 return found
-            return [b for b in found if b.consumed_at >= oldest]
+            return [b for b in found if predicate(b)]
 
         # 候補・境界・下ろし計画・前進・移管後の読み直し・省略件数の数え上げは
         # **一つのロック区間**で完結させる (2026-09-05 Codex 第二巡 high)。
@@ -1281,9 +1311,9 @@ def list_presented_perception_blocks(
                 [b for b in candidates if b.id > dropped_through],
                 dropped_through,
                 model_key=model_key,
-                head_room_key=head_room,
                 advance=advance_cutoff,
             )
+            reseat_preview: Optional[Tuple[str, List[Dict[str, Any]], int]] = None
             if planned > dropped_through and not advance_cutoff:
                 # 測るだけのモード: 進める判定はここまで同じで、書き込みだけを
                 # しない。境界は一方向で取り消せないので、実際には送らない列
@@ -1291,13 +1321,38 @@ def list_presented_perception_blocks(
                 # 「進めたつもり」の境界で振り分ける — 実送信の側が同じ判定で
                 # 同じ境界へ進めるので、勘定と実送信は一致する。
                 dropped_through = planned
+                # 実送信ならこの前進と同一 tx の hook (reseat_current_room →
+                # room_state_packages.md §6-4) が「今いる部屋の全文」を提示の
+                # 最古端に積む。測るだけの回は境界を書かないので hook が走ら
+                # ない — 下見 (dry_run) で同じ判定・同じ内容を求め、下の組成で
+                # 幻のブロックとして合成する。合成しないと測る列だけが全文
+                # 一枚ぶん小さくなる (測る列と送る列の同一性の破れ)。判定は
+                # 境界を進めた**後**の可視性なので、進めたつもりの境界を
+                # assume_cutoff で仮定させる。「運搬役が生きているか」の走査
+                # には、この組成が使っているのと同じ窓の篩を渡す — Chronicle
+                # 無効の窓の外に居る運搬役はこの列に出ないので、生きていると
+                # 数えると下見だけが発火せず、実 INSERT 側 (検知の自己回復 —
+                # 同じ篩で発火する) と割れる (2026-09-06 二巡目修正 1)。
+                reseat_preview = reseat_current_room(
+                    sai_mem.conn, dry_run=True, assume_cutoff=planned,
+                    in_window=_window_predicate_locked(),
+                )
             elif planned > dropped_through:
                 try:
                     # 戻り値 = 進めた後の実境界。別プロセスが先へ進めていたら
                     # planned より大きい値が返る (advance は一方向で no-op) —
                     # planned を信じると「もう下ろされたバッチ」を一回だけ
                     # 提示に復活させる (2026-09-05 ローカルレビュー #1)。
-                    planned = advance_presentation_cutoff(sai_mem.conn, planned)
+                    # 同一 tx の hook (reseat_current_room) の運搬役判定には、
+                    # この組成と同じ窓の篩を渡す — 渡さないと、窓の外に立つ
+                    # 古い同部屋束が運搬役に数えられて置き直しが抑止され、
+                    # 境界だけが確定してこのペルソナの提示から部屋の全文が
+                    # 消える。測るだけの下見 (上の dry_run)・検知の自己回復と
+                    # 同じ篩 — 判定の規則は一枚 (2026-09-06 九巡目修正 1)。
+                    planned = advance_presentation_cutoff(
+                        sai_mem.conn, planned,
+                        in_window=_window_predicate_locked(),
+                    )
                     sai_mem.conn.commit()
                 except Exception:
                     try:
@@ -1321,6 +1376,41 @@ def list_presented_perception_blocks(
 
             presented = [b for b in candidates if b.id > dropped_through]
             dropped = [b for b in candidates if b.id <= dropped_through]
+            if reseat_preview is not None:
+                # 幻のブロック: 実送信で hook が積むはずの置き直しバッチと同じ
+                # 形 (本文・メディア・時刻・境界キー) を、実 INSERT せずに提示
+                # 列の最古端へ立てる。consumed_at は下見が「残る提示のどれより
+                # も古い時刻」に決めているので先頭 (印の位置の抑えも実物と同じ
+                # 値で効く)。id はまだ無い (実体化していない) ので None —
+                # 下の組成が __perception_batch_id__ を載せない。
+                # room_state_json は持たせない: 置き直しが発火する回は同部屋の
+                # 運搬役が提示に残っていない (発火条件そのもの) ので、連なりの
+                # 開き直し (reopen_lost_bases) に参加しなくても結果は実物と
+                # 同じ。可視性は実物と同じ篩 (窓の述語) を通す。
+                preview_text, preview_media, preview_consumed_at = reseat_preview
+                # strict にしない: 幻は INSERT されないので、キーなしで窓から
+                # 落ちても測る列が一枚小さくなるだけ — 実物の重複 (置き直しの
+                # strict の理由、五巡目修正 3) は起きない。
+                boundary_created_at, boundary_rowid = latest_message_boundary(
+                    sai_mem.conn,
+                )
+                phantom = PerceptionBatch(
+                    id=None,  # type: ignore[arg-type] — 実 INSERT 前の下見
+                    consumed_at=preview_consumed_at,
+                    pulse_id=None,
+                    episode_id=None,
+                    rendered_text=preview_text,
+                    media=(
+                        json.dumps(preview_media, ensure_ascii=False)
+                        if preview_media else None
+                    ),
+                    annexed_entry_id=None,
+                    boundary_created_at=boundary_created_at,
+                    boundary_rowid=boundary_rowid,
+                )
+                predicate = _window_predicate_locked()
+                if predicate is None or predicate(phantom):
+                    presented.insert(0, phantom)
             # 省略の印に出す件数は**記録の数**であってバッチ数ではない。台帳を
             # 読むので、候補・境界と同じロック区間・同じ世代で数える。
             record_counts = (
@@ -1331,7 +1421,8 @@ def list_presented_perception_blocks(
         # 窓絞り (Chronicle 無効) と「測るだけ」の境界は台帳へ書けないので、
         # そこで土台が抜けた差分はここで全文へ開き直す (純関数・決定論)。
         # Chronicle 有効で境界も進めた回は、台帳側の回復が済んでいるので空。
-        reopened = reopen_lost_bases(presented, head_room_key=head_room)
+        # 値は (開き直し後の文面, 添え直すメディア)。
+        reopened = reopen_lost_bases(presented)
 
         blocks: List[Dict[str, Any]] = []
         if dropped:
@@ -1350,16 +1441,31 @@ def list_presented_perception_blocks(
                 # 旧 flush の event_message 行と同型のタグ + マージ由来の目印。
                 "tags": ["internal", "event_message", "perception"],
                 CONSUMED_PERCEPTION_KEY: True,
-                "__perception_batch_id__": batch.id,
             }
+            if batch.id is not None:
+                # 幻のブロック (測るだけの回の置き直しの下見) は実体化前で
+                # id を持たない — キーごと載せない。読者は .get() で読む
+                # (書き手はここ一枚、他の読み手は本目印を前提にしていない)。
+                metadata["__perception_batch_id__"] = batch.id
             media = batch.media_list()
+            content_text = batch.rendered_text
+            if batch.id in reopened:
+                content_text, extra_media = reopened[batch.id]
+                # 開き直しで全文に戻したパッケージのメディアを添え直す
+                # (path で重複排除 — 土台と一緒に付いていた絵は二重にしない)。
+                seen_paths = {
+                    m.get("path") for m in media if isinstance(m, dict)
+                }
+                for m in extra_media:
+                    if m.get("path") in seen_paths:
+                        continue
+                    seen_paths.add(m.get("path"))
+                    media.append(dict(m))
             if media:
                 metadata["media"] = media
             blocks.append({
                 "role": "user",
-                "content": _perception_block_text(
-                    reopened.get(batch.id, batch.rendered_text)
-                ),
+                "content": _perception_block_text(content_text),
                 "created_at": batch.consumed_at,
                 "metadata": metadata,
             })
@@ -1405,7 +1511,6 @@ def _merge_consumed_perceptions(
     anchor_id: Optional[str] = None,
     model_key: Optional[str] = None,
     advance_cutoff: bool = True,
-    head_room_key: Any = _HEAD_ROOM_UNSET,
 ) -> List[Dict[str, Any]]:
     """提示履歴に未付記の消費バッチを時刻順マージする (W14, §10.3)。
 
@@ -1417,13 +1522,10 @@ def _merge_consumed_perceptions(
     ``advance_cutoff=False`` は測るだけ (下ろし境界を書かない) — 組み立てが
     プレビュー (``preview_only``) の回に使う。プレビューの列は送られないので、
     一方向にしか進まない境界をそこで確定させない。返るブロックは同じ。
-
-    ``head_room_key`` は同じ prompt へ載せる head が見せている部屋のキー
-    (:func:`_pinned_head_room_key`)。省略すると組成側が自分で読み直す。
     """
     blocks = list_presented_perception_blocks(
         runtime, persona, recent, anchor_id=anchor_id, model_key=model_key,
-        advance_cutoff=advance_cutoff, head_room_key=head_room_key,
+        advance_cutoff=advance_cutoff,
     )
     if not blocks:
         return recent

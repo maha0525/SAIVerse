@@ -26,7 +26,7 @@ import logging
 import sqlite3
 import time
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Sequence
+from typing import Callable, Dict, List, Optional, Sequence, Union
 
 LOGGER = logging.getLogger(__name__)
 
@@ -527,6 +527,275 @@ def create_consumption_batch(
     return batch_id
 
 
+def latest_message_boundary(
+    conn: sqlite3.Connection, *, strict: bool = False,
+) -> tuple:
+    """バッチ確定時点で最後に保存済みの message の正典順序キー ``(created_at, rowid)``。
+
+    message がまだ無ければ ``(None, None)`` — その行は epoch 比較へフォール
+    バックする。通常の flush (saiverse_memory/adapter.py) と機構の置き直し
+    (:func:`insert_presentation_batch` の呼び出し側) が同じ規則で境界キーを
+    記帳するための一点。
+
+    ``strict=True`` は**読みの失敗** (テーブル不在以外の OperationalError —
+    ロック等) を例外のまま伝える — 「message がまだ無い」という正当な
+    ``(None, None)`` に化かさない (2026-09-06 五巡目修正 3)。使い手は置き直し
+    (:func:`sai_memory.room_state.reseat_current_room`): 置き直しバッチの
+    ``consumed_at`` は意図的に最古なので、キーなしで積むと窓判定
+    (:func:`batch_in_window`) の epoch フォールバックで窓の外に立ち、次の
+    検知が「運搬役が見えない」と判定してまた置き直す — 単発の読み取り失敗が
+    全文バッチの重複を生む。通常の flush は ``strict=False`` のまま — 新規
+    バッチの ``consumed_at`` は現在時刻 (提示の末尾) なので、キーなしの epoch
+    フォールバックが実害の形にならない。
+    """
+    try:
+        row = conn.execute(
+            "SELECT created_at, rowid FROM messages "
+            "ORDER BY created_at DESC, rowid DESC LIMIT 1"
+        ).fetchone()
+        if row is not None and row[0] is not None:
+            return (int(row[0]), int(row[1]))
+    except sqlite3.OperationalError as exc:
+        if strict:
+            from sai_memory.arasuji.storage import is_missing_table_error
+            if not is_missing_table_error(exc):
+                raise
+        # messages テーブルの無い DB (単体テスト等) は「message がまだ無い」
+        # と同じ縮退 — strict でも (None, None) でよい (窓の材料も存在しない)。
+    return (None, None)
+
+
+def batch_in_window(batch: PerceptionBatch, anchor_key: Optional[tuple]) -> bool:
+    """Chronicle 無効ペルソナの提示窓 (anchor) にこのバッチが入るか。
+
+    窓は正典順序キー ``(created_at, rowid)`` が anchor 以上の行。バッチは確定
+    時点の境界キー (最後に保存済みだった行のキー) で同じ比較をする — anchor と
+    同秒でも「anchor 行より前に確定したバッチ」だけが窓の外になる。境界キーの
+    無い旧バッチは ``consumed_at`` の epoch 比較へフォールバック。
+    ``anchor_key`` が None (窓なし) なら常に True。
+
+    提示の組成 (sea/runtime_context.list_presented_perception_blocks) と、
+    検知の瞬間の自己回復判定 (sea/head_pipeline/integration.py) が同じ規則を
+    共有するための一点 — 二枚書くと窓の解釈がずれる。
+    """
+    if anchor_key is None:
+        return True
+    if batch.boundary_created_at is not None and batch.boundary_rowid is not None:
+        return (batch.boundary_created_at, batch.boundary_rowid) >= anchor_key
+    return batch.consumed_at >= anchor_key[0]
+
+
+class WindowResolutionError(RuntimeError):
+    """提示窓の解決に失敗した — 「窓なし」と区別する三値の「判定不能」。
+
+    :func:`resolve_window_key` は三値を返す/送出する: 窓キー (tuple) / 窓なし
+    (None — 正当) / 解決失敗 (この例外)。失敗を None に畳むと「窓なし = 全件
+    可視」になり、検知が床で隠れた運搬役を「見えている」と誤判定して自己回復を
+    抑止する — 「検知は見えない側にしか倒れない」契約の破れ (2026-09-06 四巡目
+    修正 2)。逆に「全部見えない」へ倒すと、置き直しで作った新しいバッチまで
+    見えない扱いになり、失敗が続く限り毎検知で置き直しが積もる。受け手
+    (saiverse_memory/adapter.latest_room_snapshot → sea/head_pipeline/
+    integration の検知) はその回の部屋の判定そのものを見送り、WARN を出して
+    次の検知でやり直す。提示側は床を ``floor_epoch`` (純計算) で渡すので、
+    この例外を出さない — 提示の挙動は変わらない。
+    """
+
+
+def resolve_window_key(
+    conn: sqlite3.Connection,
+    anchor_id: Optional[str],
+    *,
+    floor_epoch: Optional[int] = None,
+    floor_chars: Union[int, Callable[[], int], None] = None,
+) -> Optional[tuple]:
+    """提示窓の起点キーの解決の一枚: anchor 行 → 引けなければ床。None = 窓なし。
+
+    提示の組成 (sea/runtime_context._window_predicate_locked) と検知の読み・
+    自己回復 (saiverse_memory/adapter の latest_room_snapshot /
+    reseat_room_state) は
+    **必ずこの関数でキーを解決し**、包含は :func:`batch_in_window` で判定する。
+    解決の規則を二枚書くと、anchor が読めない劣化時に「提示では部屋が窓の外
+    なのに検知は見えている扱い」の形で両側が割れる (2026-09-06 三巡目 #1)。
+
+    返りは三値: 窓キー (tuple) / 窓なし (None — anchor も床の材料も正当に
+    無い)。床 (``floor_chars``) の**読みが失敗**した回と、床の近似そのものが
+    成立しない回 (:func:`_window_floor_key` の「判定不能」— 履歴は有るのに
+    正典キーを作れる行が無い) は :class:`WindowResolutionError` を送出する —
+    「読めなかった・判定できなかった」を「窓なし」に化かさない (2026-09-06
+    四巡目修正 2)。
+
+    解決の順序:
+
+    1. ``anchor_id`` の messages 行が読めれば、その正典順序キー
+       ``(created_at, rowid)``。
+    2. 読めなければ床 (窓の近似) へフォールバック。床は呼び出し側の手元に
+       ある材料で渡す:
+
+       - ``floor_epoch`` — 提示側: recent (提示中の生ログ) の最古行の epoch。
+         擬似キー ``(floor_epoch, 0)`` になる (rowid 0 はどの実行より小さい
+         ので、同秒は見える側に倒れる)。
+       - ``floor_chars`` — 検知側 (recent を持たない): messages の末尾
+         ``floor_chars`` 文字ぶんに入る最古行のキー。提示の最小ロード
+         (sea/runtime_context._minimal_load_chars) と同じ予算を渡すことで
+         「anchor が死んだときに提示が実際に読む窓」を近似する。フィルタ
+         (line_role / thread) をかけない全行の勘定なので、窓は提示側の床
+         **以上** (= 見えない側) に倒れる — 検知が余分に発火しても全文一枚で
+         済むが、逆向き (検知だけ見えている扱い) は自己回復を殺す。
+         **予算は int のほか、呼ぶと int を返す遅延の口 (callable) でも渡せる**
+         — 床の読みはこの床の枝に入った回だけ行う (2026-09-06 五巡目修正 2:
+         呼び出し側で先に解決すると、床の一時失敗が正当な anchor で判定できる
+         回まで「窓の解決失敗」に巻き込む)。
+
+    3. どの材料も無ければ None (= 窓なし・全部見える)。両側とも同じ None に
+       落ちるので、完全ブートストラップ (anchor も履歴も無い) の全提示は
+       これまでどおり両側で一致する。
+    """
+    if anchor_id:
+        try:
+            row = conn.execute(
+                "SELECT created_at, rowid FROM messages WHERE id = ?",
+                (str(anchor_id),),
+            ).fetchone()
+            if row is not None and row[0] is not None:
+                return (int(row[0]), int(row[1]))
+        except Exception:
+            pass  # 読めない = 「行なし」と同じ扱いで床へ (旧二枚と同じ寛さ)
+    if floor_epoch is not None:
+        return (int(floor_epoch), 0)
+    if floor_chars is not None:
+        if callable(floor_chars):
+            # 床の予算の遅延解決 (2026-09-06 五巡目修正 2) — 床は「anchor の
+            # 行が読めないときの代替」の材料なので、読みはこの枝に入った回
+            # だけ行う。口の失敗は WindowResolutionError のまま伝播する
+            # (三値の意味は変わらない)。
+            floor_chars = floor_chars()
+        return _window_floor_key(conn, int(floor_chars))
+    return None
+
+
+def _window_floor_key(
+    conn: sqlite3.Connection, floor_chars: int,
+) -> Optional[tuple]:
+    """messages の末尾 ``floor_chars`` 文字ぶんに入る最古行の正典順序キー。
+
+    :func:`resolve_window_key` の検知側フォールバック専用。候補 (正典キー
+    ``(created_at, rowid)`` を作れる行) を新しい側から ``LENGTH(content)``
+    で積み、予算を超える行の手前で止める — 提示の文字勘定
+    (adapter.recent_persona_messages: ``len(content)`` を積んで超えたら
+    打ち切り) と同じ規則。
+
+    返りは四状態 (2026-09-06 十三巡目 — 十二巡目の三状態に「判定不能」を
+    足して契約を言い切った):
+
+    - **通常**: 予算内に収まる最古の候補行のキー。
+    - **一行窓**: 予算に収まる行が一つも無い — 最新の一行だけで予算を
+      超える・予算が 0 以下・空内容の並びで勘定が進まない、すべて —
+      なら**最新の候補行そのもの**が床 (最新一行だけの保守的な窓)。
+      None (= 窓なし・全件可視) に畳むと、巨大な最新メッセージがあるだけで
+      検知が床の外の古い運搬役を「見えている」と誤認して自己回復を抑止する
+      (「検知は見えない側にしか倒れない」契約の破れ — 四巡目修正 2 と同じ
+      契約)。狭い窓に倒しても置き直しはループしない — 置き直しバッチの
+      境界キーは最新の message なので ``>=`` の包含で窓の内に立つ。
+    - **窓なし** (messages に行が無い): None — 正当な全件可視。
+    - **判定不能**: 履歴は有るのに候補が一つも無い (created_at が全行
+      NULL — スキーマは NULL を許す) は :class:`WindowResolutionError`。
+      None に畳むと「履歴が有るのに全件可視」へ反転し (上と同じ契約の
+      破れ)、最古の広い窓に倒しても向きが逆 — 正典キーの秩序が壊れた DB は
+      近似そのものが成立しないので、受け手 (検知) がその回の判定を WARN で
+      見送る (四巡目修正 2 の三値と同じ向き)。
+
+    **読みの失敗も** :class:`WindowResolutionError` — None (= 床なし =
+    窓なし・全件可視) に畳むと、床が要る劣化の回に検知だけ「全部見える」へ
+    倒れて自己回復を抑止する (2026-09-06 四巡目修正 2)。
+    """
+    floor: Optional[tuple] = None
+    newest: Optional[tuple] = None
+    saw_unkeyed_row = False
+    consumed = 0
+    try:
+        rows = conn.execute(
+            "SELECT created_at, rowid, LENGTH(COALESCE(content, '')) "
+            "FROM messages ORDER BY created_at DESC, rowid DESC"
+        )
+        for created_at, rowid, chars in rows:
+            if created_at is None:
+                # 正典キーを作れない行 — 床の候補にならない (候補が一つでも
+                # あれば素通し、全行これなら下の「判定不能」)。
+                saw_unkeyed_row = True
+                continue
+            key = (int(created_at), int(rowid))
+            if newest is None:
+                newest = key
+                if floor_chars <= 0:
+                    break  # 予算がそもそも行を許さない — 一行窓で確定
+            consumed += int(chars or 0)
+            if consumed > floor_chars:
+                break
+            floor = key
+    except Exception as exc:
+        raise WindowResolutionError(
+            "could not read the messages ledger to approximate the window floor"
+        ) from exc
+    if floor is not None:
+        return floor  # 通常
+    if newest is not None:
+        return newest  # 一行窓 (予算に収まる行が無い)
+    if saw_unkeyed_row:
+        raise WindowResolutionError(
+            "the messages ledger is non-empty but no row carries a canonical "
+            "(created_at, rowid) key — the window floor cannot be approximated"
+        )
+    return None  # 窓なし (履歴空)
+
+
+def insert_presentation_batch(
+    conn: sqlite3.Connection,
+    *,
+    consumed_at: int,
+    rendered_text: str,
+    media: Optional[list] = None,
+    room_state_json: Optional[str] = None,
+    boundary_created_at: Optional[int] = None,
+    boundary_rowid: Optional[int] = None,
+) -> int:
+    """知覚項目の消費を伴わないバッチ行を追加する。**commit しない**。
+
+    使い手は「部屋の様子」の機構の置き直し
+    (:func:`sai_memory.room_state.reseat_current_room`) だけ — 既に知覚済みの
+    部屋の全文を、提示の最古端 (``consumed_at`` を残る提示より古い時刻にする)
+    へ立て直すための行で、新しい知覚を作るものではない (perception_buffer.md
+    C1 は破らない)。台帳の既存の行・バッチは書き換えない — 追加だけ。
+
+    こうして作られたバッチは ``room_state_json`` のエントリに ``reseated`` の
+    印を持ち、(a) 知覚の合計上限の下ろし候補から外れ (id と consumed_at の
+    順序が食い違うため — sea/runtime_context._plan_perception_drop)、(b) 編纂の
+    付記では印だけ受けて材料には載らない (機構の置き直しは出来事ではない —
+    sai_memory/arasuji/executor.collect_annex_items)。
+    """
+    cur = conn.execute(
+        "INSERT INTO perception_batches "
+        "(consumed_at, pulse_id, episode_id, rendered_text, media, "
+        "annexed_entry_id, boundary_created_at, boundary_rowid, room_state_json) "
+        "VALUES (?, NULL, NULL, ?, ?, NULL, ?, ?, ?)",
+        (
+            int(consumed_at),
+            rendered_text,
+            _encode_media(media),
+            int(boundary_created_at) if boundary_created_at is not None else None,
+            int(boundary_rowid) if boundary_rowid is not None else None,
+            room_state_json,
+        ),
+    )
+    return int(cur.lastrowid)
+
+
+def _encode_media(media: Optional[list]) -> Optional[str]:
+    if not media:
+        return None
+    import json
+    return json.dumps(media, ensure_ascii=False)
+
+
 def list_unannexed_batches(
     conn: sqlite3.Connection,
     *,
@@ -584,6 +853,7 @@ def get_presentation_cutoff(conn: sqlite3.Connection) -> int:
 
 def advance_presentation_cutoff(
     conn: sqlite3.Connection, batch_id: int,
+    *, in_window: Optional[Callable[[PerceptionBatch], bool]] = None,
 ) -> int:
     """下ろした境界を ``batch_id`` まで進める。**commit しない**。
 
@@ -591,20 +861,41 @@ def advance_presentation_cutoff(
     片道性が設計の核 (docs/intent/perception_buffer.md §10.9): 下ろす瞬間に
     プロンプトキャッシュの前方一致が割れるのは一回きりで、下ろしたバッチが
     提示に戻ってまた割れる揺り戻しを構造的に禁じる。後退は DB 側の UPSERT の
-    条件でも弾く (同時に走った二本のうち小さい方が勝たない)。
+    条件でも弾く (同時に走った二本のうち小さい方が勝たない)。負けた側も
+    返すのは**読み直した実境界** — 自分の ``batch_id`` を名乗ると、呼び出し
+    側がその値で提示を組んで、勝った側が既に下ろしたバッチを再提示する
+    (2026-09-06 十巡目)。
 
-    境界が実際に進んだら、続けて「部屋の様子」の土台の回復
+    境界が実際に進んだら、続けて「部屋の様子」の置き直し
+    (:func:`sai_memory.room_state.reseat_current_room`) と土台の回復
     (:func:`sai_memory.room_state.restore_room_state_bases`) を
     **この tx の中で**走らせる — 可視性が変わる瞬間の一つなので、不変条件
-    「提示に見えているどの差分も自分の土台が直前に見えている」をここで回復する
-    (付記で下りるときと同じ扱い。§10.8)。
+    「今いる部屋の全体像が提示のどこかに見えている」「提示に見えているどの
+    差分も自分の土台が直前に見えている」をここで守る (付記で下りるときと
+    同じ扱い。§10.8 / room_state_packages.md §6-4)。
 
-    回復が失敗したら**この tx を rollback して例外を送出する** — 境界だけが進んで
-    回復が消えると、土台の全文バッチが提示から下りたまま差分だけが残る。境界の
-    前進は一方向で取り消せないので、中途半端に進めるより「何もしなかった」へ
-    倒す (次の提示で全体をやり直す)。
+    ``in_window`` は置き直しの運搬役判定に渡す提示窓の篩
+    (:func:`~sai_memory.room_state.reseat_current_room` の同名引数へそのまま
+    配線する。None = 窓なし)。境界前進は Chronicle 無効ペルソナの提示組成
+    (sea/runtime_context.list_presented_perception_blocks — 窓 = anchor /
+    recent の床) からも起きるので、窓を持つ呼び出し側は自分の組成と同じ
+    述語を渡す — 渡さないと、窓の外に立つ古い同部屋束を運搬役に数えて
+    置き直しが抑止され、境界だけが確定してそのペルソナの提示から部屋の
+    全文が一拍 (次の Pulse 頭の自己回復まで) 消える (2026-09-06 九巡目修正
+    1)。もう一つの hook (:func:`mark_batches_annexed` — 編纂の付記) は
+    Chronicle 有効のみの経路で窓の概念が無いため、篩なしのまま。
 
-    Returns: 進めた後の境界 (呼び出し前より小さくはならない)。
+    置き直し・回復のどちらかが失敗したら**この tx を rollback して例外を送出
+    する** — 境界だけが進むと、部屋の運搬役や土台の全文バッチが提示から下りた
+    まま戻せない (検知の自己回復より先に送信が起きる経路では部屋なしで送られ
+    る)。境界の前進は一方向で取り消せないので、中途半端に進めるより「何も
+    しなかった」へ倒す (次の機会に全体をやり直す)。
+
+    Returns: 進めた後の**実境界** (UPSERT 後に DB の行を読み直した値。呼び出し
+        前より小さくはならず、別の接続が先に更に先へ進めていたら ``batch_id``
+        より大きい)。読み直した値が ``batch_id`` に届いていなければ書き込み
+        自体の異常 (ガードで負ける相手は「より大きい値」だけ) なので、この tx
+        を rollback して RuntimeError を送出する。
     """
     current = get_presentation_cutoff(conn)
     target = int(batch_id)
@@ -620,7 +911,37 @@ def advance_presentation_cutoff(
         "perception_presentation.dropped_through_batch_id",
         (_PRESENTATION_STATE_ID, target, int(time.time())),
     )
-    from sai_memory.room_state import restore_room_state_bases
+    # 行の実物を読み直す — 上の current の読みと UPSERT の間に別接続が先に
+    # もっと大きい境界へ進めて commit していたら、こちらの書き込みはガードで
+    # 無効になり、境界は相手の値のまま。target を返すと、呼び出し側がその値で
+    # 提示を組んで、もう下ろされたバッチを再提示する (2026-09-06 十巡目)。
+    advanced = get_presentation_cutoff(conn)
+    if advanced < target:
+        conn.rollback()
+        raise RuntimeError(
+            f"perception presentation cutoff did not advance: wrote {target} "
+            f"but the row reads {advanced} (the guard only loses to a larger "
+            "value, so this is a failed write, not a race)"
+        )
+    from sai_memory.room_state import reseat_current_room, restore_room_state_bases
+    # 今いる部屋の最後の運搬役がこの前進で下りたら、最新の全文を提示の最古端へ
+    # 置き直す (room_state_packages.md §6-4 — 同一 tx なので「置き直してから
+    # 下ろした」のと外からは区別がつかない)。置き直しに失敗したら前進ごと
+    # rollback して見送る — 境界だけが進むと「今いる部屋の全体像が提示の
+    # どこにも無い」状態が確定し、検知の自己回復 (§6-2) より先に送信が起きる
+    # 経路 (検知を通らない組成) では部屋なしで送られる。運搬役の判定には
+    # 呼び出し側の提示窓の篩 (in_window) をそのまま通す — 窓の外の束は
+    # この提示に出ないので、運搬役に数えてはいけない。
+    try:
+        reseat_current_room(conn, in_window=in_window)
+    except Exception:
+        conn.rollback()
+        LOGGER.error(
+            "[perception] could not reseat the current room while advancing "
+            "the presentation cutoff to %s; rolled the whole step back so the "
+            "cutoff stays where it was", target, exc_info=True,
+        )
+        raise
     try:
         restore_room_state_bases(conn)
     except Exception:
@@ -631,7 +952,7 @@ def advance_presentation_cutoff(
             "cutoff stays where it was", target, exc_info=True,
         )
         raise
-    return target
+    return advanced
 
 
 def _list_batches_by_cutoff(
@@ -740,17 +1061,19 @@ def mark_batches_annexed(
     呼び出し元 (arasuji executor) の tx が rollback すれば印も戻り、バッチは
     未付記 = 提示に残る (fail-open)。
 
-    印が 1 行でも立ったら、続けて「部屋の様子」の土台の回復
+    印が 1 行でも立ったら、続けて「部屋の様子」の置き直し
+    (:func:`sai_memory.room_state.reseat_current_room`) と土台の回復
     (:func:`sai_memory.room_state.restore_room_state_bases`) を
-    **この tx の中で**走らせる。全文のバッチが提示から下りる瞬間に、土台を失った
-    差分エントリを全文へ差し替える一点がここ — 提示の書き換えを編纂の発火に
-    相乗りさせ、プロンプトキャッシュの壊れ時点を増やさないための配置なので、
-    付記なしでこの回復だけを呼んではいけない。
+    **この tx の中で**走らせる。全文のバッチが提示から下りる瞬間に、部屋の
+    運搬役を置き直し、土台を失った差分エントリを全文へ差し替える一点がここ —
+    提示の書き換えを編纂の発火に相乗りさせ、プロンプトキャッシュの壊れ時点を
+    増やさないための配置なので、付記なしでこの回復だけを呼んではいけない。
 
-    回復が失敗したら**この tx を rollback して例外を送出する** — 付記だけが確定
-    して回復が消えると、土台の全文バッチが提示から下りたまま差分だけが残る
-    (差分は付記済みバッチを土台にできないので復元不能)。呼び出し元の digest
-    ごと巻き戻し、次の編纂でチャンクごとやり直す。
+    置き直し・回復のどちらかが失敗したら**この tx を rollback して例外を送出
+    する** — 付記だけが確定すると、部屋の運搬役や土台の全文バッチが提示から
+    下りたまま戻せない (差分は付記済みバッチを土台にできず、部屋なしの状態は
+    検知の自己回復より先に送信が起きる経路で部屋なしのまま送られる)。呼び出し
+    元の digest ごと巻き戻し、次の編纂でチャンクごとやり直す。
 
     Returns: 印を打てた行数 (未付記だった行のみ)。
     """
@@ -764,7 +1087,30 @@ def mark_batches_annexed(
     )
     stamped = int(cur.rowcount)
     if stamped:
-        from sai_memory.room_state import restore_room_state_bases
+        from sai_memory.room_state import reseat_current_room, restore_room_state_bases
+        # 今いる部屋の最後の運搬役がこの付記で下りたら、最新の全文を提示の
+        # 最古端へ置き直す (room_state_packages.md §6-4 — 付記と同一 tx なので
+        # 「置き直してから下ろした」のと外からは区別がつかない)。置き直しに
+        # 失敗したら付記ごと rollback して見送る — 付記だけが確定すると
+        # 「今いる部屋の全体像が提示のどこにも無い」状態が確定し、検知の
+        # 自己回復 (§6-2) より先に送信が起きる経路では部屋なしで送られる。
+        # in_window は渡さない (篩なし) — 付記は編纂の畳みで、編纂は
+        # Chronicle 有効のペルソナにしか走らず、提示窓 (anchor) は Chronicle
+        # 無効の忘れ方なので、この経路に窓の概念は無い。窓を持ちうるもう
+        # 一方の hook (advance_presentation_cutoff — Chronicle 無効の組成
+        # からも呼ばれる) は、呼び出し側から同名引数で篩を受け取る
+        # (2026-09-06 九巡目修正 1)。
+        try:
+            reseat_current_room(conn)
+        except Exception:
+            conn.rollback()
+            LOGGER.error(
+                "[perception] could not reseat the current room while stamping "
+                "%d batch(es) for entry %s; rolled the whole transaction back "
+                "so the annexation is retried as a whole",
+                stamped, entry_id, exc_info=True,
+            )
+            raise
         try:
             restore_room_state_bases(conn)
         except Exception:

@@ -1,8 +1,8 @@
 """BuildingOccupantsSection — Building 内の他ペルソナ/ユーザーの入退室差分検知。
 
 旧 ``DynamicStateManager`` の occupants 差分計算ロジックを Section interface に
-移植。head には何も render しない (= visual_context が ## ペルソナ / ## ユーザー
-の表示を担当)。
+移植。head には何も render しない (居合わせる相手の姿は知覚の「部屋の様子」
+が運ぶ — docs/intent/room_state_packages.md)。
 
 注意: ``OccupancyManager.move_entity`` は移動の度に host メッセージとして
 "X が Y から入室しました" を building_histories に書き込んでおり、auto_ingest を
@@ -72,7 +72,7 @@ class BuildingOccupantsSection:
         )
 
     def render(self, snapshot: BuildingOccupantsSnapshot) -> Optional[RenderedSection]:
-        # head には何も載せない (visual_context が描画担当)
+        # head には何も載せない (居合わせる相手の姿は知覚の「部屋の様子」が運ぶ)
         return None
 
     def diff_to_notifications(

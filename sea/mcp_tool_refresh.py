@@ -34,6 +34,7 @@ def refresh_mcp_tools_at_head(
     *,
     connect: bool,
     notify: bool = True,
+    model_key: Optional[str] = None,
 ) -> bool:
     """ツール一覧を取り直し、変わっていたら検知器へ渡す。
 
@@ -47,6 +48,10 @@ def refresh_mcp_tools_at_head(
         notify: 変化を検知器 (``inject_diff_notifications``) へ渡すか。
             直後に無条件の検知フェーズが走る呼び出し元 (run_meta_user) だけ
             False にする — 同じ検知を二重に走らせないため。
+        model_key: その回の実行 model。検知の窓判定 (Chronicle 無効ペルソナの
+            提示窓は (ペルソナ, model) ごと) に使うので、ExecutionContext を
+            持つ呼び出し元 (Pulse root / Beat 頭) は必ず渡す — 落とすと常に
+            標準 model の窓で判定される (2026-09-06 二巡目修正 2)。
 
     Returns:
         このペルソナのツール所属が変わったら True。例外は投げない
@@ -81,7 +86,7 @@ def refresh_mcp_tools_at_head(
     try:
         from sea.head_pipeline import inject_diff_notifications
 
-        inject_diff_notifications(persona, manager, building_id)
+        inject_diff_notifications(persona, manager, building_id, model_key=model_key)
     except Exception:
         LOGGER.warning(
             "[mcp] tool-list change detected but the perception push failed "

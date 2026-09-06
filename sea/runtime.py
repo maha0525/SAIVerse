@@ -281,6 +281,7 @@ class SEARuntime:
         # 前置き判定だけで即戻る。
         refresh_mcp_tools_at_head(
             persona, self.manager, building_id, connect=True, notify=False,
+            model_key=_pre_model_key,
         )
 
         # --- 知覚の「検知」フェーズ (バッファへ push、まだ消費しない) ---
@@ -290,7 +291,12 @@ class SEARuntime:
         # docs/intent/perception_buffer.md §4.5 / §5.1。
         try:
             from saiverse.dynamic_state import DynamicStateManager
-            DynamicStateManager.maybe_inject_event_messages(persona, self.manager)
+            # model_key = 上で解決済みの実行 model。検知の窓判定 (Chronicle
+            # 無効ペルソナの提示窓) は (ペルソナ, model) ごとなので、実行の
+            # 身分を持つこの経路は必ず渡す (2026-09-06 二巡目修正 2)。
+            DynamicStateManager.maybe_inject_event_messages(
+                persona, self.manager, model_key=_pre_model_key,
+            )
         except Exception:
             LOGGER.exception("[dynamic_state] Event detection failed in run_meta_user")
 

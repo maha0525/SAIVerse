@@ -1,8 +1,8 @@
 """BuildingSection — 現在地 Building の静的情報 (name + system_instruction) を head に。
 
 `sea/runtime_context.py` 旧 system prompt の 3. ``## {building_name}`` を移植。
-items / occupants は Phase 3 で BuildingItemsSection / BuildingOccupantsSection に
-分離するため、本 Section では扱わない (= dynamic_state との二重通知回避)。
+items / occupants は本 Section では扱わない — アイテムは知覚の「部屋の様子」
+(docs/intent/room_state_packages.md)、入退室は BuildingOccupantsSection の担当。
 
 詳細: docs/intent/cached_head_architecture.md §5.3
 """

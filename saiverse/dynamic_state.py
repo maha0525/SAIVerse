@@ -2,8 +2,9 @@
 
 このモジュールは旧 SAIVerse の `DynamicStateManager`。Building 内のアイテム/居住者/
 Memopedia/Chronicle の差分通知を担当していたが、Phase 3-e で実装本体が
-`sea.head_pipeline.sections` の 4 Section + `sea.head_pipeline.integration.inject_diff_notifications`
-に統合された。
+`sea.head_pipeline.sections` の Section 群 + `sea.head_pipeline.integration.inject_diff_notifications`
+に統合された (アイテム差分は 2026-09-06 に「部屋の様子」のパッケージ照合へ
+一本化 — docs/intent/room_state_packages.md §6-2)。
 
 本ファイルは互換のための **facade** を提供する:
   - `maybe_inject_event_messages` → head_pipeline 経由で diff 通知
@@ -29,11 +30,21 @@ class DynamicStateManager:
     """Building 状態同期の facade (= head_pipeline への薄い委譲)。"""
 
     @staticmethod
-    def maybe_inject_event_messages(persona: Any, manager: Any) -> bool:
+    def maybe_inject_event_messages(
+        persona: Any, manager: Any, model_key: Optional[str] = None,
+    ) -> bool:
         """world 状態の差分を末尾通知として SAIMemory に注入する。
 
         Phase 3-e で実装が ``sea.head_pipeline.integration.inject_diff_notifications``
         に統合された。本メソッドはその facade。
+
+        ``model_key`` は**その回の実行 model** — Pulse 開始の呼び出し元
+        (sea/runtime.py の ``_run_meta_user_locked``) が解決済みの実行 model を
+        渡す。検知の窓判定 (Chronicle 無効ペルソナの提示窓は (ペルソナ, model)
+        ごと) に使うので、ここが None のままだと常に標準 model の窓で判定され、
+        実行 model の窓では部屋が外れているのに自己回復が発火しない
+        (2026-09-06 二巡目修正 2)。実行の身分が無い呼び出しだけ None (= 標準
+        model の窓) でよい。
 
         Returns:
             True if a notification message was injected.
@@ -53,7 +64,9 @@ class DynamicStateManager:
             return False
 
         try:
-            return bool(inject_diff_notifications(persona, manager, building_id))
+            return bool(inject_diff_notifications(
+                persona, manager, building_id, model_key=model_key,
+            ))
         except Exception:
             LOGGER.exception(
                 "[dynamic_state] maybe_inject_event_messages (via head_pipeline) failed for %s/%s",
@@ -86,20 +99,17 @@ class DynamicStateManager:
             return True
         ok = True
 
-        # 「移動先の様子」の土台になれる head の姿は、**入室処理を始める前**に
-        # 読んでおく。この直後の inject_diff_notifications は ensure_snapshot を
-        # 通るので、snapshot が未構築のときや anchor TTL が切れているときは
-        # そこで head を撮り直す — 撮り直しは引数の building_id (= 移動先) を
-        # 写すため、後から読むと「たった今この入室が作った head」を土台に選ぶ。
-        # 初訪問でも「前回見たときから変わっていません」の一行になり、ペルソナ
-        # が見たことのない部屋に「前回」があったことにされる (2026-09-05 Codex
-        # 指摘)。土台にしてよいのは入室の時点で既に見えていた head だけなので、
-        # ここで確定させる。読み口は撮り直さないので、この前倒しに副作用は無い。
-        head_full_text = _head_view_of(persona, building_id)
-
         try:
             from sea.head_pipeline import inject_diff_notifications
-            inject_diff_notifications(persona, manager, building_id)
+            # detect_room=False: この直後に入室の push (下) が同じ部屋を積む。
+            # 検知器の部屋の照合まで走らせると、入室が二重に語られる
+            # (docs/intent/room_state_packages.md §6-1 — 入室は末尾の出来事、
+            # 照合は滞在中の Pulse 頭の仕事)。
+            # model_key は渡さない (= 標準 model の窓): 入室は Pulse の外で
+            # 起きる出来事で、この時点に実行の身分 (ExecutionContext) は無い。
+            inject_diff_notifications(
+                persona, manager, building_id, detect_room=False,
+            )
         except Exception:
             LOGGER.warning(
                 "[dynamic_state] pre-dispatch diff inject failed for %s -> %s",
@@ -124,6 +134,8 @@ class DynamicStateManager:
                 other = personas_map.get(oid)
                 if other is None:
                     continue  # user 等・未ロードのペルソナは対象外
+                # model_key は渡さない (= 標準 model の窓): 居合わせる側の
+                # Pulse は走っておらず、その回の実行 model が存在しない。
                 inject_diff_notifications(other, manager, building_id)
         except Exception:
             LOGGER.warning(
@@ -132,44 +144,38 @@ class DynamicStateManager:
             )
             ok = False
 
-        # 移動先の様子 (アイテム一覧・内装画像・居合わせる他ペルソナの外見) を、移動した
-        # 本人の知覚バッファへ push する。head の visual_context は移動で refresh されない
-        # (cache 保護) ため、これが無いと本人は次の Metabolism まで新しい部屋のアイテム/
-        # 内装を正確に知れず、旧部屋のものと誤認しうる (まはー指摘 2026-07-09)。
-        # get_visual_context(include_self=False) は他ペルソナ外見+内装+アイテム(無い時も
-        # 明示)+Fixture を返す。self は head と重複するので除外。消費は本人の次 Pulse。
+        # 部屋の様子 (居合わせる他ペルソナの外見・内装画像・アイテム・設置物) を
+        # パッケージの束のまま、移動した本人の知覚バッファへ push する。head は
+        # もう部屋を描かない (VisualContextSection 退役、2026-09-06) ので、
+        # 部屋の様子の置き場はこの知覚一つ。self は部屋の性質ではないので除外。
+        # 消費は本人の次 Beat 頭。
         #
         # 積むのは全文とは限らない: 同じ部屋の前回のエントリがまだ提示に見えて
         # いれば差分だけになる (sai_memory/room_state.py)。行き来のたびに 1 万字
-        # 級の全文が積み上がるのを止めるため (2026-09-04 まはー裁定)。
+        # 級の全文が積み上がるのを止めるため (2026-09-04 まはー裁定)。入室は
+        # 「体験として新しく見た回」なので末尾 (出来事) — 機構の置き直し (全文を
+        # 提示の最古端へ) は検知の自己回復と付記・境界前進の相乗りが担う
+        # (docs/intent/room_state_packages.md §6)。
         #
-        # 台帳に土台が無くても、head の visual_context がこの部屋を見せている
-        # ことがある — 部屋 A → B → A の往復がその形で、head の一覧と一字も
-        # 違わない全文が知覚にも積まれていた (2026-09-05 まはー実測)。head が
-        # 見せている姿 (head_full_text — 入室処理の前に確定させた値) を土台に
-        # 渡し、変化だけ (無ければ一行) にする。
+        # ここは滞在中の検知 (_detect_room_state_changes) と違い、組成中に本人が
+        # さらに移動していても「配送の荷物の行き先 (building_id)」へ積むのが
+        # 現行契約 — 遅延配送が古い部屋を積みうる性質は
+        # docs/issues/entry_delivery_retry_duplicates_room_perception.md
+        # (遅延の混入) として起票済みで、現在地の再確認はそこの裁定に合流する。
         try:
-            from builtin_data.tools.get_visual_context import get_visual_context
+            from builtin_data.tools.get_visual_context import build_room_bundle
             from tools.context import persona_context
             pid = getattr(persona, "persona_id", None)
             pdir = getattr(persona, "persona_dir", None)
             sai_mem = getattr(persona, "sai_memory", None)
             if pid and sai_mem is not None:
                 with persona_context(pid, pdir, manager):
-                    # for_perception=True: 知覚バッファ向けの簡潔記法・<system> 包みなし。
-                    vc_messages = get_visual_context(
-                        building_id=building_id, include_self=False, for_perception=True,
+                    bundle = build_room_bundle(building_id)
+                if bundle:
+                    sai_mem.push_room_state(
+                        building_id, bundle,
+                        allow_diff=_chronicle_enabled(persona, manager),
                     )
-                if vc_messages:
-                    vc = vc_messages[0]
-                    content = (vc.get("content") or "").strip()
-                    media = (vc.get("metadata") or {}).get("media") or []
-                    if content:
-                        sai_mem.push_room_state(
-                            building_id, content, media=media,
-                            allow_diff=_chronicle_enabled(persona, manager),
-                            head_full_text=head_full_text,
-                        )
         except Exception:
             LOGGER.warning(
                 "[dynamic_state] surroundings push on entry failed -> %s",
@@ -248,36 +254,6 @@ def _chronicle_enabled(persona: Any, manager: Any) -> bool:
             "treating the persona as chronicle-enabled", exc_info=True,
         )
         return True
-
-
-def _head_view_of(persona: Any, building_id: str) -> Optional[str]:
-    """head がいま **この** Building を見せているなら、その姿 (知覚記法の全文)。
-
-    見せていなければ None = 「土台なし」。head の visual_context は移動では
-    撮り直されない (Metabolism / anchor TTL 切れのみ) ので、部屋 A → B → A の
-    往復の間ずっと A を見せている — 帰還時の「移動先の様子」がその全文と一字も
-    違わない二重になっていた (issue room_state_duplicates_head_inventory)。
-
-    **呼ぶ順番が意味を持つ**: :meth:`DynamicStateManager.on_building_entered` は
-    入室処理の**最初**にこれを呼ぶ。後段の ``inject_diff_notifications`` が
-    ensure_snapshot 経由で head を移動先の姿に撮り直すことがあり、その後で
-    読むと入室自身が作った head を土台に選んでしまう。
-
-    引けなかったら None に倒す (= 従来どおり全文を積む)。ここの失敗で入室の
-    知覚そのものを落とさないよう、呼び出し側の try とは別に包む。
-    """
-    try:
-        from sea.head_pipeline import current_head_room
-        head_building_id, head_room_text = current_head_room(persona)
-    except Exception:
-        LOGGER.warning(
-            "[dynamic_state] could not read the head's current room; "
-            "pushing the full room text instead", exc_info=True,
-        )
-        return None
-    if head_building_id != building_id or not head_room_text:
-        return None
-    return head_room_text
 
 
 def _dispatch_head_event(

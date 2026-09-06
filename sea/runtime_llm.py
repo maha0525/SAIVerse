@@ -2608,9 +2608,15 @@ async def _run_spell_loop(
             # 一覧を変えるサーバー (モードチェンジ型) の変動をここで拾う。
             # 並びは「取得 → 検知 → flush → 生成」— 検知が flush より後だと
             # 変動の知覚が次の Beat まで読まれない。
+            # model_key = この Beat の実行 model (Beat 開始時に state へ積まれた
+            # ExecutionContext — 検知の窓判定用、2026-09-06 二巡目修正 2)。
+            # まだ積まれていない経路は None = 標準 model の窓。
             refresh_mcp_tools_at_head(
                 persona, getattr(runtime, "manager", None), building_id,
                 connect=False,
+                model_key=getattr(
+                    state.get("_execution_context"), "model_key", None,
+                ),
             )
 
             # ---- Beat 頭の知覚消費 (perception_buffer.md §4.2 2026-08-08 改訂) ----
