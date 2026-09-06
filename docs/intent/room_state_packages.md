@@ -1,8 +1,8 @@
 # Intent: 部屋の様子のパッケージ — 世界の眺めを構造のまま知覚へ運ぶ
 
-**ステータス**: 実装済み・テスト緑 (§11 実機所見の第一弾まで、2026-09-07) — 実機検証待ち (完了の定義は §10 の旅 + 実機所見 ①②④ の解消確認)
-**発端**: [room_state_diff_built_on_string_parsing.md](../issues/room_state_diff_built_on_string_parsing.md) (v0.3.9 出荷停止 — 差分を描画済み文字列の解析で組んでいた) と、その洗い出し・設計の問い 7 点の裁定 (2026-09-06)
-**吸収**: [room_state_single_source_of_truth.md](../issues/room_state_single_source_of_truth.md) (一元化 — head の Visual Context 退役。まはー裁定で一緒に設計)
+**ステータス**: 完了 (2026-09-07) — §10 の旅と実機所見の解消をすべてまはーの実機で確認し、v0.3.9 として発行 (タグ v0.3.9、発行記録は [release_history.md](../overview/release_history.md))
+**発端**: [room_state_diff_built_on_string_parsing.md](../issues/archive/room_state_diff_built_on_string_parsing.md) (v0.3.9 出荷停止 — 差分を描画済み文字列の解析で組んでいた) と、その洗い出し・設計の問い 7 点の裁定 (2026-09-06)
+**吸収**: [room_state_single_source_of_truth.md](../issues/archive/room_state_single_source_of_truth.md) (一元化 — head の Visual Context 退役。まはー裁定で一緒に設計)
 **置き換え対象**: [perception_buffer.md](perception_buffer.md) §10.8〜§10.8.1 (文字列差分と head 照合)。§10.9 (知覚の合計上限) は生きる
 **約束の参照**: 思い出機能の後継 — [recall_tags_and_track_reduction.md](persona_cognition/recall_tags_and_track_reduction.md) 冒頭 📌
 
@@ -212,3 +212,4 @@
 - **2026-09-07**: まはーの実機確認で 5 点の所見 (①汚染バッファの掃除 ②積み順の逆転 ③出来事の区切り ④往復の堆積 ⑤アイテム過多) + テリスの入室知覚欠落。第一弾 (④②① = §11) の設計を裁定 (「方針完璧」) — ③⑤テリスは §11-4 の器へ。差分の基準について「見ていないものからの差分を語っていた」と報告したのは不正確だった — 土台の pending も同じ flush で一緒に見えるので連なりとしては読める。実害は堆積 (④) と読み順 (②) にある。
 - **2026-09-07 (§11 実装とレビュー収束)**: Fable サブエージェントで実装 (回収の一枚・通知の二枚分割と型付け・様子の outbox 配送・flush の配り直し) → Codex (Luna/high) 三巡で収束 (一巡目 3 件全採用 = 配達の冪等化・payload の門・degrade の未 ready / 二巡目 採用 2 却下 2 / 三巡目 approve 指摘ゼロ)。全修正 red 証明つき、フルスイート毎巡二重確認で最終 5,641 緑。同族走査で見つけた隣 4 点は [outbox_delivery_gate_siblings.md](../issues/outbox_delivery_gate_siblings.md) へ。却下の証拠は発端 issue の経緯。
 - **2026-09-07 (読み順の改訂 — 指示の一本化と様子の末尾寄せ)**: 実機でエリスの入室通知より先に部屋の差分が出た件から、まはーが役割・指示の性質を裁定 (識別情報ではない → 重複させない → 出すなら様子に含める)。調査で指示ラベルと束の `building:prompt` が同じフィールドの複製と確定し、ラベルを退役。§11-2 に「様子は組成の末尾へ」を追加、§11-3 の読み順を改訂。
+- **2026-09-07 (完了・発行)**: 出来事の区切り (一出来事一ラベル — format の world_state 合流の退役)、新ペルソナの入室知覚欠落の解消確認まで、実機検証がすべて通過。PR #282 をまはーが確認してマージし、タグ v0.3.9 で発行。アイテム個数上限 (⑤) だけは「片付け機能とセットで新 feature ブランチ」の裁定でスコープ外 ([room_items_uncapped.md](../issues/room_items_uncapped.md))。

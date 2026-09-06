@@ -259,7 +259,7 @@ Cached Head が「Metabolism まで snapshot を凍結」、visual_context / mem
 
 ### 10.8 部屋の様子は再訪なら差分だけ + 土台の回復 (2026-09-04 まはー裁定、2026-09-05 実装)
 
-> ⚠️ **2026-09-06: 本節と §10.8.1 は [room_state_packages.md](room_state_packages.md) で置き換え済み (実装 2026-09-06)。** 差分を描画済み文字列の解析で組む方式に出荷停止級の欠陥が見つかり ([issue](../issues/room_state_diff_built_on_string_parsing.md))、部屋はパッケージの束のまま運びキー照合で差分を組む形になった。head の VisualContextSection と §10.8.1 の head 照合機構は全退役 (部屋の様子の置き場は知覚一つ)。§10.9 (知覚の合計上限) は生きる — ただし機構の置き直しバッチの扱いが加わった (room_state_packages.md 実装メモ)。以下は当時の設計の記録として残す。
+> ⚠️ **2026-09-06: 本節と §10.8.1 は [room_state_packages.md](room_state_packages.md) で置き換え済み (実装 2026-09-06)。** 差分を描画済み文字列の解析で組む方式に出荷停止級の欠陥が見つかり ([issue](../issues/archive/room_state_diff_built_on_string_parsing.md))、部屋はパッケージの束のまま運びキー照合で差分を組む形になった。head の VisualContextSection と §10.8.1 の head 照合機構は全退役 (部屋の様子の置き場は知覚一つ)。§10.9 (知覚の合計上限) は生きる — ただし機構の置き直しバッチの扱いが加わった (room_state_packages.md 実装メモ)。以下は当時の設計の記録として残す。
 
 **問題**: §5.4 の「移動先の様子」は移動のたびに全アイテムの説明つき全文を積む。同じ部屋を行き来するだけで同じ 1 万字級の全文が提示に何枚も並び、知覚が「残す量」の保護枠を食い潰す原因の筆頭になっていた (issue `watermarks_unsatisfiable_when_perception_is_large.md`)。
 
@@ -282,7 +282,7 @@ Cached Head が「Metabolism まで snapshot を凍結」、visual_context / mem
 
 #### 10.8.1 head が同じ部屋を見せているなら、その姿を土台にする (2026-09-05 追加)
 
-**問題**: 上の差分は「知覚バッチ同士」の照合なので、部屋 A → B → A と往復すると効かない — 帰ってきた時点で台帳に見えている A のエントリが一枚も無く、初訪問と同じ扱いで全文が積まれる。ところが head の visual_context は**移動では撮り直されない** (`refresh_on_events` は APPEARANCE_CHANGED だけ。移動で撮り直すと cache が壊れるため) ので、往復の間ずっと A を見せている。結果、head 最上部の一覧と帰還時の知覚が一字も違わない二重になった (実測: エリスの部屋で `item:252`〜`item:442`。issue [room_state_duplicates_head_inventory.md](../issues/room_state_duplicates_head_inventory.md))。
+**問題**: 上の差分は「知覚バッチ同士」の照合なので、部屋 A → B → A と往復すると効かない — 帰ってきた時点で台帳に見えている A のエントリが一枚も無く、初訪問と同じ扱いで全文が積まれる。ところが head の visual_context は**移動では撮り直されない** (`refresh_on_events` は APPEARANCE_CHANGED だけ。移動で撮り直すと cache が壊れるため) ので、往復の間ずっと A を見せている。結果、head 最上部の一覧と帰還時の知覚が一字も違わない二重になった (実測: エリスの部屋で `item:252`〜`item:442`。issue [room_state_duplicates_head_inventory.md](../issues/archive/room_state_duplicates_head_inventory.md))。
 
 **採った形**: 台帳に土台が無いときの土台に **head が見せている同じ部屋の姿**を使う。
 

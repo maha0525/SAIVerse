@@ -812,7 +812,7 @@ class HistoryManager:
                 # (ユーザーが別の部屋に居ても付く) で、同席の証拠にならない。
                 # ユーザーが複数居る世界では発言者をこのマーカーから特定できない
                 # が、取り違えの向きは「想起を抑える」側 (知覚の堆積を防ぐ側 —
-                # docs/issues/persona_recall_perception_unbounded.md) に倒れる。
+                # docs/issues/archive/persona_recall_perception_unbounded.md) に倒れる。
                 if (
                     target_is_user
                     and msg.get("role") == "user"

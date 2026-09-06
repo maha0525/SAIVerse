@@ -386,7 +386,7 @@ def _inject_persona_recall_on_enter(
     (:meth:`HistoryManager.should_recall_persona`)。この繋ぎ実装は門を呼ばないまま
     出荷されていたため、ずっと会話している相手にも移動のたびに「過去会話 6 件
     (各 2,000 字) + 相手の Memopedia 個人ページ全文」が積まれ、本番で知覚
-    18 万字まで膨らんだ (docs/issues/persona_recall_perception_unbounded.md)。
+    18 万字まで膨らんだ (docs/issues/archive/persona_recall_perception_unbounded.md)。
 
     見出しに書く相手の名前は ``persona.id_to_name_map`` (manager と参照を共有する
     id→表示名の対応) で解決して渡す。解決できないときだけ ID のままになる。

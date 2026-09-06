@@ -2,7 +2,7 @@
 
 門が配線されていなかったため、ずっと会話している相手にも移動のたびに
 「過去会話 6 件 + 相手の Memopedia 個人ページ全文」が積まれ、本番で知覚が
-18 万字まで膨らんだ (docs/issues/persona_recall_perception_unbounded.md)。
+18 万字まで膨らんだ (docs/issues/archive/persona_recall_perception_unbounded.md)。
 
 ここでは繋ぎ実装 (`_inject_persona_recall_on_enter`) と本物の
 `HistoryManager.should_recall_persona` / `recall_conversation_with` を繋いだまま

@@ -1,7 +1,7 @@
 """部屋の様子のパッケージ (room state packages) の契約テスト。
 
 設計の正典は docs/intent/room_state_packages.md (2026-09-06)。発端は
-docs/issues/room_state_diff_built_on_string_parsing.md — 差分を描画済み文字列の
+docs/issues/archive/room_state_diff_built_on_string_parsing.md — 差分を描画済み文字列の
 解析で組んでいたため、開いたドキュメントの本文段落が「見当たらなくなったもの」
 に化けて v0.3.9 の出荷を止めた。合成の一行アイテムだけを食べたテストがこの欠陥を
 6 巡のレビューごと素通ししたので、**本物の描画 (build_room_bundle) をテストに

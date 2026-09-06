@@ -349,7 +349,7 @@ def _render_item(
 
 
 #: is_open の概念を持つアイテム型 (Object と不明型には無い —
-#: docs/issues/room_state_diff_built_on_string_parsing.md 洗い出し)。
+#: docs/issues/archive/room_state_diff_built_on_string_parsing.md 洗い出し)。
 _OPENABLE_ITEM_TYPES = frozenset({"picture", "document", "audio", "video", "bag"})
 
 

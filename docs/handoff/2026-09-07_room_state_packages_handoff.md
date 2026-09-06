@@ -15,8 +15,8 @@
 | 何 | どこ |
 |---|---|
 | 設計 (パッケージ・差分の規則・供給の四点・置き場所の原則・劣化の三原則・床の四状態・実装メモ) | `docs/intent/room_state_packages.md` |
-| 発端の欠陥・裁定 7 点・14 巡の経緯・却下 4 件 | `docs/issues/room_state_diff_built_on_string_parsing.md` |
-| 一元化 (head の Visual Context 退役) — 本実装で同時解決、実機待ちで未 archive | `docs/issues/room_state_single_source_of_truth.md` |
+| 発端の欠陥・裁定 7 点・14 巡の経緯・却下 4 件 | `docs/issues/archive/room_state_diff_built_on_string_parsing.md` |
+| 一元化 (head の Visual Context 退役) — 本実装で同時解決、実機待ちで未 archive | `docs/issues/archive/room_state_single_source_of_truth.md` |
 | 思い出機能の退役と上位互換の約束 (📌) | `docs/intent/persona_cognition/recall_tags_and_track_reduction.md` 冒頭 |
 | スコープ外で issue 化した既存問題 | `docs/issues/work_session_composes_before_model_fallback.md` / `docs/issues/entry_delivery_retry_duplicates_room_perception.md` |
 | v0.3.10 候補 (7/30 監査の残存 3 件 F1〜F3) | `docs/issues/audit_20260730_review_guards.md` |

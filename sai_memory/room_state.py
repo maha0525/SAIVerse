@@ -1,7 +1,7 @@
 """部屋の様子 (room state) — パッケージの束を構造のまま運び、差分はキー照合で組む。
 
 設計の正典: docs/intent/room_state_packages.md (2026-09-06)。発端は
-docs/issues/room_state_diff_built_on_string_parsing.md — 差分を描画済み文字列の
+docs/issues/archive/room_state_diff_built_on_string_parsing.md — 差分を描画済み文字列の
 解析 (空行 = アイテムの境目、という推測) で組んでいたため、開いたドキュメントの
 本文段落が「見当たらなくなったもの」に化けて v0.3.9 の出荷を止めた。
 
