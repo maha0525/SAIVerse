@@ -19,12 +19,13 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
 from functools import partial
 from typing import Any, Optional
 
 from sea.head_pipeline.pipeline import HeadPipeline, get_default_pipeline
-from sea.head_pipeline.types import LineHeadInput, NotificationLabel, RenderedSection
+from sea.head_pipeline.types import LineHeadInput, RenderedSection
 
 # 旧 builtin_data/tools/get_memory_weave_context.py が message metadata に付与していた
 # marker / type field 名と互換のキーを composition で再現する (= preview UI の
@@ -201,7 +202,7 @@ def inject_diff_notifications(
       **移動の事実だけ** で、対象は building と building_occupants の 2 つ
       (``only_sections={"building", "building_occupants"}``)。在室者の側は
       部屋替えの分岐が deliver=False のラベルしか出さないので文は届かず、
-      基準合わせ (新しい部屋の顔ぶれまで) と再会の想起だけがここで走る。
+      ここで走るのは基準合わせ (新しい部屋の顔ぶれまで) だけ。
       スペル・Memopedia 等の状態の差分は Pulse 開始時の検知が「最後に知らせた
       状態 vs 今」で計算する — 移動のたびに途中経過を積むと、読む時点
       (次の Pulse) には別の部屋の話になっている (2026-09-07、
@@ -211,15 +212,15 @@ def inject_diff_notifications(
       消費は次の Pulse (= 主観時間が止まっている間の知覚は詰まって待つ、という
       時間モデル通り)。
 
-    ``deliver=False`` のラベル (:class:`NotificationLabel`) は「検知はするが文は
-    届けない」— push はせず、基準 (B) の前進と再会の想起の発火にだけ使う。
+    ``deliver=False`` のラベル (:class:`~sea.head_pipeline.types.NotificationLabel`)
+    は「検知はするが文は届けない」— push はせず、基準 (B) の前進にだけ使う。
     deliver=False だけの回は配送そのものが無いので台帳の execution も作らず、
-    戻り値も False (= 何も届けていない)。SAIMemory が未 ready の回は想起も
-    push できないので、その Section の基準も進めずに次回の再検出へ委ねる
-    (経路によらず同じ。文を届けた Section の基準は配送確定後に進む)。
+    戻り値も False (= 何も届けていない)。
 
-    入室想起 (persona_recall) も同じくバッファへ push する。詳細:
-    docs/intent/perception_buffer.md §4.5 / §5.1。
+    再会の想起 (persona_recall) はこの検知器の仕事ではない — Pulse の頭で
+    「いま同席している相手」を見る :func:`inject_copresence_recall` が積む
+    (2026-09-07 に移動時のラベル発火から移した。
+    docs/intent/perception_buffer.md §4.5 / §5.1)。
 
     ``model_key`` を省略した場合は persona の標準 model の Session に対して
     diff チェックする (= 従来の単一窓挙動と同じ)。既読状態 (last_notified) は
@@ -286,22 +287,9 @@ def _push_section_diffs(
     if not deliverable:
         # 検知だけのラベル (deliver=False) しか無い回。配送する文が無いので台帳は
         # 通さず、基準だけ新しい状態へ進める — 進めないと以後の差分が古い基準との
-        # 比較になって出なくなる (部屋替え時の同席者がこれ)。想起は kind と
-        # metadata を見るので、文を届けなくても従来どおり発火する。
-        sai_mem = getattr(persona, "sai_memory", None)
-        if sai_mem is None or not sai_mem.is_ready():
-            # 想起の push 先が無い回。ここで基準だけ進めると、その部屋へ入った
-            # 事実が二度と差分に出ず、再会の想起が永久に発火しなくなる。何も
-            # 進めずに次回の再検出へ委ねる (直接経路と同じ倒し方)。
-            LOGGER.debug(
-                "head_pipeline: SAIMemory not ready, %d silent label(s) deferred "
-                "(baseline kept for re-detection)",
-                len(labels),
-            )
-            return False
+        # 比較になって出なくなる (部屋替え時の同席者がこれ)。
         for section_name, new_snapshot in detected.items():
             pipeline.advance_last_notified(ctx.persona_id, section_name, new_snapshot)
-        _inject_persona_recall_on_enter(persona, labels, sai_mem)
         return False
 
     try:
@@ -345,34 +333,17 @@ def _push_section_diffs(
         )
         return False
 
-    # outbox 積みが durable に確定した後で B を前進 (S3 の修正)。前進は Section
-    # ごとに分ける — 文を届けた Section は outbox に載った以上そのまま進めるが、
-    # deliver=False のラベルしか出していない Section (部屋替え時の同席者) は
-    # SAIMemory へ想起を積める回でなければ進めない。混在の回で一律に進めると、
-    # 想起の push 先が無いまま基準だけ新しい部屋へ動き、その入室が二度と差分に
-    # 出ない (deliver=False だけの回と同じ倒し方)。
-    sai_mem = getattr(persona, "sai_memory", None)
-    memory_ready = sai_mem is not None and sai_mem.is_ready()
-    delivered_sections = {
-        label.section for label in deliverable if label.section
-    }
+    # outbox 積みが durable に確定した後で B を前進 (S3 の修正)。検知した Section
+    # は一律に進める — deliver=False のラベルしか出さない Section (部屋替え時の
+    # 同席者) も、もう後段の処理を持たない (再会の想起は Pulse 頭の同席チェックへ
+    # 移った、2026-09-07) ので、基準だけ進めて次の差分に備えればよい。
     for section_name, new_snapshot in detected.items():
-        if section_name in delivered_sections or memory_ready:
-            pipeline.advance_last_notified(ctx.persona_id, section_name, new_snapshot)
-        else:
-            LOGGER.debug(
-                "head_pipeline: SAIMemory not ready, keeping the baseline of "
-                "silent section=%s for re-detection", section_name,
-            )
+        pipeline.advance_last_notified(ctx.persona_id, section_name, new_snapshot)
 
     LOGGER.info(
         "head_pipeline: queued %d world_state notification(s) via ledger "
         "for persona=%s building=%s", len(deliverable), ctx.persona_id, building_id,
     )
-
-    # 入室想起は head 操作でも diff でもないので outbox 化の対象外 (従来どおり)。
-    if memory_ready:
-        _inject_persona_recall_on_enter(persona, labels, sai_mem)
 
     return True
 
@@ -395,9 +366,9 @@ def _inject_diff_notifications_direct(
     再検出に委ねる (push 済みラベルの再通知はあり得る = at-least-once。台帳経路
     の再配送と同じ倒し方)。
 
-    ``deliver=False`` のラベルは push の対象外 (基準の前進と想起の発火にだけ使う)。
-    SAIMemory が未 ready の回は、届ける文の有無にかかわらず何も進めない — 想起も
-    そこへ push できない以上、次回の再検出でまとめてやり直す方が落としが無い。
+    ``deliver=False`` のラベルは push の対象外 (基準の前進にだけ使う)。SAIMemory が
+    未 ready の回は、届ける文の有無にかかわらず何も進めない — push 先が無い以上、
+    次回の再検出でまとめてやり直す方が落としが無い。
     """
     labels, detected = pipeline.flush_diffs(
         ctx, all_sections=True, advance=False, only=only_sections,
@@ -444,21 +415,93 @@ def _inject_diff_notifications_direct(
         len(deliverable), ctx.persona_id, building_id,
     )
 
-    _inject_persona_recall_on_enter(persona, labels, sai_mem)
-
     return bool(deliverable)
 
 
-def _inject_persona_recall_on_enter(
-    persona: Any,
-    labels: list[NotificationLabel],
-    sai_mem: Any,
-) -> None:
-    """occupant_entered ラベルに対応する過去会話・Memopedia を知覚バッファへ push する。
+# 「不在から同席へ変わった一回だけ想起を試みる」ための、プロセス内の記憶。
+# persona_id → その相手と同席が続いている間に想起を**試み済み**の相手 ID の集合。
+# 想起が実際に積まれたかではなく「試みたか」を覚える (門で抑制された回・想起本文が
+# 空だった回・push が失敗した回も試み済み) — 再会は一度きりの出来事で、毎 Pulse
+# 再試行に戻すと「同席している間じゅう毎 Pulse 想起が積まれる」欠陥が別の形で残る。
+# 相手が部屋から居なくなった Pulse で集合から落ちるので、次の再会でまた発火する。
+# プロセスを再起動するとこの記憶は消え、再起動後の最初の Pulse で門を通った相手に
+# 想起が一回出る — 発火点を移す前の「入室ごとに一回」と同じ量なので受容する
+# (docs/issues/perception_state_pushed_at_event_time.md 直し方 6)。
+_copresence_recalled: dict[str, set[str]] = {}
+_copresence_recalled_lock = threading.Lock()
 
-    Note システム完成までの繋ぎ実装。ペルソナが同じ Building に入室した際、過去の会話と
-    Memopedia ページを想起する。以前は直接 SAIMemory へ append していたが、Phase 2 で
-    知覚バッファ (kind='persona_recall') への push に変更 (消費は呼び出し元の flush)。
+
+def reset_copresence_recall_memory(persona_id: str | None = None) -> None:
+    """同席想起の「試み済み」の記憶を捨てる (テストの相互汚染の掃除用)。
+
+    ``persona_id`` を渡すとその 1 人ぶんだけ、省略すると全員ぶんを忘れる。
+    忘れた後の最初の Pulse は、同席中の相手を新顔として扱う (= 想起を一回試みる)。
+    """
+    with _copresence_recalled_lock:
+        if persona_id is None:
+            _copresence_recalled.clear()
+        else:
+            _copresence_recalled.pop(str(persona_id), None)
+
+
+def _take_copresence_newcomers(
+    persona_id: str, occupant_ids: list[str],
+) -> list[str]:
+    """同席者のうち「不在から同席へ変わった相手」だけを返し、全員を試み済みにする。
+
+    記憶に残すのは**いま同席している試み済みの相手だけ** — 居なくなった相手は
+    集合から落ちるので、次に再会したときは新顔として扱われる (再武装)。
+    戻り値は ``occupant_ids`` の順序を保つ。
+    """
+    with _copresence_recalled_lock:
+        already = _copresence_recalled.get(persona_id) or set()
+        current = set(occupant_ids)
+        newcomers = [oid for oid in occupant_ids if oid not in already]
+        # 新顔は「これから試みる」ぶんも含めて試み済みにする (門で抑制されても
+        # push に失敗しても、この同席の間は再試行しない)。
+        if current:
+            _copresence_recalled[persona_id] = current
+        else:
+            _copresence_recalled.pop(persona_id, None)
+    return newcomers
+
+
+def inject_copresence_recall(
+    persona: Any,
+    manager: Any,
+    building_id: str,
+) -> None:
+    """いま同席している相手との過去会話・Memopedia を知覚バッファへ push する。
+
+    呼ばれるのは Pulse の頭ただ一箇所 (``sea.runtime.SEARuntime.
+    _run_meta_user_locked`` の、建物発言の取り込みの直後・知覚の消費の直前)。
+    「目を覚ましたときに隣に居る相手のことを思い出す」形で、``manager.occupants``
+    の**いまの**顔ぶれを見る。
+
+    【発火の規約】
+
+    - **不在から同席へ変わった相手に一回だけ**試みる。
+    - 同席が続いている間は再発火しない (門で抑制された回も、想起が空だった回も、
+      push に失敗した回も「試み済み」— 再会は一度きりの出来事)。
+    - 相手が部屋から居なくなると再武装され、次の再会でまた発火する。
+    - プロセスを再起動するとこの記憶は消える (再起動後の最初の Pulse で同席中の
+      相手に一回出る)。記憶の実体と受容の理由は :data:`_copresence_recalled`。
+
+    【発火点を移した理由 (2026-09-07)】以前は入室の検知が出す
+    kind=``occupant_entered`` のラベルを目印に、移動の瞬間に想起を積んでいた。
+    移動の瞬間に積んだ想起は次の Pulse まで知覚バッファで待つので、その間に
+    本人が別の部屋へ移ると「もう居ない相手との再会」を思い出す嘘になる
+    (まはーの実機報告)。往復すればそのぶん想起が積み重なる欠陥も同じ根。
+    Pulse の頭で発火させれば、同じ Pulse が同席者を見て同じ Pulse で消費するので
+    どちらも構造的に消える (docs/issues/perception_state_pushed_at_event_time.md)。
+
+    【縁の記憶が要る理由 (2026-09-07 の同日追記)】発火の条件が「同席している」と
+    いう**状態**になったので、そのままだと同席中は毎 Pulse 門が開きうる (隣で
+    黙っている相手は直近の文脈に痕跡が無いため門を通り続ける)。旧実装が
+    「入室」という一回きりの出来事に紐づいていた性質を、上の「試み済み」の記憶で
+    復元する。
+
+    Note システム完成までの繋ぎ実装であることは変わらない (配送保証は無い)。
 
     【再会の門 (2026-09-05, v0.3.9)】相手が直近の文脈に居るあいだは想起しない
     (:meth:`HistoryManager.should_recall_persona`)。この繋ぎ実装は門を呼ばないまま
@@ -468,25 +511,55 @@ def _inject_persona_recall_on_enter(
 
     見出しに書く相手の名前は ``persona.id_to_name_map`` (manager と参照を共有する
     id→表示名の対応) で解決して渡す。解決できないときだけ ID のままになる。
+
+    SAIMemory が未 ready の回は静かに見送る — **記憶を触らずに**戻るので、次の
+    Pulse の頭が同じ同席を新顔としてやり直す (何も失われない)。
     """
     history_manager = getattr(persona, "history_manager", None)
-    if not history_manager:
+    if not history_manager or not building_id:
+        return
+    sai_mem = getattr(persona, "sai_memory", None)
+    if sai_mem is None or not sai_mem.is_ready():
+        # 「試み済み」を刻まずに戻る — 刻むと、起動直後の未 ready の一回で
+        # その同席まるごとの想起が永久に飛ぶ。
+        LOGGER.debug(
+            "head_pipeline: SAIMemory not ready, skipping copresence recall "
+            "(the next pulse head checks the same room again)",
+        )
         return
 
     id_to_name = getattr(persona, "id_to_name_map", None) or {}
+    self_id = getattr(persona, "persona_id", None)
+    occupants = list(getattr(manager, "occupants", {}).get(building_id, []) or [])
+    # ペルソナか、ユーザーか。訪問中のペルソナも居るので all_personas を優先する
+    # (無い manager では personas に degrade)。
+    persona_ids = set(
+        getattr(manager, "all_personas", None) or getattr(manager, "personas", {}) or {}
+    )
 
-    for label in labels:
-        if label.kind != "occupant_entered":
+    # 同席者一覧の ID は生の値 (ユーザーは数値のことがある)。旧実装は入室の
+    # 検知 (capture) が文字列へ揃えた後の値を見ていたので、同じ揃えを通す —
+    # 生のまま比較すると、門の照合 (履歴の with / audience は文字列) が
+    # 型の違いで空振りして、想起が二重に出る。「試み済み」の記憶もこの揃えた
+    # 形で持つ。
+    occupant_ids: list[str] = []
+    for raw_id in occupants:
+        occupant_id = str(raw_id) if raw_id is not None else ""
+        if not occupant_id or occupant_id == str(self_id):
             continue
-        occupant_id = label.metadata.get("occupant_id")
-        occupant_kind = label.metadata.get("occupant_kind")
+        occupant_ids.append(occupant_id)
+
+    # 想起を試みるのは「不在から同席へ変わった相手」だけ。ここで全員が試み済みに
+    # なる (下の門・想起・push の結果は問わない)。
+    newcomers = _take_copresence_newcomers(str(self_id or ""), occupant_ids)
+
+    for occupant_id in newcomers:
         # ユーザーも対ペルソナと同様に想起する (まはー裁定 2026-07-11)。
         # 従来はユーザーページの肥大化に打つ手が無く persona 限定だったが、
         # 編纂の分割 (P4-a) が肥大を受けられるようになったため前提が変わった。
         # 過去会話の検索 (audience) も個人ページの解決 (metadata.persona_id) も
         # ユーザー ID でそのまま機能する。
-        if not occupant_id or occupant_kind not in ("persona", "user"):
-            continue
+        occupant_kind = "persona" if occupant_id in persona_ids else "user"
 
         if not _should_recall_on_enter(history_manager, occupant_id, occupant_kind):
             LOGGER.debug(
@@ -513,8 +586,8 @@ def _inject_persona_recall_on_enter(
         try:
             sai_mem.push_perception("persona_recall", recall_text)
             LOGGER.info(
-                "head_pipeline: pushed persona recall perception for %s on occupant_entered",
-                occupant_id,
+                "head_pipeline: pushed persona recall perception for %s "
+                "(copresent at the pulse head)", occupant_id,
             )
         except Exception:
             LOGGER.exception(
@@ -529,8 +602,8 @@ def _should_recall_on_enter(
 
     判定の本体は :meth:`HistoryManager.should_recall_persona` (直近 20 メッセージに
     相手の痕跡 — metadata.with / audience / persona_id — があれば False)。ここは
-    繋ぎ実装からその門へ配線するだけ。``occupant_kind`` は入室ラベルの metadata が
-    運ぶ "persona" | "user" — ユーザー発言は id を持たない形 (with=["user"]) で
+    繋ぎ実装からその門へ配線するだけ。``occupant_kind`` は同席者の種別
+    "persona" | "user" — ユーザー発言は id を持たない形 (with=["user"]) で
     履歴に刻まれるため、ユーザー相手の照合には種別が要る (2026-09-06)。
 
     判定自体が失敗したときは想起する側に倒す (= 従来挙動)。門は想起の量を抑える

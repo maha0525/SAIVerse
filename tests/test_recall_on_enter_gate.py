@@ -1,13 +1,17 @@
-"""入室想起の「再会の門」と見出しの名前解決の契約テスト (v0.3.9)。
+"""同席想起の「再会の門」と見出しの名前解決の契約テスト (v0.3.9)。
 
 門が配線されていなかったため、ずっと会話している相手にも移動のたびに
 「過去会話 6 件 + 相手の Memopedia 個人ページ全文」が積まれ、本番で知覚が
 18 万字まで膨らんだ (docs/issues/archive/persona_recall_perception_unbounded.md)。
 
-ここでは繋ぎ実装 (`_inject_persona_recall_on_enter`) と本物の
+ここでは想起の繋ぎ実装 (`inject_copresence_recall`) と本物の
 `HistoryManager.should_recall_persona` / `recall_conversation_with` を繋いだまま
 検査する — 門を呼ぶ配線と、見出しに ID 生値ではなく表示名が載ることの両方が
 壊れたら落ちるようにするため。
+
+発火点は 2026-09-07 に「移動時の入室ラベル」から「Pulse の頭で、いま同席して
+いる相手」へ移った (docs/issues/perception_state_pushed_at_event_time.md)。
+門の判定規約そのものは変わっていない。
 """
 import sys
 import unittest
@@ -18,18 +22,24 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from persona.history_manager import HistoryManager
-from sea.head_pipeline.integration import _inject_persona_recall_on_enter
-from sea.head_pipeline.types import NotificationLabel
+from sea.head_pipeline.integration import (
+    inject_copresence_recall,
+    reset_copresence_recall_memory,
+)
 
 TARGET = "elis_city_a"
+ROOM = "b_air_room"
 
 
-def _enter_label(occupant_id, occupant_kind="persona"):
-    return NotificationLabel(
-        kind="occupant_entered",
-        label=f"{occupant_id} が入室しました",
-        metadata={"occupant_id": occupant_id, "occupant_kind": occupant_kind},
-    )
+class _FakeManager:
+    """同席者の列挙が読む面だけの替え玉。
+
+    ``persona_occupants`` に挙げた ID がペルソナ、それ以外の同席者はユーザー。
+    """
+
+    def __init__(self, occupants, persona_occupants):
+        self.occupants = {ROOM: list(occupants)}
+        self.personas = {oid: object() for oid in persona_occupants}
 
 
 class _FakeAdapter:
@@ -48,11 +58,16 @@ class _FakeAdapter:
 
 class RecallGateTests(unittest.TestCase):
     def setUp(self):
+        # 「同席の間は一度だけ試みる」記憶はプロセス内で共有される。同じ
+        # ペルソナ・同じ相手を何度も走らせるので、テストごとに忘れさせる。
+        reset_copresence_recall_memory()
+        self.addCleanup(reset_copresence_recall_memory)
         self.pushed = []
         self.past_messages = [
             {"role": "assistant", "content": "また会えたね", "created_at": 1750000000},
         ]
         self.sai_mem = SimpleNamespace(
+            is_ready=lambda: True,
             push_perception=lambda kind, text: self.pushed.append((kind, text)),
         )
 
@@ -69,19 +84,25 @@ class RecallGateTests(unittest.TestCase):
             if memopedia_content is not None else None
         )
         return SimpleNamespace(
+            persona_id="air_city_a",
             history_manager=hm,
+            sai_memory=self.sai_mem,
             id_to_name_map=dict(id_to_name_map or {}),
         )
 
-    def _run(self, persona, label):
+    def _run(self, persona, occupant_id, occupant_kind="persona"):
+        manager = _FakeManager(
+            [occupant_id],
+            [occupant_id] if occupant_kind == "persona" else [],
+        )
         with patch(
             "sai_memory.memopedia.storage.get_page_by_persona_id",
             return_value=self.memopedia_page,
         ):
-            _inject_persona_recall_on_enter(persona, [label], self.sai_mem)
+            inject_copresence_recall(persona, manager, ROOM)
 
     def test_recent_contact_is_not_recalled(self):
-        """直近の文脈に相手が居るなら、再入室しても想起は積まれない。
+        """直近の文脈に相手が居るなら、同席していても想起は積まれない。
 
         注 (2026-09-06): この「相手の persona_id 付き assistant 発言」は手作りの
         形で、本番の self.messages には現れない (相手の発言は取り込みで
@@ -92,7 +113,7 @@ class RecallGateTests(unittest.TestCase):
         persona = self._make_persona(messages=[
             {"role": "assistant", "content": "うん", "persona_id": TARGET},
         ])
-        self._run(persona, _enter_label(TARGET))
+        self._run(persona, TARGET)
         self.assertEqual(self.pushed, [])
 
     def test_recent_contact_via_audience_is_not_recalled(self):
@@ -111,7 +132,7 @@ class RecallGateTests(unittest.TestCase):
                 "metadata": {"audience": {"personas": [TARGET]}},
             },
         ])
-        self._run(persona, _enter_label(TARGET))
+        self._run(persona, TARGET)
         self.assertEqual(self.pushed, [])
 
     # ---- 実形テスト (2026-09-06) ------------------------------------------
@@ -122,10 +143,10 @@ class RecallGateTests(unittest.TestCase):
     #                   literal "user" — sea/runtime_emitters.py)
     #   取り込んだ発言: with = [相手ペルソナ id] / ユーザー発言は ["user"]
     #                   (builtin_data/tools/get_building_messages.py)
-    # ユーザーの入室ラベル occupant_id は素の USERID ("1")。
+    # ユーザーの同席者 ID は素の USERID ("1")。
 
     def test_user_partner_in_with_is_not_recalled(self):
-        """ユーザーと会話中の再入室では想起しない (自分の発言の with 実形)。
+        """ユーザーと会話中は想起しない (自分の発言の with 実形)。
 
         v0.3.9 の門はユーザー相手に一度も効いていなかった (backend.log
         2026-09-06 17:41:30 — 常に会話しているユーザーの入室で過去会話 6 件を
@@ -140,7 +161,7 @@ class RecallGateTests(unittest.TestCase):
                 "metadata": {"tags": ["conversation"], "with": ["1", "user"]},
             },
         ])
-        self._run(persona, _enter_label("1", occupant_kind="user"))
+        self._run(persona, "1", occupant_kind="user")
         self.assertEqual(self.pushed, [])
 
     def test_user_utterance_in_with_is_not_recalled(self):
@@ -152,7 +173,7 @@ class RecallGateTests(unittest.TestCase):
                 "metadata": {"with": ["user"], "tags": ["conversation"]},
             },
         ])
-        self._run(persona, _enter_label("1", occupant_kind="user"))
+        self._run(persona, "1", occupant_kind="user")
         self.assertEqual(self.pushed, [])
 
     def test_persona_partner_ingested_form_is_not_recalled(self):
@@ -168,14 +189,14 @@ class RecallGateTests(unittest.TestCase):
                 "metadata": {"with": [TARGET], "tags": ["conversation"]},
             },
         ])
-        self._run(persona, _enter_label(TARGET))
+        self._run(persona, TARGET)
         self.assertEqual(self.pushed, [])
 
     def test_recent_contact_via_audience_users_is_not_recalled(self):
-        """audience.users の "user_1" と入室 occupant_id "1" を同一人物と照合する。
+        """audience.users の "user_1" と同席者 ID "1" を同一人物と照合する。
 
         audience.users は add_message (heard_by) 経路の形 ("user_" 接頭辞つき)。
-        入室ラベルは素の USERID を運ぶので、門が接頭辞を剥がして照合する。
+        同席者は素の USERID を運ぶので、門が接頭辞を剥がして照合する。
         """
         persona = self._make_persona(messages=[
             {
@@ -185,7 +206,7 @@ class RecallGateTests(unittest.TestCase):
                 "metadata": {"audience": {"personas": [], "users": ["user_1"]}},
             },
         ])
-        self._run(persona, _enter_label("1", occupant_kind="user"))
+        self._run(persona, "1", occupant_kind="user")
         self.assertEqual(self.pushed, [])
 
     def test_a_persona_id_wearing_the_user_prefix_is_not_the_user(self):
@@ -206,7 +227,7 @@ class RecallGateTests(unittest.TestCase):
             }],
             id_to_name_map={"1": "まはー"},
         )
-        self._run(persona, _enter_label("1", occupant_kind="user"))
+        self._run(persona, "1", occupant_kind="user")
         self.assertEqual(len(self.pushed), 1)
 
     def test_audience_personas_are_matched_raw_not_stripped(self):
@@ -220,7 +241,7 @@ class RecallGateTests(unittest.TestCase):
             }],
             id_to_name_map={"1": "まはー"},
         )
-        self._run(persona, _enter_label("1", occupant_kind="user"))
+        self._run(persona, "1", occupant_kind="user")
         self.assertEqual(len(self.pushed), 1)
 
     def test_a_persona_id_wearing_the_user_prefix_still_matches_itself(self):
@@ -232,7 +253,7 @@ class RecallGateTests(unittest.TestCase):
                 "metadata": {"with": ["user_1"], "tags": ["conversation"]},
             },
         ])
-        self._run(persona, _enter_label("user_1", occupant_kind="persona"))
+        self._run(persona, "user_1", occupant_kind="persona")
         self.assertEqual(self.pushed, [])
 
     def test_presence_marker_alone_does_not_suppress_user_recall(self):
@@ -251,7 +272,7 @@ class RecallGateTests(unittest.TestCase):
             }],
             id_to_name_map={"1": "まはー"},
         )
-        self._run(persona, _enter_label("1", occupant_kind="user"))
+        self._run(persona, "1", occupant_kind="user")
         self.assertEqual(len(self.pushed), 1)
 
     def test_user_utterance_does_not_suppress_persona_recall(self):
@@ -264,7 +285,7 @@ class RecallGateTests(unittest.TestCase):
             }],
             id_to_name_map={TARGET: "エリス"},
         )
-        self._run(persona, _enter_label(TARGET))
+        self._run(persona, TARGET)
         self.assertEqual(len(self.pushed), 1)
 
     def test_long_absent_contact_is_recalled(self):
@@ -273,7 +294,7 @@ class RecallGateTests(unittest.TestCase):
             messages=[{"role": "user", "content": "ひとりごと"}],
             id_to_name_map={TARGET: "エリス"},
         )
-        self._run(persona, _enter_label(TARGET))
+        self._run(persona, TARGET)
         self.assertEqual(len(self.pushed), 1)
         kind, text = self.pushed[0]
         self.assertEqual(kind, "persona_recall")
@@ -286,7 +307,7 @@ class RecallGateTests(unittest.TestCase):
             id_to_name_map={"1": "まはー"},
             memopedia_content="まはーについての記録",
         )
-        self._run(persona, _enter_label("1", occupant_kind="user"))
+        self._run(persona, "1", occupant_kind="user")
         self.assertEqual(len(self.pushed), 1)
         text = self.pushed[0][1]
         self.assertIn("[想起: まはーとの過去の会話]", text)
@@ -296,7 +317,7 @@ class RecallGateTests(unittest.TestCase):
     def test_unresolvable_id_stays_raw(self):
         """表示名が引けないときだけ ID のままにする。"""
         persona = self._make_persona(messages=[], id_to_name_map={})
-        self._run(persona, _enter_label(TARGET))
+        self._run(persona, TARGET)
         self.assertEqual(len(self.pushed), 1)
         self.assertIn(f"[想起: {TARGET}との過去の会話]", self.pushed[0][1])
 
@@ -306,13 +327,15 @@ class RecallGateTests(unittest.TestCase):
             raise RuntimeError("gate broken")
 
         persona = SimpleNamespace(
+            persona_id="air_city_a",
             history_manager=SimpleNamespace(
                 should_recall_persona=_boom,
                 recall_conversation_with=lambda occupant_id, **kwargs: "recall",
             ),
+            sai_memory=self.sai_mem,
             id_to_name_map={},
         )
-        _inject_persona_recall_on_enter(persona, [_enter_label(TARGET)], self.sai_mem)
+        inject_copresence_recall(persona, _FakeManager([TARGET], [TARGET]), ROOM)
         self.assertEqual(self.pushed, [("persona_recall", "recall")])
 
 

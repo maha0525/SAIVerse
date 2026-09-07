@@ -106,18 +106,12 @@ class NotificationLabel:
     label: str  # ペルソナに見せる文 ("移動先 Building で新たに使えるようになったスペル: …")
     media: list[MediaRef] = field(default_factory=list)  # 必要なら新コンテンツを tail に attach
     metadata: dict = field(default_factory=dict)  # Section 固有の付加情報 (occupant_id 等)
-    # False = 検知はするが、ペルソナに文としては届けない。基準 (last_notified) の
-    # 前進と、kind / metadata を使う後段の処理 (再会の想起) のためだけに存在する
-    # ラベル。部屋を移ったときの同席者がこれ — 顔ぶれは「部屋の様子」が運ぶので
-    # 文は要らないが、基準を新しい部屋まで進めないと以後の入退室の差分が出ない
+    # False = 検知はするが、ペルソナに文としては届けない。基準 (last_notified) を
+    # 前進させるためだけに存在するラベル。部屋を移ったときの同席者がこれ —
+    # 顔ぶれは「部屋の様子」が運ぶので文は要らないが、基準を新しい部屋まで
+    # 進めないと以後の入退室の差分が出ない
     # (2026-09-07、docs/issues/perception_state_pushed_at_event_time.md)。
     deliver: bool = True
-    # このラベルを出した Section の名前。Section 実装は設定しない —
-    # :meth:`HeadPipeline.flush_diffs` が diff の呼び出し元の名前で刻む。配送側
-    # (integration._push_section_diffs) が「どの Section が文を届けたか」を
-    # Section 単位で判定するために要る: 届けた Section の基準は進め、
-    # deliver=False だけの Section は想起を積める状態のときだけ進める。
-    section: str = ""
 
 
 @dataclass

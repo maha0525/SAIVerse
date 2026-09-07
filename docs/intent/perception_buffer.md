@@ -43,7 +43,7 @@ Pulse と Pulse の間にペルソナ宛てに発生した知覚イベントを�
 | 経路 | 実装 | Pulse で消費? | 永続化 | 逸脱 |
 |---|---|---|---|---|
 | 世界状態の差分（入退室 / アイテム / スペル / Memopedia 索引 等） | Cached Head の各 Section `diff_to_notifications` → `inject_diff_notifications` (`sea/head_pipeline/integration.py:139`) | ✅ Pulse 開始時 (`sea/runtime.py:129`, `sea/runtime_context.py:190`) | ✅ event_message 1 通 | **snapshot 差分**であってイベントバッファではない。中間イベントを保持せず B/C 比較で net 差分を出す。状態で表せない一発イベントを表現できない。プレビュー用の常設バッファが無い |
-| 入室時の過去会話想起 | `_inject_persona_recall_on_enter` (`integration.py:197`) | △ Pulse だが差分通知の**副作用**として別メッセージ | ✅ 別 event_message | 同一 Pulse なのに**2 通目**を足す（③「同一 Pulse は 1 メッセージ」違反）。enter が畳まれても道連れにできない |
+| 同席の相手の過去会話想起 | `inject_copresence_recall`（`integration.py`。2026-09-07 までは移動時の入室ラベルを目印にする `_inject_persona_recall_on_enter` だった） | △ Pulse だが差分通知の**副作用**として別メッセージ | ✅ 別 event_message | 同一 Pulse なのに**2 通目**を足す（③「同一 Pulse は 1 メッセージ」違反）。enter が畳まれても道連れにできない |
 | メタ記憶訂正（ユーザーがコア記憶を edit/delete/restore） | `_notify_persona_correction` (`api/routes/people/core_memory.py`) | ❌ **編集した瞬間**に即書き込み | ✅ 即時 event_message | **時間が止まっているペルソナが即座に記憶を得る**＝時間モデル違反。一括操作で通知スパム（2026-07-09 応急停止済み） |
 | 他ペルソナの Building 内発話 | `auto_ingest_building_messages` | ✅ 次 Pulse で取り込み | ✅ 会話として | Pulse 消費だが知覚バッファとは別経路。畳み込み対象外 |
 | 自動想起 | `sea/auto_recall.py` | ✅ Pulse | ❌ 非永続 | 別枠でよい（§2）。混同注意 |
@@ -86,7 +86,7 @@ Pulse と Pulse の間にペルソナ宛てに発生した知覚イベントを�
 | 型 | reduce | 備考 |
 |---|---|---|
 | occupant 入退室 | 同一対象の enter と leave が未消費バッファ内に両方あれば**相殺して消える**。片方だけなら net の在/不在変化として残る | まはー案。検知（§4.5）で enter/leave が別々に積まれ、消費時 reduce で畳まれて消える |
-| 入室時想起 | 対応する enter が相殺で消えたら道連れで消える。残るなら本文に統合 | 現行の 2 通目別メッセージを廃し、統合フローに畳む |
+| 同席の相手の想起 | 本文に統合する | 現行の 2 通目別メッセージを廃し、統合フローに畳む。当初あった「対応する enter が相殺で消えたら道連れで消える」規則は 2026-09-07 に不要になった — 想起は入室の出来事ではなく Pulse の頭の同席から積まれ、同じ Pulse で消費されるので、相殺の対象になる enter がそもそも無い |
 | メタ記憶訂正 | 同一コア記憶への複数操作を最新状態＋件数に集約（「N 件のコア記憶が更新された」等） | 一括操作のスパムをここで吸収。応急停止の恒久対応 |
 | アイテム / スペル / 索引差分 | 現行 Section の diff ロジックを型付き項目として移植 | §5 参照 |
 
@@ -137,7 +137,7 @@ reduce は「型 → マージ関数」の汎用基盤にする。新しい知�
 
 - Section は **head 描画のための snapshot** を持つ責務は維持する（Cached Head の不変条件 C1〜C6 はそのまま）。
 - **snapshot 比較（`diff_to_notifications`）は状態型 event の検知器として残す**。ただし (1) 実行タイミングを消費から切り離して**検知タイミング（プレビュー / Pulse / 定期）で走らせ**（§4.5）、(2) 出力先を「直接 SAIMemory へ注入」から「永続バッファへ型付き項目として投入」に変える。これにより状態型も一発イベントと同じ器に入り、reduce とプレビューの対象になる。
-- 消費（flush）は Section 横断で 1 箇所（知覚バッファ）に集約し、`inject_diff_notifications` + `_inject_persona_recall_on_enter` + `_notify_persona_correction` の**3 直挿入経路を撤去して 1 本化**する。
+- 消費（flush）は Section 横断で 1 箇所（知覚バッファ）に集約し、`inject_diff_notifications` + 想起（現 `inject_copresence_recall`）+ `_notify_persona_correction` の**3 直挿入経路を撤去して 1 本化**する。
 
 （注: 撤去するのは「バッファを迂回する直接注入経路」であって、snapshot 比較そのものではない。snapshot 比較は「検知器」として残り、消費とは独立に走る（§4.5）。検知の実装が型で違う（状態型＝snapshot 比較、非状態型＝発生時 push）のは並存する二経路ではなく、単一の永続バッファへの型別入力。）
 
@@ -156,7 +156,9 @@ Cached Head が「Metabolism まで snapshot を凍結」、visual_context / mem
 **対応**: head は凍結のまま、tail (知覚バッファ) で新しい景色を届ける。
 - **メディア channel**: 知覚バッファに `media` 列 (JSON) を追加。push/list/flush で画像 ref を運び、flush が全知覚のメディアを path 重複排除で集約して event_message の `metadata.media` に載せる (`NotificationLabel.media` / `append_persona_message` の media 対応は既存)。
 - **移動時 push**: `on_building_entered` で移動した本人へ `get_visual_context(include_self=False, for_perception=True)` の内容 (他ペルソナ外見画像 + 内装画像 + Building 内アイテム〔**無い時も明示**〕+ Fixture) を kind=`surroundings` で push。self は head と重複するので除外。消費は本人の次 Pulse。
-- **移動時に本人へ積むのは移動の事実と部屋の様子だけ (2026-09-07 改訂)**: 状態の差分の検知 (`inject_diff_notifications`) は移動時には `only_sections={"building", "building_occupants"}` に絞り、**積む (= ペルソナに文が届く) のは移動通知だけ**にする。在室者を対象に含めるのは配送のためではなく、部屋替えの分岐が出す配送しないラベル (`NotificationLabel.deliver=False`) で比較の基準を新しい部屋の顔ぶれへ合わせ、再会の想起を発火させるため — 外すと基準が旧部屋のまま残り、本人が Pulse を打つ前に誰かが同じ部屋へ入ってきた回まで「部屋替え」の比較に化けて、入室の知らせが消える。スペル・Memopedia 等の差分は **Pulse 開始時の検知**が「最後に知らせた状態 vs 今」で計算する。移動のたびに途中経過を積むと、次の Pulse で読まれる頃には別の部屋の話になっている (往復すれば差し引きゼロなのに、よその部屋の在室通知と、失って戻っただけのスペルの得喪が全部残る)。移動通知そのものは本物の出来事なので従来どおり移動時に積み、往復は回収 ([room_state_packages.md](room_state_packages.md) §11-2) が経路一行に畳む。経緯: [issues/perception_state_pushed_at_event_time.md](../issues/perception_state_pushed_at_event_time.md)。
+- **移動時に本人へ積むのは移動の事実と部屋の様子だけ (2026-09-07 改訂)**: 状態の差分の検知 (`inject_diff_notifications`) は移動時には `only_sections={"building", "building_occupants"}` に絞り、**積む (= ペルソナに文が届く) のは移動通知だけ**にする。在室者を対象に含めるのは配送のためではなく、部屋替えの分岐が出す配送しないラベル (`NotificationLabel.deliver=False`) で比較の基準を新しい部屋の顔ぶれへ合わせるため — 外すと基準が旧部屋のまま残り、本人が Pulse を打つ前に誰かが同じ部屋へ入ってきた回まで「部屋替え」の比較に化けて、入室の知らせが消える。スペル・Memopedia 等の差分は **Pulse 開始時の検知**が「最後に知らせた状態 vs 今」で計算する。移動のたびに途中経過を積むと、次の Pulse で読まれる頃には別の部屋の話になっている (往復すれば差し引きゼロなのに、よその部屋の在室通知と、失って戻っただけのスペルの得喪が全部残る)。移動通知そのものは本物の出来事なので従来どおり移動時に積み、往復は回収 ([room_state_packages.md](room_state_packages.md) §11-2) が経路一行に畳む。経緯: [issues/perception_state_pushed_at_event_time.md](../issues/perception_state_pushed_at_event_time.md)。
+- **再会の想起は Pulse の頭で「いま同席している相手」から積む (2026-09-07 改訂)**: `inject_copresence_recall(persona, manager, building_id)` を Pulse 開始の頭 (`sea/runtime.py` の `run_meta_user`、**建物発言の取り込みの後・知覚の消費の前**) から呼び、その部屋にいま居る相手 (`manager.occupants` から自分を除いた顔ぶれ) それぞれに再会の門 (`HistoryManager.should_recall_persona`) を通して、通った相手の過去会話・Memopedia を kind=`persona_recall` で積む。取り込みの後に置くのは、直前に喋った相手の発言を履歴に入れてから門に見せるため — 前だと会話中の相手が「久しぶりの相手」に化ける。旧実装は移動の瞬間に入室ラベル (kind=`occupant_entered`) を目印にして積んでいたため、読まれる次の Pulse までに本人がさらに移動すると「もう居ない相手との再会」が届き、往復のたびに同じ想起が積み重なった (まはーの実機報告)。Pulse の頭なら同じ Pulse が発火して同じ Pulse で消費するので、どちらも構造的に消える。ユーザーも対象 (まはー裁定 2026-07-11)、門の判定が失敗したときは想起する側に倒す、SAIMemory が未 ready の回は次の Pulse の頭でやり直す。
+  - **同席の間は一回だけ**: 発火の条件が「同席している」という状態になったので、そのままだと隣で黙っている相手 (門を通り続ける相手) に毎 Pulse 想起が積まれる。プロセス内に「不在から同席へ変わった相手を、その同席の間に試み済みか」の記憶を持たせて、旧実装が「入室」という一回きりの出来事に紐づいていた性質を復元する。門で抑制された回も、想起が空だった回も、push に失敗した回も試み済み (再会は一度きりの出来事)。相手が部屋から居なくなると再武装され、次の再会でまた発火する。プロセス再起動でこの記憶は消え、再起動後の最初の Pulse で同席中の相手に一回出る — 旧実装の「入室ごとに一回」と同じ量なので受容する。SAIMemory が未 ready の回だけは記憶を触らずに戻る (次の Pulse が新顔としてやり直す)。作業セッション (`sea/work_session.py`) にはこの一手を置かない — 建物発言の取り込みも世界状態の検知も持たない Pulse root で、門に見せる会話の文脈がそもそも組まれていない。
 - **入室を既存者へ**: 併せて、`on_building_entered` は居合わせる既存ペルソナ全員にも occupant 検知を push する (新入りに自分の次 Pulse を待たず気づける)。
 - **知覚バッファ向けの整形** (2026-07-09): head 記法をそのまま入れるとごちゃつくため:
   - flush の format は **kind グルーピングでなく発生順**。移動を跨いだとき「後から入室した相手が前の部屋にいた」ように見える崩れを防ぐ。**一出来事一ラベル** (2026-09-07): 出来事 1 件ごとに見出しを付ける。当初あった「連続する world_state だけ 1 見出しにまとめる」合流 (通知の乱発対策) は退役 — 乱発の供給源 (移動通知の堆積) は回収 ([room_state_packages.md](room_state_packages.md) §11-2) が往復を経路一行に畳むようになり、行頭の `[システム通知]` が出来事の区切りの印になった ([issues/archive/perception_event_boundaries_unclear.md](../issues/archive/perception_event_boundaries_unclear.md) の裁定)。
@@ -194,7 +196,7 @@ Cached Head が「Metabolism まで snapshot を凍結」、visual_context / mem
 
 - **Phase 0（応急・完了）**: メタ記憶訂正の SAIMemory 挿入停止（2026-07-09。通知スパム回避。Phase 1 で恒久対応に置換済み）。
 - **Phase 1a（実機検証済み, 2026-07-09）**: 知覚バッファの器（**永続ストア** `sai_memory/perception_buffer.py`・型付き項目・型別 reduce・Pulse 消費で 1 メッセージ flush・検知と消費の分離〈§4.5〉）を実装。メタ記憶訂正を最初の利用者として載せ替え（`_notify_persona_correction` → `adapter.push_perception`、reduce_key=`c:{id}` で同一記憶の連続操作を集約）。消費は `run_meta_user` 冒頭の `flush_perception_buffer`（全 Pulse タイプの単一入口）。**quon_city_a で実機確認**: コア記憶3件を復元→バッファに3件溜まる（SAIMemory 0）→会話（Pulse）で1メッセージに畳まれ SAIMemory へ→バッファ空、まで全経路通過。
-- **Phase 2a（3直挿入撤去・実機検証済み 2026-07-09）**: 世界状態差分（world_state）・入室想起（persona_recall）・メタ記憶訂正の**3直挿入を全廃**し、全て知覚バッファへ push → 呼び出し元の flush で消費する形に統一。`inject_diff_notifications` は検知器（push）に降格、snapshot 比較は残す（§9-B）。4呼び出しサイトの timing 契約を検知/消費分離（§4.5）で一貫化: pulse開始=全Sectionを検知して末尾flush / pulse中(metabolism直後)=即flush / 移動時(pulse外)=移動の事実だけを push し(検知の対象は building と building_occupants の 2 つで、後者は文を届けず基準合わせと再会の想起だけ)、消費は次 pulse(＝主観時間停止中の知覚は詰まって待つ、が正しくなった)。**移動時に積む範囲は 2026-09-07 に「全 Section の差分」から「移動の事実だけ」へ絞った**（§5.4 の同日改訂。状態の差分は pulse 開始時の計算に任せる）。
+- **Phase 2a（3直挿入撤去・実機検証済み 2026-07-09）**: 世界状態差分（world_state）・想起（persona_recall）・メタ記憶訂正の**3直挿入を全廃**し、全て知覚バッファへ push → 呼び出し元の flush で消費する形に統一。`inject_diff_notifications` は検知器（push）に降格、snapshot 比較は残す（§9-B）。4呼び出しサイトの timing 契約を検知/消費分離（§4.5）で一貫化: pulse開始=全Sectionを検知して末尾flush（同席の相手への再会の想起もここ） / pulse中(metabolism直後)=即flush / 移動時(pulse外)=移動の事実だけを push し(検知の対象は building と building_occupants の 2 つで、後者は文を届けず基準合わせだけ)、消費は次 pulse(＝主観時間停止中の知覚は詰まって待つ、が正しくなった)。**移動時に積む範囲は 2026-09-07 に「全 Section の差分」から「移動の事実だけ」へ絞り、同日に再会の想起の発火点も移動時のラベルから pulse 開始時の同席チェックへ移した**（§5.4 の同日改訂）。
 - **Phase 1b / 2b（設計フォーク・未着手）**: **起動力ディスパッチャ（§4.4）＋会話取り込み（auto_ingest）統合**。「絶対反応する」フラグを §3.1 全契機に付与し、他ペルソナ発話が Pulse を起こせるようにする。これは**新能力＝Phase 5 UC-2（対ペルソナ social Track 入口）と重なる**（単なる rewire でなく、(1) 会話型知覚を flush で個別メッセージとして render する拡張、(2) salience 判定ルール、(3) pulse_controller/AutonomyManager との接続、の設計判断を含む）。Phase 5 と足並みを揃えて設計してから実装する。※メタ記憶訂正・world_state・persona_recall は起動力なし（溜まる）なので 2a では不要だった。
 - **Phase 3（閲覧・実機検証済み 2026-07-09）**: 未消費バッファの**閲覧（read-only）**を `ContextPreviewModal` に 1 section「知覚バッファ（未消費・次のPulseで反映）」として追加（`preview_context` が list_pending→reduce→format で実 flush と同じ形に畳み、section・トークン推定を返す。フロントは section 汎用描画なので変更不要）。read-only 徹底: プレビューで検知（snapshot 比較）は走らせない（snapshot を進める副作用回避）ので、既に溜まっている未消費分のみ表示。項目編集（削除 / 抑制 / 本文）とペルソナホームからのアクセスは後続。
 - **Phase 4（構想）**: 凍結概念（Cached Head / visual / weave）の知覚バッファ一般形への寄せ。

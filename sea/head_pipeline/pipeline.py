@@ -411,9 +411,7 @@ class HeadPipeline:
         (outbox mark_applied) した後に :meth:`advance_last_notified` で B を進める。
         配送前に B を進めると、配送失敗時に差分が永久に失われる (SEA 監査 S3)。
         差分が出た section の dirty マークも据え置く (= 配送失敗時は次回 flush で
-        再検出される)。返すラベルには出所の Section 名 (``NotificationLabel.section``)
-        を刻む — 呼び出し側が Section ごとに「文を届けたか」を判定して B の
-        前進を分けるため (2026-09-07)。
+        再検出される)。
 
         ``only`` を渡すと、チェック対象をその名前の集合との積に絞る。移動の瞬間に
         「移動の事実」だけを届ける呼び出し (saiverse/dynamic_state.on_building_entered、
@@ -482,11 +480,6 @@ class HeadPipeline:
                     continue
 
                 if section_labels:
-                    # ラベルに出所の Section 名を刻む。呼び出し側は
-                    # (labels, detected) の二つを突き合わせるだけでは「どの
-                    # Section が文を届けたか」を分けられない。
-                    for label in section_labels:
-                        label.section = section.name
                     labels.extend(section_labels)
                     detected[section.name] = new_snapshot
                     if advance:

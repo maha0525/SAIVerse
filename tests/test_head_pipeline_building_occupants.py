@@ -3,16 +3,15 @@
 固定する仕様 (docs/issues/perception_state_pushed_at_event_time.md):
 
 1. 部屋が変わった回の occupants の diff は ``deliver=False`` の occupant_entered
-   ラベルを返す (文面と metadata は従来どおり — ログと想起の発火に使う)。
+   ラベルを返す (文面と metadata は従来どおり — ログに残す)。
 2. 台帳経路: deliver=False だけの回は outbox に積まれず、基準 (last_notified) は
    進む。以後は新しい部屋の顔ぶれとの比較になるので、同じ部屋での入退室が正しく
    出る。
 3. 直接経路 (台帳なし): deliver=False は push されず、基準は進む。
-4. 再会の想起は deliver=False のラベルからも発火する (目印は kind と metadata)。
+4. 再会の想起はこの検知器からは発火しない — 発火点は Pulse の頭の同席チェック
+   (``integration.inject_copresence_recall``、tests/test_copresence_recall.py)。
 5. 入室 hook は在室者も検知の対象にする — 移動した本人が Pulse を打つ前に誰かが
    同じ部屋へ入ってきても、それが「入室しました」として届く。
-6. 配送あり・なしが混じる回で SAIMemory が未 ready なら、文を届けた Section の
-   基準だけ進め、deliver=False だけの Section は据え置く (想起を落とさない)。
 """
 from __future__ import annotations
 
@@ -61,7 +60,7 @@ def test_room_change_yields_silent_occupant_labels():
     assert len(labels) == 1
     assert labels[0].kind == "occupant_entered"
     assert labels[0].deliver is False
-    # 文面と metadata は従来どおり (ログと想起の発火に使う)
+    # 文面と metadata は従来どおり (ログに残す)
     assert labels[0].label == "エリス がいます"
     assert labels[0].metadata == {"occupant_id": "elis", "occupant_kind": "persona"}
 
@@ -77,7 +76,6 @@ def test_room_change_into_an_empty_room_still_yields_one_silent_label():
     labels = section.diff_to_notifications(old, new)
     assert len(labels) == 1
     assert labels[0].deliver is False
-    # 想起 (kind=occupant_entered が目印) は発火させない
     assert labels[0].kind == "occupants_baseline"
 
 
@@ -270,51 +268,48 @@ def test_ledger_path_moving_through_an_empty_room_keeps_entries_visible(session_
     assert [p["content"] for p in payloads] == ["アイフィ が入室しました"]
 
 
-def test_ledger_path_silent_labels_keep_baseline_while_memory_is_not_ready(session_factory):
-    """SAIMemory 未 ready の回は基準を進めない (想起が永久に消えるのを防ぐ)。"""
+def test_ledger_path_silent_labels_advance_the_baseline_even_without_memory(
+    session_factory,
+):
+    """deliver=False だけの回の基準は SAIMemory の状態に関わらず進む。
+
+    このラベルにはもう後段の処理が無い (再会の想起は Pulse の頭の同席チェックへ
+    移った、2026-09-07) ので、SAIMemory が未 ready でも基準を据え置く理由が無い。
+    据え置くと、その部屋での以後の入退室が古い部屋との比較になって出なくなる。
+    """
     ledger = ExecutionLedger(session_factory=session_factory)
-    manager = _FakeManager({ROOM_A: [], ROOM_B: ["elis"]}, ledger=ledger)
+    occupants = {ROOM_A: [], ROOM_B: ["elis"]}
+    manager = _FakeManager(occupants, ledger=ledger)
     pipeline = _pipeline()
     pipeline.capture_all(_ctx(ROOM_A, manager))
     sai_mem = _FakeMemory(ready=False)
-    persona = _persona(sai_mem, recall_text="[想起: エリスとの過去の会話]")
+    persona = _persona(sai_mem)
 
-    # 1) 未 ready: 何も届かず、想起も出ない
+    # 1) 未 ready の部屋替え: 何も届かない
     assert inject_diff_notifications(
         persona, manager, ROOM_B, pipeline=pipeline, model_key=MODEL,
         detect_room=False,
     ) is False
     assert sai_mem.pushed == []
+    assert _outbox_payloads(session_factory) == []
 
-    # 2) ready になったら同じ差分が再検出され、想起が出る (= 基準は据え置かれていた)
+    # 2) 基準は新しい部屋まで進んでいる → 同じ部屋での入室は届く
     sai_mem.ready = True
+    occupants[ROOM_B] = ["elis", "aifi"]
     assert inject_diff_notifications(
         persona, manager, ROOM_B, pipeline=pipeline, model_key=MODEL,
         detect_room=False,
-    ) is False
-    assert sai_mem.pushed == [("persona_recall", "[想起: エリスとの過去の会話]")]
-
-    # 3) 今度は基準が進んでいるので、同じ状態では再検出されない
-    inject_diff_notifications(
-        persona, manager, ROOM_B, pipeline=pipeline, model_key=MODEL,
-        detect_room=False,
-    )
-    assert len(sai_mem.pushed) == 1
-    assert _outbox_payloads(session_factory) == []
+    ) is True
+    assert [
+        p["content"] for p in _outbox_payloads(session_factory)
+    ] == ["アイフィ が入室しました"]
 
 
-def test_ledger_path_keeps_the_silent_baseline_when_memory_is_not_ready_in_a_mixed_round(
-    session_factory,
-):
-    """混在の回でも、想起を積めない回は在室者の基準を進めない。
-
-    文を届けた Section (chatty) は outbox に載った以上そのまま進める。同じ回に
-    紛れた deliver=False だけの Section (在室者) まで一緒に進めると、SAIMemory が
-    未 ready で想起が積めなかったのに基準だけ新しい部屋へ動き、その入室が二度と
-    差分に出ない。
-    """
+def test_ledger_path_advances_every_detected_section_in_a_mixed_round(session_factory):
+    """配送あり・なしが混じる回でも、検知した Section は一律に基準が進む。"""
     ledger = ExecutionLedger(session_factory=session_factory)
-    manager = _FakeManager({ROOM_A: [], ROOM_B: ["elis"]}, ledger=ledger)
+    occupants = {ROOM_A: [], ROOM_B: ["elis"]}
+    manager = _FakeManager(occupants, ledger=ledger)
 
     registry = HeadSectionRegistry()
     registry.register(BuildingOccupantsSection())
@@ -323,10 +318,9 @@ def test_ledger_path_keeps_the_silent_baseline_when_memory_is_not_ready_in_a_mix
     pipeline.capture_all(_ctx(ROOM_A, manager))
     registry.by_name("chatty").live_text = "変わった"
 
-    sai_mem = _FakeMemory(ready=False)
-    persona = _persona(sai_mem, recall_text="[想起: エリスとの過去の会話]")
+    persona = _persona(_FakeMemory())
 
-    # 1) 未 ready の混在回: 届ける文は載るが、想起は積めない
+    # 1) 混在回: 届ける文だけが outbox に載る
     assert inject_diff_notifications(
         persona, manager, ROOM_B, pipeline=pipeline, model_key=MODEL,
         detect_room=False,
@@ -334,16 +328,12 @@ def test_ledger_path_keeps_the_silent_baseline_when_memory_is_not_ready_in_a_mix
     assert [
         p["content"] for p in _outbox_payloads(session_factory)
     ] == ["chatty が変わりました"]
-    assert sai_mem.pushed == []
 
-    # 2) ready 復帰: 在室者は基準が据え置かれていたので再検出されて想起が出る。
-    #    chatty は基準が進んでいるので二重には載らない。
-    sai_mem.ready = True
+    # 2) 何も変わらなければ再検出されない (両 Section とも基準が進んでいる)
     assert inject_diff_notifications(
         persona, manager, ROOM_B, pipeline=pipeline, model_key=MODEL,
         detect_room=False,
     ) is False
-    assert sai_mem.pushed == [("persona_recall", "[想起: エリスとの過去の会話]")]
     assert [
         p["content"] for p in _outbox_payloads(session_factory)
     ] == ["chatty が変わりました"]
@@ -457,11 +447,11 @@ def test_direct_path_skips_delivery_but_advances_baseline():
 
 
 # ---------------------------------------------------------------------------
-# 4. 再会の想起は配送しないラベルからも発火する
+# 4. 再会の想起はこの検知器からは発火しない (発火点は Pulse の頭の同席チェック)
 # ---------------------------------------------------------------------------
 
 
-def test_recall_fires_from_silent_occupant_label_via_ledger(session_factory):
+def test_diff_detection_does_not_fire_recall_via_ledger(session_factory):
     ledger = ExecutionLedger(session_factory=session_factory)
     manager = _FakeManager({ROOM_A: [], ROOM_B: ["elis"]}, ledger=ledger)
     pipeline = _pipeline()
@@ -474,10 +464,10 @@ def test_recall_fires_from_silent_occupant_label_via_ledger(session_factory):
         detect_room=False,
     )
     assert _outbox_payloads(session_factory) == []       # 文は届けない
-    assert sai_mem.pushed == [("persona_recall", "[想起: エリスとの過去の会話]")]
+    assert sai_mem.pushed == []                          # 想起もここでは積まない
 
 
-def test_recall_fires_from_silent_occupant_label_direct():
+def test_diff_detection_does_not_fire_recall_direct():
     manager = _FakeManager({ROOM_A: [], ROOM_B: ["elis"]})
     pipeline = _pipeline()
     pipeline.capture_all(_ctx(ROOM_A, manager))
@@ -488,4 +478,4 @@ def test_recall_fires_from_silent_occupant_label_direct():
         persona, manager, ROOM_B, pipeline=pipeline, model_key=MODEL,
         detect_room=False,
     )
-    assert sai_mem.pushed == [("persona_recall", "[想起: エリスとの過去の会話]")]
+    assert sai_mem.pushed == []

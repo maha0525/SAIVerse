@@ -211,7 +211,7 @@ pending Track:
 
 既存 `persona/history_manager.py` の `recall_conversation_with` を新基盤上に再実装。
 
-**v0.3.0 繋ぎ実装 (2026-06-07)**: Note 完成前の暫定として、head pipeline の `occupant_entered` 差分通知時に `recall_conversation_with()` を呼び、過去会話 + Memopedia を SAIMemory に注入する実装を投入済み (`integration.py:_inject_persona_recall_on_enter`)。
+**v0.3.0 繋ぎ実装 (2026-06-07)**: Note 完成前の暫定として、`recall_conversation_with()` を呼んで過去会話 + Memopedia を知覚バッファへ積む実装を投入済み (`integration.py:inject_copresence_recall`)。発火は Pulse の頭 (建物発言の取り込みの後) の「いま同席している相手」の走査で、同席が続いている間は一回だけ — 2026-09-07 までは head pipeline の `occupant_entered` 差分通知 (= 移動の瞬間) が目印だった。
 
 **新基盤での再会フロー (設計 target)**:
 
@@ -234,7 +234,7 @@ pending Track:
 - [ ] `track_parameter_set` ツールでペルソナ自身がパラメータを書き換えられる
 - [ ] SomaticHandler / ScheduledHandler / PerceptualHandler のうち少なくとも 1 つが運用ペルソナで動作確認済み
 - [ ] ScheduleManager と並走して、Track 経由のスケジュール起因 alert が動く
-- [ ] ペルソナ再会機能が occupancy レイヤー経由の Person Note 自動開封で動き、v0.3.0 繋ぎ実装 (`_inject_persona_recall_on_enter`) が Note 経由に差し替えられる
+- [ ] ペルソナ再会機能が occupancy レイヤー経由の Person Note 自動開封で動き、v0.3.0 繋ぎ実装 (`inject_copresence_recall`) が Note 経由に差し替えられる
 - [ ] 時間差ツール基盤が動作し、少なくとも 1 つの個別ツール (Kitchen 完了 / MCP Elicitation / dispatch 等) が基盤上で結果配送できる
 
 ---
