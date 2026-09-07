@@ -270,6 +270,8 @@ protobuf==6.33.5
     #   googleapis-common-protos
     #   onnxruntime
     #   xai-sdk
+psutil==7.2.2
+    # via -r requirements.txt
 py-rust-stemmers==0.1.5
     # via fastembed
 pyasn1==0.6.2

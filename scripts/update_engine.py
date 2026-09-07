@@ -566,18 +566,33 @@ def _process_create_time(pid: int) -> float | None:
 
 
 def _process_alive(pid: int) -> bool:
+    """Whether ``pid`` is still running, via psutil only.
+
+    Fail closed: without psutil "cannot check" is indistinguishable from
+    "already exited", and guessing "exited" once let the updater run beside a
+    live backend (docs/issues/self_update_unsafe_without_psutil.md), so the
+    honest answer is to abort the update instead of guessing.
+    """
     try:
         import psutil
-
+    except Exception as exc:
+        # ImportError に限定しない: 壊れた拡張モジュールは import 自体が
+        # OSError 等で失敗しうる。main() は UpdateError しか捕まえないので、
+        # ここで変換しないと更新プロセスが記録なしの未処理例外で終わる。
+        raise UpdateError(
+            "psutil is unavailable or broken, so the main process cannot be"
+            " confirmed to have exited; aborting the update instead of guessing"
+        ) from exc
+    try:
         return bool(psutil.pid_exists(pid))
-    except Exception:
-        if sys.platform == "win32":
-            return _process_create_time(pid) is not None
-        try:
-            os.kill(pid, 0)
-            return True
-        except OSError:
-            return False
+    except Exception as exc:
+        # 壊れたインストールや ABI 不整合で probe 自体が失敗することがある。
+        # main() は UpdateError しか捕まえないので、素通しすると DETACHED
+        # プロセスでは痕跡の無い未処理例外になる — 判定できないなら中止する。
+        raise UpdateError(
+            f"psutil could not determine whether PID {pid} is still running"
+            f" ({exc}); aborting the update instead of guessing"
+        ) from exc
 
 
 def _identity_matches(pid: int, expected_created_at: float | None) -> bool:
@@ -591,9 +606,15 @@ def wait_for_owned_process_exit(
     pid: int,
     expected_created_at: float | None,
     *,
-    timeout: float = 30.0,
+    timeout: float = 120.0,
 ) -> None:
-    """Wait for the recorded process; only terminate that verified identity."""
+    """Wait for the recorded process; only terminate that verified identity.
+
+    ``_process_alive`` raising (psutil missing) propagates as-is — fail closed
+    rather than proceeding beside a possibly-live backend. The timeout is long
+    because a large world's shutdown can exceed 30 seconds and overrunning it
+    ends in terminating a backend that is still writing its records.
+    """
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if not _process_alive(pid):

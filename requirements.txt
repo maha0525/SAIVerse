@@ -41,6 +41,11 @@ uvicorn>=0.52.4
 python-multipart>=0.0.9
 cryptography>=45.0.0
 tzdata
+# Process liveness checks for the updater's "wait for the main process to
+# exit" (scripts/update_engine.py) and the runtime-marker double-run guard
+# (saiverse/runtime_marker.py). Both are safety checks that fail closed
+# without it, so it is a hard requirement, not an optional accelerator.
+psutil>=7.0.0
 
 # SAIMemory embeddings
 fastembed>=0.7.3

@@ -426,6 +426,42 @@ async def trigger_update():
     if not updater_script.exists():
         raise HTTPException(status_code=500, detail="Update script not found")
 
+    # Determine venv python path — the interpreter the updater actually runs on.
+    if sys.platform == "win32":
+        venv_python = str(project_path / ".venv" / "Scripts" / "python.exe")
+    else:
+        venv_python = str(project_path / ".venv" / "bin" / "python")
+
+    # UI 更新で走るアップデータは更新前のチェックアウトのもの。psutil 無しでは
+    # アップデータの終了待ちが fail-closed で中止し、バックエンドだけが落ちて
+    # 戻らない (docs/issues/self_update_unsafe_without_psutil.md)。断るなら
+    # 本体が生きているうちに断る。検査は API プロセス自身の import ではなく、
+    # アップデータが実際に使う venv の interpreter で行う (両者は別インストール
+    # でありうる)。import だけでなく create_time() まで呼ぶのは、壊れた
+    # インストールで import は通るが呼び出しで死ぬ場合を掬うため。
+    try:
+        probe = subprocess.run(
+            [
+                venv_python,
+                "-c",
+                "import os, psutil; psutil.Process(os.getpid()).create_time()",
+            ],
+            capture_output=True,
+            timeout=15,
+        )
+        probe_failed = probe.returncode != 0
+    except (OSError, subprocess.SubprocessError):
+        probe_failed = True
+    if probe_failed:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "この環境には更新の安全確認に必要な部品 (psutil) がまだ入っていません。"
+                "SAIVerse を終了してから update.bat (macOS / Linux は update.sh) を"
+                "一度実行してください。それ以降はこのボタンから更新できます。"
+            ),
+        )
+
     # Refuse before shutdown if update cannot preserve local work. The engine
     # repeats this check after shutdown to close the race.
     try:
@@ -437,12 +473,6 @@ async def trigger_update():
 
     manager = app_state.manager
     backend_port = manager.ui_port if manager else 8000
-
-    # Determine venv python path
-    if sys.platform == "win32":
-        venv_python = str(project_path / ".venv" / "Scripts" / "python.exe")
-    else:
-        venv_python = str(project_path / ".venv" / "bin" / "python")
 
     try:
         import psutil
