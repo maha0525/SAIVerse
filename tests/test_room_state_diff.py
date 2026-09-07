@@ -259,6 +259,8 @@ class RoomBundleCompositionTest(_EnvTestBase):
         bundle = self.env.bundle()
         text = render_room_full(bundle)
         self.assertIn("# 「工房」の様子", text)
+        # 同席者は名乗りの一行 + 外見 (「がいます」廃止後の唯一の運び手、2026-09-07)
+        self.assertIn("- エリス (ID:p2)", text)
         self.assertIn("[エリスの外見]", text)
         self.assertIn("[システムプロンプト]", text)
         self.assertIn("静かに集中できる場所です。", text)
@@ -409,7 +411,8 @@ class RenderRoomDiffContractTest(_EnvTestBase):
     def test_a_left_persona_is_reported_by_label(self):
         self.env.manager.occupants["b1"] = ["p1", "42"]
         diff = render_room_diff(self.before, self.env.bundle())
-        self.assertIn("- [エリスの外見]", diff["content"])
+        # label は名乗りの形 — 退場の報告が「- [エリスの外見]」にならない
+        self.assertIn("- エリス (ID:p2)", diff["content"])
 
 
 class CrossFamilyKeyTest(_EnvTestBase):
