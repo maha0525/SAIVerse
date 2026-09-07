@@ -67,6 +67,13 @@ class SessionLifecycle:
         # しないようにする (Codex 指摘 2026-09-03)。
         self._chronicle_failures_lock = threading.Lock()
         self._chronicle_failures: Dict[str, Dict[str, Any]] = {}
+        # generate_chronicle が "ok" で閉じた直近の走行の内訳 (編纂 / 吸収 /
+        # 発話ゼロの残り — 機構 G、docs/intent/chronicle_coverage_gaps.md)。
+        # 失敗理由と同じ器の形: 戻り値の契約 (status 文字列) を変えずに、
+        # 補修ジョブが完了メッセージへ内訳を写せるようにする口。persona_id を
+        # キーにして走行の重なりで混ざらないようにする (失敗理由と同じ理由)。
+        # 錠は _chronicle_failures_lock を共用する。
+        self._chronicle_breakdowns: Dict[str, Dict[str, Any]] = {}
         # 「一度だけ警告」の既出集合 2 つを守る錠。集合への「確認して追加」は
         # 素のままだと原子的でなく、並行呼び出しで同じ警告が重複する。錠が
         # 覆うのは判定+追加のごく短い区間だけで、警告本体 (LOGGER 呼び出し)
@@ -4842,6 +4849,45 @@ class SessionLifecycle:
                 self._chronicle_failure_key(persona_id), None,
             )
 
+    def _note_chronicle_breakdown(
+        self, persona_id: Optional[str], breakdown: Dict[str, Any],
+    ) -> None:
+        """generate_chronicle が "ok" を返す直前に、走行の内訳を persona ごとに保持する。
+
+        内訳 (機構 G): ``compiled_messages`` = 新しい一次あらすじに編纂した
+        メッセージ数 / ``absorbed_messages`` = 隣のあらすじへ合流した
+        メッセージ数。残り (未被覆のまま終わった分) は三系統:
+        ``silent_messages`` = 発話ゼロで自動編纂しなかった分 (``silent_runs``
+        はその run 数) / ``skipped_messages`` = 吸収の skip で未被覆のまま
+        残った分 (``skipped_reasons`` は理由別 {理由: メッセージ数}) /
+        ``deferred_messages`` = fold 照会失敗で吸収を見送った分
+        (``deferred_runs`` はその run 数)。
+        """
+        with self._chronicle_failures_lock:
+            self._chronicle_breakdowns[
+                self._chronicle_failure_key(persona_id)
+            ] = breakdown
+
+    def _reset_chronicle_breakdown(self, persona_id: Optional[str]) -> None:
+        with self._chronicle_failures_lock:
+            self._chronicle_breakdowns.pop(
+                self._chronicle_failure_key(persona_id), None,
+            )
+
+    def pop_last_chronicle_breakdown(
+        self, persona_id: Optional[str],
+    ) -> Optional[Dict[str, Any]]:
+        """その persona の直近の "ok" 走行の内訳を返して消す (無ければ None)。
+
+        補修ジョブ (api/routes/people/arasuji.py の _run_coverage_repair_job)
+        が完了メッセージへ「編纂 N 件 / 合流 M 件 / 残り K 件」を写すのに使う
+        — 残りがあるのに完了の顔だけで終わらない (機構 G)。
+        """
+        with self._chronicle_failures_lock:
+            return self._chronicle_breakdowns.pop(
+                self._chronicle_failure_key(persona_id), None,
+            )
+
     def generate_chronicle(
         self,
         persona,
@@ -4905,6 +4951,7 @@ class SessionLifecycle:
         # その理由には触れない)。
         _failure_persona_id = getattr(persona, "persona_id", None)
         self._reset_chronicle_failure(_failure_persona_id)
+        self._reset_chronicle_breakdown(_failure_persona_id)
 
         try:
             model_id, model_config, _weave_source = resolve_memory_weave_config(
@@ -5052,6 +5099,9 @@ class SessionLifecycle:
         absorption_plan = None
         pending_stale_count = 0
         _stale_marker = False
+        # fold 照会失敗で吸収を見送った極小 run の勘定 (機構 G の「残り」)。
+        _deferred_tiny_runs = 0
+        _deferred_tiny_messages = 0
         _full_plan_end_id = (
             plan.chunks[-1].messages[-1].id if plan.chunks else None
         )
@@ -5119,10 +5169,17 @@ class SessionLifecycle:
                 plan, target_chars=chronicle_band_budget(),
             )
             if _tiny_chunks and folded_entry_ids is None:
+                # 見送った run のメッセージ数は内訳の「残り」に理由つきで
+                # 数える (機構 G) — 成功の顔で隠さない。
+                _deferred_tiny_runs = len(_tiny_chunks)
+                _deferred_tiny_messages = sum(
+                    len(c.messages) for c in _tiny_chunks
+                )
                 LOGGER.warning(
-                    "[metabolism] %d tiny run(s) deferred: folds unknown, "
-                    "neighbors cannot be safely reopened this round",
-                    len(_tiny_chunks),
+                    "[metabolism] %d tiny run(s) (%d messages) deferred: "
+                    "folds unknown, neighbors cannot be safely reopened "
+                    "this round",
+                    len(_tiny_chunks), _deferred_tiny_messages,
                 )
                 plan = normal_plan
             elif _tiny_chunks:
@@ -5146,7 +5203,16 @@ class SessionLifecycle:
                     )
                     self._note_chronicle_failure(_failure_persona_id, exc)
                     return "failed"
-                plan = normal_plan
+                # 吸収できない発話あり run (機構 E) は通常チャンクとして
+                # 整列計画へ合流させる — 参考文脈つきの通常の生成で独立の
+                # 一次あらすじにする。LLM 数は合流先 (plan.llm_calls) が
+                # 数えるので absorption 側とは二重計上しない。
+                from sai_memory.arasuji.absorption import (
+                    merge_standalone_chunks,
+                )
+                plan = merge_standalone_chunks(
+                    normal_plan, absorption_plan, all_messages,
+                )
         _absorption_calls = (
             absorption_plan.llm_calls if absorption_plan is not None
             else pending_stale_count
@@ -5154,6 +5220,36 @@ class SessionLifecycle:
         _absorption_work = (
             _absorption_calls > 0 or pending_stale_count > 0 or _stale_marker
         )
+
+        def _note_breakdown(
+            compiled: int, absorbed: int, *,
+            skipped_messages: int = 0,
+            skipped_reasons: Optional[Dict[str, int]] = None,
+        ) -> None:
+            """走行の内訳 (機構 G) を記録する — 補修ジョブが完了文へ写す。
+
+            発話ゼロ (silent) と fold 照会失敗の見送り (deferred) は計画段階で
+            確定しているので、仕事なしの早期 return でもここを通す — silent
+            だけの走行が内訳なしの完了顔で終わらない。
+            """
+            payload: Dict[str, Any] = {
+                "compiled_messages": compiled,
+                "absorbed_messages": absorbed,
+                "silent_messages": (
+                    absorption_plan.silent_message_count
+                    if absorption_plan is not None else 0
+                ),
+                "silent_runs": (
+                    absorption_plan.silent_runs
+                    if absorption_plan is not None else 0
+                ),
+                "deferred_messages": _deferred_tiny_messages,
+                "deferred_runs": _deferred_tiny_runs,
+                "skipped_messages": skipped_messages,
+            }
+            if skipped_reasons:
+                payload["skipped_reasons"] = dict(skipped_reasons)
+            self._note_chronicle_breakdown(_failure_persona_id, payload)
 
         try:
             from sai_memory.arasuji.bands import EST_PARENT_CHARS
@@ -5179,7 +5275,11 @@ class SessionLifecycle:
                 "[metabolism] Nothing to compile or consolidate "
                 "(%d unprocessed messages)", plan.total_unprocessed,
             )
-            # 編纂対象なし = claim せず no-op (退役は許す)。
+            # 編纂対象なし = claim せず no-op (退役は許す)。silent / deferred の
+            # 残りは計画段階で確定しているので、内訳はここでも記録する —
+            # 発話ゼロだけの走行が「残り K 件」を落として完了顔にならない
+            # (機構 G)。
+            _note_breakdown(0, 0)
             return "ok"
 
         unprocessed_count = plan.total_unprocessed
@@ -5518,6 +5618,10 @@ class SessionLifecycle:
         # 吸収の実行 (全量計画のみ)。通常チャンクの編纂 (execute_plan) より先
         # — 歯抜けの古い区間を先に治し、上位あらすじを新しくしてから後続の
         # 生成に「これまでの流れ」を引かせる (裁定 4 の時系列たたみ込み)。
+        _absorbed_messages = 0  # 隣のあらすじへ合流したメッセージ数 (機構 G)
+        # skip されて未被覆のまま残った run のメッセージ数と理由別内訳 (機構 G)。
+        _skipped_messages = 0
+        _skipped_reasons: Dict[str, int] = {}
         if _absorption_work:
             from sai_memory.arasuji.absorption import run_absorption
 
@@ -5586,17 +5690,27 @@ class SessionLifecycle:
                     len(absorption_result.merged_entries),
                 )
                 return "deferred"
+            _absorbed_messages = absorption_result.absorbed_run_message_count
+            _skipped_messages = absorption_result.skipped_run_message_count
+            _skipped_reasons = dict(absorption_result.skipped_reasons)
+            if _skipped_messages:
+                LOGGER.warning(
+                    "[metabolism] absorption left %d run message(s) uncovered "
+                    "(reasons=%s); they count as remainder in the completion "
+                    "breakdown",
+                    _skipped_messages, _skipped_reasons,
+                )
             if (
                 absorption_result.merged_entries
                 or absorption_result.regenerated_upper_ids
             ):
                 LOGGER.info(
-                    "[metabolism] absorption done: %d merged, %d reopened, "
-                    "%d upper regenerated, %d unresolved run(s)",
+                    "[metabolism] absorption done: %d merged (%d run "
+                    "messages), %d reopened, %d upper regenerated",
                     len(absorption_result.merged_entries),
+                    absorption_result.absorbed_run_message_count,
                     len(absorption_result.reopened_entry_ids),
                     len(absorption_result.regenerated_upper_ids),
-                    absorption_result.unresolved_runs,
                 )
 
         # 本編の開始をここで報告する (前段の吸収を跨いだ後)。
@@ -5884,6 +5998,18 @@ class SessionLifecycle:
                 ledger.mark_completed(execution_id)
             except Exception:
                 LOGGER.warning("[metabolism] ledger apply/complete failed", exc_info=True)
+
+        # 走行の内訳 (機構 G): 補修ジョブが完了メッセージへ写す。編纂 =
+        # 新しい一次あらすじに入ったメッセージ数 (E の単独編纂も plan に
+        # 合流済みなのでここに含まれる) / 吸収 = 隣のあらすじへ合流した run
+        # メッセージ数 / 残り = 発話ゼロ (silent) + 吸収の skip で未被覆の
+        # まま残った分 (skipped) + fold 照会失敗の見送り (deferred)。
+        _note_breakdown(
+            sum(e.message_count for e in exec_result.created),
+            _absorbed_messages,
+            skipped_messages=_skipped_messages,
+            skipped_reasons=_skipped_reasons,
+        )
 
         # Notify frontend that generation is complete
         if event_callback:

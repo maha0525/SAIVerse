@@ -236,8 +236,14 @@ class TestExcluded(BandTestBase):
 
 
 class TestUncompiledGap(BandTestBase):
-    """隣接ノード間の未編纂の生ログを跨いで畳まない (偽の隣接と孤児化の防止 —
-    Codex レビュー 2026-07-28 high1)。"""
+    """穴 (未編纂の生ログ) と未統合の下位ノードの扱い。
+
+    2026-09-08 の設計変更 (docs/intent/chronicle_coverage_gaps.md 機構 A・B)
+    で仕様が変わった: 穴は畳みの境界ではなくなり (統合は穴を跨ぐ)、代わりに
+    材料へ不明期間の一行として明示される。未統合の下位ノードの境界だけが残る
+    (順に畳めば解消する一時状態のため)。旧テスト
+    ``test_fold_does_not_span_uncompiled_gap`` (穴で切れることの固定) は
+    新仕様の検証 (跨いで一つに計画 + 注記) へ書き換えた。"""
 
     def _eligible_message(self, created_at):
         from sai_memory.memory.storage import add_message
@@ -245,9 +251,10 @@ class TestUncompiledGap(BandTestBase):
             self.conn, "main", "user", "未編纂の取り残し", created_at=created_at,
         )
 
-    def test_fold_does_not_span_uncompiled_gap(self):
+    def test_fold_spans_uncompiled_hole_as_one(self):
         # 前半 2 件と後半 7 件の間に、どの一次あらすじにも入っていない
-        # 編纂対象メッセージが居る。
+        # 編纂対象メッセージ (穴) が居る。機構 A: 畳み範囲は穴を跨いで
+        # 一つに計画される (旧仕様は穴の手前で切れて帯が肥大した)。
         front = [
             _entry(self.conn, start=1000 + i * 100, coverage=10_000)
             for i in range(2)
@@ -260,16 +267,38 @@ class TestUncompiledGap(BandTestBase):
         client = _Client()
         created = run_band_overflow(self.conn, client)
         self.assertEqual(created, 1)
+        self.assertEqual(client.calls, 1)
         parent = _band_parents(self.conn)[0]
-        ids = set(parent.source_ids)
-        # 範囲はギャップを跨がない — 前半だけ、または後半だけ。
-        self.assertTrue(
-            ids <= {e.id for e in front} or ids <= {e.id for e in rear},
+        # 古い側 5 件 = 前半 2 件 + 後半 3 件 — 穴を跨いだ一つの畳み。
+        self.assertEqual(
             parent.source_ids,
+            [e.id for e in front] + [e.id for e in rear[:3]],
         )
 
-    def test_compiled_messages_do_not_create_gap(self):
-        # 全メッセージがいずれかの一次あらすじの source なら境界は立たない。
+    def test_hole_note_is_in_the_material_with_count_and_period(self):
+        # 機構 B: 材料組成の穴の位置に、件数と期間つきの決定論の一行が挟まり、
+        # 地続きに繋げない指示が足される (本文へ「不明」と書けとは指示しない)。
+        from sai_memory.arasuji.generator import _format_timestamp
+        for i in range(2):
+            _entry(self.conn, start=1000 + i * 100, coverage=10_000)
+        self._eligible_message(1500)
+        self._eligible_message(2500)
+        for i in range(7):
+            _entry(self.conn, start=3000 + i * 100, coverage=10_000)
+        client = _Client()
+        self.assertEqual(run_band_overflow(self.conn, client), 1)
+        prompt = client.prompts[0]
+        self.assertIn(
+            "(この間に、まだあらすじになっていない記録が 2 件ある: "
+            f"期間 {_format_timestamp(1500)}〜{_format_timestamp(2500)})",
+            prompt,
+        )
+        self.assertIn("地続きの出来事として繋げない", prompt)
+        self.assertNotIn("不明」と書", prompt)
+
+    def test_compiled_messages_do_not_create_hole_note(self):
+        # 全メッセージがいずれかの一次あらすじの source なら穴は無く、
+        # 注記も指示も入らない。
         from sai_memory.memory.storage import add_message
         mids = []
         for i in range(9):
@@ -279,8 +308,11 @@ class TestUncompiledGap(BandTestBase):
             mids.append(mid)
             _entry(self.conn, start=1000 + i * 100, coverage=10_000,
                    source_ids=[mid])
-        created = run_band_overflow(self.conn, _Client())
+        client = _Client()
+        created = run_band_overflow(self.conn, client)
         self.assertEqual(created, 1)
+        self.assertNotIn("まだあらすじになっていない記録", client.prompts[0])
+        self.assertNotIn("地続きの出来事として繋げない", client.prompts[0])
 
     def test_upper_level_does_not_span_unconsolidated_lower_node(self):
         """レベル2 の並びは、間に居る未統合の一次あらすじを跨がない —
@@ -306,11 +338,12 @@ class TestUncompiledGap(BandTestBase):
         lv1_ids = [i.entry.id for i in rows.get(1, [])]
         self.assertIn(straggler.id, lv1_ids)
 
-    def test_same_second_later_message_is_not_a_false_gap(self):
-        """境界の判定は正典順序 (created_at, rowid) — 同じ秒でも両ノードの
+    def test_same_second_later_message_is_not_a_false_hole(self):
+        """穴の判定は正典順序 (created_at, rowid) — 同じ秒でも両ノードの
         source より後の rowid のメッセージは「間」ではない
-        (Codex レビュー 2026-07-28 二巡 medium)。"""
-        from sai_memory.arasuji.bands import _load_rows
+        (Codex レビュー 2026-07-28 二巡 medium。境界の判定から穴の検出
+        (_hole_between、機構 B) へ移した後も同じ精度を保つ)。"""
+        from sai_memory.arasuji.bands import _hole_between
         from sai_memory.memory.storage import add_message
         m_a = add_message(self.conn, "main", "user", "a", created_at=1000)
         m_b = add_message(self.conn, "main", "user", "b", created_at=1000)
@@ -320,14 +353,11 @@ class TestUncompiledGap(BandTestBase):
                     source_ids=[m_b])
         # 同じ秒だが rowid は m_b より後 = 正典順序では両ノードより新しい。
         add_message(self.conn, "main", "user", "後から来た未編纂", created_at=1000)
-        rows = _load_rows(self.conn)
-        row1 = rows[1]
-        self.assertEqual([i.entry.id for i in row1], [e1.id, e2.id])
-        self.assertFalse(row1[1].gap_before)
+        self.assertIsNone(_hole_between(self.conn, e1, e2))
 
-    def test_same_second_in_between_message_is_a_gap(self):
-        """同じ秒でも rowid が両ノードの source の間なら境界が立つ。"""
-        from sai_memory.arasuji.bands import _load_rows
+    def test_same_second_in_between_message_is_a_hole(self):
+        """同じ秒でも rowid が両ノードの source の間なら穴として数えられる。"""
+        from sai_memory.arasuji.bands import _hole_between
         from sai_memory.memory.storage import add_message
         m_a = add_message(self.conn, "main", "user", "a", created_at=1000)
         add_message(self.conn, "main", "user", "間の未編纂", created_at=1000)
@@ -336,10 +366,239 @@ class TestUncompiledGap(BandTestBase):
                     source_ids=[m_a])
         e2 = _entry(self.conn, start=1000, end=1000, coverage=5_000,
                     source_ids=[m_b])
+        self.assertEqual(_hole_between(self.conn, e1, e2), (1, 1000, 1000))
+
+
+class TestOrphanReconnection(BandTestBase):
+    """後から埋まった穴の繋ぎ直し (chronicle_coverage_gaps 機構 C、2026-09-08)。
+
+    上位あらすじの被覆期間に内包された未統合エントリは、孤児として並びから
+    除外するのではなく、内包する最下層の上位の子として繋ぎ、上位から最上位
+    までを content_stale に回す (語り直しは既存の stale flush に乗せる)。"""
+
+    def test_contained_lv1_reconnects_into_lowest_upper_and_marks_stale(self):
+        from sai_memory.arasuji.bands import reconnect_contained_orphans
+        from sai_memory.arasuji.storage import mark_consolidated
+        c1 = _entry(self.conn, start=0, end=2_000, coverage=10_000)
+        c2 = _entry(self.conn, start=8_000, end=10_000, coverage=10_000)
+        lv2 = _entry(self.conn, start=0, end=10_000, coverage=20_000, level=2,
+                     origin="band", source_ids=[c1.id, c2.id])
+        lv3 = _entry(self.conn, start=0, end=50_000, coverage=40_000, level=3,
+                     origin="band", source_ids=[lv2.id])
+        mark_consolidated(self.conn, [c1.id, c2.id], lv2.id)
+        mark_consolidated(self.conn, [lv2.id], lv3.id)
+        # 後から埋まった穴の一次あらすじ — lv2 (と lv3) の被覆期間に内包。
+        late = _entry(self.conn, start=3_000, end=4_000, coverage=1_000)
+        reconnected = reconnect_contained_orphans(self.conn)
+        self.assertEqual(reconnected, [late.id])
+        # 繋ぎ先は内包する最下層の上位 = lv2 (lv3 ではない)。
+        lv2_after = get_entry(self.conn, lv2.id)
+        self.assertIn(late.id, lv2_after.source_ids)
+        late_after = get_entry(self.conn, late.id)
+        self.assertTrue(late_after.is_consolidated)
+        self.assertEqual(late_after.parent_id, lv2.id)
+        # 上位から最上位まで stale — 次の flush が語り直す。
+        self.assertEqual(_entry_meta(self.conn, lv2.id).get("content_stale"), 1)
+        self.assertEqual(_entry_meta(self.conn, lv3.id).get("content_stale"), 1)
+        # 冪等 — もう孤児は居ない。
+        self.assertEqual(reconnect_contained_orphans(self.conn), [])
+
+    def test_shrunken_parent_does_not_adopt_the_next_orphan_in_the_same_run(self):
+        """1 パスにつき縁組 1 件 + 毎パス読み直し (Codex 三巡目): 縁組後の帳簿の
+        引き直しで親の期間は実子の合算まで**縮み**うる。同じ回の次の孤児を古い
+        スナップショットで判定すると、縮んだ期間の外の孤児を誤って縁組する。"""
+        from sai_memory.arasuji.bands import reconnect_contained_orphans
+        from sai_memory.arasuji.storage import mark_consolidated
+        c1 = _entry(self.conn, start=0, end=2_000, coverage=10_000)
+        # 宣言期間 0..10,000 だが実子は c1 (0..2,000) だけの親。
+        parent = _entry(self.conn, start=0, end=10_000, coverage=20_000, level=2,
+                        origin="band", source_ids=[c1.id])
+        mark_consolidated(self.conn, [c1.id], parent.id)
+        # 孤児 Y (3,000..4,000): 縁組されると引き直しで親の期間は 0..4,000 に縮む。
+        orphan_y = _entry(self.conn, start=3_000, end=4_000, coverage=1_000)
+        # 孤児 Z (8,000..9,000): 旧宣言では内包、縮んだ期間では外。
+        orphan_z = _entry(self.conn, start=8_000, end=9_000, coverage=1_000)
+
+        reconnected = reconnect_contained_orphans(self.conn)
+
+        self.assertEqual(reconnected, [orphan_y.id])
+        parent_after = get_entry(self.conn, parent.id)
+        self.assertEqual(parent_after.end_time, 4_000)  # 縮みの検算
+        z_after = get_entry(self.conn, orphan_z.id)
+        self.assertFalse(z_after.is_consolidated)  # 誤縁組されない
+        self.assertNotIn(orphan_z.id, parent_after.source_ids)
+
+    def test_refresh_failure_before_adoption_keeps_child_unconsolidated(self):
+        """書き込み順の fail-safe: stale (refresh_ancestor_bookkeeping) が先、
+        縁組 (add_to_parent_source_ids) が後。refresh が失敗したら縁組は行われず、
+        子は未統合のまま次回の走査対象に残る — 逆順だと、子は並びから消えたのに
+        上位が永久に古いまま残る (次回の走査は is_consolidated=0 しか見ない)。"""
+        from unittest.mock import patch
+        from sai_memory.arasuji.bands import reconnect_contained_orphans
+        from sai_memory.arasuji.storage import mark_consolidated
+        c1 = _entry(self.conn, start=0, end=2_000, coverage=10_000)
+        lv2 = _entry(self.conn, start=0, end=10_000, coverage=10_000, level=2,
+                     origin="band", source_ids=[c1.id])
+        mark_consolidated(self.conn, [c1.id], lv2.id)
+        late = _entry(self.conn, start=3_000, end=4_000, coverage=1_000)
+        with patch(
+            "sai_memory.arasuji.storage.refresh_ancestor_bookkeeping",
+            side_effect=RuntimeError("bookkeeping down"),
+        ):
+            with self.assertRaises(RuntimeError):
+                reconnect_contained_orphans(self.conn)
+        # 縁組は行われていない — 子は並びに残り、親の source_ids も無傷。
+        self.assertFalse(get_entry(self.conn, late.id).is_consolidated)
+        self.assertNotIn(late.id, get_entry(self.conn, lv2.id).source_ids)
+        # 帳簿が直った次回の走査が拾い直す。
+        self.assertEqual(reconnect_contained_orphans(self.conn), [late.id])
+        self.assertTrue(get_entry(self.conn, late.id).is_consolidated)
+
+    def test_run_band_overflow_reconnects_even_without_folds(self):
+        """繋ぎ直しの実行場所は統合の実行経路 (run_band_overflow の冒頭) —
+        予算超過が無い回でも保守ステップとして走る。"""
+        from sai_memory.arasuji.storage import mark_consolidated
+        c1 = _entry(self.conn, start=0, end=2_000, coverage=10_000)
+        lv2 = _entry(self.conn, start=0, end=10_000, coverage=10_000, level=2,
+                     origin="band", source_ids=[c1.id])
+        mark_consolidated(self.conn, [c1.id], lv2.id)
+        late = _entry(self.conn, start=3_000, end=4_000, coverage=1_000)
+        client = _Client()
+        self.assertEqual(run_band_overflow(self.conn, client), 0)
+        self.assertEqual(client.calls, 0)
+        self.assertTrue(get_entry(self.conn, late.id).is_consolidated)
+        self.assertIn(late.id, get_entry(self.conn, lv2.id).source_ids)
+
+    def test_reconnect_failure_sets_the_incomplete_marker(self):
+        """繋ぎ直しの例外は握り潰したまま完了の顔をしない (2026-09-08) —
+        未完了の印を立てて帯の「前回の処理が完了していません」に乗せる。
+        統合そのものは従来どおり続行する (途中で止めない — 印だけ)。"""
+        from unittest.mock import patch
+        from sai_memory.arasuji.absorption import is_repair_incomplete
+        for i in range(9):  # 9 × 600 = 5,400 > 5,000 → 発火する
+            _entry(self.conn, start=1000 + i * 100, coverage=10_000)
+        client = _Client()
+        with patch(
+            "sai_memory.arasuji.bands.reconnect_contained_orphans",
+            side_effect=RuntimeError("reconnect down"),
+        ):
+            created = run_band_overflow(self.conn, client)
+        self.assertEqual(created, 1)  # 統合は止まらない
+        self.assertTrue(is_repair_incomplete(self.conn))
+
+    def test_reconnect_marker_survives_absorption_no_work(self):
+        """reconnect 失敗の印は吸収の未完了の印と別の理由 (Codex 二巡採用 1) —
+        次回の run_absorption が仕事なし (no_work) で「完了」と判定しても、
+        消えるのは吸収の印だけで、reconnect の残債は帯の促しに残り続ける。
+        消えるのは reconnect が例外なく走り切った回 (run_band_overflow 冒頭の
+        保守ステップ)。"""
+        from unittest.mock import patch
+        from sai_memory.arasuji.absorption import (
+            is_repair_incomplete,
+            run_absorption,
+        )
+        client = _Client()
+        with patch(
+            "sai_memory.arasuji.bands.reconnect_contained_orphans",
+            side_effect=RuntimeError("reconnect down"),
+        ):
+            run_band_overflow(self.conn, client)
+        self.assertTrue(is_repair_incomplete(self.conn))
+        # 吸収の no_work は自分の理由の印だけを外す — reconnect の印は残る。
+        run_absorption(self.conn, client, None)
+        self.assertTrue(is_repair_incomplete(self.conn))
+        # reconnect が走り切った回 (畳みゼロでも保守ステップは走る) に消える。
+        self.assertEqual(run_band_overflow(self.conn, client), 0)
+        self.assertFalse(is_repair_incomplete(self.conn))
+
+    def test_clean_reconnect_run_does_not_clear_the_absorption_marker(self):
+        """逆方向の検算: reconnect が走り切っても、吸収の未完了の印 (別の
+        理由の残債) は消えない — 消してよいのは run_absorption だけ。"""
+        from sai_memory.arasuji.absorption import (
+            is_repair_incomplete,
+            set_repair_incomplete,
+        )
+        set_repair_incomplete(self.conn)  # 吸収の未完了 (reason 既定値)
+        self.assertEqual(run_band_overflow(self.conn, _Client()), 0)
+        self.assertTrue(is_repair_incomplete(self.conn))
+
+    def test_adoption_refreshes_parent_bookkeeping_immediately(self):
+        """縁組成功の直後に親の帳簿を引き直す (Codex 二巡採用 2)。縁組
+        (add_to_parent_source_ids) は source_ids / parent_id / is_consolidated
+        しか書かないので、引き直さないと親の期間・件数系は次の stale flush
+        まで新しい子を含まない — その間、診断や次の繋ぎ直しの内包判定が
+        古い期間で行われる。"""
+        from sai_memory.arasuji.bands import reconnect_contained_orphans
+        from sai_memory.arasuji.storage import mark_consolidated
+        c1 = _entry(self.conn, start=0, end=2_000, coverage=10_000)
+        lv2 = _entry(self.conn, start=0, end=10_000, coverage=10_000, level=2,
+                     origin="band", source_ids=[c1.id])
+        mark_consolidated(self.conn, [c1.id], lv2.id)
+        late = _entry(self.conn, start=3_000, end=4_000, coverage=1_000)
+        self.assertEqual(reconnect_contained_orphans(self.conn), [late.id])
+        # 期間は生存子 (c1 + late) の合算 — 新しい子 (end=4,000) を含む。
+        lv2_after = get_entry(self.conn, lv2.id)
+        self.assertEqual(lv2_after.start_time, 0)
+        self.assertEqual(lv2_after.end_time, 4_000)
+        meta = _entry_meta(self.conn, lv2.id)
+        self.assertEqual(meta.get("source_count"), 2)
+        self.assertEqual(meta.get("message_count"), 2)
+
+    def test_deleted_container_does_not_orphan_the_entry(self):
+        """孤児判定の親候補は繋ぎ直しの親候補と同じ集合 (勘定の一致、
+        2026-09-08) — 削除済みページに内包されただけのエントリを孤児として
+        並びから外すと、繋ぎ直し (削除済みを親にできない) が永久に回収できず、
+        発火の前検査だけが数え続ける空振りになる。"""
+        from sai_memory.arasuji.bands import (
+            _load_rows,
+            reconnect_contained_orphans,
+        )
+        from sai_memory.arasuji.storage import mark_consolidated
+        c1 = _entry(self.conn, start=0, end=2_000, coverage=10_000)
+        lv2 = _entry(self.conn, start=0, end=10_000, coverage=10_000, level=2,
+                     origin="band", source_ids=[c1.id])
+        mark_consolidated(self.conn, [c1.id], lv2.id)
+        late = _entry(self.conn, start=3_000, end=4_000, coverage=1_000)
+        self.conn.execute(
+            "UPDATE memopedia_pages SET is_deleted = 1 WHERE id = ?",
+            (lv2.id,),
+        )
+        self.conn.commit()
+        # 繋ぎ直しは削除済みを親にしない
+        self.assertEqual(reconnect_contained_orphans(self.conn), [])
+        # だから並びからも外さない — 通常の統合対象として立つ
         rows = _load_rows(self.conn)
-        row1 = rows[1]
-        self.assertEqual([i.entry.id for i in row1], [e1.id, e2.id])
-        self.assertTrue(row1[1].gap_before)
+        self.assertIn(late.id, [i.entry.id for i in rows.get(1, [])])
+
+    def test_same_level_containment_is_not_orphaned(self):
+        """同レベルの entry に内包されるだけのもの (期間 0 秒の一括インポート
+        産 Lv1 等) は孤児ではなく、通常の並びに立つ。繋ぎ直しの対象でもない
+        (重複被覆は別課題 — docs/issues/lv1_source_ids_duplicates_and_orphans.md)。"""
+        from sai_memory.arasuji.bands import (
+            _load_rows,
+            reconnect_contained_orphans,
+        )
+        big = _entry(self.conn, start=1_000, end=5_000, coverage=10_000)
+        small = _entry(self.conn, start=2_000, end=3_000, coverage=1_000)
+        rows = _load_rows(self.conn)
+        ids = [i.entry.id for i in rows.get(1, [])]
+        self.assertIn(big.id, ids)
+        self.assertIn(small.id, ids)
+        self.assertEqual(reconnect_contained_orphans(self.conn), [])
+        self.assertFalse(get_entry(self.conn, small.id).is_consolidated)
+
+    def test_same_level_contained_entry_still_folds_normally(self):
+        """同レベル内包のエントリが並びに戻っても統合は壊れない — 発火すれば
+        普通に材料へ入って畳まれる。"""
+        big = _entry(self.conn, start=1_000, end=5_000, coverage=10_000)
+        small = _entry(self.conn, start=2_000, end=3_000, coverage=1_000)
+        for i in range(7):
+            _entry(self.conn, start=6_000 + i * 100, coverage=10_000)
+        client = _Client()
+        self.assertEqual(run_band_overflow(self.conn, client), 1)
+        parent = _band_parents(self.conn)[0]
+        self.assertIn(big.id, parent.source_ids)
+        self.assertIn(small.id, parent.source_ids)
 
 
 class TestApprovedCallCap(BandTestBase):

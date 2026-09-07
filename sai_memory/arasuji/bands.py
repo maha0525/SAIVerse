@@ -234,9 +234,11 @@ class _RowItem:
     end_time: Optional[int]
     entry: Optional[ArasujiEntry] = None  # dry の模擬ノードでは None
     excluded: bool = False  # 圧縮区間として提示中 — 畳まず、字数も数えない
-    #: 直前のノードとの間に「未編纂の編纂対象メッセージ」が居る = 畳み範囲は
-    #: この手前で切れる (跨ぐと偽の隣接になり、後から編纂されたあらすじが
-    #: 親の被覆範囲に内包されて孤児化する — Codex レビュー 2026-07-28 high1)。
+    #: 直前のノードとの間に「未統合の下位レベルノード」が居る = 畳み範囲は
+    #: この手前で切れる (跨ぐとその下位ノードが親の被覆範囲に内包されて
+    #: 孤児化する)。未編纂の生ログ (穴) はもう境界にしない — 統合は穴を
+    #: 跨ぎ、穴は材料への不明期間の注記として LLM に明示する
+    #: (docs/intent/chronicle_coverage_gaps.md 機構 A・B、2026-09-08)。
     gap_before: bool = False
 
     @property
@@ -251,8 +253,13 @@ def _load_rows(
 ) -> Dict[int, List[_RowItem]]:
     """レベル別の並び = {level: 未束ねノードの時系列列}。
 
-    - 孤児 (他 entry の被覆範囲に真に内包される未束ねノード) は並びから外す —
-      畳むと同じ体験を二重に覆うため (回収は別課題、現状維持で残る)。
+    - 孤児 (**自分より上位**の entry の被覆範囲に真に内包される未束ねノード)
+      は並びから外す — 畳むと同じ体験を二重に覆うため。回収は
+      :func:`reconnect_contained_orphans` (統合の実行経路の保守ステップ) が
+      内包する上位へ繋ぎ直す (chronicle_coverage_gaps 機構 C、2026-09-08)。
+      同レベルの entry に内包されるだけのもの (期間 0 秒の一括インポート産
+      Lv1 等) は孤児ではなく、通常の並びに立つ (重複被覆は別課題 —
+      docs/issues/lv1_source_ids_duplicates_and_orphans.md)。
     - ``excluded_entry_ids`` (圧縮区間として提示コンテキストに表示中の digest)
       は字数の勘定からも畳み対象からも外すが、**並びには残す** (excluded
       マーク)。畳みの範囲はこれを跨がない。
@@ -271,11 +278,19 @@ def _load_rows(
     ).fetchall()
     coverage = _coverage_index(conn)
 
-    # 孤児判定用: 全 chronicle entry の被覆範囲。
+    # 孤児判定用: chronicle entry の被覆範囲 (level つき — 判定は
+    # 「自分より上位に内包されるか」だけを見る)。絞り込みは
+    # :func:`reconnect_contained_orphans` の親候補と**同じ** (trunk・削除済み・
+    # Track 時代の行を除く) — ここだけ広いと、繋ぎ直しが親にできないページ
+    # (例: 削除済み) に内包されたエントリが、並びから外れたまま誰にも回収
+    # されない (勘定の一致、2026-09-08)。
     ranges = conn.execute(
-        "SELECT id, json_extract(metadata, '$.start_time'), "
+        "SELECT id, json_extract(metadata, '$.level'), "
+        "json_extract(metadata, '$.start_time'), "
         "json_extract(metadata, '$.end_time') "
-        "FROM memopedia_pages WHERE category = 'chronicle'"
+        "FROM memopedia_pages WHERE category = 'chronicle' AND is_trunk = 0 "
+        "AND (is_deleted = 0 OR is_deleted IS NULL) "
+        "AND json_extract(metadata, '$.origin_track_id') IS NULL"
     ).fetchall()
 
     excluded = excluded_entry_ids or set()
@@ -298,21 +313,19 @@ def _load_rows(
 
 
 def _edge_source_rowid(
-    conn: sqlite3.Connection, item: "_RowItem", *, newest: bool,
+    conn: sqlite3.Connection, entry: Optional[ArasujiEntry], *, newest: bool,
 ) -> Optional[int]:
-    """item の境界側 source メッセージの rowid (正典順序の端点)。
+    """entry の境界側 source メッセージの rowid (正典順序の端点)。
 
     messages の正典順序は ``(created_at, rowid)`` の辞書式なので、境界「秒」
     だけでは端点を厳密に表せない。lv1 entry なら source_ids から端の
     メッセージの rowid を引けるので、その created_at が entry の境界時刻と
     一致するときだけ rowid を返す (不一致 = 境界秒に source が無い = 秒比較へ
-    フォールバック)。上位 entry / dry の模擬ノードは None (保守側 = 秒の
-    閉区間で見る)。
+    フォールバック)。上位 entry は None (保守側 = 秒の閉区間で見る)。
     """
-    entry = item.entry
     if entry is None or entry.level != 1 or not entry.source_ids:
         return None
-    boundary = item.end_time if newest else item.start_time
+    boundary = entry.end_time if newest else entry.start_time
     if boundary is None:
         return None
     ph = ",".join("?" for _ in entry.source_ids)
@@ -331,92 +344,254 @@ def _mark_uncompiled_gaps(
     conn: sqlite3.Connection, level: int, row: List[_RowItem],
 ) -> None:
     """隣接ノード間に「まだこのレベルまで上がってきていない体験」が居る境界へ
-    印を付ける。2 種類を見る:
+    印を付ける。見るのは **未統合の下位レベルノード** (level < このレベル、
+    区間に重なる範囲) だけ:
 
-    1. **未編纂の編纂対象メッセージ** (どの一次あらすじの source にも入って
-       いない生ログ)。跨いで畳むと、親は間の体験を材料にしないまま地続きに
-       語る (偽の隣接)。さらに間の生ログが後から一次あらすじ化されると、その
-       新エントリは親の被覆時間範囲に真に内包され、孤児判定で**永久に**並び
-       から除外される (Codex レビュー 2026-07-28 high1)。
-    2. **未統合の下位レベルノード** (level < このレベル、区間に重なる範囲)。
-       レベル2 以上の並びでは、間の生ログが一次あらすじ化された「直後」も
-       まだレベル2 に上がっていない — その一次あらすじを跨いで上位親を作ると
-       同じ孤児化が起きる (同レビュー二巡 high1)。
+    - レベル2 以上の並びでは、間の生ログが一次あらすじ化された「直後」も
+      まだレベル2 に上がっていない — その一次あらすじを跨いで上位親を作ると
+      親の被覆時間範囲に内包されて孤児化する (Codex レビュー 2026-07-28
+      二巡 high1)。これは「もう Lv1 になっていて統合待ち」の一時状態で、
+      順に畳めば自然に解消する。
 
-    定常運転では起きない (レベル0 は古い側から漏れなく畳む) が、手動生成の
-    途中打ち切りや旧世代の取り残しでは現実に起きる形。
-
-    1 の区間の端点は正典順序 ``(created_at, rowid)`` のキーセットで見る
-    (:func:`_edge_source_rowid`)。rowid を引けない側は秒の閉区間 (保守側 =
-    偽の境界は畳みを待たせるだけで、間の体験が畳まれれば自然解消する。
-    逆向きの誤りは偽の隣接 = 不可逆)。
+    かつては「未編纂の編纂対象メッセージ (穴)」も境界だったが、2026-09-08 に
+    廃止した — 止めても穴の中身は語られず、統合の停止 = 帯の肥大 = ユーザーの
+    API 料金だけが実在した。統合は穴を跨ぎ、穴は :func:`_hole_between` が
+    件数・期間つきで検出して材料への注記になる
+    (docs/intent/chronicle_coverage_gaps.md 機構 A・B)。
     """
-    from sai_memory.memory.storage import chronicle_eligibility_filter
-
-    clause, params = chronicle_eligibility_filter()
+    if level <= 1:
+        return
     for i in range(1, len(row)):
         prev, nxt = row[i - 1], row[i]
         if prev.end_time is None or nxt.start_time is None:
             continue
         if nxt.start_time < prev.end_time:
             continue
-        # 1. 未編纂の生ログ (正典順序キーセット)
-        prev_rowid = _edge_source_rowid(conn, prev, newest=True)
-        next_rowid = _edge_source_rowid(conn, nxt, newest=False)
-        sql_params: List = []
-        if prev_rowid is not None:
-            lower = "(created_at > ? OR (created_at = ? AND rowid > ?))"
-            sql_params += [prev.end_time, prev.end_time, prev_rowid]
-        else:
-            lower = "created_at >= ?"
-            sql_params += [prev.end_time]
-        if next_rowid is not None:
-            upper = "(created_at < ? OR (created_at = ? AND rowid < ?))"
-            sql_params += [nxt.start_time, nxt.start_time, next_rowid]
-        else:
-            upper = "created_at <= ?"
-            sql_params += [nxt.start_time]
-        hit = conn.execute(
-            f"""
-            SELECT 1 FROM messages
-            WHERE {lower} AND {upper}
-            AND {clause}
-            AND NOT EXISTS (
-                SELECT 1 FROM arasuji_entries a, json_each(a.source_ids_json) s
-                WHERE a.level = 1 AND s.value = messages.id
-            )
-            LIMIT 1
-            """,
-            tuple(sql_params) + params,
-        ).fetchone()
-        # 2. 未統合の下位レベルノード (レベル2 以上の並びのみ)
         # origin_track_id / is_incomplete のフィルタを残す理由は _load_rows と同じ
         # (既存 DB に残る Track Chronicle 時代の行を並びへ混ぜない)。
-        if hit is None and level > 1:
-            hit = conn.execute(
-                "SELECT 1 FROM arasuji_entries "
-                "WHERE is_consolidated = 0 AND origin_track_id IS NULL "
-                "AND (is_incomplete IS NULL OR is_incomplete = 0) "
-                "AND level < ? AND end_time >= ? AND start_time <= ? "
-                "LIMIT 1",
-                (level, prev.end_time, nxt.start_time),
-            ).fetchone()
+        hit = conn.execute(
+            "SELECT 1 FROM arasuji_entries "
+            "WHERE is_consolidated = 0 AND origin_track_id IS NULL "
+            "AND (is_incomplete IS NULL OR is_incomplete = 0) "
+            "AND level < ? AND end_time >= ? AND start_time <= ? "
+            "LIMIT 1",
+            (level, prev.end_time, nxt.start_time),
+        ).fetchone()
         if hit is not None:
             nxt.gap_before = True
 
 
+def _hole_between(
+    conn: sqlite3.Connection,
+    prev: Optional[ArasujiEntry],
+    nxt: Optional[ArasujiEntry],
+) -> Optional[Tuple[int, int, int]]:
+    """隣接する材料の間の穴 = 未編纂の編纂対象メッセージの (件数, 最古, 最新)。
+
+    穴が無ければ None。統合の材料組成 (:func:`_build_consolidation_prompt`)
+    が、穴の位置に決定論の不明期間の一行を挟むために使う
+    (chronicle_coverage_gaps 機構 B — 穴を隠して地続きの材料を渡すと、LLM が
+    偽の連続を書く)。
+
+    区間の端点は正典順序 ``(created_at, rowid)`` のキーセットで見る
+    (:func:`_edge_source_rowid`)。rowid を引けない側は秒の閉区間 (保守側 =
+    偽の穴は注記を 1 行増やすだけで、材料を欠けさせる向きの誤りではない)。
+    """
+    from sai_memory.memory.storage import chronicle_eligibility_filter
+
+    if prev is None or nxt is None:
+        return None
+    if prev.end_time is None or nxt.start_time is None:
+        return None
+    if nxt.start_time < prev.end_time:
+        return None
+    clause, params = chronicle_eligibility_filter()
+    prev_rowid = _edge_source_rowid(conn, prev, newest=True)
+    next_rowid = _edge_source_rowid(conn, nxt, newest=False)
+    sql_params: List = []
+    if prev_rowid is not None:
+        lower = "(created_at > ? OR (created_at = ? AND rowid > ?))"
+        sql_params += [prev.end_time, prev.end_time, prev_rowid]
+    else:
+        lower = "created_at >= ?"
+        sql_params += [prev.end_time]
+    if next_rowid is not None:
+        upper = "(created_at < ? OR (created_at = ? AND rowid < ?))"
+        sql_params += [nxt.start_time, nxt.start_time, next_rowid]
+    else:
+        upper = "created_at <= ?"
+        sql_params += [nxt.start_time]
+    row = conn.execute(
+        f"""
+        SELECT COUNT(*), MIN(created_at), MAX(created_at) FROM messages
+        WHERE {lower} AND {upper}
+        AND {clause}
+        AND NOT EXISTS (
+            SELECT 1 FROM arasuji_entries a, json_each(a.source_ids_json) s
+            WHERE a.level = 1 AND s.value = messages.id
+        )
+        """,
+        tuple(sql_params) + params,
+    ).fetchone()
+    if row is None or not row[0]:
+        return None
+    return (int(row[0]), int(row[1]), int(row[2]))
+
+
 def _is_orphan(entry: ArasujiEntry, ranges: Sequence[Tuple]) -> bool:
-    """他 entry の被覆範囲に真に内包されるか (少なくとも片側が strict)。"""
+    """**自分より上位** (level が大きい) の entry の被覆範囲に真に内包されるか
+    (少なくとも片側が strict)。
+
+    同レベルの entry に内包されるだけのものは孤児にしない — 通常の並びに
+    立って統合される (重複被覆は別課題 —
+    docs/issues/lv1_source_ids_duplicates_and_orphans.md)。上位に内包される
+    孤児は :func:`reconnect_contained_orphans` が繋ぎ直して回収する
+    (chronicle_coverage_gaps 機構 C、2026-09-08)。
+    """
     if entry.start_time is None or entry.end_time is None:
         return False
-    for other_id, st, et in ranges:
+    for other_id, other_level, st, et in ranges:
         if other_id == entry.id or st is None or et is None:
+            continue
+        if other_level is None or int(other_level) <= entry.level:
             continue
         st_i, et_i = int(st), int(et)
         if st_i <= entry.start_time and entry.end_time <= et_i:
             if st_i < entry.start_time or entry.end_time < et_i:
                 return True
     return False
+
+
+def reconnect_contained_orphans(conn: sqlite3.Connection) -> List[str]:
+    """上位に内包された未統合エントリを、繋ぎ直しが起きなくなるまで走査する。
+
+    実体は :func:`_reconnect_pass` (1 パスにつき縁組 1 件)。パスで包むのは、
+    縁組後の親帳簿の引き直しで親の期間が変わるため — 親候補の範囲はパス頭の
+    スナップショットなので、続行すると次の孤児が古い期間で判定される (縮んだ
+    親への誤縁組・広がった親の拾い損ねの両方が起きうる)。縁組のたびに読み
+    直す。縁組した子は is_consolidated=1 で候補から消えるためパスごとに単調
+    減少し、必ず停止する (上限は暴走の安全弁 — 超過分は次回の走査が拾う)。
+    """
+    reconnected: List[str] = []
+    for _ in range(50):
+        batch = _reconnect_pass(conn)
+        if not batch:
+            break
+        reconnected.extend(batch)
+    return reconnected
+
+
+def _reconnect_pass(conn: sqlite3.Connection) -> List[str]:
+    """上位に内包された未統合エントリを、その上位の子として繋ぎ直す (1 パス分)。
+
+    後から埋まった穴の一次あらすじ (や補修が作った後発エントリ) が、既存の
+    上位あらすじの被覆期間に真に内包されると、孤児として統合の並びから
+    永久に除外されていた (chronicle_coverage_gaps 機構 C がこれの根治)。
+    帳簿の操作は三点一組:
+
+    1. 内包する**最下層**の上位 (直近の親候補。同 level なら期間の狭い方) から
+       最上位までを content_stale に回す
+       (storage.refresh_ancestor_bookkeeping mark_stale=True — 吸収の
+       _mark_ancestors_stale と同じ一枚の規則)。次の統合/補修の流れの
+       stale flush が上位を語り直す — 新しい再生成機構は作らない。
+    2. その上位の source_ids へ子の id を追加。
+    3. 子の is_consolidated を立てて未統合の並びから外す
+       (storage.add_to_parent_source_ids が 2・3 を一度に行う)。
+
+    順序は stale が先 (fail-safe): stale が先なら、縁組が失敗しても上位が
+    一回余分に語り直されるだけ (stale flush は冪等)。縁組が先だと、stale の
+    失敗で子は並びから消えたのに上位が永久に古いまま残る (次回の走査は
+    is_consolidated=0 しか見ない)。
+
+    実行場所は統合の実行経路 (:func:`run_band_overflow` の冒頭) — _load_rows
+    (読み) の中では書かない。冪等 (孤児が無ければ何も書かない)。LLM なし。
+
+    Returns:
+        繋ぎ直した entry id のリスト。
+    """
+    from sai_memory.arasuji.storage import (
+        _ENTRY_COLUMNS,
+        _row_to_entry,
+        add_to_parent_source_ids,
+        refresh_ancestor_bookkeeping,
+    )
+
+    rows = conn.execute(
+        f"SELECT {_ENTRY_COLUMNS} FROM arasuji_entries "
+        "WHERE is_consolidated = 0 AND origin_track_id IS NULL "
+        "AND (is_incomplete IS NULL OR is_incomplete = 0) "
+        "ORDER BY end_time ASC, start_time ASC, created_at ASC",
+    ).fetchall()
+    if not rows:
+        return []
+    # 親候補は生きている chronicle entry (Track 時代の行は除く — General の
+    # 系譜へ混ぜない)。
+    ranges = conn.execute(
+        "SELECT id, json_extract(metadata, '$.level'), "
+        "json_extract(metadata, '$.start_time'), "
+        "json_extract(metadata, '$.end_time') "
+        "FROM memopedia_pages WHERE category = 'chronicle' AND is_trunk = 0 "
+        "AND (is_deleted = 0 OR is_deleted IS NULL) "
+        "AND json_extract(metadata, '$.origin_track_id') IS NULL"
+    ).fetchall()
+    reconnected: List[str] = []
+    for row in rows:
+        entry = _row_to_entry(row)
+        if entry.start_time is None or entry.end_time is None:
+            continue
+        best: Optional[Tuple[Tuple[int, int], str]] = None
+        for other_id, lvl, st, et in ranges:
+            if other_id == entry.id or lvl is None or st is None or et is None:
+                continue
+            lvl_i, st_i, et_i = int(lvl), int(st), int(et)
+            if lvl_i <= entry.level:
+                continue
+            if not (st_i <= entry.start_time and entry.end_time <= et_i):
+                continue
+            if not (st_i < entry.start_time or entry.end_time < et_i):
+                continue
+            key = (lvl_i, et_i - st_i)
+            if best is None or key < best[0]:
+                best = (key, str(other_id))
+        if best is None:
+            continue
+        parent_id = best[1]
+        # stale (refresh) を先、縁組 (add) を後 — stale が先なら、縁組が失敗
+        # しても上位が一回余分に語り直されるだけ (stale flush は冪等)。縁組が
+        # 先だと、stale の失敗で子は並びから消えたのに上位が永久に古いまま
+        # 残る (次回の走査は is_consolidated=0 しか見ない)。
+        refresh_ancestor_bookkeeping(conn, [parent_id], mark_stale=True)
+        if not add_to_parent_source_ids(conn, entry.id, parent_id):
+            LOGGER.warning(
+                "[bands] orphan %s could not be reconnected: containing "
+                "parent %s vanished before adoption; entry stays "
+                "unconsolidated for the next sweep",
+                entry.id[:8], parent_id[:8],
+            )
+            continue
+        # 縁組成功後にもう一度引き直す (Codex 二巡採用 2 — 帳簿の即時整合):
+        # add は source_ids / parent_id / is_consolidated しか書かないので、
+        # 親の期間 (start/end)・件数系の派生値は引き直すまで新しい子を含ま
+        # ない。次の stale flush を待つ間、診断や次の繋ぎ直しの内包判定が
+        # 古い期間で行われるのを防ぐ。この 2 回目が失敗しても、最初の
+        # refresh で stale は立っている — flush が拾うので fail-safe は
+        # 崩れない (例外は上へ抜けて reconnect の未完了の印になり、次回が
+        # 冪等にやり直す)。
+        refresh_ancestor_bookkeeping(conn, [parent_id], mark_stale=True)
+        reconnected.append(entry.id)
+        LOGGER.info(
+            "[bands] reconnected orphan %s (level=%d) into containing parent "
+            "%s; ancestors marked stale for the next flush",
+            entry.id[:8], entry.level, parent_id[:8],
+        )
+        # 1 パスにつき縁組は 1 件で切り上げる (Codex 三巡目): 直前の引き直しで
+        # 親の期間は変わりうる (実子の合算が宣言より狭ければ**縮む**)。この
+        # パスの ranges は頭のスナップショットなので、続行すると 2 件目以降が
+        # 古い期間で判定され、縮んだ親への誤縁組すら起きうる。公開側のパス
+        # ループが読み直して続きを処理する — 孤児は普段ゼロ〜数件なので
+        # 1 件ごとの再読みのコストは無視できる。
+        break
+    return reconnected
 
 
 # ---------------------------------------------------------------------------
@@ -439,7 +614,7 @@ def _plan_fold_for_level(row: Sequence[_RowItem]) -> Optional[List[_RowItem]]:
     残して、古い側の連続部分を畳み範囲にする。
 
     範囲が跨げない境界は 2 種類 — excluded (提示中の圧縮区間) と gap_before
-    (間に未編纂の生ログが居る = 偽の隣接の禁止)。境界で刻んだ区間のうち、
+    (間に未統合の下位レベルノードが居る = 跨ぐと孤児化)。境界で刻んだ区間のうち、
     **2 件以上ある最古の区間**を畳む。最古の区間が 1 件でも、その先の区間は
     独立に畳める (先頭だけを見て打ち切ると、一時的な境界の手前 1 件が
     その後ろの過予算区間を永久に人質に取る — Codex レビュー 2026-07-28 high3)。
@@ -578,6 +753,11 @@ def _build_consolidation_prompt(
     材料には種別を明示する (intent §3-4): 通常はあらすじだが、旧設計の
     恒等圧縮などで生ログ断片が並びに残っていても、LLM が「あらすじの列に
     会話の断片が混ざっている」ことを理解して前後の文脈に織り込めるように。
+
+    材料の間に穴 (未編纂の編纂対象メッセージ) があれば、その位置に決定論の
+    不明期間の一行を挟み、地続きに繋げない指示を足す (chronicle_coverage_gaps
+    機構 B — 穴を隠すと LLM が偽の連続を書く。統合は穴を跨ぐ (機構 A) ので、
+    正直に明示するのがここ)。
     """
     from sai_memory.arasuji.context import get_episode_context_for_timerange
     from sai_memory.arasuji.generator import _format_timestamp
@@ -591,8 +771,19 @@ def _build_consolidation_prompt(
         )
 
     has_fragment = False
+    has_hole = False
     lines: List[str] = []
+    prev_entry: Optional[ArasujiEntry] = None
     for i, entry in enumerate(entries, 1):
+        hole = _hole_between(conn, prev_entry, entry)
+        if hole is not None:
+            has_hole = True
+            count, first_ts, last_ts = hole
+            lines.append(
+                f"(この間に、まだあらすじになっていない記録が {count} 件ある: "
+                f"期間 {_format_timestamp(first_ts)}〜{_format_timestamp(last_ts)})"
+            )
+            lines.append("")
         start = _format_timestamp(entry.start_time)
         end = _format_timestamp(entry.end_time)
         if origins.get(entry.id) == "identity":
@@ -602,6 +793,7 @@ def _build_consolidation_prompt(
             lines.append(f"### 材料 {i} 【あらすじ】 ({start} ~ {end})")
         lines.append(entry.content)
         lines.append("")
+        prev_entry = entry
     entries_text = "\n".join(lines)
 
     parts = [
@@ -624,6 +816,11 @@ def _build_consolidation_prompt(
         parts.append(
             "- 【生ログ断片】は要約前の会話の断片です。前後のあらすじの流れに"
             "自然に織り込んでください（無視しない・そのまま引用しない）"
+        )
+    if has_hole:
+        parts.append(
+            "- 材料の間に、記録されていない期間があります。その前後を"
+            "地続きの出来事として繋げないでください"
         )
     parts.extend([
         "- **前置き（「以下にまとめます」等）や見出し（「【あらすじ】」等）は書かないでください**（本文のみ出力）",
@@ -814,11 +1011,13 @@ def _consolidate_fold(
                 return None
             # ギャップ不変条件の tx 内再検査 (Codex レビュー 2026-07-28 三〜四巡):
             # 計画〜LLM 応答の間に別経路 (CLI / API / Metabolism) が畳み区間へ
-            # 挿入を行っていると、古い計画のまま確定すれば跨ぎ親 = 恒久孤児化に
+            # 挿入を行っていると、古い計画のまま確定すれば跨ぎ親 = 孤児化に
             # なる。write ロック取得後に検査し直し、増えていたら放棄する
-            # (次の発火が再計画する)。2 段:
+            # (次の発火が再計画する)。未編纂メッセージ (穴) はもう境界ではない
+            # (機構 A) — 待ちの間に届いた生ログは跨いでよく、後から編纂されて
+            # 内包されても reconnect_contained_orphans (機構 C) が繋ぎ直す。2 段:
             #
-            # 1. 未編纂メッセージ / 下位レベルノードの境界 (計画時と同じ判定)。
+            # 1. 未統合の下位レベルノードの境界 (計画時と同じ判定)。
             # 2. 親の時間範囲に内包される**計画後に新規出現した未統合ノード**
             #    (レベル不問 — 同一レベルの並走挿入は 1 に掛からない。四巡 high)。
             #    判定は計画時スナップショット (``known_ids``) との差分 — 計画時から
@@ -908,6 +1107,13 @@ def _any_level_over_limit(
     ここでの合計は実際の判定値 **以上**になる。よってこの検査が False なら
     どのレベルも発火しない (連鎖は畳みが起きて初めて始まる) — 見落としは
     無く、誤って True になった回は従来どおりの完全な計画が判定する。
+
+    保守側 (発火) に倒す判断 (2026-09-08): 完全な孤児判定をここへ入れると
+    全エントリ×全被覆範囲の照合になり、1 クエリで抜ける門の意味が消える。
+    代償として、孤児が字数を膨らませたまま繋ぎ直しに失敗し続ける間は
+    「発火するのに畳むものが無い」空振り (_load_rows の読み直し 1 回、LLM
+    なし) が毎回起きうる — その状態は reconnect の失敗時に立つ未完了の印
+    (:func:`run_band_overflow` 冒頭) が帯の警告として可視化する。
     """
     rows = conn.execute(
         "SELECT level, id, length(COALESCE(content, '')) FROM arasuji_entries "
@@ -982,6 +1188,52 @@ def run_band_overflow(
     if stats is not None:
         stats["attempts"] = 0
         stats["created"] = 0
+    # 保守ステップ: 上位に内包された孤児を繋ぎ直す (機構 C — LLM なしの帳簿
+    # 操作)。失敗しても統合そのものは止めない。
+    #
+    # 印の理由は "reconnect" — 吸収の未完了の印 ("absorption") とは別の行
+    # (Codex 二巡採用 1)。共有すると、次回の run_absorption が仕事なし
+    # (no_work) の回に「完了」として印を外し、reconnect の残債が残ったまま
+    # 帯の促しだけが消える。再試行の経路は run_band_overflow の発火に依存した
+    # ままでよい — reconnect は毎回冪等に走り、補修 (repair) ジョブは必ず
+    # run_band_overflow を通るので、印がある限り帯の「再実行してください」
+    # から再試行できる。
+    with (db_lock or nullcontext()):
+        try:
+            reconnect_contained_orphans(conn)
+        except Exception:
+            LOGGER.exception(
+                "[bands] orphan reconnection failed; continuing with folds",
+            )
+            # 握り潰したまま完了の顔をしない (2026-09-08): 未完了の印を
+            # 立てて、Chronicle タブの帯の「前回の処理が完了していません。
+            # 再実行してください」に乗せる。再実行がこの保守ステップを
+            # 冪等にやり直す。統合は続行してよい — 印だけ。
+            try:
+                from sai_memory.arasuji.absorption import (
+                    set_repair_incomplete,
+                )
+                set_repair_incomplete(conn, reason="reconnect")
+            except Exception:
+                LOGGER.warning(
+                    "[bands] failed to set the repair-incomplete marker "
+                    "after the reconnection failure; the stall stays "
+                    "invisible until the next run", exc_info=True,
+                )
+        else:
+            # 例外なく走り切った = reconnect の残債は無い。自分の理由の印
+            # だけを外す (吸収の印は run_absorption が自分で外す)。
+            try:
+                from sai_memory.arasuji.absorption import (
+                    clear_repair_incomplete,
+                )
+                clear_repair_incomplete(conn, reason="reconnect")
+            except Exception:
+                LOGGER.warning(
+                    "[bands] failed to clear the reconnect repair marker "
+                    "after a clean run; the band keeps prompting a re-run "
+                    "until a later clear succeeds", exc_info=True,
+                )
     limit = _max_consolidations_per_run()
     if max_folds is not None:
         limit = min(limit, max(0, max_folds))

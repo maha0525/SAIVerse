@@ -772,6 +772,10 @@ def run_cli() -> None:
             conn, tiny_chunks, messages, processed_ids,
             target_chars=chronicle_band_budget(),
         )
+        # 吸収できない発話あり run (機構 E) は通常チャンクとして計画へ合流
+        # (repair API と同じ関数)。発話ゼロの run は自動では編纂しない。
+        from sai_memory.arasuji.absorption import merge_standalone_chunks
+        plan = merge_standalone_chunks(plan, absorption_plan, messages)
 
     # 実行前の見積もり表示 (LLM 呼び出しなし)。位置はメッセージ取得・thread
     # 絞り・truncate・吸収判定の**後** (Codex 三巡 F4) — 実行と同じ入力から
@@ -808,8 +812,14 @@ def run_cli() -> None:
         if absorption_plan.items or absorption_plan.rewind_run_ids:
             print(
                 f"  極小 run の吸収: {len(absorption_plan.items)} 件 "
-                f"(上位の再生成 {len(absorption_plan.stale_upper_ids)} 件, "
-                f"未解決 {absorption_plan.unresolved_runs} run)"
+                f"(上位の再生成 {len(absorption_plan.stale_upper_ids)} 件)"
+            )
+        if absorption_plan.standalone_chunks or absorption_plan.silent_runs:
+            print(
+                f"  吸収先の無い run: 単独編纂 "
+                f"{len(absorption_plan.standalone_chunks)} 件 (計画に合流済み), "
+                f"発話ゼロで残す {absorption_plan.silent_runs} run "
+                f"({absorption_plan.silent_message_count} 通)"
             )
         if absorption_plan.rewind_run_ids:
             # anchor 行は world DB にある — オフラインの本スクリプトでは引き
@@ -876,11 +886,12 @@ def run_cli() -> None:
         batch_callback=batch_callback,
     )
     LOGGER.info(
-        "[absorption] merged=%d reopened=%d upper_regenerated=%d unresolved=%d",
+        "[absorption] merged=%d (%d run messages) reopened=%d "
+        "upper_regenerated=%d",
         len(absorption_result.merged_entries),
+        absorption_result.absorbed_run_message_count,
         len(absorption_result.reopened_entry_ids),
         len(absorption_result.regenerated_upper_ids),
-        absorption_result.unresolved_runs,
     )
 
     # 保守 (上の run_absorption) が済んだところで、編纂する仕事が本当に無ければ

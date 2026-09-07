@@ -2354,6 +2354,39 @@ def _conversation_exclusion() -> Tuple[str, Tuple[str, ...]]:
     return clause, MECHANISM_TAGS + CHRONICLE_EXCLUDED_LINE_ROLES
 
 
+def filter_real_conversation_ids(
+    conn: sqlite3.Connection, message_ids: Iterable[str],
+) -> set:
+    """``message_ids`` のうち「実会話」(発話) と数えられる id の集合。
+
+    定義は ``_conversation_exclusion`` を名指しで再利用する — role が
+    user/model/assistant で、機構タグ (handy_tool / spell / event_message) も
+    line_role 除外も ``'<system>'`` 頭の本文も持たない行だけが「発話」。
+
+    吸収の機構 E (docs/intent/chronicle_coverage_gaps.md) が「吸収先の無い
+    run を単独編纂してよいか」の線引きに使う。role だけで判定してはならない:
+    機構の記録 (入室通知等) は role=user で保存されており、role 判定では
+    「発話あり」に化けて捏造あらすじの温床に戻る。
+    """
+    ids = [str(m) for m in message_ids]
+    if not ids:
+        return set()
+    clause, params = _conversation_exclusion()
+    out: set = set()
+    # SQLite の既定の変数上限 999 (SQLITE_MAX_VARIABLE_NUMBER) の約半分 —
+    # exclusion 側の params を足しても安全側に収まる。
+    chunk_size = 500
+    for i in range(0, len(ids), chunk_size):
+        chunk = ids[i:i + chunk_size]
+        id_placeholders = ",".join("?" for _ in chunk)
+        cur = conn.execute(
+            f"SELECT id FROM messages WHERE id IN ({id_placeholders}) AND {clause}",
+            tuple(chunk) + params,
+        )
+        out.update(str(row[0]) for row in cur.fetchall())
+    return out
+
+
 def real_conversation_filter() -> Tuple[str, Tuple[str, ...]]:
     """message 検索 (unified_recall / 自動想起) 用の「実会話」フィルタ共有 SQL 断片。
 

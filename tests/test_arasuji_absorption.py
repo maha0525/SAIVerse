@@ -1,10 +1,16 @@
 """極小 run の隣人吸収 (sai_memory/arasuji/absorption.py) のテスト。
 
-docs/issues/arasuji_tiny_run_absorption.md (2026-08-31 まはー裁定 8 点) を固定する:
+docs/issues/archive/arasuji_tiny_run_absorption.md (2026-08-31 まはー裁定 8 点) と
+docs/intent/chronicle_coverage_gaps.md (2026-09-08 機構 D/E/F) を固定する:
 
 - 検出: 材料 0.5U 未満のチャンク = 極小 run (閾値は U から導出)。
-- 計画: 吸収先は後ろ (新しい側) の隣人 Lv1。隣人が居ない末尾 run は見送り。
-  隣人自体が極小なら合計 0.5U に届くまで連鎖する。
+- 計画 (機構 D): 開く隣人は後ろ (新しい側) → 居なければ同スレッドの前側。
+  計画の単位は「開く隣人ごと」で、同じ隣人に割り当たった run は一つの item に
+  束なる (開き直しは隣人 1 個につき一回)。隣人自体が極小なら合計 0.5U に
+  届くまで連鎖する。
+- 機構 E: 両方向とも吸収先が無い run は、発話 (実会話フィルタ) を含むなら
+  通常編纂へ合流して独立の一次あらすじに、発話ゼロなら自動編纂せず数える。
+- 機構 F: source が一部欠けた隣人も開く (計画・実行の両側)。
 - 実行: 生成が先・削除が後 (generate-then-swap)。帳簿 (Fragment / 付記印 /
   埋め込み) は差し替えに追随する。
 - 上位の連鎖再生成: 「被覆範囲から抜けた時点」で 1 回ずつ、ジョブ末尾で全 flush。
@@ -97,12 +103,22 @@ class _Client:
         ]
 
 
-def _add_message(adapter, minute, chars, prefix="会話"):
-    mid = adapter.append_persona_message({
-        "role": "user",
-        "content": f"{prefix} " + "あ" * chars,
-        "timestamp": (BASE_TIME + timedelta(minutes=minute)).isoformat(),
-    })
+def _add_message(
+    adapter, minute, chars, prefix="会話", *, thread=None, metadata=None,
+    content=None,
+):
+    """thread: 別スレッドを作る thread_suffix / metadata: tags 等 (機構 E 用)。"""
+    mid = adapter.append_persona_message(
+        {
+            "role": "user",
+            "content": (
+                content if content is not None else f"{prefix} " + "あ" * chars
+            ),
+            "timestamp": (BASE_TIME + timedelta(minutes=minute)).isoformat(),
+            "metadata": metadata,
+        },
+        thread_suffix=thread,
+    )
     assert mid is not None
     return mid
 
@@ -185,7 +201,8 @@ class TestPlanAbsorption:
         plan = plan_absorption(
             adapter.conn, tiny, messages, processed, target_chars=TARGET,
         )
-        assert plan.unresolved_runs == 0
+        assert plan.standalone_chunks == []
+        assert plan.silent_runs == 0
         assert plan.rewind_run_ids == []
         assert len(plan.items) == 1
         assert plan.items[0].run_message_ids == [gap]
@@ -205,7 +222,8 @@ class TestPlanAbsorption:
             adapter.conn, tiny, messages, processed, target_chars=TARGET,
         )
         assert plan.items == []
-        assert plan.unresolved_runs == 0
+        assert plan.standalone_chunks == []
+        assert plan.silent_runs == 0
         assert plan.rewind_run_ids == [tail]
         assert plan.rewind_first_message_id == tail
         # 引き戻しは LLM ゼロ — 呼び出し回数の見積もりに入らない
@@ -227,7 +245,7 @@ class TestPlanAbsorption:
         )
         # 2 つの極小 run と 2 つの隣人がひとつの連続範囲に束ねられる
         assert len(plan.items) == 1
-        assert plan.unresolved_runs == 0
+        assert plan.standalone_chunks == []
         assert plan.rewind_run_ids == []
         item = plan.items[0]
         assert set(item.run_message_ids) == {gap1, gap2}
@@ -252,17 +270,19 @@ class TestPlanAbsorption:
             adapter.conn, tiny, messages, processed, target_chars=TARGET,
         )
         # 穴は 1 個も取り残されず、1 個の item に両方入る
-        assert plan.unresolved_runs == 0
+        assert plan.standalone_chunks == []
         assert len(plan.items) == 1
         item = plan.items[0]
         assert item.run_message_ids == [gap1, gap2]  # 正典順
         assert item.absorbed_entry_ids == [entry.id]
 
-    def test_presented_digest_leaves_the_run_unresolved(self, adapter):
-        """提示中の digest に塞がれた run は、吸収も引き戻しもできない残余
-        (unresolved) として数える — 後ろに編纂済みが在るので帯 (rewind 対象)
-        ではない。次の畳みで digest が動けば自然に解消する。"""
-        _add_message(adapter, 0, 100)
+    def test_presented_digest_diverts_the_run_to_standalone(self, adapter):
+        """提示中の digest に塞がれた run は、旧仕様では「未解決 (unresolved)」
+        として見送っていたが、機構 E (chronicle_coverage_gaps) で見送りの器は
+        廃止 — 両方向とも開ける隣人が無く発話を含む run は、通常編纂へ合流して
+        独立の一次あらすじになる (書き換え理由: 残余を数えるだけの旧仕様は
+        何度実行しても件数が減らない形の温床だった)。"""
+        gap = _add_message(adapter, 0, 100)
         n1 = _add_message(adapter, 10, 300)
         entry = _entry(adapter.conn, [n1], start_min=10, end_min=10)
 
@@ -273,7 +293,8 @@ class TestPlanAbsorption:
         )
         assert plan.items == []
         assert plan.rewind_run_ids == []
-        assert plan.unresolved_runs == 1
+        assert plan.silent_runs == 0
+        assert [c.message_ids for c in plan.standalone_chunks] == [[gap]]
 
     def test_dirty_ancestors_are_counted(self, adapter):
         _add_message(adapter, 0, 100)
@@ -291,6 +312,165 @@ class TestPlanAbsorption:
         assert len(plan.items) == 1
         assert plan.stale_upper_ids == [parent.id]
         assert plan.llm_calls == 2  # 合体 1 + 上位再生成 1
+
+
+class TestBidirectionalAbsorption:
+    """機構 D (chronicle_coverage_gaps): 両方向吸収と隣人ごとの計画。"""
+
+    def test_front_neighbor_in_the_same_thread_absorbs_when_rear_fails(
+        self, adapter,
+    ):
+        """後ろの隣人が別スレッド (開けない) なら、同じスレッドの前側の隣人へ
+        吸収される — インポートされた会話の端数の形 (D)。"""
+        conn = adapter.conn
+        n1 = _add_message(adapter, 0, 300)
+        e1 = _entry(conn, [n1], start_min=0, end_min=0)
+        gap = _add_message(adapter, 10, 100)              # 端数 (前が同スレッド)
+        n2 = _add_message(adapter, 20, 300, thread="t2")  # 後ろは別スレッド
+        e2 = _entry(conn, [n2], start_min=20, end_min=20)
+
+        messages, processed, _normal, tiny = _plan(adapter)
+        assert len(tiny) == 1
+        plan = plan_absorption(
+            conn, tiny, messages, processed, target_chars=TARGET,
+        )
+        assert plan.standalone_chunks == []
+        assert plan.silent_runs == 0
+        assert len(plan.items) == 1
+        assert plan.items[0].run_message_ids == [gap]
+        assert plan.items[0].absorbed_entry_ids == [e1.id]
+        assert e2.id not in plan.items[0].absorbed_entry_ids
+
+    def test_front_and_rear_runs_share_one_neighbor_item(self, adapter):
+        """同じ隣人へ前後から割り当たった run は一つの item に束なり、
+        開き直し (LLM の合体生成) は隣人 1 個につき一回で済む (D —
+        2026-09-08 まはー指摘: 同じあらすじが二回開かれる形を作らない)。"""
+        conn = adapter.conn
+        gap_a = _add_message(adapter, 0, 100)             # 後ろの隣人として E へ
+        n1 = _add_message(adapter, 10, 300)
+        n2 = _add_message(adapter, 11, 300)
+        e = _entry(conn, [n1, n2], start_min=10, end_min=11)
+        gap_b = _add_message(adapter, 20, 100)            # 前側の隣人として E へ
+        n3 = _add_message(adapter, 30, 300, thread="t2")  # gap_b の後ろは別スレッド
+        _entry(conn, [n3], start_min=30, end_min=30)
+
+        messages, processed, _normal, tiny = _plan(adapter)
+        assert len(tiny) == 2
+        plan = plan_absorption(
+            conn, tiny, messages, processed, target_chars=TARGET,
+        )
+        assert plan.standalone_chunks == []
+        assert len(plan.items) == 1                       # E は一回しか開かない
+        item = plan.items[0]
+        assert item.run_message_ids == [gap_a, gap_b]     # 正典順
+        assert item.absorbed_entry_ids == [e.id]
+
+        client = _Client()
+        result = run_absorption(conn, client, plan)
+        assert client.kinds() == ["merge"]                # 再生成は一回
+        assert result.reopened_entry_ids == [e.id]
+        assert result.absorbed_run_message_count == 2
+        covering = get_entries_covering_messages(conn, [gap_a, gap_b])
+        assert len({e_.id for e_ in covering}) == 1
+        assert set(covering[0].source_ids) == {gap_a, n1, n2, gap_b}
+
+
+class TestStandaloneAndSilentRuns:
+    """機構 E (chronicle_coverage_gaps): 吸収できない run の線引き。"""
+
+    def test_run_with_utterance_becomes_a_standalone_chunk(self, adapter):
+        """両方向とも吸収先が無く、発話を含む run は独立チャンクとして計画に
+        残る (通常編纂へ合流する器 standalone_chunks に載る)。"""
+        conn = adapter.conn
+        gap = _add_message(adapter, 0, 100)               # 発話 (実会話)
+        n1 = _add_message(adapter, 10, 300, thread="t2")  # 隣は別スレッドのみ
+        _entry(conn, [n1], start_min=10, end_min=10)
+
+        messages, processed, _normal, tiny = _plan(adapter)
+        assert len(tiny) == 1
+        plan = plan_absorption(
+            conn, tiny, messages, processed, target_chars=TARGET,
+        )
+        assert plan.items == []
+        assert plan.silent_runs == 0
+        assert [c.message_ids for c in plan.standalone_chunks] == [[gap]]
+
+    def test_silent_run_is_counted_and_left_out_of_the_plan(self, adapter):
+        """発話ゼロ (機構タグ付き role=user のみ) の run は計画から外れ、
+        「残り (発話のない記録のみ)」として数えられる — role だけの判定なら
+        「発話あり」に化ける形を、実会話フィルタの名指し再利用で塞ぐ。"""
+        conn = adapter.conn
+        s1 = _add_message(
+            adapter, 0, 50, metadata={"tags": ["event_message"]},
+        )
+        s2 = _add_message(
+            adapter, 1, 50, metadata={"tags": ["handy_tool"]},
+        )
+        n1 = _add_message(adapter, 10, 300, thread="t2")  # 隣は別スレッドのみ
+        _entry(conn, [n1], start_min=10, end_min=10)
+
+        messages, processed, _normal, tiny = _plan(adapter)
+        assert len(tiny) == 1
+        assert {m.id for m in tiny[0].messages} == {s1, s2}
+        plan = plan_absorption(
+            conn, tiny, messages, processed, target_chars=TARGET,
+        )
+        assert plan.items == []
+        assert plan.standalone_chunks == []
+        assert plan.silent_runs == 1
+        assert plan.silent_message_count == 2
+
+    def test_system_notice_rows_do_not_count_as_utterances(self, adapter):
+        """'<system>' 頭の本文 (タグを持たない世代のシステム通知) も発話に
+        数えない — _conversation_exclusion と同じ規則の名指し再利用。"""
+        conn = adapter.conn
+        _add_message(adapter, 0, 0, content="<system>Track を切り替えました")
+        n1 = _add_message(adapter, 10, 300, thread="t2")
+        _entry(conn, [n1], start_min=10, end_min=10)
+
+        messages, processed, _normal, tiny = _plan(adapter)
+        assert len(tiny) == 1
+        plan = plan_absorption(
+            conn, tiny, messages, processed, target_chars=TARGET,
+        )
+        assert plan.standalone_chunks == []
+        assert plan.silent_runs == 1
+        assert plan.silent_message_count == 1
+
+    def test_merge_orders_same_second_chunks_by_canonical_position(self):
+        """standalone の合流キーは正典順 (created_at, rowid 相当の位置) —
+        created_at だけで並べると、同一秒のメッセージが大量に並ぶインポート
+        環境で既存チャンクと standalone の順序が崩れ、実行順と付記範囲の計算
+        (チャンク順前提) が時系列とずれる (Codex 二巡採用 3)。"""
+        from sai_memory.arasuji.absorption import (
+            AbsorptionPlan,
+            merge_standalone_chunks,
+        )
+        from sai_memory.memory.storage import Message
+
+        def _msg(mid):
+            return Message(
+                id=mid, thread_id="t", role="user", content="本文",
+                resource_id=None, created_at=1_000,  # 全員が同一秒
+            )
+
+        # 正典順 = ordered_messages の並び (同一秒なので rowid = 挿入順)。
+        ordered = [_msg(f"m{i}") for i in range(4)]
+
+        def _chunk(msg):
+            return PlannedChunk(kind=CHUNK_LLM_BATCH, messages=[msg])
+
+        plan = AlignmentPlan(
+            chunks=[_chunk(ordered[0]), _chunk(ordered[2])],
+            total_unprocessed=4,
+        )
+        absorption_plan = AbsorptionPlan(
+            standalone_chunks=[_chunk(ordered[1]), _chunk(ordered[3])],
+        )
+        merged = merge_standalone_chunks(plan, absorption_plan, ordered)
+        assert [c.messages[0].id for c in merged.chunks] == [
+            "m0", "m1", "m2", "m3",
+        ]
 
 
 # ---------------------------------------------------------------------------
@@ -393,15 +573,48 @@ class TestRunAbsorption:
         client = _Client()
         result = run_absorption(conn, client, plan)
 
-        assert result.unresolved_runs == 0
         assert result.skipped_items == 0
         assert len(result.merged_entries) == 1
+        assert result.absorbed_run_message_count == 2  # gap1 + gap2 (機構 G)
         assert client.kinds() == ["merge"]  # LLM は合体 1 回だけ
         # 旧 E は消え、新エントリの source に全穴 + E の全 source が入る
         assert get_entry(conn, entry.id) is None
         covering = get_entries_covering_messages(conn, [gap1])
         assert len(covering) == 1
         assert set(covering[0].source_ids) == {n1, gap1, n2, gap2, n3}
+        assert not is_repair_incomplete(conn)
+
+    def test_partially_missing_material_proceeds_with_survivors(self, adapter):
+        """機構 F (実行側): 材料の一部が DB に無くても item を skip せず、
+        生存分で合体を進める — 「開かない」柵は実行側からも撤去。sweep を
+        すり抜けた孤児参照 (実行直前の並行削除と同型) を再現するため、冒頭の
+        掃除を無効化して走らせる。"""
+        conn = adapter.conn
+        gap = _add_message(adapter, 0, 100)
+        n1 = _add_message(adapter, 10, 300)
+        n2 = _add_message(adapter, 11, 300)
+        entry = _entry(conn, [n1, "dead-1", n2], start_min=10, end_min=11)
+
+        messages, processed, _normal, tiny = _plan(adapter)
+        plan = plan_absorption(
+            conn, tiny, messages, processed, target_chars=TARGET,
+        )
+        assert plan.items and plan.items[0].absorbed_entry_ids == [entry.id]
+
+        client = _Client()
+        with patch(
+            "sai_memory.arasuji.absorption._sweep_dead_message_sources",
+            lambda conn: {},
+        ):
+            result = run_absorption(conn, client, plan)
+
+        assert result.skipped_items == 0
+        assert len(result.merged_entries) == 1
+        assert get_entry(conn, entry.id) is None          # 旧隣人は開き直された
+        covering = get_entries_covering_messages(conn, [gap, n1, n2])
+        assert [e.id for e in covering] == [result.merged_entries[0].id]
+        # 消えた材料は source から自然に落ちる (削除の完遂)
+        assert set(covering[0].source_ids) == {gap, n1, n2}
         assert not is_repair_incomplete(conn)
 
     def test_generation_failure_keeps_old_entries(self, adapter):
@@ -615,6 +828,129 @@ class TestGenerateChronicleWiring:
         assert set(covering[0].source_ids) == {gap, n1, n2}
         assert not is_repair_incomplete(conn)
 
+    def test_standalone_chunk_flows_into_the_executor_plan(
+        self, adapter, session_factory, monkeypatch,
+    ):
+        """機構 E の配線: 吸収先の無い発話あり run は、executor へ渡る計画に
+        通常チャンクとして合流する (単独の一次あらすじになる)。"""
+        from types import SimpleNamespace
+
+        from sea.session_lifecycle import SessionLifecycle
+
+        monkeypatch.setenv("SAIVERSE_CHRONICLE_BAND_BUDGET", str(TARGET))
+        conn = adapter.conn
+        gap = _add_message(adapter, 0, 100)               # 発話・吸収先なし
+        n1 = _add_message(adapter, 10, 600, thread="t2")  # 隣は別スレッドのみ
+        _entry(conn, [n1], start_min=10, end_min=10)
+
+        manager = SimpleNamespace(SessionLocal=session_factory, personas={})
+        lifecycle = SessionLifecycle(SimpleNamespace(), manager)
+        lifecycle.get_metabolism_watermarks = lambda persona, model_key=None: None
+        persona = SimpleNamespace(
+            persona_id=PERSONA_ID, persona_name="テスター", model="claude-x",
+            sai_memory=adapter,
+        )
+        captured = {}
+
+        def _capture_plan(plan, *a, **k):
+            from sai_memory.arasuji.executor import ExecutionResult
+            captured["chunks"] = [list(c.message_ids) for c in plan.chunks]
+            return ExecutionResult()
+
+        with patch(
+            "saiverse.model_configs.find_model_config",
+            return_value=(
+                "mock-model", {"provider": "mock", "context_length": 1000},
+            ),
+        ), patch(
+            "llm_clients.factory.get_llm_client", return_value=_Client(),
+        ), patch(
+            "sai_memory.arasuji.executor.execute_plan", _capture_plan,
+        ), patch(
+            "sai_memory.arasuji.bands.backfill_coverage", lambda conn: 0,
+        ), patch(
+            "sai_memory.arasuji.bands.run_band_overflow", lambda *a, **k: 0,
+        ), patch(
+            "sai_memory.memory.entity_extractor.make_batch_callback",
+            side_effect=RuntimeError("skip entity extraction"),
+        ):
+            status = lifecycle.generate_chronicle(persona, force=True)
+
+        assert status == "ok"
+        assert [gap] in captured["chunks"]
+
+    def test_breakdown_is_noted_for_the_repair_job(
+        self, adapter, session_factory, monkeypatch,
+    ):
+        """機構 G の配線: 走行の内訳 (編纂 / 吸収 / 発話ゼロの残り) が
+        pop_last_chronicle_breakdown で補修ジョブへ渡る。"""
+        from types import SimpleNamespace
+
+        from sea.session_lifecycle import SessionLifecycle
+
+        monkeypatch.setenv("SAIVERSE_CHRONICLE_BAND_BUDGET", str(TARGET))
+        conn = adapter.conn
+        gap = _add_message(adapter, 0, 100)               # 吸収へ (1 通)
+        n1 = _add_message(adapter, 10, 300)
+        n2 = _add_message(adapter, 11, 300)
+        _entry(conn, [n1, n2], start_min=10, end_min=11)
+        # 発話ゼロの孤立 run (両隣とも別スレッド → 吸収先なし・編纂もしない)
+        _add_message(
+            adapter, 20, 50, thread="t3",
+            metadata={"tags": ["event_message"]},
+        )
+        n3 = _add_message(adapter, 30, 600, thread="t2")
+        _entry(conn, [n3], start_min=30, end_min=30)
+
+        manager = SimpleNamespace(SessionLocal=session_factory, personas={})
+        lifecycle = SessionLifecycle(SimpleNamespace(), manager)
+        lifecycle.get_metabolism_watermarks = lambda persona, model_key=None: None
+        persona = SimpleNamespace(
+            persona_id=PERSONA_ID, persona_name="テスター", model="claude-x",
+            sai_memory=adapter,
+        )
+
+        def _fake_executor(plan, *a, **k):
+            from sai_memory.arasuji.executor import ExecutionResult
+            # 通常チャンクの編纂で 2 通ぶんのエントリが 1 個できた形
+            return ExecutionResult(
+                created=[SimpleNamespace(message_count=2)],
+            )
+
+        with patch(
+            "saiverse.model_configs.find_model_config",
+            return_value=(
+                "mock-model", {"provider": "mock", "context_length": 1000},
+            ),
+        ), patch(
+            "llm_clients.factory.get_llm_client", return_value=_Client(),
+        ), patch(
+            "sai_memory.arasuji.executor.execute_plan", _fake_executor,
+        ), patch(
+            "sai_memory.arasuji.bands.backfill_coverage", lambda conn: 0,
+        ), patch(
+            "sai_memory.arasuji.bands.run_band_overflow", lambda *a, **k: 0,
+        ), patch(
+            "sai_memory.memory.entity_extractor.make_batch_callback",
+            side_effect=RuntimeError("skip entity extraction"),
+        ):
+            status = lifecycle.generate_chronicle(persona, force=True)
+
+        assert status == "ok"
+        breakdown = lifecycle.pop_last_chronicle_breakdown(PERSONA_ID)
+        assert breakdown == {
+            "compiled_messages": 2,
+            "absorbed_messages": 1,   # gap が隣のあらすじへ合流
+            "silent_messages": 1,
+            "silent_runs": 1,
+            "deferred_messages": 0,
+            "deferred_runs": 0,
+            "skipped_messages": 0,
+        }
+        # pop は消費する — 二度目は None (次の走行の値と混ざらない)
+        assert lifecycle.pop_last_chronicle_breakdown(PERSONA_ID) is None
+        assert get_entries_covering_messages(conn, [gap])
+
     def test_plan_exception_fails_the_full_plan(
         self, adapter, session_factory, monkeypatch,
     ):
@@ -672,6 +1008,11 @@ class TestGenerateChronicleWiring:
         entry = _entry(conn, [n1], start_min=10, end_min=10)
         manager = SimpleNamespace(SessionLocal=session_factory, personas={})
         lifecycle = SessionLifecycle(SimpleNamespace(), manager)
+        # 水位を持たない model = 極小 run が実際に計画へ載る (載らないと
+        # 「見送り」の経路自体を通らない)
+        lifecycle.get_metabolism_watermarks = (
+            lambda persona, model_key=None: None
+        )
         persona = SimpleNamespace(
             persona_id=PERSONA_ID, persona_name="テスター", model="claude-x",
             sai_memory=adapter,
@@ -694,6 +1035,12 @@ class TestGenerateChronicleWiring:
         # 見送り: 極小 run は編纂されず、隣人も無傷
         assert get_entry(conn, entry.id) is not None
         assert get_entries_covering_messages(conn, [gap]) == []
+        # 見送った run は内訳の「残り」に理由つきで載る (機構 G —
+        # fold 照会失敗の見送りを成功の顔で隠さない)
+        breakdown = lifecycle.pop_last_chronicle_breakdown(PERSONA_ID)
+        assert breakdown is not None
+        assert breakdown["deferred_messages"] == 1
+        assert breakdown["deferred_runs"] == 1
 
     def test_maintenance_check_exception_fails_the_full_plan(
         self, adapter, session_factory, monkeypatch,
@@ -1082,6 +1429,9 @@ class TestReviewFixes:
         assert result.merged_entries == []
         assert client.prompts == []
         assert get_entry(conn, entry.id) is not None
+        # 冪等スキップは完了であって残りではない (機構 G)
+        assert result.skipped_run_message_count == 0
+        assert result.skipped_reasons == {}
 
     def test_partially_covered_item_is_discarded(self, adapter):
         """[Codex 2] 一部だけ被覆済みの item は合体を強行せず破棄する。"""
@@ -1106,6 +1456,33 @@ class TestReviewFixes:
         assert client.prompts == []
         assert get_entry(conn, entry.id) is not None
         assert get_entries_covering_messages(conn, [gap2]) == []
+        # 未被覆のまま残るのは gap2 の 1 件だけ — 理由つきで残りに数える
+        # (機構 G。gap1 は被覆済みなので残りではない)
+        assert result.skipped_run_message_count == 1
+        assert result.skipped_reasons == {"partially_covered": 1}
+
+    def test_missing_neighbor_counts_the_run_as_remainder(self, adapter):
+        """隣人が計画の後に消えた skip は、run 全件を理由つきで残りに数える
+        (機構 G — skip された run が完了報告から消えない)。"""
+        conn = adapter.conn
+        gap = _add_message(adapter, 0, 100)
+        n1 = _add_message(adapter, 10, 600)
+        entry = _entry(conn, [n1], start_min=10, end_min=10)
+        messages, processed, _normal, tiny = _plan(adapter)
+        plan = plan_absorption(
+            conn, tiny, messages, processed, target_chars=TARGET,
+        )
+        assert plan.items
+        from sai_memory.arasuji.storage import delete_entry
+        assert delete_entry(conn, entry.id)
+        client = _Client()
+        result = run_absorption(conn, client, plan)
+        assert result.skipped_items == 1
+        assert client.prompts == []
+        assert result.skipped_run_message_count == 1
+        assert result.skipped_reasons == {"neighbor_missing": 1}
+        # run は未被覆のまま残っている (残りに数える根拠)
+        assert get_entries_covering_messages(conn, [gap]) == []
 
     def test_chain_stops_at_parent_boundary(self, adapter):
         """[Codex 3] 隣人連鎖は親境界 (parent_id の変化) を跨がない。"""
@@ -1270,6 +1647,9 @@ class TestReviewFixes:
         covering = get_entries_covering_messages(conn, [gap])
         assert len(covering) == 1
         assert covering[0].content == "CLI が被覆"
+        # 別経路が被覆し切った run は残りではない (機構 G)
+        assert result.skipped_run_message_count == 0
+        assert result.skipped_reasons == {}
 
     def test_upper_conflict_retry_capped_per_job(self, adapter):
         """[Codex R2] 指紋 CAS 棄却の再試行は 1 ジョブ 2 回まで — 競合が続いても
@@ -2789,13 +3169,15 @@ class TestSweepDeadMessageSources:
         assert parent_after.content == "P"
         assert not _is_stale(conn, parent.id)
 
-    def test_neighbor_with_orphans_becomes_absorbable_after_the_sweep(
+    def test_neighbor_with_orphans_is_opened_without_waiting_for_the_sweep(
         self, adapter,
     ):
-        """統合: 孤児参照を持つ隣人は開き直しを拒まれ、隣の未被覆断片が取り
-        残される。sweep 後は同じ計画で吸収され、断片が被覆に入る。"""
-        from sai_memory.arasuji.absorption import _sweep_dead_message_sources
-
+        """統合: 孤児参照を持つ隣人も計画は**そのまま開く** (機構 F —
+        chronicle_coverage_gaps)。旧仕様は「sweep が先に治すまで開かない」を
+        固定していたが、「開かない」柵は計画側から撤去された (書き換え理由:
+        柵が守る品質は無く、掃除で治る前提を柵の側でも一貫させる設計の整理)。
+        実行 (run_absorption) 冒頭の sweep が dead 参照を落とすので、合体後の
+        被覆は生存分だけになる。"""
         conn = adapter.conn
         gap = _add_message(adapter, 0, 100)               # 取り残される断片
         n1 = _add_message(adapter, 10, 300)
@@ -2803,19 +3185,11 @@ class TestSweepDeadMessageSources:
         entry = _entry(conn, [n1, "dead-1", n2], start_min=10, end_min=11)
 
         messages, processed, _normal, tiny = _plan(adapter)
-        blocked = plan_absorption(
-            conn, tiny, messages, processed, target_chars=TARGET,
-        )
-        assert blocked.items == []
-        assert blocked.unresolved_runs == 1
-
-        assert _sweep_dead_message_sources(conn) == {entry.id: ["dead-1"]}
-
-        messages, processed, _normal, tiny = _plan(adapter)
         plan = plan_absorption(
             conn, tiny, messages, processed, target_chars=TARGET,
         )
-        assert plan.unresolved_runs == 0
+        # sweep より前でも孤児参照の隣人は開かれる (F — 計画側の柵の撤去)
+        assert plan.standalone_chunks == []
         assert len(plan.items) == 1
         assert plan.items[0].run_message_ids == [gap]
         assert plan.items[0].absorbed_entry_ids == [entry.id]
