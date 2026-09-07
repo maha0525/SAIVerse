@@ -81,11 +81,10 @@ class _AtlasTestBase(unittest.TestCase):
         return memopedia.create_page(parent_id="root_terms", title=title, content=content)
 
     def _make_chronicle_entry(self, content="1日目のできごと"):
-        from sai_memory.arasuji.storage import create_entry, init_arasuji_tables
+        from sai_memory.arasuji.storage import create_entry
 
-        # SAIMemoryAdapter は Memopedia/core_memory と違い arasuji テーブルを
-        # __init__ で eager 初期化しない (既存の遅延初期化パターン)。
-        init_arasuji_tables(self.adapter.conn)
+        # arasuji テーブルは SAIMemoryAdapter の __init__ が eager 初期化する
+        # (2026-09-07 から。AdapterEagerArasujiInitTests 参照)。
         return create_entry(
             self.adapter.conn, level=1, content=content, source_ids=["msg1"],
             source_count=1, message_count=1,
@@ -1417,6 +1416,117 @@ class ChronicleShortIdBackfillTests(unittest.TestCase):
             "SELECT short_id FROM arasuji_entries WHERE id = 'old-1'"
         ).fetchone()
         self.assertEqual(row[0], 1)
+
+
+class AdapterEagerArasujiInitTests(unittest.TestCase):
+    """v0.2 形式の memory.db を SAIMemoryAdapter が開くだけで移行することを固定する。
+
+    v0.2 の DB では ``arasuji_entries`` が旧実テーブル (origin_track_id 列なし)
+    のまま残る。移行して互換 VIEW に差し替えるのは init_arasuji_tables だけだが、
+    会話の頭 (sea/session_lifecycle.py の窓の読み戻しと床の確認) は初期化を
+    経ずに adapter.conn へ直接 SQL を投げる。そのため adapter の __init__ が
+    eager に移行していないと、v0.2 → v0.3.7+ 直行の利用者は最初の会話で
+    "no such column: a.origin_track_id" に倒れ、床の確立に毎回失敗する
+    (2026-09-07 実害)。
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.persona_dir = Path(self._tmp.name) / "personas" / "tester"
+        self.persona_dir.mkdir(parents=True, exist_ok=True)
+        os.environ["SAIMEMORY_MEMORY"] = "1"
+        self.addCleanup(self._cleanup_temp)
+        self.addCleanup(os.environ.pop, "SAIMEMORY_MEMORY", None)
+
+        # adapter が開く前に、v0.2 形式の memory.db (旧 arasuji_entries 実
+        # テーブル + 旧行) を同じパスに仕込む。CREATE 文は
+        # ChronicleShortIdBackfillTests と同じ旧スキーマ (origin_track_id 列なし)。
+        conn = sqlite3.connect(str(self.persona_dir / "memory.db"))
+        conn.execute(
+            """
+            CREATE TABLE arasuji_entries (
+                id TEXT PRIMARY KEY,
+                level INTEGER NOT NULL,
+                content TEXT NOT NULL,
+                source_ids_json TEXT NOT NULL,
+                start_time INTEGER,
+                end_time INTEGER,
+                source_count INTEGER NOT NULL,
+                message_count INTEGER NOT NULL,
+                parent_id TEXT,
+                is_consolidated INTEGER DEFAULT 0,
+                created_at INTEGER NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO arasuji_entries VALUES "
+            "('old-1', 1, '一番古い', '[\"m-old\"]', 50, 50, 1, 1, NULL, 0, 100)"
+        )
+        conn.execute(
+            "INSERT INTO arasuji_entries VALUES "
+            "('old-2', 1, '2番目に古い', '[]', 100, 100, 1, 1, NULL, 0, 200)"
+        )
+        conn.commit()
+        conn.close()
+
+        patcher = patch("saiverse_memory.adapter.Embedder", DummyEmbedder)
+        self.addCleanup(patcher.stop)
+        patcher.start()
+
+        from saiverse_memory import SAIMemoryAdapter
+
+        self.adapter = SAIMemoryAdapter(
+            "tester", persona_dir=self.persona_dir, resource_id="tester"
+        )
+        self.addCleanup(self.adapter.close)
+
+    def _cleanup_temp(self):
+        gc.collect()
+        try:
+            self._tmp.cleanup()
+        except OSError:
+            pass  # Windows: SQLite ハンドル解放待ちの間欠 WinError 145
+
+    def test_open_migrates_legacy_table_to_view(self):
+        # 開いた直後、arasuji_entries は実テーブルではなく互換 VIEW になっている
+        rows = self.adapter.conn.execute(
+            "SELECT type FROM sqlite_master WHERE name = 'arasuji_entries'"
+        ).fetchall()
+        self.assertEqual([r[0] for r in rows], ["view"])
+        # 旧 2 行は memopedia_pages 側 (= VIEW 越しに見える) へ移行済み
+        count = self.adapter.conn.execute(
+            "SELECT COUNT(*) FROM arasuji_entries"
+        ).fetchone()[0]
+        self.assertEqual(count, 2)
+
+    def test_conversation_head_reads_do_not_raise(self):
+        # 会話の頭が踏む二つの読み (窓の読み戻し / 床の圧縮区間の引き当て) が
+        # v0.2 由来の DB でも OperationalError を出さないこと。どちらの SQL も
+        # a.origin_track_id を参照するので、旧実テーブルのままなら prepare の
+        # 時点で "no such column" に倒れる。
+        from sai_memory.arasuji.storage import (
+            get_entries_covering_messages,
+            get_latest_primary_entry_before_message,
+        )
+
+        # 床の確認 (_floor_coverage_folds) 側: 移行済みの旧行が source 経由で
+        # 引き当てられる = 中身ごと読める
+        entries = get_entries_covering_messages(self.adapter.conn, ["m-old"])
+        self.assertEqual([e.id for e in entries], ["old-1"])
+        self.assertEqual(entries[0].content, "一番古い")
+
+        # 読み戻し (_plan_window_refill) 側: 実在する起点メッセージを積んでから
+        # 呼ぶ (messages に無い id だと SQL に到達する前に None が返るため)
+        anchor_id = self.adapter.append_persona_message(
+            {"role": "user", "content": "v0.2 から来た最初の発話"}
+        )
+        entry = get_latest_primary_entry_before_message(
+            self.adapter.conn, anchor_id
+        )
+        # 旧行の材料 "m-old" は messages に実在しないので候補にならず None。
+        # ここで例外にならないことが本題。
+        self.assertIsNone(entry)
 
 
 class ChronicleLegacyMigrationTest(unittest.TestCase):
