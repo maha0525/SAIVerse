@@ -122,7 +122,7 @@ reduce は「型 → マージ関数」の汎用基盤にする。新しい知�
 **snapshot の操作とバッファ消費は完全に別物**として扱う。状態差分を検知する操作は、消費（Pulse での flush）とは無関係なタイミングで独立に走る。
 
 - **検知操作**: （前回検知時の基準 snapshot）vs（現在の live 状態）を比較し、差分があれば知覚項目を永続バッファに入れ、基準 snapshot を現在状態で更新する（次の検知で同じ差分を二重に出さないため）。
-- **検知タイミング（複数・消費とは独立）**: **プレビューを開いたとき**・**Pulse 起動時**・定期（数分おき）・その他のきっかけ。どれで走っても正しく動く（基準 snapshot が進むので冪等）。
+- **検知タイミング（複数・消費とは独立）**: **プレビューを開いたとき**・**Pulse 起動時**・定期（数分おき）・その他のきっかけ。どれで走っても正しく動く（基準 snapshot が進むので冪等）。ただし**プレビューの検知だけは基準を進めない読み取り専用**で走る（2026-09-07 改訂、§8 Phase 3）— 進めてしまうと、送られない列のために差分が既読化され、直後の実 Pulse がそれを届けられなくなる。
 - 非状態イベント（メタ記憶訂正・発話）は「検知」ではなく発生時に直接永続バッファへ push する（差分ではなく一発の事実なので）。
 
 **なぜ分離が必須か**: 「消費時にしか状態差分を検知しない」とすると、状態変化は Pulse が起きて初めて可視化される＝**プレビューできない＝透明性が出ない**（本 doc の大目的に反する）。検知を消費から切り離し、プレビューを検知タイミングの一つにすることで、「今このペルソナに話しかけたら何が知覚されるか」を Pulse 前に見られる。当初 §9-B に「消費時に比較」と書いていたのはこの点で誤りだった（まはー指摘）。
@@ -198,7 +198,8 @@ Cached Head が「Metabolism まで snapshot を凍結」、visual_context / mem
 - **Phase 1a（実機検証済み, 2026-07-09）**: 知覚バッファの器（**永続ストア** `sai_memory/perception_buffer.py`・型付き項目・型別 reduce・Pulse 消費で 1 メッセージ flush・検知と消費の分離〈§4.5〉）を実装。メタ記憶訂正を最初の利用者として載せ替え（`_notify_persona_correction` → `adapter.push_perception`、reduce_key=`c:{id}` で同一記憶の連続操作を集約）。消費は `run_meta_user` 冒頭の `flush_perception_buffer`（全 Pulse タイプの単一入口）。**quon_city_a で実機確認**: コア記憶3件を復元→バッファに3件溜まる（SAIMemory 0）→会話（Pulse）で1メッセージに畳まれ SAIMemory へ→バッファ空、まで全経路通過。
 - **Phase 2a（3直挿入撤去・実機検証済み 2026-07-09）**: 世界状態差分（world_state）・想起（persona_recall）・メタ記憶訂正の**3直挿入を全廃**し、全て知覚バッファへ push → 呼び出し元の flush で消費する形に統一。`inject_diff_notifications` は検知器（push）に降格、snapshot 比較は残す（§9-B）。4呼び出しサイトの timing 契約を検知/消費分離（§4.5）で一貫化: pulse開始=全Sectionを検知して末尾flush（同席の相手への再会の想起もここ） / pulse中(metabolism直後)=即flush / 移動時(pulse外)=移動の事実だけを push し(検知の対象は building と building_occupants の 2 つで、後者は文を届けず基準合わせだけ)、消費は次 pulse(＝主観時間停止中の知覚は詰まって待つ、が正しくなった)。**移動時に積む範囲は 2026-09-07 に「全 Section の差分」から「移動の事実だけ」へ絞り、同日に再会の想起の発火点も移動時のラベルから pulse 開始時の同席チェックへ移した**（§5.4 の同日改訂）。
 - **Phase 1b / 2b（設計フォーク・未着手）**: **起動力ディスパッチャ（§4.4）＋会話取り込み（auto_ingest）統合**。「絶対反応する」フラグを §3.1 全契機に付与し、他ペルソナ発話が Pulse を起こせるようにする。これは**新能力＝Phase 5 UC-2（対ペルソナ social Track 入口）と重なる**（単なる rewire でなく、(1) 会話型知覚を flush で個別メッセージとして render する拡張、(2) salience 判定ルール、(3) pulse_controller/AutonomyManager との接続、の設計判断を含む）。Phase 5 と足並みを揃えて設計してから実装する。※メタ記憶訂正・world_state・persona_recall は起動力なし（溜まる）なので 2a では不要だった。
-- **Phase 3（閲覧・実機検証済み 2026-07-09）**: 未消費バッファの**閲覧（read-only）**を `ContextPreviewModal` に 1 section「知覚バッファ（未消費・次のPulseで反映）」として追加（`preview_context` が list_pending→reduce→format で実 flush と同じ形に畳み、section・トークン推定を返す。フロントは section 汎用描画なので変更不要）。read-only 徹底: プレビューで検知（snapshot 比較）は走らせない（snapshot を進める副作用回避）ので、既に溜まっている未消費分のみ表示。項目編集（削除 / 抑制 / 本文）とペルソナホームからのアクセスは後続。
+- **Phase 3（閲覧・実機検証済み 2026-07-09）**: 未消費バッファの**閲覧（read-only）**を `ContextPreviewModal` に 1 section「知覚バッファ（未消費・次のPulseで反映）」として追加（`preview_context` が list_pending→reduce→format で実 flush と同じ形に畳み、section・トークン推定を返す。フロントは section 汎用描画なので変更不要）。項目編集（削除 / 抑制 / 本文）とペルソナホームからのアクセスは後続。
+  - **プレビューは Pulse の頭の検知ぶんも合成する（2026-09-07 改訂）**: 起票時は「プレビューで検知は走らせない（基準を進める副作用を避ける）」としていたが、その後 world_state の検知・部屋の様子の照合・同席の想起がいずれも Pulse の頭へ集まったため、未消費バッファだけを見せると**「いま話しかけたらペルソナが読むもの」が映らなくなった**（まはーの実機: エリスの退室がプレビューに出ない）。改訂後は Pulse の頭と同じ三つの検知を**読み取り専用**で走らせ、結果を仮の未消費項目として実際の未消費の後ろに合成してから、既存の reduce → 回収 → 消費時描画へ通す。読み取り専用の中身は「基準（`last_notified`）を進めない・知覚バッファに push しない・実行台帳に行を作らない・同席想起の『試み済み』の記憶に触れない・head の snapshot も撮らない」。実装は `sea/head_pipeline/integration.preview_head_perceptions` と `sea/runtime_context._compose_pending_preview`（詳細は [issues/perception_state_pushed_at_event_time.md](../issues/perception_state_pushed_at_event_time.md) 直し方 8）。
 - **Phase 4（構想）**: 凍結概念（Cached Head / visual / weave）の知覚バッファ一般形への寄せ。
 
 ---

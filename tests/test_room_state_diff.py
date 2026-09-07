@@ -1259,6 +1259,104 @@ class RoomStateSelfRecoveryTest(RoomStateLedgerTestBase):
         self.assertEqual(sai_mem.pushed, [])
         self.assertEqual(sai_mem.reseated, [])
 
+    # --- 照合の計算だけを取り出す口 (プレビューが使う、2026-09-07) ---
+
+    def _plan(self, sai_mem, bundle, *, chronicle_on=True):
+        from sea.head_pipeline.integration import _plan_room_state_change
+
+        persona = SimpleNamespace(
+            persona_id="p1", persona_dir=None,
+            current_building_id="b1", sai_memory=sai_mem,
+        )
+        with patch(
+            "builtin_data.tools.get_visual_context.build_room_bundle",
+            return_value=bundle,
+        ), patch(
+            "sea.head_pipeline.integration._room_chronicle_enabled",
+            return_value=chronicle_on,
+        ):
+            return _plan_room_state_change(persona, SimpleNamespace(), "b1")
+
+    def test_the_plan_reports_the_push_without_writing(self):
+        """計算だけの口は「積むはず」を返すだけ — 積みも置き直しもしない。"""
+        bundle = self.env.bundle()
+        self._push("b1", bundle)
+        self._flush()
+        self.env.items.append(_make_item(
+            "uuid-new", 14, "picture", "新しい絵", "届いたばかりの絵。",
+            is_open=True, file_path=self.env.pic2_path,
+        ))
+        changed = self.env.bundle()
+        sai_mem = self._sai_mem_stub()
+
+        plan = self._plan(sai_mem, changed)
+
+        self.assertEqual(plan, {
+            "action": "push", "bundle": changed, "allow_diff": True,
+        })
+        self.assertEqual(sai_mem.pushed, [])
+        self.assertEqual(sai_mem.reseated, [])
+        # 何も進んでいないので、二度呼んでも同じ答えが返る
+        self.assertEqual(self._plan(sai_mem, changed), plan)
+
+    def test_the_plan_reports_the_reseat_without_writing(self):
+        """提示に部屋が無い回も、置き直しの予定を返すだけで積み直さない。"""
+        bundle = self.env.bundle()
+        sai_mem = self._sai_mem_stub()
+
+        plan = self._plan(sai_mem, bundle)
+
+        self.assertEqual(plan["action"], "reseat")
+        self.assertEqual(plan["bundle"], bundle)
+        self.assertEqual(sai_mem.reseated, [])
+        self.assertEqual(list_presented_batches(self.conn), [])
+
+    def test_the_preview_shows_the_room_change_without_writing(self):
+        """プレビューの組成に、まだ積まれていない部屋の変化が差分として出る。"""
+        import threading
+
+        from sea.runtime_context import _compose_pending_preview
+
+        bundle = self.env.bundle()
+        self._push("b1", bundle)
+        self._flush()
+        self.env.items.append(_make_item(
+            "uuid-new", 14, "picture", "新しい絵", "届いたばかりの絵。",
+            is_open=True, file_path=self.env.pic2_path,
+        ))
+        changed = self.env.bundle()
+
+        sai_mem = self._sai_mem_stub()
+        sai_mem.conn = self.conn
+        sai_mem._db_lock = threading.RLock()
+        persona = SimpleNamespace(
+            # 既定 pipeline に snapshot を持たない id — Section の差分は出ない
+            # (Section 側の読み取り専用化は
+            #  tests/test_head_pipeline_building_occupants.py が固定する)。
+            persona_id="p_room_preview", persona_dir=None,
+            current_building_id="b1", sai_memory=sai_mem,
+        )
+        select = (
+            "SELECT id, kind, content, media, metadata, consumed_at "
+            "FROM perception_buffer ORDER BY id"
+        )
+        before = self.conn.execute(select).fetchall()
+
+        with patch(
+            "builtin_data.tools.get_visual_context.build_room_bundle",
+            return_value=changed,
+        ), patch(
+            "sea.head_pipeline.integration._room_chronicle_enabled",
+            return_value=True,
+        ):
+            items = _compose_pending_preview(persona, SimpleNamespace(), "b1")
+
+        text = format_perception_message(items)
+        self.assertIn("新しい絵", text)
+        self.assertEqual(self.conn.execute(select).fetchall(), before)
+        self.assertEqual(sai_mem.pushed, [])
+        self.assertEqual(sai_mem.reseated, [])
+
     def _detect_with_move_during_composition(self, sai_mem, bundle):
         """組成 (build_room_bundle) の最中にペルソナが b2 へ移動する検知を回す。
 
@@ -3185,12 +3283,15 @@ class PendingPreviewParityTest(_RoundTripMixin, RoomStateLedgerTestBase):
 
         self._stack_round_trip()
         sai_mem = SimpleNamespace(conn=self.conn, _db_lock=threading.RLock())
+        # 頭の検知を持たないペルソナ (history_manager 無し・現在地なし) —
+        # 合成されるのは未消費バッファの分だけ。
+        persona = SimpleNamespace(sai_memory=sai_mem)
         select = (
             "SELECT id, kind, content, media, metadata, consumed_at "
             "FROM perception_buffer ORDER BY id"
         )
         before = self.conn.execute(select).fetchall()
-        preview_items = _compose_pending_preview(sai_mem)
+        preview_items = _compose_pending_preview(persona, None, "b1")
         preview_text = format_perception_message(preview_items)
         after = self.conn.execute(select).fetchall()
         self.assertEqual(before, after)  # 読むだけ — 行は触らない
@@ -3420,13 +3521,14 @@ class ConsumptionTimeRenderingTest(RoomStateLedgerTestBase):
 
         self._stack_pendings(self.bundle_b, self.bundle_b)
         sai_mem = SimpleNamespace(conn=self.conn, _db_lock=threading.RLock())
+        persona = SimpleNamespace(sai_memory=sai_mem)
         select = (
             "SELECT id, kind, content, media, metadata, consumed_at "
             "FROM perception_buffer ORDER BY id"
         )
         before = self.conn.execute(select).fetchall()
         preview_text = format_perception_message(
-            _compose_pending_preview(sai_mem),
+            _compose_pending_preview(persona, None, "b1"),
         )
         after = self.conn.execute(select).fetchall()
         self.assertEqual(before, after)  # 読むだけ — 行は触らない

@@ -18,6 +18,9 @@
 7. **積んだ想起には同席の印が付く** — 旧方式が移動時に積んだ想起はユーザーの
    知覚バッファに未消費のまま残るので、印の無い persona_recall を未消費バッファ
    の回収が遺物として捨てる (room_state_packages.md §11-2 規則 3(c))。
+8. **コンテキストプレビューは同じ想起を読み取り専用で組む** — 本文はプレビュー
+   に出るが、知覚バッファにも「試み済み」の記憶にも触らないので、直後の実 Pulse
+   がその再会を普通に想起する (2026-09-07 直し方 8)。
 """
 from __future__ import annotations
 
@@ -356,3 +359,72 @@ def test_a_broken_recall_does_not_stop_the_pulse():
         assert runtime.run_meta_user(
             persona=persona, user_input="hello", building_id="b1",
         ) == ["ok"]
+
+
+# ---- プレビューは想起を組むが「試み済み」を消費しない (2026-09-07) ----------
+
+
+def _preview_recalls(persona, manager, building_id):
+    """部屋の様子の照合を外して、想起だけをプレビューさせる。
+
+    部屋の照合は実世界の束の組成を伴うので、この足場では組めない
+    (読み取り専用化の検証は tests/test_room_state_diff.py が持つ)。
+    """
+    from sea.head_pipeline import integration
+
+    with patch.object(integration, "_plan_room_state_change", return_value=None):
+        entries = integration.preview_head_perceptions(
+            persona, manager, building_id,
+        )
+    return [e for e in entries if e["kind"] == "persona_recall"]
+
+
+def test_the_preview_composes_the_recall_without_pushing_it():
+    sai_mem = _FakeMemory()
+    manager = _FakeManager({ROOM_A: [SELF_ID, PARTNER]})
+    persona = _persona(sai_mem, building_id=ROOM_A)
+
+    entries = _preview_recalls(persona, manager, ROOM_A)
+
+    assert [e["content"] for e in entries] == [
+        f"[想起: {PARTNER} との過去の会話]",
+    ]
+    assert sai_mem.pushed == []          # 知覚バッファには積まない
+
+
+def test_the_preview_leaves_the_attempt_memory_clean():
+    """プレビューの後でも、直後の実 Pulse がその再会を想起する。"""
+    sai_mem = _FakeMemory()
+    manager = _FakeManager({ROOM_A: [SELF_ID, PARTNER]})
+    persona = _persona(sai_mem, building_id=ROOM_A)
+
+    _preview_recalls(persona, manager, ROOM_A)
+
+    from sea.head_pipeline.integration import inject_copresence_recall
+    inject_copresence_recall(persona, manager, ROOM_A)
+    assert sai_mem.pushed == [
+        ("persona_recall", f"[想起: {PARTNER} との過去の会話]"),
+    ]
+
+
+def test_the_preview_is_idempotent():
+    sai_mem = _FakeMemory()
+    manager = _FakeManager({ROOM_A: [SELF_ID, PARTNER]})
+    persona = _persona(sai_mem, building_id=ROOM_A)
+
+    assert (
+        _preview_recalls(persona, manager, ROOM_A)
+        == _preview_recalls(persona, manager, ROOM_A)
+    )
+
+
+def test_the_preview_does_not_recall_a_partner_who_already_got_one():
+    """実 Pulse が想起済みの相手は、プレビューにも二重には出ない。"""
+    from sea.head_pipeline.integration import inject_copresence_recall
+
+    sai_mem = _FakeMemory()
+    manager = _FakeManager({ROOM_A: [SELF_ID, PARTNER]})
+    persona = _persona(sai_mem, building_id=ROOM_A)
+
+    inject_copresence_recall(persona, manager, ROOM_A)
+    assert _preview_recalls(persona, manager, ROOM_A) == []

@@ -12,6 +12,9 @@
    (``integration.inject_copresence_recall``、tests/test_copresence_recall.py)。
 5. 入室 hook は在室者も検知の対象にする — 移動した本人が Pulse を打つ前に誰かが
    同じ部屋へ入ってきても、それが「入室しました」として届く。
+6. コンテキストプレビューは Pulse の頭と同じ検知を**読み取り専用**で走らせる —
+   まだ知覚バッファに溜まっていない差分も映り、基準 (last_notified) も知覚
+   バッファも動かさない (2026-09-07 直し方 8)。
 """
 from __future__ import annotations
 
@@ -32,6 +35,7 @@ from sea.head_pipeline import (
     LineHeadInput,
     inject_diff_notifications,
 )
+from sea.head_pipeline import integration
 from sea.head_pipeline.sections.building_occupants import (
     BuildingOccupantsSection,
     BuildingOccupantsSnapshot,
@@ -479,3 +483,71 @@ def test_diff_detection_does_not_fire_recall_direct():
         detect_room=False,
     )
     assert sai_mem.pushed == []
+
+
+# ---------------------------------------------------------------------------
+# 5. プレビューは Pulse の頭の検知ぶんを読み取り専用で合成する (2026-09-07)
+# ---------------------------------------------------------------------------
+
+
+def _preview(persona, manager, building_id, pipeline):
+    """部屋の様子の照合を外して、Section の差分だけをプレビューさせる。
+
+    部屋の照合は実世界の束の組成 (builtin_data/tools/get_visual_context) を
+    伴うので、この足場では組めない — その読み取り専用化は
+    tests/test_room_state_diff.py が持つ。
+    """
+    with patch.object(integration, "_plan_room_state_change", return_value=None):
+        return integration.preview_head_perceptions(
+            persona, manager, building_id, pipeline=pipeline, model_key=MODEL,
+        )
+
+
+def test_preview_shows_a_departure_that_has_not_been_detected_yet():
+    """溜まっていない差分 (Pulse の頭で初めて出る分) もプレビューに映る。"""
+    manager = _FakeManager({ROOM_B: ["elis", "aifi"]})
+    pipeline = _pipeline()
+    pipeline.capture_all(_ctx(ROOM_B, manager))     # 基準 = 二人居る
+    sai_mem = _FakeMemory()
+    persona = _persona(sai_mem)
+
+    manager.occupants[ROOM_B] = ["elis"]            # アイフィが出ていった
+    entries = _preview(persona, manager, ROOM_B, pipeline)
+
+    assert [(e["kind"], e["content"]) for e in entries] == [
+        ("world_state", "アイフィ が退室しました"),
+    ]
+    assert sai_mem.pushed == []                     # 知覚バッファは触らない
+
+
+def test_preview_does_not_advance_the_baseline():
+    """プレビューの後でも、実 Pulse の検知が同じ差分を届ける。"""
+    manager = _FakeManager({ROOM_B: ["elis", "aifi"]})
+    pipeline = _pipeline()
+    pipeline.capture_all(_ctx(ROOM_B, manager))
+    sai_mem = _FakeMemory()
+    persona = _persona(sai_mem)
+
+    manager.occupants[ROOM_B] = ["elis"]
+    _preview(persona, manager, ROOM_B, pipeline)
+
+    assert inject_diff_notifications(
+        persona, manager, ROOM_B, pipeline=pipeline, model_key=MODEL,
+        detect_room=False,
+    ) is True
+    assert sai_mem.pushed == [("world_state", "アイフィ が退室しました")]
+
+
+def test_preview_is_idempotent():
+    """二回続けてプレビューしても同じ結果 (基準が動いていない証拠)。"""
+    manager = _FakeManager({ROOM_B: ["elis", "aifi"]})
+    pipeline = _pipeline()
+    pipeline.capture_all(_ctx(ROOM_B, manager))
+    persona = _persona(_FakeMemory())
+
+    manager.occupants[ROOM_B] = ["elis"]
+    first = _preview(persona, manager, ROOM_B, pipeline)
+    second = _preview(persona, manager, ROOM_B, pipeline)
+
+    assert first == second
+    assert [e["content"] for e in first] == ["アイフィ が退室しました"]

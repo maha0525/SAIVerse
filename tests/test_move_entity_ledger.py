@@ -386,6 +386,10 @@ class MoveDeadlockRegressionTest(unittest.TestCase):
     「handler の中から flush_pending_for_persona を呼ぶ」という再入構造だけを
     最小構成で再現する (実処理の細部に依存せず、ロックの再入安全性そのものを
     固定する)。
+
+    2026-09-07 の新契約: ネストした呼び出しは配送せずに戻る (ここまで従来通り)
+    が、依頼された persona は控えに載り、外側の配達が鍵を離した後に引き継がれる。
+    引き継ぎの flush は配り終わった後なので、同じ行がもう一度配られることはない。
     """
 
     def setUp(self):
@@ -419,7 +423,9 @@ class MoveDeadlockRegressionTest(unittest.TestCase):
                 "target": "test.reentrant", "payload": {}, "persona_id": "air",
             }],
         )
-        # デッドロックしていればこの assert 自体に到達しない (pytest がタイムアウトで検知)
+        # デッドロックしていればこの assert 自体に到達しない (pytest がタイムアウトで検知)。
+        # 引き継ぎで "air" をもう一度 flush しても配る行はもう無いので、handler は
+        # 一度しか呼ばれない (= 二重配送しない)。
         self.assertEqual(calls, ["outer", "inner-returned"])
         self.assertEqual(
             self.ledger.get_execution(execution_id)["status"], "completed"

@@ -261,6 +261,119 @@ def inject_diff_notifications(
     return pushed
 
 
+def preview_head_perceptions(
+    persona: Any,
+    manager: Any,
+    building_id: str,
+    *,
+    pipeline: HeadPipeline | None = None,
+    model_key: str | None = None,
+) -> list[dict]:
+    """Pulse の頭が積むはずの知覚を、何も進めずに組んで返す (プレビュー専用)。
+
+    実 Pulse の頭 (``sea.runtime.SEARuntime._run_meta_user_locked``) は
+    「世界状態の差分 → 部屋の様子 → 同席の想起」の順に検知して知覚バッファへ
+    積み、その回のうちに消費する。プレビューが未消費バッファだけを見せると、
+    この頭の検知ぶんが丸ごと抜けて「いま話しかけたらペルソナが読むもの」に
+    ならない (エリスの退室がプレビューに出なかった実機所見、2026-09-07)。
+    ここは同じ三つの検知を同じ順で走らせ、**読み取り専用**で結果だけを返す。
+
+    読み取り専用の中身:
+
+    - 基準 (last_notified) を進めない (``flush_diffs(..., advance=False)`` の
+      戻りを使うだけで :meth:`HeadPipeline.advance_last_notified` を呼ばない)。
+    - 知覚バッファに push しない / 実行台帳に行を作らない。
+    - 部屋の様子は照合の計算 (:func:`_plan_room_state_change`) までで、置き直し
+      (自己回復) は行わない — 置き直しは提示への書き込みで、しかも未消費の
+      項目を生まないのでプレビューに映すものが無い。
+    - 同席想起は「試み済み」の記憶を更新しない (``remember=False``) ので、
+      直後の実 Pulse が同じ再会をやり直せる。
+    - head の snapshot も撮らない (:func:`ensure_snapshot` を呼ばない) —
+      snapshot が無い回は :meth:`HeadPipeline.flush_diffs` が空を返して差分の
+      行が出ないだけで、プレビューのために head を作って永続化はしない。
+      プレビューの本線 (``preview_context`` → ``_prepare_context``) が先に
+      head を組んでいるので、実運用でこの枝に落ちるのは head を持てない回。
+
+    ``model_key`` は検知の窓判定に使う実行 model。None なら persona の標準
+    model (プレビューが見積もりに使う model と同じ)。
+
+    Returns:
+        ``[{"kind", "content", "media", "metadata"}, ...]`` を実 Pulse の到着順
+        で。``media`` は :meth:`SAIMemoryAdapter.push_perception` と同じ list 形
+        (無ければ None)、``metadata`` は JSON 文字列 (無ければ None)。
+    """
+    items: list[dict] = []
+
+    # 1. 世界状態の差分 — 実 Pulse の _push_section_diffs と同じ検出の呼び方。
+    try:
+        pipeline = pipeline or get_default_pipeline()
+        ctx = build_line_head_input(persona, manager, building_id, model_key=model_key)
+        labels, _detected = pipeline.flush_diffs(
+            ctx, all_sections=True, advance=False,
+        )
+        for label in labels:
+            if not label.deliver:
+                continue
+            items.append({
+                "kind": "world_state",
+                "content": label.label,
+                "media": None,
+                "metadata": (
+                    json.dumps(label.metadata, ensure_ascii=False)
+                    if label.metadata else None
+                ),
+            })
+    except Exception:
+        LOGGER.warning(
+            "head_pipeline: preview section-diff detection failed persona=%s "
+            "building=%s", getattr(persona, "persona_id", "?"), building_id,
+            exc_info=True,
+        )
+
+    # 2. 部屋の様子 — 積むはずの束だけを仮項目にする (置き直しは映さない)。
+    try:
+        plan = _plan_room_state_change(
+            persona, manager, building_id, model_key=model_key,
+        )
+        if plan is not None and plan["action"] == "push":
+            from sai_memory.room_state import ROOM_STATE_KIND, build_room_state_push
+            payload = build_room_state_push(
+                building_id, plan["bundle"], allow_diff=plan["allow_diff"],
+            )
+            items.append({
+                "kind": ROOM_STATE_KIND,
+                "content": payload["content"],
+                "media": payload["media"],
+                "metadata": payload["metadata"],
+            })
+    except Exception:
+        LOGGER.warning(
+            "head_pipeline: preview room-state detection failed persona=%s "
+            "building=%s", getattr(persona, "persona_id", "?"), building_id,
+            exc_info=True,
+        )
+
+    # 3. 同席の相手との再会の想起。
+    try:
+        for recall in _compose_copresence_recalls(
+            persona, manager, building_id, remember=False,
+        ):
+            items.append({
+                "kind": "persona_recall",
+                "content": recall["content"],
+                "media": None,
+                "metadata": recall["metadata"],
+            })
+    except Exception:
+        LOGGER.warning(
+            "head_pipeline: preview copresence recall failed persona=%s "
+            "building=%s", getattr(persona, "persona_id", "?"), building_id,
+            exc_info=True,
+        )
+
+    return items
+
+
 def _push_section_diffs(
     persona: Any,
     manager: Any,
@@ -445,18 +558,23 @@ def reset_copresence_recall_memory(persona_id: str | None = None) -> None:
 
 
 def _take_copresence_newcomers(
-    persona_id: str, occupant_ids: list[str],
+    persona_id: str, occupant_ids: list[str], *, remember: bool = True,
 ) -> list[str]:
     """同席者のうち「不在から同席へ変わった相手」だけを返し、全員を試み済みにする。
 
     記憶に残すのは**いま同席している試み済みの相手だけ** — 居なくなった相手は
     集合から落ちるので、次に再会したときは新顔として扱われる (再武装)。
     戻り値は ``occupant_ids`` の順序を保つ。
+
+    ``remember=False`` は読み取りだけ (プレビュー用) — 新顔の判定は同じだが
+    記憶を更新しないので、直後の実 Pulse がその再会をやり直せる。
     """
     with _copresence_recalled_lock:
         already = _copresence_recalled.get(persona_id) or set()
         current = set(occupant_ids)
         newcomers = [oid for oid in occupant_ids if oid not in already]
+        if not remember:
+            return newcomers
         # 新顔は「これから試みる」ぶんも含めて試み済みにする (門で抑制されても
         # push に失敗しても、この同席の間は再試行しない)。
         if current:
@@ -522,10 +640,53 @@ def inject_copresence_recall(
 
     SAIMemory が未 ready の回は静かに見送る — **記憶を触らずに**戻るので、次の
     Pulse の頭が同じ同席を新顔としてやり直す (何も失われない)。
+
+    想起本文の組み立て (新顔の判定 + 門 + 本文の生成) は
+    :func:`_compose_copresence_recalls` が持ち、ここは戻りを push するだけの
+    外装 — プレビューが「試み済み」の記憶を汚さずに同じ本文を組めるようにする
+    ための分割 (2026-09-07、
+    docs/issues/perception_state_pushed_at_event_time.md 直し方 8)。
+    """
+    sai_mem = getattr(persona, "sai_memory", None)
+    for recall in _compose_copresence_recalls(
+        persona, manager, building_id, remember=True,
+    ):
+        try:
+            sai_mem.push_perception(
+                "persona_recall", recall["content"],
+                metadata=recall["metadata"],
+            )
+            LOGGER.info(
+                "head_pipeline: pushed persona recall perception for %s "
+                "(copresent at the pulse head)", recall["occupant_id"],
+            )
+        except Exception:
+            LOGGER.exception(
+                "head_pipeline: failed to push persona recall for %s",
+                recall["occupant_id"],
+            )
+
+
+def _compose_copresence_recalls(
+    persona: Any,
+    manager: Any,
+    building_id: str,
+    *,
+    remember: bool = True,
+) -> list[dict]:
+    """同席の新顔ごとに、積むはずの想起 (本文 + 同席の印) を組んで返す。
+
+    知覚バッファには積まない。``remember=False`` は「試み済み」の記憶も更新
+    しない読み取り専用モード (プレビュー用) — 直後の実 Pulse がその再会を
+    同じ新顔としてやり直す。
+
+    Returns:
+        ``[{"occupant_id", "content", "metadata"}, ...]`` を同席者一覧の順で。
+        門で抑制された相手・想起本文が空だった相手は含まれない。
     """
     history_manager = getattr(persona, "history_manager", None)
     if not history_manager or not building_id:
-        return
+        return []
     sai_mem = getattr(persona, "sai_memory", None)
     if sai_mem is None or not sai_mem.is_ready():
         # 「試み済み」を刻まずに戻る — 刻むと、起動直後の未 ready の一回で
@@ -534,7 +695,7 @@ def inject_copresence_recall(
             "head_pipeline: SAIMemory not ready, skipping copresence recall "
             "(the next pulse head checks the same room again)",
         )
-        return
+        return []
 
     id_to_name = getattr(persona, "id_to_name_map", None) or {}
     self_id = getattr(persona, "persona_id", None)
@@ -559,15 +720,18 @@ def inject_copresence_recall(
 
     # 想起を試みるのは「不在から同席へ変わった相手」だけ。ここで全員が試み済みに
     # なる (下の門・想起・push の結果は問わない)。
-    newcomers = _take_copresence_newcomers(str(self_id or ""), occupant_ids)
+    newcomers = _take_copresence_newcomers(
+        str(self_id or ""), occupant_ids, remember=remember,
+    )
     if not newcomers:
-        return
+        return []
 
     from sai_memory.room_state import (
         RECALL_COPRESENCE_META_KEY,
         RECALL_OCCUPANT_META_KEY,
     )
 
+    composed: list[dict] = []
     for occupant_id in newcomers:
         # ユーザーも対ペルソナと同様に想起する (まはー裁定 2026-07-11)。
         # 従来はユーザーページの肥大化に打つ手が無く persona 限定だったが、
@@ -598,30 +762,23 @@ def inject_copresence_recall(
         if not recall_text:
             continue
 
-        try:
-            # 同席の印を metadata に刻む。未消費バッファの回収
-            # (sai_memory/room_state.reclaim_pending_perceptions — §11-2 規則
-            # 3(c)) は、この印が無い persona_recall を旧方式 (移動の瞬間に積む、
-            # 2026-09-07 退役) の遺物として捨てる。相手の ID は診断とプレビュー
-            # のために併記する。
-            sai_mem.push_perception(
-                "persona_recall", recall_text,
-                metadata=json.dumps(
-                    {
-                        RECALL_COPRESENCE_META_KEY: True,
-                        RECALL_OCCUPANT_META_KEY: occupant_id,
-                    },
-                    ensure_ascii=False,
-                ),
-            )
-            LOGGER.info(
-                "head_pipeline: pushed persona recall perception for %s "
-                "(copresent at the pulse head)", occupant_id,
-            )
-        except Exception:
-            LOGGER.exception(
-                "head_pipeline: failed to push persona recall for %s", occupant_id,
-            )
+        # 同席の印を metadata に刻む。未消費バッファの回収
+        # (sai_memory/room_state.reclaim_pending_perceptions — §11-2 規則
+        # 3(c)) は、この印が無い persona_recall を旧方式 (移動の瞬間に積む、
+        # 2026-09-07 退役) の遺物として捨てる。相手の ID は診断とプレビュー
+        # のために併記する。
+        composed.append({
+            "occupant_id": occupant_id,
+            "content": recall_text,
+            "metadata": json.dumps(
+                {
+                    RECALL_COPRESENCE_META_KEY: True,
+                    RECALL_OCCUPANT_META_KEY: occupant_id,
+                },
+                ensure_ascii=False,
+            ),
+        })
+    return composed
 
 
 def _should_recall_on_enter(
@@ -655,7 +812,44 @@ def _detect_room_state_changes(
     persona: Any, manager: Any, building_id: str,
     *, model_key: Optional[str] = None,
 ) -> None:
+    """部屋の様子の照合を走らせ、出た予定 (置き直し / 積み) を実行する。
+
+    照合の計算そのものは :func:`_plan_room_state_change` が持ち、ここは戻りを
+    書き込みに変えるだけの外装 — プレビューが同じ計算を書き込み抜きで使える
+    ようにするための分割で、実配送側の挙動は分割前と同じ
+    (2026-09-07、docs/issues/perception_state_pushed_at_event_time.md 直し方 8)。
+    """
+    plan = _plan_room_state_change(
+        persona, manager, building_id, model_key=model_key,
+    )
+    if plan is None:
+        return
+    sai_mem = getattr(persona, "sai_memory", None)
+    if sai_mem is None:
+        return
+    if plan["action"] == "reseat":
+        sai_mem.reseat_room_state(
+            plan["bundle"],
+            anchor_id=plan["anchor_id"], floor_chars=plan["floor_chars"],
+        )
+    else:
+        sai_mem.push_room_state(
+            building_id, plan["bundle"], allow_diff=plan["allow_diff"],
+        )
+
+
+def _plan_room_state_change(
+    persona: Any, manager: Any, building_id: str,
+    *, model_key: Optional[str] = None,
+) -> Optional[dict]:
     """滞在中の「部屋の様子」のパッケージ照合と自己回復 (room_state_packages.md §6-2/§6-3)。
+
+    **読むだけ** — 判定に必要な世界と台帳の読みは行うが、知覚バッファにも
+    提示にも書き込まない。何をすべきかを次の形で返す (何も要らなければ None):
+
+    - ``{"action": "reseat", "bundle", "anchor_id", "floor_chars"}`` —
+      部屋の様子が提示のどこにも見えないので全文を最古端へ置き直す。
+    - ``{"action": "push", "bundle", "allow_diff"}`` — 変わったので末尾へ積む。
 
     検知の瞬間 (Pulse 開始・入室時の居合わせ側・Beat 頭の MCP 変動) に今の部屋の
     パッケージの束を組み、**提示と同じ窓で見えている**最新の束と指紋で
@@ -692,10 +886,10 @@ def _detect_room_state_changes(
     五巡目修正 2)。
     """
     if getattr(persona, "current_building_id", None) != building_id:
-        return
+        return None
     sai_mem = getattr(persona, "sai_memory", None)
     if sai_mem is None or not getattr(sai_mem, "is_ready", lambda: False)():
-        return
+        return None
 
     from builtin_data.tools.get_visual_context import build_room_bundle
     from tools.context import persona_context
@@ -703,11 +897,11 @@ def _detect_room_state_changes(
     persona_id = getattr(persona, "persona_id", None)
     persona_dir = getattr(persona, "persona_dir", None)
     if not persona_id:
-        return
+        return None
     with persona_context(persona_id, persona_dir, manager):
         bundle = build_room_bundle(building_id)
     if not bundle:
-        return
+        return None
 
     from sai_memory.perception_buffer import WindowResolutionError
     from sai_memory.room_state import room_key, snapshot_digest
@@ -750,7 +944,7 @@ def _detect_room_state_changes(
             "persona=%s building=%s (the next detection will retry)",
             persona_id, building_id, exc_info=True,
         )
-        return
+        return None
     # 積む直前の現在地の再確認 — 冒頭の確認から束の組成 (world の読み) を
     # 挟んで時間が経っており、その間に別スレッドの移動で現在地が変わって
     # いたら、この束はもう「現在の知覚」ではない。見送れば次の検知が現在地で
@@ -764,19 +958,26 @@ def _detect_room_state_changes(
             persona_id, building_id,
             getattr(persona, "current_building_id", None),
         )
-        return
+        return None
     if latest is None:
         # 窓に見える束が一枚も無い = 提示に部屋が無い (ブートストラップと、
         # Chronicle 無効の窓絞りで運搬役が落ちた形を含む)。窓が解決できない
         # 回は上の見送りで既に抜けている。
-        sai_mem.reseat_room_state(
-            bundle, anchor_id=anchor_id, floor_chars=floor_chars,
-        )
-        return
+        return {
+            "action": "reseat",
+            "bundle": bundle,
+            "anchor_id": anchor_id,
+            "floor_chars": floor_chars,
+        }
     if snapshot_digest(latest) != snapshot_digest(bundle):
         # 変化は出来事 — 末尾へ束を積む。描画 (差分 / Chronicle 無効は毎回
         # 全文) は消費の組成の一回だけ (room_state_packages.md §11-2 規則 2)。
-        sai_mem.push_room_state(building_id, bundle, allow_diff=chronicle_on)
+        return {
+            "action": "push",
+            "bundle": bundle,
+            "allow_diff": chronicle_on,
+        }
+    return None
 
 
 def _room_chronicle_enabled(persona: Any, manager: Any) -> bool:

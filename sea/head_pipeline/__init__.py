@@ -6,6 +6,7 @@ from sea.head_pipeline.integration import (
     ensure_snapshot,
     inject_copresence_recall,
     inject_diff_notifications,
+    preview_head_perceptions,
     render_head_messages,
 )
 from sea.head_pipeline.notify import (
@@ -47,5 +48,6 @@ __all__ = [
     "inject_diff_notifications",
     "notify_head_mutation",
     "notify_head_mutation_from_tool_context",
+    "preview_head_perceptions",
     "render_head_messages",
 ]
