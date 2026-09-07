@@ -18,7 +18,7 @@
 ## 次の版の範囲
 
 - **v0.3.10 に入れると確定** (2026-09-07 まはー): 移動の瞬間に積む知覚通知の是正 4 点 — 移動した本人への差分の積み込み廃止 / 「〜がいます」通知の退役 (同席者は部屋の様子に一本化) / スペル通知の方向ごとの束ね / Memopedia 通知の操作ごとの束ね ([issues/perception_state_pushed_at_event_time.md](../issues/perception_state_pushed_at_event_time.md))。
-- 2026-09-07 (v0.3.9 発行後): 上記のほかの範囲は**未確定**。持ち越しの候補: (a) 発行後検討と裁定された未裁定 3 点 — 知覚の既定値の調整 (上 60,000/下 20,000 の見直しと発火の相乗り案) / 保存時検査の余裕 10,000 の妥当性 / `perception_high` null のオプトアウトが検査を素通しする穴。(b) アイテム個数上限 — 片付け機能 (Bag の一般ユーザー向け作成手段) と Building ごとの個数設定とセットで**新 feature ブランチ**の裁定 (2026-09-07、[issues/room_items_uncapped.md](../issues/room_items_uncapped.md) に裁定と設計の問いを収録)。(c) 入室通知の配達が数十秒遅れる件 (実測 38 秒、issue 未起票)。
+- 2026-09-07 (v0.3.9 発行後): 上記のほかの範囲は**未確定**。持ち越しの候補: (a) 発行後検討と裁定された未裁定 3 点 — 知覚の既定値の調整 (上 60,000/下 20,000 の見直しと発火の相乗り案) / 保存時検査の余裕 10,000 の妥当性 / `perception_high` null のオプトアウトが検査を素通しする穴。(b) アイテム個数上限 — 片付け機能 (Bag の一般ユーザー向け作成手段) と Building ごとの個数設定とセットで**新 feature ブランチ**の裁定 (2026-09-07、[issues/room_items_uncapped.md](../issues/room_items_uncapped.md) に裁定と設計の問いを収録)。(c) 知覚の届く順が起きた順とずれる件 — 配達の遅れ (実測 38 秒) と、想起が移動より先に出る並び崩れを一つの issue にした ([issues/perception_arrival_order_differs_from_event_order.md](../issues/perception_arrival_order_differs_from_event_order.md)、2026-09-07 起票)。
 
 ## 発行済みの版の門の記録 (v0.3.9)
 
