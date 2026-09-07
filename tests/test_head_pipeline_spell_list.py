@@ -283,6 +283,77 @@ def test_removed_notification_is_name_only():
     assert labels[0].label == "スペル 投稿 (post_message) が使えなくなりました"
 
 
+def _visible_entry(name, display, description="", parameters_json="{}"):
+    return SpellEntry(
+        name=name, display_name=display, description=description,
+        parameters_json=parameters_json, addon_key=None, visible=True,
+    )
+
+
+def test_multiple_added_spells_are_one_label():
+    """複数の付与は 1 ラベルに束ねる (2026-09-07)。
+
+    ラベルごとに [システム通知] の見出しが付くので、1 件ずつ分けると一度の移動で
+    見出しが何個も並ぶ。詳細は従来どおり head 一覧と同じ描画をそのまま並べる。
+    """
+    section = SpellListSection()
+    old = SpellListSnapshot(enabled=True, entries=(), addon_manifests=())
+    new = SpellListSnapshot(
+        enabled=True,
+        entries=(
+            _visible_entry(
+                "post_message", "投稿", "掲示板に書き込む",
+                '{"type": "object", "properties": '
+                '{"body": {"type": "string", "description": "本文"}}, '
+                '"required": ["body"]}',
+            ),
+            _visible_entry("read_board", "閲覧", "掲示板を読む"),
+        ),
+        addon_manifests=(),
+    )
+    labels = section.diff_to_notifications(old, new)
+    assert [label.kind for label in labels] == ["spell_added"]
+    text = labels[0].label
+    assert text.splitlines()[0] == "スペルが 2 件使えるようになりました"
+    assert "スペル 投稿 (post_message) が使えるようになりました" in text
+    assert "スペル 閲覧 (read_board) が使えるようになりました" in text
+    assert "body (string, 必須): 本文" in text      # 詳細行も束の中に残る
+
+
+def test_single_added_spell_keeps_the_original_wording():
+    """1 件のときは束ねの見出しを付けない (従来文面のまま)。"""
+    section = SpellListSection()
+    old = SpellListSnapshot(enabled=True, entries=(), addon_manifests=())
+    new = SpellListSnapshot(
+        enabled=True,
+        entries=(_visible_entry("post_message", "投稿", "掲示板に書き込む"),),
+        addon_manifests=(),
+    )
+    labels = section.diff_to_notifications(old, new)
+    assert labels[0].label.splitlines()[0] == (
+        "スペル 投稿 (post_message) が使えるようになりました"
+    )
+
+
+def test_multiple_removed_spells_are_one_line():
+    """複数の剥奪は名前を並べた一行 1 ラベル。"""
+    section = SpellListSection()
+    old = SpellListSnapshot(
+        enabled=True,
+        entries=(
+            _visible_entry("post_message", "投稿"),
+            _visible_entry("read_board", "閲覧"),
+        ),
+        addon_manifests=(),
+    )
+    new = SpellListSnapshot(enabled=True, entries=(), addon_manifests=())
+    labels = section.diff_to_notifications(old, new)
+    assert [label.kind for label in labels] == ["spell_removed"]
+    assert labels[0].label == (
+        "スペル 投稿 (post_message)、閲覧 (read_board) が使えなくなりました"
+    )
+
+
 def test_diff_notifies_when_spell_system_toggles():
     section = SpellListSection()
     old = SpellListSnapshot(enabled=False, entries=(), addon_manifests=())

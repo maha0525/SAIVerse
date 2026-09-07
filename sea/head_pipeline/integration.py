@@ -175,8 +175,13 @@ def inject_diff_notifications(
     pipeline: HeadPipeline | None = None,
     model_key: str | None = None,
     detect_room: bool = True,
+    only_sections: set[str] | None = None,
 ) -> bool:
     """全 Section の diff を検知し、知覚バッファへ型付き項目として push する (消費はしない)。
+
+    ``only_sections`` を渡すと、その名前の Section だけを検知の対象にする
+    (:meth:`HeadPipeline.flush_diffs` の ``only``)。対象外の Section は capture も
+    diff もされないので、その変化は次に全 Section で走る検知が拾う。
 
     ``detect_room`` — 「部屋の様子」のパッケージ照合 + 自己回復
     (:func:`_detect_room_state_changes`、docs/intent/room_state_packages.md §6-2)
@@ -190,10 +195,28 @@ def inject_diff_notifications(
     していた。本関数は **検知器** に徹し、差分を知覚バッファ (kind='world_state') へ
     push するだけにする。実際に SAIMemory へ入る (= ペルソナが知覚する) のは呼び出し元
     が ``flush_perception_buffer`` を呼ぶ消費時。呼び出し元ごとの flush 制御:
-    - Pulse 開始 (run_meta_user): push → 末尾で flush (同 Pulse で消費)。
+    - Pulse 開始 (run_meta_user): 全 Section を push → 末尾で flush (同 Pulse で消費)。
     - Pulse 中の metabolism 直後 (runtime_context): push → 直後に flush (同ターン知覚)。
-    - 移動時 (on_building_entered, pulse 外): push のみ。次の Pulse で消費される
-      (= 主観時間が止まっている間の知覚は詰まって待つ、という時間モデル通り)。
+    - 移動時 (on_building_entered, pulse 外): 移動した本人へ push するのは
+      **移動の事実だけ** で、対象は building と building_occupants の 2 つ
+      (``only_sections={"building", "building_occupants"}``)。在室者の側は
+      部屋替えの分岐が deliver=False のラベルしか出さないので文は届かず、
+      基準合わせ (新しい部屋の顔ぶれまで) と再会の想起だけがここで走る。
+      スペル・Memopedia 等の状態の差分は Pulse 開始時の検知が「最後に知らせた
+      状態 vs 今」で計算する — 移動のたびに途中経過を積むと、読む時点
+      (次の Pulse) には別の部屋の話になっている (2026-09-07、
+      docs/issues/perception_state_pushed_at_event_time.md)。在室者を対象から
+      外すと基準が旧部屋のまま残り、本人が Pulse を打つ前に誰かが同じ部屋へ
+      入ってきた回が「部屋替え」の比較に化けて入室の知らせが消える。
+      消費は次の Pulse (= 主観時間が止まっている間の知覚は詰まって待つ、という
+      時間モデル通り)。
+
+    ``deliver=False`` のラベル (:class:`NotificationLabel`) は「検知はするが文は
+    届けない」— push はせず、基準 (B) の前進と再会の想起の発火にだけ使う。
+    deliver=False だけの回は配送そのものが無いので台帳の execution も作らず、
+    戻り値も False (= 何も届けていない)。SAIMemory が未 ready の回は想起も
+    push できないので、その Section の基準も進めずに次回の再検出へ委ねる
+    (経路によらず同じ。文を届けた Section の基準は配送確定後に進む)。
 
     入室想起 (persona_recall) も同じくバッファへ push する。詳細:
     docs/intent/perception_buffer.md §4.5 / §5.1。
@@ -219,7 +242,10 @@ def inject_diff_notifications(
     ctx = build_line_head_input(persona, manager, building_id, model_key=model_key)
     ensure_snapshot(pipeline, ctx)
 
-    pushed = _push_section_diffs(persona, manager, pipeline, ctx, building_id)
+    pushed = _push_section_diffs(
+        persona, manager, pipeline, ctx, building_id,
+        only_sections=only_sections,
+    )
 
     if detect_room:
         try:
@@ -240,14 +266,42 @@ def _push_section_diffs(
     pipeline: HeadPipeline,
     ctx: LineHeadInput,
     building_id: str,
+    *,
+    only_sections: set[str] | None = None,
 ) -> bool:
     """Section 群の diff ラベルを検知して知覚バッファ (or outbox) へ push する。"""
     ledger = getattr(manager, "execution_ledger", None)
     if ledger is None:
-        return _inject_diff_notifications_direct(persona, pipeline, ctx, building_id)
+        return _inject_diff_notifications_direct(
+            persona, pipeline, ctx, building_id, only_sections=only_sections,
+        )
 
-    labels, detected = pipeline.flush_diffs(ctx, all_sections=True, advance=False)
+    labels, detected = pipeline.flush_diffs(
+        ctx, all_sections=True, advance=False, only=only_sections,
+    )
     if not labels:
+        return False
+
+    deliverable = [label for label in labels if label.deliver]
+    if not deliverable:
+        # 検知だけのラベル (deliver=False) しか無い回。配送する文が無いので台帳は
+        # 通さず、基準だけ新しい状態へ進める — 進めないと以後の差分が古い基準との
+        # 比較になって出なくなる (部屋替え時の同席者がこれ)。想起は kind と
+        # metadata を見るので、文を届けなくても従来どおり発火する。
+        sai_mem = getattr(persona, "sai_memory", None)
+        if sai_mem is None or not sai_mem.is_ready():
+            # 想起の push 先が無い回。ここで基準だけ進めると、その部屋へ入った
+            # 事実が二度と差分に出ず、再会の想起が永久に発火しなくなる。何も
+            # 進めずに次回の再検出へ委ねる (直接経路と同じ倒し方)。
+            LOGGER.debug(
+                "head_pipeline: SAIMemory not ready, %d silent label(s) deferred "
+                "(baseline kept for re-detection)",
+                len(labels),
+            )
+            return False
+        for section_name, new_snapshot in detected.items():
+            pipeline.advance_last_notified(ctx.persona_id, section_name, new_snapshot)
+        _inject_persona_recall_on_enter(persona, labels, sai_mem)
         return False
 
     try:
@@ -275,11 +329,11 @@ def _push_section_diffs(
                     ),
                 },
             }
-            for label in labels
+            for label in deliverable
         ]
         ledger.mark_applied(
             execution_id,
-            result={"labels": len(labels), "sections": sorted(detected.keys())},
+            result={"labels": len(deliverable), "sections": sorted(detected.keys())},
             outbox_items=outbox_items,
             deliver=True,
         )
@@ -291,18 +345,33 @@ def _push_section_diffs(
         )
         return False
 
-    # outbox 積みが durable に確定した後で B を前進 (S3 の修正)。
+    # outbox 積みが durable に確定した後で B を前進 (S3 の修正)。前進は Section
+    # ごとに分ける — 文を届けた Section は outbox に載った以上そのまま進めるが、
+    # deliver=False のラベルしか出していない Section (部屋替え時の同席者) は
+    # SAIMemory へ想起を積める回でなければ進めない。混在の回で一律に進めると、
+    # 想起の push 先が無いまま基準だけ新しい部屋へ動き、その入室が二度と差分に
+    # 出ない (deliver=False だけの回と同じ倒し方)。
+    sai_mem = getattr(persona, "sai_memory", None)
+    memory_ready = sai_mem is not None and sai_mem.is_ready()
+    delivered_sections = {
+        label.section for label in deliverable if label.section
+    }
     for section_name, new_snapshot in detected.items():
-        pipeline.advance_last_notified(ctx.persona_id, section_name, new_snapshot)
+        if section_name in delivered_sections or memory_ready:
+            pipeline.advance_last_notified(ctx.persona_id, section_name, new_snapshot)
+        else:
+            LOGGER.debug(
+                "head_pipeline: SAIMemory not ready, keeping the baseline of "
+                "silent section=%s for re-detection", section_name,
+            )
 
     LOGGER.info(
         "head_pipeline: queued %d world_state notification(s) via ledger "
-        "for persona=%s building=%s", len(labels), ctx.persona_id, building_id,
+        "for persona=%s building=%s", len(deliverable), ctx.persona_id, building_id,
     )
 
     # 入室想起は head 操作でも diff でもないので outbox 化の対象外 (従来どおり)。
-    sai_mem = getattr(persona, "sai_memory", None)
-    if sai_mem is not None and sai_mem.is_ready():
+    if memory_ready:
         _inject_persona_recall_on_enter(persona, labels, sai_mem)
 
     return True
@@ -313,6 +382,8 @@ def _inject_diff_notifications_direct(
     pipeline: HeadPipeline,
     ctx: LineHeadInput,
     building_id: str,
+    *,
+    only_sections: set[str] | None = None,
 ) -> bool:
     """台帳が無い環境の degrade 経路 (配達保証なし)。
 
@@ -323,8 +394,14 @@ def _inject_diff_notifications_direct(
     「配送確定後の前進」違反)。失敗時は B と dirty を据え置き、次回 flush の
     再検出に委ねる (push 済みラベルの再通知はあり得る = at-least-once。台帳経路
     の再配送と同じ倒し方)。
+
+    ``deliver=False`` のラベルは push の対象外 (基準の前進と想起の発火にだけ使う)。
+    SAIMemory が未 ready の回は、届ける文の有無にかかわらず何も進めない — 想起も
+    そこへ push できない以上、次回の再検出でまとめてやり直す方が落としが無い。
     """
-    labels, detected = pipeline.flush_diffs(ctx, all_sections=True, advance=False)
+    labels, detected = pipeline.flush_diffs(
+        ctx, all_sections=True, advance=False, only=only_sections,
+    )
     if not labels:
         return False
 
@@ -337,8 +414,9 @@ def _inject_diff_notifications_direct(
         )
         return False
 
+    deliverable = [label for label in labels if label.deliver]
     push_failed = False
-    for label in labels:
+    for label in deliverable:
         try:
             # 台帳経路と同じく、ラベルの型付け (label_kind 等) を知覚エントリへ
             # 写す (room_state_packages.md §11-3-2)。
@@ -363,12 +441,12 @@ def _inject_diff_notifications_direct(
 
     LOGGER.info(
         "head_pipeline: pushed %d world_state perception(s) for persona=%s building=%s",
-        len(labels), ctx.persona_id, building_id,
+        len(deliverable), ctx.persona_id, building_id,
     )
 
     _inject_persona_recall_on_enter(persona, labels, sai_mem)
 
-    return True
+    return bool(deliverable)
 
 
 def _inject_persona_recall_on_enter(

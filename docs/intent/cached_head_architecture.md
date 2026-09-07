@@ -256,6 +256,8 @@ Section の登録は startup 時に集中させる (アドオン由来 Section �
 
 既存の `BuildingStateSnapshot` / `compute_diff` / `format_event_message` のロジックは Section 内に移植される。`PersonaBuildingState` テーブルは `LineHeadSnapshot` の永続化先に統合 or 並走 (移行戦略は実装時に判断)。
 
+**在室者の差分の訂正 (2026-09-07)**: `BuildingOccupantsSection` が部屋替えのときに出していた「〜がいます」(移動先の同席者を全員並べる通知) は退役した。誰が居るかは移動先の「部屋の様子」に含まれていて、二重に語ることになるため ([room_state_packages.md](room_state_packages.md) §6-2「到着時は状態を、滞在中は出来事を」の役割分担のうち、消したのは到着時の状態側)。ラベル自体は `deliver=False` (`NotificationLabel` のフラグ = 検知はするが文は届けない) で残す — 比較の基準 (`last_notified`) を新しい部屋の顔ぶれまで進めないと以後の入退室の差分が古い部屋との比較になって出なくなり、再会の想起 (`_inject_persona_recall_on_enter`) も kind=`occupant_entered` のラベルを目印に発火しているため。同じ部屋に居るあいだの「入室しました / 退室しました」は本物の出来事なので従来どおり届ける。経緯: [issues/perception_state_pushed_at_event_time.md](../issues/perception_state_pushed_at_event_time.md)
+
 ### 5.2. visual_context cache
 
 既存の `runtime_context.py` の visual_context cache (anchor キー) は、`VisualContextSection` (refresh_on_events: `{building_entered, appearance_changed}`) として本機構に乗せ替えられる。

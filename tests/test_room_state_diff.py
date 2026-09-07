@@ -2605,6 +2605,14 @@ class EntryPushWiringTest(_EnvTestBase):
         self.assertEqual(
             inject.call_args_list[0].kwargs.get("detect_room"), False,
         )
+        # 本人へ届けるのは移動の事実だけ (2026-09-07)。スペル等の状態の差分を
+        # ここで積むと、次の Pulse で読まれる頃には別の部屋の話になる。
+        # building_occupants は文を出さない (部屋替えの分岐は deliver=False) —
+        # 基準を新しい部屋の顔ぶれへ合わせるために対象へ含める。
+        self.assertEqual(
+            inject.call_args_list[0].kwargs.get("only_sections"),
+            {"building", "building_occupants"},
+        )
 
 
 class EntryPushDegradeReadinessTest(_EnvTestBase):
@@ -2680,6 +2688,47 @@ class DetectionEntryModelKeyTest(unittest.TestCase):
         self.assertEqual(
             inject.call_args.kwargs.get("model_key"), "exec-model",
         )
+        # Pulse 開始の検知は全 Section (絞らない) — 移動時に積まなくなった状態の
+        # 差分は、ここが「最後に知らせた状態 vs 今」で拾う (2026-09-07)。
+        self.assertIsNone(inject.call_args.kwargs.get("only_sections"))
+
+
+class EntryOccupantNotifyScopeTest(unittest.TestCase):
+    """居合わせる既存者への入室通知は絞らない (2026-09-07 の隣の検算)。
+
+    移動した本人への積み込みだけが移動の事実の 2 セクションに絞られる。既存者に
+    とって「誰かが入ってきた」は自分の部屋で起きた出来事なので、従来どおり全
+    Section の検知で拾う。
+    """
+
+    def test_existing_occupants_are_notified_with_every_section(self):
+        from saiverse.dynamic_state import DynamicStateManager
+
+        newcomer = SimpleNamespace(
+            persona_id="p1", persona_dir=None, sai_memory=None,
+            current_building_id="b1",
+        )
+        resident = SimpleNamespace(persona_id="p2", current_building_id="b1")
+        manager = SimpleNamespace(
+            personas={"p1": newcomer, "p2": resident},
+            occupants={"b1": ["p1", "p2"]},
+            feed_manager=None,
+        )
+        with patch(
+            "sea.head_pipeline.inject_diff_notifications", return_value=True,
+        ) as inject, patch(
+            "saiverse.dynamic_state._dispatch_head_event", return_value=True,
+        ):
+            DynamicStateManager.on_building_entered(newcomer, "b1", manager)
+
+        by_persona = {
+            call.args[0].persona_id: call for call in inject.call_args_list
+        }
+        self.assertEqual(
+            by_persona["p1"].kwargs.get("only_sections"),
+            {"building", "building_occupants"},
+        )
+        self.assertIsNone(by_persona["p2"].kwargs.get("only_sections"))
 
 
 class WindowedDetectionReadTest(RoomStateLedgerTestBase):

@@ -101,6 +101,17 @@ class DynamicStateManager:
 
         try:
             from sea.head_pipeline import inject_diff_notifications
+            # only_sections: 移動の瞬間に本人へ届けるのは移動の事実だけ。
+            # スペル・Memopedia 等の状態の差分をここで積むと、次の Pulse で
+            # 読まれる頃には別の部屋の話になっている (往復すれば差し引きゼロなのに
+            # 途中経過が全部残る)。それらは Pulse 開始時の全 Section の検知が
+            # 「最後に知らせた状態 vs 今」で計算する (2026-09-07、
+            # docs/issues/perception_state_pushed_at_event_time.md)。
+            # building_occupants を対象に含めるのは配送のためではない — 部屋替えの
+            # 分岐は deliver=False のラベルしか出さないので文は届かず、比較の基準を
+            # 新しい部屋の顔ぶれへ合わせて再会の想起を発火させるだけ。外すと基準が
+            # 旧部屋のまま残り、本人が Pulse を打つ前に誰かが同じ部屋へ入ってきた
+            # 回まで「部屋替え」の比較に化けて、入室の知らせが消える。
             # detect_room=False: この直後に入室の push (下) が同じ部屋を積む。
             # 検知器の部屋の照合まで走らせると、入室が二重に語られる
             # (docs/intent/room_state_packages.md §6-1 — 入室は末尾の出来事、
@@ -109,6 +120,7 @@ class DynamicStateManager:
             # 起きる出来事で、この時点に実行の身分 (ExecutionContext) は無い。
             inject_diff_notifications(
                 persona, manager, building_id, detect_room=False,
+                only_sections={"building", "building_occupants"},
             )
         except Exception:
             LOGGER.warning(

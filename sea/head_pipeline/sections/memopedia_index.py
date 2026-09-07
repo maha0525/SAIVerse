@@ -232,23 +232,34 @@ class MemopediaIndexSection:
         if old is None or new is None:
             return []
         cutoff = old.captured_at
-        labels: list[NotificationLabel] = []
+        # 一度の差分検知で出た同種の変化は一つの出来事として 1 ラベルに束ねる
+        # (2026-09-07、docs/issues/perception_state_pushed_at_event_time.md)。
+        # ラベルごとに [システム通知] の見出しが付くので、ページ 1 件ごとに
+        # 分けると 3 ページ作っただけで見出しが 3 個並ぶ。最大 3 ラベル
+        # (作成・更新・削除)。
+        created: list[str] = []
+        updated: list[str] = []
+        deleted: list[str] = []
         for page in new.pages:
             if page.is_deleted and page.updated_at > cutoff:
-                labels.append(NotificationLabel(
-                    kind="memopedia_deleted",
-                    label=f"Memopedia「{page.title}」が削除されました",
-                ))
+                deleted.append(page.title)
             elif page.created_at > cutoff:
-                labels.append(NotificationLabel(
-                    kind="memopedia_created",
-                    label=f"Memopedia「{page.title}」が作成されました",
-                ))
+                created.append(page.title)
             elif page.updated_at > cutoff:
-                labels.append(NotificationLabel(
-                    kind="memopedia_updated",
-                    label=f"Memopedia「{page.title}」が更新されました",
-                ))
+                updated.append(page.title)
+
+        labels: list[NotificationLabel] = []
+        for kind, titles, verb in (
+            ("memopedia_created", created, "作成"),
+            ("memopedia_updated", updated, "更新"),
+            ("memopedia_deleted", deleted, "削除"),
+        ):
+            if not titles:
+                continue
+            joined = "".join(f"「{title}」" for title in titles)
+            labels.append(NotificationLabel(
+                kind=kind, label=f"Memopedia{joined}が{verb}されました",
+            ))
         return labels
 
     def capture_changes_since(

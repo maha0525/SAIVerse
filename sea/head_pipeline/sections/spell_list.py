@@ -255,6 +255,11 @@ class SpellListSection:
 
         old_visible = {e.name: e for e in old.entries if e.visible}
         new_visible = {e.name: e for e in new.entries if e.visible}
+
+        # 一度の差分検知で出た同種の変化は一つの出来事として 1 ラベルに束ねる
+        # (2026-09-07)。ラベルごとに [システム通知] の見出しが付くので、スペル
+        # 1 件ごとに分けると一度の移動で見出しが何個も並ぶ。
+        added_blocks: list[str] = []
         for name in sorted(new_visible.keys() - old_visible.keys()):
             entry = new_visible[name]
             display = entry.display_name or entry.name
@@ -266,21 +271,30 @@ class SpellListSection:
             # (sea/head_pipeline/notify.py の「寸分たがわず」と同じ原則)。
             detail_lines: list[str] = []
             self._render_entry(detail_lines, entry)
-            labels.append(NotificationLabel(
-                kind="spell_added",
-                label="\n".join(
-                    [f"スペル {display} ({name}) が使えるようになりました"]
-                    + detail_lines
-                ),
+            added_blocks.append("\n".join(
+                [f"スペル {display} ({name}) が使えるようになりました"] + detail_lines
             ))
+        if added_blocks:
+            if len(added_blocks) == 1:
+                text = added_blocks[0]
+            else:
+                text = "\n".join(
+                    [f"スペルが {len(added_blocks)} 件使えるようになりました"]
+                    + added_blocks
+                )
+            labels.append(NotificationLabel(kind="spell_added", label=text))
+
         # 剥奪通知は名前だけでよい — 「もう唱えられない」を伝えるのに引数の形は
-        # 要らないし、head からも消えている。
+        # 要らないし、head からも消えている。複数なら名前の列挙の一行。
+        removed_names: list[str] = []
         for name in sorted(old_visible.keys() - new_visible.keys()):
             entry = old_visible[name]
             display = entry.display_name or entry.name
+            removed_names.append(f"{display} ({name})")
+        if removed_names:
             labels.append(NotificationLabel(
                 kind="spell_removed",
-                label=f"スペル {display} ({name}) が使えなくなりました",
+                label=f"スペル {'、'.join(removed_names)} が使えなくなりました",
             ))
         return labels
 

@@ -226,6 +226,65 @@ class CaptureChangesSinceTest(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# 4-b. 差分通知の束ね (2026-09-07)
+# ---------------------------------------------------------------------------
+
+class DiffNotificationBundlingTest(unittest.TestCase):
+    """作成・更新・削除それぞれ最大 1 ラベル。
+
+    ラベルごとに [システム通知] の見出しが付くので、ページ 1 件ごとに分けると
+    3 ページ作っただけで見出しが 3 個並ぶ
+    (docs/issues/perception_state_pushed_at_event_time.md)。
+    """
+
+    def _snapshots(self, pages):
+        from sea.head_pipeline.sections.memopedia_index import MemopediaIndexSnapshot
+        old = MemopediaIndexSnapshot(captured_at=1000.0, pages=())
+        new = MemopediaIndexSnapshot(captured_at=2000.0, pages=tuple(pages))
+        return old, new
+
+    def _page(self, title, *, created_at=1000, updated_at=1000, is_deleted=False):
+        from sea.head_pipeline.sections.memopedia_index import MemopediaPageEntry
+        return MemopediaPageEntry(
+            page_id=title, title=title, created_at=created_at,
+            updated_at=updated_at, is_deleted=is_deleted,
+        )
+
+    def test_created_and_updated_are_one_label_each(self):
+        from sea.head_pipeline.sections.memopedia_index import MemopediaIndexSection
+        old, new = self._snapshots([
+            self._page("A", created_at=1500),
+            self._page("B", created_at=1600),
+            self._page("C", updated_at=1700),
+        ])
+        labels = MemopediaIndexSection().diff_to_notifications(old, new)
+        self.assertEqual(
+            [(label.kind, label.label) for label in labels],
+            [
+                ("memopedia_created", "Memopedia「A」「B」が作成されました"),
+                ("memopedia_updated", "Memopedia「C」が更新されました"),
+            ],
+        )
+
+    def test_deleted_pages_are_bundled_too(self):
+        from sea.head_pipeline.sections.memopedia_index import MemopediaIndexSection
+        old, new = self._snapshots([
+            self._page("A", updated_at=1500, is_deleted=True),
+            self._page("B", updated_at=1600, is_deleted=True),
+        ])
+        labels = MemopediaIndexSection().diff_to_notifications(old, new)
+        self.assertEqual([label.kind for label in labels], ["memopedia_deleted"])
+        self.assertEqual(labels[0].label, "Memopedia「A」「B」が削除されました")
+
+    def test_no_change_yields_no_label(self):
+        from sea.head_pipeline.sections.memopedia_index import MemopediaIndexSection
+        old, new = self._snapshots([self._page("A", created_at=500, updated_at=500)])
+        self.assertEqual(
+            MemopediaIndexSection().diff_to_notifications(old, new), [],
+        )
+
+
+# ---------------------------------------------------------------------------
 # 5. serialize / deserialize ラウンドトリップ
 # ---------------------------------------------------------------------------
 
