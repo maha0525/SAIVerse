@@ -678,6 +678,223 @@ class FlushRedrainTests(ExecutionLedgerTestBase):
         ])
 
 
+class FlushHandoffTests(ExecutionLedgerTestBase):
+    """配達中に来た配達依頼を、外側の配達が終わったその場で引き継ぐ。
+
+    配り直しループ (FlushRedrainTests) が拾えるのは同じ persona 宛ての行だけ —
+    毎周回 persona で引き直すため。別 persona 宛ての依頼はネストした
+    flush_pending_for_persona が再入検知で退場して誰にも引き継がれず、60 秒の
+    回復 tick 待ちになっていた (まはーの実機で入室通知の配達が 38 秒遅れた正体、
+    2026-09-07)。修正後は、退いた依頼を到着順の控えに残し、鍵を離した後に
+    同じ呼び出しの中で排出する。
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.delivered = []
+
+        def note(item):
+            self.delivered.append(
+                (item["persona_id"], item["payload"].get("id"))
+            )
+
+        self._note = note
+        self.ledger.register_outbox_handler("t.note", note)
+
+    def _queue(self, persona_id, payload_id, *, deliver=False, target="t.note"):
+        execution_id, _ = self.ledger.begin_execution(
+            "test.queue", persona_id=persona_id,
+        )
+        self.ledger.mark_running(execution_id)
+        self.ledger.mark_applied(execution_id, outbox_items=[{
+            "target": target, "persona_id": persona_id,
+            "payload": {"id": payload_id},
+        }], deliver=deliver)
+        return execution_id
+
+    def _pending_ids(self):
+        return [
+            r["outbox_id"] for r in self._outbox_rows()
+            if r["status"] == XL.OUTBOX_PENDING
+        ]
+
+    def test_a_request_for_another_persona_is_delivered_in_the_same_call(self):
+        """handler が別 persona 宛てに積んで配達を頼んだら、戻る前に配り終える。"""
+        def notifier(item):
+            self.delivered.append(("p1", "notifier"))
+            # 実運用の形: 別 persona 宛ての通知を積み、即時配送を頼む
+            # (deliver=True の即時配送はこのスレッドでは再入検知で退く)。
+            self._queue("p2", "entered", deliver=True)
+
+        self.ledger.register_outbox_handler("t.notifier", notifier)
+        execution_id, _ = self.ledger.begin_execution(
+            "test.move", persona_id="p1",
+        )
+        self.ledger.mark_running(execution_id)
+        self.ledger.mark_applied(execution_id, outbox_items=[{
+            "target": "t.notifier", "persona_id": "p1", "payload": {},
+        }], deliver=False)
+
+        self.assertTrue(self.ledger.flush_pending_for_persona("p1"))
+        # 回復 tick を待たずに、この呼び出しの中で p2 へ届いている
+        self.assertIn(("p2", "entered"), self.delivered)
+        self.assertEqual(self._pending_ids(), [])
+
+    def test_multiple_requests_are_drained_in_arrival_order(self):
+        def fanout(item):
+            for persona_id in ("p2", "p3", "p4"):
+                self._queue(persona_id, f"to-{persona_id}", deliver=True)
+
+        self.ledger.register_outbox_handler("t.fanout", fanout)
+        execution_id, _ = self.ledger.begin_execution(
+            "test.fanout", persona_id="p1",
+        )
+        self.ledger.mark_running(execution_id)
+        self.ledger.mark_applied(execution_id, outbox_items=[{
+            "target": "t.fanout", "persona_id": "p1", "payload": {},
+        }], deliver=False)
+
+        self.assertTrue(self.ledger.flush_pending_for_persona("p1"))
+        self.assertEqual(
+            self.delivered,
+            [("p2", "to-p2"), ("p3", "to-p3"), ("p4", "to-p4")],
+        )
+
+    def test_requests_born_during_the_drain_are_handled_too(self):
+        """排出中の handler が出した依頼も、同じ呼び出しの中で片付く。"""
+        def chain(item):
+            self.delivered.append((item["persona_id"], item["payload"]["id"]))
+            nxt = item["payload"].get("next")
+            if nxt:
+                execution_id, _ = self.ledger.begin_execution(
+                    "test.chain", persona_id=nxt,
+                )
+                self.ledger.mark_running(execution_id)
+                self.ledger.mark_applied(execution_id, outbox_items=[{
+                    "target": "t.chain", "persona_id": nxt,
+                    "payload": {"id": nxt},
+                }], deliver=True)
+
+        self.ledger.register_outbox_handler("t.chain", chain)
+        execution_id, _ = self.ledger.begin_execution(
+            "test.chain", persona_id="p1",
+        )
+        self.ledger.mark_running(execution_id)
+        self.ledger.mark_applied(execution_id, outbox_items=[{
+            "target": "t.chain", "persona_id": "p1",
+            "payload": {"id": "p1", "next": "p2"},
+        }], deliver=False)
+        # p2 の配送でさらに p3 を積む — 排出ループが続けて拾う形
+        self._queue("p3", "unrelated")
+
+        self.assertTrue(self.ledger.flush_pending_for_persona("p1"))
+        self.assertEqual(self.delivered, [("p1", "p1"), ("p2", "p2")])
+        # p3 は誰にも頼まれていないので手つかず (排出は依頼された分だけ)
+        self.assertEqual(len(self._pending_ids()), 1)
+
+    def test_rows_queued_for_the_caller_during_the_drain_are_delivered(self):
+        """排出で走った handler が依頼元宛てに積んだ行も、返す前に配り終える。
+
+        Codex レビュー (2026-09-07 high) の再現形: 排出 → その handler が p1 宛て
+        に積む、で古い判定を返すと「pending なし」が嘘になる。排出が走った回は
+        依頼元を配り直し、その最新の結果を返す。
+        """
+        def notifier(item):
+            self.delivered.append(("p1", "notifier"))
+            self._queue("p2", "entered", deliver=True, target="t.backfill")
+
+        def backfill(item):
+            self.delivered.append((item["persona_id"], item["payload"]["id"]))
+            # 別 persona の配送の後処理が、依頼元 (p1) 宛ての行を新しく積む
+            self._queue("p1", "late", deliver=False)
+
+        self.ledger.register_outbox_handler("t.notifier", notifier)
+        self.ledger.register_outbox_handler("t.backfill", backfill)
+        execution_id, _ = self.ledger.begin_execution(
+            "test.move", persona_id="p1",
+        )
+        self.ledger.mark_running(execution_id)
+        self.ledger.mark_applied(execution_id, outbox_items=[{
+            "target": "t.notifier", "persona_id": "p1", "payload": {},
+        }], deliver=False)
+
+        self.assertTrue(self.ledger.flush_pending_for_persona("p1"))
+        # 排出中に積まれた p1 宛ての行まで配り終えている (True が嘘でない)
+        self.assertIn(("p1", "late"), self.delivered)
+        self.assertEqual(self._pending_ids(), [])
+
+    def test_a_row_queued_for_the_caller_during_the_drain_can_close_the_gate(self):
+        """排出中に積まれた依頼元宛ての行の配送が失敗したら False (pending 残存)。"""
+        def notifier(item):
+            self._queue("p2", "entered", deliver=True, target="t.backfill")
+
+        def backfill(item):
+            self._queue("p1", "late", deliver=False, target="t.boom")
+
+        def boom(item):
+            raise RuntimeError("delivery of the late row fails")
+
+        self.ledger.register_outbox_handler("t.notifier", notifier)
+        self.ledger.register_outbox_handler("t.backfill", backfill)
+        self.ledger.register_outbox_handler("t.boom", boom)
+        execution_id, _ = self.ledger.begin_execution(
+            "test.move", persona_id="p1",
+        )
+        self.ledger.mark_running(execution_id)
+        self.ledger.mark_applied(execution_id, outbox_items=[{
+            "target": "t.notifier", "persona_id": "p1", "payload": {},
+        }], deliver=False)
+
+        self.assertFalse(self.ledger.flush_pending_for_persona("p1"))
+        self.assertEqual(len(self._pending_ids()), 1)
+
+    def test_the_drain_stops_at_the_limit_and_leaves_the_rest_pending(self):
+        """毎排出が次の依頼を生み続けても上限で打ち切り、残りは pending に残る。"""
+        seen = []
+
+        def gremlin(item):
+            seen.append(item["persona_id"])
+            nxt = f"p{len(seen) + 1}"
+            self._queue(nxt, nxt, deliver=True, target="t.gremlin")
+
+        self.ledger.register_outbox_handler("t.gremlin", gremlin)
+        execution_id, _ = self.ledger.begin_execution(
+            "test.gremlin", persona_id="p1",
+        )
+        self.ledger.mark_running(execution_id)
+        self.ledger.mark_applied(execution_id, outbox_items=[{
+            "target": "t.gremlin", "persona_id": "p1", "payload": {},
+        }], deliver=False)
+
+        with unittest.mock.patch.object(XL, "FLUSH_HANDOFF_MAX_DRAINS", 3):
+            # 打ち切りは安全側 (False) — 未排出の依頼が依頼元宛ての行をさらに
+            # 積みうる以上、この回は「pending なし」を主張できない。
+            self.assertFalse(self.ledger.flush_pending_for_persona("p1"))
+        # 最初の 1 件 + 上限 3 件だけ配り、残りは pending のまま回復 tick へ
+        self.assertEqual(len(seen), 4)
+        self.assertEqual(len(self._pending_ids()), 1)
+
+    def test_same_persona_rows_are_not_delivered_twice(self):
+        """同一 persona の追加行は配り直しループの担当 — 控えと二重配送しない。"""
+        def spawner(item):
+            self.delivered.append(("p1", item["payload"].get("id")))
+            if item["payload"].get("id") == "first":
+                self._queue("p1", "second", deliver=True)
+
+        self.ledger.register_outbox_handler("t.spawn", spawner)
+        execution_id, _ = self.ledger.begin_execution(
+            "test.spawn", persona_id="p1",
+        )
+        self.ledger.mark_running(execution_id)
+        self.ledger.mark_applied(execution_id, outbox_items=[{
+            "target": "t.spawn", "persona_id": "p1", "payload": {"id": "first"},
+        }], deliver=False)
+
+        self.assertTrue(self.ledger.flush_pending_for_persona("p1"))
+        self.assertEqual(self.delivered, [("p1", "first"), ("p1", "second")])
+        self.assertEqual(self._pending_ids(), [])
+
+
 class DeadLetterTests(ExecutionLedgerTestBase):
     def setUp(self):
         super().setUp()

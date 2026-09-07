@@ -4,6 +4,19 @@
 移植。head には何も render しない (居合わせる相手の姿は知覚の「部屋の様子」
 が運ぶ — docs/intent/room_state_packages.md)。
 
+**部屋を移ったときの同席者は文にしない** (2026-09-07、
+docs/issues/perception_state_pushed_at_event_time.md): 誰が居るかは移動先の
+「部屋の様子」に含まれていて重複する。それでも同席者を検知はする —
+``deliver=False`` のラベルを返して比較の基準 (last_notified) を新しい部屋の
+顔ぶれまで進めるため。移動先が無人でも基準は進める必要があるので、その回は
+``occupants_baseline`` の deliver=False のラベルを 1 件だけ返す。
+再会の想起はこのラベルからは発火しない — Pulse の頭で「いま同席している
+相手」を見る ``integration.inject_copresence_recall`` の仕事
+(2026-09-07 に発火点を移した)。
+同じ部屋に居るあいだの「入室しました / 退室しました」は本物の出来事なので
+従来どおり届ける (room_state_packages.md §6-2 の「到着時は状態、滞在中は
+出来事」の役割分担のうち、消したのは到着時の状態側だけ)。
+
 注意: ``OccupancyManager.move_entity`` は移動の度に host メッセージとして
 "X が Y から入室しました" を building_histories に書き込んでおり、auto_ingest を
 経由してペルソナの SAIMemory にも届く (= 別経路の通知)。本 Section の diff は
@@ -84,12 +97,26 @@ class BuildingOccupantsSection:
             return []
         labels: list[NotificationLabel] = []
         if old.building_id != new.building_id:
-            # 自分が別の Building に移動した場合、新 Building の全同席者を通知
+            # 自分が別の Building に移動した場合、新 Building の同席者は
+            # 「部屋の様子」が運ぶので文にはしない (deliver=False)。ラベル自体は
+            # 残す — 基準を新しい部屋の顔ぶれまで進めないと、以後の入退室の差分が
+            # 古い部屋との比較になって出なくなる。
             for entry in new.entries:
                 labels.append(NotificationLabel(
                     kind="occupant_entered",
                     label=f"{entry.name} がいます",
                     metadata={"occupant_id": entry.occupant_id, "occupant_kind": entry.kind},
+                    deliver=False,
+                ))
+            if not labels:
+                # 移動先が無人の回。ラベルが 0 件だとこの Section は「差分なし」
+                # として扱われ、基準が古い部屋の顔ぶれのまま残る — その後に誰かが
+                # 入ってきても部屋違いの比較になり、「入室しました」ではなく
+                # deliver=False の同席ラベルに化けて入室の知らせが消える。
+                labels.append(NotificationLabel(
+                    kind="occupants_baseline",
+                    label="(部屋替え: 同席者なし)",
+                    deliver=False,
                 ))
             return labels
         old_map = {e.occupant_id: e for e in old.entries}

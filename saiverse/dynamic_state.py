@@ -46,6 +46,12 @@ class DynamicStateManager:
         (2026-09-06 二巡目修正 2)。実行の身分が無い呼び出しだけ None (= 標準
         model の窓) でよい。
 
+        **再会の想起はここでは積まない** — 同席の相手の想起
+        (``inject_copresence_recall``) は建物発言の取り込みの後に走る必要があるが、
+        呼び出し元 (sea/runtime.py) では取り込みがこの検知より後にあるため、
+        Pulse の頭の中でもう一段あとに置いてある (2026-09-07、
+        docs/issues/perception_state_pushed_at_event_time.md)。
+
         Returns:
             True if a notification message was injected.
         """
@@ -63,8 +69,9 @@ class DynamicStateManager:
             )
             return False
 
+        injected = False
         try:
-            return bool(inject_diff_notifications(
+            injected = bool(inject_diff_notifications(
                 persona, manager, building_id, model_key=model_key,
             ))
         except Exception:
@@ -72,7 +79,8 @@ class DynamicStateManager:
                 "[dynamic_state] maybe_inject_event_messages (via head_pipeline) failed for %s/%s",
                 persona_id, building_id,
             )
-            return False
+
+        return injected
 
     @staticmethod
     def on_building_entered(persona: Any, building_id: str, manager: Any) -> bool:
@@ -101,6 +109,18 @@ class DynamicStateManager:
 
         try:
             from sea.head_pipeline import inject_diff_notifications
+            # only_sections: 移動の瞬間に本人へ届けるのは移動の事実だけ。
+            # スペル・Memopedia 等の状態の差分をここで積むと、次の Pulse で
+            # 読まれる頃には別の部屋の話になっている (往復すれば差し引きゼロなのに
+            # 途中経過が全部残る)。それらは Pulse 開始時の全 Section の検知が
+            # 「最後に知らせた状態 vs 今」で計算する (2026-09-07、
+            # docs/issues/perception_state_pushed_at_event_time.md)。
+            # building_occupants を対象に含めるのは配送のためではない — 部屋替えの
+            # 分岐は deliver=False のラベルしか出さないので文は届かず、比較の基準を
+            # 新しい部屋の顔ぶれへ合わせるだけ。外すと基準が旧部屋のまま残り、
+            # 本人が Pulse を打つ前に誰かが同じ部屋へ入ってきた回まで「部屋替え」の
+            # 比較に化けて、入室の知らせが消える。再会の想起はここでは発火しない —
+            # Pulse の頭の同席チェック (maybe_inject_event_messages) の仕事。
             # detect_room=False: この直後に入室の push (下) が同じ部屋を積む。
             # 検知器の部屋の照合まで走らせると、入室が二重に語られる
             # (docs/intent/room_state_packages.md §6-1 — 入室は末尾の出来事、
@@ -109,6 +129,7 @@ class DynamicStateManager:
             # 起きる出来事で、この時点に実行の身分 (ExecutionContext) は無い。
             inject_diff_notifications(
                 persona, manager, building_id, detect_room=False,
+                only_sections={"building", "building_occupants"},
             )
         except Exception:
             LOGGER.warning(

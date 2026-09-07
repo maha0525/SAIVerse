@@ -388,6 +388,7 @@ class HeadPipeline:
 
     def flush_diffs(
         self, ctx: LineHeadInput, *, all_sections: bool = False, advance: bool = True,
+        only: Optional[set[str]] = None,
     ) -> list[NotificationLabel] | tuple[list[NotificationLabel], dict[str, object]]:
         """dirty Section + periodic backstop 対象 Section の diff をチェックし、
         差分があれば NotificationLabel 列を返す。
@@ -411,6 +412,14 @@ class HeadPipeline:
         配送前に B を進めると、配送失敗時に差分が永久に失われる (SEA 監査 S3)。
         差分が出た section の dirty マークも据え置く (= 配送失敗時は次回 flush で
         再検出される)。
+
+        ``only`` を渡すと、チェック対象をその名前の集合との積に絞る。移動の瞬間に
+        「移動の事実」だけを届ける呼び出し (saiverse/dynamic_state.on_building_entered、
+        building + building_occupants) が使う —
+        対象外の Section は capture も diff もされないので B は据え置かれ、
+        その変化は Pulse 開始時の全 Section の flush が「最後に知らせた状態 vs 今」
+        で拾う (2026-09-07、docs/issues/perception_state_pushed_at_event_time.md)。
+        B の前進の規約 (``advance``) は変えない。
         """
         with self._lock:
             state = self._states.get((ctx.persona_id, ctx.model_key))
@@ -426,6 +435,8 @@ class HeadPipeline:
             target_names: set[str] = set(state.dirty_sections)
             if do_backstop or all_sections:
                 target_names.update(s.name for s in self._registry.all_sections())
+            if only is not None:
+                target_names &= set(only)
 
             if not target_names:
                 return [] if advance else ([], {})

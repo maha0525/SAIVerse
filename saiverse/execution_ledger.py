@@ -79,6 +79,18 @@ OUTBOX_DEAD = "dead"
 #: が引き継ぐ (戻り値 False = pending 残存、の既存契約のまま)。
 FLUSH_REDRAIN_MAX_ROUNDS = 8
 
+#: 配達中に来た配達依頼を引き継いで排出するときの上限件数。
+#: 配送中の handler が別の依頼を出すと、その場では配れない (同じスレッドが
+#: :attr:`ExecutionLedger._delivery_lock` を握っているため) ので控えに載せ、
+#: 外側の配達が終わって鍵を離した後に到着順で片付ける。排出の最中に生まれた
+#: 依頼も同じ控えに載るため、handler が依頼を出し続ける異常形では終わらない
+#: — その打ち切りがこの上限で、残りは 60 秒の回復 tick が引き継ぐ。打ち切った
+#: 回の :meth:`ExecutionLedger.flush_pending_for_persona` は安全側の False を
+#: 返す (未排出の依頼が依頼元宛ての行をさらに積みうるため、pending なしを
+#: 主張できない)。1 回の呼び出しでの総排出件数がこの上限で、勘定は
+#: flush_pending_for_persona が一本で持つ。
+FLUSH_HANDOFF_MAX_DRAINS = 50
+
 #: 配送再試行の既定上限。超過で dead (人裁定に回す終端、黙って捨てない)。
 DEFAULT_MAX_ATTEMPTS = 20
 
@@ -194,9 +206,11 @@ class ExecutionLedger:
         # mark_applied(deliver=True)、move.post_game_lifecycle →
         # on_entity_moved → 別 persona の move_entity) が同じスレッドから
         # 再度 flush_pending_for_persona を呼ぶと、非再入ロックで永久待ちに
-        # なる。スレッドローカルな旗で検知し、ネストした呼び出しは配送を
-        # 試みずに即座に離脱する (次の即時配送呼び出し・Beat 関所・回復 tick
-        # が拾う — 「今回は配送されない」であって「失われる」ではない)。
+        # なる。スレッドローカルな控え (deferred) で検知し、ネストした呼び出しは
+        # 配送を試みずに離脱する — ただし依頼された persona_id は到着順で控えに
+        # 残し、外側の配達が鍵を離した後に引き継いで配る (下の
+        # :meth:`_drain_deferred_flushes`)。控えが None = このスレッドは配達中
+        # ではない。
         self._flush_local = threading.local()
 
     # ------------------------------------------------------------------
@@ -920,26 +934,103 @@ class ExecutionLedger:
             呼び出し元 (:mod:`sea.beat_gate` の Beat 関所) は Beat 境界の
             最外周からのみ呼ぶため、ネストされる側にはならない。
 
-        再入検知 (W5): 同一スレッドで既に flush 実行中 (= outbox handler の
-        中から呼ばれた) 場合は、ロックを取らずに False を返して離脱する。
-        handler が別の実行 (移動の誘発等) を通じて自分自身の配送を再帰的に
-        呼ぶ経路があり、非再入ロックのままだと永久待ちになるため。
+            戻り値が指すのは**この呼び出しが引き起こした配送まで織り込んだ、
+            返す時点の判定**である。引き継ぎ (下記) で他 persona へ配った
+            handler が、依頼元の persona 宛ての行を新しく積むことがあるため、
+            排出が走った回は依頼元をもう一度配り直し、その最新の結果を返す。
+            返した**後**に別スレッドが積む行は従来どおり対象外 — 返り値は
+            返した瞬間のキューの状態であって、以後の不在を約束しない。
+
+        再入と引き継ぎ (W5 + 2026-09-07): 同一スレッドで既に配達中 (= outbox
+        handler の中から呼ばれた) なら、ロックを取らずに False を返して離脱
+        する — その場で配ると非再入の ``_delivery_lock`` で永久待ちになる。
+        離脱する際に依頼された persona_id を到着順の控えに残し、**外側の
+        配達が終わって鍵を離した後**に控えが空になるまで順に flush する。
+        排出の最中に handler がさらに依頼を出したら同じ控えに載り、同じループ
+        が続けて片付ける。60 秒の回復 tick は本来の保険 (誰も来ない間の掃除)
+        に戻り、別 persona 宛ての通知が数十秒待たされる経路は消える。
+
+        排出件数は 1 回の呼び出しで :data:`FLUSH_HANDOFF_MAX_DRAINS` 件までで、
+        勘定はこのメソッドが一本で持つ (:meth:`_drain_deferred_flushes` には
+        残り枠を渡す)。打ち切ったときは**安全側の False** を返す — 未排出の
+        依頼を実行すれば依頼元宛ての行がさらに積まれうるので、その回の判定は
+        「pending なし」を主張できない。残りは次の関所 / 回復 tick が引き継ぐ。
         """
-        if getattr(self._flush_local, "active", False):
+        deferred = getattr(self._flush_local, "deferred", None)
+        if deferred is not None:
+            if persona_id not in deferred:
+                deferred.append(persona_id)
             LOGGER.debug(
                 "[ledger] flush_pending_for_persona reentered on the same "
                 "thread (persona=%s) — an outbox handler triggered another "
-                "flush; skipping the nested call (deferred to the next "
-                "gate/recovery pass) to avoid deadlocking on _delivery_lock",
+                "flush; queued for handoff after the current delivery "
+                "releases _delivery_lock",
                 persona_id,
             )
             return False
-        self._flush_local.active = True
+        self._flush_local.deferred = []
         try:
-            with self._delivery_lock:
-                return self._flush_queue(persona_id)
+            drained = 0
+            while True:
+                with self._delivery_lock:
+                    result = self._flush_queue(persona_id)
+                # 排出で走った handler が依頼元宛ての行を積んでいることがある
+                # ので、控えが残っている間は配り直して最新の判定を返す。
+                requests = self._flush_local.deferred
+                if not requests:
+                    return result
+                if drained >= FLUSH_HANDOFF_MAX_DRAINS:
+                    LOGGER.warning(
+                        "[ledger] handoff drain limit reached (%d); leaving %d "
+                        "deferred flush request(s) to the recovery pass: %s "
+                        "— returning False for persona=%s (its queue cannot be "
+                        "declared empty while requests remain unserved)",
+                        FLUSH_HANDOFF_MAX_DRAINS, len(requests), list(requests),
+                        persona_id,
+                    )
+                    return False
+                drained += self._drain_deferred_flushes(
+                    FLUSH_HANDOFF_MAX_DRAINS - drained
+                )
         finally:
-            self._flush_local.active = False
+            self._flush_local.deferred = None
+
+    def _drain_deferred_flushes(self, budget: int) -> int:
+        """配達中に来た依頼を到着順に片付ける (鍵を離した後に呼ぶこと)。
+
+        呼び出しの間も控え (``self._flush_local.deferred``) は生きたままなので、
+        排出中の handler が出した依頼も同じ控えに積まれ、このループが続けて
+        拾う。同一 persona の追加行は :meth:`_flush_queue` の配り直しループの
+        担当なので、実際に控えに載るのは自分以外の persona 宛ての依頼だけに
+        なる — ただし選別はしない (自分宛てが載っても flush が空振りするだけ)。
+
+        Args:
+            budget: この呼び出しで排出してよい件数の上限 (残り枠)。上限の勘定は
+                :meth:`flush_pending_for_persona` が一本で持ち、打ち切りの判断と
+                警告もそちら側にある。
+
+        Returns:
+            実際に排出した件数 (呼び出し元が残り枠から差し引く)。
+        """
+        deferred = getattr(self._flush_local, "deferred", None)
+        if not deferred:
+            return 0
+        drained = 0
+        while deferred and drained < budget:
+            persona_id = deferred.pop(0)
+            drained += 1
+            try:
+                with self._delivery_lock:
+                    self._flush_queue(persona_id)
+            except Exception:
+                # 引き継ぎは外側の依頼の「ついで」なので、1 件の失敗で呼び出し元
+                # (Beat 関所) の判定まで巻き込まない。その persona の pending は
+                # 残るので、次の関所か回復 tick が拾う。
+                LOGGER.exception(
+                    "[ledger] handoff flush failed for persona=%s "
+                    "(left to the next gate/recovery pass)", persona_id,
+                )
+        return drained
 
     def _flush_queue(self, persona_id: Optional[str]) -> bool:
         db = self._session_factory()

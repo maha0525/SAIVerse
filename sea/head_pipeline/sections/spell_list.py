@@ -73,6 +73,22 @@ def _belongs_to_per_persona_mcp_server(tool_name: str) -> bool:
     return False
 
 
+def _is_unfetched_per_persona_spell(
+    name: str, registered_names: frozenset[str],
+) -> bool:
+    """この名前は「per_persona MCP のツールで、今セッションでまだ未取得」か。
+
+    per_persona のツールは Pulse の頭でペルソナ自身の接続から登録簿へ入る
+    (docs/intent/mcp_addon_integration.md §I)。だから登録簿に名前が無いことは
+    「消えた」の証拠にならない — 「まだ取りに行っていない」だけでも同じ姿になる。
+
+    鮮度検査 (:meth:`SpellListSection._check_spell_freshness`) と差分の計算
+    (:meth:`SpellListSection.diff_to_notifications`) の両方がこの一つの判定を
+    使う。同じ規則を二箇所へ書き写すと、片方だけ直した日に食い違う。
+    """
+    return name not in registered_names and _belongs_to_per_persona_mcp_server(name)
+
+
 class SpellListSection:
     """Spell 一覧の section 実装。
 
@@ -255,6 +271,11 @@ class SpellListSection:
 
         old_visible = {e.name: e for e in old.entries if e.visible}
         new_visible = {e.name: e for e in new.entries if e.visible}
+
+        # 一度の差分検知で出た同種の変化は一つの出来事として 1 ラベルに束ねる
+        # (2026-09-07)。ラベルごとに [システム通知] の見出しが付くので、スペル
+        # 1 件ごとに分けると一度の移動で見出しが何個も並ぶ。
+        added_blocks: list[str] = []
         for name in sorted(new_visible.keys() - old_visible.keys()):
             entry = new_visible[name]
             display = entry.display_name or entry.name
@@ -266,21 +287,49 @@ class SpellListSection:
             # (sea/head_pipeline/notify.py の「寸分たがわず」と同じ原則)。
             detail_lines: list[str] = []
             self._render_entry(detail_lines, entry)
-            labels.append(NotificationLabel(
-                kind="spell_added",
-                label="\n".join(
-                    [f"スペル {display} ({name}) が使えるようになりました"]
-                    + detail_lines
-                ),
+            added_blocks.append("\n".join(
+                [f"スペル {display} ({name}) が使えるようになりました"] + detail_lines
             ))
+        if added_blocks:
+            if len(added_blocks) == 1:
+                text = added_blocks[0]
+            else:
+                text = "\n".join(
+                    [f"スペルが {len(added_blocks)} 件使えるようになりました"]
+                    + added_blocks
+                )
+            labels.append(NotificationLabel(kind="spell_added", label=text))
+
         # 剥奪通知は名前だけでよい — 「もう唱えられない」を伝えるのに引数の形は
-        # 要らないし、head からも消えている。
+        # 要らないし、head からも消えている。複数なら名前の列挙の一行。
+        #
+        # ただし「まだ取りに行っていない per_persona MCP ツール」は剥奪と数えない
+        # (2026-09-07)。鮮度検査に置いた §I の除外と同じ原則を、差分の計算にも
+        # 効かせる — 再起動後まだ一度も Pulse していないペルソナのコンテキスト
+        # プレビューが、未取得のツールを「使えなくなりました」と偽表示した
+        # (実機所見、docs/issues/perception_state_pushed_at_event_time.md)。
+        # 実 Pulse への影響: 頭の取得が成功した回は名前が登録簿にあるので除外は
+        # 不発で、本物の剥奪はそのまま出る。取得が失敗した回は §I「fetch 失敗の
+        # 扱い (失敗 ≠ 消滅)」が直前の一覧を維持して剥奪を発火させない側で既に
+        # 守っているので、ここの除外と役割が重ならない。
+        registered_names = new.registered_names
+        if registered_names is None:
+            # 旧形式の snapshot (registered_names を持たない) から来た場合だけ、
+            # いまの登録簿を直接見る。capture 由来の new は必ず持っている。
+            from tools import SPELL_TOOL_SCHEMAS
+            registered_names = frozenset(SPELL_TOOL_SCHEMAS.keys())
+
+        removed_names: list[str] = []
         for name in sorted(old_visible.keys() - new_visible.keys()):
+            if _is_unfetched_per_persona_spell(name, registered_names):
+                continue
             entry = old_visible[name]
             display = entry.display_name or entry.name
+            removed_names.append(f"{display} ({name})")
+        if removed_names:
             labels.append(NotificationLabel(
                 kind="spell_removed",
-                label=f"スペル {display} ({name}) が使えなくなりました",
+                label=f"スペル {'、'.join(removed_names)} が使えなくなりました",
             ))
         return labels
 
@@ -343,12 +392,13 @@ class SpellListSection:
         if stored_registered is None:
             return
 
-        live_names = set(SPELL_TOOL_SCHEMAS.keys())
+        live_names = frozenset(SPELL_TOOL_SCHEMAS.keys())
         if stored_registered != live_names:
             added = live_names - stored_registered
             removed = stored_registered - live_names
             if not added and removed and all(
-                _belongs_to_per_persona_mcp_server(name) for name in removed
+                _is_unfetched_per_persona_spell(name, live_names)
+                for name in removed
             ):
                 # per_persona MCP ツールは Pulse 頭に各ペルソナ自身の接続から
                 # 登録される (mcp_addon_integration.md §I)。再起動直後は「まだ

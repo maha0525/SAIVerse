@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import threading
+import time
 from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 from sea.eviction_plan import CONSUMED_PERCEPTION_KEY
@@ -1833,23 +1834,75 @@ def _swap_preview_weave_for_refill(
         return False
 
 
-def _compose_pending_preview(sai_mem: Any) -> List[Any]:
-    """未消費の知覚のプレビュー組成 — 実 flush と同じ並びの一枚 (読むだけ)。
+def _preview_head_items(
+    persona: Any, manager: Any, building_id: str,
+) -> List[Any]:
+    """Pulse の頭の検知ぶんを、未消費の項目と同じ器 (PerceptionItem) に写す。
 
-    実 flush (saiverse_memory/adapter.flush_perception_buffer_payload) と同じ
-    reduce → 回収 (reclaim_pending_perceptions — room_state_packages.md §11-2)
-    → 消費時描画 (render_pending_room_states — 部屋の様子の差分/全文は §11-2
-    規則 2 でこの一回だけ描く) を通す。まはーがプレビューで見る文面と次の
-    Pulse が実際に知覚する文面を一致させるための同順で、DB の行は書き換え
-    ない (描画はこの組成で使う写しだけ)。
+    中身を組むのは sea/head_pipeline の読み取り専用の検知
+    (:func:`~sea.head_pipeline.integration.preview_head_perceptions`)。ここは
+    その戻りを、reduce / 回収 / 消費時描画が扱える形に詰め替えるだけ。
+
+    ``id`` は台帳に無い仮の項目なので**負の値**を到着順に振る — 実在の行
+    (rowid は 1 以上) と衝突しないので、後段が id で照合しても取り違えない。
+    """
+    from sai_memory.perception_buffer import PerceptionItem
+    from sea.head_pipeline import preview_head_perceptions
+
+    entries = preview_head_perceptions(persona, manager, building_id)
+    now = int(time.time())
+    items: List[Any] = []
+    for offset, entry in enumerate(entries):
+        media = entry.get("media")
+        items.append(PerceptionItem(
+            id=offset - len(entries),
+            kind=entry["kind"],
+            content=entry["content"],
+            reduce_key=None,
+            salient=0,
+            media=(
+                json.dumps(media, ensure_ascii=False)
+                if isinstance(media, list) and media else media
+            ),
+            metadata=entry.get("metadata"),
+            created_at=now,
+        ))
+    return items
+
+
+def _compose_pending_preview(
+    persona: Any, manager: Any, building_id: str,
+) -> List[Any]:
+    """次の Pulse が読む知覚のプレビュー組成 — 実 flush と同じ並びの一枚 (読むだけ)。
+
+    材料は二つで、実 Pulse の到着順に並べる:
+
+    1. **実際に未消費の項目** — 移動通知など、既にバッファに溜まっている分。
+    2. **Pulse の頭が積むはずの項目** — 世界状態の差分・部屋の様子・同席の
+       想起。検知が Pulse の頭へ移った (2026-09-07) ことで、溜まっている物と
+       「話しかけた瞬間にペルソナが読む物」の間にこの差が開いた。頭と同じ検知を
+       **読み取り専用**で走らせて仮の未消費項目に写す (:func:`_preview_head_items`)。
+
+    そのうえで実 flush (saiverse_memory/adapter.flush_perception_buffer_payload)
+    と同じ reduce → 回収 (reclaim_pending_perceptions —
+    room_state_packages.md §11-2) → 消費時描画 (render_pending_room_states —
+    部屋の様子の差分/全文は §11-2 規則 2 でこの一回だけ描く) を通す。まはーが
+    プレビューで見る文面と次の Pulse が実際に知覚する文面を一致させるための
+    同順で、DB の行は書き換えない (描画はこの組成で使う写しだけ)。
     """
     from sai_memory.perception_buffer import list_pending, reduce_perceptions
     from sai_memory.room_state import (
         reclaim_pending_perceptions,
         render_pending_room_states,
     )
+    sai_mem = getattr(persona, "sai_memory", None)
+    if sai_mem is None:
+        return []
+    # 頭の検知は sai_mem の錠前の外で走らせる (world の読みを含み、内部で
+    # 必要なぶんだけ自分で錠前を取る)。
+    head_items = _preview_head_items(persona, manager, building_id)
     with sai_mem._db_lock:
-        pending = list_pending(sai_mem.conn)
+        pending = list(list_pending(sai_mem.conn)) + head_items
         if not pending:
             return []
         return render_pending_room_states(
@@ -1978,14 +2031,18 @@ def preview_context(
 
     # 知覚バッファ (未消費) — 次の Pulse で flush されてプロンプトに入る予定の知覚を
     # プレビューに出す (docs/intent/perception_buffer.md Phase 3, 透明性 §6)。
-    # ここでは read-only: 検知 (snapshot 比較) は走らせず、既に溜まっている未消費分
-    # だけを表示する (検知は snapshot を進めるため、プレビューで走らせると実 Pulse の
-    # 差分が消える副作用がある)。実際の flush と同じく型別 reduce → 1 メッセージに畳む。
+    # 既に溜まっている未消費分に加えて、Pulse の頭が積むはずの検知ぶん (世界状態の
+    # 差分・部屋の様子・同席の想起) も**読み取り専用**で合成する — 検知が Pulse の
+    # 頭へ移った (2026-09-07) ので、溜まっている物だけでは「いま話しかけたら
+    # ペルソナが読むもの」にならない。読み取り専用の意味は
+    # _compose_pending_preview / head_pipeline.preview_head_perceptions を参照。
     try:
         sai_mem = getattr(persona, "sai_memory", None)
         if sai_mem is not None and getattr(sai_mem, "is_ready", lambda: False)():
             from sai_memory.perception_buffer import format_perception_message
-            reduced_pending = _compose_pending_preview(sai_mem)
+            reduced_pending = _compose_pending_preview(
+                persona, runtime.manager, building_id,
+            )
             if reduced_pending:
                 pb_text = format_perception_message(reduced_pending)
                 pb_msg = {"role": "user", "content": f"<system>{pb_text}</system>"}

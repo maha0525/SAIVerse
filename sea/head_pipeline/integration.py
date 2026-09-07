@@ -19,12 +19,13 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
 from functools import partial
 from typing import Any, Optional
 
 from sea.head_pipeline.pipeline import HeadPipeline, get_default_pipeline
-from sea.head_pipeline.types import LineHeadInput, NotificationLabel, RenderedSection
+from sea.head_pipeline.types import LineHeadInput, RenderedSection
 
 # 旧 builtin_data/tools/get_memory_weave_context.py が message metadata に付与していた
 # marker / type field 名と互換のキーを composition で再現する (= preview UI の
@@ -175,8 +176,13 @@ def inject_diff_notifications(
     pipeline: HeadPipeline | None = None,
     model_key: str | None = None,
     detect_room: bool = True,
+    only_sections: set[str] | None = None,
 ) -> bool:
     """全 Section の diff を検知し、知覚バッファへ型付き項目として push する (消費はしない)。
+
+    ``only_sections`` を渡すと、その名前の Section だけを検知の対象にする
+    (:meth:`HeadPipeline.flush_diffs` の ``only``)。対象外の Section は capture も
+    diff もされないので、その変化は次に全 Section で走る検知が拾う。
 
     ``detect_room`` — 「部屋の様子」のパッケージ照合 + 自己回復
     (:func:`_detect_room_state_changes`、docs/intent/room_state_packages.md §6-2)
@@ -190,13 +196,31 @@ def inject_diff_notifications(
     していた。本関数は **検知器** に徹し、差分を知覚バッファ (kind='world_state') へ
     push するだけにする。実際に SAIMemory へ入る (= ペルソナが知覚する) のは呼び出し元
     が ``flush_perception_buffer`` を呼ぶ消費時。呼び出し元ごとの flush 制御:
-    - Pulse 開始 (run_meta_user): push → 末尾で flush (同 Pulse で消費)。
+    - Pulse 開始 (run_meta_user): 全 Section を push → 末尾で flush (同 Pulse で消費)。
     - Pulse 中の metabolism 直後 (runtime_context): push → 直後に flush (同ターン知覚)。
-    - 移動時 (on_building_entered, pulse 外): push のみ。次の Pulse で消費される
-      (= 主観時間が止まっている間の知覚は詰まって待つ、という時間モデル通り)。
+    - 移動時 (on_building_entered, pulse 外): 移動した本人へ push するのは
+      **移動の事実だけ** で、対象は building と building_occupants の 2 つ
+      (``only_sections={"building", "building_occupants"}``)。在室者の側は
+      部屋替えの分岐が deliver=False のラベルしか出さないので文は届かず、
+      ここで走るのは基準合わせ (新しい部屋の顔ぶれまで) だけ。
+      スペル・Memopedia 等の状態の差分は Pulse 開始時の検知が「最後に知らせた
+      状態 vs 今」で計算する — 移動のたびに途中経過を積むと、読む時点
+      (次の Pulse) には別の部屋の話になっている (2026-09-07、
+      docs/issues/perception_state_pushed_at_event_time.md)。在室者を対象から
+      外すと基準が旧部屋のまま残り、本人が Pulse を打つ前に誰かが同じ部屋へ
+      入ってきた回が「部屋替え」の比較に化けて入室の知らせが消える。
+      消費は次の Pulse (= 主観時間が止まっている間の知覚は詰まって待つ、という
+      時間モデル通り)。
 
-    入室想起 (persona_recall) も同じくバッファへ push する。詳細:
-    docs/intent/perception_buffer.md §4.5 / §5.1。
+    ``deliver=False`` のラベル (:class:`~sea.head_pipeline.types.NotificationLabel`)
+    は「検知はするが文は届けない」— push はせず、基準 (B) の前進にだけ使う。
+    deliver=False だけの回は配送そのものが無いので台帳の execution も作らず、
+    戻り値も False (= 何も届けていない)。
+
+    再会の想起 (persona_recall) はこの検知器の仕事ではない — Pulse の頭で
+    「いま同席している相手」を見る :func:`inject_copresence_recall` が積む
+    (2026-09-07 に移動時のラベル発火から移した。
+    docs/intent/perception_buffer.md §4.5 / §5.1)。
 
     ``model_key`` を省略した場合は persona の標準 model の Session に対して
     diff チェックする (= 従来の単一窓挙動と同じ)。既読状態 (last_notified) は
@@ -219,7 +243,10 @@ def inject_diff_notifications(
     ctx = build_line_head_input(persona, manager, building_id, model_key=model_key)
     ensure_snapshot(pipeline, ctx)
 
-    pushed = _push_section_diffs(persona, manager, pipeline, ctx, building_id)
+    pushed = _push_section_diffs(
+        persona, manager, pipeline, ctx, building_id,
+        only_sections=only_sections,
+    )
 
     if detect_room:
         try:
@@ -234,20 +261,148 @@ def inject_diff_notifications(
     return pushed
 
 
+def preview_head_perceptions(
+    persona: Any,
+    manager: Any,
+    building_id: str,
+    *,
+    pipeline: HeadPipeline | None = None,
+    model_key: str | None = None,
+) -> list[dict]:
+    """Pulse の頭が積むはずの知覚を、何も進めずに組んで返す (プレビュー専用)。
+
+    実 Pulse の頭 (``sea.runtime.SEARuntime._run_meta_user_locked``) は
+    「世界状態の差分 → 部屋の様子 → 同席の想起」の順に検知して知覚バッファへ
+    積み、その回のうちに消費する。プレビューが未消費バッファだけを見せると、
+    この頭の検知ぶんが丸ごと抜けて「いま話しかけたらペルソナが読むもの」に
+    ならない (エリスの退室がプレビューに出なかった実機所見、2026-09-07)。
+    ここは同じ三つの検知を同じ順で走らせ、**読み取り専用**で結果だけを返す。
+
+    読み取り専用の中身:
+
+    - 基準 (last_notified) を進めない (``flush_diffs(..., advance=False)`` の
+      戻りを使うだけで :meth:`HeadPipeline.advance_last_notified` を呼ばない)。
+    - 知覚バッファに push しない / 実行台帳に行を作らない。
+    - 部屋の様子は照合の計算 (:func:`_plan_room_state_change`) までで、置き直し
+      (自己回復) は行わない — 置き直しは提示への書き込みで、しかも未消費の
+      項目を生まないのでプレビューに映すものが無い。
+    - 同席想起は「試み済み」の記憶を更新しない (``remember=False``) ので、
+      直後の実 Pulse が同じ再会をやり直せる。
+    - head の snapshot も撮らない (:func:`ensure_snapshot` を呼ばない) —
+      snapshot が無い回は :meth:`HeadPipeline.flush_diffs` が空を返して差分の
+      行が出ないだけで、プレビューのために head を作って永続化はしない。
+      プレビューの本線 (``preview_context`` → ``_prepare_context``) が先に
+      head を組んでいるので、実運用でこの枝に落ちるのは head を持てない回。
+
+    ``model_key`` は検知の窓判定に使う実行 model。None なら persona の標準
+    model (プレビューが見積もりに使う model と同じ)。
+
+    Returns:
+        ``[{"kind", "content", "media", "metadata"}, ...]`` を実 Pulse の到着順
+        で。``media`` は :meth:`SAIMemoryAdapter.push_perception` と同じ list 形
+        (無ければ None)、``metadata`` は JSON 文字列 (無ければ None)。
+    """
+    items: list[dict] = []
+
+    # 1. 世界状態の差分 — 実 Pulse の _push_section_diffs と同じ検出の呼び方。
+    try:
+        pipeline = pipeline or get_default_pipeline()
+        ctx = build_line_head_input(persona, manager, building_id, model_key=model_key)
+        labels, _detected = pipeline.flush_diffs(
+            ctx, all_sections=True, advance=False,
+        )
+        for label in labels:
+            if not label.deliver:
+                continue
+            items.append({
+                "kind": "world_state",
+                "content": label.label,
+                "media": None,
+                "metadata": (
+                    json.dumps(label.metadata, ensure_ascii=False)
+                    if label.metadata else None
+                ),
+            })
+    except Exception:
+        LOGGER.warning(
+            "head_pipeline: preview section-diff detection failed persona=%s "
+            "building=%s", getattr(persona, "persona_id", "?"), building_id,
+            exc_info=True,
+        )
+
+    # 2. 部屋の様子 — 積むはずの束だけを仮項目にする (置き直しは映さない)。
+    try:
+        plan = _plan_room_state_change(
+            persona, manager, building_id, model_key=model_key,
+        )
+        if plan is not None and plan["action"] == "push":
+            from sai_memory.room_state import ROOM_STATE_KIND, build_room_state_push
+            payload = build_room_state_push(
+                building_id, plan["bundle"], allow_diff=plan["allow_diff"],
+            )
+            items.append({
+                "kind": ROOM_STATE_KIND,
+                "content": payload["content"],
+                "media": payload["media"],
+                "metadata": payload["metadata"],
+            })
+    except Exception:
+        LOGGER.warning(
+            "head_pipeline: preview room-state detection failed persona=%s "
+            "building=%s", getattr(persona, "persona_id", "?"), building_id,
+            exc_info=True,
+        )
+
+    # 3. 同席の相手との再会の想起。
+    try:
+        for recall in _compose_copresence_recalls(
+            persona, manager, building_id, remember=False,
+        ):
+            items.append({
+                "kind": "persona_recall",
+                "content": recall["content"],
+                "media": None,
+                "metadata": recall["metadata"],
+            })
+    except Exception:
+        LOGGER.warning(
+            "head_pipeline: preview copresence recall failed persona=%s "
+            "building=%s", getattr(persona, "persona_id", "?"), building_id,
+            exc_info=True,
+        )
+
+    return items
+
+
 def _push_section_diffs(
     persona: Any,
     manager: Any,
     pipeline: HeadPipeline,
     ctx: LineHeadInput,
     building_id: str,
+    *,
+    only_sections: set[str] | None = None,
 ) -> bool:
     """Section 群の diff ラベルを検知して知覚バッファ (or outbox) へ push する。"""
     ledger = getattr(manager, "execution_ledger", None)
     if ledger is None:
-        return _inject_diff_notifications_direct(persona, pipeline, ctx, building_id)
+        return _inject_diff_notifications_direct(
+            persona, pipeline, ctx, building_id, only_sections=only_sections,
+        )
 
-    labels, detected = pipeline.flush_diffs(ctx, all_sections=True, advance=False)
+    labels, detected = pipeline.flush_diffs(
+        ctx, all_sections=True, advance=False, only=only_sections,
+    )
     if not labels:
+        return False
+
+    deliverable = [label for label in labels if label.deliver]
+    if not deliverable:
+        # 検知だけのラベル (deliver=False) しか無い回。配送する文が無いので台帳は
+        # 通さず、基準だけ新しい状態へ進める — 進めないと以後の差分が古い基準との
+        # 比較になって出なくなる (部屋替え時の同席者がこれ)。
+        for section_name, new_snapshot in detected.items():
+            pipeline.advance_last_notified(ctx.persona_id, section_name, new_snapshot)
         return False
 
     try:
@@ -275,11 +430,11 @@ def _push_section_diffs(
                     ),
                 },
             }
-            for label in labels
+            for label in deliverable
         ]
         ledger.mark_applied(
             execution_id,
-            result={"labels": len(labels), "sections": sorted(detected.keys())},
+            result={"labels": len(deliverable), "sections": sorted(detected.keys())},
             outbox_items=outbox_items,
             deliver=True,
         )
@@ -291,19 +446,17 @@ def _push_section_diffs(
         )
         return False
 
-    # outbox 積みが durable に確定した後で B を前進 (S3 の修正)。
+    # outbox 積みが durable に確定した後で B を前進 (S3 の修正)。検知した Section
+    # は一律に進める — deliver=False のラベルしか出さない Section (部屋替え時の
+    # 同席者) も、もう後段の処理を持たない (再会の想起は Pulse 頭の同席チェックへ
+    # 移った、2026-09-07) ので、基準だけ進めて次の差分に備えればよい。
     for section_name, new_snapshot in detected.items():
         pipeline.advance_last_notified(ctx.persona_id, section_name, new_snapshot)
 
     LOGGER.info(
         "head_pipeline: queued %d world_state notification(s) via ledger "
-        "for persona=%s building=%s", len(labels), ctx.persona_id, building_id,
+        "for persona=%s building=%s", len(deliverable), ctx.persona_id, building_id,
     )
-
-    # 入室想起は head 操作でも diff でもないので outbox 化の対象外 (従来どおり)。
-    sai_mem = getattr(persona, "sai_memory", None)
-    if sai_mem is not None and sai_mem.is_ready():
-        _inject_persona_recall_on_enter(persona, labels, sai_mem)
 
     return True
 
@@ -313,6 +466,8 @@ def _inject_diff_notifications_direct(
     pipeline: HeadPipeline,
     ctx: LineHeadInput,
     building_id: str,
+    *,
+    only_sections: set[str] | None = None,
 ) -> bool:
     """台帳が無い環境の degrade 経路 (配達保証なし)。
 
@@ -323,8 +478,14 @@ def _inject_diff_notifications_direct(
     「配送確定後の前進」違反)。失敗時は B と dirty を据え置き、次回 flush の
     再検出に委ねる (push 済みラベルの再通知はあり得る = at-least-once。台帳経路
     の再配送と同じ倒し方)。
+
+    ``deliver=False`` のラベルは push の対象外 (基準の前進にだけ使う)。SAIMemory が
+    未 ready の回は、届ける文の有無にかかわらず何も進めない — push 先が無い以上、
+    次回の再検出でまとめてやり直す方が落としが無い。
     """
-    labels, detected = pipeline.flush_diffs(ctx, all_sections=True, advance=False)
+    labels, detected = pipeline.flush_diffs(
+        ctx, all_sections=True, advance=False, only=only_sections,
+    )
     if not labels:
         return False
 
@@ -337,8 +498,9 @@ def _inject_diff_notifications_direct(
         )
         return False
 
+    deliverable = [label for label in labels if label.deliver]
     push_failed = False
-    for label in labels:
+    for label in deliverable:
         try:
             # 台帳経路と同じく、ラベルの型付け (label_kind 等) を知覚エントリへ
             # 写す (room_state_packages.md §11-3-2)。
@@ -363,24 +525,109 @@ def _inject_diff_notifications_direct(
 
     LOGGER.info(
         "head_pipeline: pushed %d world_state perception(s) for persona=%s building=%s",
-        len(labels), ctx.persona_id, building_id,
+        len(deliverable), ctx.persona_id, building_id,
     )
 
-    _inject_persona_recall_on_enter(persona, labels, sai_mem)
-
-    return True
+    return bool(deliverable)
 
 
-def _inject_persona_recall_on_enter(
+# 「不在から同席へ変わった一回だけ想起を試みる」ための、プロセス内の記憶。
+# persona_id → その相手と同席が続いている間に想起を**試み済み**の相手 ID の集合。
+# 想起が実際に積まれたかではなく「試みたか」を覚える (門で抑制された回・想起本文が
+# 空だった回・push が失敗した回も試み済み) — 再会は一度きりの出来事で、毎 Pulse
+# 再試行に戻すと「同席している間じゅう毎 Pulse 想起が積まれる」欠陥が別の形で残る。
+# 相手が部屋から居なくなった Pulse で集合から落ちるので、次の再会でまた発火する。
+# プロセスを再起動するとこの記憶は消え、再起動後の最初の Pulse で門を通った相手に
+# 想起が一回出る — 発火点を移す前の「入室ごとに一回」と同じ量なので受容する
+# (docs/issues/perception_state_pushed_at_event_time.md 直し方 6)。
+_copresence_recalled: dict[str, set[str]] = {}
+_copresence_recalled_lock = threading.Lock()
+
+
+def reset_copresence_recall_memory(persona_id: str | None = None) -> None:
+    """同席想起の「試み済み」の記憶を捨てる (テストの相互汚染の掃除用)。
+
+    ``persona_id`` を渡すとその 1 人ぶんだけ、省略すると全員ぶんを忘れる。
+    忘れた後の最初の Pulse は、同席中の相手を新顔として扱う (= 想起を一回試みる)。
+    """
+    with _copresence_recalled_lock:
+        if persona_id is None:
+            _copresence_recalled.clear()
+        else:
+            _copresence_recalled.pop(str(persona_id), None)
+
+
+def _take_copresence_newcomers(
+    persona_id: str, occupant_ids: list[str], *, remember: bool = True,
+) -> list[str]:
+    """同席者のうち「不在から同席へ変わった相手」だけを返し、全員を試み済みにする。
+
+    記憶に残すのは**いま同席している試み済みの相手だけ** — 居なくなった相手は
+    集合から落ちるので、次に再会したときは新顔として扱われる (再武装)。
+    戻り値は ``occupant_ids`` の順序を保つ。
+
+    ``remember=False`` は読み取りだけ (プレビュー用) — 新顔の判定は同じだが
+    記憶を更新しないので、直後の実 Pulse がその再会をやり直せる。
+    """
+    with _copresence_recalled_lock:
+        already = _copresence_recalled.get(persona_id) or set()
+        current = set(occupant_ids)
+        newcomers = [oid for oid in occupant_ids if oid not in already]
+        if not remember:
+            return newcomers
+        # 新顔は「これから試みる」ぶんも含めて試み済みにする (門で抑制されても
+        # push に失敗しても、この同席の間は再試行しない)。
+        if current:
+            _copresence_recalled[persona_id] = current
+        else:
+            _copresence_recalled.pop(persona_id, None)
+    return newcomers
+
+
+def inject_copresence_recall(
     persona: Any,
-    labels: list[NotificationLabel],
-    sai_mem: Any,
+    manager: Any,
+    building_id: str,
 ) -> None:
-    """occupant_entered ラベルに対応する過去会話・Memopedia を知覚バッファへ push する。
+    """いま同席している相手との過去会話・Memopedia を知覚バッファへ push する。
 
-    Note システム完成までの繋ぎ実装。ペルソナが同じ Building に入室した際、過去の会話と
-    Memopedia ページを想起する。以前は直接 SAIMemory へ append していたが、Phase 2 で
-    知覚バッファ (kind='persona_recall') への push に変更 (消費は呼び出し元の flush)。
+    呼ばれるのは Pulse の頭ただ一箇所 (``sea.runtime.SEARuntime.
+    _run_meta_user_locked`` の、建物発言の取り込みの直後・知覚の消費の直前)。
+    「目を覚ましたときに隣に居る相手のことを思い出す」形で、``manager.occupants``
+    の**いまの**顔ぶれを見る。
+
+    【発火の規約】
+
+    - **不在から同席へ変わった相手に一回だけ**試みる。
+    - 同席が続いている間は再発火しない (門で抑制された回も、想起が空だった回も、
+      push に失敗した回も「試み済み」— 再会は一度きりの出来事)。
+    - 相手が部屋から居なくなると再武装され、次の再会でまた発火する。
+    - プロセスを再起動するとこの記憶は消える (再起動後の最初の Pulse で同席中の
+      相手に一回出る)。記憶の実体と受容の理由は :data:`_copresence_recalled`。
+
+    【発火点を移した理由 (2026-09-07)】以前は入室の検知が出す
+    kind=``occupant_entered`` のラベルを目印に、移動の瞬間に想起を積んでいた。
+    移動の瞬間に積んだ想起は次の Pulse まで知覚バッファで待つので、その間に
+    本人が別の部屋へ移ると「もう居ない相手との再会」を思い出す嘘になる
+    (まはーの実機報告)。往復すればそのぶん想起が積み重なる欠陥も同じ根。
+    Pulse の頭で発火させれば、同じ Pulse が同席者を見て同じ Pulse で消費するので
+    どちらも構造的に消える (docs/issues/perception_state_pushed_at_event_time.md)。
+
+    【縁の記憶が要る理由 (2026-09-07 の同日追記)】発火の条件が「同席している」と
+    いう**状態**になったので、そのままだと同席中は毎 Pulse 門が開きうる (隣で
+    黙っている相手は直近の文脈に痕跡が無いため門を通り続ける)。旧実装が
+    「入室」という一回きりの出来事に紐づいていた性質を、上の「試み済み」の記憶で
+    復元する。
+
+    【積んだ想起に印を付ける (2026-09-07 の移行の掃除)】push する知覚の metadata
+    に ``{"copresence": true, "occupant_id": "<相手 ID>"}`` を載せる。旧方式が
+    移動の瞬間に積んだ想起は v0.3.9 までのユーザーの知覚バッファに未消費のまま
+    残っていて、そのままだと次の Pulse で新方式の想起と二重に読まれる。印の無い
+    ``persona_recall`` を回収 (``sai_memory.room_state.
+    reclaim_pending_perceptions`` の §11-2 規則 3(c)) が遺物として捨てるので、
+    掃除は再起動後の最初の消費で自動的に済む (手動の掃除は要らない)。
+
+    Note システム完成までの繋ぎ実装であることは変わらない (配送保証は無い)。
 
     【再会の門 (2026-09-05, v0.3.9)】相手が直近の文脈に居るあいだは想起しない
     (:meth:`HistoryManager.should_recall_persona`)。この繋ぎ実装は門を呼ばないまま
@@ -390,25 +637,108 @@ def _inject_persona_recall_on_enter(
 
     見出しに書く相手の名前は ``persona.id_to_name_map`` (manager と参照を共有する
     id→表示名の対応) で解決して渡す。解決できないときだけ ID のままになる。
+
+    SAIMemory が未 ready の回は静かに見送る — **記憶を触らずに**戻るので、次の
+    Pulse の頭が同じ同席を新顔としてやり直す (何も失われない)。
+
+    想起本文の組み立て (新顔の判定 + 門 + 本文の生成) は
+    :func:`_compose_copresence_recalls` が持ち、ここは戻りを push するだけの
+    外装 — プレビューが「試み済み」の記憶を汚さずに同じ本文を組めるようにする
+    ための分割 (2026-09-07、
+    docs/issues/perception_state_pushed_at_event_time.md 直し方 8)。
+    """
+    sai_mem = getattr(persona, "sai_memory", None)
+    for recall in _compose_copresence_recalls(
+        persona, manager, building_id, remember=True,
+    ):
+        try:
+            sai_mem.push_perception(
+                "persona_recall", recall["content"],
+                metadata=recall["metadata"],
+            )
+            LOGGER.info(
+                "head_pipeline: pushed persona recall perception for %s "
+                "(copresent at the pulse head)", recall["occupant_id"],
+            )
+        except Exception:
+            LOGGER.exception(
+                "head_pipeline: failed to push persona recall for %s",
+                recall["occupant_id"],
+            )
+
+
+def _compose_copresence_recalls(
+    persona: Any,
+    manager: Any,
+    building_id: str,
+    *,
+    remember: bool = True,
+) -> list[dict]:
+    """同席の新顔ごとに、積むはずの想起 (本文 + 同席の印) を組んで返す。
+
+    知覚バッファには積まない。``remember=False`` は「試み済み」の記憶も更新
+    しない読み取り専用モード (プレビュー用) — 直後の実 Pulse がその再会を
+    同じ新顔としてやり直す。
+
+    Returns:
+        ``[{"occupant_id", "content", "metadata"}, ...]`` を同席者一覧の順で。
+        門で抑制された相手・想起本文が空だった相手は含まれない。
     """
     history_manager = getattr(persona, "history_manager", None)
-    if not history_manager:
-        return
+    if not history_manager or not building_id:
+        return []
+    sai_mem = getattr(persona, "sai_memory", None)
+    if sai_mem is None or not sai_mem.is_ready():
+        # 「試み済み」を刻まずに戻る — 刻むと、起動直後の未 ready の一回で
+        # その同席まるごとの想起が永久に飛ぶ。
+        LOGGER.debug(
+            "head_pipeline: SAIMemory not ready, skipping copresence recall "
+            "(the next pulse head checks the same room again)",
+        )
+        return []
 
     id_to_name = getattr(persona, "id_to_name_map", None) or {}
+    self_id = getattr(persona, "persona_id", None)
+    occupants = list(getattr(manager, "occupants", {}).get(building_id, []) or [])
+    # ペルソナか、ユーザーか。訪問中のペルソナも居るので all_personas を優先する
+    # (無い manager では personas に degrade)。
+    persona_ids = set(
+        getattr(manager, "all_personas", None) or getattr(manager, "personas", {}) or {}
+    )
 
-    for label in labels:
-        if label.kind != "occupant_entered":
+    # 同席者一覧の ID は生の値 (ユーザーは数値のことがある)。旧実装は入室の
+    # 検知 (capture) が文字列へ揃えた後の値を見ていたので、同じ揃えを通す —
+    # 生のまま比較すると、門の照合 (履歴の with / audience は文字列) が
+    # 型の違いで空振りして、想起が二重に出る。「試み済み」の記憶もこの揃えた
+    # 形で持つ。
+    occupant_ids: list[str] = []
+    for raw_id in occupants:
+        occupant_id = str(raw_id) if raw_id is not None else ""
+        if not occupant_id or occupant_id == str(self_id):
             continue
-        occupant_id = label.metadata.get("occupant_id")
-        occupant_kind = label.metadata.get("occupant_kind")
+        occupant_ids.append(occupant_id)
+
+    # 想起を試みるのは「不在から同席へ変わった相手」だけ。ここで全員が試み済みに
+    # なる (下の門・想起・push の結果は問わない)。
+    newcomers = _take_copresence_newcomers(
+        str(self_id or ""), occupant_ids, remember=remember,
+    )
+    if not newcomers:
+        return []
+
+    from sai_memory.room_state import (
+        RECALL_COPRESENCE_META_KEY,
+        RECALL_OCCUPANT_META_KEY,
+    )
+
+    composed: list[dict] = []
+    for occupant_id in newcomers:
         # ユーザーも対ペルソナと同様に想起する (まはー裁定 2026-07-11)。
         # 従来はユーザーページの肥大化に打つ手が無く persona 限定だったが、
         # 編纂の分割 (P4-a) が肥大を受けられるようになったため前提が変わった。
         # 過去会話の検索 (audience) も個人ページの解決 (metadata.persona_id) も
         # ユーザー ID でそのまま機能する。
-        if not occupant_id or occupant_kind not in ("persona", "user"):
-            continue
+        occupant_kind = "persona" if occupant_id in persona_ids else "user"
 
         if not _should_recall_on_enter(history_manager, occupant_id, occupant_kind):
             LOGGER.debug(
@@ -432,16 +762,23 @@ def _inject_persona_recall_on_enter(
         if not recall_text:
             continue
 
-        try:
-            sai_mem.push_perception("persona_recall", recall_text)
-            LOGGER.info(
-                "head_pipeline: pushed persona recall perception for %s on occupant_entered",
-                occupant_id,
-            )
-        except Exception:
-            LOGGER.exception(
-                "head_pipeline: failed to push persona recall for %s", occupant_id,
-            )
+        # 同席の印を metadata に刻む。未消費バッファの回収
+        # (sai_memory/room_state.reclaim_pending_perceptions — §11-2 規則
+        # 3(c)) は、この印が無い persona_recall を旧方式 (移動の瞬間に積む、
+        # 2026-09-07 退役) の遺物として捨てる。相手の ID は診断とプレビュー
+        # のために併記する。
+        composed.append({
+            "occupant_id": occupant_id,
+            "content": recall_text,
+            "metadata": json.dumps(
+                {
+                    RECALL_COPRESENCE_META_KEY: True,
+                    RECALL_OCCUPANT_META_KEY: occupant_id,
+                },
+                ensure_ascii=False,
+            ),
+        })
+    return composed
 
 
 def _should_recall_on_enter(
@@ -451,8 +788,8 @@ def _should_recall_on_enter(
 
     判定の本体は :meth:`HistoryManager.should_recall_persona` (直近 20 メッセージに
     相手の痕跡 — metadata.with / audience / persona_id — があれば False)。ここは
-    繋ぎ実装からその門へ配線するだけ。``occupant_kind`` は入室ラベルの metadata が
-    運ぶ "persona" | "user" — ユーザー発言は id を持たない形 (with=["user"]) で
+    繋ぎ実装からその門へ配線するだけ。``occupant_kind`` は同席者の種別
+    "persona" | "user" — ユーザー発言は id を持たない形 (with=["user"]) で
     履歴に刻まれるため、ユーザー相手の照合には種別が要る (2026-09-06)。
 
     判定自体が失敗したときは想起する側に倒す (= 従来挙動)。門は想起の量を抑える
@@ -475,7 +812,44 @@ def _detect_room_state_changes(
     persona: Any, manager: Any, building_id: str,
     *, model_key: Optional[str] = None,
 ) -> None:
+    """部屋の様子の照合を走らせ、出た予定 (置き直し / 積み) を実行する。
+
+    照合の計算そのものは :func:`_plan_room_state_change` が持ち、ここは戻りを
+    書き込みに変えるだけの外装 — プレビューが同じ計算を書き込み抜きで使える
+    ようにするための分割で、実配送側の挙動は分割前と同じ
+    (2026-09-07、docs/issues/perception_state_pushed_at_event_time.md 直し方 8)。
+    """
+    plan = _plan_room_state_change(
+        persona, manager, building_id, model_key=model_key,
+    )
+    if plan is None:
+        return
+    sai_mem = getattr(persona, "sai_memory", None)
+    if sai_mem is None:
+        return
+    if plan["action"] == "reseat":
+        sai_mem.reseat_room_state(
+            plan["bundle"],
+            anchor_id=plan["anchor_id"], floor_chars=plan["floor_chars"],
+        )
+    else:
+        sai_mem.push_room_state(
+            building_id, plan["bundle"], allow_diff=plan["allow_diff"],
+        )
+
+
+def _plan_room_state_change(
+    persona: Any, manager: Any, building_id: str,
+    *, model_key: Optional[str] = None,
+) -> Optional[dict]:
     """滞在中の「部屋の様子」のパッケージ照合と自己回復 (room_state_packages.md §6-2/§6-3)。
+
+    **読むだけ** — 判定に必要な世界と台帳の読みは行うが、知覚バッファにも
+    提示にも書き込まない。何をすべきかを次の形で返す (何も要らなければ None):
+
+    - ``{"action": "reseat", "bundle", "anchor_id", "floor_chars"}`` —
+      部屋の様子が提示のどこにも見えないので全文を最古端へ置き直す。
+    - ``{"action": "push", "bundle", "allow_diff"}`` — 変わったので末尾へ積む。
 
     検知の瞬間 (Pulse 開始・入室時の居合わせ側・Beat 頭の MCP 変動) に今の部屋の
     パッケージの束を組み、**提示と同じ窓で見えている**最新の束と指紋で
@@ -512,10 +886,10 @@ def _detect_room_state_changes(
     五巡目修正 2)。
     """
     if getattr(persona, "current_building_id", None) != building_id:
-        return
+        return None
     sai_mem = getattr(persona, "sai_memory", None)
     if sai_mem is None or not getattr(sai_mem, "is_ready", lambda: False)():
-        return
+        return None
 
     from builtin_data.tools.get_visual_context import build_room_bundle
     from tools.context import persona_context
@@ -523,11 +897,11 @@ def _detect_room_state_changes(
     persona_id = getattr(persona, "persona_id", None)
     persona_dir = getattr(persona, "persona_dir", None)
     if not persona_id:
-        return
+        return None
     with persona_context(persona_id, persona_dir, manager):
         bundle = build_room_bundle(building_id)
     if not bundle:
-        return
+        return None
 
     from sai_memory.perception_buffer import WindowResolutionError
     from sai_memory.room_state import room_key, snapshot_digest
@@ -570,7 +944,7 @@ def _detect_room_state_changes(
             "persona=%s building=%s (the next detection will retry)",
             persona_id, building_id, exc_info=True,
         )
-        return
+        return None
     # 積む直前の現在地の再確認 — 冒頭の確認から束の組成 (world の読み) を
     # 挟んで時間が経っており、その間に別スレッドの移動で現在地が変わって
     # いたら、この束はもう「現在の知覚」ではない。見送れば次の検知が現在地で
@@ -584,19 +958,26 @@ def _detect_room_state_changes(
             persona_id, building_id,
             getattr(persona, "current_building_id", None),
         )
-        return
+        return None
     if latest is None:
         # 窓に見える束が一枚も無い = 提示に部屋が無い (ブートストラップと、
         # Chronicle 無効の窓絞りで運搬役が落ちた形を含む)。窓が解決できない
         # 回は上の見送りで既に抜けている。
-        sai_mem.reseat_room_state(
-            bundle, anchor_id=anchor_id, floor_chars=floor_chars,
-        )
-        return
+        return {
+            "action": "reseat",
+            "bundle": bundle,
+            "anchor_id": anchor_id,
+            "floor_chars": floor_chars,
+        }
     if snapshot_digest(latest) != snapshot_digest(bundle):
         # 変化は出来事 — 末尾へ束を積む。描画 (差分 / Chronicle 無効は毎回
         # 全文) は消費の組成の一回だけ (room_state_packages.md §11-2 規則 2)。
-        sai_mem.push_room_state(building_id, bundle, allow_diff=chronicle_on)
+        return {
+            "action": "push",
+            "bundle": bundle,
+            "allow_diff": chronicle_on,
+        }
+    return None
 
 
 def _room_chronicle_enabled(persona: Any, manager: Any) -> bool:

@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { X, ChevronDown, ChevronRight } from 'lucide-react';
 import ModalOverlay from '@/components/common/ModalOverlay';
 import { formatCost } from '@/lib/formatCost';
@@ -206,10 +206,18 @@ function PersonaPreviewView({ persona }: { persona: PersonaPreview }) {
 export default function ContextPreviewModal({ isOpen, onClose, data, isLoading }: ContextPreviewModalProps) {
     const [selectedPersonaIdx, setSelectedPersonaIdx] = useState(0);
 
+    // タブ選択は開くたびに先頭へ戻す。コンポーネントは閉じても破棄されないので、
+    // 前回の部屋で選んだタブ番号が残り、今回のペルソナ数より大きいと表示対象が
+    // 空になって「真っ黒なモーダル」になる (2026-09-07 実機で発覚)。
+    useEffect(() => {
+        if (isOpen) setSelectedPersonaIdx(0);
+    }, [isOpen]);
+
     if (!isOpen) return null;
 
     const personas = data?.personas || [];
-    const activePersona = personas[selectedPersonaIdx] || null;
+    // 番号がずれていても先頭のペルソナに倒す (空白の描画を構造的に塞ぐ保険)
+    const activePersona = personas[selectedPersonaIdx] ?? personas[0] ?? null;
 
     return (
         <ModalOverlay onClose={onClose}>
