@@ -452,6 +452,161 @@ def test_missing_non_per_persona_tools_still_stale():
             section.deserialize_snapshot(data)
 
 
+# ---------------------------------------------------------------------------
+# 未取得の per_persona MCP ツールは剥奪と数えない (2026-09-07)
+#
+# 鮮度検査に置いた除外 (docs/intent/mcp_addon_integration.md §I) を、差分の計算
+# にも効かせる。再起動後まだ一度も Pulse していないペルソナのコンテキスト
+# プレビューが、未取得のツールを「使えなくなりました」と偽表示した実機所見
+# (docs/issues/perception_state_pushed_at_event_time.md)。
+# ---------------------------------------------------------------------------
+
+PER_PERSONA_SERVER = "saiverse-elyth-addon__elyth"
+PER_PERSONA_TOOL = f"{PER_PERSONA_SERVER}__create_post"
+
+
+def _per_persona_mcp_manager():
+    """per_persona サーバーが 1 つ宣言されているだけの MCP manager。
+
+    ツールは 1 件も登録されていない = 再起動直後 (誰もまだ取りに行っていない)。
+    """
+    from tools.mcp_client import MCPClientManager
+
+    mgr = MCPClientManager()
+    mgr._server_meta[PER_PERSONA_SERVER] = {
+        "scope": "per_persona", "raw_config": {},
+    }
+    return mgr
+
+
+def _mcp_entry(name, display, addon_key=None):
+    return SpellEntry(
+        name=name, display_name=display, description="", parameters_json="{}",
+        addon_key=addon_key, visible=True,
+    )
+
+
+def test_unfetched_per_persona_spell_is_not_a_revocation():
+    """登録簿に無い per_persona ツールは「消えた」ではなく「まだ未取得」。"""
+    section = SpellListSection()
+    old = SpellListSnapshot(
+        enabled=True,
+        entries=(_mcp_entry(PER_PERSONA_TOOL, "投稿", "saiverse-elyth-addon"),),
+        addon_manifests=(),
+        registered_names=frozenset({PER_PERSONA_TOOL}),
+    )
+    new = SpellListSnapshot(
+        enabled=True, entries=(), addon_manifests=(),
+        registered_names=frozenset(),   # 再起動直後の登録簿
+    )
+    with patch(
+        "tools.mcp_client.get_mcp_manager", return_value=_per_persona_mcp_manager(),
+    ):
+        labels = section.diff_to_notifications(old, new)
+    assert labels == []
+
+
+def test_fetched_per_persona_spell_that_really_vanished_is_reported():
+    """取得済み (= 登録簿にある) のに一覧から消えたら、本物の剥奪として出す。"""
+    section = SpellListSection()
+    old = SpellListSnapshot(
+        enabled=True,
+        entries=(_mcp_entry(PER_PERSONA_TOOL, "投稿", "saiverse-elyth-addon"),),
+        addon_manifests=(),
+        registered_names=frozenset({PER_PERSONA_TOOL}),
+    )
+    new = SpellListSnapshot(
+        enabled=True, entries=(), addon_manifests=(),
+        # 今セッションで取得済み — サーバー側でツールが引っ込んだ / 鍵が失効した
+        registered_names=frozenset({PER_PERSONA_TOOL}),
+    )
+    with patch(
+        "tools.mcp_client.get_mcp_manager", return_value=_per_persona_mcp_manager(),
+    ):
+        labels = section.diff_to_notifications(old, new)
+    assert [label.kind for label in labels] == ["spell_removed"]
+    assert labels[0].label == (
+        f"スペル 投稿 ({PER_PERSONA_TOOL}) が使えなくなりました"
+    )
+
+
+def test_ordinary_spell_revocation_survives_the_per_persona_exclusion():
+    """除外は per_persona の未取得だけに効く — 同じ回の普通の剥奪は従来どおり。"""
+    section = SpellListSection()
+    old = SpellListSnapshot(
+        enabled=True,
+        entries=(
+            _mcp_entry(PER_PERSONA_TOOL, "投稿", "saiverse-elyth-addon"),
+            _visible_entry("read_board", "閲覧"),
+        ),
+        addon_manifests=(),
+        registered_names=frozenset({PER_PERSONA_TOOL, "read_board"}),
+    )
+    new = SpellListSnapshot(
+        enabled=True, entries=(), addon_manifests=(),
+        # per_persona は未取得、read_board は登録簿にあるのに一覧から消えた
+        registered_names=frozenset({"read_board"}),
+    )
+    with patch(
+        "tools.mcp_client.get_mcp_manager", return_value=_per_persona_mcp_manager(),
+    ):
+        labels = section.diff_to_notifications(old, new)
+    assert [label.kind for label in labels] == ["spell_removed"]
+    assert labels[0].label == "スペル 閲覧 (read_board) が使えなくなりました"
+
+
+def test_preview_does_not_show_a_false_revocation_for_unfetched_per_persona(
+    isolated_manager, ctx, fake_spell_registry,
+):
+    """通し: Pulse 前のコンテキストプレビューが偽の剥奪を映さない。
+
+    前セッションの基準 (B) には per_persona ツールが載っているが、再起動直後の
+    登録簿には無い。プレビューはこの状態で差分を計算するので、除外が無いと
+    「使えなくなりました」が出る (まはーの実機所見、2026-09-07)。
+    """
+    from types import SimpleNamespace
+
+    from sea.head_pipeline import HeadPipeline, HeadSectionRegistry, integration
+
+    registry = HeadSectionRegistry()
+    registry.register(SpellListSection())
+    pipeline = HeadPipeline(registry=registry)
+
+    # 前セッション: per_persona ツールが取得済みで、基準に載る。
+    fake_spell_registry[PER_PERSONA_TOOL] = _make_schema(
+        PER_PERSONA_TOOL, spell_display_name="投稿",
+        addon_name="saiverse-elyth-addon",
+    )
+    fake_spell_registry["read_board"] = _make_schema(
+        "read_board", spell_display_name="閲覧",
+    )
+
+    class _AllAvailableMCP:
+        def is_tool_available_for_persona(self, name, persona_id, building_id=None):
+            return True
+
+    with patch("tools.mcp_client.get_mcp_manager", return_value=_AllAvailableMCP()):
+        pipeline.capture_all(ctx)
+
+    # 再起動直後: per_persona ツールがまだ登録簿に入っていない。
+    del fake_spell_registry[PER_PERSONA_TOOL]
+
+    persona = SimpleNamespace(persona_id="air", model="claude-opus-4-7")
+    with patch(
+        "tools.mcp_client.get_mcp_manager", return_value=_per_persona_mcp_manager(),
+    ), patch.object(
+        integration, "_plan_room_state_change", return_value=None,
+    ), patch.object(
+        integration, "_compose_copresence_recalls", return_value=[],
+    ):
+        entries = integration.preview_head_perceptions(
+            persona, isolated_manager, "b_lobby", pipeline=pipeline,
+            model_key="claude-opus-4-7",
+        )
+
+    assert entries == []
+
+
 def test_serialize_deserialize_roundtrip():
     section = SpellListSection()
     snap = SpellListSnapshot(
