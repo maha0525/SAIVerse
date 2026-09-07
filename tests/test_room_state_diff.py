@@ -48,6 +48,9 @@ from sai_memory.perception_buffer import (
 )
 from sai_memory.perception_buffer import PerceptionItem
 from sai_memory.room_state import (
+    RECALL_COPRESENCE_META_KEY,
+    RECALL_KIND,
+    RECALL_OCCUPANT_META_KEY,
     ROOM_STATE_KIND,
     build_room_state_push,
     bundle_is_valid,
@@ -2872,6 +2875,18 @@ def _typed_instruction_meta(building_id, building_name):
     }, ensure_ascii=False)
 
 
+def _copresence_recall_meta(occupant_id):
+    """同席想起の印つき metadata (書き手 = sea/head_pipeline/integration.py)。
+
+    印のある ``persona_recall`` は Pulse の頭の同席チェックが積んだ本物なので、
+    回収 (§11-2 規則 3(c)) は位置ごと触らない。
+    """
+    return json.dumps({
+        RECALL_COPRESENCE_META_KEY: True,
+        RECALL_OCCUPANT_META_KEY: occupant_id,
+    }, ensure_ascii=False)
+
+
 class _RoundTripMixin:
     """往復 (b1 → b2 → b1) の未消費バッファを積む共通手順。
 
@@ -2984,6 +2999,24 @@ class PendingReclaimTest(_RoundTripMixin, RoomStateLedgerTestBase):
         self.assertTrue(all(row[0] is not None for row in consumed))
         # バッチの記帳にも旧形式は載らない。
         self.assertIsNone(self._batch(batch_id).room_state_json)
+
+    def test_legacy_recalls_are_dropped_but_the_marked_one_is_delivered(self):
+        """旧方式の想起 (印なし) は消え、Pulse 頭が積んだ印つきの想起は届く。
+
+        v0.3.9 を使ったユーザーの知覚バッファに残る移行の掃除 (§11-2 規則 3(c))。
+        """
+        push_perception(self.conn, RECALL_KIND, "[想起] 旧方式・アイフィとの会話")
+        push_perception(self.conn, RECALL_KIND, "[想起] 旧方式・アイフィとの会話 (2 枚目)")
+        push_perception(
+            self.conn, RECALL_KIND, "[想起] 新方式・エリスとの会話",
+            metadata=_copresence_recall_meta("elis_city_a"),
+        )
+        batch_id = self._flush()
+        text = self._batch(batch_id).rendered_text
+        self.assertNotIn("旧方式", text)
+        self.assertIn("[想起] 新方式・エリスとの会話", text)
+        # 外した行にも消費済みの印は付く (台帳の行は消さない)。
+        self.assertEqual(list_pending(self.conn), [])
 
     def test_a_metadata_less_surroundings_row_is_also_legacy(self):
         push_perception(self.conn, ROOM_STATE_KIND, "metadata の無い旧世代の様子")
@@ -3212,6 +3245,63 @@ class ReclaimReturnListTest(unittest.TestCase):
             self._item(1, metadata=_typed_instruction_meta("b1", "工房")),
         ]
         self.assertEqual(reclaim_pending_perceptions(items), [])
+
+    # ---- 規則 3(c): 旧方式の再会の想起 (2026-09-07 退役) ---------------------
+
+    def test_an_unmarked_persona_recall_is_reclaimed(self):
+        """印の無い想起は旧方式 (移動時に積む) の遺物なので組成から外れる。
+
+        発火点を Pulse の頭へ移した後も、旧方式が積んだ想起は未消費のまま
+        ユーザーの知覚バッファに残る (まはーの実機ではエリスに同じ相手の想起が
+        複数枚)。放置すると次の Pulse で新方式の想起と二重に読まれる。
+        """
+        items = [
+            self._item(1, kind=RECALL_KIND, content="[想起] 旧方式が積んだ一枚"),
+            self._item(2, content="生きている通知"),
+        ]
+        out = reclaim_pending_perceptions(items)
+        self.assertEqual([i.id for i in out], [2])
+
+    def test_a_recall_with_unreadable_metadata_is_also_legacy(self):
+        """metadata が JSON でない / 印のキーが無い想起も遺物として扱う。"""
+        for metadata in ("これは JSON ではない", json.dumps({"occupant_id": "elis"})):
+            with self.subTest(metadata=metadata):
+                items = [self._item(1, kind=RECALL_KIND, metadata=metadata)]
+                self.assertEqual(reclaim_pending_perceptions(items), [])
+
+    def test_a_copresence_marked_recall_keeps_its_position(self):
+        """印つきの想起は位置ごと残る (新方式が積んだ本物)。
+
+        同じ Pulse が積んで同じ Pulse が読む建て付けなので未消費で残るのは
+        異常終了した回だけで、その一枚は次の Pulse が読むべきもの。
+        """
+        items = [
+            self._item(1, content="先に届いた出来事"),
+            self._item(
+                2, kind=RECALL_KIND, content="[想起] エリスとの過去の会話",
+                metadata=_copresence_recall_meta("elis_city_a"),
+            ),
+            self._item(3, content="後から届いた出来事"),
+        ]
+        out = reclaim_pending_perceptions(items)
+        self.assertEqual([i.id for i in out], [1, 2, 3])
+        self.assertIs(out[1], items[1])
+
+    def test_recalls_do_not_disturb_other_kinds(self):
+        """想起の破棄は他の種別に波及しない (様子の末尾寄せ・移動の畳みも同じ)。"""
+        items = [
+            self._item(1, kind="feed", content="フィード記事"),
+            self._item(2, kind=RECALL_KIND, content="旧方式の想起"),
+            self._room(3),
+            self._item(
+                4, kind=RECALL_KIND, content="新方式の想起",
+                metadata=_copresence_recall_meta("elis_city_a"),
+            ),
+            self._item(5, kind="core_memory_correction", content="コア記憶の修正"),
+        ]
+        out = reclaim_pending_perceptions(items)
+        # 旧方式の一枚だけが消え、様子は末尾へ、他は順序ごと残る。
+        self.assertEqual([i.id for i in out], [1, 4, 5, 3])
 
     def test_trail_replacement_and_tail_move_together(self):
         """[様子, 移動1, 移動2] → [経路一行 (移動2 の行), 様子] — 重複も欠落もない。

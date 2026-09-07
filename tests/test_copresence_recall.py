@@ -15,6 +15,9 @@
    すると再武装される。
 6. Pulse の頭の呼び出し元 (sea/runtime.py の run_meta_user) から実際に配線されて
    いて、位置は**建物発言の取り込みの後**・知覚の消費の前。
+7. **積んだ想起には同席の印が付く** — 旧方式が移動時に積んだ想起はユーザーの
+   知覚バッファに未消費のまま残るので、印の無い persona_recall を未消費バッファ
+   の回収が遺物として捨てる (room_state_packages.md §11-2 規則 3(c))。
 """
 from __future__ import annotations
 
@@ -49,12 +52,14 @@ class _FakeMemory:
     def __init__(self, ready=True):
         self.ready = ready
         self.pushed = []
+        self.metadata = []
 
     def is_ready(self):
         return self.ready
 
     def push_perception(self, kind, content, **kwargs):
         self.pushed.append((kind, content))
+        self.metadata.append(kwargs.get("metadata"))
 
 
 def _persona(sai_mem, *, gate=True, building_id=ROOM_B):
@@ -81,6 +86,34 @@ def test_copresent_partner_is_recalled():
     assert sai_mem.pushed == [
         ("persona_recall", f"[想起: {PARTNER} との過去の会話]"),
     ]
+
+
+def test_the_pushed_recall_carries_the_copresence_mark():
+    """新方式の想起には同席の印が付く (7 の移行の掃除の目印)。
+
+    印の無い persona_recall は、移動の瞬間に積んでいた旧方式の遺物として未消費
+    バッファの回収が捨てる (room_state_packages.md §11-2 規則 3(c))。印を落とすと
+    自分が積んだ想起まで掃除の対象になるので、形ごと固定する。
+    """
+    import json
+
+    from sai_memory.room_state import (
+        RECALL_COPRESENCE_META_KEY,
+        RECALL_OCCUPANT_META_KEY,
+        _is_copresence_recall,
+    )
+    from sea.head_pipeline.integration import inject_copresence_recall
+
+    sai_mem = _FakeMemory()
+    manager = _FakeManager({ROOM_A: [SELF_ID, PARTNER]})
+    inject_copresence_recall(_persona(sai_mem), manager, ROOM_A)
+
+    assert json.loads(sai_mem.metadata[0]) == {
+        RECALL_COPRESENCE_META_KEY: True,
+        RECALL_OCCUPANT_META_KEY: PARTNER,
+    }
+    # 回収側の読み手が実際にこの形を「印つき」と認めることまで確かめる。
+    assert _is_copresence_recall(sai_mem.metadata[0])
 
 
 def test_partner_who_left_is_not_recalled():

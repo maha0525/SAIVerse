@@ -68,7 +68,11 @@ class RecallGateTests(unittest.TestCase):
         ]
         self.sai_mem = SimpleNamespace(
             is_ready=lambda: True,
-            push_perception=lambda kind, text: self.pushed.append((kind, text)),
+            # metadata (同席の印) つきで呼ばれる — 形の検査は
+            # tests/test_copresence_recall.py が持つ。
+            push_perception=(
+                lambda kind, text, **kwargs: self.pushed.append((kind, text))
+            ),
         )
 
     def _make_persona(self, *, messages, id_to_name_map=None, memopedia_content=None):

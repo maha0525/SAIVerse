@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 import unittest
@@ -460,7 +461,15 @@ class CoreMemorySceneApiTest(unittest.TestCase):
         # kind は見出しなしで自己完結する persona_recall を使う。旧素材の
         # surroundings は §11-2 (room_state_packages.md) の回収が「束 metadata の
         # 無い行 = 旧形式の遺物」として組成から外すようになったため。
-        self.adapter.push_perception("persona_recall", "移動先の様子テスト", media=media)
+        # persona_recall も同席の印つきでなければ回収に外される (§11-2 規則 3(c)
+        # — 印の無い想起は旧方式の遺物) ので、実物と同じ印を付けて積む。
+        self.adapter.push_perception(
+            "persona_recall", "移動先の様子テスト", media=media,
+            metadata=json.dumps(
+                {"copresence": True, "occupant_id": "elis_city_a"},
+                ensure_ascii=False,
+            ),
+        )
         payload = self.adapter.flush_perception_buffer_payload()
         self.assertIsNotNone(payload)
         self.assertIn("移動先の様子テスト", payload["content"])

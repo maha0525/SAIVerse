@@ -501,6 +501,14 @@ def inject_copresence_recall(
     「入室」という一回きりの出来事に紐づいていた性質を、上の「試み済み」の記憶で
     復元する。
 
+    【積んだ想起に印を付ける (2026-09-07 の移行の掃除)】push する知覚の metadata
+    に ``{"copresence": true, "occupant_id": "<相手 ID>"}`` を載せる。旧方式が
+    移動の瞬間に積んだ想起は v0.3.9 までのユーザーの知覚バッファに未消費のまま
+    残っていて、そのままだと次の Pulse で新方式の想起と二重に読まれる。印の無い
+    ``persona_recall`` を回収 (``sai_memory.room_state.
+    reclaim_pending_perceptions`` の §11-2 規則 3(c)) が遺物として捨てるので、
+    掃除は再起動後の最初の消費で自動的に済む (手動の掃除は要らない)。
+
     Note システム完成までの繋ぎ実装であることは変わらない (配送保証は無い)。
 
     【再会の門 (2026-09-05, v0.3.9)】相手が直近の文脈に居るあいだは想起しない
@@ -552,6 +560,13 @@ def inject_copresence_recall(
     # 想起を試みるのは「不在から同席へ変わった相手」だけ。ここで全員が試み済みに
     # なる (下の門・想起・push の結果は問わない)。
     newcomers = _take_copresence_newcomers(str(self_id or ""), occupant_ids)
+    if not newcomers:
+        return
+
+    from sai_memory.room_state import (
+        RECALL_COPRESENCE_META_KEY,
+        RECALL_OCCUPANT_META_KEY,
+    )
 
     for occupant_id in newcomers:
         # ユーザーも対ペルソナと同様に想起する (まはー裁定 2026-07-11)。
@@ -584,7 +599,21 @@ def inject_copresence_recall(
             continue
 
         try:
-            sai_mem.push_perception("persona_recall", recall_text)
+            # 同席の印を metadata に刻む。未消費バッファの回収
+            # (sai_memory/room_state.reclaim_pending_perceptions — §11-2 規則
+            # 3(c)) は、この印が無い persona_recall を旧方式 (移動の瞬間に積む、
+            # 2026-09-07 退役) の遺物として捨てる。相手の ID は診断とプレビュー
+            # のために併記する。
+            sai_mem.push_perception(
+                "persona_recall", recall_text,
+                metadata=json.dumps(
+                    {
+                        RECALL_COPRESENCE_META_KEY: True,
+                        RECALL_OCCUPANT_META_KEY: occupant_id,
+                    },
+                    ensure_ascii=False,
+                ),
+            )
             LOGGER.info(
                 "head_pipeline: pushed persona recall perception for %s "
                 "(copresent at the pulse head)", occupant_id,
