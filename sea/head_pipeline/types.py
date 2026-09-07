@@ -106,6 +106,12 @@ class NotificationLabel:
     label: str  # ペルソナに見せる文 ("移動先 Building で新たに使えるようになったスペル: …")
     media: list[MediaRef] = field(default_factory=list)  # 必要なら新コンテンツを tail に attach
     metadata: dict = field(default_factory=dict)  # Section 固有の付加情報 (occupant_id 等)
+    # False = 検知はするが、ペルソナに文としては届けない。基準 (last_notified) を
+    # 前進させるためだけに存在するラベル。部屋を移ったときの同席者がこれ —
+    # 顔ぶれは「部屋の様子」が運ぶので文は要らないが、基準を新しい部屋まで
+    # 進めないと以後の入退室の差分が出ない
+    # (2026-09-07、docs/issues/perception_state_pushed_at_event_time.md)。
+    deliver: bool = True
 
 
 @dataclass

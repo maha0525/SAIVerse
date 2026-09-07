@@ -1062,14 +1062,15 @@ ALTER TABLE AI ADD COLUMN SLEEP_ON_CACHE_EXPIRE BOOLEAN NOT NULL DEFAULT TRUE;
 
 #### v0.3.0 繋ぎ実装 (2026-06-07)
 
-Note システムが未完成のため、v0.3.0 では **head pipeline の occupant_entered 差分通知** をフックして既存の `recall_conversation_with()` を呼ぶ繋ぎ実装で出荷する:
+Note システムが未完成のため、v0.3.0 では既存の `recall_conversation_with()` を呼ぶ繋ぎ実装で出荷する:
 
-- **トリガー**: `BuildingOccupantsSection.diff_to_notifications()` が `occupant_entered` を検出
-- **門**: `integration.py:_should_recall_on_enter()` が `HistoryManager.should_recall_persona()` を呼び、直近 20 メッセージに相手（発言または audience）が居るなら想起しない。2026-09-05 (v0.3.9) に配線。それまで門は呼ばれておらず、ずっと会話している相手にも移動のたびに全文が積まれていた（`docs/issues/persona_recall_perception_unbounded.md`）
-- **処理**: `integration.py:_inject_persona_recall_on_enter()` が `recall_conversation_with(target, current_thread_only=False, display_name=...)` を呼び、過去会話（最大 6 件）+ Memopedia ページ内容を知覚バッファ（kind=`persona_recall`）へ push する。見出しの相手の名前は `persona.id_to_name_map` で表示名へ解決してから渡す（解決できないときだけ ID のまま）
-- **対象**: `occupant_kind` が `persona` または `user`（ユーザーもまはー裁定 2026-07-11 で対象に入った）
+- **トリガー**: Pulse の頭 (`sea/runtime.py` の `run_meta_user`、建物発言の取り込みの後・知覚の消費の前) が `integration.py:inject_copresence_recall()` を呼び、**その部屋にいま同席している相手** (`manager.occupants` から自分を除いた顔ぶれ) を対象にする。2026-09-07 までは `BuildingOccupantsSection.diff_to_notifications()` の `occupant_entered` ラベル（= 移動の瞬間）が目印だったが、積んだ想起が読まれるのは次の Pulse なので、その間にさらに移動すると「もう居ない相手との再会」が届いた（`docs/issues/perception_state_pushed_at_event_time.md`）
+- **同席の間の再発火の抑止**: 状態 (同席している) を条件にすると同席中ずっと門が開きうるので、プロセス内に「不在から同席へ変わった相手を、その同席の間に試み済みか」の記憶を持ち、**一回だけ**試みる。門で抑制された回・想起が空だった回・push が失敗した回も試み済み。相手が退室すると再武装され、プロセス再起動では忘れる (再起動後の最初の Pulse で一回出る)
+- **門**: `integration.py:_should_recall_on_enter()` が `HistoryManager.should_recall_persona()` を呼び、直近 20 メッセージに相手（発言または audience）が居るなら想起しない。2026-09-05 (v0.3.9) に配線。それまで門は呼ばれておらず、ずっと会話している相手にも移動のたびに全文が積まれていた（`docs/issues/archive/persona_recall_perception_unbounded.md`）
+- **処理**: 門を通った相手ごとに `recall_conversation_with(target, current_thread_only=False, display_name=...)` を呼び、過去会話（最大 6 件）+ Memopedia ページ内容を知覚バッファ（kind=`persona_recall`）へ push する。見出しの相手の名前は `persona.id_to_name_map` で表示名へ解決してから渡す（解決できないときだけ ID のまま）
+- **対象**: ペルソナとユーザーの両方（ユーザーもまはー裁定 2026-07-11 で対象に入った）。同席者の ID が `manager.all_personas` に居ればペルソナ、居なければユーザーと判定する
 
-この繋ぎは Note 完成時に `_inject_persona_recall_on_enter` を差し替えることで移行する。
+この繋ぎは Note 完成時に `inject_copresence_recall` を差し替えることで移行する。
 
 #### Note 完成時の再会フロー（設計 target）
 

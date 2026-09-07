@@ -349,7 +349,7 @@ def _render_item(
 
 
 #: is_open の概念を持つアイテム型 (Object と不明型には無い —
-#: docs/issues/room_state_diff_built_on_string_parsing.md 洗い出し)。
+#: docs/issues/archive/room_state_diff_built_on_string_parsing.md 洗い出し)。
 _OPENABLE_ITEM_TYPES = frozenset({"picture", "document", "audio", "video", "bag"})
 
 
@@ -367,6 +367,7 @@ class _RenderedItem:
 class _RenderedOccupant:
     """他ペルソナ 1 人の描画 (パッケージの材料)。"""
     persona_id: str
+    name: str = ""
     lines: List[str] = field(default_factory=list)
     media: List[Dict[str, str]] = field(default_factory=list)
 
@@ -582,7 +583,12 @@ def _read_world(
         for other_id in sorted(str(oid) for oid in occupants if oid != persona_id):
             other_persona = manager.all_personas.get(other_id)
             other_name = getattr(other_persona, "persona_name", other_id) if other_persona else other_id
-            occupant = _RenderedOccupant(persona_id=other_id)
+            occupant = _RenderedOccupant(persona_id=other_id, name=other_name)
+            # 名前と ID の一行を先頭に置く。「〜がいます」の通知を廃止して
+            # (2026-09-07、docs/issues/perception_state_pushed_at_event_time.md)
+            # 同席者の名乗りはこの描画が唯一の運び手になった — 外見の見出しの
+            # 角括弧に名前が埋まっているだけでは、誰が居るのかが読めない。
+            occupant.lines.append(f"- {other_name} (ID:{other_id})")
             occupant.lines.append(f"[{other_name}の外見]")
             occupant.lines.append(f"saiverse://persona/{other_id}/image")
 
@@ -768,10 +774,16 @@ def _bundle_from_world(world: _WorldRead) -> Dict[str, Any]:
         packages.append(package)
 
     for occupant in world.other_personas:
+        # label は差分の「見当たらなくなったもの」の一行にそのまま出る —
+        # 退場の報告が「- [エリスの外見]」にならないよう、名乗りの形で持つ。
+        occupant_label = (
+            f"{occupant.name} (ID:{occupant.persona_id})"
+            if occupant.name else occupant.persona_id
+        )
         _add({
             "key": f"persona:{occupant.persona_id}",
             "family": "persona",
-            "label": occupant.lines[0] if occupant.lines else occupant.persona_id,
+            "label": occupant_label,
             "lines": _normalize_lines(occupant.lines),
             "media": [dict(m) for m in occupant.media],
             "state": None,

@@ -393,6 +393,25 @@ def test_flush_diffs_does_not_double_notify(pipeline, ctx, registry):
     assert second == []  # 内容変わってないので 2 回目は空
 
 
+def test_flush_diffs_only_narrows_the_targets(pipeline, ctx, registry):
+    """``only`` を渡した回は、その Section だけを検知する (2026-09-07)。
+
+    移動の瞬間に「移動の事実」だけを積むための絞り込み。対象外の Section は
+    capture も diff もされないので B が据え置かれ、その変化は次に全 Section で
+    走る検知が拾う。
+    """
+    pipeline.capture_all(ctx)
+    registry.by_name("spell_list").live_spells = ["spell_a", "spell_c"]
+    registry.by_name("building").building_name = "Vessel"
+
+    labels = pipeline.flush_diffs(ctx, all_sections=True, only={"building"})
+    assert [label.kind for label in labels] == ["building_renamed"]
+
+    # spell_list の B は据え置き → 次の全 Section の検知で届く
+    labels = pipeline.flush_diffs(ctx, all_sections=True)
+    assert sorted(label.kind for label in labels) == ["spell_added", "spell_removed"]
+
+
 def test_capture_for_event_only_refreshes_targeted_sections(pipeline, ctx, registry):
     pipeline.capture_all(ctx)
     spell_section = registry.by_name("spell_list")

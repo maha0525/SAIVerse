@@ -15,8 +15,8 @@
 | 何 | どこ |
 |---|---|
 | 設計 (パッケージ・差分の規則・供給の四点・置き場所の原則・劣化の三原則・床の四状態・実装メモ) | `docs/intent/room_state_packages.md` |
-| 発端の欠陥・裁定 7 点・14 巡の経緯・却下 4 件 | `docs/issues/room_state_diff_built_on_string_parsing.md` |
-| 一元化 (head の Visual Context 退役) — 本実装で同時解決、実機待ちで未 archive | `docs/issues/room_state_single_source_of_truth.md` |
+| 発端の欠陥・裁定 7 点・14 巡の経緯・却下 4 件 | `docs/issues/archive/room_state_diff_built_on_string_parsing.md` |
+| 一元化 (head の Visual Context 退役) — 本実装で同時解決、実機待ちで未 archive | `docs/issues/archive/room_state_single_source_of_truth.md` |
 | 思い出機能の退役と上位互換の約束 (📌) | `docs/intent/persona_cognition/recall_tags_and_track_reduction.md` 冒頭 |
 | スコープ外で issue 化した既存問題 | `docs/issues/work_session_composes_before_model_fallback.md` / `docs/issues/entry_delivery_retry_duplicates_room_perception.md` |
 | v0.3.10 候補 (7/30 監査の残存 3 件 F1〜F3) | `docs/issues/audit_20260730_review_guards.md` |
@@ -51,5 +51,5 @@
 
 - 発端の欠陥がレビュー 6 巡を素通しした原因は「テストが合成の行儀よいデータしか食べていなかった」— 以後、部屋の様子のテストは**本物の描画 fixture** (開いたドキュメント・メディア付き画像・入れ子 Bag) が必須。
 - 「呼ばれたことの検証」と「効いたことの検証」は別物 (一巡目の窓テストの素通し)。
-- 検算・調査の直後の返信は調査語彙の独り言になる / 報告の結論は「SAIVerse が何を保障するようになるか」(`feedback_every_message_is_a_fair_copy` に実例)。
+- 検算・調査の直後の返信は調査語彙の独り言になる / 報告の結論は「SAIVerse が何を保証するようになるか」(`feedback_every_message_is_a_fair_copy` に実例)。
 - まはーの語を翻訳しない (パッケージング→包み化の再演禁止)。「境界」→ スコープ / 実装範囲。「鍵」→ キー。

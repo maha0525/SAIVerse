@@ -1,7 +1,7 @@
 """部屋の様子のパッケージ (room state packages) の契約テスト。
 
 設計の正典は docs/intent/room_state_packages.md (2026-09-06)。発端は
-docs/issues/room_state_diff_built_on_string_parsing.md — 差分を描画済み文字列の
+docs/issues/archive/room_state_diff_built_on_string_parsing.md — 差分を描画済み文字列の
 解析で組んでいたため、開いたドキュメントの本文段落が「見当たらなくなったもの」
 に化けて v0.3.9 の出荷を止めた。合成の一行アイテムだけを食べたテストがこの欠陥を
 6 巡のレビューごと素通ししたので、**本物の描画 (build_room_bundle) をテストに
@@ -48,6 +48,9 @@ from sai_memory.perception_buffer import (
 )
 from sai_memory.perception_buffer import PerceptionItem
 from sai_memory.room_state import (
+    RECALL_COPRESENCE_META_KEY,
+    RECALL_KIND,
+    RECALL_OCCUPANT_META_KEY,
     ROOM_STATE_KIND,
     build_room_state_push,
     bundle_is_valid,
@@ -259,6 +262,8 @@ class RoomBundleCompositionTest(_EnvTestBase):
         bundle = self.env.bundle()
         text = render_room_full(bundle)
         self.assertIn("# 「工房」の様子", text)
+        # 同席者は名乗りの一行 + 外見 (「がいます」廃止後の唯一の運び手、2026-09-07)
+        self.assertIn("- エリス (ID:p2)", text)
         self.assertIn("[エリスの外見]", text)
         self.assertIn("[システムプロンプト]", text)
         self.assertIn("静かに集中できる場所です。", text)
@@ -307,7 +312,7 @@ class RenderRoomDiffContractTest(_EnvTestBase):
         「(Open)」は現在の状態でしかなく、新登場のアイテムと見分けが付かない —
         閉じる側の「(閉じられた)」と対の出来事として語る。説明・作成日時は
         閉じている間も全文ビューに出続けていた (§3 の表) ので再掲しない
-        (保障 2「同じ内容が二枚並ぶことは構造的に無い」)。開いて初めて見える
+        (保証 2「同じ内容が二枚並ぶことは構造的に無い」)。開いて初めて見える
         もの (メディアリンクと絵の実体) だけを出す。
         """
         self.env.items.append(_make_item(
@@ -345,7 +350,7 @@ class RenderRoomDiffContractTest(_EnvTestBase):
         )
         # 本文は開いたことで新しく見えるようになったもの — これは出す。
         self.assertIn("光の扱いはフェルメールに学ぶ。", diff["content"])
-        # 説明は閉じている間も提示に出ていた — 再掲は保障 2 への自己矛盾。
+        # 説明は閉じている間も提示に出ていた — 再掲は保証 2 への自己矛盾。
         self.assertNotIn("非公開のメモ。", diff["content"])
 
     def test_a_gone_document_is_one_label_line_without_its_body(self):
@@ -409,7 +414,8 @@ class RenderRoomDiffContractTest(_EnvTestBase):
     def test_a_left_persona_is_reported_by_label(self):
         self.env.manager.occupants["b1"] = ["p1", "42"]
         diff = render_room_diff(self.before, self.env.bundle())
-        self.assertIn("- [エリスの外見]", diff["content"])
+        # label は名乗りの形 — 退場の報告が「- [エリスの外見]」にならない
+        self.assertIn("- エリス (ID:p2)", diff["content"])
 
 
 class CrossFamilyKeyTest(_EnvTestBase):
@@ -1250,6 +1256,104 @@ class RoomStateSelfRecoveryTest(RoomStateLedgerTestBase):
         self._flush()
         sai_mem = self._sai_mem_stub()
         self._detect(sai_mem, bundle)
+        self.assertEqual(sai_mem.pushed, [])
+        self.assertEqual(sai_mem.reseated, [])
+
+    # --- 照合の計算だけを取り出す口 (プレビューが使う、2026-09-07) ---
+
+    def _plan(self, sai_mem, bundle, *, chronicle_on=True):
+        from sea.head_pipeline.integration import _plan_room_state_change
+
+        persona = SimpleNamespace(
+            persona_id="p1", persona_dir=None,
+            current_building_id="b1", sai_memory=sai_mem,
+        )
+        with patch(
+            "builtin_data.tools.get_visual_context.build_room_bundle",
+            return_value=bundle,
+        ), patch(
+            "sea.head_pipeline.integration._room_chronicle_enabled",
+            return_value=chronicle_on,
+        ):
+            return _plan_room_state_change(persona, SimpleNamespace(), "b1")
+
+    def test_the_plan_reports_the_push_without_writing(self):
+        """計算だけの口は「積むはず」を返すだけ — 積みも置き直しもしない。"""
+        bundle = self.env.bundle()
+        self._push("b1", bundle)
+        self._flush()
+        self.env.items.append(_make_item(
+            "uuid-new", 14, "picture", "新しい絵", "届いたばかりの絵。",
+            is_open=True, file_path=self.env.pic2_path,
+        ))
+        changed = self.env.bundle()
+        sai_mem = self._sai_mem_stub()
+
+        plan = self._plan(sai_mem, changed)
+
+        self.assertEqual(plan, {
+            "action": "push", "bundle": changed, "allow_diff": True,
+        })
+        self.assertEqual(sai_mem.pushed, [])
+        self.assertEqual(sai_mem.reseated, [])
+        # 何も進んでいないので、二度呼んでも同じ答えが返る
+        self.assertEqual(self._plan(sai_mem, changed), plan)
+
+    def test_the_plan_reports_the_reseat_without_writing(self):
+        """提示に部屋が無い回も、置き直しの予定を返すだけで積み直さない。"""
+        bundle = self.env.bundle()
+        sai_mem = self._sai_mem_stub()
+
+        plan = self._plan(sai_mem, bundle)
+
+        self.assertEqual(plan["action"], "reseat")
+        self.assertEqual(plan["bundle"], bundle)
+        self.assertEqual(sai_mem.reseated, [])
+        self.assertEqual(list_presented_batches(self.conn), [])
+
+    def test_the_preview_shows_the_room_change_without_writing(self):
+        """プレビューの組成に、まだ積まれていない部屋の変化が差分として出る。"""
+        import threading
+
+        from sea.runtime_context import _compose_pending_preview
+
+        bundle = self.env.bundle()
+        self._push("b1", bundle)
+        self._flush()
+        self.env.items.append(_make_item(
+            "uuid-new", 14, "picture", "新しい絵", "届いたばかりの絵。",
+            is_open=True, file_path=self.env.pic2_path,
+        ))
+        changed = self.env.bundle()
+
+        sai_mem = self._sai_mem_stub()
+        sai_mem.conn = self.conn
+        sai_mem._db_lock = threading.RLock()
+        persona = SimpleNamespace(
+            # 既定 pipeline に snapshot を持たない id — Section の差分は出ない
+            # (Section 側の読み取り専用化は
+            #  tests/test_head_pipeline_building_occupants.py が固定する)。
+            persona_id="p_room_preview", persona_dir=None,
+            current_building_id="b1", sai_memory=sai_mem,
+        )
+        select = (
+            "SELECT id, kind, content, media, metadata, consumed_at "
+            "FROM perception_buffer ORDER BY id"
+        )
+        before = self.conn.execute(select).fetchall()
+
+        with patch(
+            "builtin_data.tools.get_visual_context.build_room_bundle",
+            return_value=changed,
+        ), patch(
+            "sea.head_pipeline.integration._room_chronicle_enabled",
+            return_value=True,
+        ):
+            items = _compose_pending_preview(persona, SimpleNamespace(), "b1")
+
+        text = format_perception_message(items)
+        self.assertIn("新しい絵", text)
+        self.assertEqual(self.conn.execute(select).fetchall(), before)
         self.assertEqual(sai_mem.pushed, [])
         self.assertEqual(sai_mem.reseated, [])
 
@@ -2605,6 +2709,14 @@ class EntryPushWiringTest(_EnvTestBase):
         self.assertEqual(
             inject.call_args_list[0].kwargs.get("detect_room"), False,
         )
+        # 本人へ届けるのは移動の事実だけ (2026-09-07)。スペル等の状態の差分を
+        # ここで積むと、次の Pulse で読まれる頃には別の部屋の話になる。
+        # building_occupants は文を出さない (部屋替えの分岐は deliver=False) —
+        # 基準を新しい部屋の顔ぶれへ合わせるために対象へ含める。
+        self.assertEqual(
+            inject.call_args_list[0].kwargs.get("only_sections"),
+            {"building", "building_occupants"},
+        )
 
 
 class EntryPushDegradeReadinessTest(_EnvTestBase):
@@ -2680,6 +2792,47 @@ class DetectionEntryModelKeyTest(unittest.TestCase):
         self.assertEqual(
             inject.call_args.kwargs.get("model_key"), "exec-model",
         )
+        # Pulse 開始の検知は全 Section (絞らない) — 移動時に積まなくなった状態の
+        # 差分は、ここが「最後に知らせた状態 vs 今」で拾う (2026-09-07)。
+        self.assertIsNone(inject.call_args.kwargs.get("only_sections"))
+
+
+class EntryOccupantNotifyScopeTest(unittest.TestCase):
+    """居合わせる既存者への入室通知は絞らない (2026-09-07 の隣の検算)。
+
+    移動した本人への積み込みだけが移動の事実の 2 セクションに絞られる。既存者に
+    とって「誰かが入ってきた」は自分の部屋で起きた出来事なので、従来どおり全
+    Section の検知で拾う。
+    """
+
+    def test_existing_occupants_are_notified_with_every_section(self):
+        from saiverse.dynamic_state import DynamicStateManager
+
+        newcomer = SimpleNamespace(
+            persona_id="p1", persona_dir=None, sai_memory=None,
+            current_building_id="b1",
+        )
+        resident = SimpleNamespace(persona_id="p2", current_building_id="b1")
+        manager = SimpleNamespace(
+            personas={"p1": newcomer, "p2": resident},
+            occupants={"b1": ["p1", "p2"]},
+            feed_manager=None,
+        )
+        with patch(
+            "sea.head_pipeline.inject_diff_notifications", return_value=True,
+        ) as inject, patch(
+            "saiverse.dynamic_state._dispatch_head_event", return_value=True,
+        ):
+            DynamicStateManager.on_building_entered(newcomer, "b1", manager)
+
+        by_persona = {
+            call.args[0].persona_id: call for call in inject.call_args_list
+        }
+        self.assertEqual(
+            by_persona["p1"].kwargs.get("only_sections"),
+            {"building", "building_occupants"},
+        )
+        self.assertIsNone(by_persona["p2"].kwargs.get("only_sections"))
 
 
 class WindowedDetectionReadTest(RoomStateLedgerTestBase):
@@ -2820,6 +2973,18 @@ def _typed_instruction_meta(building_id, building_name):
     }, ensure_ascii=False)
 
 
+def _copresence_recall_meta(occupant_id):
+    """同席想起の印つき metadata (書き手 = sea/head_pipeline/integration.py)。
+
+    印のある ``persona_recall`` は Pulse の頭の同席チェックが積んだ本物なので、
+    回収 (§11-2 規則 3(c)) は位置ごと触らない。
+    """
+    return json.dumps({
+        RECALL_COPRESENCE_META_KEY: True,
+        RECALL_OCCUPANT_META_KEY: occupant_id,
+    }, ensure_ascii=False)
+
+
 class _RoundTripMixin:
     """往復 (b1 → b2 → b1) の未消費バッファを積む共通手順。
 
@@ -2932,6 +3097,24 @@ class PendingReclaimTest(_RoundTripMixin, RoomStateLedgerTestBase):
         self.assertTrue(all(row[0] is not None for row in consumed))
         # バッチの記帳にも旧形式は載らない。
         self.assertIsNone(self._batch(batch_id).room_state_json)
+
+    def test_legacy_recalls_are_dropped_but_the_marked_one_is_delivered(self):
+        """旧方式の想起 (印なし) は消え、Pulse 頭が積んだ印つきの想起は届く。
+
+        v0.3.9 を使ったユーザーの知覚バッファに残る移行の掃除 (§11-2 規則 3(c))。
+        """
+        push_perception(self.conn, RECALL_KIND, "[想起] 旧方式・アイフィとの会話")
+        push_perception(self.conn, RECALL_KIND, "[想起] 旧方式・アイフィとの会話 (2 枚目)")
+        push_perception(
+            self.conn, RECALL_KIND, "[想起] 新方式・エリスとの会話",
+            metadata=_copresence_recall_meta("elis_city_a"),
+        )
+        batch_id = self._flush()
+        text = self._batch(batch_id).rendered_text
+        self.assertNotIn("旧方式", text)
+        self.assertIn("[想起] 新方式・エリスとの会話", text)
+        # 外した行にも消費済みの印は付く (台帳の行は消さない)。
+        self.assertEqual(list_pending(self.conn), [])
 
     def test_a_metadata_less_surroundings_row_is_also_legacy(self):
         push_perception(self.conn, ROOM_STATE_KIND, "metadata の無い旧世代の様子")
@@ -3100,12 +3283,15 @@ class PendingPreviewParityTest(_RoundTripMixin, RoomStateLedgerTestBase):
 
         self._stack_round_trip()
         sai_mem = SimpleNamespace(conn=self.conn, _db_lock=threading.RLock())
+        # 頭の検知を持たないペルソナ (history_manager 無し・現在地なし) —
+        # 合成されるのは未消費バッファの分だけ。
+        persona = SimpleNamespace(sai_memory=sai_mem)
         select = (
             "SELECT id, kind, content, media, metadata, consumed_at "
             "FROM perception_buffer ORDER BY id"
         )
         before = self.conn.execute(select).fetchall()
-        preview_items = _compose_pending_preview(sai_mem)
+        preview_items = _compose_pending_preview(persona, None, "b1")
         preview_text = format_perception_message(preview_items)
         after = self.conn.execute(select).fetchall()
         self.assertEqual(before, after)  # 読むだけ — 行は触らない
@@ -3161,6 +3347,63 @@ class ReclaimReturnListTest(unittest.TestCase):
         ]
         self.assertEqual(reclaim_pending_perceptions(items), [])
 
+    # ---- 規則 3(c): 旧方式の再会の想起 (2026-09-07 退役) ---------------------
+
+    def test_an_unmarked_persona_recall_is_reclaimed(self):
+        """印の無い想起は旧方式 (移動時に積む) の遺物なので組成から外れる。
+
+        発火点を Pulse の頭へ移した後も、旧方式が積んだ想起は未消費のまま
+        ユーザーの知覚バッファに残る (まはーの実機ではエリスに同じ相手の想起が
+        複数枚)。放置すると次の Pulse で新方式の想起と二重に読まれる。
+        """
+        items = [
+            self._item(1, kind=RECALL_KIND, content="[想起] 旧方式が積んだ一枚"),
+            self._item(2, content="生きている通知"),
+        ]
+        out = reclaim_pending_perceptions(items)
+        self.assertEqual([i.id for i in out], [2])
+
+    def test_a_recall_with_unreadable_metadata_is_also_legacy(self):
+        """metadata が JSON でない / 印のキーが無い想起も遺物として扱う。"""
+        for metadata in ("これは JSON ではない", json.dumps({"occupant_id": "elis"})):
+            with self.subTest(metadata=metadata):
+                items = [self._item(1, kind=RECALL_KIND, metadata=metadata)]
+                self.assertEqual(reclaim_pending_perceptions(items), [])
+
+    def test_a_copresence_marked_recall_keeps_its_position(self):
+        """印つきの想起は位置ごと残る (新方式が積んだ本物)。
+
+        同じ Pulse が積んで同じ Pulse が読む建て付けなので未消費で残るのは
+        異常終了した回だけで、その一枚は次の Pulse が読むべきもの。
+        """
+        items = [
+            self._item(1, content="先に届いた出来事"),
+            self._item(
+                2, kind=RECALL_KIND, content="[想起] エリスとの過去の会話",
+                metadata=_copresence_recall_meta("elis_city_a"),
+            ),
+            self._item(3, content="後から届いた出来事"),
+        ]
+        out = reclaim_pending_perceptions(items)
+        self.assertEqual([i.id for i in out], [1, 2, 3])
+        self.assertIs(out[1], items[1])
+
+    def test_recalls_do_not_disturb_other_kinds(self):
+        """想起の破棄は他の種別に波及しない (様子の末尾寄せ・移動の畳みも同じ)。"""
+        items = [
+            self._item(1, kind="feed", content="フィード記事"),
+            self._item(2, kind=RECALL_KIND, content="旧方式の想起"),
+            self._room(3),
+            self._item(
+                4, kind=RECALL_KIND, content="新方式の想起",
+                metadata=_copresence_recall_meta("elis_city_a"),
+            ),
+            self._item(5, kind="core_memory_correction", content="コア記憶の修正"),
+        ]
+        out = reclaim_pending_perceptions(items)
+        # 旧方式の一枚だけが消え、様子は末尾へ、他は順序ごと残る。
+        self.assertEqual([i.id for i in out], [1, 4, 5, 3])
+
     def test_trail_replacement_and_tail_move_together(self):
         """[様子, 移動1, 移動2] → [経路一行 (移動2 の行), 様子] — 重複も欠落もない。
 
@@ -3186,7 +3429,7 @@ class ConsumptionTimeRenderingTest(RoomStateLedgerTestBase):
     未消費に [途中の様子 + 型付き移動通知 2 組 + 最後の様子] が積まれた形。
     旧実装は積む時に描画して土台を pending から選ぶ (最後の様子の base_digest =
     捨てられる途中の pending の指紋) が、回収 (§11-2) は途中の pending を必ず
-    捨てるので連なりが切れ、消費時の開き直しがもう一枚の全文を立てて保障 2
+    捨てるので連なりが切れ、消費時の開き直しがもう一枚の全文を立てて保証 2
     (同じ内容が二枚並ばない) を破った。
 
     green: 描画が消費の組成の一回になると、土台は常に「提示に見えている同部屋の
@@ -3241,7 +3484,7 @@ class ConsumptionTimeRenderingTest(RoomStateLedgerTestBase):
         batch = self._batch(batch_id)
         text = batch.rendered_text
         # 提示済みの置き直し (束 A の全文) が生きているのに、もう一枚の全文が
-        # 立ってはならない (保障 2)。
+        # 立ってはならない (保証 2)。
         self.assertNotIn(render_room_full(self.bundle_b), text)
         self.assertNotIn("覚え書き", text)  # 変わっていないパッケージは再掲しない
         # 出力は A→B の差分 — 新しく現れたパッケージだけ + そのメディア。
@@ -3278,13 +3521,14 @@ class ConsumptionTimeRenderingTest(RoomStateLedgerTestBase):
 
         self._stack_pendings(self.bundle_b, self.bundle_b)
         sai_mem = SimpleNamespace(conn=self.conn, _db_lock=threading.RLock())
+        persona = SimpleNamespace(sai_memory=sai_mem)
         select = (
             "SELECT id, kind, content, media, metadata, consumed_at "
             "FROM perception_buffer ORDER BY id"
         )
         before = self.conn.execute(select).fetchall()
         preview_text = format_perception_message(
-            _compose_pending_preview(sai_mem),
+            _compose_pending_preview(persona, None, "b1"),
         )
         after = self.conn.execute(select).fetchall()
         self.assertEqual(before, after)  # 読むだけ — 行は触らない

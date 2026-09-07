@@ -181,6 +181,18 @@ class SAIMemoryAdapter:
             from sai_memory.memopedia.storage import init_memopedia_tables
             init_memopedia_tables(self.conn)
 
+            # Initialize arasuji (Chronicle) storage (冪等)。v0.2 形式の DB に残る
+            # 旧 arasuji_entries 実テーブル (origin_track_id 列なし) を
+            # memopedia_pages へ一回きり移行し、互換 VIEW に差し替えるのは
+            # この関数だけ。会話の頭 (sea/session_lifecycle.py の窓の読み戻しと
+            # 床の確認) は self.conn へ直接 SQL を投げるため、遅延初期化のままだと
+            # v0.2 → v0.3.7+ 直行の利用者が最初の会話で必ず
+            # "no such column: a.origin_track_id" に倒れる (2026-09-07 実害)。
+            # memopedia_pages の上に乗る互換 VIEW なので init_memopedia_tables の
+            # 直後に置く。
+            from sai_memory.arasuji.storage import init_arasuji_tables
+            init_arasuji_tables(self.conn)
+
             # Initialize core_memories table (記憶アーキv2 ゾーン A, 冪等)。
             # Memopedia と同様、self.conn 直参照経路 (core_memory スペル / head
             # セクション) がテーブルの存在を前提にできるよう、ここで作成する。

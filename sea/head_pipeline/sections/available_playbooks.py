@@ -111,15 +111,22 @@ class AvailablePlaybooksSection:
         old_names = {e.name for e in old.entries}
         new_names = {e.name for e in new.entries}
         labels: list[NotificationLabel] = []
-        for name in sorted(new_names - old_names):
+        # 一度の差分検知で出た同種の変化は一つの出来事として 1 ラベルに束ねる
+        # (2026-09-07、docs/issues/perception_state_pushed_at_event_time.md。
+        # spell_list と同型 — ラベルごとに [システム通知] の見出しが付く)。
+        added = sorted(new_names - old_names)
+        if added:
+            joined = "」「".join(added)
             labels.append(NotificationLabel(
                 kind="playbook_added",
-                label=f"新しい能力「{name}」が使えるようになりました",
+                label=f"新しい能力「{joined}」が使えるようになりました",
             ))
-        for name in sorted(old_names - new_names):
+        removed = sorted(old_names - new_names)
+        if removed:
+            joined = "」「".join(removed)
             labels.append(NotificationLabel(
                 kind="playbook_removed",
-                label=f"能力「{name}」が使えなくなりました",
+                label=f"能力「{joined}」が使えなくなりました",
             ))
         return labels
 

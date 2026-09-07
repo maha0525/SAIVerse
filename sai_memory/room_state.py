@@ -1,7 +1,7 @@
 """部屋の様子 (room state) — パッケージの束を構造のまま運び、差分はキー照合で組む。
 
 設計の正典: docs/intent/room_state_packages.md (2026-09-06)。発端は
-docs/issues/room_state_diff_built_on_string_parsing.md — 差分を描画済み文字列の
+docs/issues/archive/room_state_diff_built_on_string_parsing.md — 差分を描画済み文字列の
 解析 (空行 = アイテムの境目、という推測) で組んでいたため、開いたドキュメントの
 本文段落が「見当たらなくなったもの」に化けて v0.3.9 の出荷を止めた。
 
@@ -94,6 +94,18 @@ LABEL_KIND_BUILDING_CHANGED = "building_changed"
 #: building:prompt パッケージが運ぶ) — 回収 (§11-2 規則 3) が旧コードの積んだ
 #: 遺物を識別するためだけに残る。
 LABEL_KIND_BUILDING_INSTRUCTION = "building_instruction"
+
+#: 再会の想起を積む知覚の型 (``perception_buffer.kind``)。
+RECALL_KIND = "persona_recall"
+
+#: 同席想起の印 (metadata の JSON に載るキー)。書き手は
+#: sea/head_pipeline/integration.py の ``inject_copresence_recall`` — Pulse の頭で
+#: 「いま同席している相手」を見る新方式だけがこの印を付け、相手の ID を
+#: :data:`RECALL_OCCUPANT_META_KEY` に併記する (診断とプレビュー用)。印の無い
+#: ``persona_recall`` は、移動の瞬間に積んでいた旧方式 (2026-09-07 退役) の遺物
+#: なので、回収 (:func:`reclaim_pending_perceptions` の §11-2 規則 3(c)) が捨てる。
+RECALL_COPRESENCE_META_KEY = "copresence"
+RECALL_OCCUPANT_META_KEY = "occupant_id"
 
 #: 経路一行 (§11-2 の移動群の畳みの合成文) の書き出し。
 _MOVE_TRAIL_PREFIX = "この間に現在地が移動しました: "
@@ -391,7 +403,7 @@ def _render_opened(old_pkg: Mapping[str, Any], new_pkg: Mapping[str, Any]) -> st
     は、閉じた状態の描画 (old の lines) と開いた状態の描画 (new の lines) の
     行差分の新側 (:func:`_line_opcodes` — §4 の「本文の変化」と同じ機構) で
     求める。見出し・作成日時・説明は閉じている間も提示に出ていた (§3 の表 =
-    equal 側に落ちる) ので再掲されない — 保障 2「同じ内容が二枚並ぶことは
+    equal 側に落ちる) ので再掲されない — 保証 2「同じ内容が二枚並ぶことは
     構造的に無い」。除くのは二種だけ: 状態マーカー行
     (:data:`STATE_MARKER_OPEN` — 状態は出来事行が語る) と、label と同じ行
     (先頭行が既に名乗っている — 閉じている間の改名で見出し行が差分の新側に
@@ -552,6 +564,23 @@ def _parse_label_meta(metadata: Optional[str]) -> Optional[Dict[str, Any]]:
     return meta
 
 
+def _is_copresence_recall(metadata: Optional[str]) -> bool:
+    """再会の想起が「Pulse の頭の同席チェック」(新方式) の印を持つか。
+
+    印は :data:`RECALL_COPRESENCE_META_KEY` が真の dict-JSON。metadata が無い /
+    読めない / 印が無いものは、移動の瞬間に積んでいた旧方式の遺物と見なす。
+    """
+    if not metadata:
+        return False
+    try:
+        meta = json.loads(metadata)
+    except (TypeError, ValueError):
+        return False
+    if not isinstance(meta, dict):
+        return False
+    return bool(meta.get(RECALL_COPRESENCE_META_KEY))
+
+
 def reclaim_pending_perceptions(items: Sequence[Any]) -> List[Any]:
     """未消費の組成から、読まれる前に不要になった知覚を回収する (intent §11-2)。
 
@@ -587,7 +616,14 @@ def reclaim_pending_perceptions(items: Sequence[Any]) -> List[Any]:
        して読めない旧文字列形式) の行、(b) 型付きの役割・指示エントリ
        (:data:`LABEL_KIND_BUILDING_INSTRUCTION` — 書き手は 2026-09-07 に退役。
        指示は束の building:prompt パッケージが運ぶので、独立エントリは様子との
-       重複 — §11-3 改訂) は、移動の件数に関係なく無条件で組成から外す。
+       重複 — §11-3 改訂)、(c) kind='persona_recall' (:data:`RECALL_KIND`) で
+       同席の印 (:data:`RECALL_COPRESENCE_META_KEY`) が**無い**行 (移動の瞬間に
+       入室ラベルを目印として想起を積んでいた旧方式 — 2026-09-07 に退役。積んだ
+       時点と読む時点で同席が変わるので「もう居ない相手との再会」になり、往復の
+       たびに積み重なる) は、移動の件数に関係なく無条件で組成から外す。
+       **印つきの想起は触らない** — Pulse の頭が積んだ新方式の想起は、その Pulse
+       が読むはずのもので、クラッシュ等で読まれずに残った回も次の Pulse で正しく
+       読まれるべき本物 (印は「いま同席している相手を見て積んだ」ことの証)。
        消費済みの印は呼び出し側の消費 (全 item id を渡す既存挙動) がそのまま
        付ける。
 
@@ -616,8 +652,18 @@ def reclaim_pending_perceptions(items: Sequence[Any]) -> List[Any]:
 
     # 規則 1: 移動群 — 2 件以上なら経路一行に畳む。
     # 規則 3(b): 型付き指示エントリは無条件で破棄 (書き手は退役済みの遺物)。
+    # 規則 3(c): 同席の印が無い再会の想起も同じく破棄 (旧方式の遺物)。
     moves: List[Tuple[int, Dict[str, Any]]] = []
     for index, item in enumerate(items):
+        if getattr(item, "kind", None) == RECALL_KIND:
+            if not _is_copresence_recall(getattr(item, "metadata", None)):
+                keep[index] = False
+                LOGGER.info(
+                    "[room_state] reclaimed a legacy persona-recall entry from "
+                    "the unconsumed buffer (pushed at move time by the retired "
+                    "path; the pulse head recalls copresent partners now)",
+                )
+            continue
         meta = _parse_label_meta(getattr(item, "metadata", None))
         if meta is None:
             continue
@@ -835,7 +881,7 @@ def build_room_state_push(
     規則 2)。回収 (§11-2) は途中の pending を必ず捨てるので、積む時に土台を
     pending から選んで描画しても、その差分は構造的に提示へ届き得ない — 実機
     では、提示済みの全文が生きているのに、土台を失った差分の開き直しがもう
-    一枚の全文を立てて保障 2 (同じ内容が二枚並ばない) を破った。
+    一枚の全文を立てて保証 2 (同じ内容が二枚並ばない) を破った。
 
     記帳 (``metadata`` の :data:`ROOM_STATE_META_KEY`) は ``key`` / ``snapshot``
     (束) / ``allow_diff`` (Chronicle 無効 = 毎回全文、の旗の凍結) のみ —

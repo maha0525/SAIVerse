@@ -285,10 +285,11 @@ class SEARuntime:
         )
 
         # --- 知覚の「検知」フェーズ (バッファへ push、まだ消費しない) ---
-        # 世界状態の差分 (入退室・アイテム・スペル 等) と入室時想起を検知し、知覚
-        # バッファへ push する (SAIMemory へは直接入れない)。Phase 2 で
+        # 世界状態の差分 (入退室・アイテム・スペル 等) を検知し、知覚バッファへ
+        # push する (SAIMemory へは直接入れない)。Phase 2 で
         # inject_diff_notifications を「検知＝push」に変更した。詳細:
         # docs/intent/perception_buffer.md §4.5 / §5.1。
+        # 同席の相手の想起はここではなく、下の取り込みの後 (理由はその節)。
         try:
             from saiverse.dynamic_state import DynamicStateManager
             # model_key = 上で解決済みの実行 model。検知の窓判定 (Chronicle
@@ -308,6 +309,25 @@ class SEARuntime:
             auto_ingest_building_messages(persona, self.manager)
         except Exception:
             LOGGER.exception("[auto_ingest] Failed in run_meta_user")
+
+        # --- 同席の相手との再会の想起 (バッファへ push) ---
+        # 取り込みの**後**・消費の**前**に置く。想起の門
+        # (HistoryManager.should_recall_persona) は「直近の履歴に相手の痕跡が
+        # あるか」で判定するので、直前にその相手が喋った回は、その発言が上の
+        # 取り込みで履歴に入ってから門に見せないと「久しぶりの相手」に化けて、
+        # 会話中の相手にまで過去会話 6 件が積まれる (2026-09-07、
+        # docs/issues/perception_state_pushed_at_event_time.md)。消費より前なのは
+        # 検知フェーズと同じ理由 — 同じ Pulse で積んで同じ Pulse で読む。
+        # 他の段とは独立の best-effort (落ちても Pulse は止めない)。
+        # もう一つの Pulse root (sea/work_session.py) には置かない: 作業セッション
+        # は建物発言の取り込みも世界状態の検知も持たない「指示書に向かうコマ」で、
+        # 門に見せる会話の文脈がそもそも組まれていない。同席の相手の想起は本人が
+        # 会話の Pulse を打つ回に出る。
+        try:
+            from sea.head_pipeline import inject_copresence_recall
+            inject_copresence_recall(persona, self.manager, building_id)
+        except Exception:
+            LOGGER.exception("[copresence_recall] Failed in run_meta_user")
 
         # --- 知覚の「消費」フェーズ (flush) ---
         # 未消費の知覚 (REST 由来のメタ記憶訂正 + 上で検知した world_state/persona_recall)
