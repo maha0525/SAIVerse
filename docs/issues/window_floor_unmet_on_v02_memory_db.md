@@ -1,6 +1,6 @@
 # v0.2 形式の記憶 DB のまま話しかけると「記憶の窓を用意できなかった」が毎回出て会話できない
 
-**状態**: 検証待ち (2026-09-07 実装・隔離検証・レビュー済み。PR のまはー確認 → v0.3.10 で配布)
+**状態**: 検証待ち (2026-09-07 実装・隔離検証・レビュー済み、PR #283 を develop へマージ済み。v0.3.10 の発行と報告者の環境での回復確認待ち)
 **起票**: 2026-09-07 (v0.2 系から v0.3.9 へ更新した利用者 (稟乃さん、ペルソナ `BerrienCliane_city_a`) からの「話しかけるたびに見送りメッセージが出て一言も返らない」報告の調査。経緯の全文は [handoff 2026-09-07](../handoff/2026-09-07_window_floor_unmet_on_v02_memory_db.md))
 **関連**: `saiverse_memory/adapter.py` `SAIMemoryAdapter.__init__` / `sai_memory/arasuji/storage.py` `init_arasuji_tables` / `sea/session_lifecycle.py` `_plan_window_refill` `_floor_coverage_folds`。[memory_db_connection_leak_on_init_failure.md](memory_db_connection_leak_on_init_failure.md) 末尾の「直したあとも残る設計上の疑問」が予告していた構造の見直しを、この issue で実行する。
 
