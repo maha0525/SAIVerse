@@ -912,11 +912,19 @@ def run_cli() -> None:
 
     consolidated_count = 0
     try:
-        consolidated_count = run_band_overflow(
-            conn, client, persona_id=args.persona_id,
-            # 確認時に表示した統合コール数を実行の上限にする
-            max_folds=estimate.consolidation_calls,
-        )
+        # run_band_overflow は 1 回の呼び出しに安全弁 (既定 3) があるので、
+        # 確認時に表示した統合コール数まで呼び直す (1 回きりだと承認件数の
+        # 手前で頭打ちになる — 2026-09-09)。0 が返ったら超過は解消済みか
+        # 失敗なので抜ける。
+        while consolidated_count < estimate.consolidation_calls:
+            folded = run_band_overflow(
+                conn, client, persona_id=args.persona_id,
+                # 承認済みの残り予算だけを渡す
+                max_folds=estimate.consolidation_calls - consolidated_count,
+            )
+            if not folded:
+                break
+            consolidated_count += folded
     except Exception:
         LOGGER.exception("band overflow consolidation failed; continuing")
 

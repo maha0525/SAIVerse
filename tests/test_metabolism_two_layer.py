@@ -602,8 +602,9 @@ class ChronicleClaimTest(unittest.TestCase):
     def test_consolidation_runs_after_each_chunk_and_once_at_the_end(self):
         status, calls, events = self._generate_interleaved(band_plan_count=5)
         self.assertEqual(status, "ok")
-        # 3 チャンク分 + 最後の 1 回。各呼び出しには残り予算だけを渡す。
-        self.assertEqual(calls, [5, 4, 3, 2])
+        # 3 チャンク分 + 最後の呼び直し (予算が残っていて進んでいる限り繰り返す)。
+        # 各呼び出しには残り予算だけを渡す。
+        self.assertEqual(calls, [5, 4, 3, 2, 1])
         # 画面の件数は走行全体の累計 / 承認済み総予算 (呼び出しごとに 1/N へ戻らない)。
         band_msgs = [
             e["content"] for e in events
@@ -611,7 +612,7 @@ class ChronicleClaimTest(unittest.TestCase):
         ]
         self.assertEqual(
             band_msgs,
-            [f"上位のあらすじを束ねています ({n}/5)..." for n in (1, 2, 3, 4)],
+            [f"上位のあらすじを束ねています ({n}/5)..." for n in (1, 2, 3, 4, 5)],
         )
 
     def test_total_folds_never_exceed_the_approved_budget(self):
@@ -621,6 +622,17 @@ class ChronicleClaimTest(unittest.TestCase):
         self.assertEqual(status, "ok")
         # 2 回で予算を使い切り、以後 (3 チャンク目・最後) は呼ばれない。
         self.assertEqual(calls, [2, 1])
+
+    def test_final_consolidation_loops_until_the_approved_budget_is_done(self):
+        """束ねだけ (チャンク無し) の走行 — run_band_overflow 1 回の安全弁
+        (既定 3、folds_per_call=3 が模す) で頭打ちにせず、最後の束ねを承認済み
+        予算まで呼び直す。2026-09-09 実機: 承認 5 件の補修が「まとめ 3 件」で
+        止まり、残り 2 件が画面に出た。"""
+        status, calls, _ = self._generate_interleaved(
+            band_plan_count=5, n_chunks=0, folds_per_call=3,
+        )
+        self.assertEqual(status, "ok")
+        self.assertEqual(calls, [5, 2])
 
     def test_zero_budget_never_calls_consolidation(self):
         status, calls, _ = self._generate_interleaved(band_plan_count=0)
@@ -641,12 +653,12 @@ class ChronicleClaimTest(unittest.TestCase):
             band_plan_count=5, band_failure="band-entry",
         )
         self.assertEqual(status, "ok")
-        self.assertEqual(len(calls), 4)
+        self.assertEqual(len(calls), 5)
         done = [e for e in events if e.get("status") == "completed"
                 or "Chronicle生成完了" in e.get("content", "")]
         self.assertTrue(done, f"completion event missing: {events}")
-        # 4 回の束ねがそれぞれ 1 件ずつ失敗を積んだ → 4 件として報告される。
-        self.assertIn("うち 4 件で知識の書き出しに失敗", done[-1]["content"])
+        # 5 回の束ねがそれぞれ 1 件ずつ失敗を積んだ → 5 件として報告される。
+        self.assertIn("うち 5 件で知識の書き出しに失敗", done[-1]["content"])
 
     def test_cancel_during_the_last_after_chunk_fold_ends_as_deferred(self):
         """最後のチャンクが確定した後 (after_chunk の束ねの最中) に中止が押さ
@@ -826,21 +838,21 @@ class ChronicleClaimTest(unittest.TestCase):
         ], [])
 
     def test_band_progress_labels_stay_monotone_across_a_failed_call(self):
-        """成功 → 失敗 → 成功 → 成功 (最後) の並びで、画面の累計 (n/総予算)
-        が戻らず、失敗した回のぶん予算が飛ぶ (1/5, 3/5, 4/5)。"""
+        """成功 → 失敗 → 成功 → 成功 → 成功 (最後の呼び直し) の並びで、画面の
+        累計 (n/総予算) が戻らず、失敗した回のぶん予算が飛ぶ (1/5, 3/5, 4/5, 5/5)。"""
         status, calls, events = self._generate_interleaved(
             band_plan_count=5, n_chunks=3, fail_band_calls={2},
         )
         self.assertEqual(status, "ok")
         # 2 回目 (失敗) も残り予算を 1 消費している。
-        self.assertEqual(calls, [5, 4, 3, 2])
+        self.assertEqual(calls, [5, 4, 3, 2, 1])
         band_msgs = [
             e["content"] for e in events
             if "上位のあらすじを束ねています" in e.get("content", "")
         ]
         self.assertEqual(
             band_msgs,
-            [f"上位のあらすじを束ねています ({n}/5)..." for n in (1, 3, 4)],
+            [f"上位のあらすじを束ねています ({n}/5)..." for n in (1, 3, 4, 5)],
         )
         shown = [int(m.split("(")[1].split("/")[0]) for m in band_msgs]
         self.assertEqual(shown, sorted(shown))

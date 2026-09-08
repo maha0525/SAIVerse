@@ -6326,8 +6326,23 @@ class SessionLifecycle:
             return _finish_cancelled(exec_result)
 
         # 最後の束ね — 末尾のチャンクぶんの超過を畳む。チャンクが無く束ねだけの
-        # 走行 (plan 空 + band backlog) もここで従来どおり実行される。
-        _consolidate("final")
+        # 走行 (plan 空 + band backlog) もここで実行される。
+        #
+        # 呼び直しのループ (2026-09-09 実機): run_band_overflow には 1 回の
+        # 呼び出しあたりの安全弁 (既定 3) があり、承認済み予算はチャンクごとの
+        # 呼び出しの累計で届く設計。束ねだけの走行は after_chunk が一度も
+        # 走らないので、1 回きりだと承認 5 件が 3 件で頭打ちになる — 予算が
+        # 残っていて前の呼び出しが進んだ間は呼び直す (進まなかった = 超過が
+        # 解消済みか失敗。どちらも次の呼び出しは仕事をしないので抜ける)。
+        while True:
+            _before_final = _consolidated[0]
+            _consolidate("final")
+            if _consolidated[0] <= _before_final:
+                break
+            if _consolidated[0] >= band_plan_count:
+                break
+            if cancel_fn is not None and cancel_fn():
+                break
         _merge_band_failures(exec_result)
         consolidated_count = _consolidated[0]
 

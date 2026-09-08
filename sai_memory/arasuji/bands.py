@@ -51,8 +51,10 @@ from sai_memory.arasuji.storage import (
 LOGGER = logging.getLogger(__name__)
 
 #: run_band_overflow **1 回の呼び出し**で走らせる LLM コール (束ね) の上限。
-#: generate_chronicle はチャンク確定のたびに呼ぶので、大量編纂の走行全体では
-#: 確認ゲートで承認された dry 予測件数 (max_folds) まで束ねが積み上がる。
+#: generate_chronicle はチャンク確定のたびに呼び、走行の最後は承認済み予算が
+#: 残っている限り呼び直すので、走行全体では確認ゲートで承認された dry 予測
+#: 件数 (max_folds) まで束ねが積み上がる (束ねだけの走行も同じ — 1 回きり
+#: だとここで頭打ちになる。呼び直しは呼び出し側の責務、2026-09-09)。
 DEFAULT_MAX_CONSOLIDATIONS_PER_RUN = 3
 
 #: レベル 1 以上の各並びの予算 — 上限 (これを超えたら発火)。intent §9。
