@@ -111,11 +111,13 @@ class _PocketbookSpellTestBase(unittest.TestCase):
         with self.adapter._db_lock:
             return add_activity(self.adapter.conn, name, origin, born_at=born_at)
 
-    def _add_memo(self, activity_id, date, kind, text):
+    def _add_memo(self, activity_id, date, kind, text, **kwargs):
         from sai_memory.memory.pocketbook import add_memo
 
         with self.adapter._db_lock:
-            return add_memo(self.adapter.conn, activity_id, date, kind, text)
+            return add_memo(
+                self.adapter.conn, activity_id, date, kind, text, **kwargs
+            )
 
     def _add_task(self, content, **kwargs):
         from saiverse.task_book import add_entry
@@ -177,6 +179,46 @@ class PocketbookOpenSpellTest(_PocketbookSpellTestBase):
         self.assertEqual(lines[0], "- 2026-08-22 [やった] 小説を書く: 第一稿を書いた")
         self.assertEqual(lines[1], "- 2026-08-21 [やった] 絵の練習: クロッキーを30分")
         self.assertEqual(lines[2], "- 2026-08-20 [やりたい] 小説を書く: 星を拾う話を書きたい")
+
+    def test_recent_page_sorts_by_event_date_and_marks_readback(self):
+        """⭐ 提示の軸はできごとの日 (B-2): 読み返しで今日書かれた過去のメモは
+        時間軸の本来の場所に並び、由来の印 (読み返し) を添えて出る。"""
+        novel = self._add_activity("小説を書く")
+        self._add_memo(novel.id, "2026-08-22", "did", "第一稿を書いた")
+        # 今日 (2026-09-08) の読み返しで拾われた、2026-03-01 のできごと。
+        self._add_memo(
+            novel.id, "2026-09-08", "did", "星の話の構想を練った",
+            event_date="2026-03-01", origin="readback",
+        )
+
+        text = self._open()
+        page = text.split("■ 最近のページ")[1]
+        lines = [ln for ln in page.splitlines() if ln.startswith("- ")]
+        # 現在のページが押し流されない: 2026-08-22 が先頭のまま。
+        self.assertEqual(
+            lines[0], "- 2026-08-22 [やった] 小説を書く: 第一稿を書いた",
+        )
+        # 読み返しのメモは、できごとの日で過去の場所に並び、印を持つ。
+        self.assertEqual(
+            lines[1],
+            "- 2026-03-01 [やった] 小説を書く: 星の話の構想を練った（読み返しで記録）",
+        )
+
+    def test_paging_axis_is_the_event_date(self):
+        """めくる鍵 (before) も、並びと同じできごとの日の軸で切れる。"""
+        novel = self._add_activity("小説を書く")
+        self._add_memo(novel.id, "2026-08-22", "did", "今日の分")
+        self._add_memo(
+            novel.id, "2026-09-08", "did", "昔の分",
+            event_date="2026-03-01", origin="readback",
+        )
+        text = self._open(limit=1)
+        self.assertIn("今日の分", text)
+        self.assertNotIn("昔の分", text)
+        self.assertIn("before='2026-08-22'", text)
+        nxt = self._open(limit=1, before="2026-08-22")
+        self.assertIn("昔の分", nxt)
+        self.assertNotIn("今日の分", nxt)
 
     def test_activity_with_no_memo_is_listed_as_not_written_yet(self):
         self._add_activity("まだ何もしていない活動")
@@ -318,6 +360,16 @@ class PocketbookWriteSpellTest(_PocketbookSpellTestBase):
         self.assertEqual(rows[0][1], today)
         self.assertEqual(rows[0][2], "want")
         self.assertEqual(rows[0][3], "星を拾う話を書きたい")
+
+    def test_written_memo_is_stamped_with_today_as_event_date(self):
+        """⭐ 二つの時刻 (B-2): 本人がその場で書くメモは、できごとの日 = 当日の
+        機械刻印と origin='live' を持つ。"""
+        self._write(kind="did", text="クロッキーを30分", activity="絵の練習")
+        row = self.adapter.conn.execute(
+            "SELECT event_date, origin FROM memos"
+        ).fetchone()
+        self.assertEqual(row[0], self._today())
+        self.assertEqual(row[1], "live")
 
     def test_did_appends_to_an_existing_activity(self):
         existing = self._add_activity("絵の練習", origin="user")

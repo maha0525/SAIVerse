@@ -228,6 +228,7 @@ def _init_schema(conn: sqlite3.Connection) -> None:
     # テーブルを遅延初期化にすると、v0.2 → v0.3 直行の DB で最初の会話が
     # 落ちる (2026-09-07 実害の教訓)。
     init_sluice_skipped_spans_table(conn)
+    init_sluice_candidate_memos_table(conn)
 
     # Pulse logs table for unified memory architecture
     conn.execute(
@@ -1865,6 +1866,99 @@ def delete_sluice_skipped_span(conn: sqlite3.Connection, span_id: int) -> bool:
     )
     conn.commit()
     return cur.rowcount > 0
+
+
+def init_sluice_candidate_memos_table(conn: sqlite3.Connection) -> None:
+    """``sluice_candidate_memos`` テーブルを用意する (冪等)。
+
+    後から通す採取の**機構モード** (docs/intent/sluice_coverage_gaps.md B 節
+    候補 1) が置く「機構が拾った候補」の器。機構はコア記憶・手帳へ代筆できない
+    (本人の言葉の器) ので、出力はここに候補として置くだけ — 本人かユーザーが
+    第二段の UI で採用・却下する。``event_date`` はできごとの日 (日粒度) で、
+    候補の材料になったメッセージの時刻から**機械が刻印**する (LLM に申告
+    させない)。``status`` は 'open' (未裁定) から始まる。初期化は adapter
+    起動時 (eager) — 遅延初期化は v0.2 事故の温床 (skipped spans と同じ理由)。
+    """
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS sluice_candidate_memos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            span_start_id TEXT,
+            span_end_id TEXT,
+            kind TEXT NOT NULL,
+            activity_name TEXT,
+            text TEXT NOT NULL,
+            event_date TEXT,
+            created_at TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'open'
+        )
+        """
+    )
+    conn.commit()
+
+
+def add_sluice_candidate_memo(
+    conn: sqlite3.Connection,
+    *,
+    span_start_id: Optional[str],
+    span_end_id: Optional[str],
+    kind: str,
+    activity_name: Optional[str],
+    text: str,
+    event_date: Optional[str],
+) -> Optional[int]:
+    """機構が拾った候補を 1 件置く。行 id を返す (重複スキップ時は None)。
+
+    重複の判定は「同じ範囲・同じ種類・同じ本文」の内容一致 — 台帳の再適用
+    (途中失敗 → 同じチャンクの再実行) で同じ候補が二重に並ばないための保険。
+    status は見ない (却下済みの候補も再挿入しない — 裁定を機械が蒸し返さない)。
+    """
+    row = conn.execute(
+        "SELECT id FROM sluice_candidate_memos "
+        "WHERE span_start_id IS ? AND span_end_id IS ? AND kind = ? AND text = ?",
+        (span_start_id, span_end_id, str(kind), str(text)),
+    ).fetchone()
+    if row is not None:
+        return None
+    cur = conn.execute(
+        "INSERT INTO sluice_candidate_memos "
+        "(span_start_id, span_end_id, kind, activity_name, text, event_date, "
+        "created_at, status) VALUES (?, ?, ?, ?, ?, ?, ?, 'open')",
+        (span_start_id, span_end_id, str(kind), activity_name, str(text),
+         event_date, datetime.utcnow().isoformat()),
+    )
+    conn.commit()
+    return int(cur.lastrowid)
+
+
+def list_sluice_candidate_memos(
+    conn: sqlite3.Connection, *, status: Optional[str] = "open",
+) -> List[Dict[str, Any]]:
+    """機構が拾った候補の一覧 (古い順)。``status=None`` で全件。"""
+    base = (
+        "SELECT id, span_start_id, span_end_id, kind, activity_name, text, "
+        "event_date, created_at, status FROM sluice_candidate_memos"
+    )
+    if status is None:
+        rows = conn.execute(f"{base} ORDER BY id ASC").fetchall()
+    else:
+        rows = conn.execute(
+            f"{base} WHERE status = ? ORDER BY id ASC", (str(status),)
+        ).fetchall()
+    return [
+        {
+            "id": row[0],
+            "span_start_id": row[1],
+            "span_end_id": row[2],
+            "kind": row[3],
+            "activity_name": row[4],
+            "text": row[5],
+            "event_date": row[6],
+            "created_at": row[7],
+            "status": row[8],
+        }
+        for row in rows
+    ]
 
 
 # ---------------------------------------------------------------------------

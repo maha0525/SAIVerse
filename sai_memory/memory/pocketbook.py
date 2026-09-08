@@ -42,6 +42,18 @@ ACTIVITY_ORIGINS = ("sluice", "user", "initial", "migration")
 #: memos.kind の閉語彙 (§13.1)。
 MEMO_KINDS = ("did", "want")
 
+#: memos.origin の閉語彙 (docs/intent/sluice_coverage_gaps.md B-2 — 由来の印)。
+#:
+#: - ``live``: 定常のスルースの採取と、本人が唱える手帳のスペル
+#:   (``pocketbook_write``) — いま進行中の暮らしから書かれたもの (既定)
+#: - ``readback``: 本人が過去の会話を読み返して拾ったもの (後から通す採取の
+#:   本人モード)
+#: - ``mechanism``: 機構が拾った候補からの採用 (第二段 UI で採用されたとき用)
+#:
+#: 既存行 (列の後付けより前) は NULL のまま — 読み手は NULL を ``live`` 相当と
+#: して扱う。
+MEMO_ORIGINS = ("live", "readback", "mechanism")
+
 # [0-9] 明記 — \d は全角数字 (２０２６ 等) も通してしまう。ASCII 桁のみ。
 _DATE_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
 
@@ -124,6 +136,15 @@ def init_pocketbook_tables(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_memos_idem ON memos(idem_key)"
     )
+    # 二つの時刻と由来 (docs/intent/sluice_coverage_gaps.md B-2):
+    # - event_date = できごとの日時 (日粒度)。採取元の会話のメッセージ時刻から
+    #   **機械が刻印**する (本人・LLM に申告させない)。date (書かれた日) と
+    #   別に持つことで、読み返しで当日作の記録が大量に生まれても、過去由来の
+    #   記録は時間軸の本来の場所に並ぶ。既存行は NULL のまま (読み手は date で
+    #   代替する)。
+    # - origin = 由来の印 (:data:`MEMO_ORIGINS`)。既存行は NULL (= live 相当)。
+    _ensure_column(conn, "memos", "event_date", "TEXT")
+    _ensure_column(conn, "memos", "origin", "TEXT")
     if owns_txn:
         conn.commit()
 
@@ -142,15 +163,25 @@ class Activity:
 class Memo:
     id: int
     activity_id: int
-    date: str  # 'YYYY-MM-DD' (日粒度)
+    date: str  # 'YYYY-MM-DD' (日粒度) — 書かれた日 (作成日)
     kind: str  # 'did' | 'want'
     text: str
     span_start_id: Optional[str] = None
     span_end_id: Optional[str] = None
+    event_date: Optional[str] = None  # 'YYYY-MM-DD' — できごとの日 (機械刻印)
+    origin: Optional[str] = None  # 'live' | 'readback' | 'mechanism' (NULL = live 相当)
+
+    @property
+    def effective_date(self) -> str:
+        """提示・ソートに使う日付 — できごとの日、無ければ書かれた日で代替。"""
+        return self.event_date or self.date
 
 
 _ACTIVITY_COLUMNS = "id, name, status, born_at, origin, closed_at"
-_MEMO_COLUMNS = "id, activity_id, date, kind, text, span_start_id, span_end_id"
+_MEMO_COLUMNS = (
+    "id, activity_id, date, kind, text, span_start_id, span_end_id, "
+    "event_date, origin"
+)
 
 
 def _row_to_activity(row) -> Activity:
@@ -173,6 +204,8 @@ def _row_to_memo(row) -> Memo:
         text=row[4],
         span_start_id=row[5],
         span_end_id=row[6],
+        event_date=row[7],
+        origin=row[8],
     )
 
 
@@ -510,6 +543,8 @@ def add_memo(
     span_start_id: Optional[str] = None,
     span_end_id: Optional[str] = None,
     idem_key: Optional[str] = None,
+    event_date: Optional[str] = None,
+    origin: str = "live",
     commit: bool = True,
 ) -> Memo:
     """メモを追加する。span はスルースの一手が担当した範囲を機械が刻印する引数。
@@ -517,6 +552,10 @@ def add_memo(
     ``idem_key`` は冪等キー。与えると get-or-create になり、スルースの再試行で
     同じメモが二重に書かれるのを防ぐ (既存が勝つ)。キーは呼び手 (スルース) が
     スルース実行 ID + 操作番号で採番する。省略 (None) は従来どおり毎回新規。
+    ``event_date`` は**できごとの日** (採取元の会話のメッセージ時刻から機械が
+    刻印する — 本人・LLM に申告させない)。None は「刻印できなかった」で、
+    読み手は date で代替する。``origin`` は由来の印 (:data:`MEMO_ORIGINS`、
+    既定 'live')。
     ``commit=False`` は、呼び手が一連の操作を一つのトランザクションに束ねて
     最後に ``conn.commit()`` する用 (既定 True = 従来どおり即 commit)。既定の
     まま呼ばれても、呼び手が既にトランザクションを開いていれば確定も巻き戻しも
@@ -531,6 +570,12 @@ def add_memo(
         raise ValueError("memo text must be a non-empty string")
     _validate_optional_str("span_start_id", span_start_id)
     _validate_optional_str("span_end_id", span_end_id)
+    if event_date is not None:
+        _validate_date(event_date)
+    if origin not in MEMO_ORIGINS:
+        raise ValueError(
+            f"unknown memo origin: {origin!r} (expected one of {MEMO_ORIGINS})"
+        )
     # idem_key は非空の str か None — 空白のみを None に倒すと冪等性が静かに
     # 無効化され、そのまま通すと空白キー同士が UNIQUE 衝突で既存返しに化ける。
     if idem_key is not None and (
@@ -555,9 +600,11 @@ def add_memo(
     try:
         cur = conn.execute(
             "INSERT INTO memos("
-            "activity_id, date, kind, text, span_start_id, span_end_id, idem_key) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (activity_id, date, kind, text, span_start_id, span_end_id, idem_key),
+            "activity_id, date, kind, text, span_start_id, span_end_id, "
+            "idem_key, event_date, origin) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (activity_id, date, kind, text, span_start_id, span_end_id,
+             idem_key, event_date, origin),
         )
         if owns_txn:
             conn.commit()
@@ -590,6 +637,8 @@ def add_memo(
         text=text,
         span_start_id=span_start_id,
         span_end_id=span_end_id,
+        event_date=event_date,
+        origin=origin,
     )
 
 
@@ -599,20 +648,25 @@ def list_memos(
     *,
     kind: Optional[str] = None,
 ) -> List[Memo]:
-    """アクティビティのメモ一覧 (日付順)。kind で did / want に絞れる。"""
+    """アクティビティのメモ一覧 (できごとの日付順)。kind で did / want に絞れる。
+
+    並びは **できごとの日 (event_date)、無ければ書かれた日 (date) で代替** —
+    読み返し由来の記録が当日に大量に生まれても、過去由来の記録は時間軸の
+    本来の場所に並ぶ (docs/intent/sluice_coverage_gaps.md B-2)。
+    """
     _validate_activity_id(activity_id)
     if kind is not None and kind not in MEMO_KINDS:
         raise ValueError(f"unknown memo kind: {kind!r} (expected one of {MEMO_KINDS})")
     if kind is None:
         cur = conn.execute(
             f"SELECT {_MEMO_COLUMNS} FROM memos WHERE activity_id = ? "
-            "ORDER BY date ASC, id ASC",
+            "ORDER BY COALESCE(event_date, date) ASC, id ASC",
             (activity_id,),
         )
     else:
         cur = conn.execute(
             f"SELECT {_MEMO_COLUMNS} FROM memos WHERE activity_id = ? AND kind = ? "
-            "ORDER BY date ASC, id ASC",
+            "ORDER BY COALESCE(event_date, date) ASC, id ASC",
             (activity_id, kind),
         )
     return [_row_to_memo(row) for row in cur.fetchall()]
@@ -636,7 +690,8 @@ def list_undigested_want_memos(
         params = (activity_id,)
     cur = conn.execute(
         f"""
-        SELECT w.id, w.activity_id, w.date, w.kind, w.text, w.span_start_id, w.span_end_id
+        SELECT w.id, w.activity_id, w.date, w.kind, w.text, w.span_start_id,
+               w.span_end_id, w.event_date, w.origin
         FROM memos w
         WHERE {where}
           AND NOT EXISTS (

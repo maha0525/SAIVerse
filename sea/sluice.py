@@ -869,8 +869,16 @@ def _apply_memos(
     span_start_id: Optional[str],
     span_end_id: Optional[str],
     offered_activities: Dict[int, str],
+    event_date: Optional[str] = None,
+    origin: str = "live",
 ) -> tuple[int, int, List[str]]:
     """want/did メモを手帳 (pocketbook) に書く。(成功数, 失敗数, 結果行) を返す。
+
+    ``event_date`` / ``origin`` は二つの時刻と由来の刻印
+    (docs/intent/sluice_coverage_gaps.md B-2)。``event_date`` は採取元の会話の
+    メッセージ時刻から呼び出し側が機械で導いた「できごとの日」(None = 導け
+    なかった — 読み手は date で代替する)。``origin`` は 'live' (定常のスルース) /
+    'readback' (本人の読み返し)。どちらも本人の申告は使わない。
 
     - ``new_activity_name`` は get_or_create_activity(origin='sluice') で収束させる。
     - ``activity_ref`` は ``act:N`` の形の写しだけを受け取り (:func:`_parse_ref`)、
@@ -987,6 +995,8 @@ def _apply_memos(
                     span_start_id=span_start_id,
                     span_end_id=span_end_id,
                     idem_key=f"{idem_prefix}:m{idx}",
+                    event_date=event_date,
+                    origin=origin,
                     commit=False,
                 )
                 applied += 1
@@ -1310,11 +1320,15 @@ def _persist_record(
     prompt_snapshot: str,
     *,
     applied_total: int,
+    scope_override: Optional[str] = None,
 ) -> None:
     """判断ターンを main_line / (committed|discardable) で SAIMemory に残す。
 
     採取ありなら committed (コンテキストに残る来歴)、なしなら discardable
     (DB には残るが context 復元から除外)。生 JSON は保存しない (自然文のみ)。
+    ``scope_override`` はこの規則の差し替え — 後から通す採取 (本人の読み返し)
+    は過程を本線の context に載せない (入口は一本 — ダイジェスト一行だけが
+    committed で立つ) ため、採取ありでも 'discardable' を渡す。
 
     role は "user"、``record_text`` は呼び出し側で ``<system>…</system>`` に
     包んだシステム通知形式で渡る (event_message の確立形式)。プロンプト無しの
@@ -1349,7 +1363,9 @@ def _persist_record(
         # 編纂には 2026-08-29 裁定から材料として入る (長文は決定論の一行に縮む)。
         "metadata": {"tags": ["internal", "event_message", "sluice"]},
         "line_role": "main_line",
-        "scope": "committed" if applied_total > 0 else "discardable",
+        "scope": scope_override or (
+            "committed" if applied_total > 0 else "discardable"
+        ),
         "pulse_id": pulse_id,
         "paired_action_text": prompt_snapshot,
     })
@@ -1457,6 +1473,47 @@ def _compute_span(
         idx = len(ids) - 1 - ids[::-1].index(prev_marker)
         start = ids[idx + 1] if idx + 1 < len(ids) else end
     return (start, end)
+
+
+def _message_event_date(persona: Any, message_id: Optional[str]) -> Optional[str]:
+    """メッセージ id から「できごとの日」('YYYY-MM-DD') を機械で導く。
+
+    二つの時刻の刻印 (docs/intent/sluice_coverage_gaps.md B-2) の供給源。
+    採取元の範囲の**末尾メッセージ**の保存時刻 (messages.created_at) を日粒度に
+    落とす — 本人・LLM に申告させない。読めない (行が無い・時刻が欠落・変換
+    不能) ときは None を返し、記録は event_date NULL で書かれる (読み手は
+    作成日で代替する)。刻印できない事情で採取を止めない — 時刻の欄は提示の
+    並びのためのもので、採取の成立条件ではない。
+    """
+    if not message_id:
+        return None
+    adapter = getattr(persona, "sai_memory", None)
+    conn = getattr(adapter, "conn", None) if adapter is not None else None
+    if conn is None:
+        return None
+    try:
+        with adapter._db_lock:
+            row = conn.execute(
+                "SELECT created_at FROM messages WHERE id = ?",
+                (str(message_id),),
+            ).fetchone()
+    except Exception:
+        LOGGER.warning(
+            "[sluice] event_date lookup failed for message %s", message_id,
+            exc_info=True,
+        )
+        return None
+    if not row or row[0] is None:
+        return None
+    try:
+        ts = int(row[0])
+        if ts <= 0:
+            # created_at 欠落を 0 に写した行 (native import) — 1970-01-01 の
+            # 嘘を刻印しない。
+            return None
+        return datetime.fromtimestamp(ts).date().isoformat()
+    except (TypeError, ValueError, OverflowError, OSError):
+        return None
 
 
 # (旧: コンテキスト超過の後退 §13.5-1 — 2026-09-08 廃止。
@@ -2285,6 +2342,9 @@ def run_sluice(
         persona, want_memos, did_memos,
         idem_prefix=idem_prefix, span_start_id=span_start_id, span_end_id=span_end_id,
         offered_activities=offered_activities,
+        # できごとの日 = 担当範囲の末尾メッセージの時刻 (機械刻印、B-2)。
+        event_date=_message_event_date(persona, span_end_id),
+        origin="live",
     )
     promises_applied, promises_failed, promise_lines = _apply_promises(
         lifecycle, persona, promises,
@@ -2394,10 +2454,15 @@ def run_sluice(
 # ---------------------------------------------------------------------------
 #
 # ``sluice_skipped_spans`` に記録された「スルースを通っていない範囲」を、
-# チャンクに刻んで順にスルースへ通すジョブの実行部。入口 (UI) は第二段で、
+# チャンクに刻んで順に通すジョブの実行部。入口 (UI) は第二段で、
 # 第一段では API (api/routes/people/sluice.py) までを作る。
 #
-# 定常のスルース (run_sluice) との違い:
+# 判断の主体は二本立て (B 節、2026-09-08 再設計): **機構** (候補を拾って
+# ``sluice_candidate_memos`` に置くだけ — 既定) と **現在の本人** (読み返しだと
+# 明示して読み、定常のスルースと同じ器を操作する)。「本人のシステムプロンプト
+# だけ着せた器」は当時の本人でも今の本人でもない第三の主体だった (棄却)。
+#
+# 定常のスルース (run_sluice) との違い (本人モード):
 # - 文脈は提示窓ではなく、記録された範囲のメッセージを DB から読み直して組む。
 #   前置き (本人のシステムプロンプト + 短い自己認識) は毎チャンク同一に固定し、
 #   プロバイダのプロンプトキャッシュに乗せる (帯の全量は載せない — intent 決定 3)。
@@ -2463,16 +2528,28 @@ def _capture_scope_sentence(count: int) -> str:
     )
 
 
-def _capture_period_label(chunk_messages: List[Any]) -> Optional[str]:
-    """チャンクの期間 (日付) の表示。created_at が読めなければ None (載せない)。"""
+def _chunk_period_dates(
+    chunk_messages: List[Any],
+) -> tuple[Optional[str], Optional[str]]:
+    """チャンクの期間の両端の日付 ('YYYY-MM-DD')。読めない端は None。"""
     def _fmt(ts: Any) -> Optional[str]:
         try:
-            return datetime.fromtimestamp(int(ts)).strftime("%Y-%m-%d")
+            value = int(ts)
+            if value <= 0:
+                return None  # created_at 欠落 (0 写し) — 1970 の嘘を出さない
+            return datetime.fromtimestamp(value).strftime("%Y-%m-%d")
         except (TypeError, ValueError, OverflowError, OSError):
             return None
 
-    start = _fmt(getattr(chunk_messages[0], "created_at", None))
-    end = _fmt(getattr(chunk_messages[-1], "created_at", None))
+    return (
+        _fmt(getattr(chunk_messages[0], "created_at", None)),
+        _fmt(getattr(chunk_messages[-1], "created_at", None)),
+    )
+
+
+def _capture_period_label(chunk_messages: List[Any]) -> Optional[str]:
+    """チャンクの期間 (日付) の表示。created_at が読めなければ None (載せない)。"""
+    start, end = _chunk_period_dates(chunk_messages)
     if start and end:
         return start if start == end else f"{start}〜{end}"
     return None
@@ -2852,6 +2929,10 @@ def _run_capture_chunk(
         idem_prefix=idem_prefix,
         span_start_id=apply_span_start, span_end_id=apply_span_end,
         offered_activities=offered_activities,
+        # できごとの日 = チャンクの末尾メッセージの時刻 (機械刻印、B-2)。
+        # 由来の印 = 本人の読み返し。
+        event_date=_message_event_date(persona, apply_span_end),
+        origin="readback",
     )
     promises_applied, promises_failed, promise_lines = _apply_promises(
         lifecycle, persona, _as_list("promises"),
@@ -2894,8 +2975,12 @@ def _run_capture_chunk(
     record_text = "<system>" + "\n".join(body_lines) + "\n</system>"
 
     # 永続が先、completed が最後 (run_sluice の finalize と同じ順序)。
+    # 読み返しの過程は本線の context に載せない (入口は一本 — 走行の締めに
+    # ダイジェスト一行だけが committed で立つ) ので、判断ターン記録は採取の
+    # 有無に関わらず discardable (DB には残る = 監査は可能)。
     _persist_record(
         persona, record_text, prompt_snapshot, applied_total=applied_total,
+        scope_override="discardable",
     )
     if execution_id is not None and ledger_status == "applied":
         ledger.mark_completed(execution_id)
@@ -2913,24 +2998,514 @@ def _run_capture_chunk(
         "promises_applied": promises_applied, "promises_failed": promises_failed,
         "span_start_id": chunk_start_id, "span_end_id": chunk_end_id,
         "messages": len(chunk_messages),
+        # 走行の締めのダイジェスト一行が期間を言うための材料 (日付のみ)。
+        "period_start": _chunk_period_dates(chunk_messages)[0],
+        "period_end": _chunk_period_dates(chunk_messages)[1],
     }
+
+
+# ---------------------------------------------------------------------------
+# 機構モード (candidate 抽出) — docs/intent/sluice_coverage_gaps.md B 節 候補 1
+# ---------------------------------------------------------------------------
+#
+# 誰でもない機構がその範囲だけを見て、手帳のメモの**候補**を拾う。Chronicle の
+# 生成と同じ型 (本人のシステムプロンプトを着せない・単発の user プロンプト)。
+# 機構はコア記憶・手帳へ代筆できない (本人の言葉の器) ので、出力は
+# ``sluice_candidate_memos`` に候補として置くだけ — 本人の器 (コア記憶・手帳・
+# 約束・会話ログ) には何も書かない。採用・却下は第二段の UI。
+# コア記憶・約束の候補は出さない (第一段の範囲外)。
+
+#: 候補の参照欄の書式 (会話の写しに振る行番号の写し)。桁数の縛りは
+#: _CORE_REF_RE と同じ理由 (暴走した数字列を int() へ渡さない)。
+_MSG_REF_RE = re.compile(r"^msg:([0-9]{1,9})$")
+
+_CANDIDATE_ITEM_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "activity_name": {
+            "type": "string",
+            "description": (
+                "「小説を書く」「絵の練習」のような活動の粒度の名前の提案。"
+                "具体的な詳細はここではなく text に書く。"
+            ),
+        },
+        "text": {
+            "type": "string",
+            "description": (
+                "候補の一行。会話の中の本人の言い方に沿わせる（発明しない）。"
+            ),
+        },
+        "source_refs": {
+            "type": "array",
+            "description": (
+                "根拠になったメッセージの msg:N（会話の写しの行頭の番号）を"
+                "そのまま写す（例: msg:3）。"
+            ),
+            "items": {"type": "string"},
+        },
+    },
+    "required": ["activity_name", "text", "source_refs"],
+}
+
+#: 機構モードの構造化出力 (want / did の二欄のみ)。型の規律は _RESPONSE_SCHEMA
+#: と同じ: 数値の欄を置かない (参照は msg:N の文字列写し)、全欄必須 (欄の省略を
+#: 「候補なし」へ丸めない)。
+_CANDIDATE_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "want_memos": {
+            "type": "array",
+            "description": "本人がやりたいと言っていたことの候補。無ければ空配列。",
+            "items": _CANDIDATE_ITEM_SCHEMA,
+        },
+        "did_memos": {
+            "type": "array",
+            "description": "本人が実際にやったことの候補。無ければ空配列。",
+            "items": _CANDIDATE_ITEM_SCHEMA,
+        },
+    },
+    "required": ["want_memos", "did_memos"],
+}
+
+_CANDIDATE_LIST_FIELDS = ("want_memos", "did_memos")
+
+
+def _build_mechanism_prompt(
+    persona_name: str, chunk_messages: List[Any],
+) -> str:
+    """機構モードの単発プロンプト (機構の声 — Chronicle 生成と同じ型)。
+
+    本人のシステムプロンプトは着せない。会話の写しに ``msg:N`` の行番号を
+    振り、候補の根拠 (source_refs) はその写しで受け取る — できごとの日時
+    (event_date) は根拠のメッセージの保存時刻から**機械が刻印**するので、
+    日付を LLM に申告させる欄は無い。
+    """
+    lines: List[str] = []
+    for index, msg in enumerate(chunk_messages, start=1):
+        role = getattr(msg, "role", None)
+        speaker = persona_name if role in ("model", "assistant") else "ユーザー"
+        date_label = ""
+        try:
+            ts = int(getattr(msg, "created_at", 0) or 0)
+            if ts > 0:
+                date_label = datetime.fromtimestamp(ts).strftime("%Y-%m-%d") + " "
+        except (TypeError, ValueError, OverflowError, OSError):
+            date_label = ""
+        content = (getattr(msg, "content", None) or "").strip()
+        lines.append(f"[msg:{index}] {date_label}{speaker}: {content}")
+    transcript = "\n".join(lines)
+    return (
+        "これは、過去の会話の記録から、手帳のメモの候補を拾う整理の作業です。\n"
+        "あなたはこの会話の当事者ではありません。拾った候補はそのまま記録には"
+        "ならず、後で本人とユーザーが見て採用・却下を決めます。\n"
+        "\n"
+        f"以下は、ペルソナ「{persona_name}」とユーザーの過去の会話の写しです"
+        f"（{len(chunk_messages)} 通。行頭の msg:N は参照用の番号）:\n"
+        "\n"
+        "【会話の写し】\n"
+        f"{transcript}\n"
+        "\n"
+        "この写しの中から、次の二種類の候補を拾ってください:\n"
+        f"- want_memos: {persona_name} がやりたいと言っていたこと\n"
+        f"- did_memos: {persona_name} が実際にやったこと\n"
+        "\n"
+        "各候補の書き方:\n"
+        "- activity_name: 「小説を書く」「絵の練習」のような活動の粒度の名前の提案\n"
+        f"- text: 候補の一行。会話の中の {persona_name} の言い方に沿わせて"
+        "ください（書かれていないことを発明しない）\n"
+        "- source_refs: 根拠になったメッセージの msg:N をそのまま写す\n"
+        "\n"
+        "拾わないのが普通です。写しに確かな根拠のある候補だけを拾い、無ければ"
+        "両方とも空配列で構いません。コア記憶や約束はこの作業では扱いません。"
+    )
+
+
+def _parse_candidate_result(
+    result: Any, persona_id: Optional[str],
+) -> Dict[str, List[Dict[str, Any]]]:
+    """機構モードの構造化出力を検証済み dict へ正規化する。
+
+    fail-closed の粒度は :func:`_parse_structured_result` と同じ思想:
+    **全体の型** (dict でない / 必須欄の欠落・非配列 / 要素が object でない)
+    は :class:`SluiceOutputError` を送出。**要素の中身の不正** (text が空・
+    文字列でない等) はその要素だけ落として WARNING に残す — 候補は本人の器に
+    触れないので、要素の棄却を本人向けの記録に書く先は無い。
+    """
+    if isinstance(result, str):
+        try:
+            parsed = json.loads(result)
+        except (ValueError, TypeError) as exc:
+            raise SluiceOutputError(
+                f"candidate output is not JSON (persona={persona_id}): "
+                f"{result[:200]!r}"
+            ) from exc
+        result = parsed
+    if not isinstance(result, dict):
+        raise SluiceOutputError(
+            f"candidate output is not an object (persona={persona_id}): "
+            f"{type(result).__name__}"
+        )
+    out: Dict[str, List[Dict[str, Any]]] = {}
+    for field in _CANDIDATE_LIST_FIELDS:
+        value = result.get(field)
+        if not isinstance(value, list):
+            raise SluiceOutputError(
+                f"required field {field!r} is missing or not an array "
+                f"(persona={persona_id}): {type(value).__name__}"
+            )
+        kept: List[Dict[str, Any]] = []
+        for index, item in enumerate(value):
+            if not isinstance(item, dict):
+                raise SluiceOutputError(
+                    f"element {field}[{index}] must be an object "
+                    f"(persona={persona_id}): {type(item).__name__}"
+                )
+            text = item.get("text")
+            if not isinstance(text, str) or not text.strip():
+                LOGGER.warning(
+                    "[sluice-capture] dropped candidate %s[%d]: empty or "
+                    "non-string text (persona=%s)", field, index, persona_id,
+                )
+                continue
+            kept.append(item)
+        out[field] = kept
+    return out
+
+
+def _candidate_event_date(
+    persona: Any, item: Dict[str, Any], chunk_messages: List[Any],
+) -> Optional[str]:
+    """候補一件の「できごとの日」を機械で導く (B-2 の刻印)。
+
+    根拠 (source_refs の msg:N) が解決できれば、その中で最も新しい
+    メッセージの日付。解決できなければチャンクの末尾メッセージの日付で代替。
+    どの経路でも LLM の申告は使わない。
+    """
+    best_ts = 0
+    refs = item.get("source_refs")
+    if isinstance(refs, list):
+        for ref in refs:
+            parsed = _parse_ref(ref, _MSG_REF_RE)
+            if parsed is None or not (1 <= parsed <= len(chunk_messages)):
+                continue
+            try:
+                ts = int(getattr(chunk_messages[parsed - 1], "created_at", 0) or 0)
+            except (TypeError, ValueError):
+                continue
+            best_ts = max(best_ts, ts)
+    if best_ts > 0:
+        try:
+            return datetime.fromtimestamp(best_ts).date().isoformat()
+        except (ValueError, OverflowError, OSError):
+            pass
+    return _message_event_date(
+        persona, str(getattr(chunk_messages[-1], "id", "") or "") or None,
+    )
+
+
+def _call_mechanism_llm(
+    lifecycle: Any,
+    persona: Any,
+    chunk_messages: List[Any],
+    *,
+    model_key: Optional[str] = None,
+) -> Dict[str, List[Dict[str, Any]]]:
+    """チャンク 1 つの機構モード LLM 呼び出し (単発 user プロンプト)。
+
+    Chronicle 生成と同じ型: 本人のシステムプロンプトも現在のコア記憶・手帳の
+    一覧も載せない — 判断の主体は機構で、現在の本人の知識を混ぜない。例外
+    (LLM エラー・出力不適合) はそのまま送出する。
+    """
+    runtime = lifecycle.runtime
+    persona_id = getattr(persona, "persona_id", None)
+    persona_name = (
+        getattr(persona, "persona_name", None) or persona_id or "ペルソナ"
+    )
+
+    from sea.pulse_context import resolve_execution_context
+    execution_context = resolve_execution_context(persona, None)
+    if model_key and execution_context.model_key != model_key:
+        execution_context = execution_context.with_model(model_key)
+
+    prompt = _build_mechanism_prompt(persona_name, chunk_messages)
+    node_def = SimpleNamespace(id="sluice_capture", memorize=None, speak=False)
+    llm_client, actual_model = runtime.select_llm_client(
+        node_def, persona, execution_context=execution_context,
+        needs_structured_output=True,
+    )
+    if actual_model != execution_context.model_key:
+        execution_context = execution_context.with_model(actual_model)
+
+    result = llm_client.generate(
+        [{"role": "user", "content": prompt}],
+        tools=[],
+        response_schema=_CANDIDATE_SCHEMA,
+        temperature=runtime._default_temperature(persona),
+        max_output_tokens=_MAX_OUTPUT_TOKENS,
+        **runtime._get_cache_kwargs(persona_id),
+    )
+
+    usage = llm_client.consume_usage() if hasattr(llm_client, "consume_usage") else None
+    if usage is not None:
+        try:
+            from saiverse.usage_tracker import get_usage_tracker
+            get_usage_tracker().record_usage(
+                model_id=usage.model,
+                input_tokens=usage.input_tokens,
+                output_tokens=usage.output_tokens,
+                cached_tokens=usage.cached_tokens,
+                cache_write_tokens=usage.cache_write_tokens,
+                cache_ttl=usage.cache_ttl,
+                persona_id=persona_id,
+                building_id=getattr(persona, "current_building_id", None),
+                node_type="sluice",
+                playbook_name="sluice_capture",
+                category="sluice",
+            )
+        except Exception:
+            LOGGER.warning(
+                "[sluice-capture] usage tracking failed (persona=%s)",
+                persona_id, exc_info=True,
+            )
+
+    return _parse_candidate_result(result, persona_id)
+
+
+def _run_mechanism_chunk(
+    lifecycle: Any,
+    persona: Any,
+    chunk_messages: List[Any],
+    *,
+    model_key: Optional[str] = None,
+) -> Dict[str, Any]:
+    """チャンク 1 つを機構モードで処理する (候補テーブルへ置くだけ)。
+
+    振り付けは :func:`_run_capture_chunk` の縮約形 (claim → running → 凍結
+    (applied) → 冪等適用 → completed)。本人の器 (コア記憶・手帳・約束・会話
+    ログ) には一切書かない — 判断ターンの永続 (_persist_record) も無い。
+    台帳キーは本人モードと**別** (``#mechanism`` 接尾) — 同じチャンクでも
+    主体が違えば別の実行で、互いの記録を再利用しない。
+    """
+    persona_id = getattr(persona, "persona_id", None)
+    chunk_start_id = str(getattr(chunk_messages[0], "id"))
+    chunk_end_id = str(getattr(chunk_messages[-1], "id"))
+
+    ledger = _get_ledger(lifecycle)
+    ledger_key = (
+        f"{persona_id}:{chunk_start_id}#mechanism" if persona_id else None
+    )
+    recorded = None
+    if ledger is not None and ledger_key:
+        recorded = _find_recorded_result(ledger, ledger_key)
+        if recorded is not None and not all(
+            isinstance(recorded.get("response", {}).get(field), list)
+            for field in _CANDIDATE_LIST_FIELDS
+        ):
+            # 形式の読めない記録は再利用しない (別キーで採り直す —
+            # _is_legacy_response と同じ fail-closed)。
+            LOGGER.warning(
+                "[sluice-capture] 機構モードの記録の形式が読めないため再利用"
+                "しません (execution=%s key=%s persona=%s)",
+                recorded.get("execution_id"), ledger_key, persona_id,
+            )
+            ledger_key = f"{ledger_key}#format-candidate1"
+            recorded = _find_recorded_result(ledger, ledger_key)
+
+    execution_id: Optional[str] = None
+    ledger_status: Optional[str] = None
+    apply_span_start = chunk_start_id
+    apply_span_end = chunk_end_id
+    if recorded is not None:
+        execution_id = recorded["execution_id"]
+        ledger_status = recorded["status"]
+        parsed = {
+            field: [
+                item for item in (recorded["response"].get(field) or [])
+                if isinstance(item, dict)
+            ]
+            for field in _CANDIDATE_LIST_FIELDS
+        }
+        apply_span_start = str(recorded.get("span_start_id") or chunk_start_id)
+        apply_span_end = str(recorded.get("span_end_id") or chunk_end_id)
+        LOGGER.info(
+            "[sluice-capture] reusing recorded candidates (execution=%s "
+            "span=%s..%s persona=%s); no new LLM call",
+            execution_id, chunk_start_id, chunk_end_id, persona_id,
+        )
+    else:
+        if ledger is not None and ledger_key:
+            execution_id, runnable, existing_status = ledger.claim_execution(
+                _LEDGER_KIND, ledger_key, persona_id,
+                payload={
+                    "span_start_id": chunk_start_id,
+                    "span_end_id": chunk_end_id,
+                    "origin": "capture_mechanism",
+                },
+            )
+            if not runnable:
+                raise SluiceExecutionBlockedError(
+                    f"sluice mechanism capture blocked by ledger "
+                    f"(key={ledger_key}, status={existing_status})"
+                )
+            if not ledger.try_mark_running(execution_id):
+                raise SluiceExecutionBlockedError(
+                    f"sluice mechanism capture running seat lost (key={ledger_key})"
+                )
+        try:
+            parsed = _call_mechanism_llm(
+                lifecycle, persona, chunk_messages, model_key=model_key,
+            )
+        except Exception as exc:
+            noter = getattr(lifecycle, "_note_metabolism_rate_limit", None)
+            if callable(noter):
+                noter(persona_id, exc)
+            if execution_id is not None:
+                try:
+                    ledger.mark_failed(execution_id, str(exc) or type(exc).__name__)
+                except Exception:
+                    LOGGER.exception(
+                        "[sluice-capture] mark_failed itself failed (execution=%s)",
+                        execution_id,
+                    )
+            raise
+        if execution_id is not None:
+            try:
+                ledger.mark_applied(execution_id, result={
+                    "response": parsed,
+                    "span_start_id": chunk_start_id,
+                    "span_end_id": chunk_end_id,
+                    "seen_ids": [
+                        str(getattr(m, "id")) for m in chunk_messages
+                    ],
+                })
+            except Exception as exc:
+                LOGGER.error(
+                    "[sluice-capture] freezing candidates failed (execution=%s "
+                    "persona=%s); marking failed so the next run can retry",
+                    execution_id, persona_id, exc_info=True,
+                )
+                ledger.mark_failed(execution_id, str(exc) or type(exc).__name__)
+                raise
+            ledger_status = "applied"
+
+    # 適用: 候補テーブルへ置くだけ (内容一致で冪等 — 再適用で二重に並ばない)。
+    from sai_memory.memory.storage import add_sluice_candidate_memo
+
+    adapter = getattr(persona, "sai_memory", None)
+    if adapter is None or getattr(adapter, "conn", None) is None:
+        raise SluiceStorageUnavailableError(
+            "memory.db connection is missing; cannot store candidate memos"
+        )
+    candidates_created = 0
+    candidates_total = 0
+    for field, kind in (("want_memos", "want"), ("did_memos", "did")):
+        for item in parsed.get(field, []):
+            candidates_total += 1
+            activity_name = item.get("activity_name")
+            if not isinstance(activity_name, str) or not activity_name.strip():
+                activity_name = None
+            else:
+                activity_name = activity_name.strip()
+            event_date = _candidate_event_date(persona, item, chunk_messages)
+            with adapter._db_lock:
+                new_id = add_sluice_candidate_memo(
+                    adapter.conn,
+                    span_start_id=apply_span_start,
+                    span_end_id=apply_span_end,
+                    kind=kind,
+                    activity_name=activity_name,
+                    text=str(item.get("text")).strip(),
+                    event_date=event_date,
+                )
+            if new_id is not None:
+                candidates_created += 1
+
+    if execution_id is not None and ledger_status == "applied":
+        ledger.mark_completed(execution_id)
+
+    LOGGER.info(
+        "[sluice-capture] mechanism chunk done: persona=%s span=%s..%s "
+        "(%d messages) candidates=%d (new=%d)",
+        persona_id, chunk_start_id, chunk_end_id, len(chunk_messages),
+        candidates_total, candidates_created,
+    )
+    return {
+        "ops_applied": 0, "ops_failed": 0,
+        "memos_applied": candidates_total, "memos_failed": 0,
+        "promises_applied": 0, "promises_failed": 0,
+        "span_start_id": chunk_start_id, "span_end_id": chunk_end_id,
+        "messages": len(chunk_messages),
+        "candidates_created": candidates_created,
+        "period_start": _chunk_period_dates(chunk_messages)[0],
+        "period_end": _chunk_period_dates(chunk_messages)[1],
+    }
+
+
+#: 後から通す採取の判断の主体 (docs/intent/sluice_coverage_gaps.md B 節)。
+#: 'mechanism' = 機構が候補を拾う (安い方 — 既定) / 'persona' = 現在の本人が
+#: 読み返す。
+CAPTURE_MODES = ("mechanism", "persona")
+
+
+def _append_capture_digest(persona: Any, digest_text: str) -> None:
+    """読み返しのダイジェスト一行を本線へ立てる (長期記憶への入口は一本)。
+
+    器は作業セッションのダイジェスト行 (:data:`sea.work_session.DIGEST_TAG` /
+    main_line / committed) をそのまま使う — 一日新聞 (day_report) と就寝判断
+    (day_close の _collect_today_session_digests) がタグで拾う既存の読み手に、
+    「今日、過去の会話を読み返した」という事実がそのまま乗る。
+    role は作業セッションの digest (assistant = 本人の言葉) と違って
+    user + ``<system>`` 包み — この一行は件数から機械が組んだ文で、機構の
+    代筆を本人名義 (assistant) にしない (発話の尊厳の規律)。
+    書き込みの失敗は送出する — 採取は適用済みなので、呼び出し元のジョブが
+    失敗として報告し、記録の欠けを黙って飲まない。
+    """
+    from sea.work_session import DIGEST_TAG
+
+    adapter = getattr(persona, "sai_memory", None)
+    if adapter is None:
+        raise SluiceStorageUnavailableError(
+            "sai_memory adapter is missing; cannot append the capture digest"
+        )
+    adapter.append_persona_message({
+        "role": "user",
+        "content": f"<system>{digest_text}</system>",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "metadata": {"tags": [DIGEST_TAG, "sluice"]},
+        "line_role": "main_line",
+        "scope": "committed",
+    })
 
 
 def run_sluice_capture(
     lifecycle: Any,
     persona: Any,
     *,
+    mode: str = "mechanism",
     model_key: Optional[str] = None,
     event_callback: Optional[Any] = None,
     cancellation_token: Optional[Any] = None,
 ) -> Dict[str, Any]:
-    """記録された「通っていない範囲」を、チャンクごとに順へスルースへ通す。
+    """記録された「通っていない範囲」を、チャンクごとに順に通す。
 
     docs/intent/sluice_coverage_gaps.md 第一段 B の実行部。範囲の行を古い順に
     取り、A と同じ閾値 (:func:`get_max_span_chars`) 以下のチャンクへ刻んで
-    :func:`_run_capture_chunk` で処理する。チャンクを終えるたびに範囲の行を
-    縮める (行の start_message_id を前進、全部済んだら行を削除) — 中断しても
-    続きから。パンマーカーは動かさない。
+    処理する。チャンクを終えるたびに範囲の行を縮める (行の start_message_id を
+    前進、全部済んだら行を削除) — 中断しても続きから。パンマーカーは動かさない。
+
+    判断の主体 (``mode`` — B 節の再設計):
+
+    - ``"mechanism"`` (既定 — 安い方): 誰でもない機構が範囲を読み、手帳のメモの
+      **候補**を ``sluice_candidate_memos`` に置く (:func:`_run_mechanism_chunk`)。
+      本人の器 (コア記憶・手帳・約束・会話ログ) には何も書かない。
+    - ``"persona"``: 現在の本人が「読み返し」だと明示されて読み、コア記憶・
+      手帳・約束を定常のスルースと同じ経路で操作する
+      (:func:`_run_capture_chunk`)。拾われたメモは origin='readback' と
+      できごとの日 (event_date) の機械刻印を持つ。読み返しの過程は本線の
+      context に載せず (判断ターン記録は discardable)、1 件以上採取して完走
+      したら、本線にダイジェスト一行だけを立てる
+      (:func:`_append_capture_digest` — 入口は一本)。採取ゼロの完走では
+      立てない。
 
     直列化: チャンクごとに Beat ロック (purpose="sluice_capture") を取る —
     ロックはチャンク間で手放すので、走行中も会話 (Pulse) が間に挟まれる
@@ -2954,6 +3529,11 @@ def run_sluice_capture(
         delete_sluice_skipped_span,
         list_sluice_skipped_spans,
     )
+
+    if mode not in CAPTURE_MODES:
+        raise ValueError(
+            f"unknown capture mode: {mode!r} (expected one of {CAPTURE_MODES})"
+        )
 
     if not is_enabled():
         # スルースを env で切っている環境では、後から通す採取も動かさない —
@@ -2982,6 +3562,12 @@ def run_sluice_capture(
     captures_failed = 0
     status = "ok"
     processed_any = False
+    # 本人モードのダイジェスト一行の材料 (期間と器ごとの件数)。
+    period_start: Optional[str] = None
+    period_end: Optional[str] = None
+    total_core = 0
+    total_memos = 0
+    total_promises = 0
 
     def _spans() -> List[Dict[str, Any]]:
         with adapter._db_lock:
@@ -3040,9 +3626,14 @@ def run_sluice_capture(
         with hold_beat(
             manager, persona_id, purpose="sluice_capture", check_gate=False,
         ):
-            chunk_summary = _run_capture_chunk(
-                lifecycle, persona, chunk, model_key=model_key,
-            )
+            if mode == "persona":
+                chunk_summary = _run_capture_chunk(
+                    lifecycle, persona, chunk, model_key=model_key,
+                )
+            else:
+                chunk_summary = _run_mechanism_chunk(
+                    lifecycle, persona, chunk, model_key=model_key,
+                )
         # 処理し終えたチャンクぶんだけ記録を縮める。縮めの失敗は送出 —
         # 縮めずに次へ進むと同じチャンクを永久に回る。再実行は台帳の記録済み
         # 結果に合流するので、縮め直前の失敗でも二重適用にはならない。
@@ -3064,18 +3655,57 @@ def run_sluice_capture(
             chunk_summary["ops_failed"] + chunk_summary["memos_failed"]
             + chunk_summary["promises_failed"]
         )
-        _emit(
-            f"過去の会話を読み返しています…… ({messages_processed} 通まで採取済み)"
+        total_core += chunk_summary["ops_applied"]
+        total_memos += chunk_summary["memos_applied"]
+        total_promises += chunk_summary["promises_applied"]
+        chunk_start_date = chunk_summary.get("period_start")
+        chunk_end_date = chunk_summary.get("period_end")
+        if chunk_start_date and (period_start is None or chunk_start_date < period_start):
+            period_start = chunk_start_date
+        if chunk_end_date and (period_end is None or chunk_end_date > period_end):
+            period_end = chunk_end_date
+        if mode == "persona":
+            _emit(
+                f"過去の会話を読み返しています…… ({messages_processed} 通まで採取済み)"
+            )
+        else:
+            _emit(
+                f"過去の会話から候補を探しています…… ({messages_processed} 通まで処理済み)"
+            )
+
+    # 本人モードのダイジェスト一行 (入口は一本): 1 件以上採取して完走 (= 記録
+    # された範囲を全部通し終えた) したときだけ、本線に一行を立てる。採取ゼロの
+    # 完走・途中終了 (cancelled / cooldown / 例外) では立てない。
+    if mode == "persona" and status == "ok" and captures_applied > 0:
+        if period_start and period_end:
+            period_label = (
+                period_start if period_start == period_end
+                else f"{period_start}〜{period_end}"
+            )
+            period_part = f"（期間 {period_label}、{messages_processed} 通）"
+        else:
+            period_part = f"（{messages_processed} 通）"
+        parts: List[str] = []
+        if total_memos:
+            parts.append(f"手帳のメモ {total_memos} 件")
+        if total_core:
+            parts.append(f"コア記憶の操作 {total_core} 件")
+        if total_promises:
+            parts.append(f"約束の操作 {total_promises} 件")
+        digest_text = (
+            f"過去の会話{period_part}を読み返し、{'・'.join(parts)}を記録した。"
         )
+        _append_capture_digest(persona, digest_text)
 
     LOGGER.info(
-        "[sluice-capture] run closed: persona=%s status=%s chunks=%d "
+        "[sluice-capture] run closed: persona=%s mode=%s status=%s chunks=%d "
         "messages=%d applied=%d failed=%d",
-        persona_id, status, chunks_processed, messages_processed,
+        persona_id, mode, status, chunks_processed, messages_processed,
         captures_applied, captures_failed,
     )
     return {
         "status": status,
+        "mode": mode,
         "chunks_processed": chunks_processed,
         "messages_processed": messages_processed,
         "captures_applied": captures_applied,

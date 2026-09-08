@@ -50,16 +50,22 @@ class PocketbookMemo(BaseModel):
     """メモ一件 (§13.6 の memos)。
 
     本文 (``text``) はペルソナ本人の言葉なので切り詰めない (表示側で折り返す)。
-    ``created_at`` に相当する列は memos に無い — 手帳は日粒度の記録で、時刻を
-    持つのは日付 (``date``) だけ。
+    ``created_at`` に相当する列は memos に無い — 手帳は日粒度の記録で、時刻は
+    日付二つ: ``date`` (書かれた日) と ``event_date`` (できごとの日 — 採取元の
+    会話のメッセージ時刻から機械が刻印。旧行は None)。並び・提示の軸は
+    できごとの日 (None は date で代替)。``origin`` は由来の印
+    ('live' = 定常の採取・本人のスペル / 'readback' = 読み返し /
+    'mechanism' = 機構の候補からの採用。旧行は None = live 相当)。
     """
 
     id: int
-    date: str          # 'YYYY-MM-DD'
+    date: str          # 'YYYY-MM-DD' — 書かれた日
     kind: str          # 'did' (やった) | 'want' (やりたい)
     text: str
     span_start_id: Optional[str] = None
     span_end_id: Optional[str] = None
+    event_date: Optional[str] = None  # 'YYYY-MM-DD' — できごとの日 (機械刻印)
+    origin: Optional[str] = None      # 'live' | 'readback' | 'mechanism'
 
 
 class PocketbookActivity(BaseModel):
@@ -92,7 +98,7 @@ def get_pocketbook(
     include_closed: bool = False,
     manager=Depends(get_manager),
 ):
-    """手帳を読む — アクティビティごとにメモを日付降順で束ねて返す。
+    """手帳を読む — アクティビティごとにメモをできごとの日の降順で束ねて返す。
 
     既定は開いているアクティビティだけ。``include_closed=true`` で閉じたものも
     含める (誕生順は変えない)。読み取り専用 — 書き込み・LLM 呼び出し・Pulse 起動は
@@ -130,9 +136,13 @@ def get_pocketbook(
                                     text=m.text,
                                     span_start_id=m.span_start_id,
                                     span_end_id=m.span_end_id,
+                                    event_date=m.event_date,
+                                    origin=m.origin,
                                 )
-                                # 日付降順 (新しいメモが上)。list_memos は
-                                # (date, id) 昇順なので、その逆順が同順序の反転。
+                                # できごとの日の降順 (新しいメモが上)。list_memos
+                                # は (COALESCE(event_date, date), id) 昇順なので、
+                                # その逆順が同順序の反転 (B-2 — 提示の軸は
+                                # できごとの日)。
                                 for m in reversed(memos)
                             ],
                         )

@@ -15,7 +15,7 @@ import logging
 import threading
 import time
 import uuid
-from typing import Dict, Optional
+from typing import Dict, Literal, Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel
@@ -147,6 +147,52 @@ def list_sluice_skipped_spans_api(persona_id: str, manager=Depends(get_manager))
     return {"spans": spans, "total": len(spans)}
 
 
+@router.get("/{persona_id}/sluice/candidate-memos", tags=["Sluice"])
+def list_sluice_candidate_memos_api(
+    persona_id: str,
+    status: Optional[str] = "open",
+    manager=Depends(get_manager),
+):
+    """機構が拾った手帳のメモ候補の一覧 (読み口 — 第一段は読むだけ)。
+
+    候補は本人の器 (手帳) には入っていない。採用・却下の操作は第二段の UI
+    (docs/intent/sluice_coverage_gaps.md 第二段) で作る。``status`` は既定
+    'open' (未裁定のみ)。'all' で全件。
+    """
+    from sai_memory.memory.storage import (
+        init_sluice_candidate_memos_table,
+        list_sluice_candidate_memos,
+    )
+
+    status_filter = None if status == "all" else status
+
+    persona = _loaded_persona(manager, persona_id)
+    if persona is not None:
+        adapter = persona.sai_memory
+        with adapter._db_lock:
+            init_sluice_candidate_memos_table(adapter.conn)
+            rows = list_sluice_candidate_memos(
+                adapter.conn, status=status_filter,
+            )
+        return {"candidates": rows, "total": len(rows)}
+
+    import sqlite3
+
+    db_path = get_persona_memory_db(persona_id)
+    if not db_path.exists():
+        raise HTTPException(
+            status_code=404,
+            detail=f"Memory database not found for {persona_id}",
+        )
+    conn = sqlite3.connect(str(db_path), check_same_thread=False)
+    try:
+        init_sluice_candidate_memos_table(conn)
+        rows = list_sluice_candidate_memos(conn, status=status_filter)
+    finally:
+        conn.close()
+    return {"candidates": rows, "total": len(rows)}
+
+
 # -----------------------------------------------------------------------------
 # 後から通す採取ジョブ
 # -----------------------------------------------------------------------------
@@ -156,13 +202,20 @@ class SluiceCaptureRequest(BaseModel):
 
     ``dry=True`` はジョブを開始せず、見積もり (対象メッセージ件数と予測
     チャンク数) だけを返す。``model`` は使用モデルの明示指定 (省略 = 本人の
-    モデル。第二段 UI の軽量モデル選択がここに乗る)。
+    モデル。第二段 UI の軽量モデル選択がここに乗る)。``mode`` は判断の主体
+    (docs/intent/sluice_coverage_gaps.md B 節): 'mechanism' (既定 — 機構が
+    候補を拾って置くだけ。本人の器には書かない) / 'persona' (現在の本人が
+    読み返す。コア記憶・手帳・約束を定常のスルースと同じ経路で操作する)。
     """
     dry: bool = False
     model: Optional[str] = None
+    mode: Literal["mechanism", "persona"] = "mechanism"
 
 
-def _run_capture_job(job_id: str, persona, lifecycle, model_name: Optional[str]):
+def _run_capture_job(
+    job_id: str, persona, lifecycle, model_name: Optional[str],
+    mode: str = "mechanism",
+):
     """後から通す採取のジョブ本体 (背景タスク)。"""
     from sea.cancellation import CancellationToken
     from sea.sluice import (
@@ -185,10 +238,11 @@ def _run_capture_job(job_id: str, persona, lifecycle, model_name: Optional[str])
         return
 
     persona_id = getattr(persona, "persona_id", None)
-    _update_job(
-        job_id, status="running",
-        message="過去の会話を読み返して、覚えておくことを探しています...",
-    )
+    if mode == "persona":
+        running_message = "過去の会話を読み返して、覚えておくことを探しています..."
+    else:
+        running_message = "過去の会話から、手帳に書けそうな候補を探しています..."
+    _update_job(job_id, status="running", message=running_message)
     try:
         # 進み具合の分母 (対象メッセージ件数)。見積もりが失敗しても走行は
         # 止めない — 分母なしの進み表示になるだけ。
@@ -217,6 +271,7 @@ def _run_capture_job(job_id: str, persona, lifecycle, model_name: Optional[str])
 
         summary = run_sluice_capture(
             lifecycle, persona,
+            mode=mode,
             model_key=model_name,
             event_callback=_progress,
             cancellation_token=token,
@@ -230,10 +285,16 @@ def _run_capture_job(job_id: str, persona, lifecycle, model_name: Optional[str])
         )
         status = summary.get("status")
         if status == "ok":
-            message = (
-                f"過去の会話 {processed} 通を読み返し、"
-                f"{applied} 件を記録しました"
-            )
+            if mode == "persona":
+                message = (
+                    f"過去の会話 {processed} 通を読み返し、"
+                    f"{applied} 件を記録しました"
+                )
+            else:
+                message = (
+                    f"過去の会話 {processed} 通から候補 {applied} 件を"
+                    "拾いました（採用するまで手帳には入りません）"
+                )
             remaining = int(summary.get("spans_remaining") or 0)
             if remaining:
                 message += f"（未処理の範囲が {remaining} 件残っています）"
@@ -348,6 +409,7 @@ async def start_sluice_capture(
         persona=persona,
         lifecycle=lifecycle,
         model_name=request.model,
+        mode=request.mode,
     )
     return {"job_id": job_id, "status": "started"}
 

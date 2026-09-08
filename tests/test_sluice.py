@@ -901,6 +901,49 @@ class SluiceApplyExtensionTest(_AdapterTestBase):
         row = _read_sluice_record(self.adapter)
         self.assertEqual(row[1], "committed")
 
+    def test_memo_event_date_stamped_from_span_end_message(self):
+        """⭐ 二つの時刻 (B-2): 定常のスルースは担当範囲の末尾メッセージの時刻
+        から event_date を機械で刻印し、origin='live' を持つ。"""
+        from datetime import datetime as _dt, timezone as _tz
+
+        real_ids = []
+        for i in range(2):
+            mid = self.adapter.append_persona_message({
+                "role": "user" if i % 2 == 0 else "assistant",
+                "content": f"実会話 {i}",
+                "timestamp": _dt(2026, 1, 5, 10, 0, i, tzinfo=_tz.utc).isoformat(),
+            })
+            real_ids.append(str(mid))
+        result = {
+            **_sluice_result(),
+            "did_memos": [{"new_activity_name": "散歩", "text": "川沿いを歩いた"}],
+        }
+        msgs = [{"id": rid, "content": "x"} for rid in real_ids]
+        self._run(result, current_messages=msgs)
+        row = self.adapter.conn.execute(
+            "SELECT event_date, origin FROM memos"
+        ).fetchone()
+        end_created = self.adapter.conn.execute(
+            "SELECT created_at FROM messages WHERE id = ?", (real_ids[-1],)
+        ).fetchone()[0]
+        expected = _dt.fromtimestamp(int(end_created)).date().isoformat()
+        self.assertEqual(row[0], expected)
+        self.assertEqual(row[1], "live")
+
+    def test_memo_event_date_null_when_span_end_is_not_in_db(self):
+        """event_date は刻印できなければ NULL (採取は止めない — 読み手が date で
+        代替する)。合成 id (DB に無い) の窓では NULL になる。"""
+        result = {
+            **_sluice_result(),
+            "did_memos": [{"new_activity_name": "散歩", "text": "川沿いを歩いた"}],
+        }
+        self._run(result)  # 既定の窓は合成 id (m0..m4)
+        row = self.adapter.conn.execute(
+            "SELECT event_date, origin FROM memos"
+        ).fetchone()
+        self.assertIsNone(row[0])
+        self.assertEqual(row[1], "live")
+
     def test_span_starts_after_previous_pan_marker(self):
         result = {
             **_sluice_result(),

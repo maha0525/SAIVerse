@@ -160,6 +160,25 @@ class PocketbookApiTest(unittest.TestCase):
         self.assertEqual(memo.span_start_id, "msg-1")
         self.assertEqual(memo.span_end_id, "msg-9")
 
+    def test_pocketbook_memo_carries_event_date_and_origin_and_sorts_by_it(self):
+        """⭐ 二つの時刻と由来 (B-2): API はできごとの日と由来を返し、並びは
+        できごとの日の降順 (NULL は date で代替)。"""
+        act = self._add_activity("小説を書く", origin="sluice")
+        self._add_memo(act.id, "2026-08-22", "did", "第一稿を書いた")
+        self._add_memo(
+            act.id, "2026-09-08", "did", "星の話の構想を練った",
+            event_date="2026-03-01", origin="readback",
+        )
+        resp = get_pocketbook("tester", manager=self.manager)
+        memos = resp.activities[0].memos
+        # 現在の記録 (event_date NULL → date 代替 2026-08-22) が上、読み返しの
+        # 過去 (2026-03-01) が下。
+        self.assertEqual([m.text for m in memos], ["第一稿を書いた", "星の話の構想を練った"])
+        self.assertIsNone(memos[0].event_date)
+        self.assertEqual(memos[0].origin, "live")  # 書き込みの既定
+        self.assertEqual(memos[1].event_date, "2026-03-01")
+        self.assertEqual(memos[1].origin, "readback")
+
     def test_pocketbook_excludes_closed_by_default(self):
         open_act = self._add_activity("開いている活動", born_at=1_700_000_000)
         closed_act = self._add_activity("閉じた活動", born_at=1_700_000_001)

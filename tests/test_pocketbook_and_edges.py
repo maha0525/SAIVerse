@@ -135,6 +135,64 @@ class TestMemos(PocketbookTestBase):
         self.assertEqual(rows[0].kind, "did")
         self.assertEqual(rows[0].text, "冒頭の三行を書いた")
 
+    # -- 二つの時刻と由来 (docs/intent/sluice_coverage_gaps.md B-2) ----------
+
+    def test_add_memo_persists_event_date_and_origin(self):
+        m = pocketbook.add_memo(
+            self.conn, self.act.id, "2026-09-08", "did", "星の章を読み返した",
+            event_date="2026-03-01", origin="readback",
+        )
+        rows = pocketbook.list_memos(self.conn, self.act.id)
+        self.assertEqual([x.id for x in rows], [m.id])
+        self.assertEqual(rows[0].date, "2026-09-08")          # 書かれた日
+        self.assertEqual(rows[0].event_date, "2026-03-01")    # できごとの日
+        self.assertEqual(rows[0].origin, "readback")
+        self.assertEqual(rows[0].effective_date, "2026-03-01")
+
+    def test_memo_defaults_are_live_origin_and_no_event_date(self):
+        pocketbook.add_memo(self.conn, self.act.id, "2026-08-19", "want", "続き")
+        row = pocketbook.list_memos(self.conn, self.act.id)[0]
+        self.assertIsNone(row.event_date)
+        self.assertEqual(row.origin, "live")
+        # NULL の event_date は date で代替される (提示の軸)。
+        self.assertEqual(row.effective_date, "2026-08-19")
+
+    def test_memo_origin_is_a_closed_vocabulary(self):
+        with self.assertRaises(ValueError):
+            pocketbook.add_memo(
+                self.conn, self.act.id, "2026-08-19", "want", "続き",
+                origin="llm_invented",
+            )
+
+    def test_memo_event_date_is_validated_like_date(self):
+        for bad in ("2026-02-31", "きのう", "2026/03/01"):
+            with self.assertRaises(ValueError):
+                pocketbook.add_memo(
+                    self.conn, self.act.id, "2026-08-19", "want", "続き",
+                    event_date=bad,
+                )
+        self.assertEqual(
+            self.conn.execute("SELECT COUNT(*) FROM memos").fetchone()[0], 0,
+        )
+
+    def test_list_memos_sorts_by_event_date_with_date_fallback(self):
+        """⭐ 並びの軸はできごとの日 (NULL は date で代替)。読み返しで今日
+        書かれた過去のメモが、時間軸の本来の場所に並ぶ。"""
+        a = pocketbook.add_memo(
+            self.conn, self.act.id, "2026-08-01", "did", "旧行 (event_date なし)",
+        )
+        b = pocketbook.add_memo(
+            self.conn, self.act.id, "2026-09-08", "did", "読み返しの記録",
+            event_date="2026-03-01", origin="readback",
+        )
+        c = pocketbook.add_memo(
+            self.conn, self.act.id, "2026-09-08", "did", "今日の記録",
+            event_date="2026-09-08",
+        )
+        rows = pocketbook.list_memos(self.conn, self.act.id)
+        # 2026-03-01 (読み返し) < 2026-08-01 (旧行の date 代替) < 2026-09-08。
+        self.assertEqual([x.id for x in rows], [b.id, a.id, c.id])
+
     def test_memo_validation(self):
         with self.assertRaises(ValueError):
             pocketbook.add_memo(self.conn, self.act.id, "2026-08-19", "hope", "x")
