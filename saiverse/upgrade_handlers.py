@@ -1073,4 +1073,24 @@ HANDLERS: List[UpgradeHandler] = [
         run=_no_op_ai_upgrade,
         description="Empty release edge 0.3.9 -> 0.3.10 (code-only release, no data migration).",
     ),
+    # ---- v0.3.11 ----
+    # 新テーブル (sluice_skipped_spans / sluice_candidate_memos) と memos の
+    # 追加列 (event_date / origin) は、ペルソナ読み込み時に adapter が毎回
+    # 冪等に用意する (v0.2 の遅延初期化の教訓) — 更新の鎖に移行は要らない。
+    UpgradeHandler(
+        name="city_noop_v0_3_11",
+        scope="city",
+        from_version="0.3.10",
+        to_version="0.3.11",
+        run=_no_op_city_upgrade,
+        description="Empty release edge 0.3.10 -> 0.3.11 (per-persona schema is ensured eagerly at adapter load; no world-DB migration).",
+    ),
+    UpgradeHandler(
+        name="ai_noop_v0_3_11",
+        scope="ai",
+        from_version="0.3.10",
+        to_version="0.3.11",
+        run=_no_op_ai_upgrade,
+        description="Empty release edge 0.3.10 -> 0.3.11 (per-persona schema is ensured eagerly at adapter load; no world-DB migration).",
+    ),
 ]
