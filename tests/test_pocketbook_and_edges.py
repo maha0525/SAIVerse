@@ -298,12 +298,64 @@ class TestMemos(PocketbookTestBase):
         got_all = pocketbook.list_undigested_want_memos(self.conn)
         self.assertEqual([m.id for m in got_all], [w2.id, w3.id])
 
+    def test_undigested_want_memos_compare_the_event_date(self):
+        """⭐ 消化の判定はできごとの日 (B-2)。
+
+        読み返しで拾った過去の want は、書かれた日が今日なので、書かれた日で
+        比べると「それより後の did」が原理的に存在せず永久に未消化になる。
+        できごとの日で比べれば、より新しいできごとの did が消化する。
+        """
+        # 今日 (書かれた日 = 2026-09-08) の読み返しで拾った、3/01 の want。
+        w = pocketbook.add_memo(
+            self.conn, self.act.id, "2026-09-08", "want", "続きを書きたい",
+            event_date="2026-03-01", origin="readback",
+        )
+        got = pocketbook.list_undigested_want_memos(self.conn, self.act.id)
+        self.assertEqual([m.id for m in got], [w.id])
+
+        # 同じ読み返しで拾った 3/02 のできごとの did が、これを消化する
+        # (書かれた日はどちらも 2026-09-08 で同じ)。
+        pocketbook.add_memo(
+            self.conn, self.act.id, "2026-09-08", "did", "書いた",
+            event_date="2026-03-02", origin="readback",
+        )
+        got = pocketbook.list_undigested_want_memos(self.conn, self.act.id)
+        self.assertEqual(got, [])
+
+    def test_undigested_want_memos_do_not_count_an_earlier_event_as_digestion(self):
+        """できごとの日が want より前の did は消化に数えない (向きを保つ)。"""
+        w = pocketbook.add_memo(
+            self.conn, self.act.id, "2026-09-08", "want", "推敲したい",
+            event_date="2026-03-05", origin="readback",
+        )
+        # 書かれた日 (今日) は want より後だが、できごとは 3/01 で前。
+        pocketbook.add_memo(
+            self.conn, self.act.id, "2026-09-08", "did", "昔書いた",
+            event_date="2026-03-01", origin="readback",
+        )
+        got = pocketbook.list_undigested_want_memos(self.conn, self.act.id)
+        self.assertEqual([m.id for m in got], [w.id])
+
     def test_last_memo_date_for_dormancy_derivation(self):
         self.assertIsNone(pocketbook.get_last_memo_date(self.conn, self.act.id))
         pocketbook.add_memo(self.conn, self.act.id, "2026-08-15", "want", "a")
         pocketbook.add_memo(self.conn, self.act.id, "2026-08-18", "did", "b")
         self.assertEqual(
             pocketbook.get_last_memo_date(self.conn, self.act.id), "2026-08-18")
+
+    def test_last_memo_date_uses_the_event_date(self):
+        """⭐ 眠りの導出材料もできごとの日 (B-2)。
+
+        半年眠っていた活動に読み返しのメモが一件入っただけで「今日まで
+        続いている」と見えてはいけない。
+        """
+        pocketbook.add_memo(self.conn, self.act.id, "2026-03-01", "did", "a")
+        pocketbook.add_memo(
+            self.conn, self.act.id, "2026-09-08", "did", "b",
+            event_date="2026-03-02", origin="readback",
+        )
+        self.assertEqual(
+            pocketbook.get_last_memo_date(self.conn, self.act.id), "2026-03-02")
 
 
 class TestRetryIdempotency(PocketbookTestBase):
@@ -1015,11 +1067,12 @@ class TestEdgeDeletionOnlyIgnoresAMissingTable(PocketbookTestBase):
 
 
 class TestFindMemoByContent(PocketbookTestBase):
-    """内容ベースの重複判定は「同じ日・同じ活動・同じ種類・同じ本文」の四つ組。
+    """重複判定は「同じできごとの日・同じ活動・同じ種類・同じ本文」の四つ組。
 
     出自: docs/issues/sluice_memo_duplicate_across_spans.md (2026-08-22 裁定)。
     手帳は日々の記録なので、日が違えば同じ本文でも別の事実 —— 単純な内容一致で
-    弾くと正しい記録が落ちる。種類 (want / did) も同じ理由で分ける。
+    弾くと正しい記録が落ちる。種類 (want / did) も同じ理由で分ける。日の軸は
+    できごとの日 (docs/intent/sluice_coverage_gaps.md B-2)。
     """
 
     def setUp(self):
@@ -1052,6 +1105,26 @@ class TestFindMemoByContent(PocketbookTestBase):
     def test_a_different_text_is_not_a_duplicate(self):
         self.assertIsNone(pocketbook.find_memo_by_content(
             self.conn, self.act.id, "2026-08-22", "did", "冒頭を書き直した"))
+
+    def test_the_day_is_counted_as_the_event_date(self):
+        """⭐ 「同じ日」はできごとの日で数える (B-2)。
+
+        読み返しで拾った 3/01 のできごとは、書かれた日が今日でも 3/01 の照合で
+        見つかり、今日のできごとの照合では見つからない (別のできごとが重複と
+        して落ちない)。
+        """
+        pocketbook.add_memo(
+            self.conn, self.act.id, "2026-09-08", "did", "星の話を書いた",
+            event_date="2026-03-01", origin="readback",
+        )
+        found = pocketbook.find_memo_by_content(
+            self.conn, self.act.id, "2026-03-01", "did", "星の話を書いた")
+        self.assertIsNotNone(found)
+        self.assertEqual(found.event_date, "2026-03-01")
+        # 書かれた日 (今日) での照合は当たらない —— 今日のできごととして同じ
+        # 本文を書くのは別の事実。
+        self.assertIsNone(pocketbook.find_memo_by_content(
+            self.conn, self.act.id, "2026-09-08", "did", "星の話を書いた"))
 
     def test_invalid_arguments_are_rejected(self):
         """入口の検査は兄弟関数と同じ口 (暗黙変換で救わない)。"""

@@ -178,6 +178,9 @@ class PocketbookApiTest(unittest.TestCase):
         self.assertEqual(memos[0].origin, "live")  # 書き込みの既定
         self.assertEqual(memos[1].event_date, "2026-03-01")
         self.assertEqual(memos[1].origin, "readback")
+        # 眠りの導出材料もできごとの日 — 読み返しの一件で「今日まで続いている」
+        # とは見せない。
+        self.assertEqual(resp.activities[0].last_memo_date, "2026-08-22")
 
     def test_pocketbook_excludes_closed_by_default(self):
         open_act = self._add_activity("開いている活動", born_at=1_700_000_000)

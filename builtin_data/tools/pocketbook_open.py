@@ -328,7 +328,10 @@ def _render_whole_book(
 ) -> str:
     lines: List[str] = ["【手帳】"]
 
-    # 1) 目次 — 開いているアクティビティごとに件数と最後に書いた日。
+    # 1) 目次 — 開いているアクティビティごとに件数と最後のできごとの日。軸は
+    # メモ一行の日付 (_memo_line) と同じできごとの日 (effective_date) — 書かれた
+    # 日で取ると、読み返しのメモ一件で眠っている活動が今日まで続いて見える
+    # (docs/intent/sluice_coverage_gaps.md B-2)。
     lines.append("")
     lines.append("■ 目次（メモ欄のアクティビティ）")
     if not activities:
@@ -336,13 +339,13 @@ def _render_whole_book(
     else:
         for act in activities:
             memos = memos_by_activity.get(act.id, [])
-            last_date = max((m.date for m in memos), default=None)
+            last_date = max((m.effective_date for m in memos), default=None)
             if last_date is None:
                 lines.append(f"- {act.name}（メモ 0 件、まだ書いていません）")
             else:
                 lines.append(
                     f"- {act.name}（メモ {len(memos)} 件、"
-                    f"最後に書いた日 {last_date}）"
+                    f"最後のできごと {last_date}）"
                 )
 
     # 2) 最近のページ — 全アクティビティ横断で新しい順。

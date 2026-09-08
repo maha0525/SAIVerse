@@ -170,9 +170,9 @@ class PocketbookOpenSpellTest(_PocketbookSpellTestBase):
         self._add_memo(drawing.id, "2026-08-21", "did", "クロッキーを30分")
 
         text = self._open()
-        # 目次: 件数と最後に書いた日。
-        self.assertIn("- 小説を書く（メモ 2 件、最後に書いた日 2026-08-22）", text)
-        self.assertIn("- 絵の練習（メモ 1 件、最後に書いた日 2026-08-21）", text)
+        # 目次: 件数と最後のできごとの日。
+        self.assertIn("- 小説を書く（メモ 2 件、最後のできごと 2026-08-22）", text)
+        self.assertIn("- 絵の練習（メモ 1 件、最後のできごと 2026-08-21）", text)
         # 最近のページ: 全アクティビティ横断で新しい順。
         page = text.split("■ 最近のページ")[1]
         lines = [ln for ln in page.splitlines() if ln.startswith("- ")]
@@ -203,6 +203,20 @@ class PocketbookOpenSpellTest(_PocketbookSpellTestBase):
             lines[1],
             "- 2026-03-01 [やった] 小説を書く: 星の話の構想を練った（読み返しで記録）",
         )
+
+    def test_index_last_date_is_the_event_date(self):
+        """⭐ 目次の「最後のできごと」もできごとの日 (B-2): 半年眠っていた活動が、
+        読み返しのメモ一件で今日まで続いているようには見えない。"""
+        novel = self._add_activity("小説を書く")
+        self._add_memo(novel.id, "2026-03-01", "did", "第一稿を書いた")
+        # 今日 (2026-09-08) の読み返しで拾われた、2026-03-02 のできごと。
+        self._add_memo(
+            novel.id, "2026-09-08", "did", "推敲した",
+            event_date="2026-03-02", origin="readback",
+        )
+        text = self._open()
+        self.assertIn("- 小説を書く（メモ 2 件、最後のできごと 2026-03-02）", text)
+        self.assertNotIn("最後のできごと 2026-09-08", text)
 
     def test_paging_axis_is_the_event_date(self):
         """めくる鍵 (before) も、並びと同じできごとの日の軸で切れる。"""

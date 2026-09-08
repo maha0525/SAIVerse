@@ -988,6 +988,47 @@ class SluiceApplyExtensionTest(_AdapterTestBase):
         record = _read_sluice_record(self.adapter)[0]
         self.assertIn("既に手帳にあるため採りませんでした", record)
 
+    def test_the_same_memo_on_a_different_event_day_is_written(self):
+        """⭐ 重複判定の日はできごとの日 (B-2)。
+
+        担当範囲が別の日のできごとを指しているなら、同じ本文でも別の事実
+        (「今日も小説を書いた」が二日続くのと同じ)。書かれた日 (どちらも今日)
+        で照合すると、二日目の記録が重複として黙って落ちる。
+        """
+        from datetime import datetime as _dt, timezone as _tz
+
+        def _messages_on(day, prefix):
+            ids = []
+            for i in range(2):
+                mid = self.adapter.append_persona_message({
+                    "role": "user" if i % 2 == 0 else "assistant",
+                    "content": f"{prefix} {i}",
+                    "timestamp": _dt(
+                        2026, 1, day, 10, 0, i, tzinfo=_tz.utc
+                    ).isoformat(),
+                })
+                ids.append(str(mid))
+            return [{"id": rid, "content": "x"} for rid in ids]
+
+        result = {
+            **_sluice_result(),
+            "did_memos": [
+                {"new_activity_name": "小説を書く", "text": "星を拾う話の続きを書いた"},
+            ],
+        }
+        summary1, _ = self._run(result, current_messages=_messages_on(5, "五日"))
+        self.assertEqual(summary1["memos_applied"], 1)
+        summary2, _ = self._run(
+            result, current_messages=_messages_on(20, "二十日"), run_id="run-2",
+        )
+        self.assertEqual(summary2["memos_applied"], 1)
+
+        rows = self.adapter.conn.execute(
+            "SELECT event_date FROM memos ORDER BY id ASC"
+        ).fetchall()
+        self.assertEqual(len(rows), 2)
+        self.assertNotEqual(rows[0][0], rows[1][0])
+
     def test_prompt_states_the_span_scope(self):
         """⭐ 手帳の節で、今回の対象範囲を本人へ明示する (重複の供給源を塞ぐ)。"""
         msgs = [{"id": f"m{i}", "content": "x"} for i in range(5)]

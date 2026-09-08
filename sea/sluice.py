@@ -893,10 +893,11 @@ def _apply_memos(
       不正 (空本文・一覧外 id) はその要素だけ捨てるが、ストレージ例外は送出する
       (スルース失敗 = 退場停止のゲートに乗せる)。
     - 内容ベースの重複防止 (コア記憶 add の内容一致ガードと同じ二段構え): 同じ
-      日・同じアクティビティ・同じ種類・同じ本文の既存メモがあればスキップする
-      (成功扱い)。冪等キーは担当範囲が変わると別キーになるので、繰り越された
-      回の再提案を止められない。照合は書き込みと同じロック・同じトランザク
-      ションの中で行う (docs/issues/sluice_memo_duplicate_across_spans.md)。
+      できごとの日・同じアクティビティ・同じ種類・同じ本文の既存メモがあれば
+      スキップする (成功扱い)。冪等キーは担当範囲が変わると別キーになるので、
+      繰り越された回の再提案を止められない。照合は書き込みと同じロック・同じ
+      トランザクションの中で行う
+      (docs/issues/sluice_memo_duplicate_across_spans.md)。
     """
     items: List[Tuple[str, Any]] = (
         [("want", m) for m in (want_memos or [])]
@@ -981,8 +982,13 @@ def _apply_memos(
                 # 内容ベースの重複防止 — 同じロック・同じトランザクションの中で
                 # 照合してから書く (check-then-act の隙間を作らない)。同じ束の中で
                 # 先に書いたメモも同じ接続から見えるので、一回の結果に同じメモが
-                # 二つ入っていた場合もここで止まる。
-                duplicate = find_memo_by_content(conn, aid, today, kind, text)
+                # 二つ入っていた場合もここで止まる。照合する日はこれから書く
+                # メモの**できごとの日** (event_date、無ければ今日) — 書かれた日で
+                # 照合すると、読み返しで拾った別の日のできごとが今日の記録と
+                # ぶつかって落ちる (B-2)。
+                duplicate = find_memo_by_content(
+                    conn, aid, event_date or today, kind, text
+                )
                 if duplicate is not None:
                     applied += 1
                     lines.append(

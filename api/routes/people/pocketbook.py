@@ -72,7 +72,8 @@ class PocketbookActivity(BaseModel):
     """アクティビティ一件 (§13.6 の activities) と、そのメモ (日付降順)。
 
     誕生の時刻は ``born_at`` (epoch 秒) で、activities に ``created_at`` 列は
-    無い。``last_memo_date`` は「眠っている」の導出材料 (§13.1 — 列にしない)。
+    無い。``last_memo_date`` は「眠っている」の導出材料 (§13.1 — 列にしない) で、
+    値は最後の**できごとの日** (event_date、無ければ書かれた日で代替)。
     """
 
     id: int
@@ -115,10 +116,15 @@ def get_pocketbook(
                 rows: List[PocketbookActivity] = []
                 for act in activities:
                     memos = list_memos(adapter.conn, act.id)
-                    # 最終メモ日付 (§13.1 の「眠っている」の導出材料) は取得済みの
-                    # メモから取る — get_last_memo_date と同じ集合の MAX(date) で、
-                    # アクティビティ数ぶんの追加クエリを撃たない。
-                    last_date = max((m.date for m in memos), default=None)
+                    # 最後のできごとの日 (§13.1 の「眠っている」の導出材料) は
+                    # 取得済みのメモから取る — get_last_memo_date と同じ集合の
+                    # 最大値で、アクティビティ数ぶんの追加クエリを撃たない。軸は
+                    # できごとの日 (event_date、無ければ date で代替) — 書かれた日
+                    # で取ると、読み返しのメモ一件で眠っている活動が今日まで
+                    # 続いて見える (B-2)。
+                    last_date = max(
+                        (m.effective_date for m in memos), default=None
+                    )
                     rows.append(
                         PocketbookActivity(
                             id=act.id,

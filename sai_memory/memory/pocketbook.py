@@ -3,7 +3,7 @@
 正典: docs/intent/autonomous_behavior_v3.md §13.1 / §13.6 (2026-08-18 まはー承認)。
 
 - **activities**: 活動粒度の名前と開閉状態。「眠っている」は列にせず、
-  最終メモの日付 (:func:`get_last_memo_date`) から導出する。
+  最後のできごとの日 (:func:`get_last_memo_date`) から導出する。
 - **memos**: 日付つき一行 (やった did / やりたい want)。本文はペルソナ本人の
   言葉で、システムは構造だけを読み本文を解釈しない。``span_start_id`` /
   ``span_end_id`` は生ログ (messages.id) への降り口 — 本人には書かせず
@@ -504,16 +504,23 @@ def find_memo_by_content(
     kind: str,
     text: str,
 ) -> Optional[Memo]:
-    """同じ日・同じアクティビティ・同じ種類・同じ本文のメモを探す (重複防止用)。
+    """同じできごとの日・同じアクティビティ・同じ種類・同じ本文のメモを探す。
 
-    冪等キー (``idem_key``) が守るのは「同じ担当範囲の同じ番号」の再適用だけ
-    なので、担当範囲が変われば同じ内容でも別キーになって通る。退場が次回へ
-    繰り越された回は採取済みの会話が窓に残り、本人が同じメモをもう一度返す —
-    その内容ベースの重複をここで見つける。
+    重複防止用。冪等キー (``idem_key``) が守るのは「同じ担当範囲の同じ番号」の
+    再適用だけなので、担当範囲が変われば同じ内容でも別キーになって通る。退場が
+    次回へ繰り越された回は採取済みの会話が窓に残り、本人が同じメモをもう一度
+    返す — その内容ベースの重複をここで見つける。
 
     日付を条件に含めるのは、手帳が日々の記録だから — 「今日も小説を書いた」が
     二日続くのは重複ではなく事実で、単純な内容一致で弾くと正しい記録が落ちる。
     種類 (want / did) も分けるのは同じ理由 (「やりたい」と「やった」は別の記録)。
+
+    その日は**できごとの日**で数える — ``date`` 引数には照合したいメモの
+    できごとの日 (書き込む側の ``event_date``、無ければ書かれた日) を渡し、
+    既存行の側も ``COALESCE(event_date, date)`` で比べる
+    (docs/intent/sluice_coverage_gaps.md B-2)。書かれた日で比べると、読み返しで
+    拾った三月の記録と今日の記録が「同じ日」に見えて、別のできごとが重複として
+    落ちる。
 
     照合は書き込みと同じトランザクションの中で行うこと (check-then-act の隙間を
     作らない)。出自: docs/issues/sluice_memo_duplicate_across_spans.md。
@@ -526,7 +533,8 @@ def find_memo_by_content(
         raise ValueError(f"memo text must be a string, got: {text!r}")
     row = conn.execute(
         f"SELECT {_MEMO_COLUMNS} FROM memos "
-        "WHERE activity_id = ? AND date = ? AND kind = ? AND text = ? "
+        "WHERE activity_id = ? AND COALESCE(event_date, date) = ? "
+        "AND kind = ? AND text = ? "
         "ORDER BY id ASC LIMIT 1",
         (activity_id, date, kind, text),
     ).fetchone()
@@ -678,9 +686,14 @@ def list_undigested_want_memos(
 ) -> List[Memo]:
     """未消化のやりたいメモを導出する (§13.6 — 列ではなく導出)。
 
-    未消化 = 同じアクティビティに、その want メモの日付より**後**の did メモが
-    無いこと。同日の did は消化とみなさない (「その日付より後」の字義通り)。
+    未消化 = 同じアクティビティに、その want メモの日より**後**の did メモが
+    無いこと。同じ日の did は消化とみなさない (「その日より後」の字義通り)。
     activity_id を渡すとそのアクティビティだけに絞る。
+
+    比べる日は**できごとの日** (event_date、無ければ書かれた日 date で代替 —
+    docs/intent/sluice_coverage_gaps.md B-2)。書かれた日で比べると、読み返しで
+    拾った過去の want は作成日が今日になるため、それより後の did が原理的に
+    存在せず、永久に未消化のまま居座る。
     """
     where = "w.kind = 'want'"
     params: tuple = ()
@@ -698,9 +711,10 @@ def list_undigested_want_memos(
               SELECT 1 FROM memos d
               WHERE d.activity_id = w.activity_id
                 AND d.kind = 'did'
-                AND d.date > w.date
+                AND COALESCE(d.event_date, d.date)
+                    > COALESCE(w.event_date, w.date)
           )
-        ORDER BY w.date ASC, w.id ASC
+        ORDER BY COALESCE(w.event_date, w.date) ASC, w.id ASC
         """,
         params,
     )
@@ -708,13 +722,18 @@ def list_undigested_want_memos(
 
 
 def get_last_memo_date(conn: sqlite3.Connection, activity_id: int) -> Optional[str]:
-    """アクティビティの最終メモ日付 ('YYYY-MM-DD')。メモが無ければ None。
+    """アクティビティの最後のできごとの日 ('YYYY-MM-DD')。メモが無ければ None。
 
     「眠っている」状態の導出材料 (§13.1 — 眠りは列にせずここから導く)。
+
+    取るのは**できごとの日**の最大値 (event_date、無ければ書かれた日 date で
+    代替 — docs/intent/sluice_coverage_gaps.md B-2)。書かれた日で取ると、半年
+    眠っていた活動でも読み返しのメモが一件入った瞬間に「今日まで続いている」
+    と見えてしまい、眠りの導出が嘘になる。
     """
     _validate_activity_id(activity_id)
     row = conn.execute(
-        "SELECT MAX(date) FROM memos WHERE activity_id = ?",
+        "SELECT MAX(COALESCE(event_date, date)) FROM memos WHERE activity_id = ?",
         (activity_id,),
     ).fetchone()
     return row[0] if row and row[0] is not None else None
