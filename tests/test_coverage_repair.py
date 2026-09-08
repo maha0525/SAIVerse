@@ -962,6 +962,33 @@ class TestRepairCompletionBreakdown:
         assert "隣のあらすじに合流 2 件" in job["message"]
         assert "残り 3 件（処理できなかった記録のみ）" in job["message"]
 
+    def test_fold_only_run_switches_the_base_message(
+        self, adapter, session_factory,
+    ):
+        """編纂ゼロ・まとめ (束ね) だけの走行は「編纂しました」と言わない —
+        実際にした仕事 (あらすじを大きな流れにまとめた) を言う。"""
+        job = self._run_ok_job(adapter, session_factory, {
+            "compiled_messages": 0, "absorbed_messages": 0,
+            "silent_messages": 0, "silent_runs": 0,
+            "consolidated_folds": 3,
+        })
+        assert job["status"] == "completed"
+        assert "編纂しました" not in job["message"]
+        assert "あらすじを大きな流れにまとめました" in job["message"]
+        assert "まとめ 3 件" in job["message"]
+
+    def test_folds_join_the_breakdown_parts(self, adapter, session_factory):
+        """編纂とまとめの両方があった走行は、従来の完了文にまとめ件数を併記する。"""
+        job = self._run_ok_job(adapter, session_factory, {
+            "compiled_messages": 3, "absorbed_messages": 0,
+            "silent_messages": 0, "silent_runs": 0,
+            "consolidated_folds": 2,
+        })
+        assert job["status"] == "completed"
+        assert "あらすじになっていなかった過去の会話を編纂しました" in job["message"]
+        assert "あらすじにした 3 件" in job["message"]
+        assert "まとめ 2 件" in job["message"]
+
 
 class TestSilentOnlyRunEndToEnd:
     """発話ゼロの run しか無い補修の走行 — 仕事なしの早期 return でも内訳が

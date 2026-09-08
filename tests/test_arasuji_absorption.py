@@ -946,6 +946,7 @@ class TestGenerateChronicleWiring:
             "deferred_messages": 0,
             "deferred_runs": 0,
             "skipped_messages": 0,
+            "consolidated_folds": 0,
         }
         # pop は消費する — 二度目は None (次の走行の値と混ざらない)
         assert lifecycle.pop_last_chronicle_breakdown(PERSONA_ID) is None

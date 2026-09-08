@@ -222,6 +222,7 @@ def estimate_chronicle_cost(
             is_free_tier=estimate.is_free_tier,
             currency=estimate.currency,
             repair_incomplete=repair_incomplete,
+            consolidation_calls=estimate.consolidation_calls,
         )
     finally:
         conn.close()
@@ -1353,16 +1354,23 @@ def _run_coverage_repair_job(
                 compiled = int(breakdown.get("compiled_messages") or 0)
                 absorbed = int(breakdown.get("absorbed_messages") or 0)
                 silent = int(breakdown.get("silent_messages") or 0)
+                folds = int(breakdown.get("consolidated_folds") or 0)
                 # 処理できなかった分 = 吸収の skip で未被覆のまま残った分 +
                 # fold 照会失敗で見送った分。どちらも再実行で再計画される。
                 unprocessed = (
                     int(breakdown.get("skipped_messages") or 0)
                     + int(breakdown.get("deferred_messages") or 0)
                 )
+                if not compiled and not absorbed and folds:
+                    # 編纂ゼロ・まとめだけの走行 — 「編纂しました」は嘘に
+                    # なるので、実際にした仕事 (まとめ) を言う。
+                    message = "あらすじを大きな流れにまとめました"
                 if compiled:
                     parts.append(f"あらすじにした {compiled} 件")
                 if absorbed:
                     parts.append(f"隣のあらすじに合流 {absorbed} 件")
+                if folds:
+                    parts.append(f"まとめ {folds} 件")
                 remaining = silent + unprocessed
                 if silent and unprocessed:
                     parts.append(

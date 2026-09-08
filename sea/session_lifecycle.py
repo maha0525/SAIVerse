@@ -4861,7 +4861,9 @@ class SessionLifecycle:
         はその run 数) / ``skipped_messages`` = 吸収の skip で未被覆のまま
         残った分 (``skipped_reasons`` は理由別 {理由: メッセージ数}) /
         ``deferred_messages`` = fold 照会失敗で吸収を見送った分
-        (``deferred_runs`` はその run 数)。
+        (``deferred_runs`` はその run 数)。``consolidated_folds`` = この走行で
+        確定した束ね (一次あらすじを上位へまとめた回数) — 編纂ゼロで束ねだけの
+        走行が「編纂しました」という嘘の完了文にならないための材料。
         """
         with self._chronicle_failures_lock:
             self._chronicle_breakdowns[
@@ -5225,6 +5227,7 @@ class SessionLifecycle:
             compiled: int, absorbed: int, *,
             skipped_messages: int = 0,
             skipped_reasons: Optional[Dict[str, int]] = None,
+            consolidated_folds: int = 0,
         ) -> None:
             """走行の内訳 (機構 G) を記録する — 補修ジョブが完了文へ写す。
 
@@ -5246,6 +5249,7 @@ class SessionLifecycle:
                 "deferred_messages": _deferred_tiny_messages,
                 "deferred_runs": _deferred_tiny_runs,
                 "skipped_messages": skipped_messages,
+                "consolidated_folds": consolidated_folds,
             }
             if skipped_reasons:
                 payload["skipped_reasons"] = dict(skipped_reasons)
@@ -6049,6 +6053,9 @@ class SessionLifecycle:
             _absorbed_messages,
             skipped_messages=_skipped_messages,
             skipped_reasons=_skipped_reasons,
+            # この走行で確定した束ねの実数 — 編纂ゼロ・束ねだけの走行でも
+            # 完了文が仕事の実体 (まとめ) を言えるようにする。
+            consolidated_folds=consolidated_count,
         )
 
         # Notify frontend that generation is complete

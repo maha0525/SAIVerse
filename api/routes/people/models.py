@@ -492,6 +492,10 @@ class ChronicleCostEstimate(BaseModel):
     # Chronicle タブの帯が「前回の処理が完了していません。再実行してください」
     # を併記するための印。
     repair_incomplete: bool = False
+    # 一次あらすじを上位へまとめる作業 (束ね) の残り回数の dry 予測。
+    # 未編纂ゼロでもこれが 1 以上なら補修入口 (帯 + 確認モーダル) を出す —
+    # 畳みだけが残った状態の正常化経路が会話 (Metabolism) しか無い穴を塞ぐ。
+    consolidation_calls: int = 0
 
 
 class GenerationJobStatus(BaseModel):
