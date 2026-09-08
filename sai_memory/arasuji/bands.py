@@ -38,6 +38,7 @@ from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 
+from sai_memory.arasuji.alignment import DEFAULT_TARGET_CHARS
 from sai_memory.arasuji.storage import (
     ArasujiEntry,
     _get_chronicle_page_row,
@@ -63,6 +64,19 @@ BAND_CHAR_KEEP = 2_500
 
 #: 計画時の親あらすじ字数の見込み (LLM 指示は 5〜8 文 ≒ 500 字)。
 EST_PARENT_CHARS = 500
+
+#: 畳み 1 回の材料の上限 — 畳み範囲に入る子エントリの本文字数の合計
+#: (2026-09-08 まはー裁定)。U = 一次あらすじ 1 個が標準で覆う材料の字数
+#: (alignment.DEFAULT_TARGET_CHARS = 1 万字) の半分。半分にするのは、
+#: あらすじは既に圧縮された文章で、同じ字数でも生の会話より多くの出来事を
+#: 運ぶため — 親 1 本に握らせる量を生会話の U と同格にしない。子 1 本
+#: 300〜800 字の実態で親 1 本あたり子 7〜15 本になり、旧設計 (W4 前) の
+#: 「Lv1 を 10 本で Lv2 一本」と同じ粒感に戻る。恒常運転 (あふれたらすぐ
+#: 畳む) では区間が小さく効かないが、全量補修・大量インポートの一括編纂では
+#: 区間が巨大になり、上限なしだと (a) 数十本を 1 個の親に握らせる粗い上位
+#: あらすじができ、(b) dry 計画が「巨大区間 = 畳み 1 回」と数えて補修の
+#: 束ね予算が枯渇する (2026-09-08 実機で確認)。
+FOLD_MATERIAL_CHAR_LIMIT = DEFAULT_TARGET_CHARS // 2
 
 
 def estimate_leaf_chars(kind: str, messages: Sequence, digest_text) -> int:
@@ -621,6 +635,12 @@ def _plan_fold_for_level(row: Sequence[_RowItem]) -> Optional[List[_RowItem]]:
 
     どの区間も 2 件未満なら畳まない (1 個を 1 個に要約し直すのは無意味 —
     次の到着か境界の解消を待つ)。
+
+    選んだ区間は先頭 (古い側) から材料の合計字数が
+    :data:`FOLD_MATERIAL_CHAR_LIMIT` を超えない範囲に切り詰める (ただし最低
+    2 本は必ず含める — 2 本未満に切ると過大な子が永久に畳まれず滞留する)。
+    切り詰めで残った分は :func:`_plan_folds` の次周が拾う (2026-09-08
+    まはー裁定 — 理由は定数のコメント)。
     """
     eligible_chars = sum(i.chars for i in row if not i.excluded)
     if eligible_chars <= BAND_CHAR_LIMIT:
@@ -652,8 +672,18 @@ def _plan_fold_for_level(row: Sequence[_RowItem]) -> Optional[List[_RowItem]]:
     if current:
         segments.append(current)
     for segment in segments:
-        if len(segment) >= 2:
-            return segment
+        if len(segment) < 2:
+            continue
+        # 材料上限で切り詰める: 先頭 (古い側) から本文字数を積み、上限を
+        # 超えない範囲で返す。最低 2 本は超えていても含める。
+        trimmed: List[_RowItem] = []
+        total = 0
+        for item in segment:
+            if len(trimmed) >= 2 and total + item.chars > FOLD_MATERIAL_CHAR_LIMIT:
+                break
+            trimmed.append(item)
+            total += item.chars
+        return trimmed
     return None
 
 

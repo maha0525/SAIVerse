@@ -27,6 +27,7 @@ from sai_memory.arasuji.bands import (
     BAND_CHAR_KEEP,
     BAND_CHAR_LIMIT,
     EST_PARENT_CHARS,
+    FOLD_MATERIAL_CHAR_LIMIT,
     _any_level_over_limit,
     _plan_folds,
     _RowItem,
@@ -207,6 +208,76 @@ class TestMinimumMembers(BandTestBase):
         # 超過しているが、残す量を確保すると畳み範囲が 1 件になる → 待つ。
         self.assertEqual(plan_band_overflow(self.conn), 0)
         self.assertEqual(run_band_overflow(self.conn, _Client()), 0)
+
+
+class TestFoldMaterialCap(BandTestBase):
+    """畳み 1 回の材料上限 (FOLD_MATERIAL_CHAR_LIMIT = U/2、2026-09-08 裁定)。
+
+    恒常運転 (あふれたらすぐ畳む) では区間が小さく効かないが、全量補修・
+    大量インポートの一括編纂では無境界の区間が巨大になる。上限なしだと
+    数十本を 1 個の親に握らせる粗い上位あらすじができ、dry 計画も
+    「巨大区間 = 畳み 1 回」と数えて補修の束ね予算が枯渇していた
+    (2026-09-08 実機で確認、W4 移行が旧 consolidation_size=10 の「量の上限」
+    の役割を引き継ぎ損ねていた回帰)。
+    """
+
+    @staticmethod
+    def _pure_row(n, chars):
+        """DB なしの純計画用の並び (レベル1)。"""
+        return {1: [
+            _RowItem(coverage=10_000, chars=chars,
+                     start_time=1000 + i * 100, end_time=1000 + i * 100 + 99)
+            for i in range(n)
+        ]}
+
+    def test_long_unbounded_run_splits_into_capped_folds(self):
+        # 500 字 × 30 本 = 15,000 字の無境界区間。旧仕様は「残す量より古い側」
+        # 25 本を丸ごと 1 fold にしたが、新仕様は材料合計が上限 (U/2 = 5,000)
+        # 以下の複数 fold に割れる。
+        rows = self._pure_row(30, 500)
+        folds = _plan_folds(rows)
+        self.assertGreaterEqual(len(folds), 2, "巨大区間が 1 fold に握られている")
+        for fold in folds:
+            self.assertGreaterEqual(len(fold.items), 2)
+            self.assertLessEqual(
+                sum(i.chars for i in fold.items), FOLD_MATERIAL_CHAR_LIMIT,
+            )
+
+    def test_two_oversized_heads_still_fold_as_a_pair(self):
+        # 先頭 2 本だけで上限を超える (3,000 + 3,000 = 6,000 > 5,000) ケース
+        # でも 2 本は畳む — 2 本未満に切ると過大な子が永久に畳まれず滞留する。
+        rows = {1: []}
+        for i, chars in enumerate([3_000, 3_000, 600, 600, 600, 600]):
+            rows[1].append(_RowItem(
+                coverage=10_000, chars=chars,
+                start_time=1000 + i * 100, end_time=1000 + i * 100 + 99,
+            ))
+        folds = _plan_folds(rows)
+        self.assertGreaterEqual(len(folds), 1)
+        first = folds[0]
+        self.assertEqual(len(first.items), 2)
+        self.assertEqual(sum(i.chars for i in first.items), 6_000)
+
+    def test_dry_count_matches_execution_count_on_bulk_backlog(self):
+        # 予算枯渇の回帰: dry (plan_band_overflow) と実行の畳み総数が同じ入力で
+        # 一致する。LLM 出力を見込み (EST_PARENT_CHARS=500) と同じ長さにして、
+        # generate_chronicle と同じく承認件数を予算に繰り返し呼ぶ。
+        for i in range(30):
+            _entry(self.conn, start=1000 + i * 100, coverage=10_000, chars=500)
+        approved = plan_band_overflow(self.conn)
+        self.assertGreaterEqual(approved, 2, "dry が巨大区間を 1 回と数えている")
+        client = _Client(response="ま" * EST_PARENT_CHARS)
+        total = 0
+        while total < approved:
+            created = run_band_overflow(
+                self.conn, client, max_folds=approved - total,
+            )
+            if created == 0:
+                break
+            total += created
+        self.assertEqual(total, approved)
+        # 予算内で帯は静止している (肥大したまま予算切れにならない)。
+        self.assertEqual(plan_band_overflow(self.conn), 0)
 
 
 class TestExcluded(BandTestBase):
