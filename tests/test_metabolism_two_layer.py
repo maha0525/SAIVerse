@@ -230,18 +230,70 @@ class ChronicleClaimTest(unittest.TestCase):
                       side_effect=RuntimeError("skip entity extraction")):
             return lifecycle.generate_chronicle(self._persona(), force=True)
 
-    def test_same_window_second_begin_is_skipped(self):
-        """① 同じ提示コンテキストの二重実行は claim (created=False) でスキップされる。"""
+    def test_same_window_after_completed_supersedes_and_reruns(self):
+        """① 前回 completed の同鍵は退避 (supersede) されて再実行が走る
+        (2026-09-08 改訂 — docs/intent/execution_ledger.md §11.2)。
+
+        旧仕様はここで「completed 行がブロック → deferred」を固定していたが、
+        Chronicle 全削除・インポート直後の補修のように鍵 (範囲の末尾メッセージ
+        ID) が前進しない形では再編纂が永久に塞がるため、completed はキーを
+        #superseded- 付きで退避して新しい走行を通す裁定に変えた。二重 LLM
+        コストの安全網は台帳ではなく arasuji の source_ids スキップ (FakeExecutor
+        は arasuji_entries に書かない = 成果物が消えた全削除後の形の再現)。"""
+        from saiverse.execution_ledger import STATUS_COMPLETED
+
         lifecycle = self._make_lifecycle()
         first = self._generate(lifecycle)
         self.assertEqual(first, "ok")
         self.assertEqual(len(FakeExecutor.calls), 1)
 
-        # FakeExecutor は arasuji_entries に書かないため提示コンテキストは同一のまま。
-        # 台帳の dedup だけが二重編纂 (二重 LLM コスト) を止める。
+        key = f"{PERSONA_ID}:{self._message_ids()[-1]}"
+        first_row = self.ledger.find_execution("metabolism.run", key)
+        self.assertIsNotNone(first_row)
+        first_id = first_row["execution_id"]
+        self.assertEqual(first_row["status"], STATUS_COMPLETED)
+
+        # 同じ提示コンテキスト: completed 行は退避され、新しい走行が走る
         second = self._generate(lifecycle)
-        self.assertEqual(second, "deferred")
-        self.assertEqual(len(FakeExecutor.calls), 1)  # 生成は走らない
+        self.assertEqual(second, "ok")
+        self.assertEqual(len(FakeExecutor.calls), 2)
+
+        # 旧行はキーを #superseded- 付きで退避され、completed のまま残る
+        old = self.ledger.get_execution(first_id)
+        self.assertEqual(old["status"], STATUS_COMPLETED)
+        self.assertEqual(
+            old["idempotency_key"], f"{key}#superseded-{first_id[:8]}",
+        )
+        # 正キーは新しい走行の行が持つ
+        fresh = self.ledger.find_execution("metabolism.run", key)
+        self.assertIsNotNone(fresh)
+        self.assertNotEqual(fresh["execution_id"], first_id)
+
+    def test_supersede_failure_defers_instead_of_running_untracked(self):
+        """① completed の退避に失敗したら "deferred" で見送る — 追跡外
+        (claim なし) で走らせない (unknown の照合失敗と同じ規則)。"""
+        from saiverse.execution_ledger import (
+            STATUS_COMPLETED, ExecutionLedgerError,
+        )
+
+        lifecycle = self._make_lifecycle()
+        self.assertEqual(self._generate(lifecycle), "ok")
+        self.assertEqual(len(FakeExecutor.calls), 1)
+
+        key = f"{PERSONA_ID}:{self._message_ids()[-1]}"
+        first_id = self.ledger.find_execution("metabolism.run", key)["execution_id"]
+
+        with patch.object(
+            self.ledger, "supersede_completed",
+            side_effect=ExecutionLedgerError("db down"),
+        ):
+            self.assertEqual(self._generate(lifecycle), "deferred")
+        self.assertEqual(len(FakeExecutor.calls), 1)
+
+        # 行は completed のまま、鍵も元のまま (次の claim が再び退避を試みる)
+        row = self.ledger.get_execution(first_id)
+        self.assertEqual(row["status"], STATUS_COMPLETED)
+        self.assertEqual(row["idempotency_key"], key)
 
     def test_failed_generation_returns_failed_and_same_window_retries(self):
         """② (編纂側) 生成失敗 → "failed"。failed claim はキー退避されるため
@@ -257,9 +309,11 @@ class ChronicleClaimTest(unittest.TestCase):
         self.assertEqual(self._generate(lifecycle), "ok")
         self.assertEqual(len(FakeExecutor.calls), 2)
 
-        # 完了後の同じ提示コンテキスト: completed 行がブロック → deferred (二重編纂なし)
-        self.assertEqual(self._generate(lifecycle), "deferred")
-        self.assertEqual(len(FakeExecutor.calls), 2)
+        # 完了後の同じ提示コンテキスト: completed 行も退避されて再実行が走る
+        # (2026-09-08 改訂 — 旧仕様の「completed がブロック → deferred」は
+        # 全削除後の再編纂を永久に塞ぐため撤回。intent §11.2)
+        self.assertEqual(self._generate(lifecycle), "ok")
+        self.assertEqual(len(FakeExecutor.calls), 3)
 
     def test_progress_heartbeats_the_ledger_row(self):
         """進捗を画面へ流す場所が台帳の心拍 (touch_running) にもなる
@@ -322,9 +376,10 @@ class ChronicleClaimTest(unittest.TestCase):
         self.assertNotEqual(fresh["execution_id"], stale_id)
         self.assertEqual(fresh["status"], STATUS_COMPLETED)
 
-        # 新しい行が completed で塞いだ後は従来どおり deferred (二重編纂なし)
-        self.assertEqual(self._generate(lifecycle), "deferred")
-        self.assertEqual(len(FakeExecutor.calls), 1)
+        # 新しい行が completed になった後の同鍵も、退避されて再実行が走る
+        # (2026-09-08 改訂 — intent §11.2。二重編纂の防止は source_ids が担う)
+        self.assertEqual(self._generate(lifecycle), "ok")
+        self.assertEqual(len(FakeExecutor.calls), 2)
 
     def test_reconcile_failure_defers_instead_of_running_untracked(self):
         """unknown の照合に失敗したら "deferred" で見送る — 追跡外 (claim なし)

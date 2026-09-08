@@ -5406,18 +5406,28 @@ class SessionLifecycle:
         #   照合済み (completed、キーは #unknown- 付きで退避) として閉じ、新しい
         #   claim で走る。閉じないと同じ鍵 (チャンクは古い順なので最新の未処理
         #   ID は変わらない) が永久に window_claimed になる。
+        # - completed の退避 (2026-09-08、同 intent §11.2): claim が completed に
+        #   当たったらキーを #superseded- 付きで退避して新しい claim で走る。
+        #   Chronicle 全削除・古いログのインポート直後は鍵が前進せず、completed
+        #   でブロックすると再編纂が永久に塞がるため。二重 LLM コストは上と同じ
+        #   source_ids スキップが守り、並行の二重実行は running 行と Beat ロック
+        #   が塞ぐ。
         ledger = self._get_ledger()
         execution_id: Optional[str] = None
         if ledger is not None and _window_end_id is not None:
             try:
-                from saiverse.execution_ledger import STATUS_UNKNOWN
+                from saiverse.execution_ledger import STATUS_COMPLETED, STATUS_UNKNOWN
 
                 claim_key = f"{getattr(persona, 'persona_id', None)}:{_window_end_id}"
                 # claim_execution: failed 行 (前回の失敗 / キャンセル) はキーを
                 # 退避して新規 prepared を作る — キャンセル直後の同提示コンテキスト再実行が
                 # 永久に deferred にならない (Codex W4 二巡 #6)。running /
-                # applied / completed はブロック。unknown は上の規則で一度だけ
-                # 照合して閉じ、再 claim する。
+                # applied はブロック。unknown は上の規則で一度だけ照合して
+                # 閉じ、再 claim する。completed は下の規則 (2026-09-08) で
+                # キーを退避して再走行する — Chronicle 全削除や古いログの
+                # インポート直後は鍵 (範囲の末尾メッセージ ID) が前進しない
+                # ため、completed でブロックすると再編纂が永久に塞がる。
+                # 二重 LLM コストは arasuji の source_ids スキップが守る。
                 execution_id, runnable, existing_status = ledger.claim_execution(
                     kind="metabolism.run",
                     idempotency_key=claim_key,
@@ -5456,6 +5466,36 @@ class SessionLifecycle:
                     except Exception:
                         LOGGER.warning(
                             "[metabolism] unknown reconciliation failed for key %s; "
+                            "deferring (no untracked run)",
+                            claim_key, exc_info=True,
+                        )
+                        return "deferred"
+                if not runnable and existing_status == STATUS_COMPLETED:
+                    LOGGER.warning(
+                        "[metabolism] superseding completed execution %s for key %s: "
+                        "the artifacts may have been removed by the user (Chronicle "
+                        "delete-all) while the ledger row remains; metabolism.run is "
+                        "idempotent (committed chunks are skipped by source_ids), "
+                        "retiring the key and starting a new run",
+                        execution_id, claim_key,
+                    )
+                    # 退避の失敗は degrade しない (unknown の照合と同じ理由) —
+                    # ここで外側の except に落ちると claim なし (追跡外) で走る。
+                    # 退避できないなら見送る。supersede が False (別経路が先に
+                    # 動かした等) のときも新しい claim は取らず、従来どおり
+                    # deferred へ落とす。
+                    try:
+                        if ledger.supersede_completed(execution_id):
+                            execution_id, runnable, existing_status = (
+                                ledger.claim_execution(
+                                    kind="metabolism.run",
+                                    idempotency_key=claim_key,
+                                    persona_id=getattr(persona, "persona_id", None),
+                                )
+                            )
+                    except Exception:
+                        LOGGER.warning(
+                            "[metabolism] superseding completed failed for key %s; "
                             "deferring (no untracked run)",
                             claim_key, exc_info=True,
                         )

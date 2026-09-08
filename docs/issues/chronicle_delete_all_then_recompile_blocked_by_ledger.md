@@ -28,16 +28,25 @@
   正しい。全削除の後は成果物が無く、再実行はユーザーの意図そのもの — 保護の前提
   (arasuji の source_ids による冪等スキップが安全網) も成果物ごと消えている。
 
-## 修正の方向 (未着手)
+## 修正 (2026-09-08 実装、claim 側の一点で受ける形)
 
-- **削除の境界が台帳の整合も持つ**: Chronicle 全削除ルート
-  (`api/routes/people/arasuji.py` `delete_all_arasuji_entries`) が、その persona の
-  `kind=metabolism.run` の行の鍵を退避する (`{key}#deleted-{...}` — failed /
-  unknown 照合と同じ退避の形。行の削除ではなく退避なので、走った事実の記録は残る)。
-  個別削除は対象外 (範囲の末尾が変わらない限り衝突しない)。
-- 文言も直す: 「しばらく待って再実行してください」は、この形では嘘になる
-  (待っても解けない)。claim 競合の文面は既知の改善案件 (稟乃さんの
-  「メッセージが死ぬほどわかりづらい」の束) と同時に見直す。
+- **claim の側で直した**: `saiverse/execution_ledger.py` に `supersede_completed`
+  を新設 (completed 行のキーを `{key}#superseded-{id先頭8字}` へ退避する。状態は
+  completed のまま — 走った事実の記録は残る)。`sea/session_lifecycle.py` の claim
+  が completed に当たったら、この退避を通して同じキーで新しい claim を取り、
+  そのまま走る。退避に失敗したら従来どおり deferred で見送る (追跡外で走らせない)。
+- **なぜ安全か**: metabolism.run の成果物は arasuji テーブルで観測でき、確定済み
+  チャンクは source_ids で冪等スキップされる — 成果物が残っている限り LLM は
+  再発火しない。成果物が全削除で消えた場合の再実行はユーザーの意図そのもの。
+  並行の二重実行は running 行と Beat ロックが引き続き塞ぐ。裁定の全文は
+  `docs/intent/execution_ledger.md` §11.2。
+- **経緯**: 当初は削除ルート (`api/routes/people/arasuji.py`
+  `delete_all_arasuji_entries`) が台帳の鍵を退避する案だったが、同族の穴
+  (古いログのインポート直後の補修 — 末尾メッセージが変わらない) は削除を経由
+  しないため塞がらない。claim 側の一点で受ける形に変更した。
+- **残タスク**: claim 競合の文言「しばらく待って再実行してください」の見直しは
+  既知の改善案件 (稟乃さんの「メッセージが死ぬほどわかりづらい」の束) と同時に
+  行う (本修正で completed 起因の永久封鎖は消えたが、running 競合の文面は残る)。
 
 ## 応急処置 (ユーザー向け)
 
