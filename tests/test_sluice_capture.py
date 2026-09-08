@@ -733,6 +733,42 @@ class CaptureApplyTest(_CaptureTestBase):
         )
 
 
+    def test_silent_append_failure_keeps_the_pending_tally(self):
+        """追記が None (adapter が失敗を飲んだ形) の回は送出し、材料を消さない。
+
+        adapter.append_persona_message は行が入らなかったとき例外でなく None を
+        返す — 検査しないと flush が消し込みまで進み、一行が立たないまま材料が
+        消えて回収不能になる (2026-09-09 Codex 第三巡)。
+        """
+        ids = self._append_conversation(2)
+        self._record_span(ids[0], ids[-1])
+        client = FakeLLMClient(self._memo_result("星の話を書きたい"))
+        lifecycle = SimpleNamespace(
+            runtime=FakeRuntime(client), manager=self.manager,
+        )
+        with patch.object(
+            type(self.adapter), "append_persona_message", return_value=None,
+        ):
+            with self.assertRaises(sluice.SluiceStorageUnavailableError):
+                sluice.run_sluice_capture(
+                    lifecycle, self._persona(), mode="persona",
+                )
+        self.assertEqual(len(self._digest_rows()), 0)  # 一行は立っていない
+        pending = sluice._load_pending_digest(self._persona())
+        self.assertEqual(pending["memos"], 1)          # 材料は残ったまま
+
+        # 次の完走 (範囲ゼロ) が材料を拾って一行を立てる — 復旧経路。
+        client2 = FakeLLMClient(_sluice_result())
+        lifecycle2 = SimpleNamespace(
+            runtime=FakeRuntime(client2), manager=self.manager,
+        )
+        summary = sluice.run_sluice_capture(
+            lifecycle2, self._persona(), mode="persona",
+        )
+        self.assertEqual(summary["status"], "noop")
+        self.assertEqual(len(self._digest_rows()), 1)
+
+
 class MechanismModeTest(_CaptureTestBase):
     """機構モード (既定) — 候補テーブルに置くだけで、本人の器に書かない。"""
 

@@ -3670,7 +3670,7 @@ def _append_capture_digest(
     metadata: Dict[str, Any] = {"tags": [DIGEST_TAG, "sluice"]}
     if nonce:
         metadata["capture_digest_nonce"] = nonce
-    adapter.append_persona_message({
+    message_id = adapter.append_persona_message({
         "role": "user",
         "content": f"<system>{digest_text}</system>",
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -3678,6 +3678,15 @@ def _append_capture_digest(
         "line_role": "main_line",
         "scope": "committed",
     })
+    if not message_id:
+        # adapter は行が入らなかったとき (未準備・INSERT 例外) に例外でなく
+        # None を返す — docstring の「書き込みの失敗は送出する」の契約は
+        # ここで実装する (2026-09-09 Codex 第三巡)。送出しないと呼び出し元が
+        # 材料 (pending) を消し込み、一行が立たないまま回収不能になる。
+        raise SluiceStorageUnavailableError(
+            "capture digest append returned no message id; keeping the "
+            "pending tally for the next run"
+        )
 
 
 def run_sluice_capture(
@@ -3854,7 +3863,11 @@ def run_sluice_capture(
             #     縮めだけが進む。
             #   - マージ前に落ちる → 縮めも進んでいないので、再実行がマージから
             #     やり直す。
-            # どちらも欠けも二重も無い。
+            # どちらも欠けも二重も無い。残る縁が一つ (2026-09-09 Codex 第三巡、
+            # 記録して受け入れ): マージ前に落ちた回の再適用は、冪等スキップを
+            # applied に数えない操作 (コア記憶の remove 等) の件数だけ少なく
+            # 数える。実体は器に残っており、欠けるのは通知の件数が控えめに
+            # 言うことだけ — 件数を台帳に凍結する架構はこの縁には過大。
             _merge_pending_digest(
                 persona,
                 chunk_start_id=chunk_summary.get("span_start_id"),
