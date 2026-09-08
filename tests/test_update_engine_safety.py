@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -158,6 +160,47 @@ def test_dirty_worktree_message_lists_at_most_twenty_paths(tmp_path: Path) -> No
     # files and the update would refuse again; offer the catch-all instead.
     assert "git checkout -- ." in message
     assert "git checkout -- file_00.py" not in message
+
+
+def test_process_alive_fails_closed_without_psutil(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Without psutil, "cannot check" must not be reported as "already exited".
+
+    That lie once let the updater proceed beside a live backend
+    (docs/issues/self_update_unsafe_without_psutil.md).
+    """
+    monkeypatch.setitem(sys.modules, "psutil", None)  # makes `import psutil` fail
+    with pytest.raises(update_engine.UpdateError, match="psutil"):
+        update_engine._process_alive(os.getpid())
+
+
+def test_process_alive_converts_psutil_runtime_failure_to_update_error(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """psutil が入っていても probe 自体が失敗しうる (壊れたインストール・ABI
+    不整合)。main() は UpdateError しか捕まえないので、素通しは DETACHED
+    プロセスで痕跡の無い未処理例外になる — UpdateError へ変換して中止する。"""
+
+    def _broken_pid_exists(pid):  # type: ignore[no-untyped-def]
+        raise RuntimeError("abi mismatch")
+
+    fake_psutil = SimpleNamespace(pid_exists=_broken_pid_exists)
+    monkeypatch.setitem(sys.modules, "psutil", fake_psutil)
+    with pytest.raises(update_engine.UpdateError, match="could not determine"):
+        update_engine._process_alive(os.getpid())
+
+
+def test_wait_for_owned_process_exit_fails_closed_without_psutil(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """The exit-wait must propagate the psutil error, not swallow it and pass."""
+    monkeypatch.setitem(sys.modules, "psutil", None)
+    with pytest.raises(update_engine.UpdateError, match="psutil"):
+        update_engine.wait_for_owned_process_exit(os.getpid(), None, timeout=5.0)
+
+
+def test_requirements_files_declare_psutil() -> None:
+    """psutil is a safety dependency now; both requirements files must carry it."""
+    project = Path(update_engine.__file__).resolve().parent.parent
+    lock_lines = (project / update_engine.REQUIREMENTS_LOCK).read_text(encoding="utf-8").splitlines()
+    assert any(line.startswith("psutil==") for line in lock_lines)
+    txt_lines = (project / "requirements.txt").read_text(encoding="utf-8").splitlines()
+    assert any(line.startswith("psutil>=") for line in txt_lines)
 
 
 def test_unverified_pid_is_never_signalled() -> None:
