@@ -1149,21 +1149,21 @@ class SessionLifecycle:
         embed_metadata の read-through) をそのまま使う。二枚目の読み方を
         書かない。
 
+        **未存在と読み取り失敗を区別する** (2026-09-09 Codex 指摘)。ここで
+        例外を None へ丸めていたので、一時的な読み取り障害が「スルース未走行」
+        に化け、既に採取済みの履歴まで ``sluice_skipped_spans`` に「通って
+        いない範囲」として記録したうえで前進・退場を許してしまっていた。
+        丸めない読み方は :func:`sea.sluice._load_pan_marker` の fail-closed
+        (Codex 第八巡 修正 5) と同じ格。
+
         Returns:
-            マーカー。まだ一度もスルースが走っていない (キーが無い)、または
-            読み取りに失敗した場合は None。呼び出し側は None を「前進を
-            許可できない」に倒す (fail-closed)。
+            マーカー。まだ一度もスルースが走っていない (キーが無い) なら
+            None。読み取りに失敗したときは
+            :class:`sea.sluice.SluiceStorageUnavailableError` を送出する —
+            呼び出し側は前進も飛ばしも行わず、次の走行に委ねる。
         """
-        try:
-            from sea.sluice import _load_pan_marker
-            return _load_pan_marker(persona)
-        except Exception:
-            LOGGER.warning(
-                "[metabolism] sluice pan marker unreadable; treating it as "
-                "absent (persona=%s)",
-                getattr(persona, "persona_id", "?"), exc_info=True,
-            )
-            return None
+        from sea.sluice import _load_pan_marker
+        return _load_pan_marker(persona)
 
     def _sluice_unseen_window_messages(
         self, persona, current_messages: Sequence[Dict[str, Any]],
@@ -1173,6 +1173,10 @@ class SessionLifecycle:
         パンマーカーの次から窓の末尾まで。マーカーが窓に無い (初回 / 押し出されて
         消えた) ときは窓全体 — sluice 側の担当範囲の規則
         (:func:`sea.sluice._compute_span`) と同じ読み。複数一致は後勝ち (最新)。
+
+        マーカーが読めないときは :class:`sea.sluice.SluiceStorageUnavailableError`
+        をそのまま送出する (窓全体へ倒さない — 呼び出し側が飛ばしも通常の
+        スルースも止める)。
         """
         marker = self._load_sluice_pan_marker(persona)
         if not marker:
@@ -1230,12 +1234,24 @@ class SessionLifecycle:
             未走行) なら範囲は (旧起点, 新起点) — 前進で出て行く範囲の全部が
             未見。マーカーと新起点の順序が引けない・マーカーの次が引けない
             ときは (False, None) — 記録できない範囲を黙って出さない
-            (fail-closed)。スルース無効 (env) の設計では記録なしで前進する。
+            (fail-closed)。マーカーそのものが読めない回も (False, None) —
+            「未走行」と読み違えて採取済みの履歴を未見として記録しない
+            (2026-09-09 Codex 指摘)。スルース無効 (env) の設計では記録なしで
+            前進する。
         """
+        from sea.sluice import SluiceStorageUnavailableError
         from sea.sluice import is_enabled as sluice_is_enabled
         if not sluice_is_enabled():
             return (True, None)
-        marker = self._load_sluice_pan_marker(persona)
+        try:
+            marker = self._load_sluice_pan_marker(persona)
+        except SluiceStorageUnavailableError:
+            LOGGER.warning(
+                "[metabolism] cold anchor advance skipped: the sluice pan "
+                "marker cannot be read (persona=%s model=%s target=%s)",
+                persona_id, model_key, target, exc_info=True,
+            )
+            return (False, None)
         if not marker:
             # スルースが一度も走っていない — 前進で提示から出る範囲は全部未見。
             return (True, (self_anchor, target))
@@ -4734,38 +4750,53 @@ class SessionLifecycle:
         # 通す仕組み (第二段) がこの記録を読む。
         sluice_skipped_range: Optional[Tuple[str, str]] = None
         if chronicle_status in ("ok", "disabled"):
-            from sea.sluice import get_max_span_chars
+            from sea.sluice import SluiceStorageUnavailableError, get_max_span_chars
             from sea.sluice import is_enabled as sluice_is_enabled
             if sluice_is_enabled():
-                unseen_msgs = self._sluice_unseen_window_messages(
-                    persona, current_messages,
-                )
-                span_chars = message_chars(unseen_msgs)
-                max_span_chars = get_max_span_chars()
-                if span_chars > max_span_chars:
-                    sluice_status = "skipped_cold"
-                    evicted_ids = {
-                        str(mid) for f in plan.folds for mid in f.message_ids
-                    }
-                    unseen_evicted = [
-                        str(m.get("id")) for m in unseen_msgs
-                        if isinstance(m, dict) and m.get("id")
-                        and str(m.get("id")) in evicted_ids
-                    ]
-                    if unseen_evicted:
-                        sluice_skipped_range = (
-                            unseen_evicted[0], unseen_evicted[-1],
-                        )
-                    LOGGER.warning(
-                        "[sluice] skipped cold (persona=%s): unseen span is "
-                        "%d chars / %d messages > max=%d; eviction proceeds "
-                        "without capture and the departing unseen range "
-                        "(%s..%s) is recorded for later manual capture",
-                        persona_id, span_chars, len(unseen_msgs),
-                        max_span_chars,
-                        sluice_skipped_range[0] if sluice_skipped_range else None,
-                        sluice_skipped_range[1] if sluice_skipped_range else None,
+                # 担当範囲の判定はパンマーカーの上に立つ。マーカーが読めない回は
+                # 判定そのものが成立しないので、飛ばしも通常のスルースも走らせず
+                # 退場を止め、次回の maybe_run_metabolism に委ねる (2026-09-09
+                # Codex 指摘)。読み取り障害を「マーカー無し」と読み違えると担当
+                # 範囲が窓全体に広がり、既に採取済みの履歴まで「通っていない
+                # 範囲」として記録したうえで退場させてしまう。
+                try:
+                    unseen_msgs = self._sluice_unseen_window_messages(
+                        persona, current_messages,
                     )
+                    span_chars = message_chars(unseen_msgs)
+                    max_span_chars = get_max_span_chars()
+                    if span_chars > max_span_chars:
+                        sluice_status = "skipped_cold"
+                        evicted_ids = {
+                            str(mid) for f in plan.folds for mid in f.message_ids
+                        }
+                        unseen_evicted = [
+                            str(m.get("id")) for m in unseen_msgs
+                            if isinstance(m, dict) and m.get("id")
+                            and str(m.get("id")) in evicted_ids
+                        ]
+                        if unseen_evicted:
+                            sluice_skipped_range = (
+                                unseen_evicted[0], unseen_evicted[-1],
+                            )
+                        LOGGER.warning(
+                            "[sluice] skipped cold (persona=%s): unseen span is "
+                            "%d chars / %d messages > max=%d; eviction proceeds "
+                            "without capture and the departing unseen range "
+                            "(%s..%s) is recorded for later manual capture",
+                            persona_id, span_chars, len(unseen_msgs),
+                            max_span_chars,
+                            sluice_skipped_range[0] if sluice_skipped_range else None,
+                            sluice_skipped_range[1] if sluice_skipped_range else None,
+                        )
+                except SluiceStorageUnavailableError:
+                    LOGGER.warning(
+                        "[sluice] pan marker unreadable; neither the cold skip "
+                        "nor the sluice runs this round and eviction is blocked "
+                        "(persona=%s)", persona_id, exc_info=True,
+                    )
+                    sluice_status = "failed"
+                    sluice_skipped_range = None
         if chronicle_status in ("ok", "disabled") and sluice_status == "ok":
             try:
                 from sea.sluice import run_sluice
@@ -5923,7 +5954,12 @@ class SessionLifecycle:
         # (下の _consolidate) ので、run_band_overflow が渡す「この呼び出し内の
         # (done, limit)」ではなく、走行全体の累計 / 承認済みの総予算で数える —
         # 呼び出しごとに (1/3) からやり直す表示にしない。
-        _consolidated = [0]  # 走行全体で確定した束ねの累計
+        _consolidated = [0]  # 走行全体で消費した承認予算 (試行回数) の累計
+        # 走行全体で**確定した** (親が実際にできた) 束ねの数。予算の消費とは
+        # 別に数える — 最後の呼び直しループの「進んだか」の判定に使う
+        # (2026-09-09 Codex 指摘。予算の消費を進捗と数えると、失敗しか返さない
+        # 呼び出しでも残り予算の回数だけループが回る)。
+        _band_created = [0]
         _band_disabled = [False]  # LLM に届く前の失敗で、この走行の束ねを止めた印
 
         def band_progress_fn(done, _total):
@@ -6135,6 +6171,8 @@ class SessionLifecycle:
         band_extraction_failures_unrecorded: List[str] = []
 
         def _consolidate(reason: str) -> None:
+            from llm_clients.exceptions import RateLimitError
+
             # 台帳の心拍は成否に依らず 1 回打つ (finally)。失敗した畳みは進捗
             # イベントを出さないので、progress 経由の心拍だけだとプロバイダ障害
             # の間の走行が「観測途絶」に見える。
@@ -6167,6 +6205,17 @@ class SessionLifecycle:
                         progress_callback=band_progress_fn,
                         stats=stats,
                     )
+                except RateLimitError as exc:
+                    # レート制限は「もう一度呼べば通るかもしれない失敗」では
+                    # ないので、この走行の以後の束ねを止めて persona 単位の
+                    # 小休止を置く (2026-09-09 Codex 指摘)。止めないと残り予算の
+                    # 回数だけ 429 を撃ち続ける。
+                    self._note_metabolism_rate_limit(persona_id_str, exc)
+                    _band_disabled[0] = True
+                    LOGGER.warning(
+                        "[bands] consolidation stopped for the rest of this run: "
+                        "rate limited (%s)", reason,
+                    )
                 except Exception:
                     LOGGER.exception("[bands] consolidation failed; continuing")
                     if not int(stats.get("attempts") or 0):
@@ -6182,6 +6231,7 @@ class SessionLifecycle:
                             reason,
                         )
                 created = max(int(folded or 0), int(stats.get("created") or 0))
+                _band_created[0] += created
                 attempts = int(stats.get("attempts") or 0)
                 consumed = max(attempts, created)
                 _consolidated[0] += consumed
@@ -6332,12 +6382,16 @@ class SessionLifecycle:
         # 呼び出しあたりの安全弁 (既定 3) があり、承認済み予算はチャンクごとの
         # 呼び出しの累計で届く設計。束ねだけの走行は after_chunk が一度も
         # 走らないので、1 回きりだと承認 5 件が 3 件で頭打ちになる — 予算が
-        # 残っていて前の呼び出しが進んだ間は呼び直す (進まなかった = 超過が
-        # 解消済みか失敗。どちらも次の呼び出しは仕事をしないので抜ける)。
+        # 残っていて前の呼び出しで**親が確定した**間は呼び直す。
+        #
+        # 「進んだか」は確定数で見る (2026-09-09 Codex 指摘)。予算の消費で見ると、
+        # LLM が毎回失敗する回 (created=0 / attempts=1) も「進んだ」と数えて
+        # しまい、残り予算の回数だけ失敗を叩き続ける。確定が 0 の呼び出しは
+        # 「超過が解消済み」か「失敗」で、どちらも次の呼び出しは仕事をしない。
         while True:
-            _before_final = _consolidated[0]
+            _before_final = _band_created[0]
             _consolidate("final")
-            if _consolidated[0] <= _before_final:
+            if _band_created[0] <= _before_final:
                 break
             if _consolidated[0] >= band_plan_count:
                 break

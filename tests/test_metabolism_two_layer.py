@@ -510,7 +510,8 @@ class ChronicleClaimTest(unittest.TestCase):
                               fail_band_calls=None, band_failure_calls=None,
                               band_failure_unrecorded=None,
                               raise_on_band_call=None,
-                              raise_band_after_attempt=False):
+                              raise_band_after_attempt=False,
+                              raise_band_with=None):
         """run_band_overflow の呼び出し (max_folds) と画面の進捗文言を記録して走らせる。
 
         ``on_band_call`` は束ねの呼び出しごとに (呼び出し番号 1 始まり) で
@@ -526,6 +527,7 @@ class ChronicleClaimTest(unittest.TestCase):
         ``raise_on_band_call`` の回は RuntimeError("db down") を投げる —
         ``raise_band_after_attempt`` なら stats["attempts"]=1 を書いてから
         (LLM に届いた後の失敗)、既定では stats に触れず (前検査での失敗)。
+        投げる例外は ``raise_band_with`` で差し替えられる (レート制限の検証用)。
         """
         calls = []
         events = []
@@ -540,7 +542,7 @@ class ChronicleClaimTest(unittest.TestCase):
                 if raise_band_after_attempt and stats is not None:
                     stats["attempts"] = 1
                     stats["created"] = 0
-                raise RuntimeError("db down")
+                raise raise_band_with or RuntimeError("db down")
             if len(calls) in failing:
                 if stats is not None:
                     stats["attempts"] = 1
@@ -901,6 +903,49 @@ class ChronicleClaimTest(unittest.TestCase):
         self.assertTrue(any(
             "fold attempt(s) failed in this call" in m for m in logs.output
         ), logs.output)
+
+    # ------------------------------------------------------------------
+    # レート制限 (2026-09-09 Codex 指摘): 束ねの 429 は「もう一度呼べば通る
+    # かもしれない失敗」ではないので、走行の以後の束ねを止めて persona 単位の
+    # 小休止を置く。止めないと残り予算の回数だけ 429 を撃ち続ける。
+    # ------------------------------------------------------------------
+
+    def test_rate_limited_fold_stops_the_run_and_starts_a_cooldown(self):
+        from llm_clients.exceptions import RateLimitError
+
+        with self.assertLogs("sea.session_lifecycle", level="WARNING") as logs:
+            status, calls, _ = self._generate_interleaved(
+                band_plan_count=5, n_chunks=4, with_ledger=True,
+                raise_on_band_call=1, raise_band_after_attempt=True,
+                raise_band_with=RateLimitError("429 tokens per min"),
+            )
+        self.assertEqual(status, "ok")
+        # LLM に届いた後の失敗でも、レート制限なら 1 回目で打ち止め —
+        # 残り 3 チャンクの after_chunk も最後の束ねも呼ばれない。
+        self.assertEqual(calls, [5])
+        self.assertTrue(any(
+            "consolidation stopped for the rest of this run" in m
+            and "rate limited" in m for m in logs.output
+        ), logs.output)
+        # persona 単位の小休止が置かれ、次の入口が仕事を始めない。
+        self.assertTrue(
+            self._last_lifecycle._metabolism_rate_limit_active(PERSONA_ID)
+        )
+
+    def test_only_confirmed_folds_keep_the_final_loop_going(self):
+        """最後の呼び直しは「確定数」で進捗を判定する (予算の消費ではない)。
+
+        毎回 attempts=1 / created=0 を返す束ね (LLM が失敗し続ける形) では、
+        チャンクの after_chunk で予算を使い切る手前でも、最後のループが残り
+        予算のぶん回り続けてはいけない。ここでは n_chunks=0 (束ねだけの走行) で
+        1 回目の失敗の直後にループが抜けることを見る。
+        """
+        status, calls, _ = self._generate_interleaved(
+            band_plan_count=5, n_chunks=0, fail_band_calls=set(range(1, 100)),
+        )
+        self.assertEqual(status, "ok")
+        # 予算は 5 残っているが、確定が 0 なので 1 回で抜ける。
+        self.assertEqual(calls, [5])
 
     # ------------------------------------------------------------------
     # "failed" の実際の理由 (2026-09-03 まはー裁定): LLMError の error_code /

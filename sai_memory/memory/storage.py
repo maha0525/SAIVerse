@@ -1813,7 +1813,19 @@ def record_sluice_skipped_span(
     範囲は [start_message_id, end_message_id] のメッセージ id (正典順で
     先頭〜末尾)。書き込みは「その範囲が実際に提示から出て行く回」だけに
     呼ぶ — 呼び出し側 (sea/session_lifecycle.py) の責務。
+
+    同じ範囲が既に記録されていれば挿入せず、既存行の id を返す (2026-09-09
+    Codex 指摘)。記録は退場の適用より先に確定するので、退場側 (anchor 前進) が
+    落ちた回は記録だけが残り、次回の再試行が同じ範囲をもう一度持ってくる —
+    素の INSERT だと同じ範囲が二行に増え、後から通す採取が同じ会話を二度読む。
     """
+    existing = conn.execute(
+        "SELECT id FROM sluice_skipped_spans "
+        "WHERE start_message_id = ? AND end_message_id = ?",
+        (str(start_message_id), str(end_message_id)),
+    ).fetchone()
+    if existing is not None:
+        return int(existing[0])
     cur = conn.execute(
         "INSERT INTO sluice_skipped_spans "
         "(start_message_id, end_message_id, created_at) VALUES (?, ?, ?)",

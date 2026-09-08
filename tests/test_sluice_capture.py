@@ -114,6 +114,28 @@ class CapturePlanTest(_CaptureTestBase):
         self.assertFalse(plan["spans"][0]["readable"])
 
 
+class SkippedSpanRecordTest(_CaptureTestBase):
+    """飛ばした範囲の記録そのもの (sluice_skipped_spans) の書き込み規則。"""
+
+    def test_recording_the_same_range_twice_does_not_add_a_row(self):
+        """同じ範囲の二度目の記録は行を増やさず、既存行の id を返す。
+
+        記録は退場の適用より先に確定するので、退場側 (anchor 前進) が落ちた回は
+        記録だけが残り、次回の再試行が同じ範囲をもう一度持ってくる (2026-09-09
+        Codex 指摘)。素の INSERT だと同じ会話が二行ぶん採取対象になる。
+        """
+        ids = self._append_conversation(4, chars=10)
+        first = self._record_span(ids[0], ids[-1])
+        second = self._record_span(ids[0], ids[-1])
+        self.assertEqual(second, first)
+        self.assertEqual(len(self._spans()), 1)
+
+        # 範囲が違えば従来どおり別の行として積む。
+        third = self._record_span(ids[1], ids[-1])
+        self.assertNotEqual(third, first)
+        self.assertEqual(len(self._spans()), 2)
+
+
 class CaptureRunTest(_CaptureTestBase):
     """実行部 (本人モード) — チャンク刻み・前置き・進みの記録・完了。"""
 
@@ -419,6 +441,125 @@ class CaptureApplyTest(_CaptureTestBase):
         self.assertIn("約束の操作 1 件", d_content)
         self.assertEqual(d_scope, "committed")
         self.assertEqual(d_line_role, "main_line")
+
+    # -- ダイジェストの材料の耐久化 (2026-09-09 Codex 指摘) ----------------
+    #
+    # 手帳・コア記憶への書き込みには本線の痕跡が必ず残る、という透明性の約束を
+    # 守るため、ダイジェストの件数は memory.db に貯める。in-memory の累計だけで
+    # 組んでいた頃は (i) 中断した走行の採取分がどの走行のダイジェストにも入らず、
+    # (ii) 範囲の記録を縮めた後に本線への追記が落ちると、再実行が noop になって
+    # ダイジェストが永久に立たなかった。
+
+    def _memo_result(self, text):
+        return {
+            **_sluice_result(reflection="読み返して思い出した"),
+            "want_memos": [{"new_activity_name": "小説を書く", "text": text}],
+        }
+
+    def _digest_rows(self):
+        from sea.work_session import DIGEST_TAG
+        return self.adapter.conn.execute(
+            "SELECT content FROM messages "
+            f"WHERE metadata LIKE '%{DIGEST_TAG}%'"
+        ).fetchall()
+
+    def test_capture_from_a_cancelled_run_still_gets_a_digest_later(self):
+        """中断した走行で採取した分は、次に完走した走行のダイジェストに乗る。
+
+        2 回目は範囲がもう残っていない ("noop") — 旧実装は完走 (ok) かつその
+        走行内の採取が 1 件以上のときだけ立てていたので、この形ではダイジェストが
+        永久に立たなかった。
+        """
+        from sea.cancellation import CancellationToken
+
+        ids = self._append_conversation(2)
+        self._record_span(ids[0], ids[-1])
+        token = CancellationToken()
+
+        class _CancelAfterFirstCall(FakeLLMClient):
+            """1 チャンク目を返した直後に中止が押された状況を作る。"""
+
+            def generate(inner, messages, tools=None, response_schema=None, *,
+                         temperature=None, **kwargs):
+                out = super().generate(
+                    messages, tools, response_schema,
+                    temperature=temperature, **kwargs,
+                )
+                token.cancel(interrupted_by="user")
+                return out
+
+        client = _CancelAfterFirstCall(self._memo_result("星の話を書きたい"))
+        lifecycle = SimpleNamespace(
+            runtime=FakeRuntime(client), manager=self.manager,
+        )
+        first = sluice.run_sluice_capture(
+            lifecycle, self._persona(), mode="persona",
+            cancellation_token=token,
+        )
+        self.assertEqual(first["status"], "cancelled")
+        self.assertEqual(first["captures_applied"], 1)
+        self.assertEqual(self._digest_rows(), [])  # 中断した回は立てない
+        self.assertEqual(self._spans(), [])        # 範囲は通し終えている
+
+        # 2 回目は通す範囲が無い (noop) が、貯まった 1 件でダイジェストが立つ。
+        client2 = FakeLLMClient(_sluice_result())
+        lifecycle2 = SimpleNamespace(
+            runtime=FakeRuntime(client2), manager=self.manager,
+        )
+        second = sluice.run_sluice_capture(
+            lifecycle2, self._persona(), mode="persona",
+        )
+        self.assertEqual(second["status"], "noop")
+        self.assertEqual(second["captures_applied"], 0)
+        self.assertEqual(client2.calls, [])  # LLM は呼ばない
+        rows = self._digest_rows()
+        self.assertEqual(len(rows), 1)
+        self.assertIn("手帳のメモ 1 件", rows[0][0])
+
+        # 3 回目は材料が消えているので、同じ一行を二度立てない。
+        sluice.run_sluice_capture(
+            lifecycle2, self._persona(), mode="persona",
+        )
+        self.assertEqual(len(self._digest_rows()), 1)
+
+    def test_failed_digest_append_is_recovered_by_the_next_run(self):
+        """本線への追記が落ちた走行も、再実行でダイジェストが立ち二重にならない。
+
+        範囲の記録は追記より先に消えているので、旧実装では再実行が noop になり
+        ダイジェストが永久に立たなかった。
+        """
+        ids = self._append_conversation(2)
+        self._record_span(ids[0], ids[-1])
+
+        client = FakeLLMClient(self._memo_result("星の話を書きたい"))
+        lifecycle = SimpleNamespace(
+            runtime=FakeRuntime(client), manager=self.manager,
+        )
+        with patch.object(
+            sluice, "_append_capture_digest",
+            side_effect=RuntimeError("main line write failed"),
+        ):
+            with self.assertRaises(RuntimeError):
+                sluice.run_sluice_capture(
+                    lifecycle, self._persona(), mode="persona",
+                )
+        self.assertEqual(self._spans(), [])   # 記録は縮め終えて消えている
+        self.assertEqual(self._digest_rows(), [])
+
+        client2 = FakeLLMClient(_sluice_result())
+        lifecycle2 = SimpleNamespace(
+            runtime=FakeRuntime(client2), manager=self.manager,
+        )
+        summary = sluice.run_sluice_capture(
+            lifecycle2, self._persona(), mode="persona",
+        )
+        self.assertEqual(summary["status"], "noop")
+        rows = self._digest_rows()
+        self.assertEqual(len(rows), 1)
+        self.assertIn("手帳のメモ 1 件", rows[0][0])
+
+        sluice.run_sluice_capture(lifecycle2, self._persona(), mode="persona")
+        self.assertEqual(len(self._digest_rows()), 1)
 
     def test_persona_zero_capture_writes_no_digest(self):
         ids = self._append_conversation(2)

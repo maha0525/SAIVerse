@@ -1394,6 +1394,16 @@ _PAN_MARKER_KEY = "sluice_last_pan_id"
 #: 新キーへ写す (永続データの移行であって、コード API の互換シムではない)。
 _LEGACY_PAN_MARKER_KEY = "gold_panning_last_pan_id"
 
+#: 本人モードの読み返しダイジェスト (本線の一行) の材料を、走行を跨いで貯める
+#: 永続キー。値は JSON: ``{"period_start", "period_end", "messages", "memos",
+#: "core", "promises"}``。in-memory のカウンタだけで組んでいた頃は、
+#: (i) 中断 (cancelled / cooldown / 例外) した走行の採取分がどの走行の
+#: ダイジェストにも入らず、(ii) 記録の縮めの後に本線への追記が落ちると、範囲の
+#: 記録は消えているので再実行が noop になりダイジェストが永久に立たなかった
+#: (2026-09-09 Codex 指摘)。手帳・コア記憶への書き込みには本線の痕跡が必ず残る、
+#: という透明性の約束を守るために、材料を memory.db へ耐久化する。
+_CAPTURE_PENDING_DIGEST_KEY = "sluice_capture_pending_digest"
+
 
 def _load_pan_marker(persona: Any) -> Optional[str]:
     """pan マーカー (前回採取した末尾 message id) を取得する (read-through)。
@@ -1419,13 +1429,24 @@ def _load_pan_marker(persona: Any) -> Optional[str]:
             "memory.db connection is missing; cannot read the pan marker"
         )
     from sai_memory.memory.storage import get_embed_metadata, set_embed_metadata
-    with adapter._db_lock:
-        value = get_embed_metadata(conn, _PAN_MARKER_KEY)
-        if not value:
-            # 旧世代キーからの一回きり移行 (見つかれば新キーへ写す)。
-            value = get_embed_metadata(conn, _LEGACY_PAN_MARKER_KEY)
-            if value:
-                set_embed_metadata(conn, _PAN_MARKER_KEY, value)
+    try:
+        with adapter._db_lock:
+            value = get_embed_metadata(conn, _PAN_MARKER_KEY)
+            if not value:
+                # 旧世代キーからの一回きり移行 (見つかれば新キーへ写す)。
+                value = get_embed_metadata(conn, _LEGACY_PAN_MARKER_KEY)
+                if value:
+                    set_embed_metadata(conn, _PAN_MARKER_KEY, value)
+    except SluiceStorageUnavailableError:
+        raise
+    except Exception as exc:
+        # 読み取り障害はこの型に揃える (2026-09-09 Codex 指摘) — 呼び出し側は
+        # 「マーカーが読めない」を一つの型で捕まえて前進・飛ばしを止められる。
+        # 生の例外のままだと、捕まえる側が provider 依存の型を列挙することに
+        # なり、取りこぼした型が呼び出し元まで素通りする。
+        raise SluiceStorageUnavailableError(
+            f"pan marker read failed: {exc}"
+        ) from exc
     if value:
         persona._sluice_last_pan_id = value
     return value
@@ -1449,6 +1470,107 @@ def _save_pan_marker(persona: Any, last_id: str) -> None:
     with adapter._db_lock:
         set_embed_metadata(conn, _PAN_MARKER_KEY, last_id)
     persona._sluice_last_pan_id = last_id
+
+
+# ---------------------------------------------------------------------------
+# 読み返しダイジェストの材料の耐久化 (走行を跨いで貯める)
+# ---------------------------------------------------------------------------
+
+def _empty_pending_digest() -> Dict[str, Any]:
+    return {
+        "period_start": None, "period_end": None,
+        "messages": 0, "memos": 0, "core": 0, "promises": 0,
+    }
+
+
+def _pending_digest_conn(persona: Any):
+    adapter = getattr(persona, "sai_memory", None)
+    conn = getattr(adapter, "conn", None) if adapter is not None else None
+    if conn is None:
+        raise SluiceStorageUnavailableError(
+            "memory.db connection is missing; cannot access the pending "
+            "capture digest"
+        )
+    return adapter, conn
+
+
+def _load_pending_digest(persona: Any) -> Dict[str, Any]:
+    """貯まっているダイジェストの材料を読む (無ければ空の器)。
+
+    壊れた値 (JSON にならない / 辞書でない) は空として扱う — ダイジェスト一行の
+    材料であって、採取そのものの成立条件ではないので、ここで走行を止めない。
+    """
+    adapter, conn = _pending_digest_conn(persona)
+    from sai_memory.memory.storage import get_embed_metadata
+    with adapter._db_lock:
+        raw = get_embed_metadata(conn, _CAPTURE_PENDING_DIGEST_KEY)
+    if not raw:
+        return _empty_pending_digest()
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        LOGGER.warning(
+            "[sluice-capture] pending digest value is not valid JSON; "
+            "starting from an empty tally",
+        )
+        return _empty_pending_digest()
+    if not isinstance(parsed, dict):
+        return _empty_pending_digest()
+    merged = _empty_pending_digest()
+    for key in ("period_start", "period_end"):
+        value = parsed.get(key)
+        merged[key] = value if isinstance(value, str) and value else None
+    for key in ("messages", "memos", "core", "promises"):
+        try:
+            merged[key] = int(parsed.get(key) or 0)
+        except (TypeError, ValueError):
+            merged[key] = 0
+    return merged
+
+
+def _merge_pending_digest(
+    persona: Any, *, messages: int, memos: int, core: int, promises: int,
+    period_start: Optional[str], period_end: Optional[str],
+) -> None:
+    """チャンク 1 個ぶんの適用数を、貯まっている材料へ足して書き戻す。"""
+    adapter, conn = _pending_digest_conn(persona)
+    current = _load_pending_digest(persona)
+    current["messages"] += int(messages or 0)
+    current["memos"] += int(memos or 0)
+    current["core"] += int(core or 0)
+    current["promises"] += int(promises or 0)
+    if period_start and (
+        current["period_start"] is None or period_start < current["period_start"]
+    ):
+        current["period_start"] = period_start
+    if period_end and (
+        current["period_end"] is None or period_end > current["period_end"]
+    ):
+        current["period_end"] = period_end
+    from sai_memory.memory.storage import set_embed_metadata
+    with adapter._db_lock:
+        set_embed_metadata(
+            conn, _CAPTURE_PENDING_DIGEST_KEY, json.dumps(current, ensure_ascii=False),
+        )
+
+
+def _clear_pending_digest(persona: Any) -> None:
+    """貯まっている材料を消す (ダイジェスト一行を本線に立て終えた後だけ)。"""
+    adapter, conn = _pending_digest_conn(persona)
+    from sai_memory.memory.storage import set_embed_metadata
+    with adapter._db_lock:
+        set_embed_metadata(
+            conn, _CAPTURE_PENDING_DIGEST_KEY,
+            json.dumps(_empty_pending_digest(), ensure_ascii=False),
+        )
+
+
+def _pending_digest_total(pending: Dict[str, Any]) -> int:
+    """貯まっている適用数の合計 (0 ならダイジェストを立てる材料が無い)。"""
+    return (
+        int(pending.get("memos") or 0) + int(pending.get("core") or 0)
+        + int(pending.get("promises") or 0)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -3508,9 +3630,11 @@ def run_sluice_capture(
       手帳・約束を定常のスルースと同じ経路で操作する
       (:func:`_run_capture_chunk`)。拾われたメモは origin='readback' と
       できごとの日 (event_date) の機械刻印を持つ。読み返しの過程は本線の
-      context に載せず (判断ターン記録は discardable)、1 件以上採取して完走
-      したら、本線にダイジェスト一行だけを立てる
-      (:func:`_append_capture_digest` — 入口は一本)。採取ゼロの完走では
+      context に載せず (判断ターン記録は discardable)、範囲を全部通し終えた
+      走行で、貯まっている採取が 1 件以上あれば本線にダイジェスト一行だけを
+      立てる (:func:`_append_capture_digest` — 入口は一本)。件数の材料は
+      チャンクごとに memory.db へ貯める (:func:`_merge_pending_digest`) ので、
+      中断した走行の採取分も次の完走のダイジェストに合流する。採取ゼロなら
       立てない。
 
     直列化: チャンクごとに Beat ロック (purpose="sluice_capture") を取る —
@@ -3568,12 +3692,9 @@ def run_sluice_capture(
     captures_failed = 0
     status = "ok"
     processed_any = False
-    # 本人モードのダイジェスト一行の材料 (期間と器ごとの件数)。
-    period_start: Optional[str] = None
-    period_end: Optional[str] = None
-    total_core = 0
-    total_memos = 0
-    total_promises = 0
+    # 本人モードのダイジェスト一行の材料 (期間と器ごとの件数) は memory.db 側に
+    # 貯める (_merge_pending_digest) — in-memory の累計だと、中断した走行の
+    # 採取分がどの走行のダイジェストにも入らない。
 
     def _spans() -> List[Dict[str, Any]]:
         with adapter._db_lock:
@@ -3650,26 +3771,33 @@ def run_sluice_capture(
             next_start = str(getattr(span_messages[len(chunk)], "id"))
             with adapter._db_lock:
                 advance_sluice_skipped_span(adapter.conn, span["id"], next_start)
-        processed_any = True
-        chunks_processed += 1
-        messages_processed += chunk_summary["messages"]
-        captures_applied += (
+        chunk_applied = (
             chunk_summary["ops_applied"] + chunk_summary["memos_applied"]
             + chunk_summary["promises_applied"]
         )
+        if mode == "persona" and chunk_applied:
+            # ダイジェストの材料は memory.db に貯める — この走行が中断しても
+            # (cancelled / cooldown / 例外)、次に完走した走行が本線の一行を
+            # 立てて拾う。**縮めの後**に足すのは、その間で落ちたときに少なく
+            # 数える側へ倒すため (ダイジェストが実際より件数を膨らませるより、
+            # 少なく言うほうが害が小さい)。
+            _merge_pending_digest(
+                persona,
+                messages=chunk_summary["messages"],
+                memos=chunk_summary["memos_applied"],
+                core=chunk_summary["ops_applied"],
+                promises=chunk_summary["promises_applied"],
+                period_start=chunk_summary.get("period_start"),
+                period_end=chunk_summary.get("period_end"),
+            )
+        processed_any = True
+        chunks_processed += 1
+        messages_processed += chunk_summary["messages"]
+        captures_applied += chunk_applied
         captures_failed += (
             chunk_summary["ops_failed"] + chunk_summary["memos_failed"]
             + chunk_summary["promises_failed"]
         )
-        total_core += chunk_summary["ops_applied"]
-        total_memos += chunk_summary["memos_applied"]
-        total_promises += chunk_summary["promises_applied"]
-        chunk_start_date = chunk_summary.get("period_start")
-        chunk_end_date = chunk_summary.get("period_end")
-        if chunk_start_date and (period_start is None or chunk_start_date < period_start):
-            period_start = chunk_start_date
-        if chunk_end_date and (period_end is None or chunk_end_date > period_end):
-            period_end = chunk_end_date
         if mode == "persona":
             _emit(
                 f"過去の会話を読み返しています…… ({messages_processed} 通まで採取済み)"
@@ -3679,29 +3807,38 @@ def run_sluice_capture(
                 f"過去の会話から候補を探しています…… ({messages_processed} 通まで処理済み)"
             )
 
-    # 本人モードのダイジェスト一行 (入口は一本): 1 件以上採取して完走 (= 記録
-    # された範囲を全部通し終えた) したときだけ、本線に一行を立てる。採取ゼロの
-    # 完走・途中終了 (cancelled / cooldown / 例外) では立てない。
-    if mode == "persona" and status == "ok" and captures_applied > 0:
-        if period_start and period_end:
-            period_label = (
-                period_start if period_start == period_end
-                else f"{period_start}〜{period_end}"
+    # 本人モードのダイジェスト一行 (入口は一本): 記録された範囲を全部通し終えた
+    # 走行 (status "ok"、または貯まった材料だけが残っていて今回は範囲ゼロだった
+    # "noop") で、貯まっている適用数が 1 件以上あるときに本線へ一行を立てる。
+    # 件数は in-memory のカウンタではなく耐久化した累計から組む — 前の走行が
+    # 中断していたら、その採取分もここで一緒に報告される。追記が失敗したら
+    # 材料は残したまま送出する (ジョブは失敗になるが、次の完走が拾う = 復旧経路)。
+    if mode == "persona" and status in ("ok", "noop"):
+        pending = _load_pending_digest(persona)
+        if _pending_digest_total(pending) > 0:
+            pending_start = pending["period_start"]
+            pending_end = pending["period_end"]
+            pending_messages = int(pending["messages"] or 0)
+            if pending_start and pending_end:
+                period_label = (
+                    pending_start if pending_start == pending_end
+                    else f"{pending_start}〜{pending_end}"
+                )
+                period_part = f"（期間 {period_label}、{pending_messages} 通）"
+            else:
+                period_part = f"（{pending_messages} 通）"
+            parts: List[str] = []
+            if pending["memos"]:
+                parts.append(f"手帳のメモ {pending['memos']} 件")
+            if pending["core"]:
+                parts.append(f"コア記憶の操作 {pending['core']} 件")
+            if pending["promises"]:
+                parts.append(f"約束の操作 {pending['promises']} 件")
+            digest_text = (
+                f"過去の会話{period_part}を読み返し、{'・'.join(parts)}を記録した。"
             )
-            period_part = f"（期間 {period_label}、{messages_processed} 通）"
-        else:
-            period_part = f"（{messages_processed} 通）"
-        parts: List[str] = []
-        if total_memos:
-            parts.append(f"手帳のメモ {total_memos} 件")
-        if total_core:
-            parts.append(f"コア記憶の操作 {total_core} 件")
-        if total_promises:
-            parts.append(f"約束の操作 {total_promises} 件")
-        digest_text = (
-            f"過去の会話{period_part}を読み返し、{'・'.join(parts)}を記録した。"
-        )
-        _append_capture_digest(persona, digest_text)
+            _append_capture_digest(persona, digest_text)
+            _clear_pending_digest(persona)
 
     LOGGER.info(
         "[sluice-capture] run closed: persona=%s mode=%s status=%s chunks=%d "

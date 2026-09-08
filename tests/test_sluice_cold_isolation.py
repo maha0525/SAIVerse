@@ -331,6 +331,41 @@ class ColdMetabolismTest(_ColdWorldBase):
         self.assertEqual(self._anchor_of(lifecycle), anchor_after_first)
         self.assertEqual(len(self._skipped_spans()), 1)    # 記録も増えない
 
+    def test_unreadable_pan_marker_blocks_both_the_skip_and_the_eviction(self):
+        """マーカーが読めない回は、飛ばしも通常のスルースも走らせず退場を止める。
+
+        読み取り障害を「スルース未走行」へ丸めていた頃 (2026-09-09 Codex 指摘)、
+        担当範囲が窓全体に広がり、既に採取済みの履歴まで
+        ``sluice_skipped_spans`` に「通っていない範囲」として記録したうえで
+        前進・退場を許していた。判定はマーカーの上に立つので、読めない回は
+        判定そのものを見送って次回の maybe_run_metabolism に委ねる。
+        """
+        import sai_memory.memory.storage as memory_storage
+
+        client = FakeLLMClient(RuntimeError("no LLM call is expected here"))
+        lifecycle = self._lifecycle(client)
+        real_get = memory_storage.get_embed_metadata
+
+        def _fail_on_marker_keys(conn, key):
+            # 壊すのはマーカーの読み出しだけ (埋め込みの帳簿など他の KV は素通し)。
+            if key in (sluice._PAN_MARKER_KEY, sluice._LEGACY_PAN_MARKER_KEY):
+                raise RuntimeError("embed_metadata read failed")
+            return real_get(conn, key)
+
+        with patch(
+            "sai_memory.memory.storage.get_embed_metadata",
+            side_effect=_fail_on_marker_keys,
+        ):
+            ret = self._run_cold_metabolism(lifecycle)
+
+        self.assertEqual(ret, "failed")
+        self.assertEqual(client.calls, [])          # スルースも走らせない
+        self.assertEqual(self._skipped_spans(), [])  # 記録も作らない
+        # 起点は最前線に立ったまま (退場も機構1 の前進も起きていない)。
+        self.assertEqual(
+            self._anchor_of(lifecycle), self.message_ids[COMPILED_MESSAGES],
+        )
+
     def test_skipped_span_is_recorded_before_the_window_moves(self):
         """記録が書けない回は退場しない (fail-closed) — 記録なしで範囲を提示から
         出さない、が代替の制約 (intent 追加の決定 1)。"""

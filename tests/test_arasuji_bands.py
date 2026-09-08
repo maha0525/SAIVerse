@@ -162,6 +162,31 @@ class TestFiring(BandTestBase):
         self.assertEqual(len(parents), 1)
         self.assertEqual(parents[0].content, "三度目の統合まとめ。")
 
+    def test_rate_limit_propagates_instead_of_being_folded_into_none(self):
+        """レート制限は None に丸めず送出する (2026-09-09 Codex 指摘)。
+
+        他の LLM 失敗と同じく None に落としていた頃は、呼び出し元 (Metabolism の
+        束ね) が「1 回失敗しただけ」として残り予算のぶん呼び直し、429 の最中に
+        承認件数ぶんの課金試行を撃っていた。送出することで呼び出し元が走行を
+        閉じて小休止を置ける。試行の勘定 (attempts) は他の失敗と同じく 1。
+        """
+        from llm_clients.exceptions import RateLimitError
+
+        class _RateLimitedClient(_Client):
+            def generate(inner, messages, tools):
+                inner.calls += 1
+                raise RateLimitError("429 tokens per min")
+
+        for i in range(9):
+            _entry(self.conn, start=1000 + i * 100, coverage=10_000)
+        client = _RateLimitedClient()
+        stats = {}
+        with self.assertRaises(RateLimitError):
+            run_band_overflow(self.conn, client, stats=stats)
+        self.assertEqual(client.calls, 1)  # 呼び直しの巡には入らない
+        self.assertEqual(stats.get("attempts"), 1)
+        self.assertEqual(_band_parents(self.conn), [])  # 親は確定していない
+
     def test_coverage_does_not_affect_folding(self):
         """被覆がどれだけ極端に違っても判定に使われない (比率規則の廃止)。"""
         _entry(self.conn, start=1000, coverage=1)

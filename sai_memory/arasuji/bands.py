@@ -993,6 +993,8 @@ def _consolidate_fold(
     child_ids = [e.id for e in entries]
     origins = _digest_origins(conn, child_ids)
     prompt = _build_consolidation_prompt(entries, origins, conn)
+    from llm_clients.exceptions import RateLimitError
+
     from sai_memory.arasuji.generator import generate_text_with_empty_retry
     if stats is not None:
         # LLM を叩く直前に数える — 失敗・空応答・tx 内再検査での放棄も
@@ -1009,6 +1011,13 @@ def _consolidate_fold(
             persona_id=persona_id,
             usage_node_type=f"chronicle_level{target_level}",
         )
+    except RateLimitError:
+        # レート制限は呼び出し元が走行を閉じて小休止を置く — 他の失敗と違い
+        # None に丸めない (2026-09-09 Codex 指摘)。None にすると呼び出し元は
+        # 「1 回失敗しただけ」として残り予算のぶん叩き続け、429 の最中に承認
+        # 件数ぶんの課金試行を撃つ。試行の勘定 (stats["attempts"]) は上で
+        # 済んでいるので、予算は他の失敗と同じく 1 消費される。
+        raise
     except Exception:
         LOGGER.exception(
             "[bands] consolidation LLM failed (level=%d, %d entries)",
