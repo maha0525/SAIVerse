@@ -223,6 +223,13 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         """
     )
 
+    # スルースを通っていない範囲の記録 (docs/intent/sluice_coverage_gaps.md
+    # 第一段)。起動時 (eager) にここで用意する — 会話の頭が直接 SQL を投げる
+    # テーブルを遅延初期化にすると、v0.2 → v0.3 直行の DB で最初の会話が
+    # 落ちる (2026-09-07 実害の教訓)。
+    init_sluice_skipped_spans_table(conn)
+    init_sluice_candidate_memos_table(conn)
+
     # Pulse logs table for unified memory architecture
     conn.execute(
         """
@@ -1758,6 +1765,38 @@ def get_embed_metadata(conn: sqlite3.Connection, key: str) -> str | None:
         return None
 
 
+def get_embed_metadata_strict(conn: sqlite3.Connection, key: str) -> str | None:
+    """Return the value for *key*, distinguishing "absent" from "unreadable".
+
+    「無い」(旧 DB にテーブルがまだ無い) だけを ``None`` へ畳み、ロック競合や
+    I/O 障害 (``database is locked`` / ``disk I/O error`` 等) はそのまま送出する。
+
+    :func:`get_embed_metadata` との使い分け:
+
+    - 既存の :func:`get_embed_metadata` — 「読めなければ無いのと同じでよい」
+      読み手向け。値は補助情報で、読めない回は既定値で先へ進んでよい
+      (埋め込みモデル名の帳簿など)。
+    - この strict 版 — 「読めない」と「無い」を区別しないと安全側に倒せない
+      読み手向け。例えばスルースのパンマーカーは、読み取り障害を「マーカー
+      無し = 初回」へ丸めると担当範囲が窓全体に広がり、確定時にマーカーを
+      現在値より後ろへ書き戻す縁ができる (2026-09-09 Codex 第二巡 修正 A)。
+
+    テーブル不在の判定は例外の文言 (``no such table``) で行う — sqlite3 は
+    テーブル不在も一時的な障害も同じ :class:`sqlite3.OperationalError` で
+    返すので、型では割れない。
+    """
+    try:
+        row = conn.execute(
+            "SELECT value FROM embed_metadata WHERE key = ?", (key,)
+        ).fetchone()
+        return row[0] if row else None
+    except sqlite3.OperationalError as exc:
+        if "no such table" in str(exc).lower():
+            # Table may not exist yet in very old databases = 値の不在。
+            return None
+        raise
+
+
 def set_embed_metadata(conn: sqlite3.Connection, key: str, value: str) -> None:
     """Upsert *key*/*value* into the embed_metadata table."""
     now = datetime.utcnow().isoformat()
@@ -1770,6 +1809,200 @@ def set_embed_metadata(conn: sqlite3.Connection, key: str, value: str) -> None:
         (key, value, now),
     )
     conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# スルースを通っていない範囲の記録 (docs/intent/sluice_coverage_gaps.md 第一段)
+# ---------------------------------------------------------------------------
+
+def init_sluice_skipped_spans_table(conn: sqlite3.Connection) -> None:
+    """``sluice_skipped_spans`` テーブルを用意する (冪等)。
+
+    冷たいときにスルースを飛ばして退場した範囲、および機構1 (冷えた起点の
+    前進) がパンマーカーを越えた範囲の記録。第二段の UI (期間選択 / 後から
+    通すジョブ) がこの記録を読む。初期化は adapter 起動時 (eager) — 遅延
+    初期化は v0.2 事故の温床 (docs/handoff/
+    2026-09-07_window_floor_unmet_on_v02_memory_db.md)。
+    """
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS sluice_skipped_spans (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            start_message_id TEXT NOT NULL,
+            end_message_id TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.commit()
+
+
+def record_sluice_skipped_span(
+    conn: sqlite3.Connection, start_message_id: str, end_message_id: str,
+) -> int:
+    """スルースを通っていない範囲を 1 行記録し、行 id を返す。
+
+    範囲は [start_message_id, end_message_id] のメッセージ id (正典順で
+    先頭〜末尾)。書き込みは「その範囲が実際に提示から出て行く回」だけに
+    呼ぶ — 呼び出し側 (sea/session_lifecycle.py) の責務。
+
+    同じ範囲が既に記録されていれば挿入せず、既存行の id を返す (2026-09-09
+    Codex 指摘)。記録は退場の適用より先に確定するので、退場側 (anchor 前進) が
+    落ちた回は記録だけが残り、次回の再試行が同じ範囲をもう一度持ってくる —
+    素の INSERT だと同じ範囲が二行に増え、後から通す採取が同じ会話を二度読む。
+    """
+    existing = conn.execute(
+        "SELECT id FROM sluice_skipped_spans "
+        "WHERE start_message_id = ? AND end_message_id = ?",
+        (str(start_message_id), str(end_message_id)),
+    ).fetchone()
+    if existing is not None:
+        return int(existing[0])
+    cur = conn.execute(
+        "INSERT INTO sluice_skipped_spans "
+        "(start_message_id, end_message_id, created_at) VALUES (?, ?, ?)",
+        (str(start_message_id), str(end_message_id),
+         datetime.utcnow().isoformat()),
+    )
+    conn.commit()
+    return int(cur.lastrowid)
+
+
+def list_sluice_skipped_spans(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
+    """記録済みの「スルースを通っていない範囲」を古い順に返す (読み口)。"""
+    rows = conn.execute(
+        "SELECT id, start_message_id, end_message_id, created_at "
+        "FROM sluice_skipped_spans ORDER BY id ASC"
+    ).fetchall()
+    return [
+        {
+            "id": row[0],
+            "start_message_id": row[1],
+            "end_message_id": row[2],
+            "created_at": row[3],
+        }
+        for row in rows
+    ]
+
+
+def advance_sluice_skipped_span(
+    conn: sqlite3.Connection, span_id: int, new_start_message_id: str,
+) -> bool:
+    """記録された範囲の起点を前進させる (処理し終えたチャンクぶんの縮め)。
+
+    後から通すジョブ (sea/sluice.py の capture) がチャンクを一つ処理し終える
+    たびに呼ぶ — 中断しても続きが「縮んだ記録の頭」から再開できる。前進だけを
+    許す用途で、範囲を広げる方向の書き換えには使わないこと。行が無ければ
+    False (呼び出し側の勘定ずれの検知用)。
+    """
+    cur = conn.execute(
+        "UPDATE sluice_skipped_spans SET start_message_id = ? WHERE id = ?",
+        (str(new_start_message_id), int(span_id)),
+    )
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def delete_sluice_skipped_span(conn: sqlite3.Connection, span_id: int) -> bool:
+    """記録された範囲を 1 行消す (範囲全体を通し終えたときだけ呼ぶ)。"""
+    cur = conn.execute(
+        "DELETE FROM sluice_skipped_spans WHERE id = ?", (int(span_id),)
+    )
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def init_sluice_candidate_memos_table(conn: sqlite3.Connection) -> None:
+    """``sluice_candidate_memos`` テーブルを用意する (冪等)。
+
+    後から通す採取の**機構モード** (docs/intent/sluice_coverage_gaps.md B 節
+    候補 1) が置く「機構が拾った候補」の器。機構はコア記憶・手帳へ代筆できない
+    (本人の言葉の器) ので、出力はここに候補として置くだけ — 本人かユーザーが
+    第二段の UI で採用・却下する。``event_date`` はできごとの日 (日粒度) で、
+    候補の材料になったメッセージの時刻から**機械が刻印**する (LLM に申告
+    させない)。``status`` は 'open' (未裁定) から始まる。初期化は adapter
+    起動時 (eager) — 遅延初期化は v0.2 事故の温床 (skipped spans と同じ理由)。
+    """
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS sluice_candidate_memos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            span_start_id TEXT,
+            span_end_id TEXT,
+            kind TEXT NOT NULL,
+            activity_name TEXT,
+            text TEXT NOT NULL,
+            event_date TEXT,
+            created_at TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'open'
+        )
+        """
+    )
+    conn.commit()
+
+
+def add_sluice_candidate_memo(
+    conn: sqlite3.Connection,
+    *,
+    span_start_id: Optional[str],
+    span_end_id: Optional[str],
+    kind: str,
+    activity_name: Optional[str],
+    text: str,
+    event_date: Optional[str],
+) -> Optional[int]:
+    """機構が拾った候補を 1 件置く。行 id を返す (重複スキップ時は None)。
+
+    重複の判定は「同じ範囲・同じ種類・同じ本文」の内容一致 — 台帳の再適用
+    (途中失敗 → 同じチャンクの再実行) で同じ候補が二重に並ばないための保険。
+    status は見ない (却下済みの候補も再挿入しない — 裁定を機械が蒸し返さない)。
+    """
+    row = conn.execute(
+        "SELECT id FROM sluice_candidate_memos "
+        "WHERE span_start_id IS ? AND span_end_id IS ? AND kind = ? AND text = ?",
+        (span_start_id, span_end_id, str(kind), str(text)),
+    ).fetchone()
+    if row is not None:
+        return None
+    cur = conn.execute(
+        "INSERT INTO sluice_candidate_memos "
+        "(span_start_id, span_end_id, kind, activity_name, text, event_date, "
+        "created_at, status) VALUES (?, ?, ?, ?, ?, ?, ?, 'open')",
+        (span_start_id, span_end_id, str(kind), activity_name, str(text),
+         event_date, datetime.utcnow().isoformat()),
+    )
+    conn.commit()
+    return int(cur.lastrowid)
+
+
+def list_sluice_candidate_memos(
+    conn: sqlite3.Connection, *, status: Optional[str] = "open",
+) -> List[Dict[str, Any]]:
+    """機構が拾った候補の一覧 (古い順)。``status=None`` で全件。"""
+    base = (
+        "SELECT id, span_start_id, span_end_id, kind, activity_name, text, "
+        "event_date, created_at, status FROM sluice_candidate_memos"
+    )
+    if status is None:
+        rows = conn.execute(f"{base} ORDER BY id ASC").fetchall()
+    else:
+        rows = conn.execute(
+            f"{base} WHERE status = ? ORDER BY id ASC", (str(status),)
+        ).fetchall()
+    return [
+        {
+            "id": row[0],
+            "span_start_id": row[1],
+            "span_end_id": row[2],
+            "kind": row[3],
+            "activity_name": row[4],
+            "text": row[5],
+            "event_date": row[6],
+            "created_at": row[7],
+            "status": row[8],
+        }
+        for row in rows
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -2352,6 +2585,39 @@ def _conversation_exclusion() -> Tuple[str, Tuple[str, ...]]:
         AND content NOT LIKE '<system>%'
     """
     return clause, MECHANISM_TAGS + CHRONICLE_EXCLUDED_LINE_ROLES
+
+
+def filter_real_conversation_ids(
+    conn: sqlite3.Connection, message_ids: Iterable[str],
+) -> set:
+    """``message_ids`` のうち「実会話」(発話) と数えられる id の集合。
+
+    定義は ``_conversation_exclusion`` を名指しで再利用する — role が
+    user/model/assistant で、機構タグ (handy_tool / spell / event_message) も
+    line_role 除外も ``'<system>'`` 頭の本文も持たない行だけが「発話」。
+
+    吸収の機構 E (docs/intent/chronicle_coverage_gaps.md) が「吸収先の無い
+    run を単独編纂してよいか」の線引きに使う。role だけで判定してはならない:
+    機構の記録 (入室通知等) は role=user で保存されており、role 判定では
+    「発話あり」に化けて捏造あらすじの温床に戻る。
+    """
+    ids = [str(m) for m in message_ids]
+    if not ids:
+        return set()
+    clause, params = _conversation_exclusion()
+    out: set = set()
+    # SQLite の既定の変数上限 999 (SQLITE_MAX_VARIABLE_NUMBER) の約半分 —
+    # exclusion 側の params を足しても安全側に収まる。
+    chunk_size = 500
+    for i in range(0, len(ids), chunk_size):
+        chunk = ids[i:i + chunk_size]
+        id_placeholders = ",".join("?" for _ in chunk)
+        cur = conn.execute(
+            f"SELECT id FROM messages WHERE id IN ({id_placeholders}) AND {clause}",
+            tuple(chunk) + params,
+        )
+        out.update(str(row[0]) for row in cur.fetchall())
+    return out
 
 
 def real_conversation_filter() -> Tuple[str, Tuple[str, ...]]:

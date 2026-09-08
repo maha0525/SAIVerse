@@ -1316,7 +1316,8 @@ def test_strict_resolve_does_not_advance_over_corrupted_folds(session_factory):
     )
     with patch("sai_memory.arasuji.storage.get_frontier_anchor_id", return_value="m3"), \
             patch("sai_memory.arasuji.storage.compare_message_positions", return_value=1), \
-            patch.object(lc, "_cap_advance_at_pan_marker", return_value="m3"):
+            patch.object(lc, "_plan_marker_crossing_record",
+                         return_value=(True, None)):
         with pytest.raises(ValueError):
             lc.resolve_metabolism_anchor(persona, model_key=MODEL, strict=True)
         with patch.object(lc, "get_metabolism_watermarks", return_value=WM):
@@ -1533,7 +1534,8 @@ def test_emergency_precompaction_persists_the_advance_only_when_it_folds(session
     with patch.object(lc, "get_metabolism_watermarks", return_value=wm), \
             patch("sai_memory.arasuji.storage.get_frontier_anchor_id", return_value="m3"), \
             patch("sai_memory.arasuji.storage.compare_message_positions", return_value=1), \
-            patch.object(lc, "_cap_advance_at_pan_marker", return_value="m3"), \
+            patch.object(lc, "_plan_marker_crossing_record",
+                         return_value=(True, None)), \
             patch.object(lc, "perception_blocks_for", return_value=[]), \
             patch.object(lc, "run_metabolism", return_value="ok") as run:
         # 上限以下 → 何もしない回。前進は書かれない

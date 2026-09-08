@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import sys
 from datetime import datetime, timezone
@@ -73,6 +74,16 @@ def _marker_state(path: Path) -> tuple[str, str, dict | None]:
     if actual_created is None:
         try:
             os.kill(pid, 0)
+        except PermissionError:
+            # プロセスは存在するがアクセスできない (POSIX の EPERM / Windows の
+            # Access Denied)。"stopped" は acquire_runtime_marker がマーカーを
+            # 削除する判定に使われるため、生きているかもしれないものを
+            # "stopped" に潰すと二重起動の関所そのものが消える — unknown に倒す。
+            return (
+                "unknown",
+                f"pid {pid} may be alive but cannot be probed (access denied)",
+                data,
+            )
         except OSError:
             return "stopped", f"stale runtime marker for pid {pid}", data
         return (
@@ -80,14 +91,32 @@ def _marker_state(path: Path) -> tuple[str, str, dict | None]:
             f"pid {pid} exists but process identity cannot be verified",
             data,
         )
-    try:
-        identity_matches = (
-            expected_created is not None
-            and abs(float(expected_created) - actual_created) <= 0.01
+    if expected_created is None:
+        # 照合値の無いマーカーは、psutil の無い環境で書かれた正規の姿でもある
+        # — 生きている本物のプロセスかもしれない。"stopped" は
+        # acquire_runtime_marker がマーカーを削除する判定に使われるため、
+        # ここで "stopped" に潰すと生きたプロセスのマーカーが消える。
+        return (
+            "unknown",
+            f"pid {pid} is alive but the marker has no identity record to verify against",
+            data,
         )
-    except (TypeError, ValueError):
-        identity_matches = False
-    if not identity_matches:
+    if (
+        not isinstance(expected_created, (int, float))
+        or isinstance(expected_created, bool)
+        or not math.isfinite(expected_created)
+    ):
+        # 正規の書き手 (acquire_runtime_marker) は float か None しか書かない。
+        # 数値文字列 "1.0" / bool / Infinity / NaN は破損値 = 照合できないので、
+        # 「数値不一致 = stopped (マーカー削除)」に落とさず unknown に倒す。
+        return (
+            "unknown",
+            f"pid {pid} is alive but the marker's identity record is corrupt"
+            " and cannot be verified",
+            data,
+        )
+    if abs(float(expected_created) - actual_created) > 0.01:
+        # 両方の値が取れて数値照合で本当に不一致 = pid 再利用の確定。
         return "stopped", f"stale runtime marker with reused pid {pid}", data
     return (
         "running",
@@ -122,6 +151,10 @@ def another_running_process_owns_db(db_path: Path | str) -> tuple[bool, str]:
     ``_init_city_config`` の CITY_SLUG 自動修復が、稼働中プロセスの City を
     改名して乗っ取らないための関所 (2026-07-31 席競合案件・十巡目)。
 
+    照合できない ("unknown") マーカーも「稼働中かもしれない」として拒否側に
+    数える — 起動時検査 (``acquire_runtime_marker``) と同じ向きで、psutil の
+    無い環境で稼働中プロセスを素通ししないため。
+
     Returns:
         (True, 所有プロセスの説明) / (False, "")。
     """
@@ -132,12 +165,19 @@ def another_running_process_owns_db(db_path: Path | str) -> tuple[bool, str]:
         wanted = str(db_path)
     for path in _marker_paths():
         state, reason, data = _marker_state(path)
-        if state != "running" or not data:
+        if state not in ("running", "unknown"):
             continue
+        if data is None:
+            # マーカーが読めない: どの DB のものか判定できないので無条件に拒否。
+            return True, reason
         if data.get("pid") == me:
             continue
         recorded = data.get("db_path")
-        if recorded and str(recorded) == wanted:
+        if not recorded:
+            # db_path の無いマーカーは同じ DB かを判定できない — 自動修復は
+            # 判定できないなら止まる。
+            return True, reason
+        if str(recorded) == wanted:
             return True, reason
     return False, ""
 
@@ -150,7 +190,11 @@ def acquire_runtime_marker(*, city_name: str, db_path: Path, argv: list[str]) ->
     for existing in _marker_paths():
         state, reason, data = _marker_state(existing)
         if state == "unknown":
-            raise RuntimeError(f"Cannot start SAIVerse: {reason}")
+            raise RuntimeError(
+                f"Cannot start SAIVerse: {reason}. If you are certain no SAIVerse "
+                f"process is running anywhere, delete the marker files under "
+                f"{runtime_marker_dir()} and start again."
+            )
         if state == "running" and data and data["city_name"] == city_name:
             raise RuntimeError(f"Cannot start duplicate City {city_name!r}: {reason}")
         if state == "stopped":

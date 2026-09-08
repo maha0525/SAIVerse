@@ -50,6 +50,10 @@ DEFAULT_LIMIT = 30
 #: メモ種類の表示名 (本人・ユーザーに見える語)。
 _KIND_LABEL = {"want": "やりたい", "did": "やった"}
 
+#: 由来の印 (memos.origin) の添え書き。'live' と NULL (= live 相当) は無印 —
+#: 普段の記録に印は要らない。過去の経験由来だけに印を添える。
+_ORIGIN_MARK = {"readback": "（読み返しで記録）", "mechanism": "（候補から採用）"}
+
 #: 約束の相手 (task_book.COUNTERPART) の表示名。既知の値だけ訳す。
 _COUNTERPART_LABEL = {"user": "ユーザー", "system": "システム"}
 
@@ -140,8 +144,16 @@ def _load_promises(persona_id: str, manager: Any) -> Optional[List[Dict[str, Any
 
 
 def _sort_newest_first(entries: List[Tuple[Any, str]]) -> List[Tuple[Any, str]]:
-    """(メモ, アクティビティ名) を新しい順に並べる (日付 → id の降順)。"""
-    return sorted(entries, key=lambda e: (e[0].date, e[0].id), reverse=True)
+    """(メモ, アクティビティ名) を新しい順に並べる (できごとの日 → id の降順)。
+
+    並びの軸は**できごとの日** (event_date、無ければ書かれた日 date で代替 —
+    docs/intent/sluice_coverage_gaps.md B-2)。読み返しで当日に大量の記録が
+    生まれても、過去由来のメモは時間軸の本来の場所に並び、現在のページを
+    押し流さない。
+    """
+    return sorted(
+        entries, key=lambda e: (e[0].effective_date, e[0].id), reverse=True,
+    )
 
 
 def _page(
@@ -156,15 +168,18 @@ def _page(
     途中で切ると次のページ (date < 鍵) が同日の残りを飛ばして、本人からは
     メモが黙って消えたように見える。切れ目を日付に合わせると、
     ``before=鍵`` が残り全部にちょうど一致する。
+
+    日付の軸は並び (:func:`_sort_newest_first`) と同じ**できごとの日**
+    (effective_date) — 軸が並びと別だと、めくった先で順序が壊れる。
     """
     if before is not None:
-        entries = [e for e in entries if e[0].date < before]
+        entries = [e for e in entries if e[0].effective_date < before]
     if len(entries) <= limit:
         return (entries, 0, None)
     page = list(entries[:limit])
-    pivot = page[-1][0].date
+    pivot = page[-1][0].effective_date
     index = limit
-    while index < len(entries) and entries[index][0].date == pivot:
+    while index < len(entries) and entries[index][0].effective_date == pivot:
         page.append(entries[index])
         index += 1
     remaining = len(entries) - index
@@ -174,11 +189,18 @@ def _page(
 
 
 def _memo_line(memo: Any, activity_name: Optional[str]) -> str:
-    """メモ 1 件の一行。本文は切らない (本人の言葉)。"""
+    """メモ 1 件の一行。本文は切らない (本人の言葉)。
+
+    日付は**できごとの日** (effective_date)。由来の印 (origin) が読み返し
+    (readback) / 機構の候補の採用 (mechanism) のメモには、過去の経験由来だと
+    後から読んで分かる印を添える (B-2 — 本文の外の添え書きで、本人の言葉には
+    触らない)。
+    """
     kind = _KIND_LABEL.get(memo.kind, memo.kind)
+    origin_mark = _ORIGIN_MARK.get(getattr(memo, "origin", None) or "", "")
     if activity_name:
-        return f"- {memo.date} [{kind}] {activity_name}: {memo.text}"
-    return f"- {memo.date} [{kind}] {memo.text}"
+        return f"- {memo.effective_date} [{kind}] {activity_name}: {memo.text}{origin_mark}"
+    return f"- {memo.effective_date} [{kind}] {memo.text}{origin_mark}"
 
 
 def _more_line(remaining: int, pivot: str) -> str:
@@ -306,7 +328,10 @@ def _render_whole_book(
 ) -> str:
     lines: List[str] = ["【手帳】"]
 
-    # 1) 目次 — 開いているアクティビティごとに件数と最後に書いた日。
+    # 1) 目次 — 開いているアクティビティごとに件数と最後のできごとの日。軸は
+    # メモ一行の日付 (_memo_line) と同じできごとの日 (effective_date) — 書かれた
+    # 日で取ると、読み返しのメモ一件で眠っている活動が今日まで続いて見える
+    # (docs/intent/sluice_coverage_gaps.md B-2)。
     lines.append("")
     lines.append("■ 目次（メモ欄のアクティビティ）")
     if not activities:
@@ -314,13 +339,13 @@ def _render_whole_book(
     else:
         for act in activities:
             memos = memos_by_activity.get(act.id, [])
-            last_date = max((m.date for m in memos), default=None)
+            last_date = max((m.effective_date for m in memos), default=None)
             if last_date is None:
                 lines.append(f"- {act.name}（メモ 0 件、まだ書いていません）")
             else:
                 lines.append(
                     f"- {act.name}（メモ {len(memos)} 件、"
-                    f"最後に書いた日 {last_date}）"
+                    f"最後のできごと {last_date}）"
                 )
 
     # 2) 最近のページ — 全アクティビティ横断で新しい順。

@@ -5,7 +5,7 @@
 
 REST API 全エンドポイントの一覧（自動生成）。すべて `/api` 配下にマウントされる。
 
-**エンドポイント数**: 352（tag グループ: 25）
+**エンドポイント数**: 356（tag グループ: 25）
 
 ## addon
 
@@ -332,6 +332,10 @@ REST API 全エンドポイントの一覧（自動生成）。すべて `/api` 
 | PUT | `/api/people/{persona_id}/schedules/{schedule_id}` | Update an existing schedule. |
 | DELETE | `/api/people/{persona_id}/schedules/{schedule_id}` | Delete a schedule. |
 | POST | `/api/people/{persona_id}/schedules/{schedule_id}/toggle` | Toggle schedule enabled status. |
+| POST | `/api/people/{persona_id}/sluice/capture` | 後から通す採取を開始する (``dry=True`` なら見積もりだけを返す)。 |
+| GET | `/api/people/{persona_id}/sluice/capture/{job_id}` | 採取ジョブの進み具合・完了/失敗を返す (ポーリング用)。 |
+| POST | `/api/people/{persona_id}/sluice/capture/{job_id}/cancel` | 走行中の採取ジョブに中止を要求する (チャンクの切れ目で止まる)。 |
+| GET | `/api/people/{persona_id}/sluice/skipped-spans` | スルースを通っていない範囲の記録一覧 (範囲・件数・日時)。 |
 | GET | `/api/people/{persona_id}/storage-layers` | Return a unified view of the 7-layer storage for one persona. |
 | GET | `/api/people/{persona_id}/task-book` | タスク帳の open な一件を作成順に返す (読み取り専用)。 |
 | GET | `/api/people/{persona_id}/threads` | List all conversation threads for a persona. |

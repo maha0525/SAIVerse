@@ -50,23 +50,30 @@ class PocketbookMemo(BaseModel):
     """メモ一件 (§13.6 の memos)。
 
     本文 (``text``) はペルソナ本人の言葉なので切り詰めない (表示側で折り返す)。
-    ``created_at`` に相当する列は memos に無い — 手帳は日粒度の記録で、時刻を
-    持つのは日付 (``date``) だけ。
+    ``created_at`` に相当する列は memos に無い — 手帳は日粒度の記録で、時刻は
+    日付二つ: ``date`` (書かれた日) と ``event_date`` (できごとの日 — 採取元の
+    会話のメッセージ時刻から機械が刻印。旧行は None)。並び・提示の軸は
+    できごとの日 (None は date で代替)。``origin`` は由来の印
+    ('live' = 定常の採取・本人のスペル / 'readback' = 読み返し /
+    'mechanism' = 機構の候補からの採用。旧行は None = live 相当)。
     """
 
     id: int
-    date: str          # 'YYYY-MM-DD'
+    date: str          # 'YYYY-MM-DD' — 書かれた日
     kind: str          # 'did' (やった) | 'want' (やりたい)
     text: str
     span_start_id: Optional[str] = None
     span_end_id: Optional[str] = None
+    event_date: Optional[str] = None  # 'YYYY-MM-DD' — できごとの日 (機械刻印)
+    origin: Optional[str] = None      # 'live' | 'readback' | 'mechanism'
 
 
 class PocketbookActivity(BaseModel):
     """アクティビティ一件 (§13.6 の activities) と、そのメモ (日付降順)。
 
     誕生の時刻は ``born_at`` (epoch 秒) で、activities に ``created_at`` 列は
-    無い。``last_memo_date`` は「眠っている」の導出材料 (§13.1 — 列にしない)。
+    無い。``last_memo_date`` は「眠っている」の導出材料 (§13.1 — 列にしない) で、
+    値は最後の**できごとの日** (event_date、無ければ書かれた日で代替)。
     """
 
     id: int
@@ -92,7 +99,7 @@ def get_pocketbook(
     include_closed: bool = False,
     manager=Depends(get_manager),
 ):
-    """手帳を読む — アクティビティごとにメモを日付降順で束ねて返す。
+    """手帳を読む — アクティビティごとにメモをできごとの日の降順で束ねて返す。
 
     既定は開いているアクティビティだけ。``include_closed=true`` で閉じたものも
     含める (誕生順は変えない)。読み取り専用 — 書き込み・LLM 呼び出し・Pulse 起動は
@@ -109,10 +116,15 @@ def get_pocketbook(
                 rows: List[PocketbookActivity] = []
                 for act in activities:
                     memos = list_memos(adapter.conn, act.id)
-                    # 最終メモ日付 (§13.1 の「眠っている」の導出材料) は取得済みの
-                    # メモから取る — get_last_memo_date と同じ集合の MAX(date) で、
-                    # アクティビティ数ぶんの追加クエリを撃たない。
-                    last_date = max((m.date for m in memos), default=None)
+                    # 最後のできごとの日 (§13.1 の「眠っている」の導出材料) は
+                    # 取得済みのメモから取る — get_last_memo_date と同じ集合の
+                    # 最大値で、アクティビティ数ぶんの追加クエリを撃たない。軸は
+                    # できごとの日 (event_date、無ければ date で代替) — 書かれた日
+                    # で取ると、読み返しのメモ一件で眠っている活動が今日まで
+                    # 続いて見える (B-2)。
+                    last_date = max(
+                        (m.effective_date for m in memos), default=None
+                    )
                     rows.append(
                         PocketbookActivity(
                             id=act.id,
@@ -130,9 +142,13 @@ def get_pocketbook(
                                     text=m.text,
                                     span_start_id=m.span_start_id,
                                     span_end_id=m.span_end_id,
+                                    event_date=m.event_date,
+                                    origin=m.origin,
                                 )
-                                # 日付降順 (新しいメモが上)。list_memos は
-                                # (date, id) 昇順なので、その逆順が同順序の反転。
+                                # できごとの日の降順 (新しいメモが上)。list_memos
+                                # は (COALESCE(event_date, date), id) 昇順なので、
+                                # その逆順が同順序の反転 (B-2 — 提示の軸は
+                                # できごとの日)。
                                 for m in reversed(memos)
                             ],
                         )

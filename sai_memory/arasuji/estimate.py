@@ -189,6 +189,11 @@ def estimate_chronicle_generation_cost(
             absorption_calls = len(absorption_plan.items)
             absorption_material_chars = absorption_plan.material_chars
             counted_upper_ids = list(absorption_plan.stale_upper_ids)
+            # 吸収できない発話あり run (機構 E) は通常チャンクとして計画へ
+            # 合流する — 実行 (generate_chronicle) と同じ関数で合流させ、
+            # level1_calls / 材料字数 / 束ねの dry 判定に同じ数で載せる。
+            from sai_memory.arasuji.absorption import merge_standalone_chunks
+            plan = merge_standalone_chunks(plan, absorption_plan, all_messages)
 
     # sweep (壊れた親の救済) が実行時に**新しく見つける**分を足す。実行側
     # (run_absorption / generate_chronicle) は走る前に _sweep_broken_parents を

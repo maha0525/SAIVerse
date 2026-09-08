@@ -103,6 +103,27 @@ def get_pending_cap() -> float:
     return _env_float("SAIVERSE_SLUICE_PENDING_CAP", 1.5)
 
 
+def get_max_span_chars() -> int:
+    """一発のスルースの呼び出しに入れてよい担当範囲の上限 (字数)。
+
+    docs/intent/sluice_coverage_gaps.md 第一段 A: 担当範囲 (パンマーカーから
+    窓の末尾まで) がこの量を超えていたら、run_metabolism はスルースを走らせ
+    ない (飛ばした範囲を記録して退場は進める)。「入りきらない事態を復旧する」
+    のではなく「入りきる回だけ走らせる」 — 旧 §13.5-1 の後退方式の代替。
+    """
+    raw = _read_env_with_legacy("SAIVERSE_SLUICE_MAX_SPAN_CHARS")
+    if raw is None:
+        return 100_000
+    try:
+        return int(raw)
+    except ValueError:
+        LOGGER.warning(
+            "[sluice] invalid int for SAIVERSE_SLUICE_MAX_SPAN_CHARS=%r; "
+            "using default 100000", raw,
+        )
+        return 100_000
+
+
 # ---------------------------------------------------------------------------
 # response_schema (Gemini 制約: additionalProperties 禁止、フラット)
 # ---------------------------------------------------------------------------
@@ -473,10 +494,6 @@ def _scope_sentence(span_new_count: Optional[int]) -> str:
     ``span_new_count`` が None のときはマーカーが窓に無い (初回 / 押し出されて
     消えた) ので、窓全体が対象。
 
-    ⚠ コンテキスト超過の後退 (§13.5-1) が起きた回は、実際に見せる通数がここで
-    宣言した数より少なくなる (プロンプトは後退前に一度だけ組む)。「それより前は
-    採取済み」の部分は後退しても真のままなので、件数だけが概数になる。
-
     出自: docs/issues/sluice_memo_duplicate_across_spans.md (2026-08-22 裁定 —
     機械側の重複防止と対で、供給源をここで塞ぐ)。
     """
@@ -499,6 +516,7 @@ def _build_sluice_prompt(
     *,
     span_new_count: Optional[int],
     today_memos: Optional[List[Tuple[str, str, str]]] = None,
+    scope_sentence: Optional[str] = None,
 ) -> str:
     """<system> 包みの注入プロンプトを組む (keepalive の末尾通知と同じ面)。
 
@@ -507,7 +525,9 @@ def _build_sluice_prompt(
     ``span_new_count`` は今回の担当範囲の通数 (None = 窓全体) — 手帳の節で
     対象範囲を明示するのに使う (:func:`_scope_sentence`)。``today_memos`` は
     :func:`_list_today_memos` の読み (今日すでに書いたメモ) — 無ければその節を
-    出さない。
+    出さない。``scope_sentence`` は対象範囲の一行の差し替え (後から通す採取が
+    「直近の会話」ではなく「読み返した過去の会話」を対象と明示するために使う)。
+    None なら従来どおり :func:`_scope_sentence` で組む。
     """
     from builtin_data.tools._core_memory_common import resolve_core_memory_budget
 
@@ -560,7 +580,7 @@ def _build_sluice_prompt(
         "- 既存のコア記憶と矛盾する新情報（帰国・引っ越しなど。矛盾は core_updates で書き換え）。\n"
         "\n"
         "2) 手帳のメモ欄 (want_memos / did_memos):\n"
-        f"- {_scope_sentence(span_new_count)}\n"
+        f"- {scope_sentence if scope_sentence is not None else _scope_sentence(span_new_count)}\n"
         "- この範囲で、やりたいと思ったこと・実際にやったことはありますか?\n"
         "  無ければ空で構いません。あれば、活動の名前（「小説を書く」「絵の練習」\n"
         "  のような粒度。下の一覧にあるものは act:N で参照）と、今日の中身\n"
@@ -849,8 +869,16 @@ def _apply_memos(
     span_start_id: Optional[str],
     span_end_id: Optional[str],
     offered_activities: Dict[int, str],
+    event_date: Optional[str] = None,
+    origin: str = "live",
 ) -> tuple[int, int, List[str]]:
     """want/did メモを手帳 (pocketbook) に書く。(成功数, 失敗数, 結果行) を返す。
+
+    ``event_date`` / ``origin`` は二つの時刻と由来の刻印
+    (docs/intent/sluice_coverage_gaps.md B-2)。``event_date`` は採取元の会話の
+    メッセージ時刻から呼び出し側が機械で導いた「できごとの日」(None = 導け
+    なかった — 読み手は date で代替する)。``origin`` は 'live' (定常のスルース) /
+    'readback' (本人の読み返し)。どちらも本人の申告は使わない。
 
     - ``new_activity_name`` は get_or_create_activity(origin='sluice') で収束させる。
     - ``activity_ref`` は ``act:N`` の形の写しだけを受け取り (:func:`_parse_ref`)、
@@ -865,10 +893,11 @@ def _apply_memos(
       不正 (空本文・一覧外 id) はその要素だけ捨てるが、ストレージ例外は送出する
       (スルース失敗 = 退場停止のゲートに乗せる)。
     - 内容ベースの重複防止 (コア記憶 add の内容一致ガードと同じ二段構え): 同じ
-      日・同じアクティビティ・同じ種類・同じ本文の既存メモがあればスキップする
-      (成功扱い)。冪等キーは担当範囲が変わると別キーになるので、繰り越された
-      回の再提案を止められない。照合は書き込みと同じロック・同じトランザク
-      ションの中で行う (docs/issues/sluice_memo_duplicate_across_spans.md)。
+      できごとの日・同じアクティビティ・同じ種類・同じ本文の既存メモがあれば
+      スキップする (成功扱い)。冪等キーは担当範囲が変わると別キーになるので、
+      繰り越された回の再提案を止められない。照合は書き込みと同じロック・同じ
+      トランザクションの中で行う
+      (docs/issues/sluice_memo_duplicate_across_spans.md)。
     """
     items: List[Tuple[str, Any]] = (
         [("want", m) for m in (want_memos or [])]
@@ -953,8 +982,13 @@ def _apply_memos(
                 # 内容ベースの重複防止 — 同じロック・同じトランザクションの中で
                 # 照合してから書く (check-then-act の隙間を作らない)。同じ束の中で
                 # 先に書いたメモも同じ接続から見えるので、一回の結果に同じメモが
-                # 二つ入っていた場合もここで止まる。
-                duplicate = find_memo_by_content(conn, aid, today, kind, text)
+                # 二つ入っていた場合もここで止まる。照合する日はこれから書く
+                # メモの**できごとの日** (event_date、無ければ今日) — 書かれた日で
+                # 照合すると、読み返しで拾った別の日のできごとが今日の記録と
+                # ぶつかって落ちる (B-2)。
+                duplicate = find_memo_by_content(
+                    conn, aid, event_date or today, kind, text
+                )
                 if duplicate is not None:
                     applied += 1
                     lines.append(
@@ -967,6 +1001,8 @@ def _apply_memos(
                     span_start_id=span_start_id,
                     span_end_id=span_end_id,
                     idem_key=f"{idem_prefix}:m{idx}",
+                    event_date=event_date,
+                    origin=origin,
                     commit=False,
                 )
                 applied += 1
@@ -1290,11 +1326,15 @@ def _persist_record(
     prompt_snapshot: str,
     *,
     applied_total: int,
+    scope_override: Optional[str] = None,
 ) -> None:
     """判断ターンを main_line / (committed|discardable) で SAIMemory に残す。
 
     採取ありなら committed (コンテキストに残る来歴)、なしなら discardable
     (DB には残るが context 復元から除外)。生 JSON は保存しない (自然文のみ)。
+    ``scope_override`` はこの規則の差し替え — 後から通す採取 (本人の読み返し)
+    は過程を本線の context に載せない (入口は一本 — ダイジェスト一行だけが
+    committed で立つ) ため、採取ありでも 'discardable' を渡す。
 
     role は "user"、``record_text`` は呼び出し側で ``<system>…</system>`` に
     包んだシステム通知形式で渡る (event_message の確立形式)。プロンプト無しの
@@ -1329,7 +1369,9 @@ def _persist_record(
         # 編纂には 2026-08-29 裁定から材料として入る (長文は決定論の一行に縮む)。
         "metadata": {"tags": ["internal", "event_message", "sluice"]},
         "line_role": "main_line",
-        "scope": "committed" if applied_total > 0 else "discardable",
+        "scope": scope_override or (
+            "committed" if applied_total > 0 else "discardable"
+        ),
         "pulse_id": pulse_id,
         "paired_action_text": prompt_snapshot,
     })
@@ -1351,6 +1393,18 @@ _PAN_MARKER_KEY = "sluice_last_pan_id"
 #: 旧世代 (gold_panning) の永続キー。読み出しで新キーが無いときに一度だけ参照して
 #: 新キーへ写す (永続データの移行であって、コード API の互換シムではない)。
 _LEGACY_PAN_MARKER_KEY = "gold_panning_last_pan_id"
+
+#: 本人モードの読み返しダイジェスト (本線の一行) の材料を、走行を跨いで貯める
+#: 永続キー。値は JSON: ``{"period_start", "period_end", "messages", "memos",
+#: "core", "promises", "last_chunk_id", "flush_nonce"}``
+#: (:data:`_PENDING_DIGEST_COUNTS` / :data:`_PENDING_DIGEST_STRINGS`)。
+#: in-memory のカウンタだけで組んでいた頃は、
+#: (i) 中断 (cancelled / cooldown / 例外) した走行の採取分がどの走行の
+#: ダイジェストにも入らず、(ii) 記録の縮めの後に本線への追記が落ちると、範囲の
+#: 記録は消えているので再実行が noop になりダイジェストが永久に立たなかった
+#: (2026-09-09 Codex 指摘)。手帳・コア記憶への書き込みには本線の痕跡が必ず残る、
+#: という透明性の約束を守るために、材料を memory.db へ耐久化する。
+_CAPTURE_PENDING_DIGEST_KEY = "sluice_capture_pending_digest"
 
 
 def _load_pan_marker(persona: Any) -> Optional[str]:
@@ -1376,14 +1430,32 @@ def _load_pan_marker(persona: Any) -> Optional[str]:
         raise SluiceStorageUnavailableError(
             "memory.db connection is missing; cannot read the pan marker"
         )
-    from sai_memory.memory.storage import get_embed_metadata, set_embed_metadata
-    with adapter._db_lock:
-        value = get_embed_metadata(conn, _PAN_MARKER_KEY)
-        if not value:
-            # 旧世代キーからの一回きり移行 (見つかれば新キーへ写す)。
-            value = get_embed_metadata(conn, _LEGACY_PAN_MARKER_KEY)
-            if value:
-                set_embed_metadata(conn, _PAN_MARKER_KEY, value)
+    # 読みは strict 版 (Codex 第二巡 修正 A)。通常の get_embed_metadata は
+    # **あらゆる** OperationalError を「テーブルがまだ無い旧 DB」とみなして None を
+    # 返すので、DB ロックや I/O 障害が入口で「マーカー不在」に化け、下の
+    # 包み直し (fail-closed) がそもそも発火しなかった。
+    from sai_memory.memory.storage import (
+        get_embed_metadata_strict,
+        set_embed_metadata,
+    )
+    try:
+        with adapter._db_lock:
+            value = get_embed_metadata_strict(conn, _PAN_MARKER_KEY)
+            if not value:
+                # 旧世代キーからの一回きり移行 (見つかれば新キーへ写す)。
+                value = get_embed_metadata_strict(conn, _LEGACY_PAN_MARKER_KEY)
+                if value:
+                    set_embed_metadata(conn, _PAN_MARKER_KEY, value)
+    except SluiceStorageUnavailableError:
+        raise
+    except Exception as exc:
+        # 読み取り障害はこの型に揃える (2026-09-09 Codex 指摘) — 呼び出し側は
+        # 「マーカーが読めない」を一つの型で捕まえて前進・飛ばしを止められる。
+        # 生の例外のままだと、捕まえる側が provider 依存の型を列挙することに
+        # なり、取りこぼした型が呼び出し元まで素通りする。
+        raise SluiceStorageUnavailableError(
+            f"pan marker read failed: {exc}"
+        ) from exc
     if value:
         persona._sluice_last_pan_id = value
     return value
@@ -1407,6 +1479,144 @@ def _save_pan_marker(persona: Any, last_id: str) -> None:
     with adapter._db_lock:
         set_embed_metadata(conn, _PAN_MARKER_KEY, last_id)
     persona._sluice_last_pan_id = last_id
+
+
+# ---------------------------------------------------------------------------
+# 読み返しダイジェストの材料の耐久化 (走行を跨いで貯める)
+# ---------------------------------------------------------------------------
+
+#: 貯まっている材料の数の欄 (整数)。
+_PENDING_DIGEST_COUNTS = ("messages", "memos", "core", "promises")
+#: 貯まっている材料の文字列の欄 (無ければ None)。
+#: - ``period_start`` / ``period_end``: 読み返した期間 ('YYYY-MM-DD')。
+#: - ``last_chunk_id``: 最後に足したチャンクの先頭 message id。同じチャンクを
+#:   やり直した回に二重加算しないための冪等キー (修正 B)。
+#: - ``flush_nonce``: 本線へ立てる一行に刻む識別子。追記の前に採番して永続する
+#:   ことで、「追記成功・消し込み失敗」の後の再実行が二度目の一行を立てない
+#:   (修正 C)。
+_PENDING_DIGEST_STRINGS = (
+    "period_start", "period_end", "last_chunk_id", "flush_nonce",
+)
+
+
+def _empty_pending_digest() -> Dict[str, Any]:
+    empty: Dict[str, Any] = {key: None for key in _PENDING_DIGEST_STRINGS}
+    empty.update({key: 0 for key in _PENDING_DIGEST_COUNTS})
+    return empty
+
+
+def _pending_digest_conn(persona: Any):
+    adapter = getattr(persona, "sai_memory", None)
+    conn = getattr(adapter, "conn", None) if adapter is not None else None
+    if conn is None:
+        raise SluiceStorageUnavailableError(
+            "memory.db connection is missing; cannot access the pending "
+            "capture digest"
+        )
+    return adapter, conn
+
+
+def _load_pending_digest(persona: Any) -> Dict[str, Any]:
+    """貯まっているダイジェストの材料を読む (無ければ空の器)。
+
+    壊れた値 (JSON にならない / 辞書でない) は空として扱う — ダイジェスト一行の
+    材料であって、採取そのものの成立条件ではないので、ここで走行を止めない。
+
+    一方、**ストアが読めない**例外は送出する (Codex 第二巡 修正 A)。読めないのを
+    「空」と誤認したまま :func:`_merge_pending_digest` が書き戻すと、貯まっていた
+    件数がその一回で消える。呼び出し側で新たに捕まえる必要は無い — チャンク処理の
+    失敗として伝播し、ジョブが failed になって再実行で回収される。
+    """
+    adapter, conn = _pending_digest_conn(persona)
+    from sai_memory.memory.storage import get_embed_metadata_strict
+    with adapter._db_lock:
+        raw = get_embed_metadata_strict(conn, _CAPTURE_PENDING_DIGEST_KEY)
+    if not raw:
+        return _empty_pending_digest()
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        LOGGER.warning(
+            "[sluice-capture] pending digest value is not valid JSON; "
+            "starting from an empty tally",
+        )
+        return _empty_pending_digest()
+    if not isinstance(parsed, dict):
+        return _empty_pending_digest()
+    merged = _empty_pending_digest()
+    for key in _PENDING_DIGEST_STRINGS:
+        value = parsed.get(key)
+        merged[key] = value if isinstance(value, str) and value else None
+    for key in _PENDING_DIGEST_COUNTS:
+        try:
+            merged[key] = int(parsed.get(key) or 0)
+        except (TypeError, ValueError):
+            merged[key] = 0
+    return merged
+
+
+def _write_pending_digest(persona: Any, pending: Dict[str, Any]) -> None:
+    """貯まっている材料を丸ごと書き戻す (材料の永続はこの一点に集める)。"""
+    adapter, conn = _pending_digest_conn(persona)
+    from sai_memory.memory.storage import set_embed_metadata
+    with adapter._db_lock:
+        set_embed_metadata(
+            conn, _CAPTURE_PENDING_DIGEST_KEY,
+            json.dumps(pending, ensure_ascii=False),
+        )
+
+
+def _merge_pending_digest(
+    persona: Any, *, chunk_start_id: Optional[str],
+    messages: int, memos: int, core: int, promises: int,
+    period_start: Optional[str], period_end: Optional[str],
+) -> None:
+    """チャンク 1 個ぶんの適用数を、貯まっている材料へ足して書き戻す。
+
+    ``chunk_start_id`` (そのチャンクの先頭 message id = 実行台帳の identity と
+    同じ値) で**冪等**にする (Codex 第二巡 修正 B)。貯まっている材料の
+    ``last_chunk_id`` と一致したら何も足さずに返る — 台帳の記録済み結果で同じ
+    チャンクをやり直した回 (LLM は呼ばず適用だけ再実行する経路) が、同じ件数を
+    二度足さないため。足すときは ``last_chunk_id`` を更新して書く。
+
+    適用ゼロのチャンクは呼び出し側がそもそも呼ばない (``last_chunk_id`` は適用の
+    あったチャンクだけ進む) — ゼロのチャンクのやり直しは足すものが無いので、
+    冪等キーが進んでいなくても二重にはならない。
+    """
+    current = _load_pending_digest(persona)
+    if chunk_start_id and current.get("last_chunk_id") == chunk_start_id:
+        LOGGER.info(
+            "[sluice-capture] chunk %s is already merged into the pending "
+            "digest; skipping the tally", chunk_start_id,
+        )
+        return
+    current["last_chunk_id"] = chunk_start_id or current.get("last_chunk_id")
+    current["messages"] += int(messages or 0)
+    current["memos"] += int(memos or 0)
+    current["core"] += int(core or 0)
+    current["promises"] += int(promises or 0)
+    if period_start and (
+        current["period_start"] is None or period_start < current["period_start"]
+    ):
+        current["period_start"] = period_start
+    if period_end and (
+        current["period_end"] is None or period_end > current["period_end"]
+    ):
+        current["period_end"] = period_end
+    _write_pending_digest(persona, current)
+
+
+def _clear_pending_digest(persona: Any) -> None:
+    """貯まっている材料を消す (ダイジェスト一行を本線に立て終えた後だけ)。"""
+    _write_pending_digest(persona, _empty_pending_digest())
+
+
+def _pending_digest_total(pending: Dict[str, Any]) -> int:
+    """貯まっている適用数の合計 (0 ならダイジェストを立てる材料が無い)。"""
+    return (
+        int(pending.get("memos") or 0) + int(pending.get("core") or 0)
+        + int(pending.get("promises") or 0)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1439,57 +1649,54 @@ def _compute_span(
     return (start, end)
 
 
-# ---------------------------------------------------------------------------
-# コンテキスト超過の後退 (§13.5-1)
-# ---------------------------------------------------------------------------
+def _message_event_date(persona: Any, message_id: Optional[str]) -> Optional[str]:
+    """メッセージ id から「できごとの日」('YYYY-MM-DD') を機械で導く。
 
-#: 超過エラー判定の文字列マーカー (プロバイダ横断のヒューリスティック)。
-_CONTEXT_OVERFLOW_MARKERS = (
-    "context length",
-    "context window",
-    "maximum context",
-    "context_length_exceeded",
-    "too many tokens",
-    "token limit",
-    "input token count",
-    "prompt is too long",
-    "request too large",
-    "exceeds the maximum",
-)
-
-
-def _is_context_overflow(exc: BaseException) -> bool:
-    """例外が「プロンプトがコンテキストに入りきらない」超過エラーかを判定する。
-
-    プロバイダ共通の超過例外型が無いため、例外文字列 (original_error 含む) の
-    マーカー照合で判定する。判定に漏れた超過エラーは通常の失敗として退場停止 →
-    次回再試行の経路に乗る (取りこぼしても fail-closed)。
+    二つの時刻の刻印 (docs/intent/sluice_coverage_gaps.md B-2) の供給源。
+    採取元の範囲の**末尾メッセージ**の保存時刻 (messages.created_at) を日粒度に
+    落とす — 本人・LLM に申告させない。読めない (行が無い・時刻が欠落・変換
+    不能) ときは None を返し、記録は event_date NULL で書かれる (読み手は
+    作成日で代替する)。刻印できない事情で採取を止めない — 時刻の欄は提示の
+    並びのためのもので、採取の成立条件ではない。
     """
-    texts = [str(exc)]
-    original = getattr(exc, "original_error", None)
-    if original is not None:
-        texts.append(str(original))
-    blob = " ".join(texts).lower()
-    return any(marker in blob for marker in _CONTEXT_OVERFLOW_MARKERS)
-
-
-def _drop_last_exchange(
-    context_messages: List[Dict[str, Any]],
-) -> Optional[tuple[List[Dict[str, Any]], int]]:
-    """担当範囲の直近のプロンプト+応答の組を一つ外す (§13.5-1 の後退方式)。
-
-    末尾から最後の user メッセージを探し、そこから末尾まで (user プロンプトと
-    それに続く応答) をまとめて外す。外せる組が無ければ None。
-    """
-    last_user = None
-    for i in range(len(context_messages) - 1, -1, -1):
-        msg = context_messages[i]
-        if isinstance(msg, dict) and msg.get("role") == "user":
-            last_user = i
-            break
-    if last_user is None:
+    if not message_id:
         return None
-    return (context_messages[:last_user], len(context_messages) - last_user)
+    adapter = getattr(persona, "sai_memory", None)
+    conn = getattr(adapter, "conn", None) if adapter is not None else None
+    if conn is None:
+        return None
+    try:
+        with adapter._db_lock:
+            row = conn.execute(
+                "SELECT created_at FROM messages WHERE id = ?",
+                (str(message_id),),
+            ).fetchone()
+    except Exception:
+        LOGGER.warning(
+            "[sluice] event_date lookup failed for message %s", message_id,
+            exc_info=True,
+        )
+        return None
+    if not row or row[0] is None:
+        return None
+    try:
+        ts = int(row[0])
+        if ts <= 0:
+            # created_at 欠落を 0 に写した行 (native import) — 1970-01-01 の
+            # 嘘を刻印しない。
+            return None
+        return datetime.fromtimestamp(ts).date().isoformat()
+    except (TypeError, ValueError, OverflowError, OSError):
+        return None
+
+
+# (旧: コンテキスト超過の後退 §13.5-1 — 2026-09-08 廃止。
+#  docs/intent/sluice_coverage_gaps.md 第一段 A: 「直近の組を外して再試行」は
+#  1 組はみ出したための設計で、巨大な冷たい窓には無力なまま 429 の連打だけを
+#  生んだ。しかも文字列マーカー "request too large" が OpenAI の 429 TPM 超過に
+#  一致してレート制限をコンテキスト超過に誤分類していた。現行は「入らない量の
+#  ときは走らせない」(run_metabolism 側の量判定) に一本化し、本物の超過は
+#  通常の失敗として送出 → 退場停止 → 次回再試行に乗る。)
 
 
 # ---------------------------------------------------------------------------
@@ -1532,8 +1739,8 @@ class SluiceContextUnavailableError(RuntimeError):
 class SluiceEmptySeenSetError(RuntimeError):
     """このスルースが 1 通も見ていない (見た集合が空)。
 
-    Codex 第八巡 修正 2: 全交換がコンテキスト超過の後退で外れる等で「何も見て
-    いない」結果になったとき、それを適用・確定してしまうと、マーカーは進まない
+    Codex 第八巡 修正 2: 履歴の実入力が空等で「何も見ていない」結果に
+    なったとき、それを適用・確定してしまうと、マーカーは進まない
     のに台帳が completed になり、以降は**同じ安定キーの記録が永久に再利用**
     されて新しい LLM コールが起きない (退場側は空の見た集合を拒むので、末尾の
     退場が止まったままになる)。完了の条件は「最低 1 通は本人の目を通った」—
@@ -1706,8 +1913,8 @@ def _parse_structured_result(
 # 実行の identity は (persona, span_start_id)。担当範囲の起点はパンマーカーで
 # 決まり、マーカーは成功時にしか進まないので、同じ論理単位の再試行は必ず同じ
 # 起点を持つ。終端 (span_end) を identity に含めないのは意図的 — 終端は
-# ①退場が止まっている間に窓へ新着が積まれる ②コンテキスト超過の後退で縮む、
-# の二通りで試行ごとに動き、キーに含めると「同じ仕事の再試行」が別キーになって
+# 退場が止まっている間に窓へ新着が積まれることで試行ごとに動き、
+# キーに含めると「同じ仕事の再試行」が別キーになって
 # 記録済み結果に合流できない (= 重複の穴が戻る)。実際に見た終端は identity
 # ではなく記録の中身 (result.span_end_id) が持つ。
 #
@@ -1815,38 +2022,16 @@ def _find_recorded_result(ledger: Any, ledger_key: str) -> Optional[Dict[str, An
     return None
 
 
-def _seen_span_end(
-    span_ids: List[str], span_end_full: Optional[str], dropped_total: int,
-) -> Optional[str]:
-    """実際に LLM に渡した範囲の末尾メッセージ ID を求める。
-
-    コンテキスト超過の後退 (§13.5-1) で外した組は「見ていない」— パンマーカーと
-    span をそこまで進めると、外した会話が未見のまま処理済みになりゲートの
-    不変条件 (全経験が退場前に一度本人の目を通る) が破れる。後退で外したのは
-    提示 context の末尾ブロックなので、窓の ID 列の末尾から同数を引いた位置を
-    見た範囲の末尾とする (提示 context の履歴部は窓のメッセージと 1:1 で並ぶ
-    前提の末尾勘定。ずれても安全側 = 進めなさすぎ、で二重見にしかならない)。
-    全部外れた (勘定が窓を使い切った) ときは None = マーカーを進めない。
-    """
-    if dropped_total <= 0:
-        return span_end_full
-    seen_count = len(span_ids) - dropped_total
-    if seen_count <= 0:
-        return None
-    return span_ids[seen_count - 1]
-
-
 def _call_sluice_llm(
     lifecycle: Any,
     persona: Any,
     building_id: str,
-    span_ids: List[str],
     span_end_full: Optional[str],
     span_new_count: Optional[int],
     window_anchor_id: Optional[str] = None,
     model_key: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """LLM 呼び出しフェーズ (context 組み → 後退つき generate → usage → 検証)。
+    """LLM 呼び出しフェーズ (context 組み → generate → usage → 検証)。
 
     Returns:
         ``{"response": 検証済み dict, "rejections": 型不正で落とした要素の記録,
@@ -1944,47 +2129,23 @@ def _call_sluice_llm(
         # structured-output fallback で実 model が変わった場合の差し替え
         execution_context = execution_context.with_model(_sluice_model)
 
-    # コンテキスト超過の後退方式 (autonomous_behavior_v3.md §13.5-1): 超過エラー
-    # のときは担当範囲の直近のプロンプト+応答の組を一つ外して再試行し、まだ
-    # 入らなければもう一組前を外す。外した組は「見ていない」のでパンマーカーを
-    # そこまで進めず、次回の担当範囲に残す (_seen_span_end)。
-    # TODO(§13.5-2): 再試行し続けても失敗しキャッシュが切れた場合の扱いは未設計
-    # (autonomous_behavior_v3.md §13.5-2 — 存在だけ確定)。現状は失敗として送出し、
-    # 呼び出し元の退場停止 → 次回再試行に乗る。
-    dropped_total = 0
-    while True:
-        messages = context_messages + [{"role": "user", "content": prompt}]
-        try:
-            result = llm_client.generate(
-                messages,
-                tools=[],
-                response_schema=_RESPONSE_SCHEMA,
-                temperature=runtime._default_temperature(persona),
-                # このコールだけの出力上限 (per-call)。対応していない
-                # プロバイダのクライアントは generate の **kwargs が
-                # 黙って落とす — 上限が効かないだけで、例外にはしない。
-                max_output_tokens=_MAX_OUTPUT_TOKENS,
-                **runtime._get_cache_kwargs(persona_id),
-            )
-            break
-        except Exception as exc:
-            if not _is_context_overflow(exc):
-                raise
-            reduced = _drop_last_exchange(context_messages)
-            if reduced is None:
-                LOGGER.error(
-                    "[sluice] context overflow persists with nothing left to drop "
-                    "(persona=%s dropped=%d)", persona_id, dropped_total,
-                )
-                raise
-            context_messages, dropped = reduced
-            dropped_total += dropped
-            LOGGER.warning(
-                "[sluice] context overflow; dropped the most recent prompt+response "
-                "pair (%d messages, total dropped=%d) and retrying — "
-                "外した組は次回の担当範囲に残る (persona=%s)",
-                dropped, dropped_total, persona_id,
-            )
+    # LLM 呼び出しは一発 (2026-09-08、docs/intent/sluice_coverage_gaps.md
+    # 第一段 A)。旧 §13.5-1 の後退方式 (超過エラーで直近の組を外して再試行) は
+    # 廃止した — 入らない量の窓はそもそも呼び出し元 (run_metabolism) の量判定が
+    # 走らせない。本物のコンテキスト超過を含むあらゆる失敗は送出し、呼び出し元の
+    # 退場停止 → 次回再試行に乗る。
+    messages = context_messages + [{"role": "user", "content": prompt}]
+    result = llm_client.generate(
+        messages,
+        tools=[],
+        response_schema=_RESPONSE_SCHEMA,
+        temperature=runtime._default_temperature(persona),
+        # このコールだけの出力上限 (per-call)。対応していない
+        # プロバイダのクライアントは generate の **kwargs が
+        # 黙って落とす — 上限が効かないだけで、例外にはしない。
+        max_output_tokens=_MAX_OUTPUT_TOKENS,
+        **runtime._get_cache_kwargs(persona_id),
+    )
 
     # usage 記録 + anchor touch (keepalive の後処理と同じ)。
     usage = llm_client.consume_usage() if hasattr(llm_client, "consume_usage") else None
@@ -2019,25 +2180,23 @@ def _call_sluice_llm(
     # 繰り返す縁ができない)。
     parsed, rejections = _parse_structured_result(result, persona_id)
 
-    # 見た集合: 実入力の履歴 ID 列から、後退で外した末尾ぶんを件数で引く
-    # (外した組は context の末尾ブロック = 履歴の末尾)。退場側の包含検算
-    # (_eviction_within_seen) の一次データ。
-    seen_count = max(0, len(presented_ids) - dropped_total)
-    seen_ids = presented_ids[:seen_count]
+    # 見た集合 = 実入力の履歴 ID 列そのもの (後退方式の廃止で件数の引き算は
+    # 無くなった)。退場側の包含検算 (_eviction_within_seen) の一次データ。
+    seen_ids = list(presented_ids)
     if not seen_ids:
         # 1 通も見ていない結果は完了させない (Codex 第八巡 修正 2)。凍結すると
         # マーカー据え置きのまま completed になり、以後は同じ記録が再利用されて
         # LLM が二度と走らず、末尾の退場が永久に止まる。
         raise SluiceEmptySeenSetError(
             f"the sluice saw no messages (persona={persona_id}, "
-            f"presented={len(presented_ids)}, dropped={dropped_total}); "
+            f"presented={len(presented_ids)}); "
             "refusing to freeze a result that saw nothing"
         )
 
     return {
         "response": parsed,
         "rejections": rejections,
-        "span_end_id": _seen_span_end(span_ids, span_end_full, dropped_total),
+        "span_end_id": span_end_full,
         "seen_ids": seen_ids,
         "offered_activities": offered_activities,
         "offered_tasks": offered_tasks,
@@ -2257,7 +2416,7 @@ def run_sluice(
                 )
         try:
             call = _call_sluice_llm(
-                lifecycle, persona, building_id, span_ids, span_end_full,
+                lifecycle, persona, building_id, span_end_full,
                 span_new_count, window_anchor_id=window_anchor_id,
                 model_key=model_key,
             )
@@ -2282,7 +2441,7 @@ def run_sluice(
         core_snapshot = call["core_snapshot"]
         prompt_snapshot = call["prompt"]
         if span_end_id is None:
-            # 実際に見た範囲の末尾が特定できない (後退で窓勘定を使い切った等)。
+            # 実際に見た範囲の末尾が特定できない (窓に id 付きの行が無い等)。
             # span 刻印もマーカー前進も行わず、適用だけ実施する。
             span_start_id = None
         if execution_id is not None:
@@ -2357,6 +2516,9 @@ def run_sluice(
         persona, want_memos, did_memos,
         idem_prefix=idem_prefix, span_start_id=span_start_id, span_end_id=span_end_id,
         offered_activities=offered_activities,
+        # できごとの日 = 担当範囲の末尾メッセージの時刻 (機械刻印、B-2)。
+        event_date=_message_event_date(persona, span_end_id),
+        origin="live",
     )
     promises_applied, promises_failed, promise_lines = _apply_promises(
         lifecycle, persona, promises,
@@ -2396,8 +2558,8 @@ def run_sluice(
 
     # 6. 確定クロージャ (Codex 第五巡 修正 2)。適用は済んでいるが、
     #    ①台帳を閉じる (applied → completed) ②判断ターン記録の永続 ③完了通知
-    #    ④パンマーカー前進 (実際に見た範囲の末尾まで — 超過後退で外した組は
-    #    次回の担当範囲に残る) は「確定」として一塊にする。呼び出し元
+    #    ④パンマーカー前進 (実際に見た範囲の末尾まで) は「確定」として
+    #    一塊にする。呼び出し元
     #    (run_metabolism) はマーカー前進が未提示メッセージを跨がないことを
     #    検算してから呼ぶ — 確定しなかった回の記録は applied のまま残り、
     #    次回は再適用 (冪等) から入り直す。二重呼びは no-op。
@@ -2458,6 +2620,1357 @@ def run_sluice(
         "seen_span_end": span_end_id,
         "seen_ids": seen_ids,
         "finalize": _finalize,
+    }
+
+
+# ---------------------------------------------------------------------------
+# 後から通す採取 (capture) — docs/intent/sluice_coverage_gaps.md 第一段 B
+# ---------------------------------------------------------------------------
+#
+# ``sluice_skipped_spans`` に記録された「スルースを通っていない範囲」を、
+# チャンクに刻んで順に通すジョブの実行部。入口 (UI) は第二段で、
+# 第一段では API (api/routes/people/sluice.py) までを作る。
+#
+# 判断の主体は二本立て (B 節、2026-09-08 再設計): **機構** (候補を拾って
+# ``sluice_candidate_memos`` に置くだけ — 既定) と **現在の本人** (読み返しだと
+# 明示して読み、定常のスルースと同じ器を操作する)。「本人のシステムプロンプト
+# だけ着せた器」は当時の本人でも今の本人でもない第三の主体だった (棄却)。
+#
+# 定常のスルース (run_sluice) との違い (本人モード):
+# - 文脈は提示窓ではなく、記録された範囲のメッセージを DB から読み直して組む。
+#   前置き (本人のシステムプロンプト + 短い自己認識) は毎チャンク同一に固定し、
+#   プロバイダのプロンプトキャッシュに乗せる (帯の全量は載せない — intent 決定 3)。
+# - パンマーカーは動かさない。このジョブは過去の範囲の採取で、定常のスルースの
+#   担当範囲 (マーカーから窓の末尾) とは独立。
+# - 進みの記録は ``sluice_skipped_spans`` の行そのもの: チャンクを処理し終える
+#   たびに行の start_message_id を前進させ、全部済んだら行を消す — 中断しても
+#   続きから再開できる。
+# - 実行台帳は定常のスルースと同じ kind (:data:`_LEDGER_KIND`)・同じ identity
+#   (persona, チャンクの起点 message id) に乗る。チャンクの起点は記録の縮めで
+#   一意に決まるので、再試行は同じキーへ合流する。定常のスルースが同じ起点で
+#   残した記録 (例: 記録範囲の末尾 1 通 = 新しい窓の頭を、後の温かい回が採取
+#   済み) があれば再利用され、二重の LLM コールと二重適用が自然に防がれる。
+
+#: 前置きの「短い自己認識」— 毎チャンク同一の固定文 (intent 決定 3 / 追加の
+#: 決定 4: 文面はコード中の定数に置き、実装の検収でまはーが読む)。本人の
+#: システムプロンプトの直後に置かれ、いま読んでいるものが進行中の会話ではなく
+#: 過去の読み返しであることを本人に伝える。
+_CAPTURE_SELF_RECOGNITION = (
+    "<system>\n"
+    "## 過去の会話の読み返し\n"
+    "これは、いま進行中の会話ではありません。あなたの過去の会話のうち、\n"
+    "記憶整理の採取（スルース）をまだ通っていない期間を、あなた自身の目で\n"
+    "読み返すための時間です。\n"
+    "この後に、その期間の会話の写しが当時のまま続きます。読み終えたところで、\n"
+    "残しておきたいことがあれば記録できます。\n"
+    "</system>"
+)
+
+
+class SluiceCaptureSpanUnreadableError(RuntimeError):
+    """記録された範囲のメッセージが読み出せない (端の行の欠落・thread 不一致)。
+
+    fail-closed: 読めない範囲を黙って消したり飛ばしたりせず、送出してジョブを
+    失敗させる — 記録は残るので、原因 (行の削除等) を直せば再実行できる。
+    """
+
+
+def _build_capture_preamble(persona: Any) -> str:
+    """毎チャンク同一の前置き (system 面)。本人のシステムプロンプト + 短い自己認識。
+
+    「## あなたについて」の見出しは head の persona_self セクション
+    (sea/head_pipeline/sections/persona_self.py) と同じ形 — 本人が普段の会話で
+    受け取っている自己定義と同じ姿で渡す。帯 (Memory Weave) の全量は載せない
+    (intent 決定 3) — 前置きが毎チャンク同一であることがプロンプトキャッシュの
+    前提なので、変化する材料を混ぜない。
+    """
+    instruction = (
+        getattr(persona, "persona_system_instruction", "") or ""
+    ).strip()
+    parts: List[str] = []
+    if instruction:
+        parts.append(f"## あなたについて\n{instruction}")
+    parts.append(_CAPTURE_SELF_RECOGNITION)
+    return "\n\n".join(parts)
+
+
+def _capture_scope_sentence(count: int) -> str:
+    """後から通す採取での「今回どこが対象か」の一行 (:func:`_scope_sentence` の差し替え)。"""
+    return (
+        f"今回の対象は、上に写した過去の会話 {count} 通です。"
+        "いま進行中の会話とは独立した、後からの読み返しです。"
+    )
+
+
+def _chunk_period_dates(
+    chunk_messages: List[Any],
+) -> tuple[Optional[str], Optional[str]]:
+    """チャンクの期間の両端の日付 ('YYYY-MM-DD')。読めない端は None。"""
+    def _fmt(ts: Any) -> Optional[str]:
+        try:
+            value = int(ts)
+            if value <= 0:
+                return None  # created_at 欠落 (0 写し) — 1970 の嘘を出さない
+            return datetime.fromtimestamp(value).strftime("%Y-%m-%d")
+        except (TypeError, ValueError, OverflowError, OSError):
+            return None
+
+    return (
+        _fmt(getattr(chunk_messages[0], "created_at", None)),
+        _fmt(getattr(chunk_messages[-1], "created_at", None)),
+    )
+
+
+def _capture_period_label(chunk_messages: List[Any]) -> Optional[str]:
+    """チャンクの期間 (日付) の表示。created_at が読めなければ None (載せない)。"""
+    start, end = _chunk_period_dates(chunk_messages)
+    if start and end:
+        return start if start == end else f"{start}〜{end}"
+    return None
+
+
+def _plan_capture_chunks(
+    messages: List[Any], max_chars: int,
+) -> List[List[Any]]:
+    """メッセージ列を、A と同じ閾値以下のチャンク列に刻む (各チャンク最低 1 通)。
+
+    貪欲法: 先頭から字数を積み、超える直前で切る。**1 通だけで閾値を超える
+    メッセージは、その 1 通だけのチャンクにする** — メッセージより細かい単位は
+    無く、飛ばすと範囲の縮めが進まなくなる (採取は冪等なので過大な 1 チャンクを
+    許す方が安全)。
+    """
+    chunks: List[List[Any]] = []
+    current: List[Any] = []
+    current_chars = 0
+    for msg in messages:
+        chars = len(getattr(msg, "content", None) or "")
+        if current and current_chars + chars > max_chars:
+            chunks.append(current)
+            current = []
+            current_chars = 0
+        current.append(msg)
+        current_chars += chars
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def _read_span_messages(persona: Any, span: Dict[str, Any]) -> Optional[List[Any]]:
+    """記録された範囲 [start, end] の実会話メッセージを正典順で読む。
+
+    読みは :func:`sai_memory.memory.storage.get_conversation_messages_between`
+    — 機構名義の行 (event_message / handy_tool / spell) と ``<system>`` 頭の
+    通知は対象に入れない。本人の目で読み返して採取する材料は発話であって、
+    機構の定型文ではない。端の行が無い・thread が食い違うときは None (呼び出し
+    側が fail-closed で止める)。
+    """
+    from sai_memory.memory.storage import get_conversation_messages_between
+
+    adapter = getattr(persona, "sai_memory", None)
+    if adapter is None or getattr(adapter, "conn", None) is None:
+        raise SluiceStorageUnavailableError(
+            "memory.db connection is missing; cannot read the skipped span"
+        )
+    with adapter._db_lock:
+        return get_conversation_messages_between(
+            adapter.conn,
+            str(span["start_message_id"]),
+            str(span["end_message_id"]),
+        )
+
+
+def plan_sluice_capture(persona: Any) -> Dict[str, Any]:
+    """後から通す採取の見積もり (dry)。LLM ゼロ・書き込みゼロ。
+
+    Returns:
+        ``{"spans": [{id, start_message_id, end_message_id, created_at,
+        message_count, estimated_chunks, readable}], "target_messages": int,
+        "estimated_chunks": int, "unreadable_spans": int,
+        "max_span_chars": int}``。件数・チャンク数は実行部と同じ読み
+        (:func:`_read_span_messages`) と同じ刻み (:func:`_plan_capture_chunks`)
+        から数える — 表示と実走が違う数を言わない。
+    """
+    from sai_memory.memory.storage import list_sluice_skipped_spans
+
+    adapter = getattr(persona, "sai_memory", None)
+    if adapter is None or not getattr(adapter, "is_ready", lambda: False)():
+        raise SluiceStorageUnavailableError(
+            "persona memory storage is not ready; cannot plan the capture"
+        )
+    max_chars = get_max_span_chars()
+    with adapter._db_lock:
+        spans = list_sluice_skipped_spans(adapter.conn)
+
+    spans_out: List[Dict[str, Any]] = []
+    target_messages = 0
+    estimated_chunks = 0
+    unreadable = 0
+    for span in spans:
+        messages = _read_span_messages(persona, span)
+        if messages is None:
+            unreadable += 1
+            spans_out.append({
+                **span, "message_count": None, "estimated_chunks": None,
+                "readable": False,
+            })
+            continue
+        chunks = _plan_capture_chunks(messages, max_chars)
+        target_messages += len(messages)
+        estimated_chunks += len(chunks)
+        spans_out.append({
+            **span, "message_count": len(messages),
+            "estimated_chunks": len(chunks), "readable": True,
+        })
+    return {
+        "spans": spans_out,
+        "target_messages": target_messages,
+        "estimated_chunks": estimated_chunks,
+        "unreadable_spans": unreadable,
+        "max_span_chars": max_chars,
+    }
+
+
+def _call_capture_llm(
+    lifecycle: Any,
+    persona: Any,
+    chunk_messages: List[Any],
+    *,
+    model_key: Optional[str] = None,
+) -> Dict[str, Any]:
+    """チャンク 1 つの LLM 呼び出し (前置き + 会話の写し + 注入プロンプト)。
+
+    定常の :func:`_call_sluice_llm` と違い、文脈は提示窓ではなくチャンクの
+    メッセージから直接組む。anchor には触らない — この呼び出しは会話の
+    Session prefix を温めるものではないので、touch すると温かさの偽装になる。
+    例外 (LLM エラー・出力不適合) はそのまま送出する。
+    """
+    runtime = lifecycle.runtime
+    persona_id = getattr(persona, "persona_id", None)
+
+    from sea.pulse_context import resolve_execution_context
+    execution_context = resolve_execution_context(persona, None)
+    if model_key and execution_context.model_key != model_key:
+        # 使用モデルの既定は本人のモデル。明示指定 (第二段 UI の選択肢) が
+        # 来たときだけ差し替える (intent 決定 3 — 後から通す操作は明示の
+        # 操作なので、モデルが通常の会話と違ってよい)。
+        execution_context = execution_context.with_model(model_key)
+
+    activities = _list_open_activities(persona)
+    offered_activities = dict(activities)
+    open_tasks = _list_open_tasks(lifecycle, persona)
+    offered_tasks: Dict[str, Optional[int]] = {
+        str(t.get("task_id")): t.get("revision")
+        for t in open_tasks if t.get("task_id")
+    }
+    core_memories, core_total_chars = _read_core_state(persona)
+    core_snapshot: Dict[str, str] = {
+        str(mem.id): _core_content_hash(mem.content) for mem in core_memories
+    }
+    today_memos = _list_today_memos(persona, activities)
+    prompt = _build_sluice_prompt(
+        persona, activities, open_tasks, core_memories, core_total_chars,
+        span_new_count=None, today_memos=today_memos,
+        scope_sentence=_capture_scope_sentence(len(chunk_messages)),
+    )
+
+    # 会話の写し。役割は保存値のまま ('model' だけ通称 'assistant' へ —
+    # saiverse_memory/adapter.py の提示時と同じ写像)。実会話フィルタ
+    # (_read_span_messages) が user/model/assistant 以外を通さない。
+    history = [
+        {
+            "role": (
+                "assistant" if getattr(m, "role", None) == "model"
+                else getattr(m, "role", "user")
+            ),
+            "content": getattr(m, "content", None) or "",
+        }
+        for m in chunk_messages
+    ]
+    messages = (
+        [{"role": "system", "content": _build_capture_preamble(persona)}]
+        + history
+        + [{"role": "user", "content": prompt}]
+    )
+
+    node_def = SimpleNamespace(id="sluice_capture", memorize=None, speak=False)
+    llm_client, actual_model = runtime.select_llm_client(
+        node_def, persona, execution_context=execution_context,
+        needs_structured_output=True,
+    )
+    if actual_model != execution_context.model_key:
+        execution_context = execution_context.with_model(actual_model)
+
+    result = llm_client.generate(
+        messages,
+        tools=[],
+        response_schema=_RESPONSE_SCHEMA,
+        temperature=runtime._default_temperature(persona),
+        max_output_tokens=_MAX_OUTPUT_TOKENS,
+        **runtime._get_cache_kwargs(persona_id),
+    )
+
+    usage = llm_client.consume_usage() if hasattr(llm_client, "consume_usage") else None
+    if usage is not None:
+        try:
+            from saiverse.usage_tracker import get_usage_tracker
+            get_usage_tracker().record_usage(
+                model_id=usage.model,
+                input_tokens=usage.input_tokens,
+                output_tokens=usage.output_tokens,
+                cached_tokens=usage.cached_tokens,
+                cache_write_tokens=usage.cache_write_tokens,
+                cache_ttl=usage.cache_ttl,
+                persona_id=persona_id,
+                building_id=getattr(persona, "current_building_id", None),
+                node_type="sluice",
+                playbook_name="sluice_capture",
+                category="sluice",
+            )
+        except Exception:
+            LOGGER.warning(
+                "[sluice-capture] usage tracking failed (persona=%s)",
+                persona_id, exc_info=True,
+            )
+
+    parsed, rejections = _parse_structured_result(result, persona_id)
+    return {
+        "response": parsed,
+        "rejections": rejections,
+        "offered_activities": offered_activities,
+        "offered_tasks": offered_tasks,
+        "core_snapshot": core_snapshot,
+        "prompt": prompt,
+    }
+
+
+def _run_capture_chunk(
+    lifecycle: Any,
+    persona: Any,
+    chunk_messages: List[Any],
+    *,
+    model_key: Optional[str] = None,
+) -> Dict[str, Any]:
+    """チャンク 1 つを台帳 → LLM → 適用 → 記録 → 完了まで通す。
+
+    振り付けは :func:`run_sluice` と同じ状態機械 (claim → running → 凍結
+    (applied) → 冪等適用 → 永続 → completed) の縮約形。パンマーカーの前進と
+    finalize の保留 (退場との検算) はこのジョブには無い — 進みの記録は
+    呼び出し側 (:func:`run_sluice_capture`) が範囲の行の縮めで持つ。
+
+    途中失敗の再実行はチャンクの起点 (= 記録の縮めで一意) が同じ台帳キーへ
+    合流する: applied/completed の記録があれば LLM を呼ばず再適用する (適用は
+    冪等)。completed 済みの記録を再適用した回は判断ターンの永続が二重になる
+    縁があるが、これは run_sluice の finalize 再実行と同じ大きさの既知の縁。
+    """
+    persona_id = getattr(persona, "persona_id", None)
+    chunk_start_id = str(getattr(chunk_messages[0], "id"))
+    chunk_end_id = str(getattr(chunk_messages[-1], "id"))
+
+    ledger = _get_ledger(lifecycle)
+    ledger_key = f"{persona_id}:{chunk_start_id}" if persona_id else None
+    recorded = None
+    if ledger is not None and ledger_key:
+        recorded = _find_recorded_result(ledger, ledger_key)
+        if recorded is not None and _is_legacy_response(recorded.get("response")):
+            LOGGER.warning(
+                "[sluice-capture] 記録の形式が古いため再利用しません "
+                "(execution=%s key=%s persona=%s) — 新しい実行として採り直します",
+                recorded.get("execution_id"), ledger_key, persona_id,
+            )
+            ledger_key = f"{ledger_key}#format-{_RESPONSE_FORMAT_TAG}"
+            recorded = _find_recorded_result(ledger, ledger_key)
+
+    execution_id: Optional[str] = None
+    ledger_status: Optional[str] = None
+    # 適用の冪等キーと span 刻印の素材。再利用の回は**記録側の span** を使う —
+    # 定常のスルースが同じ起点で残した記録 (終端が違う) を別キーで適用し直すと
+    # 冪等キーが揃わず、同じメモが二重に入る (run_sluice の再利用と同じ規律)。
+    apply_span_start = chunk_start_id
+    apply_span_end = chunk_end_id
+    if recorded is not None:
+        execution_id = recorded["execution_id"]
+        ledger_status = recorded["status"]
+        parsed_result = recorded["response"]
+        apply_span_start = str(recorded.get("span_start_id") or chunk_start_id)
+        apply_span_end = str(recorded.get("span_end_id") or chunk_end_id)
+        rejections = [
+            item for item in (recorded.get("rejections") or [])
+            if isinstance(item, dict)
+        ]
+        offered_activities = {
+            int(k): v
+            for k, v in dict(recorded.get("offered_activities") or {}).items()
+        }
+        offered_tasks = dict(recorded.get("offered_tasks") or {})
+        core_snapshot = recorded.get("core_snapshot")
+        if not isinstance(core_snapshot, dict):
+            core_snapshot = None
+        prompt_snapshot = str(
+            recorded.get("prompt") or "(実行台帳の記録済み結果の再適用)"
+        )
+        LOGGER.info(
+            "[sluice-capture] reusing recorded result (execution=%s span=%s..%s "
+            "persona=%s); no new LLM call — re-applying idempotently",
+            execution_id, chunk_start_id, chunk_end_id, persona_id,
+        )
+    else:
+        if ledger is not None and ledger_key:
+            execution_id, runnable, existing_status = ledger.claim_execution(
+                _LEDGER_KIND, ledger_key, persona_id,
+                payload={
+                    "span_start_id": chunk_start_id,
+                    "span_end_id": chunk_end_id,
+                    "origin": "capture",
+                },
+            )
+            if not runnable:
+                raise SluiceExecutionBlockedError(
+                    f"sluice capture blocked by ledger (key={ledger_key}, "
+                    f"status={existing_status})"
+                )
+            if not ledger.try_mark_running(execution_id):
+                raise SluiceExecutionBlockedError(
+                    f"sluice capture running seat lost (key={ledger_key})"
+                )
+        try:
+            call = _call_capture_llm(
+                lifecycle, persona, chunk_messages, model_key=model_key,
+            )
+        except Exception as exc:
+            # LLM 失敗・出力不適合 = 適用前の検証棄却 (副作用ゼロ) → failed。
+            # レート制限起因なら persona 単位の小休止 (C-1) を置く — 呼び出し
+            # 側のループはこの小休止を見て走行を閉じる。
+            noter = getattr(lifecycle, "_note_metabolism_rate_limit", None)
+            if callable(noter):
+                noter(persona_id, exc)
+            if execution_id is not None:
+                try:
+                    ledger.mark_failed(execution_id, str(exc) or type(exc).__name__)
+                except Exception:
+                    LOGGER.exception(
+                        "[sluice-capture] mark_failed itself failed (execution=%s)",
+                        execution_id,
+                    )
+            raise
+        parsed_result = call["response"]
+        rejections = call["rejections"]
+        offered_activities = call["offered_activities"]
+        offered_tasks = call["offered_tasks"]
+        core_snapshot = call["core_snapshot"]
+        prompt_snapshot = call["prompt"]
+        if execution_id is not None:
+            try:
+                ledger.mark_applied(execution_id, result={
+                    "response": parsed_result,
+                    "rejections": rejections,
+                    "span_start_id": chunk_start_id,
+                    "span_end_id": chunk_end_id,
+                    "seen_ids": [
+                        str(getattr(m, "id")) for m in chunk_messages
+                    ],
+                    "offered_activities": {
+                        str(k): v for k, v in offered_activities.items()
+                    },
+                    "offered_tasks": offered_tasks,
+                    "core_snapshot": core_snapshot,
+                    "prompt": prompt_snapshot,
+                })
+            except Exception as exc:
+                # 凍結の失敗を running のまま残さない (run_sluice と同じ理由)。
+                LOGGER.error(
+                    "[sluice-capture] freezing the result failed (execution=%s "
+                    "persona=%s); marking failed so the next run can retry",
+                    execution_id, persona_id, exc_info=True,
+                )
+                ledger.mark_failed(execution_id, str(exc) or type(exc).__name__)
+                raise
+            ledger_status = "applied"
+
+    reflection = str(parsed_result.get("reflection", "") or "")
+
+    def _as_list(key: str) -> List[Any]:
+        raw = parsed_result.get(key, [])
+        return list(raw) if isinstance(raw, list) else []
+
+    idem_prefix = f"sluice:{apply_span_start}..{apply_span_end}"
+
+    ops_applied, ops_failed, ops_lines = _apply_core_ops(
+        persona, _as_list("core_adds"), _as_list("core_updates"),
+        _as_list("core_removes"), core_snapshot=core_snapshot,
+    )
+    memos_applied, memos_failed, memo_lines = _apply_memos(
+        persona, _as_list("want_memos"), _as_list("did_memos"),
+        idem_prefix=idem_prefix,
+        span_start_id=apply_span_start, span_end_id=apply_span_end,
+        offered_activities=offered_activities,
+        # できごとの日 = チャンクの末尾メッセージの時刻 (機械刻印、B-2)。
+        # 由来の印 = 本人の読み返し。
+        event_date=_message_event_date(persona, apply_span_end),
+        origin="readback",
+    )
+    promises_applied, promises_failed, promise_lines = _apply_promises(
+        lifecycle, persona, _as_list("promises"),
+        idem_prefix=idem_prefix,
+        span_start_id=apply_span_start, span_end_id=apply_span_end,
+        offered_tasks=offered_tasks,
+    )
+    rejection_lines: List[str] = []
+    for item in rejections:
+        text = str(item.get("text") or "").strip()
+        if text:
+            rejection_lines.append(text)
+        field = item.get("field")
+        if field in _CORE_FIELDS:
+            ops_failed += 1
+        elif field in ("want_memos", "did_memos"):
+            memos_failed += 1
+        elif field == "promises":
+            promises_failed += 1
+    applied_total = ops_applied + memos_applied + promises_applied
+    result_lines = rejection_lines + ops_lines + memo_lines + promise_lines
+
+    # 判断ターンの記録 (run_sluice と同じ event_message 形式・同じ永続経路)。
+    # 見出しで「過去の読み返し」であることを明示する — 定常のスルースの記録と
+    # 混ざっても、いつの何を読んだ判断かが本人にも読める。
+    persona_name = getattr(persona, "persona_name", None) or persona_id or "assistant"
+    period = _capture_period_label(chunk_messages)
+    header = "過去の会話の読み返し — スルースの採取判断"
+    if period:
+        header += f"（{period}、{len(chunk_messages)} 通）"
+    else:
+        header += f"（{len(chunk_messages)} 通）"
+    body_lines: List[str] = [header + ":"]
+    if reflection.strip():
+        body_lines.append(f"{persona_name}の判断: {reflection.strip()}")
+    if result_lines:
+        body_lines.extend(result_lines)
+    if applied_total == 0 and not result_lines:
+        body_lines.append("今回は採取しませんでした。")
+    record_text = "<system>" + "\n".join(body_lines) + "\n</system>"
+
+    # 永続が先、completed が最後 (run_sluice の finalize と同じ順序)。
+    # 読み返しの過程は本線の context に載せない (入口は一本 — 走行の締めに
+    # ダイジェスト一行だけが committed で立つ) ので、判断ターン記録は採取の
+    # 有無に関わらず discardable (DB には残る = 監査は可能)。
+    _persist_record(
+        persona, record_text, prompt_snapshot, applied_total=applied_total,
+        scope_override="discardable",
+    )
+    if execution_id is not None and ledger_status == "applied":
+        ledger.mark_completed(execution_id)
+
+    LOGGER.info(
+        "[sluice-capture] chunk done: persona=%s span=%s..%s (%d messages) "
+        "core=%d/%d memos=%d/%d promises=%d/%d",
+        persona_id, chunk_start_id, chunk_end_id, len(chunk_messages),
+        ops_applied, ops_failed, memos_applied, memos_failed,
+        promises_applied, promises_failed,
+    )
+    return {
+        "ops_applied": ops_applied, "ops_failed": ops_failed,
+        "memos_applied": memos_applied, "memos_failed": memos_failed,
+        "promises_applied": promises_applied, "promises_failed": promises_failed,
+        "span_start_id": chunk_start_id, "span_end_id": chunk_end_id,
+        "messages": len(chunk_messages),
+        # 走行の締めのダイジェスト一行が期間を言うための材料 (日付のみ)。
+        "period_start": _chunk_period_dates(chunk_messages)[0],
+        "period_end": _chunk_period_dates(chunk_messages)[1],
+    }
+
+
+# ---------------------------------------------------------------------------
+# 機構モード (candidate 抽出) — docs/intent/sluice_coverage_gaps.md B 節 候補 1
+# ---------------------------------------------------------------------------
+#
+# 誰でもない機構がその範囲だけを見て、手帳のメモの**候補**を拾う。Chronicle の
+# 生成と同じ型 (本人のシステムプロンプトを着せない・単発の user プロンプト)。
+# 機構はコア記憶・手帳へ代筆できない (本人の言葉の器) ので、出力は
+# ``sluice_candidate_memos`` に候補として置くだけ — 本人の器 (コア記憶・手帳・
+# 約束・会話ログ) には何も書かない。採用・却下は第二段の UI。
+# コア記憶・約束の候補は出さない (第一段の範囲外)。
+
+#: 候補の参照欄の書式 (会話の写しに振る行番号の写し)。桁数の縛りは
+#: _CORE_REF_RE と同じ理由 (暴走した数字列を int() へ渡さない)。
+_MSG_REF_RE = re.compile(r"^msg:([0-9]{1,9})$")
+
+_CANDIDATE_ITEM_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "activity_name": {
+            "type": "string",
+            "description": (
+                "「小説を書く」「絵の練習」のような活動の粒度の名前の提案。"
+                "具体的な詳細はここではなく text に書く。"
+            ),
+        },
+        "text": {
+            "type": "string",
+            "description": (
+                "候補の一行。会話の中の本人の言い方に沿わせる（発明しない）。"
+            ),
+        },
+        "source_refs": {
+            "type": "array",
+            "description": (
+                "根拠になったメッセージの msg:N（会話の写しの行頭の番号）を"
+                "そのまま写す（例: msg:3）。"
+            ),
+            "items": {"type": "string"},
+        },
+    },
+    "required": ["activity_name", "text", "source_refs"],
+}
+
+#: 機構モードの構造化出力 (want / did の二欄のみ)。型の規律は _RESPONSE_SCHEMA
+#: と同じ: 数値の欄を置かない (参照は msg:N の文字列写し)、全欄必須 (欄の省略を
+#: 「候補なし」へ丸めない)。
+_CANDIDATE_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "want_memos": {
+            "type": "array",
+            "description": "本人がやりたいと言っていたことの候補。無ければ空配列。",
+            "items": _CANDIDATE_ITEM_SCHEMA,
+        },
+        "did_memos": {
+            "type": "array",
+            "description": "本人が実際にやったことの候補。無ければ空配列。",
+            "items": _CANDIDATE_ITEM_SCHEMA,
+        },
+    },
+    "required": ["want_memos", "did_memos"],
+}
+
+_CANDIDATE_LIST_FIELDS = ("want_memos", "did_memos")
+
+
+def _build_mechanism_prompt(
+    persona_name: str, chunk_messages: List[Any],
+) -> str:
+    """機構モードの単発プロンプト (機構の声 — Chronicle 生成と同じ型)。
+
+    本人のシステムプロンプトは着せない。会話の写しに ``msg:N`` の行番号を
+    振り、候補の根拠 (source_refs) はその写しで受け取る — できごとの日時
+    (event_date) は根拠のメッセージの保存時刻から**機械が刻印**するので、
+    日付を LLM に申告させる欄は無い。
+    """
+    lines: List[str] = []
+    for index, msg in enumerate(chunk_messages, start=1):
+        role = getattr(msg, "role", None)
+        speaker = persona_name if role in ("model", "assistant") else "ユーザー"
+        date_label = ""
+        try:
+            ts = int(getattr(msg, "created_at", 0) or 0)
+            if ts > 0:
+                date_label = datetime.fromtimestamp(ts).strftime("%Y-%m-%d") + " "
+        except (TypeError, ValueError, OverflowError, OSError):
+            date_label = ""
+        content = (getattr(msg, "content", None) or "").strip()
+        lines.append(f"[msg:{index}] {date_label}{speaker}: {content}")
+    transcript = "\n".join(lines)
+    return (
+        "これは、過去の会話の記録から、手帳のメモの候補を拾う整理の作業です。\n"
+        "あなたはこの会話の当事者ではありません。拾った候補はそのまま記録には"
+        "ならず、後で本人とユーザーが見て採用・却下を決めます。\n"
+        "\n"
+        f"以下は、ペルソナ「{persona_name}」とユーザーの過去の会話の写しです"
+        f"（{len(chunk_messages)} 通。行頭の msg:N は参照用の番号）:\n"
+        "\n"
+        "【会話の写し】\n"
+        f"{transcript}\n"
+        "\n"
+        "この写しの中から、次の二種類の候補を拾ってください:\n"
+        f"- want_memos: {persona_name} がやりたいと言っていたこと\n"
+        f"- did_memos: {persona_name} が実際にやったこと\n"
+        "\n"
+        "各候補の書き方:\n"
+        "- activity_name: 「小説を書く」「絵の練習」のような活動の粒度の名前の提案\n"
+        f"- text: 候補の一行。会話の中の {persona_name} の言い方に沿わせて"
+        "ください（書かれていないことを発明しない）\n"
+        "- source_refs: 根拠になったメッセージの msg:N をそのまま写す\n"
+        "\n"
+        "拾わないのが普通です。写しに確かな根拠のある候補だけを拾い、無ければ"
+        "両方とも空配列で構いません。コア記憶や約束はこの作業では扱いません。"
+    )
+
+
+def _parse_candidate_result(
+    result: Any, persona_id: Optional[str],
+) -> Dict[str, List[Dict[str, Any]]]:
+    """機構モードの構造化出力を検証済み dict へ正規化する。
+
+    fail-closed の粒度は :func:`_parse_structured_result` と同じ思想:
+    **全体の型** (dict でない / 必須欄の欠落・非配列 / 要素が object でない)
+    は :class:`SluiceOutputError` を送出。**要素の中身の不正** (text が空・
+    文字列でない等) はその要素だけ落として WARNING に残す — 候補は本人の器に
+    触れないので、要素の棄却を本人向けの記録に書く先は無い。
+    """
+    if isinstance(result, str):
+        try:
+            parsed = json.loads(result)
+        except (ValueError, TypeError) as exc:
+            raise SluiceOutputError(
+                f"candidate output is not JSON (persona={persona_id}): "
+                f"{result[:200]!r}"
+            ) from exc
+        result = parsed
+    if not isinstance(result, dict):
+        raise SluiceOutputError(
+            f"candidate output is not an object (persona={persona_id}): "
+            f"{type(result).__name__}"
+        )
+    out: Dict[str, List[Dict[str, Any]]] = {}
+    for field in _CANDIDATE_LIST_FIELDS:
+        value = result.get(field)
+        if not isinstance(value, list):
+            raise SluiceOutputError(
+                f"required field {field!r} is missing or not an array "
+                f"(persona={persona_id}): {type(value).__name__}"
+            )
+        kept: List[Dict[str, Any]] = []
+        for index, item in enumerate(value):
+            if not isinstance(item, dict):
+                raise SluiceOutputError(
+                    f"element {field}[{index}] must be an object "
+                    f"(persona={persona_id}): {type(item).__name__}"
+                )
+            text = item.get("text")
+            if not isinstance(text, str) or not text.strip():
+                LOGGER.warning(
+                    "[sluice-capture] dropped candidate %s[%d]: empty or "
+                    "non-string text (persona=%s)", field, index, persona_id,
+                )
+                continue
+            kept.append(item)
+        out[field] = kept
+    return out
+
+
+def _candidate_event_date(
+    persona: Any, item: Dict[str, Any], chunk_messages: List[Any],
+) -> Optional[str]:
+    """候補一件の「できごとの日」を機械で導く (B-2 の刻印)。
+
+    根拠 (source_refs の msg:N) が解決できれば、その中で最も新しい
+    メッセージの日付。解決できなければチャンクの末尾メッセージの日付で代替。
+    どの経路でも LLM の申告は使わない。
+    """
+    best_ts = 0
+    refs = item.get("source_refs")
+    if isinstance(refs, list):
+        for ref in refs:
+            parsed = _parse_ref(ref, _MSG_REF_RE)
+            if parsed is None or not (1 <= parsed <= len(chunk_messages)):
+                continue
+            try:
+                ts = int(getattr(chunk_messages[parsed - 1], "created_at", 0) or 0)
+            except (TypeError, ValueError):
+                continue
+            best_ts = max(best_ts, ts)
+    if best_ts > 0:
+        try:
+            return datetime.fromtimestamp(best_ts).date().isoformat()
+        except (ValueError, OverflowError, OSError):
+            pass
+    return _message_event_date(
+        persona, str(getattr(chunk_messages[-1], "id", "") or "") or None,
+    )
+
+
+def _call_mechanism_llm(
+    lifecycle: Any,
+    persona: Any,
+    chunk_messages: List[Any],
+    *,
+    model_key: Optional[str] = None,
+) -> Dict[str, List[Dict[str, Any]]]:
+    """チャンク 1 つの機構モード LLM 呼び出し (単発 user プロンプト)。
+
+    Chronicle 生成と同じ型: 本人のシステムプロンプトも現在のコア記憶・手帳の
+    一覧も載せない — 判断の主体は機構で、現在の本人の知識を混ぜない。例外
+    (LLM エラー・出力不適合) はそのまま送出する。
+    """
+    runtime = lifecycle.runtime
+    persona_id = getattr(persona, "persona_id", None)
+    persona_name = (
+        getattr(persona, "persona_name", None) or persona_id or "ペルソナ"
+    )
+
+    from sea.pulse_context import resolve_execution_context
+    execution_context = resolve_execution_context(persona, None)
+    if model_key and execution_context.model_key != model_key:
+        execution_context = execution_context.with_model(model_key)
+
+    prompt = _build_mechanism_prompt(persona_name, chunk_messages)
+    node_def = SimpleNamespace(id="sluice_capture", memorize=None, speak=False)
+    llm_client, actual_model = runtime.select_llm_client(
+        node_def, persona, execution_context=execution_context,
+        needs_structured_output=True,
+    )
+    if actual_model != execution_context.model_key:
+        execution_context = execution_context.with_model(actual_model)
+
+    result = llm_client.generate(
+        [{"role": "user", "content": prompt}],
+        tools=[],
+        response_schema=_CANDIDATE_SCHEMA,
+        temperature=runtime._default_temperature(persona),
+        max_output_tokens=_MAX_OUTPUT_TOKENS,
+        **runtime._get_cache_kwargs(persona_id),
+    )
+
+    usage = llm_client.consume_usage() if hasattr(llm_client, "consume_usage") else None
+    if usage is not None:
+        try:
+            from saiverse.usage_tracker import get_usage_tracker
+            get_usage_tracker().record_usage(
+                model_id=usage.model,
+                input_tokens=usage.input_tokens,
+                output_tokens=usage.output_tokens,
+                cached_tokens=usage.cached_tokens,
+                cache_write_tokens=usage.cache_write_tokens,
+                cache_ttl=usage.cache_ttl,
+                persona_id=persona_id,
+                building_id=getattr(persona, "current_building_id", None),
+                node_type="sluice",
+                playbook_name="sluice_capture",
+                category="sluice",
+            )
+        except Exception:
+            LOGGER.warning(
+                "[sluice-capture] usage tracking failed (persona=%s)",
+                persona_id, exc_info=True,
+            )
+
+    return _parse_candidate_result(result, persona_id)
+
+
+def _run_mechanism_chunk(
+    lifecycle: Any,
+    persona: Any,
+    chunk_messages: List[Any],
+    *,
+    model_key: Optional[str] = None,
+) -> Dict[str, Any]:
+    """チャンク 1 つを機構モードで処理する (候補テーブルへ置くだけ)。
+
+    振り付けは :func:`_run_capture_chunk` の縮約形 (claim → running → 凍結
+    (applied) → 冪等適用 → completed)。本人の器 (コア記憶・手帳・約束・会話
+    ログ) には一切書かない — 判断ターンの永続 (_persist_record) も無い。
+    台帳キーは本人モードと**別** (``#mechanism`` 接尾) — 同じチャンクでも
+    主体が違えば別の実行で、互いの記録を再利用しない。
+    """
+    persona_id = getattr(persona, "persona_id", None)
+    chunk_start_id = str(getattr(chunk_messages[0], "id"))
+    chunk_end_id = str(getattr(chunk_messages[-1], "id"))
+
+    ledger = _get_ledger(lifecycle)
+    ledger_key = (
+        f"{persona_id}:{chunk_start_id}#mechanism" if persona_id else None
+    )
+    recorded = None
+    if ledger is not None and ledger_key:
+        recorded = _find_recorded_result(ledger, ledger_key)
+        if recorded is not None and not all(
+            isinstance(recorded.get("response", {}).get(field), list)
+            for field in _CANDIDATE_LIST_FIELDS
+        ):
+            # 形式の読めない記録は再利用しない (別キーで採り直す —
+            # _is_legacy_response と同じ fail-closed)。
+            LOGGER.warning(
+                "[sluice-capture] 機構モードの記録の形式が読めないため再利用"
+                "しません (execution=%s key=%s persona=%s)",
+                recorded.get("execution_id"), ledger_key, persona_id,
+            )
+            ledger_key = f"{ledger_key}#format-candidate1"
+            recorded = _find_recorded_result(ledger, ledger_key)
+
+    execution_id: Optional[str] = None
+    ledger_status: Optional[str] = None
+    apply_span_start = chunk_start_id
+    apply_span_end = chunk_end_id
+    if recorded is not None:
+        execution_id = recorded["execution_id"]
+        ledger_status = recorded["status"]
+        parsed = {
+            field: [
+                item for item in (recorded["response"].get(field) or [])
+                if isinstance(item, dict)
+            ]
+            for field in _CANDIDATE_LIST_FIELDS
+        }
+        apply_span_start = str(recorded.get("span_start_id") or chunk_start_id)
+        apply_span_end = str(recorded.get("span_end_id") or chunk_end_id)
+        LOGGER.info(
+            "[sluice-capture] reusing recorded candidates (execution=%s "
+            "span=%s..%s persona=%s); no new LLM call",
+            execution_id, chunk_start_id, chunk_end_id, persona_id,
+        )
+    else:
+        if ledger is not None and ledger_key:
+            execution_id, runnable, existing_status = ledger.claim_execution(
+                _LEDGER_KIND, ledger_key, persona_id,
+                payload={
+                    "span_start_id": chunk_start_id,
+                    "span_end_id": chunk_end_id,
+                    "origin": "capture_mechanism",
+                },
+            )
+            if not runnable:
+                raise SluiceExecutionBlockedError(
+                    f"sluice mechanism capture blocked by ledger "
+                    f"(key={ledger_key}, status={existing_status})"
+                )
+            if not ledger.try_mark_running(execution_id):
+                raise SluiceExecutionBlockedError(
+                    f"sluice mechanism capture running seat lost (key={ledger_key})"
+                )
+        try:
+            parsed = _call_mechanism_llm(
+                lifecycle, persona, chunk_messages, model_key=model_key,
+            )
+        except Exception as exc:
+            noter = getattr(lifecycle, "_note_metabolism_rate_limit", None)
+            if callable(noter):
+                noter(persona_id, exc)
+            if execution_id is not None:
+                try:
+                    ledger.mark_failed(execution_id, str(exc) or type(exc).__name__)
+                except Exception:
+                    LOGGER.exception(
+                        "[sluice-capture] mark_failed itself failed (execution=%s)",
+                        execution_id,
+                    )
+            raise
+        if execution_id is not None:
+            try:
+                ledger.mark_applied(execution_id, result={
+                    "response": parsed,
+                    "span_start_id": chunk_start_id,
+                    "span_end_id": chunk_end_id,
+                    "seen_ids": [
+                        str(getattr(m, "id")) for m in chunk_messages
+                    ],
+                })
+            except Exception as exc:
+                LOGGER.error(
+                    "[sluice-capture] freezing candidates failed (execution=%s "
+                    "persona=%s); marking failed so the next run can retry",
+                    execution_id, persona_id, exc_info=True,
+                )
+                ledger.mark_failed(execution_id, str(exc) or type(exc).__name__)
+                raise
+            ledger_status = "applied"
+
+    # 適用: 候補テーブルへ置くだけ (内容一致で冪等 — 再適用で二重に並ばない)。
+    from sai_memory.memory.storage import add_sluice_candidate_memo
+
+    adapter = getattr(persona, "sai_memory", None)
+    if adapter is None or getattr(adapter, "conn", None) is None:
+        raise SluiceStorageUnavailableError(
+            "memory.db connection is missing; cannot store candidate memos"
+        )
+    candidates_created = 0
+    candidates_total = 0
+    for field, kind in (("want_memos", "want"), ("did_memos", "did")):
+        for item in parsed.get(field, []):
+            candidates_total += 1
+            activity_name = item.get("activity_name")
+            if not isinstance(activity_name, str) or not activity_name.strip():
+                activity_name = None
+            else:
+                activity_name = activity_name.strip()
+            event_date = _candidate_event_date(persona, item, chunk_messages)
+            with adapter._db_lock:
+                new_id = add_sluice_candidate_memo(
+                    adapter.conn,
+                    span_start_id=apply_span_start,
+                    span_end_id=apply_span_end,
+                    kind=kind,
+                    activity_name=activity_name,
+                    text=str(item.get("text")).strip(),
+                    event_date=event_date,
+                )
+            if new_id is not None:
+                candidates_created += 1
+
+    if execution_id is not None and ledger_status == "applied":
+        ledger.mark_completed(execution_id)
+
+    LOGGER.info(
+        "[sluice-capture] mechanism chunk done: persona=%s span=%s..%s "
+        "(%d messages) candidates=%d (new=%d)",
+        persona_id, chunk_start_id, chunk_end_id, len(chunk_messages),
+        candidates_total, candidates_created,
+    )
+    return {
+        "ops_applied": 0, "ops_failed": 0,
+        "memos_applied": candidates_total, "memos_failed": 0,
+        "promises_applied": 0, "promises_failed": 0,
+        "span_start_id": chunk_start_id, "span_end_id": chunk_end_id,
+        "messages": len(chunk_messages),
+        "candidates_created": candidates_created,
+        "period_start": _chunk_period_dates(chunk_messages)[0],
+        "period_end": _chunk_period_dates(chunk_messages)[1],
+    }
+
+
+#: 後から通す採取の判断の主体 (docs/intent/sluice_coverage_gaps.md B 節)。
+#: 'mechanism' = 機構が候補を拾う (安い方 — 既定) / 'persona' = 現在の本人が
+#: 読み返す。
+CAPTURE_MODES = ("mechanism", "persona")
+
+
+def _capture_digest_exists(persona: Any, nonce: str) -> bool:
+    """この nonce のダイジェスト一行が、既に本線に立っているか。
+
+    「追記は成功したが消し込み (:func:`_clear_pending_digest`) が落ちた」あとの
+    再実行が、同じ一行をもう一度立てないための照会 (Codex 第二巡 修正 C)。
+    本人の目には「同じ読み返しが二度あった」ように見えるのを止める。
+
+    索引の無い全走査だが、走るのは走行の締めの flush のときだけ (キャンペーンに
+    一度) — 索引を足してまで速くする対象ではない。
+    """
+    adapter, conn = _pending_digest_conn(persona)
+    with adapter._db_lock:
+        row = conn.execute(
+            "SELECT 1 FROM messages "
+            "WHERE json_extract(metadata, '$.capture_digest_nonce') = ? "
+            "LIMIT 1",
+            (nonce,),
+        ).fetchone()
+    return row is not None
+
+
+def _append_capture_digest(
+    persona: Any, digest_text: str, *, nonce: Optional[str] = None,
+) -> None:
+    """読み返しのダイジェスト一行を本線へ立てる (長期記憶への入口は一本)。
+
+    器は作業セッションのダイジェスト行 (:data:`sea.work_session.DIGEST_TAG` /
+    main_line / committed) をそのまま使う — 一日新聞 (day_report) と就寝判断
+    (day_close の _collect_today_session_digests) がタグで拾う既存の読み手に、
+    「今日、過去の会話を読み返した」という事実がそのまま乗る。
+    role は作業セッションの digest (assistant = 本人の言葉) と違って
+    user + ``<system>`` 包み — この一行は件数から機械が組んだ文で、機構の
+    代筆を本人名義 (assistant) にしない (発話の尊厳の規律)。
+    書き込みの失敗は送出する — 採取は適用済みなので、呼び出し元のジョブが
+    失敗として報告し、記録の欠けを黙って飲まない。
+
+    ``nonce`` は :func:`_capture_digest_exists` が照会する識別子で、metadata の
+    ``capture_digest_nonce`` として一行に刻まれる (修正 C)。
+    """
+    from sea.work_session import DIGEST_TAG
+
+    adapter = getattr(persona, "sai_memory", None)
+    if adapter is None:
+        raise SluiceStorageUnavailableError(
+            "sai_memory adapter is missing; cannot append the capture digest"
+        )
+    metadata: Dict[str, Any] = {"tags": [DIGEST_TAG, "sluice"]}
+    if nonce:
+        metadata["capture_digest_nonce"] = nonce
+    message_id = adapter.append_persona_message({
+        "role": "user",
+        "content": f"<system>{digest_text}</system>",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "metadata": metadata,
+        "line_role": "main_line",
+        "scope": "committed",
+    })
+    if not message_id:
+        # adapter は行が入らなかったとき (未準備・INSERT 例外) に例外でなく
+        # None を返す — docstring の「書き込みの失敗は送出する」の契約は
+        # ここで実装する (2026-09-09 Codex 第三巡)。送出しないと呼び出し元が
+        # 材料 (pending) を消し込み、一行が立たないまま回収不能になる。
+        raise SluiceStorageUnavailableError(
+            "capture digest append returned no message id; keeping the "
+            "pending tally for the next run"
+        )
+
+
+def run_sluice_capture(
+    lifecycle: Any,
+    persona: Any,
+    *,
+    mode: str = "mechanism",
+    model_key: Optional[str] = None,
+    event_callback: Optional[Any] = None,
+    cancellation_token: Optional[Any] = None,
+) -> Dict[str, Any]:
+    """記録された「通っていない範囲」を、チャンクごとに順に通す。
+
+    docs/intent/sluice_coverage_gaps.md 第一段 B の実行部。範囲の行を古い順に
+    取り、A と同じ閾値 (:func:`get_max_span_chars`) 以下のチャンクへ刻んで
+    処理する。チャンクを終えるたびに範囲の行を縮める (行の start_message_id を
+    前進、全部済んだら行を削除) — 中断しても続きから。パンマーカーは動かさない。
+
+    判断の主体 (``mode`` — B 節の再設計):
+
+    - ``"mechanism"`` (既定 — 安い方): 誰でもない機構が範囲を読み、手帳のメモの
+      **候補**を ``sluice_candidate_memos`` に置く (:func:`_run_mechanism_chunk`)。
+      本人の器 (コア記憶・手帳・約束・会話ログ) には何も書かない。
+    - ``"persona"``: 現在の本人が「読み返し」だと明示されて読み、コア記憶・
+      手帳・約束を定常のスルースと同じ経路で操作する
+      (:func:`_run_capture_chunk`)。拾われたメモは origin='readback' と
+      できごとの日 (event_date) の機械刻印を持つ。読み返しの過程は本線の
+      context に載せず (判断ターン記録は discardable)、範囲を全部通し終えた
+      走行で、貯まっている採取が 1 件以上あれば本線にダイジェスト一行だけを
+      立てる (:func:`_append_capture_digest` — 入口は一本)。件数の材料は
+      チャンクごとに memory.db へ貯める (:func:`_merge_pending_digest`) ので、
+      中断した走行の採取分も次の完走のダイジェストに合流する。採取ゼロなら
+      立てない。
+
+    直列化: チャンクごとに Beat ロック (purpose="sluice_capture") を取る —
+    ロックはチャンク間で手放すので、走行中も会話 (Pulse) が間に挟まれる
+    (「普通の会話を妨げない」が本設計の芯)。
+
+    小休止 (C-1): チャンクの頭ごとに persona 単位のレート制限小休止を見て、
+    小休止中なら走行を閉じる (status="cooldown" — 進んだ分は確定済み)。
+    チャンクの LLM がレート制限で落ちた場合も同じ小休止が置かれる
+    (:func:`_run_capture_chunk`)。
+
+    Returns:
+        ``{"status": "ok"|"noop"|"disabled"|"cooldown"|"cancelled",
+        "chunks_processed": int, "messages_processed": int,
+        "captures_applied": int, "captures_failed": int,
+        "spans_remaining": int}``。例外 (LLM 失敗・台帳ブロック・範囲が
+        読めない) は送出する — 進んだ分の縮めは確定済みなので、再実行は
+        続きから。
+    """
+    from sai_memory.memory.storage import (
+        advance_sluice_skipped_span,
+        delete_sluice_skipped_span,
+        list_sluice_skipped_spans,
+    )
+
+    if mode not in CAPTURE_MODES:
+        raise ValueError(
+            f"unknown capture mode: {mode!r} (expected one of {CAPTURE_MODES})"
+        )
+
+    if not is_enabled():
+        # スルースを env で切っている環境では、後から通す採取も動かさない —
+        # 「採取 (課金) を止めている」意思の尊重 (定常のスルースと同じ判定)。
+        return {
+            "status": "disabled", "chunks_processed": 0,
+            "messages_processed": 0, "captures_applied": 0,
+            "captures_failed": 0, "spans_remaining": 0,
+        }
+
+    persona_id = getattr(persona, "persona_id", None)
+    adapter = getattr(persona, "sai_memory", None)
+    if adapter is None or not getattr(adapter, "is_ready", lambda: False)():
+        raise SluiceStorageUnavailableError(
+            f"persona memory storage is not ready (persona={persona_id}); "
+            "cannot capture skipped spans"
+        )
+
+    from sea.beat_gate import hold_beat
+    manager = getattr(lifecycle, "manager", None)
+    max_chars = get_max_span_chars()
+
+    chunks_processed = 0
+    messages_processed = 0
+    captures_applied = 0
+    captures_failed = 0
+    status = "ok"
+    processed_any = False
+    # 本人モードのダイジェスト一行の材料 (期間と器ごとの件数) は memory.db 側に
+    # 貯める (_merge_pending_digest) — in-memory の累計だと、中断した走行の
+    # 採取分がどの走行のダイジェストにも入らない。
+
+    def _spans() -> List[Dict[str, Any]]:
+        with adapter._db_lock:
+            return list_sluice_skipped_spans(adapter.conn)
+
+    def _emit(content: str) -> None:
+        if event_callback is None:
+            return
+        try:
+            event_callback({
+                "type": "metabolism",
+                "status": "sluice_capture",
+                "content": content,
+                "messages_processed": messages_processed,
+            })
+        except Exception:
+            LOGGER.debug("[sluice-capture] event_callback raised", exc_info=True)
+
+    while True:
+        if cancellation_token is not None and cancellation_token.is_cancelled():
+            status = "cancelled"
+            break
+        rate_check = getattr(lifecycle, "_metabolism_rate_limit_active", None)
+        if callable(rate_check) and rate_check(persona_id):
+            LOGGER.info(
+                "[sluice-capture] stopping during rate-limit cooldown "
+                "(persona=%s)", persona_id,
+            )
+            status = "cooldown"
+            break
+        spans = _spans()
+        if not spans:
+            status = "ok" if processed_any else "noop"
+            break
+        span = spans[0]
+        span_messages = _read_span_messages(persona, span)
+        if span_messages is None:
+            raise SluiceCaptureSpanUnreadableError(
+                f"recorded span {span['start_message_id']}.."
+                f"{span['end_message_id']} (row {span['id']}) cannot be read "
+                f"(missing endpoint or cross-thread; persona={persona_id})"
+            )
+        if not span_messages:
+            # 範囲に実会話が 1 通も無い (機構の記録だけ等) — 本人の目で読む
+            # 材料が無いので、記録を閉じて次へ。
+            with adapter._db_lock:
+                delete_sluice_skipped_span(adapter.conn, span["id"])
+            LOGGER.info(
+                "[sluice-capture] span %s..%s had no conversation messages; "
+                "record closed (persona=%s)",
+                span["start_message_id"], span["end_message_id"], persona_id,
+            )
+            processed_any = True
+            continue
+        chunk = _plan_capture_chunks(span_messages, max_chars)[0]
+        with hold_beat(
+            manager, persona_id, purpose="sluice_capture", check_gate=False,
+        ):
+            if mode == "persona":
+                chunk_summary = _run_capture_chunk(
+                    lifecycle, persona, chunk, model_key=model_key,
+                )
+            else:
+                chunk_summary = _run_mechanism_chunk(
+                    lifecycle, persona, chunk, model_key=model_key,
+                )
+        chunk_applied = (
+            chunk_summary["ops_applied"] + chunk_summary["memos_applied"]
+            + chunk_summary["promises_applied"]
+        )
+        if mode == "persona" and chunk_applied:
+            # ダイジェストの材料は memory.db に貯める — この走行が中断しても
+            # (cancelled / cooldown / 例外)、次に完走した走行が本線の一行を
+            # 立てて拾う。
+            #
+            # **縮めより先**に足す (Codex 第二巡 修正 B)。逆順だと「縮めは確定 →
+            # マージが落ちる」の窓で、チャンクは台帳上完了済みなのに件数が
+            # どこにも残らず、そのチャンクの適用分がダイジェストから永久に
+            # 欠けた。マージを先にしても二重にはならない — 失敗の各窓の帰結:
+            #   - マージ後・縮め前に落ちる → 再実行は台帳の記録済み結果で同じ
+            #     チャンクをやり直し、マージは last_chunk_id で二重加算を止め、
+            #     縮めだけが進む。
+            #   - マージ前に落ちる → 縮めも進んでいないので、再実行がマージから
+            #     やり直す。
+            # どちらも欠けも二重も無い。残る縁が一つ (2026-09-09 Codex 第三巡、
+            # 記録して受け入れ): マージ前に落ちた回の再適用は、冪等スキップを
+            # applied に数えない操作 (コア記憶の remove 等) の件数だけ少なく
+            # 数える。実体は器に残っており、欠けるのは通知の件数が控えめに
+            # 言うことだけ — 件数を台帳に凍結する架構はこの縁には過大。
+            _merge_pending_digest(
+                persona,
+                chunk_start_id=chunk_summary.get("span_start_id"),
+                messages=chunk_summary["messages"],
+                memos=chunk_summary["memos_applied"],
+                core=chunk_summary["ops_applied"],
+                promises=chunk_summary["promises_applied"],
+                period_start=chunk_summary.get("period_start"),
+                period_end=chunk_summary.get("period_end"),
+            )
+        # 処理し終えたチャンクぶんだけ記録を縮める。縮めの失敗は送出 —
+        # 縮めずに次へ進むと同じチャンクを永久に回る。再実行は台帳の記録済み
+        # 結果に合流するので、縮め直前の失敗でも二重適用にはならない。
+        if len(chunk) == len(span_messages):
+            with adapter._db_lock:
+                delete_sluice_skipped_span(adapter.conn, span["id"])
+        else:
+            next_start = str(getattr(span_messages[len(chunk)], "id"))
+            with adapter._db_lock:
+                advance_sluice_skipped_span(adapter.conn, span["id"], next_start)
+        processed_any = True
+        chunks_processed += 1
+        messages_processed += chunk_summary["messages"]
+        captures_applied += chunk_applied
+        captures_failed += (
+            chunk_summary["ops_failed"] + chunk_summary["memos_failed"]
+            + chunk_summary["promises_failed"]
+        )
+        if mode == "persona":
+            _emit(
+                f"過去の会話を読み返しています…… ({messages_processed} 通まで採取済み)"
+            )
+        else:
+            _emit(
+                f"過去の会話から候補を探しています…… ({messages_processed} 通まで処理済み)"
+            )
+
+    # 本人モードのダイジェスト一行 (入口は一本): 記録された範囲を全部通し終えた
+    # 走行 (status "ok"、または貯まった材料だけが残っていて今回は範囲ゼロだった
+    # "noop") で、貯まっている適用数が 1 件以上あるときに本線へ一行を立てる。
+    # 件数は in-memory のカウンタではなく耐久化した累計から組む — 前の走行が
+    # 中断していたら、その採取分もここで一緒に報告される。追記が失敗したら
+    # 材料は残したまま送出する (ジョブは失敗になるが、次の完走が拾う = 復旧経路)。
+    if mode == "persona" and status in ("ok", "noop"):
+        pending = _load_pending_digest(persona)
+        if _pending_digest_total(pending) > 0:
+            # 追記の識別子は**追記より先に**永続する (Codex 第二巡 修正 C)。
+            # 「追記は成功・消し込みは失敗」で落ちると材料が残ったままになり、
+            # 次の完走が同じ一行をもう一度本線へ立てていた (本人の目には同じ
+            # 読み返しが二度あったように見える)。先に採番して残しておけば、
+            # 再実行はその nonce の一行が既にあるかを見て追記を飛ばせる。
+            flush_nonce = pending.get("flush_nonce")
+            if not flush_nonce:
+                flush_nonce = str(uuid.uuid4())
+                pending["flush_nonce"] = flush_nonce
+                _write_pending_digest(persona, pending)
+            pending_start = pending["period_start"]
+            pending_end = pending["period_end"]
+            pending_messages = int(pending["messages"] or 0)
+            if pending_start and pending_end:
+                period_label = (
+                    pending_start if pending_start == pending_end
+                    else f"{pending_start}〜{pending_end}"
+                )
+                period_part = f"（期間 {period_label}、{pending_messages} 通）"
+            else:
+                period_part = f"（{pending_messages} 通）"
+            parts: List[str] = []
+            if pending["memos"]:
+                parts.append(f"手帳のメモ {pending['memos']} 件")
+            if pending["core"]:
+                parts.append(f"コア記憶の操作 {pending['core']} 件")
+            if pending["promises"]:
+                parts.append(f"約束の操作 {pending['promises']} 件")
+            digest_text = (
+                f"過去の会話{period_part}を読み返し、{'・'.join(parts)}を記録した。"
+            )
+            if not _capture_digest_exists(persona, flush_nonce):
+                _append_capture_digest(
+                    persona, digest_text, nonce=flush_nonce,
+                )
+            else:
+                LOGGER.info(
+                    "[sluice-capture] the digest line for %s is already on the "
+                    "main line; skipping the append and clearing the tally",
+                    flush_nonce,
+                )
+            _clear_pending_digest(persona)
+
+    LOGGER.info(
+        "[sluice-capture] run closed: persona=%s mode=%s status=%s chunks=%d "
+        "messages=%d applied=%d failed=%d",
+        persona_id, mode, status, chunks_processed, messages_processed,
+        captures_applied, captures_failed,
+    )
+    return {
+        "status": status,
+        "mode": mode,
+        "chunks_processed": chunks_processed,
+        "messages_processed": messages_processed,
+        "captures_applied": captures_applied,
+        "captures_failed": captures_failed,
+        "spans_remaining": len(_spans()),
     }
 
 

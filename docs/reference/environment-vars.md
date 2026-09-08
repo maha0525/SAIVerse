@@ -42,6 +42,8 @@
 | `SAIVERSE_CHRONICLE_CHAR_BUDGET` | `20000` | weave の General Chronicle 読み込みの文字数予算。超過時は年表を粗いレベルへ畳んで全期間をカバーする（最古を落とさない）。**この 1/4 が束ねの発火閾値 X を兼ねる** ([chronicle_consolidation](../intent/chronicle_consolidation.md) §3 — 発火と提示を同じノブに連動させる)。記憶アーキv2 §6.2 |
 | `SAIVERSE_SLUICE_ENABLED` | `1` | スルース（Metabolism 時のコア記憶・手帳メモ・約束の採取。旧 gold_panning）の全体トグル。`0` で無効（defer-to-hot ごと従来挙動に戻る。無効時は採取なしで退場が進む）。intent `gold_panning.md`（旧名のまま）+ `autonomous_behavior_v3.md` §13 |
 | `SAIVERSE_SLUICE_PENDING_CAP` | `1.5` | defer-to-hot 圧力弁。ウィンドウが high watermark のこの倍率を超えたらキャッシュが冷たくても Metabolism を実行する |
+| `SAIVERSE_SLUICE_MAX_SPAN_CHARS` | `100000` | 一発のスルースの呼び出しに入れてよい担当範囲（パンマーカーから窓の末尾まで）の上限字数。超えていたらスルースを走らせず、退場はそのまま進め、窓から出る未見の範囲を memory.db の `sluice_skipped_spans` に記録する（後から通せる）。[sluice_coverage_gaps](../intent/sluice_coverage_gaps.md) 第一段 A |
+| `SAIVERSE_METABOLISM_RATE_LIMIT_COOLDOWN_S` | `600` | Metabolism 系の LLM 呼び出し（スルース・編纂・束ね）がレート制限 (429) で失敗したあと、その persona の Metabolism を見送る秒数。[sluice_coverage_gaps](../intent/sluice_coverage_gaps.md) 第一段 C-1 |
 | （旧 `SAIVERSE_GOLD_PANNING_*`） | — | **非推奨**（2026-08-19 の sluice 改名で置換）。上 2 つと同名対応（`ENABLED` / `PENDING_CAP`）の旧キーは、新キー未設定のときだけフォールバックとして読まれ、使用時に WARNING が出る（旧 `ENABLED=0` の環境が更新後に黙って採取を再開しないための設定移行）。優先順は 新キー > 旧キー > 既定。`SAIVERSE_SLUICE_*` へ移行すること |
 | `SAIVERSE_MEDIA_RECALL_ENABLED` | `false` | 添付メディア（画像/音声/動画）の概要を自動想起の検索クエリに使うか。ON 時は添付があると概要生成を同期実行するため数秒待ちが発生する。UI（グローバル設定 > 環境）からも切替可 |
 

@@ -209,6 +209,102 @@ def test_count_based_mode_still_reports_the_band(persona_home, monkeypatch):
     )
 
 
+def test_orphan_source_ids_report_a_per_entry_breakdown(persona_home):
+    """孤児参照 (存在しないメッセージを指す source_ids) はエントリ単位の
+    内訳が出る — 何本の Lv1 に散っているか、各エントリの総 source 数 /
+    欠け数 / 全滅か部分欠けか (機構 G — chronicle_coverage_gaps)。総数
+    「参照が 20 個」だけでは原因の切り分けができなかった不足の解消。"""
+    ids = _add_messages(persona_home, 4)
+    partial = _create_entry(
+        persona_home.conn, [ids[0], "dead-a", ids[1]], "部分欠けの話。",
+    )
+    # 全滅: source が全部消えているエントリ
+    import json as _json
+    row = persona_home.conn.execute(
+        "SELECT metadata FROM memopedia_pages WHERE id = ?", (partial.id,)
+    ).fetchone()
+    assert row is not None
+    all_dead = _create_entry(persona_home.conn, [ids[2]], "全滅の話。")
+    meta_row = persona_home.conn.execute(
+        "SELECT metadata FROM memopedia_pages WHERE id = ?", (all_dead.id,)
+    ).fetchone()
+    meta = _json.loads(meta_row[0])
+    meta["source_ids"] = ["dead-b", "dead-c"]
+    persona_home.conn.execute(
+        "UPDATE memopedia_pages SET metadata = ? WHERE id = ?",
+        (_json.dumps(meta, ensure_ascii=False), all_dead.id),
+    )
+    # 健全なエントリは内訳に載らない
+    _create_entry(persona_home.conn, [ids[3]], "健全な話。")
+    persona_home.conn.commit()
+
+    result = get_chronicle_diagnosis(PERSONA_ID, manager=_manager())
+    assert result["lv1_orphan_source_ids"] == 3  # dead-a, dead-b, dead-c
+    assert result["lv1_orphan_entry_count"] == 2
+    by_prefix = {e["id_prefix"]: e for e in result["lv1_orphan_entries"]}
+    assert set(by_prefix) == {partial.id[:8], all_dead.id[:8]}
+    assert by_prefix[partial.id[:8]] == {
+        "id_prefix": partial.id[:8],
+        "total_sources": 3,
+        "missing_sources": 1,
+        "all_missing": False,
+    }
+    assert by_prefix[all_dead.id[:8]] == {
+        "id_prefix": all_dead.id[:8],
+        "total_sources": 2,
+        "missing_sources": 2,
+        "all_missing": True,
+    }
+
+
+def test_orphan_breakdown_counts_distinct_on_both_sides(persona_home):
+    """source_ids に重複があっても内訳の数字は食い違わない — 総数・欠け数とも
+    DISTINCT の勘定で揃える (総数だけ json_array_length の重複込みだと、
+    欠け数 (DISTINCT) と土俵が違って all_missing の判定も狂う)。"""
+    import json as _json
+
+    def _set_source_ids(entry_id, source_ids):
+        row = persona_home.conn.execute(
+            "SELECT metadata FROM memopedia_pages WHERE id = ?", (entry_id,)
+        ).fetchone()
+        meta = _json.loads(row[0])
+        meta["source_ids"] = source_ids
+        persona_home.conn.execute(
+            "UPDATE memopedia_pages SET metadata = ? WHERE id = ?",
+            (_json.dumps(meta, ensure_ascii=False), entry_id),
+        )
+
+    ids = _add_messages(persona_home, 2)
+    # 部分欠け + 重複: 生存 1 (重複) + 死 1 (重複) → distinct では 2 中 1 欠け
+    partial = _create_entry(persona_home.conn, [ids[0]], "重複部分欠けの話。")
+    _set_source_ids(partial.id, [ids[0], "dead-x", "dead-x", ids[0]])
+    # 全滅 + 重複: 死 1 種が 2 回 → distinct では 1 中 1 欠け = 全滅
+    all_dead = _create_entry(persona_home.conn, [ids[1]], "重複全滅の話。")
+    _set_source_ids(all_dead.id, ["dead-y", "dead-y"])
+    persona_home.conn.commit()
+
+    result = get_chronicle_diagnosis(PERSONA_ID, manager=_manager())
+    by_prefix = {e["id_prefix"]: e for e in result["lv1_orphan_entries"]}
+    assert by_prefix[partial.id[:8]] == {
+        "id_prefix": partial.id[:8],
+        "total_sources": 2,
+        "missing_sources": 1,
+        "all_missing": False,
+    }
+    assert by_prefix[all_dead.id[:8]] == {
+        "id_prefix": all_dead.id[:8],
+        "total_sources": 1,
+        "missing_sources": 1,
+        "all_missing": True,
+    }
+
+
+def test_no_orphans_yields_an_empty_breakdown(diagnosis):
+    assert diagnosis["lv1_orphan_source_ids"] == 0
+    assert diagnosis["lv1_orphan_entries"] == []
+    assert diagnosis["lv1_orphan_entry_count"] == 0
+
+
 def test_band_simulation_failure_does_not_break_the_report(persona_home):
     """帯の測定が落ちても診断全体は 200 で返る (stelis_stats_error と同じ流儀)。"""
     _add_messages(persona_home, 2)

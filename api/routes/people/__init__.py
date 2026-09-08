@@ -11,6 +11,7 @@ from . import storage_layers, cache_status, context_status, debug, pulse_timelin
 from . import realtime_spell, core_memory, life
 from . import experience_ledger
 from . import pocketbook
+from . import sluice
 
 router = APIRouter()
 
@@ -64,3 +65,4 @@ router.include_router(core_memory.router, tags=["people"])
 router.include_router(life.router, tags=["people"])
 router.include_router(experience_ledger.router, tags=["people"])
 router.include_router(pocketbook.router, tags=["people"])
+router.include_router(sluice.router, tags=["people"])
