@@ -193,6 +193,14 @@ class SAIMemoryAdapter:
             from sai_memory.arasuji.storage import init_arasuji_tables
             init_arasuji_tables(self.conn)
 
+            # スルースを通っていない範囲の記録 (sluice_skipped_spans, 冪等)。
+            # init_db → _init_schema が既に作っているが、起動時 (eager) の初期化
+            # であることをこの経路でも明示する — Chronicle の遅延初期化が v0.2
+            # 事故の温床だった教訓 (docs/handoff/
+            # 2026-09-07_window_floor_unmet_on_v02_memory_db.md) に従う。
+            from sai_memory.memory.storage import init_sluice_skipped_spans_table
+            init_sluice_skipped_spans_table(self.conn)
+
             # Initialize core_memories table (記憶アーキv2 ゾーン A, 冪等)。
             # Memopedia と同様、self.conn 直参照経路 (core_memory スペル / head
             # セクション) がテーブルの存在を前提にできるよう、ここで作成する。

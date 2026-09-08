@@ -1,7 +1,7 @@
 # スルースの被覆の穴 — 会話を止めない採取と、後から拾える記録
 
 **ステータス**: 実装中 (2026-09-08 起草・文書レビュー 2 種反映・未決 4 点をまはーが裁可して確定。第一段を実装中)
-**関連**: [autonomous_behavior_v3.md](autonomous_behavior_v3.md) §13.3 (捕獲の一本化 — 本設計が改訂)・§13.5-1 (コンテキスト超過の後退方式 — 本設計が廃止)、[issues/cold_anchor_advance_bypasses_sluice.md](../issues/cold_anchor_advance_bypasses_sluice.md) (前提が本設計で変わる)、[chronicle_coverage_gaps.md](chronicle_coverage_gaps.md) (同じ原則の Chronicle 側)、[arasuji_levels.md](arasuji_levels.md) §14-2・§15・§16、`sea/sluice.py` / `sea/session_lifecycle.py` (run_metabolism・非常畳み・読み戻し)
+**関連**: [autonomous_behavior_v3.md](autonomous_behavior_v3.md) §13.3 (捕獲の一本化 — 本設計が改訂)・§13.5-1 (コンテキスト超過の後退方式 — 本設計が廃止)、[issues/archive/cold_anchor_advance_bypasses_sluice.md](../issues/archive/cold_anchor_advance_bypasses_sluice.md) (前提が本設計で変わり、2026-09-08 に決着して archive へ)、[chronicle_coverage_gaps.md](chronicle_coverage_gaps.md) (同じ原則の Chronicle 側)、[arasuji_levels.md](arasuji_levels.md) §14-2・§15・§16、`sea/sluice.py` / `sea/session_lifecycle.py` (run_metabolism・非常畳み・読み戻し)
 **発端**: 稟乃さんの報告 (2026-09-07〜08)。v0.2 時代の記憶 DB を持つペルソナに話しかけると返事が一度も来ず、翌朝「APIの利用制限に達しました」が出た。診断で確定した実体は下の「出自」節。
 
 用語 (この文書で使う既存語彙): **スルース** = 窓から押し出される会話を本人の目で
@@ -220,3 +220,14 @@ Chronicle タブに、ペルソナの歴史を期間の一覧で見せる画面�
   除去、9/5 の読み戻しの決定と 8/23 の頭打ちの決定への正面衝突を「未決」へ分離、
   「マーカーとの差で導出」案の破綻 (成功一回で左端が消える) を明示の記録へ変更、
   429 → コンテキスト超過の誤分類 (真の近因) の追記。
+- 2026-09-08: 第一段の A (量の事前判定と飛ばした範囲の記録) と C (安全装置) を
+  実装した。intent からの差分は 5 点: (1) 量の閾値はモデルのコンテキスト長からの
+  導出ではなく env 固定にした (`SAIVERSE_SLUICE_MAX_SPAN_CHARS`、既定 10 万字)。
+  (2) `"request too large"` の一語だけでなく、コンテキスト超過判定の文字列一覧
+  (`_CONTEXT_OVERFLOW_MARKERS`) ごと撤去した — 後退方式の廃止で判定の読み手が
+  居なくなり、一覧全体が死コード化したため。(3) 飛ばしたことの context-status
+  への一行は見送った — 第二段 UI の領分。(4) パンマーカーが無いペルソナの
+  機構 1 の前進は、旧起点〜新起点の全部を未見の範囲として記録する — マーカーが
+  無いことを理由に記録の空白を作らない。(5) 記録する範囲の末尾は新起点の行を
+  含み、実際に窓から出る範囲より 1 通だけ過剰に包含する — 採取は冪等なので
+  安全側に倒した。フルスイート 5,818 件合格。

@@ -223,6 +223,12 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         """
     )
 
+    # スルースを通っていない範囲の記録 (docs/intent/sluice_coverage_gaps.md
+    # 第一段)。起動時 (eager) にここで用意する — 会話の頭が直接 SQL を投げる
+    # テーブルを遅延初期化にすると、v0.2 → v0.3 直行の DB で最初の会話が
+    # 落ちる (2026-09-07 実害の教訓)。
+    init_sluice_skipped_spans_table(conn)
+
     # Pulse logs table for unified memory architecture
     conn.execute(
         """
@@ -1770,6 +1776,68 @@ def set_embed_metadata(conn: sqlite3.Connection, key: str, value: str) -> None:
         (key, value, now),
     )
     conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# スルースを通っていない範囲の記録 (docs/intent/sluice_coverage_gaps.md 第一段)
+# ---------------------------------------------------------------------------
+
+def init_sluice_skipped_spans_table(conn: sqlite3.Connection) -> None:
+    """``sluice_skipped_spans`` テーブルを用意する (冪等)。
+
+    冷たいときにスルースを飛ばして退場した範囲、および機構1 (冷えた起点の
+    前進) がパンマーカーを越えた範囲の記録。第二段の UI (期間選択 / 後から
+    通すジョブ) がこの記録を読む。初期化は adapter 起動時 (eager) — 遅延
+    初期化は v0.2 事故の温床 (docs/handoff/
+    2026-09-07_window_floor_unmet_on_v02_memory_db.md)。
+    """
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS sluice_skipped_spans (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            start_message_id TEXT NOT NULL,
+            end_message_id TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.commit()
+
+
+def record_sluice_skipped_span(
+    conn: sqlite3.Connection, start_message_id: str, end_message_id: str,
+) -> int:
+    """スルースを通っていない範囲を 1 行記録し、行 id を返す。
+
+    範囲は [start_message_id, end_message_id] のメッセージ id (正典順で
+    先頭〜末尾)。書き込みは「その範囲が実際に提示から出て行く回」だけに
+    呼ぶ — 呼び出し側 (sea/session_lifecycle.py) の責務。
+    """
+    cur = conn.execute(
+        "INSERT INTO sluice_skipped_spans "
+        "(start_message_id, end_message_id, created_at) VALUES (?, ?, ?)",
+        (str(start_message_id), str(end_message_id),
+         datetime.utcnow().isoformat()),
+    )
+    conn.commit()
+    return int(cur.lastrowid)
+
+
+def list_sluice_skipped_spans(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
+    """記録済みの「スルースを通っていない範囲」を古い順に返す (読み口)。"""
+    rows = conn.execute(
+        "SELECT id, start_message_id, end_message_id, created_at "
+        "FROM sluice_skipped_spans ORDER BY id ASC"
+    ).fetchall()
+    return [
+        {
+            "id": row[0],
+            "start_message_id": row[1],
+            "end_message_id": row[2],
+            "created_at": row[3],
+        }
+        for row in rows
+    ]
 
 
 # ---------------------------------------------------------------------------

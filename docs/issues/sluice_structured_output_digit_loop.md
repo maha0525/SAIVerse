@@ -138,4 +138,4 @@ Web の報告 (同じ症状):
 
 ## 別 issue との関係
 
-[cold_anchor_advance_bypasses_sluice.md](cold_anchor_advance_bypasses_sluice.md): スルースが失敗しても起点が進んでいた。本 issue が直っても、あちらが直らなければ退場の不変条件は守れない。両方直してからリリース。
+[cold_anchor_advance_bypasses_sluice.md](archive/cold_anchor_advance_bypasses_sluice.md): スルースが失敗しても起点が進んでいた。本 issue が直っても、あちらが直らなければ退場の不変条件は守れない。両方直してからリリース。

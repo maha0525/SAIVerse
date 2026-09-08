@@ -247,14 +247,37 @@ def _patch_storage(entries, universe):
 
 
 def _refill_history(universe):
-    """指定の行 (時系列昇順) を持つ履歴の読み手 — 読み戻しが読む形だけを実装。"""
+    """指定の行 (時系列昇順) を持つ履歴の読み手 — 読み戻しが読む形だけを実装。
+
+    ``get_history_before_anchor`` は実物 (persona/history_manager.py) と同じ
+    契約: anchor より前の行を、合計 max_chars 分まで新しい側から遡って読み、
+    時系列昇順で返す。
+    """
     def _from_anchor(start_id, **_k):
         idx = next(
             (i for i, m in enumerate(universe) if m["id"] == start_id), None,
         )
         return list(universe[idx:]) if idx is not None else []
 
-    return SimpleNamespace(get_history_from_anchor=_from_anchor)
+    def _before_anchor(anchor_id, *, max_chars, **_k):
+        idx = next(
+            (i for i, m in enumerate(universe) if m["id"] == anchor_id), None,
+        )
+        if idx is None:
+            return []
+        selected = []
+        acc = 0
+        for m in reversed(universe[:idx]):
+            selected.append(m)
+            acc += len(str(m.get("content") or ""))
+            if acc >= max_chars:
+                break
+        return list(reversed(selected))
+
+    return SimpleNamespace(
+        get_history_from_anchor=_from_anchor,
+        get_history_before_anchor=_before_anchor,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -389,6 +412,93 @@ def test_refill_rewinds_anchor_with_synthesized_folds(session_factory):
     assert entry["anchor_id"] == "b0"
     saved = deserialize_folds(entry.get("folded_ranges"))
     assert [f.chronicle_entry_ids for f in saved] == [["e1"], ["e2"]]
+    assert all(f.presented_raw for f in saved)
+
+
+def test_refill_reads_uncompiled_tail_only_up_to_target(session_factory):
+    """稟乃さんの 212 万字の経路の回帰 (2026-09-08、sluice_coverage_gaps
+    追加の決定 2)。
+
+    起点の直前にあらすじに覆われていない生の未編纂の行が並んでいるとき、旧実装は
+    「いちばん新しいあらすじの材料の最古の行から起点まで」を一息に読んだため、
+    間に溜まった未編纂が丸ごと窓に開かれた (v0.2 更新直後の実機で 212 万字)。
+    現行: 生の未編纂は後ろ (新しい側) から必要な分 (残す量) まで読んだら終わり。
+    あらすじは開かれず、読み切れなかった未編纂は窓の外に残る (Chronicle 補修の
+    領分)。
+    """
+    from contextlib import ExitStack
+    lc = _make_lifecycle(session_factory)
+    covered = [_msg("b0", 100, 1000), _msg("b1", 101, 1000)]     # e1 の材料
+    raw_gap = [_msg(f"r{i}", 110 + i, 1000) for i in range(4)]   # 未編纂 r0..r3
+    universe = covered + raw_gap + [_msg("m0", 200, 1000)]
+    persona = SimpleNamespace(
+        persona_id=PERSONA_ID, model="model-a",
+        history_manager=_refill_history(universe),
+        sai_memory=SimpleNamespace(conn=object(), is_ready=lambda: True),
+    )
+    lc.upsert_anchor_entry(PERSONA_ID, "model-a", {
+        "anchor_id": "m0", "updated_at": _now().isoformat(), "ttl_seconds": 3600,
+    })
+    wm = Watermarks(target=3000, high=10_000)  # 不足 2,000 字 = 未編纂 2 行ぶん
+    window = _window("m0", [_msg("m0", 200, 1000)])
+    entries = [_entry("e1", ["b0", "b1"], short_id=1)]
+    with ExitStack() as stack:
+        stack.enter_context(
+            patch.object(lc, "get_metabolism_watermarks", return_value=wm))
+        stack.enter_context(
+            patch.object(lc, "resolve_metabolism_anchor", return_value=("m0", "self")))
+        stack.enter_context(
+            patch.object(lc, "get_presented_window", return_value=window))
+        for p in _patch_storage(entries, universe):
+            stack.enter_context(p)
+        assert lc.maybe_run_window_refill(persona, "room") == "ok"
+
+    entry = lc.load_anchor_entry(PERSONA_ID, "model-a")
+    # 後ろから 2 行 (r2, r3) で目標量に到達 — r0, r1 と e1 の材料は開かれない
+    assert entry["anchor_id"] == "r2"
+    assert not deserialize_folds(entry.get("folded_ranges"))  # あらすじ未開封
+
+
+def test_refill_opens_the_arasuji_after_the_uncompiled_tail_is_exhausted(
+    session_factory,
+):
+    """未編纂を全部読んでも足りなければ、従来どおり圧縮区間を丸ごと開く。
+
+    順序の固定: 生の未編纂 (後ろから必要な分) → あらすじに覆われた圧縮区間
+    (新しい順に丸ごと)。
+    """
+    from contextlib import ExitStack
+    lc = _make_lifecycle(session_factory)
+    covered = [_msg("b0", 100, 1000), _msg("b1", 101, 1000)]
+    raw_gap = [_msg("r0", 110, 1000), _msg("r1", 111, 1000)]
+    universe = covered + raw_gap + [_msg("m0", 200, 1000)]
+    persona = SimpleNamespace(
+        persona_id=PERSONA_ID, model="model-a",
+        history_manager=_refill_history(universe),
+        sai_memory=SimpleNamespace(conn=object(), is_ready=lambda: True),
+    )
+    lc.upsert_anchor_entry(PERSONA_ID, "model-a", {
+        "anchor_id": "m0", "updated_at": _now().isoformat(), "ttl_seconds": 3600,
+    })
+    wm = Watermarks(target=5000, high=10_000)
+    window = _window("m0", [_msg("m0", 200, 1000)])
+    entries = [_entry("e1", ["b0", "b1"], short_id=1)]
+    with ExitStack() as stack:
+        stack.enter_context(
+            patch.object(lc, "get_metabolism_watermarks", return_value=wm))
+        stack.enter_context(
+            patch.object(lc, "resolve_metabolism_anchor", return_value=("m0", "self")))
+        stack.enter_context(
+            patch.object(lc, "get_presented_window", return_value=window))
+        for p in _patch_storage(entries, universe):
+            stack.enter_context(p)
+        assert lc.maybe_run_window_refill(persona, "room") == "ok"
+
+    entry = lc.load_anchor_entry(PERSONA_ID, "model-a")
+    # 未編纂 2 行 (3,000 字) では足りず、e1 (b0, b1) を丸ごと開いて 5,000 字
+    assert entry["anchor_id"] == "b0"
+    saved = deserialize_folds(entry.get("folded_ranges"))
+    assert [f.chronicle_entry_ids for f in saved] == [["e1"]]
     assert all(f.presented_raw for f in saved)
 
 
@@ -1894,15 +2004,23 @@ def test_refill_logs_why_it_planned_nothing(session_factory, caplog):
     # 不足なし
     msgs = _messages([], [m0], presented_chars=6000)
     assert any("refill not needed" in m for m in msgs)
-    # 起点より古い側に開けるあらすじが無い
-    msgs = _messages([], [_msg("b0", 100, 1000), m0])
+    # 起点より古い側に何も無い (あらすじも生の行も) → planned nothing
+    msgs = _messages([], [m0])
     assert any(
         "planned nothing" in m and "no arasuji left to open" in m for m in msgs
+    )
+    # 生の未編纂の行 (b0) は後ろから開く — あらすじが無くても、開いた結果を
+    # 保って「目標量に届かない」の理由が残る (2026-09-08 追加の決定 2)。
+    msgs = _messages([], [_msg("b0", 100, 1000), m0])
+    assert any(
+        "refill stopped below target" in m and "no arasuji left to open" in m
+        for m in msgs
     )
     # 器が無い (SAIMemory not ready)
     msgs = _messages([], [m0], ready=False)
     assert any("history or memory store unavailable" in m for m in msgs)
-    # 材料が一行も実在しないあらすじは飛ばして次へ (次が無ければ見送り)
+    # 材料が一行も実在しないあらすじは飛ばして次へ (次が無ければ見送り。
+    # 生の b0 は後ろ読みで開き済みなので「開いた結果を保つ」ログ側に出る)
     ghost_entry = _entry("e1", ["ghost-a", "ghost-b"])
 
     def _latest_ghost(conn, message_id, *, exclude_entry_ids=()):
@@ -1919,7 +2037,7 @@ def test_refill_logs_why_it_planned_nothing(session_factory, caplog):
         )],
     )
     assert any("no surviving material rows" in m for m in msgs)
-    assert any("planned nothing" in m for m in msgs)
+    assert any("refill stopped below target" in m for m in msgs)
     # 一部だけ開いて目標量に届かない → その旨を INFO (開いた結果は保つ)
     msgs = _messages([_entry("e1", ["b0"])], [_msg("b0", 100, 1000), m0])
     assert any("refill stopped below target" in m for m in msgs)

@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
+import time
 import uuid
 from datetime import datetime, timedelta
 from typing import (
@@ -37,6 +38,48 @@ LOGGER = logging.getLogger(__name__)
 # 要る — 両方 None に潰すと、検査が壊れている並びで stale な head が「組み直せ
 # ました」の顔で通り、知らせるための機構が黙る (Codex 指摘 2026-09-01)。
 _WEAVE_INSPECT_FAILED = object()
+
+
+def _rate_limit_cooldown_seconds() -> float:
+    """RateLimitError 後の Metabolism 小休止の長さ (秒)。env で調整できる。"""
+    raw = os.getenv("SAIVERSE_METABOLISM_RATE_LIMIT_COOLDOWN_S")
+    if raw is None or not raw.strip():
+        return 600.0
+    try:
+        return float(raw)
+    except ValueError:
+        LOGGER.warning(
+            "[metabolism] invalid SAIVERSE_METABOLISM_RATE_LIMIT_COOLDOWN_S=%r; "
+            "using default 600", raw,
+        )
+        return 600.0
+
+
+def _is_rate_limit_error(exc: BaseException) -> bool:
+    """例外 (の連鎖) がレート制限 (RateLimitError) 起因かを型で判定する。
+
+    docs/intent/sluice_coverage_gaps.md 第一段 C-1: 判定は例外の**型**で行い、
+    文字列照合は新設しない (文字列照合が 429 をコンテキスト超過に化けさせた
+    のが本設計の出自)。``original_error`` (llm_clients.LLMError の包み) と
+    ``__cause__`` / ``__context__`` の連鎖も辿る。
+    """
+    from llm_clients.exceptions import RateLimitError
+
+    seen: Set[int] = set()
+    stack: List[Optional[BaseException]] = [exc]
+    while stack:
+        e = stack.pop()
+        if e is None or id(e) in seen:
+            continue
+        seen.add(id(e))
+        if isinstance(e, RateLimitError):
+            return True
+        original = getattr(e, "original_error", None)
+        stack.extend([
+            original if isinstance(original, BaseException) else None,
+            e.__cause__, e.__context__,
+        ])
+    return False
 
 
 class SessionLifecycle:
@@ -94,6 +137,12 @@ class SessionLifecycle:
         # 最終防衛ラインを「SAIMemory absent (従来のメモリ上の履歴)」で見送った
         # ことをペルソナごと 1 度だけ INFO に残すための既出集合。
         self._floor_absent_logged: Set[str] = set()
+        # Metabolism 系 LLM (スルース・編纂・束ね) が RateLimitError で失敗した
+        # persona の小休止 (docs/intent/sluice_coverage_gaps.md 第一段 C-1)。
+        # persona_id → 小休止が明ける時刻 (time.monotonic())。メモリ上のみ —
+        # プロセス再起動でリセットされてよい (429 は分単位の現象)。
+        self._rate_limit_cooldown_lock = threading.Lock()
+        self._metabolism_rate_limited: Dict[str, float] = {}
 
     # ------------------------------------------------------------------
     # 勘定の単位 — 「実際に送る中身」(2026-09-02 まはー裁定)
@@ -834,15 +883,15 @@ class SessionLifecycle:
         前進させる (機構1)。編纂も LLM も伴わない行更新のみで、休眠 model の
         復帰不能 (§12-10 極端形) の主対策。
 
-        不変条件 (2026-08-23): **起点はスルースのパンマーカーを越えない。**
-        飛ばす範囲は最前線の定義により必ず Chronicle が覆っているが、それだけ
-        では足りない — 押し出される記憶は必ずスルースを通る
-        (autonomous_behavior_v3.md §13.3) ので、前進先はさらに「スルースが最後に
-        見た位置 (パンマーカー) の次」で頭打ちにする。マーカーが読めない
-        (スルース未走行 / 読み取り失敗) なら前進しない (fail-closed)。
-        経緯: 手動整理で Chronicle 生成成功 → スルース自身のプロンプト組成で
-        機構1 が発火して起点が前進 → スルース失敗、の並びで、スルースを
-        通っていない範囲がペルソナの提示範囲から消えた (2026-08-23 実機)。
+        パンマーカーとの関係 (2026-09-08 改訂 —
+        docs/intent/sluice_coverage_gaps.md 追加の決定 1): 8/23 の不変条件
+        「起点はスルースのパンマーカーを越えない」は撤回した。前進は最前線
+        まで進んでよい。代わりの制約は「スルースを通っていない範囲はユーザーに
+        分かる状態で明示する」 — マーカーを越えて前進する回は、越えた範囲
+        (旧マーカーの次〜新起点。マーカーが無ければ旧起点〜新起点) を
+        ``sluice_skipped_spans`` へ記録してから前進する。記録が書けない・
+        マーカーとの順序が引けないときは前進しない (fail-closed — 記録なしで
+        範囲を提示から出さない)。
 
         Args:
             model_key: 「自 model」として扱う model。ExecutionContext が届いている
@@ -891,25 +940,50 @@ class SessionLifecycle:
                     "[metabolism] Anchor resolved: self model '%s' (hot)", persona_model,
                 )
                 return (self_anchor, "self")
-            # §14-2 機構1: 冷え切った自行は最前線まで前進してよい。ただし
-            # 前進先はスルースのパンマーカーの次で頭打ちにする (v3 §13.3 —
-            # 押し出される記憶は必ずスルースを通る)。
+            # §14-2 機構1: 冷え切った自行は最前線まで前進してよい。
+            # 2026-09-08 (docs/intent/sluice_coverage_gaps.md 追加の決定 1):
+            # 8/23 の「前進先はパンマーカーの次で頭打ち」は撤回。マーカーを
+            # 越えて前進する回は、越えた範囲 (旧マーカーの次〜新起点) を
+            # sluice_skipped_spans へ記録してから前進する — 「通っていない
+            # 範囲はユーザーに分かる状態で明示する」が新しい制約。
             frontier = self._resolve_frontier_anchor(persona, strict=strict)
             target = None
+            crossing_span: Optional[Tuple[str, str]] = None
             if (
                 frontier
                 and frontier != self_anchor
                 and self._is_ahead_of(persona, frontier, self_anchor, strict=strict)
             ):
-                target = self._cap_advance_at_pan_marker(
-                    persona, frontier, persona_id, persona_model,
+                allowed, crossing_span = self._plan_marker_crossing_record(
+                    persona, self_anchor, frontier, persona_id, persona_model,
                 )
+                if allowed:
+                    target = frontier
             if (
                 target
                 and target != self_anchor
                 and self._is_ahead_of(persona, target, self_anchor, strict=strict)
             ):
                 if persist_advance:
+                    if crossing_span is not None:
+                        # 記録が先、前進が後 (fail-closed): 記録できない範囲を
+                        # 黙って提示から出さない。前進の永続化が後で失敗した
+                        # 場合は記録だけが残る — 範囲は出て行っていないので、
+                        # 後から通すジョブがその範囲を読み直しても実害は無い
+                        # (採取は冪等)。
+                        try:
+                            self._record_sluice_skipped_span(
+                                persona, *crossing_span,
+                            )
+                        except Exception:
+                            LOGGER.warning(
+                                "[metabolism] cold anchor advance skipped: the "
+                                "marker-crossing span %s..%s could not be "
+                                "recorded (persona=%s model=%s)",
+                                crossing_span[0], crossing_span[1],
+                                persona_id, persona_model, exc_info=True,
+                            )
+                            return (self_anchor, "self")
                     # 温度は据え置く — 前進はキャッシュの主張ではないので、
                     # 冷えた updated_at をそのまま書き戻し「温かい行」を偽造しない。
                     # 書き込みは専用経路 — 汎用 upsert は anchor 変更時に圧縮区間を
@@ -936,11 +1010,13 @@ class SessionLifecycle:
                         )
                         return (self_anchor, "self")
                     LOGGER.info(
-                        # 「最前線まで」とは書かない — パンマーカーで頭打ちに
-                        # なった回は target が最前線より手前になる。
                         "[metabolism] cold anchor advanced "
-                        "(persona=%s model=%s %s -> %s, frontier=%s)",
+                        "(persona=%s model=%s %s -> %s, frontier=%s%s)",
                         persona_id, persona_model, self_anchor, target, frontier,
+                        (
+                            f", unseen span recorded {crossing_span[0]}.."
+                            f"{crossing_span[1]}"
+                        ) if crossing_span is not None else "",
                     )
                 return (target, "frontier")
             LOGGER.debug(
@@ -1089,56 +1165,101 @@ class SessionLifecycle:
             )
             return None
 
-    def _cap_advance_at_pan_marker(
-        self, persona, frontier: str,
-        persona_id: Optional[str], model_key: str,
-    ) -> Optional[str]:
-        """機構1 の前進先を、スルースのパンマーカーの次で頭打ちにする。
+    def _sluice_unseen_window_messages(
+        self, persona, current_messages: Sequence[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """窓のうち「スルースがまだ見ていない」提示メッセージ列を返す。
 
-        不変条件 (2026-08-23): 起点はスルースが見た位置より先へは進まない。
-        マーカーは「スルースが最後に見た範囲の末尾」なので、マーカーを含む
-        範囲までは通過済み — 前進してよいのは「マーカーの次」まで。
-
-        Returns:
-            前進先の message id (最前線かパンマーカーの次)。前進を許可でき
-            ないときは None: マーカーが無い (スルース未走行 / 読み取り失敗)、
-            正典順が引けない、マーカーの次が存在しない。
+        パンマーカーの次から窓の末尾まで。マーカーが窓に無い (初回 / 押し出されて
+        消えた) ときは窓全体 — sluice 側の担当範囲の規則
+        (:func:`sea.sluice._compute_span`) と同じ読み。複数一致は後勝ち (最新)。
         """
         marker = self._load_sluice_pan_marker(persona)
         if not marker:
-            LOGGER.debug(
-                "[metabolism] cold anchor advance skipped: no sluice pan marker "
-                "(persona=%s model=%s frontier=%s)",
-                persona_id, model_key, frontier,
+            return list(current_messages)
+        idx = None
+        for i, m in enumerate(current_messages):
+            if isinstance(m, dict) and str(m.get("id")) == str(marker):
+                idx = i
+        if idx is None:
+            return list(current_messages)
+        return list(current_messages[idx + 1:])
+
+    def _record_sluice_skipped_span(
+        self, persona, start_message_id: str, end_message_id: str,
+    ) -> None:
+        """スルースを通っていない範囲を memory.db (sluice_skipped_spans) へ記録する。
+
+        docs/intent/sluice_coverage_gaps.md 第一段: 飛ばすたびに範囲を明示の
+        記録として残す (「マーカーと起点の差から導出」は成立しない — intent
+        全体の見立て参照)。書けない場合は送出する — 呼び出し側は記録なしで
+        範囲を提示から出さない (fail-closed)。
+        """
+        adapter = getattr(persona, "sai_memory", None)
+        if (adapter is None or not getattr(adapter, "is_ready", lambda: False)()
+                or getattr(adapter, "conn", None) is None):
+            raise RuntimeError(
+                "memory.db is unavailable; cannot record the skipped sluice span"
             )
-            return None
-        cmp_result = self._compare_positions(persona, frontier, marker)
+        from sai_memory.memory.storage import record_sluice_skipped_span
+        with adapter._db_lock:
+            record_sluice_skipped_span(
+                adapter.conn, str(start_message_id), str(end_message_id),
+            )
+        LOGGER.info(
+            "[sluice] recorded skipped span %s..%s (persona=%s)",
+            start_message_id, end_message_id,
+            getattr(persona, "persona_id", "?"),
+        )
+
+    def _plan_marker_crossing_record(
+        self, persona, self_anchor: str, target: str,
+        persona_id: Optional[str], model_key: str,
+    ) -> Tuple[bool, Optional[Tuple[str, str]]]:
+        """機構1 の前進がパンマーカーを越えるかを判定し、記録すべき範囲を返す。
+
+        2026-09-08 (docs/intent/sluice_coverage_gaps.md 追加の決定 1):
+        8/23 の「起点はパンマーカーを越えない」頭打ちは撤回した。代わりの
+        制約は「スルースを通っていない範囲はユーザーに分かる状態で明示する」 —
+        越える回は、越えた範囲 (旧マーカーの次〜新起点) を
+        ``sluice_skipped_spans`` へ記録してから前進する。
+
+        Returns:
+            ``(前進してよいか, 記録すべき範囲 or None)``。範囲は
+            (start_message_id, end_message_id)。マーカーが無い (スルース
+            未走行) なら範囲は (旧起点, 新起点) — 前進で出て行く範囲の全部が
+            未見。マーカーと新起点の順序が引けない・マーカーの次が引けない
+            ときは (False, None) — 記録できない範囲を黙って出さない
+            (fail-closed)。スルース無効 (env) の設計では記録なしで前進する。
+        """
+        from sea.sluice import is_enabled as sluice_is_enabled
+        if not sluice_is_enabled():
+            return (True, None)
+        marker = self._load_sluice_pan_marker(persona)
+        if not marker:
+            # スルースが一度も走っていない — 前進で提示から出る範囲は全部未見。
+            return (True, (self_anchor, target))
+        cmp_result = self._compare_positions(persona, target, marker)
         if cmp_result is None:
             LOGGER.info(
                 "[metabolism] cold anchor advance skipped: cannot order the "
-                "frontier against the sluice pan marker "
-                "(persona=%s model=%s frontier=%s marker=%s)",
-                persona_id, model_key, frontier, marker,
+                "advance target against the sluice pan marker "
+                "(persona=%s model=%s target=%s marker=%s)",
+                persona_id, model_key, target, marker,
             )
-            return None
+            return (False, None)
         if cmp_result <= 0:
-            # 最前線はマーカー以前 = 飛ばす範囲は全部スルースを通っている。
-            return frontier
-        cap = self._next_position_after(persona, marker)
-        if not cap:
+            # 新起点はマーカー以前 = 出て行く範囲は全部スルースを通っている。
+            return (True, None)
+        start = self._next_position_after(persona, marker)
+        if not start:
             LOGGER.info(
                 "[metabolism] cold anchor advance skipped: no message after the "
-                "sluice pan marker (persona=%s model=%s frontier=%s marker=%s)",
-                persona_id, model_key, frontier, marker,
+                "sluice pan marker (persona=%s model=%s target=%s marker=%s)",
+                persona_id, model_key, target, marker,
             )
-            return None
-        if cap != frontier:
-            LOGGER.info(
-                "[metabolism] cold anchor advance capped at the sluice pan marker "
-                "(persona=%s frontier=%s marker=%s)",
-                persona_id, frontier, marker,
-            )
-        return cap
+            return (False, None)
+        return (True, (start, target))
 
     def _next_position_after(self, persona, message_id: str) -> Optional[str]:
         """正典順で ``message_id`` の直後にあるメッセージの id (引けなければ None)。"""
@@ -1506,6 +1627,17 @@ class SessionLifecycle:
         """
         model_key = str(model_key or getattr(persona, "model", "") or "") or None
         if not model_key:
+            return
+
+        # RateLimitError 後の小休止 (sluice_coverage_gaps 第一段 C-1): LLM を
+        # 伴う Metabolism の仕事を一定時間見送る。水位超過は残るので、小休止が
+        # 明けた後の maybe_run が自然に再試行する。
+        persona_id_for_cooldown = getattr(persona, "persona_id", None)
+        if self._metabolism_rate_limit_active(persona_id_for_cooldown):
+            LOGGER.info(
+                "[metabolism] skipped during rate-limit cooldown (persona=%s)",
+                persona_id_for_cooldown,
+            )
             return
 
         history_mgr = getattr(persona, "history_manager", None)
@@ -2656,6 +2788,15 @@ class SessionLifecycle:
         model_key = str(model_key or getattr(persona, "model", "") or "") or None
         if not model_key:
             return "skip"
+        # RateLimitError 後の小休止 (sluice_coverage_gaps 第一段 C-1): 非常畳み
+        # も LLM (編纂・スルース) を伴うので、小休止中は見送る。
+        if self._metabolism_rate_limit_active(getattr(persona, "persona_id", None)):
+            LOGGER.info(
+                "[metabolism] emergency pre-compaction skipped during "
+                "rate-limit cooldown (persona=%s)",
+                getattr(persona, "persona_id", None),
+            )
+            return "skip"
         watermarks = self.get_metabolism_watermarks(persona, model_key)
         if watermarks is None or watermarks.high is None:
             return "skip"
@@ -2822,11 +2963,13 @@ class SessionLifecycle:
             "[metabolism] window refill (persona=%s model=%s): rows %d -> %d "
             "chars toward target=%d, total %d chars (high=%s; opened %d "
             "in-window range(s), %d straddling range(s), %d older arasuji "
-            "group(s), restored %d message(s), resolution=%s)",
+            "group(s), %d uncompiled tail row(s), restored %d message(s), "
+            "resolution=%s)",
             persona_id, model_key, plan["current_chars"], plan["final_chars"],
             plan["target"], plan["final_total_chars"], plan["high"],
             plan["opened_in_window"], plan["opened_straddling"],
-            plan["opened_older"], plan["restored_messages"], resolution,
+            plan["opened_older"], plan["opened_raw_tail"],
+            plan["restored_messages"], resolution,
         )
         return "ok"
 
@@ -3279,9 +3422,14 @@ class SessionLifecycle:
         0. 不足判定は**会話文** (:func:`~sea.eviction_plan.stored_message_chars`)
            vs 目標量 (``watermarks.target``)。目標量以上なら何もしない。
         1. 開ける対象 = 窓の中で digest 表示中の圧縮区間 (起点をまたぐものを
-           含む) + 起点より古い側の一次あらすじ。これを新しい順に、一つずつ
-           **丸ごと**開く — 読む範囲を字数で切る「予算」は無い。「開く」の
-           中身は場所で違うが、それは実装の都合であって判断には使わない:
+           含む) + 起点より古い側の一次あらすじ + 起点の直前に並ぶ生の未編纂の
+           行。**丸ごと開く単位があるのはあらすじに覆われた圧縮区間だけ**
+           (2026-09-08 まはー裁定 — sluice_coverage_gaps 追加の決定 2)。生の
+           未編纂の行は後ろ (新しい側) から必要な分 (残す量) まで読んだら
+           終わり — 塊として一括で開かない。圧縮区間は従来どおり新しい順に
+           一つずつ丸ごと開く (区間に「読む範囲を字数で切る予算」は無い)。
+           「開く」の中身は場所で違うが、それは実装の都合であって判断には
+           使わない:
 
            - 窓に収まる区間: ``presented_raw`` の印を付けるだけ。
            - 起点をまたぐ区間: 区間の最古の読める行まで起点を戻し、印を付ける。
@@ -3422,8 +3570,19 @@ class SessionLifecycle:
             opened_straddling += 1
             _recompose()
 
-        # --- 1b. 起点より古い側の一次あらすじを、新しい順に一つずつ丸ごと開く。
+        # --- 1b. 起点より古い側を、新しい順に開く。
+        #
+        # 丸ごと開く単位があるのは**あらすじに覆われた圧縮区間だけ** (2026-09-08
+        # まはー裁定 — docs/intent/sluice_coverage_gaps.md 追加の決定 2)。起点の
+        # 直前にあらすじに覆われていない生の未編纂の行が並んでいるときは、
+        # 後ろ (新しい側) から必要な分 (残す量) まで読んだら終わり — 塊として
+        # 一括で開かない。旧実装は「選んだあらすじの材料の最古の行から起点まで」
+        # を一息に読んだため、あらすじと起点の間に溜まった未編纂 (v0.2 からの
+        # 更新直後は数千通) が丸ごと窓に開かれた (稟乃さんの実機で 212 万字)。
+        # 読み切れなかった未編纂が窓の外に残るのは設計どおり — Chronicle 補修の
+        # バナーが件数を出す (§16-1 の例外の記帳)。
         skipped_entry_ids: Set[str] = set()
+        opened_raw_tail = 0
         while rows_chars < watermarks.target:
             if history_mgr is None or not adapter or not adapter.is_ready():
                 stop_reason = "history or memory store unavailable"
@@ -3438,6 +3597,19 @@ class SessionLifecycle:
                     get_latest_primary_entry_before_message,
                     get_oldest_present_message_id,
                 )
+                raw_tail = self._read_uncovered_tail_before(
+                    persona, history_mgr, base_anchor_id,
+                    needed_chars=watermarks.target - rows_chars,
+                    known_ids={base_anchor_id} | raw_ids | pre_ids,
+                    raise_on_error=store_strict,
+                )
+                if raw_tail:
+                    pre_rows = list(raw_tail) + pre_rows
+                    pre_ids |= {str(m.get("id")) for m in raw_tail}
+                    base_anchor_id = str(raw_tail[0].get("id"))
+                    opened_raw_tail += len(raw_tail)
+                    _recompose()
+                    continue  # 量を測り直す — 足りたらここで終わり
                 entry = get_latest_primary_entry_before_message(
                     adapter.conn, base_anchor_id, exclude_entry_ids=exclude,
                 )
@@ -3533,7 +3705,8 @@ class SessionLifecycle:
             opened_older += 1
             _recompose()
 
-        if not (opened_in_window or opened_straddling or opened_older):
+        if not (opened_in_window or opened_straddling or opened_older
+                or opened_raw_tail):
             LOGGER.info(
                 "[metabolism] refill planned nothing (persona=%s model=%s "
                 "rows=%d target=%d): %s",
@@ -3581,8 +3754,67 @@ class SessionLifecycle:
             "opened_in_window": opened_in_window,
             "opened_straddling": opened_straddling,
             "opened_older": opened_older,
+            "opened_raw_tail": opened_raw_tail,
             "restored_messages": len(pre_rows),
         }
+
+    def _read_uncovered_tail_before(
+        self, persona, history_mgr, base_anchor_id: str,
+        *,
+        needed_chars: int,
+        known_ids: Set[str],
+        raise_on_error: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """起点の直前に並ぶ「あらすじに覆われていない生の未編纂の行」を、
+        後ろ (新しい側) から必要な分だけ読む。
+
+        読み戻しの規則 (docs/intent/sluice_coverage_gaps.md 追加の決定 2):
+        生の未編纂のメッセージに「丸ごと開く単位」の概念は無い — 後ろから
+        必要な分 (残す量) まで取ったら終わり。読みは ``needed_chars`` を上限に
+        後ろへ遡り (:meth:`persona.history_manager.get_history_before_anchor`)、
+        読んだ列のうち**いちばん新しいあらすじ被覆行より後ろ**の連続した
+        末尾 (= 起点に直結する未被覆の行) だけを返す。被覆行が直前にある
+        (未被覆の隙間が無い) とき・遡る行が無いときは空 — 呼び出し側は
+        圧縮区間を丸ごと開く従来経路へ進む。
+
+        Returns:
+            時系列昇順の行列 (起点の直前に連続して繋がる)。読み口の無い
+            history manager (互換フェイク等) では空。
+        """
+        reader = getattr(history_mgr, "get_history_before_anchor", None)
+        if reader is None or needed_chars <= 0:
+            return []
+        read_kwargs: Dict[str, Any] = (
+            {"raise_on_error": True} if raise_on_error else {}
+        )
+        rows = reader(
+            str(base_anchor_id),
+            max_chars=int(needed_chars),
+            required_line_roles=["main_line"],
+            required_scopes=["committed"],
+            **read_kwargs,
+        ) or []
+        rows = [
+            m for m in rows
+            if isinstance(m, dict) and m.get("id")
+            and str(m.get("id")) not in known_ids
+        ]
+        if not rows:
+            return []
+        ids = [str(m.get("id")) for m in rows]
+        adapter = getattr(persona, "sai_memory", None)
+        if not adapter or not adapter.is_ready():
+            return []
+        from sai_memory.arasuji.storage import get_entries_covering_messages
+        covering = get_entries_covering_messages(adapter.conn, ids)
+        covered = {str(s) for e in covering for s in e.source_ids}
+        last_covered = None
+        for i, mid in enumerate(ids):
+            if mid in covered:
+                last_covered = i
+        if last_covered is None:
+            return rows
+        return rows[last_covered + 1:]
 
     def _read_segment_before(
         self, history_mgr, start_ids: Sequence[str], stop_ids: Set[str],
@@ -4462,6 +4694,11 @@ class SessionLifecycle:
                 )
             except Exception as exc:
                 LOGGER.warning("[metabolism] Chronicle generation failed: %s", exc)
+                # generate_chronicle は通常内部で "failed" に写像するが、素通り
+                # した例外にもレート制限の小休止 (C-1) を効かせる。
+                self._note_metabolism_rate_limit(
+                    getattr(persona, "persona_id", None), exc,
+                )
                 chronicle_status = "failed"
 
         # (旧 2.5. Track Chronicle generation は W4 で廃止 —
@@ -4486,7 +4723,50 @@ class SessionLifecycle:
         sluice_seen_ids: Optional[List[str]] = None
         sluice_seen_end: Optional[str] = None
         sluice_finalize = None
+        # 冷たいときの飛ばし (docs/intent/sluice_coverage_gaps.md 第一段 A):
+        # 担当範囲 (パンマーカーから窓の末尾まで) の保存行の字数が、一発の
+        # スルースの呼び出しに入る量 (SAIVERSE_SLUICE_MAX_SPAN_CHARS) を超えて
+        # いたら走らせない。判定は**量** — 位置 (マーカーが窓の中に居るか) で
+        # 引くと、一度飛ばした後にマーカーが永久に窓の外となり、スルースが
+        # 二度と走らなくなる (intent 整合性レビュー c-1)。飛ばした回は退場を
+        # そのまま進め (退役ゲートで "ok"/"disabled" と同格)、窓から出て行く
+        # 未見の範囲を memory.db (sluice_skipped_spans) に記録する — 後から
+        # 通す仕組み (第二段) がこの記録を読む。
+        sluice_skipped_range: Optional[Tuple[str, str]] = None
         if chronicle_status in ("ok", "disabled"):
+            from sea.sluice import get_max_span_chars
+            from sea.sluice import is_enabled as sluice_is_enabled
+            if sluice_is_enabled():
+                unseen_msgs = self._sluice_unseen_window_messages(
+                    persona, current_messages,
+                )
+                span_chars = message_chars(unseen_msgs)
+                max_span_chars = get_max_span_chars()
+                if span_chars > max_span_chars:
+                    sluice_status = "skipped_cold"
+                    evicted_ids = {
+                        str(mid) for f in plan.folds for mid in f.message_ids
+                    }
+                    unseen_evicted = [
+                        str(m.get("id")) for m in unseen_msgs
+                        if isinstance(m, dict) and m.get("id")
+                        and str(m.get("id")) in evicted_ids
+                    ]
+                    if unseen_evicted:
+                        sluice_skipped_range = (
+                            unseen_evicted[0], unseen_evicted[-1],
+                        )
+                    LOGGER.warning(
+                        "[sluice] skipped cold (persona=%s): unseen span is "
+                        "%d chars / %d messages > max=%d; eviction proceeds "
+                        "without capture and the departing unseen range "
+                        "(%s..%s) is recorded for later manual capture",
+                        persona_id, span_chars, len(unseen_msgs),
+                        max_span_chars,
+                        sluice_skipped_range[0] if sluice_skipped_range else None,
+                        sluice_skipped_range[1] if sluice_skipped_range else None,
+                    )
+        if chronicle_status in ("ok", "disabled") and sluice_status == "ok":
             try:
                 from sea.sluice import run_sluice
                 # window_anchor_id: 実行頭に撮った窓の起点をスルースへ渡し、
@@ -4503,9 +4783,13 @@ class SessionLifecycle:
                 sluice_seen_ids = (sluice_summary or {}).get("seen_ids")
                 sluice_seen_end = (sluice_summary or {}).get("seen_span_end")
                 sluice_finalize = (sluice_summary or {}).get("finalize")
-            except Exception:
+            except Exception as exc:
                 LOGGER.exception(
                     "[sluice] failed; eviction blocked, will retry on next metabolism",
+                )
+                # レート制限起因なら persona 単位の小休止を置く (C-1)。
+                self._note_metabolism_rate_limit(
+                    getattr(persona, "persona_id", None), exc,
                 )
                 sluice_status = "failed"
 
@@ -4554,12 +4838,33 @@ class SessionLifecycle:
                 )
                 sluice_status = "unseen_tail"
 
+        # 飛ばした範囲の記録は退場の適用と同じ回にだけ書く (退場しない回に
+        # 書くと、出て行っていない範囲が「未採取のまま退場した」記録になる)。
+        # 記録が書けない回は退場を見送る (fail-closed) — 代替の制約「通って
+        # いない範囲はユーザーに分かる状態で明示する」(intent 追加の決定 1) を
+        # 記録なしで破らない。
+        if (chronicle_status in ("ok", "disabled")
+                and sluice_status == "skipped_cold"
+                and sluice_skipped_range is not None):
+            try:
+                self._record_sluice_skipped_span(persona, *sluice_skipped_range)
+            except Exception:
+                LOGGER.exception(
+                    "[sluice] failed to record the skipped span %s..%s; "
+                    "blocking eviction (fail-closed, persona=%s)",
+                    sluice_skipped_range[0], sluice_skipped_range[1], persona_id,
+                )
+                sluice_status = "failed"
+
         # 3. Update anchor to new window start — S2 ガード: 編纂が済んだ
         # ("ok") か編纂を持たない設計 ("disabled")、かつスルースが通った
+        # ("ok") か量の条件で飛ばした ("skipped_cold" — 未見の範囲は記録済み)
         # ときだけ退役する。failed / deferred は据え置き — watermark 超過が
         # 残るので、次の maybe_run_metabolism が自然に再試行する
-        # (beat_execution_context.md §3.2 / autonomous_behavior_v3.md §13.3)。
-        if chronicle_status in ("ok", "disabled") and sluice_status == "ok":
+        # (beat_execution_context.md §3.2 / autonomous_behavior_v3.md §13.3、
+        # 飛ばしの裁定は docs/intent/sluice_coverage_gaps.md)。
+        if (chronicle_status in ("ok", "disabled")
+                and sluice_status in ("ok", "skipped_cold")):
             self._apply_eviction_plan(
                 persona, model_key, window, plan, chronicle_status,
             )
@@ -4812,6 +5117,42 @@ class SessionLifecycle:
     def _chronicle_failure_key(cls, persona_id: Optional[str]) -> str:
         return str(persona_id) if persona_id else cls._CHRONICLE_FAILURE_UNKNOWN_KEY
 
+    def _note_metabolism_rate_limit(
+        self, persona_id: Optional[str], exc: BaseException,
+    ) -> None:
+        """Metabolism 系 LLM の失敗理由がレート制限なら、その persona に小休止を置く。
+
+        docs/intent/sluice_coverage_gaps.md 第一段 C-1: 走行単位で止めるだけだと
+        自律の Pulse ごとに再試行の 429 が続く — persona 単位で一定時間
+        (SAIVERSE_METABOLISM_RATE_LIMIT_COOLDOWN_S、既定 600 秒)、LLM を伴う
+        Metabolism の仕事を見送る。判定は例外の型 (:func:`_is_rate_limit_error`)。
+        """
+        if not persona_id or not _is_rate_limit_error(exc):
+            return
+        cooldown = _rate_limit_cooldown_seconds()
+        deadline = time.monotonic() + cooldown
+        with self._rate_limit_cooldown_lock:
+            self._metabolism_rate_limited[str(persona_id)] = deadline
+        LOGGER.warning(
+            "[metabolism] rate limited; cooling down for %.0f s "
+            "(persona=%s) — LLM-bearing metabolism is skipped until then",
+            cooldown, persona_id,
+        )
+
+    def _metabolism_rate_limit_active(self, persona_id: Optional[str]) -> bool:
+        """その persona が RateLimitError 後の小休止中か。明けていれば記録を消す。"""
+        if not persona_id:
+            return False
+        key = str(persona_id)
+        with self._rate_limit_cooldown_lock:
+            deadline = self._metabolism_rate_limited.get(key)
+            if deadline is None:
+                return False
+            if time.monotonic() >= deadline:
+                self._metabolism_rate_limited.pop(key, None)
+                return False
+        return True
+
     def _note_chronicle_failure(
         self, persona_id: Optional[str], exc: BaseException,
     ) -> None:
@@ -4821,7 +5162,12 @@ class SessionLifecycle:
         を持ち、executor はチャンクの LLMError に ``batch_meta`` (落ちたチャンクの
         message_ids / 時間範囲) を付けて propagate する。それ以外の例外は
         error_code "unknown"、本文は str(exc)。
+
+        レート制限起因なら、あわせて persona 単位の小休止
+        (:meth:`_note_metabolism_rate_limit`) を置く — 編纂・束ねの 429 も
+        スルースの 429 と同じ扱い (sluice_coverage_gaps 第一段 C-1)。
         """
+        self._note_metabolism_rate_limit(persona_id, exc)
         failure = {
             "error_code": getattr(exc, "error_code", None) or "unknown",
             "error": getattr(exc, "user_message", None) or str(exc),

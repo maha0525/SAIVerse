@@ -1,8 +1,10 @@
 # 冷えた起点の最前線への前進 (arasuji_levels §14 機構 1) が、スルースを通さずに退場させる
 
-**状態**: 🟡 修正済み (A)、実機検証待ち。回復 (飛ばされた範囲の採取し直し) は**不要と判明** (2026-08-24 実測: エリスのパンマーカーは今日前進した起点より先にあり、読まれていない範囲は退場していない)。残るのは Case 2 の穴の裁定と実機検証。2026-08-23 起票・同日修正。束 3 の不変条件「押し出される記憶は必ずスルースを通る」(v3 §13.3) が、隣の保守経路で破られていた。実機で発見 (まはー「生成を押す前より文字数が減ってる気がする」)。
+**状態**: ✅ 決着 (2026-09-08)。頭打ち (裁定 A) は撤回され、マーカーを越える前進は「越えた範囲を memory.db の `sluice_skipped_spans` に記録してから進む」仕様に変わった ([sluice_coverage_gaps.md](../../intent/sluice_coverage_gaps.md) 追加の決定 1)。守る対象が「越えさせない」から「見える・直せる」へ移ったため、残っていた Case 2 の穴の裁定と実機検証はこの決着に吸収された — マーカーより先から提示が始まっても、通っていない範囲は記録と後から通す操作で拾える。以下は歴史として残す。
 
-関連: [`sea/session_lifecycle.py`](../../sea/session_lifecycle.py) `resolve_metabolism_anchor` (§14 機構 1) / `run_metabolism` (退場の適用ゲート) / [`sea/sluice.py`](../../sea/sluice.py) (パンマーカー) / [`sea/runtime_context.py`](../../sea/runtime_context.py) (プロンプト組成時の起点解決) / 正典 [arasuji_levels.md](../intent/arasuji_levels.md) §14 と [autonomous_behavior_v3.md](../intent/autonomous_behavior_v3.md) §13.3
+**旧状態 (2026-08-24 時点)**: 🟡 修正済み (A)、実機検証待ち。回復 (飛ばされた範囲の採取し直し) は**不要と判明** (2026-08-24 実測: エリスのパンマーカーは今日前進した起点より先にあり、読まれていない範囲は退場していない)。残るのは Case 2 の穴の裁定と実機検証。2026-08-23 起票・同日修正。束 3 の不変条件「押し出される記憶は必ずスルースを通る」(v3 §13.3) が、隣の保守経路で破られていた。実機で発見 (まはー「生成を押す前より文字数が減ってる気がする」)。
+
+関連: [`sea/session_lifecycle.py`](../../../sea/session_lifecycle.py) `resolve_metabolism_anchor` (§14 機構 1) / `run_metabolism` (退場の適用ゲート) / [`sea/sluice.py`](../../../sea/sluice.py) (パンマーカー) / [`sea/runtime_context.py`](../../../sea/runtime_context.py) (プロンプト組成時の起点解決) / 正典 [arasuji_levels.md](../../intent/arasuji_levels.md) §14 と [autonomous_behavior_v3.md](../../intent/autonomous_behavior_v3.md) §13.3
 出自: 2026-08-23 実機検証 (手動の記憶整理 → スルース失敗 → それでも文字数が減った)。
 
 ## 何が起きたか (2026-08-23 23:18〜23:20、エリス、ログで確認)

@@ -103,6 +103,27 @@ def get_pending_cap() -> float:
     return _env_float("SAIVERSE_SLUICE_PENDING_CAP", 1.5)
 
 
+def get_max_span_chars() -> int:
+    """一発のスルースの呼び出しに入れてよい担当範囲の上限 (字数)。
+
+    docs/intent/sluice_coverage_gaps.md 第一段 A: 担当範囲 (パンマーカーから
+    窓の末尾まで) がこの量を超えていたら、run_metabolism はスルースを走らせ
+    ない (飛ばした範囲を記録して退場は進める)。「入りきらない事態を復旧する」
+    のではなく「入りきる回だけ走らせる」 — 旧 §13.5-1 の後退方式の代替。
+    """
+    raw = _read_env_with_legacy("SAIVERSE_SLUICE_MAX_SPAN_CHARS")
+    if raw is None:
+        return 100_000
+    try:
+        return int(raw)
+    except ValueError:
+        LOGGER.warning(
+            "[sluice] invalid int for SAIVERSE_SLUICE_MAX_SPAN_CHARS=%r; "
+            "using default 100000", raw,
+        )
+        return 100_000
+
+
 # ---------------------------------------------------------------------------
 # response_schema (Gemini 制約: additionalProperties 禁止、フラット)
 # ---------------------------------------------------------------------------
@@ -472,10 +493,6 @@ def _scope_sentence(span_new_count: Optional[int]) -> str:
     件数は機械が知る値だけで組む — 本人の申告は使わない (§13.6)。
     ``span_new_count`` が None のときはマーカーが窓に無い (初回 / 押し出されて
     消えた) ので、窓全体が対象。
-
-    ⚠ コンテキスト超過の後退 (§13.5-1) が起きた回は、実際に見せる通数がここで
-    宣言した数より少なくなる (プロンプトは後退前に一度だけ組む)。「それより前は
-    採取済み」の部分は後退しても真のままなので、件数だけが概数になる。
 
     出自: docs/issues/sluice_memo_duplicate_across_spans.md (2026-08-22 裁定 —
     機械側の重複防止と対で、供給源をここで塞ぐ)。
@@ -1439,57 +1456,13 @@ def _compute_span(
     return (start, end)
 
 
-# ---------------------------------------------------------------------------
-# コンテキスト超過の後退 (§13.5-1)
-# ---------------------------------------------------------------------------
-
-#: 超過エラー判定の文字列マーカー (プロバイダ横断のヒューリスティック)。
-_CONTEXT_OVERFLOW_MARKERS = (
-    "context length",
-    "context window",
-    "maximum context",
-    "context_length_exceeded",
-    "too many tokens",
-    "token limit",
-    "input token count",
-    "prompt is too long",
-    "request too large",
-    "exceeds the maximum",
-)
-
-
-def _is_context_overflow(exc: BaseException) -> bool:
-    """例外が「プロンプトがコンテキストに入りきらない」超過エラーかを判定する。
-
-    プロバイダ共通の超過例外型が無いため、例外文字列 (original_error 含む) の
-    マーカー照合で判定する。判定に漏れた超過エラーは通常の失敗として退場停止 →
-    次回再試行の経路に乗る (取りこぼしても fail-closed)。
-    """
-    texts = [str(exc)]
-    original = getattr(exc, "original_error", None)
-    if original is not None:
-        texts.append(str(original))
-    blob = " ".join(texts).lower()
-    return any(marker in blob for marker in _CONTEXT_OVERFLOW_MARKERS)
-
-
-def _drop_last_exchange(
-    context_messages: List[Dict[str, Any]],
-) -> Optional[tuple[List[Dict[str, Any]], int]]:
-    """担当範囲の直近のプロンプト+応答の組を一つ外す (§13.5-1 の後退方式)。
-
-    末尾から最後の user メッセージを探し、そこから末尾まで (user プロンプトと
-    それに続く応答) をまとめて外す。外せる組が無ければ None。
-    """
-    last_user = None
-    for i in range(len(context_messages) - 1, -1, -1):
-        msg = context_messages[i]
-        if isinstance(msg, dict) and msg.get("role") == "user":
-            last_user = i
-            break
-    if last_user is None:
-        return None
-    return (context_messages[:last_user], len(context_messages) - last_user)
+# (旧: コンテキスト超過の後退 §13.5-1 — 2026-09-08 廃止。
+#  docs/intent/sluice_coverage_gaps.md 第一段 A: 「直近の組を外して再試行」は
+#  1 組はみ出したための設計で、巨大な冷たい窓には無力なまま 429 の連打だけを
+#  生んだ。しかも文字列マーカー "request too large" が OpenAI の 429 TPM 超過に
+#  一致してレート制限をコンテキスト超過に誤分類していた。現行は「入らない量の
+#  ときは走らせない」(run_metabolism 側の量判定) に一本化し、本物の超過は
+#  通常の失敗として送出 → 退場停止 → 次回再試行に乗る。)
 
 
 # ---------------------------------------------------------------------------
@@ -1532,8 +1505,8 @@ class SluiceContextUnavailableError(RuntimeError):
 class SluiceEmptySeenSetError(RuntimeError):
     """このスルースが 1 通も見ていない (見た集合が空)。
 
-    Codex 第八巡 修正 2: 全交換がコンテキスト超過の後退で外れる等で「何も見て
-    いない」結果になったとき、それを適用・確定してしまうと、マーカーは進まない
+    Codex 第八巡 修正 2: 履歴の実入力が空等で「何も見ていない」結果に
+    なったとき、それを適用・確定してしまうと、マーカーは進まない
     のに台帳が completed になり、以降は**同じ安定キーの記録が永久に再利用**
     されて新しい LLM コールが起きない (退場側は空の見た集合を拒むので、末尾の
     退場が止まったままになる)。完了の条件は「最低 1 通は本人の目を通った」—
@@ -1706,8 +1679,8 @@ def _parse_structured_result(
 # 実行の identity は (persona, span_start_id)。担当範囲の起点はパンマーカーで
 # 決まり、マーカーは成功時にしか進まないので、同じ論理単位の再試行は必ず同じ
 # 起点を持つ。終端 (span_end) を identity に含めないのは意図的 — 終端は
-# ①退場が止まっている間に窓へ新着が積まれる ②コンテキスト超過の後退で縮む、
-# の二通りで試行ごとに動き、キーに含めると「同じ仕事の再試行」が別キーになって
+# 退場が止まっている間に窓へ新着が積まれることで試行ごとに動き、
+# キーに含めると「同じ仕事の再試行」が別キーになって
 # 記録済み結果に合流できない (= 重複の穴が戻る)。実際に見た終端は identity
 # ではなく記録の中身 (result.span_end_id) が持つ。
 #
@@ -1815,38 +1788,16 @@ def _find_recorded_result(ledger: Any, ledger_key: str) -> Optional[Dict[str, An
     return None
 
 
-def _seen_span_end(
-    span_ids: List[str], span_end_full: Optional[str], dropped_total: int,
-) -> Optional[str]:
-    """実際に LLM に渡した範囲の末尾メッセージ ID を求める。
-
-    コンテキスト超過の後退 (§13.5-1) で外した組は「見ていない」— パンマーカーと
-    span をそこまで進めると、外した会話が未見のまま処理済みになりゲートの
-    不変条件 (全経験が退場前に一度本人の目を通る) が破れる。後退で外したのは
-    提示 context の末尾ブロックなので、窓の ID 列の末尾から同数を引いた位置を
-    見た範囲の末尾とする (提示 context の履歴部は窓のメッセージと 1:1 で並ぶ
-    前提の末尾勘定。ずれても安全側 = 進めなさすぎ、で二重見にしかならない)。
-    全部外れた (勘定が窓を使い切った) ときは None = マーカーを進めない。
-    """
-    if dropped_total <= 0:
-        return span_end_full
-    seen_count = len(span_ids) - dropped_total
-    if seen_count <= 0:
-        return None
-    return span_ids[seen_count - 1]
-
-
 def _call_sluice_llm(
     lifecycle: Any,
     persona: Any,
     building_id: str,
-    span_ids: List[str],
     span_end_full: Optional[str],
     span_new_count: Optional[int],
     window_anchor_id: Optional[str] = None,
     model_key: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """LLM 呼び出しフェーズ (context 組み → 後退つき generate → usage → 検証)。
+    """LLM 呼び出しフェーズ (context 組み → generate → usage → 検証)。
 
     Returns:
         ``{"response": 検証済み dict, "rejections": 型不正で落とした要素の記録,
@@ -1944,47 +1895,23 @@ def _call_sluice_llm(
         # structured-output fallback で実 model が変わった場合の差し替え
         execution_context = execution_context.with_model(_sluice_model)
 
-    # コンテキスト超過の後退方式 (autonomous_behavior_v3.md §13.5-1): 超過エラー
-    # のときは担当範囲の直近のプロンプト+応答の組を一つ外して再試行し、まだ
-    # 入らなければもう一組前を外す。外した組は「見ていない」のでパンマーカーを
-    # そこまで進めず、次回の担当範囲に残す (_seen_span_end)。
-    # TODO(§13.5-2): 再試行し続けても失敗しキャッシュが切れた場合の扱いは未設計
-    # (autonomous_behavior_v3.md §13.5-2 — 存在だけ確定)。現状は失敗として送出し、
-    # 呼び出し元の退場停止 → 次回再試行に乗る。
-    dropped_total = 0
-    while True:
-        messages = context_messages + [{"role": "user", "content": prompt}]
-        try:
-            result = llm_client.generate(
-                messages,
-                tools=[],
-                response_schema=_RESPONSE_SCHEMA,
-                temperature=runtime._default_temperature(persona),
-                # このコールだけの出力上限 (per-call)。対応していない
-                # プロバイダのクライアントは generate の **kwargs が
-                # 黙って落とす — 上限が効かないだけで、例外にはしない。
-                max_output_tokens=_MAX_OUTPUT_TOKENS,
-                **runtime._get_cache_kwargs(persona_id),
-            )
-            break
-        except Exception as exc:
-            if not _is_context_overflow(exc):
-                raise
-            reduced = _drop_last_exchange(context_messages)
-            if reduced is None:
-                LOGGER.error(
-                    "[sluice] context overflow persists with nothing left to drop "
-                    "(persona=%s dropped=%d)", persona_id, dropped_total,
-                )
-                raise
-            context_messages, dropped = reduced
-            dropped_total += dropped
-            LOGGER.warning(
-                "[sluice] context overflow; dropped the most recent prompt+response "
-                "pair (%d messages, total dropped=%d) and retrying — "
-                "外した組は次回の担当範囲に残る (persona=%s)",
-                dropped, dropped_total, persona_id,
-            )
+    # LLM 呼び出しは一発 (2026-09-08、docs/intent/sluice_coverage_gaps.md
+    # 第一段 A)。旧 §13.5-1 の後退方式 (超過エラーで直近の組を外して再試行) は
+    # 廃止した — 入らない量の窓はそもそも呼び出し元 (run_metabolism) の量判定が
+    # 走らせない。本物のコンテキスト超過を含むあらゆる失敗は送出し、呼び出し元の
+    # 退場停止 → 次回再試行に乗る。
+    messages = context_messages + [{"role": "user", "content": prompt}]
+    result = llm_client.generate(
+        messages,
+        tools=[],
+        response_schema=_RESPONSE_SCHEMA,
+        temperature=runtime._default_temperature(persona),
+        # このコールだけの出力上限 (per-call)。対応していない
+        # プロバイダのクライアントは generate の **kwargs が
+        # 黙って落とす — 上限が効かないだけで、例外にはしない。
+        max_output_tokens=_MAX_OUTPUT_TOKENS,
+        **runtime._get_cache_kwargs(persona_id),
+    )
 
     # usage 記録 + anchor touch (keepalive の後処理と同じ)。
     usage = llm_client.consume_usage() if hasattr(llm_client, "consume_usage") else None
@@ -2019,25 +1946,23 @@ def _call_sluice_llm(
     # 繰り返す縁ができない)。
     parsed, rejections = _parse_structured_result(result, persona_id)
 
-    # 見た集合: 実入力の履歴 ID 列から、後退で外した末尾ぶんを件数で引く
-    # (外した組は context の末尾ブロック = 履歴の末尾)。退場側の包含検算
-    # (_eviction_within_seen) の一次データ。
-    seen_count = max(0, len(presented_ids) - dropped_total)
-    seen_ids = presented_ids[:seen_count]
+    # 見た集合 = 実入力の履歴 ID 列そのもの (後退方式の廃止で件数の引き算は
+    # 無くなった)。退場側の包含検算 (_eviction_within_seen) の一次データ。
+    seen_ids = list(presented_ids)
     if not seen_ids:
         # 1 通も見ていない結果は完了させない (Codex 第八巡 修正 2)。凍結すると
         # マーカー据え置きのまま completed になり、以後は同じ記録が再利用されて
         # LLM が二度と走らず、末尾の退場が永久に止まる。
         raise SluiceEmptySeenSetError(
             f"the sluice saw no messages (persona={persona_id}, "
-            f"presented={len(presented_ids)}, dropped={dropped_total}); "
+            f"presented={len(presented_ids)}); "
             "refusing to freeze a result that saw nothing"
         )
 
     return {
         "response": parsed,
         "rejections": rejections,
-        "span_end_id": _seen_span_end(span_ids, span_end_full, dropped_total),
+        "span_end_id": span_end_full,
         "seen_ids": seen_ids,
         "offered_activities": offered_activities,
         "offered_tasks": offered_tasks,
@@ -2257,7 +2182,7 @@ def run_sluice(
                 )
         try:
             call = _call_sluice_llm(
-                lifecycle, persona, building_id, span_ids, span_end_full,
+                lifecycle, persona, building_id, span_end_full,
                 span_new_count, window_anchor_id=window_anchor_id,
                 model_key=model_key,
             )
@@ -2282,7 +2207,7 @@ def run_sluice(
         core_snapshot = call["core_snapshot"]
         prompt_snapshot = call["prompt"]
         if span_end_id is None:
-            # 実際に見た範囲の末尾が特定できない (後退で窓勘定を使い切った等)。
+            # 実際に見た範囲の末尾が特定できない (窓に id 付きの行が無い等)。
             # span 刻印もマーカー前進も行わず、適用だけ実施する。
             span_start_id = None
         if execution_id is not None:
@@ -2396,8 +2321,8 @@ def run_sluice(
 
     # 6. 確定クロージャ (Codex 第五巡 修正 2)。適用は済んでいるが、
     #    ①台帳を閉じる (applied → completed) ②判断ターン記録の永続 ③完了通知
-    #    ④パンマーカー前進 (実際に見た範囲の末尾まで — 超過後退で外した組は
-    #    次回の担当範囲に残る) は「確定」として一塊にする。呼び出し元
+    #    ④パンマーカー前進 (実際に見た範囲の末尾まで) は「確定」として
+    #    一塊にする。呼び出し元
     #    (run_metabolism) はマーカー前進が未提示メッセージを跨がないことを
     #    検算してから呼ぶ — 確定しなかった回の記録は applied のまま残り、
     #    次回は再適用 (冪等) から入り直す。二重呼びは no-op。
