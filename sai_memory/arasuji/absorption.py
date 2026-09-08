@@ -7,9 +7,15 @@
 - **検出** (:func:`split_plan_for_absorption`): 整列計画 (plan_alignment) の
   チャンクから材料 0.5U 未満のもの = 極小 run を選り分ける。閾値は
   ``target_chars // 2`` で導出する (U はチャンク計画と同じ物差し — 裁定 2)。
-- **計画** (:func:`plan_absorption`): 極小 run ごとに**後ろ (新しい側) の隣人
-  Lv1 エントリ**を特定する (裁定 1 — 欠落が壊すのは後続の文脈)。隣人自体が
-  極小なら、合計材料が 0.5U に届くまでさらに後ろへ連鎖する。
+- **計画** (:func:`plan_absorption`): 極小 run ごとに開く隣人 Lv1 を
+  **後ろ (新しい側) → 居なければ同じスレッドの前側**の順で割り当て、同じ
+  隣人に割り当たった run を一つの item に束ねる (機構 D、
+  docs/intent/chronicle_coverage_gaps.md — 開き直しと再生成は隣人 1 個に
+  つき必ず一回)。隣人自体が極小なら、合計材料が 0.5U に届くまでさらに
+  後ろへ連鎖する。両方向とも隣人が居ない run は、発話 (実会話フィルタ) を
+  含むなら通常の生成へ回して独立の一次あらすじにし
+  (``standalone_chunks`` — 機構 E)、発話ゼロ (機構の記録だけ) なら自動では
+  書かせず件数だけ数える (``silent_runs`` — 解消はユーザー操作に返す)。
 - **末尾の端数は anchor 引き戻しの対象** (裁定 5 改訂 — 「見送り」の概念は
   廃止): 後ろに編纂済みが何も無い末尾の極小 run 群
   (:func:`uncovered_tail_zone`) は、境界の anchor 行を run の最古まで引き
@@ -98,7 +104,13 @@ def split_plan_for_absorption(
 
 @dataclass
 class AbsorptionItem:
-    """吸収 1 件 = 極小 run (連鎖 run 含む) + 開き直す既存 Lv1 の列。"""
+    """吸収 1 件 = 開く隣人 1 組 + そこへ合流する極小 run 群。
+
+    機構 D (chronicle_coverage_gaps): 計画の単位は「開く隣人ごと」。前の穴から
+    後ろの隣人として割り当たった run も、後ろの穴から前側の隣人として割り
+    当たった run も、同じ item の材料に入る — 開き直しと再生成は隣人 1 個に
+    つき必ず一回。
+    """
 
     run_message_ids: List[str]
     absorbed_entry_ids: List[str]
@@ -117,9 +129,16 @@ class AbsorptionPlan:
     rewind_run_ids: List[str] = field(default_factory=list)
     #: 引き戻し先 (rewind_run_ids の正典順最古のメッセージ id)。
     rewind_first_message_id: Optional[str] = None
-    #: 隣が隣人あらすじでも窓でもない稀な形 (提示中 digest / thread 断絶) で
-    #: 今回は手を付けられなかった run の数 (WARNING で可視化済み)。
-    unresolved_runs: int = 0
+    #: 機構 E: 両方向とも吸収先が無く、発話 (実会話フィルタ) を含む run。
+    #: 通常の生成 (参考文脈つき) で独立の一次あらすじにする — 呼び出し側が
+    #: :func:`merge_standalone_chunks` で整列計画へ合流させる。llm_calls には
+    #: 数えない (合流先の計画が数える — 二重計上しない)。
+    standalone_chunks: List[Any] = field(default_factory=list)
+    #: 機構 E: 両方向とも吸収先が無く、発話ゼロ (機構の記録だけ) の run の数。
+    #: 自動では書かせない — 解消は第二段の修復 UI (ユーザー操作) に返す。
+    silent_runs: int = 0
+    #: 同、メッセージ数 (完了報告の「残り K 件」— 機構 G)。
+    silent_message_count: int = 0
     #: 再生成が見込まれる上位 (吸収で汚れる先祖 + 既存の content_stale)。
     stale_upper_ids: List[str] = field(default_factory=list)
 
@@ -130,6 +149,41 @@ class AbsorptionPlan:
     @property
     def material_chars(self) -> int:
         return sum(i.material_chars for i in self.items)
+
+
+def merge_standalone_chunks(
+    plan: AlignmentPlan, absorption_plan, ordered_messages: Sequence,
+) -> AlignmentPlan:
+    """吸収できない発話あり run (機構 E) を通常の整列計画へ合流させる。
+
+    executor は計画のチャンクを時系列順で処理する前提なので、合流後も先頭
+    メッセージの**正典順** (created_at, rowid) で並べ直す。Message は rowid を
+    持たないので、rowid の代わりに ``ordered_messages`` (plan_alignment に
+    渡したのと同じ、正典順の編纂候補列) の位置で同一秒を分ける — created_at
+    だけで並べると、同一秒のメッセージが大量に並ぶインポート環境 (本設計の
+    主対象) で既存チャンクと standalone の順序が崩れ、実行順と付記範囲の計算
+    (チャンク順前提) が時系列とずれる (Codex 二巡採用 3)。
+
+    ``absorption_plan`` が None (吸収を見送った回) や standalone が空の回は
+    計画をそのまま返す。
+    """
+    if absorption_plan is None or not absorption_plan.standalone_chunks:
+        return plan
+    position = {m.id: idx for idx, m in enumerate(ordered_messages)}
+
+    def _key(chunk) -> tuple:
+        if not chunk.messages:
+            return (0, -1)
+        first = chunk.messages[0]
+        # 位置が引けない先頭 (通常は無い) は同一秒の末尾側へ — created_at が
+        # 第一キーなので並びの大枠は保たれる。
+        return (first.created_at or 0, position.get(first.id, len(position)))
+
+    chunks = sorted(
+        list(plan.chunks) + list(absorption_plan.standalone_chunks),
+        key=_key,
+    )
+    return AlignmentPlan(chunks=chunks, total_unprocessed=plan.total_unprocessed)
 
 
 def _load_messages(conn: sqlite3.Connection, message_ids: Sequence[str]):
@@ -204,37 +258,58 @@ def plan_absorption(
     target_chars: int,
     excluded_entry_ids: FrozenSet[str] = frozenset(),
 ) -> AbsorptionPlan:
-    """極小 run ごとの吸収先 (後ろの隣人) を決める。決定論・LLM なし。
+    """極小 run の吸収を「開く隣人ごと」に計画する。決定論・LLM なし。
+
+    二段で計画する (機構 D、docs/intent/chronicle_coverage_gaps.md):
+
+    1. **割り当て**: 各極小 run に開く隣人を割り当てる — 後ろ (新しい側) の
+       隣人 → 居なければ**同じスレッドの前側**の隣人。スレッド境界の停止は
+       両向きで維持 (別スレッドの発話を一つの一次あらすじに合体させない)。
+    2. **束ね**: 同じ隣人に割り当たった run を一つの item に束ねる。開き直しと
+       再生成は隣人 1 個につき必ず一回 — 前から来た run も後ろから来た run も
+       同じ item の材料に入る (旧 ``absorbed_global`` の「後から来た方を break
+       で諦めさせる」は、既存 item への相乗りに置き換え — 見送りを新たに
+       生まない)。
+
+    どちらの向きにも隣人が居ない run は (機構 E):
+
+    - 発話 (storage の実会話フィルタ ``_conversation_exclusion``) を 1 件でも
+      含むなら ``standalone_chunks`` へ — 通常の生成で独立の一次あらすじに
+      する (呼び出し側が :func:`merge_standalone_chunks` で整列計画へ合流)。
+    - 発話ゼロ (機構の記録だけ) なら ``silent_runs`` に数えるだけで自動では
+      書かせない — 解消は第二段の修復 UI (ユーザー操作) に返す。
 
     Args:
         conn: persona memory.db (読むだけ)。
         tiny_chunks: split_plan_for_absorption が選り分けた極小チャンク。
         ordered_messages: 編纂候補の全列 (plan_alignment に渡したのと同じ、
-            正典順)。隣人の探索はこの並びを前へ歩く。
+            正典順)。隣人の探索はこの並びを歩く。
         processed_ids: 既に一次あらすじの source になっている id 集合。
         excluded_entry_ids: 圧縮区間として提示中の digest id 集合。提示中の
-            エントリは開き直せない — 連鎖はそこで止まる。
+            エントリは開き直せない。
 
     連鎖の停止規則 (吸収は連続範囲しか作らない):
 
-    - 提示中 (excluded) のエントリ / source が引き切れないエントリに当たったら
-      止まる。
-    - **スレッドが変わったら止まる** (§3 の thread 境界 — 別スレッドの発話を
-      一つのあらすじに合体させない。裁定文には明示されていないが、既存の
-      不変条件を吸収が破らないための保守)。
+    - 提示中 (excluded) のエントリに当たったら止まる。
+    - **スレッドが変わったら止まる** (§3 の thread 境界)。
+    - 親境界 (parent_id の変化) を跨がない (Codex レビュー 2026-08-31 採用 3)。
+    - source が一部欠けた隣人は**開いてよい** (機構 F — 生存分 + 穴の材料で
+      再生成する。欠けは WARNING で可視化)。「処理済みメッセージに被覆 Lv1 が
+      引けない」停止は別の防御で、従来どおり残す。
     - **末尾の未被覆帯 (uncovered_tail_zone) は吸収の対象外** — anchor 引き
-      戻しの対象として ``rewind_run_ids`` に載せる (裁定 5 改訂 — 「見送り」の
-      概念は廃止)。帯の外で直の隣人を持てなかった run (提示中 digest /
-      thread 断絶に挟まれた稀な形) は ``unresolved_runs`` に数えて WARNING で
-      可視化する — どちらの器 (吸収 / 引き戻し) にも入らない残余。
+      戻しの対象として ``rewind_run_ids`` に載せる (裁定 5 改訂)。
     """
+    from sai_memory.arasuji.generator import material_chars
+    from sai_memory.memory.storage import filter_real_conversation_ids
+
     threshold = tiny_run_threshold(target_chars)
     plan = AbsorptionPlan()
     if not tiny_chunks:
         plan.stale_upper_ids = list_stale_upper_ids(conn)
         return plan
 
-    position = {m.id: i for i, m in enumerate(ordered_messages)}
+    ordered = list(ordered_messages)
+    position = {m.id: i for i, m in enumerate(ordered)}
     tiny_ordered = sorted(
         range(len(tiny_chunks)),
         key=lambda i: position.get(tiny_chunks[i].messages[0].id, 0),
@@ -247,7 +322,7 @@ def plan_absorption(
     consumed: Set[int] = set()
     # 末尾の未被覆帯は吸収の walk に入れない — anchor 引き戻しの対象 (LLM ゼロ)。
     zone_ids, zone_first, zone_indices = uncovered_tail_zone(
-        tiny_chunks, ordered_messages,
+        tiny_chunks, ordered,
     )
     if zone_first is not None:
         plan.rewind_run_ids = zone_ids
@@ -259,7 +334,79 @@ def plan_absorption(
             "not an absorption target",
             len(zone_ids), len(zone_indices),
         )
+
+    entry_cache: Dict[str, ArasujiEntry] = {}
+    sources_cache: Dict[str, List[Any]] = {}
+
+    def _neighbor_sources(entry: ArasujiEntry) -> List[Any]:
+        """隣人の**生存している** source メッセージ (機構 F — 欠けは開く側へ倒す)。"""
+        if entry.id not in sources_cache:
+            sources = _load_messages(conn, entry.source_ids)
+            missing = len({str(s) for s in entry.source_ids}) - len(sources)
+            if missing > 0:
+                LOGGER.warning(
+                    "[absorption] neighbor %s has %d missing source "
+                    "message(s); opening it anyway and regenerating from the "
+                    "survivors (entry=%s)",
+                    entry.id[:8], missing, entry.id,
+                )
+            sources_cache[entry.id] = sources
+        return sources_cache[entry.id]
+
+    def _covering_entry(message_id: str) -> Optional[ArasujiEntry]:
+        entries = get_entries_covering_messages(conn, [message_id])
+        entry = entries[0] if entries else None
+        if entry is None:
+            # この防御は撤去しない (機構 F の対象外): 被覆の帳簿そのものが
+            # 引けない状態で開き直すと、どの範囲を差し替えるかが決められない。
+            LOGGER.warning(
+                "[absorption] processed message %s has no covering lv1 "
+                "entry; it cannot serve as an absorption neighbor", message_id,
+            )
+            return None
+        return entry_cache.setdefault(entry.id, entry)
+
+    def _openable(entry: ArasujiEntry, thread: object) -> bool:
+        """隣人として開けるか — 提示中でなく、生存 source が同スレッド。"""
+        if entry.id in excluded_entry_ids:
+            LOGGER.info(
+                "[absorption] neighbor %s is presented as a folded digest; "
+                "it cannot be reopened this round", entry.id[:8],
+            )
+            return False
+        sources = _neighbor_sources(entry)
+        if any(getattr(s, "thread_id", None) != thread for s in sources):
+            return False  # thread 境界 — 別スレッドと合体しない (両向きで維持)
+        return True
+
+    # --- 段 1: 各極小 run へ開く隣人を割り当てる (後ろ優先 → 前側) ---
+    assignment: Dict[int, str] = {}
+    for idx in tiny_ordered:
+        if idx in consumed:
+            continue
+        chunk = tiny_chunks[idx]
+        thread = getattr(chunk.messages[0], "thread_id", None)
+        target: Optional[ArasujiEntry] = None
+        rear_pos = position.get(chunk.messages[-1].id, -1) + 1
+        if 0 < rear_pos < len(ordered) and ordered[rear_pos].id in processed_ids:
+            entry = _covering_entry(ordered[rear_pos].id)
+            if entry is not None and _openable(entry, thread):
+                target = entry
+        if target is None:
+            front_pos = position.get(chunk.messages[0].id, 0) - 1
+            if front_pos >= 0 and ordered[front_pos].id in processed_ids:
+                entry = _covering_entry(ordered[front_pos].id)
+                if entry is not None and _openable(entry, thread):
+                    target = entry
+        if target is not None:
+            assignment[idx] = target.id
+
+    runs_by_entry: Dict[str, List[int]] = {}
+    for idx, eid in assignment.items():
+        runs_by_entry.setdefault(eid, []).append(idx)
+
     absorbed_global: Set[str] = set()
+    item_by_entry: Dict[str, AbsorptionItem] = {}
     dirty_uppers: List[str] = []
     dirty_seen: Set[str] = set()
 
@@ -271,154 +418,193 @@ def plan_absorption(
             parent = get_entry(conn, pid)
             pid = parent.parent_id if parent else None
 
+    # 発話判定 (機構 E) は一括で引いておく — run ごとの点照会を避ける。
+    unassigned_ids = [
+        m.id
+        for idx in tiny_ordered
+        if idx not in consumed and idx not in assignment
+        for m in tiny_chunks[idx].messages
+    ]
+    real_utterance_ids = (
+        filter_real_conversation_ids(conn, unassigned_ids)
+        if unassigned_ids else set()
+    )
+
+    # --- 段 2: 開く隣人ごとに一つの item へ束ねる ---
     for idx in tiny_ordered:
         if idx in consumed:
             continue
         chunk = tiny_chunks[idx]
-        consumed.add(idx)
-        run_ids: List[str] = [m.id for m in chunk.messages]
-        material = int(chunk.coverage_chars)
         thread = getattr(chunk.messages[0], "thread_id", None)
+        eid = assignment.get(idx)
+
+        if eid is None:
+            # 機構 E: 両方向とも吸収先が無い。
+            consumed.add(idx)
+            if any(m.id in real_utterance_ids for m in chunk.messages):
+                plan.standalone_chunks.append(chunk)
+                LOGGER.info(
+                    "[absorption] tiny run (%d msgs, %d chars) has no "
+                    "absorbable neighbor; compiling it standalone (it "
+                    "contains real utterances)",
+                    len(chunk.messages), int(chunk.coverage_chars),
+                )
+            else:
+                plan.silent_runs += 1
+                plan.silent_message_count += len(chunk.messages)
+                LOGGER.info(
+                    "[absorption] tiny run (%d msgs) has no absorbable "
+                    "neighbor and no real utterance; leaving it to the "
+                    "user-driven repair (not auto-compiled)",
+                    len(chunk.messages),
+                )
+            continue
+
+        if eid in absorbed_global:
+            # 割り当て先が既に別 item で開かれている — 相乗り (機構 D:
+            # 見送りを新たに生まない)。通常は _absorb の claim が先に消費
+            # するので、ここへ来るのは防御。万一 item が引けない形 (想定外)
+            # は、二重に開く item を作らず機構 E の受け皿へ倒す。
+            item = item_by_entry.get(eid)
+            consumed.add(idx)
+            if item is not None:
+                item.run_message_ids.extend(m.id for m in chunk.messages)
+                item.run_message_ids.sort(key=lambda mid: position.get(mid, 0))
+                item.material_chars += int(chunk.coverage_chars)
+                item.start_at = min(
+                    item.start_at,
+                    min((m.created_at or 0) for m in chunk.messages),
+                )
+            elif filter_real_conversation_ids(
+                conn, [m.id for m in chunk.messages],
+            ):
+                # 割り当て済み run は一括の発話判定 (real_utterance_ids) に
+                # 含まれていないので、ここだけ点で引き直す。
+                LOGGER.warning(
+                    "[absorption] run assigned to an already-opened neighbor "
+                    "%s has no item to ride; compiling it standalone",
+                    eid[:8],
+                )
+                plan.standalone_chunks.append(chunk)
+            else:
+                plan.silent_runs += 1
+                plan.silent_message_count += len(chunk.messages)
+            continue
+
+        entry = entry_cache[eid]
+        item_runs: List[int] = []
         absorbed: List[ArasujiEntry] = []
         covered: Set[str] = set()
-        i = position.get(chunk.messages[-1].id, -1) + 1
-        while i < len(ordered_messages):
-            m = ordered_messages[i]
+        material = 0
+
+        def _claim_run(j: int) -> None:
+            nonlocal material
+            if j in consumed:
+                return
+            consumed.add(j)
+            item_runs.append(j)
+            material += int(tiny_chunks[j].coverage_chars)
+
+        def _absorb(e: ArasujiEntry) -> None:
+            nonlocal material
+            absorbed.append(e)
+            absorbed_global.add(e.id)
+            covered.update(str(s) for s in e.source_ids)
+            material += sum(material_chars(s) for s in _neighbor_sources(e))
+            _mark_dirty_chain(e)
+            # この隣人に割り当たった run は全部この item へ (相乗り) —
+            # span の内側の穴も、前側から来た run も、後ろから来た run も。
+            for j in runs_by_entry.get(e.id, ()):
+                _claim_run(j)
+
+        def _max_pos() -> int:
+            pos = -1
+            for e in absorbed:
+                for s in e.source_ids:
+                    p = position.get(str(s))
+                    if p is not None and p > pos:
+                        pos = p
+            for j in item_runs:
+                p = position.get(tiny_chunks[j].messages[-1].id)
+                if p is not None and p > pos:
+                    pos = p
+            return pos
+
+        _claim_run(idx)
+        _absorb(entry)
+
+        # 開いた範囲 (隣人の span + claim 済み run) の直後から後ろへ歩く。
+        # 隣接の極小 run は閾値と無関係にすくい取り (2026-08-31 検収指摘の
+        # 挙動を維持)、0.5U の閾値が縛るのは「さらに先の別の隣人へ連鎖
+        # するか」だけ。
+        i = _max_pos() + 1
+        while i < len(ordered):
+            m = ordered[i]
             if m.id in covered:
                 i += 1
                 continue
             if m.id in processed_ids:
-                entries = get_entries_covering_messages(conn, [m.id])
-                entry = entries[0] if entries else None
-                if entry is None:
-                    LOGGER.warning(
-                        "[absorption] processed message %s has no covering "
-                        "lv1 entry; stopping the chain here", m.id,
-                    )
-                    break
-                if entry.id in excluded_entry_ids:
+                if material >= threshold:
+                    break  # 0.5U に達した — さらに先の隣人へは連鎖しない
+                nxt = _covering_entry(m.id)
+                if nxt is None:
+                    break  # 被覆 Lv1 が引けない (この防御は維持)
+                if nxt.id in excluded_entry_ids:
                     LOGGER.info(
                         "[absorption] neighbor %s is presented as a folded "
-                        "digest; it cannot be reopened — chain stops",
-                        entry.id[:8],
+                        "digest; chain stops", nxt.id[:8],
                     )
                     break
-                if entry.id in absorbed_global:
-                    break  # 別 item が既に開く予定 (防御 — 二重吸収しない)
-                if absorbed and entry.parent_id != absorbed[0].parent_id:
-                    # 親境界を跨ぐ連鎖はしない (Codex レビュー 2026-08-31 採用 3
-                    # — thread 境界と同格の停止条件)。跨いでも期間は消えない
-                    # (実行側は全親の帳簿を引き直す) が、合体エントリの所有権
-                    # (どの親の子になるか) が曖昧になる形を計画が作らない。
+                if nxt.id in absorbed_global:
+                    break  # 既に別 item が開く隣人 — 連続範囲はここまで
+                if nxt.parent_id != absorbed[0].parent_id:
+                    # 親境界を跨ぐ連鎖はしない (Codex レビュー 2026-08-31
+                    # 採用 3): 合体エントリの所有権 (どの親の子になるか) が
+                    # 曖昧になる形を計画が作らない。
                     break
-                sources = _load_messages(conn, entry.source_ids)
-                if len(sources) != len({str(s) for s in entry.source_ids}):
-                    LOGGER.warning(
-                        "[absorption] neighbor %s has missing source "
-                        "messages; not reopening it", entry.id[:8],
-                    )
-                    break
-                if any(getattr(s, "thread_id", None) != thread for s in sources):
+                sources = _neighbor_sources(nxt)
+                if any(
+                    getattr(s, "thread_id", None) != thread for s in sources
+                ):
                     break  # thread 境界 — 別スレッドと合体しない
-                from sai_memory.arasuji.generator import material_chars
-                absorbed.append(entry)
-                absorbed_global.add(entry.id)
-                covered.update(str(s) for s in entry.source_ids)
-                material += sum(material_chars(s) for s in sources)
-                # 開いた隣人の被覆範囲 (source の正典順の最初〜最後) の内側と
-                # 隣接に位置する極小 run は、**閾値と無関係に**全部この item へ
-                # すくい取る (2026-08-31 検収指摘)。E を開いたのに E の内側の
-                # 他の穴を残すと、その穴の walk が absorbed_global で止まって
-                # 見送りになり、1 実行につき隣人 1 つ + 穴 1 個しか治らない —
-                # 同じ範囲の合体 Lv1 を再実行のたびに LLM で作り直す無駄が出る。
-                # 0.5U の閾値が縛るのは「さらに先の別の隣人へ連鎖するか」だけ。
-                span_positions = [
-                    position[str(s)] for s in entry.source_ids
-                    if str(s) in position
-                ]
-                if span_positions:
-                    lo, hi = min(span_positions), max(span_positions)
-                    # 内側の穴 (span の途中に開いた極小 run、同 thread のみ)。
-                    # 時系列昇順処理なので、最古の穴が最初に E を開き、その
-                    # item が span 内の残り全部 (前後どちら側でも) をすくう。
-                    for other_idx in range(len(tiny_chunks)):
-                        if other_idx in consumed:
-                            continue
-                        other = tiny_chunks[other_idx]
-                        first_pos = position.get(other.messages[0].id)
-                        if first_pos is None or not (lo < first_pos < hi):
-                            continue
-                        if getattr(
-                            other.messages[0], "thread_id", None,
-                        ) != thread:
-                            continue
-                        consumed.add(other_idx)
-                        run_ids.extend(x.id for x in other.messages)
-                        material += int(other.coverage_chars)
-                    i = max(i + 1, hi + 1)
-                    # 隣接 (span の直後) の極小 run も同じ item へ。
-                    while i < len(ordered_messages):
-                        adj_idx = membership.get(ordered_messages[i].id)
-                        if adj_idx is None or adj_idx in consumed:
-                            break
-                        adj = tiny_chunks[adj_idx]
-                        if getattr(
-                            adj.messages[0], "thread_id", None,
-                        ) != thread:
-                            break
-                        consumed.add(adj_idx)
-                        run_ids.extend(x.id for x in adj.messages)
-                        material += int(adj.coverage_chars)
-                        i = position.get(adj.messages[-1].id, i) + 1
-                else:
-                    i += 1
-                if material >= threshold:
-                    break
+                _absorb(nxt)
+                i = max(i + 1, _max_pos() + 1)
                 continue
-            other_idx = membership.get(m.id)
-            if other_idx is not None and other_idx not in consumed:
-                if not absorbed:
-                    break  # 直の隣人が entry でない run — この run は見送り
-                other = tiny_chunks[other_idx]
+            j = membership.get(m.id)
+            if j is not None:
+                if j in consumed:
+                    break  # 別 item / 帯の run — 連続範囲はここまで
+                other = tiny_chunks[j]
                 if getattr(other.messages[0], "thread_id", None) != thread:
                     break
-                consumed.add(other_idx)
-                run_ids.extend(x.id for x in other.messages)
-                material += int(other.coverage_chars)
+                _claim_run(j)
                 i = position.get(other.messages[-1].id, i) + 1
-                if material >= threshold:
-                    break
                 continue
             break  # 通常 run / 未知の未編纂 — 連続範囲はここまで
 
-        if not absorbed:
-            # 帯 (rewind 対象) は事前に consumed 済みなので、ここへ来るのは
-            # 「後ろに編纂済みは在るのに開けない」稀な形だけ — 提示中 digest
-            # に塞がれた / thread 断絶 / 被覆 entry が引けない。吸収でも引き
-            # 戻しでも救えない残余として可視化する。
-            plan.unresolved_runs += 1
-            LOGGER.warning(
-                "[absorption] tiny run (%d msgs, %d chars) has a compiled "
-                "rear side but no reopenable neighbor (presented digest / "
-                "thread break); left unresolved this round",
-                len(run_ids), material,
-            )
-            continue
-        for entry in absorbed:
-            _mark_dirty_chain(entry)
-        # すくい取り (span 内の穴は walk の前方にも後方にもある) で追加順が
-        # 時系列と一致しなくなるので、正典順に整えてから item にする。冪等
-        # スキップ (run_absorption の first_run_id 検査) はこの並びの先頭 =
-        # 範囲全体の最古の run メッセージで判定する。
+        run_ids = [
+            m.id for j in item_runs for m in tiny_chunks[j].messages
+        ]
+        # 相乗り (span 内の穴・前側から来た run) で追加順が時系列と一致しなく
+        # なるので、正典順に整えてから item にする。
         run_ids.sort(key=lambda mid: position.get(mid, 0))
-        plan.items.append(AbsorptionItem(
+        item = AbsorptionItem(
             run_message_ids=run_ids,
             absorbed_entry_ids=[e.id for e in absorbed],
             material_chars=material,
             start_at=min(
-                (m.created_at or 0) for m in chunk.messages
+                (m.created_at or 0)
+                for j in item_runs for m in tiny_chunks[j].messages
             ),
-        ))
+        )
+        plan.items.append(item)
+        for e in absorbed:
+            item_by_entry[e.id] = item
+
+    # 前側割り当て (run が隣人より後ろ) があると item の生成順が時系列と
+    # 一致しないことがある — 実行 (run_absorption) は start_at 昇順で flush
+    # 判定するので、ここで整えておく。
+    plan.items.sort(key=lambda it: it.start_at)
 
     existing_stale = [
         sid for sid in list_stale_upper_ids(conn) if sid not in dirty_seen
@@ -433,36 +619,70 @@ def plan_absorption(
 
 REPAIR_INCOMPLETE_PROGRESS_ID = "repair_incomplete"
 
+#: 印は理由ごとに別の行 (Codex 二巡採用 1 — 繋ぎ直し失敗の印を吸収の
+#: 未完了の印から分離する)。一行に相乗りさせると、吸収の no_work が
+#: 「仕事ゼロ = 完了」で印を外すとき、無関係な reconnect の残債まで一緒に
+#: 消える。clear は自分の理由の行だけを消し、is_repair_incomplete (読み手)
+#: はどの理由でも True のまま。"absorption" の行 id は旧来のままなので、
+#: 既存 DB に残っている印もそのまま吸収の印として読める。
+_REPAIR_REASON_IDS = {
+    "absorption": REPAIR_INCOMPLETE_PROGRESS_ID,
+    "reconnect": "repair_incomplete_reconnect",
+}
 
-def set_repair_incomplete(conn: sqlite3.Connection) -> None:
+
+def _repair_reason_id(reason: str) -> str:
+    try:
+        return _REPAIR_REASON_IDS[reason]
+    except KeyError:
+        raise ValueError(f"unknown repair-incomplete reason: {reason!r}")
+
+
+def set_repair_incomplete(
+    conn: sqlite3.Connection, *, reason: str = "absorption",
+) -> None:
     import time
     conn.execute(
         "INSERT INTO arasuji_progress "
         "(id, last_processed_message_id, last_processed_at) VALUES (?, NULL, ?) "
         "ON CONFLICT(id) DO UPDATE SET last_processed_at = excluded.last_processed_at",
-        (REPAIR_INCOMPLETE_PROGRESS_ID, int(time.time())),
+        (_repair_reason_id(reason), int(time.time())),
     )
     conn.commit()
 
 
-def clear_repair_incomplete(conn: sqlite3.Connection) -> None:
+def clear_repair_incomplete(
+    conn: sqlite3.Connection, *, reason: str = "absorption",
+) -> None:
+    """自分の理由の印**だけ**を消す — 他の理由の残債は残す。
+
+    吸収 (run_absorption) は no_work / flush 完了で "absorption" を、
+    繋ぎ直し (bands.run_band_overflow) は reconnect が例外なく走り切った回に
+    "reconnect" を消す。
+    """
     conn.execute(
         "DELETE FROM arasuji_progress WHERE id = ?",
-        (REPAIR_INCOMPLETE_PROGRESS_ID,),
+        (_repair_reason_id(reason),),
     )
     conn.commit()
 
 
 def is_repair_incomplete(conn: sqlite3.Connection) -> bool:
-    """前回の吸収ジョブが完了していないか (UI の帯・cost-estimate 応答用)。
+    """前回の補修の仕事が完了していないか (UI の帯・cost-estimate 応答用)。
 
-    印の行に加えて content_stale の残骸も見る — 印だけを信じると、印の
-    書き込みより後・flush より前に落ちた稀な並びで嘘の「完了」になる。
+    理由 (吸収 / 繋ぎ直し) を問わず、どれか一つでも印が残っていれば True —
+    帯の「前回の処理が完了していません。再実行してください」はどの残債にも
+    同じ促しでよい。印の行に加えて content_stale の残骸も見る — 印だけを
+    信じると、印の書き込みより後・flush より前に落ちた稀な並びで嘘の
+    「完了」になる。
     """
+    reason_ids = tuple(_REPAIR_REASON_IDS.values())
+    placeholders = ", ".join("?" for _ in reason_ids)
     try:
         row = conn.execute(
-            "SELECT 1 FROM arasuji_progress WHERE id = ?",
-            (REPAIR_INCOMPLETE_PROGRESS_ID,),
+            f"SELECT 1 FROM arasuji_progress WHERE id IN ({placeholders}) "
+            "LIMIT 1",
+            reason_ids,
         ).fetchone()
     except sqlite3.OperationalError as exc:
         if is_missing_table_error(exc):
@@ -784,8 +1004,24 @@ class AbsorptionResult:
     reopened_entry_ids: List[str] = field(default_factory=list)
     regenerated_upper_ids: List[str] = field(default_factory=list)
     skipped_items: int = 0
-    unresolved_runs: int = 0
+    #: 隣のあらすじへ合流した run メッセージの数 (完了報告の内訳 — 機構 G)。
+    absorbed_run_message_count: int = 0
+    #: skip の結果**未被覆のまま残った** run メッセージの数 (機構 G の「残り」)。
+    #: 冪等スキップ (run が既に被覆済みで仕事が無かった) は含まない — あれは
+    #: 完了であって残りではない。部分被覆の skip は未被覆分だけを数える。
+    skipped_run_message_count: int = 0
+    #: 同、理由別の内訳 {理由: メッセージ数}。完了報告のログ・台帳用。
+    skipped_reasons: Dict[str, int] = field(default_factory=dict)
     cancelled: bool = False
+
+    def note_skipped_uncovered(self, reason: str, count: int) -> None:
+        """skip で未被覆のまま残ったメッセージ数を理由つきで積む (機構 G)。"""
+        if count <= 0:
+            return
+        self.skipped_run_message_count += count
+        self.skipped_reasons[reason] = (
+            self.skipped_reasons.get(reason, 0) + count
+        )
 
 
 def _repoint_fragments(
@@ -997,9 +1233,7 @@ def run_absorption(
     from sai_memory.arasuji.generator import generate_level1_arasuji
     from sai_memory.perception_buffer import list_batches_annexed_to
 
-    result = AbsorptionResult(
-        unresolved_runs=plan.unresolved_runs if plan is not None else 0,
-    )
+    result = AbsorptionResult()
     items = list(plan.items) if plan is not None else []
     # ジョブ冒頭の整合性検査〜マーカー操作は一つの錠の中で原子的に行う
     # (Codex 八巡 — sweep の書き込み・stale 判定・印の上げ下げが他 writer と
@@ -1054,10 +1288,15 @@ def run_absorption(
         with (db_lock or nullcontext()):
             covered = _covered_run_count(conn, run_ids)
         if covered == len(set(run_ids)):
+            # 冪等スキップ — run は既に被覆済み (前回の実行が完了している)。
+            # 残りには数えない。
             result.skipped_items += 1
             continue
         if covered > 0:
             result.skipped_items += 1
+            result.note_skipped_uncovered(
+                "partially_covered", len(set(run_ids)) - covered,
+            )
             LOGGER.warning(
                 "[absorption] %d of %d run message(s) are already covered "
                 "(crash residue or concurrent change); discarding this item — "
@@ -1104,17 +1343,36 @@ def run_absorption(
                 extra_items.sort(key=lambda x: x["at"])
         if missing:
             result.skipped_items += 1
+            result.note_skipped_uncovered("neighbor_missing", len(set(run_ids)))
             LOGGER.info(
                 "[absorption] neighbor disappeared before the merge; "
                 "item skipped (re-planned next run)",
             )
             continue
         if len(messages) < len(set(material_ids)):
-            result.skipped_items += 1
+            # 機構 F (chronicle_coverage_gaps): 材料の一部が DB に無くても
+            # 生存分で進める — 「開かない」柵は計画側と実行側の両方から撤去。
+            # 読めないメッセージの最有力の由来はユーザー自身のログ削除で、
+            # 開き直しで削除分があらすじから消えるのは削除の完遂 (2026-09-08
+            # まはー裁定)。全滅 (生存ゼロ) だけは生成の材料が無いので skip。
+            missing_count = len(set(material_ids)) - len(messages)
+            if not messages:
+                result.skipped_items += 1
+                result.note_skipped_uncovered(
+                    "material_missing", len(set(run_ids)),
+                )
+                LOGGER.warning(
+                    "[absorption] all %d material message(s) are missing; "
+                    "item skipped (nothing to generate from)", missing_count,
+                )
+                continue
             LOGGER.warning(
-                "[absorption] material messages missing; item skipped",
+                "[absorption] %d material message(s) missing (entries=%s); "
+                "proceeding with the %d survivor(s)",
+                missing_count,
+                ",".join(e.id[:8] for e in snapshots),
+                len(messages),
             )
-            continue
         messages.sort(key=lambda m: (m.created_at or 0))
 
         # 生成が先 (旧隣人は生きたまま)。失敗したら何も失わずに止まる。
@@ -1179,6 +1437,7 @@ def run_absorption(
         if conflicted:
             _withdraw()
             result.skipped_items += 1
+            result.note_skipped_uncovered("neighbor_changed", len(set(run_ids)))
             LOGGER.info(
                 "[absorption] neighbor changed during generation; merge "
                 "withdrawn (re-planned next run)",
@@ -1190,14 +1449,16 @@ def run_absorption(
         moved_batches: List[tuple] = []    # (old_id, [batch_ids])
         repoint_failed = False
         recheck_conflict = False
+        recheck_covered = 0
         with (db_lock or nullcontext()):
             # 確定直前の run 被覆再検査 (Codex 二巡 R1): Beat ロックは本番内の
             # 並走を直列化するが、CLI (ロック外プロセス) との同時実行は塞がない。
             # LLM の間に run が別経路で被覆されていたら、この合体は二重被覆に
             # なる — 取り下げて次回の再計画に任せる。
-            if _covered_run_count(
+            recheck_covered = _covered_run_count(
                 conn, run_ids, exclude_entry_id=new_entry.id,
-            ) > 0:
+            )
+            if recheck_covered > 0:
                 recheck_conflict = True
             else:
                 try:
@@ -1247,6 +1508,10 @@ def run_absorption(
         if recheck_conflict:
             _withdraw()
             result.skipped_items += 1
+            # 別経路が被覆した分は残りではない — 未被覆の残余だけ数える。
+            result.note_skipped_uncovered(
+                "concurrently_covered", len(set(run_ids)) - recheck_covered,
+            )
             LOGGER.warning(
                 "[absorption] run became covered during generation "
                 "(concurrent CLI / other writer); merge withdrawn — the next "
@@ -1297,6 +1562,7 @@ def run_absorption(
 
         result.merged_entries.append(new_entry)
         result.reopened_entry_ids.extend(e.id for e in snapshots)
+        result.absorbed_run_message_count += len(set(run_ids))
         LOGGER.info(
             "[absorption] merged tiny run into neighbor(s): run=%d msgs, "
             "reopened=%d entries, material=%d chars -> entry %s",

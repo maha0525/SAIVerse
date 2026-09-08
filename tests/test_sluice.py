@@ -7,7 +7,10 @@
 - 同じ実行 ID (run_id) の再適用が重複しないこと
 - 一覧に無い / 形の違う activity_ref の要素だけが捨てられ、他は適用されること
 - **確実に通るゲート**: スルース失敗で退場 (anchor 前進) が止まり、成功で進むこと
-- コンテキスト超過で後退再試行 (§13.5-1) が働くこと
+- コンテキスト超過もレート制限 (429) も一発で送出され、再試行ループに入らない
+  こと (旧 §13.5-1 後退方式は 2026-09-08 廃止 — sluice_coverage_gaps 第一段 A)
+- 冷たいときの飛ばし: 担当範囲が量の上限を超えたらスルースを走らせず、退場は
+  進み、窓から出る未見の範囲が記録されること
 - defer-to-hot: anchor 冷で pending が立ち metabolism がスキップ / 圧力弁で実行
 
 LLM はモック。SAIMemory は temp DB (test_core_memory_section と同じ Embedder patch)。
@@ -17,6 +20,7 @@ from __future__ import annotations
 
 import gc
 import os
+import sqlite3
 import tempfile
 import unittest
 from datetime import datetime, timezone
@@ -898,6 +902,49 @@ class SluiceApplyExtensionTest(_AdapterTestBase):
         row = _read_sluice_record(self.adapter)
         self.assertEqual(row[1], "committed")
 
+    def test_memo_event_date_stamped_from_span_end_message(self):
+        """⭐ 二つの時刻 (B-2): 定常のスルースは担当範囲の末尾メッセージの時刻
+        から event_date を機械で刻印し、origin='live' を持つ。"""
+        from datetime import datetime as _dt, timezone as _tz
+
+        real_ids = []
+        for i in range(2):
+            mid = self.adapter.append_persona_message({
+                "role": "user" if i % 2 == 0 else "assistant",
+                "content": f"実会話 {i}",
+                "timestamp": _dt(2026, 1, 5, 10, 0, i, tzinfo=_tz.utc).isoformat(),
+            })
+            real_ids.append(str(mid))
+        result = {
+            **_sluice_result(),
+            "did_memos": [{"new_activity_name": "散歩", "text": "川沿いを歩いた"}],
+        }
+        msgs = [{"id": rid, "content": "x"} for rid in real_ids]
+        self._run(result, current_messages=msgs)
+        row = self.adapter.conn.execute(
+            "SELECT event_date, origin FROM memos"
+        ).fetchone()
+        end_created = self.adapter.conn.execute(
+            "SELECT created_at FROM messages WHERE id = ?", (real_ids[-1],)
+        ).fetchone()[0]
+        expected = _dt.fromtimestamp(int(end_created)).date().isoformat()
+        self.assertEqual(row[0], expected)
+        self.assertEqual(row[1], "live")
+
+    def test_memo_event_date_null_when_span_end_is_not_in_db(self):
+        """event_date は刻印できなければ NULL (採取は止めない — 読み手が date で
+        代替する)。合成 id (DB に無い) の窓では NULL になる。"""
+        result = {
+            **_sluice_result(),
+            "did_memos": [{"new_activity_name": "散歩", "text": "川沿いを歩いた"}],
+        }
+        self._run(result)  # 既定の窓は合成 id (m0..m4)
+        row = self.adapter.conn.execute(
+            "SELECT event_date, origin FROM memos"
+        ).fetchone()
+        self.assertIsNone(row[0])
+        self.assertEqual(row[1], "live")
+
     def test_span_starts_after_previous_pan_marker(self):
         result = {
             **_sluice_result(),
@@ -941,6 +988,47 @@ class SluiceApplyExtensionTest(_AdapterTestBase):
         self.assertEqual(summary2["memos_failed"], 0)
         record = _read_sluice_record(self.adapter)[0]
         self.assertIn("既に手帳にあるため採りませんでした", record)
+
+    def test_the_same_memo_on_a_different_event_day_is_written(self):
+        """⭐ 重複判定の日はできごとの日 (B-2)。
+
+        担当範囲が別の日のできごとを指しているなら、同じ本文でも別の事実
+        (「今日も小説を書いた」が二日続くのと同じ)。書かれた日 (どちらも今日)
+        で照合すると、二日目の記録が重複として黙って落ちる。
+        """
+        from datetime import datetime as _dt, timezone as _tz
+
+        def _messages_on(day, prefix):
+            ids = []
+            for i in range(2):
+                mid = self.adapter.append_persona_message({
+                    "role": "user" if i % 2 == 0 else "assistant",
+                    "content": f"{prefix} {i}",
+                    "timestamp": _dt(
+                        2026, 1, day, 10, 0, i, tzinfo=_tz.utc
+                    ).isoformat(),
+                })
+                ids.append(str(mid))
+            return [{"id": rid, "content": "x"} for rid in ids]
+
+        result = {
+            **_sluice_result(),
+            "did_memos": [
+                {"new_activity_name": "小説を書く", "text": "星を拾う話の続きを書いた"},
+            ],
+        }
+        summary1, _ = self._run(result, current_messages=_messages_on(5, "五日"))
+        self.assertEqual(summary1["memos_applied"], 1)
+        summary2, _ = self._run(
+            result, current_messages=_messages_on(20, "二十日"), run_id="run-2",
+        )
+        self.assertEqual(summary2["memos_applied"], 1)
+
+        rows = self.adapter.conn.execute(
+            "SELECT event_date FROM memos ORDER BY id ASC"
+        ).fetchall()
+        self.assertEqual(len(rows), 2)
+        self.assertNotEqual(rows[0][0], rows[1][0])
 
     def test_prompt_states_the_span_scope(self):
         """⭐ 手帳の節で、今回の対象範囲を本人へ明示する (重複の供給源を塞ぐ)。"""
@@ -1433,20 +1521,21 @@ class SluiceApplyExtensionTest(_AdapterTestBase):
         self.assertEqual(updated["content"], "挿絵を月曜までに渡す")
 
 
-class ContextOverflowBackoffTest(_AdapterTestBase):
-    """コンテキスト超過の後退方式 (autonomous_behavior_v3.md §13.5-1)。"""
+class ContextOverflowClosesRunTest(_AdapterTestBase):
+    """コンテキスト超過は走行の失敗として閉じる (2026-09-08 改訂)。
 
-    #: 3 交換ぶんの提示 context。履歴部には ID を振ってある — 後退で全部外れると
-    #: 「1 通も見ていない」結果になり、スルースはそれを凍結せず送出する
-    #: (Codex 第八巡 修正 2)。ここでは 2 組外しても 1 組残る長さにしてある。
+    docs/intent/sluice_coverage_gaps.md 第一段 A: 旧 §13.5-1 の後退方式
+    (超過エラーで直近の組を外して再試行) は廃止した。文字列マーカー
+    "request too large" が OpenAI の 429 TPM 超過に一致し、レート制限が
+    コンテキスト超過に誤分類されて夜通しの再試行ループ (429 が 14,475 回) を
+    生んだのが出自。現行は「入らない量のときは走らせない」(run_metabolism 側の
+    量判定) に一本化し、どんな失敗も LLM 一発で送出 → 退場停止 → 次回再試行。
+    """
+
     _CONTEXT = [
         {"role": "system", "content": "HEAD"},
         {"role": "user", "content": "u0", "id": "c1"},
         {"role": "assistant", "content": "a0", "id": "c2"},
-        {"role": "user", "content": "u1", "id": "c3"},
-        {"role": "assistant", "content": "a1", "id": "c4"},
-        {"role": "user", "content": "u2", "id": "c5"},
-        {"role": "assistant", "content": "a2", "id": "c6"},
     ]
 
     def _persona(self):
@@ -1464,86 +1553,49 @@ class ContextOverflowBackoffTest(_AdapterTestBase):
         )
         return sluice.run_sluice(lifecycle, self._persona(), "b", [], 0), client
 
-    def test_overflow_drops_latest_exchange_and_retries(self):
-        overflow = RuntimeError("input token count exceeds the maximum context length")
-        summary, client = self._run([overflow, _sluice_result()])
-        self.assertFalse(summary["skipped"])
-        self.assertEqual(len(client.calls), 2)
-        # 1 回目: 全 context + 注入プロンプト。
-        self.assertEqual(len(client.calls[0]["messages"]), 8)
-        # 2 回目: 直近のプロンプト+応答の組 (u2, a2) が外れている。
-        second = client.calls[1]["messages"]
-        self.assertEqual(len(second), 6)
-        contents = [m["content"] for m in second[:-1]]
-        self.assertEqual(contents, ["HEAD", "u0", "a0", "u1", "a1"])
-
-    def test_overflow_backs_off_pairwise_until_fit(self):
-        overflow = RuntimeError("prompt is too long: context window exceeded")
-        summary, client = self._run(
-            [overflow, overflow, _sluice_result()],
+    def test_context_overflow_propagates_after_a_single_call(self):
+        """本物の超過も再試行しない — 一発で送出し、退場停止に写像される。"""
+        overflow = RuntimeError(
+            "input token count exceeds the maximum context length"
         )
-        self.assertFalse(summary["skipped"])
-        self.assertEqual(len(client.calls), 3)
-        # 3 回目は 2 組外れ、最初の 1 組だけが残っている。
-        third = client.calls[2]["messages"]
-        self.assertEqual([m["content"] for m in third[:-1]], ["HEAD", "u0", "a0"])
-
-    def test_overflow_with_nothing_left_to_drop_raises(self):
-        overflow = RuntimeError("context length exceeded")
-        with self.assertRaises(RuntimeError):
-            self._run([overflow, overflow, overflow, overflow])
-
-    def test_all_exchanges_dropped_is_rejected_as_seeing_nothing(self):
-        """後退で全交換が外れた回は「1 通も見ていない」— 適用も確定もせず送出する
-        (Codex 第八巡 修正 2)。通すと、マーカー据え置きのまま台帳が completed に
-        なり、以後は同じ記録が再利用されて末尾の退場が永久に止まる。"""
-        overflow = RuntimeError("context length exceeded")
-        with self.assertRaises(sluice.SluiceEmptySeenSetError):
-            self._run([overflow, overflow, overflow, _sluice_result()])
-        # 判断ターンの記録も残らない (失敗した回は痕跡ごと再試行に委ねる)。
-        self.assertIsNone(_read_sluice_record(self.adapter))
-
-    def test_non_overflow_error_does_not_trigger_backoff(self):
-        boom = RuntimeError("boom")
-        with self.assertRaises(RuntimeError):
-            self._run([boom, _sluice_result()])
-
-    def test_backoff_advances_marker_only_to_seen_end_and_next_span_covers_rest(self):
-        """後退で外した組は「見ていない」— マーカーは実際に LLM に渡した範囲の
-        末尾までしか進まず、外した組は次回の担当範囲に自然に入る (ゲートの
-        不変条件: 全経験が退場前に一度本人の目を通る)。"""
-        # 窓の 6 通 (c1..c6) が提示 context の履歴部 (3 交換) に対応する。
-        msgs = [{"id": f"c{i}", "content": "x"} for i in range(1, 7)]
-        overflow = RuntimeError("context length exceeded")
-        client = FakeLLMClient([overflow, _sluice_result()])
+        client = FakeLLMClient(overflow)
         runtime = FakeRuntime(client, context_messages=self._CONTEXT)
         lifecycle = SimpleNamespace(
             runtime=runtime,
             touch_anchor_after_llm_call=runtime.touch_anchor_after_llm_call,
         )
-        persona = self._persona()
-        summary = sluice.run_sluice(lifecycle, persona, "b", msgs, 0)
-        self.assertFalse(summary["skipped"])
-        # 1 組 (u2, a2 = 2 通) 外した → 見た末尾は c4。c5, c6 は未見のまま。
-        self.assertEqual(persona._sluice_last_pan_id, "c4")
+        with self.assertRaises(RuntimeError):
+            sluice.run_sluice(lifecycle, self._persona(), "b", [], 0)
+        self.assertEqual(len(client.calls), 1)  # 後退再試行は起きない
+        # 判断ターンの記録も残らない (失敗した回は痕跡ごと再試行に委ねる)。
+        self.assertIsNone(_read_sluice_record(self.adapter))
 
-        # 次のスルース: 担当範囲は c5 から始まり、外した組を回収する。
-        client2 = FakeLLMClient({
-            **_sluice_result(reflection="回収"),
-            "did_memos": [{"new_activity_name": "散歩", "text": "川沿いを歩いた"}],
-        })
-        runtime2 = FakeRuntime(client2)
-        lifecycle2 = SimpleNamespace(
-            runtime=runtime2,
-            touch_anchor_after_llm_call=runtime2.touch_anchor_after_llm_call,
+    def test_request_too_large_429_is_not_reclassified_and_propagates(self):
+        """OpenAI の 429 TPM 超過 ("Request too large ...") がコンテキスト超過
+        扱いされない — RateLimitError の型のまま一発で送出される (出自の近因の
+        再発防止)。"""
+        from llm_clients.exceptions import RateLimitError
+
+        exc = RateLimitError(
+            "Request too large for gpt-5.1-instant: Limit 30000, Requested "
+            "532013. Visit https://platform.openai.com/account/rate-limits",
         )
-        sluice.run_sluice(lifecycle2, persona, "b", msgs, 0)
-        row = self.adapter.conn.execute(
-            "SELECT span_start_id, span_end_id, idem_key FROM memos"
-        ).fetchone()
-        self.assertEqual((row[0], row[1]), ("c5", "c6"))
-        self.assertEqual(row[2], "sluice:c5..c6:m0")
-        self.assertEqual(persona._sluice_last_pan_id, "c6")
+        client = FakeLLMClient(exc)
+        runtime = FakeRuntime(client, context_messages=self._CONTEXT)
+        lifecycle = SimpleNamespace(
+            runtime=runtime,
+            touch_anchor_after_llm_call=runtime.touch_anchor_after_llm_call,
+        )
+        with self.assertRaises(RateLimitError):
+            sluice.run_sluice(lifecycle, self._persona(), "b", [], 0)
+        self.assertEqual(len(client.calls), 1)  # 再試行ループに入らない
+
+    def test_success_uses_the_whole_context_in_one_call(self):
+        summary, client = self._run(_sluice_result())
+        self.assertFalse(summary["skipped"])
+        self.assertEqual(len(client.calls), 1)
+        contents = [m["content"] for m in client.calls[0]["messages"][:-1]]
+        self.assertEqual(contents, ["HEAD", "u0", "a0"])
 
 
 class LegacyEnvMigrationTest(unittest.TestCase):
@@ -2499,6 +2551,177 @@ class MetabolismUnseenTailGuardTest(_AdapterTestBase):
         self.assertEqual(client.calls, [])  # LLM は呼ばれない
 
 
+class MetabolismColdSkipTest(_AdapterTestBase):
+    """冷たいときのスルースの飛ばし (docs/intent/sluice_coverage_gaps.md 第一段 A)。
+
+    担当範囲 (パンマーカーから窓の末尾まで) の字数が
+    SAIVERSE_SLUICE_MAX_SPAN_CHARS を超えていたらスルースを走らせず、退場は
+    そのまま進め、窓から出て行く未見の範囲を sluice_skipped_spans へ記録する。
+    """
+
+    def setUp(self):
+        super().setUp()
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import sessionmaker
+        from database.models import AI, Base
+        from saiverse.execution_ledger import ExecutionLedger
+
+        self._tb_tmp = tempfile.TemporaryDirectory()
+        db_path = str(Path(self._tb_tmp.name) / "central.db")
+        self.engine = create_engine(f"sqlite:///{db_path}")
+        Base.metadata.create_all(self.engine)
+        self.SessionLocal = sessionmaker(bind=self.engine)
+        self.ledger = ExecutionLedger(self.SessionLocal)
+        self.manager = SimpleNamespace(
+            SessionLocal=self.SessionLocal, execution_ledger=self.ledger,
+        )
+        db = self.SessionLocal()
+        try:
+            db.add(AI(AIID="tester", HOME_CITYID=1, AINAME="tester"))
+            db.commit()
+        finally:
+            db.close()
+        self.addCleanup(self._cleanup_tb)
+
+    def _cleanup_tb(self):
+        self.engine.dispose()
+        gc.collect()
+        try:
+            self._tb_tmp.cleanup()
+        except (PermissionError, OSError):
+            pass
+
+    def _make_lifecycle(self, client, presented_ids="auto"):
+        from sea.session_lifecycle import SessionLifecycle
+
+        runtime = FakeRuntime(client, presented_ids=presented_ids)
+        lifecycle = SessionLifecycle(runtime, self.manager)
+        lifecycle.ensure_recall_embeddings = lambda p: None
+        lifecycle._attach_chronicle_refs = _stub_chronicle_refs
+        lifecycle.is_chronicle_enabled_for_persona = lambda p: False
+        anchor_updates = []
+        lifecycle.update_anchor_for_model = (
+            lambda p, m, aid, ttl=None: anchor_updates.append((m, aid))
+        )
+        return lifecycle, anchor_updates
+
+    def _persona(self, messages):
+        history_manager = SimpleNamespace(
+            get_history_from_anchor=(
+                lambda anchor, required_line_roles=None, required_scopes=None,
+                pulse_id=None: list(messages)
+            )
+        )
+        return SimpleNamespace(
+            persona_id="tester", persona_name="エア", model="claude-x",
+            sai_memory=self.adapter, history_manager=history_manager,
+        )
+
+    def _run_metabolism(self, lifecycle, persona, messages, env=None):
+        window = _metabolism_window(messages)
+        env_vars = {"SAIVERSE_CHRONICLE_BAND_BUDGET": "2500"}
+        env_vars.update(env or {})
+        with patch.dict(os.environ, env_vars), \
+                patch("saiverse.dynamic_state.DynamicStateManager.on_metabolism",
+                      lambda *a, **k: None):
+            return lifecycle.run_metabolism(
+                persona, "b", window, _METABOLISM_WATERMARKS, None,
+            )
+
+    def _skipped_spans(self):
+        from sai_memory.memory.storage import list_sluice_skipped_spans
+        return [
+            (r["start_message_id"], r["end_message_id"])
+            for r in list_sluice_skipped_spans(self.adapter.conn)
+        ]
+
+    def test_span_over_threshold_skips_sluice_evicts_and_records(self):
+        """量超過: LLM は呼ばれず、退場は進み、出て行く未見の範囲が記録される。"""
+        base = _metabolism_messages()  # m0..m4 (各 1,000 字) — 退場計画は m0..m2
+        client = FakeLLMClient(RuntimeError("must not be called"))
+        lifecycle, anchors = self._make_lifecycle(client)
+        ret = self._run_metabolism(
+            lifecycle, self._persona(base), base,
+            env={"SAIVERSE_SLUICE_MAX_SPAN_CHARS": "3000"},  # 窓 5,000 字 > 3,000
+        )
+        self.assertEqual(ret, "ok")
+        self.assertEqual(client.calls, [])   # スルースの LLM は呼ばれない
+        self.assertTrue(anchors)             # 退場 (anchor 前進) は進む
+        # 記録 = 退場計画で窓から出る未見の範囲 (マーカー無し = 窓全体が未見)
+        self.assertEqual(self._skipped_spans(), [("m0", "m2")])
+
+    def test_span_under_threshold_runs_sluice_normally(self):
+        """量が上限以下なら従来どおり走る (既定の上限 100,000 字)。"""
+        base = _metabolism_messages()
+        client = FakeLLMClient(_sluice_result())
+        lifecycle, anchors = self._make_lifecycle(
+            client, presented_ids=[m["id"] for m in base],
+        )
+        ret = self._run_metabolism(lifecycle, self._persona(base), base)
+        self.assertEqual(ret, "ok")
+        self.assertEqual(len(client.calls), 1)  # スルースが走った
+        self.assertTrue(anchors)
+        self.assertEqual(self._skipped_spans(), [])  # 飛ばしていない = 記録なし
+
+    def test_no_record_when_chronicle_failure_blocks_eviction(self):
+        """退場が適用されない回 (編纂失敗) は範囲を記録しない。"""
+        base = _metabolism_messages()
+        client = FakeLLMClient(RuntimeError("must not be called"))
+        lifecycle, anchors = self._make_lifecycle(client)
+        lifecycle.is_chronicle_enabled_for_persona = lambda p: True
+        lifecycle.generate_chronicle = lambda p, cb=None, **kw: "failed"
+        ret = self._run_metabolism(
+            lifecycle, self._persona(base), base,
+            env={"SAIVERSE_SLUICE_MAX_SPAN_CHARS": "3000"},
+        )
+        self.assertEqual(ret, "failed")
+        self.assertEqual(anchors, [])            # 退場は止まっている
+        self.assertEqual(self._skipped_spans(), [])  # 記録も書かれない
+
+    def test_record_write_failure_blocks_eviction(self):
+        """範囲が記録できない回は退場を見送る (fail-closed) — 記録なしで
+        「通っていない範囲の明示」を破らない。"""
+        base = _metabolism_messages()
+        client = FakeLLMClient(RuntimeError("must not be called"))
+        lifecycle, anchors = self._make_lifecycle(client)
+        with patch.object(
+            lifecycle, "_record_sluice_skipped_span",
+            side_effect=RuntimeError("db write failed"),
+        ):
+            ret = self._run_metabolism(
+                lifecycle, self._persona(base), base,
+                env={"SAIVERSE_SLUICE_MAX_SPAN_CHARS": "3000"},
+            )
+        self.assertEqual(ret, "failed")
+        self.assertEqual(anchors, [])
+        self.assertEqual(self._skipped_spans(), [])
+
+    def test_rate_limited_sluice_failure_sets_the_cooldown(self):
+        """スルースが RateLimitError で失敗した走行は、persona 単位の小休止を
+        立てる (sluice_coverage_gaps 第一段 C-1)。"""
+        from llm_clients.exceptions import RateLimitError
+
+        base = _metabolism_messages()
+        client = FakeLLMClient(RateLimitError("Request too large: 429"))
+        lifecycle, anchors = self._make_lifecycle(
+            client, presented_ids=[m["id"] for m in base],
+        )
+        ret = self._run_metabolism(lifecycle, self._persona(base), base)
+        self.assertEqual(ret, "failed")
+        self.assertEqual(anchors, [])
+        self.assertTrue(lifecycle._metabolism_rate_limit_active("tester"))
+        # 非 429 の失敗では小休止は立たない
+        client2 = FakeLLMClient(RuntimeError("boom"))
+        lifecycle2, _ = self._make_lifecycle(
+            client2, presented_ids=[m["id"] for m in base],
+        )
+        self.assertEqual(
+            self._run_metabolism(lifecycle2, self._persona(base), base),
+            "failed",
+        )
+        self.assertFalse(lifecycle2._metabolism_rate_limit_active("tester"))
+
+
 class PinnedHistoryCompositionTest(unittest.TestCase):
     """起点を凍結した履歴組成 (_pinned_history_from_anchor) の単体。
 
@@ -3028,11 +3251,14 @@ class PanMarkerPersistenceTest(_AdapterTestBase):
         persona = self._fresh_persona()
         client = FakeLLMClient(_sluice_result())
         lifecycle = SimpleNamespace(runtime=FakeRuntime(client))
+        # 読みは strict 版 (Codex 第二巡 修正 A) — 通常の get_embed_metadata は
+        # OperationalError を全部「テーブル不在」へ丸めるので、当て先を変えると
+        # 同時に「読めない」の型も本物 (ロック競合) にしておく。
         with patch(
-            "sai_memory.memory.storage.get_embed_metadata",
-            side_effect=RuntimeError("db read error"),
+            "sai_memory.memory.storage.get_embed_metadata_strict",
+            side_effect=sqlite3.OperationalError("database is locked"),
         ):
-            with self.assertRaises(RuntimeError):
+            with self.assertRaises(sluice.SluiceStorageUnavailableError):
                 sluice.run_sluice(lifecycle, persona, "b", msgs, 0, None)
         self.assertEqual(client.calls, [])  # LLM を呼ぶ前に止まる
         self.assertIsNone(getattr(persona, "_sluice_last_pan_id", None))

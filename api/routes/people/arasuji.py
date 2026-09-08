@@ -222,6 +222,7 @@ def estimate_chronicle_cost(
             is_free_tier=estimate.is_free_tier,
             currency=estimate.currency,
             repair_incomplete=repair_incomplete,
+            consolidation_calls=estimate.consolidation_calls,
         )
     finally:
         conn.close()
@@ -442,6 +443,32 @@ def get_chronicle_diagnosis(persona_id: str, manager=Depends(get_manager)):
         )
         lv1_orphan_source_ids = cur.fetchone()[0] or 0
 
+        # 孤児参照のエントリ単位の内訳 (機構 G —
+        # docs/intent/chronicle_coverage_gaps.md): 何本の Lv1 に散っているか、
+        # 各エントリの総 source 数 / 欠け数 / 全滅か部分欠けか。総数だけでは
+        # 「参照が 20 個」までしか分からず、原因の切り分け ((c) の真偽) が
+        # できなかった不足の解消。総数・欠け数とも DISTINCT の勘定で揃える
+        # (source_ids に重複があると json_array_length の総数と食い違う)。
+        cur = conn.execute(
+            "SELECT a.id, COUNT(DISTINCT je.value), "
+            "COUNT(DISTINCT CASE WHEN je.value NOT IN (SELECT id FROM messages) "
+            "THEN je.value END) AS missing "
+            "FROM arasuji_entries a, json_each(a.source_ids_json) je "
+            "WHERE a.level = 1 "
+            "GROUP BY a.id "
+            "HAVING missing > 0 "
+            "ORDER BY missing DESC, a.id"
+        )
+        lv1_orphan_entries = [
+            {
+                "id_prefix": str(entry_id)[:8],
+                "total_sources": int(total or 0),
+                "missing_sources": int(missing or 0),
+                "all_missing": int(missing or 0) >= int(total or 0),
+            }
+            for entry_id, total, missing in cur.fetchall()
+        ]
+
         # source_count フィールドと実際の長さが異なるエントリ
         cur = conn.execute(
             "SELECT COUNT(*) FROM arasuji_entries "
@@ -589,6 +616,8 @@ def get_chronicle_diagnosis(persona_id: str, manager=Depends(get_manager)):
             "lv1_unique_source_ids": lv1_unique_source_ids,        # plan_alignment の processed_ids 件数と同値
             "lv1_duplicate_source_ids": lv1_duplicate_source_ids,  # 重複分（0でなければ異常）
             "lv1_orphan_source_ids": lv1_orphan_source_ids,        # 存在しないメッセージ参照数
+            "lv1_orphan_entries": lv1_orphan_entries,              # 孤児参照のエントリ単位内訳 (機構 G)
+            "lv1_orphan_entry_count": len(lv1_orphan_entries),     # 孤児参照が散っている Lv1 の本数
             "lv1_mismatched_entries": lv1_mismatched_entries,      # source_count != 実際長 のエントリ数
             "lv1_actual_source_ids_avg": round(lv1_actual_avg, 1),
             "lv1_actual_source_ids_max": lv1_actual_max,
@@ -1315,6 +1344,47 @@ def _run_coverage_repair_job(
 
         if status == "ok":
             message = "あらすじになっていなかった過去の会話を編纂しました"
+            # 内訳 (機構 G — docs/intent/chronicle_coverage_gaps.md): 残りが
+            # あるのに完了の顔だけで終わらない。数字ゼロの項は省く。
+            breakdown = lifecycle.pop_last_chronicle_breakdown(
+                getattr(persona, "persona_id", None)
+            )
+            if breakdown:
+                parts = []
+                compiled = int(breakdown.get("compiled_messages") or 0)
+                absorbed = int(breakdown.get("absorbed_messages") or 0)
+                silent = int(breakdown.get("silent_messages") or 0)
+                folds = int(breakdown.get("consolidated_folds") or 0)
+                # 処理できなかった分 = 吸収の skip で未被覆のまま残った分 +
+                # fold 照会失敗で見送った分。どちらも再実行で再計画される。
+                unprocessed = (
+                    int(breakdown.get("skipped_messages") or 0)
+                    + int(breakdown.get("deferred_messages") or 0)
+                )
+                if not compiled and not absorbed and folds:
+                    # 編纂ゼロ・まとめだけの走行 — 「編纂しました」は嘘に
+                    # なるので、実際にした仕事 (まとめ) を言う。
+                    message = "あらすじを大きな流れにまとめました"
+                if compiled:
+                    parts.append(f"あらすじにした {compiled} 件")
+                if absorbed:
+                    parts.append(f"隣のあらすじに合流 {absorbed} 件")
+                if folds:
+                    parts.append(f"まとめ {folds} 件")
+                remaining = silent + unprocessed
+                if silent and unprocessed:
+                    parts.append(
+                        f"残り {remaining} 件（うち発話のない記録 {silent} 件"
+                        f" / 処理できなかった記録 {unprocessed} 件）"
+                    )
+                elif silent:
+                    parts.append(f"残り {silent} 件（発話のない記録のみ）")
+                elif unprocessed:
+                    parts.append(
+                        f"残り {unprocessed} 件（処理できなかった記録のみ）"
+                    )
+                if parts:
+                    message += "（" + " / ".join(parts) + "）"
             if mark_failures:
                 # 編纂は確定済み。印だけの失敗は completed のまま可視化する
                 # (修正 4) — 次回の補修の mark_covered_cold_windows が冪等に

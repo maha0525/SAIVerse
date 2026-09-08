@@ -306,7 +306,10 @@ class ExecutionLedger:
           prepared → runnable (failed は副作用ゼロ保証なので再実行安全、
           intent §2.1)
         - 既存 running / applied / completed → runnable=False (既に走った /
-          走っている)
+          走っている)。completed について、成果物が外部証跡で観測でき再実行が
+          冪等な kind は、呼び出し元の判断で :meth:`supersede_completed` により
+          キーを退避してから再 claim できる (成果物がユーザー削除等で消えた
+          場合の再実行の口)
         - 既存 unknown → runnable=False。**自動再実行禁止** (intent §2.5) —
           裁定 (list_unknown → 照合) まで同キーの実行はブロックする。kind 側が
           照合を済ませられるなら :meth:`reconcile_unknown` で閉じてから再 claim
@@ -658,6 +661,74 @@ class ExecutionLedger:
             LOGGER.warning(
                 "[ledger] reconciled unknown %s kind=%s (key %s -> %s): closed as "
                 "completed; the next claim on the original key starts a new run",
+                execution_id, entry.KIND, original_key, entry.IDEMPOTENCY_KEY,
+            )
+            return True
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+
+    def supersede_completed(self, execution_id: str) -> bool:
+        """completed 行のキーだけを退避し、同じキーで新しい claim が取れるようにする。
+
+        状態遷移はしない — 行は completed のまま残る (走った事実の記録は消さない)。
+        退避するのは IDEMPOTENCY_KEY だけで、形は
+        ``{key}#superseded-{id先頭8字}`` (:meth:`claim_execution` の failed 退避 /
+        :meth:`reconcile_unknown` の unknown 退避と同じ形)。
+
+        なぜ completed を退避してよいか (2026-09-08、Chronicle 全削除の直後の
+        再編纂が completed 行に永久に塞がれた実害から):
+
+        - completed が守るのは「同じ冪等キーの実行を二度走らせない」こと。だが
+          成果物が外部証跡で観測でき、再実行が冪等な kind (例 ``metabolism.run``
+          — arasuji テーブルの source_ids で確定済みチャンクは飛ばされ、LLM は
+          再発火しない) では、その保護は成果物が存在する限り成果物側で既に
+          守られている。
+        - 成果物がユーザー操作 (全削除) で消えた場合、同じキーでの再実行は
+          ユーザーの意図そのもの — completed 行だけが残って再実行を永久に塞ぐ
+          のは保護ではなく故障になる。
+        - 並行の二重実行は本メソッドの守備範囲ではない — running 行の claim
+          ブロックと kind 側の排他 (Beat ロック) が引き続き塞ぐ。
+
+        汎用メソッドとして台帳に置くが、「この kind は退避してよい」の判断は
+        kind の意味論 (成果物の観測可能性・再実行の冪等性) を知る呼び出し元の
+        責務である (:meth:`reconcile_unknown` と同じ責務分界)。台帳は kind を
+        知らないので、無条件に呼べば completed の二重実行防止は消える。
+
+        completed 以外の行 (running / prepared / unknown / failed) には何もせず
+        False を返す (別経路が先に動かしていても壊さない)。キーを持たない行
+        (idempotency_key=None) も False — 塞いでいるキーが無く、退避する対象が
+        存在しない。
+
+        Returns:
+            True = キーを退避した (元のキーで新しい claim が取れる)。
+            False = 行が completed ではない、またはキーを持たない — 台帳は無変更。
+        """
+        db = self._session_factory()
+        try:
+            entry = self._get_entry(db, execution_id)
+            if entry.STATUS != STATUS_COMPLETED:
+                LOGGER.info(
+                    "[ledger] supersede skipped (not completed): %s status=%s",
+                    execution_id, entry.STATUS,
+                )
+                return False
+            original_key = entry.IDEMPOTENCY_KEY
+            if original_key is None:
+                LOGGER.info(
+                    "[ledger] supersede skipped (no idempotency key): %s",
+                    execution_id,
+                )
+                return False
+            entry.IDEMPOTENCY_KEY = f"{original_key}#superseded-{execution_id[:8]}"
+            entry.UPDATED_AT = _now_epoch()
+            db.commit()
+            LOGGER.info(
+                "[ledger] superseded completed %s kind=%s (key %s -> %s): status "
+                "stays completed; the next claim on the original key starts a "
+                "new run",
                 execution_id, entry.KIND, original_key, entry.IDEMPOTENCY_KEY,
             )
             return True

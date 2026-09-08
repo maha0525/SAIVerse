@@ -1214,8 +1214,19 @@ def test_resolve_stays_at_self_anchor_when_advance_write_fails(session_factory, 
 
 
 # ---------------------------------------------------------------------------
-# 起点はスルースのパンマーカーを越えない (2026-08-23、v3 §13.3 との整合)
+# 機構1 とパンマーカー (2026-09-08 改訂 — docs/intent/sluice_coverage_gaps.md
+# 追加の決定 1: 8/23 の「起点はマーカーを越えない」頭打ちは撤回。代わりに、
+# 越えた範囲を sluice_skipped_spans へ記録してから前進する)
 # ---------------------------------------------------------------------------
+
+
+def _skipped_spans(conn):
+    """記録済みの「スルースを通っていない範囲」を (start, end) の列で返す。"""
+    from sai_memory.memory.storage import list_sluice_skipped_spans
+    return [
+        (r["start_message_id"], r["end_message_id"])
+        for r in list_sluice_skipped_spans(conn)
+    ]
 
 
 def test_get_next_message_id(tmp_path):
@@ -1231,14 +1242,16 @@ def test_get_next_message_id(tmp_path):
     conn.close()
 
 
-def test_cold_advance_is_capped_at_the_sluice_pan_marker(
-    session_factory, tmp_path, caplog,
+def test_cold_advance_crosses_the_marker_and_records_the_span(
+    session_factory, tmp_path,
 ):
-    """最前線がマーカーより先でも、起点はマーカーの次までしか進まない。
+    """最前線がマーカーより先なら、越えた範囲を記録して最前線まで進む。
 
-    Chronicle が覆っているだけでは退場を許さない (v3 §13.3) — スルースが見て
-    いない範囲を提示から落とすと、その範囲は本人の目を通らずに消える
-    (2026-08-23 実機事故)。
+    改訂 (2026-09-08、docs/intent/sluice_coverage_gaps.md 追加の決定 1):
+    旧仕様「起点はマーカーの次で頭打ち」は撤回。守る対象は「越えさせない」
+    から「スルースを通っていない範囲がユーザーに分かる状態で記録される」へ
+    移った — 越えた範囲 (旧マーカーの次〜新起点) が sluice_skipped_spans に
+    残ることを固定する。
     """
     lc = _make_lifecycle(session_factory)
     conn = _memory_conn(tmp_path)
@@ -1255,17 +1268,23 @@ def test_cold_advance_is_capped_at_the_sluice_pan_marker(
     )
     _set_pan_marker(persona, "m2")  # スルースは m2 までしか見ていない
 
-    with caplog.at_level("INFO", logger="sea.session_lifecycle"):
-        assert lc.resolve_metabolism_anchor(persona) == ("m3", "frontier")
-    assert "cold anchor advance capped at the sluice pan marker" in caplog.text
-    assert lc.load_anchor_entry(PERSONA_ID, "model-a")["anchor_id"] == "m3"
+    assert lc.resolve_metabolism_anchor(persona) == ("m5", "frontier")
+    assert lc.load_anchor_entry(PERSONA_ID, "model-a")["anchor_id"] == "m5"
+    # 越えた範囲 = 旧マーカーの次 (m3) 〜 新起点 (m5)
+    assert _skipped_spans(conn) == [("m3", "m5")]
     conn.close()
 
 
-def test_cold_advance_skipped_without_a_pan_marker(
-    session_factory, tmp_path, caplog,
+def test_cold_advance_without_a_marker_records_from_the_old_anchor(
+    session_factory, tmp_path,
 ):
-    """スルース未走行 (マーカー無し) のペルソナでは前進しない (fail-closed)。"""
+    """スルース未走行 (マーカー無し) でも前進する — 出て行く範囲は全部未見
+    なので、旧起点〜新起点を記録する。
+
+    改訂 (2026-09-08、sluice_coverage_gaps 追加の決定 1): 旧仕様は
+    「マーカーが読めなければ前進しない (fail-closed)」だったが、スルースが
+    無い時代の記憶に遡ってスルースを義務づけない (intent 決定 4)。
+    """
     lc = _make_lifecycle(session_factory)
     conn = _memory_conn(tmp_path)
     for i in range(1, 5):
@@ -1280,10 +1299,41 @@ def test_cold_advance_skipped_without_a_pan_marker(
         persona_id=PERSONA_ID, model="model-a", sai_memory=_adapter(conn),
     )
 
-    with caplog.at_level("DEBUG", logger="sea.session_lifecycle"):
+    assert lc.resolve_metabolism_anchor(persona) == ("m3", "frontier")
+    assert lc.load_anchor_entry(PERSONA_ID, "model-a")["anchor_id"] == "m3"
+    assert _skipped_spans(conn) == [("m1", "m3")]
+    conn.close()
+
+
+def test_cold_advance_blocked_when_the_span_cannot_be_recorded(
+    session_factory, tmp_path,
+):
+    """越えた範囲が記録できない回は前進しない (fail-closed)。
+
+    代替の制約「通っていない範囲はユーザーに分かる状態で明示する」を、
+    記録なしの前進で黙って破らない (sluice_coverage_gaps 追加の決定 1)。
+    """
+    lc = _make_lifecycle(session_factory)
+    conn = _memory_conn(tmp_path)
+    for i in range(1, 5):
+        _add_message(conn, f"m{i}", 1000 + i)
+    _add_l1_entry(conn, ["m1", "m2"])  # 最前線 = m3
+
+    stale = _now() - timedelta(days=3)
+    lc.upsert_anchor_entry(PERSONA_ID, "model-a", {
+        "anchor_id": "m1", "updated_at": stale.isoformat(), "ttl_seconds": 300,
+    })
+    persona = SimpleNamespace(
+        persona_id=PERSONA_ID, model="model-a", sai_memory=_adapter(conn),
+    )
+
+    with patch.object(
+        lc, "_record_sluice_skipped_span",
+        side_effect=RuntimeError("db write failed"),
+    ):
         assert lc.resolve_metabolism_anchor(persona) == ("m1", "self")
-    assert "cold anchor advance skipped: no sluice pan marker" in caplog.text
     assert lc.load_anchor_entry(PERSONA_ID, "model-a")["anchor_id"] == "m1"
+    assert _skipped_spans(conn) == []
     conn.close()
 
 
@@ -1292,8 +1342,7 @@ def test_cold_advance_reaches_frontier_when_the_marker_is_past_it(
 ):
     """マーカーが最前線以降なら従来どおり最前線まで進む (機構1 の本来の目的)。
 
-    マーカーがちょうど最前線にある場合も、最前線までの範囲は全部スルースを
-    通っているので頭打ちにならない。
+    最前線までの範囲は全部スルースを通っているので、記録も要らない。
     """
     lc = _make_lifecycle(session_factory)
     conn = _memory_conn(tmp_path)
@@ -1312,6 +1361,7 @@ def test_cold_advance_reaches_frontier_when_the_marker_is_past_it(
         _set_pan_marker(persona, marker)
         assert lc.resolve_metabolism_anchor(persona) == ("m3", "frontier")
         assert lc.load_anchor_entry(PERSONA_ID, "model-a")["anchor_id"] == "m3"
+    assert _skipped_spans(conn) == []  # 越えていない = 記録なし
     conn.close()
 
 
@@ -1332,23 +1382,23 @@ def _history_manager(ids, chars=1_000):
     return SimpleNamespace(get_history_from_anchor=get_history_from_anchor)
 
 
-def test_manual_compaction_with_failing_sluice_does_not_shrink_the_window(
+def test_manual_compaction_with_failing_sluice_shrinks_only_with_a_record(
     session_factory, tmp_path,
 ):
-    """2026-08-23 実機事故の並びの回帰: 手動整理で Chronicle 生成が成功し、その
-    直後にスルースが失敗しても、提示ウィンドウの文字数は減らない。
+    """スルースが失敗しても窓は縮んでよい — ただし縮んだ範囲が記録される。
 
-    事故は「スルース自身のプロンプト組成が起点を解決した瞬間に機構1 が発火し、
-    いま生成した Chronicle の最前線まで起点が進む」並びで起きた。現行仕様
-    (起点の凍結、2026-08-24) ではスルースは起点を解決しない — 呼び出し元が
-    実行頭に撮った窓の起点が window_anchor_id で渡り、失敗しても anchor 行と
-    提示ウィンドウは実行前のまま残ることを固定する。
+    改訂 (2026-09-08、docs/intent/sluice_coverage_gaps.md 追加の決定 1):
+    旧仕様は「手動整理 + スルース失敗で窓の文字数が減らない」(起点はマーカーを
+    越えない) を固定していた。現行は、冷えた起点の前進 (機構1) がマーカーを
+    越えて窓を縮めることを許し、越えた範囲を sluice_skipped_spans へ記録する。
+    スルース失敗そのものの退場停止 (v3 §13.3 のゲート) は従来どおり — 失敗した
+    整理が窓を**さらに**縮めることはない。
     """
     from sea.eviction_plan import Watermarks, message_chars
 
     lc = _make_lifecycle(session_factory)
     conn = _memory_conn(tmp_path)
-    ids = [f"m{i}" for i in range(1, 9)]
+    ids = [f"m{i}" for i in range(1, 13)]
     for n, mid in enumerate(ids, start=1):
         _add_message(conn, mid, 1000 + n)
     _add_l1_entry(conn, ["m1", "m2", "m3", "m4", "m5"])  # 最前線 = m6
@@ -1369,14 +1419,20 @@ def test_manual_compaction_with_failing_sluice_does_not_shrink_the_window(
 
     before = message_chars(lc.get_presented_window(persona, "model-a").presented)
 
+    # 会話の頭の組成に相当する起点の解決 — 冷えた行は最前線 (m6) まで前進し、
+    # マーカーを越えた範囲 (m3..m6) が記録される。窓はここで縮む。
+    assert lc.resolve_metabolism_anchor(persona) == ("m6", "frontier")
+    assert _skipped_spans(conn) == [("m3", "m6")]
+    shrunk = message_chars(lc.get_presented_window(persona, "model-a").presented)
+    assert shrunk < before
+
     pinned = []
 
     def _failing_sluice(lifecycle, persona_, building_id, current_messages,
                         evict_count, event_callback=None, finalize=False,
                         window_anchor_id=None, model_key=None):
-        # 新仕様 (起点の凍結): スルースは起点を自分で解決しない — 呼び出し元が
-        # 実行頭に撮った窓の起点が window_anchor_id で渡ってくる。ここで失敗
-        # しても、その凍結値と anchor 行が動いていないことを下で検算する。
+        # 起点の凍結 (2026-08-24): 呼び出し元が実行頭に撮った窓の起点が
+        # window_anchor_id で渡ってくる。
         pinned.append((window_anchor_id, model_key))
         raise RuntimeError("structured output loop")
 
@@ -1388,10 +1444,11 @@ def test_manual_compaction_with_failing_sluice_does_not_shrink_the_window(
         status = lc.run_manual_compaction(persona)
 
     assert status == "failed"                      # 退場は止まった
-    assert pinned == [("m3", "model-a")]           # 実行頭の窓の起点と model が凍結で届く
-    assert lc.load_anchor_entry(PERSONA_ID, "model-a")["anchor_id"] == "m3"
+    assert pinned == [("m6", "model-a")]           # 前進後の起点が凍結で届く
+    assert lc.load_anchor_entry(PERSONA_ID, "model-a")["anchor_id"] == "m6"
     after = message_chars(lc.get_presented_window(persona, "model-a").presented)
-    assert after == before
+    assert after == shrunk                         # 失敗した整理はさらに縮めない
+    assert _skipped_spans(conn) == [("m3", "m6")]  # 記録は増えない
     conn.close()
 
 

@@ -73,7 +73,12 @@ def _write_memo(kind: str, text: str, activity_name: str) -> str:
                 activity = get_or_create_activity(
                     conn, activity_name, _ACTIVITY_ORIGIN, commit=False,
                 )
-                add_memo(conn, activity.id, today, kind, text, commit=False)
+                # できごとの日 = 当日 (本人がその場で書く記録なので、書かれた日
+                # とできごとの日が一致する)。origin は既定の 'live'。
+                add_memo(
+                    conn, activity.id, today, kind, text,
+                    event_date=today, commit=False,
+                )
                 conn.commit()
             except BaseException:
                 conn.rollback()

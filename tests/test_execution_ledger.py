@@ -1159,6 +1159,70 @@ class ReconcileUnknownTests(ExecutionLedgerTestBase):
         self.assertEqual(self.ledger.list_unknown(), [])
 
 
+class SupersedeCompletedTests(ExecutionLedgerTestBase):
+    """supersede_completed (2026-09-08): completed 行のキーだけを退避し、同じ
+    キーの次の claim を通す (Chronicle 全削除・インポート直後の補修のように、
+    成果物が消えても鍵が前進しない形の救済)。状態は completed のまま動かさない。"""
+
+    def _make_completed(self, key="p1:msg-42"):
+        execution_id = self._begin_running(
+            "metabolism.run", persona_id="p1", key=key,
+        )
+        self.ledger.mark_applied(execution_id, result={"chunks": 2})
+        self.ledger.mark_completed(execution_id)
+        return execution_id
+
+    def test_retires_key_and_opens_new_claim(self):
+        execution_id = self._make_completed()
+        self.assertTrue(self.ledger.supersede_completed(execution_id))
+
+        row = self.ledger.get_execution(execution_id)
+        # 状態遷移はしない — completed のまま (走った事実の記録は残る)
+        self.assertEqual(row["status"], XL.STATUS_COMPLETED)
+        self.assertEqual(row["result"], {"chunks": 2})
+        self.assertEqual(
+            row["idempotency_key"], f"p1:msg-42#superseded-{execution_id[:8]}",
+        )
+
+        # 元のキーは空いたので、次の claim は新しい prepared 行を作る
+        new_id, runnable, existing = self.ledger.claim_execution(
+            "metabolism.run", idempotency_key="p1:msg-42", persona_id="p1",
+        )
+        self.assertTrue(runnable)
+        self.assertIsNone(existing)
+        self.assertNotEqual(new_id, execution_id)
+
+    def test_returns_false_and_leaves_non_completed_rows_alone(self):
+        # running (走行中の保護は退避しない)
+        running_id = self._begin_running("metabolism.run", persona_id="p1", key="k1")
+        self.assertFalse(self.ledger.supersede_completed(running_id))
+        row = self.ledger.get_execution(running_id)
+        self.assertEqual(row["status"], XL.STATUS_RUNNING)
+        self.assertEqual(row["idempotency_key"], "k1")
+
+        # unknown (照合は reconcile_unknown の仕事 — 退避しない)
+        unknown_id = self._begin_running("metabolism.run", persona_id="p1", key="k2")
+        self.ledger.mark_unknown(unknown_id, "recovered: deadline")
+        self.assertFalse(self.ledger.supersede_completed(unknown_id))
+        row = self.ledger.get_execution(unknown_id)
+        self.assertEqual(row["status"], XL.STATUS_UNKNOWN)
+        self.assertEqual(row["idempotency_key"], "k2")
+
+    def test_returns_false_for_keyless_completed_row(self):
+        # キーの無い行は claim を塞がないので、退避する対象が存在しない
+        execution_id = self._begin_running("test.kind", persona_id="p1", key=None)
+        self.ledger.mark_applied(execution_id)
+        self.ledger.mark_completed(execution_id)
+        self.assertFalse(self.ledger.supersede_completed(execution_id))
+        row = self.ledger.get_execution(execution_id)
+        self.assertEqual(row["status"], XL.STATUS_COMPLETED)
+        self.assertIsNone(row["idempotency_key"])
+
+    def test_unknown_id_raises(self):
+        with self.assertRaises(XL.ExecutionNotFoundError):
+            self.ledger.supersede_completed("no-such-execution")
+
+
 class StaleSweepRaceTests(ExecutionLedgerTestBase):
     """recover_stale_running (2026-09-03): 書き換えは「いまも running」を条件に
     した UPDATE で、読んだ後に終端へ進んだ行を上書きしない。"""

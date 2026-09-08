@@ -230,18 +230,70 @@ class ChronicleClaimTest(unittest.TestCase):
                       side_effect=RuntimeError("skip entity extraction")):
             return lifecycle.generate_chronicle(self._persona(), force=True)
 
-    def test_same_window_second_begin_is_skipped(self):
-        """① 同じ提示コンテキストの二重実行は claim (created=False) でスキップされる。"""
+    def test_same_window_after_completed_supersedes_and_reruns(self):
+        """① 前回 completed の同鍵は退避 (supersede) されて再実行が走る
+        (2026-09-08 改訂 — docs/intent/execution_ledger.md §11.2)。
+
+        旧仕様はここで「completed 行がブロック → deferred」を固定していたが、
+        Chronicle 全削除・インポート直後の補修のように鍵 (範囲の末尾メッセージ
+        ID) が前進しない形では再編纂が永久に塞がるため、completed はキーを
+        #superseded- 付きで退避して新しい走行を通す裁定に変えた。二重 LLM
+        コストの安全網は台帳ではなく arasuji の source_ids スキップ (FakeExecutor
+        は arasuji_entries に書かない = 成果物が消えた全削除後の形の再現)。"""
+        from saiverse.execution_ledger import STATUS_COMPLETED
+
         lifecycle = self._make_lifecycle()
         first = self._generate(lifecycle)
         self.assertEqual(first, "ok")
         self.assertEqual(len(FakeExecutor.calls), 1)
 
-        # FakeExecutor は arasuji_entries に書かないため提示コンテキストは同一のまま。
-        # 台帳の dedup だけが二重編纂 (二重 LLM コスト) を止める。
+        key = f"{PERSONA_ID}:{self._message_ids()[-1]}"
+        first_row = self.ledger.find_execution("metabolism.run", key)
+        self.assertIsNotNone(first_row)
+        first_id = first_row["execution_id"]
+        self.assertEqual(first_row["status"], STATUS_COMPLETED)
+
+        # 同じ提示コンテキスト: completed 行は退避され、新しい走行が走る
         second = self._generate(lifecycle)
-        self.assertEqual(second, "deferred")
-        self.assertEqual(len(FakeExecutor.calls), 1)  # 生成は走らない
+        self.assertEqual(second, "ok")
+        self.assertEqual(len(FakeExecutor.calls), 2)
+
+        # 旧行はキーを #superseded- 付きで退避され、completed のまま残る
+        old = self.ledger.get_execution(first_id)
+        self.assertEqual(old["status"], STATUS_COMPLETED)
+        self.assertEqual(
+            old["idempotency_key"], f"{key}#superseded-{first_id[:8]}",
+        )
+        # 正キーは新しい走行の行が持つ
+        fresh = self.ledger.find_execution("metabolism.run", key)
+        self.assertIsNotNone(fresh)
+        self.assertNotEqual(fresh["execution_id"], first_id)
+
+    def test_supersede_failure_defers_instead_of_running_untracked(self):
+        """① completed の退避に失敗したら "deferred" で見送る — 追跡外
+        (claim なし) で走らせない (unknown の照合失敗と同じ規則)。"""
+        from saiverse.execution_ledger import (
+            STATUS_COMPLETED, ExecutionLedgerError,
+        )
+
+        lifecycle = self._make_lifecycle()
+        self.assertEqual(self._generate(lifecycle), "ok")
+        self.assertEqual(len(FakeExecutor.calls), 1)
+
+        key = f"{PERSONA_ID}:{self._message_ids()[-1]}"
+        first_id = self.ledger.find_execution("metabolism.run", key)["execution_id"]
+
+        with patch.object(
+            self.ledger, "supersede_completed",
+            side_effect=ExecutionLedgerError("db down"),
+        ):
+            self.assertEqual(self._generate(lifecycle), "deferred")
+        self.assertEqual(len(FakeExecutor.calls), 1)
+
+        # 行は completed のまま、鍵も元のまま (次の claim が再び退避を試みる)
+        row = self.ledger.get_execution(first_id)
+        self.assertEqual(row["status"], STATUS_COMPLETED)
+        self.assertEqual(row["idempotency_key"], key)
 
     def test_failed_generation_returns_failed_and_same_window_retries(self):
         """② (編纂側) 生成失敗 → "failed"。failed claim はキー退避されるため
@@ -257,9 +309,11 @@ class ChronicleClaimTest(unittest.TestCase):
         self.assertEqual(self._generate(lifecycle), "ok")
         self.assertEqual(len(FakeExecutor.calls), 2)
 
-        # 完了後の同じ提示コンテキスト: completed 行がブロック → deferred (二重編纂なし)
-        self.assertEqual(self._generate(lifecycle), "deferred")
-        self.assertEqual(len(FakeExecutor.calls), 2)
+        # 完了後の同じ提示コンテキスト: completed 行も退避されて再実行が走る
+        # (2026-09-08 改訂 — 旧仕様の「completed がブロック → deferred」は
+        # 全削除後の再編纂を永久に塞ぐため撤回。intent §11.2)
+        self.assertEqual(self._generate(lifecycle), "ok")
+        self.assertEqual(len(FakeExecutor.calls), 3)
 
     def test_progress_heartbeats_the_ledger_row(self):
         """進捗を画面へ流す場所が台帳の心拍 (touch_running) にもなる
@@ -322,9 +376,10 @@ class ChronicleClaimTest(unittest.TestCase):
         self.assertNotEqual(fresh["execution_id"], stale_id)
         self.assertEqual(fresh["status"], STATUS_COMPLETED)
 
-        # 新しい行が completed で塞いだ後は従来どおり deferred (二重編纂なし)
-        self.assertEqual(self._generate(lifecycle), "deferred")
-        self.assertEqual(len(FakeExecutor.calls), 1)
+        # 新しい行が completed になった後の同鍵も、退避されて再実行が走る
+        # (2026-09-08 改訂 — intent §11.2。二重編纂の防止は source_ids が担う)
+        self.assertEqual(self._generate(lifecycle), "ok")
+        self.assertEqual(len(FakeExecutor.calls), 2)
 
     def test_reconcile_failure_defers_instead_of_running_untracked(self):
         """unknown の照合に失敗したら "deferred" で見送る — 追跡外 (claim なし)
@@ -455,7 +510,8 @@ class ChronicleClaimTest(unittest.TestCase):
                               fail_band_calls=None, band_failure_calls=None,
                               band_failure_unrecorded=None,
                               raise_on_band_call=None,
-                              raise_band_after_attempt=False):
+                              raise_band_after_attempt=False,
+                              raise_band_with=None):
         """run_band_overflow の呼び出し (max_folds) と画面の進捗文言を記録して走らせる。
 
         ``on_band_call`` は束ねの呼び出しごとに (呼び出し番号 1 始まり) で
@@ -471,6 +527,7 @@ class ChronicleClaimTest(unittest.TestCase):
         ``raise_on_band_call`` の回は RuntimeError("db down") を投げる —
         ``raise_band_after_attempt`` なら stats["attempts"]=1 を書いてから
         (LLM に届いた後の失敗)、既定では stats に触れず (前検査での失敗)。
+        投げる例外は ``raise_band_with`` で差し替えられる (レート制限の検証用)。
         """
         calls = []
         events = []
@@ -485,7 +542,7 @@ class ChronicleClaimTest(unittest.TestCase):
                 if raise_band_after_attempt and stats is not None:
                     stats["attempts"] = 1
                     stats["created"] = 0
-                raise RuntimeError("db down")
+                raise raise_band_with or RuntimeError("db down")
             if len(calls) in failing:
                 if stats is not None:
                     stats["attempts"] = 1
@@ -547,8 +604,9 @@ class ChronicleClaimTest(unittest.TestCase):
     def test_consolidation_runs_after_each_chunk_and_once_at_the_end(self):
         status, calls, events = self._generate_interleaved(band_plan_count=5)
         self.assertEqual(status, "ok")
-        # 3 チャンク分 + 最後の 1 回。各呼び出しには残り予算だけを渡す。
-        self.assertEqual(calls, [5, 4, 3, 2])
+        # 3 チャンク分 + 最後の呼び直し (予算が残っていて進んでいる限り繰り返す)。
+        # 各呼び出しには残り予算だけを渡す。
+        self.assertEqual(calls, [5, 4, 3, 2, 1])
         # 画面の件数は走行全体の累計 / 承認済み総予算 (呼び出しごとに 1/N へ戻らない)。
         band_msgs = [
             e["content"] for e in events
@@ -556,7 +614,7 @@ class ChronicleClaimTest(unittest.TestCase):
         ]
         self.assertEqual(
             band_msgs,
-            [f"上位のあらすじを束ねています ({n}/5)..." for n in (1, 2, 3, 4)],
+            [f"上位のあらすじを束ねています ({n}/5)..." for n in (1, 2, 3, 4, 5)],
         )
 
     def test_total_folds_never_exceed_the_approved_budget(self):
@@ -566,6 +624,17 @@ class ChronicleClaimTest(unittest.TestCase):
         self.assertEqual(status, "ok")
         # 2 回で予算を使い切り、以後 (3 チャンク目・最後) は呼ばれない。
         self.assertEqual(calls, [2, 1])
+
+    def test_final_consolidation_loops_until_the_approved_budget_is_done(self):
+        """束ねだけ (チャンク無し) の走行 — run_band_overflow 1 回の安全弁
+        (既定 3、folds_per_call=3 が模す) で頭打ちにせず、最後の束ねを承認済み
+        予算まで呼び直す。2026-09-09 実機: 承認 5 件の補修が「まとめ 3 件」で
+        止まり、残り 2 件が画面に出た。"""
+        status, calls, _ = self._generate_interleaved(
+            band_plan_count=5, n_chunks=0, folds_per_call=3,
+        )
+        self.assertEqual(status, "ok")
+        self.assertEqual(calls, [5, 2])
 
     def test_zero_budget_never_calls_consolidation(self):
         status, calls, _ = self._generate_interleaved(band_plan_count=0)
@@ -586,12 +655,12 @@ class ChronicleClaimTest(unittest.TestCase):
             band_plan_count=5, band_failure="band-entry",
         )
         self.assertEqual(status, "ok")
-        self.assertEqual(len(calls), 4)
+        self.assertEqual(len(calls), 5)
         done = [e for e in events if e.get("status") == "completed"
                 or "Chronicle生成完了" in e.get("content", "")]
         self.assertTrue(done, f"completion event missing: {events}")
-        # 4 回の束ねがそれぞれ 1 件ずつ失敗を積んだ → 4 件として報告される。
-        self.assertIn("うち 4 件で知識の書き出しに失敗", done[-1]["content"])
+        # 5 回の束ねがそれぞれ 1 件ずつ失敗を積んだ → 5 件として報告される。
+        self.assertIn("うち 5 件で知識の書き出しに失敗", done[-1]["content"])
 
     def test_cancel_during_the_last_after_chunk_fold_ends_as_deferred(self):
         """最後のチャンクが確定した後 (after_chunk の束ねの最中) に中止が押さ
@@ -771,21 +840,21 @@ class ChronicleClaimTest(unittest.TestCase):
         ], [])
 
     def test_band_progress_labels_stay_monotone_across_a_failed_call(self):
-        """成功 → 失敗 → 成功 → 成功 (最後) の並びで、画面の累計 (n/総予算)
-        が戻らず、失敗した回のぶん予算が飛ぶ (1/5, 3/5, 4/5)。"""
+        """成功 → 失敗 → 成功 → 成功 → 成功 (最後の呼び直し) の並びで、画面の
+        累計 (n/総予算) が戻らず、失敗した回のぶん予算が飛ぶ (1/5, 3/5, 4/5, 5/5)。"""
         status, calls, events = self._generate_interleaved(
             band_plan_count=5, n_chunks=3, fail_band_calls={2},
         )
         self.assertEqual(status, "ok")
         # 2 回目 (失敗) も残り予算を 1 消費している。
-        self.assertEqual(calls, [5, 4, 3, 2])
+        self.assertEqual(calls, [5, 4, 3, 2, 1])
         band_msgs = [
             e["content"] for e in events
             if "上位のあらすじを束ねています" in e.get("content", "")
         ]
         self.assertEqual(
             band_msgs,
-            [f"上位のあらすじを束ねています ({n}/5)..." for n in (1, 3, 4)],
+            [f"上位のあらすじを束ねています ({n}/5)..." for n in (1, 3, 4, 5)],
         )
         shown = [int(m.split("(")[1].split("/")[0]) for m in band_msgs]
         self.assertEqual(shown, sorted(shown))
@@ -834,6 +903,49 @@ class ChronicleClaimTest(unittest.TestCase):
         self.assertTrue(any(
             "fold attempt(s) failed in this call" in m for m in logs.output
         ), logs.output)
+
+    # ------------------------------------------------------------------
+    # レート制限 (2026-09-09 Codex 指摘): 束ねの 429 は「もう一度呼べば通る
+    # かもしれない失敗」ではないので、走行の以後の束ねを止めて persona 単位の
+    # 小休止を置く。止めないと残り予算の回数だけ 429 を撃ち続ける。
+    # ------------------------------------------------------------------
+
+    def test_rate_limited_fold_stops_the_run_and_starts_a_cooldown(self):
+        from llm_clients.exceptions import RateLimitError
+
+        with self.assertLogs("sea.session_lifecycle", level="WARNING") as logs:
+            status, calls, _ = self._generate_interleaved(
+                band_plan_count=5, n_chunks=4, with_ledger=True,
+                raise_on_band_call=1, raise_band_after_attempt=True,
+                raise_band_with=RateLimitError("429 tokens per min"),
+            )
+        self.assertEqual(status, "ok")
+        # LLM に届いた後の失敗でも、レート制限なら 1 回目で打ち止め —
+        # 残り 3 チャンクの after_chunk も最後の束ねも呼ばれない。
+        self.assertEqual(calls, [5])
+        self.assertTrue(any(
+            "consolidation stopped for the rest of this run" in m
+            and "rate limited" in m for m in logs.output
+        ), logs.output)
+        # persona 単位の小休止が置かれ、次の入口が仕事を始めない。
+        self.assertTrue(
+            self._last_lifecycle._metabolism_rate_limit_active(PERSONA_ID)
+        )
+
+    def test_only_confirmed_folds_keep_the_final_loop_going(self):
+        """最後の呼び直しは「確定数」で進捗を判定する (予算の消費ではない)。
+
+        毎回 attempts=1 / created=0 を返す束ね (LLM が失敗し続ける形) では、
+        チャンクの after_chunk で予算を使い切る手前でも、最後のループが残り
+        予算のぶん回り続けてはいけない。ここでは n_chunks=0 (束ねだけの走行) で
+        1 回目の失敗の直後にループが抜けることを見る。
+        """
+        status, calls, _ = self._generate_interleaved(
+            band_plan_count=5, n_chunks=0, fail_band_calls=set(range(1, 100)),
+        )
+        self.assertEqual(status, "ok")
+        # 予算は 5 残っているが、確定が 0 なので 1 回で抜ける。
+        self.assertEqual(calls, [5])
 
     # ------------------------------------------------------------------
     # "failed" の実際の理由 (2026-09-03 まはー裁定): LLMError の error_code /

@@ -878,6 +878,178 @@ class TestMarkFailureVisibility:
 
 
 # ---------------------------------------------------------------------------
+# 完了報告の内訳 (機構 G — docs/intent/chronicle_coverage_gaps.md)
+# ---------------------------------------------------------------------------
+
+
+class TestRepairCompletionBreakdown:
+    """補修ジョブの完了メッセージは内訳を言う — 残りがあるのに完了の顔だけで
+    終わらない (機構 G)。内訳は generate_chronicle が persona ごとに保持し、
+    ジョブが pop_last_chronicle_breakdown で受け取る。"""
+
+    def _run_ok_job(self, adapter, session_factory, breakdown):
+        from api.routes.people import arasuji as arasuji_api
+        from sea.cancellation import CancellationToken
+        lc = _make_lifecycle(session_factory)
+        if breakdown is not None:
+            lc._note_chronicle_breakdown(PERSONA_ID, breakdown)
+        job_id = arasuji_api._create_job(PERSONA_ID)
+        with patch.object(
+            lc, "run_coverage_repair_checked", return_value=("ok", 0, True),
+        ), patch.object(lc, "ensure_recall_embeddings"):
+            arasuji_api._run_coverage_repair_job(
+                job_id, _persona(adapter), lc, CancellationToken(),
+            )
+        job = arasuji_api._get_job(job_id)
+        assert job is not None
+        return job
+
+    def test_message_carries_the_breakdown(self, adapter, session_factory):
+        job = self._run_ok_job(adapter, session_factory, {
+            "compiled_messages": 3, "absorbed_messages": 2,
+            "silent_messages": 4, "silent_runs": 1,
+        })
+        assert job["status"] == "completed"
+        assert "あらすじになっていなかった過去の会話を編纂しました" in job["message"]
+        assert "あらすじにした 3 件" in job["message"]
+        assert "隣のあらすじに合流 2 件" in job["message"]
+        assert "残り 4 件（発話のない記録のみ）" in job["message"]
+
+    def test_zero_items_are_omitted(self, adapter, session_factory):
+        """数字ゼロの項は省く (何も無い項を並べて報告を薄めない)。"""
+        job = self._run_ok_job(adapter, session_factory, {
+            "compiled_messages": 3, "absorbed_messages": 0,
+            "silent_messages": 0, "silent_runs": 0,
+        })
+        assert job["status"] == "completed"
+        assert "あらすじにした 3 件" in job["message"]
+        assert "合流" not in job["message"]
+        assert "残り" not in job["message"]
+
+    def test_without_a_breakdown_the_plain_message_stands(
+        self, adapter, session_factory,
+    ):
+        """内訳が取れない回 (旧経路・別入口) は従来の文面のまま。"""
+        job = self._run_ok_job(adapter, session_factory, None)
+        assert job["status"] == "completed"
+        assert job["message"] == "あらすじになっていなかった過去の会話を編纂しました"
+
+    def test_message_splits_remainder_by_reason(self, adapter, session_factory):
+        """残りが複数系統 (発話ゼロ + 処理できず) のときは合計と内数を言う。
+        skip (吸収で処理できず) と deferred (fold 照会失敗の見送り) は
+        「処理できなかった記録」に合算する — どちらも再実行で再計画される。"""
+        job = self._run_ok_job(adapter, session_factory, {
+            "compiled_messages": 3, "absorbed_messages": 0,
+            "silent_messages": 2, "silent_runs": 1,
+            "skipped_messages": 3, "deferred_messages": 1,
+        })
+        assert job["status"] == "completed"
+        assert (
+            "残り 6 件（うち発話のない記録 2 件 / 処理できなかった記録 4 件）"
+            in job["message"]
+        )
+
+    def test_message_carries_skipped_only_remainder(
+        self, adapter, session_factory,
+    ):
+        """吸収で skip された run だけが残った走行も完了顔で終わらない。"""
+        job = self._run_ok_job(adapter, session_factory, {
+            "compiled_messages": 0, "absorbed_messages": 2,
+            "silent_messages": 0, "silent_runs": 0,
+            "skipped_messages": 3,
+        })
+        assert job["status"] == "completed"
+        assert "隣のあらすじに合流 2 件" in job["message"]
+        assert "残り 3 件（処理できなかった記録のみ）" in job["message"]
+
+    def test_fold_only_run_switches_the_base_message(
+        self, adapter, session_factory,
+    ):
+        """編纂ゼロ・まとめ (束ね) だけの走行は「編纂しました」と言わない —
+        実際にした仕事 (あらすじを大きな流れにまとめた) を言う。"""
+        job = self._run_ok_job(adapter, session_factory, {
+            "compiled_messages": 0, "absorbed_messages": 0,
+            "silent_messages": 0, "silent_runs": 0,
+            "consolidated_folds": 3,
+        })
+        assert job["status"] == "completed"
+        assert "編纂しました" not in job["message"]
+        assert "あらすじを大きな流れにまとめました" in job["message"]
+        assert "まとめ 3 件" in job["message"]
+
+    def test_folds_join_the_breakdown_parts(self, adapter, session_factory):
+        """編纂とまとめの両方があった走行は、従来の完了文にまとめ件数を併記する。"""
+        job = self._run_ok_job(adapter, session_factory, {
+            "compiled_messages": 3, "absorbed_messages": 0,
+            "silent_messages": 0, "silent_runs": 0,
+            "consolidated_folds": 2,
+        })
+        assert job["status"] == "completed"
+        assert "あらすじになっていなかった過去の会話を編纂しました" in job["message"]
+        assert "あらすじにした 3 件" in job["message"]
+        assert "まとめ 2 件" in job["message"]
+
+
+class TestSilentOnlyRunEndToEnd:
+    """発話ゼロの run しか無い補修の走行 — 仕事なしの早期 return でも内訳が
+    記録され、「残り K 件」が API の完了文まで届く (機構 G の一気通貫)。"""
+
+    def test_remainder_reaches_the_job_message(self, adapter, session_factory):
+        from api.routes.people import arasuji as arasuji_api
+        from sea.cancellation import CancellationToken
+
+        # 発話ゼロの極小 run (機構の記録だけ)。隣は別スレッドのみ = 吸収されず、
+        # 後ろに編纂済みが居るので末尾の引き戻し帯にもならない。
+        adapter.append_persona_message({
+            "role": "user", "content": "入室の記録",
+            "timestamp": BASE_TIME.isoformat(),
+            "metadata": {"tags": ["event_message"]},
+        })
+        n1 = adapter.append_persona_message({
+            "role": "user", "content": "会話 " + "あ" * 300,
+            "timestamp": (BASE_TIME + timedelta(minutes=10)).isoformat(),
+        }, thread_suffix="t2")
+        assert n1 is not None
+        _create_entry(adapter.conn, [n1])
+
+        lc = _make_lifecycle(session_factory)
+        job_id = arasuji_api._create_job(PERSONA_ID)
+        executor = _CapturingExecutor()
+        with patch(
+            "saiverse.model_configs.find_model_config",
+            return_value=(
+                "mock-model", {"provider": "mock", "context_length": 1000},
+            ),
+        ), patch(
+            "llm_clients.factory.get_llm_client",
+            return_value=SimpleNamespace(),
+        ), patch(
+            "sai_memory.arasuji.executor.execute_plan", executor,
+        ), patch(
+            "sai_memory.arasuji.bands.backfill_coverage", lambda conn: 0,
+        ), patch(
+            "sai_memory.arasuji.bands.run_band_overflow", lambda *a, **k: 0,
+        ), patch(
+            "sai_memory.memory.entity_extractor.make_batch_callback",
+            side_effect=RuntimeError("skip entity extraction"),
+        ), patch.object(lc, "ensure_recall_embeddings"), patch.object(
+            # 水位を持たない model = 全履歴が補修対象 (テストの関心は内訳の
+            # 伝搬であって止め線ではない)
+            lc, "get_metabolism_watermarks", return_value=None,
+        ):
+            arasuji_api._run_coverage_repair_job(
+                job_id, _persona(adapter), lc, CancellationToken(),
+            )
+
+        job = arasuji_api._get_job(job_id)
+        assert job is not None
+        assert job["status"] == "completed"
+        assert "残り 1 件（発話のない記録のみ）" in job["message"]
+        # 通常チャンクは無い = 仕事なしの早期 return を通っても内訳が届いた
+        assert executor.chunks == []
+
+
+# ---------------------------------------------------------------------------
 # 見積もりの時点ずれの歯止め (Codex レビュー 2026-08-31 採用 3)
 # ---------------------------------------------------------------------------
 

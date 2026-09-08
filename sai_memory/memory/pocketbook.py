@@ -3,7 +3,7 @@
 正典: docs/intent/autonomous_behavior_v3.md §13.1 / §13.6 (2026-08-18 まはー承認)。
 
 - **activities**: 活動粒度の名前と開閉状態。「眠っている」は列にせず、
-  最終メモの日付 (:func:`get_last_memo_date`) から導出する。
+  最後のできごとの日 (:func:`get_last_memo_date`) から導出する。
 - **memos**: 日付つき一行 (やった did / やりたい want)。本文はペルソナ本人の
   言葉で、システムは構造だけを読み本文を解釈しない。``span_start_id`` /
   ``span_end_id`` は生ログ (messages.id) への降り口 — 本人には書かせず
@@ -41,6 +41,18 @@ ACTIVITY_ORIGINS = ("sluice", "user", "initial", "migration")
 
 #: memos.kind の閉語彙 (§13.1)。
 MEMO_KINDS = ("did", "want")
+
+#: memos.origin の閉語彙 (docs/intent/sluice_coverage_gaps.md B-2 — 由来の印)。
+#:
+#: - ``live``: 定常のスルースの採取と、本人が唱える手帳のスペル
+#:   (``pocketbook_write``) — いま進行中の暮らしから書かれたもの (既定)
+#: - ``readback``: 本人が過去の会話を読み返して拾ったもの (後から通す採取の
+#:   本人モード)
+#: - ``mechanism``: 機構が拾った候補からの採用 (第二段 UI で採用されたとき用)
+#:
+#: 既存行 (列の後付けより前) は NULL のまま — 読み手は NULL を ``live`` 相当と
+#: して扱う。
+MEMO_ORIGINS = ("live", "readback", "mechanism")
 
 # [0-9] 明記 — \d は全角数字 (２０２６ 等) も通してしまう。ASCII 桁のみ。
 _DATE_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
@@ -124,6 +136,15 @@ def init_pocketbook_tables(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_memos_idem ON memos(idem_key)"
     )
+    # 二つの時刻と由来 (docs/intent/sluice_coverage_gaps.md B-2):
+    # - event_date = できごとの日時 (日粒度)。採取元の会話のメッセージ時刻から
+    #   **機械が刻印**する (本人・LLM に申告させない)。date (書かれた日) と
+    #   別に持つことで、読み返しで当日作の記録が大量に生まれても、過去由来の
+    #   記録は時間軸の本来の場所に並ぶ。既存行は NULL のまま (読み手は date で
+    #   代替する)。
+    # - origin = 由来の印 (:data:`MEMO_ORIGINS`)。既存行は NULL (= live 相当)。
+    _ensure_column(conn, "memos", "event_date", "TEXT")
+    _ensure_column(conn, "memos", "origin", "TEXT")
     if owns_txn:
         conn.commit()
 
@@ -142,15 +163,25 @@ class Activity:
 class Memo:
     id: int
     activity_id: int
-    date: str  # 'YYYY-MM-DD' (日粒度)
+    date: str  # 'YYYY-MM-DD' (日粒度) — 書かれた日 (作成日)
     kind: str  # 'did' | 'want'
     text: str
     span_start_id: Optional[str] = None
     span_end_id: Optional[str] = None
+    event_date: Optional[str] = None  # 'YYYY-MM-DD' — できごとの日 (機械刻印)
+    origin: Optional[str] = None  # 'live' | 'readback' | 'mechanism' (NULL = live 相当)
+
+    @property
+    def effective_date(self) -> str:
+        """提示・ソートに使う日付 — できごとの日、無ければ書かれた日で代替。"""
+        return self.event_date or self.date
 
 
 _ACTIVITY_COLUMNS = "id, name, status, born_at, origin, closed_at"
-_MEMO_COLUMNS = "id, activity_id, date, kind, text, span_start_id, span_end_id"
+_MEMO_COLUMNS = (
+    "id, activity_id, date, kind, text, span_start_id, span_end_id, "
+    "event_date, origin"
+)
 
 
 def _row_to_activity(row) -> Activity:
@@ -173,6 +204,8 @@ def _row_to_memo(row) -> Memo:
         text=row[4],
         span_start_id=row[5],
         span_end_id=row[6],
+        event_date=row[7],
+        origin=row[8],
     )
 
 
@@ -471,16 +504,23 @@ def find_memo_by_content(
     kind: str,
     text: str,
 ) -> Optional[Memo]:
-    """同じ日・同じアクティビティ・同じ種類・同じ本文のメモを探す (重複防止用)。
+    """同じできごとの日・同じアクティビティ・同じ種類・同じ本文のメモを探す。
 
-    冪等キー (``idem_key``) が守るのは「同じ担当範囲の同じ番号」の再適用だけ
-    なので、担当範囲が変われば同じ内容でも別キーになって通る。退場が次回へ
-    繰り越された回は採取済みの会話が窓に残り、本人が同じメモをもう一度返す —
-    その内容ベースの重複をここで見つける。
+    重複防止用。冪等キー (``idem_key``) が守るのは「同じ担当範囲の同じ番号」の
+    再適用だけなので、担当範囲が変われば同じ内容でも別キーになって通る。退場が
+    次回へ繰り越された回は採取済みの会話が窓に残り、本人が同じメモをもう一度
+    返す — その内容ベースの重複をここで見つける。
 
     日付を条件に含めるのは、手帳が日々の記録だから — 「今日も小説を書いた」が
     二日続くのは重複ではなく事実で、単純な内容一致で弾くと正しい記録が落ちる。
     種類 (want / did) も分けるのは同じ理由 (「やりたい」と「やった」は別の記録)。
+
+    その日は**できごとの日**で数える — ``date`` 引数には照合したいメモの
+    できごとの日 (書き込む側の ``event_date``、無ければ書かれた日) を渡し、
+    既存行の側も ``COALESCE(event_date, date)`` で比べる
+    (docs/intent/sluice_coverage_gaps.md B-2)。書かれた日で比べると、読み返しで
+    拾った三月の記録と今日の記録が「同じ日」に見えて、別のできごとが重複として
+    落ちる。
 
     照合は書き込みと同じトランザクションの中で行うこと (check-then-act の隙間を
     作らない)。出自: docs/issues/sluice_memo_duplicate_across_spans.md。
@@ -493,7 +533,8 @@ def find_memo_by_content(
         raise ValueError(f"memo text must be a string, got: {text!r}")
     row = conn.execute(
         f"SELECT {_MEMO_COLUMNS} FROM memos "
-        "WHERE activity_id = ? AND date = ? AND kind = ? AND text = ? "
+        "WHERE activity_id = ? AND COALESCE(event_date, date) = ? "
+        "AND kind = ? AND text = ? "
         "ORDER BY id ASC LIMIT 1",
         (activity_id, date, kind, text),
     ).fetchone()
@@ -510,6 +551,8 @@ def add_memo(
     span_start_id: Optional[str] = None,
     span_end_id: Optional[str] = None,
     idem_key: Optional[str] = None,
+    event_date: Optional[str] = None,
+    origin: str = "live",
     commit: bool = True,
 ) -> Memo:
     """メモを追加する。span はスルースの一手が担当した範囲を機械が刻印する引数。
@@ -517,6 +560,10 @@ def add_memo(
     ``idem_key`` は冪等キー。与えると get-or-create になり、スルースの再試行で
     同じメモが二重に書かれるのを防ぐ (既存が勝つ)。キーは呼び手 (スルース) が
     スルース実行 ID + 操作番号で採番する。省略 (None) は従来どおり毎回新規。
+    ``event_date`` は**できごとの日** (採取元の会話のメッセージ時刻から機械が
+    刻印する — 本人・LLM に申告させない)。None は「刻印できなかった」で、
+    読み手は date で代替する。``origin`` は由来の印 (:data:`MEMO_ORIGINS`、
+    既定 'live')。
     ``commit=False`` は、呼び手が一連の操作を一つのトランザクションに束ねて
     最後に ``conn.commit()`` する用 (既定 True = 従来どおり即 commit)。既定の
     まま呼ばれても、呼び手が既にトランザクションを開いていれば確定も巻き戻しも
@@ -531,6 +578,12 @@ def add_memo(
         raise ValueError("memo text must be a non-empty string")
     _validate_optional_str("span_start_id", span_start_id)
     _validate_optional_str("span_end_id", span_end_id)
+    if event_date is not None:
+        _validate_date(event_date)
+    if origin not in MEMO_ORIGINS:
+        raise ValueError(
+            f"unknown memo origin: {origin!r} (expected one of {MEMO_ORIGINS})"
+        )
     # idem_key は非空の str か None — 空白のみを None に倒すと冪等性が静かに
     # 無効化され、そのまま通すと空白キー同士が UNIQUE 衝突で既存返しに化ける。
     if idem_key is not None and (
@@ -555,9 +608,11 @@ def add_memo(
     try:
         cur = conn.execute(
             "INSERT INTO memos("
-            "activity_id, date, kind, text, span_start_id, span_end_id, idem_key) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (activity_id, date, kind, text, span_start_id, span_end_id, idem_key),
+            "activity_id, date, kind, text, span_start_id, span_end_id, "
+            "idem_key, event_date, origin) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (activity_id, date, kind, text, span_start_id, span_end_id,
+             idem_key, event_date, origin),
         )
         if owns_txn:
             conn.commit()
@@ -590,6 +645,8 @@ def add_memo(
         text=text,
         span_start_id=span_start_id,
         span_end_id=span_end_id,
+        event_date=event_date,
+        origin=origin,
     )
 
 
@@ -599,20 +656,25 @@ def list_memos(
     *,
     kind: Optional[str] = None,
 ) -> List[Memo]:
-    """アクティビティのメモ一覧 (日付順)。kind で did / want に絞れる。"""
+    """アクティビティのメモ一覧 (できごとの日付順)。kind で did / want に絞れる。
+
+    並びは **できごとの日 (event_date)、無ければ書かれた日 (date) で代替** —
+    読み返し由来の記録が当日に大量に生まれても、過去由来の記録は時間軸の
+    本来の場所に並ぶ (docs/intent/sluice_coverage_gaps.md B-2)。
+    """
     _validate_activity_id(activity_id)
     if kind is not None and kind not in MEMO_KINDS:
         raise ValueError(f"unknown memo kind: {kind!r} (expected one of {MEMO_KINDS})")
     if kind is None:
         cur = conn.execute(
             f"SELECT {_MEMO_COLUMNS} FROM memos WHERE activity_id = ? "
-            "ORDER BY date ASC, id ASC",
+            "ORDER BY COALESCE(event_date, date) ASC, id ASC",
             (activity_id,),
         )
     else:
         cur = conn.execute(
             f"SELECT {_MEMO_COLUMNS} FROM memos WHERE activity_id = ? AND kind = ? "
-            "ORDER BY date ASC, id ASC",
+            "ORDER BY COALESCE(event_date, date) ASC, id ASC",
             (activity_id, kind),
         )
     return [_row_to_memo(row) for row in cur.fetchall()]
@@ -624,9 +686,14 @@ def list_undigested_want_memos(
 ) -> List[Memo]:
     """未消化のやりたいメモを導出する (§13.6 — 列ではなく導出)。
 
-    未消化 = 同じアクティビティに、その want メモの日付より**後**の did メモが
-    無いこと。同日の did は消化とみなさない (「その日付より後」の字義通り)。
+    未消化 = 同じアクティビティに、その want メモの日より**後**の did メモが
+    無いこと。同じ日の did は消化とみなさない (「その日より後」の字義通り)。
     activity_id を渡すとそのアクティビティだけに絞る。
+
+    比べる日は**できごとの日** (event_date、無ければ書かれた日 date で代替 —
+    docs/intent/sluice_coverage_gaps.md B-2)。書かれた日で比べると、読み返しで
+    拾った過去の want は作成日が今日になるため、それより後の did が原理的に
+    存在せず、永久に未消化のまま居座る。
     """
     where = "w.kind = 'want'"
     params: tuple = ()
@@ -636,16 +703,18 @@ def list_undigested_want_memos(
         params = (activity_id,)
     cur = conn.execute(
         f"""
-        SELECT w.id, w.activity_id, w.date, w.kind, w.text, w.span_start_id, w.span_end_id
+        SELECT w.id, w.activity_id, w.date, w.kind, w.text, w.span_start_id,
+               w.span_end_id, w.event_date, w.origin
         FROM memos w
         WHERE {where}
           AND NOT EXISTS (
               SELECT 1 FROM memos d
               WHERE d.activity_id = w.activity_id
                 AND d.kind = 'did'
-                AND d.date > w.date
+                AND COALESCE(d.event_date, d.date)
+                    > COALESCE(w.event_date, w.date)
           )
-        ORDER BY w.date ASC, w.id ASC
+        ORDER BY COALESCE(w.event_date, w.date) ASC, w.id ASC
         """,
         params,
     )
@@ -653,13 +722,18 @@ def list_undigested_want_memos(
 
 
 def get_last_memo_date(conn: sqlite3.Connection, activity_id: int) -> Optional[str]:
-    """アクティビティの最終メモ日付 ('YYYY-MM-DD')。メモが無ければ None。
+    """アクティビティの最後のできごとの日 ('YYYY-MM-DD')。メモが無ければ None。
 
     「眠っている」状態の導出材料 (§13.1 — 眠りは列にせずここから導く)。
+
+    取るのは**できごとの日**の最大値 (event_date、無ければ書かれた日 date で
+    代替 — docs/intent/sluice_coverage_gaps.md B-2)。書かれた日で取ると、半年
+    眠っていた活動でも読み返しのメモが一件入った瞬間に「今日まで続いている」
+    と見えてしまい、眠りの導出が嘘になる。
     """
     _validate_activity_id(activity_id)
     row = conn.execute(
-        "SELECT MAX(date) FROM memos WHERE activity_id = ?",
+        "SELECT MAX(COALESCE(event_date, date)) FROM memos WHERE activity_id = ?",
         (activity_id,),
     ).fetchone()
     return row[0] if row and row[0] is not None else None

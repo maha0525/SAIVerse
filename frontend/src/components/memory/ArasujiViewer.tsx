@@ -53,6 +53,10 @@ interface RepairEstimate {
     // 前回の補修/再編纂ジョブが完了していない (上位あらすじの再生成が残って
     // いる)。帯に「再実行してください」を併記し、再実行で続きから直る。
     repair_incomplete?: boolean;
+    // あらすじを大きな流れにまとめる作業 (束ね) の残り回数の dry 予測。
+    // 未編纂ゼロでもこれが 1 以上なら帯を出す — まとめだけが残った状態の
+    // 正常化経路が会話 (会話後の Metabolism) しか無い穴を塞ぐ。
+    consolidation_calls?: number;
 }
 
 interface ArasujiViewerProps {
@@ -920,16 +924,24 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                 })()}
 
                 {/* 被覆補修の案内 (§16-2: 押すタイミングが分かる可視化)。
-                    件数は cost-estimate (止め線適用後) — 0 なら何も出さない。 */}
-                {repairEstimate && (repairEstimate.unprocessed_messages >= 1 || repairEstimate.repair_incomplete) && (
+                    件数は cost-estimate (止め線適用後) — 0 なら何も出さない。
+                    未編纂ゼロでもまとめ (consolidation_calls) が残っていれば
+                    出す — 実行は同じ mode: 'repair' でバックエンドが拾う。 */}
+                {repairEstimate && (repairEstimate.unprocessed_messages >= 1 || (repairEstimate.consolidation_calls ?? 0) >= 1 || repairEstimate.repair_incomplete) && (
                     <div className={styles.repairBanner}>
                         <span className={styles.repairBannerText}>
                             {repairEstimate.unprocessed_messages >= 1 && (
                                 <>あらすじになっていない過去の会話が {repairEstimate.unprocessed_messages.toLocaleString()} 件あります</>
                             )}
-                            {repairEstimate.repair_incomplete && (
+                            {(repairEstimate.consolidation_calls ?? 0) >= 1 && (
                                 <>
                                     {repairEstimate.unprocessed_messages >= 1 && <br />}
+                                    あらすじを大きな流れにまとめる作業が {(repairEstimate.consolidation_calls ?? 0).toLocaleString()} 回分残っています
+                                </>
+                            )}
+                            {repairEstimate.repair_incomplete && (
+                                <>
+                                    {(repairEstimate.unprocessed_messages >= 1 || (repairEstimate.consolidation_calls ?? 0) >= 1) && <br />}
                                     {/* 未完了の印はジョブ開始時に置かれ完了時に外れるので、
                                         走行中は「放置された未完了」ではない — 再実行を
                                         促すのは止まっているときだけ (2026-09-01 実機指摘)。 */}
@@ -1267,11 +1279,26 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
             {showRepairModal && repairEstimate && (
                 <ModalOverlay onClose={() => setShowRepairModal(false)} className={styles.modalOverlay}>
                     <div className={styles.modal} onClick={(e) => e.stopPropagation()}>
-                        <h3>過去の会話をあらすじにする</h3>
-                        <p className={styles.hint} style={{ display: 'block', margin: '0 0 1rem', lineHeight: 1.7 }}>
-                            あらすじになっていない過去の会話が残っています。実行すると、その会話をまとめたあらすじが作られ、
-                            本人が古い出来事を思い出せるようになります。いま進行中の会話には触りません。
-                        </p>
+                        {/* 未編纂ゼロ・まとめだけが残った状態では、見出しと説明を
+                            まとめの言い回しに切り替える (「過去の会話をあらすじに
+                            する」は嘘になる)。 */}
+                        <h3>
+                            {repairEstimate.unprocessed_messages < 1 && (repairEstimate.consolidation_calls ?? 0) >= 1
+                                ? 'あらすじを大きな流れにまとめる'
+                                : '過去の会話をあらすじにする'}
+                        </h3>
+                        {repairEstimate.unprocessed_messages >= 1 && (
+                            <p className={styles.hint} style={{ display: 'block', margin: '0 0 1rem', lineHeight: 1.7 }}>
+                                あらすじになっていない過去の会話が残っています。実行すると、その会話をまとめたあらすじが作られ、
+                                本人が古い出来事を思い出せるようになります。いま進行中の会話には触りません。
+                            </p>
+                        )}
+                        {repairEstimate.unprocessed_messages < 1 && (repairEstimate.consolidation_calls ?? 0) >= 1 && (
+                            <p className={styles.hint} style={{ display: 'block', margin: '0 0 1rem', lineHeight: 1.7 }}>
+                                細かなあらすじが溜まっています。実行すると、それらを大きな流れにまとめたあらすじが作られ、
+                                本人が長い期間の出来事を見通せるようになります。いま進行中の会話には触りません。
+                            </p>
+                        )}
                         {repairEstimate.repair_incomplete && (
                             <p className={styles.hint} style={{ display: 'block', margin: '0 0 1rem', lineHeight: 1.7 }}>
                                 前回の処理が完了していません。再実行すると、処理済みの部分は飛ばして続きから進みます。
@@ -1284,6 +1311,14 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                                     {repairEstimate.unprocessed_messages.toLocaleString()} 件
                                 </span>
                             </div>
+                            {(repairEstimate.consolidation_calls ?? 0) >= 1 && (
+                                <div className={styles.repairEstimateRow}>
+                                    <span className={styles.repairEstimateLabel}>まとめる作業</span>
+                                    <span className={styles.repairEstimateValue}>
+                                        {(repairEstimate.consolidation_calls ?? 0).toLocaleString()} 回分
+                                    </span>
+                                </div>
+                            )}
                             <div className={styles.repairEstimateRow}>
                                 <span className={styles.repairEstimateLabel}>AI の呼び出し</span>
                                 <span className={styles.repairEstimateValue}>
@@ -1309,7 +1344,9 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                                 className={styles.startBtn}
                                 onClick={startRepair}
                                 disabled={
-                                    (repairEstimate.unprocessed_messages < 1 && !repairEstimate.repair_incomplete)
+                                    (repairEstimate.unprocessed_messages < 1
+                                        && (repairEstimate.consolidation_calls ?? 0) < 1
+                                        && !repairEstimate.repair_incomplete)
                                     || ['running', 'started', 'pending', 'cancelling'].includes(generationJob?.status ?? '')
                                 }
                             >
