@@ -1,6 +1,6 @@
 # スルースの被覆の穴 — 会話を止めない採取と、後から拾える記録
 
-**ステータス**: 実装中 (2026-09-08 起草・文書レビュー 2 種反映・未決 4 点をまはーが裁可して確定。第一段を実装中)
+**ステータス**: 第一段 完了 (v0.3.11 で発行、2026-09-09)。第二段 (期間選択 UI) は実装待ち — 着手はまはーの裁定から
 **関連**: [autonomous_behavior_v3.md](autonomous_behavior_v3.md) §13.3 (捕獲の一本化 — 本設計が改訂)・§13.5-1 (コンテキスト超過の後退方式 — 本設計が廃止)、[issues/archive/cold_anchor_advance_bypasses_sluice.md](../issues/archive/cold_anchor_advance_bypasses_sluice.md) (前提が本設計で変わり、2026-09-08 に決着して archive へ)、[chronicle_coverage_gaps.md](chronicle_coverage_gaps.md) (同じ原則の Chronicle 側)、[arasuji_levels.md](arasuji_levels.md) §14-2・§15・§16、`sea/sluice.py` / `sea/session_lifecycle.py` (run_metabolism・非常畳み・読み戻し)
 **発端**: 稟乃さんの報告 (2026-09-07〜08)。v0.2 時代の記憶 DB を持つペルソナに話しかけると返事が一度も来ず、翌朝「APIの利用制限に達しました」が出た。診断で確定した実体は下の「出自」節。
 
@@ -240,6 +240,10 @@ Chronicle タブに、ペルソナの歴史を期間の一覧で見せる画面�
 
 ## 経緯
 
+- 2026-09-09: v0.3.11 として発行 (タグ + Release、明細は release_history.md)。発行前の
+  実機確認は、まはーの本番 (会話・手帳・Chronicle 補修) と、隔離環境の実サーバーでの
+  冷間スキップの実走 (130 通 13 万字の縮尺再現へ一言 → 21 秒で応答・skipped cold 1 回・
+  範囲記録 80 通・429 は一回で停止)。残 = 稟乃さんの回復確認と第二段の着手裁定。
 - 2026-09-09 朝: レビュー二巡目・三巡目。二巡目は「一巡目の修正 1 が下の層で
   素通り」(embed_metadata の読み口が全 OperationalError を不在に丸める) を
   含む 3 件を採用 (d75c4754): 厳格な読み口 / ダイジェスト材料のマージを
