@@ -1396,7 +1396,9 @@ _LEGACY_PAN_MARKER_KEY = "gold_panning_last_pan_id"
 
 #: 本人モードの読み返しダイジェスト (本線の一行) の材料を、走行を跨いで貯める
 #: 永続キー。値は JSON: ``{"period_start", "period_end", "messages", "memos",
-#: "core", "promises"}``。in-memory のカウンタだけで組んでいた頃は、
+#: "core", "promises", "last_chunk_id", "flush_nonce"}``
+#: (:data:`_PENDING_DIGEST_COUNTS` / :data:`_PENDING_DIGEST_STRINGS`)。
+#: in-memory のカウンタだけで組んでいた頃は、
 #: (i) 中断 (cancelled / cooldown / 例外) した走行の採取分がどの走行の
 #: ダイジェストにも入らず、(ii) 記録の縮めの後に本線への追記が落ちると、範囲の
 #: 記録は消えているので再実行が noop になりダイジェストが永久に立たなかった
@@ -1428,13 +1430,20 @@ def _load_pan_marker(persona: Any) -> Optional[str]:
         raise SluiceStorageUnavailableError(
             "memory.db connection is missing; cannot read the pan marker"
         )
-    from sai_memory.memory.storage import get_embed_metadata, set_embed_metadata
+    # 読みは strict 版 (Codex 第二巡 修正 A)。通常の get_embed_metadata は
+    # **あらゆる** OperationalError を「テーブルがまだ無い旧 DB」とみなして None を
+    # 返すので、DB ロックや I/O 障害が入口で「マーカー不在」に化け、下の
+    # 包み直し (fail-closed) がそもそも発火しなかった。
+    from sai_memory.memory.storage import (
+        get_embed_metadata_strict,
+        set_embed_metadata,
+    )
     try:
         with adapter._db_lock:
-            value = get_embed_metadata(conn, _PAN_MARKER_KEY)
+            value = get_embed_metadata_strict(conn, _PAN_MARKER_KEY)
             if not value:
                 # 旧世代キーからの一回きり移行 (見つかれば新キーへ写す)。
-                value = get_embed_metadata(conn, _LEGACY_PAN_MARKER_KEY)
+                value = get_embed_metadata_strict(conn, _LEGACY_PAN_MARKER_KEY)
                 if value:
                     set_embed_metadata(conn, _PAN_MARKER_KEY, value)
     except SluiceStorageUnavailableError:
@@ -1476,11 +1485,24 @@ def _save_pan_marker(persona: Any, last_id: str) -> None:
 # 読み返しダイジェストの材料の耐久化 (走行を跨いで貯める)
 # ---------------------------------------------------------------------------
 
+#: 貯まっている材料の数の欄 (整数)。
+_PENDING_DIGEST_COUNTS = ("messages", "memos", "core", "promises")
+#: 貯まっている材料の文字列の欄 (無ければ None)。
+#: - ``period_start`` / ``period_end``: 読み返した期間 ('YYYY-MM-DD')。
+#: - ``last_chunk_id``: 最後に足したチャンクの先頭 message id。同じチャンクを
+#:   やり直した回に二重加算しないための冪等キー (修正 B)。
+#: - ``flush_nonce``: 本線へ立てる一行に刻む識別子。追記の前に採番して永続する
+#:   ことで、「追記成功・消し込み失敗」の後の再実行が二度目の一行を立てない
+#:   (修正 C)。
+_PENDING_DIGEST_STRINGS = (
+    "period_start", "period_end", "last_chunk_id", "flush_nonce",
+)
+
+
 def _empty_pending_digest() -> Dict[str, Any]:
-    return {
-        "period_start": None, "period_end": None,
-        "messages": 0, "memos": 0, "core": 0, "promises": 0,
-    }
+    empty: Dict[str, Any] = {key: None for key in _PENDING_DIGEST_STRINGS}
+    empty.update({key: 0 for key in _PENDING_DIGEST_COUNTS})
+    return empty
 
 
 def _pending_digest_conn(persona: Any):
@@ -1499,11 +1521,16 @@ def _load_pending_digest(persona: Any) -> Dict[str, Any]:
 
     壊れた値 (JSON にならない / 辞書でない) は空として扱う — ダイジェスト一行の
     材料であって、採取そのものの成立条件ではないので、ここで走行を止めない。
+
+    一方、**ストアが読めない**例外は送出する (Codex 第二巡 修正 A)。読めないのを
+    「空」と誤認したまま :func:`_merge_pending_digest` が書き戻すと、貯まっていた
+    件数がその一回で消える。呼び出し側で新たに捕まえる必要は無い — チャンク処理の
+    失敗として伝播し、ジョブが failed になって再実行で回収される。
     """
     adapter, conn = _pending_digest_conn(persona)
-    from sai_memory.memory.storage import get_embed_metadata
+    from sai_memory.memory.storage import get_embed_metadata_strict
     with adapter._db_lock:
-        raw = get_embed_metadata(conn, _CAPTURE_PENDING_DIGEST_KEY)
+        raw = get_embed_metadata_strict(conn, _CAPTURE_PENDING_DIGEST_KEY)
     if not raw:
         return _empty_pending_digest()
     try:
@@ -1517,10 +1544,10 @@ def _load_pending_digest(persona: Any) -> Dict[str, Any]:
     if not isinstance(parsed, dict):
         return _empty_pending_digest()
     merged = _empty_pending_digest()
-    for key in ("period_start", "period_end"):
+    for key in _PENDING_DIGEST_STRINGS:
         value = parsed.get(key)
         merged[key] = value if isinstance(value, str) and value else None
-    for key in ("messages", "memos", "core", "promises"):
+    for key in _PENDING_DIGEST_COUNTS:
         try:
             merged[key] = int(parsed.get(key) or 0)
         except (TypeError, ValueError):
@@ -1528,13 +1555,42 @@ def _load_pending_digest(persona: Any) -> Dict[str, Any]:
     return merged
 
 
+def _write_pending_digest(persona: Any, pending: Dict[str, Any]) -> None:
+    """貯まっている材料を丸ごと書き戻す (材料の永続はこの一点に集める)。"""
+    adapter, conn = _pending_digest_conn(persona)
+    from sai_memory.memory.storage import set_embed_metadata
+    with adapter._db_lock:
+        set_embed_metadata(
+            conn, _CAPTURE_PENDING_DIGEST_KEY,
+            json.dumps(pending, ensure_ascii=False),
+        )
+
+
 def _merge_pending_digest(
-    persona: Any, *, messages: int, memos: int, core: int, promises: int,
+    persona: Any, *, chunk_start_id: Optional[str],
+    messages: int, memos: int, core: int, promises: int,
     period_start: Optional[str], period_end: Optional[str],
 ) -> None:
-    """チャンク 1 個ぶんの適用数を、貯まっている材料へ足して書き戻す。"""
-    adapter, conn = _pending_digest_conn(persona)
+    """チャンク 1 個ぶんの適用数を、貯まっている材料へ足して書き戻す。
+
+    ``chunk_start_id`` (そのチャンクの先頭 message id = 実行台帳の identity と
+    同じ値) で**冪等**にする (Codex 第二巡 修正 B)。貯まっている材料の
+    ``last_chunk_id`` と一致したら何も足さずに返る — 台帳の記録済み結果で同じ
+    チャンクをやり直した回 (LLM は呼ばず適用だけ再実行する経路) が、同じ件数を
+    二度足さないため。足すときは ``last_chunk_id`` を更新して書く。
+
+    適用ゼロのチャンクは呼び出し側がそもそも呼ばない (``last_chunk_id`` は適用の
+    あったチャンクだけ進む) — ゼロのチャンクのやり直しは足すものが無いので、
+    冪等キーが進んでいなくても二重にはならない。
+    """
     current = _load_pending_digest(persona)
+    if chunk_start_id and current.get("last_chunk_id") == chunk_start_id:
+        LOGGER.info(
+            "[sluice-capture] chunk %s is already merged into the pending "
+            "digest; skipping the tally", chunk_start_id,
+        )
+        return
+    current["last_chunk_id"] = chunk_start_id or current.get("last_chunk_id")
     current["messages"] += int(messages or 0)
     current["memos"] += int(memos or 0)
     current["core"] += int(core or 0)
@@ -1547,22 +1603,12 @@ def _merge_pending_digest(
         current["period_end"] is None or period_end > current["period_end"]
     ):
         current["period_end"] = period_end
-    from sai_memory.memory.storage import set_embed_metadata
-    with adapter._db_lock:
-        set_embed_metadata(
-            conn, _CAPTURE_PENDING_DIGEST_KEY, json.dumps(current, ensure_ascii=False),
-        )
+    _write_pending_digest(persona, current)
 
 
 def _clear_pending_digest(persona: Any) -> None:
     """貯まっている材料を消す (ダイジェスト一行を本線に立て終えた後だけ)。"""
-    adapter, conn = _pending_digest_conn(persona)
-    from sai_memory.memory.storage import set_embed_metadata
-    with adapter._db_lock:
-        set_embed_metadata(
-            conn, _CAPTURE_PENDING_DIGEST_KEY,
-            json.dumps(_empty_pending_digest(), ensure_ascii=False),
-        )
+    _write_pending_digest(persona, _empty_pending_digest())
 
 
 def _pending_digest_total(pending: Dict[str, Any]) -> int:
@@ -3575,7 +3621,30 @@ def _run_mechanism_chunk(
 CAPTURE_MODES = ("mechanism", "persona")
 
 
-def _append_capture_digest(persona: Any, digest_text: str) -> None:
+def _capture_digest_exists(persona: Any, nonce: str) -> bool:
+    """この nonce のダイジェスト一行が、既に本線に立っているか。
+
+    「追記は成功したが消し込み (:func:`_clear_pending_digest`) が落ちた」あとの
+    再実行が、同じ一行をもう一度立てないための照会 (Codex 第二巡 修正 C)。
+    本人の目には「同じ読み返しが二度あった」ように見えるのを止める。
+
+    索引の無い全走査だが、走るのは走行の締めの flush のときだけ (キャンペーンに
+    一度) — 索引を足してまで速くする対象ではない。
+    """
+    adapter, conn = _pending_digest_conn(persona)
+    with adapter._db_lock:
+        row = conn.execute(
+            "SELECT 1 FROM messages "
+            "WHERE json_extract(metadata, '$.capture_digest_nonce') = ? "
+            "LIMIT 1",
+            (nonce,),
+        ).fetchone()
+    return row is not None
+
+
+def _append_capture_digest(
+    persona: Any, digest_text: str, *, nonce: Optional[str] = None,
+) -> None:
     """読み返しのダイジェスト一行を本線へ立てる (長期記憶への入口は一本)。
 
     器は作業セッションのダイジェスト行 (:data:`sea.work_session.DIGEST_TAG` /
@@ -3587,6 +3656,9 @@ def _append_capture_digest(persona: Any, digest_text: str) -> None:
     代筆を本人名義 (assistant) にしない (発話の尊厳の規律)。
     書き込みの失敗は送出する — 採取は適用済みなので、呼び出し元のジョブが
     失敗として報告し、記録の欠けを黙って飲まない。
+
+    ``nonce`` は :func:`_capture_digest_exists` が照会する識別子で、metadata の
+    ``capture_digest_nonce`` として一行に刻まれる (修正 C)。
     """
     from sea.work_session import DIGEST_TAG
 
@@ -3595,11 +3667,14 @@ def _append_capture_digest(persona: Any, digest_text: str) -> None:
         raise SluiceStorageUnavailableError(
             "sai_memory adapter is missing; cannot append the capture digest"
         )
+    metadata: Dict[str, Any] = {"tags": [DIGEST_TAG, "sluice"]}
+    if nonce:
+        metadata["capture_digest_nonce"] = nonce
     adapter.append_persona_message({
         "role": "user",
         "content": f"<system>{digest_text}</system>",
         "timestamp": datetime.now(timezone.utc).isoformat(),
-        "metadata": {"tags": [DIGEST_TAG, "sluice"]},
+        "metadata": metadata,
         "line_role": "main_line",
         "scope": "committed",
     })
@@ -3761,6 +3836,35 @@ def run_sluice_capture(
                 chunk_summary = _run_mechanism_chunk(
                     lifecycle, persona, chunk, model_key=model_key,
                 )
+        chunk_applied = (
+            chunk_summary["ops_applied"] + chunk_summary["memos_applied"]
+            + chunk_summary["promises_applied"]
+        )
+        if mode == "persona" and chunk_applied:
+            # ダイジェストの材料は memory.db に貯める — この走行が中断しても
+            # (cancelled / cooldown / 例外)、次に完走した走行が本線の一行を
+            # 立てて拾う。
+            #
+            # **縮めより先**に足す (Codex 第二巡 修正 B)。逆順だと「縮めは確定 →
+            # マージが落ちる」の窓で、チャンクは台帳上完了済みなのに件数が
+            # どこにも残らず、そのチャンクの適用分がダイジェストから永久に
+            # 欠けた。マージを先にしても二重にはならない — 失敗の各窓の帰結:
+            #   - マージ後・縮め前に落ちる → 再実行は台帳の記録済み結果で同じ
+            #     チャンクをやり直し、マージは last_chunk_id で二重加算を止め、
+            #     縮めだけが進む。
+            #   - マージ前に落ちる → 縮めも進んでいないので、再実行がマージから
+            #     やり直す。
+            # どちらも欠けも二重も無い。
+            _merge_pending_digest(
+                persona,
+                chunk_start_id=chunk_summary.get("span_start_id"),
+                messages=chunk_summary["messages"],
+                memos=chunk_summary["memos_applied"],
+                core=chunk_summary["ops_applied"],
+                promises=chunk_summary["promises_applied"],
+                period_start=chunk_summary.get("period_start"),
+                period_end=chunk_summary.get("period_end"),
+            )
         # 処理し終えたチャンクぶんだけ記録を縮める。縮めの失敗は送出 —
         # 縮めずに次へ進むと同じチャンクを永久に回る。再実行は台帳の記録済み
         # 結果に合流するので、縮め直前の失敗でも二重適用にはならない。
@@ -3771,25 +3875,6 @@ def run_sluice_capture(
             next_start = str(getattr(span_messages[len(chunk)], "id"))
             with adapter._db_lock:
                 advance_sluice_skipped_span(adapter.conn, span["id"], next_start)
-        chunk_applied = (
-            chunk_summary["ops_applied"] + chunk_summary["memos_applied"]
-            + chunk_summary["promises_applied"]
-        )
-        if mode == "persona" and chunk_applied:
-            # ダイジェストの材料は memory.db に貯める — この走行が中断しても
-            # (cancelled / cooldown / 例外)、次に完走した走行が本線の一行を
-            # 立てて拾う。**縮めの後**に足すのは、その間で落ちたときに少なく
-            # 数える側へ倒すため (ダイジェストが実際より件数を膨らませるより、
-            # 少なく言うほうが害が小さい)。
-            _merge_pending_digest(
-                persona,
-                messages=chunk_summary["messages"],
-                memos=chunk_summary["memos_applied"],
-                core=chunk_summary["ops_applied"],
-                promises=chunk_summary["promises_applied"],
-                period_start=chunk_summary.get("period_start"),
-                period_end=chunk_summary.get("period_end"),
-            )
         processed_any = True
         chunks_processed += 1
         messages_processed += chunk_summary["messages"]
@@ -3816,6 +3901,16 @@ def run_sluice_capture(
     if mode == "persona" and status in ("ok", "noop"):
         pending = _load_pending_digest(persona)
         if _pending_digest_total(pending) > 0:
+            # 追記の識別子は**追記より先に**永続する (Codex 第二巡 修正 C)。
+            # 「追記は成功・消し込みは失敗」で落ちると材料が残ったままになり、
+            # 次の完走が同じ一行をもう一度本線へ立てていた (本人の目には同じ
+            # 読み返しが二度あったように見える)。先に採番して残しておけば、
+            # 再実行はその nonce の一行が既にあるかを見て追記を飛ばせる。
+            flush_nonce = pending.get("flush_nonce")
+            if not flush_nonce:
+                flush_nonce = str(uuid.uuid4())
+                pending["flush_nonce"] = flush_nonce
+                _write_pending_digest(persona, pending)
             pending_start = pending["period_start"]
             pending_end = pending["period_end"]
             pending_messages = int(pending["messages"] or 0)
@@ -3837,7 +3932,16 @@ def run_sluice_capture(
             digest_text = (
                 f"過去の会話{period_part}を読み返し、{'・'.join(parts)}を記録した。"
             )
-            _append_capture_digest(persona, digest_text)
+            if not _capture_digest_exists(persona, flush_nonce):
+                _append_capture_digest(
+                    persona, digest_text, nonce=flush_nonce,
+                )
+            else:
+                LOGGER.info(
+                    "[sluice-capture] the digest line for %s is already on the "
+                    "main line; skipping the append and clearing the tally",
+                    flush_nonce,
+                )
             _clear_pending_digest(persona)
 
     LOGGER.info(

@@ -579,6 +579,159 @@ class CaptureApplyTest(_CaptureTestBase):
         ).fetchall()
         self.assertEqual(digest_rows, [])
 
+    # -- 材料のマージと一行の追記の冪等 (2026-09-09 Codex 第二巡 修正 B/C) ---
+    #
+    # 材料のマージ (memory.db) と範囲の縮め (別 commit)、一行の追記と材料の
+    # 消し込み (別 commit) は、それぞれ二段階の書き込み。間で落ちたときに件数が
+    # 欠けたり、同じ読み返しが二行になったりしないことを固定する。
+
+    def test_merge_is_idempotent_for_a_replayed_chunk(self):
+        """同じチャンク (先頭 id が同じ) を二度マージしても件数が二重にならない。
+
+        台帳に記録済み結果があるチャンクのやり直しは、LLM を呼ばずに適用だけ
+        再実行する — 適用は冪等なので手帳のメモは増えないが、件数の足し込みまで
+        冪等でないとダイジェストだけが実際の倍を言う。
+        """
+        persona = self._persona()
+        kwargs = dict(
+            messages=2, memos=1, core=0, promises=0,
+            period_start="2026-01-01", period_end="2026-01-01",
+        )
+        sluice._merge_pending_digest(persona, chunk_start_id="chunk-a", **kwargs)
+        sluice._merge_pending_digest(persona, chunk_start_id="chunk-a", **kwargs)
+        pending = sluice._load_pending_digest(persona)
+        self.assertEqual(pending["memos"], 1)
+        self.assertEqual(pending["messages"], 2)
+        self.assertEqual(pending["last_chunk_id"], "chunk-a")
+
+        # 別のチャンクは普通に足される (冪等キーが効きすぎていない)。
+        sluice._merge_pending_digest(persona, chunk_start_id="chunk-b", **kwargs)
+        pending = sluice._load_pending_digest(persona)
+        self.assertEqual(pending["memos"], 2)
+        self.assertEqual(pending["last_chunk_id"], "chunk-b")
+
+    def test_failed_shrink_after_the_merge_keeps_the_tally(self):
+        """マージ後・縮め前に落ちた回でも件数は残り、再実行で二重にならない。
+
+        マージが縮めより後だった頃は、この窓 (縮めは確定・マージが未了) で
+        チャンクの適用分がダイジェストから永久に欠けた。順序を入れ替えたので、
+        落ちた時点で件数は既に貯まっている。
+        """
+        import sai_memory.memory.storage as memory_storage
+
+        ids = self._append_conversation(2)
+        self._record_span(ids[0], ids[-1])
+        client = FakeLLMClient(self._memo_result("星の話を書きたい"))
+        lifecycle = SimpleNamespace(
+            runtime=FakeRuntime(client), manager=self.manager,
+        )
+        with patch.object(
+            memory_storage, "delete_sluice_skipped_span",
+            side_effect=RuntimeError("shrink failed"),
+        ):
+            with self.assertRaises(RuntimeError):
+                sluice.run_sluice_capture(
+                    lifecycle, self._persona(), mode="persona",
+                )
+        pending = sluice._load_pending_digest(self._persona())
+        self.assertEqual(pending["memos"], 1)   # 縮めより先に貯まっている
+        self.assertEqual(pending["last_chunk_id"], ids[0])
+        self.assertEqual(len(self._spans()), 1)  # 縮めは落ちたので範囲は残る
+
+        # 再実行は同じチャンクをやり直す — 件数は増えず、縮めだけが進む。
+        client2 = FakeLLMClient(self._memo_result("星の話を書きたい"))
+        lifecycle2 = SimpleNamespace(
+            runtime=FakeRuntime(client2), manager=self.manager,
+        )
+        summary = sluice.run_sluice_capture(
+            lifecycle2, self._persona(), mode="persona",
+        )
+        self.assertEqual(summary["status"], "ok")
+        self.assertEqual(self._spans(), [])
+        rows = self._digest_rows()
+        self.assertEqual(len(rows), 1)
+        self.assertIn("手帳のメモ 1 件", rows[0][0])
+        self.assertNotIn("手帳のメモ 2 件", rows[0][0])
+
+    def test_failed_merge_leaves_the_span_for_the_next_run(self):
+        """マージが落ちたら縮めも進まない — 再実行がマージからやり直す。
+
+        逆順 (縮め → マージ) だと、この回でチャンクは台帳上完了済みになり、
+        再実行は noop でダイジェストが立たなかった。
+        """
+        ids = self._append_conversation(2)
+        self._record_span(ids[0], ids[-1])
+        client = FakeLLMClient(self._memo_result("星の話を書きたい"))
+        lifecycle = SimpleNamespace(
+            runtime=FakeRuntime(client), manager=self.manager,
+        )
+        with patch.object(
+            sluice, "_merge_pending_digest",
+            side_effect=RuntimeError("pending digest write failed"),
+        ):
+            with self.assertRaises(RuntimeError):
+                sluice.run_sluice_capture(
+                    lifecycle, self._persona(), mode="persona",
+                )
+        self.assertEqual(len(self._spans()), 1)  # 縮めていない
+        self.assertEqual(self._digest_rows(), [])
+
+        client2 = FakeLLMClient(self._memo_result("星の話を書きたい"))
+        lifecycle2 = SimpleNamespace(
+            runtime=FakeRuntime(client2), manager=self.manager,
+        )
+        summary = sluice.run_sluice_capture(
+            lifecycle2, self._persona(), mode="persona",
+        )
+        self.assertEqual(summary["status"], "ok")
+        rows = self._digest_rows()
+        self.assertEqual(len(rows), 1)
+        self.assertIn("手帳のメモ 1 件", rows[0][0])
+
+    def test_failed_clear_does_not_duplicate_the_digest_line(self):
+        """一行の追記は成功・材料の消し込みが落ちた回の再実行が、二行目を立てない。
+
+        材料が残ったままなので次の完走が flush をやり直すが、追記の前に永続した
+        nonce (flush_nonce) と同じ一行が本線にあるかを見て、追記だけを飛ばす。
+        本人の目に同じ読み返しが二度あったように見えるのを止める。
+        """
+        ids = self._append_conversation(2)
+        self._record_span(ids[0], ids[-1])
+        client = FakeLLMClient(self._memo_result("星の話を書きたい"))
+        lifecycle = SimpleNamespace(
+            runtime=FakeRuntime(client), manager=self.manager,
+        )
+        with patch.object(
+            sluice, "_clear_pending_digest",
+            side_effect=RuntimeError("clearing the tally failed"),
+        ):
+            with self.assertRaises(RuntimeError):
+                sluice.run_sluice_capture(
+                    lifecycle, self._persona(), mode="persona",
+                )
+        self.assertEqual(len(self._digest_rows()), 1)  # 追記は成功している
+        pending = sluice._load_pending_digest(self._persona())
+        self.assertEqual(pending["memos"], 1)          # 材料は残ったまま
+        first_nonce = pending["flush_nonce"]
+        self.assertTrue(first_nonce)
+
+        client2 = FakeLLMClient(_sluice_result())
+        lifecycle2 = SimpleNamespace(
+            runtime=FakeRuntime(client2), manager=self.manager,
+        )
+        summary = sluice.run_sluice_capture(
+            lifecycle2, self._persona(), mode="persona",
+        )
+        self.assertEqual(summary["status"], "noop")
+        self.assertEqual(len(self._digest_rows()), 1)  # 二行目は立たない
+        # 材料は消し込まれ、次の読み返しは新しい nonce から始まる。
+        self.assertEqual(
+            sluice._pending_digest_total(
+                sluice._load_pending_digest(self._persona())
+            ),
+            0,
+        )
+
 
 class MechanismModeTest(_CaptureTestBase):
     """機構モード (既定) — 候補テーブルに置くだけで、本人の器に書かない。"""

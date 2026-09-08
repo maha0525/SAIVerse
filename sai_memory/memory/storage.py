@@ -1765,6 +1765,38 @@ def get_embed_metadata(conn: sqlite3.Connection, key: str) -> str | None:
         return None
 
 
+def get_embed_metadata_strict(conn: sqlite3.Connection, key: str) -> str | None:
+    """Return the value for *key*, distinguishing "absent" from "unreadable".
+
+    「無い」(旧 DB にテーブルがまだ無い) だけを ``None`` へ畳み、ロック競合や
+    I/O 障害 (``database is locked`` / ``disk I/O error`` 等) はそのまま送出する。
+
+    :func:`get_embed_metadata` との使い分け:
+
+    - 既存の :func:`get_embed_metadata` — 「読めなければ無いのと同じでよい」
+      読み手向け。値は補助情報で、読めない回は既定値で先へ進んでよい
+      (埋め込みモデル名の帳簿など)。
+    - この strict 版 — 「読めない」と「無い」を区別しないと安全側に倒せない
+      読み手向け。例えばスルースのパンマーカーは、読み取り障害を「マーカー
+      無し = 初回」へ丸めると担当範囲が窓全体に広がり、確定時にマーカーを
+      現在値より後ろへ書き戻す縁ができる (2026-09-09 Codex 第二巡 修正 A)。
+
+    テーブル不在の判定は例外の文言 (``no such table``) で行う — sqlite3 は
+    テーブル不在も一時的な障害も同じ :class:`sqlite3.OperationalError` で
+    返すので、型では割れない。
+    """
+    try:
+        row = conn.execute(
+            "SELECT value FROM embed_metadata WHERE key = ?", (key,)
+        ).fetchone()
+        return row[0] if row else None
+    except sqlite3.OperationalError as exc:
+        if "no such table" in str(exc).lower():
+            # Table may not exist yet in very old databases = 値の不在。
+            return None
+        raise
+
+
 def set_embed_metadata(conn: sqlite3.Connection, key: str, value: str) -> None:
     """Upsert *key*/*value* into the embed_metadata table."""
     now = datetime.utcnow().isoformat()

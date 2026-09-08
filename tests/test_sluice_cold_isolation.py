@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import gc
 import os
+import sqlite3
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -344,16 +345,19 @@ class ColdMetabolismTest(_ColdWorldBase):
 
         client = FakeLLMClient(RuntimeError("no LLM call is expected here"))
         lifecycle = self._lifecycle(client)
-        real_get = memory_storage.get_embed_metadata
+        real_get = memory_storage.get_embed_metadata_strict
 
         def _fail_on_marker_keys(conn, key):
             # 壊すのはマーカーの読み出しだけ (埋め込みの帳簿など他の KV は素通し)。
+            # 例外は sqlite3 が実際に投げる形 (ロック競合) にする — 読みを
+            # strict 版へ差し替える前は、この型が入口の except OperationalError
+            # に飲まれて「マーカー不在」に化けていた (2026-09-09 Codex 第二巡)。
             if key in (sluice._PAN_MARKER_KEY, sluice._LEGACY_PAN_MARKER_KEY):
-                raise RuntimeError("embed_metadata read failed")
+                raise sqlite3.OperationalError("database is locked")
             return real_get(conn, key)
 
         with patch(
-            "sai_memory.memory.storage.get_embed_metadata",
+            "sai_memory.memory.storage.get_embed_metadata_strict",
             side_effect=_fail_on_marker_keys,
         ):
             ret = self._run_cold_metabolism(lifecycle)
@@ -731,6 +735,55 @@ class ColdCaptureTest(_ColdWorldBase):
             expected_messages - (shrunk_start - self._index_of(span["start_message_id"])),
         )
         self.assertEqual(self._skipped_spans(), [])
+
+
+class EmbedMetadataStrictReadTest(unittest.TestCase):
+    """マーカーの読み口が「無い」と「読めない」を区別すること (第二巡 修正 A)。
+
+    上の :meth:`ColdMetabolismTest.test_unreadable_pan_marker_blocks_both_the_skip_and_the_eviction`
+    が守る fail-closed は、この読み口が例外を通してはじめて発火する。通常の
+    ``get_embed_metadata`` はあらゆる :class:`sqlite3.OperationalError` を
+    「テーブルがまだ無い旧 DB」とみなして None を返すので、ロック競合や I/O 障害が
+    入口で「マーカー不在」に化けていた。
+    """
+
+    def test_locked_database_is_raised_not_swallowed(self):
+        from sai_memory.memory.storage import get_embed_metadata_strict
+
+        class _LockedConn:
+            def execute(self, *args, **kwargs):
+                raise sqlite3.OperationalError("database is locked")
+
+        with self.assertRaises(sqlite3.OperationalError):
+            get_embed_metadata_strict(_LockedConn(), "any-key")
+
+    def test_missing_table_is_still_absence(self):
+        """旧 DB (embed_metadata テーブルが無い) は従来どおり None。"""
+        from sai_memory.memory.storage import get_embed_metadata_strict
+
+        conn = sqlite3.connect(":memory:")
+        try:
+            self.assertIsNone(get_embed_metadata_strict(conn, "any-key"))
+        finally:
+            conn.close()
+
+    def test_existing_table_returns_the_value(self):
+        from sai_memory.memory.storage import (
+            get_embed_metadata_strict,
+            set_embed_metadata,
+        )
+
+        conn = sqlite3.connect(":memory:")
+        try:
+            conn.execute(
+                "CREATE TABLE embed_metadata ("
+                "key TEXT PRIMARY KEY, value TEXT, updated_at TEXT)"
+            )
+            set_embed_metadata(conn, "k", "v")
+            self.assertEqual(get_embed_metadata_strict(conn, "k"), "v")
+            self.assertIsNone(get_embed_metadata_strict(conn, "other"))
+        finally:
+            conn.close()
 
 
 if __name__ == "__main__":

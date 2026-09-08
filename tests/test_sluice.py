@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import gc
 import os
+import sqlite3
 import tempfile
 import unittest
 from datetime import datetime, timezone
@@ -3250,11 +3251,14 @@ class PanMarkerPersistenceTest(_AdapterTestBase):
         persona = self._fresh_persona()
         client = FakeLLMClient(_sluice_result())
         lifecycle = SimpleNamespace(runtime=FakeRuntime(client))
+        # 読みは strict 版 (Codex 第二巡 修正 A) — 通常の get_embed_metadata は
+        # OperationalError を全部「テーブル不在」へ丸めるので、当て先を変えると
+        # 同時に「読めない」の型も本物 (ロック競合) にしておく。
         with patch(
-            "sai_memory.memory.storage.get_embed_metadata",
-            side_effect=RuntimeError("db read error"),
+            "sai_memory.memory.storage.get_embed_metadata_strict",
+            side_effect=sqlite3.OperationalError("database is locked"),
         ):
-            with self.assertRaises(RuntimeError):
+            with self.assertRaises(sluice.SluiceStorageUnavailableError):
                 sluice.run_sluice(lifecycle, persona, "b", msgs, 0, None)
         self.assertEqual(client.calls, [])  # LLM を呼ぶ前に止まる
         self.assertIsNone(getattr(persona, "_sluice_last_pan_id", None))
