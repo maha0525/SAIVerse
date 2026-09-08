@@ -516,6 +516,7 @@ def _build_sluice_prompt(
     *,
     span_new_count: Optional[int],
     today_memos: Optional[List[Tuple[str, str, str]]] = None,
+    scope_sentence: Optional[str] = None,
 ) -> str:
     """<system> 包みの注入プロンプトを組む (keepalive の末尾通知と同じ面)。
 
@@ -524,7 +525,9 @@ def _build_sluice_prompt(
     ``span_new_count`` は今回の担当範囲の通数 (None = 窓全体) — 手帳の節で
     対象範囲を明示するのに使う (:func:`_scope_sentence`)。``today_memos`` は
     :func:`_list_today_memos` の読み (今日すでに書いたメモ) — 無ければその節を
-    出さない。
+    出さない。``scope_sentence`` は対象範囲の一行の差し替え (後から通す採取が
+    「直近の会話」ではなく「読み返した過去の会話」を対象と明示するために使う)。
+    None なら従来どおり :func:`_scope_sentence` で組む。
     """
     from builtin_data.tools._core_memory_common import resolve_core_memory_budget
 
@@ -577,7 +580,7 @@ def _build_sluice_prompt(
         "- 既存のコア記憶と矛盾する新情報（帰国・引っ越しなど。矛盾は core_updates で書き換え）。\n"
         "\n"
         "2) 手帳のメモ欄 (want_memos / did_memos):\n"
-        f"- {_scope_sentence(span_new_count)}\n"
+        f"- {scope_sentence if scope_sentence is not None else _scope_sentence(span_new_count)}\n"
         "- この範囲で、やりたいと思ったこと・実際にやったことはありますか?\n"
         "  無ければ空で構いません。あれば、活動の名前（「小説を書く」「絵の練習」\n"
         "  のような粒度。下の一覧にあるものは act:N で参照）と、今日の中身\n"
@@ -2383,6 +2386,701 @@ def run_sluice(
         "seen_span_end": span_end_id,
         "seen_ids": seen_ids,
         "finalize": _finalize,
+    }
+
+
+# ---------------------------------------------------------------------------
+# 後から通す採取 (capture) — docs/intent/sluice_coverage_gaps.md 第一段 B
+# ---------------------------------------------------------------------------
+#
+# ``sluice_skipped_spans`` に記録された「スルースを通っていない範囲」を、
+# チャンクに刻んで順にスルースへ通すジョブの実行部。入口 (UI) は第二段で、
+# 第一段では API (api/routes/people/sluice.py) までを作る。
+#
+# 定常のスルース (run_sluice) との違い:
+# - 文脈は提示窓ではなく、記録された範囲のメッセージを DB から読み直して組む。
+#   前置き (本人のシステムプロンプト + 短い自己認識) は毎チャンク同一に固定し、
+#   プロバイダのプロンプトキャッシュに乗せる (帯の全量は載せない — intent 決定 3)。
+# - パンマーカーは動かさない。このジョブは過去の範囲の採取で、定常のスルースの
+#   担当範囲 (マーカーから窓の末尾) とは独立。
+# - 進みの記録は ``sluice_skipped_spans`` の行そのもの: チャンクを処理し終える
+#   たびに行の start_message_id を前進させ、全部済んだら行を消す — 中断しても
+#   続きから再開できる。
+# - 実行台帳は定常のスルースと同じ kind (:data:`_LEDGER_KIND`)・同じ identity
+#   (persona, チャンクの起点 message id) に乗る。チャンクの起点は記録の縮めで
+#   一意に決まるので、再試行は同じキーへ合流する。定常のスルースが同じ起点で
+#   残した記録 (例: 記録範囲の末尾 1 通 = 新しい窓の頭を、後の温かい回が採取
+#   済み) があれば再利用され、二重の LLM コールと二重適用が自然に防がれる。
+
+#: 前置きの「短い自己認識」— 毎チャンク同一の固定文 (intent 決定 3 / 追加の
+#: 決定 4: 文面はコード中の定数に置き、実装の検収でまはーが読む)。本人の
+#: システムプロンプトの直後に置かれ、いま読んでいるものが進行中の会話ではなく
+#: 過去の読み返しであることを本人に伝える。
+_CAPTURE_SELF_RECOGNITION = (
+    "<system>\n"
+    "## 過去の会話の読み返し\n"
+    "これは、いま進行中の会話ではありません。あなたの過去の会話のうち、\n"
+    "記憶整理の採取（スルース）をまだ通っていない期間を、あなた自身の目で\n"
+    "読み返すための時間です。\n"
+    "この後に、その期間の会話の写しが当時のまま続きます。読み終えたところで、\n"
+    "残しておきたいことがあれば記録できます。\n"
+    "</system>"
+)
+
+
+class SluiceCaptureSpanUnreadableError(RuntimeError):
+    """記録された範囲のメッセージが読み出せない (端の行の欠落・thread 不一致)。
+
+    fail-closed: 読めない範囲を黙って消したり飛ばしたりせず、送出してジョブを
+    失敗させる — 記録は残るので、原因 (行の削除等) を直せば再実行できる。
+    """
+
+
+def _build_capture_preamble(persona: Any) -> str:
+    """毎チャンク同一の前置き (system 面)。本人のシステムプロンプト + 短い自己認識。
+
+    「## あなたについて」の見出しは head の persona_self セクション
+    (sea/head_pipeline/sections/persona_self.py) と同じ形 — 本人が普段の会話で
+    受け取っている自己定義と同じ姿で渡す。帯 (Memory Weave) の全量は載せない
+    (intent 決定 3) — 前置きが毎チャンク同一であることがプロンプトキャッシュの
+    前提なので、変化する材料を混ぜない。
+    """
+    instruction = (
+        getattr(persona, "persona_system_instruction", "") or ""
+    ).strip()
+    parts: List[str] = []
+    if instruction:
+        parts.append(f"## あなたについて\n{instruction}")
+    parts.append(_CAPTURE_SELF_RECOGNITION)
+    return "\n\n".join(parts)
+
+
+def _capture_scope_sentence(count: int) -> str:
+    """後から通す採取での「今回どこが対象か」の一行 (:func:`_scope_sentence` の差し替え)。"""
+    return (
+        f"今回の対象は、上に写した過去の会話 {count} 通です。"
+        "いま進行中の会話とは独立した、後からの読み返しです。"
+    )
+
+
+def _capture_period_label(chunk_messages: List[Any]) -> Optional[str]:
+    """チャンクの期間 (日付) の表示。created_at が読めなければ None (載せない)。"""
+    def _fmt(ts: Any) -> Optional[str]:
+        try:
+            return datetime.fromtimestamp(int(ts)).strftime("%Y-%m-%d")
+        except (TypeError, ValueError, OverflowError, OSError):
+            return None
+
+    start = _fmt(getattr(chunk_messages[0], "created_at", None))
+    end = _fmt(getattr(chunk_messages[-1], "created_at", None))
+    if start and end:
+        return start if start == end else f"{start}〜{end}"
+    return None
+
+
+def _plan_capture_chunks(
+    messages: List[Any], max_chars: int,
+) -> List[List[Any]]:
+    """メッセージ列を、A と同じ閾値以下のチャンク列に刻む (各チャンク最低 1 通)。
+
+    貪欲法: 先頭から字数を積み、超える直前で切る。**1 通だけで閾値を超える
+    メッセージは、その 1 通だけのチャンクにする** — メッセージより細かい単位は
+    無く、飛ばすと範囲の縮めが進まなくなる (採取は冪等なので過大な 1 チャンクを
+    許す方が安全)。
+    """
+    chunks: List[List[Any]] = []
+    current: List[Any] = []
+    current_chars = 0
+    for msg in messages:
+        chars = len(getattr(msg, "content", None) or "")
+        if current and current_chars + chars > max_chars:
+            chunks.append(current)
+            current = []
+            current_chars = 0
+        current.append(msg)
+        current_chars += chars
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def _read_span_messages(persona: Any, span: Dict[str, Any]) -> Optional[List[Any]]:
+    """記録された範囲 [start, end] の実会話メッセージを正典順で読む。
+
+    読みは :func:`sai_memory.memory.storage.get_conversation_messages_between`
+    — 機構名義の行 (event_message / handy_tool / spell) と ``<system>`` 頭の
+    通知は対象に入れない。本人の目で読み返して採取する材料は発話であって、
+    機構の定型文ではない。端の行が無い・thread が食い違うときは None (呼び出し
+    側が fail-closed で止める)。
+    """
+    from sai_memory.memory.storage import get_conversation_messages_between
+
+    adapter = getattr(persona, "sai_memory", None)
+    if adapter is None or getattr(adapter, "conn", None) is None:
+        raise SluiceStorageUnavailableError(
+            "memory.db connection is missing; cannot read the skipped span"
+        )
+    with adapter._db_lock:
+        return get_conversation_messages_between(
+            adapter.conn,
+            str(span["start_message_id"]),
+            str(span["end_message_id"]),
+        )
+
+
+def plan_sluice_capture(persona: Any) -> Dict[str, Any]:
+    """後から通す採取の見積もり (dry)。LLM ゼロ・書き込みゼロ。
+
+    Returns:
+        ``{"spans": [{id, start_message_id, end_message_id, created_at,
+        message_count, estimated_chunks, readable}], "target_messages": int,
+        "estimated_chunks": int, "unreadable_spans": int,
+        "max_span_chars": int}``。件数・チャンク数は実行部と同じ読み
+        (:func:`_read_span_messages`) と同じ刻み (:func:`_plan_capture_chunks`)
+        から数える — 表示と実走が違う数を言わない。
+    """
+    from sai_memory.memory.storage import list_sluice_skipped_spans
+
+    adapter = getattr(persona, "sai_memory", None)
+    if adapter is None or not getattr(adapter, "is_ready", lambda: False)():
+        raise SluiceStorageUnavailableError(
+            "persona memory storage is not ready; cannot plan the capture"
+        )
+    max_chars = get_max_span_chars()
+    with adapter._db_lock:
+        spans = list_sluice_skipped_spans(adapter.conn)
+
+    spans_out: List[Dict[str, Any]] = []
+    target_messages = 0
+    estimated_chunks = 0
+    unreadable = 0
+    for span in spans:
+        messages = _read_span_messages(persona, span)
+        if messages is None:
+            unreadable += 1
+            spans_out.append({
+                **span, "message_count": None, "estimated_chunks": None,
+                "readable": False,
+            })
+            continue
+        chunks = _plan_capture_chunks(messages, max_chars)
+        target_messages += len(messages)
+        estimated_chunks += len(chunks)
+        spans_out.append({
+            **span, "message_count": len(messages),
+            "estimated_chunks": len(chunks), "readable": True,
+        })
+    return {
+        "spans": spans_out,
+        "target_messages": target_messages,
+        "estimated_chunks": estimated_chunks,
+        "unreadable_spans": unreadable,
+        "max_span_chars": max_chars,
+    }
+
+
+def _call_capture_llm(
+    lifecycle: Any,
+    persona: Any,
+    chunk_messages: List[Any],
+    *,
+    model_key: Optional[str] = None,
+) -> Dict[str, Any]:
+    """チャンク 1 つの LLM 呼び出し (前置き + 会話の写し + 注入プロンプト)。
+
+    定常の :func:`_call_sluice_llm` と違い、文脈は提示窓ではなくチャンクの
+    メッセージから直接組む。anchor には触らない — この呼び出しは会話の
+    Session prefix を温めるものではないので、touch すると温かさの偽装になる。
+    例外 (LLM エラー・出力不適合) はそのまま送出する。
+    """
+    runtime = lifecycle.runtime
+    persona_id = getattr(persona, "persona_id", None)
+
+    from sea.pulse_context import resolve_execution_context
+    execution_context = resolve_execution_context(persona, None)
+    if model_key and execution_context.model_key != model_key:
+        # 使用モデルの既定は本人のモデル。明示指定 (第二段 UI の選択肢) が
+        # 来たときだけ差し替える (intent 決定 3 — 後から通す操作は明示の
+        # 操作なので、モデルが通常の会話と違ってよい)。
+        execution_context = execution_context.with_model(model_key)
+
+    activities = _list_open_activities(persona)
+    offered_activities = dict(activities)
+    open_tasks = _list_open_tasks(lifecycle, persona)
+    offered_tasks: Dict[str, Optional[int]] = {
+        str(t.get("task_id")): t.get("revision")
+        for t in open_tasks if t.get("task_id")
+    }
+    core_memories, core_total_chars = _read_core_state(persona)
+    core_snapshot: Dict[str, str] = {
+        str(mem.id): _core_content_hash(mem.content) for mem in core_memories
+    }
+    today_memos = _list_today_memos(persona, activities)
+    prompt = _build_sluice_prompt(
+        persona, activities, open_tasks, core_memories, core_total_chars,
+        span_new_count=None, today_memos=today_memos,
+        scope_sentence=_capture_scope_sentence(len(chunk_messages)),
+    )
+
+    # 会話の写し。役割は保存値のまま ('model' だけ通称 'assistant' へ —
+    # saiverse_memory/adapter.py の提示時と同じ写像)。実会話フィルタ
+    # (_read_span_messages) が user/model/assistant 以外を通さない。
+    history = [
+        {
+            "role": (
+                "assistant" if getattr(m, "role", None) == "model"
+                else getattr(m, "role", "user")
+            ),
+            "content": getattr(m, "content", None) or "",
+        }
+        for m in chunk_messages
+    ]
+    messages = (
+        [{"role": "system", "content": _build_capture_preamble(persona)}]
+        + history
+        + [{"role": "user", "content": prompt}]
+    )
+
+    node_def = SimpleNamespace(id="sluice_capture", memorize=None, speak=False)
+    llm_client, actual_model = runtime.select_llm_client(
+        node_def, persona, execution_context=execution_context,
+        needs_structured_output=True,
+    )
+    if actual_model != execution_context.model_key:
+        execution_context = execution_context.with_model(actual_model)
+
+    result = llm_client.generate(
+        messages,
+        tools=[],
+        response_schema=_RESPONSE_SCHEMA,
+        temperature=runtime._default_temperature(persona),
+        max_output_tokens=_MAX_OUTPUT_TOKENS,
+        **runtime._get_cache_kwargs(persona_id),
+    )
+
+    usage = llm_client.consume_usage() if hasattr(llm_client, "consume_usage") else None
+    if usage is not None:
+        try:
+            from saiverse.usage_tracker import get_usage_tracker
+            get_usage_tracker().record_usage(
+                model_id=usage.model,
+                input_tokens=usage.input_tokens,
+                output_tokens=usage.output_tokens,
+                cached_tokens=usage.cached_tokens,
+                cache_write_tokens=usage.cache_write_tokens,
+                cache_ttl=usage.cache_ttl,
+                persona_id=persona_id,
+                building_id=getattr(persona, "current_building_id", None),
+                node_type="sluice",
+                playbook_name="sluice_capture",
+                category="sluice",
+            )
+        except Exception:
+            LOGGER.warning(
+                "[sluice-capture] usage tracking failed (persona=%s)",
+                persona_id, exc_info=True,
+            )
+
+    parsed, rejections = _parse_structured_result(result, persona_id)
+    return {
+        "response": parsed,
+        "rejections": rejections,
+        "offered_activities": offered_activities,
+        "offered_tasks": offered_tasks,
+        "core_snapshot": core_snapshot,
+        "prompt": prompt,
+    }
+
+
+def _run_capture_chunk(
+    lifecycle: Any,
+    persona: Any,
+    chunk_messages: List[Any],
+    *,
+    model_key: Optional[str] = None,
+) -> Dict[str, Any]:
+    """チャンク 1 つを台帳 → LLM → 適用 → 記録 → 完了まで通す。
+
+    振り付けは :func:`run_sluice` と同じ状態機械 (claim → running → 凍結
+    (applied) → 冪等適用 → 永続 → completed) の縮約形。パンマーカーの前進と
+    finalize の保留 (退場との検算) はこのジョブには無い — 進みの記録は
+    呼び出し側 (:func:`run_sluice_capture`) が範囲の行の縮めで持つ。
+
+    途中失敗の再実行はチャンクの起点 (= 記録の縮めで一意) が同じ台帳キーへ
+    合流する: applied/completed の記録があれば LLM を呼ばず再適用する (適用は
+    冪等)。completed 済みの記録を再適用した回は判断ターンの永続が二重になる
+    縁があるが、これは run_sluice の finalize 再実行と同じ大きさの既知の縁。
+    """
+    persona_id = getattr(persona, "persona_id", None)
+    chunk_start_id = str(getattr(chunk_messages[0], "id"))
+    chunk_end_id = str(getattr(chunk_messages[-1], "id"))
+
+    ledger = _get_ledger(lifecycle)
+    ledger_key = f"{persona_id}:{chunk_start_id}" if persona_id else None
+    recorded = None
+    if ledger is not None and ledger_key:
+        recorded = _find_recorded_result(ledger, ledger_key)
+        if recorded is not None and _is_legacy_response(recorded.get("response")):
+            LOGGER.warning(
+                "[sluice-capture] 記録の形式が古いため再利用しません "
+                "(execution=%s key=%s persona=%s) — 新しい実行として採り直します",
+                recorded.get("execution_id"), ledger_key, persona_id,
+            )
+            ledger_key = f"{ledger_key}#format-{_RESPONSE_FORMAT_TAG}"
+            recorded = _find_recorded_result(ledger, ledger_key)
+
+    execution_id: Optional[str] = None
+    ledger_status: Optional[str] = None
+    # 適用の冪等キーと span 刻印の素材。再利用の回は**記録側の span** を使う —
+    # 定常のスルースが同じ起点で残した記録 (終端が違う) を別キーで適用し直すと
+    # 冪等キーが揃わず、同じメモが二重に入る (run_sluice の再利用と同じ規律)。
+    apply_span_start = chunk_start_id
+    apply_span_end = chunk_end_id
+    if recorded is not None:
+        execution_id = recorded["execution_id"]
+        ledger_status = recorded["status"]
+        parsed_result = recorded["response"]
+        apply_span_start = str(recorded.get("span_start_id") or chunk_start_id)
+        apply_span_end = str(recorded.get("span_end_id") or chunk_end_id)
+        rejections = [
+            item for item in (recorded.get("rejections") or [])
+            if isinstance(item, dict)
+        ]
+        offered_activities = {
+            int(k): v
+            for k, v in dict(recorded.get("offered_activities") or {}).items()
+        }
+        offered_tasks = dict(recorded.get("offered_tasks") or {})
+        core_snapshot = recorded.get("core_snapshot")
+        if not isinstance(core_snapshot, dict):
+            core_snapshot = None
+        prompt_snapshot = str(
+            recorded.get("prompt") or "(実行台帳の記録済み結果の再適用)"
+        )
+        LOGGER.info(
+            "[sluice-capture] reusing recorded result (execution=%s span=%s..%s "
+            "persona=%s); no new LLM call — re-applying idempotently",
+            execution_id, chunk_start_id, chunk_end_id, persona_id,
+        )
+    else:
+        if ledger is not None and ledger_key:
+            execution_id, runnable, existing_status = ledger.claim_execution(
+                _LEDGER_KIND, ledger_key, persona_id,
+                payload={
+                    "span_start_id": chunk_start_id,
+                    "span_end_id": chunk_end_id,
+                    "origin": "capture",
+                },
+            )
+            if not runnable:
+                raise SluiceExecutionBlockedError(
+                    f"sluice capture blocked by ledger (key={ledger_key}, "
+                    f"status={existing_status})"
+                )
+            if not ledger.try_mark_running(execution_id):
+                raise SluiceExecutionBlockedError(
+                    f"sluice capture running seat lost (key={ledger_key})"
+                )
+        try:
+            call = _call_capture_llm(
+                lifecycle, persona, chunk_messages, model_key=model_key,
+            )
+        except Exception as exc:
+            # LLM 失敗・出力不適合 = 適用前の検証棄却 (副作用ゼロ) → failed。
+            # レート制限起因なら persona 単位の小休止 (C-1) を置く — 呼び出し
+            # 側のループはこの小休止を見て走行を閉じる。
+            noter = getattr(lifecycle, "_note_metabolism_rate_limit", None)
+            if callable(noter):
+                noter(persona_id, exc)
+            if execution_id is not None:
+                try:
+                    ledger.mark_failed(execution_id, str(exc) or type(exc).__name__)
+                except Exception:
+                    LOGGER.exception(
+                        "[sluice-capture] mark_failed itself failed (execution=%s)",
+                        execution_id,
+                    )
+            raise
+        parsed_result = call["response"]
+        rejections = call["rejections"]
+        offered_activities = call["offered_activities"]
+        offered_tasks = call["offered_tasks"]
+        core_snapshot = call["core_snapshot"]
+        prompt_snapshot = call["prompt"]
+        if execution_id is not None:
+            try:
+                ledger.mark_applied(execution_id, result={
+                    "response": parsed_result,
+                    "rejections": rejections,
+                    "span_start_id": chunk_start_id,
+                    "span_end_id": chunk_end_id,
+                    "seen_ids": [
+                        str(getattr(m, "id")) for m in chunk_messages
+                    ],
+                    "offered_activities": {
+                        str(k): v for k, v in offered_activities.items()
+                    },
+                    "offered_tasks": offered_tasks,
+                    "core_snapshot": core_snapshot,
+                    "prompt": prompt_snapshot,
+                })
+            except Exception as exc:
+                # 凍結の失敗を running のまま残さない (run_sluice と同じ理由)。
+                LOGGER.error(
+                    "[sluice-capture] freezing the result failed (execution=%s "
+                    "persona=%s); marking failed so the next run can retry",
+                    execution_id, persona_id, exc_info=True,
+                )
+                ledger.mark_failed(execution_id, str(exc) or type(exc).__name__)
+                raise
+            ledger_status = "applied"
+
+    reflection = str(parsed_result.get("reflection", "") or "")
+
+    def _as_list(key: str) -> List[Any]:
+        raw = parsed_result.get(key, [])
+        return list(raw) if isinstance(raw, list) else []
+
+    idem_prefix = f"sluice:{apply_span_start}..{apply_span_end}"
+
+    ops_applied, ops_failed, ops_lines = _apply_core_ops(
+        persona, _as_list("core_adds"), _as_list("core_updates"),
+        _as_list("core_removes"), core_snapshot=core_snapshot,
+    )
+    memos_applied, memos_failed, memo_lines = _apply_memos(
+        persona, _as_list("want_memos"), _as_list("did_memos"),
+        idem_prefix=idem_prefix,
+        span_start_id=apply_span_start, span_end_id=apply_span_end,
+        offered_activities=offered_activities,
+    )
+    promises_applied, promises_failed, promise_lines = _apply_promises(
+        lifecycle, persona, _as_list("promises"),
+        idem_prefix=idem_prefix,
+        span_start_id=apply_span_start, span_end_id=apply_span_end,
+        offered_tasks=offered_tasks,
+    )
+    rejection_lines: List[str] = []
+    for item in rejections:
+        text = str(item.get("text") or "").strip()
+        if text:
+            rejection_lines.append(text)
+        field = item.get("field")
+        if field in _CORE_FIELDS:
+            ops_failed += 1
+        elif field in ("want_memos", "did_memos"):
+            memos_failed += 1
+        elif field == "promises":
+            promises_failed += 1
+    applied_total = ops_applied + memos_applied + promises_applied
+    result_lines = rejection_lines + ops_lines + memo_lines + promise_lines
+
+    # 判断ターンの記録 (run_sluice と同じ event_message 形式・同じ永続経路)。
+    # 見出しで「過去の読み返し」であることを明示する — 定常のスルースの記録と
+    # 混ざっても、いつの何を読んだ判断かが本人にも読める。
+    persona_name = getattr(persona, "persona_name", None) or persona_id or "assistant"
+    period = _capture_period_label(chunk_messages)
+    header = "過去の会話の読み返し — スルースの採取判断"
+    if period:
+        header += f"（{period}、{len(chunk_messages)} 通）"
+    else:
+        header += f"（{len(chunk_messages)} 通）"
+    body_lines: List[str] = [header + ":"]
+    if reflection.strip():
+        body_lines.append(f"{persona_name}の判断: {reflection.strip()}")
+    if result_lines:
+        body_lines.extend(result_lines)
+    if applied_total == 0 and not result_lines:
+        body_lines.append("今回は採取しませんでした。")
+    record_text = "<system>" + "\n".join(body_lines) + "\n</system>"
+
+    # 永続が先、completed が最後 (run_sluice の finalize と同じ順序)。
+    _persist_record(
+        persona, record_text, prompt_snapshot, applied_total=applied_total,
+    )
+    if execution_id is not None and ledger_status == "applied":
+        ledger.mark_completed(execution_id)
+
+    LOGGER.info(
+        "[sluice-capture] chunk done: persona=%s span=%s..%s (%d messages) "
+        "core=%d/%d memos=%d/%d promises=%d/%d",
+        persona_id, chunk_start_id, chunk_end_id, len(chunk_messages),
+        ops_applied, ops_failed, memos_applied, memos_failed,
+        promises_applied, promises_failed,
+    )
+    return {
+        "ops_applied": ops_applied, "ops_failed": ops_failed,
+        "memos_applied": memos_applied, "memos_failed": memos_failed,
+        "promises_applied": promises_applied, "promises_failed": promises_failed,
+        "span_start_id": chunk_start_id, "span_end_id": chunk_end_id,
+        "messages": len(chunk_messages),
+    }
+
+
+def run_sluice_capture(
+    lifecycle: Any,
+    persona: Any,
+    *,
+    model_key: Optional[str] = None,
+    event_callback: Optional[Any] = None,
+    cancellation_token: Optional[Any] = None,
+) -> Dict[str, Any]:
+    """記録された「通っていない範囲」を、チャンクごとに順へスルースへ通す。
+
+    docs/intent/sluice_coverage_gaps.md 第一段 B の実行部。範囲の行を古い順に
+    取り、A と同じ閾値 (:func:`get_max_span_chars`) 以下のチャンクへ刻んで
+    :func:`_run_capture_chunk` で処理する。チャンクを終えるたびに範囲の行を
+    縮める (行の start_message_id を前進、全部済んだら行を削除) — 中断しても
+    続きから。パンマーカーは動かさない。
+
+    直列化: チャンクごとに Beat ロック (purpose="sluice_capture") を取る —
+    ロックはチャンク間で手放すので、走行中も会話 (Pulse) が間に挟まれる
+    (「普通の会話を妨げない」が本設計の芯)。
+
+    小休止 (C-1): チャンクの頭ごとに persona 単位のレート制限小休止を見て、
+    小休止中なら走行を閉じる (status="cooldown" — 進んだ分は確定済み)。
+    チャンクの LLM がレート制限で落ちた場合も同じ小休止が置かれる
+    (:func:`_run_capture_chunk`)。
+
+    Returns:
+        ``{"status": "ok"|"noop"|"disabled"|"cooldown"|"cancelled",
+        "chunks_processed": int, "messages_processed": int,
+        "captures_applied": int, "captures_failed": int,
+        "spans_remaining": int}``。例外 (LLM 失敗・台帳ブロック・範囲が
+        読めない) は送出する — 進んだ分の縮めは確定済みなので、再実行は
+        続きから。
+    """
+    from sai_memory.memory.storage import (
+        advance_sluice_skipped_span,
+        delete_sluice_skipped_span,
+        list_sluice_skipped_spans,
+    )
+
+    if not is_enabled():
+        # スルースを env で切っている環境では、後から通す採取も動かさない —
+        # 「採取 (課金) を止めている」意思の尊重 (定常のスルースと同じ判定)。
+        return {
+            "status": "disabled", "chunks_processed": 0,
+            "messages_processed": 0, "captures_applied": 0,
+            "captures_failed": 0, "spans_remaining": 0,
+        }
+
+    persona_id = getattr(persona, "persona_id", None)
+    adapter = getattr(persona, "sai_memory", None)
+    if adapter is None or not getattr(adapter, "is_ready", lambda: False)():
+        raise SluiceStorageUnavailableError(
+            f"persona memory storage is not ready (persona={persona_id}); "
+            "cannot capture skipped spans"
+        )
+
+    from sea.beat_gate import hold_beat
+    manager = getattr(lifecycle, "manager", None)
+    max_chars = get_max_span_chars()
+
+    chunks_processed = 0
+    messages_processed = 0
+    captures_applied = 0
+    captures_failed = 0
+    status = "ok"
+    processed_any = False
+
+    def _spans() -> List[Dict[str, Any]]:
+        with adapter._db_lock:
+            return list_sluice_skipped_spans(adapter.conn)
+
+    def _emit(content: str) -> None:
+        if event_callback is None:
+            return
+        try:
+            event_callback({
+                "type": "metabolism",
+                "status": "sluice_capture",
+                "content": content,
+                "messages_processed": messages_processed,
+            })
+        except Exception:
+            LOGGER.debug("[sluice-capture] event_callback raised", exc_info=True)
+
+    while True:
+        if cancellation_token is not None and cancellation_token.is_cancelled():
+            status = "cancelled"
+            break
+        rate_check = getattr(lifecycle, "_metabolism_rate_limit_active", None)
+        if callable(rate_check) and rate_check(persona_id):
+            LOGGER.info(
+                "[sluice-capture] stopping during rate-limit cooldown "
+                "(persona=%s)", persona_id,
+            )
+            status = "cooldown"
+            break
+        spans = _spans()
+        if not spans:
+            status = "ok" if processed_any else "noop"
+            break
+        span = spans[0]
+        span_messages = _read_span_messages(persona, span)
+        if span_messages is None:
+            raise SluiceCaptureSpanUnreadableError(
+                f"recorded span {span['start_message_id']}.."
+                f"{span['end_message_id']} (row {span['id']}) cannot be read "
+                f"(missing endpoint or cross-thread; persona={persona_id})"
+            )
+        if not span_messages:
+            # 範囲に実会話が 1 通も無い (機構の記録だけ等) — 本人の目で読む
+            # 材料が無いので、記録を閉じて次へ。
+            with adapter._db_lock:
+                delete_sluice_skipped_span(adapter.conn, span["id"])
+            LOGGER.info(
+                "[sluice-capture] span %s..%s had no conversation messages; "
+                "record closed (persona=%s)",
+                span["start_message_id"], span["end_message_id"], persona_id,
+            )
+            processed_any = True
+            continue
+        chunk = _plan_capture_chunks(span_messages, max_chars)[0]
+        with hold_beat(
+            manager, persona_id, purpose="sluice_capture", check_gate=False,
+        ):
+            chunk_summary = _run_capture_chunk(
+                lifecycle, persona, chunk, model_key=model_key,
+            )
+        # 処理し終えたチャンクぶんだけ記録を縮める。縮めの失敗は送出 —
+        # 縮めずに次へ進むと同じチャンクを永久に回る。再実行は台帳の記録済み
+        # 結果に合流するので、縮め直前の失敗でも二重適用にはならない。
+        if len(chunk) == len(span_messages):
+            with adapter._db_lock:
+                delete_sluice_skipped_span(adapter.conn, span["id"])
+        else:
+            next_start = str(getattr(span_messages[len(chunk)], "id"))
+            with adapter._db_lock:
+                advance_sluice_skipped_span(adapter.conn, span["id"], next_start)
+        processed_any = True
+        chunks_processed += 1
+        messages_processed += chunk_summary["messages"]
+        captures_applied += (
+            chunk_summary["ops_applied"] + chunk_summary["memos_applied"]
+            + chunk_summary["promises_applied"]
+        )
+        captures_failed += (
+            chunk_summary["ops_failed"] + chunk_summary["memos_failed"]
+            + chunk_summary["promises_failed"]
+        )
+        _emit(
+            f"過去の会話を読み返しています…… ({messages_processed} 通まで採取済み)"
+        )
+
+    LOGGER.info(
+        "[sluice-capture] run closed: persona=%s status=%s chunks=%d "
+        "messages=%d applied=%d failed=%d",
+        persona_id, status, chunks_processed, messages_processed,
+        captures_applied, captures_failed,
+    )
+    return {
+        "status": status,
+        "chunks_processed": chunks_processed,
+        "messages_processed": messages_processed,
+        "captures_applied": captures_applied,
+        "captures_failed": captures_failed,
+        "spans_remaining": len(_spans()),
     }
 
 

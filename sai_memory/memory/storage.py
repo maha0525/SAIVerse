@@ -1840,6 +1840,33 @@ def list_sluice_skipped_spans(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
     ]
 
 
+def advance_sluice_skipped_span(
+    conn: sqlite3.Connection, span_id: int, new_start_message_id: str,
+) -> bool:
+    """記録された範囲の起点を前進させる (処理し終えたチャンクぶんの縮め)。
+
+    後から通すジョブ (sea/sluice.py の capture) がチャンクを一つ処理し終える
+    たびに呼ぶ — 中断しても続きが「縮んだ記録の頭」から再開できる。前進だけを
+    許す用途で、範囲を広げる方向の書き換えには使わないこと。行が無ければ
+    False (呼び出し側の勘定ずれの検知用)。
+    """
+    cur = conn.execute(
+        "UPDATE sluice_skipped_spans SET start_message_id = ? WHERE id = ?",
+        (str(new_start_message_id), int(span_id)),
+    )
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def delete_sluice_skipped_span(conn: sqlite3.Connection, span_id: int) -> bool:
+    """記録された範囲を 1 行消す (範囲全体を通し終えたときだけ呼ぶ)。"""
+    cur = conn.execute(
+        "DELETE FROM sluice_skipped_spans WHERE id = ?", (int(span_id),)
+    )
+    conn.commit()
+    return cur.rowcount > 0
+
+
 # ---------------------------------------------------------------------------
 # Pulse Logs
 # ---------------------------------------------------------------------------
