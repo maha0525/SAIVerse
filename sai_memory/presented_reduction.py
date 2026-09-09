@@ -27,7 +27,11 @@
 - **書き換えは Metabolism の瞬間以外に起きない。** 縮みの判断そのものは
   :func:`mark_presentation_reductions` が Metabolism の中だけで永続化し、以後の
   提示はその記録を読むだけ。移動しても発言しても提示の途中は変わらない
-  (プロンプトキャッシュの前方一致の保護)。
+  (プロンプトキャッシュの前方一致の保護)。**Metabolism の入口の門で引き返す回**
+  も同じ「Metabolism の瞬間」に数える (会話が畳めないまま合計だけが上限を超えて
+  いるペルソナは本体へ入れないため。門は :func:`has_pending_reductions` が
+  「縮めるものがある」と答えたときにだけ書く — 詳細は
+  ``docs/intent/presented_context_reduction.md`` の「実装で確定したこと」6)。
 - **一方向** — 一度縮めたものは戻らない。操作通知は前進しかしない境界
   (``perception_presentation.notices_dropped_through_batch_id``) で、部屋は
   バッチの記帳に打つ外れない印で表す。揺り戻しでちらつかない。
@@ -215,6 +219,137 @@ def notice_omission_block(count: int) -> str:
 # Metabolism の瞬間の書き込み
 # ---------------------------------------------------------------------------
 
+def _room_shrink_targets(
+    batch: Any, current_key: str,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Set[str]]:
+    """このバッチで縮められる部屋のエントリを選ぶ (**何も書かない**)。
+
+    :func:`mark_presentation_reductions` (書く側) と
+    :func:`has_pending_reductions` (門の前提条件) が**同じ一枚**を通るための
+    切り出し。二枚に分かれると、門が「縮めるものがある」と言った回に書く側が
+    何もしない (= 節目のたびに head を無駄に描き直す) 食い違いが生まれる。
+
+    Returns:
+        ``(このバッチの全エントリ, 縮める対象, 提示に残る側のメディア path)``。
+        対象の dict は全エントリの中の同じオブジェクトなので、書く側はここで
+        返ったものをそのまま書き換えて記帳を保存できる。
+    """
+    from sai_memory.room_state import batch_room_states, bundle_media, is_legacy_entry
+
+    entries = batch_room_states(batch.room_state_json)
+    if not entries:
+        return [], [], set()
+    targets: List[Dict[str, Any]] = []
+    survivor_paths: Set[str] = set()
+    survivor_blocks: Set[str] = set()
+    for entry in entries:
+        if entry.get(SHRUNK_FLAG):
+            continue  # 既に縮めた — 触らない (一方向)。
+        if is_legacy_entry(entry):
+            # 束として読めない (旧形式) — 縮めないが、確定文面には
+            # 全文のまま残るので照合の相手には数える。
+            survivor_blocks.add(str(entry.get("block") or ""))
+            continue
+        if str(entry.get("key") or "") == current_key:
+            survivor_paths.update(
+                str(m["path"]) for m in bundle_media(entry["snapshot"])
+                if m.get("path")
+            )
+            survivor_blocks.add(str(entry.get("block") or ""))
+            continue
+        targets.append(entry)
+    # 縮める側と残る側のブロック文面が同一なら見送る — 差し替えは
+    # 確定文面の中の**文字列一致**で位置を決めるので (_replace_block)、
+    # 同名・同内容の部屋が同じバッチに二つあると、残すべき方 (現在地)
+    # のブロックを縮めうる。曖昧なら触らない、の保守側
+    # (ローカルレビュー指摘 2026-09-10)。
+    if survivor_blocks:
+        kept_targets = []
+        for entry in targets:
+            if str(entry.get("block") or "") in survivor_blocks:
+                LOGGER.debug(
+                    "[presented_reduction] skipping the shrink of room %s in "
+                    "batch %s: its block text is identical to a room that stays "
+                    "in the presentation", entry.get("key"), batch.id,
+                )
+                continue
+            kept_targets.append(entry)
+        targets = kept_targets
+    return entries, targets, survivor_paths
+
+
+def _has_droppable_notices(
+    conn: sqlite3.Connection, batch_ids: Sequence[int],
+) -> bool:
+    """これらのバッチに「下ろす対象の操作通知」の台帳の行があるか。
+
+    読むのは ``kind`` と ``metadata`` だけ — 本文 (``content``) は下ろされた
+    バッチだと 10 万字規模になりうるので触らない。読み取り失敗は送出する
+    (呼び出し側の門が「見送り」に倒す)。
+    """
+    ids = [int(b) for b in batch_ids]
+    for start in range(0, len(ids), 500):
+        chunk = ids[start:start + 500]
+        placeholders = ",".join("?" for _ in chunk)
+        rows = conn.execute(
+            "SELECT kind, metadata FROM perception_buffer "
+            f"WHERE consumed_batch_id IN ({placeholders})",
+            tuple(chunk),
+        ).fetchall()
+        for kind, metadata in rows:
+            if is_droppable_notice(kind, metadata):
+                return True
+    return False
+
+
+def has_pending_reductions(conn: sqlite3.Connection) -> bool:
+    """いま :func:`mark_presentation_reductions` を呼んだら何か縮むか。
+
+    **安い読みだけ**で答える (書き込みなし・LLM なし)。使うのは Metabolism の
+    入口の門 — 「合計は上限超えなのに会話は畳めない」回に縮みを試す前の
+    前提条件で、ここが False なら head の描き直しごと見送る。見送りが要るのは、
+    超過が続く限り毎ターンこの門を通るから: 縮めるものが無いのに head を
+    描き直すと、プロンプトの前置きが毎回変わってキャッシュの前方一致が
+    無駄に割れ続ける。
+
+    True になるのは次のどちらか:
+
+    1. 操作通知の境界より新しい提示中のバッチに、下ろす対象の通知の行がある
+    2. 現在地でない部屋の、まだ縮めていないエントリが提示中のバッチにある
+
+    **二度目は False になる** (冪等): 書く側は通知の境界を提示中の最大 id まで
+    必ず進め、対象の部屋のエントリには必ず印を打つので、直後に呼び直すと
+    どちらの条件も落ちる。
+
+    既知の甘さ: 1 は台帳に行があることまでしか見ない — その通知が畳まれて
+    確定文面に出ていない回は、書く側が「外すものなし」で終わる。ただし境界は
+    その回に進むので、無駄な描き直しは**多くても一度**で止まる。
+
+    読み取りの失敗は送出する (「縮めるものが無い」の False に化かさない —
+    呼び出し側が見送りとして記録する)。
+    """
+    from sai_memory.perception_buffer import list_presented_batches
+    from sai_memory.room_state import find_current_room_key
+
+    presented = list_presented_batches(conn)
+    if not presented:
+        return False
+    cutoff = get_notice_cutoff(conn)
+    fresh = [int(b.id) for b in presented if int(b.id) > cutoff]
+    if fresh and _has_droppable_notices(conn, fresh):
+        return True
+    current_key = find_current_room_key(conn)
+    if not current_key:
+        # 何と比べて「現在地でない」と言うのかが決まらない — 書く側も部屋を
+        # 一つも縮めないので、ここも縮めるものなしに倒す。
+        return False
+    for batch in presented:
+        _entries, targets, _survivor_paths = _room_shrink_targets(batch, current_key)
+        if targets:
+            return True
+    return False
+
+
 def mark_presentation_reductions(conn: sqlite3.Connection) -> Dict[str, int]:
     """Metabolism の瞬間に「ここから先は縮める」を永続化する。**commit しない**。
 
@@ -244,12 +379,7 @@ def mark_presentation_reductions(conn: sqlite3.Connection) -> Dict[str, int]:
         "batches": 記帳を書き換えたバッチの数}``。
     """
     from sai_memory.perception_buffer import list_presented_batches
-    from sai_memory.room_state import (
-        batch_room_states,
-        bundle_media,
-        find_current_room_key,
-        is_legacy_entry,
-    )
+    from sai_memory.room_state import bundle_media, find_current_room_key
 
     presented = list_presented_batches(conn)
     if not presented:
@@ -261,46 +391,9 @@ def mark_presentation_reductions(conn: sqlite3.Connection) -> Dict[str, int]:
     batches_touched = 0
     if current_key:
         for batch in presented:
-            entries = batch_room_states(batch.room_state_json)
-            if not entries:
-                continue
-            targets: List[Dict[str, Any]] = []
-            survivor_paths: Set[str] = set()
-            survivor_blocks: Set[str] = set()
-            for entry in entries:
-                if entry.get(SHRUNK_FLAG):
-                    continue  # 既に縮めた — 触らない (一方向)。
-                if is_legacy_entry(entry):
-                    # 束として読めない (旧形式) — 縮めないが、確定文面には
-                    # 全文のまま残るので照合の相手には数える。
-                    survivor_blocks.add(str(entry.get("block") or ""))
-                    continue
-                if str(entry.get("key") or "") == current_key:
-                    survivor_paths.update(
-                        str(m["path"]) for m in bundle_media(entry["snapshot"])
-                        if m.get("path")
-                    )
-                    survivor_blocks.add(str(entry.get("block") or ""))
-                    continue
-                targets.append(entry)
-            # 縮める側と残る側のブロック文面が同一なら見送る — 差し替えは
-            # 確定文面の中の**文字列一致**で位置を決めるので (_replace_block)、
-            # 同名・同内容の部屋が同じバッチに二つあると、残すべき方 (現在地)
-            # のブロックを縮めうる。曖昧なら触らない、の保守側
-            # (ローカルレビュー指摘 2026-09-10)。
-            if survivor_blocks:
-                kept_targets = []
-                for entry in targets:
-                    if str(entry.get("block") or "") in survivor_blocks:
-                        LOGGER.debug(
-                            "[presented_reduction] skipping the shrink of room "
-                            "%s in batch %s: its block text is identical to a "
-                            "room that stays in the presentation",
-                            entry.get("key"), batch.id,
-                        )
-                        continue
-                    kept_targets.append(entry)
-                targets = kept_targets
+            entries, targets, survivor_paths = _room_shrink_targets(
+                batch, current_key,
+            )
             if not targets:
                 continue
             for entry in targets:

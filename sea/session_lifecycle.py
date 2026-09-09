@@ -268,6 +268,36 @@ class SessionLifecycle:
             )
         return True
 
+    def _handle_perception_over_budget(
+        self, persona, rows_chars: int, total_chars: int, watermarks: Watermarks,
+        model_key: Optional[str] = None,
+    ) -> bool:
+        """入口の門が「合計は上限超え・会話は畳めない」を見つけた回の処置。
+
+        **Metabolism の 4 つの入口 (自動発火 / 手動の記憶の整理 / 冷えた先回り /
+        非常畳み) が共有する一点**。どの入口も「会話の行が残す量以下」だと
+        :meth:`_run_metabolism_locked` へ入らず引き返すので、会話がずっと小さく
+        知覚 (会話以外の提示内容) だけが大きいペルソナでは、ロックの内側にある
+        提示の節約 (:meth:`_reduce_presented_perceptions`) に一度も届かない。
+        旧しきい値 (知覚の二水位、2026-09-09 廃止) はこの状態を独立に拾えて
+        いたので、放置するとその型のペルソナには退行になる — だから引き返す
+        前にここで縮みを試す
+        (docs/intent/presented_context_reduction.md 設計 1/2)。
+
+        やるのは旗を立てること (:meth:`_note_perception_over_budget`) と、
+        縮めるものが実際にあるときだけの縮み
+        (:meth:`_reduce_presented_perceptions_at_gate`) の二つ。**LLM は呼ばない**
+        — 門が今まで持っていた「何も生成しない」性質はそのまま。
+
+        Returns: 旗が立ったか (呼び出し側の従来のログ分岐はこの値のまま)。
+        """
+        if not self._note_perception_over_budget(
+            persona, rows_chars, total_chars, watermarks,
+        ):
+            return False
+        self._reduce_presented_perceptions_at_gate(persona, model_key)
+        return True
+
     def get_metabolism_watermarks(
         self, persona, model_key: Optional[str] = None,
         persona_id: Optional[str] = None,
@@ -1705,9 +1735,10 @@ class SessionLifecycle:
         rows_chars = stored_message_chars(current_messages)
         if rows_chars <= watermarks.target:
             # 既に目標水位より軽い。削る先が無いので走らせない (token 発火でも同じ)。
-            # 合計が上限を超えている (= 知覚の供給が予算超過) なら 1 度だけ警告。
-            if not self._note_perception_over_budget(
-                persona, rows_chars, current_chars, watermarks,
+            # 合計が上限を超えている (= 知覚の供給が予算超過) なら 1 度だけ警告し、
+            # 縮めるものがあれば提示の節約だけ走らせる (LLM は呼ばない)。
+            if not self._handle_perception_over_budget(
+                persona, rows_chars, current_chars, watermarks, model_key,
             ):
                 LOGGER.debug(
                     "[metabolism] skip: window already at/below target "
@@ -2563,8 +2594,8 @@ class SessionLifecycle:
                 persona, window.presented, window.anchor_id,
                 model_key=resolved_model,
             )
-            if not self._note_perception_over_budget(
-                persona, rows_chars, total_chars, watermarks,
+            if not self._handle_perception_over_budget(
+                persona, rows_chars, total_chars, watermarks, resolved_model,
             ):
                 LOGGER.info(
                     "[metabolism] manual compaction: window already at/below "
@@ -2780,8 +2811,9 @@ class SessionLifecycle:
 
         合計が上限を超えていても会話の行が残す量以下なら、畳めるものが無い
         (超過の主は知覚の供給)。その回は通知も session_anchor 行の立ち上げも
-        run_metabolism もせず "skip" を返す (警告はペルソナごと 1 度、
-        :meth:`_note_perception_over_budget`)。
+        run_metabolism もせず "skip" を返す (警告はペルソナごと 1 度)。ただし
+        引き返す前に提示の節約だけは試す — 縮めるものがあるときに限る
+        (:meth:`_handle_perception_over_budget`。LLM は呼ばない)。
 
         Returns:
             "skip" (条件外・超過なし・知覚の供給だけが予算超過) / run_metabolism の結果
@@ -2828,8 +2860,8 @@ class SessionLifecycle:
         # 「整理しています」だけ出て何も畳めない (Codex 指摘 2026-09-03)。1 度
         # だけ警告して、通知・行の立ち上げ・run_metabolism のどれもせず引き返す。
         rows_chars = stored_message_chars(window.presented)
-        if self._note_perception_over_budget(
-            persona, rows_chars, current_chars, watermarks,
+        if self._handle_perception_over_budget(
+            persona, rows_chars, current_chars, watermarks, model_key,
         ):
             return "skip"
         # ここから先は実際に畳む — 機構1 の前進をこの時点で永続化する (上の
@@ -4435,7 +4467,8 @@ class SessionLifecycle:
         滞留 (:meth:`_retry_extraction_backlog` — LLM 課金と記憶書き込み) を
         流すので、空振りと分かっている回に入れない (Codex 指摘 2026-09-03)。
         合計が上限も超えていれば知覚の供給が予算超過 — 警告はペルソナごと
-        1 度 (:meth:`_note_perception_over_budget`)。
+        1 度で、縮めるものがあれば提示の節約だけ走らせる (LLM なし、
+        :meth:`_handle_perception_over_budget`)。
 
         Returns:
             :meth:`cold_precompaction_status` の値 (条件不成立時)、"skip"
@@ -4469,8 +4502,8 @@ class SessionLifecycle:
                 # 滞留 (LLM) を流し、10 分ごとに同じ空振りを繰り返す。
                 rows_chars = stored_message_chars(window.presented)
                 if rows_chars <= watermarks.target:
-                    if not self._note_perception_over_budget(
-                        persona, rows_chars, current_chars, watermarks,
+                    if not self._handle_perception_over_budget(
+                        persona, rows_chars, current_chars, watermarks, model_key,
                     ):
                         LOGGER.debug(
                             "[metabolism] cold pre-compaction skip: rows already "
@@ -4963,13 +4996,18 @@ class SessionLifecycle:
         読むだけになる。だから提示が変わるのはこの瞬間だけで、移動や発言では
         変わらない (プロンプトキャッシュの前方一致の保護)。
 
-        **呼ばれる瞬間は 3 つ**で、どれも直前に head を描き直している
-        (:meth:`_run_metabolism_locked` の中だけ、順序は head → 縮み):
+        **呼ばれる瞬間は 4 つ**で、どれも直前に head を描き直している
+        (順序は必ず head → 縮み):
 
         1. 退場まで進んだ回 (anchor 前進の直後)
         2. 印戻しだけで残す量に収まった回 (編纂なしの早期完了)
         3. 会話が畳めない回 (``plan.is_empty`` — 会話の行は残す量以下なのに
-           合計が上限超え)。会話以外だけが大きい状態で、縮みが一番効く場面
+           合計が上限超え)。1〜3 は :meth:`_run_metabolism_locked` の中
+        4. **入口の門**が同じ状態を見つけて引き返す回
+           (:meth:`_reduce_presented_perceptions_at_gate` 経由)。会話がずっと
+           小さく知覚だけが大きいペルソナは 3 に一度も届かないので、この 4 番
+           だけが縮みの唯一の機会になる。ここだけは前提条件つき (縮めるものが
+           無ければ head の描き直しごと見送る)
 
         **発火の単位はペルソナ全体** — head と提示は (persona, model) ごとだが、
         縮みの記録は知覚を下ろす境界 (§10.9) と同じくペルソナに一つ。つまり
@@ -5009,6 +5047,63 @@ class SessionLifecycle:
             "[metabolism] presentation reduction recorded (persona=%s): %s",
             getattr(persona, "persona_id", "?"), result,
         )
+
+    def _reduce_presented_perceptions_at_gate(
+        self, persona, model_key: Optional[str] = None,
+    ) -> bool:
+        """入口の門で引き返す回の提示の節約 (縮めるものがあるときだけ)。
+
+        :meth:`_reduce_presented_perceptions` との違いは**前提条件**の一つだけ:
+        ここは Metabolism の本体に入れなかった回に呼ばれるので、
+        :func:`~sai_memory.presented_reduction.has_pending_reductions` (安い読み
+        だけの判定) が「縮めるものがある」と言ったときにしか動かない。無条件に
+        動かすと、合計が上限を超えている限り毎ターン head を描き直すことになり、
+        プロンプトの前置きが毎回変わってキャッシュの前方一致が無駄に割れ続ける。
+
+        並びは本体と同じで、**順序は入れ替えられない**: 先に head を描き直し
+        (:meth:`~saiverse.dynamic_state.DynamicStateManager.on_metabolism`)、
+        その後で縮める。操作通知は head が今の状態を見せるまで唯一の情報源
+        なので、先に下ろすと一拍だけ「通知も head も古い」瞬間ができる。
+
+        **冪等** — 縮みの記録は境界の前進と記帳への印の追加だけなので、二度目の
+        呼び出しでは前提条件が偽になって何もしない。
+
+        Beat ロックは取らない (門は Metabolism 本体の外)。同時に走る本体との
+        競合は、縮みの書き込みが SAIMemory の ``_db_lock`` の内側で完結し、
+        境界は一方向・記帳の印は追加のみであることで無害になる。
+
+        Returns: 実際に縮みを走らせたか (前提条件が偽 / 読めなかった回は False)。
+        """
+        adapter = getattr(persona, "sai_memory", None)
+        if adapter is None or not getattr(adapter, "is_ready", lambda: False)():
+            return False
+        try:
+            from sai_memory.presented_reduction import has_pending_reductions
+            with adapter._db_lock:
+                pending = has_pending_reductions(adapter.conn)
+        except Exception:
+            LOGGER.warning(
+                "[metabolism] could not tell whether anything can be reduced in "
+                "the presentation (persona=%s); leaving it at full size this "
+                "round", getattr(persona, "persona_id", "?"), exc_info=True,
+            )
+            return False
+        if not pending:
+            LOGGER.debug(
+                "[metabolism] over budget but nothing to reduce in the "
+                "presentation (persona=%s); skipping the head rebuild too",
+                getattr(persona, "persona_id", "?"),
+            )
+            return False
+        try:
+            from saiverse.dynamic_state import DynamicStateManager
+            DynamicStateManager.on_metabolism(
+                persona, self.manager, model_key=model_key,
+            )
+        except Exception:
+            LOGGER.exception("[dynamic_state] on_metabolism failed")
+        self._reduce_presented_perceptions(persona)
+        return True
 
     def _retry_extraction_backlog(
         self,

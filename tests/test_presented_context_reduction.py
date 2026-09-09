@@ -41,6 +41,7 @@ from sai_memory.perception_buffer import (
 from sai_memory.presented_reduction import (
     advance_notice_cutoff,
     get_notice_cutoff,
+    has_pending_reductions,
     is_droppable_notice,
     mark_presentation_reductions,
 )
@@ -762,6 +763,203 @@ class ReductionAccountingTest(PresentedReductionTestBase):
         self._flush()
         self._metabolism()
         self.assertEqual(len(list_presented_batches(self.conn)), 2)
+
+
+class HasPendingReductionsTest(PresentedReductionTestBase):
+    """修正 2 の前提条件 — 「いま呼んだら何か縮むか」を安い読みだけで答える。
+
+    入口の門はこれが True のときだけ縮みへ入る。False の回に head を描き直すと、
+    合計が上限を超えている限り毎ターン前置きが書き変わって、プロンプトキャッシュ
+    の前方一致が無駄に割れ続ける。
+    """
+
+    def _pending(self):
+        return has_pending_reductions(self.conn)
+
+    def test_empty_ledger_has_nothing_to_reduce(self):
+        self.assertFalse(self._pending())
+
+    def test_droppable_notice_makes_it_true_until_the_metabolism(self):
+        self._push_head_mutation("core_memory", "コア記憶を書き換えました")
+        self._flush()
+        self.assertTrue(self._pending())
+        self._metabolism()
+        self.assertFalse(self._pending())
+
+    def test_event_notice_alone_is_not_enough(self):
+        # 出来事の通知 (型なし) は下ろす対象ではない。
+        self._push_world_state("エリスがやって来ました")
+        self._flush()
+        self.assertFalse(self._pending())
+
+    def test_room_away_makes_it_true_until_the_metabolism(self):
+        self._push_room("b1", "工房", image="/img/b1.png")
+        self._flush()
+        self._push_room("b2", "書斎")   # 現在地は b2 になる
+        self._flush()
+        self.assertTrue(self._pending())
+        self._metabolism()
+        self.assertFalse(self._pending())
+
+    def test_current_room_alone_is_not_enough(self):
+        self._push_room("b1", "工房", image="/img/b1.png")
+        self._flush()
+        self.assertFalse(self._pending())
+
+    def test_new_notice_after_the_metabolism_makes_it_true_again(self):
+        self._push_head_mutation("core_memory", "コア記憶を書き換えました")
+        self._flush()
+        self._metabolism()
+        self.assertFalse(self._pending())
+        self._push_head_mutation("desk", "机を更新しました")
+        self._flush()
+        self.assertTrue(self._pending())
+
+    def test_read_failure_is_raised_not_swallowed(self):
+        # 「縮めるものが無い」の False に化かさない (門が見送りとして記録する)。
+        self._push_head_mutation("core_memory", "コア記憶を書き換えました")
+        self._flush()
+        with mock.patch(
+            "sai_memory.perception_buffer.list_presented_batches",
+            side_effect=sqlite3.DatabaseError("boom"),
+        ):
+            with self.assertRaises(sqlite3.DatabaseError):
+                self._pending()
+
+
+class MetabolismGateReductionTest(PresentedReductionTestBase):
+    """修正 2 — 入口の門 (自動発火) から縮みが走る。
+
+    4 経路 (自動 / 手動 / 冷えた先回り / 非常畳み) はどれも「会話の行が残す量
+    以下」だと Metabolism の本体へ入らずに引き返す。会話がずっと小さく知覚だけが
+    大きいペルソナは本体の縮み (``plan.is_empty`` の回) に一度も届かないので、
+    門が縮みの唯一の機会になる。
+    """
+
+    def setUp(self):
+        super().setUp()
+        from sea.eviction_plan import Watermarks
+        from sea.session_lifecycle import SessionLifecycle
+        from sea.session_window import SessionWindow
+
+        self.lifecycle = SessionLifecycle(
+            SimpleNamespace(run_cache_keepalive=lambda pid, mk=None: None),
+            SimpleNamespace(personas={}),
+        )
+        self.persona.history_manager = SimpleNamespace()
+        self.persona.current_building_id = "b2"
+        # 会話は小さい (残す量以下) が、合計は上限超え。
+        msgs = [{"id": "m0", "content": "x" * 100}]
+        self.window = SessionWindow(
+            anchor_id="m0", raw=list(msgs), presented=list(msgs), folds=[],
+        )
+        self.watermarks = Watermarks(target=2_000, high=4_000)
+        self.order: list = []
+
+    def _run_gate(self):
+        """自動経路 (maybe_run_metabolism) の門を、実データの上で一度回す。"""
+        with mock.patch.object(
+                    self.lifecycle, "load_anchor_entry",
+                    return_value={"anchor_id": "m0"},
+                ), \
+                mock.patch.object(
+                    self.lifecycle, "get_metabolism_watermarks",
+                    return_value=self.watermarks,
+                ), \
+                mock.patch.object(
+                    self.lifecycle, "get_presented_window",
+                    return_value=self.window,
+                ), \
+                mock.patch.object(
+                    self.lifecycle, "presented_chars", return_value=9_000,
+                ), \
+                mock.patch.object(
+                    self.lifecycle, "run_metabolism",
+                    side_effect=AssertionError("the gate must not run metabolism"),
+                ), \
+                mock.patch(
+                    "saiverse.dynamic_state.DynamicStateManager.on_metabolism",
+                    lambda persona, manager, model_key=None: self.order.append(
+                        ("head", model_key),
+                    ),
+                ):
+            self.lifecycle.maybe_run_metabolism(
+                self.persona, "b2", model_key="test-model",
+            )
+
+    def test_gate_reduces_when_the_conversation_cannot_be_folded(self):
+        self._push_room("b1", "工房", image="/img/b1.png")
+        self._push_head_mutation("core_memory", "コア記憶を書き換えました")
+        self._flush()
+        self._push_room("b2", "書斎")
+        self._flush()
+
+        before = self._text()
+        self.assertIn("工房 のノート", before)
+        self.assertIn("コア記憶を書き換えました", before)
+
+        self._run_gate()
+
+        after = self._text()
+        self.assertNotIn("工房 のノート", after)              # いない部屋は縮んだ
+        self.assertNotIn("コア記憶を書き換えました", after)   # 操作通知は下りた
+        self.assertIn(PERCEPTION_OMISSION_HEADER, after)      # 黙って消していない
+        self.assertIn("書斎 のノート", after)                 # 現在地は全文のまま
+        self.assertNotIn("/img/b1.png", self._media_paths())
+        # head を描き直して**から** 縮んだ (順序は入れ替えられない)。
+        self.assertEqual(self.order, [("head", "test-model")])
+
+    def test_second_pass_skips_the_head_rebuild(self):
+        self._push_room("b1", "工房")
+        self._push_head_mutation("core_memory", "コア記憶を書き換えました")
+        self._flush()
+        self._push_room("b2", "書斎")
+        self._flush()
+
+        self._run_gate()
+        text_after_first = self._text()
+        self.order.clear()
+
+        # まだ超過は続いている (presented_chars は 9,000 のまま) が、縮める
+        # ものはもう無い — head は描き直さず、提示も動かない。
+        self._run_gate()
+        self.assertEqual(self.order, [])
+        self.assertEqual(self._text(), text_after_first)
+
+    def test_nothing_to_reduce_writes_nothing(self):
+        # 現在地の部屋だけ・出来事の通知だけ = 縮める先が無い超過。
+        self._push_room("b2", "書斎")
+        self._push_world_state("エリスがやって来ました")
+        self._flush()
+        before_batches = self.conn.execute(
+            "SELECT id, rendered_text, room_state_json FROM perception_batches "
+            "ORDER BY id"
+        ).fetchall()
+
+        self._run_gate()
+
+        # 門そのものには届いている (超過の旗が立っている) — その上で何も書かない。
+        self.assertIn("p1", self.lifecycle._perception_over_budget_warned)
+        self.assertEqual(self.order, [])                 # head も描き直さない
+        self.assertEqual(get_notice_cutoff(self.conn), 0)  # 境界も進まない
+        self.assertEqual(
+            self.conn.execute(
+                "SELECT id, rendered_text, room_state_json FROM "
+                "perception_batches ORDER BY id"
+            ).fetchall(),
+            before_batches,
+        )
+
+    def test_gate_never_calls_an_llm(self):
+        """門は縮めても本体 (run_metabolism = 編纂・スルース) へ入らない。"""
+        self._push_room("b1", "工房")
+        self._flush()
+        self._push_room("b2", "書斎")
+        self._flush()
+        # run_metabolism は _run_gate の中で AssertionError を投げるように
+        # 差し替えてある — 呼ばれれば落ちる。
+        self._run_gate()
+        self.assertTrue(get_notice_cutoff(self.conn) > 0)
 
 
 if __name__ == "__main__":
