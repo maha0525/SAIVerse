@@ -18,6 +18,10 @@ sea/runtime_context.list_presented_perception_blocks。
 6. 提示が変わるのは Metabolism の瞬間だけ — 移動しても新しい知覚が積まれても、
    既に提示に出ているブロックの文面は変わらない。
 7. 一方向 — 二度目の Metabolism でも、縮めたものは戻らない。
+8. 操作通知が下りる境界は **model ごと** — model A の縮みでは model B の提示から
+   通知は消えない (B の head はまだ凍結されていて、通知が唯一の情報源だから)。
+   部屋の縮めた印はペルソナ共通 (部屋の様子は head に載らない)。
+9. head を描き直せなかった回は操作通知を下ろさない (部屋は縮める)。
 """
 from __future__ import annotations
 
@@ -60,6 +64,11 @@ from sea.runtime_context import list_presented_perception_blocks
 #: Chronicle 有効相当 (lifecycle 無し = 判定不能 → 有効側に倒す)。
 _RUNTIME = SimpleNamespace(session_lifecycle=None)
 
+#: このペルソナの標準 model (= 引数なしの提示組成が解決する model)。
+MODEL_A = "test-model"
+#: 同じペルソナに向いている別の Session の model (head は別に凍結されている)。
+MODEL_B = "other-model"
+
 
 def _bundle(building: str, name: str, *, image: str | None = None) -> dict:
     """開いたドキュメント 1 個 (+ 任意の内装画像) を持つ部屋の束。"""
@@ -89,9 +98,10 @@ class PresentedReductionTestBase(unittest.TestCase):
         init_perception_buffer_table(self.conn)
         self.addCleanup(self.conn.close)
         self.clock = 1000
+        self.model_key = MODEL_A
         self.persona = SimpleNamespace(
             persona_id="p1",
-            model="test-model",
+            model=MODEL_A,
             sai_memory=SimpleNamespace(
                 conn=self.conn, _db_lock=threading.RLock(), is_ready=lambda: True,
             ),
@@ -149,23 +159,29 @@ class PresentedReductionTestBase(unittest.TestCase):
 
     # ---- 節目と提示 ----
 
-    def _metabolism(self):
-        """Metabolism の瞬間の縮みの記録 (SessionLifecycle が呼ぶのと同じ一枚)。"""
-        result = mark_presentation_reductions(self.conn)
+    def _metabolism(self, model_key: str | None = None, *, drop_notices=True):
+        """Metabolism の瞬間の縮みの記録 (SessionLifecycle が呼ぶのと同じ一枚)。
+
+        ``model_key`` を省くとこのペルソナの標準 model (= 引数なしの提示組成が
+        解決するのと同じ model) の境界が進む。
+        """
+        result = mark_presentation_reductions(
+            self.conn, model_key or self.model_key, drop_notices=drop_notices,
+        )
         self.conn.commit()
         return result
 
-    def _blocks(self):
+    def _blocks(self, model_key: str | None = None):
         return list_presented_perception_blocks(
-            _RUNTIME, self.persona, [], raise_on_error=True,
+            _RUNTIME, self.persona, [], raise_on_error=True, model_key=model_key,
         )
 
-    def _text(self):
-        return "\n".join(b["content"] for b in self._blocks())
+    def _text(self, model_key: str | None = None):
+        return "\n".join(b["content"] for b in self._blocks(model_key))
 
-    def _media_paths(self):
+    def _media_paths(self, model_key: str | None = None):
         paths = []
-        for block in self._blocks():
+        for block in self._blocks(model_key):
             for m in (block.get("metadata") or {}).get("media") or []:
                 paths.append(m.get("path"))
         return paths
@@ -535,13 +551,17 @@ class ReductionIdempotenceTest(PresentedReductionTestBase):
 
 
 class MetabolismEntryPointsTest(unittest.TestCase):
-    """修正 1 — 会話が畳めない回 (知覚だけが上限超え) でも縮みが走る。
+    """縮みへの到達 — 本体の中の三つの分岐と、外の三つの入口。
 
     「会話は小さく知覚だけが大きい」は縮みが一番効くべき状態なのに、退場計画が
     空 (``plan.is_empty``) の回は縮みへ到達していなかった。head を描き直して
     **から** 縮みへ入る順序も一緒に固定する — 操作通知は head が今の状態を
     見せるまで唯一の情報源なので、先に下ろすと一拍だけ「通知も head も古い」
     瞬間ができる (intent 設計 1 の合図の定義)。
+
+    2026-09-10 レビュー二巡目で、退場を見送った回 (編纂・スルースの失敗) と
+    429 の小休止からも同じ一枚 (:meth:`SessionLifecycle.reduce_presentation`)
+    へ到達することを足した。
     """
 
     def setUp(self):
@@ -568,18 +588,29 @@ class MetabolismEntryPointsTest(unittest.TestCase):
             personas={},
         )
 
-    def _run_with_empty_plan(self):
-        from sea.eviction_plan import EvictionPlan, Watermarks
+    def _lifecycle(self):
         from sea.session_lifecycle import SessionLifecycle
-        from sea.session_window import SessionWindow
 
-        lifecycle = SessionLifecycle(
+        return SessionLifecycle(
             SimpleNamespace(run_cache_keepalive=lambda pid, mk=None: None),
             self.manager,
         )
-        persona = SimpleNamespace(
+
+    def _persona(self):
+        return SimpleNamespace(
             persona_id="p1", model="model-a", current_building_id="room",
+            sai_memory=SimpleNamespace(
+                is_ready=lambda: True, _db_lock=threading.RLock(),
+                conn=SimpleNamespace(),
+            ),
         )
+
+    def _run_with_empty_plan(self, *, pending: bool = True):
+        from sea.eviction_plan import EvictionPlan, Watermarks
+        from sea.session_window import SessionWindow
+
+        lifecycle = self._lifecycle()
+        persona = self._persona()
         msgs = [{"id": f"m{i}", "content": "x" * 1000} for i in range(4)]
         window = SessionWindow(
             anchor_id="m0", raw=list(msgs), presented=list(msgs), folds=[],
@@ -597,23 +628,154 @@ class MetabolismEntryPointsTest(unittest.TestCase):
                     return_value=EvictionPlan(),
                 ), \
                 mock.patch(
+                    "sai_memory.presented_reduction.has_pending_reductions",
+                    return_value=pending,
+                ), \
+                mock.patch(
                     "saiverse.dynamic_state.DynamicStateManager.on_metabolism",
-                    lambda persona, manager, model_key=None: order.append("head"),
+                    lambda persona, manager, model_key=None: (
+                        order.append(("head", model_key)) or True
+                    ),
                 ), \
                 mock.patch.object(
                     lifecycle, "_reduce_presented_perceptions",
-                    lambda p: order.append("shrink"),
+                    lambda p, mk=None, drop_notices=True: order.append(
+                        ("shrink", mk, drop_notices),
+                    ),
                 ):
             status = lifecycle._run_metabolism_locked(
                 persona, "room", window, Watermarks(target=2_000, high=4_000),
-                chronicle_force=True,
+                chronicle_force=True, model_key="model-a",
             )
         return status, order
 
     def test_empty_plan_still_reaches_the_reduction(self):
         status, order = self._run_with_empty_plan()
         self.assertEqual(status, "nothing")  # 戻り値は従来のまま
-        self.assertEqual(order, ["head", "shrink"])
+        self.assertEqual(
+            order, [("head", "model-a"), ("shrink", "model-a", True)],
+        )
+
+    def test_empty_plan_skips_the_head_rebuild_when_nothing_is_pending(self):
+        """前提条件が偽なら head の描き直しごと見送る (前置きを割らない)。"""
+        status, order = self._run_with_empty_plan(pending=False)
+        self.assertEqual(status, "nothing")
+        self.assertEqual(order, [])
+
+    def _run_with_held_back_anchor(self):
+        """編纂が失敗して退場を見送った回 (anchor held back)。"""
+        from sea.eviction_plan import EvictionPlan, Fold, Watermarks
+        from sea.session_window import SessionWindow
+
+        lifecycle = self._lifecycle()
+        persona = self._persona()
+        msgs = [{"id": f"m{i}", "content": "x" * 1000} for i in range(4)]
+        window = SessionWindow(
+            anchor_id="m0", raw=list(msgs), presented=list(msgs), folds=[],
+        )
+        plan = EvictionPlan(
+            folds=[Fold(messages=list(msgs[:2]))],
+            protected_from=2, stored_chars=4_000, total_chars=9_000,
+        )
+        order: list = []
+        with mock.patch.object(
+                    lifecycle, "is_chronicle_enabled_for_persona",
+                    return_value=True,
+                ), \
+                mock.patch.object(
+                    lifecycle, "get_presented_window", return_value=window,
+                ), \
+                mock.patch.object(
+                    lifecycle, "_retry_extraction_backlog", return_value=None,
+                ), \
+                mock.patch.object(
+                    lifecycle, "ensure_recall_embeddings", return_value=None,
+                ), \
+                mock.patch.object(
+                    lifecycle, "_refold_raw_view_folds", return_value=None,
+                ), \
+                mock.patch(
+                    "sea.session_lifecycle.plan_eviction", return_value=plan,
+                ), \
+                mock.patch.object(
+                    lifecycle, "generate_chronicle", return_value="failed",
+                ), \
+                mock.patch.object(
+                    lifecycle, "_apply_eviction_plan",
+                    side_effect=AssertionError("must not evict"),
+                ), \
+                mock.patch(
+                    "sai_memory.presented_reduction.has_pending_reductions",
+                    return_value=True,
+                ), \
+                mock.patch(
+                    "saiverse.dynamic_state.DynamicStateManager.on_metabolism",
+                    lambda persona, manager, model_key=None: (
+                        order.append(("head", model_key)) or True
+                    ),
+                ), \
+                mock.patch.object(
+                    lifecycle, "_reduce_presented_perceptions",
+                    lambda p, mk=None, drop_notices=True: order.append(
+                        ("shrink", mk, drop_notices),
+                    ),
+                ):
+            status = lifecycle._run_metabolism_locked(
+                persona, "room", window, Watermarks(target=2_000, high=4_000),
+                chronicle_force=True, model_key="model-a",
+            )
+        return status, order
+
+    def test_held_back_anchor_still_reaches_the_reduction(self):
+        status, order = self._run_with_held_back_anchor()
+        self.assertEqual(status, "failed")   # 退場は見送ったまま
+        self.assertEqual(
+            order, [("head", "model-a"), ("shrink", "model-a", True)],
+        )
+
+    def test_rate_limit_cooldown_still_reaches_the_reduction(self):
+        """429 の小休止は LLM を止めるだけ — 縮みは LLM を呼ばないので走る。"""
+        lifecycle = self._lifecycle()
+        persona = self._persona()
+        calls: list = []
+        with mock.patch.object(
+                    lifecycle, "_metabolism_rate_limit_active", return_value=True,
+                ), \
+                mock.patch.object(
+                    lifecycle, "load_anchor_entry",
+                    side_effect=AssertionError("must not proceed past the cooldown"),
+                ), \
+                mock.patch.object(
+                    lifecycle, "reduce_presentation",
+                    lambda p, mk=None, require_pending=True: calls.append(
+                        (mk, require_pending),
+                    ),
+                ):
+            lifecycle.maybe_run_metabolism(persona, "room", model_key="model-a")
+        self.assertEqual(calls, [("model-a", True)])
+
+    def test_emergency_cooldown_still_reaches_the_reduction(self):
+        lifecycle = self._lifecycle()
+        persona = self._persona()
+        calls: list = []
+        with mock.patch.object(
+                    lifecycle, "_metabolism_rate_limit_active", return_value=True,
+                ), \
+                mock.patch.object(
+                    lifecycle, "get_metabolism_watermarks",
+                    side_effect=AssertionError("must not proceed past the cooldown"),
+                ), \
+                mock.patch.object(
+                    lifecycle, "reduce_presentation",
+                    lambda p, mk=None, require_pending=True: calls.append(
+                        (mk, require_pending),
+                    ),
+                ):
+            status = lifecycle.maybe_run_emergency_precompaction(
+                persona, "room", model_key="model-a",
+            )
+        self.assertEqual(status, "skip")
+        self.assertEqual(calls, [("model-a", True)])
 
 
 class ReductionTimingTest(PresentedReductionTestBase):
@@ -648,7 +810,7 @@ class ReductionTimingTest(PresentedReductionTestBase):
 
 
 class NoticeCutoffTest(unittest.TestCase):
-    """操作通知の境界は一方向にしか進まない。"""
+    """操作通知の境界は model ごとで、一方向にしか進まない。"""
 
     def setUp(self):
         self.conn = sqlite3.connect(":memory:")
@@ -656,13 +818,26 @@ class NoticeCutoffTest(unittest.TestCase):
         self.addCleanup(self.conn.close)
 
     def test_starts_at_zero(self):
-        self.assertEqual(get_notice_cutoff(self.conn), 0)
+        self.assertEqual(get_notice_cutoff(self.conn, MODEL_A), 0)
 
     def test_advances_forward_only(self):
-        self.assertEqual(advance_notice_cutoff(self.conn, 5), 5)
-        self.assertEqual(advance_notice_cutoff(self.conn, 3), 5)
-        self.assertEqual(advance_notice_cutoff(self.conn, 9), 9)
-        self.assertEqual(get_notice_cutoff(self.conn), 9)
+        self.assertEqual(advance_notice_cutoff(self.conn, 5, MODEL_A), 5)
+        self.assertEqual(advance_notice_cutoff(self.conn, 3, MODEL_A), 5)
+        self.assertEqual(advance_notice_cutoff(self.conn, 9, MODEL_A), 9)
+        self.assertEqual(get_notice_cutoff(self.conn, MODEL_A), 9)
+
+    def test_each_model_has_its_own_boundary(self):
+        advance_notice_cutoff(self.conn, 9, MODEL_A)
+        self.assertEqual(get_notice_cutoff(self.conn, MODEL_B), 0)
+        advance_notice_cutoff(self.conn, 4, MODEL_B)
+        self.assertEqual(get_notice_cutoff(self.conn, MODEL_A), 9)
+        self.assertEqual(get_notice_cutoff(self.conn, MODEL_B), 4)
+
+    def test_no_model_key_reads_and_writes_nothing(self):
+        # model が分からない呼び出しは「一つも下ろさない」の安全側。
+        self.assertEqual(advance_notice_cutoff(self.conn, 9, None), 0)
+        self.assertEqual(get_notice_cutoff(self.conn, None), 0)
+        self.assertEqual(get_notice_cutoff(self.conn, MODEL_A), 0)
 
     def test_does_not_disturb_the_drop_cutoff(self):
         from sai_memory.perception_buffer import (
@@ -670,13 +845,13 @@ class NoticeCutoffTest(unittest.TestCase):
             get_presentation_cutoff,
         )
         advance_presentation_cutoff(self.conn, 4)
-        advance_notice_cutoff(self.conn, 7)
+        advance_notice_cutoff(self.conn, 7, MODEL_A)
         self.assertEqual(get_presentation_cutoff(self.conn), 4)
-        self.assertEqual(get_notice_cutoff(self.conn), 7)
+        self.assertEqual(get_notice_cutoff(self.conn, MODEL_A), 7)
 
     def test_missing_table_reads_as_zero(self):
-        self.conn.execute("DROP TABLE perception_presentation")
-        self.assertEqual(get_notice_cutoff(self.conn), 0)
+        self.conn.execute("DROP TABLE perception_notice_presentation")
+        self.assertEqual(get_notice_cutoff(self.conn, MODEL_A), 0)
 
 
 class ReductionWiringTest(PresentedReductionTestBase):
@@ -739,6 +914,88 @@ class ReductionWiringTest(PresentedReductionTestBase):
         self.assertEqual(events, ["rollback"])
 
 
+class NoticeBoundaryIsPerModelTest(PresentedReductionTestBase):
+    """契約 8 — 操作通知の境界は model ごと、部屋の縮めた印はペルソナ共通。
+
+    head は (persona, model) ごとに描き直される。model A の Metabolism で全 model
+    の提示から通知を下ろすと、head が凍結されたままの model B は変更を知る手段を
+    失い、跡地の文面「いまの状態が改めて示されているため」も B では嘘になる。
+    部屋の様子は head に載らないので、この理屈が当てはまらない。
+    """
+
+    def setUp(self):
+        super().setUp()
+        self._push_room("b1", "工房", image="/img/b1.png")
+        self._push_head_mutation("core_memory", "コア記憶を書き換えました")
+        self._push_world_state("スペル foo (foo) が使えるようになりました", "spell_added")
+        self._flush()
+        self._push_room("b2", "書斎")   # 現在地は b2
+        self._flush()
+
+    def test_model_b_still_sees_the_notices_after_model_a_reduces(self):
+        self._metabolism(MODEL_A)
+        text_b = self._text(MODEL_B)
+        self.assertIn("コア記憶を書き換えました", text_b)
+        self.assertIn("スペル foo (foo) が使えるようになりました", text_b)
+        # A の提示からは下りている (同じ台帳・同じ瞬間なのに答えが違う)。
+        self.assertNotIn("コア記憶を書き換えました", self._text(MODEL_A))
+
+    def test_model_b_drops_them_on_its_own_metabolism(self):
+        self._metabolism(MODEL_A)
+        self._metabolism(MODEL_B)
+        self.assertNotIn("コア記憶を書き換えました", self._text(MODEL_B))
+        self.assertIn(PERCEPTION_OMISSION_HEADER, self._text(MODEL_B))
+
+    def test_room_shrink_is_shared_by_every_model(self):
+        self._metabolism(MODEL_A)
+        for model in (MODEL_A, MODEL_B):
+            self.assertNotIn("工房 のノート", self._text(model), model)
+            self.assertNotIn("/img/b1.png", self._media_paths(model), model)
+
+    def test_head_rebuild_failure_leaves_the_boundary_where_it_was(self):
+        result = self._metabolism(MODEL_A, drop_notices=False)
+        self.assertEqual(result["notices_through"], 0)
+        self.assertIn("コア記憶を書き換えました", self._text(MODEL_A))
+        # 部屋は head と無関係なので、この回でも縮む。
+        self.assertEqual(result["rooms_shrunk"], 1)
+        self.assertNotIn("工房 のノート", self._text(MODEL_A))
+
+
+class ReductionWritebackTest(PresentedReductionTestBase):
+    """記帳への書き戻しは追加だけ — 読む側の篩で未知の要素を消さない。"""
+
+    def test_unknown_entries_survive_the_shrink(self):
+        self._push_room("b1", "工房", image="/img/b1.png")
+        batch_a = self._flush()
+        self._push_room("b2", "書斎")
+        self._flush()
+
+        # 記帳に「読む側の篩が落とす要素」を混ぜる (未来の形式・非 dict)。
+        raw = json.loads(self.conn.execute(
+            "SELECT room_state_json FROM perception_batches WHERE id = ?",
+            (batch_a,),
+        ).fetchone()[0])
+        raw.append({"note": "key の無い未知のエントリ"})
+        raw.append("旧世代の素の文字列")
+        self.conn.execute(
+            "UPDATE perception_batches SET room_state_json = ? WHERE id = ?",
+            (json.dumps(raw, ensure_ascii=False), batch_a),
+        )
+        self.conn.commit()
+
+        self._metabolism()
+
+        after = json.loads(self.conn.execute(
+            "SELECT room_state_json FROM perception_batches WHERE id = ?",
+            (batch_a,),
+        ).fetchone()[0])
+        self.assertIn({"note": "key の無い未知のエントリ"}, after)
+        self.assertIn("旧世代の素の文字列", after)
+        self.assertTrue(any(
+            isinstance(e, dict) and e.get("shrunk") for e in after
+        ))
+
+
 class ReductionAccountingTest(PresentedReductionTestBase):
     """縮んだ提示は、測る側と送る側で同じ一枚 (組成規則の二枚目を作らない)。"""
 
@@ -773,8 +1030,8 @@ class HasPendingReductionsTest(PresentedReductionTestBase):
     の前方一致が無駄に割れ続ける。
     """
 
-    def _pending(self):
-        return has_pending_reductions(self.conn)
+    def _pending(self, model_key: str | None = None):
+        return has_pending_reductions(self.conn, model_key or self.model_key)
 
     def test_empty_ledger_has_nothing_to_reduce(self):
         self.assertFalse(self._pending())
@@ -820,11 +1077,30 @@ class HasPendingReductionsTest(PresentedReductionTestBase):
         self._push_head_mutation("core_memory", "コア記憶を書き換えました")
         self._flush()
         with mock.patch(
-            "sai_memory.perception_buffer.list_presented_batches",
+            "sai_memory.perception_buffer.list_presented_batch_room_states",
             side_effect=sqlite3.DatabaseError("boom"),
         ):
             with self.assertRaises(sqlite3.DatabaseError):
                 self._pending()
+
+    def test_another_model_still_has_the_notice_pending(self):
+        # model A の縮みの後も、B の境界は 0 のまま = B にはまだ縮める先がある。
+        self._push_head_mutation("core_memory", "コア記憶を書き換えました")
+        self._flush()
+        self._metabolism(MODEL_A)
+        self.assertFalse(self._pending(MODEL_A))
+        self.assertTrue(self._pending(MODEL_B))
+
+    def test_without_a_model_key_only_the_rooms_count(self):
+        # model が分からない呼び出しは通知の条件を見ない (下ろす根拠が無い)。
+        self._push_head_mutation("core_memory", "コア記憶を書き換えました")
+        self._flush()
+        self.assertFalse(has_pending_reductions(self.conn, None))
+        self._push_room("b1", "工房")
+        self._flush()
+        self._push_room("b2", "書斎")
+        self._flush()
+        self.assertTrue(has_pending_reductions(self.conn, None))
 
 
 class MetabolismGateReductionTest(PresentedReductionTestBase):
@@ -855,8 +1131,10 @@ class MetabolismGateReductionTest(PresentedReductionTestBase):
         )
         self.watermarks = Watermarks(target=2_000, high=4_000)
         self.order: list = []
+        #: on_metabolism の戻り値 (head を描き直せたか) の差し替え。
+        self.head_ok = True
 
-    def _run_gate(self):
+    def _run_gate(self, model_key: str | None = None):
         """自動経路 (maybe_run_metabolism) の門を、実データの上で一度回す。"""
         with mock.patch.object(
                     self.lifecycle, "load_anchor_entry",
@@ -879,12 +1157,12 @@ class MetabolismGateReductionTest(PresentedReductionTestBase):
                 ), \
                 mock.patch(
                     "saiverse.dynamic_state.DynamicStateManager.on_metabolism",
-                    lambda persona, manager, model_key=None: self.order.append(
-                        ("head", model_key),
+                    lambda persona, manager, model_key=None: (
+                        self.order.append(("head", model_key)) or self.head_ok
                     ),
                 ):
             self.lifecycle.maybe_run_metabolism(
-                self.persona, "b2", model_key="test-model",
+                self.persona, "b2", model_key=model_key or MODEL_A,
             )
 
     def test_gate_reduces_when_the_conversation_cannot_be_folded(self):
@@ -941,7 +1219,8 @@ class MetabolismGateReductionTest(PresentedReductionTestBase):
         # 門そのものには届いている (超過の旗が立っている) — その上で何も書かない。
         self.assertIn("p1", self.lifecycle._perception_over_budget_warned)
         self.assertEqual(self.order, [])                 # head も描き直さない
-        self.assertEqual(get_notice_cutoff(self.conn), 0)  # 境界も進まない
+        # 境界も進まない。
+        self.assertEqual(get_notice_cutoff(self.conn, MODEL_A), 0)
         self.assertEqual(
             self.conn.execute(
                 "SELECT id, rendered_text, room_state_json FROM "
@@ -959,7 +1238,35 @@ class MetabolismGateReductionTest(PresentedReductionTestBase):
         # run_metabolism は _run_gate の中で AssertionError を投げるように
         # 差し替えてある — 呼ばれれば落ちる。
         self._run_gate()
-        self.assertTrue(get_notice_cutoff(self.conn) > 0)
+        self.assertTrue(get_notice_cutoff(self.conn, MODEL_A) > 0)
+
+    def test_head_rebuild_failure_keeps_the_notices_and_shrinks_the_rooms(self):
+        """head を描き直せなかった回 — 通知は残り、部屋だけ縮む (修正 B)。
+
+        ``on_metabolism`` は失敗を例外ではなく ``False`` で返す。戻り値を捨てる
+        と、head が古いまま「いまの状態が改めて示されているため」と言って通知が
+        消える — 二度と分からなくなる変更が出る。
+        """
+        self._push_room("b1", "工房", image="/img/b1.png")
+        self._push_head_mutation("core_memory", "コア記憶を書き換えました")
+        self._flush()
+        self._push_room("b2", "書斎")
+        self._flush()
+
+        self.head_ok = False
+        self._run_gate()
+
+        after = self._text()
+        self.assertIn("コア記憶を書き換えました", after)   # 通知は残る
+        self.assertNotIn("工房 のノート", after)            # 部屋は縮む
+        self.assertEqual(get_notice_cutoff(self.conn, MODEL_A), 0)
+
+        # head が描けるようになった回に、通知はまとめて下りる。
+        self.head_ok = True
+        self.order.clear()
+        self._run_gate()
+        self.assertNotIn("コア記憶を書き換えました", self._text())
+        self.assertTrue(get_notice_cutoff(self.conn, MODEL_A) > 0)
 
 
 if __name__ == "__main__":

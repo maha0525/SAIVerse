@@ -827,7 +827,11 @@ def list_presented_perception_blocks(
       (head が描き直された後は重複) を下ろし、現在地でない部屋の様子を一行へ
       縮めて画像を外す。判断そのものは Metabolism の瞬間に確定済みで、ここでは
       読むだけ — だから提示は Metabolism 以外の瞬間に変わらない。跡地には
-      どちらも機構名義の一行が出る (黙って消さない)。
+      どちらも機構名義の一行が出る (黙って消さない)。**操作通知を下ろした境界は
+      ``model_key`` ごと** (head と同じ単位。部屋の縮めた印はペルソナ共通) なので、
+      ``model_key`` はここで実の用途を持つ — 引数が無ければ head 側と同じ解決
+      (:func:`sea.head_pipeline.integration.resolve_default_model_key`) で
+      persona の標準 model に落とす。
     - **付記の印** (``annexed_entry_id``) が付いたバッチは提示から下りる — 付記
       されるまで消えないので、下限「退場したものは必ず編纂されている」が提示側
       でも常に成立する。履歴が空でも未付記バッチは提示される。
@@ -877,7 +881,15 @@ def list_presented_perception_blocks(
         from sai_memory.perception_buffer import batch_in_window, resolve_window_key
         from sai_memory.presented_reduction import reduce_presented_batches
         from sai_memory.room_state import reopen_lost_bases
+        from sea.head_pipeline.integration import resolve_default_model_key
         chronicle_enabled = _chronicle_enabled_for(runtime, persona)
+        # 操作通知を下ろした境界は (persona, model) ごと — head と同じ単位で
+        # 持つ (docs/intent/presented_context_reduction.md 設計 1)。だから
+        # 同定キーは head と**同じ解決**を通す: 引数が無い呼び出し (プレビュー
+        # 等) は head 側と同じく persona の標準 model へ落ちるので、測る列と
+        # 送る列が別の境界を見ることはない。
+        head_model_key = resolve_default_model_key(persona) if not model_key \
+            else str(model_key)
 
         def _window_predicate_locked() -> Optional[Callable[[Any], bool]]:
             """このペルソナの提示窓の篩 (None = 窓なし・全部見える)。
@@ -933,7 +945,9 @@ def list_presented_perception_blocks(
             if predicate is not None:
                 found = [b for b in found if predicate(b)]
             try:
-                return reduce_presented_batches(sai_mem.conn, found)
+                return reduce_presented_batches(
+                    sai_mem.conn, found, head_model_key,
+                )
             except Exception:
                 # 縮みの適用の失敗は「縮めない」へ倒す。ここで送出すると外側の
                 # 受け (perception batch listing failed) が知覚を丸ごと空にする —

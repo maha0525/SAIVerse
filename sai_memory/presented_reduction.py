@@ -33,7 +33,7 @@
   「縮めるものがある」と答えたときにだけ書く — 詳細は
   ``docs/intent/presented_context_reduction.md`` の「実装で確定したこと」6)。
 - **一方向** — 一度縮めたものは戻らない。操作通知は前進しかしない境界
-  (``perception_presentation.notices_dropped_through_batch_id``) で、部屋は
+  (``perception_notice_presentation`` の model ごとの行) で、部屋は
   バッチの記帳に打つ外れない印で表す。揺り戻しでちらつかない。
 
 **記録の持ち方を二つに分けた理由** (実装判断、2026-09-09): 操作通知は「その時点で
@@ -42,6 +42,19 @@
 Metabolism の時点の現在地でない部屋」で、境界一本で表すと、ペルソナが戻ってきた
 回に同じ境界の再評価で印が外れて (縮めたものが戻って) 揺り戻す。だから部屋だけは
 バッチの記帳 (``room_state_json``) に外れない印を打つ。
+
+**境界の単位は model ごと・部屋の印はペルソナ共通** (2026-09-10 レビュー二巡目の
+裁定)。一文で言うと「操作通知は、そのモデルの head が描き直されたときに、その
+モデルの提示から下りる。部屋は head と無関係なのでペルソナ共通」。理由: head は
+(persona, model) ごとに描き直される (``sea/head_pipeline`` の capture) ので、
+model A の Metabolism で全 model の提示から通知を下ろすと、head が凍結された
+ままの model B が「変化を伝えるつなぎ」を失う — この機構が塞いだはずの穴
+(``sea/head_pipeline/notify.py`` 冒頭の「別 model の Session が変更を知る手段が
+無い」) が開き直る。跡地の文面「いまの状態が改めて示されているため」も B では
+嘘になる。部屋の様子は head に載らないので、この理屈が当てはまらない。
+
+``model_key`` を渡せない呼び出し (model の分からない読み口・旧テスト) では
+**通知を一つも下ろさない** = 全部見せる、の安全側に倒す。
 """
 from __future__ import annotations
 
@@ -83,9 +96,6 @@ NOTICE_LABEL_KINDS = frozenset({
     "spell_system_disabled",
 })
 
-#: ``perception_presentation`` の 1 行のキー (perception_buffer と同じ値)。
-_PRESENTATION_STATE_ID = "main"
-
 #: 部屋の記帳に打つ「縮めた」印と、その相棒のフィールド。
 SHRUNK_FLAG = "shrunk"
 SHRUNK_BLOCK_FIELD = "shrunk_block"
@@ -117,7 +127,7 @@ def is_droppable_notice(kind: Optional[str], metadata: Optional[str]) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# 操作通知の一方向境界 (perception_presentation の 2 本目)
+# 操作通知の一方向境界 (model ごと — perception_notice_presentation)
 # ---------------------------------------------------------------------------
 
 def _is_missing_schema_error(exc: sqlite3.OperationalError) -> bool:
@@ -129,18 +139,26 @@ def _is_missing_schema_error(exc: sqlite3.OperationalError) -> bool:
     return "no such column" in str(exc).lower()
 
 
-def get_notice_cutoff(conn: sqlite3.Connection) -> int:
-    """操作通知を下ろした境界 (この id までのバッチは通知を提示しない)。
+def get_notice_cutoff(
+    conn: sqlite3.Connection, model_key: Optional[str] = None,
+) -> int:
+    """この model が操作通知を下ろした境界 (この id までは通知を提示しない)。
 
     まだ一度も下ろしていない / この仕組みより古い DB なら 0 = 全部出る。
-    テーブル・列の不在**以外**の失敗は raise する — 0 を返すと「一度も下ろして
+    ``model_key`` が無い呼び出しも 0 — どの model の提示を組んでいるのか
+    決まらない以上、下ろす根拠 (「その model の head が描き直された」) が
+    立たないので、全部見せる安全側に倒す。
+
+    テーブルの不在**以外**の失敗は raise する — 0 を返すと「一度も下ろして
     いない」と同じ顔になり、下ろしたはずの通知が提示へ戻る
     (:func:`~sai_memory.perception_buffer.get_presentation_cutoff` と同じ契約)。
     """
+    if not model_key:
+        return 0
     try:
         row = conn.execute(
-            "SELECT notices_dropped_through_batch_id FROM perception_presentation "
-            "WHERE id = ?", (_PRESENTATION_STATE_ID,),
+            "SELECT dropped_through_batch_id FROM perception_notice_presentation "
+            "WHERE model_key = ?", (str(model_key),),
         ).fetchone()
     except sqlite3.OperationalError as exc:
         if _is_missing_schema_error(exc):
@@ -149,8 +167,10 @@ def get_notice_cutoff(conn: sqlite3.Connection) -> int:
     return int(row[0]) if row and row[0] is not None else 0
 
 
-def advance_notice_cutoff(conn: sqlite3.Connection, batch_id: int) -> int:
-    """操作通知の境界を ``batch_id`` まで進める。**commit しない**。
+def advance_notice_cutoff(
+    conn: sqlite3.Connection, batch_id: int, model_key: Optional[str] = None,
+) -> int:
+    """この model の操作通知の境界を ``batch_id`` まで進める。**commit しない**。
 
     **一方向にしか進まない** — 既にそれ以上まで進んでいれば何もしない。後退は
     UPSERT の条件でも弾く。下ろし境界
@@ -158,30 +178,35 @@ def advance_notice_cutoff(conn: sqlite3.Connection, batch_id: int) -> int:
     部屋の様子の土台の連なりには影響しない (通知は連なりに参加しない) ので、
     置き直し・回復の hook は持たない。
 
+    ``model_key`` が無い呼び出しは**何も書かずに 0 を返す** — 誰の head が
+    描き直されたのか言えないまま境界を進めると、head が凍結されたままの model の
+    提示から通知だけが消える。
+
     Returns: 進めた後の実境界 (書き込み後に行を読み直した値)。
     """
-    current = get_notice_cutoff(conn)
+    if not model_key:
+        return 0
+    current = get_notice_cutoff(conn, model_key)
     target = int(batch_id)
     if target <= current:
         return current
     conn.execute(
-        "INSERT INTO perception_presentation "
-        "(id, dropped_through_batch_id, notices_dropped_through_batch_id, updated_at) "
-        "VALUES (?, 0, ?, strftime('%s','now')) "
-        "ON CONFLICT(id) DO UPDATE SET "
-        "notices_dropped_through_batch_id = "
-        "excluded.notices_dropped_through_batch_id, "
+        "INSERT INTO perception_notice_presentation "
+        "(model_key, dropped_through_batch_id, updated_at) "
+        "VALUES (?, ?, strftime('%s','now')) "
+        "ON CONFLICT(model_key) DO UPDATE SET "
+        "dropped_through_batch_id = excluded.dropped_through_batch_id, "
         "updated_at = excluded.updated_at "
-        "WHERE excluded.notices_dropped_through_batch_id > "
-        "perception_presentation.notices_dropped_through_batch_id",
-        (_PRESENTATION_STATE_ID, target),
+        "WHERE excluded.dropped_through_batch_id > "
+        "perception_notice_presentation.dropped_through_batch_id",
+        (str(model_key), target),
     )
-    advanced = get_notice_cutoff(conn)
+    advanced = get_notice_cutoff(conn, model_key)
     if advanced < target:
         raise RuntimeError(
-            f"perception notice cutoff did not advance: wrote {target} but the "
-            f"row reads {advanced} (the guard only loses to a larger value, so "
-            "this is a failed write, not a race)"
+            f"perception notice cutoff did not advance for model {model_key!r}: "
+            f"wrote {target} but the row reads {advanced} (the guard only loses "
+            "to a larger value, so this is a failed write, not a race)"
         )
     return advanced
 
@@ -219,9 +244,27 @@ def notice_omission_block(count: int) -> str:
 # Metabolism の瞬間の書き込み
 # ---------------------------------------------------------------------------
 
+def _raw_room_entries(room_state_json: Optional[str]) -> Optional[List[Any]]:
+    """記帳の JSON を**篩わずに**生の list として読む (壊れていれば None)。
+
+    :func:`~sai_memory.room_state.batch_room_states` は読む側の便宜で「dict で
+    key を持つ要素」だけに絞るが、書き戻しにその結果を使うと、篩で落ちた未知の
+    要素が黙って消える。ここは記帳への書き込み点なので生の並びを保ち、印を打つ
+    エントリだけを差し替える (「記録は追加だけ」— ローカルレビュー指摘
+    2026-09-10)。
+    """
+    if not room_state_json:
+        return None
+    try:
+        data = json.loads(room_state_json)
+    except (TypeError, ValueError):
+        return None
+    return data if isinstance(data, list) else None
+
+
 def _room_shrink_targets(
-    batch: Any, current_key: str,
-) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Set[str]]:
+    batch_id: Any, room_state_json: Optional[str], current_key: str,
+) -> Tuple[Optional[List[Any]], List[Dict[str, Any]], Set[str]]:
     """このバッチで縮められる部屋のエントリを選ぶ (**何も書かない**)。
 
     :func:`mark_presentation_reductions` (書く側) と
@@ -230,15 +273,19 @@ def _room_shrink_targets(
     何もしない (= 節目のたびに head を無駄に描き直す) 食い違いが生まれる。
 
     Returns:
-        ``(このバッチの全エントリ, 縮める対象, 提示に残る側のメディア path)``。
-        対象の dict は全エントリの中の同じオブジェクトなので、書く側はここで
-        返ったものをそのまま書き換えて記帳を保存できる。
+        ``(記帳の生の並び, 縮める対象, 提示に残る側のメディア path)``。生の並びは
+        篩っていない (未知の要素もそのまま入っている) ので、書く側は対象の dict
+        を書き換えてこの並びをそのまま書き戻せる。読めない記帳は生の並びが
+        ``None``。
     """
-    from sai_memory.room_state import batch_room_states, bundle_media, is_legacy_entry
+    from sai_memory.room_state import bundle_media, is_legacy_entry
 
-    entries = batch_room_states(batch.room_state_json)
+    raw = _raw_room_entries(room_state_json)
+    if not raw:
+        return raw, [], set()
+    entries = [e for e in raw if isinstance(e, dict) and e.get("key")]
     if not entries:
-        return [], [], set()
+        return raw, [], set()
     targets: List[Dict[str, Any]] = []
     survivor_paths: Set[str] = set()
     survivor_blocks: Set[str] = set()
@@ -270,12 +317,12 @@ def _room_shrink_targets(
                 LOGGER.debug(
                     "[presented_reduction] skipping the shrink of room %s in "
                     "batch %s: its block text is identical to a room that stays "
-                    "in the presentation", entry.get("key"), batch.id,
+                    "in the presentation", entry.get("key"), batch_id,
                 )
                 continue
             kept_targets.append(entry)
         targets = kept_targets
-    return entries, targets, survivor_paths
+    return raw, targets, survivor_paths
 
 
 def _has_droppable_notices(
@@ -302,24 +349,30 @@ def _has_droppable_notices(
     return False
 
 
-def has_pending_reductions(conn: sqlite3.Connection) -> bool:
+def has_pending_reductions(
+    conn: sqlite3.Connection, model_key: Optional[str] = None,
+) -> bool:
     """いま :func:`mark_presentation_reductions` を呼んだら何か縮むか。
 
-    **安い読みだけ**で答える (書き込みなし・LLM なし)。使うのは Metabolism の
-    入口の門 — 「合計は上限超えなのに会話は畳めない」回に縮みを試す前の
-    前提条件で、ここが False なら head の描き直しごと見送る。見送りが要るのは、
-    超過が続く限り毎ターンこの門を通るから: 縮めるものが無いのに head を
-    描き直すと、プロンプトの前置きが毎回変わってキャッシュの前方一致が
-    無駄に割れ続ける。
+    **安い読みだけ**で答える (書き込みなし・LLM なし。読むのはバッチの id と
+    部屋の記帳、台帳の ``kind`` / ``metadata`` だけで、確定文面には触らない)。
+    使うのは Metabolism の縮みの入口 — 本体へ入れなかった回・入口の門で
+    引き返す回に縮みを試す前の前提条件で、ここが False なら head の描き直し
+    ごと見送る。見送りが要るのは、超過が続く限り毎ターンこの判定を通るから:
+    縮めるものが無いのに head を描き直すと、プロンプトの前置きが毎回変わって
+    キャッシュの前方一致が無駄に割れ続ける。
 
     True になるのは次のどちらか:
 
-    1. 操作通知の境界より新しい提示中のバッチに、下ろす対象の通知の行がある
+    1. **この model の**操作通知の境界より新しい提示中のバッチに、下ろす対象の
+       通知の行がある (``model_key`` が無い呼び出しはこの条件を見ない —
+       下ろす根拠が立たないため)
     2. 現在地でない部屋の、まだ縮めていないエントリが提示中のバッチにある
+       (部屋の印はペルソナ共通なので model に依らない)
 
-    **二度目は False になる** (冪等): 書く側は通知の境界を提示中の最大 id まで
-    必ず進め、対象の部屋のエントリには必ず印を打つので、直後に呼び直すと
-    どちらの条件も落ちる。
+    **二度目は False になる** (冪等): 書く側は同じ ``model_key`` の境界を提示中の
+    最大 id まで必ず進め、対象の部屋のエントリには必ず印を打つので、直後に
+    呼び直すとどちらの条件も落ちる。
 
     既知の甘さ: 1 は台帳に行があることまでしか見ない — その通知が畳まれて
     確定文面に出ていない回は、書く側が「外すものなし」で終わる。ただし境界は
@@ -328,38 +381,47 @@ def has_pending_reductions(conn: sqlite3.Connection) -> bool:
     読み取りの失敗は送出する (「縮めるものが無い」の False に化かさない —
     呼び出し側が見送りとして記録する)。
     """
-    from sai_memory.perception_buffer import list_presented_batches
+    from sai_memory.perception_buffer import list_presented_batch_room_states
     from sai_memory.room_state import find_current_room_key
 
-    presented = list_presented_batches(conn)
+    presented = list_presented_batch_room_states(conn)
     if not presented:
         return False
-    cutoff = get_notice_cutoff(conn)
-    fresh = [int(b.id) for b in presented if int(b.id) > cutoff]
-    if fresh and _has_droppable_notices(conn, fresh):
-        return True
+    if model_key:
+        cutoff = get_notice_cutoff(conn, model_key)
+        fresh = [batch_id for batch_id, _json in presented if batch_id > cutoff]
+        if fresh and _has_droppable_notices(conn, fresh):
+            return True
     current_key = find_current_room_key(conn)
     if not current_key:
         # 何と比べて「現在地でない」と言うのかが決まらない — 書く側も部屋を
         # 一つも縮めないので、ここも縮めるものなしに倒す。
         return False
-    for batch in presented:
-        _entries, targets, _survivor_paths = _room_shrink_targets(batch, current_key)
+    for batch_id, room_state_json in presented:
+        _raw, targets, _survivor_paths = _room_shrink_targets(
+            batch_id, room_state_json, current_key,
+        )
         if targets:
             return True
     return False
 
 
-def mark_presentation_reductions(conn: sqlite3.Connection) -> Dict[str, int]:
+def mark_presentation_reductions(
+    conn: sqlite3.Connection, model_key: Optional[str] = None,
+    *, drop_notices: bool = True,
+) -> Dict[str, int]:
     """Metabolism の瞬間に「ここから先は縮める」を永続化する。**commit しない**。
 
     やることは二つだけで、どちらも記録の**追加**:
 
-    1. 操作通知の境界を、いま提示に出ている最大のバッチ id まで進める。
+    1. **この model の**操作通知の境界を、いま提示に出ている最大のバッチ id まで
+       進める。``model_key`` が無い / ``drop_notices=False`` (= その model の
+       head を描き直せなかった回) なら進めない。
     2. いま提示に出ているバッチの部屋の記帳のうち、**現在地でない部屋**の
        エントリに「縮めた」印を打つ (:data:`SHRUNK_FLAG`)。印と一緒に、跡地に
        出す一行 (:data:`SHRUNK_BLOCK_FIELD`) と、提示から外すメディアの path
        (:data:`DROPPED_MEDIA_FIELD`) を確定させ、**束 (``snapshot``) を落とす**。
+       部屋は head と無関係なので、head を描き直せなかった回でも縮める。
 
     束を落とすのが「戻ってきたら全文を見せ直す」の実装そのもの: 束の無い記帳は
     連なりの外 (:func:`sai_memory.room_state.is_legacy_entry`) になるので、土台
@@ -367,6 +429,9 @@ def mark_presentation_reductions(conn: sqlite3.Connection) -> Dict[str, int]:
     (``_reopen_lost_bases``) もこのエントリを見なくなり、その部屋へ戻った回の
     消費は**土台なし = 全文 + 画像**を積む。連なりの読み手を一枚も書き換えずに
     済むのは、旧形式 (文字列 snapshot) の扱いと同じ道に合流させたため。
+
+    記帳の書き戻しは**読んだ生の並びの上**で行う (篩った結果で上書きしない) —
+    未知の要素が黙って消えるのは「記録は追加だけ」に反する。
 
     現在地が読めない / 台帳に部屋の記録が無い回は部屋を一つも縮めない (何と
     比べて「現在地でない」と言うのかが決まらない — 縮めない側に倒す)。同じ
@@ -378,23 +443,23 @@ def mark_presentation_reductions(conn: sqlite3.Connection) -> Dict[str, int]:
     Returns: ``{"notices_through": 進めた境界, "rooms_shrunk": 縮めた部屋の数,
         "batches": 記帳を書き換えたバッチの数}``。
     """
-    from sai_memory.perception_buffer import list_presented_batches
+    from sai_memory.perception_buffer import list_presented_batch_room_states
     from sai_memory.room_state import bundle_media, find_current_room_key
 
-    presented = list_presented_batches(conn)
+    presented = list_presented_batch_room_states(conn)
     if not presented:
-        return {"notices_through": get_notice_cutoff(conn), "rooms_shrunk": 0,
-                "batches": 0}
+        return {"notices_through": get_notice_cutoff(conn, model_key),
+                "rooms_shrunk": 0, "batches": 0}
 
     current_key = find_current_room_key(conn)
     rooms_shrunk = 0
     batches_touched = 0
     if current_key:
-        for batch in presented:
-            entries, targets, survivor_paths = _room_shrink_targets(
-                batch, current_key,
+        for batch_id, room_state_json in presented:
+            raw, targets, survivor_paths = _room_shrink_targets(
+                batch_id, room_state_json, current_key,
             )
-            if not targets:
+            if not targets or raw is None:
                 continue
             for entry in targets:
                 snapshot = entry["snapshot"]
@@ -416,7 +481,7 @@ def mark_presentation_reductions(conn: sqlite3.Connection) -> Dict[str, int]:
                 entry.pop("snapshot", None)
             conn.execute(
                 "UPDATE perception_batches SET room_state_json = ? WHERE id = ?",
-                (json.dumps(entries, ensure_ascii=False), int(batch.id)),
+                (json.dumps(raw, ensure_ascii=False), int(batch_id)),
             )
             rooms_shrunk += len(targets)
             batches_touched += 1
@@ -426,14 +491,24 @@ def mark_presentation_reductions(conn: sqlite3.Connection) -> Dict[str, int]:
             "room state at full size this metabolism",
         )
 
-    notices_through = advance_notice_cutoff(
-        conn, max(int(b.id) for b in presented),
-    )
+    if drop_notices and model_key:
+        notices_through = advance_notice_cutoff(
+            conn, max(batch_id for batch_id, _json in presented), model_key,
+        )
+    else:
+        notices_through = get_notice_cutoff(conn, model_key)
+        LOGGER.debug(
+            "[presented_reduction] leaving the operation notices in the "
+            "presentation (model=%s, head redrawn=%s); the boundary stays at %d",
+            model_key, drop_notices, notices_through,
+        )
     if rooms_shrunk or notices_through:
         LOGGER.info(
-            "[presented_reduction] metabolism reduction: notices dropped through "
-            "batch %d, %d room state(s) shrunk in %d batch(es) (current room=%s)",
-            notices_through, rooms_shrunk, batches_touched, current_key,
+            "[presented_reduction] metabolism reduction (model=%s): notices "
+            "dropped through batch %d, %d room state(s) shrunk in %d batch(es) "
+            "(current room=%s)",
+            model_key, notices_through, rooms_shrunk, batches_touched,
+            current_key,
         )
     return {
         "notices_through": notices_through,
@@ -583,6 +658,7 @@ def _reduce_rooms(
 
 def reduce_presented_batches(
     conn: sqlite3.Connection, batches: Sequence[Any],
+    model_key: Optional[str] = None,
 ) -> List[Any]:
     """提示に出るバッチへ、Metabolism が決めた縮みを適用した写しを返す。
 
@@ -595,10 +671,14 @@ def reduce_presented_batches(
 
     縮み方は二つ:
 
-    - **操作通知**: 境界 (:func:`get_notice_cutoff`) 以下のバッチから、対象の
-      通知ブロックを外し、跡地に機構名義の一行を置く。
+    - **操作通知**: ``model_key`` の境界 (:func:`get_notice_cutoff`) 以下の
+      バッチから、対象の通知ブロックを外し、跡地に機構名義の一行を置く。
+      **境界は model ごと** — 別の model の Metabolism では下りない (その model の
+      head はまだ凍結されていて、通知が唯一の情報源だから)。``model_key`` の
+      無い呼び出しは通知を一つも下ろさない (全部見せる安全側)。
     - **部屋の様子**: 「縮めた」印の付いたエントリを短い一行へ差し替え、その
-      部屋の画像を提示のメディアから外す。
+      部屋の画像を提示のメディアから外す。印はペルソナ共通なので model に依らない
+      (部屋の様子は head に載らないため)。
 
     どちらも判断は Metabolism が既に確定させたもので、ここでは**読むだけ** —
     だから提示は Metabolism 以外の瞬間に変わらない。
@@ -609,7 +689,7 @@ def reduce_presented_batches(
     """
     if not batches:
         return list(batches)
-    cutoff = get_notice_cutoff(conn)
+    cutoff = get_notice_cutoff(conn, model_key)
     notice_ids = [
         int(b.id) for b in batches
         if getattr(b, "id", None) is not None and int(b.id) <= cutoff

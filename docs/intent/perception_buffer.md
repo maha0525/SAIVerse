@@ -333,7 +333,7 @@ Cached Head が「Metabolism まで snapshot を凍結」、visual_context / mem
 - **下ろすのは提示だけ**。台帳の行も付記印も触らないので、その期間の編纂が来れば従来どおり材料として引き取られる (`collect_annex_items` は `list_unannexed_batches` を読み続ける。提示側だけが `list_presented_batches` を読む)。
 - **境界を読む点は提示の組成そのもの** (`sea/runtime_context.list_presented_perception_blocks`)。知覚ブロックは送信直前に差し込まれるので、振り分けも同じ一点に置く — 送る側と測る側が同じ関数を呼ぶ規則 (§10.3、`context_accounting_excludes_injected_rows.md`) をここにも通す。**2026-09-09 以降、この組成は台帳へ一切書かない** (読み取り専用)。引き金があった頃は組成が境界を進めていたため、読み取り専用の画面が書き込む事故を `advance_cutoff=False` という引数で塞いでいた — 書き込み経路ごと消えたので、その引数も検査も要らなくなった。
 
-**設計 1・2 の縮みとの噛み合わせ** (2026-09-09、[presented_context_reduction.md](presented_context_reduction.md)): 提示の組成は候補を取った直後に、Metabolism が確定させた縮み (用の済んだ操作通知を下ろす / 現在地でない部屋の様子を一行へ縮める) を写しの上で適用する。省略の印の位置も縮んだ姿で決まる — 測る側と送る側が同じ一枚を見る規則はそのまま。縮みは「下ろす」とは別物で、バッチは提示に残り続ける (`perception_presentation` の下ろし境界は動かない)。操作通知の側は同じテーブルにもう一本の一方向境界 (`notices_dropped_through_batch_id`) を持つ。
+**設計 1・2 の縮みとの噛み合わせ** (2026-09-09、[presented_context_reduction.md](presented_context_reduction.md)): 提示の組成は候補を取った直後に、Metabolism が確定させた縮み (用の済んだ操作通知を下ろす / 現在地でない部屋の様子を一行へ縮める) を写しの上で適用する。省略の印の位置も縮んだ姿で決まる — 測る側と送る側が同じ一枚を見る規則はそのまま。縮みは「下ろす」とは別物で、バッチは提示に残り続ける (`perception_presentation` の下ろし境界は動かない)。操作通知の側は別のテーブル (`perception_notice_presentation`) にもう一本の一方向境界を持つ — こちらは**モデルごと**で、主キーが `model_key`。head が (persona, model) ごとに描き直されるからで、ここが唯一「下ろす境界がペルソナ全体で一つ」でない値になる (2026-09-10 の裁定、[presented_context_reduction.md](presented_context_reduction.md) 実装 4)。
 
 **§10.8 (部屋の様子の差分) との噛み合わせ**: 境界の前進は「可視性が変わる瞬間」の三つ目なので、不変条件「提示に見えているどの差分も自分の土台が直前に見えている」を同じヘルパ (`restore_room_state_bases`) で回復する。`advance_presentation_cutoff` が境界の前進と**同一トランザクション**で呼び、差分の土台が下りたらその位置を全文へ差し替える。土台の判定 (`latest_visible_snapshot` / `_visible_chain_tail`) も「未付記」から「提示に出る」へ揃えた。
 

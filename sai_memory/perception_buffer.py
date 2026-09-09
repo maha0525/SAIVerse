@@ -251,13 +251,25 @@ def init_perception_buffer_table(
     # 今の状態に描き直された後、それまでの操作通知 (スペルの増減・コア記憶などの
     # 操作のお知らせ) は重複になるので提示から下ろす。値は「この id までのバッチ
     # は操作通知を提示しない」で、前進しかしない (sai_memory/presented_reduction)。
-    try:
-        conn.execute(
-            "ALTER TABLE perception_presentation ADD COLUMN "
-            "notices_dropped_through_batch_id INTEGER NOT NULL DEFAULT 0"
+    #
+    # **境界は model ごと** (2026-09-10 レビュー二巡目の裁定): head は
+    # (persona, model) ごとに描き直されるので、model A の Metabolism で全 model の
+    # 提示から通知が消えると、head が凍結されたままの model B は「変化を伝える
+    # つなぎ」を失う。だから主キーは model_key。部屋の様子の縮めた印は head と
+    # 無関係なのでペルソナ共通のまま (バッチの記帳に打つ)。
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS perception_notice_presentation (
+            model_key TEXT PRIMARY KEY,
+            dropped_through_batch_id INTEGER NOT NULL DEFAULT 0,
+            updated_at INTEGER
         )
-    except sqlite3.OperationalError:
-        pass  # 既に存在する
+        """
+    )
+    # 旧形 (2026-09-09〜09-10 のブランチ内でしか書かれていない、ペルソナに一つの
+    # 境界) は ``perception_presentation.notices_dropped_through_batch_id`` に
+    # 載っていた。読み替えはしない — 配布済みの実環境が無く、残っていても
+    # 誰も読まないため (新しい形は上の表だけを読む)。
     if upgraded_from_two_phase:
         # 一度きりの清算 (2026-08-19 Codex 第七巡 #4): 旧二段 flush (event_message
         # を書く → pending を削除) が「書き終えたのに削除だけ失敗して」中断した
@@ -1012,6 +1024,29 @@ def list_dropped_batches(
     済んだバッチは Chronicle の digest がその位置を語るので数から外れる。
     """
     return _list_batches_by_cutoff(conn, above=False, cutoff=cutoff)
+
+
+def list_presented_batch_room_states(
+    conn: sqlite3.Connection, *, cutoff: Optional[int] = None,
+) -> List[tuple]:
+    """提示に出るバッチの ``(id, room_state_json)`` だけを読む軽い読み口。
+
+    :func:`list_presented_batches` と同じ選び方 (未付記 かつ 下ろした境界より
+    新しい) だが、確定文面 (``rendered_text``) とメディアを読まない — 下ろされて
+    いないだけの古いバッチは 10 万字規模になりうるので、判定だけが要る呼び出し
+    (:func:`sai_memory.presented_reduction.has_pending_reductions`。超過が続く
+    間は毎ターン通る) が全文を運ばずに済むようにする。並びは
+    :func:`list_presented_batches` と同じ ``consumed_at`` 昇順。
+    """
+    if cutoff is None:
+        cutoff = get_presentation_cutoff(conn)
+    rows = conn.execute(
+        "SELECT id, room_state_json FROM perception_batches "
+        "WHERE annexed_entry_id IS NULL AND id > ? "
+        "ORDER BY consumed_at ASC, id ASC",
+        (int(cutoff),),
+    ).fetchall()
+    return [(int(row[0]), row[1]) for row in rows]
 
 
 def count_batch_records(
