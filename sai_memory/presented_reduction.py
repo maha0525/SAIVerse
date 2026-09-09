@@ -16,10 +16,12 @@
 
 守っている不変条件 (intent の「不変条件」節):
 
-- **台帳・履歴・記録は消さない。変わるのは提示だけ。** ``perception_buffer`` の
-  行も ``perception_batches.rendered_text`` (編纂の材料であり、下ろされた期間の
+- **ペルソナが見た記録は消さない。** ``perception_buffer`` の行も
+  ``perception_batches.rendered_text`` (編纂の材料であり、下ろされた期間の
   読み口でもある確定文面) も書き換えない。縮みは**提示を組む一点**
-  (:func:`reduce_presented_batches`) が確定文面の写しの上で行う。
+  (:func:`reduce_presented_batches`) が確定文面の写しの上で行う。部屋の記帳
+  (``room_state_json``) には縮めた印を**追加**して差分の土台の束を外すが、
+  これは差分の組み方の帳簿への追記で、見た文面そのものは無傷。
 - **縮めたら、そこで省略があったことを機構の名義で示す。** 黙って消すのは
   「そこに何も無かった」という記録の嘘 (2026-09-04 裁定 1)。
 - **書き換えは Metabolism の瞬間以外に起きない。** 縮みの判断そのものは
@@ -393,7 +395,11 @@ def _notice_blocks_by_batch(
                 "ORDER BY created_at ASC, id ASC",
                 tuple(chunk),
             ).fetchall()
-        except sqlite3.OperationalError:
+        except sqlite3.Error:
+            # OperationalError に限らず DB エラーの族ごと受ける — ここで漏らすと
+            # 呼び出し元の広い受け (list_presented_perception_blocks) が知覚を
+            # 丸ごと空にする。節約の失敗が知覚の喪失に化ける向きは作らない
+            # (ローカルレビュー指摘 2026-09-10)。
             LOGGER.warning(
                 "[presented_reduction] could not read the ledger rows behind the "
                 "presented batches; leaving their operation notices in the "

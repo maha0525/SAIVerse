@@ -4941,8 +4941,8 @@ class SessionLifecycle:
         """Metabolism の瞬間だけ走る提示の節約 (会話以外の内容を縮める)。
 
         正典: docs/intent/presented_context_reduction.md 設計 1 / 設計 2。
-        やることは記録の追加だけで、台帳の行も確定文面も書き換えない —
-        「ここから先は縮めて出す」という判断を永続化し、以後の提示の組成
+        やることは縮みの判断の永続化だけ — 台帳の行も確定文面も書き換えず、
+        部屋の記帳に印を追加し、操作通知の境界を進める。以後の提示の組成
         (:func:`sea.runtime_context.list_presented_perception_blocks`) がそれを
         読むだけになる。だから提示が変わるのはこの瞬間だけで、移動や発言では
         変わらない (プロンプトキャッシュの前方一致の保護)。

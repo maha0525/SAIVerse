@@ -932,7 +932,19 @@ def list_presented_perception_blocks(
             predicate = _window_predicate_locked()
             if predicate is not None:
                 found = [b for b in found if predicate(b)]
-            return reduce_presented_batches(sai_mem.conn, found)
+            try:
+                return reduce_presented_batches(sai_mem.conn, found)
+            except Exception:
+                # 縮みの適用の失敗は「縮めない」へ倒す。ここで送出すると外側の
+                # 受け (perception batch listing failed) が知覚を丸ごと空にする —
+                # 節約の失敗が知覚の喪失に化ける向きは作らない
+                # (ローカルレビュー指摘 2026-09-10)。
+                LOGGER.warning(
+                    "[sea][prepare-context] presentation reduction failed; "
+                    "presenting the batches at full size this round",
+                    exc_info=True,
+                )
+                return found
 
         # 候補・境界・省略件数の数え上げは**一つのロック区間**で完結させる
         # (2026-09-05 Codex 第二巡 high)。ここを二区間に割ると、別スレッドの

@@ -26,6 +26,7 @@ import sqlite3
 import threading
 import unittest
 from types import SimpleNamespace
+from unittest import mock
 
 from sai_memory.perception_buffer import (
     PERCEPTION_OMISSION_HEADER,
@@ -471,6 +472,66 @@ class NoticeCutoffTest(unittest.TestCase):
     def test_missing_table_reads_as_zero(self):
         self.conn.execute("DROP TABLE perception_presentation")
         self.assertEqual(get_notice_cutoff(self.conn), 0)
+
+
+class ReductionWiringTest(PresentedReductionTestBase):
+    """配線の契約 — 縮みの失敗は「縮めない」へ倒れ、知覚の喪失に化けない。"""
+
+    def test_reduce_failure_degrades_to_full_size_not_empty(self):
+        # 縮みの適用が失敗しても、知覚は縮まずに全文で提示される (空にならない)。
+        # ローカルレビュー指摘 2026-09-10: ここで送出すると外側の受けが知覚を
+        # 丸ごと空にする — その向きを禁じる契約。
+        self._push_head_mutation("core_memory", "コア記憶を書き換えました")
+        self._flush()
+        self._metabolism()
+        with mock.patch(
+            "sai_memory.presented_reduction.reduce_presented_batches",
+            side_effect=sqlite3.DatabaseError("boom"),
+        ):
+            blocks = list_presented_perception_blocks(
+                _RUNTIME, self.persona, [], raise_on_error=False,
+            )
+        self.assertTrue(blocks)
+        self.assertIn(
+            "コア記憶を書き換えました",
+            "\n".join(b["content"] for b in blocks),
+        )
+
+    def test_lifecycle_wiring_not_ready_and_rollback(self):
+        # SessionLifecycle._reduce_presented_perceptions の配線:
+        # 未 ready なら何も書かず、失敗したら rollback して送出しない。
+        from sea.session_lifecycle import SessionLifecycle
+
+        events: list = []
+        persona = SimpleNamespace(
+            persona_id="p1",
+            sai_memory=SimpleNamespace(
+                is_ready=lambda: False, _db_lock=threading.RLock(),
+                conn=SimpleNamespace(commit=lambda: events.append("commit")),
+            ),
+        )
+        SessionLifecycle._reduce_presented_perceptions(SimpleNamespace(), persona)
+        self.assertEqual(events, [])
+
+        class _FailingConn:
+            def commit(self):
+                events.append("commit")
+
+            def rollback(self):
+                events.append("rollback")
+
+            def execute(self, *args, **kwargs):
+                raise sqlite3.DatabaseError("boom")
+
+        persona2 = SimpleNamespace(
+            persona_id="p2",
+            sai_memory=SimpleNamespace(
+                is_ready=lambda: True, _db_lock=threading.RLock(),
+                conn=_FailingConn(),
+            ),
+        )
+        SessionLifecycle._reduce_presented_perceptions(SimpleNamespace(), persona2)
+        self.assertEqual(events, ["rollback"])
 
 
 class ReductionAccountingTest(PresentedReductionTestBase):
