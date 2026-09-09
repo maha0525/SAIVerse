@@ -778,6 +778,33 @@ class RoomStateRestoreTest(RoomStateLedgerTestBase):
         self.assertIn(str(self.env.pic_path), paths)   # 土台と一緒に下りた絵
         self.assertIn(str(self.env.pic2_path), paths)  # 差分が連れてきた絵
 
+    def test_unknown_entries_survive_the_reopen_writeback(self):
+        """記帳の書き戻しは生の並びの上 — 読む側の篩で未知の要素を消さない。
+
+        もう一つの書き戻し (mark_presentation_reductions) と同じ規則。篩った
+        結果 (batch_room_states) を書き戻すと、未来の形式・非 dict の要素が
+        黙って消える (ローカルレビュー指摘 2026-09-10)。
+        """
+        raw = json.loads(self._batch(self.diff_id).room_state_json)
+        raw.append({"note": "key の無い未知のエントリ"})
+        raw.append("旧世代の素の文字列")
+        self.conn.execute(
+            "UPDATE perception_batches SET room_state_json = ? WHERE id = ?",
+            (json.dumps(raw, ensure_ascii=False), self.diff_id),
+        )
+        self.conn.commit()
+
+        mark_batches_annexed(self.conn, [self.base_id], "entry-1")
+        self.conn.commit()
+
+        after = json.loads(self._batch(self.diff_id).room_state_json)
+        self.assertIn({"note": "key の無い未知のエントリ"}, after)
+        self.assertIn("旧世代の素の文字列", after)
+        # 開き直しそのものは効いている (差分が全文へ戻った)。
+        self.assertTrue(any(
+            isinstance(e, dict) and e.get("transferred") for e in after
+        ))
+
     def test_the_rewrite_is_rolled_back_with_the_stamp(self):
         with patch(
             "sai_memory.room_state.restore_room_state_bases",

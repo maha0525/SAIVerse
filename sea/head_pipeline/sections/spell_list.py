@@ -25,6 +25,23 @@ from sea.head_pipeline.types import (
 LOGGER = logging.getLogger(__name__)
 
 
+def _notice_metadata(label_kind: str) -> dict:
+    """スペル一覧の通知に「用が済んだら下ろす操作通知」の型を刻む。
+
+    読み手は提示の節約 (:mod:`sai_memory.presented_reduction` の
+    ``NOTICE_LABEL_KINDS`` — docs/intent/presented_context_reduction.md 設計 1)。
+    head のスペル一覧が Metabolism で今の一覧に描き直された後、この通知は同じ
+    ことを二度言っているだけになるので提示から下ろす。型を metadata に載せない
+    と、確定文面の側からは他の ``world_state`` 通知 (移動・入退室など、下ろして
+    はいけない出来事) と見分けが付かない。運び手は
+    sea/head_pipeline/integration.py (label.metadata を知覚エントリの metadata
+    へ写す) — 移動通知の型付け (room_state_packages.md §11-3-2) と同じ道。
+    """
+    from sai_memory.room_state import LABEL_KIND_META_KEY
+
+    return {LABEL_KIND_META_KEY: label_kind}
+
+
 @dataclass(frozen=True)
 class SpellEntry:
     name: str
@@ -261,11 +278,13 @@ class SpellListSection:
                 labels.append(NotificationLabel(
                     kind="spell_system_enabled",
                     label="スペル機構が有効になりました",
+                    metadata=_notice_metadata("spell_system_enabled"),
                 ))
             else:
                 labels.append(NotificationLabel(
                     kind="spell_system_disabled",
                     label="スペル機構が無効になりました",
+                    metadata=_notice_metadata("spell_system_disabled"),
                 ))
             return labels  # 切替時はリスト diff より先にこれを通知
 
@@ -298,7 +317,10 @@ class SpellListSection:
                     [f"スペルが {len(added_blocks)} 件使えるようになりました"]
                     + added_blocks
                 )
-            labels.append(NotificationLabel(kind="spell_added", label=text))
+            labels.append(NotificationLabel(
+                kind="spell_added", label=text,
+                metadata=_notice_metadata("spell_added"),
+            ))
 
         # 剥奪通知は名前だけでよい — 「もう唱えられない」を伝えるのに引数の形は
         # 要らないし、head からも消えている。複数なら名前の列挙の一行。
@@ -330,6 +352,7 @@ class SpellListSection:
             labels.append(NotificationLabel(
                 kind="spell_removed",
                 label=f"スペル {'、'.join(removed_names)} が使えなくなりました",
+                metadata=_notice_metadata("spell_removed"),
             ))
         return labels
 

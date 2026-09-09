@@ -535,11 +535,18 @@ def _parse_item_state(metadata: Optional[str]) -> Optional[Dict[str, Any]]:
 
 
 def is_legacy_entry(entry: Mapping[str, Any]) -> bool:
-    """旧形式 (snapshot が文字列) の記帳か。
+    """束として読めない記帳か (旧形式 = snapshot が文字列、および縮めた記帳)。
 
     True のエントリは連なりに参加しない — 土台にもならず、開き直しもされない
     (旧データの読者を書かない — intent §9)。提示には積んだときの文面のまま出る。
     次の入室は土台なし扱いで全文を積み、以後は構造つきで運ぶ。
+
+    **提示の節約で縮めた部屋の記帳も同じ道に合流する**
+    (:func:`sai_memory.presented_reduction.mark_presentation_reductions` は
+    縮めるときに束を落とす)。だから「離れている間に縮めた部屋へ戻ったら全文と
+    画像を見せ直す」(まはー裁定 2026-09-09) は、連なりの読み手を一枚も書き換え
+    ずに成立する — 縮めた記帳は土台にならないので、戻った回の消費は土台なし =
+    全文を積む。
     """
     return not bundle_is_valid(entry.get("snapshot"))
 
@@ -737,27 +744,48 @@ def chain_is_intact(
     return snapshot_digest(snapshot) == str(base)
 
 
-def batch_room_states(room_state_json: Optional[str]) -> List[Dict[str, Any]]:
-    """バッチの ``room_state_json`` を list に復元する。壊れていれば空 list。"""
+def raw_room_entries(room_state_json: Optional[str]) -> Optional[List[Any]]:
+    """バッチの ``room_state_json`` を**篩わずに**生の list として読む。
+
+    壊れている (JSON でない / list でない) なら None。
+
+    :func:`batch_room_states` は読む側の便宜で「dict で ``key`` を持つ要素」だけに
+    絞るが、**記帳への書き戻しにその結果を使うと、篩で落ちた未知の要素が黙って
+    消える**。記帳を UPDATE する箇所 (:func:`restore_room_state_bases` /
+    :func:`sai_memory.presented_reduction.mark_presentation_reductions`) はこの生の
+    並びを保ち、書き換える要素だけを差し替える (「記録は追加だけ」— ローカル
+    レビュー指摘 2026-09-10)。
+    """
     if not room_state_json:
-        return []
+        return None
     try:
         data = json.loads(room_state_json)
     except (TypeError, ValueError):
+        return None
+    return data if isinstance(data, list) else None
+
+
+def batch_room_states(room_state_json: Optional[str]) -> List[Dict[str, Any]]:
+    """バッチの ``room_state_json`` を list に復元する。壊れていれば空 list。
+
+    読む側の篩 — 「dict で ``key`` を持つ要素」だけを返す。書き戻しにこの結果を
+    使ってはいけない (:func:`raw_room_entries` の docstring)。
+    """
+    raw = raw_room_entries(room_state_json)
+    if raw is None:
         return []
-    if not isinstance(data, list):
-        return []
-    return [e for e in data if isinstance(e, dict) and e.get("key")]
+    return [e for e in raw if isinstance(e, dict) and e.get("key")]
 
 
 def batch_is_room_reseat(room_state_json: Optional[str]) -> bool:
     """このバッチが機構の置き直し (:func:`reseat_current_room`) で作られたものか。
 
     置き直しのバッチは「提示の最古端」に置くため ``consumed_at`` が id の順序と
-    食い違う。知覚の合計上限の下ろし (id 一本の境界) がこの id を境界に取ると、
-    より新しい consumed_at のバッチまで巻き添えで下ろしてしまうので、下ろしの
-    候補からは外す (sea/runtime_context._plan_perception_drop)。編纂の付記では
-    普通に引き取られる (材料には載せない — 機構の置き直しは出来事ではないため。
+    食い違う。id 一本で持つ下ろし境界がこの id を境界に取ると、より新しい
+    consumed_at のバッチまで巻き添えで下ろしてしまうので、下ろす機構は候補から
+    外す必要がある (2026-09-09 に知覚の合計上限を廃止して以降、境界を進める
+    呼び出しは無い — 将来また現れたときのための規則)。編纂の付記では普通に
+    引き取られる (材料には載せない — 機構の置き直しは出来事ではないため。
     sai_memory/arasuji/executor.collect_annex_items)。
     """
     for entry in batch_room_states(room_state_json):
@@ -1078,13 +1106,19 @@ def _reopen_lost_bases(batches: Sequence[Any]) -> Dict[int, tuple]:
 
     返るのは**変わったバッチだけ**の
     ``{batch.id: (rendered_text, entries, extra_media)}``。``entries`` は
-    差し替え済みの記帳、``extra_media`` は開き直しで戻すメディア (束由来、
-    path 重複なし)。
+    差し替え済みの記帳の**生の並び** (:func:`raw_room_entries` — 読む側の篩を
+    通していない)、``extra_media`` は開き直しで戻すメディア (束由来、path
+    重複なし)。生で返すのは、書き戻す側 (:func:`restore_room_state_bases`) が
+    篩の落とした未知の要素を消さずに済むようにするため — 差し替えはエントリの
+    dict をその場で書き換えるので、生の並びの中の同じ dict がそのまま更新される。
     """
     previous_by_key: Dict[str, Dict[str, Any]] = {}
     out: Dict[int, tuple] = {}
     for batch in batches:
-        entries = batch_room_states(batch.room_state_json)
+        raw = raw_room_entries(batch.room_state_json)
+        entries = [
+            e for e in (raw or []) if isinstance(e, dict) and e.get("key")
+        ]
         if not entries:
             continue
         rendered = batch.rendered_text or ""
@@ -1119,7 +1153,7 @@ def _reopen_lost_bases(batches: Sequence[Any]) -> Dict[int, tuple]:
             extra_media.extend(bundle_media(snapshot))
             changed = True
         if changed:
-            out[int(batch.id)] = (rendered, entries, extra_media)
+            out[int(batch.id)] = (rendered, raw, extra_media)
     return out
 
 
@@ -1200,6 +1234,12 @@ def restore_room_state_bases(conn: sqlite3.Connection) -> int:
     残った差分が宙に浮く」壊れ方が確定する。呼び出し側は例外を受けたら tx ごと
     rollback して、付記も境界前進も見送る (次の機会に全体をやり直す)。
 
+    記帳の書き戻しは**読んだ生の並びの上**で行う (:func:`raw_room_entries`) —
+    読む側の篩 (:func:`batch_room_states`) の結果を書き戻すと、篩が落とした未知の
+    要素が黙って消える。もう一つの書き戻し
+    (:func:`sai_memory.presented_reduction.mark_presentation_reductions`) と同じ
+    規則 (ローカルレビュー指摘 2026-09-10)。
+
     Returns:
         文面を差し替えたバッチの件数。
     """
@@ -1208,13 +1248,13 @@ def restore_room_state_bases(conn: sqlite3.Connection) -> int:
     batches = list_presented_batches(conn)
     media_by_id = {int(b.id): b.media for b in batches}
     repaired = _reopen_lost_bases(batches)
-    for batch_id, (rendered, entries, extra_media) in repaired.items():
+    for batch_id, (rendered, raw_entries, extra_media) in repaired.items():
         conn.execute(
             "UPDATE perception_batches SET rendered_text = ?, "
             "room_state_json = ?, media = ? WHERE id = ?",
             (
                 rendered,
-                json.dumps(entries, ensure_ascii=False),
+                json.dumps(raw_entries, ensure_ascii=False),
                 _merge_media_json(media_by_id.get(batch_id), extra_media),
                 batch_id,
             ),
@@ -1439,13 +1479,14 @@ def reseat_current_room(
     **下見モード** (``dry_run=True``): INSERT せず、実際に積むはずの内容
     ``(rendered_text, media, consumed_at)`` を返す (発火しない回は None)。
     発火条件・材料の選定・位置決めは実 INSERT と同じこの一本を通る — 判定
-    ロジックの二枚目を作らないための口で、測るだけの提示組成
-    (sea/runtime_context.list_presented_perception_blocks の
-    ``advance_cutoff=False``) が「進めたつもり」の列に置き直しの幻のブロックを
-    合成するのに使う。``assume_cutoff`` は「下ろし境界がこの id まで進んだと
-    仮定する」入力 — 実物は境界を書いた**後**の提示可視性 (運搬役が残って
-    いるか) で判定するので、下見も進めたつもりの世界で判定する必要がある。
-    None なら DB の実境界を読む (実 INSERT の経路は挙動不変)。
+    ロジックの二枚目を作らないための口。``assume_cutoff`` は「下ろし境界が
+    この id まで進んだと仮定する」入力で、実物は境界を書いた**後**の提示可視性
+    (運搬役が残っているか) で判定するので、下見も進めたつもりの世界で判定する
+    必要がある。None なら DB の実境界を読む (実 INSERT の経路は挙動不変)。
+
+    この下見の利用者だった「測るだけの提示組成」は 2026-09-09 に消えた (知覚の
+    合計上限の廃止で、組成が境界を進めなくなったため)。口は残してある — 境界を
+    進める機構が将来また現れたら、その勘定は同じこの一本を通す。
 
     **読み取り失敗の契約 (2026-09-06 四巡目修正 1)**: 発火判定・材料の読み
     (:func:`find_current_room_key` / :func:`pending_has_room` /

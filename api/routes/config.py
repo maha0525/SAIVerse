@@ -1179,26 +1179,26 @@ def get_model_file(key: str):
     return {"key": key, "config": cfg, "source": source}
 
 
-# ── 水位 (四つ) の保存時検査 ────────────────────────────────────
+# ── 水位 (二つ) の保存時検査 ────────────────────────────────────
 #
 # 保存の入口はモデル定義 (作成 / 更新 / 複製 / チャットから保存) と全体設定の
 # PUT。どの入口も下の一本 (`_watermark_constraints_error`) を通る — 二本に
 # 分かれると片方だけ直す事故が起きる。
 #
-# 検査は三つ:
+# 検査は二つ:
 #   (1) 型: 数値でも null でもない値は入力の誤りとして弾く。
-#   (2) 順序: 残す量 ≤ 上限 (Metabolism と知覚でそれぞれ)。
-#   (3) 余裕: 整理を始める量 − 残す量 > 知覚の上限 + 余裕。
-# (3) が無いと「会話を残す量まで畳んでも、知覚の分だけ合計が上限を超えたまま」
-# という**設定として満たせない状態**が保存できてしまう (docs/issues/
-# watermarks_unsatisfiable_when_perception_is_large.md 裁定 4)。
+#   (2) 順序: 残す量 ≤ 上限。
+#
+# 2026-09-09 に知覚の二水位を廃止した (docs/intent/
+# presented_context_reduction.md 設計 3) ので、二族をまたぐ余裕の検査
+# (整理を始める量 − 残す量 > 知覚の上限 + 余裕) は機構ごと消えた — 「会話を
+# 畳んでも減らせない大物」は Metabolism の瞬間の縮み
+# (sai_memory/presented_reduction.py) が減らす側に回った。
 
 #: 画面に出す水位の呼び名 (エラー文用)。実装名は出さない。
 _WATERMARK_LABELS: Dict[str, str] = {
     "metabolism_target_chars": "整理後に残す文字数",
     "metabolism_high_chars": "整理をはじめる文字数",
-    "perception_target_chars": "部屋の様子などの記録を省略した後に残す文字数",
-    "perception_high_chars": "部屋の様子などの記録の省略をはじめる文字数",
 }
 
 
@@ -1215,57 +1215,23 @@ def _watermark_order_error(
     return None
 
 
-def _watermark_headroom_error(
-    values: Dict[str, Optional[int]], *, blank_note: str,
-) -> Optional[str]:
-    """「整理を始める量 − 残す量 > 知覚の上限 + 余裕」を調べ、満たさなければ理由を返す。
-
-    残す量 (会話の行だけを数える) と整理を始める量 (実際に送る合計を数える) は
-    主語が違うので、その差より知覚の上限が大きいと、会話をどれだけ畳んでも合計が
-    上限を下回らない。余裕の分 (`WATERMARK_HEADROOM_CHARS`) は、畳んだ後の会話が
-    「残す量ちょうど」には収まらない端数のため。
-
-    どれかが None (= その水位を持たない) のときは検査しない — 上限を持たない
-    モデルには「上限を下回る」という約束が無く、知覚の上限を持たないモデルは
-    「合計は伸びるに任せる」というオプトアウトを明示的に選んでいる。
-    """
-    from saiverse.model_configs import WATERMARK_HEADROOM_CHARS
-
-    target = values.get("metabolism_target_chars")
-    high = values.get("metabolism_high_chars")
-    perception_high = values.get("perception_high_chars")
-    if target is None or high is None or perception_high is None:
-        return None
-    gap = high - target
-    needed = perception_high + WATERMARK_HEADROOM_CHARS
-    if gap > needed:
-        return None
-    return (
-        f"整理をはじめる文字数 ({high:,}) と整理後に残す文字数 ({target:,}) の差 "
-        f"{gap:,} 字が、部屋の様子などの記録の上限 {perception_high:,} 字 + 余裕 "
-        f"{WATERMARK_HEADROOM_CHARS:,} 字 = {needed:,} 字 を上回っていません。"
-        "このままだと会話をどれだけ整理しても、送る量が上限を下回らないことがあります。"
-        "整理をはじめる文字数を増やすか、整理後に残す文字数か記録の上限を減らして"
-        f"ください（{blank_note}）"
-    )
-
-
 def _watermark_values_or_error(
     config: Dict[str, Any], fill_defaults: Dict[str, int],
 ) -> tuple[Optional[Dict[str, Optional[int]]], Optional[str]]:
-    """設定一つ + 埋め合わせの既定から、検査に掛ける**素の**四水位を組む。
+    """設定一つ + 埋め合わせの既定から、検査に掛ける**素の**二水位を組む。
 
     ``config`` に無いキーは ``fill_defaults`` で埋めて (= 実行時の解決と同じ
     実効値で) 比べる。明示 null / 0 以下は「その水位を持たない」(実行時の解釈と
     同じ)。数値でも null でもない型は入力の誤りとしてここで弾く (実行時は既定へ
-    黙って落ちるが、保存の入口では教える)。廃止済みの ``metabolism_low_chars``
-    キーは検証しない = 残っていても黙って通す (実行時に読まれないものを保存の
-    入口で咎めない)。
+    黙って落ちるが、保存の入口では教える)。廃止済みのキー
+    (``metabolism_low_chars`` / ``perception_target_chars`` /
+    ``perception_high_chars``) は検証しない = 残っていても黙って通す (実行時に
+    読まれないものを保存の入口で咎めない)。
     """
-    from saiverse.model_configs import ALL_WATERMARK_KEYS
+    from saiverse.model_configs import METABOLISM_WATERMARK_KEYS
 
     effective: Dict[str, Optional[int]] = {}
-    for key in ALL_WATERMARK_KEYS:
+    for key in METABOLISM_WATERMARK_KEYS:
         if key not in config:
             effective[key] = fill_defaults[key]
             continue
@@ -1290,16 +1256,9 @@ def _watermark_constraints_error(
     values, type_error = _watermark_values_or_error(config, fill_defaults)
     if values is None:
         return type_error
-    return (
-        _watermark_order_error(
-            values, "metabolism_target_chars", "metabolism_high_chars",
-            blank_note=blank_note,
-        )
-        or _watermark_order_error(
-            values, "perception_target_chars", "perception_high_chars",
-            blank_note=blank_note,
-        )
-        or _watermark_headroom_error(values, blank_note=blank_note)
+    return _watermark_order_error(
+        values, "metabolism_target_chars", "metabolism_high_chars",
+        blank_note=blank_note,
     )
 
 
@@ -1332,33 +1291,29 @@ def _validate_watermarks(config: Dict[str, Any]) -> None:
 # ── 水位の全体既定 (user_settings) ──────────────────────────────
 #
 # 三層 (組み込み既定 < 全体設定 < モデル定義) の真ん中。真実は
-# user_settings.{METABOLISM,PERCEPTION}_*_CHARS (NULL = 未設定) で、保存成功のたびに
+# user_settings.METABOLISM_*_CHARS (NULL = 未設定) で、保存成功のたびに
 # saiverse.model_configs.set_global_watermark_defaults へ写すので再起動は要らない
 # (起動時の読み込みは saiverse_manager)。docs/concepts/metabolism.md。
 #
-# 経路は Metabolism の二水位と知覚の二水位で共通 (2026-09-05)。保存時検査が
-# 二族をまたぐ (整理を始める量 − 残す量 > 知覚の上限 + 余裕) ので、別々の入口に
-# すると片方だけの保存で成立しない組を作れてしまう。URL は既存クライアントとの
-# 互換のため `metabolism-defaults` のまま。
+# 2026-09-05 にここへ同居させた知覚の二水位は 2026-09-09 に廃止した
+# (docs/intent/presented_context_reduction.md 設計 3)。しきい値は「残す量 /
+# 上限」の一系統だけになり、旧クライアントが送ってくる perception の欄は
+# pydantic が黙って落とす。
 
 class MetabolismDefaultsRequest(BaseModel):
-    """水位四つの全体既定。省略 = 触らない / null = 既定に戻す / 正の整数 = その値。
+    """水位二つの全体既定。省略 = 触らない / null = 既定に戻す / 正の整数 = その値。
 
-    名前と URL は Metabolism の二水位だけだった頃 (2026-09-03) のまま — 2026-09-05
-    に知覚の二水位が同居した。廃止済みの ``metabolism_low_chars`` は受け取らない
-    (旧クライアントが送ってきても pydantic が黙って無視する)。
+    廃止済みの欄 (``metabolism_low_chars`` / ``perception_target_chars`` /
+    ``perception_high_chars``) は受け取らない — 旧クライアントが送ってきても
+    pydantic が黙って無視する。
     """
     metabolism_target_chars: Optional[int] = None
     metabolism_high_chars: Optional[int] = None
-    perception_target_chars: Optional[int] = None
-    perception_high_chars: Optional[int] = None
 
 
 _WATERMARK_SETTING_COLUMNS = {
     "metabolism_target_chars": "METABOLISM_TARGET_CHARS",
     "metabolism_high_chars": "METABOLISM_HIGH_CHARS",
-    "perception_target_chars": "PERCEPTION_TARGET_CHARS",
-    "perception_high_chars": "PERCEPTION_HIGH_CHARS",
 }
 
 #: PUT を直列化する。読み (DB 行) → 検証 → 書き → 公開 (モジュール変数へ写す) を
@@ -1376,11 +1331,11 @@ def _models_conflicting_with_defaults(proposed_global: Dict[str, Optional[int]])
     モデル定義が一部の水位だけ数値で書いている場合 (例: target=15万 だけ)、残りは
     全体既定で埋まる。全体の high を 20万 → 未設定 (組み込み 12万) に戻すと、
     そのモデルは target 15万 > high 12万 になる — 全体の組だけ検証しても
-    見えない。組み方は実行時と同じ関数 (`compose_all_watermarks`) で行う。
+    見えない。組み方は実行時と同じ関数 (`compose_watermark_map`) で行う。
     """
     from saiverse.model_configs import (
         MODEL_CONFIGS,
-        compose_all_watermarks,
+        compose_watermark_map,
         effective_watermark_defaults_from,
     )
 
@@ -1390,7 +1345,7 @@ def _models_conflicting_with_defaults(proposed_global: Dict[str, Optional[int]])
         config = MODEL_CONFIGS.get(model_key)
         if not isinstance(config, dict):
             continue
-        values = compose_all_watermarks(config, proposed_global)
+        values = compose_watermark_map(config, proposed_global)
         if _watermark_constraints_error(
             dict(values), fill_defaults, blank_note="",
         ) is not None:
@@ -1399,15 +1354,20 @@ def _models_conflicting_with_defaults(proposed_global: Dict[str, Optional[int]])
 
 
 def _watermark_defaults_payload() -> Dict[str, Any]:
-    """設定値 (null = 未設定) / 実効値 / 組み込み既定を、四水位そろえて返す。
+    """設定値 (null = 未設定) / 実効値 / 組み込み既定と、画面のプリセットを返す。
 
-    ``target`` / ``high`` (Metabolism) の二キーは 2026-09-03 からの形のまま —
-    知覚の二つは ``perception_target`` / ``perception_high`` として**足す**ので、
-    古いクライアントは読む場所が変わらない。
+    ``target`` / ``high`` の二キーは 2026-09-03 からの形のまま。2026-09-05 に
+    足した知覚の二キー (``perception_target`` / ``perception_high``) と余裕
+    (``headroom``) は 2026-09-09 の廃止で落とした。
+
+    ``presets`` は全体設定の画面が出す「多い / デフォルト / 少ない」の定義
+    (:data:`saiverse.model_configs.METABOLISM_PRESETS`)。数字の置き場を
+    backend の一枚にしておかないと、既定を動かしたときに画面のプリセットだけ
+    古い数字を出す。
     """
     from saiverse.model_configs import (
-        BUILTIN_WATERMARK_DEFAULTS,
-        WATERMARK_HEADROOM_CHARS,
+        BUILTIN_METABOLISM_DEFAULTS,
+        METABOLISM_PRESETS,
         get_effective_watermark_defaults,
         get_global_watermark_defaults,
     )
@@ -1416,22 +1376,22 @@ def _watermark_defaults_payload() -> Dict[str, Any]:
         return {
             "target": values["metabolism_target_chars"],
             "high": values["metabolism_high_chars"],
-            "perception_target": values["perception_target_chars"],
-            "perception_high": values["perception_high_chars"],
         }
 
     return {
         "global": _short(get_global_watermark_defaults()),
         "effective": _short(get_effective_watermark_defaults()),
-        "builtin": _short(BUILTIN_WATERMARK_DEFAULTS),
-        # 画面が保存前に同じ検査 (差 > 知覚の上限 + 余裕) を掛けるための余裕の分。
-        "headroom": WATERMARK_HEADROOM_CHARS,
+        "builtin": _short(BUILTIN_METABOLISM_DEFAULTS),
+        "presets": [
+            {"id": preset["id"], "label": preset["label"], **_short(preset)}
+            for preset in METABOLISM_PRESETS
+        ],
     }
 
 
 @router.get("/metabolism-defaults")
 def get_metabolism_defaults():
-    """水位 (記憶の整理 + 知覚) の全体既定 — 設定値 (null = 未設定) / 実効値 / 組み込み既定。"""
+    """記憶の整理の水位の全体既定 — 設定値 (null = 未設定) / 実効値 / 組み込み既定 + プリセット。"""
     return _watermark_defaults_payload()
 
 
@@ -1444,7 +1404,7 @@ def put_metabolism_defaults(req: MetabolismDefaultsRequest):
     公開を `_watermark_defaults_lock` の中で一続きに行う。
 
     検証は二段: (1) 全体の組を、未設定分は組み込み既定で埋めた実効値で検査
-    (モデル保存と同じ `_check_watermarks` — 順序と余裕の両方)。(2) 既存の
+    (モデル保存と同じ `_check_watermarks` — 残す量 ≤ 上限の順序)。(2) 既存の
     全モデル定義について、その部分上書きと新しい全体既定を実行時と同じ規則で
     組んだ組を同じ検査に掛ける (`_models_conflicting_with_defaults`) — 落ちる
     モデルがあれば名前を挙げて 400。
@@ -1452,7 +1412,7 @@ def put_metabolism_defaults(req: MetabolismDefaultsRequest):
     from database.session import SessionLocal
     from database.models import UserSettings
     from saiverse.model_configs import (
-        BUILTIN_WATERMARK_DEFAULTS,
+        BUILTIN_METABOLISM_DEFAULTS,
         set_global_watermark_defaults,
     )
 
@@ -1475,11 +1435,11 @@ def put_metabolism_defaults(req: MetabolismDefaultsRequest):
             # 未設定 (None) は「制約を外す」ではなく「組み込み既定に従う」なので、検証には
             # 組み込み既定を入れた形で渡す (モデル定義の null とは意味が違う)。
             to_check = {
-                key: (value if value is not None else BUILTIN_WATERMARK_DEFAULTS[key])
+                key: (value if value is not None else BUILTIN_METABOLISM_DEFAULTS[key])
                 for key, value in merged.items()
             }
             _check_watermarks(
-                to_check, BUILTIN_WATERMARK_DEFAULTS,
+                to_check, BUILTIN_METABOLISM_DEFAULTS,
                 blank_note="「既定に戻す」にした項目は組み込み既定で数えます",
             )
             conflicting = _models_conflicting_with_defaults(merged)
