@@ -34,7 +34,7 @@ Metabolism は短期記憶を区切り直す節目であり、同時に**短期�
 | 層 | どこで編集するか | 保存先 | 意味 |
 |---|---|---|---|
 | 組み込み既定 | 編集しない | `saiverse/model_configs.py` の `BUILTIN_METABOLISM_*_CHARS` | 何も設定していないときの値（上表） |
-| 全体設定 | 全体設定画面 → 環境タブ「ペルソナに送る量の水位」（`GET/PUT /api/config/metabolism-defaults`） | `user_settings.METABOLISM_{TARGET,HIGH}_CHARS`（NULL = 未設定） | モデル定義にキーが無いモデルが従う既定。プリセットを選ぶとここへ書かれる |
+| 全体設定 | 全体設定画面 → 環境タブ「ペルソナに送る量」（`GET/PUT /api/config/metabolism-defaults`） | `user_settings.METABOLISM_{TARGET,HIGH}_CHARS`（NULL = 未設定） | モデル定義にキーが無いモデルが従う既定。プリセットを選ぶとここへ書かれる |
 | モデル定義 | モデル編集 UI の専用欄（`metabolism_*_chars`） | モデル JSON | 数値を書いたモデルはそれが勝つ。null = その水位を持たない = Metabolism なし（モデル単位のオプトアウト。全体設定では表せない） |
 
 解決は `saiverse/model_configs.py` の `resolve_metabolism_watermarks` の一箇所（キー無し → 全体設定 → 組み込み、キーあり null → None。全体設定は不変の写像を一枚だけ読み、そこから二つの水位をまとめて解くので、差し替えの途中で新旧が混ざった組にはならない）。全体設定の真実は DB で、起動時（`saiverse_manager`）と保存成功時（API）に `set_global_watermark_defaults` でモジュール変数へ写すので再起動は要らない。
