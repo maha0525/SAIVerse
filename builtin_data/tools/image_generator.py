@@ -3,7 +3,11 @@
 Supported models:
 - nano_banana_2: Gemini 3.1 Flash Image (fast, high quality, aspect ratio + resolution control)
 - nano_banana_pro: Gemini 3 Pro Image (highest quality, aspect ratio + resolution control)
-- gpt_image_1_5: OpenAI GPT Image 1.5 (state of the art)
+- gpt_image_1_5: OpenAI GPT Image 1.5 (legacy)
+- gpt_image_2: OpenAI GPT Image 2 (previous generation)
+- gpt_image_2_5_flare: OpenAI GPT Image 2.5 Flare (state of the art, fastest high-quality generation)
+- gpt_image_2_5_sunburst: OpenAI GPT Image 2.5 Sunburst (state of the art, best editing precision with reference images)
+- grok_imagine: xAI Grok Imagine Image Pro (can also create slightly NSFW images)
 
 Input image URI formats:
 - saiverse://image/<filename> - Generated image file
@@ -30,9 +34,17 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 # Type definitions
-ModelType = Literal["nano_banana_2", "nano_banana_pro", "gpt_image_1_5", "gpt_image_2", "grok_imagine"]
+ModelType = Literal[
+    "nano_banana_2",
+    "nano_banana_pro",
+    "gpt_image_1_5",
+    "gpt_image_2",
+    "gpt_image_2_5_flare",
+    "gpt_image_2_5_sunburst",
+    "grok_imagine",
+]
 AspectRatioType = Literal["1:1", "16:9", "9:16", "4:3", "3:4", "2:3", "3:2", "4:5", "5:4", "1:4", "4:1", "1:8", "8:1", "21:9"]
-QualityType = Literal["low", "medium", "high", "auto"]
+QualityType = Literal["low", "medium", "high", "xhigh", "max", "auto"]
 SizeType = Literal[
     "auto",
     "1024x1024",
@@ -44,6 +56,17 @@ SizeType = Literal[
     "3840x2160",
     "2160x3840",
 ]
+
+# OpenAI API model IDs that support the 'xhigh' / 'max' quality levels.
+_GPT_IMAGE_25_MODELS = ("gpt-image-2.5-flare", "gpt-image-2.5-sunburst")
+
+# Tool-level model names routed to the OpenAI images API (these honour `size`).
+_OPENAI_TOOL_MODELS = (
+    "gpt_image_1_5",
+    "gpt_image_2",
+    "gpt_image_2_5_flare",
+    "gpt_image_2_5_sunburst",
+)
 
 
 def _aspect_ratio_to_openai_size(aspect_ratio: str) -> str:
@@ -89,6 +112,8 @@ def _quality_to_gemini_resolution(quality: str) -> str:
         "low": "HD",
         "medium": "HD",
         "high": "4K",
+        "xhigh": "4K",
+        "max": "4K",
         "auto": "4K",
     }
     return mapping.get(quality, "4K")
@@ -127,6 +152,8 @@ def _quality_to_nano_banana_2_resolution(quality: str) -> str:
         "low": "1K",
         "medium": "2K",
         "high": "4K",
+        "xhigh": "4K",
+        "max": "4K",
         "auto": "2K",
     }
     return mapping.get(quality, "2K")
@@ -246,14 +273,18 @@ def _generate_with_nano_banana_pro(
     raise RuntimeError("No image data in response")
 
 
-def _generate_with_gpt_image_1_5(
+def _generate_with_gpt_image(
+    openai_model: str,
     prompt: str,
     aspect_ratio: str = "1:1",
     quality: str = "high",
     input_image_paths: Optional[List[Path]] = None,
     size: str = "auto",
 ) -> Tuple[bytes, str]:
-    """Generate image using OpenAI GPT Image 1.5."""
+    """Generate image using an OpenAI GPT Image model.
+
+    `openai_model` is the OpenAI API model ID (e.g. "gpt-image-2.5-flare").
+    """
     from openai import OpenAI
 
     api_key = os.getenv("OPENAI_API_KEY")
@@ -267,10 +298,20 @@ def _generate_with_gpt_image_1_5(
         effective_size = _aspect_ratio_to_openai_size(aspect_ratio)
     effective_quality = quality if quality != "auto" else "high"
 
+    # 'xhigh' / 'max' were introduced with GPT Image 2.5; older models top out at 'high'.
+    if openai_model not in _GPT_IMAGE_25_MODELS and effective_quality in ("xhigh", "max"):
+        logger.warning(
+            "[gpt_image] quality=%s is only supported by GPT Image 2.5 models, "
+            "clamping to 'high' for model=%s",
+            effective_quality, openai_model,
+        )
+        effective_quality = "high"
+
     if input_image_paths:
         # Use images.edit for input image processing
         logger.info(
-            f"[gpt_image] Editing with {len(input_image_paths)} input images, "
+            f"[gpt_image] Editing with model={openai_model}, "
+            f"{len(input_image_paths)} input images, "
             f"size={effective_size} (requested={size}), quality={effective_quality}"
         )
 
@@ -282,7 +323,7 @@ def _generate_with_gpt_image_1_5(
 
         try:
             result = client.images.edit(
-                model="gpt-image-1.5",
+                model=openai_model,
                 image=image_files if len(image_files) > 1 else image_files[0],
                 prompt=prompt,
                 size=effective_size,
@@ -295,12 +336,13 @@ def _generate_with_gpt_image_1_5(
     else:
         # Standard generation without input images
         logger.info(
-            f"[gpt_image] Generating with size={effective_size} (requested={size}), "
+            f"[gpt_image] Generating with model={openai_model}, "
+            f"size={effective_size} (requested={size}), "
             f"quality={effective_quality}"
         )
 
         result = client.images.generate(
-            model="gpt-image-1.5",
+            model=openai_model,
             prompt=prompt,
             size=effective_size,
             quality=effective_quality,
@@ -313,6 +355,18 @@ def _generate_with_gpt_image_1_5(
     image_bytes = base64.b64decode(result.data[0].b64_json)
     # GPT Image returns PNG by default
     return image_bytes, "image/png"
+
+
+def _generate_with_gpt_image_1_5(
+    prompt: str,
+    aspect_ratio: str = "1:1",
+    quality: str = "high",
+    input_image_paths: Optional[List[Path]] = None,
+    size: str = "auto",
+) -> Tuple[bytes, str]:
+    """Generate image using OpenAI GPT Image 1.5 (legacy)."""
+    return _generate_with_gpt_image("gpt-image-1.5", prompt, aspect_ratio, quality, input_image_paths, size)
+
 
 def _generate_with_gpt_image_2(
     prompt: str,
@@ -321,66 +375,31 @@ def _generate_with_gpt_image_2(
     input_image_paths: Optional[List[Path]] = None,
     size: str = "auto",
 ) -> Tuple[bytes, str]:
-    """Generate image using OpenAI GPT Image 2."""
-    from openai import OpenAI
+    """Generate image using OpenAI GPT Image 2 (previous generation)."""
+    return _generate_with_gpt_image("gpt-image-2", prompt, aspect_ratio, quality, input_image_paths, size)
 
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        raise RuntimeError("OPENAI_API_KEY environment variable is not set.")
 
-    client = OpenAI(api_key=api_key)
-    if size and size != "auto":
-        effective_size = size
-    else:
-        effective_size = _aspect_ratio_to_openai_size(aspect_ratio)
-    effective_quality = quality if quality != "auto" else "high"
+def _generate_with_gpt_image_2_5_flare(
+    prompt: str,
+    aspect_ratio: str = "1:1",
+    quality: str = "high",
+    input_image_paths: Optional[List[Path]] = None,
+    size: str = "auto",
+) -> Tuple[bytes, str]:
+    """Generate image using OpenAI GPT Image 2.5 Flare."""
+    return _generate_with_gpt_image("gpt-image-2.5-flare", prompt, aspect_ratio, quality, input_image_paths, size)
 
-    if input_image_paths:
-        # Use images.edit for input image processing
-        logger.info(
-            f"[gpt_image] Editing with {len(input_image_paths)} input images, "
-            f"size={effective_size} (requested={size}), quality={effective_quality}"
-        )
 
-        # Prepare input images as file-like objects
-        image_files = []
-        for img_path in input_image_paths:
-            image_files.append(open(img_path, "rb"))
-            logger.info(f"[gpt_image] Added input image: {img_path.name}")
+def _generate_with_gpt_image_2_5_sunburst(
+    prompt: str,
+    aspect_ratio: str = "1:1",
+    quality: str = "high",
+    input_image_paths: Optional[List[Path]] = None,
+    size: str = "auto",
+) -> Tuple[bytes, str]:
+    """Generate image using OpenAI GPT Image 2.5 Sunburst."""
+    return _generate_with_gpt_image("gpt-image-2.5-sunburst", prompt, aspect_ratio, quality, input_image_paths, size)
 
-        try:
-            result = client.images.edit(
-                model="gpt-image-2",
-                image=image_files if len(image_files) > 1 else image_files[0],
-                prompt=prompt,
-                size=effective_size,
-                quality=effective_quality,
-                n=1,
-            )
-        finally:
-            for f in image_files:
-                f.close()
-    else:
-        # Standard generation without input images
-        logger.info(
-            f"[gpt_image] Generating with size={effective_size} (requested={size}), "
-            f"quality={effective_quality}"
-        )
-
-        result = client.images.generate(
-            model="gpt-image-2",
-            prompt=prompt,
-            size=effective_size,
-            quality=effective_quality,
-            n=1,
-        )
-
-    if not result.data or not result.data[0].b64_json:
-        raise RuntimeError("No image data returned from OpenAI")
-
-    image_bytes = base64.b64decode(result.data[0].b64_json)
-    # GPT Image returns PNG by default
-    return image_bytes, "image/png"
 
 def _generate_with_grok_imagine(
     prompt: str,
@@ -398,7 +417,7 @@ def _generate_with_grok_imagine(
     client = xai_sdk.Client(api_key=api_key)
 
     # Map quality to resolution
-    resolution = "2k" if quality in ("high", "auto") else "1k"
+    resolution = "2k" if quality in ("high", "xhigh", "max", "auto") else "1k"
 
     kwargs: dict = {
         "prompt": prompt,
@@ -491,6 +510,8 @@ def _get_model_api_key_env(model: str) -> Optional[str]:
         "nano_banana_pro": "GEMINI_API_KEY",
         "gpt_image_1_5": "OPENAI_API_KEY",
         "gpt_image_2": "OPENAI_API_KEY",
+        "gpt_image_2_5_flare": "OPENAI_API_KEY",
+        "gpt_image_2_5_sunburst": "OPENAI_API_KEY",
         "grok_imagine": "XAI_API_KEY",
     }
     return mapping.get(model)
@@ -506,12 +527,28 @@ def _is_image_model_available(model: str) -> bool:
 
 def get_available_image_models() -> List[str]:
     """Return list of image model names whose API keys are configured."""
-    all_models = ["nano_banana_2", "nano_banana_pro", "gpt_image_1_5", "gpt_image_2", "grok_imagine"]
+    all_models = [
+        "nano_banana_2",
+        "nano_banana_pro",
+        "gpt_image_2_5_flare",
+        "gpt_image_2_5_sunburst",
+        "gpt_image_1_5",
+        "gpt_image_2",
+        "grok_imagine",
+    ]
     return [m for m in all_models if _is_image_model_available(m)]
 
 
 # Fallback priority order (most commonly available first)
-_FALLBACK_ORDER = ["nano_banana_2", "nano_banana_pro", "gpt_image_1_5", "gpt_image_2", "grok_imagine"]
+_FALLBACK_ORDER = [
+    "nano_banana_2",
+    "nano_banana_pro",
+    "gpt_image_2_5_flare",
+    "gpt_image_2_5_sunburst",
+    "gpt_image_1_5",
+    "gpt_image_2",
+    "grok_imagine",
+]
 
 
 def generate_image(
@@ -530,11 +567,18 @@ def generate_image(
         model: Which image generation model to use:
             - nano_banana_2: Fast, high quality with aspect ratio + resolution control (Gemini 3.1 Flash)
             - nano_banana_pro: Highest quality with aspect ratio + resolution control (Gemini 3 Pro)
-            - gpt_image_1_5: State of the art quality (OpenAI GPT Image 1.5)
+            - gpt_image_1_5: Legacy quality (OpenAI GPT Image 1.5)
+            - gpt_image_2: Previous generation (OpenAI GPT Image 2)
+            - gpt_image_2_5_flare: State of the art, fastest high-quality generation
+              (OpenAI GPT Image 2.5 Flare)
+            - gpt_image_2_5_sunburst: State of the art, best editing precision with
+              reference images (OpenAI GPT Image 2.5 Sunburst)
             - grok_imagine: High quality image generation (xAI Grok Imagine Pro)
         aspect_ratio: Image aspect ratio ("1:1", "16:9", "9:16", "4:3", "3:4")
-        quality: Image quality level ("low", "medium", "high", "auto").
+        quality: Image quality level ("low", "medium", "high", "xhigh", "max", "auto").
             "auto" uses the global default quality setting.
+            "xhigh" / "max" are only honored by the gpt_image_2_5_* models; other
+            models round them down to "high" (Gemini: 4K).
         size: Output image size in pixels (gpt_image_* only). "auto" uses
             aspect_ratio + quality to pick a size. Specific values like
             "2048x2048" override aspect_ratio. Ignored for non-OpenAI models.
@@ -626,7 +670,7 @@ def generate_image(
             f"input_images={len(input_image_paths)}"
         )
         # Warn if size override is set on a model that ignores it
-        if size != "auto" and attempt_model not in ("gpt_image_1_5", "gpt_image_2"):
+        if size != "auto" and attempt_model not in _OPENAI_TOOL_MODELS:
             logger.warning(
                 "[image_generator] size=%s is OpenAI-specific and will be "
                 "ignored by model=%s (using aspect_ratio instead)",
@@ -640,6 +684,14 @@ def generate_image(
             elif attempt_model == "nano_banana_pro":
                 image_data, mime = _generate_with_nano_banana_pro(
                     prompt, aspect_ratio, quality, input_image_paths
+                )
+            elif attempt_model == "gpt_image_2_5_flare":
+                image_data, mime = _generate_with_gpt_image_2_5_flare(
+                    prompt, aspect_ratio, quality, input_image_paths, size=size
+                )
+            elif attempt_model == "gpt_image_2_5_sunburst":
+                image_data, mime = _generate_with_gpt_image_2_5_sunburst(
+                    prompt, aspect_ratio, quality, input_image_paths, size=size
                 )
             elif attempt_model == "gpt_image_2":
                 image_data, mime = _generate_with_gpt_image_2(
@@ -744,7 +796,10 @@ def schema() -> ToolSchema:
             "Supports multiple AI models:\n"
             "- nano_banana_2: Fast, high quality generation with aspect ratio + resolution control (Gemini 3.1 Flash)\n"
             "- nano_banana_pro: Highest quality with aspect ratio and resolution control (Gemini 3 Pro)\n"
-            "- gpt_image_1_5: State of the art photorealistic quality (OpenAI)\n"
+            "- gpt_image_2_5_flare: State of the art, fastest high-quality generation (OpenAI GPT Image 2.5 Flare)\n"
+            "- gpt_image_2_5_sunburst: State of the art, best editing precision with reference images (OpenAI GPT Image 2.5 Sunburst)\n"
+            "- gpt_image_1_5: Legacy photorealistic quality (OpenAI)\n"
+            "- gpt_image_2: Previous generation photorealistic quality (OpenAI)\n"
             "- grok_imagine: High quality image generation (xAI Grok Imagine Pro)\n\n"
             "Prompt tips:\n"
             "- Be specific and detailed about what you want\n"
@@ -766,12 +821,23 @@ def schema() -> ToolSchema:
                 },
                 "model": {
                     "type": "string",
-                    "enum": ["nano_banana_2", "nano_banana_pro", "gpt_image_1_5", "gpt_image_2", "grok_imagine"],
+                    "enum": [
+                        "nano_banana_2",
+                        "nano_banana_pro",
+                        "gpt_image_1_5",
+                        "gpt_image_2",
+                        "gpt_image_2_5_flare",
+                        "gpt_image_2_5_sunburst",
+                        "grok_imagine",
+                    ],
                     "description": (
                         "Image generation model: "
                         "nano_banana_2 (fast, high quality, Gemini 3.1 Flash), "
                         "nano_banana_pro (a bit higher quality, Gemini 3 Pro), "
-                        "gpt_image_1_5 (legacy model), gpt_image_2 (state of the art), grok_imagine (this can also create slightly NSFW images)"
+                        "gpt_image_2_5_flare (state of the art, fastest high-quality generation, OpenAI GPT Image 2.5 Flare), "
+                        "gpt_image_2_5_sunburst (state of the art, best editing precision with reference images, OpenAI GPT Image 2.5 Sunburst), "
+                        "gpt_image_1_5 (legacy model), gpt_image_2 (previous generation), "
+                        "grok_imagine (this can also create slightly NSFW images)"
                     ),
                     "default": "nano_banana_2"
                 },
@@ -783,8 +849,12 @@ def schema() -> ToolSchema:
                 },
                 "quality": {
                     "type": "string",
-                    "enum": ["low", "medium", "high", "auto"],
-                    "description": "Image quality level. 'auto' uses the global default quality setting.",
+                    "enum": ["low", "medium", "high", "xhigh", "max", "auto"],
+                    "description": (
+                        "Image quality level. 'auto' uses the global default quality setting. "
+                        "'xhigh' and 'max' are only honored by gpt_image_2_5_* models; "
+                        "other models treat them as 'high' (Gemini: 4K)."
+                    ),
                     "default": "auto"
                 },
                 "size": {
