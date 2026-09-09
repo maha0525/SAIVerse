@@ -15,10 +15,12 @@
   退場 (Chronicle fold) 時の決定論付記 (§10.4) と読み口の実体になる。
 - 「部屋の様子」だけは再訪で差分に縮む — その記帳と、付記と同一 tx で走る
   提示文面の移管は sai_memory/room_state.py が持つ。
-- 提示に出る知覚の**合計**には上限がある (§10.9)。超えたら古い側をまとめて
-  下ろし、その境界 (``perception_presentation`` の 1 行) は一方向にしか
-  進まない。下ろすのは提示だけ — 台帳の行も付記印も変えないので、その期間の
-  編纂が来れば材料として引き取られる。
+- 提示から知覚を下ろした境界 (``perception_presentation`` の 1 行) は一方向に
+  しか進まない (§10.9)。下ろすのは提示だけ — 台帳の行も付記印も変えないので、
+  その期間の編纂が来れば材料として引き取られる。2026-09-04 に入れた「合計が
+  上限を超えたら下ろす」引き金は 2026-09-09 に廃止した (会話以外の大物は
+  Metabolism の瞬間の縮み sai_memory/presented_reduction.py が減らす)。器は
+  残っていて、既に下ろされた区間はそのまま提示に戻らない。
 """
 from __future__ import annotations
 
@@ -227,10 +229,14 @@ def init_perception_buffer_table(
         "CREATE INDEX IF NOT EXISTS idx_perception_batches_annexed "
         "ON perception_batches(annexed_entry_id)"
     )
-    # 提示の状態 (1 行だけ): 知覚の合計が上の水位を超えて「まとめて下ろした」
-    # 境界。値は「この id までのバッチは提示に出さない」で、**一方向にしか
-    # 進まない** (advance_presentation_cutoff)。台帳の行も付記印も触らない —
-    # 下ろすのは提示だけで、その期間の編纂が来れば材料として引き取られる。
+    # 提示の状態 (1 行だけ): 知覚を「まとめて下ろした」境界。値は「この id まで
+    # のバッチは提示に出さない」で、**一方向にしか進まない**
+    # (advance_presentation_cutoff)。台帳の行も付記印も触らない — 下ろすのは
+    # 提示だけで、その期間の編纂が来れば材料として引き取られる。
+    # 2026-09-04 に入れた引き金 (知覚の合計が上の水位を超えたら下ろす) は
+    # 2026-09-09 に廃止した (docs/intent/presented_context_reduction.md 設計 3)
+    # ので、いまこの列を進める呼び出しは無い。既に進んでいる境界は尊重する
+    # (一度下ろしたものを戻すと、揺り戻しでキャッシュの前方一致が割れる)。
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS perception_presentation (
@@ -779,10 +785,11 @@ def insert_presentation_batch(
     C1 は破らない)。台帳の既存の行・バッチは書き換えない — 追加だけ。
 
     こうして作られたバッチは ``room_state_json`` のエントリに ``reseated`` の
-    印を持ち、(a) 知覚の合計上限の下ろし候補から外れ (id と consumed_at の
-    順序が食い違うため — sea/runtime_context._plan_perception_drop)、(b) 編纂の
-    付記では印だけ受けて材料には載らない (機構の置き直しは出来事ではない —
-    sai_memory/arasuji/executor.collect_annex_items)。
+    印を持ち、(a) 下ろす機構があればその候補から外れ (id と consumed_at の
+    順序が食い違うため — :func:`sai_memory.room_state.batch_is_room_reseat`。
+    知覚の合計上限は 2026-09-09 に廃止したので、現在この印を読む下ろしは
+    無い)、(b) 編纂の付記では印だけ受けて材料には載らない (機構の置き直しは
+    出来事ではない — sai_memory/arasuji/executor.collect_annex_items)。
     """
     cur = conn.execute(
         "INSERT INTO perception_batches "
@@ -817,9 +824,9 @@ def list_unannexed_batches(
     """付記印のない消費バッチを consumed_at → id 昇順で返す。
 
     退場付記 (§10.4) の読み口 = 「まだ編纂に引き取られていない」全件。**提示は
-    こちらではなく** :func:`list_presented_batches` を読む — 知覚の合計上限で
-    下ろした境界より古いバッチは、未付記のまま提示にだけ出なくなるため
-    (§10.9)。台帳から消えるわけではないので、材料集めはここを読み続ける。
+    こちらではなく** :func:`list_presented_batches` を読む — 下ろした境界より
+    古いバッチは、未付記のまま提示にだけ出なくなるため (§10.9)。台帳から消える
+    わけではないので、材料集めはここを読み続ける。
     ``since`` (以上) / ``before`` (未満) は付記スパンの絞り込み用。
     """
     sql = (
@@ -843,7 +850,7 @@ _PRESENTATION_STATE_ID = "main"
 
 
 def get_presentation_cutoff(conn: sqlite3.Connection) -> int:
-    """知覚の合計上限で「まとめて下ろした」境界 (この id までは提示に出ない)。
+    """知覚を「まとめて下ろした」境界 (この id までは提示に出ない)。
 
     まだ一度も下ろしていない / テーブルの無い DB なら 0 = 全部が提示に出る。
     テーブル不在**以外**の失敗 (ロック等) は raise する — 0 を返すと「一度も

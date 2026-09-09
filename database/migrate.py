@@ -110,6 +110,62 @@ KNOWN_COLUMN_RENAMES = {
 }
 
 
+# 廃止して DB から落とす列: {table_name: (col, ...)}。
+# 列を消すだけの差分は、放っておくと _schema_diff の extra 列として全書換
+# (ファイル move) に落ちる — 生きた DB では Windows の WinError 32 を踏むし、
+# たかが 2 列のために全テーブルをコピーし直すのは割に合わない。SQLite 3.35 以降の
+# ALTER TABLE DROP COLUMN で先に落として、追加系パスで完結させる。
+# 落とせなかった (古い SQLite 等) 場合は差分が残るので、従来どおり全書換が受ける。
+KNOWN_COLUMN_DROPS = {
+    # 2026-09-09: 知覚の二水位の廃止 (docs/intent/presented_context_reduction.md
+    # 設計 3)。しきい値は「残す量 / 上限」の一系統だけになった。
+    "user_settings": ("PERCEPTION_TARGET_CHARS", "PERCEPTION_HIGH_CHARS"),
+}
+
+
+def apply_known_column_drops(db_path: str) -> None:
+    """KNOWN_COLUMN_DROPS の列を ALTER TABLE DROP COLUMN で落とす (冪等)。
+
+    列が既に無ければ何もしない。落とせなかった場合は警告だけ出して続行する —
+    差分は残るので、呼び出し側 (try_additive_migration) が全書換へ切り替える。
+
+    モデル側に同名の列が残っている表は触らない (誤記で現役の列を落とさない)。
+    """
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        insp = inspect(engine)
+        model_tables = {t.name: t for t in Base.metadata.sorted_tables}
+        for table_name, columns in KNOWN_COLUMN_DROPS.items():
+            if not insp.has_table(table_name):
+                continue
+            db_cols = {c["name"] for c in insp.get_columns(table_name)}
+            model_cols = {
+                c.name for c in model_tables[table_name].columns
+            } if table_name in model_tables else set()
+            for col in columns:
+                if col not in db_cols:
+                    continue
+                if col in model_cols:
+                    logging.warning(
+                        "列 %s.%s は現行モデルにも存在するため削除しません",
+                        table_name, col,
+                    )
+                    continue
+                try:
+                    with engine.begin() as conn:
+                        conn.execute(text(
+                            f'ALTER TABLE "{table_name}" DROP COLUMN "{col}"'
+                        ))
+                    logging.info("廃止列を削除しました: %s.%s", table_name, col)
+                except Exception as e:
+                    logging.warning(
+                        "廃止列 %s.%s の削除に失敗しました (全書換で落とします): %s",
+                        table_name, col, e,
+                    )
+    finally:
+        engine.dispose()
+
+
 def apply_known_column_renames(db_path: str) -> None:
     """KNOWN_COLUMN_RENAMES に従い ALTER TABLE RENAME COLUMN を適用する。
 
@@ -151,6 +207,7 @@ def try_additive_migration(db_path: str) -> bool:
                 一切変更しない (部分適用しない)。
     """
     apply_known_column_renames(db_path)
+    apply_known_column_drops(db_path)
     missing_by_table, extra_by_table, missing_tables = _schema_diff(db_path)
 
     # DB にあってモデルに無い列 = 削除/リネーム → 全書換が必要

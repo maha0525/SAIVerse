@@ -1,6 +1,6 @@
 # 送る量の一系統化と、会話以外の内容の節約
 
-**ステータス**: 実装中 — 設計 1・2（会話以外の内容を Metabolism の瞬間に縮める）は実装と契約テストまで済み、まはーの検収待ち。設計 3（しきい値の一系統化と知覚の二水位の廃止）・プリセットの画面・正典の書き直しはこれから
+**ステータス**: 実装中 — 設計 1・2（会話以外の内容を Metabolism の瞬間に縮める）と設計 3（しきい値の一系統化・知覚の二水位の廃止・プリセットの定義と API 応答・正典の書き直し）は実装と契約テストまで済み、まはーの検収待ち。残るのはプリセットの画面（フロントエンド）
 **対象のリリース**: v0.3.12 候補。release_history の「次の版の範囲」の節にある持ち越しのうち、知覚の既定値・保存時検査の余裕 10,000・perception_high null の素通しの 3 件は、この設計で問いごと解消する
 **関連**: [watermarks_unsatisfiable_when_perception_is_large.md](../issues/watermarks_unsatisfiable_when_perception_is_large.md)（前段の議論と裁定の記録）/ [perception_buffer.md](perception_buffer.md) §10.9（知覚の二つのしきい値 — 本設計の廃止対象）/ [metabolism.md](../concepts/metabolism.md) / [room_state_packages.md](room_state_packages.md) / [room_items_uncapped.md](../issues/room_items_uncapped.md)（隣接・別裁定）
 
@@ -109,4 +109,5 @@
 
 - 2026-09-09: 起草。このセッションの絞り込みの議論（ユーザー実害 3 件 → 観察 → 重要度判定の不成立裁定 → 型の棚卸し → 一系統化の合意）から。
 - 2026-09-09（同日、設計 1・2 の実装）: 縮める規則を実装し、契約テスト（`tests/test_presented_context_reduction.py`、30 件）を新設した。台帳の押し出された旧文面: 「設計はプリセットの数字まで全部確定した。次は実装 — 縮める規則・しきい値の一系統化と廃止・プリセットの画面・正典の書き直しを一つの束で進める。」（誰待ち = まはー、実装開始の GO）。実装で確定した判断は上の「実装で確定したこと」の節にある。設計 3（しきい値の一系統化と知覚の二水位の廃止）以降は未着手で、既存の知覚の上限機構はそのまま生きている。
+- 2026-09-09（同日、設計 3 の実装）: 組み込み既定を 20,000 / 60,000 へ下げ（旧 40,000 / 120,000 はプリセット「多い」へ降格）、プリセット 3 段の定義を `saiverse/model_configs.py` の `METABOLISM_PRESETS` 一枚に置いて全体設定の GET（`presets`）に載せた。知覚の二つのしきい値は、モデル定義キー・`user_settings` の 2 列・全体設定の欄・保存時検査の余裕（`WATERMARK_HEADROOM_CHARS`）ごと削除し、旧キーは黙って無視する形にした（`metabolism_low_chars` と同じ）。DB の列は `database/migrate.py` の `KNOWN_COLUMN_DROPS`（ALTER で落とす新設の汎用経路）が落とす — 列を消すだけの差分で全書換に落ちると、生きた DB ではファイルロックを踏むため。引き金（`_plan_perception_drop` と、その見積もり `_perception_suffix_totals` / `_room_reseat_projection`、測るだけのモード `advance_cutoff`）は削除し、器（一方向境界・`advance_presentation_cutoff`・`restore_room_state_bases`・省略の印）は残した。この結果、提示の組成は台帳へ一切書かない読み取り専用の関数になった。画面側（プリセットの選択と注意書き、知覚の欄の撤去）は未着手。
 - 2026-09-09（同日）: まはーレビューで 3 点裁定（プリセット化 / よその部屋の割り切り / スペルの結果は後回し）。初稿の「未裁定」の節は実装の語彙のままで、まはーが裁定できる内容に煮えていなかった — 「まはーが決めること」と「実装の中で決めること」に分けて書き直した。語彙の裁定も同日（水位・退役・割れ・痕跡・跡地・印・一行・版は使わない。repo 既存文書での流通は使用許可の根拠にならない）。

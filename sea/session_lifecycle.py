@@ -154,7 +154,6 @@ class SessionLifecycle:
         *,
         raise_on_error: bool = False,
         model_key: Optional[str] = None,
-        advance_cutoff: bool = True,
     ) -> List[Dict[str, Any]]:
         """この窓と一緒に送られる知覚ブロック (組成は組み立て側と同じ一枚)。
 
@@ -164,17 +163,9 @@ class SessionLifecycle:
         測る側もそれを呼ぶ (規則の二枚目を作らない —
         docs/issues/context_accounting_excludes_injected_rows.md)。
 
-        ``model_key`` はこの窓を届ける Session の実行 model。組成の中で走る
-        知覚の下ろし判定はこの model の水位で行う — 勘定と提示が別の model の
-        水位で動くと、実行モデルに保存した知覚の水位が効かない
-        (2026-09-05 Codex 三巡 #2)。None なら ``persona.model`` へ落ちる。
-
-        ``advance_cutoff=False`` は**測るだけ** — 知覚の下ろし境界を進める判定は
-        同じように行うが、``perception_presentation`` へは書かない。仕分けは
-        「この列が実際に送られるか」: 送られる列 (発火判定・非常畳み・実書き込み
-        の読み戻し・整理の退場計画) は進め、送られない列 (読み取り専用の画面と、
-        仮定の窓の下見) は進めない。境界は一方向で取り消せないので、実際には
-        送らない列でそれを確定させない (2026-09-05 四巡目 #6)。
+        ``model_key`` はこの窓を届ける Session の実行 model。組成は読み取り専用
+        (2026-09-09 に知覚の合計上限を廃止して以降、台帳へ書く経路が無い) なので、
+        測るだけの呼び出しと実際に送る呼び出しの区別は要らない。
 
         取得できない環境・失敗時は空リスト = 知覚ぶん 0 (従来値へ縮退)。WARN は
         組成側が出す。``raise_on_error=True`` は失敗を例外で伝える — 透明性の
@@ -186,7 +177,6 @@ class SessionLifecycle:
             return list_presented_perception_blocks(
                 self.runtime, persona, list(presented), anchor_id=anchor_id,
                 raise_on_error=raise_on_error, model_key=model_key,
-                advance_cutoff=advance_cutoff,
             )
         except Exception:
             if raise_on_error:
@@ -204,18 +194,16 @@ class SessionLifecycle:
         *,
         raise_on_error: bool = False,
         model_key: Optional[str] = None,
-        advance_cutoff: bool = True,
     ) -> List[Dict[str, Any]]:
         """保存行 + 知覚ブロックを時刻順にマージした「送る中身」の列。
 
         水位の勘定 (:func:`~sea.eviction_plan.message_chars`) と退場計画
         (:func:`~sea.eviction_plan.plan_eviction`) の入力はどちらもこれ。
-        ``model_key`` は実行 model (知覚の水位の主語)。``advance_cutoff=False``
-        は測るだけ (:meth:`perception_blocks_for` を参照)。
+        ``model_key`` は実行 model。
         """
         blocks = self.perception_blocks_for(
             persona, presented, anchor_id, raise_on_error=raise_on_error,
-            model_key=model_key, advance_cutoff=advance_cutoff,
+            model_key=model_key,
         )
         if not blocks:
             return list(presented)
@@ -228,20 +216,18 @@ class SessionLifecycle:
         *,
         raise_on_error: bool = False,
         model_key: Optional[str] = None,
-        advance_cutoff: bool = True,
     ) -> int:
         """この窓で実際に送られる文字数 (保存行 + 知覚ブロック)。
 
         適用範囲は**履歴窓**: 時刻アンカー (49 字)・添付注記などの微小な整形と、
         履歴の外のセクション (head / realtime) は含まない — 水位が束ねるのは
         履歴窓で、逸脱は issue (context_accounting_excludes_injected_rows.md)
-        に既知として記録済み。``model_key`` は実行 model (知覚の水位の主語)。
-        ``advance_cutoff=False`` は測るだけ (:meth:`perception_blocks_for`)。
+        に既知として記録済み。``model_key`` は実行 model。
         """
         return message_chars(
             self.presented_with_perceptions(
                 persona, presented, anchor_id, raise_on_error=raise_on_error,
-                model_key=model_key, advance_cutoff=advance_cutoff,
+                model_key=model_key,
             )
         )
 
@@ -3396,8 +3382,6 @@ class SessionLifecycle:
             plan = self._plan_window_refill(
                 persona, model_key, anchor_id, watermarks,
                 raise_on_error=raise_on_error,
-                # 仮定の窓の下見 — 行も知覚の下ろし境界も一切書かない。
-                advance_cutoff=False,
             )
         except Exception:
             if raise_on_error:
@@ -3423,7 +3407,6 @@ class SessionLifecycle:
         *,
         raise_on_error: bool = False,
         strict: bool = False,
-        advance_cutoff: bool = True,
     ) -> Optional[Dict[str, Any]]:
         """§15 読み戻しの計画 (読みだけ — 行は触らない)。
 
@@ -3741,13 +3724,9 @@ class SessionLifecycle:
         # 3. 仕上げの検算は一度だけ: 実際に送る合計 (知覚込み) を上限と比べ、
         # 超えていても開いた結果は保つ (2026-09-05 裁定 — 記憶を開き直さない
         # くらいなら超過を受け入れる。始末は次の Pulse の非常畳みの仕事)。
-        # 仕上げの検算が知覚の下ろし境界を進めてよいのは、この計画が実際に
-        # 書き戻される回だけ (maybe_run_window_refill)。プレビュー
-        # (preview_refilled_history) は「読み戻したら、の仮定の窓」なので、
-        # 送られない列で一方向の境界を確定させない (advance_cutoff=False)。
         final_total = self.presented_chars(
             persona, presented, base_anchor_id, raise_on_error=raise_on_error,
-            model_key=model_key, advance_cutoff=advance_cutoff,
+            model_key=model_key,
         )
         if watermarks.high is not None and final_total > watermarks.high:
             LOGGER.warning(

@@ -1,12 +1,13 @@
-"""水位の全体既定 (2026-09-03、2026-09-05 に知覚も同居) — 三層解決・API・移行のテスト。
+"""水位の全体既定 (2026-09-03) — 三層解決・プリセット・API・移行のテスト。
 
-三層は 組み込み既定 < 全体設定 (user_settings.{METABOLISM,PERCEPTION}_*_CHARS) <
-モデル定義。docs/concepts/metabolism.md。旧三水位の低水位 (`metabolism_low_chars`) は
-2026-09-04 に廃止 — 残っているキーは黙って無視される (データ互換)。
+三層は 組み込み既定 < 全体設定 (user_settings.METABOLISM_*_CHARS) < モデル定義。
+docs/concepts/metabolism.md。廃止済みのキー (`metabolism_low_chars` 2026-09-04 /
+`perception_*_chars` 2026-09-09) は黙って無視される (データ互換)。
 
-保存時検査 (2026-09-05) が二族をまたぐ (整理を始める量 − 残す量 > 知覚の上限 +
-余裕) ので、ここの数字は組み込みの知覚上限 6万 + 余裕 1万 = 7万 より差が大きい組を
-選んである。検査そのもののテストは test_watermark_headroom_validation.py。
+2026-09-09 にしきい値は一系統 (残す量 / 上限) になり、組み込み既定は 2万 / 6万へ
+下がった (docs/intent/presented_context_reduction.md 設計 3)。保存時検査も型と順序
+だけになったので、ここの数字は「残す量 ≤ 上限」を満たすだけでよい。検査そのものの
+テストは test_model_watermark_validation.py。
 """
 from __future__ import annotations
 
@@ -20,8 +21,7 @@ from saiverse import model_configs
 from saiverse.model_configs import (
     BUILTIN_METABOLISM_HIGH_CHARS,
     BUILTIN_METABOLISM_TARGET_CHARS,
-    BUILTIN_PERCEPTION_HIGH_CHARS,
-    BUILTIN_PERCEPTION_TARGET_CHARS,
+    METABOLISM_PRESETS,
     get_effective_watermark_defaults,
     get_global_watermark_defaults,
     get_metabolism_high_chars,
@@ -42,9 +42,7 @@ def isolated_globals(monkeypatch: pytest.MonkeyPatch):
     全体既定の保存が「既存モデルと矛盾する」で弾かれてテストが環境依存になるため、
     表ごと差し替える (config.py は関数内 import で毎回モジュール属性を引くので効く)。
     MODEL_EXPLICIT には廃止済みの metabolism_low_chars を残してある — 旧モデル
-    JSON との互換 (黙って無視) の検証を兼ねる。その水位は保存時検査 (差 > 知覚の
-    上限 + 余裕 = 7万) を満たす組にしてある — 満たさないと、この表が入っている
-    かぎり全体既定の PUT が「既存モデルと矛盾する」で全部弾かれる。
+    JSON との互換 (黙って無視) の検証を兼ねる。
     """
     saved = get_global_watermark_defaults()
     set_global_watermark_defaults({})
@@ -111,109 +109,74 @@ def test_set_ignores_invalid_values(isolated_globals):
     assert get_global_watermark_defaults() == {
         "metabolism_target_chars": None,
         "metabolism_high_chars": None,
-        "perception_target_chars": None,
-        "perception_high_chars": None,
     }
     assert "unrelated" not in model_configs._current_global_defaults()
     assert "metabolism_low_chars" not in model_configs._current_global_defaults()
+
+
+def test_set_ignores_obsolete_perception_keys(isolated_globals):
+    """旧 DB / 旧クライアントの知覚の二水位が混ざっても黙って落とす (2026-09-09 廃止)。"""
+    set_global_watermark_defaults({
+        "metabolism_target_chars": 30_000,
+        "perception_target_chars": 12_000,
+        "perception_high_chars": 20_000,
+    })
+    assert get_global_watermark_defaults() == {
+        "metabolism_target_chars": 30_000,
+        "metabolism_high_chars": None,
+    }
+    assert "perception_high_chars" not in model_configs._current_global_defaults()
 
 
 def test_effective_defaults_composition(isolated_globals):
     assert get_effective_watermark_defaults() == {
         "metabolism_target_chars": BUILTIN_METABOLISM_TARGET_CHARS,
         "metabolism_high_chars": BUILTIN_METABOLISM_HIGH_CHARS,
-        "perception_target_chars": BUILTIN_PERCEPTION_TARGET_CHARS,
-        "perception_high_chars": BUILTIN_PERCEPTION_HIGH_CHARS,
     }
     set_global_watermark_defaults({"metabolism_target_chars": 30_000})
     assert get_effective_watermark_defaults() == {
         "metabolism_target_chars": 30_000,
         "metabolism_high_chars": BUILTIN_METABOLISM_HIGH_CHARS,
-        "perception_target_chars": BUILTIN_PERCEPTION_TARGET_CHARS,
-        "perception_high_chars": BUILTIN_PERCEPTION_HIGH_CHARS,
     }
 
 
-# ── 知覚の二水位も同じ三層で解ける (2026-09-05) ─────────────────
-
-
-def test_perception_builtin_when_nothing_set(isolated_globals):
-    assert model_configs.resolve_perception_watermarks(MODEL_NO_KEYS) == (
-        BUILTIN_PERCEPTION_TARGET_CHARS, BUILTIN_PERCEPTION_HIGH_CHARS,
-    )
-
-
-def test_perception_global_changes_model_without_keys(isolated_globals):
-    set_global_watermark_defaults({
-        "perception_target_chars": 12_000,
-        "perception_high_chars": 20_000,
-    })
-    assert model_configs.resolve_perception_watermarks(MODEL_NO_KEYS) == (12_000, 20_000)
-
-
-def test_perception_model_definition_wins_over_global(isolated_globals, monkeypatch):
-    """三層の優先順位: モデル定義 > 全体設定 > 組み込み。"""
-    model_key = "wm-test-perception-model"
+def test_obsolete_perception_keys_in_model_config_are_ignored(isolated_globals, monkeypatch):
+    """モデル定義に残る perception_*_chars は解決に一切現れない (2026-09-09 廃止)。"""
+    model_key = "wm-test-legacy-perception"
     monkeypatch.setitem(
         model_configs.MODEL_CONFIGS, model_key,
-        {"model": "x", "perception_high_chars": 33_000},
+        {
+            "model": "x", "metabolism_target_chars": 30_000,
+            "metabolism_high_chars": 90_000,
+            "perception_target_chars": 12_000, "perception_high_chars": 20_000,
+        },
     )
-    set_global_watermark_defaults({
-        "perception_target_chars": 12_000,
-        "perception_high_chars": 20_000,
-    })
-    # high はモデル定義、target はモデルに無いので全体設定
-    assert model_configs.resolve_perception_watermarks(model_key) == (12_000, 33_000)
+    assert model_configs.resolve_metabolism_watermarks(model_key) == (30_000, 90_000)
+    assert not hasattr(model_configs, "resolve_perception_watermarks")
 
 
-def test_perception_partial_global_fills_only_its_key(isolated_globals):
-    set_global_watermark_defaults({"perception_high_chars": 20_000})
-    target, high = model_configs.resolve_perception_watermarks(MODEL_NO_KEYS)
-    assert high == 20_000
-    # 組み込みの下の水位 (4万) が上の水位 (2万) を超えるので、下を上まで寄せて受ける
-    assert target == 20_000
+# ── プリセット (2026-09-09 まはー裁定) ───────────────────────────
 
 
-def test_perception_model_null_opts_out_of_dropping(isolated_globals, monkeypatch):
-    model_key = "wm-test-perception-null"
-    monkeypatch.setitem(
-        model_configs.MODEL_CONFIGS, model_key,
-        {"model": "x", "perception_high_chars": None},
-    )
-    set_global_watermark_defaults({"perception_high_chars": 20_000})
-    assert model_configs.resolve_perception_watermarks(model_key) == (
-        BUILTIN_PERCEPTION_TARGET_CHARS, None,
-    )
+def test_presets_are_three_steps_with_one_to_three_ratio():
+    """多い / デフォルト / 少ない の三段。どの段も 残す量 : 上限 = 1 : 3。"""
+    assert [p["id"] for p in METABOLISM_PRESETS] == ["large", "default", "small"]
+    assert [p["label"] for p in METABOLISM_PRESETS] == ["多い", "デフォルト", "少ない"]
+    for preset in METABOLISM_PRESETS:
+        assert preset["metabolism_high_chars"] == preset["metabolism_target_chars"] * 3
 
 
-def test_perception_null_target_falls_back_to_effective_default(isolated_globals, monkeypatch):
-    """下の水位に「持たない」は無い — null は実効既定 (全体設定があればそれ) へ戻る。"""
-    model_key = "wm-test-perception-null-target"
-    monkeypatch.setitem(
-        model_configs.MODEL_CONFIGS, model_key,
-        {"model": "x", "perception_target_chars": None},
-    )
-    set_global_watermark_defaults({
-        "perception_target_chars": 12_000, "perception_high_chars": 20_000,
-    })
-    assert model_configs.resolve_perception_watermarks(model_key) == (12_000, 20_000)
+def test_default_preset_is_the_builtin_default():
+    """「デフォルト」の段と組み込み既定は同じ数字 — 二枚目の真実を作らない。"""
+    default = next(p for p in METABOLISM_PRESETS if p["id"] == "default")
+    assert default["metabolism_target_chars"] == BUILTIN_METABOLISM_TARGET_CHARS
+    assert default["metabolism_high_chars"] == BUILTIN_METABOLISM_HIGH_CHARS
 
 
-def test_perception_resolve_reads_global_mapping_exactly_once(isolated_globals, monkeypatch):
-    original = model_configs._current_global_defaults
-    calls: list[int] = []
-
-    def _counting():
-        calls.append(1)
-        return original()
-
-    monkeypatch.setattr(model_configs, "_current_global_defaults", _counting)
-    set_global_watermark_defaults({
-        "perception_target_chars": 12_000, "perception_high_chars": 20_000,
-    })
-    calls.clear()
-    assert model_configs.resolve_perception_watermarks(MODEL_NO_KEYS) == (12_000, 20_000)
-    assert len(calls) == 1
+def test_builtin_defaults_are_the_decided_numbers():
+    """2026-09-09 まはー裁定の数字 (2万 / 6万) を固定する。"""
+    assert BUILTIN_METABOLISM_TARGET_CHARS == 20_000
+    assert BUILTIN_METABOLISM_HIGH_CHARS == 60_000
 
 
 def test_session_lifecycle_watermarks_follow_global(isolated_globals):
@@ -235,7 +198,7 @@ def test_session_lifecycle_watermarks_follow_global(isolated_globals):
 #
 # 保存 API の順序検証 (残す量 ≤ 上限) は既に保存済みのデータには効かない。
 # 例: 旧既定 (上限 20万) の下で target=15万 だけ書いた model JSON は、新既定
-# (上限 12万) と合成されると「残す量 15万 > 上限 12万」に逆転する。逆転のまま
+# (上限 6万) と合成されると「残す量 15万 > 上限 6万」に逆転する。逆転のまま
 # 走ると退場計画が空になり「知覚の供給過多」の間違った旗が立つので、実行時の
 # 解決点 (SessionLifecycle.get_metabolism_watermarks) が上限を残す量まで
 # 引き上げ、WARNING を (persona, model) ごと 1 度だけ出す。
@@ -244,7 +207,7 @@ def test_session_lifecycle_watermarks_follow_global(isolated_globals):
 def test_inverted_target_only_model_clamps_high_and_warns_once(
     isolated_globals, monkeypatch, caplog,
 ):
-    """target=15万 だけの model は組み込み上限 12万 と逆転 → high を 15万 に引き上げ。"""
+    """target=15万 だけの model は組み込み上限 6万 と逆転 → high を 15万 に引き上げ。"""
     from types import SimpleNamespace
 
     from sea.session_lifecycle import SessionLifecycle
@@ -264,7 +227,7 @@ def test_inverted_target_only_model_clamps_high_and_warns_once(
     assert len(warnings) == 1
     message = warnings[0].getMessage()
     assert model_key in message
-    assert "150000" in message and "120000" in message
+    assert "150000" in message and str(BUILTIN_METABOLISM_HIGH_CHARS) in message
 
     # 二度目の呼び出しは同じ実効値のまま、WARNING を重ねない
     caplog.clear()
@@ -277,7 +240,7 @@ def test_inverted_target_only_model_clamps_high_and_warns_once(
 def test_inverted_high_only_model_clamps_to_builtin_target(
     isolated_globals, monkeypatch, caplog,
 ):
-    """high=3万 だけの model は組み込み残す量 4万 と逆転 → high を 4万 に引き上げ。"""
+    """high=1万5千 だけの model は組み込み残す量 2万 と逆転 → high を 2万 に引き上げ。"""
     from types import SimpleNamespace
 
     from sea.session_lifecycle import SessionLifecycle
@@ -285,7 +248,7 @@ def test_inverted_high_only_model_clamps_to_builtin_target(
     model_key = "wm-test-inverted-high"
     monkeypatch.setitem(
         model_configs.MODEL_CONFIGS, model_key,
-        {"model": "x", "metabolism_high_chars": 30_000},
+        {"model": "x", "metabolism_high_chars": 15_000},
     )
     lifecycle = SessionLifecycle(SimpleNamespace(), None)
     persona = SimpleNamespace(persona_id="p1", model=model_key)
@@ -405,30 +368,47 @@ def api_db(monkeypatch: pytest.MonkeyPatch, isolated_globals):
     engine.dispose()
 
 
-def _short(target, high, perception_target, perception_high):
-    return {
-        "target": target, "high": high,
-        "perception_target": perception_target, "perception_high": perception_high,
-    }
+def _short(target, high):
+    return {"target": target, "high": high}
+
+
+def _preset_payload():
+    return [
+        {
+            "id": preset["id"], "label": preset["label"],
+            "target": preset["metabolism_target_chars"],
+            "high": preset["metabolism_high_chars"],
+        }
+        for preset in METABOLISM_PRESETS
+    ]
 
 
 def test_get_payload_shape(api_db):
     from api.routes import config
-    from saiverse.model_configs import WATERMARK_HEADROOM_CHARS
 
     payload = config.get_metabolism_defaults()
     assert payload == {
-        "global": _short(None, None, None, None),
+        "global": _short(None, None),
         "effective": _short(
             BUILTIN_METABOLISM_TARGET_CHARS, BUILTIN_METABOLISM_HIGH_CHARS,
-            BUILTIN_PERCEPTION_TARGET_CHARS, BUILTIN_PERCEPTION_HIGH_CHARS,
         ),
         "builtin": _short(
             BUILTIN_METABOLISM_TARGET_CHARS, BUILTIN_METABOLISM_HIGH_CHARS,
-            BUILTIN_PERCEPTION_TARGET_CHARS, BUILTIN_PERCEPTION_HIGH_CHARS,
         ),
-        "headroom": WATERMARK_HEADROOM_CHARS,
+        "presets": _preset_payload(),
     }
+
+
+def test_get_payload_carries_the_presets_for_the_screen(api_db):
+    """画面はプリセットの数字を書き写さず、この応答から受け取る。"""
+    from api.routes import config
+
+    presets = config.get_metabolism_defaults()["presets"]
+    assert [p["id"] for p in presets] == ["large", "default", "small"]
+    default = next(p for p in presets if p["id"] == "default")
+    assert (default["target"], default["high"]) == (
+        BUILTIN_METABOLISM_TARGET_CHARS, BUILTIN_METABOLISM_HIGH_CHARS,
+    )
 
 
 def test_put_round_trip_persists_and_applies(api_db):
@@ -439,10 +419,8 @@ def test_put_round_trip_persists_and_applies(api_db):
         metabolism_target_chars=30_000,
         metabolism_high_chars=150_000,
     ))
-    assert payload["global"] == _short(30_000, 150_000, None, None)
-    assert payload["effective"] == _short(
-        30_000, 150_000, BUILTIN_PERCEPTION_TARGET_CHARS, BUILTIN_PERCEPTION_HIGH_CHARS,
-    )
+    assert payload["global"] == _short(30_000, 150_000)
+    assert payload["effective"] == _short(30_000, 150_000)
     assert payload["builtin"]["high"] == BUILTIN_METABOLISM_HIGH_CHARS
 
     # DB 行 (USERID=1 を作って書く)
@@ -455,32 +433,18 @@ def test_put_round_trip_persists_and_applies(api_db):
     assert config.get_metabolism_defaults() == payload
 
 
-def test_put_round_trip_of_perception_watermarks(api_db):
-    """知覚の二水位も同じ入口で保存され、同じ経路で解決に効く (2026-09-05)。"""
-    from api.routes import config
-    from database.models import UserSettings
-
-    payload = config.put_metabolism_defaults(config.MetabolismDefaultsRequest(
-        perception_target_chars=12_000, perception_high_chars=20_000,
-    ))
-    assert payload["global"] == _short(None, None, 12_000, 20_000)
-    assert payload["effective"]["perception_high"] == 20_000
-    with api_db() as db:
-        row = db.query(UserSettings).filter(UserSettings.USERID == 1).one()
-        assert (row.PERCEPTION_TARGET_CHARS, row.PERCEPTION_HIGH_CHARS) == (12_000, 20_000)
-    assert model_configs.resolve_perception_watermarks(MODEL_NO_KEYS) == (12_000, 20_000)
-
-
-def test_put_both_families_in_one_request(api_db):
-    """二族を一度に動かせる — 片方ずつだと保存時検査を通れない組み合わせがある。"""
+def test_put_obsolete_perception_keys_are_silently_dropped(api_db):
+    """旧クライアントが知覚の二水位を送っても pydantic が黙って落とす (2026-09-09 廃止)。"""
     from api.routes import config
 
-    # 差 3万 は組み込みの知覚上限 (6万) では通らないが、知覚も一緒に 1万 へ下げれば通る
-    payload = config.put_metabolism_defaults(config.MetabolismDefaultsRequest(
-        metabolism_target_chars=30_000, metabolism_high_chars=60_000,
-        perception_target_chars=8_000, perception_high_chars=10_000,
-    ))
-    assert payload["global"] == _short(30_000, 60_000, 8_000, 10_000)
+    req = config.MetabolismDefaultsRequest.model_validate({
+        "metabolism_target_chars": 30_000,
+        "perception_target_chars": 12_000,
+        "perception_high_chars": 20_000,
+    })
+    payload = config.put_metabolism_defaults(req)
+    assert payload["global"] == _short(30_000, None)
+    assert "perception_high" not in payload["global"]
 
 
 def test_put_partial_touches_only_given_keys(api_db):
@@ -492,7 +456,7 @@ def test_put_partial_touches_only_given_keys(api_db):
     payload = config.put_metabolism_defaults(
         config.MetabolismDefaultsRequest(metabolism_high_chars=180_000),
     )
-    assert payload["global"] == _short(30_000, 180_000, None, None)
+    assert payload["global"] == _short(30_000, 180_000)
 
 
 def test_put_null_clears_back_to_builtin(api_db):
@@ -505,7 +469,7 @@ def test_put_null_clears_back_to_builtin(api_db):
     # 明示 null (= exclude_unset で「渡された None」として区別される)
     req = config.MetabolismDefaultsRequest.model_validate({"metabolism_high_chars": None})
     payload = config.put_metabolism_defaults(req)
-    assert payload["global"] == _short(30_000, None, None, None)
+    assert payload["global"] == _short(30_000, None)
     assert payload["effective"]["high"] == BUILTIN_METABOLISM_HIGH_CHARS
     with api_db() as db:
         row = db.query(UserSettings).filter(UserSettings.USERID == 1).one()
@@ -523,7 +487,7 @@ def test_put_obsolete_low_key_is_silently_dropped(api_db):
         "metabolism_target_chars": 30_000,
     })
     payload = config.put_metabolism_defaults(req)
-    assert payload["global"] == _short(30_000, None, None, None)
+    assert payload["global"] == _short(30_000, None)
 
 
 def test_put_out_of_order_is_400_and_leaves_state(api_db):
@@ -536,7 +500,7 @@ def test_put_out_of_order_is_400_and_leaves_state(api_db):
     with pytest.raises(HTTPException) as exc:
         config.put_metabolism_defaults(config.MetabolismDefaultsRequest(metabolism_high_chars=80_000))
     assert exc.value.status_code == 400
-    assert config.get_metabolism_defaults()["global"] == _short(100_000, 200_000, None, None)
+    assert config.get_metabolism_defaults()["global"] == _short(100_000, 200_000)
     assert get_metabolism_high_chars(MODEL_NO_KEYS) == 200_000
 
 
@@ -579,7 +543,7 @@ def test_put_that_breaks_a_partially_overriding_model_is_400(api_db, monkeypatch
     config.put_metabolism_defaults(config.MetabolismDefaultsRequest(
         metabolism_high_chars=400_000,
     ))
-    # high を既定 (組み込み 12万) に戻す → そのモデルは target 25万 > high 12万 で壊れる。
+    # high を既定 (組み込み 6万) に戻す → そのモデルは target 25万 > high 6万 で壊れる。
     req = config.MetabolismDefaultsRequest.model_validate({"metabolism_high_chars": None})
     with pytest.raises(HTTPException) as exc:
         config.put_metabolism_defaults(req)
@@ -587,8 +551,8 @@ def test_put_that_breaks_a_partially_overriding_model_is_400(api_db, monkeypatch
     assert MODEL_PARTIAL_TARGET in exc.value.detail
     assert "モデル側" in exc.value.detail
     # 失敗した PUT は何も変えない (DB もキャッシュも)
-    assert config.get_metabolism_defaults()["global"] == _short(None, 400_000, None, None)
-    # high を下げても順序と余裕が保たれる分には通る
+    assert config.get_metabolism_defaults()["global"] == _short(None, 400_000)
+    # high を下げても順序が保たれる分には通る
     payload = config.put_metabolism_defaults(
         config.MetabolismDefaultsRequest(metabolism_high_chars=330_000),
     )
@@ -621,7 +585,7 @@ def test_model_with_null_watermark_never_conflicts(api_db):
     payload = config.put_metabolism_defaults(config.MetabolismDefaultsRequest(
         metabolism_target_chars=50_000, metabolism_high_chars=150_000,
     ))
-    assert payload["global"] == _short(50_000, 150_000, None, None)
+    assert payload["global"] == _short(50_000, 150_000)
 
 
 # ── F2: PUT は直列化し、合成の土台は DB 行 (Codex 指摘 2026-09-03) ──────────
@@ -639,8 +603,6 @@ def test_sequential_single_field_puts_both_survive(api_db):
     assert get_global_watermark_defaults() == {
         "metabolism_target_chars": 30_000,
         "metabolism_high_chars": 150_000,
-        "perception_target_chars": None,
-        "perception_high_chars": None,
     }
 
 
@@ -657,7 +619,7 @@ def test_merge_base_is_db_row_not_cache(api_db):
     payload = config.put_metabolism_defaults(
         config.MetabolismDefaultsRequest(metabolism_high_chars=180_000),
     )
-    assert payload["global"] == _short(50_000, 180_000, None, None)
+    assert payload["global"] == _short(50_000, 180_000)
     with api_db() as db:
         row = db.query(UserSettings).filter(UserSettings.USERID == 1).one()
         assert (row.METABOLISM_TARGET_CHARS, row.METABOLISM_HIGH_CHARS) == (50_000, 180_000)
@@ -670,8 +632,8 @@ def test_concurrent_single_field_puts_do_not_lose_updates(api_db):
     from api.routes import config
     from database.models import UserSettings
 
-    # 各値は単独でも (組み込み既定と組んでも) 保存時検査を通る:
-    # 30k なら差 = 12万 − 3万 = 9万 > 7万、150k なら差 = 15万 − 4万 = 11万 > 7万。
+    # 各値は単独でも (組み込み既定と組んでも) 順序検査を通る:
+    # target=3万 なら上限は組み込み 6万、high=15万 なら残す量は組み込み 2万。
     requests = [
         config.MetabolismDefaultsRequest(metabolism_target_chars=30_000),
         config.MetabolismDefaultsRequest(metabolism_high_chars=150_000),
@@ -698,8 +660,6 @@ def test_concurrent_single_field_puts_do_not_lose_updates(api_db):
     assert get_global_watermark_defaults() == {
         "metabolism_target_chars": 30_000,
         "metabolism_high_chars": 150_000,
-        "perception_target_chars": None,
-        "perception_high_chars": None,
     }
 
 
@@ -774,10 +734,7 @@ def test_additive_migration_adds_columns_and_is_idempotent(tmp_path):
     db_path = tmp_path / "old.db"
     engine = create_engine(f"sqlite:///{db_path}")
     Base.metadata.create_all(engine)
-    watermark_columns = (
-        "METABOLISM_TARGET_CHARS", "METABOLISM_HIGH_CHARS",
-        "PERCEPTION_TARGET_CHARS", "PERCEPTION_HIGH_CHARS",
-    )
+    watermark_columns = ("METABOLISM_TARGET_CHARS", "METABOLISM_HIGH_CHARS")
     with engine.begin() as conn:
         for col in watermark_columns:
             conn.execute(text(f'ALTER TABLE user_settings DROP COLUMN "{col}"'))
@@ -798,7 +755,6 @@ def test_additive_migration_adds_columns_and_is_idempotent(tmp_path):
     with sessionmaker(bind=engine)() as db:
         row = db.query(UserSettings).filter(UserSettings.USERID == 1).one()
         assert row.METABOLISM_HIGH_CHARS is None  # 既存行は NULL = 未設定
-        assert row.PERCEPTION_HIGH_CHARS is None
     engine.dispose()
 
     # 二度目: 差分なし → True のまま、壊れない
@@ -827,3 +783,53 @@ def test_obsolete_low_column_triggers_full_rewrite_migration(tmp_path):
 
     assert needs_migration(str(db_path))
     assert not try_additive_migration(str(db_path))
+
+
+def test_obsolete_perception_columns_are_dropped_in_place(tmp_path):
+    """旧 PERCEPTION_*_CHARS 列は KNOWN_COLUMN_DROPS が ALTER で落とす (2026-09-09)。
+
+    列を消すだけの差分で全書換 (ファイル move) に落ちると、生きた DB では
+    Windows のファイルロックを踏む。落とす列を名指ししてあるので、追加系の
+    パスがその場で解消し、他の値 (既に保存されている残す量 / 上限) は残る。
+    """
+    from database.migrate import needs_migration, try_additive_migration
+    from database.models import Base
+
+    db_path = tmp_path / "with_perception.db"
+    engine = create_engine(f"sqlite:///{db_path}")
+    Base.metadata.create_all(engine)
+    with engine.begin() as conn:
+        for col in ("PERCEPTION_TARGET_CHARS", "PERCEPTION_HIGH_CHARS"):
+            conn.execute(text(
+                f'ALTER TABLE user_settings ADD COLUMN "{col}" INTEGER'
+            ))
+        conn.execute(text(
+            "INSERT INTO user (USERID, PASSWORD, USERNAME, LOGGED_IN) "
+            "VALUES (1, 'p', 'u', 0)"
+        ))
+        conn.execute(text(
+            "INSERT INTO user_settings "
+            "(USERID, TUTORIAL_COMPLETED, LAST_TUTORIAL_VERSION, "
+            "METABOLISM_TARGET_CHARS, PERCEPTION_HIGH_CHARS) "
+            "VALUES (1, 0, 1, 30000, 60000)"
+        ))
+    engine.dispose()
+
+    assert needs_migration(str(db_path))
+    assert try_additive_migration(str(db_path))  # 全書換に落ちない
+    assert not needs_migration(str(db_path))
+
+    engine = create_engine(f"sqlite:///{db_path}")
+    cols = {c["name"] for c in inspect(engine).get_columns("user_settings")}
+    assert "PERCEPTION_HIGH_CHARS" not in cols
+    assert "PERCEPTION_TARGET_CHARS" not in cols
+    with engine.begin() as conn:
+        kept = conn.execute(text(
+            "SELECT METABOLISM_TARGET_CHARS FROM user_settings WHERE USERID = 1"
+        )).scalar()
+    assert kept == 30_000  # 残す量は無傷
+    engine.dispose()
+
+    # 二度目は何もすることが無い (冪等)
+    assert try_additive_migration(str(db_path))
+    assert not needs_migration(str(db_path))
