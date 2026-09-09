@@ -4632,6 +4632,22 @@ class SessionLifecycle:
             # 入口の門 (行 vs 残す量) で弾かれるのが普通だが、印戻し・恒久欠落
             # fold の破棄でロック内の窓が痩せた回はここまで来る。LLM は呼ばずに
             # 引き返す (警告はペルソナごと 1 度)。
+            #
+            # ただし引き返す前に**提示の節約だけは走らせる** — 会話が畳めない
+            # のに合計が上限を超えている状態こそ、会話以外 (操作通知・いない
+            # 部屋の様子) の縮みが一番効く場面だから
+            # (docs/intent/presented_context_reduction.md 設計 1/2)。並びは
+            # 印戻しの早期完了と同じ最小の二手で、**順序は入れ替えられない**:
+            # 操作通知は head が今の状態を描き直すまで唯一の情報源なので、
+            # 先に下ろすと「通知も head も古い」一拍ができる。
+            try:
+                from saiverse.dynamic_state import DynamicStateManager
+                DynamicStateManager.on_metabolism(
+                    persona, self.manager, model_key=model_key,
+                )
+            except Exception:
+                LOGGER.exception("[dynamic_state] on_metabolism failed")
+            self._reduce_presented_perceptions(persona)
             if not self._note_perception_over_budget(
                 persona, plan.stored_chars, plan.total_chars, watermarks,
             ):
@@ -4946,6 +4962,14 @@ class SessionLifecycle:
         (:func:`sea.runtime_context.list_presented_perception_blocks`) がそれを
         読むだけになる。だから提示が変わるのはこの瞬間だけで、移動や発言では
         変わらない (プロンプトキャッシュの前方一致の保護)。
+
+        **呼ばれる瞬間は 3 つ**で、どれも直前に head を描き直している
+        (:meth:`_run_metabolism_locked` の中だけ、順序は head → 縮み):
+
+        1. 退場まで進んだ回 (anchor 前進の直後)
+        2. 印戻しだけで残す量に収まった回 (編纂なしの早期完了)
+        3. 会話が畳めない回 (``plan.is_empty`` — 会話の行は残す量以下なのに
+           合計が上限超え)。会話以外だけが大きい状態で、縮みが一番効く場面
 
         **発火の単位はペルソナ全体** — head と提示は (persona, model) ごとだが、
         縮みの記録は知覚を下ろす境界 (§10.9) と同じくペルソナに一つ。つまり

@@ -126,15 +126,28 @@ KNOWN_COLUMN_DROPS = {
 def apply_known_column_drops(db_path: str) -> None:
     """KNOWN_COLUMN_DROPS の列を ALTER TABLE DROP COLUMN で落とす (冪等)。
 
-    列が既に無ければ何もしない。落とせなかった場合は警告だけ出して続行する —
-    差分は残るので、呼び出し側 (try_additive_migration) が全書換へ切り替える。
+    列が既に無ければ何もしない。モデル側に同名の列が残っている列は触らない
+    (誤記で現役の列を落とさない)。
 
-    モデル側に同名の列が残っている表は触らない (誤記で現役の列を落とさない)。
+    **全部落ちるか、一つも落ちないか**の二択にする — 落とす列は 1 回の
+    トランザクションにまとめ、途中で失敗したら全部戻す。列ごとに commit すると
+    「PERCEPTION_TARGET_CHARS だけ消えて PERCEPTION_HIGH_CHARS が残る」DB が
+    生まれ、呼び出し側 (try_additive_migration) が「False なら DB を変えない」
+    と言っている契約とも食い違う (ローカルレビュー指摘 2026-09-10)。
+    落とせなかった場合は警告だけ出して続行する — 差分は残るので、従来どおり
+    全書換が受ける。
+
+    DDL は SQLAlchemy のトランザクション境界に乗らない (pysqlite は DML まで
+    BEGIN を出さないので、DDL は autocommit で走って rollback で戻らない) ため、
+    ここだけは生の sqlite3 接続で BEGIN / COMMIT / ROLLBACK を自分で出す。
     """
+    import sqlite3
+
     engine = create_engine(f"sqlite:///{db_path}")
     try:
         insp = inspect(engine)
         model_tables = {t.name: t for t in Base.metadata.sorted_tables}
+        planned = []  # [(table_name, col), ...]
         for table_name, columns in KNOWN_COLUMN_DROPS.items():
             if not insp.has_table(table_name):
                 continue
@@ -151,19 +164,39 @@ def apply_known_column_drops(db_path: str) -> None:
                         table_name, col,
                     )
                     continue
-                try:
-                    with engine.begin() as conn:
-                        conn.execute(text(
-                            f'ALTER TABLE "{table_name}" DROP COLUMN "{col}"'
-                        ))
-                    logging.info("廃止列を削除しました: %s.%s", table_name, col)
-                except Exception as e:
-                    logging.warning(
-                        "廃止列 %s.%s の削除に失敗しました (全書換で落とします): %s",
-                        table_name, col, e,
-                    )
+                planned.append((table_name, col))
     finally:
         engine.dispose()
+
+    if not planned:
+        return
+
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.isolation_level = None  # トランザクション境界を自分で出す
+        try:
+            conn.execute("BEGIN")
+            for table_name, col in planned:
+                conn.execute(
+                    f'ALTER TABLE "{table_name}" DROP COLUMN "{col}"'
+                )
+            conn.execute("COMMIT")
+        except Exception as e:
+            try:
+                conn.execute("ROLLBACK")
+            except Exception:
+                # 戻すものが無い (BEGIN 自体が通らなかった) 場合もここに来る。
+                # 元の失敗を握り潰さないよう、ここでは黙って続ける。
+                pass
+            logging.warning(
+                "廃止列の削除に失敗しました。%d 列すべてを元に戻します "
+                "(全書換で落とします): %s", len(planned), e,
+            )
+            return
+        for table_name, col in planned:
+            logging.info("廃止列を削除しました: %s.%s", table_name, col)
+    finally:
+        conn.close()
 
 
 def apply_known_column_renames(db_path: str) -> None:
@@ -203,8 +236,17 @@ def try_additive_migration(db_path: str) -> bool:
     Returns:
         True  — 追加系のみで差分を完全に解消した (= 全書換不要)
         False — 列削除 / 型変更など破壊的差分があり全書換が必要、 または NOT NULL
-                かつ既定値が無く安全に ALTER 追加できない列がある。 この場合 DB は
-                一切変更しない (部分適用しない)。
+                かつ既定値が無く安全に ALTER 追加できない列がある。 この場合
+                **追加系の変更 (ADD COLUMN / CREATE TABLE) は一つも適用しない**
+                (追加の部分適用はしない)。
+
+    False でも DB が変わっていないとは限らない: 既知のリネーム
+    (:func:`apply_known_column_renames`) と既知の廃止列の削除
+    (:func:`apply_known_column_drops`) は差分検出の**前**に当たる。 どちらも
+    全書換パスでも同じ結果になる冪等な整地で、 リネームは全書換のデータ移行
+    (列名一致コピー) の前提そのものなので、 ここで当てておく必要がある。
+    廃止列の削除はまとめて 1 トランザクションなので、 中途半端に一部の列だけ
+    落ちた DB は残らない (2026-09-10 に文言と実装を揃えた)。
     """
     apply_known_column_renames(db_path)
     apply_known_column_drops(db_path)

@@ -234,8 +234,11 @@ def mark_presentation_reductions(conn: sqlite3.Connection) -> Dict[str, int]:
     済むのは、旧形式 (文字列 snapshot) の扱いと同じ道に合流させたため。
 
     現在地が読めない / 台帳に部屋の記録が無い回は部屋を一つも縮めない (何と
-    比べて「現在地でない」と言うのかが決まらない — 縮めない側に倒す)。読み取り
-    失敗は例外のまま送出する: 呼び出し側 (Metabolism) が丸ごと見送る。
+    比べて「現在地でない」と言うのかが決まらない — 縮めない側に倒す)。同じ
+    バッチに文面が**寸分違わず同じ**部屋が二つあり、片方が提示に残る側 (現在地
+    または旧形式) のときも縮めない — 提示の差し替えは確定文面の文字列一致で
+    位置を決めるので、残すべき方を縮める形を作らない。読み取り失敗は例外の
+    まま送出する: 呼び出し側 (Metabolism) が丸ごと見送る。
 
     Returns: ``{"notices_through": 進めた境界, "rooms_shrunk": 縮めた部屋の数,
         "batches": 記帳を書き換えたバッチの数}``。
@@ -263,17 +266,41 @@ def mark_presentation_reductions(conn: sqlite3.Connection) -> Dict[str, int]:
                 continue
             targets: List[Dict[str, Any]] = []
             survivor_paths: Set[str] = set()
+            survivor_blocks: Set[str] = set()
             for entry in entries:
-                if entry.get(SHRUNK_FLAG) or is_legacy_entry(entry):
-                    # 既に縮めた / 束として読めない (旧形式) — どちらも触らない。
+                if entry.get(SHRUNK_FLAG):
+                    continue  # 既に縮めた — 触らない (一方向)。
+                if is_legacy_entry(entry):
+                    # 束として読めない (旧形式) — 縮めないが、確定文面には
+                    # 全文のまま残るので照合の相手には数える。
+                    survivor_blocks.add(str(entry.get("block") or ""))
                     continue
                 if str(entry.get("key") or "") == current_key:
                     survivor_paths.update(
                         str(m["path"]) for m in bundle_media(entry["snapshot"])
                         if m.get("path")
                     )
+                    survivor_blocks.add(str(entry.get("block") or ""))
                     continue
                 targets.append(entry)
+            # 縮める側と残る側のブロック文面が同一なら見送る — 差し替えは
+            # 確定文面の中の**文字列一致**で位置を決めるので (_replace_block)、
+            # 同名・同内容の部屋が同じバッチに二つあると、残すべき方 (現在地)
+            # のブロックを縮めうる。曖昧なら触らない、の保守側
+            # (ローカルレビュー指摘 2026-09-10)。
+            if survivor_blocks:
+                kept_targets = []
+                for entry in targets:
+                    if str(entry.get("block") or "") in survivor_blocks:
+                        LOGGER.debug(
+                            "[presented_reduction] skipping the shrink of room "
+                            "%s in batch %s: its block text is identical to a "
+                            "room that stays in the presentation",
+                            entry.get("key"), batch.id,
+                        )
+                        continue
+                    kept_targets.append(entry)
+                targets = kept_targets
             if not targets:
                 continue
             for entry in targets:
@@ -420,7 +447,14 @@ def _notice_blocks_by_batch(
 def _reduce_rooms(
     batch: Any, text: str, media: List[Dict[str, Any]],
 ) -> Tuple[str, List[Dict[str, Any]], bool]:
-    """このバッチの「縮めた」印が付いた部屋を、短い一行と画像なしへ写す。"""
+    """このバッチの「縮めた」印が付いた部屋を、短い一行と画像なしへ写す。
+
+    **文字と絵ははぐれない** (room_state_packages §1): 画像を提示から外すのは
+    本文の差し替えに成功したエントリだけ。差し替えに失敗した回 (確定文面に
+    そのブロックが見つからない) に画像だけ外すと、本文には部屋の様子が全文で
+    残ったまま絵が消え、省略の表示も出ない — 「そこに絵は無かった」という
+    記録の嘘になる (ローカルレビュー指摘 2026-09-10)。
+    """
     from sai_memory.room_state import batch_room_states
 
     changed = False
@@ -429,17 +463,20 @@ def _reduce_rooms(
             continue
         block = entry.get("block") or ""
         replacement = entry.get(SHRUNK_BLOCK_FIELD) or ""
-        if block and replacement:
-            replaced = _replace_block(text, block, replacement)
-            if replaced is None:
-                LOGGER.warning(
-                    "[presented_reduction] the shrunk room block is not in the "
-                    "rendered text of batch %s (key=%s); leaving it as it is",
-                    batch.id, entry.get("key"),
-                )
-            else:
-                text = replaced
-                changed = True
+        replaced = (
+            _replace_block(text, block, replacement)
+            if block and replacement else None
+        )
+        if replaced is None:
+            LOGGER.warning(
+                "[presented_reduction] the shrunk room block is not in the "
+                "rendered text of batch %s (key=%s); leaving the room at full "
+                "size this round (its media stays too)",
+                batch.id, entry.get("key"),
+            )
+            continue
+        text = replaced
+        changed = True
         dropped = {str(p) for p in (entry.get(DROPPED_MEDIA_FIELD) or []) if p}
         if dropped and media:
             kept = [
@@ -448,7 +485,6 @@ def _reduce_rooms(
             ]
             if len(kept) != len(media):
                 media = kept
-                changed = True
     return text, media, changed
 
 

@@ -833,3 +833,52 @@ def test_obsolete_perception_columns_are_dropped_in_place(tmp_path):
     # 二度目は何もすることが無い (冪等)
     assert try_additive_migration(str(db_path))
     assert not needs_migration(str(db_path))
+
+
+def test_column_drops_are_all_or_nothing(tmp_path, monkeypatch):
+    """廃止列の削除は 1 トランザクション — 途中で失敗したら部分適用を残さない。
+
+    列ごとに commit すると「片方だけ消えた」DB が生まれ、呼び出し側
+    (try_additive_migration) の「追加系は部分適用しない」という契約とも食い違う
+    (ローカルレビュー指摘 2026-09-10)。SQLite は索引の張られた列を DROP できない
+    ので、二列目にそれを置いて失敗を作る。
+    """
+    from database import migrate
+    from database.models import Base
+
+    db_path = tmp_path / "partial_drop.db"
+    engine = create_engine(f"sqlite:///{db_path}")
+    Base.metadata.create_all(engine)
+    with engine.begin() as conn:
+        for col in ("ZZ_PLAIN", "ZZ_INDEXED"):
+            conn.execute(text(
+                f'ALTER TABLE user_settings ADD COLUMN "{col}" INTEGER'
+            ))
+        conn.execute(text(
+            "CREATE INDEX ix_zz_indexed ON user_settings (ZZ_INDEXED)"
+        ))
+    engine.dispose()
+
+    monkeypatch.setattr(
+        migrate, "KNOWN_COLUMN_DROPS",
+        {"user_settings": ("ZZ_PLAIN", "ZZ_INDEXED")},
+    )
+    migrate.apply_known_column_drops(str(db_path))  # 例外は投げず警告で続行
+
+    engine = create_engine(f"sqlite:///{db_path}")
+    cols = {c["name"] for c in inspect(engine).get_columns("user_settings")}
+    engine.dispose()
+    # 二列目の失敗で一列目も戻っている (全部落ちるか、一つも落ちないか)。
+    assert "ZZ_PLAIN" in cols
+    assert "ZZ_INDEXED" in cols
+
+    # 対照: 一列目だけなら落ちる — つまり上で残っていたのは「落とせなかった」の
+    # ではなく、二列目の失敗で**戻した**結果 (テストが素通りしていない証拠)。
+    monkeypatch.setattr(
+        migrate, "KNOWN_COLUMN_DROPS", {"user_settings": ("ZZ_PLAIN",)},
+    )
+    migrate.apply_known_column_drops(str(db_path))
+    engine = create_engine(f"sqlite:///{db_path}")
+    cols = {c["name"] for c in inspect(engine).get_columns("user_settings")}
+    engine.dispose()
+    assert "ZZ_PLAIN" not in cols

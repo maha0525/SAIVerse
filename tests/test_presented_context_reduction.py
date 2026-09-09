@@ -411,6 +411,210 @@ class RoomShrinkGuardTest(PresentedReductionTestBase):
         self.assertIn("エリスがやって来ました", self._text())
 
 
+class RoomShrinkAmbiguityTest(PresentedReductionTestBase):
+    """一つのバッチの記帳が同じ文面を指すなら縮めない (曖昧なら触らない)。
+
+    提示の差し替えは確定文面の**文字列一致**で位置を決めるので、残る側 (現在地)
+    と縮める側のブロック文面が同じだと、残すべき方の位置を縮めうる
+    (ローカルレビュー指摘 2026-09-10)。
+
+    ⚠ この並びは今の消費経路では作れない — ``reclaim_pending_perceptions`` の
+    規則 2 (「様子は最後の一枚だけ残す」2026-09-07 まはー裁定) により、1 バッチ
+    の部屋の記帳は必ず一つになる。だから記帳を**直接組んで**確かめる: 差し替えが
+    文字列一致である以上、記帳が二つ並ぶ形に対しても安全側で止まることを固定
+    しておく (供給側の規則が変わった日に静かに壊れないため)。
+    """
+
+    def _install_two_room_batch(self, *, identical: bool) -> int:
+        """現在地 (書斎) とよその部屋の記帳を一つのバッチへ手で組む。
+
+        ``identical=True`` は二つの記帳が**同じ一つの文面**を指す形 (確定文面に
+        その文面は一度しか出てこない) — 縮めると現在地の様子が消える。
+        """
+        self._push_room("b2", "書斎", image="/img/b2.png")
+        batch_id = self._flush()
+        row = self.conn.execute(
+            "SELECT rendered_text, room_state_json FROM perception_batches "
+            "WHERE id = ?", (batch_id,),
+        ).fetchone()
+        text, entries = row[0], json.loads(row[1])
+        current = entries[0]
+        other = json.loads(json.dumps(current))  # 深い写し
+        other["key"] = "building:b1"
+        other["snapshot"]["building_id"] = "b1"
+        other["snapshot"]["building_name"] = "工房"
+        if not identical:
+            other["block"] = current["block"].replace("書斎", "工房")
+            text = other["block"] + "\n\n" + text
+        self.conn.execute(
+            "UPDATE perception_batches SET rendered_text = ?, room_state_json = ? "
+            "WHERE id = ?",
+            (text, json.dumps([other, current], ensure_ascii=False), batch_id),
+        )
+        self.conn.commit()
+        return batch_id
+
+    def test_identical_block_text_is_left_alone(self):
+        self._install_two_room_batch(identical=True)
+        result = self._metabolism()
+        self.assertEqual(result["rooms_shrunk"], 0)
+        # 現在地の様子がそのまま見えている (縮めていたらここが消えていた)。
+        self.assertIn("書斎 のノート", self._text())
+        self.assertIn("/img/b2.png", self._media_paths())
+
+    def test_distinct_block_text_still_shrinks(self):
+        """対照 — 文面が違えば同じ並びでも従来どおり縮む (見送りが効きすぎない)。"""
+        self._install_two_room_batch(identical=False)
+        result = self._metabolism()
+        self.assertEqual(result["rooms_shrunk"], 1)
+        text = self._text()
+        self.assertNotIn("工房 のノート", text)           # よその部屋は縮んだ
+        self.assertIn(PERCEPTION_OMISSION_HEADER, text)   # 省略があったと分かる
+        self.assertIn("書斎 のノート", text)              # 現在地は無傷
+
+
+class RoomShrinkMediaPairingTest(PresentedReductionTestBase):
+    """文字と絵ははぐれない — 本文を差し替えられない回は画像も外さない。
+
+    room_state_packages §1 の保証。差し替えに失敗した回に画像だけ外すと、本文に
+    部屋の様子が全文で残ったまま絵が消え、省略の表示も出ない。
+    """
+
+    def test_media_stays_when_the_block_cannot_be_replaced(self):
+        self._push_room("b1", "工房", image="/img/b1.png")
+        batch_a = self._flush()
+        self._push_room("b2", "書斎", image="/img/b2.png")
+        self._flush()
+        self._metabolism()
+        self.assertEqual(self._media_paths(), ["/img/b2.png"])  # 縮んだ状態
+
+        # 確定文面と記帳の食い違いを作る (台帳の行が読めない・文面が入れ替わった
+        # 回に相当)。本文の差し替えは空振りするので、画像も外れてはいけない。
+        entries = batch_room_states(self.conn.execute(
+            "SELECT room_state_json FROM perception_batches WHERE id = ?",
+            (batch_a,),
+        ).fetchone()[0])
+        for entry in entries:
+            if entry.get("shrunk"):
+                entry["block"] = "この文面は確定文面のどこにも無い"
+        self.conn.execute(
+            "UPDATE perception_batches SET room_state_json = ? WHERE id = ?",
+            (json.dumps(entries, ensure_ascii=False), batch_a),
+        )
+        self.conn.commit()
+
+        text = self._text()
+        self.assertIn("工房 のノート", text)                  # 本文は全文のまま
+        self.assertIn("/img/b1.png", self._media_paths())     # 絵も残る
+
+
+class ReductionIdempotenceTest(PresentedReductionTestBase):
+    """二連続の Metabolism は安全 (冪等・一方向)。
+
+    修正 1 で「会話が畳めない回」からも縮みが走るようになり、同じ提示に対して
+    縮みが二度続けて走る並びが現実に出る。
+    """
+
+    def test_back_to_back_metabolisms_change_nothing_the_second_time(self):
+        self._push_room("b1", "工房", image="/img/b1.png")
+        self._push_head_mutation("core_memory", "コア記憶を書き換えました")
+        self._flush()
+        self._push_room("b2", "書斎")
+        self._flush()
+
+        first = self._metabolism()
+        text_after_first = self._text()
+        media_after_first = self._media_paths()
+
+        second = self._metabolism()
+        self.assertEqual(second["rooms_shrunk"], 0)          # 縮める先はもう無い
+        self.assertEqual(second["notices_through"], first["notices_through"])
+        self.assertEqual(self._text(), text_after_first)     # 提示も動かない
+        self.assertEqual(self._media_paths(), media_after_first)
+
+
+class MetabolismEntryPointsTest(unittest.TestCase):
+    """修正 1 — 会話が畳めない回 (知覚だけが上限超え) でも縮みが走る。
+
+    「会話は小さく知覚だけが大きい」は縮みが一番効くべき状態なのに、退場計画が
+    空 (``plan.is_empty``) の回は縮みへ到達していなかった。head を描き直して
+    **から** 縮みへ入る順序も一緒に固定する — 操作通知は head が今の状態を
+    見せるまで唯一の情報源なので、先に下ろすと一拍だけ「通知も head も古い」
+    瞬間ができる (intent 設計 1 の合図の定義)。
+    """
+
+    def setUp(self):
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import sessionmaker
+        from sqlalchemy.pool import StaticPool
+
+        from database.models import Base
+
+        engine = create_engine(
+            "sqlite:///:memory:",
+            connect_args={"check_same_thread": False}, poolclass=StaticPool,
+        )
+        Base.metadata.create_all(engine)
+        self.addCleanup(engine.dispose)
+        self.manager = SimpleNamespace(
+            SessionLocal=sessionmaker(bind=engine),
+            event_scheduler=None,
+            meta_layer=SimpleNamespace(
+                _load_judgment_config=lambda persona: {
+                    "keep_cache_alive": True, "cache_threshold_ratio": 0.3,
+                },
+            ),
+            personas={},
+        )
+
+    def _run_with_empty_plan(self):
+        from sea.eviction_plan import EvictionPlan, Watermarks
+        from sea.session_lifecycle import SessionLifecycle
+        from sea.session_window import SessionWindow
+
+        lifecycle = SessionLifecycle(
+            SimpleNamespace(run_cache_keepalive=lambda pid, mk=None: None),
+            self.manager,
+        )
+        persona = SimpleNamespace(
+            persona_id="p1", model="model-a", current_building_id="room",
+        )
+        msgs = [{"id": f"m{i}", "content": "x" * 1000} for i in range(4)]
+        window = SessionWindow(
+            anchor_id="m0", raw=list(msgs), presented=list(msgs), folds=[],
+        )
+        order: list = []
+        with mock.patch.object(
+                    lifecycle, "is_chronicle_enabled_for_persona",
+                    return_value=False,
+                ), \
+                mock.patch.object(
+                    lifecycle, "get_presented_window", return_value=window,
+                ), \
+                mock.patch(
+                    "sea.session_lifecycle.plan_eviction",
+                    return_value=EvictionPlan(),
+                ), \
+                mock.patch(
+                    "saiverse.dynamic_state.DynamicStateManager.on_metabolism",
+                    lambda persona, manager, model_key=None: order.append("head"),
+                ), \
+                mock.patch.object(
+                    lifecycle, "_reduce_presented_perceptions",
+                    lambda p: order.append("shrink"),
+                ):
+            status = lifecycle._run_metabolism_locked(
+                persona, "room", window, Watermarks(target=2_000, high=4_000),
+                chronicle_force=True,
+            )
+        return status, order
+
+    def test_empty_plan_still_reaches_the_reduction(self):
+        status, order = self._run_with_empty_plan()
+        self.assertEqual(status, "nothing")  # 戻り値は従来のまま
+        self.assertEqual(order, ["head", "shrink"])
+
+
 class ReductionTimingTest(PresentedReductionTestBase):
     """設計 2 — 提示が変わるのは Metabolism の瞬間だけ。"""
 
