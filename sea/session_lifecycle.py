@@ -5125,10 +5125,19 @@ class SessionLifecycle:
                 return False
         head_rebuilt = False
         try:
-            from saiverse.dynamic_state import DynamicStateManager
-            head_rebuilt = bool(DynamicStateManager.on_metabolism(
+            from saiverse.dynamic_state import (
+                DynamicStateManager,
+                head_pipeline_ready,
+            )
+            dispatched = bool(DynamicStateManager.on_metabolism(
                 persona, self.manager, model_key=resolved_model,
             ))
+            # on_metabolism は pipeline 未初期化・未導入を「対象外 = True」で
+            # 返す (入室の再配送判定の意味論)。縮みにとっての「描き直せた」は
+            # pipeline が実在して dispatch が成立したときだけ (2026-09-10
+            # Codex 三巡目の指摘 — 未初期化の True を成功と読むと、head が
+            # 一度も描かれていない環境で通知だけが下りる)。
+            head_rebuilt = dispatched and head_pipeline_ready()
         except Exception:
             LOGGER.exception("[dynamic_state] on_metabolism failed")
         if not head_rebuilt:

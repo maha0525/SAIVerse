@@ -289,6 +289,27 @@ class DynamicStateManager:
         )
 
 
+def head_pipeline_ready() -> bool:
+    """head の再構築が実際に走りうる状態か (pipeline が実在し section 登録済み)。
+
+    :func:`_dispatch_head_event` は未導入・未初期化・未知イベントを「対象外 =
+    True」で返す (入室の outbox 再試行判定の意味論なので変えられない)。だが提示の
+    縮み (sea/session_lifecycle の reduce_presentation) にとっての「描き直せた」は
+    「head が今の状態を見せている」の意味でなければならない — 未初期化の True を
+    成功と読むと、head が一度も描かれていない環境で操作通知だけが提示から下りる
+    (2026-09-10 Codex 三巡目の指摘)。縮み側はこの検査と dispatch の戻り値の両方が
+    真のときだけ通知を下ろす。
+    """
+    try:
+        from sea.head_pipeline import get_default_pipeline
+    except Exception:
+        return False
+    try:
+        return bool(get_default_pipeline().registry.all_sections())
+    except Exception:
+        return False
+
+
 def _chronicle_enabled(persona: Any, manager: Any) -> bool:
     """このペルソナが Chronicle 編纂を有効にしているか (判定不能なら有効側)。
 

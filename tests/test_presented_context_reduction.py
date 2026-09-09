@@ -637,6 +637,10 @@ class MetabolismEntryPointsTest(unittest.TestCase):
                         order.append(("head", model_key)) or True
                     ),
                 ), \
+                mock.patch(
+                    "saiverse.dynamic_state.head_pipeline_ready",
+                    return_value=True,
+                ), \
                 mock.patch.object(
                     lifecycle, "_reduce_presented_perceptions",
                     lambda p, mk=None, drop_notices=True: order.append(
@@ -713,6 +717,10 @@ class MetabolismEntryPointsTest(unittest.TestCase):
                     lambda persona, manager, model_key=None: (
                         order.append(("head", model_key)) or True
                     ),
+                ), \
+                mock.patch(
+                    "saiverse.dynamic_state.head_pipeline_ready",
+                    return_value=True,
                 ), \
                 mock.patch.object(
                     lifecycle, "_reduce_presented_perceptions",
@@ -1133,6 +1141,8 @@ class MetabolismGateReductionTest(PresentedReductionTestBase):
         self.order: list = []
         #: on_metabolism の戻り値 (head を描き直せたか) の差し替え。
         self.head_ok = True
+        #: head pipeline が実在するか (未初期化の「対象外 = True」と区別する検査)。
+        self.pipeline_ready = True
 
     def _run_gate(self, model_key: str | None = None):
         """自動経路 (maybe_run_metabolism) の門を、実データの上で一度回す。"""
@@ -1160,6 +1170,10 @@ class MetabolismGateReductionTest(PresentedReductionTestBase):
                     lambda persona, manager, model_key=None: (
                         self.order.append(("head", model_key)) or self.head_ok
                     ),
+                ), \
+                mock.patch(
+                    "saiverse.dynamic_state.head_pipeline_ready",
+                    return_value=self.pipeline_ready,
                 ):
             self.lifecycle.maybe_run_metabolism(
                 self.persona, "b2", model_key=model_key or MODEL_A,
@@ -1267,6 +1281,30 @@ class MetabolismGateReductionTest(PresentedReductionTestBase):
         self._run_gate()
         self.assertNotIn("コア記憶を書き換えました", self._text())
         self.assertTrue(get_notice_cutoff(self.conn, MODEL_A) > 0)
+
+    def test_uninitialized_head_pipeline_keeps_the_notices(self):
+        """pipeline が実在しない環境 — 通知は残り、部屋だけ縮む。
+
+        ``on_metabolism`` の下層 (``_dispatch_head_event``) は pipeline 未導入・
+        未初期化を「対象外 = True」で返す (入室の再配送判定の意味論)。この True
+        を「描き直せた」と読むと、head が一度も描かれていない環境で操作通知だけが
+        提示から下りる (2026-09-10 Codex 三巡目の指摘)。縮み側は
+        ``head_pipeline_ready`` との論理積で判定する。
+        """
+        self._push_room("b1", "工房", image="/img/b1.png")
+        self._push_head_mutation("core_memory", "コア記憶を書き換えました")
+        self._flush()
+        self._push_room("b2", "書斎")
+        self._flush()
+
+        self.head_ok = True          # dispatch 自体は「対象外 = True」を返す
+        self.pipeline_ready = False  # だが pipeline は実在しない
+        self._run_gate()
+
+        after = self._text()
+        self.assertIn("コア記憶を書き換えました", after)   # 通知は残る
+        self.assertNotIn("工房 のノート", after)            # 部屋は縮む
+        self.assertEqual(get_notice_cutoff(self.conn, MODEL_A), 0)
 
 
 if __name__ == "__main__":
