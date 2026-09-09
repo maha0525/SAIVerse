@@ -329,6 +329,8 @@ Cached Head が「Metabolism まで snapshot を凍結」、visual_context / mem
 - **下ろすのは提示だけ**。台帳の行も付記印も触らないので、その期間の編纂が来れば従来どおり材料として引き取られる (`collect_annex_items` は `list_unannexed_batches` を読み続ける。提示側だけが `list_presented_batches` を読む)。
 - **発火点は提示の組成そのもの** (`sea/runtime_context.list_presented_perception_blocks`)。知覚ブロックは送信直前に差し込まれるので、上限の判定も同じ一点に置く — 送る側と測る側が同じ関数を呼ぶ規則 (§10.3、`context_accounting_excludes_injected_rows.md`) を知覚の上限にも通す。下ろしの書き込みに失敗したら全部提示のまま進む (fail-open)。
 
+**設計 1・2 の縮みとの噛み合わせ** (2026-09-09、[presented_context_reduction.md](presented_context_reduction.md)): 提示の組成は候補を取った直後に、Metabolism が確定させた縮み (用の済んだ操作通知を下ろす / 現在地でない部屋の様子を一行へ縮める) を写しの上で適用する。**下ろし判定より手前**なので、合計上限の勘定も省略の印の位置も縮んだ姿で決まる — 測る側と送る側が同じ一枚を見る規則はそのまま。縮みは「下ろす」とは別物で、バッチは提示に残り続ける (`perception_presentation` の下ろし境界は動かない)。操作通知の側は同じテーブルにもう一本の一方向境界 (`notices_dropped_through_batch_id`) を持つ。
+
 **§10.8 (部屋の様子の差分) との噛み合わせ**: 境界の前進は「可視性が変わる瞬間」の三つ目なので、不変条件「提示に見えているどの差分も自分の土台が直前に見えている」を同じヘルパ (`restore_room_state_bases`) で回復する。`advance_presentation_cutoff` が境界の前進と**同一トランザクション**で呼び、差分の土台が下りたらその位置を全文へ差し替える。土台の判定 (`latest_visible_snapshot` / `_visible_chain_tail`) も「未付記」から「提示に出る」へ揃えた。
 
 **判定に使う水位は、その回の実行モデルのもの** (2026-09-05 Codex 三巡 #2): prepare_context も Metabolism も実行 model (`model_key`) で動くのに、下ろし判定だけが `persona.model` の水位を引いていた。そのままだと実行モデルに個別の知覚水位を保存しても効かず、保存時の検査 (整理を始める量 − 残す量 > 知覚の上限 + 余裕) がその model に対して保証した余裕も成立しない。だから `model_key` を、送る側 (`prepare_context` → `_merge_consumed_perceptions`) と測る側 (`SessionLifecycle.presented_chars` / `presented_with_perceptions` / `perception_blocks_for`) の両方から `list_presented_perception_blocks` → `_plan_perception_drop` まで引数で通す。`model_key` の無い呼び出しだけが従来どおり `persona.model` へ落ちる。

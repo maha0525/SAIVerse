@@ -535,11 +535,18 @@ def _parse_item_state(metadata: Optional[str]) -> Optional[Dict[str, Any]]:
 
 
 def is_legacy_entry(entry: Mapping[str, Any]) -> bool:
-    """旧形式 (snapshot が文字列) の記帳か。
+    """束として読めない記帳か (旧形式 = snapshot が文字列、および縮めた記帳)。
 
     True のエントリは連なりに参加しない — 土台にもならず、開き直しもされない
     (旧データの読者を書かない — intent §9)。提示には積んだときの文面のまま出る。
     次の入室は土台なし扱いで全文を積み、以後は構造つきで運ぶ。
+
+    **提示の節約で縮めた部屋の記帳も同じ道に合流する**
+    (:func:`sai_memory.presented_reduction.mark_presentation_reductions` は
+    縮めるときに束を落とす)。だから「離れている間に縮めた部屋へ戻ったら全文と
+    画像を見せ直す」(まはー裁定 2026-09-09) は、連なりの読み手を一枚も書き換え
+    ずに成立する — 縮めた記帳は土台にならないので、戻った回の消費は土台なし =
+    全文を積む。
     """
     return not bundle_is_valid(entry.get("snapshot"))
 

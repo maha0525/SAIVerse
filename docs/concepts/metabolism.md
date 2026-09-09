@@ -66,7 +66,8 @@ Metabolism は短期記憶を区切り直す節目であり、同時に**短期�
 
 1. 全 Section に `capture(live_state)` を走らせて**短期記憶（head snapshot）を再構築**
 2. 同時に**長期記憶への結晶化**（履歴圧縮・Chronicle 化・Fragment 生成）を束ねて実行
-3. **新しい Session を開始する**
+3. **提示の節約**（2026-09-09、intent [`presented_context_reduction.md`](../intent/presented_context_reduction.md) 設計 1・2）: head を描き直した**後**に、用の済んだ操作通知（スペルの増減・コア記憶などの操作のお知らせ — head が今の状態を見せた時点で重複）を提示から下ろし、**現在地でない部屋の様子**を一行へ縮めて画像も外す。やるのは記録の追加だけで、台帳の行も確定文面も書き換えない — 縮んだ姿は提示を組むときに写しの上で作られる。**この縮みが起きるのは Metabolism の瞬間だけ**（移動や発言で提示の途中を書き換えるとプロンプトキャッシュの前方一致が割れる）。実装は `sai_memory/presented_reduction.py`、発火は `SessionLifecycle._reduce_presented_perceptions`
+4. **新しい Session を開始する**
 
 `resolve_metabolism_anchor` のフォールバック順（intent §14-2、2026-07-29）: 当該モデルの anchor 行（**温かければ絶対に動かさない**。冷え切っていて編纂の最前線より後ろなら、最前線まで前進して永続化 — 編纂なし・LLM なしの行更新のみ。**スルースのパンマーカーを越えて前進するときは、越えた範囲〈スルース未通過〉を memory.db の `sluice_skipped_spans` に記録してから進む — 記録が書けなければ前進しない**。通っていない範囲はユーザーに分かる状態で明示し、後から通せる、が制約〈旧「パンマーカーの次で頭打ち」は 2026-09-08 に撤回。経緯は intent [sluice_coverage_gaps](../intent/sluice_coverage_gaps.md)〉）→ 行が無ければ最前線（Chronicle の `source_ids` から導出。行は LLM 成功後の touch が立てる）→ 最前線より先の他モデル行があれば借用（編纂なしで前進する設計の persona 等）→ どれも無ければブートストラップ最小ロード。**実装済**。
 

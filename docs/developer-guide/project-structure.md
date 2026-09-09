@@ -224,6 +224,8 @@ sai_memory/
 ├── core_memory.py    # コア記憶（記憶アーキv2 ゾーンA。memory.db 同居）
 ├── perception_buffer.py # 知覚バッファ（未消費知覚を溜め Pulse 消費で放出。memory.db 同居）
 ├── room_state.py     # 「部屋の様子」の再訪差分と、付記と同一 tx で走る提示文面の移管
+├── presented_reduction.py # 会話以外の内容を Metabolism の瞬間だけ縮める（用の済んだ操作通知を
+│                     #   下ろす／現在地でない部屋の様子を一行へ。提示だけ・台帳は無傷）
 ├── clips.py / purpose_tags.py # クリップ（土地参照の統一プリミティブ、旧 marks）・目的タグ（memory.db 同居）
 ├── unified_recall.py # 統合想起
 ├── backup.py         # rdiff-backup

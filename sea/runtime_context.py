@@ -6,6 +6,7 @@ import threading
 import time
 from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 
+from sai_memory.perception_buffer import PERCEPTION_OMISSION_HEADER
 from sea.eviction_plan import CONSUMED_PERCEPTION_KEY
 from saiverse.model_configs import (
     calculate_cost,
@@ -756,10 +757,11 @@ def _perception_block_text(rendered_text: str) -> str:
     return f"<system>{rendered_text}</system>"
 
 
-#: 下ろした跡地に置く機構名義の一行の見出し。既存の知覚ブロックの見出し
-#: (``[システム通知]`` / ``[フィード]`` — sai_memory/perception_buffer の
-#: ``_KIND_HEADERS``) と同じ流儀に合わせる。
-_PERCEPTION_OMISSION_HEADER = "[省略された記録]"
+#: 下ろした跡地に置く機構名義の一行の見出しは台帳側の一枚
+#: (:data:`sai_memory.perception_buffer.PERCEPTION_OMISSION_HEADER`) —
+#: 既存の知覚ブロックの見出し (``[システム通知]`` / ``[フィード]`` =
+#: ``_KIND_HEADERS``) と同じ流儀で、提示の節約 (sai_memory/presented_reduction)
+#: も同じ見出しで跡地を書く。
 
 #: 「下ろしても上の水位を下回れない」を (ペルソナ, 実行 model) ごとプロセス
 #: ごとに 1 度だけ警告するための既出集合 (毎ターン同じ行でログを埋めない)。
@@ -802,7 +804,7 @@ def _perception_omission_block(
     return {
         "role": "user",
         "content": (
-            f"<system>{_PERCEPTION_OMISSION_HEADER}\n{body}</system>"
+            f"<system>{PERCEPTION_OMISSION_HEADER}\n{body}</system>"
         ),
         "created_at": int(created_at),
         "metadata": {
@@ -1197,6 +1199,13 @@ def list_presented_perception_blocks(
       ``<system>`` 包みでそのまま出す — 生の台帳項目からの再構成 (再 reduce /
       再 format) はしない (reduce で消えた中間状態の復活・秒精度の時刻衝突に
       よるグループ混線の根)。
+    - **Metabolism が決めた縮み**は候補を取った直後に一度だけ適用する
+      (:func:`sai_memory.presented_reduction.reduce_presented_batches`、
+      docs/intent/presented_context_reduction.md 設計 1/2): 用の済んだ操作通知
+      (head が描き直された後は重複) を下ろし、現在地でない部屋の様子を一行へ
+      縮めて画像を外す。判断そのものは Metabolism の瞬間に確定済みで、ここでは
+      読むだけ — だから提示は Metabolism 以外の瞬間に変わらない。跡地には
+      どちらも機構名義の一行が出る (黙って消さない)。
     - **付記の印** (``annexed_entry_id``) が付いたバッチは提示から下りる — 付記
       されるまで消えないので、下限「退場したものは必ず編纂されている」が提示側
       でも常に成立する。履歴が空でも未付記バッチは提示される。
@@ -1254,6 +1263,7 @@ def list_presented_perception_blocks(
             list_unannexed_batches,
         )
         from sai_memory.perception_buffer import batch_in_window, resolve_window_key
+        from sai_memory.presented_reduction import reduce_presented_batches
         from sai_memory.room_state import reopen_lost_bases, reseat_current_room
         chronicle_enabled = _chronicle_enabled_for(runtime, persona)
 
@@ -1297,6 +1307,15 @@ def list_presented_perception_blocks(
             下ろした境界より古いものもここには入る — 省略の印の件数を数える
             のに要るため。境界での振り分けは呼び出し側。
 
+            **Metabolism が決めた縮み**
+            (:func:`sai_memory.presented_reduction.reduce_presented_batches` —
+            用の済んだ操作通知を下ろし、現在地でない部屋の様子を一行へ縮める)
+            はここで一度だけ適用する。以降の下ろし計画・省略の印・ブロックの
+            組み立ては縮んだ写しの上で動くので、**測る側と送る側が同じ一枚を
+            見る** (組成規則の二枚目を作らない)。確定文面
+            (``perception_batches.rendered_text``) も台帳も書き換えない —
+            変わるのはこの写しだけ。
+
             **呼び出し側が ``sai_mem._db_lock`` を保持している前提** (錠前を
             取る層は下の一枚だけ)。
             """
@@ -1304,9 +1323,9 @@ def list_presented_perception_blocks(
             if not found:
                 return found
             predicate = _window_predicate_locked()
-            if predicate is None:
-                return found
-            return [b for b in found if predicate(b)]
+            if predicate is not None:
+                found = [b for b in found if predicate(b)]
+            return reduce_presented_batches(sai_mem.conn, found)
 
         # 候補・境界・下ろし計画・前進・移管後の読み直し・省略件数の数え上げは
         # **一つのロック区間**で完結させる (2026-09-05 Codex 第二巡 high)。

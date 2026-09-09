@@ -240,6 +240,18 @@ def init_perception_buffer_table(
         )
         """
     )
+    # 操作通知を提示から下ろした境界 (2 本目の一方向境界、2026-09-09 —
+    # docs/intent/presented_context_reduction.md 設計 1)。Metabolism で head が
+    # 今の状態に描き直された後、それまでの操作通知 (スペルの増減・コア記憶などの
+    # 操作のお知らせ) は重複になるので提示から下ろす。値は「この id までのバッチ
+    # は操作通知を提示しない」で、前進しかしない (sai_memory/presented_reduction)。
+    try:
+        conn.execute(
+            "ALTER TABLE perception_presentation ADD COLUMN "
+            "notices_dropped_through_batch_id INTEGER NOT NULL DEFAULT 0"
+        )
+    except sqlite3.OperationalError:
+        pass  # 既に存在する
     if upgraded_from_two_phase:
         # 一度きりの清算 (2026-08-19 Codex 第七巡 #4): 旧二段 flush (event_message
         # を書く → pending を削除) が「書き終えたのに削除だけ失敗して」中断した
@@ -1270,6 +1282,24 @@ _KIND_HEADERS = {
 }
 _DEFAULT_HEADER = "[システム通知]"
 
+#: 提示から下ろした・縮めた跡地に置く機構名義の一行の見出し (§10.9)。上の
+#: ``_KIND_HEADERS`` と同じ流儀に合わせる。読み手は提示の組成
+#: (sea/runtime_context) と提示の節約 (sai_memory/presented_reduction) の二つ —
+#: 文字列の知識はここ一枚。
+PERCEPTION_OMISSION_HEADER = "[省略された記録]"
+
+
+def perception_block_text(kind: str, content: str) -> str:
+    """知覚 1 件が確定文面の中で占めるブロック (見出し + 本文)。
+
+    :func:`format_perception_message` の 1 件ぶんの組み立てをそのまま切り出した
+    もの — 提示の節約 (sai_memory/presented_reduction) が「この通知は確定文面の
+    どこか」を台帳の行から復元するのに同じ一枚を通る。確定文面を区切りで割って
+    型を推測する形を作らないため (文字列の解析で差分を組んだ v0.3.9 の欠陥)。
+    """
+    header = _KIND_HEADERS.get(kind, _DEFAULT_HEADER)
+    return f"{header}\n{content}" if header else content
+
 
 def format_perception_message(items: List[PerceptionItem]) -> str:
     """reduce 済み知覚を 1 メッセージ分の本文に整形する (``<system>`` 包みは呼び出し側)。
@@ -1287,8 +1317,6 @@ def format_perception_message(items: List[PerceptionItem]) -> str:
 
     同一 Pulse で消費される全知覚を 1 メッセージにまとめる (C3)。
     """
-    blocks: List[str] = []
-    for item in items:
-        header = _KIND_HEADERS.get(item.kind, _DEFAULT_HEADER)
-        blocks.append(f"{header}\n{item.content}" if header else item.content)
-    return "\n\n".join(blocks)
+    return "\n\n".join(
+        perception_block_text(item.kind, item.content) for item in items
+    )

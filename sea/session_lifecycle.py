@@ -4622,6 +4622,7 @@ class SessionLifecycle:
                     )
                 except Exception:
                     LOGGER.exception("[dynamic_state] on_metabolism failed")
+                self._reduce_presented_perceptions(persona)
                 if event_callback:
                     event_callback({
                         "type": "metabolism",
@@ -4909,6 +4910,13 @@ class SessionLifecycle:
             except Exception:
                 LOGGER.exception("[dynamic_state] on_metabolism failed")
 
+            # 4.5. 提示の節約 — head を描き直した**後**に、用の済んだ操作通知を
+            # 提示から下ろし、現在地でない部屋の様子を一行へ縮める
+            # (docs/intent/presented_context_reduction.md 設計 1/2)。順番が要る:
+            # 通知が重複になるのは head が今の状態を見せてからで、先に下ろすと
+            # 一拍だけ「通知も head も古い」瞬間ができる。
+            self._reduce_presented_perceptions(persona)
+
             # 5. Notify completion
             if event_callback:
                 event_callback({
@@ -4949,6 +4957,55 @@ class SessionLifecycle:
                     "content": message,
                 })
             return ret
+
+    def _reduce_presented_perceptions(self, persona) -> None:
+        """Metabolism の瞬間だけ走る提示の節約 (会話以外の内容を縮める)。
+
+        正典: docs/intent/presented_context_reduction.md 設計 1 / 設計 2。
+        やることは記録の追加だけで、台帳の行も確定文面も書き換えない —
+        「ここから先は縮めて出す」という判断を永続化し、以後の提示の組成
+        (:func:`sea.runtime_context.list_presented_perception_blocks`) がそれを
+        読むだけになる。だから提示が変わるのはこの瞬間だけで、移動や発言では
+        変わらない (プロンプトキャッシュの前方一致の保護)。
+
+        **発火の単位はペルソナ全体** — head と提示は (persona, model) ごとだが、
+        縮みの記録は知覚を下ろす境界 (§10.9) と同じくペルソナに一つ。つまり
+        Metabolism を回した model 以外の Session も、次に送るときには縮んだ提示
+        を見る。これは新しい性質ではなく、下ろし境界が既に持っている性質と
+        同型で (「厳しい水位の model の回に多く進み、緩い model の回はそれを
+        戻さない」)、境界を model ごとに分けると同じ台帳に対して提示が並立し、
+        部屋の様子の土台の連なりが model ごとに別々の切れ方をする。前方一致が
+        割れる場所を**新しく増やしてはいない**が、Metabolism を回していない
+        model の窓がその回に一度読み直しになることは正直に記しておく。
+
+        失敗は WARN に倒す (fail-open) — Metabolism 本体は既に確定しており、
+        縮めそこねても提示が従来どおり大きいだけで、失われるものは無い。
+        次の Metabolism がやり直す。
+        """
+        adapter = getattr(persona, "sai_memory", None)
+        if adapter is None or not getattr(adapter, "is_ready", lambda: False)():
+            return
+        try:
+            from sai_memory.presented_reduction import mark_presentation_reductions
+            with adapter._db_lock:
+                try:
+                    result = mark_presentation_reductions(adapter.conn)
+                    adapter.conn.commit()
+                except Exception:
+                    adapter.conn.rollback()
+                    raise
+        except Exception:
+            LOGGER.warning(
+                "[metabolism] could not record the presentation reduction "
+                "(persona=%s); the presentation stays at full size until the "
+                "next metabolism", getattr(persona, "persona_id", "?"),
+                exc_info=True,
+            )
+            return
+        LOGGER.debug(
+            "[metabolism] presentation reduction recorded (persona=%s): %s",
+            getattr(persona, "persona_id", "?"), result,
+        )
 
     def _retry_extraction_backlog(
         self,
