@@ -440,6 +440,14 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
         : (wmPresets.find(p => p.target === wmEffective.target && p.high === wmEffective.high) ?? null);
 
     const applyWatermarkPreset = (preset: WatermarkPreset) => {
+        // 「デフォルト」だけは数字を書き込まず、未設定 (空欄) に戻す。明示値で保存すると、
+        // 将来組み込みの既定が変わったとき、このユーザーだけ古い数字に取り残される。
+        // 未設定なら常に組み込みの既定へ追従する (実効値は同じなので選択表示も
+        // デフォルトのまま光る)。
+        if (preset.id === 'default') {
+            setWmInputs({ target: '', high: '' });
+            return;
+        }
         setWmInputs({ target: String(preset.target), high: String(preset.high) });
     };
 
