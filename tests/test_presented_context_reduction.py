@@ -1307,5 +1307,165 @@ class MetabolismGateReductionTest(PresentedReductionTestBase):
         self.assertEqual(get_notice_cutoff(self.conn, MODEL_A), 0)
 
 
+class _FlakySpellListSection:
+    """capture を任意に失敗させられる ``spell_list`` (通知を出す Section の代表)。
+
+    実物と同じ名前を名乗る — 縮み側の前提条件は Section 名で引くため。
+    """
+
+    name = "spell_list"
+    order = 600
+    refresh_on_events = frozenset()
+
+    def __init__(self):
+        self.fail = False
+        self.value = ("spell_foo",)
+
+    def capture(self, ctx):
+        if self.fail:
+            raise RuntimeError("spell list unavailable")
+        return self.value
+
+    def render(self, snapshot):
+        from sea.head_pipeline import RenderedSection
+
+        if not snapshot:
+            return None
+        return RenderedSection(text="## スペル\n" + ", ".join(snapshot))
+
+    def diff_to_notifications(self, old, new):
+        return []
+
+    def serialize_snapshot(self, snapshot):
+        return json.dumps(list(snapshot or ()))
+
+    def deserialize_snapshot(self, data):
+        return tuple(json.loads(data))
+
+
+class HeadCaptureFreshnessTest(PresentedReductionTestBase):
+    """契約 9 の精度 — 「描き直せた」は通知を出す Section 単位で確かめる。
+
+    head の capture は Section ごとの失敗を例外にしない: 既存の snapshot が
+    あれば**古い値を据え置き**、無ければその Section が head から消えるだけで、
+    dispatch は成立する。この回に通知を下ろすと、head には古い一覧しか無いのに
+    「いまの状態が改めて示されているため」と言って通知が消え、境界は一方向
+    なので、そのペルソナはその変化を知る手段を恒久的に失う (2026-09-10 最終検分)。
+
+    ここは実物の pipeline を回す — 失敗を飲み込むのは pipeline の中なので、
+    そこを模造すると検査したい欠陥が消える。
+    """
+
+    def setUp(self):
+        super().setUp()
+        from sea.head_pipeline import HeadPipeline, HeadSectionRegistry
+        from sea.session_lifecycle import SessionLifecycle
+
+        self.section = _FlakySpellListSection()
+        registry = HeadSectionRegistry()
+        registry.register(self.section)
+        self.pipeline = HeadPipeline(registry=registry)
+        self.manager = SimpleNamespace(personas={})
+        self.lifecycle = SessionLifecycle(
+            SimpleNamespace(run_cache_keepalive=lambda pid, mk=None: None),
+            self.manager,
+        )
+        self.persona.current_building_id = "b2"
+
+        # 提示: いない部屋 (工房) の様子 + スペル増減の通知、現在地は書斎。
+        self._push_room("b1", "工房", image="/img/b1.png")
+        self._push_world_state(
+            "スペル foo (foo) が使えるようになりました", "spell_added",
+        )
+        self._flush()
+        self._push_room("b2", "書斎")
+        self._flush()
+
+    def _reduce(self):
+        """縮みの唯一の入口を、実物の pipeline の上で一度回す。"""
+        with mock.patch(
+            "sea.head_pipeline.get_default_pipeline", return_value=self.pipeline,
+        ):
+            return self.lifecycle.reduce_presentation(self.persona, MODEL_A)
+
+    def test_a_missing_section_keeps_the_notices_and_shrinks_the_rooms(self):
+        """撮り直せず head から消えた回 — 通知は残り、部屋だけ縮む。"""
+        self.section.fail = True
+        self._reduce()
+
+        self.assertIsNone(
+            self.pipeline.get_snapshot("p1", MODEL_A).sections.get("spell_list"),
+        )
+        text = self._text(MODEL_A)
+        self.assertIn("スペル foo (foo) が使えるようになりました", text)
+        self.assertEqual(get_notice_cutoff(self.conn, MODEL_A), 0)
+        self.assertNotIn("工房 のノート", text)          # 部屋は縮む
+        self.assertNotIn("/img/b1.png", self._media_paths(MODEL_A))
+
+    def test_the_notices_drop_once_the_section_is_captured_again(self):
+        """撮れるようになった回に、溜まっていた通知はまとめて下りる。"""
+        self.section.fail = True
+        self._reduce()
+        self.assertEqual(get_notice_cutoff(self.conn, MODEL_A), 0)
+
+        self.section.fail = False
+        self._reduce()
+        self.assertNotIn(
+            "スペル foo (foo) が使えるようになりました", self._text(MODEL_A),
+        )
+        self.assertGreater(get_notice_cutoff(self.conn, MODEL_A), 0)
+
+    def test_a_stale_reuse_keeps_the_notices(self):
+        """古い値の据え置きも「描き直せた」ではない (欠損検査をすり抜ける形)。"""
+        self._reduce()
+        first_cutoff = get_notice_cutoff(self.conn, MODEL_A)
+        self.assertGreater(first_cutoff, 0)
+
+        # 新しい通知と、いない部屋がもう一つ積まれた後で capture が壊れる。
+        self._push_world_state(
+            "スペル bar (bar) が使えるようになりました", "spell_added",
+        )
+        self._push_room("b3", "書庫")
+        self._push_room("b2", "書斎")   # 現在地は書斎のまま
+        self._flush()
+        self.section.fail = True
+        self._reduce()
+
+        # snapshot には前回の値が載ったまま — 欠損検査では素通りする形。
+        self.assertEqual(
+            self.pipeline.get_snapshot("p1", MODEL_A).sections.get("spell_list"),
+            ("spell_foo",),
+        )
+        text = self._text(MODEL_A)
+        self.assertIn("スペル bar (bar) が使えるようになりました", text)
+        self.assertEqual(get_notice_cutoff(self.conn, MODEL_A), first_cutoff)
+        self.assertNotIn("書庫 のノート", text)          # 部屋は縮む
+
+    def test_the_head_not_redrawn_warning_is_once_per_persona_and_model(self):
+        """恒久的に描けない状態でも、警告は (persona, model) ごとに 1 度だけ。"""
+        self.section.fail = True
+        with self.assertLogs("sea.session_lifecycle", level="WARNING") as first:
+            self._reduce()
+        self.assertTrue(any(
+            "the head was not redrawn" in line for line in first.output
+        ))
+        self.assertIn(("p1", MODEL_A), self.lifecycle._head_not_redrawn_warned)
+
+        # 二度目は WARNING に出ない (DEBUG へ落ちる)。
+        self._push_world_state(
+            "スペル bar (bar) が使えるようになりました", "spell_added",
+        )
+        self._flush()
+        with self.assertLogs("sea.session_lifecycle", level="DEBUG") as second:
+            self._reduce()
+        self.assertFalse([
+            line for line in second.output
+            if line.startswith("WARNING") and "the head was not redrawn" in line
+        ])
+        self.assertTrue(any(
+            "the head was not redrawn" in line for line in second.output
+        ))
+
+
 if __name__ == "__main__":
     unittest.main()

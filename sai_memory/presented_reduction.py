@@ -244,24 +244,6 @@ def notice_omission_block(count: int) -> str:
 # Metabolism の瞬間の書き込み
 # ---------------------------------------------------------------------------
 
-def _raw_room_entries(room_state_json: Optional[str]) -> Optional[List[Any]]:
-    """記帳の JSON を**篩わずに**生の list として読む (壊れていれば None)。
-
-    :func:`~sai_memory.room_state.batch_room_states` は読む側の便宜で「dict で
-    key を持つ要素」だけに絞るが、書き戻しにその結果を使うと、篩で落ちた未知の
-    要素が黙って消える。ここは記帳への書き込み点なので生の並びを保ち、印を打つ
-    エントリだけを差し替える (「記録は追加だけ」— ローカルレビュー指摘
-    2026-09-10)。
-    """
-    if not room_state_json:
-        return None
-    try:
-        data = json.loads(room_state_json)
-    except (TypeError, ValueError):
-        return None
-    return data if isinstance(data, list) else None
-
-
 def _room_shrink_targets(
     batch_id: Any, room_state_json: Optional[str], current_key: str,
 ) -> Tuple[Optional[List[Any]], List[Dict[str, Any]], Set[str]]:
@@ -278,9 +260,9 @@ def _room_shrink_targets(
         を書き換えてこの並びをそのまま書き戻せる。読めない記帳は生の並びが
         ``None``。
     """
-    from sai_memory.room_state import bundle_media, is_legacy_entry
+    from sai_memory.room_state import bundle_media, is_legacy_entry, raw_room_entries
 
-    raw = _raw_room_entries(room_state_json)
+    raw = raw_room_entries(room_state_json)
     if not raw:
         return raw, [], set()
     entries = [e for e in raw if isinstance(e, dict) and e.get("key")]
@@ -430,8 +412,10 @@ def mark_presentation_reductions(
     消費は**土台なし = 全文 + 画像**を積む。連なりの読み手を一枚も書き換えずに
     済むのは、旧形式 (文字列 snapshot) の扱いと同じ道に合流させたため。
 
-    記帳の書き戻しは**読んだ生の並びの上**で行う (篩った結果で上書きしない) —
-    未知の要素が黙って消えるのは「記録は追加だけ」に反する。
+    記帳の書き戻しは**読んだ生の並びの上**で行う
+    (:func:`~sai_memory.room_state.raw_room_entries` — 篩った結果で上書きしない) —
+    未知の要素が黙って消えるのは「記録は追加だけ」に反する。もう一つの書き戻し
+    (:func:`~sai_memory.room_state.restore_room_state_bases`) も同じ規則。
 
     現在地が読めない / 台帳に部屋の記録が無い回は部屋を一つも縮めない (何と
     比べて「現在地でない」と言うのかが決まらない — 縮めない側に倒す)。同じ

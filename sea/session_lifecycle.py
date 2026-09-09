@@ -11,6 +11,7 @@ from typing import (
     Any,
     Callable,
     Dict,
+    FrozenSet,
     List,
     Optional,
     Sequence,
@@ -130,6 +131,10 @@ class SessionLifecycle:
         # ごとに 1 度だけ警告するための既出集合
         # (:meth:`get_metabolism_watermarks`)。毎ターン同じ警告を出さない。
         self._watermark_inversion_warned: Set[Tuple[str, str]] = set()
+        # head を描き直せなかったことを (persona, model) ごとプロセスごとに
+        # 1 度だけ警告するための既出集合 (:meth:`_note_head_not_redrawn`)。
+        # 恒久的に描けない状態だと縮みの入口を通るたびに出てしまう。
+        self._head_not_redrawn_warned: Set[Tuple[str, str]] = set()
         # 最終防衛ライン (:meth:`ensure_window_floor`) が最後に発火した時刻
         # ((persona_id, model_key) → ISO 文字列)。発火は上流 (読み戻し) の
         # 失敗の印なので context-status に出す。プロセス内の記録で永続化しない。
@@ -269,6 +274,44 @@ class SessionLifecycle:
                 persona_id, rows_chars, total_chars,
             )
         return True
+
+    def _note_head_not_redrawn(
+        self, persona, model_key: Optional[str],
+        stale_sections: FrozenSet[str] = frozenset(),
+    ) -> None:
+        """head を描き直せなかった回の警告 — (persona, model) ごとに 1 度だけ。
+
+        挙動は変えない (通知は提示に残る) — 変えるのはログの量だけ。head が
+        恒久的に描けない状態だと縮みの入口を通るたびに同じ行が出るので、
+        :meth:`_note_perception_over_budget` と同じ形で抑止する。復帰しても
+        再武装しない (プロセスの間 1 度) — 目的は「毎ターン同じ行で埋めない」
+        ことで、故障の回数を数えることではない。
+
+        ``stale_sections`` が空でないなら「dispatch は通ったが Section の
+        capture が古いまま」、空なら「dispatch 自体が成立しなかった」。
+        """
+        persona_id = str(getattr(persona, "persona_id", "?"))
+        key = (persona_id, str(model_key))
+        with self._warn_lock:
+            first_time = key not in self._head_not_redrawn_warned
+            if first_time:
+                self._head_not_redrawn_warned.add(key)
+        reason = (
+            "these head sections still hold their previous values: "
+            + ", ".join(sorted(stale_sections))
+            if stale_sections else "the head rebuild did not go through"
+        )
+        message = (
+            "[metabolism] the head was not redrawn (persona=%s model=%s): %s. "
+            "Keeping the operation notices in the presentation this round — "
+            "they are the only way that model learns of the change, and the "
+            "boundary only moves forward. The room states still shrink (they "
+            "do not live in the head)"
+        )
+        if first_time:
+            LOGGER.warning(message, persona_id, model_key, reason)
+        else:
+            LOGGER.debug(message, persona_id, model_key, reason)
 
     def _handle_perception_over_budget(
         self, persona, rows_chars: int, total_chars: int, watermarks: Watermarks,
@@ -5063,6 +5106,15 @@ class SessionLifecycle:
         戻り値を捨てると head が古いまま通知だけが消える。部屋の様子は head に
         載らないので、この回も縮める。
 
+        **「描き直せた」は Section 単位で確かめる** (2026-09-10 最終検分)。
+        head の capture は Section ごとの失敗を例外にせず、古い値を据え置くか
+        その Section を head から落とすだけなので、dispatch の成立だけでは
+        「今の状態を見せている」と言えない。**通知を出す Section**
+        (:data:`~saiverse.dynamic_state.NOTICE_SOURCE_SECTIONS` — コア記憶・机・
+        Memopedia 目次・スペル一覧) が全部撮り直せた回にだけ通知を下ろす。
+        境界は一方向なので、古い head のまま下ろすと、そのペルソナはその変化を
+        知る手段を恒久的に失う。失敗が続く限り通知が残るのは安全側で正しい。
+
         **境界は model ごと・部屋の印はペルソナ共通**。一文で言うと「操作通知は、
         そのモデルの head が描き直されたときに、そのモデルの提示から下りる。
         部屋は head と無関係なのでペルソナ共通」。model の同定は head と同じ解決
@@ -5124,10 +5176,12 @@ class SessionLifecycle:
                 )
                 return False
         head_rebuilt = False
+        stale_sections: FrozenSet[str] = frozenset()
         try:
             from saiverse.dynamic_state import (
                 DynamicStateManager,
                 head_pipeline_ready,
+                head_sections_not_freshly_captured,
             )
             dispatched = bool(DynamicStateManager.on_metabolism(
                 persona, self.manager, model_key=resolved_model,
@@ -5137,17 +5191,21 @@ class SessionLifecycle:
             # pipeline が実在して dispatch が成立したときだけ (2026-09-10
             # Codex 三巡目の指摘 — 未初期化の True を成功と読むと、head が
             # 一度も描かれていない環境で通知だけが下りる)。
-            head_rebuilt = dispatched and head_pipeline_ready()
+            if dispatched and head_pipeline_ready():
+                # dispatch が成立しても、Section ごとの capture 失敗は例外に
+                # ならない (古い値の据え置き / 欠損)。**通知を出す Section**
+                # (コア記憶・机・Memopedia 目次・スペル一覧) が一つでも撮り
+                # 直せていなければ、head はその変化について古いまま — 通知を
+                # 下ろすと、境界は一方向なのでそのペルソナは変化を知る手段を
+                # 恒久的に失う (2026-09-10 最終検分)。
+                stale_sections = head_sections_not_freshly_captured(
+                    persona, resolved_model,
+                )
+                head_rebuilt = not stale_sections
         except Exception:
             LOGGER.exception("[dynamic_state] on_metabolism failed")
         if not head_rebuilt:
-            LOGGER.warning(
-                "[metabolism] the head was not redrawn (persona=%s model=%s); "
-                "keeping the operation notices in the presentation this round "
-                "— they are the only way that model learns of the change. The "
-                "room states still shrink (they do not live in the head)",
-                getattr(persona, "persona_id", "?"), resolved_model,
-            )
+            self._note_head_not_redrawn(persona, resolved_model, stale_sections)
         if not memory_ready:
             return False
         return self._reduce_presented_perceptions(

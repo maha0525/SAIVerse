@@ -744,17 +744,37 @@ def chain_is_intact(
     return snapshot_digest(snapshot) == str(base)
 
 
-def batch_room_states(room_state_json: Optional[str]) -> List[Dict[str, Any]]:
-    """バッチの ``room_state_json`` を list に復元する。壊れていれば空 list。"""
+def raw_room_entries(room_state_json: Optional[str]) -> Optional[List[Any]]:
+    """バッチの ``room_state_json`` を**篩わずに**生の list として読む。
+
+    壊れている (JSON でない / list でない) なら None。
+
+    :func:`batch_room_states` は読む側の便宜で「dict で ``key`` を持つ要素」だけに
+    絞るが、**記帳への書き戻しにその結果を使うと、篩で落ちた未知の要素が黙って
+    消える**。記帳を UPDATE する箇所 (:func:`restore_room_state_bases` /
+    :func:`sai_memory.presented_reduction.mark_presentation_reductions`) はこの生の
+    並びを保ち、書き換える要素だけを差し替える (「記録は追加だけ」— ローカル
+    レビュー指摘 2026-09-10)。
+    """
     if not room_state_json:
-        return []
+        return None
     try:
         data = json.loads(room_state_json)
     except (TypeError, ValueError):
+        return None
+    return data if isinstance(data, list) else None
+
+
+def batch_room_states(room_state_json: Optional[str]) -> List[Dict[str, Any]]:
+    """バッチの ``room_state_json`` を list に復元する。壊れていれば空 list。
+
+    読む側の篩 — 「dict で ``key`` を持つ要素」だけを返す。書き戻しにこの結果を
+    使ってはいけない (:func:`raw_room_entries` の docstring)。
+    """
+    raw = raw_room_entries(room_state_json)
+    if raw is None:
         return []
-    if not isinstance(data, list):
-        return []
-    return [e for e in data if isinstance(e, dict) and e.get("key")]
+    return [e for e in raw if isinstance(e, dict) and e.get("key")]
 
 
 def batch_is_room_reseat(room_state_json: Optional[str]) -> bool:
@@ -1086,13 +1106,19 @@ def _reopen_lost_bases(batches: Sequence[Any]) -> Dict[int, tuple]:
 
     返るのは**変わったバッチだけ**の
     ``{batch.id: (rendered_text, entries, extra_media)}``。``entries`` は
-    差し替え済みの記帳、``extra_media`` は開き直しで戻すメディア (束由来、
-    path 重複なし)。
+    差し替え済みの記帳の**生の並び** (:func:`raw_room_entries` — 読む側の篩を
+    通していない)、``extra_media`` は開き直しで戻すメディア (束由来、path
+    重複なし)。生で返すのは、書き戻す側 (:func:`restore_room_state_bases`) が
+    篩の落とした未知の要素を消さずに済むようにするため — 差し替えはエントリの
+    dict をその場で書き換えるので、生の並びの中の同じ dict がそのまま更新される。
     """
     previous_by_key: Dict[str, Dict[str, Any]] = {}
     out: Dict[int, tuple] = {}
     for batch in batches:
-        entries = batch_room_states(batch.room_state_json)
+        raw = raw_room_entries(batch.room_state_json)
+        entries = [
+            e for e in (raw or []) if isinstance(e, dict) and e.get("key")
+        ]
         if not entries:
             continue
         rendered = batch.rendered_text or ""
@@ -1127,7 +1153,7 @@ def _reopen_lost_bases(batches: Sequence[Any]) -> Dict[int, tuple]:
             extra_media.extend(bundle_media(snapshot))
             changed = True
         if changed:
-            out[int(batch.id)] = (rendered, entries, extra_media)
+            out[int(batch.id)] = (rendered, raw, extra_media)
     return out
 
 
@@ -1208,6 +1234,12 @@ def restore_room_state_bases(conn: sqlite3.Connection) -> int:
     残った差分が宙に浮く」壊れ方が確定する。呼び出し側は例外を受けたら tx ごと
     rollback して、付記も境界前進も見送る (次の機会に全体をやり直す)。
 
+    記帳の書き戻しは**読んだ生の並びの上**で行う (:func:`raw_room_entries`) —
+    読む側の篩 (:func:`batch_room_states`) の結果を書き戻すと、篩が落とした未知の
+    要素が黙って消える。もう一つの書き戻し
+    (:func:`sai_memory.presented_reduction.mark_presentation_reductions`) と同じ
+    規則 (ローカルレビュー指摘 2026-09-10)。
+
     Returns:
         文面を差し替えたバッチの件数。
     """
@@ -1216,13 +1248,13 @@ def restore_room_state_bases(conn: sqlite3.Connection) -> int:
     batches = list_presented_batches(conn)
     media_by_id = {int(b.id): b.media for b in batches}
     repaired = _reopen_lost_bases(batches)
-    for batch_id, (rendered, entries, extra_media) in repaired.items():
+    for batch_id, (rendered, raw_entries, extra_media) in repaired.items():
         conn.execute(
             "UPDATE perception_batches SET rendered_text = ?, "
             "room_state_json = ?, media = ? WHERE id = ?",
             (
                 rendered,
-                json.dumps(entries, ensure_ascii=False),
+                json.dumps(raw_entries, ensure_ascii=False),
                 _merge_media_json(media_by_id.get(batch_id), extra_media),
                 batch_id,
             ),
