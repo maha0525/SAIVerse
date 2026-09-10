@@ -644,6 +644,28 @@ class ResumeTests(_RepairTestCase):
             [(NEW, "done"), (NEW, "done")],
         )
 
+    def test_same_new_id_is_reused_when_the_retry_after_a_database_restore_stopped_at_step_1(self) -> None:
+        """DB だけを戻した後の付け替えが「予定」のまま残っても、次の起動で同じ新 ID に付け替える。
+
+        新 ID の場所のフォルダは前に自分が移したもの。「予定」から来た ID でも空きとみなさないと、
+        番号を足した別の ID に付け替えて、フォルダが部屋から外れる。
+        """
+        self._add(self._building(OLD, "2/28"))
+        self._make_folder(self.buildings_root, NEW)
+        self._write_record(
+            self._planned(status="done", db_renamed_at="x", done_at="x"),
+            self._planned(),
+        )
+
+        self.assertEqual(self._run(), [])
+
+        self.assertEqual(self._building_ids(), [NEW])
+        self.assertTrue((self.buildings_root / NEW / "log.json").is_file())
+        self.assertEqual(
+            [(e["new_id"], e["status"]) for e in self._record()["renames"]],
+            [(NEW, "done"), (NEW, "done")],
+        )
+
 
 class SkipAndFailureTests(_RepairTestCase):
     def test_skips_while_another_process_owns_the_database(self) -> None:
@@ -1451,10 +1473,13 @@ class AddonMetadataOnUnimportedLogTests(_RepairTestCase):
 # ---------------------------------------------------------------------------
 
 class LegacyMatchGuardTests(_RepairTestCase):
-    """付け替えで、古い会話のファイルとの照合の欠けが増えないこと (増えるならまるごと巻き戻す)。"""
+    """付け替えで、古い会話のファイルとの照合の欠けが増えないこと (増える部屋だけを外し、残りは付け替える)。"""
 
-    def _old_log(self, *message_ids: str) -> Path:
-        folder = self.buildings_root / OLD
+    OTHER_OLD = "a/b_city_a"
+    OTHER_NEW = "a_b_city_a"
+
+    def _old_log(self, *message_ids: str, folder_id: str = OLD) -> Path:
+        folder = self.buildings_root / folder_id
         folder.mkdir(parents=True)
         path = folder / "log.json"
         path.write_text(json.dumps([
@@ -1464,44 +1489,164 @@ class LegacyMatchGuardTests(_RepairTestCase):
         ], ensure_ascii=False), encoding="utf-8")
         return path
 
-    def test_rename_is_rolled_back_when_the_old_message_id_would_disappear(self) -> None:
-        """legacy_message_id に旧メッセージ ID と違う値がある行: 旧メッセージ ID が DB のどこにも残らなくなる。"""
+    def _messages(self) -> list:
+        return [tuple(r) for r in self._all(
+            "SELECT building_id, message_id, legacy_message_id FROM building_messages "
+            "ORDER BY building_id"
+        )]
+
+    def _seed_worsening_and_normal_rooms(self) -> Path:
+        """部屋「2/28」は照合の欠けが増えるデータ、部屋「a/b」は普通のデータ。戻り値は「2/28」の古いファイル。
+
+        「2/28」の行は legacy_message_id に旧メッセージ ID と違う値を持つ — 付け替えると、
+        古いファイルの旧メッセージ ID が DB のどこにも残らなくなる。
+        """
         self._add(
             self._building(OLD, "2/28"),
-            self._building("#1_city_a", "#1"),
+            self._building(self.OTHER_OLD, "a/b"),
             User(USERID=1, PASSWORD="x", USERNAME="まはー", CURRENT_BUILDINGID=OLD),
+            Fixture(FIXTURE_ID="fx1", BUILDING_ID=self.OTHER_OLD, NAME="時計"),
             self._message(OLD, 1, f"{OLD}:1", content="発言 0", legacy_message_id="imported-elsewhere"),
+            self._message(self.OTHER_OLD, 1, f"{self.OTHER_OLD}:1", content="発言 0"),
             AddonMessageMetadata(message_id=f"{OLD}:1", addon_name="tts", key="audio", value="a.wav"),
+            AddonMessageMetadata(
+                message_id=f"{self.OTHER_OLD}:1", addon_name="tts", key="audio", value="b.wav",
+            ),
         )
-        log_path = self._old_log(f"{OLD}:1")
+        self._old_log(f"{self.OTHER_OLD}:1", folder_id=self.OTHER_OLD)
+        return self._old_log(f"{OLD}:1")
 
-        alerts = self._run()
+    def test_only_the_room_whose_match_would_worsen_is_skipped(self) -> None:
+        log_path = self._seed_worsening_and_normal_rooms()
 
+        with patch.object(repair, "_rewrite_database", wraps=repair._rewrite_database) as rewrite:
+            alerts = self._run()
+
+        # 一回目は 2 部屋で書き換え、欠けが増える「2/28」を外して「a/b」だけでやり直す
+        self.assertEqual(
+            [sorted(plan.old_id for plan in c.args[2]) for c in rewrite.call_args_list],
+            [sorted([OLD, self.OTHER_OLD]), [self.OTHER_OLD]],
+        )
+        # 警告は見送った部屋だけを挙げる
         self.assertEqual([a["id"] for a in alerts], ["building_id_repair_skipped_legacy_match"])
         self.assertIn("「2/28」", alerts[0]["message"])
+        self.assertNotIn("「a/b」", alerts[0]["message"])
         self.assertIn("二重", alerts[0]["message"])
         self.assertEqual(alerts[0]["details"]["rooms"], [{
             "building_id": OLD, "new_building_id": NEW, "name": "2/28",
             "missing_before": 0, "missing_after": 1, "path": str(log_path),
         }])
-        # この回の付け替えはまるごと巻き戻る (照合に問題の無い部屋「#1」も)
-        self.assertEqual(self._building_ids(), sorted([OLD, "#1_city_a"]))
-        self.assertEqual(self._scalar('SELECT "CURRENT_BUILDINGID" FROM "user"'), OLD)
         self.assertEqual(
-            [tuple(r) for r in self._all(
-                "SELECT building_id, message_id, legacy_message_id FROM building_messages"
-            )],
-            [(OLD, f"{OLD}:1", "imported-elsewhere")],
+            alerts[0]["details"]["buildings"],
+            [{"building_id": OLD, "new_building_id": NEW, "name": "2/28"}],
         )
-        self.assertEqual(self._scalar("SELECT message_id FROM addon_message_metadata"), f"{OLD}:1")
-        self.assertTrue(log_path.is_file())  # フォルダも移さない
+
+        # 「a/b」は付け替わる (部屋 ID・参照の欄・メッセージ ID・メタデータ・フォルダ・記録)
+        self.assertEqual(self._building_ids(), sorted([OLD, self.OTHER_NEW]))
+        self.assertEqual(self._scalar('SELECT "BUILDING_ID" FROM fixture'), self.OTHER_NEW)
+        self.assertTrue((self.buildings_root / self.OTHER_NEW / "log.json").is_file())
+        self.assertFalse((self.buildings_root / "a").exists())
+        # 「2/28」は旧 ID のまま (DB の行も、フォルダも)
+        self.assertEqual(self._scalar('SELECT "CURRENT_BUILDINGID" FROM "user"'), OLD)
+        self.assertTrue(log_path.is_file())
+        messages = [
+            (OLD, f"{OLD}:1", "imported-elsewhere"),
+            (self.OTHER_NEW, f"{self.OTHER_NEW}:1", f"{self.OTHER_OLD}:1"),
+        ]
+        self.assertEqual(self._messages(), messages)
+        metadata = [f"{OLD}:1", f"{self.OTHER_NEW}:1"]
+        self.assertEqual(
+            [r[0] for r in self._all("SELECT message_id FROM addon_message_metadata ORDER BY value")],
+            metadata,
+        )
+        entries = {e["old_id"]: e for e in self._record()["renames"]}
+        self.assertEqual(entries[OLD]["status"], "planned")
+        self.assertNotIn("db_renamed_at", entries[OLD])
+        self.assertEqual(entries[self.OTHER_OLD]["status"], "done")
+        self.assertIn("db_renamed_at", entries[self.OTHER_OLD])
+
+        # 次の起動: 原因が残っている「2/28」はまた見送り、付け替え済みの「a/b」には何も起きない
+        with patch.object(repair, "_rewrite_database", wraps=repair._rewrite_database) as rewrite:
+            alerts = self._run()
+
+        self.assertEqual(
+            [[plan.old_id for plan in c.args[2]] for c in rewrite.call_args_list], [[OLD]],
+        )
+        self.assertEqual([a["id"] for a in alerts], ["building_id_repair_skipped_legacy_match"])
+        self.assertEqual([b["building_id"] for b in alerts[0]["details"]["buildings"]], [OLD])
+        self.assertEqual(self._building_ids(), sorted([OLD, self.OTHER_NEW]))
+        self.assertEqual(self._messages(), messages)
+        self.assertEqual(
+            [r[0] for r in self._all("SELECT message_id FROM addon_message_metadata ORDER BY value")],
+            metadata,
+        )
+        self.assertTrue(log_path.is_file())
+        self.assertTrue((self.buildings_root / self.OTHER_NEW / "log.json").is_file())
+        after = {e["old_id"]: e for e in self._record()["renames"]}
+        self.assertEqual(after[self.OTHER_OLD], entries[self.OTHER_OLD])
+        self.assertEqual(after[OLD]["status"], "planned")
+
+    def test_other_failure_after_skipping_a_room_rolls_back_the_rest(self) -> None:
+        """外した後のやり直しで別の失敗が起きたら、その回をまるごと巻き戻し、見送りと失敗の両方を知らせる。"""
+        log_path = self._seed_worsening_and_normal_rooms()
+        real_rewrite = repair._rewrite_database
+        calls = []
+
+        def rewrite(db, schema, plans, **kwargs):
+            calls.append(sorted(plan.old_id for plan in plans))
+            result = real_rewrite(db, schema, plans, **kwargs)
+            if len(calls) == 2:
+                raise RuntimeError("disk I/O error")  # 書き換えた後、commit の前に倒れる
+            return result
+
+        with patch.object(repair, "_rewrite_database", side_effect=rewrite):
+            alerts = self._run()
+
+        self.assertEqual(calls, [sorted([OLD, self.OTHER_OLD]), [self.OTHER_OLD]])
+        self.assertEqual(
+            [a["id"] for a in alerts],
+            ["building_id_repair_skipped_legacy_match", "building_id_repair_failed"],
+        )
+        self.assertEqual([b["building_id"] for b in alerts[0]["details"]["buildings"]], [OLD])
+        self.assertEqual(
+            [b["building_id"] for b in alerts[1]["details"]["buildings"]], [self.OTHER_OLD],
+        )
+        self.assertEqual(self._building_ids(), sorted([OLD, self.OTHER_OLD]))
+        self.assertEqual(self._scalar('SELECT "BUILDING_ID" FROM fixture'), self.OTHER_OLD)
+        self.assertEqual(self._messages(), [
+            (OLD, f"{OLD}:1", "imported-elsewhere"),
+            (self.OTHER_OLD, f"{self.OTHER_OLD}:1", None),
+        ])
+        self.assertTrue(log_path.is_file())
+        self.assertTrue((self.buildings_root / self.OTHER_OLD / "log.json").is_file())
         self.assertEqual({e["status"] for e in self._record()["renames"]}, {"planned"})
 
-        # 原因が残っている間は、次の起動でも見送る
-        self.assertEqual(
-            [a["id"] for a in self._run()], ["building_id_repair_skipped_legacy_match"],
+    def test_file_at_the_new_id_is_checked_when_only_the_database_was_restored(self) -> None:
+        """控えから DB だけを戻すと、部屋は旧 ID に戻るが、古い会話のファイルは前に移した新 ID の場所にある。"""
+        self._add(
+            self._building(OLD, "2/28"),
+            self._message(OLD, 1, f"{OLD}:1", content="発言 0", legacy_message_id="imported-elsewhere"),
         )
-        self.assertEqual(self._building_ids(), sorted([OLD, "#1_city_a"]))
+        log_path = self._old_log(f"{OLD}:1", folder_id=NEW)
+        self._write_record(self._planned(status="done", db_renamed_at="x", done_at="x"))
+
+        # 次の起動でも、同じ新 ID の場所のファイルで確かめて見送る
+        for startup in (1, 2):
+            with self.subTest(startup=startup):
+                alerts = self._run()
+
+                self.assertEqual([a["id"] for a in alerts], ["building_id_repair_skipped_legacy_match"])
+                self.assertEqual(alerts[0]["details"]["rooms"], [{
+                    "building_id": OLD, "new_building_id": NEW, "name": "2/28",
+                    "missing_before": 0, "missing_after": 1, "path": str(log_path),
+                }])
+                self.assertEqual(self._building_ids(), [OLD])
+                self.assertEqual(self._messages(), [(OLD, f"{OLD}:1", "imported-elsewhere")])
+                self.assertTrue(log_path.is_file())
+                self.assertEqual(
+                    [(e["new_id"], e["status"]) for e in self._record()["renames"]],
+                    [(NEW, "done"), (NEW, "planned")],
+                )
 
     def test_rename_goes_through_when_the_legacy_id_is_empty_or_the_same(self) -> None:
         self._add(

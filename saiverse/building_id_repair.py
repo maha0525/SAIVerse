@@ -26,7 +26,8 @@ v0.3.0 より前は部屋 ID に使える文字の制限が無く、名前に「
 
 1. 付け替えの記録 ``cities/<city>/building_id_renames.json`` に「予定」を書く
 2. DB を一つのトランザクションで書き換え、古い会話のファイルとの照合の欠けが
-   増えていないことを確かめてから commit する (増えていればまるごと巻き戻して見送る)
+   増えていないことを確かめてから commit する (増える部屋があれば巻き戻し、その部屋を
+   外して残りの部屋でやり直す。外した部屋は見送って警告を出し、記録は「予定」のまま)
 3. ペルソナの記憶のファイルの印を、ペルソナごとに複製を取ってから書き換える
    (ID に区切り記号を含むペルソナは、部屋のフォルダと同じ組み立て方の入れ子の場所)
 4. フォルダを移し、空になった途中のフォルダを消す
@@ -568,7 +569,8 @@ class _LegacyMatchWorsened(RuntimeError):
     """付け替えると、古い会話のファイルとの照合の欠けが増える部屋があった。
 
     ``rooms`` は部屋ごとの {building_id, new_building_id, name, missing_before,
-    missing_after, path}。呼び出し側はこの回の DB の書き換えをまるごと巻き戻す。
+    missing_after, path}。呼び出し側はこの回の DB の書き換えを巻き戻し、``rooms`` の
+    部屋を外して、残りの部屋で書き換えをやり直す。
     """
 
     def __init__(self, rooms: List[dict]) -> None:
@@ -582,24 +584,49 @@ class _LegacyMatchWorsened(RuntimeError):
         self.rooms = rooms
 
 
+def _old_log_for_match_check(plan: _Plan, buildings_root: Path) -> Optional[Path]:
+    """照合の検査で読む古い会話のファイル (``log.json``)。無ければ None。
+
+    まず旧 ID の古いフォルダの場所 — 付け替えの後にフォルダを移すまでここにあり、移した
+    後は起動時の確認処理が新 ID の場所で同じファイルを読む。旧 ID の場所に無ければ
+    (場所を決められない・この OS ではフォルダを作れなかった場合を含む)、新 ID の場所を
+    見る — 前にこの部屋を付け替えてフォルダを移した後に、DB だけを控え (バックアップ)
+    から戻すと、部屋は旧 ID に戻るが、ファイルは新 ID の場所にある。
+    """
+    parts = legacy_folder_parts(plan.old_id)
+    if parts is not None and legacy_folder_can_exist(parts):
+        old_path = buildings_root.joinpath(*parts) / "log.json"
+        if _path_exists(old_path):
+            LOGGER.info(
+                "%s 部屋 %r の照合の検査は、旧 ID の場所の古い会話のファイルを読みます: %s",
+                _LOG_PREFIX, plan.old_id, old_path,
+            )
+            return old_path
+    if plan.new_id is not None:
+        new_path = buildings_root / plan.new_id / "log.json"
+        if _path_exists(new_path):
+            LOGGER.info(
+                "%s 部屋 %r の照合の検査は、旧 ID の場所に古い会話のファイルが無いので、"
+                "新 ID %r の場所のファイルを読みます: %s",
+                _LOG_PREFIX, plan.old_id, plan.new_id, new_path,
+            )
+            return new_path
+    return None
+
+
 def _legacy_match_baseline(
     db, plans: Sequence[_Plan], buildings_root: Path,
 ) -> List[_LegacyMatchCheck]:
     """付け替える前 (旧 ID) の、古い会話のファイルとの照合の欠けの数を部屋ごとに数える。
 
-    ファイルは ``buildings_root`` (``cities/<city>/buildings``) の下の、旧 ID の古い
-    フォルダの場所の ``log.json`` — 付け替えの後にフォルダを移すまでここにあり、移した
-    後は起動時の確認処理が新 ID の場所で同じファイルを読む。場所を決められない・この OS
-    ではフォルダを作れなかった・ファイルが無い・読めない部屋は数えない (照合する行が
-    無いので、付け替えで照合が悪くなることもない)。
+    ファイルは ``buildings_root`` (``cities/<city>/buildings``) の下の ``log.json``
+    (:func:`_old_log_for_match_check`)。ファイルが無い・読めない部屋は数えない (照合する
+    行が無いので、付け替えで照合が悪くなることもない)。
     """
     checks: List[_LegacyMatchCheck] = []
     for plan in plans:
-        parts = legacy_folder_parts(plan.old_id)
-        if parts is None or not legacy_folder_can_exist(parts):
-            continue
-        log_path = buildings_root.joinpath(*parts) / "log.json"
-        if not _path_exists(log_path):
+        log_path = _old_log_for_match_check(plan, buildings_root)
+        if log_path is None:
             continue
         messages, unreadable_reason = load_log(log_path)
         if messages is None:
@@ -644,6 +671,13 @@ def _verify_legacy_matches(db, checks: Sequence[_LegacyMatchCheck]) -> None:
         raise _LegacyMatchWorsened(worsened)
 
 
+def _rollback_quietly(db) -> None:
+    try:
+        db.rollback()
+    except Exception:
+        LOGGER.debug("%s rollback にも失敗しました", _LOG_PREFIX, exc_info=True)
+
+
 def _rewrite_database(
     db, schema: _Schema, plans: Sequence[_Plan], *, legacy_buildings_root: Path,
 ) -> Tuple[Dict[str, Dict[str, int]], Dict[str, int]]:
@@ -655,7 +689,8 @@ def _rewrite_database(
 
     書き換える前と後で、``legacy_buildings_root`` (``cities/<city>/buildings``) の古い
     会話のファイルとの照合の欠けを部屋ごとに数え、増えた部屋があれば
-    :class:`_LegacyMatchWorsened` を上げる (これも呼び出し側が巻き戻す)。
+    :class:`_LegacyMatchWorsened` を上げる (呼び出し側が巻き戻し、その部屋を外して
+    残りの部屋でもう一度呼ぶ)。
     """
     # 外部キーの強制はこの DB ではオフだが、オンの環境でも主キーの書き換えを
     # commit 時点まで待たせる。
@@ -1302,15 +1337,18 @@ def _folder_failed_alert(plan: _Plan, problem: Optional[str]) -> dict:
 
 
 def _legacy_match_worsened_alert(plans: Sequence[_Plan], rooms: Sequence[dict]) -> dict:
-    names = "、".join(f"「{room['name']}」" for room in rooms)
+    """照合の欠けが増えるので付け替えを見送った部屋の警告。
+
+    ``plans`` と ``rooms`` は見送った部屋だけ (同じ起動で付け替えた部屋は挙げない)。
+    """
     return _alert(
         "building_id_repair_skipped_legacy_match",
         _TITLE_SKIPPED,
         _pending_sentence(plans)
-        + f"部屋{names}の内部の名前を付け替えると、古い会話のファイルとデータベースの会話の"
+        + "この部屋の内部の名前を付け替えると、古い会話のファイルとデータベースの会話の"
         "照合が外れて、次に古い会話を移すときに同じ会話が二重に表示されるおそれがあります。"
-        "そのため、今回は付け替えを見送り、データベースは付け替える前の状態に戻しました。"
-        "原因が取り除かれるまで、起動のたびに付け替えを見送ります。"
+        "そのため、この部屋の内部の名前は今回は付け替えず、元のままにしてあります。"
+        "原因が取り除かれるまで、起動のたびにこの部屋の付け替えを見送ります。"
         "この警告の内容を添えて開発者に知らせてください。"
         + _NOT_SHOWN_SENTENCE,
         {
@@ -1689,37 +1727,14 @@ class _Repair:
             return
 
         # 手順 2: DB を一つのトランザクションで書き換え、古い会話のファイルとの照合の
-        # 欠けが増えていないことを確かめてから commit する
-        db = self.session_factory()
-        try:
-            per_plan, json_counts = _rewrite_database(
-                db, schema, accepted, legacy_buildings_root=self.legacy_buildings_root,
-            )
-            db.commit()
-        except Exception as exc:
-            try:
-                db.rollback()
-            except Exception:
-                LOGGER.debug("%s rollback にも失敗しました", _LOG_PREFIX, exc_info=True)
-            if isinstance(exc, _LegacyMatchWorsened):
-                LOGGER.error(
-                    "%s 付け替えると古い会話のファイルとの照合の欠けが増える部屋があるので、"
-                    "この回の付け替えを見送り、データベースを元に戻しました: %s",
-                    _LOG_PREFIX, exc.rooms,
-                )
-                self.alerts.append(_legacy_match_worsened_alert(accepted, exc.rooms))
-            else:
-                LOGGER.error(
-                    "%s 付け替えの途中で失敗したので、データベースを元に戻しました",
-                    _LOG_PREFIX, exc_info=True,
-                )
-                self.alerts.append(_database_failed_alert(accepted, exc))
+        # 欠けが増えていないことを確かめてから commit する (増える部屋は外してやり直す)。
+        # 手順 3 から先は、DB を付け替えた部屋だけで行う。
+        renamed, per_plan, json_counts = self._rewrite_database_skipping_worsened(schema, accepted)
+        if not renamed:
             return
-        finally:
-            db.close()
 
         renamed_at = _now()
-        for plan in accepted:
+        for plan in renamed:
             assert plan.entry is not None
             plan.entry["db_renamed_at"] = renamed_at
             LOGGER.info(
@@ -1729,13 +1744,85 @@ class _Repair:
         if json_counts:
             LOGGER.info("%s JSON の欄で書き換えた行数: %s", _LOG_PREFIX, json_counts)
         self._save_record_best_effort()
-        self._log_remaining_references(schema, [plan.old_id for plan in accepted])
+        self._log_remaining_references(schema, [plan.old_id for plan in renamed])
 
         # 手順 3: ペルソナの記憶のファイルの印を書き換える
-        memories_done = self._rewrite_persona_memories(accepted)
+        memories_done = self._rewrite_persona_memories(renamed)
         # 手順 4・5: フォルダを移し、記録を「完了」にする
-        for plan in _deepest_first(accepted):
+        for plan in _deepest_first(renamed):
             self._move_folders(plan, finish=memories_done)
+
+    def _rewrite_database_skipping_worsened(
+        self, schema: _Schema, plans: Sequence[_Plan],
+    ) -> Tuple[List[_Plan], Dict[str, Dict[str, int]], Dict[str, int]]:
+        """手順 2。DB を書き換えて commit する。照合の欠けが増える部屋は外して、残りでやり直す。
+
+        戻り値は (DB を付け替えた部屋, 部屋ごとの {欄: 書き換えた行数}, JSON の欄ごとの
+        書き換えた行数)。
+
+        - :class:`_LegacyMatchWorsened` を受けたら、その回の書き換えを巻き戻し、挙げられた
+          部屋を外して、残りの部屋を新しいトランザクションで書き換え直す (照合の前の数も
+          そのトランザクションで数え直す)。残りが無くなったら終わる。外した部屋の見送りの
+          警告は、同じ起動で何回外しても 1 つにまとめて出す。外した部屋の記録は「予定」の
+          まま残し、次の起動でまた確かめる。
+        - それ以外の失敗 (一意制約の違反など) では、その回の書き換えをまるごと巻き戻して
+          失敗の警告を出し、付け替えた部屋を空で返す。
+        """
+        remaining: List[_Plan] = list(plans)
+        skipped: List[_Plan] = []
+        skipped_rooms: List[dict] = []
+        renamed: List[_Plan] = []
+        per_plan: Dict[str, Dict[str, int]] = {}
+        json_counts: Dict[str, int] = {}
+        failure: Optional[dict] = None
+        while remaining:
+            db = self.session_factory()
+            try:
+                per_plan, json_counts = _rewrite_database(
+                    db, schema, remaining, legacy_buildings_root=self.legacy_buildings_root,
+                )
+                db.commit()
+            except _LegacyMatchWorsened as exc:
+                _rollback_quietly(db)
+                worsened_ids = {room["building_id"] for room in exc.rooms}
+                excluded = [plan for plan in remaining if plan.old_id in worsened_ids]
+                if not excluded:
+                    # 挙げられた部屋がこの回の部屋に無い — 外せないので、やり直しても同じになる
+                    LOGGER.error(
+                        "%s 照合の欠けが増える部屋として、この回に付け替えていない部屋が挙がったので、"
+                        "データベースを元に戻しました: %s",
+                        _LOG_PREFIX, exc.rooms,
+                    )
+                    failure = _database_failed_alert(remaining, exc)
+                    break
+                remaining = [plan for plan in remaining if plan.old_id not in worsened_ids]
+                skipped.extend(excluded)
+                skipped_rooms.extend(exc.rooms)
+                LOGGER.error(
+                    "%s 付け替えると古い会話のファイルとの照合の欠けが増える部屋があるので、"
+                    "その部屋の付け替えを見送り、データベースを元に戻しました (%s)。%s",
+                    _LOG_PREFIX, exc.rooms,
+                    f"残りの {len(remaining)} 部屋で書き換えをやり直します"
+                    if remaining else "付け替える部屋は残っていません",
+                )
+            except Exception as exc:
+                _rollback_quietly(db)
+                LOGGER.error(
+                    "%s 付け替えの途中で失敗したので、データベースを元に戻しました",
+                    _LOG_PREFIX, exc_info=True,
+                )
+                failure = _database_failed_alert(remaining, exc)
+                break
+            else:
+                renamed = remaining
+                break
+            finally:
+                db.close()
+        if skipped:
+            self.alerts.append(_legacy_match_worsened_alert(skipped, skipped_rooms))
+        if failure is not None:
+            self.alerts.append(failure)
+        return renamed, per_plan, json_counts
 
     def _decide_new_ids(self, plans: Sequence[_Plan], taken: Set[str]) -> List[_Plan]:
         accepted: List[_Plan] = []
@@ -1747,11 +1834,13 @@ class _Repair:
                 )
                 self.alerts.append(_unsafe_folder_alert(plan))
                 continue
-            preferred = plan.new_id
-            reuse_folder = False
-            if preferred is None:
-                preferred = self._previous_new_id(plan.old_id)
-                reuse_folder = preferred is not None
+            previous = self._previous_new_id(plan.old_id)
+            preferred = plan.new_id if plan.new_id is not None else previous
+            # 前にこの部屋を付け替えて移したフォルダは、あっても空きとみなす。記録の「予定」
+            # から来た ID でも同じ — DB だけを戻した後の付け替えが、手順 1 の後で止まったか、
+            # 照合の検査で見送られて「予定」のまま残った部屋。空きとみなさないと番号を足した
+            # 別の ID に付け替え、新 ID の場所のファイルを照合の検査も取り込みも読まなくなる。
+            reuse_folder = preferred is not None and preferred == previous
             new_id = choose_new_building_id(
                 plan.old_id,
                 taken=taken,
