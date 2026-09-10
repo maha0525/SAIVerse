@@ -41,6 +41,12 @@ City は User が運営する一つの「世界」。複数の Building を束�
 
 識別子と表示名を分ける理由・不変条件・移行の経緯は [`intent/city_identity.md`](../intent/city_identity.md)。**`NAME` が付く列は表示名**（`BUILDINGNAME` / `AINAME` と同じ規則）。
 
+### Building ID（内部の識別子）
+
+`BUILDINGID` は、会話ファイルのフォルダ名（`~/.saiverse/cities/<city>/buildings/<building>/`）・URL・`saiverse://` リンクの一部としてそのまま使われる。**区切り記号（`/` `\`）を含めない**。新しく作る部屋の ID は、作成時の検査で ASCII 英数字と `_` `-` だけに限られる（`manager/ids.py`）。部屋の名前は `BUILDINGNAME` が持つ。
+
+v0.3.0 より前に作られた部屋は、ID に `/` を含むことがある（表示名「2/28」→ `2/28_city_a`）。こうした部屋は起動時に、`/` と `\` を `_` に置き換えた ID へ付け替えられる（`saiverse/building_id_repair.py`）。表示名は変わらない。どの ID をどう変えたかは `~/.saiverse/cities/<city>/building_id_renames.json` に残る。付け替える欄の一覧と経緯は [issue](../issues/building_id_contains_path_separator.md)。
+
 ### 入退室の管理
 
 エンティティ（ユーザー・ペルソナ・訪問者）の移動は **OccupancyManager**（`saiverse/occupancy_manager.py`）が一元管理し、`BuildingOccupancyLog` に記録する。ペルソナの移動は `OccupancyManager.move_entity(entity_id, entity_type, from_id, to_id)` を使う（PersonaCore のメソッドを直接呼ばない）。

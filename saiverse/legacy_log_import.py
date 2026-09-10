@@ -130,6 +130,33 @@ def _child_by_name(parent: Path, name: str) -> Optional[Path]:
     return child
 
 
+#: 部屋 ID がフォルダ名として使えず、古い会話のファイルの場所を決められないときの理由
+UNUSABLE_FOLDER_NAME_REASON = (
+    "部屋 ID に区切り記号などが含まれていて、フォルダ名として使えません"
+)
+
+
+def legacy_log_path(saiverse_home: Path, city_name: str, building_id: str) -> Optional[Path]:
+    """その部屋の旧 log.json の場所。City / Building の名前がフォルダ名として使えなければ None。
+
+    **同じ部屋のファイルを探す規則はこの 1 つだけにする。** 起動時の確認処理
+    (:func:`_scan_one_building`)、取り込み処理 (:func:`find_log_files`、名前を
+    指定されたとき)、読めないファイルを脇へ移す API が、どれも ``_child_by_name`` で
+    場所を決める。2026-09-02 に「探し方を揃えた」と書いたときは取り込み処理だけが
+    ``_child_by_name`` を通り、確認処理は素のパス結合のままだった。そのため部屋 ID
+    ``2/28_city_a`` について、確認処理は 2 段のフォルダの奥のファイルを見つけて
+    「21 件が移せていない」と数え、取り込み処理は名前を拒んで 0 件 — 警告だけが毎起動
+    出続けた (docs/issues/building_id_contains_path_separator.md)。
+    """
+    city_dir = _child_by_name(Path(saiverse_home) / "cities", city_name)
+    if city_dir is None:
+        return None
+    building_dir = _child_by_name(city_dir / "buildings", building_id)
+    if building_dir is None:
+        return None
+    return building_dir / "log.json"
+
+
 def find_log_files(
     saiverse_home: Path,
     *,
@@ -150,7 +177,9 @@ def find_log_files(
     ずれのせいで、同じ部屋について「597 件が移せていない」と「対象 log.json:
     0 件」が同時に成立し、取り込みが毎起動 0 件で空振りしながらアラートだけが
     出続けた (2026-09-02、実ユーザーの macOS 環境で実測)。**同じ部屋を探す
-    規則は 1 つに揃える。**
+    規則は 1 つに揃える** — 名前からの場所の決め方は ``_child_by_name`` 一本で、
+    検算側も :func:`legacy_log_path` 経由で同じ関数を通る (2026-09-11 に一本化。
+    それまで検算側は素のパス結合のままだった)。
     """
     cities_root = saiverse_home / "cities"
     if not cities_root.exists():
@@ -619,7 +648,8 @@ def scan_legacy_log_deficits(
         "not_imported"   ... 履歴があるのに DB に 1 行も無い
         "live_rows_only" ... ファイル時代の履歴が DB に無く、通常経路の行だけある
         "partial"        ... 取り込みはあるが一部のメッセージが DB に無い
-        "check_failed"   ... その部屋の検算自体が例外で完了しなかった
+        "check_failed"   ... その部屋の検算自体が例外で完了しなかった、または
+                             部屋 ID がフォルダ名として使えず場所を決められない
 
     部屋ひとつの失敗で検算全体を黙らせない: 例外は部屋ごとに捕まえ、"check_failed"
     として結果に載せる (黙って 0 件を返すと「漏れ無し」と区別がつかない)。
@@ -645,6 +675,7 @@ def scan_legacy_log_deficits(
                 "この部屋だけ飛ばして、他の部屋は確認します",
                 building_id, exc_info=True,
             )
+            failed_path = legacy_log_path(saiverse_home, city_name, building_id)
             deficits.append({
                 "building_id": building_id,
                 "kind": "check_failed",
@@ -653,10 +684,7 @@ def scan_legacy_log_deficits(
                 "missing": None,
                 "imported_rows": None,
                 "live_rows": None,
-                "path": str(
-                    saiverse_home / "cities" / city_name / "buildings"
-                    / building_id / "log.json"
-                ),
+                "path": str(failed_path) if failed_path is not None else None,
             })
             continue
         if deficit is not None:
@@ -671,9 +699,21 @@ def _scan_one_building(
 
     判定の意味と精度の限界は :func:`scan_legacy_log_deficits` の docstring 参照。
     """
-    log_path = (
-        saiverse_home / "cities" / city_name / "buildings" / building_id / "log.json"
-    )
+    log_path = legacy_log_path(saiverse_home, city_name, building_id)
+    if log_path is None:
+        # 取り込み処理 (find_log_files) も同じ名前を拒むので、ここで不足を数えると
+        # 「移せていない」の警告だけが直らないまま毎起動出続ける。確認できないことを
+        # そのまま報告する (docs/issues/building_id_contains_path_separator.md)。
+        return {
+            "building_id": building_id,
+            "kind": "check_failed",
+            "reason": UNUSABLE_FOLDER_NAME_REASON,
+            "file_entries": None,
+            "missing": None,
+            "imported_rows": None,
+            "live_rows": None,
+            "path": None,
+        }
     if not log_path.exists():
         return None  # Phase 2+3 以降に作られた部屋。旧ファイルが無いのは正常
 

@@ -95,6 +95,8 @@ saiverse/
 ├── meta_layer.py           # 判断 Pulse の共有基盤だけが残る（per-persona Lock / 判断ログ / 設定読み。
 │                           #   v1 メタ判断の状況分類は 2026-08-14 に退役）
 ├── buildings.py            # Building モデルヘルパ
+├── building_id_repair.py   # 区切り記号（/ \）を含む古い部屋 ID を起動時に付け替える（DB の参照・フォルダ・
+│                           #   付け替えの記録 cities/<city>/building_id_renames.json）
 ├── data_paths.py           # パス管理（user_data/builtin_data）
 ├── addon_*.py              # アドオン機構（loader/installer/registry 等）
 ├── observer_manager.py     # Observer（定期観測 Fixture）

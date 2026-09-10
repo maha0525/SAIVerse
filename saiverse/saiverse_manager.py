@@ -119,6 +119,8 @@ class SAIVerseManager(
         # --- Phase 1: Data Loading ---
         self._init_database(db_path)
         self._init_city_config(city_name)
+        # 部屋を読み込む前に、区切り記号 (/ \) を含む古い部屋 ID を付け替える
+        self._repair_building_ids_with_path_separators()
         self._init_buildings()
         self._init_file_paths()
         self._init_avatars()

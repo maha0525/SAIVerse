@@ -136,6 +136,39 @@ class InitializationMixin:
         finally:
             db.close()
 
+    def _repair_building_ids_with_path_separators(self) -> None:
+        """Step 1a: 部屋 ID に区切り記号 (/ \\) を含む部屋を、部屋を読み込む前に付け替える。
+
+        v0.3.0 より前の部屋は ID に「/」を含みうる (表示名「2/28」→ ``2/28_city_a``)。
+        そのままだと会話ファイルが 2 段のフォルダの奥にあり、過去ログの取り込みが毎起動
+        空振りする。付け替えは部屋を読み込む前 (_init_buildings) に済ませ、後段の
+        過去ログの確認処理 (_check_legacy_building_log_import) が新しい 1 段のフォルダ
+        から会話を移す。docs/issues/building_id_contains_path_separator.md
+
+        **起動は止めない。** 見送り・失敗は startup_alerts に載せる。この時点では
+        self.saiverse_home がまだ無い (_init_file_paths で決まる) ので、同じ関数で引く。
+        """
+        from saiverse.building_id_repair import (
+            repair_building_ids_with_path_separators,
+            unexpected_failure_alert,
+        )
+        from saiverse.data_paths import get_saiverse_home
+
+        try:
+            alerts = repair_building_ids_with_path_separators(
+                session_factory=self.SessionLocal,
+                db_path=self.db_path,
+                saiverse_home=get_saiverse_home(),
+                city_id=self.city_id,
+                city_slug=self.city_name,
+            )
+        except Exception as exc:
+            LOGGER.error(
+                "[building-id-repair] 部屋 ID の付け替えの処理が例外で止まりました", exc_info=True,
+            )
+            alerts = [unexpected_failure_alert(exc)]
+        self.startup_alerts.extend(alerts)
+
     def _init_buildings(self) -> None:
         """Step 1b: Load Static Assets from DB."""
         self.regions: Dict[str, Region] = self._load_regions_from_db()
