@@ -666,6 +666,25 @@ class ResumeTests(_RepairTestCase):
             [(NEW, "done"), (NEW, "done")],
         )
 
+    def test_same_new_id_is_reused_when_only_the_planned_entry_remains_after_the_folder_was_moved(self) -> None:
+        """フォルダを移した後、記録を「完了」にする前に止まり、DB だけを戻した: 記録は「予定」だけ。
+
+        新 ID の場所のフォルダは、この部屋の前の付け替えで移したもの。「完了」の記録が無くても
+        空きとみなさないと、番号を足した別の ID に付け替えて、フォルダが部屋から外れる。
+        """
+        self._add(self._building(OLD, "2/28"))
+        self._make_folder(self.buildings_root, NEW)
+        self._write_record(self._planned(db_renamed_at="x"))
+
+        self.assertEqual(self._run(), [])
+
+        self.assertEqual(self._building_ids(), [NEW])
+        self.assertTrue((self.buildings_root / NEW / "log.json").is_file())
+        self.assertEqual(
+            [(e["new_id"], e["status"]) for e in self._record()["renames"]],
+            [(NEW, "done")],
+        )
+
 
 class SkipAndFailureTests(_RepairTestCase):
     def test_skips_while_another_process_owns_the_database(self) -> None:

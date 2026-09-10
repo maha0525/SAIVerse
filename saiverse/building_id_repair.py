@@ -217,9 +217,9 @@ def choose_new_building_id(
     - 付け替え先のフォルダが、``folder_roots`` のどれかの下に既にある。
 
     ``preferred`` は前に決めて記録に書いた ID。空いていればそれを使う (記録と違う
-    ID を黙って選び直さない)。``preferred_folder_may_exist`` は「以前この部屋を付け
-    替えてフォルダを移した後に、DB だけが控えから戻された」場合 — そのフォルダは
-    自分が移したものなので、あっても空きとみなす。
+    ID を黙って選び直さない)。``preferred_folder_may_exist`` は ``preferred`` の場所の
+    フォルダを空きとみなすとき — 記録に書いた ID のフォルダは、前の付け替えでこの部屋の
+    フォルダを移したもの (その後に DB だけが控えから戻された) なので、あっても空き。
 
     戻り値がフォルダ名として安全でない ID のことがある (置き換えても Windows の
     予約名 ``CON`` などに当たる)。安全かどうかの判定は呼び出し側が持つ。None は
@@ -292,6 +292,11 @@ def legacy_folder_can_exist(
     作れなかったので、古いフォルダは無い。False のとき、フォルダの移動は飛ばして
     ID の付け替えは進める (パスとして組み立てると ``a:b`` がドライブ名 ``a:`` に
     解釈され、buildings の外を指すので、組み立てもしない)。
+
+    末尾のドット・空白や予約名 (``CON`` など) の段は False にしない。v0.2 と同じ文字列で
+    場所を組み立てれば、Windows がその名前をどう解釈しても、v0.2 がファイルを書いた
+    ときと同じ場所を指す — False にすると、実際にあるフォルダや記憶のファイルを見失う。
+    v0.2 が作れなかった名前なら、そこにはファイルもフォルダも無く、存在の確認で飛ばされる。
     """
     if windows is None:
         windows = _on_windows()
@@ -1834,19 +1839,20 @@ class _Repair:
                 )
                 self.alerts.append(_unsafe_folder_alert(plan))
                 continue
-            previous = self._previous_new_id(plan.old_id)
-            preferred = plan.new_id if plan.new_id is not None else previous
-            # 前にこの部屋を付け替えて移したフォルダは、あっても空きとみなす。記録の「予定」
-            # から来た ID でも同じ — DB だけを戻した後の付け替えが、手順 1 の後で止まったか、
-            # 照合の検査で見送られて「予定」のまま残った部屋。空きとみなさないと番号を足した
-            # 別の ID に付け替え、新 ID の場所のファイルを照合の検査も取り込みも読まなくなる。
-            reuse_folder = preferred is not None and preferred == previous
+            # preferred はどちらも、この部屋の付け替えの記録に書いた ID (記録の「予定」の新 ID、
+            # または前に付け替え終えたときの新 ID)。記録に書く時点でその ID のフォルダが無いことは
+            # 確かめてあるので、いまそこにあるフォルダは、前の付け替えでこの部屋のフォルダを
+            # 移したもの — 空きとみなす。記録が「完了」でも「予定」のままでも同じ (DB だけを
+            # 控えから戻した後で、付け替えが照合の検査で見送られた・フォルダを移した後に「完了」を
+            # 書く前に止まった)。空きとみなさないと番号を足した別の ID に付け替え、新 ID の場所の
+            # ファイルを照合の検査も取り込みも読まなくなる。
+            preferred = plan.new_id if plan.new_id is not None else self._previous_new_id(plan.old_id)
             new_id = choose_new_building_id(
                 plan.old_id,
                 taken=taken,
                 folder_roots=self.folder_roots,
                 preferred=preferred,
-                preferred_folder_may_exist=reuse_folder,
+                preferred_folder_may_exist=preferred is not None,
             )
             if new_id is None or not is_safe_path_component(new_id):
                 LOGGER.warning(

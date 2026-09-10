@@ -301,7 +301,11 @@ def _registered_room_log_files(
     書き込む。
 
     DB に登録されていない部屋 (または City) のフォルダにある log.json は取り込まず、
-    フォルダの名前を WARNING に出す。
+    フォルダの名前を WARNING に出す。WARNING に出すのは buildings (と cities) の直下の
+    フォルダだけで、入れ子のフォルダ (v0.2 で「/」入りの部屋 ID が作った 2 段のフォルダ)
+    の奥は調べない — 登録されている「/」入りの部屋は起動時の付け替えで 1 段のフォルダに
+    移り (付け替えを見送った部屋は、場所を決められない WARNING に出る)、登録されていない
+    部屋の古い会話はどのみち取り込まないので、出ないのはログの一行だけになる。
     """
     saiverse_home = Path(saiverse_home)
     cities_root = saiverse_home / "cities"
