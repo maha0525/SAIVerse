@@ -129,6 +129,8 @@ def reload_models():
     """Reload model configurations from disk without restarting the server."""
     from saiverse.model_configs import reload_configs
 
+    # 冷えたウィンドウの見張りの指紋を捨てるのは reload_configs() の側 (モデル
+    # 定義の書き換えの入口が全部そこを通るため)。ここで重ねて呼ばない。
     reload_configs()
     choices = get_model_choices_with_display_names()
     return {

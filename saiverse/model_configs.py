@@ -166,6 +166,16 @@ def reload_configs() -> Dict[str, Dict]:
     global MODEL_CONFIGS
     MODEL_CONFIGS = load_configs()
     LOGGER.info("Model configurations reloaded: %d models", len(MODEL_CONFIGS))
+
+    # 冷えたウィンドウの見張りは「前回と同じ状態なら結果も同じ」で素通しするが、
+    # その前提はモデルの定義が変わらないことに依っている。書き換えの入口は複数
+    # ある (作成・更新・削除・複製・chat から保存・reload-models ルート) が、
+    # 全部この読み直しを通るので、記録を捨てる呼び出しはここに一本だけ置く。
+    # import はここで行う: session_lifecycle 側が設定を読むため、モジュール
+    # 先頭に置くと循環参照になる。
+    from sea.session_lifecycle import invalidate_cold_sweep_fingerprints
+
+    invalidate_cold_sweep_fingerprints()
     return MODEL_CONFIGS
 
 

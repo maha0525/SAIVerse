@@ -18,9 +18,11 @@ SEA 監査 S1/S8 の根治を固定する:
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import threading
+import time
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -1748,6 +1750,594 @@ def test_run_cold_precompaction_skips_when_only_perception_over_budget(
             assert len(warned) == 1
     run.assert_not_called()
     backlog.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# §14-4 見張りの素通しゲート (2026-09-10)
+# ---------------------------------------------------------------------------
+
+
+def _cold_sweep_setup(session_factory, rows=None, watermarks=None):
+    """見張りテスト用: "due" が立つ persona を 1 体だけ載せた lifecycle。
+
+    ``state`` の中身 (行・水位) を書き換えると、次の tick が新しい状態を読む。
+    """
+    from sea.eviction_plan import Watermarks
+
+    lc = _cold_ready_lifecycle(session_factory)
+    persona = SimpleNamespace(
+        persona_id=PERSONA_ID, model="model-a", current_building_id="room",
+    )
+    lc.manager.personas = {PERSONA_ID: persona}
+    stale = _now() - timedelta(days=3)
+    lc.upsert_anchor_entry(PERSONA_ID, "model-a", {
+        "anchor_id": "m1", "updated_at": stale.isoformat(), "ttl_seconds": 300,
+    })
+    state = {
+        # 中間値 = 3,000 字。3,500 字の行で "due"。
+        "watermarks": watermarks or Watermarks(target=2000, high=4000),
+        "rows": rows if rows is not None else [{"id": "m1", "content": "x" * 3500}],
+    }
+    return lc, persona, state
+
+
+@contextlib.contextmanager
+def _cold_sweep_env(lc, state):
+    """先回り畳みの門を開け、行と水位を ``state`` から引かせる。
+
+    差し替えるのは畳みの**本体** (run_metabolism → ``state["result"]``) だけで、
+    run_cold_precompaction は本物を通す。指紋の記録は本体を通した直後・Beat
+    ロックの内側にあるので、run_cold_precompaction を丸ごと mock すると記録が
+    一度も起きず、ゲートの検証にならない。
+
+    yield するのは run_cold_precompaction を包んだ spy — 「その tick で spawn
+    されたか」はこの呼び出し回数で数え、各回の戻り値は ``run.results`` に並ぶ。
+    """
+    state.setdefault("result", "ok")
+    original = lc.run_cold_precompaction
+    results = []
+
+    def _spy(persona):
+        result = original(persona)
+        results.append(result)
+        return result
+
+    with patch.object(lc, "is_chronicle_enabled_for_persona", return_value=True), \
+            patch.object(lc, "is_autonomous_chronicle_enabled_for_persona",
+                         return_value=True), \
+            patch.object(lc, "get_metabolism_watermarks",
+                         side_effect=lambda *a, **k: state["watermarks"]), \
+            patch.object(lc, "get_presented_window",
+                         side_effect=lambda *a, **k: _window("m1", state["rows"])), \
+            patch.object(lc, "run_metabolism",
+                         side_effect=lambda *a, **k: state["result"]), \
+            patch.object(lc, "run_cold_precompaction", side_effect=_spy) as run:
+        run.results = results
+        yield run
+
+
+def _wait_cold_sweep_idle(lc, timeout=5.0):
+    """spawn された daemon スレッドが走り終える (= 指紋を記録し終える) まで待つ。"""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        with lc._cold_sweep_lock:
+            if not lc._cold_sweep_inflight:
+                return
+        time.sleep(0.01)
+    raise AssertionError("cold pre-compaction thread did not finish in time")
+
+
+def test_cold_sweep_tick_spawns_on_first_pass(session_factory):
+    """指紋の記録が無い一巡目は従来どおり spawn する。"""
+    lc, _persona, state = _cold_sweep_setup(session_factory)
+
+    with _cold_sweep_env(lc, state) as run:
+        assert lc.cold_precompaction_status(lc.manager.personas[PERSONA_ID]) == "due"
+        lc._cold_window_sweep_tick()
+        _wait_cold_sweep_idle(lc)
+        assert run.call_count == 1
+
+
+def test_cold_sweep_tick_skips_when_state_unchanged(session_factory):
+    """試行が完了したあと状態が動かなければ、次の tick は素通しする。
+
+    見張りに記憶が無いと、変わらない persona へ同じ判定・同じ失敗を 10 分ごとに
+    繰り返す (2026-09-10 実害: 404 に 88 連続再試行)。
+    """
+    lc, _persona, state = _cold_sweep_setup(session_factory)
+
+    with _cold_sweep_env(lc, state) as run:
+        lc._cold_window_sweep_tick()
+        _wait_cold_sweep_idle(lc)
+        assert run.call_count == 1
+
+        lc._cold_window_sweep_tick()
+        _wait_cold_sweep_idle(lc)
+        assert run.call_count == 1  # 状態不変 → spawn しない
+
+
+def test_cold_sweep_tick_respawns_when_rows_change(session_factory):
+    """新しい行が積まれたら (行数と最終行 id が動く) 再び試行する。"""
+    lc, _persona, state = _cold_sweep_setup(session_factory)
+
+    with _cold_sweep_env(lc, state) as run:
+        lc._cold_window_sweep_tick()
+        _wait_cold_sweep_idle(lc)
+        assert run.call_count == 1
+
+        state["rows"] = state["rows"] + [{"id": "m2", "content": "y" * 500}]
+        lc._cold_window_sweep_tick()
+        _wait_cold_sweep_idle(lc)
+        assert run.call_count == 2
+
+
+def test_cold_sweep_tick_respawns_when_row_content_is_edited(session_factory):
+    """行数も字数も同じまま既存行の本文だけが変わった回も再び試行する。
+
+    数だけの指紋は、記憶の設定画面の本文編集のように「同じ字数の別内容へ
+    差し替える」変化を見落とし、編集後の窓を試行済みとして素通しさせる
+    (Codex 指摘 2026-09-10)。
+    """
+    lc, _persona, state = _cold_sweep_setup(session_factory, rows=[
+        {"id": "m1", "content": "a" * 100},
+        {"id": "m2", "content": "b" * 200},
+        {"id": "m3", "content": "c" * 3200},
+    ])
+
+    with _cold_sweep_env(lc, state) as run:
+        lc._cold_window_sweep_tick()
+        _wait_cold_sweep_idle(lc)
+        assert run.call_count == 1
+
+        # 中間の行だけ、字数を変えずに別内容へ差し替える
+        # (行数・最終行 id・保存行の字数はどれも動かない)。
+        state["rows"] = [
+            state["rows"][0],
+            {"id": "m2", "content": "z" * 200},
+            state["rows"][2],
+        ]
+        lc._cold_window_sweep_tick()
+        _wait_cold_sweep_idle(lc)
+        assert run.call_count == 2
+
+
+def test_cold_sweep_tick_respawns_when_watermarks_change(session_factory):
+    """水位 (残す量・上限) が変われば同じ行でも判定が変わりうる → 再び試行する。"""
+    from sea.eviction_plan import Watermarks
+
+    lc, _persona, state = _cold_sweep_setup(session_factory)
+
+    with _cold_sweep_env(lc, state) as run:
+        lc._cold_window_sweep_tick()
+        _wait_cold_sweep_idle(lc)
+        assert run.call_count == 1
+
+        state["watermarks"] = Watermarks(target=1000, high=3000)
+        lc._cold_window_sweep_tick()
+        _wait_cold_sweep_idle(lc)
+        assert run.call_count == 2
+
+
+def test_cold_sweep_deferred_attempt_is_retried_next_tick(session_factory):
+    """"deferred" (Beat の関所が閉じていた) は試行前の引き返しなので記録しない。"""
+    from sea.beat_gate import BeatGateClosedError
+
+    lc, _persona, state = _cold_sweep_setup(session_factory)
+
+    @contextlib.contextmanager
+    def _closed_gate(persona_id, purpose=None, check_gate=True):
+        raise BeatGateClosedError(persona_id, purpose or "metabolism")
+        yield  # pragma: no cover - 到達しない (関所は開かない)
+
+    lc.manager.beat_gate = SimpleNamespace(hold=_closed_gate)
+
+    with _cold_sweep_env(lc, state) as run:
+        lc._cold_window_sweep_tick()
+        _wait_cold_sweep_idle(lc)
+        assert run.call_count == 1
+        assert run.results == ["deferred"]
+        assert lc._cold_sweep_fingerprints == {}
+
+        lc._cold_window_sweep_tick()
+        _wait_cold_sweep_idle(lc)
+        assert run.call_count == 2  # 状態不変でも再訪する
+
+
+def test_cold_sweep_hot_attempt_is_retried_next_tick(session_factory):
+    """"hot" (生きたキャッシュを見て引き返した) も記録しない — 同上。
+
+    tick 側の事前判定からロック取得までの間にユーザー Pulse が anchor を touch
+    した状況を、ロック取得時に touch する fake gate で再現する (既存の
+    test_run_cold_precompaction_rechecks_under_beat_lock と同じ作り)。次の tick
+    のために anchor を冷え直させ、記録が無いので再訪することを見る。
+    """
+    lc, _persona, state = _cold_sweep_setup(session_factory)
+    stale = _now() - timedelta(days=3)
+
+    @contextlib.contextmanager
+    def _warming_gate(persona_id, purpose=None, check_gate=True):
+        lc.upsert_anchor_entry(PERSONA_ID, "model-a", {
+            "anchor_id": "m1", "updated_at": _now().isoformat(),
+            "ttl_seconds": 3600,
+        })
+        yield
+
+    lc.manager.beat_gate = SimpleNamespace(hold=_warming_gate)
+
+    def _cool_the_anchor():
+        # TTL は縮められない (短い書き込みは生きたキャッシュを短縮しない) ので、
+        # 同じ TTL のまま更新時刻だけ 3 日前へ戻す = 失効させる。
+        lc.upsert_anchor_entry(PERSONA_ID, "model-a", {
+            "anchor_id": "m1", "updated_at": stale.isoformat(), "ttl_seconds": 3600,
+        })
+
+    with _cold_sweep_env(lc, state) as run:
+        lc._cold_window_sweep_tick()
+        _wait_cold_sweep_idle(lc)
+        assert run.call_count == 1
+        assert run.results == ["hot"]
+        assert lc._cold_sweep_fingerprints == {}
+
+        _cool_the_anchor()
+        lc._cold_window_sweep_tick()
+        _wait_cold_sweep_idle(lc)
+        assert run.call_count == 2
+        assert lc._cold_sweep_fingerprints == {}
+
+
+def test_cold_sweep_skip_attempt_is_retried_next_tick(session_factory):
+    """"skip" (会話の行が残す量以下) も記録しない。
+
+    この経路は、知覚だけが大きいペルソナの提示の節約
+    (_handle_perception_over_budget、presented_context_reduction.md 設計 6) の
+    入口で、その発火材料 (部屋の様子の変化) は指紋の外にある。記録すると
+    入口が閉じたままになる。LLM を呼ばないので毎 tick 再訪してよい。
+    """
+    from sea.eviction_plan import Watermarks
+
+    lc, _persona, state = _cold_sweep_setup(
+        session_factory,
+        rows=[{"id": "m1", "content": "x" * 10000}],
+        watermarks=Watermarks(target=18000, high=26000),  # 中間値 = 22,000
+    )
+
+    with _cold_sweep_env(lc, state) as run, \
+            patch.object(lc, "perception_blocks_for",
+                         return_value=[_perception_block(30000)]), \
+            patch.object(lc, "reduce_presentation") as reduce_call:
+        # 合計 40,000 > 中間値 22,000 で "due"、行 10,000 <= 残す量 18,000 で
+        # 本体へ入らず "skip"。
+        lc._cold_window_sweep_tick()
+        _wait_cold_sweep_idle(lc)
+        assert run.call_count == 1
+        assert run.results == ["skip"]
+        assert lc._cold_sweep_fingerprints == {}
+
+        lc._cold_window_sweep_tick()
+        _wait_cold_sweep_idle(lc)
+        assert run.call_count == 2  # 状態不変でも再訪する (節約の入口を閉じない)
+        assert reduce_call.call_count == 2  # 節約の入口は毎 tick 開いている
+
+
+def test_cold_sweep_gate_passes_when_fingerprint_unavailable(session_factory):
+    """指紋が取れない (None) 回は素通しさせず従来どおり試行する。
+
+    ゲートは節約であって門ではない — 判定不能を「変化なし」に丸めない。
+    """
+    lc, persona, state = _cold_sweep_setup(session_factory)
+
+    with _cold_sweep_env(lc, state) as run:
+        lc._cold_window_sweep_tick()
+        _wait_cold_sweep_idle(lc)
+        assert run.call_count == 1
+        assert lc._cold_sweep_fingerprints  # 一巡目で記録済み
+
+        with patch.object(lc, "_cold_sweep_fingerprint", return_value=None):
+            assert lc._cold_sweep_is_unchanged(persona) is False
+            lc._cold_window_sweep_tick()
+            _wait_cold_sweep_idle(lc)
+            assert run.call_count == 2
+
+
+def test_cold_sweep_fingerprint_is_recorded_inside_the_beat_lock(session_factory):
+    """指紋の記録は Beat ロックを握ったまま行う。
+
+    ロックを手放してから記録すると、その隙間で会話経路の Metabolism や新しい
+    発言が状態を進め、冷えた試行が一度も見ていない状態を「試行後の状態」として
+    焼いてしまう。以後その新しい状態が素通しする (Codex 指摘 2026-09-10)。
+    """
+    lc, _persona, state = _cold_sweep_setup(session_factory)
+    seen_inside = []
+
+    @contextlib.contextmanager
+    def _observing_gate(persona_id, purpose=None, check_gate=True):
+        yield
+        # ここはまだロックの内側 — 記録が済んでいなければならない。
+        with lc._cold_sweep_lock:
+            seen_inside.append(dict(lc._cold_sweep_fingerprints))
+
+    lc.manager.beat_gate = SimpleNamespace(hold=_observing_gate)
+
+    with _cold_sweep_env(lc, state) as run:
+        lc._cold_window_sweep_tick()
+        _wait_cold_sweep_idle(lc)
+        assert run.call_count == 1
+    assert seen_inside and PERSONA_ID in seen_inside[0]
+
+
+def test_invalidate_cold_sweep_fingerprints_forces_a_retry(session_factory):
+    """設定を読み直したら記録を捨てる — 直したのに二度と試されない状態を作らない。
+
+    一度 "failed" を記録したあと provider の endpoint や API キーを直しても、
+    行も水位も model 名も動かないので指紋は一致し続ける (Codex 指摘 2026-09-10)。
+    """
+    lc, _persona, state = _cold_sweep_setup(session_factory)
+    state["result"] = "failed"
+
+    with _cold_sweep_env(lc, state) as run:
+        lc._cold_window_sweep_tick()
+        _wait_cold_sweep_idle(lc)
+        assert run.call_count == 1
+        assert lc._cold_sweep_fingerprints  # "failed" も試行済みとして記録される
+
+        lc._cold_window_sweep_tick()
+        _wait_cold_sweep_idle(lc)
+        assert run.call_count == 1  # 状態不変 → 素通し
+
+        lc.invalidate_cold_sweep_fingerprints()
+        assert lc._cold_sweep_fingerprints == {}
+        lc._cold_window_sweep_tick()
+        _wait_cold_sweep_idle(lc)
+        assert run.call_count == 2
+
+
+def test_module_level_invalidate_reaches_the_running_lifecycle(session_factory):
+    """設定ルートが使う口が manager → sea_runtime → session_lifecycle まで届く。
+
+    ルート側 (config の reload-models / providers の reload / admin の API キー
+    更新) は manager を持っていないことがあるので、app_state から引く経路を
+    通す。この参照経路が切れると、記録を捨てる呼び出しが黙って空振りする。
+    """
+    import saiverse.app_state as app_state
+    from sea.session_lifecycle import invalidate_cold_sweep_fingerprints
+
+    lc = _cold_ready_lifecycle(session_factory)
+    lc._cold_sweep_fingerprints[PERSONA_ID] = ("stale",)
+    fake_manager = SimpleNamespace(sea_runtime=SimpleNamespace(session_lifecycle=lc))
+
+    with patch.object(app_state, "manager", fake_manager):
+        invalidate_cold_sweep_fingerprints()
+    assert lc._cold_sweep_fingerprints == {}
+
+    # 世界が起動していない (manager が None) 環境でも例外にしない。
+    with patch.object(app_state, "manager", None):
+        invalidate_cold_sweep_fingerprints()
+
+
+def _fingerprinted_lifecycle(session_factory):
+    """"前回試した" 記録を 1 件持った lifecycle と、それを配る偽 manager。"""
+    lc = _cold_ready_lifecycle(session_factory)
+    lc._cold_sweep_fingerprints[PERSONA_ID] = ("stale",)
+    fake_manager = SimpleNamespace(
+        sea_runtime=SimpleNamespace(session_lifecycle=lc), personas={},
+    )
+    return lc, fake_manager
+
+
+def test_model_config_reload_invalidates_cold_sweep_fingerprints(session_factory):
+    """モデル定義の読み直しそのものが、記録を捨てる入口になっている。
+
+    モデルの作成・更新・削除・複製・chat からの保存・reload-models ルートは、
+    どれも自分では失効を呼ばず ``model_configs.reload_configs()`` を呼ぶ。
+    失効をルート側に配ると、後から増えた入口だけが黙って漏れる (Codex 指摘
+    2026-09-10) ので、呼び出しは漏斗の側に一本だけ置く。
+    """
+    import saiverse.app_state as app_state
+    from saiverse import model_configs
+
+    lc, fake_manager = _fingerprinted_lifecycle(session_factory)
+
+    with patch.object(app_state, "manager", fake_manager):
+        model_configs.reload_configs()
+    assert lc._cold_sweep_fingerprints == {}
+
+
+def test_provider_config_reload_invalidates_cold_sweep_fingerprints(session_factory):
+    """プロバイダ定義の読み直しも同じ漏斗で記録を捨てる。"""
+    import saiverse.app_state as app_state
+    from saiverse import provider_configs
+
+    lc, fake_manager = _fingerprinted_lifecycle(session_factory)
+
+    with patch.object(app_state, "manager", fake_manager):
+        provider_configs.reload_configs()
+    assert lc._cold_sweep_fingerprints == {}
+
+
+def test_provider_save_reaches_the_invalidation_through_the_reload(
+    session_factory, tmp_path, monkeypatch,
+):
+    """プロバイダの保存 (作成・更新の実体) も、漏斗を通って失効まで届く。
+
+    保存も削除も内部で ``reload_configs()`` を呼ぶので、ルート側に失効の配線を
+    足さなくても届く — その経路がつながっていることをここで固定する。
+    """
+    import saiverse.app_state as app_state
+    from saiverse import provider_configs
+
+    lc, fake_manager = _fingerprinted_lifecycle(session_factory)
+    # 実ユーザーの ~/.saiverse を汚さない: 書き込み先だけ一時ディレクトリへ。
+    monkeypatch.setattr(provider_configs, "USER_DATA_DIR", tmp_path)
+
+    with patch.object(app_state, "manager", fake_manager):
+        provider_configs.save_provider(
+            "cold-sweep-test-provider",
+            {"protocol": "openai_compat", "base_url": "http://localhost:9/v1"},
+        )
+    assert lc._cold_sweep_fingerprints == {}
+
+
+def test_write_env_updates_invalidates_for_any_variable(
+    session_factory, tmp_path, monkeypatch,
+):
+    """環境設定の更新は、鍵でない変数でも記録を捨てる。
+
+    旧実装は名前に KEY / TOKEN / SECRET を含む変数のときだけ失効していたが、
+    例えば接続先の許可ホスト (SAIVERSE_PROVIDER_ALLOWED_HOSTS) の変更も LLM
+    接続の成否を変える。失効は「全員をもう一回だけ再検査させる」だけの安い
+    操作なので、絞る精度より漏れの無さを採る (Codex 指摘 2026-09-10)。
+    """
+    import saiverse.app_state as app_state
+    from api.routes import admin
+
+    lc, fake_manager = _fingerprinted_lifecycle(session_factory)
+    monkeypatch.setattr(admin, "ENV_FILE_PATH", tmp_path / ".env")
+    monkeypatch.setenv("SAIVERSE_PROVIDER_ALLOWED_HOSTS", "old.example")
+
+    with patch.object(app_state, "manager", fake_manager):
+        admin.write_env_updates(
+            {"SAIVERSE_PROVIDER_ALLOWED_HOSTS": "new.example"}
+        )
+
+    assert lc._cold_sweep_fingerprints == {}
+    assert os.environ["SAIVERSE_PROVIDER_ALLOWED_HOSTS"] == "new.example"
+
+
+def test_cold_sweep_fingerprint_excludes_perception_chars(session_factory):
+    """指紋は保存行ベースだけ — 時変の知覚ブロックを混ぜるとゲートが死ぬ。"""
+    lc, persona, state = _cold_sweep_setup(session_factory)
+
+    with _cold_sweep_env(lc, state):
+        with patch.object(lc, "perception_blocks_for", return_value=[]):
+            base = lc._cold_sweep_fingerprint(persona)
+        with patch.object(lc, "perception_blocks_for",
+                          return_value=[_perception_block(9000)]):
+            assert lc._cold_sweep_fingerprint(persona) == base
+
+
+def test_cold_sweep_deferred_sluice_unseen_is_retried_next_tick(session_factory):
+    """"deferred_sluice_unseen" は記録しない — 再実行に意味が残る戻り値。
+
+    run_metabolism はこの戻り値で「退場だけ次回へ譲り、再実行すれば続きから
+    整理する」と約束している。採取とマーカーの前進は確定済みなので、保存行が
+    一行も動かないまま再実行しても続きが進む。記録するとその約束が凍る
+    (Codex 指摘 2026-09-10)。
+    """
+    lc, _persona, state = _cold_sweep_setup(session_factory)
+    state["result"] = "deferred_sluice_unseen"
+
+    with _cold_sweep_env(lc, state) as run:
+        lc._cold_window_sweep_tick()
+        _wait_cold_sweep_idle(lc)
+        assert run.call_count == 1
+        assert run.results == ["deferred_sluice_unseen"]
+        assert lc._cold_sweep_fingerprints == {}
+
+        lc._cold_window_sweep_tick()
+        _wait_cold_sweep_idle(lc)
+        assert run.call_count == 2  # 状態不変でも再訪する
+
+
+def test_cold_sweep_fingerprint_dropped_when_config_reloads_mid_run(session_factory):
+    """走行中に設定を読み直したら、その走行の指紋は記録しない。
+
+    dict を clear するだけだと、読み直しの時点で旧設定のまま走っていた試行が
+    完了して空の dict へ古い指紋を書き戻し、修復後の再試行が抑止される
+    (Codex 指摘 2026-09-10)。設定の札 (generation) で弾く。
+    """
+    lc, _persona, state = _cold_sweep_setup(session_factory)
+    state["result"] = "failed"
+
+    def _reload_then_fail(*args, **kwargs):
+        # 畳みの本体の内側 = 記録より前に設定が読み直された状況を決定論で作る。
+        lc.invalidate_cold_sweep_fingerprints()
+        return state["result"]
+
+    with _cold_sweep_env(lc, state) as run:
+        with patch.object(lc, "run_metabolism", side_effect=_reload_then_fail):
+            lc._cold_window_sweep_tick()
+            _wait_cold_sweep_idle(lc)
+        assert run.call_count == 1
+        assert lc._cold_sweep_fingerprints == {}  # 古い走行の指紋は書き戻らない
+
+        lc._cold_window_sweep_tick()
+        _wait_cold_sweep_idle(lc)
+        assert run.call_count == 2  # 修復後の再試行が届く
+
+
+def test_cold_sweep_gate_passes_when_fingerprint_raises(session_factory):
+    """指紋の計算が例外で落ちた回も試行へ進む (ゲートは節約であって門ではない)。
+
+    例外をそのまま投げると tick 側のペルソナ単位 except に届き、その回の spawn
+    ごと落ちる — 節約のための計算が畳みを止めてしまう (Codex 指摘 2026-09-10)。
+    """
+    lc, persona, state = _cold_sweep_setup(session_factory)
+
+    with _cold_sweep_env(lc, state) as run:
+        lc._cold_window_sweep_tick()
+        _wait_cold_sweep_idle(lc)
+        assert run.call_count == 1
+        assert lc._cold_sweep_fingerprints  # 一巡目で記録済み
+
+        with patch.object(lc, "_cold_sweep_fingerprint",
+                          side_effect=RuntimeError("fingerprint boom")):
+            assert lc._cold_sweep_is_unchanged(persona) is False
+            lc._cold_window_sweep_tick()
+            _wait_cold_sweep_idle(lc)
+            assert run.call_count == 2
+
+
+def test_cold_sweep_fingerprint_survives_non_dict_rows(session_factory):
+    """提示の並びに dict でない要素が混ざっても指紋の計算は落ちない。"""
+    lc, persona, state = _cold_sweep_setup(session_factory, rows=[
+        {"id": "m1", "content": "x" * 3500},
+        "壊れた並びの行 (dict ではない)",
+    ])
+
+    with _cold_sweep_env(lc, state):
+        fingerprint = lc._cold_sweep_fingerprint(persona)
+
+    assert fingerprint is not None
+    assert fingerprint[2] == 2        # 行数には数える
+    assert fingerprint[3] is None     # 最終行の id は取れないので None 扱い
+
+
+def test_rows_content_digest_is_not_confused_by_control_chars(session_factory):
+    """本文に区切りの制御文字が入っていても、行の切れ目が混ざらない。
+
+    区切りを生の 0x1f / 0x1e に頼ると、「2 行」と「その 2 行を区切り文字ごと
+    連結した 1 行」が同じバイト列に畳まれる (Codex 指摘 2026-09-10)。各
+    フィールドにバイト長を前置して、読み進める位置を本文の中身から独立させる。
+    """
+    from sea.session_lifecycle import _rows_content_digest
+
+    two_rows = [
+        {"id": "m1", "content": "aaa"},
+        {"id": "m2", "content": "bbb"},
+    ]
+    # 旧方式 (id \x1f content \x1e の連結) だと、この 1 行は上の 2 行と
+    # まったく同じバイト列になる。
+    one_row = [{"id": "m1", "content": "aaa\x1em2\x1fbbb"}]
+
+    assert _rows_content_digest(two_rows) != _rows_content_digest(one_row)
+
+
+def test_cold_sweep_respawns_when_persona_moves(session_factory):
+    """部屋を移ったら再び試行する — 保存行が動かない状態変化も再検査の合図。"""
+    lc, persona, state = _cold_sweep_setup(session_factory)
+
+    with _cold_sweep_env(lc, state) as run:
+        lc._cold_window_sweep_tick()
+        _wait_cold_sweep_idle(lc)
+        assert run.call_count == 1
+
+        before = lc._cold_sweep_fingerprint(persona)
+        persona.current_building_id = "another_room"
+        assert lc._cold_sweep_fingerprint(persona) != before
+
+        lc._cold_window_sweep_tick()
+        _wait_cold_sweep_idle(lc)
+        assert run.call_count == 2
 
 
 def test_emergency_precompaction_skip_below_high(session_factory):

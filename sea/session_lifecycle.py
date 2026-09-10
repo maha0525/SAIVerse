@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import threading
@@ -39,6 +40,62 @@ LOGGER = logging.getLogger(__name__)
 # 要る — 両方 None に潰すと、検査が壊れている並びで stale な head が「組み直せ
 # ました」の顔で通り、知らせるための機構が黙る (Codex 指摘 2026-09-01)。
 _WEAVE_INSPECT_FAILED = object()
+
+
+def _rows_content_digest(rows: Sequence[Dict[str, Any]]) -> str:
+    """保存行の (id, 本文) を順序込みで畳んだダイジェスト (sha256 の hex)。
+
+    :meth:`SessionLifecycle._cold_sweep_fingerprint` が「行数も字数も同じまま
+    本文だけが差し替わった」変化を見るために使う。content が None の行は空文字
+    として数える (例外を出さない)。
+
+    各フィールドは「バイト長を ASCII 数字で書いて ``:`` を置き、その後に本体」
+    という形 (netstring) で流し込む。区切り文字を本文の中身から独立させるため:
+    生の制御文字 (0x1f / 0x1e) を区切りに使うと、本文にその文字が入っている
+    行の並びが、別の行構成と同じバイト列に畳まれうる (Codex 指摘 2026-09-10)。
+    長さを前置すれば、読み進める位置が本文の中身で動かないので衝突しない。
+    """
+    digest = hashlib.sha256()
+
+    def _feed(value: Any) -> None:
+        raw = ("" if value is None else str(value)).encode("utf-8", "replace")
+        digest.update(str(len(raw)).encode("ascii"))
+        digest.update(b":")
+        digest.update(raw)
+
+    for row in rows:
+        if isinstance(row, dict):
+            row_id = row.get("id")
+            content = row.get("content")
+        else:  # 想定外の形 (dict でない要素) でも落ちずに区別だけは残す
+            row_id, content = None, row
+        _feed(row_id)
+        _feed(content)
+    return digest.hexdigest()
+
+
+def invalidate_cold_sweep_fingerprints() -> None:
+    """走行中の世界の見張りの指紋を捨てる (設定を読み直す入口から呼ぶ)。
+
+    :meth:`SessionLifecycle.invalidate_cold_sweep_fingerprints` へ届けるだけの
+    薄い口。model / provider / API キーを直す API ルートは manager を持って
+    いないことがあるので、ここで app_state から引く。世界がまだ起動していない
+    (manager が None) 場合は何もしない — 起動時に指紋は空から始まる。
+    """
+    try:
+        from saiverse.app_state import manager
+        lifecycle = getattr(
+            getattr(manager, "sea_runtime", None), "session_lifecycle", None,
+        )
+        if lifecycle is None:
+            return
+        lifecycle.invalidate_cold_sweep_fingerprints()
+    except Exception:
+        LOGGER.warning(
+            "[metabolism] failed to clear cold sweep fingerprints after a config "
+            "reload; a persona whose last attempt failed may keep being skipped "
+            "until the next state change", exc_info=True,
+        )
 
 
 def _rate_limit_cooldown_seconds() -> float:
@@ -94,6 +151,24 @@ class SessionLifecycle:
     #: 検知しても実害は無い — 先回り畳みは「次の会話再開より前」に済めばよい。
     COLD_SWEEP_INTERVAL_SECONDS = 600
     _COLD_SWEEP_KEY = "metabolism:cold_window_sweep"
+    #: :meth:`run_metabolism` の戻り値のうち「畳みを試行し終えた」もの。
+    #: :meth:`run_cold_precompaction` はこの回だけ見張りの指紋を記録する。
+    #: 本体へ入る前に戻った回 ("hot" = 温まったキャッシュを見て引き返した、
+    #: "deferred" = Beat の関所が閉じていた、"cool"、"skip") は記録しない —
+    #: 次の tick で普通に再訪させる。
+    #:
+    #: "skip" (会話の行が残す量以下) も含めない。この経路は、知覚だけが大きい
+    #: ペルソナの提示の節約 (:meth:`_handle_perception_over_budget`、
+    #: presented_context_reduction.md 設計 6) の入口であり、その発火材料
+    #: (部屋の様子の変化) は指紋の外にある。記録するとこの入口が閉じたままに
+    #: なる。LLM を呼ばない経路なので、毎 tick 再訪して構わない。
+    #:
+    #: "deferred_sluice_unseen" も含めない。:meth:`run_metabolism` はこの戻り値
+    #: で「退場だけ次回へ譲り、再実行すれば続きから整理する」と約束している —
+    #: 保存行が一行も動かなくても、スルース側の読み終えた位置は進んでいるので、
+    #: 同じ状態での再実行に意味がある。記録するとその約束を凍らせてしまう
+    #: (Codex 指摘 2026-09-10)。
+    _COLD_SWEEP_ATTEMPTED_RESULTS = frozenset({"ok", "nothing", "failed"})
 
     def __init__(self, runtime: "SEARuntime", manager_ref: Any) -> None:
         self.runtime = runtime      # 過渡期の後方参照 (設計書 §4 で削減)
@@ -101,6 +176,20 @@ class SessionLifecycle:
         # §14-4 先回り畳みの実行中 persona (persona ごとに同時 1 本)
         self._cold_sweep_lock = threading.Lock()
         self._cold_sweep_inflight: Set[str] = set()
+        # 見張りが前回**試行を終えた**ときの状態の指紋 (persona_id → tuple、
+        # :meth:`_cold_sweep_fingerprint`)。見張りに記憶が無いと、状態が変わらない
+        # ペルソナへ同じ判定・同じ失敗を 10 分ごとに繰り返す (2026-09-10 実害:
+        # スルースの LLM が 404 を返す persona に 88 回連続で再試行した)。前回
+        # 試行時と保存行が同じなら素通しする。永続化しない — 再起動でクリアされ、
+        # 全員が一度だけ再検査されるのは設計どおり (錠は _cold_sweep_lock を共用)。
+        self._cold_sweep_fingerprints: Dict[str, tuple] = {}
+        # 指紋の「何回目の設定で取られたものか」を数える札。設定を読み直す
+        # (invalidate_cold_sweep_fingerprints) たびに +1 する。走行を始めた時点で
+        # 控えた札と、記録しようとする時点の札が違えば、その走行は捨てられた前提
+        # (古い endpoint / 古い API キー) の上で得た結果なので記録しない — clear
+        # した直後の dict へ古い走行の指紋が書き戻されると、直したのに二度と
+        # 再試行されない状態が復活する (Codex 指摘 2026-09-10)。
+        self._cold_sweep_generation = 0
         # generate_chronicle が "failed" を返した直近の理由 (error_code /
         # user_message / batch_meta)。戻り値の契約 (status 文字列) を変えずに、
         # 手動生成のジョブ UI が empty_response 等の案内と「該当メッセージを
@@ -4401,12 +4490,29 @@ class SessionLifecycle:
         スレッドへ逃がす — EventScheduler の dispatch スレッドで重い LLM 処理を
         同期実行すると後続の予約が滞るため (saiverse/event_scheduler.py の
         docstring: 重い処理は別 thread に投げる)。
+
+        "due" でも、前回の試行から状態が動いていない persona は素通しする
+        (:meth:`_cold_sweep_fingerprint`)。指紋が取れない (None) ときは素通し
+        させず従来どおり試行する — ゲートは節約であって門ではない。
         """
         try:
             personas = dict(getattr(self.manager, "personas", None) or {})
+            with self._cold_sweep_lock:
+                # 削除・退場した persona の指紋は自然には消えないので、巡回の
+                # たびに現存しないキーを落とす (_cold_sweep_inflight は実行完了で
+                # 自然に消えるが、指紋は明示的に掃除しないと残り続ける)。
+                for stale in set(self._cold_sweep_fingerprints) - personas.keys():
+                    del self._cold_sweep_fingerprints[stale]
             for persona in personas.values():
                 try:
                     if self.cold_precompaction_status(persona) != "due":
+                        continue
+                    if self._cold_sweep_is_unchanged(persona):
+                        LOGGER.debug(
+                            "[metabolism] cold sweep skip: state unchanged since "
+                            "last attempt (persona=%s)",
+                            getattr(persona, "persona_id", "?"),
+                        )
                         continue
                     self._spawn_cold_precompaction(persona)
                 except Exception:
@@ -4416,6 +4522,144 @@ class SessionLifecycle:
                     )
         finally:
             self.schedule_cold_window_sweep()
+
+    def _cold_sweep_fingerprint(self, persona) -> Optional[tuple]:
+        """見張りが「前回の試行から状態が動いたか」を見るための指紋。
+
+        中身は**保存行ベースの値と現在地の部屋だけ** — (実行 model, 現行 model の
+        起点, 提示ウィンドウの行数, 最終行の id, 保存行の字数, 残す量, 上限,
+        保存行の中身のダイジェスト, 現在地の建物 id)。知覚ブロックの字数
+        (:meth:`presented_chars`) は意図的に入れない: 部屋の様子など時変の内容が
+        混ざると毎回「変化あり」になり、ゲートが死ぬ。現在地の建物 id は
+        時変ではなく離散的な状態変化 (移動) で、保存行を一行も動かさずに起きる
+        ことがあるので、再検査の合図として入れる (ローカルレビュー指摘 2026-09-10)。
+
+        中身のダイジェストが要るのは、行数も字数も動かさずに既存行の本文だけが
+        差し替わる経路があるため (Memory 設定 UI の本文編集など)。数だけの指紋は
+        その変化を見落とし、編集後の窓を「試行済み」として素通しさせてしまう
+        (Codex 指摘 2026-09-10)。
+
+        必要なデータが取れないときは None を返す (呼び出し側は「判定不能 =
+        素通しさせず従来どおり試行」として扱う)。
+        """
+        persona_id = getattr(persona, "persona_id", None)
+        model_key = str(getattr(persona, "model", "") or "") or None
+        if not persona_id or not model_key:
+            return None
+        watermarks = self.get_metabolism_watermarks(persona, model_key)
+        if watermarks is None or watermarks.high is None:
+            return None
+        entry = self.load_anchor_entry(persona_id, model_key)
+        anchor_id = (entry or {}).get("anchor_id")
+        if not anchor_id:
+            return None
+        window = self.get_presented_window(persona, model_key, anchor_id)
+        rows = list(window.presented)
+        # 行が dict でない並び (想定外) でも AttributeError で落とさない —
+        # 指紋の計算はゲートの都合であって、畳みの試行を止める理由にならない
+        # (Codex 指摘 2026-09-10)。dict でない要素は id を持たないものとして
+        # 扱い、字数の勘定 (dict しか読めない) からも外す。行数と中身の
+        # ダイジェストには入るので、区別そのものは残る。
+        dict_rows = [row for row in rows if isinstance(row, dict)]
+        last_row = rows[-1] if rows else None
+        last_id = last_row.get("id") if isinstance(last_row, dict) else None
+        building_id = getattr(persona, "current_building_id", None) or ""
+        return (
+            model_key,
+            str(anchor_id),
+            len(rows),
+            None if last_id is None else str(last_id),
+            stored_message_chars(dict_rows),
+            watermarks.target,
+            watermarks.high,
+            _rows_content_digest(rows),
+            str(building_id),
+        )
+
+    def _cold_sweep_is_unchanged(self, persona) -> bool:
+        """前回**試行を終えた**ときと同じ状態か (指紋が取れなければ False)。
+
+        指紋の計算が例外で落ちた回も False を返す (= 変化あり扱いで試行へ進む)。
+        例外をそのまま投げると tick 側のペルソナ単位 except に届き、その回の
+        spawn ごと落ちる — ゲートは節約であって門ではないのに、指紋の失敗が
+        畳みを止める門として働いてしまう (Codex 指摘 2026-09-10)。
+        """
+        persona_id = getattr(persona, "persona_id", None)
+        if not persona_id:
+            return False
+        try:
+            fingerprint = self._cold_sweep_fingerprint(persona)
+        except Exception:
+            LOGGER.debug(
+                "[metabolism] cold sweep fingerprint failed before the attempt; "
+                "treating the state as changed (persona=%s)",
+                persona_id, exc_info=True,
+            )
+            return False
+        if fingerprint is None:
+            return False
+        with self._cold_sweep_lock:
+            return self._cold_sweep_fingerprints.get(persona_id) == fingerprint
+
+    def _record_cold_sweep_fingerprint(self, persona, generation: int) -> None:
+        """試行**後**の状態で指紋を記録する (次の tick の素通し判定の基準)。
+
+        呼ぶのは :meth:`run_cold_precompaction` が畳みの本体を通し終えた回だけ
+        (:data:`_COLD_SWEEP_ATTEMPTED_RESULTS`)。本体へ入る前に引き返した回
+        ("hot" / "deferred" / "skip") と、同じ状態での再実行に意味が残る回
+        ("deferred_sluice_unseen") は記録せず、次の tick で普通に再訪させる。
+        Beat ロックの内側から呼ばれる — 記録の時点の状態が「試行が見た状態」と
+        一致していることがこのゲートの前提。
+
+        ``generation`` は走行を始めた時点で控えた設定の札。記録の時点で札が
+        進んでいたら (走行中に設定が読み直された) 何もしない — その結果は捨てた
+        前提の上で得たものなので、記録すると修復後の再試行を抑止してしまう。
+        """
+        persona_id = getattr(persona, "persona_id", None)
+        if not persona_id:
+            return
+        try:
+            fingerprint = self._cold_sweep_fingerprint(persona)
+        except Exception:
+            LOGGER.debug(
+                "[metabolism] cold sweep fingerprint failed after the attempt "
+                "(persona=%s)", persona_id, exc_info=True,
+            )
+            return
+        if fingerprint is None:
+            return
+        with self._cold_sweep_lock:
+            if generation != self._cold_sweep_generation:
+                LOGGER.debug(
+                    "[metabolism] cold sweep fingerprint dropped: the config was "
+                    "reloaded while the attempt was running (persona=%s)",
+                    persona_id,
+                )
+                return
+            self._cold_sweep_fingerprints[persona_id] = fingerprint
+
+    def invalidate_cold_sweep_fingerprints(self) -> None:
+        """記録済みの指紋を全部捨てて、次の tick で全員を再検査させる。
+
+        指紋は「保存行と水位が同じなら結果も同じ」という前提に立っているが、
+        その前提は接続先の設定が変わらないことに依っている。一度 "failed" を
+        記録したあと provider の endpoint や API キーを直しても、行も水位も
+        model 名も動かないので指紋が一致し続け、直したのに二度と再試行されない
+        (Codex 指摘 2026-09-10)。設定を読み直す入口はこれを呼んで前提を捨てる。
+
+        捨てるのは dict の中身だけでは足りない。読み直しの時点で旧設定のまま
+        走行中だった :meth:`run_cold_precompaction` は、この後で完了して空の
+        dict へ古い走行の指紋を書き戻しうる。設定の札 (generation) を一緒に
+        進めて、走行開始時の札と食い違う記録を弾く。
+        """
+        with self._cold_sweep_lock:
+            count = len(self._cold_sweep_fingerprints)
+            self._cold_sweep_fingerprints.clear()
+            self._cold_sweep_generation += 1
+        LOGGER.debug(
+            "[metabolism] cold sweep fingerprints cleared after a config reload "
+            "(%d personas will be re-examined on the next tick)", count,
+        )
 
     def cold_precompaction_status(self, persona) -> str:
         """先回り畳み (§14-4) の発火条件を検査する (読みだけ・LLM なし)。
@@ -4485,6 +4729,9 @@ class SessionLifecycle:
 
         def _target() -> None:
             try:
+                # 指紋の記録は run_cold_precompaction の内側 (Beat ロックの中)
+                # で行う — ここで記録すると、ロック解放から記録までの隙間に
+                # 会話経路が進めた状態を「試行後の状態」として焼いてしまう。
                 self.run_cold_precompaction(persona)
             except Exception:
                 LOGGER.exception(
@@ -4523,6 +4770,13 @@ class SessionLifecycle:
         1 度で、縮めるものがあれば提示の節約だけ走らせる (LLM なし、
         :meth:`_handle_perception_over_budget`)。
 
+        畳みの本体を通した回は、**Beat ロックを握ったまま**見張りの指紋を記録
+        する (:meth:`_record_cold_sweep_fingerprint`)。次の tick は同じ状態なら
+        素通しする — 記録をロックの外へ出すと、その隙間で会話経路が進めた状態を
+        試行後の状態として焼き、以後その新しい状態が素通しする。走行を始める
+        時点で設定の札 (generation) を控えて記録側へ渡す — 走行中に設定が
+        読み直されたら、この回の指紋は捨てて次の tick へ再検査を譲る。
+
         Returns:
             :meth:`cold_precompaction_status` の値 (条件不成立時)、"skip"
             (会話の行が残す量以下で畳めるものが無い)、または run_metabolism の
@@ -4536,6 +4790,11 @@ class SessionLifecycle:
                 status = self.cold_precompaction_status(persona)
                 if status != "due":
                     return status
+                # 走行を始める設定の札を控える。走行中に設定が読み直されたら
+                # (invalidate_cold_sweep_fingerprints)、この札は現在の札と
+                # 食い違い、記録側がこの回の指紋を捨てる。
+                with self._cold_sweep_lock:
+                    generation = self._cold_sweep_generation
                 model_key = str(getattr(persona, "model", "") or "") or None
                 watermarks = self.get_metabolism_watermarks(persona, model_key)
                 window = self.get_presented_window(persona, model_key)
@@ -4573,10 +4832,19 @@ class SessionLifecycle:
                     watermarks.target, watermarks.high,
                 )
                 building_id = getattr(persona, "current_building_id", None) or ""
-                return self.run_metabolism(
+                result = self.run_metabolism(
                     persona, building_id, window, watermarks, None,
                     model_key=model_key, chronicle_force=True,
                 )
+                if result in self._COLD_SWEEP_ATTEMPTED_RESULTS:
+                    # 試行し終えた回だけ、試行**後**の状態を見張りの指紋に残す
+                    # (次の tick はこれと同じ状態なら素通しする)。記録は Beat
+                    # ロックを握ったまま行う — 解放してから記録すると、その隙間で
+                    # 会話経路の Metabolism や新しい発言が状態を進め、冷えた試行が
+                    # 一度も見ていない状態を「試行後の状態」として焼いてしまう。
+                    # 以後その新しい状態が素通しする (Codex 指摘 2026-09-10)。
+                    self._record_cold_sweep_fingerprint(persona, generation)
+                return result
         except BeatGateClosedError:
             # 先回りは急がない — pending が残る persona は次の tick に譲る。
             LOGGER.info(
