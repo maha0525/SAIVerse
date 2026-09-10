@@ -80,7 +80,7 @@ python scripts/migrate_to_user_data.py --dry-run   # 既存データを ~/.saive
 
 その他: `migrate_building_logs_to_db.py` / `migrate_conscious_log_to_db.py` / `migrate_memory_tags.py` / `migrate_playbooks_to_lines.py` / `migrate_tasks_db_to_unified.py` / `migrate_track_tasks_json.py`。
 
-`migrate_building_logs_to_db.py` (旧 log.json → building_messages) と `migrate_conscious_log_to_db.py` (旧 conscious_log.json → persona_pulse_cursor) は 2026-08-16 から実体が `saiverse/legacy_log_import.py` にあり、バージョンアップグレード (`0.3.0.dev5`) で自動実行される。スクリプトは個別復旧・再実行用の入口。スキップ判定は「現物のファイルが読めるか」だけで行い、`log.json.corrupted_*` マーカーの有無では判定しない。取り込み漏れは毎起動の検算が UI バナーに出す (詳細: `docs/intent/building_memory_unified.md` の「過去ログ取り込みの自動化と検算」)。
+`migrate_building_logs_to_db.py` (旧 log.json → building_messages) と `migrate_conscious_log_to_db.py` (旧 conscious_log.json → persona_pulse_cursor) は 2026-08-16 から実体が `saiverse/legacy_log_import.py` にあり、バージョンアップグレード (`0.3.0.dev5`) で自動実行される。スクリプトは個別復旧・再実行用の入口。スキップ判定は「現物のファイルが読めるか」だけで行い、`log.json.corrupted_*` マーカーの有無では判定しない。取り込み漏れは毎起動の検算が UI バナーに出す (詳細: `docs/intent/building_memory_unified.md` の「過去ログ取り込みの自動化と検算」)。`migrate_building_logs_to_db.py` を部屋の指定 (`--building-id`) なしで実行したときは、DB に登録された部屋の ID からファイルの場所を決める。DB に登録されていない部屋のフォルダにある log.json は取り込まず、ログに WARNING を出す (2026-09-11 — フォルダ名を部屋 ID に使うと、macOS でフォルダ名が濁点の分解された形のとき、DB の部屋と別の部屋 ID で書き込むため)。
 
 ## 開発 / 運用
 

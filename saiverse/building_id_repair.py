@@ -25,8 +25,10 @@ v0.3.0 より前は部屋 ID に使える文字の制限が無く、名前に「
 順番と、途中で止まったときの再開:
 
 1. 付け替えの記録 ``cities/<city>/building_id_renames.json`` に「予定」を書く
-2. DB を一つのトランザクションで書き換えて commit する
+2. DB を一つのトランザクションで書き換え、古い会話のファイルとの照合の欠けが
+   増えていないことを確かめてから commit する (増えていればまるごと巻き戻して見送る)
 3. ペルソナの記憶のファイルの印を、ペルソナごとに複製を取ってから書き換える
+   (ID に区切り記号を含むペルソナは、部屋のフォルダと同じ組み立て方の入れ子の場所)
 4. フォルダを移し、空になった途中のフォルダを消す
 5. 記録を「完了」にする (記録は消さない)
 
@@ -58,6 +60,8 @@ from sqlalchemy import text
 # 付け替えで置き換える文字をそこから取り、「フォルダ名として使えない」の基準を二つにしない。
 from manager.ids import _UNSAFE_PATH_CHARS, is_safe_path_component
 from sai_memory.room_state import ROOM_STATE_META_KEY, bundle_is_valid, snapshot_digest
+# 古い会話のファイルとの照合の欠けは、起動時の確認処理・取り込み処理と同じ 1 つの規則で数える
+from saiverse.legacy_log_import import count_missing_legacy_messages, load_log
 
 LOGGER = logging.getLogger(__name__)
 
@@ -550,18 +554,115 @@ def room_replacements(renames: Mapping[str, str]) -> Dict[str, str]:
     return out
 
 
+@dataclass
+class _LegacyMatchCheck:
+    """付け替える前に数えた、1 部屋の古い会話のファイルとの照合の欠けの数。"""
+
+    plan: _Plan
+    log_path: Path
+    messages: List[Any]
+    missing_before: int
+
+
+class _LegacyMatchWorsened(RuntimeError):
+    """付け替えると、古い会話のファイルとの照合の欠けが増える部屋があった。
+
+    ``rooms`` は部屋ごとの {building_id, new_building_id, name, missing_before,
+    missing_after, path}。呼び出し側はこの回の DB の書き換えをまるごと巻き戻す。
+    """
+
+    def __init__(self, rooms: List[dict]) -> None:
+        super().__init__(
+            "付け替えると古い会話のファイルとの照合の欠けが増える部屋があります: "
+            + ", ".join(
+                f"{room['building_id']!r} ({room['missing_before']} -> {room['missing_after']})"
+                for room in rooms
+            )
+        )
+        self.rooms = rooms
+
+
+def _legacy_match_baseline(
+    db, plans: Sequence[_Plan], buildings_root: Path,
+) -> List[_LegacyMatchCheck]:
+    """付け替える前 (旧 ID) の、古い会話のファイルとの照合の欠けの数を部屋ごとに数える。
+
+    ファイルは ``buildings_root`` (``cities/<city>/buildings``) の下の、旧 ID の古い
+    フォルダの場所の ``log.json`` — 付け替えの後にフォルダを移すまでここにあり、移した
+    後は起動時の確認処理が新 ID の場所で同じファイルを読む。場所を決められない・この OS
+    ではフォルダを作れなかった・ファイルが無い・読めない部屋は数えない (照合する行が
+    無いので、付け替えで照合が悪くなることもない)。
+    """
+    checks: List[_LegacyMatchCheck] = []
+    for plan in plans:
+        parts = legacy_folder_parts(plan.old_id)
+        if parts is None or not legacy_folder_can_exist(parts):
+            continue
+        log_path = buildings_root.joinpath(*parts) / "log.json"
+        if not _path_exists(log_path):
+            continue
+        messages, unreadable_reason = load_log(log_path)
+        if messages is None:
+            LOGGER.info(
+                "%s 部屋 %r の古い会話のファイルが読めないので、照合の検査を飛ばします (%s): %s",
+                _LOG_PREFIX, plan.old_id, unreadable_reason, log_path,
+            )
+            continue
+        checks.append(_LegacyMatchCheck(
+            plan, log_path, messages, count_missing_legacy_messages(db, plan.old_id, messages),
+        ))
+    return checks
+
+
+def _verify_legacy_matches(db, checks: Sequence[_LegacyMatchCheck]) -> None:
+    """付け替えた後 (新 ID、commit の前) の欠けの数を数え、前より増えた部屋があれば例外を上げる。
+
+    メッセージ ID の書き換えで、古いファイルとの照合に使っていた値が DB から消える形
+    (``legacy_message_id`` に旧メッセージ ID と違う値が入っている行など) を、データの
+    前提に頼らず止める。増えたまま commit すると、次の取り込みで同じ会話が二重に入る。
+    """
+    worsened: List[dict] = []
+    for check in checks:
+        plan = check.plan
+        assert plan.new_id is not None
+        missing_after = count_missing_legacy_messages(db, plan.new_id, check.messages)
+        LOGGER.info(
+            "%s 部屋 %r -> %r: 古い会話のファイルとの照合の欠けは、付け替えの前 %d・後 %d です (%s)",
+            _LOG_PREFIX, plan.old_id, plan.new_id, check.missing_before, missing_after,
+            check.log_path,
+        )
+        if missing_after > check.missing_before:
+            worsened.append({
+                "building_id": plan.old_id,
+                "new_building_id": plan.new_id,
+                "name": plan.display_name,
+                "missing_before": check.missing_before,
+                "missing_after": missing_after,
+                "path": str(check.log_path),
+            })
+    if worsened:
+        raise _LegacyMatchWorsened(worsened)
+
+
 def _rewrite_database(
-    db, schema: _Schema, plans: Sequence[_Plan],
+    db, schema: _Schema, plans: Sequence[_Plan], *, legacy_buildings_root: Path,
 ) -> Tuple[Dict[str, Dict[str, int]], Dict[str, int]]:
     """付け替えを 1 つのトランザクションの中で書く。commit はしない (呼び出し側が持つ)。
 
     戻り値は (部屋ごとの {欄: 書き換えた行数}, JSON の欄ごとの書き換えた行数)。
     一意制約にぶつかったら例外がそのまま上がる — 呼び出し側がこの回の付け替えを
     まるごと巻き戻す。
+
+    書き換える前と後で、``legacy_buildings_root`` (``cities/<city>/buildings``) の古い
+    会話のファイルとの照合の欠けを部屋ごとに数え、増えた部屋があれば
+    :class:`_LegacyMatchWorsened` を上げる (これも呼び出し側が巻き戻す)。
     """
     # 外部キーの強制はこの DB ではオフだが、オンの環境でも主キーの書き換えを
     # commit 時点まで待たせる。
     db.execute(text("PRAGMA defer_foreign_keys = ON"))
+
+    # 書き換える前 (旧 ID) の欠けの数。部屋の行を 1 つも動かさないうちに数える。
+    legacy_checks = _legacy_match_baseline(db, plans, legacy_buildings_root)
 
     direct_columns = _resolve_columns(schema, DIRECT_REFERENCE_COLUMNS)
     json_columns = _resolve_columns(schema, JSON_COLUMNS)
@@ -723,6 +824,10 @@ def _rewrite_database(
                 updates,
             )
             json_counts[column.label] = len(updates)
+
+    # 書き換えた後 (新 ID、commit の前) の欠けの数。増えていれば例外 (呼び出し側が巻き戻す)。
+    # フォルダはまだ移していないので、ファイルは前と同じ場所にある。
+    _verify_legacy_matches(db, legacy_checks)
     return per_plan, json_counts
 
 
@@ -1196,10 +1301,45 @@ def _folder_failed_alert(plan: _Plan, problem: Optional[str]) -> dict:
     )
 
 
+def _legacy_match_worsened_alert(plans: Sequence[_Plan], rooms: Sequence[dict]) -> dict:
+    names = "、".join(f"「{room['name']}」" for room in rooms)
+    return _alert(
+        "building_id_repair_skipped_legacy_match",
+        _TITLE_SKIPPED,
+        _pending_sentence(plans)
+        + f"部屋{names}の内部の名前を付け替えると、古い会話のファイルとデータベースの会話の"
+        "照合が外れて、次に古い会話を移すときに同じ会話が二重に表示されるおそれがあります。"
+        "そのため、今回は付け替えを見送り、データベースは付け替える前の状態に戻しました。"
+        "原因が取り除かれるまで、起動のたびに付け替えを見送ります。"
+        "この警告の内容を添えて開発者に知らせてください。"
+        + _NOT_SHOWN_SENTENCE,
+        {
+            "reason": "legacy_match_worsened",
+            "rooms": list(rooms),
+            "buildings": _plans_details(plans),
+        },
+    )
+
+
 _MEMORY_NOT_REWRITTEN_SENTENCE = (
     "書き換わるまで、このペルソナに付け替えた部屋の様子が二重に届いたり、"
     "その部屋の会話の一部が二重に記憶されたりすることがあります。"
 )
+
+
+def _memory_location_unsafe_alert(persona_id: str, name: str) -> dict:
+    return _alert(
+        f"building_id_repair_memory_location_{persona_id}",
+        f"ペルソナ「{name}」の記憶の中の部屋の名前を書き換えられませんでした",
+        "部屋の内部の名前を付け替えたので、ペルソナの記憶のファイルに記録されている"
+        "部屋の内部の名前も書き換える必要があります。このペルソナの内部の名前は、"
+        "記憶のファイルが入ったフォルダの場所を安全に決められない形をしています"
+        "（区切り記号が続いている、先頭や末尾にある など）。自動では場所を決められないため、"
+        "このペルソナの記憶は書き換えていません。次の起動でもう一度確かめます。"
+        + _MEMORY_NOT_REWRITTEN_SENTENCE
+        + "この警告が起動のたびに出る場合は、この警告の内容を添えて開発者に知らせてください。",
+        {"reason": "memory_location_unsafe", "persona_id": persona_id},
+    )
 
 
 def _memory_backup_failed_alert(persona_id: str, name: str, path: Path, exc: BaseException) -> dict:
@@ -1364,6 +1504,7 @@ class _Repair:
         session_factory,
         db_path,
         city_id: int,
+        city_slug: str,
         saiverse_home: Path,
         folder_roots: Sequence[Path],
         record: dict,
@@ -1373,6 +1514,8 @@ class _Repair:
         self.db_path = db_path
         self.city_id = city_id
         self.saiverse_home = Path(saiverse_home)
+        # 起動時の確認処理が古い会話のファイルを読む置き場 (付け替えの照合の検査に使う)
+        self.legacy_buildings_root = self.saiverse_home / "cities" / city_slug / "buildings"
         self.folder_roots = list(folder_roots)
         self.record = record
         self.record_path = record_path
@@ -1545,21 +1688,32 @@ class _Repair:
             )
             return
 
-        # 手順 2: DB を一つのトランザクションで書き換える
+        # 手順 2: DB を一つのトランザクションで書き換え、古い会話のファイルとの照合の
+        # 欠けが増えていないことを確かめてから commit する
         db = self.session_factory()
         try:
-            per_plan, json_counts = _rewrite_database(db, schema, accepted)
+            per_plan, json_counts = _rewrite_database(
+                db, schema, accepted, legacy_buildings_root=self.legacy_buildings_root,
+            )
             db.commit()
         except Exception as exc:
             try:
                 db.rollback()
             except Exception:
                 LOGGER.debug("%s rollback にも失敗しました", _LOG_PREFIX, exc_info=True)
-            LOGGER.error(
-                "%s 付け替えの途中で失敗したので、データベースを元に戻しました",
-                _LOG_PREFIX, exc_info=True,
-            )
-            self.alerts.append(_database_failed_alert(accepted, exc))
+            if isinstance(exc, _LegacyMatchWorsened):
+                LOGGER.error(
+                    "%s 付け替えると古い会話のファイルとの照合の欠けが増える部屋があるので、"
+                    "この回の付け替えを見送り、データベースを元に戻しました: %s",
+                    _LOG_PREFIX, exc.rooms,
+                )
+                self.alerts.append(_legacy_match_worsened_alert(accepted, exc.rooms))
+            else:
+                LOGGER.error(
+                    "%s 付け替えの途中で失敗したので、データベースを元に戻しました",
+                    _LOG_PREFIX, exc_info=True,
+                )
+                self.alerts.append(_database_failed_alert(accepted, exc))
             return
         finally:
             db.close()
@@ -1717,8 +1871,18 @@ class _Repair:
     def _rewrite_persona_memories(self, plans: Sequence[_Plan]) -> bool:
         """DB に登録されている全ペルソナの記憶のファイルの印を書き換える。
 
-        戻り値は、書き換えが要ったペルソナの全員について済んだか (失敗した
-        ペルソナがいれば False — 警告は self.alerts に載せてある)。
+        記憶のファイルの場所は、部屋のフォルダと同じ組み立て方で決める
+        (:func:`legacy_folder_parts`)。v0.2 のペルソナ ID の生成式は部屋と同じで、名前の
+        「/」が ID に残ったペルソナの記憶のファイルは入れ子の場所
+        (``personas/<a>/<b>/memory.db``) にある。
+
+        - 場所を安全に決められない ID (空の段・``.``・``..``) のペルソナは、警告を出して
+          False を返す — 記録を「完了」にせず、次の起動でもう一度確かめる。
+        - この OS のフォルダ名に使えない文字を含む ID のペルソナには、記憶のファイルが
+          作られていないので、処理済みとして扱う。
+
+        戻り値は、書き換えが要ったペルソナの全員について済んだか (失敗したペルソナ・
+        場所を決められないペルソナがいれば False — 警告は self.alerts に載せてある)。
         """
         renames = {plan.old_id: plan.new_id for plan in plans if plan.new_id}
         if not renames:
@@ -1733,17 +1897,30 @@ class _Repair:
             self.alerts.append(_memory_list_failed_alert(exc))
             return False
         all_done = True
+        personas_root = self.saiverse_home / "personas"
         for persona_id, name in personas:
-            if not is_safe_path_component(persona_id):
+            display_name = name or persona_id
+            parts = legacy_folder_parts(persona_id)
+            if parts is None:
                 LOGGER.warning(
-                    "%s ペルソナ ID %r がフォルダ名として使えないので、記憶のファイルを確かめません",
+                    "%s ペルソナ %r の記憶のファイルの場所を安全に決められないので、書き換えません。"
+                    "付け替えの記録は「予定」のまま残します",
+                    _LOG_PREFIX, persona_id,
+                )
+                self.alerts.append(_memory_location_unsafe_alert(persona_id, display_name))
+                all_done = False
+                continue
+            if not legacy_folder_can_exist(parts):
+                LOGGER.info(
+                    "%s ペルソナ ID %r にはこの OS のフォルダ名に使えない文字が含まれるので、"
+                    "記憶のファイルは作られていません",
                     _LOG_PREFIX, persona_id,
                 )
                 continue
-            path = self.saiverse_home / "personas" / persona_id / "memory.db"
+            path = personas_root.joinpath(*parts) / "memory.db"
             if not path.is_file():
                 continue
-            if not self._rewrite_one_memory(persona_id, name or persona_id, path, renames):
+            if not self._rewrite_one_memory(persona_id, display_name, path, renames):
                 all_done = False
         return all_done
 
@@ -1791,7 +1968,12 @@ class _Repair:
                 conn.close()
 
     def _memory_backup_path(self, persona_id: str) -> Path:
-        """``<ホーム>/backups/building_id_repair/<日時>/<persona_id>_memory.db`` (既にあれば番号を足す)。"""
+        """``<ホーム>/backups/building_id_repair/<日時>/<ペルソナ ID>_memory.db`` (既にあれば番号を足す)。
+
+        ペルソナ ID は区切り記号などを含みうる (v0.2 の ID)。複製が日時のフォルダの直下の
+        1 つのファイル名になるよう、ファイル名の ID には部屋 ID の付け替えと同じ置き換え
+        (:func:`repaired_building_id`) をする。
+        """
         if self._memory_backup_dir is None:
             stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             base = self.saiverse_home / "backups" / "building_id_repair"
@@ -1801,11 +1983,19 @@ class _Repair:
                     break
                 folder = base / f"{stamp}_{n}"
             self._memory_backup_dir = folder
-        dest = self._memory_backup_dir / f"{persona_id}_memory.db"
+        file_stem = repaired_building_id(persona_id)
+
+        def file_name(suffix: str) -> str:
+            name = f"{file_stem}_memory{suffix}.db"
+            # 「NUL.x_memory.db」のように Windows が装置として扱う名前だと、複製が
+            # ファイルに残らないまま「複製した」ことになるので、先頭をずらす
+            return name if is_safe_path_component(name) else "_" + name
+
+        dest = self._memory_backup_dir / file_name("")
         for n in range(2, _MAX_SUFFIX + 2):
             if not _path_exists(dest):
                 break
-            dest = self._memory_backup_dir / f"{persona_id}_memory_{n}.db"
+            dest = self._memory_backup_dir / file_name(f"_{n}")
         return dest
 
     def _save_record_best_effort(self) -> None:
@@ -1837,7 +2027,8 @@ def repair_unsafe_building_ids(
         session_factory: saiverse.db のセッションを作る呼び出し可能オブジェクト
         db_path: saiverse.db のパス (多重起動の確認とバックアップに使う)
         saiverse_home: ``~/.saiverse`` (テストでは一時フォルダ)。部屋のフォルダ、
-            ペルソナの記憶のファイル (``personas/<AIID>/memory.db``)、その複製の置き場
+            ペルソナの記憶のファイル (``personas/<AIID>/memory.db``。AIID に区切り記号が
+            あれば、部屋のフォルダと同じ組み立て方の入れ子の場所)、その複製の置き場
             (``backups/building_id_repair/``) はすべてこの下
         city_id / city_slug: この City の CITYID と CITY_SLUG
         environ: Discord の対応表を読む環境変数 (既定は os.environ)
@@ -1866,6 +2057,7 @@ def repair_unsafe_building_ids(
         session_factory=session_factory,
         db_path=db_path,
         city_id=city_id,
+        city_slug=city_slug,
         saiverse_home=saiverse_home,
         folder_roots=[city_dir / "buildings", saiverse_home / "buildings"],
         record=record,

@@ -135,9 +135,14 @@ def _write_conscious_log(home: Path, persona_id: str, payload: dict) -> None:
 
 def test_ai_handler_imports_cursors_after_building_import(session: Session, home: Path) -> None:
     """取り込み済みの部屋に対して、seq 形式の旧 cursor が新 seq にリマップされる。"""
+    from database.models import Building
     from saiverse.legacy_log_import import import_building_logs
 
     _make_city(session, "test_city")
+    # 部屋を指定しない取り込みは、DB に登録された部屋 ID から場所を決める
+    # (フォルダ名を部屋 ID に使わない) ので、部屋も登録しておく。
+    session.add(Building(CITYID=1, BUILDINGID="room1", BUILDINGNAME="room1"))
+    session.commit()
     _write_building_log(home, "test_city", "room1", SAMPLE_MESSAGES)
     import_building_logs(session, home, city_filter="test_city")
     session.commit()

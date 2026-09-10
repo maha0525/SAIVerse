@@ -1446,5 +1446,183 @@ class AddonMetadataOnUnimportedLogTests(_RepairTestCase):
         self.assertEqual(self._scalar("SELECT message_id FROM addon_message_metadata"), imported)
 
 
+# ---------------------------------------------------------------------------
+# レビュー指摘の訂正 (2026-09-11)
+# ---------------------------------------------------------------------------
+
+class LegacyMatchGuardTests(_RepairTestCase):
+    """付け替えで、古い会話のファイルとの照合の欠けが増えないこと (増えるならまるごと巻き戻す)。"""
+
+    def _old_log(self, *message_ids: str) -> Path:
+        folder = self.buildings_root / OLD
+        folder.mkdir(parents=True)
+        path = folder / "log.json"
+        path.write_text(json.dumps([
+            {"role": "user", "content": f"発言 {i}", "seq": i + 1, "message_id": message_id,
+             "timestamp": "2025-02-28T10:00:00"}
+            for i, message_id in enumerate(message_ids)
+        ], ensure_ascii=False), encoding="utf-8")
+        return path
+
+    def test_rename_is_rolled_back_when_the_old_message_id_would_disappear(self) -> None:
+        """legacy_message_id に旧メッセージ ID と違う値がある行: 旧メッセージ ID が DB のどこにも残らなくなる。"""
+        self._add(
+            self._building(OLD, "2/28"),
+            self._building("#1_city_a", "#1"),
+            User(USERID=1, PASSWORD="x", USERNAME="まはー", CURRENT_BUILDINGID=OLD),
+            self._message(OLD, 1, f"{OLD}:1", content="発言 0", legacy_message_id="imported-elsewhere"),
+            AddonMessageMetadata(message_id=f"{OLD}:1", addon_name="tts", key="audio", value="a.wav"),
+        )
+        log_path = self._old_log(f"{OLD}:1")
+
+        alerts = self._run()
+
+        self.assertEqual([a["id"] for a in alerts], ["building_id_repair_skipped_legacy_match"])
+        self.assertIn("「2/28」", alerts[0]["message"])
+        self.assertIn("二重", alerts[0]["message"])
+        self.assertEqual(alerts[0]["details"]["rooms"], [{
+            "building_id": OLD, "new_building_id": NEW, "name": "2/28",
+            "missing_before": 0, "missing_after": 1, "path": str(log_path),
+        }])
+        # この回の付け替えはまるごと巻き戻る (照合に問題の無い部屋「#1」も)
+        self.assertEqual(self._building_ids(), sorted([OLD, "#1_city_a"]))
+        self.assertEqual(self._scalar('SELECT "CURRENT_BUILDINGID" FROM "user"'), OLD)
+        self.assertEqual(
+            [tuple(r) for r in self._all(
+                "SELECT building_id, message_id, legacy_message_id FROM building_messages"
+            )],
+            [(OLD, f"{OLD}:1", "imported-elsewhere")],
+        )
+        self.assertEqual(self._scalar("SELECT message_id FROM addon_message_metadata"), f"{OLD}:1")
+        self.assertTrue(log_path.is_file())  # フォルダも移さない
+        self.assertEqual({e["status"] for e in self._record()["renames"]}, {"planned"})
+
+        # 原因が残っている間は、次の起動でも見送る
+        self.assertEqual(
+            [a["id"] for a in self._run()], ["building_id_repair_skipped_legacy_match"],
+        )
+        self.assertEqual(self._building_ids(), sorted([OLD, "#1_city_a"]))
+
+    def test_rename_goes_through_when_the_legacy_id_is_empty_or_the_same(self) -> None:
+        self._add(
+            self._building(OLD, "2/28"),
+            self._message(OLD, 1, f"{OLD}:1", content="発言 0"),
+            self._message(OLD, 2, f"{OLD}:2", content="発言 1", legacy_message_id=f"{OLD}:2"),
+            self._message(OLD, -1, f"{OLD}:-1", content="発言 2",
+                          legacy_seq=3, legacy_message_id=f"{OLD}:3"),
+        )
+        self._old_log(f"{OLD}:1", f"{OLD}:2", f"{OLD}:3")
+
+        self.assertEqual(self._run(), [])
+
+        self.assertEqual(self._building_ids(), [NEW])
+        db = self.SessionLocal()
+        try:
+            self.assertEqual(scan_legacy_log_deficits(db, self.home, CITY, [NEW]), [])
+        finally:
+            db.close()
+
+    def test_unreadable_old_file_is_not_checked(self) -> None:
+        """照合する行が無いので、付け替えで照合が悪くなることもない。"""
+        self._add(
+            self._building(OLD, "2/28"),
+            self._message(OLD, 1, f"{OLD}:1", legacy_message_id="imported-elsewhere"),
+        )
+        folder = self.buildings_root / OLD
+        folder.mkdir(parents=True)
+        (folder / "log.json").write_text("{壊れている", encoding="utf-8")
+
+        self.assertEqual(self._run(), [])
+        self.assertEqual(self._building_ids(), [NEW])
+
+
+class PersonaMemoryLocationTests(_RepairTestCase):
+    """ID がフォルダ名として使えないペルソナの記憶のファイルを、黙って飛ばして「完了」にしない。"""
+
+    def _seed_memory_at(self, parts) -> Path:
+        path = (self.home / "personas").joinpath(*parts) / "memory.db"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(str(path))
+        try:
+            conn.execute("CREATE TABLE messages (id TEXT PRIMARY KEY, content TEXT, metadata TEXT)")
+            conn.execute(
+                "INSERT INTO messages VALUES (?, ?, ?)",
+                ("m1", f"{OLD} の話", json.dumps({"building_msg_ref": f"{OLD}:{OLD}:5"})),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        return path
+
+    @staticmethod
+    def _ref(path: Path) -> str:
+        conn = sqlite3.connect(str(path))
+        try:
+            return json.loads(conn.execute("SELECT metadata FROM messages").fetchone()[0])[
+                "building_msg_ref"
+            ]
+        finally:
+            conn.close()
+
+    @property
+    def backup_root(self) -> Path:
+        return self.home / "backups" / "building_id_repair"
+
+    def test_nested_memory_file_of_a_persona_id_with_a_slash_is_rewritten(self) -> None:
+        persona_id = "p/1_city_a"
+        self._add(self._building(OLD, "2/28"), AI(AIID=persona_id, HOME_CITYID=CITY_ID, AINAME="p/1"))
+        path = self._seed_memory_at(["p", "1_city_a"])
+
+        self.assertEqual(self._run(), [])
+
+        self.assertEqual(self._ref(path), f"{NEW}:{NEW}:5")
+        self.assertEqual(self._record()["renames"][0]["status"], "done")
+        # 複製は日時のフォルダの直下に、区切り記号を「_」にした 1 つのファイル名で置く
+        [backup] = sorted(self.backup_root.rglob("*.db"))
+        self.assertEqual(backup.name, "p_1_city_a_memory.db")
+        self.assertEqual(backup.parent.parent, self.backup_root)
+        self.assertEqual(self._ref(backup), f"{OLD}:{OLD}:5")
+
+    def test_persona_id_whose_location_cannot_be_decided_keeps_the_plan_open(self) -> None:
+        persona_id = "a//b_city_a"
+        self._add(self._building(OLD, "2/28"), AI(AIID=persona_id, HOME_CITYID=CITY_ID, AINAME="a//b"))
+        self._make_folder(self.buildings_root, OLD)
+
+        alerts = self._run()
+
+        self.assertEqual([a["details"]["reason"] for a in alerts], ["memory_location_unsafe"])
+        self.assertIn("「a//b」", alerts[0]["title"])
+        self.assertEqual(alerts[0]["details"]["persona_id"], persona_id)
+        # DB の付け替えとフォルダの移動は済んでいるが、記録は「予定」のまま
+        self.assertEqual(self._building_ids(), [NEW])
+        self.assertTrue((self.buildings_root / NEW / "log.json").is_file())
+        self.assertEqual(self._record()["renames"][0]["status"], "planned")
+
+        # 次の起動でももう一度確かめ、「完了」にしない
+        self.assertEqual([a["details"]["reason"] for a in self._run()], ["memory_location_unsafe"])
+        self.assertEqual(self._record()["renames"][0]["status"], "planned")
+
+    def test_persona_id_with_characters_windows_cannot_use_is_done_on_windows(self) -> None:
+        """Windows では「:」を含むフォルダは作れなかった — 記憶のファイルは無いので処理済み。"""
+        self._add(
+            self._building(OLD, "2/28"),
+            AI(AIID="p:1_city_a", HOME_CITYID=CITY_ID, AINAME="p:1"),
+        )
+        with patch("saiverse.building_id_repair._on_windows", return_value=True):
+            self.assertEqual(self._run(), [])
+        self.assertEqual(self._record()["renames"][0]["status"], "done")
+
+    @unittest.skipIf(os.name == "nt", "「:」を含むフォルダは POSIX でだけ作れる")
+    def test_persona_id_with_a_colon_is_rewritten_on_posix(self) -> None:
+        persona_id = "p:1_city_a"
+        self._add(self._building(OLD, "2/28"), AI(AIID=persona_id, HOME_CITYID=CITY_ID, AINAME="p:1"))
+        path = self._seed_memory_at([persona_id])
+        with patch("saiverse.building_id_repair._on_windows", return_value=False):
+            self.assertEqual(self._run(), [])
+        self.assertEqual(self._ref(path), f"{NEW}:{NEW}:5")
+        [backup] = sorted(self.backup_root.rglob("*.db"))
+        self.assertEqual(backup.name, "p_1_city_a_memory.db")
+
+
 if __name__ == "__main__":
     unittest.main()

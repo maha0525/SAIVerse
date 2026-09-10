@@ -106,3 +106,10 @@ False になる。その部屋は「log.json が無い部屋」として扱わ�
   (`legacy_log_path` → `_child_by_name`) で場所を決めるように一本化した。
   あわせて行った部屋 ID の付け替えと経緯は
   [building_id_contains_path_separator.md](building_id_contains_path_separator.md)。
+- 2026-09-11 (続き): 部屋を指定しない取り込み (手動の取り込みスクリプトで部屋を省いたとき)
+  だけは、`find_log_files` がフォルダを一覧し、呼び出し側がフォルダ名を部屋 ID に
+  使っていた。macOS でフォルダ名が濁点の分解された形 (NFD) のとき、DB の部屋 (NFC) と
+  別の部屋 ID で書き込むので、フォルダを一覧する経路を撤去し、DB に登録された部屋 ID
+  から場所を決める形に変えた (`_registered_room_log_files`)。上の「残っている穴」
+  (Linux で NFD のフォルダ名と NFC の部屋 ID が食い違うと、確認処理も取り込み処理も
+  見つけられない) は変わらず残る。

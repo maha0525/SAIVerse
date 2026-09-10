@@ -31,18 +31,28 @@ Building のチャットログは Phase 2+3 (2026-05-20, ec9eba70) で
   CLI 経路だけは ``commit_per_building=True`` で部屋ごとに確定させ、後半の失敗で
   前半まで巻き戻らないようにする。
 - **既定では commit しない。** トランザクション境界は呼び出し側が持つ。
+- **部屋 ID は常に DB の値を使い、フォルダ名から取らない** (:func:`import_building_logs`)。
+- **「欠け」の規則は 1 つ** (:func:`count_missing_legacy_messages`)。確認処理・取り込み処理・
+  部屋 ID の付け替え (saiverse/building_id_repair.py) が同じ規則を使う。
 """
 from __future__ import annotations
 
 import json
 import logging
+import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 from sqlalchemy import func, or_
 
-from database.models import AddonMessageMetadata, BuildingMessage, PersonaPulseCursor
+from database.models import (
+    AddonMessageMetadata,
+    Building,
+    BuildingMessage,
+    City,
+    PersonaPulseCursor,
+)
 from database.building_messages import serialize_building_message
 from manager.ids import is_safe_path_component
 
@@ -168,18 +178,17 @@ def legacy_log_path(saiverse_home: Path, city_name: str, building_id: str) -> Op
 def find_log_files(
     saiverse_home: Path,
     *,
+    building_filter: str,
     city_filter: Optional[str] = None,
-    building_filter: Optional[str] = None,
 ) -> List[Path]:
-    """取り込み対象の log.json を集める。
+    """名前を指定された部屋の log.json を探す (City を指定しなければ全 City の下から)。
 
-    **名前を指定された City / Building は、一覧して名前を突き合わせるのでは
-    なくパスとして組み立てて開く。** 同じ名前が違うコード列で書かれていると、
-    一覧が返す名前との文字列比較は一致しない — macOS はファイル名の濁点・
-    半濁点を「ヒ + 濁点」の 2 文字へ分解して保存する (NFD) 一方、DB の
-    BUILDINGID はアプリが受け取った合成済みの 1 文字 (NFC) なので、
-    「リビング」のような名前がここで落ちる。ファイルシステム自身はこの 2 つを
-    同じ名前として扱うため、パスで開けば見つかる。
+    **部屋の名前は、一覧して名前を突き合わせるのではなくパスとして組み立てて
+    開く。** 同じ名前が違うコード列で書かれていると、一覧が返す名前との文字列
+    比較は一致しない — macOS はファイル名の濁点・半濁点を「ヒ + 濁点」の 2 文字へ
+    分解して保存する (NFD) 一方、DB の BUILDINGID はアプリが受け取った合成済みの
+    1 文字 (NFC) なので、「リビング」のような名前がここで落ちる。ファイルシステム
+    自身はこの 2 つを同じ名前として扱うため、パスで開けば見つかる。
 
     検算側 (:func:`_scan_one_building`) は最初からパスを直接組んでいた。その
     ずれのせいで、同じ部屋について「597 件が移せていない」と「対象 log.json:
@@ -188,6 +197,11 @@ def find_log_files(
     規則は 1 つに揃える** — 名前からの場所の決め方は ``_child_by_name`` 一本で、
     検算側も :func:`legacy_log_path` 経由で同じ関数を通る (2026-09-11 に一本化。
     それまで検算側は素のパス結合のままだった)。
+
+    部屋を指定しない取り込みはこの関数を使わず、DB に登録された部屋 ID から場所を
+    決める (:func:`_registered_room_log_files`)。以前はここで部屋のフォルダを一覧し、
+    呼び出し側がフォルダ名を部屋 ID に使っていた — フォルダ名が NFD のとき、DB の
+    部屋と別の部屋 ID で行を書き込むので、一覧する経路ごと撤去した (2026-09-11)。
     """
     cities_root = saiverse_home / "cities"
     if not cities_root.exists():
@@ -201,6 +215,8 @@ def find_log_files(
             return []
         city_dirs = [city_dir]
     else:
+        # City は一覧してよい — 見つけたフォルダの名前を識別子として使わず、
+        # 部屋のファイルを探す親にするだけ。
         city_dirs = sorted(p for p in cities_root.iterdir() if p.is_dir())
 
     found: List[Path] = []
@@ -208,20 +224,145 @@ def find_log_files(
         buildings_root = city_dir / "buildings"
         if not buildings_root.exists():
             continue
-        if building_filter:
-            building_dir = _child_by_name(buildings_root, building_filter)
-            if building_dir is None:
-                LOGGER.warning(
-                    "Building の識別子が名前として使えません: %r", building_filter
-                )
-                continue
-            building_dirs = [building_dir]
+        building_dir = _child_by_name(buildings_root, building_filter)
+        if building_dir is None:
+            LOGGER.warning(
+                "Building の識別子が名前として使えません: %r", building_filter
+            )
+            continue
+        log_path = building_dir / "log.json"
+        if log_path.exists():
+            found.append(log_path)
+    return found
+
+
+def _entry_identity(path: Path) -> Optional[Tuple[int, int]]:
+    """ファイルシステム上の実体を見分ける印 (装置の番号, ファイルの番号)。取れなければ None。"""
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    if not st.st_ino:
+        return None  # ファイルの番号を持たないファイルシステム (FAT など)
+    return (st.st_dev, st.st_ino)
+
+
+def _comparable_name(name: str) -> str:
+    """ファイルの番号が取れないときだけ使う、書き方の違い (NFC / NFD・大文字小文字) を揃えた名前。"""
+    return unicodedata.normalize("NFC", name).casefold()
+
+
+def _unregistered_folders(parent: Path, registered: Sequence[Path]) -> List[Path]:
+    """``parent`` の直下のフォルダのうち、``registered`` のどれとも同じ実体でないもの。
+
+    **名前では比べない。** 同じフォルダの違う書き方 (macOS の NFD と DB の NFC、
+    大文字小文字を区別しないファイルシステムの大文字と小文字) を「登録されていない」と
+    取り違えるため。ファイルの番号を持たないファイルシステムでだけ、書き方を揃えた
+    名前で比べる。
+    """
+    try:
+        children = sorted(p for p in parent.iterdir() if p.is_dir())
+    except OSError:
+        return []
+    identities = {i for i in (_entry_identity(p) for p in registered) if i is not None}
+    names = {_comparable_name(p.name) for p in registered}
+    out: List[Path] = []
+    for child in children:
+        identity = _entry_identity(child)
+        if identity is not None:
+            is_registered = identity in identities
         else:
-            building_dirs = sorted(p for p in buildings_root.iterdir() if p.is_dir())
-        for building_dir in building_dirs:
-            log_path = building_dir / "log.json"
+            is_registered = _comparable_name(child.name) in names
+        if not is_registered:
+            out.append(child)
+    return out
+
+
+def _has_room_log(buildings_root: Path) -> bool:
+    try:
+        return any(
+            (room / "log.json").exists()
+            for room in buildings_root.iterdir()
+            if room.is_dir()
+        )
+    except OSError:
+        return False
+
+
+def _registered_room_log_files(
+    db, saiverse_home: Path, *, city_filter: Optional[str] = None,
+) -> List[Tuple[str, Path]]:
+    """DB に登録された部屋の log.json を、(部屋 ID, 場所) の組で集める。部屋を指定しない取り込み用。
+
+    **部屋 ID は常に DB の値を使う。** 場所は :func:`legacy_log_path` で DB の
+    CITY_SLUG と部屋 ID から組み立てる (起動時の確認処理と同じ規則)。フォルダを
+    一覧してフォルダ名を部屋 ID に使うと、macOS でフォルダ名が濁点の分解された形
+    (NFD)、DB の部屋 ID が合成済みの形 (NFC) のとき、DB の部屋と別の部屋 ID で行を
+    書き込む。
+
+    DB に登録されていない部屋 (または City) のフォルダにある log.json は取り込まず、
+    フォルダの名前を WARNING に出す。
+    """
+    saiverse_home = Path(saiverse_home)
+    cities_root = saiverse_home / "cities"
+    city_query = db.query(City.CITYID, City.CITY_SLUG)
+    if city_filter:
+        city_query = city_query.filter(City.CITY_SLUG == city_filter)
+    cities = sorted(
+        ((city_id, str(slug)) for city_id, slug in city_query.all() if slug),
+        key=lambda city: city[1],
+    )
+    if city_filter and not cities:
+        LOGGER.warning(
+            "City %r はデータベースに登録されていないので、その下の古い会話のファイルは"
+            "取り込みません",
+            city_filter,
+        )
+        return []
+
+    found: List[Tuple[str, Path]] = []
+    registered_city_dirs: List[Path] = []
+    for city_id, slug in cities:
+        city_dir = _child_by_name(cities_root, slug)
+        if city_dir is None:
+            LOGGER.warning(
+                "City の識別子 %r がフォルダ名として使えないので、古い会話のファイルの"
+                "場所を決められません",
+                slug,
+            )
+            continue
+        registered_city_dirs.append(city_dir)
+        building_ids = sorted(
+            str(building_id)
+            for (building_id,) in db.query(Building.BUILDINGID)
+            .filter(Building.CITYID == city_id)
+            .all()
+            if building_id
+        )
+        registered_room_dirs: List[Path] = []
+        for building_id in building_ids:
+            log_path = legacy_log_path(saiverse_home, slug, building_id)
+            if log_path is None:
+                LOGGER.warning("  %s: %s", building_id, UNUSABLE_FOLDER_NAME_REASON)
+                continue
+            registered_room_dirs.append(log_path.parent)
             if log_path.exists():
-                found.append(log_path)
+                found.append((building_id, log_path))
+        for folder in _unregistered_folders(city_dir / "buildings", registered_room_dirs):
+            if (folder / "log.json").exists():
+                LOGGER.warning(
+                    "データベースに登録されていない部屋の古い会話のファイルがあります。"
+                    "取り込みません (City %s のフォルダ %r): %s",
+                    slug, folder.name, folder / "log.json",
+                )
+    if not city_filter and cities_root.exists():
+        for folder in _unregistered_folders(cities_root, registered_city_dirs):
+            if _has_room_log(folder / "buildings"):
+                LOGGER.warning(
+                    "データベースに登録されていない City のフォルダに、古い会話のファイルが"
+                    "あります。取り込みません (フォルダ %r): %s",
+                    folder.name, folder,
+                )
     return found
 
 
@@ -253,6 +394,75 @@ def load_log(log_path: Path) -> Tuple[Optional[List[dict]], Optional[str]]:
     if not isinstance(data, list):
         return None, f"list ではない (type={type(data).__name__})"
     return data, None
+
+
+# ---------------------------------------------------------------------------
+# 古いファイルの行と DB の突き合わせ (欠けの規則はここだけ)
+# ---------------------------------------------------------------------------
+
+def _room_message_ids(db, building_id: str) -> Tuple[int, Set[str]]:
+    """この部屋の DB の行数と、その行が持つ message_id ∪ legacy_message_id。"""
+    total_rows = (
+        db.query(BuildingMessage).filter_by(building_id=building_id).count()
+    )
+    ids: Set[str] = set()
+    if total_rows:
+        for mid, legacy_mid in (
+            db.query(BuildingMessage.message_id, BuildingMessage.legacy_message_id)
+            .filter_by(building_id=building_id)
+            .all()
+        ):
+            if mid:
+                ids.add(mid)
+            if legacy_mid:
+                ids.add(legacy_mid)
+    return total_rows, ids
+
+
+def _legacy_entry_message_id(entry: Any) -> Optional[str]:
+    """古いファイルの 1 行の message_id。持たない (空・文字列でない・行が dict でない) なら None。"""
+    mid = entry.get("message_id") if isinstance(entry, dict) else None
+    return mid if isinstance(mid, str) and mid else None
+
+
+def _legacy_entry_is_missing(entry: Any, db_ids: Set[str], room_has_rows: bool) -> bool:
+    """古いファイルの 1 行が、この部屋の DB に見つからない (欠け) か。
+
+    message_id を持つ行は、DB のこの部屋の message_id ∪ legacy_message_id に無ければ欠け。
+    持たない行は、この部屋に DB の行が 1 つも無いとき (= ファイルが唯一の写し) だけ
+    欠け — 行があるときは、既に入っているのか未取り込みなのかを見分けられない。
+    """
+    mid = _legacy_entry_message_id(entry)
+    if mid is not None:
+        return mid not in db_ids
+    return not room_has_rows
+
+
+def count_missing_legacy_messages(db, building_id: str, messages: Iterable[Any]) -> int:
+    """古いファイルの行のうち、この部屋の DB に見つからないもの (欠け) の数。
+
+    **欠けの規則はこの 1 つだけ** (:func:`_legacy_entry_is_missing`)。起動時の確認処理
+    (:func:`_scan_one_building`) がこの数で警告を出し、取り込み処理
+    (:func:`migrate_building`) が同じ規則で入れる行を選び、部屋 ID の付け替え
+    (saiverse/building_id_repair.py) が付け替えの前後でこの数を比べる。規則が 2 枚に
+    なると、「欠けとして警告する対象」「取り込む対象」「付け替えで増えていないかを
+    確かめる対象」がずれる。
+
+    数え方: message_id を持つ欠けは **ID の種類** を数える (同じ ID の行が 2 つあっても
+    1)。message_id を持たない欠けは行の数を数える。
+    """
+    total_rows, db_ids = _room_message_ids(db, building_id)
+    missing_ids: Set[str] = set()
+    missing_without_id = 0
+    for entry in messages:
+        if not _legacy_entry_is_missing(entry, db_ids, total_rows > 0):
+            continue
+        mid = _legacy_entry_message_id(entry)
+        if mid is None:
+            missing_without_id += 1
+        else:
+            missing_ids.add(mid)
+    return len(missing_ids) + missing_without_id
 
 
 def migrate_building(
@@ -312,29 +522,12 @@ def migrate_building(
     messages_list = list(messages)
     stats.messages_seen += len(messages_list)
 
-    total_rows = (
-        db.query(BuildingMessage).filter_by(building_id=building_id).count()
-    )
-    db_ids = set()
-    if total_rows:
-        for mid, legacy_mid in (
-            db.query(BuildingMessage.message_id, BuildingMessage.legacy_message_id)
-            .filter_by(building_id=building_id)
-            .all()
-        ):
-            if mid:
-                db_ids.add(mid)
-            if legacy_mid:
-                db_ids.add(legacy_mid)
-
-    pending: List[dict] = []
-    for msg in messages_list:
-        mid = msg.get("message_id") if isinstance(msg, dict) else None
-        if isinstance(mid, str) and mid:
-            if mid not in db_ids:
-                pending.append(msg)
-        elif total_rows == 0:
-            pending.append(msg)
+    # 入れる行の選び方は、確認処理が欠けを数える規則と同じ関数 (規則を 2 枚にしない)
+    total_rows, db_ids = _room_message_ids(db, building_id)
+    pending: List[dict] = [
+        msg for msg in messages_list
+        if _legacy_entry_is_missing(msg, db_ids, total_rows > 0)
+    ]
 
     if not pending:
         LOGGER.info(
@@ -549,21 +742,32 @@ def import_building_logs(
     部屋ひとつを SAVEPOINT で囲うので、1 部屋の失敗は他の部屋を巻き込まない
     (失敗した部屋は行が 1 つも残らず、検算が「未取込」として拾う)。
 
+    **部屋 ID は常に DB の値 (または呼び出し側が渡した部屋 ID) を使い、フォルダ名から
+    取らない。** 部屋を指定したとき (起動時の経路) はその ID でファイルを探す。
+    指定しないとき (手動 CLI で ``--building-id`` を省いたとき) は、DB に登録された
+    部屋 ID から場所を決める (:func:`_registered_room_log_files`)。登録されていない
+    部屋のフォルダの log.json は取り込まず、WARNING に出す。
+
     Args:
         commit_per_building: True なら部屋ごとに commit して確定させる。手動 CLI
             用 — 後半の部屋の失敗で前半の取り込みまで巻き戻らないようにする。
             False (既定) では commit せず、境界は呼び出し側が持つ
             (アップグレード経路はエンティティ単位の commit に相乗りする)。
     """
-    log_files = find_log_files(
-        saiverse_home, city_filter=city_filter, building_filter=building_filter,
-    )
-    LOGGER.info("対象 log.json: %d 件", len(log_files))
+    if building_filter:
+        targets: List[Tuple[str, Path]] = [
+            (building_filter, log_path)
+            for log_path in find_log_files(
+                saiverse_home, city_filter=city_filter, building_filter=building_filter,
+            )
+        ]
+    else:
+        targets = _registered_room_log_files(db, saiverse_home, city_filter=city_filter)
+    LOGGER.info("対象 log.json: %d 件", len(targets))
 
     commit_each = commit_per_building and not dry_run
     stats = MigrationStats()
-    for log_path in log_files:
-        building_id = log_path.parent.name
+    for building_id, log_path in targets:
         stats.buildings_scanned += 1
         LOGGER.info("→ %s", log_path)
 
@@ -757,29 +961,8 @@ def _scan_one_building(
     if file_entries == 0:
         return None
 
-    file_ids = set()
-    no_id_entries = 0
-    for m in messages:
-        mid = m.get("message_id") if isinstance(m, dict) else None
-        if isinstance(mid, str) and mid:
-            file_ids.add(mid)
-        else:
-            no_id_entries += 1
-
-    db_ids = set()
-    for mid, legacy_mid in (
-        db.query(BuildingMessage.message_id, BuildingMessage.legacy_message_id)
-        .filter_by(building_id=building_id)
-        .all()
-    ):
-        if mid:
-            db_ids.add(mid)
-        if legacy_mid:
-            db_ids.add(legacy_mid)
-
-    missing = len(file_ids - db_ids)
-    if total_rows == 0:
-        missing += no_id_entries
+    # 取り込み処理・部屋 ID の付け替えと同じ 1 つの規則で数える
+    missing = count_missing_legacy_messages(db, building_id, messages)
     if missing == 0:
         return None
 
