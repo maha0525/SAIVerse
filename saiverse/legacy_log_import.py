@@ -44,6 +44,7 @@ from sqlalchemy import func, or_
 
 from database.models import AddonMessageMetadata, BuildingMessage, PersonaPulseCursor
 from database.building_messages import serialize_building_message
+from manager.ids import is_safe_path_component
 
 LOGGER = logging.getLogger(__name__)
 
@@ -116,13 +117,19 @@ def imported_row_filter():
 
 
 def _child_by_name(parent: Path, name: str) -> Optional[Path]:
-    """``parent`` の直下にある ``name`` を指す Path。階層を跨ぐ名前なら None。
+    """``parent`` の直下にある ``name`` を指す Path。フォルダ名として使えない名前なら None。
 
     一覧との名前照合をやめてパスを直接組む以上、名前が親の外へ出ないことは
     ここで確かめる (照合していた頃は、一覧に載っている名前しか通らないので
     構造上ありえなかった)。
+
+    断る基準は ``manager.ids.is_safe_path_component`` — 区切り記号と ``.`` ``..`` に
+    加えて、Windows でフォルダ名に使えない文字 (``:`` はドライブ名として解釈され、
+    親の外を指しうる)・制御文字・末尾のドットと空白・Windows の予約名も断る。部屋 ID の
+    付け替え (saiverse/building_id_repair.py) が「フォルダ名として安全」と見なす基準と
+    同じ。``#`` ``%`` はフォルダ名としては使えるので、ここでは断らない。
     """
-    if not name or name in {".", ".."} or "/" in name or "\\" in name:
+    if not is_safe_path_component(name):
         return None
     child = parent / name
     if child.parent != parent:
@@ -132,7 +139,8 @@ def _child_by_name(parent: Path, name: str) -> Optional[Path]:
 
 #: 部屋 ID がフォルダ名として使えず、古い会話のファイルの場所を決められないときの理由
 UNUSABLE_FOLDER_NAME_REASON = (
-    "部屋 ID に区切り記号などが含まれていて、フォルダ名として使えません"
+    "部屋 ID にフォルダ名として使えない文字（「/」「:」など）が含まれていて、"
+    "古い会話のファイルの場所を決められません"
 )
 
 
@@ -264,6 +272,9 @@ def migrate_building(
     - **並び順**: 既に会話が始まっている部屋でも、過去ログは時系列どおり前に入る。
       既存の行は 1 つも動かさないので、行の seq / message_id を指している他の記録
       (ペルソナ個人の記憶に残る転記元の目印、AddonMessageMetadata) がずれない。
+      この約束は取り込みについてのもの。部屋 ID の付け替え
+      (saiverse/building_id_repair.py) だけは message_id を新しい部屋 ID の形に
+      動かす例外で、参照している側も同じ付け替えで書き換える。
     - **既読の扱い**: 「どこまで読んだか」は 0 以上なので、負の seq は常にそれ以下 =
       既読。過去ログを「未読の新着」に化けさせないための cursor 操作が要らなくなる。
     - **見分け**: その部屋の過去ログは seq < 0 で正確に引ける。

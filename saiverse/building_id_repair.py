@@ -1,4 +1,4 @@
-"""部屋 ID に区切り記号 (``/`` ``\\``) を含む部屋を、起動時に付け替える。
+"""フォルダ名や URL を壊す文字を ID に含む部屋を、起動時に付け替える。
 
 設計: docs/issues/building_id_contains_path_separator.md
 
@@ -7,26 +7,34 @@ v0.3.0 より前は部屋 ID に使える文字の制限が無く、名前に「
 リンクの一部としてそのまま使われるので、「/」は会話ファイルを 2 段のフォルダの
 奥に置き、過去ログの取り込みを毎起動空振りさせていた。
 
-ここでは、この City の部屋のうち ID に区切り記号を含むものを、``_`` に置き換えた
-新しい ID へ付け替える。**表示名 (BUILDINGNAME) は変えない。** 部屋を指す DB の欄、
-JSON でまとめて保存している欄 (値の完全一致だけ)、会話ファイルのフォルダを一緒に
-付け替える。
+ここでは、この City の部屋のうち、次の文字をそれぞれ ``_`` に置き換えると ID が
+変わるものを、置き換えた新しい ID へ付け替える (まはーの判断 2 (b)):
+フォルダ名に使えない文字 (``manager/ids.py`` の ``_UNSAFE_PATH_CHARS``:
+``/ \\ : * ? " < > |``)、URL の区切りになる ``#`` ``%``、制御文字、末尾に並ぶ
+ドットと空白。日本語と全角文字は変えない。**表示名 (BUILDINGNAME) は変えない。**
+部屋を指す DB の欄、JSON でまとめて保存している欄 (値の完全一致だけ)、ペルソナの
+記憶のファイルの中の機械が読む印、会話ファイルのフォルダを一緒に付け替える。
 
-**変えないもの**: 古いファイルでの元のメッセージ ID
+**変えないもの**: 古いファイルでの元のメッセージ ID のうち既に値があるもの
 (``building_messages.legacy_message_id`` — 起動時の確認処理がこの値で古いファイルと
-突き合わせる。書き換えると同じ会話がもう一度移される)、ペルソナの記憶
-(``personas/<id>/memory.db``) の中身、ユーザーが書いた文章の中の ID。
+突き合わせる。空の行にだけ、書き換える前のメッセージ ID を写す)、ペルソナに送る
+本文の元 (``session_head_snapshot.SECTIONS_JSON`` — 書き換えるとプロンプト
+キャッシュが割れる)、ペルソナの記憶のファイルの文面と添付 (まはーの判断 1 (b) で
+書き換えるのは印だけ)、ユーザーが書いた文章の中の ID。
 
 順番と、途中で止まったときの再開:
 
 1. 付け替えの記録 ``cities/<city>/building_id_renames.json`` に「予定」を書く
 2. DB を一つのトランザクションで書き換えて commit する
-3. フォルダを移し、空になった途中のフォルダを消す
-4. 記録を「完了」にする (記録は消さない)
+3. ペルソナの記憶のファイルの印を、ペルソナごとに複製を取ってから書き換える
+4. フォルダを移し、空になった途中のフォルダを消す
+5. 記録を「完了」にする (記録は消さない)
 
 次の起動では「予定」のまま残った要素を DB の姿で振り分ける — DB に旧 ID が残って
-いれば 2 から、旧 ID が無く新 ID があれば 3 から。3 のフォルダの移動は、移し終わった
-ものが古い場所に無いので飛ばされる。
+いれば 2 から、旧 ID が無く新 ID があれば 3 から。3 は完全一致の置き換えなので、
+途中まで済んだペルソナにもう一度行っても結果は変わらない。4 のフォルダの移動は、
+移し終わったものが古い場所に無いので飛ばされる。3 で失敗したペルソナがいた回は
+記録を「完了」にせず、次の起動でもう一度 3 から行う。
 
 **起動は止めない。** 見送り (多重起動・バックアップの失敗・安全な ID にできない) と
 失敗は、startup_alerts と同じ形の警告として戻り値で返す。付け替えが成功しただけの
@@ -34,17 +42,22 @@ JSON でまとめて保存している欄 (値の完全一致だけ)、会話フ
 """
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import os
+import sqlite3
 from dataclasses import dataclass
 from datetime import datetime
-from pathlib import Path, PurePath
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
+from pathlib import Path
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple, Union
 
 from sqlalchemy import text
 
-from manager.ids import is_safe_path_component
+# _UNSAFE_PATH_CHARS は作成の口の検査 (is_safe_path_component) と同じ一覧。
+# 付け替えで置き換える文字をそこから取り、「フォルダ名として使えない」の基準を二つにしない。
+from manager.ids import _UNSAFE_PATH_CHARS, is_safe_path_component
+from sai_memory.room_state import ROOM_STATE_META_KEY, bundle_is_valid, snapshot_digest
 
 LOGGER = logging.getLogger(__name__)
 
@@ -59,12 +72,23 @@ NOTE_ROOM_NOT_FOUND = "room_not_found"
 #: Discord 連携の「チャンネルと部屋の対応表」を持つ環境変数 (discord_gateway/mapping.py)
 DISCORD_CHANNEL_MAP_ENV = "SAIVERSE_GATEWAY_CHANNEL_MAP"
 
-_SEPARATORS = ("/", "\\")
+#: URL の区切りになる文字。フォルダ名には使えるが、URL・リンクの途中で切れる。
+_URL_BREAKING_CHARS = frozenset("#%")
+#: 付け替えで ``_`` に置き換える文字 (制御文字と末尾のドット・空白は別に扱う)
+_REPLACED_CHARS = _UNSAFE_PATH_CHARS | _URL_BREAKING_CHARS
+#: Windows のフォルダ名に使えない文字のうち、区切り記号でないもの
+_WINDOWS_INVALID_NAME_CHARS = _UNSAFE_PATH_CHARS - {"/", "\\"}
+#: 末尾にあると Windows がフォルダ名から黙って落とす文字
+_TRAILING_DROPPED_BY_WINDOWS = frozenset(". ")
 _MAX_SUFFIX = 10_000
 _LOG_PREFIX = "[building-id-repair]"
 
-#: (列, 比較, 値)。「列 比較 値」を満たす行だけを対象にする。
-_RowFilter = Optional[Tuple[str, str, str]]
+#: (列, 比較, 値)。「列 比較 値」を満たす行だけを対象にする。値がタプルなら
+#: ``IN`` / ``NOT IN`` の一覧として扱う。
+_RowFilter = Optional[Tuple[str, str, Union[str, Tuple[str, ...]]]]
+
+#: 部屋の様子の記録の鍵の書き出し (sai_memory/room_state.room_key と同じ形)
+_ROOM_KEY_PREFIX = "building:"
 
 #: 部屋を指す欄 (値そのものが部屋 ID)。新しい ID の空き判定にも使う。
 DIRECT_REFERENCE_COLUMNS: Tuple[Tuple[str, str, _RowFilter], ...] = (
@@ -83,20 +107,36 @@ DIRECT_REFERENCE_COLUMNS: Tuple[Tuple[str, str, _RowFilter], ...] = (
     # 部屋専用 Playbook の持ち主。sea/runtime.py と list_available_playbooks が
     # この値の完全一致で「この部屋の Playbook」を選ぶので、残すと部屋から消える。
     ("playbooks", "building_id", None),
-    # 読む処理は無いが、古い ID を残さない。visiting_ai は現行の表に building_id が
-    # 無い — 列が無ければ飛ばす (_resolve_columns)。
+    # 読む処理は無いが、古い ID を残さない。
     ("building_tool_link", "BUILDINGID", None),
-    ("visiting_ai", "building_id", None),
 )
 
-#: JSON でまとめて保存している欄。値の完全一致だけを置き換える (replace_exact_strings)。
+#: 実行台帳の「終わった」状態 (saiverse/execution_ledger.py の STATUS_COMPLETED /
+#: STATUS_FAILED)。failed の行は再試行されるとき別の行として作り直される
+#: (claim_execution) ので、その入力が読み直されることは無い。
+_LEDGER_FINISHED_STATUSES = ("completed", "failed")
+
+#: JSON でまとめて保存している欄。値の完全一致だけを置き換える
+#: (:func:`replace_exact_strings_nested` — 文字列の中に JSON を入れ子で持つ欄にも届く)。
 JSON_COLUMNS: Tuple[Tuple[str, str, _RowFilter], ...] = (
     ("persona_day_plan", "slots_json", None),
     ("persona_timetable_template", "SLOTS_JSON", None),
     ("phenomenon_rule", "CONDITION_JSON", None),
     ("persona_schedule", "PLAYBOOK_PARAMS", None),
     # 未配達の作業だけ。配達済みの行は実行時点で凍結された記録なので触らない。
+    # 知覚の配達 (perception.push) は metadata を JSON の文字列で持つので、
+    # 入れ子の中の部屋の様子の鍵まで置き換える。
     ("execution_outbox", "PAYLOAD_JSON", ("STATUS", "<>", "delivered")),
+    # まだ終わっていない実行の入力だけ (prepared / running / applied / unknown)。
+    ("execution_ledger", "PAYLOAD_JSON", ("STATUS", "NOT IN", _LEDGER_FINISHED_STATUSES)),
+    # 前回ペルソナに知らせた状態。値は「Section 名 → その Section の snapshot の
+    # JSON 文字列」なので、入れ子の中の部屋 ID を置き換える。付け替えないと、
+    # 付け替えた部屋にいるペルソナに起きていない移動の通知が作られる
+    # (sea/head_pipeline/sections/building.py の diff_to_notifications)。
+    # 同じ行の SECTIONS_JSON (ペルソナに送る本文の元) には触らない。
+    ("session_head_snapshot", "LAST_NOTIFIED_JSON", None),
+    ("persona_building_state", "BASELINE_JSON", None),
+    ("persona_building_state", "LAST_NOTIFIED_JSON", None),
     ("persona_event_log", "PAYLOAD", None),
     ("region", "STATE_JSON", None),
     ("region", "CONFIG_JSON", None),
@@ -114,9 +154,28 @@ _STRING_TYPE_MARKERS = ("CHAR", "TEXT", "CLOB", "STRING")
 # 小さな部品
 # ---------------------------------------------------------------------------
 
-def has_path_separator(building_id: str) -> bool:
-    """部屋 ID に区切り記号 (``/`` ``\\``) が入っているか。"""
-    return any(sep in building_id for sep in _SEPARATORS)
+def repaired_building_id(building_id: str) -> str:
+    """フォルダ名や URL を壊す文字を、それぞれ ``_`` に置き換えた ID (付け替え先の候補の元)。
+
+    置き換えるのは ``manager/ids.py`` の ``_UNSAFE_PATH_CHARS`` (``/ \\ : * ? " < > |``)、
+    ``#`` ``%``、制御文字 (コード 32 未満)、末尾に並ぶドットと空白 (Windows が
+    フォルダ名から黙って落とすため、``alice.`` と ``alice`` が同じ場所を指す)。
+    それ以外 (日本語・全角の「？」「：」など) は変えない。
+    """
+    chars = [
+        "_" if ch in _REPLACED_CHARS or ord(ch) < 32 else ch
+        for ch in building_id
+    ]
+    index = len(chars)
+    while index > 0 and chars[index - 1] in _TRAILING_DROPPED_BY_WINDOWS:
+        chars[index - 1] = "_"
+        index -= 1
+    return "".join(chars)
+
+
+def needs_building_id_repair(building_id: str) -> bool:
+    """付け替える部屋か (置き換えで ID が変わるか)。"""
+    return repaired_building_id(building_id) != building_id
 
 
 def _quote(identifier: str) -> str:
@@ -145,8 +204,8 @@ def choose_new_building_id(
 ) -> Optional[str]:
     """付け替え先の部屋 ID を決める。
 
-    ``/`` と ``\\`` を ``_`` に置き換え、次のどれかに当てはまる間は末尾に ``_2``、
-    ``_3`` … を足す:
+    :func:`repaired_building_id` の結果を元に、次のどれかに当てはまる間は末尾に
+    ``_2``、``_3`` … を足す:
 
     - ``taken`` (**小文字にした**使用済みの ID) に含まれる。Windows のファイル
       システムは大文字小文字を区別しないので、比べるのは小文字どうし。
@@ -157,8 +216,9 @@ def choose_new_building_id(
     替えてフォルダを移した後に、DB だけが控えから戻された」場合 — そのフォルダは
     自分が移したものなので、あっても空きとみなす。
 
-    戻り値がフォルダ名として安全でない ID のことがある (置き換えても末尾のドット
-    などが残る)。安全かどうかの判定は呼び出し側が持つ。None は候補を使い切ったとき。
+    戻り値がフォルダ名として安全でない ID のことがある (置き換えても Windows の
+    予約名 ``CON`` などに当たる)。安全かどうかの判定は呼び出し側が持つ。None は
+    候補を使い切ったとき。
     """
     if (
         preferred is not None
@@ -171,9 +231,7 @@ def choose_new_building_id(
     ):
         return preferred
 
-    base = old_id
-    for sep in _SEPARATORS:
-        base = base.replace(sep, "_")
+    base = repaired_building_id(old_id)
     for n in range(1, _MAX_SUFFIX + 1):
         candidate = base if n == 1 else f"{base}_{n}"
         if candidate.lower() in taken:
@@ -186,26 +244,59 @@ def choose_new_building_id(
     return None
 
 
-def legacy_folder_parts(building_id: str) -> Optional[List[str]]:
+def _on_windows() -> bool:
+    return os.name == "nt"
+
+
+def legacy_folder_parts(
+    building_id: str, *, windows: Optional[bool] = None,
+) -> Optional[List[str]]:
     """旧 ID をそのままパスに繋いだとき、実際のフォルダが何段の何という名前になるか。
 
     v0.2 は ``buildings/<部屋ID>`` を素の結合で作ったので、この OS の区切り記号は段の
     区切りになった (Windows では ``/`` と ``\\`` の両方、それ以外では ``/`` だけ)。
+    ``windows`` は判定する OS (None ならこの OS)。
 
-    空の段 (``a//b``・末尾の ``/``)、``.``・``..``、ドライブ名や根を含む段があれば
-    None を返す — 素の結合が別の部屋のフォルダや buildings の外を指しうるので、
-    そういう部屋のフォルダは動かさない。
+    空の段 (``a//b``・末尾の ``/``)、``.``・``..`` を含むときは None を返す — 素の
+    結合が別の部屋のフォルダや buildings の外を指しうるので、そういう部屋は付け替え
+    ない。
+
+    それ以外の段にフォルダ名として使えない文字 (``:`` など) があっても None には
+    しない。Windows ではそのフォルダは作れなかったはずで (``:`` はドライブ名や
+    ファイルの別の流れの区切りとして解釈される)、移すものが無いだけ — 判定は
+    :func:`legacy_folder_can_exist`。POSIX では普通のフォルダ名として作られている。
     """
+    if windows is None:
+        windows = _on_windows()
+    separators = ("/", "\\") if windows else ("/",)
     parts = [building_id]
-    for sep in {s for s in (os.sep, os.altsep) if s}:
+    for sep in separators:
         parts = [piece for chunk in parts for piece in chunk.split(sep)]
     for part in parts:
         if part in {"", ".", ".."}:
             return None
-        pure = PurePath(part)
-        if pure.drive or pure.root:
-            return None
     return parts
+
+
+def legacy_folder_can_exist(
+    parts: Sequence[str], *, windows: Optional[bool] = None,
+) -> bool:
+    """:func:`legacy_folder_parts` の段が、その OS でフォルダとして作れた名前か。
+
+    Windows ではフォルダ名に使えない文字 (``: * ? " < > |``) と制御文字を含む段は
+    作れなかったので、古いフォルダは無い。False のとき、フォルダの移動は飛ばして
+    ID の付け替えは進める (パスとして組み立てると ``a:b`` がドライブ名 ``a:`` に
+    解釈され、buildings の外を指すので、組み立てもしない)。
+    """
+    if windows is None:
+        windows = _on_windows()
+    if not windows:
+        return True
+    return not any(
+        ch in _WINDOWS_INVALID_NAME_CHARS or ord(ch) < 32
+        for part in parts
+        for ch in part
+    )
 
 
 def replace_exact_strings(value: Any, replacements: Mapping[str, str]) -> Tuple[Any, bool]:
@@ -253,6 +344,58 @@ def replace_exact_strings(value: Any, replacements: Mapping[str, str]) -> Tuple[
             out[new_key] = new_item
         return (out if changed else value), changed
     return value, False
+
+
+def replace_exact_strings_nested(
+    value: Any, replacements: Mapping[str, str],
+) -> Tuple[Any, bool]:
+    """:func:`replace_exact_strings` に加えて、JSON を文字列で入れ子に持つ値の中も置き換える。
+
+    DB の JSON の欄には、値そのものが JSON の文字列になっているものがある —
+    ``session_head_snapshot.LAST_NOTIFIED_JSON`` (Section ごとの snapshot の
+    JSON 文字列)、``execution_outbox.PAYLOAD_JSON`` の知覚の配達 (``metadata``)。
+    文字列の値が JSON の辞書か一覧として読めるときだけ中を辿り、変わったら
+    ``ensure_ascii=False`` で書き戻す (書き手の head_pipeline・room_state と同じ流儀)。
+    JSON として読めない文字列 (文章) は、完全一致のほかは触らない。
+    """
+    replaced, changed = replace_exact_strings(value, replacements)
+    return _replace_inside_json_strings(replaced, replacements, changed)
+
+
+def _replace_inside_json_strings(
+    value: Any, replacements: Mapping[str, str], changed: bool,
+) -> Tuple[Any, bool]:
+    if isinstance(value, str):
+        stripped = value.lstrip()
+        if not stripped or stripped[0] not in "{[":
+            return value, changed
+        try:
+            inner = json.loads(value)
+        except (ValueError, RecursionError):
+            return value, changed
+        if not isinstance(inner, (dict, list)):
+            return value, changed
+        new_inner, inner_changed = replace_exact_strings_nested(inner, replacements)
+        if not inner_changed:
+            return value, changed
+        return json.dumps(new_inner, ensure_ascii=False), True
+    if isinstance(value, list):
+        items = []
+        any_changed = False
+        for item in value:
+            new_item, item_changed = _replace_inside_json_strings(item, replacements, False)
+            items.append(new_item)
+            any_changed = any_changed or item_changed
+        return (items if any_changed else value), (changed or any_changed)
+    if isinstance(value, dict):
+        out: Dict[Any, Any] = {}
+        any_changed = False
+        for key, item in value.items():
+            new_item, item_changed = _replace_inside_json_strings(item, replacements, False)
+            out[key] = new_item
+            any_changed = any_changed or item_changed
+        return (out if any_changed else value), (changed or any_changed)
+    return value, changed
 
 
 # ---------------------------------------------------------------------------
@@ -306,13 +449,21 @@ class _Column:
     def where_sql(self) -> str:
         if self.row_filter is None:
             return ""
-        column, op, _value = self.row_filter
+        column, op, value = self.row_filter
+        if isinstance(value, tuple):
+            names = ", ".join(f":filter_value_{i}" for i in range(len(value)))
+            return f" AND {_quote(column)} {op} ({names})"
         return f" AND {_quote(column)} {op} :filter_value"
 
     def params(self, **extra: Any) -> Dict[str, Any]:
         params = dict(extra)
         if self.row_filter is not None:
-            params["filter_value"] = self.row_filter[2]
+            value = self.row_filter[2]
+            if isinstance(value, tuple):
+                for i, item in enumerate(value):
+                    params[f"filter_value_{i}"] = item
+            else:
+                params["filter_value"] = value
         return params
 
 
@@ -390,6 +541,15 @@ def _collect_taken_ids(
     return taken
 
 
+def room_replacements(renames: Mapping[str, str]) -> Dict[str, str]:
+    """完全一致で置き換える対応表: 部屋 ID と、部屋の様子の記録の鍵 ``building:<ID>``。"""
+    out: Dict[str, str] = {}
+    for old_id, new_id in renames.items():
+        out[old_id] = new_id
+        out[_ROOM_KEY_PREFIX + old_id] = _ROOM_KEY_PREFIX + new_id
+    return out
+
+
 def _rewrite_database(
     db, schema: _Schema, plans: Sequence[_Plan],
 ) -> Tuple[Dict[str, Dict[str, int]], Dict[str, int]]:
@@ -410,6 +570,9 @@ def _rewrite_database(
         schema,
         (("building_messages", "building_id", None), ("building_messages", "message_id", None)),
     )
+    legacy_cols = _resolve_columns(
+        schema, (("building_messages", "legacy_message_id", None),),
+    )
     addon_cols = _resolve_columns(schema, (("addon_message_metadata", "message_id", None),))
     if not building_pk:
         raise RuntimeError("building.BUILDINGID がこの DB にありません")
@@ -424,22 +587,34 @@ def _rewrite_database(
         prefix = old_id + ":"
 
         # メッセージ ID (旧ID:番号 → 新ID:番号)。部屋の行を新しい ID へ移す前に、旧 ID で引く。
+        #
+        # 書き換える行で legacy_message_id が空なら、書き換える前のメッセージ ID を写す。
+        # 起動時の確認処理と取り込み処理は、古いファイルのメッセージ ID を DB の
+        # message_id と legacy_message_id の和集合と突き合わせる — message_id だけで
+        # 一致していた行 (二重書き込み期の行など) が、書き換え後に「まだ移していない」
+        # と数えられて二重に取り込まれるのを防ぐ。既に値がある行は変えない。
         plan_message_map: Dict[str, str] = {}
         if len(message_cols) == 2:
             bid_col, mid_col = message_cols
+            legacy_col = legacy_cols[0] if legacy_cols else None
+            legacy_select = _quote(legacy_col.column) if legacy_col is not None else "NULL"
             rows = db.execute(
                 text(
-                    f"SELECT rowid, {_quote(mid_col.column)} FROM {_quote(mid_col.table)} "
+                    f"SELECT rowid, {_quote(mid_col.column)}, {legacy_select} "
+                    f"FROM {_quote(mid_col.table)} "
                     f"WHERE {_quote(bid_col.column)} = :old_id"
                 ),
                 {"old_id": old_id},
             ).fetchall()
             updates = []
-            for rowid, message_id in rows:
+            legacy_updates = []
+            for rowid, message_id, legacy_message_id in rows:
                 if isinstance(message_id, str) and message_id.startswith(prefix):
                     new_message_id = new_id + ":" + message_id[len(prefix):]
                     plan_message_map[message_id] = new_message_id
                     updates.append({"rid": rowid, "value": new_message_id})
+                    if legacy_col is not None and legacy_message_id in (None, ""):
+                        legacy_updates.append({"rid": rowid, "value": message_id})
             if updates:
                 db.execute(
                     text(
@@ -449,6 +624,16 @@ def _rewrite_database(
                     updates,
                 )
                 counts[mid_col.label] = len(updates)
+            if legacy_updates:
+                assert legacy_col is not None
+                db.execute(
+                    text(
+                        f"UPDATE {_quote(legacy_col.table)} "
+                        f"SET {_quote(legacy_col.column)} = :value WHERE rowid = :rid"
+                    ),
+                    legacy_updates,
+                )
+                counts[legacy_col.label] = len(legacy_updates)
 
         # 部屋そのもの
         result = db.execute(
@@ -506,7 +691,9 @@ def _rewrite_database(
 
     # JSON の欄は、この回に付け替える全部屋ぶんの対応表で一度だけ読む
     replacements: Dict[str, str] = dict(message_map)
-    replacements.update({plan.old_id: plan.new_id for plan in plans if plan.new_id})
+    replacements.update(
+        room_replacements({plan.old_id: plan.new_id for plan in plans if plan.new_id})
+    )
     json_counts: Dict[str, int] = {}
     for column in json_columns:
         rows = db.execute(
@@ -522,7 +709,7 @@ def _rewrite_database(
                 continue
             try:
                 data = json.loads(raw)
-                new_data, changed = replace_exact_strings(data, replacements)
+                new_data, changed = replace_exact_strings_nested(data, replacements)
             except (ValueError, RecursionError):
                 continue  # JSON として読めない値は触らない
             if changed:
@@ -570,6 +757,11 @@ def _move_room_folders(
     parts = legacy_folder_parts(old_id)
     if parts is None:
         return False, [], "古いフォルダの場所を安全に決められません"
+    if not legacy_folder_can_exist(parts):
+        return True, [
+            f"旧 ID {old_id!r} にはこの OS のフォルダ名に使えない文字が含まれるので、"
+            "古いフォルダは作られていません。移すフォルダはありません"
+        ], None
     notes: List[str] = []
     for root in folder_roots:
         src = root.joinpath(*parts)
@@ -592,6 +784,287 @@ def _move_room_folders(
 def _deepest_first(plans: Sequence[_Plan]) -> List[_Plan]:
     """深い段の部屋から移す (``a/b/c`` を先に出さないと ``a/b`` と一緒に動いてしまう)。"""
     return sorted(plans, key=lambda plan: -len(legacy_folder_parts(plan.old_id) or [plan.old_id]))
+
+
+# ---------------------------------------------------------------------------
+# ペルソナの記憶のファイル (まはーの判断 1 (b))
+# ---------------------------------------------------------------------------
+#
+# 書き換えるのは機械が読む印だけ。ペルソナが読む文面 (perception_buffer.content、
+# perception_batches.rendered_text、messages.content) と添付 (media) には触らない。
+#
+# - perception_buffer.metadata (JSON): 部屋 ID と部屋の様子の記録の鍵を完全一致で
+# - perception_buffer.reduce_key: 値が ``building:<旧ID>`` と完全一致するときだけ
+# - perception_batches.room_state_json (JSON): 部屋 ID と記録の鍵を完全一致で
+# - messages.metadata の building_msg_ref (写した会話の目印) だけ
+#
+# 部屋の様子の記帳の束 (snapshot) は部屋 ID を含み、差分の記帳は土台の束の指紋
+# (base_digest = 束の正準 JSON の sha256) を持つ。束の部屋 ID を書き換えると指紋が
+# 変わるので、同じ書き換えで base_digest も新しい束の指紋に付け直す — 付け直さないと
+# chain_is_intact (sai_memory/room_state.py) が「土台が見えていない」と判定し、提示の
+# 差分を全文へ開き直す (提示の書き換えと、同じ部屋の様子が二枚並ぶこと)。
+
+_MEMORY_BUSY_TIMEOUT_MS = 5000
+#: 写した会話の目印のキー (builtin_data/tools/get_building_messages.BUILDING_MSG_REF_KEY)
+_BUILDING_MSG_REF_KEY = "building_msg_ref"
+#: 完全一致の置き換えで読む JSON の欄 (テーブル, 列)
+_MEMORY_JSON_COLUMNS = (
+    ("perception_buffer", "metadata"),
+    ("perception_batches", "room_state_json"),
+)
+
+
+@dataclass(frozen=True)
+class MemoryUpdate:
+    """記憶のファイルの 1 行 1 欄の書き換え。``before`` は読んだときの値 (書く直前に照合する)。"""
+
+    table: str
+    column: str
+    rowid: int
+    before: str
+    after: str
+
+    @property
+    def label(self) -> str:
+        return f"{self.table}.{self.column}"
+
+
+def rewrite_building_msg_ref(ref: str, renames: Mapping[str, str]) -> str:
+    """写した会話の目印 ``<部屋ID>:<メッセージID>`` の旧 ID を新 ID にする。
+
+    先頭が ``旧ID:`` なら ``新ID:`` に、続くメッセージ ID の先頭が ``旧ID:`` なら
+    そこも ``新ID:`` に。旧 ID どうしが前方一致しうるので、長い旧 ID から試す。
+    """
+    for old_id in sorted(renames, key=len, reverse=True):
+        prefix = old_id + ":"
+        if not ref.startswith(prefix):
+            continue
+        new_id = renames[old_id]
+        rest = ref[len(prefix):]
+        if rest.startswith(prefix):
+            rest = new_id + ":" + rest[len(prefix):]
+        return new_id + ":" + rest
+    return ref
+
+
+def _id_needles(old_ids: Sequence[str]) -> List[str]:
+    """事前の絞り込みで探す文字列: 旧 ID と、JSON の文字列の中での書かれ方。"""
+    needles: Set[str] = set()
+    for old_id in old_ids:
+        forms = {
+            old_id,
+            json.dumps(old_id, ensure_ascii=False)[1:-1],
+            json.dumps(old_id)[1:-1],
+        }
+        for form in forms:
+            needles.add(form)
+            # JSON の文字列の中にもう一段 JSON がある書き方
+            needles.add(json.dumps(form, ensure_ascii=False)[1:-1])
+    return sorted(needle for needle in needles if needle)
+
+
+def _memory_columns(conn: sqlite3.Connection) -> Dict[str, Set[str]]:
+    """{テーブル名: {列名}} (小文字)。古い memory.db ではテーブルや列が無いことがある。"""
+    tables: Dict[str, Set[str]] = {}
+    for (name,) in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'table'"
+    ).fetchall():
+        columns = {
+            str(row[1]).lower()
+            for row in conn.execute(f"PRAGMA table_info({_quote(str(name))})").fetchall()
+        }
+        tables[str(name).lower()] = columns
+    return tables
+
+
+def _candidate_rows(
+    conn: sqlite3.Connection, table: str, column: str, needles: Sequence[str],
+) -> List[Tuple[int, Any]]:
+    where = " OR ".join(f"instr({_quote(column)}, ?) > 0" for _ in needles)
+    return [
+        (int(rowid), value)
+        for rowid, value in conn.execute(
+            f"SELECT rowid, {_quote(column)} FROM {_quote(table)} "
+            f"WHERE {_quote(column)} IS NOT NULL AND ({where})",
+            tuple(needles),
+        ).fetchall()
+    ]
+
+
+def _room_state_records(data: Any, column: str) -> List[Any]:
+    """JSON の中の部屋の様子の記帳 (バッチは一覧の要素、知覚の記録は metadata の一項目)。"""
+    if column == "room_state_json":
+        return list(data) if isinstance(data, list) else []
+    if isinstance(data, dict):
+        return [data.get(ROOM_STATE_META_KEY)]
+    return []
+
+
+def plan_memory_rewrite(
+    conn: sqlite3.Connection, renames: Mapping[str, str],
+) -> List[MemoryUpdate]:
+    """記憶のファイルで書き換えが要る行を集める (読むだけ、書かない)。
+
+    完全一致の置き換えなので、書き換え済みのファイルに対しては空の一覧になる
+    (再開でもう一度呼ばれても結果が変わらない)。
+    """
+    if not renames:
+        return []
+    columns = _memory_columns(conn)
+    replacements = room_replacements(renames)
+    needles = _id_needles(list(renames))
+    updates: List[MemoryUpdate] = []
+
+    def has(table: str, column: str) -> bool:
+        return column in columns.get(table, set())
+
+    # JSON の欄: まず完全一致で置き換え、書き換わった束の指紋の対応表を作る
+    parsed: List[Tuple[str, str, int, str, Any, Any, bool]] = []
+    for table, column in _MEMORY_JSON_COLUMNS:
+        if not has(table, column):
+            continue
+        for rowid, raw in _candidate_rows(conn, table, column, needles):
+            if not isinstance(raw, str) or not raw:
+                continue
+            try:
+                data = json.loads(raw)
+            except (ValueError, RecursionError):
+                continue  # JSON として読めない値は触らない
+            new_data, changed = replace_exact_strings(data, replacements)
+            parsed.append((table, column, rowid, raw, data, new_data, changed))
+
+    digest_map: Dict[str, str] = {}
+    for _table, column, _rowid, _raw, data, new_data, changed in parsed:
+        if not changed:
+            continue
+        for before, after in zip(
+            _room_state_records(data, column), _room_state_records(new_data, column),
+        ):
+            if not isinstance(before, dict) or not isinstance(after, dict):
+                continue
+            old_snapshot, new_snapshot = before.get("snapshot"), after.get("snapshot")
+            if old_snapshot is new_snapshot or not bundle_is_valid(old_snapshot):
+                continue
+            if not bundle_is_valid(new_snapshot):
+                continue
+            old_digest = snapshot_digest(old_snapshot)
+            new_digest = snapshot_digest(new_snapshot)
+            if old_digest != new_digest:
+                digest_map[old_digest] = new_digest
+
+    for table, column, rowid, raw, _data, new_data, changed in parsed:
+        if digest_map and any(
+            isinstance(record, dict)
+            and isinstance(record.get("base_digest"), str)
+            and record["base_digest"] in digest_map
+            for record in _room_state_records(new_data, column)
+        ):
+            # replace_exact_strings は変わらなかった部分を元のオブジェクトと共有する
+            new_data = copy.deepcopy(new_data)
+            for record in _room_state_records(new_data, column):
+                if not isinstance(record, dict):
+                    continue
+                base = record.get("base_digest")
+                if isinstance(base, str) and base in digest_map:
+                    record["base_digest"] = digest_map[base]
+            changed = True
+        if changed:
+            updates.append(MemoryUpdate(
+                table, column, rowid, raw, json.dumps(new_data, ensure_ascii=False),
+            ))
+
+    # 知覚の reduce の鍵: 値が部屋の様子の記録の鍵と完全一致するときだけ
+    if has("perception_buffer", "reduce_key"):
+        keys = {
+            _ROOM_KEY_PREFIX + old_id: _ROOM_KEY_PREFIX + new_id
+            for old_id, new_id in renames.items()
+        }
+        placeholders = ", ".join("?" for _ in keys)
+        for rowid, value in conn.execute(
+            "SELECT rowid, reduce_key FROM perception_buffer "
+            f"WHERE reduce_key IN ({placeholders})",
+            tuple(keys),
+        ).fetchall():
+            updates.append(MemoryUpdate(
+                "perception_buffer", "reduce_key", int(rowid), value, keys[value],
+            ))
+
+    # 記憶の行の写した会話の目印 (ほかの項目は変えない)
+    if has("messages", "metadata"):
+        for rowid, raw in _candidate_rows(conn, "messages", "metadata", needles):
+            if not isinstance(raw, str) or not raw:
+                continue
+            try:
+                data = json.loads(raw)
+            except (ValueError, RecursionError):
+                continue
+            if not isinstance(data, dict):
+                continue
+            ref = data.get(_BUILDING_MSG_REF_KEY)
+            if not isinstance(ref, str):
+                continue
+            new_ref = rewrite_building_msg_ref(ref, renames)
+            if new_ref == ref:
+                continue
+            new_data = dict(data)
+            new_data[_BUILDING_MSG_REF_KEY] = new_ref
+            updates.append(MemoryUpdate(
+                "messages", "metadata", rowid, raw,
+                json.dumps(new_data, ensure_ascii=False),
+            ))
+    return updates
+
+
+def apply_memory_rewrite(
+    conn: sqlite3.Connection, updates: Sequence[MemoryUpdate],
+) -> Dict[str, int]:
+    """書き換えを一つのトランザクションで書く。戻り値は欄ごとの書き換えた行数。
+
+    書く直前に、読んだときの値と同じかを照合する。読んだ後に変わった行があれば、
+    このファイルの書き換えをまるごと巻き戻して例外を上げる。
+    """
+    counts: Dict[str, int] = {}
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        for update in updates:
+            cursor = conn.execute(
+                f"UPDATE {_quote(update.table)} SET {_quote(update.column)} = ? "
+                f"WHERE rowid = ? AND {_quote(update.column)} = ?",
+                (update.after, update.rowid, update.before),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError(
+                    f"{update.label} の行 {update.rowid} が、読んだ後に変わっていました"
+                )
+            counts[update.label] = counts.get(update.label, 0) + 1
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+    return counts
+
+
+def _backup_memory_db(conn: sqlite3.Connection, dest: Path) -> None:
+    """記憶のファイルを SQLite のバックアップ機能で丸ごと複製する (書き込み途中の状態を写さない)。
+
+    一時的な名前に書いてから差し替える — 途中で失敗した複製を、完全な控えと
+    取り違えないため。
+    """
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    partial = dest.with_name(dest.name + ".partial")
+    try:
+        target = sqlite3.connect(str(partial))
+        try:
+            conn.backup(target)
+        finally:
+            target.close()
+        os.replace(partial, dest)
+    except BaseException:
+        try:
+            partial.unlink()  # この関数が作りかけた複製だけを片付ける
+        except OSError:
+            pass
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -621,8 +1094,8 @@ def _plans_details(plans: Sequence[_Plan]) -> List[dict]:
 
 def _pending_sentence(plans: Sequence[_Plan]) -> str:
     return (
-        f"部屋{_rooms_text(plans)}は、内部の名前に区切り記号（「/」など）を含む"
-        "古い形式のままで、名前の付け替えが済んでいません。"
+        f"部屋{_rooms_text(plans)}は、内部の名前にフォルダ名や URL に使えない文字"
+        "（「/」「?」など）を含む古い形式のままで、名前の付け替えが済んでいません。"
     )
 
 
@@ -676,9 +1149,10 @@ def _unsafe_id_alert(plan: _Plan, candidate: Optional[str]) -> dict:
     return _alert(
         f"building_id_repair_unsafe_{plan.old_id}",
         f"部屋「{plan.display_name}」の内部の名前を付け替えられません",
-        "この部屋の内部の名前は、区切り記号（「/」など）を取り除いても、"
-        "フォルダ名として使えない形のままです。自動では安全な名前を決められないため、"
-        "付け替えていません。この部屋の過去の会話が表示されないことがあります。",
+        "この部屋の内部の名前は、フォルダ名や URL に使えない文字（「/」「?」など）を"
+        "「_」に置き換えても、フォルダ名として使えない形（Windows が特別に扱う名前など）"
+        "のままです。自動では安全な名前を決められないため、付け替えていません。"
+        "この部屋の過去の会話が表示されないことがあります。",
         {"reason": "unsafe_new_id", "building_id": plan.old_id, "candidate": candidate},
     )
 
@@ -722,11 +1196,64 @@ def _folder_failed_alert(plan: _Plan, problem: Optional[str]) -> dict:
     )
 
 
+_MEMORY_NOT_REWRITTEN_SENTENCE = (
+    "書き換わるまで、このペルソナに付け替えた部屋の様子が二重に届いたり、"
+    "その部屋の会話の一部が二重に記憶されたりすることがあります。"
+)
+
+
+def _memory_backup_failed_alert(persona_id: str, name: str, path: Path, exc: BaseException) -> dict:
+    return _alert(
+        f"building_id_repair_memory_backup_{persona_id}",
+        f"ペルソナ「{name}」の記憶の中の部屋の名前を書き換えられませんでした",
+        "部屋の内部の名前を付け替えたので、ペルソナの記憶のファイルに記録されている"
+        "部屋の内部の名前も書き換える必要があります。書き換える前に記憶のファイルの"
+        "控え（バックアップ）を作ろうとしましたが、作れなかったため、このペルソナの記憶は"
+        "書き換えていません。次の起動でもう一度試します。"
+        + _MEMORY_NOT_REWRITTEN_SENTENCE,
+        {
+            "reason": "memory_backup_failed",
+            "persona_id": persona_id,
+            "path": str(path),
+            "error": f"{type(exc).__name__}: {exc}",
+        },
+    )
+
+
+def _memory_rewrite_failed_alert(persona_id: str, name: str, path: Path, exc: BaseException) -> dict:
+    return _alert(
+        f"building_id_repair_memory_rewrite_{persona_id}",
+        f"ペルソナ「{name}」の記憶の中の部屋の名前を書き換えられませんでした",
+        "部屋の内部の名前を付け替えたので、ペルソナの記憶のファイルに記録されている"
+        "部屋の内部の名前も書き換えようとしましたが、途中で問題が起きました。"
+        "このペルソナの記憶は、書き換える前の状態のままです。次の起動でもう一度試します。"
+        + _MEMORY_NOT_REWRITTEN_SENTENCE,
+        {
+            "reason": "memory_rewrite_failed",
+            "persona_id": persona_id,
+            "path": str(path),
+            "error": f"{type(exc).__name__}: {exc}",
+        },
+    )
+
+
+def _memory_list_failed_alert(exc: BaseException) -> dict:
+    return _alert(
+        "building_id_repair_memory_list_failed",
+        "ペルソナの記憶の中の部屋の名前を書き換えられませんでした",
+        "部屋の内部の名前を付け替えた後、ペルソナの一覧を読めなかったため、"
+        "ペルソナの記憶のファイルに記録されている部屋の内部の名前を書き換えていません。"
+        "次の起動でもう一度試します。"
+        + _MEMORY_NOT_REWRITTEN_SENTENCE,
+        {"reason": "memory_list_failed", "error": f"{type(exc).__name__}: {exc}"},
+    )
+
+
 def _record_unreadable_alert(path: Path, error: Optional[str]) -> dict:
     return _alert(
         "building_id_repair_record_unreadable",
         "部屋の名前の付け替えの記録が読めません",
-        "区切り記号（「/」など）を含む古い形式の部屋の名前を付け替えた記録ファイルが"
+        "フォルダ名や URL に使えない文字（「/」など）を含む古い形式の部屋の名前を付け替えた記録ファイルが"
         "壊れていて読めないため、付け替えの確認と続きの作業を見送りました。"
         "記録ファイルは消さずに残しています。部屋の過去の会話が表示されない場合は、"
         "この警告の内容を添えて開発者に知らせてください。",
@@ -739,7 +1266,8 @@ def unexpected_failure_alert(exc: BaseException) -> dict:
     return _alert(
         "building_id_repair_failed",
         _TITLE_FAILED,
-        "区切り記号（「/」など）を含む古い形式の部屋の名前を確かめて付け替える処理が、"
+        "フォルダ名や URL に使えない文字（「/」など）を含む古い形式の部屋の名前を"
+        "確かめて付け替える処理が、"
         "途中で止まりました。起動は続けています。次の起動でもう一度試します。"
         "部屋の過去の会話が表示されない場合は、この警告の内容を添えて開発者に"
         "知らせてください。",
@@ -836,6 +1364,7 @@ class _Repair:
         session_factory,
         db_path,
         city_id: int,
+        saiverse_home: Path,
         folder_roots: Sequence[Path],
         record: dict,
         record_path: Path,
@@ -843,11 +1372,14 @@ class _Repair:
         self.session_factory = session_factory
         self.db_path = db_path
         self.city_id = city_id
+        self.saiverse_home = Path(saiverse_home)
         self.folder_roots = list(folder_roots)
         self.record = record
         self.record_path = record_path
         self.renames: List[dict] = record["renames"]
         self.alerts: List[dict] = []
+        # 記憶のファイルの複製の置き場。最初に複製するときに決める (この回の起動で一つ)。
+        self._memory_backup_dir: Optional[Path] = None
 
     # -- 全体の流れ ----------------------------------------------------------
 
@@ -876,9 +1408,13 @@ class _Repair:
 
         if record_dirty:
             self._save_record_best_effort()
-        # DB は付け替え済みで、フォルダの移動だけが残っている部屋 (手順 2 の後で止まった)
-        for plan in _deepest_first(folder_plans):
-            self._move_folders(plan)
+        # DB は付け替え済みで、記憶のファイルの印とフォルダが残っている部屋
+        # (手順 2 の後で止まった)。印の書き換えは完全一致の置き換えなので、途中まで
+        # 済んだペルソナにもう一度行っても結果は変わらない。
+        if folder_plans:
+            memories_done = self._rewrite_persona_memories(folder_plans)
+            for plan in _deepest_first(folder_plans):
+                self._move_folders(plan, finish=memories_done)
         if db_plans:
             self._rename(db_plans, [building_id for building_id, _, _ in buildings])
         return self.alerts
@@ -916,7 +1452,7 @@ class _Repair:
             if (
                 not isinstance(old_id, str)
                 or not isinstance(new_id, str)
-                or not has_path_separator(old_id)
+                or not needs_building_id_repair(old_id)
                 or old_id in seen
             ):
                 LOGGER.warning(
@@ -943,7 +1479,7 @@ class _Repair:
                 entry["note"] = NOTE_ROOM_NOT_FOUND
                 dirty = True
         for building_id, name in city_rooms.items():
-            if has_path_separator(building_id) and building_id not in seen:
+            if needs_building_id_repair(building_id) and building_id not in seen:
                 db_plans.append(_Plan(building_id, name))
         return db_plans, folder_plans, dirty
 
@@ -1041,9 +1577,11 @@ class _Repair:
         self._save_record_best_effort()
         self._log_remaining_references(schema, [plan.old_id for plan in accepted])
 
-        # 手順 3・4: フォルダを移し、記録を「完了」にする
+        # 手順 3: ペルソナの記憶のファイルの印を書き換える
+        memories_done = self._rewrite_persona_memories(accepted)
+        # 手順 4・5: フォルダを移し、記録を「完了」にする
         for plan in _deepest_first(accepted):
-            self._move_folders(plan)
+            self._move_folders(plan, finish=memories_done)
 
     def _decide_new_ids(self, plans: Sequence[_Plan], taken: Set[str]) -> List[_Plan]:
         accepted: List[_Plan] = []
@@ -1124,8 +1662,9 @@ class _Repair:
                                     _LOG_PREFIX, table, column, count, old_id,
                                 )
                 LOGGER.info(
-                    "%s 旧 ID を含む値の数え上げ: 合計 %d 行 (building_messages.legacy_message_id "
-                    "と文章の中の ID は変えない決まりなので、そこに数が出るのは正常です)",
+                    "%s 旧 ID を含む値の数え上げ: 合計 %d 行 (building_messages.legacy_message_id、"
+                    "session_head_snapshot.SECTIONS_JSON、配達済み・終わった実行台帳の記録、"
+                    "文章の中の ID は変えない決まりなので、そこに数が出るのは正常です)",
                     _LOG_PREFIX, total,
                 )
             finally:
@@ -1137,7 +1676,12 @@ class _Repair:
 
     # -- フォルダと記録 ------------------------------------------------------
 
-    def _move_folders(self, plan: _Plan) -> None:
+    def _move_folders(self, plan: _Plan, *, finish: bool = True) -> None:
+        """フォルダを移し、``finish`` なら記録を「完了」にする。
+
+        ``finish`` が False なのは、記憶のファイルの印を書き換えられなかったペルソナが
+        いた回 — 記録を「予定」のまま残し、次の起動で印の書き換えからやり直す。
+        """
         assert plan.new_id is not None and plan.entry is not None
         ok, notes, problem = _move_room_folders(self.folder_roots, plan.old_id, plan.new_id)
         for note in notes:
@@ -1149,9 +1693,120 @@ class _Repair:
             )
             self.alerts.append(_folder_failed_alert(plan, problem))
             return
+        if not finish:
+            LOGGER.warning(
+                "%s 部屋 %r -> %r: 記憶のファイルの書き換えが済んでいないペルソナがいるので、"
+                "記録は「予定」のまま残します (次の起動で続きを行います)",
+                _LOG_PREFIX, plan.old_id, plan.new_id,
+            )
+            return
         plan.entry["status"] = STATUS_DONE
         plan.entry["done_at"] = _now()
         self._save_record_best_effort()
+
+    # -- ペルソナの記憶のファイル ------------------------------------------
+
+    def _load_personas(self) -> List[Tuple[str, Optional[str]]]:
+        db = self.session_factory()
+        try:
+            rows = db.execute(text('SELECT "AIID", "AINAME" FROM "ai"')).fetchall()
+        finally:
+            db.close()
+        return [(str(row[0]), row[1]) for row in rows if row[0] is not None]
+
+    def _rewrite_persona_memories(self, plans: Sequence[_Plan]) -> bool:
+        """DB に登録されている全ペルソナの記憶のファイルの印を書き換える。
+
+        戻り値は、書き換えが要ったペルソナの全員について済んだか (失敗した
+        ペルソナがいれば False — 警告は self.alerts に載せてある)。
+        """
+        renames = {plan.old_id: plan.new_id for plan in plans if plan.new_id}
+        if not renames:
+            return True
+        try:
+            personas = self._load_personas()
+        except Exception as exc:
+            LOGGER.error(
+                "%s ペルソナの一覧を読めないので、記憶のファイルの印を書き換えられません",
+                _LOG_PREFIX, exc_info=True,
+            )
+            self.alerts.append(_memory_list_failed_alert(exc))
+            return False
+        all_done = True
+        for persona_id, name in personas:
+            if not is_safe_path_component(persona_id):
+                LOGGER.warning(
+                    "%s ペルソナ ID %r がフォルダ名として使えないので、記憶のファイルを確かめません",
+                    _LOG_PREFIX, persona_id,
+                )
+                continue
+            path = self.saiverse_home / "personas" / persona_id / "memory.db"
+            if not path.is_file():
+                continue
+            if not self._rewrite_one_memory(persona_id, name or persona_id, path, renames):
+                all_done = False
+        return all_done
+
+    def _rewrite_one_memory(
+        self, persona_id: str, name: str, path: Path, renames: Mapping[str, str],
+    ) -> bool:
+        conn: Optional[sqlite3.Connection] = None
+        try:
+            conn = sqlite3.connect(str(path), timeout=_MEMORY_BUSY_TIMEOUT_MS / 1000)
+            conn.execute(f"PRAGMA busy_timeout = {_MEMORY_BUSY_TIMEOUT_MS}")
+            updates = plan_memory_rewrite(conn, renames)
+            if not updates:
+                LOGGER.debug(
+                    "%s ペルソナ %r の記憶のファイルに書き換える印はありません", _LOG_PREFIX, persona_id,
+                )
+                return True
+            dest = self._memory_backup_path(persona_id)
+            try:
+                _backup_memory_db(conn, dest)
+            except Exception as exc:
+                LOGGER.error(
+                    "%s ペルソナ %r の記憶のファイルの複製を作れなかったので、書き換えません: %s",
+                    _LOG_PREFIX, persona_id, dest, exc_info=True,
+                )
+                self.alerts.append(_memory_backup_failed_alert(persona_id, name, path, exc))
+                return False
+            LOGGER.info(
+                "%s ペルソナ %r の記憶のファイルを複製しました: %s", _LOG_PREFIX, persona_id, dest,
+            )
+            counts = apply_memory_rewrite(conn, updates)
+            LOGGER.info(
+                "%s ペルソナ %r の記憶のファイルの印を書き換えました。欄ごとの行数: %s",
+                _LOG_PREFIX, persona_id, counts,
+            )
+            return True
+        except Exception as exc:
+            LOGGER.error(
+                "%s ペルソナ %r の記憶のファイルの印を書き換えられませんでした: %s",
+                _LOG_PREFIX, persona_id, path, exc_info=True,
+            )
+            self.alerts.append(_memory_rewrite_failed_alert(persona_id, name, path, exc))
+            return False
+        finally:
+            if conn is not None:
+                conn.close()
+
+    def _memory_backup_path(self, persona_id: str) -> Path:
+        """``<ホーム>/backups/building_id_repair/<日時>/<persona_id>_memory.db`` (既にあれば番号を足す)。"""
+        if self._memory_backup_dir is None:
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            base = self.saiverse_home / "backups" / "building_id_repair"
+            folder = base / stamp
+            for n in range(2, _MAX_SUFFIX + 2):
+                if not _path_exists(folder):
+                    break
+                folder = base / f"{stamp}_{n}"
+            self._memory_backup_dir = folder
+        dest = self._memory_backup_dir / f"{persona_id}_memory.db"
+        for n in range(2, _MAX_SUFFIX + 2):
+            if not _path_exists(dest):
+                break
+            dest = self._memory_backup_dir / f"{persona_id}_memory_{n}.db"
+        return dest
 
     def _save_record_best_effort(self) -> None:
         try:
@@ -1164,7 +1819,7 @@ class _Repair:
             )
 
 
-def repair_building_ids_with_path_separators(
+def repair_unsafe_building_ids(
     *,
     session_factory,
     db_path,
@@ -1173,7 +1828,7 @@ def repair_building_ids_with_path_separators(
     city_slug: str,
     environ: Optional[Mapping[str, str]] = None,
 ) -> List[dict]:
-    """この City の部屋のうち、ID に区切り記号を含むものを付け替える。
+    """この City の部屋のうち、ID にフォルダ名や URL を壊す文字を含むものを付け替える。
 
     起動時、``_init_city_config`` の直後・``_init_buildings`` の前に呼ぶ
     (manager/initialization.py)。対象が無ければ何もしない。
@@ -1181,7 +1836,9 @@ def repair_building_ids_with_path_separators(
     Args:
         session_factory: saiverse.db のセッションを作る呼び出し可能オブジェクト
         db_path: saiverse.db のパス (多重起動の確認とバックアップに使う)
-        saiverse_home: ``~/.saiverse`` (テストでは一時フォルダ)
+        saiverse_home: ``~/.saiverse`` (テストでは一時フォルダ)。部屋のフォルダ、
+            ペルソナの記憶のファイル (``personas/<AIID>/memory.db``)、その複製の置き場
+            (``backups/building_id_repair/``) はすべてこの下
         city_id / city_slug: この City の CITYID と CITY_SLUG
         environ: Discord の対応表を読む環境変数 (既定は os.environ)
 
@@ -1209,6 +1866,7 @@ def repair_building_ids_with_path_separators(
         session_factory=session_factory,
         db_path=db_path,
         city_id=city_id,
+        saiverse_home=saiverse_home,
         folder_roots=[city_dir / "buildings", saiverse_home / "buildings"],
         record=record,
         record_path=record_path,
@@ -1221,16 +1879,24 @@ def repair_building_ids_with_path_separators(
 __all__ = [
     "DIRECT_REFERENCE_COLUMNS",
     "JSON_COLUMNS",
+    "MemoryUpdate",
     "RENAMES_FILENAME",
     "STATUS_DONE",
     "STATUS_PLANNED",
+    "apply_memory_rewrite",
     "choose_new_building_id",
     "discord_mapping_alerts",
-    "has_path_separator",
+    "legacy_folder_can_exist",
     "legacy_folder_parts",
     "load_rename_record",
+    "needs_building_id_repair",
+    "plan_memory_rewrite",
     "rename_record_path",
-    "repair_building_ids_with_path_separators",
+    "repair_unsafe_building_ids",
+    "repaired_building_id",
     "replace_exact_strings",
+    "replace_exact_strings_nested",
+    "rewrite_building_msg_ref",
+    "room_replacements",
     "unexpected_failure_alert",
 ]

@@ -1,4 +1,4 @@
-"""部屋 ID に区切り記号 (/ \\) を含む部屋を、起動時に付け替えること。
+"""フォルダ名や URL を壊す文字 (/ \\ : ? # % など) を ID に含む部屋を、起動時に付け替えること。
 
 docs/issues/building_id_contains_path_separator.md。ここで固定するのは:
 
@@ -15,10 +15,13 @@ docs/issues/building_id_contains_path_separator.md。ここで固定するのは
 """
 from __future__ import annotations
 
+import dataclasses
 import gc
 import json
 import os
+import sqlite3
 import tempfile
+import unicodedata
 import unittest
 from datetime import datetime
 from pathlib import Path
@@ -54,12 +57,37 @@ from database.models import (
     Playbook,
     RealtimeSpellBinding,
     Region,
+    SessionHeadSnapshot,
     User,
 )
 from manager.ids import is_safe_path_component
 from manager.initialization import InitializationMixin
+from sai_memory.memory.storage import init_db
+from sai_memory.perception_buffer import (
+    create_consumption_batch,
+    init_perception_buffer_table,
+    list_presented_batches,
+    push_perception,
+)
+from sai_memory.room_state import (
+    LABEL_KIND_BUILDING_CHANGED,
+    LABEL_KIND_META_KEY,
+    ROOM_STATE_KIND,
+    build_room_state_push,
+    latest_visible_snapshot,
+    reopen_lost_bases,
+    render_room_full,
+    room_key,
+    snapshot_digest,
+)
 from saiverse import building_id_repair as repair
-from saiverse.legacy_log_import import find_log_files, scan_legacy_log_deficits
+from saiverse.legacy_log_import import (
+    _child_by_name,
+    find_log_files,
+    legacy_log_path,
+    scan_legacy_log_deficits,
+)
+from sea.head_pipeline.sections.building import BuildingSection, BuildingSnapshot
 
 CITY = "city_a"
 CITY_ID = 1
@@ -200,7 +228,7 @@ class _RepairTestCase(unittest.TestCase):
         return json.loads(self.record_path.read_text(encoding="utf-8"))
 
     def _run(self, environ=None):
-        return repair.repair_building_ids_with_path_separators(
+        return repair.repair_unsafe_building_ids(
             session_factory=self.SessionLocal,
             db_path=str(self.db_path),
             saiverse_home=self.home,
@@ -250,8 +278,9 @@ class ChooseNewIdTests(unittest.TestCase):
         )
 
     def test_unsafe_result_is_returned_for_the_caller_to_reject(self) -> None:
-        new_id = repair.choose_new_building_id("a/b.", taken=set(), folder_roots=[])
-        self.assertEqual(new_id, "a_b.")
+        # 置き換えても Windows の予約名 (COM1) に当たる形は、呼び出し側が断る
+        new_id = repair.choose_new_building_id("com1.a/b", taken=set(), folder_roots=[])
+        self.assertEqual(new_id, "com1.a_b")
         self.assertFalse(is_safe_path_component(new_id))
 
     def test_legacy_folder_parts(self) -> None:
@@ -411,7 +440,9 @@ class RenameTests(_RepairTestCase):
             OLD,
         )
 
-        # 部屋の会話: メッセージ ID は新しい部屋 ID の形。legacy_message_id と本文は元のまま
+        # 部屋の会話: メッセージ ID は新しい部屋 ID の形。本文は元のまま。
+        # legacy_message_id は既に値がある行では変えず、空の行には書き換える前の
+        # メッセージ ID を写す (確認処理が古いファイルと突き合わせ続けられるように)
         rows = self._all(
             "SELECT seq, message_id, legacy_message_id, content FROM building_messages "
             "WHERE building_id = :b ORDER BY seq",
@@ -419,7 +450,7 @@ class RenameTests(_RepairTestCase):
         )
         self.assertEqual(
             [(r.seq, r.message_id, r.legacy_message_id) for r in rows],
-            [(-1, f"{NEW}:-1", f"{OLD}:old1"), (1, f"{NEW}:1", None)],
+            [(-1, f"{NEW}:-1", f"{OLD}:old1"), (1, f"{NEW}:1", f"{OLD}:1")],
         )
         self.assertEqual(rows[1].content, f"{OLD} の話をしよう")
         self.assertEqual(
@@ -508,10 +539,10 @@ class RenameTests(_RepairTestCase):
         self.assertEqual(self._building_ids(), [f"{NEW}_2"])
 
     def test_unsafe_new_id_is_not_renamed_and_is_reported(self) -> None:
-        self._add(self._building("a/b.", "a/b."))
+        self._add(self._building("com1.a?b", "予約名"))
         alerts = self._run()
         self.assertEqual([a["details"]["reason"] for a in alerts], ["unsafe_new_id"])
-        self.assertEqual(self._building_ids(), ["a/b."])
+        self.assertEqual(self._building_ids(), ["com1.a?b"])
         self.assertFalse(self.record_path.exists())
 
     def test_other_cities_and_normal_rooms_are_not_touched(self) -> None:
@@ -681,10 +712,10 @@ class SkipAndFailureTests(_RepairTestCase):
     def test_startup_continues_when_the_repair_itself_raises(self) -> None:
         mgr = _Manager(self.SessionLocal, self.db_path)
         with patch(
-            "saiverse.building_id_repair.repair_building_ids_with_path_separators",
+            "saiverse.building_id_repair.repair_unsafe_building_ids",
             side_effect=RuntimeError("boom"),
         ):
-            mgr._repair_building_ids_with_path_separators()
+            mgr._repair_unsafe_building_ids()
         self.assertEqual([a["id"] for a in mgr.startup_alerts], ["building_id_repair_failed"])
 
 
@@ -752,7 +783,7 @@ class NSanRoomEndToEndTests(_RepairTestCase):
 
     def _startup(self) -> _Manager:
         mgr = _Manager(self.SessionLocal, self.db_path)
-        mgr._repair_building_ids_with_path_separators()
+        mgr._repair_unsafe_building_ids()
         mgr.load_buildings_like_startup(self.home)
         mgr._check_legacy_building_log_import()
         return mgr
@@ -823,7 +854,7 @@ class CheckAndImportUseTheSameFolderRuleTests(_RepairTestCase):
         with patch(
             "saiverse.runtime_marker.another_running_process_owns_db", return_value=(True, "pid 1"),
         ):
-            mgr._repair_building_ids_with_path_separators()
+            mgr._repair_unsafe_building_ids()
         mgr.load_buildings_like_startup(self.home)
         mgr._check_legacy_building_log_import()
 
@@ -835,6 +866,584 @@ class CheckAndImportUseTheSameFolderRuleTests(_RepairTestCase):
             ],
         )
         self.assertEqual(self._scalar("SELECT COUNT(*) FROM building_messages"), 0)
+
+
+# ---------------------------------------------------------------------------
+# 付け替える部屋と置き換える文字 (まはーの判断 2 (b))
+# ---------------------------------------------------------------------------
+
+class RepairedIdTests(unittest.TestCase):
+    def test_every_breaking_character_becomes_an_underscore(self) -> None:
+        cases = {
+            "a?b_city_a": "a_b_city_a",
+            "10:30_city_a": "10_30_city_a",
+            "#1_city_a": "_1_city_a",
+            "100%_city_a": "100__city_a",
+            "a*b_city_a": "a_b_city_a",
+            'a"b<c>d|e_city_a': "a_b_c_d_e_city_a",
+            "a\x01b\tc_city_a": "a_b_c_city_a",
+            "room.": "room_",
+            "room. .": "room___",
+            "room ": "room_",
+            # 途中のドットと空白は Windows も落とさないので変えない
+            "a.b c_city_a": "a.b c_city_a",
+        }
+        for old, expected in cases.items():
+            with self.subTest(old=old):
+                self.assertEqual(repair.repaired_building_id(old), expected)
+                self.assertEqual(repair.needs_building_id_repair(old), old != expected)
+
+    def test_japanese_and_fullwidth_characters_are_not_targets(self) -> None:
+        for building_id in ("リビング_city_a", "何？_city_a", "10：30_city_a", "ｒｏｏｍ．"):
+            with self.subTest(building_id=building_id):
+                self.assertFalse(repair.needs_building_id_repair(building_id))
+
+
+class LegacyFolderBranchTests(unittest.TestCase):
+    """旧 ID の古いフォルダの場所。Windows と POSIX の分岐を、どちらの OS でも確かめる。"""
+
+    def test_windows_splits_on_both_separators_and_posix_only_on_slash(self) -> None:
+        self.assertEqual(repair.legacy_folder_parts("a\\b/c", windows=True), ["a", "b", "c"])
+        self.assertEqual(repair.legacy_folder_parts("a\\b/c", windows=False), ["a\\b", "c"])
+
+    def test_invalid_folder_characters_mean_no_old_folder_only_on_windows(self) -> None:
+        """「:」などを含む段は Windows では作れなかった — 部屋ごと見送らず、移すものが無いだけ。"""
+        for building_id in ("10:30/x_city_a", "a?b_city_a", "c:", 'a"b', "a\x01b"):
+            for windows in (True, False):
+                with self.subTest(building_id=building_id, windows=windows):
+                    parts = repair.legacy_folder_parts(building_id, windows=windows)
+                    self.assertIsNotNone(parts)
+                    self.assertEqual(
+                        repair.legacy_folder_can_exist(parts, windows=windows), not windows,
+                    )
+
+    def test_empty_and_dot_segments_are_still_unsafe_on_both(self) -> None:
+        for bad in ("a//b", "a/", "/a", "a/../b", "./a"):
+            for windows in (True, False):
+                with self.subTest(bad=bad, windows=windows):
+                    self.assertIsNone(repair.legacy_folder_parts(bad, windows=windows))
+
+    def test_default_follows_this_os(self) -> None:
+        with patch("saiverse.building_id_repair._on_windows", return_value=True):
+            self.assertFalse(repair.legacy_folder_can_exist(repair.legacy_folder_parts("c:x")))
+        with patch("saiverse.building_id_repair._on_windows", return_value=False):
+            self.assertTrue(repair.legacy_folder_can_exist(repair.legacy_folder_parts("c:x")))
+
+
+class BroaderCharacterRenameTests(_RepairTestCase):
+    def test_rooms_with_url_breaking_characters_and_trailing_dots_are_renamed(self) -> None:
+        self._add(
+            self._building("#1_city_a", "#1"),
+            self._building("100%_city_a", "100%"),
+            self._building("何？_city_a", "何？"),
+            self._building("room.", "room."),
+        )
+        self.assertEqual(self._run(), [])
+        self.assertEqual(
+            self._building_ids(), sorted(["_1_city_a", "100__city_a", "何？_city_a", "room_"]),
+        )
+        self.assertEqual(
+            sorted((e["old_id"], e["new_id"], e["status"]) for e in self._record()["renames"]),
+            sorted([
+                ("#1_city_a", "_1_city_a", "done"),
+                ("100%_city_a", "100__city_a", "done"),
+                ("room.", "room_", "done"),
+            ]),
+        )
+
+    def test_room_with_a_colon_is_renamed_without_moving_a_folder_on_windows(self) -> None:
+        """Windows では「:」を含むフォルダは作れなかった — 付け替えは進め、警告も出さない。"""
+        self._add(self._building("10:30_city_a", "10:30"))
+        with patch("saiverse.building_id_repair._on_windows", return_value=True):
+            alerts = self._run()
+        self.assertEqual(alerts, [])
+        self.assertEqual(self._building_ids(), ["10_30_city_a"])
+        [entry] = self._record()["renames"]
+        self.assertEqual((entry["new_id"], entry["status"]), ("10_30_city_a", "done"))
+
+    @unittest.skipIf(os.name == "nt", "「:」を含むフォルダは POSIX でだけ作れる")
+    def test_room_with_a_colon_moves_its_folder_on_posix(self) -> None:
+        old = "10:30_city_a"
+        self._add(self._building(old, "10:30"))
+        self._make_folder(self.buildings_root, old)
+        with patch("saiverse.building_id_repair._on_windows", return_value=False):
+            self.assertEqual(self._run(), [])
+        self.assertTrue((self.buildings_root / "10_30_city_a" / "log.json").is_file())
+        self.assertFalse((self.buildings_root / old).exists())
+
+
+class ChildByNameRuleTests(_RepairTestCase):
+    """確認処理・取り込み処理が名前を断る基準は is_safe_path_component と同じ。"""
+
+    def test_names_that_are_not_safe_folder_names_are_rejected(self) -> None:
+        parent = self.home / "cities" / CITY / "buildings"
+        for bad in ("10:30_city_a", "c:", "a?b", "room.", "room ", "CON", "a\x01b",
+                    "..", ".", "a/b", "a\\b", ""):
+            with self.subTest(bad=bad):
+                self.assertIsNone(_child_by_name(parent, bad))
+                self.assertFalse(is_safe_path_component(bad))
+
+    def test_url_breaking_and_non_ascii_names_are_still_accepted(self) -> None:
+        parent = self.home / "cities" / CITY / "buildings"
+        nfd = unicodedata.normalize("NFD", "リビング_city_a")
+        for good in ("#1_city_a", "100%_city_a", "リビング_city_a", nfd, "何？_city_a"):
+            with self.subTest(good=good):
+                self.assertEqual(_child_by_name(parent, good), parent / good)
+
+    def test_check_reports_check_failed_for_an_id_with_a_colon(self) -> None:
+        self.assertIsNone(legacy_log_path(self.home, CITY, "10:30_city_a"))
+        db = self.SessionLocal()
+        try:
+            deficits = scan_legacy_log_deficits(db, self.home, CITY, ["10:30_city_a"])
+        finally:
+            db.close()
+        self.assertEqual([d["kind"] for d in deficits], ["check_failed"])
+
+
+# ---------------------------------------------------------------------------
+# ペルソナの記憶のファイルの印 (まはーの判断 1 (b))
+# ---------------------------------------------------------------------------
+
+class BuildingMsgRefTests(unittest.TestCase):
+    def test_both_old_id_prefixes_are_replaced_preferring_the_longest_old_id(self) -> None:
+        renames = {"x?": "x_", "x?:y": "x__y"}
+        self.assertEqual(repair.rewrite_building_msg_ref("x?:y:x?:y:5", renames), "x__y:x__y:5")
+        self.assertEqual(repair.rewrite_building_msg_ref("x?:x?:5", renames), "x_:x_:5")
+        self.assertEqual(repair.rewrite_building_msg_ref("other:other:1", renames), "other:other:1")
+
+
+class PersonaMemoryMarkTests(_RepairTestCase):
+    PERSONA = "p1_city_a"
+    WITHOUT_MEMORY = "p2_city_a"
+
+    def _memory_path(self, persona_id: str) -> Path:
+        return self.home / "personas" / persona_id / "memory.db"
+
+    @property
+    def backup_root(self) -> Path:
+        return self.home / "backups" / "building_id_repair"
+
+    def _seed_world(self) -> None:
+        self._add(
+            self._building(OLD, "2/28"),
+            AI(AIID=self.PERSONA, HOME_CITYID=CITY_ID, AINAME="P1"),
+            AI(AIID=self.WITHOUT_MEMORY, HOME_CITYID=CITY_ID, AINAME="P2"),
+        )
+
+    def _seed_memory(self) -> None:
+        """実物のスキーマの memory.db に、旧 ID の部屋の様子 (消費済みの全文と差分)・未消費の移動の知らせ・写した会話を入れる。"""
+        conn = init_db(str(self._memory_path(self.PERSONA)))
+        try:
+            init_perception_buffer_table(conn)
+            full_bundle = _bundle(OLD)
+            diff_bundle = _bundle(OLD, extra_line="床に落ち葉がある")
+            full_text = render_room_full(full_bundle)
+            first = push_perception(
+                conn, ROOM_STATE_KIND, full_text,
+                metadata=build_room_state_push(OLD, full_bundle)["metadata"],
+            )
+            create_consumption_batch(
+                conn, [first], consumed_at=100, rendered_text=full_text,
+                media=[{"path": "C:/img/clock.png", "mime_type": "image/png"}],
+                room_state_json=json.dumps([{
+                    "key": room_key(OLD), "is_diff": False,
+                    "block": full_text, "snapshot": full_bundle,
+                }], ensure_ascii=False),
+            )
+            diff_text = "# 「2/28」の様子 (前回見たときからの変化)\n\n+ 床に落ち葉がある"
+            second = push_perception(
+                conn, ROOM_STATE_KIND, diff_text,
+                metadata=build_room_state_push(OLD, diff_bundle)["metadata"],
+            )
+            create_consumption_batch(
+                conn, [second], consumed_at=200, rendered_text="前置き\n" + diff_text,
+                room_state_json=json.dumps([{
+                    "key": room_key(OLD), "is_diff": True, "block": diff_text,
+                    "snapshot": diff_bundle, "base_digest": snapshot_digest(full_bundle),
+                }], ensure_ascii=False),
+            )
+            push_perception(
+                conn, "building_changed", "現在地が「サロン」から「2/28」に変わりました",
+                reduce_key=room_key(OLD),
+                metadata=json.dumps({
+                    LABEL_KIND_META_KEY: LABEL_KIND_BUILDING_CHANGED,
+                    "from_id": "salon_city_a", "from_name": "サロン",
+                    "to_id": OLD, "to_name": "2/28",
+                }, ensure_ascii=False),
+            )
+            conn.execute(
+                "INSERT INTO messages (id, thread_id, role, content, resource_id, created_at, metadata) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                ("m1", f"{self.PERSONA}:main", "user", f"{OLD} の話をしよう", self.PERSONA, 50,
+                 json.dumps({"building_msg_ref": f"{OLD}:{OLD}:5", "note": OLD,
+                             "tags": ["conversation"]}, ensure_ascii=False)),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    @staticmethod
+    def _rows(path: Path) -> dict:
+        conn = sqlite3.connect(str(path))
+        try:
+            return {
+                "buffer": conn.execute(
+                    "SELECT id, kind, content, reduce_key, media, metadata "
+                    "FROM perception_buffer ORDER BY id"
+                ).fetchall(),
+                "batches": conn.execute(
+                    "SELECT id, rendered_text, media, room_state_json "
+                    "FROM perception_batches ORDER BY id"
+                ).fetchall(),
+                "messages": conn.execute(
+                    "SELECT id, content, metadata FROM messages ORDER BY id"
+                ).fetchall(),
+            }
+        finally:
+            conn.close()
+
+    def _backups(self, persona_id: str) -> list:
+        return sorted(self.backup_root.glob(f"*/{persona_id}_memory*.db"))
+
+    def test_machine_marks_are_rewritten_and_texts_are_untouched(self) -> None:
+        self._seed_world()
+        self._seed_memory()
+        path = self._memory_path(self.PERSONA)
+        before = self._rows(path)
+
+        self.assertEqual(self._run(), [])
+        after = self._rows(path)
+
+        # (b) 文面・添付・記憶の本文はバイト単位で不変
+        self.assertEqual(
+            [(r[0], r[1], r[2], r[4]) for r in after["buffer"]],
+            [(r[0], r[1], r[2], r[4]) for r in before["buffer"]],
+        )
+        self.assertEqual([r[:3] for r in after["batches"]], [r[:3] for r in before["batches"]])
+        self.assertEqual([r[:2] for r in after["messages"]], [r[:2] for r in before["messages"]])
+
+        # (a) 印は新しい ID
+        metas = [json.loads(r[5]) for r in after["buffer"]]
+        self.assertEqual([m["room_state"]["key"] for m in metas[:2]], [room_key(NEW)] * 2)
+        self.assertEqual(
+            [m["room_state"]["snapshot"]["building_id"] for m in metas[:2]], [NEW] * 2,
+        )
+        self.assertEqual(
+            (metas[2]["from_id"], metas[2]["to_id"], metas[2]["to_name"]),
+            ("salon_city_a", NEW, "2/28"),
+        )
+        self.assertEqual(after["buffer"][2][3], room_key(NEW))
+        entries = [json.loads(r[3])[0] for r in after["batches"]]
+        before_entries = [json.loads(r[3])[0] for r in before["batches"]]
+        self.assertEqual([e["key"] for e in entries], [room_key(NEW)] * 2)
+        self.assertEqual([e["block"] for e in entries], [e["block"] for e in before_entries])
+        # 束の部屋 ID が変わったので、差分の土台の指紋も新しい束の指紋に付け直されている
+        self.assertEqual(entries[1]["base_digest"], snapshot_digest(entries[0]["snapshot"]))
+        self.assertEqual(
+            json.loads(after["messages"][0][2]),
+            {"building_msg_ref": f"{NEW}:{NEW}:5", "note": OLD, "tags": ["conversation"]},
+        )
+
+        # (c) 複製は書き換える前の中身。記憶のファイルが無いペルソナの複製は作らない
+        [backup] = self._backups(self.PERSONA)
+        self.assertEqual(self._rows(backup), before)
+        self.assertEqual(self._backups(self.WITHOUT_MEMORY), [])
+
+        # (d) 新しい鍵で部屋の様子が見つかり、差分を全文へ開き直す回復も起きない
+        conn = sqlite3.connect(str(path))
+        try:
+            self.assertEqual(latest_visible_snapshot(conn, room_key(NEW)), entries[1]["snapshot"])
+            self.assertEqual(reopen_lost_bases(list_presented_batches(conn)), {})
+        finally:
+            conn.close()
+        # 対照: 書き換える前 (= 複製) では新しい鍵で見つからず、鍵と束だけを置き換えて
+        # 指紋を付け直さないと、差分が全文へ開き直される
+        conn = sqlite3.connect(str(backup))
+        try:
+            self.assertIsNone(latest_visible_snapshot(conn, room_key(NEW)))
+            keys_only = [
+                dataclasses.replace(batch, room_state_json=json.dumps(
+                    repair.replace_exact_strings(
+                        json.loads(batch.room_state_json), repair.room_replacements({OLD: NEW}),
+                    )[0],
+                    ensure_ascii=False,
+                ))
+                for batch in list_presented_batches(conn)
+            ]
+            self.assertNotEqual(reopen_lost_bases(keys_only), {})
+        finally:
+            conn.close()
+
+    def test_running_again_changes_nothing(self) -> None:
+        """(e) 再開 (記録が「予定」のまま、DB は新 ID) で二度目を行っても結果は同じ。"""
+        self._seed_world()
+        self._seed_memory()
+        path = self._memory_path(self.PERSONA)
+        self.assertEqual(self._run(), [])
+        first = self._rows(path)
+        record = self._record()
+        record["renames"][0]["status"] = "planned"
+        self.record_path.write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
+
+        self.assertEqual(self._run(), [])
+
+        self.assertEqual(self._rows(path), first)
+        self.assertEqual(len(self._backups(self.PERSONA)), 1)  # 書き換えるものが無ければ複製もしない
+        self.assertEqual(self._record()["renames"][0]["status"], "done")
+
+    def test_memory_is_not_rewritten_when_its_copy_cannot_be_made(self) -> None:
+        """(f) 複製に失敗したペルソナは書き換えず、警告を出し、記録は次の起動に続きを残す。"""
+        self._seed_world()
+        self._seed_memory()
+        path = self._memory_path(self.PERSONA)
+        before = self._rows(path)
+
+        with patch("saiverse.building_id_repair._backup_memory_db", side_effect=OSError("disk full")):
+            alerts = self._run()
+
+        self.assertEqual([a["details"]["reason"] for a in alerts], ["memory_backup_failed"])
+        self.assertIn("「P1」", alerts[0]["title"])
+        self.assertEqual(self._rows(path), before)
+        self.assertEqual(self._building_ids(), [NEW])  # DB の付け替えは済んでいる
+        self.assertEqual(self._record()["renames"][0]["status"], "planned")
+
+        # 次の起動 (複製できる) で書き換わり、記録が「完了」になる
+        self.assertEqual(self._run(), [])
+        self.assertEqual(
+            json.loads(self._rows(path)["messages"][0][2])["building_msg_ref"], f"{NEW}:{NEW}:5",
+        )
+        self.assertEqual(self._record()["renames"][0]["status"], "done")
+
+    def test_old_memory_file_without_the_tables_is_skipped(self) -> None:
+        self._seed_world()
+        path = self._memory_path(self.PERSONA)
+        path.parent.mkdir(parents=True)
+        conn = sqlite3.connect(str(path))
+        try:
+            conn.execute("CREATE TABLE messages (id TEXT PRIMARY KEY, content TEXT)")
+            conn.execute("INSERT INTO messages VALUES ('m1', ?)", (OLD,))
+            conn.commit()
+        finally:
+            conn.close()
+
+        self.assertEqual(self._run(), [])
+        self.assertEqual(self._record()["renames"][0]["status"], "done")
+        self.assertEqual(self._backups(self.PERSONA), [])
+
+
+# ---------------------------------------------------------------------------
+# 訂正: 部屋を指す欄・JSON の欄・legacy_message_id・アドオンのメタデータ
+# ---------------------------------------------------------------------------
+
+def _bundle(building_id: str, *, extra_line: str = "") -> dict:
+    """部屋の様子の束 (sai_memory/room_state.bundle_is_valid を満たす最小の形)。"""
+    lines = ["# 日付の部屋", "壁にカレンダーがある"]
+    if extra_line:
+        lines.append(extra_line)
+    return {
+        "building_id": building_id,
+        "building_name": "2/28",
+        "packages": [
+            {"key": "building:prompt", "family": "prompt", "label": "部屋の説明",
+             "lines": lines, "media": [], "state": None},
+            {"key": "item:clock", "family": "item", "label": "時計",
+             "lines": ["時計", "10:30"],
+             "media": [{"path": "C:/img/clock.png", "mime_type": "image/png", "type": "image"}],
+             "state": None},
+        ],
+    }
+
+
+class ReferenceColumnCorrectionTests(_RepairTestCase):
+    def test_nonexistent_visiting_ai_column_is_not_listed(self) -> None:
+        self.assertNotIn(
+            "visiting_ai", {table for table, _column, _filter in repair.DIRECT_REFERENCE_COLUMNS},
+        )
+
+    def test_leftover_room_playbook_makes_the_new_id_taken(self) -> None:
+        """削除済みの部屋の Playbook が新しい ID を指していたら、その ID には付け替えない。"""
+        self._add(
+            self._building(OLD, "2/28"),
+            Playbook(name="room_pb", scope="building", building_id=OLD,
+                     schema_json="{}", nodes_json="[]"),
+            Playbook(name="leftover_pb", scope="building", building_id=NEW,
+                     schema_json="{}", nodes_json="[]"),
+        )
+        self.assertEqual(self._run(), [])
+        self.assertEqual(self._building_ids(), [f"{NEW}_2"])
+        self.assertEqual(
+            {row[0]: row[1] for row in self._all("SELECT name, building_id FROM playbooks")},
+            {"room_pb": f"{NEW}_2", "leftover_pb": NEW},
+        )
+
+
+class NotifiedHeadStateTests(_RepairTestCase):
+    @staticmethod
+    def _building_snapshot(building_id: str) -> BuildingSnapshot:
+        return BuildingSnapshot(
+            building_id=building_id, name="2/28",
+            base_system_instruction="日付の部屋", physical_vessel_id=None,
+        )
+
+    def test_last_notified_is_rewritten_so_no_move_notification_is_made(self) -> None:
+        section = BuildingSection()
+        serialized = json.dumps(
+            {"building": section.serialize_snapshot(self._building_snapshot(OLD))},
+            ensure_ascii=False,
+        )
+        self._add(
+            self._building(OLD, "2/28"),
+            AI(AIID="p1_city_a", HOME_CITYID=CITY_ID, AINAME="P1"),
+            SessionHeadSnapshot(
+                PERSONA_ID="p1_city_a", MODEL_KEY="m", LINE_ROLE="main_line",
+                SECTIONS_JSON=serialized, LAST_NOTIFIED_JSON=serialized,
+            ),
+            PersonaBuildingState(
+                PERSONA_ID="p1_city_a", BUILDING_ID=OLD,
+                BASELINE_JSON=json.dumps({"building_id": OLD, "captured_at": 1}),
+                LAST_NOTIFIED_JSON=json.dumps({"building": json.dumps({"building_id": OLD})}),
+            ),
+        )
+
+        self.assertEqual(self._run(), [])
+
+        sections_json, notified_json = self._all(
+            'SELECT "SECTIONS_JSON", "LAST_NOTIFIED_JSON" FROM session_head_snapshot'
+        )[0]
+        # ペルソナに送る本文の元はバイト単位で不変
+        self.assertEqual(sections_json, serialized)
+        current = self._building_snapshot(NEW)
+        notified = section.deserialize_snapshot(json.loads(notified_json)["building"])
+        self.assertEqual(notified.building_id, NEW)
+        self.assertEqual(section.diff_to_notifications(notified, current), [])
+        # 対照: 書き換えていない控え (本文の元と同じ中身) なら、起きていない移動の通知が出る
+        stale = section.deserialize_snapshot(json.loads(sections_json)["building"])
+        self.assertEqual(
+            [label.kind for label in section.diff_to_notifications(stale, current)],
+            ["building_changed"],
+        )
+
+        baseline, last = self._all(
+            'SELECT "BASELINE_JSON", "LAST_NOTIFIED_JSON" FROM persona_building_state'
+        )[0]
+        self.assertEqual(json.loads(baseline), {"building_id": NEW, "captured_at": 1})
+        self.assertEqual(json.loads(json.loads(last)["building"]), {"building_id": NEW})
+
+
+class ExecutionLedgerPayloadTests(_RepairTestCase):
+    def test_only_unfinished_executions_and_undelivered_items_are_rewritten(self) -> None:
+        statuses = ["prepared", "running", "applied", "unknown", "completed", "failed"]
+        room_push = build_room_state_push(OLD, _bundle(OLD))
+        self._add(
+            self._building(OLD, "2/28"),
+            *[
+                ExecutionLedgerEntry(
+                    EXECUTION_ID=f"ex_{status}", KIND="k", STATUS=status,
+                    PAYLOAD_JSON=json.dumps({"building_id": OLD}), CREATED_AT=1, UPDATED_AT=1,
+                )
+                for status in statuses
+            ],
+            # 知覚の配達は metadata を JSON の文字列で持つ (入れ子の中まで置き換える)
+            ExecutionOutboxItem(
+                EXECUTION_ID="ex_applied", TARGET="perception.push", PERSONA_ID="p1_city_a",
+                PAYLOAD_JSON=json.dumps(
+                    {"kind": ROOM_STATE_KIND, "content": room_push["content"],
+                     "metadata": room_push["metadata"]},
+                    ensure_ascii=False,
+                ),
+                STATUS="pending", CREATED_AT=1,
+            ),
+        )
+
+        self.assertEqual(self._run(), [])
+
+        payloads = {
+            row[0]: json.loads(row[1])
+            for row in self._all('SELECT "STATUS", "PAYLOAD_JSON" FROM execution_ledger')
+        }
+        for status in statuses:
+            with self.subTest(status=status):
+                expected = OLD if status in ("completed", "failed") else NEW
+                self.assertEqual(payloads[status]["building_id"], expected)
+        outbox = json.loads(self._scalar('SELECT "PAYLOAD_JSON" FROM execution_outbox'))
+        state = json.loads(outbox["metadata"])["room_state"]
+        self.assertEqual(state["key"], room_key(NEW))
+        self.assertEqual(state["snapshot"]["building_id"], NEW)
+        self.assertEqual(outbox["content"], room_push["content"])  # ペルソナが読む文は変えない
+
+
+class LegacyMessageIdCopyTests(_RepairTestCase):
+    def test_row_matched_only_by_message_id_is_not_imported_twice(self) -> None:
+        """二重書き込み期の行 (legacy が空で、message_id だけが古いファイルと一致) を付け替えても、欠けに数えない。"""
+        self._add(
+            self._building(OLD, "2/28"),
+            self._message(OLD, 1, f"{OLD}:1", content="発言 1"),
+            self._message(OLD, 2, f"{OLD}:2", content="発言 2", legacy_message_id="keep-me"),
+        )
+        folder = self.buildings_root / OLD
+        folder.mkdir(parents=True)
+        (folder / "log.json").write_text(json.dumps([{
+            "role": "user", "content": "発言 1", "seq": 1,
+            "message_id": f"{OLD}:1", "timestamp": "2025-02-28T10:00:00",
+        }], ensure_ascii=False), encoding="utf-8")
+
+        mgr = _Manager(self.SessionLocal, self.db_path)
+        mgr._repair_unsafe_building_ids()
+
+        self.assertEqual(
+            [tuple(row) for row in self._all(
+                "SELECT message_id, legacy_message_id FROM building_messages ORDER BY seq"
+            )],
+            [(f"{NEW}:1", f"{OLD}:1"), (f"{NEW}:2", "keep-me")],
+        )
+        db = self.SessionLocal()
+        try:
+            self.assertEqual(scan_legacy_log_deficits(db, self.home, CITY, [NEW]), [])
+        finally:
+            db.close()
+        mgr.load_buildings_like_startup(self.home)
+        mgr._check_legacy_building_log_import()
+        self.assertEqual(mgr.startup_alerts, [])
+        self.assertEqual(self._scalar("SELECT COUNT(*) FROM building_messages"), 2)
+
+        # 対照: 写さなかったら、同じ行が「まだ移していない」と数えられる
+        with self.engine.begin() as conn:
+            conn.execute(text("UPDATE building_messages SET legacy_message_id = NULL WHERE seq = 1"))
+        db = self.SessionLocal()
+        try:
+            deficits = scan_legacy_log_deficits(db, self.home, CITY, [NEW])
+        finally:
+            db.close()
+        self.assertEqual([d["missing"] for d in deficits], [1])
+
+
+class AddonMetadataOnUnimportedLogTests(_RepairTestCase):
+    def test_metadata_of_a_message_only_in_the_old_file_follows_the_import(self) -> None:
+        log = NSanRoomEndToEndTests._n_san_log()
+        self._add(
+            self._building(OLD, "2/28"),
+            AddonMessageMetadata(message_id=f"{OLD}:5", addon_name="tts", key="audio", value="five.wav"),
+        )
+        folder = self.buildings_root / OLD
+        folder.mkdir(parents=True)
+        (folder / "log.json").write_text(json.dumps(log, ensure_ascii=False), encoding="utf-8")
+
+        mgr = _Manager(self.SessionLocal, self.db_path)
+        mgr._repair_unsafe_building_ids()
+        # 付け替えでは変わらない (DB に取り込まれていないメッセージの ID は対応表に無い)
+        self.assertEqual(self._scalar("SELECT message_id FROM addon_message_metadata"), f"{OLD}:5")
+
+        mgr.load_buildings_like_startup(self.home)
+        mgr._check_legacy_building_log_import()
+        self.assertEqual(mgr.startup_alerts, [])
+        imported = self._scalar(
+            "SELECT message_id FROM building_messages WHERE legacy_message_id = :m "
+            "ORDER BY seq LIMIT 1",
+            m=f"{OLD}:5",
+        )
+        self.assertTrue(imported.startswith(f"{NEW}:"))
+        # 取り込みが、新しいメッセージ ID へ付け替える
+        self.assertEqual(self._scalar("SELECT message_id FROM addon_message_metadata"), imported)
 
 
 if __name__ == "__main__":

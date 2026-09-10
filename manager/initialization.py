@@ -136,26 +136,26 @@ class InitializationMixin:
         finally:
             db.close()
 
-    def _repair_building_ids_with_path_separators(self) -> None:
-        """Step 1a: 部屋 ID に区切り記号 (/ \\) を含む部屋を、部屋を読み込む前に付け替える。
+    def _repair_unsafe_building_ids(self) -> None:
+        """Step 1a: フォルダ名や URL を壊す文字を ID に含む部屋を、部屋を読み込む前に付け替える。
 
-        v0.3.0 より前の部屋は ID に「/」を含みうる (表示名「2/28」→ ``2/28_city_a``)。
+        v0.3.0 より前の部屋は ID に「/」などを含みうる (表示名「2/28」→ ``2/28_city_a``)。
         そのままだと会話ファイルが 2 段のフォルダの奥にあり、過去ログの取り込みが毎起動
-        空振りする。付け替えは部屋を読み込む前 (_init_buildings) に済ませ、後段の
-        過去ログの確認処理 (_check_legacy_building_log_import) が新しい 1 段のフォルダ
-        から会話を移す。docs/issues/building_id_contains_path_separator.md
+        空振りする。付け替えは部屋とペルソナの記憶を読み込む前 (_init_buildings) に
+        済ませ、後段の過去ログの確認処理 (_check_legacy_building_log_import) が新しい
+        1 段のフォルダから会話を移す。docs/issues/building_id_contains_path_separator.md
 
         **起動は止めない。** 見送り・失敗は startup_alerts に載せる。この時点では
         self.saiverse_home がまだ無い (_init_file_paths で決まる) ので、同じ関数で引く。
         """
         from saiverse.building_id_repair import (
-            repair_building_ids_with_path_separators,
+            repair_unsafe_building_ids,
             unexpected_failure_alert,
         )
         from saiverse.data_paths import get_saiverse_home
 
         try:
-            alerts = repair_building_ids_with_path_separators(
+            alerts = repair_unsafe_building_ids(
                 session_factory=self.SessionLocal,
                 db_path=self.db_path,
                 saiverse_home=get_saiverse_home(),
@@ -307,6 +307,9 @@ class InitializationMixin:
         取り込んだ過去ログは 0 未満の seq を持ち、通常の発言 (1 以上) より必ず
         前に並ぶ。既存の行は 1 つも動かないので、行を指している他の記録
         (ペルソナ個人の記憶に残る転記元の目印、AddonMessageMetadata) もずれない。
+        例外は部屋 ID の付け替え (_repair_unsafe_building_ids) だけで、message_id を
+        新しい部屋 ID の形に動かす — 参照している側 (アドオンのメタデータ、ペルソナの
+        記憶の転記元の目印) も同じ付け替えで書き換える。
 
         直せなかったものだけ startup_alerts (UI バナー) に載せる。2026-08-16 の
         テスタロッサの部屋 (隔離マーカー残置で移行がスキップされ、2 ヶ月半誰も

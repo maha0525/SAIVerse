@@ -43,7 +43,9 @@ sha256 になっただけ。
    自己回復の置き直しは例外 (部屋が見えていない異常の一回きりの修復)。
 4. 台帳の行 (``perception_buffer``) は書き換えない — 変わるのは提示の正準
    (``perception_batches.rendered_text`` / ``media`` / ``room_state_json``)
-   だけ。
+   だけ。例外は部屋 ID の付け替え (saiverse/building_id_repair.py) で、記録の鍵・
+   束の部屋 ID・差分の base_digest だけを書き換え、文面は書き換えない
+   (docs/intent/room_state_packages.md §7-7)。
 
 **旧形式 (文字列 snapshot) との互換**: 構造照合できないので**土台なし扱い** —
 連なりに参加しない (土台にもならず、開き直しもされない)。次の入室が一度だけ

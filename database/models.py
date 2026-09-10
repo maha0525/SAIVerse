@@ -1398,7 +1398,9 @@ class ExecutionOutboxItem(Base):
     黙って捨てない。FIFO 上は「先頭」とみなさず飛ばす (後続をブロックしない)。
 
     PAYLOAD_JSON は配送内容 (本文・タグ・名義・実行時刻) を**実行時点で凍結**
-    したもの。配送遅延があっても変形しない (不変条件 6)。
+    したもの。配送遅延があっても変形しない (不変条件 6)。例外は部屋 ID の付け替え
+    (saiverse/building_id_repair.py) で、未配達の行の中の同じ部屋を指す識別子だけを
+    新しい ID に置き換える (表す事実は変わらない)。
     """
     __tablename__ = "execution_outbox"
     OUTBOX_ID = Column(Integer, primary_key=True, autoincrement=True)
