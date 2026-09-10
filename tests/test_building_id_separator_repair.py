@@ -685,6 +685,26 @@ class ResumeTests(_RepairTestCase):
             [(NEW, "done")],
         )
 
+    def test_folder_at_the_planned_id_is_not_taken_over_before_the_room_was_ever_renamed(self) -> None:
+        """記録に「予定」を書いただけで、まだ一度も新 ID でデータベースに載っていない部屋。
+
+        その後で新 ID の場所に現れたフォルダは、別の部屋のものかもしれない。この部屋のものと
+        みなさず、番号を足した ID を選び、そのフォルダには触らない。
+        """
+        self._add(self._building(OLD, "2/28"))
+        foreign = self._make_folder(self.buildings_root, NEW)
+        self._write_record(self._planned())
+
+        self.assertEqual(self._run(), [])
+
+        self.assertEqual(self._building_ids(), [f"{NEW}_2"])
+        self.assertTrue((foreign / "log.json").is_file())
+        self.assertFalse((self.buildings_root / f"{NEW}_2").exists())
+        self.assertEqual(
+            [(e["new_id"], e["status"]) for e in self._record()["renames"]],
+            [(f"{NEW}_2", "done")],
+        )
+
 
 class SkipAndFailureTests(_RepairTestCase):
     def test_skips_while_another_process_owns_the_database(self) -> None:
