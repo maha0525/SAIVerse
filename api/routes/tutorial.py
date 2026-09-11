@@ -97,7 +97,7 @@ PROVIDER_CONFIG = [
         "provider": "nvidia",
         "env_key": "NVIDIA_API_KEY",
         "display_name": "Nvidia NIM",
-        "description": "Kimi K3、DeepSeek V4、Nemotron 3 Ultra など",
+        "description": "Gemma 4 31B、DeepSeek V4、Kimi K3 など",
         "free_label": "無料!",
     },
 ]
@@ -360,7 +360,9 @@ PROVIDER_PRESETS: Dict[str, Dict[str, Optional[str]]] = {
         "video_summary_model": None,
     },
     "nvidia": {
-        "default_model": "nim-deepseek-v4-flash-0731",
+        # 会話は Gemma 4 31B。無料枠の NIM で、会話・長い履歴・判断の形の答え・画像が
+        # 数秒〜数十秒で返った (DeepSeek V4 Flash 0731 は返りが分単位でぶれた)。
+        "default_model": "nim-gemma-4-31b-it",
         # 軽量・Memory Weave・画像要約は Muse Glimmer 30B (考える深さ low)。
         # 無料枠の NIM で、判断の形の答え・ページ分け・あらすじが途中で止まらずに返った。
         "lightweight_model": "nim-muse-glimmer-30b",

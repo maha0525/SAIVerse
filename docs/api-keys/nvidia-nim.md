@@ -27,8 +27,9 @@ APIキーを取得すれば、全モデルを無料で利用できます。
 
 SAIVerseに設定済みのNIMモデル（2026年9月時点）：
 
-- **DeepSeek V4 Flash 0731**: DeepSeek V4 Flashの改訂版（チュートリアルの標準モデル）
+- **Gemma 4 31B**: Googleの画像対応モデル（チュートリアルの標準モデル）
 - **Muse Glimmer 30B**: Metaの画像対応モデル（考える深さは既定で low、チュートリアルの軽量モデル・Memory Weaveモデル・画像要約モデル）
+- **DeepSeek V4 Flash 0731**: DeepSeek V4 Flashの改訂版（無料枠では返りの速さが大きくぶれることがある）
 - **DeepSeek V4 Pro 0813**: DeepSeek V4 Proの正式版
 - **Kimi K3**: Moonshot AIの大規模マルチモーダル推論モデル（画像対応。無料枠では1回の返答に数分かかることがある）
 - **Nemotron 3 Ultra**: NVIDIAの大規模推論モデル
