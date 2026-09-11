@@ -47,10 +47,12 @@ world clone は `setup_test_env.py` を前提にしない (dest 構造を自分�
    - `visiting_ai` / `thinking_request` を全消去 (他 City とのトランザクション残骸)
    - **Discord ゲートウェイはアドオンではないので、上の DB 操作では止まらない**
      (2026-09-11 訂正。以前はこの節で Discord をアドオンの一つとして挙げていた)。
-     ゲートウェイはリポジトリの `.env` の `SAIVERSE_GATEWAY_*` で動き、複製スクリプトは
-     `.env` に触れない。そのため、複製した世界を起動する側が、ゲートウェイを止める値で
-     上書きする: `test_fixtures/start_test_server.{bat,sh}`、`scripts/run_conversation.py`、
-     `scripts/run_day_sim.py --real`。値の一致は `tests/test_sandbox_gateway_isolation.py` が検査する
+     ゲートウェイの設定はリポジトリの `.env` の `SAIVERSE_GATEWAY_*` にあり、`.env` は
+     本番と共有していて複製では変わらない。そのため、複製した世界を起動するときに、
+     ゲートウェイを止める値で上書きする。上書きしている場所は
+     `test_fixtures/start_test_server.{bat,sh}`、`scripts/run_conversation.py`、
+     `scripts/run_day_sim.py --real` の四つで、値が一致していることはテスト
+     `tests/test_sandbox_gateway_isolation.py` で確かめている
 4. **ポート衝突の防止**。本番と同時起動できるよう、City のポートを
    テスト用に書き換える (既定: UI 18000 / API 18001。複数 City は +10 ずつ)。
 5. **dest の既存データは確認なしに消さない** (`--force` で確認スキップ)。
