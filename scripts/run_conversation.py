@@ -252,6 +252,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         from dotenv import load_dotenv
         load_dotenv(ROOT / ".env")
 
+        # テストの世界を本番の Discord ゲートウェイにつながせない (.env の本番設定を無効値で上書き)
+        from scripts._shared.gateway_isolation import force_discord_gateway_off
+        force_discord_gateway_off()
+
         from saiverse.day_scenario import SyncJudgmentDispatcher
         from saiverse.saiverse_manager import SAIVerseManager
 
