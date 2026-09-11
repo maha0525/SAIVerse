@@ -142,7 +142,13 @@ class AdminAiEditContractTest(unittest.TestCase):
 
     def test_blank_model_selection_clears_the_column(self):
         """「指定なし」を選ぶと空文字が届く。空文字は NULL に倒す (= 既定に従う)。"""
-        self._update(memory_weave_model="weave-1")
+        self._update(memory_weave_model="weave-1", appearance_image_path="/appearance/air.png")
+        # 消す前に値が入っていること (入っていないと「消えた」を確かめられない)
+        before = self._row()
+        self.assertIsNotNone(before.DEFAULT_MODEL)
+        self.assertIsNotNone(before.LIGHTWEIGHT_MODEL)
+        self.assertIsNotNone(before.MEMORY_WEAVE_MODEL)
+        self.assertIsNotNone(before.APPEARANCE_IMAGE_PATH)
         self._update(
             default_model="",
             lightweight_model="",
