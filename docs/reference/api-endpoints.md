@@ -143,7 +143,7 @@ REST API 全エンドポイントの一覧（自動生成）。すべて `/api` 
 | GET | `/api/config/reembed-check` | Return list of personas that need re-embedding due to model changes. |
 | POST | `/api/config/reload-models` | Reload model configurations from disk without restarting the server. |
 | GET | `/api/config/slot-kinds` | コマ種別カタログの一覧 (timetable_redesign.md §5.5)。 |
-| GET | `/api/config/startup-warnings` | Return warnings collected during startup (e.g. failed persona loads). |
+| GET | `/api/config/startup-warnings` | Return startup warnings plus model-setting warnings built from the current settings. |
 | GET | `/api/config/update-check` | Get update check monitoring status. |
 | POST | `/api/config/update-check` | Toggle update availability check on/off. |
 

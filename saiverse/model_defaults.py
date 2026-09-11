@@ -5,8 +5,10 @@ update BUILTIN_DEFAULT_LITE_MODEL here. All fallback references
 across the codebase import from this single file.
 
 This file also owns the model role table (role -> global env var and display
-label) and the startup check that reports configured model names whose
-definition cannot be found (``missing_model_warnings``).
+label) and the pure check that turns configured model names whose definition
+cannot be found into screen warnings (``missing_model_warnings``). The check has
+no DB access; the manager feeds it the current settings every time the screen
+asks (``current_model_setting_warnings`` in manager/initialization.py).
 """
 import logging
 from typing import Callable, Dict, Iterable, List, Optional, Tuple
@@ -22,7 +24,7 @@ BUILTIN_DEFAULT_LITE_MODEL = "gemini-3.1-flash-lite-preview"
 # --- Model roles -------------------------------------------------------------
 
 #: 役割 → 全体設定の環境変数名。チュートリアルのプリセット適用
-#: (api/routes/tutorial.py) と、起動時の検査 (missing_model_warnings) が共有する。
+#: (api/routes/tutorial.py) と、モデル設定の警告 (missing_model_warnings) が共有する。
 MODEL_ROLES: Dict[str, str] = {
     "default_model": "SAIVERSE_DEFAULT_MODEL",
     "lightweight_model": "SAIVERSE_DEFAULT_LIGHTWEIGHT_MODEL",
@@ -81,10 +83,14 @@ def _defined_by_find_model_config(value: str) -> bool:
     return bool(config)
 
 
-#: 標準モデル以外の役割ごとの「定義があるか」の引き方。その値を実際に使う側と
+#: 役割ごとの「定義があるか」の引き方。その値を実際に使う側と
 #: 同じ引き方にする — 違う引き方だと「動いているのに警告が出る」「動いていない
 #: のに出ない」になる。
 #:
+#: - default_model: 設定キーの完全一致。ペルソナの値は manager/persona.py の
+#:   _load_single_persona、全体設定の値は manager/initialization.py の
+#:   _init_model_config が get_context_length / get_model_provider で引き、
+#:   引けなければ代わりのモデルで読み込む。
 #: - lightweight_model: 設定キーの完全一致。persona/core.py の
 #:   lightweight_llm_client と sea/runtime.py の select_llm_client が
 #:   get_context_length / get_model_provider で引く。
@@ -93,8 +99,9 @@ def _defined_by_find_model_config(value: str) -> bool:
 #: - image/audio/video_summary_model: find_model_config。全体設定の値を
 #:   saiverse/media_summary.py が引く。ペルソナ単位の VISION_MODEL / AUDIO_MODEL /
 #:   VIDEO_MODEL は読む箇所が無い (保存されるだけ) ので、ペルソナ単位の検査
-#:   (manager/persona.py) には入れていない。
+#:   (manager/initialization.py の current_model_setting_warnings) には入れていない。
 _ROLE_LOOKUPS: Dict[str, Callable[[str], bool]] = {
+    "default_model": _defined_by_config_key,
     "lightweight_model": _defined_by_config_key,
     "memory_weave_model": _defined_by_find_model_config,
     "image_summary_model": _defined_by_find_model_config,
@@ -107,17 +114,20 @@ def missing_model_warnings(
     entries: Iterable[Tuple[str, Optional[str]]],
     *,
     persona_id: Optional[str] = None,
+    default_model_substitute: Optional[str] = None,
 ) -> List[Dict[str, str]]:
-    """設定されたモデル名のうち、定義が見つからないものを起動時警告にして返す。
+    """設定されたモデル名のうち、定義が見つからないものを画面の警告にして返す。
 
     Args:
         entries: ``(役割, 設定値)`` の並び。役割は ``_ROLE_LOOKUPS`` のキー。
             設定値が None / 空文字の役割は未設定として検査しない。
         persona_id: 渡すとペルソナ単位の文面、省略するとグローバル設定単位の文面になる。
+        default_model_substitute: 標準モデルの定義が見つからないとき、代わりに
+            動いているモデル。分かっているときだけ渡す。渡されていて、しかも
+            設定値と違うときだけ、標準モデルの文面に「いまはモデル '…' で代わりに
+            動いています。」を足す (設定値と同じなら代わりに動いているとは言えない)。
 
-    標準モデル (default_model) は対象外 — フォールバックを伴う専用の検査が
-    manager/persona.py と manager/initialization.py にある。一つの役割の検査が
-    例外を出しても、ログに残して残りの役割の検査を続ける。
+    一つの役割の検査が例外を出しても、ログに残して残りの役割の検査を続ける。
     """
     warnings: List[Dict[str, str]] = []
     for role, value in entries:
@@ -137,15 +147,21 @@ def missing_model_warnings(
         # 「グローバル設定」の「モデルロール」タブで選ぶ。
         label = MODEL_ROLE_DESCRIPTIONS[role]["label"]
         if persona_id is not None:
-            message = (
-                f"ペルソナ '{persona_id}' の{label} '{value}' の設定ファイルが見つかりません。"
-                "ペルソナ設定から選び直してください。"
-            )
+            message = f"ペルソナ '{persona_id}' の{label} '{value}' の設定ファイルが見つかりません。"
+            reselect = "ペルソナ設定から選び直してください。"
         else:
-            message = (
-                f"グローバル設定の{label} '{value}' の設定ファイルが見つかりません。"
-                "グローバル設定の「モデルロール」から選び直してください。"
-            )
+            message = f"グローバル設定の{label} '{value}' の設定ファイルが見つかりません。"
+            reselect = "グローバル設定の「モデルロール」から選び直してください。"
+        # 標準モデルは、読み込むときに代わりのモデルへ差し替わる
+        # (manager/persona.py の _load_single_persona と
+        # manager/initialization.py の _init_model_config)。
+        if (
+            role == "default_model"
+            and default_model_substitute
+            and default_model_substitute != value
+        ):
+            message += f"いまはモデル '{default_model_substitute}' で代わりに動いています。"
+        message += reselect
         # 帰結を書くのは、コードで確かめられた役割だけ。Memory Weave は代わりの
         # モデルが無く、resolve_memory_weave_config が LookupError を出し続ける。
         # グローバル設定の値が効くのは、自分の Memory Weave モデルを持たない

@@ -1,4 +1,9 @@
-"""Initialization helpers extracted from SAIVerseManager.__init__."""
+"""Initialization helpers extracted from SAIVerseManager.__init__.
+
+Also holds ``current_model_setting_warnings``: the model settings that
+``_init_model_config`` resolves once at startup are re-checked against the
+current settings every time the screen asks for warnings.
+"""
 from __future__ import annotations
 
 import json
@@ -13,7 +18,7 @@ from sqlalchemy.orm import sessionmaker
 
 from saiverse.buildings import Building
 from saiverse.regions import Region
-from database.models import City as CityModel
+from database.models import AI as AIModel, City as CityModel
 
 if TYPE_CHECKING:
     pass
@@ -538,46 +543,85 @@ class InitializationMixin:
             self.context_length = get_context_length(base_model)
             self.provider = get_model_provider(base_model)
         except ValueError:
+            # 画面への警告はここで積まない。画面が取りに来るたびに
+            # current_model_setting_warnings がいまの設定から作る — 起動後に
+            # 選び直した設定を反映するため。
             from saiverse.model_defaults import BUILTIN_DEFAULT_LITE_MODEL
             fallback = BUILTIN_DEFAULT_LITE_MODEL
-            city = getattr(self, "city_name", "unknown")
-            msg = (
-                f"City '{city}' のデフォルトモデル '{base_model}' の設定ファイルが見つかりません。"
-                f"デフォルトモデル '{fallback}' にフォールバックしました。"
-            )
             LOGGER.warning(
                 "Model config '%s' not found. Falling back to '%s'. "
                 "Check that the model JSON file exists in builtin_data/models/ or user_data/models/.",
                 base_model, fallback,
             )
-            self.startup_warnings.append({
-                "source": "model_config",
-                "message": msg,
-            })
             base_model = fallback
             self.context_length = get_context_length(base_model)
             self.provider = get_model_provider(base_model)
         self._base_model = base_model
-        # 標準モデル以外の役割の全体設定も、定義が見つからないモデルを指していたら
-        # 起動時に知らせる。検査の失敗で起動を止めない。
-        try:
-            from saiverse.model_defaults import MODEL_ROLES, missing_model_warnings
-
-            self.startup_warnings.extend(missing_model_warnings(
-                (role, os.getenv(env_key))
-                for role, env_key in MODEL_ROLES.items()
-                # 標準モデルは上のフォールバック付きの検査が受け持つ
-                if role != "default_model"
-            ))
-        except Exception:
-            LOGGER.warning(
-                "Global model setting check failed; continuing startup.",
-                exc_info=True,
-            )
         self.model_parameter_overrides: Dict[str, Any] = {}
         # Metabolism は常時 ON (2026-07-30 OFF トグル撤去)。水位は model 定義
         # 一本で解決する (sea/session_lifecycle.py get_metabolism_watermarks)。
         self.max_image_embeds_override: Optional[int] = None
+
+    def current_model_setting_warnings(self) -> List[Dict[str, str]]:
+        """いまの設定のうち、定義が見つからないモデルを指しているものを警告にして返す。
+
+        画面 (GET /api/config/startup-warnings) が取りに来るたびに呼ばれる。起動時に
+        一度だけ作って保存すると、起動後に設定を選び直しても (ペルソナ設定の保存・
+        グローバル設定のモデルロール・チュートリアル)、モデル定義を足したり消したり
+        して読み直しても、再起動まで古い警告が出続ける。読む瞬間に作れば、どの入口
+        から設定が変わっても古い警告は残らない。
+
+        - グローバル設定: ``MODEL_ROLES`` の 6 役割を環境変数から読む。設定の保存は
+          os.environ も書き換える (api/routes/admin.py の write_env_updates)。
+        - ペルソナ: この City のペルソナの DB 行から、標準・軽量・Memory Weave
+          モデルを読む (``_load_personas_from_db`` と同じ条件)。メモリ上の
+          PersonaCore の ``model`` は、読み込み時に代わりのモデルへ差し替わって
+          いるので設定値の判定には使わず、「いま何で動いているか」の表示にだけ
+          使う。画像/音声/動画要約モデルは、ペルソナ単位の値を読む箇所が無いので
+          対象にしない。
+
+        PersonaMixin ではなくここに置くのは、PersonaMixin を継承する AdminService が
+        ``_base_model`` を起動時の写しとして持つため (manager/admin.py の __init__)。
+        この mixin を継承するのは SAIVerseManager だけで、update_default_model が
+        書き換える ``_base_model`` の実体を読む。
+        """
+        import os
+
+        from saiverse.model_defaults import MODEL_ROLES, missing_model_warnings
+
+        warnings = missing_model_warnings(
+            [(role, os.getenv(env_key)) for role, env_key in MODEL_ROLES.items()],
+            default_model_substitute=self._base_model,
+        )
+
+        db = self.SessionLocal()
+        try:
+            rows = (
+                db.query(
+                    AIModel.AIID,
+                    AIModel.DEFAULT_MODEL,
+                    AIModel.LIGHTWEIGHT_MODEL,
+                    AIModel.MEMORY_WEAVE_MODEL,
+                )
+                .filter(AIModel.HOME_CITYID == self.city_id)
+                .all()
+            )
+        finally:
+            db.close()
+
+        for persona_id, default_model, lightweight_model, memory_weave_model in rows:
+            persona = self.personas.get(persona_id)
+            warnings.extend(missing_model_warnings(
+                [
+                    ("default_model", default_model),
+                    ("lightweight_model", lightweight_model),
+                    ("memory_weave_model", memory_weave_model),
+                ],
+                persona_id=persona_id,
+                # 読み込めていないペルソナは、何で動いているとも言えない
+                default_model_substitute=persona.model if persona is not None else None,
+            ))
+        return warnings
 
     def _update_timezone_cache(self, tz_name: Optional[str]) -> None:
         """Update cached timezone information for this manager.

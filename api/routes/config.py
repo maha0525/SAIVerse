@@ -897,8 +897,25 @@ def set_max_image_embeds(req: MaxImageEmbedsRequest, manager=Depends(get_manager
 
 @router.get("/startup-warnings")
 def get_startup_warnings(manager=Depends(get_manager)):
-    """Return warnings collected during startup (e.g. failed persona loads)."""
-    warnings = getattr(manager, "startup_warnings", [])
+    """Return startup warnings plus model-setting warnings built from the current settings.
+
+    Warnings recorded at startup (e.g. failed persona loads) come first. Warnings
+    about a configured model whose definition cannot be found are not recorded
+    at startup; they are computed from the current settings on every request, so
+    a setting re-selected, or a model definition added or removed, after startup
+    is reflected without a restart. If that computation fails, only the recorded
+    warnings are returned so the other warnings still reach the screen.
+    """
+    # 保存済みのリストは写してから足す — そのまま extend すると、画面を開くたびに
+    # 同じ警告が保存済みの側へ溜まっていく。
+    warnings = list(getattr(manager, "startup_warnings", []))
+    try:
+        warnings.extend(manager.current_model_setting_warnings())
+    except Exception:
+        _log.warning(
+            "Failed to compute model setting warnings; returning startup warnings only.",
+            exc_info=True,
+        )
     return {"warnings": warnings}
 
 

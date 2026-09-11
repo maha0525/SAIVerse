@@ -1,33 +1,42 @@
-"""起動時の「設定されているのに定義が見つからないモデル」警告のテスト。
+"""「設定されているのに定義が見つからないモデル」の警告のテスト。
 
 組み込みモデルの定義を削除すると、そのモデルを選んでいたユーザーの設定は
-存在しないモデルを指したまま残る。標準モデルには起動時の警告 (と既定モデルへの
-フォールバック) が前からあったが、軽量・Memory Weave・画像/音声/動画要約の
-各モデルは画面に何も出なかった。ここでは次を押さえる:
+存在しないモデルを指したまま残る。画面はページを開くたびに
+GET /api/config/startup-warnings を読んでこの警告を出す。警告は起動時に積まず、
+取りに来るたびにいまの設定から作る (manager/initialization.py の
+``current_model_setting_warnings``)。ここでは次を押さえる:
 
-- 同じ理由が当てはまる役割にも、ペルソナ単位とグローバル設定単位で一件ずつ警告が出る
+- 標準・軽量・Memory Weave・画像/音声/動画要約モデルが、ペルソナ単位と
+  グローバル設定単位で一件ずつ警告になる。ペルソナ単位の要約モデルは、値を
+  読む箇所が無いので警告しない
 - 判定が、各役割の値を実際に使う側と同じ引き方になっている
-- ペルソナ単位の画像/音声/動画要約モデルは、値を読む箇所が無いので警告しない
-- 検査の失敗がペルソナの読み込みや起動を止めない
-- 標準モデルの既存の警告とフォールバックは変わらない
+- 起動後に設定を直す・モデル定義を足す/消す (読み直しを含む) と、再起動せずに
+  次の計算へ反映される
+- 起動時には警告を積まないが、標準モデルを代わりのモデルで読み込むことは今までどおり
+- 画面のルートは保存済みの警告の後ろに計算分を足し、計算が失敗しても保存済みは返す
 
-モデル定義は MODEL_CONFIGS を差し替えた偽物を使い、PersonaCore はスタブにする
-(本物は SAIMemory や埋め込みモデルまで巻き込む)。LLM は呼ばない。
+モデル定義は MODEL_CONFIGS を差し替えた偽物を使い (読み直しのテストだけは本物の
+reload_configs を一時フォルダ相手に通す)、PersonaCore はスタブにする (本物は
+SAIMemory や埋め込みモデルまで巻き込む)。LLM は呼ばない。
 """
 from __future__ import annotations
+
+import json
 
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from api.routes import config as config_route
 from database.models import AI as AIModel, Base, City as CityModel
 from manager.initialization import InitializationMixin
 from manager.persona import PersonaMixin
-from saiverse import model_configs, model_defaults
+from saiverse import data_paths, model_configs, model_defaults
 
 PERSONA_ID = "air_city_a"
-STANDARD_KEY = "test-standard-model"
+#: 標準モデルの定義が見つからないとき、起動時に代わりに読み込まれるモデル
+FALLBACK_KEY = model_defaults.BUILTIN_DEFAULT_LITE_MODEL
 DEFINED_KEY = "test-defined-model"
 #: DEFINED_KEY の定義が持つ API モデル名。設定キーとしては存在しない。
 DEFINED_API_NAME = "vendor/test-defined-api-name"
@@ -45,15 +54,15 @@ PERSONA_RESELECT = "ペルソナ設定から選び直してください。"
 GLOBAL_RESELECT = "グローバル設定の「モデルロール」から選び直してください。"
 
 
+def _definition(api_name: str) -> dict:
+    return {"model": api_name, "provider": "stub", "context_length": 1000}
+
+
 @pytest.fixture(autouse=True)
 def fake_model_definitions(monkeypatch):
     monkeypatch.setattr(model_configs, "MODEL_CONFIGS", {
-        STANDARD_KEY: {
-            "model": "test-standard-api-name", "provider": "stub", "context_length": 1000,
-        },
-        DEFINED_KEY: {
-            "model": DEFINED_API_NAME, "provider": "stub", "context_length": 1000,
-        },
+        FALLBACK_KEY: _definition("test-fallback-api-name"),
+        DEFINED_KEY: _definition(DEFINED_API_NAME),
     })
     for key in ROLE_ENV_KEYS:
         monkeypatch.delenv(key, raising=False)
@@ -63,11 +72,14 @@ def _raise(*_args, **_kwargs):
     raise RuntimeError("boom")
 
 
-def _model_config_messages(svc):
-    return [w["message"] for w in svc.startup_warnings if w["source"] == "model_config"]
+def _set_env(monkeypatch, **env):
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
 
 
-# --- ペルソナ単位 ---------------------------------------------------------------
+def _messages(warnings):
+    assert all(w["source"] == "model_config" for w in warnings), warnings
+    return [w["message"] for w in warnings]
 
 
 class _StubPersonaCore:
@@ -77,35 +89,64 @@ class _StubPersonaCore:
         self.__dict__.update(kwargs)
 
 
-def _persona_manager_stub(session_factory):
-    svc = PersonaMixin.__new__(PersonaMixin)
-    svc.SessionLocal = session_factory
-    svc.city_id = 1
-    svc.city_name = "city_a"
-    svc.model = None
-    svc._base_model = STANDARD_KEY
-    svc.default_avatar = "avatar.png"
-    svc.user_room_id = "user_room_city_a"
-    svc.timezone_info = None
-    svc.timezone_name = "UTC"
-    svc.buildings = []
-    svc.building_map = {}
-    svc.building_histories = {}
-    svc.occupants = {}
-    svc.personas = {}
-    svc.avatar_map = {}
-    svc.id_to_name_map = {}
-    svc.items = {}
-    svc.items_by_persona = {}
-    svc.get_persona_pending_events = lambda *a, **k: []
-    svc.archive_persona_events = lambda *a, **k: None
-    svc.startup_warnings = []
-    return svc
+class _Manager(InitializationMixin, PersonaMixin):
+    """起動時にモデル設定を解決する二つの入口 (_init_model_config と
+    _load_personas_from_db) と、警告の計算を持つ最小の manager。"""
+
+
+class _World:
+    """一つの City と一人のペルソナの DB 行。起動は start() で行う。"""
+
+    def __init__(self, session_factory):
+        self.session_factory = session_factory
+
+    def add_persona(self, **model_columns):
+        db = self.session_factory()
+        try:
+            db.add(AIModel(AIID=PERSONA_ID, HOME_CITYID=1, AINAME="Air", **model_columns))
+            db.commit()
+        finally:
+            db.close()
+
+    def set_persona_models(self, **model_columns):
+        """ペルソナ設定の保存 (manager/admin.py の update_ai) が DB 行を書き換えるのと同じ変更。"""
+        db = self.session_factory()
+        try:
+            ai = db.query(AIModel).filter_by(AIID=PERSONA_ID).one()
+            for column, value in model_columns.items():
+                setattr(ai, column, value)
+            db.commit()
+        finally:
+            db.close()
+
+    def start(self) -> _Manager:
+        """SAIVerseManager.__init__ と同じ順で、モデル設定の解決とペルソナの読み込みを行う。"""
+        svc = _Manager.__new__(_Manager)
+        svc.SessionLocal = self.session_factory
+        svc.city_id = 1
+        svc.city_name = "city_a"
+        svc.default_avatar = "avatar.png"
+        svc.user_room_id = "user_room_city_a"
+        svc.timezone_info = None
+        svc.timezone_name = "UTC"
+        svc.buildings = []
+        svc.building_map = {}
+        svc.building_histories = {}
+        svc.occupants = {}
+        svc.personas = {}
+        svc.avatar_map = {}
+        svc.id_to_name_map = {}
+        svc.items = {}
+        svc.items_by_persona = {}
+        svc.get_persona_pending_events = lambda *a, **k: []
+        svc.archive_persona_events = lambda *a, **k: None
+        svc._init_model_config(None)  # main.py は model を渡さない
+        svc._load_personas_from_db()
+        return svc
 
 
 @pytest.fixture
-def load_persona(monkeypatch):
-    """AI 行を一つ作り、起動時と同じ入口 (_load_personas_from_db) で読み込む。"""
+def world(monkeypatch):
     engine = create_engine(
         "sqlite://",
         connect_args={"check_same_thread": False},
@@ -114,148 +155,157 @@ def load_persona(monkeypatch):
     Base.metadata.create_all(engine)
     session_factory = sessionmaker(bind=engine)
     monkeypatch.setattr("manager.persona.PersonaCore", _StubPersonaCore)
-
-    def _load(**model_columns):
-        columns = {"DEFAULT_MODEL": STANDARD_KEY, **model_columns}
-        db = session_factory()
-        try:
-            db.add(CityModel(
-                CITYID=1, USERID=1, CITY_SLUG="city_a", UI_PORT=3000, API_PORT=8000,
-            ))
-            db.add(AIModel(AIID=PERSONA_ID, HOME_CITYID=1, AINAME="Air", **columns))
-            db.commit()
-        finally:
-            db.close()
-        svc = _persona_manager_stub(session_factory)
-        svc._load_personas_from_db()
-        return svc
-
-    yield _load
+    db = session_factory()
+    try:
+        db.add(CityModel(
+            CITYID=1, USERID=1, CITY_SLUG="city_a", UI_PORT=3000, API_PORT=8000,
+        ))
+        db.commit()
+    finally:
+        db.close()
+    yield _World(session_factory)
     engine.dispose()
 
 
-def test_persona_missing_lightweight_and_weave_each_warn(load_persona):
-    svc = load_persona(
+# --- ペルソナ単位 ---------------------------------------------------------------
+
+
+def test_persona_missing_models_each_warn(world):
+    world.add_persona(
+        DEFAULT_MODEL="gone-default",
         LIGHTWEIGHT_MODEL="gone-lite",
         MEMORY_WEAVE_MODEL="gone-weave",
     )
+    svc = world.start()
 
-    assert _model_config_messages(svc) == [
+    assert _messages(svc.current_model_setting_warnings()) == [
+        f"ペルソナ '{PERSONA_ID}' の標準モデル 'gone-default' の設定ファイルが見つかりません。"
+        f"いまはモデル '{FALLBACK_KEY}' で代わりに動いています。"
+        "ペルソナ設定から選び直してください。",
         f"ペルソナ '{PERSONA_ID}' の軽量モデル 'gone-lite' の設定ファイルが見つかりません。"
-        + PERSONA_RESELECT,
+        "ペルソナ設定から選び直してください。",
         f"ペルソナ '{PERSONA_ID}' のMemory Weaveモデル 'gone-weave' の設定ファイルが見つかりません。"
-        + PERSONA_RESELECT
-        + "選び直すまで、このペルソナの記憶の整理は止まったままになります。",
+        "ペルソナ設定から選び直してください。"
+        "選び直すまで、このペルソナの記憶の整理は止まったままになります。",
     ]
-    # 検査は知らせるだけ — 値は差し替えずにそのまま PersonaCore へ渡る
-    persona = svc.personas[PERSONA_ID]
-    assert persona.model == STANDARD_KEY
-    assert persona.lightweight_model == "gone-lite"
-    assert persona.memory_weave_model == "gone-weave"
 
 
-def test_persona_media_summary_models_are_not_checked(load_persona):
+@pytest.mark.parametrize("columns", [
+    pytest.param(
+        {
+            "DEFAULT_MODEL": DEFINED_KEY,
+            "LIGHTWEIGHT_MODEL": DEFINED_KEY,
+            "MEMORY_WEAVE_MODEL": DEFINED_API_NAME,
+        },
+        id="defined",
+    ),
+    pytest.param(
+        {"DEFAULT_MODEL": None, "LIGHTWEIGHT_MODEL": None, "MEMORY_WEAVE_MODEL": None},
+        id="unset",
+    ),
+    pytest.param(
+        {"DEFAULT_MODEL": "", "LIGHTWEIGHT_MODEL": "", "MEMORY_WEAVE_MODEL": ""},
+        id="empty",
+    ),
+])
+def test_persona_defined_unset_and_empty_values_do_not_warn(world, columns):
+    world.add_persona(**columns)
+    svc = world.start()
+
+    assert PERSONA_ID in svc.personas
+    assert svc.current_model_setting_warnings() == []
+
+
+def test_persona_media_summary_models_are_not_checked(world):
     """ペルソナ単位の画像/音声/動画要約モデルは保存されるだけで、読む箇所が無い。
     選び直しても挙動が変わらない設定に「選び直して」と出さない。"""
-    svc = load_persona(
+    world.add_persona(
         VISION_MODEL="gone-vision",
         AUDIO_MODEL="gone-audio",
         VIDEO_MODEL="gone-video",
     )
+    svc = world.start()
 
-    assert _model_config_messages(svc) == []
-    persona = svc.personas[PERSONA_ID]
-    assert persona.vision_model == "gone-vision"
-    assert persona.audio_model == "gone-audio"
-    assert persona.video_model == "gone-video"
+    assert svc.current_model_setting_warnings() == []
 
 
-def test_persona_defined_values_do_not_warn(load_persona):
-    svc = load_persona(
-        LIGHTWEIGHT_MODEL=DEFINED_KEY,
-        MEMORY_WEAVE_MODEL=DEFINED_API_NAME,
-    )
-    assert svc.startup_warnings == []
-    assert PERSONA_ID in svc.personas
-
-
-def test_persona_unset_and_empty_values_do_not_warn(load_persona):
-    svc = load_persona(LIGHTWEIGHT_MODEL=None, MEMORY_WEAVE_MODEL="")
-
-    assert svc.startup_warnings == []
-    assert PERSONA_ID in svc.personas
-
-
-def test_persona_lookup_follows_each_consumer(load_persona):
+def test_persona_lookup_follows_each_consumer(world):
     """API モデル名は、Memory Weave (find_model_config) なら引けるが、
-    軽量モデル (設定キーの完全一致) では引けない。"""
-    svc = load_persona(
+    標準・軽量モデル (設定キーの完全一致) では引けない。"""
+    world.add_persona(
+        DEFAULT_MODEL=DEFINED_API_NAME,
         LIGHTWEIGHT_MODEL=DEFINED_API_NAME,
         MEMORY_WEAVE_MODEL=DEFINED_API_NAME,
     )
+    svc = world.start()
 
-    assert _model_config_messages(svc) == [
+    assert _messages(svc.current_model_setting_warnings()) == [
+        f"ペルソナ '{PERSONA_ID}' の標準モデル '{DEFINED_API_NAME}' の設定ファイルが見つかりません。"
+        f"いまはモデル '{FALLBACK_KEY}' で代わりに動いています。" + PERSONA_RESELECT,
         f"ペルソナ '{PERSONA_ID}' の軽量モデル '{DEFINED_API_NAME}' の設定ファイルが見つかりません。"
         + PERSONA_RESELECT,
     ]
+    # 標準モデルは読み込む側でも引けず、代わりのモデルで読み込まれている
+    assert svc.personas[PERSONA_ID].model == FALLBACK_KEY
 
 
-def test_persona_failing_lookup_does_not_stop_loading(load_persona, monkeypatch):
-    monkeypatch.setattr(model_configs, "find_model_config", _raise)
+def test_persona_not_loaded_omits_substitute_sentence(world, monkeypatch):
+    """読み込めなかったペルソナは、何で動いているとも言えない。"""
+    world.add_persona(DEFAULT_MODEL="gone-default")
+    monkeypatch.setattr("manager.persona.PersonaCore", _raise)
+    svc = world.start()
 
-    svc = load_persona(LIGHTWEIGHT_MODEL="gone-lite", MEMORY_WEAVE_MODEL="gone-weave")
-
-    assert PERSONA_ID in svc.personas
-    assert not any(w["source"] == "persona_load" for w in svc.startup_warnings)
-    # 引けなかった役割は飛ばし、残りの役割の検査は続く
-    assert _model_config_messages(svc) == [
-        f"ペルソナ '{PERSONA_ID}' の軽量モデル 'gone-lite' の設定ファイルが見つかりません。"
+    assert PERSONA_ID not in svc.personas
+    assert _messages(svc.current_model_setting_warnings()) == [
+        f"ペルソナ '{PERSONA_ID}' の標準モデル 'gone-default' の設定ファイルが見つかりません。"
         + PERSONA_RESELECT,
     ]
 
 
-def test_persona_failing_check_does_not_stop_loading(load_persona, monkeypatch):
-    monkeypatch.setattr(model_defaults, "missing_model_warnings", _raise)
+def test_persona_running_under_the_missing_name_omits_substitute_sentence(world):
+    """ペルソナ設定の保存 (manager/admin.py の update_ai) は、定義を引く前にメモリ上の
+    モデル名を書き換える。設定値と同じ名前を「代わりに動いている」とは言えない。"""
+    world.add_persona(DEFAULT_MODEL="gone-default")
+    svc = world.start()
+    svc.personas[PERSONA_ID].model = "gone-default"
 
-    svc = load_persona(LIGHTWEIGHT_MODEL="gone-lite")
-
-    assert PERSONA_ID in svc.personas
-    assert svc.startup_warnings == []
-
-
-def test_persona_default_model_warning_and_fallback_unchanged(load_persona):
-    svc = load_persona(DEFAULT_MODEL="gone-default")
-
-    assert _model_config_messages(svc) == [
-        f"ペルソナ '{PERSONA_ID}' のモデル 'gone-default' の設定ファイルが見つかりません。"
-        f"デフォルトモデル '{STANDARD_KEY}' にフォールバックしました。",
+    assert _messages(svc.current_model_setting_warnings()) == [
+        f"ペルソナ '{PERSONA_ID}' の標準モデル 'gone-default' の設定ファイルが見つかりません。"
+        + PERSONA_RESELECT,
     ]
-    assert svc.personas[PERSONA_ID].model == STANDARD_KEY
+
+
+def test_failing_lookup_skips_only_that_role(world, monkeypatch):
+    world.add_persona(LIGHTWEIGHT_MODEL="gone-lite", MEMORY_WEAVE_MODEL="gone-weave")
+    svc = world.start()
+    monkeypatch.setattr(model_configs, "find_model_config", _raise)
+
+    # 引けなかった役割 (Memory Weave) は飛ばし、残りの役割の検査は続く
+    assert _messages(svc.current_model_setting_warnings()) == [
+        f"ペルソナ '{PERSONA_ID}' の軽量モデル 'gone-lite' の設定ファイルが見つかりません。"
+        + PERSONA_RESELECT,
+    ]
 
 
 # --- グローバル設定単位 ---------------------------------------------------------
 
 
-def _init_global_model_config(monkeypatch, **env):
-    for key, value in env.items():
-        monkeypatch.setenv(key, value)
-    svc = InitializationMixin.__new__(InitializationMixin)
-    svc.city_name = "city_a"
-    svc._init_model_config(STANDARD_KEY)
-    return svc
-
-
-def test_global_missing_values_warn(monkeypatch):
-    svc = _init_global_model_config(
+def test_global_missing_values_each_warn(world, monkeypatch):
+    _set_env(
         monkeypatch,
+        SAIVERSE_DEFAULT_MODEL="gone-default",
         SAIVERSE_DEFAULT_LIGHTWEIGHT_MODEL="gone-lite",
         MEMORY_WEAVE_MODEL="gone-weave",
         SAIVERSE_IMAGE_SUMMARY_MODEL="gone-image",
         SAIVERSE_AUDIO_SUMMARY_MODEL="gone-audio",
         SAIVERSE_VIDEO_SUMMARY_MODEL="gone-video",
     )
+    svc = world.start()
 
-    assert _model_config_messages(svc) == [
+    assert _messages(svc.current_model_setting_warnings()) == [
+        "グローバル設定の標準モデル 'gone-default' の設定ファイルが見つかりません。"
+        f"いまはモデル '{FALLBACK_KEY}' で代わりに動いています。"
+        "グローバル設定の「モデルロール」から選び直してください。",
         "グローバル設定の軽量モデル 'gone-lite' の設定ファイルが見つかりません。" + GLOBAL_RESELECT,
         "グローバル設定のMemory Weaveモデル 'gone-weave' の設定ファイルが見つかりません。"
         + GLOBAL_RESELECT
@@ -264,25 +314,210 @@ def test_global_missing_values_warn(monkeypatch):
         "グローバル設定の音声要約モデル 'gone-audio' の設定ファイルが見つかりません。" + GLOBAL_RESELECT,
         "グローバル設定の動画要約モデル 'gone-video' の設定ファイルが見つかりません。" + GLOBAL_RESELECT,
     ]
-    assert svc._base_model == STANDARD_KEY
 
 
-def test_global_unset_empty_and_defined_values_do_not_warn(monkeypatch):
-    svc = _init_global_model_config(
+def test_global_defined_unset_and_empty_values_do_not_warn(world, monkeypatch):
+    _set_env(
         monkeypatch,
+        SAIVERSE_DEFAULT_MODEL=DEFINED_KEY,
         SAIVERSE_DEFAULT_LIGHTWEIGHT_MODEL=DEFINED_KEY,
         MEMORY_WEAVE_MODEL=DEFINED_API_NAME,
         SAIVERSE_IMAGE_SUMMARY_MODEL="",
         # 音声・動画要約は未設定のまま
     )
+    svc = world.start()
 
+    assert svc._base_model == DEFINED_KEY
+    assert svc.current_model_setting_warnings() == []
+
+
+def test_global_lookup_follows_each_consumer(world, monkeypatch):
+    """API モデル名は、Memory Weave・画像/音声/動画要約 (find_model_config) なら
+    引けるが、標準・軽量モデル (設定キーの完全一致) では引けない。"""
+    _set_env(monkeypatch, **{key: DEFINED_API_NAME for key in ROLE_ENV_KEYS})
+    svc = world.start()
+
+    assert _messages(svc.current_model_setting_warnings()) == [
+        f"グローバル設定の標準モデル '{DEFINED_API_NAME}' の設定ファイルが見つかりません。"
+        f"いまはモデル '{FALLBACK_KEY}' で代わりに動いています。" + GLOBAL_RESELECT,
+        f"グローバル設定の軽量モデル '{DEFINED_API_NAME}' の設定ファイルが見つかりません。"
+        + GLOBAL_RESELECT,
+    ]
+    # 標準モデルは起動時の読み込みでも引けず、代わりのモデルで動いている
+    assert svc._base_model == FALLBACK_KEY
+
+
+def test_global_running_under_the_missing_name_omits_substitute_sentence(world, monkeypatch):
+    """チュートリアルの自動設定が呼ぶ update_default_model は、定義を引く前に
+    _base_model を書き換える。設定値と同じ名前を「代わりに動いている」とは言えない。"""
+    svc = world.start()
+    monkeypatch.setenv("SAIVERSE_DEFAULT_MODEL", "gone-default")
+    svc._base_model = "gone-default"
+
+    assert _messages(svc.current_model_setting_warnings()) == [
+        "グローバル設定の標準モデル 'gone-default' の設定ファイルが見つかりません。" + GLOBAL_RESELECT,
+    ]
+
+
+# --- 起動時 ---------------------------------------------------------------------
+
+
+def test_startup_records_no_model_setting_warnings_but_still_falls_back(world, monkeypatch):
+    _set_env(monkeypatch, **{key: "gone-global" for key in ROLE_ENV_KEYS})
+    world.add_persona(
+        DEFAULT_MODEL="gone-default",
+        LIGHTWEIGHT_MODEL="gone-lite",
+        MEMORY_WEAVE_MODEL="gone-weave",
+    )
+    svc = world.start()
+
+    # 同じ事実を二重に出さないよう、起動時には積まない
     assert svc.startup_warnings == []
+    # 標準モデルを代わりのモデルで読み込むことは今までどおり
+    assert svc._base_model == FALLBACK_KEY
+    assert svc.provider == "stub"
+    persona = svc.personas[PERSONA_ID]
+    assert persona.model == FALLBACK_KEY
+    assert persona.provider == "stub"
+    # 標準モデル以外は、値を差し替えずにそのまま渡る
+    assert persona.lightweight_model == "gone-lite"
+    assert persona.memory_weave_model == "gone-weave"
+    # 積まなかった分は、取りに来たときに作られる (グローバル 6 件 + ペルソナ 3 件)
+    assert len(svc.current_model_setting_warnings()) == 9
 
 
-def test_global_failing_check_does_not_stop_startup(monkeypatch):
-    monkeypatch.setattr(model_defaults, "missing_model_warnings", _raise)
+# --- 起動後の変更 ---------------------------------------------------------------
 
-    svc = _init_global_model_config(monkeypatch, MEMORY_WEAVE_MODEL="gone-weave")
 
-    assert svc.startup_warnings == []
-    assert svc._base_model == STANDARD_KEY
+def test_fixing_persona_row_after_startup_clears_warnings(world):
+    world.add_persona(
+        DEFAULT_MODEL="gone-default",
+        LIGHTWEIGHT_MODEL="gone-lite",
+        MEMORY_WEAVE_MODEL="gone-weave",
+    )
+    svc = world.start()
+    assert len(svc.current_model_setting_warnings()) == 3
+
+    world.set_persona_models(
+        DEFAULT_MODEL=DEFINED_KEY,
+        LIGHTWEIGHT_MODEL=DEFINED_KEY,
+        MEMORY_WEAVE_MODEL=DEFINED_API_NAME,
+    )
+    assert svc.current_model_setting_warnings() == []
+
+
+def test_fixing_global_env_after_startup_clears_warnings(world, monkeypatch):
+    _set_env(monkeypatch, **{key: "gone-global" for key in ROLE_ENV_KEYS})
+    svc = world.start()
+    assert len(svc.current_model_setting_warnings()) == 6
+
+    # グローバル設定のモデルロールの保存も、チュートリアルの自動設定も、
+    # write_env_updates (api/routes/admin.py) で os.environ を書き換える
+    _set_env(monkeypatch, **{key: DEFINED_KEY for key in ROLE_ENV_KEYS})
+    assert svc.current_model_setting_warnings() == []
+
+
+def test_adding_definition_after_startup_clears_warnings(world, monkeypatch):
+    monkeypatch.setenv("SAIVERSE_DEFAULT_LIGHTWEIGHT_MODEL", "added-later")
+    world.add_persona(DEFAULT_MODEL="added-later", MEMORY_WEAVE_MODEL="added-later")
+    svc = world.start()
+    assert len(svc.current_model_setting_warnings()) == 3
+
+    # 読み直し (model_configs.reload_configs) は MODEL_CONFIGS を新しい辞書へ差し替える
+    monkeypatch.setattr(model_configs, "MODEL_CONFIGS", {
+        **model_configs.MODEL_CONFIGS,
+        "added-later": _definition("vendor/added-later"),
+    })
+    assert svc.current_model_setting_warnings() == []
+
+
+def test_removing_definition_after_startup_raises_warnings(world, monkeypatch):
+    monkeypatch.setenv("SAIVERSE_DEFAULT_LIGHTWEIGHT_MODEL", DEFINED_KEY)
+    world.add_persona(DEFAULT_MODEL=DEFINED_KEY, MEMORY_WEAVE_MODEL=DEFINED_KEY)
+    svc = world.start()
+    assert svc.current_model_setting_warnings() == []
+
+    monkeypatch.setattr(model_configs, "MODEL_CONFIGS", {
+        key: value
+        for key, value in model_configs.MODEL_CONFIGS.items()
+        if key != DEFINED_KEY
+    })
+    assert _messages(svc.current_model_setting_warnings()) == [
+        f"グローバル設定の軽量モデル '{DEFINED_KEY}' の設定ファイルが見つかりません。"
+        + GLOBAL_RESELECT,
+        # ペルソナは起動時に読み込んだ名前のまま動いているので「代わりに」の一文は付かない
+        f"ペルソナ '{PERSONA_ID}' の標準モデル '{DEFINED_KEY}' の設定ファイルが見つかりません。"
+        + PERSONA_RESELECT,
+        f"ペルソナ '{PERSONA_ID}' のMemory Weaveモデル '{DEFINED_KEY}' の設定ファイルが見つかりません。"
+        + PERSONA_RESELECT
+        + "選び直すまで、このペルソナの記憶の整理は止まったままになります。",
+    ]
+
+
+def test_real_reload_is_reflected(world, monkeypatch, tmp_path):
+    """モデル定義を作る・消すルートは最後に model_configs.reload_configs() を呼ぶ。
+    その本物を、一時フォルダの user_data と組み込み定義 (builtin_data) だけを相手に通す。"""
+    user_data = tmp_path / "user_data"
+    models_dir = user_data / "models"
+    models_dir.mkdir(parents=True)
+    monkeypatch.setattr(data_paths, "USER_DATA_DIR", user_data)
+    monkeypatch.setattr(data_paths, "EXPANSION_DATA_DIR", tmp_path / "no_expansion")
+
+    world.add_persona(LIGHTWEIGHT_MODEL="test-reloaded-model")
+    svc = world.start()
+    assert len(svc.current_model_setting_warnings()) == 1
+
+    definition_file = models_dir / "test-reloaded-model.json"
+    definition_file.write_text(
+        json.dumps(_definition("vendor/test-reloaded-model")), encoding="utf-8",
+    )
+    model_configs.reload_configs()
+    assert svc.current_model_setting_warnings() == []
+
+    definition_file.unlink()
+    model_configs.reload_configs()
+    assert _messages(svc.current_model_setting_warnings()) == [
+        f"ペルソナ '{PERSONA_ID}' の軽量モデル 'test-reloaded-model' の設定ファイルが見つかりません。"
+        + PERSONA_RESELECT,
+    ]
+
+
+# --- 画面のルート ---------------------------------------------------------------
+
+RECORDED = {"source": "persona_load", "message": "Failed to load persona 'eris_city_a': boom"}
+
+
+def test_route_returns_recorded_warnings_then_current_ones(world):
+    world.add_persona(LIGHTWEIGHT_MODEL="gone-lite")
+    svc = world.start()
+    svc.startup_warnings.append(RECORDED)
+    lite_warning = {
+        "source": "model_config",
+        "message": (
+            f"ペルソナ '{PERSONA_ID}' の軽量モデル 'gone-lite' の設定ファイルが見つかりません。"
+            + PERSONA_RESELECT
+        ),
+    }
+
+    assert config_route.get_startup_warnings(manager=svc) == {
+        "warnings": [RECORDED, lite_warning],
+    }
+    # 計算分は保存済みの側へ溜まらない — 画面を開き直しても増えない
+    assert svc.startup_warnings == [RECORDED]
+    assert config_route.get_startup_warnings(manager=svc) == {
+        "warnings": [RECORDED, lite_warning],
+    }
+
+    # 起動後に選び直すと、次に画面が取りに来たときには消えている
+    world.set_persona_models(LIGHTWEIGHT_MODEL=DEFINED_KEY)
+    assert config_route.get_startup_warnings(manager=svc) == {"warnings": [RECORDED]}
+
+
+def test_route_returns_recorded_warnings_when_computation_fails(world, monkeypatch):
+    world.add_persona(LIGHTWEIGHT_MODEL="gone-lite")
+    svc = world.start()
+    svc.startup_warnings.append(RECORDED)
+    monkeypatch.setattr(svc, "current_model_setting_warnings", _raise)
+
+    assert config_route.get_startup_warnings(manager=svc) == {"warnings": [RECORDED]}
+    assert svc.startup_warnings == [RECORDED]

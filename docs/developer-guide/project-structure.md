@@ -86,7 +86,7 @@ saiverse/
 ├── llm_router.py           # ツール呼び出し判定
 ├── gemini_clients.py       # Router/LLM client共通のGemini SDK client構築
 ├── model_configs.py        # モデル設定管理
-├── model_defaults.py       # 組み込みデフォルトモデル / モデル役割と環境変数の表 / 定義の無いモデル設定の起動時警告
+├── model_defaults.py       # 組み込みデフォルトモデル / モデル役割と環境変数の表 / 定義の無いモデル設定を警告の文面にする判定
 ├── provider_security.py    # provider credentialと接続先URLの束縛・SSRF境界
 ├── file_policy.py          # persisted pathのmanaged root境界
 ├── tls_trust.py            # HTTPS の信頼元を起動時に一度決める。OS の証明書ストアが空の環境
