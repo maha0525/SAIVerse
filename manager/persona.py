@@ -196,9 +196,6 @@ class PersonaMixin:
             persona_context_length = get_context_length(persona_model)
             persona_provider = get_model_provider(persona_model)
         persona_lightweight_model = db_ai.LIGHTWEIGHT_MODEL
-        persona_vision_model = db_ai.VISION_MODEL
-        persona_audio_model = db_ai.AUDIO_MODEL
-        persona_video_model = db_ai.VIDEO_MODEL
         persona_memory_weave_model = getattr(db_ai, "MEMORY_WEAVE_MODEL", None)
 
         from saiverse.data_paths import find_file, PROMPTS_DIR
@@ -230,9 +227,6 @@ class PersonaMixin:
             start_building_id=private_room_id,
             model=persona_model,
             lightweight_model=persona_lightweight_model,
-            vision_model=persona_vision_model,
-            audio_model=persona_audio_model,
-            video_model=persona_video_model,
             memory_weave_model=persona_memory_weave_model,
             context_length=persona_context_length,
             user_room_id=self.user_room_id,

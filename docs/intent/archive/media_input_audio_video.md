@@ -19,6 +19,7 @@
 - 入口での長さ上限を **音声 5 分 / 動画 90 秒** で強制 (超過時はアップロード自体を拒否)
 - `media_summary.py` を拡張し `ensure_audio_summary` / `ensure_video_summary` を実装、非対応モデル向けに `*.ogg.summary.txt` / `*.mp4.summary.txt` の sidecar を生成
 - ペルソナごとの `AUDIO_MODEL` / `VIDEO_MODEL` 設定欄を追加、unset 時は `SAIVERSE_AUDIO_SUMMARY_MODEL` / `SAIVERSE_VIDEO_SUMMARY_MODEL` 環境変数 → `BUILTIN_DEFAULT_LITE_MODEL` の順にフォールバック
+  - **2026-09-11 追記**: ペルソナの値を読む処理は実装されなかった。実装されたのは、グローバル設定 (画面の「モデルロール」タブで選ぶ値。実体は環境変数) から先だけで、ペルソナ設定の欄は保存されるだけで読まれないまま残った。要約は元のファイルごとに 1 つを全ペルソナで共有する (C3) ので、ペルソナ単位の設定を要約に使う形にはせず、2026-09-11 に画面・API・DB から削除した ([issue](../../issues/persona_media_summary_models_unused.md))
 - LLM client 側に `supports_audio` / `supports_video` フラグと、Gemini の inline_data として音声・動画を送る経路
 - **アイテム経路の対応**: audio/video タイプのアイテムを Open 状態にすると、`get_visual_context` 経由で毎回 LLM 認知に乗る (picture アイテムの Open 挙動と完全に対称)。`item_view` ツールでも一時的に閲覧できる
 - ffmpeg バイナリは `imageio-ffmpeg` を `requirements.txt` に追加して pip install で同梱、ユーザーに個別インストールを促さない
@@ -140,7 +141,7 @@ ffmpeg で metadata 読み取り → 音声 duration > 300s または動画 dura
 
 ### 4.3. モデルロール拡張
 
-`database/models.py` の `AI` テーブルに以下のカラムを追加:
+`database/models.py` の `AI` テーブルに以下のカラムを追加 (**2026-09-11 に削除済み** — この節の末尾の追記を参照):
 
 ```python
 AUDIO_MODEL = Column(String, nullable=True)  # 音声認識用モデル
@@ -158,6 +159,8 @@ BUILTIN_DEFAULT_LITE_MODEL (= 現状 gemini-2.0-flash 系)
 ```
 
 video も同様。`VISION_MODEL` / `LIGHTWEIGHT_VISION_MODEL` のような 2 段は設けない (Gemini 以外で音声・動画ネイティブ対応モデルがほぼ存在しないため、軽量版を分ける意味が薄い)。
+
+> **2026-09-11 追記**: 上の順序のうち、先頭の `persona.AUDIO_MODEL (DB)` を読む処理は実装されなかった。ここで比較に挙げている `VISION_MODEL` / `LIGHTWEIGHT_VISION_MODEL` も、当時から値を読むコードの無い、AI テーブルの列だった。四つの列はすべて 2026-09-11 に削除した。要約に使うモデルは、グローバル設定 (画面の「モデルロール」タブで選ぶ値。実体は環境変数) と組み込みの既定モデルだけから決まる ([issue](../../issues/persona_media_summary_models_unused.md))。
 
 ### 4.4. Item タイプ拡張
 
@@ -314,7 +317,7 @@ def probe_duration(path: Path) -> float:
 | `api/routes/media.py` | `POST /upload-audio`, `POST /upload-video`, `GET /audio/{filename}`, `GET /video/{filename}` 追加、`POST /upload-file` の auto 判定拡張 |
 | `saiverse/media_utils.py` | `SUPPORTED_LLM_AUDIO_MIME`, `SUPPORTED_LLM_VIDEO_MIME`, `AUDIO_URI_PREFIX`, `VIDEO_URI_PREFIX`, `_ensure_audio_dir`, `_ensure_video_dir`, `resolve_media_uri` 拡張, `iter_audio_media`, `iter_video_media`, `load_audio_bytes_for_llm`, `load_video_bytes_for_llm`, `store_audio_bytes`, `store_video_bytes`, `resolve_extended_media_uri` 拡張 (saiverse://item/<id>/audio, saiverse://item/<id>/video) |
 | `saiverse/media_summary.py` | `_AUDIO_SUMMARY_MODEL_RAW`, `_VIDEO_SUMMARY_MODEL_RAW` 定数、`ensure_audio_summary`, `ensure_video_summary`, `_generate_audio_summary`, `_generate_video_summary` 追加。再入防止ガードは画像と共通化 |
-| `database/models.py` | `AI.AUDIO_MODEL`, `AI.VIDEO_MODEL` カラム追加 |
+| `database/models.py` | `AI.AUDIO_MODEL`, `AI.VIDEO_MODEL` カラム追加 (**2026-09-11 に削除済み** — §1 の追記を参照) |
 | `database/migrate.py` | 上記カラム追加のマイグレーション |
 | `llm_clients/base.py` | `supports_audio`, `supports_video` フラグ追加 |
 | `llm_clients/gemini.py` | `_convert_messages` で audio/video の inline_data 構築追加、`__init__` で `supports_audio`/`supports_video` 受け取り |
@@ -384,7 +387,7 @@ def probe_duration(path: Path) -> float:
 - `imageio-ffmpeg` 追加、`saiverse/ffmpeg_runner.py` 実装
 - `media_utils.py` に音声・動画用の MIME / URI / iter / load / store / dir ヘルパ追加
 - `media_summary.py` に `ensure_audio_summary` / `ensure_video_summary` 追加
-- DB マイグレーション: `AI.AUDIO_MODEL`, `AI.VIDEO_MODEL` カラム追加
+- DB マイグレーション: `AI.AUDIO_MODEL`, `AI.VIDEO_MODEL` カラム追加 (**2026-09-11 に削除済み** — §1 の追記を参照)
 
 ### Phase 2: API + ストレージ
 
@@ -413,6 +416,7 @@ def probe_duration(path: Path) -> float:
 
 - ペルソナ編集画面に `AUDIO_MODEL` / `VIDEO_MODEL` 選択欄を追加
 - unset 時の挙動 (env → builtin default) をツールチップで説明
+- **2026-09-11 追記**: 末尾の改訂履歴の v1.0 は Phase 1〜8 の全機能を実装したとしているが、この Phase の欄は 2026-05-18 のコミット (`d2f1c740`、画面側の変更は `page.tsx` / `ItemModal.tsx` / `RightSidebar.tsx` / `FileUpload.tsx`) に含まれていない。ペルソナ設定画面に欄が入ったのは 2026-06-21 (`33c71fc0`) で、入った後も値を読むコードは足されなかった。2026-09-11 に欄ごと削除した (§1 の追記を参照)
 
 ### Phase 7: アイテム連携 (Open 状態 + item_view)
 
@@ -450,7 +454,7 @@ def probe_duration(path: Path) -> float:
 ## 10. 関連ドキュメント
 
 - [multimodal_input_pipeline.md](multimodal_input_pipeline.md) — ツール戻り値経路のメディア基盤 (本書と並走)
-- [model_provider_management.md](model_provider_management.md) — モデル設定の 3 層優先 (AUDIO_MODEL / VIDEO_MODEL もこの体系に乗る)
+- [model_provider_management.md](model_provider_management.md) — モデル設定の 3 層優先 (AUDIO_MODEL / VIDEO_MODEL もこの体系に乗る。**2026-09-11 追記**: ペルソナ単位の AUDIO_MODEL / VIDEO_MODEL は削除した。音声・動画の要約に使うモデルは、グローバル設定だけで選ぶ)
 - [Gemini API: Audio](https://ai.google.dev/gemini-api/docs/audio?hl=ja) — 音声入力の公式仕様
 - [Gemini API: Video Understanding](https://ai.google.dev/gemini-api/docs/video-understanding?hl=ja) — 動画入力の公式仕様
 - [imageio-ffmpeg (PyPI)](https://pypi.org/project/imageio-ffmpeg/) — ffmpeg バイナリ同梱パッケージ
@@ -470,3 +474,4 @@ def probe_duration(path: Path) -> float:
   - `manager/items.py:_resolve_file_path` と `api/routes/info.py:get_item_content` のパスリカバリに audio/video subdir 戦略を追加
 
   archive へ移動。今後の拡張 (item_view ツールの戻り値スキーマ拡張、ペルソナ単位 AUDIO/VIDEO_MODEL の動的読み込み、Files API 経由の長尺対応など) は §9 「未対応 / 将来拡張」にあるとおり、需要が出てから個別 Intent Doc を立てる。
+- 2026-09-11 追記: ペルソナ単位の `AUDIO_MODEL` / `VIDEO_MODEL` と、本書が比較に挙げた `VISION_MODEL` / `LIGHTWEIGHT_VISION_MODEL` は、値を読むコードが一度も足されないまま残っていたので、画面・API・DB から削除した。要約は元のファイルごとに 1 つを全ペルソナで共有する (C3) ため、v1.0 の記録で先送りした、ペルソナ単位で AUDIO/VIDEO_MODEL を読み込む拡張も行わない。§1・§4.3・Phase 6・§10 に追記した。経緯と判断は [issue](../../issues/persona_media_summary_models_unused.md) にある。

@@ -1155,9 +1155,6 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                 "IS_DISPATCHED": ai.IS_DISPATCHED,
                 "DEFAULT_MODEL": ai.DEFAULT_MODEL,
                 "LIGHTWEIGHT_MODEL": ai.LIGHTWEIGHT_MODEL,
-                "VISION_MODEL": ai.VISION_MODEL,
-                "AUDIO_MODEL": ai.AUDIO_MODEL,
-                "VIDEO_MODEL": ai.VIDEO_MODEL,
                 "MEMORY_WEAVE_MODEL": ai.MEMORY_WEAVE_MODEL,
                 "AUTONOMY_ENABLED": ai.AUTONOMY_ENABLED,
                 "CHRONICLE_ENABLED": ai.CHRONICLE_ENABLED,
@@ -1210,9 +1207,6 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
         avatar_path: Optional[str],
         avatar_upload: Optional[str],
         appearance_image_path: Optional[str] = None,
-        vision_model: Optional[str] = None,
-        audio_model: Optional[str] = None,
-        video_model: Optional[str] = None,
         memory_weave_model: Optional[str] = None,
         chronicle_enabled: Optional[bool] = None,
         autonomous_chronicle_enabled: Optional[bool] = None,
@@ -1264,9 +1258,6 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
             ai.HOME_CITYID = home_city_id
             ai.DEFAULT_MODEL = default_model or None
             ai.LIGHTWEIGHT_MODEL = lightweight_model or None
-            ai.VISION_MODEL = vision_model or None
-            ai.AUDIO_MODEL = audio_model or None
-            ai.VIDEO_MODEL = video_model or None
             ai.MEMORY_WEAVE_MODEL = memory_weave_model or None
             ai.AVATAR_IMAGE = avatar_value
             # Update appearance image path if provided
@@ -1330,9 +1321,6 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                 persona.persona_system_instruction = system_prompt
                 persona.autonomy_enabled = ai.AUTONOMY_ENABLED
                 persona.lightweight_model = lightweight_model
-                persona.vision_model = vision_model
-                persona.audio_model = audio_model
-                persona.video_model = video_model
                 persona.memory_weave_model = memory_weave_model
 
                 # Phase C-2: AUTONOMY_ENABLED 変更を AutonomyManager に反映

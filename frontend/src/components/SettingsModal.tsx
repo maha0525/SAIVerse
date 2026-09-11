@@ -30,9 +30,6 @@ interface AIConfig {
     system_prompt: string;
     default_model: string | null;
     lightweight_model: string | null;
-    vision_model: string | null;
-    audio_model: string | null;
-    video_model: string | null;
     memory_weave_model: string | null;
     autonomy_enabled: boolean;  // 自律行動 (自分から考えて動くこと) の ON/OFF
     chronicle_enabled: boolean;
@@ -92,9 +89,6 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
     const [systemPrompt, setSystemPrompt] = useState('');
     const [defaultModel, setDefaultModel] = useState<string>('');
     const [lightweightModel, setLightweightModel] = useState<string>('');
-    const [visionModel, setVisionModel] = useState<string>('');
-    const [audioModel, setAudioModel] = useState<string>('');
-    const [videoModel, setVideoModel] = useState<string>('');
     const [memoryWeaveModel, setMemoryWeaveModel] = useState<string>('');
     // ⚠ 自律行動の ON/OFF は v0.3 で UI から隠した (autonomous_behavior_v3.md
     // §11「運転 UI は隠す」)。state だけ残すのは、ロードした値をそのまま保存へ
@@ -210,9 +204,6 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                 setSystemPrompt(data.system_prompt);
                 setDefaultModel(data.default_model || '');
                 setLightweightModel(data.lightweight_model || '');
-                setVisionModel(data.vision_model || '');
-                setAudioModel(data.audio_model || '');
-                setVideoModel(data.video_model || '');
                 setMemoryWeaveModel(data.memory_weave_model || '');
                 setAutonomyEnabled(data.autonomy_enabled ?? true);
                 setChronicleEnabled(data.chronicle_enabled ?? true);
@@ -322,9 +313,6 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                     system_prompt: systemPrompt,
                     default_model: defaultModel,
                     lightweight_model: lightweightModel,
-                    vision_model: visionModel,
-                    audio_model: audioModel,
-                    video_model: videoModel,
                     memory_weave_model: memoryWeaveModel,
                     autonomy_enabled: autonomyEnabled,
                     chronicle_enabled: chronicleEnabled,
@@ -477,60 +465,6 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                                     ))}
                                 </select>
                                 <div className={styles.description}>クロニクル・メモペディア生成に使用するモデル。</div>
-                            </div>
-
-                            <div className={styles.fieldGroup}>
-                                <label className={styles.label}>画像要約モデル（任意）</label>
-                                <select
-                                    className={styles.select}
-                                    value={visionModel}
-                                    onChange={(e) => setVisionModel(e.target.value)}
-                                >
-                                    <option value="">グローバル設定を使用</option>
-                                    {visionModel && !availableModels.some(m => m.id === visionModel) && (
-                                        <option value={visionModel}>⚠️ 不明: {visionModel}</option>
-                                    )}
-                                    {availableModels.map(m => (
-                                        <option key={m.id} value={m.id}>{m.name}</option>
-                                    ))}
-                                </select>
-                                <div className={styles.description}>画像・ドキュメントの要約生成に使用するモデル。</div>
-                            </div>
-
-                            <div className={styles.fieldGroup}>
-                                <label className={styles.label}>音声要約モデル（任意）</label>
-                                <select
-                                    className={styles.select}
-                                    value={audioModel}
-                                    onChange={(e) => setAudioModel(e.target.value)}
-                                >
-                                    <option value="">グローバル設定を使用</option>
-                                    {audioModel && !availableModels.some(m => m.id === audioModel) && (
-                                        <option value={audioModel}>⚠️ 不明: {audioModel}</option>
-                                    )}
-                                    {availableModels.map(m => (
-                                        <option key={m.id} value={m.id}>{m.name}</option>
-                                    ))}
-                                </select>
-                                <div className={styles.description}>音声ファイルの要約生成に使用するモデル（Gemini系推奨）。</div>
-                            </div>
-
-                            <div className={styles.fieldGroup}>
-                                <label className={styles.label}>動画要約モデル（任意）</label>
-                                <select
-                                    className={styles.select}
-                                    value={videoModel}
-                                    onChange={(e) => setVideoModel(e.target.value)}
-                                >
-                                    <option value="">グローバル設定を使用</option>
-                                    {videoModel && !availableModels.some(m => m.id === videoModel) && (
-                                        <option value={videoModel}>⚠️ 不明: {videoModel}</option>
-                                    )}
-                                    {availableModels.map(m => (
-                                        <option key={m.id} value={m.id}>{m.name}</option>
-                                    ))}
-                                </select>
-                                <div className={styles.description}>動画ファイルの要約生成に使用するモデル（Gemini系推奨）。</div>
                             </div>
 
                             <DebugPanel personaId={personaId} />

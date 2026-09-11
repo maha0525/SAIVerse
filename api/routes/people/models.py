@@ -150,9 +150,6 @@ class AIConfigResponse(BaseModel):
     system_prompt: str
     default_model: Optional[str]
     lightweight_model: Optional[str] = None
-    vision_model: Optional[str] = None
-    audio_model: Optional[str] = None
-    video_model: Optional[str] = None
     memory_weave_model: Optional[str] = None
     autonomy_enabled: bool = True
     chronicle_enabled: bool = True
@@ -177,9 +174,6 @@ class UpdateAIConfigRequest(BaseModel):
     system_prompt: Optional[str] = None
     default_model: Optional[str] = None
     lightweight_model: Optional[str] = None
-    vision_model: Optional[str] = None
-    audio_model: Optional[str] = None
-    video_model: Optional[str] = None
     memory_weave_model: Optional[str] = None
     autonomy_enabled: Optional[bool] = None
     chronicle_enabled: Optional[bool] = None

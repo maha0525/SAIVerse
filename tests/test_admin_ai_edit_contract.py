@@ -99,9 +99,6 @@ class AdminAiEditContractTest(unittest.TestCase):
             system_prompt="you are Air",
             avatar_path="  /icons/air.webp  ",
             autonomy_enabled=False,
-            vision_model="vision-1",
-            audio_model="audio-1",
-            video_model="video-1",
             memory_weave_model="weave-1",
             appearance_image_path="  /appearance/air.png  ",
             chronicle_enabled=False,
@@ -126,9 +123,6 @@ class AdminAiEditContractTest(unittest.TestCase):
         self.assertEqual(details["APPEARANCE_IMAGE_PATH"], "/appearance/air.png")
         self.assertEqual(details["DEFAULT_MODEL"], "gemini-2.0-flash")
         self.assertEqual(details["LIGHTWEIGHT_MODEL"], "gemini-2.0-flash-lite")
-        self.assertEqual(details["VISION_MODEL"], "vision-1")
-        self.assertEqual(details["AUDIO_MODEL"], "audio-1")
-        self.assertEqual(details["VIDEO_MODEL"], "video-1")
         self.assertEqual(details["MEMORY_WEAVE_MODEL"], "weave-1")
         self.assertFalse(details["AUTONOMY_ENABLED"])
         self.assertFalse(details["CHRONICLE_ENABLED"])
@@ -148,13 +142,10 @@ class AdminAiEditContractTest(unittest.TestCase):
 
     def test_blank_model_selection_clears_the_column(self):
         """「指定なし」を選ぶと空文字が届く。空文字は NULL に倒す (= 既定に従う)。"""
-        self._update(vision_model="vision-1", memory_weave_model="weave-1")
+        self._update(memory_weave_model="weave-1")
         self._update(
             default_model="",
             lightweight_model="",
-            vision_model="",
-            audio_model="",
-            video_model="",
             memory_weave_model="",
             appearance_image_path="",
         )
@@ -162,9 +153,6 @@ class AdminAiEditContractTest(unittest.TestCase):
         row = self._row()
         self.assertIsNone(row.DEFAULT_MODEL)
         self.assertIsNone(row.LIGHTWEIGHT_MODEL)
-        self.assertIsNone(row.VISION_MODEL)
-        self.assertIsNone(row.AUDIO_MODEL)
-        self.assertIsNone(row.VIDEO_MODEL)
         self.assertIsNone(row.MEMORY_WEAVE_MODEL)
         self.assertIsNone(row.APPEARANCE_IMAGE_PATH)
 

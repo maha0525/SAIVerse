@@ -63,9 +63,6 @@ class PersonaCore(
         start_building_id: str = "air_room",
         model: str = "gpt-4o",
         lightweight_model: Optional[str] = None,
-        vision_model: Optional[str] = None,
-        audio_model: Optional[str] = None,
-        video_model: Optional[str] = None,
         memory_weave_model: Optional[str] = None,
         context_length: int = 120000,
         user_room_id: str = "user_room",
@@ -147,9 +144,6 @@ class PersonaCore(
         # Initialize remaining attributes
         self.model = model
         self.lightweight_model = lightweight_model
-        self.vision_model = vision_model
-        self.audio_model = audio_model
-        self.video_model = video_model
         self.memory_weave_model = memory_weave_model
         self.provider = provider
         self.context_length = context_length

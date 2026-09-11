@@ -72,10 +72,6 @@ class AI(Base):
     IS_DISPATCHED = Column(Boolean, default=False, nullable=False)
     DEFAULT_MODEL = Column(String(255), nullable=True)
     LIGHTWEIGHT_MODEL = Column(String(255), nullable=True)
-    LIGHTWEIGHT_VISION_MODEL = Column(String(255), nullable=True)
-    VISION_MODEL = Column(String(255), nullable=True)
-    AUDIO_MODEL = Column(String(255), nullable=True)
-    VIDEO_MODEL = Column(String(255), nullable=True)
     MEMORY_WEAVE_MODEL = Column(String(255), nullable=True)
     PRIVATE_ROOM_ID = Column(String(255), ForeignKey("building.BUILDINGID"), nullable=True)
     CHRONICLE_ENABLED = Column(Boolean, default=True, nullable=False)  # Per-persona Chronicle auto-generation toggle
