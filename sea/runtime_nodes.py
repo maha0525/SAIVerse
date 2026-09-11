@@ -47,17 +47,17 @@ def lg_tool_call_node(runtime: Any, node_def: Any, persona: Any, playbook: Any, 
         # アドオン由来のツールは <addon>__<name> キーで登録されるため、
         # 素名参照を一意なら名前空間キーへ解決する。
         tool_func = TOOL_REGISTRY.get(canonicalize_tool_name(tool_name))
-        if tool_func is None:
-            error_msg = f"[sea][tool_call] Tool '{tool_name}' not found in registry"
-            LOGGER.error(error_msg)
-            state["last"] = error_msg
-            if output_key:
-                set_playbook_var(state, output_key, error_msg, where=f"node '{node_id}' output_key")
-            return state
 
         persona_obj = state.get("_persona_obj") or persona
         persona_id = getattr(persona_obj, "persona_id", "unknown")
         try:
+            if tool_func is None:
+                # 未登録のツール名も、呼び出しの例外と同じ except へ送る。早期 return で
+                # state["last"] だけを書くと、関数呼び出しの応答 (role="tool") が会話に
+                # 足されず、assistant の tool_calls に対応する返事の無いまま後続の LLM
+                # ノードへ渡る (プロバイダが拒否しうる)。PulseContext にも残らない。
+                # runtime_engine.py の lg_tool_node と同じ扱い。
+                raise LookupError(f"Tool '{tool_name}' not found in registry")
             persona_dir = getattr(persona_obj, "persona_log_path", None)
             persona_dir = persona_dir.parent if persona_dir else Path.cwd()
             manager_ref = getattr(persona_obj, "manager_ref", None)
