@@ -40,11 +40,17 @@ world clone は `setup_test_env.py` を前提にしない (dest 構造を自分�
    ファイル copy だと WAL 未反映分が欠ける)。
 2. **dest が本番と同一パスなら拒否する** (resolve 後のパス比較)。
 3. **外部への作用を持ち込まない**。複製した世界は起動しただけで外に触れてはならない:
-   - `addon_config.is_enabled` を全行 0 にする (Discord / stackchan / X 等の
+   - `addon_config.is_enabled` を全行 0 にする (stackchan / X / SwitchBot 等の
      アドオンが本物のデバイス・外部サービスへ繋がる事故の防止)。`--keep-addons` で
      opt-out 可 (アドオン自体をテストしたい場合)
    - `city.START_IN_ONLINE_MODE = 0` (SDS 登録の抑止)
    - `visiting_ai` / `thinking_request` を全消去 (他 City とのトランザクション残骸)
+   - **Discord ゲートウェイはアドオンではないので、上の DB 操作では止まらない**
+     (2026-09-11 訂正。以前はこの節で Discord をアドオンの一つとして挙げていた)。
+     ゲートウェイはリポジトリの `.env` の `SAIVERSE_GATEWAY_*` で動き、複製スクリプトは
+     `.env` に触れない。そのため、複製した世界を起動する側が、ゲートウェイを止める値で
+     上書きする: `test_fixtures/start_test_server.{bat,sh}`、`scripts/run_conversation.py`、
+     `scripts/run_day_sim.py --real`。値の一致は `tests/test_sandbox_gateway_isolation.py` が検査する
 4. **ポート衝突の防止**。本番と同時起動できるよう、City のポートを
    テスト用に書き換える (既定: UI 18000 / API 18001。複数 City は +10 ずつ)。
 5. **dest の既存データは確認なしに消さない** (`--force` で確認スキップ)。

@@ -390,7 +390,7 @@ def _build_real_manager(city_name: str, db_file: Optional[str], sds_url: str) ->
     from scripts._shared.gateway_isolation import force_discord_gateway_off
 
     # シムの世界を本番の Discord ゲートウェイにつながせない。モジュール冒頭の
-    # load_dotenv() が .env の本番設定を入れているので、組み立ての直前に無効値で上書きする
+    # load_dotenv() が .env の本番設定を入れているので、組み立ての直前にゲートウェイを止める値で上書きする
     force_discord_gateway_off()
 
     db_path = Path(db_file) if db_file else default_db_path()

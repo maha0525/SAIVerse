@@ -252,7 +252,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         from dotenv import load_dotenv
         load_dotenv(ROOT / ".env")
 
-        # テストの世界を本番の Discord ゲートウェイにつながせない (.env の本番設定を無効値で上書き)
+        # テストの世界を本番の Discord ゲートウェイにつながせない (.env の本番設定を、ゲートウェイを止める値で上書き)
         from scripts._shared.gateway_isolation import force_discord_gateway_off
         force_discord_gateway_off()
 

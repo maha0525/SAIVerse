@@ -3,7 +3,7 @@
 main.py や各ランナーの load_dotenv() は、未設定の環境変数をリポジトリの .env で
 埋める。何もしなければ、テスト環境を指すプロセスにも .env の本番用
 SAIVERSE_GATEWAY_* (トークン含む) が入る。discord_gateway/config.py も .env を
-自分で読むので、変数を消すのではなく空でない無効値で上書きする。
+自分で読むので、変数を消すのではなく、空でない「ゲートウェイを止める値」で上書きする。
 
 同じ値を test_fixtures/start_test_server.bat / .sh にも書いている。
 値の一致は tests/test_sandbox_gateway_isolation.py が検査する。
@@ -21,5 +21,5 @@ DISABLED_GATEWAY_ENV: dict[str, str] = {
 
 
 def force_discord_gateway_off() -> None:
-    """ゲートウェイの設定を無効値で上書きする。.env を読んだ前後どちらで呼んでもよい。"""
+    """ゲートウェイを止める値で設定を上書きする。.env を読んだ前後どちらで呼んでもよい。"""
     os.environ.update(DISABLED_GATEWAY_ENV)

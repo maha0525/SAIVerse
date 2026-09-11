@@ -68,7 +68,7 @@ python scripts/run_conversation.py --script <台本.json>
 # 環境変数未設定なら自動で test_data/ を指す。本番 DB を指すと起動拒否
 ```
 
-Discord ゲートウェイの設定は、起動スクリプトと同じ無効値で上書きしてから `SAIVerseManager` を作ります（一日シム `scripts/run_day_sim.py --real` も同じです。理由は後述の「外部連携の扱い」）。
+Discord ゲートウェイの設定は、起動スクリプトと同じ「ゲートウェイを止める値」で上書きしてから `SAIVerseManager` を作ります（一日シム `scripts/run_day_sim.py --real` も同じです。理由は後述の「外部連携の扱い」）。
 
 ## コマンド詳細
 
