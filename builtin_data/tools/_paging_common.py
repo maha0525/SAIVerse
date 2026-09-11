@@ -26,9 +26,20 @@ from typing import Any, List, Optional, Sequence, Tuple
 #: 残り続けるので、際限なく開ける形にはしない (intent 設計 3)。
 MAX_PAGE_SPAN = 5
 
+#: 受けるページ番号の桁数の上限。これは「何ページ目まで開けるか」の上限では
+#: なく、**文字列を数に直せる形に限る**ための枠。Python の int() は 4300 桁を
+#: 超える数字列で ValueError を投げるので、桁数を絞らないと巨大な数字列が
+#: 検査をすり抜けて int() の段で例外になり、スペルごと落ちる (呼んだペルソナに
+#: は「不正なページ指定」ではなくツールの失敗として返る)。9 桁あれば現実の
+#: ページ数は全て収まる。
+MAX_PAGE_DIGITS = 9
+
 # ASCII 数字だけを受ける。``\d`` は全角数字も通すので使わない
-# (pocketbook_open._DATE_RE と同じ思想)。
-_PAGE_RE = re.compile(r"^([0-9]+)(?:-([0-9]+))?$")
+# (pocketbook_open._DATE_RE と同じ思想)。桁数の枠を超える数字列はここで
+# 落ちて、通常の「page は '2' のような番号か…」の文言になる。
+_PAGE_RE = re.compile(
+    rf"^([0-9]{{1,{MAX_PAGE_DIGITS}}})(?:-([0-9]{{1,{MAX_PAGE_DIGITS}}}))?$"
+)
 
 _FORMAT_HINT = "page は '2' のような番号か '1-5' のような範囲で指定してください"
 
@@ -52,15 +63,22 @@ class PageRange:
 def parse_page_arg(value: Any) -> Tuple[Optional[PageRange], Optional[str]]:
     """``page`` 引数を検査する。``(範囲, エラー文)`` を返す。
 
-    省略 (None / 空文字) は 1 ページ目。数字でない・0 以下・逆順・5 ページ超は
-    それぞれ分かる文言で断る (範囲は返さない)。
+    省略 (None / 空文字) は 1 ページ目。数字でない・桁数が :data:`MAX_PAGE_DIGITS`
+    を超える・0 以下・逆順・5 ページ超は、それぞれ分かる文言で断る (範囲は
+    返さない)。**どの入り口からも例外は投げない** — ここで例外が出ると、
+    ページ指定を間違えただけでスペルごと落ちる。
     """
     if value is None:
         return (PageRange(1, 1), None)
     if isinstance(value, bool):
         return (None, f"{_FORMAT_HINT}: {value!r}")
     if isinstance(value, int):
-        raw = str(value)
+        try:
+            raw = str(value)
+        except ValueError:
+            # 4300 桁超の int は文字列化そのものが ValueError になる
+            # (Python 3.11+ の整数変換の桁数制限)。値は文言に載せられない。
+            return (None, _FORMAT_HINT)
     elif isinstance(value, str):
         raw = value.strip()
         if not raw:

@@ -127,6 +127,13 @@ DEFAULT_ROOM_ITEM_DISPLAY_LIMIT = 10
 #: 一字一句同じ = 指紋も変わらない)。
 BUNDLE_CAPPED_KEYS = "capped_keys"
 
+#: 「埋もれた」と記録してよいキーの接頭辞。上限が絞るのは**建物に直接置かれた
+#: アイテム**だけなので、一覧に載りうるのは ``item:N`` の形のキーに限られる
+#: (docs/intent/room_item_display_cap.md 設計 1)。ペルソナや設置物のキーが
+#: 紛れた束を有効と数えると、差分の「消えたと言わない」照合がその族にも働き、
+#: 退室したペルソナの消失報告まで黙って落ちる。
+BUNDLE_CAPPED_KEY_PREFIX = "item:"
+
 #: 埋もれた物の存在を知らせる機構名義の一行 (intent 設計 2 の出力例の写し)。
 #: **束のパッケージには入れない** — 埋もれた数が変わるたびに「見た目は何も
 #: 変わっていないのに差分が出る」ことになるため、様子を文字にするときに添える。
@@ -217,6 +224,12 @@ def bundle_is_valid(bundle: Any) -> bool:
     部屋から消えても、抑止の一覧に名前が載っているだけで「見当たらなくなった
     もの」から外れる。組成側 (_select_displayed_items) は載せた物と外した物を
     排他に作っているので、重なりのある束は記帳の破損 (2026-09-11 修正 1)。
+
+    外した物のキーは ``item:`` で始まるものだけを有効とする
+    (:data:`BUNDLE_CAPPED_KEY_PREFIX`) — 上限が絞るのは建物直下のアイテムだけ
+    なので、ペルソナや設置物のキーが一覧に載った束は組成の欠陥の印。通すと
+    その族にも gone 抑止が働き、退室したペルソナの「見当たらなくなったもの」
+    まで黙って落ちる (2026-09-11 修正 2)。
     """
     if not isinstance(bundle, dict):
         return False
@@ -232,7 +245,10 @@ def bundle_is_valid(bundle: Any) -> bool:
         capped = bundle[BUNDLE_CAPPED_KEYS]
         if not isinstance(capped, list):
             return False
-        if not all(isinstance(key, str) and key for key in capped):
+        if not all(
+            isinstance(key, str) and key.startswith(BUNDLE_CAPPED_KEY_PREFIX)
+            for key in capped
+        ):
             return False
         capped_keys = set(capped)
         if len(capped_keys) != len(capped):

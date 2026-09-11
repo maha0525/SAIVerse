@@ -67,13 +67,20 @@ def _make_item(short_id, name, *, touched_min=0, location_touched_min=None):
     return item
 
 
-def _build_bundle(items, *, item_display_limit=None, building_name="工房"):
-    """本物の組成 (build_room_bundle) に食わせて束を取る。"""
-    building = SimpleNamespace(
-        name=building_name,
-        base_system_instruction="",
-        item_display_limit=item_display_limit,
-    )
+def _build_bundle(items, *, item_display_limit=None, building_name="工房",
+                  building=None):
+    """本物の組成 (build_room_bundle) に食わせて束を取る。
+
+    ``building`` を渡すとその Building オブジェクトをそのまま使う (DB から
+    読み込んだ本物の Building を組成に通すため)。渡さなければ、指定された
+    上限だけを持つ最小の代役を立てる。
+    """
+    if building is None:
+        building = SimpleNamespace(
+            name=building_name,
+            base_system_instruction="",
+            item_display_limit=item_display_limit,
+        )
     persona = SimpleNamespace(
         persona_name="アイフィ",
         current_building_id="b1",
@@ -136,15 +143,23 @@ class SelectionAxisTest(unittest.TestCase):
         self.assertEqual(bundle_capped_keys(bundle), ["item:1", "item:2"])
 
     def test_bundle_order_is_unchanged_by_the_cap(self):
-        """不変条件 6: 束の並びはキーの昇順のまま (選別だけが上限の仕事)。"""
+        """不変条件 6: 束の並びはキーの昇順のまま (選別だけが上限の仕事)。
+
+        選ばれる二つがキー順で**飛び飛び**になり (item:1 と item:3 が残り、
+        間の item:2 が埋もれる)、かつ新しい順とキー順で並びが逆になる材料を
+        使う — 連続した先頭 2 件が選ばれる材料では、束が「選んだ順」で並んで
+        いても「キー順」で並んでいても同じ答えになり、契約を検分できない。
+        """
         items = [
-            _make_item(1, "一番新しい", touched_min=100),
-            _make_item(2, "二番目", touched_min=90),
-            _make_item(3, "一番古い", touched_min=0),
+            _make_item(1, "真ん中に触った物", touched_min=50),
+            _make_item(2, "ずっと触っていない物", touched_min=10),
+            _make_item(3, "さっき触った物", touched_min=90),
         ]
         bundle = _build_bundle(items, item_display_limit=2)
-        # 新しい順に選ばれたのは 1 と 2 だが、並びは昇順のまま。
-        self.assertEqual(_item_keys(bundle), ["item:1", "item:2"])
+        # 新しい順に選ばれたのは item:3 → item:1 の順だが、束の並びはキーの
+        # 昇順のまま。選んだ順で並べる実装だと ["item:3", "item:1"] になる。
+        self.assertEqual(_item_keys(bundle), ["item:1", "item:3"])
+        self.assertEqual(bundle_capped_keys(bundle), ["item:2"])
 
 
 class LimitValueTest(unittest.TestCase):
@@ -245,6 +260,31 @@ class CappedNoticeLineTest(unittest.TestCase):
         content = render_room_diff(bundle, bundle)["content"]
         self.assertIn("前回見たときから変わっていません。", content)
         self.assertIn("ほかに 4 個のアイテムがありますが", content)
+
+    def test_zero_limit_room_says_buried_not_empty(self):
+        """⭐ 上限 0 の部屋は「ほかに N 個」だけを言い、「ありません」と言わない。
+
+        アイテムの節が空になるのは「部屋に何も無い」ときと「全部埋もれた」とき
+        の二つで、意味は正反対。埋もれている回に「アイテムはありません。」を
+        出すと、直後の「ほかに 3 個のアイテムがありますが」と真正面から矛盾した
+        一枚をペルソナに読ませることになる (全文の分岐を外すと赤になる形)。
+        """
+        items = [_make_item(n, f"物{n}", touched_min=n) for n in (1, 2, 3)]
+        bundle = _build_bundle(items, item_display_limit=0)
+        text = render_room_full(bundle)
+        self.assertIn(
+            "（ほかに 3 個のアイテムがありますが、埋もれていて見えません。"
+            "スペル「埋もれたアイテムを見る」でめくって見られます）",
+            text,
+        )
+        self.assertNotIn("アイテムはありません。", text)
+
+    def test_truly_empty_room_still_says_it_is_empty(self):
+        """物が一つも無い部屋では、今までどおり「ありません」と言う。"""
+        bundle = _build_bundle([], item_display_limit=0)
+        text = render_room_full(bundle)
+        self.assertIn("アイテムはありません。", text)
+        self.assertNotIn("埋もれていて見えません", text)
 
     def test_no_line_when_nothing_is_buried(self):
         bundle = _build_bundle(
@@ -421,6 +461,55 @@ class OpenBagContentCapTest(unittest.TestCase):
         self.assertIn("[item:204]", text)
         self.assertIn("[item:213]", text)
 
+    def test_every_level_is_capped_and_each_item_is_drawn_once(self):
+        """⭐ 実描画の経路 (build_room_bundle → render_room_full) で、開いた
+        入れ物の中身が**各階層 10 件 + 内側の一行**になり、どのアイテムも
+        一度だけ出ること。
+
+        入れ子の両方の階層をあふれさせる材料を使う — 片方だけの材料では、
+        階層ごとに上限が掛かっているのか一番外だけなのかを区別できない。
+        重複の検分も同じ一枚で行う: 中身を親の描画と一覧の両方に書く実装に
+        戻ると、同じアイテムが二度出て送る量が黙って倍になる。
+        """
+        import re
+
+        inner = [
+            self._bag_child(200 + n, f"奥{n}", touched_min=n)
+            for n in range(1, 13)
+        ]
+        contents = [self._bag_child(1, "小箱", touched_min=50, children=inner)]
+        contents += [
+            self._bag_child(n, f"中身{n}", touched_min=n - 1)
+            for n in range(2, 13)
+        ]
+        text = self._render_bag(contents)
+
+        refs = re.findall(r"\[item:(\d+)\]", text)
+        self.assertEqual(
+            len(refs), len(set(refs)),
+            f"同じアイテムが二度描かれている: {refs}",
+        )
+
+        # 外側 (道具袋の中身) は 12 件中 10 件 — 小箱と、新しい方の中身 9 件。
+        shown_outer = sorted(
+            int(r) for r in refs if 1 <= int(r) <= 12
+        )
+        self.assertEqual(shown_outer, [1] + list(range(4, 13)))
+        # 内側 (小箱の中身) も 12 件中 10 件。
+        shown_inner = sorted(int(r) for r in refs if 200 < int(r) < 300)
+        self.assertEqual(shown_inner, list(range(203, 213)))
+
+        # 「ほかに 2 個」の一行が、あふれた階層ごとに一本ずつ。
+        self.assertEqual(
+            text.count(
+                "（この入れ物にはほかに 2 個のアイテムがありますが、"
+                "埋もれていて見えません）"
+            ),
+            2,
+        )
+        # 部屋直下は入れ物 1 個なので、部屋の上限の一行は出ない。
+        self.assertNotIn("スペル「埋もれたアイテムを見る」", text)
+
     def test_bag_contents_do_not_count_toward_the_room_limit(self):
         """開いた入れ物の中身は部屋の上限の勘定に入らない (裁定の維持)。"""
         contents = [
@@ -475,6 +564,18 @@ class BundleShapeTest(unittest.TestCase):
     def test_duplicate_capped_keys_make_the_bundle_invalid(self):
         """同じ物を二度「外した」と記帳した束は組成の欠陥の印なので通さない。"""
         self.assertFalse(bundle_is_valid(self._bundle(["item:1", "item:1"])))
+
+    def test_non_item_keys_in_the_capped_list_make_the_bundle_invalid(self):
+        """⭐ 「埋もれた」と言えるのは建物直下のアイテムだけ (item: の名前空間)。
+
+        上限が絞るのはアイテムだけなので、ペルソナや設置物のキーが一覧に載った
+        束は組成の欠陥の印。通すと差分の「消えたと言わない」照合がその族にも
+        働き、退室したペルソナの「見当たらなくなったもの」まで黙って落ちる。
+        """
+        for bad in (["persona:air"], ["fixture:f1"], ["user:u1"],
+                    ["building:image"], ["item:1", "persona:air"]):
+            with self.subTest(bad=bad):
+                self.assertFalse(bundle_is_valid(self._bundle(bad)))
 
     def test_capped_key_that_is_also_displayed_makes_the_bundle_invalid(self):
         """表で見えている物が「埋もれている」一覧にも立つ束は通さない。
@@ -621,13 +722,68 @@ class BuildingSettingPlumbingTest(unittest.TestCase):
             )
         self.assertEqual(ctx.exception.status_code, 400)
 
-    def test_building_loaded_from_db_carries_the_limit(self):
-        """DB の列が、様子の組成が読む in-memory Building まで届く。"""
-        from saiverse.buildings import Building
+    def _load_buildings(self):
+        """起動時と同じ読み込み処理で、DB から in-memory Building を作る。"""
+        from saiverse.saiverse_manager import SAIVerseManager
 
-        b = Building(building_id="b1", name="工房", item_display_limit=0)
-        self.assertEqual(b.item_display_limit, 0)
-        self.assertIsNone(Building(building_id="b2", name="蔵").item_display_limit)
+        fake_self = SimpleNamespace(SessionLocal=self.SessionLocal, city_id=1)
+        loaded = SAIVerseManager._load_and_create_buildings_from_db(fake_self)
+        return {b.building_id: b for b in loaded}
+
+    def _set_limit_in_db(self, building_id, value):
+        from database.models import Building as BuildingModel
+
+        db = self.SessionLocal()
+        try:
+            row = db.query(BuildingModel).filter_by(BUILDINGID=building_id).first()
+            row.ITEM_DISPLAY_LIMIT = value
+            db.commit()
+        finally:
+            db.close()
+
+    def test_building_loaded_from_db_carries_the_limit(self):
+        """⭐ DB の列が、**起動時の読み込み処理を通って**組成の読む値まで届く。
+
+        コンストラクタに直に渡して確かめても、読み込み処理がその列を読み忘れて
+        いる形 (部屋の設定が保存できるのに一つも効かない) は素通りする。0 は
+        真偽値で潰れやすい値なので、0 で確かめる。
+        """
+        from database.models import Building as BuildingModel
+
+        db = self.SessionLocal()
+        try:
+            db.add(BuildingModel(
+                CITYID=1, BUILDINGID="b2", BUILDINGNAME="蔵", CAPACITY=4,
+                SYSTEM_INSTRUCTION="", ENTRY_PROMPT="", AUTO_PROMPT="",
+                DESCRIPTION="", AUTO_INTERVAL_SEC=10,
+            ))
+            db.commit()
+        finally:
+            db.close()
+        self._set_limit_in_db("b1", 0)
+
+        buildings = self._load_buildings()
+        self.assertEqual(buildings["b1"].item_display_limit, 0)
+        self.assertIsNone(buildings["b2"].item_display_limit)  # 未設定は既定のまま
+
+    def test_limit_loaded_from_db_actually_caps_the_room(self):
+        """読み込んだ Building をそのまま組成に通すと、部屋の様子が縮む。
+
+        値が in-memory に載るだけで組成に届いていない形を捕まえるため、読み
+        込んだ本物の Building オブジェクトで束を組む。
+        """
+        self._set_limit_in_db("b1", 0)
+        building = self._load_buildings()["b1"]
+
+        items = [_make_item(n, f"物{n}", touched_min=n) for n in (1, 2, 3)]
+        bundle = _build_bundle(items, building=building)
+        self.assertEqual(
+            [p["key"] for p in bundle["packages"] if p.get("family") == "item"],
+            [],
+        )
+        self.assertEqual(
+            bundle_capped_keys(bundle), ["item:1", "item:2", "item:3"],
+        )
 
 
 class MigrationTest(unittest.TestCase):

@@ -165,8 +165,19 @@ def test_create_document_returns_short_ref_usable_by_read(manager, tmp_path, mon
     persona.is_proxy = False
     persona.persona_name = "エア"
 
+    class _Query:
+        """``_require_building`` の「その部屋は在るか」だけに答える最小の口。
+
+        作成経路は置き場所を書く前に、同じセッションで Building の実在を
+        確かめる (どの部屋にも属さないアイテムを作らないため)。この偽物は
+        「在る」と答える — ここで見たいのは戻り値の参照の形だけなので。
+        """
+        def filter(self, *_a, **_k): return self
+        def first(self): return ("air_city_a_room",)
+
     class _Session:
         def add(self, *_a, **_k): pass
+        def query(self, *_a, **_k): return _Query()
         def commit(self): pass
         def rollback(self): pass
         def close(self): pass

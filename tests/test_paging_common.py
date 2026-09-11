@@ -14,6 +14,7 @@ from __future__ import annotations
 import unittest
 
 from builtin_data.tools._paging_common import (
+    MAX_PAGE_DIGITS,
     MAX_PAGE_SPAN,
     PageRange,
     chunk_by_count,
@@ -77,6 +78,37 @@ class ParsePageArgTest(unittest.TestCase):
     def test_fullwidth_digits_are_refused(self):
         """⭐ ASCII 数字だけを受ける (``\\d`` は全角も通すので使っていない)。"""
         page_range, error = parse_page_arg("２")
+        self.assertIsNone(page_range)
+        self.assertIn("page は '2' のような番号か '1-5' のような範囲", error)
+
+    def test_absurdly_long_digit_string_is_refused_not_raised(self):
+        """⭐ 桁数の異常な指定でも、スペルは落ちずに普通の断り文で返る。
+
+        Python の ``int()`` は 4300 桁を超える数字列で ValueError を投げる。
+        桁数を絞らずに正規表現を通すと、その例外がここから飛び出して、ページを
+        間違えただけのペルソナにはスペルの失敗として返る (返事も案内も無い)。
+        """
+        for raw in ("9" * 5000, "1-" + "9" * 5000):
+            with self.subTest(length=len(raw)):
+                page_range, error = parse_page_arg(raw)
+                self.assertIsNone(page_range)
+                self.assertIn(
+                    "page は '2' のような番号か '1-5' のような範囲", error,
+                )
+
+    def test_digit_cap_boundary(self):
+        """上限ちょうどの桁数は通り、一桁多いと断られる。"""
+        page_range, error = parse_page_arg("9" * MAX_PAGE_DIGITS)
+        self.assertIsNone(error)
+        self.assertEqual(page_range.start, int("9" * MAX_PAGE_DIGITS))
+
+        page_range, error = parse_page_arg("9" * (MAX_PAGE_DIGITS + 1))
+        self.assertIsNone(page_range)
+        self.assertIn("page は '2' のような番号か '1-5' のような範囲", error)
+
+    def test_absurdly_large_int_is_refused_not_raised(self):
+        """数として渡された巨大な値も同じ道で断る (文字列化自体が落ちる範囲)。"""
+        page_range, error = parse_page_arg(10 ** 5000)
         self.assertIsNone(page_range)
         self.assertIn("page は '2' のような番号か '1-5' のような範囲", error)
 

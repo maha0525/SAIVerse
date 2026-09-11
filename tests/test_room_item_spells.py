@@ -326,6 +326,10 @@ class BagCreateSpellTest(unittest.TestCase):
         Base.metadata.create_all(self.engine)
         self.SessionLocal = sessionmaker(bind=self.engine)
         self.addCleanup(self.engine.dispose)
+        # 置き場所に書く Building は DB にも実在させる — 作成は書く前に
+        # 「その部屋が今も在るか」を確かめるので、居ない部屋では断られる
+        # (どの部屋にも属さないアイテムを作らないため)。
+        self._add_building(BUILDING_ID, BUILDING_NAME)
 
         self.events = []
         self.notes = []
@@ -358,6 +362,20 @@ class BagCreateSpellTest(unittest.TestCase):
             self.service.create_bag_item(pid, name, desc, source_context=source_context)
         )
         self.manager.get_all_items_in_building = self.service.get_all_items_in_building
+
+    def _add_building(self, building_id, name):
+        from database.models import Building as BuildingModel
+
+        db = self.SessionLocal()
+        try:
+            db.add(BuildingModel(
+                CITYID=1, BUILDINGID=building_id, BUILDINGNAME=name,
+                CAPACITY=4, SYSTEM_INSTRUCTION="", ENTRY_PROMPT="",
+                AUTO_PROMPT="", DESCRIPTION="", AUTO_INTERVAL_SEC=10,
+            ))
+            db.commit()
+        finally:
+            db.close()
 
     def _cleanup_temp(self):
         try:
@@ -429,6 +447,30 @@ class BagCreateSpellTest(unittest.TestCase):
         self._create(name="空の箱")
         items, _ = self._rows()
         self.assertEqual(items[0].DESCRIPTION, "")
+
+    def test_creation_is_refused_when_the_room_is_not_in_the_db(self):
+        """⭐ 現在地の部屋が DB に無ければ、書く前に断る。
+
+        ペルソナの現在地は部屋が消された後もインメモリに残ることがある。その
+        ID をそのまま置き場所に書くと、部屋の様子にも「埋もれたアイテムを見る」
+        にも出ず、ユーザー画面からも辿れないのに DB には在る、どの部屋にも
+        属さないアイテムが静かに生まれる。
+        """
+        self.manager.personas[PERSONA_ID].current_building_id = "消えた部屋"
+
+        with self.assertRaises(RuntimeError) as ctx:
+            self._create(name="布の道具袋", description="細かい道具をまとめる")
+        message = str(ctx.exception)
+        self.assertIn("消えた部屋", message)
+        self.assertIn("見つからない", message)
+        # 「データベース登録に失敗しました」で包むと、何が起きたのか読めない。
+        self.assertNotIn("データベース登録に失敗しました", message)
+
+        items, locations = self._rows()
+        self.assertEqual(items, [])
+        self.assertEqual(locations, [])
+        self.assertEqual(self.events, [])
+        self.assertEqual(self.notes, [])
 
 
 if __name__ == "__main__":

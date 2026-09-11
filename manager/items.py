@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 from database.models import (
+    Building as BuildingModel,
     Item as ItemModel,
     ItemLocation as ItemLocationModel,
 )
@@ -20,6 +21,15 @@ if TYPE_CHECKING:
     from manager.state import CoreState
 
 LOGGER = logging.getLogger(__name__)
+
+
+class MissingBuildingError(RuntimeError):
+    """置き場所に指定された Building が DB に無い (作成を断る)。
+
+    アイテム作成の各経路は DB 例外を「データベース登録に失敗しました」で包むが、
+    これは登録の失敗ではなく**書く前の拒否**なので、その包みを通さずにそのまま
+    ペルソナとユーザーへ届ける (何が起きたのかが文言で分かるように)。
+    """
 
 
 def item_db_filter(key):
@@ -840,6 +850,8 @@ class ItemService:
 
         db = self.manager.SessionLocal()
         try:
+            # 置き場所を書く前に、その部屋が今も在ることを同じセッションで確かめる。
+            self._require_building(db, building_id, "文書")
             relative_path = str(file_path.relative_to(self.manager.saiverse_home))
             initial_state = {"is_open": True}
             item_row = ItemModel(
@@ -866,6 +878,9 @@ class ItemService:
             )
             db.add(location_row)
             db.commit()
+        except MissingBuildingError:
+            db.rollback()
+            raise  # 書く前の拒否 — 「登録に失敗」で包まずそのまま伝える
         except Exception as exc:
             db.rollback()
             raise RuntimeError(f"データベース登録に失敗しました: {exc}") from exc
@@ -940,6 +955,8 @@ class ItemService:
 
         db = self.manager.SessionLocal()
         try:
+            # 置き場所を書く前に、その部屋が今も在ることを同じセッションで確かめる。
+            self._require_building(db, building_id, "入れ物")
             item_row = ItemModel(
                 ITEM_ID=item_id,
                 NAME=name,
@@ -963,6 +980,9 @@ class ItemService:
             )
             db.add(location_row)
             db.commit()
+        except MissingBuildingError:
+            db.rollback()
+            raise  # 書く前の拒否 — 「登録に失敗」で包まずそのまま伝える
         except Exception as exc:
             db.rollback()
             raise RuntimeError(f"データベース登録に失敗しました: {exc}") from exc
@@ -1038,6 +1058,8 @@ class ItemService:
 
         db = self.manager.SessionLocal()
         try:
+            # 置き場所を書く前に、その部屋が今も在ることを同じセッションで確かめる。
+            self._require_building(db, building_id, "画像")
             item_row = ItemModel(
                 ITEM_ID=item_id,
                 NAME=name,
@@ -1061,6 +1083,9 @@ class ItemService:
             )
             db.add(location_row)
             db.commit()
+        except MissingBuildingError:
+            db.rollback()
+            raise  # 書く前の拒否 — 「登録に失敗」で包まずそのまま伝える
         except Exception as exc:
             db.rollback()
             raise RuntimeError(f"データベース登録に失敗しました: {exc}") from exc
@@ -1444,6 +1469,31 @@ class ItemService:
             result.append(entry)
         result.sort(key=lambda x: (x.get("slot_number") is None, x.get("slot_number") or 0))
         return result
+
+    def _require_building(self, db, building_id: str, what: str) -> None:
+        """置き場所に書こうとしている Building が実在するか、書く前に確かめる。
+
+        ``db`` は**これから書き込むのと同じセッション**を渡す — 別のセッションで
+        先に確かめると、確認と書き込みの間に部屋が消えた形をすり抜ける。
+
+        ペルソナの現在地 (``persona.current_building_id``) は、部屋が消された後
+        (削除・City の作り直し) もインメモリに残ることがある。その値をそのまま
+        ``ItemLocation.OWNER_ID`` に書くと、**どの部屋にも属さないアイテム**が
+        静かに生まれる: 部屋の様子にも「埋もれたアイテムを見る」にも出ず、
+        ユーザー画面の一覧からも辿れないのに DB には在る、という姿になる。
+        書いてから気づける道が無いので、書く前に分かる文言で断る。
+
+        Raises:
+            MissingBuildingError: その Building が DB に無いとき。
+        """
+        exists = db.query(BuildingModel.BUILDINGID).filter(
+            BuildingModel.BUILDINGID == building_id,
+        ).first()
+        if exists is None:
+            raise MissingBuildingError(
+                f"現在地の建物 '{building_id}' が見つからないため、"
+                f"{what}を作成できません。"
+            )
 
     def _assign_slot(self, db, owner_kind: str, owner_id: str) -> int:
         """コンテナ内の最小空きスロット番号を返す（DB参照）。"""
