@@ -579,6 +579,9 @@ class InitializationMixin:
           いるので設定値の判定には使わず、「いま何で動いているか」の表示にだけ
           使う。画像/音声/動画要約モデルは、ペルソナ単位の値を読む箇所が無いので
           対象にしない。
+        - DB からペルソナ行を読み出せなかったときは、グローバル設定の警告をそのまま
+          返し、ペルソナ単位の確認ができていないことを警告一件で伝える。黙って
+          ペルソナ分を落とすと、警告が無い画面を「問題なし」と読ませてしまう。
 
         PersonaMixin ではなくここに置くのは、PersonaMixin を継承する AdminService が
         ``_base_model`` を起動時の写しとして持つため (manager/admin.py の __init__)。
@@ -594,20 +597,35 @@ class InitializationMixin:
             default_model_substitute=self._base_model,
         )
 
-        db = self.SessionLocal()
+        # DB の読み出しだけを独立に扱う。ここで例外を外へ出すと、ルートの外側の
+        # 例外処理がグローバル設定の警告まで一緒に捨て、保存済みの警告が無ければ
+        # 画面は正常に見えてしまう。
         try:
-            rows = (
-                db.query(
-                    AIModel.AIID,
-                    AIModel.DEFAULT_MODEL,
-                    AIModel.LIGHTWEIGHT_MODEL,
-                    AIModel.MEMORY_WEAVE_MODEL,
+            db = self.SessionLocal()
+            try:
+                rows = (
+                    db.query(
+                        AIModel.AIID,
+                        AIModel.DEFAULT_MODEL,
+                        AIModel.LIGHTWEIGHT_MODEL,
+                        AIModel.MEMORY_WEAVE_MODEL,
+                    )
+                    .filter(AIModel.HOME_CITYID == self.city_id)
+                    .all()
                 )
-                .filter(AIModel.HOME_CITYID == self.city_id)
-                .all()
+            finally:
+                db.close()
+        except Exception:
+            LOGGER.warning(
+                "Failed to read persona model settings from the DB; "
+                "persona model settings were not checked.",
+                exc_info=True,
             )
-        finally:
-            db.close()
+            warnings.append({
+                "source": "model_config",
+                "message": "ペルソナごとのモデル設定を読み出せなかったため、ペルソナ単位の確認はできていません。",
+            })
+            return warnings
 
         for persona_id, default_model, lightweight_model, memory_weave_model in rows:
             persona = self.personas.get(persona_id)

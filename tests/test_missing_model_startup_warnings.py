@@ -52,6 +52,9 @@ ROLE_ENV_KEYS = (
 
 PERSONA_RESELECT = "ペルソナ設定から選び直してください。"
 GLOBAL_RESELECT = "グローバル設定の「モデルロール」から選び直してください。"
+#: 画像・音声・動画要約モデルの定義が見つからないときに、グローバル設定の警告へ付く一文
+#: (saiverse/media_summary.py は組み込みの既定モデルへ切り替えて要約を続ける)
+MEDIA_SUBSTITUTE = f"いまは組み込みの既定モデル '{FALLBACK_KEY}' に切り替えて要約を続けようとしています。"
 
 
 def _definition(api_name: str) -> dict:
@@ -310,9 +313,12 @@ def test_global_missing_values_each_warn(world, monkeypatch):
         "グローバル設定のMemory Weaveモデル 'gone-weave' の設定ファイルが見つかりません。"
         + GLOBAL_RESELECT
         + "Memory Weaveモデルを個別に設定していないペルソナは、選び直すまで記憶の整理が止まったままになります。",
-        "グローバル設定の画像要約モデル 'gone-image' の設定ファイルが見つかりません。" + GLOBAL_RESELECT,
-        "グローバル設定の音声要約モデル 'gone-audio' の設定ファイルが見つかりません。" + GLOBAL_RESELECT,
-        "グローバル設定の動画要約モデル 'gone-video' の設定ファイルが見つかりません。" + GLOBAL_RESELECT,
+        "グローバル設定の画像要約モデル 'gone-image' の設定ファイルが見つかりません。"
+        + MEDIA_SUBSTITUTE + GLOBAL_RESELECT,
+        "グローバル設定の音声要約モデル 'gone-audio' の設定ファイルが見つかりません。"
+        + MEDIA_SUBSTITUTE + GLOBAL_RESELECT,
+        "グローバル設定の動画要約モデル 'gone-video' の設定ファイルが見つかりません。"
+        + MEDIA_SUBSTITUTE + GLOBAL_RESELECT,
     ]
 
 
@@ -482,7 +488,85 @@ def test_real_reload_is_reflected(world, monkeypatch, tmp_path):
     ]
 
 
-# --- 画面のルート ---------------------------------------------------------------
+# --- 読み出し・引き当ての失敗 -----------------------------------------------------
+
+UNREAD_PERSONAS = "ペルソナごとのモデル設定を読み出せなかったため、ペルソナ単位の確認はできていません。"
+GLOBAL_LITE_WARNING = (
+    "グローバル設定の軽量モデル 'gone-lite' の設定ファイルが見つかりません。" + GLOBAL_RESELECT
+)
+
+
+class _QueryFailingSession:
+    """query で失敗するセッション。close が呼ばれたかを記録する。"""
+
+    def __init__(self):
+        self.closed = False
+
+    def query(self, *_args, **_kwargs):
+        raise RuntimeError("boom")
+
+    def close(self):
+        self.closed = True
+
+
+def test_session_creation_failure_keeps_global_warnings(world, monkeypatch):
+    """DB のセッションが作れなくても、グローバル設定の警告は消えず、
+    ペルソナ単位の確認ができていないことが一件の警告で伝わる。"""
+    monkeypatch.setenv("SAIVERSE_DEFAULT_LIGHTWEIGHT_MODEL", "gone-lite")
+    world.add_persona(LIGHTWEIGHT_MODEL="gone-persona-lite")
+    svc = world.start()
+    svc.SessionLocal = _raise
+
+    assert _messages(svc.current_model_setting_warnings()) == [
+        GLOBAL_LITE_WARNING,
+        UNREAD_PERSONAS,
+    ]
+
+
+def test_query_failure_keeps_global_warnings_and_closes_the_session(world, monkeypatch):
+    monkeypatch.setenv("SAIVERSE_DEFAULT_LIGHTWEIGHT_MODEL", "gone-lite")
+    world.add_persona(LIGHTWEIGHT_MODEL="gone-persona-lite")
+    svc = world.start()
+    session = _QueryFailingSession()
+    svc.SessionLocal = lambda: session
+
+    assert _messages(svc.current_model_setting_warnings()) == [
+        GLOBAL_LITE_WARNING,
+        UNREAD_PERSONAS,
+    ]
+    assert session.closed
+
+
+def test_route_shows_global_warnings_when_persona_rows_cannot_be_read(world, monkeypatch):
+    """画面のルートまで通しても、DB の失敗で警告が消えて正常に見えることはない。"""
+    monkeypatch.setenv("SAIVERSE_DEFAULT_LIGHTWEIGHT_MODEL", "gone-lite")
+    svc = world.start()
+    svc.SessionLocal = _raise
+
+    assert config_route.get_startup_warnings(manager=svc) == {"warnings": [
+        {"source": "model_config", "message": GLOBAL_LITE_WARNING},
+        {"source": "model_config", "message": UNREAD_PERSONAS},
+    ]}
+
+
+def test_media_summary_substitute_sentence_needs_the_fallback_definition(world, monkeypatch):
+    """要約側は、組み込みの既定モデルの定義も引けないと要約しない
+    (saiverse/media_summary.py の _resolve_client_for_model)。そのときは
+    「代わりに要約しています」と言わない。"""
+    monkeypatch.setenv("SAIVERSE_IMAGE_SUMMARY_MODEL", "gone-image")
+    svc = world.start()
+    # 起動の後で差し替える。起動時は標準モデルの代わりにもこの名前が使われる。
+    monkeypatch.setattr(
+        model_defaults, "BUILTIN_DEFAULT_LITE_MODEL", "test-missing-builtin-fallback",
+    )
+
+    assert _messages(svc.current_model_setting_warnings()) == [
+        "グローバル設定の画像要約モデル 'gone-image' の設定ファイルが見つかりません。"
+        + GLOBAL_RESELECT,
+    ]
+
+
+# --- 画面のルート---------------------------------------------------------------
 
 RECORDED = {"source": "persona_load", "message": "Failed to load persona 'eris_city_a': boom"}
 

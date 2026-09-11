@@ -27,6 +27,32 @@ def _mapping_option(options: Dict[str, Any], name: str) -> Dict[str, Any]:
     return value
 
 
+#: This path's wait when request_kwargs has no timeout (unchanged from before the
+#: option was honoured). The SDK path would use the SDK's own default instead.
+_DEFAULT_STRUCTURED_OUTPUT_TIMEOUT_SECONDS = 120.0
+
+
+def _timeout_option(options: Dict[str, Any]) -> float:
+    """Read request_kwargs.timeout (an SDK option) as this path's wait in seconds.
+
+    The SDK path applies it to the request, so ignoring it here would make the
+    same model config wait differently depending on whether structured output
+    was requested. A value that is not a positive number is refused before
+    sending, like a malformed extra_body, rather than replaced by the default.
+    """
+    value = options.get("timeout")
+    if value is None:
+        return _DEFAULT_STRUCTURED_OUTPUT_TIMEOUT_SECONDS
+    # bool is a subclass of int, but true/false in a model JSON is not a wait.
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise TypeError(
+            f"request_kwargs.timeout must be a number of seconds, got {type(value).__name__}"
+        )
+    if not value > 0:  # also refuses NaN
+        raise ValueError(f"request_kwargs.timeout must be greater than 0, got {value!r}")
+    return float(value)
+
+
 class NvidiaNIMClient(OpenAIClient):
     """
     Client for NVIDIA NIM APIs.
@@ -124,6 +150,7 @@ class NvidiaNIMClient(OpenAIClient):
         )
         extra_body = _mapping_option(options, "extra_body")
         extra_query = _mapping_option(options, "extra_query")
+        timeout = _timeout_option(options)
 
         # Structured output only works if these reach the API as written, so
         # they go last and no configuration replaces them. (On the SDK path
@@ -170,9 +197,8 @@ class NvidiaNIMClient(OpenAIClient):
         # Retry logic for transient errors (timeouts, connection errors, 5xx)
         for attempt in range(max_retries + 1):
             try:
-                # The wait is fixed for this path; request_kwargs.timeout (an SDK
-                # option, see split_sdk_request_options) is not applied here.
-                with httpx.Client(timeout=120.0) as client:
+                # request_kwargs.timeout applies here as on the SDK path (_timeout_option).
+                with httpx.Client(timeout=timeout) as client:
                     response = client.post(url, **post_kwargs)
                     response.raise_for_status()
                     resp_json = response.json()

@@ -243,8 +243,48 @@ class TestNimStructuredOutputRequest(unittest.TestCase):
         self.assertNotIn("timeout", comparable(raw))
         self.assertEqual(dict(raw.url.params), {"probe": "1"})
         self.assertEqual(raw.headers.get("x-probe"), "a")
-        # This path keeps its own fixed wait; request_kwargs.timeout is not applied here.
-        self.assertEqual(raw.extensions["timeout"]["read"], 120.0)
+        # request_kwargs.timeout is the wait on both paths.
+        self.assertEqual(raw.extensions["timeout"], sdk.extensions["timeout"])
+        self.assertEqual(raw.extensions["timeout"]["read"], 30.0)
+
+    def test_structured_output_without_timeout_keeps_waiting_120_seconds(self):
+        """request_kwargs に timeout が無い設定 (null を含む) では、この経路は今までどおり 120 秒待つ。"""
+        for name, request_kwargs in (
+            ("no-request-kwargs", None),
+            ("no-timeout", {"top_p": 0.9}),
+            ("null-timeout", {"timeout": None}),
+        ):
+            with self.subTest(name):
+                model_json = {"model": "vendor/timeout-probe", "provider_ref": "nvidia_nim"}
+                if request_kwargs is not None:
+                    model_json["request_kwargs"] = request_kwargs
+                request = self._send_structured(self._client("nim-timeout-probe", model_json))
+                self.assertEqual(request.extensions["timeout"]["read"], 120.0)
+
+    def test_timeout_that_is_not_a_positive_number_fails_before_sending(self):
+        """数値でない (または 0 以下の) timeout では、この経路は送らずに失敗する。
+
+        extra_body の形の検査と同じ扱い。既定の 120 秒に黙って置き換えると、呼び方に
+        よって別の待ち時間で動く形に戻る。
+        """
+        for value, expected in (
+            ("30", TypeError),
+            (True, TypeError),
+            ({"read": 30}, TypeError),
+            (0, ValueError),
+            (-1, ValueError),
+        ):
+            with self.subTest(timeout=value):
+                client = self._client("nim-timeout-probe", {
+                    "model": "vendor/timeout-probe",
+                    "provider_ref": "nvidia_nim",
+                    "request_kwargs": {"timeout": value},
+                })
+                with patch("httpx.Client") as http_client:
+                    with self.assertRaises(RuntimeError) as raised:
+                        client.generate(list(_MESSAGES), tools=[], response_schema=_SCHEMA)
+                http_client.assert_not_called()
+                self.assertIsInstance(raised.exception.__context__, expected)
 
     def test_temperature_argument_still_outranks_request_kwargs(self):
         model_json = {

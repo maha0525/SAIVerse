@@ -903,8 +903,11 @@ def get_startup_warnings(manager=Depends(get_manager)):
     about a configured model whose definition cannot be found are not recorded
     at startup; they are computed from the current settings on every request, so
     a setting re-selected, or a model definition added or removed, after startup
-    is reflected without a restart. If that computation fails, only the recorded
-    warnings are returned so the other warnings still reach the screen.
+    is reflected without a restart. If the persona rows cannot be read from the
+    DB, the computation still returns the global-setting warnings plus one warning
+    saying the per-persona check was not done. If the computation fails in any
+    other way, only the recorded warnings are returned so they still reach the
+    screen.
     """
     # 保存済みのリストは写してから足す — そのまま extend すると、画面を開くたびに
     # 同じ警告が保存済みの側へ溜まっていく。

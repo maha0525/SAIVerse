@@ -1473,6 +1473,13 @@ class SAIVerseManager(
             model,
         )
         self._base_model = model
+        # AdminService は起動時に _base_model を写して持ち、ワールドエディタから作る
+        # ペルソナの標準モデルに使う (manager/admin.py の __init__、manager/persona.py の
+        # create_ai)。写しも揃えないと、標準モデルを変えた後に作ったペルソナだけが
+        # 再起動まで古いモデルで作られる。
+        admin = getattr(self, "admin", None)
+        if admin is not None:
+            admin._base_model = model
 
         db = self.SessionLocal()
         try:

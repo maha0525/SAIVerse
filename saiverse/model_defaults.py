@@ -109,6 +109,37 @@ _ROLE_LOOKUPS: Dict[str, Callable[[str], bool]] = {
     "video_summary_model": _defined_by_find_model_config,
 }
 
+#: 定義が見つからないとき、組み込みの既定モデルへ切り替えて続ける役割
+#: (saiverse/media_summary.py の _resolve_client_for_model)。
+_MEDIA_SUMMARY_ROLES = frozenset({
+    "image_summary_model",
+    "audio_summary_model",
+    "video_summary_model",
+})
+
+
+def _media_summary_fallback_is_defined() -> bool:
+    """要約の代わりに使う組み込みの既定モデルの定義が、要約側と同じ引き方で引けるか。"""
+    try:
+        return _defined_by_find_model_config(BUILTIN_DEFAULT_LITE_MODEL)
+    except Exception:
+        LOGGER.warning(
+            "Model config check failed for the media summary fallback %r; "
+            "omitting the substitute sentence.",
+            BUILTIN_DEFAULT_LITE_MODEL, exc_info=True,
+        )
+        return False
+
+
+def role_model_is_defined(role: str, value: str) -> bool:
+    """役割の値に定義があるかを、その値を実際に使う側と同じ引き方で返す。
+
+    モデル設定の警告 (missing_model_warnings) と、グローバル設定の保存で標準モデルを
+    動いているペルソナへ反映するか (api/routes/admin.py の update_env_vars) が
+    同じ判定を使うためにある。判定が割れると「反映しなかったのに警告も出ない」になる。
+    """
+    return _ROLE_LOOKUPS[role](value)
+
 
 def missing_model_warnings(
     entries: Iterable[Tuple[str, Optional[str]]],
@@ -161,6 +192,19 @@ def missing_model_warnings(
             and default_model_substitute != value
         ):
             message += f"いまはモデル '{default_model_substitute}' で代わりに動いています。"
+        # 画像・音声・動画要約は、グローバル設定の値の定義が引けないと組み込みの
+        # 既定モデルへ切り替えて要約を続ける (saiverse/media_summary.py の
+        # _resolve_client_for_model)。その既定モデルの定義も引けないときは要約
+        # しないので、この一文は付けない。
+        if (
+            persona_id is None
+            and role in _MEDIA_SUMMARY_ROLES
+            and _media_summary_fallback_is_defined()
+        ):
+            message += (
+                f"いまは組み込みの既定モデル '{BUILTIN_DEFAULT_LITE_MODEL}' に"
+                "切り替えて要約を続けようとしています。"
+            )
         message += reselect
         # 帰結を書くのは、コードで確かめられた役割だけ。Memory Weave は代わりの
         # モデルが無く、resolve_memory_weave_config が LookupError を出し続ける。
