@@ -1,6 +1,8 @@
 # NVIDIA NIM の structured output が モデルの `request_kwargs` を落とす
 
-**状態**: 未解決 (2026-08-04 起票、OpenRouter アプリ帰属ヘッダーの Codex レビュー二巡目で発見)。帰属ヘッダーとは独立した既存の欠陥。
+**状態**: 解決済み (2026-09-11)。2026-08-04 起票、OpenRouter アプリ帰属ヘッダーの Codex レビュー二巡目で発見した、帰属ヘッダーとは独立した既存の欠陥。
+
+**解決の中身 (2026-09-11)**: 組み込みモデルの棚卸しで `nim-deepseek-v4-flash-0731` (thinking を `extra_body` で指定) をチュートリアルの NIM 設定の軽量モデルに選んだところ、Codex レビューがこの欠陥を high で指摘したので直した。生 HTTP 経路も SDK 経路と同じ `build_request_kwargs` で組み立て、`openai_runtime.split_sdk_request_options` で SDK と同じようにボディと SDK 専用の指定に分ける。`extra_body` はボディの最上位へ、`extra_headers` はヘッダーへ、`extra_query` は URL へ写す。構造化出力が持ち主のキー (`model` / `messages` / `n` / `tools` / `tool_choice`) だけは、設定から上書きできない (上書きしようとした設定はキー名を WARNING に出す)。検出の穴だった「factory を通していない」は、同梱の NIM 定義を factory 経由で組み立てて送信内容を読むテスト (`tests/test_nim_structured_output_request.py`) で塞いだ。隔離環境から SAIVerse のクライアントで実 API へ構造化出力を送り、thinking の指定つきで受け付けられることも確かめた。なお下の本文の「`extra_headers` は捨てられる」は起票後に先に直っていて、今回の時点ではヘッダーには写っていた。
 
 関連: [`docs/intent/model_provider_management.md`](../intent/model_provider_management.md) §9「モデル固有の API 契約をモデル定義からプロバイダ境界まで保つ」
 
