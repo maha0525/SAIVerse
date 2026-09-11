@@ -115,6 +115,8 @@ test_fixtures\start_test_server.bat
 - `SAIVERSE_USER_DATA_DIR=test_data/user_data`
 - Discord ゲートウェイの 4 つの変数（次の「外部連携の扱い」）
 
+⚠️ **`SAIVERSE_HOME` を倒すだけでは隔離になりません。** この PC の環境に `SAIVERSE_LOG_PATH` が設定されていると、一部の組み込みツールが**読み込まれた瞬間に**その先 (本番の `~/.saiverse/log.txt`) へログの口を開いて書き込みます (2026-09-11 実害 — [issue](issues/import_time_log_handlers_escape_isolation.md))。隔離環境を組むときは `SAIVERSE_LOG_PATH` も隔離先へ倒すか、空にしてください。
+
 ### 外部連携の扱い
 
 #### Discord ゲートウェイは起動スクリプトが必ず無効にする
