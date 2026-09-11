@@ -1,6 +1,6 @@
 # Unity Gateway の削除 (認証なしで全ネットワークインターフェースに開いていた)
 
-**状態**: 実装中 (2026-09-11 起票)
+**状態**: 検証待ち (2026-09-11 起票。develop 向けの PR で、まはーの確認を待っている)
 **起票**: 2026-09-11 (まはーの依頼で行った Unity Gateway の調査の中で起票)
 **関連**: `unity_gateway/` (削除)、`main.py`、`sea/runtime_emitters.py`、`sea/runtime.py` の `_build_realtime_context`、`builtin_data/tools/control_body.py` (削除)、[Godot で 3D アバターを動かす計画の設計文書](../intent/virtual_embodiment_godot.md)、[旧設計書](../old/unity-gateway.md)、[状態を変える API に「どこから来た操作か」の確認が無い件](api_state_changing_routes_have_no_origin_check.md)
 
