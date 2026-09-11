@@ -1,6 +1,6 @@
 # Issue: MCP 再接続時の anyio キャンセルスコープ違反による無限スピン → GIL 飢餓で全体劣化
 
-**ステータス**: 🟡 進行中 (根本原因特定済み・修正未着手)
+**ステータス**: 🟡 未解決 (修正方針 A は 2026-05-24 にコミット 1786e6d0 で実装済みで、回帰テスト `tests/test_mcp_connection_owner_task.py` も同じコミットで入っている。B は voice-tts の upstream に PR #5 として 2026-05-24 に出したまま、未マージ)
 **優先度**: high
 **作成日**: 2026-05-24
 **関連**: `tools/mcp_client.py`、`expansion_data/saiverse-voice-tts/tools/speak/playback_worker.py`、anyio
@@ -103,3 +103,4 @@ eris_city_a の発話の音声合成が「同じ発言を無限に合成し続�
 - 2026-05-24: **修正 A 実装完了**。`MCPConnection` を所有タスク方式に変更 (`tools/mcp_client.py`): `connect()` は専用の長命タスク `_run_connection()` を起動して ready を待つだけにし、transport/session の `async with` をその単一タスク内で開閉。`disconnect()` は `_exit_stack.aclose()` を自前で呼ばず、shutdown イベントを set して所有タスクの自己巻き戻しを待つ (15s タイムアウト→cancel フォールバック付き)。stdio/sse/streamable_http の3経路すべて統一。ruff・ast parse クリーン、既存 MCP テスト 21件パス。
   - **検証の限界**: 既存テストはマネージャ層をモックしており、所有タスク方式の anyio 実挙動 (クロスタスク回避) そのものは未カバー。真の検証には実 MCP サーバ＋切断誘発が必要 (= 本 issue の稀シナリオ自体)。所有タスク方式は「開いたタスクと同じタスクで閉じる」を構造的に保証するため、原理的にクロスタスク違反は起きない設計。
   - **残**: B (TTS 別プロセス化、多重防御) は未着手。A の anyio 挙動を直接検証する回帰テスト (偽 transport で cross-task 条件を再現) も未作成。
+- 2026-09-11: 冒頭のステータス行が「修正未着手」のまま残っていたので、上のログ (A の実装完了) と、B を実装した voice-tts の upstream の PR #5 (2026-05-24 作成、未マージ) に合わせて書き直した。上のログの「残」にある A の回帰テストは、A と同じコミット 1786e6d0 で `tests/test_mcp_connection_owner_task.py` として入っていた。
