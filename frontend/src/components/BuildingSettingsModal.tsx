@@ -36,6 +36,9 @@ export default function BuildingSettingsModal({ isOpen, onClose, buildingId, onS
     const [description, setDescription] = useState('');
     const [capacity, setCapacity] = useState(10);
     const [autoInterval, setAutoInterval] = useState(10);
+    // 部屋の様子に出すアイテムの個数の上限。null = 設定なし = 既定の 10 個。
+    // 0 も有効な値 (アイテムを様子に出さない部屋) — docs/intent/room_item_display_cap.md 設計 4。
+    const [itemDisplayLimit, setItemDisplayLimit] = useState<number | null>(null);
     const [systemInstruction, setSystemInstruction] = useState('');
     const [imagePath, setImagePath] = useState('');
     const [extraPromptFiles, setExtraPromptFiles] = useState<string[]>([]);
@@ -100,6 +103,8 @@ export default function BuildingSettingsModal({ isOpen, onClose, buildingId, onS
                     setDescription(building.DESCRIPTION || '');
                     setCapacity(building.CAPACITY || 10);
                     setAutoInterval(building.AUTO_INTERVAL_SEC || 10);
+                    // 0 も有効な値なので `||` で潰さない (WorldEditor 側と同じ扱い)
+                    setItemDisplayLimit(building.ITEM_DISPLAY_LIMIT ?? null);
                     setSystemInstruction(building.SYSTEM_INSTRUCTION || '');
                     setImagePath(building.IMAGE_PATH || '');
                     setCityId(building.CITYID || 1);
@@ -192,6 +197,10 @@ export default function BuildingSettingsModal({ isOpen, onClose, buildingId, onS
                     description,
                     capacity,
                     auto_interval: autoInterval,
+                    // null を明示的に送ると「設定なし = 既定の 10 個」に戻る。
+                    // このモーダルは値を読み込んで表示しているので、空欄での保存は
+                    // ユーザーが見て納得した上での解除になる。
+                    item_display_limit: itemDisplayLimit,
                     system_instruction: systemInstruction,
                     image_path: imagePath,
                     extra_prompt_files: extraPromptFiles,
@@ -305,6 +314,22 @@ export default function BuildingSettingsModal({ isOpen, onClose, buildingId, onS
                                     min={1}
                                 />
                             </div>
+                        </div>
+
+                        <div className={styles.field}>
+                            <label>部屋の様子に表示するアイテム数（空欄で既定の 10 個）</label>
+                            <input
+                                type="number"
+                                min={0}
+                                placeholder="10"
+                                value={itemDisplayLimit ?? ''}
+                                onChange={e => {
+                                    const raw = e.target.value;
+                                    const parsed = parseInt(raw, 10);
+                                    setItemDisplayLimit(raw === '' || Number.isNaN(parsed) ? null : parsed);
+                                }}
+                            />
+                            <small className={styles.hint}>この数を超えたアイテムは、最近触られていないものから部屋の様子に出なくなります（物は消えません）。0 にするとアイテムを出しません。</small>
                         </div>
 
                         <div className={styles.field}>

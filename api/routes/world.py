@@ -71,10 +71,11 @@ class BuildingUpdate(BaseModel):
     # (docs/intent/room_item_display_cap.md 設計 4)。
     # null を**明示的に送る**と上書きを外して既定 (10 個) に戻す。0 は有効
     # (アイテムを様子に出さない部屋)。負数は 400 で拒否する。
-    # **フィールドを送らないクライアントは値に触らない** — Building 設定モーダル
-    # (frontend/src/components/BuildingSettingsModal.tsx) はこの同じ経路へ
-    # このフィールド抜きで PUT するので、「未送信 = null = 解除」にすると
-    # そちらで保存するたびにワールドエディタの設定が黙って消える。
+    # **フィールドを送らないクライアントは値に触らない** — ワールドエディタと
+    # Building 設定モーダル (BuildingSettingsModal.tsx) は 2026-09-12 から両方
+    # このフィールドを送るが、この欄を知らないクライアントが同じ経路へ PUT
+    # したとき「未送信 = null = 解除」にすると設定が黙って消えるので、
+    # 未送信と null 明示の区別 (model_fields_set) は残す。
     item_display_limit: Optional[int] = None
 
 
