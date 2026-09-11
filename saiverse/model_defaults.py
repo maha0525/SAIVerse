@@ -3,9 +3,165 @@
 When rotating to a new model version (e.g. Gemini preview expiry),
 update BUILTIN_DEFAULT_LITE_MODEL here. All fallback references
 across the codebase import from this single file.
+
+This file also owns the model role table (role -> global env var and display
+label) and the startup check that reports configured model names whose
+definition cannot be found (``missing_model_warnings``).
 """
+import logging
+from typing import Callable, Dict, Iterable, List, Optional, Tuple
+
+LOGGER = logging.getLogger(__name__)
 
 # The single source of truth for the built-in fallback lite model.
 # Used as the default for: DEFAULT_MODEL, LIGHTWEIGHT_MODEL, MEMORY_WEAVE_MODEL,
 # ROUTER_MODEL, IMAGE_SUMMARY_MODEL, AGENTIC_MODEL, emotion module, etc.
 BUILTIN_DEFAULT_LITE_MODEL = "gemini-3.1-flash-lite-preview"
+
+
+# --- Model roles -------------------------------------------------------------
+
+#: 役割 → 全体設定の環境変数名。チュートリアルのプリセット適用
+#: (api/routes/tutorial.py) と、起動時の検査 (missing_model_warnings) が共有する。
+MODEL_ROLES: Dict[str, str] = {
+    "default_model": "SAIVERSE_DEFAULT_MODEL",
+    "lightweight_model": "SAIVERSE_DEFAULT_LIGHTWEIGHT_MODEL",
+    "memory_weave_model": "MEMORY_WEAVE_MODEL",
+    "image_summary_model": "SAIVERSE_IMAGE_SUMMARY_MODEL",
+    "audio_summary_model": "SAIVERSE_AUDIO_SUMMARY_MODEL",
+    "video_summary_model": "SAIVERSE_VIDEO_SUMMARY_MODEL",
+}
+
+#: 役割の表示ラベルと説明。全体設定のモデルロール画面に出る文言で、ラベルは
+#: ペルソナ設定画面 (frontend/src/components/SettingsModal.tsx) の欄名とも揃っている。
+MODEL_ROLE_DESCRIPTIONS: Dict[str, Dict[str, str]] = {
+    "default_model": {
+        "label": "標準モデル",
+        "description": "会話や複雑な推論に使用するメインモデル",
+    },
+    "lightweight_model": {
+        "label": "軽量モデル",
+        "description": "ルーティングやツール判断に使用する高速・安価なモデル",
+    },
+    "memory_weave_model": {
+        "label": "Memory Weaveモデル",
+        "description": "クロニクル・メモペディアの生成に使用するモデル",
+    },
+    "image_summary_model": {
+        "label": "画像要約モデル",
+        "description": "画像・ドキュメント要約生成用モデル（Vision対応モデル推奨）",
+    },
+    "audio_summary_model": {
+        "label": "音声要約モデル",
+        "description": "ユーザー添付音声の要約生成用モデル（Gemini系のみ対応）",
+    },
+    "video_summary_model": {
+        "label": "動画要約モデル",
+        "description": "ユーザー添付動画の要約生成用モデル（Gemini系のみ対応）",
+    },
+}
+
+
+def _defined_by_config_key(value: str) -> bool:
+    """設定キー (定義ファイル名) の完全一致だけで引く。"""
+    from saiverse.model_configs import get_model_provider
+
+    try:
+        get_model_provider(value)
+    except ValueError:
+        return False
+    return True
+
+
+def _defined_by_find_model_config(value: str) -> bool:
+    """find_model_config (設定キー / API モデル名 / ファイル名 / 接尾辞) で引く。"""
+    from saiverse.model_configs import find_model_config
+
+    _config_key, config = find_model_config(value)
+    return bool(config)
+
+
+#: 標準モデル以外の役割ごとの「定義があるか」の引き方。その値を実際に使う側と
+#: 同じ引き方にする — 違う引き方だと「動いているのに警告が出る」「動いていない
+#: のに出ない」になる。
+#:
+#: - lightweight_model: 設定キーの完全一致。persona/core.py の
+#:   lightweight_llm_client と sea/runtime.py の select_llm_client が
+#:   get_context_length / get_model_provider で引く。
+#: - memory_weave_model: find_model_config。saiverse/memory_weave_llm.py の
+#:   resolve_memory_weave_config が引く。
+#: - image/audio/video_summary_model: find_model_config。全体設定の値を
+#:   saiverse/media_summary.py が引く。ペルソナ単位の VISION_MODEL / AUDIO_MODEL /
+#:   VIDEO_MODEL は読む箇所が無い (保存されるだけ) ので、ペルソナ単位の検査
+#:   (manager/persona.py) には入れていない。
+_ROLE_LOOKUPS: Dict[str, Callable[[str], bool]] = {
+    "lightweight_model": _defined_by_config_key,
+    "memory_weave_model": _defined_by_find_model_config,
+    "image_summary_model": _defined_by_find_model_config,
+    "audio_summary_model": _defined_by_find_model_config,
+    "video_summary_model": _defined_by_find_model_config,
+}
+
+
+def missing_model_warnings(
+    entries: Iterable[Tuple[str, Optional[str]]],
+    *,
+    persona_id: Optional[str] = None,
+) -> List[Dict[str, str]]:
+    """設定されたモデル名のうち、定義が見つからないものを起動時警告にして返す。
+
+    Args:
+        entries: ``(役割, 設定値)`` の並び。役割は ``_ROLE_LOOKUPS`` のキー。
+            設定値が None / 空文字の役割は未設定として検査しない。
+        persona_id: 渡すとペルソナ単位の文面、省略するとグローバル設定単位の文面になる。
+
+    標準モデル (default_model) は対象外 — フォールバックを伴う専用の検査が
+    manager/persona.py と manager/initialization.py にある。一つの役割の検査が
+    例外を出しても、ログに残して残りの役割の検査を続ける。
+    """
+    warnings: List[Dict[str, str]] = []
+    for role, value in entries:
+        if not value:
+            continue
+        try:
+            if _ROLE_LOOKUPS[role](value):
+                continue
+        except Exception:
+            LOGGER.warning(
+                "Model config check failed (role=%s value=%r persona=%s); skipping.",
+                role, value, persona_id, exc_info=True,
+            )
+            continue
+
+        # 画面の名前に合わせる: ペルソナは「ペルソナ設定」、全体の値は
+        # 「グローバル設定」の「モデルロール」タブで選ぶ。
+        label = MODEL_ROLE_DESCRIPTIONS[role]["label"]
+        if persona_id is not None:
+            message = (
+                f"ペルソナ '{persona_id}' の{label} '{value}' の設定ファイルが見つかりません。"
+                "ペルソナ設定から選び直してください。"
+            )
+        else:
+            message = (
+                f"グローバル設定の{label} '{value}' の設定ファイルが見つかりません。"
+                "グローバル設定の「モデルロール」から選び直してください。"
+            )
+        # 帰結を書くのは、コードで確かめられた役割だけ。Memory Weave は代わりの
+        # モデルが無く、resolve_memory_weave_config が LookupError を出し続ける。
+        # グローバル設定の値が効くのは、自分の Memory Weave モデルを持たない
+        # ペルソナだけ (saiverse/memory_weave_llm.py の解決順)。
+        if role == "memory_weave_model":
+            if persona_id is not None:
+                message += "選び直すまで、このペルソナの記憶の整理は止まったままになります。"
+            else:
+                message += (
+                    "Memory Weaveモデルを個別に設定していないペルソナは、"
+                    "選び直すまで記憶の整理が止まったままになります。"
+                )
+
+        LOGGER.warning(
+            "Model config not found (role=%s value=%r persona=%s).",
+            role, value, persona_id,
+        )
+        warnings.append({"source": "model_config", "message": message})
+    return warnings

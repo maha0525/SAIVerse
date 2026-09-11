@@ -159,7 +159,7 @@ class TestModelSupportsImages(unittest.TestCase):
         self.assertTrue(model_configs.model_supports_images("claude-sonnet-4-5"))
 
     def test_non_vision_model(self):
-        self.assertFalse(model_configs.model_supports_images("nim-deepseek-v4-pro"))
+        self.assertFalse(model_configs.model_supports_images("nim-deepseek-v4-pro-0813"))
 
 
 class TestAugust2026ModelCatalog(unittest.TestCase):
@@ -175,7 +175,7 @@ class TestAugust2026ModelCatalog(unittest.TestCase):
                 "meta/muse-spark-1.2", 1_048_576, 1.25, 4.25,
             ),
             "openrouter-qwen3.8-max": (
-                "qwen/qwen3.8-max", 1_000_000, 2, 6,
+                "qwen/qwen3.8-max-0902", 1_000_000, 2, 6,
             ),
             "openrouter-deepseek-v4-flash-latest": (
                 "~deepseek/deepseek-v4-flash-latest", 1_048_576, 0.079996, 0.252,
@@ -221,9 +221,9 @@ class TestFindModelConfig(unittest.TestCase):
         self.assertEqual(config.get("provider"), "anthropic")
 
     def test_find_by_api_model_name(self):
-        key, config = model_configs.find_model_config("mistralai/mistral-large-3-675b-instruct-2512")
+        key, config = model_configs.find_model_config("deepseek-ai/deepseek-v4-flash-0731")
         self.assertTrue(key)
-        self.assertEqual(config.get("model"), "mistralai/mistral-large-3-675b-instruct-2512")
+        self.assertEqual(config.get("model"), "deepseek-ai/deepseek-v4-flash-0731")
 
     def test_not_found(self):
         key, config = model_configs.find_model_config("nonexistent-model-xyz-abc")
@@ -246,7 +246,7 @@ class TestSupportsStructuredOutput(unittest.TestCase):
         self.assertTrue(model_configs.supports_structured_output("claude-sonnet-4-5"))
 
     def test_explicit_false(self):
-        self.assertFalse(model_configs.supports_structured_output("nim-step-3.5-flash"))
+        self.assertFalse(model_configs.supports_structured_output("openrouter-nemotron-3-ultra-550b-a55b-free"))
 
 
 class TestRequiredEnvVars(unittest.TestCase):

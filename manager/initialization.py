@@ -558,6 +558,22 @@ class InitializationMixin:
             self.context_length = get_context_length(base_model)
             self.provider = get_model_provider(base_model)
         self._base_model = base_model
+        # 標準モデル以外の役割の全体設定も、定義が見つからないモデルを指していたら
+        # 起動時に知らせる。検査の失敗で起動を止めない。
+        try:
+            from saiverse.model_defaults import MODEL_ROLES, missing_model_warnings
+
+            self.startup_warnings.extend(missing_model_warnings(
+                (role, os.getenv(env_key))
+                for role, env_key in MODEL_ROLES.items()
+                # 標準モデルは上のフォールバック付きの検査が受け持つ
+                if role != "default_model"
+            ))
+        except Exception:
+            LOGGER.warning(
+                "Global model setting check failed; continuing startup.",
+                exc_info=True,
+            )
         self.model_parameter_overrides: Dict[str, Any] = {}
         # Metabolism は常時 ON (2026-07-30 OFF トグル撤去)。水位は model 定義
         # 一本で解決する (sea/session_lifecycle.py get_metabolism_watermarks)。

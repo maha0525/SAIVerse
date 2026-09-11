@@ -13,7 +13,7 @@ Nvidia NIM (NVIDIA Inference Microservices) は、NVIDIAが提供するAI推論�
 ## 2. NIM APIキーの生成
 
 1. [NVIDIA NIM](https://build.nvidia.com/) にアクセス
-2. 利用したいモデルを選択（例: Mistral Large）
+2. 利用したいモデルを選択（例: Kimi K3）
 3. 「Get API Key」をクリック
 4. APIキーを生成してコピー
 
@@ -25,18 +25,15 @@ APIキーを取得すれば、全モデルを無料で利用できます。
 
 ## 4. 利用可能なモデル
 
-SAIVerseに設定済みのNIMモデル：
+SAIVerseに設定済みのNIMモデル（2026年9月時点）：
 
-- **Mistral Large 3**: 高性能オープンウェイトモデル
-- **DeepSeek V3.2**: 高性能・低コストモデル
-- **Qwen 3 235B-A22B**: Alibaba Cloudの大規模MoEモデル
-- **Qwen 3 Next 80B-A3B**: Qwen 3の軽量版（instruct / thinking）
-- **Qwen 3 Coder 480B-A35B**: コーディング特化モデル
-- **Kimi K2.5**: Moonshotの高性能モデル（画像対応）
-- **MiniMax M2.1**: MiniMaxの大規模モデル
-- **Z.ai GLM-4.7**: 智谱AIのフラッグシップモデル
-- **Step 3.5 Flash**: StepFunの高速モデル
-- **GPT-OSS 120B**: OpenAIのオープンウェイトモデル
+- **Kimi K3**: Moonshot AIの大規模マルチモーダル推論モデル（画像対応、チュートリアルの標準モデル）
+- **Kimi K2.6**: Moonshot AIの前世代モデル（画像対応）
+- **DeepSeek V4 Pro 0813**: DeepSeek V4 Proの正式版
+- **DeepSeek V4 Flash 0731**: DeepSeek V4 Flashの改訂版（高速、チュートリアルの軽量モデル）
+- **Nemotron 3 Ultra**: NVIDIAの大規模推論モデル
+
+NIMのモデルは、NVIDIAが定めた提供終了日を過ぎると呼べなくなります。選んでいたモデルが一覧から消えた場合は、別のモデルを選び直してください。
 
 ## 5. 特徴
 

@@ -41,8 +41,10 @@ OpenRouterは各プロバイダーの料金に少額のマージンを追加し�
 | GPT-OSS 20B | $0.03/1M | $0.14/1M |
 
 ### 無料モデル
-以下のモデルは無料で利用可能です（レート制限あり）：
-- Step 3.5 Flash / Trinity Large Preview / Qwen 3 Next 80B / Qwen 3 Coder 480B / GPT-OSS 120B・20B
+以下のモデルは無料で利用可能です（レート制限あり、2026年9月時点）：
+- Nemotron 3 Ultra / Nex N2.5 Pro（画像対応）
+
+無料版は提供元の都合で終了することがあります。選んでいた無料モデルが一覧から消えた場合は、別のモデルを選び直してください。
 
 > **注意**: 最新の料金は [OpenRouter Models](https://openrouter.ai/models) で確認してください。
 
@@ -63,9 +65,8 @@ OpenRouterでは200以上のモデルが利用可能です。SAIVerseに設定�
 - Qwen 3 Next 80B-A3B / GPT-OSS 120B・20B
 
 **無料モデル**:
-- Step 3.5 Flash / Trinity Large Preview
-- Qwen 3 Next 80B-A3B / Qwen 3 Coder 480B-A35B
-- GPT-OSS 120B・20B
+- Nemotron 3 Ultra（チュートリアルの無料設定の標準モデル・軽量モデル・Memory Weaveモデル）
+- Nex N2.5 Pro（画像対応、チュートリアルの無料設定の画像要約モデル）
 
 ## 7. アプリ名の申告について
 

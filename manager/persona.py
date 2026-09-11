@@ -200,6 +200,25 @@ class PersonaMixin:
         persona_audio_model = db_ai.AUDIO_MODEL
         persona_video_model = db_ai.VIDEO_MODEL
         persona_memory_weave_model = getattr(db_ai, "MEMORY_WEAVE_MODEL", None)
+        # 標準モデル以外の役割も、定義が見つからないモデルを指していたら起動時に
+        # 知らせる (知らせるだけで、値は差し替えずに PersonaCore へ渡す)。
+        # 画像/音声/動画要約モデルは、ペルソナ単位の値を読む箇所が無い (保存される
+        # だけ) ので対象にしない。検査の失敗でペルソナの読み込みを止めない。
+        try:
+            from saiverse.model_defaults import missing_model_warnings
+
+            self.startup_warnings.extend(missing_model_warnings(
+                [
+                    ("lightweight_model", persona_lightweight_model),
+                    ("memory_weave_model", persona_memory_weave_model),
+                ],
+                persona_id=pid,
+            ))
+        except Exception:
+            logging.warning(
+                "Persona '%s': model setting check failed; continuing to load.",
+                pid, exc_info=True,
+            )
 
         from saiverse.data_paths import find_file, PROMPTS_DIR
         common_prompt_file = find_file(PROMPTS_DIR, "common.txt") or Path("system_prompts/common.txt")

@@ -83,7 +83,7 @@ PROVIDER_CONFIG = [
         "provider": "grok",
         "env_key": "XAI_API_KEY",
         "display_name": "Grok (xAI)",
-        "description": "Grok 4.1 fast、Grok 4 など",
+        "description": "Grok 4.3、Grok 4.6 など",
     },
     {
         "provider": "openrouter",
@@ -97,7 +97,7 @@ PROVIDER_CONFIG = [
         "provider": "nvidia",
         "env_key": "NVIDIA_API_KEY",
         "display_name": "Nvidia NIM",
-        "description": "Qwen3 Coder、Mistral Large 3、GLM 4.7 など",
+        "description": "Kimi K3、DeepSeek V4、Nemotron 3 Ultra など",
         "free_label": "無料!",
     },
 ]
@@ -285,14 +285,9 @@ def get_env_key_mapping():
 
 # --- Model Role Presets ---
 
-MODEL_ROLES = {
-    "default_model": "SAIVERSE_DEFAULT_MODEL",
-    "lightweight_model": "SAIVERSE_DEFAULT_LIGHTWEIGHT_MODEL",
-    "memory_weave_model": "MEMORY_WEAVE_MODEL",
-    "image_summary_model": "SAIVERSE_IMAGE_SUMMARY_MODEL",
-    "audio_summary_model": "SAIVERSE_AUDIO_SUMMARY_MODEL",
-    "video_summary_model": "SAIVERSE_VIDEO_SUMMARY_MODEL",
-}
+# 役割 → 環境変数名 (MODEL_ROLES) と表示ラベル (MODEL_ROLE_DESCRIPTIONS) は、
+# 起動時の「定義が見つからないモデル」検査と共有するため saiverse/model_defaults.py に置く。
+from saiverse.model_defaults import MODEL_ROLE_DESCRIPTIONS, MODEL_ROLES
 
 # Roles that fall back to a Gemini default when the active provider doesn't
 # support them natively (audio/video are currently Gemini-only).
@@ -300,33 +295,6 @@ _GEMINI_FALLBACK_ROLES = {
     "image_summary_model",
     "audio_summary_model",
     "video_summary_model",
-}
-
-MODEL_ROLE_DESCRIPTIONS = {
-    "default_model": {
-        "label": "標準モデル",
-        "description": "会話や複雑な推論に使用するメインモデル",
-    },
-    "lightweight_model": {
-        "label": "軽量モデル",
-        "description": "ルーティングやツール判断に使用する高速・安価なモデル",
-    },
-    "memory_weave_model": {
-        "label": "Memory Weaveモデル",
-        "description": "クロニクル・メモペディアの生成に使用するモデル",
-    },
-    "image_summary_model": {
-        "label": "画像要約モデル",
-        "description": "画像・ドキュメント要約生成用モデル（Vision対応モデル推奨）",
-    },
-    "audio_summary_model": {
-        "label": "音声要約モデル",
-        "description": "ユーザー添付音声の要約生成用モデル（Gemini系のみ対応）",
-    },
-    "video_summary_model": {
-        "label": "動画要約モデル",
-        "description": "ユーザー添付動画の要約生成用モデル（Gemini系のみ対応）",
-    },
 }
 
 # Provider presets: values are config keys (filename stems).
@@ -366,10 +334,10 @@ PROVIDER_PRESETS: Dict[str, Dict[str, Optional[str]]] = {
         "video_summary_model": None,
     },
     "grok": {
-        "default_model": "grok-4-1-fast-reasoning",
-        "lightweight_model": "grok-4-1-fast-reasoning",
-        "memory_weave_model": "grok-4-1-fast-reasoning",
-        "image_summary_model": "grok-4-1-fast-reasoning",
+        "default_model": "grok-4.3",
+        "lightweight_model": "grok-4.3",
+        "memory_weave_model": "grok-4.3",
+        "image_summary_model": "grok-4.3",
         "audio_summary_model": None,
         "video_summary_model": None,
     },
@@ -382,18 +350,19 @@ PROVIDER_PRESETS: Dict[str, Dict[str, Optional[str]]] = {
         "video_summary_model": None,
     },
     "openrouter_free": {
-        "default_model": "openrouter-qwen3-coder-480b-a35b-free",
-        "lightweight_model": "openrouter-qwen3-next-80b-a3b-instruct-free",
-        "memory_weave_model": "openrouter-qwen3-next-80b-a3b-instruct-free",
-        "image_summary_model": None,
+        "default_model": "openrouter-nemotron-3-ultra-550b-a55b-free",
+        "lightweight_model": "openrouter-nemotron-3-ultra-550b-a55b-free",
+        "memory_weave_model": "openrouter-nemotron-3-ultra-550b-a55b-free",
+        # Nemotron は画像を読めないので、画像要約だけ画像対応の無料モデルに振る。
+        "image_summary_model": "openrouter-nex-n2.5-pro-free",
         "audio_summary_model": None,
         "video_summary_model": None,
     },
     "nvidia": {
-        "default_model": "nim-qwen3.5-397b-a17b-instruct",
-        "lightweight_model": "nim-qwen3-next-80b-a3b-instruct",
-        "memory_weave_model": "nim-qwen3-next-80b-a3b-instruct",
-        "image_summary_model": "nim-kimi-k2.6",
+        "default_model": "nim-kimi-k3",
+        "lightweight_model": "nim-deepseek-v4-flash-0731",
+        "memory_weave_model": "nim-deepseek-v4-flash-0731",
+        "image_summary_model": "nim-kimi-k3",
         "audio_summary_model": None,
         "video_summary_model": None,
     },
