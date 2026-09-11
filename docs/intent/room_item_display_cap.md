@@ -1,6 +1,6 @@
 # 部屋のアイテムの表示個数の上限と、片付けの道具
 
-**ステータス**: 実装中 — 2026-09-11 起草 → 同日整合性検査 (Opus) の指摘 7 件を反映 → 同日まはーの裁定 (第二回・第三回) で全論点確定、実装中
+**ステータス**: 検証待ち — 2026-09-11 起草・全論点裁定済み → 実装 → 隔離環境で場面の出力を読む検収 (16 枚) → レビュー三巡の消し込み (ローカル LLM 1 + Codex 3) まで完了。まはーの実機検証待ち
 **関連**: [room_items_uncapped.md](../issues/room_items_uncapped.md)（発端の issue — 経緯と却下済みの案）/ [bag_item_has_no_creation_path.md](../issues/bag_item_has_no_creation_path.md)（Bag の作成経路 — 2026-09-01 裁定「アイテム作成の一般経路として設計」。本 intent の設計 5 が引き取る想定）/ [room_state_packages.md](room_state_packages.md)（部屋の様子の組み立てと差分 — 上限の実装点。本 intent の実装時に §7-1 の文言を改訂する）/ [presented_context_reduction.md](presented_context_reduction.md)（隣接 — 送る量の上限。本件はその供給側を減らす一手）
 
 ## 一言で

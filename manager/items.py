@@ -834,6 +834,15 @@ class ItemService:
         if not building_id:
             raise RuntimeError("現在地が不明なため、文書を作成できません。")
 
+        # 置き場所の実在は本文ファイルを保存する前に確かめる — 後で確かめる形だと、
+        # 拒否のたびにどの Item からも辿れない本文ファイルがディスクに残る
+        # (書き込みトランザクション内の検査は従来どおり別途行う)。
+        db = self.manager.SessionLocal()
+        try:
+            self._require_building(db, building_id, "文書")
+        finally:
+            db.close()
+
         from saiverse.media_utils import store_document_text
         try:
             metadata, file_path = store_document_text(content, source="tool:document_create")
