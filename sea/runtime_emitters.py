@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import logging
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional
@@ -178,7 +177,6 @@ class RuntimeEmitters:
         # 保存完了イベント: 建物の行に本文が入った回だけ流れる (判定は
         # notify_speak_persisted に一本化。message_id 無し = insert 失敗)。
         notify_speak_persisted(event_callback, building_msg, persona, pulse_id)
-        self.notify_unity_speak(persona, text)
         # アドオン向けサーバー側 hook (persona_speak イベント) を発火する。
         # ThreadPoolExecutor で隔離実行されるため本関数は即座に return する。
         # See docs/intent/addon_speak_hooks.md.
@@ -216,7 +214,7 @@ class RuntimeEmitters:
         metadata: Optional[Dict[str, Any]] = None,
         event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> Optional[Dict[str, Any]]:
-        # 層1マーカー (==語句==) は表示系シンク (建物履歴 / gateway / Unity /
+        # 層1マーカー (==語句==) は表示系シンク (建物履歴 / gateway /
         # TTS hook) には流さない (life_concept_map.md §9.1 / P3)。mark の保存は
         # SAIMemory 側の _store_memory が担うので、ここでは剥離のみ。
         text = strip_marks(text)
@@ -280,7 +278,6 @@ class RuntimeEmitters:
         # 保存完了イベント: 建物の行に本文が入った回だけ流れる (判定は
         # notify_speak_persisted に一本化。message_id 無し = insert 失敗)。
         notify_speak_persisted(event_callback, building_msg, persona, pulse_id)
-        self.notify_unity_speak(persona, text)
         # アドオン向けサーバー側 hook (persona_speak イベント) を発火する。
         # emit_speak と同一イベントに統合し、source="say" で区別する。
         # See docs/intent/addon_speak_hooks.md.
@@ -578,8 +575,6 @@ class RuntimeEmitters:
                 result_status, message_id,
             )
 
-        self.notify_unity_speak(persona, text)
-
         try:
             from saiverse.addon_hooks import dispatch_hook
             # Pipeline Streaming (案 A): caller が指定した ``final_voice_text``
@@ -659,22 +654,3 @@ class RuntimeEmitters:
                 adapter.append_persona_message(msg)
         except Exception:
             LOGGER.warning("think message not stored", exc_info=True)
-
-    def notify_unity_speak(self, persona: Any, text: str) -> None:
-        """Send persona speak event to Unity Gateway if connected."""
-        if not text:
-            return
-        unity_gateway = getattr(self.runtime.manager, "unity_gateway", None)
-        if not unity_gateway:
-            return
-        try:
-            persona_id = getattr(persona, "persona_id", "unknown")
-            try:
-                asyncio.get_running_loop()
-                asyncio.create_task(unity_gateway.send_speak(persona_id, text))
-            except RuntimeError:
-                loop = asyncio.new_event_loop()
-                loop.run_until_complete(unity_gateway.send_speak(persona_id, text))
-                loop.close()
-        except Exception as exc:
-            LOGGER.debug("Failed to notify Unity Gateway: %s", exc)

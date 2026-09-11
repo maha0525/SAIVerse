@@ -1946,9 +1946,6 @@ class SEARuntime:
     def _emit_think(self, persona: Any, pulse_id: str, text: str, record_history: bool = True, extra_metadata: Optional[Dict[str, Any]] = None) -> None:
         self._emitters.emit_think(persona, pulse_id, text, record_history=record_history, extra_metadata=extra_metadata)
 
-    def _notify_unity_speak(self, persona: Any, text: str) -> None:
-        self._emitters.notify_unity_speak(persona, text)
-
     # ---------------- history metabolism -----------------
 
     #: keep-alive の末尾メッセージ。意味的に不活性 (何のイベントでもない) で、
@@ -2340,7 +2337,6 @@ class SEARuntime:
         Contents:
         - Current timestamp (year/month/day, weekday, hour:minute)
         - Previous AI response timestamp (for time passage awareness)
-        - Spatial info from Unity gateway (if connected)
         - (Future) Auto-recalled memory content
 
         Returns:
@@ -2349,7 +2345,7 @@ class SEARuntime:
         from datetime import datetime
 
         # Per-persona toggle: ペルソナ設定で OFF なら、リアルタイム情報セクション
-        # 自体を一切組み立てず送らない (現在時刻・前回発言時刻・空間情報すべて含む)。
+        # 自体を一切組み立てず送らない (現在時刻・前回発言時刻のどちらも送らない)。
         if not self._is_realtime_info_enabled_for_persona(persona):
             LOGGER.debug(
                 "[sea][realtime-context] Skipped: REALTIME_INFO_ENABLED is off for persona %s",
@@ -2378,7 +2374,6 @@ class SEARuntime:
         # 2. Previous AI response timestamp
         # Find the last assistant/persona message in history with a timestamp
         prev_ai_timestamp = None
-        persona_id = getattr(persona, "persona_id", None)
         persona_name = getattr(persona, "persona_name", None)
         for msg in reversed(history_messages):
             role = msg.get("role", "")
@@ -2403,28 +2398,6 @@ class SEARuntime:
                 prev_ai_timestamp = prev_ai_timestamp.astimezone(persona.timezone)
             prev_time_str = prev_ai_timestamp.strftime(f"%Y年%m月%d日({weekday_names[prev_ai_timestamp.weekday()]}) %H:%M")
             sections.append(f"あなたの前回発言: {prev_time_str}")
-
-        # 3. Spatial context (Unity gateway)
-        try:
-            unity_gateway = getattr(self.manager, "unity_gateway", None)
-            if unity_gateway and getattr(unity_gateway, "is_running", False):
-                spatial_state = unity_gateway.spatial_state.get(persona_id) if persona_id else None
-                if spatial_state:
-                    distance = getattr(spatial_state, "distance_to_player", None)
-                    is_visible = getattr(spatial_state, "is_visible", None)
-
-                    spatial_lines = []
-                    if distance is not None:
-                        spatial_lines.append(f"プレイヤーとの距離: {distance:.1f}m")
-                    if is_visible is not None:
-                        visibility_text = "見える" if is_visible else "見えない"
-                        spatial_lines.append(f"プレイヤーの視認: {visibility_text}")
-
-                    if spatial_lines:
-                        sections.append("空間情報: " + " / ".join(spatial_lines))
-                        LOGGER.debug("[sea][realtime-context] Added spatial info: distance=%.1f, visible=%s", distance, is_visible)
-        except Exception as exc:
-            LOGGER.debug("[sea][realtime-context] Failed to get spatial context: %s", exc)
 
         if not sections:
             return None

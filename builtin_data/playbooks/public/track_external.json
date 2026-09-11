@@ -28,16 +28,6 @@
           "text": "speak_content"
         }
       ],
-      "next": "process_body"
-    },
-    {
-      "id": "process_body",
-      "type": "tool",
-      "action": "control_body",
-      "args_input": {
-        "message": "speak_content"
-      },
-      "output_key": null,
       "next": null
     }
   ],

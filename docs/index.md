@@ -60,7 +60,6 @@ SAIVerseの公式ドキュメントへようこそ。
 - [Playbook/SEA](./features/playbooks.md) - 行動パターン定義
 - [MCP連携](./features/mcp-integration.md) - 外部ツールサーバー接続
 - [Discord連携](./features/discord-gateway.md) - Discordとの接続
-- [Unity Gateway](./features/unity-gateway.md) - 3D/VR空間連携
 
 ### 開発者ガイド
 - [コントリビューション](./developer-guide/contributing.md) - 貢献の方法

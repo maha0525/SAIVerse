@@ -28,8 +28,6 @@ SAIVerse/
 ├── database/               # DB モデル・マイグレーション
 ├── llm_clients/            # LLM プロバイダクライアント
 ├── discord_gateway/        # Discord ゲートウェイ（任意）
-├── unity_gateway/          # Unity ゲートウェイ（3D/VR 連携）
-├── unity_client/           # Unity クライアント資材
 │
 ├── builtin_data/           # 組み込みデフォルト（git 追跡・最低優先）
 ├── expansion_data/         # ユーザー導入の拡張パック（gitignore・中間優先）
