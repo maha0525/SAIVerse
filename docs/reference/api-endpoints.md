@@ -5,7 +5,7 @@
 
 REST API 全エンドポイントの一覧（自動生成）。すべて `/api` 配下にマウントされる。
 
-**エンドポイント数**: 356（tag グループ: 25）
+**エンドポイント数**: 357（tag グループ: 25）
 
 ## addon
 
@@ -123,7 +123,7 @@ REST API 全エンドポイントの一覧（自動生成）。すべて `/api` 
 | POST | `/api/config/max-image-embeds` | Set session override for max image embeds. |
 | GET | `/api/config/media-recall` | Get whether attached media (image/audio/video) summaries feed the auto-recall query. |
 | POST | `/api/config/media-recall` | Toggle attached-media auto-recall and persist to .env. |
-| GET | `/api/config/metabolism-defaults` | 水位 (記憶の整理 + 知覚) の全体既定 — 設定値 (null = 未設定) / 実効値 / 組み込み既定。 |
+| GET | `/api/config/metabolism-defaults` | 記憶の整理の水位の全体既定 — 設定値 (null = 未設定) / 実効値 / 組み込み既定 + プリセット。 |
 | PUT | `/api/config/metabolism-defaults` | 全体既定を保存する。 |
 | POST | `/api/config/model` | Set the global model override and return updated config. |
 | GET | `/api/config/models` | List available LLM models. |
@@ -143,7 +143,7 @@ REST API 全エンドポイントの一覧（自動生成）。すべて `/api` 
 | GET | `/api/config/reembed-check` | Return list of personas that need re-embedding due to model changes. |
 | POST | `/api/config/reload-models` | Reload model configurations from disk without restarting the server. |
 | GET | `/api/config/slot-kinds` | コマ種別カタログの一覧 (timetable_redesign.md §5.5)。 |
-| GET | `/api/config/startup-warnings` | Return warnings collected during startup (e.g. failed persona loads). |
+| GET | `/api/config/startup-warnings` | Return startup warnings plus model-setting warnings built from the current settings. |
 | GET | `/api/config/update-check` | Get update check monitoring status. |
 | POST | `/api/config/update-check` | Toggle update availability check on/off. |
 
@@ -314,7 +314,7 @@ REST API 全エンドポイントの一覧（自動生成）。すべて `/api` 
 | DELETE | `/api/people/{persona_id}/messages/{message_id}` | Delete a message. |
 | POST | `/api/people/{persona_id}/meta-judgment/bulk-delete` | Delete multiple meta_judgment_log rows in one request. |
 | DELETE | `/api/people/{persona_id}/meta-judgment/{judgment_id}` | Delete a single meta_judgment_log row owned by ``persona_id``. |
-| GET | `/api/people/{persona_id}/pocketbook` | 手帳を読む — アクティビティごとにメモを日付降順で束ねて返す。 |
+| GET | `/api/people/{persona_id}/pocketbook` | 手帳を読む — アクティビティごとにメモをできごとの日の降順で束ねて返す。 |
 | GET | `/api/people/{persona_id}/pulse-logs` | List pulse_id summaries with pagination (newest first). |
 | GET | `/api/people/{persona_id}/pulse-logs/{pulse_id}` | Get all log entries for a specific pulse. |
 | GET | `/api/people/{persona_id}/pulse-timeline` | messages を pulse_id でグルーピングした Pulse サマリ一覧 (新しい順)。 |
@@ -332,6 +332,7 @@ REST API 全エンドポイントの一覧（自動生成）。すべて `/api` 
 | PUT | `/api/people/{persona_id}/schedules/{schedule_id}` | Update an existing schedule. |
 | DELETE | `/api/people/{persona_id}/schedules/{schedule_id}` | Delete a schedule. |
 | POST | `/api/people/{persona_id}/schedules/{schedule_id}/toggle` | Toggle schedule enabled status. |
+| GET | `/api/people/{persona_id}/sluice/candidate-memos` | 機構が拾った手帳のメモ候補の一覧 (読み口 — 第一段は読むだけ)。 |
 | POST | `/api/people/{persona_id}/sluice/capture` | 後から通す採取を開始する (``dry=True`` なら見積もりだけを返す)。 |
 | GET | `/api/people/{persona_id}/sluice/capture/{job_id}` | 採取ジョブの進み具合・完了/失敗を返す (ポーリング用)。 |
 | POST | `/api/people/{persona_id}/sluice/capture/{job_id}/cancel` | 走行中の採取ジョブに中止を要求する (チャンクの切れ目で止まる)。 |

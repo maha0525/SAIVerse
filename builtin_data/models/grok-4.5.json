@@ -34,8 +34,12 @@
   },
   "pricing": {
     "input_per_1m_tokens": 2,
-    "cached_input_per_1m_tokens": 0.5,
+    "cached_input_per_1m_tokens": 0.3,
     "output_per_1m_tokens": 6,
+    "long_context_threshold_tokens": 200000,
+    "long_context_input_per_1m_tokens": 4,
+    "long_context_cached_input_per_1m_tokens": 0.6,
+    "long_context_output_per_1m_tokens": 12,
     "currency": "USD"
   },
   "model": "grok-4.5",

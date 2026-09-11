@@ -5,8 +5,52 @@ import json
 import logging
 from typing import Any, Dict, List, Optional
 
+from . import openai_runtime
 from .exceptions import EmptyResponseError
 from .openai import OpenAIClient
+
+
+def _mapping_option(options: Dict[str, Any], name: str) -> Dict[str, Any]:
+    """Read an SDK option that the SDK merges as a mapping (extra_body / extra_query).
+
+    A value that is not an object is refused rather than dropped: the SDK cannot
+    merge it either, so the same config already fails on the SDK path, and
+    dropping it only here would make this path run with different settings again.
+    """
+    value = options.get(name)
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise TypeError(
+            f"request_kwargs.{name} must be an object, got {type(value).__name__}"
+        )
+    return value
+
+
+#: This path's wait when request_kwargs has no timeout (unchanged from before the
+#: option was honoured). The SDK path would use the SDK's own default instead.
+_DEFAULT_STRUCTURED_OUTPUT_TIMEOUT_SECONDS = 120.0
+
+
+def _timeout_option(options: Dict[str, Any]) -> float:
+    """Read request_kwargs.timeout (an SDK option) as this path's wait in seconds.
+
+    The SDK path applies it to the request, so ignoring it here would make the
+    same model config wait differently depending on whether structured output
+    was requested. A value that is not a positive number is refused before
+    sending, like a malformed extra_body, rather than replaced by the default.
+    """
+    value = options.get("timeout")
+    if value is None:
+        return _DEFAULT_STRUCTURED_OUTPUT_TIMEOUT_SECONDS
+    # bool is a subclass of int, but true/false in a model JSON is not a wait.
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise TypeError(
+            f"request_kwargs.timeout must be a number of seconds, got {type(value).__name__}"
+        )
+    if not value > 0:  # also refuses NaN
+        raise ValueError(f"request_kwargs.timeout must be greater than 0, got {value!r}")
+    return float(value)
 
 
 class NvidiaNIMClient(OpenAIClient):
@@ -96,8 +140,22 @@ class NvidiaNIMClient(OpenAIClient):
             }
         }
 
-        # Build request body
-        body: Dict[str, Any] = {
+        # The request is assembled by the same code as the SDK path's tool call
+        # (OpenAIClient._generate_tool_detection), then split the way the SDK
+        # splits it before sending. Copying chosen request_kwargs by hand is what
+        # used to drop extra_body here: the same model ran with thinking on in
+        # conversation and off for structured output, without any error.
+        body_params, options = openai_runtime.split_sdk_request_options(
+            self._build_request_kwargs(response_schema=None, temperature=temperature)
+        )
+        extra_body = _mapping_option(options, "extra_body")
+        extra_query = _mapping_option(options, "extra_query")
+        timeout = _timeout_option(options)
+
+        # Structured output only works if these reach the API as written, so
+        # they go last and no configuration replaces them. (On the SDK path
+        # extra_body would win over them; on this path it may not.)
+        owned: Dict[str, Any] = {
             "model": self.model,
             "messages": messages,
             "n": 1,
@@ -107,26 +165,20 @@ class NvidiaNIMClient(OpenAIClient):
                 "function": {"name": "_structured_output"}
             },
         }
-
-        # Add temperature from request_kwargs or parameter
-        if temperature is not None:
-            body["temperature"] = temperature
-        elif "temperature" in self._request_kwargs:
-            body["temperature"] = self._request_kwargs["temperature"]
-
-        # Add top_p if present
-        if "top_p" in self._request_kwargs:
-            body["top_p"] = self._request_kwargs["top_p"]
-
-        # Add max_tokens if present
-        if "max_tokens" in self._request_kwargs:
-            body["max_tokens"] = self._request_kwargs["max_tokens"]
+        shadowed = sorted(owned.keys() & (body_params.keys() | extra_body.keys()))
+        if shadowed:
+            logging.warning(
+                "[nvidia_nim] request_kwargs sets %s, which structured output owns; ignoring them",
+                shadowed,
+            )
+        # Same precedence as the SDK: extra_body over the named parameters.
+        body: Dict[str, Any] = {**body_params, **extra_body, **owned}
 
         # This path bypasses the SDK, so the client's default_headers have to be
         # applied by hand or the backend sees different headers depending on
         # whether structured output was requested. Credentials and framing are
         # written last: they belong to the client, not to configuration.
-        per_request_headers = self._request_kwargs.get("extra_headers")
+        per_request_headers = options.get("extra_headers")
         headers = {
             **self._default_headers,
             # Already sanitized in __init__; kept here so this path sees the
@@ -135,6 +187,9 @@ class NvidiaNIMClient(OpenAIClient):
             "Content-Type": "application/json",
             "Authorization": f"Bearer {self._nim_api_key}",
         }
+        post_kwargs: Dict[str, Any] = {"json": body, "headers": headers}
+        if extra_query:
+            post_kwargs["params"] = extra_query
 
         logging.info("Using forced function calling for structured output (tool: _structured_output)")
         logging.debug("NIM structured output schema: %s", dummy_tool["function"]["parameters"])
@@ -142,8 +197,9 @@ class NvidiaNIMClient(OpenAIClient):
         # Retry logic for transient errors (timeouts, connection errors, 5xx)
         for attempt in range(max_retries + 1):
             try:
-                with httpx.Client(timeout=120.0) as client:
-                    response = client.post(url, json=body, headers=headers)
+                # request_kwargs.timeout applies here as on the SDK path (_timeout_option).
+                with httpx.Client(timeout=timeout) as client:
+                    response = client.post(url, **post_kwargs)
                     response.raise_for_status()
                     resp_json = response.json()
                 break  # Success, exit retry loop
@@ -233,7 +289,8 @@ class NvidiaNIMClient(OpenAIClient):
         """
         Generate response using Nvidia NIM.
 
-        For structured output, uses guided_json in extra_body instead of response_format.
+        Structured output without tools is sent over raw HTTP as a forced call to
+        a dummy tool (_create_nim_structured_output_via_tool), not response_format.
         """
         messages = self._inject_unsupported_media_summaries(messages)
         from tools import OPENAI_TOOLS_SPEC, TOOL_REGISTRY

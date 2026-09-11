@@ -114,6 +114,16 @@ def write_env_updates(updates: Dict[str, str]) -> None:
     for key, val in updates.items():
         os.environ[key] = val
 
+    # 冷えたウィンドウの見張りは「前回と同じ状態なら結果も同じ」で素通しする。
+    # 環境変数で失敗していたペルソナは行も水位も動かないので、設定を直しても
+    # 記録が残っている限り二度と試されない。鍵かどうかで絞らず、更新が成った
+    # 全ての変数で記録を捨てる — 失効は「全員をもう一回だけ再検査させる」だけの
+    # 安い操作で、絞る精度より漏れの無さが要る (例: 接続先の許可ホストの変更は
+    # 鍵ではないが LLM 接続の成否を変える)。
+    from sea.session_lifecycle import invalidate_cold_sweep_fingerprints
+
+    invalidate_cold_sweep_fingerprints()
+
     # Rebuild router Gemini clients if relevant keys changed
     _GEMINI_ENV_KEYS = {"GEMINI_FREE_API_KEY", "GEMINI_API_KEY"}
     if updates.keys() & _GEMINI_ENV_KEYS:

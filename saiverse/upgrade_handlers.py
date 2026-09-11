@@ -1093,4 +1093,23 @@ HANDLERS: List[UpgradeHandler] = [
         run=_no_op_ai_upgrade,
         description="Empty release edge 0.3.10 -> 0.3.11 (per-persona schema is ensured eagerly at adapter load; no world-DB migration).",
     ),
+    # ---- v0.3.12 ----
+    # 知覚の二水位列の削除は migrate.py の KNOWN_COLUMN_DROPS が、部屋 ID の
+    # 付け替えは起動時の building_id_repair が担う — 更新の鎖に移行は要らない。
+    UpgradeHandler(
+        name="city_noop_v0_3_12",
+        scope="city",
+        from_version="0.3.11",
+        to_version="0.3.12",
+        run=_no_op_city_upgrade,
+        description="Empty release edge 0.3.11 -> 0.3.12 (column drops run in migrate.py; building-id repair runs at startup).",
+    ),
+    UpgradeHandler(
+        name="ai_noop_v0_3_12",
+        scope="ai",
+        from_version="0.3.11",
+        to_version="0.3.12",
+        run=_no_op_ai_upgrade,
+        description="Empty release edge 0.3.11 -> 0.3.12 (column drops run in migrate.py; building-id repair runs at startup).",
+    ),
 ]

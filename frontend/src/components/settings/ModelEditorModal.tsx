@@ -35,9 +35,11 @@ const DEFAULT_CONTEXT_LENGTH = 128000;
 // 旧 metabolism_low_chars (最初に読み込む文字数) は 2026-09-04 廃止 — 専用欄から
 // 外れたため、古いモデル JSON に残っているキーは追加設定 JSON 側に現れる
 // (backend は黙って無視する)。
+// (部屋の様子などの記録の二欄 perception_high_chars / perception_target_chars は
+//  2026-09-09 廃止 — docs/intent/presented_context_reduction.md 設計 3。古いモデル
+//  JSON に残っているキーは追加設定 JSON 側に現れ、backend は黙って無視する)
 const WATERMARK_FIELDS = [
     'metabolism_high_chars', 'metabolism_target_chars',
-    'perception_high_chars', 'perception_target_chars',
 ] as const;
 type WatermarkField = typeof WATERMARK_FIELDS[number];
 const WATERMARK_LABELS: Record<WatermarkField, { label: string; hint: string }> = {
@@ -48,14 +50,6 @@ const WATERMARK_LABELS: Record<WatermarkField, { label: string; hint: string }> 
     metabolism_target_chars: {
         label: '整理後に残す文字数 (metabolism_target_chars)',
         hint: '整理はこの文字数まで畳んだら止まります。少なすぎるときは畳んだ範囲をここまで開き直します。会話の起点がまだ無いとき（新規ペルソナ等）に最初に読み込む量もこの値です。none にするとこのモデルは履歴の自動整理を行いません。',
-    },
-    perception_high_chars: {
-        label: '部屋の様子などの記録の省略をはじめる文字数 (perception_high_chars)',
-        hint: '移動したときの部屋の様子や、使えるスペルが増えた・減ったといった記録の合計がこの文字数を超えたら、古いものからまとめて省略します（省略されるのは送る内容からだけで、記録そのものは消えません）。none にすると省略せず、合計は伸びるに任せます。',
-    },
-    perception_target_chars: {
-        label: '部屋の様子などの記録を省略した後に残す文字数 (perception_target_chars)',
-        hint: '一度の省略でここまでまとめて減らします。一個ずつ減らさないのは、送る内容の前の方が毎回書き換わるとキャッシュが効かなくなるためです。none にすると全体設定の既定に従います。',
     },
 };
 
@@ -88,15 +82,9 @@ export default function ModelEditorModal({ isOpen, mode, modelKey, cloneSource, 
     const [parseError, setParseError] = useState<string | null>(null);
     const [saveError, setSaveError] = useState<string | null>(null);
     // 空欄のモデルが実際に従う既定 (全体設定があればそれ、無ければ組み込み)。
-    // GET /api/config/metabolism-defaults の effective。取れないときは組み込みの数字。
-    const [effectiveDefaults, setEffectiveDefaults] = useState<Record<WatermarkField, number>>({
-        metabolism_high_chars: 120000,
-        metabolism_target_chars: 40000,
-        perception_high_chars: 60000,
-        perception_target_chars: 40000,
-    });
-    // 「整理をはじめる量 − 残す量 > 記録の上限 + 余裕」の余裕の分 (サーバーの値)。
-    const [headroom, setHeadroom] = useState(10000);
+    // GET /api/config/metabolism-defaults の effective。数字はサーバーが持つので
+    // 画面には書き写さない — 読み込めるまでは null (欄の説明から数字を伏せる)。
+    const [effectiveDefaults, setEffectiveDefaults] = useState<Record<WatermarkField, number> | null>(null);
 
     const loadEffectiveDefaults = async () => {
         try {
@@ -105,15 +93,11 @@ export default function ModelEditorModal({ isOpen, mode, modelKey, cloneSource, 
             const data = await res.json();
             const eff = data?.effective;
             if (eff && typeof eff.high === 'number' && typeof eff.target === 'number') {
-                setEffectiveDefaults(prev => ({
-                    ...prev,
+                setEffectiveDefaults({
                     metabolism_high_chars: eff.high,
                     metabolism_target_chars: eff.target,
-                    ...(typeof eff.perception_high === 'number' ? { perception_high_chars: eff.perception_high } : {}),
-                    ...(typeof eff.perception_target === 'number' ? { perception_target_chars: eff.perception_target } : {}),
-                }));
+                });
             }
-            if (typeof data?.headroom === 'number') setHeadroom(data.headroom);
         } catch (e) {
             console.error('Failed to load watermark defaults', e);
         }
@@ -265,7 +249,10 @@ export default function ModelEditorModal({ isOpen, mode, modelKey, cloneSource, 
         // 空欄 = キーを書かない (一律既定) / "none" = null (持たない) / 数字 = 数値。
         // 検査は**実効値**で行う (空欄は全体設定の既定で埋める) — サーバー側
         // (api/routes/config.py の _watermark_constraints_error) と同じ数え方。
-        const wmEffective: Record<WatermarkField, number | null> = { ...effectiveDefaults };
+        const wmEffective: Record<WatermarkField, number | null> = {
+            metabolism_high_chars: effectiveDefaults?.metabolism_high_chars ?? null,
+            metabolism_target_chars: effectiveDefaults?.metabolism_target_chars ?? null,
+        };
         for (const field of WATERMARK_FIELDS) {
             const raw = watermarks[field].trim();
             delete merged[field];
@@ -285,23 +272,8 @@ export default function ModelEditorModal({ isOpen, mode, modelKey, cloneSource, 
         }
         const wmHigh = wmEffective.metabolism_high_chars;
         const wmTarget = wmEffective.metabolism_target_chars;
-        const pwHigh = wmEffective.perception_high_chars;
-        const pwTarget = wmEffective.perception_target_chars;
         if (wmTarget != null && wmHigh != null && wmTarget > wmHigh) {
             setSaveError('整理後に残す文字数は、整理をはじめる文字数以下にしてください');
-            return;
-        }
-        if (pwTarget != null && pwHigh != null && pwTarget > pwHigh) {
-            setSaveError('部屋の様子などの記録を省略した後に残す文字数は、省略をはじめる文字数以下にしてください');
-            return;
-        }
-        if (wmTarget != null && wmHigh != null && pwHigh != null && !(wmHigh - wmTarget > pwHigh + headroom)) {
-            setSaveError(
-                `整理をはじめる文字数 (${wmHigh.toLocaleString()}) と整理後に残す文字数 (${wmTarget.toLocaleString()}) の差 `
-                + `${(wmHigh - wmTarget).toLocaleString()} 字が、部屋の様子などの記録の上限 ${pwHigh.toLocaleString()} 字 + 余裕 `
-                + `${headroom.toLocaleString()} 字 を上回っていません。このままだと会話をどれだけ整理しても、`
-                + '送る量が上限を下回らないことがあります（空欄の欄は全体設定の既定で数えています）',
-            );
             return;
         }
 
@@ -424,26 +396,35 @@ export default function ModelEditorModal({ isOpen, mode, modelKey, cloneSource, 
                                 />
                             </div>
 
-                            {WATERMARK_FIELDS.map(field => (
-                                <div className={styles.field} key={field}>
-                                    <label>{WATERMARK_LABELS[field].label}</label>
-                                    <input
-                                        className={styles.input}
-                                        type="text"
-                                        inputMode="numeric"
-                                        value={watermarks[field]}
-                                        onChange={e => {
-                                            const v = e.target.value;
-                                            setWatermarks(prev => ({ ...prev, [field]: v }));
-                                        }}
-                                        placeholder={`空欄 = 全体設定の既定 (${effectiveDefaults[field].toLocaleString()} 字) に従う / none = 使わない`}
-                                    />
-                                    <span className={styles.hint}>
-                                        {WATERMARK_LABELS[field].hint}
-                                        {' '}空欄のときは全体設定の既定 {effectiveDefaults[field].toLocaleString()} 字に従います（全体設定 → 環境タブ「ペルソナに送る量の水位」）。
-                                    </span>
-                                </div>
-                            ))}
+                            {WATERMARK_FIELDS.map(field => {
+                                const fallback = effectiveDefaults?.[field] ?? null;
+                                return (
+                                    <div className={styles.field} key={field}>
+                                        <label>{WATERMARK_LABELS[field].label}</label>
+                                        <input
+                                            className={styles.input}
+                                            type="text"
+                                            inputMode="numeric"
+                                            value={watermarks[field]}
+                                            onChange={e => {
+                                                const v = e.target.value;
+                                                setWatermarks(prev => ({ ...prev, [field]: v }));
+                                            }}
+                                            placeholder={
+                                                fallback != null
+                                                    ? `空欄 = 全体設定の既定 (${fallback.toLocaleString()} 字) に従う / none = 使わない`
+                                                    : '空欄 = 全体設定の既定に従う / none = 使わない'
+                                            }
+                                        />
+                                        <span className={styles.hint}>
+                                            {WATERMARK_LABELS[field].hint}
+                                            {' '}空欄のときは全体設定の既定
+                                            {fallback != null ? ` ${fallback.toLocaleString()} 字` : ''}
+                                            に従います（全体設定 → 環境タブ「ペルソナに送る量」）。
+                                        </span>
+                                    </div>
+                                );
+                            })}
 
                             <div className={styles.field}>
                                 <label>
