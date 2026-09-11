@@ -77,6 +77,9 @@
 |---|---|
 | `SAIVERSE_DEFAULT_MODEL` | 既定モデル（persona 未設定時のフォールバック） |
 | `SAIVERSE_DEFAULT_LIGHTWEIGHT_MODEL` | 既定の軽量モデル |
+| `SAIVERSE_IMAGE_SUMMARY_MODEL` | 添付画像と文書の要約に使うモデル（グローバル設定「モデルロール」タブの画像要約モデル）。未設定なら組み込みの既定の軽量モデル（`BUILTIN_DEFAULT_LITE_MODEL`）。全ペルソナ共通で、ペルソナごとの設定は無い（`saiverse/media_summary.py`） |
+| `SAIVERSE_AUDIO_SUMMARY_MODEL` | 添付音声の要約に使うモデル（同タブの音声要約モデル）。未設定時と適用範囲は上と同じ |
+| `SAIVERSE_VIDEO_SUMMARY_MODEL` | 添付動画の要約に使うモデル（同タブの動画要約モデル）。未設定時と適用範囲は上と同じ |
 | `GEMINI_TIMEOUT_SECONDS` | Gemini タイムアウト（既定 180） |
 | `SAIVERSE_ATTACHMENT_LIMIT` | 添付上限（既定 4） |
 | `SAIVERSE_DISABLE_GEMINI_STREAMING` / `SAIVERSE_DISABLE_GEMINI_SSE_PATCH` | Gemini ストリーミング関連のフォールバック制御（`llm_clients/gemini.py`） |
