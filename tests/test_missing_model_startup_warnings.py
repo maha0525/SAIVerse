@@ -436,7 +436,7 @@ def test_fixing_persona_row_after_startup_clears_warnings(world):
     assert svc.current_model_setting_warnings() == []
 
 
-def test_fixing_global_env_after_startup_clears_warnings(world, monkeypatch):
+def test_fixing_global_env_after_startup_leaves_only_the_restart_notice(world, monkeypatch):
     _set_env(monkeypatch, **{key: "gone-global" for key in ROLE_ENV_KEYS})
     svc = world.start()
     assert len(svc.current_model_setting_warnings()) == 6
