@@ -108,6 +108,15 @@ def reload_configs() -> dict[str, dict]:
         "Provider configurations reloaded: %d providers",
         len(PROVIDER_CONFIGS),
     )
+
+    # 見張りの素通しは「前回と同じ状態なら結果も同じ」という前提に立つ。接続先の
+    # 定義を読み直したらその前提は消える。書き換えの入口は複数ある (作成・更新・
+    # 削除・reload ルート) が、全部この読み直しを通るので、記録を捨てる呼び出しは
+    # ここに一本だけ置く。import はここで行う: session_lifecycle 側が設定を読む
+    # ため、モジュール先頭に置くと循環参照になる。
+    from sea.session_lifecycle import invalidate_cold_sweep_fingerprints
+
+    invalidate_cold_sweep_fingerprints()
     return PROVIDER_CONFIGS
 
 

@@ -34,10 +34,11 @@
             "type": "string",
             "enum": [
               "nano_banana_2",
-              "gpt_image_2",
+              "gpt_image_2_5_flare",
+              "gpt_image_2_5_sunburst",
               "grok_imagine"
             ],
-            "description": "使用するモデル。nano_banana_2(高速・高品質, Gemini 3.1 Flash), gpt_image_2(常軌を逸した最高品質, OpenAI), grok_imagine(多少NSFWな画像の生成が可能, xAI Grok Imagine Pro)。デフォルトはnano_banana_2"
+            "description": "使用するモデル。nano_banana_2(高速・高品質, Gemini 3.1 Flash), gpt_image_2_5_flare(最高品質かつ高速, OpenAI GPT Image 2.5 Flare), gpt_image_2_5_sunburst(参照画像を使う編集の精度が最高, OpenAI GPT Image 2.5 Sunburst), grok_imagine(多少NSFWな画像の生成が可能, xAI Grok Imagine Pro)。デフォルトはnano_banana_2"
           },
           "quality": {
             "type": "string",
@@ -81,7 +82,7 @@
               "3840x2160",
               "2160x3840"
             ],
-            "description": "出力ピクセルサイズ（gpt_image_2 / gpt_image_1_5 専用）。'auto'はaspect_ratioから自動。'2048x2048'等を直接指定すればaspect_ratio無視で固定サイズに。Gemini/Grokでは無視されます。デフォルトはauto"
+            "description": "出力ピクセルサイズ（OpenAI gpt_image 系専用）。'auto'はaspect_ratioから自動。'2048x2048'等を直接指定すればaspect_ratio無視で固定サイズに。Gemini/Grokでは無視されます。デフォルトはauto"
           },
           "prompt": {
             "type": "string",

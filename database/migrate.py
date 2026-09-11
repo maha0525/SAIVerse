@@ -110,6 +110,95 @@ KNOWN_COLUMN_RENAMES = {
 }
 
 
+# 廃止して DB から落とす列: {table_name: (col, ...)}。
+# 列を消すだけの差分は、放っておくと _schema_diff の extra 列として全書換
+# (ファイル move) に落ちる — 生きた DB では Windows の WinError 32 を踏むし、
+# たかが 2 列のために全テーブルをコピーし直すのは割に合わない。SQLite 3.35 以降の
+# ALTER TABLE DROP COLUMN で先に落として、追加系パスで完結させる。
+# 落とせなかった (古い SQLite 等) 場合は差分が残るので、従来どおり全書換が受ける。
+KNOWN_COLUMN_DROPS = {
+    # 2026-09-09: 知覚の二水位の廃止 (docs/intent/presented_context_reduction.md
+    # 設計 3)。しきい値は「残す量 / 上限」の一系統だけになった。
+    "user_settings": ("PERCEPTION_TARGET_CHARS", "PERCEPTION_HIGH_CHARS"),
+}
+
+
+def apply_known_column_drops(db_path: str) -> None:
+    """KNOWN_COLUMN_DROPS の列を ALTER TABLE DROP COLUMN で落とす (冪等)。
+
+    列が既に無ければ何もしない。モデル側に同名の列が残っている列は触らない
+    (誤記で現役の列を落とさない)。
+
+    **全部落ちるか、一つも落ちないか**の二択にする — 落とす列は 1 回の
+    トランザクションにまとめ、途中で失敗したら全部戻す。列ごとに commit すると
+    「PERCEPTION_TARGET_CHARS だけ消えて PERCEPTION_HIGH_CHARS が残る」DB が
+    生まれ、呼び出し側 (try_additive_migration) が「False なら DB を変えない」
+    と言っている契約とも食い違う (ローカルレビュー指摘 2026-09-10)。
+    落とせなかった場合は警告だけ出して続行する — 差分は残るので、従来どおり
+    全書換が受ける。
+
+    DDL は SQLAlchemy のトランザクション境界に乗らない (pysqlite は DML まで
+    BEGIN を出さないので、DDL は autocommit で走って rollback で戻らない) ため、
+    ここだけは生の sqlite3 接続で BEGIN / COMMIT / ROLLBACK を自分で出す。
+    """
+    import sqlite3
+
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        insp = inspect(engine)
+        model_tables = {t.name: t for t in Base.metadata.sorted_tables}
+        planned = []  # [(table_name, col), ...]
+        for table_name, columns in KNOWN_COLUMN_DROPS.items():
+            if not insp.has_table(table_name):
+                continue
+            db_cols = {c["name"] for c in insp.get_columns(table_name)}
+            model_cols = {
+                c.name for c in model_tables[table_name].columns
+            } if table_name in model_tables else set()
+            for col in columns:
+                if col not in db_cols:
+                    continue
+                if col in model_cols:
+                    logging.warning(
+                        "列 %s.%s は現行モデルにも存在するため削除しません",
+                        table_name, col,
+                    )
+                    continue
+                planned.append((table_name, col))
+    finally:
+        engine.dispose()
+
+    if not planned:
+        return
+
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.isolation_level = None  # トランザクション境界を自分で出す
+        try:
+            conn.execute("BEGIN")
+            for table_name, col in planned:
+                conn.execute(
+                    f'ALTER TABLE "{table_name}" DROP COLUMN "{col}"'
+                )
+            conn.execute("COMMIT")
+        except Exception as e:
+            try:
+                conn.execute("ROLLBACK")
+            except Exception:
+                # 戻すものが無い (BEGIN 自体が通らなかった) 場合もここに来る。
+                # 元の失敗を握り潰さないよう、ここでは黙って続ける。
+                pass
+            logging.warning(
+                "廃止列の削除に失敗しました。%d 列すべてを元に戻します "
+                "(全書換で落とします): %s", len(planned), e,
+            )
+            return
+        for table_name, col in planned:
+            logging.info("廃止列を削除しました: %s.%s", table_name, col)
+    finally:
+        conn.close()
+
+
 def apply_known_column_renames(db_path: str) -> None:
     """KNOWN_COLUMN_RENAMES に従い ALTER TABLE RENAME COLUMN を適用する。
 
@@ -147,10 +236,20 @@ def try_additive_migration(db_path: str) -> bool:
     Returns:
         True  — 追加系のみで差分を完全に解消した (= 全書換不要)
         False — 列削除 / 型変更など破壊的差分があり全書換が必要、 または NOT NULL
-                かつ既定値が無く安全に ALTER 追加できない列がある。 この場合 DB は
-                一切変更しない (部分適用しない)。
+                かつ既定値が無く安全に ALTER 追加できない列がある。 この場合
+                **追加系の変更 (ADD COLUMN / CREATE TABLE) は一つも適用しない**
+                (追加の部分適用はしない)。
+
+    False でも DB が変わっていないとは限らない: 既知のリネーム
+    (:func:`apply_known_column_renames`) と既知の廃止列の削除
+    (:func:`apply_known_column_drops`) は差分検出の**前**に当たる。 どちらも
+    全書換パスでも同じ結果になる冪等な整地で、 リネームは全書換のデータ移行
+    (列名一致コピー) の前提そのものなので、 ここで当てておく必要がある。
+    廃止列の削除はまとめて 1 トランザクションなので、 中途半端に一部の列だけ
+    落ちた DB は残らない (2026-09-10 に文言と実装を揃えた)。
     """
     apply_known_column_renames(db_path)
+    apply_known_column_drops(db_path)
     missing_by_table, extra_by_table, missing_tables = _schema_diff(db_path)
 
     # DB にあってモデルに無い列 = 削除/リネーム → 全書換が必要

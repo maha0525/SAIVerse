@@ -8,6 +8,11 @@
 (``log.json.corrupted_*``) の有無では判定しない — マーカーは事故時の退避物で、
 修復後の log.json の健全性について何も語らないため。
 
+``--building-id`` を省くと、データベースに登録された部屋だけを対象にする。部屋 ID は
+データベースの値を使い、フォルダ名から取らない (macOS でフォルダ名が濁点の分解された
+形のとき、データベースの部屋と別の部屋 ID で書き込まないため)。登録されていない部屋の
+フォルダにある log.json は取り込まず、WARNING に出す。
+
 Usage:
     python scripts/migrate_building_logs_to_db.py [--dry-run]
                                                   [--city CITY_NAME]

@@ -289,6 +289,79 @@ class DynamicStateManager:
         )
 
 
+#: 提示から下ろす操作通知を出す head の Section。
+#:
+#: 発生源は二つ: ``head_mutation`` の通知 (sea/head_pipeline/notify.py — コア記憶・
+#: 机・Memopedia 目次の操作) と、スペル一覧の増減ラベル。どちらを下ろすかは
+#: :data:`sai_memory.presented_reduction.NOTICE_KINDS` /
+#: :data:`~sai_memory.presented_reduction.NOTICE_LABEL_KINDS` が決めていて、この
+#: 集合はその「発生源の Section」側の名前。通知を提示から下ろしてよいのは、
+#: **その通知を出した Section が今の状態で描き直されている**ときだけなので、
+#: 縮み (sea/session_lifecycle の reduce_presentation) が前提条件に使う。
+NOTICE_SOURCE_SECTIONS = frozenset({
+    "core_memory", "desk", "memopedia_index", "spell_list",
+})
+
+
+def head_sections_not_freshly_captured(
+    persona: Any, model_key: Optional[str] = None,
+    names: frozenset = NOTICE_SOURCE_SECTIONS,
+) -> frozenset:
+    """``names`` のうち、直近の再構築で撮り直せなかった Section の名前。
+
+    :meth:`DynamicStateManager.on_metabolism` の戻り値 (bool) は §15 の読み戻しの
+    再試行判定のもので、「対象外 = True」の意味論を持つ — 変えられない。head の
+    capture は Section ごとに失敗を飲み込む (古い値の据え置き / 欠損) ので、
+    「全部描き直せたか」はそことは別の口で聞く必要がある。それがこの関数で、
+    答えは (persona, model) ごとの pipeline の state から引く
+    (:meth:`sea.head_pipeline.pipeline.HeadPipeline.sections_not_freshly_captured`)
+    — プロセス共有のグローバルには積まない。
+
+    **判定できない回は fail-closed** (``names`` をそのまま返す = 一つも fresh で
+    ない扱い)。ここで空集合を返すと、pipeline を引けない環境で「全部描き直せた」
+    と読まれて通知が下りる。
+    """
+    persona_id = getattr(persona, "persona_id", None)
+    if not persona_id:
+        return frozenset(names)
+    try:
+        from sea.head_pipeline import get_default_pipeline
+        from sea.head_pipeline.integration import resolve_default_model_key
+
+        key = str(model_key) if model_key else resolve_default_model_key(persona)
+        return frozenset(get_default_pipeline().sections_not_freshly_captured(
+            str(persona_id), key, names,
+        ))
+    except Exception:
+        LOGGER.warning(
+            "[dynamic_state] could not tell which head sections were freshly "
+            "captured for %s; treating all of %s as stale",
+            persona_id, sorted(names), exc_info=True,
+        )
+        return frozenset(names)
+
+
+def head_pipeline_ready() -> bool:
+    """head の再構築が実際に走りうる状態か (pipeline が実在し section 登録済み)。
+
+    :func:`_dispatch_head_event` は未導入・未初期化・未知イベントを「対象外 =
+    True」で返す (入室の outbox 再試行判定の意味論なので変えられない)。だが提示の
+    縮み (sea/session_lifecycle の reduce_presentation) にとっての「描き直せた」は
+    「head が今の状態を見せている」の意味でなければならない — 未初期化の True を
+    成功と読むと、head が一度も描かれていない環境で操作通知だけが提示から下りる
+    (2026-09-10 Codex 三巡目の指摘)。縮み側はこの検査と dispatch の戻り値の両方が
+    真のときだけ通知を下ろす。
+    """
+    try:
+        from sea.head_pipeline import get_default_pipeline
+    except Exception:
+        return False
+    try:
+        return bool(get_default_pipeline().registry.all_sections())
+    except Exception:
+        return False
+
+
 def _chronicle_enabled(persona: Any, manager: Any) -> bool:
     """このペルソナが Chronicle 編纂を有効にしているか (判定不能なら有効側)。
 

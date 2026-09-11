@@ -166,6 +166,16 @@ def reload_configs() -> Dict[str, Dict]:
     global MODEL_CONFIGS
     MODEL_CONFIGS = load_configs()
     LOGGER.info("Model configurations reloaded: %d models", len(MODEL_CONFIGS))
+
+    # 冷えたウィンドウの見張りは「前回と同じ状態なら結果も同じ」で素通しするが、
+    # その前提はモデルの定義が変わらないことに依っている。書き換えの入口は複数
+    # ある (作成・更新・削除・複製・chat から保存・reload-models ルート) が、
+    # 全部この読み直しを通るので、記録を捨てる呼び出しはここに一本だけ置く。
+    # import はここで行う: session_lifecycle 側が設定を読むため、モジュール
+    # 先頭に置くと循環参照になる。
+    from sea.session_lifecycle import invalidate_cold_sweep_fingerprints
+
+    invalidate_cold_sweep_fingerprints()
     return MODEL_CONFIGS
 
 
@@ -214,61 +224,26 @@ def get_context_length(model: str) -> int:
 #: 会話が早々に頭打ちになっていた。一回で削る量は 6万 → 10万字。
 #: 2026-09-04 に target 10万 → 4万・high 20万 → 12万 (まはー裁定)。残す量の主語が
 #: 会話の行だけになった (知覚ブロックを数えない) ため、旧既定は大きすぎた。
-#: 4万字は日本語の会話で百数十往復ほど。差 8万は、知覚の上限を差し引いても
-#: 畳みの発火を「たまに・まとめて」に保てる幅。
 #:
-#: 旧三水位の低水位 (``metabolism_low_chars``、組み込み既定 4万) は 2026-09-04 に
-#: 廃止 — 現役の役割が「anchor 未確立時の初期読み込み量」だけに縮んでおり、
-#: 発話直前の最終防衛ライン (arasuji_levels.md §15-5) が窓を残す量まで埋め直す
-#: ため効く場面が実質無かった (docs/issues/
-#: watermarks_unsatisfiable_when_perception_is_large.md 裁定 5)。モデル JSON や
-#: 全体設定に残っているキーは黙って無視される (エラーにしない)。
-BUILTIN_METABOLISM_TARGET_CHARS = 40_000
-BUILTIN_METABOLISM_HIGH_CHARS = 120_000
-
-#: 知覚の提示上限の二水位 (文字数) の組み込み既定。
-#: docs/intent/perception_buffer.md §10.9 (2026-09-04 まはー裁定)。
+#: 2026-09-09 に target 4万 → 2万・high 12万 → 6万 (まはー裁定、docs/intent/
+#: presented_context_reduction.md 「まはーが決めること」1)。旧既定はユーザーの
+#: 反応から**既定としては大きすぎた**ので、その組はプリセット「多い」へ降格した。
+#: 2万字は日本語の会話で数十往復ほど。差 4万は、畳みの発火を「たまに・まとめて」に
+#: 保てる幅 (幅が狭いほど整理の LLM 呼び出しとキャッシュの読み直しが増える)。
 #:
-#: Metabolism の水位が束ねるのは**提示の合計**で、その内訳のうち会話の行は畳みで
-#: 減らせるが、知覚ブロック (部屋の様子・通知) は畳みの対象外なので、知覚が多い
-#: 環境では「残す量まで畳んでも合計が上限を下回らない」状態になる
-#: (docs/issues/watermarks_unsatisfiable_when_perception_is_large.md)。そこで
-#: 知覚の合計にも自分の二水位を持たせる:
+#: 廃止したキーは黙って無視される (エラーにしない) — 旧 DB / 旧モデル JSON との
+#: データ互換:
 #:
-#: - high (上の水位): 提示中の知覚ブロックの合計がこれを超えたら下ろしが起きる。
-#: - target (下の水位): 一度の下ろしで**ここまでまとめて**下ろす到達点。
-#:
-#: 一個ずつではなく「上を超えたら下まで」なのは、下ろすたびに提示の前方が
-#: 書き換わるとプロンプトキャッシュがほぼ毎ターン定価の読み直しになるから
-#: (窓の並びが変わるのは「たまに・まとめて」— intent cached_head_architecture)。
-#:
-#: 既定の 6万 / 4万は、Metabolism 側の既定 (残す量 4万 / 上限 12万) と組んで
-#: 「会話を残す量まで畳めば合計が上限を下回る」(12万 − 4万 = 8万 > 6万 + 余裕 1万) が
-#: 成り立つ幅。数字はまはーの製品判断で見直しうる。
-#:
-#: 読み経路は Metabolism の水位と同じ三層 (モデル定義 > 全体設定 > 組み込み既定)。
-BUILTIN_PERCEPTION_TARGET_CHARS = 20_000  # 2026-09-05 まはー裁定: 幅 (high−target) が省略の頻度 = キャッシュの割れ頻度を決める。幅 2 万は会話の整理 (幅 8 万) の 4 倍の頻度で割るため 4 万へ広げた
-BUILTIN_PERCEPTION_HIGH_CHARS = 60_000
-
-#: 保存時検査「整理を始める量 − 残す量 > 知覚の上限 + 余裕」の**余裕**の分。
-#: docs/issues/watermarks_unsatisfiable_when_perception_is_large.md 裁定 4。
-#:
-#: 等号ぎりぎり (差 = 知覚の上限) では成立しない — 畳んだ後の会話は端数
-#: (材料 U 未満の畳み残し) と関節寄せで「残す量ちょうど」には収まらず、知覚も
-#: 下の水位まで下ろした後に新着が積まれる。この余裕はその取りこぼしの分。
-#:
-#: 値はまはーの裁定待ちの叩き台 (2026-09-05 時点)。ここ一箇所だけを直せば
-#: 保存時検査 (api/routes/config.py) と UI の事前検査が同時に追随する。
-WATERMARK_HEADROOM_CHARS = 10_000
-
-#: モデル定義で上書きするときのキー名 (順に 下の水位 / 上の水位)。
-PERCEPTION_WATERMARK_KEYS: tuple[str, str] = (
-    "perception_target_chars", "perception_high_chars",
-)
-BUILTIN_PERCEPTION_DEFAULTS: dict[str, int] = {
-    "perception_target_chars": BUILTIN_PERCEPTION_TARGET_CHARS,
-    "perception_high_chars": BUILTIN_PERCEPTION_HIGH_CHARS,
-}
+#: - ``metabolism_low_chars`` (旧三水位の低水位、2026-09-04 廃止): 現役の役割が
+#:   「anchor 未確立時の初期読み込み量」だけに縮んでおり、発話直前の最終防衛ライン
+#:   (arasuji_levels.md §15-5) が窓を残す量まで埋め直すため効く場面が無かった。
+#: - ``perception_target_chars`` / ``perception_high_chars`` (知覚の提示上限の
+#:   二水位、2026-09-05 導入 → 2026-09-09 廃止): 「会話を畳んでも減らせない大物」
+#:   だった操作通知と現在地でない部屋の様子が、Metabolism の瞬間の縮み
+#:   (sai_memory/presented_reduction.py) で減るようになったため、専用のしきい値を
+#:   持つ理由が消えた。しきい値は「残す量 / 上限」の一系統だけになった。
+BUILTIN_METABOLISM_TARGET_CHARS = 20_000
+BUILTIN_METABOLISM_HIGH_CHARS = 60_000
 
 #: 水位のキー名 → 組み込み既定。全体設定 / API / UI が同じ組を回すための表。
 METABOLISM_WATERMARK_KEYS: tuple[str, str] = (
@@ -279,36 +254,54 @@ BUILTIN_METABOLISM_DEFAULTS: dict[str, int] = {
     "metabolism_high_chars": BUILTIN_METABOLISM_HIGH_CHARS,
 }
 
-#: 二族 (Metabolism / 知覚) を合わせた水位の全キー。全体設定・保存時検査・UI は
-#: この四つを一組として扱う — 保存時検査 (整理を始める量 − 残す量 > 知覚の上限
-#: + 余裕) が二族をまたぐので、既定の層を族ごとに分けると「片方だけ新しい組」を
-#: 読む瞬間が生まれる。
-ALL_WATERMARK_KEYS: tuple[str, ...] = METABOLISM_WATERMARK_KEYS + PERCEPTION_WATERMARK_KEYS
-BUILTIN_WATERMARK_DEFAULTS: dict[str, int] = {
-    **BUILTIN_METABOLISM_DEFAULTS,
-    **BUILTIN_PERCEPTION_DEFAULTS,
-}
+#: 全体設定の画面が出す水位のプリセット (2026-09-09 まはー裁定、数字まで確定 —
+#: docs/intent/presented_context_reduction.md 「まはーが決めること」1)。
+#:
+#: 「デフォルト」の段は組み込み既定そのものを参照するので、ここと
+#: :data:`BUILTIN_METABOLISM_DEFAULTS` は食い違えない (契約テスト
+#: tests/test_metabolism_global_defaults.py が固定する)。
+#: どの段も 残す量 : 上限 = 1 : 3。幅 (上限 − 残す量) が整理の頻度を決めるので、
+#: 小さい段ほど整理の LLM 呼び出しとキャッシュの読み直しが増えうる — 画面は
+#: この注意書きを添えて出す。
+#:
+#: 定義はこの一枚だけに置き、全体設定の GET (``/api/config/metabolism-defaults``)
+#: が応答へ載せて画面が読む。画面側に数字を書き写すと、既定を動かしたときに
+#: 「プリセットのデフォルトだけ古い」という食い違いが生まれる。
+METABOLISM_PRESETS: tuple[dict[str, Any], ...] = (
+    {
+        "id": "large", "label": "多い",
+        "metabolism_target_chars": 40_000, "metabolism_high_chars": 120_000,
+    },
+    {
+        "id": "default", "label": "デフォルト",
+        "metabolism_target_chars": BUILTIN_METABOLISM_TARGET_CHARS,
+        "metabolism_high_chars": BUILTIN_METABOLISM_HIGH_CHARS,
+    },
+    {
+        "id": "small", "label": "少ない",
+        "metabolism_target_chars": 10_000, "metabolism_high_chars": 30_000,
+    },
+)
 
-#: 全体設定の水位既定 (2026-09-03、2026-09-05 に知覚の二水位も同居)。三層の真ん中:
+#: 全体設定の水位既定 (2026-09-03)。三層の真ん中:
 #: 組み込み既定 < **全体設定** < モデル定義。キー無し / None = 未設定
 #: (組み込み既定に落ちる)。
 #:
-#: 真実の置き場は DB (user_settings.{METABOLISM,PERCEPTION}_*_CHARS)。このモジュールは
+#: 真実の置き場は DB (user_settings.METABOLISM_*_CHARS)。このモジュールは
 #: DB を触らない約束なので、起動時 (saiverse_manager) と API の保存成功時に
 #: ``set_global_watermark_defaults`` で写してもらう。
 #:
 #: **不変の写像を丸ごと差し替える** (clear → 逐次代入ではない)。読み手は
 #: ``_current_global_defaults()`` で一枚の写像を取り、その一枚から水位を解く
-#: (``resolve_metabolism_watermarks`` / ``resolve_perception_watermarks``) ので、
-#: 差し替えの途中で「target は新・high は旧」の混ざった組を観測しない
-#: (Codex 指摘 2026-09-03)。外から読むときは ``get_global_watermark_defaults()``
-#: を使う (この変数名は private)。
+#: (``resolve_metabolism_watermarks``) ので、差し替えの途中で「target は新・
+#: high は旧」の混ざった組を観測しない (Codex 指摘 2026-09-03)。外から読むときは
+#: ``get_global_watermark_defaults()`` を使う (この変数名は private)。
 #:
 #: 2026-07-30 に撤去した揮発性のグローバル上書き (会話ごとの画面に置かれ、効く範囲が
 #: 不明瞭だった) とは別物 — こちらは永続の**既定**で、モデル定義に数値があれば
 #: そちらが勝つ (docs/concepts/metabolism.md)。
 _GLOBAL_WATERMARK_DEFAULTS: Mapping[str, int | None] = MappingProxyType(
-    {key: None for key in ALL_WATERMARK_KEYS}
+    {key: None for key in METABOLISM_WATERMARK_KEYS}
 )
 
 
@@ -328,39 +321,41 @@ def _positive_int_or_none(value: Any) -> int | None:
 
 
 def set_global_watermark_defaults(values: Mapping[str, int | None]) -> None:
-    """全体設定の水位既定を差し替える (四キー以外は無視、正の整数以外は未設定扱い)。
+    """全体設定の水位既定を差し替える (二キー以外は無視、正の整数以外は未設定扱い)。
 
-    廃止済みの ``metabolism_low_chars`` が混ざっていても黙って無視する
-    (旧 DB / 旧クライアントとのデータ互換)。
+    廃止済みのキー (``metabolism_low_chars`` / ``perception_target_chars`` /
+    ``perception_high_chars``) が混ざっていても黙って無視する (旧 DB / 旧
+    クライアントとのデータ互換)。
 
     新しい不変写像を作って一回の代入で差し替える — 読み手が持っている古い一枚は
-    変化しない。二族 (Metabolism / 知覚) を一枚に収めているので、両方を変える
-    保存でも「片方だけ新しい組」を読む瞬間が生まれない。
+    変化しない。二つの水位を一枚に収めているので、両方を変える保存でも
+    「片方だけ新しい組」を読む瞬間が生まれない。
     """
     global _GLOBAL_WATERMARK_DEFAULTS
     _GLOBAL_WATERMARK_DEFAULTS = MappingProxyType({
-        key: _positive_int_or_none(values.get(key)) for key in ALL_WATERMARK_KEYS
+        key: _positive_int_or_none(values.get(key))
+        for key in METABOLISM_WATERMARK_KEYS
     })
 
 
 def get_global_watermark_defaults() -> dict[str, int | None]:
-    """全体設定の水位既定 (未設定は None) を四キーそろえて返す。"""
+    """全体設定の水位既定 (未設定は None) を二キーそろえて返す。"""
     current = _current_global_defaults()
-    return {key: current.get(key) for key in ALL_WATERMARK_KEYS}
+    return {key: current.get(key) for key in METABOLISM_WATERMARK_KEYS}
 
 
 def effective_watermark_defaults_from(
     global_defaults: Mapping[str, int | None],
 ) -> dict[str, int]:
-    """全体既定の一枚を「キー無しのモデルが従う実効既定」(四キー) に均す。
+    """全体既定の一枚を「キー無しのモデルが従う実効既定」(二キー) に均す。
 
     保存時検査は「その全体既定にしたら既存モデルはどうなるか」を調べるので、
     *提案中の* 全体既定でも同じ均し方ができる必要がある (api/routes/config.py の
     `_models_conflicting_with_defaults`)。
     """
     return {
-        key: global_defaults.get(key) or BUILTIN_WATERMARK_DEFAULTS[key]
-        for key in ALL_WATERMARK_KEYS
+        key: global_defaults.get(key) or BUILTIN_METABOLISM_DEFAULTS[key]
+        for key in METABOLISM_WATERMARK_KEYS
     }
 
 
@@ -382,8 +377,6 @@ def compose_watermark(
     ``effective_default`` に落ちる。全体既定の保存時に「既存モデルの部分上書きと
     矛盾しないか」を調べる側 (api/routes/config.py) もこの関数で組む — 実行時の
     解決とそこが二本に分かれると、検証は通るのに実行時は壊れる事故が起きる。
-
-    規則は Metabolism の水位と知覚の提示上限で共通なので、名前は水位一般で持つ。
     """
     if key not in config:
         return effective_default
@@ -416,8 +409,9 @@ def resolve_metabolism_watermarks(model: str) -> tuple[int | None, int | None]:
     (一律)。キーが有って ``null`` / 0 以下なら None = その水位を持たない (これは
     モデル単位のオプトアウトで、全体設定では表せない)。high が None のとき
     文字数による発火は起きず、``token_triggered`` だけが Metabolism を起こす
-    (chronicle_eviction.md §4)。モデル定義に残っている廃止済みの
-    ``metabolism_low_chars`` キーは読まない = 黙って無視される。
+    (chronicle_eviction.md §4)。モデル定義に残っている廃止済みのキー
+    (``metabolism_low_chars`` / ``perception_*_chars``) は読まない = 黙って
+    無視される。
 
     全体既定は ``_current_global_defaults()`` を**一度だけ**読む。水位を別々の
     getter で取ると、間に ``set_global_watermark_defaults`` が挟まったとき
@@ -428,59 +422,20 @@ def resolve_metabolism_watermarks(model: str) -> tuple[int | None, int | None]:
     return compose_metabolism_watermarks(config, _current_global_defaults())
 
 
-def compose_all_watermarks(
+def compose_watermark_map(
     config: Mapping[str, Any], global_defaults: Mapping[str, int | None],
 ) -> dict[str, int | None]:
-    """四水位を**素のまま** (実行時の救済を掛けずに) 組む。保存時検査の入力。
+    """二水位を**素のまま** (実行時の救済を掛けずに) キー付きで組む。保存時検査の入力。
 
-    実行時の解決 (``compose_perception_watermarks``) は、下の水位が潰れていたら
-    既定へ戻し、上下が逆転していたら下を上へ寄せる — 走らせるための縮退であって、
-    保存の入口で「その設定は壊れている」と教える責務の代わりではない。だから
-    検査はこの素の組で行う (docs/issues/
-    watermarks_unsatisfiable_when_perception_is_large.md 裁定 4)。
+    実行時の解決 (:func:`compose_metabolism_watermarks`) と同じ関数
+    (:func:`compose_watermark`) を通す — 検査と実行が二本に分かれると、検証は
+    通るのに実行時は壊れる組が保存できる。
     """
     effective = effective_watermark_defaults_from(global_defaults)
     return {
         key: compose_watermark(config, key, effective[key])
-        for key in ALL_WATERMARK_KEYS
+        for key in METABOLISM_WATERMARK_KEYS
     }
-
-
-def compose_perception_watermarks(
-    config: Mapping[str, Any], global_defaults: Mapping[str, int | None],
-) -> tuple[int, int | None]:
-    """モデル定義一つと全体既定の一枚から知覚の (下の水位, 上の水位) を組む。
-
-    キーが有って ``null`` / 0 以下なら上の水位は None = **下ろしを持たない**
-    (モデル単位のオプトアウト。合計は伸びるに任せる)。下の水位が None に潰れた
-    場合は実効既定へ戻す — 下ろす到達点が無いと「どこまで下ろすか」が決まらない
-    ので、ここにオプトアウトは無い。上下が逆転している設定は、下の水位を上の
-    水位まで下げて受ける (下ろした直後にまた超過している状態を作らない)。
-    """
-    effective = effective_watermark_defaults_from(global_defaults)
-    target = compose_watermark(
-        config, "perception_target_chars", effective["perception_target_chars"],
-    )
-    high = compose_watermark(
-        config, "perception_high_chars", effective["perception_high_chars"],
-    )
-    if target is None:
-        target = effective["perception_target_chars"]
-    if high is not None and target > high:
-        target = high
-    return int(target), (int(high) if high is not None else None)
-
-
-def resolve_perception_watermarks(model: str) -> tuple[int, int | None]:
-    """知覚の提示上限の二水位 (下の水位, 上の水位) を解決する。
-
-    三層: モデル定義にキーが無いなら全体設定の既定、それも無ければ組み込み既定
-    (:data:`BUILTIN_PERCEPTION_DEFAULTS`)。全体既定は
-    ``_current_global_defaults()`` を**一度だけ**読む (Metabolism 側と同じ理由 —
-    水位ごとに別々に読むと新旧の混ざった組になる)。
-    """
-    config = MODEL_CONFIGS.get(model, {})
-    return compose_perception_watermarks(config, _current_global_defaults())
 
 
 def _metabolism_chars(model: str, key: str) -> int | None:

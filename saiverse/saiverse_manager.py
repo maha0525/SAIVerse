@@ -119,6 +119,8 @@ class SAIVerseManager(
         # --- Phase 1: Data Loading ---
         self._init_database(db_path)
         self._init_city_config(city_name)
+        # 部屋を読み込む前に、フォルダ名や URL を壊す文字を含む古い部屋 ID を付け替える
+        self._repair_unsafe_building_ids()
         self._init_buildings()
         self._init_file_paths()
         self._init_avatars()
@@ -314,15 +316,13 @@ class SAIVerseManager(
                     self.state.current_playbook = settings.SELECTED_META_PLAYBOOK
                     logging.info("Loaded saved meta playbook: %s", settings.SELECTED_META_PLAYBOOK)
                 # 水位の全体既定 (user_settings → model_configs のモジュール変数へ写す)。
-                # Metabolism の二水位と知覚の二水位を一枚で持つ。model_configs は DB を
-                # 触らない約束なので写すのはここと PUT /api/config/metabolism-defaults の
-                # 二箇所 (docs/concepts/metabolism.md)。
+                # 残す量と上限の一組。model_configs は DB を触らない約束なので写すのは
+                # ここと PUT /api/config/metabolism-defaults の二箇所
+                # (docs/concepts/metabolism.md)。
                 from saiverse.model_configs import set_global_watermark_defaults
                 set_global_watermark_defaults({
                     "metabolism_target_chars": settings.METABOLISM_TARGET_CHARS if settings else None,
                     "metabolism_high_chars": settings.METABOLISM_HIGH_CHARS if settings else None,
-                    "perception_target_chars": settings.PERCEPTION_TARGET_CHARS if settings else None,
-                    "perception_high_chars": settings.PERCEPTION_HIGH_CHARS if settings else None,
                 })
             finally:
                 db.close()
@@ -1473,6 +1473,13 @@ class SAIVerseManager(
             model,
         )
         self._base_model = model
+        # AdminService は起動時に _base_model を写して持ち、ワールドエディタから作る
+        # ペルソナの標準モデルに使う (manager/admin.py の __init__、manager/persona.py の
+        # create_ai)。写しも揃えないと、標準モデルを変えた後に作ったペルソナだけが
+        # 再起動まで古いモデルで作られる。
+        admin = getattr(self, "admin", None)
+        if admin is not None:
+            admin._base_model = model
 
         db = self.SessionLocal()
         try:

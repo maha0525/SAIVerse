@@ -64,7 +64,39 @@ class MigrateBuildingLogsTests(unittest.TestCase):
         except PermissionError:
             pass
 
-    def _make_building_log(self, city: str, building_id: str, messages: list) -> Path:
+    def _register_room(self, city: str, building_id: str) -> None:
+        """DB に City と部屋を登録する (既にあれば何もしない)。
+
+        部屋を指定しない取り込みは、DB に登録された部屋 ID から古い会話のファイルの
+        場所を決める (フォルダ名を部屋 ID に使わない)。
+        """
+        from database.models import Building, City
+
+        db = self.SessionLocal()
+        try:
+            city_row = db.query(City).filter_by(CITY_SLUG=city).first()
+            if city_row is None:
+                next_id = max((c.CITYID for c in db.query(City).all()), default=0) + 1
+                city_row = City(
+                    CITYID=next_id, CITY_SLUG=city, USERID=1,
+                    UI_PORT=3000 + next_id, API_PORT=8000 + next_id,
+                )
+                db.add(city_row)
+                db.flush()
+            if db.query(Building).filter_by(BUILDINGID=building_id).first() is None:
+                db.add(Building(
+                    CITYID=city_row.CITYID, BUILDINGID=building_id, BUILDINGNAME=building_id,
+                ))
+            db.commit()
+        finally:
+            db.close()
+
+    def _make_building_log(
+        self, city: str, building_id: str, messages: list, *, register: bool = True,
+    ) -> Path:
+        """古い会話のファイルを置く。``register`` なら DB にもその部屋を登録する。"""
+        if register:
+            self._register_room(city, building_id)
         b_dir = self.home_path / "cities" / city / "buildings" / building_id
         b_dir.mkdir(parents=True, exist_ok=True)
         path = b_dir / "log.json"
@@ -247,29 +279,30 @@ class MigrateBuildingLogsTests(unittest.TestCase):
     # エッジケース: 不正ファイル / 隔離
     # ------------------------------------------------------------------
 
-    def test_zero_byte_log_skipped(self) -> None:
+    def _broken_log(self, content: str) -> None:
+        self._register_room("city_a", "broken")
         b_dir = self.home_path / "cities" / "city_a" / "buildings" / "broken"
         b_dir.mkdir(parents=True, exist_ok=True)
-        (b_dir / "log.json").write_text("", encoding="utf-8")
+        (b_dir / "log.json").write_text(content, encoding="utf-8")
+
+    def _assert_skipped_as_unreadable(self) -> None:
         rc = self._run_main([])
         self.assertEqual(rc, 0)
         self.assertEqual(len(self._all_db_messages()), 0)
+        # 登録された部屋のファイルとして読んだうえで、読めないので飛ばした (素通りではない)
+        self.assertEqual(self._import().buildings_skipped_unreadable, 1)
+
+    def test_zero_byte_log_skipped(self) -> None:
+        self._broken_log("")
+        self._assert_skipped_as_unreadable()
 
     def test_invalid_json_skipped(self) -> None:
-        b_dir = self.home_path / "cities" / "city_a" / "buildings" / "broken"
-        b_dir.mkdir(parents=True, exist_ok=True)
-        (b_dir / "log.json").write_text("{not json", encoding="utf-8")
-        rc = self._run_main([])
-        self.assertEqual(rc, 0)
-        self.assertEqual(len(self._all_db_messages()), 0)
+        self._broken_log("{not json")
+        self._assert_skipped_as_unreadable()
 
     def test_non_list_root_skipped(self) -> None:
-        b_dir = self.home_path / "cities" / "city_a" / "buildings" / "broken"
-        b_dir.mkdir(parents=True, exist_ok=True)
-        (b_dir / "log.json").write_text('{"role": "user"}', encoding="utf-8")
-        rc = self._run_main([])
-        self.assertEqual(rc, 0)
-        self.assertEqual(len(self._all_db_messages()), 0)
+        self._broken_log('{"role": "user"}')
+        self._assert_skipped_as_unreadable()
 
     def test_corrupted_marker_does_not_block_import(self) -> None:
         """隔離マーカー (log.json.corrupted_*) が残っていても、現物の log.json が
@@ -1059,6 +1092,113 @@ class MigrateBuildingLogsTests(unittest.TestCase):
         self.assertEqual(by_id["room_bad"]["kind"], "check_failed")
         self.assertIn("simulated scan failure", by_id["room_bad"]["reason"])
         self.assertEqual(by_id["room_ok"]["kind"], "not_imported")
+
+    # ------------------------------------------------------------------
+    # 部屋を指定しない取り込みでも、部屋 ID をフォルダ名から取らない
+    # (docs/issues/building_id_contains_path_separator.md、2026-09-11)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _one_message(message_id: str) -> list:
+        return [{"role": "user", "content": "hi", "seq": 1, "message_id": message_id,
+                 "timestamp": "2026-05-20T10:00:00", "heard_by": []}]
+
+    def test_room_id_comes_from_the_database_not_the_folder_name(self) -> None:
+        """DB の部屋 ID が名前の違うフォルダに解決されても、行は DB の部屋 ID で書き込む。
+
+        macOS のファイル名の正規化 (NFD) は他の OS で再現できないので、DB の部屋 ID から
+        場所を決める関数 (legacy_log_path) の解決先を、名前の違うフォルダへ向けて確かめる。
+        同じ実体のフォルダなので、「登録されていない部屋」の WARNING も出さない。
+        """
+        import logging
+
+        from saiverse import legacy_log_import as mod
+
+        self._register_room("city_a", "room_db")
+        folder_log = self._make_building_log(
+            "city_a", "room_folder", self._one_message("room_db:1"), register=False,
+        )
+        real_legacy_log_path = mod.legacy_log_path
+
+        def _resolve_to_the_folder(home, city, building_id):
+            if (city, building_id) == ("city_a", "room_db"):
+                return folder_log
+            return real_legacy_log_path(home, city, building_id)
+
+        with patch.object(mod, "legacy_log_path", side_effect=_resolve_to_the_folder), \
+                self.assertLogs("saiverse.legacy_log_import", level="INFO") as logs:
+            stats = self._import(commit_per_building=True)
+
+        self.assertEqual(stats.messages_inserted, 1)
+        rows = self._all_db_messages()
+        self.assertEqual([r.building_id for r in rows], ["room_db"])
+        self.assertTrue(rows[0].message_id.startswith("room_db:"))
+        self.assertEqual(
+            [r.getMessage() for r in logs.records if r.levelno >= logging.WARNING], [],
+        )
+
+    def test_decomposed_folder_name_is_never_used_as_the_room_id(self) -> None:
+        """DB の部屋 ID が合成済みの形 (NFC)、フォルダ名が分解された形 (NFD) の部屋。
+
+        ファイルシステムが 2 つを同じ名前として扱う (macOS) なら DB の部屋 ID で取り込み、
+        別の名前として扱う (Windows・Linux) なら、そのフォルダは登録されていない部屋の
+        フォルダとして WARNING に出す。どちらでも、フォルダ名 (NFD) の部屋 ID の行は作らない。
+        """
+        import logging
+        import unicodedata
+
+        from saiverse.legacy_log_import import legacy_log_path
+
+        nfc = unicodedata.normalize("NFC", "リビング_city_a")
+        nfd = unicodedata.normalize("NFD", nfc)
+        self.assertNotEqual(nfc, nfd, "テストの前提: 濁点で表現が変わる名前を使う")
+        self._register_room("city_a", nfc)
+        self._make_building_log("city_a", nfd, self._one_message(f"{nfc}:1"), register=False)
+
+        with self.assertLogs("saiverse.legacy_log_import", level="INFO") as logs:
+            self._import(commit_per_building=True)
+
+        building_ids = {r.building_id for r in self._all_db_messages()}
+        self.assertNotIn(nfd, building_ids)
+        if legacy_log_path(self.home_path, "city_a", nfc).exists():
+            self.assertEqual(building_ids, {nfc})
+        else:
+            self.assertEqual(building_ids, set())
+            warnings = [r.getMessage() for r in logs.records if r.levelno >= logging.WARNING]
+            self.assertTrue(
+                any("登録されていない部屋" in w and nfd in w for w in warnings), warnings,
+            )
+
+    def test_unregistered_room_folder_is_not_imported_and_is_warned(self) -> None:
+        self._make_building_log("city_a", "room1", self._one_message("room1:1"))
+        self._make_building_log(
+            "city_a", "ghost_room", self._one_message("ghost_room:1"), register=False,
+        )
+
+        with self.assertLogs("saiverse.legacy_log_import", level="WARNING") as logs:
+            stats = self._import(commit_per_building=True)
+
+        self.assertEqual({r.building_id for r in self._all_db_messages()}, {"room1"})
+        self.assertEqual(stats.buildings_scanned, 1)
+        self.assertTrue(
+            any("登録されていない部屋" in m and "ghost_room" in m for m in logs.output),
+            logs.output,
+        )
+
+    def test_unregistered_city_folder_is_not_imported_and_is_warned(self) -> None:
+        self._make_building_log("city_a", "room1", self._one_message("room1:1"))
+        self._make_building_log(
+            "old_city", "room9", self._one_message("room9:1"), register=False,
+        )
+
+        with self.assertLogs("saiverse.legacy_log_import", level="WARNING") as logs:
+            self._import(commit_per_building=True)
+
+        self.assertEqual({r.building_id for r in self._all_db_messages()}, {"room1"})
+        self.assertTrue(
+            any("登録されていない City" in m and "old_city" in m for m in logs.output),
+            logs.output,
+        )
 
 
 if __name__ == "__main__":

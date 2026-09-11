@@ -63,7 +63,6 @@ def probe_refold_floor() -> dict:
     ), patch.object(lc, "presented_chars", side_effect=lambda _p, rows, *_a, **_kw: stored_message_chars(rows)):
         reopened = lc._plan_window_refill(
             None, "audit-model", "m0", Watermarks(target=5000, high=10000),
-            advance_cutoff=False,
         )
     assert reopened is not None and reopened["final_chars"] == 12000
     assert reopened["opened_in_window"] == 1

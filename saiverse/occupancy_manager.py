@@ -593,7 +593,9 @@ class OccupancyManager:
     ) -> List[Dict[str, Any]]:
         """移動後処理の outbox item 列 (dynamic state / addon hooks / game lifecycle)。
 
-        payload は移動時点の事実を凍結する。配送順は persona キュー内 FIFO
+        payload は移動時点の事実を凍結する (例外は部屋 ID の付け替え —
+        saiverse/building_id_repair.py が、未配達の payload の中の同じ部屋を指す
+        識別子だけを新しい ID に置き換える。表す事実は変わらない)。配送順は persona キュー内 FIFO
         (OUTBOX_ID 昇順) で従来の呼び出し順 (dynamic state → hooks → lifecycle)
         を保つ。ハンドラは execution_ledger_wiring 側。
         """

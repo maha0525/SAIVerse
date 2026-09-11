@@ -41,6 +41,14 @@ City は User が運営する一つの「世界」。複数の Building を束�
 
 識別子と表示名を分ける理由・不変条件・移行の経緯は [`intent/city_identity.md`](../intent/city_identity.md)。**`NAME` が付く列は表示名**（`BUILDINGNAME` / `AINAME` と同じ規則）。
 
+### Building ID（内部の識別子）
+
+`BUILDINGID` は、会話ファイルのフォルダ名（`~/.saiverse/cities/<city>/buildings/<building>/`）・URL・`saiverse://` リンクの一部としてそのまま使われる。**フォルダ名や URL を壊す文字を含めない**。新しく作る部屋の ID は、作成時の検査で ASCII 英数字と `_` `-` だけに限られる（`manager/ids.py`）。部屋の名前は `BUILDINGNAME` が持つ。
+
+v0.3.0 より前に作られた部屋は、ID にそうした文字を含むことがある（表示名「2/28」→ `2/28_city_a`）。こうした部屋は起動時に、次の文字をそれぞれ `_` に置き換えた ID へ付け替えられる（`saiverse/building_id_repair.py`）: フォルダ名に使えない文字（`/` `\` `:` `*` `?` `"` `<` `>` `|`）、URL の区切りになる `#` `%`、制御文字、末尾のドットと空白。日本語と全角の文字は変えない。表示名は変わらない。
+
+付け替えは DB の部屋を指す欄・JSON の欄（値の完全一致だけ）・会話ファイルのフォルダに加えて、ペルソナの記憶のファイル（`~/.saiverse/personas/<id>/memory.db`）の機械が読む印も書き換える — 部屋の様子の記録の鍵 `building:<ID>` と束の部屋 ID（と差分の土台の指紋）、写した会話の目印 `building_msg_ref`。ペルソナが読む文面と添付は書き換えない。書き換える前に、そのペルソナの記憶のファイルを `~/.saiverse/backups/building_id_repair/<日時>/` へ複製する。どの ID をどう変えたかは `~/.saiverse/cities/<city>/building_id_renames.json` に残る。付け替える欄の一覧と経緯は [issue](../issues/building_id_contains_path_separator.md)。
+
 ### 入退室の管理
 
 エンティティ（ユーザー・ペルソナ・訪問者）の移動は **OccupancyManager**（`saiverse/occupancy_manager.py`）が一元管理し、`BuildingOccupancyLog` に記録する。ペルソナの移動は `OccupancyManager.move_entity(entity_id, entity_type, from_id, to_id)` を使う（PersonaCore のメソッドを直接呼ばない）。

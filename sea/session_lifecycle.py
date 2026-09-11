@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import threading
@@ -11,6 +12,7 @@ from typing import (
     Any,
     Callable,
     Dict,
+    FrozenSet,
     List,
     Optional,
     Sequence,
@@ -38,6 +40,62 @@ LOGGER = logging.getLogger(__name__)
 # 要る — 両方 None に潰すと、検査が壊れている並びで stale な head が「組み直せ
 # ました」の顔で通り、知らせるための機構が黙る (Codex 指摘 2026-09-01)。
 _WEAVE_INSPECT_FAILED = object()
+
+
+def _rows_content_digest(rows: Sequence[Dict[str, Any]]) -> str:
+    """保存行の (id, 本文) を順序込みで畳んだダイジェスト (sha256 の hex)。
+
+    :meth:`SessionLifecycle._cold_sweep_fingerprint` が「行数も字数も同じまま
+    本文だけが差し替わった」変化を見るために使う。content が None の行は空文字
+    として数える (例外を出さない)。
+
+    各フィールドは「バイト長を ASCII 数字で書いて ``:`` を置き、その後に本体」
+    という形 (netstring) で流し込む。区切り文字を本文の中身から独立させるため:
+    生の制御文字 (0x1f / 0x1e) を区切りに使うと、本文にその文字が入っている
+    行の並びが、別の行構成と同じバイト列に畳まれうる (Codex 指摘 2026-09-10)。
+    長さを前置すれば、読み進める位置が本文の中身で動かないので衝突しない。
+    """
+    digest = hashlib.sha256()
+
+    def _feed(value: Any) -> None:
+        raw = ("" if value is None else str(value)).encode("utf-8", "replace")
+        digest.update(str(len(raw)).encode("ascii"))
+        digest.update(b":")
+        digest.update(raw)
+
+    for row in rows:
+        if isinstance(row, dict):
+            row_id = row.get("id")
+            content = row.get("content")
+        else:  # 想定外の形 (dict でない要素) でも落ちずに区別だけは残す
+            row_id, content = None, row
+        _feed(row_id)
+        _feed(content)
+    return digest.hexdigest()
+
+
+def invalidate_cold_sweep_fingerprints() -> None:
+    """走行中の世界の見張りの指紋を捨てる (設定を読み直す入口から呼ぶ)。
+
+    :meth:`SessionLifecycle.invalidate_cold_sweep_fingerprints` へ届けるだけの
+    薄い口。model / provider / API キーを直す API ルートは manager を持って
+    いないことがあるので、ここで app_state から引く。世界がまだ起動していない
+    (manager が None) 場合は何もしない — 起動時に指紋は空から始まる。
+    """
+    try:
+        from saiverse.app_state import manager
+        lifecycle = getattr(
+            getattr(manager, "sea_runtime", None), "session_lifecycle", None,
+        )
+        if lifecycle is None:
+            return
+        lifecycle.invalidate_cold_sweep_fingerprints()
+    except Exception:
+        LOGGER.warning(
+            "[metabolism] failed to clear cold sweep fingerprints after a config "
+            "reload; a persona whose last attempt failed may keep being skipped "
+            "until the next state change", exc_info=True,
+        )
 
 
 def _rate_limit_cooldown_seconds() -> float:
@@ -93,6 +151,24 @@ class SessionLifecycle:
     #: 検知しても実害は無い — 先回り畳みは「次の会話再開より前」に済めばよい。
     COLD_SWEEP_INTERVAL_SECONDS = 600
     _COLD_SWEEP_KEY = "metabolism:cold_window_sweep"
+    #: :meth:`run_metabolism` の戻り値のうち「畳みを試行し終えた」もの。
+    #: :meth:`run_cold_precompaction` はこの回だけ見張りの指紋を記録する。
+    #: 本体へ入る前に戻った回 ("hot" = 温まったキャッシュを見て引き返した、
+    #: "deferred" = Beat の関所が閉じていた、"cool"、"skip") は記録しない —
+    #: 次の tick で普通に再訪させる。
+    #:
+    #: "skip" (会話の行が残す量以下) も含めない。この経路は、知覚だけが大きい
+    #: ペルソナの提示の節約 (:meth:`_handle_perception_over_budget`、
+    #: presented_context_reduction.md 設計 6) の入口であり、その発火材料
+    #: (部屋の様子の変化) は指紋の外にある。記録するとこの入口が閉じたままに
+    #: なる。LLM を呼ばない経路なので、毎 tick 再訪して構わない。
+    #:
+    #: "deferred_sluice_unseen" も含めない。:meth:`run_metabolism` はこの戻り値
+    #: で「退場だけ次回へ譲り、再実行すれば続きから整理する」と約束している —
+    #: 保存行が一行も動かなくても、スルース側の読み終えた位置は進んでいるので、
+    #: 同じ状態での再実行に意味がある。記録するとその約束を凍らせてしまう
+    #: (Codex 指摘 2026-09-10)。
+    _COLD_SWEEP_ATTEMPTED_RESULTS = frozenset({"ok", "nothing", "failed"})
 
     def __init__(self, runtime: "SEARuntime", manager_ref: Any) -> None:
         self.runtime = runtime      # 過渡期の後方参照 (設計書 §4 で削減)
@@ -100,6 +176,20 @@ class SessionLifecycle:
         # §14-4 先回り畳みの実行中 persona (persona ごとに同時 1 本)
         self._cold_sweep_lock = threading.Lock()
         self._cold_sweep_inflight: Set[str] = set()
+        # 見張りが前回**試行を終えた**ときの状態の指紋 (persona_id → tuple、
+        # :meth:`_cold_sweep_fingerprint`)。見張りに記憶が無いと、状態が変わらない
+        # ペルソナへ同じ判定・同じ失敗を 10 分ごとに繰り返す (2026-09-10 実害:
+        # スルースの LLM が 404 を返す persona に 88 回連続で再試行した)。前回
+        # 試行時と保存行が同じなら素通しする。永続化しない — 再起動でクリアされ、
+        # 全員が一度だけ再検査されるのは設計どおり (錠は _cold_sweep_lock を共用)。
+        self._cold_sweep_fingerprints: Dict[str, tuple] = {}
+        # 指紋の「何回目の設定で取られたものか」を数える札。設定を読み直す
+        # (invalidate_cold_sweep_fingerprints) たびに +1 する。走行を始めた時点で
+        # 控えた札と、記録しようとする時点の札が違えば、その走行は捨てられた前提
+        # (古い endpoint / 古い API キー) の上で得た結果なので記録しない — clear
+        # した直後の dict へ古い走行の指紋が書き戻されると、直したのに二度と
+        # 再試行されない状態が復活する (Codex 指摘 2026-09-10)。
+        self._cold_sweep_generation = 0
         # generate_chronicle が "failed" を返した直近の理由 (error_code /
         # user_message / batch_meta)。戻り値の契約 (status 文字列) を変えずに、
         # 手動生成のジョブ UI が empty_response 等の案内と「該当メッセージを
@@ -130,6 +220,10 @@ class SessionLifecycle:
         # ごとに 1 度だけ警告するための既出集合
         # (:meth:`get_metabolism_watermarks`)。毎ターン同じ警告を出さない。
         self._watermark_inversion_warned: Set[Tuple[str, str]] = set()
+        # head を描き直せなかったことを (persona, model) ごとプロセスごとに
+        # 1 度だけ警告するための既出集合 (:meth:`_note_head_not_redrawn`)。
+        # 恒久的に描けない状態だと縮みの入口を通るたびに出てしまう。
+        self._head_not_redrawn_warned: Set[Tuple[str, str]] = set()
         # 最終防衛ライン (:meth:`ensure_window_floor`) が最後に発火した時刻
         # ((persona_id, model_key) → ISO 文字列)。発火は上流 (読み戻し) の
         # 失敗の印なので context-status に出す。プロセス内の記録で永続化しない。
@@ -154,7 +248,6 @@ class SessionLifecycle:
         *,
         raise_on_error: bool = False,
         model_key: Optional[str] = None,
-        advance_cutoff: bool = True,
     ) -> List[Dict[str, Any]]:
         """この窓と一緒に送られる知覚ブロック (組成は組み立て側と同じ一枚)。
 
@@ -164,17 +257,11 @@ class SessionLifecycle:
         測る側もそれを呼ぶ (規則の二枚目を作らない —
         docs/issues/context_accounting_excludes_injected_rows.md)。
 
-        ``model_key`` はこの窓を届ける Session の実行 model。組成の中で走る
-        知覚の下ろし判定はこの model の水位で行う — 勘定と提示が別の model の
-        水位で動くと、実行モデルに保存した知覚の水位が効かない
-        (2026-09-05 Codex 三巡 #2)。None なら ``persona.model`` へ落ちる。
-
-        ``advance_cutoff=False`` は**測るだけ** — 知覚の下ろし境界を進める判定は
-        同じように行うが、``perception_presentation`` へは書かない。仕分けは
-        「この列が実際に送られるか」: 送られる列 (発火判定・非常畳み・実書き込み
-        の読み戻し・整理の退場計画) は進め、送られない列 (読み取り専用の画面と、
-        仮定の窓の下見) は進めない。境界は一方向で取り消せないので、実際には
-        送らない列でそれを確定させない (2026-09-05 四巡目 #6)。
+        ``model_key`` はこの窓を届ける Session の実行 model。組成は読み取り専用
+        (2026-09-09 に知覚の合計上限を廃止して以降、台帳へ書く経路が無い) なので、
+        測るだけの呼び出しと実際に送る呼び出しの区別は要らない。ただし
+        **操作通知を下ろした境界は model ごと**なので、同じ窓でも model が違えば
+        通知の出方は変わる (docs/intent/presented_context_reduction.md 設計 1)。
 
         取得できない環境・失敗時は空リスト = 知覚ぶん 0 (従来値へ縮退)。WARN は
         組成側が出す。``raise_on_error=True`` は失敗を例外で伝える — 透明性の
@@ -186,7 +273,6 @@ class SessionLifecycle:
             return list_presented_perception_blocks(
                 self.runtime, persona, list(presented), anchor_id=anchor_id,
                 raise_on_error=raise_on_error, model_key=model_key,
-                advance_cutoff=advance_cutoff,
             )
         except Exception:
             if raise_on_error:
@@ -204,18 +290,16 @@ class SessionLifecycle:
         *,
         raise_on_error: bool = False,
         model_key: Optional[str] = None,
-        advance_cutoff: bool = True,
     ) -> List[Dict[str, Any]]:
         """保存行 + 知覚ブロックを時刻順にマージした「送る中身」の列。
 
         水位の勘定 (:func:`~sea.eviction_plan.message_chars`) と退場計画
         (:func:`~sea.eviction_plan.plan_eviction`) の入力はどちらもこれ。
-        ``model_key`` は実行 model (知覚の水位の主語)。``advance_cutoff=False``
-        は測るだけ (:meth:`perception_blocks_for` を参照)。
+        ``model_key`` は実行 model。
         """
         blocks = self.perception_blocks_for(
             persona, presented, anchor_id, raise_on_error=raise_on_error,
-            model_key=model_key, advance_cutoff=advance_cutoff,
+            model_key=model_key,
         )
         if not blocks:
             return list(presented)
@@ -228,20 +312,18 @@ class SessionLifecycle:
         *,
         raise_on_error: bool = False,
         model_key: Optional[str] = None,
-        advance_cutoff: bool = True,
     ) -> int:
         """この窓で実際に送られる文字数 (保存行 + 知覚ブロック)。
 
         適用範囲は**履歴窓**: 時刻アンカー (49 字)・添付注記などの微小な整形と、
         履歴の外のセクション (head / realtime) は含まない — 水位が束ねるのは
         履歴窓で、逸脱は issue (context_accounting_excludes_injected_rows.md)
-        に既知として記録済み。``model_key`` は実行 model (知覚の水位の主語)。
-        ``advance_cutoff=False`` は測るだけ (:meth:`perception_blocks_for`)。
+        に既知として記録済み。``model_key`` は実行 model。
         """
         return message_chars(
             self.presented_with_perceptions(
                 persona, presented, anchor_id, raise_on_error=raise_on_error,
-                model_key=model_key, advance_cutoff=advance_cutoff,
+                model_key=model_key,
             )
         )
 
@@ -280,6 +362,74 @@ class SessionLifecycle:
                 total_chars - rows_chars, watermarks.high, watermarks.target,
                 persona_id, rows_chars, total_chars,
             )
+        return True
+
+    def _note_head_not_redrawn(
+        self, persona, model_key: Optional[str],
+        stale_sections: FrozenSet[str] = frozenset(),
+    ) -> None:
+        """head を描き直せなかった回の警告 — (persona, model) ごとに 1 度だけ。
+
+        挙動は変えない (通知は提示に残る) — 変えるのはログの量だけ。head が
+        恒久的に描けない状態だと縮みの入口を通るたびに同じ行が出るので、
+        :meth:`_note_perception_over_budget` と同じ形で抑止する。復帰しても
+        再武装しない (プロセスの間 1 度) — 目的は「毎ターン同じ行で埋めない」
+        ことで、故障の回数を数えることではない。
+
+        ``stale_sections`` が空でないなら「dispatch は通ったが Section の
+        capture が古いまま」、空なら「dispatch 自体が成立しなかった」。
+        """
+        persona_id = str(getattr(persona, "persona_id", "?"))
+        key = (persona_id, str(model_key))
+        with self._warn_lock:
+            first_time = key not in self._head_not_redrawn_warned
+            if first_time:
+                self._head_not_redrawn_warned.add(key)
+        reason = (
+            "these head sections still hold their previous values: "
+            + ", ".join(sorted(stale_sections))
+            if stale_sections else "the head rebuild did not go through"
+        )
+        message = (
+            "[metabolism] the head was not redrawn (persona=%s model=%s): %s. "
+            "Keeping the operation notices in the presentation this round — "
+            "they are the only way that model learns of the change, and the "
+            "boundary only moves forward. The room states still shrink (they "
+            "do not live in the head)"
+        )
+        if first_time:
+            LOGGER.warning(message, persona_id, model_key, reason)
+        else:
+            LOGGER.debug(message, persona_id, model_key, reason)
+
+    def _handle_perception_over_budget(
+        self, persona, rows_chars: int, total_chars: int, watermarks: Watermarks,
+        model_key: Optional[str] = None,
+    ) -> bool:
+        """入口の門が「合計は上限超え・会話は畳めない」を見つけた回の処置。
+
+        **Metabolism の 4 つの入口 (自動発火 / 手動の記憶の整理 / 冷えた先回り /
+        非常畳み) が共有する一点**。どの入口も「会話の行が残す量以下」だと
+        :meth:`_run_metabolism_locked` へ入らず引き返すので、会話がずっと小さく
+        知覚 (会話以外の提示内容) だけが大きいペルソナでは、ロックの内側にある
+        提示の節約 (:meth:`reduce_presentation`) に一度も届かない。
+        旧しきい値 (知覚の二水位、2026-09-09 廃止) はこの状態を独立に拾えて
+        いたので、放置するとその型のペルソナには退行になる — だから引き返す
+        前にここで縮みを試す
+        (docs/intent/presented_context_reduction.md 設計 1/2)。
+
+        やるのは旗を立てること (:meth:`_note_perception_over_budget`) と、
+        縮めるものが実際にあるときだけの縮み (:meth:`reduce_presentation` の
+        前提条件つきの呼び出し) の二つ。**LLM は呼ばない** — 門が今まで持って
+        いた「何も生成しない」性質はそのまま。
+
+        Returns: 旗が立ったか (呼び出し側の従来のログ分岐はこの値のまま)。
+        """
+        if not self._note_perception_over_budget(
+            persona, rows_chars, total_chars, watermarks,
+        ):
+            return False
+        self.reduce_presentation(persona, model_key)
         return True
 
     def get_metabolism_watermarks(
@@ -1654,6 +1804,11 @@ class SessionLifecycle:
                 "[metabolism] skipped during rate-limit cooldown (persona=%s)",
                 persona_id_for_cooldown,
             )
+            # 小休止が止めるのは LLM を伴う仕事 (編纂・スルース) だけ。会話以外の
+            # 縮みは LLM を呼ばないので、小休止の理由に当たらない — 縮めるものが
+            # あるときだけ走らせる (2026-09-10 レビュー二巡目)。ここを素通しに
+            # すると、429 が続く間じゅう提示が育ちっぱなしになる。
+            self.reduce_presentation(persona, model_key)
             return
 
         history_mgr = getattr(persona, "history_manager", None)
@@ -1719,9 +1874,10 @@ class SessionLifecycle:
         rows_chars = stored_message_chars(current_messages)
         if rows_chars <= watermarks.target:
             # 既に目標水位より軽い。削る先が無いので走らせない (token 発火でも同じ)。
-            # 合計が上限を超えている (= 知覚の供給が予算超過) なら 1 度だけ警告。
-            if not self._note_perception_over_budget(
-                persona, rows_chars, current_chars, watermarks,
+            # 合計が上限を超えている (= 知覚の供給が予算超過) なら 1 度だけ警告し、
+            # 縮めるものがあれば提示の節約だけ走らせる (LLM は呼ばない)。
+            if not self._handle_perception_over_budget(
+                persona, rows_chars, current_chars, watermarks, model_key,
             ):
                 LOGGER.debug(
                     "[metabolism] skip: window already at/below target "
@@ -2577,8 +2733,8 @@ class SessionLifecycle:
                 persona, window.presented, window.anchor_id,
                 model_key=resolved_model,
             )
-            if not self._note_perception_over_budget(
-                persona, rows_chars, total_chars, watermarks,
+            if not self._handle_perception_over_budget(
+                persona, rows_chars, total_chars, watermarks, resolved_model,
             ):
                 LOGGER.info(
                     "[metabolism] manual compaction: window already at/below "
@@ -2794,8 +2950,9 @@ class SessionLifecycle:
 
         合計が上限を超えていても会話の行が残す量以下なら、畳めるものが無い
         (超過の主は知覚の供給)。その回は通知も session_anchor 行の立ち上げも
-        run_metabolism もせず "skip" を返す (警告はペルソナごと 1 度、
-        :meth:`_note_perception_over_budget`)。
+        run_metabolism もせず "skip" を返す (警告はペルソナごと 1 度)。ただし
+        引き返す前に提示の節約だけは試す — 縮めるものがあるときに限る
+        (:meth:`_handle_perception_over_budget`。LLM は呼ばない)。
 
         Returns:
             "skip" (条件外・超過なし・知覚の供給だけが予算超過) / run_metabolism の結果
@@ -2812,6 +2969,9 @@ class SessionLifecycle:
                 "rate-limit cooldown (persona=%s)",
                 getattr(persona, "persona_id", None),
             )
+            # 小休止は LLM を伴う仕事だけを止める — 会話以外の縮みは LLM を
+            # 呼ばないので、縮めるものがあるときだけ走らせる (2026-09-10)。
+            self.reduce_presentation(persona, model_key)
             return "skip"
         watermarks = self.get_metabolism_watermarks(persona, model_key)
         if watermarks is None or watermarks.high is None:
@@ -2842,8 +3002,8 @@ class SessionLifecycle:
         # 「整理しています」だけ出て何も畳めない (Codex 指摘 2026-09-03)。1 度
         # だけ警告して、通知・行の立ち上げ・run_metabolism のどれもせず引き返す。
         rows_chars = stored_message_chars(window.presented)
-        if self._note_perception_over_budget(
-            persona, rows_chars, current_chars, watermarks,
+        if self._handle_perception_over_budget(
+            persona, rows_chars, current_chars, watermarks, model_key,
         ):
             return "skip"
         # ここから先は実際に畳む — 機構1 の前進をこの時点で永続化する (上の
@@ -3396,8 +3556,6 @@ class SessionLifecycle:
             plan = self._plan_window_refill(
                 persona, model_key, anchor_id, watermarks,
                 raise_on_error=raise_on_error,
-                # 仮定の窓の下見 — 行も知覚の下ろし境界も一切書かない。
-                advance_cutoff=False,
             )
         except Exception:
             if raise_on_error:
@@ -3423,7 +3581,6 @@ class SessionLifecycle:
         *,
         raise_on_error: bool = False,
         strict: bool = False,
-        advance_cutoff: bool = True,
     ) -> Optional[Dict[str, Any]]:
         """§15 読み戻しの計画 (読みだけ — 行は触らない)。
 
@@ -3741,13 +3898,9 @@ class SessionLifecycle:
         # 3. 仕上げの検算は一度だけ: 実際に送る合計 (知覚込み) を上限と比べ、
         # 超えていても開いた結果は保つ (2026-09-05 裁定 — 記憶を開き直さない
         # くらいなら超過を受け入れる。始末は次の Pulse の非常畳みの仕事)。
-        # 仕上げの検算が知覚の下ろし境界を進めてよいのは、この計画が実際に
-        # 書き戻される回だけ (maybe_run_window_refill)。プレビュー
-        # (preview_refilled_history) は「読み戻したら、の仮定の窓」なので、
-        # 送られない列で一方向の境界を確定させない (advance_cutoff=False)。
         final_total = self.presented_chars(
             persona, presented, base_anchor_id, raise_on_error=raise_on_error,
-            model_key=model_key, advance_cutoff=advance_cutoff,
+            model_key=model_key,
         )
         if watermarks.high is not None and final_total > watermarks.high:
             LOGGER.warning(
@@ -4337,12 +4490,29 @@ class SessionLifecycle:
         スレッドへ逃がす — EventScheduler の dispatch スレッドで重い LLM 処理を
         同期実行すると後続の予約が滞るため (saiverse/event_scheduler.py の
         docstring: 重い処理は別 thread に投げる)。
+
+        "due" でも、前回の試行から状態が動いていない persona は素通しする
+        (:meth:`_cold_sweep_fingerprint`)。指紋が取れない (None) ときは素通し
+        させず従来どおり試行する — ゲートは節約であって門ではない。
         """
         try:
             personas = dict(getattr(self.manager, "personas", None) or {})
+            with self._cold_sweep_lock:
+                # 削除・退場した persona の指紋は自然には消えないので、巡回の
+                # たびに現存しないキーを落とす (_cold_sweep_inflight は実行完了で
+                # 自然に消えるが、指紋は明示的に掃除しないと残り続ける)。
+                for stale in set(self._cold_sweep_fingerprints) - personas.keys():
+                    del self._cold_sweep_fingerprints[stale]
             for persona in personas.values():
                 try:
                     if self.cold_precompaction_status(persona) != "due":
+                        continue
+                    if self._cold_sweep_is_unchanged(persona):
+                        LOGGER.debug(
+                            "[metabolism] cold sweep skip: state unchanged since "
+                            "last attempt (persona=%s)",
+                            getattr(persona, "persona_id", "?"),
+                        )
                         continue
                     self._spawn_cold_precompaction(persona)
                 except Exception:
@@ -4352,6 +4522,144 @@ class SessionLifecycle:
                     )
         finally:
             self.schedule_cold_window_sweep()
+
+    def _cold_sweep_fingerprint(self, persona) -> Optional[tuple]:
+        """見張りが「前回の試行から状態が動いたか」を見るための指紋。
+
+        中身は**保存行ベースの値と現在地の部屋だけ** — (実行 model, 現行 model の
+        起点, 提示ウィンドウの行数, 最終行の id, 保存行の字数, 残す量, 上限,
+        保存行の中身のダイジェスト, 現在地の建物 id)。知覚ブロックの字数
+        (:meth:`presented_chars`) は意図的に入れない: 部屋の様子など時変の内容が
+        混ざると毎回「変化あり」になり、ゲートが死ぬ。現在地の建物 id は
+        時変ではなく離散的な状態変化 (移動) で、保存行を一行も動かさずに起きる
+        ことがあるので、再検査の合図として入れる (ローカルレビュー指摘 2026-09-10)。
+
+        中身のダイジェストが要るのは、行数も字数も動かさずに既存行の本文だけが
+        差し替わる経路があるため (Memory 設定 UI の本文編集など)。数だけの指紋は
+        その変化を見落とし、編集後の窓を「試行済み」として素通しさせてしまう
+        (Codex 指摘 2026-09-10)。
+
+        必要なデータが取れないときは None を返す (呼び出し側は「判定不能 =
+        素通しさせず従来どおり試行」として扱う)。
+        """
+        persona_id = getattr(persona, "persona_id", None)
+        model_key = str(getattr(persona, "model", "") or "") or None
+        if not persona_id or not model_key:
+            return None
+        watermarks = self.get_metabolism_watermarks(persona, model_key)
+        if watermarks is None or watermarks.high is None:
+            return None
+        entry = self.load_anchor_entry(persona_id, model_key)
+        anchor_id = (entry or {}).get("anchor_id")
+        if not anchor_id:
+            return None
+        window = self.get_presented_window(persona, model_key, anchor_id)
+        rows = list(window.presented)
+        # 行が dict でない並び (想定外) でも AttributeError で落とさない —
+        # 指紋の計算はゲートの都合であって、畳みの試行を止める理由にならない
+        # (Codex 指摘 2026-09-10)。dict でない要素は id を持たないものとして
+        # 扱い、字数の勘定 (dict しか読めない) からも外す。行数と中身の
+        # ダイジェストには入るので、区別そのものは残る。
+        dict_rows = [row for row in rows if isinstance(row, dict)]
+        last_row = rows[-1] if rows else None
+        last_id = last_row.get("id") if isinstance(last_row, dict) else None
+        building_id = getattr(persona, "current_building_id", None) or ""
+        return (
+            model_key,
+            str(anchor_id),
+            len(rows),
+            None if last_id is None else str(last_id),
+            stored_message_chars(dict_rows),
+            watermarks.target,
+            watermarks.high,
+            _rows_content_digest(rows),
+            str(building_id),
+        )
+
+    def _cold_sweep_is_unchanged(self, persona) -> bool:
+        """前回**試行を終えた**ときと同じ状態か (指紋が取れなければ False)。
+
+        指紋の計算が例外で落ちた回も False を返す (= 変化あり扱いで試行へ進む)。
+        例外をそのまま投げると tick 側のペルソナ単位 except に届き、その回の
+        spawn ごと落ちる — ゲートは節約であって門ではないのに、指紋の失敗が
+        畳みを止める門として働いてしまう (Codex 指摘 2026-09-10)。
+        """
+        persona_id = getattr(persona, "persona_id", None)
+        if not persona_id:
+            return False
+        try:
+            fingerprint = self._cold_sweep_fingerprint(persona)
+        except Exception:
+            LOGGER.debug(
+                "[metabolism] cold sweep fingerprint failed before the attempt; "
+                "treating the state as changed (persona=%s)",
+                persona_id, exc_info=True,
+            )
+            return False
+        if fingerprint is None:
+            return False
+        with self._cold_sweep_lock:
+            return self._cold_sweep_fingerprints.get(persona_id) == fingerprint
+
+    def _record_cold_sweep_fingerprint(self, persona, generation: int) -> None:
+        """試行**後**の状態で指紋を記録する (次の tick の素通し判定の基準)。
+
+        呼ぶのは :meth:`run_cold_precompaction` が畳みの本体を通し終えた回だけ
+        (:data:`_COLD_SWEEP_ATTEMPTED_RESULTS`)。本体へ入る前に引き返した回
+        ("hot" / "deferred" / "skip") と、同じ状態での再実行に意味が残る回
+        ("deferred_sluice_unseen") は記録せず、次の tick で普通に再訪させる。
+        Beat ロックの内側から呼ばれる — 記録の時点の状態が「試行が見た状態」と
+        一致していることがこのゲートの前提。
+
+        ``generation`` は走行を始めた時点で控えた設定の札。記録の時点で札が
+        進んでいたら (走行中に設定が読み直された) 何もしない — その結果は捨てた
+        前提の上で得たものなので、記録すると修復後の再試行を抑止してしまう。
+        """
+        persona_id = getattr(persona, "persona_id", None)
+        if not persona_id:
+            return
+        try:
+            fingerprint = self._cold_sweep_fingerprint(persona)
+        except Exception:
+            LOGGER.debug(
+                "[metabolism] cold sweep fingerprint failed after the attempt "
+                "(persona=%s)", persona_id, exc_info=True,
+            )
+            return
+        if fingerprint is None:
+            return
+        with self._cold_sweep_lock:
+            if generation != self._cold_sweep_generation:
+                LOGGER.debug(
+                    "[metabolism] cold sweep fingerprint dropped: the config was "
+                    "reloaded while the attempt was running (persona=%s)",
+                    persona_id,
+                )
+                return
+            self._cold_sweep_fingerprints[persona_id] = fingerprint
+
+    def invalidate_cold_sweep_fingerprints(self) -> None:
+        """記録済みの指紋を全部捨てて、次の tick で全員を再検査させる。
+
+        指紋は「保存行と水位が同じなら結果も同じ」という前提に立っているが、
+        その前提は接続先の設定が変わらないことに依っている。一度 "failed" を
+        記録したあと provider の endpoint や API キーを直しても、行も水位も
+        model 名も動かないので指紋が一致し続け、直したのに二度と再試行されない
+        (Codex 指摘 2026-09-10)。設定を読み直す入口はこれを呼んで前提を捨てる。
+
+        捨てるのは dict の中身だけでは足りない。読み直しの時点で旧設定のまま
+        走行中だった :meth:`run_cold_precompaction` は、この後で完了して空の
+        dict へ古い走行の指紋を書き戻しうる。設定の札 (generation) を一緒に
+        進めて、走行開始時の札と食い違う記録を弾く。
+        """
+        with self._cold_sweep_lock:
+            count = len(self._cold_sweep_fingerprints)
+            self._cold_sweep_fingerprints.clear()
+            self._cold_sweep_generation += 1
+        LOGGER.debug(
+            "[metabolism] cold sweep fingerprints cleared after a config reload "
+            "(%d personas will be re-examined on the next tick)", count,
+        )
 
     def cold_precompaction_status(self, persona) -> str:
         """先回り畳み (§14-4) の発火条件を検査する (読みだけ・LLM なし)。
@@ -4421,6 +4729,9 @@ class SessionLifecycle:
 
         def _target() -> None:
             try:
+                # 指紋の記録は run_cold_precompaction の内側 (Beat ロックの中)
+                # で行う — ここで記録すると、ロック解放から記録までの隙間に
+                # 会話経路が進めた状態を「試行後の状態」として焼いてしまう。
                 self.run_cold_precompaction(persona)
             except Exception:
                 LOGGER.exception(
@@ -4456,7 +4767,15 @@ class SessionLifecycle:
         滞留 (:meth:`_retry_extraction_backlog` — LLM 課金と記憶書き込み) を
         流すので、空振りと分かっている回に入れない (Codex 指摘 2026-09-03)。
         合計が上限も超えていれば知覚の供給が予算超過 — 警告はペルソナごと
-        1 度 (:meth:`_note_perception_over_budget`)。
+        1 度で、縮めるものがあれば提示の節約だけ走らせる (LLM なし、
+        :meth:`_handle_perception_over_budget`)。
+
+        畳みの本体を通した回は、**Beat ロックを握ったまま**見張りの指紋を記録
+        する (:meth:`_record_cold_sweep_fingerprint`)。次の tick は同じ状態なら
+        素通しする — 記録をロックの外へ出すと、その隙間で会話経路が進めた状態を
+        試行後の状態として焼き、以後その新しい状態が素通しする。走行を始める
+        時点で設定の札 (generation) を控えて記録側へ渡す — 走行中に設定が
+        読み直されたら、この回の指紋は捨てて次の tick へ再検査を譲る。
 
         Returns:
             :meth:`cold_precompaction_status` の値 (条件不成立時)、"skip"
@@ -4471,6 +4790,11 @@ class SessionLifecycle:
                 status = self.cold_precompaction_status(persona)
                 if status != "due":
                     return status
+                # 走行を始める設定の札を控える。走行中に設定が読み直されたら
+                # (invalidate_cold_sweep_fingerprints)、この札は現在の札と
+                # 食い違い、記録側がこの回の指紋を捨てる。
+                with self._cold_sweep_lock:
+                    generation = self._cold_sweep_generation
                 model_key = str(getattr(persona, "model", "") or "") or None
                 watermarks = self.get_metabolism_watermarks(persona, model_key)
                 window = self.get_presented_window(persona, model_key)
@@ -4490,8 +4814,8 @@ class SessionLifecycle:
                 # 滞留 (LLM) を流し、10 分ごとに同じ空振りを繰り返す。
                 rows_chars = stored_message_chars(window.presented)
                 if rows_chars <= watermarks.target:
-                    if not self._note_perception_over_budget(
-                        persona, rows_chars, current_chars, watermarks,
+                    if not self._handle_perception_over_budget(
+                        persona, rows_chars, current_chars, watermarks, model_key,
                     ):
                         LOGGER.debug(
                             "[metabolism] cold pre-compaction skip: rows already "
@@ -4508,10 +4832,19 @@ class SessionLifecycle:
                     watermarks.target, watermarks.high,
                 )
                 building_id = getattr(persona, "current_building_id", None) or ""
-                return self.run_metabolism(
+                result = self.run_metabolism(
                     persona, building_id, window, watermarks, None,
                     model_key=model_key, chronicle_force=True,
                 )
+                if result in self._COLD_SWEEP_ATTEMPTED_RESULTS:
+                    # 試行し終えた回だけ、試行**後**の状態を見張りの指紋に残す
+                    # (次の tick はこれと同じ状態なら素通しする)。記録は Beat
+                    # ロックを握ったまま行う — 解放してから記録すると、その隙間で
+                    # 会話経路の Metabolism や新しい発言が状態を進め、冷えた試行が
+                    # 一度も見ていない状態を「試行後の状態」として焼いてしまう。
+                    # 以後その新しい状態が素通しする (Codex 指摘 2026-09-10)。
+                    self._record_cold_sweep_fingerprint(persona, generation)
+                return result
         except BeatGateClosedError:
             # 先回りは急がない — pending が残る persona は次の tick に譲る。
             LOGGER.info(
@@ -4615,13 +4948,12 @@ class SessionLifecycle:
             # の警告)。
             if stored_message_chars(current_messages) <= watermarks.target:
                 self.ensure_recall_embeddings(persona)
-                try:
-                    from saiverse.dynamic_state import DynamicStateManager
-                    DynamicStateManager.on_metabolism(
-                        persona, self.manager, model_key=model_key,
-                    )
-                except Exception:
-                    LOGGER.exception("[dynamic_state] on_metabolism failed")
+                # head の描き直しはこの回に必ず要る (印戻しで提示が変わった
+                # ことの可視化の同期) ので前提条件は付けない。縮みは
+                # reduce_presentation の中で head の成否を見て決まる。
+                self.reduce_presentation(
+                    persona, model_key, require_pending=False,
+                )
                 if event_callback:
                     event_callback({
                         "type": "metabolism",
@@ -4652,6 +4984,17 @@ class SessionLifecycle:
             # 入口の門 (行 vs 残す量) で弾かれるのが普通だが、印戻し・恒久欠落
             # fold の破棄でロック内の窓が痩せた回はここまで来る。LLM は呼ばずに
             # 引き返す (警告はペルソナごと 1 度)。
+            #
+            # ただし引き返す前に**提示の節約だけは走らせる** — 会話が畳めない
+            # のに合計が上限を超えている状態こそ、会話以外 (操作通知・いない
+            # 部屋の様子) の縮みが一番効く場面だから
+            # (docs/intent/presented_context_reduction.md 設計 1/2)。
+            #
+            # 前提条件つき (縮めるものが無ければ head の描き直しごと見送る):
+            # この分岐は「畳める材料が U に届くまで毎回落ちる」普通の経路なので、
+            # 無条件だと超過が続く間ずっと head の凍結が解け続け、プロンプトの
+            # 前置きが毎ターン書き変わる (2026-09-10 レビュー二巡目)。
+            self.reduce_presentation(persona, model_key)
             if not self._note_perception_over_budget(
                 persona, plan.stored_chars, plan.total_chars, watermarks,
             ):
@@ -4900,14 +5243,16 @@ class SessionLifecycle:
                 persona, model_key, window, plan, chronicle_status,
             )
 
-            # 4. Dynamic State Sync: 可視化は model の節目 — anchor を進めた model の
-            # (persona, model) snapshot だけを再 capture する (§3.2。他 model の提示コンテキストは
-            # 自分の節目まで prefix を変えない = prefix cache 保護)。
-            try:
-                from saiverse.dynamic_state import DynamicStateManager
-                DynamicStateManager.on_metabolism(persona, self.manager, model_key=model_key)
-            except Exception:
-                LOGGER.exception("[dynamic_state] on_metabolism failed")
+            # 4. Dynamic State Sync + 提示の節約: 可視化は model の節目 —
+            # anchor を進めた model の (persona, model) snapshot だけを再 capture
+            # する (§3.2。他 model の提示コンテキストは自分の節目まで prefix を
+            # 変えない = prefix cache 保護)。その head を描き直した**後**に、
+            # 用の済んだ操作通知を提示から下ろし、現在地でない部屋の様子を一行へ
+            # 縮める (docs/intent/presented_context_reduction.md 設計 1/2)。
+            # 順番が要る: 通知が重複になるのは head が今の状態を見せてからで、
+            # 先に下ろすと一拍だけ「通知も head も古い」瞬間ができる。
+            # head の描き直しはこの回に必ず要る (起点が動いた) ので前提条件なし。
+            self.reduce_presentation(persona, model_key, require_pending=False)
 
             # 5. Notify completion
             if event_callback:
@@ -4926,6 +5271,12 @@ class SessionLifecycle:
                 "maybe_run_metabolism",
                 chronicle_status, sluice_status, model_key,
             )
+            # 退場は見送るが、会話以外の縮みはここでも走らせる (2026-09-10
+            # レビュー二巡目)。編纂・スルースが失敗し続けるペルソナは退場に
+            # 届かないまま提示が育つ — 縮みは LLM を呼ばないので、失敗の巻き
+            # 添えで止める理由が無い。前提条件つき (縮めるものが無ければ head の
+            # 描き直しごと見送る) なので、再試行のたびに前置きが割れることはない。
+            self.reduce_presentation(persona, model_key)
             if chronicle_status not in ("ok", "disabled"):
                 message = "記憶の整理を見送りました（Chronicle生成が完了しなかったため、次回に再試行します）"
                 ret = chronicle_status  # "failed" / "deferred" (手動入口の結果報告用)
@@ -4949,6 +5300,185 @@ class SessionLifecycle:
                     "content": message,
                 })
             return ret
+
+    def _reduce_presented_perceptions(
+        self, persona, model_key: Optional[str] = None,
+        *, drop_notices: bool = True,
+    ) -> bool:
+        """縮みの判断を台帳へ書き留める (:meth:`reduce_presentation` の下請け)。
+
+        正典: docs/intent/presented_context_reduction.md 設計 1 / 設計 2。
+        やることは縮みの判断の永続化だけ — 台帳の行も確定文面も書き換えず、
+        部屋の記帳に印を追加し、操作通知の境界を進める。以後の提示の組成
+        (:func:`sea.runtime_context.list_presented_perception_blocks`) がそれを
+        読むだけになる。だから提示が変わるのは Metabolism の瞬間だけで、移動や
+        発言では変わらない (プロンプトキャッシュの前方一致の保護)。
+
+        ``model_key`` は**操作通知の境界の持ち主** — 境界は head と同じ
+        (persona, model) の単位で持つ。``drop_notices=False`` はその model の
+        head を描き直せなかった回で、通知は提示に残す (部屋の様子は head と
+        無関係なので縮める)。
+
+        呼び出しは :meth:`reduce_presentation` の一点だけ。失敗は WARN に倒す
+        (fail-open) — Metabolism 本体は既に確定しており、縮めそこねても提示が
+        従来どおり大きいだけで、失われるものは無い。次の Metabolism がやり直す。
+
+        Returns: 縮みの記録を書けたか。
+        """
+        adapter = getattr(persona, "sai_memory", None)
+        if adapter is None or not getattr(adapter, "is_ready", lambda: False)():
+            return False
+        try:
+            from sai_memory.presented_reduction import mark_presentation_reductions
+            with adapter._db_lock:
+                try:
+                    result = mark_presentation_reductions(
+                        adapter.conn, model_key, drop_notices=drop_notices,
+                    )
+                    adapter.conn.commit()
+                except Exception:
+                    adapter.conn.rollback()
+                    raise
+        except Exception:
+            LOGGER.warning(
+                "[metabolism] could not record the presentation reduction "
+                "(persona=%s); the presentation stays at full size until the "
+                "next metabolism", getattr(persona, "persona_id", "?"),
+                exc_info=True,
+            )
+            return False
+        LOGGER.debug(
+            "[metabolism] presentation reduction recorded (persona=%s): %s",
+            getattr(persona, "persona_id", "?"), result,
+        )
+        return True
+
+    def reduce_presentation(
+        self, persona, model_key: Optional[str] = None,
+        *, require_pending: bool = True,
+    ) -> bool:
+        """head を描き直してから提示を縮める — 縮みへの**唯一の入口**。
+
+        正典: docs/intent/presented_context_reduction.md 設計 1 / 設計 2。
+        会話以外の内容 (用の済んだ操作通知・現在地でない部屋の様子) を縮める
+        仕事は、条件の違う入口が 6 つあるのでここ一枚に寄せてある。
+
+        **順序は入れ替えられない**: 先に head を描き直し
+        (:meth:`~saiverse.dynamic_state.DynamicStateManager.on_metabolism`)、
+        その後で縮める。操作通知は head が今の状態を見せるまで唯一の情報源
+        なので、先に下ろすと一拍だけ「通知も head も古い」瞬間ができる。
+
+        **head を描き直せなかった回は操作通知を下ろさない** (2026-09-10 レビュー
+        二巡目)。``on_metabolism`` は失敗を例外ではなく ``False`` で返す
+        (persona / building 不明の無言 False、dispatch 失敗の WARN + False) ので、
+        戻り値を捨てると head が古いまま通知だけが消える。部屋の様子は head に
+        載らないので、この回も縮める。
+
+        **「描き直せた」は Section 単位で確かめる** (2026-09-10 最終検分)。
+        head の capture は Section ごとの失敗を例外にせず、古い値を据え置くか
+        その Section を head から落とすだけなので、dispatch の成立だけでは
+        「今の状態を見せている」と言えない。**通知を出す Section**
+        (:data:`~saiverse.dynamic_state.NOTICE_SOURCE_SECTIONS` — コア記憶・机・
+        Memopedia 目次・スペル一覧) が全部撮り直せた回にだけ通知を下ろす。
+        境界は一方向なので、古い head のまま下ろすと、そのペルソナはその変化を
+        知る手段を恒久的に失う。失敗が続く限り通知が残るのは安全側で正しい。
+
+        **境界は model ごと・部屋の印はペルソナ共通**。一文で言うと「操作通知は、
+        そのモデルの head が描き直されたときに、そのモデルの提示から下りる。
+        部屋は head と無関係なのでペルソナ共通」。model の同定は head と同じ解決
+        (:func:`~sea.head_pipeline.integration.resolve_default_model_key`) を通す。
+
+        ``require_pending`` は前提条件の有無:
+
+        - ``True`` (既定) — 縮めるものが実際にあるとき (安い読みだけの
+          :func:`~sai_memory.presented_reduction.has_pending_reductions`) にしか
+          動かない。**head の描き直しごと見送る**。超過が続く限り毎ターン通る
+          入口 (門・計画が空の回・退場を見送った回・小休止) で無条件に動かすと、
+          プロンプトの前置きが毎回変わってキャッシュの前方一致が無駄に割れ続ける。
+        - ``False`` — head の描き直しがそもそも要る回 (退場して起点が動いた回・
+          印戻しだけで収まった回。可視化の同期がこの回の本来の仕事) だけ。
+
+        **冪等** — 縮みの記録は境界の前進と記帳への印の追加だけなので、二度目の
+        呼び出しでは前提条件が偽になって何もしない。
+
+        Beat ロックはここでは取らない (入口には門のようにロックの外のものがある)。
+        同時に走る本体との競合は、縮みの書き込みが SAIMemory の ``_db_lock`` の
+        内側で完結し、境界は一方向・記帳の印は追加のみであることで無害になる。
+
+        SAIMemory が未 ready の回は縮みの記録を書けないが、``require_pending=False``
+        の回の**head の描き直しは走らせる** — あちらは可視化の同期という別の
+        仕事で、記憶の読み書きに依らない (縮みの相乗りでその仕事を落とさない)。
+
+        Returns: 縮みの記録まで進んだか (前提条件が偽 / 読めなかった回は False)。
+        """
+        adapter = getattr(persona, "sai_memory", None)
+        memory_ready = (
+            adapter is not None
+            and bool(getattr(adapter, "is_ready", lambda: False)())
+        )
+        from sea.head_pipeline.integration import resolve_default_model_key
+        resolved_model = (
+            str(model_key) if model_key else resolve_default_model_key(persona)
+        )
+        if require_pending:
+            if not memory_ready:
+                return False
+            try:
+                from sai_memory.presented_reduction import has_pending_reductions
+                with adapter._db_lock:
+                    pending = has_pending_reductions(adapter.conn, resolved_model)
+            except Exception:
+                LOGGER.warning(
+                    "[metabolism] could not tell whether anything can be reduced "
+                    "in the presentation (persona=%s model=%s); leaving it at "
+                    "full size this round",
+                    getattr(persona, "persona_id", "?"), resolved_model,
+                    exc_info=True,
+                )
+                return False
+            if not pending:
+                LOGGER.debug(
+                    "[metabolism] nothing to reduce in the presentation "
+                    "(persona=%s model=%s); skipping the head rebuild too",
+                    getattr(persona, "persona_id", "?"), resolved_model,
+                )
+                return False
+        head_rebuilt = False
+        stale_sections: FrozenSet[str] = frozenset()
+        try:
+            from saiverse.dynamic_state import (
+                DynamicStateManager,
+                head_pipeline_ready,
+                head_sections_not_freshly_captured,
+            )
+            dispatched = bool(DynamicStateManager.on_metabolism(
+                persona, self.manager, model_key=resolved_model,
+            ))
+            # on_metabolism は pipeline 未初期化・未導入を「対象外 = True」で
+            # 返す (入室の再配送判定の意味論)。縮みにとっての「描き直せた」は
+            # pipeline が実在して dispatch が成立したときだけ (2026-09-10
+            # Codex 三巡目の指摘 — 未初期化の True を成功と読むと、head が
+            # 一度も描かれていない環境で通知だけが下りる)。
+            if dispatched and head_pipeline_ready():
+                # dispatch が成立しても、Section ごとの capture 失敗は例外に
+                # ならない (古い値の据え置き / 欠損)。**通知を出す Section**
+                # (コア記憶・机・Memopedia 目次・スペル一覧) が一つでも撮り
+                # 直せていなければ、head はその変化について古いまま — 通知を
+                # 下ろすと、境界は一方向なのでそのペルソナは変化を知る手段を
+                # 恒久的に失う (2026-09-10 最終検分)。
+                stale_sections = head_sections_not_freshly_captured(
+                    persona, resolved_model,
+                )
+                head_rebuilt = not stale_sections
+        except Exception:
+            LOGGER.exception("[dynamic_state] on_metabolism failed")
+        if not head_rebuilt:
+            self._note_head_not_redrawn(persona, resolved_model, stale_sections)
+        if not memory_ready:
+            return False
+        return self._reduce_presented_perceptions(
+            persona, resolved_model, drop_notices=head_rebuilt,
+        )
 
     def _retry_extraction_backlog(
         self,

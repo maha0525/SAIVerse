@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { X, Settings, Globe, Layers, Save, RefreshCw, Power, Monitor, Sun, Moon, Cpu, ChevronDown, ChevronRight, Info, ExternalLink, Wrench, CheckCircle, XCircle, Loader, Boxes, Rss } from 'lucide-react';
 import styles from './GlobalSettingsModal.module.css';
 import WorldEditor from './settings/WorldEditor';
@@ -6,7 +6,7 @@ import ProviderManagementPanel from './settings/ProviderManagementPanel';
 import ModelManagementPanel from './settings/ModelManagementPanel';
 import FeedManagementPanel from './settings/FeedManagementPanel';
 import ModalOverlay from './common/ModalOverlay';
-import WatermarkBar, { WATERMARK_LABELS, PERCEPTION_WATERMARK_LABELS, WatermarkBarValues, findWatermarkOrderViolations } from './common/WatermarkBar';
+import WatermarkBar, { WATERMARK_LABELS, WatermarkBarValues, findWatermarkOrderViolations } from './common/WatermarkBar';
 
 interface GlobalSettingsModalProps {
     isOpen: boolean;
@@ -39,6 +39,14 @@ interface ModelInfo {
     provider: string;
     is_available: boolean;
     supports_structured_output?: boolean;
+}
+
+/** 送る量のプリセット一つ (GET /api/config/metabolism-defaults の presets)。 */
+interface WatermarkPreset {
+    id: string;
+    label: string;
+    target: number;
+    high: number;
 }
 
 interface PlaybookPermEntry {
@@ -81,35 +89,27 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
     const [geminiAutoCacheKeepInput, setGeminiAutoCacheKeepInput] = useState('0');
     const [geminiAutoCacheKeepMax, setGeminiAutoCacheKeepMax] = useState(3600);
 
-    // ペルソナに送る量の水位 — 全体既定 (GET/PUT /api/config/metabolism-defaults)。
-    // 三層 (組み込み既定 < 全体設定 < モデル定義) の真ん中。二族 (会話の整理 /
-    // 部屋の様子などの記録) を一枚の画面で扱い、保存ボタンも一つ — 二族をまたぐ
-    // 検査 (整理をはじめる量 − 残す量 > 記録の上限 + 余裕) があるので、片方ずつ
-    // 保存すると「先に緩める側から保存する」順番をユーザーに強いることになる。
-    // 欄の文字列は編集中の値で、'' = 未設定 (組み込み既定に従う)。
+    // ペルソナに送る量 — 全体既定 (GET/PUT /api/config/metabolism-defaults)。
+    // 三層 (組み込み既定 < 全体設定 < モデル定義) の真ん中。2026-09-09 に
+    // 「部屋の様子などの記録」側の二つの数字を廃止したので (docs/intent/
+    // presented_context_reduction.md 設計 3)、画面が扱うのは会話の整理の一組
+    // (残す量 / 整理をはじめる量) だけ。欄の文字列は編集中の値で、
+    // '' = 未設定 (組み込み既定に従う)。
     type WatermarkKey = keyof WatermarkBarValues;
-    type WatermarkFamily = 'metabolism' | 'perception';
     const WATERMARK_KEYS: WatermarkKey[] = ['target', 'high'];
-    const WATERMARK_FAMILIES: WatermarkFamily[] = ['metabolism', 'perception'];
-    const WATERMARK_API_KEYS: Record<WatermarkFamily, Record<WatermarkKey, string>> = {
-        metabolism: { target: 'metabolism_target_chars', high: 'metabolism_high_chars' },
-        perception: { target: 'perception_target_chars', high: 'perception_high_chars' },
+    const WATERMARK_API_KEYS: Record<WatermarkKey, string> = {
+        target: 'metabolism_target_chars',
+        high: 'metabolism_high_chars',
     };
-    type WatermarkSet = Record<WatermarkFamily, WatermarkBarValues>;
-    const [wmGlobal, setWmGlobal] = useState<WatermarkSet>({
-        metabolism: { target: null, high: null },
-        perception: { target: null, high: null },
-    });
-    const [wmBuiltin, setWmBuiltin] = useState<WatermarkSet>({
-        metabolism: { target: 40000, high: 120000 },
-        perception: { target: 40000, high: 60000 },
-    });
-    const [wmInputs, setWmInputs] = useState<Record<WatermarkFamily, Record<WatermarkKey, string>>>({
-        metabolism: { target: '', high: '' },
-        perception: { target: '', high: '' },
-    });
-    // 「整理をはじめる量 − 残す量 > 記録の上限 + 余裕」の余裕の分 (サーバーの値)。
-    const [wmHeadroom, setWmHeadroom] = useState(10000);
+    const [wmGlobal, setWmGlobal] = useState<WatermarkBarValues>({ target: null, high: null });
+    // 組み込み既定とプリセットの数字はサーバーが持つ (saiverse/model_configs.py の
+    // BUILTIN_METABOLISM_DEFAULTS / METABOLISM_PRESETS)。画面に書き写すと、既定を
+    // 動かしたときに画面だけ古い数字を出すので、読み込むまでは持たない。
+    const [wmBuiltin, setWmBuiltin] = useState<WatermarkBarValues>({ target: null, high: null });
+    const [wmPresets, setWmPresets] = useState<WatermarkPreset[]>([]);
+    const [wmInputs, setWmInputs] = useState<Record<WatermarkKey, string>>({ target: '', high: '' });
+    // 「カスタム」を押したときに数字を打ち始められるよう、残す量の欄へ移る。
+    const wmTargetInputRef = useRef<HTMLInputElement>(null);
     const [wmSaving, setWmSaving] = useState(false);
     const [wmError, setWmError] = useState<string | null>(null);
     const [wmSavedAt, setWmSavedAt] = useState<number | null>(null);
@@ -363,39 +363,34 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
         saveGeminiAutoCache(geminiAutoCacheEnabled, next);
     };
 
-    // API の一組 {target, high, perception_target, perception_high} を族ごとに分ける。
-    type WatermarkPayloadGroup = {
-        target?: number | null; high?: number | null;
-        perception_target?: number | null; perception_high?: number | null;
-    };
-    const splitWatermarkGroup = (g: WatermarkPayloadGroup | undefined): WatermarkSet => ({
-        metabolism: { target: g?.target ?? null, high: g?.high ?? null },
-        perception: { target: g?.perception_target ?? null, high: g?.perception_high ?? null },
-    });
+    // API の一組 {target, high}。global は設定値 (null = 未設定)、builtin は組み込み既定。
+    type WatermarkPayloadGroup = { target?: number | null; high?: number | null };
 
     const applyMetabolismDefaults = (data: {
-        global?: WatermarkPayloadGroup; builtin?: WatermarkPayloadGroup; headroom?: number;
+        global?: WatermarkPayloadGroup;
+        builtin?: WatermarkPayloadGroup;
+        presets?: Array<Partial<WatermarkPreset>>;
     }) => {
-        const g = splitWatermarkGroup(data.global);
+        const g: WatermarkBarValues = {
+            target: data.global?.target ?? null,
+            high: data.global?.high ?? null,
+        };
         setWmGlobal(g);
-        if (data.builtin) {
-            const b = splitWatermarkGroup(data.builtin);
-            // 組み込み既定は必ず数値。欠けている族は今の値のままにする (古い応答対策)。
-            setWmBuiltin(prev => ({
-                metabolism: b.metabolism.target != null && b.metabolism.high != null ? b.metabolism : prev.metabolism,
-                perception: b.perception.target != null && b.perception.high != null ? b.perception : prev.perception,
-            }));
+        // 組み込み既定は必ず数値。欠けていれば今の値のままにする (古い応答対策)。
+        if (typeof data.builtin?.target === 'number' && typeof data.builtin?.high === 'number') {
+            setWmBuiltin({ target: data.builtin.target, high: data.builtin.high });
         }
-        if (typeof data.headroom === 'number') setWmHeadroom(data.headroom);
+        setWmPresets(
+            (Array.isArray(data.presets) ? data.presets : []).flatMap(p =>
+                typeof p?.id === 'string' && typeof p?.label === 'string'
+                    && typeof p?.target === 'number' && typeof p?.high === 'number'
+                    ? [{ id: p.id, label: p.label, target: p.target, high: p.high }]
+                    : [],
+            ),
+        );
         setWmInputs({
-            metabolism: {
-                target: g.metabolism.target != null ? String(g.metabolism.target) : '',
-                high: g.metabolism.high != null ? String(g.metabolism.high) : '',
-            },
-            perception: {
-                target: g.perception.target != null ? String(g.perception.target) : '',
-                high: g.perception.high != null ? String(g.perception.high) : '',
-            },
+            target: g.target != null ? String(g.target) : '',
+            high: g.high != null ? String(g.high) : '',
         });
     };
 
@@ -420,60 +415,53 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
     };
 
     // 画面上の実効値 = 欄に数字があればそれ、空欄なら組み込み既定 (棒と検査に使う)
-    const wmEdited: WatermarkSet = {
-        metabolism: {
-            target: parseWatermarkInput(wmInputs.metabolism.target),
-            high: parseWatermarkInput(wmInputs.metabolism.high),
-        },
-        perception: {
-            target: parseWatermarkInput(wmInputs.perception.target),
-            high: parseWatermarkInput(wmInputs.perception.high),
-        },
+    const wmEdited: WatermarkBarValues = {
+        target: parseWatermarkInput(wmInputs.target),
+        high: parseWatermarkInput(wmInputs.high),
     };
-    const wmEveryField: Array<[WatermarkFamily, WatermarkKey]> =
-        WATERMARK_FAMILIES.flatMap(f => WATERMARK_KEYS.map(k => [f, k] as [WatermarkFamily, WatermarkKey]));
-    const wmHasNaN = wmEveryField.some(([f, k]) => Number.isNaN(wmEdited[f][k]));
-    const wmHasZero = wmEveryField.some(([f, k]) => wmEdited[f][k] != null && (wmEdited[f][k] as number) < 1);
+    const wmHasNaN = WATERMARK_KEYS.some(k => Number.isNaN(wmEdited[k]));
+    const wmHasZero = WATERMARK_KEYS.some(k => wmEdited[k] != null && (wmEdited[k] as number) < 1);
     // 棒に渡す実効値。NaN (数字でない入力) は null 扱いで既定に落とす — `??` は NaN を
     // 通してしまい、凡例が「NaN 字」になる。
     const wmNum = (v: number | null): number | null => (v == null || Number.isNaN(v) ? null : v);
-    const wmEffective: WatermarkSet = {
-        metabolism: {
-            target: wmNum(wmEdited.metabolism.target) ?? wmBuiltin.metabolism.target,
-            high: wmNum(wmEdited.metabolism.high) ?? wmBuiltin.metabolism.high,
-        },
-        perception: {
-            target: wmNum(wmEdited.perception.target) ?? wmBuiltin.perception.target,
-            high: wmNum(wmEdited.perception.high) ?? wmBuiltin.perception.high,
-        },
+    const wmEffective: WatermarkBarValues = {
+        target: wmNum(wmEdited.target) ?? wmBuiltin.target,
+        high: wmNum(wmEdited.high) ?? wmBuiltin.high,
     };
     const wmBadInput = wmHasNaN || wmHasZero;
-    const wmViolations: Record<WatermarkFamily, Set<WatermarkKey>> = {
-        metabolism: wmBadInput ? new Set<WatermarkKey>() : findWatermarkOrderViolations(wmEffective.metabolism),
-        perception: wmBadInput ? new Set<WatermarkKey>() : findWatermarkOrderViolations(wmEffective.perception),
+    const wmViolations: Set<WatermarkKey> =
+        wmBadInput ? new Set<WatermarkKey>() : findWatermarkOrderViolations(wmEffective);
+    const wmDirty = WATERMARK_KEYS.some(k => (wmEdited[k] ?? null) !== (wmGlobal[k] ?? null));
+    const wmCanSave = !wmSaving && wmDirty && !wmBadInput && wmViolations.size === 0;
+    // どのプリセットを選んでいる状態か。数字そのものから決めるので、欄を直接
+    // 書き換えたときも表示が追いつく (どれとも一致しなければカスタム = null)。
+    const wmActivePreset = wmBadInput
+        ? null
+        : (wmPresets.find(p => p.target === wmEffective.target && p.high === wmEffective.high) ?? null);
+
+    const applyWatermarkPreset = (preset: WatermarkPreset) => {
+        // 「デフォルト」だけは数字を書き込まず、未設定 (空欄) に戻す。明示値で保存すると、
+        // 将来組み込みの既定が変わったとき、このユーザーだけ古い数字に取り残される。
+        // 未設定なら常に組み込みの既定へ追従する (実効値は同じなので選択表示も
+        // デフォルトのまま光る)。
+        if (preset.id === 'default') {
+            setWmInputs({ target: '', high: '' });
+            return;
+        }
+        setWmInputs({ target: String(preset.target), high: String(preset.high) });
     };
-    // 保存時検査と同じ式 (サーバー: api/routes/config.py の _watermark_headroom_error)。
-    // 会話を残す量まで畳んでも、記録の分だけ合計が上限を超えたままになる設定を止める。
-    const wmGap = (wmEffective.metabolism.high ?? 0) - (wmEffective.metabolism.target ?? 0);
-    const wmNeeded = (wmEffective.perception.high ?? 0) + wmHeadroom;
-    const wmHeadroomBad = !wmBadInput
-        && wmViolations.metabolism.size === 0 && wmViolations.perception.size === 0
-        && !(wmGap > wmNeeded);
-    const wmDirty = wmEveryField.some(([f, k]) => (wmEdited[f][k] ?? null) !== (wmGlobal[f][k] ?? null));
-    const wmCanSave = !wmSaving && wmDirty && !wmBadInput
-        && wmViolations.metabolism.size === 0 && wmViolations.perception.size === 0 && !wmHeadroomBad;
 
     const saveMetabolismDefaults = async () => {
         if (!wmCanSave) return;
         setWmSaving(true);
         setWmError(null);
         try {
-            // 変えた欄だけ送る (PUT は省略 = 触らない)。四つ全部を送ると、最初の読み込みに
+            // 変えた欄だけ送る (PUT は省略 = 触らない)。両方を送ると、最初の読み込みに
             // 失敗して欄が空のまま一欄だけ直したとき、残りを null で消してしまう。
             const body: Record<string, number | null> = {};
-            for (const [f, k] of wmEveryField) {
-                if ((wmEdited[f][k] ?? null) !== (wmGlobal[f][k] ?? null)) {
-                    body[WATERMARK_API_KEYS[f][k]] = wmEdited[f][k] ?? null;
+            for (const k of WATERMARK_KEYS) {
+                if ((wmEdited[k] ?? null) !== (wmGlobal[k] ?? null)) {
+                    body[WATERMARK_API_KEYS[k]] = wmEdited[k] ?? null;
                 }
             }
             const res = await fetch('/api/config/metabolism-defaults', {
@@ -989,95 +977,115 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                                     />
                                 </div>
 
-                                {/* ペルソナに送る量の水位 (全体既定) */}
+                                {/* ペルソナに送る量 (全体既定) */}
                                 <div className={`${styles.toggleContainer} ${styles.toggleContainerStacked}`}>
                                     <div>
                                         <div className={styles.toggleLabel}>
                                             <Layers size={18} />
-                                            ペルソナに送る量の水位
+                                            ペルソナに送る量
                                         </div>
                                         <div className={styles.toggleDescription}>
-                                            ペルソナに毎回送る内容がどれだけ溜まったら古い部分を減らすか、その目安を文字数で決めます。ここは全モデル共通の既定値です。
+                                            ペルソナに毎回送る会話がどれだけ溜まったら、古い部分をあらすじへ畳んで整理するかを決めます。ここは全モデル共通の既定値です。
                                         </div>
                                     </div>
 
-                                    {WATERMARK_FAMILIES.map(family => {
-                                        const isPerception = family === 'perception';
-                                        const labels = isPerception ? PERCEPTION_WATERMARK_LABELS : WATERMARK_LABELS;
-                                        return (
-                                            <div key={family} className={styles.wmGroup}>
-                                                <div className={styles.wmGroupTitle}>
-                                                    {isPerception ? '部屋の様子などの記録' : '会話の整理'}
-                                                </div>
-                                                <div className={styles.wmGroupDesc}>
-                                                    {isPerception
-                                                        ? '移動したときの部屋の様子や、使えるスペルが増えた・減ったといった記録も、送るたびに積み上がります。合計がここを超えたら、古いものからまとめて省略します（省略されるのは送る内容からだけで、記録そのものは消えません）。'
-                                                        : '会話の履歴がどれだけ溜まったら古い部分をあらすじへ畳むかを決めます。'}
-                                                </div>
-                                                <div className={styles.wmBarArea}>
-                                                    <WatermarkBar
-                                                        values={wmEffective[family]}
-                                                        invalidKeys={wmViolations[family]}
-                                                        labels={labels}
-                                                    />
-                                                </div>
-                                                <div className={styles.wmFields}>
-                                                    {WATERMARK_KEYS.map(k => {
-                                                        const edited = wmEdited[family][k];
-                                                        const isUser = edited != null;
-                                                        const builtin = wmBuiltin[family][k] ?? 0;
-                                                        const bad = wmViolations[family].has(k) || Number.isNaN(edited) || (edited != null && (edited as number) < 1);
-                                                        const inputId = `wm-${family}-${k}`;
-                                                        return (
-                                                            <div key={k} className={styles.wmField}>
-                                                                <label className={styles.subSettingLabel} htmlFor={inputId}>
-                                                                    {labels[k]}
-                                                                    <span className={`${styles.wmBadge} ${isUser ? styles.wmBadgeUser : ''}`}>
-                                                                        {isUser ? '設定した値' : `既定 ${builtin.toLocaleString()} 字`}
-                                                                    </span>
-                                                                </label>
-                                                                <div className={styles.wmInputRow}>
-                                                                    <input
-                                                                        id={inputId}
-                                                                        type="text"
-                                                                        inputMode="numeric"
-                                                                        className={`${styles.subSettingInput} ${bad ? styles.wmInputBad : ''}`}
-                                                                        value={wmInputs[family][k]}
-                                                                        placeholder={`${builtin.toLocaleString()}`}
-                                                                        onChange={e => {
-                                                                            const v = e.target.value;
-                                                                            setWmInputs(prev => ({ ...prev, [family]: { ...prev[family], [k]: v } }));
-                                                                        }}
-                                                                        onKeyDown={e => { if (e.key === 'Enter') saveMetabolismDefaults(); }}
-                                                                    />
-                                                                    <span className={styles.wmUnit}>字</span>
-                                                                    <button
-                                                                        type="button"
-                                                                        className={styles.wmResetBtn}
-                                                                        disabled={wmInputs[family][k] === ''}
-                                                                        onClick={() => setWmInputs(prev => ({ ...prev, [family]: { ...prev[family], [k]: '' } }))}
-                                                                    >
-                                                                        既定に戻す
-                                                                    </button>
-                                                                </div>
-                                                            </div>
-                                                        );
-                                                    })}
-                                                </div>
-                                                {wmViolations[family].size > 0 && (
-                                                    <div className={styles.wmMessageBad}>
-                                                        {labels.target} ≤ {labels.high} の順にしてください
-                                                    </div>
-                                                )}
+                                    {wmPresets.length > 0 && (
+                                        <div className={styles.wmPresetArea}>
+                                            <div className={styles.wmPresetRow}>
+                                                {wmPresets.map(preset => (
+                                                    <button
+                                                        key={preset.id}
+                                                        type="button"
+                                                        className={`${styles.wmPresetBtn} ${wmActivePreset?.id === preset.id ? styles.wmPresetBtnActive : ''}`}
+                                                        aria-pressed={wmActivePreset?.id === preset.id}
+                                                        onClick={() => applyWatermarkPreset(preset)}
+                                                    >
+                                                        <span className={styles.wmPresetLabel}>{preset.label}</span>
+                                                        <span className={styles.wmPresetNums}>
+                                                            {preset.high.toLocaleString()} 字で整理し、{preset.target.toLocaleString()} 字残す
+                                                        </span>
+                                                    </button>
+                                                ))}
+                                                <button
+                                                    type="button"
+                                                    className={`${styles.wmPresetBtn} ${wmActivePreset == null ? styles.wmPresetBtnActive : ''}`}
+                                                    aria-pressed={wmActivePreset == null}
+                                                    onClick={() => wmTargetInputRef.current?.focus()}
+                                                >
+                                                    <span className={styles.wmPresetLabel}>カスタム</span>
+                                                    <span className={styles.wmPresetNums}>下の欄で自分で決める</span>
+                                                </button>
                                             </div>
-                                        );
-                                    })}
-
-                                    {wmHeadroomBad && (
-                                        <div className={styles.wmMessageBad}>
-                                            整理をはじめる量と整理後に残す量の差 {wmGap.toLocaleString()} 字が、部屋の様子などの記録の上限 {(wmEffective.perception.high ?? 0).toLocaleString()} 字 + 余裕 {wmHeadroom.toLocaleString()} 字 = {wmNeeded.toLocaleString()} 字 を上回っていません。このままだと会話をどれだけ整理しても、送る量が上限を下回らないことがあります。整理をはじめる量を増やすか、整理後に残す量か記録の上限を減らしてください。
+                                            <div className={styles.wmPresetNote}>
+                                                <Info size={14} />
+                                                <span>
+                                                    大きい設定ほど、一回に送る量は増えますが、会話の整理はあまり走りません。小さい設定にすると一回に送る量は減りますが、そのぶん整理が何度も走り、そのたびに AI への問い合わせが増えて、それまで送っていた内容をもう一度送り直すことになります。料金や待ち時間がかえって増えることがあるので、迷ったときは「デフォルト」に戻してください。
+                                                </span>
+                                            </div>
                                         </div>
                                     )}
+
+                                    <div className={styles.wmGroup}>
+                                        <div className={styles.wmBarArea}>
+                                            <WatermarkBar
+                                                values={wmEffective}
+                                                invalidKeys={wmViolations}
+                                                labels={WATERMARK_LABELS}
+                                            />
+                                        </div>
+                                        <div className={styles.wmFields}>
+                                            {WATERMARK_KEYS.map(k => {
+                                                const edited = wmEdited[k];
+                                                const isUser = edited != null;
+                                                const builtin = wmBuiltin[k];
+                                                const bad = wmViolations.has(k) || Number.isNaN(edited) || (edited != null && (edited as number) < 1);
+                                                const inputId = `wm-${k}`;
+                                                return (
+                                                    <div key={k} className={styles.wmField}>
+                                                        <label className={styles.subSettingLabel} htmlFor={inputId}>
+                                                            {WATERMARK_LABELS[k]}
+                                                            <span className={`${styles.wmBadge} ${isUser ? styles.wmBadgeUser : ''}`}>
+                                                                {isUser
+                                                                    ? '設定した値'
+                                                                    : builtin != null ? `既定 ${builtin.toLocaleString()} 字` : '既定'}
+                                                            </span>
+                                                        </label>
+                                                        <div className={styles.wmInputRow}>
+                                                            <input
+                                                                id={inputId}
+                                                                ref={k === 'target' ? wmTargetInputRef : undefined}
+                                                                type="text"
+                                                                inputMode="numeric"
+                                                                className={`${styles.subSettingInput} ${bad ? styles.wmInputBad : ''}`}
+                                                                value={wmInputs[k]}
+                                                                placeholder={builtin != null ? builtin.toLocaleString() : ''}
+                                                                onChange={e => {
+                                                                    const v = e.target.value;
+                                                                    setWmInputs(prev => ({ ...prev, [k]: v }));
+                                                                }}
+                                                                onKeyDown={e => { if (e.key === 'Enter') saveMetabolismDefaults(); }}
+                                                            />
+                                                            <span className={styles.wmUnit}>字</span>
+                                                            <button
+                                                                type="button"
+                                                                className={styles.wmResetBtn}
+                                                                disabled={wmInputs[k] === ''}
+                                                                onClick={() => setWmInputs(prev => ({ ...prev, [k]: '' }))}
+                                                            >
+                                                                既定に戻す
+                                                            </button>
+                                                        </div>
+                                                    </div>
+                                                );
+                                            })}
+                                        </div>
+                                        {wmViolations.size > 0 && (
+                                            <div className={styles.wmMessageBad}>
+                                                {WATERMARK_LABELS.target} ≤ {WATERMARK_LABELS.high} の順にしてください
+                                            </div>
+                                        )}
+                                    </div>
+
                                     {(wmHasNaN || wmHasZero) && (
                                         <div className={styles.wmMessageBad}>
                                             1 以上の整数を入力してください（空欄 = 既定に戻す）
