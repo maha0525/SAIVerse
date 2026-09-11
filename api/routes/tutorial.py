@@ -351,18 +351,21 @@ PROVIDER_PRESETS: Dict[str, Dict[str, Optional[str]]] = {
     },
     "openrouter_free": {
         "default_model": "openrouter-nemotron-3-ultra-550b-a55b-free",
-        "lightweight_model": "openrouter-nemotron-3-ultra-550b-a55b-free",
-        "memory_weave_model": "openrouter-nemotron-3-ultra-550b-a55b-free",
-        # Nemotron は画像を読めないので、画像要約だけ画像対応の無料モデルに振る。
+        # Nemotron (無料) は構造化出力に対応しない (判断・編纂のページ分けが止まる)
+        # ので、決まった形の答えが要る軽量・Memory Weave と、画像要約は Nex に振る。
+        "lightweight_model": "openrouter-nex-n2.5-pro-free",
+        "memory_weave_model": "openrouter-nex-n2.5-pro-free",
         "image_summary_model": "openrouter-nex-n2.5-pro-free",
         "audio_summary_model": None,
         "video_summary_model": None,
     },
     "nvidia": {
-        "default_model": "nim-kimi-k3",
-        "lightweight_model": "nim-deepseek-v4-flash-0731",
-        "memory_weave_model": "nim-deepseek-v4-flash-0731",
-        "image_summary_model": "nim-kimi-k3",
+        "default_model": "nim-deepseek-v4-flash-0731",
+        # 軽量・Memory Weave・画像要約は Muse Glimmer 30B (考える深さ low)。
+        # 無料枠の NIM で、判断の形の答え・ページ分け・あらすじが途中で止まらずに返った。
+        "lightweight_model": "nim-muse-glimmer-30b",
+        "memory_weave_model": "nim-muse-glimmer-30b",
+        "image_summary_model": "nim-muse-glimmer-30b",
         "audio_summary_model": None,
         "video_summary_model": None,
     },

@@ -136,6 +136,18 @@ class TestNimStructuredOutputRequest(unittest.TestCase):
         self.assertEqual(str(request.url), f"{self.provider['base_url']}/chat/completions")
         self.assertEqual(request.headers["authorization"], f"Bearer {_API_KEY}")
 
+    def test_muse_glimmer_structured_output_runs_with_low_reasoning_effort(self):
+        """Muse Glimmer 30B は既定の考える深さだと短い返事にも 20 秒前後かかるため、定義の
+        パラメータ既定で low にしている (チュートリアルの NIM 設定の軽量・Memory Weave)。
+        構造化出力の生 HTTP 経路でも、その既定が送られる。"""
+        key = "nim-muse-glimmer-30b"
+        model_json = _read_builtin(data_paths.MODELS_DIR, key)
+
+        body = json.loads(self._send_structured(self._client(key, model_json)).content)
+
+        self.assertEqual(body["reasoning_effort"], "low")
+        self.assertEqual(body["tool_choice"], _FORCED_TOOL_CHOICE)
+
     def test_every_shipped_nim_extra_body_reaches_structured_output(self):
         """同梱の NIM モデルが extra_body に書いた指定は、構造化出力でも全部送られる。"""
         checked = []

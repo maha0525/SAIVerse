@@ -1,21 +1,25 @@
 {
-  "model": "moonshotai/kimi-k2.6",
+  "model": "meta/muse-glimmer-30b",
   "system_prompt": "",
-  "display_name": "Kimi K2.6 (NIM)",
+  "display_name": "Muse Glimmer 30B (NIM)",
   "provider_ref": "nvidia_nim",
-  "supports_structured_output": false,
-  "context_length": 262144,
+  "supports_structured_output": true,
+  "context_length": 131072,
   "supports_images": true,
   "convert_system_to_user": true,
-  "request_kwargs": {
-    "extra_body": {
-      "chat_template_kwargs": {
-        "enable_thinking": true,
-        "clear_thinking": false
-      }
-    }
-  },
   "parameters": {
+    "reasoning_effort": {
+      "type": "enum",
+      "options": [
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "default": "low",
+      "label": "Reasoning Effort",
+      "description": "Controls how much reasoning the model performs. Higher settings are much slower on the NIM free tier."
+    },
     "temperature": {
       "type": "float",
       "min": 0,
@@ -30,14 +34,14 @@
       "min": 0,
       "max": 1,
       "step": 0.05,
-      "default": 1,
+      "default": 0.95,
       "label": "Top P",
       "description": "Nucleus sampling cutoff."
     },
     "max_tokens": {
       "type": "int",
       "min": 32,
-      "max": 65536,
+      "max": 16384,
       "step": 1,
       "default": 8192,
       "label": "Max tokens",

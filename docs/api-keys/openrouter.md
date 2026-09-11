@@ -65,8 +65,8 @@ OpenRouterでは200以上のモデルが利用可能です。SAIVerseに設定�
 - Qwen 3 Next 80B-A3B / GPT-OSS 120B・20B
 
 **無料モデル**:
-- Nemotron 3 Ultra（チュートリアルの無料設定の標準モデル・軽量モデル・Memory Weaveモデル）
-- Nex N2.5 Pro（画像対応、チュートリアルの無料設定の画像要約モデル）
+- Nemotron 3 Ultra（チュートリアルの無料設定の標準モデル）
+- Nex N2.5 Pro（画像対応・構造化出力対応、チュートリアルの無料設定の軽量モデル・Memory Weaveモデル・画像要約モデル）
 
 ## 7. アプリ名の申告について
 

@@ -14,15 +14,15 @@ NIM は Mistral 系が `guided_json` / `response_format` に対応しないた�
 
 ## 実害
 
-同梱モデルのうち、`request_kwargs.extra_body` を持つ NIM モデルは 3 枚（2026-09-11 時点）。
+同梱モデルのうち、`request_kwargs.extra_body` を持つ NIM モデルは 2 枚（2026-09-11 時点）。
 
 ```
-nim-kimi-k2.6 / nim-deepseek-v4-pro-0813 / nim-deepseek-v4-flash-0731
+nim-deepseek-v4-pro-0813 / nim-deepseek-v4-flash-0731
 ```
 
-2026-08-04 の起票時点では 8 枚あったが、そのうち 7 枚は NIM 側で提供が終了したため、2026-09-11 に同梱から削除した。
+2026-08-04 の起票時点の 8 枚は、2026-09-11 までに全部 NIM 側で呼べなくなったため、同梱から削除した (7 枚は提供終了、Kimi K2.6 は一覧には残っていたが呼ぶと「このアカウントでは見つからない」で断られた)。
 
-いずれも `extra_body.chat_template_kwargs` で thinking の有無を指定している。キーの名前はモデルによって違う (Kimi K2.6 は `enable_thinking`、DeepSeek V4 の 0813 / 0731 版は `thinking`)。例 (`nim-deepseek-v4-flash-0731.json`):
+いずれも `extra_body.chat_template_kwargs` で thinking の有無を指定している。キーの名前はモデルによって違う (起票時の Kimi K2.6 などは `enable_thinking`、DeepSeek V4 の 0813 / 0731 版は `thinking`)。例 (`nim-deepseek-v4-flash-0731.json`):
 
 ```json
 "request_kwargs": {
