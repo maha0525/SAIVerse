@@ -1,8 +1,8 @@
 # 送る量の一系統化と、会話以外の内容の節約
 
-**ステータス**: 検証待ち — 設計 1〜4（縮みの規則・しきい値の一系統化・プリセットの画面まで）実装済み。レビューはローカル LLM 3 本 + Codex 1.5 巡 + 代行 2 巡で収束、フルスイート緑。統合ブランチ hotfix/v0.3.12 でまはーの実機検証待ち
-**対象のリリース**: v0.3.12 候補。release_history の「次の版の範囲」の節にある持ち越しのうち、知覚の既定値・保存時検査の余裕 10,000・perception_high null の素通しの 3 件は、この設計で問いごと解消する
-**関連**: [watermarks_unsatisfiable_when_perception_is_large.md](../issues/watermarks_unsatisfiable_when_perception_is_large.md)（前段の議論と裁定の記録）/ [perception_buffer.md](perception_buffer.md) §10.9（知覚の二つのしきい値 — 本設計の廃止対象）/ [metabolism.md](../concepts/metabolism.md) / [room_state_packages.md](room_state_packages.md) / [room_items_uncapped.md](../issues/room_items_uncapped.md)（隣接・別裁定）
+**ステータス**: 完了 — 設計 1〜4（縮みの規則・しきい値の一系統化・プリセットの画面まで）実装済み。レビューはローカル LLM 3 本 + Codex 1.5 巡 + 代行 2 巡で収束、フルスイート緑。2026-09-11 にまはーの実機検証 (GPT-Image 2.5 生成・プリセット画面・既定変更による会話前の整理・棚卸し後の警告) を通り、v0.3.12 として発行済み
+**対象のリリース**: v0.3.12 (2026-09-11 発行)。release_history の「次の版の範囲」の節にある持ち越しのうち、知覚の既定値・保存時検査の余裕 10,000・perception_high null の素通しの 3 件は、この設計で問いごと解消する
+**関連**: [watermarks_unsatisfiable_when_perception_is_large.md](../issues/archive/watermarks_unsatisfiable_when_perception_is_large.md)（前段の議論と裁定の記録）/ [perception_buffer.md](perception_buffer.md) §10.9（知覚の二つのしきい値 — 本設計の廃止対象）/ [metabolism.md](../concepts/metabolism.md) / [room_state_packages.md](room_state_packages.md) / [room_items_uncapped.md](../issues/room_items_uncapped.md)（隣接・別裁定）
 
 ## 一言で
 
