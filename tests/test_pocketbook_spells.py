@@ -354,6 +354,154 @@ class PocketbookOpenSpellTest(_PocketbookSpellTestBase):
         self.assertIn("limit は 1 以上の整数で指定してください", text)
 
 
+class PocketbookPageNumberTest(_PocketbookSpellTestBase):
+    """手帳のページ番号 (docs/intent/room_item_display_cap.md 設計 3)。
+
+    **切れ目の規則は日付の境目のまま** (§13.2.1 の裁定)。その規則で全体を頭から
+    区切ってできたページの列に、新しい順の番号を振っただけ — 日付めくり
+    (``before``) も現行のまま残る。
+    """
+
+    def _five_days(self):
+        novel = self._add_activity("小説を書く")
+        for day in range(18, 23):  # 2026-08-18 〜 2026-08-22 の 5 件
+            self._add_memo(novel.id, f"2026-08-{day}", "did", f"{day} 日の分")
+        return novel
+
+    def test_default_open_is_the_first_page_and_carries_the_guide(self):
+        self._five_days()
+        text = self._open(limit=2)
+        self.assertIn(
+            "全 5 件・3 ページ。いま 1 ページ目 (1〜2 件目)。"
+            "page='N' で他のページを開けます。",
+            text,
+        )
+        self.assertIn("22 日の分", text)
+        self.assertIn("21 日の分", text)
+        self.assertNotIn("20 日の分", text)
+
+    def test_guide_and_the_date_key_are_shown_together(self):
+        """⭐ ページ番号の案内と、現行の日付めくりの案内を**併記**する。"""
+        self._five_days()
+        text = self._open(limit=2)
+        self.assertIn("全 5 件・3 ページ。いま 1 ページ目 (1〜2 件目)。", text)
+        self.assertIn(
+            "さらに 3 件、2026-08-21 より前にあります。"
+            "続きは before='2026-08-21' で開けます。",
+            text,
+        )
+
+    def test_second_page(self):
+        self._five_days()
+        text = self._open(limit=2, page="2")
+        self.assertIn("全 5 件・3 ページ。いま 2 ページ目 (3〜4 件目)。", text)
+        self.assertIn("20 日の分", text)
+        self.assertIn("19 日の分", text)
+        self.assertNotIn("21 日の分", text)
+        self.assertIn(
+            "さらに 1 件、2026-08-19 より前にあります。"
+            "続きは before='2026-08-19' で開けます。",
+            text,
+        )
+
+    def test_last_page_has_no_more_line(self):
+        self._five_days()
+        text = self._open(limit=2, page="3")
+        self.assertIn("全 5 件・3 ページ。いま 3 ページ目 (5 件目)。", text)
+        self.assertIn("18 日の分", text)
+        self.assertNotIn("より前にあります", text)
+
+    def test_range_opens_several_pages_at_once(self):
+        self._five_days()
+        text = self._open(limit=2, page="1-2")
+        self.assertIn("全 5 件・3 ページ。いま 1〜2 ページ目 (1〜4 件目)。", text)
+        for day in (22, 21, 20, 19):
+            self.assertIn(f"{day} 日の分", text)
+        self.assertNotIn("18 日の分", text)
+
+    def test_range_over_five_pages_is_refused(self):
+        self._five_days()
+        text = self._open(limit=2, page="1-6")
+        self.assertIn("手帳を開けませんでした", text)
+        self.assertIn("一度に開けるのは 5 ページまでです", text)
+
+    def test_page_past_the_end_says_so(self):
+        self._five_days()
+        text = self._open(limit=2, page="9")
+        self.assertIn("全 3 ページです。9 ページ目はありません。", text)
+
+    def test_bad_page_argument_is_refused(self):
+        self._five_days()
+        text = self._open(limit=2, page="二")
+        self.assertIn("手帳を開けませんでした", text)
+        self.assertIn("page は '2' のような番号か '1-5' のような範囲", text)
+
+    def test_page_and_before_cannot_be_used_together(self):
+        self._five_days()
+        text = self._open(limit=2, page="2", before="2026-08-21")
+        self.assertIn("page と before は同時に指定できません", text)
+        self.assertNotIn("20 日の分", text)
+
+    def test_page_numbers_do_not_split_a_single_date(self):
+        """⭐ 切れ目は日付の境目のまま — 同じ日のメモは同じページ番号に入る。"""
+        novel = self._add_activity("小説を書く")
+        for i in range(3):
+            self._add_memo(novel.id, "2026-08-22", "did", f"同じ日の {i}")
+        self._add_memo(novel.id, "2026-08-21", "did", "前の日の分")
+
+        first = self._open(limit=2, page="1")
+        self.assertIn("全 4 件・2 ページ。いま 1 ページ目 (1〜3 件目)。", first)
+        for i in range(3):
+            self.assertIn(f"同じ日の {i}", first)
+        self.assertNotIn("前の日の分", first)
+
+        second = self._open(limit=2, page="2")
+        self.assertIn("前の日の分", second)
+        for i in range(3):
+            self.assertNotIn(f"同じ日の {i}", second)
+
+    def test_date_paging_output_is_unchanged(self):
+        """⭐ 回帰: ``before`` の日付めくりは現行のまま (ページ番号を混ぜない)。"""
+        self._five_days()
+        text = self._open(limit=2, before="2026-08-21")
+        self.assertIn("20 日の分", text)
+        self.assertIn("19 日の分", text)
+        self.assertNotIn("21 日の分", text)
+        self.assertIn(
+            "さらに 1 件、2026-08-19 より前にあります。"
+            "続きは before='2026-08-19' で開けます。",
+            text,
+        )
+        self.assertNotIn("ページ目", text)
+
+    def test_activity_scoped_open_pages_too(self):
+        novel = self._add_activity("小説を書く")
+        for day in range(18, 23):
+            self._add_memo(novel.id, f"2026-08-{day}", "did", f"{day} 日の分")
+        self._add_activity("絵の練習")
+
+        text = self._open(activity="小説を書く", limit=2, page="2")
+        self.assertIn("【手帳】小説を書く", text)
+        self.assertIn("全 5 件・3 ページ。いま 2 ページ目 (3〜4 件目)。", text)
+        self.assertIn("20 日の分", text)
+        self.assertNotIn("22 日の分", text)
+
+    def test_a_book_of_one_page_does_not_promise_other_pages(self):
+        novel = self._add_activity("小説を書く")
+        self._add_memo(novel.id, "2026-08-22", "did", "一件だけ")
+        text = self._open()
+        self.assertIn("全 1 件・1 ページ。いま 1 ページ目 (1 件目)。", text)
+        self.assertNotIn("他のページを開けます", text)
+
+    def test_long_memo_text_is_not_truncated_when_paging_by_number(self):
+        novel = self._add_activity("小説を書く")
+        long_text = "星を拾う話の続きを書いた。" * 40
+        self._add_memo(novel.id, "2026-08-22", "did", long_text)
+        self._add_memo(novel.id, "2026-08-21", "did", "前の日の分")
+        text = self._open(limit=1, page="1")
+        self.assertIn(long_text, text)
+
+
 class PocketbookWriteSpellTest(_PocketbookSpellTestBase):
     def _today(self):
         from saiverse import clock

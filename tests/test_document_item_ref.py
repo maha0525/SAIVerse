@@ -229,6 +229,66 @@ def test_create_document_returns_short_ref_usable_by_read(manager, tmp_path, mon
     assert "ペルモン" in text
 
 
+# ---------------------------------------------------------------------------
+# item_move — しまい先の入れ物も item:N の形で通ること (2026-09-11)
+# ---------------------------------------------------------------------------
+# bag_create は入れ物の参照を item:N で返し、部屋の様子も item:N で見せる。
+# しまい先 (destination_id) だけが解決を通らないと、ペルソナは自分で作った
+# 入れ物に「見つかりません」で物をしまえない (片付けの流れが最後で切れる)。
+
+def test_item_move_resolves_bag_destination_short_ref(manager, tmp_path):
+    calls = []
+
+    def move_item_for_persona(persona_id, ids, destination_type, destination_id):
+        calls.append((persona_id, ids, destination_type, destination_id))
+        return "moved"
+
+    manager.move_item_for_persona = move_item_for_persona
+    mod = load_builtin_tool("item_move")
+    with _ctx(manager, tmp_path):
+        result = mod.item_move(
+            item_ids=f"item:{SHORT_ID}",
+            destination_type="bag",
+            destination_id=f"item:{SHORT_ID}",
+        )
+    assert result == "moved"
+    assert calls == [(PERSONA_ID, [UUID_A], "bag", UUID_A)], (
+        "しまい先の item:N が UUID に解決されてから move に渡ること "
+        f"(実際: {calls!r})"
+    )
+
+
+def test_item_move_bag_destination_uuid_passthrough(manager, tmp_path):
+    calls = []
+    manager.move_item_for_persona = (
+        lambda persona_id, ids, destination_type, destination_id:
+        calls.append((destination_id,)) or "moved"
+    )
+    mod = load_builtin_tool("item_move")
+    with _ctx(manager, tmp_path):
+        mod.item_move(
+            item_ids=UUID_A, destination_type="bag", destination_id=UUID_A,
+        )
+    assert calls == [(UUID_A,)], "生 UUID のしまい先は素通りで通ること"
+
+
+def test_item_move_building_destination_not_item_resolved(manager, tmp_path):
+    """建物へ置く回の行き先は building_id — アイテムの解決を通さないこと。"""
+    calls = []
+    manager.move_item_for_persona = (
+        lambda persona_id, ids, destination_type, destination_id:
+        calls.append((destination_type, destination_id)) or "moved"
+    )
+    mod = load_builtin_tool("item_move")
+    with _ctx(manager, tmp_path):
+        mod.item_move(
+            item_ids=f"item:{SHORT_ID}",
+            destination_type="building",
+            destination_id="air_city_a_room",
+        )
+    assert calls == [("building", "air_city_a_room")]
+
+
 if __name__ == "__main__":
     import sys
 

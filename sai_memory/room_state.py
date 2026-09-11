@@ -112,6 +112,29 @@ RECALL_OCCUPANT_META_KEY = "occupant_id"
 #: 経路一行 (§11-2 の移動群の畳みの合成文) の書き出し。
 _MOVE_TRAIL_PREFIX = "この間に現在地が移動しました: "
 
+#: 部屋の様子に出す「建物に直接置かれたアイテム」の既定の個数の上限
+#: (docs/intent/room_item_display_cap.md 設計 1)。Building ごとの上書きが
+#: 無い部屋はこの数になる。0 以上の整数で、0 は「アイテムを様子に出さない部屋」。
+DEFAULT_ROOM_ITEM_DISPLAY_LIMIT = 10
+
+#: 上限で束から外したアイテムのキーの一覧を持つ、束のフィールド名。
+#: 書き手は builtin_data/tools/get_visual_context.py の ``_bundle_from_world``、
+#: 読み手は :func:`render_room_diff` (消えたと言わないための照合) と
+#: :func:`render_room_full` / :func:`render_room_diff` の「ほかに N 個」の一行。
+#: **キーが無い束は「外した物なし」** — 上限を入れる前に記帳された束をそのまま
+#: 読めるようにするため (docs/intent/room_item_display_cap.md 設計 2)。
+#: 空のときはフィールド自体を載せない (上限に掛からない部屋の束は上限導入前と
+#: 一字一句同じ = 指紋も変わらない)。
+BUNDLE_CAPPED_KEYS = "capped_keys"
+
+#: 埋もれた物の存在を知らせる機構名義の一行 (intent 設計 2 の出力例の写し)。
+#: **束のパッケージには入れない** — 埋もれた数が変わるたびに「見た目は何も
+#: 変わっていないのに差分が出る」ことになるため、様子を文字にするときに添える。
+_CAPPED_NOTICE_TEMPLATE = (
+    "（ほかに {count} 個のアイテムがありますが、埋もれていて見えません。"
+    "スペル「埋もれたアイテムを見る」でめくって見られます）"
+)
+
 _NO_CHANGE_LINE = "前回見たときから変わっていません。"
 _DIFF_TITLE_SUFFIX = " (前回見たときからの変化)"
 _ADDED_HEADING = "## 増えた・変わったもの"
@@ -142,7 +165,9 @@ def room_key(building_id: str) -> str:
 # パッケージの束 (bundle)
 # ---------------------------------------------------------------------------
 #
-# bundle = {"building_id": str, "building_name": str, "packages": [package...]}
+# bundle = {"building_id": str, "building_name": str, "packages": [package...],
+#           "capped_keys": [str...] (任意 — 表示上限で外した物のキー。空なら
+#                                   フィールドごと無い。無い束 = 外した物なし)}
 # package = {"key": str, "family": str, "label": str, "lines": [str...],
 #            "media": [{"path","mime_type","type"}...], "state": "open"|"closed"|None}
 #
@@ -179,6 +204,19 @@ def bundle_is_valid(bundle: Any) -> bool:
     :func:`first_room_bundle` の停止規則 (旧形式・不正束 = 材料なし・土台なし)
     を素通りして、壊れた土台への差分や壊れた束の置き直しが静かに確定する
     (2026-09-06 七巡目修正 1)。
+
+    :data:`BUNDLE_CAPPED_KEYS` (表示上限で外した物のキーの一覧) も**あれば**
+    型まで検める — 差分の gone 抑止 (:func:`render_room_diff`) がこの list を
+    集合にして照合するので、壊れた型を有効束と数えると、上限で埋もれただけの
+    物が「見当たらなくなったもの」に化ける。無い束は「外した物なし」として
+    正当 (上限導入前の記帳の後方互換)。
+
+    外した物の一覧は**重なりも許さない**: 一覧の中の重複と、packages のキーとの
+    重なり (同じ物が「表で見えている」と「埋もれている」の両方に立つ) のどちらも
+    組成の欠陥の印で、通すと差分の gone 抑止が実際の消滅まで黙らせる — その物は
+    部屋から消えても、抑止の一覧に名前が載っているだけで「見当たらなくなった
+    もの」から外れる。組成側 (_select_displayed_items) は載せた物と外した物を
+    排他に作っているので、重なりのある束は記帳の破損 (2026-09-11 修正 1)。
     """
     if not isinstance(bundle, dict):
         return False
@@ -189,6 +227,16 @@ def bundle_is_valid(bundle: Any) -> bool:
     packages = bundle.get("packages")
     if not isinstance(packages, list):
         return False
+    capped_keys: set = set()
+    if BUNDLE_CAPPED_KEYS in bundle:
+        capped = bundle[BUNDLE_CAPPED_KEYS]
+        if not isinstance(capped, list):
+            return False
+        if not all(isinstance(key, str) and key for key in capped):
+            return False
+        capped_keys = set(capped)
+        if len(capped_keys) != len(capped):
+            return False  # 一覧内の重複 = 記帳破損 (同じ物を二度外している)
     seen_keys: set = set()
     for package in packages:
         if not isinstance(package, dict):
@@ -226,6 +274,11 @@ def bundle_is_valid(bundle: Any) -> bool:
                 return False
         if package.get("state") not in _PACKAGE_STATES:
             return False
+    if capped_keys & seen_keys:
+        # 表で見えている物が「埋もれている」一覧にも立っている = 記帳破損。
+        # このまま通すと、その物が本当に部屋から消えた回の差分でも gone 抑止が
+        # 働き、「見当たらなくなったもの」が黙って落ちる。
+        return False
     return True
 
 
@@ -256,6 +309,32 @@ def snapshot_digest(snapshot: Any) -> str:
 
 def _packages(bundle: Mapping[str, Any]) -> List[Dict[str, Any]]:
     return [p for p in bundle.get("packages", []) if isinstance(p, dict) and p.get("key")]
+
+
+def bundle_capped_keys(bundle: Mapping[str, Any]) -> List[str]:
+    """束が「表示上限で外した」と記録している物のキー (無ければ空)。
+
+    上限を入れる前に記帳された束にはこのフィールドが無い — その束は「外した物
+    なし」として読む (docs/intent/room_item_display_cap.md 設計 2 の後方互換)。
+    """
+    capped = bundle.get(BUNDLE_CAPPED_KEYS)
+    if not isinstance(capped, list):
+        return []
+    return [key for key in capped if isinstance(key, str) and key]
+
+
+def capped_notice_line(bundle: Mapping[str, Any]) -> Optional[str]:
+    """埋もれた物が 1 個以上あるときの「ほかに N 個」の一行 (無ければ None)。
+
+    束には入れず、様子を文字にする描画 (:func:`render_room_full` /
+    :func:`render_room_diff`) の末尾に添えるだけ — 埋もれた数の増減だけで
+    「見た目は何も変わっていないのに差分が出る」ことを避けるため
+    (docs/intent/room_item_display_cap.md 設計 2)。
+    """
+    count = len(bundle_capped_keys(bundle))
+    if count <= 0:
+        return None
+    return _CAPPED_NOTICE_TEMPLATE.format(count=count)
 
 
 def _package_lines(package: Mapping[str, Any]) -> List[str]:
@@ -338,7 +417,9 @@ def render_room_full(bundle: Mapping[str, Any]) -> str:
     for package in items:
         parts.extend(_package_lines(package))
         parts.append("")
-    if not items:
+    if not items and not bundle_capped_keys(bundle):
+        # 埋もれた物があるときは「ありません」と言わない — 直後の「ほかに N 個」
+        # の一行と矛盾した読み味になる (上限 0 の部屋の実出力で確認、2026-09-11)。
         parts.append("アイテムはありません。")
         parts.append("")
 
@@ -357,6 +438,10 @@ def render_room_full(bundle: Mapping[str, Any]) -> str:
         for package in packages:
             parts.extend(_package_lines(package))
             parts.append("")
+
+    notice = capped_notice_line(bundle)
+    if notice:
+        parts.append(notice)
 
     return "\n".join(parts)
 
@@ -493,14 +578,22 @@ def render_room_diff(
             changed_blocks.append(_package_text(package))
             _add_media(package)
 
+    # 表示上限で外れただけの物は「見当たらなくなったもの」に出さない
+    # (docs/intent/room_item_display_cap.md 不変条件 3)。部屋から実際に
+    # 持ち出された・消えた「見えていた物」だけがここに出る。
+    capped_now = set(bundle_capped_keys(new_bundle))
     gone_labels = [
         str(p.get("label") or key)
         for key, p in old_pkgs.items()
-        if key not in new_keys
+        if key not in new_keys and key not in capped_now
     ]
+    notice = capped_notice_line(new_bundle)
 
     if not changed_blocks and not gone_labels:
-        return {"content": f"# 「{name}」の様子\n{_NO_CHANGE_LINE}", "media": []}
+        content = f"# 「{name}」の様子\n{_NO_CHANGE_LINE}"
+        if notice:
+            content += f"\n{notice}"
+        return {"content": content, "media": []}
 
     parts: List[str] = [f"# 「{name}」の様子" + _DIFF_TITLE_SUFFIX, ""]
     if changed_blocks:
@@ -515,6 +608,8 @@ def render_room_diff(
             parts.append(f"- {label}")
         parts.append("")
     parts.append(_TAIL_LINE)
+    if notice:
+        parts.append(notice)
     return {"content": "\n".join(parts), "media": media}
 
 

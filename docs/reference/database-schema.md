@@ -244,6 +244,7 @@ SAIVerse の全テーブル・カラム定義（自動生成）。SQLite。本�
 | `PHYSICAL_VESSEL_ID` | VARCHAR(64) | — |  |
 | `REGION_ID` | VARCHAR(255) | FK→region.REGION_ID |  |
 | `FACILITY_ROLES` | TEXT | — |  |
+| `ITEM_DISPLAY_LIMIT` | INTEGER | — |  |
 
 ## ai
 
