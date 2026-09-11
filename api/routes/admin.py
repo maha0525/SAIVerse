@@ -159,57 +159,14 @@ def write_env_updates(updates: Dict[str, str]) -> None:
 
 
 @router.post("/env")
-def update_env_vars(req: EnvUpdateRequest, manager=Depends(get_manager)):
-    """Update environment variables in .env file and runtime os.environ.
-
-    When the update sets SAIVERSE_DEFAULT_MODEL to a model whose definition
-    exists, running personas without their own default model are switched to it
-    as well, so they do not keep talking with the previous model until a restart.
-    """
+def update_env_vars(req: EnvUpdateRequest):
+    """Update environment variables in .env file and runtime os.environ."""
     try:
         write_env_updates(req.updates)
+        return {"success": True, "message": "Environment variables updated."}
     except Exception as e:
         LOGGER.error(f"Failed to update .env: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-    _apply_default_model_to_running_personas(manager, req.updates)
-    return {"success": True, "message": "Environment variables updated."}
-
-
-def _apply_default_model_to_running_personas(manager, updates: Dict[str, str]) -> None:
-    """グローバル設定の標準モデルの変更を、動いているペルソナへ反映する。
-
-    write_env_updates は .env と os.environ を書き換えるだけで、読み込み済みの
-    ペルソナのモデルは変えない。反映しないと、個別の標準モデルを持たない
-    ペルソナは再起動まで古いモデルで話し続けるのに、モデル設定の警告
-    (GET /api/config/startup-warnings) はいまの環境変数を見るので消えてしまう。
-    チュートリアルのプリセット適用 (api/routes/tutorial.py の
-    auto_configure_models) と同じく update_default_model を呼ぶ。
-
-    定義があるかは、起動時に標準モデルを引くのと同じ引き方 (設定キーの完全一致) で
-    判定する。定義が無い値は反映しない — ペルソナはいまのモデルで動き続け、
-    定義が無いことは警告が伝える。
-    """
-    from saiverse.model_defaults import MODEL_ROLES, role_model_is_defined
-
-    value = updates.get(MODEL_ROLES["default_model"])
-    if not value:
-        return
-    try:
-        if not role_model_is_defined("default_model", value):
-            LOGGER.warning(
-                "SAIVERSE_DEFAULT_MODEL was set to '%s', which has no model definition; "
-                "running personas keep their current model.",
-                value,
-            )
-            return
-        manager.update_default_model(value)
-    except Exception:
-        # .env と os.environ は書き換え済みなので、保存自体は失敗として返さない。
-        LOGGER.warning(
-            "Saved SAIVERSE_DEFAULT_MODEL='%s' but failed to switch running personas to it.",
-            value,
-            exc_info=True,
-        )
 
 @router.post("/restart")
 def restart_server(background_tasks: BackgroundTasks):

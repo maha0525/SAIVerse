@@ -134,9 +134,11 @@ def _media_summary_fallback_is_defined() -> bool:
 def role_model_is_defined(role: str, value: str) -> bool:
     """役割の値に定義があるかを、その値を実際に使う側と同じ引き方で返す。
 
-    モデル設定の警告 (missing_model_warnings) と、グローバル設定の保存で標準モデルを
-    動いているペルソナへ反映するか (api/routes/admin.py の update_env_vars) が
-    同じ判定を使うためにある。判定が割れると「反映しなかったのに警告も出ない」になる。
+    「設定ファイルが見つかりません」の警告 (missing_model_warnings) と、グローバル設定の
+    標準モデルがまだ動いているペルソナに反映されていないことの知らせ
+    (manager/initialization.py の current_model_setting_warnings) が同じ判定を使う
+    ためにある。判定が割れると、同じ標準モデルの値に二つの文面が両方出る、あるいは
+    どちらも出ない。
     """
     return _ROLE_LOOKUPS[role](value)
 

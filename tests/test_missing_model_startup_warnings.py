@@ -13,6 +13,9 @@ GET /api/config/startup-warnings を読んでこの警告を出す。警告は�
 - 起動後に設定を直す・モデル定義を足す/消す (読み直しを含む) と、再起動せずに
   次の計算へ反映される
 - 起動時には警告を積まないが、標準モデルを代わりのモデルで読み込むことは今までどおり
+- グローバル設定の標準モデルを起動後に変えても、個別の標準モデルを持たないペルソナは
+  再起動まで前のモデルで動く。そのあいだはそのことを知らせ、起動し直す・チュートリアルの
+  自動設定 (update_default_model) で揃うと消える
 - 画面のルートは保存済みの警告の後ろに計算分を足し、計算が失敗しても保存済みは返す
 
 モデル定義は MODEL_CONFIGS を差し替えた偽物を使い (読み直しのテストだけは本物の
@@ -55,6 +58,24 @@ GLOBAL_RESELECT = "グローバル設定の「モデルロール」から選び�
 #: 画像・音声・動画要約モデルの定義が見つからないときに、グローバル設定の警告へ付く一文
 #: (saiverse/media_summary.py は組み込みの既定モデルへ切り替えて要約を続ける)
 MEDIA_SUBSTITUTE = f"いまは組み込みの既定モデル '{FALLBACK_KEY}' に切り替えて要約を続けようとしています。"
+
+
+def _changed_notice(value: str, *, running: str) -> str:
+    """グローバル設定の標準モデルが定義のある別の値に変わったときの知らせ。"""
+    return (
+        f"グローバル設定の標準モデルは '{value}' に変わっていますが、"
+        "個別の標準モデルを持たないペルソナには再起動するまで反映されません。"
+        f"いまは '{running}' で動いています。"
+    )
+
+
+def _cleared_notice(*, running: str) -> str:
+    """グローバル設定の標準モデルが空・未設定になったときの知らせ。"""
+    return (
+        "グローバル設定の標準モデルが未設定になりましたが、"
+        f"個別の標準モデルを持たないペルソナは再起動するまで '{running}' で動き続けます。"
+        f"再起動後は組み込みの既定モデル '{FALLBACK_KEY}' になります。"
+    )
 
 
 def _definition(api_name: str) -> dict:
@@ -122,8 +143,11 @@ class _World:
         finally:
             db.close()
 
-    def start(self) -> _Manager:
-        """SAIVerseManager.__init__ と同じ順で、モデル設定の解決とペルソナの読み込みを行う。"""
+    def start(self, model=None) -> _Manager:
+        """SAIVerseManager.__init__ と同じ順で、モデル設定の解決とペルソナの読み込みを行う。
+
+        ``model`` は SAIVerseManager.__init__ の同名の引数。呼ぶたびに同じ DB から
+        起動し直すので、二度呼べば再起動になる。"""
         svc = _Manager.__new__(_Manager)
         svc.SessionLocal = self.session_factory
         svc.city_id = 1
@@ -143,7 +167,7 @@ class _World:
         svc.items_by_persona = {}
         svc.get_persona_pending_events = lambda *a, **k: []
         svc.archive_persona_events = lambda *a, **k: None
-        svc._init_model_config(None)  # main.py は model を渡さない
+        svc._init_model_config(model)  # main.py は model を渡さない
         svc._load_personas_from_db()
         return svc
 
@@ -420,7 +444,11 @@ def test_fixing_global_env_after_startup_clears_warnings(world, monkeypatch):
     # グローバル設定のモデルロールの保存も、チュートリアルの自動設定も、
     # write_env_updates (api/routes/admin.py) で os.environ を書き換える
     _set_env(monkeypatch, **{key: DEFINED_KEY for key in ROLE_ENV_KEYS})
-    assert svc.current_model_setting_warnings() == []
+    # 定義が見つからない警告は消える。標準モデルだけは、起動時に代わりに読み込んだ
+    # モデルのまま再起動まで動くので、そのことの知らせが残る。
+    assert _messages(svc.current_model_setting_warnings()) == [
+        _changed_notice(DEFINED_KEY, running=FALLBACK_KEY),
+    ]
 
 
 def test_adding_definition_after_startup_clears_warnings(world, monkeypatch):
@@ -488,6 +516,115 @@ def test_real_reload_is_reflected(world, monkeypatch, tmp_path):
     ]
 
 
+# --- 標準モデルの変更が再起動まで反映されないことの知らせ ------------------------
+
+
+def test_changing_global_default_model_notices_until_restart(world, monkeypatch):
+    """グローバル設定の保存は os.environ を書き換えるだけで、個別の標準モデルを持たない
+    ペルソナのモデルは変えない。そのあいだは知らせ、起動し直すとその値で動いて消える。"""
+    world.add_persona()  # 個別の標準モデルを持たない
+    svc = world.start()
+    assert svc.personas[PERSONA_ID].model == FALLBACK_KEY
+
+    monkeypatch.setenv("SAIVERSE_DEFAULT_MODEL", DEFINED_KEY)
+    assert svc.current_model_setting_warnings() == [
+        {"source": "model_config", "message": _changed_notice(DEFINED_KEY, running=FALLBACK_KEY)},
+    ]
+    # 知らせのとおり、ペルソナは前のモデルのまま
+    assert svc.personas[PERSONA_ID].model == FALLBACK_KEY
+
+    restarted = world.start()
+    assert restarted._base_model == DEFINED_KEY
+    assert restarted.personas[PERSONA_ID].model == DEFINED_KEY
+    assert restarted.current_model_setting_warnings() == []
+
+
+@pytest.mark.parametrize("cleared", [
+    pytest.param("", id="empty"),
+    pytest.param(None, id="unset"),
+])
+def test_clearing_global_default_model_notices_until_restart(world, monkeypatch, cleared):
+    """グローバル設定で標準モデルを空にしても、再起動までは前のモデルで動く。
+    起動し直すと組み込みの既定モデルで動き、知らせは消える。"""
+    monkeypatch.setenv("SAIVERSE_DEFAULT_MODEL", DEFINED_KEY)
+    world.add_persona()
+    svc = world.start()
+    assert svc.personas[PERSONA_ID].model == DEFINED_KEY
+
+    if cleared is None:
+        monkeypatch.delenv("SAIVERSE_DEFAULT_MODEL")
+    else:
+        monkeypatch.setenv("SAIVERSE_DEFAULT_MODEL", cleared)
+    assert svc.current_model_setting_warnings() == [
+        {"source": "model_config", "message": _cleared_notice(running=DEFINED_KEY)},
+    ]
+
+    restarted = world.start()
+    assert restarted._base_model == FALLBACK_KEY
+    assert restarted.personas[PERSONA_ID].model == FALLBACK_KEY
+    assert restarted.current_model_setting_warnings() == []
+
+
+@pytest.mark.parametrize("startup_value", [
+    pytest.param(None, id="unset"),
+    pytest.param("", id="empty"),
+    pytest.param(DEFINED_KEY, id="defined"),
+    pytest.param(FALLBACK_KEY, id="builtin-default-by-name"),
+])
+def test_unchanged_global_default_model_does_not_notice(world, monkeypatch, startup_value):
+    if startup_value is not None:
+        monkeypatch.setenv("SAIVERSE_DEFAULT_MODEL", startup_value)
+    svc = world.start()
+
+    assert svc.current_model_setting_warnings() == []
+
+
+def test_update_default_model_clears_the_notice(world, monkeypatch):
+    """チュートリアルの自動設定は、環境変数を書いたあと update_default_model で
+    _base_model を同じ値に揃える (api/routes/tutorial.py の auto_configure_models)。
+    揃ったあとは知らせない。"""
+    from saiverse.saiverse_manager import SAIVerseManager
+
+    svc = world.start()
+    monkeypatch.setenv("SAIVERSE_DEFAULT_MODEL", DEFINED_KEY)
+    assert _messages(svc.current_model_setting_warnings()) == [
+        _changed_notice(DEFINED_KEY, running=FALLBACK_KEY),
+    ]
+
+    SAIVerseManager.update_default_model(svc, DEFINED_KEY)
+
+    assert svc._base_model == DEFINED_KEY
+    assert svc.current_model_setting_warnings() == []
+
+
+def test_changing_to_an_undefined_value_is_left_to_the_missing_definition_warning(
+    world, monkeypatch,
+):
+    """定義の無い値に変えたときは「設定ファイルが見つかりません」の警告だけを出す。
+    再起動しても組み込みの既定モデルへ落ちるので、その値に変わるとは言えない。"""
+    monkeypatch.setenv("SAIVERSE_DEFAULT_MODEL", DEFINED_KEY)
+    svc = world.start()
+
+    monkeypatch.setenv("SAIVERSE_DEFAULT_MODEL", "gone-default")
+    assert _messages(svc.current_model_setting_warnings()) == [
+        "グローバル設定の標準モデル 'gone-default' の設定ファイルが見つかりません。"
+        f"いまはモデル '{DEFINED_KEY}' で代わりに動いています。" + GLOBAL_RESELECT,
+    ]
+
+
+def test_startup_with_a_model_argument_does_not_notice(world, monkeypatch):
+    """SAIVerseManager.__init__ は標準モデルを引数 model でも受け取る。いまの起動口
+    (main.py ほか) は渡さないが、渡された起動では環境変数が標準モデルを決めていないので、
+    環境変数との食い違いを「再起動するまで反映されない」とは言えない。"""
+    svc = world.start(model=DEFINED_KEY)
+    assert svc._base_model == DEFINED_KEY
+    # 環境変数は未設定のまま。引数を見ずに比べると「未設定になりましたが」を出してしまう
+    assert svc.current_model_setting_warnings() == []
+
+    monkeypatch.setenv("SAIVERSE_DEFAULT_MODEL", FALLBACK_KEY)
+    assert svc.current_model_setting_warnings() == []
+
+
 # --- 読み出し・引き当ての失敗 -----------------------------------------------------
 
 UNREAD_PERSONAS = "ペルソナごとのモデル設定を読み出せなかったため、ペルソナ単位の確認はできていません。"
@@ -549,21 +686,36 @@ def test_route_shows_global_warnings_when_persona_rows_cannot_be_read(world, mon
     ]}
 
 
-def test_media_summary_substitute_sentence_needs_the_fallback_definition(world, monkeypatch):
+def test_media_summary_substitute_sentence_needs_the_fallback_definition(
+    world, monkeypatch, tmp_path,
+):
     """要約側は、組み込みの既定モデルの定義も引けないと要約しない
     (saiverse/media_summary.py の _resolve_client_for_model)。そのときは
-    「代わりに要約しています」と言わない。"""
+    「代わりに要約しています」と言わない。
+
+    要約側は組み込みの既定モデルの名前を import 時に束縛しているので、定数ではなく
+    定義の側を消す。find_model_config は MODEL_CONFIGS に無い名前を定義フォルダの
+    ファイルからも探す (組み込みの既定モデルの JSON は builtin_data/models/ にある) ので、
+    三層の定義フォルダも空の一時フォルダへ向ける。"""
+    from saiverse import media_summary
+
     monkeypatch.setenv("SAIVERSE_IMAGE_SUMMARY_MODEL", "gone-image")
     svc = world.start()
-    # 起動の後で差し替える。起動時は標準モデルの代わりにもこの名前が使われる。
-    monkeypatch.setattr(
-        model_defaults, "BUILTIN_DEFAULT_LITE_MODEL", "test-missing-builtin-fallback",
-    )
+    # 起動の後で消す。起動時は標準モデルの代わりにもこの定義が使われる。
+    monkeypatch.setattr(model_configs, "MODEL_CONFIGS", {
+        key: value
+        for key, value in model_configs.MODEL_CONFIGS.items()
+        if key != FALLBACK_KEY
+    })
+    for name in ("USER_DATA_DIR", "EXPANSION_DATA_DIR", "BUILTIN_DATA_DIR"):
+        monkeypatch.setattr(data_paths, name, tmp_path / name)
 
     assert _messages(svc.current_model_setting_warnings()) == [
         "グローバル設定の画像要約モデル 'gone-image' の設定ファイルが見つかりません。"
         + GLOBAL_RESELECT,
     ]
+    # 同じ状態で、要約側も代わりのモデルへ切り替えられずに諦める
+    assert media_summary._resolve_client_for_model("gone-image", "image") is None
 
 
 # --- 画面のルート---------------------------------------------------------------
@@ -605,3 +757,25 @@ def test_route_returns_recorded_warnings_when_computation_fails(world, monkeypat
 
     assert config_route.get_startup_warnings(manager=svc) == {"warnings": [RECORDED]}
     assert svc.startup_warnings == [RECORDED]
+
+
+def test_global_default_model_messages_name_the_override_while_it_is_active(world, monkeypatch):
+    """チャット画面のモデル一時上書き (manager.model、set_model が立てる) が有効な間は、
+    ペルソナはその上書きのモデルで動いている。グローバル設定の標準モデルの警告と知らせが
+    「いまは …」で名指すのも、その上書き。食い違いの判定そのものは _base_model と比べる。"""
+    override = "test-override-model"
+    model_configs.MODEL_CONFIGS[override] = _definition("vendor/test-override")
+    svc = world.start()  # 環境変数は未設定 → 組み込みの既定モデルで起動
+    svc.model = override
+
+    _set_env(monkeypatch, SAIVERSE_DEFAULT_MODEL="gone-default")
+    assert _messages(svc.current_model_setting_warnings()) == [
+        "グローバル設定の標準モデル 'gone-default' の設定ファイルが見つかりません。"
+        f"いまはモデル '{override}' で代わりに動いています。"
+        + GLOBAL_RESELECT,
+    ]
+
+    _set_env(monkeypatch, SAIVERSE_DEFAULT_MODEL=DEFINED_KEY)
+    assert _messages(svc.current_model_setting_warnings()) == [
+        _changed_notice(DEFINED_KEY, running=override),
+    ]

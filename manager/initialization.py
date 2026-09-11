@@ -537,6 +537,12 @@ class InitializationMixin:
             return os.getenv("SAIVERSE_DEFAULT_MODEL", BUILTIN_DEFAULT_LITE_MODEL)
 
         base_model = model or _get_default_model()
+        # 標準モデルを環境変数 (未設定なら組み込みの既定モデル) から決めたか。引数で
+        # 渡された起動では環境変数が標準モデルを決めていないので、再起動すれば環境変数の
+        # 値になるとは言えない。そのとき current_model_setting_warnings は、グローバル
+        # 設定の標準モデルとの食い違いを知らせない。いまの起動口 (main.py ほか) は
+        # 引数を渡さない。
+        self._base_model_from_env = not model
         self.model = None  # No global override by default
         self.startup_warnings: List[Dict[str, str]] = []
         try:
@@ -579,6 +585,10 @@ class InitializationMixin:
           いるので設定値の判定には使わず、「いま何で動いているか」の表示にだけ
           使う。画像/音声/動画要約モデルは、ペルソナ単位の値を読む箇所が無いので
           対象にしない。
+        - グローバル設定の標準モデルが起動後に変わっても、個別の標準モデルを持たない
+          ペルソナは再起動まで ``_base_model`` で動き続ける。いまの環境変数から再起動
+          したら決まるはずの標準モデルが ``_base_model`` と違えば、そのことを警告一件で
+          知らせる (``_default_model_restart_notice``)。
         - DB からペルソナ行を読み出せなかったときは、グローバル設定の警告をそのまま
           返し、ペルソナ単位の確認ができていないことを警告一件で伝える。黙って
           ペルソナ分を落とすと、警告が無い画面を「問題なし」と読ませてしまう。
@@ -592,10 +602,19 @@ class InitializationMixin:
 
         from saiverse.model_defaults import MODEL_ROLES, missing_model_warnings
 
+        # 環境変数は一度だけ読む。保存と重なって二度読むと、「設定ファイルが見つかり
+        # ません」の警告と標準モデルの知らせが別々の値を見てしまう。
+        global_settings = {role: os.getenv(env_key) for role, env_key in MODEL_ROLES.items()}
+        # チャット画面のモデル一時上書き (set_model) が有効な間は、ペルソナはそのモデルで
+        # 動いているので、「いまは …」で名指すのはそちら。
+        running_model = getattr(self, "model", None) or self._base_model
         warnings = missing_model_warnings(
-            [(role, os.getenv(env_key)) for role, env_key in MODEL_ROLES.items()],
-            default_model_substitute=self._base_model,
+            global_settings.items(),
+            default_model_substitute=running_model,
         )
+        restart_notice = self._default_model_restart_notice(global_settings["default_model"])
+        if restart_notice is not None:
+            warnings.append(restart_notice)
 
         # DB の読み出しだけを独立に扱う。ここで例外を外へ出すと、ルートの外側の
         # 例外処理がグローバル設定の警告まで一緒に捨て、保存済みの警告が無ければ
@@ -640,6 +659,60 @@ class InitializationMixin:
                 default_model_substitute=persona.model if persona is not None else None,
             ))
         return warnings
+
+    def _default_model_restart_notice(self, value: Optional[str]) -> Optional[Dict[str, str]]:
+        """グローバル設定の標準モデルが、動いているペルソナにまだ反映されていなければ知らせる。
+
+        グローバル設定の保存 (POST /api/admin/env) は .env と os.environ を書き換える
+        だけで、個別の標準モデルを持たないペルソナが使う ``_base_model`` は変えない。
+        ``_base_model`` が変わるのは、再起動して ``_init_model_config`` がいまの環境変数
+        から決め直したときと、チュートリアルの自動設定が update_default_model を
+        呼んだときだけ。そこで、いまの環境変数から再起動したら決まるはずの標準モデルを
+        求め、``_base_model`` と違うときだけ知らせを一件返す。
+
+        - 値が空でなく定義がある: その値。定義の引き方は ``_init_model_config`` と同じ
+          設定キーの完全一致 (role_model_is_defined)。
+        - 値が空・未設定: 組み込みの既定モデル。``_init_model_config`` は空文字も定義を
+          引けないので、組み込みの既定モデルへ落ちる。
+        - 値が空でないのに定義が無い: 知らせない。「設定ファイルが見つかりません」の
+          警告 (missing_model_warnings) が受け持つ。
+        - 起動時に標準モデルを引数から決めた: 知らせない (``_init_model_config`` の
+          ``_base_model_from_env`` の説明)。
+        """
+        from saiverse.model_defaults import BUILTIN_DEFAULT_LITE_MODEL, role_model_is_defined
+
+        if not self._base_model_from_env:
+            return None
+        running = self._base_model
+        # 食い違いの判定は _base_model と比べる (再起動で変わるのはそれ)。文面で
+        # 「いまは …」と名指すのは、チャット画面のモデル一時上書きが有効ならそちら。
+        shown = getattr(self, "model", None) or running
+        if value:
+            try:
+                defined = role_model_is_defined("default_model", value)
+            except Exception:
+                LOGGER.warning(
+                    "Model config check failed for SAIVERSE_DEFAULT_MODEL=%r; "
+                    "skipping the restart notice.",
+                    value, exc_info=True,
+                )
+                return None
+            if not defined or value == running:
+                return None
+            message = (
+                f"グローバル設定の標準モデルは '{value}' に変わっていますが、"
+                "個別の標準モデルを持たないペルソナには再起動するまで反映されません。"
+                f"いまは '{shown}' で動いています。"
+            )
+        else:
+            if running == BUILTIN_DEFAULT_LITE_MODEL:
+                return None
+            message = (
+                "グローバル設定の標準モデルが未設定になりましたが、"
+                f"個別の標準モデルを持たないペルソナは再起動するまで '{shown}' で動き続けます。"
+                f"再起動後は組み込みの既定モデル '{BUILTIN_DEFAULT_LITE_MODEL}' になります。"
+            )
+        return {"source": "model_config", "message": message}
 
     def _update_timezone_cache(self, tz_name: Optional[str]) -> None:
         """Update cached timezone information for this manager.
