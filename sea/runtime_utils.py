@@ -3,7 +3,34 @@ from __future__ import annotations
 import logging
 import os
 import re
-from typing import Any, Dict
+from typing import Any, Dict, Optional
+
+LOGGER = logging.getLogger(__name__)
+
+
+def event_building_id(runtime: Any, persona: Any) -> Optional[str]:
+    """画面イベントに載せる「いまペルソナが居る部屋」。分からなければ ``None``。
+
+    フロントは ``building_id`` を名乗るイベントを、閲覧中の部屋と突き合わせて
+    「別の部屋のものなら吹き出しに触らない」と判定する
+    (docs/issues/pulse_beats_merge_into_single_record.md 契約 5)。名乗らない
+    イベントは従来どおり素通しされるので、引けなかったときは名乗らない方へ倒す。
+
+    部屋 id を引数で受け取らないノード (TOOL / MEMORIZE / tool_call / 自動想起)
+    のための口。現在地の正は在室表なので ``_effective_building_id`` に聞く —
+    在室表を持たない部分構築の runtime (テストのスタブ) では黙って None を返す。
+    """
+    resolver = getattr(runtime, "_effective_building_id", None)
+    if resolver is None:
+        return None
+    try:
+        return resolver(persona, "") or None
+    except Exception:
+        LOGGER.debug(
+            "[sea] could not resolve the current building for a UI event",
+            exc_info=True,
+        )
+        return None
 
 
 def _is_llm_streaming_enabled() -> bool:
