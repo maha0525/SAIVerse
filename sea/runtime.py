@@ -168,7 +168,57 @@ class SEARuntime:
         pulse_type: str = "user",
         pre_spells: Optional[List[str]] = None,
     ) -> List[str]:
-        """:meth:`run_meta_user` の本体 (Beat ロック保持下で実行される)。"""
+        """:meth:`run_meta_user` の本体 (Beat ロック保持下で実行される)。
+
+        返事の始まりに、この返事で使うモデルと接続を決める
+        (saiverse/persona_model_selection.py の ReplyModelBinding、
+        docs/intent/persona_model_selection.md 決まったこと 10)。書いている途中で
+        設定が変わっても、この返事は始めたときのモデルと接続で最後まで書く。
+
+        この返事の段 (自律は軽量、それ以外は標準) のモデルの設定ファイルが無ければ、
+        返事の前処理 (実行モデルの解決・読み戻し・床の確保) より前に
+        ModelUnavailableError で止める。代わりのモデルでは動かさず、建物の記録にも
+        ペルソナの記憶にも何も書かない (知らせはチャット画面のエラーだけ)。
+        """
+        from saiverse.persona_model_selection import (
+            TIER_LIGHTWEIGHT,
+            TIER_STANDARD,
+            ReplyModelBinding,
+            reply_binding_scope,
+        )
+
+        model_binding = ReplyModelBinding.capture(persona)
+        model_binding.check_defined(TIER_LIGHTWEIGHT if pulse_type == "auto" else TIER_STANDARD)
+        with reply_binding_scope(model_binding):
+            return self._run_meta_user_with_models(
+                persona,
+                user_input,
+                building_id,
+                model_binding,
+                metadata=metadata,
+                meta_playbook=meta_playbook,
+                args=args,
+                event_callback=event_callback,
+                cancellation_token=cancellation_token,
+                pulse_type=pulse_type,
+                pre_spells=pre_spells,
+            )
+
+    def _run_meta_user_with_models(
+        self,
+        persona,
+        user_input: str,
+        building_id: str,
+        model_binding: Any,
+        metadata: Optional[Dict[str, Any]] = None,
+        meta_playbook: Optional[str] = None,
+        args: Optional[Dict[str, Any]] = None,
+        event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+        cancellation_token: Optional[CancellationToken] = None,
+        pulse_type: str = "user",
+        pre_spells: Optional[List[str]] = None,
+    ) -> List[str]:
+        """返事の始まりに決めたモデル (``model_binding``) で返事を走らせる。"""
         # Store pulse_type in persona for tools to access
         persona._current_pulse_type = pulse_type
 
@@ -216,7 +266,7 @@ class SEARuntime:
         # 別の model (auto → 軽量) で走りうる — 検証した窓と喋る窓が食い違う。
         _pre_model_key: Optional[str] = None
         try:
-            _pre_probe_state: Dict[str, Any] = {}
+            _pre_probe_state: Dict[str, Any] = {"_model_binding": model_binding}
             if pulse_type is not None:
                 _pre_probe_state["_pulse_type"] = pulse_type
             _pre_model_key = resolve_execution_context(
@@ -418,6 +468,7 @@ class SEARuntime:
             initial_params=effective_args if effective_args else None,
             pulse_line_aspect=_root_aspect,
             pre_spells=pre_spells,
+            model_binding=model_binding,
         )
 
         # Post-response metabolism check (DB ベースで件数比較)。
@@ -430,7 +481,7 @@ class SEARuntime:
         from database.building_messages import fetch_max_seq
         bh_before = fetch_max_seq(getattr(self.manager, "SessionLocal", None), building_id)
         try:
-            _mk_probe_state: Dict[str, Any] = {}
+            _mk_probe_state: Dict[str, Any] = {"_model_binding": model_binding}
             if pulse_type is not None:
                 _mk_probe_state["_pulse_type"] = pulse_type
             _metabolism_model_key = resolve_execution_context(
@@ -475,6 +526,7 @@ class SEARuntime:
         line: str = "main",
         pulse_line_aspect: Optional[Any] = None,  # sea.pulse_context.Aspect
         pre_spells: Optional[List[str]] = None,
+        model_binding: Optional[Any] = None,  # saiverse.persona_model_selection.ReplyModelBinding
     ) -> List[str]:
         return run_playbook(
             self,
@@ -493,6 +545,7 @@ class SEARuntime:
             line=line,
             pulse_line_aspect=pulse_line_aspect,
             pre_spells=pre_spells,
+            model_binding=model_binding,
         )
 
     # LangGraph compile wrapper -----------------------------------------
@@ -651,9 +704,17 @@ class SEARuntime:
         ``execution_context=None`` の legacy 経路では従来どおり state の
         PulseContext / フラグから導出する (挙動は同一)。
 
-        戻り値の model は「実際に使う client の model」。structured-output
-        fallback 等で ``execution_context.model_key`` と異なる model になった
-        場合、呼び出し側は ``execution_context.with_model()`` で差し替える。
+        戻り値の model は「実際に使う client の model」。標準モデルが構造化出力に
+        対応していないときの軽量モデルへの使い分けで ``execution_context.model_key``
+        と異なる model になった場合、呼び出し側は ``execution_context.with_model()``
+        で差し替える。
+
+        接続は、書いている途中の返事なら返事の始まりに決めたもの
+        (saiverse/persona_model_selection.py の ReplyModelBinding) を使い、返事の
+        外 (keep-alive など) ならこの呼び出しの時点の設定で決める。どちらでも、
+        返す接続は返す model のもの。使えない (設定ファイルが無い・繋げない)
+        ときは ModelUnavailableError を出し、代わりのモデルへは回さない
+        (docs/intent/persona_model_selection.md 決まったこと 7)。
 
         Args:
             node_def: Node definition from playbook
@@ -693,45 +754,32 @@ class SEARuntime:
 
         LOGGER.info("[sea] Node model_type: %s (node_id=%s, force_light=%s)", model_type, getattr(node_def, "id", "unknown"), force_lightweight)
 
-        # First, select base client based on model_type.
+        from saiverse.persona_model_selection import (
+            TIER_LIGHTWEIGHT,
+            TIER_STANDARD,
+            ReplyModelBinding,
+            find_reply_binding,
+        )
+
+        # 書いている途中の返事なら、返事の始まりに決めたモデルと接続を使う。返事の
+        # 外 (keep-alive / 直接呼び) はこの呼び出しの時点の設定で決める。
+        binding = find_reply_binding(state=state, persona=persona)
+        if binding is None:
+            binding = ReplyModelBinding.capture(persona)
+        tier = TIER_LIGHTWEIGHT if model_type == "lightweight" else TIER_STANDARD
         # model 名は ExecutionContext があればその解決値 (resolve_execution_context
-        # が同じチェーンで導出済み)、無ければ従来チェーンで導出する。
-        if model_type == "lightweight":
-            # Try persona's lightweight_llm_client first
-            lightweight_client = getattr(persona, "lightweight_llm_client", None)
-            LOGGER.info("[sea] lightweight_client exists: %s", lightweight_client is not None)
-            lightweight_model_name = (
-                execution_context.model_key if execution_context is not None
-                else getattr(persona, "lightweight_model", None) or _get_default_lightweight_model()
-            )
-            if lightweight_client:
-                LOGGER.info("[sea] Using persona's lightweight_llm_client")
-                base_client = lightweight_client
-                base_model = lightweight_model_name
-            else:
-                # Fallback: create a temporary lightweight client
-                LOGGER.info("[sea] Persona has no lightweight_llm_client; creating temporary client with default model")
-                LOGGER.info("[sea] Using lightweight model: %s", lightweight_model_name)
-                try:
-                    from llm_clients import get_llm_client
-                    from saiverse.model_configs import get_context_length, get_model_provider
-                    lw_context = get_context_length(lightweight_model_name)
-                    provider = get_model_provider(lightweight_model_name)
-                    base_client = get_llm_client(lightweight_model_name, provider, lw_context)
-                    base_model = lightweight_model_name
-                except Exception as exc:
-                    LOGGER.warning("[sea] Failed to create lightweight client: %s; falling back to normal client", exc)
-                    base_client = persona.llm_client
-                    base_model = getattr(persona, "model", "unknown")
-        else:
-            # Default: use normal client
-            LOGGER.info("[sea] Using normal llm_client")
-            base_client = persona.llm_client
-            base_model = (
-                execution_context.model_key if execution_context is not None
-                else getattr(persona, "model", "unknown")
-            )
-            LOGGER.info("[sea] persona.model=%s, llm_client type=%s", base_model, type(base_client).__name__)
+        # が同じ規則で導出済み)、無ければ返事の始まりに決めた値。
+        base_model = (
+            execution_context.model_key if execution_context is not None
+            else binding.model_for(tier)
+        )
+        # 使えない (設定ファイルが無い・繋げない) ときは ModelUnavailableError。
+        # 標準モデルへ代わりに回さない。
+        base_client = binding.client_for_model(tier, base_model)
+        LOGGER.info(
+            "[sea] %s tier: model=%s, llm_client type=%s",
+            tier, base_model, type(base_client).__name__,
+        )
 
         # Ensure llama.cpp server is running (may have been stopped by idle timeout)
         self._ensure_llama_server(base_model)
@@ -746,9 +794,9 @@ class SEARuntime:
 
         # If structured output is needed, check if the selected model supports it
         if needs_structured_output:
-            from saiverse.model_configs import get_context_length, get_model_provider, supports_structured_output
+            from saiverse.model_configs import supports_structured_output
             if not supports_structured_output(base_model):
-                lw_model = getattr(persona, "lightweight_model", None) or _get_default_lightweight_model()
+                lw_model = binding.model_for(TIER_LIGHTWEIGHT)
                 if not supports_structured_output(lw_model):
                     persona_name = getattr(persona, "persona_name", "unknown")
                     raise LLMError(
@@ -759,17 +807,11 @@ class SEARuntime:
                             "構造化出力に対応していません。チャットオプションから対応モデルに変更してください。"
                         ),
                     )
+                # モデルの能力に合わせた使い分け (失敗の代わりではない)。軽量モデルに
+                # 繋げなければ ModelUnavailableError で止める — 元のモデルへは戻らない。
                 LOGGER.info("[sea] Model '%s' doesn't support structured output, "
-                            "falling back to lightweight model: %s", base_model, lw_model)
-                try:
-                    from llm_clients import get_llm_client
-                    lw_context = get_context_length(lw_model)
-                    lw_provider = get_model_provider(lw_model)
-                    return get_llm_client(lw_model, lw_provider, lw_context), lw_model
-                except Exception as exc:
-                    LOGGER.warning("[sea] Failed to create lightweight client for structured output: %s; "
-                                   "using base client", exc)
-                    return base_client, base_model
+                            "using the lightweight model for this call: %s", base_model, lw_model)
+                return binding.structured_output_client(lw_model), lw_model
 
         return base_client, base_model
 
@@ -1435,7 +1477,7 @@ class SEARuntime:
             stelis_info = memory_adapter.get_stelis_info(thread_id)
             chronicle_prompt = stelis_info.chronicle_prompt if stelis_info else None
             chronicle_summary = self._generate_stelis_chronicle(
-                persona, thread_id, chronicle_prompt
+                persona, thread_id, chronicle_prompt, pulse_context=pulse_context,
             )
             if chronicle_summary:
                 LOGGER.info(
@@ -1497,11 +1539,22 @@ class SEARuntime:
         persona: Any,
         thread_id: str,
         chronicle_prompt: Optional[str] = None,
+        *,
+        state: Optional[Dict[str, Any]] = None,
+        pulse_context: Optional[Any] = None,
     ) -> Optional[str]:
         """Generate a Chronicle summary for a Stelis thread.
 
         This creates a concise summary of the conversation/work done in the
         Stelis thread, which will be stored and can be referenced later.
+
+        要約には軽量モデルを使う。書いている途中の返事の中なら、返事の始まりに決めた
+        軽量モデルの接続 (saiverse/persona_model_selection.py の ReplyModelBinding、
+        ``state`` か ``pulse_context`` から探す)、返事の外なら、いまの設定から返事と同じ
+        決め方で決めた軽量モデルの接続。使えないときは代わりのモデルで要約せず、WARNING を
+        残して None を返す
+        (スレッドは呼び出し側がそのまま閉じる。docs/intent/persona_model_selection.md
+        決まったこと 7・10)。
         """
         memory_adapter = getattr(persona, "sai_memory", None)
         if not memory_adapter:
@@ -1537,20 +1590,30 @@ class SEARuntime:
                 "Focus on: what was done, key decisions made, and any important outcomes."
             )
 
-        # Get LLM client for summarization
+        # 要約に使う接続。返事の中なら返事の始まりに決めた軽量モデルの接続。返事の外なら、
+        # いまの設定から返事と同じ決め方 (個別 → グローバル → 組み込み) で決めた軽量モデルの
+        # 接続。使えなければ、代わりのモデルで接続を作らず、クロニクルを作らないまま返す。
+        from llm_clients.exceptions import ModelUnavailableError
+        from saiverse.persona_model_selection import (
+            TIER_LIGHTWEIGHT,
+            ReplyModelBinding,
+            find_reply_binding,
+        )
+
+        binding = find_reply_binding(state=state, pulse_context=pulse_context, persona=persona)
+        if binding is None:
+            binding = ReplyModelBinding.capture(persona)
         try:
-            # Prefer persona's existing lightweight client (already configured)
-            client = getattr(persona, "lightweight_llm_client", None)
-            if client is None:
-                # Fallback: create a temporary client
-                from llm_clients import get_llm_client
-                from saiverse.model_configs import get_context_length, get_model_provider
+            binding.check_defined(TIER_LIGHTWEIGHT)
+            client = binding.client_for(TIER_LIGHTWEIGHT)
+        except ModelUnavailableError as exc:
+            LOGGER.warning(
+                "[stelis] Chronicle skipped for thread %s: the lightweight model is unavailable "
+                "and no substitute model is used (%s)", thread_id, exc,
+            )
+            return None
 
-                lightweight_model = getattr(persona, "lightweight_model", None) or _get_default_lightweight_model()
-                lw_context = get_context_length(lightweight_model)
-                provider = get_model_provider(lightweight_model)
-                client = get_llm_client(lightweight_model, provider, lw_context)
-
+        try:
             summary_messages = [
                 {"role": "system", "content": chronicle_prompt},
                 {"role": "user", "content": f"Session content:\n\n{conversation_text}"}

@@ -67,16 +67,6 @@ from database.models import (
 from saiverse.regions import Region
 
 
-from saiverse.model_defaults import BUILTIN_DEFAULT_LITE_MODEL
-
-DEFAULT_MODEL = BUILTIN_DEFAULT_LITE_MODEL
-
-
-def _get_default_model() -> str:
-    """Resolve the base default model with optional environment override."""
-    return os.getenv("SAIVERSE_DEFAULT_MODEL", DEFAULT_MODEL)
-
-
 class SAIVerseManager(
     InitializationMixin,
     UserStateMixin,
@@ -95,7 +85,6 @@ class SAIVerseManager(
         self,
         city_name: str,
         db_path: str,
-        model: Optional[str] = None,
         sds_url: str = os.getenv("SDS_URL", "http://127.0.0.1:8080"),
     ):
         # --- Critical: startup_alerts and quarantine state must exist before
@@ -125,7 +114,7 @@ class SAIVerseManager(
         self._init_file_paths()
         self._init_avatars()
         self._init_building_histories()
-        self._init_model_config(model)
+        self._init_model_config()
 
         self.state = CoreState(
             session_factory=self.SessionLocal,
@@ -1415,112 +1404,68 @@ class SAIVerseManager(
     ) -> str:
         return self.runtime.end_conversation(persona_id, building_id)
 
-    def set_model(self, model: str, parameters: Optional[Dict[str, Any]] = None) -> None:
+    def set_model(self, model: str, parameters: Optional[Dict[str, Any]] = None) -> Any:
+        """チャット画面のモデル一時上書きを設定する (空なら解除する)。
+
+        一時上書きは保存しない。設定・解除のどちらも、ロック
+        (saiverse/persona_model_selection.py の MODEL_SETTINGS_LOCK) の中で値を
+        書き換え、話す標準モデルの決め方 (一時上書き → 個別 → グローバル → 組み込み)
+        で全員を決め直す。解除すると各ペルソナはそのとき決め方が指すモデルになる。
+
+        設定ファイルの無いモデルは一時上書きに使わない (ValueError、ルートは 400)。
+
+        Returns:
+            ReapplyResult — 切り替えられなかったペルソナの名前と、いま使っているモデル。
         """
-        Update LLM model override for all active personas in memory.
-        - If model is "None" or empty: clear the override and reset each persona to its DB-defined default model.
-        - Otherwise: set the given model for all personas (temporary, not persisted).
-        """
-        if not model or not model.strip():
-            logging.info("Clearing global model override; restoring each persona's DB default model.")
-            self.model_parameter_overrides = {}
-            db = self.SessionLocal()
-            try:
-                for pid, persona in self.personas.items():
-                    ai = db.query(AIModel).filter_by(AIID=pid).first()
-                    if not ai:
-                        continue
-                    m = ai.DEFAULT_MODEL or getattr(self, '_base_model', None) or _get_default_model()
-                    persona.set_model(m, get_context_length(m), get_model_provider(m))
-                # Reflect no-override state in manager
-                self.model = None
-                self.state.model = self.model
-                if hasattr(self.runtime, "model"):
-                    self.runtime.model = self.model
-            except Exception as e:
-                logging.error(f"Failed to restore DB default models: {e}", exc_info=True)
-            finally:
-                db.close()
-            return
-
-        logging.info(f"Temporarily setting model to '{model}' for all active personas.")
-        self.model_parameter_overrides = dict(parameters or {})
-        self.model = model
-        self.context_length = get_context_length(model)
-        self.provider = get_model_provider(model)
-        self.state.model = self.model
-        self.state.context_length = self.context_length
-        self.state.provider = self.provider
-        if hasattr(self.runtime, "model"):
-            self.runtime.model = self.model
-            self.runtime.context_length = self.context_length
-            self.runtime.provider = self.provider
-        for persona in self.personas.values():
-            persona.set_model(model, self.context_length, self.provider, self.model_parameter_overrides)
-
-    def update_default_model(self, model: str) -> None:
-        """Update the base default model without setting a global override.
-
-        Unlike ``set_model()``, this does NOT create a session-level global
-        override.  It updates ``_base_model`` and refreshes each persona that
-        has no explicit ``DEFAULT_MODEL`` in the database.
-        """
-        from saiverse.model_configs import get_context_length, get_model_provider
-
-        logging.info(
-            "Updating base default model from '%s' to '%s' (no global override).",
-            getattr(self, "_base_model", None),
-            model,
+        from saiverse.model_defaults import role_model_is_defined
+        from saiverse.persona_model_selection import (
+            MODEL_SETTINGS_LOCK,
+            reapply_speaking_models,
+            undefined_override_message,
         )
-        self._base_model = model
-        # AdminService は起動時に _base_model を写して持ち、ワールドエディタから作る
-        # ペルソナの標準モデルに使う (manager/admin.py の __init__、manager/persona.py の
-        # create_ai)。写しも揃えないと、標準モデルを変えた後に作ったペルソナだけが
-        # 再起動まで古いモデルで作られる。
-        admin = getattr(self, "admin", None)
-        if admin is not None:
-            admin._base_model = model
 
-        db = self.SessionLocal()
-        try:
-            for pid, persona in self.personas.items():
-                ai = db.query(AIModel).filter_by(AIID=pid).first()
-                if not ai:
-                    continue
-                if ai.DEFAULT_MODEL:
-                    # Persona has an explicit model in DB; leave it alone
-                    logging.debug(
-                        "Persona '%s' has explicit DEFAULT_MODEL='%s'; skipping.",
-                        pid,
-                        ai.DEFAULT_MODEL,
-                    )
-                    continue
-                new_ctx = get_context_length(model)
-                new_provider = get_model_provider(model)
-                persona.set_model(model, new_ctx, new_provider)
-                logging.info(
-                    "Updated persona '%s' to base default model '%s'.",
-                    pid,
-                    model,
-                )
-        except Exception as e:
-            logging.error(
-                "Failed to update personas to new default model '%s': %s",
-                model,
-                e,
-                exc_info=True,
-            )
-        finally:
-            db.close()
+        requested = (model or "").strip()
+        with MODEL_SETTINGS_LOCK:
+            if requested:
+                if not role_model_is_defined("default_model", requested):
+                    raise ValueError(undefined_override_message(requested))
+                logging.info("Temporarily setting model to '%s' for all active personas.", requested)
+                self.model_parameter_overrides = dict(parameters or {})
+                self.model = requested
+                self.context_length = get_context_length(requested)
+                self.provider = get_model_provider(requested)
+            else:
+                logging.info("Clearing the chat model override; re-deciding each persona's model.")
+                self.model_parameter_overrides = {}
+                self.model = None
+            self.state.model = self.model
+            self.state.context_length = self.context_length
+            self.state.provider = self.provider
+            runtime = getattr(self, "runtime", None)
+            if runtime is not None and hasattr(runtime, "model"):
+                runtime.model = self.model
+                runtime.context_length = self.context_length
+                runtime.provider = self.provider
+            return reapply_speaking_models(self)
 
     def set_model_parameters(self, parameters: Optional[Dict[str, Any]] = None) -> None:
-        """Update model parameters for the current override model."""
-        self.model_parameter_overrides = dict(parameters or {})
-        if not self.model:
-            logging.info("Parameter overrides ignored because no global model override is active.")
-            return
-        for persona in self.personas.values():
-            persona.apply_parameter_overrides(self.model_parameter_overrides)
+        """Update model parameters for the current override model.
+
+        全体を設定のロック (saiverse/persona_model_selection.py の
+        MODEL_SETTINGS_LOCK) の中で行う。一時上書きの設定・解除や決め直しと交錯して、
+        解除したあとの接続に古いパラメータが載ったり、一時上書きの値とペルソナに
+        載せた値が食い違ったりしないように (docs/intent/persona_model_selection.md
+        決まったこと 5)。
+        """
+        from saiverse.persona_model_selection import MODEL_SETTINGS_LOCK
+
+        with MODEL_SETTINGS_LOCK:
+            self.model_parameter_overrides = dict(parameters or {})
+            if not self.model:
+                logging.info("Parameter overrides ignored because no global model override is active.")
+                return
+            for persona in self.personas.values():
+                persona.apply_parameter_overrides(self.model_parameter_overrides)
 
     # ------------------------------------------------------------------
     # AutonomyManager <-> AUTONOMY_ENABLED 同期 (Phase C-2)

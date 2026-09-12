@@ -460,7 +460,18 @@ def create_ai(ai: AICreate, manager: SAIVerseManager = Depends(get_manager)):
 
 @router.put("/ais/{ai_id}")
 def update_ai(ai_id: str, ai: AIUpdate, manager: SAIVerseManager = Depends(get_manager)):
-    return _check_result(manager.update_ai(ai_id, ai.name, ai.description, ai.system_prompt, ai.home_city_id, ai.default_model, ai.lightweight_model, ai.autonomy_enabled, ai.avatar_path, None, ai.appearance_image_path, chronicle_enabled=ai.chronicle_enabled, autonomous_chronicle_enabled=ai.autonomous_chronicle_enabled, auto_recall_enabled=ai.auto_recall_enabled, memopedia_index_enabled=ai.memopedia_index_enabled, spell_enabled=ai.spell_enabled))
+    """ペルソナの設定を保存する。
+
+    保存しなかったモデル設定や、新しい設定に切り替えられなかったことの知らせは
+    ``warning`` で返す (ペルソナ設定の画面の PUT と同じ形。
+    docs/intent/persona_model_selection.md 決まったこと 2・6)。
+    """
+    response = _check_result(manager.update_ai(ai_id, ai.name, ai.description, ai.system_prompt, ai.home_city_id, ai.default_model, ai.lightweight_model, ai.autonomy_enabled, ai.avatar_path, None, ai.appearance_image_path, chronicle_enabled=ai.chronicle_enabled, autonomous_chronicle_enabled=ai.autonomous_chronicle_enabled, auto_recall_enabled=ai.auto_recall_enabled, memopedia_index_enabled=ai.memopedia_index_enabled, spell_enabled=ai.spell_enabled))
+    message = response["message"]
+    if "[WARNING:LLM]" in message:
+        base, warning = message.split("[WARNING:LLM]", 1)
+        response = {"message": base.strip(), "warning": warning.strip()}
+    return response
 
 @router.delete("/ais/{ai_id}")
 def delete_ai(ai_id: str, manager: SAIVerseManager = Depends(get_manager)):

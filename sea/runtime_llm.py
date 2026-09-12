@@ -13,7 +13,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, NamedTuple, Optional, Tuple
 
-from llm_clients.exceptions import LLMError
+from llm_clients.exceptions import LLMError, ModelUnavailableError
 from sea.beat_gate import BeatGateClosedError
 from sea.cancellation import ExecutionCancelledException
 from sea.mcp_tool_refresh import refresh_mcp_tools_at_head
@@ -1730,6 +1730,12 @@ async def _run_spell_tool_async(
         result_str = content
         LOGGER.info("[sea][spell] Executed %s → %s", tool_name, result_str[:200])
         return result_str, result_metadata, True
+    except ModelUnavailableError:
+        # ペルソナが使うモデルが無い・繋げない (サブラインの軽量モデルなど)。
+        # スペルの結果の文字列に畳むと、止まったことの知らせがペルソナの記憶に
+        # 書かれてしまう。返事ごと止めて、チャット画面のエラーにだけ出す
+        # (docs/intent/persona_model_selection.md 決まったこと 8)。
+        raise
     except Exception as exc:
         result_str = f"Spell error ({tool_name}): {type(exc).__name__}: {exc}"
         LOGGER.exception("[sea][spell] %s failed", tool_name)
@@ -2819,10 +2825,12 @@ async def _run_spell_loop(
         if final_continuation:
             merged_parts.append(final_continuation)
         return "\n".join(merged_parts), final_continuation, loop_count
-    except (ExecutionCancelledException, BeatGateClosedError):
+    except (ExecutionCancelledException, BeatGateClosedError, ModelUnavailableError):
         # Beat 境界の中断 / 関所 fail-closed は「spell 系の内部エラー」ではなく
         # 実行制御の正規イベント。partial 保存へ降格せずそのまま伝播する
         # (caller = PulseController / run_meta_user が型別に処理する)。
+        # 使うモデルが無い・繋げない (ModelUnavailableError) も同じ: エラーの注記を
+        # 次の生成へ差し込まず、チャット画面のエラーとして出す。
         raise
     except Exception as exc:
         # Any unhandled error in the spell pipeline: log with traceback,
@@ -2884,6 +2892,8 @@ async def _decide_spell_args_via_playbook(
         "_messages": list(outer_state.get("_messages") or []),
         "_pulse_context": outer_state.get("_pulse_context"),
         "_pulse_id": outer_state.get("_pulse_id"),
+        # 同じ返事の中の仕事なので、返事の始まりに決めたモデルと接続を引き継ぐ
+        "_model_binding": outer_state.get("_model_binding"),
     }
 
     try:
@@ -2899,6 +2909,8 @@ async def _decide_spell_args_via_playbook(
             line="sub",
             isolate_pulse_context=False,
         )
+    except ModelUnavailableError:
+        raise
     except Exception:
         LOGGER.exception(
             "[sea][pre_spells] spell_args_decider raised for '%s'", spell_name,
@@ -3309,6 +3321,9 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                 await _execute_pre_spells(
                     _pre_spells, runtime, persona, building_id, state, playbook, event_callback,
                 )
+            except ModelUnavailableError:
+                # 使うモデルが無い・繋げない — 事前スペル抜きで続けず、返事ごと止める
+                raise
             except Exception:
                 LOGGER.exception("[sea][pre_spells] Pre-spell execution failed; continuing without pre-spell results")
 

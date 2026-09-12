@@ -74,7 +74,6 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
         self.id_to_name_map = state.id_to_name_map
 
         self.model = state.model
-        self._base_model = getattr(manager, '_base_model', None)
         self.provider = state.provider
         self.context_length = state.context_length
         self.default_avatar = state.default_avatar
@@ -1252,171 +1251,170 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                     )
                     return f"Error: Failed to process avatar upload: {exc}"
 
-            original_autonomy = ai.AUTONOMY_ENABLED
-            state_changed = original_autonomy != autonomy_enabled
+            from saiverse.model_defaults import role_model_is_defined
+            from saiverse.persona_model_selection import (
+                MODEL_SETTINGS_LOCK,
+                reapply_speaking_models,
+                rejected_persona_model_message,
+            )
 
-            if state_changed:
-                ai.AUTONOMY_ENABLED = autonomy_enabled
+            llm_warnings: List[str] = []
+            persona = self.personas.get(ai_id)
+            # モデルの欄の検査・保存・当てはめは、設定のロックの中で一件ずつ行う
+            # (docs/intent/persona_model_selection.md 決まったこと 5)。ロックの中で
+            # 行うのは DB の読み書きと値の書き換えだけ — 自律の起動停止とアバターの
+            # 反映はロックの外で行う。
+            with MODEL_SETTINGS_LOCK:
+                db.refresh(ai)
 
-            ai.AINAME = name
-            ai.DESCRIPTION = description
-            ai.SYSTEMPROMPT = system_prompt
-            ai.HOME_CITYID = home_city_id
-            ai.DEFAULT_MODEL = default_model or None
-            ai.LIGHTWEIGHT_MODEL = lightweight_model or None
-            ai.VISION_MODEL = vision_model or None
-            ai.AUDIO_MODEL = audio_model or None
-            ai.VIDEO_MODEL = video_model or None
-            ai.MEMORY_WEAVE_MODEL = memory_weave_model or None
-            ai.AVATAR_IMAGE = avatar_value
-            # Update appearance image path if provided
-            if appearance_image_path is not None:
-                ai.APPEARANCE_IMAGE_PATH = appearance_image_path.strip() if appearance_image_path.strip() else None
-            # Update Chronicle auto-generation toggle
-            if chronicle_enabled is not None:
-                ai.CHRONICLE_ENABLED = chronicle_enabled
-            # Update autonomous-Pulse Chronicle generation toggle (Phase 0, memory_architecture_v2 §6.3)
-            if autonomous_chronicle_enabled is not None:
-                ai.AUTONOMOUS_CHRONICLE_ENABLED = autonomous_chronicle_enabled
-            # Update auto-recall (記憶アーキv2 ゾーン C) per-persona toggle
-            if auto_recall_enabled is not None:
-                ai.AUTO_RECALL_ENABLED = auto_recall_enabled
-            # Update Memory Weave context injection toggle
-            if memory_weave_context is not None:
-                ai.MEMORY_WEAVE_CONTEXT = memory_weave_context
-            # Update Memopedia 索引の head 常時表示 (旧方式) 復活トグル
-            if memopedia_index_enabled is not None:
-                ai.MEMOPEDIA_INDEX_ENABLED = memopedia_index_enabled
-            # Update コア記憶の文字数目安 (記憶アーキv2 ゾーン A, §5)。
-            # 0 / 負値が渡されたら NULL に倒して既定値運用 (= 2000 字) に戻す。
-            if core_memory_char_budget is not None:
-                if core_memory_char_budget > 0:
-                    ai.CORE_MEMORY_CHAR_BUDGET = int(core_memory_char_budget)
-                else:
-                    ai.CORE_MEMORY_CHAR_BUDGET = None
-            # Update Chronicle 帯の読み込み文字数 (2026-09-01)。コア記憶と同じ流儀で
-            # 0 / 負値は NULL に倒し、既定 (env → 20,000 字) の運用へ戻す。
-            if chronicle_char_budget is not None:
-                if chronicle_char_budget > 0:
-                    ai.CHRONICLE_CHAR_BUDGET = int(chronicle_char_budget)
-                else:
-                    ai.CHRONICLE_CHAR_BUDGET = None
-            # Update Spell system toggle
-            if spell_enabled is not None:
-                ai.SPELL_ENABLED = spell_enabled
-            # Update realtime info injection toggle
-            if realtime_info_enabled is not None:
-                ai.REALTIME_INFO_ENABLED = realtime_info_enabled
-            # Update Meta-Judgment Pulse configuration (Phase 4-e)
-            if meta_judgment_config is not None:
-                if isinstance(meta_judgment_config, dict) and meta_judgment_config:
-                    ai.META_JUDGMENT_CONFIG = json.dumps(meta_judgment_config, ensure_ascii=False)
-                else:
-                    # 空 dict / None / その他は NULL に倒して既定値運用に戻す
-                    ai.META_JUDGMENT_CONFIG = None
-            # 2026-05-09: wait_response Track の自動 pause タイマー閾値 (分)。
-            # 0 / 負値が渡されたら NULL に倒して既定値運用 (= 30 分) に戻す。
-            if user_conv_timeout_minutes is not None:
-                if user_conv_timeout_minutes > 0:
-                    ai.USER_CONV_TIMEOUT_MINUTES = int(user_conv_timeout_minutes)
-                else:
-                    ai.USER_CONV_TIMEOUT_MINUTES = None
-            db.commit()
+                def _checked(role: str, requested: Optional[str], stored: Optional[str]) -> Optional[str]:
+                    """設定ファイルの無いモデルの名前は保存せず、いまの値を返す (決まったこと 6)。
 
-            llm_warnings = []
-            if ai_id in self.personas:
-                persona = self.personas[ai_id]
-                persona.persona_name = name
-                persona.persona_system_instruction = system_prompt
-                persona.autonomy_enabled = ai.AUTONOMY_ENABLED
-                persona.lightweight_model = lightweight_model
-                persona.vision_model = vision_model
-                persona.audio_model = audio_model
-                persona.video_model = video_model
-                persona.memory_weave_model = memory_weave_model
-
-                # Phase C-2: AUTONOMY_ENABLED 変更を AutonomyManager に反映
-                # (True なら起動、False なら停止)。
-                # ``ensure_autonomy_for`` は SAIVerseManager のメソッドのため、
-                # AdminService からは ``self.manager`` 経由で呼び出す。
-                if state_changed:
+                    空の値 (個別の設定を外す) は受け付ける。いまと同じ名前は新しい
+                    保存ではないので断らない — ほかの欄だけ保存したときに、前から
+                    入っていた名前で「保存しませんでした」と言わない。
+                    """
+                    value = requested or None
+                    if value is None or value == stored:
+                        return value
                     try:
-                        ensure_autonomy = getattr(
-                            self.manager, "ensure_autonomy_for", None
-                        )
-                        if callable(ensure_autonomy):
-                            ensure_autonomy(ai_id)
+                        defined = role_model_is_defined(role, value)
                     except Exception:
                         logging.warning(
-                            "Failed to sync AutonomyManager state for '%s'",
-                            ai_id, exc_info=True,
+                            "Model config check failed (role=%s value=%r persona=%s); not saving it",
+                            role, value, ai_id, exc_info=True,
                         )
+                        defined = False
+                    if defined:
+                        return value
+                    llm_warnings.append(rejected_persona_model_message(
+                        name, role, value, stored=stored, persona=persona,
+                    ))
+                    return stored
 
-                # Update default model and recreate LLM client if model changed
-                # If a global chat-option override is active, preserve it;
-                # only the DB value (ai.DEFAULT_MODEL) was updated above.
-                # NOTE: Use self.state.model (live reference) rather than
-                # self.model (snapshot from __init__) so chat-option overrides
-                # set after AdminService construction are visible.
-                global_model_override = getattr(self.state, 'model', None)
-                if global_model_override:
-                    new_model = global_model_override
-                else:
-                    new_model = default_model
-                if new_model and persona.model != new_model:
-                    persona.model = new_model
-                    from llm_clients import get_llm_client
-                    from saiverse.model_configs import get_context_length, get_model_provider, model_supports_images
-                    try:
-                        context_len = get_context_length(new_model)
-                        provider = get_model_provider(new_model)
-                        persona.llm_client = get_llm_client(new_model, provider, context_len)
-                        persona.model_supports_images = model_supports_images(new_model)
-                        logging.info(
-                            "Recreated LLM client for persona '%s' with model '%s'.",
-                            name,
-                            new_model,
-                        )
-                    except Exception as exc:
-                        logging.error(
-                            "Failed to recreate LLM client for '%s': %s",
-                            name,
-                            exc,
-                        )
-                        llm_warnings.append(f"モデル '{new_model}' のLLMクライアント作成に失敗: {exc}")
+                default_model = _checked("default_model", default_model, ai.DEFAULT_MODEL)
+                lightweight_model = _checked(
+                    "lightweight_model", lightweight_model, ai.LIGHTWEIGHT_MODEL,
+                )
+                memory_weave_model = _checked(
+                    "memory_weave_model", memory_weave_model, ai.MEMORY_WEAVE_MODEL,
+                )
 
-                # Recreate lightweight LLM client if model changed
-                if lightweight_model:
-                    from llm_clients import get_llm_client
-                    from saiverse.model_configs import get_context_length, get_model_provider
-                    try:
-                        lw_context = get_context_length(lightweight_model)
-                        lw_provider = get_model_provider(lightweight_model)
-                        persona.lightweight_llm_client = get_llm_client(
-                            lightweight_model, lw_provider, lw_context
-                        )
-                        logging.info(
-                            "Recreated lightweight LLM client for persona '%s' with model '%s'.",
-                            name,
-                            lightweight_model,
-                        )
-                    except Exception as exc:
-                        logging.error(
-                            "Failed to recreate lightweight LLM client for '%s': %s",
-                            name,
-                            exc,
-                        )
-                        persona.lightweight_llm_client = None
-                        llm_warnings.append(f"軽量モデル '{lightweight_model}' のLLMクライアント作成に失敗: {exc}")
-                else:
-                    persona.lightweight_llm_client = None
+                original_autonomy = ai.AUTONOMY_ENABLED
+                state_changed = original_autonomy != autonomy_enabled
 
-                logging.info("Updated in-memory persona '%s' with new settings.", name)
+                if state_changed:
+                    ai.AUTONOMY_ENABLED = autonomy_enabled
+
+                ai.AINAME = name
+                ai.DESCRIPTION = description
+                ai.SYSTEMPROMPT = system_prompt
+                ai.HOME_CITYID = home_city_id
+                ai.DEFAULT_MODEL = default_model or None
+                ai.LIGHTWEIGHT_MODEL = lightweight_model or None
+                ai.VISION_MODEL = vision_model or None
+                ai.AUDIO_MODEL = audio_model or None
+                ai.VIDEO_MODEL = video_model or None
+                ai.MEMORY_WEAVE_MODEL = memory_weave_model or None
+                ai.AVATAR_IMAGE = avatar_value
+                # Update appearance image path if provided
+                if appearance_image_path is not None:
+                    ai.APPEARANCE_IMAGE_PATH = appearance_image_path.strip() if appearance_image_path.strip() else None
+                # Update Chronicle auto-generation toggle
+                if chronicle_enabled is not None:
+                    ai.CHRONICLE_ENABLED = chronicle_enabled
+                # Update autonomous-Pulse Chronicle generation toggle (Phase 0, memory_architecture_v2 §6.3)
+                if autonomous_chronicle_enabled is not None:
+                    ai.AUTONOMOUS_CHRONICLE_ENABLED = autonomous_chronicle_enabled
+                # Update auto-recall (記憶アーキv2 ゾーン C) per-persona toggle
+                if auto_recall_enabled is not None:
+                    ai.AUTO_RECALL_ENABLED = auto_recall_enabled
+                # Update Memory Weave context injection toggle
+                if memory_weave_context is not None:
+                    ai.MEMORY_WEAVE_CONTEXT = memory_weave_context
+                # Update Memopedia 索引の head 常時表示 (旧方式) 復活トグル
+                if memopedia_index_enabled is not None:
+                    ai.MEMOPEDIA_INDEX_ENABLED = memopedia_index_enabled
+                # Update コア記憶の文字数目安 (記憶アーキv2 ゾーン A, §5)。
+                # 0 / 負値が渡されたら NULL に倒して既定値運用 (= 2000 字) に戻す。
+                if core_memory_char_budget is not None:
+                    if core_memory_char_budget > 0:
+                        ai.CORE_MEMORY_CHAR_BUDGET = int(core_memory_char_budget)
+                    else:
+                        ai.CORE_MEMORY_CHAR_BUDGET = None
+                # Update Chronicle 帯の読み込み文字数 (2026-09-01)。コア記憶と同じ流儀で
+                # 0 / 負値は NULL に倒し、既定 (env → 20,000 字) の運用へ戻す。
+                if chronicle_char_budget is not None:
+                    if chronicle_char_budget > 0:
+                        ai.CHRONICLE_CHAR_BUDGET = int(chronicle_char_budget)
+                    else:
+                        ai.CHRONICLE_CHAR_BUDGET = None
+                # Update Spell system toggle
+                if spell_enabled is not None:
+                    ai.SPELL_ENABLED = spell_enabled
+                # Update realtime info injection toggle
+                if realtime_info_enabled is not None:
+                    ai.REALTIME_INFO_ENABLED = realtime_info_enabled
+                # Update Meta-Judgment Pulse configuration (Phase 4-e)
+                if meta_judgment_config is not None:
+                    if isinstance(meta_judgment_config, dict) and meta_judgment_config:
+                        ai.META_JUDGMENT_CONFIG = json.dumps(meta_judgment_config, ensure_ascii=False)
+                    else:
+                        # 空 dict / None / その他は NULL に倒して既定値運用に戻す
+                        ai.META_JUDGMENT_CONFIG = None
+                # 2026-05-09: wait_response Track の自動 pause タイマー閾値 (分)。
+                # 0 / 負値が渡されたら NULL に倒して既定値運用 (= 30 分) に戻す。
+                if user_conv_timeout_minutes is not None:
+                    if user_conv_timeout_minutes > 0:
+                        ai.USER_CONV_TIMEOUT_MINUTES = int(user_conv_timeout_minutes)
+                    else:
+                        ai.USER_CONV_TIMEOUT_MINUTES = None
+                autonomy_now = ai.AUTONOMY_ENABLED
+                db.commit()
+
+                if persona is not None:
+                    persona.persona_name = name
+                    persona.persona_system_instruction = system_prompt
+                    persona.autonomy_enabled = autonomy_now
+                    persona.vision_model = vision_model
+                    persona.audio_model = audio_model
+                    persona.video_model = video_model
+                    # 話す標準モデル・軽量モデル・Memory Weave モデルは、いま保存した
+                    # DB 行から決め方の一か所で決め直して当てはめる (値の書き換えと
+                    # 接続の破棄だけ。新しい接続は次の返事で作られる)。個別の標準モデルを
+                    # 空に戻したら、その場でグローバル設定のモデルになる。
+                    result = reapply_speaking_models(self, persona_ids=[ai_id])
+                    llm_warnings.extend(result.notices())
+                    logging.info("Updated in-memory persona '%s' with new settings.", name)
+
+            # Phase C-2: AUTONOMY_ENABLED 変更を AutonomyManager に反映
+            # (True なら起動、False なら停止)。
+            # ``ensure_autonomy_for`` は SAIVerseManager のメソッドのため、
+            # AdminService からは ``self.manager`` 経由で呼び出す。
+            if persona is not None and state_changed:
+                try:
+                    ensure_autonomy = getattr(
+                        self.manager, "ensure_autonomy_for", None
+                    )
+                    if callable(ensure_autonomy):
+                        ensure_autonomy(ai_id)
+                except Exception:
+                    logging.warning(
+                        "Failed to sync AutonomyManager state for '%s'",
+                        ai_id, exc_info=True,
+                    )
+            # 記憶の整理の見張りは「前回と同じ状態なら結果も同じ」で素通しする。Memory
+            # Weave モデルを選び直しても会話が動くまで整理が再試行されないと
+            # 「再起動しなくても」が偽になるので、記録を捨てる (読み込んでいないペルソナの
+            # 保存も含めて)。
+            from sea.session_lifecycle import invalidate_cold_sweep_fingerprints
+
+            invalidate_cold_sweep_fingerprints()
             self._set_persona_avatar(ai_id, avatar_value)
 
             status_message = f"AI '{name}' updated successfully."
             if llm_warnings:
-                status_message += " [WARNING:LLM] " + "; ".join(llm_warnings)
+                status_message += " [WARNING:LLM] " + "\n".join(llm_warnings)
             if state_changed:
                 status_message += (
                     f" Autonomy changed from {original_autonomy} to {autonomy_enabled}."

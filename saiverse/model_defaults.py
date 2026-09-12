@@ -9,22 +9,27 @@ label) and the pure check that turns configured model names whose definition
 cannot be found into screen warnings (``missing_model_warnings``). The check has
 no DB access; the manager feeds it the current settings every time the screen
 asks (``current_model_setting_warnings`` in manager/initialization.py).
+
+SAIVerse does not substitute another model when a configured one has no
+definition (docs/intent/persona_model_selection.md, decision 7): the work that
+needs that model stops until it is reselected, and the warnings say so.
 """
 import logging
-from typing import Callable, Dict, Iterable, List, Optional, Tuple
+from typing import Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 LOGGER = logging.getLogger(__name__)
 
-# The single source of truth for the built-in fallback lite model.
-# Used as the default for: DEFAULT_MODEL, LIGHTWEIGHT_MODEL, MEMORY_WEAVE_MODEL,
-# ROUTER_MODEL, IMAGE_SUMMARY_MODEL, AGENTIC_MODEL, emotion module, etc.
+# The single source of truth for the built-in default model.
+# Used when the corresponding setting is empty: DEFAULT_MODEL, LIGHTWEIGHT_MODEL,
+# MEMORY_WEAVE_MODEL, ROUTER_MODEL, IMAGE_SUMMARY_MODEL, AGENTIC_MODEL, emotion module, etc.
 BUILTIN_DEFAULT_LITE_MODEL = "gemini-3.1-flash-lite-preview"
 
 
 # --- Model roles -------------------------------------------------------------
 
 #: 役割 → 全体設定の環境変数名。チュートリアルのプリセット適用
-#: (api/routes/tutorial.py) と、モデル設定の警告 (missing_model_warnings) が共有する。
+#: (api/routes/tutorial.py)、設定ファイルの無いモデル名を保存しない検査
+#: (saiverse/persona_model_selection.py)、モデル設定の警告 (missing_model_warnings) が共有する。
 MODEL_ROLES: Dict[str, str] = {
     "default_model": "SAIVERSE_DEFAULT_MODEL",
     "lightweight_model": "SAIVERSE_DEFAULT_LIGHTWEIGHT_MODEL",
@@ -87,13 +92,12 @@ def _defined_by_find_model_config(value: str) -> bool:
 #: 同じ引き方にする — 違う引き方だと「動いているのに警告が出る」「動いていない
 #: のに出ない」になる。
 #:
-#: - default_model: 設定キーの完全一致。ペルソナの値は manager/persona.py の
-#:   _load_single_persona、全体設定の値は manager/initialization.py の
-#:   _init_model_config が get_context_length / get_model_provider で引き、
-#:   引けなければ代わりのモデルで読み込む。
+#: - default_model: 設定キーの完全一致。話す標準モデルを決める
+#:   saiverse/persona_model_selection.py の resolve_speaking_model が引き、
+#:   引けなければ代わりのモデルへ進まず「使えない」と決める。
 #: - lightweight_model: 設定キーの完全一致。persona/core.py の
-#:   lightweight_llm_client と sea/runtime.py の select_llm_client が
-#:   get_context_length / get_model_provider で引く。
+#:   lightweight_llm_client と saiverse/persona_model_selection.py の
+#:   ReplyModelBinding が get_context_length / get_model_provider で引く。
 #: - memory_weave_model: find_model_config。saiverse/memory_weave_llm.py の
 #:   resolve_memory_weave_config が引く。
 #: - image/audio/video_summary_model: find_model_config。全体設定の値を
@@ -109,62 +113,126 @@ _ROLE_LOOKUPS: Dict[str, Callable[[str], bool]] = {
     "video_summary_model": _defined_by_find_model_config,
 }
 
-#: 定義が見つからないとき、組み込みの既定モデルへ切り替えて続ける役割
-#: (saiverse/media_summary.py の _resolve_client_for_model)。
-_MEDIA_SUMMARY_ROLES = frozenset({
-    "image_summary_model",
-    "audio_summary_model",
-    "video_summary_model",
-})
-
-
-def _media_summary_fallback_is_defined() -> bool:
-    """要約の代わりに使う組み込みの既定モデルの定義が、要約側と同じ引き方で引けるか。"""
-    try:
-        return _defined_by_find_model_config(BUILTIN_DEFAULT_LITE_MODEL)
-    except Exception:
-        LOGGER.warning(
-            "Model config check failed for the media summary fallback %r; "
-            "omitting the substitute sentence.",
-            BUILTIN_DEFAULT_LITE_MODEL, exc_info=True,
-        )
-        return False
+_PERSONA_RESELECT = "ペルソナ設定で選び直すと"
+_GLOBAL_RESELECT = "グローバル設定の「モデルロール」で選び直すと"
 
 
 def role_model_is_defined(role: str, value: str) -> bool:
     """役割の値に定義があるかを、その値を実際に使う側と同じ引き方で返す。
 
-    「設定ファイルが見つかりません」の警告 (missing_model_warnings) と、グローバル設定の
-    標準モデルがまだ動いているペルソナに反映されていないことの知らせ
-    (manager/initialization.py の current_model_setting_warnings) が同じ判定を使う
-    ためにある。判定が割れると、同じ標準モデルの値に二つの文面が両方出る、あるいは
-    どちらも出ない。
+    話す標準モデルの決め方 (saiverse/persona_model_selection.py)、設定ファイルの無い
+    名前を保存しない検査、「SAIVerse にありません」の警告 (missing_model_warnings) が
+    同じ判定を使うためにある。判定が割れると、保存を断ったのに警告が出ない、あるいは
+    話せているのに止まっていると言う。
     """
     return _ROLE_LOOKUPS[role](value)
+
+
+def _names(names: Optional[Sequence[str]]) -> str:
+    return f" ({'、'.join(names)})" if names else ""
+
+
+def _persona_message(role: str, name: str, value: str, override_model: Optional[str]) -> str:
+    label = MODEL_ROLE_DESCRIPTIONS[role]["label"]
+    if role == "default_model":
+        if override_model:
+            return (
+                f"{name}の標準モデル '{value}' は SAIVerse にありません。"
+                f"いまはチャット画面のモデル一時上書き '{override_model}' で話していますが、"
+                f"上書きを解除すると{name}は止まります。"
+                f"{_PERSONA_RESELECT}、上書きを解除しても再起動せずに話し続けられます。"
+            )
+        return (
+            f"{name}の標準モデル '{value}' は SAIVerse にないため、{name}は止まっています。"
+            f"{_PERSONA_RESELECT}、再起動しなくても話せるようになります。"
+        )
+    if role == "lightweight_model":
+        return (
+            f"{name}の軽量モデル '{value}' は SAIVerse にないため、{name}は軽量モデルを使う作業"
+            "（返事の途中の作業や、自分から動く判断）ができず、止まっています。"
+            f"{_PERSONA_RESELECT}、再起動しなくても続けられるようになります。"
+        )
+    if role == "memory_weave_model":
+        return (
+            f"{name}の{label} '{value}' は SAIVerse にないため、{name}の記憶の整理は止まっています。"
+            f"{_PERSONA_RESELECT}、再起動しなくても整理が再開します。"
+        )
+    return (
+        f"{name}の{label} '{value}' は SAIVerse にないため、このモデルを使う仕事は止まっています。"
+        f"{_PERSONA_RESELECT}、再起動しなくても再開します。"
+    )
+
+
+def _global_message(
+    role: str,
+    value: str,
+    override_model: Optional[str],
+    names: Optional[Sequence[str]],
+) -> str:
+    label = MODEL_ROLE_DESCRIPTIONS[role]["label"]
+    if role == "default_model":
+        if override_model:
+            return (
+                f"グローバル設定の標準モデル '{value}' は SAIVerse にありません。"
+                f"いまはチャット画面のモデル一時上書き '{override_model}' で話していますが、"
+                f"上書きを解除すると、個別の標準モデルを持たないペルソナ{_names(names)}は止まります。"
+                f"{_GLOBAL_RESELECT}、上書きを解除しても再起動せずに話し続けられます。"
+            )
+        if names:
+            return (
+                f"グローバル設定の標準モデル '{value}' は SAIVerse にないため、"
+                f"個別の標準モデルを持たないペルソナ{_names(names)}は止まっています。"
+                f"{_GLOBAL_RESELECT}、再起動しなくても話せるようになります。"
+            )
+        return (
+            f"グローバル設定の標準モデル '{value}' は SAIVerse にありません。"
+            "個別の標準モデルを持たないペルソナは、選び直すまで止まります。"
+            f"{_GLOBAL_RESELECT}、再起動しなくても話せるようになります。"
+        )
+    if role == "lightweight_model":
+        return (
+            f"グローバル設定の軽量モデル '{value}' は SAIVerse にないため、"
+            f"個別の軽量モデルを持たないペルソナ{_names(names)}は軽量モデルを使う作業"
+            "（返事の途中の作業や、自分から動く判断）ができず、止まっています。"
+            f"{_GLOBAL_RESELECT}、再起動しなくても続けられるようになります。"
+        )
+    if role == "memory_weave_model":
+        return (
+            f"グローバル設定の{label} '{value}' は SAIVerse にないため、"
+            f"{label}を個別に設定していないペルソナ{_names(names)}の記憶の整理は止まっています。"
+            f"{_GLOBAL_RESELECT}、再起動しなくても整理が再開します。"
+        )
+    # 画像・音声・動画の要約は、代わりのモデルで要約しない (saiverse/media_summary.py)。
+    return (
+        f"グローバル設定の{label} '{value}' は SAIVerse にないため、要約は止まっています。"
+        f"{_GLOBAL_RESELECT}、再起動しなくても要約されるようになります。"
+    )
 
 
 def missing_model_warnings(
     entries: Iterable[Tuple[str, Optional[str]]],
     *,
-    persona_id: Optional[str] = None,
-    default_model_substitute: Optional[str] = None,
+    persona_name: Optional[str] = None,
+    override_model: Optional[str] = None,
+    affected_persona_names: Optional[Mapping[str, Sequence[str]]] = None,
 ) -> List[Dict[str, str]]:
     """設定されたモデル名のうち、定義が見つからないものを画面の警告にして返す。
 
     Args:
         entries: ``(役割, 設定値)`` の並び。役割は ``_ROLE_LOOKUPS`` のキー。
             設定値が None / 空文字の役割は未設定として検査しない。
-        persona_id: 渡すとペルソナ単位の文面、省略するとグローバル設定単位の文面になる。
-        default_model_substitute: 標準モデルの定義が見つからないとき、代わりに
-            動いているモデル。分かっているときだけ渡す。渡されていて、しかも
-            設定値と違うときだけ、標準モデルの文面に「いまはモデル '…' で代わりに
-            動いています。」を足す (設定値と同じなら代わりに動いているとは言えない)。
+        persona_name: 渡すとペルソナ単位の文面 (その名前で呼ぶ)、省略すると
+            グローバル設定単位の文面になる。
+        override_model: チャット画面のモデル一時上書きが有効なら、そのモデル名。
+            標準モデルの文面を「止まっています」ではなく「上書きを解除すると止まる」にする。
+        affected_persona_names: グローバル設定単位の文面で、役割ごとに「その値を
+            使っているペルソナ (個別の値を持たないペルソナ)」の名前。分からないときは省略する。
 
     一つの役割の検査が例外を出しても、ログに残して残りの役割の検査を続ける。
     """
     warnings: List[Dict[str, str]] = []
     for role, value in entries:
-        if not value:
+        if not value or not str(value).strip():
             continue
         try:
             if _ROLE_LOOKUPS[role](value):
@@ -172,58 +240,19 @@ def missing_model_warnings(
         except Exception:
             LOGGER.warning(
                 "Model config check failed (role=%s value=%r persona=%s); skipping.",
-                role, value, persona_id, exc_info=True,
+                role, value, persona_name, exc_info=True,
             )
             continue
 
-        # 画面の名前に合わせる: ペルソナは「ペルソナ設定」、全体の値は
-        # 「グローバル設定」の「モデルロール」タブで選ぶ。
-        label = MODEL_ROLE_DESCRIPTIONS[role]["label"]
-        if persona_id is not None:
-            message = f"ペルソナ '{persona_id}' の{label} '{value}' の設定ファイルが見つかりません。"
-            reselect = "ペルソナ設定から選び直してください。"
+        if persona_name is not None:
+            message = _persona_message(role, persona_name, value, override_model)
         else:
-            message = f"グローバル設定の{label} '{value}' の設定ファイルが見つかりません。"
-            reselect = "グローバル設定の「モデルロール」から選び直してください。"
-        # 標準モデルは、読み込むときに代わりのモデルへ差し替わる
-        # (manager/persona.py の _load_single_persona と
-        # manager/initialization.py の _init_model_config)。
-        if (
-            role == "default_model"
-            and default_model_substitute
-            and default_model_substitute != value
-        ):
-            message += f"いまはモデル '{default_model_substitute}' で代わりに動いています。"
-        # 画像・音声・動画要約は、グローバル設定の値の定義が引けないと組み込みの
-        # 既定モデルへ切り替えて要約を続ける (saiverse/media_summary.py の
-        # _resolve_client_for_model)。その既定モデルの定義も引けないときは要約
-        # しないので、この一文は付けない。
-        if (
-            persona_id is None
-            and role in _MEDIA_SUMMARY_ROLES
-            and _media_summary_fallback_is_defined()
-        ):
-            message += (
-                f"いまは組み込みの既定モデル '{BUILTIN_DEFAULT_LITE_MODEL}' に"
-                "切り替えて要約を続けようとしています。"
-            )
-        message += reselect
-        # 帰結を書くのは、コードで確かめられた役割だけ。Memory Weave は代わりの
-        # モデルが無く、resolve_memory_weave_config が LookupError を出し続ける。
-        # グローバル設定の値が効くのは、自分の Memory Weave モデルを持たない
-        # ペルソナだけ (saiverse/memory_weave_llm.py の解決順)。
-        if role == "memory_weave_model":
-            if persona_id is not None:
-                message += "選び直すまで、このペルソナの記憶の整理は止まったままになります。"
-            else:
-                message += (
-                    "Memory Weaveモデルを個別に設定していないペルソナは、"
-                    "選び直すまで記憶の整理が止まったままになります。"
-                )
+            names = (affected_persona_names or {}).get(role)
+            message = _global_message(role, value, override_model, names)
 
         LOGGER.warning(
             "Model config not found (role=%s value=%r persona=%s).",
-            role, value, persona_id,
+            role, value, persona_name,
         )
         warnings.append({"source": "model_config", "message": message})
     return warnings

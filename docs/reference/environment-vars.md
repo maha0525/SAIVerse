@@ -75,8 +75,8 @@
 
 | 変数 | 説明 |
 |---|---|
-| `SAIVERSE_DEFAULT_MODEL` | 既定モデル（persona 未設定時のフォールバック） |
-| `SAIVERSE_DEFAULT_LIGHTWEIGHT_MODEL` | 既定の軽量モデル |
+| `SAIVERSE_DEFAULT_MODEL` | グローバル設定の標準モデル。ペルソナが話す標準モデルは「チャット画面の一時上書き → ペルソナ個別の標準モデル → この値 → 組み込みの既定モデル」の順に、空でない最初のものになる。選ばれたモデルの設定ファイルが無ければ代わりのモデルでは動かず、そのペルソナは選び直すまで止まる。UI（グローバル設定の「モデルロール」）で変えると再起動しなくても効き、設定ファイルの無いモデル名は保存されない（[persona_model_selection.md](../intent/persona_model_selection.md)） |
+| `SAIVERSE_DEFAULT_LIGHTWEIGHT_MODEL` | グローバル設定の軽量モデル（個別の軽量モデルを持たないペルソナが使う。空なら組み込みの既定モデル）。設定ファイルが無い・繋げないときは標準モデルへ代わりに回さず、軽量モデルを使う作業が止まる |
 | `GEMINI_TIMEOUT_SECONDS` | Gemini タイムアウト（既定 180） |
 | `SAIVERSE_ATTACHMENT_LIMIT` | 添付上限（既定 4） |
 | `SAIVERSE_DISABLE_GEMINI_STREAMING` / `SAIVERSE_DISABLE_GEMINI_SSE_PATCH` | Gemini ストリーミング関連のフォールバック制御（`llm_clients/gemini.py`） |

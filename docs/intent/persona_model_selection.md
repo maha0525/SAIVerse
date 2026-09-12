@@ -1,9 +1,9 @@
 # ペルソナが話すモデルの決め方と、設定を変えたときの反映
 
-**ステータス**: 実装中 — 2026-09-11 にまはーと大筋を決め、2026-09-12 に残りの 5 件 (下の決まったこと 6・7・10・11 と「載せる版」) もまはーが決めた。スタックチャンに声で話しかけたときに知らせが届かない件は、別の issue に切り出した
+**ステータス**: 検証待ち — 実装・検収・レビュー (手元のモデルと Codex 二巡) まで終わり、まはーの実機確認を待っている。2026-09-11 にまはーと大筋を決め、2026-09-12 に残りの 5 件 (下の決まったこと 6・7・10・11 と「載せる版」)、それと決まったこと 10 の「受け入れた限界」もまはーが決めた。スタックチャンに声で話しかけたときに知らせが届かない件は、別の issue に切り出した
 **載せる版**: v0.3.12 より後のどこか (未定)。まはー「0.3.12はもうリリースしたからその後のどこか！ちょっとバージョンは未定！」。版が決まったら、下の「リリースノートに書くこと」を release_history の「次の版の範囲」に写す
 **関連**: [model_provider_management.md](model_provider_management.md) / [model_catalog_distribution.md](model_catalog_distribution.md) / [beat_execution_context.md](beat_execution_context.md) / [release_history.md](../overview/release_history.md) の v0.3.12 (5) / [stackchan_voice_errors_not_shown.md](../issues/stackchan_voice_errors_not_shown.md) / [provider_change_does_not_reach_live_personas.md](../issues/provider_change_does_not_reach_live_personas.md)
-**コード**: `saiverse/saiverse_manager.py` (`set_model` / `update_default_model`)、`api/routes/admin.py` (`write_env_updates` / `update_env_vars`)、`api/routes/config.py` (`set_model` の、遅れて届いた古い選択を弾く仕組み、`write_env_updates` を呼ぶ三つの設定、モデルの作成・更新・削除)、`api/routes/providers.py`、`saiverse/model_configs.py` と `saiverse/provider_configs.py` (`reload_configs`)、`api/routes/tutorial.py` (`auto_configure_models`)、`manager/admin.py` (`update_ai` / `create_ai`)、`manager/persona.py` (`_load_single_persona` / `_create_persona`)、`manager/blueprints.py` (設計図からの生成)、`manager/initialization.py` (`_init_model_config` / `current_model_setting_warnings`)、`saiverse/model_defaults.py` (`missing_model_warnings` / `role_model_is_defined`)、`sea/runtime.py` (`select_llm_client`)、`sea/runtime_runner.py` (返事の始まりに実行モデルを決める箇所)、`sea/pulse_context.py` (`resolve_execution_context` / `default_lightweight_model`)、`persona/core.py` (`llm_client` / `lightweight_llm_client`)、`saiverse/media_summary.py` (`_resolve_client_for_model`)、`sea/session_lifecycle.py` (`invalidate_cold_sweep_fingerprints`)、`frontend/src/components/GlobalSettingsModal.tsx`、`frontend/src/components/tutorial/TutorialWizard.tsx`
+**コード**: `saiverse/persona_model_selection.py` (決め方・決め直し・返事の始まりに決めたモデルの控え・画面へ出す文面)、`saiverse/saiverse_manager.py` (`set_model` / `set_model_parameters`)、`api/routes/admin.py` (`write_env_updates` / `update_env_vars`)、`api/routes/config.py` (`set_model` の、遅れて届いた古い選択を弾く仕組み、`write_env_updates` を呼ぶ三つの設定、モデルの作成・更新・削除・複製・チャット画面からの保存)、`api/routes/providers.py`、`api/routes/world.py` (ワールドエディタからのペルソナ設定の保存)、`saiverse/model_configs.py` と `saiverse/provider_configs.py` (`reload_configs`)、`api/routes/tutorial.py` (`auto_configure_models`)、`manager/admin.py` (`update_ai` / `create_ai`)、`manager/persona.py` (`_load_single_persona` / `_create_persona`)、`manager/blueprints.py` (設計図からの生成)、`manager/initialization.py` (`_init_model_config` / `current_model_setting_warnings`)、`saiverse/model_defaults.py` (`missing_model_warnings` / `role_model_is_defined`)、`sea/runtime.py` (`select_llm_client` / `_generate_stelis_chronicle`)、`sea/runtime_runner.py` (返事の始まりに実行モデルを決める箇所)、`sea/pulse_context.py` (`resolve_execution_context` / `default_lightweight_model`)、`persona/core.py` と `persona/mixins/generation.py` (`llm_client` / `lightweight_llm_client` / `set_model` / `apply_parameter_overrides`)、`saiverse/media_summary.py` (`_resolve_client_for_model`)、`saiverse/memory_weave_llm.py` (`resolve_global_memory_weave_model`)、`builtin_data/tools/get_since_last_user_conversation.py`、`sea/session_lifecycle.py` (`invalidate_cold_sweep_fingerprints`)、`frontend/src/components/GlobalSettingsModal.tsx`、`frontend/src/components/ChatOptions.tsx`、`frontend/src/components/settings/` (モデル管理・プロバイダ管理・ワールドエディタ)、`frontend/src/components/tutorial/TutorialWizard.tsx`
 
 ## 一言で
 
@@ -55,6 +55,12 @@
 10. **書いている途中の返事は、その返事を始めたときの設定で最後まで書く。次の返事から新しい設定になる。** 標準モデルの保存、一時上書きの変更、モデルやプロバイダの設定の変更、どれで変わったときも同じ。
     - 材料: SAIVerse はすでに、「その返事で使うモデルは返事の始まりに決め、ペルソナに送る内容もそのモデルに合わせて組み立てる」と決めている ([beat_execution_context.md](beat_execution_context.md))。途中から新しいモデルに書かせると、前のモデルに合わせて組み立てた内容を新しいモデルに送ることになる。
     - 根拠: まはー「(b)で。理由はメティスの言う通り、(a)やろうとすると色々ごちゃごちゃする。(b)は挙動として特に不思議でもないと思う」(2026-09-12)。2026-09-11 の時点では、チャット画面の一時上書きを変えると、書いている途中の返事の続きから新しいモデルで書かれていた。
+    - **受け入れた限界** (2026-09-12 にまはーが決めた。まはー「実用上は実害出ないと思う」): 返事を書いている途中に設定を変えると、次の四つはその一回の返事にも入り込む。入り込むのは「前の設定」か「新しく選んだ設定」のどちらかで、代わりのモデルにはならない。次の返事からは全部新しい設定になる。
+      1. API キーを書き換えたとき、その返事がまだ接続を作っていなければ、新しいキーで繋ぐ。
+      2. 画像・音声・動画の要約モデルを変えたとき、その返事の中で行う要約は新しいモデルで行う。
+      3. モデル管理でそのモデルの設定 (構造化出力に対応するか、llama.cpp の起動設定など) を書き換えたとき、その返事の残りの部分は、書き換えたあとの設定で動く。
+      4. 保存とほぼ同じ瞬間に始まった返事は、古い設定と新しい設定が混ざった状態で始まることがある (ペルソナの値は保存の前、モデルの定義は保存の後、のような混ざり方)。
+    - 隙間なく守る形 (返事の始まりに API キー・要約モデル・モデルの能力の設定までコピーしておき、返事の中はそのコピーだけを見る) は採らなかった。LLM に繋ぐ処理の全部が「コピーを読む」決まりを守り続けることになり、新しい処理を足すたびに読み忘れの穴ができる。把握できる複雑さに収めることを優先した ([CLAUDE.md](../../CLAUDE.md) の把握可能性)。
 11. **モデル管理やプロバイダの設定を変えたときも、その場で反映する。** モデル管理の画面でモデルを追加・削除・編集したとき、プロバイダの接続先や API キーの環境変数名を変えたときは、全員を決め直し、次の返事から新しい設定で動く。削除したモデルを選んでいたペルソナはその場で止まり、話しかけると文面が出る。モデルを追加し直せば、再起動しなくても話せる。[provider_change_does_not_reach_live_personas.md](../issues/provider_change_does_not_reach_live_personas.md) (すでに話したペルソナは、プロバイダの設定を変えても再起動まで前の接続を使い続ける) もここで直る。
     - 根拠: まはー「(a)で。反映したい。ユーザーにとってはすぐ反映されないものっていう発想自体が無いし」(2026-09-12)。
     - この決まりで、[model_provider_management.md](model_provider_management.md) の「反映の範囲を約束しすぎない」の段落 (すでに動いているペルソナは作成済みの LLM クライアントを持ち続ける) は置き換わる。実装と同じ変更で、その段落を書き直す。
@@ -75,11 +81,13 @@
 
 - 話す標準モデルを決める処理は、コードの一か所にだけ置く。決まったことの 1 に並べた操作は、全部その処理を使う。
 - 決め直すときは、先に必要なもの (各ペルソナの個別の設定、使うモデルの設定ファイル) を読み、それから一人ずつ当てはめる。一人ずつ当てはめるときは、値を書き換えるだけにする。新しいモデルへの接続は、そのペルソナが次の返事を始めるときに作られる。
-- 書いている途中の返事には、始めたときに決めたモデルと接続を最後まで使う。途中で設定が変わっても、その返事の LLM 呼び出しと、送る内容の準備が、別々のモデルや接続先を見ることがないようにする。
+- 書いている途中の返事には、始めたときに決めたモデルと接続を最後まで使う。途中で設定が変わっても、その返事の LLM 呼び出しと、送る内容の準備が、別々のモデルや接続先を見ることがないようにする。一時上書きのパラメータ (温度など) を変えたときも、作ってあった接続を設定し直さずに捨て、次の返事から新しいパラメータで接続を作る。
+- Stelis のスレッド (ペルソナが作業のために開く、本筋と切り離した会話) を閉じるときの要約と、ユーザーと最後に話してからの要約は、返事の中なら返事の始まりに決めた軽量モデルの接続を使い、返事の外なら返事の始まりと同じ決め方 (個別 → グローバル → 組み込み) で軽量モデルを決める。使えなければ代わりのモデルで要約しない。Stelis の要約は作らず、ユーザーと最後に話してからの要約は、LLM を使わない件数だけの要約になる (LLM の呼び出しが失敗したときと同じ)。
 - 一人の失敗で、ほかの人の切り替えを止めない。
-- ロックは .env を書き換える処理そのものに掛け、そのあとの決め直しと一時上書きの変更も同じロックの中で行う。ロックを持ったまま、ペルソナが返事の一区切りを終えるのを待たない (`sea/beat_gate.py` のロックを待たない)。ロックの中で行うのは、設定の読み書きとペルソナの値の書き換えだけにする。
-- モデルやプロバイダの設定を読み直したら (読み直しの入口は `saiverse/model_configs.py` と `saiverse/provider_configs.py` の `reload_configs` に集まっている)、全員を決め直し、作ってあった接続を捨てる。書いている途中の返事が持っている接続は、その返事が終わるまで使う。
+- ロックは .env を書き換える処理そのものに掛け、そのあとの決め直しと一時上書きの変更 (一時上書きのパラメータの変更を含む) も同じロックの中で行う。モデルやプロバイダの設定の読み直しも、定義を差し替えるところから決め直しが終わるところまで、同じロックの中で行う。ロックを取る順番は、このロックが先で、ペルソナの接続のロックが後にする。ロックを持ったまま、ペルソナが返事の一区切りを終えるのを待たない (`sea/beat_gate.py` のロックを待たない)。ロックの中で行うのは、設定の読み書きとペルソナの値の書き換えだけにする。
+- モデルやプロバイダの設定を読み直したら (読み直しの入口は `saiverse/model_configs.py` と `saiverse/provider_configs.py` の `reload_configs` に集まっている)、上のロックの中で全員を決め直し、作ってあった接続を捨てる。切り替えられなかったペルソナの名前は、読み直しを起こした画面の応答に載せる。書いている途中の返事が持っている接続は、その返事が終わるまで使う。
 - 設定ファイルの無いモデル、または繋げないモデルを指す設定は、どの役割でも代わりのモデルで動かさない。
+- いま保存されている値 (環境変数なら .env の値、ペルソナ設定ならそのペルソナの DB 行の値) と同じ値を保存し直したときは、その値のモデルに設定ファイルがあるかを確かめ直さない。これは新しい保存ではないからで、ここで断ると「保存しませんでした」と伝えながら値はそのまま残ってしまう。その値のモデルが無いことは、ページを開いたときの警告がすでに伝えている。環境変数の保存 (`split_undefined_model_updates`) とペルソナ設定の保存 (`manager/admin.py` の `_checked`) の両方がこう動く。
 - 会話が止まっている間に記憶の整理を前もって行う処理は、前回試したときから状態が変わっていないペルソナを飛ばすための記録を持っている (`invalidate_cold_sweep_fingerprints` で捨てられる)。ペルソナのモデルの設定を変えたとき (ペルソナ設定の保存を含む) は、この記録も捨てる。捨てないと、Memory Weave モデルを選び直しても、会話が動くまで整理が再試行されず、「再起動しなくても」が偽になる。
 - 話せなかったことの知らせを、建物の会話の記録やペルソナの記憶に書かない。
 - モデル設定の警告は、v0.3.12 と同じく、画面を開いたり読み込み直したりするたびに、いまの設定と各ペルソナの状態から作る。「再起動するまで反映されません」の代わりに、切り替えられなかったペルソナがいるときだけ、そのペルソナの名前つきで出す。

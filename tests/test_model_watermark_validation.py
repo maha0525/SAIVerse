@@ -145,10 +145,12 @@ def test_unset_global_falls_back_to_builtin(global_defaults):
 def _patch_model_file_env(monkeypatch, tmp_path, configs):
     """保存の入口をテスト内で完結させる: モデル表・書き込み先・再読込を差し替える。"""
     from saiverse import model_configs
+    from saiverse.persona_model_selection import ReapplyResult
     from api.routes import config as config_module
 
     monkeypatch.setattr(model_configs, "MODEL_CONFIGS", configs)
-    monkeypatch.setattr(model_configs, "reload_configs", lambda: None)
+    # 再読込は決め直しの結果 (切り替えられなかった人) を返す。ここでは誰もいない
+    monkeypatch.setattr(model_configs, "reload_configs", lambda: ReapplyResult())
     monkeypatch.setattr(
         config_module, "_model_user_path", lambda key: tmp_path / f"{key}.json"
     )

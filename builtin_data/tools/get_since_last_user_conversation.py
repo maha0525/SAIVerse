@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime, timezone as dt_timezone
 from typing import Any, Dict, List, Optional
 
-from tools.context import get_active_persona_id, get_active_manager
+from tools.context import get_active_manager, get_active_persona_id, get_active_pulse_context
 from tools.core import ToolSchema
 
 LOGGER = logging.getLogger(__name__)
@@ -122,34 +122,16 @@ def get_since_last_user_conversation(
 
 
 def _generate_summary(persona: Any, messages: List[Dict], summary_uuid: str) -> str:
-    """Generate a summary of messages using LLM."""
+    """Generate a summary of messages using LLM.
+
+    要約には軽量モデルを使う。書いている途中の返事の中なら、返事の始まりに決めた軽量
+    モデルの接続 (saiverse/persona_model_selection.py の ReplyModelBinding)、返事の外なら
+    いまの設定から返事と同じ決め方 (個別 → グローバル → 組み込み) で決めた軽量モデルの接続。
+    使えない (設定ファイルが無い・繋げない) ときは代わりのモデルで要約せず、下の except の
+    件数だけの要約を返す。件数だけの要約は
+    LLM を呼ばない (docs/intent/persona_model_selection.md 決まったこと 7・10)。
+    """
     try:
-        from llm_clients import get_llm_client
-        from saiverse.model_configs import find_model_config, get_context_length, get_model_provider
-
-        # Use lightweight model for summary
-        model_name = getattr(persona, "lightweight_model", None)
-        if not model_name:
-            import os
-            from saiverse.model_defaults import BUILTIN_DEFAULT_LITE_MODEL
-            model_name = os.getenv("SAIVERSE_DEFAULT_LIGHTWEIGHT_MODEL", BUILTIN_DEFAULT_LITE_MODEL)
-
-        # get_llm_client は (model, provider, context_length, config) を取る。
-        # 第一引数はそのまま config_key になるので設定キーを渡す — API 名を渡すと
-        # 同名の別設定の単価で使用量が記録される
-        # (docs/intent/model_provider_management.md「使用量の帰属」)。
-        config_key, config = find_model_config(model_name)
-        if not config_key or not config:
-            # 未登録のキーで getter を呼ぶと解決できず、後段が読みにくい失敗になる。
-            # ここで打ち切って呼び出し元のフォールバックに渡す。
-            raise ValueError(f"model config not found for {model_name!r}")
-        client = get_llm_client(
-            config_key,
-            get_model_provider(config_key),
-            get_context_length(config_key),
-            config=config,
-        )
-
         # Build prompt
         messages_text = []
         for msg in messages:
@@ -166,6 +148,21 @@ def _generate_summary(persona: Any, messages: List[Dict], summary_uuid: str) -> 
 
         if not messages_text:
             return "特に記録すべき出来事はありませんでした（待機のみ）。"
+
+        from saiverse.persona_model_selection import (
+            TIER_LIGHTWEIGHT,
+            ReplyModelBinding,
+            find_reply_binding,
+        )
+
+        # 軽量モデルの設定キーは完全一致で引く (role_model_is_defined と同じ引き方)。
+        # 名前の一部一致で別のモデルを拾わないように、ここで名前から定義を探さない。
+        binding = find_reply_binding(pulse_context=get_active_pulse_context(), persona=persona)
+        if binding is None:
+            # 返事の外: いまの設定から、返事と同じ決め方で軽量モデルを決める
+            binding = ReplyModelBinding.capture(persona)
+        binding.check_defined(TIER_LIGHTWEIGHT)
+        client = binding.client_for(TIER_LIGHTWEIGHT)
 
         prompt = f"""以下は、ユーザーと最後に話してから現在までの出来事の記録です。
 これを簡潔に要約してください（3-5文程度）。重要な出来事や会話があれば強調してください。
@@ -185,7 +182,7 @@ def _generate_summary(persona: Any, messages: List[Dict], summary_uuid: str) -> 
 
     except Exception as exc:
         LOGGER.warning("Failed to generate summary: %s", exc)
-        # Fallback: simple count-based summary
+        # Fallback: simple count-based summary (LLM を呼ばない。代わりのモデルでも要約しない)
         wait_count = sum(1 for m in messages if "wait" in m.get("metadata", {}).get("tags", []))
         other_count = len(messages) - wait_count
         return f"待機{wait_count}回、その他のアクティビティ{other_count}件がありました。"

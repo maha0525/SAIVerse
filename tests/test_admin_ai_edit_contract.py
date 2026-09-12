@@ -41,8 +41,25 @@ def _make_admin(session_local):
     return admin
 
 
+#: 編集フォームが送るモデル名の定義。設定ファイルの無いモデル名は保存されない
+#: (docs/intent/persona_model_selection.md 決まったこと 6) ので、ここで往復を
+#: 検べる名前は合成の定義として置いておく。
+_MODEL_DEFINITIONS = {
+    name: {"model": f"vendor/{name}", "provider": "stub", "context_length": 1000}
+    for name in ("gemini-2.0-flash", "gemini-2.0-flash-lite", "weave-1")
+}
+
+
 class AdminAiEditContractTest(unittest.TestCase):
     def setUp(self):
+        from unittest.mock import patch
+
+        from saiverse import model_configs
+
+        definitions = patch.dict(model_configs.MODEL_CONFIGS, _MODEL_DEFINITIONS)
+        definitions.start()
+        self.addCleanup(definitions.stop)
+
         self.engine = create_engine(
             "sqlite:///:memory:",
             connect_args={"check_same_thread": False},

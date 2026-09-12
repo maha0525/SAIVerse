@@ -27,11 +27,17 @@ def run_playbook(
     line: str = "main",
     pulse_line_aspect: Optional[Any] = None,  # sea.pulse_context.Aspect
     pre_spells: Optional[List[str]] = None,
+    model_binding: Optional[Any] = None,  # saiverse.persona_model_selection.ReplyModelBinding
 ) -> List[str]:
     if cancellation_token:
         cancellation_token.raise_if_cancelled()
 
     parent = parent_state or {}
+    # 返事の始まりに決めたモデルと接続。ここから下の送る内容の準備
+    # (_prepared_model_key) と、Playbook の全ての LLM ノードが同じものを使う。
+    # サブプレイブックは親の state から引き継ぐ (sea/runtime_graph.py)。
+    if model_binding is not None:
+        parent["_model_binding"] = model_binding
 
     if initial_params:
         LOGGER.debug("[sea] _run_playbook received args: %s", list(initial_params.keys()))

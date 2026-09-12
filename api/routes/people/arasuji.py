@@ -157,9 +157,10 @@ def estimate_chronicle_cost(
             if ceiling is not None:
                 compile_before = (ceiling.created_at, ceiling.rowid)
 
-        from saiverse.model_defaults import BUILTIN_DEFAULT_LITE_MODEL
+        # グローバル設定を空に戻したら組み込みの既定モデル (空文字をモデル名として使わない)
+        from saiverse.memory_weave_llm import resolve_global_memory_weave_model
         model_name = (getattr(persona, "memory_weave_model", None)
-                      or os.getenv("MEMORY_WEAVE_MODEL", BUILTIN_DEFAULT_LITE_MODEL))
+                      or resolve_global_memory_weave_model()[0])
 
         # 生成経路 (ジョブ) と同じ fold 集合で束ねコールを見積もる
         # (Codex 四巡 P1-b)。None = 照会失敗 → 生成が束ねを見送るのと同形。

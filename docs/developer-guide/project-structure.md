@@ -87,6 +87,9 @@ saiverse/
 ├── gemini_clients.py       # Router/LLM client共通のGemini SDK client構築
 ├── model_configs.py        # モデル設定管理
 ├── model_defaults.py       # 組み込みデフォルトモデル / モデル役割と環境変数の表 / 定義の無いモデル設定を警告の文面にする判定
+├── persona_model_selection.py # ペルソナが話す標準モデルの決め方（一時上書き → 個別 → グローバル → 組み込み）の唯一の置き場 /
+│                           #   設定を変えたときの決め直しとロック / 返事の始まりに決めるモデルと接続（ReplyModelBinding）/
+│                           #   設定ファイルの無いモデル名を保存しない検査と知らせの文面（persona_model_selection.md）
 ├── provider_security.py    # provider credentialと接続先URLの束縛・SSRF境界
 ├── file_policy.py          # persisted pathのmanaged root境界
 ├── tls_trust.py            # HTTPS の信頼元を起動時に一度決める。OS の証明書ストアが空の環境

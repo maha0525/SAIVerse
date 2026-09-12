@@ -468,8 +468,11 @@ def auto_configure_models(
     """Auto-configure all 6 model role env vars based on available API keys.
 
     If provider is not specified, auto-detects the highest-priority provider
-    with an API key set. Writes to .env, updates os.environ, and updates
-    the base default model for personas without an explicit DB override.
+    with an API key set. Saves through ``write_env_updates`` — the same save as
+    the global settings screen: a model name without a definition is not saved
+    (its assignment is dropped from the response), and personas' speaking models
+    are decided again right away. What was not saved and who could not be
+    switched are added to ``warnings``.
     """
     from api.routes.admin import write_env_updates
     from saiverse.model_configs import get_model_display_name
@@ -523,17 +526,15 @@ def auto_configure_models(
             display_name=display_name,
         ))
 
-    # 3. Write to .env and os.environ
+    # 3. Write to .env and os.environ (this also re-decides personas' speaking models)
     if env_updates:
-        write_env_updates(env_updates)
-
-    # 4. Update base default model (without global override)
-    default_model = preset.get("default_model")
-    if default_model:
-        try:
-            manager.update_default_model(default_model)
-        except Exception as exc:
-            LOGGER.warning("Failed to update default model to %s: %s", default_model, exc)
+        write_result = write_env_updates(env_updates)
+        rejected_keys = set(write_result.rejected_keys)
+        if rejected_keys:
+            assignments = [a for a in assignments if a.env_key not in rejected_keys]
+            for key in rejected_keys:
+                env_updates.pop(key, None)
+        warnings.extend(write_result.notices)
 
     LOGGER.info(
         "Auto-configured models for provider=%s: %s",

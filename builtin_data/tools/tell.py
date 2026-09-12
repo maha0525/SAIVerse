@@ -136,6 +136,16 @@ def tell(target: str, gist: str = "") -> str:
 
     pulse_id = str(uuid.uuid4())
     pulse_ctx = runtime._get_or_create_pulse_context(pulse_id)
+    # この一言は唱えた返事の中の仕事。返事の始まりに決めたモデルと接続を使う
+    # (saiverse/persona_model_selection.py の ReplyModelBinding)。
+    from saiverse.persona_model_selection import find_reply_binding
+    from tools.context import get_active_pulse_context
+
+    reply_binding = find_reply_binding(
+        pulse_context=get_active_pulse_context(), persona=persona,
+    )
+    if reply_binding is not None:
+        pulse_ctx.model_binding = reply_binding
     pulse_ctx.push_line(aspect=Aspect.CONVERSATION)
     # 投函が済んだ後の失敗を「何も起きなかった」と報告しないための印。
     # 声は取り消せないので、届いた後のエラーは「届いた + 記録で失敗」と返す。
@@ -171,6 +181,7 @@ def tell(target: str, gist: str = "") -> str:
             "_pulse_type": "tell",
             "_pulse_context": pulse_ctx,
             "_execution_context": execution_context,
+            "_model_binding": reply_binding,
             "_messages": messages,
         }
         # 前駆刻印の材料 (sea/message_stamp.py): この発話が実際に見た履歴の

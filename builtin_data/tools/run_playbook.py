@@ -26,6 +26,7 @@ import json
 import logging
 from typing import Any, Dict, Tuple, Union
 
+from llm_clients.exceptions import ModelUnavailableError
 from tools.context import (
     get_active_llm_messages,
     get_active_manager,
@@ -151,6 +152,9 @@ def run_playbook(name: str) -> Union[str, Tuple[str, Dict[str, Any]]]:
         "_messages": list(parent_messages),  # snapshot copy, never share reference
         "_pulse_context": pulse_ctx,
         "_pulse_id": pulse_ctx.pulse_id,
+        # サブラインは唱えた返事の中の仕事。返事の始まりに決めたモデルと接続を
+        # 引き継ぐ (saiverse/persona_model_selection.py の ReplyModelBinding)。
+        "_model_binding": getattr(pulse_ctx, "model_binding", None),
     }
 
     LOGGER.info(
@@ -170,6 +174,10 @@ def run_playbook(name: str) -> Union[str, Tuple[str, Dict[str, Any]]]:
             line="sub",
             isolate_pulse_context=False,  # share parent PulseContext for line stack management
         )
+    except ModelUnavailableError:
+        # 使うモデルが無い・繋げない。エラー文字列にして親へ返すと、止まったことの
+        # 知らせがペルソナの記憶に書かれてしまうので、返事ごと止める。
+        raise
     except Exception as exc:
         LOGGER.exception("[run_playbook] Sub-line execution failed for '%s'", name)
         return f"[run_playbook error] Sub-line failed for '{name}': {type(exc).__name__}: {exc}"

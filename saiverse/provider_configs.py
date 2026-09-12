@@ -20,6 +20,7 @@ import logging
 import os
 import re
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from .data_paths import (
     BUILTIN_DATA_DIR,
@@ -30,6 +31,9 @@ from .data_paths import (
     USER_DATA_DIR,
     iter_files_with_layer,
 )
+
+if TYPE_CHECKING:
+    from .persona_model_selection import ReapplyResult
 
 LOGGER = logging.getLogger(__name__)
 
@@ -100,24 +104,44 @@ def load_configs() -> dict[str, dict]:
 PROVIDER_CONFIGS: dict[str, dict] = load_configs()
 
 
-def reload_configs() -> dict[str, dict]:
-    """Reload provider configurations from disk and refresh the global cache."""
-    global PROVIDER_CONFIGS
-    PROVIDER_CONFIGS = load_configs()
-    LOGGER.info(
-        "Provider configurations reloaded: %d providers",
-        len(PROVIDER_CONFIGS),
-    )
+def reload_configs() -> ReapplyResult:
+    """Reload provider configurations from disk and refresh the global cache.
 
-    # 見張りの素通しは「前回と同じ状態なら結果も同じ」という前提に立つ。接続先の
-    # 定義を読み直したらその前提は消える。書き換えの入口は複数ある (作成・更新・
-    # 削除・reload ルート) が、全部この読み直しを通るので、記録を捨てる呼び出しは
-    # ここに一本だけ置く。import はここで行う: session_lifecycle 側が設定を読む
-    # ため、モジュール先頭に置くと循環参照になる。
+    Returns the result of deciding every persona's speaking model again
+    (``saiverse.persona_model_selection.ReapplyResult``): the personas that
+    could not be switched, which the screen that made the change shows right
+    away. Read the new definitions from ``PROVIDER_CONFIGS``.
+    """
+    # import はここで行う: session_lifecycle / persona_model_selection 側が設定を
+    # 読むため、モジュール先頭に置くと循環参照になる。
+    from saiverse.persona_model_selection import (
+        MODEL_SETTINGS_LOCK,
+        reapply_after_config_reload,
+    )
     from sea.session_lifecycle import invalidate_cold_sweep_fingerprints
 
-    invalidate_cold_sweep_fingerprints()
-    return PROVIDER_CONFIGS
+    global PROVIDER_CONFIGS
+    # 定義の差し替えから決め直しまでを、設定のロックの中で一続きに行う
+    # (docs/intent/persona_model_selection.md 決まったこと 5)。取る順番は設定の
+    # ロックが先、ペルソナの接続のロックが後。
+    with MODEL_SETTINGS_LOCK:
+        PROVIDER_CONFIGS = load_configs()
+        LOGGER.info(
+            "Provider configurations reloaded: %d providers",
+            len(PROVIDER_CONFIGS),
+        )
+
+        # 見張りの素通しは「前回と同じ状態なら結果も同じ」という前提に立つ。接続先の
+        # 定義を読み直したらその前提は消える。書き換えの入口は複数ある (作成・更新・
+        # 削除・reload ルート) が、全部この読み直しを通るので、記録を捨てる呼び出しは
+        # ここに一本だけ置く。
+        invalidate_cold_sweep_fingerprints()
+
+        # 接続先の定義が変わったら、動いているペルソナの接続を捨てて決め直す
+        # (docs/intent/persona_model_selection.md 決まったこと 11)。すでに話したペルソナも
+        # 次の返事から新しい接続先の設定で接続が作られる。書いている途中の返事は、
+        # 始めたときの接続で最後まで書く。
+        return reapply_after_config_reload()
 
 
 def get_provider(provider_id: str) -> dict | None:
@@ -137,7 +161,7 @@ def is_builtin(provider_id: str) -> bool:
     return config.get("source") == SOURCE_BUILTIN
 
 
-def reload_models_after_provider_change() -> None:
+def reload_models_after_provider_change() -> ReapplyResult:
     """Re-resolve model configs after a provider definition changed.
 
     ``model_configs`` inlines a provider's ``base_url`` / ``api_key_env`` into
@@ -145,13 +169,34 @@ def reload_models_after_provider_change() -> None:
     would leave those copies pointing at the old endpoint — and the credential
     check compares the two, so every model on an edited provider would start
     failing until the next restart.
+
+    Returns the model reload's ``ReapplyResult`` (personas that could not be
+    switched).
     """
     from .model_configs import reload_configs as reload_model_configs
 
-    reload_model_configs()
+    return reload_model_configs()
 
 
-def save_provider(provider_id: str, config: dict) -> None:
+def reload_providers_and_models() -> ReapplyResult:
+    """Reload provider definitions, then the model definitions that inline them.
+
+    Both reloads run inside one section of the settings lock
+    (``persona_model_selection.MODEL_SETTINGS_LOCK``, an RLock), so no other
+    settings save or re-decide runs between them. Otherwise that save would
+    decide with the new provider definitions and the old model definitions.
+
+    Both reloads decide every persona again; the model reload runs last, so its
+    result is the one that describes where every persona ended up.
+    """
+    from .persona_model_selection import MODEL_SETTINGS_LOCK
+
+    with MODEL_SETTINGS_LOCK:
+        reload_configs()
+        return reload_models_after_provider_change()
+
+
+def save_provider(provider_id: str, config: dict) -> ReapplyResult:
     """Save a provider configuration to user_data/providers/<id>.json.
 
     The provider is always saved to user_data/, even when a builtin with the
@@ -161,6 +206,12 @@ def save_provider(provider_id: str, config: dict) -> None:
     Args:
         provider_id: Unique provider identifier (filename stem).
         config: Provider configuration dict.
+
+    Returns:
+        The personas that could not be switched to the new settings. The
+        provider reload and the model reload that follows it both decide
+        everyone again; the model reload runs last, so its result is the one
+        that describes where every persona ended up.
 
     Raises:
         ValueError: If provider_id contains characters unsafe for filenames.
@@ -194,17 +245,20 @@ def save_provider(provider_id: str, config: dict) -> None:
         staged.unlink(missing_ok=True)
         raise
     LOGGER.info("Saved provider %s to %s", provider_id, target_file)
-    reload_configs()
-    reload_models_after_provider_change()
+    return reload_providers_and_models()
 
 
-def delete_provider(provider_id: str) -> None:
+def delete_provider(provider_id: str) -> ReapplyResult:
     """Delete a provider's user_data override.
 
     Only user_data providers can be deleted. Builtin providers are immutable;
     attempting to delete one without a user_data override raises ValueError.
     If a user_data override is deleted while a builtin with the same id exists,
     the builtin becomes visible again after reload.
+
+    Returns:
+        The personas that could not be switched, from the model reload that
+        runs last (see :func:`save_provider`).
 
     Raises:
         FileNotFoundError: If no user_data provider with this id exists.
@@ -222,8 +276,7 @@ def delete_provider(provider_id: str) -> None:
 
     target_file.unlink()
     LOGGER.info("Deleted provider %s (file: %s)", provider_id, target_file)
-    reload_configs()
-    reload_models_after_provider_change()
+    return reload_providers_and_models()
 
 
 def list_models_using_provider(provider_id: str) -> list[str]:

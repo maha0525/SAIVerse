@@ -25,7 +25,11 @@ from manager.ids import (
 )
 from persona.core import PersonaCore
 from saiverse import task_book
-from saiverse.model_configs import get_context_length, get_model_provider
+from saiverse.persona_model_selection import (
+    attach_speaking_model_choice,
+    initial_speaking_model,
+    register_new_persona,
+)
 
 
 def ai_stem_taken(db, stem: str, city_slug: str) -> bool:
@@ -175,22 +179,21 @@ class PersonaMixin:
 
         self._set_persona_avatar(pid, db_ai.AVATAR_IMAGE)
 
-        persona_model = db_ai.DEFAULT_MODEL or self.model or self._base_model
-        try:
-            persona_context_length = get_context_length(persona_model)
-            persona_provider = get_model_provider(persona_model)
-        except ValueError:
-            # 画面への警告はここで積まない。画面が取りに来るたびに
-            # current_model_setting_warnings (manager/initialization.py) が
-            # いまの DB の値から作る — 起動後に選び直した設定を反映するため。
-            fallback = self._base_model
+        # 話す標準モデルは決め方の一か所 (saiverse/persona_model_selection.py) で決める。
+        # 設定ファイルが無くても代わりのモデルでは読み込まない — 読み込みはするが、
+        # 話そうとしたら止まる (docs/intent/persona_model_selection.md 決まったこと 7)。
+        # 画面への警告はここで積まない。画面が取りに来るたびに
+        # current_model_setting_warnings (manager/initialization.py) がいまの状態から作る。
+        choice, persona_provider, persona_context_length, parameter_overrides = (
+            initial_speaking_model(self, persona_default=db_ai.DEFAULT_MODEL)
+        )
+        persona_model = choice.model
+        if not choice.defined:
             logging.warning(
-                "Persona '%s': model config '%s' not found. Falling back to '%s'.",
-                pid, persona_model, fallback,
+                "Persona '%s': speaking model '%s' (source=%s) has no definition. The persona "
+                "is loaded but stopped until the model is reselected (no substitute model).",
+                pid, persona_model, choice.source,
             )
-            persona_model = fallback
-            persona_context_length = get_context_length(persona_model)
-            persona_provider = get_model_provider(persona_model)
         persona_lightweight_model = db_ai.LIGHTWEIGHT_MODEL
         persona_vision_model = db_ai.VISION_MODEL
         persona_audio_model = db_ai.AUDIO_MODEL
@@ -247,6 +250,7 @@ class PersonaMixin:
 
         persona.private_room_id = private_room_id
         persona.persona_role = getattr(db_ai, "PERSONA_ROLE", None)
+        attach_speaking_model_choice(persona, choice, parameter_overrides)
         if private_room_id not in self.building_map:
             logging.warning(
                 "Persona '%s' private room '%s' is missing from building_map.",
@@ -546,7 +550,10 @@ class PersonaMixin:
                 # 設計に合わせ、既定は ON。
                 AUTONOMY_ENABLED=True,
                 IS_DISPATCHED=False,
-                DEFAULT_MODEL=self.model,
+                # 個別の標準モデルは持たせない。チャット画面のモデル一時上書きは
+                # 保存しないもので、ここで写すと解除しても上書きのモデルが残る
+                # (docs/intent/persona_model_selection.md 決まったこと 1)。
+                DEFAULT_MODEL=None,
                 # 既定 ON (まはー裁定 2026-09-01)。旧 False は「ログインポート直後に
                 # 全量が自動編纂される事故」の防止だったが、その経路は §13 (編纂は
                 # 提示窓の中だけ) と §16 (窓の外の過去は明示ボタン + 費用確認のみ) で
@@ -636,9 +643,11 @@ class PersonaMixin:
                 if linked_user:
                     linked_user_name = linked_user.USERNAME
 
-            new_persona_model = self.model or self._base_model
-            new_persona_provider = get_model_provider(new_persona_model)  # Get provider for model
-            new_persona_context_length = get_context_length(new_persona_model)
+            # いまの設定 (一時上書き → グローバル → 組み込み) で決める。起動時の写しは使わない。
+            choice, new_persona_provider, new_persona_context_length, parameter_overrides = (
+                initial_speaking_model(self)
+            )
+            new_persona_model = choice.model
 
             from saiverse.data_paths import find_file, PROMPTS_DIR
             common_prompt_file = find_file(PROMPTS_DIR, "common.txt") or Path("system_prompts/common.txt")
@@ -672,7 +681,10 @@ class PersonaMixin:
             )
             new_persona_core.private_room_id = new_building_id
             new_persona_core.persona_role = persona_role
-            self.personas[new_ai_id] = new_persona_core
+            attach_speaking_model_choice(new_persona_core, choice, parameter_overrides)
+            # 登録と話すモデルの決め直しを同じロックの中で行う (構築の間に保存された
+            # 設定を取りこぼさない)。
+            register_new_persona(self, new_ai_id, new_persona_core, choice)
             self.avatar_map[new_ai_id] = self.default_avatar
             self.id_to_name_map[new_ai_id] = name
             self.persona_map[name] = new_ai_id
