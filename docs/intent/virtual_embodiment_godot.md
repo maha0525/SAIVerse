@@ -1,7 +1,7 @@
 # Intent: Godot / ARDY 仮想身体デモ
 
 > **ステータス: v0.24 (2026-07-23) — 実装中**
-> 2026-07-12 の「VR/3Dアバターの身体制御」構想を、Godot + OpenXR + VRM + ARDY による公開デモ計画へ昇格した。Unity は正典から外し、既存 `unity_gateway` は再利用可能な知見を回収するための旧実装として扱う。
+> 2026-07-12 の「VR/3Dアバターの身体制御」構想を、Godot + OpenXR + VRM + ARDY による公開デモ計画へ昇格した。Unity は正典から外し、既存 `unity_gateway` は再利用可能な知見を回収するための旧実装として扱う。なお、旧 `unity_gateway` は 2026-09-11 にリポジトリから削除したので、知見は旧設計書 (`docs/old/unity-gateway.md`) と git の履歴から回収する。
 
 ## 実装記録
 
@@ -323,7 +323,7 @@ ARDY Service (WSL / RTX 3090)         Godot Client (Windows / OpenXR)
 - [`physical_ear.md`](physical_ear.md): VAD と音声直入力
 - [`multimodal_input_pipeline.md`](multimodal_input_pipeline.md): Gemini へ画像・音声を渡す経路
 - [`addon_speak_hooks.md`](addon_speak_hooks.md): `persona_speak` 購読点
-- [`unity-gateway.md`](../features/unity-gateway.md): 3D空間連携の旧試作。プロトコルと現実装は正典にせず、失敗と境界設計だけを回収する
+- [`unity-gateway.md`](../old/unity-gateway.md): 3D空間連携の旧試作の設計書で、その実装 (`unity_gateway/`) は 2026-09-11 に削除した。プロトコルと旧実装は正典にせず、失敗と境界設計だけを回収する
 
 ## Body Spell の最小語彙
 

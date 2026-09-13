@@ -126,16 +126,21 @@ def get_models():
 
 @router.post("/reload-models")
 def reload_models():
-    """Reload model configurations from disk without restarting the server."""
+    """Reload model configurations from disk without restarting the server.
+
+    応答の ``notices`` は、読み直した設定に切り替えられなかったペルソナの知らせ
+    (無ければ空。docs/intent/persona_model_selection.md 決まったこと 2・11)。
+    """
     from saiverse.model_configs import reload_configs
 
     # 冷えたウィンドウの見張りの指紋を捨てるのは reload_configs() の側 (モデル
     # 定義の書き換えの入口が全部そこを通るため)。ここで重ねて呼ばない。
-    reload_configs()
+    reapplied = reload_configs()
     choices = get_model_choices_with_display_names()
     return {
         "reloaded": len(choices),
         "models": [{"id": mid, "name": name} for mid, name in choices],
+        "notices": reapplied.notices(),
     }
 
 class SlotKindInfo(BaseModel):
@@ -405,7 +410,21 @@ def set_model(req: UpdateModelRequest, manager = Depends(get_manager)):
     ``client_id`` + ``seq`` 付きの要求は世代ガードを通す — 同じクライアントで
     既に新しい世代が適用済みなら 409 (呼び出し側は現在状態を取り直す)。省略時は
     従来どおり無条件適用 (他の呼び出し元との互換)。適用自体はロックで直列化する。
+
+    設定ファイルの無いモデルの名前は 400 で断り、理由を返す
+    (docs/intent/persona_model_selection.md 決まったこと 6)。適用
+    (manager.set_model) は、この世代ガードのロックの内側で、設定のロック
+    (MODEL_SETTINGS_LOCK) を取って行う。応答の ``notices`` は、新しいモデルに
+    切り替えられなかったペルソナの知らせ (無ければ空)。
     """
+    requested = (req.model or "").strip()
+    if requested:
+        from saiverse.model_defaults import role_model_is_defined
+        from saiverse.persona_model_selection import undefined_override_message
+
+        if not role_model_is_defined("default_model", requested):
+            raise HTTPException(status_code=400, detail=undefined_override_message(requested))
+
     with _MODEL_CHANGE_LOCK:
         if req.seq is not None and req.client_id:
             now = time.monotonic()
@@ -428,18 +447,23 @@ def set_model(req: UpdateModelRequest, manager = Depends(get_manager)):
                 ]:
                     del _model_change_seqs[cid]
             _model_change_seqs[req.client_id] = (req.seq, now)
-        manager.set_model(req.model, req.parameters)
+        try:
+            reapplied = manager.set_model(req.model, req.parameters)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+    notices = list(reapplied.notices()) if hasattr(reapplied, "notices") else []
 
     # Return full config inline to avoid a separate /config fetch
     current_model = manager.model or None
-    
+
     if not current_model:
         return {
             "success": True,
             "model": req.model,
             "current_model": None,
             "parameters": {},
-            "current_values": {}
+            "current_values": {},
+            "notices": notices,
         }
     
     # Get param specs
@@ -490,6 +514,7 @@ def set_model(req: UpdateModelRequest, manager = Depends(get_manager)):
         "current_values": current_values,
         "max_image_embeds": img_embeds_model_default,
         "max_image_embeds_model_default": img_embeds_model_default,
+        "notices": notices,
     }
 
 @router.post("/parameters")
@@ -1499,7 +1524,13 @@ def put_metabolism_defaults(req: MetabolismDefaultsRequest):
 
 @router.post("/models", status_code=201)
 def create_model_file(req: ModelFileCreateRequest):
-    """Create a new model JSON file in user_data."""
+    """Create a new model JSON file in user_data.
+
+    モデルの作成・更新・削除・複製・チャット画面からの保存は、どれも読み直しで全員の
+    話すモデルを決め直す。応答の ``notices`` は、新しい設定に切り替えられなかった
+    ペルソナの知らせ (無ければ空。docs/intent/persona_model_selection.md 決まったこと
+    2・11)。
+    """
     _validate_model_key(req.key)
     if "model" not in req.config:
         raise HTTPException(status_code=400, detail="config must include 'model' field")
@@ -1521,8 +1552,13 @@ def create_model_file(req: ModelFileCreateRequest):
         json.dumps(payload, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
-    reload_configs()
-    return {"key": req.key, "path": str(user_path), "source": "user_data"}
+    reapplied = reload_configs()
+    return {
+        "key": req.key,
+        "path": str(user_path),
+        "source": "user_data",
+        "notices": reapplied.notices(),
+    }
 
 
 @router.put("/models/{key}")
@@ -1531,6 +1567,8 @@ def update_model_file(key: str, req: ModelFileUpdateRequest):
 
     On reload the user_data file takes priority, so the builtin remains
     untouched but is shadowed.
+
+    応答の ``notices`` は、新しい設定に切り替えられなかったペルソナの知らせ (無ければ空)。
     """
     _validate_model_key(key)
     if "model" not in req.config:
@@ -1551,21 +1589,25 @@ def update_model_file(key: str, req: ModelFileUpdateRequest):
         json.dumps(payload, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
-    reload_configs()
+    reapplied = reload_configs()
     return {
         "key": key,
         "path": str(user_path),
         "source": "user_data",
         "created_override": not was_user_data,
+        "notices": reapplied.notices(),
     }
 
 
-@router.delete("/models/{key}", status_code=204)
+@router.delete("/models/{key}")
 def delete_model_file(key: str):
     """Delete a user_data model file. Builtin models are read-only.
 
     If a user_data override exists for a builtin, deletion restores the
     builtin on next reload (the override is removed, not the builtin itself).
+
+    200 で ``{"notices": [...]}`` を返す。削除で決め直したときに、新しい設定に
+    切り替えられなかったペルソナの知らせ (無ければ空)。
     """
     _validate_model_key(key)
     user_path = _model_user_path(key)
@@ -1582,13 +1624,16 @@ def delete_model_file(key: str):
 
     user_path.unlink()
     from saiverse.model_configs import reload_configs
-    reload_configs()
-    return None
+    reapplied = reload_configs()
+    return {"notices": reapplied.notices()}
 
 
 @router.post("/models/{key}/clone")
 def clone_model_file(key: str, req: ModelFileCloneRequest):
-    """Clone an existing model under a new key (always to user_data)."""
+    """Clone an existing model under a new key (always to user_data).
+
+    応答の ``notices`` は、新しい設定に切り替えられなかったペルソナの知らせ (無ければ空)。
+    """
     _validate_model_key(key)
     _validate_model_key(req.new_key)
 
@@ -1618,8 +1663,13 @@ def clone_model_file(key: str, req: ModelFileCloneRequest):
         json.dumps(cloned, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
-    reload_configs()
-    return {"key": req.new_key, "path": str(target), "source": "user_data"}
+    reapplied = reload_configs()
+    return {
+        "key": req.new_key,
+        "path": str(target),
+        "source": "user_data",
+        "notices": reapplied.notices(),
+    }
 
 
 @router.post("/models/save-from-chat")
@@ -1629,6 +1679,8 @@ def save_model_from_chat(req: SaveModelFromChatRequest):
     Uses the source model as the base template, then overlays the user's
     parameter values + cache settings + history settings, then writes to
     user_data/models/<target_key>.json.
+
+    応答の ``notices`` は、新しい設定に切り替えられなかったペルソナの知らせ (無ければ空)。
     """
     _validate_model_key(req.target_key)
 
@@ -1687,10 +1739,11 @@ def save_model_from_chat(req: SaveModelFromChatRequest):
         json.dumps(new_config, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
-    reload_configs()
+    reapplied = reload_configs()
     return {
         "key": req.target_key,
         "path": str(target_path),
         "source": "user_data",
         "overwrote_existing": req.overwrite and target_path.exists(),
+        "notices": reapplied.notices(),
     }

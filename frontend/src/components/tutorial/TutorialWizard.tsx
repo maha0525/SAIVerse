@@ -372,11 +372,23 @@ export default function TutorialWizard({
 
     const handleModelOverride = async (role: string, envKey: string, modelId: string) => {
         try {
-            await fetch('/api/admin/env', {
+            const res = await fetch('/api/admin/env', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ updates: { [envKey]: modelId } })
             });
+            if (res.ok) {
+                // 保存しなかったモデル設定や、切り替えられなかったペルソナの知らせ
+                const data = await res.json().catch(() => null);
+                const notices: string[] = Array.isArray(data?.notices) ? data.notices : [];
+                if (notices.length > 0) {
+                    alert(notices.join('\n\n'));
+                }
+                const rejected: string[] = Array.isArray(data?.rejected_keys) ? data.rejected_keys : [];
+                if (rejected.includes(envKey)) {
+                    return; // 保存されていないので、表示も前の値のままにする
+                }
+            }
             // Update local state
             const updated = state.autoConfiguredAssignments.map(a =>
                 a.role === role ? { ...a, model_id: modelId, display_name: modelId } : a

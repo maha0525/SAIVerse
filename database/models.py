@@ -121,7 +121,7 @@ class AI(Base):
     # (manager/admin.py)。
     CHRONICLE_CHAR_BUDGET = Column(Integer, nullable=True)
     SPELL_ENABLED = Column(Boolean, default=True, nullable=False)  # Per-persona spell system toggle (基幹機能化に伴い v0.3.0.dev3 でデフォルト ON 化)
-    # Per-persona toggle for the realtime info section (現在時刻 / 前回発言時刻 / 空間情報)
+    # Per-persona toggle for the realtime info section (現在時刻 / 前回発言時刻)
     # injected by sea/runtime.py:_build_realtime_context. OFF にすると、その動的
     # コンテキストブロックをこのペルソナには一切送らない。夜になると時刻を気にして
     # 会話が成立しなくなるモデル向けの脱出経路 (docs/issues/realtime_info_current_time_toggle.md)。
@@ -205,7 +205,7 @@ class Building(Base):
     DESCRIPTION = Column(String(1024), default="", nullable=False)
     AUTO_INTERVAL_SEC = Column(Integer, default=10, nullable=False)
     IMAGE_PATH = Column(String(512), nullable=True)  # Building interior image for LLM visual context
-    EXTRA_PROMPT_FILES = Column(Text, nullable=True)  # JSON: ["body_control.txt", "other.txt"]
+    EXTRA_PROMPT_FILES = Column(Text, nullable=True)  # JSON: ["extra_instructions.txt", "other.txt"]
     # 街マップ上の絶対座標 (world 座標系、px相当)。NULL なら擬似配置にフォールバック。
     MAP_X = Column(Float, nullable=True)
     MAP_Y = Column(Float, nullable=True)
@@ -223,6 +223,13 @@ class Building(Base):
     # 1 Building 複数ロール可。NULL/空 = ロールなし (私室・通常 Building)。
     # タグ付け UI/CLI は将来フェーズ — 手動 SQL 例は facility_map.py の docstring 参照。
     FACILITY_ROLES = Column(Text, nullable=True)
+    # 部屋の様子に出す「建物に直接置かれたアイテム」の個数の上限
+    # (docs/intent/room_item_display_cap.md 設計 4)。
+    # NULL = 既定 (sai_memory/room_state.py の DEFAULT_ROOM_ITEM_DISPLAY_LIMIT = 10)。
+    # 0 以上の整数 = その個数 (0 は「様子にアイテムを出さない部屋」として有効)。
+    # 負数は保存時に拒否する。「全部見せたい」部屋は十分大きい数を入れる
+    # (「無制限」の特別な値は作らない)。
+    ITEM_DISPLAY_LIMIT = Column(Integer, nullable=True)
     __table_args__ = (UniqueConstraint('CITYID', 'BUILDINGNAME', name='uq_city_building_name'),)
 
 

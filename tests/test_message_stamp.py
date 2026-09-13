@@ -541,6 +541,7 @@ class TestSpellLoopPredecessor:
             _get_cache_kwargs=lambda persona_id=None: {},
             _dump_llm_io=lambda *a, **k: None,
             _accumulate_usage=lambda *a, **k: None,
+            _effective_building_id=lambda persona, fallback: fallback,
         )
 
         # ラウンド 1 の retry はもう一度 spell を唱える → ラウンド 2 へ

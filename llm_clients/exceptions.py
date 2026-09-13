@@ -98,3 +98,41 @@ class InvalidRequestError(LLMError):
 
     error_code = "invalid_request"
     user_message = "リクエストが不正です。入力内容を確認してください。"
+
+
+class ModelUnavailableError(LLMError):
+    """The model a persona is set to use has no definition, or cannot be connected to.
+
+    SAIVerse does not substitute another model in that case
+    (docs/intent/persona_model_selection.md, decision 7). The ``user_message``
+    names who could not speak, which model is missing or unreachable, where to
+    reselect it, and that no restart is needed. It is shown in the chat screen
+    only — it is never written to the building log or the persona's memory.
+
+    Attributes:
+        role: ``"default_model"`` or ``"lightweight_model"``.
+        reason: ``"missing"`` (no definition) or ``"unreachable"`` (the
+            definition exists but a client could not be created).
+        model: the model name that could not be used.
+        persona_id: the persona that could not use it.
+    """
+
+    error_code = "model_unavailable"
+    user_message = "ペルソナが使うモデルを使えません。"
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        role: str,
+        reason: str,
+        model: str | None = None,
+        persona_id: str | None = None,
+        original_error: Exception | None = None,
+        user_message: str | None = None,
+    ):
+        super().__init__(message, original_error=original_error, user_message=user_message)
+        self.role = role
+        self.reason = reason
+        self.model = model
+        self.persona_id = persona_id

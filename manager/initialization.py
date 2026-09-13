@@ -1,8 +1,9 @@
 """Initialization helpers extracted from SAIVerseManager.__init__.
 
-Also holds ``current_model_setting_warnings``: the model settings that
-``_init_model_config`` resolves once at startup are re-checked against the
-current settings every time the screen asks for warnings.
+Also holds ``current_model_setting_warnings``: every time the screen asks, the
+model settings are checked against the current settings and each persona's
+state, so a setting reselected (or a model definition added or removed) after
+startup is reflected without a restart.
 """
 from __future__ import annotations
 
@@ -527,192 +528,172 @@ class InitializationMixin:
             }
         self.startup_alerts.append(alert)
 
-    def _init_model_config(self, model: Optional[str]) -> None:
-        """Step 4a: Initialize model configuration."""
-        from saiverse.model_configs import get_context_length, get_model_provider
-        import os
+    def _init_model_config(self) -> None:
+        """Step 4a: Initialize model configuration.
 
-        def _get_default_model() -> str:
-            from saiverse.model_defaults import BUILTIN_DEFAULT_LITE_MODEL
-            return os.getenv("SAIVERSE_DEFAULT_MODEL", BUILTIN_DEFAULT_LITE_MODEL)
+        チャット画面のモデル一時上書きは起動時には無い (``model = None``)。
+        ``provider`` / ``context_length`` は、一時上書きが無いときに話す標準モデル
+        (グローバル設定の標準モデル、空なら組み込みの既定モデル) の定義から控える。
 
-        base_model = model or _get_default_model()
-        # 標準モデルを環境変数 (未設定なら組み込みの既定モデル) から決めたか。引数で
-        # 渡された起動では環境変数が標準モデルを決めていないので、再起動すれば環境変数の
-        # 値になるとは言えない。そのとき current_model_setting_warnings は、グローバル
-        # 設定の標準モデルとの食い違いを知らせない。いまの起動口 (main.py ほか) は
-        # 引数を渡さない。
-        self._base_model_from_env = not model
+        定義が無くても組み込みの既定モデルへ差し替えない — 個別の標準モデルを持たない
+        ペルソナは、選び直すまで止まる (docs/intent/persona_model_selection.md
+        決まったこと 7)。画面への警告はここで積まず、画面が取りに来るたびに
+        current_model_setting_warnings がいまの設定から作る。
+        """
+        from saiverse.persona_model_selection import (
+            global_default_model_setting,
+            resolve_speaking_model,
+            speaking_model_definition,
+        )
+
         self.model = None  # No global override by default
         self.startup_warnings: List[Dict[str, str]] = []
-        try:
-            self.context_length = get_context_length(base_model)
-            self.provider = get_model_provider(base_model)
-        except ValueError:
-            # 画面への警告はここで積まない。画面が取りに来るたびに
-            # current_model_setting_warnings がいまの設定から作る — 起動後に
-            # 選び直した設定を反映するため。
-            from saiverse.model_defaults import BUILTIN_DEFAULT_LITE_MODEL
-            fallback = BUILTIN_DEFAULT_LITE_MODEL
+        choice = resolve_speaking_model(
+            override=None, persona_default=None,
+            global_default=global_default_model_setting(),
+        )
+        choice, provider, context_length = speaking_model_definition(choice)
+        if not choice.defined:
             LOGGER.warning(
-                "Model config '%s' not found. Falling back to '%s'. "
-                "Check that the model JSON file exists in builtin_data/models/ or user_data/models/.",
-                base_model, fallback,
+                "Default model '%s' (source=%s) has no definition. It is not replaced with "
+                "another model: personas without their own default model are loaded but "
+                "stopped until it is reselected. Check that the model JSON file exists in "
+                "builtin_data/models/ or user_data/models/.",
+                choice.model, choice.source,
             )
-            base_model = fallback
-            self.context_length = get_context_length(base_model)
-            self.provider = get_model_provider(base_model)
-        self._base_model = base_model
+        self.context_length = context_length
+        self.provider = provider
         self.model_parameter_overrides: Dict[str, Any] = {}
         # Metabolism は常時 ON (2026-07-30 OFF トグル撤去)。水位は model 定義
         # 一本で解決する (sea/session_lifecycle.py get_metabolism_watermarks)。
         self.max_image_embeds_override: Optional[int] = None
 
     def current_model_setting_warnings(self) -> List[Dict[str, str]]:
-        """いまの設定のうち、定義が見つからないモデルを指しているものを警告にして返す。
+        """いまの設定と各ペルソナの状態から、モデル設定の警告を作って返す。
 
-        画面 (GET /api/config/startup-warnings) が取りに来るたびに呼ばれる。起動時に
-        一度だけ作って保存すると、起動後に設定を選び直しても (ペルソナ設定の保存・
-        グローバル設定のモデルロール・チュートリアル)、モデル定義を足したり消したり
-        して読み直しても、再起動まで古い警告が出続ける。読む瞬間に作れば、どの入口
-        から設定が変わっても古い警告は残らない。
+        画面 (GET /api/config/startup-warnings) が取りに来るたびに呼ばれる。保存せず、
+        読むたびにいまの状態から作る — どの入口から設定が変わっても古い警告は残らない。
 
-        - グローバル設定: ``MODEL_ROLES`` の 6 役割を環境変数から読む。設定の保存は
-          os.environ も書き換える (api/routes/admin.py の write_env_updates)。
+        - チャット画面のモデル一時上書きのモデルが SAIVerse に無ければ、そのこと。
+        - グローバル設定: ``MODEL_ROLES`` の 6 役割を環境変数から読む。定義の無い値は
+          「止まっています」。標準・軽量・Memory Weave モデルは、その値を使っている
+          (個別の値を持たない) ペルソナの名前を並べる。一時上書き中の標準モデルは
+          「上書きを解除すると止まる」。
         - ペルソナ: この City のペルソナの DB 行から、標準・軽量・Memory Weave
-          モデルを読む (``_load_personas_from_db`` と同じ条件)。メモリ上の
-          PersonaCore の ``model`` は、読み込み時に代わりのモデルへ差し替わって
-          いるので設定値の判定には使わず、「いま何で動いているか」の表示にだけ
-          使う。画像/音声/動画要約モデルは、ペルソナ単位の値を読む箇所が無いので
-          対象にしない。
-        - グローバル設定の標準モデルが起動後に変わっても、個別の標準モデルを持たない
-          ペルソナは再起動まで ``_base_model`` で動き続ける。いまの環境変数から再起動
-          したら決まるはずの標準モデルが ``_base_model`` と違えば、そのことを警告一件で
-          知らせる (``_default_model_restart_notice``)。
+          モデルを読み、表示名 (AINAME) で呼ぶ。画像/音声/動画要約モデルは、
+          ペルソナ単位の値を読む箇所が無いので対象にしない。
+        - 切り替えられなかったペルソナ: 読み込んでいるペルソナのうち、決め方
+          (saiverse/persona_model_selection.py) が指すモデルと、実際に使っている
+          モデルが食い違う人だけ、その名前つきで知らせる。失敗を記録しておかず、
+          いまの状態から毎回判定する。
         - DB からペルソナ行を読み出せなかったときは、グローバル設定の警告をそのまま
           返し、ペルソナ単位の確認ができていないことを警告一件で伝える。黙って
           ペルソナ分を落とすと、警告が無い画面を「問題なし」と読ませてしまう。
-
-        PersonaMixin ではなくここに置くのは、PersonaMixin を継承する AdminService が
-        ``_base_model`` を起動時の写しとして持つため (manager/admin.py の __init__)。
-        この mixin を継承するのは SAIVerseManager だけで、update_default_model が
-        書き換える ``_base_model`` の実体を読む。
         """
         import os
 
-        from saiverse.model_defaults import MODEL_ROLES, missing_model_warnings
-
-        # 環境変数は一度だけ読む。保存と重なって二度読むと、「設定ファイルが見つかり
-        # ません」の警告と標準モデルの知らせが別々の値を見てしまう。
-        global_settings = {role: os.getenv(env_key) for role, env_key in MODEL_ROLES.items()}
-        # チャット画面のモデル一時上書き (set_model) が有効な間は、ペルソナはそのモデルで
-        # 動いているので、「いまは …」で名指すのはそちら。
-        running_model = getattr(self, "model", None) or self._base_model
-        warnings = missing_model_warnings(
-            global_settings.items(),
-            default_model_substitute=running_model,
+        from saiverse.model_defaults import (
+            MODEL_ROLES,
+            missing_model_warnings,
+            role_model_is_defined,
         )
-        restart_notice = self._default_model_restart_notice(global_settings["default_model"])
-        if restart_notice is not None:
-            warnings.append(restart_notice)
+        from saiverse.persona_model_selection import (
+            live_model_override,
+            override_missing_message,
+            read_persona_model_rows,
+            resolve_speaking_model,
+            unswitched_persona_message,
+        )
+
+        # 環境変数は一度だけ読む。保存と重なって二度読むと、警告ごとに別々の値を見てしまう。
+        global_settings = {role: os.getenv(env_key) for role, env_key in MODEL_ROLES.items()}
+        override, _overrides = live_model_override(self)
+        warnings: List[Dict[str, str]] = []
+        if override is not None:
+            try:
+                if not role_model_is_defined("default_model", override):
+                    warnings.append({
+                        "source": "model_config",
+                        "message": override_missing_message(override),
+                    })
+            except Exception:
+                LOGGER.warning(
+                    "Model config check failed for the chat model override %r; skipping.",
+                    override, exc_info=True,
+                )
 
         # DB の読み出しだけを独立に扱う。ここで例外を外へ出すと、ルートの外側の
         # 例外処理がグローバル設定の警告まで一緒に捨て、保存済みの警告が無ければ
         # 画面は正常に見えてしまう。
         try:
-            db = self.SessionLocal()
-            try:
-                rows = (
-                    db.query(
-                        AIModel.AIID,
-                        AIModel.DEFAULT_MODEL,
-                        AIModel.LIGHTWEIGHT_MODEL,
-                        AIModel.MEMORY_WEAVE_MODEL,
-                    )
-                    .filter(AIModel.HOME_CITYID == self.city_id)
-                    .all()
-                )
-            finally:
-                db.close()
+            rows = read_persona_model_rows(self.SessionLocal, city_id=self.city_id)
         except Exception:
             LOGGER.warning(
                 "Failed to read persona model settings from the DB; "
                 "persona model settings were not checked.",
                 exc_info=True,
             )
+            warnings.extend(missing_model_warnings(
+                global_settings.items(), override_model=override,
+            ))
             warnings.append({
                 "source": "model_config",
                 "message": "ペルソナごとのモデル設定を読み出せなかったため、ペルソナ単位の確認はできていません。",
             })
             return warnings
 
-        for persona_id, default_model, lightweight_model, memory_weave_model in rows:
-            persona = self.personas.get(persona_id)
+        def _name(row) -> str:
+            return (row.name or "").strip() or row.persona_id
+
+        affected = {
+            "default_model": [_name(r) for r in rows.values() if not (r.default_model or "").strip()],
+            "lightweight_model": [
+                _name(r) for r in rows.values() if not (r.lightweight_model or "").strip()
+            ],
+            "memory_weave_model": [
+                _name(r) for r in rows.values() if not (r.memory_weave_model or "").strip()
+            ],
+        }
+        warnings.extend(missing_model_warnings(
+            global_settings.items(),
+            override_model=override,
+            affected_persona_names=affected,
+        ))
+
+        for row in rows.values():
             warnings.extend(missing_model_warnings(
                 [
-                    ("default_model", default_model),
-                    ("lightweight_model", lightweight_model),
-                    ("memory_weave_model", memory_weave_model),
+                    ("default_model", row.default_model),
+                    ("lightweight_model", row.lightweight_model),
+                    ("memory_weave_model", row.memory_weave_model),
                 ],
-                persona_id=persona_id,
-                # 読み込めていないペルソナは、何で動いているとも言えない
-                default_model_substitute=persona.model if persona is not None else None,
+                persona_name=_name(row),
+                override_model=override,
             ))
-        return warnings
 
-    def _default_model_restart_notice(self, value: Optional[str]) -> Optional[Dict[str, str]]:
-        """グローバル設定の標準モデルが、動いているペルソナにまだ反映されていなければ知らせる。
-
-        グローバル設定の保存 (POST /api/admin/env) は .env と os.environ を書き換える
-        だけで、個別の標準モデルを持たないペルソナが使う ``_base_model`` は変えない。
-        ``_base_model`` が変わるのは、再起動して ``_init_model_config`` がいまの環境変数
-        から決め直したときと、チュートリアルの自動設定が update_default_model を
-        呼んだときだけ。そこで、いまの環境変数から再起動したら決まるはずの標準モデルを
-        求め、``_base_model`` と違うときだけ知らせを一件返す。
-
-        - 値が空でなく定義がある: その値。定義の引き方は ``_init_model_config`` と同じ
-          設定キーの完全一致 (role_model_is_defined)。
-        - 値が空・未設定: 組み込みの既定モデル。``_init_model_config`` は空文字も定義を
-          引けないので、組み込みの既定モデルへ落ちる。
-        - 値が空でないのに定義が無い: 知らせない。「設定ファイルが見つかりません」の
-          警告 (missing_model_warnings) が受け持つ。
-        - 起動時に標準モデルを引数から決めた: 知らせない (``_init_model_config`` の
-          ``_base_model_from_env`` の説明)。
-        """
-        from saiverse.model_defaults import BUILTIN_DEFAULT_LITE_MODEL, role_model_is_defined
-
-        if not self._base_model_from_env:
-            return None
-        running = self._base_model
-        # 食い違いの判定は _base_model と比べる (再起動で変わるのはそれ)。文面で
-        # 「いまは …」と名指すのは、チャット画面のモデル一時上書きが有効ならそちら。
-        shown = getattr(self, "model", None) or running
-        if value:
+        for row in rows.values():
+            persona = self.personas.get(row.persona_id)
+            if persona is None:
+                continue
             try:
-                defined = role_model_is_defined("default_model", value)
+                choice = resolve_speaking_model(
+                    override=override,
+                    persona_default=row.default_model,
+                    global_default=global_settings["default_model"],
+                )
             except Exception:
                 LOGGER.warning(
-                    "Model config check failed for SAIVERSE_DEFAULT_MODEL=%r; "
-                    "skipping the restart notice.",
-                    value, exc_info=True,
+                    "Could not decide the speaking model of %s for the warning; skipping.",
+                    row.persona_id, exc_info=True,
                 )
-                return None
-            if not defined or value == running:
-                return None
-            message = (
-                f"グローバル設定の標準モデルは '{value}' に変わっていますが、"
-                "個別の標準モデルを持たないペルソナには再起動するまで反映されません。"
-                f"いまは '{shown}' で動いています。"
-            )
-        else:
-            if running == BUILTIN_DEFAULT_LITE_MODEL:
-                return None
-            message = (
-                "グローバル設定の標準モデルが未設定になりましたが、"
-                f"個別の標準モデルを持たないペルソナは再起動するまで '{shown}' で動き続けます。"
-                f"再起動後は組み込みの既定モデル '{BUILTIN_DEFAULT_LITE_MODEL}' になります。"
-            )
-        return {"source": "model_config", "message": message}
+                continue
+            current = getattr(persona, "model", None)
+            if current and current != choice.model:
+                warnings.append({
+                    "source": "model_config",
+                    "message": unswitched_persona_message(_name(row), current),
+                })
+        return warnings
 
     def _update_timezone_cache(self, tz_name: Optional[str]) -> None:
         """Update cached timezone information for this manager.

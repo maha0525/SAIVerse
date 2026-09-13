@@ -3,7 +3,10 @@ import logging
 import os
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Dict, Mapping
+from typing import TYPE_CHECKING, Any, Dict, Mapping
+
+if TYPE_CHECKING:
+    from saiverse.persona_model_selection import ReapplyResult
 
 LOGGER = logging.getLogger(__name__)
 
@@ -157,26 +160,47 @@ def load_configs() -> Dict[str, Dict]:
 MODEL_CONFIGS = load_configs()
 
 
-def reload_configs() -> Dict[str, Dict]:
+def reload_configs() -> "ReapplyResult":
     """Reload model configurations from disk and update the global cache.
 
     Call this after adding, editing, or removing model JSON files
     to pick up changes without restarting the server.
-    """
-    global MODEL_CONFIGS
-    MODEL_CONFIGS = load_configs()
-    LOGGER.info("Model configurations reloaded: %d models", len(MODEL_CONFIGS))
 
-    # 冷えたウィンドウの見張りは「前回と同じ状態なら結果も同じ」で素通しするが、
-    # その前提はモデルの定義が変わらないことに依っている。書き換えの入口は複数
-    # ある (作成・更新・削除・複製・chat から保存・reload-models ルート) が、
-    # 全部この読み直しを通るので、記録を捨てる呼び出しはここに一本だけ置く。
-    # import はここで行う: session_lifecycle 側が設定を読むため、モジュール
-    # 先頭に置くと循環参照になる。
+    Returns the result of deciding every persona's speaking model again
+    (``saiverse.persona_model_selection.ReapplyResult``): the personas that
+    could not be switched, which the screen that made the change shows right
+    away (``ReapplyResult.notices()``). Read the new definitions from
+    ``MODEL_CONFIGS``.
+    """
+    # import はここで行う: session_lifecycle / persona_model_selection 側が設定を
+    # 読むため、モジュール先頭に置くと循環参照になる。
+    from saiverse.persona_model_selection import (
+        MODEL_SETTINGS_LOCK,
+        reapply_after_config_reload,
+    )
     from sea.session_lifecycle import invalidate_cold_sweep_fingerprints
 
-    invalidate_cold_sweep_fingerprints()
-    return MODEL_CONFIGS
+    global MODEL_CONFIGS
+    # 定義の差し替えから決め直しまでを、設定のロックの中で一続きに行う
+    # (docs/intent/persona_model_selection.md 決まったこと 5)。ロックの外で
+    # 差し替えると、同時に保存された設定の決め直しが、新旧どちらの定義を見たか
+    # 分からなくなる。取る順番は設定のロックが先、ペルソナの接続のロックが後。
+    with MODEL_SETTINGS_LOCK:
+        MODEL_CONFIGS = load_configs()
+        LOGGER.info("Model configurations reloaded: %d models", len(MODEL_CONFIGS))
+
+        # 冷えたウィンドウの見張りは「前回と同じ状態なら結果も同じ」で素通しするが、
+        # その前提はモデルの定義が変わらないことに依っている。書き換えの入口は複数
+        # ある (作成・更新・削除・複製・chat から保存・reload-models ルート) が、
+        # 全部この読み直しを通るので、記録を捨てる呼び出しはここに一本だけ置く。
+        invalidate_cold_sweep_fingerprints()
+
+        # モデルの定義が変わったら、動いているペルソナの話すモデルをその場で決め直し、
+        # 作ってあった接続を捨てる (docs/intent/persona_model_selection.md 決まったこと
+        # 11)。削除されたモデルを選んでいたペルソナは止まり、追加し直せば話せる。
+        # 書いている途中の返事は、始めたときに控えた定義と接続で最後まで書く。
+        # 入口がここに集まっているので、呼び出しもここに一本だけ置く。
+        return reapply_after_config_reload()
 
 
 def get_model_provider(model: str) -> str:

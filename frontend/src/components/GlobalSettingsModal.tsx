@@ -601,7 +601,12 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                 body: JSON.stringify({ updates: editedEnv })
             });
             if (res.ok) {
-                alert("環境変数を保存しました。");
+                // 保存しなかったモデル設定や、切り替えられなかったペルソナの知らせ
+                const data = await res.json().catch(() => null);
+                const notices: string[] = Array.isArray(data?.notices) ? data.notices : [];
+                alert(notices.length > 0
+                    ? `環境変数を保存しました。\n\n${notices.join('\n\n')}`
+                    : "環境変数を保存しました。");
                 loadEnvVars(); // Reload to confirm
             } else {
                 alert("保存に失敗しました。");
@@ -667,6 +672,11 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                 body: JSON.stringify({ provider }),
             });
             if (res.ok) {
+                const data = await res.json().catch(() => null);
+                const warnings: string[] = Array.isArray(data?.warnings) ? data.warnings : [];
+                if (warnings.length > 0) {
+                    alert(warnings.join('\n\n'));
+                }
                 await loadModelRoles();
             }
         } catch (e) {
@@ -676,11 +686,19 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
 
     const handleModelRoleChange = async (envKey: string, modelId: string) => {
         try {
-            await fetch('/api/admin/env', {
+            const res = await fetch('/api/admin/env', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ updates: { [envKey]: modelId } }),
             });
+            if (res.ok) {
+                // 保存しなかったモデル設定や、切り替えられなかったペルソナの知らせ
+                const data = await res.json().catch(() => null);
+                const notices: string[] = Array.isArray(data?.notices) ? data.notices : [];
+                if (notices.length > 0) {
+                    alert(notices.join('\n\n'));
+                }
+            }
             setExpandedModelRole(null);
             await loadModelRoles();
         } catch (e) {

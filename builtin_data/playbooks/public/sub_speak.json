@@ -25,18 +25,8 @@
           "text": "speak_content"
         }
       ],
-      "next": "process_body",
+      "next": null,
       "conditional_next": null
-    },
-    {
-      "id": "process_body",
-      "type": "tool",
-      "action": "control_body",
-      "args_input": {
-        "message": "speak_content"
-      },
-      "output_key": null,
-      "next": null
     }
   ],
   "start_node": "compose"

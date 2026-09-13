@@ -69,9 +69,9 @@ voice-tts アドオンは旧仕様の前提に立ち、`expansion_data/saiverse-
 
 理由は (1) 今すぐ必要な仕組みではない、(2) アドオン側で書けば 1〜2 行で済む、(3) 宣言型にすると `client_actions` と同様の評価器が本体に必要になり Phase 1 のスコープを膨らませる、の 3 点。
 
-### 7. 既存の `notify_unity_speak` は据え置き
+### 7. (2026-09-11 に失効) 既存の `notify_unity_speak` は据え置き
 
-Unity Gateway 通知も本来この hook 機構で表現できる (unity-gateway アドオン化) が、今回はスコープ外。`emit_speak` / `emit_say` 内で従来通り直接呼ぶ。将来 Unity Gateway をアドオン化する際にこの機構へ移行する。
+当初の設計では、Unity Gateway への発話通知 (`notify_unity_speak`) は `emit_speak` / `emit_say` の中から従来どおり直接呼ぶ形で据え置き、将来 Unity Gateway をアドオンとして切り出すときにこの hook 機構へ移す予定だった。Unity Gateway (`unity_gateway/`) は 2026-09-11 に削除し、`notify_unity_speak` もそのとき一緒に削除した。そのため、この hook 機構への移行は必要なくなった。
 
 ## 設計
 
@@ -176,7 +176,7 @@ def load_addon_server_hooks() -> None:
 `sea/runtime_emitters.py` の各メソッド末尾 (Building history 記録と `set_active_message_id` の後) に dispatch を追加:
 
 ```python
-# emit_speak の末尾 (現状の notify_unity_speak の前後)
+# emit_speak の末尾 (設計した時点では notify_unity_speak の前後。notify_unity_speak は 2026-09-11 に削除した)
 if record_history and msg_id:
     from saiverse.addon_hooks import dispatch_hook
     from saiverse.content_tags import strip_in_heart
@@ -286,7 +286,7 @@ Phase 1 のスコープを絞るためアドオン側責務とする。実装が
 
 - `requires_enabled_param` 等の宣言型フィルタ追加
 - 他のイベント追加: `tool_call_finished`, `pulse_completed`, `persona_moved` 等
-- Unity Gateway を unity-gateway アドオンとして切り出し、`notify_unity_speak` を本機構に移行
+- Unity Gateway をアドオンとして切り出して `notify_unity_speak` を本機構に移す案は、2026-09-11 に Unity Gateway と `notify_unity_speak` を削除したので不要になった
 - ハンドラ実行のメトリクス収集 (どのハンドラが何 ms かかっているか)
 
 ## 検証観点

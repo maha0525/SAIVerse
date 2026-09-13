@@ -13,9 +13,11 @@ import {
     Video,
     Anchor,
     Activity,
+    Plus,
     X,
 } from 'lucide-react';
 import ItemModal from './ItemModal';
+import ItemCreateModal from './ItemCreateModal';
 import PersonaMenu from './PersonaMenu';
 import ModalOverlay from './common/ModalOverlay';
 import fixtureStyles from './FixtureModal.module.css';
@@ -92,6 +94,7 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger, currentB
     const [showSettings, setShowSettings] = useState(false);
     const [showInventory, setShowInventory] = useState(false);
     const [showBuildingSettings, setShowBuildingSettings] = useState(false);
+    const [showItemCreate, setShowItemCreate] = useState(false);
 
     // Keep track of which persona is active for modals
     // When opening a modal, we use selectedPersona's ID.
@@ -168,6 +171,7 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger, currentB
         setShowSettings(false);
         setShowInventory(false);
         setShowBuildingSettings(false);
+        setShowItemCreate(false);
     }, [details?.id]);
 
     // Polling for real-time updates when sidebar is open
@@ -377,6 +381,20 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger, currentB
                         <div className={styles.section}>
                             <h3 className={styles.heading}>
                                 <FileText size={16} /> アイテム ({details.items.length})
+                                {/* この部屋にアイテムを作る一般経路。ワールドエディタを開かずに
+                                    今いる部屋へ置ける (docs/issues/bag_item_has_no_creation_path.md)。
+                                    id が "unknown" のときは Building を特定できていない
+                                    (/api/info/details のフォールバック) ので出さない。 */}
+                                {details.id && details.id !== 'unknown' && (
+                                    <button
+                                        className={styles.addItemBtn}
+                                        onClick={() => setShowItemCreate(true)}
+                                        title="この部屋にアイテムを作る"
+                                        aria-label="この部屋にアイテムを作る"
+                                    >
+                                        <Plus size={16} />
+                                    </button>
+                                )}
                             </h3>
                             <div className={styles.grid}>
                                 {details.items.length > 0 ? (
@@ -476,10 +494,13 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger, currentB
                     isOpen={!!selectedItem}
                     onClose={() => setSelectedItem(null)}
                     item={selectedItem}
+                    currentBuildingId={details?.id ?? currentBuildingId ?? null}
                     onItemUpdated={() => {
                         fetchDetails();
                         setSelectedItem(null);
                     }}
+                    // まとめ収納のように操作を続ける経路。部屋の一覧だけ更新し、モーダルは開いたままにする。
+                    onWorldChanged={() => fetchDetails()}
                 />
 
                 {selectedFixture && (
@@ -535,6 +556,17 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger, currentB
                             personaId={activeModalPersonaId}
                         />
                     </>
+                )}
+
+                {/* アイテム作成 (この部屋へ置く) */}
+                {details && (
+                    <ItemCreateModal
+                        isOpen={showItemCreate}
+                        onClose={() => setShowItemCreate(false)}
+                        buildingId={details.id}
+                        buildingName={details.name}
+                        onCreated={() => fetchDetails()}
+                    />
                 )}
 
                 {/* Building Settings Modal */}

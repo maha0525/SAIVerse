@@ -244,7 +244,6 @@ def test_lg_say_node_persists_auto_recall_into_metadata() -> None:
     manager.occupants = {"b1": ["pid"]}
     manager.user_presence_status = "online"
     manager.gateway_handle_ai_replies = Mock()
-    manager.unity_gateway = None
 
     playbook = SimpleNamespace(name="pb")
     node_def = SimpleNamespace(id="say", metadata_key=None)
@@ -268,7 +267,6 @@ def test_emit_speak_payload_compatibility() -> None:
         occupants={"b1": ["pid", "npc-2"]},
         user_presence_status="online",
         gateway_handle_ai_replies=Mock(),
-        unity_gateway=None,
         item_service=None,
     )
     runtime = SEARuntime(manager)
@@ -293,7 +291,6 @@ def test_emit_say_payload_compatibility() -> None:
         occupants={"b1": ["pid", "npc-2"]},
         user_presence_status="away",
         gateway_handle_ai_replies=Mock(),
-        unity_gateway=None,
     )
     runtime = SEARuntime(manager)
     history_manager = SimpleNamespace(add_to_building_only=Mock())

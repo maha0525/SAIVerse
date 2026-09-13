@@ -378,7 +378,7 @@ graph TD
 
 ### Addon（拡張パッケージ）
 
-Tools / Playbooks / Phenomena / MCP サーバー / ペルソナフックを束ねて配布・導入・管理する単位。`addon.json`（manifest v2）で宣言し、永続データは `~/.saiverse/user_data/addon_data/<addon_id>/` に置く。導入は審査済みレジストリ経由のワンタッチ UI または手動 git clone。既存アドオン（Elyth / voice-tts / stack-chan / X / ComfyUI ローカル画像生成）は v2 化済み。**カタログ機構は Phase 1〜4 実装済**。ローカル画像生成 (`generate_image_local`) は 2026-08-01 に builtin からアドオン (saiverse-comfyui-addon) へ切り出された — ComfyUI・生成モデルの別途導入が前提の機能を builtin に置かないため。
+Tools / Playbooks / Phenomena / MCP サーバー / ペルソナフックを束ねて配布・導入・管理する単位。`addon.json`（manifest v2）で宣言し、永続データは `~/.saiverse/user_data/addon_data/<addon_id>/` に置く。導入は審査済みレジストリ経由のワンタッチ UI または手動 git clone。既存アドオンのうち Elyth / stack-chan / X / ComfyUI ローカル画像生成は v2 化済みで、voice-tts は未着手（`docs/intent/addon_catalog_management.md` の Phase 4-E）。**カタログ機構は Phase 1〜4 実装済**（Phase 4 のうち、voice-tts を扱う 4-E だけが未着手）。ローカル画像生成 (`generate_image_local`) は 2026-08-01 に builtin からアドオン (saiverse-comfyui-addon) へ切り出された — ComfyUI・生成モデルの別途導入が前提の機能を builtin に置かないため。
 
 ### MCP（外部ツールサーバー）
 
@@ -463,6 +463,7 @@ graph TD
 | **ライフビュー・できごと UI・タスク管理・ライフ設定・習慣テンプレートの画面** | **v0.3 では隠す**（2026-08-22、v3 §11「運転 UI は隠す」）。自律行動の**運転**を v0.3 のリリース要件から外したので、動いていない運転の状態を UI に出さない（根拠 = v1→v2→v2.5 の三世代連続で「動かすまで見えない病理」が出た帰納。運転の初回実装が正しいことにリリースを賭けない）。フロントは LifeView / EventsTimeline / EventsModal / TasksModal / LifeSettingsModal / TimetableTemplateModal / PersonaProfileModal と `/events` ページを削除し、対応するルート（`activity` / `autonomy` / `autonomous` / `life-settings` / `timetable-template` / `tasks` / `day-plan` / `/api/episodes`）も削除。**データと記憶の形は v0.3 に入っている**（v3 §11）— 隠したのは運転席だけ。作り直しは v0.4 の「暮らしの窓」（v3 §9-9） |
 | **Fixture** | `observer.md` で構想のみ。テーブル未実装 |
 | **BuildingToolLink** | `BuildingToolLink` テーブルは実在するが数ヶ月触られておらず未使用。ツールがペルソナに届く経路は Spell（`spell=True`）と Playbook の TOOL ノードで、この紐付けテーブルではない（→ `stackchan_vessel.md` v0.5 でも「機能してない可能性」と記録） |
+| **Unity Gateway（`unity_gateway/`）と Unity 向けの身体制御ツール `control_body`** | **撤去**（2026-09-11、[issue](../issues/archive/unity_gateway_removal.md)）。Unity で作った 3D クライアントとつなぐ WebSocket サーバーで、SAIVerse を起動すると既定でポート 8765 が全ネットワークインターフェースに向けて認証なしで開いていた。繋いだ相手には全ペルソナの発言が `<in_heart>` の中身ごと送られ、ペルソナのプロンプトへ好きな「空間情報」を差し込めた。チャット送信のメッセージを受けた処理は存在しないメソッドを呼んでエラーになっており、残っていた本番ログの 129 セッションに接続は一度も無かった。Unity は [仮想身体 Godot](../intent/virtual_embodiment_godot.md) の計画から既に外れていた。サーバー、発言を送る処理、リアルタイム情報の空間情報、`control_body` ツールと会話の playbook 4 本の該当ノード、`body_control.txt` を削除した。3D の仮想身体の計画は Godot vessel アドオンで進めているが、削除した機能をそのまま引き継ぐものではない。旧設計書は [docs/old/unity-gateway.md](../old/unity-gateway.md) |
 
 ---
 

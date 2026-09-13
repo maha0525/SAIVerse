@@ -8,6 +8,7 @@ from llm_clients.exceptions import LLMError
 from saiverse.logging_config import log_sea_trace
 from sea.message_stamp import clear_call_tokens, clear_presented_message_ids
 from sea.runtime_state import effective_auto_mode, set_playbook_var
+from sea.runtime_utils import event_building_id
 
 LOGGER = logging.getLogger(__name__)
 
@@ -47,17 +48,17 @@ def lg_tool_call_node(runtime: Any, node_def: Any, persona: Any, playbook: Any, 
         # アドオン由来のツールは <addon>__<name> キーで登録されるため、
         # 素名参照を一意なら名前空間キーへ解決する。
         tool_func = TOOL_REGISTRY.get(canonicalize_tool_name(tool_name))
-        if tool_func is None:
-            error_msg = f"[sea][tool_call] Tool '{tool_name}' not found in registry"
-            LOGGER.error(error_msg)
-            state["last"] = error_msg
-            if output_key:
-                set_playbook_var(state, output_key, error_msg, where=f"node '{node_id}' output_key")
-            return state
 
         persona_obj = state.get("_persona_obj") or persona
         persona_id = getattr(persona_obj, "persona_id", "unknown")
         try:
+            if tool_func is None:
+                # 未登録のツール名も、呼び出しの例外と同じ except へ送る。早期 return で
+                # state["last"] だけを書くと、関数呼び出しの応答 (role="tool") が会話に
+                # 足されず、assistant の tool_calls に対応する返事の無いまま後続の LLM
+                # ノードへ渡る (プロバイダが拒否しうる)。PulseContext にも残らない。
+                # runtime_engine.py の lg_tool_node と同じ扱い。
+                raise LookupError(f"Tool '{tool_name}' not found in registry")
             persona_dir = getattr(persona_obj, "persona_log_path", None)
             persona_dir = persona_dir.parent if persona_dir else Path.cwd()
             manager_ref = getattr(persona_obj, "manager_ref", None)
@@ -91,7 +92,17 @@ def lg_tool_call_node(runtime: Any, node_def: Any, persona: Any, playbook: Any, 
                 if isinstance(_at, list):
                     _at.append({"action": "tool_call", "name": tool_name, "playbook": pb_display})
                 if event_callback:
-                    event_callback({"type": "activity", "action": "tool_call", "name": tool_name, "playbook": pb_display, "status": "completed", "persona_id": getattr(persona, "persona_id", None), "persona_name": getattr(persona, "persona_name", None), "pulse_id": state.get("_pulse_id")})
+                    # building_id = 発火時点の部屋。名乗らないと、別の部屋で
+                    # 進んでいる Beat の活動記録が閲覧中の部屋の吹き出しに混ざる。
+                    # 名乗りと部屋は同じ persona_obj から引く — これはツールを
+                    # 実際に走らせた本人 (上の persona_context と同じ) で、
+                    # 「誰の吹き出しか」と「その人がいまいる部屋」が一致する。
+                    # state["_persona_obj"] を書くのは compile_with_langgraph の
+                    # 1 箇所だけで、そこはノードを作るときと同じ persona を入れる
+                    # (sea/runtime_graph.py の initial_state)。置かない経路
+                    # (sea/work_session.py) では or で persona に倒れるので、
+                    # 二つが別物になることはない。
+                    event_callback({"type": "activity", "action": "tool_call", "name": tool_name, "playbook": pb_display, "status": "completed", "persona_id": getattr(persona_obj, "persona_id", None), "persona_name": getattr(persona_obj, "persona_name", None), "pulse_id": state.get("_pulse_id"), "building_id": event_building_id(runtime, persona_obj)})
             state["last"] = result_str
             if output_key:
                 set_playbook_var(state, output_key, result, where=f"node '{node_id}' output_key")
@@ -434,7 +445,7 @@ def lg_stelis_end_node(runtime: Any, node_def: Any, persona: Any, playbook: Any,
         if not stelis_info:
             LOGGER.warning("[stelis] Current thread %s is not a Stelis thread", current_thread_id)
             return state
-        chronicle_summary = runtime._generate_stelis_chronicle(persona, current_thread_id, stelis_info.chronicle_prompt) if generate_chronicle else None
+        chronicle_summary = runtime._generate_stelis_chronicle(persona, current_thread_id, stelis_info.chronicle_prompt, state=state) if generate_chronicle else None
         memory_adapter.end_stelis_thread(thread_id=current_thread_id, status="completed", chronicle_summary=chronicle_summary)
         # S4: start が push した親を pop で復元する。pop の記録値が state の
         # 親と食い違ったら WARN (入れ子の pop 漏れの兆候)。push を経ていない

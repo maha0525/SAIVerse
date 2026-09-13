@@ -1,7 +1,7 @@
 # 部屋のアイテムに個数の上限が無く、部屋の様子が数万字に膨らむ
 
 **起票**: 2026-09-07 (まはーの実機所見 ⑤)
-**状態**: 設計待ち — **v0.3.9 のスコープ外と裁定 (2026-09-07)**。片付け機能とセットで、新しい feature ブランチで腰を据えて取り組む
+**状態**: 完了 — 2026-09-11 に intent を起草し、整合性検査を経て全論点の裁定が確定 ([room_item_display_cap.md](../../intent/room_item_display_cap.md) が設計の正)。feature/room-item-cap ブランチで片付けの道具とセットで実装し、2026-09-13 まはーの実機検証で合格 (アイフィさんの部屋の縮みを実測、既提示の文脈は書き換えない挙動も確認)
 
 ## 現象
 
@@ -30,4 +30,4 @@
 
 ## 関連
 
-- [room_state_packages.md](../intent/room_state_packages.md) — 束の組成 (`build_room_bundle`) が上限の実装点になる見込み
+- [room_state_packages.md](../../intent/room_state_packages.md) — 束の組成 (`build_room_bundle`) が上限の実装点になる見込み

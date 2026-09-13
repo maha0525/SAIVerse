@@ -252,6 +252,19 @@
     justify-content: flex-start;
 }
 
+/* 同じペルソナの発言が続く 2 個目以降の吹き出し。顔と名前を出さない分、
+   前の吹き出しと地続きに見えるように上の間隔と上の余白だけを詰める
+   (docs/issues/pulse_beats_merge_into_single_record.md 実機 1)。
+   chatArea の gap が 1rem なので、負のマージンでそこから引く。
+   色は一切触らないので、ライトとダークの両方でそのまま成立する。 */
+.continuedBubble {
+    margin-top: -0.7rem;
+}
+
+.continuedBubble .card {
+    padding-top: 0.9rem;
+}
+
 /* System notices — world events (item/document/move), warnings, info.
    These are NOT AI utterances, so they drop the avatar + author name + heavy
    card chrome and render author-less, compact and centered. The slight

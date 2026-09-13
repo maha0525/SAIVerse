@@ -789,7 +789,7 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                                     </label>
                                 </div>
                                 <div className={styles.description}>
-                                    発言の直前に現在時刻・前回発言時刻・空間情報などの動的コンテキストを提供します。無効にすると、これらをこのペルソナには一切送りません（時刻を気にして会話が成立しなくなる場合などに）。
+                                    発言の直前に現在時刻・前回発言時刻などの動的コンテキストを提供します。無効にすると、これらをこのペルソナには一切送りません（時刻を気にして会話が成立しなくなる場合などに）。
                                 </div>
                             </div>
 

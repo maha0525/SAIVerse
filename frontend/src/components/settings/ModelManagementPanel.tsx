@@ -77,6 +77,12 @@ export default function ModelManagementPanel() {
                 alert(`削除に失敗しました: ${text}`);
                 return;
             }
+            // 削除で決め直したときに、新しい設定に切り替えられなかったペルソナの知らせ
+            const data = await res.json().catch(() => null);
+            const notices: string[] = Array.isArray(data?.notices) ? data.notices : [];
+            if (notices.length > 0) {
+                alert(notices.join('\n\n'));
+            }
             loadModels();
         } catch (e) {
             alert(`削除に失敗しました: ${e}`);

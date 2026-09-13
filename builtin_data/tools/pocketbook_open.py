@@ -20,6 +20,14 @@
 省略の単位は件数だけで、省略したときは必ず「何件が、どこから先に、どうやって
 読めるか」を同じ返答に載せる (既定 30 件、めくる鍵は日付)。
 
+めくり方は二つある (同時には使えない):
+
+- ``before`` の日付めくり — 元からの読み口。その日より前を取り直して出す。
+- ``page`` のページ番号 — 2026-09-11 追加 (docs/intent/room_item_display_cap.md
+  設計 3)。**ページの切れ目の規則は日付の境目のまま** (§13.2.1 の裁定) で、その
+  規則で全体を頭から区切ってできたページの列に新しい順の番号を振っただけ。
+  メモが増えると同じ番号が別の中身を指すのは仕様で、固定の索引ではない。
+
 見せるのは**開いているアクティビティ**とその配下のメモだけ (ユーザー向け読み口の
 既定と同じ)。閉じたアクティビティを混ぜると、目次に無い名前のメモが「最近のページ」
 に出て食い違う。v0.3 に閉じる口はまだ無い (`close_activity` の呼び手はテストだけ)
@@ -37,6 +45,14 @@ import re
 import sqlite3
 from typing import Any, Dict, List, Optional, Tuple
 
+from builtin_data.tools._paging_common import (
+    MAX_PAGE_SPAN,
+    PageRange,
+    format_missing_page,
+    format_page_guide,
+    parse_page_arg,
+    select_pages,
+)
 from tools.context import (
     get_active_manager,
     get_active_persona_id,
@@ -188,6 +204,27 @@ def _page(
     return (page, remaining, pivot)
 
 
+def _chunk_pages(
+    entries: List[Tuple[Any, str]], limit: int,
+) -> List[List[Tuple[Any, str]]]:
+    """新しい順の一覧を、現行の切れ目の規則で頭から繰り返し区切る。
+
+    切れ目は :func:`_page` と同じ**日付の境目** (§13.2.1 の裁定 — 変えない)。
+    その規則でできたページの列に、新しい順に 1 から番号が振られる。メモが
+    増えると同じ番号が別の中身を指すのは仕様で、固定の索引ではない
+    (docs/intent/room_item_display_cap.md 設計 3)。
+    """
+    pages: List[List[Tuple[Any, str]]] = []
+    rest = list(entries)
+    while rest:
+        page, _remaining, _pivot = _page(rest, None, limit)
+        if not page:
+            break
+        pages.append(page)
+        rest = rest[len(page):]
+    return pages
+
+
 def _memo_line(memo: Any, activity_name: Optional[str]) -> str:
     """メモ 1 件の一行。本文は切らない (本人の言葉)。
 
@@ -208,6 +245,54 @@ def _more_line(remaining: int, pivot: str) -> str:
         f"さらに {remaining} 件、{pivot} より前にあります。"
         f"続きは before='{pivot}' で開けます。"
     )
+
+
+def _render_memo_lines(
+    entries: List[Tuple[Any, str]],
+    before: Optional[str],
+    limit: int,
+    page_range: PageRange,
+    *,
+    with_activity_name: bool,
+) -> List[str]:
+    """メモ欄の本文を組む (呼び手は ``entries`` が空でないことを確かめてから呼ぶ)。
+
+    めくり方は二つあり、同時には使えない (引数の検査で弾く):
+
+    - ``before`` の日付めくり — 現行のまま。その日より前だけを取り直して
+      1 ページ出す。ページ番号は付けない (日付で絞った先は番号が振り直さ
+      れるので、二つの数え方が混ざる)。
+    - ``page`` のページ番号 — 全体を切れ目の規則で区切った列の何枚目かで開く。
+      全体の案内行を添え、続きがあれば現行の日付めくりの案内も**併記**する。
+    """
+    if before is not None:
+        page, remaining, pivot = _page(entries, before, limit)
+        if not page:
+            return [f"{before} より前のメモはありません。"]
+        lines = [
+            _memo_line(m, name if with_activity_name else None) for m, name in page
+        ]
+        if remaining and pivot:
+            lines.append(_more_line(remaining, pivot))
+        return lines
+
+    pages = _chunk_pages(entries, limit)
+    selected = select_pages(pages, page_range)
+    if not selected:
+        return [format_missing_page(pages, page_range)]
+
+    lines = [format_page_guide(pages, page_range, unit="件")]
+    shown = 0
+    for chunk in selected:
+        for memo, name in chunk:
+            lines.append(_memo_line(memo, name if with_activity_name else None))
+        shown += len(chunk)
+    consumed = sum(len(page) for page in pages[:page_range.start - 1]) + shown
+    remaining = len(entries) - consumed
+    if remaining > 0:
+        pivot = entries[consumed - 1][0].effective_date
+        lines.append(_more_line(remaining, pivot))
+    return lines
 
 
 def _promise_line(task: Dict[str, Any]) -> str:
@@ -256,6 +341,7 @@ def pocketbook_open(
     activity: Optional[str] = None,
     before: Optional[str] = None,
     limit: int = DEFAULT_LIMIT,
+    page: Optional[str] = None,
 ) -> str:
     """自分の手帳を開いて読む (読み取り専用)。"""
     persona_id = get_active_persona_id()
@@ -268,6 +354,14 @@ def pocketbook_open(
     page_limit, error = _parse_limit_arg(limit)
     if error:
         return f"手帳を開けませんでした: {error}"
+    page_range, error = parse_page_arg(page)
+    if error:
+        return f"手帳を開けませんでした: {error}"
+    if before_date is not None and page is not None and str(page).strip():
+        return (
+            "手帳を開けませんでした: page と before は同時に指定できません。"
+            "ページ番号でめくるか、日付でめくるか、どちらかにしてください。"
+        )
 
     with open_persona_memory() as adapter:
         if not adapter.is_ready():
@@ -277,12 +371,13 @@ def pocketbook_open(
     if activity is not None and str(activity).strip():
         return _render_single_activity(
             str(activity).strip(), activities, memos_by_activity,
-            before_date, page_limit,
+            before_date, page_limit, page_range,
         )
 
     promises = _load_promises(persona_id, get_active_manager())
     return _render_whole_book(
         activities, memos_by_activity, promises, before_date, page_limit,
+        page_range,
     )
 
 
@@ -292,6 +387,7 @@ def _render_single_activity(
     memos_by_activity: Dict[int, List[Any]],
     before: Optional[str],
     limit: int,
+    page_range: PageRange,
 ) -> str:
     target = next((a for a in activities if a.name == name), None)
     if target is None:
@@ -309,13 +405,11 @@ def _render_single_activity(
     if not entries:
         lines.append("このページにはまだ何も書いていません。")
         return "\n".join(lines)
-    page, remaining, pivot = _page(entries, before, limit)
-    if not page:
-        lines.append(f"{before} より前のメモはありません。")
-        return "\n".join(lines)
-    lines.extend(_memo_line(m, None) for m, _ in page)
-    if remaining and pivot:
-        lines.append(_more_line(remaining, pivot))
+    lines.extend(
+        _render_memo_lines(
+            entries, before, limit, page_range, with_activity_name=False,
+        )
+    )
     return "\n".join(lines)
 
 
@@ -325,6 +419,7 @@ def _render_whole_book(
     promises: Optional[List[Dict[str, Any]]],
     before: Optional[str],
     limit: int,
+    page_range: PageRange,
 ) -> str:
     lines: List[str] = ["【手帳】"]
 
@@ -356,16 +451,14 @@ def _render_whole_book(
     ])
     lines.append("")
     lines.append("■ 最近のページ（メモ欄）")
-    page, remaining, pivot = _page(entries, before, limit)
-    if not page:
-        if before is not None:
-            lines.append(f"{before} より前のメモはありません。")
-        else:
-            lines.append("手帳にはまだ何も書いていません。")
+    if not entries:
+        lines.append("手帳にはまだ何も書いていません。")
     else:
-        lines.extend(_memo_line(m, name) for m, name in page)
-        if remaining and pivot:
-            lines.append(_more_line(remaining, pivot))
+        lines.extend(
+            _render_memo_lines(
+                entries, before, limit, page_range, with_activity_name=True,
+            )
+        )
 
     # 3) 約束の欄。
     lines.append("")
@@ -383,9 +476,13 @@ def schema() -> ToolSchema:
             "場所で、手帳は自分のやりたいこと・やったこと・約束を書きとめる場所です。"
             "手帳は開いたときしか中身が見えません — 前に何を書いたか思い出したい"
             "ときは、このスペルで開いてください。"
-            "引数なしで開くと、メモ欄の目次と最近のメモ、そして開いている約束が"
-            "出ます。activity を指定するとそのアクティビティのメモだけ、"
-            "before に日付を指定するとその日より前のメモをめくれます。"
+            "引数なしで開くと、メモ欄の目次と最近のメモ（1 ページ目）、そして"
+            "開いている約束が出ます。activity を指定するとそのアクティビティの"
+            "メモだけが出ます。"
+            "めくり方は二つあり、page='2' や page='1-3' でページ番号でめくるか"
+            f"（一度に開けるのは {MAX_PAGE_SPAN} ページまで）、"
+            "before に日付を指定してその日より前をめくるかです"
+            "（page と before は同時には使えません）。"
         ),
         parameters={
             "type": "object",
@@ -409,6 +506,14 @@ def schema() -> ToolSchema:
                     "description": (
                         f"一度に出すメモの件数（既定 {DEFAULT_LIMIT}）。"
                         "本文は切らず、件数だけで区切ります"
+                    ),
+                },
+                "page": {
+                    "type": "string",
+                    "description": (
+                        "開くページ。'2' のような番号か '1-3' のような範囲"
+                        f"（一度に {MAX_PAGE_SPAN} ページまで）。省略すると"
+                        "1 ページ目。before とは同時に使えません"
                     ),
                 },
             },

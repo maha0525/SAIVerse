@@ -52,7 +52,19 @@ def resolve_memory_weave_model(persona: Any) -> Tuple[str, str]:
     if model_name:
         return str(model_name), SOURCE_PERSONA
 
-    env_model = os.getenv("MEMORY_WEAVE_MODEL")
+    return resolve_global_memory_weave_model()
+
+
+def resolve_global_memory_weave_model() -> Tuple[str, str]:
+    """グローバル設定の Memory Weave モデルを ``(model_name, source)`` で返す。
+
+    環境変数 MEMORY_WEAVE_MODEL が未設定・空・空白だけなら組み込みの既定モデル
+    (空文字をモデル名として使わない。docs/intent/persona_model_selection.md
+    決まったこと 4)。ペルソナの値を DB 行から自分で読む呼び出し元 (API ルートなど) も、
+    グローバル設定の段はここを通す — ``os.getenv(key, default)`` は空で保存された
+    値に対して空文字を返し、既定モデルに落ちない。
+    """
+    env_model = (os.getenv("MEMORY_WEAVE_MODEL") or "").strip()
     if env_model:
         return env_model, SOURCE_ENV
 

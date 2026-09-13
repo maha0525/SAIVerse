@@ -59,6 +59,16 @@ class ProviderInfo(BaseModel):
     default_max_image_bytes: Optional[int] = None
 
 
+class ProviderSaveResponse(ProviderInfo):
+    """Provider info returned right after a create or update.
+
+    ``notices``: 保存で全員の話すモデルを決め直したときに、新しい設定に切り替えられ
+    なかったペルソナの知らせ (無ければ空。docs/intent/persona_model_selection.md
+    決まったこと 2・11)。GET と一覧の応答は ProviderInfo のままで、notices を持たない。
+    """
+    notices: list[str] = []
+
+
 class ProviderCreateRequest(BaseModel):
     id: str
     display_name: str
@@ -126,6 +136,13 @@ def _to_provider_info(pid: str, cfg: dict) -> ProviderInfo:
     )
 
 
+def _to_provider_save_response(pid: str, cfg: dict, reapplied: Any) -> ProviderSaveResponse:
+    return ProviderSaveResponse(
+        **_to_provider_info(pid, cfg).model_dump(),
+        notices=reapplied.notices(),
+    )
+
+
 @router.get("", response_model=list[ProviderInfo])
 def list_providers():
     """List all providers (builtin + user_data)."""
@@ -143,12 +160,15 @@ def get_provider(provider_id: str):
     return _to_provider_info(provider_id, cfg)
 
 
-@router.post("", response_model=ProviderInfo, status_code=201)
+@router.post("", response_model=ProviderSaveResponse, status_code=201)
 def create_provider(req: ProviderCreateRequest):
     """Create a new user_data provider.
 
     UI is restricted to protocols in VALID_UI_PROTOCOLS. Other protocols
     can only be added by manually placing files under builtin_data/providers/.
+
+    The response carries ``notices`` for personas that could not be switched
+    to the new settings (see ProviderSaveResponse).
     """
     if req.protocol not in VALID_UI_PROTOCOLS:
         raise HTTPException(
@@ -170,20 +190,23 @@ def create_provider(req: ProviderCreateRequest):
         validate_provider_config(
             req.id, {**payload, "source": provider_configs.SOURCE_USER_DATA}
         )
-        provider_configs.save_provider(req.id, payload)
+        reapplied = provider_configs.save_provider(req.id, payload)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     cfg = provider_configs.get_provider(req.id)
-    return _to_provider_info(req.id, cfg)
+    return _to_provider_save_response(req.id, cfg, reapplied)
 
 
-@router.put("/{provider_id}", response_model=ProviderInfo)
+@router.put("/{provider_id}", response_model=ProviderSaveResponse)
 def update_provider(provider_id: str, req: ProviderUpdateRequest):
     """Update a provider.
 
     Builtin providers automatically get a user_data override on update
     (since save_provider always writes to user_data). The override then
     takes priority on next reload.
+
+    The response carries ``notices`` for personas that could not be switched
+    to the new settings (see ProviderSaveResponse).
     """
     existing = provider_configs.get_provider(provider_id)
     if existing is None:
@@ -205,28 +228,32 @@ def update_provider(provider_id: str, req: ProviderUpdateRequest):
 
     try:
         validate_provider_config(provider_id, merged)
-        provider_configs.save_provider(provider_id, merged)
+        reapplied = provider_configs.save_provider(provider_id, merged)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
     cfg = provider_configs.get_provider(provider_id)
-    return _to_provider_info(provider_id, cfg)
+    return _to_provider_save_response(provider_id, cfg, reapplied)
 
 
-@router.delete("/{provider_id}", status_code=204)
+@router.delete("/{provider_id}")
 def delete_provider(provider_id: str):
     """Delete a user_data provider.
 
     Builtin-only providers cannot be deleted (returns 403). Deleting a
     user_data override of a builtin restores the builtin on next reload.
+
+    Returns 200 with ``{"notices": [...]}``: personas that could not be
+    switched when the deletion re-decided everyone's speaking model (empty
+    when there are none).
     """
     try:
-        provider_configs.delete_provider(provider_id)
+        reapplied = provider_configs.delete_provider(provider_id)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail=f"Provider not found: {provider_id}")
     except ValueError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
-    return None
+    return {"notices": reapplied.notices()}
 
 
 @router.get("/{provider_id}/models", response_model=list[str])
@@ -247,12 +274,16 @@ def reload_providers():
     Models inline their provider's endpoint and credential at load time, so
     they are re-resolved here too; otherwise they would keep pointing at the
     definition this call just replaced.
+
+    No screen calls this route, so it keeps returning the provider list and
+    does not carry ``notices``. Personas that could not be switched by the
+    reload show up, by name, in the model-setting warnings of the page
+    (``current_model_setting_warnings`` in manager/initialization.py).
     """
     # 冷えたウィンドウの見張りの指紋を捨てるのは provider_configs.reload_configs()
     # の側 (プロバイダ定義の書き換えの入口が全部そこを通るため)。ここで重ねて
     # 呼ばない。
-    provider_configs.reload_configs()
-    provider_configs.reload_models_after_provider_change()
+    provider_configs.reload_providers_and_models()
     return [
         _to_provider_info(pid, cfg)
         for pid, cfg in provider_configs.PROVIDER_CONFIGS.items()

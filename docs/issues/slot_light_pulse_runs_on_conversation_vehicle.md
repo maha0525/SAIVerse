@@ -23,7 +23,7 @@
 
 ### ② user_conversation 型の特殊機構が健在
 
-Playbook 自体は素朴 (main_line_response + control_body の 2 ノード) だが、**コード側のハンドラに特殊機能が残っている**: `track_activate` スペルの適用で `on_track_activated` (user-conv-handler) が (a) 新しい会話 Pulse を起動、(b) 会話エピソードを開き直し (観測では episode:8)、(c) `wait_response` 30 分タイムアウトを再装填。ペルソナがスペル一つで「会話中」状態 (コマ繰り下げの原因) を自分で作れる。
+Playbook 自体は素朴 (観測した時点では main_line_response + control_body の 2 ノードで、control_body のノードは 2026-09-11 に Unity Gateway と一緒に削除した) だが、**コード側のハンドラに特殊機能が残っている**: `track_activate` スペルの適用で `on_track_activated` (user-conv-handler) が (a) 新しい会話 Pulse を起動、(b) 会話エピソードを開き直し (観測では episode:8)、(c) `wait_response` 30 分タイムアウトを再装填。ペルソナがスペル一つで「会話中」状態 (コマ繰り下げの原因) を自分で作れる。
 
 ### ③ 中断復帰の再配達が完走済み Pulse にも発火した疑い
 

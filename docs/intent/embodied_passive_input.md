@@ -28,7 +28,8 @@
 現在の section:
 1. 現在時刻 (persona.timezone)
 2. 前回 AI 発言からの経過
-3. 空間情報 (unity_gateway 接続時)
+
+以前は 3 番目に空間情報があった。`unity_gateway` が起動していて、Unity 側から値が送られてきたペルソナにだけ差し込まれ、送られた値は接続が切れても SAIVerse を再起動するまで残っていた。2026-09-11 に `unity_gateway` を削除したときに、この section も一緒に削除した。
 
 ここに **環境センサー section** を追加する:
 
@@ -41,7 +42,7 @@
 
 #### 値の取得経路
 
-`unity_gateway` の `spatial_state` と同じパターンで、各 Vessel 種別ごとの gateway が `sensor_state` を保持する:
+各 Vessel 種別ごとの gateway が、センサーの最新値を `sensor_state` としてメモリに保持し、`_build_realtime_context` はその値を読む。2026-09-11 に削除した旧 `unity_gateway` も、空間情報の最新値を `spatial_state` に保持して同じ形をとっていた。Vessel 種別ごとの取得経路は次のとおり:
 
 - **stackchan**: `stackchan-mcp` MCP server が定期的に温湿度・照度を読み、SAIVerse 側で最新値をキャッシュ
   - stackchan-mcp 側に sensor 読み出し endpoint があるか、なければ環境センサー専用の polling tool を SAIVerse 側で叩いてキャッシュする (実装時要調査)

@@ -89,7 +89,7 @@
 
 - **UI**: グローバル設定 > モデル管理 > プロバイダタブ →「新規追加」→ protocol 選択 → base_url / api_key_env 入力 → 接続テスト
 - **手動**: `~/.saiverse/user_data/providers/*.json` に配置（3層優先で builtin を上書き）
-- 反映: `POST /api/providers/reload` または再起動。ただし **起動後に既にそのプロバイダで喋ったペルソナは、作成済みの接続を再起動まで使い続ける**（通常用と軽量用は別々に作られるので、同じペルソナ内で新旧が混ざることもある。[未解決 issue](../issues/provider_change_does_not_reach_live_personas.md)）。接続先や鍵を変えたら再起動するのが確実
+- 反映: 手動で置いたファイルは、`POST /api/providers/reload` を呼ぶか再起動すると読み込まれる。画面からの保存・削除と `POST /api/providers/reload` は、その場で全ペルソナの話すモデルを決め直し、作ってあった接続を捨てる。そのため、すでにそのプロバイダで話したペルソナも、再起動しなくても次の返事から新しい設定で接続する。書いている途中の返事は、始めたときの接続で最後まで書く（[persona_model_selection.md](../intent/persona_model_selection.md) の決まったこと 11）。画面から保存・削除したときに新しい設定へ切り替えられなかったペルソナがいれば、その場で名前つきで知らせる
 
 3層優先順位: `~/.saiverse/user_data/providers/` > `expansion_data/<addon>/providers/` > `builtin_data/providers/`
 

@@ -407,9 +407,13 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
                 return;
             }
             if (!res.ok) {
-                // 失敗: サーバーの実状態へ表示を合わせ直した上でエラーを出す
+                // 失敗: サーバーの実状態へ表示を合わせ直した上でエラーを出す。400 の
+                // detail は、無いモデルの名前と選び直す場所を伝える文面。fetchData は
+                // 最初にエラーを消すので、合わせ直したあとで出す
+                const failure = await res.json().catch(() => null);
+                const detail = typeof failure?.detail === 'string' ? failure.detail : '';
                 await fetchData();
-                setError('モデルの変更に失敗しました');
+                setError(detail || 'モデルの変更に失敗しました');
                 return;
             }
             // Use inline parameters from response (no separate fetch needed)
@@ -428,6 +432,11 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
             // 水位はモデル依存 — モデルが変わったら状態表示を取り直す
             setContextStatus(null);
             setContextStatusReload(n => n + 1);
+            // 新しいモデルに切り替えられなかったペルソナの知らせ
+            const notices: string[] = Array.isArray(data?.notices) ? data.notices : [];
+            if (notices.length > 0) {
+                alert(notices.join('\n\n'));
+            }
 
             // Refetch cache config since it depends on selected model
             const cacheRes = await fetch('/api/config/cache', { signal: controller.signal });
@@ -542,10 +551,15 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
                 alert(`保存に失敗しました: ${await res.text()}`);
                 return;
             }
+            // 保存で決め直したときに、新しい設定に切り替えられなかったペルソナの知らせ
+            const saved = await res.json().catch(() => null);
+            const notices: string[] = Array.isArray(saved?.notices) ? saved.notices : [];
             // Refresh model list so the new model appears in the dropdown
             const modelsRes = await fetch('/api/config/models');
             if (modelsRes.ok) setModels(await modelsRes.json());
-            alert('新しいモデルとして保存しました');
+            alert(notices.length > 0
+                ? `新しいモデルとして保存しました\n\n${notices.join('\n\n')}`
+                : '新しいモデルとして保存しました');
         } catch (e) {
             alert(`保存に失敗しました: ${e}`);
         } finally {
@@ -570,7 +584,12 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
                 alert(`上書き保存に失敗しました: ${await res.text()}`);
                 return;
             }
-            alert('上書き保存しました');
+            // 保存で決め直したときに、新しい設定に切り替えられなかったペルソナの知らせ
+            const saved = await res.json().catch(() => null);
+            const notices: string[] = Array.isArray(saved?.notices) ? saved.notices : [];
+            alert(notices.length > 0
+                ? `上書き保存しました\n\n${notices.join('\n\n')}`
+                : '上書き保存しました');
         } catch (e) {
             alert(`上書き保存に失敗しました: ${e}`);
         } finally {

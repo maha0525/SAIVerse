@@ -26,6 +26,7 @@ saiverse://{global_scheme}/{path}?{params}               # グローバル (下�
 | `persona` | `saiverse://persona/{id}/image` / `saiverse://persona/self/image` | ペルソナのアバター等のリソースパス |
 | `building` | `saiverse://building/{id}/items` | Building 内アイテム一覧 |
 | `building` | `saiverse://building/{id}/history?last=N` | Building 履歴（直近 N 件） |
+| `building` | `saiverse://building/{id}`（サブパス無し） | **画面の導線専用**（2026-09-12〜）。移動イベントの部屋名リンクに使い、チャット UI がクリックで閲覧先をその Building に切り替える。`UriResolver` で解決しても中身は無く、従来どおり `Unknown building path` エラーが返る |
 | `web` | `saiverse://web?url={encoded_url}&max_chars=N` | Web ページ本文（`read_url_content`） |
 
 ## ペルソナスコープ（self の記憶のみ・アクセス制御あり）

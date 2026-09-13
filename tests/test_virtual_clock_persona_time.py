@@ -37,7 +37,6 @@ def _build_realtime_context(persona):
     from sea.runtime import SEARuntime
 
     fake_self = SimpleNamespace(
-        manager=SimpleNamespace(unity_gateway=None),
         _is_realtime_info_enabled_for_persona=lambda p: True,
     )
     return SEARuntime._build_realtime_context(fake_self, persona, "b1", [])

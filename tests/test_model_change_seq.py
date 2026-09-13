@@ -32,6 +32,19 @@ def _reset_seqs(monkeypatch):
     monkeypatch.setattr(config_module, "_model_change_seqs", {})
 
 
+@pytest.fixture(autouse=True)
+def _model_definitions(monkeypatch):
+    """ルートは設定ファイルの無いモデル名を 400 で断る
+    (docs/intent/persona_model_selection.md 決まったこと 6)。ここで選ぶ名前は
+    合成の定義として置く — このファイルが検べるのは世代ガードの順序だけ。"""
+    from saiverse import model_configs
+
+    monkeypatch.setattr(model_configs, "MODEL_CONFIGS", {
+        name: {"model": f"vendor/{name}", "provider": "stub", "context_length": 1000}
+        for name in ("model-a", "model-b", "model-c", "model-x")
+    })
+
+
 def test_newer_seq_applies():
     manager = _fake_manager()
     set_model(UpdateModelRequest(model="model-a", seq=1, client_id="c1"), manager)

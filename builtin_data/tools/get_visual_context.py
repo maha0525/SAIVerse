@@ -21,7 +21,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from sai_memory.room_state import STATE_MARKER_CLOSED, STATE_MARKER_OPEN
+from sai_memory.room_state import (
+    BUNDLE_CAPPED_KEYS,
+    DEFAULT_ROOM_ITEM_DISPLAY_LIMIT,
+    STATE_MARKER_CLOSED,
+    STATE_MARKER_OPEN,
+)
 from tools.context import get_active_persona_id, get_active_manager
 from tools.core import ToolSchema
 
@@ -146,6 +151,57 @@ def _add_video_to_media_list(file_path: str, media_list: List[Dict[str, str]]) -
     })
 
 
+#: 開いた入れ物 (Bag) の中身を一階層あたり何件まで描くか
+#: (docs/intent/room_item_display_cap.md 設計 1、2026-09-11 第三回裁定)。
+#: 部屋の上限とは別勘定の定数 — 開いた入れ物が部屋の上限の抜け道にならない
+#: ようにするための、入れ物側の上限。入れ子の入れ物も各階層で同じ数。
+BAG_CONTENT_DISPLAY_LIMIT = 10
+
+#: 入れ物の中で埋もれた物の一行 (intent 設計 1 の文言)。
+_BAG_CAPPED_NOTICE = (
+    "（この入れ物にはほかに {count} 個のアイテムがありますが、"
+    "埋もれていて見えません）"
+)
+
+
+def _entry_touched_at(entry: Dict[str, Any]) -> float:
+    """アイテム 1 件の「最近触られた」の物差し (二つの時刻の新しい方)。"""
+    return max(
+        _touched_epoch(entry.get("updated_at")),
+        _touched_epoch(entry.get("location_updated_at")),
+    )
+
+
+def _select_recent_bag_contents(
+    contents: List[Dict[str, Any]],
+) -> Tuple[List[Dict[str, Any]], int]:
+    """開いた入れ物の中身を「最近触られた順」の上位 N 件に絞る。
+
+    返りは ``(描く中身, 埋もれた件数)``。軸は部屋の上限と同じ — アイテム自身の
+    更新時刻と置き場所の更新時刻の新しい方の降順、同時刻は ``SHORT_ID`` の降順。
+    **並びは渡された順 (スロット順) のまま** — 選別だけが上限の仕事で、見た目の
+    順番は動かさない (部屋の上限と同じ規律)。
+    """
+    if len(contents) <= BAG_CONTENT_DISPLAY_LIMIT:
+        return list(contents), 0
+
+    def _rank(index: int) -> Tuple[float, int, int, str]:
+        entry = contents[index]
+        short_id = entry.get("short_id")
+        numbered = isinstance(short_id, int) and not isinstance(short_id, bool)
+        return (
+            -_entry_touched_at(entry),
+            0 if numbered else 1,
+            -short_id if numbered else 0,
+            str(entry.get("item_id") or entry.get("name") or ""),
+        )
+
+    ranked = sorted(range(len(contents)), key=_rank)
+    displayed = set(ranked[:BAG_CONTENT_DISPLAY_LIMIT])
+    kept = [contents[i] for i in range(len(contents)) if i in displayed]
+    return kept, len(contents) - len(kept)
+
+
 def _render_bag_contents(
     contents: List[Dict[str, Any]],
     text_parts: List[str],
@@ -153,8 +209,14 @@ def _render_bag_contents(
     manager: Any,
     indent: int = 1,
 ) -> None:
-    """Render bag contents as indented list (all items shown as closed)."""
+    """Render bag contents as indented list (all items shown as closed).
+
+    中身は「最近触られた順」の上位 :data:`BAG_CONTENT_DISPLAY_LIMIT` 件まで。
+    あふれた分は件数の一行で示す (docs/intent/room_item_display_cap.md 設計 1)。
+    入れ子の入れ物もこの関数を再帰で通るので、各階層に同じ上限が掛かる。
+    """
     prefix = "  " * indent
+    contents, buried_count = _select_recent_bag_contents(contents)
     type_labels = {
         "picture": "Image", "document": "Document",
         "object": "Object", "bag": "Bag",
@@ -179,6 +241,9 @@ def _render_bag_contents(
         children = entry.get("_children", [])
         if children and child_type == "bag":
             _render_bag_contents(children, text_parts, media_list, manager, indent + 1)
+
+    if buried_count:
+        text_parts.append(prefix + _BAG_CAPPED_NOTICE.format(count=buried_count))
 
 
 def _format_item_created_at(item: Dict[str, Any]) -> str:
@@ -361,6 +426,11 @@ class _RenderedItem:
     state: Optional[str] = None   # "open" / "closed" / None (Object と不明型)
     lines: List[str] = field(default_factory=list)
     media: List[Dict[str, str]] = field(default_factory=list)
+    #: 「最近触られた」の物差し (POSIX 秒)。アイテム自身の更新時刻と置き場所の
+    #: 更新時刻の**新しい方** — 表示上限の選別だけに使い、束には載せない
+    #: (docs/intent/room_item_display_cap.md 設計 1)。読めない回は -inf =
+    #: 「一番古い」に倒す (埋もれる側 — 時刻不明の物が新着を押し出さない)。
+    touched_at: float = float("-inf")
 
 
 @dataclass
@@ -403,6 +473,9 @@ class _WorldRead:
     inventory: List[_RenderedItem] = field(default_factory=list)
     building_items: List[_RenderedItem] = field(default_factory=list)
     fixtures: List[_RenderedFixture] = field(default_factory=list)
+    #: 部屋の様子に出す建物直下のアイテムの個数の上限 (Building の設定)。
+    #: None = 設定なし = 既定 (:data:`DEFAULT_ROOM_ITEM_DISPLAY_LIMIT`)。
+    item_display_limit: Optional[int] = None
 
 
 def get_visual_context(
@@ -472,6 +545,13 @@ def build_room_bundle(building_id: Optional[str] = None) -> Optional[Dict[str, A
 
     自分の外見とインベントリは含めない (部屋の性質ではなく見る側の持ち物)。
     アクティブなペルソナ / manager が引けない回は None (従来の縮退と同じ)。
+
+    **建物に直接置かれたアイテムは「最近触られた順」の上位だけを載せる**
+    (docs/intent/room_item_display_cap.md 設計 1)。個数は Building の設定
+    (``item_display_limit``)、無ければ既定 10 件。外した物のキーは束の
+    ``capped_keys`` に残り、差分がそれを「見当たらなくなったもの」と言わない
+    ための手掛かりになる (同 設計 2)。物は消えない — 埋もれるのは表示だけで、
+    スペル「埋もれたアイテムを見る」で全部に届く (同 不変条件 1)。
     """
     world = _read_active_world(
         building_id,
@@ -537,6 +617,69 @@ def _sort_key_for_item(entry: _RenderedItem) -> Tuple[int, str]:
     return (1 << 30, ref)
 
 
+def _coerce_display_limit(value: Any) -> Optional[int]:
+    """Building の表示個数の設定を読む (None / 負数 / 数でない値は「設定なし」)。
+
+    保存時に負数は拒否する (api/routes/world.py) が、手で DB を書いた世界や
+    古い記録が入っていても様子の組成は止めない — 設定なし = 既定に倒す。
+    """
+    if value is None:
+        return None
+    try:
+        limit = int(value)
+    except (TypeError, ValueError):
+        LOGGER.warning(
+            "build_room_bundle: ITEM_DISPLAY_LIMIT is not a number (%r); "
+            "falling back to the default limit", value,
+        )
+        return None
+    if limit < 0:
+        LOGGER.warning(
+            "build_room_bundle: ITEM_DISPLAY_LIMIT is negative (%d); "
+            "falling back to the default limit", limit,
+        )
+        return None
+    return limit
+
+
+def _touched_epoch(value: Any) -> float:
+    """更新時刻を比較できる POSIX 秒にする (読めなければ -inf = 一番古い)。
+
+    DB の DateTime は naive (UTC) で入る — 素の datetime 同士の比較は aware/naive
+    が混ざると TypeError になるので、秒に落としてから比べる。
+
+    時刻が **ISO 形式の文字列** で来る道もある (JSON を経由したキャッシュや、
+    行を dict にして渡す API の返り)。文字列を一律で「一番古い」に倒すと、
+    さっき触った物が黙って埋もれる — 読める文字列は日時として受ける。読めない
+    文字列だけが従来どおり最古で、その回は DEBUG に一行残す (2026-09-11 修正 3)。
+
+    「最近触られた」の物差しはこの一枚だけ — 部屋の様子と「埋もれたアイテムを
+    見る」(:mod:`builtin_data.tools.buried_items_view`) は同じ軸で並ばなければ
+    ならないので、あちらはここを import して使う。
+    """
+    from datetime import datetime, timezone
+
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return value.timestamp()
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value)
+        except ValueError:
+            LOGGER.debug(
+                "_touched_epoch: unreadable timestamp string %r; "
+                "treating it as the oldest", value,
+            )
+            return float("-inf")
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.timestamp()
+    return float("-inf")
+
+
 def _read_world(
     manager: Any,
     persona: Any,
@@ -560,6 +703,9 @@ def _read_world(
     if building_obj:
         base_sys = getattr(building_obj, "base_system_instruction", "") or ""
         world.base_system_instruction = base_sys.strip()
+        world.item_display_limit = _coerce_display_limit(
+            getattr(building_obj, "item_display_limit", None),
+        )
 
     # ========== Section 1: ペルソナ ==========
     all_occupants = manager.occupants.get(building_id, [])
@@ -715,6 +861,10 @@ def _render_item_entry(item: Dict[str, Any], manager: Any) -> _RenderedItem:
             ("open" if is_open else "closed")
             if item_type in _OPENABLE_ITEM_TYPES else None
         ),
+        # 「最近触られた」= アイテム自身の更新 (開閉・説明や中身の書き換え) と
+        # 置き場所の更新 (設置・移動・拾得) の新しい方。入れ物の中身の上限も
+        # 同じ一枚 (:func:`_entry_touched_at`) を通る。
+        touched_at=_entry_touched_at(item),
     )
     _render_item(item, entry.lines, entry.media, manager, ref=ref)
     # 末尾の空行はパッケージには持たせない (結合側が区切りを足す)。
@@ -741,6 +891,43 @@ def _normalize_lines(parts: List[str]) -> List[str]:
         split = text.splitlines()
         lines.extend(split if split else [""])
     return lines
+
+
+def _select_displayed_items(
+    entries: List[_RenderedItem], limit: Optional[int],
+) -> Tuple[List[_RenderedItem], List[str]]:
+    """建物直下のアイテムを「最近触られた順」の上位 ``limit`` 件に絞る。
+
+    docs/intent/room_item_display_cap.md 設計 1。返るのは
+    ``(載せるもの, 外したもののキー)``。
+
+    **選別と並びは別物** (intent 不変条件 6): ここが決めるのは「どれを載せるか」
+    だけで、返す list は渡された並び (キーの昇順) のまま — 束の中の並びは差分の
+    照合と指紋が「同じ部屋は同じ束になる」ことの前提なので変えない。
+
+    物差しは ``touched_at`` (アイテム自身の更新時刻と置き場所の更新時刻の
+    新しい方) の降順、同時刻は ``SHORT_ID`` の降順。開いている Bag の中身は
+    勘定に入れない — ここが数えるのは建物に直接置かれたアイテムの個数だけで、
+    Bag の中身はその Bag のパッケージの描画の一部 (intent 設計 1 の帰結)。
+    """
+    if limit is None:
+        limit = DEFAULT_ROOM_ITEM_DISPLAY_LIMIT
+    if len(entries) <= limit:
+        return list(entries), []
+
+    def _rank(index: int) -> Tuple[float, int, int, str]:
+        entry = entries[index]
+        order, ref = _sort_key_for_item(entry)
+        unnumbered = 1 if order == (1 << 30) else 0
+        # 時刻の降順 → SHORT_ID の降順。番号を引けないキーは末尾へ回し、
+        # その中はキー文字列の昇順で決める (どちらも決定論)。
+        return (-entry.touched_at, unnumbered, -order, ref)
+
+    ranked = sorted(range(len(entries)), key=_rank)
+    displayed = set(ranked[:limit])
+    kept = [entries[i] for i in range(len(entries)) if i in displayed]
+    capped = [entries[i].key for i in range(len(entries)) if i not in displayed]
+    return kept, capped
 
 
 def _bundle_from_world(world: _WorldRead) -> Dict[str, Any]:
@@ -822,7 +1009,10 @@ def _bundle_from_world(world: _WorldRead) -> Dict[str, Any]:
             "state": None,
         })
 
-    for entry in world.building_items:
+    displayed_items, capped_keys = _select_displayed_items(
+        world.building_items, world.item_display_limit,
+    )
+    for entry in displayed_items:
         _add({
             "key": entry.key,
             "family": "item",
@@ -842,11 +1032,18 @@ def _bundle_from_world(world: _WorldRead) -> Dict[str, Any]:
             "state": None,
         })
 
-    return {
+    bundle: Dict[str, Any] = {
         "building_id": world.building_id,
         "building_name": world.building_name,
         "packages": packages,
     }
+    if capped_keys:
+        # 差分が「消えた」と言わないための一覧 (sai_memory/room_state.py の
+        # gone 抑止と「ほかに N 個」の一行が読む)。空のときはフィールドごと
+        # 載せない — 上限に掛からない部屋の束は上限導入前と一字一句同じになり、
+        # 指紋 (正準 JSON の sha256) も変わらない。
+        bundle[BUNDLE_CAPPED_KEYS] = capped_keys
+    return bundle
 
 
 def _render_head_view(

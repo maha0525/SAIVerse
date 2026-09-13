@@ -210,6 +210,7 @@ def run_work_session(
     frame_pushed = False
     items_before: Optional[Set[str]] = None
     episode_ref: Optional[str] = None  # 開いた出来事の参照 (close 用)
+    binding_token: Optional[Any] = None  # 返事のモデルを文脈変数に載せた札 (finally で外す)
 
     try:
         # ---- setup: manager / persona / runtime ----
@@ -263,6 +264,22 @@ def run_work_session(
 
         pulse_ctx.push_line(aspect=Aspect.WORKER)
         frame_pushed = True
+
+        # 返事の始まりに、このセッションで使うモデルと接続を決める
+        # (docs/intent/persona_model_selection.md 決まったこと 10)。途中でモデルの
+        # 設定が変わっても、このセッションは始めたときのもので最後まで走る。
+        # WORKER は軽量モデルの段 — その設定ファイルが無ければ、読み戻しや頭の
+        # 処理より前にここで止める (代わりのモデルでは動かさない)。
+        from saiverse.persona_model_selection import (
+            TIER_LIGHTWEIGHT,
+            ReplyModelBinding,
+            enter_reply_binding,
+        )
+
+        model_binding = ReplyModelBinding.capture(persona)
+        pulse_ctx.model_binding = model_binding
+        binding_token = enter_reply_binding(model_binding)
+        model_binding.check_defined(TIER_LIGHTWEIGHT)
 
         # WORKER フレームが active な状態で解決 → 軽量モデルが導出される
         # (Beat 相当の開始点、beat_execution_context §2.1。挙動不変の置換)。
@@ -392,6 +409,7 @@ def run_work_session(
                 "_pulse_usage_accumulator": usage_accumulator,
                 "_activity_trace": [],
                 "_cancellation_token": None,
+                "_model_binding": model_binding,
                 "_messages": messages,
                 # call-local anchor (§3.2)。2026-07-23 以降 prefix は main-line
                 # 履歴を含むため、通常は実 anchor が載る (touch は Beat 内)。
@@ -456,7 +474,7 @@ def run_work_session(
                 LOGGER.warning("[work_session] failed to dump initial LLM I/O", exc_info=True)
 
             # ---- act→observe ループ (予算付き) ----
-            merged_text, continuation, rounds_used = _run_coro_sync(_run_spell_loop(
+            _spell_result = _run_coro_sync(_run_spell_loop(
                 text=text,
                 spell_enabled=spell_enabled,
                 llm_client=llm_client,
@@ -471,6 +489,11 @@ def run_work_session(
                 action_text=instruction_content,
                 max_rounds=budget_rounds,
             ))
+            # 作業セッションは speak=false なので、周ごとの本文 (BeatSegment) は
+            # 建物へ出さない — 生ログはループが SAIMemory へ記録済み。ここで使うのは
+            # 締めの発言とラウンド数だけ。
+            continuation = _spell_result.final_continuation
+            rounds_used = _spell_result.loop_count
 
             # 予算切れ判定: ループが予算上限に達し、かつ最終応答にまだ spell が
             # 残っている (= 続きをやりたがっていた) とき budget_exhausted。
@@ -601,6 +624,10 @@ def run_work_session(
             extra=dict(metadata) if metadata else None,
         )
     finally:
+        if binding_token is not None:
+            from saiverse.persona_model_selection import exit_reply_binding
+
+            exit_reply_binding(binding_token)
         if pulse_ctx is not None:
             if frame_pushed:
                 try:

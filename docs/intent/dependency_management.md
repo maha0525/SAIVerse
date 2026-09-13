@@ -1,6 +1,6 @@
 # Intent Document: 依存関係の管理 (lock ファイルと「上げる / 止める」の裁定簿)
 
-**ステータス**: 完了 (2026-09-03。実装・レビュー 3 巡・lock だけの venv でのフルスイート・本番 venv の同期と再起動 (まはー、エリスと会話・声あり)・OpenAI / Anthropic / xAI の実 API 一回ずつ (隔離環境、下記 §5) まで済。残るのは develop へのマージとリリース発行、それと報告者の macOS で LLM 呼び出しが通ることの確認 (リリース後))
+**ステータス**: 完了 (2026-09-03。実装・レビュー 3 巡・lock だけの venv でのフルスイート・本番 venv の同期と再起動 (まはー、エリスと会話・声あり)・OpenAI / Anthropic / xAI の実 API 一回ずつ (隔離環境、下記 §5) まで済。残るのは develop へのマージとリリース発行、それと報告者の macOS で LLM 呼び出しが通ることの確認 (リリース後))。2026-09-11 に、アドオンの setup の `platform_script` / `python_script` の step で実行されるスクリプトの中の pip が constraints の外にあり、§2-2 で数え漏れていたと分かった。[addon_setup_scripts_bypass_lock_constraints.md](../issues/addon_setup_scripts_bypass_lock_constraints.md) で追跡している
 
 ## 概要
 
@@ -45,7 +45,7 @@ SAIVerse が使う Python の部品 (ライブラリ) について、**「意図
 | `.github/workflows/discord_gateway.yml` | `discord_gateway/requirements-dev.txt` (中で `-r ../requirements.txt`) | CI (Python 3.11) |
 | `docs/getting-started/installation.md` | 手動手順に `pip install -r requirements.txt` | 手で入れる人 |
 
-lock を導入するなら、この **7 箇所すべて**が lock を読むように揃える。一箇所でも requirements.txt を直接読む経路が残ると、その経路だけ違う組み合わせが入る (入口の検査ではなく境界の保証として、読む側を数え切る)。
+lock を導入するなら、この **7 箇所すべて**が lock を読むように揃える。一箇所でも requirements.txt を直接読む経路が残ると、その経路だけ違う組み合わせが入る (入口の検査ではなく境界の保証として、読む側を数え切る)。**2026-09-11 に数え漏れが一つ見つかった**: アドオンの setup の `platform_script` / `python_script` の step で実行されるスクリプトの中の pip (たとえば voice-tts の `scripts/install_backends.py`) は、上の表のどれにも当たらず、requirements.lock も constraints として渡らない ([addon_setup_scripts_bypass_lock_constraints.md](../issues/addon_setup_scripts_bypass_lock_constraints.md))。
 
 ### 2-3. 変更後の形
 
@@ -57,7 +57,7 @@ requirements.lock     ← 全部品の版を固定した一覧 (機械が作る�
 - **requirements.txt** は「本体が直接 import する部品」だけを、**下限 + 理由つきの上限**で書く。`==` は使わない (釘を打つのは lock の仕事)。上限を書くときは必ず一行の理由を添える (mcp<2 の書き方が手本)。
 - **requirements.lock** は `requirements.txt` から機械生成する。全部品 (間接依存も含む) が `==` で並び、プラットフォーム差 (Windows / macOS / Linux、Python 3.11〜3.13) は環境マーカーで一枚に収める。ユーザー側は素の pip で読める形式 (`pip install -r requirements.lock`) に限る — ユーザーに新しい道具を入れさせない。
 - 生成の道具は開発者だけが使う。`uv pip compile --universal` を第一候補とする (開発機に導入済み、pip 互換の出力、プラットフォーム横断の一枚を作れる)。ユーザーの手元では uv は不要。
-- **アドオンの pip install には lock を constraints として渡す** (`pip install -r <addon>/requirements.txt -c requirements.lock`)。アドオンは本体が固定した部品を動かせなくなり、動かす必要があるなら導入時に失敗して理由が出る (黙って壊れる代わりに)。
+- **アドオンの pip install には lock を constraints として渡す** (`pip install -r <addon>/requirements.txt -c requirements.lock`)。アドオンは本体が固定した部品を動かせなくなり、動かす必要があるなら導入時に失敗して理由が出る (黙って壊れる代わりに)。2026-09-11 の時点で実際に渡しているのは、setup の `pip_install` の step だけ (§2-2 の数え漏れ)。
 
 ### 2-4. 不変条件と持ち主
 
@@ -66,7 +66,7 @@ requirements.lock     ← 全部品の版を固定した一覧 (機械が作る�
 | ユーザーの手元に入る部品の版は lock と一致する | `requirements.lock` |
 | lock は requirements.txt の範囲の中にある | 生成の道具 (compile が保証) |
 | 止めている部品には理由がある | `requirements.txt` のコメント行 |
-| アドオンは本体の部品を動かせない | `addon_installer.py` が constraints を渡す |
+| アドオンは本体の部品を動かせない | `addon_installer.py` が constraints を渡す。**2026-09-11 時点で渡しているのは `pip_install` の step だけで、`platform_script` / `python_script` の step で実行されるスクリプトの中の pip には渡っていない** ([addon_setup_scripts_bypass_lock_constraints.md](../issues/addon_setup_scripts_bypass_lock_constraints.md)) |
 | 更新完了マーカーは lock の内容と結びつく | `update_engine.completion_fingerprint` (lock の sha256 を含める) |
 
 ### 2-5. 移行
@@ -108,6 +108,8 @@ requirements.lock     ← 全部品の版を固定した一覧 (機械が作る�
 torch / transformers / librosa / numba / gradio / funasr など、venv にある 269 個のうち本体の直接依存 (約 30 個) を除く大半は voice-tts が連れてきたもの。これらは本体の requirements には入っていない (現状で正しい)。本体がやることは **constraints で「本体の部品を動かすな」と言う**ことまで。numba の上限などアドオン自身の部品の整合はアドオン側の requirements の責任 (voice-tts に numba の固定を足すのはアドオンのリポジトリの宿題)。
 
 ただし本体の更新は、壊したことを**その場で見せる**義務は負う。`update_engine.update_dependencies` は lock を入れた直後に `pip check` を回し、lock の外にあるパッケージ (アドオンか手で入れたもの) との衝突を `[deps] pip check: ...` の WARNING として更新ログに残す (2026-09-02 の voice-tts の実害は、翌日まで誰も気づかなかったことが問題だった)。衝突と読むのは `pip check` の exit 1 だけで、それ以外の非ゼロ (2 = pip 自身の使い方の誤りや内部エラー、負数 = シグナル) は「pip check が走らず、衝突は検査できなかった」として stderr と一緒に別の WARNING で残す (pip の落ち方をアドオンの衝突に見せない)。可視化だけで、更新は失敗にしないし巻き戻しもしない — 直すのはアドオン側。
+
+2026-09-11 に、この警告の最後の文の助言 (「該当のアドオンは入れ直す (アドオンを入れ直す) 必要があるかもしれません。」) が当てはまらない衝突が見つかった。voice-tts が入れる GPT-SoVITS の requirements.txt 自体が requirements.lock と両立しない場合で、アドオンを入れ直しても衝突は消えない ([pip_check_warning_reinstall_advice.md](../issues/pip_check_warning_reinstall_advice.md))。
 
 ### 3-4. SDK を上げる前に分かっていること (2026-09-02 の下調べ)
 
@@ -165,3 +167,4 @@ torch / transformers / librosa / numba / gradio / funasr など、venv にある
 - 2026-09-02: voice-tts の無音事故 (numba × NumPy 2.5) を契機に起草。まはー「そろそろやらなきゃダメかな。依存関係全体を洗いたい、新しくするべきとこ新しくして、古いまま止めなきゃだめなやつはそう設定する整理が必要」。Python 推奨は 3.13 へ、feature ブランチで対応、と裁定。
 - 2026-09-02 深夜 (レビュー 1 巡目): ローカル LLM と Codex (ブランチ全体、develop 基点)。**採用**: ①lock の onnxruntime 1.24.1 は Intel Mac の wheel も sdist も無く、Intel Mac では lock が入らない (Codex high) → `onnxruntime<1.24` を理由つきで置き、`scripts/check_lock_platforms.py` を新設して同族を機械検査 (§3-2)。②packaging 無しの退化パーサーがマーカー付き行を「必要」と読み、macOS で Windows 限定の pin を未導入と判定して起動のたびに更新へ送る (ローカル low) → マーカー付き行は未検査扱いへ。③壊れた dist-info (版が読めない) を満たしている扱いにしていた (Codex medium) → 未検査へ。④requirements.txt の `==` 禁止を契約テストへ (ローカル low)。**採用せず**: lock が読めない・メタデータが列挙できないときに CHECK_READY を返す fail-open (Codex high) — 以前からの設計で、代案の INCONCLUSIVE も起動する点は同じ (印を書かない) なので挙動差が無い。`strict_content_type=False` は CSRF 防御の保留 (Codex high) — 0.116 には検査自体が無かったので退行ではないが、issue の優先度を high に上げてフロントエンドを監査対象に加えた。thinking と sampling の同時送信 (Codex medium) — この分岐は以前から同じ引数を top-level で送っており、`extra_body` への移動で挙動は変わっていない (別件)。
 - 2026-09-02 深夜 (レビュー 2〜3 巡目、Codex)。**2 巡目 3 件すべて採用**: `check_lock_platforms.py` が PyPI に問えなかった pin を通していた → fail-closed に / wheel の判定を文字列の部分一致から `packaging.tags` へ (macOS の床 13 / 14) / 本体の更新が同居アドオンの部品を壊しても気づけない → `update_dependencies` の直後に `pip check` を回して衝突を WARNING で更新ログに残す (止めない・戻さない、§3-3)。**3 巡目 4 件すべて採用**: lock の無い旧版 (v0.3.3 以前) からの更新が途中で失敗したとき、巻き戻しが旧版に無い lock を探して失敗する → 巻き戻し経路だけ旧版の requirements.txt を読む (§2-5) / manylinux の列挙を glibc の床 2.31 からの生成へ / Requires-Python と yanked をファイル単位で判定 / `pip check` は exit 1 だけを衝突として読み、他の非 0 は「検査できなかった」と書く。3 巡で採用した指摘の的は「lock の中身 (Intel Mac)」→「新設した検査の精度」→「移行の一回きりの経路」と外周へ移っており、私の見立てでは収束。4 巡目を投げるかはまはーの判断。
+- 2026-09-11: まはーの環境で v0.3.12 へ更新したときに pip check の警告が 3 件出た件を調べ、欠陥を二つ見つけて issue にした。一つは、`saiverse/addon_installer.py` で requirements.lock が constraints として pip に渡されるのが `pip_install` の step だけで、`platform_script` / `python_script` の step で実行されるスクリプトには渡されないこと (ステータス行・§2-2・§2-3・§2-4 に注記、[addon_setup_scripts_bypass_lock_constraints.md](../issues/addon_setup_scripts_bypass_lock_constraints.md))。もう一つは、pip check の警告の「アドオンを入れ直す」という助言が、入れ直しでは解けない衝突にも出ること (§3-3、[pip_check_warning_reinstall_advice.md](../issues/pip_check_warning_reinstall_advice.md))。

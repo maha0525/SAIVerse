@@ -251,16 +251,66 @@ class TestSelectLLMClientParity:
         assert legacy is temp_client
         assert model == ec.model_key == "lite-model"
 
-    def test_lightweight_client_creation_failure_falls_back_to_normal(self):
-        """一時 client 作成失敗 → 従来どおり normal client。実 model 名が返る。"""
+    def test_lightweight_client_creation_failure_stops_instead_of_using_the_normal_client(self):
+        """軽量モデルの定義はあるが接続を作れない → 標準モデルへ代わりに回さず止める
+        (docs/intent/persona_model_selection.md 決まったこと 7)。"""
+        from llm_clients.exceptions import ModelUnavailableError
+
         persona = _persona(lightweight_llm_client=None)
-        with patch("llm_clients.get_llm_client", side_effect=RuntimeError("boom")):
-            ec, client, model, legacy = self._select_both(persona, _pulse_ctx(Aspect.WORKER))
-        assert client is persona.llm_client is legacy
-        assert model == "standard-model"
-        # 解決値 (lite-model) と実 model が違う → with_model で差し替えられる
-        assert ec.model_key == "lite-model"
-        assert ec.with_model(model).model_key == "standard-model"
+        runtime = _runtime()
+        ctx = _pulse_ctx(Aspect.WORKER)
+        state = {"_pulse_context": ctx}
+        ec = resolve_execution_context(persona, ctx, state=state)
+        with patch("llm_clients.get_llm_client", side_effect=RuntimeError("boom")), \
+             patch("saiverse.model_configs.get_context_length", return_value=32768), \
+             patch("saiverse.model_configs.get_model_provider", return_value="openai"):
+            with pytest.raises(ModelUnavailableError) as new_path:
+                runtime.select_llm_client(_NODE, persona, execution_context=ec, state=state)
+            with pytest.raises(ModelUnavailableError):
+                runtime._select_llm_client(_NODE, persona, state=state)
+        err = new_path.value
+        assert (err.role, err.reason, err.model) == ("lightweight_model", "unreachable", "lite-model")
+        assert err.user_message == (
+            "Personaの軽量モデル 'lite-model' に繋げなかったため、返事の途中の作業ができませんでした。"
+            "API キーなどの接続の設定を確かめるか、軽量モデルを選び直してください。再起動は要りません。"
+        )
+
+    def test_lightweight_model_without_definition_stops_instead_of_using_the_normal_client(self):
+        """軽量モデルの設定ファイルが無い → 標準モデルへ代わりに回さず止める。"""
+        from llm_clients.exceptions import ModelUnavailableError
+
+        persona = _persona(lightweight_llm_client=None)
+        runtime = _runtime()
+        ctx = _pulse_ctx(Aspect.WORKER)
+        with pytest.raises(ModelUnavailableError) as exc_info:
+            runtime.select_llm_client(
+                _NODE, persona,
+                execution_context=resolve_execution_context(persona, ctx),
+                state={"_pulse_context": ctx},
+            )
+        assert (exc_info.value.role, exc_info.value.reason) == ("lightweight_model", "missing")
+        assert "ペルソナ設定で軽量モデルを選び直すと、再起動しなくても続けられます。" in (
+            exc_info.value.user_message
+        )
+
+    def test_structured_output_lightweight_creation_failure_does_not_use_the_base_client(self):
+        """構造化出力のための軽量モデルに繋げない → 元の標準モデルの接続へ戻らず止める。"""
+        from llm_clients.exceptions import ModelUnavailableError
+
+        persona = _persona()
+        runtime = _runtime()
+        with patch("saiverse.model_configs.supports_structured_output",
+                   side_effect=lambda m: m == "lite-model"), \
+             patch("llm_clients.get_llm_client", side_effect=RuntimeError("boom")), \
+             patch("saiverse.model_configs.get_context_length", return_value=32768), \
+             patch("saiverse.model_configs.get_model_provider", return_value="gemini"):
+            with pytest.raises(ModelUnavailableError) as exc_info:
+                runtime.select_llm_client(
+                    _NODE, persona,
+                    execution_context=resolve_execution_context(persona, None),
+                    needs_structured_output=True,
+                )
+        assert (exc_info.value.role, exc_info.value.reason) == ("lightweight_model", "unreachable")
 
     def test_structured_output_fallback_returns_actual_model(self):
         """standard が構造化出力非対応 → lite へ fallback、実 model 名が返る。"""

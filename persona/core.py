@@ -154,11 +154,12 @@ class PersonaCore(
         self.provider = provider
         self.context_length = context_length
         self.model_supports_images = model_supports_images(model)
+        # 話す標準モデルをどの設定から決めたか (saiverse/persona_model_selection.py の
+        # SpeakingModelChoice)。ペルソナを読み込む・作る側が入れる。設定ファイルの
+        # 無いモデルを選んでいるときは、返事を始める時点で止まる。
+        self.speaking_model_choice = None
         # LLM clients are created lazily on first access (see properties below)
-        self._llm_client = None
-        self._lightweight_llm_client = None
-        self._lightweight_llm_client_initialized = False
-        self._pending_parameter_overrides: Optional[Dict[str, Any]] = None
+        self._init_model_client_state()
 
         # Visual context cache は Cached Head Architecture (Phase 2-h) で
         # head_pipeline 側 (LineHeadSnapshot + VisualContextSection) に統合済み。
@@ -239,48 +240,72 @@ class PersonaCore(
 
     @property
     def llm_client(self):
-        if self._llm_client is None:
-            logging.info("Lazy-creating LLM client for persona '%s' (model=%s)", self.persona_id, self.model)
-            self._llm_client = get_llm_client(self.model, self.provider, self.context_length)
-            # Apply any stored parameter overrides from set_model() or apply_parameter_overrides()
-            overrides = getattr(self, "_pending_parameter_overrides", None)
-            if overrides:
-                self.apply_parameter_overrides(overrides)
-        return self._llm_client
+        client = self._llm_client
+        if client is not None:
+            return client
+        # 値と世代札を同時に読んでから、ロックの外で作る (作るのは時間がかかりうる)。
+        # 作っている間に設定が変わったら、古いモデルの接続をペルソナに持たせない。
+        with self._model_client_lock:
+            token = self._model_settings_token
+            model, provider, context_length = self.model, self.provider, self.context_length
+            overrides = self._pending_parameter_overrides
+        logging.info("Lazy-creating LLM client for persona '%s' (model=%s)", self.persona_id, model)
+        client = get_llm_client(model, provider, context_length)
+        # Apply any stored parameter overrides from set_model() or apply_parameter_overrides()
+        self._configure_client_parameters(client, model, overrides)
+        return self._install_client_if_current("standard", token, client)
 
     @llm_client.setter
     def llm_client(self, value):
-        self._llm_client = value
+        with self._model_client_lock:
+            self._llm_client = value
 
     @property
     def lightweight_llm_client(self):
-        if not self._lightweight_llm_client_initialized:
-            self._lightweight_llm_client_initialized = True
-            if self.lightweight_model and str(self.lightweight_model).strip():
-                try:
-                    from saiverse.model_configs import get_context_length, get_model_provider
-                    lw_context_length = get_context_length(self.lightweight_model)
-                    lw_provider = get_model_provider(self.lightweight_model)
-                    logging.info(
-                        "Lazy-creating lightweight LLM client for persona '%s' (model=%s)",
-                        self.persona_id, self.lightweight_model,
-                    )
-                    self._lightweight_llm_client = get_llm_client(
-                        self.lightweight_model, lw_provider, lw_context_length,
-                    )
-                except Exception as exc:
-                    logging.warning(
-                        "Failed to initialize lightweight LLM client for persona '%s' with model '%s': %s",
-                        self.persona_id, self.lightweight_model, exc,
-                    )
-                    self._lightweight_llm_client = None
+        """個別の軽量モデルの接続。個別の軽量モデルが無いときと、作れなかったときは None。
 
-        return self._lightweight_llm_client
+        作れなかった回は覚えない — 次に要ったときにまた作ろうとする。作れなかった
+        理由は ``_lightweight_llm_client_error`` に残し、返事の側
+        (saiverse/persona_model_selection.py) がそれを見て止める (標準モデルへ
+        代わりに回さない)。
+        """
+        if self._lightweight_llm_client_initialized:
+            return self._lightweight_llm_client
+        with self._model_client_lock:
+            token = self._model_settings_token
+            lightweight_model = self.lightweight_model
+        if not (lightweight_model and str(lightweight_model).strip()):
+            with self._model_client_lock:
+                if self._model_settings_token is token:
+                    self._lightweight_llm_client = None
+                    self._lightweight_llm_client_initialized = True
+            return None
+        try:
+            from saiverse.model_configs import get_context_length, get_model_provider
+            lw_context_length = get_context_length(lightweight_model)
+            lw_provider = get_model_provider(lightweight_model)
+            logging.info(
+                "Lazy-creating lightweight LLM client for persona '%s' (model=%s)",
+                self.persona_id, lightweight_model,
+            )
+            client = get_llm_client(lightweight_model, lw_provider, lw_context_length)
+        except Exception as exc:
+            logging.warning(
+                "Failed to initialize lightweight LLM client for persona '%s' with model '%s': %s",
+                self.persona_id, lightweight_model, exc,
+            )
+            with self._model_client_lock:
+                if self._model_settings_token is token:
+                    self._lightweight_llm_client_error = exc
+            return None
+        return self._install_client_if_current("lightweight", token, client)
 
     @lightweight_llm_client.setter
     def lightweight_llm_client(self, value):
-        self._lightweight_llm_client = value
-        self._lightweight_llm_client_initialized = True
+        with self._model_client_lock:
+            self._lightweight_llm_client = value
+            self._lightweight_llm_client_initialized = True
+            self._lightweight_llm_client_error = None
 
     @property
     def common_prompt(self) -> str:

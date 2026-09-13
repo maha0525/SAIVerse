@@ -592,7 +592,7 @@ def _run_memopedia_generation(
         # Initialize LLM client
         _update_memopedia_job(job_id, message="Initializing LLM client...")
         
-        from saiverse.model_defaults import BUILTIN_DEFAULT_LITE_MODEL
+        from saiverse.memory_weave_llm import resolve_global_memory_weave_model
         from database.models import AI as AIModel
         from database.session import SessionLocal
         _db = SessionLocal()
@@ -601,7 +601,8 @@ def _run_memopedia_generation(
             persona_mw_model = getattr(_ai, "MEMORY_WEAVE_MODEL", None) if _ai else None
         finally:
             _db.close()
-        env_model = os.getenv("MEMORY_WEAVE_MODEL", BUILTIN_DEFAULT_LITE_MODEL)
+        # グローバル設定を空に戻したら組み込みの既定モデル (空文字をモデル名として使わない)
+        env_model, _env_source = resolve_global_memory_weave_model()
         model_to_use = model_name or persona_mw_model or env_model
 
         resolved_model_id, model_config = find_model_config(model_to_use)
@@ -813,7 +814,7 @@ def _run_build_memopedia_from_logs(
         # Initialize LLM client
         _update_memopedia_job(job_id, message="LLMクライアントを初期化中...")
 
-        from saiverse.model_defaults import BUILTIN_DEFAULT_LITE_MODEL
+        from saiverse.memory_weave_llm import resolve_global_memory_weave_model
         from saiverse.model_configs import find_model_config
         from llm_clients.factory import get_llm_client
         from database.models import AI as AIModel
@@ -824,7 +825,8 @@ def _run_build_memopedia_from_logs(
             persona_mw_model = getattr(_ai, "MEMORY_WEAVE_MODEL", None) if _ai else None
         finally:
             _db.close()
-        env_model = os.getenv("MEMORY_WEAVE_MODEL", BUILTIN_DEFAULT_LITE_MODEL)
+        # グローバル設定を空に戻したら組み込みの既定モデル (空文字をモデル名として使わない)
+        env_model, _env_source = resolve_global_memory_weave_model()
         model_to_use = model_name or persona_mw_model or env_model
 
         resolved_model_id, model_config = find_model_config(model_to_use)

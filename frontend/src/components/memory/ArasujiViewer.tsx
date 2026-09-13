@@ -824,8 +824,12 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                         chronicle_disabled: '🚫',
                         estimate_stale: '🔄',
                         ceiling_unresolved: '🚧',
+                        model_unavailable: '🧩',
                     };
                     const guidanceMap: Record<string, string> = {
+                        // 使うモデルが無い・繋げない。待っても直らないので、選び直しを案内する
+                        // (docs/intent/persona_model_selection.md 決まったこと 8)。
+                        model_unavailable: 'ペルソナが使うモデルが SAIVerse に無いか、繋げないため止まりました。モデルを選び直すと、再起動しなくても再実行できます。',
                         empty_response: 'しばらく時間を置いてから再実行してください。繰り返し発生する場合は、サーバーの障害情報を確認してください。',
                         safety_filter: '該当メッセージに不適切と判定された内容が含まれている可能性があります。特に画像生成プロンプト（少年・少女関連など）が含まれる場合、健全な内容でもブロックされることがあります。下の「該当メッセージを表示」で内容を確認し、必要に応じて修正・削除してから再実行してください。',
                         timeout: 'サーバーが混雑している可能性があります。しばらく時間を置いてから再実行してください。',

@@ -16,6 +16,16 @@ export SAIVERSE_HOME="$PROJECT_ROOT/test_data/.saiverse"
 export SAIVERSE_USER_DATA_DIR="$PROJECT_ROOT/test_data/user_data"
 TEST_DB_PATH="$SAIVERSE_USER_DATA_DIR/database/saiverse.db"
 
+# Never let the test world reach the production Discord gateway.
+# load_dotenv() (main.py etc.) fills every variable that is not already set
+# from the repository .env, and discord_gateway/config.py reads .env by itself.
+# Keep these non-empty and identical to start_test_server.bat: in cmd,
+# set "VAR=" deletes the variable, so an empty value cannot be expressed there.
+export SAIVERSE_GATEWAY_ENABLED=0
+export SAIVERSE_GATEWAY_WS_URL="ws://127.0.0.1:9/test-disabled"
+export SAIVERSE_GATEWAY_TOKEN="test-disabled"
+export SAIVERSE_GATEWAY_CHANNEL_MAP="[]"
+
 # City name from test_data.json
 CITY_NAME="test_city"
 
@@ -25,6 +35,7 @@ echo "=============================================="
 echo "SAIVERSE_HOME: $SAIVERSE_HOME"
 echo "SAIVERSE_USER_DATA_DIR: $SAIVERSE_USER_DATA_DIR"
 echo "Database: $TEST_DB_PATH"
+echo "Discord gateway: disabled (forced by this script)"
 echo "=============================================="
 
 # Handle arguments

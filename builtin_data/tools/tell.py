@@ -136,6 +136,16 @@ def tell(target: str, gist: str = "") -> str:
 
     pulse_id = str(uuid.uuid4())
     pulse_ctx = runtime._get_or_create_pulse_context(pulse_id)
+    # この一言は唱えた返事の中の仕事。返事の始まりに決めたモデルと接続を使う
+    # (saiverse/persona_model_selection.py の ReplyModelBinding)。
+    from saiverse.persona_model_selection import find_reply_binding
+    from tools.context import get_active_pulse_context
+
+    reply_binding = find_reply_binding(
+        pulse_context=get_active_pulse_context(), persona=persona,
+    )
+    if reply_binding is not None:
+        pulse_ctx.model_binding = reply_binding
     pulse_ctx.push_line(aspect=Aspect.CONVERSATION)
     # 投函が済んだ後の失敗を「何も起きなかった」と報告しないための印。
     # 声は取り消せないので、届いた後のエラーは「届いた + 記録で失敗」と返す。
@@ -171,6 +181,7 @@ def tell(target: str, gist: str = "") -> str:
             "_pulse_type": "tell",
             "_pulse_context": pulse_ctx,
             "_execution_context": execution_context,
+            "_model_binding": reply_binding,
             "_messages": messages,
         }
         # 前駆刻印の材料 (sea/message_stamp.py): この発話が実際に見た履歴の
@@ -209,10 +220,10 @@ def tell(target: str, gist: str = "") -> str:
         tell_meta: Dict[str, Any] = {"tell_target": target_norm}
         if gist and gist.strip():
             tell_meta["tell_gist"] = gist.strip()
-        # 投函: Building 履歴 + UI + TTS/Unity (既存の発話経路がそのまま効く)。
+        # 投函: Building 履歴 + UI + TTS (既存の発話経路がそのまま効く)。
         # **ここを呼んだ時点で「言ってしまった」**— `_emit_say` は履歴の保存に
-        # 失敗しても gateway (Discord 等) と Unity へは送る (sea/runtime_emitters.py
-        # の emit_say: gateway 送信と unity 通知は insert の成否を見ない)。
+        # 失敗しても gateway (Discord 等) へは送る (sea/runtime_emitters.py
+        # の emit_say: gateway 送信は insert の成否を見ない)。
         # したがって戻り値から分かるのは「届いたか」ではなく **「この場の記録に
         # 残ったか」**だけ。記録の成否によらず本人の記憶には残す — 自分が言った
         # ことを知らないまま次を喋ると、同じ話を二度することになる。
@@ -265,7 +276,7 @@ def tell(target: str, gist: str = "") -> str:
         )
         if not emitted_id:
             # 記録に残らなかった = 相手に届いたかどうかも確かめられない。
-            # 外への配送 (gateway / Unity) は履歴と別経路で走るうえ、宛先が
+            # 外への配送 (gateway) は履歴と別経路で走るうえ、宛先が
             # 繋がっていない構成では黙って no-op になる — 「届いた」とも
             # 「届いていない」とも言えない。断定せず、判断の材料だけ返す。
             return (
