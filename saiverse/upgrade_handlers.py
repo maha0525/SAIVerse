@@ -1112,4 +1112,23 @@ HANDLERS: List[UpgradeHandler] = [
         run=_no_op_ai_upgrade,
         description="Empty release edge 0.3.11 -> 0.3.12 (column drops run in migrate.py; building-id repair runs at startup).",
     ),
+    # ---- v0.3.13 ----
+    # この版の DB 変更は Building.ITEM_DISPLAY_LIMIT の追加 1 本だけ (additive)。
+    # 追加列は migrate.py が既存 DB に足すので、更新の鎖に移行は要らない。
+    UpgradeHandler(
+        name="city_noop_v0_3_13",
+        scope="city",
+        from_version="0.3.12",
+        to_version="0.3.13",
+        run=_no_op_city_upgrade,
+        description="Empty release edge 0.3.12 -> 0.3.13 (only additive column Building.ITEM_DISPLAY_LIMIT; migrate.py adds it).",
+    ),
+    UpgradeHandler(
+        name="ai_noop_v0_3_13",
+        scope="ai",
+        from_version="0.3.12",
+        to_version="0.3.13",
+        run=_no_op_ai_upgrade,
+        description="Empty release edge 0.3.12 -> 0.3.13 (only additive column Building.ITEM_DISPLAY_LIMIT; migrate.py adds it).",
+    ),
 ]
