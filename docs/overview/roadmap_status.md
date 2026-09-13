@@ -105,7 +105,7 @@
 
 - ✅ **RSS フィード施設** — Building 単位の購読 + プリセット施設化 + 知覚バッファ投入 (`rss_feed_intake.md`、2026-08-03 実装完了)。世界の供給側の第一弾。実機検証は門 Wave 5
 - 🟡 **SwitchBot**（Intent doc draft 済、レビュー待ち。Cloud API v1.1 / 入出力両経路。Observer の利用者）
-- 🟡 **voice-tts**（GPT-SoVITS、実装済。GIL 飢餓問題対応中）
+- 🟡 **voice-tts**（GPT-SoVITS、実装済。アドオンカタログへの掲載は未着手で、公開前に必要な作業は `addon_catalog_management.md` の Phase 4-E に洗い出してある。GIL 飢餓対策の合成の別プロセス化は、upstream の PR #5 が未マージ）
 - 🟡 **stack-chan**（Vessel 統合 §5 + 能動入力 BLE HID リモコン構想）
 - 🔲 **Discord**（見守り機能の軽量アドオン化構想）
 - 🔲 **Withings 連携**（定期データ取得 + 通知ペルソナ、構想）

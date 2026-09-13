@@ -1,6 +1,6 @@
 # Intent: アドオンカタログ管理 (curated registry + ワンタッチ導入)
 
-**ステータス**: Phase 4 完了 (voice-tts 除く、2026-05-23)。voice-tts は Nature109 共有 repo の PR レビュー後に Phase 4-E として後追い対応予定
+**ステータス**: Phase 4 完了 (voice-tts 除く、2026-05-23)。voice-tts の Phase 4-E は未着手 (前提だった PR #4 は 2026-05-24 にマージ済み)。公開前に必要な作業と、まはーが決めることは、2026-09-11 に Phase 4-E の節へ洗い出してある
 
 ## これは何か
 
@@ -249,7 +249,63 @@ voice-tts は `external/GPT-SoVITS/` (5.2GB) を `setup.bat` で初回 DL する
 - **4-F registry public 化**: github.com/maha0525/saiverse-addon-registry を public で作成 + push、 raw.githubusercontent.com 経由で env override なしで fetch できることを実機確認 ✅
 - **インシデント (2026-05-23)**: Phase 4-D で stackchan のコード path 変更を push したが migration 起動時呼び出しを「voice-tts 完了後」 と遅延、 結果まはー の SAIVerse 再起動でアバター画像 / ペアリング情報が UI から不可視に。 手動コピーで復旧後、 `ENABLED_ADDONS_FOR_STARTUP` フィルタを設けて voice-tts 以外を起動時 migration 有効化 (`c362b1e`)。 教訓: 「コード path 変更と migration はセット commit」、 詳細は memory `feedback_code_path_migration_coupling.md`
 
-### Phase 4-E: voice-tts v2 化 (PR レビュー待ち)
+### Phase 4-E: voice-tts v2 化 (未着手、2026-09-11 に公開前の作業を洗い出し)
+
+voice-tts の upstream (元になっているリポジトリ) は `Nature109/saiverse-voice-tts` で、GitHub 上でそれを複製したフォーク `maha0525/saiverse-voice-tts` もある。PR #4〜#6 は maha0525 が作成し、#4 は Nature109 のアカウントがマージした。
+
+この節では、次の語をこの意味で使う。
+
+- **requirements.lock** は、本体が動作を確かめた版に全パッケージを固定した一覧 ([dependency_management.md](dependency_management.md))。
+- **constraints** は、pip の `-c` オプションで渡す「この一覧に書いてある版から動かすな」という指定。
+- **venv** は、SAIVerse が使う Python の仮想環境 (virtual environment)。本体とアドオンのパッケージは同じ venv に入る。
+- **衝突** は、パッケージ同士の版の条件が両立しないこと (pip check の警告文と同じ呼び方)。
+- **GIL** (Global Interpreter Lock) は、Python が一度に一つのスレッドにしか処理をさせない仕組み。
+
+#### 2026-09-11 時点の現状
+
+- 旧手順が前提にしていた PR #4 (音声の配信経路と再生キューの変更) は、2026-05-24 にマージ済み。upstream の main ブランチには、それ以降のコミットが無い。
+- `addon.json` に `manifest_version` も `setup` も無い。upstream の main ブランチ、フォークの main ブランチ、まはーの手元の `expansion_data/saiverse-voice-tts/` の三つで確認した。このままでは、アドオンカタログから GPT-SoVITS を入れられない。
+- 公開の registry.json に voice-tts は載っていない (載っているのは Elyth・X・stackchan)。
+- 合成した音声は、旧来の `~/.saiverse/user_data/voice/out/` に保存されている (`tools/speak/playback_worker.py` の `_OUT_DIR`)。
+- ペルソナごとの参照音声は、本体のアップロード処理 (`api/routes/addon.py` の `_resolve_file_dir`) によって `~/.saiverse/user_data/addon_files/saiverse-voice-tts/personas/<persona_id>/` に保存され、その絶対パスが DB の `AddonPersonaConfig.params_json` に記録される。voice-tts の合成では、記録された絶対パスがそのまま使われる (`tools/speak/profiles.py` の `_resolve_ref_audio`)。
+- 本体の `saiverse/addon_migrations.py` には、voice-tts の参照音声 (`addon_files/saiverse-voice-tts/` から `addon_data/saiverse-voice-tts/inputs/` へ) と合成音声 (`voice/out/` から `addon_data/saiverse-voice-tts/outputs/` へ) を移す処理がすでにある。`ENABLED_ADDONS_FOR_STARTUP` に voice-tts が入っていないので、起動時には実行されない。
+- upstream にまだマージされていない PR が 2 本ある。#5 は GPT-SoVITS の合成の別プロセス化 (2026-05-24 に作成)。#6 は、音声のストリームが止まったときに SAIVerse の終了処理が止まったままにならないよう、待ち時間に上限を付ける修正 (2026-08-27 に作成)。まはーの手元の `feature/tts-out-of-process` ブランチ (#5 のブランチ) には、`tools/speak/engine/gpt_sovits.py` と `tools/speak/playback_worker.py` にコミットされていない変更がある。
+- voice-tts には Windows 用の `setup.bat` しかなく、`setup.sh` は無い。voice-tts の requirements.txt のコメントには、どのプラットフォームでも使える導入コマンドとして `python scripts/install_backends.py gpt_sovits` が書かれている。
+
+#### 旧手順の 3 番が、いまのままでは成り立たない理由
+
+旧手順 (この節の最後に残してある) の 3 番は、「`setup.bat` を `platform_script` の step で登録する」としていた。これは requirements.lock の導入 (2026-09-02) より前に書かれたもので、いまは次の二つの理由で成り立たない。3 番を計画から外すかどうかは、まはーが決める。
+
+1. `setup.bat` は `scripts/install_backends.py` を通して、GPT-SoVITS の requirements.txt をそのまま `pip install -r` する。その中の `numpy<2.0` と `pydantic<=2.10.6` は、requirements.lock (numpy は Python 3.12 以上で 2.5.2、3.11 で 2.4.6。pydantic は 2.13.5) と両立しない。さらに、`gradio<5` で入る gradio 4.44.1 は `pillow<11` を、それが連れてくる gradio-client 1.3.0 は `websockets<13` を、`torchmetrics<=1.5` で入る torchmetrics 1.5.0 は `numpy<2.0` を要求していて、requirements.lock の pillow 11.3.0・websockets 16.1.1・numpy と衝突する。
+2. `saiverse/addon_installer.py` では、requirements.lock が constraints として pip に渡されるのは `pip_install` の step だけで、`platform_script` の step で実行されるスクリプトには渡されない ([addon_setup_scripts_bypass_lock_constraints.md](../issues/addon_setup_scripts_bypass_lock_constraints.md))。旧手順のまま実行すると、venv の本体のパッケージが requirements.lock の版から引き下げられる。
+
+#### 公開前にやること (2026-09-11 にメティスが洗い出した。進め方はまはー未決)
+
+1. **voice-tts 用の GPT-SoVITS の requirements を、voice-tts 側で持つ。** GPT-SoVITS の requirements.txt を元に、次を変える。
+   - `gradio` を外す。GPT-SoVITS の推論で読み込まれるコード (`GPT_SoVITS/TTS_infer_pack/TTS.py` から import を辿れる範囲) は、gradio を import していない。gradio を import しているのは、WebUI の 5 つ (`webui.py`、`GPT_SoVITS/inference_webui.py`、`GPT_SoVITS/inference_webui_fast.py`、`tools/uvr5/webui.py`、`tools/subfix_webui.py`) と `tools/my_utils.py` だった。`tools/my_utils.py` を import しているのは、WebUI、学習・データ準備・書き出し用のスクリプト、実験的なストリーミング推論のスクリプト (`GPT_SoVITS/stream_v2pro.py`) で、voice-tts の入口 (`tools/speak/engine/gpt_sovits.py` の `from TTS_infer_pack.TTS import TTS, TTS_Config`) から辿れる範囲には無い。これはコードを辿った確認で、gradio を外した venv で合成してはいない。
+   - `numpy<2.0` と `pydantic<=2.10.6` の上限を外す。2026-09-03 00:11 の再起動で、numpy 2.5.2 と pydantic 2.13.5 が入った venv (まはーの開発機、Windows、Python 3.13) のまま、voice-tts の合成は成功している ([dependency_management.md](dependency_management.md) §5 の 6)。
+   - `torchmetrics<=1.5` を `torchmetrics>=1.5.2` にする。torchmetrics は `GPT_SoVITS/AR/models/t2s_model.py` が import していて、推論で必要になる。1.5.0 は `numpy<2.0` を要求するが、1.5.2 以降は numpy の上限を持たない (PyPI で確認)。1.5.2 以降で推論が通るかは未確認。
+   - voice-tts の requirements.txt に、numba の版の条件を足す ([dependency_management.md](dependency_management.md) §3-3 に残っている宿題)。まはーの開発機の venv では 2026-09-02 20:47 に numba 0.67.0 へ上がっていて、9/3 の合成はその版で成功した。
+2. **`saiverse/addon_installer.py` で、`platform_script` / `python_script` の step で実行されるスクリプトの中の pip にも、requirements.lock が constraints として渡るようにする (本体側)。** [addon_setup_scripts_bypass_lock_constraints.md](../issues/addon_setup_scripts_bypass_lock_constraints.md)。
+3. **`addon.json` を manifest v2 にする。** `manifest_version`・`setup_version`・`data_subdirs`・`setup.steps` を書く。1 の requirements をどの step で入れるか (`pip_install` の step に分けるか、スクリプトの中に残すか) は未決。スクリプトを使うなら、`platform_script` の step の `unix` 側のスクリプトも要る。いまの `saiverse/addon_installer.py` は、実行中の OS 向けのスクリプトが無いとその step を失敗にせず飛ばして先へ進むので、`setup.sh` が無いまま載せると、macOS と Linux では GPT-SoVITS が入らないまま導入が成功したように見える。
+4. **参照音声と合成音声を、永続データの規約の場所へ移す。** 本体の `ENABLED_ADDONS_FOR_STARTUP` に voice-tts を加えると、起動時に参照音声のファイルが `addon_data/saiverse-voice-tts/inputs/` へ移る。しかし DB に記録された参照音声の絶対パスと、本体のアップロード処理の保存先は、古い `addon_files/` のまま残る。合成では記録された絶対パスがそのまま使われるので、参照音声のファイルが見つからずにエラーになる。移行を有効にするときは、同じリリースで次の三つを揃える (2026-05-23 のインシデントの教訓「コード path 変更と migration はセット commit」)。
+   - 本体: voice-tts の参照音声のアップロード先を、移行先の `addon_data/saiverse-voice-tts/inputs/` と揃える。ファイルを受け付ける他のアドオンの保存先をどう扱うかも、あわせて決める。
+   - 本体: DB の `AddonPersonaConfig.params_json` に記録された、古い場所の絶対パスを書き換える。
+   - voice-tts: 合成音声の保存先 (`_OUT_DIR`) を `get_addon_data_dir(...)/outputs/` に変える。
+5. **upstream に PR を出してマージし、registry.json に voice-tts を載せる。**
+6. **公開前の検証。** 隔離した `SAIVERSE_HOME` と、requirements.lock だけを入れた新しい venv に、アドオンカタログの導入経路で voice-tts を入れ、GPT-SoVITS で実際に声が出るところまで確かめる。[dependency_management.md](dependency_management.md) §5 の 4 で「voice-tts の実導入は本番 venv の同期のときに」と後に回していた検証にあたる。証拠は次の項目ごとに残す。2026-09-11 の時点では、すべて未検証。
+   - Windows で、カタログから入れて声が出る: 未検証。
+   - macOS で、カタログから入れて声が出る: 未検証 (`setup.sh` が無い)。
+   - Linux で、カタログから入れて声が出る: 未検証 (`setup.sh` が無い)。
+   - 参照音声を設定済みのペルソナがいる既存の環境に 4 の移行を当てて、そのペルソナの声が出る: 未検証。
+
+#### まはーが決めること (2026-09-11 時点で未決)
+
+- **旧手順の 3 番 (`setup.bat` を `platform_script` の step で実行する) を、計画から外すか。**
+- **upstream にまだマージされていない PR #5・#6 を、公開前にマージするか。** #5 は GPT-SoVITS の合成を別プロセスに移して、SAIVerse 本体のどのスレッドが GIL を握り続けても合成が遅くならないようにするもので、[mcp_cancel_scope_spin_gil_starvation.md](../issues/mcp_cancel_scope_spin_gil_starvation.md) の修正方針 B にあたる。GIL 飢餓の元になった本体側の不具合を直す修正方針 A は、2026-05-24 に回帰テストと一緒に実装済み。
+- **Irodori-TTS を公開に含めるか。** Irodori-TTS の pyproject.toml は `transformers>=5.12.1,<6`・`peft>=0.18.0`・`gradio>=5.0.0` を要求していて、GPT-SoVITS の requirements.txt の `transformers>=4.43,<=4.50`・`peft<0.18.0`・`gradio<5` と両立しない。同じ venv に両方は入らない。`addon.json` のエンジンの選択肢 (`engine`) には、今も `irodori` がある。
+
+#### 旧手順 (2026-05-23。3 番は、上に書いた理由でいまのままでは成り立たない)
 
 voice-tts repo は `origin = Nature109/saiverse-voice-tts` の共有 repo で、 現在 PR #4 (subscribe-before-open) がレビュー待ち。 v2 化は別 PR で出す方針:
 
