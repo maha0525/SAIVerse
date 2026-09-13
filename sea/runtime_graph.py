@@ -178,6 +178,18 @@ def compile_with_langgraph(
         # Create new PulseContext for this pulse (or get existing one from cache)
         pulse_ctx = runtime._get_or_create_pulse_context(pulse_id)
 
+    # 返事の始まりに決めたモデルと接続 (saiverse/persona_model_selection.py の
+    # ReplyModelBinding)。サブプレイブックも同じ返事の中なので引き継ぐ
+    # (docs/intent/persona_model_selection.md 決まったこと 10)。分離した
+    # PulseContext にも載せ、そこから唱えるスペル (run_playbook 等) にも届くようにする。
+    _model_binding = parent.get("_model_binding")
+    if _model_binding is None:
+        _model_binding = getattr(parent.get("_pulse_context"), "model_binding", None)
+    if _model_binding is not None and getattr(pulse_ctx, "model_binding", None) is None:
+        pulse_ctx.model_binding = _model_binding
+    if _model_binding is None:
+        _model_binding = getattr(pulse_ctx, "model_binding", None)
+
     # S4 (thread push/pop): この graph 実行の入口での thread スタック深さを記録。
     # 実行中に push された Stelis/subagent 切替は正常系ではノード自身が pop する。
     # 例外/cancel で pop 不達のときは finally で入口深さまで巻き戻し、「Beat が
@@ -230,6 +242,9 @@ def compile_with_langgraph(
         "_pulse_usage_accumulator": usage_accumulator,  # Inherit from parent or create new
         "_activity_trace": activity_trace,  # Shared trace of exec/tool activities
         "_pulse_context": pulse_ctx,  # Pulse-level log context (replaces _intermediate_msgs)
+        # 返事の始まりに決めたモデルと接続 (上のコメント)。LLM ノードの
+        # resolve_execution_context / select_llm_client がここから読む。
+        "_model_binding": _model_binding,
         "_spell_enabled": _spell_enabled,  # Per-persona spell system toggle
         # 「応答ループにユーザーが居ない Pulse か」。spell/tool 実行時の
         # persona_context(auto_mode=) と確認ダイアログの自動承認・auto フィルタが

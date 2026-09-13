@@ -27,16 +27,22 @@ _generating_paths: Set[str] = set()
 from saiverse.model_defaults import BUILTIN_DEFAULT_LITE_MODEL
 
 
+def _summary_model_raw(env_key: str) -> str:
+    # 空に戻したら組み込みの既定モデル (空文字をモデル名として使わない)
+    value = (os.getenv(env_key) or "").strip()
+    return value or BUILTIN_DEFAULT_LITE_MODEL
+
+
 def _get_image_summary_model_raw() -> str:
-    return os.getenv("SAIVERSE_IMAGE_SUMMARY_MODEL", BUILTIN_DEFAULT_LITE_MODEL)
+    return _summary_model_raw("SAIVERSE_IMAGE_SUMMARY_MODEL")
 
 
 def _get_audio_summary_model_raw() -> str:
-    return os.getenv("SAIVERSE_AUDIO_SUMMARY_MODEL", BUILTIN_DEFAULT_LITE_MODEL)
+    return _summary_model_raw("SAIVERSE_AUDIO_SUMMARY_MODEL")
 
 
 def _get_video_summary_model_raw() -> str:
-    return os.getenv("SAIVERSE_VIDEO_SUMMARY_MODEL", BUILTIN_DEFAULT_LITE_MODEL)
+    return _summary_model_raw("SAIVERSE_VIDEO_SUMMARY_MODEL")
 
 
 # Cached clients keyed by role name. Each entry is (client, model_raw_used).
@@ -48,8 +54,9 @@ _summary_clients: Dict[str, Tuple[Any, str]] = {}
 def _resolve_client_for_model(model_raw: str, role: str) -> Any:
     """Create an LLM client for the given model identifier.
 
-    Falls back to BUILTIN_DEFAULT_LITE_MODEL if the requested model isn't found.
-    Returns None on failure.
+    Returns None when the model has no definition or the client cannot be
+    created. It does not substitute another model: summaries stop until the
+    model is reselected (docs/intent/persona_model_selection.md, decision 7).
     """
     from saiverse.model_configs import find_model_config
     from llm_clients.factory import get_llm_client
@@ -57,16 +64,11 @@ def _resolve_client_for_model(model_raw: str, role: str) -> Any:
     config_key, config = find_model_config(model_raw)
     if not config:
         LOGGER.warning(
-            "%s summary model '%s' not found in model configs; falling back to '%s'",
-            role.capitalize(), model_raw, BUILTIN_DEFAULT_LITE_MODEL,
+            "%s summary model '%s' has no model definition; no summary is generated "
+            "until it is reselected (no substitute model)",
+            role.capitalize(), model_raw,
         )
-        config_key, config = find_model_config(BUILTIN_DEFAULT_LITE_MODEL)
-        if not config:
-            LOGGER.error(
-                "Fallback model '%s' also not found in model configs",
-                BUILTIN_DEFAULT_LITE_MODEL,
-            )
-            return None
+        return None
 
     provider = config.get("provider", "gemini")
     context_length = config.get("context_length", 128000)

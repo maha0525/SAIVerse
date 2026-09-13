@@ -136,6 +136,39 @@ def test_non_streaming_insert_failure_is_terminal() -> None:
     service.manager.pulse_dispatcher.dispatch_user_utterance.assert_not_called()
 
 
+def test_non_streaming_keeps_going_past_a_persona_without_a_usable_model() -> None:
+    """ストリームでない経路でも、モデルが使えない一人でほかのペルソナを止めない。"""
+    from llm_clients.exceptions import ModelUnavailableError
+
+    service = _runtime([SimpleNamespace(persona_id="p1"), SimpleNamespace(persona_id="p2")])
+    saved = {"message_id": "room:1", "_was_inserted": True}
+    called: list[str] = []
+
+    def _dispatch(*, persona_id, **_kwargs):
+        called.append(persona_id)
+        if persona_id == "p1":
+            raise ModelUnavailableError(
+                "lightweight_model 'gone-lite' is unreachable for persona p1",
+                role="lightweight_model",
+                reason="unreachable",
+                model="gone-lite",
+                persona_id="p1",
+                user_message="P1の軽量モデル 'gone-lite' に繋げなかったため、返事の途中の作業ができませんでした。",
+            )
+
+    service.manager.pulse_dispatcher.dispatch_user_utterance = MagicMock(side_effect=_dispatch)
+    service.personas = {}
+
+    with patch(
+        "database.building_messages.insert_building_message_with_location_guard",
+        return_value=saved,
+    ):
+        replies = service.handle_user_input("hello")
+
+    assert called == ["p1", "p2"]
+    assert any("P1の軽量モデル" in reply for reply in replies)
+
+
 # ---------------------------------------------------------------------------
 # 出口 3: 発言は受け取ったのに、画面へ何も出ないまま終わる回を捕まえる
 #
@@ -224,6 +257,51 @@ def test_a_reported_failure_is_not_reported_twice() -> None:
 
     assert [e for e in events if e.get("error_code") == "unknown"]
     assert _no_response(events) == []
+
+
+def test_a_persona_without_a_usable_model_does_not_silence_the_others() -> None:
+    """一人のモデルが使えなくても、同じ部屋のほかのペルソナの返事は止めない。
+
+    docs/intent/persona_model_selection.md 決まったこと 2 と同じ理由。2026-09-12 の
+    隔離環境での確認で、先に呼ばれたペルソナの ModelUnavailableError が、部屋の
+    残りのペルソナの受け口を一度も呼ばずに発言の処理を終わらせていた。
+    """
+    from llm_clients.exceptions import ModelUnavailableError
+
+    stopped = SimpleNamespace(persona_id="p1")
+    speaking = SimpleNamespace(persona_id="p2")
+    service = _runtime([stopped, speaking])
+    saved = {"message_id": "room:1", "_was_inserted": True}
+    called: list[str] = []
+
+    def _dispatch(*, persona_id, **_kwargs):
+        called.append(persona_id)
+        if persona_id == "p1":
+            raise ModelUnavailableError(
+                "default_model 'gone' is missing for persona p1",
+                role="default_model",
+                reason="missing",
+                model="gone",
+                persona_id="p1",
+                user_message="P1が選んでいた標準モデル 'gone' は SAIVerse にありません。",
+            )
+
+    service.manager.pulse_dispatcher.dispatch_user_utterance = MagicMock(side_effect=_dispatch)
+
+    with patch(
+        "database.building_messages.insert_building_message_with_location_guard",
+        return_value=saved,
+    ):
+        events = _events(
+            service.handle_user_input_stream(
+                "hello", building_id="room", client_message_id="cmd-1",
+            )
+        )
+
+    assert called == ["p1", "p2"]
+    unavailable = [e for e in events if e.get("error_code") == "model_unavailable"]
+    assert len(unavailable) == 1
+    assert "P1が選んでいた標準モデル" in unavailable[0]["content"]
 
 
 def test_a_persistence_failure_is_not_reported_twice() -> None:

@@ -106,8 +106,9 @@ interface ModelChoice {
     name: string;
 }
 
-/** Wrapper around fetch that checks res.ok and shows alert on error. Returns true on success. */
-async function apiCall(url: string, options?: RequestInit): Promise<boolean> {
+/** Wrapper around fetch that checks res.ok and shows alert on error.
+ * Returns the parsed JSON body on success (true when the body is not JSON), false on error. */
+async function apiCall(url: string, options?: RequestInit): Promise<any> {
     try {
         const res = await fetch(url, options);
         if (!res.ok) {
@@ -126,7 +127,8 @@ async function apiCall(url: string, options?: RequestInit): Promise<boolean> {
             alert(`エラー:\n${msg}`);
             return false;
         }
-        return true;
+        const data = await res.json().catch(() => null);
+        return data ?? true;
     } catch (e) {
         console.error('API call failed:', url, e);
         alert('エラー: ネットワークエラー');
@@ -408,7 +410,15 @@ export default function WorldEditor() {
         });
     };
     const handleCreateAI = async () => { if (await apiCall('/api/world/ais', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: formData.name, system_prompt: formData.system_prompt, home_city_id: formData.home_city_id }) })) { aiList.load(); setFormData({}); } };
-    const handleUpdateAI = async () => { if (await apiCall(`/api/world/ais/${selectedAI!.AIID}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(formData) })) { aiList.load(); } };
+    const handleUpdateAI = async () => {
+        const result = await apiCall(`/api/world/ais/${selectedAI!.AIID}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(formData) });
+        if (!result) return;
+        // 保存しなかったモデル設定や、新しい設定に切り替えられなかったことの知らせ (ペルソナ設定の画面と同じ文面)
+        if (typeof result === 'object' && typeof result.warning === 'string' && result.warning) {
+            alert(`設定は保存されましたが、警告があります:\n${result.warning}`);
+        }
+        aiList.load();
+    };
     const handleDeleteAI = async () => { if (confirm("このペルソナを削除しますか？") && await apiCall(`/api/world/ais/${selectedAI!.AIID}`, { method: 'DELETE' })) { setSelectedAI(null); setFormData({}); aiList.load(); } };
     const handleMoveAI = async () => {
         if (!selectedAI || !formData.target_building_name) return;

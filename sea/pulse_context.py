@@ -24,13 +24,16 @@ LOGGER = logging.getLogger("saiverse.pulse_context")
 
 
 def default_lightweight_model() -> str:
-    """軽量モデル未設定時のフォールバックチェーン (env → builtin 既定)。
+    """個別の軽量モデルが無いときに使う軽量モデル (グローバル設定 → 組み込み既定)。
 
-    ``sea/runtime.py`` の LLM 選択と ``resolve_execution_context`` の双方が
-    同じ解決結果になるよう、供給源をここに一本化している。
+    グローバル設定を空に戻したら組み込みの既定モデルになる (空文字をモデル名として
+    使わない)。返事の始まりに決める軽量モデル
+    (saiverse/persona_model_selection.py の ReplyModelBinding) と同じ規則。
     """
     from saiverse.model_defaults import BUILTIN_DEFAULT_LITE_MODEL
-    return os.getenv("SAIVERSE_DEFAULT_LIGHTWEIGHT_MODEL", BUILTIN_DEFAULT_LITE_MODEL)
+    from saiverse.persona_model_selection import global_lightweight_model_setting
+
+    return global_lightweight_model_setting() or BUILTIN_DEFAULT_LITE_MODEL
 
 
 class Aspect(str, Enum):
@@ -285,10 +288,26 @@ def resolve_execution_context(
         ))
         tier = "lightweight" if force_lightweight else "standard"
 
+    # 書いている途中の返事なら、返事の始まりに決めたモデルを使う
+    # (docs/intent/persona_model_selection.md 決まったこと 10)。途中でペルソナの
+    # モデル設定が変わっても、この返事の中の model_key は変わらない。
+    from saiverse.persona_model_selection import (
+        TIER_LIGHTWEIGHT,
+        TIER_STANDARD,
+        find_reply_binding,
+    )
+
+    binding = find_reply_binding(state=state, pulse_context=pulse_context, persona=persona)
     if tier == "lightweight":
-        model_key = getattr(persona, "lightweight_model", None) or default_lightweight_model()
+        if binding is not None:
+            model_key = binding.model_for(TIER_LIGHTWEIGHT)
+        else:
+            model_key = getattr(persona, "lightweight_model", None) or default_lightweight_model()
     else:
-        model_key = getattr(persona, "model", "unknown")
+        if binding is not None:
+            model_key = binding.model_for(TIER_STANDARD)
+        else:
+            model_key = getattr(persona, "model", "unknown")
 
     # ── thread_id: adapter の現在値が正 (Stelis/subagent の push/pop は
     #    PulseContext.push_thread / pop_thread が adapter と同期する) ──
@@ -348,6 +367,11 @@ class PulseContext:
     # Pulse 完了時に MetaLayer が meta_judgment_log テーブルへ flush する。
     # 形式: {"thought_parts": List[str], "spells": List[{name, args, result}]}
     meta_judgment_buffer: Optional[Dict[str, Any]] = None
+    # 返事の始まりに決めた、この返事で使うモデルと接続
+    # (saiverse/persona_model_selection.py の ReplyModelBinding)。分離した
+    # PulseContext を作るサブプレイブックや、別スレッドで走るスペルにも届くよう
+    # ここにも載せる。返事の外で作った PulseContext では None。
+    model_binding: Optional[Any] = None
 
     def append(self, entry: PulseLogEntry) -> None:
         """Append a log entry to this Pulse's log list."""

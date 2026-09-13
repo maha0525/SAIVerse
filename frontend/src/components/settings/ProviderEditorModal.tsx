@@ -165,6 +165,12 @@ export default function ProviderEditorModal({ isOpen, mode, providerId, onClose,
                 return;
             }
 
+            // 保存で決め直したときに、新しい設定に切り替えられなかったペルソナの知らせ
+            const data = await res.json().catch(() => null);
+            const notices: string[] = Array.isArray(data?.notices) ? data.notices : [];
+            if (notices.length > 0) {
+                alert(notices.join('\n\n'));
+            }
             onSaved();
             onClose();
         } catch (e) {

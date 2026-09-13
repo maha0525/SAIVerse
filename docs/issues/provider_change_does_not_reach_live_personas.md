@@ -1,7 +1,7 @@
 # プロバイダを変更しても、すでに動いているペルソナには届かない
 
 **起票**: 2026-08-05（資格情報の層束縛の改修中に発見。Codex 八巡目の指摘）
-**状態**: 未着手
+**状態**: 対応中 — 2026-09-12 にまはーが「モデルやプロバイダの設定を変えたときも、その場で反映する」と決め、[persona_model_selection.md](../intent/persona_model_selection.md) の実装で直す (書いている途中の返事は始まったときの接続で最後まで書き、次の返事から新しい設定で動く)
 **関連**: `persona/core.py`（`_llm_client` / `_lightweight_llm_client` のキャッシュ）、`saiverse/provider_configs.py`、`api/routes/providers.py`
 
 ## 何が起きるか

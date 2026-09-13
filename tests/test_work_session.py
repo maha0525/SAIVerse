@@ -741,7 +741,13 @@ def test_session_start_runs_window_refill_before_context(session_factory, person
 
     runtime._prepare_context = _recording_prepare
 
-    with patch("sea.work_session.refresh_mcp_tools_at_head", _fake_refresh):
+    from saiverse import model_configs
+
+    # 軽量モデルの設定ファイルが無いとセッションは始まらない
+    # (docs/intent/persona_model_selection.md 決まったこと 7) ので、合成の定義を置く
+    lite_definition = {"model": "vendor/lite-model", "provider": "stub", "context_length": 1000}
+    with patch("sea.work_session.refresh_mcp_tools_at_head", _fake_refresh), \
+         patch.dict(model_configs.MODEL_CONFIGS, {"lite-model": lite_definition}):
         result = _run(manager, budget=2)
 
     assert result.ended_reason == ENDED_FINISHED
@@ -751,6 +757,25 @@ def test_session_start_runs_window_refill_before_context(session_factory, person
         "building_id": "b1",
         "model_key": "lite-model",
     }]
+
+
+def test_session_stops_before_anything_when_the_lightweight_model_is_gone(session_factory, persona):
+    """作業セッションは軽量モデルの段。その設定ファイルが無ければ、読み戻しも頭の処理も
+    LLM 呼び出しもせずに error で終わる — 標準モデルで代わりに動かさない
+    (docs/intent/persona_model_selection.md 決まったこと 7)。"""
+    persona.lightweight_model = "gone-lite-model"
+    manager, runtime, client = _make_env(session_factory, persona, ["終わった。"])
+    refills: List[str] = []
+    runtime.session_lifecycle.maybe_run_window_refill = (
+        lambda p, building_id, model_key=None: refills.append(model_key) or "ok"
+    )
+
+    result = _run(manager, budget=2)
+
+    assert result.ended_reason == ENDED_ERROR
+    assert "ModelUnavailableError" in (result.error or "")
+    assert refills == []
+    assert client.calls == []
 
 
 def test_session_survives_window_refill_failure(session_factory, persona):

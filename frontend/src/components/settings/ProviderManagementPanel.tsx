@@ -29,10 +29,11 @@ export default function ProviderManagementPanel() {
     const [editorOpen, setEditorOpen] = useState(false);
     const [editorMode, setEditorMode] = useState<ProviderEditorMode>('create');
     const [editingId, setEditingId] = useState<string | undefined>();
-    // Personas that have already spoken keep the connection they built, so a
-    // change here does not reach them until restart. Saying so at the moment of
-    // the change, rather than only in the docs, keeps it from looking like the
-    // setting was ignored.
+    // A change here reaches every persona from its next reply, without a restart;
+    // a reply already being written finishes with the settings it started with.
+    // Saying so at the moment of the change keeps it from looking like the setting
+    // was ignored. Personas that could not be switched are named in an alert right
+    // after the save or delete.
     const [notice, setNotice] = useState<string | null>(null);
     const [codexStatus, setCodexStatus] = useState<CodexAuthStatus | null>(null);
     const [codexLoginOpen, setCodexLoginOpen] = useState(false);
@@ -130,7 +131,13 @@ export default function ProviderManagementPanel() {
                 alert(`削除に失敗しました: ${text}`);
                 return;
             }
-            setNotice('削除しました。SAIVerse を起動してから既にこのプロバイダで喋ったペルソナは、再起動するまで削除前の接続へ送り続けます。通常用と軽量用の接続は別々に作られるため、同じペルソナの中で新旧が混ざることもあります。');
+            // 削除で決め直したときに、新しい設定に切り替えられなかったペルソナの知らせ
+            const data = await res.json().catch(() => null);
+            const notices: string[] = Array.isArray(data?.notices) ? data.notices : [];
+            if (notices.length > 0) {
+                alert(notices.join('\n\n'));
+            }
+            setNotice('削除しました。書いている途中の返事は削除前の設定のまま書き終え、次の返事から新しい設定で接続します。再起動は要りません。');
             loadProviders();
         } catch (e) {
             alert(`削除に失敗しました: ${e}`);
@@ -223,7 +230,7 @@ export default function ProviderManagementPanel() {
                 providerId={editingId}
                 onClose={() => setEditorOpen(false)}
                 onSaved={() => {
-                    setNotice('保存しました。SAIVerse を起動してから既にこのプロバイダで喋ったペルソナは、再起動するまで変更前の接続を使い続けます。通常用と軽量用の接続は別々に作られるため、同じペルソナの中で新旧が混ざることもあります。');
+                    setNotice('保存しました。書いている途中の返事は変更前の設定のまま書き終え、次の返事から新しい設定で接続します。再起動は要りません。');
                     loadProviders();
                 }}
             />

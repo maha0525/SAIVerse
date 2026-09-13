@@ -11,7 +11,7 @@ import queue
 from google.genai import errors
 
 from api.deps import avatar_path_to_url
-from llm_clients.exceptions import LLMError
+from llm_clients.exceptions import LLMError, ModelUnavailableError
 from discord_gateway.translator import GatewayCommand
 from manager.persona import PersonaMixin
 from manager.visitors import VisitorMixin
@@ -624,12 +624,23 @@ class RuntimeService(
 
             # pulse_dispatch.md §7: PulseDispatcher 経由で起動 (例外時の
             # フォールバックは Dispatcher が担う)
-            self.manager.pulse_dispatcher.dispatch_user_utterance(
-                persona_id=captured_persona.persona_id,
-                user_id=user_id_str,
-                event=user_entry,
-                invoke_main_line=_invoke_main_line,
-            )
+            try:
+                self.manager.pulse_dispatcher.dispatch_user_utterance(
+                    persona_id=captured_persona.persona_id,
+                    user_id=user_id_str,
+                    event=user_entry,
+                    invoke_main_line=_invoke_main_line,
+                )
+            except ModelUnavailableError as e:
+                # 使うモデルが無い・繋げないペルソナが一人いても、同じ部屋のほかの
+                # ペルソナの返事は止めない (ストリーム版と同じ扱い)。知らせは
+                # このペルソナの分だけ返す。
+                logging.warning(
+                    "[runtime] persona %s cannot speak (%s); continuing with the other personas",
+                    captured_persona.persona_id, e,
+                )
+                replies.append(f'<div class="note-box">{e.user_message}</div>')
+                continue
         logging.debug("[runtime] handle_user_input collected %d replies", len(replies))
 
         self._save_modified_buildings()
@@ -830,13 +841,28 @@ class RuntimeService(
                         "event_callback": _enrich_event,
                     }
 
-                    self.manager.pulse_dispatcher.dispatch_user_utterance(
-                        persona_id=captured_persona.persona_id,
-                        user_id=user_id_str,
-                        event=user_entry,
-                        invoke_main_line=_invoke_main_line,
-                        pulse_options=pulse_options,
-                    )
+                    try:
+                        self.manager.pulse_dispatcher.dispatch_user_utterance(
+                            persona_id=captured_persona.persona_id,
+                            user_id=user_id_str,
+                            event=user_entry,
+                            invoke_main_line=_invoke_main_line,
+                            pulse_options=pulse_options,
+                        )
+                    except ModelUnavailableError as e:
+                        # このペルソナは使うモデルが無い・繋げないので話せない。同じ部屋の
+                        # ほかのペルソナの返事までは止めない (一人の不調で全員を止めない —
+                        # docs/intent/persona_model_selection.md 決まったこと 2 と同じ理由)。
+                        # 知らせはこのペルソナの分だけチャット画面に出す。
+                        logging.warning(
+                            "[runtime] persona %s cannot speak (%s); continuing with the other personas",
+                            captured_persona.persona_id, e,
+                        )
+                        if stop_event.is_set():
+                            _enrich_event({"type": "cancelled", "content": "生成を中止しました。"})
+                            break
+                        _enrich_event(e.to_dict())
+                        continue
                     # Check stop event after each persona completes
                     if stop_event.is_set():
                         logging.info("[runtime] Stop event detected after persona %s; breaking loop", persona.persona_id)

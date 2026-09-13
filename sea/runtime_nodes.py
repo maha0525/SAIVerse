@@ -445,7 +445,7 @@ def lg_stelis_end_node(runtime: Any, node_def: Any, persona: Any, playbook: Any,
         if not stelis_info:
             LOGGER.warning("[stelis] Current thread %s is not a Stelis thread", current_thread_id)
             return state
-        chronicle_summary = runtime._generate_stelis_chronicle(persona, current_thread_id, stelis_info.chronicle_prompt) if generate_chronicle else None
+        chronicle_summary = runtime._generate_stelis_chronicle(persona, current_thread_id, stelis_info.chronicle_prompt, state=state) if generate_chronicle else None
         memory_adapter.end_stelis_thread(thread_id=current_thread_id, status="completed", chronicle_summary=chronicle_summary)
         # S4: start が push した親を pop で復元する。pop の記録値が state の
         # 親と食い違ったら WARN (入れ子の pop 漏れの兆候)。push を経ていない

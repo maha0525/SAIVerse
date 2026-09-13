@@ -34,6 +34,10 @@ from database.models import (
 )
 from manager.blueprints import BlueprintMixin
 from manager.persona import PersonaMixin
+from saiverse import model_configs
+
+#: svc.model に入れるチャット画面のモデル一時上書きの定義
+_TEST_MODEL_DEFINITION = {"model": "vendor/test-model", "provider": "stub", "context_length": 1000}
 
 
 class _StubPersonaCore:
@@ -88,8 +92,9 @@ class PersonaCreationWiringTestCase(unittest.TestCase):
         svc.SessionLocal = self.SessionLocal
         svc.city_id = 1
         svc.city_name = "city_a"
+        # チャット画面のモデル一時上書きが有効な状態
         svc.model = "test-model"
-        svc._base_model = "test-model"
+        svc.model_parameter_overrides = {"temperature": 0.2}
         svc.saiverse_home = Path(tempfile.mkdtemp())
         svc.default_avatar = "avatar.png"
         svc.user_room_id = "user_room_city_a"
@@ -119,8 +124,7 @@ class PersonaCreationWiringTestCase(unittest.TestCase):
 
     def _create(self, name, **kwargs):
         with patch("manager.persona.PersonaCore", _StubPersonaCore), \
-             patch("manager.persona.get_model_provider", return_value="stub"), \
-             patch("manager.persona.get_context_length", return_value=1000):
+             patch.dict(model_configs.MODEL_CONFIGS, {"test-model": _TEST_MODEL_DEFINITION}):
             return self.svc._create_persona(name, "system prompt", **kwargs)
 
     def _room_id_in_db(self, ai_id):
@@ -318,6 +322,31 @@ class PersonaCreationWiringTestCase(unittest.TestCase):
         self.assertIn("already exists", msg)
         self.assertEqual(list(self.svc.building_map), buildings_before)
 
+    # --- 話す標準モデル (docs/intent/persona_model_selection.md 決まったこと 1) ---
+
+    def test_the_override_model_is_not_saved_as_the_personas_default_model(self):
+        """一時上書き中に作ると、上書きのモデルで話すが、個別の標準モデルとしては保存しない。"""
+        ok, _msg, ai_id, _room = self._create("Sophie")
+        self.assertTrue(ok)
+        db = self.SessionLocal()
+        try:
+            self.assertIsNone(db.query(AIModel).filter_by(AIID=ai_id).one().DEFAULT_MODEL)
+        finally:
+            db.close()
+        persona = self.svc.personas[ai_id]
+        self.assertEqual(persona.model, "test-model")
+        self.assertEqual(persona.speaking_model_choice.source, "override")
+        self.assertEqual(persona._pending_parameter_overrides, {"temperature": 0.2})
+
+    def test_without_an_override_the_new_persona_uses_the_global_default(self):
+        self.svc.model = None
+        with patch.dict(os.environ, {"SAIVERSE_DEFAULT_MODEL": "test-model"}):
+            ok, _msg, ai_id, _room = self._create("Sophie")
+        self.assertTrue(ok)
+        persona = self.svc.personas[ai_id]
+        self.assertEqual(persona.model, "test-model")
+        self.assertEqual(persona.speaking_model_choice.source, "global")
+
 
 class BlueprintSpawnWiringTestCase(unittest.TestCase):
     """ブループリント孵化 (spawn_entity_from_blueprint) の配線契約。
@@ -386,8 +415,7 @@ class BlueprintSpawnWiringTestCase(unittest.TestCase):
 
     def _spawn(self, entity_name):
         with patch("manager.blueprints.PersonaCore", _StubPersonaCore), \
-             patch("manager.blueprints.get_model_provider", return_value="stub"), \
-             patch("manager.blueprints.get_context_length", return_value=1000):
+             patch.dict(model_configs.MODEL_CONFIGS, {"test-model": _TEST_MODEL_DEFINITION}):
             return self.svc.spawn_entity_from_blueprint(1, entity_name, "plaza_city_a")
 
     def _ai_row(self, ai_id):
@@ -433,6 +461,25 @@ class BlueprintSpawnWiringTestCase(unittest.TestCase):
         row = self._ai_row("persona_2_city_a")
         self.assertIsNotNone(row, "既存私室の番号を飛ばした連番になっていない")
         self.assertEqual(row.PRIVATE_ROOM_ID, "persona_2_city_a_room")
+
+    def test_the_override_model_is_not_saved_as_the_spawned_personas_default_model(self):
+        """一時上書き中に設計図から生成すると、上書きのモデルで話すが保存はしない。"""
+        ok, msg = self._spawn("Golem")
+        self.assertTrue(ok, msg)
+        self.assertIsNone(self._ai_row("golem_city_a").DEFAULT_MODEL)
+        persona = self.svc.personas["golem_city_a"]
+        self.assertEqual(persona.model, "test-model")
+        self.assertEqual(persona.speaking_model_choice.source, "override")
+
+    def test_without_an_override_the_spawned_persona_uses_the_global_default(self):
+        """2026-09-11 までは、一時上書きが無いとモデル名が空のまま定義を引いて例外になっていた。"""
+        self.svc.model = None
+        with patch.dict(os.environ, {"SAIVERSE_DEFAULT_MODEL": "test-model"}):
+            ok, msg = self._spawn("Golem")
+        self.assertTrue(ok, msg)
+        persona = self.svc.personas["golem_city_a"]
+        self.assertEqual(persona.model, "test-model")
+        self.assertEqual(persona.speaking_model_choice.source, "global")
 
 
 if __name__ == "__main__":

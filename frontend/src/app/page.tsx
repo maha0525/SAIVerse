@@ -3452,7 +3452,7 @@ export default function Home() {
                                         <div className={styles.errorContent}>
                                             <div className={styles.errorHeader}>
                                                 <span className={styles.errorIcon}>
-                                                    {({rate_limit: '⏱️', timeout: '⏰', safety_filter: '🛡️', server_error: '🔧', empty_response: '📭', authentication: '🔑', payment: '💳', no_response: '💭', no_responder: '🚪', unknown_outcome: '❓', stream_broken: '🔌', send_failed: '🔌', message_not_found: '🔍', location_conflict: '📍'} as Record<string, string>)[msg.errorCode || ''] || '⚠️'}
+                                                    {({rate_limit: '⏱️', timeout: '⏰', safety_filter: '🛡️', server_error: '🔧', empty_response: '📭', authentication: '🔑', payment: '💳', no_response: '💭', no_responder: '🚪', unknown_outcome: '❓', stream_broken: '🔌', send_failed: '🔌', message_not_found: '🔍', location_conflict: '📍', model_unavailable: '🧩'} as Record<string, string>)[msg.errorCode || ''] || '⚠️'}
                                                 </span>
                                                 <span className={styles.errorMessage}>{msg.content}</span>
                                             </div>
@@ -3481,6 +3481,11 @@ export default function Home() {
                                                     // 他の画面が先に移動していた回。発言はサーバーに
                                                     // 届いていないので、本文は入力欄へ返してある。
                                                     location_conflict: '発言は保存されていません。本文は入力欄に戻したので、いまいる場所を確かめてから送り直してください。',
+                                                    // 使うモデルが無い・繋げない回。待っても直らないので「少し待って」は
+                                                    // 出さない。上の文面が選び直す場所を言うので、ここは発言が残って
+                                                    // いることと、選び直した後の手立てだけを足す
+                                                    // (docs/intent/persona_model_selection.md 決まったこと 8)。
+                                                    model_unavailable: 'あなたの発言は記録に残っています。モデルを選び直したあと、発言の「再送」から応答をもう一度求められます。',
                                                     empty_message: '空のまま送信されました。内容を入れてから送ってください。',
                                                     no_current_building: 'いまいる場所が確定していません。画面を再読み込みするか、建物を選び直してください。',
                                                     action_failed: '操作をサーバーに届けられませんでした。接続を確認してもう一度お試しください。',

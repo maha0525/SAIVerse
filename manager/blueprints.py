@@ -18,7 +18,11 @@ from manager.ids import build_identifier
 from manager.persona import ai_stem_taken
 from persona.core import PersonaCore
 from saiverse.buildings import Building
-from saiverse.model_configs import get_context_length, get_model_provider
+from saiverse.persona_model_selection import (
+    attach_speaking_model_choice,
+    initial_speaking_model,
+    register_new_persona,
+)
 
 
 class BlueprintMixin:
@@ -247,7 +251,9 @@ class BlueprintMixin:
                 SYSTEMPROMPT=blueprint.BASE_SYSTEM_PROMPT,
                 DESCRIPTION=blueprint.DESCRIPTION,
                 AVATAR_IMAGE=blueprint.BASE_AVATAR,
-                DEFAULT_MODEL=self.model,
+                # 個別の標準モデルは持たせない (一時上書きのモデルを保存しない —
+                # docs/intent/persona_model_selection.md 決まったこと 1)。
+                DEFAULT_MODEL=None,
                 PRIVATE_ROOM_ID=private_room_id,
             )
             db.add(new_ai_model)
@@ -302,9 +308,12 @@ class BlueprintMixin:
                 self.building_histories[private_room_id] = []
 
             if in_this_city:
-                blueprint_model = self.model
-                blueprint_provider = get_model_provider(blueprint_model)  # Get provider for model
-                blueprint_context_length = get_context_length(blueprint_model)
+                # いまの設定 (一時上書き → グローバル → 組み込み) で決める。
+                # 2026-09-11 まではここだけ一時上書きの値をそのまま使い、上書きが
+                # 無いとモデル名が空のまま定義を引いて例外になっていた。
+                (
+                    choice, blueprint_provider, blueprint_context_length, parameter_overrides,
+                ) = initial_speaking_model(self)
 
                 from saiverse.data_paths import find_file, PROMPTS_DIR
                 common_prompt_file = find_file(PROMPTS_DIR, "common.txt") or Path("system_prompts/common.txt")
@@ -319,22 +328,23 @@ class BlueprintMixin:
                     building_histories=self.building_histories,
                     occupants=self.occupants,
                     id_to_name_map=self.id_to_name_map,
-                session_factory=self.SessionLocal,
-                start_building_id=target_building_id,
-                model=blueprint_model,
-                context_length=blueprint_context_length,
-                user_room_id=self.user_room_id,
-                provider=blueprint_provider,  # Use provider for model
-                is_dispatched=False,
-                timezone_info=self.timezone_info,
-                timezone_name=self.timezone_name,
-                item_registry=self.items,
-                inventory_item_ids=self.items_by_persona.get(new_ai_id, []),
-                persona_event_fetcher=self.get_persona_pending_events,
-                persona_event_ack=self.archive_persona_events,
-                manager_ref=self,
-            )
-                self.personas[new_ai_id] = new_persona_core
+                    session_factory=self.SessionLocal,
+                    start_building_id=target_building_id,
+                    model=choice.model,
+                    context_length=blueprint_context_length,
+                    user_room_id=self.user_room_id,
+                    provider=blueprint_provider,
+                    is_dispatched=False,
+                    timezone_info=self.timezone_info,
+                    timezone_name=self.timezone_name,
+                    item_registry=self.items,
+                    inventory_item_ids=self.items_by_persona.get(new_ai_id, []),
+                    persona_event_fetcher=self.get_persona_pending_events,
+                    persona_event_ack=self.archive_persona_events,
+                    manager_ref=self,
+                )
+                attach_speaking_model_choice(new_persona_core, choice, parameter_overrides)
+                register_new_persona(self, new_ai_id, new_persona_core, choice)
                 self.avatar_map[new_ai_id] = self.default_avatar
                 self.id_to_name_map[new_ai_id] = entity_name
                 self.persona_map[entity_name] = new_ai_id
