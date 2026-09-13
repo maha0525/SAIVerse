@@ -1,8 +1,8 @@
 # Unity Gateway の削除 (認証なしで全ネットワークインターフェースに開いていた)
 
-**状態**: 検証待ち (2026-09-11 起票。develop 向けの PR で、まはーの確認を待っている)
+**状態**: 完了 (2026-09-11 起票 → 2026-09-13 まはーの指示で develop へマージ (PR #291)、v0.3.13 に収載。同日、v0.3.13 でのバックエンド再起動後に 8765 番がどのインターフェースでも開いていないことを netstat で確認した)
 **起票**: 2026-09-11 (まはーの依頼で行った Unity Gateway の調査の中で起票)
-**関連**: `unity_gateway/` (削除)、`main.py`、`sea/runtime_emitters.py`、`sea/runtime.py` の `_build_realtime_context`、`builtin_data/tools/control_body.py` (削除)、[Godot で 3D アバターを動かす計画の設計文書](../intent/virtual_embodiment_godot.md)、[旧設計書](../old/unity-gateway.md)、[状態を変える API に「どこから来た操作か」の確認が無い件](api_state_changing_routes_have_no_origin_check.md)
+**関連**: `unity_gateway/` (削除)、`main.py`、`sea/runtime_emitters.py`、`sea/runtime.py` の `_build_realtime_context`、`builtin_data/tools/control_body.py` (削除)、[Godot で 3D アバターを動かす計画の設計文書](../../intent/virtual_embodiment_godot.md)、[旧設計書](../../old/unity-gateway.md)、[状態を変える API に「どこから来た操作か」の確認が無い件](../api_state_changing_routes_have_no_origin_check.md)
 
 ## 何が起きていたか
 
@@ -18,7 +18,7 @@ Unity Gateway は、Unity で作った 3D クライアントと SAIVerse をつ�
 
 周辺では、次のことも起きていた。
 
-- テストサーバーも起動時に同じポートを使う設定だったので、本番と同じ PC で起動すると、後から起動した側の Unity Gateway が起動に失敗していた ([2026-08-29 のアップグレード検証の記録](../handoff/2026-08-29_v0229_upgrade_test.md))。
+- テストサーバーも起動時に同じポートを使う設定だったので、本番と同じ PC で起動すると、後から起動した側の Unity Gateway が起動に失敗していた ([2026-08-29 のアップグレード検証の記録](../../handoff/2026-08-29_v0229_upgrade_test.md))。
 - 2026-05-13 にスタックチャンの MCP ゲートウェイを組み込んだときには、ゲートウェイの既定のポート 8765 が Unity Gateway と競合してゲートウェイが起動できず、スタックチャン側のポートを 18765 に変えて避けた (開発時の作業記録による)。いまのスタックチャンのアドオンでは、機体ごとのゲートウェイのポートが 8765 から順に割り当てられ、そのポートが OS 上で空いているかは確かめられないので、新しく入れた環境では同じ競合がまた起こりえた。
 - `UNITY_GATEWAY_ENABLED` を `true` 以外にすると、SAIVerse の起動時の処理 (`main.py` の `_lifespan`) で NameError が起き、バックエンドが起動しない不具合があった。起動時の処理の中の `asyncio` という名前が、Unity Gateway を起動する分岐の中の `import asyncio` に結び付いていて、その分岐を通らないと値が無いためである。コンパイル時の名前の解決 (symtable) と、最小限の再現用コードで確かめた。SAIVerse を実際にこの設定で起動しては確かめていない。
 
@@ -28,7 +28,7 @@ Unity Gateway は、Unity で作った 3D クライアントと SAIVerse をつ�
 - まはーの PC で動いていた本番は、`0.0.0.0:8765` で待ち受けていた。本番が使っていた python.exe には、受信を許可するファイアウォールのルールが Private と Public の両方で有効だった。有線 LAN と Tailscale は、どちらも Private 扱いだった。
 - 残っていた本番ログ (2026-07-22〜09-11) のうち、Unity Gateway が起動していた 129 セッションに、接続・ハンドシェイクの失敗・普通の HTTP の問い合わせの記録は一件も無かった。
 - まはーの手元にだけある Unity クライアント (`unity_client/`、git の管理外) は、スクリプトの最終更新が 2025-12-31 で、送る処理はハンドシェイクと空間情報の二つだけだった。
-- [Godot で 3D アバターを動かす計画の設計文書](../intent/virtual_embodiment_godot.md) には、Unity を公開デモの計画から外し、`unity_gateway` を知見を拾うための旧実装として扱うと書かれていた。
+- [Godot で 3D アバターを動かす計画の設計文書](../../intent/virtual_embodiment_godot.md) には、Unity を公開デモの計画から外し、`unity_gateway` を知見を拾うための旧実装として扱うと書かれていた。
 
 ## 確かめていないこと
 
@@ -51,7 +51,7 @@ Unity Gateway は、Unity で作った 3D クライアントと SAIVerse をつ�
 - ペルソナの発言を Unity Gateway へ送る処理 (`notify_unity_speak`) と、リアルタイム情報に空間情報を差し込む処理。
 - Unity 向けの身体制御ツール `control_body` と、それを最後のノードに持っていた組み込みの playbook 4 本 (`track_user_conversation`、`track_social`、`track_external`、`sub_speak`) の該当ノード。組み込みの playbook ファイルから DB に取り込まれた行は、起動のたびにファイルの内容と比べられ、違いがあれば自動で更新される。
 - Unity 専用の追加プロンプト `builtin_data/prompts/body_control.txt`。
-- 旧設計書は `docs/features/` から [`docs/old/unity-gateway.md`](../old/unity-gateway.md) へ移した。
+- 旧設計書は `docs/features/` から [`docs/old/unity-gateway.md`](../../old/unity-gateway.md) へ移した。
 
 ### 他の利用者への影響
 
@@ -71,7 +71,7 @@ Unity Gateway は、Unity で作った 3D クライアントと SAIVerse をつ�
 
 ## この issue では扱わない、隣で見つけたこと
 
-- フロントエンド (Next.js の `next start`) は、全ネットワークインターフェースのポート 3000 で待ち受けていた (2026-09-11 に netstat で `0.0.0.0:3000` と `[::]:3000` を確認)。`/api` への要求は、127.0.0.1:8000 の SAIVerse のバックエンドへそのまま中継される。既定の起動ではバックエンドにオーナー認証 (`OwnerAuthMiddleware`) が掛からないので、ポート 3000 に届く相手からは、API 全体に認証なしで届く可能性がある。これは実際の接続を試していない推測である。この推測が正しければ、[状態を変える API に「どこから来た操作か」の確認が無い件](api_state_changing_routes_have_no_origin_check.md) で想定されている範囲 (悪意のあるページを同じブラウザで開いたときだけで、しかも返事は読めない) より広い。
+- フロントエンド (Next.js の `next start`) は、全ネットワークインターフェースのポート 3000 で待ち受けていた (2026-09-11 に netstat で `0.0.0.0:3000` と `[::]:3000` を確認)。`/api` への要求は、127.0.0.1:8000 の SAIVerse のバックエンドへそのまま中継される。既定の起動ではバックエンドにオーナー認証 (`OwnerAuthMiddleware`) が掛からないので、ポート 3000 に届く相手からは、API 全体に認証なしで届く可能性がある。これは実際の接続を試していない推測である。この推測が正しければ、[状態を変える API に「どこから来た操作か」の確認が無い件](../api_state_changing_routes_have_no_origin_check.md) で想定されている範囲 (悪意のあるページを同じブラウザで開いたときだけで、しかも返事は読めない) より広い。
 - Godot vessel アドオンの WebSocket のエンドポイントには、上の中継を通っては届かない見込みである。Next.js では、アプリ側のルートに一致した WebSocket の接続は切られ、`/api/addon/[...path]` のルートがそこに一致するためである。加えて、このエンドポイントでは、同じ PC の中 (loopback) 以外から来た接続は拒否され、ペアリングのときに発行したトークンが一致しない接続も拒否される。中継を通らないことはコードから読み取った推測で、実際の接続は試していない。
 
 ## 経緯
@@ -79,5 +79,6 @@ Unity Gateway は、Unity で作った 3D クライアントと SAIVerse をつ�
 - 2026-09-11: まはーの依頼で Unity Gateway を調査した。受け付けるメッセージ、使っているもの、docs での扱いを確かめ、検証用の環境で、繋いだ相手に何が届くかを再現して、選択肢を示した。メティスは削除を推し、ポートを今すぐ閉じる回避策として `.env` に `UNITY_GATEWAY_ENABLED=false` を足すことも二回勧めた。まはーが削除を了承し、同日に削除の実装に入った。
 - 2026-09-11: まはーが、この削除を v0.3.12 には入れず develop に入れると決めた (「0.3.12 は今日中に出したくて、ちょっとスコープ広げられないんだ。Unity まわりの問題も結局は LAN 内に何か侵入されてる前提の脆弱性だし、いままでもずーっとあったわけだから急ぐものではないかなと」)。
 - 2026-09-11: Codex レビューの一巡目で、未登録のツール名を指す TOOL ノードが「None という結果の成功」として記録されることが分かった。削除した `control_body` を指す上書き版の playbook がこれを踏むので、`lg_tool_node` を関数呼び出しの経路 (`lg_tool_call_node`) と同じく失敗として記録する形に直し、回帰テスト `tests/sea/test_tool_node_missing_tool.py` を足した。
-- 2026-09-11: Codex レビューの二巡目で、関数呼び出しの経路 (`lg_tool_call_node`) も、呼ぶツールが見つからないときに会話へ「失敗した」という返事 (role="tool") を足さずに抜けていたことが分かった。後続の LLM の呼び出しがプロバイダに拒否されうる。一巡目の修正と同じ種類の欠陥なので、同じく失敗の処理へ送る形に直し、同じテストファイルに回帰テストを足した。呼ぶツールが見つからない場面は、この二つと、雑用ツールの経路 (`runtime_llm.py`、もともと失敗の返事を足していた)、スペルの経路 (もともと失敗として返していた) の四か所で全部である。同じ巡のもう一件、「ツールが失敗した回は画面の実行履歴とノード単位の記録に残らない」は、画面の見え方の仕様を決める必要があるので、この削除では直さずに [別の issue](tool_failure_missing_from_activity_trace.md) に記録した。
+- 2026-09-11: Codex レビューの二巡目で、関数呼び出しの経路 (`lg_tool_call_node`) も、呼ぶツールが見つからないときに会話へ「失敗した」という返事 (role="tool") を足さずに抜けていたことが分かった。後続の LLM の呼び出しがプロバイダに拒否されうる。一巡目の修正と同じ種類の欠陥なので、同じく失敗の処理へ送る形に直し、同じテストファイルに回帰テストを足した。呼ぶツールが見つからない場面は、この二つと、雑用ツールの経路 (`runtime_llm.py`、もともと失敗の返事を足していた)、スペルの経路 (もともと失敗として返していた) の四か所で全部である。同じ巡のもう一件、「ツールが失敗した回は画面の実行履歴とノード単位の記録に残らない」は、画面の見え方の仕様を決める必要があるので、この削除では直さずに [別の issue](../tool_failure_missing_from_activity_trace.md) に記録した。
 - 2026-09-11: 削除の実装の途中で、上の NameError の不具合が見つかった。`.env` に 1 行足す回避策は、削除が入る前の版で行うと SAIVerse が起動できなくなるので、まはーに撤回を伝えた。
+- 2026-09-13: PR #291 をまはーの指示で develop へマージした。マージ時の衝突 3 件 (発言の書き込み口のコメント・リリース履歴・ツールカタログの件数見出し) は develop 側の新しい中身を正にして解消 (Unity の字を消す意図と「v0.3.12 に入れない」の記録は保持)。v0.3.13 (release/v0.3.13) に載せ、起動後に 8765 番が開かないことの確認は v0.3.13 の動作確認で行う。
