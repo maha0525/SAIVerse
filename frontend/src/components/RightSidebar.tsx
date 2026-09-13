@@ -499,6 +499,8 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger, currentB
                         fetchDetails();
                         setSelectedItem(null);
                     }}
+                    // まとめ収納のように操作を続ける経路。部屋の一覧だけ更新し、モーダルは開いたままにする。
+                    onWorldChanged={() => fetchDetails()}
                 />
 
                 {selectedFixture && (
