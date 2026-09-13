@@ -2,7 +2,7 @@
 
 **ステータス**: 完了 — 設計 1〜4（縮みの規則・しきい値の一系統化・プリセットの画面まで）実装済み。レビューはローカル LLM 3 本 + Codex 1.5 巡 + 代行 2 巡で収束、フルスイート緑。2026-09-11 にまはーの実機検証 (GPT-Image 2.5 生成・プリセット画面・既定変更による会話前の整理・棚卸し後の警告) を通り、v0.3.12 として発行済み
 **対象のリリース**: v0.3.12 (2026-09-11 発行)。release_history の「次の版の範囲」の節にある持ち越しのうち、知覚の既定値・保存時検査の余裕 10,000・perception_high null の素通しの 3 件は、この設計で問いごと解消する
-**関連**: [watermarks_unsatisfiable_when_perception_is_large.md](../issues/archive/watermarks_unsatisfiable_when_perception_is_large.md)（前段の議論と裁定の記録）/ [perception_buffer.md](perception_buffer.md) §10.9（知覚の二つのしきい値 — 本設計の廃止対象）/ [metabolism.md](../concepts/metabolism.md) / [room_state_packages.md](room_state_packages.md) / [room_items_uncapped.md](../issues/room_items_uncapped.md)（隣接・別裁定）
+**関連**: [watermarks_unsatisfiable_when_perception_is_large.md](../issues/archive/watermarks_unsatisfiable_when_perception_is_large.md)（前段の議論と裁定の記録）/ [perception_buffer.md](perception_buffer.md) §10.9（知覚の二つのしきい値 — 本設計の廃止対象）/ [metabolism.md](../concepts/metabolism.md) / [room_state_packages.md](room_state_packages.md) / [room_items_uncapped.md](../issues/archive/room_items_uncapped.md)（隣接・別裁定）
 
 ## 一言で
 
@@ -118,7 +118,7 @@
 
 - **供給側の文量の制限** — スペル結果・部屋の様子が生まれる時点の文量そのもの（[nonconversation_supply_volume.md](../issues/nonconversation_supply_volume.md)）
 - **システムプロンプトのスペル一覧の常駐量**（[head_prompt_followups.md](../issues/head_prompt_followups.md) §1。head 側が痩せれば、同一描画を同梱する操作通知も一緒に痩せる）
-- **アイテム個数上限**（[room_items_uncapped.md](../issues/room_items_uncapped.md) — 新 feature ブランチの裁定済み。入れば設計 1 の「用が乏しい」の中身がさらに減る）
+- **アイテム個数上限**（[room_items_uncapped.md](../issues/archive/room_items_uncapped.md) — 新 feature ブランチの裁定済み。入れば設計 1 の「用が乏しい」の中身がさらに減る）
 - **スタイル構想** — キャッシュの使い方別の方針プリセット（ideas 帳）。「ユーザーは方針を選び、数字は内側に沈む」の傘
 
 ## 検証 — 実機でどう確かめるか
