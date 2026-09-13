@@ -2,7 +2,7 @@
 
 SAIVerseとUnityクライアントを連携させるための設計書。
 
-> ℹ️ **これは削除済みの機能の旧設計書である**。Unity Gateway (`unity_gateway/`) は 2026-09-11 にリポジトリから削除した。削除する前に調べたこと (認証なしで全ネットワークインターフェースに開いていたこと、使われた記録が無かったことなど) と、削除を決めた経緯は [unity_gateway_removal.md](../issues/unity_gateway_removal.md) にある。この文書のプロトコル・コード例・Phase の計画は、現在のコードに対応していない。
+> ℹ️ **これは削除済みの機能の旧設計書である**。Unity Gateway (`unity_gateway/`) は 2026-09-11 にリポジトリから削除した。削除する前に調べたこと (認証なしで全ネットワークインターフェースに開いていたこと、使われた記録が無かったことなど) と、削除を決めた経緯は [unity_gateway_removal.md](../issues/archive/unity_gateway_removal.md) にある。この文書のプロトコル・コード例・Phase の計画は、現在のコードに対応していない。
 
 ## 概要
 
