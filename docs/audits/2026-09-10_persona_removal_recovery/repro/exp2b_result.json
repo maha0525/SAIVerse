@@ -1,0 +1,12 @@
+{
+  "unified_recall": [
+    {
+      "source_type": "message",
+      "uri": "saiverse://self/message/79fcbddd-a176-4adb-80ff-db1512586699",
+      "title": "assistant @ 2026-09-10 00:42",
+      "content": "PROBE-A-PERSONA-2 棚は三段で、上段に定規を置くことにした",
+      "score": 0.0164
+    }
+  ],
+  "hit_count": 1
+}

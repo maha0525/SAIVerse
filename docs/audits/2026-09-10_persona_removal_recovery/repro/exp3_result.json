@@ -1,0 +1,406 @@
+{
+  "home": "C:\\Users\\shuhe\\AppData\\Local\\Temp\\claude\\C--Users-shuhe-workspace-SAIVerse\\f1b2319e-4c7c-4bd2-8ce7-6030f2cf8b92\\scratchpad\\exp3_home",
+  "A_seed": {
+    "core_id": 1,
+    "page_id": "594a4505-a8cd-4ef8-9f0c-933760276259",
+    "desk": "ok",
+    "message_ids": [
+      "08d04489-3c00-48f0-913b-41de504c3f47",
+      "0b062119-1ff0-4b50-a5f7-6bec6f25f610",
+      "026a420e-96f6-4876-9cde-25940855d34c",
+      "3734abef-583d-46f0-8769-b3718838f880",
+      "8af94d80-22e6-4798-a988-d286efa6fb82"
+    ],
+    "extra_seeded": {
+      "arasuji_entry": "8015471c-396b-4015-8b72-3e608aef7749",
+      "clip": "bb3f30d9-c335-481a-ac0a-d39ee857b367",
+      "purpose_tag": true,
+      "memory_notes": 1,
+      "pulse_log": "5943ea66-c268-4360-84b3-6c1ea7f85914",
+      "perception": null,
+      "sluice_skipped_span": "ok"
+    },
+    "threads": [
+      "probe_a_testcity:__persona__",
+      "probe_a_testcity:probe_building_hall",
+      "probe_a_testcity:probe_named_thread"
+    ]
+  },
+  "A_tables": {
+    "activities": 0,
+    "arasuji_embeddings": 0,
+    "arasuji_progress": 0,
+    "chunk_page_edges": 0,
+    "clips": 1,
+    "curation_plans": 0,
+    "desk_items": 1,
+    "embed_metadata": 1,
+    "embeddings": 0,
+    "memopedia_embeddings": 0,
+    "memopedia_fragment_embeddings": 0,
+    "memopedia_fragments": 0,
+    "memopedia_page_edit_history": 1,
+    "memopedia_page_states": 0,
+    "memopedia_pages": 9,
+    "memopedia_update_log": 0,
+    "memory_notes": 1,
+    "memos": 0,
+    "message_embeddings": 0,
+    "messages": 5,
+    "perception_batches": 0,
+    "perception_buffer": 1,
+    "perception_presentation": 0,
+    "pulse_logs": 1,
+    "purpose_tags": 1,
+    "sluice_candidate_memos": 0,
+    "sluice_skipped_spans": 1,
+    "stelis_threads": 0,
+    "thread_edges": 0,
+    "threads": 3,
+    "working_memory": 1
+  },
+  "export": {
+    "path": "C:\\Users\\shuhe\\AppData\\Local\\Temp\\claude\\C--Users-shuhe-workspace-SAIVerse\\f1b2319e-4c7c-4bd2-8ce7-6030f2cf8b92\\scratchpad\\exp3_archive_A.json",
+    "top_level_keys": [
+      "exported_at",
+      "format",
+      "persona_id",
+      "threads"
+    ],
+    "thread_count": 3,
+    "thread_ids": [
+      "probe_a_testcity:__persona__",
+      "probe_a_testcity:probe_building_hall",
+      "probe_a_testcity:probe_named_thread"
+    ],
+    "per_thread_keys": [
+      "messages",
+      "overview",
+      "overview_updated_at",
+      "resource_id",
+      "stelis",
+      "thread_id"
+    ],
+    "message_count": 5,
+    "size_bytes": 2932
+  },
+  "C_before_tables": {
+    "activities": 0,
+    "arasuji_embeddings": 0,
+    "arasuji_progress": 0,
+    "chunk_page_edges": 0,
+    "clips": 0,
+    "curation_plans": 0,
+    "desk_items": 0,
+    "embed_metadata": 1,
+    "embeddings": 0,
+    "memopedia_embeddings": 0,
+    "memopedia_fragment_embeddings": 0,
+    "memopedia_fragments": 0,
+    "memopedia_page_edit_history": 0,
+    "memopedia_page_states": 0,
+    "memopedia_pages": 6,
+    "memopedia_update_log": 0,
+    "memory_notes": 0,
+    "memos": 0,
+    "message_embeddings": 0,
+    "messages": 1,
+    "perception_batches": 0,
+    "perception_buffer": 0,
+    "perception_presentation": 0,
+    "pulse_logs": 0,
+    "purpose_tags": 0,
+    "sluice_candidate_memos": 0,
+    "sluice_skipped_spans": 0,
+    "stelis_threads": 0,
+    "thread_edges": 0,
+    "threads": 1,
+    "working_memory": 0
+  },
+  "restore_into_other_id": "REJECTED: ValueError: restore rejected: archive persona 'probe_a_testcity' != target 'probe_c_testcity'. 別 persona へ移すには transplant (移植) を明示指定してください。",
+  "transplant_result": {
+    "threads_imported": 3,
+    "messages_imported": 5,
+    "embeddings": "skipped"
+  },
+  "C_after_tables": {
+    "activities": 0,
+    "arasuji_embeddings": 0,
+    "arasuji_progress": 0,
+    "chunk_page_edges": 0,
+    "clips": 0,
+    "curation_plans": 0,
+    "desk_items": 0,
+    "embed_metadata": 1,
+    "embeddings": 0,
+    "memopedia_embeddings": 0,
+    "memopedia_fragment_embeddings": 0,
+    "memopedia_fragments": 0,
+    "memopedia_page_edit_history": 0,
+    "memopedia_page_states": 0,
+    "memopedia_pages": 6,
+    "memopedia_update_log": 0,
+    "memory_notes": 0,
+    "memos": 0,
+    "message_embeddings": 0,
+    "messages": 5,
+    "perception_batches": 0,
+    "perception_buffer": 0,
+    "perception_presentation": 0,
+    "pulse_logs": 0,
+    "purpose_tags": 0,
+    "sluice_candidate_memos": 0,
+    "sluice_skipped_spans": 0,
+    "stelis_threads": 0,
+    "thread_edges": 0,
+    "threads": 3,
+    "working_memory": 0
+  },
+  "read_as_C_after_transplant": {
+    "recent_persona_messages": {
+      "thread_id_queried": "probe_c_testcity:__persona__",
+      "count": 2,
+      "contents": [
+        "PROBE-A-PERSONA-1 まはーが工房の棚を作り直した話",
+        "PROBE-A-PERSONA-2 棚は三段で、上段に定規を置くことにした"
+      ]
+    },
+    "recent_messages(building)": {
+      "thread_id_queried": "probe_c_testcity:probe_building_hall",
+      "contents": [
+        "PROBE-A-BUILDING-1 今日の天気はどうだった",
+        "PROBE-A-BUILDING-2 午後から晴れて、窓から光が入った"
+      ]
+    },
+    "list_thread_summaries": [
+      {
+        "thread_id": "probe_c_testcity:__persona__",
+        "title": null,
+        "message_count": 2
+      },
+      {
+        "thread_id": "probe_c_testcity:probe_building_hall",
+        "title": null,
+        "message_count": 2
+      },
+      {
+        "thread_id": "probe_c_testcity:probe_named_thread",
+        "title": "プローブ用の名前つきスレッド",
+        "message_count": 1
+      }
+    ],
+    "list_core_memories": [],
+    "working_memory": {},
+    "memopedia_page_titles": [
+      "時間の地図",
+      "コア記憶",
+      "出来事",
+      "人物",
+      "計画",
+      "用語"
+    ],
+    "transplanted_from_sample": [
+      "{\"tags\": [\"conversation\"], \"transplanted_from\": {\"persona_id\": \"probe_a_testcity\", \"thread_id\": \"probe_a_testcity:__persona__\"}}",
+      "{\"tags\": [\"conversation\"], \"transplanted_from\": {\"persona_id\": \"probe_a_testcity\", \"thread_id\": \"probe_a_testcity:__persona__\"}}"
+    ]
+  },
+  "tables_not_carried_by_transplant": {
+    "clips": {
+      "A": 1,
+      "C_after_transplant": 0
+    },
+    "desk_items": {
+      "A": 1,
+      "C_after_transplant": 0
+    },
+    "memopedia_page_edit_history": {
+      "A": 1,
+      "C_after_transplant": 0
+    },
+    "memopedia_pages": {
+      "A": 9,
+      "C_after_transplant": 6
+    },
+    "memory_notes": {
+      "A": 1,
+      "C_after_transplant": 0
+    },
+    "perception_buffer": {
+      "A": 1,
+      "C_after_transplant": 0
+    },
+    "pulse_logs": {
+      "A": 1,
+      "C_after_transplant": 0
+    },
+    "purpose_tags": {
+      "A": 1,
+      "C_after_transplant": 0
+    },
+    "sluice_skipped_spans": {
+      "A": 1,
+      "C_after_transplant": 0
+    },
+    "working_memory": {
+      "A": 1,
+      "C_after_transplant": 0
+    }
+  },
+  "A_after_wipe_tables": {
+    "activities": 0,
+    "arasuji_embeddings": 0,
+    "arasuji_progress": 0,
+    "chunk_page_edges": 0,
+    "clips": 0,
+    "curation_plans": 0,
+    "desk_items": 0,
+    "embed_metadata": 1,
+    "embeddings": 0,
+    "memopedia_embeddings": 0,
+    "memopedia_fragment_embeddings": 0,
+    "memopedia_fragments": 0,
+    "memopedia_page_edit_history": 0,
+    "memopedia_page_states": 0,
+    "memopedia_pages": 6,
+    "memopedia_update_log": 0,
+    "memory_notes": 0,
+    "memos": 0,
+    "message_embeddings": 0,
+    "messages": 0,
+    "perception_batches": 0,
+    "perception_buffer": 0,
+    "perception_presentation": 0,
+    "pulse_logs": 0,
+    "purpose_tags": 0,
+    "sluice_candidate_memos": 0,
+    "sluice_skipped_spans": 0,
+    "stelis_threads": 0,
+    "thread_edges": 0,
+    "threads": 0,
+    "working_memory": 0
+  },
+  "restore_same_id_result": {
+    "threads_imported": 3,
+    "messages_imported": 5,
+    "embeddings": "skipped"
+  },
+  "A_after_restore_tables": {
+    "activities": 0,
+    "arasuji_embeddings": 0,
+    "arasuji_progress": 0,
+    "chunk_page_edges": 0,
+    "clips": 0,
+    "curation_plans": 0,
+    "desk_items": 0,
+    "embed_metadata": 1,
+    "embeddings": 0,
+    "memopedia_embeddings": 0,
+    "memopedia_fragment_embeddings": 0,
+    "memopedia_fragments": 0,
+    "memopedia_page_edit_history": 0,
+    "memopedia_page_states": 0,
+    "memopedia_pages": 6,
+    "memopedia_update_log": 0,
+    "memory_notes": 0,
+    "memos": 0,
+    "message_embeddings": 0,
+    "messages": 5,
+    "perception_batches": 0,
+    "perception_buffer": 0,
+    "perception_presentation": 0,
+    "pulse_logs": 0,
+    "purpose_tags": 0,
+    "sluice_candidate_memos": 0,
+    "sluice_skipped_spans": 0,
+    "stelis_threads": 0,
+    "thread_edges": 0,
+    "threads": 3,
+    "working_memory": 0
+  },
+  "read_as_A_after_restore": {
+    "recent_persona_messages": {
+      "thread_id_queried": "probe_a_testcity:probe_named_thread",
+      "count": 1,
+      "contents": [
+        "PROBE-A-NAMED-1 別スレッドの記録"
+      ]
+    },
+    "recent_messages(building)": {
+      "thread_id_queried": "probe_a_testcity:probe_building_hall",
+      "contents": [
+        "PROBE-A-BUILDING-1 今日の天気はどうだった",
+        "PROBE-A-BUILDING-2 午後から晴れて、窓から光が入った"
+      ]
+    },
+    "list_thread_summaries": [
+      {
+        "thread_id": "probe_a_testcity:__persona__",
+        "title": null,
+        "message_count": 2
+      },
+      {
+        "thread_id": "probe_a_testcity:probe_building_hall",
+        "title": null,
+        "message_count": 2
+      },
+      {
+        "thread_id": "probe_a_testcity:probe_named_thread",
+        "title": "プローブ用の名前つきスレッド",
+        "message_count": 1
+      }
+    ],
+    "list_core_memories": [],
+    "working_memory": {},
+    "memopedia_page_titles": [
+      "時間の地図",
+      "コア記憶",
+      "出来事",
+      "人物",
+      "計画",
+      "用語"
+    ],
+    "transplanted_from_sample": []
+  },
+  "tables_not_carried_by_restore": {
+    "clips": {
+      "A_original": 1,
+      "A_after_restore": 0
+    },
+    "desk_items": {
+      "A_original": 1,
+      "A_after_restore": 0
+    },
+    "memopedia_page_edit_history": {
+      "A_original": 1,
+      "A_after_restore": 0
+    },
+    "memopedia_pages": {
+      "A_original": 9,
+      "A_after_restore": 6
+    },
+    "memory_notes": {
+      "A_original": 1,
+      "A_after_restore": 0
+    },
+    "perception_buffer": {
+      "A_original": 1,
+      "A_after_restore": 0
+    },
+    "pulse_logs": {
+      "A_original": 1,
+      "A_after_restore": 0
+    },
+    "purpose_tags": {
+      "A_original": 1,
+      "A_after_restore": 0
+    },
+    "sluice_skipped_spans": {
+      "A_original": 1,
+      "A_after_restore": 0
+    },
+    "working_memory": {
+      "A_original": 1,
+      "A_after_restore": 0
+    }
+  }
+}

@@ -1,0 +1,328 @@
+{
+  "home": "C:\\Users\\shuhe\\AppData\\Local\\Temp\\saiverse_probe\\exp2_home",
+  "A_seed": {
+    "core_id": 1,
+    "memopedia_page_id": "d9e6458c-7a4a-44dd-a5ae-3b48c0ddfaf5",
+    "threads": [
+      "probe_a_testcity:__persona__",
+      "probe_a_testcity:probe_building_hall",
+      "probe_a_testcity:probe_named_thread"
+    ],
+    "message_count": 5,
+    "embedding_count": 5,
+    "can_embed": true
+  },
+  "B_seed": {
+    "threads": [
+      "probe_b_testcity:__persona__"
+    ],
+    "message_count": 1
+  },
+  "before_swap": {
+    "A_tables": {
+      "activities": 0,
+      "arasuji_embeddings": 0,
+      "arasuji_progress": 0,
+      "chunk_page_edges": 0,
+      "clips": 0,
+      "curation_plans": 0,
+      "desk_items": 0,
+      "embed_metadata": 1,
+      "embeddings": 0,
+      "memopedia_embeddings": 0,
+      "memopedia_fragment_embeddings": 0,
+      "memopedia_fragments": 0,
+      "memopedia_page_edit_history": 1,
+      "memopedia_page_states": 0,
+      "memopedia_pages": 8,
+      "memopedia_update_log": 0,
+      "memory_notes": 0,
+      "memos": 0,
+      "message_embeddings": 5,
+      "messages": 5,
+      "perception_batches": 0,
+      "perception_buffer": 0,
+      "perception_notice_presentation": 0,
+      "perception_presentation": 0,
+      "pulse_logs": 0,
+      "purpose_tags": 0,
+      "sluice_candidate_memos": 0,
+      "sluice_skipped_spans": 0,
+      "stelis_threads": 0,
+      "thread_edges": 0,
+      "threads": 3,
+      "working_memory": 0
+    },
+    "B_tables": {
+      "activities": 0,
+      "arasuji_embeddings": 0,
+      "arasuji_progress": 0,
+      "chunk_page_edges": 0,
+      "clips": 0,
+      "curation_plans": 0,
+      "desk_items": 0,
+      "embed_metadata": 1,
+      "embeddings": 0,
+      "memopedia_embeddings": 0,
+      "memopedia_fragment_embeddings": 0,
+      "memopedia_fragments": 0,
+      "memopedia_page_edit_history": 0,
+      "memopedia_page_states": 0,
+      "memopedia_pages": 6,
+      "memopedia_update_log": 0,
+      "memory_notes": 0,
+      "memos": 0,
+      "message_embeddings": 1,
+      "messages": 1,
+      "perception_batches": 0,
+      "perception_buffer": 0,
+      "perception_notice_presentation": 0,
+      "perception_presentation": 0,
+      "pulse_logs": 0,
+      "purpose_tags": 0,
+      "sluice_candidate_memos": 0,
+      "sluice_skipped_spans": 0,
+      "stelis_threads": 0,
+      "thread_edges": 0,
+      "threads": 1,
+      "working_memory": 0
+    }
+  },
+  "read_as_B_BEFORE_swap": {
+    "recent_persona_messages": {
+      "thread_id_queried": "probe_b_testcity:__persona__",
+      "count": 1,
+      "contents": [
+        "PROBE-B-OWN-1 B 自身の記憶 (差し替えで消えるはず)"
+      ]
+    },
+    "recent_persona_messages_by_count": {
+      "count": 1,
+      "contents": [
+        "PROBE-B-OWN-1 B 自身の記憶 (差し替えで消えるはず)"
+      ]
+    },
+    "recent_messages(building)": {
+      "thread_id_queried": "probe_b_testcity:probe_building_hall",
+      "count": 0,
+      "contents": []
+    },
+    "list_thread_summaries": [
+      {
+        "thread_id": "probe_b_testcity:__persona__",
+        "title": null,
+        "message_count": 1,
+        "active": false
+      }
+    ],
+    "get_thread_messages(A の thread_id 直指定)": {
+      "probe_a_testcity:__persona__": {
+        "count": 0,
+        "contents": []
+      },
+      "probe_a_testcity:probe_building_hall": {
+        "count": 0,
+        "contents": []
+      },
+      "probe_a_testcity:probe_named_thread": {
+        "count": 0,
+        "contents": []
+      }
+    },
+    "can_embed": true,
+    "recall_snippet": {
+      "length": 104,
+      "text": "[Memory Recall]\n```\n- assistant @ 2026-09-10 02:28 (score=0.775): PROBE-B-OWN-1 B 自身の記憶 (差し替えで消えるはず)\n```"
+    },
+    "recall_snippet(persona thread)": {
+      "length": 0,
+      "text": ""
+    },
+    "list_core_memories": [],
+    "memopedia_pages": [
+      [
+        "root_chronicle",
+        "時間の地図",
+        ""
+      ],
+      [
+        "root_core",
+        "コア記憶",
+        ""
+      ],
+      [
+        "root_events",
+        "出来事",
+        ""
+      ],
+      [
+        "root_people",
+        "人物",
+        ""
+      ],
+      [
+        "root_plans",
+        "計画",
+        ""
+      ],
+      [
+        "root_terms",
+        "用語",
+        ""
+      ]
+    ],
+    "working_memory_rows": [],
+    "get_current_thread": null
+  },
+  "swap": {
+    "copied": "C:\\Users\\shuhe\\AppData\\Local\\Temp\\saiverse_probe\\exp2_home\\personas\\probe_a_testcity\\memory.db -> C:\\Users\\shuhe\\AppData\\Local\\Temp\\saiverse_probe\\exp2_home\\personas\\probe_b_testcity\\memory.db"
+  },
+  "after_swap_B_tables": {
+    "activities": 0,
+    "arasuji_embeddings": 0,
+    "arasuji_progress": 0,
+    "chunk_page_edges": 0,
+    "clips": 0,
+    "curation_plans": 0,
+    "desk_items": 0,
+    "embed_metadata": 1,
+    "embeddings": 0,
+    "memopedia_embeddings": 0,
+    "memopedia_fragment_embeddings": 0,
+    "memopedia_fragments": 0,
+    "memopedia_page_edit_history": 1,
+    "memopedia_page_states": 0,
+    "memopedia_pages": 8,
+    "memopedia_update_log": 0,
+    "memory_notes": 0,
+    "memos": 0,
+    "message_embeddings": 5,
+    "messages": 5,
+    "perception_batches": 0,
+    "perception_buffer": 0,
+    "perception_notice_presentation": 0,
+    "perception_presentation": 0,
+    "pulse_logs": 0,
+    "purpose_tags": 0,
+    "sluice_candidate_memos": 0,
+    "sluice_skipped_spans": 0,
+    "stelis_threads": 0,
+    "thread_edges": 0,
+    "threads": 3,
+    "working_memory": 0
+  },
+  "read_as_B_AFTER_swap": {
+    "recent_persona_messages": {
+      "thread_id_queried": "probe_b_testcity:__persona__",
+      "count": 0,
+      "contents": []
+    },
+    "recent_persona_messages_by_count": {
+      "count": 0,
+      "contents": []
+    },
+    "recent_messages(building)": {
+      "thread_id_queried": "probe_b_testcity:probe_building_hall",
+      "count": 0,
+      "contents": []
+    },
+    "list_thread_summaries": [
+      {
+        "thread_id": "probe_a_testcity:__persona__",
+        "title": null,
+        "message_count": 2,
+        "active": false
+      },
+      {
+        "thread_id": "probe_a_testcity:probe_building_hall",
+        "title": null,
+        "message_count": 2,
+        "active": false
+      },
+      {
+        "thread_id": "probe_a_testcity:probe_named_thread",
+        "title": "プローブ用の名前つきスレッド",
+        "message_count": 1,
+        "active": false
+      }
+    ],
+    "get_thread_messages(A の thread_id 直指定)": {
+      "probe_a_testcity:__persona__": {
+        "count": 2,
+        "contents": [
+          "PROBE-A-PERSONA-1 まはーが工房の棚を作り直した話",
+          "PROBE-A-PERSONA-2 棚は三段で、上段に定規を置くことにした"
+        ]
+      },
+      "probe_a_testcity:probe_building_hall": {
+        "count": 2,
+        "contents": [
+          "PROBE-A-BUILDING-1 今日の天気はどうだった",
+          "PROBE-A-BUILDING-2 午後から晴れて、窓から光が入った"
+        ]
+      },
+      "probe_a_testcity:probe_named_thread": {
+        "count": 1,
+        "contents": [
+          "PROBE-A-NAMED-1 別スレッドの記録"
+        ]
+      }
+    },
+    "can_embed": true,
+    "recall_snippet": {
+      "length": 379,
+      "text": "[Memory Recall]\n```\n- user @ 2026-09-10 02:28: PROBE-A-PERSONA-1 まはーが工房の棚を作り直した話\n- assistant @ 2026-09-10 02:28 (score=0.862): PROBE-A-PERSONA-2 棚は三段で、上段に定規を置くことにした\n- assistant @ 2026-09-10 02:28 (score=0.788): PROBE-A-NAMED-1 別スレッドの記録\n- assistant @ 2026-09-10 02:28: PROBE-A-BUILDING-2 午後から晴れて、窓から光が入った\n- user @ 2026-09-10 02:28 (score=0.785): PROBE-A-BUILDING-1 今日の天気はどうだった\n```"
+    },
+    "recall_snippet(persona thread)": {
+      "length": 379,
+      "text": "[Memory Recall]\n```\n- assistant @ 2026-09-10 02:28: PROBE-A-BUILDING-2 午後から晴れて、窓から光が入った\n- user @ 2026-09-10 02:28 (score=0.827): PROBE-A-BUILDING-1 今日の天気はどうだった\n- assistant @ 2026-09-10 02:28 (score=0.789): PROBE-A-NAMED-1 別スレッドの記録\n- assistant @ 2026-09-10 02:28: PROBE-A-PERSONA-2 棚は三段で、上段に定規を置くことにした\n- user @ 2026-09-10 02:28 (score=0.784): PROBE-A-PERSONA-1 まはーが工房の棚を作り直した話\n```"
+    },
+    "list_core_memories": [
+      "PROBE-A-CORE-1 まはーの誕生日は 1 月 14 日"
+    ],
+    "memopedia_pages": [
+      [
+        "a933ecd6-7999-4b63-9a77-d212157a143b",
+        "コア記憶 c:1",
+        "PROBE-A-CORE-1 まはーの誕生日は 1 月 14 日"
+      ],
+      [
+        "d9e6458c-7a4a-44dd-a5ae-3b48c0ddfaf5",
+        "PROBE-A-PAGE タイトル",
+        "PROBE-A-PAGE-1 手帳のページ本文"
+      ],
+      [
+        "root_chronicle",
+        "時間の地図",
+        ""
+      ],
+      [
+        "root_core",
+        "コア記憶",
+        ""
+      ],
+      [
+        "root_events",
+        "出来事",
+        ""
+      ],
+      [
+        "root_people",
+        "人物",
+        ""
+      ],
+      [
+        "root_plans",
+        "計画",
+        ""
+      ],
+      [
+        "root_terms",
+        "用語",
+        ""
+      ]
+    ],
+    "working_memory_rows": [],
+    "get_current_thread": null
+  }
+}
