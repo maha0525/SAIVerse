@@ -2,7 +2,7 @@
 
 SAIVerseとUnityクライアントを連携させるための設計書。
 
-> ℹ️ **これは設計書**（feature の完成状態の説明ではない）。Phase 1 の一部は実装済み（`unity_gateway/server.py` / `protocol.py` が存在し、`main.py` に統合されている）。以下の Phase チェックボックスやモジュール構成（`handlers.py` / `state.py` 等）は当初計画で、実装と差がある。**コード例の一部は旧ツール API（`@register_tool` / `tools/defs/`）で書かれており現行と異なる**（現行のツール定義は [ツールの追加](../developer-guide/adding-tools.md) を参照）。WebSocket ポートは 8765。
+> ℹ️ **これは削除済みの機能の旧設計書である**。Unity Gateway (`unity_gateway/`) は 2026-09-11 にリポジトリから削除した。削除する前に調べたこと (認証なしで全ネットワークインターフェースに開いていたこと、使われた記録が無かったことなど) と、削除を決めた経緯は [unity_gateway_removal.md](../issues/unity_gateway_removal.md) にある。この文書のプロトコル・コード例・Phase の計画は、現在のコードに対応していない。
 
 ## 概要
 

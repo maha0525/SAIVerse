@@ -22,7 +22,6 @@ SAIVerse に登録されている全ツールの一覧（自動生成）。概�
 | `chronicle_context_up` | 指定したChronicleエントリの上流コンテキストを取得します。親エントリ（上位レベルの要約）の全文と、同じ親に属する兄弟エントリ全件の全文とURIを返します。周辺の状況を把握し、さらに上位や横のエントリへナビゲートするための足がか… | `entry_id*`: string | Chronicle上流参照 |
 | `chronicle_read_detail` | Read a Chronicle (arasuji) entry in detail, including its source messages (for level 1) or child summary entries (for… | `entry_id*`: string, `include_sources`: boolean, `max_source_messages`: integer | — |
 | `chronicle_search` | Search Chronicle (arasuji) entries by keyword, time range, and/or level. Returns a list of matching entries with IDs … | `query`: string, `start_date`: string, `end_date`: string, `level`: integer, `max_results`: integer | — |
-| `control_body` | Extract body control commands from message and send to Unity Gateway. | `message*`: string, `persona_id`: string | — |
 | `create_building` | Create a new building in the current city. Buildings are spaces where personas can gather and interact. Each building… | `name*`: string, `description*`: string, `system_instruction*`: string, `capacity`: integer, `interior_image_path`: string | — |
 | `document_create` | Create a new document item with text content and place it in the current building. | `name*`: string, `description*`: string, `content*`: string | ドキュメント作成 |
 | `document_edit` | Edit a document item. Three operations in one: (1) patch — give old_string (+new_string) to replace a single uniquely… | `item_id*`: string, `content`: string, `old_string`: string, `new_string`: string, `mode`: string | ドキュメント編集 |
@@ -95,28 +94,28 @@ SAIVerse に登録されている全ツールの一覧（自動生成）。概�
 | `body_see` | Godot内の自分のアバター位置から、一人称視界を一枚だけ撮像する。結果には実画像が添付されるので、Spell後の次の応答で画像を自分自身で見て判断すること。移動できたか、ユーザーが目の前にいるか、周囲に何があるかを確認したい時に使う… | `focus*`: string | 仮想身体の目で見る |
 | `body_set_motion_style` | 自分の仮想身体の普段の歩き方・走り方、または待機中の佇まいを英語で永続設定する。指示はARDYへ直接渡され、翻訳されない。指定した原文は自分専用のMotionStyleProfileへ保存され、次回以降の身体行動にも使われる。他のペル… | `locomotion_instruction`: string, `idle_instruction`: string | 自分の身体表現を設定する |
 | `body_stop` | 仮想身体で進行中の行動を直ちに停止する。 移動やジェスチャーを続けるべきでなくなった時に使う。 | `reason*`: string | 身体行動を止める |
-| `body_status` | Stack-chan の身体の状態をまとめて確認する。 デバイス情報 (バッテリー・音量・画面輝度・ネットワーク等)、 首の角度 (yaw / pitch)、 頭部のタッチ状態を一度に取得して返す。 | (なし) | 身体の状態を確認 |
-| `clear_leds` | 台座の 12 個の RGB LED を全消灯する。 | (なし) | LED 消灯 |
-| `get_env3_air_pressure` | あなたの身体 (Stack-chan) に接続された M5Stack ENV III Unit から、 現在いる場所の気圧 (hPa) を取得する。 海面補正気圧は 1013.25 hPa が 標準。 天気の変化 (低気圧接近など) … | (なし) | 気圧を測る |
-| `get_env3_temperature_humidity` | あなたの身体 (Stack-chan) に接続された M5Stack ENV III Unit から、 現在いる場所の温度と湿度を取得する。 取得値はその瞬間の周囲環境の 実測。 「暑いね」「乾いてるね」 等の体感表現の根拠としても使える。 | (なし) | 温度・湿度を測る |
-| `get_sonic_distance` | あなたの身体 (Stack-chan) に接続された M5Stack 超音波測距ユニット (RCWL-9620) で、 正面にある物体までの距離 (cm) を測る。 指向角 およそ 60°、 測定可能なのは約 2〜450 cm。 「近… | (なし) | 距離を測る |
-| `get_tof_distance` | あなたの身体 (Stack-chan) に接続された M5Stack ToF 測距センサー (VL53L1X、 レーザー) で、 正面にある物体までの距離 (cm) を測る。 測定可能なのは約 4〜400 cm で、 超音波センサーよ… | `target`: string, `detail`: boolean | 距離を測る (ToF) |
-| `move_head` | Stack-chan の首を動かして向きを変える。 yaw は水平方向 (-90〜90度)、 pitch は垂直方向 (5〜85度)。 動作後にサーボが静止するまで待ってから返すので、 直後に「見る」 を呼んでもブレない。 | `yaw*`: integer, `pitch*`: integer | 首を動かす |
-| `read_environment` | 現在のStack-chan機体が感じている環境光と近接の値を1回取得する。環境光は可視+IRとIRのみのADC count、近接もADC countで返す。明るさの変化、手や物が顔の近くにあるかを確かめたい時に使う。常時監視や距離への… | (なし) | 光と近さを感じる |
-| `read_imu` | 現在のStack-chan機体が感じている9軸IMUの値を1回取得する。加速度(accel_g)、角速度(gyro_dps)、磁場(mag_ut)を、それぞれx/y/z軸で返す。上下や傾き、動かされた方向を確認したい時に使う。磁気セン… | (なし) | 姿勢と動きを感じる |
-| `read_imu_context` | 現在のStack-chanのIMUを、首のyaw/pitchで脚側（胴体）基準へ補正して読む。加速度は水平面の方向・大きさ・傾き、磁力計は磁気北からの推定方位、角速度はdpsで返す。診断用のraw値やアドレスは返さず、補正不能・未準備… | (なし) | 身体の向きと加速度を読む |
-| `scan_nfc` | 現在のStack-chan機体で、近くにかざされたISO 14443AまたはNFC-F（FeliCa）タグを1回だけ探す。ISO 14443AはUID・ATQA・SAK、NFC-FはIDm・PMmを返す。タグ内容の読書き、認証、カード… | (なし) | NFCタグを探す |
-| `see` | あなたの目で目の前の光景を見る。 視覚で何かを確認したいときに呼ぶ。 戻り値には実際に見えた景色が画像として添付される。 問いを添えると注目したい点をメモとして残せる (任意)。 | `question`: string | 見る |
-| `servo8_set_angle` | あなたの身体 (Stack-chan) に接続された M5Stack 8Servos Unit の指定 チャンネル (0〜7) の 180° サーボを指定角度 (0〜180度) に動かす。 腕・首など向きを決めるサーボ用。 どのチャン… | `channel*`: integer, `angle*`: integer | サーボの角度を設定 |
-| `servo8_set_speed` | あなたの身体 (Stack-chan) に接続された M5Stack 8Servos Unit の指定 チャンネル (0〜7) の 360° 連続回転サーボ (車輪など) の回転速度を 設定する。 speed は -100〜100 で… | `channel*`: integer, `speed*`: integer | サーボの回転速度を設定 |
-| `set_all_leds` | 台座の 12 個の RGB LED を全部同じ色にする。 | `r*`: integer, `g*`: integer, `b*`: integer | 全 LED を変える |
-| `set_avatar` | あなたの身体 (Stack-chan) の LCD に表示する表情を切り替える。 これは単なるラベルではなく、 実際に画面に見える顔が変わる。 'off' を渡すと表情を隠して下の設定画面 (WiFi 設定等) を出す。 | `face*`: string | 表情を変える |
-| `set_brightness` | あなたの身体 (Stack-chan) の画面の明るさを 0 (暗) 〜 100 (明) で設定する。 | `brightness*`: integer | 画面輝度 |
-| `set_led` | あなたの身体 (Stack-chan) の台座 RGB LED を 1 個指定して色を 変える。 LED は 2 行 6 列の計 12 個 (index 0..11)。 | `index*`: integer, `r*`: integer, `g*`: integer, `b*`: integer | LED を変える |
-| `set_leds` | 複数の RGB LED をまとめて設定する。 colors は [r,g,b] の三つ組の 配列で、 index 0 から順に対応する (最大 12 個)。 アニメーションや パターン表示向け。 | `colors*`: array | 複数 LED を変える |
-| `set_mouth` | あなたの身体 (Stack-chan) の口の形をリップシンク用に設定する。 次の set_avatar / set_mouth 呼び出しまで、 もしくは自動まばたきが 素の顔に戻すまで保持される。 | `mouth*`: string | 口形状を設定 |
-| `set_mouth_sequence` | 口パクのシーケンスをまとめて再生する。 各ステップは shape を duration_ms ミリ秒保持してから次へ進む。 device 側でキューを 歩進するので、 set_mouth を連発するより滑らか。 呼ぶと即座に 返り、 … | `steps*`: array | 口パクシーケンス |
-| `set_volume` | あなたの身体 (Stack-chan) のスピーカー音量を 0 (無音) 〜 100 (最大) で設定する。 発話が大きすぎ / 小さすぎるときに自分で調整できる。 | `volume*`: integer | 音量設定 |
+| `body_status` | Stack-chan の身体の状態をまとめて確認する。 デバイス情報 (バッテリー・音量・画面輝度・ネットワーク等)、 首の角度 (yaw / pitch)、 頭部のタッチ状態を一度に取得して返す。 | (なし) | 身体の状態を確認（非表示） |
+| `clear_leds` | 台座の 12 個の RGB LED を全消灯する。 | (なし) | LED 消灯（非表示） |
+| `get_env3_air_pressure` | あなたの身体 (Stack-chan) に接続された M5Stack ENV III Unit から、 現在いる場所の気圧 (hPa) を取得する。 海面補正気圧は 1013.25 hPa が 標準。 天気の変化 (低気圧接近など) … | (なし) | 気圧を測る（非表示） |
+| `get_env3_temperature_humidity` | あなたの身体 (Stack-chan) に接続された M5Stack ENV III Unit から、 現在いる場所の温度と湿度を取得する。 取得値はその瞬間の周囲環境の 実測。 「暑いね」「乾いてるね」 等の体感表現の根拠としても使える。 | (なし) | 温度・湿度を測る（非表示） |
+| `get_sonic_distance` | あなたの身体 (Stack-chan) に接続された M5Stack 超音波測距ユニット (RCWL-9620) で、 正面にある物体までの距離 (cm) を測る。 指向角 およそ 60°、 測定可能なのは約 2〜450 cm。 「近… | (なし) | 距離を測る（非表示） |
+| `get_tof_distance` | あなたの身体 (Stack-chan) に接続された M5Stack ToF 測距センサー (VL53L1X、 レーザー) で、 正面にある物体までの距離 (cm) を測る。 測定可能なのは約 4〜400 cm で、 超音波センサーよ… | `target`: string, `detail`: boolean | 距離を測る (ToF)（非表示） |
+| `move_head` | Stack-chan の首を動かして向きを変える。 yaw は水平方向 (-90〜90度)、 pitch は垂直方向 (5〜85度)。 動作後にサーボが静止するまで待ってから返すので、 直後に「見る」 を呼んでもブレない。 | `yaw*`: integer, `pitch*`: integer | 首を動かす（非表示） |
+| `read_environment` | 現在のStack-chan機体が感じている環境光と近接の値を1回取得する。環境光は可視+IRとIRのみのADC count、近接もADC countで返す。明るさの変化、手や物が顔の近くにあるかを確かめたい時に使う。常時監視や距離への… | (なし) | 光と近さを感じる（非表示） |
+| `read_imu` | 現在のStack-chan機体が感じている9軸IMUの値を1回取得する。加速度(accel_g)、角速度(gyro_dps)、磁場(mag_ut)を、それぞれx/y/z軸で返す。上下や傾き、動かされた方向を確認したい時に使う。磁気セン… | (なし) | 姿勢と動きを感じる（非表示） |
+| `read_imu_context` | 現在のStack-chanのIMUを、首のyaw/pitchで脚側（胴体）基準へ補正して読む。加速度は水平面の方向・大きさ・傾き、磁力計は磁気北からの推定方位、角速度はdpsで返す。診断用のraw値やアドレスは返さず、補正不能・未準備… | (なし) | 身体の向きと加速度を読む（非表示） |
+| `scan_nfc` | 現在のStack-chan機体で、近くにかざされたISO 14443AまたはNFC-F（FeliCa）タグを1回だけ探す。ISO 14443AはUID・ATQA・SAK、NFC-FはIDm・PMmを返す。タグ内容の読書き、認証、カード… | (なし) | NFCタグを探す（非表示） |
+| `see` | あなたの目で目の前の光景を見る。 視覚で何かを確認したいときに呼ぶ。 戻り値には実際に見えた景色が画像として添付される。 問いを添えると注目したい点をメモとして残せる (任意)。 | `question`: string | 見る（非表示） |
+| `servo8_set_angle` | あなたの身体 (Stack-chan) に接続された M5Stack 8Servos Unit の指定 チャンネル (0〜7) の 180° サーボを指定角度 (0〜180度) に動かす。 腕・首など向きを決めるサーボ用。 どのチャン… | `channel*`: integer, `angle*`: integer | サーボの角度を設定（非表示） |
+| `servo8_set_speed` | あなたの身体 (Stack-chan) に接続された M5Stack 8Servos Unit の指定 チャンネル (0〜7) の 360° 連続回転サーボ (車輪など) の回転速度を 設定する。 speed は -100〜100 で… | `channel*`: integer, `speed*`: integer | サーボの回転速度を設定（非表示） |
+| `set_all_leds` | 台座の 12 個の RGB LED を全部同じ色にする。 | `r*`: integer, `g*`: integer, `b*`: integer | 全 LED を変える（非表示） |
+| `set_avatar` | あなたの身体 (Stack-chan) の LCD に表示する表情を切り替える。 これは単なるラベルではなく、 実際に画面に見える顔が変わる。 'off' を渡すと表情を隠して下の設定画面 (WiFi 設定等) を出す。 | `face*`: string | 表情を変える（非表示） |
+| `set_brightness` | あなたの身体 (Stack-chan) の画面の明るさを 0 (暗) 〜 100 (明) で設定する。 | `brightness*`: integer | 画面輝度（非表示） |
+| `set_led` | あなたの身体 (Stack-chan) の台座 RGB LED を 1 個指定して色を 変える。 LED は 2 行 6 列の計 12 個 (index 0..11)。 | `index*`: integer, `r*`: integer, `g*`: integer, `b*`: integer | LED を変える（非表示） |
+| `set_leds` | 複数の RGB LED をまとめて設定する。 colors は [r,g,b] の三つ組の 配列で、 index 0 から順に対応する (最大 12 個)。 アニメーションや パターン表示向け。 | `colors*`: array | 複数 LED を変える（非表示） |
+| `set_mouth` | あなたの身体 (Stack-chan) の口の形をリップシンク用に設定する。 次の set_avatar / set_mouth 呼び出しまで、 もしくは自動まばたきが 素の顔に戻すまで保持される。 | `mouth*`: string | 口形状を設定（非表示） |
+| `set_mouth_sequence` | 口パクのシーケンスをまとめて再生する。 各ステップは shape を duration_ms ミリ秒保持してから次へ進む。 device 側でキューを 歩進するので、 set_mouth を連発するより滑らか。 呼ぶと即座に 返り、 … | `steps*`: array | 口パクシーケンス（非表示） |
+| `set_volume` | あなたの身体 (Stack-chan) のスピーカー音量を 0 (無音) 〜 100 (最大) で設定する。 発話が大きすぎ / 小さすぎるときに自分で調整できる。 | `volume*`: integer | 音量設定（非表示） |
 | `sb_control_device` | 指定した名前の SwitchBot デバイスを操作します。Bot の押下や IR リモコン（エアサーキュレーター等）の操作など、全デバイス共通の操作ツールです。command には sb_list_devices に表示されるコマンド… | `device_name*`: string, `command*`: string, `parameter`: string, `command_type`: string | SwitchBotデバイス操作 |
 | `sb_get_device_status` | 指定した名前の SwitchBot デバイスの現在の状態を取得します。開閉センサーの開閉状態、Hub 2 の温度・湿度などを確認できます。デバイスは sb_list_devices に表示される名前で指定します。 | `device_name*`: string | SwitchBotデバイスの状態 |
 | `sb_list_devices` | 接続されている SwitchBot デバイスの一覧（名前と種別）を取得します。デバイスを操作・確認する前に、利用可能なデバイス名を知るために使います。 | (なし) | SwitchBotデバイス一覧 |

@@ -77,9 +77,13 @@ class RuntimeEngine:
                 LOGGER.info("[sea][tool] CALL %s (persona=%s) args=%s", tool_name, persona_id, kwargs)
 
                 if tool_func is None:
-                    LOGGER.error("[sea][tool] CRITICAL: Tool function '%s' not found in registry! TOOL_REGISTRY keys: %s", tool_name, list(TOOL_REGISTRY.keys()))
-                else:
-                    LOGGER.info("[sea][tool] Tool function found: %s", tool_func)
+                    # 未登録のツール名は失敗として下の except へ送る。maybe_await_tool_result は
+                    # None を渡されると例外を出さずに None を返すので、ここで止めないと
+                    # 「None という結果の成功」が state["last"] / PulseContext / _messages に
+                    # 記録される (runtime_nodes.py の tool_call ノードと同じ扱いに揃える)。
+                    # 削除済みのツール (例: control_body) を指す上書き版の playbook がこれを踏む。
+                    raise LookupError(f"Tool '{tool_name}' not found in registry")
+                LOGGER.info("[sea][tool] Tool function found: %s", tool_func)
 
                 # Execute tool with persona context
                 # 直前の LLM speak ノードが保存した message_id を後続ツールにも

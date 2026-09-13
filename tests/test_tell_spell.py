@@ -282,7 +282,7 @@ def test_tell_empty_generation_does_not_emit():
 def test_tell_reports_history_failure_without_claiming_silence(emit_result):
     """履歴に残らなくても「言ってしまった」— 出た事実を伏せない。
 
-    `_emit_say` は履歴保存に失敗しても gateway (Discord 等) と Unity へは送る
+    `_emit_say` は履歴保存に失敗しても gateway (Discord 等) へは送る
     ため、戻り値で分かるのは「この場の記録に残ったか」だけ。実装で最も起き
     やすい失敗形は 3 番目 — dict は返るが message_id が無い。truthy かどうかで
     判定すると、この形が丸ごと成功に化ける。

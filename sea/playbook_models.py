@@ -630,7 +630,7 @@ class ContextRequirements(BaseModel):
     )
     realtime_context: bool = Field(
         default=True,
-        description="Include realtime context (current time, previous AI response time, spatial info) near end of context. "
+        description="Include realtime context (current time, previous AI response time) near end of context. "
                     "Placing time-sensitive info at the end improves LLM context caching efficiency."
     )
 

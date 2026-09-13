@@ -121,7 +121,7 @@ class AI(Base):
     # (manager/admin.py)。
     CHRONICLE_CHAR_BUDGET = Column(Integer, nullable=True)
     SPELL_ENABLED = Column(Boolean, default=True, nullable=False)  # Per-persona spell system toggle (基幹機能化に伴い v0.3.0.dev3 でデフォルト ON 化)
-    # Per-persona toggle for the realtime info section (現在時刻 / 前回発言時刻 / 空間情報)
+    # Per-persona toggle for the realtime info section (現在時刻 / 前回発言時刻)
     # injected by sea/runtime.py:_build_realtime_context. OFF にすると、その動的
     # コンテキストブロックをこのペルソナには一切送らない。夜になると時刻を気にして
     # 会話が成立しなくなるモデル向けの脱出経路 (docs/issues/realtime_info_current_time_toggle.md)。
@@ -205,7 +205,7 @@ class Building(Base):
     DESCRIPTION = Column(String(1024), default="", nullable=False)
     AUTO_INTERVAL_SEC = Column(Integer, default=10, nullable=False)
     IMAGE_PATH = Column(String(512), nullable=True)  # Building interior image for LLM visual context
-    EXTRA_PROMPT_FILES = Column(Text, nullable=True)  # JSON: ["body_control.txt", "other.txt"]
+    EXTRA_PROMPT_FILES = Column(Text, nullable=True)  # JSON: ["extra_instructions.txt", "other.txt"]
     # 街マップ上の絶対座標 (world 座標系、px相当)。NULL なら擬似配置にフォールバック。
     MAP_X = Column(Float, nullable=True)
     MAP_Y = Column(Float, nullable=True)

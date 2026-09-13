@@ -552,7 +552,6 @@ def test_lg_say_node_emits_the_signal_through_the_real_wiring() -> None:
         occupants={"room": ["p1"]},
         user_presence_status="online",
         gateway_handle_ai_replies=MagicMock(),
-        unity_gateway=None,
     )
     runtime = SEARuntime(manager)
     persona = SimpleNamespace(

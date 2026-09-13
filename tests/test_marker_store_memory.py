@@ -178,7 +178,6 @@ class EmitSayStripTest(unittest.TestCase):
             occupants={"b1": ["pid"]},
             user_presence_status="offline",
             gateway_handle_ai_replies=Mock(),
-            unity_gateway=None,
         )
         runtime = SEARuntime(manager)
         history_manager = SimpleNamespace(add_to_building_only=Mock(return_value=None))
