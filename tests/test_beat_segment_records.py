@@ -631,5 +631,243 @@ def test_the_leave_notice_encodes_a_destination_id_that_would_split_the_uri():
     assert "&lt;部屋&gt;" in leave_content
 
 
+# ---------------------------------------------------------------------------
+# 6. 使用量の札 — 合計は出さず、各吹き出しが自分の分だけを持つ
+# ---------------------------------------------------------------------------
+
+
+def _node_def():
+    return SimpleNamespace(
+        id="llm",
+        speak=True,
+        action=None,
+        available_tools=None,
+        response_schema=None,
+        response_schema_source=None,
+        output_key=None,
+        output_keys=None,
+        metadata_key=None,
+        memorize=None,
+        important=False,
+        label=None,
+    )
+
+
+class _OneChunkStreamClient:
+    """1 chunk 流して終わる最小のストリーミングクライアント。"""
+
+    config_key = None
+
+    def generate_stream(self, messages, tools=(), temperature=None, **kwargs):
+        return iter(["一回目だ。"])
+
+    def consume_usage(self):
+        return None
+
+    def consume_thought_signature(self):
+        return None
+
+
+def _build_streaming_node(monkeypatch, *, spell_loop):
+    """``lg_llm_node`` を、スペルが走ったストリーミング経路で走らせる器。
+
+    締めの Beat の metadata は node 側 (スペルループの外) で組まれるので、
+    ループ単体のテストでは触れない。本物の呼び出し口を通す。
+    """
+    runtime = MagicMock()
+    runtime.manager.occupants = {"b1": ["p1"]}
+    runtime._effective_building_id.return_value = "b1"
+    runtime._emit_speak_start.return_value = "msg-1"
+    runtime._emit_speak_finalize.return_value = SpeakFinalizeResult(
+        status="saved",
+        building_msg={"message_id": "msg-1", "content": "終わりました。"},
+    )
+    runtime._default_temperature.return_value = 0.7
+    runtime._get_cache_kwargs.return_value = {}
+    runtime.select_llm_client.return_value = (_OneChunkStreamClient(), "model-a")
+
+    monkeypatch.setattr(
+        runtime_llm, "resolve_execution_context",
+        lambda persona, pulse_context, state=None: SimpleNamespace(model_key="model-a"),
+    )
+    monkeypatch.setattr(runtime_llm, "_is_llm_streaming_enabled", lambda: True)
+    monkeypatch.setattr(runtime_llm, "_record_llm_usage", lambda *a, **k: None)
+    monkeypatch.setattr(runtime_llm, "_consume_reasoning", lambda *a, **k: ("", None))
+    monkeypatch.setattr(runtime_llm, "_finalize_beat", lambda *a, **k: None)
+    monkeypatch.setattr(runtime_llm, "_run_spell_loop", spell_loop)
+
+    # persona_id=None で persona_context の wrap を素通しする
+    # (tests/test_streaming_placeholder_salvage.py と同じ手)。
+    persona = SimpleNamespace(
+        persona_id=None, persona_name="p", history_manager=MagicMock(),
+    )
+    events: List[Dict[str, Any]] = []
+    node = runtime_llm.lg_llm_node(
+        runtime, _node_def(), persona, "b1", SimpleNamespace(name="pb"),
+        events.append,
+    )
+    return runtime, node, events
+
+
+def _two_beat_spell_loop(closing_usage: Optional[Dict[str, Any]] = None):
+    """中間 Beat 1 件 (確定済み) + 締めの Beat 1 件を返すフェイクのスペルループ。"""
+
+    async def _loop(**kwargs):
+        return runtime_llm.SpellLoopResult(
+            segments=[
+                runtime_llm.BeatSegment(
+                    text="一回目だ。", building_id="b1",
+                    llm_usage={"model": "m1", "input_tokens": 3}, emitted=True,
+                ),
+                runtime_llm.BeatSegment(
+                    text="終わりました。", building_id="b1",
+                    llm_usage=closing_usage, emitted=False,
+                ),
+            ],
+            final_continuation="終わりました。",
+            loop_count=1,
+        )
+
+    return _loop
+
+
+def test_the_closing_beat_of_a_spell_pulse_shows_no_pulse_total(monkeypatch):
+    """スペルが走った Pulse の締めの Beat に、Pulse 合計の札を載せない。
+
+    吹き出しが Beat ごとに割れた今、締めに合計を付けると前の吹き出しの分を
+    含む数字が隣に並んで二重に読める (2026-09-13 まはー観測・同日裁定、
+    docs/issues/pulse_beats_merge_into_single_record.md の実機 2)。各吹き出しは
+    自分の Beat の分だけを出し、正確な集計は使用量の記帳が別に持つ。
+    """
+    runtime, node, events = _build_streaming_node(
+        monkeypatch,
+        spell_loop=_two_beat_spell_loop(
+            closing_usage={"model": "m2", "input_tokens": 7},
+        ),
+    )
+    state = {
+        "_messages": [],
+        "_pulse_id": "pl-1",
+        # Pulse 合計は積まれている。載らないのは「積んでいないから」ではなく
+        # 「載せないと決めたから」— この前提が崩れるとテストが空振りになる。
+        "_pulse_usage_accumulator": {
+            "total_input_tokens": 10, "total_output_tokens": 4,
+            "total_cost_usd": 0.01, "call_count": 2, "models_used": ["m1", "m2"],
+        },
+    }
+    asyncio.run(node(state))
+
+    assert "llm_usage_total" in runtime_llm._build_say_metadata(dict(state)), (
+        "前提が崩れている: この state では合計が載りうるはず"
+    )
+
+    runtime._emit_speak_finalize.assert_called_once()
+    extra = runtime._emit_speak_finalize.call_args.kwargs["extra_metadata"]
+    assert "llm_usage_total" not in extra
+    # 締めの吹き出しは自分の Beat の分だけを持つ
+    assert extra["llm_usage"] == {"model": "m2", "input_tokens": 7}
+    # 画面へ渡す札も同じ (記録と表示で数字が食い違わない)
+    say_events = [e for e in events if e["type"] == "say"]
+    assert say_events, "締めの Beat の say イベントが流れていない"
+    assert "llm_usage_total" not in say_events[-1]["metadata"]
+
+
+def test_an_intermediate_beat_carries_its_own_usage(monkeypatch):
+    """中間 Beat の記録は、その周の使用量を自分の分として持つ。"""
+    runtime = SpellLoopRuntime()
+    client = ScriptedStreamClient(["終わりました。"])
+    st = _streaming_state("draft-0", "b1")
+    state = {"_pulse_id": "pulse-1", "_pulse_context": None,
+             "_cancellation_token": None,
+             "_pulse_usage_accumulator": {"call_count": 2}}
+    _run_loop(
+        runtime, client, f"やるぞ。\n{SPELL_LINE}", _ok_spell(),
+        streaming_state=st, initial_building_id="b1", state=state,
+    )
+
+    assert len(runtime.finalized) == 1
+    extra = runtime.finalized[0]["extra_metadata"]
+    assert extra["llm_usage"] == {"model": "m", "input_tokens": 1}
+    assert "llm_usage_total" not in extra
+
+
+# ---------------------------------------------------------------------------
+# 7. 「ふと浮かんだ記憶」は、最初に確定する Beat に付く
+# ---------------------------------------------------------------------------
+
+RECALL = "ふと浮かんだ記憶:\n- [Chronicle] 去年の夏のこと"
+
+
+def test_the_recall_lands_on_the_first_beat_not_the_closing_one():
+    """想起は最初に確定する Beat の記録へ (ストリーミング経路)。
+
+    想起が起きるのは Pulse の文脈を組む時点 = Beat 1 の生成前なので、締めの
+    Beat に付くと時系列が逆になる (2026-09-13 まはー観測、実機 4)。最初の
+    Beat が state から pop するので、締めの組み立ては空振りする。
+    """
+    runtime = SpellLoopRuntime()
+    client = ScriptedStreamClient(["終わりました。"])
+    events: List[Dict[str, Any]] = []
+    st = _streaming_state("draft-0", "b1")
+    state = {"_pulse_id": "pulse-1", "_pulse_context": None,
+             "_cancellation_token": None, "_auto_recall_text": RECALL}
+    _run_loop(
+        runtime, client, f"やるぞ。\n{SPELL_LINE}", _ok_spell(),
+        streaming_state=st, initial_building_id="b1", state=state,
+        event_callback=events.append,
+    )
+
+    # Beat 1 の記録に載る
+    assert runtime.finalized[0]["extra_metadata"]["auto_recall"] == RECALL
+    # 締めの Beat には残らない (pop 済みなので組み立てが空振りする)
+    assert "_auto_recall_text" not in state
+    assert "auto_recall" not in runtime_llm._build_say_metadata(state)
+    # 画面にも、Beat 1 を確定させるイベントで届く。Beat の切れ目の取り消しが
+    # 生成中の吹き出しごと捨てるので、ここで渡さないと画面から消える。
+    say_events = [e for e in events if e["type"] == "say"]
+    assert say_events[0]["metadata"]["auto_recall"] == RECALL
+
+
+def test_the_recall_lands_on_the_first_beat_without_streaming():
+    """非ストリーミング経路でも、想起は最初に書かれる Beat の記録へ。"""
+    runtime = SpellLoopRuntime()
+    persona = SimpleNamespace(persona_id="p1")
+    state = {"_auto_recall_text": RECALL}
+    segments = [
+        runtime_llm.BeatSegment(text="一回目だ。", building_id="b1"),
+        runtime_llm.BeatSegment(text="終わりました。", building_id="b1"),
+    ]
+    runtime_llm._emit_beat_segments(
+        runtime, persona, state, segments,
+        pulse_id="pulse-1", event_callback=None,
+        # 締めのメタデータは本物の組み立てを通す (ここが空振りすることが要点)
+        final_metadata_factory=lambda usage: runtime_llm._build_say_metadata(
+            state, llm_usage_metadata=usage, include_total=False,
+        ),
+    )
+
+    assert runtime.said[0]["metadata"]["auto_recall"] == RECALL
+    # 締めの組み立ては空振りする (何も残らない回は metadata ごと None になる)
+    assert "auto_recall" not in (runtime.said[-1]["metadata"] or {})
+
+
+def test_a_single_beat_pulse_still_carries_the_recall_on_its_only_record():
+    """Beat が 1 つしかない Pulse では、その唯一の記録に想起が付く (従来どおり)。"""
+    runtime = SpellLoopRuntime()
+    persona = SimpleNamespace(persona_id="p1")
+    state = {"_auto_recall_text": RECALL}
+    runtime_llm._emit_beat_segments(
+        runtime, persona, state,
+        [runtime_llm.BeatSegment(text="ただいま。", building_id="b1")],
+        pulse_id="pulse-1", event_callback=None,
+        final_metadata_factory=lambda usage: runtime_llm._build_say_metadata(
+            state, llm_usage_metadata=usage, include_total=False,
+        ),
+    )
+
+    assert len(runtime.said) == 1
+    assert runtime.said[0]["metadata"]["auto_recall"] == RECALL
+
+
 if __name__ == "__main__":  # pragma: no cover
     pytest.main([__file__])

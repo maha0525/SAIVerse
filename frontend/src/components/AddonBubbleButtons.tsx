@@ -259,6 +259,38 @@ function ToolBubbleButton({
     );
 }
 
+/** メタデータ待ちの仮ボタン (回転表示)。
+ *
+ * 待ち続けたまま終わる回がある — 声に出す文が無かった Beat (スペル行だけの
+ * Beat) には音声がそもそも作られないので、音声の合図 (metadata) は永久に来ない
+ * (docs/issues/pulse_beats_merge_into_single_record.md 実機 3)。時間切れで
+ * 回転を消し、押せないボタンが残り続けないようにする。ToolBubbleButton の
+ * 300 秒の保険と同じ長さ。
+ *
+ * これは画面側の安全網であって本筋の直しではない。「この Beat に音声は無い」を
+ * アドオン側から知らせる工事は音声アドオンのリポジトリ側で別途行う。
+ */
+function PendingBubbleButton({ label }: { label: string }) {
+    const [timedOut, setTimedOut] = useState(false);
+
+    useEffect(() => {
+        const timer = setTimeout(() => setTimedOut(true), 300_000);
+        return () => clearTimeout(timer);
+    }, []);
+
+    if (timedOut) return null;
+
+    return (
+        <button
+            className={`${styles.bubbleBtn} ${styles.pending}`}
+            title={`${label}（準備中）`}
+            disabled
+        >
+            <Loader size={13} className={styles.spinner} />
+        </button>
+    );
+}
+
 export default function AddonBubbleButtons({
     messageId,
     messageText,
@@ -286,16 +318,12 @@ export default function AddonBubbleButtons({
 
     return (
         <>
-            {/* ローディング中のプレースホルダー */}
+            {/* ローディング中のプレースホルダー (時間切れで自分から消える) */}
             {pendingButtons.map((btn) => (
-                <button
+                <PendingBubbleButton
                     key={`pending-${btn.addon_name}-${btn.id}`}
-                    className={`${styles.bubbleBtn} ${styles.pending}`}
-                    title={`${btn.label}（準備中）`}
-                    disabled
-                >
-                    <Loader size={13} className={styles.spinner} />
-                </button>
+                    label={btn.label}
+                />
             ))}
 
             {/* 有効化済みのボタン */}

@@ -539,11 +539,19 @@ def _emit_beat_segments(
     emit する。1 件にまとめると、周の途中で移動したペルソナの発言が全部どちらか
     片方の部屋に落ちる (docs/issues/pulse_beats_merge_into_single_record.md)。
 
-    メタデータの帰属 (契約 4): 中間 Beat はその周の使用量だけ、締めの Beat が
-    ``final_metadata_factory`` の全部入り (Pulse 合計・activity_trace・auto_recall
-    ・reasoning)。``final_metadata_factory`` は締めの Beat の使用量を受け取って
-    metadata を組む — ``_build_say_metadata`` は ``_auto_recall_text`` を pop する
-    ので、締めの 1 回だけ呼ぶ。
+    メタデータの帰属 (契約 4): 中間 Beat はその周の使用量、締めの Beat が
+    ``final_metadata_factory`` の全部入り (activity_trace・reasoning)。
+    ``final_metadata_factory`` は締めの Beat の使用量を受け取って metadata を
+    組む — ``_build_say_metadata`` は ``_auto_recall_text`` を pop するので、
+    締めの 1 回だけ呼ぶ。
+
+    例外が二つ。想起 (auto_recall) は **最初に書かれる Beat** へ回す
+    (起きたのは Beat 1 の生成前なので、締めに付けると時系列が逆になる)。
+    Pulse 合計の札 (``llm_usage_total``) はスペルが走った Pulse では出さない
+    (各吹き出しが自分の分を持つので、合計を並べると前の Beat の分が二重に
+    見える) — 呼び出し元が ``include_total=False`` で組む。
+    どちらも 2026-09-13 の実機確認の裁定
+    (docs/issues/pulse_beats_merge_into_single_record.md の実機 2・4)。
 
     ``strip_prefix``: 先頭 Beat から切り落とす、既に早期 emit 済みの本文。
 
@@ -583,6 +591,13 @@ def _emit_beat_segments(
             metadata = {"tags": ["conversation"]}
             if segment.llm_usage:
                 metadata["llm_usage"] = segment.llm_usage
+            # 想起は Beat 1 の生成前に起きた出来事なので、最初に書かれる Beat の
+            # 記録に載せる (実機 4)。pop なので 2 件目以降と締めの
+            # ``_build_say_metadata`` は空振りする。締めしか無い回 (= 単一 Beat)
+            # は上の分岐に入るので、従来どおり締めが拾う。
+            auto_recall = state.pop("_auto_recall_text", None)
+            if auto_recall:
+                metadata["auto_recall"] = auto_recall
         bmsg = _emit_say_and_capture(
             runtime, persona, segment.building_id, seg_text, state,
             pulse_id=pulse_id, metadata=metadata,
@@ -2509,6 +2524,16 @@ async def _run_spell_loop(
         extra: Dict[str, Any] = {"tags": ["conversation"]}
         if segment.llm_usage:
             extra["llm_usage"] = segment.llm_usage
+        # 「ふと浮かんだ記憶」(自動想起) が起きるのは Pulse の文脈を組む時点、
+        # つまり **Beat 1 の生成が始まる前**。締めの Beat の
+        # ``_build_say_metadata`` に任せると、時系列では序盤の出来事なのに
+        # 最後の吹き出しに付く (2026-09-13 実機 4)。ここで pop して最初に
+        # 確定する Beat の記録へ載せると、締めの組み立ては空振りして
+        # 位置が揃う。スペルが走らない単一 Beat の Pulse は締め = 唯一の
+        # Beat なので、従来どおり締めが拾う。
+        _auto_recall = state.pop("_auto_recall_text", None)
+        if _auto_recall:
+            extra["auto_recall"] = _auto_recall
 
         def _write_beat_body_directly(*, announce: bool) -> bool:
             """下書き行へ確定できなかった周の本文を、建物へ 1 件として直接書く。
@@ -2521,6 +2546,11 @@ async def _run_spell_loop(
             """
             segment.emitted = True
             if not segment.text.strip():
+                # 何も書かずに終わる回。取り出した想起を state に戻して、後続の
+                # Beat が拾えるようにする — ここで捨てると、記録にも画面にも
+                # 残らないまま消える。
+                if _auto_recall:
+                    state["_auto_recall_text"] = _auto_recall
                 return False
             _emit_say_and_capture(
                 runtime, persona, segment.building_id, segment.text, state,
@@ -2568,6 +2598,10 @@ async def _run_spell_loop(
                 "pulse_id": state.get("_pulse_id"),
                 "building_id": segment.building_id,
             })
+            # metadata を載せるのは、この Beat の記録に入る値を画面の吹き出しにも
+            # そのまま反映させるため。想起 (auto_recall) は Beat の切れ目の
+            # ``streaming_discard`` が生成中の吹き出しごと捨ててしまうので、
+            # 確定のこのイベントで渡さないと画面から消える (実機 4)。
             event_callback({
                 "type": "say",
                 "content": segment.text,
@@ -2575,6 +2609,7 @@ async def _run_spell_loop(
                 "pulse_id": state.get("_pulse_id"),
                 "message_id": str(msg_id),
                 "building_id": segment.building_id,
+                "metadata": extra,
             })
         _sf = _finalize_speak_with_signal(
             runtime, persona, segment.building_id, msg_id, segment.text,
@@ -5039,12 +5074,17 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                             # spell 経路は従来から reasoning を載せていない
                             # （＝ 既存挙動を維持）。
                             _spell_at_ns = state.get("_activity_trace")
+                            # Pulse 合計の札は出さない (2026-09-13 まはー裁定)。
+                            # 吹き出しが Beat ごとに割れた今、締めに合計を付けると
+                            # 前の吹き出しの分を含む数字が並んで二重に読める。
+                            # 正確な集計は使用量の記帳 (usage tracker) が別に持つ。
                             _spell_msg_meta_ns = _build_say_metadata(
                                 state,
                                 llm_usage_metadata=(
                                     _final_seg_ns.llm_usage
                                     if _final_seg_ns is not None else None
                                 ),
+                                include_total=False,
                             )
 
                             # Pipeline Streaming finalize: 締めの Beat の下書き行を
@@ -5428,12 +5468,16 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                                 runtime, persona, state, _spell_segments_sync,
                                 pulse_id=pulse_id,
                                 event_callback=event_callback,
+                                # Pulse 合計の札は出さない (2026-09-13 まはー裁定。
+                                # ストリーミング経路の締めと同じ理由 — 各吹き出しが
+                                # 自分の Beat の分を持つので、合計は重複に見える)。
                                 final_metadata_factory=lambda usage: _build_say_metadata(
                                     state,
                                     base_metadata=_speak_base_metadata2,
                                     llm_usage_metadata=usage,
                                     reasoning_text=reasoning_text,
                                     reasoning_details=reasoning_details,
+                                    include_total=False,
                                 ),
                                 final_say_extra=_sync_say_extra or None,
                                 strip_prefix=_bubble1_emitted_early_sync,

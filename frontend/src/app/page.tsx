@@ -173,6 +173,18 @@ interface ActivityEntry {
     status?: string;
 }
 
+/** その吹き出しを喋ったペルソナの ID。同定できないときは undefined。
+ *
+ * 出どころが二つあるので、ここで一本化する — 履歴とポーリング由来の吹き出しは
+ * `persona_id` を持ち、生成中およびライブの発言は `_persona_id` を持つ。
+ * ユーザーの発言・システム通知・エラーカードは「誰の発言か」を持たないので、
+ * 名乗りが無いものとして扱う (連続判定では必ず仕切り直しになる)。
+ */
+function bubbleSpeakerId(msg?: Message): string | undefined {
+    if (!msg || msg.role !== 'assistant' || msg.isError) return undefined;
+    return msg.persona_id || msg._persona_id || undefined;
+}
+
 // File attachment types for upload
 interface FileAttachment {
     id: string;             // unique key for React + async state replace
@@ -1917,8 +1929,10 @@ export default function Home() {
                         const isOtherBuildingEvent = !!eventBuildingId
                             && !!currentBuildingIdRef.current
                             && eventBuildingId !== currentBuildingIdRef.current;
-                        // 生成中の吹き出しの持ち主。同じ部屋で二人が同時に喋る
-                        // ときの取り消しの同定に使う (下の streaming_discard)。
+                        // その吹き出しの持ち主。同じ部屋で二人が同時に喋るときの
+                        // 取り消しの同定 (下の streaming_discard) と、確定した
+                        // 吹き出しに持ち主を記録するのに使う。後者は、同じ
+                        // ペルソナの吹き出しが続く間だけ顔と名前を省く判定の材料。
                         const evtPersonaId: string | undefined =
                             typeof event.persona_id === 'string' && event.persona_id
                                 ? event.persona_id : undefined;
@@ -2191,6 +2205,15 @@ export default function Home() {
                             const sayReasoning = event.reasoning || undefined;
                             const sayActivityTrace = event.activity_trace || undefined;
                             const sayPulseId: string | undefined = event.pulse_id || undefined;
+                            // 「ふと浮かんだ記憶」は、その Beat の記録に載って届く。
+                            // ライブの auto_recall イベントで貼った内容があっても、
+                            // Beat の切れ目の streaming_discard が吹き出しごと捨てる
+                            // ので、確定のこのイベントが唯一の届き先になる回がある
+                            // (docs/issues/pulse_beats_merge_into_single_record.md 実機 4)。
+                            // 両方来た場合は確定時の内容で上書きする。
+                            const sayAutoRecall: string | undefined =
+                                typeof sayMeta?.auto_recall === 'string' && sayMeta.auto_recall.trim()
+                                    ? sayMeta.auto_recall : undefined;
                             setMessages(prev => {
                                 // 別の部屋の Beat の発言は、この部屋には出さない
                                 // (replied の簿記は上で済ませてある)
@@ -2208,7 +2231,9 @@ export default function Home() {
                                         ...(sayUsageTotal && { llm_usage_total: sayUsageTotal }),
                                         ...(sayReasoning && { reasoning: sayReasoning }),
                                         ...(sayActivityTrace && { activity_trace: sayActivityTrace }),
+                                        ...(sayAutoRecall && { auto_recall: sayAutoRecall }),
                                         ...(sayPulseId && { _pulse_id: sayPulseId }),
+                                        ...(evtPersonaId && { persona_id: evtPersonaId }),
                                     }];
                                 }
                                 return [...prev, {
@@ -2222,7 +2247,12 @@ export default function Home() {
                                     ...(sayUsageTotal && { llm_usage_total: sayUsageTotal }),
                                     ...(sayReasoning && { reasoning: sayReasoning }),
                                     ...(sayActivityTrace && { activity_trace: sayActivityTrace }),
+                                    ...(sayAutoRecall && { auto_recall: sayAutoRecall }),
                                     ...(sayPulseId && { _pulse_id: sayPulseId }),
+                                    // 誰の発言かを吹き出し自身に持たせる。連続する
+                                    // Beat の吹き出しで顔と名前を省く判定 (下の
+                                    // messages.map) と、アドオンのボタンが使う。
+                                    ...(evtPersonaId && { persona_id: evtPersonaId }),
                                 }];
                             });
                             setLoadingStatus('Thinking...');
@@ -3351,17 +3381,29 @@ export default function Home() {
                                 </div>
                             );
                         }
+                        // 同じペルソナの吹き出しが続く間は、2 個目以降で顔と名前を省く。
+                        // Pulse が Beat ごとの吹き出しに割れるようになって、一人の
+                        // ひと続きの発言に顔と名前が何度も並ぶようになった
+                        // (docs/issues/pulse_beats_merge_into_single_record.md 実機 1)。
+                        // 間に別の話者・システム通知・ユーザーの発言・エラーが挟まると
+                        // 同定が一致しないので、自然に仕切り直して顔と名前が戻る。
+                        // どちらかの持ち主が分からない吹き出しでは省略しない。
+                        const speakerId = bubbleSpeakerId(msg);
+                        const continuesSamePersona = !!speakerId
+                            && speakerId === bubbleSpeakerId(idx > 0 ? messages[idx - 1] : undefined);
                         return (
-                        <div key={msg.id || idx} className={`${styles.message} ${styles[msg.role]}`}>
+                        <div key={msg.id || idx} className={`${styles.message} ${styles[msg.role]} ${continuesSamePersona ? styles.continuedBubble : ''}`}>
                             <div className={`${styles.card} ${msg.isError ? styles.errorCard : ''} ${msg.isError && msg.errorCode ? styles[`error_${msg.errorCode}`] : ''}`}>
-                                <div className={styles.cardHeader}>
-                                    <img
-                                        src={msg.avatar || (msg.role === 'user' ? '/api/static/builtin_icons/user.png' : '/api/static/builtin_icons/host.png')}
-                                        alt="avatar"
-                                        className={styles.avatar}
-                                    />
-                                    <span className={styles.sender}>{msg.sender || (msg.role === 'user' ? 'You' : 'Assistant')}</span>
-                                </div>
+                                {!continuesSamePersona && (
+                                    <div className={styles.cardHeader}>
+                                        <img
+                                            src={msg.avatar || (msg.role === 'user' ? '/api/static/builtin_icons/user.png' : '/api/static/builtin_icons/host.png')}
+                                            alt="avatar"
+                                            className={styles.avatar}
+                                        />
+                                        <span className={styles.sender}>{msg.sender || (msg.role === 'user' ? 'You' : 'Assistant')}</span>
+                                    </div>
+                                )}
                                 <div className={styles.cardBody}>
                                     {msg.images && msg.images.length > 0 && (
                                         <div className={styles.messageImages}>
