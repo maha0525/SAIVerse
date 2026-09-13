@@ -1,7 +1,7 @@
 {
-  "model": "qwen/qwen3.8-max",
+  "model": "qwen/qwen3.8-max-0902",
   "system_prompt": "",
-  "display_name": "Qwen3.8 Max (OpenRouter)",
+  "display_name": "Qwen3.8 Max 0902 (OpenRouter)",
   "provider_ref": "openrouter",
   "group": "openrouter",
   "supports_structured_output": true,

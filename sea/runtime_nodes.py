@@ -8,6 +8,7 @@ from llm_clients.exceptions import LLMError
 from saiverse.logging_config import log_sea_trace
 from sea.message_stamp import clear_call_tokens, clear_presented_message_ids
 from sea.runtime_state import effective_auto_mode, set_playbook_var
+from sea.runtime_utils import event_building_id
 
 LOGGER = logging.getLogger(__name__)
 
@@ -91,7 +92,17 @@ def lg_tool_call_node(runtime: Any, node_def: Any, persona: Any, playbook: Any, 
                 if isinstance(_at, list):
                     _at.append({"action": "tool_call", "name": tool_name, "playbook": pb_display})
                 if event_callback:
-                    event_callback({"type": "activity", "action": "tool_call", "name": tool_name, "playbook": pb_display, "status": "completed", "persona_id": getattr(persona, "persona_id", None), "persona_name": getattr(persona, "persona_name", None), "pulse_id": state.get("_pulse_id")})
+                    # building_id = 発火時点の部屋。名乗らないと、別の部屋で
+                    # 進んでいる Beat の活動記録が閲覧中の部屋の吹き出しに混ざる。
+                    # 名乗りと部屋は同じ persona_obj から引く — これはツールを
+                    # 実際に走らせた本人 (上の persona_context と同じ) で、
+                    # 「誰の吹き出しか」と「その人がいまいる部屋」が一致する。
+                    # state["_persona_obj"] を書くのは compile_with_langgraph の
+                    # 1 箇所だけで、そこはノードを作るときと同じ persona を入れる
+                    # (sea/runtime_graph.py の initial_state)。置かない経路
+                    # (sea/work_session.py) では or で persona に倒れるので、
+                    # 二つが別物になることはない。
+                    event_callback({"type": "activity", "action": "tool_call", "name": tool_name, "playbook": pb_display, "status": "completed", "persona_id": getattr(persona_obj, "persona_id", None), "persona_name": getattr(persona_obj, "persona_name", None), "pulse_id": state.get("_pulse_id"), "building_id": event_building_id(runtime, persona_obj)})
             state["last"] = result_str
             if output_key:
                 set_playbook_var(state, output_key, result, where=f"node '{node_id}' output_key")

@@ -711,3 +711,63 @@ def test_retry_is_refused_when_the_check_is_unavailable(session_factory) -> None
     assert exc.value.detail["code"] == "history_unavailable"
     assert "少し待ってもう一度" in exc.value.detail["message"]
     manager.retry_user_message_stream.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# hook 配送の直列化キー (order_key) — Pulse 優先 (2026-09-12)
+#
+# 1 Pulse が Beat ごとの複数 message になったため、message_id 単位の直列化では
+# Beat N の close と Beat N+1 の最初の sub-speak が別キーになり、並列配送で
+# 追い越しうる (docs/issues/pulse_beats_merge_into_single_record.md 契約 6)。
+# ---------------------------------------------------------------------------
+
+
+def _capture_dispatch(monkeypatch):
+    calls: list[dict] = []
+
+    def _fake_dispatch(event_name, **kwargs):
+        calls.append(kwargs)
+
+    import saiverse.addon_hooks as addon_hooks
+    monkeypatch.setattr(addon_hooks, "dispatch_hook", _fake_dispatch)
+    return calls
+
+
+def test_sub_speak_serializes_on_the_pulse_when_it_has_one(monkeypatch) -> None:
+    calls = _capture_dispatch(monkeypatch)
+    persona = SimpleNamespace(persona_id="p1")
+
+    _emitters().emit_sub_speak(persona, "room", "room:1", "こんにちは。", 1, pulse_id="pulse-A")
+
+    assert calls and calls[0]["order_key"] == "pulse-A"
+
+
+def test_sub_speak_falls_back_to_the_message_without_a_pulse(monkeypatch) -> None:
+    calls = _capture_dispatch(monkeypatch)
+    persona = SimpleNamespace(persona_id="p1")
+
+    _emitters().emit_sub_speak(persona, "room", "room:1", "こんにちは。", 1, pulse_id=None)
+
+    assert calls and calls[0]["order_key"] == "room:1"
+
+
+def test_finalize_serializes_on_the_same_pulse_as_the_sub_speaks(monkeypatch) -> None:
+    """Beat N の close と Beat N+1 の sub-speak が同じキーに乗る = 追い越さない。"""
+    calls = _capture_dispatch(monkeypatch)
+    persona = _persona_with({
+        "message_id": "room:5",
+        "metadata": {"_streaming_placeholder": False},
+    })
+
+    _emitters().emit_speak_finalize(
+        persona, "room", "room:5", "こんにちは", pulse_id="pulse-A",
+    )
+    _emitters().emit_sub_speak(
+        SimpleNamespace(persona_id="p1"), "room", "room:6", "つづき。", 1,
+        pulse_id="pulse-A",
+    )
+
+    finalize_keys = [c["order_key"] for c in calls if c.get("is_final")]
+    sub_keys = [c["order_key"] for c in calls if c.get("is_final") is False]
+    assert finalize_keys == ["pulse-A"]
+    assert sub_keys == ["pulse-A"]

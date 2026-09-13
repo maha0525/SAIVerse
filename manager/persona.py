@@ -180,18 +180,14 @@ class PersonaMixin:
             persona_context_length = get_context_length(persona_model)
             persona_provider = get_model_provider(persona_model)
         except ValueError:
+            # 画面への警告はここで積まない。画面が取りに来るたびに
+            # current_model_setting_warnings (manager/initialization.py) が
+            # いまの DB の値から作る — 起動後に選び直した設定を反映するため。
             fallback = self._base_model
             logging.warning(
                 "Persona '%s': model config '%s' not found. Falling back to '%s'.",
                 pid, persona_model, fallback,
             )
-            self.startup_warnings.append({
-                "source": "model_config",
-                "message": (
-                    f"ペルソナ '{pid}' のモデル '{persona_model}' の設定ファイルが見つかりません。"
-                    f"デフォルトモデル '{fallback}' にフォールバックしました。"
-                ),
-            })
             persona_model = fallback
             persona_context_length = get_context_length(persona_model)
             persona_provider = get_model_provider(persona_model)

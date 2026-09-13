@@ -45,7 +45,7 @@ from manager.initialization import InitializationMixin
 from manager.persona_events import PersonaEventMixin
 from manager.state import CoreState
 from manager.runtime import RuntimeService
-from manager.admin import AdminService
+from manager.admin import UNSET, AdminService
 from manager.items import ItemService
 from database.models import (
     AI as AIModel,
@@ -119,6 +119,8 @@ class SAIVerseManager(
         # --- Phase 1: Data Loading ---
         self._init_database(db_path)
         self._init_city_config(city_name)
+        # 部屋を読み込む前に、フォルダ名や URL を壊す文字を含む古い部屋 ID を付け替える
+        self._repair_unsafe_building_ids()
         self._init_buildings()
         self._init_file_paths()
         self._init_avatars()
@@ -314,15 +316,13 @@ class SAIVerseManager(
                     self.state.current_playbook = settings.SELECTED_META_PLAYBOOK
                     logging.info("Loaded saved meta playbook: %s", settings.SELECTED_META_PLAYBOOK)
                 # 水位の全体既定 (user_settings → model_configs のモジュール変数へ写す)。
-                # Metabolism の二水位と知覚の二水位を一枚で持つ。model_configs は DB を
-                # 触らない約束なので写すのはここと PUT /api/config/metabolism-defaults の
-                # 二箇所 (docs/concepts/metabolism.md)。
+                # 残す量と上限の一組。model_configs は DB を触らない約束なので写すのは
+                # ここと PUT /api/config/metabolism-defaults の二箇所
+                # (docs/concepts/metabolism.md)。
                 from saiverse.model_configs import set_global_watermark_defaults
                 set_global_watermark_defaults({
                     "metabolism_target_chars": settings.METABOLISM_TARGET_CHARS if settings else None,
                     "metabolism_high_chars": settings.METABOLISM_HIGH_CHARS if settings else None,
-                    "perception_target_chars": settings.PERCEPTION_TARGET_CHARS if settings else None,
-                    "perception_high_chars": settings.PERCEPTION_HIGH_CHARS if settings else None,
                 })
             finally:
                 db.close()
@@ -793,6 +793,7 @@ class SAIVerseManager(
                     physical_vessel_id=getattr(db_b, 'PHYSICAL_VESSEL_ID', None),
                     region_id=getattr(db_b, 'REGION_ID', None),
                     facility_roles=facility_roles,
+                    item_display_limit=getattr(db_b, 'ITEM_DISPLAY_LIMIT', None),
                 )
                 buildings.append(building)
             logging.info(f"Loaded and created {len(buildings)} buildings from database.")
@@ -954,6 +955,10 @@ class SAIVerseManager(
     def create_document_item(self, persona_id: str, name: str, description: str, content: str, source_context: Optional[str] = None) -> str:
         """Create a new document item and place it in the current building."""
         return self.item_service.create_document_item(persona_id, name, description, content, source_context=source_context)
+
+    def create_bag_item(self, persona_id: str, name: str, description: str, source_context: Optional[str] = None) -> str:
+        """Create a new bag item (closed) and place it in the current building."""
+        return self.item_service.create_bag_item(persona_id, name, description, source_context=source_context)
 
     def create_picture_item(self, persona_id: str, name: str, description: str, file_path: str, building_id: Optional[str] = None, source_context: Optional[str] = None) -> tuple:
         """Create a new picture item and place it in the specified building. Returns (item_id, slot_num)."""
@@ -1473,6 +1478,13 @@ class SAIVerseManager(
             model,
         )
         self._base_model = model
+        # AdminService は起動時に _base_model を写して持ち、ワールドエディタから作る
+        # ペルソナの標準モデルに使う (manager/admin.py の __init__、manager/persona.py の
+        # create_ai)。写しも揃えないと、標準モデルを変えた後に作ったペルソナだけが
+        # 再起動まで古いモデルで作られる。
+        admin = getattr(self, "admin", None)
+        if admin is not None:
+            admin._base_model = model
 
         db = self.SessionLocal()
         try:
@@ -2131,8 +2143,14 @@ class SAIVerseManager(
         interval: int,
         image_path: Optional[str] = None,
         extra_prompt_files: Optional[List[str]] = None,
+        item_display_limit: Any = UNSET,
     ) -> str:
-        """ワールドエディタからBuildingの設定を更新する"""
+        """ワールドエディタからBuildingの設定を更新する
+
+        ``item_display_limit`` (部屋の様子に出す建物直下のアイテムの個数の上限)
+        は :data:`~manager.admin.UNSET` なら触らない — 送ってこない画面の保存で
+        設定が消えないようにするため (docs/intent/room_item_display_cap.md 設計 4)。
+        """
         result = self.admin.update_building(
             building_id,
             name,
@@ -2144,6 +2162,7 @@ class SAIVerseManager(
             interval,
             image_path,
             extra_prompt_files,
+            item_display_limit,
         )
 
         # Update in-memory Building object if DB update succeeded
@@ -2156,6 +2175,12 @@ class SAIVerseManager(
             building.system_instruction = system_instruction
             building.auto_interval_sec = interval
             building.extra_prompt_files = extra_prompt_files or []
+            if item_display_limit is not UNSET:
+                # 次に部屋の様子を組むときから効く (提示はその場では書き換え
+                # ない — docs/intent/room_item_display_cap.md 設計 6)。
+                building.item_display_limit = (
+                    None if item_display_limit is None else int(item_display_limit)
+                )
             # Update capacities dict used by OccupancyManager
             if hasattr(self, 'capacities') and building_id in self.capacities:
                 self.capacities[building_id] = capacity

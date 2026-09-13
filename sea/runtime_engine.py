@@ -9,7 +9,7 @@ from saiverse.logging_config import log_sea_trace
 from sea.message_stamp import stamp_generation_metadata
 from sea.playbook_models import PlaybookSchema
 from sea.runtime_state import effective_auto_mode, set_playbook_var
-from sea.runtime_utils import _format, _resolve_template_arg
+from sea.runtime_utils import _format, _resolve_template_arg, event_building_id
 from tools import TOOL_REGISTRY, canonicalize_tool_name
 from tools.context import persona_context
 from tools.core import parse_tool_result
@@ -126,9 +126,23 @@ class RuntimeEngine:
                         event_callback({
                             "type": "activity", "action": "tool", "name": tool_name,
                             "playbook": pb_display, "status": "completed",
-                            "persona_id": getattr(persona, "persona_id", None),
-                            "persona_name": getattr(persona, "persona_name", None),
+                            # 名乗りと部屋は同じ persona_obj から引く — これは
+                            # ツールを実際に走らせた本人 (上の persona_context と
+                            # 同じ) で、「誰の吹き出しか」と「その人がいまいる
+                            # 部屋」が一致する。state["_persona_obj"] を書くのは
+                            # compile_with_langgraph の 1 箇所だけで、そこは
+                            # ノードを作るときと同じ persona を入れる
+                            # (sea/runtime_graph.py の initial_state)。置かない
+                            # 経路 (sea/work_session.py) では or で persona に
+                            # 倒れるので、二つが別物になることはない。
+                            "persona_id": getattr(persona_obj, "persona_id", None),
+                            "persona_name": getattr(persona_obj, "persona_name", None),
                             "pulse_id": state.get("_pulse_id"),
+                            # 発火時点の部屋。名乗らないと、別の部屋で進んでいる
+                            # Beat の活動記録が閲覧中の部屋の吹き出しに混ざる。
+                            "building_id": event_building_id(
+                                self.runtime, persona_obj,
+                            ),
                         })
 
                 # Handle tuple results with output_keys (for multi-value returns)
@@ -477,6 +491,8 @@ class RuntimeEngine:
                         "persona_id": getattr(persona, "persona_id", None),
                         "persona_name": getattr(persona, "persona_name", None),
                         "pulse_id": state.get("_pulse_id"),
+                        # 発火時点の部屋 (TOOL ノードと同じ理由)。
+                        "building_id": event_building_id(self.runtime, persona),
                     })
 
             # Debug: log speak_content at end of memorize node
@@ -519,7 +535,9 @@ class RuntimeEngine:
         if outputs is not None:
             outputs.append(text)
         if event_callback:
-            say_event: Dict[str, Any] = {"type": "say", "content": text, "persona_id": getattr(persona, "persona_id", None)}
+            # building_id = この発言が残った部屋。表示中の部屋と違う吹き出しを
+            # 画面が作らないための材料 (docs/issues/pulse_beats_merge_into_single_record.md 契約 5)。
+            say_event: Dict[str, Any] = {"type": "say", "content": text, "persona_id": getattr(persona, "persona_id", None), "building_id": eff_bid}
             if pulse_id:
                 say_event["pulse_id"] = pulse_id
             if building_msg and building_msg.get("message_id"):

@@ -248,6 +248,9 @@ def reload_providers():
     they are re-resolved here too; otherwise they would keep pointing at the
     definition this call just replaced.
     """
+    # 冷えたウィンドウの見張りの指紋を捨てるのは provider_configs.reload_configs()
+    # の側 (プロバイダ定義の書き換えの入口が全部そこを通るため)。ここで重ねて
+    # 呼ばない。
     provider_configs.reload_configs()
     provider_configs.reload_models_after_provider_change()
     return [

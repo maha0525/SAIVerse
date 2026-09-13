@@ -59,3 +59,30 @@ body {
   font-weight: 500;
   color: var(--text-primary);
 }
+
+/* note-box 内のリンク (移動イベントの行き先の部屋名など)。 box 全体が
+   opacity 0.85 + 0.85em で沈むので、 SaiverseLink の既定色のままだと
+   ライトテーマでコントラストが足りない (背景 #f1f5f9 上で約 3.6:1)。
+   ここで濃い色と太字にして拾い直す。 セレクタは
+   [data-theme=...] .note-box a (0,2,1) で、 SaiverseLink.module.css の
+   [data-theme="light"] .saiverseLink (0,2,0) より詳細度が高い。 */
+.note-box a {
+  font-weight: 600;
+  text-decoration-style: solid;
+}
+
+[data-theme="light"] .note-box a {
+  color: #1e40af;
+}
+
+[data-theme="light"] .note-box a:hover {
+  color: #1e3a8a;
+}
+
+[data-theme="dark"] .note-box a {
+  color: #93c5fd;
+}
+
+[data-theme="dark"] .note-box a:hover {
+  color: #bfdbfe;
+}

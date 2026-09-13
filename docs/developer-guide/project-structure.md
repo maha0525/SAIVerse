@@ -84,7 +84,7 @@ saiverse/
 ├── llm_router.py           # ツール呼び出し判定
 ├── gemini_clients.py       # Router/LLM client共通のGemini SDK client構築
 ├── model_configs.py        # モデル設定管理
-├── model_defaults.py       # 組み込みデフォルトモデル
+├── model_defaults.py       # 組み込みデフォルトモデル / モデル役割と環境変数の表 / 定義の無いモデル設定を警告の文面にする判定
 ├── provider_security.py    # provider credentialと接続先URLの束縛・SSRF境界
 ├── file_policy.py          # persisted pathのmanaged root境界
 ├── tls_trust.py            # HTTPS の信頼元を起動時に一度決める。OS の証明書ストアが空の環境
@@ -93,6 +93,8 @@ saiverse/
 ├── meta_layer.py           # 判断 Pulse の共有基盤だけが残る（per-persona Lock / 判断ログ / 設定読み。
 │                           #   v1 メタ判断の状況分類は 2026-08-14 に退役）
 ├── buildings.py            # Building モデルヘルパ
+├── building_id_repair.py   # 区切り記号（/ \）を含む古い部屋 ID を起動時に付け替える（DB の参照・フォルダ・
+│                           #   付け替えの記録 cities/<city>/building_id_renames.json）
 ├── data_paths.py           # パス管理（user_data/builtin_data）
 ├── addon_*.py              # アドオン機構（loader/installer/registry 等）
 ├── observer_manager.py     # Observer（定期観測 Fixture）
@@ -222,6 +224,8 @@ sai_memory/
 ├── core_memory.py    # コア記憶（記憶アーキv2 ゾーンA。memory.db 同居）
 ├── perception_buffer.py # 知覚バッファ（未消費知覚を溜め Pulse 消費で放出。memory.db 同居）
 ├── room_state.py     # 「部屋の様子」の再訪差分と、付記と同一 tx で走る提示文面の移管
+├── presented_reduction.py # 会話以外の内容を Metabolism の瞬間だけ縮める（用の済んだ操作通知を
+│                     #   下ろす／現在地でない部屋の様子を一行へ。提示だけ・台帳は無傷）
 ├── clips.py / purpose_tags.py # クリップ（土地参照の統一プリミティブ、旧 marks）・目的タグ（memory.db 同居）
 ├── unified_recall.py # 統合想起
 ├── backup.py         # rdiff-backup

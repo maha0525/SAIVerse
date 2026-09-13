@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from saiverse.marker_parser import strip_marks
 
@@ -191,7 +191,12 @@ class RuntimeEmitters:
                 )
                 dispatch_hook(
                     "persona_speak",
-                    order_key=msg_id_for_hook,
+                    # order_key は pulse 優先 (2026-09-12): 1 Pulse が Beat ごとの
+                    # 複数 message になったため、message_id 単位の直列化では
+                    # Beat N の close と Beat N+1 の最初の sub-speak が別キーに
+                    # なり、並列配送で追い越しうる (2026-05-16 の並び替え事故と
+                    # 同型)。pulse が無い経路は従来どおり message 単位。
+                    order_key=pulse_id or msg_id_for_hook,
                     persona_id=persona.persona_id,
                     building_id=building_id,
                     text_raw=text,
@@ -213,7 +218,20 @@ class RuntimeEmitters:
         pulse_id: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
         event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+        occupants_snapshot: Optional[List[str]] = None,
     ) -> Optional[Dict[str, Any]]:
+        """建物へ発言を 1 件書く。
+
+        ``occupants_snapshot``: 「聞いた人」(heard_by) と「同席者」(with) を
+        導く在室者を、いまの在室表ではなくこの写しから取る。既定 (None) は
+        従来どおり呼び出し時点の在室表。
+
+        写しが要るのは、**記録を作るのが発言した瞬間より後**になる経路がある
+        から — スペルループを使わない経路は全 Beat の本文をループ完了後に
+        まとめて書くので、素で引くと Beat 1 の記録にまで「ループが終わった
+        時点の在室者」が載る。Beat の記録はその Beat が始まった時点の在室者で
+        作る (docs/issues/pulse_beats_merge_into_single_record.md 契約 3)。
+        """
         # 層1マーカー (==語句==) は表示系シンク (建物履歴 / gateway /
         # TTS hook) には流さない (life_concept_map.md §9.1 / P3)。mark の保存は
         # SAIMemory 側の _store_memory が担うので、ここでは剥離のみ。
@@ -232,7 +250,10 @@ class RuntimeEmitters:
                     msg_metadata[key] = value
 
         partners = []
-        occupants = self.runtime.manager.occupants.get(building_id, [])
+        occupants = (
+            list(occupants_snapshot) if occupants_snapshot is not None
+            else self.runtime.manager.occupants.get(building_id, [])
+        )
         for oid in occupants:
             if oid != persona.persona_id:
                 partners.append(oid)
@@ -292,7 +313,12 @@ class RuntimeEmitters:
                 )
                 dispatch_hook(
                     "persona_speak",
-                    order_key=msg_id_for_hook,
+                    # order_key は pulse 優先 (2026-09-12): 1 Pulse が Beat ごとの
+                    # 複数 message になったため、message_id 単位の直列化では
+                    # Beat N の close と Beat N+1 の最初の sub-speak が別キーに
+                    # なり、並列配送で追い越しうる (2026-05-16 の並び替え事故と
+                    # 同型)。pulse が無い経路は従来どおり message 単位。
+                    order_key=pulse_id or msg_id_for_hook,
                     persona_id=persona.persona_id,
                     building_id=building_id,
                     text_raw=text,
@@ -366,6 +392,55 @@ class RuntimeEmitters:
             )
         return str(msg_id) if msg_id else None
 
+    def withdraw_speak_placeholder(
+        self,
+        persona: Any,
+        building_id: str,
+        message_id: str,
+    ) -> bool:
+        """一文字も入らなかった下書き行を、建物の記録から取り下げる。
+
+        ``emit_speak_start`` の対 — 生成が本文を一つも生まずに終わった回の
+        撤収口。空文字で ``emit_speak_finalize`` すると、本文の無い「発言」が
+        建物の記録とペルソナのログに残り、下書きの印も倒れて孤児掃除の網から
+        外れる (docs/issues/pulse_beats_merge_into_single_record.md の H-1)。
+
+        音声 (voice-tts) のストリームはここでは閉じない — ストリームが開くのは
+        最初の sub-speak が飛んだ瞬間で、本文が一つも無い回はそこへ到達して
+        いない。呼び出し元は「部分文があるか」で確定と取り下げを分ける
+        (部分文がある回は確定側 = ``_settle_interrupted_utterance``)。
+
+        Returns: 取り下げられたか。誰かが既に記憶へ転記していた行は消さない。
+        """
+        try:
+            withdrawn, _reason = persona.history_manager.withdraw_building_message(
+                building_id, str(message_id), expected_role="assistant",
+            )
+        except Exception:
+            LOGGER.exception(
+                "withdraw_speak_placeholder: failed to drop the draft row "
+                "(building=%s msg=%s)", building_id, message_id,
+            )
+            return False
+        if withdrawn:
+            # legacy の in-memory 建物履歴 (実体は使われないが、旧経路が
+            # 読み込むことがある) からも落とす — manager/runtime.py の
+            # ユーザー発言の取り下げと同じ後始末。
+            try:
+                histories = getattr(self.runtime.manager, "building_histories", None)
+                history = histories.get(building_id) if histories else None
+                if isinstance(history, list):
+                    history[:] = [
+                        m for m in history
+                        if str(m.get("message_id")) != str(message_id)
+                    ]
+            except Exception:
+                LOGGER.warning(
+                    "withdraw_speak_placeholder: could not purge the legacy "
+                    "in-memory history (msg=%s)", message_id, exc_info=True,
+                )
+        return withdrawn
+
     def emit_sub_speak(
         self,
         persona: Any,
@@ -395,7 +470,8 @@ class RuntimeEmitters:
                 return
             dispatch_hook(
                 "persona_speak",
-                order_key=message_id,
+                # pulse 優先の直列化 (2026-09-12、emit_speak と同じ理由)。
+                order_key=pulse_id or message_id,
                 persona_id=persona.persona_id,
                 building_id=building_id,
                 text_raw=sub_text,
@@ -591,7 +667,8 @@ class RuntimeEmitters:
                 hook_text_for_voice = strip_user_only(strip_in_heart(text))
             dispatch_hook(
                 "persona_speak",
-                order_key=message_id,
+                # pulse 優先の直列化 (2026-09-12、emit_speak と同じ理由)。
+                order_key=pulse_id or message_id,
                 persona_id=persona.persona_id,
                 building_id=building_id,
                 text_raw=text,

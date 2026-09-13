@@ -1517,29 +1517,82 @@
     background: rgba(255, 255, 255, 0.06);
 }
 
-/* --- 記憶の整理の水位 (全体既定) --- */
-/* 水位の族ごとのまとまり (会話の整理 / 部屋の様子などの記録)。保存ボタンは共通で
-   一つなので、族の境目は見出しと区切り線だけで示す。 */
-.wmGroup {
+/* --- ペルソナに送る量 (全体既定) --- */
+/* プリセットの選択列 (多い / デフォルト / 少ない / カスタム) と、その下の数値欄。
+   2026-09-09 に「部屋の様子などの記録」側の欄を廃止したので、扱う数字は
+   会話の整理の一組だけ。 */
+.wmPresetArea {
     margin-top: 1rem;
 }
 
-.wmGroup + .wmGroup {
-    padding-top: 1rem;
-    border-top: 1px solid #334155;
+.wmPresetRow {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
 }
 
-.wmGroupTitle {
+.wmPresetBtn {
+    flex: 1 1 9rem;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.15rem;
+    padding: 0.5rem 0.75rem;
+    border: 1px solid #475569;
+    border-radius: 8px;
+    background: #1e293b;
+    color: #cbd5e1;
+    cursor: pointer;
+    text-align: left;
+    transition: background 0.2s, border-color 0.2s, color 0.2s;
+}
+
+.wmPresetBtn:hover {
+    background: #334155;
+    color: #f1f5f9;
+}
+
+.wmPresetBtnActive {
+    border-color: #3b82f6;
+    background: rgba(59, 130, 246, 0.18);
+    color: #f1f5f9;
+}
+
+.wmPresetLabel {
     font-size: 0.9rem;
     font-weight: 600;
-    color: #e2e8f0;
 }
 
-.wmGroupDesc {
-    font-size: 0.8rem;
+.wmPresetNums {
+    font-size: 0.75rem;
     color: #94a3b8;
+    font-variant-numeric: tabular-nums;
+}
+
+.wmPresetBtnActive .wmPresetNums {
+    color: #bfdbfe;
+}
+
+.wmPresetNote {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.45rem;
+    margin-top: 0.6rem;
+    padding: 0.6rem 0.7rem;
+    border-radius: 8px;
+    background: rgba(148, 163, 184, 0.12);
+    font-size: 0.8rem;
+    line-height: 1.6;
+    color: #cbd5e1;
+}
+
+.wmPresetNote svg {
+    flex: 0 0 auto;
     margin-top: 0.2rem;
-    line-height: 1.5;
+}
+
+.wmGroup {
+    margin-top: 1rem;
 }
 
 .wmBarArea {
@@ -1641,16 +1694,34 @@
     border-top-color: #e2e8f0;
 }
 
-:global([data-theme="light"]) .wmGroup + .wmGroup {
-    border-top-color: #e2e8f0;
+:global([data-theme="light"]) .wmPresetBtn {
+    background: #ffffff;
+    border-color: #cbd5e1;
+    color: #334155;
 }
 
-:global([data-theme="light"]) .wmGroupTitle {
-    color: #1f2937;
+:global([data-theme="light"]) .wmPresetBtn:hover {
+    background: #f1f5f9;
+    color: #0f172a;
 }
 
-:global([data-theme="light"]) .wmGroupDesc {
+:global([data-theme="light"]) .wmPresetBtnActive {
+    border-color: #2563eb;
+    background: rgba(37, 99, 235, 0.1);
+    color: #0f172a;
+}
+
+:global([data-theme="light"]) .wmPresetNums {
     color: #64748b;
+}
+
+:global([data-theme="light"]) .wmPresetBtnActive .wmPresetNums {
+    color: #1d4ed8;
+}
+
+:global([data-theme="light"]) .wmPresetNote {
+    background: #f1f5f9;
+    color: #475569;
 }
 
 :global([data-theme="light"]) .wmBadge {

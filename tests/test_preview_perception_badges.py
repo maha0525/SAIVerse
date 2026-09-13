@@ -67,7 +67,8 @@ class _PreviewRuntime:
 
     ``_prepare_context`` は実経路 (``_merge_consumed_perceptions``) と同じ二枚
     (:func:`list_presented_perception_blocks` + :func:`merge_perception_blocks`)
-    を同じ引数 (プレビューは ``advance_cutoff=False``) で繋ぐ。
+    を同じ引数で繋ぐ。組成は読み取り専用なので、プレビューと実送信で呼び分けは
+    要らない (2026-09-09 に知覚の合計上限を廃止)。
     """
 
     session_lifecycle = None  # Chronicle 有効相当 (判定不能 → 隠さない側)
@@ -88,7 +89,6 @@ class _PreviewRuntime:
                          warnings=None, preview_only=False):
         blocks = list_presented_perception_blocks(
             self, persona, self._recent, raise_on_error=True,
-            advance_cutoff=not preview_only,
         )
         merged = merge_perception_blocks(self._recent, blocks)
         return [{"role": "system", "content": "システムプロンプト"}] + merged

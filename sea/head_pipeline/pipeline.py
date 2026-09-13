@@ -19,7 +19,7 @@ import logging
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Iterable, Optional
 
 from sea.head_pipeline.registry import HeadSectionRegistry, get_default_registry
 from sea.head_pipeline.types import (
@@ -53,6 +53,12 @@ class _LineState:
     # readiness 検証 (ensure_persisted) は persisted_version >= 現行版 を要求する。
     # store 未設定環境では検証自体がスキップされる。
     persisted_version: int = 0
+    # この state になってから **一度も新しく撮り直せていない** Section の名前。
+    # capture の部分失敗は例外にならない (古い値の据え置き / key ごと欠損) ので、
+    # 「撮り直せた」と「古いまま生き残った」を呼び出し側から区別する唯一の口が
+    # ここになる (:meth:`HeadPipeline.sections_not_freshly_captured`)。
+    # store から復元しただけの state は「今回撮っていない」= 全 Section が対象。
+    stale_sections: frozenset[str] = frozenset()
 
 
 class HeadPipeline:
@@ -111,14 +117,22 @@ class HeadPipeline:
         (初回 / 新規登録) のみで、B = 新 A で初期化する (初回に全内容を
         「増えた」と通知するスパムの防止。capture_for_event / recapture_missing
         の復帰時規約と同じ)。
+
+        **部分失敗は例外にならない** — 撮り直せなかった Section は古い値の据え置き
+        か欠損になり、戻り値の snapshot だけからは「全部描き直せた」と区別が
+        つかない。撮り直せなかった名前は state に記帳して
+        :meth:`sections_not_freshly_captured` から読めるようにする (提示の縮みが
+        「その Section の通知を下ろしてよいか」の判定に使う)。
         """
         sections = self._registry.all_sections()
         sections_dict: dict[str, object] = {}
         capture_failures: dict[str, str] = {}
+        stale: set[str] = set()
         for section in sections:
             try:
                 sections_dict[section.name] = section.capture(ctx)
             except Exception as exc:
+                stale.add(section.name)
                 LOGGER.exception(
                     "head_pipeline: capture failed for section=%s persona=%s model=%s",
                     section.name, ctx.persona_id, ctx.model_key,
@@ -172,6 +186,7 @@ class HeadPipeline:
                 last_notified_sections=notified,
                 dirty_sections=set(),
                 last_backstop_check=time.time(),
+                stale_sections=frozenset(stale),
             )
             self._states[(ctx.persona_id, ctx.model_key)] = state
 
@@ -240,6 +255,7 @@ class HeadPipeline:
                 # 据え置き (readiness 検証がこれを見て required なら止める)。
                 # 版を進めない = cache / B は無傷。
                 state.snapshot.capture_failures.update(failures)
+                state.stale_sections = state.stale_sections | set(failures)
                 return state.snapshot
 
             new_sections = dict(state.snapshot.sections)
@@ -266,6 +282,9 @@ class HeadPipeline:
                 capture_failures=new_failures,
             )
             state.snapshot = new_snapshot
+            state.stale_sections = (
+                (state.stale_sections - set(captured)) | set(failures)
+            )
             notified_snapshot_copy = dict(state.last_notified_sections)
 
         LOGGER.info(
@@ -300,10 +319,13 @@ class HeadPipeline:
 
             new_sections = dict(state.snapshot.sections)
             capture_failures = dict(state.snapshot.capture_failures)
+            fresh: set[str] = set()
+            stale: set[str] = set()
             for section in sections:
                 try:
                     new_sections[section.name] = section.capture(ctx)
                     capture_failures.pop(section.name, None)
+                    fresh.add(section.name)
                     # B が無い Section だけ初期化。既存 B は据え置き — event での
                     # 再 capture は A の最新化であって配送ではない。ここで B を
                     # 新値に揃えると、未配送の差分 (例: capture_all 後・配送前に
@@ -318,6 +340,7 @@ class HeadPipeline:
                         "head_pipeline: capture failed for section=%s event=%s",
                         section.name, event.value,
                     )
+                    stale.add(section.name)
                     # 既存値があれば据え置き (stale-but-real)。無ければ欠損として
                     # 理由を記録する (capture_all と同じ fail-closed 規約)。
                     if new_sections.get(section.name) is None:
@@ -334,6 +357,9 @@ class HeadPipeline:
                 capture_failures=capture_failures,
             )
             state.snapshot = new_snapshot
+            # 触った Section だけ更新する (他は据え置き) — この経路は一部の
+            # Section の最新化であって、全体を撮り直したわけではない。
+            state.stale_sections = (state.stale_sections - fresh) | stale
             notified_snapshot_copy = dict(state.last_notified_sections)
 
         LOGGER.info(
@@ -597,6 +623,44 @@ class HeadPipeline:
     def has_snapshot(self, persona_id: str, model_key: str) -> bool:
         return self.get_snapshot(persona_id, model_key) is not None
 
+    def sections_not_freshly_captured(
+        self, persona_id: str, model_key: str,
+        names: Optional[Iterable[str]] = None,
+    ) -> set[str]:
+        """``names`` のうち、いまの snapshot に**撮り直した値が載っていない**名前。
+
+        capture の失敗は例外にならない (:meth:`capture_all`) ので、dispatch の
+        戻り値だけでは「head を今の状態へ描き直せた」と言えない。撮り直せなかった
+        Section は次の二つのどちらかの姿で残る — どちらもここが拾う:
+
+        - **古い値の据え置き** (stale-but-real)。snapshot には値が載っているので
+          欠損検査 (fail-closed) をすり抜ける。
+        - **欠損** (capture_failures 行き)。required でない Section はこの状態で
+          head から消えるだけで、Pulse は止まらない。
+
+        ``names`` 省略時は登録されている全 Section。``names`` を渡した場合も
+        **registry が知らない名前は答えに含めない** — 登録されていない Section は
+        head にも載らず通知も出さないので、その名前で判定を止めても守るものが無い
+        (縮みが別の理由で永久に止まる方が害が大きい)。
+
+        state がまだ無い (一度も capture していない) ときは、対象の名前を全部返す
+        — 「撮っていない」は「撮り直せた」ではない。
+        """
+        registered = {s.name for s in self._registry.all_sections()}
+        targets = registered if names is None else (set(names) & registered)
+        if not targets:
+            return set()
+        with self._lock:
+            state = self._states.get((persona_id, model_key))
+            if state is None:
+                return set(targets)
+            stale = set(state.stale_sections)
+            missing = {
+                name for name in targets
+                if state.snapshot.sections.get(name) is None
+            }
+        return (stale | missing) & targets
+
     def discard_session(self, persona_id: str, model_key: str, *, delete_persisted: bool = False) -> None:
         """指定 Session の in-memory state を破棄 (= cleanup 用)。
 
@@ -636,6 +700,12 @@ class HeadPipeline:
                 last_backstop_check=time.time(),
                 # store から来た snapshot は定義上 durable (= その版は保存確認済み)
                 persisted_version=stored.snapshot.snapshot_version,
+                # 復元は capture ではない — この state の全 Section は「今回撮り
+                # 直したもの」ではないので、撮り直しを要求する側 (提示の縮み) には
+                # 全部 stale として見せる。次の capture_all が撮り直せば解ける。
+                stale_sections=frozenset(
+                    s.name for s in self._registry.all_sections()
+                ),
             )
         LOGGER.info(
             "head_pipeline: loaded snapshot from store persona=%s model=%s version=%d",

@@ -15,10 +15,12 @@
   退場 (Chronicle fold) 時の決定論付記 (§10.4) と読み口の実体になる。
 - 「部屋の様子」だけは再訪で差分に縮む — その記帳と、付記と同一 tx で走る
   提示文面の移管は sai_memory/room_state.py が持つ。
-- 提示に出る知覚の**合計**には上限がある (§10.9)。超えたら古い側をまとめて
-  下ろし、その境界 (``perception_presentation`` の 1 行) は一方向にしか
-  進まない。下ろすのは提示だけ — 台帳の行も付記印も変えないので、その期間の
-  編纂が来れば材料として引き取られる。
+- 提示から知覚を下ろした境界 (``perception_presentation`` の 1 行) は一方向に
+  しか進まない (§10.9)。下ろすのは提示だけ — 台帳の行も付記印も変えないので、
+  その期間の編纂が来れば材料として引き取られる。2026-09-04 に入れた「合計が
+  上限を超えたら下ろす」引き金は 2026-09-09 に廃止した (会話以外の大物は
+  Metabolism の瞬間の縮み sai_memory/presented_reduction.py が減らす)。器は
+  残っていて、既に下ろされた区間はそのまま提示に戻らない。
 """
 from __future__ import annotations
 
@@ -227,10 +229,14 @@ def init_perception_buffer_table(
         "CREATE INDEX IF NOT EXISTS idx_perception_batches_annexed "
         "ON perception_batches(annexed_entry_id)"
     )
-    # 提示の状態 (1 行だけ): 知覚の合計が上の水位を超えて「まとめて下ろした」
-    # 境界。値は「この id までのバッチは提示に出さない」で、**一方向にしか
-    # 進まない** (advance_presentation_cutoff)。台帳の行も付記印も触らない —
-    # 下ろすのは提示だけで、その期間の編纂が来れば材料として引き取られる。
+    # 提示の状態 (1 行だけ): 知覚を「まとめて下ろした」境界。値は「この id まで
+    # のバッチは提示に出さない」で、**一方向にしか進まない**
+    # (advance_presentation_cutoff)。台帳の行も付記印も触らない — 下ろすのは
+    # 提示だけで、その期間の編纂が来れば材料として引き取られる。
+    # 2026-09-04 に入れた引き金 (知覚の合計が上の水位を超えたら下ろす) は
+    # 2026-09-09 に廃止した (docs/intent/presented_context_reduction.md 設計 3)
+    # ので、いまこの列を進める呼び出しは無い。既に進んでいる境界は尊重する
+    # (一度下ろしたものを戻すと、揺り戻しでキャッシュの前方一致が割れる)。
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS perception_presentation (
@@ -240,6 +246,30 @@ def init_perception_buffer_table(
         )
         """
     )
+    # 操作通知を提示から下ろした境界 (2 本目の一方向境界、2026-09-09 —
+    # docs/intent/presented_context_reduction.md 設計 1)。Metabolism で head が
+    # 今の状態に描き直された後、それまでの操作通知 (スペルの増減・コア記憶などの
+    # 操作のお知らせ) は重複になるので提示から下ろす。値は「この id までのバッチ
+    # は操作通知を提示しない」で、前進しかしない (sai_memory/presented_reduction)。
+    #
+    # **境界は model ごと** (2026-09-10 レビュー二巡目の裁定): head は
+    # (persona, model) ごとに描き直されるので、model A の Metabolism で全 model の
+    # 提示から通知が消えると、head が凍結されたままの model B は「変化を伝える
+    # つなぎ」を失う。だから主キーは model_key。部屋の様子の縮めた印は head と
+    # 無関係なのでペルソナ共通のまま (バッチの記帳に打つ)。
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS perception_notice_presentation (
+            model_key TEXT PRIMARY KEY,
+            dropped_through_batch_id INTEGER NOT NULL DEFAULT 0,
+            updated_at INTEGER
+        )
+        """
+    )
+    # 旧形 (2026-09-09〜09-10 のブランチ内でしか書かれていない、ペルソナに一つの
+    # 境界) は ``perception_presentation.notices_dropped_through_batch_id`` に
+    # 載っていた。読み替えはしない — 配布済みの実環境が無く、残っていても
+    # 誰も読まないため (新しい形は上の表だけを読む)。
     if upgraded_from_two_phase:
         # 一度きりの清算 (2026-08-19 Codex 第七巡 #4): 旧二段 flush (event_message
         # を書く → pending を削除) が「書き終えたのに削除だけ失敗して」中断した
@@ -767,10 +797,11 @@ def insert_presentation_batch(
     C1 は破らない)。台帳の既存の行・バッチは書き換えない — 追加だけ。
 
     こうして作られたバッチは ``room_state_json`` のエントリに ``reseated`` の
-    印を持ち、(a) 知覚の合計上限の下ろし候補から外れ (id と consumed_at の
-    順序が食い違うため — sea/runtime_context._plan_perception_drop)、(b) 編纂の
-    付記では印だけ受けて材料には載らない (機構の置き直しは出来事ではない —
-    sai_memory/arasuji/executor.collect_annex_items)。
+    印を持ち、(a) 下ろす機構があればその候補から外れ (id と consumed_at の
+    順序が食い違うため — :func:`sai_memory.room_state.batch_is_room_reseat`。
+    知覚の合計上限は 2026-09-09 に廃止したので、現在この印を読む下ろしは
+    無い)、(b) 編纂の付記では印だけ受けて材料には載らない (機構の置き直しは
+    出来事ではない — sai_memory/arasuji/executor.collect_annex_items)。
     """
     cur = conn.execute(
         "INSERT INTO perception_batches "
@@ -805,9 +836,9 @@ def list_unannexed_batches(
     """付記印のない消費バッチを consumed_at → id 昇順で返す。
 
     退場付記 (§10.4) の読み口 = 「まだ編纂に引き取られていない」全件。**提示は
-    こちらではなく** :func:`list_presented_batches` を読む — 知覚の合計上限で
-    下ろした境界より古いバッチは、未付記のまま提示にだけ出なくなるため
-    (§10.9)。台帳から消えるわけではないので、材料集めはここを読み続ける。
+    こちらではなく** :func:`list_presented_batches` を読む — 下ろした境界より
+    古いバッチは、未付記のまま提示にだけ出なくなるため (§10.9)。台帳から消える
+    わけではないので、材料集めはここを読み続ける。
     ``since`` (以上) / ``before`` (未満) は付記スパンの絞り込み用。
     """
     sql = (
@@ -831,7 +862,7 @@ _PRESENTATION_STATE_ID = "main"
 
 
 def get_presentation_cutoff(conn: sqlite3.Connection) -> int:
-    """知覚の合計上限で「まとめて下ろした」境界 (この id までは提示に出ない)。
+    """知覚を「まとめて下ろした」境界 (この id までは提示に出ない)。
 
     まだ一度も下ろしていない / テーブルの無い DB なら 0 = 全部が提示に出る。
     テーブル不在**以外**の失敗 (ロック等) は raise する — 0 を返すと「一度も
@@ -993,6 +1024,29 @@ def list_dropped_batches(
     済んだバッチは Chronicle の digest がその位置を語るので数から外れる。
     """
     return _list_batches_by_cutoff(conn, above=False, cutoff=cutoff)
+
+
+def list_presented_batch_room_states(
+    conn: sqlite3.Connection, *, cutoff: Optional[int] = None,
+) -> List[tuple]:
+    """提示に出るバッチの ``(id, room_state_json)`` だけを読む軽い読み口。
+
+    :func:`list_presented_batches` と同じ選び方 (未付記 かつ 下ろした境界より
+    新しい) だが、確定文面 (``rendered_text``) とメディアを読まない — 下ろされて
+    いないだけの古いバッチは 10 万字規模になりうるので、判定だけが要る呼び出し
+    (:func:`sai_memory.presented_reduction.has_pending_reductions`。超過が続く
+    間は毎ターン通る) が全文を運ばずに済むようにする。並びは
+    :func:`list_presented_batches` と同じ ``consumed_at`` 昇順。
+    """
+    if cutoff is None:
+        cutoff = get_presentation_cutoff(conn)
+    rows = conn.execute(
+        "SELECT id, room_state_json FROM perception_batches "
+        "WHERE annexed_entry_id IS NULL AND id > ? "
+        "ORDER BY consumed_at ASC, id ASC",
+        (int(cutoff),),
+    ).fetchall()
+    return [(int(row[0]), row[1]) for row in rows]
 
 
 def count_batch_records(
@@ -1270,6 +1324,24 @@ _KIND_HEADERS = {
 }
 _DEFAULT_HEADER = "[システム通知]"
 
+#: 提示から下ろした・縮めた跡地に置く機構名義の一行の見出し (§10.9)。上の
+#: ``_KIND_HEADERS`` と同じ流儀に合わせる。読み手は提示の組成
+#: (sea/runtime_context) と提示の節約 (sai_memory/presented_reduction) の二つ —
+#: 文字列の知識はここ一枚。
+PERCEPTION_OMISSION_HEADER = "[省略された記録]"
+
+
+def perception_block_text(kind: str, content: str) -> str:
+    """知覚 1 件が確定文面の中で占めるブロック (見出し + 本文)。
+
+    :func:`format_perception_message` の 1 件ぶんの組み立てをそのまま切り出した
+    もの — 提示の節約 (sai_memory/presented_reduction) が「この通知は確定文面の
+    どこか」を台帳の行から復元するのに同じ一枚を通る。確定文面を区切りで割って
+    型を推測する形を作らないため (文字列の解析で差分を組んだ v0.3.9 の欠陥)。
+    """
+    header = _KIND_HEADERS.get(kind, _DEFAULT_HEADER)
+    return f"{header}\n{content}" if header else content
+
 
 def format_perception_message(items: List[PerceptionItem]) -> str:
     """reduce 済み知覚を 1 メッセージ分の本文に整形する (``<system>`` 包みは呼び出し側)。
@@ -1287,8 +1359,6 @@ def format_perception_message(items: List[PerceptionItem]) -> str:
 
     同一 Pulse で消費される全知覚を 1 メッセージにまとめる (C3)。
     """
-    blocks: List[str] = []
-    for item in items:
-        header = _KIND_HEADERS.get(item.kind, _DEFAULT_HEADER)
-        blocks.append(f"{header}\n{item.content}" if header else item.content)
-    return "\n\n".join(blocks)
+    return "\n\n".join(
+        perception_block_text(item.kind, item.content) for item in items
+    )

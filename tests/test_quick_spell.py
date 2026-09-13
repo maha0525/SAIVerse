@@ -28,6 +28,9 @@ class SpellLoopRuntime:
             touch_anchor_after_llm_call=lambda persona, usage, anchor_id=None: None,
         )
 
+    def _effective_building_id(self, persona, fallback):
+        return fallback
+
     def _store_memory(self, persona, text, **kwargs):
         self.stored.append(text)
         return "msg-1" if kwargs.get("return_message_id") else True
@@ -71,7 +74,7 @@ def _run_loop(text: str, client: ScriptedClient, fake_spell, messages: Optional[
     msgs = messages if messages is not None else []
     with patch.object(runtime_llm, "SPELL_TOOL_NAMES", {SPELL_NAME}), \
          patch.object(runtime_llm, "_run_spell_tool_async", new=fake_spell):
-        merged, continuation, rounds = asyncio.run(runtime_llm._run_spell_loop(
+        result = asyncio.run(runtime_llm._run_spell_loop(
             text=text,
             spell_enabled=True,
             llm_client=client,
@@ -84,7 +87,10 @@ def _run_loop(text: str, client: ScriptedClient, fake_spell, messages: Optional[
             event_callback=None,
             node_def=node_def,
         ))
-    return merged, continuation, rounds, runtime, msgs
+    # 1 Beat = 1 記録になったので、merged 全文は「各 Beat の本文をつないだもの」
+    # として組み立て直す (この検査群が見たいのは本文の中身であって分割ではない)。
+    merged = "\n".join(seg.text for seg in result.segments)
+    return merged, result.final_continuation, result.loop_count, runtime, msgs
 
 
 def _ok_spell(result: str = "記録しました", meta: Optional[dict] = None):

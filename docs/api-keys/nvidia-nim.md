@@ -13,7 +13,7 @@ Nvidia NIM (NVIDIA Inference Microservices) は、NVIDIAが提供するAI推論�
 ## 2. NIM APIキーの生成
 
 1. [NVIDIA NIM](https://build.nvidia.com/) にアクセス
-2. 利用したいモデルを選択（例: Mistral Large）
+2. 利用したいモデルを選択（例: Kimi K3）
 3. 「Get API Key」をクリック
 4. APIキーを生成してコピー
 
@@ -25,18 +25,16 @@ APIキーを取得すれば、全モデルを無料で利用できます。
 
 ## 4. 利用可能なモデル
 
-SAIVerseに設定済みのNIMモデル：
+SAIVerseに設定済みのNIMモデル（2026年9月時点）：
 
-- **Mistral Large 3**: 高性能オープンウェイトモデル
-- **DeepSeek V3.2**: 高性能・低コストモデル
-- **Qwen 3 235B-A22B**: Alibaba Cloudの大規模MoEモデル
-- **Qwen 3 Next 80B-A3B**: Qwen 3の軽量版（instruct / thinking）
-- **Qwen 3 Coder 480B-A35B**: コーディング特化モデル
-- **Kimi K2.5**: Moonshotの高性能モデル（画像対応）
-- **MiniMax M2.1**: MiniMaxの大規模モデル
-- **Z.ai GLM-4.7**: 智谱AIのフラッグシップモデル
-- **Step 3.5 Flash**: StepFunの高速モデル
-- **GPT-OSS 120B**: OpenAIのオープンウェイトモデル
+- **Gemma 4 31B**: Googleの画像対応モデル（チュートリアルの標準モデル。考える工程は使わない既定のままで、会話の返事が速い）
+- **Muse Glimmer 30B**: Metaの画像対応モデル（考える深さは既定で low、チュートリアルの軽量モデル・Memory Weaveモデル・画像要約モデル）
+- **DeepSeek V4 Flash 0731**: DeepSeek V4 Flashの改訂版（無料枠では返りの速さが大きくぶれることがある）
+- **DeepSeek V4 Pro 0813**: DeepSeek V4 Proの正式版
+- **Kimi K3**: Moonshot AIの大規模マルチモーダル推論モデル（画像対応。無料枠では1回の返答に数分かかることがある）
+- **Nemotron 3 Ultra**: NVIDIAの大規模推論モデル
+
+NIMのモデルは、NVIDIAが定めた提供終了日を過ぎると呼べなくなります。選んでいたモデルが一覧から消えた場合は、別のモデルを選び直してください。
 
 ## 5. 特徴
 

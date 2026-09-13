@@ -332,6 +332,9 @@ class SpellLoopRuntime:
             touch_anchor_after_llm_call=lambda persona, usage, anchor_id=None: None,
         )
 
+    def _effective_building_id(self, persona, fallback):
+        return fallback
+
     def _store_memory(self, persona, text, **kwargs):
         self.stored.append(text)
         return "msg-1" if kwargs.get("return_message_id") else True
@@ -436,9 +439,9 @@ def test_spell_loop_calls_boundary_between_rounds():
     runtime = SpellLoopRuntime(manager=SimpleNamespace(beat_gate=SpyGate()))
     p_names, p_exec = _spell_patches(fake_spell)
     with p_names, p_exec:
-        merged, continuation, loop_count = _run_spell_loop_sync(runtime, client)
-    assert loop_count == 1
-    assert continuation == "おわり。"
+        result = _run_spell_loop_sync(runtime, client)
+    assert result.loop_count == 1
+    assert result.final_continuation == "おわり。"
     # 1 ラウンド = 1 回の Beat 境界
     assert boundary_calls == ["p1"]
 

@@ -18,6 +18,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from saiverse import app_state
+from saiverse.legacy_log_import import legacy_log_path
 
 router = APIRouter()
 LOGGER = logging.getLogger(__name__)
@@ -376,16 +377,16 @@ async def archive_unreadable_legacy_log(building_id: str):
             detail=f"Building {building_id} has no unreadable legacy log alert",
         )
 
-    # alert に載っているパスは信用せず、サーバ側で組み直す。組み直したものが
-    # buildings の下にあり、名前が log.json であることまで確かめてから動かす
-    # (building_id に .. や絶対パスが混ざっていた場合に外へ出さないため)。
+    # alert に載っているパスは信用せず、サーバ側で組み直す。組み直しは起動時の
+    # 確認処理と同じ関数 (legacy_log_path) で行う — 確認処理が「読めない」と報告した
+    # ファイルと、ここで動かすファイルが必ず同じになる。この関数は区切り記号や
+    # .. を含む名前に None を返すので、buildings の外へは出ない。
     saiverse_home = getattr(manager, "saiverse_home", None)
     city_name = getattr(manager, "city_name", None)
     if saiverse_home is None or not city_name:
         raise HTTPException(status_code=503, detail="Manager not ready")
-    buildings_root = (Path(saiverse_home) / "cities" / city_name / "buildings").resolve()
-    log_path = (buildings_root / building_id / "log.json").resolve()
-    if log_path.parent.parent != buildings_root or log_path.name != "log.json":
+    log_path = legacy_log_path(Path(saiverse_home), city_name, building_id)
+    if log_path is None:
         raise HTTPException(status_code=400, detail="Invalid building id")
 
     if not log_path.is_file():

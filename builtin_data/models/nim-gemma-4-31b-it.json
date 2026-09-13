@@ -1,10 +1,11 @@
 {
-  "model": "openai/gpt-oss-120b",
+  "model": "google/gemma-4-31b-it",
   "system_prompt": "",
-  "display_name": "GPT-OSS 120B (NIM)",
+  "display_name": "Gemma 4 31B (NIM)",
   "provider_ref": "nvidia_nim",
-  "supports_structured_output": false,
-  "context_length": 120000,
+  "supports_structured_output": true,
+  "context_length": 256000,
+  "supports_images": true,
   "convert_system_to_user": true,
   "parameters": {
     "temperature": {
@@ -21,16 +22,16 @@
       "min": 0,
       "max": 1,
       "step": 0.05,
-      "default": 1,
+      "default": 0.95,
       "label": "Top P",
       "description": "Nucleus sampling cutoff."
     },
     "max_tokens": {
       "type": "int",
       "min": 32,
-      "max": 8000,
+      "max": 16384,
       "step": 1,
-      "default": 8000,
+      "default": 8192,
       "label": "Max tokens",
       "description": "Upper bound on generated tokens."
     }

@@ -223,6 +223,13 @@ class Building(Base):
     # 1 Building 複数ロール可。NULL/空 = ロールなし (私室・通常 Building)。
     # タグ付け UI/CLI は将来フェーズ — 手動 SQL 例は facility_map.py の docstring 参照。
     FACILITY_ROLES = Column(Text, nullable=True)
+    # 部屋の様子に出す「建物に直接置かれたアイテム」の個数の上限
+    # (docs/intent/room_item_display_cap.md 設計 4)。
+    # NULL = 既定 (sai_memory/room_state.py の DEFAULT_ROOM_ITEM_DISPLAY_LIMIT = 10)。
+    # 0 以上の整数 = その個数 (0 は「様子にアイテムを出さない部屋」として有効)。
+    # 負数は保存時に拒否する。「全部見せたい」部屋は十分大きい数を入れる
+    # (「無制限」の特別な値は作らない)。
+    ITEM_DISPLAY_LIMIT = Column(Integer, nullable=True)
     __table_args__ = (UniqueConstraint('CITYID', 'BUILDINGNAME', name='uq_city_building_name'),)
 
 
@@ -571,16 +578,14 @@ class UserSettings(Base):
     # 従う)。優先順位は 組み込み既定 < この全体設定 < モデル定義 (metabolism_*_chars)。
     # 起動時と PUT /api/config/metabolism-defaults 成功時に
     # saiverse.model_configs.set_global_watermark_defaults へ写される。
-    # 旧 METABOLISM_LOW_CHARS 列は低水位の廃止 (2026-09-04) で削除 — 既存 DB の列は
-    # migrate.py の全書換 (extra 列を運ばない) が落とす。
+    # 旧 METABOLISM_LOW_CHARS 列は低水位の廃止 (2026-09-04) で削除。
+    # 旧 PERCEPTION_TARGET_CHARS / PERCEPTION_HIGH_CHARS 列 (2026-09-05 追加) も
+    # 知覚の二水位の廃止 (2026-09-09、docs/intent/presented_context_reduction.md
+    # 設計 3) で削除 — しきい値は「残す量 / 上限」の一系統だけになった。既存 DB の
+    # 列は migrate.py の KNOWN_COLUMN_DROPS が落とす (落とせない環境では全書換が
+    # extra 列を運ばないので、どちらの経路でも消える)。
     METABOLISM_TARGET_CHARS = Column(Integer, nullable=True)
     METABOLISM_HIGH_CHARS = Column(Integer, nullable=True)
-    # 知覚 (部屋の様子などの記録) の提示上限の二水位の全体既定 (2026-09-05)。
-    # 同じ三層・同じ NULL の意味で、モデル定義側のキーは perception_*_chars。
-    # docs/intent/perception_buffer.md §10.9。既存 DB には additive マイグレーションが
-    # 列を足す (既存行は NULL = 未設定)。
-    PERCEPTION_TARGET_CHARS = Column(Integer, nullable=True)
-    PERCEPTION_HIGH_CHARS = Column(Integer, nullable=True)
 
 
 class AddonConfig(Base):
@@ -1400,7 +1405,9 @@ class ExecutionOutboxItem(Base):
     黙って捨てない。FIFO 上は「先頭」とみなさず飛ばす (後続をブロックしない)。
 
     PAYLOAD_JSON は配送内容 (本文・タグ・名義・実行時刻) を**実行時点で凍結**
-    したもの。配送遅延があっても変形しない (不変条件 6)。
+    したもの。配送遅延があっても変形しない (不変条件 6)。例外は部屋 ID の付け替え
+    (saiverse/building_id_repair.py) で、未配達の行の中の同じ部屋を指す識別子だけを
+    新しい ID に置き換える (表す事実は変わらない)。
     """
     __tablename__ = "execution_outbox"
     OUTBOX_ID = Column(Integer, primary_key=True, autoincrement=True)

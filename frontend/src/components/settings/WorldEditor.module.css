@@ -211,6 +211,15 @@
     resize: vertical;
 }
 
+/* 入力欄の下に添える補足の一行 (ライトモードの色は末尾の上書き節にある) */
+.hint {
+    display: block;
+    margin-top: 0.35rem;
+    color: #94a3b8;
+    font-size: 0.8rem;
+    line-height: 1.5;
+}
+
 .row {
     display: flex;
     gap: 1rem;
@@ -419,6 +428,10 @@
 
 :global([data-theme="light"]) .field label {
     color: #475569;
+}
+
+:global([data-theme="light"]) .hint {
+    color: #64748b;
 }
 
 :global([data-theme="light"]) .field input[type="text"],

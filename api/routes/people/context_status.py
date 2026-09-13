@@ -61,13 +61,12 @@ def get_context_status(persona_id: str, manager=Depends(get_manager)) -> dict[st
       言えない — 実際の計画 (``sea/eviction_plan.py::plan_eviction``、純関数)
       を dry に呼んで判定し、画面側に算数を再実装させない。presented を
       測れないときは None。
-    - 一切の行を書かない (resolve は persist_advance=False、知覚の勘定は
-      ``advance_cutoff=False``)。この画面は GET なのに、知覚ブロックの組成が
-      「合計が上限を超えたら古い側を下ろす」判定を連れており、下ろし境界
-      (``perception_presentation``) を進めていた — しかも仮定の窓 (読み戻し /
-      計画窓の下見) の列で。境界は一方向で取り消せないので、実際には送らない列
-      で確定させない (2026-09-05 四巡目 #6)。判定は同じように行い、進めた
-      **つもり**の提示を返すので、画面の数字と実送信は従来どおり一致する。
+    - 一切の行を書かない (resolve は persist_advance=False、知覚ブロックの組成は
+      2026-09-09 の知覚の合計上限の廃止で読み取り専用になった)。この画面は GET
+      なのに、かつては知覚ブロックの組成が「合計が上限を超えたら古い側を下ろす」
+      判定を連れており、下ろし境界 (``perception_presentation``) を進めていた —
+      しかも仮定の窓 (読み戻し / 計画窓の下見) の列で。いまは書き込む経路自体が
+      無い。
     """
     from sai_memory.arasuji.alignment import chronicle_band_budget
 
@@ -155,7 +154,7 @@ def get_context_status(persona_id: str, manager=Depends(get_manager)) -> dict[st
                 lifecycle.presented_with_perceptions(
                     persona, refill_plan["presented"],
                     refill_plan.get("new_anchor_id"), raise_on_error=True,
-                    model_key=model_key, advance_cutoff=False,
+                    model_key=model_key,
                 ),
                 watermarks,
             )
@@ -186,7 +185,6 @@ def get_context_status(persona_id: str, manager=Depends(get_manager)) -> dict[st
             lifecycle.presented_with_perceptions(
                 persona, planning_window.presented, anchor_id,
                 raise_on_error=True, model_key=model_key,
-                advance_cutoff=False,
             ),
             watermarks,
             refold_ranges=refold_ranges,
@@ -217,9 +215,8 @@ def _record_presented_chars(
     勘定には入らないが合計には生で入る) / ``injected_perception_chars``
     (送信直前に差し込まれる部屋の様子)。
 
-    ``model_key`` は表示対象の実行 model。知覚の下ろし判定はその model の水位で
-    行う — ここだけ ``persona.model`` の水位で測ると、画面の数字と実際の送信が
-    別の水位で動く。
+    ``model_key`` は表示対象の実行 model — 画面の数字と実際の送信が別の model の
+    組み立てで動かないよう、測る側にも実行 model を渡す。
     """
     from sea.eviction_plan import message_chars, stored_message_chars
 
@@ -231,7 +228,7 @@ def _record_presented_chars(
     total = message_chars(
         lifecycle.presented_with_perceptions(
             persona, presented, anchor_id, raise_on_error=True,
-            model_key=model_key, advance_cutoff=False,
+            model_key=model_key,
         )
     )
     status["stored_chars"] = rows

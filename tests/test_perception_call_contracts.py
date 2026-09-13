@@ -7,17 +7,19 @@
 - ``SessionLifecycle.presented_with_perceptions``
 - ``SessionLifecycle.presented_chars``
 
-契約は二つで、どちらも「一箇所直しても、隣で同じ欠陥が生き残る」型なので、
-呼び出し**全件**を走査する検査にしてある (grep の目視ではなく AST)。
+契約は「一箇所直しても、隣で同じ欠陥が生き残る」型なので、呼び出し**全件**を
+走査する検査にしてある (grep の目視ではなく AST)。
 
-1. **``model_key`` を明示で渡す** (2026-09-05 Codex 三巡 #2)。知覚の下ろし判定の
-   水位はその回の実行 model のもの。渡し忘れた呼び出しだけが ``persona.model``
-   へ落ち、実行モデルに保存した知覚の水位が効かないまま静かに別の水位で動く。
-   引数を足したときに新しい呼び出しを一つ書き漏らす、が実際に起きた形。
-2. **API 層 (``api/``) は ``advance_cutoff=False``** (2026-09-05 四巡目 #6)。
-   HTTP の GET が知覚の下ろし境界 (``perception_presentation``) を進めていた。
-   境界は一方向で取り消せないので、実際には送らない列で確定させてはいけない。
-   「読み取り専用の画面は書かない」を層の境界そのものに置く。
+**``model_key`` を明示で渡す** (2026-09-05 Codex 三巡 #2)。この四つは「どの
+Session の窓を組む・測るか」を扱うので、実行 model は呼び出し側が明示する。
+渡し忘れた呼び出しだけが ``persona.model`` へ落ち、勘定と提示が別の Session の
+model で静かに動く。引数を足したときに新しい呼び出しを一つ書き漏らす、が実際に
+起きた形。
+
+旧契約「API 層は ``advance_cutoff=False``」(2026-09-05 四巡目 #6) は 2026-09-09 に
+不要になった — 知覚の合計上限を廃止して組成から書き込み経路そのものが消えたので、
+「読み取り専用の画面が境界を進める」形は構造的に作れない (docs/intent/
+presented_context_reduction.md 設計 3)。
 
 ``cold_precompaction`` 系 (``cold_precompaction_status`` /
 ``run_cold_precompaction``) は ``model_key`` の値を ``persona.model`` から取る —
@@ -109,27 +111,22 @@ class PerceptionCallContractTest(unittest.TestCase):
             and self._where(path, node) not in _MODEL_KEY_EXEMPT
         ]
         self.assertEqual(missing, [], (
-            "知覚の下ろし判定は実行 model の水位で行う。model_key を渡さない "
-            "呼び出しは persona.model へ落ちて、別の水位で静かに動く:\n"
+            "組成と勘定はその回の実行 model のものとして扱う。model_key を "
+            "渡さない呼び出しは persona.model へ落ちて、別の Session の model で "
+            "静かに動く:\n"
             + "\n".join(missing)
         ))
 
-    def test_the_api_layer_never_advances_the_presentation_cutoff(self):
-        offenders = [
+    def test_no_call_site_still_passes_the_retired_advance_cutoff(self):
+        """廃止した ``advance_cutoff`` が残っていたら TypeError になる前に教える。"""
+        stale = [
             f"{self._where(path, node)} ({name})"
             for path, node, name in self.calls
-            if path.is_relative_to(_REPO_ROOT / "api")
-            and not any(
-                kw.arg == "advance_cutoff"
-                and isinstance(kw.value, ast.Constant)
-                and kw.value.value is False
-                for kw in node.keywords
-            )
+            if any(kw.arg == "advance_cutoff" for kw in node.keywords)
         ]
-        self.assertEqual(offenders, [], (
-            "API 層は読み取り専用の画面。知覚の下ろし境界は一方向で取り消せない "
-            "ので、実際には送らない列で進めてはいけない "
-            "(advance_cutoff=False を明示すること):\n" + "\n".join(offenders)
+        self.assertEqual(stale, [], (
+            "advance_cutoff は 2026-09-09 に廃止した (組成は読み取り専用に "
+            "なった)。渡している呼び出し:\n" + "\n".join(stale)
         ))
 
     def test_the_exempt_list_has_no_stale_entries(self):

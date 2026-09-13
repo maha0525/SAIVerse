@@ -30,12 +30,6 @@ export const WATERMARK_LABELS: Record<keyof WatermarkBarValues, string> = {
     high: '整理をはじめる量',
 };
 
-/** 知覚 (部屋の様子などの記録) の二水位の呼び名。同じ棒を別の量に使うときに渡す。 */
-export const PERCEPTION_WATERMARK_LABELS: Record<keyof WatermarkBarValues, string> = {
-    target: '省略した後に残す量',
-    high: '省略をはじめる量',
-};
-
 /** 目標 ≤ 高 を破っている目印を返す (null は比較しない)。 */
 export function findWatermarkOrderViolations(values: WatermarkBarValues): Set<keyof WatermarkBarValues> {
     const bad = new Set<keyof WatermarkBarValues>();

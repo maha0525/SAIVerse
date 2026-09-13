@@ -83,7 +83,7 @@ class FakeRuntime:
         pass
 
     def _emit_say(self, persona, building_id, text, pulse_id=None, metadata=None,
-                  event_callback=None):
+                  event_callback=None, occupants_snapshot=None):
         self.emitted.append({
             "building_id": building_id, "text": text, "metadata": metadata,
             "event_callback": event_callback,

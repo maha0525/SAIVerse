@@ -1,9 +1,11 @@
+import html
 import logging
 import threading
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple, Callable, TYPE_CHECKING
+from urllib.parse import quote
 
 from sqlalchemy import or_, update as sa_update
 from sqlalchemy.orm import Session
@@ -517,7 +519,9 @@ class OccupancyManager:
         は不要。
         """
         from_building_name = self.building_map[from_id].name if from_id in self.building_map else from_id
-        to_building_name = self.building_map[to_id].name
+        # 台帳に無い部屋 id は id をそのまま名前にする (from 側と同じ形)。
+        # 素で添字を引くと、消えた部屋への移動記録が KeyError で落ちる。
+        to_building_name = self.building_map[to_id].name if to_id in self.building_map else to_id
         action_type = "AI Action" if entity_type == 'ai' else "User Action"
         if move_key is None:
             move_key = uuid.uuid4().hex
@@ -560,8 +564,26 @@ class OccupancyManager:
                 "building_info": self._build_building_info(to_id),
             }
         }
-        left_message = f'<div class="note-box" data-entity-id="{entity_id}">🚶 {action_type}:<br><b>{entity_name}が{to_building_name}へ移動しました</b></div>'
-        entered_message = f'<div class="note-box" data-entity-id="{entity_id}">🚶 {action_type}:<br><b>{entity_name}が{from_building_name}から入室しました</b></div>'
+        # 行き先の部屋名はリンクにする。ユーザーは移動に自動では付いていかないので、
+        # 続きの発言がどこにあるかへの導線が要る (Pulse の途中で移動すると、以降の
+        # Beat は移動先の部屋に落ちる —
+        # docs/issues/pulse_beats_merge_into_single_record.md)。
+        # 部屋 ID は URI の 1 区切りとして percent-encode してから埋める。文字種
+        # 契約 (manager/ids.py) より前に作られた ID は日本語も「/」も取りうるので、
+        # 素で入れると読み手 (frontend の SaiverseLink) の区切り解釈で割れる。
+        # その上で HTML 属性としてもエスケープする。
+        to_building_link = (
+            '<a href="saiverse://building/'
+            f'{html.escape(quote(str(to_id), safe=""), quote=True)}">'
+            f'{html.escape(to_building_name)}</a>'
+        )
+        # この 2 行に埋まる値はどれも外から来た名前 (ペルソナ名・部屋名・id) で、
+        # 「<」を含めば note-box の HTML が壊れる。行き先の部屋名だけをリンク化の
+        # ついでにエスケープして隣を素通ししていたので、同じ形の値を全部通す。
+        _entity_attr = html.escape(str(entity_id), quote=True)
+        _entity_name_html = html.escape(entity_name)
+        left_message = f'<div class="note-box" data-entity-id="{_entity_attr}">🚶 {action_type}:<br><b>{_entity_name_html}が{to_building_link}へ移動しました</b></div>'
+        entered_message = f'<div class="note-box" data-entity-id="{_entity_attr}">🚶 {action_type}:<br><b>{_entity_name_html}が{html.escape(from_building_name)}から入室しました</b></div>'
         from_occupants_after = sorted({
             str(eid) for eid in self.occupants.get(from_id, [])
             if eid and str(eid) != entity_id
@@ -593,7 +615,9 @@ class OccupancyManager:
     ) -> List[Dict[str, Any]]:
         """移動後処理の outbox item 列 (dynamic state / addon hooks / game lifecycle)。
 
-        payload は移動時点の事実を凍結する。配送順は persona キュー内 FIFO
+        payload は移動時点の事実を凍結する (例外は部屋 ID の付け替え —
+        saiverse/building_id_repair.py が、未配達の payload の中の同じ部屋を指す
+        識別子だけを新しい ID に置き換える。表す事実は変わらない)。配送順は persona キュー内 FIFO
         (OUTBOX_ID 昇順) で従来の呼び出し順 (dynamic state → hooks → lifecycle)
         を保つ。ハンドラは execution_ledger_wiring 側。
         """

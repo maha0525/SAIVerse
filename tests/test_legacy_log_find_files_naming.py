@@ -84,17 +84,18 @@ class FindLogFilesNamingTests(unittest.TestCase):
                 self.assertEqual(built.name, "log.json")
                 self.assertEqual(built.parent.name, name)
 
-    def test_still_walks_everything_when_no_filter_is_given(self) -> None:
-        a = self._make_log(self.CITY, "salon")
-        b = self._make_log(self.CITY, self.BUILDING)
-        found = find_log_files(self.home)
-        self.assertEqual(sorted(found), sorted([a, b]))
+    def test_every_city_is_searched_when_only_the_room_is_given(self) -> None:
+        """City を指定しなければ、全 City の下から名前を指定された部屋のファイルだけを探す。
 
-    def test_walks_buildings_when_only_the_city_is_given(self) -> None:
-        a = self._make_log(self.CITY, "salon")
-        self._make_log("city_b", "other")
-        found = find_log_files(self.home, city_filter=self.CITY)
-        self.assertEqual(found, [a])
+        部屋の名前を指定しない一覧 (フォルダ名を部屋 ID に使っていた経路) は
+        2026-09-11 に撤去した。部屋を指定しない取り込みは DB に登録された部屋 ID から
+        場所を決める — tests/test_migrate_building_logs_to_db.py が固定する。
+        """
+        a = self._make_log(self.CITY, self.BUILDING)
+        b = self._make_log("city_b", self.BUILDING)
+        self._make_log(self.CITY, "salon")
+        found = find_log_files(self.home, building_filter=self.BUILDING)
+        self.assertEqual(sorted(found), sorted([a, b]))
 
     def test_rejects_names_that_climb_out_of_the_parent(self) -> None:
         """パスを直接組む以上、名前が階層を跨がないことを確かめる。
@@ -103,11 +104,14 @@ class FindLogFilesNamingTests(unittest.TestCase):
         なかった。照合をやめた分の穴をここで塞ぐ。
         """
         self._make_log(self.CITY, self.BUILDING)
-        # 空文字列は「指定なし」の意味なので、ここでは扱わない (従来どおり全走査)。
+        # City の空文字列は「指定なし」の意味なので、ここでは扱わない (全 City を探す)。
         for bad in ("..", "../..", "other/buildings", "other\\buildings"):
             with self.subTest(name=bad):
                 self.assertEqual(
-                    find_log_files(self.home, city_filter=bad), []
+                    find_log_files(
+                        self.home, city_filter=bad, building_filter=self.BUILDING
+                    ),
+                    [],
                 )
                 self.assertEqual(
                     find_log_files(
