@@ -39,6 +39,16 @@ LOGGER = logging.getLogger(__name__)
 # ました」の顔で通り、知らせるための機構が黙る (Codex 指摘 2026-09-01)。
 _WEAVE_INSPECT_FAILED = object()
 
+# 「十分に過去」= 冷え切った温度として書く UPDATED_AT の齢。§14-2 の前進、
+# 読み戻しの行立て、提示列を壊した経路の申告が共有する。epoch 0 を使わないのは
+# TZ 次第で負になり Windows で扱えないため。
+_COLD_ANCHOR_AGE = timedelta(days=3650)
+
+
+def _cold_updated_at() -> datetime:
+    """冷え切った行として書く UPDATED_AT (十分に過去の時刻)。"""
+    return datetime.now() - _COLD_ANCHOR_AGE
+
 
 def _rate_limit_cooldown_seconds() -> float:
     """RateLimitError 後の Metabolism 小休止の長さ (秒)。env で調整できる。"""
@@ -384,6 +394,55 @@ class SessionLifecycle:
             entry["folded_ranges"] = folded
         return entry
 
+    # ------------------------------------------------------------------
+    # キャッシュの申告 (docs/intent/cache_lifecycle_control.md §5.2)
+    #
+    # 行の (TTL_SECONDS, UPDATED_AT) は「いま提示している窓に対して、生きた
+    # キャッシュがどれだけ残っているか」の記録。提示列 (起点・圧縮区間) を
+    # 書き換える経路は、同じ書き込みでこの 2 値にも必ず何かを言う — 黙って
+    # 提示だけ変えると、前の窓のために焼いたキャッシュの寿命が新しい窓のもの
+    # として生き残る (2026-09-12 実機: 3 ヶ月半前の 1 時間キャッシュの行に
+    # 読み戻しが now だけ書き、UI が「残り 58 分」と表示し続けた)。
+    # 申告は 2 種類だけ — 「壊れた」と「これから焼く」。
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def cache_broken_stamp() -> Tuple[Optional[int], int]:
+        """「壊れた」申告 — 提示列が変わり、焼いてあるキャッシュはもう当たらない。
+
+        寿命は None (行は寿命を主張しない)、温度は十分に過去 = 冷えている。
+        「切れている」と読ませるにはこの 2 値が要る: 寿命だけ None にして温度を
+        now のままにすると、読み手 (:meth:`anchor_entry_ttl_seconds`) が現行設定へ
+        フォールバックして「たったいま焼いたキャッシュ」に読めてしまう。
+
+        手本は §14-2 の前進 (:meth:`_advance_anchor_preserving_folds`) — あちらも
+        起点を動かした時点で前の窓のキャッシュを捨て、同じ 2 値を書いている。
+
+        Returns:
+            ``(TTL_SECONDS, UPDATED_AT)`` に書く値。
+        """
+        return (None, int(_cold_updated_at().timestamp()))
+
+    def cache_fresh_stamp(
+        self, model_key: Optional[str], persona_id: Optional[str],
+    ) -> Tuple[int, int]:
+        """「これから焼く」申告 — この窓が直後の LLM 呼び出しでそのままキャッシュされる。
+
+        温度は now、寿命は**現行設定** (= 次に焼くキャッシュに使う TTL。§5.4 の
+        消費者 a と同じ出どころで、:meth:`touch_anchor_after_llm_call` が LLM 成功後に
+        書く値と一致する)。読み戻し (:meth:`_write_refill`) だけが使う — 読み戻しは
+        応答の直前にだけ走り、開いた窓はその応答でそのままキャッシュされるため
+        (温度を据え置くと直後の resolve が §14-2 の前進で読み戻しを飲み込む。
+        docs/intent/arasuji_levels.md §15-2)。
+
+        Returns:
+            ``(TTL_SECONDS, UPDATED_AT)`` に書く値。
+        """
+        return (
+            int(self.get_anchor_validity_seconds(str(model_key or ""), persona_id)),
+            int(datetime.now().timestamp()),
+        )
+
     def load_folded_ranges(
         self, persona_id: Optional[str], model_key: Optional[str],
         *, strict: bool = False,
@@ -408,8 +467,23 @@ class SessionLifecycle:
         persona_id: Optional[str],
         model_key: Optional[str],
         folds: List["FoldedRange"],
+        *,
+        keep_temperature: bool = False,
     ) -> None:
-        """圧縮区間を session_anchor 行へ書く。anchor / TTL は触らない。"""
+        """圧縮区間を session_anchor 行へ書く。anchor は触らない。
+
+        圧縮区間が変われば提示列が変わる = 焼いてあるキャッシュはもう当たらない
+        ので、既定は同じコミットで「壊れた」申告 (:meth:`cache_broken_stamp`) を
+        載せる。
+
+        ``keep_temperature=True`` は温度 (UPDATED_AT) を据え置き、寿命の主張
+        (TTL_SECONDS) だけ取り下げる。§15-3 印戻し専用 — 印戻しは応答の直前に
+        走り、畳み直した窓はその応答でそのままキャッシュされるので、温度は
+        直前の読み戻しが立てた「これから焼く」のまま正しい。ここで冷やすと
+        直後の resolve が §14-2 の前進で窓を飲み込み、同じ Pulse の中で開いた窓が
+        閉じる (arasuji_levels.md §15-2 の禁止形)。冷えた行は据え置いても冷えた
+        ままなので、保守経路 (先回り畳み / 手動整理) の温度も偽装されない。
+        """
         if not self.manager or not hasattr(self.manager, "SessionLocal"):
             return
         if not persona_id or not model_key:
@@ -433,6 +507,10 @@ class SessionLifecycle:
                     )
                 return
             row.FOLDED_RANGES_JSON = payload
+            ttl, updated_at = self.cache_broken_stamp()
+            row.TTL_SECONDS = ttl
+            if not keep_temperature:
+                row.UPDATED_AT = updated_at
             db.commit()
         except Exception as exc:
             LOGGER.warning(
@@ -805,7 +883,7 @@ class SessionLifecycle:
             try:
                 updated = datetime.fromisoformat(updated_at_iso)
             except (TypeError, ValueError):
-                updated = datetime.now() - timedelta(days=3650)
+                updated = _cold_updated_at()
             row.ANCHOR_MESSAGE_ID = new_anchor_id
             row.FOLDED_RANGES_JSON = serialize_folds(kept)
             row.TTL_SECONDS = None
@@ -994,7 +1072,7 @@ class SessionLifecycle:
                         self_entry.get("updated_at")
                         # 元の時刻が無い行は「十分に過去」で冷えを表す
                         # (epoch 0 は TZ 次第で負になり Windows で扱えない)
-                        or (datetime.now() - timedelta(days=3650)).isoformat(),
+                        or _cold_updated_at().isoformat(),
                         strict=strict,
                     )
                     if not advanced:
@@ -2885,7 +2963,7 @@ class SessionLifecycle:
                 self.upsert_anchor_entry(persona_id, model_key, {
                     "anchor_id": anchor_id,
                     # 「十分に過去」= 確実に冷えている温度で立てる
-                    "updated_at": (datetime.now() - timedelta(days=3650)).isoformat(),
+                    "updated_at": _cold_updated_at().isoformat(),
                 })
         # close_undersized_tail: U 判定が材料字数になった (2026-08-29 裁定) ため、
         # 「生は巨大だが材料が薄い」期間では通常計画が fold を閉じられず、高水位
@@ -2965,7 +3043,7 @@ class SessionLifecycle:
             if not entry or not entry.get("anchor_id"):
                 self.upsert_anchor_entry(persona_id, model_key, {
                     "anchor_id": anchor_id,
-                    "updated_at": (datetime.now() - timedelta(days=3650)).isoformat(),
+                    "updated_at": _cold_updated_at().isoformat(),
                 })
 
         if not self._write_refill(
@@ -3237,7 +3315,7 @@ class SessionLifecycle:
             if not entry or not entry.get("anchor_id"):
                 self.upsert_anchor_entry(persona_id, model_key, {
                     "anchor_id": anchor_id,
-                    "updated_at": (datetime.now() - timedelta(days=3650)).isoformat(),
+                    "updated_at": _cold_updated_at().isoformat(),
                 })
         if not self._write_refill(
             persona_id, model_key, anchor_id, new_anchor_id, new_folds + folds,
@@ -4006,7 +4084,9 @@ class SessionLifecycle:
         直前にだけ走り、開いた窓はその応答の LLM 呼び出しでそのままキャッシュ
         される — 据え置きにすると、直後の context 構築の resolve が「冷えた行が
         最前線より後ろ」と見て §14-2 の前進で読み戻しを即座に飲み込み、同じ
-        会話の中で開いた窓が閉じる。
+        会話の中で開いた窓が閉じる。**寿命も同じ書き込みで現行設定に揃える**
+        (:meth:`cache_fresh_stamp` =「これから焼く」申告) — now だけ書くと前の窓の
+        寿命が新しい窓のものとして生き残る。
 
         ``raise_on_error=True`` は「書けなかった」の内訳を分ける
         (:meth:`preview_refilled_history` と同じ型): 書き込み自体の失敗
@@ -4030,13 +4110,20 @@ class SessionLifecycle:
             return False
         from sea.session_window import serialize_folds
         folds = self._merge_overlapping_folds(folds, persona_id, model_key)
+        # 寿命は温度と一緒に書く (:meth:`cache_fresh_stamp`)。now だけ書くと、
+        # 行に残っていた前の窓の寿命 (長い TTL / 化石) が「たったいま焼いた」の
+        # 顔で蘇る — 2026-09-12 実機で 3 ヶ月半前の 1 時間キャッシュの行がこれで
+        # 生き返り、実際には 5 分のキャッシュなのに UI が残り 58 分と表示し続けた。
+        # ここで焼くのは新しい窓なので、寿命は現行設定が正しい。
+        ttl_seconds, updated_at = self.cache_fresh_stamp(model_key, persona_id)
         db = self.manager.SessionLocal()
         try:
             from database.models import SessionAnchor
             # CAS は条件付き UPDATE 1 文 (keepalive touch の §14-6-10 と同じ型)。
             # SELECT → 比較 → 書き込みに分けると、比較と commit の間に別接続の
             # 前進が挟まったとき stale な巻き戻しで上書きしてしまう (Codex 指摘
-            # 2026-07-30)。
+            # 2026-07-30)。寿命の「切れ判定」を読み→書きの二段でやらないのも
+            # 同じ理由 — 申告は書き込みと同じ 1 文に載せる。
             updated = db.query(SessionAnchor).filter_by(
                 PERSONA_ID=persona_id,
                 MODEL_KEY=str(model_key),
@@ -4044,7 +4131,8 @@ class SessionLifecycle:
             ).update({
                 SessionAnchor.ANCHOR_MESSAGE_ID: new_anchor_id,
                 SessionAnchor.FOLDED_RANGES_JSON: serialize_folds(folds),
-                SessionAnchor.UPDATED_AT: int(datetime.now().timestamp()),
+                SessionAnchor.TTL_SECONDS: ttl_seconds,
+                SessionAnchor.UPDATED_AT: updated_at,
             }, synchronize_session=False)
             db.commit()
             if not updated:
@@ -4134,6 +4222,14 @@ class SessionLifecycle:
         動かさず UPDATED_AT も書かない — 被覆補修の印はキャッシュの主張では
         ないので、冷えた行を温かく偽装しない (§14-6-5 と同じ理由)。
 
+        ここが「キャッシュを壊す操作」の申告 (:meth:`cache_broken_stamp`) を
+        載せない唯一の圧縮区間の書き込みなのは、**この印が提示を変えないから**:
+        印は ``presented_raw=True`` (生ログのまま見せる) で、head のあらすじ枠の
+        除外名簿に載せるためだけの記録なので、提示列は書き込みの前後で同一 =
+        焼いてあるキャッシュはそのまま当たり続ける。加えて呼び出し元
+        (``mark_covered_cold_windows``) は温かい行を除くので、触る行はもともと
+        切れている。
+
         Returns:
             書けたら True。CAS 棄却 (anchor が動いていた)・DB 失敗は False —
             呼び出し側 (mark_covered_cold_windows) は棄却された行を諦め、
@@ -4191,7 +4287,13 @@ class SessionLifecycle:
             return None
         current_presented, flipped = plan
         persona_id = getattr(persona, "persona_id", None)
-        self.save_folded_ranges(persona_id, model_key, window.folds)
+        # 温度は据え置き (寿命の主張だけ取り下げる) — 印戻しは応答の直前に走り、
+        # 畳み直した窓はその応答でそのままキャッシュされる。ここで冷やすと直後の
+        # 組成の resolve が「冷えた行が最前線より後ろ」と見て §14-2 の前進を掛け、
+        # 読み戻しが開いた窓を同じ Pulse の中で飲み込む (§15-2)。
+        self.save_folded_ranges(
+            persona_id, model_key, window.folds, keep_temperature=True,
+        )
         LOGGER.info(
             "[metabolism] refolded %d raw-view range(s) back to digest "
             "(persona=%s model=%s, LLM-free; %d conversation-row chars "
@@ -6710,6 +6812,12 @@ def remove_folds_referencing_entry(
                     if len(kept) == len(folds):
                         continue
                     row.FOLDED_RANGES_JSON = serialize_folds(kept)
+                    # 記録を外した範囲は提示が生ログへ戻る = 提示列が変わるので、
+                    # 同じコミットで「壊れた」申告を載せる (黙って提示だけ変えると、
+                    # 前の窓のキャッシュの寿命が新しい窓のものとして残る)。
+                    ttl, updated_at = SessionLifecycle.cache_broken_stamp()
+                    row.TTL_SECONDS = ttl
+                    row.UPDATED_AT = updated_at
                     removed += len(folds) - len(kept)
                 if removed:
                     db.commit()
