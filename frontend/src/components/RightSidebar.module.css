@@ -40,6 +40,29 @@
     border-bottom: 1px solid #374151;
 }
 
+/* 見出しの右端に置く「この部屋にアイテムを作る」ボタン */
+.addItemBtn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 26px;
+    height: 26px;
+    margin-left: auto;
+    margin-bottom: 0.25rem;
+    border: none;
+    border-radius: 6px;
+    background: #374151;
+    color: #9ca3af;
+    cursor: pointer;
+    transition: background 0.2s, color 0.2s;
+    flex-shrink: 0;
+}
+
+.addItemBtn:hover {
+    background: #4b5563;
+    color: #f3f4f6;
+}
+
 .content {
     display: flex;
     flex-direction: column;
@@ -375,6 +398,16 @@
 :global([data-theme="light"]) .heading {
     color: #64748b;
     border-bottom-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .addItemBtn {
+    background: #f1f5f9;
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .addItemBtn:hover {
+    background: #e2e8f0;
+    color: #1f2937;
 }
 
 :global([data-theme="light"]) .buildingName {

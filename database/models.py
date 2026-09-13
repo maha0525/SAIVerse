@@ -223,6 +223,13 @@ class Building(Base):
     # 1 Building 複数ロール可。NULL/空 = ロールなし (私室・通常 Building)。
     # タグ付け UI/CLI は将来フェーズ — 手動 SQL 例は facility_map.py の docstring 参照。
     FACILITY_ROLES = Column(Text, nullable=True)
+    # 部屋の様子に出す「建物に直接置かれたアイテム」の個数の上限
+    # (docs/intent/room_item_display_cap.md 設計 4)。
+    # NULL = 既定 (sai_memory/room_state.py の DEFAULT_ROOM_ITEM_DISPLAY_LIMIT = 10)。
+    # 0 以上の整数 = その個数 (0 は「様子にアイテムを出さない部屋」として有効)。
+    # 負数は保存時に拒否する。「全部見せたい」部屋は十分大きい数を入れる
+    # (「無制限」の特別な値は作らない)。
+    ITEM_DISPLAY_LIMIT = Column(Integer, nullable=True)
     __table_args__ = (UniqueConstraint('CITYID', 'BUILDINGNAME', name='uq_city_building_name'),)
 
 

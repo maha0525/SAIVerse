@@ -45,7 +45,7 @@ from manager.initialization import InitializationMixin
 from manager.persona_events import PersonaEventMixin
 from manager.state import CoreState
 from manager.runtime import RuntimeService
-from manager.admin import AdminService
+from manager.admin import UNSET, AdminService
 from manager.items import ItemService
 from database.models import (
     AI as AIModel,
@@ -793,6 +793,7 @@ class SAIVerseManager(
                     physical_vessel_id=getattr(db_b, 'PHYSICAL_VESSEL_ID', None),
                     region_id=getattr(db_b, 'REGION_ID', None),
                     facility_roles=facility_roles,
+                    item_display_limit=getattr(db_b, 'ITEM_DISPLAY_LIMIT', None),
                 )
                 buildings.append(building)
             logging.info(f"Loaded and created {len(buildings)} buildings from database.")
@@ -954,6 +955,10 @@ class SAIVerseManager(
     def create_document_item(self, persona_id: str, name: str, description: str, content: str, source_context: Optional[str] = None) -> str:
         """Create a new document item and place it in the current building."""
         return self.item_service.create_document_item(persona_id, name, description, content, source_context=source_context)
+
+    def create_bag_item(self, persona_id: str, name: str, description: str, source_context: Optional[str] = None) -> str:
+        """Create a new bag item (closed) and place it in the current building."""
+        return self.item_service.create_bag_item(persona_id, name, description, source_context=source_context)
 
     def create_picture_item(self, persona_id: str, name: str, description: str, file_path: str, building_id: Optional[str] = None, source_context: Optional[str] = None) -> tuple:
         """Create a new picture item and place it in the specified building. Returns (item_id, slot_num)."""
@@ -2138,8 +2143,14 @@ class SAIVerseManager(
         interval: int,
         image_path: Optional[str] = None,
         extra_prompt_files: Optional[List[str]] = None,
+        item_display_limit: Any = UNSET,
     ) -> str:
-        """ワールドエディタからBuildingの設定を更新する"""
+        """ワールドエディタからBuildingの設定を更新する
+
+        ``item_display_limit`` (部屋の様子に出す建物直下のアイテムの個数の上限)
+        は :data:`~manager.admin.UNSET` なら触らない — 送ってこない画面の保存で
+        設定が消えないようにするため (docs/intent/room_item_display_cap.md 設計 4)。
+        """
         result = self.admin.update_building(
             building_id,
             name,
@@ -2151,6 +2162,7 @@ class SAIVerseManager(
             interval,
             image_path,
             extra_prompt_files,
+            item_display_limit,
         )
 
         # Update in-memory Building object if DB update succeeded
@@ -2163,6 +2175,12 @@ class SAIVerseManager(
             building.system_instruction = system_instruction
             building.auto_interval_sec = interval
             building.extra_prompt_files = extra_prompt_files or []
+            if item_display_limit is not UNSET:
+                # 次に部屋の様子を組むときから効く (提示はその場では書き換え
+                # ない — docs/intent/room_item_display_cap.md 設計 6)。
+                building.item_display_limit = (
+                    None if item_display_limit is None else int(item_display_limit)
+                )
             # Update capacities dict used by OccupancyManager
             if hasattr(self, 'capacities') and building_id in self.capacities:
                 self.capacities[building_id] = capacity

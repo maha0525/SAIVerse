@@ -7,6 +7,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence
 
 from sai_memory.perception_buffer import PERCEPTION_OMISSION_HEADER
 from sea.eviction_plan import CONSUMED_PERCEPTION_KEY
+from sea.runtime_utils import event_building_id
 from saiverse.model_configs import (
     calculate_cost,
     get_context_length,
@@ -1222,6 +1223,10 @@ def _maybe_inject_auto_recall(
                 "content": result.block,
                 "persona_id": persona_id,
                 "persona_name": getattr(persona, "persona_name", None),
+                # 想起が起きた時点の部屋。名乗らないと、別の部屋で進んでいる
+                # Beat の想起が閲覧中の部屋の吹き出しに混ざる
+                # (docs/issues/pulse_beats_merge_into_single_record.md 契約 5)。
+                "building_id": event_building_id(runtime, persona),
             })
         except Exception:
             LOGGER.debug("[sea][auto_recall] event_callback failed", exc_info=True)

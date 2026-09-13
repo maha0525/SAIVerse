@@ -5,6 +5,7 @@ import shutil
 from pathlib import Path
 
 from api.deps import get_manager
+from manager.admin import UNSET
 from saiverse.saiverse_manager import SAIVerseManager
 
 router = APIRouter()
@@ -66,6 +67,16 @@ class BuildingUpdate(BaseModel):
     auto_interval: int
     image_path: Optional[str] = None  # Building interior image for LLM visual context
     extra_prompt_files: Optional[List[str]] = None  # Additional prompt files for this building
+    # 部屋の様子に出す建物直下のアイテムの個数の上限
+    # (docs/intent/room_item_display_cap.md 設計 4)。
+    # null を**明示的に送る**と上書きを外して既定 (10 個) に戻す。0 は有効
+    # (アイテムを様子に出さない部屋)。負数は 400 で拒否する。
+    # **フィールドを送らないクライアントは値に触らない** — ワールドエディタと
+    # Building 設定モーダル (BuildingSettingsModal.tsx) は 2026-09-12 から両方
+    # このフィールドを送るが、この欄を知らないクライアントが同じ経路へ PUT
+    # したとき「未送信 = null = 解除」にすると設定が黙って消えるので、
+    # 未送信と null 明示の区別 (model_fields_set) は残す。
+    item_display_limit: Optional[int] = None
 
 
 class RegionCreate(BaseModel):
@@ -283,7 +294,16 @@ def create_building(b: BuildingCreate, manager: SAIVerseManager = Depends(get_ma
 
 @router.put("/buildings/{building_id}")
 def update_building(building_id: str, b: BuildingUpdate, manager: SAIVerseManager = Depends(get_manager)):
-    return _check_result(manager.update_building(building_id, b.name, b.capacity, b.description, b.system_instruction, b.city_id, b.tool_ids, b.auto_interval, b.image_path, b.extra_prompt_files))
+    # 送られなかったフィールドは触らない (BuildingUpdate のコメント参照)。
+    item_display_limit: Any = UNSET
+    if "item_display_limit" in b.model_fields_set:
+        item_display_limit = b.item_display_limit
+        if item_display_limit is not None and item_display_limit < 0:
+            raise HTTPException(
+                status_code=400,
+                detail="部屋の様子に表示するアイテム数には 0 以上の数を入れてください（空欄で既定の 10 個）。",
+            )
+    return _check_result(manager.update_building(building_id, b.name, b.capacity, b.description, b.system_instruction, b.city_id, b.tool_ids, b.auto_interval, b.image_path, b.extra_prompt_files, item_display_limit))
 
 @router.delete("/buildings/{building_id}")
 def delete_building(building_id: str, manager: SAIVerseManager = Depends(get_manager)):

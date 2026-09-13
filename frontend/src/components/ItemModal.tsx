@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { X, FileText, Code2, Pencil, Save, XCircle, Settings, ArrowRightLeft, Package, Image as ImageIcon, File } from 'lucide-react';
+import { X, FileText, Code2, Pencil, Save, XCircle, Settings, ArrowRightLeft, Package, PackagePlus, PackageOpen, Check, Square, Image as ImageIcon, File } from 'lucide-react';
 import ReactMarkdown, { defaultUrlTransform } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkBreaks from 'remark-breaks';
@@ -29,6 +29,17 @@ interface BagItem {
     name: string;
 }
 
+/** まとめ収納の選択ビューに並べる、いまいる部屋のアイテム。 */
+interface RoomItem {
+    id: string;
+    name: string;
+    type: string;
+    description?: string;
+}
+
+/** まとめ操作のビュー。null = 通常の中身表示。 */
+type BulkMode = 'stow' | 'takeout' | null;
+
 interface Building {
     id: string;
     name: string;
@@ -51,6 +62,9 @@ interface ItemModalProps {
     onClose: () => void;
     item: Item | null;
     onItemUpdated?: () => void;  // Callback when item is updated
+    /** 世界のアイテム配置が変わったことを親へ知らせる。onItemUpdated と違い
+     * モーダルを閉じない前提の通知で、まとめ収納のように操作を続ける経路で使う。 */
+    onWorldChanged?: () => void;
     /** 親が把握している現在 Building ID。バッグ一覧取得用。
      * 省略すると server-global の user_current_building_id にフォールバックし、
      * マルチデバイス間で他クライアントの操作に汚染される (エリス上書き事故の遠因)。
@@ -58,7 +72,7 @@ interface ItemModalProps {
     currentBuildingId?: string | null;
 }
 
-export default function ItemModal({ isOpen, onClose, item, onItemUpdated, currentBuildingId }: ItemModalProps) {
+export default function ItemModal({ isOpen, onClose, item, onItemUpdated, onWorldChanged, currentBuildingId }: ItemModalProps) {
     const [content, setContent] = useState<string | null>(null);
     const [editContent, setEditContent] = useState<string>('');
     const [isLoading, setIsLoading] = useState(false);
@@ -87,6 +101,16 @@ export default function ItemModal({ isOpen, onClose, item, onItemUpdated, curren
 
     // Nested item modal for viewing items inside bags
     const [nestedItem, setNestedItem] = useState<Item | null>(null);
+
+    // まとめ収納 (部屋 ⇔ Bag) の状態
+    const [bulkMode, setBulkMode] = useState<BulkMode>(null);
+    const [roomItems, setRoomItems] = useState<RoomItem[]>([]);
+    const [isLoadingRoomItems, setIsLoadingRoomItems] = useState(false);
+    const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+    const [isBulkRunning, setIsBulkRunning] = useState(false);
+    const [bulkError, setBulkError] = useState<string | null>(null);
+    // サムネイルの読み込みに失敗したアイテム (アイコン表示へフォールバックする)
+    const [thumbErrors, setThumbErrors] = useState<Set<string>>(new Set());
 
     // Load buildings list
     const loadBuildings = useCallback(async () => {
@@ -122,6 +146,22 @@ export default function ItemModal({ isOpen, onClose, item, onItemUpdated, curren
         }
     }, []);
 
+    // Bag の中身を取得する (初回表示と、まとめ操作の後の再取得で共用)
+    const loadBagContents = useCallback(async (itemId: string) => {
+        setIsLoadingBagContents(true);
+        try {
+            const res = await fetch(`/api/info/item/${itemId}/bag-contents`);
+            if (!res.ok) throw new Error('Failed to load bag contents');
+            const data = await res.json();
+            setBagContents(data.items || []);
+        } catch (err) {
+            console.error(err);
+            setError('バッグの中身の読み込みに失敗しました');
+        } finally {
+            setIsLoadingBagContents(false);
+        }
+    }, []);
+
     useEffect(() => {
         if (isOpen && item && item.type === 'document') {
             setIsLoading(true);
@@ -141,21 +181,10 @@ export default function ItemModal({ isOpen, onClose, item, onItemUpdated, curren
                 })
                 .finally(() => setIsLoading(false));
         } else if (isOpen && item && item.type === 'bag') {
-            setIsLoadingBagContents(true);
             setError(null);
             setIsEditing(false);
             setIsMetaEditing(false);
-            fetch(`/api/info/item/${item.id}/bag-contents`)
-                .then(async res => {
-                    if (!res.ok) throw new Error("Failed to load bag contents");
-                    const data = await res.json();
-                    setBagContents(data.items || []);
-                })
-                .catch(err => {
-                    console.error(err);
-                    setError("バッグの中身の読み込みに失敗しました");
-                })
-                .finally(() => setIsLoadingBagContents(false));
+            loadBagContents(item.id);
         } else {
             setContent(null);
             setEditContent('');
@@ -167,11 +196,16 @@ export default function ItemModal({ isOpen, onClose, item, onItemUpdated, curren
         // Load item details and buildings (for location and creation date display)
         setItemDetails(null);
         setNestedItem(null);
+        // 別のアイテムを開いたら、まとめ操作の途中状態は持ち越さない
+        setBulkMode(null);
+        setRoomItems([]);
+        setSelectedIds(new Set());
+        setBulkError(null);
         if (isOpen && item) {
             loadItemDetails(item.id);
             loadBuildings();
         }
-    }, [isOpen, item, loadItemDetails, loadBuildings]);
+    }, [isOpen, item, loadItemDetails, loadBuildings, loadBagContents]);
 
     const handleStartEdit = () => {
         setEditContent(content || '');
@@ -302,6 +336,149 @@ export default function ItemModal({ isOpen, onClose, item, onItemUpdated, curren
             setIsSavingMeta(false);
         }
     };
+
+    // --- まとめ収納 (部屋 ⇔ Bag) ---
+
+    // いまいる部屋のアイテムを取得する (この Bag 自身は除く)
+    const loadRoomItems = useCallback(async () => {
+        if (!currentBuildingId || !item) return;
+        setIsLoadingRoomItems(true);
+        try {
+            const res = await fetch(`/api/info/details?building_id=${encodeURIComponent(currentBuildingId)}`);
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            const data = await res.json();
+            const list: RoomItem[] = (data.items || [])
+                .filter((i: RoomItem) => i.id !== item.id)
+                .map((i: RoomItem) => ({ id: i.id, name: i.name, type: i.type, description: i.description }));
+            setRoomItems(list);
+        } catch (err) {
+            console.error('Failed to load room items:', err);
+            setRoomItems([]);
+            setBulkError('部屋のアイテム一覧の取得に失敗しました');
+        } finally {
+            setIsLoadingRoomItems(false);
+        }
+    }, [currentBuildingId, item]);
+
+    // 「部屋に出す」の行き先。親から渡された現在地を優先し、無ければこの Bag 自身の置き場所を使う。
+    const takeoutBuildingId = currentBuildingId
+        || (itemDetails?.OWNER_KIND === 'building' ? itemDetails.OWNER_ID : null)
+        || null;
+
+    const toggleSelected = (id: string) => {
+        setSelectedIds(prev => {
+            const next = new Set(prev);
+            if (next.has(id)) next.delete(id);
+            else next.add(id);
+            return next;
+        });
+    };
+
+    const handleStartStow = async () => {
+        setBulkError(null);
+        setSelectedIds(new Set());
+        setBulkMode('stow');
+        await loadRoomItems();
+    };
+
+    const handleStartTakeout = () => {
+        setBulkError(null);
+        setSelectedIds(new Set());
+        setBulkMode('takeout');
+    };
+
+    const handleCancelBulk = () => {
+        setBulkMode(null);
+        setSelectedIds(new Set());
+        setBulkError(null);
+    };
+
+    /** 選択したアイテムを 1 個ずつ順に移動する。途中で失敗したらそこで中断する。 */
+    const runBulkMove = async (ids: string[], ownerKind: 'bag' | 'building', ownerId: string) => {
+        if (!item || ids.length === 0) return;
+
+        const nameOf = (id: string) =>
+            roomItems.find(r => r.id === id)?.name
+            || bagContents.find(c => c.id === id)?.name
+            || id;
+
+        setIsBulkRunning(true);
+        setBulkError(null);
+
+        let moved = 0;
+        let failureMessage: string | null = null;
+
+        for (const id of ids) {
+            try {
+                // 他のフィールドを保つため、いまの値を取ってから置き場所だけ差し替える
+                const getRes = await fetch(`/api/world/items/${id}`);
+                if (!getRes.ok) throw new Error(`アイテム情報を取得できませんでした (HTTP ${getRes.status})`);
+                const current: ItemDetails = await getRes.json();
+
+                const putRes = await fetch(`/api/world/items/${id}`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        name: current.NAME,
+                        item_type: current.TYPE,
+                        description: current.DESCRIPTION || '',
+                        owner_kind: ownerKind,
+                        owner_id: ownerId,
+                        state_json: current.STATE_JSON || null,
+                        file_path: current.FILE_PATH || null,
+                    }),
+                });
+                if (!putRes.ok) {
+                    let detail = `HTTP ${putRes.status}`;
+                    try {
+                        const errBody = await putRes.json();
+                        if (errBody?.detail) detail = String(errBody.detail);
+                    } catch {
+                        // エラー本文が JSON でない場合はステータスコードのまま伝える
+                    }
+                    throw new Error(detail);
+                }
+                moved += 1;
+            } catch (err) {
+                const reason = err instanceof Error ? err.message : String(err);
+                failureMessage = `${moved}個まで完了したところで「${nameOf(id)}」の移動に失敗しました: ${reason}`;
+                break;
+            }
+        }
+
+        if (moved > 0) {
+            await loadBagContents(item.id);
+            if (onWorldChanged) onWorldChanged();
+        }
+
+        if (failureMessage) {
+            setBulkError(failureMessage);
+            // 移動できなかった分は選択したまま残し、再実行できるようにする
+            setSelectedIds(new Set(ids.slice(moved)));
+            if (ownerKind === 'bag') await loadRoomItems();
+        } else {
+            setSelectedIds(new Set());
+            setBulkMode(null);
+        }
+
+        setIsBulkRunning(false);
+    };
+
+    const handleRunStow = () => {
+        if (!item) return;
+        runBulkMove(Array.from(selectedIds), 'bag', item.id);
+    };
+
+    const handleRunTakeout = () => {
+        if (!takeoutBuildingId) return;
+        runBulkMove(Array.from(selectedIds), 'building', takeoutBuildingId);
+    };
+
+    const renderTypeIcon = (type: string) => (
+        type === 'picture' ? <ImageIcon size={18} />
+            : type === 'bag' ? <Package size={18} />
+            : <File size={18} />
+    );
 
     // Get current building name
     const getCurrentBuildingName = () => {
@@ -566,39 +743,179 @@ export default function ItemModal({ isOpen, onClose, item, onItemUpdated, curren
                         </div>
                     ) : item.type === 'bag' ? (
                         <div className={styles.bagContainer}>
-                            {isLoadingBagContents && <div className={styles.loading}>読み込み中...</div>}
-                            {error && <div className={styles.error}>{error}</div>}
-                            {!isLoadingBagContents && (
-                                bagContents.length > 0 ? (
-                                    <div className={styles.bagGrid}>
-                                        {bagContents.map(ci => (
-                                            <div
-                                                key={ci.id}
-                                                className={`${styles.bagCard} ${styles[`bagCard_${ci.type}`] || ''}`}
-                                                onClick={() => setNestedItem({ id: ci.id, name: ci.name, type: ci.type, description: ci.description })}
+                            {/* まとめ収納の操作列。currentBuildingId が無いときは「しまう」を出さない
+                                (loadBagItemsInBuilding と同じ守り: 部屋を特定できないまま操作させない)。 */}
+                            <div className={styles.bulkBar}>
+                                {bulkMode === null ? (
+                                    <>
+                                        {currentBuildingId && (
+                                            <button
+                                                className={styles.bulkBtn}
+                                                onClick={handleStartStow}
+                                                disabled={isLoadingBagContents}
                                             >
-                                                <div className={styles.bagCardIcon}>
-                                                    {ci.type === 'picture' ? <ImageIcon size={18} />
-                                                        : ci.type === 'bag' ? <Package size={18} />
-                                                        : <File size={18} />}
-                                                </div>
-                                                <div className={styles.bagCardInfo}>
-                                                    <div className={styles.bagCardName}>
-                                                        {ci.name}
-                                                        {ci.type === 'bag' && ci.contained_count != null && (
-                                                            <span className={styles.bagCardCount}> ({ci.contained_count})</span>
-                                                        )}
-                                                    </div>
-                                                    {ci.description && (
-                                                        <div className={styles.bagCardDesc}>{ci.description}</div>
-                                                    )}
-                                                </div>
-                                            </div>
-                                        ))}
-                                    </div>
+                                                <PackagePlus size={16} />
+                                                <span>部屋のアイテムをしまう</span>
+                                            </button>
+                                        )}
+                                        {takeoutBuildingId && bagContents.length > 0 && (
+                                            <button
+                                                className={styles.bulkBtn}
+                                                onClick={handleStartTakeout}
+                                                disabled={isLoadingBagContents}
+                                            >
+                                                <PackageOpen size={16} />
+                                                <span>部屋に出す</span>
+                                            </button>
+                                        )}
+                                    </>
                                 ) : (
-                                    <div className={styles.bagEmpty}>バッグは空です</div>
-                                )
+                                    <>
+                                        <button
+                                            className={`${styles.bulkBtn} ${styles.bulkRunBtn}`}
+                                            onClick={bulkMode === 'stow' ? handleRunStow : handleRunTakeout}
+                                            disabled={isBulkRunning || selectedIds.size === 0}
+                                        >
+                                            {bulkMode === 'stow' ? <PackagePlus size={16} /> : <PackageOpen size={16} />}
+                                            <span>
+                                                {isBulkRunning
+                                                    ? '実行中...'
+                                                    : bulkMode === 'stow'
+                                                        ? `しまう (${selectedIds.size}個)`
+                                                        : `部屋に出す (${selectedIds.size}個)`}
+                                            </span>
+                                        </button>
+                                        <button
+                                            className={`${styles.bulkBtn} ${styles.bulkCancelBtn}`}
+                                            onClick={handleCancelBulk}
+                                            disabled={isBulkRunning}
+                                        >
+                                            <XCircle size={16} />
+                                            <span>キャンセル</span>
+                                        </button>
+                                    </>
+                                )}
+                            </div>
+                            {bulkError && <div className={styles.error}>{bulkError}</div>}
+                            {bulkMode === 'stow' ? (
+                                <>
+                                    {isLoadingRoomItems && <div className={styles.loading}>読み込み中...</div>}
+                                    {!isLoadingRoomItems && (
+                                        roomItems.length > 0 ? (
+                                            <div className={styles.bagGrid}>
+                                                {roomItems.map(ri => {
+                                                    const checked = selectedIds.has(ri.id);
+                                                    return (
+                                                        <div
+                                                            key={ri.id}
+                                                            className={`${styles.bagCard} ${styles[`bagCard_${ri.type}`] || ''} ${checked ? styles.bagCardSelected : ''}`}
+                                                            role="checkbox"
+                                                            aria-checked={checked}
+                                                            tabIndex={0}
+                                                            onClick={() => { if (!isBulkRunning) toggleSelected(ri.id); }}
+                                                            onKeyDown={(e) => {
+                                                                if (e.key === 'Enter' || e.key === ' ') {
+                                                                    e.preventDefault();
+                                                                    if (!isBulkRunning) toggleSelected(ri.id);
+                                                                }
+                                                            }}
+                                                        >
+                                                            <div className={`${styles.bagCardCheck} ${checked ? styles.bagCardCheckOn : ''}`}>
+                                                                {checked ? <Check size={14} /> : <Square size={14} />}
+                                                            </div>
+                                                            {ri.type === 'picture' && !thumbErrors.has(ri.id) ? (
+                                                                <div className={styles.bagCardThumb}>
+                                                                    <img
+                                                                        src={`/api/info/item/${ri.id}?thumb=1`}
+                                                                        alt={ri.name}
+                                                                        loading="lazy"
+                                                                        onError={() => setThumbErrors(prev => {
+                                                                            const next = new Set(prev);
+                                                                            next.add(ri.id);
+                                                                            return next;
+                                                                        })}
+                                                                    />
+                                                                </div>
+                                                            ) : (
+                                                                <div className={styles.bagCardIcon}>
+                                                                    {renderTypeIcon(ri.type)}
+                                                                </div>
+                                                            )}
+                                                            <div className={styles.bagCardInfo}>
+                                                                <div className={styles.bagCardName}>{ri.name}</div>
+                                                                {ri.description && (
+                                                                    <div className={styles.bagCardDesc}>{ri.description}</div>
+                                                                )}
+                                                            </div>
+                                                        </div>
+                                                    );
+                                                })}
+                                            </div>
+                                        ) : (
+                                            <div className={styles.bagEmpty}>この部屋にしまえるアイテムはありません</div>
+                                        )
+                                    )}
+                                </>
+                            ) : (
+                                <>
+                                    {isLoadingBagContents && <div className={styles.loading}>読み込み中...</div>}
+                                    {error && <div className={styles.error}>{error}</div>}
+                                    {!isLoadingBagContents && (
+                                        bagContents.length > 0 ? (
+                                            <div className={styles.bagGrid}>
+                                                {bagContents.map(ci => {
+                                                    const selecting = bulkMode === 'takeout';
+                                                    const checked = selectedIds.has(ci.id);
+                                                    return (
+                                                        <div
+                                                            key={ci.id}
+                                                            className={`${styles.bagCard} ${styles[`bagCard_${ci.type}`] || ''} ${selecting && checked ? styles.bagCardSelected : ''}`}
+                                                            // 選択モード中はしまう側のカードと同じくキーボードでも切り替えられる形にする
+                                                            role={selecting ? 'checkbox' : undefined}
+                                                            aria-checked={selecting ? checked : undefined}
+                                                            tabIndex={selecting ? 0 : undefined}
+                                                            onKeyDown={selecting ? (e) => {
+                                                                if (e.key === 'Enter' || e.key === ' ') {
+                                                                    e.preventDefault();
+                                                                    if (!isBulkRunning) toggleSelected(ci.id);
+                                                                }
+                                                            } : undefined}
+                                                            onClick={() => {
+                                                                if (selecting) {
+                                                                    if (!isBulkRunning) toggleSelected(ci.id);
+                                                                } else {
+                                                                    setNestedItem({ id: ci.id, name: ci.name, type: ci.type, description: ci.description });
+                                                                }
+                                                            }}
+                                                        >
+                                                            {selecting && (
+                                                                <div className={`${styles.bagCardCheck} ${checked ? styles.bagCardCheckOn : ''}`}>
+                                                                    {checked ? <Check size={14} /> : <Square size={14} />}
+                                                                </div>
+                                                            )}
+                                                            <div className={styles.bagCardIcon}>
+                                                                {renderTypeIcon(ci.type)}
+                                                            </div>
+                                                            <div className={styles.bagCardInfo}>
+                                                                <div className={styles.bagCardName}>
+                                                                    {ci.name}
+                                                                    {ci.type === 'bag' && ci.contained_count != null && (
+                                                                        <span className={styles.bagCardCount}> ({ci.contained_count})</span>
+                                                                    )}
+                                                                </div>
+                                                                {ci.description && (
+                                                                    <div className={styles.bagCardDesc}>{ci.description}</div>
+                                                                )}
+                                                            </div>
+                                                        </div>
+                                                    );
+                                                })}
+                                            </div>
+                                        ) : (
+                                            <div className={styles.bagEmpty}>バッグは空です</div>
+                                        )
+                                    )}
+                                </>
                             )}
                         </div>
                     ) : (
@@ -615,6 +932,12 @@ export default function ItemModal({ isOpen, onClose, item, onItemUpdated, curren
                         onClose={() => setNestedItem(null)}
                         item={nestedItem}
                         onItemUpdated={onItemUpdated}
+                        onWorldChanged={() => {
+                            // 入れ子の Bag で動かした分を、この階層の中身表示にも反映する
+                            loadBagContents(item.id);
+                            if (onWorldChanged) onWorldChanged();
+                        }}
+                        currentBuildingId={currentBuildingId}
                     />
                 )}
             </div>

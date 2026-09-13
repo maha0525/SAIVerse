@@ -38,6 +38,9 @@ interface Building {
     AUTO_INTERVAL_SEC: number;
     IMAGE_PATH?: string;  // Building interior image for visual context
     EXTRA_PROMPT_FILES?: string;  // JSON array of extra prompt file names
+    /** 部屋の様子に出すアイテムの個数の上限。null なら既定の 10 個
+     *  (docs/intent/room_item_display_cap.md 設計 4)。0 も有効な値。 */
+    ITEM_DISPLAY_LIMIT?: number | null;
 }
 
 interface Tool {
@@ -352,8 +355,18 @@ export default function WorldEditor() {
     const handleDeleteCity = async () => { if (confirm("この City を削除しますか？") && await apiCall(`/api/world/cities/${selectedCity!.CITYID}`, { method: 'DELETE' })) { setSelectedCity(null); setFormData({}); cityList.load(); } };
 
     // --- Building Handlers ---
+    // いま選ばれている Building の ID。紐付け表を読み切る前に別の Building を
+    // 選ぶと、先に投げた読みの応答が後から返って編集フォームを前の Building の
+    // 値で上書きしてしまう (そのまま保存すると、選んでいる Building に別の
+    // Building の設定が書かれる)。応答を当てる前にここと照合して、古い応答は捨てる。
+    const selectedBuildingIdRef = useRef<string | null>(null);
+    // アイテム・Playbook の選択にも同じ競合がある (速い選び直しで古い応答が
+    // 新しい選択のフォームを上書きする)。同じ照合で古い応答を捨てる。
+    const selectedItemIdRef = useRef<string | null>(null);
+    const selectedPlaybookIdRef = useRef<string | number | null>(null);
     const handleBuildingSelect = (b: Building) => {
         setSelectedBuilding(b);
+        selectedBuildingIdRef.current = b.BUILDINGID;
         // Parse extra prompt files from JSON
         let extraPrompts: string[] = [];
         if (b.EXTRA_PROMPT_FILES) {
@@ -362,8 +375,12 @@ export default function WorldEditor() {
         // 紐付け表は全件そろっていないと「チェックが外れている」という嘘の
         // 表示になるので、ページ送りではなく最後まで読み切る
         fetchAllTableRows<any>('building_tool_link').then(links => {
+            // 読んでいる間に別の Building へ移っていたら、この応答はもう古い
+            if (selectedBuildingIdRef.current !== b.BUILDINGID) return;
             const ids = links.filter((l: any) => l.BUILDINGID === b.BUILDINGID).map((l: any) => l.TOOLID);
-            setFormData({ name: b.BUILDINGNAME, description: b.DESCRIPTION, capacity: b.CAPACITY, system_instruction: b.SYSTEM_INSTRUCTION, city_id: b.CITYID, auto_interval: b.AUTO_INTERVAL_SEC, tool_ids: ids, image_path: b.IMAGE_PATH || '', extra_prompt_files: extraPrompts });
+            // item_display_limit は 0 も有効な値 (アイテムを様子に出さない部屋) なので
+            // `||` で潰さない。null = 設定なし = 既定の 10 個。
+            setFormData({ name: b.BUILDINGNAME, description: b.DESCRIPTION, capacity: b.CAPACITY, system_instruction: b.SYSTEM_INSTRUCTION, city_id: b.CITYID, auto_interval: b.AUTO_INTERVAL_SEC, tool_ids: ids, image_path: b.IMAGE_PATH || '', extra_prompt_files: extraPrompts, item_display_limit: b.ITEM_DISPLAY_LIMIT ?? null });
         }).catch(e => console.error('load building_tool_link failed:', e));
     };
     const handleCreateBuilding = async () => { if (await apiCall('/api/world/buildings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: formData.name, description: formData.description || "", capacity: formData.capacity || 1, system_instruction: formData.system_instruction || "", city_id: formData.city_id, building_id: formData.building_id || null }) })) { buildingList.load(); setFormData({}); } };
@@ -372,6 +389,7 @@ export default function WorldEditor() {
         const deletedId = selectedBuilding!.BUILDINGID;
         if (confirm("この Building を削除しますか？") && await apiCall(`/api/world/buildings/${deletedId}`, { method: 'DELETE' })) {
             setSelectedBuilding(null);
+            selectedBuildingIdRef.current = null;
             setFormData({});
             buildingList.load();
             // Notify main page so it can update if the deleted building was current
@@ -424,11 +442,14 @@ export default function WorldEditor() {
     // --- Item Handlers ---
     const handleItemSelect = async (i: Item) => {
         setSelectedItem(i);
+        selectedItemIdRef.current = i.ITEM_ID;
         // Fetch item details to get owner info
         try {
             const res = await fetch(`/api/world/items/${i.ITEM_ID}`);
+            if (selectedItemIdRef.current !== i.ITEM_ID) return; // 選び直し済み — 古い応答を捨てる
             if (res.ok) {
                 const details = await res.json();
+                if (selectedItemIdRef.current !== i.ITEM_ID) return;
                 setFormData({
                     name: details.NAME || i.NAME,
                     item_type: details.TYPE || i.TYPE,
@@ -453,11 +474,14 @@ export default function WorldEditor() {
 
     // --- Playbook Handlers ---
     const handlePlaybookSelect = async (pb: Playbook) => {
+        selectedPlaybookIdRef.current = pb.id;
         // Fetch full details
         try {
             const res = await fetch(`/api/world/playbooks/${pb.id}`);
+            if (selectedPlaybookIdRef.current !== pb.id) return; // 選び直し済み — 古い応答を捨てる
             if (res.ok) {
                 const detail = await res.json();
+                if (selectedPlaybookIdRef.current !== pb.id) return;
                 setSelectedPlaybook(detail);
                 setFormData({
                     name: detail.name,
@@ -497,7 +521,7 @@ export default function WorldEditor() {
         <div className={styles.container}>
             <div className={styles.tabs}>
                 <button className={`${styles.tab} ${subTab === 'city' ? styles.active : ''}`} onClick={() => { setSubTab('city'); setSelectedCity(null); setFormData({}); }}><MapPin size={16} /> City</button>
-                <button className={`${styles.tab} ${subTab === 'building' ? styles.active : ''}`} onClick={() => { setSubTab('building'); setSelectedBuilding(null); setFormData({}); }}><Layers size={16} /> Building</button>
+                <button className={`${styles.tab} ${subTab === 'building' ? styles.active : ''}`} onClick={() => { setSubTab('building'); setSelectedBuilding(null); selectedBuildingIdRef.current = null; setFormData({}); }}><Layers size={16} /> Building</button>
                 <button className={`${styles.tab} ${subTab === 'ai' ? styles.active : ''}`} onClick={() => { setSubTab('ai'); setSelectedAI(null); setFormData({}); }}><Cpu size={16} /> ペルソナ</button>
                 <button className={`${styles.tab} ${subTab === 'blueprint' ? styles.active : ''}`} onClick={() => { setSubTab('blueprint'); setSelectedBlueprint(null); setFormData({ entity_type: 'ai' }); }}><FileText size={16} /> Blueprint</button>
                 <button className={`${styles.tab} ${subTab === 'tool' ? styles.active : ''}`} onClick={() => { setSubTab('tool'); setSelectedTool(null); setFormData({}); }}><Wrench size={16} /> ツール</button>
@@ -550,8 +574,8 @@ export default function WorldEditor() {
                         <div className={styles.list}>
                             <h3>Building 一覧</h3>
                             {buildingList.rows.map(b => <div key={b.BUILDINGID} className={`${styles.item} ${selectedBuilding?.BUILDINGID === b.BUILDINGID ? styles.selected : ''}`} onClick={() => handleBuildingSelect(b)}>{b.BUILDINGNAME}</div>)}
-                            <Pagination list={buildingList} onNavigate={() => { setSelectedBuilding(null); setFormData({}); }} />
-                            <button className={styles.newBtn} onClick={() => { setSelectedBuilding(null); setFormData({}); }}>+ 新規作成</button>
+                            <Pagination list={buildingList} onNavigate={() => { setSelectedBuilding(null); selectedBuildingIdRef.current = null; setFormData({}); }} />
+                            <button className={styles.newBtn} onClick={() => { setSelectedBuilding(null); selectedBuildingIdRef.current = null; setFormData({}); }}>+ 新規作成</button>
                         </div>
                         <div className={styles.form}>
                             <h3>{selectedBuilding ? `Building を編集` : '新しい Building'}</h3>
@@ -569,6 +593,19 @@ export default function WorldEditor() {
                                 <Field label="定員"><NumInput value={formData.capacity || 1} onChange={(e: any) => setFormData({ ...formData, capacity: parseInt(e.target.value) })} /></Field>
                                 <Field label="インターバル（秒）"><NumInput value={formData.auto_interval || 10} onChange={(e: any) => setFormData({ ...formData, auto_interval: parseInt(e.target.value) })} /></Field>
                             </div>
+                            {selectedBuilding && <Field label="部屋の様子に表示するアイテム数（空欄で既定の 10 個）">
+                                <NumInput
+                                    min={0}
+                                    placeholder="10"
+                                    value={formData.item_display_limit ?? ''}
+                                    onChange={(e: any) => {
+                                        const raw = e.target.value;
+                                        const parsed = parseInt(raw, 10);
+                                        setFormData({ ...formData, item_display_limit: raw === '' || Number.isNaN(parsed) ? null : parsed });
+                                    }}
+                                />
+                                <small className={styles.hint}>この数を超えたアイテムは、最近触られていないものから部屋の様子に出なくなります（物は消えません）。0 にするとアイテムを出しません。</small>
+                            </Field>}
                             <Field label="説明"><TextArea value={formData.description || ''} onChange={(e: any) => setFormData({ ...formData, description: e.target.value })} /></Field>
                             <Field label="システムプロンプト"><TextArea style={{ minHeight: 150 }} value={formData.system_instruction || ''} onChange={(e: any) => setFormData({ ...formData, system_instruction: e.target.value })} /></Field>
                             {selectedBuilding && <Field label="インテリア画像（ビジュアルコンテキスト）">
