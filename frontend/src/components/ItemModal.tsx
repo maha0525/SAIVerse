@@ -615,6 +615,7 @@ export default function ItemModal({ isOpen, onClose, item, onItemUpdated, curren
                         onClose={() => setNestedItem(null)}
                         item={nestedItem}
                         onItemUpdated={onItemUpdated}
+                        currentBuildingId={currentBuildingId}
                     />
                 )}
             </div>

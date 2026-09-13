@@ -494,6 +494,7 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger, currentB
                     isOpen={!!selectedItem}
                     onClose={() => setSelectedItem(null)}
                     item={selectedItem}
+                    currentBuildingId={details?.id ?? currentBuildingId ?? null}
                     onItemUpdated={() => {
                         fetchDetails();
                         setSelectedItem(null);
