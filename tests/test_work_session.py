@@ -132,6 +132,9 @@ class FakeRuntime:
     def _get_cache_kwargs(self, persona_id=None):
         return {}
 
+    def _effective_building_id(self, persona, fallback):
+        return fallback
+
     def _is_spell_enabled_for_persona(self, persona):
         return True
 

@@ -6,7 +6,7 @@
 
 ## スコープ
 
-音声処理パイプラインを対象とした設計の話。 議論を経て、 結果として **spell loop の bubble1/bubble2 別 record 化を撤廃する内部処理変更** が含まれる (= UI / SAIMemory / building history record の最終的な保存形式 / UI 表現は維持、 内部の中間表現を 1 message に統一する)。
+音声処理パイプラインを対象とした設計の話。 議論を経て、 結果として **spell loop の bubble1/bubble2 別 record 化を撤廃する内部処理変更** が含まれる (= UI / SAIMemory / building history record の最終的な保存形式 / UI 表現は維持、 内部の中間表現を 1 message に統一する)。 (2026-09-12 改訂: 「1 message に統一」は Beat 単位へ再分割された — 不変条件 1 参照。bubble1/bubble2 の**恣意的な二分割**を撤廃した判断自体は生きている。)
 
 ## 背景
 
@@ -64,9 +64,13 @@ spell 詳細を他ペルソナに直接見せたくないため、 `<user_only>`
 
 論点 1〜4 を解決すると、 1 LLM 応答 = 1 record = 1 message_id = 1 audio_stream という対応関係が自然に成立する。 別途 「response_id」 等を導入する必要はない (= message_id がそのまま 「論理メッセージ単位」 として機能する)。
 
+> ⚠️ 2026-09-12 改訂: 「1 LLM 応答」の単位が「spell loop 全体」から「1 Beat (= loop 1 周)」へ変わった (不変条件 1 参照)。message_id が論理メッセージ単位である点は変わらない。
+
 ## 設計
 
 ### text 構造 (= 1 record として保存される最終形)
+
+> ⚠️ **2026-09-12 改訂**: 以下の「複数 round を 1 record に結合する」形は廃止した (不変条件 1 の改訂参照)。現行は round (= Beat) ごとに 1 record で、各 record の中身は「その round の text_before + `<user_only>` ブロック + text_after」。以下は旧設計の記録として残す。
 
 spell ありの 1 LLM 応答が複数 round の spell loop を経た場合、 最終的に 1 record に保存される text は以下の構造:
 
@@ -89,6 +93,8 @@ spell ありの 1 LLM 応答が複数 round の spell loop を経た場合、 �
 - 全体が 1 record として building history / persona history / SAIMemory に保存
 
 ### 各 sink への分配
+
+> ⚠️ 2026-09-12 改訂: この表の「1 LLM 応答」は spell loop 全体を指す旧設計の記述。現行は **Beat ごと**にこの表の 1 行分が起きる (spell 入り Pulse は building history に N+1 record / UI に N+1 bubble)。他ペルソナ ingestion・voice の strip 規則は Beat 単位でも同じ。
 
 | sink | 1 LLM 応答に対する出力 |
 |---|---|
@@ -120,9 +126,9 @@ LLM streaming chunk 受信ループで、 句読点 (= `。、！？，；：` �
 
 ## 不変条件
 
-1. **メッセージは単一**: 1 LLM call の応答は SAIMemory / building history / persona history / UI に **1 record として記録される**
-2. **sub_seq の順序保証**: emit 側 (sea runtime) が連番発番、 hook dispatch が `order_key=message_id` で同 message_id を直列化 (= `addon_hooks.dispatch_hook` の `order_key` 機構)、 voice-tts 側が enqueue 順で処理 (= queue は FIFO)、 audio_stream は単一 message_id で連続 push される。 hook 経路を直列化しない場合、 ThreadPoolExecutor が並列ピックアップして `enqueue_tts` への着順が崩れる (= 2026-05-16 観測のチャンク並び替え事故)。 emit 側の連番発番だけでは不十分
-3. **既存 streaming_chunk / streaming_complete event は変更なし**: UI 表現の経路は touch しない
+1. **メッセージは Beat 単位** (2026-09-12 改訂): **1 Beat (= 1 LLM call) = 1 record = 1 message_id = 1 audio_stream**。spell loop の複数ラウンドを 1 record に結合する旧設計 (2026-05-15〜) は廃止した — 結合すると保存先の部屋を 1 つしか選べず、Pulse 途中の移動で「移動後の Beat が元の部屋に残って同席者に読まれる」誤帰属と、「Beat の境界が表示に現れない」問題を起こした ([issue](../issues/archive/pulse_beats_merge_into_single_record.md))。各 Beat の record はそのラウンド開始時の Building に置き、placeholder の finalize は作成時の Building に対して行う (= 2026-06-11 の空振り対策は Beat 単位でも維持)。トレードオフ: TTS の立ち上がりラグが Beat ごとに 1 回になる (Beat 間には spell 実行の待ちが元々挟まるため受容)
+2. **sub_seq の順序保証**: emit 側 (sea runtime) が連番発番、 hook dispatch が `order_key` で直列化 (= `addon_hooks.dispatch_hook` の `order_key` 機構)、 voice-tts 側が enqueue 順で処理 (= queue は FIFO)、 audio_stream は単一 message_id で連続 push される。 hook 経路を直列化しない場合、 ThreadPoolExecutor が並列ピックアップして `enqueue_tts` への着順が崩れる (= 2026-05-16 観測のチャンク並び替え事故)。 emit 側の連番発番だけでは不十分。 **order_key は 2026-09-12 に message_id → pulse_id (無ければ message_id) へ変更** — 1 Pulse が Beat ごとの複数 message になったため、message_id 単位では Beat N の close と Beat N+1 の最初の sub-speak が別キーになり追い越しうる。同じ Pulse の配送を Beat を跨いで直列化する
+3. ~~**既存 streaming_chunk / streaming_complete event は変更なし**: UI 表現の経路は touch しない~~ (2026-09-12 改訂: Beat 単位の記録化に伴い、吹き出しを作る・更新するイベント (streaming_chunk / streaming_complete / streaming_discard / say) に `building_id` を追加し、フロントは閲覧中の建物と一致しないイベントでは吹き出しを作らない。詳細は [issue](../issues/archive/pulse_beats_merge_into_single_record.md) 契約 5)
 4. **`<user_only>` 機構は維持**: spell 詳細を他ペルソナ・音声から守る目的の機構はそのまま
 5. **ストリーミング応答経路では常時 Pipeline Streaming**: (1) ストリーミングで普通の応答 経路は旧 Phase 1 を撤去し Pipeline Streaming に一本化。 機能フラグ gate は無い (= 「旧 path を残して env で切り替え」 はリポジトリのカオス化を招くため [[feedback-no-dead-code-via-flags]] に従って削除)。 ストリーミングを使えない経路 ((3) 全文一括で普通の応答 / (4) 全文一括で function calling) では 「spell 実行前に bubble1 を先に emit する」 旧経路 (`_emit_bubble1_early`) を残す (= 物理的に sub-speak できないため)。 (2) ストリーミングで function calling は SAIVerse の主流から外れる経路 (CLAUDE.md で Playbook の function calling 利用を非推奨) なので Phase 1 のまま残置
 
@@ -135,6 +141,8 @@ LLM streaming chunk 受信ループで、 句読点 (= `。、！？，；：` �
 ### Phase 2-B-step2: emit_speak の 3 段階 API → **完了** (`5141649`)
 
 ### Phase 2-B-step3 (= 完了、 2026-05-15 後半セッション): spell loop の return + caller 統合
+
+> ⚠️ **2026-09-12 改訂**: この節の「全 round を 1 本に結合して 1 回 emit する」形は廃止した (不変条件 1)。現行の `_run_spell_loop` は `SpellLoopResult` (= `BeatSegment` の列 + 締めの発言 + ラウンド数) を返し、3 caller は Beat ごとに 1 件ずつ、**その Beat の生成が始まった部屋**へ記録する。ストリーミング経路は Beat の切れ目で下書き行を確定して次の部屋に新しい行を作る。`_build_spell_user_only_block` による 1 スペル 1 ブロックの組み立てと、早期 emit 分を先頭から切り落とす繋ぎは現行も同じ。以下は旧設計の記録として残す。
 
 - `_run_spell_loop` の return を `(full_merged_text, loop_count)` に変更:
   - `full_merged_text` = 各 round の `text_before + <user_only>...</user_only> ブロック` を順次連結した 1 string、 末尾に final continuation を append
@@ -157,13 +165,15 @@ LLM streaming chunk 受信ループで、 句読点 (= `。、！？，；：` �
 - chunk 受信ループ内:
   - `_find_next_sentence_boundary` で句読点 (`。！？．!?` + 弱区切り `、，,;:` + 改行) を検出
   - 文区切りごとに `_emit_sub_speak(persona, building_id, msg_id, sub_text, sub_seq=N)` 発火
-  - 最初の `/spell` 行が現れたら **sub-speak emit を停止** (`pipeline_spell_detected=True`)。 spell 行直前までを最後の pre-spell sub-speak として flush、 以降の text は spell loop → finalize 経由でまとめて送る (= spell 行を単独で voice-tts に渡さない)
-- chunk 受信ループ終了時: `last_emit_pos < len(text)` の residual (= 文区切りに達してない最後の chunk) を最後の sub-speak として flush。 spell 行検出後の残り (= `/spell` 以降) は spell loop で `<user_only>` wrap される対象なので flush しない
+  - `/spell` 行が現れたら **その行だけを音声から外す** (2026-09-13 改訂)。 行の手前までを 1 sub-speak として flush し、 行末の改行まで飛ばしてから、 後ろの文をまた文の区切りごとに送る。 行が複数あれば毎回同じ扱い。 行の途中で chunk が切れている間は送出を止めて待ち、 ストリームが行の途中で終わった回はその不完全な行を声にしない (args の生改行で行が千切れた回は、 救済パース `_rescue_multiline_args` が唱えごととして読む範囲がそのまま音声から外れる)
+  - 旧挙動 (2026-09-13 まで): 最初の `/spell` 行を見つけた時点で以降の sub-speak emit を全部止めていた。 Beat 分割前は 「行より後ろは全部 `<user_only>` に包まれる」 が正しかったが、 Beat 分割後の契約 1 では **行の後ろの文は可視の本文** になるので、 表示だけされて一言も声にならない回が出た (2026-09-13 実機: 長い朝の挨拶が丸ごと無音)
+- chunk 受信ループ終了時: `last_emit_pos < len(text)` の residual (= 文区切りに達してない最後の chunk) を最後の sub-speak として flush。 唱えごとの行の後ろに書かれた文もここに含まれる。 flush しないのは、 唱えごとの行の途中でストリームが終わった回だけ
 - spell loop 完了後 (or 通常完了後) に `_emit_speak_finalize(persona, building_id, msg_id, text=full_merged_or_plain, final_sub_seq=next_seq, final_voice_text="")` で確定
   - `final_voice_text=""` 固定: voice-tts は sub-speak 経由で全テキストを既に受け取っているので、 finalize hook では 「stream close + wav 保存」 のみ依頼する。 残テキストの送信を最終処理に残さない設計 (= 2026-05-16 改修。 旧設計では `_compute_pipeline_remainder_voice` で 全文 vs 既送 の文字列比較をしていたが、 whitespace 差や `<user_only>` 除去後の改行差で prefix 一致が崩れ、 fallback で全文 fallback → voice-tts 二重合成を起こしていた)
 - speak: false node の場合: 同じく `final_voice_text=""` で finalize して placeholder の `_streaming_placeholder=True` を残さない
 - サーバー側のストリーム中断 (504 DEADLINE_EXCEEDED 等): partial を finalize で確定し、その metadata に「言い切っていない」印 `_interrupted` を載せて Beat を閉じる。**続きは自動で打たない** (2026-08-25 まはー裁定 — 追加の推論はユーザーの一押しの後ろに置く)。旧 re-speak 経路 (`_emit_say` で別 message_id を作って続行) は撤去済み — 発言が分裂する縁もここで消えた ([archive/respeak_split_message_unification.md](../issues/archive/respeak_split_message_unification.md))
 - ユーザーの停止による中断: 同じく partial を finalize で確定し、同じ `_interrupted` の印を載せる (中断の主語は違うが「言い切っていない」事実は同じ)
+- **一文字も生まれなかった placeholder は確定せず取り下げる** (2026-09-12 追加): Beat 単位の分割で、スペルループは次のラウンドの生成の直前に新しい placeholder を開ける。その生成が例外で落ちるか空応答だと、本文の無い行だけが残る。空文字で finalize すると「本文の無い発言」が建物履歴とペルソナのログに永続し、`_streaming_placeholder` も False に倒れて孤児掃除の網からも外れる。そこで、部分文が届いていれば上と同じ `_interrupted` 付きの確定で救い、本当に空なら `withdraw_speak_placeholder` (= `withdraw_building_message_in_db` の assistant 版。誰の記憶にも入っていない行だけ消せる狭い口) で行ごと取り下げ、画面には `streaming_discard` を流して宙吊りの吹き出しを片付ける。音声の stream は最初の sub-speak で開くので、本文ゼロの回は開いておらず閉じ損ねは起きない。取り下げが断られた回だけ従来どおり確定へ落ちる (未確定の孤児を残さない方を優先)
 
 ### Phase 2-C 残テキスト送信設計の変遷 (2026-05-15 → 2026-05-16)
 
@@ -223,3 +233,4 @@ runtime._emit_speak_finalize(
 - 2026-05-15 (後半): chunk consume + sub-speak emit + spell 検出ロジックを `_consume_pipeline_stream` helper に切り出し。 `_run_spell_loop` に `pipeline_streaming_state` 引数を追加し、 spell 実行後の 2 回目以降の LLM 呼び出しも `generate_stream` + helper 経由に置き換え (= まはー指摘 「spell 後の応答が一気に出る」 問題の解消)。 finalize の remainder voice 計算を `[last_emit_pos:]` slice から voiced_text 累積方式に変更 (round 跨ぎで頑健)。 helper `_compute_pipeline_remainder_voice` 共通化
 - 2026-05-16: **残テキスト送信設計を撤廃** (= まはー指摘 「最終処理で音声生成を呼ばなければ問題起きない」)。 `_consume_pipeline_stream` が stream 終端の residual も sub-speak で flush するように変更し、 全 finalize 経路で `final_voice_text=""` 固定に。 `_compute_pipeline_remainder_voice` / `pipeline_voiced_text` / `voiced_text_added` を全削除。 voice-tts addon 側は `text_for_voice="" + is_final=True` を 「stream close 専用 signal」 として扱う経路を追加 (`speak_hook.py` 短絡条件緩和 + `playback_worker._process` 冒頭の finalize-only 判定)
 - 2026-05-16: **不変条件 2 (sub_seq 順序保証) の中継層対応**: `addon_hooks.dispatch_hook` に `order_key` 引数を追加し、 同 message_id の dispatch を per-handler で FIFO 直列化 (= Future chain 機構)。 実機で 「emit 順 1,2,3 → enqueue 順 1,3,2」 と並び替えが起きてチャンクが入れ替わる事故が発生 (= ThreadPoolExecutor の並列 pick-up が原因)。 emit 側 (`runtime_emitters.py`) の 4 dispatch_hook 呼び出しすべてに `order_key=message_id` を渡す。 単体テスト 4 件追加
+- 2026-09-13: **唱えごとの行より後ろの文も音声にする** (まはー裁定 「普通にバグなので直す」)。 `_consume_pipeline_stream` が `/spell` 行を見つけたときに以降の送出を全部止めるのをやめ、 行そのものだけを飛ばすようにした。 Beat 分割 (契約 1) で行の後ろの文が可視の本文になった時点で、 旧挙動の前提は失効していた。 従の直しとして、 音声が 1 件も作られなかった吹き出しの待ち表示を終わらせる契約 `unavailable_keys` (= この吹き出しではもう立たないメタデータ鍵の名前の配列) をアドオン ↔ 画面の間に新設した (voice-tts 側 `notify_no_audio`、 画面側 `AddonBubbleButtons.tsx` の pendingButtons)

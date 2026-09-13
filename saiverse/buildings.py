@@ -18,6 +18,7 @@ class Building:
         physical_vessel_id: Optional[str] = None,
         region_id: Optional[str] = None,
         facility_roles: Optional[list[str]] = None,
+        item_display_limit: Optional[int] = None,
     ):
         self.building_id = building_id
         self.name = name
@@ -40,4 +41,8 @@ class Building:
         # 公共施設のロールタグ (自律行動 v2 §6.1)。語彙・解決は saiverse/facility_map.py。
         # 空リスト = ロールなし (私室・通常 Building)。
         self.facility_roles: list[str] = facility_roles or []
+        # 部屋の様子に出す建物直下のアイテムの個数の上限。None = 既定の 10 個
+        # (docs/intent/room_item_display_cap.md 設計 4)。0 は有効な値
+        # (アイテムを様子に出さない部屋) なので、真偽値で潰さないこと。
+        self.item_display_limit: Optional[int] = item_display_limit
 

@@ -1142,6 +1142,9 @@ def test_a_setting_saved_in_the_middle_of_a_real_reply_reaches_only_the_next_rep
 
     runtime = SEARuntime(SimpleNamespace(
         building_histories={"b1": []}, SessionLocal=world.SessionLocal,
+        # Beat 分割 (develop b866d0b9) で発言の帰属先を在室表 (manager.occupants)
+        # から引くようになった。空なら渡した building_id がそのまま使われる。
+        occupants={},
     ))
     runtime._choose_playbook = Mock(return_value=PlaybookSchema(
         name="model_pin_probe", description="t", input_schema=[], start_node="first",

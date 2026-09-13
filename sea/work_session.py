@@ -474,7 +474,7 @@ def run_work_session(
                 LOGGER.warning("[work_session] failed to dump initial LLM I/O", exc_info=True)
 
             # ---- act→observe ループ (予算付き) ----
-            merged_text, continuation, rounds_used = _run_coro_sync(_run_spell_loop(
+            _spell_result = _run_coro_sync(_run_spell_loop(
                 text=text,
                 spell_enabled=spell_enabled,
                 llm_client=llm_client,
@@ -489,6 +489,11 @@ def run_work_session(
                 action_text=instruction_content,
                 max_rounds=budget_rounds,
             ))
+            # 作業セッションは speak=false なので、周ごとの本文 (BeatSegment) は
+            # 建物へ出さない — 生ログはループが SAIMemory へ記録済み。ここで使うのは
+            # 締めの発言とラウンド数だけ。
+            continuation = _spell_result.final_continuation
+            rounds_used = _spell_result.loop_count
 
             # 予算切れ判定: ループが予算上限に達し、かつ最終応答にまだ spell が
             # 残っている (= 続きをやりたがっていた) とき budget_exhausted。

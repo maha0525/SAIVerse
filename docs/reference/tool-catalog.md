@@ -7,7 +7,7 @@ SAIVerse に登録されている全ツールの一覧（自動生成）。概�
 作り方は [開発者ガイド: ツールの追加](../developer-guide/adding-tools.md)、
 平文から呼ぶ Spell 化は [concepts/spell.md](../concepts/spell.md) を参照。
 
-**登録ツール数**: 123（うち Spell 化: 81）
+**登録ツール数**: 125（うち Spell 化: 83）
 
 - `*` 付きの引数は必須。
 - **Spell** 列に表示名があるものは、ペルソナが平文応答から `/spell <名> ...` で呼べる。
@@ -15,6 +15,8 @@ SAIVerse に登録されている全ツールの一覧（自動生成）。概�
 | ツール名 | 説明 | 引数 | Spell |
 |---|---|---|---|
 | `addon_spell_help` | アドオンが提供する追加スペルの一覧とその使い方を返します。投稿・検索など詳細な操作を行う前に呼んでください。addon引数でアドオン名を絞り込めます（省略時は全アドオン、近い名前を渡せばファジーマッチします）。 | `addon`: string | アドオンスペル一覧 |
+| `bag_create` | 散らかった部屋を片付けるための入れ物 (Bag) を作ります。名前と説明を決めると、今いる部屋に置かれます。作った入れ物には item_move でアイテムをしまえて、閉じた入れ物の中身は部屋の様子に表示されません — 物が増えて部屋… | `name*`: string, `description`: string | 入れ物を作る |
+| `buried_items_view` | 部屋の様子に見えていないアイテムも含めて、いまいる部屋の全アイテムを新しく触った順にページでめくって見られます。入れ物 (Bag) の中に入っている物も、置き場所つきで一覧に出ます。部屋に物が増えると、様子に並ぶのは最近触った分だけに… | `page`: string | 埋もれたアイテムを見る |
 | `calculate_expression` | Evaluate arithmetic expression with ^ (power) and ! (factorial). | `expression*`: string | — |
 | `chronicle_context_down` | 指定したChronicleエントリの下流コンテンツを取得します。Lv1エントリに対して使うと、そのChronicleがまとめている生のメッセージ全件を返します。Lv2以上に対して使うと、子ChronicleエントリのURIと全文を返し… | `entry_id*`: string | Chronicle下流参照 |
 | `chronicle_context_up` | 指定したChronicleエントリの上流コンテキストを取得します。親エントリ（上位レベルの要約）の全文と、同じ親に属する兄弟エントリ全件の全文とURIを返します。周辺の状況を把握し、さらに上位や横のエントリへナビゲートするための足がか… | `entry_id*`: string | Chronicle上流参照 |
@@ -70,7 +72,7 @@ SAIVerse に登録されている全ツールの一覧（自動生成）。概�
 | `move_persona` | Move the active persona to another building. (When called in persona context, persona_id must match the active persona.) | `building_id*`: string, `persona_id`: string | — |
 | `observer_read` | Read the latest observation data from a building fixture's sensor/monitor. Returns cached values — does not trigger n… | `observer_id*`: string, `metric_name`: string | オブザーバー観測値取得（非表示） |
 | `pdf_read` | Extract and read text from a PDF document item. Specify page range to read specific pages. Requires pypdf to be insta… | `item_id*`: string, `pages`: string, `max_chars`: integer | — |
-| `pocketbook_open` | 自分の手帳を開いて読みます。手帳には「やりたい・やった」のメモ欄と、「約束」の欄があります。記憶の地図帳（memory_read など）は知っていること・あったことを引く場所で、手帳は自分のやりたいこと・やったこと・約束を書きとめる場… | `activity`: string, `before`: string, `limit`: integer | 手帳を開く |
+| `pocketbook_open` | 自分の手帳を開いて読みます。手帳には「やりたい・やった」のメモ欄と、「約束」の欄があります。記憶の地図帳（memory_read など）は知っていること・あったことを引く場所で、手帳は自分のやりたいこと・やったこと・約束を書きとめる場… | `activity`: string, `before`: string, `limit`: integer, `page`: string | 手帳を開く |
 | `pocketbook_write` | 自分の手帳に一行書きます。やりたいこと・やったことはメモ欄へ、誰かとの約束や引き受けた頼まれごとは約束の欄へ入ります（kind で選ぶと、どちらの欄に入るかは自動で決まります）。どちらか迷ったら、相手がいるなら約束です。記憶の地図帳（… | `kind*`: string, `text*`: string, `activity`: string, `counterpart`: string, `due`: string | 手帳に書く |
 | `read_url_content` | Fetch a web page URL and return its content as readable Markdown text. | `url*`: string, `max_chars`: integer | — |
 | `read_url_outline` | 指定したURLのページ内容を読み込み、短いページなら全文、長いページなら見出し階層（h1〜h4）を返します。長いページは続けて read_url_section で必要な節を深掘りしてください。閾値はデフォルト 5000 文字、環境変… | `url*`: string, `full_threshold`: integer | ページ概要 |

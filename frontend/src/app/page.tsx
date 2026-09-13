@@ -159,6 +159,11 @@ interface Message {
     _activities?: ActivityEntry[];
     // Pulse identifier — groups say + activity events from the same pulse together
     _pulse_id?: string;
+    // 生成中の吹き出しを作ったペルソナ。sender は表示名なので同名のペルソナを
+    // 見分けられない。取り消しイベント (streaming_discard) が「自分が流した
+    // 吹き出しだけ」を消すための同定に使う
+    // (docs/issues/pulse_beats_merge_into_single_record.md)。
+    _persona_id?: string;
 }
 
 interface ActivityEntry {
@@ -166,6 +171,18 @@ interface ActivityEntry {
     name: string;
     playbook?: string;
     status?: string;
+}
+
+/** その吹き出しを喋ったペルソナの ID。同定できないときは undefined。
+ *
+ * 出どころが二つあるので、ここで一本化する — 履歴とポーリング由来の吹き出しは
+ * `persona_id` を持ち、生成中およびライブの発言は `_persona_id` を持つ。
+ * ユーザーの発言・システム通知・エラーカードは「誰の発言か」を持たないので、
+ * 名乗りが無いものとして扱う (連続判定では必ず仕切り直しになる)。
+ */
+function bubbleSpeakerId(msg?: Message): string | undefined {
+    if (!msg || msg.role !== 'assistant' || msg.isError) return undefined;
+    return msg.persona_id || msg._persona_id || undefined;
 }
 
 // File attachment types for upload
@@ -354,11 +371,37 @@ export default function Home() {
         }
     }, []);
 
+    // 移動イベント (「〜が○○へ移動しました」) の行き先の部屋名リンクのクリック先。
+    // 実体は下の viewBuilding (サイドバーで部屋をクリックしたときと同じ表示切り替え)
+    // だが、あちらの定義はこの位置より後ろなので ref 経由で最新の実装を呼ぶ。
+    // markdownComponents に安定した関数を渡すためでもある (毎レンダー新しい関数を
+    // 渡すと <img> が再マウントされて再取得が走る)。
+    const viewBuildingRef = useRef<(buildingId: string) => void>(() => { });
+    const handleNavigateBuildingFromLink = useCallback(async (buildingId: string) => {
+        if (!buildingId) return;
+        // 消えた部屋・隔離中の部屋のリンクを踏んでも画面を壊さない。
+        // /api/info/details は知らない building_id に対して id:"unknown" を返すので、
+        // 切り替える前にここで弾く (弾いたときは表示を一切変えない)。
+        try {
+            const res = await fetch(`/api/info/details?building_id=${encodeURIComponent(buildingId)}`);
+            if (!res.ok) return;
+            const data = await res.json();
+            if (!data?.id || data.id === 'unknown') return;
+        } catch {
+            return;
+        }
+        viewBuildingRef.current(buildingId);
+    }, []);
+
     // Stable components map for ReactMarkdown — reconstructing this on every render
     // remounts <img> tags and re-fetches their src on every keystroke.
     const markdownComponents = useMemo<Components>(() => ({
         a: ({ href, children }) => (
-            <SaiverseLink href={href} onOpenItem={handleOpenItemFromLink}>{children as ReactNode}</SaiverseLink>
+            <SaiverseLink
+                href={href}
+                onOpenItem={handleOpenItemFromLink}
+                onNavigateBuilding={handleNavigateBuildingFromLink}
+            >{children as ReactNode}</SaiverseLink>
         ),
         img: ({ src, alt }) => {
             const resolved = typeof src === 'string' ? resolveSaiverseImageSrc(src) : src;
@@ -372,7 +415,7 @@ export default function Home() {
                 />
             );
         },
-    }), [handleOpenItemFromLink]);
+    }), [handleOpenItemFromLink, handleNavigateBuildingFromLink]);
 
     // Copy message content to clipboard
     const handleCopyMessage = useCallback(async (messageId: string, content: string) => {
@@ -1003,6 +1046,32 @@ export default function Home() {
         setMoveTrigger(prev => prev + 1);
         setIsMapModalOpen(false);
     };
+
+    // サイドバーで部屋をクリックしたときの表示切り替え。
+    // C-1 閲覧モード (intent §C): サーバ側の CURRENT_BUILDINGID は変えず、
+    // UI 上の表示建物だけ切り替える。 サーバへの move は発言時に
+    // /chat/utter が atomic に行う (= C-2)。
+    // 移動イベントの部屋名リンク (saiverse://building/<id>) からも同じ関数を呼ぶ
+    // ので、両者の挙動は定義ごと一つ。
+    const viewBuilding = (buildingId: string) => {
+        if (!buildingId) return;
+        setCurrentBuildingId(buildingId);
+        currentBuildingIdRef.current = buildingId;
+        // 建物を選んだ = その建物のログを見たい。セッションログ閲覧は解除
+        updateSessionLogPeek(false);
+        setMessages([]);
+        setIsHistoryLoaded(false);
+        fetchHistory(undefined, buildingId);
+        fetchBuildingInfo(buildingId);
+        setMoveTrigger(prev => prev + 1);
+        // チャット閲覧目的の遷移なのでマップは閉じる
+        setIsMapModalOpen(false);
+    };
+    // リンクのクリックハンドラ (上の handleNavigateBuildingFromLink) に最新の
+    // 実装を渡す。commit 後に差し替わるので、クリック時には必ず最新が入っている。
+    useEffect(() => {
+        viewBuildingRef.current = viewBuilding;
+    });
 
     // Esc キーでマップモーダルを閉じる
     useEffect(() => {
@@ -1839,6 +1908,35 @@ export default function Home() {
                                 `${event.persona_id || ''}/${event.pulse_id || ''}`);
                         }
 
+                        // 吹き出しの部屋フィルタ
+                        // (docs/issues/pulse_beats_merge_into_single_record.md 契約 5)。
+                        // Pulse の途中でペルソナが部屋を移ると、Beat ごとに発言の
+                        // 帰属先の部屋が変わる。発言を運ぶイベントは自分が生まれた
+                        // 部屋を building_id で名乗るので、いま画面に映している部屋と
+                        // 違うイベントでは吹き出しを作らない (見ていない部屋の発言が
+                        // 今の部屋の画面に流れない)。
+                        // - 比較相手は currentBuildingIdRef = 「表示中の部屋」。
+                        //   閲覧モードではサーバ上の現在地 (serverCurrentBuildingIdRef)
+                        //   と乖離するが、画面に出すかの判断は表示中の部屋が正しい。
+                        // - building_id を名乗らないイベント (旧形式・移行期・他ノード
+                        //   由来) は従来どおり素通しする。表示中の部屋がまだ分からない
+                        //   起動直後も同じく素通し。
+                        // - 簿記 (replied / outcome / usage) はフィルタしない。抑止する
+                        //   のは吹き出しの生成・更新だけ。
+                        const eventBuildingId: string | null =
+                            typeof event.building_id === 'string' && event.building_id
+                                ? event.building_id : null;
+                        const isOtherBuildingEvent = !!eventBuildingId
+                            && !!currentBuildingIdRef.current
+                            && eventBuildingId !== currentBuildingIdRef.current;
+                        // その吹き出しの持ち主。同じ部屋で二人が同時に喋るときの
+                        // 取り消しの同定 (下の streaming_discard) と、確定した
+                        // 吹き出しに持ち主を記録するのに使う。後者は、同じ
+                        // ペルソナの吹き出しが続く間だけ顔と名前を省く判定の材料。
+                        const evtPersonaId: string | undefined =
+                            typeof event.persona_id === 'string' && event.persona_id
+                                ? event.persona_id : undefined;
+
                         if (event.type === 'status') {
                             setLoadingStatus(event.content === 'processing' ? 'Processing...' : event.content);
                         } else if (event.type === 'think') {
@@ -1864,12 +1962,15 @@ export default function Home() {
                                 return activities;
                             };
                             setMessages(prev => {
+                                // 別の部屋の Beat の活動記録 — この部屋の吹き出しには触らない
+                                if (isOtherBuildingEvent) return prev;
                                 const last = prev[prev.length - 1];
                                 if (last && last.role === 'assistant' && last._streaming) {
                                     return [...prev.slice(0, -1), {
                                         ...last,
                                         _activities: mergeActivity(last._activities),
                                         ...(evtPulseId && !last._pulse_id && { _pulse_id: evtPulseId }),
+                                        ...(evtPersonaId && !last._persona_id && { _persona_id: evtPersonaId }),
                                     }];
                                 }
                                 // Finalized message with the same pulse_id: append to its activity_trace
@@ -1891,6 +1992,7 @@ export default function Home() {
                                     avatar: actAvatarUrl,
                                     _activities: [entry], timestamp: new Date().toISOString(),
                                     ...(evtPulseId && { _pulse_id: evtPulseId }),
+                                    ...(evtPersonaId && { _persona_id: evtPersonaId }),
                                 }];
                             });
                             setLoadingStatus(event.status === 'started' ? `Running ${event.name}...` : event.name);
@@ -1905,15 +2007,22 @@ export default function Home() {
                             if (recallBody) {
                                 const arAvatarUrl = event.persona_avatar || (event.persona_id ? `/api/chat/persona/${event.persona_id}/avatar` : undefined);
                                 setMessages(prev => {
+                                    // 別の部屋の Beat の想起 — この部屋の吹き出しには触らない
+                                    if (isOtherBuildingEvent) return prev;
                                     const last = prev[prev.length - 1];
                                     if (last && last.role === 'assistant' && last._streaming) {
-                                        return [...prev.slice(0, -1), { ...last, auto_recall: recallBody }];
+                                        return [...prev.slice(0, -1), {
+                                            ...last,
+                                            auto_recall: recallBody,
+                                            ...(evtPersonaId && !last._persona_id && { _persona_id: evtPersonaId }),
+                                        }];
                                     }
                                     return [...prev, {
                                         role: 'assistant' as const, content: '', _streaming: true,
                                         sender: event.persona_name || undefined,
                                         avatar: arAvatarUrl,
                                         auto_recall: recallBody, timestamp: new Date().toISOString(),
+                                        ...(evtPersonaId && { _persona_id: evtPersonaId }),
                                     }];
                                 });
                             }
@@ -1922,12 +2031,15 @@ export default function Home() {
                             const avatarUrl = event.persona_avatar || (event.persona_id ? `/api/chat/persona/${event.persona_id}/avatar` : undefined);
                             const evtPulseId: string | undefined = event.pulse_id || undefined;
                             setMessages(prev => {
+                                // 別の部屋で進んでいる Beat の思考は、この部屋には出さない
+                                if (isOtherBuildingEvent) return prev;
                                 const last = prev[prev.length - 1];
                                 if (last && last.role === 'assistant' && last._streaming) {
                                     return [...prev.slice(0, -1), {
                                         ...last,
                                         _streamingThinking: (last._streamingThinking || '') + event.content,
                                         ...(evtPulseId && !last._pulse_id && { _pulse_id: evtPulseId }),
+                                        ...(evtPersonaId && !last._persona_id && { _persona_id: evtPersonaId }),
                                     }];
                                 } else {
                                     return [...prev, {
@@ -1939,6 +2051,7 @@ export default function Home() {
                                         _streaming: true,
                                         _streamingThinking: event.content,
                                         ...(evtPulseId && { _pulse_id: evtPulseId }),
+                                        ...(evtPersonaId && { _persona_id: evtPersonaId }),
                                     }];
                                 }
                             });
@@ -1949,12 +2062,16 @@ export default function Home() {
                             const avatarUrl = event.persona_avatar || (event.persona_id ? `/api/chat/persona/${event.persona_id}/avatar` : undefined);
                             const evtPulseId: string | undefined = event.pulse_id || undefined;
                             setMessages(prev => {
+                                // 別の部屋で進んでいる Beat の本文は、この部屋には出さない
+                                // (replied の簿記は上で済ませてある)
+                                if (isOtherBuildingEvent) return prev;
                                 const last = prev[prev.length - 1];
                                 if (last && last.role === 'assistant' && last._streaming) {
                                     return [...prev.slice(0, -1), {
                                         ...last,
                                         content: last.content + event.content,
                                         ...(evtPulseId && !last._pulse_id && { _pulse_id: evtPulseId }),
+                                        ...(evtPersonaId && !last._persona_id && { _persona_id: evtPersonaId }),
                                     }];
                                 } else {
                                     return [...prev, {
@@ -1964,19 +2081,34 @@ export default function Home() {
                                         avatar: avatarUrl,
                                         timestamp: new Date().toISOString(),
                                         _streaming: true,
-                                        ...(evtPulseId && { _pulse_id: evtPulseId })
+                                        ...(evtPulseId && { _pulse_id: evtPulseId }),
+                                        ...(evtPersonaId && { _persona_id: evtPersonaId }),
                                     }];
                                 }
                             });
                             setLoadingStatus('Streaming...');
                         } else if (event.type === 'streaming_discard') {
                             // Tool call detected after streaming — discard streamed text
+                            const evtPulseId: string | undefined = event.pulse_id || undefined;
                             setMessages(prev => {
+                                // 別の部屋の Beat の取り消しで、この部屋の下書きの
+                                // 吹き出しを消さない
+                                if (isOtherBuildingEvent) return prev;
                                 const last = prev[prev.length - 1];
-                                if (last && last._streaming) {
-                                    return prev.slice(0, -1);
-                                }
-                                return prev;
+                                if (!last || !last._streaming) return prev;
+                                // 消してよいのは**この取り消しの出どころが流した**
+                                // 吹き出しだけ。同じ部屋で二人が同時に喋ると末尾は
+                                // 別のペルソナの生成中の吹き出しでありうるし、
+                                // Beat ごとに取り消しが飛ぶようになって重なる機会も
+                                // Beat の数だけ増えた
+                                // (docs/issues/pulse_beats_merge_into_single_record.md)。
+                                // 名乗りが欠けている側は判定材料が無いので素通しする
+                                // (旧形式のイベント・他ノード由来の吹き出し)。
+                                if (evtPersonaId && last._persona_id
+                                    && evtPersonaId !== last._persona_id) return prev;
+                                if (evtPulseId && last._pulse_id
+                                    && evtPulseId !== last._pulse_id) return prev;
+                                return prev.slice(0, -1);
                             });
                             setLoadingStatus('Thinking...');
                         } else if (event.type === 'streaming_complete') {
@@ -2006,6 +2138,9 @@ export default function Home() {
                             }
                             // Mark streaming message as complete, finalize reasoning, activities, and images
                             setMessages(prev => {
+                                // 別の部屋の Beat の確定で、この部屋の下書きの
+                                // 吹き出しを確定させない
+                                if (isOtherBuildingEvent) return prev;
                                 const last = prev[prev.length - 1];
                                 if (last && last._streaming) {
                                     const { _streaming, _streamingThinking, _activities, ...rest } = last;
@@ -2070,7 +2205,19 @@ export default function Home() {
                             const sayReasoning = event.reasoning || undefined;
                             const sayActivityTrace = event.activity_trace || undefined;
                             const sayPulseId: string | undefined = event.pulse_id || undefined;
+                            // 「ふと浮かんだ記憶」は、その Beat の記録に載って届く。
+                            // ライブの auto_recall イベントで貼った内容があっても、
+                            // Beat の切れ目の streaming_discard が吹き出しごと捨てる
+                            // ので、確定のこのイベントが唯一の届き先になる回がある
+                            // (docs/issues/pulse_beats_merge_into_single_record.md 実機 4)。
+                            // 両方来た場合は確定時の内容で上書きする。
+                            const sayAutoRecall: string | undefined =
+                                typeof sayMeta?.auto_recall === 'string' && sayMeta.auto_recall.trim()
+                                    ? sayMeta.auto_recall : undefined;
                             setMessages(prev => {
+                                // 別の部屋の Beat の発言は、この部屋には出さない
+                                // (replied の簿記は上で済ませてある)
+                                if (isOtherBuildingEvent) return prev;
                                 // Check if last message already has this content (from streaming completion)
                                 const last = prev[prev.length - 1];
                                 if (last && last.role === 'assistant' && !last._streaming
@@ -2084,7 +2231,9 @@ export default function Home() {
                                         ...(sayUsageTotal && { llm_usage_total: sayUsageTotal }),
                                         ...(sayReasoning && { reasoning: sayReasoning }),
                                         ...(sayActivityTrace && { activity_trace: sayActivityTrace }),
+                                        ...(sayAutoRecall && { auto_recall: sayAutoRecall }),
                                         ...(sayPulseId && { _pulse_id: sayPulseId }),
+                                        ...(evtPersonaId && { persona_id: evtPersonaId }),
                                     }];
                                 }
                                 return [...prev, {
@@ -2098,7 +2247,12 @@ export default function Home() {
                                     ...(sayUsageTotal && { llm_usage_total: sayUsageTotal }),
                                     ...(sayReasoning && { reasoning: sayReasoning }),
                                     ...(sayActivityTrace && { activity_trace: sayActivityTrace }),
+                                    ...(sayAutoRecall && { auto_recall: sayAutoRecall }),
                                     ...(sayPulseId && { _pulse_id: sayPulseId }),
+                                    // 誰の発言かを吹き出し自身に持たせる。連続する
+                                    // Beat の吹き出しで顔と名前を省く判定 (下の
+                                    // messages.map) と、アドオンのボタンが使う。
+                                    ...(evtPersonaId && { persona_id: evtPersonaId }),
                                 }];
                             });
                             setLoadingStatus('Thinking...');
@@ -3000,20 +3154,7 @@ export default function Home() {
                 serverMoveTrigger={moveTrigger}
                 onMove={(buildingId?: string) => {
                     if (!buildingId) return;
-                    // C-1 閲覧モード: サーバ側の CURRENT_BUILDINGID は変えず、
-                    // UI 上の表示建物だけ切り替える。 サーバへの move は
-                    // 発言時に /chat/utter が atomic に行う (= C-2)。
-                    setCurrentBuildingId(buildingId);
-                    currentBuildingIdRef.current = buildingId;
-                    // 建物を選んだ = その建物のログを見たい。セッションログ閲覧は解除
-                    updateSessionLogPeek(false);
-                    setMessages([]);
-                    setIsHistoryLoaded(false);
-                    fetchHistory(undefined, buildingId);
-                    fetchBuildingInfo(buildingId);
-                    setMoveTrigger(prev => prev + 1);
-                    // Sidebar からの遷移はチャット閲覧目的なのでマップは閉じる
-                    setIsMapModalOpen(false);
+                    viewBuilding(buildingId);
                 }}
                 isOpen={isLeftOpen}
                 onOpen={() => setIsLeftOpen(true)}
@@ -3240,17 +3381,29 @@ export default function Home() {
                                 </div>
                             );
                         }
+                        // 同じペルソナの吹き出しが続く間は、2 個目以降で顔と名前を省く。
+                        // Pulse が Beat ごとの吹き出しに割れるようになって、一人の
+                        // ひと続きの発言に顔と名前が何度も並ぶようになった
+                        // (docs/issues/pulse_beats_merge_into_single_record.md 実機 1)。
+                        // 間に別の話者・システム通知・ユーザーの発言・エラーが挟まると
+                        // 同定が一致しないので、自然に仕切り直して顔と名前が戻る。
+                        // どちらかの持ち主が分からない吹き出しでは省略しない。
+                        const speakerId = bubbleSpeakerId(msg);
+                        const continuesSamePersona = !!speakerId
+                            && speakerId === bubbleSpeakerId(idx > 0 ? messages[idx - 1] : undefined);
                         return (
-                        <div key={msg.id || idx} className={`${styles.message} ${styles[msg.role]}`}>
+                        <div key={msg.id || idx} className={`${styles.message} ${styles[msg.role]} ${continuesSamePersona ? styles.continuedBubble : ''}`}>
                             <div className={`${styles.card} ${msg.isError ? styles.errorCard : ''} ${msg.isError && msg.errorCode ? styles[`error_${msg.errorCode}`] : ''}`}>
-                                <div className={styles.cardHeader}>
-                                    <img
-                                        src={msg.avatar || (msg.role === 'user' ? '/api/static/builtin_icons/user.png' : '/api/static/builtin_icons/host.png')}
-                                        alt="avatar"
-                                        className={styles.avatar}
-                                    />
-                                    <span className={styles.sender}>{msg.sender || (msg.role === 'user' ? 'You' : 'Assistant')}</span>
-                                </div>
+                                {!continuesSamePersona && (
+                                    <div className={styles.cardHeader}>
+                                        <img
+                                            src={msg.avatar || (msg.role === 'user' ? '/api/static/builtin_icons/user.png' : '/api/static/builtin_icons/host.png')}
+                                            alt="avatar"
+                                            className={styles.avatar}
+                                        />
+                                        <span className={styles.sender}>{msg.sender || (msg.role === 'user' ? 'You' : 'Assistant')}</span>
+                                    </div>
+                                )}
                                 <div className={styles.cardBody}>
                                     {msg.images && msg.images.length > 0 && (
                                         <div className={styles.messageImages}>

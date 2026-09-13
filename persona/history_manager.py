@@ -1,4 +1,5 @@
 import copy
+import html
 import json
 import logging
 from pathlib import Path
@@ -343,6 +344,47 @@ class HistoryManager:
         finally:
             db.close()
 
+    def withdraw_building_message(
+        self,
+        building_id: str,
+        message_id: str,
+        *,
+        expected_role: str = "assistant",
+    ) -> Tuple[bool, str]:
+        """まだ誰の記憶にも入っていない自分の行を、建物の記録から取り下げる。
+
+        使い道は一つ — **本文が一文字も入らなかった下書き行の撤収**。空のまま
+        確定すると、本文の無い発言が建物の記録とペルソナのログに永続し、
+        下書きの印も倒れるので孤児掃除の網からも外れる
+        (docs/issues/pulse_beats_merge_into_single_record.md の H-1)。
+
+        条件は ``withdraw_building_message_in_db`` の狭い口そのまま — 役が
+        一致し、``ingested_by`` が空 (誰も記憶へ転記していない) 行だけ消える。
+        建物履歴は DB が単一の真実なので (Phase 2+3 以降、``building_histories``
+        の in-memory dict は廃止)、ここで消せばどの読み手からも消える。
+
+        Returns: ``(取り下げたか, 理由コード)``。理由コードは DB 層のものを
+        そのまま返す (``withdrawn`` / ``not_found`` / ``already_heard`` /
+        ``wrong_role`` / ``unavailable``)。
+        """
+        from database.building_messages import withdraw_building_message_in_db
+        withdrawn, reason, _content = withdraw_building_message_in_db(
+            self._db_session_factory, building_id, str(message_id),
+            expected_role=expected_role,
+        )
+        if withdrawn:
+            LOGGER.info(
+                "withdraw_building_message: dropped the empty draft row "
+                "(building=%s msg=%s)", building_id, message_id,
+            )
+        else:
+            LOGGER.warning(
+                "withdraw_building_message: could not drop the draft row "
+                "(building=%s msg=%s reason=%s)",
+                building_id, message_id, reason,
+            )
+        return withdrawn, reason
+
     def get_recent_history(
         self,
         max_chars: int,
@@ -640,15 +682,21 @@ class HistoryManager:
         action = event.get("action", "")
         from_name = event.get("from_building_name") or "別の場所"
         to_name = event.get("to_building_name") or "別の場所"
+        # 埋める値はどれも外から来た名前 (部屋名・persona id) で、「<」を含めば
+        # note-box の HTML が壊れる。組み立て元の退出・入室メッセージ
+        # (saiverse/occupancy_manager.py) と同じくエスケープしてから埋める。
+        _entity_attr = html.escape(str(self.persona_id), quote=True)
+        _from_html = html.escape(str(from_name))
+        _to_html = html.escape(str(to_name))
         if action == "enter":
             new_content = (
-                f'<div class="note-box" data-entity-id="{self.persona_id}">'
-                f'🚶 自分:<br><b>{from_name}から{to_name}へ入室した</b></div>'
+                f'<div class="note-box" data-entity-id="{_entity_attr}">'
+                f'🚶 自分:<br><b>{_from_html}から{_to_html}へ入室した</b></div>'
             )
         elif action == "leave":
             new_content = (
-                f'<div class="note-box" data-entity-id="{self.persona_id}">'
-                f'🚶 自分:<br><b>{from_name}から{to_name}へ移動した</b></div>'
+                f'<div class="note-box" data-entity-id="{_entity_attr}">'
+                f'🚶 自分:<br><b>{_from_html}から{_to_html}へ移動した</b></div>'
             )
         else:
             return msg

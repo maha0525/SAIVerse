@@ -1,0 +1,267 @@
+/* ダーク基調 + 末尾の [data-theme="light"] で明るいテーマを上書きする、
+   この repo のモーダル共通の書き方 (BuildingSettingsModal / ItemModal と同じ)。 */
+
+.modal {
+    background: #1f2937;
+    color: #f3f4f6;
+    width: 100%;
+    max-width: 480px;
+    border-radius: 12px;
+    border: 1px solid #374151;
+    box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    padding: 1rem 1.25rem;
+    background: #111827;
+    border-bottom: 1px solid #374151;
+}
+
+.header h2 {
+    margin: 0;
+    font-size: 1.1rem;
+    font-weight: 600;
+    color: #f9fafb;
+}
+
+.closeBtn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: none;
+    border: none;
+    color: #9ca3af;
+    cursor: pointer;
+    padding: 0.25rem;
+    border-radius: 4px;
+    transition: color 0.2s, background 0.2s;
+}
+
+.closeBtn:hover {
+    color: #f9fafb;
+    background: #374151;
+}
+
+.content {
+    padding: 1.25rem;
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+}
+
+.placeLine {
+    font-size: 0.85rem;
+    color: #9ca3af;
+}
+
+.error {
+    background: #7f1d1d;
+    color: #fca5a5;
+    padding: 0.7rem 0.9rem;
+    border-radius: 6px;
+    font-size: 0.85rem;
+    line-height: 1.5;
+}
+
+.field {
+    display: flex;
+    flex-direction: column;
+    gap: 0.375rem;
+}
+
+.field label {
+    font-size: 0.85rem;
+    font-weight: 500;
+    color: #d1d5db;
+}
+
+.field input[type="text"],
+.field select,
+.field textarea {
+    width: 100%;
+    padding: 0.6rem 0.75rem;
+    background: #111827;
+    border: 1px solid #374151;
+    border-radius: 6px;
+    color: #f9fafb;
+    font-size: 0.875rem;
+    font-family: inherit;
+    transition: border-color 0.2s;
+}
+
+.field input[type="text"]:focus,
+.field select:focus,
+.field textarea:focus {
+    outline: none;
+    border-color: #3b82f6;
+}
+
+.field input:disabled,
+.field select:disabled,
+.field textarea:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
+.field textarea {
+    resize: vertical;
+    min-height: 72px;
+}
+
+.hint {
+    font-size: 0.75rem;
+    color: #9ca3af;
+    line-height: 1.5;
+}
+
+.note {
+    font-size: 0.75rem;
+    color: #9ca3af;
+    line-height: 1.5;
+    background: #111827;
+    border: 1px solid #374151;
+    border-radius: 6px;
+    padding: 0.6rem 0.75rem;
+}
+
+.actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 0.5rem;
+    padding-top: 0.75rem;
+    border-top: 1px solid #374151;
+}
+
+.cancelBtn,
+.createBtn {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.6rem 1.1rem;
+    border: none;
+    border-radius: 6px;
+    font-size: 0.875rem;
+    font-weight: 500;
+    font-family: inherit;
+    cursor: pointer;
+    transition: background 0.2s, color 0.2s;
+}
+
+.cancelBtn {
+    background: #374151;
+    color: #d1d5db;
+}
+
+.cancelBtn:hover:not(:disabled) {
+    background: #4b5563;
+    color: #f9fafb;
+}
+
+.createBtn {
+    background: #3b82f6;
+    color: #ffffff;
+}
+
+.createBtn:hover:not(:disabled) {
+    background: #2563eb;
+}
+
+.cancelBtn:disabled,
+.createBtn:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
+.spinner {
+    animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+}
+
+/* ── Light Mode Overrides ── */
+:global([data-theme="light"]) .modal {
+    background: #ffffff;
+    color: #1f2937;
+    border-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .header {
+    background: #f8fafc;
+    border-bottom-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .header h2 {
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .closeBtn {
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .closeBtn:hover {
+    color: #1f2937;
+    background: #e2e8f0;
+}
+
+:global([data-theme="light"]) .placeLine {
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .error {
+    background: #fef2f2;
+    color: #dc2626;
+}
+
+:global([data-theme="light"]) .field label {
+    color: #475569;
+}
+
+:global([data-theme="light"]) .field input[type="text"],
+:global([data-theme="light"]) .field select,
+:global([data-theme="light"]) .field textarea {
+    background: #ffffff;
+    border-color: #cbd5e1;
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .hint {
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .note {
+    background: #f8fafc;
+    border-color: #e2e8f0;
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .actions {
+    border-top-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .cancelBtn {
+    background: #f1f5f9;
+    color: #475569;
+}
+
+:global([data-theme="light"]) .cancelBtn:hover:not(:disabled) {
+    background: #e2e8f0;
+    color: #1f2937;
+}
+
+/* Mobile */
+@media (max-width: 640px) {
+    .modal {
+        max-width: 100%;
+        border-radius: 10px;
+    }
+}

@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 from database.models import (
+    Building as BuildingModel,
     Item as ItemModel,
     ItemLocation as ItemLocationModel,
 )
@@ -20,6 +21,15 @@ if TYPE_CHECKING:
     from manager.state import CoreState
 
 LOGGER = logging.getLogger(__name__)
+
+
+class MissingBuildingError(RuntimeError):
+    """置き場所に指定された Building が DB に無い (作成を断る)。
+
+    アイテム作成の各経路は DB 例外を「データベース登録に失敗しました」で包むが、
+    これは登録の失敗ではなく**書く前の拒否**なので、その包みを通さずにそのまま
+    ペルソナとユーザーへ届ける (何が起きたのかが文言で分かるように)。
+    """
 
 
 def item_db_filter(key):
@@ -782,13 +792,22 @@ class ItemService:
         return open_items
 
     def get_all_items_in_building(self, building_id: str) -> List[Dict]:
-        """Get all items in a building (regardless of open state), sorted by slot number."""
+        """Get all items in a building (regardless of open state), sorted by slot number.
+
+        ``location_updated_at`` は置き場所の更新時刻 (ItemLocation.UPDATED_AT —
+        設置・移動・拾得で進む)。部屋の様子の表示上限が「最近触られた順」を
+        決めるのに、アイテム自身の更新時刻と**新しい方**を採るため
+        (docs/intent/room_item_display_cap.md 設計 1)。片方だけだと Bag から
+        出して部屋に置いた物 (場所だけ動いた物) が埋もれたままになる。
+        """
         all_items = []
         for item_id in self.items_by_building.get(building_id, []):
             item = self.items.get(item_id)
             if item:
                 entry = dict(item)
-                entry["slot_number"] = self.item_locations.get(item_id, {}).get("slot_number")
+                location = self.item_locations.get(item_id, {})
+                entry["slot_number"] = location.get("slot_number")
+                entry["location_updated_at"] = location.get("updated_at")
                 all_items.append(entry)
         all_items.sort(key=lambda x: (x.get("slot_number") is None, x.get("slot_number") or 0))
         return all_items
@@ -815,6 +834,15 @@ class ItemService:
         if not building_id:
             raise RuntimeError("現在地が不明なため、文書を作成できません。")
 
+        # 置き場所の実在は本文ファイルを保存する前に確かめる — 後で確かめる形だと、
+        # 拒否のたびにどの Item からも辿れない本文ファイルがディスクに残る
+        # (書き込みトランザクション内の検査は従来どおり別途行う)。
+        db = self.manager.SessionLocal()
+        try:
+            self._require_building(db, building_id, "文書")
+        finally:
+            db.close()
+
         from saiverse.media_utils import store_document_text
         try:
             metadata, file_path = store_document_text(content, source="tool:document_create")
@@ -831,6 +859,8 @@ class ItemService:
 
         db = self.manager.SessionLocal()
         try:
+            # 置き場所を書く前に、その部屋が今も在ることを同じセッションで確かめる。
+            self._require_building(db, building_id, "文書")
             relative_path = str(file_path.relative_to(self.manager.saiverse_home))
             initial_state = {"is_open": True}
             item_row = ItemModel(
@@ -857,6 +887,9 @@ class ItemService:
             )
             db.add(location_row)
             db.commit()
+        except MissingBuildingError:
+            db.rollback()
+            raise  # 書く前の拒否 — 「登録に失敗」で包まずそのまま伝える
         except Exception as exc:
             db.rollback()
             raise RuntimeError(f"データベース登録に失敗しました: {exc}") from exc
@@ -903,6 +936,109 @@ class ItemService:
         item_ref = f"item:{short_id}" if short_id is not None else item_id
         return f"文書「{name}」を作成しました。アイテムID: {item_ref}"
 
+    def create_bag_item(
+        self, persona_id: str, name: str, description: str,
+        source_context: Optional[str] = None,
+    ) -> str:
+        """Create a new bag item and place it in the current building.
+
+        片付けの道具 (docs/intent/room_item_display_cap.md 設計 5)。Bag は既に
+        「他の物を入れられるアイテム」として世界に在り、物を移す口 (item_move) も
+        あるのに、**作る手段だけがペルソナに無かった** — ここがその口。
+
+        作った Bag は**閉じた状態** (``is_open=False``) で置く。閉じた Bag の
+        中身は部屋の様子に出ないので、物を入れれば部屋が片付く。開いた Bag に
+        入れても中身は全部見えたままで、片付けにならない。
+        """
+        persona = self.manager.personas.get(persona_id)
+        if not persona or getattr(persona, "is_proxy", False):
+            raise RuntimeError("このペルソナでは入れ物を作成できません。")
+
+        building_id = persona.current_building_id
+        if not building_id:
+            raise RuntimeError("現在地が不明なため、入れ物を作成できません。")
+
+        item_id = str(uuid.uuid4())
+        timestamp = datetime.utcnow()
+        initial_state = {"is_open": False}
+
+        db = self.manager.SessionLocal()
+        try:
+            # 置き場所を書く前に、その部屋が今も在ることを同じセッションで確かめる。
+            self._require_building(db, building_id, "入れ物")
+            item_row = ItemModel(
+                ITEM_ID=item_id,
+                NAME=name,
+                TYPE="bag",
+                DESCRIPTION=description,
+                STATE_JSON=json.dumps(initial_state),
+                CREATOR_ID=persona_id,
+                SOURCE_CONTEXT=source_context,
+                CREATED_AT=timestamp,
+                UPDATED_AT=timestamp,
+            )
+            db.add(item_row)
+
+            slot_num = self._assign_slot(db, "building", building_id)
+            location_row = ItemLocationModel(
+                ITEM_ID=item_id,
+                OWNER_KIND="building",
+                OWNER_ID=building_id,
+                SLOT_NUMBER=slot_num,
+                UPDATED_AT=timestamp,
+            )
+            db.add(location_row)
+            db.commit()
+        except MissingBuildingError:
+            db.rollback()
+            raise  # 書く前の拒否 — 「登録に失敗」で包まずそのまま伝える
+        except Exception as exc:
+            db.rollback()
+            raise RuntimeError(f"データベース登録に失敗しました: {exc}") from exc
+        finally:
+            db.close()
+
+        self.items[item_id] = {
+            "item_id": item_id,
+            "short_id": self._short_id_of(item_id),
+            "name": name,
+            "type": "bag",
+            "description": description,
+            "file_path": None,
+            "state": dict(initial_state),
+            "creator_id": persona_id,
+            "source_context": source_context,
+            "created_at": timestamp,
+            "updated_at": timestamp,
+        }
+        self.item_locations[item_id] = {
+            "owner_kind": "building",
+            "owner_id": building_id,
+            "updated_at": timestamp,
+            "location_id": None,
+            "slot_number": slot_num,
+        }
+        self.items_by_building[building_id].append(item_id)
+        self.refresh_building_system_instruction(building_id)
+        self._sync_to_state()
+
+        building_name = self.manager.building_map.get(building_id).name if building_id in self.manager.building_map else building_id
+        actor_msg = f"「{name}」という入れ物を作り、{building_name}に置いた。"
+        self.manager.record_persona_event(persona_id, actor_msg)
+
+        note = (
+            '<div class="note-box">🧺 Bag Created:<br>'
+            f'<b>{persona.persona_name}が「{name}」を作成しました（{building_name}）。</b></div>'
+        )
+        self.manager._append_building_history_note(building_id, note)
+
+        # 返す参照は世界がペルソナに見せているのと同じ ``item:N`` 語彙に揃える
+        # (create_document_item と同じ理由 — 生 UUID を返すと撃ち返された参照が
+        # 解決できない)。
+        short_id = self.items[item_id].get("short_id")
+        item_ref = f"item:{short_id}" if short_id is not None else item_id
+        return f"入れ物「{name}」を作りました。アイテムID: {item_ref}"
+
     def create_picture_item(
         self, persona_id: str, name: str, description: str, file_path: str,
         building_id: Optional[str] = None, source_context: Optional[str] = None,
@@ -931,6 +1067,8 @@ class ItemService:
 
         db = self.manager.SessionLocal()
         try:
+            # 置き場所を書く前に、その部屋が今も在ることを同じセッションで確かめる。
+            self._require_building(db, building_id, "画像")
             item_row = ItemModel(
                 ITEM_ID=item_id,
                 NAME=name,
@@ -954,6 +1092,9 @@ class ItemService:
             )
             db.add(location_row)
             db.commit()
+        except MissingBuildingError:
+            db.rollback()
+            raise  # 書く前の拒否 — 「登録に失敗」で包まずそのまま伝える
         except Exception as exc:
             db.rollback()
             raise RuntimeError(f"データベース登録に失敗しました: {exc}") from exc
@@ -1321,7 +1462,12 @@ class ItemService:
             if not item:
                 continue
             entry = dict(item)
-            entry["slot_number"] = self.item_locations.get(item_id, {}).get("slot_number")
+            location = self.item_locations.get(item_id, {})
+            entry["slot_number"] = location.get("slot_number")
+            # 入れ物の中身の描画にも「最近触られた順」の上限があるので、部屋直下と
+            # 同じ軸 (置き場所の更新時刻) をここでも載せる
+            # (docs/intent/room_item_display_cap.md 設計 1、2026-09-11 第三回裁定)。
+            entry["location_updated_at"] = location.get("updated_at")
             item_type = (item.get("type") or "").lower()
             if item_type == "bag":
                 entry["_children"] = self.get_bag_contents_recursive(
@@ -1332,6 +1478,31 @@ class ItemService:
             result.append(entry)
         result.sort(key=lambda x: (x.get("slot_number") is None, x.get("slot_number") or 0))
         return result
+
+    def _require_building(self, db, building_id: str, what: str) -> None:
+        """置き場所に書こうとしている Building が実在するか、書く前に確かめる。
+
+        ``db`` は**これから書き込むのと同じセッション**を渡す — 別のセッションで
+        先に確かめると、確認と書き込みの間に部屋が消えた形をすり抜ける。
+
+        ペルソナの現在地 (``persona.current_building_id``) は、部屋が消された後
+        (削除・City の作り直し) もインメモリに残ることがある。その値をそのまま
+        ``ItemLocation.OWNER_ID`` に書くと、**どの部屋にも属さないアイテム**が
+        静かに生まれる: 部屋の様子にも「埋もれたアイテムを見る」にも出ず、
+        ユーザー画面の一覧からも辿れないのに DB には在る、という姿になる。
+        書いてから気づける道が無いので、書く前に分かる文言で断る。
+
+        Raises:
+            MissingBuildingError: その Building が DB に無いとき。
+        """
+        exists = db.query(BuildingModel.BUILDINGID).filter(
+            BuildingModel.BUILDINGID == building_id,
+        ).first()
+        if exists is None:
+            raise MissingBuildingError(
+                f"現在地の建物 '{building_id}' が見つからないため、"
+                f"{what}を作成できません。"
+            )
 
     def _assign_slot(self, db, owner_kind: str, owner_id: str) -> int:
         """コンテナ内の最小空きスロット番号を返す（DB参照）。"""

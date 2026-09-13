@@ -39,6 +39,29 @@ from scripts.import_playbook import infer_scope_from_path
 from builtin_data.tools.save_playbook import save_playbook
 
 
+class _Unset:
+    """「この項目は送られてこなかった」を表す印 (値の None とは別物)。
+
+    Building の更新は複数の画面から同じ 1 本の経路へ来る。新しい設定を
+    知らない画面が項目ごと送らないのと、知っている画面が「空欄にした」と
+    して null を送るのは意味が違う — 前者は触らない、後者は上書きを外す。
+    既定引数を None にするとこの二つが潰れて、古い画面で保存するたびに
+    新しい設定が黙って消える。
+    """
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:  # pragma: no cover - 診断表示のみ
+        return "UNSET"
+
+    def __bool__(self) -> bool:
+        return False
+
+
+#: 「送られてこなかった」の唯一の印 (この値との同一性で判定する)。
+UNSET = _Unset()
+
+
 class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
     """Administrative operations for world editing and CRUD."""
 
@@ -517,7 +540,30 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
         interval: int,
         image_path: Optional[str] = None,
         extra_prompt_files: Optional[List[str]] = None,
+        item_display_limit: Any = UNSET,
     ) -> str:
+        """Building の設定を更新する。
+
+        ``item_display_limit`` は部屋の様子に出す建物直下のアイテムの個数の
+        上限 (docs/intent/room_item_display_cap.md 設計 4)。:data:`UNSET` =
+        送られてこなかったので触らない / None = 上書きを外して既定に戻す /
+        0 以上の整数 = その個数。負数はここでも拒否する (画面を通らない
+        呼び出しもあるので、入口の検査だけに任せない)。
+        """
+        if item_display_limit is not UNSET:
+            if item_display_limit is not None:
+                try:
+                    item_display_limit = int(item_display_limit)
+                except (TypeError, ValueError):
+                    return (
+                        "Error: 部屋の様子に表示するアイテム数には数を入れて"
+                        "ください（空欄で既定の 10 個）。"
+                    )
+                if item_display_limit < 0:
+                    return (
+                        "Error: 部屋の様子に表示するアイテム数には 0 以上の数を"
+                        "入れてください（空欄で既定の 10 個）。"
+                    )
         db = self.SessionLocal()
         try:
             building = db.query(BuildingModel).filter_by(BUILDINGID=building_id).first()
@@ -549,6 +595,8 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
             if extra_prompt_files is not None:
                 import json
                 building.EXTRA_PROMPT_FILES = json.dumps(extra_prompt_files) if extra_prompt_files else None
+            if item_display_limit is not UNSET:
+                building.ITEM_DISPLAY_LIMIT = item_display_limit
 
             db.query(BuildingToolLink).filter_by(BUILDINGID=building_id).delete(
                 synchronize_session=False

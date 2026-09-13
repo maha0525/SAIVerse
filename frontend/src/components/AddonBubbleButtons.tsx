@@ -259,6 +259,39 @@ function ToolBubbleButton({
     );
 }
 
+/** メタデータ待ちの仮ボタン (回転表示)。
+ *
+ * 待ち続けたまま終わる回がある — 声に出す文が無かった吹き出しには音声が
+ * そもそも作られないので、音声の合図 (metadata) は来ない
+ * (docs/issues/pulse_beats_merge_into_single_record.md 実機 3)。時間切れで
+ * 回転を消し、押せないボタンが残り続けないようにする。ToolBubbleButton の
+ * 300 秒の保険と同じ長さ。
+ *
+ * 2026-09-13 以降、アドオンは「この吹き出しではこの鍵はもう立たない」を
+ * ``unavailable_keys`` で知らせてくる (下の pendingButtons を参照)。この
+ * 時間切れは、その知らせすら来なかったときの最後の網。
+ */
+function PendingBubbleButton({ label }: { label: string }) {
+    const [timedOut, setTimedOut] = useState(false);
+
+    useEffect(() => {
+        const timer = setTimeout(() => setTimedOut(true), 300_000);
+        return () => clearTimeout(timer);
+    }, []);
+
+    if (timedOut) return null;
+
+    return (
+        <button
+            className={`${styles.bubbleBtn} ${styles.pending}`}
+            title={`${label}（準備中）`}
+            disabled
+        >
+            <Loader size={13} className={styles.spinner} />
+        </button>
+    );
+}
+
 export default function AddonBubbleButtons({
     messageId,
     messageText,
@@ -281,21 +314,29 @@ export default function AddonBubbleButtons({
     const pendingButtons = buttons.filter((btn) => {
         if (btn.show_when !== 'metadata_exists') return false;
         const meta = addonMetadata[btn.addon_name];
-        return !meta || meta[btn.metadata_key ?? ''] === undefined;
+        if (!meta) return true;
+        if (meta[btn.metadata_key ?? ''] !== undefined) return false;
+        // アドオンが「この吹き出しでは、この鍵はもう立たない」と知らせてきたら
+        // 待つのをやめる (例: 声にする文が無かった吹き出しの音声ボタン)。
+        // 鍵の名前で言う契約なので、この規則はアドオンの中身を知らずに済む。
+        const unavailable = meta['unavailable_keys'];
+        if (
+            Array.isArray(unavailable)
+            && unavailable.includes(btn.metadata_key ?? '')
+        ) {
+            return false;
+        }
+        return true;
     });
 
     return (
         <>
-            {/* ローディング中のプレースホルダー */}
+            {/* ローディング中のプレースホルダー (時間切れで自分から消える) */}
             {pendingButtons.map((btn) => (
-                <button
+                <PendingBubbleButton
                     key={`pending-${btn.addon_name}-${btn.id}`}
-                    className={`${styles.bubbleBtn} ${styles.pending}`}
-                    title={`${btn.label}（準備中）`}
-                    disabled
-                >
-                    <Loader size={13} className={styles.spinner} />
-                </button>
+                    label={btn.label}
+                />
             ))}
 
             {/* 有効化済みのボタン */}

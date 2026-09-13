@@ -1303,7 +1303,9 @@ class SEARuntime:
             if outputs is not None:
                 outputs.append(text)
             if event_callback:
-                say_event: Dict[str, Any] = {"type": "say", "content": text, "persona_id": getattr(persona, "persona_id", None), "metadata": msg_metadata if msg_metadata else None}
+                # building_id = この発言が残った部屋。表示中の部屋と違う吹き出しを
+                # 画面が作らないための材料 (docs/issues/pulse_beats_merge_into_single_record.md 契約 5)。
+                say_event: Dict[str, Any] = {"type": "say", "content": text, "persona_id": getattr(persona, "persona_id", None), "metadata": msg_metadata if msg_metadata else None, "building_id": eff_bid}
                 if pulse_id:
                     say_event["pulse_id"] = pulse_id
                 if building_msg and building_msg.get("message_id"):
@@ -1976,13 +1978,16 @@ class SEARuntime:
         # 保存が成功した回だけ保存完了イベント (speak_persisted) が流れる。
         return self._emitters.emit_speak(persona, building_id, text, pulse_id=pulse_id, record_history=record_history, extra_metadata=extra_metadata, event_callback=event_callback)
 
-    def _emit_say(self, persona: Any, building_id: str, text: str, pulse_id: Optional[str] = None, metadata: Optional[Dict[str, Any]] = None, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None) -> Optional[Dict[str, Any]]:
-        return self._emitters.emit_say(persona, building_id, text, pulse_id=pulse_id, metadata=metadata, event_callback=event_callback)
+    def _emit_say(self, persona: Any, building_id: str, text: str, pulse_id: Optional[str] = None, metadata: Optional[Dict[str, Any]] = None, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None, occupants_snapshot: Optional[List[str]] = None) -> Optional[Dict[str, Any]]:
+        return self._emitters.emit_say(persona, building_id, text, pulse_id=pulse_id, metadata=metadata, event_callback=event_callback, occupants_snapshot=occupants_snapshot)
 
     # Pipeline Streaming (Phase 2-β): emit_speak の 2 段階 API + sub-speak 発火。
     # 詳細: docs/intent/voice_tts_pipeline_streaming.md
     def _emit_speak_start(self, persona: Any, building_id: str, pulse_id: Optional[str] = None) -> Optional[str]:
         return self._emitters.emit_speak_start(persona, building_id, pulse_id=pulse_id)
+
+    def _withdraw_speak_placeholder(self, persona: Any, building_id: str, message_id: str) -> bool:
+        return self._emitters.withdraw_speak_placeholder(persona, building_id, message_id)
 
     def _emit_sub_speak(self, persona: Any, building_id: str, message_id: str, sub_text: str, sub_seq: int, pulse_id: Optional[str] = None) -> None:
         self._emitters.emit_sub_speak(persona, building_id, message_id, sub_text, sub_seq, pulse_id=pulse_id)

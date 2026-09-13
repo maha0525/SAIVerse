@@ -33,6 +33,13 @@ def item_move(item_ids: str, destination_type: str, destination_id: str = "") ->
         raise RuntimeError("移動するアイテムIDが指定されていません。")
     ids = [manager.resolve_item_ref_for_persona(persona_id, ref) for ref in raw_ids]
 
+    # しまい先が入れ物のときは、行き先も item:N (安定 short_id) の形で来る —
+    # 中身のアイテムと同じ解決を通す (UUID はそのまま通る)。
+    if destination_type == "bag" and destination_id.strip():
+        destination_id = manager.resolve_item_ref_for_persona(
+            persona_id, destination_id.strip()
+        )
+
     return manager.move_item_for_persona(persona_id, ids, destination_type, destination_id)
 
 
@@ -61,7 +68,8 @@ def schema() -> ToolSchema:
                     "description": (
                         "Destination ID: building_id for building, "
                         "leave empty for persona (own inventory), "
-                        "or bag item_id for bag."
+                        "or the bag's item reference for bag "
+                        "(the item:N form shown in your visual context works)."
                     ),
                 },
             },
