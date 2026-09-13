@@ -2076,6 +2076,15 @@ async def _consume_pipeline_stream(
     + wav 保存」 だけ依頼する設計 (= caller 側で全文 vs 既送 の差分比較を
     しない、 残テキストの送信を最終処理に残さない)。
 
+    唱えごと (``/spell`` / ``/quick_spell``) の行は、**その行だけ** 音声から
+    外す。行より前の文も後ろの文も、普通の本文として文の区切りごとに送る —
+    スペルループが本文を組むとき、行の後ろの文は ``<user_only>`` に包まれず
+    可視の本文として記録に入るからで (Beat の契約 1、
+    docs/issues/pulse_beats_merge_into_single_record.md)、ここで止めると画面に
+    出た文が一言も声にならない。2026-09-13 までは最初の行を見つけた時点で以降の
+    送出を全部止めていた (Beat 分割前は「行より後ろは全部 ``<user_only>`` に
+    包まれる」が正しかった名残)。
+
     引数:
     - ``stream_iter``: ``llm_client.generate_stream(...)`` の戻り値
     - ``pipeline_msg_id``: ``_emit_speak_start`` で発番した placeholder ID。
@@ -2098,8 +2107,9 @@ async def _consume_pipeline_stream(
     - ``text``: 受信した chunk を joined した完成 text
     - ``next_sub_seq``: helper 内で発火した sub-speak の最終連番。 caller は
       これを次の呼び出しの ``sub_seq_start`` にする
-    - ``spell_detected``: この stream 中に ``/spell`` 行を検出したか
-      (= 検出後は voice-tts emit を停止した)。 ログ用途
+    - ``spell_detected``: この stream 中に ``/spell`` 行を検出したか。ログ用途。
+      **「音声を止めた」という意味ではない** — 唱えごとの行そのものだけを音声から
+      外し、その前後の文は普通に送る (2026-09-13)
     - ``cancelled``: ``cancellation_token`` が発火したか
     """
     text_chunks: List[str] = []
@@ -2107,6 +2117,9 @@ async def _consume_pipeline_stream(
     spell_detected = False
     cancelled = False
     last_emit_pos = 0
+    # 唱えごとの行が始まった位置。行が終わる (= 改行が届く) まで、この位置から
+    # 先は音声へ送らずに待つ。行を跨いだら None に戻り、後ろの文は普通に流れる。
+    spell_line_start: Optional[int] = None
     # この stream が属する部屋。下書き行を作った部屋が渡されればそれが正で、
     # 渡されなければ stream 開始時の現在地を 1 回だけ引く。
     stream_building_id = emit_building_id or runtime._effective_building_id(
@@ -2133,6 +2146,29 @@ async def _consume_pipeline_stream(
             sub_seq,
             pulse_id=state.get("_pulse_id"),
         )
+
+    def _spell_line_skip_to(buf: str, m: Any) -> int:
+        """``m`` が捉えた唱えごとの行の **直後** の位置を返す。まだ行が終わって
+        いなければ ``-1`` (= 次の chunk を待つ)。
+
+        「終わっている」の条件は二つ: args が読み切れていること (1 行に収まって
+        いれば JSON として、生の改行で千切れていれば波括弧の対応で判定する。
+        後者の判定は救済パース ``_rescue_multiline_args`` に任せるので、救済が
+        唱えごととして読む範囲がそのまま音声から外れる) と、行末の改行が届いて
+        いること。改行が届く前に送り始めると、args の途中までを声にしてしまう。
+        """
+        end = m.end()
+        try:
+            json.loads(m.group(2))
+        except Exception:
+            rescued = _rescue_multiline_args(buf, m)
+            if rescued is None:
+                return -1
+            end = rescued[1].end()
+        newline = buf.find("\n", end)
+        if newline < 0:
+            return -1
+        return newline + 1
 
     try:
         for chunk in stream_iter:
@@ -2163,22 +2199,43 @@ async def _consume_pipeline_stream(
                     "building_id": stream_building_id,
                 })
 
-            if pipeline_msg_id and not spell_detected:
+            if pipeline_msg_id:
                 _buf = "".join(text_chunks)
-                _tail = _buf[last_emit_pos:]
-                _spell_match = _SPELL_PATTERN.search(_tail)
-                if _spell_match:
-                    _pre_spell = _tail[: _spell_match.start()].rstrip()
-                    _emit_fragment(_pre_spell)
-                    last_emit_pos += len(_tail[: _spell_match.start()])
-                    spell_detected = True
-                else:
+                while True:
+                    if spell_line_start is not None:
+                        # 唱えごとの行の途中。行が終わったら、その行だけを飛ばして
+                        # 後ろの文の送出を再開する。
+                        _spell_match = _SPELL_PATTERN.match(_buf, spell_line_start)
+                        if _spell_match is None:
+                            # 伸びた行が唱えごとの形をやめた回 (実際には起きない
+                            # はずだが、起きたら普通の本文として扱い直す)。
+                            spell_line_start = None
+                            continue
+                        _skip_to = _spell_line_skip_to(_buf, _spell_match)
+                        if _skip_to < 0:
+                            break
+                        last_emit_pos = _skip_to
+                        spell_line_start = None
+                        continue
+                    # ``_buf`` 上の絶対位置で探す — ``^`` は本物の行頭 (文字列の
+                    # 先頭か改行の直後) にしか当たらないので、文の途中から始まる
+                    # 断片を唱えごとと見間違えない。
+                    _spell_match = _SPELL_PATTERN.search(_buf, last_emit_pos)
+                    if _spell_match is not None:
+                        _emit_fragment(
+                            _buf[last_emit_pos:_spell_match.start()].rstrip(),
+                        )
+                        last_emit_pos = _spell_match.start()
+                        spell_detected = True
+                        spell_line_start = _spell_match.start()
+                        continue
                     while True:
                         _boundary = _find_next_sentence_boundary(_buf, last_emit_pos)
                         if _boundary < 0:
                             break
                         _emit_fragment(_buf[last_emit_pos:_boundary])
                         last_emit_pos = _boundary
+                    break
     finally:
         if hasattr(stream_iter, "close"):
             stream_iter.close()
@@ -2186,10 +2243,13 @@ async def _consume_pipeline_stream(
     text = "".join(text_chunks)
 
     # Stream 終端で last_emit_pos < len(text) の residual (= 文区切りに達して
-    # ない最後の chunk) を最後の sub-speak として flush。 spell 行検出後の
-    # 残り (= /spell 以降) は spell loop で <user_only> wrap される対象なので
-    # voice-tts に渡してはいけない、 ここでは flush しない。
-    if pipeline_msg_id and not spell_detected and last_emit_pos < len(text):
+    # ない最後の chunk) を最後の sub-speak として flush。唱えごとの行より後に
+    # 書かれた文もここに含まれる — その文は記録でも ``<user_only>`` に包まれず、
+    # 画面にそのまま出る可視の本文なので (契約 1)、声にしないと表示だけされて
+    # 一言も読まれない (2026-09-13 実機: 長い朝の挨拶が丸ごと無音になった)。
+    # 唱えごとの行の途中でストリームが終わった回だけは flush しない — その
+    # 不完全な行は本文ではない。
+    if pipeline_msg_id and spell_line_start is None and last_emit_pos < len(text):
         _emit_fragment(text[last_emit_pos:].rstrip())
 
     return text, sub_seq, spell_detected, cancelled
@@ -4797,9 +4857,9 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                     # 仕組み:
                     # - 開始時に _emit_speak_start で placeholder + msg_id 発番
                     # - chunk 受信ごとに文区切り検出 → _emit_sub_speak (sub_seq=N)
-                    # - 最初の /spell 行を検出したら sub-speak emit を停止 (spell
-                    #   行は spell loop が <user_only> で wrap してから finalize
-                    #   経由で送るので、 単独で voice-tts に渡してはいけない)
+                    # - /spell 行を見つけたら **その行だけ** を音声から外す
+                    #   (行そのものは発言ではない)。行の前の文も後ろの文も、
+                    #   普通の本文として文の区切りごとに sub-speak へ送る
                     # - spell loop 完了後 (or 通常完了後) に _emit_speak_finalize
                     #   で placeholder を確定 + final hook 発火。 final_voice_text
                     #   は 「last sub-speak 以降の残テキスト」 を strip_user_only

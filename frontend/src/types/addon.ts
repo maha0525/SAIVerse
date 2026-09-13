@@ -5,6 +5,16 @@
  * バックエンド変更時は両者を揃えること。
  */
 
+/**
+ * 吹き出しに並ぶアドオンのボタン 1 つ。
+ *
+ * ``show_when: "metadata_exists"`` のボタンは、``metadata_key`` の値が立つまで
+ * 回転する待ち表示になる。値が **永久に来ない** 回 (例: 声にする文が無かった
+ * 吹き出しの音声ボタン) があるので、アドオンは自分のメタデータに予約キー
+ * ``unavailable_keys`` (= この吹き出しではもう立たない鍵の名前の配列) を書いて
+ * 知らせる。画面はそれを見て待つのをやめる (``AddonBubbleButtons.tsx``)。
+ * 後から実値が立てば、そちらが優先される。
+ */
 export interface AddonBubbleButton {
     id: string;
     icon: string;

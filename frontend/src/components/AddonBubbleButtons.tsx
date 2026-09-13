@@ -261,14 +261,15 @@ function ToolBubbleButton({
 
 /** メタデータ待ちの仮ボタン (回転表示)。
  *
- * 待ち続けたまま終わる回がある — 声に出す文が無かった Beat (スペル行だけの
- * Beat) には音声がそもそも作られないので、音声の合図 (metadata) は永久に来ない
+ * 待ち続けたまま終わる回がある — 声に出す文が無かった吹き出しには音声が
+ * そもそも作られないので、音声の合図 (metadata) は来ない
  * (docs/issues/pulse_beats_merge_into_single_record.md 実機 3)。時間切れで
  * 回転を消し、押せないボタンが残り続けないようにする。ToolBubbleButton の
  * 300 秒の保険と同じ長さ。
  *
- * これは画面側の安全網であって本筋の直しではない。「この Beat に音声は無い」を
- * アドオン側から知らせる工事は音声アドオンのリポジトリ側で別途行う。
+ * 2026-09-13 以降、アドオンは「この吹き出しではこの鍵はもう立たない」を
+ * ``unavailable_keys`` で知らせてくる (下の pendingButtons を参照)。この
+ * 時間切れは、その知らせすら来なかったときの最後の網。
  */
 function PendingBubbleButton({ label }: { label: string }) {
     const [timedOut, setTimedOut] = useState(false);
@@ -313,7 +314,19 @@ export default function AddonBubbleButtons({
     const pendingButtons = buttons.filter((btn) => {
         if (btn.show_when !== 'metadata_exists') return false;
         const meta = addonMetadata[btn.addon_name];
-        return !meta || meta[btn.metadata_key ?? ''] === undefined;
+        if (!meta) return true;
+        if (meta[btn.metadata_key ?? ''] !== undefined) return false;
+        // アドオンが「この吹き出しでは、この鍵はもう立たない」と知らせてきたら
+        // 待つのをやめる (例: 声にする文が無かった吹き出しの音声ボタン)。
+        // 鍵の名前で言う契約なので、この規則はアドオンの中身を知らずに済む。
+        const unavailable = meta['unavailable_keys'];
+        if (
+            Array.isArray(unavailable)
+            && unavailable.includes(btn.metadata_key ?? '')
+        ) {
+            return false;
+        }
+        return true;
     });
 
     return (
