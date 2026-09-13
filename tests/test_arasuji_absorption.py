@@ -2720,8 +2720,14 @@ class TestTailRewind:
         assert status == "rewound"
         assert _row_anchor(lc, "model-a") == gap
 
-        # 冪等: 帯は窓の中に入ったので、再実行は何も見つけない
-        assert run_tail_rewind(lc, _persona(adapter)) == "none"
+        # 冪等: 巻き戻しで他モデル (model-a) のキャッシュは無効化されるため
+        # 2 回目では warm ceiling にならず plan_tail_rewind まで進むが、gap は既に
+        # model-a の窓の中なので "skipped" で何も変更しない。
+        assert not lc._anchor_entry_is_hot(
+            lc.load_anchor_entry(PERSONA_ID, "model-a"), "model-a", PERSONA_ID,
+        )
+        assert run_tail_rewind(lc, _persona(adapter)) == "skipped"
+        assert _row_anchor(lc, "model-a") == gap
 
     def test_other_thread_tail_is_not_rewound_but_compiled(
         self, adapter, session_factory, monkeypatch,

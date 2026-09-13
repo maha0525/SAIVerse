@@ -527,6 +527,14 @@ def test_preflight_cycle_is_stable_when_a_straddling_fold_alone_exceeds_high(ses
         message_ids=[f"b{i}" for i in range(10)] + ["m0"], chronicle_entry_ids=["e_f"],
     )
     lc.save_folded_ranges(PERSONA_ID, MODEL, [straddling])
+    # キャッシュ有効期限内の状態から開始する。save_folded_ranges はキャッシュ無効化を
+    # 書き込むため、準備の最後に有効な UPDATED_AT / TTL_SECONDS を設定し直す
+    # (期限切れのまま始めると §14-2 のアンカー自動前進が先に走ってしまう)。
+    lc.upsert_anchor_entry(PERSONA_ID, MODEL, {
+        "anchor_id": "m0",
+        "updated_at": datetime.now().replace(microsecond=0).isoformat(),
+        "ttl_seconds": 3600,
+    })
     wm = Watermarks(target=5000, high=8000)
     lc.is_chronicle_enabled_for_persona = lambda p: True
     lc.ensure_recall_embeddings = lambda p: None
