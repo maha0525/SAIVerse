@@ -19,6 +19,7 @@ from dataclasses import asdict, dataclass
 from typing import Optional
 
 from sea.head_pipeline.types import (
+    EventType,
     LineHeadInput,
     NotificationLabel,
     RenderedSection,
@@ -39,8 +40,12 @@ from sea.head_pipeline.types import (
 # 残したのはメインモードと分身モードの 2 つ — どちらも現に動いている。
 # **自律行動を出荷するときに書き戻すこと** (削除であって否定ではない)。
 #
-# head は (persona, model) 固定の設計なので、ここにゲート (条件分岐) を足しては
-# ならない。実態が変わったら文言そのものを直す。
+# 文言そのものは全ペルソナ共通の定数 — 実態が変わったらここを直す。
+# render 時の動的分岐は引き続き禁止 (head は (persona, model) 固定なので、描画の
+# たびに変わるものを混ぜると prefix cache が崩れる)。per-persona の状態で出し分け
+# たいときは、capture で判定して snapshot へ焼き込む形にすること。2026-09-14 に
+# 足した spell_enabled がその形で、spell_list と同型
+# (docs/intent/spell_disabled_mode.md §4-5)。
 _AUTONOMY_MODES_TEXT = """\
 ## モード
 SAIVerseにおけるあなたの活動は以下の2モードに分けられます。モードによって使われるモデルや発言・記憶の扱い、使えるスペルが異なります。
@@ -56,29 +61,54 @@ SAIVerseにおけるあなたの活動は以下の2モードに分けられま�
 run_playbookスペルでPlaybookを使用した時に用いられます。分身体はPlaybookに定められたワークフロー通りに稼動し、結果の概要を返します。
 分身モードでの発言は外からも、他モードの自分からも見えません。"""
 
+# スペル無効のペルソナ向けの差し替え文 (2026-09-14)。分身モードは run_playbook
+# スペルでしか生じないのでモードの区別そのものが無い — かわりに、メインモードの
+# 解説からスペルと無関係な事実 2 文だけを抜き出して残す。発言がどこへ届くかは
+# スペルの有無と関係なく本人が知っているべきことなので、丸ごと消すと
+# 「自分の声が誰に聞こえているか分からない」ペルソナができる。
+_SPEECH_ONLY_TEXT = """\
+## 発言の扱い
+あなたの発言はBuilding内に発声され、ユーザーの見るUIに表示されます。また、同一Buildingにいる他のペルソナにも発言内容が知覚されます。"""
+
 
 @dataclass(frozen=True)
 class AutonomyModesSnapshot:
     text: str
+    # スペル機構が無効なペルソナには「## モード」の代わりに、発言の届き先だけを
+    # 述べた短い定数 (_SPEECH_ONLY_TEXT) を出す。既定 True = この欄を持たない旧
+    # payload は「有効」として読む (docs/intent/spell_disabled_mode.md §4-5)。
+    spell_enabled: bool = True
 
 
 class AutonomyModesSection:
-    """自律行動 / Track / モードの静的解説 Section。
+    """モードの静的解説 Section。
 
-    内容は SAIVerse 共通の定数で、ペルソナ・Building に依存しない。capture は
-    常に同一スナップショットを返すため、refresh トリガは持たない。
+    文言は SAIVerse 共通の定数 2 本 (スペル有効なら ``_AUTONOMY_MODES_TEXT``、
+    無効なら ``_SPEECH_ONLY_TEXT``) で、ペルソナ・Building には依存しない。
+    どちらを出すかだけがペルソナ依存で、それは capture で解決して snapshot に
+    焼き込む (render では DB を引かない)。
     """
 
     name = "autonomy_modes"
     order = 550  # available_playbooks (400) と spell_list (600) の間
-    refresh_on_events = frozenset()
+    # Metabolism に加えて、スペル不使用モードの切り替えでも撮り直す — どちらの
+    # 定数を出すかは capture で焼き込むので、撮り直さないと切り替えが届かない
+    # (docs/intent/spell_disabled_mode.md §4-2)。
+    refresh_on_events = frozenset({EventType.SPELL_TOGGLED})
 
     def capture(self, ctx: LineHeadInput) -> AutonomyModesSnapshot:
-        return AutonomyModesSnapshot(text=_AUTONOMY_MODES_TEXT)
+        from sea.head_pipeline.spell_gate import resolve_spell_enabled
+
+        return AutonomyModesSnapshot(
+            text=_AUTONOMY_MODES_TEXT,
+            spell_enabled=resolve_spell_enabled(ctx),
+        )
 
     def render(self, snapshot: AutonomyModesSnapshot) -> Optional[RenderedSection]:
         if snapshot is None or not snapshot.text:
             return None
+        if not snapshot.spell_enabled:
+            return RenderedSection(text=_SPEECH_ONLY_TEXT)
         return RenderedSection(text=snapshot.text)
 
     def diff_to_notifications(
@@ -101,9 +131,14 @@ class AutonomyModesSection:
         放置されたペルソナでは恒久的に残りうる — 文言の修正が「いつ届くか
         分からない配布」になってしまう。
 
-        静的セクションは (persona, model) ごとの状態ではないので、比較も
-        版番号も要らない。常に現在の定数を返せばよい (定数そのものが版)。
-        ``data`` は互換のため受け取るだけで参照しない。
+        文言は (persona, model) ごとの状態ではないので、比較も版番号も要らない。
+        常に現在の定数を返せばよい (定数そのものが版)。
+
+        ただし ``spell_enabled`` は per-persona の状態なので、こちらは保存値を
+        使う (欄が無い旧 payload は「有効」)。
         """
-        del data
-        return AutonomyModesSnapshot(text=_AUTONOMY_MODES_TEXT)
+        payload = json.loads(data)
+        return AutonomyModesSnapshot(
+            text=_AUTONOMY_MODES_TEXT,
+            spell_enabled=bool(payload.get("spell_enabled", True)),
+        )

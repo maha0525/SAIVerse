@@ -748,17 +748,29 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
 
                             <div className={styles.fieldGroup}>
                                 <label data-i18n="components.SettingsModal.text081" className={styles.label}>{uiText("components.SettingsModal.text081")}</label>
-                                <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
                                     <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
                                         <input
-                                            type="checkbox"
+                                            type="radio"
+                                            name={`spell-mode-${personaId}`}
                                             checked={spellEnabled}
-                                            onChange={(e) => setSpellEnabled(e.target.checked)}
+                                            onChange={() => setSpellEnabled(true)}
                                         />
-                                        <span data-i18n="components.SettingsModal.text082 components.SettingsModal.text083">{spellEnabled ? uiText("components.SettingsModal.text082") : uiText("components.SettingsModal.text083")}</span>
+                                        <span data-i18n="components.SettingsModal.spellModeStandard">{uiText("components.SettingsModal.spellModeStandard")}</span>
+                                    </label>
+                                    <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
+                                        <input
+                                            type="radio"
+                                            name={`spell-mode-${personaId}`}
+                                            checked={!spellEnabled}
+                                            onChange={() => setSpellEnabled(false)}
+                                        />
+                                        <span data-i18n="components.SettingsModal.spellModeDisabled">{uiText("components.SettingsModal.spellModeDisabled")}</span>
                                     </label>
                                 </div>
-                                <div data-i18n="components.SettingsModal.text084" className={styles.description}>{uiText("components.SettingsModal.text084")}</div>
+                                <div data-i18n="components.SettingsModal.spellModeDescription" className={styles.description}>
+                                    {uiText("components.SettingsModal.spellModeDescription")}
+                                </div>
                             </div>
 
                             <div className={styles.fieldGroup}>
@@ -778,7 +790,14 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
 
                             <div className={styles.fieldGroup}>
                                 <label data-i18n="components.SettingsModal.text089" className={styles.label}>{uiText("components.SettingsModal.text089")}</label>
-                                <div data-i18n="components.SettingsModal.text090" className={styles.description} style={{ marginBottom: '0.5rem' }}>{uiText("components.SettingsModal.text090")}</div>
+                                <div data-i18n="components.SettingsModal.text090" className={styles.description} style={{ marginBottom: '0.5rem' }}>
+                                    {uiText("components.SettingsModal.text090")}
+                                </div>
+                                {!spellEnabled && (
+                                    <div data-i18n="components.SettingsModal.spellDisabledNotice" className={styles.description} style={{ marginBottom: '0.5rem', fontWeight: 600 }}>
+                                        {uiText("components.SettingsModal.spellDisabledNotice")}
+                                    </div>
+                                )}
                                 {realtimeSpells.length > 0 && (
                                     <div style={{ marginBottom: '0.75rem' }}>
                                         {realtimeSpells.map((spell) => (

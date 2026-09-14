@@ -1180,8 +1180,8 @@
     "en": "Spells to run in advance"
   },
   "components.BuildingSettingsModal.text025": {
-    "ja": "この Building にいるペルソナの会話時に自動実行するスペル",
-    "en": "Spells run automatically during conversations with personas in this building"
+    "ja": "この Building にいるペルソナの会話時に自動実行するスペル。スペルが無効のペルソナには実行されません。",
+    "en": "Spells run automatically during conversations with personas in this building. Not run for personas with spells disabled."
   },
   "components.BuildingSettingsModal.text026": {
     "ja": "削除",
@@ -7735,18 +7735,6 @@
     "ja": "スペル",
     "en": "Spells"
   },
-  "components.SettingsModal.text082": {
-    "ja": "有効",
-    "en": "Enabled"
-  },
-  "components.SettingsModal.text083": {
-    "ja": "無効",
-    "en": "Disabled"
-  },
-  "components.SettingsModal.text084": {
-    "ja": "発言中に /spell コマンドを使って、Memopediaやチャットログを直接参照できるようにします。ツール定義を使わないため、キャッシュ効率に影響しません。",
-    "en": "Allow /spell commands in replies to access Memopedia and chat logs directly. No tool definitions are used, so cache efficiency is unaffected."
-  },
   "components.SettingsModal.text085": {
     "ja": "リアルタイム情報",
     "en": "Real-time information"
@@ -11126,5 +11114,21 @@
   "api.tutorial.geminiRequired": {
     "ja": "{role}はGemini系のみ対応のため、Gemini APIキーがない場合は機能しません。",
     "en": "{role} requires Gemini and will not work without a Gemini API key."
+  },
+  "components.SettingsModal.spellModeStandard": {
+    "ja": "使用する（標準）",
+    "en": "Enabled (standard)"
+  },
+  "components.SettingsModal.spellModeDisabled": {
+    "ja": "使用しない — スペル不使用モード",
+    "en": "Disabled — spell-free mode"
+  },
+  "components.SettingsModal.spellModeDescription": {
+    "ja": "スペル不使用モード: ペルソナがスペル（/spell）・Playbook・アイテム操作を一切使わない、会話専用の軽量モードです。スペルの説明やツール一覧がシステムプロンプトから全て外れるため、1 回の会話に使うトークンが大きく減ります。切り替えは保存するとすぐ反映されます。⚠️ 切り替えるたびにこのペルソナのコンテキストが作り直され、プロンプトキャッシュが積み直しになります（モードの間でキャッシュは共用できません）。頻繁に切り替えると、節約どころか逆に費用が高くつくことがあります。",
+    "en": "Spell-free mode: A conversation-only lightweight mode where the persona never uses spells (/spell), Playbooks, or items. Spell descriptions and tool listings are omitted from the system prompt, substantially reducing token usage per turn. Changes take effect upon saving. ⚠️ Switching modes rebuilds this persona's context and resets the prompt cache (cache cannot be shared across modes). Switching frequently may increase overall costs instead of saving."
+  },
+  "components.SettingsModal.spellDisabledNotice": {
+    "ja": "⚠️ スペル不使用モードのため、事前実行スペルは実行されません。",
+    "en": "⚠️ Because spell-free mode is enabled, pre-execution spells will not run."
   }
 }

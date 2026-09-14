@@ -25,7 +25,8 @@ Metabolism のみで更新される**目次スナップショット**を head �
   Section の登録自体を切り替えない)。
 - ON の場合のみ toc_markdown を snapshot に保持し、render がテキストを返す。
 - OFF の場合は toc_markdown=None で render が None を返す。
-- refresh_on_events = frozenset() = Metabolism のみ更新——キャッシュ整合を守る。
+- 更新は Metabolism と、スペル不使用モードの切り替え (SPELL_TOGGLED) だけ——
+  それ以外では撮り直さず、キャッシュ整合を守る。
 
 詳細: docs/intent/concept_consolidation.md §P4-d
 旧詳細: docs/intent/cached_head_architecture.md §5.1 / dynamic_state_sync.md
@@ -39,6 +40,7 @@ from dataclasses import asdict, dataclass
 from typing import Optional
 
 from sea.head_pipeline.types import (
+    EventType,
     LineHeadInput,
     NotificationLabel,
     RenderedSection,
@@ -63,6 +65,10 @@ class MemopediaIndexSnapshot:
     # P4-d: opt-in 目次。None = flag OFF または capture 失敗。
     index_enabled: bool = False
     toc_markdown: Optional[str] = None
+    # 目次そのものは自動想起の手掛かりとして残すが、「memory_read で読んで」の
+    # 一文はスペルが使えないと空振りの指示になる。既定 True = この欄を持たない
+    # 旧 payload は「有効」(docs/intent/spell_disabled_mode.md §4-5)。
+    spell_enabled: bool = True
 
 
 def _build_toc_markdown(conn) -> Optional[str]:
@@ -166,7 +172,10 @@ def _build_toc_markdown(conn) -> Optional[str]:
 class MemopediaIndexSection:
     name = "memopedia_index"
     order = 1200
-    refresh_on_events = frozenset()  # Metabolism のみ
+    # Metabolism に加えて、スペル不使用モードの切り替え (「memory_read で読んで
+    # ください」の一文の出し入れ) でも撮り直す
+    # (docs/intent/spell_disabled_mode.md §4-2)。
+    refresh_on_events = frozenset({EventType.SPELL_TOGGLED})
 
     def capture(self, ctx: LineHeadInput) -> MemopediaIndexSnapshot:
         persona = ctx.persona
@@ -179,6 +188,10 @@ class MemopediaIndexSection:
 
         # P4-d: opt-in フラグを読む
         index_enabled = self._resolve_memopedia_index_enabled(ctx)
+
+        # スペル機構の有効/無効も capture 時に焼き込む (render では引かない)。
+        from sea.head_pipeline.spell_gate import resolve_spell_enabled
+        spell_enabled = resolve_spell_enabled(ctx)
 
         # Metabolism / 初回 capture 時は「これ以降の変化」を追うための基準 timestamp。
         # ここでは since=time.time() を渡すと事実上空 list が返るので、capture では
@@ -199,20 +212,21 @@ class MemopediaIndexSection:
             pages=(),
             index_enabled=index_enabled,
             toc_markdown=toc_markdown,
+            spell_enabled=spell_enabled,
         )
 
     def render(self, snapshot: MemopediaIndexSnapshot) -> Optional[RenderedSection]:
         # P4-d: flag OFF / 目次なし → None を返す（既存の「何も render しない」挙動を維持）
         if not snapshot.index_enabled or not snapshot.toc_markdown:
             return None
-        text = (
+        header = (
             "## 記憶の目次（Memopedia Index）\n"
             "以下は地図帳の目次です。各ページの概要 (summary) を示しています。"
             "[OPEN] は机に開いているページ、★ は重要ページです。"
-            "ページの本文まで読みたい場合は memory_read で読んでください。\n"
-            + snapshot.toc_markdown
         )
-        return RenderedSection(text=text)
+        if snapshot.spell_enabled:
+            header += "ページの本文まで読みたい場合は memory_read で読んでください。"
+        return RenderedSection(text=header + "\n" + snapshot.toc_markdown)
 
     def diff_to_notifications(
         self,
@@ -309,6 +323,7 @@ class MemopediaIndexSection:
                 "pages": [asdict(p) for p in snapshot.pages],
                 "index_enabled": snapshot.index_enabled,
                 "toc_markdown": snapshot.toc_markdown,
+                "spell_enabled": snapshot.spell_enabled,
             },
             ensure_ascii=False,
         )
@@ -323,6 +338,8 @@ class MemopediaIndexSection:
             pages=pages,
             index_enabled=bool(payload.get("index_enabled", False)),
             toc_markdown=payload.get("toc_markdown"),
+            # 欄を持たない旧 payload は「有効」— memory_read の一文が載っていた頃の行。
+            spell_enabled=bool(payload.get("spell_enabled", True)),
         )
 
     # ---- 内部ヘルパー ----

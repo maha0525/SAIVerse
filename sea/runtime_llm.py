@@ -2275,6 +2275,67 @@ def _is_user_interruption(interrupted_by: Optional[str]) -> bool:
     return interrupted_by in ("user", "user_stop")
 
 
+def _record_interruption_notice(
+    runtime: Any,
+    persona: Any,
+    building_id: str,
+    *,
+    by_user: bool,
+    msg_id: Optional[str] = None,
+) -> None:
+    """中断があった事実を、建物の記録へ host 名義で一行置く。
+
+    途中で切られた発言は他のペルソナから見ても不自然な場所で終わっている。
+    それが本人の言い切りなのか外から止められたのかを知れる方がよい
+    (2026-08-26 まはー裁定)。役は ``host`` で、入退室の通知と同じ道を通る。
+    取り込みの側が建物名を添えて ``user`` + ``<system>`` へ組み替えてから
+    各ペルソナの記憶へ配るので、**ここでその形を自分で作らない**。ただし
+    取り込みが配るのは ``heard_by`` に載ったペルソナだけ — 在室者を渡さないと、
+    通告は建物の記録に残るだけで誰の記憶にも永遠に届かない (2026-08-27 の
+    実機検証で発覚)。
+
+    ``by_user`` で変わるのは文面だけ。呼ぶ場所は三つ — 停止ボタンの回と
+    Beat が例外で落ちた回 (どちらも ``_settle_interrupted_utterance`` 経由)、
+    そしてサーバーがストリームを途中で切った回。**三経路で同じ一枚を使う**
+    (同じ判断の書き分けを作らない。2026-09-13: サーバー切断の回だけ通告が
+    無く、次の生成のプロンプト末尾がモデル発話のままになって、プリフィルを
+    受け付けない Gemini 3.x が拒否した)。
+
+    書き込みに失敗しても呼び出し元を壊さない — 通告は救済であって、Beat の
+    本体ではない。
+    """
+    try:
+        heard_by = list(runtime.manager.occupants.get(building_id, []) or [])
+        # 直接参照 (getattr にしない) — 属性名のタイポを黙って飲むと、本人が
+        # heard_by から静かに落ちて通告だけ配られる。無ければ except が握る
+        # (旧実装と同じ倒れ方 = 通告ごと見送り + WARNING)。
+        persona_id = persona.persona_id
+        if persona_id and persona_id not in heard_by:
+            heard_by.append(persona_id)
+        persona.history_manager.add_to_building_only(
+            building_id,
+            {
+                "role": "host",
+                # 非ユーザー起点 (LLM エラー・サーバー切断・schedule/auto の
+                # 割り込み) は原因を書かない — 「エラー」と括ると割り込みの回に
+                # 嘘になる。通告の目的は「本人の言い切りではなく外から切られた」
+                # を伝えることで、原因の種別は必須ではない (2026-08-27 まはー
+                # 委任で推奨案を採用)。
+                "content": (
+                    "(ユーザーの操作により、ここで発言が中断されました)"
+                    if by_user
+                    else "(ここで発言が中断されました)"
+                ),
+            },
+            heard_by=heard_by,
+        )
+    except Exception:
+        LOGGER.warning(
+            "[sea][pipeline] could not record the interruption notice to the "
+            "building (msg=%s)", msg_id, exc_info=True,
+        )
+
+
 def _settle_interrupted_utterance(
     *,
     runtime: Any,
@@ -2316,15 +2377,10 @@ def _settle_interrupted_utterance(
        理由で届かない。建物の記録には残るのに本人だけが覚えていない、という
        食い違いを防ぐ。「言い切っていない」印を付けて書くので、後から想起しても
        言い切ったものとは扱われない。
-    4. **中断があった事実を建物の記録へ置く** — 途中で切られた発言は他のペルソナ
-       から見ても不自然な場所で終わっている。それが本人の言い切りなのか外から
-       止められたのかを知れる方がよい (2026-08-26 まはー裁定)。文面は ``by_user``
-       で変わる (ユーザーの操作を明記 / 原因を書かない一文)。役は ``host`` で、
-       入退室の通知と同じ道を通る。取り込みの側が建物名を添えて
-       ``user`` + ``<system>`` へ組み替えてから各ペルソナの記憶へ配るので、
-       **ここでその形を自分で作らない**。ただし取り込みが配るのは ``heard_by``
-       に載ったペルソナだけ — 在室者を渡さないと、通告は建物の記録に残るだけで
-       誰の記憶にも永遠に届かない (2026-08-27 の実機検証で発覚)。
+    4. **中断があった事実を建物の記録へ置く** — 書き込みそのものは
+       :func:`_record_interruption_notice` が持つ (サーバー切断の経路と同じ
+       一枚を使う)。文面は ``by_user`` で変わる (ユーザーの操作を明記 /
+       原因を書かない一文)。
 
     本人の発言そのものには一切手を入れない。機構が足した注記は、ペルソナが自分の
     文体として模倣し始めるため、独立した一行として後ろに置く。
@@ -2408,31 +2464,9 @@ def _settle_interrupted_utterance(
             "memory (msg=%s)", msg_id, exc_info=True,
         )
 
-    try:
-        heard_by = list(runtime.manager.occupants.get(building_id, []) or [])
-        if persona.persona_id and persona.persona_id not in heard_by:
-            heard_by.append(persona.persona_id)
-        persona.history_manager.add_to_building_only(
-            building_id,
-            {
-                "role": "host",
-                # 非ユーザー起点 (LLM エラー・schedule/auto の割り込み) は原因を
-                # 書かない — 「エラー」と括ると割り込みの回に嘘になる。通告の
-                # 目的は「本人の言い切りではなく外から切られた」を伝えることで、
-                # 原因の種別は必須ではない (2026-08-27 まはー委任で推奨案を採用)。
-                "content": (
-                    "(ユーザーの操作により、ここで発言が中断されました)"
-                    if by_user
-                    else "(ここで発言が中断されました)"
-                ),
-            },
-            heard_by=heard_by,
-        )
-    except Exception:
-        LOGGER.warning(
-            "[sea][pipeline] could not record the interruption notice to the "
-            "building (msg=%s)", msg_id, exc_info=True,
-        )
+    _record_interruption_notice(
+        runtime, persona, building_id, by_user=by_user, msg_id=msg_id,
+    )
 
     return sub_seq
 
@@ -3912,15 +3946,32 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
         _pre_spells = state.get("_pre_spells")
         if _pre_spells and not state.get("_pre_spells_executed"):
             state["_pre_spells_executed"] = True
-            try:
-                await _execute_pre_spells(
-                    _pre_spells, runtime, persona, building_id, state, playbook, event_callback,
+            if not state.get("_spell_enabled"):
+                # SPELL_ENABLED=false はどの経路のスペル実行も止める (下の realtime
+                # spell gate と同じ思想)。黙って握り潰すと、チャット UI で「ツール
+                # 指定」を選んだユーザーが実行されたものと思い込む — 警告ログと
+                # status イベントで、実行しなかったことを表に出す
+                # (docs/intent/spell_disabled_mode.md §4-7)。
+                LOGGER.warning(
+                    "[sea][pre_spells] skipped %d requested spell(s): "
+                    "spell system disabled for persona=%s",
+                    len(_pre_spells), getattr(persona, "persona_id", None),
                 )
-            except ModelUnavailableError:
-                # 使うモデルが無い・繋げない — 事前スペル抜きで続けず、返事ごと止める
-                raise
-            except Exception:
-                LOGGER.exception("[sea][pre_spells] Pre-spell execution failed; continuing without pre-spell results")
+                if event_callback:
+                    event_callback({
+                        "type": "status",
+                        "content": "スペル不使用モードのため、指定されたツールの実行をスキップしました",
+                    })
+            else:
+                try:
+                    await _execute_pre_spells(
+                        _pre_spells, runtime, persona, building_id, state, playbook, event_callback,
+                    )
+                except ModelUnavailableError:
+                    # 使うモデルが無い・繋げない — 事前スペル抜きで続けず、返事ごと止める
+                    raise
+                except Exception:
+                    LOGGER.exception("[sea][pre_spells] Pre-spell execution failed; continuing without pre-spell results")
 
         # ── Realtime spells: auto-execute bound spells and inject into realtime context ──
         # Configured per-persona and per-building via realtime_spell_binding table.
@@ -3971,6 +4022,12 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
         # 「建物にはあるが記憶に無い本文」の受け渡しも同じ理由で入り口で倒す —
         # 前のノードの本文を、このノードの Beat の補填が書いてしまう。
         state.pop(BEAT_BODY_UNMEMORIZED_KEY, None)
+        # 「サーバーがストリームを切った」の申告も同じ理由で入り口で倒す。
+        # この印は下のストリーム消費で立ち、no-spell の完了パスでしか pop
+        # されない — 切られた部分文がスペル行を含んでいた回はスペル分岐へ
+        # 進んで残留し、同じ Pulse の**次の Beat** の言い切った発言に
+        # 「中断された」の印と偽の通告が乗る (2026-09-13 検算で確認)。
+        state.pop("_stream_error", None)
 
         # ── Pipeline Streaming の下書き行 (placeholder) の追跡 ──
         # 発番するのは normal-mode streaming 経路 (下の use_streaming ブロック)
@@ -5388,6 +5445,12 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                             msg_metadata[INTERRUPTED_METADATA_KEY] = True
                         eff_bid = runtime._effective_building_id(persona, building_id)
 
+                        # 部分文が**この場で**建物の記録へ載ったときだけ、その部屋を
+                        # 持つ。中断の通告はこの事実の後ろにしか置かない — 確定に
+                        # 失敗した回に書くと、見えない行の後ろに通告だけが浮く。
+                        # 停止の後片付けが既に確定させた回に書くと、後片付け側
+                        # (_settle_interrupted_utterance) の通告と二枚になる。
+                        _partial_landed_bid: Optional[str] = None
                         if pipeline_finalized:
                             # 停止の後片付けで既に確定させた回。ここで書き足すと同じ
                             # 本文が二度 Building に入る。下の救済経路は「下書き行を
@@ -5417,6 +5480,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                             if getattr(_sf_result, "status", None) == "saved":
                                 pipeline_finalized = True
                                 state["_last_message_id"] = pipeline_msg_id
+                                _partial_landed_bid = pipeline_eff_bid
                             LOGGER.info(
                                 "[sea][pipeline] Normal-stream finalize: msg=%s final_seq=%d status=%s",
                                 pipeline_msg_id, pipeline_sub_seq,
@@ -5429,13 +5493,20 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                             LOGGER.warning(
                                 "[sea][pipeline] no placeholder msg_id — falling back to _emit_say",
                             )
-                            _emit_say_and_capture(
+                            _fb_bmsg = _emit_say_and_capture(
                                 runtime, persona, eff_bid, text, state,
                                 pulse_id=pulse_id, metadata=msg_metadata,
                                 event_callback=event_callback,
                             )
                             beat_said = True
                             beat_said_text = text
+                            # この経路の本文は eff_bid へ載せたので、通告も
+                            # eff_bid へ (載った部屋と通告の部屋を揃える)。
+                            # 「載った」の判定は message_id の有無 (DB 採番 =
+                            # insert が通った証拠。builtin_data/tools/tell.py の
+                            # 裁定と同じ)。dict が返っただけでは書けていない。
+                            if isinstance(_fb_bmsg, dict) and _fb_bmsg.get("message_id"):
+                                _partial_landed_bid = eff_bid
 
                         if _stream_err and text.strip():
                             LOGGER.warning(
@@ -5447,14 +5518,30 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                             if event_callback:
                                 event_callback({
                                     "type": "info",
+                                    # 先頭にアイコンを書かない — 画面側が info
+                                    # 種別に自前で ℹ️ を描くので、書くと二重に
+                                    # 並ぶ (2026-09-13 まはー実機報告)。
                                     "content": (
-                                        "ℹ️ メッセージの生成が途中で終了しました。"
+                                        "メッセージの生成が途中で終了しました。"
                                         f"({_stream_err.get('code', 504)} "
                                         f"{_stream_err.get('message', '')})".rstrip()
                                         + "\nここまでの発言はそのまま残ります。"
                                     ),
                                     "persona_id": getattr(persona, "persona_id", None),
                                 })
+                            # 停止ボタン・Beat 死亡と同じ通告を建物の記録へ置く。
+                            # これが無いと会話の末尾が本人の途中発言のままになり、
+                            # 続きの生成でプロンプト末尾がモデル発話になる —
+                            # プリフィルを受け付けない Gemini 3.x はそこで拒否する
+                            # (docs/issues/
+                            #  server_cut_stream_writes_no_interruption_notice.md)。
+                            # 書くのは部分文がこの場で建物へ載った回だけ・載った
+                            # のと同じ部屋へ (_partial_landed_bid の宣言コメント)。
+                            if _partial_landed_bid:
+                                _record_interruption_notice(
+                                    runtime, persona, _partial_landed_bid,
+                                    by_user=False, msg_id=pipeline_msg_id,
+                                )
 
                     # Store reasoning in state for downstream speak/say nodes
                     _store_reasoning_in_state(state, reasoning_text, reasoning_details)

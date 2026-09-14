@@ -6,6 +6,8 @@ capture で ``list_available_playbooks`` ツールを 1 回呼んで結果を fr
 
 BUILDING_ENTERED を refresh_on_events に **含めない**。Building 移動で Playbook 一覧が
 変動した場合は diff 経由で末尾通知し、head は次の Metabolism まで据え置く。
+例外はアドオンの着脱とスペル不使用モードの切り替えで、こちらは refresh_on_events に
+列挙してその場で撮り直す。
 
 詳細: docs/intent/cached_head_architecture.md §5.3
 """
@@ -35,14 +37,30 @@ class PlaybookEntry:
 @dataclass(frozen=True)
 class AvailablePlaybooksSnapshot:
     entries: tuple[PlaybookEntry, ...]
+    # Playbook は `run_playbook` スペルでしか起こせないので、スペル機構が無効な
+    # ペルソナには一覧そのものを出さない (docs/intent/spell_disabled_mode.md §4-5)。
+    # 既定 True = この欄を持たない旧 payload は「有効」として読む。
+    spell_enabled: bool = True
 
 
 class AvailablePlaybooksSection:
     name = "available_playbooks"
     order = 400
-    refresh_on_events = frozenset({EventType.ADDON_LOADED, EventType.ADDON_UNLOADED})
+    # SPELL_TOGGLED: スペル不使用モードの切り替えはその場で反映する
+    # (docs/intent/spell_disabled_mode.md §4-2)。
+    refresh_on_events = frozenset({
+        EventType.ADDON_LOADED,
+        EventType.ADDON_UNLOADED,
+        EventType.SPELL_TOGGLED,
+    })
 
     def capture(self, ctx: LineHeadInput) -> AvailablePlaybooksSnapshot:
+        from sea.head_pipeline.spell_gate import resolve_spell_enabled
+
+        if not resolve_spell_enabled(ctx):
+            # 一覧の取得ごと省く (使えないものを数えても捨てるだけ)。
+            return AvailablePlaybooksSnapshot(entries=(), spell_enabled=False)
+
         from tools import TOOL_REGISTRY
 
         list_func = TOOL_REGISTRY.get("list_available_playbooks")
@@ -108,6 +126,13 @@ class AvailablePlaybooksSection:
     ) -> list[NotificationLabel]:
         if old is None or new is None:
             return []
+        if old.spell_enabled != new.spell_enabled:
+            # スペル機構ごとの有効/無効の物語は SpellListSection の
+            # spell_system_enabled / spell_system_disabled が一手に担う
+            # (docs/intent/spell_disabled_mode.md §4-6)。ここで全 Playbook 分の
+            # 「使えなくなりました」を並べると、一言で尽きている出来事が
+            # 一覧の長さだけ繰り返される。
+            return []
         old_names = {e.name for e in old.entries}
         new_names = {e.name for e in new.entries}
         labels: list[NotificationLabel] = []
@@ -132,11 +157,18 @@ class AvailablePlaybooksSection:
 
     def serialize_snapshot(self, snapshot: AvailablePlaybooksSnapshot) -> str:
         return json.dumps(
-            {"entries": [asdict(e) for e in snapshot.entries]},
+            {
+                "entries": [asdict(e) for e in snapshot.entries],
+                "spell_enabled": snapshot.spell_enabled,
+            },
             ensure_ascii=False,
         )
 
     def deserialize_snapshot(self, data: str) -> AvailablePlaybooksSnapshot:
         payload = json.loads(data)
         entries = tuple(PlaybookEntry(**e) for e in payload.get("entries", []))
-        return AvailablePlaybooksSnapshot(entries=entries)
+        # 欄を持たない旧 payload は「有効」— 一覧が載っていた頃の行なので。
+        return AvailablePlaybooksSnapshot(
+            entries=entries,
+            spell_enabled=bool(payload.get("spell_enabled", True)),
+        )
