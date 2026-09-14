@@ -1,3 +1,7 @@
+import { t as uiText } from '@/i18n/core';
+import { useLocale } from '@/i18n/useLocale';
+
+import { apiFetch } from '@/i18n/api';
 import React, { useState, useRef } from 'react';
 import { Upload, Loader2, Image as ImageIcon, FileText, X, Music, Video } from 'lucide-react';
 
@@ -26,6 +30,7 @@ export default function FileUpload({
     placeholder = "Select File",
     className = "",
 }: FileUploadProps) {
+    useLocale();
     const [isUploading, setIsUploading] = useState(false);
     const [isDragOver, setIsDragOver] = useState(false);
     const [uploadedType, setUploadedType] = useState<UploadedFileType | null>(null);
@@ -51,7 +56,7 @@ export default function FileUpload({
         formData.append('file', file);
 
         try {
-            const res = await fetch('/api/media/upload-file', {
+            const res = await apiFetch('/api/media/upload-file', {
                 method: 'POST',
                 body: formData
             });
@@ -164,7 +169,7 @@ export default function FileUpload({
                     {isImagePath || (uploadedType === 'image' && previewUrl) ? (
                         <img
                             src={previewUrl || `/api/media/images/${value.split('/').pop()}`}
-                            alt="Preview"
+                            alt={uiText("components.common.FileUpload.label001")}
                             style={{
                                 width: '60px',
                                 height: '60px',
@@ -222,8 +227,7 @@ export default function FileUpload({
                             {value.split('/').pop()}
                         </div>
                         <div style={{ fontSize: '0.75rem', color: '#9ca3af' }}>
-                            Click to replace
-                        </div>
+                            {uiText("components.common.FileUpload.label002")}</div>
                     </div>
                     {onClear && (
                         <button

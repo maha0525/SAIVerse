@@ -1,3 +1,8 @@
+
+import { apiFetch } from '@/i18n/api';
+
+import { t as uiText } from '@/i18n/core';
+import { useLocale } from '@/i18n/useLocale';
 import React, { useEffect, useState, useCallback } from 'react';
 import { Plus, Edit2, Trash2, RefreshCw, LogIn, LogOut } from 'lucide-react';
 import styles from './ProviderManagementPanel.module.css';
@@ -24,6 +29,7 @@ interface CodexAuthStatus {
 }
 
 export default function ProviderManagementPanel() {
+    useLocale();
     const [providers, setProviders] = useState<ProviderInfo[]>([]);
     const [loading, setLoading] = useState(false);
     const [editorOpen, setEditorOpen] = useState(false);
@@ -41,7 +47,7 @@ export default function ProviderManagementPanel() {
     const loadProviders = useCallback(async () => {
         setLoading(true);
         try {
-            const res = await fetch('/api/providers');
+            const res = await apiFetch('/api/providers');
             if (res.ok) {
                 const data = await res.json();
                 setProviders(data);
@@ -55,7 +61,7 @@ export default function ProviderManagementPanel() {
 
     const loadCodexStatus = useCallback(async () => {
         try {
-            const res = await fetch('/api/codex-auth/status');
+            const res = await apiFetch('/api/codex-auth/status');
             if (res.ok) {
                 setCodexStatus(await res.json());
             }
@@ -70,28 +76,28 @@ export default function ProviderManagementPanel() {
     }, [loadProviders, loadCodexStatus]);
 
     const handleCodexLogout = async () => {
-        if (!confirm('SAIVerse に保存した ChatGPT ログインを削除しますか？\n(Codex CLI 側のログインには影響しません)')) return;
+        if (!confirm(uiText("components.settings.ProviderManagementPanel.text001"))) return;
         try {
-            const res = await fetch('/api/codex-auth/logout', { method: 'POST' });
+            const res = await apiFetch('/api/codex-auth/logout', { method: 'POST' });
             if (!res.ok) {
-                alert(`ログアウトに失敗しました (HTTP ${res.status})`);
+                alert(uiText("components.settings.ProviderManagementPanel.text002", { p1: res.status }));
                 return;
             }
             loadCodexStatus();
         } catch (e) {
-            alert(`ログアウトに失敗しました: ${e}`);
+            alert(uiText("components.settings.ProviderManagementPanel.text003", { p1: e }));
         }
     };
 
     const codexBadge = (status: CodexAuthStatus | null) => {
         if (!status) return null;
         if (status.logged_in && status.store === 'saiverse') {
-            return <span className={`${styles.badge} ${styles.badgeKeyOk}`}>ログイン済み</span>;
+            return <span data-i18n="components.settings.ProviderManagementPanel.text004" className={`${styles.badge} ${styles.badgeKeyOk}`}>{uiText("components.settings.ProviderManagementPanel.text004")}</span>;
         }
         if (status.logged_in && status.store === 'codex_cli') {
-            return <span className={styles.badge}>Codex CLI の認証を利用中</span>;
+            return <span data-i18n="components.settings.ProviderManagementPanel.text005" className={styles.badge}>{uiText("components.settings.ProviderManagementPanel.text005")}</span>;
         }
-        return <span className={`${styles.badge} ${styles.badgeKeyMissing}`}>未ログイン</span>;
+        return <span data-i18n="components.settings.ProviderManagementPanel.text006" className={`${styles.badge} ${styles.badgeKeyMissing}`}>{uiText("components.settings.ProviderManagementPanel.text006")}</span>;
     };
 
     const openCreate = () => {
@@ -110,7 +116,7 @@ export default function ProviderManagementPanel() {
         // Check usage first
         let usingModels: string[] = [];
         try {
-            const res = await fetch(`/api/providers/${provider.id}/models`);
+            const res = await apiFetch(`/api/providers/${provider.id}/models`);
             if (res.ok) {
                 usingModels = await res.json();
             }
@@ -119,16 +125,16 @@ export default function ProviderManagementPanel() {
         }
 
         const confirmMsg = usingModels.length > 0
-            ? `「${provider.display_name}」を削除しますか？\n\nこのプロバイダを参照しているモデル (${usingModels.length}件):\n${usingModels.slice(0, 10).join('\n')}${usingModels.length > 10 ? '\n...' : ''}\n\n削除すると、これらのモデルは動かなくなります。`
-            : `「${provider.display_name}」を削除しますか？`;
+            ? uiText("components.settings.ProviderManagementPanel.text007", { p1: provider.display_name, p2: usingModels.length, p3: usingModels.slice(0, 10).join('\n'), p4: usingModels.length > 10 ? '\n...' : '' })
+            : uiText("components.settings.ProviderManagementPanel.text008", { p1: provider.display_name });
 
         if (!confirm(confirmMsg)) return;
 
         try {
-            const res = await fetch(`/api/providers/${provider.id}`, { method: 'DELETE' });
+            const res = await apiFetch(`/api/providers/${provider.id}`, { method: 'DELETE' });
             if (!res.ok) {
                 const text = await res.text();
-                alert(`削除に失敗しました: ${text}`);
+                alert(uiText("components.settings.ProviderManagementPanel.text009", { p1: text }));
                 return;
             }
             // 削除で決め直したときに、新しい設定に切り替えられなかったペルソナの知らせ
@@ -137,33 +143,31 @@ export default function ProviderManagementPanel() {
             if (notices.length > 0) {
                 alert(notices.join('\n\n'));
             }
-            setNotice('削除しました。書いている途中の返事は削除前の設定のまま書き終え、次の返事から新しい設定で接続します。再起動は要りません。');
+            setNotice(uiText("components.settings.ProviderManagementPanel.text010"));
             loadProviders();
         } catch (e) {
-            alert(`削除に失敗しました: ${e}`);
+            alert(uiText("components.settings.ProviderManagementPanel.text011", { p1: e }));
         }
     };
 
     return (
         <div className={styles.container}>
             <div className={styles.header}>
-                <h3>プロバイダ</h3>
+                <h3 data-i18n="components.settings.ProviderManagementPanel.text012">{uiText("components.settings.ProviderManagementPanel.text012")}</h3>
                 <div className={styles.actions}>
-                    <button className={styles.btnSecondary} onClick={loadProviders}>
-                        <RefreshCw size={14} /> 再読み込み
-                    </button>
-                    <button className={styles.btnPrimary} onClick={openCreate}>
-                        <Plus size={14} /> 新規追加
-                    </button>
+                    <button data-i18n="components.settings.ProviderManagementPanel.text013" className={styles.btnSecondary} onClick={loadProviders}>
+                        <RefreshCw size={14} />{uiText("components.settings.ProviderManagementPanel.text013")}</button>
+                    <button data-i18n="components.settings.ProviderManagementPanel.text014" className={styles.btnPrimary} onClick={openCreate}>
+                        <Plus size={14} />{uiText("components.settings.ProviderManagementPanel.text014")}</button>
                 </div>
             </div>
 
             {notice && <div className={styles.notice}>{notice}</div>}
 
             {loading ? (
-                <div className={styles.empty}>読み込み中...</div>
+                <div data-i18n="components.settings.ProviderManagementPanel.text015" className={styles.empty}>{uiText("components.settings.ProviderManagementPanel.text015")}</div>
             ) : providers.length === 0 ? (
-                <div className={styles.empty}>プロバイダがありません</div>
+                <div data-i18n="components.settings.ProviderManagementPanel.text016" className={styles.empty}>{uiText("components.settings.ProviderManagementPanel.text016")}</div>
             ) : (
                 <div className={styles.list}>
                     {providers.map(p => (
@@ -175,40 +179,37 @@ export default function ProviderManagementPanel() {
                                         {p.builtin ? 'builtin' : 'user_data'}
                                     </span>
                                     {p.api_key_env && (
-                                        <span className={`${styles.badge} ${p.api_key_configured ? styles.badgeKeyOk : styles.badgeKeyMissing}`}>
-                                            {p.api_key_configured ? 'KEY OK' : 'KEY 未設定'}
+                                        <span data-i18n="components.settings.ProviderManagementPanel.text017" className={`${styles.badge} ${p.api_key_configured ? styles.badgeKeyOk : styles.badgeKeyMissing}`}>
+                                            {p.api_key_configured ? 'KEY OK' : uiText("components.settings.ProviderManagementPanel.text017")}
                                         </span>
                                     )}
                                     {p.protocol === 'openai_codex' && codexBadge(codexStatus)}
                                 </div>
-                                <div className={styles.rowSub}>
-                                    {p.id} ・ {p.protocol}
-                                    {p.base_url && ` ・ ${p.base_url}`}
+                                <div data-i18n="components.settings.ProviderManagementPanel.text018 components.settings.ProviderManagementPanel.text019" className={styles.rowSub}>
+                                    {p.id}{uiText("components.settings.ProviderManagementPanel.text018")}{p.protocol}
+                                    {p.base_url && uiText("components.settings.ProviderManagementPanel.text019", { p1: p.base_url })}
                                 </div>
                             </div>
                             <div className={styles.rowActions}>
                                 {p.protocol === 'openai_codex' && (
                                     codexStatus?.logged_in && codexStatus.store === 'saiverse' ? (
-                                        <button className={styles.iconBtn} onClick={handleCodexLogout}>
-                                            <LogOut size={12} /> ログアウト
-                                        </button>
+                                        <button data-i18n="components.settings.ProviderManagementPanel.text020" className={styles.iconBtn} onClick={handleCodexLogout}>
+                                            <LogOut size={12} />{uiText("components.settings.ProviderManagementPanel.text020")}</button>
                                     ) : (
-                                        <button className={styles.iconBtn} onClick={() => setCodexLoginOpen(true)}>
-                                            <LogIn size={12} /> ChatGPT でログイン
-                                        </button>
+                                        <button data-i18n="components.settings.ProviderManagementPanel.text021" className={styles.iconBtn} onClick={() => setCodexLoginOpen(true)}>
+                                            <LogIn size={12} />{uiText("components.settings.ProviderManagementPanel.text021")}</button>
                                     )
                                 )}
-                                <button className={styles.iconBtn} onClick={() => openEdit(p.id)}>
-                                    <Edit2 size={12} /> {p.builtin ? '上書き編集' : '編集'}
+                                <button data-i18n="components.settings.ProviderManagementPanel.text022 components.settings.ProviderManagementPanel.text023" className={styles.iconBtn} onClick={() => openEdit(p.id)}>
+                                    <Edit2 size={12} /> {p.builtin ? uiText("components.settings.ProviderManagementPanel.text022") : uiText("components.settings.ProviderManagementPanel.text023")}
                                 </button>
-                                <button
+                                <button data-i18n="components.settings.ProviderManagementPanel.text024 components.settings.ProviderManagementPanel.text025 components.settings.ProviderManagementPanel.text026"
                                     className={`${styles.iconBtn} ${styles.deleteBtn}`}
                                     onClick={() => handleDelete(p)}
                                     disabled={p.builtin}
-                                    title={p.builtin ? 'builtin は削除できません' : '削除'}
+                                    title={p.builtin ? uiText("components.settings.ProviderManagementPanel.text024") : uiText("components.settings.ProviderManagementPanel.text025")}
                                 >
-                                    <Trash2 size={12} /> 削除
-                                </button>
+                                    <Trash2 size={12} />{uiText("components.settings.ProviderManagementPanel.text026")}</button>
                             </div>
                         </div>
                     ))}
@@ -230,7 +231,7 @@ export default function ProviderManagementPanel() {
                 providerId={editingId}
                 onClose={() => setEditorOpen(false)}
                 onSaved={() => {
-                    setNotice('保存しました。書いている途中の返事は変更前の設定のまま書き終え、次の返事から新しい設定で接続します。再起動は要りません。');
+                    setNotice(uiText("components.settings.ProviderManagementPanel.text027"));
                     loadProviders();
                 }}
             />

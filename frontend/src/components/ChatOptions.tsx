@@ -1,3 +1,10 @@
+
+import { apiFetch } from '@/i18n/api';
+
+import { getFormatLocale } from '@/i18n/core';
+
+import { t as uiText } from '@/i18n/core';
+import { useLocale } from '@/i18n/useLocale';
 import React, { useEffect, useState, useMemo, useRef } from 'react';
 import styles from './ChatOptions.module.css';
 import { X, ChevronDown, Star } from 'lucide-react';
@@ -66,6 +73,7 @@ interface ChatOptionsProps {
 }
 
 export default function ChatOptions({ isOpen, onClose, currentModel: propCurrentModel, onModelChange, buildingId }: ChatOptionsProps) {
+    useLocale();
     const [models, setModels] = useState<ModelInfo[]>([]);
     const [currentModel, setCurrentModel] = useState<string>('');
     const [params, setParams] = useState<Record<string, any>>({});
@@ -113,7 +121,7 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
         let cancelled = false;
         (async () => {
             try {
-                const res = await fetch(`/api/info/details?building_id=${encodeURIComponent(buildingId)}`);
+                const res = await apiFetch(`/api/info/details?building_id=${encodeURIComponent(buildingId)}`);
                 if (!res.ok) return;
                 const data = await res.json();
                 const occ = (data.occupants || []).map((o: { id: string; name: string }) => ({ id: o.id, name: o.name }));
@@ -138,7 +146,7 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
         let cancelled = false;
         const poll = async () => {
             try {
-                const res = await fetch(`/api/people/${encodeURIComponent(selectedCachePersonaId)}/cache-status`);
+                const res = await apiFetch(`/api/people/${encodeURIComponent(selectedCachePersonaId)}/cache-status`);
                 if (!res.ok) return;
                 const data = await res.json();
                 if (!cancelled) {
@@ -176,7 +184,7 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
         let cancelled = false;
         (async () => {
             try {
-                const res = await fetch(`/api/people/${encodeURIComponent(selectedCachePersonaId)}/context-status`);
+                const res = await apiFetch(`/api/people/${encodeURIComponent(selectedCachePersonaId)}/context-status`);
                 if (cancelled) return;
                 if (!res.ok) {
                     setContextStatusError(true);
@@ -209,10 +217,10 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
 
         try {
             const results = await Promise.allSettled([
-                fetch('/api/config/models', { signal: controller.signal }),
-                fetch('/api/config/config', { signal: controller.signal }),
-                fetch('/api/config/cache', { signal: controller.signal }),
-                fetch('/api/config/favorite-models', { signal: controller.signal })
+                apiFetch('/api/config/models', { signal: controller.signal }),
+                apiFetch('/api/config/config', { signal: controller.signal }),
+                apiFetch('/api/config/cache', { signal: controller.signal }),
+                apiFetch('/api/config/favorite-models', { signal: controller.signal })
             ]);
             if (!isStillValid()) return; // 取得中に新しい選択が入った — 結果を捨てる
 
@@ -276,16 +284,16 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
             }
 
             if (failures.length === 3) {
-                setError("バックエンドサーバーに接続できません。サーバーが起動しているか確認してください。");
+                setError(uiText("components.ChatOptions.text001"));
             } else if (failures.length > 0) {
-                setError(`一部の設定を読み込めませんでした (${failures.join(', ')})`);
+                setError(uiText("components.ChatOptions.text002", { p1: failures.join(', ') }));
             }
         } catch (e) {
             console.error("Failed to load config", e);
             if (e instanceof DOMException && e.name === 'AbortError') {
-                setError("設定の読み込みがタイムアウトしました。バックエンドサーバーの応答を確認してください。");
+                setError(uiText("components.ChatOptions.text003"));
             } else {
-                setError("設定の読み込み中にエラーが発生しました。");
+                setError(uiText("components.ChatOptions.text004"));
             }
         } finally {
             clearTimeout(timeoutId);
@@ -318,7 +326,7 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
             : [...favoriteModels, modelId];
         setFavoriteModels(newFavorites);
         try {
-            await fetch('/api/config/favorite-models', {
+            await apiFetch('/api/config/favorite-models', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ models: newFavorites })
@@ -389,7 +397,7 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
         let timedOut = false;
         const timeoutId = setTimeout(() => { timedOut = true; controller.abort(); }, 10000);
         try {
-            const res = await fetch('/api/config/model', {
+            const res = await apiFetch('/api/config/model', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 // client_id + seq: サーバー側の世代ガード — abort した古い要求が
@@ -413,7 +421,7 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
                 const failure = await res.json().catch(() => null);
                 const detail = typeof failure?.detail === 'string' ? failure.detail : '';
                 await fetchData();
-                setError(detail || 'モデルの変更に失敗しました');
+                setError(detail || uiText("components.ChatOptions.text005"));
                 return;
             }
             // Use inline parameters from response (no separate fetch needed)
@@ -439,7 +447,7 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
             }
 
             // Refetch cache config since it depends on selected model
-            const cacheRes = await fetch('/api/config/cache', { signal: controller.signal });
+            const cacheRes = await apiFetch('/api/config/cache', { signal: controller.signal });
             if (seq !== modelChangeSeqRef.current) return;
             if (cacheRes.ok) {
                 setCacheConfig(await cacheRes.json());
@@ -448,7 +456,7 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
             console.error("Failed to set model", e);
             if (seq === modelChangeSeqRef.current) {
                 await fetchData();
-                setError('モデルの変更に失敗しました');
+                setError(uiText("components.ChatOptions.text006"));
                 if (timedOut) {
                     // abort はサーバー側の適用を止めない — 遅れて確定した状態を
                     // 拾い直す。ただし予約後に新しい選択が入ったら実行しない
@@ -482,7 +490,7 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
 
     const handleMaxImageEmbedsCommit = async () => {
         try {
-            await fetch('/api/config/max-image-embeds', {
+            await apiFetch('/api/config/max-image-embeds', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ value: maxImageEmbeds })
@@ -498,7 +506,7 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
         // 楽観更新: セレクタを即反映。残り時間 (ttl_seconds/expires_at) は次の poll で更新される。
         setCacheStatus(prev => (prev ? { ...prev, cache_setting: setting } : prev));
         try {
-            await fetch(`/api/people/${encodeURIComponent(selectedCachePersonaId)}/cache-config`, {
+            await apiFetch(`/api/people/${encodeURIComponent(selectedCachePersonaId)}/cache-config`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ setting }),
@@ -510,7 +518,7 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
 
     const saveParams = async () => {
         try {
-            await fetch('/api/config/parameters', {
+            await apiFetch('/api/config/parameters', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ parameters: params })
@@ -534,34 +542,35 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
 
     const handleSaveAs = async () => {
         if (!currentModel) return;
-        const newKey = window.prompt('新しいモデルキー (ファイル名) を入力:', `${currentModel}-tweaked`);
+        const newKey = window.prompt(uiText("components.ChatOptions.text007"), `${currentModel}-tweaked`);
         if (!newKey) return;
         const currentDisplay = models.find(m => m.id === currentModel)?.name || currentModel;
-        const newDisplay = window.prompt('表示名を入力:', `${currentDisplay} (custom)`);
+        const newDisplay = window.prompt(uiText("components.ChatOptions.text008"), `${currentDisplay} (custom)`);
         if (!newDisplay) return;
 
         setSavingAs(true);
         try {
-            const res = await fetch('/api/config/models/save-from-chat', {
+            const res = await apiFetch('/api/config/models/save-from-chat', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(buildSaveFromChatPayload(newKey, newDisplay, false)),
             });
             if (!res.ok) {
-                alert(`保存に失敗しました: ${await res.text()}`);
+                alert(uiText("components.ChatOptions.text009", { p1: await res.text() }));
                 return;
             }
             // 保存で決め直したときに、新しい設定に切り替えられなかったペルソナの知らせ
             const saved = await res.json().catch(() => null);
             const notices: string[] = Array.isArray(saved?.notices) ? saved.notices : [];
             // Refresh model list so the new model appears in the dropdown
-            const modelsRes = await fetch('/api/config/models');
+            const modelsRes = await apiFetch('/api/config/models');
             if (modelsRes.ok) setModels(await modelsRes.json());
+            const saveMsg = uiText("components.ChatOptions.text010");
             alert(notices.length > 0
-                ? `新しいモデルとして保存しました\n\n${notices.join('\n\n')}`
-                : '新しいモデルとして保存しました');
+                ? `${saveMsg}\n\n${notices.join('\n\n')}`
+                : saveMsg);
         } catch (e) {
-            alert(`保存に失敗しました: ${e}`);
+            alert(uiText("components.ChatOptions.text011", { p1: e }));
         } finally {
             setSavingAs(false);
         }
@@ -571,27 +580,28 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
         if (!currentModel) return;
         const modelInfo = models.find(m => m.id === currentModel);
         const displayName = modelInfo?.name || currentModel;
-        if (!window.confirm(`現在の設定を「${displayName}」に上書き保存しますか？\n\n※ builtin/expansion モデルの場合は user_data に上書きコピーが作成されます (元のファイルは変更されません)。`)) return;
+        if (!window.confirm(uiText("components.ChatOptions.text012", { p1: displayName }))) return;
 
         setSavingAs(true);
         try {
-            const res = await fetch('/api/config/models/save-from-chat', {
+            const res = await apiFetch('/api/config/models/save-from-chat', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(buildSaveFromChatPayload(currentModel, displayName, true)),
             });
             if (!res.ok) {
-                alert(`上書き保存に失敗しました: ${await res.text()}`);
+                alert(uiText("components.ChatOptions.text013", { p1: await res.text() }));
                 return;
             }
             // 保存で決め直したときに、新しい設定に切り替えられなかったペルソナの知らせ
             const saved = await res.json().catch(() => null);
             const notices: string[] = Array.isArray(saved?.notices) ? saved.notices : [];
+            const saveMsg = uiText("components.ChatOptions.text014");
             alert(notices.length > 0
-                ? `上書き保存しました\n\n${notices.join('\n\n')}`
-                : '上書き保存しました');
+                ? `${saveMsg}\n\n${notices.join('\n\n')}`
+                : saveMsg);
         } catch (e) {
-            alert(`上書き保存に失敗しました: ${e}`);
+            alert(uiText("components.ChatOptions.text015", { p1: e }));
         } finally {
             setSavingAs(false);
         }
@@ -599,16 +609,16 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
 
     const renderCacheTimerBody = () => {
         if (!cacheStatus) {
-            return <span className={styles.hint}>読み込み中...</span>;
+            return <span data-i18n="components.ChatOptions.text016" className={styles.hint}>{uiText("components.ChatOptions.text016")}</span>;
         }
         if (!cacheStatus.supported) {
-            return <span className={styles.hint}>このモデルは明示的キャッシュに非対応です（タイマー対象外）。</span>;
+            return <span data-i18n="components.ChatOptions.text017" className={styles.hint}>{uiText("components.ChatOptions.text017")}</span>;
         }
         if (cacheStatus.cache_setting === 'off') {
-            return <span className={styles.hint}>このペルソナはキャッシュ無効です。</span>;
+            return <span data-i18n="components.ChatOptions.text018" className={styles.hint}>{uiText("components.ChatOptions.text018")}</span>;
         }
         if (!cacheStatus.active || !cacheStatus.expires_at || !cacheStatus.ttl_seconds) {
-            return <span className={styles.hint}>キャッシュは現在効いていません（次の発話で作成されます）。</span>;
+            return <span data-i18n="components.ChatOptions.text019" className={styles.hint}>{uiText("components.ChatOptions.text019")}</span>;
         }
         const remainingSec = Math.max(0, Math.round((cacheStatus.expires_at * 1000 - nowMs) / 1000));
         const pct = Math.max(0, Math.min(100, (remainingSec / cacheStatus.ttl_seconds) * 100));
@@ -626,11 +636,9 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
                     <div className={styles.timerBar}>
                         <div className={styles.timerBarFill} style={{ width: `${pct}%`, background: color }} />
                     </div>
-                    <span className={styles.timerText}>残り {timeText}</span>
+                    <span data-i18n="components.ChatOptions.text020" className={styles.timerText}>{uiText("components.ChatOptions.text020")}{timeText}</span>
                 </div>
-                <span className={styles.hint}>
-                    キャッシュ有効中。残り時間内に発話すると cache hit（格安）になります。
-                </span>
+                <span data-i18n="components.ChatOptions.text021" className={styles.hint}>{uiText("components.ChatOptions.text021")}</span>
             </>
         );
     };
@@ -639,19 +647,17 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
     // 上限を超えると古い順にあらすじへ畳まれる。設定はモデル定義側 (モデル編集画面)。
     const renderContextStatusBody = () => {
         if (!selectedCachePersonaId) {
-            return <span className={styles.hint}>ペルソナのいる建物で開くと、会話コンテキストの状態が表示されます。</span>;
+            return <span data-i18n="components.ChatOptions.text022" className={styles.hint}>{uiText("components.ChatOptions.text022")}</span>;
         }
         if (contextStatusError) {
-            return <span className={styles.hint}>状態を取得できませんでした。開き直すか、ペルソナを切り替えると再試行します。</span>;
+            return <span data-i18n="components.ChatOptions.text023" className={styles.hint}>{uiText("components.ChatOptions.text023")}</span>;
         }
         if (!contextStatus) {
-            return <span className={styles.hint}>読み込み中...</span>;
+            return <span data-i18n="components.ChatOptions.text024" className={styles.hint}>{uiText("components.ChatOptions.text024")}</span>;
         }
         if (!contextStatus.metabolism) {
             return (
-                <span className={styles.hint}>
-                    このモデル（{contextStatus.model || '未設定'}）は水位を持たない設定のため、履歴の自動整理は行われません。
-                </span>
+                <span data-i18n="components.ChatOptions.text025 components.ChatOptions.text026 components.ChatOptions.text027" className={styles.hint}>{uiText("components.ChatOptions.text025")}{contextStatus.model || uiText("components.ChatOptions.text026")}{uiText("components.ChatOptions.text027")}</span>
             );
         }
         return (
@@ -659,19 +665,13 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
                 {canDrawContextVolumeBar(contextStatus) ? (
                     <ContextVolumeBar status={contextStatus} />
                 ) : contextStatus.measurement_failed ? (
-                    <span className={styles.hint}>現在量を測定できませんでした（水位のみ表示しています）。</span>
+                    <span data-i18n="components.ChatOptions.text028" className={styles.hint}>{uiText("components.ChatOptions.text028")}</span>
                 ) : (
-                    <span className={styles.hint}>まだ会話の起点がありません。最初の会話で確立されます。</span>
+                    <span data-i18n="components.ChatOptions.text029" className={styles.hint}>{uiText("components.ChatOptions.text029")}</span>
                 )}
-                <span className={styles.hint}>
-                    会話履歴は始点を固定したまま送られ、送る合計（会話・スペル結果・部屋の様子のすべて）が上限を超えると、古い出来事から順にあらすじへ畳んで整理します。
-                    「残す量」は畳んだ後に残す会話の量で、会話だけを数えます — スペル結果や部屋の様子がどれだけ大きくても、そのぶん会話が削られることはありません。
-                    {contextStatus.fold_unit_chars != null && contextStatus.fold_unit_chars > 0 && (
-                        `整理は古い側から約 ${contextStatus.fold_unit_chars.toLocaleString()} 文字ぶんずつまとめて畳みます（一度に畳む量は、スペルの結果などの長い記録を圧縮した後の字数で数えます）。`
-                    )}
-                    畳みすぎて残す量を下回ったときは、次の会話の前に畳んだ範囲を自動で開き直します。
-                    水位を変えたいときは、設定のモデル編集から（モデルごとの設定です）。
-                </span>
+                <span data-i18n="components.ChatOptions.text030 components.ChatOptions.text031 components.ChatOptions.text032" className={styles.hint}>{uiText("components.ChatOptions.text030")}{contextStatus.fold_unit_chars != null && contextStatus.fold_unit_chars > 0 && (
+                        uiText("components.ChatOptions.text031", { p1: contextStatus.fold_unit_chars.toLocaleString(getFormatLocale()) })
+                    )}{uiText("components.ChatOptions.text032")}</span>
             </>
         );
     };
@@ -682,33 +682,33 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
         <div className={styles.overlay}>
             <div className={styles.modal}>
                 <div className={styles.header}>
-                    <h2>チャットオプション</h2>
+                    <h2 data-i18n="components.ChatOptions.text033">{uiText("components.ChatOptions.text033")}</h2>
                     <button className={styles.closeBtn} onClick={onClose}><X size={24} /></button>
                 </div>
 
                 <div className={styles.content}>
                     {loading ? (
-                        <div>設定を読み込み中...</div>
+                        <div data-i18n="components.ChatOptions.text034">{uiText("components.ChatOptions.text034")}</div>
                     ) : (
                         <>
                             {error && (
                                 <div className={styles.errorBanner}>
                                     <span>{error}</span>
-                                    <button className={styles.retryBtn} onClick={fetchData}>再試行</button>
+                                    <button data-i18n="components.ChatOptions.text035" className={styles.retryBtn} onClick={fetchData}>{uiText("components.ChatOptions.text035")}</button>
                                 </div>
                             )}
                             <div className={styles.section}>
                                 <div className={styles.formGroup}>
-                                    <label>モデル</label>
+                                    <label data-i18n="components.ChatOptions.text036">{uiText("components.ChatOptions.text036")}</label>
                                     <div className={styles.modelSelectRow}>
                                         <select
                                             className={styles.select}
                                             value={currentModel}
                                             onChange={(e) => handleModelChange(e.target.value)}
                                         >
-                                            <option value="">（デフォルト）</option>
+                                            <option data-i18n="components.ChatOptions.text037" value="">{uiText("components.ChatOptions.text037")}</option>
                                             {groupedModels.favorites.length > 0 && (
-                                                <optgroup label="★ お気に入り">
+                                                <optgroup data-i18n="components.ChatOptions.text038" label={uiText("components.ChatOptions.text038")}>
                                                     {groupedModels.favorites.map(m => (
                                                         <option key={`fav-${m.id}`} value={m.id}>{m.name}</option>
                                                     ))}
@@ -723,10 +723,10 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
                                             ))}
                                         </select>
                                         {currentModel && (
-                                            <button
+                                            <button data-i18n="components.ChatOptions.text039 components.ChatOptions.text040"
                                                 className={`${styles.favoriteBtn} ${isFavorite(currentModel) ? styles.favoriteBtnActive : ''}`}
                                                 onClick={() => toggleFavorite(currentModel)}
-                                                title={isFavorite(currentModel) ? 'お気に入りから削除' : 'お気に入りに追加'}
+                                                title={isFavorite(currentModel) ? uiText("components.ChatOptions.text039") : uiText("components.ChatOptions.text040")}
                                             >
                                                 <Star size={18} fill={isFavorite(currentModel) ? 'currentColor' : 'none'} />
                                             </button>
@@ -737,10 +737,10 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
                                         if (!sel || (sel.input_price == null && sel.output_price == null)) return null;
                                         const cur = sel.currency ?? 'USD';
                                         return (
-                                            <span className={styles.hint}>
-                                                {sel.input_price != null && `入力: ${formatCost(sel.input_price, cur)}/1M tokens`}
-                                                {sel.input_price != null && sel.output_price != null && ' ・ '}
-                                                {sel.output_price != null && `出力: ${formatCost(sel.output_price, cur)}/1M tokens`}
+                                            <span data-i18n="components.ChatOptions.text041 components.ChatOptions.text042 components.ChatOptions.text043" className={styles.hint}>
+                                                {sel.input_price != null && uiText("components.ChatOptions.text041", { p1: formatCost(sel.input_price, cur) })}
+                                                {sel.input_price != null && sel.output_price != null && uiText("components.ChatOptions.text042")}
+                                                {sel.output_price != null && uiText("components.ChatOptions.text043", { p1: formatCost(sel.output_price, cur) })}
                                             </span>
                                         );
                                     })()}
@@ -750,7 +750,7 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
                             {cachePersonas.length > 0 && (
                                 <div className={styles.section}>
                                     <div className={styles.formGroup}>
-                                        <label>キャッシュ（このペルソナ）</label>
+                                        <label data-i18n="components.ChatOptions.text044">{uiText("components.ChatOptions.text044")}</label>
                                         {cachePersonas.length > 1 && (
                                             <div className={styles.cacheTimerTabs}>
                                                 {cachePersonas.map(p => (
@@ -767,15 +767,15 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
                                         )}
                                         {cacheStatus?.supported && (
                                             <div className={styles.cacheTtlOverrideRow}>
-                                                <span className={styles.cacheTtlOverrideLabel}>キャッシュ</span>
+                                                <span data-i18n="components.ChatOptions.text045" className={styles.cacheTtlOverrideLabel}>{uiText("components.ChatOptions.text045")}</span>
                                                 <select
                                                     className={styles.select}
                                                     value={cacheStatus.cache_setting}
                                                     onChange={(e) => handleCacheSettingChange(e.target.value)}
                                                 >
-                                                    <option value="off">オフ</option>
-                                                    <option value="5m">5分</option>
-                                                    <option value="1h">1時間（連続対話向け）</option>
+                                                    <option data-i18n="components.ChatOptions.text046" value="off">{uiText("components.ChatOptions.text046")}</option>
+                                                    <option data-i18n="components.ChatOptions.text047" value="5m">{uiText("components.ChatOptions.text047")}</option>
+                                                    <option data-i18n="components.ChatOptions.text048" value="1h">{uiText("components.ChatOptions.text048")}</option>
                                                 </select>
                                             </div>
                                         )}
@@ -789,7 +789,7 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
                                     className={styles.collapsibleTitle}
                                     onClick={() => setHistorySettingsOpen(!historySettingsOpen)}
                                 >
-                                    <span>データ送信量の管理</span>
+                                    <span data-i18n="components.ChatOptions.text049">{uiText("components.ChatOptions.text049")}</span>
                                     <ChevronDown
                                         size={16}
                                         className={`${styles.chevron} ${historySettingsOpen ? styles.chevronOpen : ''}`}
@@ -798,7 +798,7 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
                                 {historySettingsOpen && (
                                     <>
                                         <div className={styles.formGroup}>
-                                            <label>会話コンテキストの現在量</label>
+                                            <label data-i18n="components.ChatOptions.text050">{uiText("components.ChatOptions.text050")}</label>
                                             {cachePersonas.length > 1 && (
                                                 <div className={styles.cacheTimerTabs}>
                                                     {cachePersonas.map(p => (
@@ -816,25 +816,21 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
                                             {renderContextStatusBody()}
                                         </div>
                                         <div className={styles.formGroup}>
-                                            <label>
-                                                画像埋め込み上限
-                                                {maxImageEmbedsDefault != null && (
-                                                    <span className={styles.hint}> （モデルデフォルト: {maxImageEmbedsDefault}）</span>
+                                            <label data-i18n="components.ChatOptions.text051">{uiText("components.ChatOptions.text051")}{maxImageEmbedsDefault != null && (
+                                                    <span data-i18n="components.ChatOptions.text052" className={styles.hint}>{uiText("components.ChatOptions.text052")}{maxImageEmbedsDefault}）</span>
                                                 )}
                                             </label>
-                                            <input
+                                            <input data-i18n="components.ChatOptions.text053 components.ChatOptions.text054"
                                                 type="number"
                                                 className={styles.input}
                                                 min={0}
                                                 max={50}
                                                 value={maxImageEmbeds ?? ''}
-                                                placeholder={maxImageEmbedsDefault ? `（自動: ${maxImageEmbedsDefault}）` : '（デフォルト: 4）'}
+                                                placeholder={maxImageEmbedsDefault ? uiText("components.ChatOptions.text053", { p1: maxImageEmbedsDefault }) : uiText("components.ChatOptions.text054")}
                                                 onChange={(e) => handleMaxImageEmbedsInput(e.target.value)}
                                                 onBlur={() => handleMaxImageEmbedsCommit()}
                                             />
-                                            <span className={styles.hint}>
-                                                LLMに送信する画像の最大枚数。超過分はテキスト要約に置換されます。0で全画像をテキスト化。空欄でデフォルト値（4枚）を使用。
-                                            </span>
+                                            <span data-i18n="components.ChatOptions.text055" className={styles.hint}>{uiText("components.ChatOptions.text055")}</span>
                                         </div>
                                     </>
                                 )}
@@ -846,7 +842,7 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
                                         className={styles.collapsibleTitle}
                                         onClick={() => setModelParamsOpen(!modelParamsOpen)}
                                     >
-                                        <span>モデルパラメータ</span>
+                                        <span data-i18n="components.ChatOptions.text056">{uiText("components.ChatOptions.text056")}</span>
                                         <ChevronDown
                                             size={16}
                                             className={`${styles.chevron} ${modelParamsOpen ? styles.chevronOpen : ''}`}
@@ -900,34 +896,28 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
 
                 <div className={styles.footer}>
                     <div className={styles.footerLeft}>
-                        <button
+                        <button data-i18n="components.ChatOptions.text057 components.ChatOptions.text058"
                             className={styles.linkBtn}
                             onClick={() => setEditorOpen(true)}
                             disabled={!currentModel}
-                            title="モデルファイル全体を JSON で編集"
-                        >
-                            詳細編集...
-                        </button>
-                        <button
+                            title={uiText("components.ChatOptions.text057")}
+                        >{uiText("components.ChatOptions.text058")}</button>
+                        <button data-i18n="components.ChatOptions.text059 components.ChatOptions.text060"
                             className={styles.linkBtn}
                             onClick={handleSaveAs}
                             disabled={!currentModel || savingAs}
-                            title="現在の設定を新しいモデルとして保存"
-                        >
-                            別名で保存...
-                        </button>
-                        <button
+                            title={uiText("components.ChatOptions.text059")}
+                        >{uiText("components.ChatOptions.text060")}</button>
+                        <button data-i18n="components.ChatOptions.text061 components.ChatOptions.text062"
                             className={styles.linkBtn}
                             onClick={handleOverwrite}
                             disabled={!currentModel || savingAs}
-                            title="現在の設定をこのモデルに上書き保存"
-                        >
-                            上書き保存
-                        </button>
+                            title={uiText("components.ChatOptions.text061")}
+                        >{uiText("components.ChatOptions.text062")}</button>
                     </div>
                     <div className={styles.footerRight}>
-                        <button className={styles.cancelBtn} onClick={onClose}>閉じる</button>
-                        <button className={styles.saveBtn} onClick={saveParams}>設定を適用</button>
+                        <button data-i18n="components.ChatOptions.text063" className={styles.cancelBtn} onClick={onClose}>{uiText("components.ChatOptions.text063")}</button>
+                        <button data-i18n="components.ChatOptions.text064" className={styles.saveBtn} onClick={saveParams}>{uiText("components.ChatOptions.text064")}</button>
                     </div>
                 </div>
             </div>

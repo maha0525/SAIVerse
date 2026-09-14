@@ -1,3 +1,8 @@
+
+import { getFormatLocale } from '@/i18n/core';
+
+import { t as uiText } from '@/i18n/core';
+import { useLocale } from '@/i18n/useLocale';
 import React from 'react';
 import styles from './ContextVolumeBar.module.css';
 
@@ -67,6 +72,7 @@ function scaleMaxOf(status: ContextStatus): number | null {
  * null を返す — その場合の説明文は、置き場所ごとに文言が違うので呼び出し側が出す。
  */
 export default function ContextVolumeBar({ status }: ContextVolumeBarProps) {
+    useLocale();
     const presented = status.presented_chars;
     const target = status.target_chars;
     const high = status.high_chars;
@@ -87,12 +93,12 @@ export default function ContextVolumeBar({ status }: ContextVolumeBarProps) {
     const storedChars = status.stored_chars ?? null;
     const breakdownParts: string[] = [];
     if (typeof storedChars === 'number') {
-        breakdownParts.push(`会話 ${storedChars.toLocaleString()}`);
+        breakdownParts.push(uiText("components.common.ContextVolumeBar.text001", { p1: storedChars.toLocaleString(getFormatLocale()) }));
         if (mechanismChars != null && mechanismChars > 0) {
-            breakdownParts.push(`スペル結果 ${mechanismChars.toLocaleString()}`);
+            breakdownParts.push(uiText("components.common.ContextVolumeBar.text002", { p1: mechanismChars.toLocaleString(getFormatLocale()) }));
         }
         if (perceptionChars != null && perceptionChars > 0) {
-            breakdownParts.push(`部屋の様子 ${perceptionChars.toLocaleString()}`);
+            breakdownParts.push(uiText("components.common.ContextVolumeBar.text003", { p1: perceptionChars.toLocaleString(getFormatLocale()) }));
         }
     }
 
@@ -113,22 +119,17 @@ export default function ContextVolumeBar({ status }: ContextVolumeBarProps) {
                 )}
             </div>
             <div className={styles.contextStatRow}>
-                <span>
-                    現在 {presented.toLocaleString()}文字{status.refill_applied ? '（読み戻し後）' : ''}
+                <span data-i18n="components.common.ContextVolumeBar.text004 components.common.ContextVolumeBar.text005 components.common.ContextVolumeBar.text006 components.common.ContextVolumeBar.text007">{uiText("components.common.ContextVolumeBar.text004")}{presented.toLocaleString(getFormatLocale())}{uiText("components.common.ContextVolumeBar.text005")}{status.refill_applied ? uiText("components.common.ContextVolumeBar.text006") : ''}
                     {breakdownParts.length > 1
-                        ? `（うち${breakdownParts.join('・')}）`
+                        ? uiText("components.common.ContextVolumeBar.text007", { p1: breakdownParts.join('・') })
                         : ''}
                 </span>
-                <span>
-                    残す量 {target != null ? `${target.toLocaleString()}文字` : '—'} ／
-                    上限 {high != null ? `${high.toLocaleString()}文字` : 'なし'}
+                <span data-i18n="components.common.ContextVolumeBar.text008 components.common.ContextVolumeBar.text009 components.common.ContextVolumeBar.text010 components.common.ContextVolumeBar.text011 components.common.ContextVolumeBar.text012">{uiText("components.common.ContextVolumeBar.text008")}{target != null ? uiText("components.common.ContextVolumeBar.text009", { p1: target.toLocaleString(getFormatLocale()) }) : '—'}{uiText("components.common.ContextVolumeBar.text010")}{high != null ? uiText("components.common.ContextVolumeBar.text011", { p1: high.toLocaleString(getFormatLocale()) }) : uiText("components.common.ContextVolumeBar.text012")}
                 </span>
             </div>
             {status.perception_over_budget && (
                 <div className={styles.contextStatRow}>
-                    <span>
-                        会話は残す量以下ですが、スペル結果や部屋の様子を足した合計が上限を超えています。整理しても畳めるものはありません。
-                    </span>
+                    <span data-i18n="components.common.ContextVolumeBar.text013">{uiText("components.common.ContextVolumeBar.text013")}</span>
                 </div>
             )}
         </>

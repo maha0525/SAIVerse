@@ -1,4 +1,11 @@
 'use client';
+import { apiFetch } from '@/i18n/api';
+
+import { getFormatLocale } from '@/i18n/core';
+
+import { t as uiText } from '@/i18n/core';
+import { useLocale } from '@/i18n/useLocale';
+
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
     Loader2, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight,
@@ -34,6 +41,7 @@ interface PulseLogsViewerProps {
 }
 
 export default function PulseLogsViewer({ personaId }: PulseLogsViewerProps) {
+    useLocale();
     // Pulse list state
     const [pulses, setPulses] = useState<PulseSummary[]>([]);
     const [selectedPulseId, setSelectedPulseId] = useState<string | null>(null);
@@ -93,7 +101,7 @@ export default function PulseLogsViewer({ personaId }: PulseLogsViewerProps) {
     const loadPulses = async () => {
         setIsLoadingPulses(true);
         try {
-            const res = await fetch(
+            const res = await apiFetch(
                 `/api/people/${personaId}/pulse-logs?page=${pulsePage}&page_size=${pulsePageSize}`
             );
             if (res.ok) {
@@ -114,7 +122,7 @@ export default function PulseLogsViewer({ personaId }: PulseLogsViewerProps) {
     const loadEntries = async (pulseId: string) => {
         setIsLoadingEntries(true);
         try {
-            const res = await fetch(
+            const res = await apiFetch(
                 `/api/people/${personaId}/pulse-logs/${encodeURIComponent(pulseId)}`
             );
             if (res.ok) {
@@ -135,7 +143,7 @@ export default function PulseLogsViewer({ personaId }: PulseLogsViewerProps) {
 
     const formatTime = (ts: number) => {
         if (!ts) return "";
-        return new Date(ts * 1000).toLocaleString();
+        return new Date(ts * 1000).toLocaleString(getFormatLocale());
     };
 
     const formatTimeShort = (ts: number) => {
@@ -159,7 +167,7 @@ export default function PulseLogsViewer({ personaId }: PulseLogsViewerProps) {
         <div className={styles.container}>
             {/* Left sidebar: Pulse list */}
             <div className={`${styles.sidebar} ${!showList ? styles.mobileHidden : ''}`}>
-                <div className={styles.sidebarHeader}>パルス一覧</div>
+                <div data-i18n="components.memory.PulseLogsViewer.text001" className={styles.sidebarHeader}>{uiText("components.memory.PulseLogsViewer.text001")}</div>
                 <div className={styles.threadList}>
                     {isLoadingPulses ? (
                         <div className={styles.emptyState}>
@@ -168,7 +176,7 @@ export default function PulseLogsViewer({ personaId }: PulseLogsViewerProps) {
                     ) : pulses.length === 0 ? (
                         <div className={styles.emptyState}>
                             <Activity size={48} style={{ opacity: 0.3 }} />
-                            <p>パルスログがありません</p>
+                            <p data-i18n="components.memory.PulseLogsViewer.text002">{uiText("components.memory.PulseLogsViewer.text002")}</p>
                         </div>
                     ) : (
                         pulses.map((pulse) => (
@@ -189,9 +197,8 @@ export default function PulseLogsViewer({ personaId }: PulseLogsViewerProps) {
                                         {pulse.playbook_name}
                                     </div>
                                 )}
-                                <div className={styles.threadPreview}>
-                                    {formatTime(pulse.latest_created_at)} ({pulse.entry_count}件)
-                                </div>
+                                <div data-i18n="components.memory.PulseLogsViewer.text003" className={styles.threadPreview}>
+                                    {formatTime(pulse.latest_created_at)} ({pulse.entry_count}{uiText("components.memory.PulseLogsViewer.text003")}</div>
                             </div>
                         ))
                     )}
@@ -227,13 +234,13 @@ export default function PulseLogsViewer({ personaId }: PulseLogsViewerProps) {
                     <button className={styles.backButton} onClick={() => setShowList(true)}>
                         <ChevronLeft size={20} />
                     </button>
-                    <span className={styles.headerTitle}>
+                    <span data-i18n="components.memory.PulseLogsViewer.text004" className={styles.headerTitle}>
                         {selectedPulseId
                             ? `Pulse: ${selectedPulseId.substring(0, 8)}...`
-                            : 'パルスを選択してください'}
+                            : uiText("components.memory.PulseLogsViewer.text004")}
                     </span>
                     <div className={styles.headerActions}>
-                        <span className={styles.msgCount}>{entries.length}件</span>
+                        <span data-i18n="components.memory.PulseLogsViewer.text005" className={styles.msgCount}>{entries.length}{uiText("components.memory.PulseLogsViewer.text005")}</span>
                     </div>
                 </div>
 
@@ -245,11 +252,11 @@ export default function PulseLogsViewer({ personaId }: PulseLogsViewerProps) {
                     ) : !selectedPulseId ? (
                         <div className={styles.emptyState}>
                             <Activity size={48} style={{ opacity: 0.3 }} />
-                            <p>左のリストからパルスを選択してください</p>
+                            <p data-i18n="components.memory.PulseLogsViewer.text006">{uiText("components.memory.PulseLogsViewer.text006")}</p>
                         </div>
                     ) : entries.length === 0 ? (
                         <div className={styles.emptyState}>
-                            <p>エントリがありません</p>
+                            <p data-i18n="components.memory.PulseLogsViewer.text007">{uiText("components.memory.PulseLogsViewer.text007")}</p>
                         </div>
                     ) : (
                         entries.map((entry) => (
@@ -281,8 +288,7 @@ export default function PulseLogsViewer({ personaId }: PulseLogsViewerProps) {
                                         )}
                                         {entry.important && (
                                             <span className={pulseStyles.importantBadge}>
-                                                important
-                                            </span>
+                                                {uiText("components.memory.PulseLogsViewer.label001")}</span>
                                         )}
                                     </div>
                                     <div className={styles.msgHeaderRight}>
@@ -295,8 +301,7 @@ export default function PulseLogsViewer({ personaId }: PulseLogsViewerProps) {
                                 {entry.tool_calls && (
                                     <details className={pulseStyles.toolCallsBlock}>
                                         <summary className={pulseStyles.toolCallsSummary}>
-                                            Tool Calls
-                                        </summary>
+                                            {uiText("components.memory.PulseLogsViewer.label002")}</summary>
                                         <pre className={pulseStyles.toolCallsContent}>
                                             {(() => {
                                                 try {
@@ -326,14 +331,14 @@ export default function PulseLogsViewer({ personaId }: PulseLogsViewerProps) {
                                     )}
                                 </div>
                                 {overflowingEntries.has(entry.id) && (
-                                    <button
+                                    <button data-i18n="components.memory.PulseLogsViewer.text008 components.memory.PulseLogsViewer.text009"
                                         className={styles.expandBtn}
                                         onClick={() => toggleExpand(entry.id)}
                                     >
                                         {expandedEntries.has(entry.id) ? (
-                                            <><ChevronUp size={14} /> 折りたたむ</>
+                                            <><ChevronUp size={14} />{uiText("components.memory.PulseLogsViewer.text008")}</>
                                         ) : (
-                                            <><ChevronDown size={14} /> もっと見る</>
+                                            <><ChevronDown size={14} />{uiText("components.memory.PulseLogsViewer.text009")}</>
                                         )}
                                     </button>
                                 )}

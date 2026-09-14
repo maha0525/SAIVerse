@@ -1,4 +1,9 @@
 'use client';
+import { apiFetch } from '@/i18n/api';
+
+import { t as uiText } from '@/i18n/core';
+import { useLocale } from '@/i18n/useLocale';
+
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Loader2 } from 'lucide-react';
@@ -37,6 +42,7 @@ export default function OAuthFlowSection({
     flows,
     personaId,
 }: OAuthFlowSectionProps) {
+    useLocale();
     if (!flows || flows.length === 0) return null;
 
     return (
@@ -62,6 +68,7 @@ function FlowRow({
     flow: OAuthFlow;
     personaId: string;
 }) {
+    useLocale();
     const selectedPersonaId = personaId;
     const [status, setStatus] = useState<OAuthStatus | null>(null);
     const [loading, setLoading] = useState(false);
@@ -75,7 +82,7 @@ function FlowRow({
             return;
         }
         try {
-            const res = await fetch(
+            const res = await apiFetch(
                 `/api/oauth/${addonName}/${flow.key}/${encodeURIComponent(selectedPersonaId)}/status`
             );
             if (res.ok) {
@@ -83,7 +90,7 @@ function FlowRow({
                 setError(null);
             } else {
                 const data = await res.json().catch(() => ({}));
-                setError(data.detail || `ステータス取得に失敗しました (${res.status})`);
+                setError(data.detail || uiText("components.OAuthFlowSection.text001", { p1: res.status }));
             }
         } catch (err) {
             setError(err instanceof Error ? err.message : String(err));
@@ -102,12 +109,12 @@ function FlowRow({
         setLoading(true);
         setError(null);
         try {
-            const res = await fetch(
+            const res = await apiFetch(
                 `/api/oauth/start/${addonName}/${flow.key}?persona_id=${encodeURIComponent(selectedPersonaId)}`
             );
             if (!res.ok) {
                 const data = await res.json().catch(() => ({}));
-                setError(data.detail || `認可URL取得に失敗しました (${res.status})`);
+                setError(data.detail || uiText("components.OAuthFlowSection.text002", { p1: res.status }));
                 setLoading(false);
                 return;
             }
@@ -137,15 +144,15 @@ function FlowRow({
 
     const handleDisconnect = useCallback(async () => {
         if (!selectedPersonaId) return;
-        if (!confirm(`${flow.label}: 連携を解除しますか？`)) return;
+        if (!confirm(uiText("components.OAuthFlowSection.text003", { p1: flow.label }))) return;
         try {
-            const res = await fetch(
+            const res = await apiFetch(
                 `/api/oauth/${addonName}/${flow.key}/${encodeURIComponent(selectedPersonaId)}`,
                 { method: 'DELETE' }
             );
             if (!res.ok) {
                 const data = await res.json().catch(() => ({}));
-                setError(data.detail || `切断に失敗しました (${res.status})`);
+                setError(data.detail || uiText("components.OAuthFlowSection.text004", { p1: res.status }));
                 return;
             }
             setError(null);
@@ -166,27 +173,24 @@ function FlowRow({
 
             {status?.connected ? (
                 <div className={styles.statusRow}>
-                    <span className={styles.statusBadgeConnected}>連携中</span>
+                    <span data-i18n="components.OAuthFlowSection.text005" className={styles.statusBadgeConnected}>{uiText("components.OAuthFlowSection.text005")}</span>
                     {Object.entries(status.params).map(([k, v]) => (
                         <span key={k} className={styles.statusParam}>
                             {k}: {String(v)}
                         </span>
                     ))}
-                    <button className={styles.disconnectBtn} onClick={handleDisconnect}>
-                        切断
-                    </button>
+                    <button data-i18n="components.OAuthFlowSection.text006" className={styles.disconnectBtn} onClick={handleDisconnect}>{uiText("components.OAuthFlowSection.text006")}</button>
                 </div>
             ) : (
                 <div className={styles.statusRow}>
-                    <span className={styles.statusBadgeDisconnected}>未連携</span>
-                    <button
+                    <span data-i18n="components.OAuthFlowSection.text007" className={styles.statusBadgeDisconnected}>{uiText("components.OAuthFlowSection.text007")}</span>
+                    <button data-i18n="components.OAuthFlowSection.text008"
                         className={styles.connectBtn}
                         onClick={handleConnect}
                         disabled={loading || !selectedPersonaId}
                     >
                         {loading && <Loader2 size={14} className={styles.spin} />}
-                        {flow.label}に接続
-                    </button>
+                        {flow.label}{uiText("components.OAuthFlowSection.text008")}</button>
                 </div>
             )}
 

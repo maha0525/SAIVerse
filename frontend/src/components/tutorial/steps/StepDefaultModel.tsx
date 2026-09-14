@@ -1,4 +1,7 @@
 "use client";
+import { t as uiText } from '@/i18n/core';
+import { useLocale } from '@/i18n/useLocale';
+
 
 import React from 'react';
 import styles from './Steps.module.css';
@@ -21,6 +24,7 @@ export default function StepDefaultModel({
     selected,
     onChange
 }: StepDefaultModelProps) {
+    useLocale();
     // Sort models: available first, then alphabetically
     const sortedModels = [...models].sort((a, b) => {
         if (a.is_available !== b.is_available) {
@@ -31,11 +35,8 @@ export default function StepDefaultModel({
 
     return (
         <div className={styles.modelSelectContainer}>
-            <h3 className={styles.title}>標準モデルの選択</h3>
-            <p className={styles.subtitle}>
-                会話や複雑な推論に使用するメインモデルを選択してください。<br />
-                APIキーが設定されていないモデルは選択できません。
-            </p>
+            <h3 data-i18n="components.tutorial.steps.StepDefaultModel.text001" className={styles.title}>{uiText("components.tutorial.steps.StepDefaultModel.text001")}</h3>
+            <p data-i18n="components.tutorial.steps.StepDefaultModel.text002 components.tutorial.steps.StepDefaultModel.text003" className={styles.subtitle}>{uiText("components.tutorial.steps.StepDefaultModel.text002")}<br />{uiText("components.tutorial.steps.StepDefaultModel.text003")}</p>
 
             <div className={styles.modelGrid}>
                 {sortedModels.map((model) => (
@@ -47,7 +48,7 @@ export default function StepDefaultModel({
                         <div className={styles.modelName}>{model.display_name}</div>
                         <div className={styles.modelProvider}>{model.provider}</div>
                         {!model.is_available && (
-                            <div className={styles.modelUnavailable}>APIキー未設定</div>
+                            <div data-i18n="components.tutorial.steps.StepDefaultModel.text004" className={styles.modelUnavailable}>{uiText("components.tutorial.steps.StepDefaultModel.text004")}</div>
                         )}
                     </div>
                 ))}

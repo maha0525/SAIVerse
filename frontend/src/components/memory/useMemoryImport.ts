@@ -1,3 +1,5 @@
+
+import { t as uiText } from '@/i18n/core';
 import { useRef, useState } from 'react';
 
 import {
@@ -48,7 +50,7 @@ export function useMemoryImport(personaId: string, onImportComplete?: () => void
     } else if (threadList.length === 1) {
       await activateThread(personaId, threadList[0].thread_id);
       setStep('upload');
-      setResult({ type: 'success', message: `${message} スレッドを自動設定しました。` });
+      setResult({ type: 'success', message: uiText("components.memory.useMemoryImport.text001", { p1: message }) });
       onImportComplete?.();
     } else {
       setThreads(threadList);
@@ -86,7 +88,7 @@ export function useMemoryImport(personaId: string, onImportComplete?: () => void
       if (ok && 'conversations' in data && data.conversations.length > 0) {
         setPreviewData(data); setSelectedIds(new Set()); setStep('select');
       } else {
-        setResult({ type: 'error', message: ('detail' in data && data.detail) || 'ファイルに会話が見つかりませんでした。' });
+        setResult({ type: 'error', message: ('detail' in data && data.detail) || uiText("components.memory.useMemoryImport.text002") });
       }
     } else {
       setPendingExtensionFile(file); setStep('embedding-dialog');
@@ -96,7 +98,7 @@ export function useMemoryImport(personaId: string, onImportComplete?: () => void
 
   const executeExtensionImport = async (skipEmbedding: boolean) => {
     if (!pendingExtensionFile) return;
-    setStep('importing'); setIsLoading(true); setResult(null); setImportProgress('インポート開始...');
+    setStep('importing'); setIsLoading(true); setResult(null); setImportProgress(uiText("components.memory.useMemoryImport.text003"));
     const { ok, data } = await importExtension(personaId, pendingExtensionFile, skipEmbedding);
     setPendingExtensionFile(null);
     if (!ok) { setStep('upload'); setIsLoading(false); setImportProgress(null); setResult({ type: 'error', message: data.detail || 'Import failed' }); return; }
@@ -105,7 +107,7 @@ export function useMemoryImport(personaId: string, onImportComplete?: () => void
 
   const executeOfficialImport = async (skipEmbedding: boolean) => {
     if (!previewData) return;
-    setStep('importing'); setIsLoading(true); setResult(null); setImportProgress('インポート開始...');
+    setStep('importing'); setIsLoading(true); setResult(null); setImportProgress(uiText("components.memory.useMemoryImport.text004"));
     const { ok, data } = await importOfficial(personaId, {
       cache_key: previewData.cache_key,
       conversation_ids: Array.from(selectedIds).map(String),
@@ -125,7 +127,7 @@ export function useMemoryImport(personaId: string, onImportComplete?: () => void
 
   const executeNativeImport = async (skipEmbedding: boolean) => {
     if (!pendingNativeFile) return;
-    setStep('importing'); setIsLoading(true); setResult(null); setImportProgress('Nativeインポート開始...');
+    setStep('importing'); setIsLoading(true); setResult(null); setImportProgress(uiText("components.memory.useMemoryImport.text005"));
     const { ok, data } = await importNative(personaId, pendingNativeFile, skipEmbedding);
     setPendingNativeFile(null); setNativePreview(null);
     if (!ok) { setStep('upload'); setIsLoading(false); setImportProgress(null); setResult({ type: 'error', message: data.detail || 'Import failed' }); return; }
@@ -139,7 +141,7 @@ export function useMemoryImport(personaId: string, onImportComplete?: () => void
     await activateThread(personaId, selectedThreadId);
     setIsLoading(false);
     setStep('upload');
-    setResult({ type: 'success', message: 'インポート完了！アクティブスレッドを設定しました。' });
+    setResult({ type: 'success', message: uiText("components.memory.useMemoryImport.text006") });
     onImportComplete?.();
   };
 

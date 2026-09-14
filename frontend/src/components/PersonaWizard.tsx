@@ -1,4 +1,9 @@
 "use client";
+import { apiFetch } from '@/i18n/api';
+
+import { t as uiText } from '@/i18n/core';
+import { useLocale } from '@/i18n/useLocale';
+
 
 import React, { useState, useEffect } from 'react';
 import { X, Loader2, CheckCircle, ArrowRight, ArrowLeft, MessageSquare, Settings, SlidersHorizontal } from 'lucide-react';
@@ -43,6 +48,7 @@ function slugifyIdentifier(text: string): string {
 }
 
 export default function PersonaWizard({ isOpen, onClose, onComplete, embedded }: PersonaWizardProps) {
+    useLocale();
     const [step, setStep] = useState<Step>(1);
     const [isLoading, setIsLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
@@ -147,16 +153,16 @@ export default function PersonaWizard({ isOpen, onClose, onComplete, embedded }:
 
     const validateStep1 = (): boolean => {
         if (!name.trim()) {
-            setError('ペルソナの名前を入力してください');
+            setError(uiText("components.PersonaWizard.text001"));
             return false;
         }
         if (!selectedCityId) {
-            setError('Cityを選択してください');
+            setError(uiText("components.PersonaWizard.text002"));
             return false;
         }
         // Validate custom ID if provided (manager/ids.py の契約と同じ形)
         if (customId && !/^[a-zA-Z0-9][a-zA-Z0-9_-]*$/.test(customId)) {
-            setError('IDは英数字で始まり、英数字・_・- のみ使用できます');
+            setError(uiText("components.PersonaWizard.text003"));
             return false;
         }
         setError(null);
@@ -170,7 +176,7 @@ export default function PersonaWizard({ isOpen, onClose, onComplete, embedded }:
         setError(null);
 
         try {
-            const res = await fetch('/api/world/ais', {
+            const res = await apiFetch('/api/world/ais', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -189,7 +195,7 @@ export default function PersonaWizard({ isOpen, onClose, onComplete, embedded }:
             const data = await res.json().catch(() => ({ detail: res.statusText }));
 
             if (!res.ok) {
-                setError(data.detail || '不明なエラーが発生しました');
+                setError(data.detail || uiText("components.PersonaWizard.text004"));
                 return;
             }
 
@@ -209,7 +215,7 @@ export default function PersonaWizard({ isOpen, onClose, onComplete, embedded }:
             setStep(2);
         } catch (e) {
             console.error('Failed to create persona', e);
-            setError('ペルソナの作成に失敗しました');
+            setError(uiText("components.PersonaWizard.text005"));
         } finally {
             setIsLoading(false);
         }
@@ -226,7 +232,7 @@ export default function PersonaWizard({ isOpen, onClose, onComplete, embedded }:
         if (!createdRoomId) return;
 
         try {
-            const res = await fetch('/api/user/move', {
+            const res = await apiFetch('/api/user/move', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ target_building_id: createdRoomId }),
@@ -237,11 +243,11 @@ export default function PersonaWizard({ isOpen, onClose, onComplete, embedded }:
                 // Refresh page to load new room
                 window.location.reload();
             } else {
-                setError('部屋への移動に失敗しました');
+                setError(uiText("components.PersonaWizard.text006"));
             }
         } catch (e) {
             console.error('Failed to move to room', e);
-            setError('部屋への移動に失敗しました');
+            setError(uiText("components.PersonaWizard.text007"));
         }
     };
 
@@ -250,18 +256,18 @@ export default function PersonaWizard({ isOpen, onClose, onComplete, embedded }:
     const renderStep1 = () => (
         <>
             <div className={styles.field}>
-                <label>ペルソナの名前 *</label>
-                <input
+                <label data-i18n="components.PersonaWizard.text008">{uiText("components.PersonaWizard.text008")}</label>
+                <input data-i18n="components.PersonaWizard.text009"
                     type="text"
                     value={name}
                     onChange={(e) => setName(e.target.value)}
-                    placeholder="例: エア"
+                    placeholder={uiText("components.PersonaWizard.text009")}
                     autoFocus
                 />
             </div>
 
             <div className={styles.field}>
-                <label>ID (英数字)</label>
+                <label data-i18n="components.PersonaWizard.text010">{uiText("components.PersonaWizard.text010")}</label>
                 <div className={styles.idFieldRow}>
                     <input
                         type="text"
@@ -270,18 +276,16 @@ export default function PersonaWizard({ isOpen, onClose, onComplete, embedded }:
                             setIdTouched(true);
                             setCustomId(e.target.value.replace(/[^a-zA-Z0-9_-]/g, ''));
                         }}
-                        placeholder="persona_1"
+                        placeholder={uiText("components.PersonaWizard.label001")}
                     />
                     <span className={styles.idSuffix}>_{citySlug}</span>
                 </div>
-                <p className={styles.hint}>
-                    名前から自動で入ります (日本語名は連番)。編集もできます
-                </p>
+                <p data-i18n="components.PersonaWizard.text011" className={styles.hint}>{uiText("components.PersonaWizard.text011")}</p>
             </div>
 
             {cities.length > 1 && (
                 <div className={styles.field}>
-                    <label>City</label>
+                    <label>{uiText("components.PersonaWizard.label002")}</label>
                     <select
                         value={selectedCityId || ''}
                         onChange={(e) => handleCityChange(parseInt(e.target.value))}
@@ -294,15 +298,13 @@ export default function PersonaWizard({ isOpen, onClose, onComplete, embedded }:
             )}
 
             <div className={styles.field}>
-                <label>システムプロンプト</label>
-                <textarea
+                <label data-i18n="components.PersonaWizard.text012">{uiText("components.PersonaWizard.text012")}</label>
+                <textarea data-i18n="components.PersonaWizard.text013"
                     value={systemPrompt}
                     onChange={(e) => setSystemPrompt(e.target.value)}
-                    placeholder="ペルソナの性格や設定を入力 (後から編集可能)"
+                    placeholder={uiText("components.PersonaWizard.text013")}
                 />
-                <p className={styles.hint}>
-                    空欄の場合はデフォルトのプロンプトが設定されます
-                </p>
+                <p data-i18n="components.PersonaWizard.text014" className={styles.hint}>{uiText("components.PersonaWizard.text014")}</p>
             </div>
 
             {error && <p className={styles.error}>{error}</p>}
@@ -311,11 +313,8 @@ export default function PersonaWizard({ isOpen, onClose, onComplete, embedded }:
 
     const renderStep2 = () => (
         <div className={styles.importStep}>
-            <h3>ChatGPTからログをインポート</h3>
-            <p>
-                ChatGPTのエクスポートデータをインポートすると、過去の会話を記憶として引き継げます。
-                この手順はスキップして後から行うこともできます。
-            </p>
+            <h3 data-i18n="components.PersonaWizard.text015">{uiText("components.PersonaWizard.text015")}</h3>
+            <p data-i18n="components.PersonaWizard.text016">{uiText("components.PersonaWizard.text016")}</p>
             {createdPersonaId && (
                 <MemoryImport
                     personaId={createdPersonaId}
@@ -330,28 +329,22 @@ export default function PersonaWizard({ isOpen, onClose, onComplete, embedded }:
     const renderStep3 = () => (
         <div className={styles.completeContainer}>
             <CheckCircle size={64} className={styles.successIcon} />
-            <h2 className={styles.completeTitle}>ペルソナを作成しました</h2>
-            <p className={styles.completeSubtitle}>
-                {name} の部屋が作成されました。{embedded ? 'セットアップを続けましょう！' : 'チャットを始めましょう！'}
+            <h2 data-i18n="components.PersonaWizard.text017" className={styles.completeTitle}>{uiText("components.PersonaWizard.text017")}</h2>
+            <p data-i18n="components.PersonaWizard.text018 components.PersonaWizard.text019 components.PersonaWizard.text020" className={styles.completeSubtitle}>
+                {name}{uiText("components.PersonaWizard.text018")}{embedded ? uiText("components.PersonaWizard.text019") : uiText("components.PersonaWizard.text020")}
             </p>
             <div className={styles.completeActions}>
                 {!embedded && (
-                    <button className={styles.primaryButton} onClick={goToRoom}>
-                        <MessageSquare size={18} />
-                        チャットを始める
-                    </button>
+                    <button data-i18n="components.PersonaWizard.text021" className={styles.primaryButton} onClick={goToRoom}>
+                        <MessageSquare size={18} />{uiText("components.PersonaWizard.text021")}</button>
                 )}
                 {!embedded && (
-                    <button className={styles.secondaryButton} onClick={() => setShowSettings(true)}>
-                        <SlidersHorizontal size={18} />
-                        もっと設定する
-                    </button>
+                    <button data-i18n="components.PersonaWizard.text022" className={styles.secondaryButton} onClick={() => setShowSettings(true)}>
+                        <SlidersHorizontal size={18} />{uiText("components.PersonaWizard.text022")}</button>
                 )}
                 {embedded && (
-                    <button className={styles.primaryButton} onClick={handleComplete}>
-                        <ArrowRight size={18} />
-                        セットアップに戻る
-                    </button>
+                    <button data-i18n="components.PersonaWizard.text023" className={styles.primaryButton} onClick={handleComplete}>
+                        <ArrowRight size={18} />{uiText("components.PersonaWizard.text023")}</button>
                 )}
             </div>
             {error && <p className={styles.error}>{error}</p>}
@@ -376,29 +369,24 @@ export default function PersonaWizard({ isOpen, onClose, onComplete, embedded }:
             <div className={styles.actions}>
                 <div className={styles.actionsLeft}>
                     {step > 1 && (
-                        <button className={styles.backButton} onClick={() => setStep((step - 1) as Step)}>
-                            <ArrowLeft size={16} /> 戻る
-                        </button>
+                        <button data-i18n="components.PersonaWizard.text024" className={styles.backButton} onClick={() => setStep((step - 1) as Step)}>
+                            <ArrowLeft size={16} />{uiText("components.PersonaWizard.text024")}</button>
                     )}
                 </div>
                 <div className={styles.actionsRight}>
                     {step === 1 && (
-                        <button
+                        <button data-i18n="components.PersonaWizard.text025"
                             className={styles.nextButton}
                             onClick={createPersona}
                             disabled={isLoading || !name.trim()}
                         >
-                            {isLoading ? <Loader2 size={16} className={styles.loader} /> : null}
-                            次へ <ArrowRight size={16} />
+                            {isLoading ? <Loader2 size={16} className={styles.loader} /> : null}{uiText("components.PersonaWizard.text025")}<ArrowRight size={16} />
                         </button>
                     )}
                     {step === 2 && (
                         <>
-                            <button className={styles.skipButton} onClick={() => setStep(3)}>
-                                スキップ
-                            </button>
-                            <button className={styles.nextButton} onClick={() => setStep(3)}>
-                                完了 <ArrowRight size={16} />
+                            <button data-i18n="components.PersonaWizard.text026" className={styles.skipButton} onClick={() => setStep(3)}>{uiText("components.PersonaWizard.text026")}</button>
+                            <button data-i18n="components.PersonaWizard.text027" className={styles.nextButton} onClick={() => setStep(3)}>{uiText("components.PersonaWizard.text027")}<ArrowRight size={16} />
                             </button>
                         </>
                     )}
@@ -412,7 +400,7 @@ export default function PersonaWizard({ isOpen, onClose, onComplete, embedded }:
             <ModalOverlay onClose={onClose} className={styles.overlay}>
                 <div className={styles.modal} onClick={(e) => e.stopPropagation()}>
                     <div className={styles.header}>
-                        <h2 className={styles.title}>ペルソナを作成</h2>
+                        <h2 data-i18n="components.PersonaWizard.text028" className={styles.title}>{uiText("components.PersonaWizard.text028")}</h2>
                         <button className={styles.closeButton} onClick={onClose}>
                             <X size={20} />
                         </button>
@@ -421,15 +409,15 @@ export default function PersonaWizard({ isOpen, onClose, onComplete, embedded }:
                     <div className={styles.stepper}>
                         <div className={`${styles.step} ${step >= 1 ? styles.active : ''} ${step > 1 ? styles.completed : ''}`}>
                             <span className={styles.stepNumber}>{step > 1 ? '✓' : '1'}</span>
-                            <span>基本情報</span>
+                            <span data-i18n="components.PersonaWizard.text029">{uiText("components.PersonaWizard.text029")}</span>
                         </div>
                         <div className={`${styles.step} ${step >= 2 ? styles.active : ''} ${step > 2 ? styles.completed : ''}`}>
                             <span className={styles.stepNumber}>{step > 2 ? '✓' : '2'}</span>
-                            <span>ログインポート</span>
+                            <span data-i18n="components.PersonaWizard.text030">{uiText("components.PersonaWizard.text030")}</span>
                         </div>
                         <div className={`${styles.step} ${step >= 3 ? styles.active : ''}`}>
                             <span className={styles.stepNumber}>3</span>
-                            <span>完了</span>
+                            <span data-i18n="components.PersonaWizard.text031">{uiText("components.PersonaWizard.text031")}</span>
                         </div>
                     </div>
 

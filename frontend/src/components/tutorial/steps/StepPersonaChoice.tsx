@@ -1,4 +1,7 @@
 "use client";
+import { t as uiText } from '@/i18n/core';
+import { useLocale } from '@/i18n/useLocale';
+
 
 import React, { useState } from 'react';
 import { UserPlus, Download } from 'lucide-react';
@@ -16,6 +19,7 @@ export default function StepPersonaChoice({
     onChange,
     onPersonaCreated
 }: StepPersonaChoiceProps) {
+    useLocale();
     const [showPersonaWizard, setShowPersonaWizard] = useState(false);
 
     const handleNewClick = () => {
@@ -30,10 +34,8 @@ export default function StepPersonaChoice({
 
     return (
         <div className={styles.personaChoiceContainer}>
-            <h3 className={styles.title}>最初のペルソナを作成</h3>
-            <p className={styles.subtitle}>
-                この都市にあなたと話す最初のペルソナを呼びましょう
-            </p>
+            <h3 data-i18n="components.tutorial.steps.StepPersonaChoice.text001" className={styles.title}>{uiText("components.tutorial.steps.StepPersonaChoice.text001")}</h3>
+            <p data-i18n="components.tutorial.steps.StepPersonaChoice.text002" className={styles.subtitle}>{uiText("components.tutorial.steps.StepPersonaChoice.text002")}</p>
 
             <div className={styles.choiceCards}>
                 <div
@@ -42,10 +44,8 @@ export default function StepPersonaChoice({
                 >
                     <UserPlus size={32} className={styles.choiceIcon} />
                     <div className={styles.choiceInfo}>
-                        <div className={styles.choiceTitle}>新しく作成する</div>
-                        <div className={styles.choiceDescription}>
-                            ゼロから新しいペルソナを創造します
-                        </div>
+                        <div data-i18n="components.tutorial.steps.StepPersonaChoice.text003" className={styles.choiceTitle}>{uiText("components.tutorial.steps.StepPersonaChoice.text003")}</div>
+                        <div data-i18n="components.tutorial.steps.StepPersonaChoice.text004" className={styles.choiceDescription}>{uiText("components.tutorial.steps.StepPersonaChoice.text004")}</div>
                     </div>
                 </div>
 
@@ -55,10 +55,8 @@ export default function StepPersonaChoice({
                 >
                     <Download size={32} className={styles.choiceIcon} />
                     <div className={styles.choiceInfo}>
-                        <div className={styles.choiceTitle}>他のプラットフォームから引き継ぐ</div>
-                        <div className={styles.choiceDescription}>
-                            ChatGPT等の会話ログをインポートして記憶を引き継ぎます
-                        </div>
+                        <div data-i18n="components.tutorial.steps.StepPersonaChoice.text005" className={styles.choiceTitle}>{uiText("components.tutorial.steps.StepPersonaChoice.text005")}</div>
+                        <div data-i18n="components.tutorial.steps.StepPersonaChoice.text006" className={styles.choiceDescription}>{uiText("components.tutorial.steps.StepPersonaChoice.text006")}</div>
                     </div>
                 </div>
             </div>

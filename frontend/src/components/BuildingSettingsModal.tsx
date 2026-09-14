@@ -1,3 +1,8 @@
+
+import { apiFetch } from '@/i18n/api';
+
+import { t as uiText } from '@/i18n/core';
+import { useLocale } from '@/i18n/useLocale';
 import React, { useState, useEffect, useRef } from 'react';
 import styles from './BuildingSettingsModal.module.css';
 import { X, Save, Loader2 } from 'lucide-react';
@@ -27,6 +32,7 @@ interface BuildingSettingsModalProps {
 }
 
 export default function BuildingSettingsModal({ isOpen, onClose, buildingId, onSaved }: BuildingSettingsModalProps) {
+    useLocale();
     const [loading, setLoading] = useState(true);
     const [saving, setSaving] = useState(false);
     const [error, setError] = useState<string | null>(null);
@@ -85,7 +91,7 @@ export default function BuildingSettingsModal({ isOpen, onClose, buildingId, onS
                 fetchAllTableRows<any>('building'),
                 fetchAllTableRows<Tool>('tool'),
                 fetchAllTableRows<City>('city'),
-                fetch('/api/world/prompts/available'),
+                apiFetch('/api/world/prompts/available'),
                 fetchAllTableRows<any>('building_tool_link')
             ]);
             if (isStale()) {
@@ -143,8 +149,8 @@ export default function BuildingSettingsModal({ isOpen, onClose, buildingId, onS
             // Load realtime spell bindings + catalog
             try {
                 const [spellRes, catalogRes] = await Promise.all([
-                    fetch(`/api/world/buildings/${targetBuildingId}/realtime-spell`),
-                    fetch('/api/people/realtime-spell-catalog'),
+                    apiFetch(`/api/world/buildings/${targetBuildingId}/realtime-spell`),
+                    apiFetch('/api/people/realtime-spell-catalog'),
                 ]);
                 if (!isStale()) {
                     if (spellRes.ok) setRealtimeSpells(await spellRes.json());
@@ -158,7 +164,7 @@ export default function BuildingSettingsModal({ isOpen, onClose, buildingId, onS
             }
 
         } catch (err) {
-            setError('Building データの読み込みに失敗しました');
+            setError(uiText("components.BuildingSettingsModal.text001"));
             console.error(err);
         } finally {
             if (!isStale()) {
@@ -170,15 +176,15 @@ export default function BuildingSettingsModal({ isOpen, onClose, buildingId, onS
     const handleSave = async () => {
         // 整合性ガード (feedback_modal_id_integrity.md / エリス上書き事故 2026-04-30)
         if (loading) {
-            alert('読み込み中のため保存できません。少し待ってから再度お試しください。');
+            alert(uiText("components.BuildingSettingsModal.text002"));
             return;
         }
         if (!loadedBuildingId || loadedBuildingId !== buildingId) {
             alert(
-                `安全のため保存を拒否しました。\n` +
-                `表示中のフォームは "${loadedBuildingId ?? '(未読み込み)'}" のもので、\n` +
-                `現在の保存先は "${buildingId}" です。\n` +
-                `モーダルを一度閉じてから開き直してください。`
+                uiText("components.BuildingSettingsModal.text003") +
+                uiText("components.BuildingSettingsModal.text004", { p1: loadedBuildingId ?? uiText("common.extra004") }) +
+                uiText("components.BuildingSettingsModal.text005", { p1: buildingId }) +
+                uiText("components.BuildingSettingsModal.text006")
             );
             console.error(
                 `[BuildingSettingsModal] handleSave rejected: loadedBuildingId=${loadedBuildingId} != buildingId=${buildingId}`
@@ -189,7 +195,7 @@ export default function BuildingSettingsModal({ isOpen, onClose, buildingId, onS
         setSaving(true);
         setError(null);
         try {
-            const res = await fetch(`/api/world/buildings/${buildingId}`, {
+            const res = await apiFetch(`/api/world/buildings/${buildingId}`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -214,10 +220,10 @@ export default function BuildingSettingsModal({ isOpen, onClose, buildingId, onS
                 onClose();
             } else {
                 const data = await res.json();
-                setError(data.detail || '保存に失敗しました');
+                setError(data.detail || uiText("components.BuildingSettingsModal.text007"));
             }
         } catch (err) {
-            setError('Building 設定の保存に失敗しました');
+            setError(uiText("components.BuildingSettingsModal.text008"));
             console.error(err);
         } finally {
             setSaving(false);
@@ -252,7 +258,7 @@ export default function BuildingSettingsModal({ isOpen, onClose, buildingId, onS
         <div className={styles.overlay} onClick={onClose}>
             <div className={styles.modal} onClick={e => e.stopPropagation()}>
                 <div className={styles.header}>
-                    <h2>Building 設定</h2>
+                    <h2 data-i18n="components.BuildingSettingsModal.text009">{uiText("components.BuildingSettingsModal.text009")}</h2>
                     <button className={styles.closeBtn} onClick={onClose}>
                         <X size={20} />
                     </button>
@@ -261,14 +267,14 @@ export default function BuildingSettingsModal({ isOpen, onClose, buildingId, onS
                 {loading ? (
                     <div className={styles.loading}>
                         <Loader2 size={24} className={styles.spinner} />
-                        <span>読み込み中...</span>
+                        <span data-i18n="components.BuildingSettingsModal.text010">{uiText("components.BuildingSettingsModal.text010")}</span>
                     </div>
                 ) : (
                     <div className={styles.content}>
                         {error && <div className={styles.error}>{error}</div>}
 
                         <div className={styles.field}>
-                            <label>名前</label>
+                            <label data-i18n="components.BuildingSettingsModal.text011">{uiText("components.BuildingSettingsModal.text011")}</label>
                             <input
                                 type="text"
                                 value={name}
@@ -277,7 +283,7 @@ export default function BuildingSettingsModal({ isOpen, onClose, buildingId, onS
                         </div>
 
                         <div className={styles.field}>
-                            <label>ID</label>
+                            <label>{uiText("components.BuildingSettingsModal.label001")}</label>
                             <input
                                 type="text"
                                 value={buildingId}
@@ -287,7 +293,7 @@ export default function BuildingSettingsModal({ isOpen, onClose, buildingId, onS
                         </div>
 
                         <div className={styles.field}>
-                            <label>都市</label>
+                            <label data-i18n="components.BuildingSettingsModal.text012">{uiText("components.BuildingSettingsModal.text012")}</label>
                             <select value={cityId} onChange={e => setCityId(parseInt(e.target.value))}>
                                 {cities.map(c => (
                                     <option key={c.CITYID} value={c.CITYID}>{c.CITYNAME || c.CITY_SLUG}</option>
@@ -297,7 +303,7 @@ export default function BuildingSettingsModal({ isOpen, onClose, buildingId, onS
 
                         <div className={styles.row}>
                             <div className={styles.field}>
-                                <label>定員</label>
+                                <label data-i18n="components.BuildingSettingsModal.text013">{uiText("components.BuildingSettingsModal.text013")}</label>
                                 <input
                                     type="number"
                                     value={capacity}
@@ -306,7 +312,7 @@ export default function BuildingSettingsModal({ isOpen, onClose, buildingId, onS
                                 />
                             </div>
                             <div className={styles.field}>
-                                <label>自動インターバル（秒）</label>
+                                <label data-i18n="components.BuildingSettingsModal.text014">{uiText("components.BuildingSettingsModal.text014")}</label>
                                 <input
                                     type="number"
                                     value={autoInterval}
@@ -333,7 +339,7 @@ export default function BuildingSettingsModal({ isOpen, onClose, buildingId, onS
                         </div>
 
                         <div className={styles.field}>
-                            <label>説明</label>
+                            <label data-i18n="components.BuildingSettingsModal.text015">{uiText("components.BuildingSettingsModal.text015")}</label>
                             <textarea
                                 value={description}
                                 onChange={e => setDescription(e.target.value)}
@@ -342,7 +348,7 @@ export default function BuildingSettingsModal({ isOpen, onClose, buildingId, onS
                         </div>
 
                         <div className={styles.field}>
-                            <label>システムプロンプト</label>
+                            <label data-i18n="components.BuildingSettingsModal.text016">{uiText("components.BuildingSettingsModal.text016")}</label>
                             <textarea
                                 value={systemInstruction}
                                 onChange={e => setSystemInstruction(e.target.value)}
@@ -352,16 +358,16 @@ export default function BuildingSettingsModal({ isOpen, onClose, buildingId, onS
                         </div>
 
                         <div className={styles.field}>
-                            <label>インテリア画像</label>
+                            <label data-i18n="components.BuildingSettingsModal.text017">{uiText("components.BuildingSettingsModal.text017")}</label>
                             <ImageUpload
                                 value={imagePath}
                                 onChange={setImagePath}
                             />
-                            <small className={styles.hint}>LLMのビジュアルコンテキスト用の Building インテリア画像</small>
+                            <small data-i18n="components.BuildingSettingsModal.text018" className={styles.hint}>{uiText("components.BuildingSettingsModal.text018")}</small>
                         </div>
 
                         <div className={styles.field}>
-                            <label>追加プロンプトファイル</label>
+                            <label data-i18n="components.BuildingSettingsModal.text019">{uiText("components.BuildingSettingsModal.text019")}</label>
                             <div className={styles.promptList}>
                                 {extraPromptFiles.map((file, idx) => (
                                     <div key={idx} className={styles.promptItem}>
@@ -369,7 +375,7 @@ export default function BuildingSettingsModal({ isOpen, onClose, buildingId, onS
                                             value={file}
                                             onChange={e => handlePromptFileChange(idx, e.target.value)}
                                         >
-                                            <option value="">プロンプトファイルを選択...</option>
+                                            <option data-i18n="components.BuildingSettingsModal.text020" value="">{uiText("components.BuildingSettingsModal.text020")}</option>
                                             {availablePrompts.map(p => (
                                                 <option key={p} value={p}>{p}</option>
                                             ))}
@@ -379,23 +385,20 @@ export default function BuildingSettingsModal({ isOpen, onClose, buildingId, onS
                                             className={styles.removeBtn}
                                             onClick={() => handleRemovePromptFile(idx)}
                                         >
-                                            &times;
-                                        </button>
+                                            {uiText("components.BuildingSettingsModal.label002")}</button>
                                     </div>
                                 ))}
-                                <button
+                                <button data-i18n="components.BuildingSettingsModal.text021"
                                     type="button"
                                     className={styles.addBtn}
                                     onClick={handleAddPromptFile}
-                                >
-                                    + プロンプトファイルを追加
-                                </button>
+                                >{uiText("components.BuildingSettingsModal.text021")}</button>
                             </div>
-                            <small className={styles.hint}>この Building 内のペルソナ用の追加システムプロンプト</small>
+                            <small data-i18n="components.BuildingSettingsModal.text022" className={styles.hint}>{uiText("components.BuildingSettingsModal.text022")}</small>
                         </div>
 
                         <div className={styles.field}>
-                            <label>利用可能なツール</label>
+                            <label data-i18n="components.BuildingSettingsModal.text023">{uiText("components.BuildingSettingsModal.text023")}</label>
                             <div className={styles.toolGrid}>
                                 {tools.map(t => (
                                     <label key={t.TOOLID} className={styles.toolItem}>
@@ -411,10 +414,8 @@ export default function BuildingSettingsModal({ isOpen, onClose, buildingId, onS
                         </div>
 
                         <div className={styles.field}>
-                            <label>事前実行スペル</label>
-                            <small className={styles.hint} style={{ display: 'block', marginBottom: '0.5rem' }}>
-                                この Building にいるペルソナの会話時に自動実行するスペル
-                            </small>
+                            <label data-i18n="components.BuildingSettingsModal.text024">{uiText("components.BuildingSettingsModal.text024")}</label>
+                            <small data-i18n="components.BuildingSettingsModal.text025" className={styles.hint} style={{ display: 'block', marginBottom: '0.5rem' }}>{uiText("components.BuildingSettingsModal.text025")}</small>
                             {realtimeSpells.length > 0 && (
                                 <div style={{ marginBottom: '0.75rem' }}>
                                     {realtimeSpells.map((spell) => (
@@ -423,16 +424,14 @@ export default function BuildingSettingsModal({ isOpen, onClose, buildingId, onS
                                                 <strong>{spell.label || spell.spell_name}</strong>
                                                 {spell.spell_args_json && <span style={{ opacity: 0.6, marginLeft: '0.5rem', fontSize: '0.8rem' }}>{spell.spell_args_json}</span>}
                                             </span>
-                                            <button
+                                            <button data-i18n="components.BuildingSettingsModal.text026"
                                                 type="button"
                                                 style={{ padding: '0.15rem 0.4rem', fontSize: '0.75rem', cursor: 'pointer' }}
                                                 onClick={async () => {
-                                                    await fetch(`/api/world/buildings/${buildingId}/realtime-spell/${spell.binding_id}`, { method: 'DELETE' });
+                                                    await apiFetch(`/api/world/buildings/${buildingId}/realtime-spell/${spell.binding_id}`, { method: 'DELETE' });
                                                     setRealtimeSpells(prev => prev.filter(s => s.binding_id !== spell.binding_id));
                                                 }}
-                                            >
-                                                削除
-                                            </button>
+                                            >{uiText("components.BuildingSettingsModal.text026")}</button>
                                         </div>
                                     ))}
                                 </div>
@@ -444,7 +443,7 @@ export default function BuildingSettingsModal({ isOpen, onClose, buildingId, onS
                                         onChange={(e) => { setNewSpellName(e.target.value); setNewSpellArgs({}); }}
                                         style={{ width: '100%', padding: '0.3rem 0.5rem', fontSize: '0.85rem' }}
                                     >
-                                        <option value="">スペルを選択...</option>
+                                        <option data-i18n="components.BuildingSettingsModal.text027" value="">{uiText("components.BuildingSettingsModal.text027")}</option>
                                         {spellCatalog.map(s => (
                                             <option key={s.name} value={s.name}>{s.name} — {s.description.slice(0, 60)}</option>
                                         ))}
@@ -476,14 +475,14 @@ export default function BuildingSettingsModal({ isOpen, onClose, buildingId, onS
                                     );
                                 })()}
                                 <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
-                                    <input
+                                    <input data-i18n="components.BuildingSettingsModal.text028"
                                         type="text"
-                                        placeholder="ラベル (表示名)"
+                                        placeholder={uiText("components.BuildingSettingsModal.text028")}
                                         value={newSpellLabel}
                                         onChange={(e) => setNewSpellLabel(e.target.value)}
                                         style={{ flex: 1, padding: '0.25rem 0.5rem', fontSize: '0.85rem' }}
                                     />
-                                    <button
+                                    <button data-i18n="components.BuildingSettingsModal.text029"
                                         type="button"
                                         disabled={!newSpellName}
                                         style={{ padding: '0.3rem 0.75rem', fontSize: '0.85rem', cursor: newSpellName ? 'pointer' : 'not-allowed' }}
@@ -495,7 +494,7 @@ export default function BuildingSettingsModal({ isOpen, onClose, buildingId, onS
                                                 try { argsObj[k] = JSON.parse(v.trim()); } catch { argsObj[k] = v.trim(); }
                                             });
                                             const argsJson = Object.keys(argsObj).length > 0 ? JSON.stringify(argsObj) : null;
-                                            const res = await fetch(`/api/world/buildings/${buildingId}/realtime-spell`, {
+                                            const res = await apiFetch(`/api/world/buildings/${buildingId}/realtime-spell`, {
                                                 method: 'POST',
                                                 headers: { 'Content-Type': 'application/json' },
                                                 body: JSON.stringify({
@@ -519,35 +518,29 @@ export default function BuildingSettingsModal({ isOpen, onClose, buildingId, onS
                                                 setNewSpellLabel('');
                                             }
                                         }}
-                                    >
-                                        追加
-                                    </button>
+                                    >{uiText("components.BuildingSettingsModal.text029")}</button>
                                 </div>
                             </div>
                         </div>
 
                         <div className={styles.actions}>
-                            <button
+                            <button data-i18n="components.BuildingSettingsModal.text030 components.BuildingSettingsModal.text031 components.BuildingSettingsModal.text032 components.BuildingSettingsModal.text033 components.BuildingSettingsModal.text034"
                                 className={styles.saveBtn}
                                 onClick={handleSave}
                                 disabled={saving || loading || !loadedBuildingId || loadedBuildingId !== buildingId}
                                 title={
-                                    loading ? '読み込み中…'
-                                        : !loadedBuildingId ? '読み込み未完了'
-                                        : loadedBuildingId !== buildingId ? `表示中 (${loadedBuildingId}) と保存先 (${buildingId}) が不一致のため無効`
+                                    loading ? uiText("components.BuildingSettingsModal.text030")
+                                        : !loadedBuildingId ? uiText("components.BuildingSettingsModal.text031")
+                                        : loadedBuildingId !== buildingId ? uiText("components.BuildingSettingsModal.text032", { p1: loadedBuildingId, p2: buildingId })
                                         : undefined
                                 }
                             >
                                 {saving ? (
                                     <>
-                                        <Loader2 size={16} className={styles.spinner} />
-                                        保存中...
-                                    </>
+                                        <Loader2 size={16} className={styles.spinner} />{uiText("components.BuildingSettingsModal.text033")}</>
                                 ) : (
                                     <>
-                                        <Save size={16} />
-                                        保存
-                                    </>
+                                        <Save size={16} />{uiText("components.BuildingSettingsModal.text034")}</>
                                 )}
                             </button>
                         </div>

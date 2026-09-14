@@ -20,6 +20,7 @@ from sai_memory.memory.storage import (
     get_planned_notes_by_group,
     resolve_memory_notes,
 )
+from saiverse.persona_language import memory_language_messages
 
 LOGGER = logging.getLogger(__name__)
 
@@ -234,7 +235,10 @@ def _exec_append(
     prompt = _build_append_prompt(notes, page.title, page.content, page.summary)
 
     try:
-        response = client.generate(messages=[{"role": "user", "content": prompt}], tools=[])
+        response = client.generate(
+            messages=memory_language_messages([{"role": "user", "content": prompt}], persona_id),
+            tools=[],
+        )
     except Exception as e:
         LOGGER.warning("LLM call failed for exec append: %s", e)
         return None
@@ -297,7 +301,10 @@ def _exec_create_child(
     )
 
     try:
-        response = client.generate(messages=[{"role": "user", "content": prompt}], tools=[])
+        response = client.generate(
+            messages=memory_language_messages([{"role": "user", "content": prompt}], persona_id),
+            tools=[],
+        )
     except Exception as e:
         LOGGER.warning("LLM call failed for exec create_child: %s", e)
         return None
@@ -369,7 +376,10 @@ def _exec_create_new(
     prompt = _build_create_prompt(notes, suggested_title)
 
     try:
-        response = client.generate(messages=[{"role": "user", "content": prompt}], tools=[])
+        response = client.generate(
+            messages=memory_language_messages([{"role": "user", "content": prompt}], persona_id),
+            tools=[],
+        )
     except Exception as e:
         LOGGER.warning("LLM call failed for exec create_new: %s", e)
         return None

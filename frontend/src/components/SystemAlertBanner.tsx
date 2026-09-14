@@ -1,4 +1,9 @@
 "use client";
+import { apiFetch } from '@/i18n/api';
+
+import { t as uiText } from '@/i18n/core';
+import { useLocale } from '@/i18n/useLocale';
+
 
 import { useEffect, useState } from "react";
 import { AlertTriangle, ChevronDown, ChevronUp } from "lucide-react";
@@ -18,6 +23,7 @@ interface AlertResponse {
 }
 
 export default function SystemAlertBanner() {
+    useLocale();
     const [alerts, setAlerts] = useState<SystemAlert[]>([]);
     const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
     const [quarantineModalOpen, setQuarantineModalOpen] = useState(false);
@@ -25,7 +31,7 @@ export default function SystemAlertBanner() {
 
     const fetchAlerts = async () => {
         try {
-            const res = await fetch("/api/system/alerts");
+            const res = await apiFetch("/api/system/alerts");
             if (!res.ok) return;
             const data: AlertResponse = await res.json();
             setAlerts(data.alerts || []);
@@ -48,24 +54,24 @@ export default function SystemAlertBanner() {
         const buildingId = String((alert.details || {}).building_id ?? "");
         if (!buildingId) return;
         const ok = window.confirm(
-            "読めなくなった古い履歴ファイルを、同じフォルダの中で名前を変えて脇へ移します。\n\n" +
-            "ファイルは消しません。後で復元したくなったら元の名前に戻せます。\n" +
-            "この警告は移した時点で消えます。",
+            uiText("components.SystemAlertBanner.text001") +
+            uiText("components.SystemAlertBanner.text002") +
+            uiText("components.SystemAlertBanner.text003"),
         );
         if (!ok) return;
         setBusyId(alert.id);
         try {
-            const res = await fetch(
+            const res = await apiFetch(
                 `/api/system/legacy-log/${encodeURIComponent(buildingId)}/archive`,
                 { method: "POST" },
             );
             if (!res.ok) {
-                window.alert(`移せませんでした（${res.status}）。詳しくはログを見てください。`);
+                window.alert(uiText("components.SystemAlertBanner.text004", { p1: res.status }));
                 return;
             }
             await fetchAlerts();
         } catch {
-            window.alert("移せませんでした。バックエンドに繋がっていない可能性があります。");
+            window.alert(uiText("components.SystemAlertBanner.text005"));
         } finally {
             setBusyId(null);
         }
@@ -116,22 +122,20 @@ export default function SystemAlertBanner() {
                                     )}
                                 </button>
                                 {isQuarantine && (
-                                    <button
+                                    <button data-i18n="components.SystemAlertBanner.text006"
                                         type="button"
                                         className={styles.actionButton}
                                         onClick={() => setQuarantineModalOpen(true)}
-                                    >
-                                        対応する
-                                    </button>
+                                    >{uiText("components.SystemAlertBanner.text006")}</button>
                                 )}
                                 {isUnreadableLegacyLog && (
-                                    <button
+                                    <button data-i18n="components.SystemAlertBanner.text007 components.SystemAlertBanner.text008"
                                         type="button"
                                         className={styles.secondaryButton}
                                         onClick={() => archiveLegacyLog(alert)}
                                         disabled={busyId === alert.id}
                                     >
-                                        {busyId === alert.id ? "移しています…" : "ファイルを脇へ移す"}
+                                        {busyId === alert.id ? uiText("components.SystemAlertBanner.text007") : uiText("components.SystemAlertBanner.text008")}
                                     </button>
                                 )}
                             </div>
@@ -167,11 +171,11 @@ export default function SystemAlertBanner() {
 
 // 検算が返す状態の名前。そのまま出すと画面に英語の内部用語が並ぶ。
 const LEGACY_LOG_KIND_LABELS: Record<string, string> = {
-    not_imported: "まだ移していない",
-    live_rows_only: "新しい会話が先に入っている",
-    partial: "一部だけ移せていない",
-    unreadable: "ファイルが読めない",
-    check_failed: "確認できなかった",
+    get not_imported() { return uiText("components.SystemAlertBanner.text009"); },
+    get live_rows_only() { return uiText("components.SystemAlertBanner.text010"); },
+    get partial() { return uiText("components.SystemAlertBanner.text011"); },
+    get unreadable() { return uiText("components.SystemAlertBanner.text012"); },
+    get check_failed() { return uiText("components.SystemAlertBanner.text013"); },
 };
 
 function formatValue(value: unknown, key?: string): string {
@@ -179,29 +183,29 @@ function formatValue(value: unknown, key?: string): string {
         return LEGACY_LOG_KIND_LABELS[value] || value;
     }
     if (Array.isArray(value)) {
-        return value.length === 0 ? "(なし)" : value.join("\n");
+        return value.length === 0 ? uiText("components.SystemAlertBanner.text014") : value.join("\n");
     }
-    if (value === null || value === undefined) return "(なし)";
+    if (value === null || value === undefined) return uiText("components.SystemAlertBanner.text015");
     return String(value);
 }
 
 function formatKey(key: string): string {
     const labels: Record<string, string> = {
-        building_id: "ビルディングID",
-        backup_path: "退避先",
-        corrupted_path: "退避先",
-        original_path: "元の場所",
-        parse_error: "パースエラー",
-        rescue_error: "退避エラー",
-        recovery_instructions: "復元手順",
-        reason: "異常理由",
-        available_backups: "利用可能なバックアップ",
-        kind: "状態",
-        missing: "移せていない件数",
-        file_entries: "古いファイルの件数",
-        imported_rows: "移し終わった件数",
-        live_rows: "新しい会話の件数",
-        path: "古いファイルの場所",
+        building_id: uiText("components.SystemAlertBanner.text016"),
+        backup_path: uiText("components.SystemAlertBanner.text017"),
+        corrupted_path: uiText("components.SystemAlertBanner.text018"),
+        original_path: uiText("components.SystemAlertBanner.text019"),
+        parse_error: uiText("components.SystemAlertBanner.text020"),
+        rescue_error: uiText("components.SystemAlertBanner.text021"),
+        recovery_instructions: uiText("components.SystemAlertBanner.text022"),
+        reason: uiText("components.SystemAlertBanner.text023"),
+        available_backups: uiText("components.SystemAlertBanner.text024"),
+        kind: uiText("components.SystemAlertBanner.text025"),
+        missing: uiText("components.SystemAlertBanner.text026"),
+        file_entries: uiText("components.SystemAlertBanner.text027"),
+        imported_rows: uiText("components.SystemAlertBanner.text028"),
+        live_rows: uiText("components.SystemAlertBanner.text029"),
+        path: uiText("components.SystemAlertBanner.text030"),
     };
     return labels[key] || key;
 }

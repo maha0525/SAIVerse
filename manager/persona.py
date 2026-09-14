@@ -246,6 +246,7 @@ class PersonaMixin:
             persona_event_ack=self.archive_persona_events,
             manager_ref=self,
             linked_user_name=linked_user_name,
+            language=getattr(db_ai, "LANGUAGE", None),
         )
 
         persona.private_room_id = private_room_id
@@ -451,6 +452,7 @@ class PersonaMixin:
         room_capacity: int = 1,
         room_system_instruction: Optional[str] = None,
         room_description: Optional[str] = None,
+        language: Optional[str] = None,
     ) -> Tuple[bool, str, Optional[str], Optional[str]]:
         """
         Dynamically creates a new persona, their private room, and places them in it.
@@ -536,6 +538,9 @@ class PersonaMixin:
                 is not None,
             )
 
+            from saiverse.persona_language import get_city_language, validate_language
+            target_lang = validate_language(language) if language else get_city_language(self.city_id, db_path=None)
+
             new_ai_model = AIModel(
                 AIID=new_ai_id,
                 HOME_CITYID=self.city_id,
@@ -561,6 +566,7 @@ class PersonaMixin:
                 CHRONICLE_ENABLED=True,
                 PRIVATE_ROOM_ID=new_building_id,
                 PERSONA_ROLE=persona_role,
+                LANGUAGE=target_lang,
             )
             db.add(new_ai_model)
             logging.info("DB: Added new AI '%s' (%s).", name, new_ai_id)
@@ -678,6 +684,7 @@ class PersonaMixin:
                 persona_event_ack=self.archive_persona_events,
                 manager_ref=self,
                 linked_user_name=linked_user_name,
+                language=target_lang,
             )
             new_persona_core.private_room_id = new_building_id
             new_persona_core.persona_role = persona_role

@@ -1,4 +1,7 @@
 "use client";
+import { t as uiText } from '@/i18n/core';
+import { useLocale } from '@/i18n/useLocale';
+
 
 import React from 'react';
 import { ExternalLink } from 'lucide-react';
@@ -25,6 +28,7 @@ export default function StepApiKeys({
     apiKeyStatus,
     onChange
 }: StepApiKeysProps) {
+    useLocale();
     const handleChange = (provider: string, value: string) => {
         onChange({ ...apiKeys, [provider]: value });
     };
@@ -50,11 +54,8 @@ export default function StepApiKeys({
 
     return (
         <div className={styles.apiKeysContainer}>
-            <h3 className={styles.title}>APIキー設定</h3>
-            <p className={styles.subtitle}>
-                ペルソナが話すためにはAPIキーが必要です。<br />
-                利用したいプラットフォームのAPIキーを入力してください。
-            </p>
+            <h3 data-i18n="components.tutorial.steps.StepApiKeys.text001" className={styles.title}>{uiText("components.tutorial.steps.StepApiKeys.text001")}</h3>
+            <p data-i18n="components.tutorial.steps.StepApiKeys.text002 components.tutorial.steps.StepApiKeys.text003" className={styles.subtitle}>{uiText("components.tutorial.steps.StepApiKeys.text002")}<br />{uiText("components.tutorial.steps.StepApiKeys.text003")}</p>
 
             <div className={styles.apiKeyList}>
                 {apiKeyStatus.map((status) => (
@@ -66,29 +67,27 @@ export default function StepApiKeys({
                                     <span className={styles.freeBadge}>{status.free_label}</span>
                                 )}
                             </div>
-                            <button
+                            <button data-i18n="components.tutorial.steps.StepApiKeys.text004 components.tutorial.steps.StepApiKeys.text005"
                                 className={styles.docLink}
                                 onClick={() => openDocs(status.provider)}
-                                title="APIキー取得方法を見る"
+                                title={uiText("components.tutorial.steps.StepApiKeys.text004")}
                             >
-                                <ExternalLink size={14} />
-                                取得方法
-                            </button>
+                                <ExternalLink size={14} />{uiText("components.tutorial.steps.StepApiKeys.text005")}</button>
                         </div>
                         <p className={styles.providerDescription}>{status.description}</p>
                         {status.free_note && (
                             <p className={styles.freeNote}>{status.free_note}</p>
                         )}
                         <div className={styles.inputRow}>
-                            <input
+                            <input data-i18n="components.tutorial.steps.StepApiKeys.text006 components.tutorial.steps.StepApiKeys.text007"
                                 type="password"
-                                placeholder={status.is_set ? '（設定済み - 変更する場合のみ入力）' : 'APIキーを入力'}
+                                placeholder={status.is_set ? uiText("components.tutorial.steps.StepApiKeys.text006") : uiText("components.tutorial.steps.StepApiKeys.text007")}
                                 value={apiKeys[status.provider] || ''}
                                 onChange={(e) => handleChange(status.provider, e.target.value)}
                                 className={status.is_set ? styles.inputSet : ''}
                             />
                             {status.is_set && (
-                                <span className={styles.statusBadge}>設定済</span>
+                                <span data-i18n="components.tutorial.steps.StepApiKeys.text008" className={styles.statusBadge}>{uiText("components.tutorial.steps.StepApiKeys.text008")}</span>
                             )}
                         </div>
                     </div>

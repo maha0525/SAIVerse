@@ -1,4 +1,7 @@
 "use client";
+import { t as uiText } from '@/i18n/core';
+import { useLocale } from '@/i18n/useLocale';
+
 
 import React from 'react';
 import { CheckCircle, MessageSquare } from 'lucide-react';
@@ -9,23 +12,17 @@ interface StepCompleteProps {
 }
 
 export default function StepComplete({ onStart }: StepCompleteProps) {
+    useLocale();
     return (
         <div className={styles.completeContainer}>
             <CheckCircle size={64} className={styles.successIcon} />
 
-            <h2 className={styles.completeTitle}>セットアップ完了!</h2>
+            <h2 data-i18n="components.tutorial.steps.StepComplete.text001" className={styles.completeTitle}>{uiText("components.tutorial.steps.StepComplete.text001")}</h2>
 
-            <p className={styles.completeSubtitle}>
-                基本的な設定が完了しました。<br />
-                ペルソナとの生活をお楽しみください。<br /><br />
-                SAIVerseにはその他にも様々な機能があります。<br />
-                知りたい場合は、サイドバーの「システム」を開いて「チュートリアル」を選択してください。
-            </p>
+            <p data-i18n="components.tutorial.steps.StepComplete.text002 components.tutorial.steps.StepComplete.text003 components.tutorial.steps.StepComplete.text004 components.tutorial.steps.StepComplete.text005" className={styles.completeSubtitle}>{uiText("components.tutorial.steps.StepComplete.text002")}<br />{uiText("components.tutorial.steps.StepComplete.text003")}<br /><br />{uiText("components.tutorial.steps.StepComplete.text004")}<br />{uiText("components.tutorial.steps.StepComplete.text005")}</p>
 
-            <button className={styles.startButton} onClick={onStart}>
-                <MessageSquare size={20} />
-                始める
-            </button>
+            <button data-i18n="components.tutorial.steps.StepComplete.text006" className={styles.startButton} onClick={onStart}>
+                <MessageSquare size={20} />{uiText("components.tutorial.steps.StepComplete.text006")}</button>
         </div>
     );
 }

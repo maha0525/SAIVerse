@@ -1,4 +1,11 @@
 "use client";
+import { apiFetch } from '@/i18n/api';
+
+import { getFormatLocale } from '@/i18n/core';
+
+import { t as uiText } from '@/i18n/core';
+import { useLocale } from '@/i18n/useLocale';
+
 
 import React, { useState, useEffect } from 'react';
 import { BookOpen, AlertTriangle } from 'lucide-react';
@@ -24,11 +31,12 @@ interface StepChronicleProps {
 }
 
 export default function StepChronicle({ enabled, onChange, personaId }: StepChronicleProps) {
+    useLocale();
     const [costEstimate, setCostEstimate] = useState<ChronicleCostEstimate | null>(null);
 
     useEffect(() => {
         if (personaId) {
-            fetch(`/api/people/${personaId}/arasuji/cost-estimate`)
+            apiFetch(`/api/people/${personaId}/arasuji/cost-estimate`)
                 .then(res => res.ok ? res.json() : null)
                 .then(data => { if (data) setCostEstimate(data); })
                 .catch(() => {});
@@ -37,15 +45,10 @@ export default function StepChronicle({ enabled, onChange, personaId }: StepChro
 
     return (
         <div>
-            <h3 style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '1rem' }}>
-                <BookOpen size={20} />
-                Chronicle（あらすじ）設定
-            </h3>
+            <h3 data-i18n="components.tutorial.steps.StepChronicle.text001" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '1rem' }}>
+                <BookOpen size={20} />{uiText("components.tutorial.steps.StepChronicle.text001")}</h3>
 
-            <p style={{ marginBottom: '1rem', lineHeight: '1.6', fontSize: '0.9rem' }}>
-                Chronicleは、古くなった会話を自動的にあらすじへ畳んで、長期記憶として保ち続ける機能です。
-                ペルソナは直近の会話を全文のまま、それより前をあらすじとして思い出します。
-            </p>
+            <p data-i18n="components.tutorial.steps.StepChronicle.text002" style={{ marginBottom: '1rem', lineHeight: '1.6', fontSize: '0.9rem' }}>{uiText("components.tutorial.steps.StepChronicle.text002")}</p>
 
             <div style={{
                 padding: '0.75rem',
@@ -58,11 +61,7 @@ export default function StepChronicle({ enabled, onChange, personaId }: StepChro
                 alignItems: 'flex-start',
             }}>
                 <AlertTriangle size={18} style={{ flexShrink: 0, marginTop: '2px' }} />
-                <div>
-                    あらすじの生成にはLLM APIの呼び出し（<strong>APIコスト</strong>）が伴います。
-                    生成は会話が一定量を超えたときに少しずつ行われ、
-                    過去ログを取り込んでも自動でまとめて生成されることはありません。
-                </div>
+                <div data-i18n="components.tutorial.steps.StepChronicle.text003 components.tutorial.steps.StepChronicle.text005">{uiText("components.tutorial.steps.StepChronicle.text003")}<strong data-i18n="components.tutorial.steps.StepChronicle.text004">{uiText("components.tutorial.steps.StepChronicle.text004")}</strong>{uiText("components.tutorial.steps.StepChronicle.text005")}</div>
             </div>
 
             {costEstimate && costEstimate.unprocessed_messages > 0 && (
@@ -74,17 +73,14 @@ export default function StepChronicle({ enabled, onChange, personaId }: StepChro
                     fontSize: '0.85rem',
                     lineHeight: '1.6',
                 }}>
-                    <div>あらすじになっていない過去メッセージ: <strong>{costEstimate.unprocessed_messages.toLocaleString()}</strong>件</div>
-                    <div>
-                        まとめてあらすじ化した場合の推定コスト: <strong>
+                    <div data-i18n="components.tutorial.steps.StepChronicle.text006 components.tutorial.steps.StepChronicle.text007">{uiText("components.tutorial.steps.StepChronicle.text006")}<strong>{costEstimate.unprocessed_messages.toLocaleString(getFormatLocale())}</strong>{uiText("components.tutorial.steps.StepChronicle.text007")}</div>
+                    <div data-i18n="components.tutorial.steps.StepChronicle.text008">{uiText("components.tutorial.steps.StepChronicle.text008")}<strong>
                             {costEstimate.is_free_tier ? `${formatCost(0, costEstimate.currency)} (Free tier)` : formatCost(costEstimate.estimated_cost_usd, costEstimate.currency)}
                         </strong>
                         {' '}({costEstimate.model_name})
                     </div>
-                    <div>推定LLM呼び出し: {costEstimate.estimated_llm_calls}回</div>
-                    <div style={{ marginTop: '0.25rem' }}>
-                        まとめてのあらすじ化は自動では行われません。メモリー画面の「Chronicle」タブから実行したときだけ発生します。
-                    </div>
+                    <div data-i18n="components.tutorial.steps.StepChronicle.text009 components.tutorial.steps.StepChronicle.text010">{uiText("components.tutorial.steps.StepChronicle.text009")}{costEstimate.estimated_llm_calls}{uiText("components.tutorial.steps.StepChronicle.text010")}</div>
+                    <div data-i18n="components.tutorial.steps.StepChronicle.text011" style={{ marginTop: '0.25rem' }}>{uiText("components.tutorial.steps.StepChronicle.text011")}</div>
                 </div>
             )}
 
@@ -102,18 +98,13 @@ export default function StepChronicle({ enabled, onChange, personaId }: StepChro
                         style={{ width: '18px', height: '18px' }}
                     />
                     <div>
-                        <div style={{ fontWeight: 'bold' }}>Chronicle 自動生成を有効にする（推奨）</div>
-                        <div style={{ fontSize: '0.85rem', color: '#888', marginTop: '0.25rem' }}>
-                            会話が一定量を超えると、古い部分から自動的にあらすじ化されます
-                        </div>
+                        <div data-i18n="components.tutorial.steps.StepChronicle.text012" style={{ fontWeight: 'bold' }}>{uiText("components.tutorial.steps.StepChronicle.text012")}</div>
+                        <div data-i18n="components.tutorial.steps.StepChronicle.text013" style={{ fontSize: '0.85rem', color: '#888', marginTop: '0.25rem' }}>{uiText("components.tutorial.steps.StepChronicle.text013")}</div>
                     </div>
                 </label>
             </div>
 
-            <p style={{ fontSize: '0.8rem', color: '#888' }}>
-                この設定はペルソナ設定からいつでも変更できます。
-                無効にすると自動生成は止まり、メモリー画面の「Chronicle」タブからの手動生成もできなくなります。
-            </p>
+            <p data-i18n="components.tutorial.steps.StepChronicle.text014" style={{ fontSize: '0.8rem', color: '#888' }}>{uiText("components.tutorial.steps.StepChronicle.text014")}</p>
         </div>
     );
 }

@@ -1,3 +1,10 @@
+
+import { apiFetch } from '@/i18n/api';
+
+import { getFormatLocale } from '@/i18n/core';
+
+import { t as uiText } from '@/i18n/core';
+import { useLocale } from '@/i18n/useLocale';
 import React, { useState, useEffect } from 'react';
 import { X } from 'lucide-react';
 import styles from './ModelEditorModal.module.css';
@@ -44,12 +51,12 @@ const WATERMARK_FIELDS = [
 type WatermarkField = typeof WATERMARK_FIELDS[number];
 const WATERMARK_LABELS: Record<WatermarkField, { label: string; hint: string }> = {
     metabolism_high_chars: {
-        label: '整理をはじめる文字数 (metabolism_high_chars)',
-        hint: '会話コンテキストがこの文字数を超えたら、古い出来事からあらすじへ畳んで整理します。none にすると文字数では発火しません。',
+        get label() { return uiText("components.settings.ModelEditorModal.text001"); },
+        get hint() { return uiText("components.settings.ModelEditorModal.text002"); },
     },
     metabolism_target_chars: {
-        label: '整理後に残す文字数 (metabolism_target_chars)',
-        hint: '整理はこの文字数まで畳んだら止まります。少なすぎるときは畳んだ範囲をここまで開き直します。会話の起点がまだ無いとき（新規ペルソナ等）に最初に読み込む量もこの値です。none にするとこのモデルは履歴の自動整理を行いません。',
+        get label() { return uiText("components.settings.ModelEditorModal.text003"); },
+        get hint() { return uiText("components.settings.ModelEditorModal.text004"); },
     },
 };
 
@@ -65,6 +72,7 @@ const watermarkFieldFromConfig = (value: unknown): string => {
 };
 
 export default function ModelEditorModal({ isOpen, mode, modelKey, cloneSource, onClose, onSaved }: Props) {
+    useLocale();
     const [key, setKey] = useState('');
     // Basic fields (dedicated inputs)
     const [model, setModel] = useState('');
@@ -88,7 +96,7 @@ export default function ModelEditorModal({ isOpen, mode, modelKey, cloneSource, 
 
     const loadEffectiveDefaults = async () => {
         try {
-            const res = await fetch('/api/config/metabolism-defaults');
+            const res = await apiFetch('/api/config/metabolism-defaults');
             if (!res.ok) return;
             const data = await res.json();
             const eff = data?.effective;
@@ -157,18 +165,18 @@ export default function ModelEditorModal({ isOpen, mode, modelKey, cloneSource, 
         try {
             const parsed = JSON.parse(extraJson);
             if (typeof parsed !== 'object' || Array.isArray(parsed) || parsed === null) {
-                setParseError('追加設定はオブジェクト ({}) で指定してください');
+                setParseError(uiText("components.settings.ModelEditorModal.text009"));
                 return;
             }
             setParseError(null);
         } catch (e) {
-            setParseError(`JSON エラー: ${(e as Error).message}`);
+            setParseError(uiText("components.settings.ModelEditorModal.text010", { p1: (e as Error).message }));
         }
     }, [extraJson]);
 
     const loadProviderList = async () => {
         try {
-            const res = await fetch('/api/providers');
+            const res = await apiFetch('/api/providers');
             if (!res.ok) return;
             const data = await res.json();
             setProviders(
@@ -185,9 +193,9 @@ export default function ModelEditorModal({ isOpen, mode, modelKey, cloneSource, 
     const loadModel = async (k: string) => {
         setLoading(true);
         try {
-            const res = await fetch(`/api/config/models/${k}`);
+            const res = await apiFetch(`/api/config/models/${k}`);
             if (!res.ok) {
-                setSaveError(`読み込み失敗: HTTP ${res.status}`);
+                setSaveError(uiText("components.settings.ModelEditorModal.text011", { p1: res.status }));
                 return;
             }
             const data = await res.json();
@@ -195,7 +203,7 @@ export default function ModelEditorModal({ isOpen, mode, modelKey, cloneSource, 
             applyConfig(data.key, cfg);
             setSource(data.source);
         } catch (e) {
-            setSaveError(`読み込み失敗: ${e}`);
+            setSaveError(uiText("components.settings.ModelEditorModal.text012", { p1: e }));
         } finally {
             setLoading(false);
         }
@@ -205,15 +213,15 @@ export default function ModelEditorModal({ isOpen, mode, modelKey, cloneSource, 
         setSaveError(null);
 
         if (!key || !key.match(/^[a-zA-Z0-9_.\-]+$/)) {
-            setSaveError('キーは英数字・ハイフン・アンダースコア・ドットのみ使用可能です');
+            setSaveError(uiText("components.settings.ModelEditorModal.text013"));
             return;
         }
         if (!model.trim()) {
-            setSaveError('モデル ID (model) を入力してください');
+            setSaveError(uiText("components.settings.ModelEditorModal.text014"));
             return;
         }
         if (!Number.isFinite(contextLength) || contextLength <= 0) {
-            setSaveError('context_length は正の整数を入力してください');
+            setSaveError(uiText("components.settings.ModelEditorModal.text015"));
             return;
         }
 
@@ -221,11 +229,11 @@ export default function ModelEditorModal({ isOpen, mode, modelKey, cloneSource, 
         try {
             extra = extraJson.trim() ? JSON.parse(extraJson) : {};
             if (typeof extra !== 'object' || Array.isArray(extra) || extra === null) {
-                setSaveError('追加設定はオブジェクトで指定してください');
+                setSaveError(uiText("components.settings.ModelEditorModal.text016"));
                 return;
             }
         } catch (e) {
-            setSaveError(`追加設定の JSON が不正です: ${(e as Error).message}`);
+            setSaveError(uiText("components.settings.ModelEditorModal.text017", { p1: (e as Error).message }));
             return;
         }
 
@@ -264,7 +272,7 @@ export default function ModelEditorModal({ isOpen, mode, modelKey, cloneSource, 
             }
             const value = parseInt(raw, 10);
             if (isNaN(value) || String(value) !== raw || value < 1) {
-                setSaveError(`${field} は 1 以上の整数か none を入力してください（空欄 = 全体設定の既定）`);
+                setSaveError(uiText("components.settings.ModelEditorModal.text018", { p1: field }));
                 return;
             }
             merged[field] = value;
@@ -273,7 +281,7 @@ export default function ModelEditorModal({ isOpen, mode, modelKey, cloneSource, 
         const wmHigh = wmEffective.metabolism_high_chars;
         const wmTarget = wmEffective.metabolism_target_chars;
         if (wmTarget != null && wmHigh != null && wmTarget > wmHigh) {
-            setSaveError('整理後に残す文字数は、整理をはじめる文字数以下にしてください');
+            setSaveError(uiText("components.settings.ModelEditorModal.text019"));
             return;
         }
 
@@ -281,13 +289,13 @@ export default function ModelEditorModal({ isOpen, mode, modelKey, cloneSource, 
         try {
             let res: Response;
             if (mode === 'create') {
-                res = await fetch('/api/config/models', {
+                res = await apiFetch('/api/config/models', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ key, config: merged }),
                 });
             } else {
-                res = await fetch(`/api/config/models/${key}`, {
+                res = await apiFetch(`/api/config/models/${key}`, {
                     method: 'PUT',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ config: merged }),
@@ -295,7 +303,7 @@ export default function ModelEditorModal({ isOpen, mode, modelKey, cloneSource, 
             }
             if (!res.ok) {
                 const text = await res.text();
-                setSaveError(`保存失敗: HTTP ${res.status} ${text}`);
+                setSaveError(uiText("components.settings.ModelEditorModal.text025", { p1: res.status, p2: text }));
                 return;
             }
             // 保存で決め直したときに、新しい設定に切り替えられなかったペルソナの知らせ
@@ -307,7 +315,7 @@ export default function ModelEditorModal({ isOpen, mode, modelKey, cloneSource, 
             onSaved();
             onClose();
         } catch (e) {
-            setSaveError(`保存失敗: ${e}`);
+            setSaveError(uiText("components.settings.ModelEditorModal.text026", { p1: e }));
         } finally {
             setSaving(false);
         }
@@ -321,77 +329,74 @@ export default function ModelEditorModal({ isOpen, mode, modelKey, cloneSource, 
         <ModalOverlay onClose={onClose}>
             <div className={styles.modal}>
                 <div className={styles.header}>
-                    <h3>{mode === 'create' ? (cloneSource ? 'モデルを複製' : 'モデルを新規作成') : `モデルを編集: ${key}`}</h3>
+                    <h3 data-i18n="components.settings.ModelEditorModal.text027 components.settings.ModelEditorModal.text028 components.settings.ModelEditorModal.text029">{mode === 'create' ? (cloneSource ? uiText("components.settings.ModelEditorModal.text027") : uiText("components.settings.ModelEditorModal.text028")) : uiText("components.settings.ModelEditorModal.text029", { p1: key })}</h3>
                     <button className={styles.closeBtn} onClick={onClose}><X size={20} /></button>
                 </div>
 
                 <div className={styles.content}>
                     {loading ? (
-                        <div>読み込み中...</div>
+                        <div data-i18n="components.settings.ModelEditorModal.text030">{uiText("components.settings.ModelEditorModal.text030")}</div>
                     ) : (
                         <>
                             {isShadowingNonUser && (
-                                <div className={styles.warningBanner}>
-                                    {source} のモデルを編集中です。保存すると user_data に上書きが作成され、{source} は変更されません。リセットしたい場合は user_data 側のファイルを削除してください。
-                                </div>
+                                <div data-i18n="components.settings.ModelEditorModal.text031 components.settings.ModelEditorModal.text032" className={styles.warningBanner}>
+                                    {source}{uiText("components.settings.ModelEditorModal.text031")}{source}{uiText("components.settings.ModelEditorModal.text032")}</div>
                             )}
 
                             <div className={styles.field}>
-                                <label>キー（ファイル名）</label>
-                                <input
+                                <label data-i18n="components.settings.ModelEditorModal.text033">{uiText("components.settings.ModelEditorModal.text033")}</label>
+                                <input data-i18n="components.settings.ModelEditorModal.text034"
                                     className={styles.input}
                                     type="text"
                                     value={key}
                                     onChange={e => setKey(e.target.value)}
-                                    placeholder="例: qwen-via-lmstudio"
+                                    placeholder={uiText("components.settings.ModelEditorModal.text034")}
                                     disabled={mode === 'edit'}
                                 />
                             </div>
 
                             <div className={styles.field}>
-                                <label>モデル ID (model)</label>
-                                <input
+                                <label data-i18n="components.settings.ModelEditorModal.text035">{uiText("components.settings.ModelEditorModal.text035")}</label>
+                                <input data-i18n="components.settings.ModelEditorModal.text036"
                                     className={styles.input}
                                     type="text"
                                     value={model}
                                     onChange={e => setModel(e.target.value)}
-                                    placeholder="例: qwen2.5-72b-instruct"
+                                    placeholder={uiText("components.settings.ModelEditorModal.text036")}
                                 />
-                                <span className={styles.hint}>API 呼び出しに使うモデル名（プロバイダ側のモデル ID）</span>
+                                <span data-i18n="components.settings.ModelEditorModal.text037" className={styles.hint}>{uiText("components.settings.ModelEditorModal.text037")}</span>
                             </div>
 
                             <div className={styles.field}>
-                                <label>表示名 (display_name)</label>
-                                <input
+                                <label data-i18n="components.settings.ModelEditorModal.text038">{uiText("components.settings.ModelEditorModal.text038")}</label>
+                                <input data-i18n="components.settings.ModelEditorModal.text039"
                                     className={styles.input}
                                     type="text"
                                     value={displayName}
                                     onChange={e => setDisplayName(e.target.value)}
-                                    placeholder="例: Qwen 2.5 72B (LM Studio)"
+                                    placeholder={uiText("components.settings.ModelEditorModal.text039")}
                                 />
                             </div>
 
                             <div className={styles.field}>
-                                <label>プロバイダ参照 (provider_ref)</label>
+                                <label data-i18n="components.settings.ModelEditorModal.text040">{uiText("components.settings.ModelEditorModal.text040")}</label>
                                 <select
                                     className={styles.input}
                                     value={providerRef}
                                     onChange={e => setProviderRef(e.target.value)}
                                 >
-                                    <option value="">（参照なし — provider/base_url を直接指定する場合）</option>
+                                    <option data-i18n="components.settings.ModelEditorModal.text041" value="">{uiText("components.settings.ModelEditorModal.text041")}</option>
                                     {providers.map(p => (
                                         <option key={p.id} value={p.id}>
                                             {p.display_name} ({p.id})
                                         </option>
                                     ))}
                                 </select>
-                                <span className={styles.hint}>
-                                    プロバイダを選ぶと base_url / api_key_env がプロバイダ側から自動継承されます
-                                </span>
+                                <span data-i18n="components.settings.ModelEditorModal.text042" className={styles.hint}>{uiText("components.settings.ModelEditorModal.text042")}</span>
                             </div>
 
                             <div className={styles.field}>
-                                <label>コンテキスト長 (context_length)</label>
+                                <label data-i18n="components.settings.ModelEditorModal.text043">{uiText("components.settings.ModelEditorModal.text043")}</label>
                                 <input
                                     className={styles.input}
                                     type="number"
@@ -434,7 +439,7 @@ export default function ModelEditorModal({ isOpen, mode, modelKey, cloneSource, 
 
                             <div className={styles.field}>
                                 <label>
-                                    <span>追加設定 (JSON)</span>
+                                    <span data-i18n="components.settings.ModelEditorModal.text047">{uiText("components.settings.ModelEditorModal.text047")}</span>
                                     {parseError && <span className={styles.parseError}>{parseError}</span>}
                                 </label>
                                 <textarea
@@ -444,10 +449,7 @@ export default function ModelEditorModal({ isOpen, mode, modelKey, cloneSource, 
                                     rows={12}
                                     spellCheck={false}
                                 />
-                                <span className={styles.hint}>
-                                    parameters / pricing / cache / supports_images など、上記以外のフィールドを JSON で指定。
-                                    空 ({'{}'}) で問題ない場合も多い。詳細スキーマは builtin_data/models/ の例を参照。
-                                </span>
+                                <span data-i18n="components.settings.ModelEditorModal.text048 components.settings.ModelEditorModal.text049" className={styles.hint}>{uiText("components.settings.ModelEditorModal.text048")}{'{}'}{uiText("components.settings.ModelEditorModal.text049")}</span>
                             </div>
 
                             {saveError && <div className={styles.error}>{saveError}</div>}
@@ -456,13 +458,13 @@ export default function ModelEditorModal({ isOpen, mode, modelKey, cloneSource, 
                 </div>
 
                 <div className={styles.footer}>
-                    <button className={styles.cancelBtn} onClick={onClose}>キャンセル</button>
-                    <button
+                    <button data-i18n="components.settings.ModelEditorModal.text050" className={styles.cancelBtn} onClick={onClose}>{uiText("components.settings.ModelEditorModal.text050")}</button>
+                    <button data-i18n="components.settings.ModelEditorModal.text051 components.settings.ModelEditorModal.text052"
                         className={styles.saveBtn}
                         onClick={handleSave}
                         disabled={saving || loading || !!parseError}
                     >
-                        {saving ? '保存中...' : '保存'}
+                        {saving ? uiText("components.settings.ModelEditorModal.text051") : uiText("components.settings.ModelEditorModal.text052")}
                     </button>
                 </div>
             </div>

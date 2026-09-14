@@ -1,4 +1,6 @@
 "use client";
+import { apiFetch } from '@/i18n/api';
+
 
 import { useEffect, useRef, useCallback } from 'react';
 
@@ -31,7 +33,7 @@ export function useActivityTracker() {
         lastHeartbeatRef.current = now;
 
         try {
-            await fetch('/api/user/heartbeat', {
+            await apiFetch('/api/user/heartbeat', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -54,7 +56,7 @@ export function useActivityTracker() {
                 );
             } catch {
                 // Fallback to fetch if sendBeacon fails
-                fetch('/api/user/visibility', {
+                apiFetch('/api/user/visibility', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ visible: false }),

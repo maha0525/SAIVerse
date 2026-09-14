@@ -1,3 +1,8 @@
+
+import { apiFetch } from '@/i18n/api';
+
+import { t as uiText } from '@/i18n/core';
+import { useLocale } from '@/i18n/useLocale';
 import React, { useState, useEffect } from 'react';
 import { X, Save, User as UserIcon, AlertCircle } from 'lucide-react';
 import styles from './UserProfileModal.module.css';
@@ -14,6 +19,7 @@ interface UserProfileModalProps {
 }
 
 export default function UserProfileModal({ isOpen, onClose, currentName, currentAvatar, currentEmail, onSaveSuccess }: UserProfileModalProps) {
+    useLocale();
     const [name, setName] = useState(currentName);
     const [avatar, setAvatar] = useState(currentAvatar || "");
     const [email, setEmail] = useState(currentEmail || "");
@@ -33,14 +39,14 @@ export default function UserProfileModal({ isOpen, onClose, currentName, current
 
     const handleSave = async () => {
         if (!name.trim()) {
-            setError("名前を入力してください");
+            setError(uiText("components.UserProfileModal.text001"));
             return;
         }
 
         setLoading(true);
         setError(null);
         try {
-            const res = await fetch('/api/user/me', {
+            const res = await apiFetch('/api/user/me', {
                 method: 'PATCH',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -55,11 +61,11 @@ export default function UserProfileModal({ isOpen, onClose, currentName, current
                 onClose();
             } else {
                 const data = await res.json();
-                setError(data.detail || "プロフィールの更新に失敗しました");
+                setError(data.detail || uiText("components.UserProfileModal.text002"));
             }
         } catch (e) {
             console.error(e);
-            setError("ネットワークエラー");
+            setError(uiText("components.UserProfileModal.text003"));
         } finally {
             setLoading(false);
         }
@@ -69,7 +75,7 @@ export default function UserProfileModal({ isOpen, onClose, currentName, current
         <ModalOverlay onClose={onClose} className={styles.overlay}>
             <div className={styles.modal} onClick={e => e.stopPropagation()}>
                 <div className={styles.header}>
-                    <h2 className={styles.title}>プロフィール編集</h2>
+                    <h2 data-i18n="components.UserProfileModal.text004" className={styles.title}>{uiText("components.UserProfileModal.text004")}</h2>
                     <button className={styles.closeButton} onClick={onClose}>
                         <X size={20} />
                     </button>
@@ -87,24 +93,24 @@ export default function UserProfileModal({ isOpen, onClose, currentName, current
                     </div>
 
                     <div className={styles.formGroup}>
-                        <label className={styles.label}>表示名</label>
-                        <input
+                        <label data-i18n="components.UserProfileModal.text005" className={styles.label}>{uiText("components.UserProfileModal.text005")}</label>
+                        <input data-i18n="components.UserProfileModal.text006"
                             type="text"
                             className={styles.input}
                             value={name}
                             onChange={(e) => setName(e.target.value)}
-                            placeholder="表示名を入力"
+                            placeholder={uiText("components.UserProfileModal.text006")}
                         />
                     </div>
 
                     <div className={styles.formGroup}>
-                        <label className={styles.label}>メールアドレス</label>
+                        <label data-i18n="components.UserProfileModal.text007" className={styles.label}>{uiText("components.UserProfileModal.text007")}</label>
                         <input
                             type="email"
                             className={styles.input}
                             value={email}
                             onChange={(e) => setEmail(e.target.value)}
-                            placeholder="user@example.com"
+                            placeholder={uiText("components.UserProfileModal.label001")}
                         />
                     </div>
 
@@ -117,14 +123,11 @@ export default function UserProfileModal({ isOpen, onClose, currentName, current
                 </div>
 
                 <div className={styles.footer}>
-                    <button className={styles.cancelBtn} onClick={onClose} disabled={loading}>
-                        キャンセル
-                    </button>
-                    <button className={styles.saveBtn} onClick={handleSave} disabled={loading}>
-                        {loading ? "保存中..." : (
+                    <button data-i18n="components.UserProfileModal.text008" className={styles.cancelBtn} onClick={onClose} disabled={loading}>{uiText("components.UserProfileModal.text008")}</button>
+                    <button data-i18n="components.UserProfileModal.text009 components.UserProfileModal.text010" className={styles.saveBtn} onClick={handleSave} disabled={loading}>
+                        {loading ? uiText("components.UserProfileModal.text009") : (
                             <>
-                                <Save size={16} /> 保存
-                            </>
+                                <Save size={16} />{uiText("components.UserProfileModal.text010")}</>
                         )}
                     </button>
                 </div>

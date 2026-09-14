@@ -1,4 +1,9 @@
 'use client';
+import { apiFetch, parseUIEvent } from '@/i18n/api';
+
+import { t as uiText } from '@/i18n/core';
+import { useLocale } from '@/i18n/useLocale';
+
 
 import React, { useEffect, useRef, useState } from 'react';
 import { CheckCircle2, AlertCircle, AlertTriangle, X } from 'lucide-react';
@@ -32,9 +37,9 @@ interface FinishedState {
 
 function opLabel(op: CatalogOperation): string {
     switch (op) {
-        case 'install': return '導入';
-        case 'update': return '更新';
-        case 'uninstall': return '削除';
+        case 'install': return uiText("components.AddonInstallProgressDialog.text001");
+        case 'update': return uiText("components.AddonInstallProgressDialog.text002");
+        case 'uninstall': return uiText("components.AddonInstallProgressDialog.text003");
     }
 }
 
@@ -45,6 +50,7 @@ export default function AddonInstallProgressDialog({
     deleteData,
     onClose,
 }: Props) {
+    useLocale();
     const [logs, setLogs] = useState<LogEntry[]>([]);
     const [finished, setFinished] = useState<FinishedState | null>(null);
     const [streamError, setStreamError] = useState<string | null>(null);
@@ -66,7 +72,7 @@ export default function AddonInstallProgressDialog({
 
         (async () => {
             try {
-                const res = await fetch(path, {
+                const res = await apiFetch(path, {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
@@ -82,7 +88,7 @@ export default function AddonInstallProgressDialog({
                     return;
                 }
                 if (!res.body) {
-                    setStreamError('レスポンスボディがありません');
+                    setStreamError(uiText("components.AddonInstallProgressDialog.text004"));
                     return;
                 }
 
@@ -106,7 +112,7 @@ export default function AddonInstallProgressDialog({
                             if (!line.startsWith('data: ')) continue;
                             const payload = line.slice(6);
                             try {
-                                const ev = JSON.parse(payload);
+                                const ev = parseUIEvent(payload);
                                 handleEvent(ev);
                             } catch {
                                 // malformed SSE — skip
@@ -175,7 +181,7 @@ export default function AddonInstallProgressDialog({
             <div className={styles.dialog} onClick={(e) => e.stopPropagation()}>
                 <div className={styles.header}>
                     <div>
-                        <h3>{displayName} を{opLabel(operation)}中</h3>
+                        <h3 data-i18n="components.AddonInstallProgressDialog.text005 components.AddonInstallProgressDialog.text006">{displayName}{uiText("components.AddonInstallProgressDialog.text005")}{opLabel(operation)}{uiText("components.AddonInstallProgressDialog.text006")}</h3>
                         <div className={styles.subId}>{addonId}</div>
                     </div>
                     {!inProgress && (
@@ -191,8 +197,7 @@ export default function AddonInstallProgressDialog({
                             className={styles.progressFill}
                             style={{ width: `${(currentStep.index / currentStep.total) * 100}%` }}
                         />
-                        <div className={styles.progressText}>
-                            ステップ {currentStep.index} / {currentStep.total}
+                        <div data-i18n="components.AddonInstallProgressDialog.text007" className={styles.progressText}>{uiText("components.AddonInstallProgressDialog.text007")}{currentStep.index} / {currentStep.total}
                         </div>
                     </div>
                 )}
@@ -224,7 +229,7 @@ export default function AddonInstallProgressDialog({
                             <>
                                 <CheckCircle2 size={18} />
                                 <div className={styles.resultText}>
-                                    <strong>{opLabel(operation)}完了</strong>
+                                    <strong data-i18n="components.AddonInstallProgressDialog.text008">{opLabel(operation)}{uiText("components.AddonInstallProgressDialog.text008")}</strong>
                                     {finished.manifest && (
                                         <span className={styles.resultDetail}>
                                             v{finished.manifest.version}
@@ -236,7 +241,7 @@ export default function AddonInstallProgressDialog({
                             <>
                                 <AlertCircle size={18} />
                                 <div className={styles.resultText}>
-                                    <strong>{opLabel(operation)}失敗</strong>
+                                    <strong data-i18n="components.AddonInstallProgressDialog.text009">{opLabel(operation)}{uiText("components.AddonInstallProgressDialog.text009")}</strong>
                                     {finished.error && (
                                         <span className={styles.resultDetail}>{finished.error}</span>
                                     )}
@@ -249,9 +254,7 @@ export default function AddonInstallProgressDialog({
                 {finished?.ok && finished.restart_required && (
                     <div className={styles.restartNote}>
                         <AlertTriangle size={16} />
-                        <span>
-                            このアドオンは API ルートを持つため、完全に反映するには SAIVerse の再起動が必要です。
-                        </span>
+                        <span data-i18n="components.AddonInstallProgressDialog.text010">{uiText("components.AddonInstallProgressDialog.text010")}</span>
                     </div>
                 )}
 
@@ -259,7 +262,7 @@ export default function AddonInstallProgressDialog({
                     <div className={`${styles.resultBox} ${styles.resultErr}`}>
                         <AlertCircle size={18} />
                         <div className={styles.resultText}>
-                            <strong>通信エラー</strong>
+                            <strong data-i18n="components.AddonInstallProgressDialog.text011">{uiText("components.AddonInstallProgressDialog.text011")}</strong>
                             <span className={styles.resultDetail}>{streamError}</span>
                         </div>
                     </div>
@@ -267,11 +270,9 @@ export default function AddonInstallProgressDialog({
 
                 <div className={styles.footer}>
                     {inProgress ? (
-                        <div className={styles.runningHint}>実行中... 完了までお待ちください</div>
+                        <div data-i18n="components.AddonInstallProgressDialog.text012" className={styles.runningHint}>{uiText("components.AddonInstallProgressDialog.text012")}</div>
                     ) : (
-                        <button className={styles.btnPrimary} onClick={onClose}>
-                            閉じる
-                        </button>
+                        <button data-i18n="components.AddonInstallProgressDialog.text013" className={styles.btnPrimary} onClick={onClose}>{uiText("components.AddonInstallProgressDialog.text013")}</button>
                     )}
                 </div>
             </div>

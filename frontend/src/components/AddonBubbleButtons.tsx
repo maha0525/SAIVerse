@@ -1,4 +1,9 @@
 "use client";
+import { apiFetch } from '@/i18n/api';
+
+import { t as uiText } from '@/i18n/core';
+import { useLocale } from '@/i18n/useLocale';
+
 
 import React, { useEffect, useRef, useState } from 'react';
 import {
@@ -105,6 +110,7 @@ function PlayAudioButton({
     label: string;
     icon: string;
 }) {
+    useLocale();
     const audioRef = useRef<HTMLAudioElement | null>(null);
     const [playing, setPlaying] = React.useState(false);
     const [error, setError] = React.useState(false);
@@ -154,10 +160,10 @@ function PlayAudioButton({
     const Icon = resolveIcon(icon);
 
     return (
-        <button
+        <button data-i18n="components.AddonBubbleButtons.text001 components.AddonBubbleButtons.text002"
             className={`${styles.bubbleBtn} ${playing ? styles.playing : ''} ${error ? styles.error : ''}`}
             onClick={handleClick}
-            title={error ? '音声の再生に失敗しました' : (playing ? '停止' : label)}
+            title={error ? uiText("components.AddonBubbleButtons.text001") : (playing ? uiText("components.AddonBubbleButtons.text002") : label)}
         >
             {playing ? <Square size={13} /> : <Icon size={13} />}
         </button>
@@ -182,6 +188,7 @@ function ToolBubbleButton({
      *  この値の変化で検知できる。 */
     metaValue: unknown;
 }) {
+    useLocale();
     const [regenerating, setRegenerating] = useState(false);
     const [error, setError] = useState(false);
     // クリック時点の値を覚えて、変化を検知できるようにする
@@ -217,7 +224,7 @@ function ToolBubbleButton({
         lastSeenValue.current = metaValue;
         setRegenerating(true);
         try {
-            const res = await fetch(
+            const res = await apiFetch(
                 `/api/addon/${btn.addon_name}/${btn.tool}`,
                 {
                     method: 'POST',
@@ -248,9 +255,9 @@ function ToolBubbleButton({
     };
 
     return (
-        <button
+        <button data-i18n="components.AddonBubbleButtons.text003 components.AddonBubbleButtons.text004"
             className={`${styles.bubbleBtn} ${regenerating ? styles.pending : ''} ${error ? styles.error : ''}`}
-            title={error ? '失敗しました' : (regenerating ? `${btn.label} (実行中)` : btn.label)}
+            title={error ? uiText("components.AddonBubbleButtons.text003") : (regenerating ? uiText("components.AddonBubbleButtons.text004", { p1: btn.label }) : btn.label)}
             onClick={handleClick}
             disabled={regenerating}
         >
@@ -282,9 +289,9 @@ function PendingBubbleButton({ label }: { label: string }) {
     if (timedOut) return null;
 
     return (
-        <button
+        <button data-i18n="components.AddonBubbleButtons.text005"
             className={`${styles.bubbleBtn} ${styles.pending}`}
-            title={`${label}（準備中）`}
+            title={uiText("components.AddonBubbleButtons.text005", { p1: label })}
             disabled
         >
             <Loader size={13} className={styles.spinner} />
@@ -299,6 +306,7 @@ export default function AddonBubbleButtons({
     addonMetadata,
     buttons,
 }: AddonBubbleButtonsProps) {
+    useLocale();
     if (buttons.length === 0) return null;
 
     const visibleButtons = buttons.filter((btn) => {

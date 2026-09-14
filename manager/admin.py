@@ -164,6 +164,7 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
         host_avatar_path: Optional[str] = None,
         host_avatar_upload: Optional[str] = None,
         map_background_image: Optional[str] = None,
+        language: Optional[str] = None,
     ) -> str:
         """City の設定を更新する。``name`` は**表示名** (CITYNAME)。
 
@@ -192,6 +193,9 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
             city.UI_PORT = ui_port
             city.API_PORT = api_port
             city.TIMEZONE = tz_candidate
+            if language is not None:
+                from saiverse.persona_language import validate_language
+                city.LANGUAGE = validate_language(language)
             avatar_value: Optional[str] = (host_avatar_path or "").strip() or None
             if host_avatar_upload:
                 try:
@@ -256,6 +260,7 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
         ui_port: int,
         api_port: int,
         timezone_name: str,
+        language: str = "ja",
     ) -> str:
         """City を作る。``slug`` は内部の識別子、``name`` は表示名。
 
@@ -295,6 +300,9 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                     "timezone name (e.g., Asia/Tokyo)."
                 )
 
+            from saiverse.persona_language import validate_language
+            lang = validate_language(language) if language else "ja"
+
             new_city = CityModel(
                 USERID=self.state.user_id,
                 CITY_SLUG=slug,
@@ -303,6 +311,7 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                 UI_PORT=ui_port,
                 API_PORT=api_port,
                 TIMEZONE=tz_candidate,
+                LANGUAGE=lang,
             )
             db.add(new_city)
             db.commit()
@@ -1214,6 +1223,7 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                 "MEMOPEDIA_INDEX_ENABLED": ai.MEMOPEDIA_INDEX_ENABLED,
                 "CORE_MEMORY_CHAR_BUDGET": ai.CORE_MEMORY_CHAR_BUDGET,
                 "CHRONICLE_CHAR_BUDGET": ai.CHRONICLE_CHAR_BUDGET,
+                "LANGUAGE": ai.LANGUAGE or "ja",
                 "SPELL_ENABLED": ai.SPELL_ENABLED,
                 "REALTIME_INFO_ENABLED": ai.REALTIME_INFO_ENABLED,
                 "META_JUDGMENT_CONFIG": ai.META_JUDGMENT_CONFIG,
@@ -1223,7 +1233,7 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
             db.close()
 
     def create_ai(
-        self, name: str, system_prompt: str, home_city_id: int, custom_ai_id: Optional[str] = None
+        self, name: str, system_prompt: str, home_city_id: int, custom_ai_id: Optional[str] = None, language: Optional[str] = None
     ) -> Tuple[bool, str, Optional[str], Optional[str]]:
         if home_city_id != self.state.city_id:
             return (
@@ -1233,7 +1243,7 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                 None,
                 None,
             )
-        success, message, ai_id, room_id = self._create_persona(name, system_prompt, custom_ai_id)
+        success, message, ai_id, room_id = self._create_persona(name, system_prompt, custom_ai_id, language=language)
         if success:
             return (
                 True,
@@ -1272,6 +1282,7 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
         realtime_info_enabled: Optional[bool] = None,
         meta_judgment_config: Optional[Dict[str, Any]] = None,
         user_conv_timeout_minutes: Optional[int] = None,
+        language: Optional[str] = None,
     ) -> str:
         db = self.SessionLocal()
         try:
@@ -1417,6 +1428,9 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                         ai.USER_CONV_TIMEOUT_MINUTES = int(user_conv_timeout_minutes)
                     else:
                         ai.USER_CONV_TIMEOUT_MINUTES = None
+                if language is not None:
+                    from saiverse.persona_language import validate_language
+                    ai.LANGUAGE = validate_language(language)
                 autonomy_now = ai.AUTONOMY_ENABLED
                 db.commit()
 
@@ -1424,6 +1438,8 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                     persona.persona_name = name
                     persona.persona_system_instruction = system_prompt
                     persona.autonomy_enabled = autonomy_now
+                    if language is not None:
+                        persona.language = ai.LANGUAGE
                     persona.vision_model = vision_model
                     persona.audio_model = audio_model
                     persona.video_model = video_model

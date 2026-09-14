@@ -1,4 +1,7 @@
 "use client";
+import { t as uiText } from '@/i18n/core';
+import { useLocale } from '@/i18n/useLocale';
+
 
 import React from 'react';
 import styles from './Steps.module.css';
@@ -8,42 +11,61 @@ interface StepCityNameProps {
     onChange: (value: string) => void;
     timezone?: string;
     onTimezoneChange?: (value: string) => void;
+    language?: string;
+    onLanguageChange?: (value: string) => void;
 }
 
-export default function StepCityName({ value, onChange, timezone, onTimezoneChange }: StepCityNameProps) {
+export default function StepCityName({
+    value,
+    onChange,
+    timezone,
+    onTimezoneChange,
+    language,
+    onLanguageChange
+}: StepCityNameProps) {
+    useLocale();
     return (
         <div className={styles.formContainer}>
-            <h3 className={styles.title}>あなたの都市に名前をつけてください</h3>
-            <p className={styles.subtitle}>
-                SAIVerseにあるあなたの都市です。ペルソナたちがここに住みます。
-            </p>
+            <h3 data-i18n="components.tutorial.steps.StepCityName.text001" className={styles.title}>{uiText("components.tutorial.steps.StepCityName.text001")}</h3>
+            <p data-i18n="components.tutorial.steps.StepCityName.text002" className={styles.subtitle}>{uiText("components.tutorial.steps.StepCityName.text002")}</p>
 
             <div className={styles.field}>
-                <label>City名</label>
-                <input
+                <label data-i18n="components.tutorial.steps.StepCityName.text003">{uiText("components.tutorial.steps.StepCityName.text003")}</label>
+                <input data-i18n="components.tutorial.steps.StepCityName.text004"
                     type="text"
                     value={value}
                     onChange={(e) => onChange(e.target.value)}
-                    placeholder="例: 星降りの街"
+                    placeholder={uiText("components.tutorial.steps.StepCityName.text004")}
                     autoFocus
                 />
-                <p className={styles.fieldHint}>
-                    日本語も記号も使えます。あとから街マップ画面で変更できます
-                </p>
+                <p data-i18n="components.tutorial.steps.StepCityName.text005" className={styles.fieldHint}>{uiText("components.tutorial.steps.StepCityName.text005")}</p>
             </div>
+
+            {onLanguageChange && (
+                <div className={styles.field}>
+                    <label data-i18n="components.tutorial.steps.StepCityName.language">{uiText("components.tutorial.steps.StepCityName.language")}</label>
+                    <select
+                        value={language || 'ja'}
+                        onChange={(e) => onLanguageChange(e.target.value)}
+                        className={styles.select}
+                    >
+                        <option value="ja">日本語 (Japanese)</option>
+                        <option value="en">English</option>
+                    </select>
+                    <p data-i18n="components.tutorial.steps.StepCityName.languageHint" className={styles.fieldHint}>{uiText("components.tutorial.steps.StepCityName.languageHint")}</p>
+                </div>
+            )}
 
             {onTimezoneChange && (
                 <div className={styles.field}>
-                    <label>タイムゾーン</label>
-                    <input
+                    <label data-i18n="components.tutorial.steps.StepCityName.text006">{uiText("components.tutorial.steps.StepCityName.text006")}</label>
+                    <input data-i18n="components.tutorial.steps.StepCityName.text007"
                         type="text"
                         value={timezone || ''}
                         onChange={(e) => onTimezoneChange(e.target.value)}
-                        placeholder="例: Asia/Tokyo"
+                        placeholder={uiText("components.tutorial.steps.StepCityName.text007")}
                     />
-                    <p className={styles.fieldHint}>
-                        ブラウザから自動検出されたタイムゾーンです。変更も可能です
-                    </p>
+                    <p data-i18n="components.tutorial.steps.StepCityName.text008" className={styles.fieldHint}>{uiText("components.tutorial.steps.StepCityName.text008")}</p>
                 </div>
             )}
         </div>

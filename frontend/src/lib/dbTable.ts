@@ -1,3 +1,5 @@
+
+import { apiFetch } from '@/i18n/api';
 /**
  * 汎用テーブル閲覧 API (`GET /api/db/tables/{table}`) の読み口。
  *
@@ -54,7 +56,7 @@ export async function fetchTablePage<T>(
     offset: number = 0,
     limit: number = DB_TABLE_PAGE_SIZE,
 ): Promise<DbTablePage<T>> {
-    const res = await fetch(`/api/db/tables/${table}?limit=${limit}&offset=${offset}`);
+    const res = await apiFetch(`/api/db/tables/${table}?limit=${limit}&offset=${offset}`);
     if (!res.ok) {
         throw new Error(`GET /api/db/tables/${table} failed: ${res.status}`);
     }

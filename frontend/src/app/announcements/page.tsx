@@ -1,4 +1,9 @@
 "use client";
+import { apiFetch } from '@/i18n/api';
+
+import { t as uiText } from '@/i18n/core';
+import { useLocale } from '@/i18n/useLocale';
+
 
 import { useEffect, useState } from 'react';
 import { ArrowLeft, Info, AlertTriangle, AlertCircle, ExternalLink } from 'lucide-react';
@@ -25,6 +30,7 @@ function computeAnnouncementsHash(announcements: Announcement[]): string {
 }
 
 function SeverityIcon({ severity }: { severity: string }) {
+    useLocale();
     switch (severity) {
         case 'critical':
             return <AlertCircle size={18} className={`${styles.severityIcon} ${styles.severityCritical}`} />;
@@ -44,11 +50,12 @@ function severityCardClass(severity: string): string {
 }
 
 export default function AnnouncementsPage() {
+    useLocale();
     const [announcements, setAnnouncements] = useState<Announcement[]>([]);
     const [loading, setLoading] = useState(true);
 
     useEffect(() => {
-        fetch('/api/system/announcements')
+        apiFetch('/api/system/announcements')
             .then(res => res.ok ? res.json() : null)
             .then(data => {
                 if (data?.announcements) {
@@ -70,21 +77,19 @@ export default function AnnouncementsPage() {
     return (
         <div className={styles.container}>
             <div className={styles.header}>
-                <button
+                <button data-i18n="app.announcements.page.text001"
                     className={styles.backButton}
                     onClick={() => { window.location.href = '/'; }}
                 >
-                    <ArrowLeft size={16} />
-                    戻る
-                </button>
-                <h1 className={styles.title}>お知らせ</h1>
+                    <ArrowLeft size={16} />{uiText("app.announcements.page.text001")}</button>
+                <h1 data-i18n="app.announcements.page.text002" className={styles.title}>{uiText("app.announcements.page.text002")}</h1>
                 <div style={{ width: '80px' }} />
             </div>
 
-            {loading && <div className={styles.loading}>読み込み中...</div>}
+            {loading && <div data-i18n="app.announcements.page.text003" className={styles.loading}>{uiText("app.announcements.page.text003")}</div>}
 
             {!loading && announcements.length === 0 && (
-                <div className={styles.empty}>お知らせはありません</div>
+                <div data-i18n="app.announcements.page.text004" className={styles.empty}>{uiText("app.announcements.page.text004")}</div>
             )}
 
             {!loading && announcements.length > 0 && (
@@ -101,13 +106,12 @@ export default function AnnouncementsPage() {
                             </div>
                             <p className={styles.cardContent}>{item.content}</p>
                             {item.link && (
-                                <a
+                                <a data-i18n="app.announcements.page.text005"
                                     href={item.link}
                                     target="_blank"
                                     rel="noopener noreferrer"
                                     className={styles.cardLink}
-                                >
-                                    詳細を見る <ExternalLink size={14} />
+                                >{uiText("app.announcements.page.text005")}<ExternalLink size={14} />
                                 </a>
                             )}
                         </div>

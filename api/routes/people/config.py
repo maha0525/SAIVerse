@@ -65,6 +65,7 @@ def get_persona_config(persona_id: str, manager = Depends(get_manager)):
         linked_user_id=linked_user_id,
         meta_judgment_config=meta_cfg_obj,
         user_conv_timeout_minutes=details.get("USER_CONV_TIMEOUT_MINUTES"),
+        language=details.get("LANGUAGE", "ja"),
     )
 
 @router.patch("/{persona_id}/config")
@@ -105,6 +106,13 @@ def update_persona_config(
         # 明示的に与えられた項目だけを保存する。MetaLayer 側で既定値とマージされる。
         meta_cfg_dict = req.meta_judgment_config.model_dump(exclude_none=True)
 
+    if req.language is not None:
+        from saiverse.persona_language import validate_language
+        try:
+            validate_language(req.language)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+
     result = manager.update_ai(
         ai_id=persona_id,
         name=current["AINAME"], # Name update not supported here for safety/complexity
@@ -132,6 +140,7 @@ def update_persona_config(
         realtime_info_enabled=req.realtime_info_enabled,
         meta_judgment_config=meta_cfg_dict,
         user_conv_timeout_minutes=req.user_conv_timeout_minutes,
+        language=req.language,
     )
 
     if result.startswith("Error:"):

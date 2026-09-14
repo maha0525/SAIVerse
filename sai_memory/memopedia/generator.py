@@ -411,6 +411,8 @@ def generate_memopedia_page(
 
     # Build system message and initialize conversation history
     system_message = _build_system_message(keyword, directions, chronicle_context, existing_pages)
+    from saiverse.persona_language import get_persona_language, language_instruction
+    system_message += "\n\n" + language_instruction(get_persona_language(persona_id))
     messages: List[Dict[str, str]] = [{"role": "system", "content": system_message}]
 
     LOGGER.debug(f"System message length: {len(system_message)} chars")

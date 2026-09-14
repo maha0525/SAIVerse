@@ -1,3 +1,5 @@
+
+import { getFormatLocale } from '@/i18n/core';
 const CURRENCY_SYMBOLS: Record<string, string> = {
     USD: '$',
     JPY: '¥',
@@ -10,7 +12,7 @@ export function formatCost(cost: number, currency: string = 'USD'): string {
     if (cost === 0) return `${sym}0`;
     if (isWhole) {
         if (cost < 1) return `${sym}${cost.toFixed(2)}`;
-        return `${sym}${Math.round(cost).toLocaleString()}`;
+        return `${sym}${Math.round(cost).toLocaleString(getFormatLocale())}`;
     }
     if (cost < 0.001) return `${sym}${cost.toFixed(6)}`;
     if (cost < 0.01) return `${sym}${cost.toFixed(4)}`;

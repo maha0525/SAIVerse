@@ -1,3 +1,7 @@
+import { t as uiText } from '@/i18n/core';
+import { useLocale } from '@/i18n/useLocale';
+
+import { apiFetch } from '@/i18n/api';
 import React, { useState, useRef } from 'react';
 import { Upload, Loader2, Image as ImageIcon } from 'lucide-react';
 
@@ -24,6 +28,7 @@ export default function ImageUpload({
     circle = false,
     uploadEndpoint = 'default'
 }: ImageUploadProps) {
+    useLocale();
     const [isUploading, setIsUploading] = useState(false);
     const [isDragOver, setIsDragOver] = useState(false);
     const fileInputRef = useRef<HTMLInputElement>(null);
@@ -42,7 +47,7 @@ export default function ImageUpload({
 
         try {
             const url = uploadEndpoint === 'hires' ? '/api/media/upload-hires' : '/api/media/upload';
-            const res = await fetch(url, {
+            const res = await apiFetch(url, {
                 method: 'POST',
                 body: formData
             });
@@ -129,7 +134,7 @@ export default function ImageUpload({
             {value ? (
                 <img
                     src={value}
-                    alt="Preview"
+                    alt={uiText("components.common.ImageUpload.label001")}
                     style={{
                         width: '100%',
                         height: '100%',
@@ -172,8 +177,7 @@ export default function ImageUpload({
                     textAlign: 'center',
                     padding: '2px 0'
                 }}>
-                    Edit
-                </div>
+                    {uiText("components.common.ImageUpload.label002")}</div>
             )}
         </div>
     );

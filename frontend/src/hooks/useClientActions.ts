@@ -1,4 +1,6 @@
 "use client";
+import { apiFetch } from '@/i18n/api';
+
 
 import { useCallback, useEffect, useRef } from "react";
 
@@ -36,7 +38,7 @@ const notifyFailure: NotifyFailureFn = (addonName, endpoint, payload) => {
         ? endpoint
         : `/api/addon/${addonName}/${endpoint}`;
     try {
-        void fetch(path, {
+        void apiFetch(path, {
             method: "POST",
             headers: { "content-type": "application/json" },
             body: JSON.stringify(payload),
@@ -80,7 +82,7 @@ export function useClientActions(params: {
         let cancelled = false;
         const refresh = async () => {
             try {
-                const r = await fetch("/api/addon/");
+                const r = await apiFetch("/api/addon/");
                 if (!r.ok) return;
                 const data = (await r.json()) as AddonInfo[];
                 if (!cancelled) addonsRef.current = data;

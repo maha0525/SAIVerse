@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from "next";
 import "./globals.css";
+import LocaleBridge from "@/i18n/LocaleBridge";
 
 export const viewport: Viewport = {
     viewportFit: "cover",
@@ -51,7 +52,7 @@ export default function RootLayout({
                     })();
                 `}} />
             </head>
-            <body suppressHydrationWarning>{children}</body>
+            <body suppressHydrationWarning><LocaleBridge />{children}</body>
         </html>
     );
 }

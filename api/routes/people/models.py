@@ -171,6 +171,7 @@ class AIConfigResponse(BaseModel):
     linked_user_id: Optional[int] = None  # First linked user ID
     meta_judgment_config: Optional[MetaJudgmentConfig] = None  # Phase 4-e
     user_conv_timeout_minutes: Optional[int] = None  # 2026-05-09 wait_response auto-pause
+    language: str = "ja"
 
 class UpdateAIConfigRequest(BaseModel):
     description: Optional[str] = None
@@ -205,6 +206,7 @@ class UpdateAIConfigRequest(BaseModel):
     #   None = no change, 0 (or any non-positive) = clear to default (= 30 min),
     #   positive int = override.
     user_conv_timeout_minutes: Optional[int] = None
+    language: Optional[str] = None
 
 
 # -----------------------------------------------------------------------------
