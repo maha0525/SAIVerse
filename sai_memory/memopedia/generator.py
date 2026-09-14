@@ -409,10 +409,11 @@ def generate_memopedia_page(
     except Exception as e:
         LOGGER.warning(f"Failed to load existing Memopedia pages: {e}")
 
-    # Build system message and initialize conversation history
     system_message = _build_system_message(keyword, directions, chronicle_context, existing_pages)
     from saiverse.persona_language import get_persona_language, language_instruction
-    system_message += "\n\n" + language_instruction(get_persona_language(persona_id))
+    lang_inst = language_instruction(get_persona_language(persona_id))
+    if lang_inst:
+        system_message += "\n\n" + lang_inst
     messages: List[Dict[str, str]] = [{"role": "system", "content": system_message}]
 
     LOGGER.debug(f"System message length: {len(system_message)} chars")

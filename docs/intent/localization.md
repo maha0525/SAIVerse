@@ -1,6 +1,6 @@
 # UI 文言とペルソナ・City の言語設定 (ローカライズ)
 
-> **ステータス**: 起草・設計中 (2026-09-14)
+> **ステータス**: 検証待ち (2026-09-14)
 >
 > 関連: [アイデア帳 UI文言の日英ローカライズ](../overview/ideas.md) / [landscape §2](../overview/landscape.md) / [city_identity.md](city_identity.md)
 
@@ -108,11 +108,11 @@ flowchart TD
   - チュートリアル完了時、City の更新 API（`POST /api/tutorial/city` または `PUT /api/world/city`）に `timezone` と `language` を送信し、City に保存。
   - 初期ペルソナ作成時（`StepPersonaChoice.tsx` 等）にも、この言語がペルソナの `LANGUAGE` として渡される。
 
-### 5-3. ペルソナ設定 UI & API (`PeopleModal.tsx`, `api/routes/people/config.py`)
+### 5-3. ペルソナ設定 UI & API (`SettingsModal.tsx`, `api/routes/people/config.py`)
 
-- ペルソナ編集画面（`PeopleModal`）の基本設定タブに「使用する言語」項目を追加（選択肢: 日本語 / English）。
-- `GET /api/people/{id}/config` で `language` を返却。
-- `PATCH /api/people/{id}/config` で `{"language": "en"}` を更新可能にする。
+- ペルソナ設定モーダル（`SettingsModal.tsx`）に「使用する言語」項目を追加（選択肢: Cityの設定に従う (現在は〇〇) / 日本語 / English）。未設定（空文字）のときは City の言語を継承。
+- `GET /api/people/{id}/config` で `language`（個別設定）および `home_city_language` を返却。
+- `PATCH /api/people/{id}/config` で `{"language": "en"}` や `{"language": ""}`（未設定リセット）を更新可能にする。
 
 ### 5-4. ペルソナ生成パイプラインへの反映
 
@@ -155,7 +155,7 @@ flowchart TD
 - **Phase 2: チュートリアルと設定 UI の配線**
   - `StepCityName.tsx` への言語選択追加、即時UI切り替え。
   - City 保存処理への言語反映、初期ペルソナへの言語引き継ぎ。
-  - ペルソナ設定モーダル（`PeopleModal`）での言語編集UI。
+  - ペルソナ設定モーダル（`SettingsModal.tsx`）での言語編集UI。
 - **Phase 3: フロントエンド i18n 基盤 & 開発ツールチップ**
   - `frontend/src/i18n/` 基盤の整備。
   - API メッセージの `ui_message` 構造化。

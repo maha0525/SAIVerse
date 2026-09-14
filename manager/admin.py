@@ -1223,7 +1223,7 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                 "MEMOPEDIA_INDEX_ENABLED": ai.MEMOPEDIA_INDEX_ENABLED,
                 "CORE_MEMORY_CHAR_BUDGET": ai.CORE_MEMORY_CHAR_BUDGET,
                 "CHRONICLE_CHAR_BUDGET": ai.CHRONICLE_CHAR_BUDGET,
-                "LANGUAGE": ai.LANGUAGE or "ja",
+                "LANGUAGE": ai.LANGUAGE,
                 "SPELL_ENABLED": ai.SPELL_ENABLED,
                 "REALTIME_INFO_ENABLED": ai.REALTIME_INFO_ENABLED,
                 "META_JUDGMENT_CONFIG": ai.META_JUDGMENT_CONFIG,

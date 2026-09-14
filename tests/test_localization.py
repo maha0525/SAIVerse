@@ -134,10 +134,11 @@ def test_persona_config_api_language_endpoints(isolated_world):
     app.dependency_overrides[get_manager] = lambda: manager
 
     with TestClient(app) as client:
-        # GET returns current language
+        # GET returns None for unconfigured persona language, and home_city_language
         res = client.get("/people/synthetic_persona/config")
         assert res.status_code == 200
-        assert res.json()["language"] == "ja"
+        assert res.json()["language"] is None
+        assert res.json()["home_city_language"] == "ja"
 
         # PATCH updates language to 'en'
         patch_res = client.patch(
@@ -149,6 +150,14 @@ def test_persona_config_api_language_endpoints(isolated_world):
         res = client.get("/people/synthetic_persona/config")
         assert res.json()["language"] == "en"
         assert get_persona_language("synthetic_persona", path) == "en"
+
+        # PATCH with empty string resets language to None (follow city)
+        reset_res = client.patch(
+            "/people/synthetic_persona/config", json={"language": ""}
+        )
+        assert reset_res.status_code == 200
+        res = client.get("/people/synthetic_persona/config")
+        assert res.json()["language"] is None
 
         # PATCH invalid language fails with 422
         bad_res = client.patch(
@@ -245,6 +254,35 @@ def test_chronicle_generation_injects_language_instruction(monkeypatch):
 
     # Source messages not mutated
     assert source_messages == [{"role": "user", "content": "Hello in original text"}]
+
+
+def test_memopedia_language_instruction_preserves_prompt_for_ja(monkeypatch):
+    import saiverse.persona_language
+    from sai_memory.memopedia.generator import _build_system_message
+
+    base_system_message = _build_system_message("test_keyword", "test_directions", "test_chronicle", "test_pages")
+
+    # 1. ja persona does not append extra newlines or instructions
+    monkeypatch.setattr(saiverse.persona_language, "get_persona_language", lambda pid, db_path=None: "ja")
+    lang_inst_ja = saiverse.persona_language.language_instruction("ja")
+    assert lang_inst_ja == ""
+
+    system_message_ja = base_system_message
+    if lang_inst_ja:
+        system_message_ja += "\n\n" + lang_inst_ja
+    assert system_message_ja == base_system_message
+    assert not system_message_ja.endswith("\n\n")
+
+    # 2. en persona appends language instruction
+    monkeypatch.setattr(saiverse.persona_language, "get_persona_language", lambda pid, db_path=None: "en")
+    lang_inst_en = saiverse.persona_language.language_instruction("en")
+    assert "Language of your life: English" in lang_inst_en
+
+    system_message_en = base_system_message
+    if lang_inst_en:
+        system_message_en += "\n\n" + lang_inst_en
+    assert "Language of your life: English" in system_message_en
+
 
 
 def test_ui_message_envelope():

@@ -1751,14 +1751,6 @@
     "ja": "整理をはじめる量",
     "en": "Start summarizing at"
   },
-  "components.common.WatermarkBar.text003": {
-    "ja": "省略した後に残す量",
-    "en": "Amount to keep after omitting"
-  },
-  "components.common.WatermarkBar.text004": {
-    "ja": "省略をはじめる量",
-    "en": "Start omitting at"
-  },
   "components.common.WatermarkBar.text005": {
     "ja": "{p1} {p2} 字",
     "en": "{p1}: {p2} characters"
@@ -2003,30 +1995,6 @@
     "ja": "ONにすると開発中の機能が表示されます（不安定なため推奨しません）",
     "en": "Show features under development (not recommended; may be unstable)"
   },
-  "components.GlobalSettingsModal.text038": {
-    "ja": "ペルソナに送る量の水位",
-    "en": "Thresholds for data sent to personas"
-  },
-  "components.GlobalSettingsModal.text039": {
-    "ja": "ペルソナに毎回送る内容がどれだけ溜まったら古い部分を減らすか、その目安を文字数で決めます。ここは全モデル共通の既定値です。",
-    "en": "Choose how much text can accumulate before older content is reduced. These are defaults shared by all models."
-  },
-  "components.GlobalSettingsModal.text040": {
-    "ja": "部屋の様子などの記録",
-    "en": "Room observations and similar records"
-  },
-  "components.GlobalSettingsModal.text041": {
-    "ja": "会話の整理",
-    "en": "Conversation summarization"
-  },
-  "components.GlobalSettingsModal.text042": {
-    "ja": "移動したときの部屋の様子や、使えるスペルが増えた・減ったといった記録も、送るたびに積み上がります。合計がここを超えたら、古いものからまとめて省略します（省略されるのは送る内容からだけで、記録そのものは消えません）。",
-    "en": "Records such as room observations after moving and changes to available spells accumulate with each request. Once their total exceeds this threshold, older records are omitted together from the content sent. The original records are kept."
-  },
-  "components.GlobalSettingsModal.text043": {
-    "ja": "会話の履歴がどれだけ溜まったら古い部分をあらすじへ畳むかを決めます。",
-    "en": "Choose how much conversation can accumulate before older portions are summarized."
-  },
   "components.GlobalSettingsModal.text044": {
     "ja": "設定した値",
     "en": "Configured value"
@@ -2046,26 +2014,6 @@
   "components.GlobalSettingsModal.text048": {
     "ja": " の順にしてください",
     "en": " in this order"
-  },
-  "components.GlobalSettingsModal.text049": {
-    "ja": "整理をはじめる量と整理後に残す量の差 ",
-    "en": "The gap between the start threshold and the amount to keep is "
-  },
-  "components.GlobalSettingsModal.text050": {
-    "ja": " 字が、部屋の様子などの記録の上限 ",
-    "en": " characters, which must exceed the observations limit of "
-  },
-  "components.GlobalSettingsModal.text051": {
-    "ja": " 字 + 余裕 ",
-    "en": " characters + headroom of "
-  },
-  "components.GlobalSettingsModal.text052": {
-    "ja": " 字 = ",
-    "en": " characters = "
-  },
-  "components.GlobalSettingsModal.text053": {
-    "ja": " 字 を上回っていません。このままだと会話をどれだけ整理しても、送る量が上限を下回らないことがあります。整理をはじめる量を増やすか、整理後に残す量か記録の上限を減らしてください。",
-    "en": " characters. Otherwise, summarizing conversations may never bring the amount sent below the limit. Raise the start threshold, or reduce the amount to keep or the observations limit."
   },
   "components.GlobalSettingsModal.text054": {
     "ja": "1 以上の整数を入力してください（空欄 = 既定に戻す）",
@@ -6387,22 +6335,6 @@
     "ja": "整理はこの文字数まで畳んだら止まります。少なすぎるときは畳んだ範囲をここまで開き直します。会話の起点がまだ無いとき（新規ペルソナ等）に最初に読み込む量もこの値です。none にするとこのモデルは履歴の自動整理を行いません。",
     "en": "Summarization stops at this amount. If too little remains, summarized ranges are reopened up to this amount. This is also the amount loaded when there is no conversation starting point yet, such as for new personas. Set none to disable automatic history organization for this model."
   },
-  "components.settings.ModelEditorModal.text005": {
-    "ja": "部屋の様子などの記録の省略をはじめる文字数 (perception_high_chars)",
-    "en": "Characters before omitting observations (perception_high_chars)"
-  },
-  "components.settings.ModelEditorModal.text006": {
-    "ja": "移動したときの部屋の様子や、使えるスペルが増えた・減ったといった記録の合計がこの文字数を超えたら、古いものからまとめて省略します（省略されるのは送る内容からだけで、記録そのものは消えません）。none にすると省略せず、合計は伸びるに任せます。",
-    "en": "When room observations and changes to available spells exceed this amount, older records are omitted together from the content sent. Original records are kept. Set none to allow the total to grow without omissions."
-  },
-  "components.settings.ModelEditorModal.text007": {
-    "ja": "部屋の様子などの記録を省略した後に残す文字数 (perception_target_chars)",
-    "en": "Observation characters to keep (perception_target_chars)"
-  },
-  "components.settings.ModelEditorModal.text008": {
-    "ja": "一度の省略でここまでまとめて減らします。一個ずつ減らさないのは、送る内容の前の方が毎回書き換わるとキャッシュが効かなくなるためです。none にすると全体設定の既定に従います。",
-    "en": "Reduce to this amount in one operation. Removing records individually would change the beginning of each request and prevent cache hits. Set none to use the global default."
-  },
   "components.settings.ModelEditorModal.text009": {
     "ja": "追加設定はオブジェクト ({}) で指定してください",
     "en": "Additional settings must be an object ({})"
@@ -6446,26 +6378,6 @@
   "components.settings.ModelEditorModal.text019": {
     "ja": "整理後に残す文字数は、整理をはじめる文字数以下にしてください",
     "en": "The amount to keep must not exceed the summarization threshold"
-  },
-  "components.settings.ModelEditorModal.text020": {
-    "ja": "部屋の様子などの記録を省略した後に残す文字数は、省略をはじめる文字数以下にしてください",
-    "en": "The observation amount to keep must not exceed the omission threshold"
-  },
-  "components.settings.ModelEditorModal.text021": {
-    "ja": "整理をはじめる文字数 ({p1}) と整理後に残す文字数 ({p2}) の差 ",
-    "en": "The gap between the summarization threshold ({p1}) and amount to keep ({p2}) is "
-  },
-  "components.settings.ModelEditorModal.text022": {
-    "ja": "{p1} 字が、部屋の様子などの記録の上限 {p2} 字 + 余裕 ",
-    "en": "{p1} characters, which must exceed the observations limit of {p2} characters + headroom of "
-  },
-  "components.settings.ModelEditorModal.text023": {
-    "ja": "{p1} 字 を上回っていません。このままだと会話をどれだけ整理しても、",
-    "en": "{p1} characters. Otherwise, summarizing conversations may never "
-  },
-  "components.settings.ModelEditorModal.text024": {
-    "ja": "送る量が上限を下回らないことがあります（空欄の欄は全体設定の既定で数えています）",
-    "en": "bring the amount sent below the limit (blank fields use global defaults)"
   },
   "components.settings.ModelEditorModal.text025": {
     "ja": "保存失敗: HTTP {p1} {p2}",
@@ -6542,18 +6454,6 @@
   "components.settings.ModelEditorModal.text043": {
     "ja": "コンテキスト長 (context_length)",
     "en": "Context length (context_length)"
-  },
-  "components.settings.ModelEditorModal.text044": {
-    "ja": "空欄 = 全体設定の既定 ({p1} 字) に従う / none = 使わない",
-    "en": "Blank = global default ({p1} characters) / none = disabled"
-  },
-  "components.settings.ModelEditorModal.text045": {
-    "ja": "空欄のときは全体設定の既定 ",
-    "en": "When blank, uses the global default of "
-  },
-  "components.settings.ModelEditorModal.text046": {
-    "ja": " 字に従います（全体設定 → 環境タブ「ペルソナに送る量の水位」）。",
-    "en": " characters (Global settings → Environment → Thresholds for data sent to personas)."
   },
   "components.settings.ModelEditorModal.text047": {
     "ja": "追加設定 (JSON)",
@@ -8626,10 +8526,6 @@
   "components.tutorial.TutorialWizard.text014": {
     "ja": "APIキーの保存に失敗しました",
     "en": "Failed to save API key"
-  },
-  "components.tutorial.TutorialWizard.text015": {
-    "ja": "Chronicle設定の保存に失敗しました",
-    "en": "Failed to save Chronicle settings"
   },
   "components.tutorial.TutorialWizard.text016": {
     "ja": "SAIVerse セットアップ",
