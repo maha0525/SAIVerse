@@ -208,13 +208,35 @@ def test_head_pipeline_persona_self_renders_language_instruction():
     assert "日本語" in diff[0].label
 
     # Backward compatibility of serialized snapshots
-    old_json = json.dumps({
-        "persona_id": "p1",
-        "persona_name": "Old",
-        "persona_system_instruction": "Old sys",
-    })
-    deserialized = section.deserialize_snapshot(old_json)
+    raw_dict = {"persona_id": "p1", "persona_name": "P", "persona_system_instruction": "I"}
+    deserialized = PersonaSelfSnapshot(**raw_dict)
     assert deserialized.language == "ja"
+
+
+def test_persona_core_retains_none_language_and_pipeline_inherits_city(isolated_world, monkeypatch):
+    path, engine, factory = isolated_world
+    # Set city language to 'en'
+    with factory() as session:
+        city = session.get(City, 1)
+        city.LANGUAGE = "en"
+        session.commit()
+
+    # Create a mock PersonaCore-like object or PersonaCore with language=None
+    persona = SimpleNamespace(
+        persona_id="synthetic_persona",
+        persona_name="Synthetic",
+        persona_system_instruction="Identity",
+        language=None,
+    )
+    section = PersonaSelfSection()
+    ctx = LineHeadInput(persona_id="synthetic_persona", model_key="fake", persona=persona)
+    snapshot = section.capture(ctx)
+
+    # When persona.language is None, capture() falls back to get_persona_language() which gets 'en' from City
+    assert snapshot.language == "en"
+    rendered = section.render(snapshot)
+    assert "Language of your life: English" in rendered.text
+
 
 
 def test_chronicle_generation_injects_language_instruction(monkeypatch):

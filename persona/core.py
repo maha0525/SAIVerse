@@ -154,7 +154,7 @@ class PersonaCore(
         self.memory_weave_model = memory_weave_model
         self.provider = provider
         self.context_length = context_length
-        self.language = language or "ja"
+        self.language = language
         self.model_supports_images = model_supports_images(model)
         # 話す標準モデルをどの設定から決めたか (saiverse/persona_model_selection.py の
         # SpeakingModelChoice)。ペルソナを読み込む・作る側が入れる。設定ファイルの
