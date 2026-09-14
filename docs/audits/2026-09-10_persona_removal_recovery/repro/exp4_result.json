@@ -1,0 +1,23 @@
+{
+  "home": "C:\\Users\\shuhe\\AppData\\Local\\Temp\\claude\\C--Users-shuhe-workspace-SAIVerse\\f1b2319e-4c7c-4bd2-8ce7-6030f2cf8b92\\scratchpad\\exp4_home",
+  "lib_export_threads_native": {
+    "ok": true,
+    "threads": [
+      "probe_deleted_testcity:__persona__"
+    ],
+    "messages": 1
+  },
+  "api_list_threads": {
+    "status": 404,
+    "body": "{\"detail\":\"Persona probe_deleted_testcity not found\"}"
+  },
+  "api_export_native": {
+    "status": 200,
+    "body_head": "{\n  \"format\": \"saiverse_saimemory_v1\",\n  \"exported_at\": \"2026-09-09T15:50:42.348781+00:00\",\n  \"persona_id\": \"probe_deleted_testcity\",\n  \"threads\": [\n    {\n      \"thread_id\": \"probe_deleted_testcity:__persona__\",\n      \"resource_id\": \"probe_deleted_testcity\",\n      \"overview\": null,\n      \"overview_u",
+    "carries_message": true
+  },
+  "api_import_native": {
+    "status": 404,
+    "body": "{\"detail\":\"Persona not found: probe_deleted_testcity\"}"
+  }
+}
