@@ -1244,6 +1244,24 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
             )
         return False, message, None, None
 
+    def _deliver_spell_toggle(self, ai_id: str, persona: Any) -> None:
+        """スペル不使用モードの切り替えを head へ届ける。
+
+        gate を持つ Section が一斉に撮り直され、次の発言からプロンプトが新しい
+        モードになる (docs/intent/spell_disabled_mode.md §4-2)。届かなかった回
+        (現在地が無い / pipeline 未初期化 / 例外) は警告だけ出して保存は成功させる
+        — 反映は従来どおり次の記憶整理まで待つことになる。
+        """
+        try:
+            from saiverse.dynamic_state import DynamicStateManager
+
+            DynamicStateManager.on_spell_toggled(persona, self.manager)
+        except Exception:
+            logging.warning(
+                "Failed to notify the head pipeline of the spell "
+                "mode change for '%s'", ai_id, exc_info=True,
+            )
+
     def update_ai(
         self,
         ai_id: str,
@@ -1273,6 +1291,17 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
         meta_judgment_config: Optional[Dict[str, Any]] = None,
         user_conv_timeout_minutes: Optional[int] = None,
     ) -> str:
+        # 例外経路 (下の except) でも読む値は try の外で用意しておく — commit より
+        # 前に転んだ回に、まだ代入されていない名前を触って NameError にしないため。
+        persona = self.personas.get(ai_id)
+        # スペル不使用モードは保存した時点で即反映する。実際に値が変わった保存だけを
+        # 対象にするので、旧値との比較の結果をここに残しておく
+        # (docs/intent/spell_disabled_mode.md §4-2)。届けたら False に戻す — 例外経路の
+        # 保険が二重に発火しないように、「まだ届けていない切り替えがあるか」を持つ。
+        spell_toggle_pending = False
+        # DB のモード変更が確定したか。例外経路で「発火してよいか」を決める
+        # (commit 前に転んだ回は DB が巻き戻るので発火してはいけない)。
+        committed = False
         db = self.SessionLocal()
         try:
             ai = db.query(AIModel).filter(AIModel.AIID == ai_id).first()
@@ -1307,7 +1336,6 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
             )
 
             llm_warnings: List[str] = []
-            persona = self.personas.get(ai_id)
             # モデルの欄の検査・保存・当てはめは、設定のロックの中で一件ずつ行う
             # (docs/intent/persona_model_selection.md 決まったこと 5)。ロックの中で
             # 行うのは DB の読み書きと値の書き換えだけ — 自律の起動停止とアバターの
@@ -1397,8 +1425,12 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                         ai.CHRONICLE_CHAR_BUDGET = int(chronicle_char_budget)
                     else:
                         ai.CHRONICLE_CHAR_BUDGET = None
-                # Update Spell system toggle
+                # Update Spell system toggle (スペル不使用モード)。旧値との比較は
+                # 代入の前に取る — 値が変わった保存だけが head の作り直しを起こす。
                 if spell_enabled is not None:
+                    spell_toggle_pending = (
+                        bool(ai.SPELL_ENABLED) != bool(spell_enabled)
+                    )
                     ai.SPELL_ENABLED = spell_enabled
                 # Update realtime info injection toggle
                 if realtime_info_enabled is not None:
@@ -1419,6 +1451,7 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                         ai.USER_CONV_TIMEOUT_MINUTES = None
                 autonomy_now = ai.AUTONOMY_ENABLED
                 db.commit()
+                committed = True
 
                 if persona is not None:
                     persona.persona_name = name
@@ -1427,6 +1460,7 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                     persona.vision_model = vision_model
                     persona.audio_model = audio_model
                     persona.video_model = video_model
+
                     # 話す標準モデル・軽量モデル・Memory Weave モデルは、いま保存した
                     # DB 行から決め方の一か所で決め直して当てはめる (値の書き換えと
                     # 接続の破棄だけ。新しい接続は次の返事で作られる)。個別の標準モデルを
@@ -1434,6 +1468,26 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                     result = reapply_speaking_models(self, persona_ids=[ai_id])
                     llm_warnings.extend(result.notices())
                     logging.info("Updated in-memory persona '%s' with new settings.", name)
+
+            # スペル不使用モードの切り替えは、保存した時点で head へ届ける
+            # (docs/intent/spell_disabled_mode.md §4-2)。設定のロックの**外**で、
+            # モデルの当てはめが済んだ**後**に発火する (敵対レビュー 2026-09-14):
+            #  - 同じ保存でモデルも変えた場合、当てはめの前だと発火の宛先が旧モデルに
+            #    なり、新モデルの head に旧モードの説明が残ってしまう。
+            #  - 撮り直しは複数 Section の DB / ファイル読みを同期で行うので、ロックの
+            #    中でやると他のスレッドのモデル設定の操作を待たせる。
+            if spell_toggle_pending:
+                spell_toggle_pending = False
+                if persona is not None:
+                    self._deliver_spell_toggle(ai_id, persona)
+                else:
+                    # 読み込まれていないペルソナには届け先が無い。保存は成功させ、
+                    # 反映は次の記憶整理に任せる。
+                    logging.warning(
+                        "Spell mode changed for '%s', but the persona is not "
+                        "loaded in this process; the head will pick it up at "
+                        "the next metabolism.", ai_id,
+                    )
 
             # Phase C-2: AUTONOMY_ENABLED 変更を AutonomyManager に反映
             # (True なら起動、False なら停止)。
@@ -1451,6 +1505,7 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                         "Failed to sync AutonomyManager state for '%s'",
                         ai_id, exc_info=True,
                     )
+
             # 記憶の整理の見張りは「前回と同じ状態なら結果も同じ」で素通しする。Memory
             # Weave モデルを選び直しても会話が動くまで整理が再試行されないと
             # 「再起動しなくても」が偽になるので、記録を捨てる (読み込んでいないペルソナの
@@ -1469,11 +1524,29 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                 )
             return status_message
         except Exception as exc:
-            db.rollback()
+            # rollback 自体が失敗しても (commit 済みでセッションが崩れた回など)、
+            # 下の発火の保険まで巻き添えにしない。commit 済みなら rollback は
+            # もともと何も戻さない。
+            try:
+                db.rollback()
+            except Exception:
+                logging.warning(
+                    "Rollback failed while handling update_ai error for '%s'",
+                    ai_id, exc_info=True,
+                )
             logging.error("Failed to update AI '%s': %s", ai_id, exc, exc_info=True)
+            # commit の後で転んだ回でも、DB のモード変更はもう確定している。この経路
+            # では当てはめが失敗した = モデルは変わっていないので、いまの
+            # persona.model が正しい宛先。ここで発火を落とすと、同じ値を保存し直しても
+            # 「値が変わっていない」ので再発火せず、次の記憶整理まで旧いプロンプトが
+            # 残り続ける。commit より前の例外では DB が巻き戻るので発火しない。
+            # 通常経路で届け済みなら pending は下りているので、二重には発火しない。
+            if committed and spell_toggle_pending and persona is not None:
+                self._deliver_spell_toggle(ai_id, persona)
             return f"Error: {exc}"
         finally:
             db.close()
+
     def delete_ai(self, ai_id: str) -> str:
         """Deletes an AI after checking its state.
 

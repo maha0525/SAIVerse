@@ -10,6 +10,7 @@ Memopedia/Chronicle の差分通知を担当していたが、Phase 3-e で実�
   - `maybe_inject_event_messages` → head_pipeline 経由で diff 通知
   - `on_building_entered` → BUILDING_ENTERED イベントを head_pipeline に dispatch
   - `on_metabolism` → METABOLISM イベントを head_pipeline に dispatch
+  - `on_spell_toggled` → SPELL_TOGGLED イベントを head_pipeline に dispatch
 
 旧 `PersonaBuildingState` テーブルは saiverse.upgrade_handlers が触る経路が残っている
 ため、モデル定義 (`database.models.PersonaBuildingState`) はしばらく残す。新しい
@@ -287,6 +288,38 @@ class DynamicStateManager:
         return _dispatch_head_event(
             persona, manager, building_id, "metabolism", model_key=model_key,
         )
+
+    @staticmethod
+    def on_spell_toggled(persona: Any, manager: Any) -> bool:
+        """スペル不使用モードを切り替えて保存した瞬間の hook。
+
+        SPELL_TOGGLED を head_pipeline へ dispatch して、gate を持つ Section
+        (spell_list / common_prompt / available_playbooks / autonomy_modes /
+        memopedia_index / desk) を**一斉に**撮り直す。一斉であることが要 —
+        一部の Section だけ先に変わった中途半端なプロンプト先頭部を作らない
+        (docs/intent/spell_disabled_mode.md §4-2)。
+
+        ``model_key`` は渡さない (= ペルソナの標準 model の Session)。設定の保存は
+        Pulse の外の出来事で、その時点に実行の身分 (ExecutionContext) が無い —
+        入室の hook と同じ扱い。標準 model 以外の Session (軽量モデル等) の head は
+        次の Metabolism / anchor の TTL 切れで揃う。
+
+        届けられなかった回も保存は成功させる (呼び出し元は戻り値を握って続行)。
+        その場合の反映は従来どおり次の Metabolism になる。
+
+        Returns:
+            dispatch が成立したか。現在地を持たないペルソナは False。
+        """
+        persona_id = getattr(persona, "persona_id", None)
+        building_id = getattr(persona, "current_building_id", None)
+        if not persona_id or not building_id:
+            LOGGER.warning(
+                "[dynamic_state] spell toggle not delivered to the head "
+                "(persona=%s building=%s); it will apply at the next metabolism",
+                persona_id or "?", building_id or "?",
+            )
+            return False
+        return _dispatch_head_event(persona, manager, building_id, "spell_toggled")
 
 
 #: 提示から下ろす操作通知を出す head の Section。

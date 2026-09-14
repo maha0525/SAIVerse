@@ -761,18 +761,28 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
 
                             <div className={styles.fieldGroup}>
                                 <label className={styles.label}>スペル</label>
-                                <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
                                     <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
                                         <input
-                                            type="checkbox"
+                                            type="radio"
+                                            name={`spell-mode-${personaId}`}
                                             checked={spellEnabled}
-                                            onChange={(e) => setSpellEnabled(e.target.checked)}
+                                            onChange={() => setSpellEnabled(true)}
                                         />
-                                        <span>{spellEnabled ? '有効' : '無効'}</span>
+                                        <span>使用する（標準）</span>
+                                    </label>
+                                    <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
+                                        <input
+                                            type="radio"
+                                            name={`spell-mode-${personaId}`}
+                                            checked={!spellEnabled}
+                                            onChange={() => setSpellEnabled(false)}
+                                        />
+                                        <span>使用しない — スペル不使用モード</span>
                                     </label>
                                 </div>
                                 <div className={styles.description}>
-                                    発言中に /spell コマンドを使って、Memopediaやチャットログを直接参照できるようにします。ツール定義を使わないため、キャッシュ効率に影響しません。
+                                    スペル不使用モード: ペルソナがスペル（/spell）・Playbook・アイテム操作を一切使わない、会話専用の軽量モードです。スペルの説明やツール一覧がシステムプロンプトから全て外れるため、1 回の会話に使うトークンが大きく減ります。切り替えは保存するとすぐ反映されます。⚠️ 切り替えるたびにこのペルソナのコンテキストが作り直され、プロンプトキャッシュが積み直しになります（モードの間でキャッシュは共用できません）。頻繁に切り替えると、節約どころか逆に費用が高くつくことがあります。
                                 </div>
                             </div>
 
@@ -798,6 +808,11 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                                 <div className={styles.description} style={{ marginBottom: '0.5rem' }}>
                                     会話のたびに自動実行し、結果をリアルタイム情報に追加するスペルを設定します。
                                 </div>
+                                {!spellEnabled && (
+                                    <div className={styles.description} style={{ marginBottom: '0.5rem', fontWeight: 600 }}>
+                                        ⚠️ スペル不使用モードのため、事前実行スペルは実行されません。
+                                    </div>
+                                )}
                                 {realtimeSpells.length > 0 && (
                                     <div style={{ marginBottom: '0.75rem' }}>
                                         {realtimeSpells.map((spell) => (

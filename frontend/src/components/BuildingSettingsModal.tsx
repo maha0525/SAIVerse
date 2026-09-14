@@ -413,7 +413,7 @@ export default function BuildingSettingsModal({ isOpen, onClose, buildingId, onS
                         <div className={styles.field}>
                             <label>事前実行スペル</label>
                             <small className={styles.hint} style={{ display: 'block', marginBottom: '0.5rem' }}>
-                                この Building にいるペルソナの会話時に自動実行するスペル
+                                この Building にいるペルソナの会話時に自動実行するスペル。スペルが無効のペルソナには実行されません。
                             </small>
                             {realtimeSpells.length > 0 && (
                                 <div style={{ marginBottom: '0.75rem' }}>

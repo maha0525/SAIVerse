@@ -209,6 +209,7 @@ Section の登録は startup 時に集中させる (アドオン由来 Section �
 | `addon_loaded` / `addon_unloaded` | アドオン load / unload で tool registry が変動 |
 | `model_changed` | ペルソナが使うモデルが切り替わった |
 | `appearance_changed` | ペルソナの外見画像が差し替わった |
+| `spell_toggled` | スペル不使用モードが切り替わった (docs/intent/spell_disabled_mode.md §4-2 — 保存で値が実際に変わったときだけ発火) |
 
 「全 Section が `refresh_on_events` を空にする」のがデフォルト挙動 = 平時は Metabolism までキャッシュが効き続ける。例外的に refresh が必要な Section だけ明示的に宣言する。
 

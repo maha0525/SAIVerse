@@ -3912,15 +3912,32 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
         _pre_spells = state.get("_pre_spells")
         if _pre_spells and not state.get("_pre_spells_executed"):
             state["_pre_spells_executed"] = True
-            try:
-                await _execute_pre_spells(
-                    _pre_spells, runtime, persona, building_id, state, playbook, event_callback,
+            if not state.get("_spell_enabled"):
+                # SPELL_ENABLED=false はどの経路のスペル実行も止める (下の realtime
+                # spell gate と同じ思想)。黙って握り潰すと、チャット UI で「ツール
+                # 指定」を選んだユーザーが実行されたものと思い込む — 警告ログと
+                # status イベントで、実行しなかったことを表に出す
+                # (docs/intent/spell_disabled_mode.md §4-7)。
+                LOGGER.warning(
+                    "[sea][pre_spells] skipped %d requested spell(s): "
+                    "spell system disabled for persona=%s",
+                    len(_pre_spells), getattr(persona, "persona_id", None),
                 )
-            except ModelUnavailableError:
-                # 使うモデルが無い・繋げない — 事前スペル抜きで続けず、返事ごと止める
-                raise
-            except Exception:
-                LOGGER.exception("[sea][pre_spells] Pre-spell execution failed; continuing without pre-spell results")
+                if event_callback:
+                    event_callback({
+                        "type": "status",
+                        "content": "スペル不使用モードのため、指定されたツールの実行をスキップしました",
+                    })
+            else:
+                try:
+                    await _execute_pre_spells(
+                        _pre_spells, runtime, persona, building_id, state, playbook, event_callback,
+                    )
+                except ModelUnavailableError:
+                    # 使うモデルが無い・繋げない — 事前スペル抜きで続けず、返事ごと止める
+                    raise
+                except Exception:
+                    LOGGER.exception("[sea][pre_spells] Pre-spell execution failed; continuing without pre-spell results")
 
         # ── Realtime spells: auto-execute bound spells and inject into realtime context ──
         # Configured per-persona and per-building via realtime_spell_binding table.
