@@ -358,7 +358,7 @@ export default function MemoryRecall({ personaId }: MemoryRecallProps) {
                                 setBuildMemopediaResult(
                                     uiText("components.memory.MemoryRecall.text017", { p1: r.total_entities, p2: r.new_pages, p3: r.updated_pages })
                                     + uiText("components.memory.MemoryRecall.text018", { p1: r.messages_fetched ?? r.messages_processed, p2: r.messages_processed, p3: r.batches_processed })
-                                    + (leftovers.length ? ` ／ ${leftovers.join('。')}。` : '')
+                                    + (leftovers.length ? uiText("components.memory.MemoryRecall.leftoversFormat", { p1: leftovers.join(uiText("components.memory.MemoryRecall.leftoverJoiner")) }) : '')
                                 );
                             } else {
                                 setBuildMemopediaResult(status.message || uiText("components.memory.MemoryRecall.text019"));

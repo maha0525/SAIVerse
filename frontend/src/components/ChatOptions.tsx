@@ -817,7 +817,7 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
                                         </div>
                                         <div className={styles.formGroup}>
                                             <label data-i18n="components.ChatOptions.text051">{uiText("components.ChatOptions.text051")}{maxImageEmbedsDefault != null && (
-                                                    <span data-i18n="components.ChatOptions.text052" className={styles.hint}>{uiText("components.ChatOptions.text052")}{maxImageEmbedsDefault}）</span>
+                                                    <span data-i18n="components.ChatOptions.text052" className={styles.hint}>{uiText("components.ChatOptions.text052", { p1: maxImageEmbedsDefault })}</span>
                                                 )}
                                             </label>
                                             <input data-i18n="components.ChatOptions.text053 components.ChatOptions.text054"

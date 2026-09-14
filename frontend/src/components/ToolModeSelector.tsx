@@ -361,7 +361,7 @@ export default function ToolModeSelector({
                                             onClick={() => toggleSpell(spell.name)}
                                             title={spell.description}
                                         >
-                                            <span style={{ marginRight: '6px' }}>{checked ? '✓' : '　'}</span>
+                                            <span style={{ marginRight: '6px' }}>{checked ? '✓' : '\u00A0'}</span>
                                             {spell.display_name || spell.name}
                                             <span style={{ color: '#888', marginLeft: '4px', fontSize: '0.85em' }}>
                                                 ({spell.name})

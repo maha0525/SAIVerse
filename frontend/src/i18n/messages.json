@@ -948,8 +948,8 @@
     "en": "Close"
   },
   "components.AddonManagerModal.text001": {
-    "ja": "（未対応の型: ",
-    "en": "(unsupported type: "
+    "ja": "（未対応の型: {p1}）",
+    "en": "(unsupported type: {p1})"
   },
   "components.AddonManagerModal.text002": {
     "ja": "保存されている「{p1}」を削除します。\n\n",
@@ -1432,8 +1432,8 @@
     "en": "Image embedding limit"
   },
   "components.ChatOptions.text052": {
-    "ja": " （モデルデフォルト: ",
-    "en": " (model default: "
+    "ja": " （モデルデフォルト: {p1}）",
+    "en": " (model default: {p1})"
   },
   "components.ChatOptions.text053": {
     "ja": "（自動: {p1}）",
@@ -3052,8 +3052,8 @@
     "en": "Approx. "
   },
   "components.memory.ArasujiViewer.text114": {
-    "ja": " 回（",
-    "en": " calls ("
+    "ja": " 回（{p1}）",
+    "en": " calls ({p1})"
   },
   "components.memory.ArasujiViewer.text115": {
     "ja": "概算費用",
@@ -3316,8 +3316,8 @@
     "en": "No core memories yet."
   },
   "components.memory.CoreMemoryScene.text051": {
-    "ja": "ごみ箱（",
-    "en": "Trash ("
+    "ja": "ごみ箱（{p1}）",
+    "en": "Trash ({p1})"
   },
   "components.memory.CoreMemoryScene.text052": {
     "ja": "字",
@@ -3520,8 +3520,8 @@
     "en": " Mismatched pages: "
   },
   "components.memory.MemopediaConversion.text025": {
-    "ja": " 枚 （例: ",
-    "en": " (examples: "
+    "ja": " 枚 （例: {p1} — {p2}）",
+    "en": " (examples: {p1} — {p2})"
   },
   "components.memory.MemopediaConversion.text026": {
     "ja": "気づいた点",
@@ -4526,6 +4526,14 @@
   "components.memory.MemoryRecall.text018": {
     "ja": " ({p1} メッセージ中 {p2} 件を {p3} バッチで処理)",
     "en": " ({p2} of {p1} messages processed in {p3} batches)"
+  },
+  "components.memory.MemoryRecall.leftoversFormat": {
+    "ja": " ／ {p1}。",
+    "en": " / {p1}."
+  },
+  "components.memory.MemoryRecall.leftoverJoiner": {
+    "ja": "。",
+    "en": ". "
   },
   "components.memory.MemoryRecall.text019": {
     "ja": "完了",
@@ -11130,5 +11138,121 @@
   "components.SettingsModal.spellDisabledNotice": {
     "ja": "⚠️ スペル不使用モードのため、事前実行スペルは実行されません。",
     "en": "⚠️ Because spell-free mode is enabled, pre-execution spells will not run."
+  },
+  "modelRole.default_model.label": {
+    "ja": "標準モデル",
+    "en": "Standard model"
+  },
+  "modelRole.default_model.desc": {
+    "ja": "会話や複雑な推論に使用するメインモデル",
+    "en": "Main model used for conversation and complex reasoning"
+  },
+  "modelRole.lightweight_model.label": {
+    "ja": "軽量モデル",
+    "en": "Lightweight model"
+  },
+  "modelRole.lightweight_model.desc": {
+    "ja": "ルーティングやツール判断に使用する高速・安価なモデル",
+    "en": "Fast, cost-effective model used for routing and tool decisions"
+  },
+  "modelRole.memory_weave_model.label": {
+    "ja": "Memory Weaveモデル",
+    "en": "Memory Weave model"
+  },
+  "modelRole.memory_weave_model.desc": {
+    "ja": "クロニクル・メモペディアの生成に使用するモデル",
+    "en": "Model used for generating Chronicles and Memopedia"
+  },
+  "modelRole.image_summary_model.label": {
+    "ja": "画像要約モデル",
+    "en": "Image summary model"
+  },
+  "modelRole.image_summary_model.desc": {
+    "ja": "画像・ドキュメント要約生成用モデル（Vision対応モデル推奨）",
+    "en": "Model for summarizing images and documents (Vision model recommended)"
+  },
+  "modelRole.audio_summary_model.label": {
+    "ja": "音声要約モデル",
+    "en": "Audio summary model"
+  },
+  "modelRole.audio_summary_model.desc": {
+    "ja": "ユーザー添付音声の要約生成用モデル（Gemini系のみ対応）",
+    "en": "Model for summarizing user audio attachments (Gemini models only)"
+  },
+  "modelRole.video_summary_model.label": {
+    "ja": "動画要約モデル",
+    "en": "Video summary model"
+  },
+  "modelRole.video_summary_model.desc": {
+    "ja": "ユーザー添付動画の要約生成用モデル（Gemini系のみ対応）",
+    "en": "Model for summarizing user video attachments (Gemini models only)"
+  },
+  "modelPreset.openai": {
+    "ja": "OpenAI",
+    "en": "OpenAI"
+  },
+  "modelPreset.gemini_free": {
+    "ja": "Gemini (無料)",
+    "en": "Gemini (Free)"
+  },
+  "modelPreset.gemini": {
+    "ja": "Gemini (有料)",
+    "en": "Gemini (Paid)"
+  },
+  "modelPreset.anthropic": {
+    "ja": "Anthropic",
+    "en": "Anthropic"
+  },
+  "modelPreset.grok": {
+    "ja": "Grok (xAI)",
+    "en": "Grok (xAI)"
+  },
+  "modelPreset.openrouter": {
+    "ja": "OpenRouter",
+    "en": "OpenRouter"
+  },
+  "modelPreset.openrouter_free": {
+    "ja": "OpenRouter (無料)",
+    "en": "OpenRouter (Free)"
+  },
+  "modelPreset.nvidia": {
+    "ja": "Nvidia NIM",
+    "en": "Nvidia NIM"
+  },
+  "modelPreset.ollama": {
+    "ja": "Ollama (ローカル)",
+    "en": "Ollama (Local)"
+  },
+  "modelPreset.llama_cpp": {
+    "ja": "llama.cpp (ローカル)",
+    "en": "llama.cpp (Local)"
+  },
+  "components.GlobalSettingsModal.presetLarge": {
+    "ja": "多い",
+    "en": "High"
+  },
+  "components.GlobalSettingsModal.presetDefault": {
+    "ja": "デフォルト",
+    "en": "Default"
+  },
+  "components.GlobalSettingsModal.presetSmall": {
+    "ja": "少ない",
+    "en": "Low"
+  },
+  "components.tutorial.steps.StepWelcome.text002Suffix": {
+    "ja": "。",
+    "en": "."
+  },
+  "components.memory.CoreMemoryScene.text015Separator": {
+    "ja": "〜",
+    "en": " – "
+  },
+  "components.settings.WorldEditor.rangeSeparator": {
+    "ja": "〜",
+    "en": " – "
+  },
+  "components.memory.MemopediaConversion.period": {
+    "ja": "。",
+    "en": "."
   }
 }

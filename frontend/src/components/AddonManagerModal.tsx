@@ -209,7 +209,7 @@ function ParamControl({
             );
 
         default:
-            return <span data-i18n="components.AddonManagerModal.text001" className={styles.unsupported}>{uiText("components.AddonManagerModal.text001")}{schema.type}）</span>;
+            return <span data-i18n="components.AddonManagerModal.text001" className={styles.unsupported}>{uiText("components.AddonManagerModal.text001", { p1: schema.type })}</span>;
     }
 }
 

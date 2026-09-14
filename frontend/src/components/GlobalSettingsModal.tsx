@@ -2,6 +2,7 @@ import { apiFetch } from '@/i18n/api';
 import { getFormatLocale, t as uiText } from '@/i18n/core';
 import { useLocale } from '@/i18n/useLocale';
 import LocaleControls from '@/i18n/LocaleControls';
+import { getModelRoleLabel, getModelRoleDescription, getProviderPresetDisplayName, getWatermarkPresetLabel } from '@/i18n/modelRoles';
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { X, Settings, Globe, Layers, Save, RefreshCw, Power, Monitor, Sun, Moon, Cpu, ChevronDown, ChevronRight, Info, ExternalLink, Wrench, CheckCircle, XCircle, Loader, Boxes, Rss } from 'lucide-react';
 import styles from './GlobalSettingsModal.module.css';
@@ -975,7 +976,7 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                                                         aria-pressed={wmActivePreset?.id === preset.id}
                                                         onClick={() => applyWatermarkPreset(preset)}
                                                     >
-                                                        <span className={styles.wmPresetLabel}>{preset.label}</span>
+                                                        <span className={styles.wmPresetLabel}>{getWatermarkPresetLabel(preset.id, preset.label)}</span>
                                                         <span data-i18n="components.GlobalSettingsModal.text106" className={styles.wmPresetNums}>
                                                             {uiText("components.GlobalSettingsModal.text106", {
                                                                 p1: preset.high.toLocaleString(getFormatLocale()),
@@ -1111,7 +1112,7 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                                                             className={styles.presetBtn}
                                                             onClick={() => handlePresetApply(preset.provider)}
                                                         >
-                                                            {preset.display_name}
+                                                            {getProviderPresetDisplayName(preset.provider, preset.display_name)}
                                                         </button>
                                                     ))}
                                                 </div>
@@ -1123,8 +1124,8 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                                                 <div key={role} className={styles.roleItem}>
                                                     <div className={styles.roleHeader}>
                                                         <div className={styles.roleInfo}>
-                                                            <span className={styles.roleLabel}>{info.label}</span>
-                                                            <span className={styles.roleDescription}>{info.description}</span>
+                                                            <span className={styles.roleLabel}>{getModelRoleLabel(role, info.label)}</span>
+                                                            <span className={styles.roleDescription}>{getModelRoleDescription(role, info.description)}</span>
                                                         </div>
                                                         <div className={styles.roleValue}>
                                                             <span data-i18n="components.GlobalSettingsModal.text063" className={styles.roleModelName}>
