@@ -174,6 +174,18 @@ def test_head_pipeline_persona_self_renders_language_instruction():
     assert "## あなたについて" in rendered.text
     assert "Language of your life: English" in rendered.text
 
+    # Verify Japanese (default) does NOT append language instruction to preserve prompt cache
+    snapshot_ja = PersonaSelfSnapshot(
+        persona_id="p1",
+        persona_name="Persona 1",
+        persona_system_instruction="You are a helpful assistant.",
+        language="ja",
+    )
+    rendered_ja = section.render(snapshot_ja)
+    assert rendered_ja is not None
+    assert "## あなたについて\nYou are a helpful assistant." == rendered_ja.text
+    assert "Language of your life" not in rendered_ja.text
+
     # Test notification on language change
     new_snapshot = PersonaSelfSnapshot(
         persona_id="p1",
@@ -196,25 +208,40 @@ def test_head_pipeline_persona_self_renders_language_instruction():
     assert deserialized.language == "ja"
 
 
-def test_chronicle_generation_injects_language_instruction():
+def test_chronicle_generation_injects_language_instruction(monkeypatch):
     source_messages = [{"role": "user", "content": "Hello in original text"}]
     fake_client = Mock()
     fake_client.generate.return_value = "Generated summary response"
 
-    result = generate_text_with_empty_retry(
+    # 1. Default language (ja) does NOT inject to preserve prompt cache and original prompt
+    result_ja = generate_text_with_empty_retry(
         fake_client,
         source_messages,
         purpose="chronicle_summary",
-        persona_id="nonexistent_defaults_to_ja",
+        persona_id="persona_ja",
     )
-    assert result == "Generated summary response"
+    assert result_ja == "Generated summary response"
+    called_messages_ja = fake_client.generate.call_args.kwargs["messages"]
+    assert len(called_messages_ja) == 1
+    assert called_messages_ja == source_messages
 
-    # Check called messages
-    called_messages = fake_client.generate.call_args.kwargs["messages"]
-    assert len(called_messages) == 2
-    assert called_messages[0]["role"] == "system"
-    assert "Language of your life" in called_messages[0]["content"]
-    assert called_messages[1] == source_messages[0]
+    # 2. Non-default language (en) injects instruction
+    import saiverse.persona_language
+    monkeypatch.setattr(saiverse.persona_language, "get_persona_language", lambda pid, db_path=None: "en")
+
+    result_en = generate_text_with_empty_retry(
+        fake_client,
+        source_messages,
+        purpose="chronicle_summary",
+        persona_id="persona_en",
+    )
+    assert result_en == "Generated summary response"
+
+    called_messages_en = fake_client.generate.call_args.kwargs["messages"]
+    assert len(called_messages_en) == 2
+    assert called_messages_en[0]["role"] == "system"
+    assert "Language of your life" in called_messages_en[0]["content"]
+    assert called_messages_en[1] == source_messages[0]
 
     # Source messages not mutated
     assert source_messages == [{"role": "user", "content": "Hello in original text"}]

@@ -423,15 +423,15 @@ export default function ModelEditorModal({ isOpen, mode, modelKey, cloneSource, 
                                             }}
                                             placeholder={
                                                 fallback != null
-                                                    ? `空欄 = 全体設定の既定 (${fallback.toLocaleString()} 字) に従う / none = 使わない`
-                                                    : '空欄 = 全体設定の既定に従う / none = 使わない'
+                                                    ? uiText("components.settings.ModelEditorModal.text053", { p1: fallback.toLocaleString(getFormatLocale()) })
+                                                    : uiText("components.settings.ModelEditorModal.text054")
                                             }
                                         />
-                                        <span className={styles.hint}>
+                                        <span data-i18n="components.settings.ModelEditorModal.text055 components.settings.ModelEditorModal.text056" className={styles.hint}>
                                             {WATERMARK_LABELS[field].hint}
-                                            {' '}空欄のときは全体設定の既定
-                                            {fallback != null ? ` ${fallback.toLocaleString()} 字` : ''}
-                                            に従います（全体設定 → 環境タブ「ペルソナに送る量」）。
+                                            {fallback != null
+                                                ? uiText("components.settings.ModelEditorModal.text055", { p1: fallback.toLocaleString(getFormatLocale()) })
+                                                : uiText("components.settings.ModelEditorModal.text056")}
                                         </span>
                                     </div>
                                 );

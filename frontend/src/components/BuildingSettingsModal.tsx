@@ -323,7 +323,7 @@ export default function BuildingSettingsModal({ isOpen, onClose, buildingId, onS
                         </div>
 
                         <div className={styles.field}>
-                            <label>部屋の様子に表示するアイテム数（空欄で既定の 10 個）</label>
+                            <label data-i18n="components.BuildingSettingsModal.text035">{uiText("components.BuildingSettingsModal.text035")}</label>
                             <input
                                 type="number"
                                 min={0}
@@ -335,7 +335,7 @@ export default function BuildingSettingsModal({ isOpen, onClose, buildingId, onS
                                     setItemDisplayLimit(raw === '' || Number.isNaN(parsed) ? null : parsed);
                                 }}
                             />
-                            <small className={styles.hint}>この数を超えたアイテムは、最近触られていないものから部屋の様子に出なくなります（物は消えません）。0 にするとアイテムを出しません。</small>
+                            <small data-i18n="components.BuildingSettingsModal.text036" className={styles.hint}>{uiText("components.BuildingSettingsModal.text036")}</small>
                         </div>
 
                         <div className={styles.field}>

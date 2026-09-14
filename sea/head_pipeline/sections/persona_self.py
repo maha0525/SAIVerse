@@ -65,8 +65,10 @@ class PersonaSelfSection:
         instruction = (snapshot.persona_system_instruction or "").strip()
         lang_text = language_instruction(snapshot.language)
         if not instruction:
-            return RenderedSection(text=lang_text)
-        return RenderedSection(text=f"## あなたについて\n{instruction}\n\n{lang_text}")
+            return RenderedSection(text=lang_text) if lang_text else None
+        if lang_text:
+            return RenderedSection(text=f"## あなたについて\n{instruction}\n\n{lang_text}")
+        return RenderedSection(text=f"## あなたについて\n{instruction}")
 
     def diff_to_notifications(
         self, old: Optional[PersonaSelfSnapshot], new: Optional[PersonaSelfSnapshot],

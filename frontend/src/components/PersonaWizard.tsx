@@ -181,7 +181,7 @@ export default function PersonaWizard({ isOpen, onClose, onComplete, embedded }:
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     name: name.trim(),
-                    system_prompt: systemPrompt.trim() || `あなたは${name}です。`,
+                    system_prompt: systemPrompt.trim() || uiText("components.PersonaWizard.text032", { p1: name }),
                     home_city_id: selectedCityId,
                     // ID 欄をユーザーが触っていなければ null を送り、生成を
                     // バックエンド (manager/ids.py の契約 + 連番予約) に任せる。

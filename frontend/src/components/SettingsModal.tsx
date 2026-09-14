@@ -35,7 +35,8 @@ interface AIConfig {
     name: string;
     description: string;
     system_prompt: string;
-    language: "ja" | "en";
+    language?: "ja" | "en" | null;
+    home_city_language?: string | null;
     default_model: string | null;
     lightweight_model: string | null;
     vision_model: string | null;
@@ -99,7 +100,7 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
     // Form state
     const [description, setDescription] = useState('');
     const [systemPrompt, setSystemPrompt] = useState('');
-    const [language, setLanguage] = useState<'ja' | 'en'>('ja');
+    const [language, setLanguage] = useState<string>('');
     const [defaultModel, setDefaultModel] = useState<string>('');
     const [lightweightModel, setLightweightModel] = useState<string>('');
     const [visionModel, setVisionModel] = useState<string>('');
@@ -218,7 +219,7 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                 setConfig(data);
                 setDescription(data.description);
                 setSystemPrompt(data.system_prompt);
-                setLanguage(data.language || 'ja');
+                setLanguage(data.language ?? '');
                 setDefaultModel(data.default_model || '');
                 setLightweightModel(data.lightweight_model || '');
                 setVisionModel(data.vision_model || '');
@@ -931,8 +932,14 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
 
                             <div className={styles.fieldGroup}>
                                 <label data-i18n="components.SettingsModal.text104" className={styles.label}>{uiText("components.SettingsModal.text104")}</label>
-                                <select data-i18n="components.SettingsModal.text105" aria-label={uiText("components.SettingsModal.text105")} value={language} onChange={e => setLanguage(e.target.value as "ja" | "en")}>
-                                    <option data-i18n="components.SettingsModal.text106" value="ja">{uiText("components.SettingsModal.text106")}</option><option value="en">{uiText("components.SettingsModal.label001")}</option>
+                                <select data-i18n="components.SettingsModal.text105" aria-label={uiText("components.SettingsModal.text105")} value={language} onChange={e => setLanguage(e.target.value)}>
+                                    <option value="">
+                                        {uiText("components.SettingsModal.languageInherit", {
+                                            p1: (config?.home_city_language === "en" ? uiText("components.SettingsModal.label001") : uiText("components.SettingsModal.text106"))
+                                        })}
+                                    </option>
+                                    <option data-i18n="components.SettingsModal.text106" value="ja">{uiText("components.SettingsModal.text106")}</option>
+                                    <option value="en">{uiText("components.SettingsModal.label001")}</option>
                                 </select>
                                 <p data-i18n="components.SettingsModal.text107">{uiText("components.SettingsModal.text107")}</p>
                                 <label data-i18n="components.SettingsModal.text108" className={styles.label}>{uiText("components.SettingsModal.text108")}</label>

@@ -19,7 +19,11 @@ def validate_language(language: str) -> str:
 
 
 def language_instruction(language: str) -> str:
-    """Generate prompt instruction ensuring persona speaks and writes in target language."""
+    """Generate prompt instruction ensuring persona speaks and writes in target language.
+    Returns empty string for default language ('ja') to avoid polluting prompt cache.
+    """
+    if not language or language == DEFAULT_LANGUAGE:
+        return ""
     name = LANGUAGES.get(language) or LANGUAGES[DEFAULT_LANGUAGE]
     return (
         f"## Language of your life: {name}\n"
@@ -106,7 +110,10 @@ def get_persona_language(persona_id: str | None, db_path: Path | str | None = No
 def memory_language_messages(
     messages: list, persona_id: str | None, db_path: Path | str | None = None
 ) -> list:
-    """Prepend language instruction to memory generation messages."""
+    """Prepend language instruction to memory generation messages for non-default languages."""
     language = get_persona_language(persona_id, db_path=db_path)
+    instruction = language_instruction(language)
+    if not instruction:
+        return messages
     LOGGER.debug("Memory generation language: persona=%s language=%s", persona_id, language)
-    return [{"role": "system", "content": language_instruction(language)}, *messages]
+    return [{"role": "system", "content": instruction}, *messages]

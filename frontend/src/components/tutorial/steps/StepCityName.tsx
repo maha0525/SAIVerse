@@ -49,7 +49,7 @@ export default function StepCityName({
                         onChange={(e) => onLanguageChange(e.target.value)}
                         className={styles.select}
                     >
-                        <option value="ja">日本語 (Japanese)</option>
+                        <option data-i18n="components.tutorial.steps.StepCityName.languageJa" value="ja">{uiText("components.tutorial.steps.StepCityName.languageJa")}</option>
                         <option value="en">English</option>
                     </select>
                     <p data-i18n="components.tutorial.steps.StepCityName.languageHint" className={styles.fieldHint}>{uiText("components.tutorial.steps.StepCityName.languageHint")}</p>

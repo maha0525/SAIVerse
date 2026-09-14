@@ -1219,6 +1219,14 @@
     "ja": "保存",
     "en": "Save"
   },
+  "components.BuildingSettingsModal.text035": {
+    "ja": "部屋の様子に表示するアイテム数（空欄で既定の 10 個）",
+    "en": "Item display limit for room appearance (blank for default 10)"
+  },
+  "components.BuildingSettingsModal.text036": {
+    "ja": "この数を超えたアイテムは、最近触られていないものから部屋の様子に出なくなります（物は消えません）。0 にするとアイテムを出しません。",
+    "en": "Items exceeding this limit are omitted from the room appearance starting from least recently used (items are not deleted). Set to 0 to show no items."
+  },
   "components.ChatOptions.text001": {
     "ja": "バックエンドサーバーに接続できません。サーバーが起動しているか確認してください。",
     "en": "Cannot connect to the backend server. Check that it is running."
@@ -1718,6 +1726,10 @@
   "components.common.ContextVolumeBar.text013": {
     "ja": "会話は残す量以下ですが、スペル結果や部屋の様子を足した合計が上限を超えています。整理しても畳めるものはありません。",
     "en": "Conversation is at or below the amount to keep, but adding spell results and room observations exceeds the limit. There is nothing eligible to summarize."
+  },
+  "components.common.ContextVolumeBar.text014": {
+    "ja": "・",
+    "en": ", "
   },
   "components.common.TermHint.text001": {
     "ja": "ペルソナの暮らしを目的ごとに分けた単位です。会話も作業も、どれかの Track に属します。",
@@ -2255,6 +2267,34 @@
     "ja": "失敗: ",
     "en": "Failed: "
   },
+  "components.GlobalSettingsModal.text104": {
+    "ja": "ペルソナに送る量",
+    "en": "Volume sent to personas"
+  },
+  "components.GlobalSettingsModal.text105": {
+    "ja": "ペルソナに毎回送る会話がどれだけ溜まったら、古い部分をあらすじへ畳んで整理するかを決めます。ここは全モデル共通の既定値です。",
+    "en": "Determines how much conversation history accumulates before folding older parts into summaries (metabolism). This is the global default across all models."
+  },
+  "components.GlobalSettingsModal.text106": {
+    "ja": "{p1} 字で整理し、{p2} 字残す",
+    "en": "Metabolize at {p1} chars, retain {p2} chars"
+  },
+  "components.GlobalSettingsModal.text107": {
+    "ja": "カスタム",
+    "en": "Custom"
+  },
+  "components.GlobalSettingsModal.text108": {
+    "ja": "下の欄で自分で決める",
+    "en": "Specify manually in the fields below"
+  },
+  "components.GlobalSettingsModal.text109": {
+    "ja": "大きい設定ほど、一回に送る量は増えますが、会話の整理はあまり走りません。小さい設定にすると一回に送る量は減りますが、そのぶん整理が何度も走り、そのたびに AI への問い合わせが増えて、それまで送っていた内容をもう一度送り直すことになります。料金や待ち時間がかえって増えることがあるので、迷ったときは「デフォルト」に戻してください。",
+    "en": "Higher settings send more context per turn with less frequent summarization. Lower settings reduce per-turn context but trigger summarization more often, increasing LLM calls and re-sending previously sent content. Since costs and latency may increase, revert to 'Default' when in doubt."
+  },
+  "components.GlobalSettingsModal.text110": {
+    "ja": "既定",
+    "en": "Default"
+  },
   "components.InventoryModal.text001": {
     "ja": "インベントリ: ",
     "en": "Inventory: "
@@ -2274,6 +2314,90 @@
   "components.InventoryModal.text005": {
     "ja": "アイテムがありません",
     "en": "No items"
+  },
+  "components.ItemCreateModal.text001": {
+    "ja": "オブジェクト",
+    "en": "Object"
+  },
+  "components.ItemCreateModal.text002": {
+    "ja": "ふつうのもの。名前と説明だけを持ちます。",
+    "en": "A regular object. Has only a name and description."
+  },
+  "components.ItemCreateModal.text003": {
+    "ja": "バッグ",
+    "en": "Bag"
+  },
+  "components.ItemCreateModal.text004": {
+    "ja": "他のアイテムを入れられます。閉じている間、中のものは部屋の様子に出ません。",
+    "en": "Can hold other items. While closed, items inside do not appear in room appearance."
+  },
+  "components.ItemCreateModal.text005": {
+    "ja": "安全のため作成を中止しました。開いたときの部屋 ({p1}) と現在の部屋 ({p2}) が違います。いったん閉じてから開き直してください。",
+    "en": "Creation cancelled for safety. Opened building ({p1}) differs from current building ({p2}). Please close and reopen."
+  },
+  "components.ItemCreateModal.text006": {
+    "ja": "不明",
+    "en": "Unknown"
+  },
+  "components.ItemCreateModal.text007": {
+    "ja": "作成に失敗しました",
+    "en": "Failed to create"
+  },
+  "components.ItemCreateModal.text008": {
+    "ja": "アイテムを作る",
+    "en": "Create item"
+  },
+  "components.ItemCreateModal.text009": {
+    "ja": "閉じる",
+    "en": "Close"
+  },
+  "components.ItemCreateModal.text010": {
+    "ja": "置き場所: {p1}",
+    "en": "Location: {p1}"
+  },
+  "components.ItemCreateModal.text011": {
+    "ja": "名前",
+    "en": "Name"
+  },
+  "components.ItemCreateModal.text012": {
+    "ja": "例: 道具箱",
+    "en": "e.g., Toolbox"
+  },
+  "components.ItemCreateModal.text013": {
+    "ja": "種類",
+    "en": "Type"
+  },
+  "components.ItemCreateModal.text014": {
+    "ja": "説明",
+    "en": "Description"
+  },
+  "components.ItemCreateModal.text015": {
+    "ja": "どんなものか（空でも作れます）",
+    "en": "Describe what it is (can be blank)"
+  },
+  "components.ItemCreateModal.text016": {
+    "ja": "ここに書いた説明は、部屋の様子としてペルソナにも見えます。",
+    "en": "Descriptions written here will be visible to personas as part of the room appearance."
+  },
+  "components.ItemCreateModal.text017": {
+    "ja": "画像やドキュメントは、チャットにファイルを添付するとこの部屋のアイテムになります。",
+    "en": "Images and documents become items in this room when attached to chat messages."
+  },
+  "components.ItemCreateModal.text018": {
+    "ja": "キャンセル",
+    "en": "Cancel"
+  },
+  "components.ItemCreateModal.text019": {
+    "ja": "名前を入れてください",
+    "en": "Please enter a name"
+  },
+  "components.ItemCreateModal.text020": {
+    "ja": "作成中...",
+    "en": "Creating..."
+  },
+  "components.ItemCreateModal.text021": {
+    "ja": "作成",
+    "en": "Create"
   },
   "components.ItemModal.text001": {
     "ja": "コンテンツの読み込みに失敗しました",
@@ -2374,6 +2498,50 @@
   "components.ItemModal.text025": {
     "ja": ") の表示はサポートされていません。",
     "en": ")."
+  },
+  "components.ItemModal.text026": {
+    "ja": "部屋のアイテム一覧の取得に失敗しました",
+    "en": "Failed to retrieve room items list"
+  },
+  "components.ItemModal.text027": {
+    "ja": "アイテム情報を取得できませんでした (HTTP {p1})",
+    "en": "Failed to retrieve item info (HTTP {p1})"
+  },
+  "components.ItemModal.text028": {
+    "ja": "{p1}個まで完了したところで「{p2}」の移動に失敗しました: {p3}",
+    "en": "Failed while moving \"{p2}\" after completing {p1} items: {p3}"
+  },
+  "components.ItemModal.text029": {
+    "ja": "部屋のアイテムをしまう",
+    "en": "Stow room items"
+  },
+  "components.ItemModal.text030": {
+    "ja": "部屋に出す",
+    "en": "Take out to room"
+  },
+  "components.ItemModal.text031": {
+    "ja": "実行中...",
+    "en": "In progress..."
+  },
+  "components.ItemModal.text032": {
+    "ja": "しまう ({p1}個)",
+    "en": "Stow ({p1} items)"
+  },
+  "components.ItemModal.text033": {
+    "ja": "部屋に出す ({p1}個)",
+    "en": "Take out ({p1} items)"
+  },
+  "components.ItemModal.text034": {
+    "ja": "キャンセル",
+    "en": "Cancel"
+  },
+  "components.ItemModal.text035": {
+    "ja": "読み込み中...",
+    "en": "Loading..."
+  },
+  "components.ItemModal.text036": {
+    "ja": "この部屋にしまえるアイテムはありません",
+    "en": "No items in this room to stow"
   },
   "components.MCPSection.text001": {
     "ja": "必要なランタイムが見つからない",
@@ -2974,6 +3142,30 @@
   "components.memory.ArasujiViewer.text123": {
     "ja": "実行",
     "en": "Run"
+  },
+  "components.memory.ArasujiViewer.text124": {
+    "ja": "ペルソナが使うモデルが SAIVerse に無いか、繋げないため止まりました。モデルを選び直すと、再起動しなくても再実行できます。",
+    "en": "Stopped because the model used by the persona does not exist in SAIVerse or cannot be reached. Selecting a different model allows retry without restarting."
+  },
+  "components.memory.ArasujiViewer.text125": {
+    "ja": "あらすじを大きな流れにまとめる作業が {p1} 回分残っています",
+    "en": "There are {p1} consolidation runs remaining to summarize the chronicle into larger arcs"
+  },
+  "components.memory.ArasujiViewer.text126": {
+    "ja": "あらすじを大きな流れにまとめる",
+    "en": "Consolidate chronicle into larger arcs"
+  },
+  "components.memory.ArasujiViewer.text127": {
+    "ja": "細かなあらすじが溜まっています。実行すると、それらを大きな流れにまとめたあらすじが作られ、本人が長い期間の出来事を見通せるようになります。いま進行中の会話には触りません。",
+    "en": "Detailed summary fragments have accumulated. Running this will synthesize them into an overarching chronicle, allowing the persona to view long-term events across periods. Active conversations will not be touched."
+  },
+  "components.memory.ArasujiViewer.text128": {
+    "ja": "まとめる作業",
+    "en": "Consolidation"
+  },
+  "components.memory.ArasujiViewer.text129": {
+    "ja": "{p1} 回分",
+    "en": "{p1} runs"
   },
   "components.memory.CoreMemoryScene.text001": {
     "ja": "操作に失敗しました",
@@ -5439,6 +5631,10 @@
     "ja": "完了",
     "en": "Done"
   },
+  "components.PersonaWizard.text032": {
+    "ja": "あなたは{p1}です。",
+    "en": "You are {p1}."
+  },
   "components.PlaybookPermissionDialog.text001": {
     "ja": "Playbook実行の確認",
     "en": "Confirm Playbook execution"
@@ -5650,6 +5846,10 @@
   "components.RightSidebar.text018": {
     "ja": "観測データなし",
     "en": "No observation data"
+  },
+  "components.RightSidebar.text019": {
+    "ja": "この部屋にアイテムを作る",
+    "en": "Create item in this room"
   },
   "components.ScheduleModal.text001": {
     "ja": "このアラームを削除しますか？",
@@ -6378,6 +6578,22 @@
   "components.settings.ModelEditorModal.text052": {
     "ja": "保存",
     "en": "Save"
+  },
+  "components.settings.ModelEditorModal.text053": {
+    "ja": "空欄 = 全体設定の既定 ({p1} 字) に従う / none = 使わない",
+    "en": "Blank = follow global default ({p1} chars) / none = do not use"
+  },
+  "components.settings.ModelEditorModal.text054": {
+    "ja": "空欄 = 全体設定の既定に従う / none = 使わない",
+    "en": "Blank = follow global default / none = do not use"
+  },
+  "components.settings.ModelEditorModal.text055": {
+    "ja": " 空欄のときは全体設定の既定 {p1} 字に従います（全体設定 → 環境タブ「ペルソナに送る量」）。",
+    "en": " When blank, follows global default of {p1} chars (Global Settings → Environment tab \"Volume sent to personas\")."
+  },
+  "components.settings.ModelEditorModal.text056": {
+    "ja": " 空欄のときは全体設定の既定に従います（全体設定 → 環境タブ「ペルソナに送る量」）。",
+    "en": " When blank, follows global default (Global Settings → Environment tab \"Volume sent to personas\")."
   },
   "components.settings.ModelManagementPanel.text001": {
     "ja": "モデル情報の取得に失敗しました: HTTP {p1}",
@@ -7287,6 +7503,14 @@
     "ja": "ノード JSON",
     "en": "Nodes JSON"
   },
+  "components.settings.WorldEditor.text147": {
+    "ja": "設定は保存されましたが、警告があります:\n{p1}",
+    "en": "Settings were saved, but there is a warning:\n{p1}"
+  },
+  "components.settings.WorldEditor.text148": {
+    "ja": "日本語 (Japanese)",
+    "en": "Japanese"
+  },
   "components.SettingsModal.text001": {
     "ja": "読み込み中のため保存できません。少し待ってから再度お試しください。",
     "en": "Cannot save while loading. Wait a moment and try again."
@@ -8114,6 +8338,10 @@
   "components.tutorial.steps.StepCityName.languageHint": {
     "ja": "UIの表示言語と、この街で生まれるペルソナが使う既定の言語になります。あとからいつでも変更できます",
     "en": "Sets the UI display language and the default language for personas born in this city. You can change it anytime later."
+  },
+  "components.tutorial.steps.StepCityName.languageJa": {
+    "ja": "日本語 (Japanese)",
+    "en": "Japanese"
   },
   "components.tutorial.steps.StepCityName.text006": {
     "ja": "タイムゾーン",
@@ -10974,6 +11202,10 @@
   "components.SettingsModal.label001": {
     "ja": "English",
     "en": "English"
+  },
+  "components.SettingsModal.languageInherit": {
+    "ja": "Cityの設定に従う (現在は {p1})",
+    "en": "Follow City setting (currently {p1})"
   },
   "components.Sidebar.label001": {
     "ja": "SAIVerse",

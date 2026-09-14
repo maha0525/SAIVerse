@@ -171,7 +171,8 @@ class AIConfigResponse(BaseModel):
     linked_user_id: Optional[int] = None  # First linked user ID
     meta_judgment_config: Optional[MetaJudgmentConfig] = None  # Phase 4-e
     user_conv_timeout_minutes: Optional[int] = None  # 2026-05-09 wait_response auto-pause
-    language: str = "ja"
+    language: Optional[str] = None
+    home_city_language: Optional[str] = "ja"
 
 class UpdateAIConfigRequest(BaseModel):
     description: Optional[str] = None

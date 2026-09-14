@@ -358,7 +358,7 @@ export default function ItemModal({ isOpen, onClose, item, onItemUpdated, onWorl
         } catch (err) {
             console.error('Failed to load room items:', err);
             setRoomItems([]);
-            setBulkError('部屋のアイテム一覧の取得に失敗しました');
+            setBulkError(uiText("components.ItemModal.text026"));
         } finally {
             setIsLoadingRoomItems(false);
         }
@@ -416,7 +416,7 @@ export default function ItemModal({ isOpen, onClose, item, onItemUpdated, onWorl
             try {
                 // 他のフィールドを保つため、いまの値を取ってから置き場所だけ差し替える
                 const getRes = await fetch(`/api/world/items/${id}`);
-                if (!getRes.ok) throw new Error(`アイテム情報を取得できませんでした (HTTP ${getRes.status})`);
+                if (!getRes.ok) throw new Error(uiText("components.ItemModal.text027", { p1: getRes.status }));
                 const current: ItemDetails = await getRes.json();
 
                 const putRes = await fetch(`/api/world/items/${id}`, {
@@ -445,7 +445,7 @@ export default function ItemModal({ isOpen, onClose, item, onItemUpdated, onWorl
                 moved += 1;
             } catch (err) {
                 const reason = err instanceof Error ? err.message : String(err);
-                failureMessage = `${moved}個まで完了したところで「${nameOf(id)}」の移動に失敗しました: ${reason}`;
+                failureMessage = uiText("components.ItemModal.text028", { p1: moved, p2: nameOf(id), p3: reason });
                 break;
             }
         }
@@ -753,7 +753,7 @@ export default function ItemModal({ isOpen, onClose, item, onItemUpdated, onWorl
                                                 disabled={isLoadingBagContents}
                                             >
                                                 <PackagePlus size={16} />
-                                                <span>部屋のアイテムをしまう</span>
+                                                <span data-i18n="components.ItemModal.text029">{uiText("components.ItemModal.text029")}</span>
                                             </button>
                                         )}
                                         {takeoutBuildingId && bagContents.length > 0 && (
@@ -763,7 +763,7 @@ export default function ItemModal({ isOpen, onClose, item, onItemUpdated, onWorl
                                                 disabled={isLoadingBagContents}
                                             >
                                                 <PackageOpen size={16} />
-                                                <span>部屋に出す</span>
+                                                <span data-i18n="components.ItemModal.text030">{uiText("components.ItemModal.text030")}</span>
                                             </button>
                                         )}
                                     </>
@@ -775,12 +775,12 @@ export default function ItemModal({ isOpen, onClose, item, onItemUpdated, onWorl
                                             disabled={isBulkRunning || selectedIds.size === 0}
                                         >
                                             {bulkMode === 'stow' ? <PackagePlus size={16} /> : <PackageOpen size={16} />}
-                                            <span>
+                                            <span data-i18n="components.ItemModal.text031 components.ItemModal.text032 components.ItemModal.text033">
                                                 {isBulkRunning
-                                                    ? '実行中...'
+                                                    ? uiText("components.ItemModal.text031")
                                                     : bulkMode === 'stow'
-                                                        ? `しまう (${selectedIds.size}個)`
-                                                        : `部屋に出す (${selectedIds.size}個)`}
+                                                        ? uiText("components.ItemModal.text032", { p1: selectedIds.size })
+                                                        : uiText("components.ItemModal.text033", { p1: selectedIds.size })}
                                             </span>
                                         </button>
                                         <button
@@ -789,7 +789,7 @@ export default function ItemModal({ isOpen, onClose, item, onItemUpdated, onWorl
                                             disabled={isBulkRunning}
                                         >
                                             <XCircle size={16} />
-                                            <span>キャンセル</span>
+                                            <span data-i18n="components.ItemModal.text034">{uiText("components.ItemModal.text034")}</span>
                                         </button>
                                     </>
                                 )}
@@ -797,7 +797,7 @@ export default function ItemModal({ isOpen, onClose, item, onItemUpdated, onWorl
                             {bulkError && <div className={styles.error}>{bulkError}</div>}
                             {bulkMode === 'stow' ? (
                                 <>
-                                    {isLoadingRoomItems && <div className={styles.loading}>読み込み中...</div>}
+                                    {isLoadingRoomItems && <div data-i18n="components.ItemModal.text035" className={styles.loading}>{uiText("components.ItemModal.text035")}</div>}
                                     {!isLoadingRoomItems && (
                                         roomItems.length > 0 ? (
                                             <div className={styles.bagGrid}>
@@ -850,7 +850,7 @@ export default function ItemModal({ isOpen, onClose, item, onItemUpdated, onWorl
                                                 })}
                                             </div>
                                         ) : (
-                                            <div className={styles.bagEmpty}>この部屋にしまえるアイテムはありません</div>
+                                            <div data-i18n="components.ItemModal.text036" className={styles.bagEmpty}>{uiText("components.ItemModal.text036")}</div>
                                         )
                                     )}
                                 </>

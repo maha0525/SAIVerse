@@ -21,7 +21,6 @@ from sai_memory.memory.storage import (
     set_note_plan,
 )
 from sai_memory.memopedia.storage import category_keys, category_label
-from saiverse.persona_language import memory_language_messages
 
 LOGGER = logging.getLogger(__name__)
 
@@ -291,7 +290,7 @@ def organize_notes(
 
     try:
         response = client.generate(
-            messages=memory_language_messages([{"role": "user", "content": prompt}], persona_id),
+            messages=[{"role": "user", "content": prompt}],
             tools=[],
         )
     except Exception as e:
@@ -432,7 +431,7 @@ def plan_notes(
 
     try:
         response = client.generate(
-            messages=memory_language_messages([{"role": "user", "content": prompt}], persona_id),
+            messages=[{"role": "user", "content": prompt}],
             tools=[],
         )
     except Exception as e:

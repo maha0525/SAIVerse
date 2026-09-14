@@ -428,7 +428,7 @@ export default function WorldEditor() {
         if (!result) return;
         // 保存しなかったモデル設定や、新しい設定に切り替えられなかったことの知らせ (ペルソナ設定の画面と同じ文面)
         if (typeof result === 'object' && typeof result.warning === 'string' && result.warning) {
-            alert(`設定は保存されましたが、警告があります:\n${result.warning}`);
+            alert(uiText("components.settings.WorldEditor.text147", { p1: result.warning }));
         }
         aiList.load();
     };
@@ -580,7 +580,7 @@ export default function WorldEditor() {
                             <Field label={uiText("components.settings.WorldEditor.text040")}><Input value={formData.timezone || ''} onChange={(e: any) => setFormData({ ...formData, timezone: e.target.value })} /></Field>
                             <Field label={uiText("components.settings.WorldEditor.language")}>
                                 <Select value={formData.language || 'ja'} onChange={(e: any) => setFormData({ ...formData, language: e.target.value })}>
-                                    <option value="ja">日本語 (Japanese)</option>
+                                    <option data-i18n="components.settings.WorldEditor.text148" value="ja">{uiText("components.settings.WorldEditor.text148")}</option>
                                     <option value="en">English</option>
                                 </Select>
                             </Field>

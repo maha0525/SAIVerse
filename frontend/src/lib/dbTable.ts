@@ -88,8 +88,8 @@ export async function fetchAllTableRows<T>(table: string): Promise<T[]> {
     }
     // 打ち切りを黙って成功にしない — 呼び出し側は「全件」を前提にしている
     console.error(
-        `fetchAllTableRows(${table}): ${MAX_PAGES_PER_FETCH_ALL} ページ ` +
-        `(${collected.length} 行) で全件取得を打ち切った。以降の行は欠けている`,
+        `fetchAllTableRows(${table}): aborted full fetch at ${MAX_PAGES_PER_FETCH_ALL} pages ` +
+        `(${collected.length} rows). Subsequent rows are missing`,
     );
     return collected;
 }

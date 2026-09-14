@@ -19,7 +19,6 @@ from sai_memory.memory.storage import (
     add_memory_notes,
     get_unresolved_notes,
 )
-from saiverse.persona_language import memory_language_messages
 
 LOGGER = logging.getLogger(__name__)
 
@@ -180,7 +179,7 @@ def extract_memory_notes(
 
     try:
         response = client.generate(
-            messages=memory_language_messages([{"role": "user", "content": prompt}], persona_id),
+            messages=[{"role": "user", "content": prompt}],
             tools=[],
         )
     except Exception as e:

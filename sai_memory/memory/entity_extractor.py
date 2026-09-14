@@ -20,8 +20,6 @@ docs/intent/autonomous_behavior_v3.md §13.6「B2 欄と辺の格納」。
 
 from __future__ import annotations
 
-from saiverse.persona_language import memory_language_messages
-
 import json
 import logging
 import re
@@ -478,7 +476,7 @@ def extract_entities_and_involvement(
 
     try:
         response = client.generate(
-            messages=memory_language_messages([{"role": "user", "content": prompt}], persona_id),
+            messages=[{"role": "user", "content": prompt}],
             tools=[],
         )
     except Exception as exc:

@@ -598,8 +598,6 @@ def plan_split(
     conn: sqlite3.Connection,
     page_id: str,
     llm_client: Any,
-    *,
-    persona_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """split の前段（読み取り＋LLM 呼び出しのみ。DB 書き込みなし）。
 
@@ -759,10 +757,9 @@ def plan_split(
         "required": ["child_pages", "sections"],
     }
 
-    from saiverse.persona_language import memory_language_messages
     try:
         raw_response = llm_client.generate(
-            messages=memory_language_messages([{"role": "user", "content": prompt}], persona_id),
+            messages=[{"role": "user", "content": prompt}],
             response_schema=response_schema,
         )
         if isinstance(raw_response, str):
@@ -1251,7 +1248,7 @@ def run_pending_plans(manager: Any, persona_id: str) -> Dict[str, Any]:
                     raise RuntimeError("LLM クライアントの初期化に失敗しました")
                 # LLM 呼び出し（plan_split）はロック・トランザクションの外。
                 # ロックを LLM コール中に保持してはいけない。
-                split_plan = plan_split(mem_conn, page_id_resolved, llm, persona_id=persona_id)
+                split_plan = plan_split(mem_conn, page_id_resolved, llm)
                 with db_lock:
                     with _plan_transaction(mem_conn):
                         result = apply_split(tx_conn, tx_memopedia, split_plan)

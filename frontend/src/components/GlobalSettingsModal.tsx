@@ -955,12 +955,12 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                                 {/* ペルソナに送る量 (全体既定) */}
                                 <div className={`${styles.toggleContainer} ${styles.toggleContainerStacked}`}>
                                     <div>
-                                        <div className={styles.toggleLabel}>
+                                        <div data-i18n="components.GlobalSettingsModal.text104" className={styles.toggleLabel}>
                                             <Layers size={18} />
-                                            ペルソナに送る量
+                                            {uiText("components.GlobalSettingsModal.text104")}
                                         </div>
-                                        <div className={styles.toggleDescription}>
-                                            ペルソナに毎回送る会話がどれだけ溜まったら、古い部分をあらすじへ畳んで整理するかを決めます。ここは全モデル共通の既定値です。
+                                        <div data-i18n="components.GlobalSettingsModal.text105" className={styles.toggleDescription}>
+                                            {uiText("components.GlobalSettingsModal.text105")}
                                         </div>
                                     </div>
 
@@ -976,8 +976,11 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                                                         onClick={() => applyWatermarkPreset(preset)}
                                                     >
                                                         <span className={styles.wmPresetLabel}>{preset.label}</span>
-                                                        <span className={styles.wmPresetNums}>
-                                                            {preset.high.toLocaleString()} 字で整理し、{preset.target.toLocaleString()} 字残す
+                                                        <span data-i18n="components.GlobalSettingsModal.text106" className={styles.wmPresetNums}>
+                                                            {uiText("components.GlobalSettingsModal.text106", {
+                                                                p1: preset.high.toLocaleString(getFormatLocale()),
+                                                                p2: preset.target.toLocaleString(getFormatLocale())
+                                                            })}
                                                         </span>
                                                     </button>
                                                 ))}
@@ -987,14 +990,14 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                                                     aria-pressed={wmActivePreset == null}
                                                     onClick={() => wmTargetInputRef.current?.focus()}
                                                 >
-                                                    <span className={styles.wmPresetLabel}>カスタム</span>
-                                                    <span className={styles.wmPresetNums}>下の欄で自分で決める</span>
+                                                    <span data-i18n="components.GlobalSettingsModal.text107" className={styles.wmPresetLabel}>{uiText("components.GlobalSettingsModal.text107")}</span>
+                                                    <span data-i18n="components.GlobalSettingsModal.text108" className={styles.wmPresetNums}>{uiText("components.GlobalSettingsModal.text108")}</span>
                                                 </button>
                                             </div>
                                             <div className={styles.wmPresetNote}>
                                                 <Info size={14} />
-                                                <span>
-                                                    大きい設定ほど、一回に送る量は増えますが、会話の整理はあまり走りません。小さい設定にすると一回に送る量は減りますが、そのぶん整理が何度も走り、そのたびに AI への問い合わせが増えて、それまで送っていた内容をもう一度送り直すことになります。料金や待ち時間がかえって増えることがあるので、迷ったときは「デフォルト」に戻してください。
+                                                <span data-i18n="components.GlobalSettingsModal.text109">
+                                                    {uiText("components.GlobalSettingsModal.text109")}
                                                 </span>
                                             </div>
                                         </div>
@@ -1019,10 +1022,10 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                                                     <div key={k} className={styles.wmField}>
                                                         <label className={styles.subSettingLabel} htmlFor={inputId}>
                                                             {WATERMARK_LABELS[k]}
-                                                            <span data-i18n="components.GlobalSettingsModal.text044 components.GlobalSettingsModal.text045" className={`${styles.wmBadge} ${isUser ? styles.wmBadgeUser : ''}`}>
+                                                            <span data-i18n="components.GlobalSettingsModal.text044 components.GlobalSettingsModal.text045 components.GlobalSettingsModal.text110" className={`${styles.wmBadge} ${isUser ? styles.wmBadgeUser : ''}`}>
                                                                 {isUser
                                                                     ? uiText("components.GlobalSettingsModal.text044")
-                                                                    : builtin != null ? uiText("components.GlobalSettingsModal.text045", { p1: builtin.toLocaleString(getFormatLocale()) }) : '既定'}
+                                                                    : builtin != null ? uiText("components.GlobalSettingsModal.text045", { p1: builtin.toLocaleString(getFormatLocale()) }) : uiText("components.GlobalSettingsModal.text110")}
                                                             </span>
                                                         </label>
                                                         <div className={styles.wmInputRow}>

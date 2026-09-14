@@ -121,7 +121,7 @@ export default function ContextVolumeBar({ status }: ContextVolumeBarProps) {
             <div className={styles.contextStatRow}>
                 <span data-i18n="components.common.ContextVolumeBar.text004 components.common.ContextVolumeBar.text005 components.common.ContextVolumeBar.text006 components.common.ContextVolumeBar.text007">{uiText("components.common.ContextVolumeBar.text004")}{presented.toLocaleString(getFormatLocale())}{uiText("components.common.ContextVolumeBar.text005")}{status.refill_applied ? uiText("components.common.ContextVolumeBar.text006") : ''}
                     {breakdownParts.length > 1
-                        ? uiText("components.common.ContextVolumeBar.text007", { p1: breakdownParts.join('・') })
+                        ? uiText("components.common.ContextVolumeBar.text007", { p1: breakdownParts.join(uiText("components.common.ContextVolumeBar.text014")) })
                         : ''}
                 </span>
                 <span data-i18n="components.common.ContextVolumeBar.text008 components.common.ContextVolumeBar.text009 components.common.ContextVolumeBar.text010 components.common.ContextVolumeBar.text011 components.common.ContextVolumeBar.text012">{uiText("components.common.ContextVolumeBar.text008")}{target != null ? uiText("components.common.ContextVolumeBar.text009", { p1: target.toLocaleString(getFormatLocale()) }) : '—'}{uiText("components.common.ContextVolumeBar.text010")}{high != null ? uiText("components.common.ContextVolumeBar.text011", { p1: high.toLocaleString(getFormatLocale()) }) : uiText("components.common.ContextVolumeBar.text012")}

@@ -396,8 +396,8 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger, currentB
                                     <button
                                         className={styles.addItemBtn}
                                         onClick={() => setShowItemCreate(true)}
-                                        title="この部屋にアイテムを作る"
-                                        aria-label="この部屋にアイテムを作る"
+                                        title={uiText("components.RightSidebar.text019")}
+                                        aria-label={uiText("components.RightSidebar.text019")}
                                     >
                                         <Plus size={16} />
                                     </button>

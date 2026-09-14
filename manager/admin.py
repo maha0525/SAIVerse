@@ -1429,8 +1429,12 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                     else:
                         ai.USER_CONV_TIMEOUT_MINUTES = None
                 if language is not None:
-                    from saiverse.persona_language import validate_language
-                    ai.LANGUAGE = validate_language(language)
+                    clean_lang = language.strip() if isinstance(language, str) else ""
+                    if not clean_lang:
+                        ai.LANGUAGE = None
+                    else:
+                        from saiverse.persona_language import validate_language
+                        ai.LANGUAGE = validate_language(clean_lang)
                 autonomy_now = ai.AUTONOMY_ENABLED
                 db.commit()
 

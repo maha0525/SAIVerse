@@ -831,7 +831,7 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                     const guidanceMap: Record<string, string> = {
                         // 使うモデルが無い・繋げない。待っても直らないので、選び直しを案内する
                         // (docs/intent/persona_model_selection.md 決まったこと 8)。
-                        model_unavailable: 'ペルソナが使うモデルが SAIVerse に無いか、繋げないため止まりました。モデルを選び直すと、再起動しなくても再実行できます。',
+                        model_unavailable: uiText("components.memory.ArasujiViewer.text124"),
                         empty_response: uiText("components.memory.ArasujiViewer.text048"),
                         safety_filter: uiText("components.memory.ArasujiViewer.text049"),
                         timeout: uiText("components.memory.ArasujiViewer.text050"),
@@ -940,7 +940,9 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                             {(repairEstimate.consolidation_calls ?? 0) >= 1 && (
                                 <>
                                     {repairEstimate.unprocessed_messages >= 1 && <br />}
-                                    あらすじを大きな流れにまとめる作業が {(repairEstimate.consolidation_calls ?? 0).toLocaleString()} 回分残っています
+                                    <span data-i18n="components.memory.ArasujiViewer.text125">
+                                        {uiText("components.memory.ArasujiViewer.text125", { p1: (repairEstimate.consolidation_calls ?? 0).toLocaleString(getFormatLocale()) })}
+                                    </span>
                                 </>
                             )}
                             {repairEstimate.repair_incomplete && (
@@ -1269,7 +1271,7 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                             する」は嘘になる)。 */}
                         <h3>
                             {repairEstimate.unprocessed_messages < 1 && (repairEstimate.consolidation_calls ?? 0) >= 1
-                                ? 'あらすじを大きな流れにまとめる'
+                                ? uiText("components.memory.ArasujiViewer.text126")
                                 : uiText("components.memory.ArasujiViewer.text107")}
                         </h3>
                         {repairEstimate.unprocessed_messages >= 1 && (
@@ -1278,9 +1280,8 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                             </p>
                         )}
                         {repairEstimate.unprocessed_messages < 1 && (repairEstimate.consolidation_calls ?? 0) >= 1 && (
-                            <p className={styles.hint} style={{ display: 'block', margin: '0 0 1rem', lineHeight: 1.7 }}>
-                                細かなあらすじが溜まっています。実行すると、それらを大きな流れにまとめたあらすじが作られ、
-                                本人が長い期間の出来事を見通せるようになります。いま進行中の会話には触りません。
+                            <p data-i18n="components.memory.ArasujiViewer.text127" className={styles.hint} style={{ display: 'block', margin: '0 0 1rem', lineHeight: 1.7 }}>
+                                {uiText("components.memory.ArasujiViewer.text127")}
                             </p>
                         )}
                         {repairEstimate.repair_incomplete && (
@@ -1297,9 +1298,9 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                             </div>
                             {(repairEstimate.consolidation_calls ?? 0) >= 1 && (
                                 <div className={styles.repairEstimateRow}>
-                                    <span className={styles.repairEstimateLabel}>まとめる作業</span>
-                                    <span className={styles.repairEstimateValue}>
-                                        {(repairEstimate.consolidation_calls ?? 0).toLocaleString(getFormatLocale())} 回分
+                                    <span data-i18n="components.memory.ArasujiViewer.text128" className={styles.repairEstimateLabel}>{uiText("components.memory.ArasujiViewer.text128")}</span>
+                                    <span data-i18n="components.memory.ArasujiViewer.text129" className={styles.repairEstimateValue}>
+                                        {uiText("components.memory.ArasujiViewer.text129", { p1: (repairEstimate.consolidation_calls ?? 0).toLocaleString(getFormatLocale()) })}
                                     </span>
                                 </div>
                             )}
