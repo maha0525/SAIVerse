@@ -1,5 +1,6 @@
 """Test suite for localization, city/persona language inheritance, and prompt generation."""
 import json
+from pathlib import Path
 import sqlite3
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -313,3 +314,37 @@ def test_ui_message_envelope():
         "$ui": "city.saved",
         "params": {"name": "Neo Tokyo", "count": 42},
     }
+
+
+def test_frontend_i18n_messages_and_literal_hygiene():
+    """Verify that i18n messages dictionary, key references, unused keys,
+    and lack of unlocalized CJK literals pass all integrity checks."""
+    import shutil
+    import subprocess
+
+    node_bin = shutil.which("node")
+    if not node_bin:
+        pytest.skip("Node.js is not installed; skipping frontend i18n check")
+
+    repo_root = Path(__file__).resolve().parent.parent
+    check_script = repo_root / "frontend" / "scripts" / "check-i18n.mjs"
+    test_script = repo_root / "frontend" / "scripts" / "test-i18n.cjs"
+
+    # 1. check-i18n.mjs (validates dictionary, placeholders, unused keys, zero CJK literals)
+    res_check = subprocess.run(
+        [node_bin, str(check_script)],
+        cwd=str(repo_root),
+        capture_output=True,
+        text=True,
+    )
+    assert res_check.returncode == 0, f"check-i18n.mjs failed:\nSTDOUT:\n{res_check.stdout}\nSTDERR:\n{res_check.stderr}"
+
+    # 2. test-i18n.cjs (validates reactive messages, interpolation, and locale boundaries)
+    res_test = subprocess.run(
+        [node_bin, str(test_script)],
+        cwd=str(repo_root),
+        capture_output=True,
+        text=True,
+    )
+    assert res_test.returncode == 0, f"test-i18n.cjs failed:\nSTDOUT:\n{res_test.stdout}\nSTDERR:\n{res_test.stderr}"
+
